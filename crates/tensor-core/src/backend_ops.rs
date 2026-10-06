@@ -2498,6 +2498,55 @@ pub trait BackendOps {
         ))
     }
 
+    /// LocalResponseNorm の forward（`F.local_response_norm` 相当。入力 `[N, C, *S]`。
+    /// イシュー #2646・`docs/autodiff-lrn-weight-reparam-decision.md`）。出力は入力と同 shape。
+    /// 窓定義・数値契約の正は [`crate::lrn`]。
+    ///
+    /// # デフォルト実装
+    /// [`Self::pool3d_max`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::lrn_ops::local_response_norm` は `Unsupported` のときだけホスト参照実装
+    /// [`crate::lrn::local_response_norm_host`] へフォールバックし、それ以外のエラーは伝播する。
+    /// 実装側も [`crate::lrn::lrn_layout`] で形状を再検査する（fail-closed）。
+    fn lrn_forward(
+        &self,
+        _input: &Tensor<f32>,
+        _params: &crate::lrn::LrnParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "lrn_forward: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// weight_norm の forward（`torch._weight_norm(v, g, dim)` 相当。`w = v·(g/‖v‖)`。イシュー
+    /// #2646）。`dim = None` はテンソル全体。`g` の shape 規約は
+    /// [`crate::weight_reparam::norm_except_dim_shape`]。契約は [`Self::lrn_forward`] と同じ
+    /// （フォールバック先は [`crate::weight_reparam::weight_norm_host`]）。
+    fn weight_norm_forward(
+        &self,
+        _v: &Tensor<f32>,
+        _g: &Tensor<f32>,
+        _dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "weight_norm_forward: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
+    /// spectral_norm の forward（`out = W / (uᵀ W_mat v)`。`u`／`v` は更新済みの非追跡状態。
+    /// イシュー #2646）。契約は [`Self::lrn_forward`] と同じ（フォールバック先は
+    /// [`crate::weight_reparam::spectral_norm_host`]）。
+    fn spectral_norm_forward(
+        &self,
+        _weight: &Tensor<f32>,
+        _u: &Tensor<f32>,
+        _v: &Tensor<f32>,
+        _dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "spectral_norm_forward: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// 非定数モード（reflect／replicate／circular）の `pad`（`F.pad` の `mode`
     /// 相当。イシュー #2642・`docs/autodiff-pad-modes-decision.md`）。`pads` は
     /// 先頭軸から順の `(before, after)`（既存 [`Self::pad`] と同じ並び）。出力 shape は
@@ -5964,6 +6013,30 @@ mod tests {
         ));
         assert!(matches!(
             ops.pool3d_avg(&x, &p, true),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
+
+    /// [`BackendOps::lrn_forward`]／`weight_norm_forward`／`spectral_norm_forward` の既定実装が
+    /// fail-safe を返し panic しないことの確認（イシュー #2646）。
+    #[test]
+    fn lrn_weight_reparam_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![0.0; 4], &[1, 2, 2]).unwrap();
+        let p = crate::lrn::LrnParams::new(2, 1.0, 0.75, 1.0).unwrap();
+        assert!(matches!(
+            ops.lrn_forward(&x, &p),
+            Err(BackendError::Unsupported(_))
+        ));
+        let g = Tensor::new(vec![1.0; 2], &[2, 1]).unwrap();
+        let x2 = Tensor::new(vec![0.0; 4], &[2, 2]).unwrap();
+        assert!(matches!(
+            ops.weight_norm_forward(&x2, &g, Some(0)),
+            Err(BackendError::Unsupported(_))
+        ));
+        let u = Tensor::new(vec![1.0; 2], &[2]).unwrap();
+        assert!(matches!(
+            ops.spectral_norm_forward(&x2, &u, &u, 0),
             Err(BackendError::Unsupported(_))
         ));
     }

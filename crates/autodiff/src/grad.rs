@@ -3368,6 +3368,86 @@ pub(crate) fn vjp(
             let d_input = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
             vec![(input, d_input)]
         }
+        // `lrn_ops::local_response_norm`（イシュー #2646）。ホスト側のみの VJP。入力値から統計 `d` を
+        // 再計算する共有カーネル `local_response_norm_vjp_host` へ委譲する（`f64` アキュムレータ・
+        // 1 回 downcast）。契約違反（shape 不一致）は panic ではなく型付きエラー。
+        Op::LocalResponseNorm { input, params } => {
+            let x = materialize_fallible(nodes, ops, input)?;
+            let layout =
+                fandhe_ai_tensor_core::lrn::lrn_layout(x.shape()).map_err(AutodiffError::Shape)?;
+            let upstream_c = upstream.contiguous();
+            if upstream_c.shape() != layout.shape() {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: upstream_c.shape().to_vec(),
+                    rhs: layout.shape().to_vec(),
+                }));
+            }
+            let data = fandhe_ai_tensor_core::lrn::local_response_norm_vjp_host(
+                &x.contiguous().host_slice(),
+                &upstream_c.host_slice(),
+                &layout,
+                &params,
+            )
+            .map_err(AutodiffError::Shape)?;
+            let d_input = Tensor::new(data, layout.shape()).map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
+        // `weight_reparam_ops::weight_norm`（イシュー #2646）。ホスト側のみの VJP。共有カーネル
+        // `weight_norm_vjp_host` が `dv`（`f64` 計算・1 回 downcast）と `dg`（グループごとの
+        // `f64` 縮約）を返す。`g` の shape はレイアウトから導出して再検証する。
+        Op::WeightNorm { v, g, dim } => {
+            let v_val = materialize_fallible(nodes, ops, v)?;
+            let g_val = materialize_fallible(nodes, ops, g)?;
+            let layout = fandhe_ai_tensor_core::weight_reparam::weight_norm_layout(
+                v_val.shape(),
+                g_val.shape(),
+                dim,
+            )
+            .map_err(AutodiffError::Shape)?;
+            let upstream_c = upstream.contiguous();
+            if upstream_c.shape() != layout.shape() {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: upstream_c.shape().to_vec(),
+                    rhs: layout.shape().to_vec(),
+                }));
+            }
+            let (dv, dg) = fandhe_ai_tensor_core::weight_reparam::weight_norm_vjp_host(
+                &v_val.contiguous().host_slice(),
+                &g_val.contiguous().host_slice(),
+                &upstream_c.host_slice(),
+                &layout,
+            )
+            .map_err(AutodiffError::Shape)?;
+            let d_v = Tensor::new(dv, layout.shape()).map_err(AutodiffError::Shape)?;
+            let d_g = Tensor::new(dg, layout.g_shape()).map_err(AutodiffError::Shape)?;
+            vec![(v, d_v), (g, d_g)]
+        }
+        // `weight_reparam_ops::spectral_norm`（イシュー #2646）。ホスト側のみの VJP。`u`／`v` は
+        // forward 時点の非追跡スナップショット（勾配は流れない）。`σ` はスナップショットと入力値から
+        // 再計算する。
+        Op::SpectralNorm { weight, u, v, dim } => {
+            let w_val = materialize_fallible(nodes, ops, weight)?;
+            let layout =
+                fandhe_ai_tensor_core::weight_reparam::spectral_norm_layout(w_val.shape(), dim)
+                    .map_err(AutodiffError::Shape)?;
+            let upstream_c = upstream.contiguous();
+            if upstream_c.shape() != layout.shape() {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: upstream_c.shape().to_vec(),
+                    rhs: layout.shape().to_vec(),
+                }));
+            }
+            let data = fandhe_ai_tensor_core::weight_reparam::spectral_norm_vjp_host(
+                &w_val.contiguous().host_slice(),
+                &upstream_c.host_slice(),
+                &layout,
+                &u.contiguous().host_slice(),
+                &v.contiguous().host_slice(),
+            )
+            .map_err(AutodiffError::Shape)?;
+            let d_w = Tensor::new(data, layout.shape()).map_err(AutodiffError::Shape)?;
+            vec![(weight, d_w)]
+        }
         // `Var::adaptive_avg_pool2d`（イシュー #1728・設計 `docs/
         // pooling-ops-design.md` §8）。ホスト側のみの VJP。
         Op::AdaptiveAvgPool2d { input } => {

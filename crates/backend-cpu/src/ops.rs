@@ -3183,6 +3183,62 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(v, &layout.out_shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::lrn_forward`] の CPU 実装（イシュー #2646）。
+    /// 共有カーネル `fandhe_ai_tensor_core::lrn::local_response_norm_host` を呼ぶだけで窓規則は
+    /// 持たない（autodiff のホストフォールバックと単一情報源）。形状は `lrn_layout` で再検査する。
+    fn lrn_forward(
+        &self,
+        input: &Tensor<f32>,
+        params: &fandhe_ai_tensor_core::lrn::LrnParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::lrn;
+        let input = input.contiguous();
+        let layout = lrn::lrn_layout(input.shape()).map_err(BackendError::ShapeMismatch)?;
+        let v = lrn::local_response_norm_host(&input.host_slice(), &layout, params)
+            .map_err(BackendError::ShapeMismatch)?;
+        Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::weight_norm_forward`] の CPU 実装（イシュー #2646）。
+    /// [`Self::lrn_forward`] と同型（共有カーネル `weight_norm_host`・レイアウト再検査）。
+    fn weight_norm_forward(
+        &self,
+        v: &Tensor<f32>,
+        g: &Tensor<f32>,
+        dim: Option<usize>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::weight_reparam as wr;
+        let (v, g) = (v.contiguous(), g.contiguous());
+        let layout = wr::weight_norm_layout(v.shape(), g.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        let out = wr::weight_norm_host(&v.host_slice(), &g.host_slice(), &layout)
+            .map_err(BackendError::ShapeMismatch)?;
+        Tensor::new(out, layout.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::spectral_norm_forward`] の CPU 実装（イシュー #2646）。
+    /// [`Self::lrn_forward`] と同型（共有カーネル `spectral_norm_host`・レイアウト再検査）。
+    fn spectral_norm_forward(
+        &self,
+        weight: &Tensor<f32>,
+        u: &Tensor<f32>,
+        v: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::weight_reparam as wr;
+        let (weight, u, v) = (weight.contiguous(), u.contiguous(), v.contiguous());
+        let layout =
+            wr::spectral_norm_layout(weight.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let out = wr::spectral_norm_host(
+            &weight.host_slice(),
+            &layout,
+            &u.host_slice(),
+            &v.host_slice(),
+        )
+        .map_err(BackendError::ShapeMismatch)?;
+        Tensor::new(out, layout.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::pad_modes_forward`] の CPU 実装
     /// （イシュー #2642）。共有ホストカーネル
     /// `fandhe_ai_tensor_core::pad_modes::pad_modes_host` を呼ぶだけで添字写像の

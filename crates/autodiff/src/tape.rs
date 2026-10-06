@@ -1259,6 +1259,38 @@ pub(crate) enum Op {
     /// `upstream.shape()` から導出する）。VJP は [`Op::Unfold`] の随伴（`im2col`）。分類は
     /// [`Op::Unfold`] と同じ。
     Fold { input: NodeId, params: Conv2dParams },
+    /// LocalResponseNorm（`F.local_response_norm` 相当。入力 `[N, C, *S]`。イシュー #2646・
+    /// `docs/autodiff-lrn-weight-reparam-decision.md`）。`crate::lrn_ops::local_response_norm`
+    /// からのみ積まれ、facade には公開しない。`params` は VJP（共有カーネル
+    /// `tensor_core::lrn::local_response_norm_vjp_host`）に必要なため保持する。統計 `d` は保持せず
+    /// backward で入力から再計算する。**既存 Op の合成にしない**（二乗が `f32` で先に確定し
+    /// `f64` アキュムレータ契約に抵触するため）。常に実体化済み（`push_eager`）・非 checkpoint・
+    /// 高階微分非対応・低精度なし。
+    LocalResponseNorm {
+        input: NodeId,
+        params: fandhe_ai_tensor_core::lrn::LrnParams,
+    },
+    /// weight_norm（`torch._weight_norm(v, g, dim)` 相当。`w = v·(g/‖v‖)`。イシュー #2646）。
+    /// `crate::weight_reparam_ops::weight_norm` からのみ積まれ、facade には公開しない。
+    /// 2 入力（`v`・`g` の順に列挙）。`dim = None` はテンソル全体。VJP は共有カーネル
+    /// `tensor_core::weight_reparam::weight_norm_vjp_host`（`g` 勾配は `f64` 縮約）。分類は
+    /// [`Op::LocalResponseNorm`] と同じ。
+    WeightNorm {
+        v: NodeId,
+        g: NodeId,
+        dim: Option<usize>,
+    },
+    /// spectral_norm（`out = W/σ`、`σ = uᵀ W_mat v`。イシュー #2646）。
+    /// `crate::weight_reparam_ops::spectral_norm` からのみ積まれ、facade には公開しない。`u`・`v` は
+    /// forward 時点の**非追跡スナップショット**（`Op::MaxPool3d { index }` と同じ payload の扱い。
+    /// 勾配は流れない）。`σ` は保持せずスナップショットと入力値から再計算する。分類は
+    /// [`Op::LocalResponseNorm`] と同じ。
+    SpectralNorm {
+        weight: NodeId,
+        u: Tensor<f32>,
+        v: Tensor<f32>,
+        dim: usize,
+    },
     /// `Var::interpolate`（`torch.nn.functional.interpolate`
     /// 相当。イシュー #1757・#1762・#2152）。空間軸（末尾
     /// `size.len()` 軸）を `size` へリサンプリングする。`mode` で
@@ -1932,6 +1964,9 @@ impl Op {
             // `Op::Unfold`／`Op::Fold`（イシュー #2645）も eager 実体化演算で再計算経路を持たないため非適格。
             Op::Unfold { .. } => false,
             Op::Fold { .. } => false,
+            // `Op::LocalResponseNorm`／`Op::WeightNorm`／`Op::SpectralNorm`（イシュー #2646）も eager
+            // 実体化演算で再計算経路を持たないため非適格。
+            Op::LocalResponseNorm { .. } | Op::WeightNorm { .. } | Op::SpectralNorm { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -2021,6 +2056,8 @@ impl Op {
             | Op::MaxUnpool { input, .. }
             | Op::Unfold { input, .. }
             | Op::Fold { input, .. }
+            | Op::LocalResponseNorm { input, .. }
+            | Op::SpectralNorm { weight: input, .. }
             | Op::AvgPool3d { input, .. }
             | Op::PadMode { input, .. }
             | Op::OrderSelect { input, .. }
@@ -2119,6 +2156,10 @@ impl Op {
                 if let Some(b) = bias {
                     f(*b);
                 }
+            }
+            Op::WeightNorm { v, g, .. } => {
+                f(*v);
+                f(*g);
             }
             Op::OneHot { input, .. } => f(*input),
             Op::MaxPool2d { input, .. }
@@ -2410,6 +2451,9 @@ impl Op {
             | Op::MaxUnpool { .. }
             | Op::Unfold { .. }
             | Op::Fold { .. }
+            | Op::LocalResponseNorm { .. }
+            | Op::WeightNorm { .. }
+            | Op::SpectralNorm { .. }
             | Op::Conv3d { .. }
             | Op::OneHot { .. }
             | Op::MaxPool2d { .. }
@@ -5153,6 +5197,50 @@ mod fold_unfold_op_tests {
             let mut seen = Vec::new();
             op.for_each_input(|id| seen.push(id.0));
             assert_eq!(seen, vec![4]);
+        }
+    }
+}
+/// `Op::LocalResponseNorm`／`Op::WeightNorm`／`Op::SpectralNorm`（イシュー #2646）のメタ性質固定:
+/// checkpoint 対象外・create_graph replay 対象外・`for_each_input` が追跡入力のみを順に列挙する
+/// （`spectral_norm` の `u`／`v` スナップショットは入力ではない）。
+#[cfg(test)]
+mod lrn_weight_reparam_op_tests {
+    use super::*;
+
+    #[test]
+    fn lrn_weight_norm_spectral_norm_op_meta_properties() {
+        let ops = [
+            (
+                Op::LocalResponseNorm {
+                    input: NodeId(4),
+                    params: fandhe_ai_tensor_core::lrn::LrnParams::new(3, 1.0, 0.75, 1.0).unwrap(),
+                },
+                vec![4],
+            ),
+            (
+                Op::WeightNorm {
+                    v: NodeId(6),
+                    g: NodeId(2),
+                    dim: Some(0),
+                },
+                vec![6, 2],
+            ),
+            (
+                Op::SpectralNorm {
+                    weight: NodeId(9),
+                    u: Tensor::<f32>::new(vec![1.0], &[1]).unwrap(),
+                    v: Tensor::<f32>::new(vec![1.0], &[1]).unwrap(),
+                    dim: 0,
+                },
+                vec![9],
+            ),
+        ];
+        for (op, want) in ops {
+            assert!(!op.is_checkpoint_eligible());
+            assert!(!op.supports_create_graph());
+            let mut seen = Vec::new();
+            op.for_each_input(|id| seen.push(id.0));
+            assert_eq!(seen, want);
         }
     }
 }

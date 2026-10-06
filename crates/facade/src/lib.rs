@@ -6153,6 +6153,185 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 #[allow(dead_code)]
 struct FoldUnfoldHoldDoctestGuard;
 
+/// LocalResponseNorm と重み再パラメータ化（`local_response_norm`・`weight_norm`・`norm_except_dim`・
+/// `spectral_norm`。`F.local_response_norm`・`torch._weight_norm`・`parametrizations.spectral_norm` 相当。
+/// イシュー #2646・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// （`FoldUnfoldHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `lrn_ops`／
+/// `weight_reparam_ops`／`lrn`／`weight_reparam`・型 `LocalResponseNorm`／`WeightNorm`／`SpectralNorm`／
+/// `SpectralNormState`・メソッド `local_response_norm`／`weight_norm`／`spectral_norm`／`norm_except_dim`
+/// （`Var`／`Tape`／`Tensor<f32>`）と `add_local_response_norm`／`add_weight_norm`／`add_spectral_norm`
+/// （`compat::Sequential`）を持つプローブ用トレイトを置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出しの
+/// 両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の inherent
+/// メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが
+/// 失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
+/// 検出範囲はこれらの名前・型に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::lrn_ops`・`fandhe_ai_autodiff::weight_reparam_ops`・
+/// `fandhe_ai_tensor_core::lrn`・`fandhe_ai_tensor_core::weight_reparam`）。保留対象は facade 公開面
+/// （`Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm` の委譲メソッドと
+/// `SpectralNormState` の公開位置）のみで、公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678・
+/// #2679。推奨案は `docs/autodiff-lrn-weight-reparam-decision.md` §7。同記録は推奨案の記録であり承認記録では
+/// ない）。層化（`compat::Sequential::add_*`・`Linear`／`Conv` への parametrization 結線）も同じ保留に
+/// 含める（#2679 の層結線がもう一方の漏出経路のため）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::lrn_weight_reparam_hold_doctest_globs_all_pub_modules`・
+/// `lrn_weight_reparam_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_lrn_weight_reparam`・
+/// `workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_lrn_weight_reparam_hold_probe {
+///     pub struct LocalResponseNorm;
+///     pub struct WeightNorm;
+///     pub struct SpectralNorm;
+///     pub struct SpectralNormState;
+///     pub mod lrn_ops {
+///         pub fn local_response_norm() {}
+///     }
+///     pub mod weight_reparam_ops {
+///         pub fn weight_norm() {}
+///         pub fn norm_except_dim() {}
+///         pub fn spectral_norm() {}
+///     }
+///     pub mod lrn {
+///         pub fn __mark() {}
+///     }
+///     pub mod weight_reparam {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_lrn_weight_reparam_hold_probe::*;
+///
+/// struct __FandheLrnWeightReparamHoldMarker;
+///
+/// trait __FandheLrnWeightReparamHoldProbe {
+///     fn local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
+///     fn weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
+///     fn spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
+///     fn norm_except_dim(&self) -> __FandheLrnWeightReparamHoldMarker;
+/// }
+///
+/// impl<'t> __FandheLrnWeightReparamHoldProbe for fandhe_ai::Var<'t> {
+///     fn local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn norm_except_dim(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+/// }
+///
+/// impl __FandheLrnWeightReparamHoldProbe for fandhe_ai::Tape {
+///     fn local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn norm_except_dim(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+/// }
+///
+/// impl __FandheLrnWeightReparamHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn norm_except_dim(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+/// }
+///
+/// trait __FandheLrnWeightReparamHoldSequentialProbe {
+///     fn add_local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
+///     fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
+///     fn add_spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
+/// }
+///
+/// impl __FandheLrnWeightReparamHoldSequentialProbe for fandhe_ai::compat::Sequential {
+///     fn add_local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+///     fn add_spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
+///         __FandheLrnWeightReparamHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: LocalResponseNorm, _: WeightNorm, _: SpectralNorm, _: SpectralNormState) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり
+///     // E0659 でコンパイル失敗する）。
+///     lrn_ops::local_response_norm();
+///     weight_reparam_ops::weight_norm();
+///     weight_reparam_ops::norm_except_dim();
+///     weight_reparam_ops::spectral_norm();
+///     lrn::__mark();
+///     weight_reparam::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     seq: &fandhe_ai::compat::Sequential,
+/// ) {
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::local_response_norm(v);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::weight_norm(v);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::spectral_norm(v);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::norm_except_dim(v);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::local_response_norm(tape);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::weight_norm(tape);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::spectral_norm(tape);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::norm_except_dim(tape);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::local_response_norm(tf);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::weight_norm(tf);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::spectral_norm(tf);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::norm_except_dim(tf);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_local_response_norm(seq);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_weight_norm(seq);
+///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_spectral_norm(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct LrnWeightReparamHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
