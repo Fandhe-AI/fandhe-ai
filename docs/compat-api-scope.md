@@ -1959,6 +1959,12 @@ facade 公開面は追加していない（保留ガード `Pool3dOpsHoldDoctest
 公開形（`Var::max_pool3d` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。層化（`nn::MaxPool3d`／`AvgPool3d`・`Sequential::add_*`）は #2679 の対象で本イシューでは実装していない。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-pool3d-ops-decision.md`。
 
+**適用記録（イシュー #2644・親 #2625・ルート #2499 Phase 4。ConvTranspose3d・MaxUnpool）**:
+`conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d` の 4 演算を内部クレート限定（`fandhe_ai_autodiff::conv_transpose3d_ops`・`max_unpool_ops`・`fandhe_ai_tensor_core::conv_transpose3d`・`max_unpool`）で CPU 実装した（新規 `BackendOps` メソッドなし。既存の `gemm_batched`・`col2im3d`・`im2col3d`・`scatter`・`gather` フックの合成）。
+facade 公開面は追加していない（保留ガード `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）は #2679 の対象で本イシューでは実装していない。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-conv-transpose3d-max-unpool-decision.md`。
+
 **適用記録（イシュー #2638・親 #2625・ルート #2499 Phase 4。ヒストグラム・二分探索系）**:
 `histc`／`bincount`／`searchsorted`／`bucketize` の 4 演算（非微分）を内部クレート限定（`fandhe_ai_autodiff::binning_ops`・`fandhe_ai_tensor_core::binning`・`BackendOps::binning_*`）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `BinningOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。

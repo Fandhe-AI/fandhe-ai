@@ -25767,3 +25767,460 @@ fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
          未承認の実装追加でないか確認すること"
     );
 }
+
+// =====================================================================
+// ConvTranspose3dMaxUnpoolHoldDoctestGuard（イシュー #2644・親 #2625・ルート #2499 Phase 4）:
+// `Pool3dOpsHoldDoctestGuard`（#2643）系のテストを鏡写しにする。実装は内部クレート
+// （`fandhe_ai_autodiff::conv_transpose3d_ops`・`fandhe_ai_autodiff::max_unpool_ops`・
+// `fandhe_ai_tensor_core::conv_transpose3d`・`fandhe_ai_tensor_core::max_unpool`）に閉じ、
+// facade 公開形（`Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` の委譲メソッド）は未承認
+// （承認依頼は #2677。公開は承認後の #2678・#2679）。層化（`compat::Sequential::add_conv_transpose3d`
+// ／`add_max_unpool1d/2d/3d`）も同じ保留に含める。既存の `Var::conv_transpose2d` は対象外で、
+// 保留対象の識別子とは別トークンとして扱う。
+// =====================================================================
+
+/// `ConvTranspose3dMaxUnpoolHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import する
+/// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
+/// （`pool3d_ops_hold_doctest_globs_all_pub_modules` と同型）。
+#[test]
+fn conv_transpose3d_max_unpool_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "ConvTranspose3dMaxUnpoolHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "ConvTranspose3dMaxUnpoolHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を追加した\
+         場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言 [`CONV_TRANSPOSE3D_MAX_UNPOOL_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を
+/// 機械的に拒否する）。
+#[test]
+fn conv_transpose3d_max_unpool_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "ConvTranspose3dMaxUnpoolHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, CONV_TRANSPOSE3D_MAX_UNPOOL_HOLD_PROBE_BODY,
+        "ConvTranspose3dMaxUnpoolHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言\
+         CONV_TRANSPOSE3D_MAX_UNPOOL_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
+         （__fandhe_conv_transpose3d_max_unpool_hold_probe モジュール・\
+         __FandheConvTranspose3dMaxUnpoolHoldProbe／__FandheConvTranspose3dMaxUnpoolHoldSequentialProbe\
+         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`conv_transpose3d_max_unpool_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定
+/// 文言（`ConvTranspose3dMaxUnpoolHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト
+/// `pub mod` の glob import 行を除いた本文と 1 行単位で完全一致する）。
+const CONV_TRANSPOSE3D_MAX_UNPOOL_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_conv_transpose3d_max_unpool_hold_probe {\n\
+\x20\x20\x20\x20pub struct ConvTranspose3d;\n\
+\x20\x20\x20\x20pub struct MaxUnpool1d;\n\
+\x20\x20\x20\x20pub struct MaxUnpool2d;\n\
+\x20\x20\x20\x20pub struct MaxUnpool3d;\n\
+\x20\x20\x20\x20pub struct MaxUnpoolLayout;\n\
+\x20\x20\x20\x20pub mod conv_transpose3d_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn conv_transpose3d() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub mod max_unpool_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn max_unpool1d() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn max_unpool2d() {}\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn max_unpool3d() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub mod conv_transpose3d {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub mod max_unpool {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
+\x20\x20\x20\x20}\n\
+}\n\
+use __fandhe_conv_transpose3d_max_unpool_hold_probe::*;\n\
+\n\
+struct __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+\n\
+trait __FandheConvTranspose3dMaxUnpoolHoldProbe {\n\
+\x20\x20\x20\x20fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+\x20\x20\x20\x20fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+\x20\x20\x20\x20fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+\x20\x20\x20\x20fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+trait __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe {\n\
+\x20\x20\x20\x20fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+\x20\x20\x20\x20fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+\x20\x20\x20\x20fn add_max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+\x20\x20\x20\x20fn add_max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
+}\n\
+\n\
+impl __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn add_max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_free_fns(_: ConvTranspose3d, _: MaxUnpool1d, _: MaxUnpool2d, _: MaxUnpool3d, _: MaxUnpoolLayout) {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20conv_transpose3d_ops::conv_transpose3d();\n\
+\x20\x20\x20\x20max_unpool_ops::max_unpool1d();\n\
+\x20\x20\x20\x20max_unpool_ops::max_unpool2d();\n\
+\x20\x20\x20\x20max_unpool_ops::max_unpool3d();\n\
+\x20\x20\x20\x20conv_transpose3d::__mark();\n\
+\x20\x20\x20\x20max_unpool::__mark();\n\
+}\n\
+\n\
+fn __probe_methods(\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
+\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::conv_transpose3d(v);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool1d(v);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool2d(v);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool3d(v);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::conv_transpose3d(tape);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool1d(tape);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool2d(tape);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool3d(tape);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::conv_transpose3d(tf);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool1d(tf);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool2d(tf);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool3d(tf);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose3d(seq);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool1d(seq);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool2d(seq);\n\
+\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool3d(seq);\n\
+}";
+
+/// 保留対象 fn 名（イシュー #2644）。`add_*` は #2679 の層結線（`compat::Sequential`）が漏出経路に
+/// なりうるため含める。
+const CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES: [&str; 8] = [
+    "conv_transpose3d",
+    "max_unpool1d",
+    "max_unpool2d",
+    "max_unpool3d",
+    "add_conv_transpose3d",
+    "add_max_unpool1d",
+    "add_max_unpool2d",
+    "add_max_unpool3d",
+];
+
+/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
+const CONV_TRANSPOSE3D_MAX_UNPOOL_IDENTS: [&str; 9] = [
+    "conv_transpose3d_ops",
+    "max_unpool_ops",
+    "conv_transpose3d",
+    "max_unpool",
+    "ConvTranspose3d",
+    "MaxUnpool1d",
+    "MaxUnpool2d",
+    "MaxUnpool3d",
+    "MaxUnpoolLayout",
+];
+
+/// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
+const CONV_TRANSPOSE3D_MAX_UNPOOL_TYPE_NAMES: [&str; 5] = [
+    "ConvTranspose3d",
+    "MaxUnpool1d",
+    "MaxUnpool2d",
+    "MaxUnpool3d",
+    "MaxUnpoolLayout",
+];
+
+/// `pub mod` 宣言を禁じるモジュール名。
+const CONV_TRANSPOSE3D_MAX_UNPOOL_MOD_NAMES: [&str; 4] = [
+    "conv_transpose3d_ops",
+    "max_unpool_ops",
+    "conv_transpose3d",
+    "max_unpool",
+];
+
+/// [`facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool`]・その自己テストが共用する
+/// 検出本体。facade src の `pub use` で [`CONV_TRANSPOSE3D_MAX_UNPOOL_IDENTS`] を経路の識別子単位で
+/// 含むもの（別名・複数行・ネストした group を含む）、内部クレート（`fandhe_ai_autodiff`／
+/// `fandhe_ai_tensor_core`）の glob 再エクスポート、leaf の個別再エクスポート、`struct`／`enum`／
+/// `type`／`trait` による [`CONV_TRANSPOSE3D_MAX_UNPOOL_TYPE_NAMES`] の独自宣言、
+/// [`CONV_TRANSPOSE3D_MAX_UNPOOL_MOD_NAMES`] の `pub mod` 宣言、
+/// [`CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない）を違反として返す。
+fn scan_conv_transpose3d_max_unpool_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in CONV_TRANSPOSE3D_MAX_UNPOOL_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            let from_internal = path_tokens
+                .iter()
+                .any(|t| t == "fandhe_ai_autodiff" || t == "fandhe_ai_tensor_core");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && CONV_TRANSPOSE3D_MAX_UNPOOL_TYPE_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && let Some(name) = tokens.get(i + 2)
+            && CONV_TRANSPOSE3D_MAX_UNPOOL_MOD_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("pub mod {name} 宣言"));
+        }
+        i += 1;
+    }
+
+    for fn_name in CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に ConvTranspose3d／MaxUnpool の保留対象の再エクスポート・
+/// 型の独自宣言・同名 `fn`・`pub mod` が存在しないことを固定する
+/// （`ConvTranspose3dMaxUnpoolHoldDoctestGuard` の正のプローブと多層防御を成す最内層のソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_conv_transpose3d_max_unpool_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が ConvTranspose3d／MaxUnpool の内部実装（#2644 の\
+         `conv_transpose3d_ops`／`max_unpool_ops`。facade 公開形は未承認で承認依頼は #2677）を\
+         再エクスポート、独自宣言、または同名の fn／pub mod を宣言している: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool`] の自己テスト（各違反カテゴリの
+/// 合成ソースを検出できることを恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool_detects_each_category() {
+    let offense =
+        |src: &str| !scan_conv_transpose3d_max_unpool_reexports_and_declarations(src).is_empty();
+    // 正例: モジュールの再エクスポート（別名含む）。
+    assert!(offense("pub use fandhe_ai_autodiff::conv_transpose3d_ops;"));
+    assert!(offense("pub use fandhe_ai_autodiff::max_unpool_ops;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::max_unpool_ops as unpool;"
+    ));
+    assert!(offense("pub use fandhe_ai_tensor_core::conv_transpose3d;"));
+    assert!(offense("pub use fandhe_ai_tensor_core::max_unpool;"));
+    // 正例: 型の再エクスポート（単一行・group・別名・複数行）。
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::max_unpool::MaxUnpoolLayout;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::{\n    Tensor,\n    MaxUnpoolLayout,\n};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::max_unpool::MaxUnpoolLayout as Layout;"
+    ));
+    // 正例: 関数の個別再エクスポート。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::conv_transpose3d_ops::conv_transpose3d;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::max_unpool_ops::{\n    max_unpool2d,\n};"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    // 正例: 型の独自宣言（層型を含む）。
+    assert!(offense("pub struct ConvTranspose3d;"));
+    assert!(offense("pub struct MaxUnpool1d { k: usize }"));
+    assert!(offense("pub enum MaxUnpool2d { A }"));
+    assert!(offense("pub type MaxUnpool3d = u8;"));
+    assert!(offense("pub trait MaxUnpoolLayout {}"));
+    // 正例: fn 宣言・pub mod（同名の trait メソッド宣言を含む）。
+    assert!(offense("pub fn conv_transpose3d() {}"));
+    assert!(offense("impl Var { pub fn max_unpool1d(&self) {} }"));
+    assert!(offense("impl Var { pub fn max_unpool2d(&self) {} }"));
+    assert!(offense("impl Tensor { pub fn max_unpool3d(&self) {} }"));
+    assert!(offense(
+        "impl Sequential { pub fn add_conv_transpose3d(&mut self) {} }"
+    ));
+    assert!(offense(
+        "impl Sequential { pub fn add_max_unpool2d(&mut self) {} }"
+    ));
+    assert!(offense("trait T { fn conv_transpose3d(&self); }"));
+    assert!(offense("pub mod conv_transpose3d_ops {}"));
+    assert!(offense("pub mod max_unpool_ops {}"));
+    assert!(offense("pub mod conv_transpose3d {}"));
+    assert!(offense("pub mod max_unpool {}"));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense("// pub use fandhe_ai_autodiff::max_unpool_ops;"));
+    assert!(!offense("let s = \"pub fn conv_transpose3d() {}\";"));
+    // 負例: 既存の 2D 転置畳み込み・プーリング・内部の shape 関数名（別トークン）。
+    assert!(!offense("impl Var { pub fn conv_transpose2d(&self) {} }"));
+    assert!(!offense("impl Var { pub fn max_pool2d(&self) {} }"));
+    assert!(!offense("fn conv_transpose3d_out_shape() {}"));
+    assert!(!offense("fn max_unpool_layout() {}"));
+    // 負例: 非公開 use。
+    assert!(!offense("use fandhe_ai_autodiff::max_unpool_ops;"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES`] の
+/// `fn` 宣言が承認済みの置き場所だけに存在することを固定する。
+///
+/// 期待値は `autodiff/src/conv_transpose3d_ops.rs::conv_transpose3d` と
+/// `autodiff/src/max_unpool_ops.rs::max_unpool{1,2,3}d` の各 1 件のみ（`add_*` は 0 件。層化は #2679 の
+/// 対象）。これら以外への追加は fail-closed に検出する。
+#[test]
+fn workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    expected.insert(
+        "autodiff/src/conv_transpose3d_ops.rs::conv_transpose3d".to_string(),
+        1,
+    );
+    for n in ["max_unpool1d", "max_unpool2d", "max_unpool3d"] {
+        expected.insert(format!("autodiff/src/max_unpool_ops.rs::{n}"), 1);
+    }
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の conv_transpose3d／max_unpool1d／max_unpool2d／\
+         max_unpool3d／add_conv_transpose3d／add_max_unpool1d／add_max_unpool2d／add_max_unpool3d の\
+         `fn` 宣言が承認済みの置き場所（autodiff/src/conv_transpose3d_ops.rs の conv_transpose3d と\
+         autodiff/src/max_unpool_ops.rs の max_unpool1d／2d／3d 各 1 件のみ）と一致しない。\
+         迂回経路（facade／Var／Sequential への inherent メソッド追加等）の混入か、\
+         未承認の実装追加でないか確認すること"
+    );
+}

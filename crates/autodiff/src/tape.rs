@@ -1226,6 +1226,27 @@ pub(crate) enum Op {
         params: fandhe_ai_tensor_core::pool3d::Pool3dParams,
         count_include_pad: bool,
     },
+    /// ConvTranspose3d（`torch.nn.functional.conv_transpose3d`／`nn.ConvTranspose3d` 相当。NCDHW
+    /// 固定。イシュー #2644・`docs/autodiff-conv-transpose3d-max-unpool-decision.md`）。
+    /// `crate::conv_transpose3d_ops::conv_transpose3d` からのみ積まれ、facade には公開しない。
+    /// `weight`: `[Cin, Cout/groups, kD, kH, kW]`（`Op::Conv3d` と先頭 2 軸が逆）。`bias` は
+    /// `None` 可。`output_padding` は保持しない（VJP は `upstream.shape()` から導出できる。
+    /// `Op::ConvTranspose2d` と同型）。**常に実体化済み**（`push_eager`。GEMM を含む段階的合成の
+    /// ため融合対象外）。`col` は保持せず backward で `im2col3d` を再計算する。非 checkpoint・
+    /// 高階微分非対応・低精度なし。
+    ConvTranspose3d {
+        input: NodeId,
+        weight: NodeId,
+        bias: Option<NodeId>,
+        params: Conv3dParams,
+    },
+    /// MaxUnpool1d／2d／3d（`F.max_unpool1d/2d/3d` 相当。イシュー #2644）。1d／2d／3d 共通の
+    /// `(n, c)` 平面 scatter で、`crate::max_unpool_ops` からのみ積まれ facade には公開しない。
+    /// `index` は入力と同 shape の contiguous な `Tensor<i32>`（`(n, c)` 平面内 flat 添字。
+    /// 非追跡データ）。パラメータは保持しない（VJP は `nodes[input].shape`／`upstream.shape()` と
+    /// `index` から導出する）。VJP は `gather`＋last-writer マスク（`Op::Scatter { Overwrite }`
+    /// の随伴と同一規則）。非融合・非 checkpoint・高階微分非対応。
+    MaxUnpool { input: NodeId, index: Tensor<i32> },
     /// `Var::interpolate`（`torch.nn.functional.interpolate`
     /// 相当。イシュー #1757・#1762・#2152）。空間軸（末尾
     /// `size.len()` 軸）を `size` へリサンプリングする。`mode` で
@@ -1892,6 +1913,10 @@ impl Op {
             // eager 実体化演算だが `recompute_value` に再計算経路を
             // 持たないため非適格（同一の最小・安全側の判断）。
             Op::Conv3d { .. } => false,
+            // `Op::ConvTranspose3d`／`Op::MaxUnpool`（イシュー #2644）も eager 実体化演算で
+            // `recompute_value` に再計算経路を持たないため非適格（`Op::Conv3d`／`Op::MaxPool3d` と同判断）。
+            Op::ConvTranspose3d { .. } => false,
+            Op::MaxUnpool { .. } => false,
             // `Op::OneHot`（イシュー #1755）は `Op::Gather`／`Sort` と
             // 同じく eager 実体化演算で `recompute_value` に再計算経路
             // を持たないため解放しない（非微分演算であることとは独立の
@@ -1978,6 +2003,7 @@ impl Op {
             | Op::Cummin { input, .. }
             | Op::Logcumsumexp { input, .. }
             | Op::MaxPool3d { input, .. }
+            | Op::MaxUnpool { input, .. }
             | Op::AvgPool3d { input, .. }
             | Op::PadMode { input, .. }
             | Op::OrderSelect { input, .. }
@@ -2054,6 +2080,12 @@ impl Op {
                 ..
             }
             | Op::ConvTranspose2d {
+                input,
+                weight,
+                bias,
+                ..
+            }
+            | Op::ConvTranspose3d {
                 input,
                 weight,
                 bias,
@@ -2357,6 +2389,8 @@ impl Op {
             | Op::Pad { .. }
             | Op::Conv2d { .. }
             | Op::ConvTranspose2d { .. }
+            | Op::ConvTranspose3d { .. }
+            | Op::MaxUnpool { .. }
             | Op::Conv3d { .. }
             | Op::OneHot { .. }
             | Op::MaxPool2d { .. }
@@ -4851,6 +4885,57 @@ mod conv3d_op_tests {
         let mut seen = Vec::new();
         op.for_each_input(|id| seen.push(id.0));
         assert_eq!(seen, vec![3, 5]);
+    }
+}
+
+/// `Op::ConvTranspose3d`／`Op::MaxUnpool`（イシュー #2644）のメタ性質固定: checkpoint 対象外・
+/// create_graph replay 対象外・`for_each_input` が入力ノードを正確に列挙する
+/// （`Op::Conv3d`／`Op::MaxPool3d` と同じ最小・安全側の判断）。
+#[cfg(test)]
+mod conv_transpose3d_max_unpool_op_tests {
+    use super::*;
+
+    fn params() -> Conv3dParams {
+        Conv3dParams::new([1, 1, 1], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1).unwrap()
+    }
+
+    fn conv_t(bias: Option<NodeId>) -> Op {
+        Op::ConvTranspose3d {
+            input: NodeId(3),
+            weight: NodeId(5),
+            bias,
+            params: params(),
+        }
+    }
+
+    fn unpool() -> Op {
+        Op::MaxUnpool {
+            input: NodeId(4),
+            index: Tensor::<i32>::new(vec![0], &[1]).unwrap(),
+        }
+    }
+
+    #[test]
+    fn conv_transpose3d_op_meta_properties() {
+        let op = conv_t(Some(NodeId(7)));
+        assert!(!op.is_checkpoint_eligible());
+        assert!(!op.supports_create_graph());
+        let mut seen = Vec::new();
+        op.for_each_input(|id| seen.push(id.0));
+        assert_eq!(seen, vec![3, 5, 7]);
+        let mut seen = Vec::new();
+        conv_t(None).for_each_input(|id| seen.push(id.0));
+        assert_eq!(seen, vec![3, 5]);
+    }
+
+    #[test]
+    fn max_unpool_op_meta_properties() {
+        let op = unpool();
+        assert!(!op.is_checkpoint_eligible());
+        assert!(!op.supports_create_graph());
+        let mut seen = Vec::new();
+        op.for_each_input(|id| seen.push(id.0));
+        assert_eq!(seen, vec![4]);
     }
 }
 
