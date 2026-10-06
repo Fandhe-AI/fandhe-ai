@@ -182,8 +182,8 @@ fn cpu_matches_naive_reference() {
     // 出力要素数・索引範囲・Max 値が入力の最大値以下・padding を含む窓の
     // count_include_pad 差（角の窓は include の平均の絶対値が exclude 以下）。
     assert_eq!(cpu.max_i.len(), OUT_NUMEL);
-    let plane = 4 * 5 * 4;
-    assert!(cpu.max_i.iter().all(|&i| (0..plane as i32).contains(&i)));
+    let plane: i32 = 4 * 5 * 4;
+    assert!(cpu.max_i.iter().all(|&i| (0..plane).contains(&i)));
     let x = input();
     let xmax = x
         .host_slice()

@@ -460,7 +460,8 @@ fn max_gradient_matches_central_difference_without_ties() {
     // 27 要素すべて異なる値（5 は 27 と互いに素）。窓重なりあり・padding あり・dilation あり。
     let in_shape = [1, 1, 3, 3, 3];
     let x: Vec<f32> = (0..27).map(|i| ((i * 5) % 27) as f32 * 0.1).collect();
-    let configs: [([usize; 3], [usize; 3], [usize; 3], [usize; 3]); 3] = [
+    type Cfg = ([usize; 3], [usize; 3], [usize; 3], [usize; 3]);
+    let configs: [Cfg; 3] = [
         ([2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1]),
         ([2, 2, 2], [1, 1, 1], [1, 1, 1], [1, 1, 1]),
         ([2, 1, 2], [1, 1, 1], [0, 0, 0], [2, 1, 1]),
