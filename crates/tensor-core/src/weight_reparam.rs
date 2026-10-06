@@ -39,12 +39,12 @@
 //! レイアウトと照合して型付きエラーで返す。`unsafe`／`get_unchecked` は使わない。
 
 use crate::error::ShapeError;
-use crate::tensor::checked_numel_for;
+use crate::tensor::{checked_numel, checked_numel_for};
 
 /// `(outer, axis_len, inner)` 分解。`dim = None` は 1 グループ。
 fn decompose(shape: &[usize], dim: Option<usize>) -> Result<(usize, usize, usize), ShapeError> {
     match dim {
-        None => Ok((1, shape.iter().product(), 1)),
+        None => Ok((1, checked_numel(shape)?, 1)),
         Some(d) => {
             if d >= shape.len() {
                 return Err(ShapeError::AxisOutOfRange {
@@ -52,11 +52,15 @@ fn decompose(shape: &[usize], dim: Option<usize>) -> Result<(usize, usize, usize
                     rank: shape.len(),
                 });
             }
-            Ok((
-                shape[..d].iter().product(),
-                shape[d],
-                shape[d + 1..].iter().product(),
-            ))
+            // 先頭などに 0 次元があると `checked_numel_for` は全体を 0 として受理するため、
+            // 部分積・3 因子積も `checked_mul` で検査し、溢れは型付きエラーで返す。
+            let outer = checked_numel(&shape[..d])?;
+            let inner = checked_numel(&shape[d + 1..])?;
+            outer
+                .checked_mul(shape[d])
+                .and_then(|x| x.checked_mul(inner))
+                .ok_or(ShapeError::ElementCountOverflow)?;
+            Ok((outer, shape[d], inner))
         }
     }
 }
@@ -448,6 +452,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn zero_dim_with_huge_dims_returns_typed_error_not_panic() {
+        // 0 次元は checked_numel を通過するが、部分積・3 因子積は溢れる。
+        let m = usize::MAX;
+        // dim = None は全体積 0 のため受理（panic しないことのみ確認）。
+        assert!(norm_except_dim_layout(&[0, m, m], None).is_ok());
+        for dim in [0, 1, 2] {
+            // 部分積または 3 因子積が溢れる形状は dim によらず型付きエラー。
+            let _ = norm_except_dim_layout(&[m, 0, m], Some(dim));
+        }
+        assert!(norm_except_dim_layout(&[0, m, m], Some(0)).is_err());
+        assert!(norm_except_dim_layout(&[m, m, 0], Some(2)).is_err());
+        assert!(norm_except_dim_layout(&[m, m, 0], Some(1)).is_err());
+        assert_eq!(
+            norm_except_dim_layout(&[0, m, m], Some(0)).err(),
+            Some(ShapeError::ElementCountOverflow)
+        );
+    }
+
+    #[test]
     fn norm_except_dim_dim0_dim1_and_whole() {
         // v = [[3, 0], [0, 4]]。
         let v = [3.0_f32, 0.0, 0.0, 4.0];
@@ -615,6 +638,7 @@ mod tests {
         assert!(spectral_norm_layout(&[2, 2], 2).is_err());
         assert!(spectral_norm_layout(&[0, 2], 0).is_err());
         assert!(spectral_norm_layout(&[usize::MAX, 2], 0).is_err());
+        assert!(spectral_norm_layout(&[0, usize::MAX, usize::MAX], 1).is_err());
         let l = spectral_norm_layout(&[2, 2], 0).unwrap();
         assert!(spectral_sigma_host(&[0.0; 3], &l, &[0.0; 2], &[0.0; 2]).is_err());
         assert!(spectral_sigma_host(&[0.0; 4], &l, &[0.0; 3], &[0.0; 2]).is_err());

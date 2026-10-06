@@ -38,7 +38,7 @@
 
 use crate::device::BackendError;
 use crate::error::ShapeError;
-use crate::tensor::checked_numel_for;
+use crate::tensor::{checked_numel, checked_numel_for};
 
 /// LocalResponseNorm のパラメータ記述子。フィールドは [`LrnParams::new`] 経由でのみ設定する
 /// （`#[non_exhaustive]` で将来のフィールド追加を非破壊にする）。
@@ -124,8 +124,12 @@ pub fn lrn_layout(shape: &[usize]) -> Result<LrnLayout, ShapeError> {
         });
     }
     checked_numel_for::<f32>(shape)?;
-    // `checked_numel_for` 通過後なので以下の積は溢れない。
-    let inner = shape[2..].iter().product();
+    // 0 次元を含む形状は `checked_numel_for` を通過するため、部分積・3 因子積も検査する。
+    let inner = checked_numel(&shape[2..])?;
+    shape[0]
+        .checked_mul(shape[1])
+        .and_then(|x| x.checked_mul(inner))
+        .ok_or(ShapeError::ElementCountOverflow)?;
     Ok(LrnLayout {
         shape: shape.to_vec(),
         n: shape[0],
@@ -320,6 +324,9 @@ mod tests {
         assert!(LrnParams::new(1, 1.0, 1.0, f32::NEG_INFINITY).is_err());
         assert!(lrn_layout(&[2, 3]).is_err());
         assert!(lrn_layout(&[usize::MAX, 2, 2]).is_err());
+        // 0 次元 + 巨大次元（部分積オーバーフローで panic しないこと）
+        assert!(lrn_layout(&[0, 1, usize::MAX, usize::MAX]).is_err());
+        assert!(lrn_layout(&[usize::MAX, usize::MAX, 0]).is_err());
         let l = lrn_layout(&[1, 2, 2]).unwrap();
         let p = LrnParams::new(2, 1.0, 1.0, 1.0).unwrap();
         assert!(local_response_norm_host(&[0.0; 3], &l, &p).is_err());
