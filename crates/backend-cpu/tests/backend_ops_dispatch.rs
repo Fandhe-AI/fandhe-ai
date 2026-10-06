@@ -723,3 +723,40 @@ fn metal_binning_ops_are_unsupported_not_panic() {
         Err(BackendError::Unsupported(_))
     ));
 }
+
+/// イシュー #2643: `pool3d_max`／`pool3d_avg` は CUDA に専用カーネルがなく既定の
+/// `Unsupported` を返す（autodiff 側が共有ホストカーネルへフォールバックする契約。
+/// panic しない）。
+#[test]
+fn cuda_pool3d_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::pool3d::Pool3dParams;
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![0.0; 8], &[1, 1, 2, 2, 2]).expect("valid tensor");
+    let p = Pool3dParams::new([2, 2, 2], None, [0; 3], [1; 3]).expect("valid params");
+    assert!(matches!(
+        cuda.pool3d_max(&a, &p),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        cuda.pool3d_avg(&a, &p, true),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #2643: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_pool3d_ops_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::pool3d::Pool3dParams;
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![0.0; 8], &[1, 1, 2, 2, 2]).expect("valid tensor");
+    let p = Pool3dParams::new([2, 2, 2], None, [0; 3], [1; 3]).expect("valid params");
+    assert!(matches!(
+        metal.pool3d_max(&a, &p),
+        Err(BackendError::Unsupported(_))
+    ));
+    assert!(matches!(
+        metal.pool3d_avg(&a, &p, true),
+        Err(BackendError::Unsupported(_))
+    ));
+}

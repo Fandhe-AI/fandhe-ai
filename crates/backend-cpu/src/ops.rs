@@ -3135,6 +3135,54 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::pool3d_max`] の CPU 実装（イシュー #2643）。
+    /// 共有カーネル `fandhe_ai_tensor_core::pool3d::max_pool3d_host` を呼ぶだけで走査規則は
+    /// 持たない（autodiff のホストフォールバックと単一情報源）。形状・パラメータ・索引上限は
+    /// `pool3d_layout`／`check_i32_indices` で再検査する（fail-closed）。非連続入力は論理順へ
+    /// 実体化する。
+    fn pool3d_max(
+        &self,
+        input: &Tensor<f32>,
+        params: &fandhe_ai_tensor_core::pool3d::Pool3dParams,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        use fandhe_ai_tensor_core::pool3d as p3;
+        let input = input.contiguous();
+        let layout =
+            p3::pool3d_layout(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        layout
+            .check_i32_indices()
+            .map_err(BackendError::ShapeMismatch)?;
+        let (v, i) = p3::max_pool3d_host(&input.host_slice(), &layout)
+            .map_err(BackendError::ShapeMismatch)?;
+        Ok((
+            Tensor::new(v, &layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+            Tensor::new(i, &layout.out_shape()).map_err(BackendError::ShapeMismatch)?,
+        ))
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::pool3d_avg`] の CPU 実装（イシュー #2643）。
+    /// [`Self::pool3d_max`] と同型。`dilation != [1, 1, 1]` は `InvalidArgument` で拒否する
+    /// （PyTorch の `avg_pool3d` に dilation は無い）。
+    fn pool3d_avg(
+        &self,
+        input: &Tensor<f32>,
+        params: &fandhe_ai_tensor_core::pool3d::Pool3dParams,
+        count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::pool3d as p3;
+        if params.dilation() != [1, 1, 1] {
+            return Err(BackendError::InvalidArgument(
+                "pool3d_avg: dilation は [1, 1, 1] 固定（avg_pool3d に dilation は無い）".into(),
+            ));
+        }
+        let input = input.contiguous();
+        let layout =
+            p3::pool3d_layout(input.shape(), params).map_err(BackendError::ShapeMismatch)?;
+        let v = p3::avg_pool3d_host(&input.host_slice(), &layout, count_include_pad)
+            .map_err(BackendError::ShapeMismatch)?;
+        Tensor::new(v, &layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::pad_modes_forward`] の CPU 実装
     /// （イシュー #2642）。共有ホストカーネル
     /// `fandhe_ai_tensor_core::pad_modes::pad_modes_host` を呼ぶだけで添字写像の
