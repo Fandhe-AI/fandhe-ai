@@ -7454,6 +7454,60 @@ struct OptimizerRpropAsgdHoldDoctestGuard;
 #[allow(dead_code)]
 struct OptimizerAdafactorLionHoldDoctestGuard;
 
+/// PolynomialLR・ChainedScheduler（`PolynomialLr`・`ChainedScheduler`。イシュー #2659・親 #2657）を
+/// facade 公開面から締め出す保留ガード（`OptimizerAdafactorLionHoldDoctestGuard` と同型の正のプローブ 1
+/// ブロック方式。型名のみが対象で既存 facade 型への inherent メソッド追加を伴わないため
+/// メソッドプローブは置かない）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 2 個を置き、
+/// 2 名すべてを関数シグネチャで参照する。facade が glob 可能な位置へ同名の型を公開すると、
+/// 名前解決の曖昧性（E0659）でエラーコードに依存せずコンパイルが失敗する。
+///
+/// 検出範囲は本プローブが名前解決で触れる 2 名に限る（マクロ生成や、内部クレート側で別名を
+/// 作ってからの公開までは保証しない）。実装は内部クレートに閉じている
+/// （`fandhe_ai_autodiff::nn::optim`。`LrScheduler` trait は不変）。保留対象は facade 公開面のみで、公開形は未承認
+/// （承認依頼は #2677・公開自体は承認後の #2679。推奨案は
+/// `docs/autodiff-lr-scheduler-poly-chained-decision.md` §8。同記録は推奨案の記録であり承認記録では
+/// ない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// lr_scheduler_poly_chained_hold_doctest_globs_all_pub_modules`・
+/// `lr_scheduler_poly_chained_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_lr_scheduler_poly_chained`・
+/// `workspace_declares_lr_scheduler_poly_chained_types_only_in_allowed_locations`）との多層防御として
+/// 働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
+/// 同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_lr_scheduler_poly_chained_hold_probe {
+///     pub struct PolynomialLr;
+///     pub struct ChainedScheduler;
+/// }
+/// use __fandhe_lr_scheduler_poly_chained_hold_probe::*;
+///
+/// fn __probe_types(_: PolynomialLr, _: ChainedScheduler) {}
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct LrSchedulerPolyChainedHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

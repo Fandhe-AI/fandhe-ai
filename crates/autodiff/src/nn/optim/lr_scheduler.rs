@@ -52,6 +52,11 @@
 //! スケジューラである。facade 公開は未承認のため保留する
 //! （`docs/autodiff-swa-decision.md` §7）。
 //!
+//! **#2659 で追加した [`PolynomialLr`]・[`ChainedScheduler`]**
+//! （PyTorch `PolynomialLR`・`ChainedScheduler` 相当）も式ベース
+//! （stateless 閉形式）である。facade 公開は未承認のため保留する
+//! （`docs/autodiff-lr-scheduler-poly-chained-decision.md`）。
+//!
 //! いずれも `f64` で中間計算し最後に 1 回だけ `f32` へ downcast する
 //! （`cos`／`powf` の libm 差による ULP 揺れを `f32` 直計算より抑える
 //! 精度方針。bit 同一契約は主張しない。`.claude/rules/coding-rust.md`
@@ -1162,5 +1167,149 @@ impl LrScheduler for SwaLr {
             SwaAnneal::Cos => (std::f64::consts::PI * t / 2.0).sin().powi(2),
         };
         (self.swa_lr as f64 * alpha + self.base_lr as f64 * (1.0 - alpha)) as f32
+    }
+}
+
+/// PyTorch `torch.optim.lr_scheduler.PolynomialLR` 相当（イシュー #2659・
+/// 親 #2657）: `lr(step) = base_lr · (1 − min(step, total_iters) /
+/// total_iters)^power`。`total_iters` step かけて多項式で 0 へ減衰し、以降は
+/// 0 を保持する（`power == 0` のみ全 step で `base_lr`）。
+///
+/// PyTorch の再帰形（直前 lr への乗算）ではなく固定 `base_lr` に対する閉形式で
+/// 表す stateless 純関数であり、`f64` で計算し最後に 1 回だけ `f32` へ落とす
+/// （モジュール doc の精度方針）。等価性は PyTorch 2.14.0 実行値 fixture
+/// （`tests/nn_optim_lr_scheduler_poly_chained.rs`）で検証する。
+///
+/// # PyTorch との差分（いずれも意図的）
+///
+/// - `total_iters == 0` を拒否する（PyTorch は例外を出さず常に `base_lr` を
+///   返すが、閉形式は `0/0` で未定義になる。ゼロ除数を拒否する
+///   [`StepLr`]／[`CosineAnnealingLr`]／[`LinearWarmupLr`] の規則に揃える。
+///   [`SwaLr`] が `anneal_epochs == 0` を受理するのは除算前の分岐で PyTorch
+///   と同じ値になるためで、事情が異なる）。
+/// - `power < 0` を構築時に拒否する（PyTorch は `step == total_iters` で
+///   遅延して `ZeroDivisionError` を出す）。
+/// - `usize → f64` の丸めにより `total_iters > 2^53` では境界直前の step が
+///   早めに 0 になりうる（実用上到達しない）。
+///
+/// `step >= total_iters` かつ `power > 0` は厳密に `0.0` を返す
+/// （`Adam::set_lr` 等は `>= 0.0` を受理するため学習が止まるだけで
+/// エラーにならない。PyTorch と同じ）。
+///
+/// 決定記録: `docs/autodiff-lr-scheduler-poly-chained-decision.md`。
+pub struct PolynomialLr {
+    base_lr: f32,
+    total_iters: usize,
+    power: f32,
+}
+
+impl PolynomialLr {
+    /// `base_lr` は有限かつ正、`total_iters` は 1 以上、`power` は有限かつ
+    /// 0 以上でなければならない（`power == 0` は受理し全 step が `base_lr`）。
+    ///
+    /// # Errors
+    ///
+    /// いずれかの条件を満たさない場合は `AutodiffError::InvalidArgument`
+    /// （fail-closed）。
+    pub fn new(base_lr: f32, total_iters: usize, power: f32) -> Result<Self, AutodiffError> {
+        if !base_lr.is_finite() || base_lr <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "base_lr は有限かつ正の値でなければならない: {base_lr}"
+            )));
+        }
+        if total_iters == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "total_iters は 1 以上でなければならない".to_string(),
+            ));
+        }
+        if !power.is_finite() || power < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "power は有限かつ 0 以上でなければならない: {power}"
+            )));
+        }
+        Ok(Self {
+            base_lr,
+            total_iters,
+            power,
+        })
+    }
+}
+
+impl LrScheduler for PolynomialLr {
+    fn lr_at(&self, step: usize) -> f32 {
+        // `min` で clamp するため巨大 step でも panic せず、`step >=
+        // total_iters` では底が厳密に 0 になる。`power == 0` は
+        // `0f64.powf(0.0) == 1.0` により全 step で `base_lr` となる。
+        let t = step.min(self.total_iters) as f64 / self.total_iters as f64;
+        (self.base_lr as f64 * (1.0 - t).powf(self.power as f64)) as f32
+    }
+}
+
+/// PyTorch `torch.optim.lr_scheduler.ChainedScheduler` 相当（イシュー #2659・
+/// 親 #2657）: 複数スケジューラの係数を掛け合わせる。
+///
+/// `lr(step) = base_lr · Π_i (s_i.lr_at(step) / base_lr)` を `f64` で累積し、
+/// 最後に 1 回だけ `f32` へ落とす（stateless 閉形式）。`LrScheduler` trait は
+/// 変更しない（公開面を広げないため）。trait から各メンバーの `base_lr` を
+/// 取れないので、[`SequentialLr`] と同じく **呼び出し側が全メンバーとチェーン
+/// へ同じ `base_lr` を渡す**規約とする。
+///
+/// # PyTorch と一致するメンバー（再帰形が現在値への純粋な乗算になるもの）
+///
+/// [`StepLr`]・[`MultiStepLr`]・[`ExponentialLr`]・[`LinearWarmupLr`]
+/// （`LinearLR(end_factor=1)` 相当）・[`PolynomialLr`]・[`ConstantLr`]
+/// （係数 1 の恒等。PyTorch の `ConstantLR(factor, total_iters)` とは別物）。
+/// 順序には依存しない。
+///
+/// # 一致しないメンバー（意図的な制限。チェーンの外で使う）
+///
+/// [`CosineAnnealingLr`]・[`CosineAnnealingWarmRestarts`]・[`CyclicLr`]・
+/// [`OneCycleLr`]・[`LambdaLr`]・[`SwaLr`]・[`SequentialLr`]・
+/// `ReduceLrOnPlateau`。PyTorch 側の再帰形が加算項を持つか現在値を上書きする
+/// ため積の閉形式に落ちない（実測: `CosineAnnealingLr(eta_min=0)` は
+/// `T_max` 超過後に相対約 0.65 乖離）。`Box<dyn LrScheduler>` では型で弾けない
+/// ため doc で明示する。非有限値は特別扱いせず伝播させる（下流の `set_lr` が
+/// 拒否する）。
+///
+/// 決定記録: `docs/autodiff-lr-scheduler-poly-chained-decision.md`。
+pub struct ChainedScheduler {
+    base_lr: f32,
+    schedulers: Vec<Box<dyn LrScheduler>>,
+}
+
+impl ChainedScheduler {
+    /// `base_lr` は有限かつ正、`schedulers` は 1 個以上でなければならない
+    /// （PyTorch も空を拒否する）。
+    ///
+    /// # Errors
+    ///
+    /// いずれかの条件を満たさない場合は `AutodiffError::InvalidArgument`
+    /// （fail-closed）。
+    pub fn new(base_lr: f32, schedulers: Vec<Box<dyn LrScheduler>>) -> Result<Self, AutodiffError> {
+        if !base_lr.is_finite() || base_lr <= 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "base_lr は有限かつ正の値でなければならない: {base_lr}"
+            )));
+        }
+        if schedulers.is_empty() {
+            return Err(AutodiffError::InvalidArgument(
+                "schedulers は 1 個以上でなければならない".to_string(),
+            ));
+        }
+        Ok(Self {
+            base_lr,
+            schedulers,
+        })
+    }
+}
+
+impl LrScheduler for ChainedScheduler {
+    fn lr_at(&self, step: usize) -> f32 {
+        let base = self.base_lr as f64;
+        let mut acc = base;
+        for s in &self.schedulers {
+            acc *= s.lr_at(step) as f64 / base;
+        }
+        acc as f32
     }
 }
