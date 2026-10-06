@@ -6555,6 +6555,210 @@ struct LrnWeightReparamHoldDoctestGuard;
 #[allow(dead_code)]
 struct PackedSequenceHoldDoctestGuard;
 
+/// SELU・CELU・Softsign・Hardsigmoid・LogSigmoid（`selu`・`celu`・`softsign`・
+/// `hardsigmoid`・`log_sigmoid`。イシュー #2649・親 #2648）を facade 公開面から
+/// 締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
+/// ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 5 個・
+/// 関数 5 個・モジュール `activation_scalar_ops` と、`Var`／`Tape`／`Tensor<f32>`
+/// 上の 5 メソッド・`compat::Sequential` 上の `add_*` 5 メソッドを持つプローブ用
+/// トレイトを置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出し（UFCS）の両方を
+/// 行う。facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、
+/// 同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出し
+/// シグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
+///
+/// 検出範囲は本プローブが列挙した名前・型に限る（マクロ生成や別名経由の公開までは
+/// 保証しない）。実装は内部クレートに閉じている
+/// （`fandhe_ai_autodiff::activation_scalar_ops`・`nn::activation` の層 5 型・
+/// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）。保留対象は facade 公開面
+/// （`Var` の委譲メソッド・`compat::Sequential::add_*`）のみで、公開形は未承認
+/// （承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
+/// `docs/autodiff-activation-scalar-ops-decision.md` §7。同記録は推奨案の記録であり
+/// 承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// activation_scalar_ops_hold_doctest_globs_all_pub_modules`・
+/// `activation_scalar_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_activation_scalar_ops`・
+/// `workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_activation_scalar_ops_hold_probe {
+///     pub struct Selu;
+///     pub struct Celu;
+///     pub struct Softsign;
+///     pub struct Hardsigmoid;
+///     pub struct LogSigmoid;
+///     pub fn selu() {}
+///     pub fn celu() {}
+///     pub fn softsign() {}
+///     pub fn hardsigmoid() {}
+///     pub fn log_sigmoid() {}
+///     pub mod activation_scalar_ops {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_activation_scalar_ops_hold_probe::*;
+///
+/// struct __FandheActivationScalarOpsHoldMarker;
+///
+/// trait __FandheActivationScalarOpsHoldProbe {
+///     fn selu(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn celu(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
+/// }
+///
+/// trait __FandheActivationScalarOpsHoldAddProbe {
+///     fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
+///     fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheActivationScalarOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn celu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheActivationScalarOpsHoldProbe for fandhe_ai::Tape {
+///     fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn celu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheActivationScalarOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn celu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheActivationScalarOpsHoldAddProbe for fandhe_ai::compat::Sequential {
+///     fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+///     fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
+///         __FandheActivationScalarOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(
+///     _0: Selu,
+///     _1: Celu,
+///     _2: Softsign,
+///     _3: Hardsigmoid,
+///     _4: LogSigmoid,
+/// ) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり
+///     // E0659 でコンパイル失敗する）。
+///     selu();
+///     celu();
+///     softsign();
+///     hardsigmoid();
+///     log_sigmoid();
+///     activation_scalar_ops::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     seq: &fandhe_ai::compat::Sequential,
+/// ) {
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::selu(v);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::selu(tape);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::selu(tf);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::celu(v);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::celu(tape);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::celu(tf);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::softsign(v);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::softsign(tape);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::softsign(tf);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::hardsigmoid(v);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::hardsigmoid(tape);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::hardsigmoid(tf);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::log_sigmoid(v);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::log_sigmoid(tape);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::log_sigmoid(tf);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_selu(seq);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_celu(seq);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_softsign(seq);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_hardsigmoid(seq);
+///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_log_sigmoid(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct ActivationScalarOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
