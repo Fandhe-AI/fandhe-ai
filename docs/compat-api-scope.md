@@ -1953,6 +1953,12 @@ facade 公開面は追加していない（保留ガード `StatReduceOpsHoldDoc
 公開形（`Var::median` 等の委譲メソッドと `QuantileInterpolation` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-stat-reduce-ops-decision.md`。
 
+**適用記録（イシュー #2643・親 #2625・ルート #2499 Phase 4。3D プーリング）**:
+`max_pool3d`／`avg_pool3d` の 2 演算を内部クレート限定（`fandhe_ai_autodiff::pool3d_ops`・`fandhe_ai_tensor_core::pool3d`・`BackendOps::pool3d_max`／`pool3d_avg`）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `Pool3dOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::max_pool3d` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。層化（`nn::MaxPool3d`／`AvgPool3d`・`Sequential::add_*`）は #2679 の対象で本イシューでは実装していない。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-pool3d-ops-decision.md`。
+
 **適用記録（イシュー #2638・親 #2625・ルート #2499 Phase 4。ヒストグラム・二分探索系）**:
 `histc`／`bincount`／`searchsorted`／`bucketize` の 4 演算（非微分）を内部クレート限定（`fandhe_ai_autodiff::binning_ops`・`fandhe_ai_tensor_core::binning`・`BackendOps::binning_*`）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `BinningOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
