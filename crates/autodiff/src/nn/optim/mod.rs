@@ -68,6 +68,7 @@
 //! 用意する」ところまでを担う。
 
 mod adadelta;
+mod adafactor;
 mod adagrad;
 mod adam;
 mod adamax;
@@ -75,6 +76,7 @@ mod adamw;
 mod asgd;
 mod lamb;
 mod lbfgs;
+mod lion;
 mod nadam;
 pub(crate) mod param_group;
 mod radam;
@@ -88,6 +90,7 @@ pub mod lr_scheduler;
 pub mod reduce_lr_on_plateau;
 
 pub use adadelta::{Adadelta, AdadeltaConfig};
+pub use adafactor::{Adafactor, AdafactorConfig};
 pub use adagrad::{Adagrad, AdagradConfig};
 pub use adam::{Adam, AdamConfig};
 pub use adamax::{Adamax, AdamaxConfig};
@@ -109,6 +112,7 @@ pub use amp::{
 pub use clip::{ClipGradResult, clip_grad_norm, clip_grad_value, global_grad_norm};
 pub use lamb::{Lamb, LambConfig};
 pub use lbfgs::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
+pub use lion::{Lion, LionConfig};
 pub use lr_scheduler::{
     ConstantLr, CosineAnnealingLr, CosineAnnealingWarmRestarts, CyclicLr, ExponentialLr, LambdaLr,
     LinearWarmupLr, LrScheduler, MultiStepLr, OneCycleAnneal, OneCycleLr, OneCycleLrConfig,
@@ -342,3 +346,22 @@ pub use state_dict::OptimizerStateDict;
 // #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
 // OptimizerRpropAsgdHoldDoctestGuard`・`docs/autodiff-optimizer-rprop-
 // asgd-decision.md` 参照）。
+
+// イシュー #2656（親 #2654・ルート #2499 Phase 4）: Adafactor（[`Adafactor`]・
+// [`AdafactorConfig`]。Shazeer & Stern, 2018）と Lion（[`Lion`]・
+// [`LionConfig`]。Chen et al., 2023）を追加した。#2655 の Rprop・ASGD と
+// 同じく `Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数で、新規
+// `Op`／`BackendOps` メソッド／VJP／カーネル／`unsafe`／依存は追加していない。
+// Adafactor の演算順は実 PyTorch 2.14.0+cpu の `torch/optim/_adafactor.py::
+// _single_tensor_adafactor` を実装前に読んで確認済み。**`torch.optim` 2.14.0
+// に Lion は存在しない**ため、Lion の参照値は公式参照実装（google/automl
+// `lion_pytorch.py`）の更新則を torch 2.14.0 のテンソル演算で実行した値
+// （各 fixture README 参照）。両種とも `ParamGroupStep`／
+// `OptimizerStateDict` は未実装（Adafactor の `row_var`／`col_var`／
+// `variance` は既存 `decode_state_dict` のフラグ構成に載らない）。
+// `DeviceParamStore` 非対応（ホスト `Tensor<f32>` 経由の `step()` のみ）。
+//
+// **facade（`fandhe_ai::optim`）へは未公開**（公開形は未承認。承認依頼
+// #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
+// OptimizerAdafactorLionHoldDoctestGuard`・`docs/autodiff-optimizer-
+// adafactor-lion-decision.md` 参照）。

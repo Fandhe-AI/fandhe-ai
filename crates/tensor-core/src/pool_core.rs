@@ -486,18 +486,19 @@ where
         let mut core = self.lock();
         // 飽和減算: 現在値が `class_bytes` 以上ならそのまま `fetch_sub`
         // 相当の減算結果を採用し、未満（= 対の加算が無い契約違反）なら
-        // `0` へ飽和させる。`fetch_update` は CAS ループのため、失敗時
-        // （他スレッドが同時に `fetch_add`/`fetch_update` している場合）
-        // は自動的に最新値で再試行する。`Result` は常に `Ok`
-        // （クロージャが常に `Some` を返すため `fetch_update` は失敗
-        // しない設計）であり、`unwrap_or` はこの構造的な保証を明示する
-        // だけの防御的表現（`.claude/rules/coding-rust.md`「本番経路で
-        // panic しない」に従い `unwrap()` は使わない）。
-        let _ = self.pending_return_bytes.fetch_update(
+        // `0` へ飽和させる。`fetch_update`（新しい toolchain では
+        // `try_update` へ改名され旧名が deprecated）に依存せず、
+        // `compare_exchange_weak` の CAS ループで手書きする（どの
+        // toolchain でも警告なしでビルドできる）。失敗時は最新値で再試行する。
+        let mut current = self.pending_return_bytes.load(Ordering::Relaxed);
+        while let Err(latest) = self.pending_return_bytes.compare_exchange_weak(
+            current,
+            current.saturating_sub(class_bytes),
             Ordering::Relaxed,
             Ordering::Relaxed,
-            |current| Some(current.saturating_sub(class_bytes)),
-        );
+        ) {
+            current = latest;
+        }
         self.put_locked(&mut core, class_bytes, handle)
     }
 
