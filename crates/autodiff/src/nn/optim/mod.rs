@@ -114,9 +114,9 @@ pub use lamb::{Lamb, LambConfig};
 pub use lbfgs::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
 pub use lion::{Lion, LionConfig};
 pub use lr_scheduler::{
-    ConstantLr, CosineAnnealingLr, CosineAnnealingWarmRestarts, CyclicLr, ExponentialLr, LambdaLr,
-    LinearWarmupLr, LrScheduler, MultiStepLr, OneCycleAnneal, OneCycleLr, OneCycleLrConfig,
-    SequentialLr, StepLr, SwaAnneal, SwaLr,
+    ChainedScheduler, ConstantLr, CosineAnnealingLr, CosineAnnealingWarmRestarts, CyclicLr,
+    ExponentialLr, LambdaLr, LinearWarmupLr, LrScheduler, MultiStepLr, OneCycleAnneal, OneCycleLr,
+    OneCycleLrConfig, PolynomialLr, SequentialLr, StepLr, SwaAnneal, SwaLr,
 };
 pub use nadam::{NAdam, NAdamConfig};
 pub(crate) use param_group::SlotHparams;
@@ -365,3 +365,16 @@ pub use state_dict::OptimizerStateDict;
 // #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
 // OptimizerAdafactorLionHoldDoctestGuard`・`docs/autodiff-optimizer-
 // adafactor-lion-decision.md` 参照）。
+
+// イシュー #2659（親 #2657・ルート #2499 Phase 4）: LR scheduler の
+// [`PolynomialLr`]（PyTorch `PolynomialLR` 相当）と [`ChainedScheduler`]
+// （同 `ChainedScheduler` 相当。係数の積）を追加した。既存の `lr_scheduler`
+// 群と同じく式ベース・stateless 純関数で、新規 `Op`／`BackendOps`／`Var`／
+// VJP／カーネル／`unsafe`／依存は追加していない。`LrScheduler` trait は
+// 変更していない。`ChainedScheduler` が PyTorch と一致するメンバーは乗算型
+// に限る（`lr_scheduler` の [`ChainedScheduler`] doc 参照）。
+//
+// **facade（`fandhe_ai::optim`）へは未公開**（公開形は未承認。承認依頼
+// #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
+// LrSchedulerPolyChainedHoldDoctestGuard`・`docs/autodiff-lr-scheduler-
+// poly-chained-decision.md` 参照）。
