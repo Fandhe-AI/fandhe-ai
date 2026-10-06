@@ -54,14 +54,10 @@ fn invalid(message: String) -> AutodiffError {
 
 /// `var` が `tape` に属さなければ `TapeMismatch` を返す。
 ///
-/// `Var` の所属 tape を読む公開 API がないため、`Var::to_tape` の契約（同一 tape なら葉を
-/// 積まずそのまま返し、別 tape なら転送先へ葉を 1 つ積む）を使い、ノード数の増減で判定する。
-/// 不一致時に積まれた葉は直ちに取り除く手段がない（`Tape::reset` で破棄される）が、`Err` で
-/// 返すため forward の成果物には混入しない。公開 API の追加を避けるための迂回である。
+/// 所属判定は `Var::is_on_tape`（ノードを積まない読み取り専用判定）で行うため、不一致で
+/// 拒否しても `tape` のノード数・メモリは増えない。
 fn ensure_on_tape(tape: &Tape, var: &Var<'_>) -> Result<(), AutodiffError> {
-    let before = tape.0.len();
-    var.to_tape(&tape.0)?;
-    if tape.0.len() != before {
+    if !var.is_on_tape(&tape.0) {
         return Err(AutodiffError::TapeMismatch);
     }
     Ok(())

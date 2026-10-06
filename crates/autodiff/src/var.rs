@@ -205,6 +205,14 @@ impl<'t> Var<'t> {
         Ok(())
     }
 
+    /// この `Var` が `target` に属するかを、ノードを積まずに判定する（読み取り専用）。
+    ///
+    /// `to_tape` は別 tape へ葉を転送する副作用を持つため、所属検証だけが目的の呼び出し側
+    /// （facade の多入力グラフ forward。#2665）が tape を汚さずに不一致を拒否するために使う。
+    pub fn is_on_tape(&self, target: &Tape) -> bool {
+        self.tape.id == target.id
+    }
+
     /// この `Var` が属する `Tape` の識別子。`backward.rs`（TASK-1.5c・
     /// #18）は別モジュールのため `tape` フィールド（private）へ直接
     /// 触れられず、`Tape::backward`/`Gradients::get` のクロステープ検査

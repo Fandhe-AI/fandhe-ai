@@ -183,8 +183,11 @@ fn forward_rejects_input_var_from_other_tape_even_for_passthrough() {
     let tape = crate::tape();
     let other = crate::tape();
     let foreign = other.var(&input);
+    let len_before_reject = tape.0.len();
     let r = model.forward(&tape, &[foreign]);
     assert!(matches!(r, Err(AutodiffError::TapeMismatch)));
+    // 不一致の拒否は呼び出し元 tape へ葉を転送しない。
+    assert_eq!(tape.0.len(), len_before_reject);
     let before = tape.0.len();
     // 同一 tape の入力は従来どおり成功し、葉を増やさない。
     let own = tape.var(&input);
