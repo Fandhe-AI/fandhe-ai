@@ -178,6 +178,7 @@ mod element;
 mod error;
 pub mod fft;
 mod fusion;
+pub mod indexed_update;
 pub mod interpolate;
 pub mod io;
 mod low_precision;
@@ -222,6 +223,7 @@ pub use dispatch_failure::DispatchFailureCell;
 pub use element::{Element, Scalar, ScalarDType};
 pub use error::ShapeError;
 pub use fft::{FftError, FftNorm, StftPadMode};
+pub use indexed_update::ScatterReduceMode;
 pub use stat_reduce::{QuantileInterpolation, StatReduceError};
 // `half::f16`／`half::bf16` の再エクスポート（イシュー #1960 codex-review
 // 対応）。`Scalar`（`element.rs`）は sealed trait で実装対象を

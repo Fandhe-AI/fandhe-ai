@@ -3198,6 +3198,35 @@ pub trait BackendOps {
         ))
     }
 
+    /// `scatter_reduce`（`torch.scatter_reduce` 相当。`Sum`／`Prod`／`Mean`／
+    /// `Amax`／`Amin` と `include_self`。イシュー #2641・
+    /// `docs/autodiff-indexed-update-ops-decision.md`）。出力は `input` と同 shape。
+    /// 数値契約（走査順・`f64` アキュムレータ・タイ／NaN 規則）の正は
+    /// [`crate::indexed_update`]。既存の [`Self::scatter`]／[`ScatterReduce`] は
+    /// 拡張せず（未知 variant が黙って `Overwrite` になる経路を避けるため）、
+    /// 別 enum [`crate::ScatterReduceMode`] の別メソッドとして提供する。
+    ///
+    /// # デフォルト実装
+    /// [`Self::scan_cummax`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::indexed_update_ops::scatter_reduce` は `Unsupported`
+    /// のときだけ共有ホストカーネル [`crate::indexed_update::scatter_reduce_host`]
+    /// へフォールバックし、それ以外のエラーは伝播する。実装側も
+    /// [`crate::indexed_update::scatter_reduce_layout`] で形状・`index` 範囲を
+    /// 再検査する（fail-closed）。
+    fn indexed_scatter_reduce(
+        &self,
+        _input: &Tensor<f32>,
+        _dim: usize,
+        _index: &Tensor<i32>,
+        _src: &Tensor<f32>,
+        _mode: crate::ScatterReduceMode,
+        _include_self: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "indexed_scatter_reduce: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// 空間軸（末尾 `size.len()` 軸）を `size` へリサンプリングする
     /// （`torch.nn.functional.interpolate`／`tf.image.resize` 相当。
     /// イシュー #1757）。先頭の残り軸（batch／channel 等）は素通し。
@@ -6004,6 +6033,27 @@ mod tests {
         let src = Tensor::new(vec![9.0, 9.0, 9.0, 9.0], &[2, 2]).unwrap();
 
         let result = ops.scatter(&input, 1, &index, &src, ScatterReduce::Overwrite);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::indexed_scatter_reduce`] の既定実装が fail-safe 契約
+    /// （`Unsupported`）を満たすことを確認する（イシュー #2641）。
+    #[test]
+    fn indexed_scatter_reduce_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let input = Tensor::new(vec![1.0, 2.0], &[2]).unwrap();
+        let index = Tensor::<i32>::new(vec![0], &[1]).unwrap();
+        let src = Tensor::new(vec![9.0], &[1]).unwrap();
+
+        let result = ops.indexed_scatter_reduce(
+            &input,
+            0,
+            &index,
+            &src,
+            crate::ScatterReduceMode::Sum,
+            true,
+        );
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }

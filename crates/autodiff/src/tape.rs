@@ -1036,6 +1036,23 @@ pub(crate) enum Op {
         src: NodeId,
         reduce: ScatterReduce,
     },
+    /// `scatter_reduce`（`torch.scatter_reduce` 相当。イシュー #2641・
+    /// `docs/autodiff-indexed-update-ops-decision.md`）。`index` は [`Op::Scatter`]
+    /// と同じ非追跡データ（forward 時点で範囲検査済み）、`src` は追跡対象。
+    /// `crate::indexed_update_ops::scatter_reduce` からのみ積まれ、facade には
+    /// 公開しない。VJP は入力値・`src`・`index` を実体化して共有カーネル
+    /// `tensor_core::indexed_update::scatter_reduce_vjp_host` で再計算する
+    /// （`Op::Logcumsumexp` と同じ「入力から再計算」方式）。既存の `ScatterReduce`
+    /// とは別 enum（`ScatterReduceMode`）を使う（未知 variant が黙って `Overwrite`
+    /// になる経路を避ける。決定記録 §2）。非融合・非 checkpoint・高階微分非対応。
+    IndexedScatterReduce {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+        src: NodeId,
+        mode: fandhe_ai_tensor_core::ScatterReduceMode,
+        include_self: bool,
+    },
     /// `Var::embedding`（`nn::Embedding` の forward 本体。`torch.nn.
     /// Embedding` 相当。イシュー #1604）。`weight`（`[V, D]`）から
     /// `index`（`[N, D]` へ broadcast・contiguous 済みの非追跡
@@ -1775,6 +1792,9 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::IndexedScatterReduce`（イシュー #2641）も eager 実体化で再計算経路を
+            // 持たない（`Op::Scatter` と同型）。
+            Op::IndexedScatterReduce { .. } => false,
             // `Op::Embedding`（イシュー #1604）は `Op::Gather` と同じく
             // `index`（`padding_idx` も）を `Op` 自身が保持する eager
             // 実体化演算で、`recompute_value` に再計算経路を持たない
@@ -1984,7 +2004,7 @@ impl Op {
                 f(*b);
             }
             Op::Gather { input, .. } => f(*input),
-            Op::Scatter { input, src, .. } => {
+            Op::Scatter { input, src, .. } | Op::IndexedScatterReduce { input, src, .. } => {
                 f(*input);
                 f(*src);
             }
@@ -2289,6 +2309,7 @@ impl Op {
             | Op::Dropout { .. }
             | Op::Gather { .. }
             | Op::Scatter { .. }
+            | Op::IndexedScatterReduce { .. }
             | Op::Embedding { .. }
             | Op::Cumsum { .. }
             | Op::Cumprod { .. }
