@@ -5592,6 +5592,110 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct TensorProductOpsHoldDoctestGuard;
 
+/// `pad` の非定数モード（`pad_with_mode`・`PadMode`。reflect／replicate／circular。
+/// イシュー #2642・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
+/// ガード（`IndexedUpdateOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `pad_ops`／`pad_modes`・型 `PadMode`／`PadModeError`・メソッド
+/// `pad_with_mode` を持つプローブ用トレイトを置き、修飾なしの関数呼び出しと
+/// `Var`／`Tape`／`Tensor<f32>` の修飾付きメソッド呼び出しの両方を行う。facade が
+/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の
+/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
+/// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::pad_ops`・
+/// `fandhe_ai_tensor_core::{pad_modes, PadMode, PadModeError}`・
+/// `BackendOps::pad_modes_forward`）。保留対象は facade 公開面
+/// （`Var::pad_with_mode` の委譲メソッドと `PadMode` の再エクスポート）のみで、公開形は
+/// 未承認（承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
+/// `docs/autodiff-pad-modes-decision.md` §7。同記録は推奨案の記録であり承認記録
+/// ではない）。既存の `Var::pad`（定数埋め）・`StftPadMode` には触れない。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// pad_modes_hold_doctest_globs_all_pub_modules`・
+/// `pad_modes_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_pad_modes`・
+/// `workspace_declares_pad_modes_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_pad_modes_hold_probe {
+///     pub struct PadMode;
+///     pub struct PadModeError;
+///     pub mod pad_ops {
+///         pub fn pad_with_mode() {}
+///     }
+///     pub mod pad_modes {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_pad_modes_hold_probe::*;
+///
+/// struct __FandhePadModesHoldMarker;
+///
+/// trait __FandhePadModesHoldProbe {
+///     fn pad_with_mode(&self) -> __FandhePadModesHoldMarker;
+/// }
+///
+/// impl<'t> __FandhePadModesHoldProbe for fandhe_ai::Var<'t> {
+///     fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {
+///         __FandhePadModesHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePadModesHoldProbe for fandhe_ai::Tape {
+///     fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {
+///         __FandhePadModesHoldMarker
+///     }
+/// }
+///
+/// impl __FandhePadModesHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {
+///         __FandhePadModesHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: PadMode, _: PadModeError) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     pad_ops::pad_with_mode();
+///     pad_modes::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandhePadModesHoldMarker = fandhe_ai::Var::pad_with_mode(v);
+///     let _: __FandhePadModesHoldMarker = fandhe_ai::Tape::pad_with_mode(tape);
+///     let _: __FandhePadModesHoldMarker = fandhe_ai::Tensor::<f32>::pad_with_mode(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct PadModesHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

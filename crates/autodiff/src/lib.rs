@@ -271,6 +271,7 @@ pub mod matrix_ops;
 pub mod nn;
 pub mod nonfinite_ops;
 pub mod optim;
+pub mod pad_ops;
 pub mod rearrange_ops;
 mod reduce_dims;
 pub mod reduce_ops;

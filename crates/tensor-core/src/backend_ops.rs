@@ -2463,6 +2463,29 @@ pub trait BackendOps {
         ))
     }
 
+    /// 非定数モード（reflect／replicate／circular）の `pad`（`F.pad` の `mode`
+    /// 相当。イシュー #2642・`docs/autodiff-pad-modes-decision.md`）。`pads` は
+    /// 先頭軸から順の `(before, after)`（既存 [`Self::pad`] と同じ並び）。出力 shape は
+    /// [`crate::ops_shape::pad_out_shape`] が定める。**bit 完全一致契約**（算術を含まない
+    /// 純粋なコピー。規則の正は [`crate::pad_modes`]）。
+    ///
+    /// # デフォルト実装
+    /// [`Self::fft_rfft`] と同じ非破壊拡張・フォールバック契約。
+    /// `fandhe_ai_autodiff::pad_ops::pad_with_mode` は `Unsupported` のときだけ
+    /// ホスト参照実装 [`crate::pad_modes::pad_modes_host`] へフォールバックし、
+    /// それ以外のエラーは伝播する。実装側も [`crate::pad_modes::pad_modes_layout`] で
+    /// 形状・pad 上限を再検査する（fail-closed）。既存 [`Self::pad`] は変更しない。
+    fn pad_modes_forward(
+        &self,
+        _input: &Tensor<f32>,
+        _pads: &[(usize, usize)],
+        _mode: crate::pad_modes::PadMode,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "pad_modes_forward: default fail-safe (no device-side kernel available)".into(),
+        ))
+    }
+
     /// `kthvalue`（`k` は 1 始まり。値と索引。`torch.kthvalue` 相当。イシュー #2637・
     /// `docs/autodiff-stat-reduce-ops-decision.md`）。出力は `dim` 軸を落とした shape
     /// で、索引は `dim` 軸上の位置（`i32`）。順序規則（安定昇順・NaN 最大）の正は
@@ -5853,6 +5876,24 @@ mod tests {
         let result = ops.cumprod(&x, 0);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::pad_modes_forward`] の既定実装が fail-safe を返し panic
+    /// しないことの確認（イシュー #2642）。
+    #[test]
+    fn pad_modes_forward_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let x = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        for mode in [
+            crate::pad_modes::PadMode::Reflect,
+            crate::pad_modes::PadMode::Replicate,
+            crate::pad_modes::PadMode::Circular,
+        ] {
+            assert!(matches!(
+                ops.pad_modes_forward(&x, &[(1, 1)], mode),
+                Err(BackendError::Unsupported(_))
+            ));
+        }
     }
 
     /// [`BackendOps::scan_cummax`]／`scan_cummin`／`scan_logcumsumexp` の

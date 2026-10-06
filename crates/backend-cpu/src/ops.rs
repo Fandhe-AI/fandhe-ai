@@ -3135,6 +3135,24 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::pad_modes_forward`] の CPU 実装
+    /// （イシュー #2642）。共有ホストカーネル
+    /// `fandhe_ai_tensor_core::pad_modes::pad_modes_host` を呼ぶだけで添字写像の
+    /// 規則は持たない（autodiff のホストフォールバックと単一情報源）。形状・pad 上限は
+    /// `pad_modes_layout` で再検査する（fail-closed）。非連続入力は論理順へ実体化する。
+    fn pad_modes_forward(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        mode: fandhe_ai_tensor_core::PadMode,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::pad_modes as pm;
+        let input = input.contiguous();
+        let layout = pm::pad_modes_layout(input.shape(), pads, mode)?;
+        let v = pm::pad_modes_host(&input.host_slice(), &layout)?;
+        Tensor::new(v, layout.out_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::indexed_scatter_reduce`] の CPU 実装
     /// （イシュー #2641）。共有ホストカーネル
     /// `fandhe_ai_tensor_core::indexed_update::scatter_reduce_host` を呼ぶだけで
