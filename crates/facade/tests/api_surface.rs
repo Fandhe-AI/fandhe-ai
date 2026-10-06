@@ -30178,3 +30178,354 @@ fn workspace_declares_lr_scheduler_poly_chained_types_only_in_allowed_locations(
          独自宣言）の混入か、未承認の実装追加でないか確認すること"
     );
 }
+
+// =====================================================================
+// DatasetComposeHoldDoctestGuard（イシュー #2661・親 #2660）:
+// `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は内部クレート
+// （`fandhe_ai_tensor_core::data::{Subset, ConcatDataset, ConcatBatch, random_split, random_split_fractions}`）
+// に閉じ、facade 公開形（推奨は `fandhe_ai::data` への純再エクスポート）は未承認（承認依頼は #2677。公開は
+// 承認後の #2679）。検出はトークン完全一致のみで行い、`SubsetSampler` など部分一致する別トークンは違反と
+// しない（自己テストで固定）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`fn` の宣言）と、
+// doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+// =====================================================================
+
+/// `DatasetComposeHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
+#[test]
+fn dataset_compose_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DatasetComposeHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "DatasetComposeHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
+         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言 [`DATASET_COMPOSE_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
+#[test]
+fn dataset_compose_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "DatasetComposeHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, DATASET_COMPOSE_HOLD_PROBE_BODY,
+        "DatasetComposeHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
+         DATASET_COMPOSE_HOLD_PROBE_BODY からドリフトしている。正のプローブ（__fandhe_dataset_compose_hold_probe \
+         モジュール・__FandheDatasetComposeHold*Probe トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入が\
+         ないか確認すること。"
+    );
+}
+
+/// [`dataset_compose_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
+/// （`DatasetComposeHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行を
+/// 除いた本文と 1 行単位で完全一致する）。
+const DATASET_COMPOSE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_dataset_compose_hold_probe {\n\
+\x20\x20\x20\x20pub struct Subset;\n\
+\x20\x20\x20\x20pub struct ConcatDataset;\n\
+\x20\x20\x20\x20pub struct ConcatBatch;\n\
+\x20\x20\x20\x20pub fn random_split() {}\n\
+\x20\x20\x20\x20pub fn random_split_fractions() {}\n\
+}\n\
+use __fandhe_dataset_compose_hold_probe::*;\n\
+\n\
+struct __FandheDatasetComposeHoldMarker;\n\
+\n\
+trait __FandheDatasetComposeHoldProbe {\n\
+\x20\x20\x20\x20fn random_split(&self) -> __FandheDatasetComposeHoldMarker;\n\
+\x20\x20\x20\x20fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker;\n\
+\x20\x20\x20\x20fn subset(&self) -> __FandheDatasetComposeHoldMarker;\n\
+}\n\
+\n\
+trait __FandheDatasetComposeHoldBatchProbe {\n\
+\x20\x20\x20\x20fn concat_batches(&self) -> __FandheDatasetComposeHoldMarker;\n\
+}\n\
+\n\
+impl __FandheDatasetComposeHoldProbe for fandhe_ai::data::TensorDataset<f32> {\n\
+\x20\x20\x20\x20fn random_split(&self) -> __FandheDatasetComposeHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn subset(&self) -> __FandheDatasetComposeHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheDatasetComposeHoldProbe for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>> {\n\
+\x20\x20\x20\x20fn random_split(&self) -> __FandheDatasetComposeHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn subset(&self) -> __FandheDatasetComposeHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheDatasetComposeHoldBatchProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn concat_batches(&self) -> __FandheDatasetComposeHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_free_fns(_0: Subset, _1: ConcatDataset, _2: ConcatBatch) {\n\
+\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20random_split();\n\
+\x20\x20\x20\x20random_split_fractions();\n\
+}\n\
+\n\
+fn __probe_methods(\n\
+\x20\x20\x20\x20ds: &fandhe_ai::data::TensorDataset<f32>,\n\
+\x20\x20\x20\x20dl: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>,\n\
+\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::random_split(ds);\n\
+\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::random_split_fractions(ds);\n\
+\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::subset(ds);\n\
+\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::random_split(dl);\n\
+\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::random_split_fractions(dl);\n\
+\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::subset(dl);\n\
+\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::Tensor::<f32>::concat_batches(tf);\n\
+}";
+
+/// 保留対象の自由関数名（推奨公開形が自由関数の再エクスポートのため、名前そのものの漏出を検出する）。
+const DATASET_COMPOSE_FREE_FN_NAMES: [&str; 2] = ["random_split", "random_split_fractions"];
+
+/// 保留対象 fn 名。自由関数に加え、既存型への inherent メソッド追加経路（`subset`）と
+/// `ConcatBatch` のメソッド（`concat_batches`）を含める。
+const DATASET_COMPOSE_FN_NAMES: [&str; 4] = [
+    "random_split",
+    "random_split_fractions",
+    "subset",
+    "concat_batches",
+];
+
+/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
+const DATASET_COMPOSE_IDENTS: [&str; 7] = [
+    "Subset",
+    "ConcatDataset",
+    "ConcatBatch",
+    "random_split",
+    "random_split_fractions",
+    "subset",
+    "concat_batches",
+];
+
+/// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
+const DATASET_COMPOSE_TYPE_NAMES: [&str; 3] = ["Subset", "ConcatDataset", "ConcatBatch"];
+
+/// [`facade_does_not_reexport_or_declare_dataset_compose`]・その自己テストが共用する検出本体。facade src の
+/// `pub use` で [`DATASET_COMPOSE_IDENTS`] を経路の識別子（トークン完全一致）単位で含むもの、内部クレート
+/// （`fandhe_ai_tensor_core`）の glob 再エクスポート、leaf の個別再エクスポート、`struct`／`enum`／`type`／`trait`
+/// による [`DATASET_COMPOSE_TYPE_NAMES`] の独自宣言、[`DATASET_COMPOSE_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を
+/// 問わない）を違反として返す。
+fn scan_dataset_compose_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in DATASET_COMPOSE_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            let from_internal = path_tokens.iter().any(|t| t == "fandhe_ai_tensor_core");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if DATASET_COMPOSE_FN_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && DATASET_COMPOSE_TYPE_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        i += 1;
+    }
+
+    for fn_name in DATASET_COMPOSE_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に Dataset 合成の保留対象の再エクスポート・型の独自宣言・同名 `fn` が
+/// 存在しないことを固定する（`DatasetComposeHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
+/// ソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_dataset_compose() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_dataset_compose_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が Dataset 合成の内部実装（#2661 の `data::{{Subset, ConcatDataset, random_split ..}}`。\
+         facade 公開形は未承認で承認依頼は #2677）を再エクスポート、独自宣言、または同名の fn を宣言している: \
+         {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_dataset_compose`] の自己テスト（各違反カテゴリの合成ソースを検出できる
+/// こと、および部分文字列に含む別トークン・呼び出し・コメント・文字列・非公開 `use` を誤検出しないことを
+/// 恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_dataset_compose_detects_each_category() {
+    let offense = |src: &str| !scan_dataset_compose_reexports_and_declarations(src).is_empty();
+    // 正例: 個別再エクスポート（単一行・group・複数行・別名）。
+    assert!(offense("pub use fandhe_ai_tensor_core::data::Subset;"));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::{DataLoader, ConcatDataset};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::{\n    random_split,\n    ConcatBatch,\n};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::random_split_fractions as rsf;"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_tensor_core::*;"));
+    // 正例: 型の独自宣言。
+    assert!(offense("pub struct Subset;"));
+    assert!(offense("pub struct ConcatDataset { n: usize }"));
+    assert!(offense("pub enum ConcatBatch { A }"));
+    assert!(offense("pub type Subset = u8;"));
+    assert!(offense("pub trait ConcatBatch {}"));
+    // 正例: fn 宣言（同名の inherent／trait メソッド宣言を含む）。
+    assert!(offense("pub fn random_split() {}"));
+    assert!(offense("impl TensorDataset { pub fn subset(&self) {} }"));
+    assert!(offense(
+        "impl DataLoader { pub fn random_split_fractions(&self) {} }"
+    ));
+    assert!(offense("trait T { fn concat_batches(&self); }"));
+    // 負例: 保留対象を部分文字列に含む別トークン。
+    assert!(!offense("pub struct SubsetSampler;"));
+    assert!(!offense("fn random_split_helper() {}"));
+    assert!(!offense("fn subsets() {}"));
+    // 負例: 呼び出し（宣言ではない）。
+    assert!(!offense("fn f(d: D) { let s = d.subset(); }"));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense("// pub use fandhe_ai_tensor_core::data::Subset;"));
+    assert!(!offense("let s = \"pub fn random_split() {}\";"));
+    // 負例: 非公開 use。
+    assert!(!offense("use fandhe_ai_tensor_core::data::Subset;"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、Dataset 合成の型宣言と [`DATASET_COMPOSE_FN_NAMES`] の
+/// `fn` 宣言が承認済みの置き場所だけに存在することを固定する。
+///
+/// 期待値は `tensor-core/src/data/compose.rs` の型 3 名が各 1 件、`random_split`・`random_split_fractions` が
+/// 各 1 件、`concat_batches` が 4 件（`ConcatBatch` trait の宣言 1 + `Tensor<T>`／2 要素タプル／3 要素タプルの
+/// impl 各 1）、`subset` は 0 件。これら以外への追加（facade／既存ローダー型への inherent メソッド等）は
+/// fail-closed に検出する。テスト用ヘルパーにも素の `fn random_split` などという名前を使わないこと
+/// （インベントリに数えられる）。
+#[test]
+fn workspace_declares_dataset_compose_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in DATASET_COMPOSE_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+            for (idx, tok) in tokens.iter().enumerate() {
+                if !matches!(tok.as_str(), "struct" | "enum" | "type" | "trait") {
+                    continue;
+                }
+                if let Some(name) = tokens.get(idx + 1)
+                    && DATASET_COMPOSE_TYPE_NAMES.contains(&name.as_str())
+                {
+                    *found.entry(format!("{rel}::{name}")).or_insert(0) += 1;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for n in DATASET_COMPOSE_FREE_FN_NAMES {
+        expected.insert(format!("tensor-core/src/data/compose.rs::{n}"), 1);
+    }
+    for n in DATASET_COMPOSE_TYPE_NAMES {
+        expected.insert(format!("tensor-core/src/data/compose.rs::{n}"), 1);
+    }
+    // `concat_batches`: trait 宣言 1 + `Tensor<T>`／(A, B)／(A, B, C) の impl 各 1。
+    expected.insert(
+        "tensor-core/src/data/compose.rs::concat_batches".to_string(),
+        4,
+    );
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の Subset／ConcatDataset／ConcatBatch の型宣言と random_split／\
+         random_split_fractions／subset／concat_batches の `fn` 宣言が承認済みの置き場所\
+         （tensor-core/src/data/compose.rs のみ）と一致しない。迂回経路（facade／既存ローダー型への inherent \
+         メソッド追加等）の混入か、未承認の実装追加でないか確認すること"
+    );
+}

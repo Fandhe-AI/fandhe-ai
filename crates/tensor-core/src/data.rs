@@ -88,6 +88,12 @@
 //! [`WeightedRandomSampler`] は [`crate::rng::multinomial`] と、それぞれ
 //! 添字列・抽選列が bit 完全一致する（各型の doc 参照）。
 //!
+//! # Dataset 合成（イシュー #2661・親 #2660）
+//!
+//! [`Subset`]・[`ConcatDataset`]・[`random_split`]／[`random_split_fractions`]
+//! は `data/compose.rs` に置く（`docs/tensor-core-dataset-compose-decision.md`）。
+//! 内部クレート限定で **facade 非公開（承認待ち #2677・公開は #2679）**。
+//!
 //! facade（`fandhe_ai::data`）へは #2505 で純再エクスポート済み
 //! （`DataLoader` への統合はしない。
 //! `docs/tensor-core-data-sampler-hooks-decision.md` §5・§8）。
@@ -96,6 +102,9 @@ use crate::element::Element;
 use crate::error::ShapeError;
 use crate::rng::{Xorshift64Star, with_global_rng};
 use crate::tensor::{Tensor, checked_numel_for};
+
+mod compose;
+pub use compose::{ConcatBatch, ConcatDataset, Subset, random_split, random_split_fractions};
 
 /// [`Dataset`]／[`DataLoader`] 専用のエラー型。shape 起因の不整合
 /// （要素数積のオーバーフロー等）は `Tensor::new`／`narrow` 等と同じ
@@ -154,6 +163,23 @@ pub enum DataError {
     /// 従い、この位置で 1 回だけ yield し以降は `None` を返す
     /// （イシュー #2183）。
     WorkerFailed { batch_index: usize },
+    /// [`ConcatDataset::new`] に成分が 1 件も渡されなかった（PyTorch
+    /// `ConcatDataset` も空列を assert で拒否する。イシュー #2661）。
+    EmptyConcat,
+    /// [`random_split`] の分割長の合計 `found` がデータセットの長さ
+    /// `expected` と一致しない（イシュー #2661）。
+    SplitLengthMismatch { expected: usize, found: usize },
+    /// [`random_split_fractions`] の割合の不正（`index` 番目が
+    /// 非有限・負・1 超。合計に関する違反は `index == fractions.len()`。
+    /// `DataError` は `Eq` 導出のため `f64` を持たせない。イシュー #2661）。
+    InvalidSplitFraction { index: usize, reason: &'static str },
+    /// [`ConcatBatch::concat_batches`] に渡された `part` 番目の shape が
+    /// 先頭 part と先頭軸以外で一致しない（イシュー #2661）。
+    ConcatShapeMismatch {
+        part: usize,
+        expected: Vec<usize>,
+        found: Vec<usize>,
+    },
 }
 
 impl From<ShapeError> for DataError {
@@ -212,6 +238,22 @@ impl std::fmt::Display for DataError {
                     "prefetch worker がバッチ {batch_index} の結果を返さずに終了した"
                 )
             }
+            DataError::EmptyConcat => write!(f, "ConcatDataset の成分が 1 件も無い"),
+            DataError::SplitLengthMismatch { expected, found } => write!(
+                f,
+                "分割長の合計 {found} がデータセットの長さ {expected} と一致しない"
+            ),
+            DataError::InvalidSplitFraction { index, reason } => {
+                write!(f, "分割割合（位置 {index}）が不正: {reason}")
+            }
+            DataError::ConcatShapeMismatch {
+                part,
+                expected,
+                found,
+            } => write!(
+                f,
+                "連結対象 {part} の shape {found:?} が先頭の shape {expected:?} と先頭軸以外で一致しない"
+            ),
         }
     }
 }

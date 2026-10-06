@@ -2057,3 +2057,7 @@ facade 公開面は追加していない（保留ガード `SwaHoldDoctestGuard`
 **適用記録（イシュー #2659。内部クレート限定）**: `PolynomialLr`（PyTorch `PolynomialLR` 相当）・`ChainedScheduler`（同 `ChainedScheduler` 相当）を内部クレート限定（`fandhe_ai_autodiff::nn::optim`。ホスト `f32` 純関数で、新規 `Op`・`BackendOps` メソッド・VJP・カーネルなし。`LrScheduler` trait は不変）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `LrSchedulerPolyChainedHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形は未承認で、承認依頼は #2677（公開自体は承認後の #2679）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-lr-scheduler-poly-chained-decision.md`。
+
+**適用記録（イシュー #2661・親 #2660。内部クレート限定）**: `Subset`・`ConcatDataset`（と先頭軸連結用の `ConcatBatch`）・`random_split`／`random_split_fractions`（`torch.utils.data` 相当）を内部クレート限定（`fandhe_ai_tensor_core::data`。ホスト側ユーティリティで、新規 `Op`・`BackendOps` メソッド・VJP・カーネルなし。既存の公開型・trait へは何も足していない）で実装した。
+facade 公開面は追加していない（保留ガード `DatasetComposeHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形（`fandhe_ai::data` への純再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/tensor-core-dataset-compose-decision.md`。

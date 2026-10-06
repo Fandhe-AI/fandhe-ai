@@ -258,6 +258,18 @@ README.md` を正とする。要点のみ記す:
   （決定性契約。前提は `Dataset::batch` が添字だけで決まる純関数で
   あること）。
 - facade（`fandhe_ai::data`）への再エクスポートは #2506 で公開済み。
+
+## 13. 追補（#2661）: Subset・ConcatDataset・random_split
+
+上記 §9 の対象外欄に挙げていた `ConcatDataset`／`Subset`／`random_split` を #2661 で
+`tensor-core::data`（`data/compose.rs`）へ実装した。設計判断は
+`docs/tensor-core-dataset-compose-decision.md` を正とする。要点のみ記す:
+
+- `Subset<D>`（`Arc` 共有の添字部分集合）・`ConcatDataset<D>`（累積和・同型成分限定。
+  先頭軸連結用の `ConcatBatch` trait を伴う）・`random_split`／`random_split_fractions` を追加した。
+  既存の公開型・trait へは何も足していない。
+- 同一 `manual_seed` の下で分割した添字列の連結は `RandomSampler` の順列と bit 完全一致する。
+- **facade 非公開**（承認依頼 #2677・公開は承認後の #2679。保留ガードで機械固定）。
   `Sequential::fit`（`compat::training::run_fit`）への結線は引き続き保留
   （`docs/tensor-core-data-prefetch-decision.md` §8）。
 - 上記 §9 の残る対象外（`pin_memory`・iterable-style dataset・
