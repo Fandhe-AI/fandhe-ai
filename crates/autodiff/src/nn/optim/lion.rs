@@ -215,8 +215,8 @@ impl Lion {
         let lr = self.config.lr;
         let beta1 = self.config.beta1;
         let beta2 = self.config.beta2;
-        let one_minus_beta1 = 1.0 - beta1;
-        let one_minus_beta2 = 1.0 - beta2;
+        let one_minus_beta1 = complement_like_python(beta1);
+        let one_minus_beta2 = complement_like_python(beta2);
         // `param.mul_(1 - lr*weight_decay)`: Python float（f64）で計算し f32 へ。
         let decay = (1.0 - lr as f64 * self.config.weight_decay as f64) as f32;
 
@@ -241,6 +241,22 @@ impl Lion {
 
         Ok(out)
     }
+}
+
+/// 補間係数 `1 - beta` を torch 参照実装（Python float〈f64〉の `1 - beta`）と同じ精度で求める。
+///
+/// `LionConfig` は `f32` で `beta` を保持するため、`1.0f32 - beta` や
+/// `1.0 - beta as f64` は f32 化済みの `beta`（例 0.9f32 = 0.89999998...）を
+/// 引いてしまい、`0.1` ではなく `0.100000024` になる。`sign` が不連続な Lion では
+/// 相殺付近でこの差が更新方向の反転になる。利用者が指定した十進値を復元するため、
+/// `f32` の最短往復表現を f64 として読み直してから `1 - beta` を f64 で計算し、
+/// 最後に 1 回 f32 へ丸める（torch の `alpha` が kernel でスカラー型へ変換される挙動に相当）。
+fn complement_like_python(beta: f32) -> f32 {
+    let b64 = beta
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or_else(|_| f64::from(beta));
+    (1.0 - b64) as f32
 }
 
 #[cfg(test)]
@@ -427,6 +443,31 @@ mod tests {
         assert_eq!(vals(&p1), vec![-0.1]);
         let p2 = opt.step(&[(&p1, &t(vec![-0.2], &[1]))]).unwrap().remove(0);
         assert_eq!(vals(&p2), vec![-0.1 + 0.1]);
+    }
+
+    /// 補間係数は f64 で `1 - beta` を求める（f32 引き算だと 0.100000024 になる）。
+    /// 相殺付近（`exp_avg*beta1 + g*(1-beta1)` が 0 の近傍）で更新方向が
+    /// 参照実装（係数 0.1）と一致することを確かめる。
+    #[test]
+    fn interpolation_coefficient_matches_f64_reference_near_cancellation() {
+        assert_eq!(complement_like_python(0.9), 0.1f32);
+        assert_eq!(complement_like_python(0.99), (1.0f64 - 0.99f64) as f32);
+        let cfg = LionConfig {
+            lr: 0.1,
+            beta1: 0.9,
+            beta2: 0.99,
+            weight_decay: 0.0,
+        };
+        let mut opt = Lion::new(cfg).unwrap();
+        opt.states = vec![SlotState {
+            shape: vec![1],
+            exp_avg: vec![1.0],
+        }];
+        // 参照（係数 0.1）: update = 0.9f32 + (-8.999999)*0.1 = +5.96e-8 → sign=+1。
+        // f32 の 1-beta1（0.100000024）だと -1.19e-7 → sign=-1 になり param が逆方向へ動く。
+        let p = t(vec![0.0], &[1]);
+        let out = opt.step(&[(&p, &t(vec![-8.999999], &[1]))]).unwrap();
+        assert_eq!(vals(&out[0]), vec![-0.1]);
     }
 
     #[test]
