@@ -29208,3 +29208,236 @@ fn workspace_declares_margin_focal_loss_ops_fn_names_only_in_allowed_locations()
          未承認の実装追加でないか確認すること"
     );
 }
+// =====================================================================
+// OptimizerRpropAsgdHoldDoctestGuard（イシュー #2655・親 #2654）:
+// `MarginFocalLossOpsHoldDoctestGuard`（#2653）系のテストを鏡写しにする。実装は内部クレート
+// （`fandhe_ai_autodiff::nn::optim::{Rprop, RpropConfig, Asgd, AsgdConfig}`）に閉じ、facade 公開形
+// （推奨は `fandhe_ai::optim` への 4 名の素の再エクスポート）は未承認（承認依頼は #2677。公開は承認後の
+// #2679）。検出はトークン完全一致のみで行い、`RpropLike`・`AsgdConfigExt` など部分一致する別トークンは違反としない
+// （自己テストで固定）。検出範囲は「doctest プローブが名前解決で触れる 4 名」と「facade src のトークン完全一致
+// （コメント・文字列リテラルを除く）」に限り、マクロ生成や、内部クレート側で別名を作ってからの公開までは保証しない。
+// =====================================================================
+
+/// `OptimizerRpropAsgdHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
+/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
+#[test]
+fn optimizer_rprop_asgd_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerRpropAsgdHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "OptimizerRpropAsgdHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
+         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言 [`OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
+#[test]
+fn optimizer_rprop_asgd_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerRpropAsgdHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY,
+        "OptimizerRpropAsgdHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
+         OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
+         （__fandhe_optimizer_rprop_asgd_hold_probe モジュール・__probe_types 関数）の削除・弱体化・\
+         隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`optimizer_rprop_asgd_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
+/// （`OptimizerRpropAsgdHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行を
+/// 除いた本文と 1 行単位で完全一致する）。
+const OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_optimizer_rprop_asgd_hold_probe {\n\
+\x20\x20\x20\x20pub struct Rprop;\n\
+\x20\x20\x20\x20pub struct RpropConfig;\n\
+\x20\x20\x20\x20pub struct Asgd;\n\
+\x20\x20\x20\x20pub struct AsgdConfig;\n\
+}\n\
+use __fandhe_optimizer_rprop_asgd_hold_probe::*;\n\
+\n\
+fn __probe_types(_: Rprop, _: RpropConfig, _: Asgd, _: AsgdConfig) {}";
+
+/// 保留対象の型名（facade src にトークンとして現れてはならない名前）。
+const OPTIMIZER_RPROP_ASGD_TYPE_NAMES: [&str; 4] = ["Rprop", "RpropConfig", "Asgd", "AsgdConfig"];
+
+/// [`facade_does_not_reexport_or_declare_optimizer_rprop_asgd`]・その自己テストが共用する検出本体。
+/// コメント・文字列リテラルを除いたトークン列に [`OPTIMIZER_RPROP_ASGD_TYPE_NAMES`] が（完全一致で）現れたら
+/// 違反とする。`pub use`（単一行・複数行・group・別名）、`struct`／`enum`／`type`／`trait` の独自宣言に加え、
+/// 非公開 `use`＋公開シグネチャや enum variant 経由の露出も拾う（保留中の facade がこれらの型名を書く理由が
+/// ないため）。内部クレートの glob 再エクスポートは名前が現れないため別途検出する。
+fn scan_optimizer_rprop_asgd_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    for name in OPTIMIZER_RPROP_ASGD_TYPE_NAMES {
+        let count = tokens.iter().filter(|t| t.as_str() == name).count();
+        if count > 0 {
+            offending.push(format!("`{name}` トークンが {count} 件"));
+        }
+    }
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let from_internal = path_tokens.iter().any(|t| t == "fandhe_ai_autodiff");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        i += 1;
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に Rprop／ASGD の保留対象の型名・再エクスポート・独自宣言が
+/// 存在しないことを固定する（`OptimizerRpropAsgdHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
+/// ソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_optimizer_rprop_asgd() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_optimizer_rprop_asgd_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が Rprop／ASGD の内部実装（#2655 の `nn::optim::{{Rprop, Asgd}}`。facade 公開形は未承認で\
+         承認依頼は #2677）の型名を参照、再エクスポート、または独自宣言している: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_optimizer_rprop_asgd`] の自己テスト（各違反カテゴリの合成ソースを
+/// 検出できること、および部分文字列に含む別トークン・コメント・文字列・無関係な `pub use` を誤検出しないことを
+/// 恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_optimizer_rprop_asgd_detects_each_category() {
+    let offense = |src: &str| !scan_optimizer_rprop_asgd_reexports_and_declarations(src).is_empty();
+    // 正例: `pub use`（単一行・group・複数行・別名）。
+    assert!(offense("pub use fandhe_ai_autodiff::nn::optim::Rprop;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::optim::{Adamax, Asgd};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::optim::{\n    AsgdConfig,\n    RpropConfig,\n};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::optim::Asgd as Averaged;"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    // 正例: 独自宣言。
+    assert!(offense("pub struct Rprop;"));
+    assert!(offense("pub struct AsgdConfig { lr: f32 }"));
+    assert!(offense("pub enum Asgd { A }"));
+    assert!(offense("pub type RpropConfig = u8;"));
+    assert!(offense("pub trait Rprop {}"));
+    // 正例: 非公開 use＋公開シグネチャ、enum variant 経由の露出。
+    assert!(offense(
+        "use fandhe_ai_autodiff::nn::optim::Rprop; pub fn f(_: Rprop) {}"
+    ));
+    assert!(offense("pub enum Optimizer { Rprop(u8) }"));
+    assert!(offense("pub fn f() -> Asgd { todo!() }"));
+    // 負例: 保留対象を部分文字列に含む別トークン・大文字小文字違い。
+    assert!(!offense("pub struct RpropLike;"));
+    assert!(!offense("pub struct AsgdConfigExt;"));
+    assert!(!offense("fn rprop() {}"));
+    assert!(!offense("fn asgd_helper() {}"));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense("// pub use fandhe_ai_autodiff::nn::optim::Rprop;"));
+    assert!(!offense("let s = \"pub struct Asgd;\";"));
+    // 負例: 無関係な `pub use`。
+    assert!(!offense("pub use fandhe_ai_autodiff::nn::optim::Adamax;"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`OPTIMIZER_RPROP_ASGD_TYPE_NAMES`] の型宣言
+/// （`struct`／`enum`／`type`／`trait`）が承認済みの置き場所だけに存在することを固定する。
+///
+/// 期待値は `autodiff/src/nn/optim/rprop.rs` の `Rprop`・`RpropConfig` と `autodiff/src/nn/optim/asgd.rs` の
+/// `Asgd`・`AsgdConfig` が各 1 件のみ。これら以外への追加（facade 等への独自宣言）は fail-closed に検出する。
+#[test]
+fn workspace_declares_optimizer_rprop_asgd_types_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for (idx, tok) in tokens.iter().enumerate() {
+                if !matches!(tok.as_str(), "struct" | "enum" | "type" | "trait") {
+                    continue;
+                }
+                let Some(name) = tokens.get(idx + 1) else {
+                    continue;
+                };
+                if OPTIMIZER_RPROP_ASGD_TYPE_NAMES.contains(&name.as_str()) {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{name}")).or_insert(0) += 1;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for n in ["Rprop", "RpropConfig"] {
+        expected.insert(format!("autodiff/src/nn/optim/rprop.rs::{n}"), 1);
+    }
+    for n in ["Asgd", "AsgdConfig"] {
+        expected.insert(format!("autodiff/src/nn/optim/asgd.rs::{n}"), 1);
+    }
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の Rprop／RpropConfig／Asgd／AsgdConfig の型宣言が承認済みの置き場所\
+         （autodiff/src/nn/optim/{{rprop,asgd}}.rs に各 1 件のみ）と一致しない。迂回経路（facade 等への\
+         独自宣言）の混入か、未承認の実装追加でないか確認すること"
+    );
+}

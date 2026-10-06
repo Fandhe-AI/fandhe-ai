@@ -2036,3 +2036,9 @@ facade 公開面は追加していない（保留ガード `ElementwiseLossOpsHo
 facade 公開面は追加していない（保留ガード `MarginFocalLossOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var` の委譲メソッド 4 本）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-margin-focal-loss-ops-decision.md`。
+
+**適用記録（イシュー #2655・親 #2654・ルート #2499 Phase 4。Rprop・ASGD）**:
+`Rprop`／`RpropConfig`／`Asgd`／`AsgdConfig` を内部クレート限定（`fandhe_ai_autodiff::nn::optim`。`Tape`／`Var`／`BackendOps` 非依存のホスト値型で、新規 `Op`・`BackendOps` メソッド・カーネルなし）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `OptimizerRpropAsgdHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`fandhe_ai::optim` への 4 名の素の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-optimizer-rprop-asgd-decision.md`。
