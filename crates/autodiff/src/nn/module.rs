@@ -24,8 +24,8 @@ use std::collections::{HashMap, HashSet};
 use crate::error::AutodiffError;
 use crate::eval;
 use crate::nn::activation::{
-    Elu, Gelu, GeluTanh, Glu, Hardswish, Hardtanh, LeakyRelu, LogSoftmax, Mish, PRelu, Relu, Relu6,
-    Sigmoid, Silu, Softmax, Softplus, Tanh,
+    Celu, Elu, Gelu, GeluTanh, Glu, Hardsigmoid, Hardswish, Hardtanh, LeakyRelu, LogSigmoid,
+    LogSoftmax, Mish, PRelu, Relu, Relu6, Selu, Sigmoid, Silu, Softmax, Softplus, Softsign, Tanh,
 };
 use crate::nn::attention::MultiheadAttention;
 use crate::nn::batch_norm::{
@@ -125,7 +125,7 @@ pub trait Module {
     /// （`docs/crates-io-naming-decision.md`）、本メソッドは非破壊拡張
     /// （デフォルトメソッド追加。外部実装者の既存 `impl Module` を壊さ
     /// ない）とする。既定は [`BackendError::Unsupported`] を返す
-    /// fail-safe（本クレート内 18 実装〈`Linear`・`Relu`・`Sigmoid`・
+    /// fail-safe（本クレート内の既存 18 実装〈`Linear`・`Relu`・`Sigmoid`・
     /// `Tanh`・`RmsNorm`・`LayerNorm`・`Softmax`・`LogSoftmax`・`Gelu`・
     /// `GeluTanh`・`Softplus`・`Silu`・`Hardswish`・`LeakyRelu`・`Elu`
     /// （イシュー #1714）・`Flatten`（イシュー #2065）・`Hardtanh`・
@@ -137,7 +137,8 @@ pub trait Module {
     /// はいずれもこのデフォルトを
     /// オーバーライドする。呼び出し元
     /// が独自の `Module` 実装をこの経路で使う場合、`Unsupported` を
-    /// フォールバックの合図として扱うこと）。
+    /// フォールバックの合図として扱うこと）。イシュー #2649 で追加した 5 層（`Selu`・`Celu`・
+    /// `Softsign`・`Hardsigmoid`・`LogSigmoid`。合計 23 実装）も同じくオーバーライドする。
     fn forward_host(
         &self,
         _ops: &dyn BackendOps,
@@ -2210,6 +2211,86 @@ impl Module for Elu {
     }
 }
 
+/// `Selu::forward` への委譲（イシュー #2649）。[`Silu`] と同じ `forward_host`
+/// ディスパッチ規律（`scalar_unary_with_fallback` を共有し構造的に bit 一致）。
+impl Module for Selu {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Selu::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `Celu::forward` への委譲（イシュー #2649）。[`Silu`] と同じ `forward_host`
+/// ディスパッチ規律（`scalar_unary_with_fallback` を共有し構造的に bit 一致）。
+impl Module for Celu {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Celu::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `Softsign::forward` への委譲（イシュー #2649）。[`Silu`] と同じ `forward_host`
+/// ディスパッチ規律（`scalar_unary_with_fallback` を共有し構造的に bit 一致）。
+impl Module for Softsign {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Softsign::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `Hardsigmoid::forward` への委譲（イシュー #2649）。[`Silu`] と同じ `forward_host`
+/// ディスパッチ規律（`scalar_unary_with_fallback` を共有し構造的に bit 一致）。
+impl Module for Hardsigmoid {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Hardsigmoid::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
+/// `LogSigmoid::forward` への委譲（イシュー #2649）。[`Silu`] と同じ `forward_host`
+/// ディスパッチ規律（`scalar_unary_with_fallback` を共有し構造的に bit 一致）。
+impl Module for LogSigmoid {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LogSigmoid::forward(self, input)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        crate::grad::scalar_unary_with_fallback(ops, self.op(), input)
+    }
+}
+
 /// `Mish::forward` への委譲（イシュー #2146）。`forward_host` は既定
 /// （`Unsupported`）のまま: `mish` は `softplus`／`tanh`／`mul` の多段
 /// 合成で、`tanh`（`Op::Tanh`）は融合実体化を経由するため、手書きの
@@ -3217,6 +3298,81 @@ mod tests {
         let xv = tape.var(&x);
         let via_tape = <Silu as Module>::forward(&silu, &tape, &xv).unwrap();
         let via_host = silu.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn selu_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-4.0, -1.0, 0.0, 2.0, 5.0], &[5]).unwrap();
+        let layer = Selu;
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Selu as Module>::forward(&layer, &tape, &xv).unwrap();
+        let via_host = layer.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn celu_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-4.0, -1.0, 0.0, 2.0, 5.0], &[5]).unwrap();
+        let layer = Celu::new(1.5).unwrap();
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Celu as Module>::forward(&layer, &tape, &xv).unwrap();
+        let via_host = layer.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn softsign_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-4.0, -1.0, 0.0, 2.0, 5.0], &[5]).unwrap();
+        let layer = Softsign;
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Softsign as Module>::forward(&layer, &tape, &xv).unwrap();
+        let via_host = layer.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn hardsigmoid_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-4.0, -1.0, 0.0, 2.0, 5.0], &[5]).unwrap();
+        let layer = Hardsigmoid;
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <Hardsigmoid as Module>::forward(&layer, &tape, &xv).unwrap();
+        let via_host = layer.forward_host(test_ops().as_ref(), &x).unwrap();
+
+        assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
+    }
+
+    #[test]
+    fn log_sigmoid_forward_host_matches_tape_forward() {
+        use crate::test_support::test_ops;
+
+        let x = Tensor::new(vec![-4.0, -1.0, 0.0, 2.0, 5.0], &[5]).unwrap();
+        let layer = LogSigmoid;
+
+        let tape = Tape::new_with_ops(test_ops());
+        let xv = tape.var(&x);
+        let via_tape = <LogSigmoid as Module>::forward(&layer, &tape, &xv).unwrap();
+        let via_host = layer.forward_host(test_ops().as_ref(), &x).unwrap();
 
         assert_eq!(dense_vec(&via_tape.to_tensor()), dense_vec(&via_host));
     }

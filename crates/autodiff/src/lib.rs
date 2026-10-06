@@ -194,6 +194,12 @@
 //! しない。`compat::Sequential::add_*` は #2529 で公開済み。
 //! `docs/autodiff-activation-ops-decision.md`・モジュール doc 参照）。
 
+//! イシュー #2649（親 #2648）で `selu`／`celu`／`softsign`／`hardsigmoid`／
+//! `log_sigmoid` の 5 活性化演算を [`activation_scalar_ops`] へ追加した
+//! （`ScalarUnaryOp` 5 variant への薄い委譲・新規 `Op` ゼロ）。facade 公開は
+//! 承認依頼 #2677 の承認待ちで保留（公開は #2678・#2679。
+//! `docs/autodiff-activation-scalar-ops-decision.md`）。
+
 //! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
 //! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。
 //! #2514（ルート #2499 の一括承認）で `Var` の 1 行委譲メソッドとして
@@ -232,6 +238,7 @@
 //! doc 参照）。
 
 pub mod activation_ops;
+pub mod activation_scalar_ops;
 mod adaptive_max_pool_ops;
 mod attention;
 mod backward;

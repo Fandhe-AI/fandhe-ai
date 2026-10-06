@@ -2013,6 +2013,12 @@ facade 公開面は追加していない（保留ガード `PackedSequenceHoldDo
 公開形（`fandhe_ai::nn::rnn` へのモジュール再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-packed-sequence-decision.md`。
 
+**適用記録（イシュー #2649・親 #2648。活性化 5 種）**:
+`selu`／`celu`／`softsign`／`hardsigmoid`／`log_sigmoid` を内部クレート限定（`fandhe_ai_autodiff::activation_scalar_ops`・`nn::activation` の層 5 型・`fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `ActivationScalarOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var` 委譲メソッド・`compat::Sequential::add_*`）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-activation-scalar-ops-decision.md`。
+
 **適用記録（イシュー #2650・親 #2648・ルート #2499 Phase 4。Softmin・Tanhshrink・RReLU・Threshold）**:
 `softmin`／`tanhshrink`／`threshold`／`rrelu`／`rrelu_with_noise` と nn 層 `Softmin`／`Tanhshrink`／`Threshold`／`RRelu` を内部クレート限定（`fandhe_ai_autodiff::softmin_threshold_ops`・`fandhe_ai_autodiff::nn::softmin_threshold`。新規 `Op`・`BackendOps` メソッドなしの既存 `Op` 合成）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `SoftminThresholdOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。

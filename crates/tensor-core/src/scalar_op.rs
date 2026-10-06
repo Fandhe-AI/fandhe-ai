@@ -81,6 +81,25 @@
 //! `PartialEq`（派生）は自分自身と等しくならない（`Clamp` と同じ性質）。
 //! CUDA／Metal は既定 `Unsupported` からホスト参照実装へフォールバックする
 //! （`docs/autodiff-nonfinite-ops-decision.md`）。
+//!
+//! ## イシュー #2649 で追加した 5 variant（活性化）
+//!
+//! `Selu`／`Celu { alpha }`／`Softsign`／`Hardsigmoid`／`LogSigmoid`
+//! （PyTorch `F.selu`／`F.celu`／`F.softsign`／`F.hardsigmoid`／
+//! `F.logsigmoid` 相当）。forward は [`ScalarUnaryOp::apply`] が単一情報源
+//! で、`NaN` は伝播し、`±inf`・巨大有限入力は IEEE のまま（panic・マスク
+//! なし）。いずれも区分定数ではない（`is_piecewise_constant` は `false`）。
+//! SELU の定数は [`SELU_ALPHA`]／[`SELU_SCALE`]（PyTorch と同値）。
+//! Hardsigmoid の導関数は [`hardsigmoid_grad`] が判定と傾きの単一情報源で、
+//! `autodiff::grad` が乗算を経由せず要素選択に使う（`0 * inf = NaN` 汚染の
+//! 回避。PR #1823・#2145 と同類型）。CUDA／Metal は既定 `Unsupported` から
+//! ホスト参照実装へフォールバックする
+//! （`docs/autodiff-activation-scalar-ops-decision.md`）。
+
+/// SELU の `alpha`（PyTorch `torch.nn.SELU` と同値。イシュー #2649）。
+pub const SELU_ALPHA: f64 = 1.673_263_242_354_377_2;
+/// SELU の `scale`（PyTorch `torch.nn.SELU` と同値。イシュー #2649）。
+pub const SELU_SCALE: f64 = 1.050_700_987_355_480_5;
 
 /// [`ScalarUnaryOp`]／[`ScalarBinaryOp`] の NVRTC キャッシュキー等に使う
 /// 安定な判別子文字列を返す（`Debug` 出力はペイロード値を含むため
@@ -238,6 +257,19 @@ pub enum ScalarUnaryOp {
         /// `-inf` の置換値。
         neginf: f32,
     },
+    /// SELU（PyTorch `F.selu` 相当。イシュー #2649）。`x > 0` なら `scale * x`、それ以外は `alpha * scale * expm1(x)`（定数は [`SELU_ALPHA`]／[`SELU_SCALE`]）。`x == ±0` は負側の枝。`NaN` は伝播する。
+    Selu,
+    /// CELU（PyTorch `F.celu(x, alpha)` 相当。イシュー #2649）。`x > 0` なら `x`、それ以外は `alpha * expm1(x / alpha)`。`alpha == 0`・非有限 `alpha` は入口（`autodiff::activation_scalar_ops::celu`）が拒否し、`apply` 自体は IEEE のまま（panic しない）。
+    Celu {
+        /// 負側の飽和スケール。
+        alpha: f32,
+    },
+    /// Softsign（PyTorch `F.softsign` 相当。イシュー #2649）。`x / (1 + |x|)`。`±inf` は `inf/inf = NaN`（IEEE のまま）。
+    Softsign,
+    /// Hardsigmoid（PyTorch `F.hardsigmoid` 相当。イシュー #2649）。`relu6(x + 3) / 6`。`NaN` は伝播する。
+    Hardsigmoid,
+    /// LogSigmoid（PyTorch `F.logsigmoid` 相当。イシュー #2649）。`min(x, 0) - ln(1 + exp(-|x|))`（数値安定形）。`+inf` は `0`、`-inf` は `-inf`、`NaN` は伝播する。
+    LogSigmoid,
 }
 
 impl ScalarOpKind for ScalarUnaryOp {
@@ -284,6 +316,11 @@ impl ScalarOpKind for ScalarUnaryOp {
             Self::IsInf => "is_inf",
             Self::IsFinite => "is_finite",
             Self::NanToNum { .. } => "nan_to_num",
+            Self::Selu => "selu",
+            Self::Celu { .. } => "celu",
+            Self::Softsign => "softsign",
+            Self::Hardsigmoid => "hardsigmoid",
+            Self::LogSigmoid => "log_sigmoid",
         }
     }
 }
@@ -427,6 +464,44 @@ impl ScalarUnaryOp {
                     neginf
                 } else {
                     x
+                }
+            }
+            // イシュー #2649。PyTorch と同じく定数を先に `f32` へ narrow
+            // してから掛ける（式順は決定記録 §3 参照）。`x <= 0`（`±0` を
+            // 含む）は負側の枝。`NaN` は比較が偽のため負側へ入り
+            // `NaN.exp_m1() = NaN` で伝播する。
+            Self::Selu => {
+                if x > 0.0 {
+                    (SELU_SCALE as f32) * x
+                } else {
+                    ((SELU_ALPHA as f32) * (SELU_SCALE as f32)) * x.exp_m1()
+                }
+            }
+            Self::Celu { alpha } => {
+                if x > 0.0 {
+                    x
+                } else {
+                    // `expm1` で `x` が 0 近傍の桁落ちを避ける（`Elu` と同方針）。
+                    // 比・`expm1`・積を `f64` で計算し 1 回だけ `f32` へ
+                    // downcast する。`f32` の `x / alpha` は大きな `alpha`
+                    // （例 `x = -1e-10`・`alpha = 3e38`）で 0 へ
+                    // アンダーフローし出力が `-0.0` になるため、受理する
+                    // `alpha` 全範囲で値を保つ（PR #2794 codex 指摘。
+                    // 勾配係数 `eval::scalar` の Celu も同じ `f64` 方針）。
+                    let a = alpha as f64;
+                    (a * (x as f64 / a).exp_m1()) as f32
+                }
+            }
+            Self::Softsign => x / (1.0 + x.abs()),
+            Self::Hardsigmoid => relu6(x + 3.0) / 6.0,
+            // `NaN` の明示分岐は `Relu`／`Clamp`／`Sign` と規約を揃えるため
+            // のもの（`f32::min(NaN, 0.0)` が `0.0` でも第 2 項が `NaN` に
+            // なるため結果は元から `NaN` になる）。
+            Self::LogSigmoid => {
+                if x.is_nan() {
+                    f32::NAN
+                } else {
+                    x.min(0.0) - (-x.abs()).exp().ln_1p()
                 }
             }
         }
@@ -699,6 +774,14 @@ pub fn hardswish_grad(x: f32) -> f32 {
     } else {
         (2.0 * x + 3.0) / 6.0
     }
+}
+
+/// Hardsigmoid（`relu6(x+3)/6`）の導関数（イシュー #2649）。開区間
+/// `-3 < x < 3` で `1/6`、境界を含むそれ以外（`NaN` 含む）は `0`
+/// （PyTorch の `hardsigmoid_backward` と同じ判定）。`autodiff::grad` は
+/// 係数 `0` を乗算に通さず要素選択に使う（`0 * inf = NaN` 汚染の回避）。
+pub fn hardsigmoid_grad(x: f32) -> f32 {
+    if x > -3.0 && x < 3.0 { 1.0 / 6.0 } else { 0.0 }
 }
 
 /// `sigmoid_stable` を `autodiff::eval::scalar`（Softplus の導関数）
@@ -1155,6 +1238,142 @@ mod tests {
             ]
         );
         assert_eq!(ScalarBinaryOp::Atan2.kind_name(), "atan2");
+    }
+
+    // --- イシュー #2649: SELU・CELU・Softsign・Hardsigmoid・LogSigmoid ---
+
+    const NEW_2649_UNARY: [ScalarUnaryOp; 5] = [
+        ScalarUnaryOp::Selu,
+        ScalarUnaryOp::Celu { alpha: 1.5 },
+        ScalarUnaryOp::Softsign,
+        ScalarUnaryOp::Hardsigmoid,
+        ScalarUnaryOp::LogSigmoid,
+    ];
+
+    #[test]
+    fn new_2649_selu_constants_product_matches_alpha_dropout() {
+        assert_eq!(SELU_ALPHA * SELU_SCALE, 1.7580993408473766);
+    }
+
+    #[test]
+    fn new_2649_known_values() {
+        let scale = SELU_SCALE as f32;
+        let a_s = (SELU_ALPHA * SELU_SCALE) as f32;
+        assert_close(ScalarUnaryOp::Selu.apply(1.0), scale, EPS, "selu(1)");
+        assert_close(
+            ScalarUnaryOp::Selu.apply(-1.0),
+            a_s * (-1.0f32).exp_m1(),
+            EPS,
+            "selu(-1)",
+        );
+        assert_close(
+            ScalarUnaryOp::Celu { alpha: 2.0 }.apply(-1.0),
+            2.0 * (-0.5f32).exp_m1(),
+            EPS,
+            "celu(-1,2)",
+        );
+        assert_close(
+            ScalarUnaryOp::Celu { alpha: 2.0 }.apply(3.0),
+            3.0,
+            EPS,
+            "celu(3)",
+        );
+        assert_close(ScalarUnaryOp::Softsign.apply(1.0), 0.5, EPS, "softsign(1)");
+        assert_close(
+            ScalarUnaryOp::Softsign.apply(-1.0),
+            -0.5,
+            EPS,
+            "softsign(-1)",
+        );
+        assert_close(ScalarUnaryOp::Hardsigmoid.apply(0.0), 0.5, EPS, "hsig(0)");
+        assert_eq!(ScalarUnaryOp::Hardsigmoid.apply(3.0), 1.0);
+        assert_eq!(ScalarUnaryOp::Hardsigmoid.apply(-3.0), 0.0);
+        assert_close(
+            ScalarUnaryOp::LogSigmoid.apply(0.0),
+            -std::f32::consts::LN_2,
+            EPS,
+            "logsig(0)",
+        );
+    }
+
+    #[test]
+    fn new_2649_nan_propagates_for_every_kind() {
+        for op in NEW_2649_UNARY {
+            assert!(op.apply(f32::NAN).is_nan(), "{op:?}");
+        }
+    }
+
+    #[test]
+    fn new_2649_huge_finite_inputs_do_not_produce_nan() {
+        for op in NEW_2649_UNARY {
+            for x in [3e38f32, -3e38f32] {
+                assert!(!op.apply(x).is_nan(), "{op:?}({x})");
+            }
+        }
+    }
+
+    #[test]
+    fn new_2649_infinities_follow_ieee() {
+        assert_eq!(
+            ScalarUnaryOp::LogSigmoid.apply(f32::NEG_INFINITY),
+            f32::NEG_INFINITY
+        );
+        assert_eq!(ScalarUnaryOp::LogSigmoid.apply(f32::INFINITY), 0.0);
+        assert!(ScalarUnaryOp::Softsign.apply(f32::INFINITY).is_nan());
+        assert!(ScalarUnaryOp::Softsign.apply(f32::NEG_INFINITY).is_nan());
+        assert_eq!(ScalarUnaryOp::Hardsigmoid.apply(f32::INFINITY), 1.0);
+        assert_eq!(ScalarUnaryOp::Hardsigmoid.apply(f32::NEG_INFINITY), 0.0);
+    }
+
+    #[test]
+    fn new_2649_celu_avoids_cancellation_near_zero() {
+        let y = ScalarUnaryOp::Celu { alpha: 1.0 }.apply(-1e-8);
+        assert!((y + 1e-8).abs() < 1e-12, "celu(-1e-8) = {y}");
+    }
+
+    #[test]
+    fn new_2649_celu_extreme_alpha_keeps_value() {
+        // 大きな alpha: f32 の x/alpha がアンダーフローしても値は ≈ x。
+        let y = ScalarUnaryOp::Celu { alpha: 3e38 }.apply(-1e-10);
+        assert!(y < 0.0 && ((y + 1e-10) / 1e-10).abs() < 1e-5, "y = {y}");
+        // 負の大きな alpha でも同様（alpha * expm1(x/alpha) ≈ x）。
+        let y = ScalarUnaryOp::Celu { alpha: -3e38 }.apply(-1e-10);
+        assert!(y < 0.0 && ((y + 1e-10) / 1e-10).abs() < 1e-5, "y = {y}");
+        // 極小 alpha: 負側は -alpha へ飽和する。
+        let y = ScalarUnaryOp::Celu { alpha: 1e-30 }.apply(-1.0);
+        assert!(((y + 1e-30) / 1e-30).abs() < 1e-5, "y = {y}");
+    }
+
+    #[test]
+    fn new_2649_signed_zero_takes_negative_branch() {
+        // 負側の枝は `x.exp_m1()` が `±0` を保つため符号付きゼロを保存する。
+        assert_eq!(ScalarUnaryOp::Selu.apply(0.0), 0.0);
+        assert!(ScalarUnaryOp::Selu.apply(-0.0).is_sign_negative());
+    }
+
+    #[test]
+    fn new_2649_kinds_are_not_piecewise_constant_and_names_are_stable() {
+        for op in NEW_2649_UNARY {
+            assert!(!op.is_piecewise_constant(), "{op:?}");
+        }
+        let names: Vec<&str> = NEW_2649_UNARY.iter().map(|o| o.kind_name()).collect();
+        assert_eq!(
+            names,
+            ["selu", "celu", "softsign", "hardsigmoid", "log_sigmoid"]
+        );
+        assert_eq!(
+            ScalarUnaryOp::Celu { alpha: 1.0 }.kind_name(),
+            ScalarUnaryOp::Celu { alpha: 2.5 }.kind_name()
+        );
+    }
+
+    #[test]
+    fn new_2649_hardsigmoid_grad_boundaries() {
+        assert_eq!(hardsigmoid_grad(3.0), 0.0);
+        assert_eq!(hardsigmoid_grad(-3.0), 0.0);
+        assert_eq!(hardsigmoid_grad(f32::NAN), 0.0);
+        assert_eq!(hardsigmoid_grad(0.0), 1.0 / 6.0);
+        assert_eq!(hardsigmoid_grad(2.999), 1.0 / 6.0);
     }
 
     // --- イシュー #2635: 非有限値の判定・置換 ---

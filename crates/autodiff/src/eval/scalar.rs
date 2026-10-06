@@ -216,6 +216,33 @@ pub(crate) fn unary_grad_factor(op: ScalarUnaryOp, x: f32, y: f32) -> f32 {
                 0.0
             }
         }
+        // イシュー #2649: 係数は `f64` で計算し 1 回 downcast する。forward
+        // 出力 `y` からは復元しない（`Elu` の PR #1686 の教訓）。
+        ScalarUnaryOp::Selu => {
+            use fandhe_ai_tensor_core::scalar_op::{SELU_ALPHA, SELU_SCALE};
+            if x > 0.0 {
+                SELU_SCALE as f32
+            } else {
+                (SELU_ALPHA * SELU_SCALE * (x as f64).exp()) as f32
+            }
+        }
+        ScalarUnaryOp::Celu { alpha } => {
+            if x > 0.0 {
+                1.0
+            } else {
+                ((x as f64) / (alpha as f64)).exp() as f32
+            }
+        }
+        ScalarUnaryOp::Softsign => {
+            let d = 1.0 + (x as f64).abs();
+            (1.0 / (d * d)) as f32
+        }
+        // 判定と傾きの単一情報源は `tensor-core::scalar_op::hardsigmoid_grad`。
+        // `grad.rs::vjp` は乗算を経由せず要素選択でこの判定を使う。
+        ScalarUnaryOp::Hardsigmoid => fandhe_ai_tensor_core::scalar_op::hardsigmoid_grad(x),
+        // `1 / (1 + exp(x))`（= `sigmoid(-x)`）。`f64` で計算し overflow を避ける
+        // （`exp(x)` が `inf` なら係数 `0`）。
+        ScalarUnaryOp::LogSigmoid => (1.0 / (1.0 + (x as f64).exp())) as f32,
         // `ScalarUnaryOp` は `#[non_exhaustive]`（`tensor-core` 側で
         // 将来 variant を追加できるようにするため）で、crate 境界を
         // またぐ match は列挙済み variant のみでは非網羅と判定される。
@@ -394,6 +421,48 @@ pub(crate) fn binary_grad_factors(
 mod tests {
     use super::*;
     use crate::eval::build_tensor;
+
+    #[test]
+    fn new_2649_grad_factor_known_values() {
+        use fandhe_ai_tensor_core::scalar_op::{SELU_ALPHA, SELU_SCALE};
+        let f = |op, x: f32| unary_grad_factor(op, x, op.apply(x));
+        assert!((f(ScalarUnaryOp::Selu, 0.0) - (SELU_ALPHA * SELU_SCALE) as f32).abs() < 1e-6);
+        assert!((f(ScalarUnaryOp::Selu, 1.0) - SELU_SCALE as f32).abs() < 1e-6);
+        assert!((f(ScalarUnaryOp::Celu { alpha: 2.0 }, -2.0) - (-1.0f32).exp()).abs() < 1e-6);
+        assert_eq!(f(ScalarUnaryOp::Celu { alpha: 2.0 }, 1.0), 1.0);
+        assert_eq!(f(ScalarUnaryOp::Softsign, 0.0), 1.0);
+        assert_eq!(f(ScalarUnaryOp::LogSigmoid, 0.0), 0.5);
+        assert_eq!(f(ScalarUnaryOp::Hardsigmoid, 0.0), 1.0 / 6.0);
+        assert_eq!(f(ScalarUnaryOp::Hardsigmoid, 3.0), 0.0);
+    }
+
+    #[test]
+    fn new_2649_grad_factor_huge_inputs_are_not_nan() {
+        for (op, x) in [
+            (ScalarUnaryOp::Softsign, 3e38f32),
+            (ScalarUnaryOp::Softsign, -3e38),
+            (ScalarUnaryOp::LogSigmoid, 3e38),
+            (ScalarUnaryOp::LogSigmoid, -3e38),
+            (ScalarUnaryOp::Selu, -3e38),
+            (ScalarUnaryOp::Selu, 3e38),
+            (ScalarUnaryOp::Celu { alpha: 1.0 }, -3e38),
+        ] {
+            let c = unary_grad_factor(op, x, op.apply(x));
+            assert!(!c.is_nan(), "{op:?}({x}) の係数が NaN");
+        }
+    }
+
+    #[test]
+    fn new_2649_celu_grad_factor_extreme_alpha() {
+        // 大きな alpha: x/alpha が f32 ならアンダーフローする入力でも係数 ≈ 1。
+        let op = ScalarUnaryOp::Celu { alpha: 3e38 };
+        let c = unary_grad_factor(op, -1e-10, op.apply(-1e-10));
+        assert!((c - 1.0).abs() < 1e-5, "c = {c}");
+        // 極小 alpha: 負側の係数は 0 へ飽和する（NaN にならない）。
+        let op = ScalarUnaryOp::Celu { alpha: 1e-30 };
+        let c = unary_grad_factor(op, -1.0, op.apply(-1.0));
+        assert!(c == 0.0, "c = {c}");
+    }
 
     #[test]
     fn unary_forward_matches_apply() {

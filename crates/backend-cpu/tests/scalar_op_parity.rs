@@ -81,6 +81,12 @@ fn unary_variants() -> Vec<ScalarUnaryOp> {
             posinf: f32::MAX,
             neginf: f32::MIN,
         },
+        // イシュー #2649: 活性化 5 kind（負側・境界の入力は下の専用テストで補う）。
+        ScalarUnaryOp::Selu,
+        ScalarUnaryOp::Celu { alpha: 1.5 },
+        ScalarUnaryOp::Softsign,
+        ScalarUnaryOp::Hardsigmoid,
+        ScalarUnaryOp::LogSigmoid,
     ]
 }
 
@@ -172,6 +178,32 @@ fn new_2634_unary_variants_match_host_reference_inside_domain() {
             expected.iter().all(|v| v.is_finite()),
             "{op:?}: 入力が定義域外"
         );
+        let out = ops.scalar_unary(op, &a).unwrap();
+        assert!(
+            bits_eq(&out, &expected),
+            "scalar_unary({op:?}) が bit 一致しない"
+        );
+    }
+}
+
+/// イシュー #2649: 活性化 5 kind を負・ゼロ・正・境界（`±3`）を含む入力で
+/// 逐次ホスト参照と bit 一致させる（`positive_data` は正の範囲のみのため）。
+#[test]
+fn new_2649_unary_variants_match_host_reference_on_signed_inputs() {
+    let ops = CpuBackendOps::new();
+    let data: Vec<f32> = vec![
+        -8.0, -3.0, -2.5, -1.0, -1e-8, -0.0, 0.0, 1e-8, 0.5, 2.5, 3.0, 8.0,
+    ];
+    let a = Tensor::new(data.clone(), &[data.len()]).unwrap();
+    for op in [
+        ScalarUnaryOp::Selu,
+        ScalarUnaryOp::Celu { alpha: 1.5 },
+        ScalarUnaryOp::Celu { alpha: -2.0 },
+        ScalarUnaryOp::Softsign,
+        ScalarUnaryOp::Hardsigmoid,
+        ScalarUnaryOp::LogSigmoid,
+    ] {
+        let expected: Vec<f32> = data.iter().map(|&x| op.apply(x)).collect();
         let out = ops.scalar_unary(op, &a).unwrap();
         assert!(
             bits_eq(&out, &expected),
