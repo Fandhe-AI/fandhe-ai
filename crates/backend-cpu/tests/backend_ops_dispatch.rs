@@ -760,3 +760,42 @@ fn metal_pool3d_ops_are_unsupported_not_panic() {
         Err(BackendError::Unsupported(_))
     ));
 }
+
+/// イシュー #2644: `conv_transpose3d` は `im2col3d`（VJP）／`col2im3d`（forward）を使うが、CUDA には
+/// 専用カーネルがなく既定の `Unsupported` を返す（autodiff 側が `eval::im2col3d`／`col2im3d` へ
+/// フォールバックする契約。panic しない）。`gemm_batched` はデバイス上で走る。
+#[test]
+fn cuda_im2col3d_col2im3d_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::Conv3dParams;
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![0.0; 8], &[1, 1, 2, 2, 2]).expect("valid tensor");
+    let p = Conv3dParams::new([1, 1, 1], [1; 3], [0; 3], [1; 3], 1).expect("valid params");
+    assert!(matches!(
+        cuda.im2col3d(&a, &p),
+        Err(BackendError::Unsupported(_))
+    ));
+    let col = Tensor::new(vec![0.0; 8], &[1, 1, 1, 8]).expect("valid tensor");
+    assert!(matches!(
+        cuda.col2im3d(&col, &[1, 1, 2, 2, 2], &p),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #2644: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_im2col3d_col2im3d_are_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::Conv3dParams;
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![0.0; 8], &[1, 1, 2, 2, 2]).expect("valid tensor");
+    let p = Conv3dParams::new([1, 1, 1], [1; 3], [0; 3], [1; 3], 1).expect("valid params");
+    assert!(matches!(
+        metal.im2col3d(&a, &p),
+        Err(BackendError::Unsupported(_))
+    ));
+    let col = Tensor::new(vec![0.0; 8], &[1, 1, 1, 8]).expect("valid tensor");
+    assert!(matches!(
+        metal.col2im3d(&col, &[1, 1, 2, 2, 2], &p),
+        Err(BackendError::Unsupported(_))
+    ));
+}

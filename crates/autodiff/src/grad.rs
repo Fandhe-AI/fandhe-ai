@@ -1471,6 +1471,111 @@ pub(crate) fn vjp(
             }
             contributions
         }
+        // `conv_transpose3d_ops::conv_transpose3d`（イシュー #2644）。`Op::ConvTranspose2d` の空間 3 軸
+        // 一般化で、`col` は保持せず `im2col3d` を再計算する。d_input は「通常 conv3d の forward」と
+        // 同一の合成（`gemm_batched_fp32_strict`。VJP は TF32 opt-in に追従しない既存方針。
+        // `conv3d_with_fallback` は直接呼ばない）、d_weight の N 軸縮約は `f64`、d_bias は
+        // `eval::reduce_bias_grad_rows`（`f64` 逐次和・1 回 downcast。`.claude/rules/coding-rust.md`）。
+        Op::ConvTranspose3d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let weight_val = materialize_fallible(nodes, ops, weight)?;
+            let input_shape = input_val.shape().to_vec();
+            let weight_shape = weight_val.shape().to_vec();
+            let g_c = upstream.contiguous();
+            let g_shape = g_c.shape().to_vec();
+            if input_shape.len() != 5 || weight_shape.len() != 5 || g_shape.len() != 5 {
+                return Err(AutodiffError::Backward(format!(
+                    "Op::ConvTranspose3d の VJP: rank が 5 でない（input={input_shape:?}, weight={weight_shape:?}, upstream={g_shape:?}。契約違反）"
+                )));
+            }
+            let groups = params.groups();
+            let cin = input_shape[1];
+            let cin_g = cin / groups.max(1);
+            let n_batch = g_shape[0];
+            let dhw_in = input_shape[2..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let p = g_shape[2..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+
+            let mut contributions: Vec<(NodeId, Tensor<f32>)>;
+            if n_batch == 0 {
+                // 空バッチ: GEMM を呼ばずゼロ勾配（d_weight／d_bias は空和 0）を返す。
+                contributions = vec![
+                    (
+                        input,
+                        Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?,
+                    ),
+                    (
+                        weight,
+                        Tensor::zeros(&weight_shape).map_err(AutodiffError::Shape)?,
+                    ),
+                ];
+                if let Some(bias_id) = bias {
+                    contributions.push((
+                        bias_id,
+                        Tensor::zeros(&nodes[bias_id.0].shape).map_err(AutodiffError::Shape)?,
+                    ));
+                }
+                contributions
+            } else {
+                let im2col_shape = fandhe_ai_tensor_core::im2col3d_out_shape(&g_shape, &params)
+                    .map_err(AutodiffError::Shape)?;
+                let k_g = im2col_shape[2];
+                let kvol: usize = weight_shape[2..].iter().product();
+                if im2col_shape[3] != dhw_in || k_g != weight_shape[1] * kvol {
+                    return Err(AutodiffError::Backward(format!(
+                        "Op::ConvTranspose3d の VJP: upstream {g_shape:?} から導出した im2col3d shape {im2col_shape:?} が input {input_shape:?}／weight {weight_shape:?} と整合しない（契約違反）"
+                    )));
+                }
+                let col_g = im2col3d_with_fallback(ops, &g_c, &params, &im2col_shape)?;
+
+                let w_mat = weight_val
+                    .contiguous()
+                    .reshape(&[groups, cin_g, k_g])
+                    .map_err(AutodiffError::Shape)?;
+                let d_input = ops
+                    .gemm_batched_fp32_strict(&w_mat, &col_g)
+                    .map_err(AutodiffError::Backend)?
+                    .reshape(&input_shape)
+                    .map_err(AutodiffError::Shape)?;
+
+                let x5 = input_val
+                    .contiguous()
+                    .reshape(&[n_batch, groups, cin_g, dhw_in])
+                    .map_err(AutodiffError::Shape)?;
+                let col_g_t = transpose_last2(&col_g);
+                let dw_full = ops
+                    .gemm_batched_fp32_strict(&x5, &col_g_t)
+                    .map_err(AutodiffError::Backend)?;
+                let dw = reduce_batch_axes_f64(&dw_full, &[groups, cin_g, k_g])?;
+                let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+
+                contributions = vec![(input, d_input), (weight, d_weight)];
+                if let Some(bias_id) = bias {
+                    let cout_usize = nodes[bias_id.0].shape[0];
+                    let permuted = g_c
+                        .permute(&[0, 2, 3, 4, 1])
+                        .map_err(AutodiffError::Shape)?;
+                    let rows = permuted
+                        .contiguous()
+                        .reshape(&[n_batch * p, cout_usize])
+                        .map_err(AutodiffError::Shape)?;
+                    let bias_data = eval::reduce_bias_grad_rows(&rows);
+                    let d_bias = build_tensor(bias_data, &nodes[bias_id.0].shape);
+                    contributions.push((bias_id, d_bias));
+                }
+                contributions
+            }
+        }
         // view ノード（イシュー #1047・親 #1043「カーネル融合・autodiff
         // 実行モデルの強化」）。`Reshape`/`Transpose` は逆写像も同じ演算
         // 族（reshape は「元の shape へ戻す」・transpose は対合）で
@@ -3119,6 +3224,67 @@ pub(crate) fn vjp(
             let d_input = d_input_flat
                 .reshape(&input_shape)
                 .map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
+        // `max_unpool_ops::max_unpool{1,2,3}d`（イシュー #2644）。forward は `(n, c)` 平面ごとの
+        // `ScatterReduce::Overwrite`（row-major 走査で最後の書き手が残る）なので、その真の随伴は
+        // `Op::Scatter { Overwrite }` の d_src と同じ「`gather` ×  last-writer マスク」。重複索引の
+        // 負けた書き手の位置は 0 を返す（PyTorch は全書き手へ上流勾配を配るため、この位置だけ意図的に
+        // 異なる。`docs/autodiff-conv-transpose3d-max-unpool-decision.md` §5・§7）。索引が重複しない
+        // 通常ケース（stride >= kernel のプール由来）では PyTorch と一致する。
+        Op::MaxUnpool { input, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let upstream_c = upstream.contiguous();
+            let out_shape = upstream_c.shape().to_vec();
+            if !(3..=5).contains(&input_shape.len())
+                || out_shape.len() != input_shape.len()
+                || input_shape[..2] != out_shape[..2]
+                || index.shape() != input_shape.as_slice()
+            {
+                return Err(AutodiffError::Backward(format!(
+                    "Op::MaxUnpool の VJP: shape が整合しない（input={input_shape:?}, upstream={out_shape:?}, index={:?}。契約違反）",
+                    index.shape()
+                )));
+            }
+            let nc = input_shape[0]
+                .checked_mul(input_shape[1])
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let in_plane = input_shape[2..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let out_plane = out_shape[2..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let flat_in = [nc, in_plane];
+            let flat_out = [nc, out_plane];
+            let index_flat = index
+                .contiguous()
+                .reshape(&flat_in)
+                .map_err(AutodiffError::Shape)?;
+            // 索引がすべて `[0, 出力平面長)` に収まることを事前検証し、契約違反は panic ではなく
+            // 型付きエラーで拒否する（`Op::MaxPool3d` と同方針。security.md A08）。
+            for v in index_flat.host_slice().iter() {
+                let vi = i64::from(*v);
+                if vi < 0 || (vi as usize) >= out_plane {
+                    return Err(AutodiffError::Backward(format!(
+                        "Op::MaxUnpool の VJP: index の値 {vi} が [0, {out_plane}) の範囲外（契約違反）"
+                    )));
+                }
+            }
+            let d_input = if nc == 0 || in_plane == 0 || out_plane == 0 {
+                Tensor::zeros(&input_shape).map_err(AutodiffError::Shape)?
+            } else {
+                let upstream_flat = upstream_c
+                    .reshape(&flat_out)
+                    .map_err(AutodiffError::Shape)?;
+                let raw = gather_with_fallback(ops, &upstream_flat, 1, &index_flat, &flat_in)?;
+                let mask = scatter_overwrite_last_writer_mask(&index_flat, 1, &flat_out);
+                elementwise_mul_mask(&raw, &mask, |m| m != 0.0)
+                    .reshape(&input_shape)
+                    .map_err(AutodiffError::Shape)?
+            };
             vec![(input, d_input)]
         }
         // `pool3d_ops::avg_pool3d`（イシュー #2643）。ホスト側のみの VJP。レイアウトを

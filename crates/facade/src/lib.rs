@@ -5834,6 +5834,193 @@ struct PadModesHoldDoctestGuard;
 #[allow(dead_code)]
 struct Pool3dOpsHoldDoctestGuard;
 
+/// 3D 転置畳み込みと MaxUnpool（`conv_transpose3d`・`max_unpool1d`・`max_unpool2d`・`max_unpool3d`。
+/// イシュー #2644・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// （`Pool3dOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール
+/// `conv_transpose3d_ops`／`max_unpool_ops`／`conv_transpose3d`／`max_unpool`・型
+/// `ConvTranspose3d`／`MaxUnpool1d`／`MaxUnpool2d`／`MaxUnpool3d`／`MaxUnpoolLayout`・メソッド
+/// `conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d`（`Var`／`Tape`／
+/// `Tensor<f32>`）と `add_conv_transpose3d`／`add_max_unpool1d`／`add_max_unpool2d`／
+/// `add_max_unpool3d`（`compat::Sequential`）を持つプローブ用トレイトを置き、修飾なしの関数
+/// 呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob
+/// 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性
+/// または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は
+/// facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::conv_transpose3d_ops`・
+/// `fandhe_ai_autodiff::max_unpool_ops`・`fandhe_ai_tensor_core::conv_transpose3d`・
+/// `fandhe_ai_tensor_core::max_unpool`）。保留対象は facade 公開面（`Var::conv_transpose3d`／
+/// `Var::max_unpool1d/2d/3d` の委譲メソッド）のみで、公開形は未承認（承認依頼は #2677・公開自体は
+/// 承認後の #2678・#2679。推奨案は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §7。
+/// 同記録は推奨案の記録であり承認記録ではない）。層化（`compat::Sequential::add_conv_transpose3d`／
+/// `add_max_unpool1d/2d/3d`）も同じ保留に含める（#2679 の層結線がもう一方の漏出経路のため）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// conv_transpose3d_max_unpool_hold_doctest_globs_all_pub_modules`・
+/// `conv_transpose3d_max_unpool_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool`・
+/// `workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
+/// 同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_conv_transpose3d_max_unpool_hold_probe {
+///     pub struct ConvTranspose3d;
+///     pub struct MaxUnpool1d;
+///     pub struct MaxUnpool2d;
+///     pub struct MaxUnpool3d;
+///     pub struct MaxUnpoolLayout;
+///     pub mod conv_transpose3d_ops {
+///         pub fn conv_transpose3d() {}
+///     }
+///     pub mod max_unpool_ops {
+///         pub fn max_unpool1d() {}
+///         pub fn max_unpool2d() {}
+///         pub fn max_unpool3d() {}
+///     }
+///     pub mod conv_transpose3d {
+///         pub fn __mark() {}
+///     }
+///     pub mod max_unpool {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_conv_transpose3d_max_unpool_hold_probe::*;
+///
+/// struct __FandheConvTranspose3dMaxUnpoolHoldMarker;
+///
+/// trait __FandheConvTranspose3dMaxUnpoolHoldProbe {
+///     fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+///     fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+///     fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+///     fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+/// }
+///
+/// impl<'t> __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Var<'t> {
+///     fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+/// }
+///
+/// impl __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Tape {
+///     fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+/// }
+///
+/// impl __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+/// }
+///
+/// trait __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe {
+///     fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+///     fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+///     fn add_max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+///     fn add_max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
+/// }
+///
+/// impl __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe for fandhe_ai::compat::Sequential {
+///     fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn add_max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+///     fn add_max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
+///         __FandheConvTranspose3dMaxUnpoolHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: ConvTranspose3d, _: MaxUnpool1d, _: MaxUnpool2d, _: MaxUnpool3d, _: MaxUnpoolLayout) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     conv_transpose3d_ops::conv_transpose3d();
+///     max_unpool_ops::max_unpool1d();
+///     max_unpool_ops::max_unpool2d();
+///     max_unpool_ops::max_unpool3d();
+///     conv_transpose3d::__mark();
+///     max_unpool::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     seq: &fandhe_ai::compat::Sequential,
+/// ) {
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::conv_transpose3d(v);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool1d(v);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool2d(v);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool3d(v);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::conv_transpose3d(tape);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool1d(tape);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool2d(tape);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool3d(tape);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::conv_transpose3d(tf);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool1d(tf);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool2d(tf);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool3d(tf);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose3d(seq);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool1d(seq);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool2d(seq);
+///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool3d(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

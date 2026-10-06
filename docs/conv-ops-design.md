@@ -1499,3 +1499,7 @@ groups 機構の拡張（既存 `[N, G, K_g, P]` レイアウトをそのまま 
 zeros`・unbatched（rank 4）入力・channels_last（NDHWC）・低精度
 （f16／bf16）の conv3d・デバイス常駐経路・ONNX `Conv`（3D）の
 import／export。
+
+**ConvTranspose3d はイシュー #2644 で内部実装済み**（`docs/autodiff-conv-transpose3d-max-unpool-decision.md`。
+`conv_transpose3d_ops::conv_transpose3d`・内部クレート限定・facade 公開は承認待ち〈承認依頼 #2677〉。層化
+〈`nn::ConvTranspose3d`〉は #2679）。
