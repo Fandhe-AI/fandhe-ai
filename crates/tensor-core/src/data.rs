@@ -94,7 +94,15 @@
 //! は `data/compose.rs` に置く（`docs/tensor-core-dataset-compose-decision.md`）。
 //! 内部クレート限定で **facade 非公開（承認待ち #2677・公開は #2679）**。
 //!
-//! facade（`fandhe_ai::data`）へは #2505 で純再エクスポート済み
+//! # IterableDataset／BatchSampler（イシュー #2662・親 #2660）
+//!
+//! 長さ不定のストリームを供給する [`IterableDataset`]（`data/iterable.rs`。
+//! [`IterableDataLoader`] がバッチ化）と、明示的な添字列を束ねる
+//! [`BatchSampler`]（`data/batch_sampler.rs`）。内部クレート限定で
+//! **facade 非公開（承認待ち #2677・公開は #2679）**。
+//! `docs/tensor-core-iterable-dataset-batch-sampler-decision.md` 参照。
+//!
+//! なお既存の Sampler／フック系の型は facade（`fandhe_ai::data`）へ #2505 で純再エクスポート済み
 //! （`DataLoader` への統合はしない。
 //! `docs/tensor-core-data-sampler-hooks-decision.md` §5・§8）。
 
@@ -103,8 +111,12 @@ use crate::error::ShapeError;
 use crate::rng::{Xorshift64Star, with_global_rng};
 use crate::tensor::{Tensor, checked_numel_for};
 
+mod batch_sampler;
 mod compose;
+mod iterable;
+pub use batch_sampler::BatchSampler;
 pub use compose::{ConcatBatch, ConcatDataset, Subset, random_split, random_split_fractions};
+pub use iterable::{IterableBatches, IterableDataLoader, IterableDataset, StackSamples};
 
 /// [`Dataset`]／[`DataLoader`] 専用のエラー型。shape 起因の不整合
 /// （要素数積のオーバーフロー等）は `Tensor::new`／`narrow` 等と同じ
@@ -180,6 +192,10 @@ pub enum DataError {
         expected: Vec<usize>,
         found: Vec<usize>,
     },
+    /// [`IterableDataset`] の実装者が供給元の失敗（読み込み失敗等）を
+    /// 型付きで伝えるための variant。ライブラリ自身は生成しない
+    /// （イシュー #2662）。
+    IterableStream { reason: String },
 }
 
 impl From<ShapeError> for DataError {
@@ -254,6 +270,9 @@ impl std::fmt::Display for DataError {
                 f,
                 "連結対象 {part} の shape {found:?} が先頭の shape {expected:?} と先頭軸以外で一致しない"
             ),
+            DataError::IterableStream { reason } => {
+                write!(f, "IterableDataset の供給元でエラー: {reason}")
+            }
         }
     }
 }
