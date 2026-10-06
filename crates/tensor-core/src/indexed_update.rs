@@ -393,6 +393,18 @@ pub fn scatter_reduce_vjp_host(
                 if k == 0 {
                     continue;
                 }
+                // NaN 寄与を含む lane は全寄与の勾配を NaN とする（PyTorch と同じ。NaN 自身の
+                // 排他的積は有限になりうるが、NaN の伝播を隠さない）。inf は割り戻さず直接積を取る。
+                if lane.iter().any(|&(_, v)| v.is_nan()) {
+                    for &(slot, _) in lane {
+                        if slot == usize::MAX {
+                            d_input[q] = f32::NAN;
+                        } else {
+                            d_src[slot] = f32::NAN;
+                        }
+                    }
+                    continue;
+                }
                 // suffix[i] = lane[i..] の積。
                 let mut suffix = vec![1.0_f64; k + 1];
                 for i in (0..k).rev() {

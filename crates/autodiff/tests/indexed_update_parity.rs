@@ -264,6 +264,9 @@ fn finite_cases_match_pytorch_reference_forward_and_backward() {
 
 /// PyTorch との実測差分（forward は一致・勾配のみ差が出る）を名前で固定する。
 /// 差分の理由は決定記録 §5。ここに無いケースは完全に一致するはず。
+/// `prod` の inf 系は、PyTorch が `結果 / 値` の割り戻しで inf/inf = NaN を返すのに対し、
+/// 本実装は各寄与を除いた積を直接求めるため有限（または符号付き inf）を返す差分
+/// （PR #2785 レビュー P1。NaN 寄与を含む lane は PyTorch と同じく全寄与 NaN で一致）。
 const KNOWN_GRAD_DIFFS: &[&str] = &[
     "sr_tie_vs_self_amax_noself",
     "sr_tie_vs_self_amin_noself",
@@ -278,9 +281,19 @@ const KNOWN_GRAD_DIFFS: &[&str] = &[
     "sr_nan_self_amax_self",
     "sr_nan_self_amin_self",
     "sr_nan_self_amin_noself",
+    "sr_posinf_src_prod_self",
+    "sr_posinf_src_prod_noself",
     "sr_posinf_src_amin_noself",
+    "sr_neginf_src_prod_self",
+    "sr_neginf_src_prod_noself",
     "sr_neginf_src_amax_noself",
     "sr_neginf_src_amin_noself",
+    "sr_inf_minus_inf_prod_self",
+    "sr_inf_minus_inf_prod_noself",
+    "sr_all_neginf_nonself_prod_self",
+    "sr_all_neginf_nonself_prod_noself",
+    "sr_all_posinf_nonself_prod_self",
+    "sr_all_posinf_nonself_prod_noself",
 ];
 
 #[test]
@@ -293,7 +306,10 @@ fn selfeq_and_nonfinite_cases_differ_from_pytorch_only_in_known_cases() {
         assert!(!bad.contains(&"forward"), "{}: forward 不一致", case.name);
         if !bad.is_empty() {
             assert!(
-                matches!(case.reduce.as_deref(), Some("amax") | Some("amin")),
+                matches!(
+                    case.reduce.as_deref(),
+                    Some("amax") | Some("amin") | Some("prod")
+                ),
                 "{}: 差分は amax/amin の勾配分配に限る",
                 case.name
             );

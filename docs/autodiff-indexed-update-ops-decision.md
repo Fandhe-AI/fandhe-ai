@@ -73,8 +73,9 @@ VJP（`scatter_reduce`。`f64` で計算し各要素 1 回 downcast。入力値�
 
 - `Sum`: `d_src[p] = g[pos(p)]`、`d_input = g`（`include_self == false` では触れられた位置を 0）。
 - `Mean`: `d_src[p] = g[pos(p)] / count`、`d_input[q] = g[q] / count`（`include_self == false` では触れられた位置を 0）。
-- `Prod`: `result / 値` は使わず、位置ごとに「寄与のうち 0 の個数 `z`」と「0 でない寄与の積 `P`」から
-  排他的積を求める（`z == 0` → `P / v`、`z == 1` → `v == 0 ? P : 0`、`z >= 2` → 0）。0 を含む lane でも有限。
+- `Prod`: 割り戻し（`result / 値`・`P / v`）は使わず、位置ごとの寄与列（`src` は走査順・`include_self` の自己寄与は末尾）の
+  前置積×後置積で各寄与を除いた積を直接求める（`f64`）。0・inf を含む lane でも inf/inf の NaN を生まない。
+  NaN 寄与を含む lane は全寄与の勾配を NaN とする（PyTorch と同じ）。
 - `Amax`／`Amin`: 結果と等しい寄与の個数 `N` で `g` を均等に分ける（`include_self == true` なら入力も数える）。
   結果が NaN の位置は `N == 0` で勾配 0。
 - 触れられていない位置の `d_input` は全 mode で `g`。
@@ -106,12 +107,13 @@ f32 は u32 ビットパターンで保存）。
 - 有限群 172 件（`scatter_reduce` 156・`index_add` 4・`index_copy` 4・`masked_scatter` 8）: forward と入力・src
   勾配がすべて REQ-2 統一複合判定で一致（`Amax`／`Amin`・`index_copy`・`masked_scatter` の forward は bit 一致）。
   `Prod` の 0 が 0／1／2 個以上のケースも勾配が一致した。
-- `selfeq` 群（8 件）と `nonfinite` 群（70 件）: **forward は全件一致**。勾配のみ次の 16 件で PyTorch と異なり、
-  差が `Amax`／`Amin` の勾配分配に限られることをテストで固定している（`KNOWN_GRAD_DIFFS`）。
+- `selfeq` 群（8 件）と `nonfinite` 群（70 件）: **forward は全件一致**。勾配のみ次の 26 件で PyTorch と異なり、
+  差が `Amax`／`Amin` の勾配分配と `Prod` の inf 寄与に限られることをテストで固定している（`KNOWN_GRAD_DIFFS`）。
 
 | 項目 | PyTorch 2.14.0（実測） | 本実装 | 扱い |
 |---|---|---|---|
 | `include_self == false` の `Amax`／`Amin` で、触れられた位置の入力値が結果と偶然一致する場合の勾配分配 | 入力も分配数に数える（`src` への勾配が `g / (一致数 + 1)` になる） | 入力は寄与に含まれないため数えない | 実測差分 10 件（`selfeq` 群 6 件、`nonfinite` 群の `nan_self_amin_noself`・`posinf_src_amin_noself`・`neginf_src_amax_noself`・`neginf_src_amin_noself` の 4 件）。本実装の方が「勾配の総和が上流勾配と一致する」。生成スクリプトは一致が起きない入力を主系列（有限群）に残し、一致する行を独立の `selfeq` 群へ自動で分ける |
+| `Prod` の VJP で inf 寄与を含む lane（例 `include_self=false`・`src=[inf, 2]`・`g=1`） | `結果 / 値` の割り戻しで inf/inf = NaN（`src[0]` の勾配も NaN） | 他寄与の積を直接求め `src[0]` の勾配は 2.0（PR #2785 レビュー P1） | 実測差分 10 件（`posinf_src_prod_*`・`neginf_src_prod_*`・`inf_minus_inf_prod_*`・`all_neginf_nonself_prod_*`・`all_posinf_nonself_prod_*` 各 self／noself）。NaN 寄与の lane は一致 |
 | 結果が NaN の位置の `Amax`／`Amin` 勾配（`include_self` 真偽とも） | NaN（`g / 0`） | 0（`N == 0` は勾配なし） | 実測差分 6 件（`nan_src_amax_self`／`nan_src_amax_noself`／`nan_src_amin_self`／`nan_src_amin_noself`／`nan_self_amax_self`／`nan_self_amin_self`）。非有限入力の勾配一致は受入条件にしない |
 | 索引の型 | `int64` | `Tensor<i32>`（`Var::gather`／`scatter` と同じ慣例） | 範囲外は型付きエラー |
 | `index` が `src` より小さい形 | 受理（実測） | `index.shape == src.shape` を要求し拒否 | 差分（スコープ外。`Var::scatter` と同じ契約） |
