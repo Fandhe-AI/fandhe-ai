@@ -1970,3 +1970,9 @@ facade 公開面は追加していない（保留ガード `ShapeViewOpsHoldDoct
 facade 公開面は追加していない（保留ガード `IndexedUpdateOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var::scatter_reduce` 等の委譲メソッドと `ScatterReduceMode` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-indexed-update-ops-decision.md`。
+
+**適用記録（イシュー #2640・親 #2625・ルート #2499 Phase 4。テンソル積・距離・外積）**:
+`kron`／`tensordot`（`tensordot_axes`）／`cdist`／`cross` を内部クレート限定（`fandhe_ai_autodiff::tensor_product_ops`。新規 `Op`・`BackendOps` メソッドなしの既存 `Op` 合成）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `TensorProductOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::kron` 等の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-tensor-product-ops-decision.md`。
