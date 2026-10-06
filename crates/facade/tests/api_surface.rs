@@ -30529,3 +30529,358 @@ fn workspace_declares_dataset_compose_names_only_in_allowed_locations() {
          メソッド追加等）の混入か、未承認の実装追加でないか確認すること"
     );
 }
+
+// =====================================================================
+// IterableBatchSamplerHoldDoctestGuard（イシュー #2662・親 #2660）:
+// `DatasetComposeHoldDoctestGuard`（#2661）系のテストを鏡写しにする。実装は内部クレート
+// （`fandhe_ai_tensor_core::data::{IterableDataset, IterableDataLoader, IterableBatches, StackSamples,
+// BatchSampler}`）に閉じ、facade 公開形（推奨は `fandhe_ai::data` への純再エクスポート）は未承認
+// （承認依頼は #2677。公開は承認後の #2679）。検出はトークン完全一致のみで行い、`BatchSamplerConfig` など
+// 部分一致する別トークンは違反としない（自己テストで固定）。検出範囲は本ソース走査が見るトークン列
+// （`pub use` の経路・型／`fn` の宣言）と、doctest プローブが名前解決で触れる位置に限り、マクロ生成や
+// 別名経由のメソッドまでは保証しない。
+// =====================================================================
+
+/// `IterableBatchSamplerHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
+/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
+#[test]
+fn iterable_batch_sampler_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "IterableBatchSamplerHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "IterableBatchSamplerHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
+         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
+         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言 [`ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY`] と 1 行たりとも
+/// 違わず一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
+#[test]
+fn iterable_batch_sampler_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "IterableBatchSamplerHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY,
+        "IterableBatchSamplerHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
+         ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
+         （__fandhe_iterable_batch_sampler_hold_probe モジュール・__FandheIterableBatchSamplerHold*Probe \
+         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`iterable_batch_sampler_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
+/// （`IterableBatchSamplerHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob
+/// import 行を除いた本文と 1 行単位で完全一致する）。
+const ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_iterable_batch_sampler_hold_probe {\n\
+\x20\x20\x20\x20pub struct IterableDataset;\n\
+\x20\x20\x20\x20pub struct IterableDataLoader;\n\
+\x20\x20\x20\x20pub struct IterableBatches;\n\
+\x20\x20\x20\x20pub struct StackSamples;\n\
+\x20\x20\x20\x20pub struct BatchSampler;\n\
+}\n\
+use __fandhe_iterable_batch_sampler_hold_probe::*;\n\
+\n\
+struct __FandheIterableBatchSamplerHoldMarker;\n\
+\n\
+trait __FandheIterableBatchSamplerHoldProbe {\n\
+\x20\x20\x20\x20fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;\n\
+\x20\x20\x20\x20fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker;\n\
+}\n\
+\n\
+trait __FandheIterableBatchSamplerHoldStackProbe {\n\
+\x20\x20\x20\x20fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;\n\
+}\n\
+\n\
+impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::TensorDataset<f32> {\n\
+\x20\x20\x20\x20fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>> {\n\
+\x20\x20\x20\x20fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheIterableBatchSamplerHoldStackProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_types(_0: IterableDataset, _1: IterableDataLoader, _2: IterableBatches, _3: StackSamples, _4: BatchSampler) {}\n\
+\n\
+fn __probe_methods(\n\
+\x20\x20\x20\x20ds: &fandhe_ai::data::TensorDataset<f32>,\n\
+\x20\x20\x20\x20dl: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>,\n\
+\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::iter_samples(ds);\n\
+\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::with_batch_sampler(ds);\n\
+\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::iter_samples(dl);\n\
+\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::with_batch_sampler(dl);\n\
+\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::Tensor::<f32>::stack_samples(tf);\n\
+}";
+/// 保留対象の fn 名。`iter_samples`・`stack_samples` は内部クレートの trait メソッド、`with_batch_sampler` は
+/// 既存ローダー型への inherent メソッド追加経路の予防名（現在どこにも存在しない）。
+const ITERABLE_BATCH_SAMPLER_FN_NAMES: [&str; 3] =
+    ["iter_samples", "stack_samples", "with_batch_sampler"];
+
+/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
+const ITERABLE_BATCH_SAMPLER_IDENTS: [&str; 8] = [
+    "IterableDataset",
+    "IterableDataLoader",
+    "IterableBatches",
+    "StackSamples",
+    "BatchSampler",
+    "iter_samples",
+    "stack_samples",
+    "with_batch_sampler",
+];
+
+/// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
+const ITERABLE_BATCH_SAMPLER_TYPE_NAMES: [&str; 5] = [
+    "IterableDataset",
+    "IterableDataLoader",
+    "IterableBatches",
+    "StackSamples",
+    "BatchSampler",
+];
+
+/// [`facade_does_not_reexport_or_declare_iterable_batch_sampler`]・その自己テストが共用する検出本体。facade src
+/// の `pub use` で [`ITERABLE_BATCH_SAMPLER_IDENTS`] を経路の識別子（トークン完全一致）単位で含むもの、内部
+/// クレート（`fandhe_ai_tensor_core`）の glob 再エクスポート、leaf の個別再エクスポート、`struct`／`enum`／
+/// `type`／`trait` による [`ITERABLE_BATCH_SAMPLER_TYPE_NAMES`] の独自宣言、
+/// [`ITERABLE_BATCH_SAMPLER_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない）を違反として返す。
+fn scan_iterable_batch_sampler_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in ITERABLE_BATCH_SAMPLER_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            let from_internal = path_tokens.iter().any(|t| t == "fandhe_ai_tensor_core");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if ITERABLE_BATCH_SAMPLER_FN_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens.get(i + 1)
+            && ITERABLE_BATCH_SAMPLER_TYPE_NAMES.contains(&name.as_str())
+        {
+            offending.push(format!("{} {name} 宣言", tokens[i]));
+        }
+        i += 1;
+    }
+
+    for fn_name in ITERABLE_BATCH_SAMPLER_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に IterableDataset／BatchSampler の保留対象の再エクスポート・型の
+/// 独自宣言・同名 `fn` が存在しないことを固定する（`IterableBatchSamplerHoldDoctestGuard` の正のプローブと
+/// 多層防御を成す最内層のソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_iterable_batch_sampler() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_iterable_batch_sampler_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が IterableDataset／BatchSampler の内部実装（#2662 の \
+         `data::{{IterableDataset, IterableDataLoader, BatchSampler ..}}`。facade 公開形は未承認で承認依頼は \
+         #2677）を再エクスポート、独自宣言、または同名の fn を宣言している: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_iterable_batch_sampler`] の自己テスト（各違反カテゴリの合成ソースを
+/// 検出できること、および部分文字列に含む別トークン・呼び出し・コメント・文字列・非公開 `use` を誤検出しない
+/// ことを恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_iterable_batch_sampler_detects_each_category() {
+    let offense =
+        |src: &str| !scan_iterable_batch_sampler_reexports_and_declarations(src).is_empty();
+    // 正例: 個別再エクスポート（単一行・group・複数行・別名）。
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::BatchSampler;"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::{DataLoader, IterableDataset};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::{\n    IterableDataLoader,\n    StackSamples,\n};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::IterableBatches as IB;"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_tensor_core::*;"));
+    // 正例: 型の独自宣言。
+    assert!(offense("pub struct BatchSampler;"));
+    assert!(offense("pub struct IterableDataLoader { n: usize }"));
+    assert!(offense("pub enum IterableBatches { A }"));
+    assert!(offense("pub type StackSamples = u8;"));
+    assert!(offense("pub trait IterableDataset {}"));
+    // 正例: fn 宣言（同名の inherent／trait メソッド宣言を含む）。
+    assert!(offense(
+        "impl DataLoader { pub fn with_batch_sampler(&self) {} }"
+    ));
+    assert!(offense("trait T { fn iter_samples(&self); }"));
+    assert!(offense("pub fn stack_samples() {}"));
+    // 負例: 保留対象を部分文字列に含む別トークン。
+    assert!(!offense("pub struct BatchSamplerConfig;"));
+    assert!(!offense("fn iter_samples_helper() {}"));
+    assert!(!offense("pub struct IterableDatasetExt;"));
+    // 負例: 呼び出し（宣言ではない）。
+    assert!(!offense("fn f(d: D) { let s = d.iter_samples(); }"));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense(
+        "// pub use fandhe_ai_tensor_core::data::BatchSampler;"
+    ));
+    assert!(!offense("let s = \"pub fn iter_samples() {}\";"));
+    // 負例: 非公開 use。
+    assert!(!offense("use fandhe_ai_tensor_core::data::BatchSampler;"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、IterableDataset／BatchSampler の型宣言と
+/// [`ITERABLE_BATCH_SAMPLER_FN_NAMES`] の `fn` 宣言が承認済みの置き場所だけに存在することを固定する。
+///
+/// 期待値は `tensor-core/src/data/iterable.rs` の型 4 名が各 1 件、`tensor-core/src/data/batch_sampler.rs` の
+/// `BatchSampler` が 1 件、`iter_samples` が 2 件（`IterableDataset` trait の宣言 1 + src 内テスト用ヘルパー
+/// impl 1）、`stack_samples` が 4 件（`StackSamples` trait の宣言 1 + `Tensor<T>`／2 要素タプル／3 要素タプルの
+/// impl 各 1）、`with_batch_sampler` は 0 件。これら以外への追加（facade／既存ローダー型への inherent メソッド
+/// 等）は fail-closed に検出する。src 内のテストヘルパーに素の `fn iter_samples` などを増やさないこと。
+#[test]
+fn workspace_declares_iterable_batch_sampler_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in ITERABLE_BATCH_SAMPLER_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+            for (idx, tok) in tokens.iter().enumerate() {
+                if !matches!(tok.as_str(), "struct" | "enum" | "type" | "trait") {
+                    continue;
+                }
+                if let Some(name) = tokens.get(idx + 1)
+                    && ITERABLE_BATCH_SAMPLER_TYPE_NAMES.contains(&name.as_str())
+                {
+                    *found.entry(format!("{rel}::{name}")).or_insert(0) += 1;
+                }
+            }
+        });
+    }
+    let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for n in [
+        "IterableDataset",
+        "IterableDataLoader",
+        "IterableBatches",
+        "StackSamples",
+    ] {
+        expected.insert(format!("tensor-core/src/data/iterable.rs::{n}"), 1);
+    }
+    expected.insert(
+        "tensor-core/src/data/batch_sampler.rs::BatchSampler".to_string(),
+        1,
+    );
+    // `iter_samples`: trait 宣言 1 + src 内テスト用 `FnStream` の impl 1。
+    expected.insert(
+        "tensor-core/src/data/iterable.rs::iter_samples".to_string(),
+        2,
+    );
+    // `stack_samples`: trait 宣言 1 + `Tensor<T>`／(A, B)／(A, B, C) の impl 各 1。
+    expected.insert(
+        "tensor-core/src/data/iterable.rs::stack_samples".to_string(),
+        4,
+    );
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の IterableDataset／IterableDataLoader／IterableBatches／StackSamples／\
+         BatchSampler の型宣言と iter_samples／stack_samples／with_batch_sampler の `fn` 宣言が承認済みの\
+         置き場所（tensor-core/src/data/{{iterable,batch_sampler}}.rs のみ）と一致しない。迂回経路（facade／\
+         既存ローダー型への inherent メソッド追加等）の混入か、未承認の実装追加でないか確認すること"
+    );
+}

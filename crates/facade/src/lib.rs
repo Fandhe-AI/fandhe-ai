@@ -7623,6 +7623,107 @@ struct LrSchedulerPolyChainedHoldDoctestGuard;
 #[allow(dead_code)]
 struct DatasetComposeHoldDoctestGuard;
 
+/// 親 #2660 の IterableDataset／BatchSampler（`IterableDataset`・`IterableDataLoader`・`IterableBatches`・
+/// `StackSamples`・`BatchSampler`。`torch.utils.data` 相当。イシュー #2662）を facade 公開面から締め出す保留ガード
+/// （`DatasetComposeHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュールの型 5 個、およびプローブ用
+/// トレイトのメソッド（`TensorDataset<f32>`／`DataLoader<TensorDataset<f32>>` の `iter_samples`／
+/// `with_batch_sampler`、`Tensor<f32>` の `stack_samples`）を置き、修飾なしの型使用と修飾付きメソッド呼び出しの
+/// 両方を行う。facade が同名の型を glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。検出範囲は
+/// 列挙した名前・型に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_tensor_core::data`）。保留対象は facade 公開面のみで、公開形は
+/// 未承認（承認依頼は #2677・公開自体は承認後の #2679。推奨案は
+/// `docs/tensor-core-iterable-dataset-batch-sampler-decision.md` §5。同記録は推奨案の記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::iterable_batch_sampler_hold_doctest_globs_all_pub_modules`・
+/// `iterable_batch_sampler_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_iterable_batch_sampler`・
+/// `workspace_declares_iterable_batch_sampler_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_iterable_batch_sampler_hold_probe {
+///     pub struct IterableDataset;
+///     pub struct IterableDataLoader;
+///     pub struct IterableBatches;
+///     pub struct StackSamples;
+///     pub struct BatchSampler;
+/// }
+/// use __fandhe_iterable_batch_sampler_hold_probe::*;
+///
+/// struct __FandheIterableBatchSamplerHoldMarker;
+///
+/// trait __FandheIterableBatchSamplerHoldProbe {
+///     fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;
+///     fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker;
+/// }
+///
+/// trait __FandheIterableBatchSamplerHoldStackProbe {
+///     fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;
+/// }
+///
+/// impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::TensorDataset<f32> {
+///     fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {
+///         __FandheIterableBatchSamplerHoldMarker
+///     }
+///     fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {
+///         __FandheIterableBatchSamplerHoldMarker
+///     }
+/// }
+///
+/// impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>> {
+///     fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {
+///         __FandheIterableBatchSamplerHoldMarker
+///     }
+///     fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {
+///         __FandheIterableBatchSamplerHoldMarker
+///     }
+/// }
+///
+/// impl __FandheIterableBatchSamplerHoldStackProbe for fandhe_ai::Tensor<f32> {
+///     fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {
+///         __FandheIterableBatchSamplerHoldMarker
+///     }
+/// }
+///
+/// fn __probe_types(_0: IterableDataset, _1: IterableDataLoader, _2: IterableBatches, _3: StackSamples, _4: BatchSampler) {}
+///
+/// fn __probe_methods(
+///     ds: &fandhe_ai::data::TensorDataset<f32>,
+///     dl: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::iter_samples(ds);
+///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::with_batch_sampler(ds);
+///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::iter_samples(dl);
+///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::with_batch_sampler(dl);
+///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::Tensor::<f32>::stack_samples(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct IterableBatchSamplerHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
