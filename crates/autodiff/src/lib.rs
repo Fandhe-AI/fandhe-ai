@@ -282,6 +282,10 @@ pub mod stat_reduce_ops;
 mod tape;
 #[cfg(test)]
 mod test_support;
+// テンソル積・距離・外積 4 演算（`kron`・`tensordot`・`cdist`・`cross`。イシュー #2640）。
+// 既存 Op の合成のみ。facade への公開は保留（承認依頼 #2677・公開 #2678。
+// `docs/autodiff-tensor-product-ops-decision.md`）。
+pub mod tensor_product_ops;
 pub mod topk_unique_ops;
 pub mod trig_ops;
 mod var;
