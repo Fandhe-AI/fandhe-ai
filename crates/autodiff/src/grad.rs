@@ -791,6 +791,86 @@ pub(crate) fn vjp(
             };
             vec![(input, dinput), (target, dtarget)]
         }
+        Op::BceWithLogitsPosWeightLoss {
+            input,
+            target,
+            pos_weight,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let n = input_val.numel();
+            let (dinput, dtarget) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+                (zeros.clone(), zeros)
+            } else {
+                let scale = elementwise_loss_scale(upstream, reduction, n);
+                eval::elementwise_loss::bce_with_logits_pos_weight_loss_vjp(
+                    input_val,
+                    target_val,
+                    &pos_weight,
+                    scale,
+                )
+            };
+            vec![(input, dinput), (target, dtarget)]
+        }
+        Op::HingeEmbeddingLoss {
+            input,
+            y,
+            margin,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let n = input_val.numel();
+            let dinput = if n == 0 {
+                build_tensor(vec![0f32; 0], input_val.shape())
+            } else {
+                let scale = elementwise_loss_scale(upstream, reduction, n);
+                eval::elementwise_loss::hinge_embedding_loss_vjp(input_val, &y, margin, scale)
+            };
+            vec![(input, dinput)]
+        }
+        Op::SoftMarginLoss {
+            input,
+            y,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let n = input_val.numel();
+            let dinput = if n == 0 {
+                build_tensor(vec![0f32; 0], input_val.shape())
+            } else {
+                let scale = elementwise_loss_scale(upstream, reduction, n);
+                eval::elementwise_loss::soft_margin_loss_vjp(input_val, &y, scale)
+            };
+            vec![(input, dinput)]
+        }
+        Op::GaussianNllLoss {
+            input,
+            target,
+            var,
+            options,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let var_val = materialize_fallible(nodes, ops, var)?;
+            let n = input_val.numel();
+            let (dinput, dtarget, dvar) = if n == 0 {
+                let zeros = build_tensor(vec![0f32; 0], input_val.shape());
+                (zeros.clone(), zeros.clone(), zeros)
+            } else {
+                let scale = elementwise_loss_scale(upstream, reduction, n);
+                eval::elementwise_loss::gaussian_nll_loss_vjp(
+                    input_val,
+                    target_val,
+                    var_val,
+                    options.eps_value(),
+                    scale,
+                )
+            };
+            vec![(input, dinput), (target, dtarget), (var, dvar)]
+        }
         Op::CtcLoss {
             log_probs,
             targets,
@@ -8624,6 +8704,16 @@ fn cosine_embedding_loss_vjp(
         }
     }
     (build_tensor(dx1, &shape), build_tensor(dx2, &shape))
+}
+
+/// 要素ごと損失 4 種（イシュー #2652）の VJP 共通 `scale`（`Mean` は `g/n`、`Sum` は
+/// `g`。`f64`）。`n > 0` は呼び出し側で保証する。
+fn elementwise_loss_scale(upstream: &Tensor<f32>, reduction: Reduction, n: usize) -> f64 {
+    let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+    match reduction {
+        Reduction::Mean => f64::from(g_value) / n as f64,
+        Reduction::Sum => f64::from(g_value),
+    }
 }
 
 /// `MarginRankingLoss` の VJP（イシュー #2167）。`crate::loss_ops::

@@ -33,6 +33,7 @@ use fandhe_ai_tensor_core::{
 use crate::layout;
 use crate::var::Reduction;
 
+pub(crate) mod elementwise_loss;
 /// 線形代数（inv／solve／det／qr／cholesky／svd）・matrix_norm のホスト
 /// 参照実装（イシュー #1621）。行数が大きいため子モジュールへ分ける
 /// （モジュール冒頭コメント参照）。
