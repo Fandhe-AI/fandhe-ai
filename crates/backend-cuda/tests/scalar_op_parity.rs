@@ -925,3 +925,25 @@ fn new_2634_kinds_return_unsupported_without_touching_device() {
         Err(BackendError::Unsupported(_))
     ));
 }
+
+/// イシュー #2649: 活性化 5 kind は GPU 専用カーネルが未実装で、対応 kind 判定は
+/// デバイス取得より前に行われるため、CUDA 非搭載環境でも `CudaUnavailable`
+/// ではなく `Unsupported`（ホスト参照実装へフォールバックする契約）を返す。
+/// 属性なし（通常 CI で実行）。
+#[test]
+fn new_2649_kinds_return_unsupported_without_touching_device() {
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).expect("valid tensor");
+    for op in [
+        ScalarUnaryOp::Selu,
+        ScalarUnaryOp::Celu { alpha: 1.0 },
+        ScalarUnaryOp::Softsign,
+        ScalarUnaryOp::Hardsigmoid,
+        ScalarUnaryOp::LogSigmoid,
+    ] {
+        assert!(
+            matches!(cuda.scalar_unary(op, &a), Err(BackendError::Unsupported(_))),
+            "{op:?}: Unsupported のはず"
+        );
+    }
+}

@@ -30,7 +30,10 @@
 //! は facade 非公開の内部専用モジュールのため、本 5 層自体も
 //! `nn::activation` 経由でのみ到達可能——`Var` 委譲メソッドは #2516 で公開済みだが、
 //! 本 5 層は #2529 で `compat::Sequential::add_*` として facade 公開済み（層型自体は非再エクスポート）。
-//! `crate::activation_ops` モジュール doc 参照）。さらなる追加活性化は
+//! `crate::activation_ops` モジュール doc 参照）。イシュー #2649 で
+//! [`Selu`]／[`Celu`]／[`Softsign`]／[`Hardsigmoid`]／[`LogSigmoid`] を追加した
+//! （`crate::activation_scalar_ops` の自由関数への薄いラッパー。層型は facade
+//! 非公開で、公開は承認依頼 #2677 の承認後に #2679 が担当する）。さらなる追加活性化は
 //! 必要になった時点の後続イシューに委ねる。
 
 use crate::error::AutodiffError;
@@ -876,5 +879,107 @@ mod tests {
     #[test]
     fn elu_default_matches_pytorch_alpha() {
         assert_eq!(Elu::default().alpha, 1.0);
+    }
+}
+
+// ---------------------------------------------------------------------
+// イシュー #2649: SELU・CELU・Softsign・Hardsigmoid・LogSigmoid
+// ---------------------------------------------------------------------
+
+/// SELU。`crate::activation_scalar_ops::selu` の薄いラッパー（イシュー #2649）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Selu;
+
+impl Selu {
+    /// `input` に SELU を適用する。[`Silu::forward`] と同じ shape・エラー契約。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::selu(input)
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Selu
+    }
+}
+
+/// CELU（`alpha` を保持）。`crate::activation_scalar_ops::celu` の薄い
+/// ラッパー（イシュー #2649）。
+#[derive(Debug, Clone, Copy)]
+pub struct Celu {
+    alpha: f32,
+}
+
+impl Celu {
+    /// `alpha` を指定して構築する。`alpha == 0`・非有限は
+    /// `AutodiffError::InvalidArgument`（負は PyTorch と同じく受理）。
+    pub fn new(alpha: f32) -> Result<Self, AutodiffError> {
+        crate::activation_scalar_ops::validate_celu_alpha(alpha, "Celu::new")?;
+        Ok(Self { alpha })
+    }
+
+    /// `input` に CELU を適用する。[`Silu::forward`] と同じ shape・エラー契約。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::celu(input, self.alpha)
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Celu { alpha: self.alpha }
+    }
+}
+
+impl Default for Celu {
+    /// PyTorch `torch.nn.CELU` の既定 `alpha=1.0`。検査を通る既知定数のため
+    /// 本番経路 `expect` 禁止規約に従いフィールドを直接構築する。
+    fn default() -> Self {
+        Self { alpha: 1.0 }
+    }
+}
+
+/// Softsign。`crate::activation_scalar_ops::softsign` の薄いラッパー（イシュー #2649）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Softsign;
+
+impl Softsign {
+    /// `input` に Softsign を適用する。[`Silu::forward`] と同じ契約。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::softsign(input)
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Softsign
+    }
+}
+
+/// Hardsigmoid。`crate::activation_scalar_ops::hardsigmoid` の薄いラッパー（イシュー #2649）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Hardsigmoid;
+
+impl Hardsigmoid {
+    /// `input` に Hardsigmoid を適用する。[`Silu::forward`] と同じ契約。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::hardsigmoid(input)
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::Hardsigmoid
+    }
+}
+
+/// LogSigmoid。`crate::activation_scalar_ops::log_sigmoid` の薄いラッパー（イシュー #2649）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LogSigmoid;
+
+impl LogSigmoid {
+    /// `input` に LogSigmoid を適用する。[`Silu::forward`] と同じ契約。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::log_sigmoid(input)
+    }
+
+    /// [`Silu::op`] と同じ理由のクレート内アクセサ。
+    pub(crate) fn op(&self) -> ScalarUnaryOp {
+        ScalarUnaryOp::LogSigmoid
     }
 }

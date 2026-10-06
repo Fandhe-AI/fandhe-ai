@@ -197,6 +197,15 @@ fn unary_expr(op: ScalarUnaryOp) -> Option<&'static str> {
         | ScalarUnaryOp::IsInf
         | ScalarUnaryOp::IsFinite
         | ScalarUnaryOp::NanToNum { .. } => None,
+        // イシュー #2649: SELU・CELU・Softsign・Hardsigmoid・LogSigmoid の GPU
+        // 専用カーネルは別イシューのスコープ。明示 `None` でホスト参照実装
+        // （`ScalarUnaryOp::apply`）へフォールバックする。`Celu` のペイロード
+        // （`alpha`）はカーネル未実装のため `unary_payload` では使われない。
+        ScalarUnaryOp::Selu
+        | ScalarUnaryOp::Celu { .. }
+        | ScalarUnaryOp::Softsign
+        | ScalarUnaryOp::Hardsigmoid
+        | ScalarUnaryOp::LogSigmoid => None,
         _ => None,
     }
 }
@@ -418,6 +427,24 @@ mod tests {
             );
         }
         assert!(binary_kernel_source(ScalarBinaryOp::Atan2).is_none());
+    }
+
+    /// イシュー #2649: 活性化 5 kind の GPU 専用カーネルはスコープ外で、
+    /// `unary_kernel_source` は明示的に `None` を返す。
+    #[test]
+    fn new_2649_unary_kinds_are_unsupported() {
+        for op in [
+            ScalarUnaryOp::Selu,
+            ScalarUnaryOp::Celu { alpha: 1.0 },
+            ScalarUnaryOp::Softsign,
+            ScalarUnaryOp::Hardsigmoid,
+            ScalarUnaryOp::LogSigmoid,
+        ] {
+            assert!(
+                unary_kernel_source(op).is_none(),
+                "{op:?}: GPU カーネル未実装のため None のはず"
+            );
+        }
     }
 
     #[test]

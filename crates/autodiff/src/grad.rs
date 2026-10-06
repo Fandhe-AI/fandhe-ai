@@ -320,6 +320,20 @@ pub(crate) fn vjp(
                 // （`docs/autodiff-nonfinite-ops-decision.md` §5）。
                 let da = elementwise_mul_mask(upstream, x_val, |v| v.is_finite());
                 vec![(input, da)]
+            } else if matches!(sop, ScalarUnaryOp::Hardsigmoid) {
+                // イシュー #2649: Hardsigmoid は領域外（`x <= -3`・`x >= 3`・
+                // `NaN`）で恒等的にゼロ勾配。係数 `0` を乗算へ通すと
+                // upstream が `inf`／`NaN` のとき `0 * inf = NaN` に汚染される
+                // （PR #1823・#2145 と同類型。PyTorch は領域外で literal `0`）
+                // ため、`NanToNum` と同じ要素選択ヘルパで領域内だけ upstream
+                // を通し、その後に傾き `1/6` を掛ける（`0 * (1/6) = 0` で汚染なし）。
+                let kept = elementwise_mul_mask(upstream, x_val, |v| {
+                    fandhe_ai_tensor_core::scalar_op::hardsigmoid_grad(v) != 0.0
+                });
+                let slope = fandhe_ai_tensor_core::scalar_op::hardsigmoid_grad(0.0);
+                let scaled: Vec<f32> = dense_vec(&kept).iter().map(|&v| v * slope).collect();
+                let da = build_tensor(scaled, kept.shape());
+                vec![(input, da)]
             } else {
                 let factor = eval::scalar::unary_grad_factors(x_val, out_value, sop);
                 let da = vjp_elementwise_mul(ops, upstream, &factor)?;
@@ -9610,6 +9624,15 @@ mod tests {
             (ScalarUnaryOp::Asinh, general.clone()),
             (ScalarUnaryOp::Acosh, vec![1.3, 2.0, 3.5, 5.0]),
             (ScalarUnaryOp::Atanh, vec![-0.7, -0.2, 0.3, 0.8]),
+            // イシュー #2649: kink（`0`・`±3`）を避ける。
+            (ScalarUnaryOp::Selu, vec![-1.7, -0.6, 0.9, 2.3]),
+            (
+                ScalarUnaryOp::Celu { alpha: 1.3 },
+                vec![-1.7, -0.6, 0.9, 2.3],
+            ),
+            (ScalarUnaryOp::Softsign, general.clone()),
+            (ScalarUnaryOp::Hardsigmoid, vec![-4.0, -1.0, 1.0, 4.0]),
+            (ScalarUnaryOp::LogSigmoid, general.clone()),
             // イシュー #2635: 有限入力のみ（導関数 1）。非有限入力は専用テスト。
             (
                 ScalarUnaryOp::NanToNum {
@@ -9714,6 +9737,26 @@ mod tests {
                     "{op:?}: upstream が inf でも勾配は有限の 0 であるべき（実際: {g}）"
                 );
             }
+        }
+    }
+
+    /// イシュー #2649: Hardsigmoid の領域外・境界（`x <= -3`・`x >= 3`・
+    /// `NaN`）では上流 `inf`／`NaN` でも勾配が厳密に `0`（`0 * inf = NaN`
+    /// 汚染なし）、領域内は `upstream / 6`。`y * inf` で上流 `inf` を作る。
+    #[test]
+    fn new_2649_hardsigmoid_backward_selects_instead_of_multiplying() {
+        let tape = crate::tape::Tape::new_with_ops(crate::test_support::test_ops());
+        let x = tape.var(&t(&[-5.0, -3.0, 0.0, 2.0, 3.0, 5.0, f32::NAN], &[7]));
+        let y = x.scalar_unary(ScalarUnaryOp::Hardsigmoid).unwrap();
+        let inf = tape.var(&t(&[f32::INFINITY; 7], &[7]));
+        let loss = y.mul(&inf).unwrap().sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dx = grads.get(&x).unwrap().unwrap();
+        for i in [0usize, 1, 4, 5, 6] {
+            assert_eq!(dx.get(&[i]).unwrap(), 0.0, "領域外 i={i}");
+        }
+        for i in [2usize, 3] {
+            assert_eq!(dx.get(&[i]).unwrap(), f32::INFINITY, "領域内 i={i}");
         }
     }
 

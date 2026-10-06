@@ -112,7 +112,8 @@ use crate::var::Var;
 /// tracking.md` で追跡）。`ScalarUnaryOp` は `tensor-core` 側で
 /// `#[non_exhaustive]` のため、末尾のワイルドカードは未知 variant を
 /// 安全側の `false` へ倒す（`tape.rs::supports_create_graph` doc
-/// 「例外」参照）。
+/// 「例外」参照）。イシュー #2649 の `Selu`／`Celu`／`Softsign`／
+/// `Hardsigmoid`／`LogSigmoid` も対象外で `false`（高階微分は型付きエラーで拒否）。
 pub(crate) fn scalar_unary_replayable(op: ScalarUnaryOp) -> bool {
     matches!(
         op,
@@ -1584,5 +1585,26 @@ mod maximum_minimum_tests {
             expected.as_slice(),
             "子テープ上の 1 階勾配が既存 Tape::backward 経路と一致しない"
         );
+    }
+}
+
+/// イシュー #2649: 活性化 5 kind は `create_graph`（高階微分）の対象外で、
+/// `scalar_unary_replayable` が `false`（型付きエラーで拒否・panic しない）を
+/// 返し続けることを固定する。
+#[cfg(test)]
+mod new_2649_tests {
+    use super::*;
+
+    #[test]
+    fn new_2649_kinds_are_not_replayable() {
+        for op in [
+            ScalarUnaryOp::Selu,
+            ScalarUnaryOp::Celu { alpha: 1.0 },
+            ScalarUnaryOp::Softsign,
+            ScalarUnaryOp::Hardsigmoid,
+            ScalarUnaryOp::LogSigmoid,
+        ] {
+            assert!(!scalar_unary_replayable(op), "{op:?}");
+        }
     }
 }
