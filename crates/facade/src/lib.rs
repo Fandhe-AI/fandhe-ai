@@ -6555,6 +6555,200 @@ struct LrnWeightReparamHoldDoctestGuard;
 #[allow(dead_code)]
 struct PackedSequenceHoldDoctestGuard;
 
+/// 活性化 4 種（`softmin`・`tanhshrink`・`threshold`・`rrelu`／`rrelu_with_noise` と層 `Softmin`・`Tanhshrink`・
+/// `Threshold`・`RRelu`。`F.softmin`／`F.tanhshrink`／`F.threshold`／`F.rrelu` 相当。イシュー #2650・親 #2648・
+/// Phase 親 #2625）を facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の
+/// 正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `softmin_threshold_ops`／
+/// `softmin_threshold`・型 `Softmin`／`Tanhshrink`／`RRelu`／`Threshold` と、プローブ用トレイトのメソッド
+/// （`Var`／`Tape`／`Tensor<f32>` の `softmin`／`tanhshrink`／`threshold`／`rrelu`／`rrelu_with_noise`、
+/// `compat::Sequential` の `add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu`）を置き、モジュール経由の
+/// 関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型を glob 可能な位置へ
+/// 公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
+/// 不一致でエラーコードに依存せずコンパイルが失敗する。検出範囲は列挙したこれらの名前・型に限り、マクロ生成や
+/// 別名経由のメソッドまでは保証しない。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::softmin_threshold_ops`・
+/// `fandhe_ai_autodiff::nn::softmin_threshold`）。保留対象は facade 公開面のみで、公開形は未承認（承認依頼は
+/// #2677・公開自体は承認後の #2678・#2679。推奨案は `docs/autodiff-softmin-threshold-ops-decision.md` §7。
+/// 同記録は推奨案の記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::softmin_threshold_ops_hold_doctest_globs_all_pub_modules`・
+/// `softmin_threshold_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_softmin_threshold_ops`・
+/// `workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_softmin_threshold_ops_hold_probe {
+///     pub struct Softmin;
+///     pub struct Tanhshrink;
+///     pub struct RRelu;
+///     pub struct Threshold;
+///     pub mod softmin_threshold_ops {
+///         pub fn softmin() {}
+///         pub fn tanhshrink() {}
+///         pub fn threshold() {}
+///         pub fn rrelu() {}
+///         pub fn rrelu_with_noise() {}
+///     }
+///     pub mod softmin_threshold {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_softmin_threshold_ops_hold_probe::*;
+///
+/// struct __FandheSoftminThresholdOpsHoldMarker;
+///
+/// trait __FandheSoftminThresholdOpsHoldProbe {
+///     fn softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+///     fn tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+///     fn threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+///     fn rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+///     fn rrelu_with_noise(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+/// }
+///
+/// trait __FandheSoftminThresholdOpsHoldSequentialProbe {
+///     fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+///     fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+///     fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+///     fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn rrelu_with_noise(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Tape {
+///     fn softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn rrelu_with_noise(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn rrelu_with_noise(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheSoftminThresholdOpsHoldSequentialProbe for fandhe_ai::compat::Sequential {
+///     fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+///     fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker {
+///         __FandheSoftminThresholdOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(
+///     _0: Softmin,
+///     _1: Tanhshrink,
+///     _2: RRelu,
+///     _3: Threshold,
+/// ) {
+///     // モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開していれば、
+///     // 名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     softmin_threshold_ops::softmin();
+///     softmin_threshold_ops::tanhshrink();
+///     softmin_threshold_ops::threshold();
+///     softmin_threshold_ops::rrelu();
+///     softmin_threshold_ops::rrelu_with_noise();
+///     softmin_threshold::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     seq: &fandhe_ai::compat::Sequential,
+/// ) {
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::softmin(v);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::tanhshrink(v);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::threshold(v);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu(v);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu_with_noise(v);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::softmin(tape);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::tanhshrink(tape);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::threshold(tape);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::rrelu(tape);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::rrelu_with_noise(tape);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::softmin(tf);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::tanhshrink(tf);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::threshold(tf);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu(tf);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu_with_noise(tf);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_softmin(seq);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_tanhshrink(seq);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_threshold(seq);
+///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_rrelu(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct SoftminThresholdOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
