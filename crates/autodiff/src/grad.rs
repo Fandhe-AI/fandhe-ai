@@ -885,6 +885,87 @@ pub(crate) fn vjp(
             };
             vec![(input, dinput), (target, dtarget), (var, dvar)]
         }
+        Op::MultiMarginLoss {
+            input,
+            targets,
+            weight,
+            p,
+            margin,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let dinput = if input_val.numel() == 0 {
+                build_tensor(vec![0f32; 0], input_val.shape())
+            } else {
+                // `Mean` の分母は行数 N（rank 1 は 1）。numel ではない。
+                let (rows, _) = eval::margin_focal_loss::rows_cols(input_val.shape());
+                let scale = elementwise_loss_scale(upstream, reduction, rows);
+                eval::margin_focal_loss::multi_margin_loss_vjp(
+                    input_val,
+                    &targets,
+                    weight.as_deref(),
+                    p,
+                    margin,
+                    scale,
+                )
+            };
+            vec![(input, dinput)]
+        }
+        Op::MultiLabelMarginLoss {
+            input,
+            targets,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let dinput = if input_val.numel() == 0 {
+                build_tensor(vec![0f32; 0], input_val.shape())
+            } else {
+                let (rows, _) = eval::margin_focal_loss::rows_cols(input_val.shape());
+                let scale = elementwise_loss_scale(upstream, reduction, rows);
+                eval::margin_focal_loss::multilabel_margin_loss_vjp(input_val, &targets, scale)
+            };
+            vec![(input, dinput)]
+        }
+        Op::MultiLabelSoftMarginLoss {
+            input,
+            target,
+            weight,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let dinput = if input_val.numel() == 0 {
+                build_tensor(vec![0f32; 0], input_val.shape())
+            } else {
+                let (rows, _) = eval::margin_focal_loss::rows_cols(input_val.shape());
+                let scale = elementwise_loss_scale(upstream, reduction, rows);
+                eval::margin_focal_loss::multilabel_soft_margin_loss_vjp(
+                    input_val,
+                    &target,
+                    weight.as_deref(),
+                    scale,
+                )
+            };
+            vec![(input, dinput)]
+        }
+        Op::SigmoidFocalLoss {
+            input,
+            target,
+            alpha,
+            gamma,
+            reduction,
+        } => {
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let n = input_val.numel();
+            let dinput = if n == 0 {
+                build_tensor(vec![0f32; 0], input_val.shape())
+            } else {
+                let scale = elementwise_loss_scale(upstream, reduction, n);
+                eval::margin_focal_loss::sigmoid_focal_loss_vjp(
+                    input_val, &target, alpha, gamma, scale,
+                )
+            };
+            vec![(input, dinput)]
+        }
         Op::CtcLoss {
             log_probs,
             targets,

@@ -65,7 +65,9 @@
 //! `PoissonNllLoss`（イシュー #2167。同型の理由で対象外）・
 //! `CtcLoss`（イシュー #2168。同型の理由で対象外）・
 //! `BceWithLogitsPosWeightLoss`・`HingeEmbeddingLoss`・`SoftMarginLoss`・
-//! `GaussianNllLoss`（イシュー #2652。同型の理由で対象外）
+//! `GaussianNllLoss`（イシュー #2652。同型の理由で対象外）・
+//! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・
+//! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路

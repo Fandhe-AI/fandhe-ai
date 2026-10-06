@@ -431,6 +431,39 @@ pub(crate) enum Op {
         options: crate::elementwise_loss_ops::GaussianNllOptions,
         reduction: crate::var::Reduction,
     },
+    /// MultiMargin 損失（イシュー #2653）。`input` のみ追跡対象。`targets`（検証済みのクラス
+    /// 添字・行ごと 1 要素）と `weight`（あれば長さ `C`）は非追跡。融合対象外・常に実体化済み。
+    MultiMarginLoss {
+        input: NodeId,
+        targets: Vec<i32>,
+        weight: Option<Vec<f32>>,
+        p: u8,
+        margin: f32,
+        reduction: crate::var::Reduction,
+    },
+    /// MultiLabelMargin 損失（イシュー #2653）。`targets` は `input` と同数の検証済み添字
+    /// （各行は最初の負値で終端）。`input` のみ追跡対象。
+    MultiLabelMarginLoss {
+        input: NodeId,
+        targets: Vec<i32>,
+        reduction: crate::var::Reduction,
+    },
+    /// MultiLabelSoftMargin 損失（イシュー #2653）。`target`（`[0, 1]` のラベル）と
+    /// `weight`（あれば長さ `C`）は非追跡。
+    MultiLabelSoftMarginLoss {
+        input: NodeId,
+        target: Tensor<f32>,
+        weight: Option<Vec<f32>>,
+        reduction: crate::var::Reduction,
+    },
+    /// sigmoid focal loss（イシュー #2653）。`target`（`[0, 1]` のラベル）は非追跡。
+    SigmoidFocalLoss {
+        input: NodeId,
+        target: Tensor<f32>,
+        alpha: Option<f32>,
+        gamma: f32,
+        reduction: crate::var::Reduction,
+    },
     /// CTC（Connectionist Temporal Classification）損失。PyTorch
     /// `nn.CTCLoss` 相当（イシュー #2168・親イシュー #2131）。
     /// `L1Loss`／`PoissonNllLoss` と同型の融合対象外パターンで常に
@@ -1826,6 +1859,8 @@ impl Op {
             // `CtcLoss`（イシュー #2168。同型の理由で非適格）／
             // `BceWithLogitsPosWeightLoss`／`HingeEmbeddingLoss`／`SoftMarginLoss`／
             // `GaussianNllLoss`（イシュー #2652。同型の理由で非適格）／
+            // `MultiMarginLoss`／`MultiLabelMarginLoss`／`MultiLabelSoftMarginLoss`／
+            // `SigmoidFocalLoss`（イシュー #2653。同型の理由で非適格）／
             // `RnnCell`／
             // `Inv`／`Solve`／`Det`／`Cholesky`／`MatrixNorm`／
             // `Softmax`／`LogSoftmax`／
@@ -1852,6 +1887,10 @@ impl Op {
             | Op::HingeEmbeddingLoss { .. }
             | Op::SoftMarginLoss { .. }
             | Op::GaussianNllLoss { .. }
+            | Op::MultiMarginLoss { .. }
+            | Op::MultiLabelMarginLoss { .. }
+            | Op::MultiLabelSoftMarginLoss { .. }
+            | Op::SigmoidFocalLoss { .. }
             | Op::CtcLoss { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
@@ -2145,7 +2184,12 @@ impl Op {
                 f(*input);
                 f(*target);
             }
-            Op::HingeEmbeddingLoss { input, .. } | Op::SoftMarginLoss { input, .. } => f(*input),
+            Op::HingeEmbeddingLoss { input, .. }
+            | Op::SoftMarginLoss { input, .. }
+            | Op::MultiMarginLoss { input, .. }
+            | Op::MultiLabelMarginLoss { input, .. }
+            | Op::MultiLabelSoftMarginLoss { input, .. }
+            | Op::SigmoidFocalLoss { input, .. } => f(*input),
             Op::GaussianNllLoss {
                 input, target, var, ..
             } => {
@@ -2430,6 +2474,10 @@ impl Op {
             | Op::HingeEmbeddingLoss { .. }
             | Op::SoftMarginLoss { .. }
             | Op::GaussianNllLoss { .. }
+            | Op::MultiMarginLoss { .. }
+            | Op::MultiLabelMarginLoss { .. }
+            | Op::MultiLabelSoftMarginLoss { .. }
+            | Op::SigmoidFocalLoss { .. }
             | Op::CtcLoss { .. }
             | Op::NllLoss { .. }
             | Op::KlDivLoss { .. }

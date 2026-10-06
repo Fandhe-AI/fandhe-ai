@@ -38,6 +38,7 @@ pub(crate) mod elementwise_loss;
 /// 参照実装（イシュー #1621）。行数が大きいため子モジュールへ分ける
 /// （モジュール冒頭コメント参照）。
 pub(crate) mod linalg;
+pub(crate) mod margin_focal_loss;
 pub(crate) mod scalar;
 
 std::thread_local! {

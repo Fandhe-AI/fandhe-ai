@@ -29,7 +29,7 @@ fn half_ln_2pi() -> f64 {
 }
 
 /// 縮約済みスカラー損失（shape `[]`）を作る。`Mean` は `numel == 0` で `0.0`。
-fn finalize(total: f64, numel: usize, reduction: Reduction) -> Tensor<f32> {
+pub(super) fn finalize(total: f64, numel: usize, reduction: Reduction) -> Tensor<f32> {
     let out = match reduction {
         Reduction::Mean => {
             if numel == 0 {
@@ -44,7 +44,7 @@ fn finalize(total: f64, numel: usize, reduction: Reduction) -> Tensor<f32> {
 }
 
 /// `softplus(−x) = ln(1 + exp(−x))` の安定形（`exp` の引数を常に非正にする）。
-fn softplus_neg(x: f64) -> f64 {
+pub(super) fn softplus_neg(x: f64) -> f64 {
     if x >= 0.0 {
         (-x).exp().ln_1p()
     } else {
@@ -53,7 +53,7 @@ fn softplus_neg(x: f64) -> f64 {
 }
 
 /// `σ(z) = 1 / (1 + exp(−z))` の安定形。
-fn sigmoid(z: f64) -> f64 {
+pub(super) fn sigmoid(z: f64) -> f64 {
     if z >= 0.0 {
         1.0 / (1.0 + (-z).exp())
     } else {

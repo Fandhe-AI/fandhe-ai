@@ -2030,3 +2030,9 @@ facade 公開面は追加していない（保留ガード `SoftminThresholdOpsH
 facade 公開面は追加していない（保留ガード `ElementwiseLossOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
 公開形（`Var` の委譲メソッド 4 本）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-elementwise-loss-ops-decision.md`。
+
+**適用記録（イシュー #2653・親 #2651・ルート #2499 Phase 4。MultiMargin・MultiLabelMargin・MultiLabelSoftMargin・sigmoid focal loss）**:
+`multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` を内部クレート限定（`fandhe_ai_autodiff::margin_focal_loss_ops`。新規 `Op` 4 種とホスト参照実装）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `MarginFocalLossOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var` の委譲メソッド 4 本）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-margin-focal-loss-ops-decision.md`。
