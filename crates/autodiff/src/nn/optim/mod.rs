@@ -72,12 +72,14 @@ mod adagrad;
 mod adam;
 mod adamax;
 mod adamw;
+mod asgd;
 mod lamb;
 mod lbfgs;
 mod nadam;
 pub(crate) mod param_group;
 mod radam;
 mod rmsprop;
+mod rprop;
 pub(crate) mod state_dict;
 
 pub mod amp;
@@ -90,6 +92,7 @@ pub use adagrad::{Adagrad, AdagradConfig};
 pub use adam::{Adam, AdamConfig};
 pub use adamax::{Adamax, AdamaxConfig};
 pub use adamw::{AdamW, AdamWConfig};
+pub use asgd::{Asgd, AsgdConfig};
 // イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）。
 // `ParamGroup`／`ParamGroupStep` は内部クレート限定の公開（facade 非
 // 公開。`param_group` モジュール冒頭 doc・
@@ -119,6 +122,7 @@ pub use reduce_lr_on_plateau::{
     PlateauMode, ReduceLrOnPlateau, ReduceLrOnPlateauConfig, ThresholdMode,
 };
 pub use rmsprop::{RmsProp, RmsPropConfig};
+pub use rprop::{Rprop, RpropConfig};
 pub use state_dict::OptimizerStateDict;
 
 // イシュー #1721: 損失スケーリング（`amp::scale_loss`/`amp::GradScaler::
@@ -320,3 +324,21 @@ pub use state_dict::OptimizerStateDict;
 // （`crates/facade/src/optim.rs` の純再エクスポート。2026-10-04 ルート
 // #2499 の一括承認。経緯・実装記録は `docs/autodiff-lr-scheduler-ext-
 // decision.md` §8）。
+
+// イシュー #2655（親 #2654・ルート #2499 Phase 4）: Rprop（[`Rprop`]・
+// [`RpropConfig`]。Riedmiller & Braun, 1993）と ASGD（[`Asgd`]・
+// [`AsgdConfig`]。Polyak & Juditsky, 1992）を追加した。#2171 の 4 種と
+// 同じく `Tape`／`Var`／`BackendOps` に一切依存しない値型・純関数で、新規
+// `Op`／`BackendOps` メソッド／VJP／カーネル／`unsafe`／依存は追加して
+// いない。演算順は実 PyTorch 2.14.0+cpu の `torch/optim/{rprop,asgd}.py::
+// _single_tensor_*` を実装前に読んで確認済み（各 fixture README 参照）。
+// 上記 #2174 ブロックの「9 optimizer 全種」は当時の記述であり、本 2 種へ
+// の `ParamGroupStep`／`OptimizerStateDict` は未実装（別イシューで設計。
+// ASGD の `eta`／`mu`／`ax`・Rprop の `prev`／`step_size` は既存
+// `decode_state_dict` のフラグ構成に載らないため）。`DeviceParamStore`
+// 非対応（ホスト `Tensor<f32>` 経由の `step()` のみ）。
+//
+// **facade（`fandhe_ai::optim`）へは未公開**（公開形は未承認。承認依頼
+// #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
+// OptimizerRpropAsgdHoldDoctestGuard`・`docs/autodiff-optimizer-rprop-
+// asgd-decision.md` 参照）。
