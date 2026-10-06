@@ -3057,6 +3057,96 @@ pub(crate) fn vjp(
             let d_input = avg_pool2d_vjp(upstream, &input_shape, &params, count_include_pad)?;
             vec![(input, d_input)]
         }
+        // `pool3d_ops::max_pool3d`（イシュー #2643）。`Op::MaxPool2d` の rank 5 版で、
+        // `input`／`upstream`／`index` を `[N·C, D·H·W]`／`[N·C, Dout·Hout·Wout]` へ reshape して
+        // `scatter_with_fallback`（`Add`。重なり窓の重複索引は `f64` アキュムレータで集約）。
+        Op::MaxPool3d { input, index } => {
+            let input_shape = nodes[input.0].shape.clone();
+            if input_shape.len() != 5 {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 5,
+                    actual: input_shape.len(),
+                }));
+            }
+            let nc = input_shape[0]
+                .checked_mul(input_shape[1])
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let dhw = input_shape[2..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let flat_in = [nc, dhw];
+            let upstream_c = upstream.contiguous();
+            let out_shape = upstream_c.shape().to_vec();
+            if out_shape.len() != 5 {
+                return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+                    expected: 5,
+                    actual: out_shape.len(),
+                }));
+            }
+            let out_dhw = out_shape[2..]
+                .iter()
+                .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+                .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+            let flat_out = [nc, out_dhw];
+            let upstream_flat = upstream_c
+                .reshape(&flat_out)
+                .map_err(AutodiffError::Shape)?;
+            let index_flat = index
+                .contiguous()
+                .reshape(&flat_out)
+                .map_err(AutodiffError::Shape)?;
+            // 索引がすべて `[0, D·H·W)` に収まることを事前検証し、契約違反は panic ではなく
+            // 型付きエラーで拒否する（`Op::MaxPool2d` と同方針。security.md A08）。
+            for v in index_flat.host_slice().iter() {
+                let vi = i64::from(*v);
+                if vi < 0 || (vi as usize) >= dhw {
+                    return Err(AutodiffError::Backward(format!(
+                        "Op::MaxPool3d の VJP: index の値 {vi} が [0, D*H*W)=[0, {dhw}) の範囲外（契約違反）"
+                    )));
+                }
+            }
+            let zeros = Tensor::zeros(&flat_in).map_err(AutodiffError::Shape)?;
+            let d_input_flat = scatter_with_fallback(
+                ops,
+                &zeros,
+                1,
+                &index_flat,
+                &upstream_flat,
+                ScatterReduce::Add,
+                &flat_in,
+            )?;
+            let d_input = d_input_flat
+                .reshape(&input_shape)
+                .map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
+        // `pool3d_ops::avg_pool3d`（イシュー #2643）。ホスト側のみの VJP。レイアウトを
+        // 再構築し共有カーネル `avg_pool3d_vjp_host` へ委譲する（`f64` アキュムレータ・1 回 downcast）。
+        Op::AvgPool3d {
+            input,
+            params,
+            count_include_pad,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let layout = fandhe_ai_tensor_core::pool3d::pool3d_layout(&input_shape, &params)
+                .map_err(AutodiffError::Shape)?;
+            let upstream_c = upstream.contiguous();
+            if upstream_c.shape() != layout.out_shape() {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                    lhs: upstream_c.shape().to_vec(),
+                    rhs: layout.out_shape().to_vec(),
+                }));
+            }
+            let data = fandhe_ai_tensor_core::pool3d::avg_pool3d_vjp_host(
+                &upstream_c.host_slice(),
+                &layout,
+                count_include_pad,
+            )
+            .map_err(AutodiffError::Shape)?;
+            let d_input = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, d_input)]
+        }
         // `Var::adaptive_avg_pool2d`（イシュー #1728・設計 `docs/
         // pooling-ops-design.md` §8）。ホスト側のみの VJP。
         Op::AdaptiveAvgPool2d { input } => {
