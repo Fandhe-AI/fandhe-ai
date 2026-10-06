@@ -480,8 +480,8 @@ impl FunctionalModel {
     /// 第 1 パスでキー集合の完全一致（未知キー・欠落キーを拒否）と各テンソルの shape 一致を
     /// 何も変更しないうちに検査する。第 2 パスでブロックごとにローカルキーへ戻して
     /// `Sequential::load_state_dict` へ委譲し、途中で失敗した場合は開始前のスナップショットで
-    /// 適用済みブロックを巻き戻して元のエラーを返す（巻き戻し自体の失敗は握りつぶす
-    /// ベストエフォート）。
+    /// 適用済みブロックを巻き戻して元のエラーを返す。巻き戻し自体が失敗した場合は、
+    /// 適用失敗と巻き戻し失敗の双方と部分適用の可能性を示す `InvalidArgument` を返す。
     pub(crate) fn load_state_dict(
         &mut self,
         mut state: HashMap<String, Tensor<f32>>,
@@ -551,10 +551,25 @@ impl FunctionalModel {
                 ))),
             };
             if let Err(err) = result {
+                // 巻き戻し失敗は握りつぶさず、部分適用の可能性を明示して fail-closed に返す
+                // （`Module::load_state_dict` 契約・security.md A08）。
+                let mut rollback_failures: Vec<String> = Vec::new();
                 for ((done_index, _), snapshot) in plan.iter().zip(snapshots.iter()).take(applied) {
-                    if let Some(NodeDef::Block { block, .. }) = self.nodes.get_mut(*done_index) {
-                        let _ = block.load_state_dict(snapshot.clone());
+                    match self.nodes.get_mut(*done_index) {
+                        Some(NodeDef::Block { block, .. }) => {
+                            if let Err(rb) = block.load_state_dict(snapshot.clone()) {
+                                rollback_failures.push(format!("ノード {done_index}: {rb}"));
+                            }
+                        }
+                        _ => rollback_failures
+                            .push(format!("ノード {done_index}: ブロックでないため復元不能")),
                     }
+                }
+                if !rollback_failures.is_empty() {
+                    return Err(invalid(format!(
+                        "load_state_dict: ノード {index} の適用に失敗（{err}）し、先行ブロックの巻き戻しにも失敗した（{}）。モデルが部分適用のまま残っている可能性がある",
+                        rollback_failures.join("; ")
+                    )));
                 }
                 return Err(err);
             }
