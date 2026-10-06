@@ -242,6 +242,10 @@ pub fn masked_scatter<'t>(
     checked_bytes_for::<bool>(&out_shape)?;
     let p: usize = out_shape.iter().product();
     checked_axis_len_as_i32(p)?;
+    // mask の `contiguous()` 実体化（bool × p）・添字列確保より前に実用上限を適用する。
+    // 小さな mask を巨大 shape へ broadcast すると、`m` の検査より先に数 GiB の確保が
+    // 走り割り当て失敗で abort しうるため（p は実体化される要素数の上界）。
+    checked_index_alloc_len(p)?;
     let mask_c = mask
         .broadcast_to(&out_shape)
         .map_err(AutodiffError::Shape)?
@@ -317,6 +321,19 @@ mod tests {
         let c = index_copy(&x, 0, &dup, &s).unwrap();
         // 重複添字は最後の書き手が勝つ。
         assert_eq!(vals(&c), vec![0.0, 0.0, 3.0, 4.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_scatter_rejects_huge_broadcast_mask_before_materializing() {
+        let tape = Tape::new();
+        let x = tape.var(&t(vec![0.0], &[1]));
+        let s = tape.var(&t(vec![1.0], &[1]));
+        // stride-0 view（実体なし）。p = 2^29 は i32 範囲内だが 1 GiB 上限（i32 換算）を超える。
+        let mask = Tensor::new(vec![true], &[1])
+            .unwrap()
+            .broadcast_to(&[1usize << 29])
+            .unwrap();
+        assert!(masked_scatter(&x, &mask, &s).is_err());
     }
 
     #[test]
