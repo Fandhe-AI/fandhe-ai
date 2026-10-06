@@ -5291,6 +5291,160 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct ShapeViewOpsHoldDoctestGuard;
 
+/// テンソル積・距離・外積 4 演算（`kron`・`tensordot`〈`tensordot_axes`〉・`cdist`・`cross`。
+/// イシュー #2640・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
+/// ガード（`ShapeViewOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `tensor_product_ops`・5 メソッドを持つプローブ用トレイトを置き、修飾なしの
+/// 関数呼び出しと `Var`／`Tape`／`Tensor<f32>` の修飾付きメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数を glob 可能な位置へ公開するか、これらの型へ同名の
+/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する（新規型はないため型のプローブは置かない）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::tensor_product_ops`。新規 `Op`・
+/// `BackendOps` メソッドはない）。保留対象は facade 公開面（`Var::kron` 等の委譲メソッド）
+/// のみで、公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
+/// `docs/autodiff-tensor-product-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
+/// ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// tensor_product_ops_hold_doctest_globs_all_pub_modules`・
+/// `tensor_product_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_tensor_product_ops`・
+/// `workspace_declares_tensor_product_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_tensor_product_hold_probe {
+///     pub mod tensor_product_ops {
+///         pub fn kron() {}
+///         pub fn tensordot() {}
+///         pub fn tensordot_axes() {}
+///         pub fn cdist() {}
+///         pub fn cross() {}
+///     }
+/// }
+/// use __fandhe_tensor_product_hold_probe::*;
+///
+/// struct __FandheTensorProductOpsHoldMarker;
+///
+/// trait __FandheTensorProductOpsHoldProbe {
+///     fn kron(&self) -> __FandheTensorProductOpsHoldMarker;
+///     fn tensordot(&self) -> __FandheTensorProductOpsHoldMarker;
+///     fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker;
+///     fn cdist(&self) -> __FandheTensorProductOpsHoldMarker;
+///     fn cross(&self) -> __FandheTensorProductOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheTensorProductOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn kron(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn tensordot(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn cdist(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn cross(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheTensorProductOpsHoldProbe for fandhe_ai::Tape {
+///     fn kron(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn tensordot(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn cdist(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn cross(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheTensorProductOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn kron(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn tensordot(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn cdist(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+///     fn cross(&self) -> __FandheTensorProductOpsHoldMarker {
+///         __FandheTensorProductOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     tensor_product_ops::kron();
+///     tensor_product_ops::tensordot();
+///     tensor_product_ops::tensordot_axes();
+///     tensor_product_ops::cdist();
+///     tensor_product_ops::cross();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::kron(v);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot(v);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot_axes(v);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cdist(v);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cross(v);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::kron(tape);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot(tape);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot_axes(tape);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::cdist(tape);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::cross(tape);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tensor::<f32>::kron(tf);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tensor::<f32>::tensordot(tf);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tensor::<f32>::tensordot_axes(tf);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tensor::<f32>::cdist(tf);
+///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tensor::<f32>::cross(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct TensorProductOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
