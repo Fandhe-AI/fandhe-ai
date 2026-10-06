@@ -698,6 +698,31 @@ fn huge_broadcast_view_is_rejected_before_allocation() {
 }
 
 #[test]
+fn huge_strided_broadcast_view_is_rejected_before_contiguous() {
+    // 空間軸が巨大でも stride が大きく L が小さい（出力は小さい）ケース。入力側の検査が無いと
+    // `contiguous()` が view 全体を確保してしまう。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let base = tape.var(&t(vec![1.0], &[1, 1, 1, 1]));
+    let huge = base
+        .broadcast_to(&[1, 1, 1usize << 31, 1usize << 31])
+        .unwrap();
+    let big = 1usize << 31;
+    assert!(matches!(
+        unfold(&huge, [1, 1], [big, big], [0, 0], [1, 1]),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+    // fold 側: 入力 `[1, 1, L]` を巨大 broadcast view にする（K=1・L=2^61）。
+    let col = tape.var(&t(vec![1.0], &[1, 1, 1]));
+    let huge_col = col.broadcast_to(&[1, 1, 1usize << 61]).unwrap();
+    let before = tape.len();
+    assert!(matches!(
+        fold(&huge_col, [1, 1], [1, 1], [1, 1], [0, 0], [1, 1]),
+        Err(AutodiffError::Shape(ShapeError::ElementCountOverflow))
+    ));
+    assert_eq!(tape.len(), before);
+}
+
+#[test]
 fn huge_output_size_is_rejected_before_allocation() {
     // kernel 1・stride 2^31 → L = 1。出力は 2^31·2^31 要素でバイト数が usize を超えるため確保前に拒否する。
     let tape = Tape::new_with_ops(common::naive_ops());

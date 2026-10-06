@@ -32,20 +32,23 @@ fn require_single_group(params: &Conv2dParams) -> Result<(), ShapeError> {
 
 /// Unfold の出力 shape `[N, C·kH·kW, L]` を検査・計算する（入力 `[N, C, H, W]`）。
 ///
-/// 検査順序: `groups == 1` → `im2col_out_shape`（rank 4・空間軸 0 拒否・窓数 `L` の算出・
+/// 検査順序: `groups == 1` → 入力の確保前検査 → `im2col_out_shape`（rank 4・空間軸 0 拒否・窓数 `L` の算出・
 /// 出力要素数の確保前検査）。
 pub fn unfold_out_shape(
     input_shape: &[usize],
     params: &Conv2dParams,
 ) -> Result<Vec<usize>, ShapeError> {
     require_single_group(params)?;
+    // 入力側の確保前検査。巨大な broadcast view は出力 `L` が小さくても `contiguous()` で全体が
+    // 実体化されるため、出力サイズとは独立に入力要素数・バイト数を拒否する。
+    checked_numel_for::<f32>(input_shape)?;
     let col = im2col_out_shape(input_shape, params)?;
     Ok(vec![col[0], col[2], col[3]])
 }
 
 /// Fold の出力 shape `[N, C, H, W]` を検査・計算する（入力 `[N, C·kH·kW, L]`）。
 ///
-/// 検査順序: rank 3 → `groups == 1` → `K % (kH·kW) == 0`（`C = K / (kH·kW)`）→ `output_size` の
+/// 検査順序: rank 3 → `groups == 1` → 入力の確保前検査 → `K % (kH·kW) == 0`（`C = K / (kH·kW)`）→ `output_size` の
 /// 0 拒否 → 出力要素数・バイト数の確保前検査 → `im2col_out_shape` で窓数 `P` を導出 → `P == L`。
 pub fn fold_out_shape(
     input_shape: &[usize],
@@ -59,6 +62,8 @@ pub fn fold_out_shape(
         });
     }
     require_single_group(params)?;
+    // 入力側の確保前検査（`unfold_out_shape` と同じ理由。`contiguous()` による全体実体化を防ぐ）。
+    checked_numel_for::<f32>(input_shape)?;
     let (n, k, l) = (input_shape[0], input_shape[1], input_shape[2]);
     let [kh, kw] = params.kernel_size();
     let kk = kh.checked_mul(kw).ok_or(ShapeError::ElementCountOverflow)?;
