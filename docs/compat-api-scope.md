@@ -1965,6 +1965,12 @@ facade 公開面は追加していない（保留ガード `ShapeViewOpsHoldDoct
 公開形（`Var::unbind` 等の委譲メソッドと `MeshgridIndexing` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-shape-view-ops-decision.md`。
 
+**適用記録（イシュー #2641・親 #2625・ルート #2499 Phase 4。索引付き更新）**:
+`scatter_reduce`／`index_add`／`index_copy`／`masked_scatter` を内部クレート限定（`fandhe_ai_autodiff::indexed_update_ops`・`fandhe_ai_tensor_core::indexed_update`・`BackendOps::indexed_scatter_reduce`）で CPU 実装した（`scatter_reduce` は専用 `Op`＋共有ホストカーネル、残り 3 演算は既存 `Op::Scatter` の合成）。
+facade 公開面は追加していない（保留ガード `IndexedUpdateOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。
+公開形（`Var::scatter_reduce` 等の委譲メソッドと `ScatterReduceMode` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678・#2679）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-indexed-update-ops-decision.md`。
+
 **適用記録（イシュー #2640・親 #2625・ルート #2499 Phase 4。テンソル積・距離・外積）**:
 `kron`／`tensordot`（`tensordot_axes`）／`cdist`／`cross` を内部クレート限定（`fandhe_ai_autodiff::tensor_product_ops`。新規 `Op`・`BackendOps` メソッドなしの既存 `Op` 合成）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `TensorProductOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。

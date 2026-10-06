@@ -2392,6 +2392,43 @@ pub(crate) fn vjp(
             };
             vec![(input, d_input), (src, d_src)]
         }
+        // `scatter_reduce`（イシュー #2641）。`Op::Logcumsumexp` と同型に入力・`src` を
+        // 実体化し、共有カーネルの VJP（mode ごとの規則は
+        // `tensor_core::indexed_update` doc）で `d_input`／`d_src` を求める。
+        Op::IndexedScatterReduce {
+            input,
+            dim,
+            index,
+            src,
+            mode,
+            include_self,
+        } => {
+            let input_shape = nodes[input.0].shape.clone();
+            let src_shape = nodes[src.0].shape.clone();
+            check_fft_upstream_shape(upstream, &input_shape, "IndexedScatterReduce")?;
+            let layout = fandhe_ai_tensor_core::indexed_update::scatter_reduce_layout(
+                &input_shape,
+                index.shape(),
+                &src_shape,
+                dim,
+            )
+            .map_err(AutodiffError::Shape)?;
+            let x_val = materialize_fallible(nodes, ops, input)?;
+            let s_val = materialize_fallible(nodes, ops, src)?;
+            let (d_in, d_src) = fandhe_ai_tensor_core::indexed_update::scatter_reduce_vjp_host(
+                &x_val.contiguous().host_slice(),
+                &index.contiguous().host_slice(),
+                &s_val.contiguous().host_slice(),
+                &upstream.contiguous().host_slice(),
+                &layout,
+                mode,
+                include_self,
+            )
+            .map_err(AutodiffError::Shape)?;
+            let d_input = Tensor::new(d_in, &input_shape).map_err(AutodiffError::Shape)?;
+            let d_src = Tensor::new(d_src, &src_shape).map_err(AutodiffError::Shape)?;
+            vec![(input, d_input), (src, d_src)]
+        }
         // `Var::sort`／`Var::topk`（`Var::argsort` はノードを記録しない
         // ため到達しない。イシュー #1733）。forward が
         // `values = gather(input, dim, index)` と数学的に同一

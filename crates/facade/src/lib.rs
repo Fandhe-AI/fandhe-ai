@@ -5291,6 +5291,153 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct ShapeViewOpsHoldDoctestGuard;
 
+/// 索引付き更新 4 種（`scatter_reduce`・`index_add`・`index_copy`・`masked_scatter`。
+/// イシュー #2641・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
+/// ガード（`ShapeViewOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
+/// モジュール `indexed_update_ops`・`indexed_update`・型 `ScatterReduceMode`・4 メソッドを持つ
+/// プローブ用トレイトを置き、修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>` の修飾付き
+/// メソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ
+/// 公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
+/// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は
+/// facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::indexed_update_ops`・
+/// `fandhe_ai_tensor_core::indexed_update`。新規 `Op` は `scatter_reduce` 用の 1 つ、
+/// `BackendOps` メソッドは `indexed_scatter_reduce` のみ）。保留対象は facade 公開面
+/// （`Var::scatter_reduce` 等の委譲メソッドと引数型 `ScatterReduceMode` の再エクスポート）のみで、
+/// 公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
+/// `docs/autodiff-indexed-update-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
+/// ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// indexed_update_ops_hold_doctest_globs_all_pub_modules`・
+/// `indexed_update_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_indexed_update_ops`・
+/// `workspace_declares_indexed_update_ops_fn_names_only_in_allowed_locations`）との
+/// 多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
+/// 対応する否定ガードも同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_indexed_update_hold_probe {
+///     pub struct ScatterReduceMode;
+///     pub mod indexed_update_ops {
+///         pub fn scatter_reduce() {}
+///         pub fn index_add() {}
+///         pub fn index_copy() {}
+///         pub fn masked_scatter() {}
+///     }
+///     pub mod indexed_update {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_indexed_update_hold_probe::*;
+///
+/// struct __FandheIndexedUpdateOpsHoldMarker;
+///
+/// trait __FandheIndexedUpdateOpsHoldProbe {
+///     fn scatter_reduce(&self) -> __FandheIndexedUpdateOpsHoldMarker;
+///     fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker;
+///     fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker;
+///     fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn scatter_reduce(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Tape {
+///     fn scatter_reduce(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn scatter_reduce(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+///     fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker {
+///         __FandheIndexedUpdateOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns(_: ScatterReduceMode) {
+///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     indexed_update_ops::scatter_reduce();
+///     indexed_update_ops::index_add();
+///     indexed_update_ops::index_copy();
+///     indexed_update_ops::masked_scatter();
+///     indexed_update::__mark();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::scatter_reduce(v);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_add(v);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_copy(v);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::masked_scatter(v);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::scatter_reduce(tape);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_add(tape);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_copy(tape);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::masked_scatter(tape);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tensor::<f32>::scatter_reduce(tf);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tensor::<f32>::index_add(tf);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tensor::<f32>::index_copy(tf);
+///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tensor::<f32>::masked_scatter(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct IndexedUpdateOpsHoldDoctestGuard;
+
 /// テンソル積・距離・外積 4 演算（`kron`・`tensordot`〈`tensordot_axes`〉・`cdist`・`cross`。
 /// イシュー #2640・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
 /// ガード（`ShapeViewOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。

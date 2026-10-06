@@ -545,6 +545,37 @@ fn metal_scan_ops_are_unsupported_not_panic() {
         Err(BackendError::Unsupported(_))
     ));
 }
+/// イシュー #2641: `indexed_scatter_reduce` は CUDA に専用カーネルがなく既定の
+/// `Unsupported` を返す（autodiff 側が共有ホストカーネルへフォールバックする契約。
+/// panic しない）。
+#[test]
+fn cuda_indexed_scatter_reduce_is_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::ScatterReduceMode;
+    let cuda = CudaBackendOps::new(0);
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    let idx = Tensor::<i32>::new(vec![0, 2], &[2]).expect("valid index");
+    let src = Tensor::new(vec![1.0, 1.0], &[2]).expect("valid tensor");
+    assert!(matches!(
+        cuda.indexed_scatter_reduce(&a, 0, &idx, &src, ScatterReduceMode::Sum, true),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
+/// イシュー #2641: Metal 版（macOS のみ）。契約は CUDA 版と同じ。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_indexed_scatter_reduce_is_unsupported_not_panic() {
+    use fandhe_ai_tensor_core::ScatterReduceMode;
+    let metal = MetalBackendOps::new();
+    let a = Tensor::new(vec![3.0, 1.0, 2.0], &[3]).expect("valid tensor");
+    let idx = Tensor::<i32>::new(vec![0, 2], &[2]).expect("valid index");
+    let src = Tensor::new(vec![1.0, 1.0], &[2]).expect("valid tensor");
+    assert!(matches!(
+        metal.indexed_scatter_reduce(&a, 0, &idx, &src, ScatterReduceMode::Sum, true),
+        Err(BackendError::Unsupported(_))
+    ));
+}
+
 /// イシュー #2637: `stat_*` 6 メソッドは CUDA に専用カーネルがなく既定の
 /// `Unsupported` を返す（autodiff 側が共有ホストカーネルへフォールバックする契約。
 /// panic しない）。

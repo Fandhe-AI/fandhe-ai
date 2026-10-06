@@ -1036,6 +1036,23 @@ pub(crate) enum Op {
         src: NodeId,
         reduce: ScatterReduce,
     },
+    /// `scatter_reduce`（`torch.scatter_reduce` 相当。イシュー #2641・
+    /// `docs/autodiff-indexed-update-ops-decision.md`）。`index` は [`Op::Scatter`]
+    /// と同じ非追跡データ（forward 時点で範囲検査済み）、`src` は追跡対象。
+    /// `crate::indexed_update_ops::scatter_reduce` からのみ積まれ、facade には
+    /// 公開しない。VJP は入力値・`src`・`index` を実体化して共有カーネル
+    /// `tensor_core::indexed_update::scatter_reduce_vjp_host` で再計算する
+    /// （`Op::Logcumsumexp` と同じ「入力から再計算」方式）。既存の `ScatterReduce`
+    /// とは別 enum（`ScatterReduceMode`）を使う（未知 variant が黙って `Overwrite`
+    /// になる経路を避ける。決定記録 §2）。非融合・非 checkpoint・高階微分非対応。
+    IndexedScatterReduce {
+        input: NodeId,
+        dim: usize,
+        index: Tensor<i32>,
+        src: NodeId,
+        mode: fandhe_ai_tensor_core::ScatterReduceMode,
+        include_self: bool,
+    },
     /// `Var::embedding`（`nn::Embedding` の forward 本体。`torch.nn.
     /// Embedding` 相当。イシュー #1604）。`weight`（`[V, D]`）から
     /// `index`（`[N, D]` へ broadcast・contiguous 済みの非追跡
@@ -1775,6 +1792,9 @@ impl Op {
             // `recompute_value` に再計算経路を持たないため解放しない
             // （非網羅 match 是正で新規 variant 追加時に強制される）。
             Op::Gather { .. } | Op::Scatter { .. } => false,
+            // `Op::IndexedScatterReduce`（イシュー #2641）も eager 実体化で再計算経路を
+            // 持たない（`Op::Scatter` と同型）。
+            Op::IndexedScatterReduce { .. } => false,
             // `Op::Embedding`（イシュー #1604）は `Op::Gather` と同じく
             // `index`（`padding_idx` も）を `Op` 自身が保持する eager
             // 実体化演算で、`recompute_value` に再計算経路を持たない
@@ -1984,7 +2004,7 @@ impl Op {
                 f(*b);
             }
             Op::Gather { input, .. } => f(*input),
-            Op::Scatter { input, src, .. } => {
+            Op::Scatter { input, src, .. } | Op::IndexedScatterReduce { input, src, .. } => {
                 f(*input);
                 f(*src);
             }
@@ -2289,6 +2309,7 @@ impl Op {
             | Op::Dropout { .. }
             | Op::Gather { .. }
             | Op::Scatter { .. }
+            | Op::IndexedScatterReduce { .. }
             | Op::Embedding { .. }
             | Op::Cumsum { .. }
             | Op::Cumprod { .. }
@@ -2824,6 +2845,25 @@ impl Tape {
     /// （`tests/tape_recording.rs`）。
     pub fn len(&self) -> usize {
         self.nodes.borrow().len()
+    }
+
+    /// 合成演算の失敗時ロールバック用に、ノード数と葉プレフィックス固定状態を保存する。
+    pub(crate) fn rollback_point(&self) -> (usize, Option<usize>) {
+        (self.nodes.borrow().len(), self.retained_leaf_len.get())
+    }
+
+    /// [`Tape::rollback_point`] の状態へ戻す（失敗時のロールバック専用）。
+    ///
+    /// `masked_scatter` のように「view 系ノードを積んだ後に失敗し得る処理」を持つ合成演算が、
+    /// `Err` 返却前に自分が積んだノードだけを取り除いて孤児ノードを残さないために使う。
+    /// `push_view` は初回の非葉ノード記録時に `retained_leaf_len` を固定するため、ノードだけを
+    /// 切り詰めると固定状態が残り、以降に登録した葉が `leaf()` から見えず `reset()` で破棄される。
+    /// そのため葉プレフィックス状態も合成開始時点へ復元する。他の演算が積んだノードは開始時点より
+    /// 前にしか存在しない前提（同一スレッド・`Tape` は `!Sync` で合成中に割り込みなし）。
+    /// checkpoint 区間は view 系合成では登録されないため触らない。
+    pub(crate) fn rollback_to(&self, point: (usize, Option<usize>)) {
+        self.nodes.borrow_mut().truncate(point.0);
+        self.retained_leaf_len.set(point.1);
     }
 
     /// テープにノードが 1 つも記録されていないか判定する。

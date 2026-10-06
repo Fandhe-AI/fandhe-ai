@@ -3135,6 +3135,36 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)
     }
 
+    /// [`fandhe_ai_tensor_core::BackendOps::indexed_scatter_reduce`] の CPU 実装
+    /// （イシュー #2641）。共有ホストカーネル
+    /// `fandhe_ai_tensor_core::indexed_update::scatter_reduce_host` を呼ぶだけで
+    /// 数値規則は持たない（autodiff のホストフォールバックと単一情報源）。
+    /// 形状・`index` の値域はカーネル側で再検査する（fail-closed）。
+    fn indexed_scatter_reduce(
+        &self,
+        input: &Tensor<f32>,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Tensor<f32>,
+        mode: fandhe_ai_tensor_core::ScatterReduceMode,
+        include_self: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        use fandhe_ai_tensor_core::indexed_update as iu;
+        let (input, index, src) = (input.contiguous(), index.contiguous(), src.contiguous());
+        let layout = iu::scatter_reduce_layout(input.shape(), index.shape(), src.shape(), dim)
+            .map_err(BackendError::ShapeMismatch)?;
+        let v = iu::scatter_reduce_host(
+            &input.host_slice(),
+            &index.host_slice(),
+            &src.host_slice(),
+            &layout,
+            mode,
+            include_self,
+        )
+        .map_err(BackendError::ShapeMismatch)?;
+        Tensor::new(v, layout.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::stat_kthvalue`] の CPU 実装（イシュー
     /// #2637）。共有カーネル `fandhe_ai_tensor_core::stat_reduce::kthvalue_host` を
     /// 呼ぶだけで順序規則は持たない（autodiff のホストフォールバックと単一情報源）。
