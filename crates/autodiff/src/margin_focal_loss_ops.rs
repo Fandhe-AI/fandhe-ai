@@ -615,6 +615,23 @@ mod tests {
         }
     }
 
+    /// 空バッチ `[0, C]` は `C` が巨大でも長さ `C` の補助バッファを確保せず 0 損失になる
+    /// （`checked_bytes_for` は numel = 0 で素通りするため。Bugbot 指摘）。
+    #[test]
+    fn empty_batch_with_huge_c_does_not_allocate_row_buffers() {
+        let tp = tape();
+        let c = 1usize << 40;
+        let x = tp.var(&t(vec![], &[0, c]));
+        for r in [Reduction::Mean, Reduction::Sum] {
+            let b = multilabel_margin_loss(&x, &ti(vec![], &[0, c]), r).unwrap();
+            assert_eq!(scalar(&b), 0.0);
+            assert_eq!(
+                tp.backward(&b).unwrap().get(&x).unwrap().unwrap().numel(),
+                0
+            );
+        }
+    }
+
     #[test]
     fn errors_do_not_leave_orphan_nodes() {
         let tp = tape();

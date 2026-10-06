@@ -92,7 +92,7 @@ pub(crate) fn multi_margin_loss_vjp(
     let (n, c) = rows_cols(input.shape());
     let xs = dense_vec(input);
     let mut dx = vec![0f32; n * c];
-    let mut row_grad = vec![0f64; c];
+    let mut row_grad = vec![0f64; if n == 0 { 0 } else { c }];
     for i in 0..n {
         let y = targets[i] as usize;
         let w = weight.map_or(1.0, |w| f64::from(w[y]));
@@ -144,7 +144,10 @@ pub(crate) fn multilabel_margin_loss_forward(
 ) -> Tensor<f32> {
     let (n, c) = rows_cols(input.shape());
     let xs = dense_vec(input);
-    let mut mask = vec![false; c];
+    // 空バッチ（n == 0）では行ループが回らないため長さ C の補助バッファを確保しない
+    // （checked_bytes_for は numel = 0 で素通りするため、巨大 C の確保を避ける）。
+    let buf_len = if n == 0 { 0 } else { c };
+    let mut mask = vec![false; buf_len];
     let mut total = 0.0f64;
     for i in 0..n {
         let row = &xs[i * c..(i + 1) * c];
@@ -176,9 +179,12 @@ pub(crate) fn multilabel_margin_loss_vjp(
 ) -> Tensor<f32> {
     let (n, c) = rows_cols(input.shape());
     let xs = dense_vec(input);
-    let mut mask = vec![false; c];
+    // 空バッチ（n == 0）では行ループが回らないため長さ C の補助バッファを確保しない
+    // （checked_bytes_for は numel = 0 で素通りするため、巨大 C の確保を避ける）。
+    let buf_len = if n == 0 { 0 } else { c };
+    let mut mask = vec![false; buf_len];
     let mut dx = vec![0f32; n * c];
-    let mut row_grad = vec![0f64; c];
+    let mut row_grad = vec![0f64; buf_len];
     let g = scale / c as f64;
     for i in 0..n {
         let row = &xs[i * c..(i + 1) * c];
