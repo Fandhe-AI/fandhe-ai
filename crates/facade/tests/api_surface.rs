@@ -16460,6 +16460,268 @@ fn facade_does_not_reexport_or_declare_ema_items_detects_each_category() {
 }
 
 // =====================================================================
+// イシュー #2658（親 #2657）: SWA（`AveragedModel`・`SwaLr`・`SwaAnneal`）
+// の facade 公開・`FitConfig`／`Sequential` 接続の保留を検査するテスト群。
+// `SwaHoldDoctestGuard`（`src/lib.rs`）の正のプローブ 1 ブロック方式の
+// ドリフト検査に加え、facade src 全体への非再エクスポート・非独自宣言
+// （型名）・非 inherent メソッド追加（`use_swa`／`swa_start`／`swa_lr`）を
+// 固定する。検出範囲は列挙名に限る（マクロ生成・別名経由までは保証しない。
+// `docs/autodiff-swa-decision.md` §9）。公開形は未承認（同 §7。承認依頼
+// #2677）。
+// =====================================================================
+
+/// `SwaHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import
+/// するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が
+/// 一致することを固定する。
+#[test]
+fn swa_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "SwaHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "SwaHoldDoctestGuard の doctest ブロックが glob import する\
+         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトして\
+         いる（declared={declared:?}, doctest={globbed:?}）。新しい\
+         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// glob 以外の本文が固定文言 [`SWA_HOLD_PROBE_BODY`] と 1 行たりとも違わず
+/// 一致することを固定する（プローブの削除・隠し行・別名シャドーイング等
+/// で正のプローブを骨抜きにする改変を機械的に拒否する）。
+#[test]
+fn swa_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines = extract_hold_doctest_guard_doc(&content, "SwaHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, SWA_HOLD_PROBE_BODY,
+        "SwaHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
+         固定文言 SWA_HOLD_PROBE_BODY からドリフトしている。正の\
+         プローブ（型名 glob 衝突・inherent メソッド衝突の両方）の\
+         削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`swa_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定
+/// 文言（`SwaHoldDoctestGuard` doc 内 doctest ブロックの glob 行を除いた
+/// 本文と 1 行単位で完全一致する）。
+const SWA_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_swa_hold_probe {\n\
+\x20\x20\x20\x20pub struct AveragedModel;\n\
+\x20\x20\x20\x20pub struct SwaLr;\n\
+\x20\x20\x20\x20pub struct SwaAnneal;\n\
+}\n\
+use __fandhe_swa_hold_probe::*;\n\
+\n\
+fn __probe_type(_: AveragedModel, _: SwaLr, _: SwaAnneal) {}\n\
+\n\
+struct __FandheSwaHoldMarker;\n\
+\n\
+trait __FandheSwaHoldProbe {\n\
+\x20\x20\x20\x20fn use_swa(&self) -> __FandheSwaHoldMarker;\n\
+\x20\x20\x20\x20fn swa_start(&self) -> __FandheSwaHoldMarker;\n\
+\x20\x20\x20\x20fn swa_lr(&self) -> __FandheSwaHoldMarker;\n\
+}\n\
+\n\
+impl __FandheSwaHoldProbe for fandhe_ai::compat::FitConfig {\n\
+\x20\x20\x20\x20fn use_swa(&self) -> __FandheSwaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSwaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn swa_start(&self) -> __FandheSwaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSwaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn swa_lr(&self) -> __FandheSwaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSwaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheSwaHoldProbe for fandhe_ai::compat::Sequential {\n\
+\x20\x20\x20\x20fn use_swa(&self) -> __FandheSwaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSwaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn swa_start(&self) -> __FandheSwaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSwaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn swa_lr(&self) -> __FandheSwaHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheSwaHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_fit_config(x: &fandhe_ai::compat::FitConfig) {\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = fandhe_ai::compat::FitConfig::use_swa(x);\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = x.use_swa();\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = fandhe_ai::compat::FitConfig::swa_start(x);\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = x.swa_start();\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = fandhe_ai::compat::FitConfig::swa_lr(x);\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = x.swa_lr();\n\
+}\n\
+\n\
+fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = fandhe_ai::compat::Sequential::use_swa(x);\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = x.use_swa();\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = fandhe_ai::compat::Sequential::swa_start(x);\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = x.swa_start();\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = fandhe_ai::compat::Sequential::swa_lr(x);\n\
+\x20\x20\x20\x20let _: __FandheSwaHoldMarker = x.swa_lr();\n\
+}";
+
+/// [`facade_does_not_reexport_or_declare_swa_items`]・その自己テストが共用
+/// する検出本体。facade src 全体の `pub use` から [`collect_pub_use_leaves`]
+/// で別名にする前の葉を集めて `AveragedModel`／`SwaLr`／`SwaAnneal` を検出し
+/// （単一行・複数行・ネスト group・別名も検出）、`trait`／`struct`／`enum`／
+/// `type` 直後の同名独自宣言と、`fn use_swa`／`fn swa_start`／`fn swa_lr`
+/// 宣言（可視性・宣言文脈を問わない）を違反として返す。検出範囲は列挙名に
+/// 限る（マクロ生成・別名経由の公開までは保証しない）。
+fn scan_swa_reexports_and_declarations(content: &str) -> Vec<String> {
+    const TYPE_NAMES: [&str; 3] = ["AveragedModel", "SwaLr", "SwaAnneal"];
+    const METHOD_NAMES: [&str; 3] = ["use_swa", "swa_start", "swa_lr"];
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if TYPE_NAMES.contains(&leaf.as_str()) {
+                    offending.push(format!("pub use leaf={leaf}"));
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && tokens
+                .get(i + 1)
+                .map(|t| TYPE_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        if tokens[i] == "fn"
+            && tokens
+                .get(i + 1)
+                .map(|t| METHOD_NAMES.contains(&t.as_str()))
+                .unwrap_or(false)
+        {
+            offending.push(format!(
+                "fn {} 宣言",
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    offending
+}
+
+/// facade src 全体に、`AveragedModel`／`SwaLr`／`SwaAnneal` を識別子単位で
+/// 含む `pub use` も、同名の独自 `trait`／`struct`／`enum`／`type` 宣言も、
+/// `use_swa`／`swa_start`／`swa_lr` という名前の `fn` 宣言も存在しないこと
+/// を固定する（`SwaHoldDoctestGuard` と多層防御を成す最内層のソース走査）。
+#[test]
+fn facade_does_not_reexport_or_declare_swa_items() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_swa_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が SWA（イシュー #2658。AveragedModel／SwaLr／\
+         SwaAnneal／use_swa／swa_start／swa_lr）を再エクスポート、または\
+         独自宣言している（`docs/autodiff-swa-decision.md` §7 承認事項が\
+         未取得のまま公開しない設計判断に違反）: {offending:?}"
+    );
+}
+
+/// [`scan_swa_reexports_and_declarations`] の自己テスト（正例・負例の
+/// 合成入力。3 型名・3 メソッド名のすべてを個別に検出できることを固定）。
+#[test]
+fn facade_does_not_reexport_or_declare_swa_items_detects_each_category() {
+    for name in ["AveragedModel", "SwaLr", "SwaAnneal"] {
+        // 正例: 単一行 pub use。
+        assert!(
+            !scan_swa_reexports_and_declarations(&format!(
+                "pub use fandhe_ai_autodiff::nn::{name};"
+            ))
+            .is_empty(),
+            "pub use {name}"
+        );
+        // 正例: 複数行 pub use（ネスト group）。
+        assert!(
+            !scan_swa_reexports_and_declarations(&format!(
+                "pub use fandhe_ai_autodiff::nn::{{\n    optim::{{\n        {name},\n        Sgd,\n    }},\n    Linear,\n}};"
+            ))
+            .is_empty(),
+            "nested pub use {name}"
+        );
+        // 正例: 別名 pub use。
+        assert!(
+            !scan_swa_reexports_and_declarations(&format!(
+                "pub use fandhe_ai_autodiff::nn::{name} as Alias;"
+            ))
+            .is_empty(),
+            "alias pub use {name}"
+        );
+        // 正例: 独自宣言（struct／enum／trait／type）。
+        for kw in ["struct", "enum", "trait", "type"] {
+            assert!(
+                !scan_swa_reexports_and_declarations(&format!("pub {kw} {name};")).is_empty(),
+                "{kw} {name}"
+            );
+        }
+        // 負例: 非公開 use。
+        assert!(
+            scan_swa_reexports_and_declarations(&format!("use fandhe_ai_autodiff::nn::{name};"))
+                .is_empty(),
+            "private use {name}"
+        );
+    }
+    // 正例: inherent メソッド追加（3 名）。
+    for method in ["use_swa", "swa_start", "swa_lr"] {
+        assert!(
+            !scan_swa_reexports_and_declarations(&format!(
+                "impl FitConfig {{\n    pub fn {method}(mut self) -> Self {{\n        self\n    }}\n}}"
+            ))
+            .is_empty(),
+            "fn {method}"
+        );
+    }
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(scan_swa_reexports_and_declarations("// pub use ...::SwaLr;").is_empty());
+    assert!(scan_swa_reexports_and_declarations("let s = \"AveragedModel\";").is_empty());
+    // 負例: 無関係な pub use・fn 宣言。
+    assert!(
+        scan_swa_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::AdamW;").is_empty()
+    );
+    assert!(scan_swa_reexports_and_declarations("pub fn use_dropout(&self) {}").is_empty());
+}
+
+// =====================================================================
 // LR スケジューラ拡張 5 種（イシュー #2176 実装・#2503 公開。親 #2499）の
 // 正ガード。旧 `LrSchedulerExtHoldDoctestGuard` 系の否定ガード 4 テストを
 // 「承認した形だけを許す」形へ反転した（決定記録

@@ -222,6 +222,13 @@
 //! `nn::packed_sequence::*` のみ）。facade 公開は未承認のため保留する
 //! （`PackedSequenceHoldDoctestGuard`・`api_surface.rs` の否定ガードで
 //! 固定。`docs/autodiff-packed-sequence-decision.md` §7）。
+//! イシュー #2658（親 #2657）で等重み平均の [`AveragedModel`]（`swa`
+//! モジュール。PyTorch `AveragedModel` 既定 `avg_fn` 相当）と、学習率側の
+//! `optim::SwaLr`／`optim::SwaAnneal`（`SWALR` 相当）を追加した。新規
+//! `Op`／`BackendOps`／VJP／カーネルは追加しない（ホスト `f32` のみ）。
+//! facade 公開は未承認のため保留する（`SwaHoldDoctestGuard`・
+//! `api_surface.rs` の否定ガードで固定。`docs/autodiff-swa-decision.md`
+//! §7）。
 
 mod attention;
 mod batch_norm;
@@ -243,6 +250,7 @@ mod pixel_shuffle;
 mod pooling;
 mod rnn;
 mod rnn_stacked;
+mod swa;
 mod transformer;
 mod transformer_decoder_layer;
 mod transformer_encoder_layer;
@@ -298,6 +306,7 @@ pub use rnn::{
 pub use rnn_stacked::{
     RnnConfig, StackedGru, StackedLstm, StackedLstmSeqOutput, StackedRnn, StackedRnnSeqOutput,
 };
+pub use swa::AveragedModel;
 pub use transformer::{Transformer, TransformerConfig, TransformerVars};
 pub use transformer_decoder_layer::{
     TransformerDecoderLayer, TransformerDecoderLayerParts, TransformerDecoderLayerVars,
