@@ -7291,6 +7291,62 @@ struct MarginFocalLossOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct OptimizerRpropAsgdHoldDoctestGuard;
 
+/// Adafactor・Lion（`Adafactor`・`AdafactorConfig`・`Lion`・`LionConfig`。イシュー #2656・親 #2654）を
+/// facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
+/// ブロック方式。型名のみが対象で既存 facade 型への inherent メソッド追加を伴わないため
+/// メソッドプローブは置かない）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 4 個を置き、
+/// 4 名すべてを関数シグネチャで参照する。facade が glob 可能な位置へ同名の型を公開すると、
+/// 名前解決の曖昧性（E0659）でエラーコードに依存せずコンパイルが失敗する。
+///
+/// 検出範囲は本プローブが名前解決で触れる 4 名に限る（マクロ生成や、内部クレート側で別名を
+/// 作ってからの公開までは保証しない）。実装は内部クレートに閉じている
+/// （`fandhe_ai_autodiff::nn::optim`）。保留対象は facade 公開面のみで、公開形は未承認
+/// （承認依頼は #2677・公開自体は承認後の #2679。推奨案は
+/// `docs/autodiff-optimizer-adafactor-lion-decision.md` §8。同記録は推奨案の記録であり承認記録では
+/// ない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// optimizer_adafactor_lion_hold_doctest_globs_all_pub_modules`・
+/// `optimizer_adafactor_lion_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_optimizer_adafactor_lion`・
+/// `workspace_declares_optimizer_adafactor_lion_types_only_in_allowed_locations`）との多層防御として
+/// 働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
+/// 同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_optimizer_adafactor_lion_hold_probe {
+///     pub struct Adafactor;
+///     pub struct AdafactorConfig;
+///     pub struct Lion;
+///     pub struct LionConfig;
+/// }
+/// use __fandhe_optimizer_adafactor_lion_hold_probe::*;
+///
+/// fn __probe_types(_: Adafactor, _: AdafactorConfig, _: Lion, _: LionConfig) {}
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct OptimizerAdafactorLionHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
