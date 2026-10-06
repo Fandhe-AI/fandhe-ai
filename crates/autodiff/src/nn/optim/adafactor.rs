@@ -91,9 +91,11 @@ impl Default for AdafactorConfig {
 enum SlotMoments {
     /// rank >= 2: 末尾 2 次元 `[n, m]`・先頭次元の積 `B` に対し
     /// `row_var` は `B*n` 要素、`col_var` は `B*m` 要素。
+    /// 分散は二乗量で `f32` では有限勾配（`f32::MAX` 要素）でも overflow
+    /// するため `f64` で保持する（`inf * inf / inf = NaN` の汚染回避）。
     Factored {
-        row_var: Vec<f32>,
-        col_var: Vec<f32>,
+        row_var: Vec<f64>,
+        col_var: Vec<f64>,
     },
     /// rank 0・1: 要素ごとの `variance`。
     Full { variance: Vec<f32> },
@@ -140,6 +142,15 @@ fn lerp(start: f32, end: f32, weight: f32) -> f32 {
     }
 }
 
+/// `lerp` の `f64` 版（因子分解経路の `row_var`／`col_var` 用）。
+fn lerp64(start: f64, end: f64, weight: f64) -> f64 {
+    if weight.abs() < 0.5 {
+        start + weight * (end - start)
+    } else {
+        end - (end - start) * (1.0 - weight)
+    }
+}
+
 /// 要素を先に `f64` へ昇格してから二乗し index 順に蓄積、`f64` で `sqrt`
 /// した L2 ノルム（`f64` のまま返す）。RMS 等の除算まで `f64` で行う呼び出し
 /// 側向け（`[f32::MAX, f32::MAX]` でも `f32` へ落とす前なので inf にならない）。
@@ -150,11 +161,6 @@ fn norm2_f64(values: impl Iterator<Item = f32>) -> f64 {
         acc = v.mul_add(v, acc);
     }
     acc.sqrt()
-}
-
-/// [`norm2_f64`] を 1 回だけ `f32` へ downcast した L2 ノルム。
-fn norm2(values: impl Iterator<Item = f32>) -> f32 {
-    norm2_f64(values) as f32
 }
 
 fn validate_hyperparameters(who: &str, c: &AdafactorConfig) -> Result<(), AutodiffError> {
@@ -301,8 +307,8 @@ impl Adafactor {
                         let m = shape[shape.len() - 1];
                         let batch = param.numel() / (n * m);
                         SlotMoments::Factored {
-                            row_var: vec![0.0f32; batch * n],
-                            col_var: vec![0.0f32; batch * m],
+                            row_var: vec![0.0f64; batch * n],
+                            col_var: vec![0.0f64; batch * m],
                         }
                     } else {
                         SlotMoments::Full {
@@ -356,31 +362,41 @@ impl Adafactor {
                         let face = &grad_data[b * n * m..(b + 1) * n * m];
                         let rv = &mut row_var[b * n..(b + 1) * n];
                         let cv = &mut col_var[b * m..(b + 1) * m];
+                        // 二乗和・平均・因子の正規化はすべて `f64` のまま行い、
+                        // 最終の `update`（`f32`）へ 1 回だけ downcast する。
                         for (i, r) in rv.iter_mut().enumerate() {
-                            let nr = norm2(face[i * m..(i + 1) * m].iter().copied());
-                            let row_mean = nr * nr / m as f32;
-                            *r = lerp(*r, row_mean, w);
+                            let mut acc = 0.0f64;
+                            for v in &face[i * m..(i + 1) * m] {
+                                let v = *v as f64;
+                                acc = v.mul_add(v, acc);
+                            }
+                            *r = lerp64(*r, acc / m as f64, w as f64);
                         }
                         for (j, c) in cv.iter_mut().enumerate() {
-                            let nc = norm2((0..n).map(|i| face[i * m + j]));
-                            let col_mean = nc * nc / n as f32;
-                            *c = lerp(*c, col_mean, w);
-                        }
-                        let mean_r = {
                             let mut acc = 0.0f64;
-                            for r in rv.iter() {
-                                acc += *r as f64;
+                            for i in 0..n {
+                                let v = face[i * m + j] as f64;
+                                acc = v.mul_add(v, acc);
                             }
-                            (acc / n as f64) as f32
+                            *c = lerp64(*c, acc / n as f64, w as f64);
+                        }
+                        let mean_r = rv.iter().sum::<f64>() / n as f64;
+                        let denom_r = if mean_r < eps1 as f64 {
+                            eps1 as f64
+                        } else {
+                            mean_r
                         };
-                        let denom_r = clamp_min_nan(mean_r, eps1);
                         for (i, r) in rv.iter().enumerate() {
                             for (j, c) in cv.iter().enumerate() {
                                 let idx = b * n * m + i * m + j;
                                 // 外積（K=1）→ 除算の順を保つ。
                                 let v = *r * *c / denom_r;
-                                let v = clamp_min_nan(v, eps1_sq);
-                                update[idx] = 1.0 / v.sqrt() * grad_data[idx];
+                                let v = if v < eps1_sq as f64 {
+                                    eps1_sq as f64
+                                } else {
+                                    v
+                                };
+                                update[idx] = (1.0 / v.sqrt() * grad_data[idx] as f64) as f32;
                             }
                         }
                     }
@@ -424,6 +440,23 @@ mod tests {
     fn close(a: f32, b: f64) -> bool {
         let d = (a as f64 - b).abs();
         d < 1e-5 || d / b.abs().max(1e-30) < 1e-3
+    }
+
+    #[test]
+    fn factored_path_finite_for_f32_max_gradients() {
+        // 二乗平均が f32 上限を超えても（f64 状態・f64 正規化のため）
+        // inf*inf/inf=NaN にならず、パラメータが有限のまま。
+        let mut opt = Adafactor::new(AdafactorConfig::default()).unwrap();
+        let p = t(vec![1.0; 6], &[2, 3]);
+        let g = t(vec![f32::MAX; 6], &[2, 3]);
+        let out = opt.step(&[(&p, &g)]).unwrap();
+        assert!(
+            vals(&out[0]).iter().all(|x| x.is_finite()),
+            "{:?}",
+            vals(&out[0])
+        );
+        let out2 = opt.step(&[(&out[0], &g)]).unwrap();
+        assert!(vals(&out2[0]).iter().all(|x| x.is_finite()));
     }
 
     #[test]
