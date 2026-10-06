@@ -174,6 +174,27 @@ fn forward_rejects_wrong_input_count() {
     assert!(is_invalid(&model.predict(&[&input, &input]).map(|_| ())));
 }
 
+#[test]
+fn forward_rejects_input_var_from_other_tape_even_for_passthrough() {
+    let mut b = FunctionalBuilder::new();
+    let x = b.input().expect("input");
+    let model = b.build(&[x], &[x]).expect("素通しグラフ");
+    let input = sample_input(2, 2, 0.1);
+    let tape = crate::tape();
+    let other = crate::tape();
+    let foreign = other.var(&input);
+    let r = model.forward(&tape, &[foreign]);
+    assert!(matches!(r, Err(AutodiffError::TapeMismatch)));
+    let before = tape.0.len();
+    // 同一 tape の入力は従来どおり成功し、葉を増やさない。
+    let own = tape.var(&input);
+    let after_leaf = tape.0.len();
+    assert_eq!(after_leaf, before + 1);
+    let outs = model.forward(&tape, &[own]).expect("same tape");
+    assert_eq!(outs.len(), 1);
+    assert_eq!(tape.0.len(), after_leaf);
+}
+
 // ------------------------------------------------------------------ 同値性
 
 #[test]

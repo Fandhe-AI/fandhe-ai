@@ -52,6 +52,21 @@ fn invalid(message: String) -> AutodiffError {
     AutodiffError::InvalidArgument(message)
 }
 
+/// `var` が `tape` に属さなければ `TapeMismatch` を返す。
+///
+/// `Var` の所属 tape を読む公開 API がないため、`Var::to_tape` の契約（同一 tape なら葉を
+/// 積まずそのまま返し、別 tape なら転送先へ葉を 1 つ積む）を使い、ノード数の増減で判定する。
+/// 不一致時に積まれた葉は直ちに取り除く手段がない（`Tape::reset` で破棄される）が、`Err` で
+/// 返すため forward の成果物には混入しない。公開 API の追加を避けるための迂回である。
+fn ensure_on_tape(tape: &Tape, var: &Var<'_>) -> Result<(), AutodiffError> {
+    let before = tape.0.len();
+    var.to_tape(&tape.0)?;
+    if tape.0.len() != before {
+        return Err(AutodiffError::TapeMismatch);
+    }
+    Ok(())
+}
+
 /// [`FunctionalBuilder`] が返すノードハンドル（Keras の「シンボリックテンソル」相当の添字）。
 ///
 /// 発行元ビルダーの ID と添字だけを持つ `Copy` 値で、他ビルダーのハンドルは `apply`／`build`
@@ -336,6 +351,11 @@ impl FunctionalModel {
                 inputs.len(),
                 self.inputs.len()
             )));
+        }
+        // 素通しグラフ（入力をそのまま出力にする構成）ではブロック評価の演算が走らず、別 tape の
+        // `Var` が成功として返りうる。入力を格納する前に全入力の所属 tape を検証する。
+        for var in inputs {
+            ensure_on_tape(tape, var)?;
         }
         let mut values: Vec<Option<Var<'t>>> = Vec::new();
         values
