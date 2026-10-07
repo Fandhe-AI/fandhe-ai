@@ -977,3 +977,69 @@ fn weighted_mse_large_equal_operands_and_scale_above_one_is_finite() {
         .unwrap();
     assert_eq!(h.loss[0], 0.0);
 }
+
+/// shuffle=true の事前係数検査は最小バッチサイズ（overflow）だけでなく最大バッチサイズ
+/// （ゼロへのアンダーフロー）でも行い、更新前に拒否する（レビュー指摘 #2823）。
+#[test]
+fn shuffle_ce_underflow_at_max_batch_size_is_rejected_before_update() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let before: Vec<Vec<f32>> = m
+        .trainable_parameters()
+        .iter()
+        .map(|p| p.host_slice().to_vec())
+        .collect();
+    let x = Tensor::new(vec![1.0f32; 5], &[5, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 1, 0, 1, 0], &[5]).unwrap();
+    // N=5・batch_size=2 → バッチサイズ {2, 1}。1.4e-45 / 2 は f32 でゼロへ丸まる。
+    let sw = [f32::from_bits(1); 5];
+    let w = FitWeights::new().sample_weight(&sw);
+    let r = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 2).shuffle(true),
+        &w,
+        None,
+        &mut [],
+        &[],
+    );
+    assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));
+    let after: Vec<Vec<f32>> = m
+        .trainable_parameters()
+        .iter()
+        .map(|p| p.host_slice().to_vec())
+        .collect();
+    assert_eq!(before, after, "更新前に拒否されること");
+}
+
+/// 別行の残差 overflow が、有限な行（pred=target・係数大）の計算を NaN にしない。
+#[test]
+fn weighted_mse_overflow_row_does_not_poison_finite_row() {
+    let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
+        .unwrap();
+    let x = Tensor::new(vec![3e38f32, 3e37], &[2, 1]).unwrap();
+    let p = m.predict(&x).unwrap();
+    let p = p.host_slice().to_vec();
+    assert!(p.iter().all(|v| v.is_finite()));
+    assert!(p[0].abs() > 1e37, "前提: pred0 が十分大きい: {p:?}");
+    let t0 = if p[0] > 0.0 { -3.3e38f32 } else { 3.3e38f32 };
+    assert!(
+        !(p[0] - t0).is_finite(),
+        "前提: 行 0 の残差が overflow: {p:?}"
+    );
+    let y = Tensor::new(vec![t0, p[1]], &[2, 1]).unwrap();
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, 2),
+            &FitWeights::new().sample_weight(&[1e-40, 1e30]),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert!(h.loss[0].is_finite(), "loss = {}", h.loss[0]);
+}

@@ -924,13 +924,20 @@ fn check_ce_coefs_for_all_batches(
         return Ok(());
     }
     let rem = total % batch_size;
-    let min_nb = if rem > 0 && !drop_last {
-        rem
-    } else {
-        batch_size.min(total)
-    };
+    let max_nb = batch_size.min(total);
+    let min_nb = if rem > 0 && !drop_last { rem } else { max_nb };
     for (i, &yi) in classes.iter().enumerate() {
         let nb = if shuffle {
+            // overflow は最小サイズ・ゼロへのアンダーフローは最大サイズで最悪になる
+            // （係数は `N_batch` に反比例）。中間サイズはこの 2 端点の間に収まる。
+            if max_nb != min_nb {
+                let cw = class_weight_of(weights, yi);
+                let sw = sample_weight_at(weights.sample_weight, i) as f64;
+                checked_f32_coef(
+                    -(sw * cw as f64) / max_nb as f64,
+                    "sample_weight × class_weight",
+                )?;
+            }
             min_nb
         } else {
             let start = (i / batch_size) * batch_size;
@@ -940,11 +947,7 @@ fn check_ce_coefs_for_all_batches(
             }
             actual
         };
-        let cw = weights
-            .class_weight
-            .as_ref()
-            .and_then(|m| u32::try_from(yi).ok().and_then(|k| m.get(&k).copied()))
-            .unwrap_or(1.0);
+        let cw = class_weight_of(weights, yi);
         let sw = sample_weight_at(weights.sample_weight, i) as f64;
         checked_f32_coef(
             -(sw * cw as f64) / nb as f64,
@@ -952,6 +955,15 @@ fn check_ce_coefs_for_all_batches(
         )?;
     }
     Ok(())
+}
+
+/// クラス `yi` の `class_weight`（未指定・未登録は `1.0`）。
+fn class_weight_of(weights: &FitWeights<'_>, yi: i32) -> f32 {
+    weights
+        .class_weight
+        .as_ref()
+        .and_then(|m| u32::try_from(yi).ok().and_then(|k| m.get(&k).copied()))
+        .unwrap_or(1.0)
 }
 
 /// サンプル別重みの `i` 番目（`sample` 未指定は `1.0`）。
@@ -1017,14 +1029,27 @@ fn weighted_mse_loss<'t>(
     // `s_i` で縮めてから減算する経路へ切り替える。
     let target_v = tape.var_no_grad(target);
     let pred_t = pred.to_tensor();
-    let residual_overflows = pred_t
+    // 経路は要素ごとに選ぶ（別行の overflow が有限な行の計算を壊さないため。
+    // 例: 他行が overflow していても pred=target=3e38・s_i 大の行は残差 0 のまま）。
+    let overflow_mask: Vec<bool> = pred_t
         .host_slice()
         .iter()
         .zip(target.host_slice().iter())
         .zip(zero_mask.iter())
-        .any(|((&p, &t), &z)| !z && !(p - t).is_finite());
-    let mut scaled = if residual_overflows {
-        pred.mul(&coef_v)?.sub(&target_v.mul(&coef_v)?)?
+        .map(|((&p, &t), &z)| !z && !(p - t).is_finite())
+        .collect();
+    let mut scaled = if overflow_mask.iter().any(|&b| b) {
+        // 残差先行側は overflow 要素を 0 へ置換し、縮小先行側は非 overflow 要素を 0 へ
+        // 置換して和を取る（`masked_fill` の VJP は置換位置の勾配を 0 にする）。
+        let keep: Vec<bool> = overflow_mask.iter().map(|&b| !b).collect();
+        let ov_t = Tensor::new(overflow_mask, &shape).map_err(AutodiffError::Shape)?;
+        let keep_t = Tensor::new(keep, &shape).map_err(AutodiffError::Shape)?;
+        let a = pred.sub(&target_v)?.mul(&coef_v)?.masked_fill(&ov_t, 0.0)?;
+        let b = pred
+            .mul(&coef_v)?
+            .sub(&target_v.mul(&coef_v)?)?
+            .masked_fill(&keep_t, 0.0)?;
+        a.add(&b)?
     } else {
         pred.sub(&target_v)?.mul(&coef_v)?
     };
