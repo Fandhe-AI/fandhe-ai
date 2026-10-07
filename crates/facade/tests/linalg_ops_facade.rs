@@ -4,9 +4,9 @@
 //!
 //! `Var::eigh` 等は `fandhe_ai_autodiff::linalg_ops` の同名自由関数への
 //! 1 行委譲メソッドで、facade は `Var` を再エクスポートするため追加の公開
-//! 経路を持たない（`linalg_ops` モジュール・`EighVars`／`SlogdetVars` 型は
-//! facade から再エクスポートしないため、本テストは `pub` フィールドで結果へ
-//! 到達する）。期待値は厳密に表せる入力での完全一致とし、tolerance は新設
+//! 経路を持たない（`linalg_ops` モジュールは facade から再エクスポートしない。
+//! `EighVars`／`SlogdetVars` 型は #2515 で再エクスポート済みだが、本テストは
+//! `pub` フィールドで結果へ到達する）。期待値は厳密に表せる入力での完全一致とし、tolerance は新設
 //! しない（REQ-2 の統一複合判定は GPU 比較側 `linalg_ops_backend_parity.rs`）。
 //! 委譲が自由関数と bit 一致する検査だけは自由関数を直接 use する
 //! （facade の dev 依存に autodiff あり）。

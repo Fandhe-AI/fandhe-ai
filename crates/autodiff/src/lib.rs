@@ -386,3 +386,7 @@ pub use fandhe_ai_tensor_core::creation::{
 // ともに再エクスポートする。`QrVars`／`SvdVars` と同じ「ルート経由」の形）。
 pub use topk_unique_ops::{TopkOptions, UniqueOptions, UniqueOutput};
 pub use var::{GateParams, QrVars, Reduction, SvdVars, Var, VarHostView};
+// `Var::eigh`／`Var::slogdet` の多出力戻り値型（イシュー #2515。承認 2026-10-07。
+// facade が再エクスポートする。`QrVars`／`SvdVars` と同じ「ルート経由」の形で、
+// `linalg_ops` モジュール自体は引き続き再エクスポートしない）。
+pub use linalg_ops::{EighVars, SlogdetVars};

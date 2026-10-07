@@ -10346,11 +10346,20 @@ fn var_linalg_ops_methods_are_thin_delegations() {
 /// facade の `fandhe_ai::Var` 経由だけ（`fandhe_ai_autodiff` を import
 /// しない）で 5 メソッドへ到達でき、シグネチャ・pub フィールドが承認形と
 /// 一致し、実際に適用して期待値が得られることを固定する（#2515）。
-/// `EighVars`／`SlogdetVars` は facade から名前で書けないため fn ポインタでは
-/// 固定せず、`Var::eigh(&x)`／`x.eigh()` の両呼び出しとフィールド型で固定する。
+/// `EighVars`／`SlogdetVars` は #2515 で facade ルートから再エクスポートされた
+/// （`QrVars`／`SvdVars` と同型。承認 2026-10-07）ため、型名を直接書いた型注釈と
+/// fn ポインタ（`Var::eigh`／`Var::slogdet`）の戻り値型で名指し可能なことを固定する。
 #[test]
 fn var_linalg_ops_are_reachable_via_facade_only() {
-    use fandhe_ai::{AutodiffError, Tensor, Var};
+    use fandhe_ai::{AutodiffError, EighVars, SlogdetVars, Tensor, Var};
+
+    // 再エクスポートされた型名で戻り値型を固定する（名前で書けなければコンパイル不能）。
+    fn sig_eigh<'t>() -> fn(&Var<'t>) -> Result<EighVars<'t>, AutodiffError> {
+        Var::<'t>::eigh
+    }
+    fn sig_slogdet<'t>() -> fn(&Var<'t>) -> Result<SlogdetVars<'t>, AutodiffError> {
+        Var::<'t>::slogdet
+    }
 
     type RcondSig<'t> = fn(&Var<'t>, Option<f32>) -> Result<Var<'t>, AutodiffError>;
     fn sig_pinv<'t>() -> RcondSig<'t> {
@@ -10370,7 +10379,7 @@ fn var_linalg_ops_are_reachable_via_facade_only() {
     let tape = fandhe_ai::tape();
     let d = tape.var(&Tensor::new(vec![3.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("tensor"));
 
-    let e1 = Var::eigh(&d).expect("eigh");
+    let e1: EighVars<'_> = sig_eigh()(&d).expect("eigh");
     let e2 = d.eigh().expect("eigh method");
     let ev: &Var<'_> = &e1.eigenvalues;
     let evec: &Var<'_> = &e2.eigenvectors;
@@ -10378,7 +10387,7 @@ fn var_linalg_ops_are_reachable_via_facade_only() {
     assert_eq!(evec.to_tensor().shape(), &[2, 2]);
 
     let neg = tape.var(&Tensor::new(vec![1.0_f32, 0.0, 0.0, -2.0], &[2, 2]).expect("tensor"));
-    let s1 = Var::slogdet(&neg).expect("slogdet");
+    let s1: SlogdetVars<'_> = sig_slogdet()(&neg).expect("slogdet");
     let s2 = neg.slogdet().expect("slogdet method");
     let sign: &Var<'_> = &s1.sign;
     let logabs: &Var<'_> = &s2.logabsdet;
