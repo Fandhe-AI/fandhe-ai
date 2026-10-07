@@ -136,6 +136,39 @@ mod recorded {
     /// `#[non_exhaustive]`（フィールド追加は非破壊）。`batches`／`samples`
     /// は反復したバッチ数・総サンプル数（入力バッチの先頭軸から数える。
     /// rank 0 バッチは 1 件として飽和加算）。
+    ///
+    /// # Examples
+    ///
+    /// ラベル付きデータセット（`(features, labels)`）でもラベルは無視され、特徴量だけが
+    /// 推論される。呼び出し前後のスナップショット差分は [`Self::since`] で取る
+    /// （時間値は環境依存のため、ここでは回数のみ確認する）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::data::{DataLoader, DataLoaderConfig, TensorDataset};
+    /// use fandhe_ai::inference::{InferencePhase, PhaseMetrics, get_phase_metrics};
+    ///
+    /// let model = Sequential::new().add_linear(2, 1, 7).unwrap();
+    /// let x = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+    /// let y = Tensor::<i32>::new(vec![0, 1], &[2]).unwrap();
+    /// let loader = DataLoader::new(
+    ///     (TensorDataset::new(x).unwrap(), TensorDataset::new(y).unwrap()),
+    ///     DataLoaderConfig::new(1),
+    /// )
+    /// .unwrap();
+    ///
+    /// let before: PhaseMetrics = get_phase_metrics();
+    /// let outputs = model.predict_batches(&loader).unwrap();
+    /// let delta = get_phase_metrics().since(&before);
+    ///
+    /// assert_eq!(outputs.len(), 2);
+    /// assert_eq!(delta.batches(), 2);
+    /// assert_eq!(delta.samples(), 2);
+    /// assert!(delta.phase(InferencePhase::DataLoad).calls() >= 2);
+    /// let _micros: u128 = delta.phase(InferencePhase::Forward).total_micros();
+    /// assert_eq!(delta.phase(InferencePhase::DeviceTransfer).calls(), 0);
+    /// ```
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     #[non_exhaustive]
     pub struct PhaseMetrics {

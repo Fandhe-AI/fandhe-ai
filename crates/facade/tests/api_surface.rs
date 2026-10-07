@@ -20886,7 +20886,7 @@ fn facade_does_not_reexport_or_declare_generate_items_detects_each_category() {
 // 固定する最小の正ガード。旧保留ガード（#2192。`PredictBatchesHoldDoctestGuard` と
 // 走査ガード 4 件・固定文言）を反転したもので、公開面は承認形（`inference/mod.rs` の 1 文の
 // `pub use`・`batch` 非公開・fn 宣言の所在）に完全一致で限定する。正ガードの全数インベントリ化と
-// doctest 存在検査は #2583 の対象。
+// doctest 存在検査は #2583 で本節末尾へ追加済み（検出範囲の限界はそちらのコメントを参照）。
 // =====================================================================
 
 /// `inference/mod.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの。6 名形）。
@@ -21170,6 +21170,437 @@ fn predict_batches_public_surface_is_reachable_with_pinned_signatures() {
     assert_input::<(fandhe_ai::Tensor<f32>, u8, u8)>();
 }
 
+// ---------------------------------------------------------------------
+// イシュー #2583（親 #2581）: 上記の最小の正ガードを「承認形だけを許す」全数インベントリへ
+// 仕上げる。対象は `inference/batch.rs` の型・トレイト・メソッド集合と crate 内専用項目の非公開、
+// および利用例 doctest の実在（決定記録 §11）。
+//
+// 検出範囲の限界（過剰保証しない）: 列挙名のトークン走査であり、マクロ生成・`use … as` 別名経由・
+// 別トレイト経由の間接実装は範囲外（`impl<T> PredictBatchInput for T` の一般形は承認 3 形と
+// 一致しないため検出される）。型レベルの到達性・シグネチャは
+// `predict_batches_public_surface_is_reachable_with_pinned_signatures` が補完する。
+// ---------------------------------------------------------------------
+
+/// `tokens` 中で `pat` と完全一致する連続トークン列の開始 index を全件返す。
+fn pb_find_seq(tokens: &[String], pat: &[&str]) -> Vec<usize> {
+    (0..tokens.len())
+        .filter(|&i| {
+            pat.iter()
+                .enumerate()
+                .all(|(k, p)| tokens.get(i + k).map(String::as_str) == Some(*p))
+        })
+        .collect()
+}
+
+/// `tokens[i]`（宣言の先頭トークン）の直前の属性列に `non_exhaustive` があるか。
+/// 直前の `;`・`{`・`}` までのトークンを属性領域として走査する（コメント・doc は除去済み）。
+fn pb_has_non_exhaustive_before(tokens: &[String], i: usize) -> bool {
+    tokens[..i]
+        .iter()
+        .rev()
+        .take_while(|t| !matches!(t.as_str(), ";" | "{" | "}"))
+        .any(|t| t == "non_exhaustive")
+}
+
+/// `pat`（`{` で終わる宣言ヘッダ）がちょうど 1 件あるとき、宣言先頭 index と本体トークン
+/// （`{` の直後〜対応する `}` の直前）を返す。0 件・複数件・閉じ欠落は `Err`。
+fn pb_single_block<'a>(
+    tokens: &'a [String],
+    pat: &[&str],
+    label: &str,
+) -> Result<(usize, &'a [String]), String> {
+    let starts = pb_find_seq(tokens, pat);
+    if starts.len() != 1 {
+        return Err(format!(
+            "{label}: `{}` の宣言がちょうど 1 件ではない（{} 件。検査対象の見失い・重複定義）",
+            pat.join(" "),
+            starts.len()
+        ));
+    }
+    let open = starts[0] + pat.len() - 1;
+    match matching_close(tokens, open, "{", "}") {
+        Some(close) => Ok((starts[0], &tokens[open + 1..close])),
+        None => Err(format!("{label}: 対応する閉じ括弧が見つからない")),
+    }
+}
+
+/// `InferencePhase` が `#[non_exhaustive]` 付きで承認 4 variant（本順）ちょうどであること
+/// （`batch.rs` のソース文字列を受け取り、違反を返す）。
+fn inference_phase_enum_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let (start, body) = match pb_single_block(
+        &tokens,
+        &["pub", "enum", "InferencePhase", "{"],
+        "InferencePhase",
+    ) {
+        Ok(v) => v,
+        Err(e) => return vec![e],
+    };
+    let mut v = Vec::new();
+    if !pb_has_non_exhaustive_before(&tokens, start) {
+        v.push("InferencePhase に #[non_exhaustive] が無い".to_string());
+    }
+    // `collect_top_level_enum_variant_idents` は深さ 1（`{` の内側）開始を前提とするため、
+    // 本体の末尾へ閉じ括弧を補って呼ぶ。
+    let mut with_close = body.to_vec();
+    with_close.push("}".to_string());
+    let variants = collect_top_level_enum_variant_idents(&with_close, 0);
+    let want = ["DataLoad", "TapeBuild", "Forward", "DeviceTransfer"].map(String::from);
+    if variants != want {
+        v.push(format!(
+            "InferencePhase の variant が承認形 4 種（本順）と不一致: {variants:?}"
+        ));
+    }
+    v
+}
+
+/// `impl [<…>] <trait_name> for <対象> {` の対象トークンを空白なしで連結して全件返す
+/// （`trait_name` は `for` の直前の識別子。パス修飾の有無は問わない）。
+fn pb_impl_targets(tokens: &[String], trait_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "impl" {
+            continue;
+        }
+        let Some(open) = tokens[i..].iter().position(|x| x == "{").map(|p| i + p) else {
+            continue;
+        };
+        let header = &tokens[i..open];
+        if let Some(f) = header.iter().position(|x| x == "for")
+            && f > 0
+            && header[f - 1] == trait_name
+        {
+            out.push(header[f + 1..].concat());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `PredictBatchInput` の形（sealed supertrait・メソッド 1 件・関連型／定数なし）と、
+/// `PredictBatchInput`／`Sealed` の impl 対象が承認 3 形ちょうどであること、
+/// `mod sealed` が非公開であること。
+fn predict_batch_input_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    match pb_single_block(
+        &tokens,
+        &[
+            "pub",
+            "trait",
+            "PredictBatchInput",
+            ":",
+            "sealed",
+            ":",
+            ":",
+            "Sealed",
+            "{",
+        ],
+        "PredictBatchInput",
+    ) {
+        Ok((_, body)) => {
+            let fns: Vec<&str> = body
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| *t == "fn")
+                .filter_map(|(k, _)| body.get(k + 1).map(String::as_str))
+                .collect();
+            if fns != ["inference_input"] {
+                v.push(format!("PredictBatchInput のメソッド集合が不一致: {fns:?}"));
+            }
+            if body.iter().any(|t| matches!(t.as_str(), "type" | "const")) {
+                v.push("PredictBatchInput に関連型／関連定数がある".to_string());
+            }
+        }
+        Err(e) => v.push(e),
+    }
+    let mut want: Vec<String> = ["Tensor<f32>", "(Tensor<f32>,B)", "(Tensor<f32>,B,C)"]
+        .map(String::from)
+        .to_vec();
+    want.sort();
+    for tr in ["PredictBatchInput", "Sealed"] {
+        let got = pb_impl_targets(&tokens, tr);
+        if got != want {
+            v.push(format!("{tr} の impl 対象が承認 3 形と不一致: {got:?}"));
+        }
+    }
+    if pb_find_seq(&tokens, &["mod", "sealed", "{"]).len() != 1 {
+        v.push("`mod sealed {` がちょうど 1 件ではない".to_string());
+    }
+    for i in pb_find_seq(&tokens, &["mod", "sealed"]) {
+        if i > 0 && tokens[i - 1] == "pub" {
+            v.push("`sealed` モジュールが公開されている".to_string());
+        }
+    }
+    v
+}
+
+/// `impl <type_name> { … }` ブロック群の深さ 0（ブロック直下）にある `pub fn` 名
+/// （`pub(crate)` 等は含めない）を昇順で返す。
+fn pb_pub_fn_names_in_inherent_impls(tokens: &[String], type_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in pb_find_seq(tokens, &["impl", type_name, "{"]) {
+        let open = i + 2;
+        let Some(close) = matching_close(tokens, open, "{", "}") else {
+            continue;
+        };
+        let mut depth = 0usize;
+        for j in open + 1..close {
+            match tokens[j].as_str() {
+                "{" => depth += 1,
+                "}" => depth = depth.saturating_sub(1),
+                "pub" if depth == 0 && tokens.get(j + 1).map(String::as_str) != Some("(") => {
+                    let k = skip_fn_declaration_qualifiers(tokens, j + 1);
+                    if tokens.get(k).map(String::as_str) == Some("fn")
+                        && let Some(n) = tokens.get(k + 1)
+                    {
+                        out.push(n.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `PhaseMetrics`／`PhaseStat` の公開メソッド集合・非公開フィールド・`#[non_exhaustive]`
+/// （`PhaseMetrics` のみ）が承認形のままであること。
+fn phase_metrics_surface_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    for (name, want, non_exhaustive) in [
+        (
+            "PhaseMetrics",
+            &["batches", "phase", "samples", "since", "total"][..],
+            true,
+        ),
+        ("PhaseStat", &["calls", "total", "total_micros"][..], false),
+    ] {
+        match pb_single_block(&tokens, &["pub", "struct", name, "{"], name) {
+            Ok((start, body)) => {
+                if body.iter().any(|t| t == "pub") {
+                    v.push(format!("{name} に pub フィールドがある"));
+                }
+                if non_exhaustive && !pb_has_non_exhaustive_before(&tokens, start) {
+                    v.push(format!("{name} に #[non_exhaustive] が無い"));
+                }
+            }
+            Err(e) => v.push(e),
+        }
+        let got = pb_pub_fn_names_in_inherent_impls(&tokens, name);
+        if got != want {
+            v.push(format!("{name} の pub fn 集合が承認形と不一致: {got:?}"));
+        }
+    }
+    v
+}
+
+/// crate 内専用項目が素の `pub`（`pub trait`／`pub struct`／`pub fn`／`pub use` での引き上げ
+/// を含む）で宣言・再エクスポートされていないこと（`pub(crate)` は許容）。
+fn predict_batches_internal_pub_violations(src: &str) -> Vec<String> {
+    const INTERNAL: [&str; 4] = [
+        "PhaseRecorder",
+        "NoopPhaseRecorder",
+        "TimingPhaseRecorder",
+        "merge_inference_phase_stats",
+    ];
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "pub" || tokens.get(i + 1).map(String::as_str) == Some("(") {
+            continue;
+        }
+        let is_use = tokens.get(i + 1).map(String::as_str) == Some("use");
+        let end = tokens[i..]
+            .iter()
+            .position(|x| x == ";" || (!is_use && x == "{"))
+            .map_or(tokens.len(), |p| i + p);
+        if let Some(n) = tokens[i + 1..end]
+            .iter()
+            .find(|x| INTERNAL.contains(&x.as_str()))
+        {
+            v.push(format!("crate 内専用項目 {n} が素の pub で現れる"));
+        }
+    }
+    v
+}
+
+/// 正ガード（#2583）: `InferencePhase` が承認 4 variant・`#[non_exhaustive]`。
+#[test]
+fn inference_phase_variants_are_exactly_approved_four() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/inference/batch.rs"));
+    let v = inference_phase_enum_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正ガード（#2583）: `PredictBatchInput` の形と impl 対象 3 形（決定記録 §10.2・§11.2）。
+#[test]
+fn predict_batch_input_impls_are_exactly_approved_three() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/inference/batch.rs"));
+    let v = predict_batch_input_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正ガード（#2583）: `PhaseMetrics`／`PhaseStat` の公開メソッド集合・フィールド非公開。
+#[test]
+fn phase_metrics_and_phase_stat_pub_methods_are_exactly_approved() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/inference/batch.rs"));
+    let v = phase_metrics_surface_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正ガード（#2583）: crate 内専用項目が facade の全ソースで素の `pub` にならない。
+#[test]
+fn inference_internal_items_stay_crate_private() {
+    let files = facade_src_files();
+    assert!(!files.is_empty(), "facade src を 1 件も読めない");
+    let mut v = Vec::new();
+    for (rel, content) in &files {
+        for e in predict_batches_internal_pub_violations(content) {
+            v.push(format!("{rel}: {e}"));
+        }
+    }
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 上記 4 走査関数の自己テスト（承認形は通り、各違反類型は検出される。コメント・文字列内は無視）。
+#[test]
+fn predict_batches_inventory_guards_detect_each_category() {
+    let enum_ok = "#[derive(Debug)] #[non_exhaustive] pub enum InferencePhase { DataLoad, TapeBuild, Forward, DeviceTransfer }";
+    assert!(inference_phase_enum_violations(enum_ok).is_empty());
+    for bad in [
+        "#[non_exhaustive] pub enum InferencePhase { DataLoad, TapeBuild, Forward }",
+        "#[non_exhaustive] pub enum InferencePhase { DataLoad, TapeBuild, Forward, DeviceTransfer, Extra }",
+        "#[non_exhaustive] pub enum InferencePhase { TapeBuild, DataLoad, Forward, DeviceTransfer }",
+        "pub enum InferencePhase { DataLoad, TapeBuild, Forward, DeviceTransfer }",
+        "// pub enum InferencePhase { DataLoad }",
+    ] {
+        assert!(!inference_phase_enum_violations(bad).is_empty(), "{bad}");
+    }
+
+    let input_ok = "mod sealed { pub trait Sealed {} }\n\
+        pub trait PredictBatchInput: sealed::Sealed { fn inference_input(&self) -> &Tensor<f32>; }\n\
+        impl sealed::Sealed for Tensor<f32> {}\n impl<B> sealed::Sealed for (Tensor<f32>, B) {}\n\
+        impl<B, C> sealed::Sealed for (Tensor<f32>, B, C) {}\n\
+        impl PredictBatchInput for Tensor<f32> { fn inference_input(&self) -> &Tensor<f32> { self } }\n\
+        impl<B> PredictBatchInput for (Tensor<f32>, B) { fn inference_input(&self) -> &Tensor<f32> { &self.0 } }\n\
+        impl<B, C> PredictBatchInput for (Tensor<f32>, B, C) { fn inference_input(&self) -> &Tensor<f32> { &self.0 } }\n";
+    assert!(predict_batch_input_violations(input_ok).is_empty());
+    for bad in [
+        input_ok.replace(": sealed::Sealed", ""),
+        input_ok.replace("mod sealed", "pub mod sealed"),
+        format!("{input_ok}impl PredictBatchInput for Vec<f32> {{}}\n"),
+        format!("{input_ok}impl sealed::Sealed for u8 {{}}\n"),
+        input_ok.replace(
+            "fn inference_input(&self) -> &Tensor<f32>;",
+            "fn inference_input(&self) -> &Tensor<f32>; fn extra(&self);",
+        ),
+        input_ok.replace(
+            "fn inference_input(&self) -> &Tensor<f32>;",
+            "type Out; fn inference_input(&self) -> &Tensor<f32>;",
+        ),
+        input_ok.replace(
+            "impl<B, C> PredictBatchInput for (Tensor<f32>, B, C)",
+            "impl<B, C> PredictBatchInput for (Tensor<f32>, B, C, u8)",
+        ),
+    ] {
+        assert!(!predict_batch_input_violations(&bad).is_empty(), "{bad}");
+    }
+    let benign = format!(
+        "// impl PredictBatchInput for Vec<f32> {{}}\n{input_ok}fn f() {{ let s = \"impl PredictBatchInput for u8 {{}}\"; }}"
+    );
+    assert!(predict_batch_input_violations(&benign).is_empty());
+
+    let surf_ok = "#[non_exhaustive] pub struct PhaseMetrics { a: u8 }\n\
+        pub struct PhaseStat { t: u8 }\n\
+        impl PhaseMetrics { pub fn phase(&self) {} pub fn total(&self) {} pub fn batches(&self) {} pub fn samples(&self) {} pub fn since(&self) {} fn merge(&mut self) {} pub(crate) fn x(&self) {} }\n\
+        impl PhaseStat { pub fn total_micros(&self) {} pub fn calls(&self) {} pub fn total(&self) {} fn add(&mut self) {} }\n";
+    assert!(phase_metrics_surface_violations(surf_ok).is_empty());
+    for bad in [
+        surf_ok.replace("fn merge(&mut self)", "pub fn merge(&mut self)"),
+        surf_ok.replace("fn add(&mut self)", "pub const fn add(&mut self)"),
+        surf_ok.replace("{ a: u8 }", "{ pub a: u8 }"),
+        surf_ok.replace("#[non_exhaustive] ", ""),
+        surf_ok.replace("pub fn since(&self) {}", ""),
+        format!("{surf_ok}impl PhaseStat {{ pub fn extra(&self) {{}} }}\n"),
+    ] {
+        assert!(!phase_metrics_surface_violations(&bad).is_empty(), "{bad}");
+    }
+
+    for bad in [
+        "pub trait PhaseRecorder {}",
+        "pub struct NoopPhaseRecorder;",
+        "pub fn merge_inference_phase_stats() {}",
+        "pub use recorded::{PhaseMetrics, TimingPhaseRecorder};",
+    ] {
+        assert!(
+            !predict_batches_internal_pub_violations(bad).is_empty(),
+            "{bad}"
+        );
+    }
+    for ok in [
+        "pub(crate) trait PhaseRecorder {}",
+        "pub(crate) use recorded::{TimingPhaseRecorder, merge_inference_phase_stats};",
+        "// pub trait PhaseRecorder {}",
+        "pub use recorded::{PhaseMetrics, PhaseStat};",
+    ] {
+        assert!(
+            predict_batches_internal_pub_violations(ok).is_empty(),
+            "{ok}"
+        );
+    }
+}
+
+/// 正の doctest プローブ（#2583。EMA の `ema_usage_doctests_are_present_and_compiled` と同型）:
+/// `predict_batches` の利用例が公開 doc 3 か所に実在し、実際にコンパイル・実行される形
+/// （`ignore` 等の指定なし）であること。検出器自体の負例は
+/// `param_groups_usage_doctests_are_present_and_compiled` が同じ [`doctest_probe_violations`]
+/// を踏んでいるため、ここでは空入力と隠し行の負例だけを置く。
+#[test]
+fn predict_batches_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let inference = read_to_string_or_panic(&root.join("src/inference/mod.rs"));
+    let sequential = read_to_string_or_panic(&root.join("src/compat/sequential.rs"));
+    let batch = read_to_string_or_panic(&root.join("src/inference/batch.rs"));
+
+    let mut v = doctest_probe_violations(
+        "inference/mod.rs モジュール doc",
+        &inner_doc_lines(&inference),
+        &[
+            "use fandhe_ai::inference::",
+            "get_phase_metrics",
+            "reset_phase_metrics",
+            "predict_batches",
+            "since",
+        ],
+    );
+    v.extend(doctest_probe_violations(
+        "Sequential::predict_batches の doc",
+        &doc_lines_above_fn(&sequential, "pub fn predict_batches"),
+        &[
+            "use fandhe_ai::compat::Sequential",
+            "DataLoader::new",
+            "predict_batches",
+        ],
+    ));
+    v.extend(doctest_probe_violations(
+        "PhaseMetrics の doc",
+        &doc_lines_above_fn(&batch, "pub struct PhaseMetrics"),
+        &[
+            "use fandhe_ai::inference::",
+            "PhaseMetrics",
+            "since",
+            "InferencePhase::",
+        ],
+    ));
+    assert!(v.is_empty(), "{v:?}");
+
+    assert!(!doctest_probe_violations("t", &[], &["predict_batches"]).is_empty());
+    let hidden = ["```", "# predict_batches", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &hidden, &["predict_batches"]).is_empty());
+}
 // =====================================================================
 // FftOpsHoldDoctestGuard（イシュー #2631・#2632・#2633・親 #2630・ルート #2499 Phase 4）:
 // `PredictBatchesHoldDoctestGuard`（#2192。#2582 で削除済み）系のテストを鏡写しにする。

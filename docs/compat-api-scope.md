@@ -1464,6 +1464,10 @@ doctest）とトークン方式の否定ガード（`facade_does_not_reexport_or
 declare_generate_items` 等）で多層固定している。詳細は
 `docs/facade-generate-decision.md` §0・§1 を参照。
 
+> **更新（イシュー #2582・#2583）**: 下記の保留は #2582 で承認形どおり公開済みとなり、保留ガード
+> （`PredictBatchesHoldDoctestGuard` と `api_surface.rs` の 4 テスト）は正ガードへ反転済み。
+> 下記は着手時点（#2192）の履歴であり、現行の公開形・ガードは直後の適用記録を正とする。
+
 **保留記録（イシュー #2192・親 #2131）**: `Sequential::
 predict_batches`・`PhaseMetrics`・`get_phase_metrics`／
 `current_phase_metrics`／`reset_phase_metrics`・非公開 `mod inference`
@@ -1472,6 +1476,29 @@ PredictBatchesHoldDoctestGuard`（正のプローブ doctest）と
 `crates/facade/tests/api_surface.rs` の 4 テストで多層固定している。
 詳細は `docs/facade-predict-batches-phase-metrics-decision.md` §0・
 §5 を参照。
+
+**適用記録（経路 2。イシュー #2582・#2583・親 #2581・ルート #2499 のコメント〈決定記録 §8 の推奨案での承認。`issuecomment-6033824965`〉に基づく）**:
+`Sequential::predict_batches`（#2192 で内部実装済みの DataLoader 反復推論）と推論フェーズ計測を、
+決定記録（`docs/facade-predict-batches-phase-metrics-decision.md` §8.4・§10・§11）の確定形どおり公開した。
+公開名は 7 件: `fandhe_ai::compat::Sequential::predict_batches` と
+`fandhe_ai::inference::{PhaseMetrics, PhaseStat, InferencePhase, PredictBatchInput, get_phase_metrics,
+reset_phase_metrics}`（`pub mod inference` を新設し、実体の `batch` は非公開のままフラットに再エクスポート）。
+`fandhe-ai =0.10.0` に対して追加のみ（`PhaseMetrics`・`InferencePhase` は `#[non_exhaustive]`、
+`PredictBatchInput` は sealed）。集計単位はスレッド単位で、`current_phase_metrics`・プロセス全体集計・
+open トレイト・`dyn` 境界は作らない。
+正ガード: #2582 で `facade_exposes_predict_batches_items_only_in_approved_shape`（＋自己テスト）・
+`workspace_declares_predict_batches_fn_names_only_in_approved_locations`・
+`inference_is_public_and_batch_stays_private`・
+`predict_batches_public_surface_is_reachable_with_pinned_signatures`、#2583 で全数インベントリ
+`inference_phase_variants_are_exactly_approved_four`・`predict_batch_input_impls_are_exactly_approved_three`・
+`phase_metrics_and_phase_stat_pub_methods_are_exactly_approved`・`inference_internal_items_stay_crate_private`
+（自己テスト `predict_batches_inventory_guards_detect_each_category`）と doctest 存在検査
+`predict_batches_usage_doctests_are_present_and_compiled`。利用例は `inference/mod.rs` のモジュール doc・
+`Sequential::predict_batches` の doc・`PhaseMetrics` の doc（doctest）と
+`crates/facade/tests/inference_predict_batches.rs`。保留を継続する項目: 他ローダー
+（`SamplerDataLoader`／`PrefetchDataLoader`／`HookedDataLoader`）向け別名メソッド・プロセス全体集計・
+`phase_metrics()` 別名・`DeviceTransfer` の実計測。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
+`docs/spec` は不変、実機申し送りは不要。詳細は決定記録 §10・§11。
 
 | 出典 | 内容 |
 |------|------|
