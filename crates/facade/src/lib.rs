@@ -3371,13 +3371,14 @@ struct SwaHoldDoctestGuard;
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// fit_weighting_hold_doctest_globs_all_pub_modules`・
 /// `fit_weighting_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_fit_weighting_items`〈承認位置の許可数を
-/// 固定。`FitWeights::class_weight`／`sample_weight` は `impl` の所有型を区別
-/// できないため「`training.rs` に各 1 件」で縛り、`FitConfig` 側への追加は本
-/// doctest のプローブが検出する〉・`fit_config_keeps_copy_eq_for_0_9_0_compat`）
-/// との多層防御の位置づけは同 doc §7・§11.6 を参照。
-///
-/// 正ガードへの反転・到達性テストは #2565 の担当。
+/// `fit_config_keeps_copy_eq_for_0_9_0_compat`）に加え、#2565 で承認形を固定する
+/// 正ガード（`facade_fit_weighting_public_surface_matches_approved_contract`〈承認した
+/// 形が承認した場所に所有型の `impl` ごとちょうど 1 件ずつあること〉・
+/// `facade_fit_weights_shape_matches_approved_contract`〈`FitWeights` の形状〉・
+/// `workspace_declares_fit_weighting_fn_names_only_in_approved_location`〈workspace
+/// インベントリ〉・`fit_weighting_items_are_reachable_via_facade_only`〈facade 単独
+/// import での到達性〉）へ反転済み。本 doctest は残る禁止経路専用で、多層防御の
+/// 位置づけは同 doc §7・§11.6・§15 を参照。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること

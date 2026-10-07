@@ -131,8 +131,10 @@ Keras `fit` の既定 `shuffle=True` とは異なり、`DataLoaderConfig::new`
 LR スケジューラ連携は #1763 で実装済み（`docs/compat-callbacks-design.md`）。
 metrics は #2072 で実装済み（`docs/compat-metrics-design.md`）。
 `DataLoader` 直接入力は引き続き対象外のまま。class_weight・
-sample_weight・validation_split は #2177 で設計記録済み・facade 公開は
-承認待ち（`docs/compat-fit-sample-weighting-decision.md`）。
+sample_weight・validation_split は #2177 で設計記録済み、#2564 で
+公開済み（`FitConfig::validation_split`・`FitWeights`・
+`Sequential::fit_with_weights`）、#2565 で公開面を正ガード化した
+（`docs/compat-fit-sample-weighting-decision.md` §14・§15）。
 
 ## 4. 正しさの検証
 

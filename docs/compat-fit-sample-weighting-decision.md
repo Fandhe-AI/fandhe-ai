@@ -6,6 +6,8 @@
 FitWeightingHoldDoctestGuard`＋`crates/facade/tests/api_surface.rs`
 のテストで機械的に固定する）。
 
+現況: #2564 で承認形を facade へ公開し、#2565 で保留ガードを正ガードへ反転した（§14・§15）。以降の節のうち §2〜§13 は各時点の履歴である。
+
 ## 1. 目的・スコープ
 
 `compat::Sequential::fit`／`fit_with_callbacks`／`fit_with_metrics`
@@ -231,6 +233,8 @@ impl Sequential {
 §3〜§5 の仕様どおりに `compat::training` を実装したうえで、
 `docs/compat-fit-evaluate-design.md` §3.7 を更新する。
 
+> 現況は §11.6・§14・§15 を参照（本節は #2177 時点の履歴。否定ガードは #2564 で縮小、#2565 で正ガードへ反転済み）。
+
 ## 8. OWASP Top 10 観点（承認後実装の要件として記録）
 
 - **A01／A04（不適切な設計・権限）**: 承認ゲートを迂回して facade の
@@ -422,3 +426,41 @@ sample_weight 適用は再開時に選択肢として提示する。新規 Issue
 3. optimizer へ渡す直前の累積勾配（通常の累積境界と epoch 末の端数 flush の両方）。各マイクロバッチが有限でも `accumulate_grads_into` の f32 加算で overflow しうるため（例: 二クラス・同一 logits・`sample_weight = 3e38`・`batch_size = 1` の 3 バッチ累積で bias 勾配が ±1.5e38 → 累積 ±inf）。勾配クリッピングは fit 経路になく optimizer 内部の処理のため、検査はクリップ前（optimizer 入力）で行う。
 
 不変条件: 拒否した更新はパラメータにも optimizer 状態にも適用されない（拒否時点の累積バッファは破棄）。train／eval モードは呼び出し前へ復元し、`compile` 状態は維持する。それまでに成功した step は既存 `fit` 系と同じく巻き戻さない。AMP 経路は `GradScaler::unscale` の非有限スキップ契約に従う（累積との併用は従来どおり拒否）。重みなしの `fit` 系の累積 overflow は別件で、本 PR では変更しない。
+
+## 15. #2565 実装記録（保留ガードの正ガード化）
+
+イシュー #2565（親 #2562）で、#2564 で縮小した否定ガードを承認形だけを許す正ガードへ反転した。着手条件は §14 と同じ、ルート #2499 のコメント（id 6033824965・2026-10-07）の「#2562: §11.1 の確定形と §11.3 の推奨案（式が未定義の組み合わせは fail-closed）」である。本節はそれ以上の承認を主張しない。
+
+### 15.1 公開済みの名前
+
+#2564（PR #2823）で公開済み: `fandhe_ai::compat::FitWeights`（`compat/mod.rs` の `pub use` 葉 1 件）・`compat/training.rs` の `struct FitWeights`・`impl FitConfig` 内 `validation_split`・`impl FitWeights` 内 `class_weight`／`sample_weight`（と `new`）・`impl Sequential` 内 `fit_with_weights`。本イシューは公開面を増減しない。
+
+### 15.2 ガード反転の対応表
+
+| 旧 | 新 | 処置 |
+|----|----|------|
+| `facade_does_not_reexport_or_declare_fit_weighting_items` | `facade_fit_weighting_public_surface_matches_approved_contract` | 鍵 6 種（`use:FitWeights`・`struct:FitWeights`・`fn:validation_split`・`fn:class_weight`・`fn:sample_weight`・`fn:fit_with_weights`）が各ちょうど 1 件であることを固定。`fn` は所有型の `impl`（`FitConfig`／`FitWeights`／`Sequential`）内の 1 件目のみ承認し、旧版の弱点（`impl` の所有型を区別できない）を解消。欠落・二重化・別名（葉の前後）・承認位置外／別種別の宣言・`fn fit_weighted` は fail |
+| `FIT_WEIGHTING_APPROVED_SITE_COUNT`（許可数 6 の件数比較） | `FIT_WEIGHTING_APPROVED_KEYS`＋`fit_weighting_inventory_violations` | 件数ではなく鍵で欠落・二重化・予期しない鍵を検出 |
+| `facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category` | `facade_fit_weighting_public_surface_guards_detect_each_category` | 既存カテゴリを引き継ぎ、所有型違い・逆向き別名・インベントリ・形状逸脱の合成入力を追加 |
+| （新規） | `facade_fit_weights_shape_matches_approved_contract` | `FitWeights` の inherent pub fn が `new`／`class_weight`／`sample_weight` のみ・非 pub fn は `is_non_default` のみ・trait impl 0・pub フィールド 0・直前属性は `#[derive(Debug, Clone, PartialEq, Default)]` のみ（`#[non_exhaustive]` なし）。`FitConfig` に `validation_split` があり重み・`fit_with_weights` が無いこと、`Sequential` に `fit_with_weights` があり他が無いこと |
+| （新規） | `workspace_declares_fit_weighting_fn_names_only_in_approved_location` | workspace 全体の `fit_with_weights`／`validation_split`／`sample_weight` が `facade/src/compat/training.rs` に各 1 件、`fit_weighted` が 0 件 |
+| （新規） | `fit_weighting_items_are_reachable_via_facade_only` | `fandhe_ai` のみの import で `validation_split`・`FitWeights` のビルダー・`fit_with_weights`（`f32`／`i32` target）を型検査し、挙動（既定との差・値の区別）も固定 |
+| `fit_weighting_hold_doctest_globs_all_pub_modules`・`fit_weighting_hold_doctest_probe_body_matches_fixed_contract` | 維持 | 禁止経路専用の `FitWeightingHoldDoctestGuard` のドリフト検査 |
+| `fit_config_keeps_copy_eq_for_0_9_0_compat` | 維持（名称も維持） | 非破壊契約（`Copy + Eq`）の正のガード |
+
+workspace インベントリの名前リストから `class_weight` を外した理由: 内部クレートに無関係な既存宣言（`crates/autodiff/src/loss_ops.rs` の `pub fn class_weight`）があり、内部クレートの都合でガードが揺れるのを避けるため。facade 内の `class_weight` は上の 2 つの facade 走査（所有型判定・形状）が固定する。
+
+### 15.3 §11.6 引き継ぎ表の消化状況
+
+- #2564 実施分: doctest プローブの縮小・固定文字列更新・否定ガードの縮小（§14）。
+- #2565 実施分: 否定ガードの正ガード化（§15.2）・到達性テスト・本記録・`docs/compat-api-scope.md` §5 の適用記録・`docs/compat-fit-evaluate-design.md` §3.7 の更新。
+- §13.2 が指摘した「4 テスト／5 件」の数え違いは、現在の構成（維持 3 件〈doctest ドリフト検査 2 件・`fit_config_keeps_copy_eq_for_0_9_0_compat`〉＋正ガード 4 件＋自己テスト 1 件）で解消する。
+- CUDA／Metal: 新規演算が無く CPU のみで実行できるため実機 parity の申し送り（`#[ignore]` テスト・`docs/perf/logs/`）は不要（§14.2 を再確認）。
+
+### 15.4 利用例テストの所在
+
+`crates/facade/tests/compat_sequential_fit_weights.rs`（#2564。CE＋class／sample weight、MSE＋sample_weight、validation_split、累積・AMP 併用、拒否経路）と、`FitConfig::validation_split`・`FitWeights`・`Sequential::fit_with_weights` の各 doctest、および facade 単独 import の到達性テスト `fit_weighting_items_are_reachable_via_facade_only`。
+
+### 15.5 検証
+
+`cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`・`cargo test -p fandhe-ai`（`api_surface`・`compat_sequential_fit_weights`・doctest を含む）・`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` を実行した（結果は PR の検証欄を参照）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
