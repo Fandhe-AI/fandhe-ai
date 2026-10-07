@@ -22,8 +22,9 @@ K-3（段階 0・将来候補）へ切り分ける。
 
 `docs/compat-api-scope.md` §5 経路 2（ユーザー承認＋issue 起票）の
 承認のうち、K-1（本 autodiff 内部実装。§6 承認事項 1）は 2026-09-24 に
-ユーザー承認済み。facade 公開（K-2）・K-3・`sdpa_compose` 置換
-（§6 承認事項 2〜4）は未取得のまま（§6 承認事項）。
+ユーザー承認済み。facade 公開（K-2。§6 承認事項 2）は 2026-10-07 にリポジトリ所有者本人が
+承認済み（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965。§14）。K-3・`sdpa_compose` 置換
+（§6 承認事項 3・4）は未取得のまま（§6 承認事項）。
 
 ## 1. 背景
 
@@ -251,7 +252,8 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
    `MultiheadAttentionVars::forward_with_cache`・
    `StatefulAttention`）に限られ、facade 公開（下記 2）は含まない。
 2. facade 公開面拡張（#2084 の `add_stateful_attention`／
-   `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）: **未取得**
+   `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）: ~~未取得~~ →
+   **2026-10-07 にリポジトリ所有者本人が承認済み**（§11.6 の P1〜P4 を推奨どおり。§14 参照）
 3. K-3（デバイス常駐 KV。段階 0）: **未取得**
 4. `sdpa_compose` 置換の別 issue 起票: **未取得**
 
@@ -335,7 +337,7 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
   「CPU GEMM の shape 依存ブロッキングパラメータにより不成立の可能性」
   はこの環境の実測では顕在化しなかったが、恒久的な bit 一致契約とは
   していない）。
-- **facade 公開（K-2）**: 未承認のため保留。`add_stateful_attention`・
+- **facade 公開（K-2）**: （記録時点では）未承認のため保留。2026-10-07 の承認（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）により解除。§14 参照。`add_stateful_attention`・
   `StatefulAttention` 相当の facade `pub fn`／再エクスポートは追加して
   いない。`crates/facade/tests/api_surface.rs::
   facade_does_not_expose_kv_cache_stateful_attention` が「未公開」を
@@ -351,7 +353,8 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 
 ## 10. facade 公開（K-2）の保留固定と承認依頼用の事前設計（#2084）
 
-§6 承認事項 2（facade 公開面拡張）は本節追記後も**未取得のまま**である。
+（2026-10-07 の承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965〉により、本節の保留固定は解除済み。§14 参照。以下は承認前の記録である。）
+§6 承認事項 2（facade 公開面拡張）は本節追記時点で**未取得のまま**である。
 本節は (a) 保留固定の多層防御構成、(b) 承認後に外すもの、(c) 承認依頼に
 向けた K-2 の事前設計と承認者が判断すべき論点、の 3 つを記録する。
 コード変更は否定ガードの強化のみで、K-2 の実装本体には着手していない。
@@ -448,7 +451,7 @@ K-2 とは独立に別承認が必要（§6 承認事項 3 のまま変更なし
 残る場合は、実装せずに記録追記と承認依頼へ切り替える（イシューの停止条項）。
 基準コミット `a5cba8a7`（origin/main）で突合した結果、後述 11.3 の論点が残っていたため
 **facade・autodiff のコードは変更していない**。**本節は承認の取得を意味しない**
-（§6 承認事項 2 は本節追記後も未取得のまま）。
+（§6 承認事項 2 は本節追記時点で未取得。2026-10-07 の承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965〉により解除。§14 参照）。
 
 ### 11.2 確定済みの形（内部 API。§2・§9 と実装の突合結果）
 
@@ -479,7 +482,7 @@ K-2 とは独立に別承認が必要（§6 承認事項 3 のまま変更なし
 5. 派生論点: `StatefulAttention::new(mha)`／`mha()` は、MHA 型を公開しない案では
    facade から名指しできない型を扱う公開メソッドとして残る。
 
-### 11.4 論点ごとの推奨案（いずれも未承認）
+### 11.4 論点ごとの推奨案（2026-10-07 に P1〜P4 すべて推奨どおりで承認済み。§14 参照）
 
 | 論点 | 推奨案 | 比較した他案 |
 |---|---|---|
@@ -506,6 +509,8 @@ K-2 とは独立に別承認が必要（§6 承認事項 3 のまま変更なし
 
 承認コメントが形を名指しするまで #2579 は着手しない。
 
+> 2026-10-07 の承認（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）により解除。リポジトリ所有者本人が A（P1〜P4 すべて推奨どおり）を承認した。§14 参照。
+
 ### 11.7 本 PR で行わないこと
 
 facade／autodiff のコード変更、ガードの削除・反転、`compat-api-scope.md` への適用記録、
@@ -518,7 +523,7 @@ Issue 起票、spec 提案の投稿。K-3 と `sdpa_compose` の置換は §6 �
 #2579 は §2・§6・§10 の推奨形による facade 公開（K-2）を求めたが、基準コミット `ca65c4b0` で突合した結果、
 §11.4 の P1〜P4 は**未承認の推奨案**であり、§11.6 の A／B／C に対する承認コメントが存在しなかった。
 P2（`MultiheadAttention` の到達経路）は B 案との択一も残る。このため停止条項に従い実装せず、
-facade・autodiff のコードは変更していない。§6 承認事項 2 は**未取得**のままである。
+facade・autodiff のコードは変更していない。§6 承認事項 2 は当時**未取得**だった（2026-10-07 の承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965〉により解除。§14 参照）。
 
 ### 12.2 承認コメントの確認範囲
 
@@ -535,7 +540,7 @@ facade・autodiff のコードは変更していない。§6 承認事項 2 は*
 
 ### 12.4 後続への影響
 
-K-2 の実装は §11.6 の承認取得後に再着手が必要で、#2580 も同じ理由で停止対象となる。
+K-2 の実装は §11.6 の承認取得後（2026-10-07 に取得済み。§14 参照）に再着手が必要で、#2580 も同じ理由で停止対象となる。
 generate() 公開（`facade-generate-decision.md`）も KvCache の facade 到達を前提としている。
 
 ### 12.5 本記録で行わないこと
@@ -545,7 +550,7 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 
 ## 13. #2580（保留ガード反転・記録更新）の着手時判定
 
-本節は docs のみの停止記録であり、**承認を得たことを意味しない**。§6 承認事項 2 は未取得のままである。
+本節は docs のみの停止記録であり、**承認を得たことを意味しない**。§6 承認事項 2 は記録時点で未取得だった（2026-10-07 の承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965〉により解除。§14 参照）。
 
 ### 13.1 判定
 
@@ -562,7 +567,7 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 （`facade_does_not_expose_kv_cache_stateful_attention`・`kv_cache_hold_doctest_globs_all_pub_modules`・
 `kv_cache_hold_doctest_probe_body_matches_fixed_contract`・`scan_kv_cache_reexports_and_declarations`・
 `facade_does_not_reexport_or_declare_kv_cache_items`・`facade_does_not_reexport_or_declare_kv_cache_items_detects_each_category`）は
-撤去・縮小・反転しない。
+撤去・縮小・反転しない（2026-10-07 の承認により解除。§14 参照）。
 
 ### 13.3 受入条件ごとの扱い
 
@@ -574,7 +579,7 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 
 ### 13.4 解除の順序
 
-1. §11.6 で A／B／C のどれを選ぶかのユーザー承認
+1. §11.6 で A／B／C のどれを選ぶかのユーザー承認（2026-10-07 に A で取得済み。§14 参照）
 2. #2579 の再着手（または再起票）で facade 公開を実装する。§12.3 のとおり、公開面追加と同時に既存否定ガードが落ちるため、同一 PR での最小限の差し替えが必要になりうる
 3. 本イシュー相当の作業で §10.2 の手順に従い否定ガードを正ガード（公開面の到達可能性検査。prefill → decode の doctest を 1 つ含む。§11.4 P4）へ置換し、`compat-api-scope.md` §5 と本 doc §2・§6・§10 へ実装記録を書く
 4. generate() 公開（`facade-generate-decision.md` §15）がこれに続く
@@ -584,9 +589,24 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 コード変更、ガードの削除・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、spec 提案、依存追加、`unsafe`、tolerance 変更。
 K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 
-## 14. #2579 実装記録（facade 公開）
+## 14. #2579 実装記録（facade 公開）と承認記録
 
-§11.4 の P1〜P4 に沿って実装した。承認の根拠は §11・§12 に記録した範囲に限る（ルート #2499 の一括承認〈2026-10-04〉と #2577・#2579 の記録コメント〈Claude が記録したもの〉。ユーザー本人の個別承認コメントではない）。
+### 14.0 承認記録
+
+- 承認者・日時: リポジトリ所有者本人（GitHub アカウント aLiz-Nancy）、2026-10-07（コメント作成 08:12 UTC）
+- 根拠コメント: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965（ルート issue #2499 への承認コメント。該当行「#2577 | `docs/kv-cache-design.md` §11 の推奨案〈§11.6 の P1〜P4 はすべて推奨どおり〉」）
+- 同コメントは「各記録にある『ユーザー承認まで着手しない』『公開と保留ガードの反転を停止する』という条件は、本コメントをもって満たされたものとします」と明記しており、§11.6・§12・§13 の停止条件はこれにより解除された。
+- 前提条件: `fandhe-ai =0.10.0` の公開 API を壊さない追加のみ。依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更しない。承認は記録に書かれた推奨形に限る（記録に形が書かれていない点は実装せず承認依頼へ戻す）。
+- §11.6 の選択: **A（P1〜P4 の推奨案で承認し、#2579 で実装する）**。B（MHA 公開案）・C（保留）は選ばれていない。承認された各項目（§11.4 の推奨案）:
+  - **P1 配置**: 純再エクスポートの `pub mod fandhe_ai::nn::kv_cache`（新ファイル `crates/facade/src/nn/kv_cache.rs`。`nn::rnn` と同型）。`compat::Sequential` へのメソッドは追加しない。
+  - **P2 MHA 到達**: `MultiheadAttention` は公開しない。autodiff に `StatefulAttention::from_config(&MultiheadAttentionConfig, seed)` を追加し、`forward_with_cache` が拒否する 3 条件（`batch_first=false`・`kdim != embed_dim`・`vdim != embed_dim`）を構築時に `InvalidArgument` で拒否する。facade は `KvCache`・`StatefulAttention`・`MultiheadAttentionConfig` を再エクスポートする。
+  - **P3 forward 入口**: facade `Tape` に `stateful_attention_forward<'t>(&'t self, sa: &mut nn::kv_cache::StatefulAttention, x_new: &Var<'t>) -> Result<Var<'t>, AutodiffError>`（`&self.0` を渡すだけの薄い委譲）。`forward_with_cache` は出さない。
+  - **P4 ガード**: §10.2 の否定ガード群を、公開面の到達可能性を検査する正ガードへ置換し、prefill → decode の doctest を 1 つ置く。
+- これ以前の §11〜§13 の記録（Claude による記録コメントを含む）は承認の根拠ではない。承認の根拠は上記のユーザー本人のコメントのみである。
+
+### 14.0.1 実装の概要
+
+§11.4 の P1〜P4 に沿って実装した。
 
 ### 14.1 公開した名前
 

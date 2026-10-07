@@ -327,7 +327,8 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 ### 14.2 承認後も残る構造的ブロッカー
 
 - `KvCache` が facade から到達できない（`KvCacheHoldDoctestGuard` で保留
-  固定中。#2577〜#2580 は open）。facade 利用者は
+  固定中。#2577〜#2580 は open）。
+  （追記: 2026-10-07 にリポジトリ所有者本人が `docs/kv-cache-design.md` §11.6 の P1〜P4 を承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965〉し、PR #2816〈#2579〉で `fandhe_ai::nn::kv_cache` を公開した。`KvCacheHoldDoctestGuard` は削除済み。本項は #2575 着手時点の記録）facade 利用者は
   `AutoregressiveModel::forward_step` を実装できず `generate` を呼べない。
 - 配置の第一候補 `pub mod inference` は、非公開の `mod inference;`
   （`crates/facade/src/lib.rs`）および predict_batches の保留ガード

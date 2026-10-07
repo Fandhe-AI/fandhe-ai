@@ -7721,11 +7721,12 @@ fn compat_sequential_has_no_introspection_methods() {
 }
 
 // =====================================================================
-// イシュー #2579（親 #2499 のルート一括承認・#2577／#2579 の承認記録）: KV キャッシュ
+// イシュー #2579（親 #2499 のリポジトリ所有者本人による 2026-10-07 付け承認コメント
+// 〈issue #2499 の issuecomment-6033824965。#2577 の §11.6 P1〜P4 を推奨どおりとする承認〉）: KV キャッシュ
 // （`KvCache`・`StatefulAttention`）の facade 公開を固定する正ガード群。旧保留ガード
 // （#2084。`KvCacheHoldDoctestGuard`・走査ガード 3 件・固定文言）を反転したもので、公開面は
 // 承認形（`nn/kv_cache.rs` の 1 文の再エクスポート・`Tape::stateful_attention_forward` 1 件）に
-// 完全一致で限定する。根拠は `docs/kv-cache-design.md` §11.4（P1〜P4）。
+// 完全一致で限定する。根拠は `docs/kv-cache-design.md` §11.4（P1〜P4）と §14（承認記録）。
 // =====================================================================
 
 /// `nn/kv_cache.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの。3 名形）。
@@ -11819,7 +11820,7 @@ fn workspace_declares_rng_distribution_names_only_in_allowed_locations() {
 
 /// `SpatialLayersHoldDoctestGuard` の唯一の doctest ブロックが glob
 /// import するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod`
-/// 宣言集合が一致することを固定する（`kv_cache_hold_doctest_globs_all_
+/// 宣言集合が一致することを固定する（#2579 で削除済みの旧 `kv_cache_hold_doctest_globs_all_
 /// pub_modules` と同型。新しい `pub mod` を facade へ追加した際、
 /// doctest 側の `use` 一覧の更新を機械的に強制する。イシュー #2159）。
 #[test]
@@ -19863,8 +19864,8 @@ fn workspace_declares_npy_io_names_only_in_allowed_locations() {
 /// `generate()` 自己回帰ループ（イシュー #2191。設計正本
 /// `docs/facade-generate-decision.md`）の facade 公開（`inference::
 /// generate`／`GenerateConfig`／`SamplingStrategy`／`AutoregressiveModel`
-/// 相当）は未承認のため保留する。`facade_does_not_expose_kv_cache_
-/// stateful_attention` と同型の否定ガード: facade の src/ に①`fn
+/// 相当）は未承認のため保留する。#2579 で削除済みの旧 KV キャッシュ否定ガード
+/// （`facade_does_not_expose_kv_cache_stateful_attention`）と同型の否定ガード: facade の src/ に①`fn
 /// generate` 宣言（可視性・宣言文脈を問わず。[`declares_fn_named`]
 /// 参照）、②`GenerateConfig`／`SamplingStrategy`／
 /// `AutoregressiveModel` を識別子単位で含む `pub use` 行、のいずれも
@@ -19914,7 +19915,7 @@ fn facade_does_not_expose_generate_items() {
 
 /// `GenerateHoldDoctestGuard` の唯一の doctest ブロックが glob import する
 /// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が
-/// 一致することを固定する（`kv_cache_hold_doctest_globs_all_pub_modules`
+/// 一致することを固定する（#2579 で削除済みの旧 `kv_cache_hold_doctest_globs_all_pub_modules`
 /// と同型）。
 #[test]
 fn generate_hold_doctest_globs_all_pub_modules() {
