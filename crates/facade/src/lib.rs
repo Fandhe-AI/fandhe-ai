@@ -6297,36 +6297,30 @@ struct LrnWeightReparamHoldDoctestGuard;
 struct PackedSequenceHoldDoctestGuard;
 
 /// SELU・CELU・Softsign・Hardsigmoid・LogSigmoid（`selu`・`celu`・`softsign`・
-/// `hardsigmoid`・`log_sigmoid`。イシュー #2649・親 #2648）を facade 公開面から
-/// 締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
-/// ブロック方式）。
+/// `hardsigmoid`・`log_sigmoid`。イシュー #2649・親 #2648）の facade 公開保留ガード
+/// （`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 5 個・
-/// 関数 5 個・モジュール `activation_scalar_ops` と、`Var`／`Tape`／`Tensor<f32>`
-/// 上の 5 メソッド・`compat::Sequential` 上の `add_*` 5 メソッドを持つプローブ用
-/// トレイトを置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出し（UFCS）の両方を
-/// 行う。facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、
-/// 同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出し
+/// `compat::Sequential::add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid` は
+/// イシュー #2679 で承認形（`docs/autodiff-activation-scalar-ops-decision.md` §7。承認はルート #2499 の
+/// コメント）として公開したため、`add_*` のプローブは削除した。残すのは**未承認の経路**
+/// （`Var`／`Tape`／`Tensor<f32>` への委譲メソッド、`activation_scalar_ops` モジュールの公開、層型の
+/// 再エクスポート。`Var` 委譲は #2678 が担当する）だけである。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 5 個・関数 5 個・モジュール
+/// `activation_scalar_ops` と、`Var`／`Tape`／`Tensor<f32>` 上の 5 メソッドを持つプローブ用トレイトを置き、
+/// 修飾なしの関数呼び出しと修飾付きメソッド呼び出し（UFCS）の両方を行う。facade が同名のモジュール・型・関数を
+/// glob 可能な位置へ公開するか、同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出し
 /// シグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
 ///
-/// 検出範囲は本プローブが列挙した名前・型に限る（マクロ生成や別名経由の公開までは
-/// 保証しない）。実装は内部クレートに閉じている
-/// （`fandhe_ai_autodiff::activation_scalar_ops`・`nn::activation` の層 5 型・
-/// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）。保留対象は facade 公開面
-/// （`Var` の委譲メソッド・`compat::Sequential::add_*`）のみで、公開形は未承認
-/// （承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
-/// `docs/autodiff-activation-scalar-ops-decision.md` §7。同記録は推奨案の記録であり
-/// 承認記録ではない）。
+/// 検出範囲は本プローブが列挙した名前・型に限る（マクロ生成や別名経由の公開までは保証しない）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// activation_scalar_ops_hold_doctest_globs_all_pub_modules`・
 /// `activation_scalar_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_activation_scalar_ops`・
-/// `workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations`）との
-/// 多層防御として働く。
+/// `workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
 ///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
+/// `Var` 委譲が承認・公開される日が来たら、本構造体・本 doctest 自体を削除する（#2678）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -6370,14 +6364,6 @@ struct PackedSequenceHoldDoctestGuard;
 ///     fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker;
 ///     fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
 ///     fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
-/// }
-///
-/// trait __FandheActivationScalarOpsHoldAddProbe {
-///     fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker;
-///     fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker;
-///     fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker;
-///     fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
-///     fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
 /// }
 ///
 /// impl<'t> __FandheActivationScalarOpsHoldProbe for fandhe_ai::Var<'t> {
@@ -6434,24 +6420,6 @@ struct PackedSequenceHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// impl __FandheActivationScalarOpsHoldAddProbe for fandhe_ai::compat::Sequential {
-///     fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-/// }
-///
 /// fn __probe_free_fns(
 ///     _0: Selu,
 ///     _1: Celu,
@@ -6473,7 +6441,6 @@ struct PackedSequenceHoldDoctestGuard;
 ///     v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
-///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::selu(v);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::selu(tape);
@@ -6490,11 +6457,6 @@ struct PackedSequenceHoldDoctestGuard;
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::log_sigmoid(v);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::log_sigmoid(tape);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::log_sigmoid(tf);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_selu(seq);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_celu(seq);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_softsign(seq);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_hardsigmoid(seq);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_log_sigmoid(seq);
 /// }
 /// ```
 #[cfg(doctest)]
@@ -6503,30 +6465,27 @@ struct ActivationScalarOpsHoldDoctestGuard;
 
 /// 活性化 4 種（`softmin`・`tanhshrink`・`threshold`・`rrelu`／`rrelu_with_noise` と層 `Softmin`・`Tanhshrink`・
 /// `Threshold`・`RRelu`。`F.softmin`／`F.tanhshrink`／`F.threshold`／`F.rrelu` 相当。イシュー #2650・親 #2648・
-/// Phase 親 #2625）を facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の
-/// 正のプローブ 1 ブロック方式）。
+/// Phase 親 #2625）の facade 公開保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
+/// ブロック方式）。
+///
+/// `compat::Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu` はイシュー #2679 で承認形
+/// （`docs/autodiff-softmin-threshold-ops-decision.md` §7。承認はルート #2499 のコメント）として公開したため、
+/// `add_*` のプローブは削除した。残すのは**未承認の経路**（`Var`／`Tape`／`Tensor<f32>` への委譲メソッド、
+/// `softmin_threshold_ops`／`softmin_threshold` モジュールの公開、層型の再エクスポート。`Var` 委譲は #2678 が
+/// 担当する）だけである。
 ///
 /// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `softmin_threshold_ops`／
 /// `softmin_threshold`・型 `Softmin`／`Tanhshrink`／`RRelu`／`Threshold` と、プローブ用トレイトのメソッド
-/// （`Var`／`Tape`／`Tensor<f32>` の `softmin`／`tanhshrink`／`threshold`／`rrelu`／`rrelu_with_noise`、
-/// `compat::Sequential` の `add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu`）を置き、モジュール経由の
-/// 関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型を glob 可能な位置へ
-/// 公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
-/// 不一致でエラーコードに依存せずコンパイルが失敗する。検出範囲は列挙したこれらの名前・型に限り、マクロ生成や
-/// 別名経由のメソッドまでは保証しない。
-///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::softmin_threshold_ops`・
-/// `fandhe_ai_autodiff::nn::softmin_threshold`）。保留対象は facade 公開面のみで、公開形は未承認（承認依頼は
-/// #2677・公開自体は承認後の #2678・#2679。推奨案は `docs/autodiff-softmin-threshold-ops-decision.md` §7。
-/// 同記録は推奨案の記録であり承認記録ではない）。
+/// （`Var`／`Tape`／`Tensor<f32>` の `softmin`／`tanhshrink`／`threshold`／`rrelu`／`rrelu_with_noise`）を置き、
+/// モジュール経由の関数呼び出しと修飾付きメソッド呼び出しの両方を行う。検出範囲は列挙したこれらの名前・型に限り、
+/// マクロ生成や別名経由のメソッドまでは保証しない。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::softmin_threshold_ops_hold_doctest_globs_all_pub_modules`・
 /// `softmin_threshold_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_softmin_threshold_ops`・
 /// `workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
 ///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
+/// `Var` 委譲が承認・公開される日が来たら、本構造体・本 doctest 自体を削除する（#2678）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -6571,13 +6530,6 @@ struct ActivationScalarOpsHoldDoctestGuard;
 ///     fn threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker;
 ///     fn rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker;
 ///     fn rrelu_with_noise(&self) -> __FandheSoftminThresholdOpsHoldMarker;
-/// }
-///
-/// trait __FandheSoftminThresholdOpsHoldSequentialProbe {
-///     fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker;
-///     fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker;
-///     fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker;
-///     fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker;
 /// }
 ///
 /// impl<'t> __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Var<'t> {
@@ -6634,21 +6586,6 @@ struct ActivationScalarOpsHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// impl __FandheSoftminThresholdOpsHoldSequentialProbe for fandhe_ai::compat::Sequential {
-///     fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {
-///         __FandheSoftminThresholdOpsHoldMarker
-///     }
-///     fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker {
-///         __FandheSoftminThresholdOpsHoldMarker
-///     }
-///     fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker {
-///         __FandheSoftminThresholdOpsHoldMarker
-///     }
-///     fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker {
-///         __FandheSoftminThresholdOpsHoldMarker
-///     }
-/// }
-///
 /// fn __probe_free_fns(
 ///     _0: Softmin,
 ///     _1: Tanhshrink,
@@ -6669,7 +6606,6 @@ struct ActivationScalarOpsHoldDoctestGuard;
 ///     v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
-///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::softmin(v);
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::tanhshrink(v);
@@ -6686,10 +6622,6 @@ struct ActivationScalarOpsHoldDoctestGuard;
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::threshold(tf);
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu(tf);
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu_with_noise(tf);
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_softmin(seq);
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_tanhshrink(seq);
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_threshold(seq);
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_rrelu(seq);
 /// }
 /// ```
 #[cfg(doctest)]

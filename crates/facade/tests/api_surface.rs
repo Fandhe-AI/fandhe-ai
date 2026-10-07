@@ -12418,6 +12418,151 @@ fn compat_sequential_exposes_activation_layers_add_methods_issue_2529_counts_dec
 }
 
 // =====================================================================
+// イシュー #2679（親 #2625・ルート #2499 Phase 4）: `compat::Sequential` の活性化 9 層
+// （`add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid`／`add_softmin`／
+// `add_tanhshrink`／`add_threshold`／`add_rrelu`）の正ガード。旧 `ActivationScalarOpsHoldDoctestGuard`・
+// `SoftminThresholdOpsHoldDoctestGuard` の `add_*` 衝突プローブと否定走査を、承認形だけを許す正ガード
+// （シグネチャ一致・`pub fn` ちょうど 1 件・場所は workspace インベントリが固定）へ反転した。承認形は
+// `docs/autodiff-activation-scalar-ops-decision.md` §7・`docs/autodiff-softmin-threshold-ops-decision.md` §7。
+// =====================================================================
+
+const ADD_SELU_PARAMS: &str = "mut self) -> Self";
+const ADD_CELU_PARAMS: &str = "mut self, alpha: f32) -> Result<Self, AutodiffError>";
+const ADD_SOFTSIGN_PARAMS: &str = "mut self) -> Self";
+const ADD_HARDSIGMOID_PARAMS: &str = "mut self) -> Self";
+const ADD_LOG_SIGMOID_PARAMS: &str = "mut self) -> Self";
+const ADD_SOFTMIN_PARAMS: &str = "mut self, dim: usize) -> Self";
+const ADD_TANHSHRINK_PARAMS: &str = "mut self) -> Self";
+const ADD_THRESHOLD_PARAMS: &str = "mut self, threshold: f32, value: f32) -> Self";
+const ADD_RRELU_PARAMS: &str = "mut self, lower: f32, upper: f32) -> Result<Self, AutodiffError>";
+
+const PHASE4_ACTIVATION_LAYER_ADD_METHODS: [(&str, &str); 9] = [
+    ("add_selu", ADD_SELU_PARAMS),
+    ("add_celu", ADD_CELU_PARAMS),
+    ("add_softsign", ADD_SOFTSIGN_PARAMS),
+    ("add_hardsigmoid", ADD_HARDSIGMOID_PARAMS),
+    ("add_log_sigmoid", ADD_LOG_SIGMOID_PARAMS),
+    ("add_softmin", ADD_SOFTMIN_PARAMS),
+    ("add_tanhshrink", ADD_TANHSHRINK_PARAMS),
+    ("add_threshold", ADD_THRESHOLD_PARAMS),
+    ("add_rrelu", ADD_RRELU_PARAMS),
+];
+
+/// `compat::Sequential` の 9 つの `add_*` が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in PHASE4_ACTIVATION_LAYER_ADD_METHODS {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures_detects_offense()
+{
+    for (ok, name, params) in [
+        (
+            "pub fn add_selu(mut self) -> Self {",
+            "add_selu",
+            ADD_SELU_PARAMS,
+        ),
+        (
+            "pub fn add_celu(mut self, alpha: f32) -> Result<Self, AutodiffError> {",
+            "add_celu",
+            ADD_CELU_PARAMS,
+        ),
+        (
+            "pub fn add_softmin(mut self, dim: usize) -> Self {",
+            "add_softmin",
+            ADD_SOFTMIN_PARAMS,
+        ),
+        (
+            "pub fn add_threshold(mut self, threshold: f32, value: f32) -> Self {",
+            "add_threshold",
+            ADD_THRESHOLD_PARAMS,
+        ),
+        (
+            "pub fn add_rrelu(mut self, lower: f32, upper: f32) -> Result<Self, AutodiffError> {",
+            "add_rrelu",
+            ADD_RRELU_PARAMS,
+        ),
+    ] {
+        assert!(
+            sequential_spatial_add_signature_ok(ok, name, params),
+            "{ok}"
+        );
+    }
+    for (bad, name, params) in [
+        // 引数の追加
+        (
+            "pub fn add_selu(mut self, scale: f32) -> Self {",
+            "add_selu",
+            ADD_SELU_PARAMS,
+        ),
+        // 戻り値が Self（Result でない）
+        (
+            "pub fn add_celu(mut self, alpha: f32) -> Self {",
+            "add_celu",
+            ADD_CELU_PARAMS,
+        ),
+        // 戻り値が Result
+        (
+            "pub fn add_softmin(mut self, dim: usize) -> Result<Self, AutodiffError> {",
+            "add_softmin",
+            ADD_SOFTMIN_PARAMS,
+        ),
+        // 型違い（dim: isize）
+        (
+            "pub fn add_softmin(mut self, dim: isize) -> Self {",
+            "add_softmin",
+            ADD_SOFTMIN_PARAMS,
+        ),
+        // 引数順の入替
+        (
+            "pub fn add_threshold(mut self, value: f32, threshold: f32) -> Self {",
+            "add_threshold",
+            ADD_THRESHOLD_PARAMS,
+        ),
+        // 引数の欠落
+        (
+            "pub fn add_rrelu(mut self, lower: f32) -> Result<Self, AutodiffError> {",
+            "add_rrelu",
+            ADD_RRELU_PARAMS,
+        ),
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, name, params),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で 9 メソッドがそれぞれちょうど 1 件の `pub fn` として宣言されている
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード）。
+#[test]
+fn compat_sequential_exposes_phase4_activation_layers_add_methods_issue_2679() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut counts = [0usize; 9];
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        for (i, (name, _)) in PHASE4_ACTIVATION_LAYER_ADD_METHODS.iter().enumerate() {
+            counts[i] += count_pub_fn_declarations(content, name);
+        }
+    });
+    assert_eq!(
+        counts, [1; 9],
+        "src/compat 配下の活性化 9 層の add_* の pub fn 宣言数が各 1 件でない（counts={counts:?}）"
+    );
+}
+
+// =====================================================================
 // イシュー #2523（親 #2520・ルート #2499 の 2026-10-04 一括承認）:
 // `compat::Sequential::add_conv_transpose2d` の正ガード。保留ガードは存在しなかった
 // （`ConvTranspose2d` を禁じるプローブ・否定テストなし）ため反転対象はなく、承認形
@@ -28625,14 +28770,6 @@ trait __FandheActivationScalarOpsHoldProbe {\n\
 \x20\x20\x20\x20fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
 }\n\
 \n\
-trait __FandheActivationScalarOpsHoldAddProbe {\n\
-\x20\x20\x20\x20fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-}\n\
-\n\
 impl<'t> __FandheActivationScalarOpsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
@@ -28687,24 +28824,6 @@ impl __FandheActivationScalarOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-impl __FandheActivationScalarOpsHoldAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe_free_fns(\n\
 \x20\x20\x20\x20_0: Selu,\n\
 \x20\x20\x20\x20_1: Celu,\n\
@@ -28726,7 +28845,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::selu(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::selu(tape);\n\
@@ -28743,11 +28861,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::log_sigmoid(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::log_sigmoid(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::log_sigmoid(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_selu(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_celu(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_softsign(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_hardsigmoid(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_log_sigmoid(seq);\n\
 }";
 
 /// 保留対象の fn 名（イシュー #2649。`activation_scalar_ops` の自由関数と `Var`／`Tape`／`Tensor` の
@@ -28827,10 +28940,10 @@ fn scan_activation_scalar_ops_reexports_and_declarations(content: &str) -> Vec<S
         i += 1;
     }
 
-    for fn_name in ACTIVATION_SCALAR_OPS_FN_NAMES
-        .iter()
-        .chain(ACTIVATION_SCALAR_OPS_ADD_NAMES.iter())
-    {
+    // `add_*` の `fn` 宣言は #2679 で承認形（`compat/sequential.rs` に各 1 件）として公開した。
+    // 場所と件数は `workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations`、
+    // シグネチャは `compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures` が固定する。
+    for fn_name in ACTIVATION_SCALAR_OPS_FN_NAMES {
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -28897,17 +29010,12 @@ fn facade_does_not_reexport_or_declare_activation_scalar_ops_detects_each_catego
     assert!(offense("impl Tape { pub fn softsign(&self) {} }"));
     assert!(offense("impl Var { pub fn hardsigmoid(&self) {} }"));
     assert!(offense("impl Var { pub fn log_sigmoid(&self) {} }"));
-    assert!(offense(
-        "impl Sequential { pub fn add_selu(self) -> Self { self } }"
+    // 負例（#2679 で承認）: `Sequential::add_*` の宣言は本走査の違反ではない
+    // （場所・件数・シグネチャは別テストが固定する）。
+    assert!(!offense(
+        "impl Sequential { pub fn add_selu(mut self) -> Self { self } }"
     ));
-    assert!(offense("impl Sequential { pub fn add_celu(self) {} }"));
-    assert!(offense("impl Sequential { pub fn add_softsign(self) {} }"));
-    assert!(offense(
-        "impl Sequential { pub fn add_hardsigmoid(self) {} }"
-    ));
-    assert!(offense(
-        "impl Sequential { pub fn add_log_sigmoid(self) {} }"
-    ));
+    assert!(!offense("impl Sequential { pub fn add_celu(self) {} }"));
     assert!(offense("pub mod activation_scalar_ops {}"));
     // 負例: コメント・文字列リテラル中の出現。
     assert!(!offense(
@@ -28971,7 +29079,7 @@ fn workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations()
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = ACTIVATION_SCALAR_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = ACTIVATION_SCALAR_OPS_FN_NAMES
         .iter()
         .map(|n| {
             (
@@ -28980,6 +29088,10 @@ fn workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations()
             )
         })
         .collect();
+    // #2679: `compat::Sequential::add_*` 5 本は承認形（`facade/src/compat/sequential.rs` に各 1 件）。
+    for n in ACTIVATION_SCALAR_OPS_ADD_NAMES {
+        expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の selu／celu／softsign／hardsigmoid／log_sigmoid の `fn` 宣言が\
@@ -29073,13 +29185,6 @@ trait __FandheSoftminThresholdOpsHoldProbe {\n\
 \x20\x20\x20\x20fn rrelu_with_noise(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
 }\n\
 \n\
-trait __FandheSoftminThresholdOpsHoldSequentialProbe {\n\
-\x20\x20\x20\x20fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-}\n\
-\n\
 impl<'t> __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20fn softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
@@ -29134,21 +29239,6 @@ impl __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-impl __FandheSoftminThresholdOpsHoldSequentialProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe_free_fns(\n\
 \x20\x20\x20\x20_0: Softmin,\n\
 \x20\x20\x20\x20_1: Tanhshrink,\n\
@@ -29169,7 +29259,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::softmin(v);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::tanhshrink(v);\n\
@@ -29186,19 +29275,20 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::threshold(tf);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu(tf);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu_with_noise(tf);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_softmin(seq);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_tanhshrink(seq);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_threshold(seq);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_rrelu(seq);\n\
 }";
 
-/// 保留対象 fn 名（`Var`／`Sequential` への inherent メソッドと自由関数の両方の経路を覆う）。
-const SOFTMIN_THRESHOLD_FN_NAMES: [&str; 9] = [
+/// 保留対象 fn 名（`Var` への inherent メソッドと自由関数の両方の経路を覆う）。
+const SOFTMIN_THRESHOLD_FN_NAMES: [&str; 5] = [
     "softmin",
     "tanhshrink",
     "threshold",
     "rrelu",
     "rrelu_with_noise",
+];
+
+/// `compat::Sequential` の追加メソッド名。イシュー #2679 で承認形（`facade/src/compat/sequential.rs` に各 1 件）
+/// として公開した（`docs/autodiff-softmin-threshold-ops-decision.md` §7）。
+const SOFTMIN_THRESHOLD_ADD_NAMES: [&str; 4] = [
     "add_softmin",
     "add_tanhshrink",
     "add_threshold",
@@ -29207,7 +29297,7 @@ const SOFTMIN_THRESHOLD_FN_NAMES: [&str; 9] = [
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前。トークン完全一致のため
 /// `ThresholdMode` のような別名は対象外）。
-const SOFTMIN_THRESHOLD_IDENTS: [&str; 15] = [
+const SOFTMIN_THRESHOLD_IDENTS: [&str; 11] = [
     "softmin_threshold_ops",
     "softmin_threshold",
     "Softmin",
@@ -29219,10 +29309,6 @@ const SOFTMIN_THRESHOLD_IDENTS: [&str; 15] = [
     "threshold",
     "rrelu",
     "rrelu_with_noise",
-    "add_softmin",
-    "add_tanhshrink",
-    "add_threshold",
-    "add_rrelu",
 ];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
@@ -29353,10 +29439,12 @@ fn facade_does_not_reexport_or_declare_softmin_threshold_ops_detects_each_catego
     assert!(offense("impl Var { pub fn tanhshrink(&self) {} }"));
     assert!(offense("impl Var { pub fn threshold(&self) {} }"));
     assert!(offense("impl Var { pub fn rrelu(&self) {} }"));
-    assert!(offense(
+    // 負例（#2679 で承認）: `Sequential::add_*` の宣言は本走査の違反ではない
+    // （場所・件数・シグネチャは別テストが固定する）。
+    assert!(!offense(
         "impl Sequential { pub fn add_rrelu(&mut self) {} }"
     ));
-    assert!(offense(
+    assert!(!offense(
         "impl Sequential { pub fn add_softmin(&mut self) {} }"
     ));
     assert!(offense("trait T { fn rrelu_with_noise(&self); }"));
@@ -29386,7 +29474,7 @@ fn facade_does_not_reexport_or_declare_softmin_threshold_ops_detects_each_catego
 ///
 /// 期待値は `autodiff/src/softmin_threshold_ops.rs` の自由関数 5 名が各 1 件と、無関係な既存宣言
 /// `autodiff/src/nn/activation.rs::threshold` 1 件（`Softplus` の `pub(crate)` アクセサ。本イシューとは無関係）。
-/// `add_*` 4 名は 0 件。これら以外への追加（`Var`／`Sequential` への inherent メソッド追加等）は fail-closed に
+/// `add_*` 4 名は `facade/src/compat/sequential.rs` に各 1 件（#2679）。これら以外への追加（`Var`／`Sequential` への inherent メソッド追加等）は fail-closed に
 /// 検出する。テスト用ヘルパーにも素の `fn softmin` などという名前を使わないこと（インベントリに数えられる）。
 #[test]
 fn workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations() {
@@ -29417,7 +29505,10 @@ fn workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations()
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in SOFTMIN_THRESHOLD_FN_NAMES {
+            for fn_name in SOFTMIN_THRESHOLD_FN_NAMES
+                .iter()
+                .chain(SOFTMIN_THRESHOLD_ADD_NAMES.iter())
+            {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -29442,6 +29533,10 @@ fn workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations()
     }
     // 無関係な既存宣言（`Softplus` の `pub(crate)` アクセサ）。
     expected.insert("autodiff/src/nn/activation.rs::threshold".to_string(), 1);
+    // #2679: `compat::Sequential::add_*` 4 本は承認形（`facade/src/compat/sequential.rs` に各 1 件）。
+    for n in SOFTMIN_THRESHOLD_ADD_NAMES {
+        expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の softmin／tanhshrink／threshold／rrelu／rrelu_with_noise／add_* の `fn` 宣言が\
@@ -31229,26 +31324,24 @@ fn phase4_optim_types_are_reachable_via_facade_only() {
     };
     use fandhe_ai::{AutodiffError, Tensor};
 
-    type Pairs<'a> = &'a [(&'a Tensor<f32>, &'a Tensor<f32>)];
+    // clippy::type_complexity 回避の別名（型の中身は各決定記録 §8 のシグネチャそのまま）。
+    type Res<T> = Result<T, AutodiffError>;
+    type Stepped = Res<Vec<Tensor<f32>>>;
+    type Step<O> =
+        for<'a, 'b, 'c, 'd> fn(&'a mut O, &'b [(&'c Tensor<f32>, &'d Tensor<f32>)]) -> Stepped;
 
-    let _rprop_new: fn(RpropConfig) -> Result<Rprop, AutodiffError> = Rprop::new;
-    let _rprop_step: fn(&mut Rprop, Pairs<'_>) -> Result<Vec<Tensor<f32>>, AutodiffError> =
-        Rprop::step;
-    let _asgd_new: fn(AsgdConfig) -> Result<Asgd, AutodiffError> = Asgd::new;
-    let _asgd_step: fn(&mut Asgd, Pairs<'_>) -> Result<Vec<Tensor<f32>>, AutodiffError> =
-        Asgd::step;
-    let _asgd_avg: fn(&Asgd) -> Result<Vec<Tensor<f32>>, AutodiffError> = Asgd::averaged_params;
-    let _adafactor_new: fn(AdafactorConfig) -> Result<Adafactor, AutodiffError> = Adafactor::new;
-    let _adafactor_step: fn(&mut Adafactor, Pairs<'_>) -> Result<Vec<Tensor<f32>>, AutodiffError> =
-        Adafactor::step;
-    let _lion_new: fn(LionConfig) -> Result<Lion, AutodiffError> = Lion::new;
-    let _lion_step: fn(&mut Lion, Pairs<'_>) -> Result<Vec<Tensor<f32>>, AutodiffError> =
-        Lion::step;
-    let _poly_new: fn(f32, usize, f32) -> Result<PolynomialLr, AutodiffError> = PolynomialLr::new;
-    let _chained_new: fn(
-        f32,
-        Vec<Box<dyn LrScheduler>>,
-    ) -> Result<ChainedScheduler, AutodiffError> = ChainedScheduler::new;
+    let _rprop_new: fn(RpropConfig) -> Res<Rprop> = Rprop::new;
+    let _rprop_step: Step<Rprop> = Rprop::step;
+    let _asgd_new: fn(AsgdConfig) -> Res<Asgd> = Asgd::new;
+    let _asgd_step: Step<Asgd> = Asgd::step;
+    let _asgd_avg: fn(&Asgd) -> Stepped = Asgd::averaged_params;
+    let _adafactor_new: fn(AdafactorConfig) -> Res<Adafactor> = Adafactor::new;
+    let _adafactor_step: Step<Adafactor> = Adafactor::step;
+    let _lion_new: fn(LionConfig) -> Res<Lion> = Lion::new;
+    let _lion_step: Step<Lion> = Lion::step;
+    let _poly_new: fn(f32, usize, f32) -> Res<PolynomialLr> = PolynomialLr::new;
+    let _chained_new: fn(f32, Vec<Box<dyn LrScheduler>>) -> Res<ChainedScheduler> =
+        ChainedScheduler::new;
 
     // 振る舞いの最小確認: 不正な設定は型付きエラー、多項式減衰は `total_iters` 以降 0。
     assert!(PolynomialLr::new(f32::NAN, 4, 1.0).is_err());
@@ -31465,47 +31558,33 @@ fn packed_sequence_types_are_reachable_via_facade_only() {
     };
     use fandhe_ai::{AutodiffError, Var};
 
-    let _pack: for<'t> fn(
-        &Var<'t>,
-        &[usize],
-        bool,
-        bool,
-    ) -> Result<PackedSequence<'t>, AutodiffError> = pack_padded_sequence;
-    let _pad: for<'t> fn(
-        &PackedSequence<'t>,
-        bool,
-        f32,
-        Option<usize>,
-    ) -> Result<(Var<'t>, Vec<usize>), AutodiffError> = pad_packed_sequence;
-    let _rnn: for<'t> fn(
-        &Rnn,
-        &PackedSequence<'t>,
-        Option<&Var<'t>>,
-    ) -> Result<PackedRnnSeqOutput<'t, RnnCellVars<'t>>, AutodiffError> = rnn_forward_packed;
-    let _gru: for<'t> fn(
-        &Gru,
-        &PackedSequence<'t>,
-        Option<&Var<'t>>,
-    ) -> Result<PackedRnnSeqOutput<'t, GruCellVars<'t>>, AutodiffError> = gru_forward_packed;
-    let _lstm: for<'t> fn(
-        &Lstm,
-        &PackedSequence<'t>,
-        Option<&Var<'t>>,
-        Option<&Var<'t>>,
-    ) -> Result<PackedLstmSeqOutput<'t>, AutodiffError> = lstm_forward_packed;
-    let _ = (
-        stacked_rnn_forward_packed,
-        stacked_gru_forward_packed,
-        stacked_lstm_forward_packed,
-    );
-    fn _assert_types(
-        _: Option<StackedRnn>,
-        _: Option<StackedGru>,
-        _: Option<StackedLstm>,
-        _: Option<StackedPackedRnnSeqOutput<'_, RnnCellVars<'_>>>,
-        _: Option<StackedPackedLstmSeqOutput<'_>>,
-    ) {
+    // clippy::type_complexity 回避の別名（型の中身は決定記録 §7 のシグネチャそのまま）。呼び出し形と戻り値型を
+    // 型注釈付きの束縛で固定する（本関数は呼ばない。コンパイルが通ることが検査）。
+    type Res<T> = Result<T, AutodiffError>;
+    type SingleOut<'t, P> = Res<PackedRnnSeqOutput<'t, P>>;
+    type StackedOut<'t, P> = Res<StackedPackedRnnSeqOutput<'t, P>>;
+    type Padded<'t> = Res<(Var<'t>, Vec<usize>)>;
+
+    struct Models<'m> {
+        rnn: &'m Rnn,
+        gru: &'m Gru,
+        lstm: &'m Lstm,
+        srnn: &'m StackedRnn,
+        sgru: &'m StackedGru,
+        slstm: &'m StackedLstm,
     }
+    fn _signatures<'t>(m: &Models<'_>, v: &Var<'t>, p: &PackedSequence<'t>) {
+        let _: Res<PackedSequence<'t>> = pack_padded_sequence(v, &[1usize], false, true);
+        let _: Padded<'t> = pad_packed_sequence(p, false, 0.0f32, None::<usize>);
+        let _: SingleOut<'t, RnnCellVars<'t>> = rnn_forward_packed(m.rnn, p, None);
+        let _: SingleOut<'t, GruCellVars<'t>> = gru_forward_packed(m.gru, p, None);
+        let _: Res<PackedLstmSeqOutput<'t>> = lstm_forward_packed(m.lstm, p, None, None);
+        let _: StackedOut<'t, RnnCellVars<'t>> = stacked_rnn_forward_packed(m.srnn, p, None);
+        let _: StackedOut<'t, GruCellVars<'t>> = stacked_gru_forward_packed(m.sgru, p, None);
+        let _: Res<StackedPackedLstmSeqOutput<'t>> =
+            stacked_lstm_forward_packed(m.slstm, p, None, None);
+    }
+    let _ = _signatures;
 
     // 振る舞いの最小確認: 長さが非増加でない（`enforce_sorted = true`）入力は型付きエラー。
     let tape = fandhe_ai::tape();
