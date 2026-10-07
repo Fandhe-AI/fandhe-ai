@@ -2,12 +2,14 @@
 
 イシュー #2156「`bernoulli`・`multinomial`・`normal`・`Generator` 独立乱数生成」。親 #2131（Phase 5「PyTorch／TF 置き換えの API 網羅」5-A 基盤）。
 
+> **更新（イシュー #2593・2026-10-07）**: 本書の facade 公開保留は、ルート #2499 のコメント（`issuecomment-6033824965`・リポジトリ所有者・2026-10-07）の承認に基づき、§5.1.3 の推奨案（案 B-1）の形で公開済みとなった。保留ガードは「承認形だけを許す」正ガードへ部分反転済み。以下の「未承認・保留」の記述は着手時点（#2156・#2592）の履歴であり、現行の公開形・ガードは §5.2 を正とする。
+
 本ドキュメントは `tensor-core::rng` 側実装（PyTorch `torch.bernoulli`／`torch.multinomial`／`torch.normal`／`torch.Generator` 相当）と、facade 公開面拡張（承認事項）の切り分けを記録する。`crates/facade/src/lib.rs`（保留 doctest 足場 `RngDistributionsHoldDoctestGuard` の追加を除く）・`tests/api_surface.rs`（否定ガード 4 件の追加を除く）・`CLAUDE.md`・`docs/spec/`（正本 submodule）・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・CI／hooks は変更しない。
 
 ## 0. 結論・段階
 
 - **内部クレート側（`tensor-core::rng`）は実装済み**（本 PR）。`bernoulli`・`multinomial`・`normal`（自由関数）と `Generator`（`new`／`manual_seed`／`initial_seed`／`Clone`／`Debug`／3 メソッド）。`autodiff` は素通し再エクスポートのみ。
-- **facade 公開（承認事項・`docs/compat-api-scope.md` §5 経路 2）は未承認のまま保留**。イシュー #2156 本文には「facade へ 3 関数と `Generator` 型を公開する」契約が明記されているが、**承認前の実施を禁じる**契約であり、#2156 に承認コメントは見当たらない（2026-09-25 確認）。親 #2131 も「設計判断を記録 → 承認 → 実装」の 2 段を求めている。公開形の候補比較と推奨案は §5.1（承認待ち。窓口は #2591〜#2593）。よって `crates/facade/src/**` は保留 doctest 足場（`RngDistributionsHoldDoctestGuard`）を追加するのみで、`bernoulli`／`multinomial`／`normal`／`Generator` は一切公開しない（兄弟イシュー #2144〈`docs/autodiff-matrix-ops-decision.md`〉・#2140〈`docs/facade-nn-init-exposure-decision.md`〉と同型の保留パターン）。
+- **（#2156 時点の記録。#2593 で承認・公開済み。§5.2 参照）facade 公開（承認事項・`docs/compat-api-scope.md` §5 経路 2）は未承認のまま保留**。イシュー #2156 本文には「facade へ 3 関数と `Generator` 型を公開する」契約が明記されているが、**承認前の実施を禁じる**契約であり、#2156 に承認コメントは見当たらない（2026-09-25 確認）。親 #2131 も「設計判断を記録 → 承認 → 実装」の 2 段を求めている。公開形の候補比較と推奨案は §5.1（承認待ち。窓口は #2591〜#2593）。よって `crates/facade/src/**` は保留 doctest 足場（`RngDistributionsHoldDoctestGuard`）を追加するのみで、`bernoulli`／`multinomial`／`normal`／`Generator` は一切公開しない（兄弟イシュー #2144〈`docs/autodiff-matrix-ops-decision.md`〉・#2140〈`docs/facade-nn-init-exposure-decision.md`〉と同型の保留パターン）。
 - **本 PR のマージで #2156 は COMPLETED とする**（前例と同じ「保留記録を残した PR のマージで issue をクローズし、承認が得られたら新規 issue か reopen で経路 2 を実施する」方針）。facade 公開面（`fandhe_ai::{bernoulli, multinomial, normal, Generator}`）の実装着手は、`docs/compat-api-scope.md` §5 経路 2 の承認取得後に別 issue／reopen・別 PR で行う。
 
 ## 1. API 設計（`crates/tensor-core/src/rng.rs`）
@@ -55,7 +57,7 @@ PyTorch `torch.Generator` 相当。グローバル RNG（`manual_seed`／`with_g
 
 ## 4. 対象外（out-of-scope）
 
-- facade 公開（経路 2。ユーザー承認待ち。現行窓口は #2591・#2592・#2593、形の推奨案は §5.1。旧窓口は #2156・#2131）
+- facade 公開（経路 2。#2593 で承認形として公開済み〈§5.2〉。旧窓口は #2156・#2131）
 - GPU（CUDA／Metal）側の乱数生成（乱数は微分不能な葉値でホスト側だけで完結。`Op`／VJP は追加しない。デバイスへの反映は既存のアップロード経路が担う）
 - テンソル値の `mean`／`std` を推定する `normal`（本 issue の `normal` はスカラー `mean`／`std` から新規生成する方のみ）
 - `Generator` の状態 get/set・デバイス属性（PyTorch `Generator.get_state`／`set_state`／`device` 相当）
@@ -80,7 +82,7 @@ PyTorch `torch.Generator` 相当。グローバル RNG（`manual_seed`／`with_g
 3. `crates/facade/tests/rng_tensor_generation.rs` 型の facade 到達性テストを追加する。
 4. `docs/compat-api-scope.md` §5 の適用記録を更新する。
 
-### 5.1 facade 公開形の候補比較・推奨案・承認依頼（#2592・承認待ち）
+### 5.1 facade 公開形の候補比較・推奨案・承認依頼（#2592。承認済み・§5.2 参照）
 
 **本節は推奨案の記録であり、ユーザー承認の取得を意味しない。確定形ではない。** 親 #2591、実装は #2593（承認コメント確認後にのみ着手）。2026-10-04 の一括承認は「記録済みの推奨形」にのみ及ぶところ、§5 は配置・`nn::init::normal` との同名の扱い・委譲 `pub fn` か `pub use` かを決めていないため、一括承認の対象外である。
 
@@ -118,7 +120,7 @@ PyTorch `torch.Generator` 相当。グローバル RNG（`manual_seed`／`with_g
 - **既存テスト**: `crates/facade/tests/nn_init.rs` は明示 import のため影響しない。
 - **下流利用者**: `use fandhe_ai::*;` と別クレートの glob が同名を持ち、かつ裸で使う場合に限り曖昧性エラーになる（ローカル定義・明示 import は glob に優先）。`nn::init` は 0.10.0 未収録のため、0.10.0 向けコードが `nn::init::normal` との曖昧性で壊れる経路は無い。次版以降は両方を glob して裸の `normal` を使うと曖昧になる点を doc に明記する。公開項目の追加は通常 minor 変更の範囲だが、本記録は互換性の保証を断定しない。
 
-#### 5.1.3 推奨案（承認待ち）
+#### 5.1.3 推奨案（2026-10-07 承認済み）
 
 ```rust
 pub fn bernoulli(probs: &Tensor<f32>) -> Result<Tensor<f32>, RngError>
@@ -171,4 +173,21 @@ pub use fandhe_ai_tensor_core::Generator;
 
 #### 5.1.7 本節の位置づけ
 
-承認は未取得。保留ガードとテストは維持し、`crates/`・`Cargo.*`・tolerance・`docs/spec` は不変。facade 公開・ガード反転・`compat-api-scope.md` の適用記録・`Generator` 版 `randn` 系・GPU 側乱数生成・Issue 起票は行わない。
+（#2592 時点）承認は未取得で、保留ガードとテストは維持し、`crates/`・`Cargo.*`・tolerance・`docs/spec` は不変だった。その後 2026-10-07 に承認され、#2593 で実施した（§5.2）。`Generator` 版 `randn` 系・GPU 側乱数生成は引き続き対象外。
+
+### 5.2 実装記録（イシュー #2593・親 #2591・ルート #2499 Phase 3）
+
+- **承認の根拠**: ルート #2499 のコメント `issuecomment-6033824965`（投稿者 `aLiz-Nancy`・2026-10-07）の Phase 3 表が #2591 を「§5.1 の推奨案」で承認している。承認範囲は §5.1.3 の推奨形（案 B-1）に限る。
+- **公開した 4 名**: `fandhe_ai::bernoulli(&Tensor<f32>) -> Result<Tensor<f32>, RngError>`・`fandhe_ai::multinomial(&Tensor<f32>, usize, bool) -> Result<Tensor<i32>, RngError>`・`fandhe_ai::normal(f32, f32, &[usize]) -> Result<Tensor<f32>, RngError>`（いずれも crate ルートの委譲 `pub fn`。本体は `fandhe_ai_autodiff::<name>(..)` の 1 式）と、`pub use fandhe_ai_tensor_core::Generator;`（1 行）。`Var`／`Tensor` へのメソッド追加・新 `pub mod`・`randn`／`rand`／`randint` の `Generator` 版は行っていない（既知の制限として doc に記載）。
+- **ガード反転**:
+  - 維持: `rng_distributions_hold_doctest_globs_all_pub_modules`。
+  - 更新: `rng_distributions_hold_doctest_probe_body_matches_fixed_contract`（固定文言 `RNG_DISTRIBUTIONS_HOLD_PROBE_BODY` から、ローカル定義の衝突プローブ・`__probe_free_fns`・入れ子スコープを除去。`Var`／`Tensor<f32>` への同名メソッド検出プローブのみ残す）。
+  - 削除: `rng_distributions_normal_scope_globs_all_pub_modules_except_nn_init`（入れ子スコープの撤去に伴う）、`scan_rng_distributions_allows_only_approved_nn_init_normal`、`facade_does_not_reexport_or_declare_rng_distributions`、`scan_rng_distributions_reexports_and_declarations`。
+  - 新設: `facade_declares_rng_distributions_only_as_approved_root_delegations`（承認形の正ガード）と検出本体 `scan_rng_distributions_surface`・その自己テスト `scan_rng_distributions_surface_accepts_only_approved_forms`（正例・負例を網羅）。
+  - インベントリ `workspace_declares_rng_distribution_names_only_in_allowed_locations` の期待集合に `facade/src/lib.rs::{bernoulli, multinomial, normal}`（各 1 件）を追加。
+  - `facade_reexports_nn_init_items_only_in_approved_shape` は、本体が承認した 1 式委譲に完全一致する crate ルートの `fn normal` に限り許可するよう狭く調整した。
+- **解釈（要確認事項ではなく検査範囲の話）**: §5.1.3 P7 は「ソース走査の `nn::init` 経路限定許可を撤去」と書くが、葉 `normal` の `pub use` を一律違反にすると承認済みの `src/nn/init.rs` の再エクスポート（#2504）が落ちる。新しい検出本体では、この既存の承認形（`src/nn/init.rs`・接頭辞 `fandhe_ai_autodiff::nn::init::`・別名なし）だけを検査対象外に残した。公開形そのものの変更ではない。
+- **GPU**: 本変更はホスト生成のみで新規 `Op`・カーネル・`BackendOps` メソッドを追加しないため、新規の parity baseline・実機実測は発生しない。生成テンソルのアップロード経路は `rng_tensor_generation.rs`（CUDA／Metal の `#[ignore]` 往復テスト）で固定済みのため、本件では CPU アップロードの bit 一致テスト（`rng_distributions_facade.rs`）のみ追加した。
+- **doctest 実測**: `cargo test -p fandhe-ai --doc` で、`fandhe_ai::*` と `fandhe_ai::nn::init::*` を同時に glob する他の保留 doctest 全件に曖昧性エラーは出なかった（109 件 pass）。
+- **不変**: `Cargo.toml`／`Cargo.lock`・依存・`unsafe`・tolerance／baseline・ガードレール閾値・`docs/spec/`・CI／hooks。`fandhe-ai =0.10.0` の公開 API は追加のみ（非破壊）。
+- **決定性の記述**: `bernoulli`／`multinomial` はプラットフォーム横断 bit 同一、`normal` は同一プロセス・同一プラットフォーム内限定。版をまたぐ乱数列の安定性は保証しない。乱数源は暗号論的に安全ではない旨を各 doc に明記した。
