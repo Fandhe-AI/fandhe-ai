@@ -1531,7 +1531,17 @@ OptimizerStateDictHoldDoctestGuard`（正のプローブ doctest）と
 `crates/facade/src/lib.rs::NpyIoHoldDoctestGuard`（正のプローブ
 doctest）と `crates/facade/tests/api_surface.rs` の 4 テストで多層
 固定している。詳細は `docs/tensor-core-npy-npz-io-decision.md` §7
-を参照。
+を参照。**→ #2590 で下記の適用記録へ置き換わった（承認済み・公開済み）。**
+
+**適用記録（イシュー #2590・親 #2588・ルート #2499 Phase 3。npy・npz の読み書き）**:
+ルート #2499 の 2026-10-07 のリポジトリ所有者の承認コメント（`docs/tensor-core-npy-npz-io-decision.md` §10 の推奨案・バイト列版は含めない）に基づき、
+`fandhe_ai::interop::npy`（新ファイル `crates/facade/src/interop/npy.rs`）として `NpyError`・`load_npy`・`save_npy`・`load_npz`・`save_npz` の 5 名を
+`tensor-core::io` からの純再エクスポートで公開した（facade に型・関数・`impl` を定義しない。別名なし）。
+非公開のまま残すもの: バイト列版 4 関数（`read_npy_bytes` 等）、クレートルート直下への名前追加、`Tensor` への inherent メソッド（`Tensor::<f32>::load_npy` 形）。
+書き出しの非原子性（`std::fs::write`）と読み込みのパス扱い（symlink を辿る・上限 1 GiB）は現状のままで、モジュール doc に明記した。
+ガードは「承認形だけを許す」正ガードへ反転した（`facade_reexports_npy_io_only_from_interop_npy`・`interop_npy_reexports_exactly_expected_surface` 等）。
+`NpyIoHoldDoctestGuard` は `Tensor<f32>` への関連関数追加を検出するプローブだけを残す部分反転。
+`Cargo.toml`／`Cargo.lock`・依存・`unsafe`・tolerance／baseline・`docs/spec/` は不変。詳細は `docs/tensor-core-npy-npz-io-decision.md` §12。
 
 **保留記録（イシュー #2191・親 #2084）**: 自己回帰生成ループ（3 戦略・
 KV キャッシュ結線・seed 決定性）の facade 公開（`pub fn generate` 等

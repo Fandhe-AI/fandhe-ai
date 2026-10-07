@@ -27,7 +27,7 @@ crates/tensor-core/src/io/
 └── inflate.rs # RFC 1951 DEFLATE 伸長（読み込み専用・pub(crate)）
 ```
 
-公開関数（`tensor-core` 内部限定。§5 参照）:
+公開関数（`tensor-core` 内部。うちパス版 4 関数と `NpyError` は #2590 で `fandhe_ai::interop::npy` として公開済み。§12 参照）:
 
 - `io::npy::{read_npy_bytes, write_npy_bytes, load_npy, save_npy}`
 - `io::npz::{read_npz_bytes, write_npz_bytes, load_npz, save_npz}`
@@ -118,6 +118,11 @@ Tensor, ...};` で `Tensor` を再エクスポートしているため、inheren
   （`UnsupportedDtype`／読み込み失敗）
 
 ## 7. 承認事項（本 PR では実施しない）
+
+> **#2590 実装記録**: 本節は #2189 時点の保留記録である。承認（ルート #2499・2026-10-07）を受け #2590 で公開した。
+> 公開した名前・配置は `fandhe_ai::interop::npy`（`NpyError`・`load_npy`・`save_npy`・`load_npz`・`save_npz` の純再エクスポート）。
+> 下記の署名案（`tensor_io.rs`・facade 側 `pub fn`）と拡張トレイト案は**不採用**。`Tensor` へのメソッド追加はしていない。
+> ガード 4 件の反転内容は §12 を参照。
 
 facade の公開面拡張（4 件: `load_npy`／`save_npy`／`load_npz`／
 `save_npz`、および `NpyError` の再エクスポート）は未承認のため保留する。
@@ -328,3 +333,38 @@ facade／tensor-core のコード変更、保留ガードの削除・反転、`c
 ### 11.6 本 PR で行わないこと
 
 コード変更、ガードの削除・反転・縮小、`compat-api-scope.md` の変更、Issue 起票・コメント投稿、spec 提案、依存追加、`unsafe`、tolerance 変更。
+
+## 12. #2590 の実装記録（facade 公開・ガード反転）
+
+### 12.1 承認の根拠と解除
+
+- §11 の停止は、ルート #2499 のリポジトリ所有者本人のコメント（2026-10-07、`issuecomment-6033824965`）で解除された。同コメントは #2588 の §10 推奨案（バイト列版は含めない）を承認し、「記録に形が書かれていない点は実装せずに止め、承認依頼に戻す」ことを条件とする。
+- 本実装は §10.4（P1〜P7）に書かれた形だけを実装した。形が書かれていない点は実装していない。
+
+### 12.2 公開した形
+
+| 項目 | 内容 |
+|---|---|
+| 配置 | `fandhe_ai::interop::npy`（`crates/facade/src/interop/npy.rs`、`interop/mod.rs` に `pub mod npy;` を 1 行） |
+| 公開名 | `NpyError`・`load_npy`・`save_npy`・`load_npz`・`save_npz` の 5 名のみ。純再エクスポート（facade に型・関数・`impl` なし）、別名なし |
+| 非公開のまま | バイト列版 4 関数、クレートルート直下の名前、`Tensor` への inherent メソッド |
+| doc 明記 | P5（書き出しは非原子的）・P6（symlink を辿る・上限 1 GiB・信頼できないパスは呼び出し側の責任） |
+| 利用例 | `npy.rs` モジュール doc の往復 doctest、`crates/facade/tests/interop_npy_roundtrip.rs` |
+
+### 12.3 ガード反転の内容
+
+| ガード | 結果 |
+|---|---|
+| `NpyIoHoldDoctestGuard` | 部分反転。`Tensor<f32>` への同名関連関数追加を検出するトレイトプローブ（`__probe_tensor`）だけを残し、ローカルモジュール・自由関数・モジュール名・型名の glob 衝突プローブは削除。全 `pub mod` の glob 一覧に `use fandhe_ai::interop::npy::*;` を追加 |
+| `facade_does_not_reexport_or_declare_npy_io` | `facade_reexports_npy_io_only_from_interop_npy` へ反転。5 名は `interop/npy.rs` にだけ各 1 件、他ファイル 0 件、バイト列版 0 件、facade 独自の `NpyError` 宣言・4 関数の `fn` 宣言 0 件 |
+| `npy_io_hold_doctest_probe_body_matches_fixed_contract` | 縮小後の固定本文へ更新 |
+| `workspace_declares_npy_io_names_only_in_allowed_locations` | 期待集合は不変（再エクスポートは `fn` 宣言ではない）の正のインベントリとして維持 |
+| 新規 | `interop_npy_module_is_pure_reexport`・`interop_npy_reexports_exactly_expected_surface`（`pub use` 3 行の完全一致。取得元の接頭辞一致方式は `io::crc32::{..}` を受理しうるため不採用）・`interop_npy_types_are_reachable_via_facade`・`npy_io_scanner_detects_unapproved_forms` |
+| 付随更新 | `interop/mod.rs` の `pub mod` 件数 2→3、`GRAD_SCALER_PROBE_MODULES` 12→13、`LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に 4 関数を追加 |
+
+### 12.4 再確認・非対象
+
+- §10.6 の glob 衝突: 新 5 名とモジュール名 `npy` は他の保留プローブのローカル名と重ならず、`cargo test -p fandhe-ai --doc` が全保留 doctest について通った。
+- Windows ターゲット: パス版は `std::fs` と `AsRef<Path>` のみで、doctest の一時パスも `std::env::temp_dir()` 基準にしている（OS 依存のパス区切りなし）。
+- 実機（CUDA／Metal）parity の対象外（ホスト常駐テンソルのファイル入出力で、`BackendOps`／GPU カーネルを追加しない）。`docs/perf/logs/` への申し送りは不要。
+- 本実装で行わないこと（スコープ外）: 書き出しの原子化、`fs_guard` 経由の読み込み、非 f32 dtype、DEFLATE／zip64 書き出し、`Tensor::<f32>::load_npy` 形の拡張トレイト。
