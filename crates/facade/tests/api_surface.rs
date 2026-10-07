@@ -394,6 +394,8 @@ fn optim_module_reexports_exactly_expected_surface() {
         "SgdConfig",
         "GradScaler",
         "GradScalerConfig",
+        "ParamGroup",
+        "ParamGroupStep",
         "UnscaleResult",
         "has_non_finite",
         "scale_grads",
@@ -15130,208 +15132,220 @@ fn var_ctc_loss_is_reachable_via_facade_var() {
 }
 
 // =====================================================================
-// #2173（親 #2131）の facade 公開保留固定（`ParamGroupsHoldDoctestGuard`）。
-// `RnnConfigHoldDoctestGuard`（イシュー #2164）と同型の正のプローブ
-// 1 ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリを持つ。承認事項の位置づけは
-// `docs/autodiff-param-groups-decision.md` §5 参照。
+// #2173（親 #2131）→ #2553（親 #2551・ルート #2499 の承認コメント）:
+// param groups の facade 公開（承認形の正ガード）。#2173 では公開保留を
+// `ParamGroupsHoldDoctestGuard`（`src/lib.rs`）と否定テストで固定して
+// いたが、#2553 で `docs/autodiff-param-groups-decision.md` §9.2・§9.3 の
+// 承認形を公開したため、doctest ガードとそのドリフト検査 2 件を削除し、
+// ソース走査ガードを「承認形だけを許す」形へ縮めた（命名・構成の仕上げと
+// 正の doctest プローブは #2554 の担当）。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `ParamGroupsHoldDoctestGuard` doc 内の
-/// 唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`rnn_config_hold_doctest_globs_all_pub_modules` の
-/// `ParamGroupsHoldDoctestGuard` 版）。
-#[test]
-fn param_groups_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "ParamGroupsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "ParamGroupsHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
+/// 承認形で公開する識別子（`pub use` 葉）。
+const PARAM_GROUPS_TYPE_NAMES: [&str; 2] = ["ParamGroup", "ParamGroupStep"];
 
-/// [`param_groups_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`PARAM_GROUPS_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（rustdoc の `# ` 隠し行・
-/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きに
-/// する改変を機械的に拒否する。イシュー #2173）。
-#[test]
-fn param_groups_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "ParamGroupsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, PARAM_GROUPS_HOLD_PROBE_BODY,
-        "ParamGroupsHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 PARAM_GROUPS_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_param_groups_hold_probe モジュール・\
-         __FandheParamGroupsCompileProbe／__FandheParamGroupsStepProbe\
-         トレイト・__probe 関数）の削除・弱体化・隠し行の混入がないか\
-         確認すること。"
-    );
-}
+/// facade 内で `fn` 宣言を許さない名前。`step_with_groups` は内部クレートの
+/// trait 実装（`param_group.rs`）にだけ存在し、facade は呼び出すだけ。
+const PARAM_GROUPS_FORBIDDEN_FN: &str = "step_with_groups";
 
-/// [`param_groups_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `ParamGroupsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const PARAM_GROUPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_param_groups_hold_probe {\n\
-\x20\x20\x20\x20pub struct ParamGroup;\n\
-\x20\x20\x20\x20pub trait ParamGroupStep {}\n\
-}\n\
-use __fandhe_param_groups_hold_probe::*;\n\
-\n\
-fn __probe_trait<T: ?Sized + ParamGroupStep>() {}\n\
-\n\
-struct __FandheParamGroupsMarker;\n\
-\n\
-trait __FandheParamGroupsCompileProbe {\n\
-\x20\x20\x20\x20fn compile_with_param_groups(&self) -> __FandheParamGroupsMarker;\n\
-}\n\
-\n\
-impl __FandheParamGroupsCompileProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn compile_with_param_groups(&self) -> __FandheParamGroupsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-trait __FandheParamGroupsStepProbe {\n\
-\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker;\n\
-}\n\
-\n\
-impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Sgd {\n\
-\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheParamGroupsStepProbe for fandhe_ai::optim::AdamW {\n\
-\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Adam {\n\
-\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheParamGroupsStepProbe for fandhe_ai::optim::RmsProp {\n\
-\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Adagrad {\n\
-\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheParamGroupsStepProbe for fandhe_ai::optim::Lamb {\n\
-\x20\x20\x20\x20fn step_with_groups(&self) -> __FandheParamGroupsMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheParamGroupsMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe(\n\
-\x20\x20\x20\x20_: ParamGroup,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
-\x20\x20\x20\x20sgd: &fandhe_ai::optim::Sgd,\n\
-\x20\x20\x20\x20adamw: &fandhe_ai::optim::AdamW,\n\
-\x20\x20\x20\x20adam: &fandhe_ai::optim::Adam,\n\
-\x20\x20\x20\x20rmsprop: &fandhe_ai::optim::RmsProp,\n\
-\x20\x20\x20\x20adagrad: &fandhe_ai::optim::Adagrad,\n\
-\x20\x20\x20\x20lamb: &fandhe_ai::optim::Lamb,\n\
-) {\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker =\n\
-\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::compile_with_param_groups(seq);\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = seq.compile_with_param_groups();\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Sgd::step_with_groups(sgd);\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = sgd.step_with_groups();\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::AdamW::step_with_groups(adamw);\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = adamw.step_with_groups();\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Adam::step_with_groups(adam);\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = adam.step_with_groups();\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::RmsProp::step_with_groups(rmsprop);\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = rmsprop.step_with_groups();\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Adagrad::step_with_groups(adagrad);\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = adagrad.step_with_groups();\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = fandhe_ai::optim::Lamb::step_with_groups(lamb);\n\
-\x20\x20\x20\x20let _: __FandheParamGroupsMarker = lamb.step_with_groups();\n\
-}";
-
-/// `ParamGroup`・`ParamGroupStep`・`step_with_groups`・
-/// `compile_with_param_groups`（イシュー #2173。4 個の識別子・fn 名）。
-/// [`facade_does_not_reexport_or_declare_param_groups`]・
-/// [`workspace_declares_param_group_fn_names_only_in_allowed_locations`]
-/// が共用する。
-const PARAM_GROUPS_FN_NAMES: [&str; 2] = ["step_with_groups", "compile_with_param_groups"];
-
-/// facade src 全体（`crates/facade/src/**`）に、`ParamGroup`／
-/// `ParamGroupStep`／`param_group` を識別子単位で含む `pub use`
-/// （別名・ネストした group 経由含む）も、[`PARAM_GROUPS_FN_NAMES`]
-/// （2 個）の `fn` 宣言（可視性・宣言文脈を問わない。
-/// [`count_fn_declarations_by_name`] と同じ検出契約）も存在しないことを
-/// 固定する（`ParamGroupsHoldDoctestGuard` の正のプローブと多層防御を
-/// 成す最内層のソース走査ガード。`facade_does_not_reexport_or_declare_
-/// loss_ops` と同型）。
-#[test]
-fn facade_does_not_reexport_or_declare_param_groups() {
-    let src_dir = facade_crate_root().join("src");
+/// [`facade_param_groups_public_surface_matches_approved_form`] とその自己テスト
+/// が共用する検出本体。`rel` は `crates/facade/src` からの `/` 区切り相対パス。
+/// 承認要素の鍵は 3 種: `optim.rs` の `pub use` 葉 `use:ParamGroup`・
+/// `use:ParamGroupStep`（`as` による別名は違反）、`compat/training.rs` の
+/// `impl Sequential` 内 `fn:compile_with_param_groups`。それ以外の場所・形の
+/// 出現と、facade 内の `fn step_with_groups` 宣言は違反。
+fn scan_param_groups_reexports_and_declarations(
+    rel: &str,
+    content: &str,
+) -> (Vec<String>, Vec<String>) {
+    let is_optim_rs = rel == "optim.rs";
+    let is_training_rs = rel == "compat/training.rs";
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("pub use") {
-                for ident in ["ParamGroup", "ParamGroupStep", "param_group"] {
-                    if line_contains_identifier(trimmed, ident) {
-                        offending.push(format!(
-                            "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
-                            path.display()
-                        ));
+    let mut allowed: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let mut aliased_any = false;
+            for (j, t) in path_tokens.iter().enumerate() {
+                if t == "param_group" {
+                    offending.push(format!("pub use が param_group モジュールを含む（{rel}）"));
+                }
+                if !PARAM_GROUPS_TYPE_NAMES.contains(&t.as_str()) {
+                    continue;
+                }
+                let before_as = j > 0 && path_tokens[j - 1] == "as";
+                let after_as = path_tokens.get(j + 1).map(String::as_str) == Some("as");
+                if before_as || after_as {
+                    aliased_any = true;
+                    offending.push(format!("pub use 別名 {t}（{rel}）"));
+                }
+            }
+            if !aliased_any {
+                for leaf in collect_pub_use_leaves(path_tokens) {
+                    if !PARAM_GROUPS_TYPE_NAMES.contains(&leaf.as_str()) {
+                        continue;
+                    }
+                    if is_optim_rs {
+                        allowed.push(format!("use:{leaf}"));
+                    } else {
+                        offending.push(format!("pub use leaf={leaf}（{rel}）"));
                     }
                 }
             }
+            i = (end + 1).min(tokens.len());
+            continue;
         }
-        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-        let tokens = tokenize_including_punctuation(&cleaned);
-        for fn_name in PARAM_GROUPS_FN_NAMES {
-            let count = count_fn_declarations_by_name(&tokens, fn_name);
-            if count > 0 {
-                offending.push(format!(
-                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
-                    path.display()
-                ));
-            }
+        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
+            && let Some(name) = tokens
+                .get(i + 1)
+                .filter(|t| PARAM_GROUPS_TYPE_NAMES.contains(&t.as_str()))
+        {
+            offending.push(format!("{} {name} 宣言（{rel}）", tokens[i]));
+        }
+        i += 1;
+    }
+
+    let compile_decls = count_fn_declarations_by_name(&tokens, "compile_with_param_groups");
+    let in_impl_sequential = is_training_rs
+        && scan_type_impl_surface(content, "Sequential")
+            .0
+            .contains("compile_with_param_groups");
+    for n in 0..compile_decls {
+        if in_impl_sequential && n == 0 {
+            allowed.push("fn:compile_with_param_groups".to_string());
+        } else {
+            offending.push(format!("fn compile_with_param_groups 宣言（{rel}）"));
+        }
+    }
+    offending.extend(
+        (0..count_fn_declarations_by_name(&tokens, PARAM_GROUPS_FORBIDDEN_FN))
+            .map(|_| format!("fn {PARAM_GROUPS_FORBIDDEN_FN} 宣言（{rel}）")),
+    );
+    (offending, allowed)
+}
+
+/// 承認形（#2553・決定記録 §9.2）の鍵 3 種。各ちょうど 1 件であることを固定する。
+const PARAM_GROUPS_APPROVED_KEYS: [&str; 3] = [
+    "use:ParamGroup",
+    "use:ParamGroupStep",
+    "fn:compile_with_param_groups",
+];
+
+/// 正ガード（#2553 時点の最小形。仕上げは #2554）: facade src 全体で、承認形が
+/// 承認した場所に 1 件ずつ存在し、それ以外の形・場所の再エクスポート／宣言・
+/// 別名・facade 内の `fn step_with_groups` が 0 件であることを固定する。
+#[test]
+fn facade_param_groups_public_surface_matches_approved_form() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut allowed_all: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let (found, allowed) = scan_param_groups_reexports_and_declarations(&rel, content);
+        allowed_all.extend(allowed);
+        for offense in found {
+            offending.push(format!("{}: {offense}", path.display()));
         }
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が param groups（イシュー #2173 の内部クレート限定\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、または同名の fn を宣言している: {offending:?}"
+        "承認形からの逸脱: facade の公開面が param groups の承認形（#2553・\
+         `docs/autodiff-param-groups-decision.md` §9.2）以外の形で公開・宣言\
+         されている: {offending:?}"
+    );
+    let mut violations: Vec<String> = Vec::new();
+    for key in PARAM_GROUPS_APPROVED_KEYS {
+        let n = allowed_all.iter().filter(|k| k.as_str() == key).count();
+        if n != 1 {
+            violations.push(format!("承認形 {key} が {n} 件（ちょうど 1 件のはず）"));
+        }
+    }
+    for k in &allowed_all {
+        if !PARAM_GROUPS_APPROVED_KEYS.contains(&k.as_str()) {
+            violations.push(format!("承認形からの逸脱: {k}"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "承認形の欠落・二重化（走査の空振りを含む）: {violations:?}"
+    );
+}
+
+/// facade の import だけで `ParamGroup` を構築し、`ParamGroupStep` 境界の型解決と
+/// `Sequential::compile_with_param_groups` のシグネチャが承認形（#2553・決定記録 §9.2）で
+/// あることを固定する。
+#[test]
+fn param_groups_resolve_from_facade_paths_only() {
+    use fandhe_ai::compat::{Loss, Optimizer, Sequential};
+    use fandhe_ai::optim::{ParamGroup, ParamGroupStep, Sgd, SgdConfig};
+
+    fn assert_step_trait<T: ParamGroupStep>() {}
+    assert_step_trait::<Sgd>();
+    let group: ParamGroup = ParamGroup::new(vec![0], 0.1, 0.0);
+    assert_eq!(group.params, vec![0]);
+    let sig: fn(
+        &mut Sequential,
+        Optimizer,
+        Loss,
+        &[ParamGroup],
+    ) -> Result<(), fandhe_ai::AutodiffError> = Sequential::compile_with_param_groups;
+    let _ = (sig, SgdConfig::new(0.1));
+}
+
+/// 合成入力で検出本体が承認形を許し、別名・別の場所への再エクスポート・
+/// `fn step_with_groups` 宣言を違反にすることを確認する（空振り防止）。
+#[test]
+fn param_groups_scan_flags_unapproved_forms() {
+    let ok = "pub use fandhe_ai_autodiff::nn::optim::{ParamGroup, ParamGroupStep};\n";
+    let (off, allowed) = scan_param_groups_reexports_and_declarations("optim.rs", ok);
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(allowed, ["use:ParamGroup", "use:ParamGroupStep"]);
+
+    let alias = "pub use x::ParamGroup as PG;\n";
+    assert!(
+        !scan_param_groups_reexports_and_declarations("optim.rs", alias)
+            .0
+            .is_empty()
+    );
+    let elsewhere = "pub use x::ParamGroup;\n";
+    assert!(
+        !scan_param_groups_reexports_and_declarations("lib.rs", elsewhere)
+            .0
+            .is_empty()
+    );
+    let module = "pub use x::param_group::Foo;\n";
+    assert!(
+        !scan_param_groups_reexports_and_declarations("optim.rs", module)
+            .0
+            .is_empty()
+    );
+    let step = "impl Foo { fn step_with_groups(&self) {} }\n";
+    assert!(
+        !scan_param_groups_reexports_and_declarations("optim.rs", step)
+            .0
+            .is_empty()
+    );
+    let compile_elsewhere = "impl Sequential { pub fn compile_with_param_groups(&self) {} }\n";
+    let (off, allowed) =
+        scan_param_groups_reexports_and_declarations("compat/training.rs", compile_elsewhere);
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(allowed, ["fn:compile_with_param_groups"]);
+    assert!(
+        !scan_param_groups_reexports_and_declarations("compat/other.rs", compile_elsewhere)
+            .0
+            .is_empty()
     );
 }
 
@@ -15348,7 +15362,8 @@ fn facade_does_not_reexport_or_declare_param_groups() {
 /// `resolve_slot_hparams`（同ファイルに 1 件）・`step_with_slot_hparams`
 /// （`adamw.rs`・`adam.rs`・`rmsprop.rs`・`adagrad.rs`・`lamb.rs`・
 /// `optim/sgd.rs`・`adadelta.rs`・`adamax.rs`・`nadam.rs`・`radam.rs` に
-/// 各 1 件）・`compile_with_param_groups`（0 件。承認待ちのため未実装）。
+/// 各 1 件）・`compile_with_param_groups`（#2553 で facade の
+/// `compat/training.rs` に承認形として 1 件）。
 #[test]
 fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -15447,6 +15462,11 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
             "autodiff/src/nn/optim/radam.rs::step_with_slot_hparams",
             1usize,
         ),
+        // #2553: facade の承認形 `compile_with_param_groups`（`impl Sequential` 内 1 件）。
+        (
+            "facade/src/compat/training.rs::compile_with_param_groups",
+            1usize,
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -15456,8 +15476,8 @@ fn workspace_declares_param_group_fn_names_only_in_allowed_locations() {
         found, expected,
         "workspace 全体（crates/*/src/）の param groups 系 `fn` 宣言集合が\
          期待と一致しない（過不足いずれも fail-closed に検出する。\
-         `compile_with_param_groups` は 0 件のはず——承認前に実装が\
-         紛れ込んでいないかを含めて確認すること）: {found:?}"
+         `compile_with_param_groups` は facade の `compat/training.rs` に\
+         ちょうど 1 件のはず）: {found:?}"
     );
 }
 // =====================================================================
@@ -15648,7 +15668,7 @@ fn facade_reexports_optimizer_ext_items_only_in_approved_shape_detects_each_cate
 /// `crates/facade/src/lib.rs` の `OptimizerStateDictHoldDoctestGuard`
 /// doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
 /// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを
-/// 固定する（`param_groups_hold_doctest_globs_all_pub_modules` の
+/// 固定する（同型の既存ガードの
 /// `OptimizerStateDictHoldDoctestGuard` 版）。
 #[test]
 fn optimizer_state_dict_hold_doctest_globs_all_pub_modules() {
@@ -19260,8 +19280,8 @@ fn workspace_declares_sequential_alt_save_load_fn_names_only_in_allowed_location
 /// `OptimizerStateDict` トレイトが glob import されるだけで一度も
 /// 名前解決されず、facade がこの名前を再エクスポートしても glob 衝突
 /// 〈E0659〉は「その名前を実際に使ったときにだけ」発生するため検出
-/// できなかった欠陥。`ParamGroupsHoldDoctestGuard` の `ParamGroupStep`
-/// トレイトにも同型の欠陥が既存で存在した。本テストは同型の欠陥の
+/// できなかった欠陥。`ParamGroupsHoldDoctestGuard`（#2553 で削除済み）の
+/// `ParamGroupStep` トレイトにも同型の欠陥が既存で存在した。本テストは同型の欠陥の
 /// 再発を機械的に防ぐ再発防止ガードであり、個々のガードの固定文言
 /// 契約〈`*_HOLD_PROBE_BODY` 系〉とは独立の横断監査を担う）。
 ///
@@ -19275,10 +19295,10 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
     let audits = scan_hold_probe_blocks(&content);
 
     // 正のプローブ: 走査対象が空振りで通過するのを防ぐため、検出した
-    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519・#2530・#2533・#2535・#2571 の保留ガード削除後は 18、#2568 で `TrainStepHoldDoctestGuard` のプローブモジュールを承認形公開に伴い削除した後は 17）以上
+    // プローブブロック数が既知の下限（2026-09-26 時点の実測値 32 から、#2505・#2508・#2511・#2512・#2513・#2514・#2515・#2517・#2518・#2519・#2530・#2533・#2535・#2571 の保留ガード削除後は 18、#2568 で `TrainStepHoldDoctestGuard` のプローブモジュールを承認形公開に伴い削除した後は 17、#2553 で `ParamGroupsHoldDoctestGuard` のプローブモジュールを承認形公開に伴い削除した後は 16）以上
     // であることを固定する。将来ブロックが追加された場合はこの下限を
     // 上方修正する（削減時は本テストが個別に指摘する）。
-    const MIN_KNOWN_PROBE_BLOCKS: usize = 17;
+    const MIN_KNOWN_PROBE_BLOCKS: usize = 16;
     assert!(
         audits.len() >= MIN_KNOWN_PROBE_BLOCKS,
         "hold ガード doctest のプローブモジュール検出数が既知の下限を\
@@ -19306,22 +19326,19 @@ fn hold_doctest_probe_blocks_reference_every_glob_imported_item() {
         audits.len()
     );
 
-    // 正のプローブ: 本テストが検出対象に含めるべき既知の 2 例
-    // （イシュー #2304 で修正した欠陥そのもの）が走査集合に含まれる
-    // ことを固定する。
+    // 正のプローブ: 本テストが検出対象に含めるべき既知の例
+    // （イシュー #2304 で修正した欠陥の対象。もう一方の
+    // `__fandhe_param_groups_hold_probe` は #2553 の公開に伴い削除済み）が
+    // 走査集合に含まれることを固定する。
     let mod_names: std::collections::BTreeSet<&str> =
         audits.iter().map(|a| a.mod_name.as_str()).collect();
-    for expected in [
-        "__fandhe_param_groups_hold_probe",
-        "__fandhe_optim_state_dict_hold_probe",
-    ] {
-        assert!(
-            mod_names.contains(expected),
-            "既知のプローブモジュール `{expected}` が走査対象に含まれて\
-             いない（走査ロジックのフェンス検出・mod 境界検出が壊れて\
-             いる疑いがある）"
-        );
-    }
+    let expected = "__fandhe_optim_state_dict_hold_probe";
+    assert!(
+        mod_names.contains(expected),
+        "既知のプローブモジュール `{expected}` が走査対象に含まれて\
+         いない（走査ロジックのフェンス検出・mod 境界検出が壊れて\
+         いる疑いがある）"
+    );
 
     let mut offenses: Vec<String> = Vec::new();
     for audit in &audits {

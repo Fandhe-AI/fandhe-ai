@@ -207,8 +207,48 @@
 //! に依存しない値型・純関数。位置対応契約（「呼び出し文脈」節）が
 //! そのまま適用される。**`crate::DeviceParamStore` 非対応**（決定記録
 //! §7）、**`crate::compat::Optimizer`（`compile()`）にも未統合**（同 §9）。
-//! 状態保存用の `OptimizerStateDict`／`ParamGroupStep` trait は facade
-//! 非公開のままで、facade のみの import ではそれらのメソッドに到達しない。
+//! 状態保存用の `OptimizerStateDict` trait は facade 非公開のままで、facade
+//! のみの import ではそのメソッドに到達しない（`ParamGroupStep` は #2553 で
+//! 公開済み。下記「param groups」節）。
+//!
+//! # param groups（イシュー #2553・親 #2499）
+//!
+//! 層別の学習率・weight decay（PyTorch の `param_groups` 相当）を
+//! [`crate::optim::ParamGroup`]／[`crate::optim::ParamGroupStep`] として公開する
+//! （`docs/autodiff-param-groups-decision.md` §9.2・§9.3。承認はルート #2499 の
+//! コメント〈issuecomment-6033824965〉）。
+//!
+//! - グループは**スロット添字**（`step` に渡す `params` の位置。
+//!   [`crate::compat::Sequential::named_parameters`] の列挙位置と同じ）で
+//!   パラメータを指す。どのグループにも属さないスロットは optimizer の config
+//!   （`lr`・`weight_decay`）を使う。
+//! - `ParamGroupStep::step_with_groups` を持つのは `Sgd`・`Adam`・`AdamW`・
+//!   `RmsProp`・`Adagrad`・`Lamb`・`Adadelta`・`Adamax`・`NAdam`・`RAdam` の 10 種。
+//!   `Lbfgs`・Rprop・ASGD・Adafactor・Lion は対象外。メソッドを呼ぶには
+//!   `ParamGroupStep` の import が要る。
+//! - [`crate::compat::Sequential::compile_with_param_groups`]（`compile()` 経路）で
+//!   使えるのは `Optimizer` enum にある 6 種（`Lbfgs` は拒否）。それ以外の種は
+//!   手動ループで `step_with_groups` を呼ぶ。
+//! - `set_lr` は既定グループ（グループ外スロット）にだけ効く。
+//! - glob import（`use fandhe_ai::optim::*;`）の利用者が同名の型を自前で定義して
+//!   いると衝突しうる。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::optim::{ParamGroup, ParamGroupStep, Sgd, SgdConfig};
+//!
+//! let mut opt = Sgd::new(SgdConfig::new(0.1)).unwrap();
+//! let p0 = Tensor::new(vec![1.0f32, 1.0], &[2]).unwrap();
+//! let p1 = Tensor::new(vec![1.0f32, 1.0], &[2]).unwrap();
+//! let g = Tensor::new(vec![1.0f32, 1.0], &[2]).unwrap();
+//! // スロット 1 だけを lr = 0.5 のグループへ入れる（スロット 0 は config の lr = 0.1）。
+//! let groups = [ParamGroup::new(vec![1], 0.5, 0.0)];
+//! let out = opt
+//!     .step_with_groups(&[&p0, &p1], &[&g, &g], &groups)
+//!     .unwrap();
+//! assert!((out[0].as_slice().unwrap()[0] - 0.9).abs() < 1e-6);
+//! assert!((out[1].as_slice().unwrap()[0] - 0.5).abs() < 1e-6);
+//! ```
 //!
 //! # ReduceLrOnPlateau（イシュー #1746・親 #1611）
 //!
@@ -336,6 +376,9 @@ pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, MultiStepLr, SequentialLr};
 pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
 pub use fandhe_ai_autodiff::nn::optim::{NAdam, NAdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};
+// イシュー #2553（親 #2551・ルート #2499 の承認コメント）: param groups の 2 名を
+// `docs/autodiff-param-groups-decision.md` §9.2 項目 2 の素の再エクスポートで公開する。
+pub use fandhe_ai_autodiff::nn::optim::{ParamGroup, ParamGroupStep};
 pub use fandhe_ai_autodiff::nn::optim::{PlateauMode, ThresholdMode};
 pub use fandhe_ai_autodiff::nn::optim::{RAdam, RAdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{ReduceLrOnPlateau, ReduceLrOnPlateauConfig};

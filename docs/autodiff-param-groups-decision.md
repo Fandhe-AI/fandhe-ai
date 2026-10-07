@@ -432,3 +432,60 @@ doctest）・`crates/facade/tests/api_surface.rs` の 4 テスト
 - `docs/compat-api-scope.md` §5 への適用記録
 - facade 経由の利用例 doctest・テストの追加（対象 API が存在しないため）
 - 追跡 Issue の起票（ユーザー承認が必要）
+
+## §12 #2553 実装記録（facade 公開）
+
+### 12.1 承認の根拠
+
+ルート #2499 のコメント（issuecomment-6033824965。リポジトリ所有者アカウントの投稿）が、#2551 を
+「§9 の推奨案（§9.5 (a)〜(e) は推奨どおり）」で承認している。本実装はその範囲に収める。
+
+### 12.2 公開した名前（3 件）
+
+- `fandhe_ai::optim::ParamGroup`・`fandhe_ai::optim::ParamGroupStep`（`optim.rs` の素の `pub use`。別名なし）
+- `compat::Sequential::compile_with_param_groups(&mut self, Optimizer, Loss, &[ParamGroup])`
+  （`compat/training.rs` の inherent メソッド。既存 `compile()` は不変）
+
+`SlotHparams`・`resolve_slot_hparams`・`step_with_slot_hparams` は `pub(crate)` のまま公開していない。
+
+### 12.3 実装判断
+
+| 論点 | 扱い |
+|---|---|
+| groups の保持 | 非公開 `Compiled::param_groups`。全構築成功後に代入（失敗時は直前の compile 状態を残す）。`compile`／`compile_with_amp`／復元／functional の構築箇所は空 |
+| step の振り分け | `OptimizerState::step_dispatch`。groups が空なら既存 `step`（`compile()` 経路と bit 一致）、非空なら `step_with_groups`。`run_fit` の 3 箇所と functional の 1 箇所をすべてこの入口へ置換（迂回なし） |
+| `accumulate_steps > 1` | 累積境界の step も `step_dispatch` を通すため対応（拒否しない） |
+| カスタム step フック | 内部フック型へ `&[ParamGroup]` を追加し、`TrainStepOptimizer`（非公開フィールド）が groups を持つ。公開シグネチャは不変（非破壊） |
+| `Lbfgs` | 空でない groups は `OptimizerState::new` より前に拒否 |
+| `LrSchedule` | groups 非空なら `fit` 系入口で `InvalidArgument`（案 B。状態変更前）。`History::lr` の意味は現行のまま |
+| 検証の段階 | compile 時は groups の中身を検証しない（compile 後に層を足せるため）。fit 入口でスロット添字の範囲を検査し、step 時に `resolve_slot_hparams` が空・重複・非有限・負値を optimizer 状態の変更前に検出する |
+| AMP | 併用 API は追加しない（`compile_with_amp` は groups を持たない） |
+
+### 12.4 記録に明記の無い外挿（要判断事項）
+
+`save_model` の manifest／`CompiledSnapshot` に groups の欄が無く、§6 は optimizer state_dict への groups
+保存をスコープ外としている。groups を黙って落とすと復元後に学習率が変わるため、`snapshot_of_compiled` は
+groups 非空を `InvalidArgument`（`ModelIoError::Autodiff`）で拒否する（保存先には何も作らない）。
+保存形式の拡張は行っていない。groups の保存・復元を認めるか否かは別途判断が必要。
+
+### 12.5 保留ガードの更新
+
+- 削除: `ParamGroupsHoldDoctestGuard`（`lib.rs`）と、そのドリフト検査 2 件・固定文言定数
+- 縮小: `facade_does_not_reexport_or_declare_param_groups` を承認形だけを許す
+  `facade_param_groups_public_surface_matches_approved_form` へ（許可 3 件がちょうど 1 件ずつであることも検査）
+- 更新: `workspace_declares_param_group_fn_names_only_in_allowed_locations` の期待集合、
+  `optim_module_reexports_exactly_expected_surface` の期待識別子、プローブ検出数の下限（17 → 16）
+- #2554 に残す: 正ガードとしての仕上げ（正の doctest プローブ）、`compat-api-scope.md` §5 の適用記録、
+  §5 への実装記録、facade 経由の利用例の拡充
+
+### 12.6 対象外
+
+AMP 併用 API、`LrSchedule` の案 A、groups の保存形式、`DeviceParamStore` 常駐経路、`Optimizer` enum に無い 4 種
+（Adadelta・Adamax・NAdam・RAdam）の `compile()` 経路。GPU カーネル・`Op`・`BackendOps` は触らないため
+実機依存テスト・perf ログの申し送りは不要。
+
+### 12.7 検証
+
+`cargo test -p fandhe-ai`（`compat_sequential_param_groups` 14 件・`api_surface`・doctest）、
+`cargo test -p fandhe-ai-autodiff --test nn_optim_param_groups`（無修正で green）。
+tolerance・baseline・依存・`docs/spec` は変更していない。
