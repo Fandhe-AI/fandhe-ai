@@ -1933,7 +1933,7 @@ impl Sequential {
                 Some("Callback::Ema はカスタム学習 step フックと併用できない")
             } else if compiled.amp.is_some() {
                 Some(
-                    "Callback::Ema は compile_with_amp（AMP）と併用できない（AMP の skip step の                     扱いが未決のため。docs/autodiff-ema-decision.md §10.2 (g)）",
+                    "Callback::Ema は compile_with_amp（AMP）と併用できない（AMP の skip step の扱いが未決のため。docs/autodiff-ema-decision.md §10.2 (g)）",
                 )
             } else {
                 None
