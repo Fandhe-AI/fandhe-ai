@@ -1270,6 +1270,34 @@ impl EmaCallback {
                 self.decay,
                 model.named_parameters(),
             )?);
+            return Ok(());
+        }
+        // 初期化済み（fit をまたぐ継続）: 最初の step で `update_named` が不一致を検出して
+        // 拒否済みモデルに重み・optimizer 状態の変更を残さないよう、更新を伴わない
+        // 名前集合・shape の照合を fit 開始時に行う（codex 指摘・#2821）。
+        if let Some(ema) = self.ema.as_ref() {
+            let named = model.named_parameters();
+            let expected = ema.shadow_parameters().len();
+            if named.len() != expected {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Callback::Ema: 継続中の shadow のパラメータ数（{expected}）が \
+                     モデルのパラメータ数（{}）と一致しない",
+                    named.len()
+                )));
+            }
+            for (name, param) in &named {
+                let Some(shadow) = ema.shadow(name) else {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Callback::Ema: モデルのパラメータ `{name}` が継続中の shadow に無い"
+                    )));
+                };
+                if shadow.shape() != param.shape() {
+                    return Err(AutodiffError::Shape(crate::ShapeError::ShapeMismatch {
+                        lhs: shadow.shape().to_vec(),
+                        rhs: param.shape().to_vec(),
+                    }));
+                }
+            }
         }
         Ok(())
     }

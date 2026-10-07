@@ -16694,22 +16694,31 @@ fn ema_surface_violations(files: &[(String, String)]) -> Vec<String> {
     let mut approved_decls = 0usize;
     for (rel, content) in files {
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-        for stmt in cleaned.split(';') {
-            let Some(pos) = stmt.find("pub use") else {
-                continue;
-            };
-            let normalized = stmt[pos..].split_whitespace().collect::<Vec<_>>().join(" ");
-            if !line_contains_identifier(&normalized, TYPE_NAME) {
-                continue;
-            }
-            let approved_stmt = EMA_APPROVED_REEXPORT_LINE.trim_end_matches(';');
-            if rel == "optim.rs" && normalized == approved_stmt {
-                approved_reexports += 1;
-            } else {
-                violations.push(format!("{rel}: 承認形以外の `{normalized}`"));
-            }
-        }
         let tokens = tokenize_including_punctuation(&cleaned);
+        // `pub use` 文はトークン列（空白・改行・タブ・コメントの有無に依存しない）で
+        // 抽出し、承認形トークン列との完全一致で照合する（codex 指摘・#2821）。
+        let approved_tokens =
+            tokenize_including_punctuation(EMA_APPROVED_REEXPORT_LINE.trim_end_matches(';'));
+        let mut j = 0usize;
+        while j < tokens.len() {
+            if tokens[j] == "pub" && tokens.get(j + 1).map(String::as_str) == Some("use") {
+                let mut end = j + 2;
+                while end < tokens.len() && tokens[end] != ";" {
+                    end += 1;
+                }
+                let stmt = &tokens[j..end];
+                if stmt.iter().any(|t| t == TYPE_NAME) {
+                    if rel == "optim.rs" && stmt == approved_tokens.as_slice() {
+                        approved_reexports += 1;
+                    } else {
+                        violations.push(format!("{rel}: 承認形以外の `{}`", stmt.join(" ")));
+                    }
+                }
+                j = end + 1;
+                continue;
+            }
+            j += 1;
+        }
         for (i, tok) in tokens.iter().enumerate() {
             let next = tokens.get(i + 1).map(String::as_str);
             if matches!(tok.as_str(), "trait" | "struct" | "enum" | "type" | "union")
@@ -16801,6 +16810,14 @@ fn facade_exposes_ema_only_in_approved_shape_detects_each_category() {
         (
             "nn/mod.rs",
             "pub use fandhe_ai_autodiff::nn::{\n    ExponentialMovingAverage,\n    Linear,\n};\n",
+        ),
+        (
+            "nn/mod.rs",
+            "pub\nuse\tfandhe_ai_autodiff::nn::/* c */ExponentialMovingAverage;\n",
+        ),
+        (
+            "nn/mod.rs",
+            "pub/**/use fandhe_ai_autodiff::nn::{\n\tExponentialMovingAverage\n};\n",
         ),
         ("lib.rs", reexport.as_str()),
         ("optim.rs", reexport.as_str()),

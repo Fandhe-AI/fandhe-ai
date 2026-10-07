@@ -421,6 +421,17 @@ facade 経由の利用例テストの追加（対象 API が存在しないた�
 実装は `Callback::Ema` と `compile_with_amp` の併用を fit 開始前に `InvalidArgument` で拒否する。
 追従（skip step では更新しない等）へ緩めるには別途承認を要する。
 
+同様に、`Callback::Ema` と `Monitor::Loss`（訓練損失監視）の `ModelCheckpoint`／`EarlyStopping` の
+併用も記録に形が無い。`Monitor::Loss` は EMA 差し替え前の生の重みで計算した損失を指標にする一方、
+snapshot は EMA 重みを保存するため、指標と保存重みが食い違う。承認された「記録に形が無い点は実装せず
+止める」方針に従い fit 開始前に `InvalidArgument` で拒否した（`Monitor::ValLoss` 等は併用可）。
+緩める（生の重みの損失でベスト判定して EMA 重みを保存する等）には別途承認を要する。
+
+継続する `EmaCallback`（初期化済み）を別構成のモデルへ使い回した場合は、最初の step で
+`update_named` が不一致を検出して拒否済みモデルに重み・optimizer 状態の変更が残らないよう、
+fit 開始時に更新を伴わない名前集合・shape の照合で拒否する（名前集合・個数は `InvalidArgument`、
+shape は `Shape`）。
+
 ### 13.5 ガードの変更と #2561 への残作業
 
 - `EmaHoldDoctestGuard` は型名 glob 衝突プローブだけを削除し、`FitConfig`／`Sequential` への

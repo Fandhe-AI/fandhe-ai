@@ -383,6 +383,7 @@ fn shadow_persists_across_fits_and_rejects_other_model() {
     other
         .compile(Optimizer::Sgd(SgdConfig::new(0.05)), Loss::Mse)
         .expect("compile");
+    let other_before = model_bits(&other);
     assert!(is_invalid_arg(other.fit_with_callbacks(
         &x,
         &y,
@@ -391,6 +392,28 @@ fn shadow_persists_across_fits_and_rejects_other_model() {
         &mut cbs
     )));
     assert_eq!(dict_bits(&shadow_of(&cbs[0])), before);
+    // fit 開始時に拒否され、最初の step が走らず重みが変わらない（副作用なし）。
+    assert_eq!(model_bits(&other), other_before);
+
+    // 名前集合が同じで shape だけ異なるモデルも fit 開始時に Shape エラーで拒否される。
+    let mut shaped = Sequential::new()
+        .add_linear(D_IN, 8, 0x11)
+        .expect("fixture")
+        .add_relu()
+        .add_linear(8, 3, 0x22)
+        .expect("fixture");
+    shaped
+        .compile(Optimizer::Sgd(SgdConfig::new(0.05)), Loss::Mse)
+        .expect("compile");
+    let shaped_before = model_bits(&shaped);
+    let y3 = Tensor::new(vec![0.0f32; N * 3], &[N, 3]).expect("fixture");
+    assert!(matches!(
+        shaped.fit_with_callbacks(&x, &y3, FitConfig::new(1, N), None, &mut cbs),
+        Err(AutodiffError::Shape(_))
+    ));
+    assert_eq!(model_bits(&shaped), shaped_before);
+    assert_eq!(dict_bits(&shadow_of(&cbs[0])), before);
+    assert_eq!(ema_of(&cbs[0]).num_updates(), 2);
 }
 
 // 10. ラッパー単体: 閉形式一致・失敗時 shadow 不変・facade Module 経由の往復。
