@@ -684,3 +684,61 @@ fn adamax_step_with_groups_is_reachable_from_facade() {
     assert_ne!(out[0].as_slice().unwrap(), p0.as_slice().unwrap());
     assert_eq!(out[1].as_slice().unwrap(), p1.as_slice().unwrap());
 }
+/// #2554: 決定記録 §9.2 項目 4 の契約を固定する。スロット添字の公開ヘルパーを足さない
+/// 代わりに、`named_parameters()` の列挙位置が `trainable_parameters()`（step に渡る
+/// `params`）の位置、すなわちスロット添字と一致する。3 層モデルの中間層だけを
+/// `lr = 0`・`weight_decay = 0` のグループへ入れ、その層のスロットだけが bit 不変で
+/// 他の層が更新されることを、名前接頭辞から導いた添字で確認する。
+#[test]
+fn named_parameters_position_is_slot_index_for_groups() {
+    let (x, y) = gen_regression_data(SEED_DATA);
+    let mut model = Sequential::new()
+        .add_linear(D_IN, D_HIDDEN, SEED_L1)
+        .unwrap()
+        .add_relu()
+        .add_linear(D_HIDDEN, D_HIDDEN, SEED_L2)
+        .unwrap()
+        .add_relu()
+        .add_linear(D_HIDDEN, D_OUT, SEED_L2 ^ SEED_L1)
+        .unwrap();
+
+    // 列挙位置 = スロット添字: 長さ・順序・値が bit 一致する。
+    let named = model.named_parameters();
+    let trainable = model.trainable_parameters();
+    assert_eq!(named.len(), trainable.len());
+    for (i, ((_, np), tp)) in named.iter().zip(trainable.iter()).enumerate() {
+        assert_eq!(
+            np.as_slice().unwrap(),
+            tp.as_slice().unwrap(),
+            "スロット {i} の named_parameters と trainable_parameters が不一致"
+        );
+    }
+
+    let middle = layer_slot_indices(&model, "2.");
+    let others: Vec<usize> = (0..trainable.len())
+        .filter(|i| !middle.contains(i))
+        .collect();
+    assert!(!middle.is_empty() && !others.is_empty());
+    let before = snapshot(&model);
+    model
+        .compile_with_param_groups(
+            Optimizer::AdamW(AdamWConfig::default()),
+            Loss::Mse,
+            &[ParamGroup::new(middle.clone(), 0.0, 0.0)],
+        )
+        .unwrap();
+    model.fit(&x, &y, fit_config()).unwrap();
+    let after = snapshot(&model);
+    for &i in &middle {
+        assert_eq!(
+            after[i], before[i],
+            "凍結した中間層のスロット {i} が変化した"
+        );
+    }
+    for &i in &others {
+        assert_ne!(
+            after[i], before[i],
+            "凍結対象外のスロット {i} が更新されていない"
+        );
+    }
+}

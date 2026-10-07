@@ -25,6 +25,9 @@ facade（`fandhe_ai::optim`）への再エクスポート・`compat::Sequential`
 面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則により**未承認のため
 保留**する（§5「承認事項」）。
 
+> 追記: 本段落の保留は §12（#2553）で公開済み・§13（#2554）で正ガードとして仕上げ済み。
+> 経緯は §12・§13 を参照（本段落は当時の記録として残す）。
+
 ## §1 背景
 
 イシュー #2173 と親 #2131 のいずれにも所有者の承認コメントはない
@@ -190,6 +193,8 @@ doctest）・`crates/facade/tests/api_surface.rs` の 4 テスト
 承認を得た日が来たら、`ParamGroupsHoldDoctestGuard`・対応する 4 テスト
 を削除し、正のガード（実際の再エクスポート・facade テスト）へ置き換
 える。
+
+> 追記: 上記は #2553 で公開・#2554 で正ガード仕上げ済み。§12・§13 参照。
 
 ## §6 スコープ外
 
@@ -489,3 +494,53 @@ AMP 併用 API、`LrSchedule` の案 A、groups の保存形式、`DeviceParamSt
 `cargo test -p fandhe-ai`（`compat_sequential_param_groups` 14 件・`api_surface`・doctest）、
 `cargo test -p fandhe-ai-autodiff --test nn_optim_param_groups`（無修正で green）。
 tolerance・baseline・依存・`docs/spec` は変更していない。
+
+## §13 #2554 実装記録（正ガードの仕上げ）
+
+### 13.1 承認の扱い
+
+公開形の承認根拠は §12.1（ルート #2499 のコメントによる §9 推奨案の承認）の範囲だけである。#2554 は公開面を
+増やさない（テスト・コメント・docs のみ）ため、新たな承認は要らず、本節も新たな承認を主張しない。
+
+### 13.2 公開した名前
+
+§12.2 の 3 件（`optim::ParamGroup`・`optim::ParamGroupStep`・`Sequential::compile_with_param_groups`）から
+追加なし。`crates/facade/src` の差分はコメントのみ。
+
+### 13.3 ガード反転の対応表
+
+| 旧（#2173 の保留ガード） | #2553 での処置 | #2554 での最終形 |
+|---|---|---|
+| `ParamGroupsHoldDoctestGuard`（`lib.rs`）とそのドリフト検査 2 件 | 削除 | 新設せず。正の doctest プローブ `param_groups_usage_doctests_are_present_and_compiled`（`api_surface.rs`）が、`optim.rs` のモジュール doc と `compile_with_param_groups` の doc にある利用例がコンパイル・実行される形であること（`ignore`／`no_run`／`compile_fail`／`text` なし）を固定する |
+| `facade_does_not_reexport_or_declare_param_groups` | `facade_param_groups_public_surface_matches_approved_form`（最小形）へ縮小 | `facade_param_groups_public_surface_matches_approved_contract` へ改名。鍵 3 種がちょうど 1 件であることの検査を `param_groups_inventory_violations` へ分離（欠落・二重化・未知の鍵を別メッセージで報告） |
+| `param_groups_resolve_from_facade_paths_only` | 承認形の到達性テストへ更新 | `param_groups_types_are_reachable_via_facade_only` へ改名。公開済み 10 optimizer すべてで `step_with_groups` のシグネチャを fn ポインタへ束縛 |
+| `param_groups_scan_flags_unapproved_forms` | 承認形を許す自己テストへ更新 | `facade_param_groups_public_surface_guards_detect_each_category` へ改名・拡充（別名・別ファイル・`impl Sequential` 外・二重宣言・型宣言・インベントリ欠落／二重化／未知・形状逸脱の各カテゴリを正例で踏む） |
+| （新設） | なし | `param_groups_types_match_approved_shape`: `ParamGroup`（`#[non_exhaustive]`・`derive(Debug, Clone, PartialEq)`・pub フィールド 3 件・inherent `new` のみ・手書き trait impl なし）と `ParamGroupStep`（メソッド `step_with_groups` 1 件のみ・supertrait／関連型なし）の形状を固定 |
+| `workspace_declares_param_group_fn_names_only_in_allowed_locations` | 期待集合を更新 | 変更なし（doc コメントのみ） |
+
+否定の保証に `compile_fail` は使っていない（stable rustdoc はエラーコードを照合しないため。正のプローブ＋
+インベントリで組む）。
+
+### 13.4 追加した利用例テスト
+
+`crates/facade/tests/compat_sequential_param_groups.rs::named_parameters_position_is_slot_index_for_groups`
+（15 件目）。3 層モデルで `named_parameters()` と `trainable_parameters()` の位置・値が一致することと、
+接頭辞から導いた中間層のスロットだけを `lr = 0`・`weight_decay = 0` のグループへ入れると、その層だけが
+bit 不変で他が更新されることを固定する（§9.2 項目 4: スロット添字の公開ヘルパーを足さない代わりの契約）。
+判定は bit 一致で、tolerance は新設していない。利用例 doctest は #2553 で追加済みの `optim.rs`
+モジュール doc と `compile_with_param_groups` の doc を使う。
+
+### 13.5 対象外
+
+§12.6 と同じ。AMP 併用 API、`LrSchedule` の案 A、groups の保存形式（§12.4 の要判断事項）、
+`DeviceParamStore` 常駐経路、`Optimizer` enum に無い 4 種（Adadelta・Adamax・NAdam・RAdam）の
+`compile()` 経路、`Lbfgs` 併用、スロット添字の公開ヘルパー。GPU カーネル・`Op`・`BackendOps` は
+触らないため実機依存テスト・perf ログの申し送りは不要。
+
+### 13.6 検証
+
+`cargo test -p fandhe-ai --test api_surface`・`--test compat_sequential_param_groups`（15 件）・`--doc`、
+`cargo test -p fandhe-ai-autodiff --test nn_optim_param_groups`（無修正）、`cargo test --workspace`、
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`。再エクスポートへ別名を一時的に
+足す変異で `facade_param_groups_public_surface_matches_approved_contract` が失敗することを手元で確認した。
+`Cargo.toml`／`Cargo.lock`・tolerance・baseline・`docs/spec` は変更していない。
