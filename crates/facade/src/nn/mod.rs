@@ -11,6 +11,8 @@
 //! ではなく `compat::Sequential::add_*`（`crate::compat::sequential`）
 //! 経由で到達する契約のまま変更しない（[`crate::nn::rnn`] モジュール
 //! doc「`Sequential::add_*` を設けない理由」参照）。
+//! 例外として [`crate::nn::kv_cache`]（#2579。`KvCache`・`StatefulAttention` の純再エクスポート）を
+//! 持つ。MHA 本体は引き続き `Sequential::add_*` 経由のみ。
 //!
 //! **例外（#2532・#2533。ルート #2499 の一括承認）**: `Transformer`・
 //! `TransformerDecoderLayer`・`TransformerConfig` は型として再エクスポートする
@@ -21,6 +23,7 @@
 //! （承認形の範囲外のため `FeedForwardActivation` や `Tape` への委譲メソッドは追加していない）。
 mod container;
 pub mod init;
+pub mod kv_cache;
 mod module;
 pub mod rnn;
 

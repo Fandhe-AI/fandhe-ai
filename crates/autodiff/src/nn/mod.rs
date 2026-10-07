@@ -144,9 +144,9 @@
 //! カーネル／依存は追加しない（`docs/kv-cache-design.md`）。
 //! K-1（本 autodiff 内部実装）は 2026-09-24 にユーザー承認済み
 //! （`docs/kv-cache-design.md` §6 承認事項 1）。facade 公開
-//! （`add_stateful_attention` 相当・K-2）は別途承認が必要で未承認
-//! のため保留する（`crates/facade/tests/api_surface.rs` の否定
-//! ガードで固定。`docs/kv-cache-design.md` §6 承認事項 2）。
+//! （K-2）はイシュー #2579 で公開済み（`fandhe_ai::nn::kv_cache`・
+//! `Tape::stateful_attention_forward`。`docs/kv-cache-design.md`
+//! §11.4）。
 //! イシュー #2140（親 #2131）で [`init`] を `pub mod` 化し、PyTorch
 //! `torch.nn.init.*` 相当の初期化関数群（`uniform`／`normal`／
 //! `constant`／`xavier_uniform`／`xavier_normal`／`kaiming_uniform`／

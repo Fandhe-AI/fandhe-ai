@@ -48,6 +48,10 @@
 //!    （詳細は [`nn::rnn`] モジュール doc）。同じく `nn` 配下に、PyTorch
 //!    `torch.nn.init.*` 相当の初期化関数 9 個と補助 4 名を [`nn::init`] へ
 //!    純再エクスポートする（イシュー #2504。グローバル RNG に従う）。
+//!    さらに KV キャッシュ付き attention（`KvCache`・`StatefulAttention`・
+//!    `MultiheadAttentionConfig`）を [`nn::kv_cache`] へ純再エクスポートし、
+//!    入口として `Tape::stateful_attention_forward`（薄い委譲）を追加した
+//!    （イシュー #2579。`docs/kv-cache-design.md` §11.4）。
 //!
 //! 6. **model 公開面**（[`model`]。イシュー #2087・親 #2082）:
 //!    ホームディレクトリ配下のキャッシュディレクトリを基盤とする
@@ -836,6 +840,28 @@ impl Tape {
         gru.forward_seq(&self.0, x, h0)
     }
 
+    /// KV キャッシュ付き self-attention の forward（イシュー #2579。
+    /// `docs/kv-cache-design.md` §11.4 P3）。`StatefulAttention::forward` へ
+    /// `&self.0` を渡すだけの薄い委譲で、`rnn_forward_seq` と同じ理由
+    /// （生の autodiff `Tape` を取り出せない。REQ-12）で `Tape` に置く。
+    ///
+    /// mask 規則: (a) キャッシュ空かつ `L_new > 1` は causal、(b) `L_new == 1`
+    /// は全キャッシュを参照、(c) キャッシュ非空かつ `L_new > 1` は offset 付き
+    /// causal（`docs/kv-cache-design.md`）。更新は原子的で、`Err` のときキャッシュは
+    /// 呼び出し前から変化しない。`x_new` は `[B, L_new, E]`。
+    ///
+    /// # Errors
+    ///
+    /// rank・`E`・`B` の不一致、別 `Tape` の `Var`（`TapeMismatch`）等で
+    /// `AutodiffError` を返す。
+    pub fn stateful_attention_forward<'t>(
+        &'t self,
+        sa: &mut nn::kv_cache::StatefulAttention,
+        x_new: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        sa.forward(&self.0, x_new)
+    }
+
     /// この `Tape` が結線されているバックエンドの `f64` 演算本体
     /// （[`TypedOps<f64>`]）への capability accessor（イシュー #1939・
     /// `docs/compat-api-scope.md` §5 経路 2 承認・`docs/backend-dtype-
@@ -1590,6 +1616,7 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -1697,6 +1724,7 @@ struct VarCustomHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -1883,6 +1911,7 @@ struct VarBoolOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -1979,87 +2008,6 @@ struct VarBoolOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarHooksHoldDoctestGuard;
 
-/// イシュー #2084（親 #2059。設計正本 `docs/kv-cache-design.md` §6
-/// 承認事項 2・§10）の facade 公開（K-2: `KvCache`／`StatefulAttention`・
-/// `compat::Sequential::add_stateful_attention` 相当）保留を固定する
-/// doctest 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）／
-/// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
-/// ブロック方式」を採る: facade の全 `pub mod` を glob import したスコープ
-/// に、本ブロック内でのみ定義したローカル `__fandhe_kv_hold_probe::
-/// {KvCache, StatefulAttention, add_stateful_attention}` を導入し、実際に
-/// 使う関数を書く。facade がどの経路（単一行・複数行・ネストした group
-/// での `pub use`・別名エクスポート・facade 独自の `struct`／`type` 宣言・
-/// `compat::Sequential` への inherent メソッド追加）で `KvCache`／
-/// `StatefulAttention`／`add_stateful_attention` という名前を公開しても、
-/// ローカル定義との glob 衝突（型名の場合。E0659 等）または呼び出し
-/// シグネチャの不一致（`compat::Sequential` への inherent メソッドは
-/// トレイトメソッドより優先解決されるため、本プローブの trait 経由呼び出し
-/// が型・引数不一致でコンパイル失敗する）でエラーコードに依存せず
-/// コンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// facade_does_not_expose_kv_cache_stateful_attention`〈直列 1 行走査。
-/// 内側の層として維持〉・`facade_does_not_reexport_or_declare_kv_cache_
-/// items`〈トークン方式。複数行・別名・独自宣言を検出〉）との多層防御の
-/// 位置づけ・承認未取得の経緯・承認依頼用の K-2 事前設計は
-/// `docs/kv-cache-design.md` §10「facade 公開（K-2）の
-/// 保留固定と承認依頼用の事前設計」を参照。本 doctest が glob import する
-/// `pub mod` 集合と `src/lib.rs` の実宣言集合のドリフトは
-/// `kv_cache_hold_doctest_globs_all_pub_modules` が、本文（glob 以外）の
-/// 固定文言からのドリフトは `kv_cache_hold_doctest_probe_body_matches_
-/// fixed_contract` が固定する（`extract_hold_doctest_guard_doc`・
-/// [`KV_CACHE_HOLD_PROBE_BODY`] 参照）。
-///
-/// K-2 facade 公開（`docs/kv-cache-design.md` §6 承認事項 2）がユーザー
-/// 承認され実施する日が来たら、本モジュール・本 doctest 自体を削除する
-/// （ソース走査側の対応する否定ガードも同時に正ガードへ置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_kv_hold_probe {
-///     pub struct KvCache;
-///     pub struct StatefulAttention;
-///     pub struct __FandheKvHoldMarker;
-///     pub fn add_stateful_attention() -> __FandheKvHoldMarker {
-///         __FandheKvHoldMarker
-///     }
-/// }
-/// use __fandhe_kv_hold_probe::*;
-///
-/// trait __FandheKvHoldProbe {
-///     fn add_stateful_attention(&self) -> __FandheKvHoldMarker;
-/// }
-///
-/// impl __FandheKvHoldProbe for fandhe_ai::compat::Sequential {
-///     fn add_stateful_attention(&self) -> __FandheKvHoldMarker {
-///         __FandheKvHoldMarker
-///     }
-/// }
-///
-/// fn __probe(_: KvCache, _: StatefulAttention, x: &fandhe_ai::compat::Sequential) {
-///     let _: __FandheKvHoldMarker = add_stateful_attention();
-///     let _: __FandheKvHoldMarker = fandhe_ai::compat::Sequential::add_stateful_attention(x);
-///     let _: __FandheKvHoldMarker = x.add_stateful_attention();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct KvCacheHoldDoctestGuard;
-
 /// イシュー #2146（親 #2131）の facade 公開のうち、承認形外の配置を引き続き
 /// 固定する doctest 足場（#2516 で `Var` 委譲メソッド 5 件を公開したため部分反転。
 /// `VarBoolOpsHoldDoctestGuard` と同じ #2510 型の部分反転）。承認形は
@@ -2110,6 +2058,7 @@ struct KvCacheHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2179,7 +2128,7 @@ struct VarActivationOpsHoldDoctestGuard;
 
 /// イシュー #2156（親 #2131）の facade 公開保留を固定する doctest 足場。
 /// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）・`KvCacheHoldDoctestGuard`
-/// （#2084）と同型の「正のプローブ 1 ブロック方式」を採る: facade の
+/// （#2084。#2579 で削除済み）と同型の「正のプローブ 1 ブロック方式」を採る: facade の
 /// 全 `pub mod` を glob import したスコープに、本ブロック内でのみ定義
 /// したローカルの自由関数群（`__fandhe_rng_dist_hold_probe::{bernoulli,
 /// multinomial, normal, Generator}`）とトレイト
@@ -2227,6 +2176,7 @@ struct VarActivationOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2277,6 +2227,7 @@ struct VarActivationOpsHoldDoctestGuard;
 ///     use fandhe_ai::data::*;
 ///     use fandhe_ai::nn::*;
 ///     use fandhe_ai::nn::rnn::*;
+///     use fandhe_ai::nn::kv_cache::*;
 ///     use fandhe_ai::interop::*;
 ///     use fandhe_ai::interop::onnx::*;
 ///     use fandhe_ai::interop::safetensors::*;
@@ -2310,7 +2261,7 @@ struct RngDistributionsHoldDoctestGuard;
 
 /// イシュー #2159（親 #2131。設計正本 `docs/autodiff-spatial-layers-
 /// decision.md` §6 承認事項 1）の facade 公開保留を固定する doctest
-/// 足場。`KvCacheHoldDoctestGuard`（#2084）と同型の「正のプローブ 1
+/// 足場。`KvCacheHoldDoctestGuard`（#2084。#2579 で削除済み）と同型の「正のプローブ 1
 /// ブロック方式」を採る。**イシュー #2522 で `add_upsample`／
 /// `add_zero_pad2d`／`add_identity` の 3 メソッドは承認・公開済み**のため
 /// メソッド／自由関数プローブから外した（型名 `Upsample`／`ZeroPad2d`／
@@ -2358,6 +2309,7 @@ struct RngDistributionsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2446,6 +2398,7 @@ struct SpatialLayersHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2537,6 +2490,7 @@ struct VarConv3dHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2622,6 +2576,7 @@ struct AdaptiveMaxGlobalPoolHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2693,6 +2648,7 @@ struct DropoutEmbeddingBagHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2779,6 +2735,7 @@ struct RnnConfigHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -2871,6 +2828,7 @@ struct PixelShuffleHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3006,6 +2964,7 @@ struct LossOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3159,6 +3118,7 @@ struct OptimizerStateDictHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3253,6 +3213,7 @@ struct EmaHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3378,6 +3339,7 @@ struct SwaHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3485,6 +3447,7 @@ struct FitWeightingHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3574,6 +3537,7 @@ struct TrainStepHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3682,6 +3646,7 @@ struct NpyIoHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3727,7 +3692,7 @@ struct NpyIoHoldDoctestGuard;
 struct ModelIoHoldDoctestGuard;
 
 /// イシュー #2191（`generate()` 自己回帰ループ）の facade 公開保留を
-/// 固定する doctest 足場。`KvCacheHoldDoctestGuard`（#2084）と同型の
+/// 固定する doctest 足場。`KvCacheHoldDoctestGuard`（#2084。#2579 で削除済み）と同型の
 /// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカル
 /// `__fandhe_generate_hold_probe::{inference::{generate, GenerateConfig,
@@ -3771,6 +3736,7 @@ struct ModelIoHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3878,6 +3844,7 @@ struct GenerateHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -3978,6 +3945,7 @@ struct PredictBatchesHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -4126,6 +4094,7 @@ struct FftOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -4300,6 +4269,7 @@ struct TrigOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -4462,6 +4432,7 @@ struct NonfiniteOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -4594,6 +4565,7 @@ struct CumulativeOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -4772,6 +4744,7 @@ struct StatReduceOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -4961,6 +4934,7 @@ struct BinningOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -5113,6 +5087,7 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -5301,6 +5276,7 @@ struct ShapeViewOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -5445,6 +5421,7 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -5603,6 +5580,7 @@ struct TensorProductOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -5708,6 +5686,7 @@ struct PadModesHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -5847,6 +5826,7 @@ struct Pool3dOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -6028,6 +6008,7 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -6164,6 +6145,7 @@ struct FoldUnfoldHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -6340,6 +6322,7 @@ struct LrnWeightReparamHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -6567,6 +6550,7 @@ struct PackedSequenceHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -6766,6 +6750,7 @@ struct ActivationScalarOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -6956,6 +6941,7 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7096,6 +7082,7 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7241,6 +7228,7 @@ struct MarginFocalLossOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7297,6 +7285,7 @@ struct OptimizerRpropAsgdHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7353,6 +7342,7 @@ struct OptimizerAdafactorLionHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7405,6 +7395,7 @@ struct LrSchedulerPolyChainedHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7519,6 +7510,7 @@ struct DatasetComposeHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7626,6 +7618,7 @@ struct IterableBatchSamplerHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7720,6 +7713,7 @@ struct FunctionalApiHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -7933,6 +7927,7 @@ struct MergeOpsHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
@@ -8046,6 +8041,7 @@ struct JacobianHessianHoldDoctestGuard;
 /// use fandhe_ai::nn::*;
 /// use fandhe_ai::nn::init::*;
 /// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;

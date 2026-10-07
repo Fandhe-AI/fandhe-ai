@@ -2,11 +2,10 @@
 //! forward_with_cache`・イシュー #2084・親 #2059）の facade 横断 parity
 //! テスト（`mha_backend_parity.rs` と同型）。
 //!
-//! facade は `add_stateful_attention`／`StatefulAttention` 相当の新規
-//! `pub fn` を追加していない（`docs/kv-cache-design.md` §6 承認事項 2。
-//! `crates/facade/tests/api_surface.rs` の否定ガードで固定）ため、
-//! `mha_backend_parity.rs` と同じ到達経路（`LinearVars`〈pub フィールド〉
-//! を自前構築し `MultiheadAttentionVars::new` へ渡す）を使う。
+//! facade は #2579 で `fandhe_ai::nn::kv_cache`・`Tape::stateful_attention_forward` を
+//! 公開済み（`kv_cache_facade.rs` が公開経路を固定する）。本テストは `mha_backend_parity.rs`
+//! と同じ到達経路（`LinearVars`〈pub フィールド〉を自前構築し `MultiheadAttentionVars::new` へ
+//! 渡す）で、バックエンド間（`CpuBackendOps` と `NaiveOps`）の decode 列を突合する。
 //!
 //! - 属性なし: `fandhe_ai::tape()`（`CpuBackendOps`）で「prefill →
 //!   decode N ステップ」の各出力を `fandhe_ai_autodiff::Tape::new()`
