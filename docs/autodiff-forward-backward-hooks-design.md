@@ -288,6 +288,7 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
   `remove_hook`（§5.7）の `tape_id`／`epoch` 検証と対になる契約であり、登録側・解除側の双方で
   `TapeMismatch` の fail-closed 検証を揃える。
 - forward 側の `nn::ForwardHooked` も、facade の `nn` が未公開（#2133）のため autodiff 内部に閉じる。
+  （#2587 で facade 版 `nn::ForwardHooked` として承認形を公開した。§18 参照。本節の記述は履歴として残す）
 - facade への公開は承認事項（§11）とする。#2139 では、`Var::register_backward_hook`・
   `Var::register_forward_hook`・`Tape::register_backward_hook` が facade に現れないことを、
   `crates/facade/tests/api_surface.rs` の保留固定 probe で守ることを推奨として引き継ぐ。
@@ -344,6 +345,8 @@ backward hook は **`Tape` の side table**（案 C）に登録し、`backward_i
 4. #2139 の受入基準の改訂: `Var::register_forward_hook` を Module ラッパー方式へ、`Fn(&Var)` をテン
    ソルベースへ、API 配置を `Var` ではなく `Tape` へ（§7）
 5. facade 公開（`docs/compat-api-scope.md` §5 経路 2）
+
+（#2587 で §14.4 の承認形に限り実施した。§18 参照。本節の記述は履歴として残す）
 
 ## 12. 出典
 
@@ -511,6 +514,8 @@ lifetime とエラー伝播・#2139 の受入基準改訂・facade 公開〈経�
 
 本 PR のマージで #2139 を一旦閉じ、承認後は新規イシューまたは reopen で
 実装する運用とする（前例: #2064・#2133 と同型）。
+
+（facade 項目は #2587 で実施。§18 参照。§4 は保持場所〈side table〉の設計で #2587 での変更はない）
 
 ## 14. #2585（公開形の確定）の着手時判定と承認依頼
 
@@ -797,3 +802,81 @@ lazy 融合契約（REQ-2 複合判定の範囲内）と同じ性質で toleranc
   P5′ の成立確認（`FacadeModuleAdapter<P>` は `P: DerefMut` を要求するため所有値を包むには `Box<M>` 等が要る点に注意。
   成立しなければ実装せず差し戻す）・保留ガードの正ガード反転・`compat-api-scope.md` §5 の適用記録・
   CPU 本番 ops（`backend-cpu`）での hook 有無 bit 一致テスト（autodiff は具象バックエンドに依存できないため facade 経由）。
+
+## 18. #2587（facade 公開・ガード反転）の実装記録
+
+### 18.1 承認根拠と範囲
+
+- 承認の所在は §17.1 と同じ（ルート #2499 の 2026-10-07 付コメント
+  `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`）。#2584 について
+  「本 doc §14 の推奨案（P5′ が成立しなければ差し戻す）」を承認している。承認は §14 に書かれた形に限り、
+  本節はそれ以上の承認を主張しない。
+- 公開したのは §14.4 の P1〜P9 の承認形のみ。§10 のスコープ外項目（勾配差し替え hook・global forward hook・
+  Module 単位 backward hook 等）は実装していない。`crates/autodiff/src/**` は変更していない。
+
+### 18.2 公開した名前と配置
+
+| 項目 | 配置 |
+|---|---|
+| `Tape::register_backward_hook<F>(&self, &Var<'_>, F) -> Result<HookHandle, AutodiffError>`（`F: Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + Sync + 'static`）・`Tape::remove_hook(&self, HookHandle) -> Result<(), AutodiffError>`（各 `self.0` への 1 行委譲） | `crates/facade/src/lib.rs`（facade の `impl Tape`）。`Var`・`compat::Sequential`・`TapeRef` には足していない（P2） |
+| `fandhe_ai::HookHandle`（autodiff からの純再エクスポート 1 行） | `crates/facade/src/lib.rs`（P3） |
+| `fandhe_ai::nn::ForwardHooked<M: nn::Module>`（`new`・`inner`・`inner_mut`・`into_inner`。`Module` を実装） | `crates/facade/src/nn/forward_hook.rs`（非公開 `mod`）＋`nn/mod.rs` の `pub use`（P5・P6） |
+| `fandhe_ai::nn::ForwardHookCtx`（`input_shape`・`output_shape`・`output_value`。autodiff からの純再エクスポート） | `crates/facade/src/nn/mod.rs`（P4・P5・P6） |
+
+`pub mod hooks` は作っていない（P4）。`register_forward_hook`・`register_hook`・`remove_backward_hook` はどの型にも
+追加していない（P8）。`HookHandle` は不透明（`Clone`／`Copy` なし）のため二重解除は型上起きない。
+
+### 18.3 P5′ のコンパイル成立結果と採った構成
+
+P5′ は**成立した**（`cargo check -p fandhe-ai` が通ることを実装の最初に単独で確認した）。facade 版
+`ForwardHooked<M>` は非公開フィールド 1 個
+`inner: fandhe_ai_autodiff::nn::ForwardHooked<FacadeModuleAdapter<Box<M>>>` を持つ。`FacadeModuleAdapter<P>` は
+`P: DerefMut` を要求するため `Box<M>` で包み、`inner`／`inner_mut`／`into_inner` はアダプタの `.0` を剥がして
+`M` を返す。hook の呼び出しと `ForwardHookCtx` の構築は autodiff 側の単一実装に任せ、facade 側は `forward` を
+`AutodiffModule::forward(&self.inner, tape.0, input)` に委譲するだけである（hook を直接呼ばず ctx も構築しない）。
+`forward` 以外の `Module` メソッド 14 件は inner の facade `Module` メソッドへ接頭辞なしで透過委譲する。
+derive は付けていない（autodiff 側も無し。追加は記録外）。
+
+制約: 包めるのは facade `nn::Module` 実装（利用者定義層・`nn::{ModuleList, Sequential, ModuleDict}`）。
+autodiff 組み込み層（`Linear` 等）を facade 側 `ForwardHooked` で直接包む経路は承認形の範囲外のため追加していない。
+`FacadeModuleAdapter` は `supports_forward_host() == false` のため、`compat::Sequential::predict` でも tape 経路で
+1 forward につき 1 回発火する（`tests/hooks.rs` で固定）。
+
+### 18.4 保留ガードの部分反転
+
+`VarHooksHoldDoctestGuard`（名称据え置き。`VarBoolOpsHoldDoctestGuard`・`VarActivationOpsHoldDoctestGuard` と同型の
+部分反転）:
+
+- 削除したプローブ（公開した名前と衝突する分）: ローカル型 `HookHandle`・`ForwardHooked`・`ForwardHookCtx` と
+  その `__probe_types` 引数、`Tape` に対する `register_backward_hook`／`remove_hook` の UFCS・メソッド呼び出し 4 行。
+- 残したプローブ: `hooks` モジュール衝突プローブ（P4）、`Var`・`compat::Sequential` への 5 メソッド全部、
+  `Tape` への `register_forward_hook`・`register_hook`・`remove_backward_hook`（P8）。
+- `api_surface.rs`: `HOOKS_HOLD_PROBE_BODY` を同期。`workspace_declares_hook_registration_fns_only_on_autodiff_tape` を
+  `..._only_on_autodiff_tape_and_facade_delegation` へ改名し期待集合へ `facade/src/lib.rs` の同名各 1 件を追加（所在の登録）。
+  `workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` へ
+  `facade/src/nn/forward_hook.rs::{state_dict, load_state_dict}` を追加（optimizer とは無関係の委譲）。
+  `nn_mod_public_items_match_expected_set` へ `ForwardHookCtx`・`ForwardHooked` を追加。
+  `hooks_hold_doctest_*`・`autodiff_declares_no_register_hook_fn`・検出器の自己テストは維持。
+- 新設した正ガード: `facade_tape_hook_methods_are_thin_delegations`（本体の完全一致・シグネチャ固定・P8 の 0 件）、
+  `facade_reexports_hook_items_only_in_approved_shape`（＋走査器の自己テスト）、
+  `workspace_declares_hook_structs_only_in_approved_locations`（struct 宣言所在 4 件）、
+  `nn_forward_hook_rs_public_items_match_expected_set`（公開 item・固有 pub fn・手書き trait impl の固定）、
+  `nn_forward_hook_rs_delegates_to_autodiff_single_implementation`（P5′ の単一実装・`unsafe`／`unwrap`／`expect` なし）、
+  `hooks_are_reachable_via_facade_only`。
+- 合成注入で実効を確認した（コミットなし・戻し済み）: `Tape::remove_hook` 本体の差し替え、`ForwardHooked` への固有
+  `pub fn` 追加（いずれも api_surface が落ちる）、facade `Tape` への `register_forward_hook` 追加・`pub mod hooks` 追加
+  （保留 doctest が落ちる）。
+
+### 18.5 検証と 0.10.0 非破壊
+
+- 利用例・挙動テスト: `crates/facade/tests/hooks.rs`（facade のみ import。15 件。backward の bit 一致・FIFO・解除・
+  `Err` 伝播・登録拒否・`reset`、hook 有無の勾配 bit 一致〈CPU 本番 ops〉、forward の ctx・`Err` 伝播・container／
+  `compat::Sequential::{forward, predict}` 経由・透過性）と doctest（`Tape::register_backward_hook`・`ForwardHooked`）。
+- `fandhe-ai =0.10.0` の公開 API は追加のみで非破壊（既存の型・メソッド・ガードの意味は変えていない）。
+  `Cargo.toml`・`Cargo.lock`・依存・`unsafe`・tolerance・`AutodiffError` の variant は不変。
+- 実機 parity の申し送りは発生しない（hook は数値経路を追加しない。§6・§14.7・§17.5）。
+
+### 18.6 本記録で行わなかったこと
+
+§10 のスコープ外項目、`TapeRef` への委譲、`HookHandle` への `Clone`／`Copy`、autodiff 組み込み層を直接包む経路、
+GPU 専用カーネル、`docs/spec/` の変更、リポジトリ設定の変更。親 #2584 のクローズ判断はユーザー側。
