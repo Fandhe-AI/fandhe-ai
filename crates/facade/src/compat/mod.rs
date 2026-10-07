@@ -67,7 +67,8 @@
 
 mod array;
 mod callbacks;
-// イシュー #2665: Functional API の内部実装。公開形は未承認のため `#[cfg(test)]` で隔離し、
+// イシュー #2665: Functional API の内部実装（#2667 で fit・evaluate〈`functional/train.rs`〉と
+// 保存・復元〈`model_io/functional_io.rs`〉を追加）。公開形は未承認のため `#[cfg(test)]` で隔離し、
 // `pub use` は足さない（詳細は `functional.rs` のモジュール doc と
 // `docs/facade-functional-api-decision.md`）。
 #[cfg(test)]

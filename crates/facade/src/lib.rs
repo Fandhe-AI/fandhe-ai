@@ -7725,11 +7725,12 @@ struct DatasetComposeHoldDoctestGuard;
 struct IterableBatchSamplerHoldDoctestGuard;
 
 /// Functional API（多入力・多出力グラフ。`FunctionalBuilder`・`FunctionalModel`・`Node`・
-/// `save_functional_model`・`load_functional_model`。イシュー #2665・親 #2663・ルート #2499 Phase 4）を
+/// `FunctionalVars`（学習用の `bind` 結果。#2667）・`save_functional_model`・`load_functional_model`。
+/// イシュー #2665・#2667・親 #2663・ルート #2499 Phase 4）を
 /// facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
 /// ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 3 個・関数 2 個・
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 4 個・関数 2 個・
 /// モジュール `functional` と、`compat::Sequential` 上のメソッド `apply`／`call` を持つプローブ用
 /// トレイトを置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出し（UFCS）の両方を行う。facade が
 /// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、`compat::Sequential` に同名の inherent
@@ -7747,7 +7748,7 @@ struct IterableBatchSamplerHoldDoctestGuard;
 /// functional_api_hold_doctest_globs_all_pub_modules`・
 /// `functional_api_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_functional_api_stays_internal`・
-/// `workspace_declares_functional_model_io_fn_names_nowhere`）との多層防御として働く。
+/// `workspace_declares_functional_model_io_fn_names_only_in_allowed_location`）との多層防御として働く。
 ///
 /// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
 /// 同時に正ガードへ置き換える）。
@@ -7772,6 +7773,7 @@ struct IterableBatchSamplerHoldDoctestGuard;
 ///     pub struct FunctionalBuilder;
 ///     pub struct FunctionalModel;
 ///     pub struct Node;
+///     pub struct FunctionalVars;
 ///     pub fn save_functional_model() {}
 ///     pub fn load_functional_model() {}
 ///     pub mod functional {
@@ -7796,7 +7798,7 @@ struct IterableBatchSamplerHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node) {}
+/// fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node, _3: FunctionalVars) {}
 ///
 /// fn __probe_free_fns() {
 ///     save_functional_model();

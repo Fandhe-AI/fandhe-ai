@@ -5,6 +5,7 @@
 - 段階: **段階 0（docs のみ）**。`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec/` は変更しない
 - #2665 追補: 内部実装を追加済み（§16 実装記録。上記「段階 0」は #2664 時点の記述で、§16 が #2665 での `crates/facade` 変更を記録する。承認状態は未承認のまま）
 - #2666 追補: 結合 4 演算を内部実装済み（§17 実装記録。`crates/autodiff` の `merge_ops` と `compat/functional.rs` の結合ノード。承認状態は未承認のまま）
+- #2667 追補: fit・evaluate・保存・復元を内部実装済み（§18 実装記録。`crates/facade` の `compat/functional/train.rs`・`compat/model_io/functional_io.rs`〈いずれも `#[cfg(test)]` 隔離の `pub(crate)`〉と、`training.rs`・`model_io.rs` の共有部品の抽出〈公開面不変〉。**§8 の manifest 追加キーのうち「入力数」を「入力ノード添字列」へ改めた**〈§18〉。承認状態は未承認のまま）
 - 状態: 本記録の推奨案は**全項目「未承認」**。承認依頼は #2677 の一括依頼に委ね、公開は承認後の #2679 で行う。本記録は承認を代行せず、承認済みとも主張しない
 
 ## 0. 結論
@@ -141,7 +142,7 @@
 |---|---|---|
 | #2666 | 結合演算 | 内部クレート `autodiff` の自由関数モジュール + PyTorch fixture |
 | #2665 | グラフ型・forward | `crates/facade/src/compat/` 配下の `pub(crate)` 型（`predict_batches` #2192 と同じ方式）+ 保留ガード |
-| #2667 | fit・保存 | 同上 + `model_io` 共有部品の再利用 |
+| #2667 | fit・保存 | `compat/functional/train.rs`（学習）と `compat/model_io/functional_io.rs`（保存・復元）。いずれも `#[cfg(test)]` 隔離の `pub(crate)`。`training.rs`・`model_io.rs` の共有部品を `compat` 内部へ可視化／抽出して再利用（§18） |
 | #2677 | 公開形の一括承認依頼 | §13 の承認事項を表にして依頼 |
 | #2679 | 承認後の公開 | 保留ガードの反転 |
 
@@ -164,6 +165,9 @@
 6. 第 1 段の対象外項目（§14）
 7. 結合ノードの入力は 2 件以上（Concatenate を含む。§17）
 8. ビルダーでの同一ノードの重複指定の拒否（§17）
+9. `compile` が `Optimizer::Lbfgs` を拒否し（保存・復元も拒否）、`fit` が `accumulate_steps != 1` を拒否する第 1 段の制限（§18。後から許可するのは非破壊・逆は破壊的）
+10. manifest の最上位キーを 13 個（既存 10 + `nodes`・`inputs`・`outputs`）とし、`inputs` を入力ノードの添字列とすること（§8 の「入力数」からの変更。§18）
+11. 学習用ハンドル（`bind` 相当の `FunctionalVars`）を推奨公開形に**含めない**こと（内部型のまま。後から公開は非破壊。§18）
 
 承認依頼は #2677。承認が得られるまで本記録は未承認のまま保持する。
 
@@ -260,3 +264,78 @@
 ### #2667 への申し送り
 
 保存形式には結合ノードの `op` 文字列 allowlist（`concatenate`／`add`／`multiply`／`average`）と `dim` パラメータの直列化が必要。結合ノードは層を持たないため、層範囲の「重複なし・隙間なし」規則に影響しない。`bind`／`compile`／`fit` では結合ノードはパラメータを持たない純関数ノードとして扱える。
+
+## 18. #2667 実装記録（Functional モデルの fit・evaluate・保存・復元。facade 非公開・保留ガード付き）
+
+**承認状態は §13 のとおり未承認のまま**。本節は内部実装の記録と推奨案であり承認記録ではない（承認依頼は #2677・公開は承認後の #2679。本イシューは #2677 へ書き込まず、承認を主張しない）。
+
+### 配置と可視性拡大（公開面は不変）
+
+| 場所 | 内容 |
+|---|---|
+| `crates/facade/src/compat/functional/train.rs`（新規） | `bind`・`trainable_parameters`・`apply_parameters`・`compile`・`is_compiled`・`fit`・`evaluate`、`FunctionalVars` の `forward`／`trainable_vars`／`trainable_grads`、n 入力 m 目標の private `GraphDataset`。`#[cfg(test)]` 隔離の `pub(crate)`（`functional.rs` の子モジュール） |
+| `crates/facade/src/compat/functional.rs` | 内部型 `FunctionalVars`（`bind` 結果）の宣言（保留ガードの許可位置）。forward のノード評価を共通評価器 `eval_graph` へ集約し推論と学習で演算列を共有。`to_local_key`（`to_global_key` の逆写像）・compile 状態の snapshot／restore 補助。結合ノードの重複検出を線形時間化（非信頼 manifest から最大 `MAX_ARRAY_LEN` 件で呼ばれるため） |
+| `crates/facade/src/compat/model_io/functional_io.rs`（新規） | `save_functional_model`／`load_functional_model`・manifest の描画・厳格パース・構造検証・往復検証。`model_io.rs` の子モジュール（親の private 部品を可視性拡大なしで使える） |
+| `crates/facade/src/compat/training.rs` | 可視性のみ拡大: `OptimizerState`（型・`new`・`lr`・`step`）・`AmpState`（型）・`Compiled` の 3 フィールド・`FitConfig` の 5 フィールドを `pub(super)`（= `compat` 内部）。getter は足さない（`pub fn` は公開面の追加になるため）。`Sequential::snapshot_compiled`／`restore_compiled` の本体を自由関数 `snapshot_of_compiled`／`compiled_from_snapshot` へ抽出（既存メソッドは薄い委譲）。`run_fit` 等の演算列は無変更 |
+| `crates/facade/src/compat/model_io.rs` | 共有部品の抽出のみ: `write_generation_with`（世代コミット書き込み。manifest の描画を引数化し `write_prepared_with` は薄いラッパー）・`collect_checked_state`（層ごとの保存可否検査と state／buffer の収集）・`read_checked_tensors`（no-follow で開く → 実長照合 → デコード → `optimizer.` 分離 → キー・shape 完全一致）・`parse_layers_and_keys`（layers／parameter_keys／buffer_keys の検証）。**定数（`MAX_*`・`FORMAT_*`）・エラー文言・検査順・描画文字列は変えない**。`Sequential` の manifest 文字列が不変であることを `sequential_manifest_text_is_byte_stable` で固定した |
+
+`compat/mod.rs` の `pub use` は変更していない。`#[cfg(test)]` を外すと `dead_code` になる点は §16 と同じ（`#[allow]` で黙らせない）。出荷側へ置いたのは「既存コードから抽出し `Sequential` 経路も呼ぶもの」だけで、Functional 専用の部品はすべて `#[cfg(test)]` モジュール内にある。
+
+### 本イシューで決めた細部（いずれも未承認の推奨）
+
+| 論点 | 決定 | 理由 |
+|---|---|---|
+| `fit` の署名 | `fit<T: FitTarget>(&mut self, xs: &[&Tensor<f32>], ys: &[&Tensor<T>], config: FitConfig) -> Result<History, AutodiffError>`。`History` は `loss`・`lr` のみ埋め `val_loss`・`val_metrics` は空 | §7 の推奨署名どおり。公開後の署名変更は破壊的なため最初から複数入力・複数出力を受ける |
+| 多出力の損失 | 各出力へ `T::loss_for` を適用し、出力の指定順に `Var::add` で左畳み込む。出力 1 件なら加算なし | §7。単一出力で `Sequential::fit` と bit 同一にするため |
+| `Optimizer::Lbfgs` | `compile` が `InvalidArgument`（保存・復元も `UnsupportedModel`） | closure 駆動の更新は `&mut` モデルへの trial 書き込みと失敗時復元の別経路が要る。後から許可は非破壊 |
+| `accumulate_steps` | `1` のみ受理（`0` と `> 1` は `InvalidArgument`）。`run_fit` は触らない | 第 1 段は最小。後から許可は非破壊 |
+| 第 1 段の対象外 | AMP・callbacks・validation・metrics・`train_step` フック・常駐経路は入口を設けない | §7 |
+| 引数検査 | 未 compile・入力／目標件数・`epochs == 0`・`accumulate_steps`・`add_module` のパラメータ持ち層・`batch_first=false` の MHA を、モード変更・データ構築より前に拒否。失敗後も compile 状態・モード・パラメータは不変（`compiled` は取り外して必ず書き戻す） | `Sequential::fit` と同じ fail-closed 契約 |
+| モード | `fit` は train、`evaluate` は eval で走り、呼び出し前の `training()` へ復元する。`training()` は導出値のためブロック間でモードが混在していた場合は一方へ揃う | §16 の導出値方針。ブロック側のモードを直接いじった場合の限界として明記 |
+| `apply_parameters` | 総数・各 shape を検査してから適用（不一致は何も変更しない）。適用中の失敗は適用済みブロックと失敗ブロックを巻き戻し、巻き戻しも失敗したら部分適用の可能性を明示 | `load_state_dict` と同じ契約 |
+| `bind` 相当の型 | 内部型 `FunctionalVars` を追加し保留ガードの型名集合へ加えた。**推奨公開形には含めない** | 名前を機械固定しつつ承認事項を増やしすぎない。後から公開は非破壊 |
+
+### §8 を改める点と manifest の形
+
+**§8 の「ほかに入力数・出力ノード列」のうち「入力数」を「入力ノード添字列」へ改める。** `build` は入力ノードを任意順で受けるため、件数だけでは `inputs` の順序（`forward`／`fit` の `xs` の順）を復元できない。最上位キーは 13 個（既存 10 + `nodes`・`inputs`・`outputs`）で `MAX_OBJECT_KEYS = 16` に収まる。
+
+```
+{"format":"fandhe-ai.compat.functional","format_version":1,"training":bool,"num_layers":N,
+ "layers":[{"index","kind","params"}...],              // 全ブロックを通した平坦な列（既存スキーマ）
+ "nodes":[{"index":i,"op":"input|block|concatenate|add|multiply|average",
+           "inputs":[..],"layer_start":s,"layer_len":l,"params":{}|{"dim":d}}...],
+ "inputs":[..],"outputs":[..],
+ "parameter_keys":[..],"buffer_keys":[..],"safetensors_file":"model.<32hex>.safetensors",
+ "safetensors_bytes":n,"compiled":null|{..}}
+```
+
+深さは root(0) → `nodes`(1) → 要素 object(2) → `inputs`／`params`(3) で `parameter_keys[].shape` と同じ（`MAX_JSON_DEPTH = 4`）。入力 300 件の結合ノードの往復テストで実コードに対し実証した。**上限定数は変更も新設もしない**（ノード数は `MAX_ARRAY_LEN`、総層数は `MAX_LAYERS`、サイズは `MAX_MANIFEST_BYTES` が抑える。超過は保存前の往復検証が `TooLarge` で拒否し `dir` に何も残さない）。
+
+- 検証順（復元）: manifest を厳格パース → 最上位 13 キー完全一致・`format`／`format_version` → `layers`／`num_layers`／`safetensors_file` パターン → **グラフの構造検証を safetensors を開く前に完了**（`nodes[].index` 連番・`op` allowlist〈未知は `UnsupportedModel`〉・`inputs[j] < index`〈前方参照禁止〉・op ごとの入力件数と `layer_len`・結合入力の重複なし・`layer_start` が累積値と一致・総和が `layers` 件数と一致・最上位 `inputs`／`outputs` の範囲と重複・全ノードが出力へ寄与）→ `parameter_keys`／`buffer_keys` を層構成から導いた期待と完全一致（旧形式の `buffer_keys: []` 許容は適用しない）→ `compiled`（`Lbfgs`・AMP は `UnsupportedModel`）→ safetensors を no-follow で開く → キー・shape の完全一致 → ブロックごとに `build_model`（ローカルキーへ写した部分 map）・strict な `load_state_dict` → `FunctionalBuilder` で再構築（`build` が到達性・未束縛入力を再検証）→ `set_training` → compile 状態の復元（construct-before-assign）。ブロック 0 個で `training = false` は `Manifest` エラー（導出値が `true` と一致しないため）。
+- 保存: プラットフォーム判定 → 各ブロックの保存可否検査（`add_module` 由来は `UnsupportedModel`・非有限 f32・層モード不一致）→ ブロック間のモード一致 → 通し番号キーへ写して合成し期待キーと完全一致 → compile 状態の snapshot とスロット整合 → サイズ上限 → **往復検証**（描画 → 同じ厳格パーサで読み戻し → nodes／inputs／outputs／specs／キー／compiled／training の一致）→ 世代コミット書き込み。ファイル I/O は既存 `fs_guard`・世代コミットを共有し、別経路を実装していない。
+- 形式の相互排他: Functional の dir を既存 `load_model` が、`Sequential` の dir を `load_functional_model` が、いずれも `ModelIoError::Manifest` で拒否する（最上位キー集合が異なる）。
+
+### PyTorch との意図した差分
+
+fixture の範囲（optimizer の定義・損失の reduction）では差分なし。本リポ側の追加拒否（`Lbfgs`・`accumulate_steps != 1`・独自層）は fixture 対象外で `fit_tests.rs` が固定する。
+
+### 保留ガード
+
+- `lib.rs::FunctionalApiHoldDoctestGuard` のプローブへ `FunctionalVars` を追加（型 4・自由関数 2・モジュール `functional`）。`api_surface.rs` の `FUNCTIONAL_API_TYPE_NAMES` を 4 件化し `FUNCTIONAL_API_HOLD_PROBE_BODY` を同文へ更新。
+- `workspace_declares_functional_model_io_fn_names_nowhere` を `workspace_declares_functional_model_io_fn_names_only_in_allowed_location`（`save_functional_model`／`load_functional_model` が `facade/src/compat/model_io/functional_io.rs` に各 1 件）へ置換・改名。`scan_functional_api_surface` に「素の `pub fn save_functional_model`／`load_functional_model`（修飾子付きを含む）」「`pub use` の経路にこの 2 名または `functional_io`」「`pub mod functional_io`」の検出と自己テストを追加。
+- 検出範囲は「走査が見るトークン列と doctest が名前解決で触れる位置」に限り、マクロ生成・別名経由までは保証しない。
+- 効くことの実証（作業ツリー上で一時変更し、実証後に元へ戻した）: `pub(crate) struct FunctionalVars` を `pub struct` にすると `facade_functional_api_stays_internal` が失敗／`pub(crate) fn save_functional_model` を `pub fn` にすると同テストが失敗／`lib.rs` へ `pub struct FunctionalVars;` を足すと doctest が E0659（`FunctionalVars` is ambiguous）で失敗。
+
+### 既存ガードとの衝突調査
+
+骨格追加後に反応した既存ガードは `workspace_declares_functional_model_io_fn_names_nowhere`（上記の置換）のみ。`state_dict`／`load_state_dict`／`save_model`／`load_model`／`accumulate_steps`／`fit_with_*` という名前の `fn` は新設していない。`FitConfig` のフィールドの `pub(super)` 化に反応するガードは無かった。
+
+### fixture・実機
+
+- PyTorch 2.14.0 実行値: `crates/facade/tests/fixtures/functional-fit-pytorch-reference/`（5 ケース: パラメータ勾配 2・fit 3〈SGD momentum・Adam・CrossEntropy〉。出自・sha256・再生成手順は同 README）。`fandhe_ai_backend_cpu::parity::assert_parity`（統一複合判定。tolerance 定数は不変）で照合。
+- 単一入力・単一ブロック・単一出力のグラフの `fit`／`evaluate` が同条件の `Sequential::fit`／`evaluate` と bit 一致する回帰（6 optimizer・`shuffle` true／false・端数バッチ・`drop_last`・CrossEntropy）を `fit_tests.rs` で固定した（§7 の要件）。
+- CUDA／Metal の実機 parity（`#[ignore]` 2 本）は未実測。`docs/perf/logs/functional-fit-2667/README.md` へ申し送り。
+
+### スコープ外（新規 Issue は未承認のため起票しない）
+
+`Lbfgs`・勾配累積・AMP・callbacks／validation／metrics・常駐経路・出力別 loss／`loss_weights`・重み共有・ONNX export・`bind` 相当の公開。承認依頼は #2677、公開と保留ガードの反転は #2679。

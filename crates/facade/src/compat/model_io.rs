@@ -79,6 +79,10 @@ use fandhe_ai_autodiff::AutodiffError;
 use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;
 
 mod compiled;
+// イシュー #2667: Functional モデルの保存・復元（公開形は未承認のため `#[cfg(test)]` で隔離。
+// `pub use` は足さない。詳細は `functional_io.rs` のモジュール doc）。
+#[cfg(test)]
+mod functional_io;
 
 use self::compiled::{
     CompiledMeta, OPTIMIZER_PREFIX, check_lbfgs_history, check_slot_shapes, parse_compiled,
@@ -1214,6 +1218,77 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
         .map(CompiledMeta::from_snapshot)
         .transpose()?;
     let specs = model.specs();
+    let CheckedState {
+        mut state,
+        expected,
+        expected_buffers,
+    } = collect_checked_state(model)?;
+    // optimizer 内部状態は `optimizer.` 接頭辞を付けて同じ safetensors へ合流させる
+    // （パラメータのキーは `{層番号}.{名前}` で衝突しない）。
+    if let Some(snap) = snapshot {
+        // load 側と同じスロット整合ガードを保存側でも通す。compile 後の `add_*` は compiled を
+        // 維持するため、パラメータ数が増えた状態を書き出すと load が Mismatch で拒否する
+        // ディレクトリができてしまう（「書き出したものは必ず load できる」契約の保持）。
+        check_slot_shapes(&snap.optimizer_state, &model.trainable_parameters())?;
+        // `Lbfgs` は `state.` 接頭辞のキーを持たず上の検査が効かないため、新しい `Lbfgs` へ
+        // 試験復元して同じ契約（構成のずれ・非有限値の拒否）を保存前に確認する（#2373）。
+        model
+            .check_lbfgs_restorable(&snap)
+            .map_err(|e| ModelIoError::Mismatch {
+                message: format!(
+                    "Lbfgs の状態を復元できない構成です（{})",
+                    clip(&e.to_string())
+                ),
+            })?;
+        for (key, tensor) in snap.optimizer_state {
+            if state
+                .insert(format!("{OPTIMIZER_PREFIX}{key}"), tensor)
+                .is_some()
+            {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: "optimizer 状態のキーがパラメータのキーと衝突しました".into(),
+                });
+            }
+        }
+    }
+    let safetensors = save_safetensors_f32_to_bytes(&state, None)
+        .map_err(|e| ModelIoError::Safetensors(e.to_string()))?;
+    if safetensors.len() as u64 > MAX_MODEL_FILE_BYTES {
+        return Err(ModelIoError::TooLarge {
+            what: "model safetensors",
+            limit: MAX_MODEL_FILE_BYTES,
+        });
+    }
+
+    let prepared = PreparedSave {
+        training: model.training(),
+        specs: specs.to_vec(),
+        parameter_keys: expected,
+        compiled,
+        buffer_keys: expected_buffers,
+        safetensors,
+    };
+    verify_round_trip(&prepared)?;
+    Ok(prepared)
+}
+
+/// 層ごとの保存可否検査を通した、パラメータ・buffer の合成 state と期待キー列
+/// （[`prepare_save`] と Functional モデルの保存〈`functional_io`。#2667〉が共有する）。
+struct CheckedState {
+    /// パラメータ（`{i}.{name}`）と BatchNorm の running stats（`{i}.running_mean`／`.running_var`）。
+    state: std::collections::HashMap<String, Tensor<f32>>,
+    expected: Vec<(String, Vec<usize>)>,
+    expected_buffers: Vec<(String, Vec<usize>)>,
+}
+
+/// `model`（`Sequential`）の層構成・状態を保存前に検査し、書き出す state を集める。
+///
+/// 拒否（`UnsupportedModel`／`TooLarge`）: 層構成の記録と実層数の不一致・層数が `MAX_LAYERS` 超・
+/// 未対応層・非有限 f32 引数・保存できない upsample／global_pool／embedding_bag の mode・
+/// 層モードがモデル全体と食い違う dropout／BatchNorm・`state_dict` が期待キー／shape と不一致・
+/// BatchNorm の running stats が不整合。`dir` には触れない。
+fn collect_checked_state(model: &Sequential) -> Result<CheckedState, ModelIoError> {
+    let specs = model.specs();
     if specs.len() != model.layers().len() {
         return Err(ModelIoError::UnsupportedModel {
             reason: "層構成の記録と実際の層数が一致しません".into(),
@@ -1310,53 +1385,11 @@ fn prepare_save(model: &Sequential) -> Result<PreparedSave, ModelIoError> {
             reason: "BatchNorm の running stats の shape が層構成と一致しません".into(),
         });
     }
-    // optimizer 内部状態は `optimizer.` 接頭辞を付けて同じ safetensors へ合流させる
-    // （パラメータのキーは `{層番号}.{名前}` で衝突しない）。
-    if let Some(snap) = snapshot {
-        // load 側と同じスロット整合ガードを保存側でも通す。compile 後の `add_*` は compiled を
-        // 維持するため、パラメータ数が増えた状態を書き出すと load が Mismatch で拒否する
-        // ディレクトリができてしまう（「書き出したものは必ず load できる」契約の保持）。
-        check_slot_shapes(&snap.optimizer_state, &model.trainable_parameters())?;
-        // `Lbfgs` は `state.` 接頭辞のキーを持たず上の検査が効かないため、新しい `Lbfgs` へ
-        // 試験復元して同じ契約（構成のずれ・非有限値の拒否）を保存前に確認する（#2373）。
-        model
-            .check_lbfgs_restorable(&snap)
-            .map_err(|e| ModelIoError::Mismatch {
-                message: format!(
-                    "Lbfgs の状態を復元できない構成です（{})",
-                    clip(&e.to_string())
-                ),
-            })?;
-        for (key, tensor) in snap.optimizer_state {
-            if state
-                .insert(format!("{OPTIMIZER_PREFIX}{key}"), tensor)
-                .is_some()
-            {
-                return Err(ModelIoError::UnsupportedModel {
-                    reason: "optimizer 状態のキーがパラメータのキーと衝突しました".into(),
-                });
-            }
-        }
-    }
-    let safetensors = save_safetensors_f32_to_bytes(&state, None)
-        .map_err(|e| ModelIoError::Safetensors(e.to_string()))?;
-    if safetensors.len() as u64 > MAX_MODEL_FILE_BYTES {
-        return Err(ModelIoError::TooLarge {
-            what: "model safetensors",
-            limit: MAX_MODEL_FILE_BYTES,
-        });
-    }
-
-    let prepared = PreparedSave {
-        training: model.training(),
-        specs: specs.to_vec(),
-        parameter_keys: expected,
-        compiled,
-        buffer_keys: expected_buffers,
-        safetensors,
-    };
-    verify_round_trip(&prepared)?;
-    Ok(prepared)
+    Ok(CheckedState {
+        state,
+        expected,
+        expected_buffers,
+    })
 }
 
 /// 層の状態が「構成だけで復元できる」ことを確認する（fail-closed。REQ-7 の無言 skip 禁止）。
@@ -1507,10 +1540,30 @@ fn write_prepared(dir: &Path, p: &PreparedSave) -> Result<(), ModelIoError> {
 /// 単体テスト（`model_io/fs_threat_tests.rs`）が事前配置の衝突を `save_model` 相当の
 /// 経路全体へ注入できるようにする（決定記録 §6・§12.3 手順 1〜2。イシュー #2376）。
 /// 生成器は本番では [`generation_id`]・[`tmp_manifest_name`] を渡す。
+/// 実体は manifest 形式に依らない [`write_generation_with`]（Functional モデルの保存〈#2667〉と共有）。
 #[cfg(unix)]
 fn write_prepared_with(
     dir: &Path,
     p: &PreparedSave,
+    next_gen: impl FnMut() -> String,
+    next_tmp: impl FnMut() -> String,
+) -> Result<(), ModelIoError> {
+    write_generation_with(
+        dir,
+        &p.safetensors,
+        |file, bytes| render_manifest(p, file, bytes),
+        next_gen,
+        next_tmp,
+    )
+}
+
+/// 世代コミット方式の書き込み本体（manifest の描画だけを `render` へ委ねる）。`render` には
+/// 確定した safetensors のファイル名とバイト数を渡す。手順は決定記録 §12.3 のとおり。
+#[cfg(unix)]
+fn write_generation_with(
+    dir: &Path,
+    safetensors: &[u8],
+    render: impl FnOnce(&str, u64) -> String,
     mut next_gen: impl FnMut() -> String,
     mut next_tmp: impl FnMut() -> String,
 ) -> Result<(), ModelIoError> {
@@ -1525,12 +1578,10 @@ fn write_prepared_with(
         || format!("model.{}.safetensors", next_gen()),
         MAX_TMP_NAME_ATTEMPTS,
     )?;
-    st_file
-        .write_all(&p.safetensors)
-        .map_err(ModelIoError::Io)?;
+    st_file.write_all(safetensors).map_err(ModelIoError::Io)?;
 
     // 手順 2〜3: manifest は一時ファイルへ書いて rename する（唯一のコミット点）。
-    let manifest = render_manifest(p, &st_name, p.safetensors.len() as u64);
+    let manifest = render(&st_name, safetensors.len() as u64);
     let (mut tmp_file, tmp_name) =
         create_new_with_retry(dir, &mut next_tmp, MAX_TMP_NAME_ATTEMPTS)?;
     let tmp_path = dir.join(&tmp_name);
@@ -1653,62 +1704,18 @@ fn load_from_dir_with_limits(
         .map_err(map_leaf_error("manifest.json"))?;
     let manifest = parse_manifest(&manifest_bytes)?;
 
-    // 上限判定は fstat 実長と固定上限だけで行い（open_leaf_checked）、その後で非信頼値
-    // `safetensors_bytes` との一致だけを確認する（決定記録 §13.2 手順 4）。
-    let opened = open_leaf_checked(&dir.join(&manifest.safetensors_file), max_model)
-        .map_err(map_leaf_error("model safetensors"))?;
-    if opened.len() != manifest.safetensors_bytes {
-        return Err(ModelIoError::Mismatch {
-            message: format!(
-                "safetensors の実バイト数 {} が manifest の記載 {} と一致しません",
-                opened.len(),
-                manifest.safetensors_bytes
-            ),
-        });
-    }
-    let bytes = opened
-        .read_exact_len()
-        .map_err(map_leaf_error("model safetensors"))?;
-    let mut tensors = load_safetensors_f32_from_bytes(&bytes)
-        .map_err(|e| ModelIoError::Safetensors(e.to_string()))?;
-    drop(bytes);
-
-    // optimizer 状態（`optimizer.` 接頭辞）を取り分け、manifest の `optimizer_state_keys` と
-    // 完全一致することを確認する。`compiled == null` なのに存在する場合も拒否する
-    // （無言 skip をしない。REQ-7）。
-    let (optimizer_full_keys, optimizer_state) = split_optimizer_tensors(&mut tensors);
-    let expected_optimizer_keys: &[String] = manifest
-        .compiled
-        .as_ref()
-        .map_or(&[], |c| c.state_keys.as_slice());
-    if optimizer_full_keys != expected_optimizer_keys {
-        return Err(ModelIoError::Mismatch {
-            message: "safetensors の optimizer 状態のキー集合が manifest の optimizer_state_keys と一致しません"
-                .into(),
-        });
-    }
-
-    // `Lbfgs` の履歴件数は実キー数と照合する（`history_len` を確保量の根拠にしない。#2373）。
-    if let Some(meta) = manifest.compiled.as_ref() {
-        check_lbfgs_history(meta, &optimizer_state)?;
-    }
-
-    // キー集合と shape の完全一致（無言 skip をしない。REQ-7）。
-    let consistent = tensors.len() == manifest.parameter_keys.len() + manifest.buffer_keys.len()
-        && manifest
-            .parameter_keys
-            .iter()
-            .chain(&manifest.buffer_keys)
-            .all(|(key, shape)| {
-                tensors
-                    .get(key)
-                    .is_some_and(|t| t.shape() == shape.as_slice())
-            });
-    if !consistent {
-        return Err(ModelIoError::Mismatch {
-            message: "safetensors のキー集合または shape が manifest と一致しません".into(),
-        });
-    }
+    let LoadedTensors {
+        mut tensors,
+        optimizer_state,
+    } = read_checked_tensors(
+        dir,
+        max_model,
+        &manifest.safetensors_file,
+        manifest.safetensors_bytes,
+        &manifest.parameter_keys,
+        &manifest.buffer_keys,
+        manifest.compiled.as_ref(),
+    )?;
 
     // ここまでで Linear の in／out は実テンソルの shape と一致済み（非信頼な整数だけで
     // 確保量を決めない）。層を積み、値を bit のまま設定する。
@@ -1749,6 +1756,86 @@ fn load_from_dir_with_limits(
             .map_err(ModelIoError::Autodiff)?;
     }
     Ok(model)
+}
+
+/// 読み込んだ safetensors のテンソル集合（モデルのパラメータ・buffer と、取り分けた optimizer 状態）。
+struct LoadedTensors {
+    /// パラメータと buffer（`optimizer.` 接頭辞のキーは取り除き済み）。
+    tensors: std::collections::HashMap<String, Tensor<f32>>,
+    /// optimizer 状態（接頭辞除去済みのキー）。
+    optimizer_state: std::collections::HashMap<String, Tensor<f32>>,
+}
+
+/// manifest が指す safetensors を no-follow で開いて読み、optimizer 状態を取り分け、キー集合と
+/// shape を manifest と完全一致で照合する（[`load_from_dir_with_limits`] と Functional モデルの復元
+/// 〈`functional_io`。#2667〉が共有する）。`safetensors_bytes`・各キー列は非信頼値で、上限判定は
+/// fstat 実長と固定上限だけで行う。
+fn read_checked_tensors(
+    dir: &Path,
+    max_model: u64,
+    safetensors_file: &str,
+    safetensors_bytes: u64,
+    parameter_keys: &[(String, Vec<usize>)],
+    buffer_keys: &[(String, Vec<usize>)],
+    compiled: Option<&CompiledMeta>,
+) -> Result<LoadedTensors, ModelIoError> {
+    // 上限判定は fstat 実長と固定上限だけで行い（open_leaf_checked）、その後で非信頼値
+    // `safetensors_bytes` との一致だけを確認する（決定記録 §13.2 手順 4）。
+    let opened = open_leaf_checked(&dir.join(safetensors_file), max_model)
+        .map_err(map_leaf_error("model safetensors"))?;
+    if opened.len() != safetensors_bytes {
+        return Err(ModelIoError::Mismatch {
+            message: format!(
+                "safetensors の実バイト数 {} が manifest の記載 {} と一致しません",
+                opened.len(),
+                safetensors_bytes
+            ),
+        });
+    }
+    let bytes = opened
+        .read_exact_len()
+        .map_err(map_leaf_error("model safetensors"))?;
+    let mut tensors = load_safetensors_f32_from_bytes(&bytes)
+        .map_err(|e| ModelIoError::Safetensors(e.to_string()))?;
+    drop(bytes);
+
+    // optimizer 状態（`optimizer.` 接頭辞）を取り分け、manifest の `optimizer_state_keys` と
+    // 完全一致することを確認する。`compiled == null` なのに存在する場合も拒否する
+    // （無言 skip をしない。REQ-7）。
+    let (optimizer_full_keys, optimizer_state) = split_optimizer_tensors(&mut tensors);
+    let expected_optimizer_keys: &[String] = compiled.map_or(&[], |c| c.state_keys.as_slice());
+    if optimizer_full_keys != expected_optimizer_keys {
+        return Err(ModelIoError::Mismatch {
+            message: "safetensors の optimizer 状態のキー集合が manifest の optimizer_state_keys と一致しません"
+                .into(),
+        });
+    }
+
+    // `Lbfgs` の履歴件数は実キー数と照合する（`history_len` を確保量の根拠にしない。#2373）。
+    if let Some(meta) = compiled {
+        check_lbfgs_history(meta, &optimizer_state)?;
+    }
+
+    // キー集合と shape の完全一致（無言 skip をしない。REQ-7）。
+    let consistent = tensors.len() == parameter_keys.len() + buffer_keys.len()
+        && parameter_keys
+            .iter()
+            .chain(buffer_keys)
+            .all(|(key, shape)| {
+                tensors
+                    .get(key)
+                    .is_some_and(|t| t.shape() == shape.as_slice())
+            });
+    if !consistent {
+        return Err(ModelIoError::Mismatch {
+            message: "safetensors のキー集合または shape が manifest と一致しません".into(),
+        });
+    }
+
+    Ok(LoadedTensors {
+        tensors,
+        optimizer_state,
+    })
 }
 
 /// 層構成から未学習の `Sequential` を構築する。保存側と同じ `add_*` を呼ぶため、
@@ -3101,6 +3188,74 @@ fn parse_key_shapes(arr: &[Json], ctx: &str) -> Result<Vec<(String, Vec<usize>)>
     Ok(keys)
 }
 
+/// [`parse_layers_and_keys`] の検証済み結果。
+struct ParsedLayers {
+    specs: Vec<LayerSpec>,
+    parameter_keys: Vec<(String, Vec<usize>)>,
+    buffer_keys: Vec<(String, Vec<usize>)>,
+}
+
+/// `layers`・`parameter_keys`・`buffer_keys` の各 JSON 配列を厳格に検証し、層構成と期待キー列に
+/// 完全一致することを確認する（[`parse_manifest`] と Functional モデルの manifest 検証
+/// 〈`functional_io`。#2667〉が共有する）。配列長の上限はパーサが保証済みで、期待キー数は
+/// checked 算術で先に照合する。`allow_legacy_empty_buffers` は旧形式（`format_version` 1）の
+/// `buffer_keys: []` を受理するかどうか（Functional 形式は常に `false`）。
+fn parse_layers_and_keys(
+    layers: &[Json],
+    parameter_keys: &[Json],
+    buffer_keys: &[Json],
+    allow_legacy_empty_buffers: bool,
+) -> Result<ParsedLayers, ModelIoError> {
+    let mut specs = Vec::with_capacity(layers.len());
+    for (i, layer) in layers.iter().enumerate() {
+        let lf = exact_fields(layer, "layers[]", &["index", "kind", "params"])?;
+        if as_usize(lf[0], "layers[].index")? != i {
+            return Err(manifest_error("layers[].index が連番ではありません"));
+        }
+        specs.push(spec_from_kind(as_str(lf[1], "layers[].kind")?, lf[2])?);
+    }
+
+    let keys = parse_key_shapes(parameter_keys, "parameter_keys")?;
+    let buffer_keys = parse_key_shapes(buffer_keys, "buffer_keys")?;
+    // 期待キー列を作る前に、層構成から導いた件数（checked 算術）が実キー数と一致することを
+    // 確認する。`keys.len()` はパーサが `MAX_ARRAY_LEN` 以下を保証済みのため、改竄された
+    // `num_*_layers` が巨大でも `expected_parameter_keys` が巨大な `Vec` を作らない
+    // （イシュー #2533。上限定数は不変）。
+    let mut expected_count: Option<usize> = Some(0);
+    for spec in &specs {
+        expected_count = expected_count
+            .zip(layer_parameter_count(spec))
+            .and_then(|(acc, n)| acc.checked_add(n));
+    }
+    if expected_count != Some(keys.len()) {
+        return Err(ModelIoError::Mismatch {
+            message: "parameter_keys が層構成から導いた期待キー・shape と一致しません".into(),
+        });
+    }
+    if keys != expected_parameter_keys(&specs) {
+        return Err(ModelIoError::Mismatch {
+            message: "parameter_keys が層構成から導いた期待キー・shape と一致しません".into(),
+        });
+    }
+
+    // 旧形式（`format_version` 1〈`allow_legacy_empty_buffers`〉。BN があっても `buffer_keys: []` で保存された既存データ）に
+    // 限り空配列を受理し、load 側で初期 running stats を補う（公開済み保存データの後方互換）。
+    // 現行版（2）は期待 buffer の欠落を旧形式と区別できないため完全一致のみ受理する。
+    let expected_buffers = expected_buffer_keys(&specs);
+    let legacy_empty = allow_legacy_empty_buffers && buffer_keys.is_empty();
+    if !legacy_empty && buffer_keys != expected_buffers {
+        return Err(ModelIoError::Mismatch {
+            message: "buffer_keys が層構成から導いた期待キー・shape と一致しません".into(),
+        });
+    }
+
+    Ok(ParsedLayers {
+        specs,
+        parameter_keys: keys,
+        buffer_keys,
+    })
+}
+
 /// manifest のバイト列を厳格に検証して [`ParsedManifest`] にする
 /// （決定記録 §4・§13.5）。
 fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
@@ -3163,48 +3318,16 @@ fn parse_manifest(bytes: &[u8]) -> Result<ParsedManifest, ModelIoError> {
         ));
     }
 
-    let mut specs = Vec::with_capacity(layers.len());
-    for (i, layer) in layers.iter().enumerate() {
-        let lf = exact_fields(layer, "layers[]", &["index", "kind", "params"])?;
-        if as_usize(lf[0], "layers[].index")? != i {
-            return Err(manifest_error("layers[].index が連番ではありません"));
-        }
-        specs.push(spec_from_kind(as_str(lf[1], "layers[].kind")?, lf[2])?);
-    }
-
-    let keys = parse_key_shapes(parameter_keys, "parameter_keys")?;
-    let buffer_keys = parse_key_shapes(buffer_keys, "buffer_keys")?;
-    // 期待キー列を作る前に、層構成から導いた件数（checked 算術）が実キー数と一致することを
-    // 確認する。`keys.len()` はパーサが `MAX_ARRAY_LEN` 以下を保証済みのため、改竄された
-    // `num_*_layers` が巨大でも `expected_parameter_keys` が巨大な `Vec` を作らない
-    // （イシュー #2533。上限定数は不変）。
-    let mut expected_count: Option<usize> = Some(0);
-    for spec in &specs {
-        expected_count = expected_count
-            .zip(layer_parameter_count(spec))
-            .and_then(|(acc, n)| acc.checked_add(n));
-    }
-    if expected_count != Some(keys.len()) {
-        return Err(ModelIoError::Mismatch {
-            message: "parameter_keys が層構成から導いた期待キー・shape と一致しません".into(),
-        });
-    }
-    if keys != expected_parameter_keys(&specs) {
-        return Err(ModelIoError::Mismatch {
-            message: "parameter_keys が層構成から導いた期待キー・shape と一致しません".into(),
-        });
-    }
-
-    // 旧形式（`format_version` 1。BN があっても `buffer_keys: []` で保存された既存データ）に
-    // 限り空配列を受理し、load 側で初期 running stats を補う（公開済み保存データの後方互換）。
-    // 現行版（2）は期待 buffer の欠落を旧形式と区別できないため完全一致のみ受理する。
-    let expected_buffers = expected_buffer_keys(&specs);
-    let legacy_empty = format_version == LEGACY_FORMAT_VERSION && buffer_keys.is_empty();
-    if !legacy_empty && buffer_keys != expected_buffers {
-        return Err(ModelIoError::Mismatch {
-            message: "buffer_keys が層構成から導いた期待キー・shape と一致しません".into(),
-        });
-    }
+    let ParsedLayers {
+        specs,
+        parameter_keys: keys,
+        buffer_keys,
+    } = parse_layers_and_keys(
+        layers,
+        parameter_keys,
+        buffer_keys,
+        format_version == LEGACY_FORMAT_VERSION,
+    )?;
 
     let compiled = parse_compiled(f[9])?;
 
@@ -3397,6 +3520,27 @@ mod tests {
                 "{bad} は拒否されるはず"
             );
         }
+    }
+
+    /// 保存する manifest の文字列が共有部品の抽出（#2667）の前後で変わらないことの固定
+    /// （キー順・描画文字列が既存ファイルとの互換の一部であるため。期待文字列は変更しない）。
+    #[test]
+    fn sequential_manifest_text_is_byte_stable() {
+        let model = Sequential::new()
+            .add_linear(2, 3, 0)
+            .expect("linear")
+            .add_relu();
+        let prepared = prepare_save(&model).expect("prepare");
+        let text = render_manifest(
+            &prepared,
+            "model.00000000000000000000000000000000.safetensors",
+            prepared.safetensors.len() as u64,
+        );
+        let expected = format!(
+            "{{\"format\":\"fandhe-ai.compat.sequential\",\"format_version\":2,\"training\":true,\"num_layers\":2,\"layers\":[{{\"index\":0,\"kind\":\"linear\",\"params\":{{\"in_features\":2,\"out_features\":3}}}},{{\"index\":1,\"kind\":\"relu\",\"params\":{{}}}}],\"parameter_keys\":[{{\"key\":\"0.weight\",\"shape\":[2,3]}},{{\"key\":\"0.bias\",\"shape\":[3]}}],\"buffer_keys\":[],\"safetensors_file\":\"model.00000000000000000000000000000000.safetensors\",\"safetensors_bytes\":{},\"compiled\":null}}",
+            prepared.safetensors.len()
+        );
+        assert_eq!(text, expected);
     }
 
     #[test]
