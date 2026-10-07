@@ -6914,32 +6914,34 @@ struct MarginFocalLossOpsHoldDoctestGuard;
 
 /// Functional API（多入力・多出力グラフ。`FunctionalBuilder`・`FunctionalModel`・`Node`・
 /// `FunctionalVars`（学習用の `bind` 結果。#2667）・`save_functional_model`・`load_functional_model`。
-/// イシュー #2665・#2667・親 #2663・ルート #2499 Phase 4）を
-/// facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
-/// ブロック方式）。
+/// イシュー #2665・#2667・親 #2663・ルート #2499 Phase 4）の保留ガード
+/// （`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 4 個・関数 2 個・
-/// モジュール `functional` と、`compat::Sequential` 上のメソッド `apply`／`call` を持つプローブ用
-/// トレイトを置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出し（UFCS）の両方を行う。facade が
-/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、`compat::Sequential` に同名の inherent
-/// メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せず
-/// コンパイルが失敗する。
+/// イシュー #2679 で承認形（`fandhe_ai::compat` への `FunctionalBuilder`・`FunctionalModel`・`Node`・
+/// `save_functional_model`・`load_functional_model` の公開。`docs/facade-functional-api-decision.md` §10・§13・
+/// §16〜§18。承認はルート #2499 のコメント）を公開したため、これら 5 名の衝突プローブは削除した。残すのは
+/// **未承認の経路**だけである: 学習用の束縛結果型 `FunctionalVars`（§13 項 11 で非公開と承認）・モジュール
+/// `functional` の公開・`compat::Sequential` 上のメソッド `apply`／`call`（`Sequential` を Functional ノードとして
+/// 呼ぶ形は承認されていない）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 `FunctionalVars`・モジュール
+/// `functional` と、`compat::Sequential` 上のメソッド `apply`／`call` を持つプローブ用トレイトを置き、
+/// 修飾なしのモジュール参照と修飾付きメソッド呼び出し（UFCS）の両方を行う。facade が同名のモジュール・型を
+/// glob 可能な位置へ公開するか、`compat::Sequential` に同名の inherent メソッドを公開すると、名前解決の
+/// 曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
 ///
 /// 検出範囲は本プローブが名前解決で触れる名前と、ソース走査が見るトークン列に限る（マクロ生成や
 /// 別名経由の公開までは保証しない）。`Sequential` の inherent メソッド名は `apply`／`call` の 2 つに
 /// 限った契約で、将来の正当な追加（PyTorch `Module.apply` 相当等）と衝突した場合は本ガードを意識的に
-/// 更新すること。実装は facade 内部の `compat/functional.rs`（`#[cfg(test)]` 限定の `pub(crate)`）に
-/// あり、保留対象は facade 公開面のみ。公開形は未承認（承認依頼は #2677・公開自体は承認後の #2679。
-/// 推奨案は `docs/facade-functional-api-decision.md` §10。同記録は推奨案の記録であり承認記録ではない）。
+/// 更新すること。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// functional_api_hold_doctest_globs_all_pub_modules`・
 /// `functional_api_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_functional_api_stays_internal`・
+/// `facade_exposes_functional_api_only_in_approved_shape`・
 /// `workspace_declares_functional_model_io_fn_names_only_in_allowed_location`）との多層防御として働く。
 ///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
-/// 同時に正ガードへ置き換える）。
+/// 未承認経路が承認される日が来たら、本構造体・本 doctest 自体を削除する。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -6959,12 +6961,7 @@ struct MarginFocalLossOpsHoldDoctestGuard;
 /// use fandhe_ai::model::*;
 ///
 /// mod __fandhe_functional_api_hold_probe {
-///     pub struct FunctionalBuilder;
-///     pub struct FunctionalModel;
-///     pub struct Node;
 ///     pub struct FunctionalVars;
-///     pub fn save_functional_model() {}
-///     pub fn load_functional_model() {}
 ///     pub mod functional {
 ///         pub fn __mark() {}
 ///     }
@@ -6987,11 +6984,9 @@ struct MarginFocalLossOpsHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node, _3: FunctionalVars) {}
+/// fn __probe_types(_0: FunctionalVars) {}
 ///
-/// fn __probe_free_fns() {
-///     save_functional_model();
-///     load_functional_model();
+/// fn __probe_module() {
 ///     functional::__mark();
 /// }
 ///
@@ -7018,14 +7013,15 @@ struct FunctionalApiHoldDoctestGuard;
 /// エラーコードに依存せずコンパイルが失敗する。
 ///
 /// **検出範囲の限定**: 列挙した名前と型に限る。`add` は既存の承認済み公開 API（`Var::add`）と
-/// 同名のため対象外（結合の公開形は `FunctionalBuilder::add` として #2679 で型と同時に公開する
-/// 想定）。マクロ生成・別名経由の公開までは保証しない。
+/// 同名のため対象外（結合の公開形は `FunctionalBuilder::add` として #2679 で型と同時に公開した）。
+/// マクロ生成・別名経由の公開までは保証しない。
 ///
 /// 実装は内部クレートと facade 内部に閉じている（`fandhe_ai_autodiff::merge_ops`・
-/// `compat/functional.rs` の `#[cfg(test)]` 限定 `pub(crate)`。新規 `Op`・`BackendOps`
-/// メソッドはない）。保留対象は facade 公開面のみで、公開形は未承認（承認依頼は #2677・公開自体は
-/// 承認後の #2679。推奨案は `docs/facade-functional-api-decision.md` §17。同記録は推奨案の
-/// 記録であり承認記録ではない）。
+/// `compat/functional.rs`。新規 `Op`・`BackendOps` メソッドはない）。**#2679 で承認形
+/// （`FunctionalBuilder::{concatenate, add, multiply, average}` を型と同時に公開。`docs/facade-functional-api-decision.md`
+/// §17。承認はルート #2499 のコメント）を公開した。本ガードが固定するのは、承認形に含まれない経路**
+/// （`merge_ops` モジュール・自由関数の公開、`Var`／`Tape`／`Tensor<f32>` への結合メソッド、
+/// `Sequential::add_concatenate` 等）の締め出しである。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// merge_ops_hold_doctest_globs_all_pub_modules`・

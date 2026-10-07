@@ -79,10 +79,10 @@ use fandhe_ai_autodiff::AutodiffError;
 use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;
 
 mod compiled;
-// イシュー #2667: Functional モデルの保存・復元（公開形は未承認のため `#[cfg(test)]` で隔離。
-// `pub use` は足さない。詳細は `functional_io.rs` のモジュール doc）。
-#[cfg(test)]
-mod functional_io;
+// イシュー #2667 実装・#2679 公開: Functional モデルの保存・復元（`functional_io.rs`）。
+// 入口 2 本は `compat/mod.rs` が `pub use model_io::functional_io::{..}` で公開する（承認形は `docs/facade-functional-api-decision.md`
+// §10・§16〜§18）。モジュール自体は非公開のまま。
+pub(super) mod functional_io;
 
 use self::compiled::{
     CompiledMeta, OPTIMIZER_PREFIX, check_lbfgs_history, check_slot_shapes, parse_compiled,

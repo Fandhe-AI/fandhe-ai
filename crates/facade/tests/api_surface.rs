@@ -16470,8 +16470,8 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
         // #2395: facade 独自 `nn::Module` の defaulted メソッド（承認済み）。
         ("facade/src/nn/module.rs::state_dict", 1usize),
         ("facade/src/nn/module.rs::load_state_dict", 1usize),
-        // #2665: Functional API の内部実装（`#[cfg(test)]` 限定の `pub(crate)`。公開面ではなく
-        // 保留ガード `FunctionalApiHoldDoctestGuard` で非公開を固定。所在の登録であり緩和ではない）。
+        // #2665 実装・#2679 公開: Functional API（`FunctionalModel` の `state_dict`／`load_state_dict`。
+        // 公開面は `facade_exposes_functional_api_only_in_approved_shape` が固定。所在の登録であり緩和ではない）。
         ("facade/src/compat/functional.rs::state_dict", 1usize),
         ("facade/src/compat/functional.rs::load_state_dict", 1usize),
         ("autodiff/src/nn/optim/state_dict.rs::state_dict", 1usize),
@@ -28689,13 +28689,16 @@ fn workspace_declares_packed_sequence_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// ActivationScalarOpsHoldDoctestGuard（イシュー #2649・親 #2648）:
+// ActivationScalarOpsHoldDoctestGuard（イシュー #2649・親 #2648。`add_*` の公開は #2679）:
 // `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::activation_scalar_ops`・`nn::activation` の層 5 型・
-// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）に閉じ、facade 公開形
-// （`Var` の委譲メソッド・`compat::Sequential::add_*`）は未承認（承認依頼は #2677。公開は承認後の
-// #2678・#2679）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、
-// doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）に閉じる。`compat::Sequential::add_*` 5 本は #2679 で
+// 承認形（`docs/autodiff-activation-scalar-ops-decision.md` §7。承認はルート #2499 のコメント）として公開した
+// ため、`add_*` のプローブ・否定走査は正ガード（`compat_sequential_phase4_activation_layers_add_methods_*`・
+// 宣言場所インベントリ）へ反転し、本ガードは**未承認の経路**（`Var` の委譲メソッド〈#2678 が担当〉・
+// モジュール／層型の公開）だけを固定する。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／
+// `pub mod`／`fn` の宣言）と、doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは
+// 保証しない。
 // =====================================================================
 
 /// `ActivationScalarOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト
@@ -29102,12 +29105,13 @@ fn workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations()
 }
 
 // =====================================================================
-// SoftminThresholdOpsHoldDoctestGuard（イシュー #2650・親 #2648・Phase 親 #2625・ルート #2499 Phase 4）:
-// `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::softmin_threshold_ops`・`fandhe_ai_autodiff::nn::softmin_threshold`）に閉じ、facade 公開形
-// （推奨は `Var` の 1 行委譲メソッド 4 本と `compat::Sequential::add_*` 4 本）は未承認（承認依頼は #2677。
-// 公開は承認後の #2678・#2679）。
-// 検出はトークン完全一致のみで行い、`threshold_mode` など部分一致する別トークンは違反としない
+// SoftminThresholdOpsHoldDoctestGuard（イシュー #2650・親 #2648・Phase 親 #2625・ルート #2499 Phase 4。
+// `add_*` の公開は #2679）: `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は
+// 内部クレート（`fandhe_ai_autodiff::softmin_threshold_ops`・`fandhe_ai_autodiff::nn::softmin_threshold`）に閉じる。
+// `compat::Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu` は #2679 で承認形
+// （`docs/autodiff-softmin-threshold-ops-decision.md` §7）として公開したため、`add_*` のプローブ・否定走査は
+// 正ガードへ反転し、本ガードは**未承認の経路**（`Var` の委譲メソッド〈#2678 が担当〉・モジュール／層型の公開）だけを
+// 固定する。検出はトークン完全一致のみで行い、`threshold_mode` など部分一致する別トークンは違反としない
 // （自己テストで固定）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、
 // doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
 // =====================================================================
@@ -31612,13 +31616,14 @@ fn packed_sequence_usage_doctests_are_present_and_compiled() {
 }
 
 // =====================================================================
-// FunctionalApiHoldDoctestGuard（イシュー #2665・親 #2663・ルート #2499 Phase 4）:
-// `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにしつつ、実装が facade 内部
-// （`crates/facade/src/compat/functional.rs`。`#[cfg(test)]` 限定の `pub(crate)`）にある点が異なる。
-// そのため「facade src に同名の型宣言が 1 件も無い」方式は使えず、3 型名の宣言を「`compat/functional.rs` に
-// `pub(crate) struct` として各 1 件」だけに固定する inventory 方式にする（`facade_train_step_public_surface_
-// matches_approved_contract` が手本）。facade 公開形（推奨は `fandhe_ai::compat` へのモジュール再エクスポート）は
-// 未承認（承認依頼は #2677。公開は承認後の #2679）。
+// FunctionalApiHoldDoctestGuard（イシュー #2665・親 #2663・ルート #2499 Phase 4。公開は #2679）:
+// 承認形（`fandhe_ai::compat` への `FunctionalBuilder`・`FunctionalModel`・`Node`・`save_functional_model`・
+// `load_functional_model` の公開。`FunctionalVars` は内部のまま。`docs/facade-functional-api-decision.md`
+// §10・§13・§16〜§18。承認はルート #2499 のコメント）の公開に伴い、保留ガードを**未承認の経路**
+// （`FunctionalVars` の公開・モジュール `functional` の公開・`Sequential::apply`／`call`）だけを固定する縮小
+// ガードにし、承認形は `facade_exposes_functional_api_only_in_approved_shape` が過不足なく固定する
+// （`compat/mod.rs` の承認 `pub use` 2 文・`compat/functional.rs` の `pub struct` 3 件と
+// `pub(crate) struct FunctionalVars` 1 件・`compat/model_io/functional_io.rs` の素の `pub fn` 2 件）。
 // 検出範囲は本ソース走査が見るトークン列（`pub use` の経路・`pub mod`・型宣言・`impl Sequential` の fn）と
 // doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由までは保証しない。`Sequential` の inherent
 // メソッド名は `apply`／`call` の 2 つに限った契約である。
@@ -31670,12 +31675,7 @@ fn functional_api_hold_doctest_probe_body_matches_fixed_contract() {
 const FUNCTIONAL_API_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_functional_api_hold_probe {\n\
-\x20\x20\x20\x20pub struct FunctionalBuilder;\n\
-\x20\x20\x20\x20pub struct FunctionalModel;\n\
-\x20\x20\x20\x20pub struct Node;\n\
 \x20\x20\x20\x20pub struct FunctionalVars;\n\
-\x20\x20\x20\x20pub fn save_functional_model() {}\n\
-\x20\x20\x20\x20pub fn load_functional_model() {}\n\
 \x20\x20\x20\x20pub mod functional {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
 \x20\x20\x20\x20}\n\
@@ -31698,11 +31698,9 @@ impl __FandheFunctionalApiHoldProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node, _3: FunctionalVars) {}\n\
+fn __probe_types(_0: FunctionalVars) {}\n\
 \n\
-fn __probe_free_fns() {\n\
-\x20\x20\x20\x20save_functional_model();\n\
-\x20\x20\x20\x20load_functional_model();\n\
+fn __probe_module() {\n\
 \x20\x20\x20\x20functional::__mark();\n\
 }\n\
 \n\
@@ -31711,45 +31709,76 @@ fn __probe_methods(seq: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheFunctionalApiHoldMarker = fandhe_ai::compat::Sequential::call(seq);\n\
 }";
 
-/// 保留対象の型名。facade src での宣言は [`FUNCTIONAL_API_ALLOWED_FILE`] の `pub(crate) struct` 各 1 件だけを許す。
-const FUNCTIONAL_API_TYPE_NAMES: [&str; 4] = [
-    "FunctionalBuilder",
-    "FunctionalModel",
-    "Node",
-    "FunctionalVars",
-];
+/// 承認して公開する型名（イシュー #2679。`docs/facade-functional-api-decision.md` §10・§13・§16〜§18）。
+/// facade src での宣言は [`FUNCTIONAL_API_ALLOWED_FILE`] の `pub struct` 各 1 件だけを許す。
+const FUNCTIONAL_API_PUBLIC_TYPE_NAMES: [&str; 3] =
+    ["FunctionalBuilder", "FunctionalModel", "Node"];
 
-/// 内部実装の唯一の置き場所（facade `src` からの相対パス）。
+/// 公開しない学習用の束縛結果型（§13 項 11）。宣言は [`FUNCTIONAL_API_ALLOWED_FILE`] の `pub(crate) struct` 1 件だけを許し、
+/// どの `pub use` にも現れてはならない。
+const FUNCTIONAL_API_INTERNAL_TYPE_NAME: &str = "FunctionalVars";
+
+/// 実装の唯一の置き場所（facade `src` からの相対パス）。
 const FUNCTIONAL_API_ALLOWED_FILE: &str = "compat/functional.rs";
 
-/// 保存・復元入口の関数名（#2667）。宣言は [`FUNCTIONAL_API_IO_ALLOWED_FILE`] に各 1 件・`pub(crate)` だけを許す。
+/// 保存・復元入口の関数名（#2667。公開は #2679）。
 const FUNCTIONAL_API_IO_FN_NAMES: [&str; 2] = ["save_functional_model", "load_functional_model"];
+
+/// 保存・復元入口の宣言場所（facade `src` からの相対パス）。素の `pub fn` 各 1 件だけを許す。
+const FUNCTIONAL_API_IO_FILE: &str = "compat/model_io/functional_io.rs";
 
 /// 保存・復元入口の唯一の置き場所（workspace `crates` からの相対パス）。
 const FUNCTIONAL_API_IO_ALLOWED_FILE: &str = "facade/src/compat/model_io/functional_io.rs";
+
+/// 承認した `pub use`（`compat/mod.rs`。トークン列で比較するため折り返しに依存しない）。
+const FUNCTIONAL_API_APPROVED_REEXPORTS: [&str; 2] = [
+    "pub use functional::{FunctionalBuilder, FunctionalModel, Node};",
+    "pub use model_io::functional_io::{load_functional_model, save_functional_model};",
+];
+
+/// 承認形を置く唯一のファイル（facade `src` からの相対パス）。
+const FUNCTIONAL_API_REEXPORT_FILE: &str = "compat/mod.rs";
 
 /// [`scan_functional_api_surface`] の結果。
 #[derive(Debug, Default)]
 struct FunctionalApiScan {
     /// 違反の説明。
     offenses: Vec<String>,
-    /// 許可位置（[`FUNCTIONAL_API_ALLOWED_FILE`] の `pub(crate) struct`）で見つけた宣言名。
-    allowed_decls: Vec<String>,
+    /// 許可位置（[`FUNCTIONAL_API_ALLOWED_FILE`]）で見つけた公開型の `pub struct` 宣言名。
+    public_decls: Vec<String>,
+    /// 許可位置で見つけた [`FUNCTIONAL_API_INTERNAL_TYPE_NAME`] の `pub(crate) struct` 宣言名。
+    internal_decls: Vec<String>,
+    /// 承認した `pub use` の出現数（[`FUNCTIONAL_API_APPROVED_REEXPORTS`] と同順）。
+    approved_reexports: [usize; 2],
+    /// 保存・復元入口の素の `pub fn` 宣言名（[`FUNCTIONAL_API_IO_FILE`] のみで許可）。
+    io_pub_fns: Vec<String>,
 }
 
-/// [`facade_functional_api_stays_internal`]・その自己テストが共用する検出本体（1 ファイル分）。
+/// [`facade_exposes_functional_api_only_in_approved_shape`]・その自己テストが共用する検出本体（1 ファイル分）。
 /// `rel_path` は facade `src` からの相対パス。違反とするもの:
-/// - `pub use` の経路に `functional` または [`FUNCTIONAL_API_TYPE_NAMES`] のいずれかのトークンを含む
-///   （単一行・複数行・group・別名・glob を問わない。`#[cfg(test)] pub use` も doctest からは見えないため
-///   本走査が受け持つ）
-/// - `pub mod functional`
-/// - [`FUNCTIONAL_API_TYPE_NAMES`] の `struct`／`enum`／`type`／`trait` 宣言が許可位置の
-///   `pub(crate) struct` 以外の形・場所にある
+/// - `pub use` の経路に `functional`／`functional_io`／公開型名／保存・復元入口名／`FunctionalVars` のいずれかの
+///   トークンを含み、かつ [`FUNCTIONAL_API_REEXPORT_FILE`] の承認 2 文（トークン列の完全一致。別名・glob・
+///   グループ変形を拒否）でないもの
+/// - `pub mod functional`／`pub mod functional_io`
+/// - 公開型名・`FunctionalVars` の `struct`／`enum`／`type`／`trait` 宣言が許可位置の許可形（公開型は
+///   `pub struct`、`FunctionalVars` は `pub(crate) struct`）以外の形・場所にある
+/// - 保存・復元入口の素の `pub fn` が [`FUNCTIONAL_API_IO_FILE`] 以外にある
 /// - `impl Sequential` の fn に `apply`／`call` がある（可視性を問わない）
 fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiScan {
     let mut scan = FunctionalApiScan::default();
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
+    let approved: Vec<Vec<String>> = FUNCTIONAL_API_APPROVED_REEXPORTS
+        .iter()
+        .map(|s| tokenize_including_punctuation(s.trim_end_matches(';')))
+        .collect();
+    let is_api_name = |t: &str| {
+        t == "functional"
+            || t == "functional_io"
+            || t == FUNCTIONAL_API_INTERNAL_TYPE_NAME
+            || FUNCTIONAL_API_PUBLIC_TYPE_NAMES.contains(&t)
+            || FUNCTIONAL_API_IO_FN_NAMES.contains(&t)
+    };
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -31758,16 +31787,25 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
             while end < tokens.len() && tokens[end] != ";" {
                 end += 1;
             }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            if path_tokens.iter().any(|t| {
-                t == "functional"
-                    || t == "functional_io"
-                    || FUNCTIONAL_API_TYPE_NAMES.contains(&t.as_str())
-                    || FUNCTIONAL_API_IO_FN_NAMES.contains(&t.as_str())
-            }) {
-                scan.offenses.push(format!(
-                    "`pub use` が Functional API 名を経路に含む: {path_tokens:?}"
-                ));
+            let stmt: Vec<String> = tokens[i..end.min(tokens.len())].to_vec();
+            // rustfmt が折り返し時に付ける `}` 直前の末尾カンマは意味を持たないため取り除く。
+            let mut normalized: Vec<String> = Vec::with_capacity(stmt.len());
+            for (k, t) in stmt.iter().enumerate() {
+                if t == "," && stmt.get(k + 1).map(String::as_str) == Some("}") {
+                    continue;
+                }
+                normalized.push(t.clone());
+            }
+            if normalized.iter().any(|t| is_api_name(t)) {
+                match approved
+                    .iter()
+                    .position(|a| rel_path == FUNCTIONAL_API_REEXPORT_FILE && *a == normalized)
+                {
+                    Some(idx) => scan.approved_reexports[idx] += 1,
+                    None => scan.offenses.push(format!(
+                        "`pub use` が承認形以外で Functional API 名を経路に含む: {normalized:?}"
+                    )),
+                }
             }
             i = (end + 1).min(tokens.len());
             continue;
@@ -31795,28 +31833,45 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
                 && let Some(name) = tokens.get(j + 1)
                 && FUNCTIONAL_API_IO_FN_NAMES.contains(&name.as_str())
             {
-                scan.offenses.push(format!(
-                    "`pub fn {name}`（保存・復元入口は `pub(crate)` に限る）"
-                ));
+                let plain = j == i + 1;
+                if rel_path == FUNCTIONAL_API_IO_FILE && plain {
+                    scan.io_pub_fns.push(name.clone());
+                } else {
+                    scan.offenses.push(format!(
+                        "`pub fn {name}`（保存・復元入口は {FUNCTIONAL_API_IO_FILE} の素の `pub fn` 各 1 件に限る）"
+                    ));
+                }
             }
         }
         if matches!(tokens[i].as_str(), "struct" | "enum" | "type" | "trait")
             && let Some(name) = tokens.get(i + 1)
-            && FUNCTIONAL_API_TYPE_NAMES.contains(&name.as_str())
+            && (FUNCTIONAL_API_PUBLIC_TYPE_NAMES.contains(&name.as_str())
+                || name == FUNCTIONAL_API_INTERNAL_TYPE_NAME)
         {
             let is_pub_crate = i >= 4
                 && tokens[i - 4] == "pub"
                 && tokens[i - 3] == "("
                 && tokens[i - 2] == "crate"
                 && tokens[i - 1] == ")";
-            if rel_path == FUNCTIONAL_API_ALLOWED_FILE && tokens[i] == "struct" && is_pub_crate {
-                scan.allowed_decls.push(name.clone());
-            } else {
-                scan.offenses.push(format!(
-                    "`{} {name}` の宣言が許可位置（{FUNCTIONAL_API_ALLOWED_FILE} の `pub(crate) struct`）以外にある（{rel_path}）",
-                    tokens[i]
-                ));
+            let is_plain_pub = i >= 1 && tokens[i - 1] == "pub";
+            let internal = name == FUNCTIONAL_API_INTERNAL_TYPE_NAME;
+            if rel_path == FUNCTIONAL_API_ALLOWED_FILE && tokens[i] == "struct" {
+                if internal && is_pub_crate {
+                    scan.internal_decls.push(name.clone());
+                    i += 1;
+                    continue;
+                }
+                if !internal && is_plain_pub {
+                    scan.public_decls.push(name.clone());
+                    i += 1;
+                    continue;
+                }
             }
+            scan.offenses.push(format!(
+                "`{} {name}` の宣言が許可位置・許可形（{FUNCTIONAL_API_ALLOWED_FILE} の公開型は `pub struct`、\
+                 FunctionalVars は `pub(crate) struct`）以外にある（{rel_path}）",
+                tokens[i]
+            ));
         }
         i += 1;
     }
@@ -31832,99 +31887,197 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
     scan
 }
 
-/// facade src 全体に Functional API の公開・再エクスポート・迂回宣言が無く、内部実装の 3 型が
-/// `compat/functional.rs` に `pub(crate) struct` として各 1 件だけ存在することを固定する
-/// （`FunctionalApiHoldDoctestGuard` の正のプローブと多層防御を成すソース走査ガード）。欠落
-/// （走査の空振り）・二重宣言・素の `pub struct`・別ファイルの宣言をすべて検出する。
+/// 走査結果の集合から、承認形からの逸脱を違反として返す（[`facade_exposes_functional_api_only_in_approved_shape`]・
+/// 自己テスト共用）。
+fn functional_api_surface_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let mut public_decls: Vec<String> = Vec::new();
+    let mut internal_decls: Vec<String> = Vec::new();
+    let mut approved_counts = [0usize; 2];
+    let mut io_fns: Vec<String> = Vec::new();
+    for (rel, content) in files {
+        let scan = scan_functional_api_surface(rel, content);
+        for offense in scan.offenses {
+            violations.push(format!("{rel}: {offense}"));
+        }
+        public_decls.extend(scan.public_decls);
+        internal_decls.extend(scan.internal_decls);
+        io_fns.extend(scan.io_pub_fns);
+        for (k, c) in scan.approved_reexports.iter().enumerate() {
+            approved_counts[k] += c;
+        }
+    }
+    public_decls.sort();
+    internal_decls.sort();
+    io_fns.sort();
+    let mut expected_public: Vec<String> = FUNCTIONAL_API_PUBLIC_TYPE_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected_public.sort();
+    if public_decls != expected_public {
+        violations.push(format!(
+            "公開型 3 名が {FUNCTIONAL_API_ALLOWED_FILE} の `pub struct` として各 1 件ずつ存在しない\
+             （found={public_decls:?}）"
+        ));
+    }
+    if internal_decls != [FUNCTIONAL_API_INTERNAL_TYPE_NAME.to_string()] {
+        violations.push(format!(
+            "{FUNCTIONAL_API_INTERNAL_TYPE_NAME} が {FUNCTIONAL_API_ALLOWED_FILE} の `pub(crate) struct` として\
+             1 件だけ存在しない（found={internal_decls:?}）"
+        ));
+    }
+    let mut expected_io: Vec<String> = FUNCTIONAL_API_IO_FN_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected_io.sort();
+    if io_fns != expected_io {
+        violations.push(format!(
+            "保存・復元入口が {FUNCTIONAL_API_IO_FILE} の素の `pub fn` として各 1 件ずつ存在しない（found={io_fns:?}）"
+        ));
+    }
+    if approved_counts != [1, 1] {
+        violations.push(format!(
+            "{FUNCTIONAL_API_REEXPORT_FILE} の承認 `pub use` 2 文がちょうど 1 件ずつでない（counts={approved_counts:?}）"
+        ));
+    }
+    violations
+}
+
+/// facade src 全体で Functional API の公開が承認形（イシュー #2679）だけであることを固定する:
+/// `compat/mod.rs` の承認 `pub use` 2 文（`FunctionalBuilder`・`FunctionalModel`・`Node`・保存・復元入口 2 本）・
+/// `compat/functional.rs` の `pub struct` 3 件と `pub(crate) struct FunctionalVars` 1 件・
+/// `compat/model_io/functional_io.rs` の素の `pub fn` 2 件。`FunctionalVars` の公開・`pub mod functional`・
+/// 別名・別経路の再エクスポート・迂回宣言・`Sequential::apply`／`call` は fail-closed で拒否する
+/// （`FunctionalApiHoldDoctestGuard` の正のプローブと多層防御を成す）。
 #[test]
-fn facade_functional_api_stays_internal() {
+fn facade_exposes_functional_api_only_in_approved_shape() {
     let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    let mut allowed: Vec<String> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
         let rel = path
             .strip_prefix(&src_dir)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        let scan = scan_functional_api_surface(&rel, content);
-        for offense in scan.offenses {
-            offending.push(format!("{rel}: {offense}"));
-        }
-        allowed.extend(scan.allowed_decls);
+        files.push((rel, content.to_string()));
     });
-    allowed.sort();
-    let mut expected: Vec<String> = FUNCTIONAL_API_TYPE_NAMES
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    expected.sort();
+    let violations = functional_api_surface_violations(&files);
     assert!(
-        offending.is_empty(),
-        "facade の公開面が Functional API（#2665 の `compat/functional.rs`。facade 公開形は未承認で承認依頼は \
-         #2677）を公開・再エクスポート・迂回宣言している: {offending:?}"
-    );
-    assert_eq!(
-        allowed, expected,
-        "内部実装の 4 型（FunctionalBuilder／FunctionalModel／Node／FunctionalVars）が {FUNCTIONAL_API_ALLOWED_FILE} の \
-         `pub(crate) struct` として各 1 件ずつ存在しない（欠落・二重宣言・走査の空振りの疑い）"
+        violations.is_empty(),
+        "facade の Functional API 公開が承認形（イシュー #2679・`docs/facade-functional-api-decision.md` §10）\
+         から外れている: {violations:?}"
     );
 }
 
-/// [`facade_functional_api_stays_internal`] の自己テスト（各違反カテゴリの合成ソースを検出できること、
-/// および部分一致する別トークン・`FunctionalBuilder::apply`・コメント・文字列・非公開 `use` を誤検出しない
+/// [`facade_exposes_functional_api_only_in_approved_shape`] の自己テスト（各違反カテゴリの合成ソースを検出
+/// できること、承認形を受理すること、部分一致する別トークン・コメント・文字列・非公開 `use` を誤検出しない
 /// ことを恒久的に固定する）。
 #[test]
-fn facade_functional_api_stays_internal_detects_each_category() {
+fn facade_exposes_functional_api_only_in_approved_shape_detects_each_category() {
     let other = "compat/other.rs";
     let offense = |rel: &str, src: &str| !scan_functional_api_surface(rel, src).offenses.is_empty();
 
-    // 正例: `pub use`（単一行・複数行・別名・glob・ネスト group・モジュール名）。
+    // 承認形は違反ではなく集計される。
+    let ok = scan_functional_api_surface(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{FunctionalBuilder, FunctionalModel, Node};\n\
+         pub use model_io::functional_io::{load_functional_model, save_functional_model};\n",
+    );
+    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
+    assert_eq!(ok.approved_reexports, [1, 1]);
+    // rustfmt の折り返し・末尾カンマでも同じ。
+    let wrapped = scan_functional_api_surface(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{\n    FunctionalBuilder,\n    FunctionalModel,\n    Node,\n};\n",
+    );
+    assert!(wrapped.offenses.is_empty(), "{:?}", wrapped.offenses);
+    assert_eq!(wrapped.approved_reexports, [1, 0]);
+    let ok = scan_functional_api_surface(
+        FUNCTIONAL_API_ALLOWED_FILE,
+        "pub struct Node { index: usize }\npub struct FunctionalBuilder;\npub struct FunctionalModel;\n\
+         pub(crate) struct FunctionalVars;\n",
+    );
+    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
+    assert_eq!(
+        ok.public_decls,
+        ["Node", "FunctionalBuilder", "FunctionalModel"]
+    );
+    assert_eq!(ok.internal_decls, ["FunctionalVars"]);
+    let ok = scan_functional_api_surface(
+        FUNCTIONAL_API_IO_FILE,
+        "pub fn save_functional_model() {}\npub fn load_functional_model() {}\n",
+    );
+    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
+    assert_eq!(
+        ok.io_pub_fns,
+        ["save_functional_model", "load_functional_model"]
+    );
+
+    // 正例: 承認形以外の `pub use`（別名・別ファイル・glob・グループ変形・FunctionalVars・モジュール名）。
     assert!(offense(other, "pub use functional::FunctionalModel;"));
-    assert!(offense(other, "pub use crate::compat::functional::*;"));
     assert!(offense(
-        other,
-        "pub use functional::{\n    FunctionalBuilder as Builder,\n    other::Node,\n};"
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::FunctionalModel;"
     ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{FunctionalBuilder as Builder, FunctionalModel, Node};"
+    ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{FunctionalBuilder, FunctionalModel, Node, FunctionalVars};"
+    ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::FunctionalVars;"
+    ));
+    assert!(offense(other, "pub use crate::compat::functional::*;"));
     assert!(offense(other, "pub use super::Node as GraphNode;"));
     assert!(offense(
         other,
         "#[cfg(test)]\npub use functional::FunctionalBuilder;"
     ));
     assert!(offense(other, "pub use a::{b::{c::Node}};"));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use model_io::functional_io::*;"
+    ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use model_io::functional_io::save_functional_model as save;"
+    ));
+    assert!(offense(
+        other,
+        "pub use model_io::functional_io::{load_functional_model, save_functional_model};"
+    ));
     // 正例: `pub mod functional`／`pub mod functional_io`。
     assert!(offense(other, "pub mod functional;"));
     assert!(offense(other, "pub mod functional { }"));
     assert!(offense(other, "pub mod functional_io;"));
-    // 正例（#2667）: 保存・復元入口の公開（素の `pub fn`・修飾子付き・`pub use` 経路）。
+    // 正例: 保存・復元入口の素の `pub fn` が許可ファイル以外にある・修飾子付き。
     assert!(offense(other, "pub fn save_functional_model() {}"));
     assert!(offense(other, "pub fn load_functional_model() {}"));
     assert!(offense(other, "pub async fn load_functional_model() {}"));
     assert!(offense(
-        FUNCTIONAL_API_ALLOWED_FILE,
+        FUNCTIONAL_API_IO_FILE,
         "pub unsafe fn save_functional_model() {}"
     ));
-    assert!(offense(
-        other,
-        "pub use model_io::functional_io::save_functional_model;"
-    ));
-    assert!(offense(
-        other,
-        "pub use crate::x::load_functional_model as l;"
-    ));
-    assert!(offense(other, "pub use model_io::functional_io::*;"));
-    // 負例（#2667）: `pub(crate)`・非公開・部分一致の別名。
+    // 負例: `pub(crate)`・非公開・部分一致の別名・`mod` 宣言。
     assert!(!offense(other, "pub(crate) fn save_functional_model() {}"));
     assert!(!offense(other, "fn load_functional_model() {}"));
     assert!(!offense(other, "pub fn save_functional_models() {}"));
     assert!(!offense(other, "mod functional_io;"));
+    assert!(!offense(other, "pub(super) mod functional_io;"));
     assert!(!offense(other, "#[cfg(test)]\nmod functional_io;"));
     // 正例: 許可位置以外・許可形以外の宣言。
     assert!(offense(other, "pub struct Node;"));
     assert!(offense(other, "pub(crate) struct Node;"));
+    assert!(offense(other, "pub(crate) struct FunctionalVars;"));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
-        "pub struct FunctionalModel;"
+        "pub(crate) struct FunctionalModel;"
     ));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
@@ -31932,16 +32085,14 @@ fn facade_functional_api_stays_internal_detects_each_category() {
     ));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) enum Node { A }"
+        "pub struct FunctionalVars;"
     ));
+    assert!(offense(FUNCTIONAL_API_ALLOWED_FILE, "pub enum Node { A }"));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) type FunctionalModel = u8;"
+        "pub type FunctionalModel = u8;"
     ));
-    assert!(offense(
-        FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) trait Node {}"
-    ));
+    assert!(offense(FUNCTIONAL_API_ALLOWED_FILE, "pub trait Node {}"));
     // 正例: `impl Sequential` の apply／call（可視性を問わない）。
     assert!(offense(other, "impl Sequential { pub fn apply(&self) {} }"));
     assert!(offense(other, "impl Sequential { pub fn call(&self) {} }"));
@@ -31955,15 +32106,43 @@ fn facade_functional_api_stays_internal_detects_each_category() {
         "impl crate::compat::Sequential { pub fn apply(&self) {} }"
     ));
 
-    // 許可形は違反ではなく allowed_decls に記録される。
-    let ok = scan_functional_api_surface(
-        FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) struct Node { index: usize }\npub(crate) struct FunctionalBuilder;\n",
-    );
-    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
-    assert_eq!(ok.allowed_decls, ["Node", "FunctionalBuilder"]);
-    // 許可位置の宣言は他ファイルでは違反（二重宣言・迂回宣言）。
-    assert!(offense(other, "pub(crate) struct FunctionalModel;"));
+    // 集合検査: 欠落・重複を検出する。
+    let full = || -> Vec<(String, String)> {
+        vec![
+            (
+                FUNCTIONAL_API_REEXPORT_FILE.to_string(),
+                "pub use functional::{FunctionalBuilder, FunctionalModel, Node};\n\
+                 pub use model_io::functional_io::{load_functional_model, save_functional_model};\n"
+                    .to_string(),
+            ),
+            (
+                FUNCTIONAL_API_ALLOWED_FILE.to_string(),
+                "pub struct Node;\npub struct FunctionalBuilder;\npub struct FunctionalModel;\n\
+                 pub(crate) struct FunctionalVars;\n"
+                    .to_string(),
+            ),
+            (
+                FUNCTIONAL_API_IO_FILE.to_string(),
+                "pub fn save_functional_model() {}\npub fn load_functional_model() {}\n"
+                    .to_string(),
+            ),
+        ]
+    };
+    assert!(functional_api_surface_violations(&full()).is_empty());
+    for skip in 0..3 {
+        let mut files = full();
+        files.remove(skip);
+        assert!(
+            !functional_api_surface_violations(&files).is_empty(),
+            "欠落を検出しない: index {skip}"
+        );
+    }
+    let mut dup = full();
+    dup.push((
+        FUNCTIONAL_API_REEXPORT_FILE.to_string(),
+        "pub use functional::{FunctionalBuilder, FunctionalModel, Node};\n".to_string(),
+    ));
+    assert!(!functional_api_surface_violations(&dup).is_empty());
 
     // 負例: 非公開の `mod`・`use`・内部型の利用・`FunctionalBuilder::apply`。
     assert!(!offense(other, "mod functional;"));
@@ -31988,11 +32167,107 @@ fn facade_functional_api_stays_internal_detects_each_category() {
     assert!(!offense(other, "let s = \"pub struct FunctionalModel;\";"));
     assert!(!offense(other, "/// pub mod functional;\nfn f() {}"));
 }
+/// 承認した Functional API の公開シグネチャ（`docs/facade-functional-api-decision.md` §4・§7・§10・§13）を
+/// `fandhe_ai` のみの import でコンパイル時に固定する（#2679）。関数ポインタ型注釈の代入が型検査を通ることが
+/// 検査であり、メソッドの追加・引数や戻り値の変更はここでコンパイルエラーになる。`FunctionalVars`・`bind`・
+/// `is_compiled` は公開しない（到達できないため本テストには現れない）。
+#[test]
+fn functional_api_types_are_reachable_via_facade_only() {
+    use std::collections::HashMap;
+
+    use fandhe_ai::compat::{
+        FitConfig, FitTarget, FunctionalBuilder, FunctionalModel, History, Loss, Node, Optimizer,
+        load_functional_model, save_functional_model,
+    };
+    use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
+
+    // clippy::type_complexity 回避の別名（型の中身は決定記録のシグネチャそのまま）。
+    type Res<T> = Result<T, AutodiffError>;
+    type Named<'a> = Res<Vec<(String, &'a Tensor<f32>)>>;
+    type StateDict = HashMap<String, Tensor<f32>>;
+    type Tensors<'a> = &'a [&'a Tensor<f32>];
+    type Outs = Res<Vec<Tensor<f32>>>;
+
+    let _new: fn() -> FunctionalBuilder = FunctionalBuilder::new;
+    let _input: fn(&mut FunctionalBuilder) -> Res<Node> = FunctionalBuilder::input;
+    let _apply: fn(&mut FunctionalBuilder, fandhe_ai::compat::Sequential, Node) -> Res<Node> =
+        FunctionalBuilder::apply;
+    let _concatenate: fn(&mut FunctionalBuilder, &[Node], usize) -> Res<Node> =
+        FunctionalBuilder::concatenate;
+    let _add: fn(&mut FunctionalBuilder, &[Node]) -> Res<Node> = FunctionalBuilder::add;
+    let _multiply: fn(&mut FunctionalBuilder, &[Node]) -> Res<Node> = FunctionalBuilder::multiply;
+    let _average: fn(&mut FunctionalBuilder, &[Node]) -> Res<Node> = FunctionalBuilder::average;
+    let _build: fn(FunctionalBuilder, &[Node], &[Node]) -> Res<FunctionalModel> =
+        FunctionalBuilder::build;
+
+    let _predict: for<'a> fn(&FunctionalModel, Tensors<'a>) -> Outs = FunctionalModel::predict;
+    let _set_training: fn(&mut FunctionalModel, bool) = FunctionalModel::set_training;
+    let _train: fn(&mut FunctionalModel) = FunctionalModel::train;
+    let _eval: fn(&mut FunctionalModel) = FunctionalModel::eval;
+    let _training: fn(&FunctionalModel) -> bool = FunctionalModel::training;
+    let _named: for<'a> fn(&'a FunctionalModel) -> Named<'a> = FunctionalModel::named_parameters;
+    let _state_dict: fn(&FunctionalModel) -> Res<StateDict> = FunctionalModel::state_dict;
+    let _load_state_dict: fn(&mut FunctionalModel, StateDict) -> Res<()> =
+        FunctionalModel::load_state_dict;
+    let _trainable: for<'a> fn(&'a FunctionalModel) -> Vec<&'a Tensor<f32>> =
+        FunctionalModel::trainable_parameters;
+    let _apply_parameters: fn(&mut FunctionalModel, Vec<Tensor<f32>>) -> Res<()> =
+        FunctionalModel::apply_parameters;
+    let _compile: fn(&mut FunctionalModel, Optimizer, Loss) -> Res<()> = FunctionalModel::compile;
+    let _fit: for<'a> fn(
+        &mut FunctionalModel,
+        Tensors<'a>,
+        Tensors<'a>,
+        FitConfig,
+    ) -> Res<History> = FunctionalModel::fit::<f32>;
+    let _evaluate: for<'a> fn(&mut FunctionalModel, Tensors<'a>, Tensors<'a>, usize) -> Res<f32> =
+        FunctionalModel::evaluate::<f32>;
+    fn _fit_target_is_public<T: FitTarget>() {}
+    _fit_target_is_public::<f32>();
+
+    // `forward` は呼び出し形だけを固定する（`Tape`／`Var` は facade の型）。
+    fn _forward<'t>(m: &FunctionalModel, tape: &'t Tape, xs: &[Var<'t>]) -> Res<Vec<Var<'t>>> {
+        m.forward(tape, xs)
+    }
+    let _ = _forward;
+
+    // 保存・復元入口の署名（`impl AsRef<Path>` は型引数で名指しできないため呼び出し形で固定する）。
+    type IoRes<T> = Result<T, fandhe_ai::compat::ModelIoError>;
+    fn _save(m: &FunctionalModel, dir: &std::path::Path) -> IoRes<()> {
+        save_functional_model(m, dir)
+    }
+    fn _load(dir: &std::path::Path) -> IoRes<FunctionalModel> {
+        load_functional_model(dir)
+    }
+    let _ = (_save, _load);
+
+    // 振る舞いの最小確認: 空の入出力は型付きエラー。
+    assert!(FunctionalBuilder::new().build(&[], &[]).is_err());
+}
+
+/// 正の doctest プローブ（#2679。`ema_usage_doctests_are_present_and_compiled` と同型）: Functional API の
+/// 利用例が facade の公開 doc に実在し、実際にコンパイル・実行される形で書かれていることを固定する。
+#[test]
+fn functional_api_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let functional = read_to_string_or_panic(&root.join("src/compat/functional.rs"));
+    let v = doctest_probe_violations(
+        "FunctionalBuilder の doc",
+        &doc_lines_above_fn(&functional, "pub struct FunctionalBuilder"),
+        &[
+            "use fandhe_ai::compat::{FunctionalBuilder, Sequential}",
+            "FunctionalBuilder::new",
+            "model.predict",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    assert!(!doctest_probe_violations("t", &[], &["FunctionalBuilder"]).is_empty());
+}
 
 /// workspace 全体（`crates/*/src/`）で `fn save_functional_model`／`fn load_functional_model` の宣言が
 /// [`FUNCTIONAL_API_IO_ALLOWED_FILE`]（`#[cfg(test)]` 隔離の内部実装。#2667）の各 1 件だけであることを固定する
-/// （所在の登録であり緩和ではない。公開は未承認で、承認依頼は #2677・公開は承認後の #2679。素の `pub` 宣言・
-/// `pub use` 経路・`pub mod functional_io` は `facade_functional_api_stays_internal` が拒否する）。
+/// （所在の登録であり緩和ではない。公開は #2679 で承認形になった。`pub use` の形・`pub mod functional_io` は
+/// `facade_exposes_functional_api_only_in_approved_shape` が固定する）。
 #[test]
 fn workspace_declares_functional_model_io_fn_names_only_in_allowed_location() {
     let crates_dir = workspace_crates_dir();
@@ -32054,10 +32329,11 @@ fn workspace_declares_functional_model_io_fn_names_only_in_allowed_location() {
 // MergeOpsHoldDoctestGuard（イシュー #2666・親 #2663・ルート #2499 Phase 4）:
 // `TensorProductOpsHoldDoctestGuard`（#2640）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::merge_ops`。新規 `Op`・`BackendOps` メソッドなし）と facade 内部の
-// `compat/functional.rs`（`#[cfg(test)]` 限定の `pub(crate)`）に閉じ、facade 公開形
-// （`FunctionalBuilder::{concatenate, add, multiply, average}` の公開）は未承認（承認依頼は
-// #2677。公開は承認後の #2679）。`add` は既存の承認済み公開 API（`Var::add`）と同名のため
-// 検出対象に含めない。
+// `compat/functional.rs` に閉じる。#2679 で承認形（`FunctionalBuilder::{concatenate, add, multiply, average}` を
+// 型と同時に公開。決定記録 §17）を公開したため、本ガードは承認形に含まれない経路（`merge_ops` の自由関数・
+// `Var`／`Tape`／`Tensor` の結合メソッド・`Sequential::add_*`）だけを固定する。ビルダーのメソッドは
+// 宣言場所インベントリ（`compat/functional.rs` に各 1 件）で許可済み。`add` は既存の承認済み公開 API
+// （`Var::add`）と同名のため検出対象に含めない。
 // =====================================================================
 
 /// `MergeOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import する

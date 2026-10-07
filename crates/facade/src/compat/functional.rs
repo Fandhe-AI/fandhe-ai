@@ -1,24 +1,25 @@
-//! Functional API（多入力・多出力グラフ）の内部実装（イシュー #2665・親 #2663・ルート #2499
-//! Phase 4）。
+//! Functional API（多入力・多出力グラフ。Keras Functional API 相当）の実装と公開型（イシュー #2665・親 #2663・
+//! ルート #2499 Phase 4。公開は #2679）。
 //!
-//! Keras Functional API 相当を facade に段階導入する計画の第 2 段で、**層ノードからなる DAG の
-//! 構築**（[`FunctionalBuilder`]）と**挿入順（= トポロジカル順）の forward**
-//! （[`FunctionalModel`]）を提供する。設計の正は `docs/facade-functional-api-decision.md`
-//! （§3 グラフ構築・§4 forward・§10 公開形・§11 配置・§12 OWASP 観点）で、同記録の公開形は
-//! **未承認**（承認依頼は #2677。公開は承認後の #2679）。
+//! Keras Functional API 相当を facade に段階導入した第 2 段で、**層ノードからなる DAG の構築**
+//! （[`FunctionalBuilder`]）と**挿入順（= トポロジカル順）の forward**（[`FunctionalModel`]）を提供する。
+//! 設計の正は `docs/facade-functional-api-decision.md`（§3 グラフ構築・§4 forward・§10 公開形・§11 配置・
+//! §12 OWASP 観点・§16〜§18 学習・保存・公開の実装記録）。
 //!
-//! # 配置と非公開の理由
+//! # 公開範囲（イシュー #2679）
 //!
-//! 本モジュールは `compat/mod.rs` で `#[cfg(test)] mod functional;`（非公開）として宣言し、
-//! 型・メソッドはすべて `pub(crate)` に留める。出荷コードのどこからも呼ばれないため
-//! `#[cfg(test)]` を外すと `dead_code` になり、`#[allow]` で黙らせない方針（
-//! `.claude/rules/coding-rust.md`）とも衝突するため、先例の `predict_batches`（#2192。
-//! `crate::inference::batch`）と同じ `#[cfg(test)]` 隔離方式を採る。公開面が増えていないことは
-//! `lib.rs::FunctionalApiHoldDoctestGuard`（正のプローブ）と
-//! `tests/api_surface.rs::facade_functional_api_stays_internal`（ソース走査）が固定する。
+//! 承認（ルート #2499 のコメント issuecomment-6033824965。同記録 §10・§13）に従い、
+//! `fandhe_ai::compat` から [`FunctionalBuilder`]・[`FunctionalModel`]・[`Node`] と保存・復元の入口
+//! `save_functional_model`／`load_functional_model` を公開する（`compat/mod.rs` の `pub use`）。**学習用の
+//! 束縛結果型 `FunctionalVars` は非公開のまま**（`FunctionalModel::bind` も `pub(crate)`。`fit`／`evaluate` の
+//! 内部が使う）。モジュール `functional` 自体も非公開で、公開面は `api_surface.rs` の
+//! `facade_exposes_functional_api_only_in_approved_shape`（承認形のインベントリ）と
+//! `lib.rs::FunctionalApiHoldDoctestGuard`（未承認経路のプローブ）が固定する。
 //!
-//! **昇格手順（#2679）**: `#[cfg(test)]` を外す → 型を `pub` にする → `compat/mod.rs` で
-//! `pub use` する → 保留ガードを正ガードへ反転する。
+//! 公開メソッドは `FunctionalBuilder::{new, input, apply, concatenate, add, multiply, average, build}`、
+//! `FunctionalModel::{forward, predict, set_training, train, eval, training, named_parameters, state_dict,
+//! load_state_dict, trainable_parameters, apply_parameters, compile, fit, evaluate}`。doc から非公開項目
+//! （`FunctionalVars`・`bind`）へ intra-doc link は張らない（`rustdoc::private_intra_doc_links` を避けるため）。
 //!
 //! # 層ノードの単位と第 1 段の範囲
 //!
@@ -28,10 +29,10 @@
 //! 結合ノード（Concatenate／Add／Multiply／Average。イシュー #2666）まで。結合ノードは
 //! [`FunctionalBuilder::concatenate`]・`add`・`multiply`・`average` で追加し、数値は
 //! `fandhe_ai_autodiff::merge_ops`（既存 `Var` 演算の合成）へ委譲する。結合ノードは層を
-//! 持たないため通し番号キーに影響しない。学習（`bind`／`trainable_parameters`／`apply_parameters`／
+//! 持たないため通し番号キーに影響しない。学習（`trainable_parameters`／`apply_parameters`／
 //! `compile`／`fit`／`evaluate`。イシュー #2667）は子モジュール `train`、保存・復元
 //! （`save_functional_model`／`load_functional_model`）は `model_io::functional_io` が担う
-//! （いずれも本モジュールと同じ `#[cfg(test)]` 隔離の `pub(crate)`。設計記録 §18）。ノード種別は
+//! （設計記録 §18）。ノード種別は
 //! 内部 enum とし入力添字を複数持てる形にしてある。shape の構築時推論は行わず（層側に推論 API
 //! が無い）、不整合は forward 時に既存 `Var` 演算の型付きエラーで検出する。
 //!
@@ -89,7 +90,7 @@ fn ensure_on_tape(tape: &Tape, var: &Var<'_>) -> Result<(), AutodiffError> {
 /// が拒否する。添字は発行元ビルダーのノード列への位置で、ノードは自分より前の添字しか参照
 /// できないため、構築時点で DAG が保証され挿入順がそのままトポロジカル順になる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Node {
+pub struct Node {
     builder_id: u64,
     index: usize,
 }
@@ -135,7 +136,32 @@ impl NodeDef {
 ///
 /// `input` → `apply` → `build` の順で呼ぶ。`build` が構造検証（fail-closed）を行って
 /// [`FunctionalModel`] を返す。
-pub(crate) struct FunctionalBuilder {
+///
+/// ```
+/// use fandhe_ai::Tensor;
+/// use fandhe_ai::compat::{FunctionalBuilder, Sequential};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 2 入力を各ブロックで変換し、加算で合流して 1 出力にする。
+/// let mut b = FunctionalBuilder::new();
+/// let a = b.input()?;
+/// let c = b.input()?;
+/// let ha = b.apply(Sequential::new().add_linear(3, 4, 1)?.add_relu(), a)?;
+/// let hc = b.apply(Sequential::new().add_linear(2, 4, 2)?.add_relu(), c)?;
+/// let merged = b.add(&[ha, hc])?;
+/// let out = b.apply(Sequential::new().add_linear(4, 1, 3)?, merged)?;
+/// let mut model = b.build(&[a, c], &[out])?;
+/// model.eval();
+///
+/// let xa = Tensor::new(vec![0.1f32; 6], &[2, 3])?;
+/// let xc = Tensor::new(vec![0.2f32; 4], &[2, 2])?;
+/// let outputs = model.predict(&[&xa, &xc])?;
+/// assert_eq!(outputs.len(), 1);
+/// assert_eq!(outputs[0].shape(), &[2, 1]);
+/// # Ok(())
+/// # }
+/// ```
+pub struct FunctionalBuilder {
     id: u64,
     nodes: Vec<NodeDef>,
 }
@@ -148,7 +174,7 @@ impl Default for FunctionalBuilder {
 
 impl FunctionalBuilder {
     /// 空のビルダーを作る（ID はプロセス内で一意）。
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             id: NEXT_BUILDER_ID.fetch_add(1, Ordering::Relaxed),
             nodes: Vec::new(),
@@ -186,7 +212,7 @@ impl FunctionalBuilder {
     }
 
     /// 入力ノードを追加する（Keras `Input`）。shape は宣言せず、forward 時の値で決まる。
-    pub(crate) fn input(&mut self) -> Result<Node, AutodiffError> {
+    pub fn input(&mut self) -> Result<Node, AutodiffError> {
         self.push_node(NodeDef::Input)
     }
 
@@ -196,7 +222,7 @@ impl FunctionalBuilder {
     /// モデル側が 1 つだけ持つため、ブロック側の状態を黙って捨てない）・層 0 個のブロック
     /// （保存形式の「層範囲は重複なし・隙間なし」と相性が悪く、後から許可するのは非破壊・
     /// 逆は破壊的なため安全側）。
-    pub(crate) fn apply(&mut self, block: Sequential, input: Node) -> Result<Node, AutodiffError> {
+    pub fn apply(&mut self, block: Sequential, input: Node) -> Result<Node, AutodiffError> {
         let src = self.resolve(input, "apply")?;
         if block.compiled.is_some() {
             return Err(invalid(
@@ -222,26 +248,22 @@ impl FunctionalBuilder {
     ///
     /// 拒否: 入力 2 件未満・他ビルダーのハンドル・範囲外添字・同一ノードの重複指定。shape の検査
     /// （rank・`dim` 範囲・非連結軸の一致）は構築時には行わず、forward 時に型付きエラーで検出する。
-    pub(crate) fn concatenate(
-        &mut self,
-        inputs: &[Node],
-        dim: usize,
-    ) -> Result<Node, AutodiffError> {
+    pub fn concatenate(&mut self, inputs: &[Node], dim: usize) -> Result<Node, AutodiffError> {
         self.add_merge("concatenate", MergeKind::Concatenate { dim }, inputs)
     }
 
     /// 要素ごとの加算ノードを追加する（Keras `Add`）。拒否規則は [`Self::concatenate`] と同じ。
-    pub(crate) fn add(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
+    pub fn add(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
         self.add_merge("add", MergeKind::Add, inputs)
     }
 
     /// 要素ごとの乗算ノードを追加する（Keras `Multiply`）。拒否規則は [`Self::concatenate`] と同じ。
-    pub(crate) fn multiply(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
+    pub fn multiply(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
         self.add_merge("multiply", MergeKind::Multiply, inputs)
     }
 
     /// 要素ごとの平均ノードを追加する（Keras `Average`）。拒否規則は [`Self::concatenate`] と同じ。
-    pub(crate) fn average(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
+    pub fn average(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
         self.add_merge("average", MergeKind::Average, inputs)
     }
 
@@ -289,7 +311,7 @@ impl FunctionalBuilder {
     /// 寄与しないノード。入力ノードを出力へそのまま指定すること（素通し）は許可する。
     /// 到達性は出力から添字の降順に 1 回走査して伝播する（前方参照が構造的に無いため 1 パスで
     /// 足り、再帰を使わない）。
-    pub(crate) fn build(
+    pub fn build(
         self,
         inputs: &[Node],
         outputs: &[Node],
@@ -398,7 +420,7 @@ impl FunctionalBuilder {
 /// 更新はノード挿入順に各 1 回で、fan-out しても上流ノードは再評価しない。パラメータキーは
 /// 全ブロックを通した層の通し番号 `i` による `"{i}.{name}"`（`docs/facade-functional-api-
 /// decision.md` §4。Block ノードの挿入順に層数を累積）。
-pub(crate) struct FunctionalModel {
+pub struct FunctionalModel {
     pub(super) nodes: Vec<NodeDef>,
     pub(super) inputs: Vec<usize>,
     pub(super) outputs: Vec<usize>,
@@ -417,7 +439,7 @@ pub(crate) struct FunctionalModel {
 /// `Sequential::trainable_parameters` と同じ順」で、`FunctionalModel::trainable_parameters`／
 /// `apply_parameters` と位置対応する（`fandhe_ai::optim` の `params[i]` ↔ `grads[i]` 契約）。
 /// 同一 tape 上で複数ブロックを `bind` する構成は ResNet examples に先例がある。
-/// 生 `Tape`・`BackendOps` は署名に出さない（REQ-12）。公開形は未承認のため内部型のまま
+/// 生 `Tape`・`BackendOps` は署名に出さない（REQ-12）。§13 項 11 で非公開と承認した内部型のまま
 /// （`docs/facade-functional-api-decision.md` §18）。
 pub(crate) struct FunctionalVars<'m, 't> {
     model: &'m FunctionalModel,
@@ -502,7 +524,7 @@ impl FunctionalModel {
     /// `inputs`（`build` に渡した `inputs` の順）を入力ノードへ束ね、ノードを挿入順に 1 回ずつ
     /// 評価して `outputs`（`build` に渡した順）の値を返す。入力件数の不一致は `InvalidArgument`。
     /// shape の不整合は既存 `Var` 演算の型付きエラーに委ねる。
-    pub(crate) fn forward<'t>(
+    pub fn forward<'t>(
         &self,
         tape: &'t Tape,
         inputs: &[Var<'t>],
@@ -598,10 +620,7 @@ impl FunctionalModel {
     /// `Tensor` へ取り出す。`Sequential::predict` の tape 不要経路（Linear→ReLU 融合）は使わず
     /// 第 1 段は単純さを優先する。モードを暗黙に切り替えない（`Sequential::predict` と同じ。
     /// 決定的な推論は先に `eval()` を呼ぶ）。
-    pub(crate) fn predict(
-        &self,
-        inputs: &[&Tensor<f32>],
-    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+    pub fn predict(&self, inputs: &[&Tensor<f32>]) -> Result<Vec<Tensor<f32>>, AutodiffError> {
         let tape = crate::tape();
         let mut vars = Vec::new();
         vars.try_reserve_exact(inputs.len())
@@ -616,7 +635,7 @@ impl FunctionalModel {
     /// 全ブロックへモードを伝播する。モデル側に別フラグは持たない（ブロックと食い違う状態を
     /// 作らないため。`build` はブロックのモードを同期しない契約で、`Sequential::add_dropout` と
     /// 同じ）。
-    pub(crate) fn set_training(&mut self, training: bool) {
+    pub fn set_training(&mut self, training: bool) {
         for def in &mut self.nodes {
             if let NodeDef::Block { block, .. } = def {
                 block.set_training(training);
@@ -625,23 +644,23 @@ impl FunctionalModel {
     }
 
     /// `set_training(true)` の別名。
-    pub(crate) fn train(&mut self) {
+    pub fn train(&mut self) {
         self.set_training(true);
     }
 
     /// `set_training(false)` の別名。
-    pub(crate) fn eval(&mut self) {
+    pub fn eval(&mut self) {
         self.set_training(false);
     }
 
     /// 全ブロックが train のとき `true`（ブロック 0 個なら `true`）の導出値。
-    pub(crate) fn training(&self) -> bool {
+    pub fn training(&self) -> bool {
         self.blocks().all(|(_, block)| block.training())
     }
 
     /// 「通し番号キー, パラメータ参照」列。順序はブロックの挿入順・各ブロック内は
     /// `Sequential::named_parameters` と同じ。
-    pub(crate) fn named_parameters(&self) -> Result<Vec<(String, &Tensor<f32>)>, AutodiffError> {
+    pub fn named_parameters(&self) -> Result<Vec<(String, &Tensor<f32>)>, AutodiffError> {
         let mut out = Vec::new();
         for (index, block) in self.blocks() {
             let start = self.layer_start(index)?;
@@ -654,7 +673,7 @@ impl FunctionalModel {
     }
 
     /// 通し番号キー付きのパラメータ辞書（`named_parameters` と同じキー集合）。
-    pub(crate) fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+    pub fn state_dict(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
         let mut out = HashMap::new();
         for (index, block) in self.blocks() {
             let start = self.layer_start(index)?;
@@ -674,7 +693,7 @@ impl FunctionalModel {
     /// `Sequential::load_state_dict` へ委譲し、途中で失敗した場合は開始前のスナップショットで
     /// 適用済みブロックと失敗した現在のブロックを巻き戻して元のエラーを返す。巻き戻し自体が失敗した場合は、
     /// 適用失敗と巻き戻し失敗の双方と部分適用の可能性を示す `InvalidArgument` を返す。
-    pub(crate) fn load_state_dict(
+    pub fn load_state_dict(
         &mut self,
         mut state: HashMap<String, Tensor<f32>>,
     ) -> Result<(), AutodiffError> {
