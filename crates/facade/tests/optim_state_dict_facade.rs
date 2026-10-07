@@ -256,15 +256,33 @@ fn load_rejects_state_of_another_optimizer_kind() {
 
 /// ファイルパス経由（`save_safetensors_f32`／`load_safetensors_f32`）の往復でも、続きの
 /// `step()` が中断なしの場合と bit 一致する（#2557。バイト列経由は
-/// `assert_resume_is_bit_exact` の `via_bytes`）。一時ディレクトリはプロセス ID を含む
-/// 一意名で作り、成否に関わらず削除する。
+/// `assert_resume_is_bit_exact` の `via_bytes`）。一時ディレクトリは排他作成した
+/// 一意名のみを使い、成否に関わらず削除する。
 #[test]
 fn resume_via_safetensors_file_path_is_bit_exact() {
-    let dir = std::env::temp_dir().join(format!(
-        "fandhe_ai_optim_state_dict_{}_file_roundtrip",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    // PID 再利用や並列実行でも既存ディレクトリを上書き・削除しないよう、時刻ナノ秒を含む
+    // 名前を `create_dir`（排他作成。既存なら AlreadyExists）で作り、作成に成功した
+    // ディレクトリだけを後段で削除する。
+    let dir = {
+        let mut attempt = 0u32;
+        loop {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let candidate = std::env::temp_dir().join(format!(
+                "fandhe_ai_optim_state_dict_{}_{nanos}_{attempt}_file_roundtrip",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => {
+                    attempt += 1;
+                }
+                Err(e) => panic!("temp dir の排他作成に失敗: {e}"),
+            }
+        }
+    };
     let result = std::panic::catch_unwind(|| {
         let path = dir.join("optimizer.safetensors");
         let mut original = AdamW::new(AdamWConfig::default()).unwrap();
