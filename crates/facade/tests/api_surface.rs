@@ -2269,16 +2269,16 @@ fn interop_module_exposes_only_approved_onnx_surface() {
 
     let mod_rs_content = read_to_string_or_panic(&interop_dir.join("mod.rs"));
     let mod_offending = scan_forbidden_pub_items(&mod_rs_content);
-    // `mod.rs` は `pub mod onnx;`／`pub mod safetensors;`（#2019）の
-    // 2 件のみを許容する（`scan_forbidden_pub_items` は `pub use` 以外の
+    // `mod.rs` は `pub mod onnx;`／`pub mod safetensors;`（#2019）／
+    // `pub mod npy;`（#2590）の 3 件のみを許容する（`scan_forbidden_pub_items` は `pub use` 以外の
     // `pub` アイテムを検出するため、`pub mod` 宣言も検出対象になる。
-    // したがってここでは「丁度 2 件・いずれも `pub mod`」であることを
+    // したがってここでは「丁度 3 件・いずれも `pub mod`」であることを
     // 検査する）。
     assert_eq!(
         mod_offending.len(),
-        2,
+        3,
         "src/interop/mod.rs の公開アイテムが想定外（`pub mod onnx;`／\
-         `pub mod safetensors;` の丁度 2 件のはず）: {mod_offending:?}"
+         `pub mod safetensors;`／`pub mod npy;` の丁度 3 件のはず）: {mod_offending:?}"
     );
     assert!(
         mod_offending.iter().all(|item| item.contains("mod")),
@@ -7502,6 +7502,11 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "require_keys",
     "save_safetensors_f32",
     "save_safetensors_f32_to_bytes",
+    // `interop/npy.rs`（イシュー #2590。npy／npz 読み書きのパス版 4 関数）。
+    "load_npy",
+    "load_npz",
+    "save_npy",
+    "save_npz",
     // `optim.rs`（イシュー #961 ほか。grad clipping／AMP 関数群）。
     "clip_grad_norm",
     "clip_grad_value",
@@ -21493,7 +21498,9 @@ fn scan_hold_probe_blocks_in_doc_run_panics_on_unclosed_fence() {
     let _ = scan_hold_probe_blocks_in_doc_run(&doc_lines);
 }
 // =====================================================================
-// NpyIoHoldDoctestGuard（イシュー #2189・親 #2131）: `RngDistributionsHold
+// NpyIoHoldDoctestGuard（イシュー #2189・親 #2131。#2590 で正ガードへ部分反転:
+// 自由関数・`NpyError` は `interop::npy` で公開済みとして許可し、`Tensor` メソッド形
+// のみ保留を維持）: `RngDistributionsHold
 // DoctestGuard`（#2156）系のテスト（`rng_distributions_hold_doctest_
 // globs_all_pub_modules`／`rng_distributions_hold_doctest_probe_body_
 // matches_fixed_contract`／`facade_does_not_reexport_or_declare_rng_
@@ -21544,8 +21551,8 @@ fn npy_io_hold_doctest_probe_body_matches_fixed_contract() {
         actual, NPY_IO_HOLD_PROBE_BODY,
         "NpyIoHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
          固定文言 NPY_IO_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_npy_io_hold_probe モジュール・\
-         __FandheNpyIoHoldProbe トレイト・__probe_* 関数）の削除・\
+         プローブ（__FandheNpyIoHoldProbe トレイト・__probe_tensor 関数。\
+         #2590 で自由関数側は公開済みのため縮小した代替案専用足場）の削除・\
          弱体化・隠し行の混入がないか確認すること。"
     );
 }
@@ -21556,21 +21563,6 @@ fn npy_io_hold_doctest_probe_body_matches_fixed_contract() {
 /// （`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致する
 /// 必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に含む）。
 const NPY_IO_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_npy_io_hold_probe {\n\
-\x20\x20\x20\x20pub struct NpyError;\n\
-\x20\x20\x20\x20pub fn load_npy() {}\n\
-\x20\x20\x20\x20pub fn save_npy() {}\n\
-\x20\x20\x20\x20pub fn load_npz() {}\n\
-\x20\x20\x20\x20pub fn save_npz() {}\n\
-\x20\x20\x20\x20pub mod npy {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20pub mod npz {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_npy_io_hold_probe::*;\n\
 \n\
 struct __FandheNpyIoHoldMarker;\n\
 \n\
@@ -21588,17 +21580,6 @@ impl __FandheNpyIoHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn save_npz(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }\n\
 }\n\
 \n\
-fn __probe_free_fns(_: NpyError) {\n\
-\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
-\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20load_npy();\n\
-\x20\x20\x20\x20save_npy();\n\
-\x20\x20\x20\x20load_npz();\n\
-\x20\x20\x20\x20save_npz();\n\
-\x20\x20\x20\x20npy::__mark();\n\
-\x20\x20\x20\x20npz::__mark();\n\
-}\n\
-\n\
 fn __probe_tensor(x: &fandhe_ai::Tensor<f32>) {\n\
 \x20\x20\x20\x20let _: __FandheNpyIoHoldMarker = fandhe_ai::Tensor::load_npy(x);\n\
 \x20\x20\x20\x20let _: __FandheNpyIoHoldMarker = x.save_npy();\n\
@@ -21611,18 +21592,33 @@ fn __probe_tensor(x: &fandhe_ai::Tensor<f32>) {\n\
 /// する。
 const NPY_IO_FN_NAMES: [&str; 4] = ["load_npy", "save_npy", "load_npz", "save_npz"];
 
-/// [`facade_does_not_reexport_or_declare_npy_io`]・その自己テストが共用
-/// する検出本体。facade src 全体（`crates/facade/src/**`）の `pub use`
-/// から [`collect_pub_use_leaves`] で別名にする前の葉を集め `NpyError`
-/// を検出し（単一行・複数行・ネストした group・別名も検出）、
-/// `trait`／`struct`／`enum`／`type` 直後の `NpyError` 独自宣言、
-/// [`NPY_IO_FN_NAMES`]（4 個）の `fn` 宣言（可視性・宣言文脈を問わない。
-/// [`count_fn_declarations_by_name`] と同じ検出契約）を違反として返す
+/// 承認範囲外のバイト列版 4 名（イシュー #2590・
+/// `docs/tensor-core-npy-npz-io-decision.md` §10.4 P3）。facade の
+/// `pub use` の葉に現れてはならない。
+const NPY_IO_BYTES_NAMES: [&str; 4] = [
+    "read_npy_bytes",
+    "write_npy_bytes",
+    "read_npz_bytes",
+    "write_npz_bytes",
+];
+
+/// `interop/npy.rs` が再エクスポートする承認済みの 5 名（P3。別名なし）。
+const NPY_IO_APPROVED_NAMES: [&str; 5] =
+    ["NpyError", "load_npy", "load_npz", "save_npy", "save_npz"];
+
+/// [`facade_reexports_npy_io_only_from_interop_npy`]・その自己テストが共用
+/// する検出本体。facade src の 1 ファイルについて、`pub use` の葉
+/// （[`collect_pub_use_leaves`]。別名にする前の葉・複数行・ネストした group
+/// を含む）のうち承認済み 5 名とバイト列版 4 名を第 1 要素として返し、
+/// 独自宣言（`trait`／`struct`／`enum`／`type` 直後の `NpyError`、
+/// [`NPY_IO_FN_NAMES`]〈4 個〉の `fn` 宣言。可視性・宣言文脈を問わない。
+/// [`count_fn_declarations_by_name`] と同じ検出契約）を第 2 要素として返す
 /// （`scan_rng_distributions_reexports_and_declarations` と同型）。
-fn scan_npy_io_reexports_and_declarations(content: &str) -> Vec<String> {
+fn scan_npy_io_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<String>) {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
+    let mut leaves_found: Vec<String> = Vec::new();
+    let mut declarations: Vec<String> = Vec::new();
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -21632,10 +21628,11 @@ fn scan_npy_io_reexports_and_declarations(content: &str) -> Vec<String> {
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if leaf == "NpyError" {
-                    offending.push(format!("pub use leaf={leaf}"));
+            for leaf in collect_pub_use_leaves(path_tokens) {
+                if NPY_IO_APPROVED_NAMES.contains(&leaf.as_str())
+                    || NPY_IO_BYTES_NAMES.contains(&leaf.as_str())
+                {
+                    leaves_found.push(leaf);
                 }
             }
             i = (end + 1).min(tokens.len());
@@ -21644,7 +21641,7 @@ fn scan_npy_io_reexports_and_declarations(content: &str) -> Vec<String> {
         if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
             && tokens.get(i + 1).map(String::as_str) == Some("NpyError")
         {
-            offending.push(format!("{} NpyError 宣言", tokens[i]));
+            declarations.push(format!("{} NpyError 宣言", tokens[i]));
         }
         i += 1;
     }
@@ -21652,36 +21649,202 @@ fn scan_npy_io_reexports_and_declarations(content: &str) -> Vec<String> {
     for fn_name in NPY_IO_FN_NAMES {
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
-            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+            declarations.push(format!("`fn {fn_name}` 宣言が {count} 件"));
         }
     }
-    offending
+    (leaves_found, declarations)
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、`NpyError` を識別子単位
-/// で含む `pub use`（複数行・ネストした group・別名含む）も、facade
-/// 独自の `trait`／`struct`／`enum`／`type` 宣言も、[`NPY_IO_FN_NAMES`]
-/// （`load_npy`／`save_npy`／`load_npz`／`save_npz`）の `fn` 宣言も
-/// 存在しないことを固定する（`NpyIoHoldDoctestGuard` の正のプローブと
-/// 多層防御を成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_or_declare_rng_distributions` と同型）。
+/// facade src 全体（`crates/facade/src/**`）で、承認済み 5 名
+/// （`NpyError`／`load_npy`／`save_npy`／`load_npz`／`save_npz`）を葉に持つ
+/// `pub use` が `src/interop/npy.rs` にだけ各 1 件あり、他ファイルには 0 件
+/// であること、バイト列版 4 名（[`NPY_IO_BYTES_NAMES`]）を葉に持つ `pub use`
+/// が全体で 0 件であること、facade 独自の `NpyError` 型宣言・4 関数の `fn`
+/// 宣言が 0 件であること（純再エクスポートの裏付け）を固定する。
+/// イシュー #2590 で旧 `facade_does_not_reexport_or_declare_npy_io`（全面否定）
+/// を正ガードへ反転した。`Tensor` メソッド形は `NpyIoHoldDoctestGuard` が検出する。
 #[test]
-fn facade_does_not_reexport_or_declare_npy_io() {
+fn facade_reexports_npy_io_only_from_interop_npy() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
+    let mut npy_rs_leaves: Vec<String> = Vec::new();
+    let mut npy_rs_seen = false;
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_npy_io_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
+        let (leaves, declarations) = scan_npy_io_reexports_and_declarations(content);
+        for d in declarations {
+            offending.push(format!("{}: {d}", path.display()));
+        }
+        let is_npy_rs = path.ends_with("interop/npy.rs");
+        if is_npy_rs {
+            npy_rs_seen = true;
+        }
+        for leaf in leaves {
+            if NPY_IO_BYTES_NAMES.contains(&leaf.as_str()) {
+                offending.push(format!(
+                    "{}: バイト列版 `{leaf}` の再エクスポート",
+                    path.display()
+                ));
+            } else if is_npy_rs {
+                npy_rs_leaves.push(leaf);
+            } else {
+                offending.push(format!(
+                    "{}: `{leaf}` の再エクスポート（interop/npy.rs 以外）",
+                    path.display()
+                ));
+            }
         }
     });
+    assert!(npy_rs_seen, "src/interop/npy.rs が走査対象に見つからない");
+    npy_rs_leaves.sort();
+    let mut expected: Vec<String> = NPY_IO_APPROVED_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        npy_rs_leaves, expected,
+        "src/interop/npy.rs の `pub use` 葉が承認済み 5 名と過不足なく 1 件ずつ一致しない"
+    );
     assert!(
         offending.is_empty(),
-        "facade の公開面が npy/npz 読み書き（#2189 の `load_npy`／\
-         `save_npy`／`load_npz`／`save_npz`／`NpyError`。内部クレート限定の\
-         新規公開面。facade 公開は承認待ちのため対象外という設計判断に\
-         違反）を再エクスポート、独自宣言、または同名の fn を宣言している: \
+        "facade の公開面が npy/npz 読み書きの承認形（#2590。`interop::npy` の純再エクスポート \
+         5 名のみ）から外れている（他ファイルからの再エクスポート・バイト列版・独自宣言）: \
          {offending:?}"
     );
+}
+
+/// [`facade_reexports_npy_io_only_from_interop_npy`] の検出本体
+/// [`scan_npy_io_reexports_and_declarations`] へ違反例を直接渡し、承認範囲外が
+/// 検出されることを固定する（合成入力）。
+#[test]
+fn npy_io_scanner_detects_unapproved_forms() {
+    let (leaves, decls) = scan_npy_io_reexports_and_declarations(
+        "pub use fandhe_ai_tensor_core::io::npy::read_npy_bytes;\n\
+         pub use fandhe_ai_tensor_core::io::npz::{write_npz_bytes as w, load_npz};\n\
+         pub use fandhe_ai_tensor_core::io::npy::load_npy as other;\n",
+    );
+    for want in ["read_npy_bytes", "write_npz_bytes", "load_npz", "load_npy"] {
+        assert!(
+            leaves.iter().any(|l| l == want),
+            "葉 {want} を検出できない: {leaves:?}"
+        );
+    }
+    assert!(decls.is_empty());
+
+    let (_, decls) = scan_npy_io_reexports_and_declarations(
+        "pub struct NpyError;\npub fn save_npz() {}\nfn load_npy() {}\n",
+    );
+    assert_eq!(decls.len(), 3, "独自宣言を検出できない: {decls:?}");
+}
+
+/// `src/interop/npy.rs` 専用の固定パス。
+fn interop_npy_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/interop/npy.rs")
+}
+
+/// `src/interop/npy.rs` が facade 独自の型・関数・impl 等の公開宣言を持たない
+/// 純再エクスポートモジュールであることを固定する
+/// （`interop_safetensors_module_is_pure_reexport` と同型。#2590）。
+#[test]
+fn interop_npy_module_is_pure_reexport() {
+    let content = read_to_string_or_panic(&interop_npy_rs_path());
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/interop/npy.rs が facade 独自の公開宣言を持つ（純再エクスポート契約違反）: {offending:?}"
+    );
+}
+
+/// 承認済み `pub use` 行の完全一致集合（取得元パスを識別子ごとに厳密に固定。
+/// P3・#2590）。取得元の接頭辞一致方式は `io::crc32::{..}` 等を受理しうるため
+/// 採らず、行そのものを固定する。
+const NPY_APPROVED_PUB_USE_LINES: [&str; 3] = [
+    "pub use fandhe_ai_tensor_core::io::NpyError;",
+    "pub use fandhe_ai_tensor_core::io::npy::{load_npy, save_npy};",
+    "pub use fandhe_ai_tensor_core::io::npz::{load_npz, save_npz};",
+];
+
+/// `content` の `pub use` で始まる行のうち [`NPY_APPROVED_PUB_USE_LINES`] に
+/// 完全一致しないもの（別名・glob・取得元違い・バイト列版・複数行折返しの断片）
+/// と、承認行で欠けているものを返す。
+fn npy_pub_use_line_violations(content: &str) -> Vec<String> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut violations = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("pub use") {
+            continue;
+        }
+        if NPY_APPROVED_PUB_USE_LINES.contains(&trimmed) && seen.insert(trimmed) {
+            continue;
+        }
+        violations.push(format!("不正または重複: {trimmed}"));
+    }
+    for want in NPY_APPROVED_PUB_USE_LINES {
+        if !seen.contains(want) {
+            violations.push(format!("欠落: {want}"));
+        }
+    }
+    violations
+}
+
+/// `src/interop/npy.rs` の `pub use` が承認済み 3 行と完全一致することを固定する
+/// （P3: 5 名・別名なし・バイト列版なし）。
+#[test]
+fn interop_npy_reexports_exactly_expected_surface() {
+    let content = read_to_string_or_panic(&interop_npy_rs_path());
+    let violations = npy_pub_use_line_violations(&content);
+    assert!(
+        violations.is_empty(),
+        "src/interop/npy.rs の pub use が承認形（5 名・別名なし・バイト列版なし）と一致しない: {violations:?}"
+    );
+
+    // 合成入力: 違反が検出されること。
+    for bad in [
+        "pub use fandhe_ai_tensor_core::io::npy::{load_npy, save_npy, read_npy_bytes};",
+        "pub use fandhe_ai_tensor_core::io::npy::*;",
+        "pub use fandhe_ai_tensor_core::io::crc32::{load_npz, save_npz};",
+        "pub use fandhe_ai_tensor_core::io::npy::{load_npy as l, save_npy};",
+        "pub use fandhe_ai_tensor_core::io::npz::{write_npz_bytes, read_npz_bytes};",
+    ] {
+        let mut synthetic = NPY_APPROVED_PUB_USE_LINES.join("\n");
+        synthetic.push('\n');
+        synthetic.push_str(bad);
+        assert!(
+            !npy_pub_use_line_violations(&synthetic).is_empty(),
+            "合成違反が検出されない: {bad}"
+        );
+    }
+    // 承認行の欠落も検出される。
+    assert!(!npy_pub_use_line_violations(NPY_APPROVED_PUB_USE_LINES[0]).is_empty());
+}
+
+/// `fandhe_ai::interop::npy::{NpyError, load_npy, save_npy, load_npz,
+/// save_npz}` が facade から到達可能であること・署名をコンパイル時に固定する
+/// （`NpyError` は `#[non_exhaustive]` のためワイルドカード腕で `match`。#2590）。
+#[test]
+fn interop_npy_types_are_reachable_via_facade() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::interop::npy::{NpyError, load_npy, load_npz, save_npy, save_npz};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    type Map = HashMap<String, Tensor<f32>>;
+    type LoadOne = fn(PathBuf) -> Result<Tensor<f32>, NpyError>;
+    type SaveOne = fn(&Tensor<f32>, PathBuf) -> Result<(), NpyError>;
+    type LoadMap = fn(PathBuf) -> Result<Map, NpyError>;
+    type SaveMap = fn(&Map, PathBuf) -> Result<(), NpyError>;
+    let _l: LoadOne = load_npy::<PathBuf>;
+    let _s: SaveOne = save_npy::<PathBuf>;
+    let _lz: LoadMap = load_npz::<PathBuf>;
+    let _sz: SaveMap = save_npz::<PathBuf>;
+
+    let err = load_npy("/nonexistent/fandhe-ai-npy-surface-probe.npy").unwrap_err();
+    let _label = match &err {
+        NpyError::Io(_) => "io",
+        NpyError::InvalidMagic => "invalid_magic",
+        _ => "other",
+    };
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`NPY_IO_FN_NAMES`]
@@ -26293,11 +26456,12 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 12] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 13] = [
     "compat",
     "data",
     "inference",
     "interop",
+    "interop::npy",
     "interop::onnx",
     "interop::safetensors",
     "model",
@@ -26325,6 +26489,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use fandhe_ai::compat::*;
     pub use fandhe_ai::data::*;
     pub use fandhe_ai::inference::*;
+    pub use fandhe_ai::interop::npy::*;
     pub use fandhe_ai::interop::onnx::*;
     pub use fandhe_ai::interop::safetensors::*;
     pub use fandhe_ai::interop::*;

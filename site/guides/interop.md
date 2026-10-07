@@ -9,7 +9,9 @@ safetensors save／load は `fandhe_ai::interop::safetensors`
 （`LoadError`／`SaveError`／`load_safetensors_f32`／
 `load_safetensors_f32_from_bytes`／`require_keys`／
 `save_safetensors_f32`／`save_safetensors_f32_to_bytes`）として、
-いずれも `fandhe-ai` から公開されています。** import 済みモデルの
+いずれも `fandhe-ai` から公開されています。NumPy 互換の `.npy`／`.npz` 読み書きは
+`fandhe_ai::interop::npy`（`NpyError`／`load_npy`／`save_npy`／`load_npz`／`save_npz`。
+`Tensor<f32>` 限定・パス版のみ。書き出しは原子的ではなく、読み込みは symlink を辿る）です。** import 済みモデルの
 roundtrip export に加え、学習済み `compat::Sequential`（対応層は
 `Linear`／`ReLU`／`Softmax`／`LayerNorm`／`GELU`〈erf 版〉／
 `Conv2d` の 6 種。`Sigmoid` は数値契約が承認保留のため対象外）から

@@ -153,7 +153,8 @@ pub mod nn;
 /// to_bytes, to_path}`・`OnnxExportOptions`・`OnnxExternalDataLimits`
 /// 〈external data 読み込み予算。#2360〉。export は #2018 で公開済み・roundtrip
 /// export ラッパー限定）に加え、[`interop::safetensors`]（safetensors
-/// save／load 純再エクスポート。イシュー #2019）を提供する
+/// save／load 純再エクスポート。イシュー #2019）と [`interop::npy`]（npy／npz
+/// 読み書き純再エクスポート。イシュー #2590）を提供する
 /// （`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-
 /// safetensors-exposure-decision.md`）。
 pub mod interop;
@@ -1859,6 +1860,7 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -1968,6 +1970,7 @@ struct VarCustomHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2164,6 +2167,7 @@ struct VarBoolOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2305,6 +2309,7 @@ struct VarHooksHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2424,6 +2429,7 @@ struct VarActivationOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2476,6 +2482,7 @@ struct VarActivationOpsHoldDoctestGuard;
 ///     use fandhe_ai::interop::*;
 ///     use fandhe_ai::interop::onnx::*;
 ///     use fandhe_ai::interop::safetensors::*;
+///     use fandhe_ai::interop::npy::*;
 ///     use fandhe_ai::model::*;
 ///     use fandhe_ai::inference::*;
 ///
@@ -2559,6 +2566,7 @@ struct RngDistributionsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2649,6 +2657,7 @@ struct SpatialLayersHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2742,6 +2751,7 @@ struct VarConv3dHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2829,6 +2839,7 @@ struct AdaptiveMaxGlobalPoolHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2902,6 +2913,7 @@ struct DropoutEmbeddingBagHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -2990,6 +3002,7 @@ struct RnnConfigHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3084,6 +3097,7 @@ struct PixelShuffleHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3211,6 +3225,7 @@ struct LossOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3292,6 +3307,7 @@ struct EmaHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3395,6 +3411,7 @@ struct SwaHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3505,6 +3522,7 @@ struct FitWeightingHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3546,40 +3564,30 @@ struct FitWeightingHoldDoctestGuard;
 #[allow(dead_code)]
 struct TrainStepHoldDoctestGuard;
 
-/// イシュー #2189（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `RngDistributionsHoldDoctestGuard`（#2156）と同型の「正のプローブ 1
-/// ブロック方式」を採る: facade の全 `pub mod` を glob import した
-/// スコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_npy_io_hold_probe::{NpyError, load_npy, save_npy, load_npz,
-/// save_npz, npy, npz}` を導入し、実際に使う名前・呼び出しを書く。
-/// facade がどの経路（`interop`／`tensor_io` 配下への自由関数としての
-/// 再エクスポート・`Tensor<f32>` への inherent メソッド追加・facade 独自
-/// の `pub mod npy`／`pub mod npz`／`struct NpyError` 宣言）でこれらの
-/// 名前を公開しても、ローカル定義との glob 衝突（自由関数・モジュール名・
-/// 型名の場合。E0659 等）または呼び出しシグネチャの不一致（inherent
-/// メソッドがトレイトメソッドより優先解決されるため、本プローブの trait
-/// 経由呼び出しが型・引数不一致でコンパイル失敗する）でエラーコードに
-/// 依存せずコンパイルが失敗する。
-///
-/// `tensor-core` 側の実装（`crates/tensor-core/src/io/{mod,npy,npz,
-/// crc32,inflate}.rs`）は完了済みで、保留対象は facade 公開面 4 件
-/// （`load_npy`／`save_npy`／`load_npz`／`save_npz`。`NpyError` の
-/// 再エクスポートを含む）のみ。`Tensor` に inherent メソッドを追加しない
-/// のは facade が `pub use fandhe_ai_tensor_core::{..., Tensor, ...};`
-/// で `Tensor` を再エクスポートしているため、inherent メソッド追加が
-/// それだけで facade の公開面を広げてしまうから（#2156 の前例。
-/// `docs/rng-distributions-generator-decision.md:28`）。
+/// イシュー #2189（親 #2131）で導入し、イシュー #2590（親 #2588）で**代替案専用へ縮小**
+/// した facade 公開保留の doctest 足場。
+/// `ModelIoHoldDoctestGuard`（#2369 で縮小）と同型の「正のプローブ 1
+/// ブロック方式」を採る。自由関数 4 件と `NpyError` は #2590 で
+/// `fandhe_ai::interop::npy` として公開済み（承認形は
+/// `docs/tensor-core-npy-npz-io-decision.md` §10.4）のため、自由関数・
+/// モジュール名・型名の glob 衝突プローブは成立しなくなり削除した。
+/// 残すのは承認範囲外の代替案（`Tensor<f32>` への inherent メソッド追加）
+/// を検出する足場のみ: 本ブロック内でのみ定義したトレイト
+/// `__FandheNpyIoHoldProbe` を `fandhe_ai::Tensor<f32>` に実装し、
+/// `Tensor::load_npy`／`save_npy`／`load_npz`／`save_npz` を呼ぶ。
+/// inherent メソッドがトレイトメソッドより優先解決されるため、`Tensor` に同名
+/// メソッドが足されると呼び出しシグネチャの不一致でエラーコードに依存せず
+/// コンパイルが失敗する。`Tensor` に inherent メソッドを追加しないのは
+/// facade が `pub use fandhe_ai_tensor_core::{..., Tensor, ...};` で `Tensor`
+/// を再エクスポートしているため、追加がそれだけで公開面を広げてしまうから
+/// （#2156 の前例。`docs/rng-distributions-generator-decision.md:28`）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// npy_io_hold_doctest_globs_all_pub_modules`・`npy_io_hold_doctest_
-/// probe_body_matches_fixed_contract`・`facade_does_not_reexport_or_
-/// declare_npy_io`・`workspace_declares_npy_io_names_only_in_allowed_
-/// locations`）との多層防御の位置づけ・承認未取得の経緯は
-/// `docs/tensor-core-npy-npz-io-decision.md` §「承認事項」節を参照。
-///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
+/// probe_body_matches_fixed_contract`・`facade_reexports_npy_io_only_from_
+/// interop_npy`・`workspace_declares_npy_io_names_only_in_allowed_
+/// locations`）との多層防御の位置づけは
+/// `docs/tensor-core-npy-npz-io-decision.md` §12 を参照。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -3596,23 +3604,9 @@ struct TrainStepHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
-///
-/// mod __fandhe_npy_io_hold_probe {
-///     pub struct NpyError;
-///     pub fn load_npy() {}
-///     pub fn save_npy() {}
-///     pub fn load_npz() {}
-///     pub fn save_npz() {}
-///     pub mod npy {
-///         pub fn __mark() {}
-///     }
-///     pub mod npz {
-///         pub fn __mark() {}
-///     }
-/// }
-/// use __fandhe_npy_io_hold_probe::*;
 ///
 /// struct __FandheNpyIoHoldMarker;
 ///
@@ -3628,17 +3622,6 @@ struct TrainStepHoldDoctestGuard;
 ///     fn save_npy(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }
 ///     fn load_npz(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }
 ///     fn save_npz(&self) -> __FandheNpyIoHoldMarker { __FandheNpyIoHoldMarker }
-/// }
-///
-/// fn __probe_free_fns(_: NpyError) {
-///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
-///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
-///     load_npy();
-///     save_npy();
-///     load_npz();
-///     save_npz();
-///     npy::__mark();
-///     npz::__mark();
 /// }
 ///
 /// fn __probe_tensor(x: &fandhe_ai::Tensor<f32>) {
@@ -3706,6 +3689,7 @@ struct NpyIoHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3807,6 +3791,7 @@ struct ModelIoHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -3892,6 +3877,7 @@ struct GenerateHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4006,6 +3992,7 @@ struct FftOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4136,6 +4123,7 @@ struct TrigOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4274,6 +4262,7 @@ struct NonfiniteOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4384,6 +4373,7 @@ struct CumulativeOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4528,6 +4518,7 @@ struct StatReduceOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4706,6 +4697,7 @@ struct BinningOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4826,6 +4818,7 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -4976,6 +4969,7 @@ struct ShapeViewOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -5097,6 +5091,7 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -5225,6 +5220,7 @@ struct TensorProductOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -5324,6 +5320,7 @@ struct PadModesHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -5465,6 +5462,7 @@ struct Pool3dOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -5648,6 +5646,7 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -5786,6 +5785,7 @@ struct FoldUnfoldHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -5960,6 +5960,7 @@ struct LrnWeightReparamHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -6152,6 +6153,7 @@ struct PackedSequenceHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -6293,6 +6295,7 @@ struct ActivationScalarOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -6454,6 +6457,7 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -6596,6 +6600,7 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -6748,6 +6753,7 @@ struct MarginFocalLossOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -6838,6 +6844,7 @@ struct FunctionalApiHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -7047,6 +7054,7 @@ struct MergeOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
@@ -7145,6 +7153,7 @@ struct JacobianHessianHoldDoctestGuard;
 /// use fandhe_ai::interop::*;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///

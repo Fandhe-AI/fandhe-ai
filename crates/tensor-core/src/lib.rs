@@ -96,11 +96,10 @@
 //! ZIP コンテナ解析・CRC-32・DEFLATE 伸長を自作し（[`io::crc32`]・
 //! [`io::inflate`] はいずれも `pub(crate)`）、依存は追加しない。GPU
 //! カーネル・演算グラフ（`Op`／`BackendOps`）とは無関係な、ホスト常駐
-//! テンソルに閉じた IO である。facade への公開（`Tensor` への
-//! inherent メソッド追加、または `interop`／`tensor_io` 配下の自由
-//! 関数としての再エクスポート）は承認待ちのため保留中
-//! （`crates/facade/src/lib.rs::NpyIoHoldDoctestGuard`・
-//! `docs/tensor-core-npy-npz-io-decision.md`）。
+//! テンソルに閉じた IO である。facade へは `fandhe_ai::interop::npy` の純
+//! 再エクスポートとして公開済み（イシュー #2590。`Tensor` への inherent
+//! メソッド追加は引き続きしない。`crates/facade/src/lib.rs::
+//! NpyIoHoldDoctestGuard`・`docs/tensor-core-npy-npz-io-decision.md`）。
 //!
 //! `layout`（`backend-metal` 専用モジュール〈#1040〉の 2 次元 view 転置
 //! 分類・先頭次元 collapse）は、イシュー #1046 で `autodiff::eval::matmul`

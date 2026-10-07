@@ -13,14 +13,15 @@
 //! ホスト常駐 `Tensor<f32>` に閉じた IO であり、`autodiff`・
 //! `backend-*` に新たな契約を課さない。
 //!
-//! **facade への公開は保留中**（`crates/facade/src/lib.rs::
-//! NpyIoHoldDoctestGuard`。承認事項の詳細は
-//! `docs/tensor-core-npy-npz-io-decision.md` を参照）。#2156（RNG 確率
-//! 分布サンプラー）の前例に倣い、`Tensor` への inherent メソッドは
-//! 追加しない（facade が `pub use fandhe_ai_tensor_core::{..., Tensor,
-//! ...};` で `Tensor` を再エクスポートしているため、inherent メソッドは
+//! **facade へは `fandhe_ai::interop::npy` で公開済み**（イシュー #2590。
+//! 承認形は `docs/tensor-core-npy-npz-io-decision.md` §10.4。パス版 4 関数と
+//! `NpyError` の純再エクスポートのみで、バイト列版は公開しない）。#2156
+//! （RNG 確率分布サンプラー）の前例に倣い、`Tensor` への inherent メソッドは
+//! 引き続き追加しない（facade が `pub use fandhe_ai_tensor_core::{...,
+//! Tensor, ...};` で `Tensor` を再エクスポートしているため、inherent メソッドは
 //! それだけで facade の公開面を広げてしまう。`docs/rng-distributions-
-//! generator-decision.md:28` 参照）。
+//! generator-decision.md:28` 参照。`crates/facade/src/lib.rs::
+//! NpyIoHoldDoctestGuard` が検出する）。
 //!
 //! 外部フォーマット（ファイル）を扱うため、形式不正・非対応 dtype・
 //! 改ざん・巨大サイズ宣言はすべて確保の前に検証し fail-closed で
