@@ -13,6 +13,7 @@
 //! 3. `load_state_dict` が失敗したとき状態は変わらない（キー欠落・余剰キー・shape 不一致）。
 //! 4. 別種の optimizer の状態（`Adam` → `AdamW`）は種別マーカーで拒否される。
 //! 5. safetensors のバイト列を経由しても復元できる。
+//! 6. safetensors のファイルパス経由（`save_safetensors_f32`／`load_safetensors_f32`）でも復元できる（#2557）。
 //!
 //! 実機（CUDA/Metal）非依存のため `#[ignore]` 分離は行わない。許容誤差は使わず bit 一致で比較する。
 
@@ -20,7 +21,8 @@ use std::collections::HashMap;
 
 use fandhe_ai::Tensor;
 use fandhe_ai::interop::safetensors::{
-    load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes,
+    load_safetensors_f32, load_safetensors_f32_from_bytes, save_safetensors_f32,
+    save_safetensors_f32_to_bytes,
 };
 use fandhe_ai::optim::{
     Adadelta, AdadeltaConfig, Adagrad, AdagradConfig, Adam, AdamConfig, AdamW, AdamWConfig, Adamax,
@@ -250,4 +252,45 @@ fn load_rejects_state_of_another_optimizer_kind() {
 
     assert!(adamw.load_state_dict(adam_state).is_err());
     assert_eq!(before, state_bits(&adamw.state_dict().unwrap()));
+}
+
+/// ファイルパス経由（`save_safetensors_f32`／`load_safetensors_f32`）の往復でも、続きの
+/// `step()` が中断なしの場合と bit 一致する（#2557。バイト列経由は
+/// `assert_resume_is_bit_exact` の `via_bytes`）。一時ディレクトリはプロセス ID を含む
+/// 一意名で作り、成否に関わらず削除する。
+#[test]
+fn resume_via_safetensors_file_path_is_bit_exact() {
+    let dir = std::env::temp_dir().join(format!(
+        "fandhe_ai_optim_state_dict_{}_file_roundtrip",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let result = std::panic::catch_unwind(|| {
+        let path = dir.join("optimizer.safetensors");
+        let mut original = AdamW::new(AdamWConfig::default()).unwrap();
+        let mut params = initial_params();
+        for k in 0..3 {
+            params = original.drive(&params, &grads(k));
+        }
+        save_safetensors_f32(&path, &original.state_dict().unwrap()).expect("save");
+
+        let mut resumed = AdamW::new(AdamWConfig::default()).unwrap();
+        resumed
+            .load_state_dict(load_safetensors_f32(&path).expect("load"))
+            .expect("load_state_dict");
+
+        let mut p_a = params.clone();
+        let mut p_b = params;
+        for k in 3..6 {
+            p_a = original.drive(&p_a, &grads(k));
+            p_b = resumed.drive(&p_b, &grads(k));
+            for (a, b) in p_a.iter().zip(p_b.iter()) {
+                assert_eq!(bits(a), bits(b), "step {k} の更新後パラメータが一致しない");
+            }
+        }
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
 }
