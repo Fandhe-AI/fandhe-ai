@@ -431,7 +431,9 @@ L-BFGS は 1 epoch（= 1 outer step。フルバッチ）あたり `max_iter=20`
   `optim.rs` モジュール doc の doctest。§9 の「既知の制約」は解消した。
 - 帰結: `Lbfgs` の inherent `state_dict`／`load_state_dict`／`history_len`（§10）も
   `fandhe_ai::optim::Lbfgs` から到達可能になった。`OptimizerStateDict` trait は
-  再エクスポートしておらず（#2555 の範囲）、`OptimizerStateDictHoldDoctestGuard` は不変。
+  本記録の時点では再エクスポートしておらず保留ガードを置いていたが、#2556 で公開し
+  ガードを撤去した（`docs/autodiff-optimizer-state-dict-decision.md` §11）。`Lbfgs` は
+  trait の対象外のまま。
   直接 `load_state_dict` を呼ぶ場合の履歴長上限（`MAX_LBFGS_HISTORY`）は `load_model`
   経路側で強制されるため、呼び出し元が渡す `HashMap` の大きさに資源消費は依存する。
 

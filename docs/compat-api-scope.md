@@ -1327,7 +1327,7 @@ compat_optimizer_enum_has_lbfgs_variant`。variant がちょうど 1 個
 を撤去し、`optim_module_reexports_exactly_expected_surface` の期待集合と
 `lbfgs_types_are_reachable_via_facade_only` を正ガードとした。帰結として
 `Lbfgs` の inherent `state_dict`／`load_state_dict`／`history_len` も facade から
-到達可能になるが、`OptimizerStateDict` trait の公開は #2555 の範囲で不変。
+到達可能になる。`OptimizerStateDict` trait は #2556 で公開済み（`Lbfgs` は対象外のまま。適用記録は #2557）。
 
 **#2177（`fit()` の class_weight・sample_weight・validation_split
 対応）は経路 2 未適用のまま承認待ちで保留した。** コード変更なし
@@ -1411,6 +1411,10 @@ bool 比較 6 種（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／
 保留ガードは承認形のみを許す正ガードへ部分反転した（`workspace_declares_bool_ops_fn_names_in_approved_places_only`
 が委譲本体を固定。doctest は logical 3 件の保留を維持）。スコープ外: logical 3 件（#2594）・
 微分可能な `masked_select`・GPU 専用カーネル。
+
+> **更新（#2556）**: 下記の保留のうち `OptimizerStateDict` の再エクスポートは #2556 で公開済み
+> （`docs/autodiff-optimizer-state-dict-decision.md` §11）。保留ガードは正ガードへ反転した。
+> 本節の適用記録は #2557 で書く。
 
 **保留記録（イシュー #2174・親 #2131）**: `fandhe_ai::optim::
 OptimizerStateDict` の再エクスポートまたは `AdamW`／`Adam`／
