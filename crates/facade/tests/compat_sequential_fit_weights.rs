@@ -853,3 +853,88 @@ fn small_weight_with_large_residual_does_not_overflow() {
         h.loss[0]
     );
 }
+
+/// shuffle なしでは各サンプルの実バッチサイズで係数を検証する（N=3・batch=2 では先頭バッチの
+/// 実サイズは 2。最小バッチサイズ 1 で一律検査すると有限な入力を誤拒否する。レビュー指摘 #2823）。
+#[test]
+fn no_shuffle_validates_coefficients_with_actual_batch_size() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::CrossEntropy)
+        .unwrap();
+    let x = Tensor::new(vec![1.0f32, 1.0, 1.0], &[3, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 0, 0], &[3]).unwrap();
+    let w = FitWeights::new()
+        .sample_weight(&[1e19, 0.0, 0.0])
+        .class_weight(HashMap::from([(0u32, 5e19f32)]));
+    // shuffle なし: サンプル 0 は実バッチサイズ 2 → 係数 2.5e38 で有限。
+    m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 2).shuffle(false),
+        &w,
+        None,
+        &mut [],
+        &[],
+    )
+    .unwrap();
+    // shuffle あり: 最小バッチサイズ 1 で評価するため 5e38 が f32 で表現不能 → 拒否。
+    let r = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 2).shuffle(true),
+        &w,
+        None,
+        &mut [],
+        &[],
+    );
+    assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));
+}
+
+/// 重み付き MSE の `pred − target` 自体が f32 で overflow する入力でも loss が有限。
+#[test]
+fn weighted_mse_subtraction_does_not_overflow() {
+    let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
+        .unwrap();
+    let x = Tensor::new(vec![0.0f32], &[1, 1]).unwrap();
+    let y = Tensor::new(vec![-3e38f32], &[1, 1]).unwrap();
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, 1),
+            &FitWeights::new().sample_weight(&[1e-40]),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert!(h.loss[0].is_finite(), "loss = {}", h.loss[0]);
+}
+
+/// ゼロ重み行の内部層 overflow が非有限勾配になっても、パラメータは汚染されない
+/// （更新前に拒否されるか、有限のまま更新される）。
+#[test]
+fn zero_weight_row_with_internal_overflow_never_pollutes_params() {
+    let mut m = Sequential::new()
+        .add_linear(1, 4, 5)
+        .unwrap()
+        .add_linear(4, 2, 6)
+        .unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let x = Tensor::new(vec![f32::MAX, 1.0], &[2, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 1], &[2]).unwrap();
+    let _ = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 2),
+        &FitWeights::new().sample_weight(&[0.0, 1.0]),
+        None,
+        &mut [],
+        &[],
+    );
+    for p in m.trainable_parameters() {
+        assert!(p.host_slice().iter().all(|v| v.is_finite()), "polluted");
+    }
+}

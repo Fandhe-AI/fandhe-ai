@@ -904,12 +904,16 @@ fn checked_f32_coef(v: f64, what: &str) -> Result<f32, AutodiffError> {
 /// `Loss::CrossEntropy` の係数 `w_i·cw(y_i)/N_batch` が、全サンプル・全バッチで f32 表現可能か
 /// を最初の更新前に検査する（バッチ内だけの検証では、後続バッチの表現不能な係数が先行バッチの
 /// 更新後に初めて見つかり「更新前に拒否する」契約を破るため。レビュー指摘 #2823）。
-/// 係数は `N_batch` に反比例して大きくなるので、実際に現れる最小の実バッチサイズ
-/// （端数バッチを含む。`drop_last` なら端数なし）で全サンプルを評価すれば十分。
+/// 係数は `N_batch` に反比例して大きくなる。`shuffle = true` は所属バッチが epoch ごとに
+/// 変わるため、実際に現れうる最小の実バッチサイズ（端数バッチを含む。`drop_last` なら端数なし）
+/// で全サンプルを評価する。`shuffle = false` は所属バッチが固定なので各サンプルをその実バッチ
+/// サイズで評価し、`drop_last` で捨てられる端数バッチのサンプルは検査しない
+/// （最小バッチサイズで一律検査すると有限な入力を誤って拒否する。レビュー指摘 #2823）。
 fn check_ce_coefs_for_all_batches(
     classes: &[i32],
     batch_size: usize,
     drop_last: bool,
+    shuffle: bool,
     weights: &FitWeights<'_>,
 ) -> Result<(), AutodiffError> {
     let total = classes.len();
@@ -923,6 +927,16 @@ fn check_ce_coefs_for_all_batches(
         batch_size.min(total)
     };
     for (i, &yi) in classes.iter().enumerate() {
+        let nb = if shuffle {
+            min_nb
+        } else {
+            let start = (i / batch_size) * batch_size;
+            let actual = batch_size.min(total - start);
+            if drop_last && actual < batch_size {
+                continue;
+            }
+            actual
+        };
         let cw = weights
             .class_weight
             .as_ref()
@@ -930,7 +944,7 @@ fn check_ce_coefs_for_all_batches(
             .unwrap_or(1.0);
         let sw = sample_weight_at(weights.sample_weight, i) as f64;
         checked_f32_coef(
-            -(sw * cw as f64) / min_nb as f64,
+            -(sw * cw as f64) / nb as f64,
             "sample_weight × class_weight",
         )?;
     }
@@ -993,12 +1007,14 @@ fn weighted_mse_loss<'t>(
     }
     let coef_t = Tensor::new(coef, &shape).map_err(AutodiffError::Shape)?;
     let coef_v = tape.var_no_grad(&coef_t);
-    let mut d = pred.sub(&tape.var_no_grad(target))?;
+    // `pred − target` を f32 で先に作ると有限入力でも overflow しうる（例 pred=3e38,
+    // target=-3e38）。両オペランドを先に `s_i` で縮めてから減算する（レビュー指摘 #2823）。
+    let target_v = tape.var_no_grad(target);
+    let mut scaled = pred.mul(&coef_v)?.sub(&target_v.mul(&coef_v)?)?;
     if zero_mask.iter().any(|&b| b) {
         let mask_t = Tensor::new(zero_mask, &shape).map_err(AutodiffError::Shape)?;
-        d = d.masked_fill(&mask_t, 0.0)?;
+        scaled = scaled.masked_fill(&mask_t, 0.0)?;
     }
-    let scaled = d.mul(&coef_v)?;
     scaled.mul(&scaled)?.sum(None)
 }
 
@@ -3088,6 +3104,7 @@ impl Sequential {
                                     &cls.host_slice(),
                                     config.batch_size,
                                     config.drop_last,
+                                    config.shuffle,
                                     weights,
                                 )
                             {
@@ -3186,6 +3203,19 @@ impl Sequential {
                                 Ok(v) => v,
                                 Err(e) => break 'epochs_block Err(e),
                             };
+                            // 非既定の重み: ゼロ重み行を出力側でマスクしても、内部層の overflow
+                            // （`inf × 0 = NaN`）が勾配へ混入しうる。optimizer.step より前に
+                            // 非有限勾配を拒否し、パラメータ汚染を防ぐ（レビュー指摘 #2823）。
+                            if weighted
+                                && grad_refs
+                                    .iter()
+                                    .any(|g| g.host_slice().iter().any(|v| !v.is_finite()))
+                            {
+                                break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                    "Sequential::{method}: 重み付き損失の勾配に非有限値（NaN／inf）が\
+                                     含まれるためパラメータ更新を拒否した（内部層の overflow の疑い）"
+                                )));
+                            }
 
                             // 勾配累積（イシュー #2180）。AMP は
                             // `accumulate_steps > 1` と併用できない
