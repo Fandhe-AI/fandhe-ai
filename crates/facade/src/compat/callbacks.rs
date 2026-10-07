@@ -149,6 +149,9 @@
 //!   `compile_with_amp`（AMP の skip step の扱いが決定記録 §10.2 (g) で未決のため）。
 //! - **対象外**: decay ウォームアップ・`BatchNorm` の running buffer・デバイス常駐経路
 //!   （`fit` 経路は構造上到達しない。手動で併用すると shadow が stale 化する）・SWA。
+//!
+//! 公開面は `api_surface.rs` の正ガード（`facade_exposes_ema_only_in_approved_shape`・
+//! `ema_types_are_reachable_via_facade_only`。イシュー #2561）で固定している。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
