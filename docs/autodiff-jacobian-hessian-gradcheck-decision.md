@@ -206,3 +206,52 @@ grep -rnE "fn (numeric_grad|finite_diff[a-z_]*|central_diff[a-z_]*|analytic_hess
 - facade 公開（`Tape::jacobian`／`Tape::hessian`）: #2677 の承認後に #2678。
 - CUDA（GB10）・Metal（M4 Max）実機 parity: `docs/perf/logs/jacobian-hessian-2670/README.md`（未実測）。
 - HVP 専用 API・複数入力・微分可能な jacobian・forward-mode／vmap・`VarF64` 版・create_graph 対象 Op の拡張は本イシューの対象外。
+
+
+## 9. 実装記録（#2671）
+
+本節は §3.4・§3.5・§3.6・§3.8 の推奨案のうち **gradcheck と anomaly detection の内部実装と保留ガード**を実装した記録である（イシュー #2671・親 #2668）。**facade 公開形は未承認のままで、承認依頼は #2677・公開は承認後の #2678**（本記録は承認記録ではない）。
+
+### 9.1 実装
+
+| 項目 | 内容 |
+|---|---|
+| 置き場所 | `crates/autodiff/src/gradcheck.rs`（`pub mod gradcheck`）・`crates/autodiff/src/anomaly.rs`（`pub mod anomaly`）。自由関数と内部型のみで、`Var`・`Tape` へ inherent メソッドを足していない。クレートルートへの型の再エクスポートもない |
+| gradcheck | `gradcheck(make_tape: Fn() -> Tape, f: for<'a> Fn(&'a Tape, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>, inputs: &[Tensor<f32>], options: &GradcheckOptions) -> Result<GradcheckReport, AutodiffError>`。解析側は既存 `jacobian_ops::jacobian` を入力ごとに呼び、数値側は評価ごとに `make_tape()` で新しいテープを作って中心差分（forward 値を `f64` へ昇格）。評価回数は `1 + 2·Σn_k` |
+| `GradcheckOptions` | `new(eps, atol, rtol, tau)` が有限かつ正を検査（違反は `InvalidArgument`）。`Default` なし・フィールド非公開。判定式は #223 承認済みの grad-check テスト判定と同式（`rel = abs / max(|a|, |n|, tau)`、`rel <= rtol` または `abs <= atol`、非有限は不合格） |
+| `GradcheckReport` | 合否・最大絶対誤差・最大相対誤差・最悪要素の位置（入力番号・出力の平坦添字・入力の平坦添字。絶対誤差最大の要素）・検査要素数。不一致は `Err` ではなく `Ok(不合格)` |
+| gradcheck の入口検査 | 空の `inputs`・出力要素数 0・摂動点での出力 shape 変化・`eps` が入力値に対して小さすぎ f32 で摂動が潰れる場合は `InvalidArgument`。要素数は検査付き乗算。出力が渡したテープに属さなければ `TapeMismatch`。クロージャ・`make_tape` の `Err` は伝播 |
+| anomaly | `backward_detect_anomaly(tape: &Tape, loss: &Var<'_>) -> Result<Gradients, AutodiffError>`。`Tape::backward` を 1 回呼んだうえで、実体化済みのノード値を node id 昇順（forward 段階）、勾配を node id 降順（gradient 段階）に読み取り専用で走査し、最初の NaN／±inf を `AutodiffError::Backward` で報告。非有限が無ければ `Tape::backward` の `Gradients` をそのまま返す（bit 一致）。グローバル／テープ単位のモードは置かない |
+| メッセージ | 段階・node id・Op 種別名・shape のみ（gradient 段階は消費側ノード候補を最大 4 件併記し、断定表現にしない）。Op 種別名は `Op` の `Debug` 出力のうち識別子文字の先頭部分だけを取る非公開関数で得る。`CrossEntropyLoss` の targets・スカラー演算の定数・`Custom` の利用者定義名・テンソル値は載らない |
+| 変更したもの | `backward.rs` へ `Gradients` の読み取り専用 `pub(crate)` accessor（`grad_slots`）1 つ、`lib.rs` へ `pub mod` 2 件。`backward_impl`・`Op`・VJP・`AutodiffError`・`Cargo.toml`／`Cargo.lock`・tolerance・baseline・`docs/spec/` は不変。新規 `unsafe` なし |
+
+§3.4・§3.5 の推奨案との差分:
+
+- **行取り出しの共用は行わず `jacobian` の呼び出しで代替**: 非公開の行取り出しヘルパーは共有せず、公開済みの `jacobian_ops::jacobian` を入力ごとに呼ぶ。`jacobian_ops.rs` は無変更。入力数ぶん backward が増えるが、検証用途の使い捨てテープなので許容。
+- **数値微分の分母は `2·eps` ではなく実際の摂動幅**: `(x + eps) as f32` と `(x − eps) as f32` の差（f32 丸め後）で割る。丸めで摂動が潰れる場合（差が 0 以下）は `InvalidArgument`。
+- **anomaly の「最初」の規則**: forward 段階を先に見て、見つかれば gradient 段階は走査しない（原因に近い側を先に報告）。forward は実体化済みノードのみで、未実体化の遅延ノードや `ResidentLeaf` は新たに実体化しない。
+
+### 9.2 検証結果
+
+| 層 | 内容 | 結果 |
+|---|---|---|
+| G1 | PyTorch 2.14.0 実行値 fixture（`tests/fixtures/gradcheck-anomaly-pytorch-reference/`・生成条件と sha256 は同 `README.md`）の 7 プログラム（要素ごとの合成・matmul＋tanh・縮約・小さな MLP・rank 0 入力・複数入力・キンクを避けた relu）について、forward 値と解析ヤコビアンを REQ-2 統一複合判定（`common::req2_close`）で全要素突合。あわせて同じプログラムが `gradcheck`（`eps=1e-3`・`atol=1e-3`・`rtol=1e-2`・`tau=1e-4`。#223 承認済みの組のみ）に合格し、検査要素数が出力要素数 × 入力要素数の総和と一致 | 全件 pass |
+| G2 | 正しい VJP は合格。`Tape::custom` で backward を `2·upstream` に誤らせた恒等関数は不合格で、最大絶対誤差 1・最悪位置は対角 | pass |
+| G3 | 数値ヤコビアンと PyTorch f64 の差を**非ゲートで記録**（assert なし）。gradcheck の最大絶対誤差は 6.5e-6〜1.7e-4、最大相対誤差は 6.5e-6〜8.0e-4 | 記録のみ（閾値内） |
+| A1 | forward の NaN（`log` に負値）・+inf（`exp` のオーバーフロー）を node id・Op 名・shape で検出／forward は有限で勾配が非有限（`sqrt` の 0）を gradient 段階で検出／異常なしでは `Tape::backward` と全入力の勾配が bit 一致／呼び出し前後でノード数と値が不変／追跡なし loss・別テープは既存エラーがそのまま返る／メッセージに `Custom` の利用者定義名が載らない（`CrossEntropyLoss` の targets は単体テストで `Debug` 全体には含まれるが種別名には出ないことを確認） | 全件 pass |
+| fail-closed | 非有限・非正のオプション・空の `inputs`・出力要素数 0・別テープの出力・クロージャの `Err` 伝播・摂動点での shape 変化・f32 で潰れる `eps`・`make_tape` の呼び出し回数が `1 + 2·Σn`・利用者の既存テープが無変更 | 全件 pass |
+| backend | `crates/facade/tests/gradcheck_anomaly_backend_parity.rs`: 実 `CpuBackendOps` tape と `NaiveOps` tape で合否・検査要素数・解析ヤコビアン（`assert_parity`）・anomaly のメッセージが一致＋手計算 1 件 | pass。CUDA／Metal 版は `#[ignore]`・**実機未実測**（`docs/perf/logs/gradcheck-anomaly-2671/README.md`） |
+
+保留ガードの検出力は、facade の `Tape` へ仮に `pub fn gradcheck` を足して doctest・`facade_does_not_reexport_or_declare_gradcheck_anomaly`・インベントリが落ちることを一時変更で確認し、戻した（コミットしていない）。
+
+### 9.3 保留ガード（§3.8）
+
+- `crates/facade/src/lib.rs::GradcheckAnomalyHoldDoctestGuard`（`#[cfg(doctest)]`。全 `pub mod` glob import のスコープへ、ローカルモジュール `gradcheck`・`anomaly`・裸の自由関数 `gradcheck`／`backward_detect_anomaly`・単位構造体 `GradcheckOptions`／`GradcheckReport`・`Var`／`Tape`／`Tensor<f32>` 向けの同名メソッドのプローブを置く正のプローブ 1 ブロック方式。モジュール `gradcheck` と関数 `gradcheck` は名前空間が別のため同一プローブ内で共存でき、両方を検査している）。検出範囲は列挙した名前に限る。
+- `crates/facade/tests/api_surface.rs` の 5 テスト: `gradcheck_anomaly_hold_doctest_globs_all_pub_modules`・`gradcheck_anomaly_hold_doctest_probe_body_matches_fixed_contract`（固定文言 `GRADCHECK_ANOMALY_HOLD_PROBE_BODY`）・`facade_does_not_reexport_or_declare_gradcheck_anomaly`・同 `_detects_each_category`・`workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations`（期待値は `autodiff/src/gradcheck.rs::gradcheck`・`autodiff/src/anomaly.rs::backward_detect_anomaly` 各 1 件）。
+- 承認後（#2678）は doctest ガードを削除し、否定ガードを正ガードへ反転する。
+
+### 9.4 申し送り
+
+- facade 公開（`Tape::gradcheck`〈`TapeRef` アダプタ〉／`Tape::backward_detect_anomaly`＋`GradcheckOptions`／`GradcheckReport` の再エクスポート）: #2677 の承認後に #2678。
+- CUDA（GB10）・Metal（M4 Max）実機 parity: `docs/perf/logs/gradcheck-anomaly-2671/README.md`（未実測）。
+- `VarF64` 版 gradcheck・gradgradcheck・複数出力・`compat::Sequential::fit` への anomaly 結線・プロセスワイド／テープ単位の検出モード・テスト内に散在する私的な数値勾配ヘルパーの統合は本イシューの対象外。
