@@ -45,17 +45,21 @@
 //! 保留。詳細は `docs/autodiff-var-operator-overload-design.md` §14）。
 //!
 //! `hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
-//! body_matches_fixed_contract`・`workspace_declares_no_hook_registration_
-//! fns`・`autodiff_declares_no_register_hook_fn` の 4 テストは
+//! body_matches_fixed_contract`・`workspace_declares_hook_registration_fns_
+//! only_on_autodiff_tape`・`autodiff_declares_no_register_hook_fn` の 4 テストは
 //! `VarHooksHoldDoctestGuard`（`VarBoolOpsHoldDoctestGuard` 系と同型の
 //! 正のプローブ 1 ブロック方式＋workspace 全体のソース走査＋
 //! `crates/autodiff/src/` 限定の `register_hook` allowlist 化ガード）で、
 //! forward・backward hooks（イシュー #2139。親 #2138・#2131）の facade
 //! 公開保留を固定する。#2139 は設計 doc §11 の承認事項 5 項目がそろう
 //! まで着手不可という設計判断（`docs/autodiff-forward-backward-hooks-
-//! design.md` §13）のため、本体実装（`crates/autodiff/**`）自体を
-//! 含まない保留固定 PR である（4 層構成の内訳は同 doc §13.3。
-//! `docs/compat-api-scope.md` §5 に同期する）。
+//! design.md` §13）のため、当初は本体実装（`crates/autodiff/**`）自体を
+//! 含まない保留固定 PR だった（4 層構成の内訳は同 doc §13.3。
+//! `docs/compat-api-scope.md` §5 に同期する）。承認（ルート #2499・
+//! 2026-10-07）後、イシュー #2586 で autodiff 本体（`Tape::
+//! register_backward_hook`・`remove_hook`）を実装し、workspace 全体の
+//! 定義元インベントリは「0 件」から「`autodiff/src/tape.rs` のみ」へ縮小した
+//! （同 doc §17）。facade 公開（保留 doctest の反転を含む）は #2587 で行う。
 
 use std::path::Path;
 
@@ -9326,7 +9330,7 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
 }";
 
-/// [`workspace_declares_no_hook_registration_fns`] が検査する 4 つの
+/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape`] が検査する 4 つの
 /// 関数名。`register_hook` はあえて含めない（並行する #2182 の DataLoader
 /// transform フック等、正当な用途で使われうる汎用名のため。facade から
 /// 到達できないことは `VarHooksHoldDoctestGuard` の doctest が固定する）。
@@ -9423,18 +9427,21 @@ fn count_fn_declarations_by_name_detects_register_hook() {
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、
-/// [`HOOK_REGISTRATION_FN_NAMES`]（4 個）の `fn` 宣言が可視性・宣言文脈
-/// を問わず 1 件も存在しないことを固定する（`workspace_declares_custom_
-/// fn_only_on_tape`・`workspace_declares_bool_ops_fn_names_in_
-/// approved_places_only` と同型の workspace 全体インベントリだが、本イシュー
-/// #2139 は本体実装自体が承認待ちのため「唯一の定義元」ではなく「0 件」
-/// を期待値とする点が異なる）。facade のソース走査・
+/// [`HOOK_REGISTRATION_FN_NAMES`]（4 個）の `fn` 宣言の定義元集合を固定する
+/// （`workspace_declares_custom_fn_only_on_tape_and_facade_delegation` と
+/// 同型のインベントリ。イシュー #2586 で「0 件」から縮小した。縮小の根拠は
+/// `docs/autodiff-forward-backward-hooks-design.md` §14.7・§17）。
+///
+/// **期待集合は `crates/autodiff/src/tape.rs` の `register_backward_hook`・
+/// `remove_hook`（各 1 件）の完全一致**。`register_forward_hook`・
+/// `remove_backward_hook` は workspace 全体で 0 件のまま（§14.4 P8）。
+/// facade 側の委譲 2 件は #2587 で追加し、その際に本期待集合へ
+/// `facade/src/lib.rs` を足す。facade のソース走査・
 /// `VarHooksHoldDoctestGuard` の正のプローブはいずれも「facade から到達
-/// 可能か」しか見ないため、facade の外（`autodiff`・`backend-*`・
-/// `onnx-interop` 等）に同名の関数が新設された場合に備え、そもそもの
-/// 定義自体の不在を固定する多層防御の最内層とする。
+/// 可能か」しか見ないため、facade の外に同名関数が新設された場合に備え、
+/// 定義元自体を固定する多層防御の最内層とする。
 #[test]
-fn workspace_declares_no_hook_registration_fns() {
+fn workspace_declares_hook_registration_fns_only_on_autodiff_tape() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -9485,19 +9492,26 @@ fn workspace_declares_no_hook_registration_fns() {
         });
     }
 
-    assert!(
-        found.is_empty(),
-        "workspace 全体（crates/*/src/）に register_forward_hook／\
-         register_backward_hook／remove_hook／remove_backward_hook の \
-         `fn` 宣言が見つかった\
-         （イシュー #2139 は §11 の承認事項 5 項目がそろうまで着手不可\
-         という設計判断〈docs/autodiff-forward-backward-hooks-design.md\
-         §13〉に違反する可能性がある。承認済みの実装であれば本ガード\
-         自体を撤去すること）: {found:?}"
+    let expected: std::collections::BTreeMap<String, usize> = [
+        (
+            "autodiff/src/tape.rs::register_backward_hook".to_string(),
+            1usize,
+        ),
+        ("autodiff/src/tape.rs::remove_hook".to_string(), 1usize),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の register_forward_hook／\
+         register_backward_hook／remove_hook／remove_backward_hook の `fn` 宣言集合が \
+         `crates/autodiff/src/tape.rs` の register_backward_hook・remove_hook（各 1 件。\
+         イシュー #2586）のみという期待と一致しない（過不足いずれも fail-closed に検出する。\
+         facade 委譲を追加する #2587 では期待集合をあわせて更新すること）: {found:?}"
     );
 }
 
-/// [`workspace_declares_no_hook_registration_fns`] が使う
+/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape`] が使う
 /// [`count_fn_declarations_by_name`] が、対象 4 関数名を実際に検出
 /// できることを固定する合成入力の自己テスト（検出器自体が機能して
 /// いなければ、前者の「0 件」判定が空合格になり得るため）。
@@ -16607,6 +16621,10 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
     let expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/nn/module.rs::state_dict", 1usize),
         ("autodiff/src/nn/module.rs::load_state_dict", 1usize),
+        // #2586: `ForwardHooked<M>`（forward hook ラッパー）が `Module` の同名
+        // メソッドを inner へ透過委譲する実装（optimizer の state_dict とは無関係）。
+        ("autodiff/src/nn/forward_hook.rs::state_dict", 1usize),
+        ("autodiff/src/nn/forward_hook.rs::load_state_dict", 1usize),
         ("facade/src/compat/sequential.rs::state_dict", 1usize),
         ("facade/src/compat/sequential.rs::load_state_dict", 1usize),
         // #2395: facade 独自 `nn::Module` の defaulted メソッド（承認済み）。

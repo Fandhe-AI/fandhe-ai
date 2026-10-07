@@ -1309,7 +1309,7 @@ src/**`）・facade 公開面（`crates/facade/src/**` 本番コード）のい�
 `crates/facade/src/lib.rs::VarHooksHoldDoctestGuard`（正のプローブ
 doctest）＋`crates/facade/tests/api_surface.rs` の 4 層構成（doctest
 ドリフト検査 2 件・workspace 全体の定義元インベントリ 1 件〈
-`workspace_declares_no_hook_registration_fns`〉・`crates/autodiff/src/`
+`workspace_declares_hook_registration_fns_only_on_autodiff_tape`〉・`crates/autodiff/src/`
 限定の `register_hook` allowlist 化ガード 1 件〈
 `autodiff_declares_no_register_hook_fn`。doctest 正のプローブが facade
 経由の到達可能性しか見ないため autodiff 側の本体実装を検出できない穴を
@@ -1318,6 +1318,15 @@ doctest）＋`crates/facade/tests/api_surface.rs` の 4 層構成（doctest
 した。詳細な承認状態の確認結果・保留の根拠・ガードの構成・承認取得後の
 実装範囲は `docs/autodiff-forward-backward-hooks-design.md` §13（4 層構成
 の内訳は同 §13.3）。
+
+**事実訂正（イシュー #2586）**: 上記「本体未実装」「workspace 全体で 0 件」は #2586
+以前の記述である。ルート #2499 の承認（2026-10-07）後、#2586 で autodiff 内部に
+`Tape::register_backward_hook`・`remove_hook`・`HookHandle`・`nn::ForwardHooked`・
+`nn::ForwardHookCtx` を実装した。facade は未公開のまま（`crates/facade/src/**` 不変）で、
+workspace 全体の定義元インベントリ（`workspace_declares_hook_registration_fns_only_on_
+autodiff_tape`）は `autodiff/src/tape.rs` のみ許す形へ縮小した（保留 doctest・
+`autodiff_declares_no_register_hook_fn` は維持）。経路 2 の適用記録は facade 公開を行う
+#2587 で追記する。実装記録は同 doc §17。
 
 **適用記録（経路 2。イシュー #2198・親 #2172・ルート #2131）**: L-BFGS
 （`fandhe_ai_autodiff::nn::optim::Lbfgs`。#2197 で内部クレート限定実装

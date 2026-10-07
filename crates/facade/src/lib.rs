@@ -1897,7 +1897,7 @@ struct VarBoolOpsHoldDoctestGuard;
 /// という newtype で `Deref` を持たないため（`crate::tape::Tape` 参照）、
 /// 本プローブが検出できるのは facade 側に追加されたメソッドのみである。
 /// autodiff 側の `Tape` に追加された定義は `crates/facade/tests/
-/// api_surface.rs::workspace_declares_no_hook_registration_fns`（workspace
+/// api_surface.rs::workspace_declares_hook_registration_fns_only_on_autodiff_tape`（workspace
 /// 全体のソース走査）が捕捉する分担とする。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
