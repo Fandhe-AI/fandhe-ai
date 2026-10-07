@@ -5334,6 +5334,10 @@ mod tests {
     /// しないこと。
     #[test]
     fn run_loader_inference_rejects_shuffle_without_consuming_rng() {
+        let _guard = crate::compat::global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         fandhe_ai_tensor_core::rng::manual_seed(42);
         let before: Vec<f32> = fandhe_ai_tensor_core::rng::rand(&[4])
             .unwrap()

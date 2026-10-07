@@ -194,6 +194,10 @@ fn single_chain_fit_is_bit_identical_to_sequential_for_every_optimizer() {
 
 #[test]
 fn single_chain_fit_with_shuffle_is_bit_identical_to_sequential() {
+    let _guard = crate::compat::global_rng_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let x = det_data(10, 4, 0.3);
     let y = det_data(10, 2, 0.9);
     for (name, optimizer) in six_optimizers() {
@@ -642,6 +646,10 @@ fn apply_parameters_updates_every_block_in_order() {
 
 #[test]
 fn fit_restores_mode_and_trains_dropout_and_batch_norm_blocks() {
+    let _guard = crate::compat::global_rng_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let x = det_data(8, 4, 0.2);
     let y = det_data(8, 2, 0.6);
     let block = Sequential::new()

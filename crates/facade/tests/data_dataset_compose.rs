@@ -380,6 +380,7 @@ fn concat_dataset_feeds_data_loader() {
 #[test]
 #[ignore = "実機（CUDA）依存。DGX Spark GB10 等で手動実行する"]
 fn composed_batch_upload_round_trips_on_cuda_tape() {
+    let _g = test_lock().lock().unwrap_or_else(|p| p.into_inner());
     let (x, _) = gen_xy(0x1234);
     let parts = random_split(TensorDataset::new(x).unwrap(), &[16, 8]).unwrap();
     let tape = fandhe_ai::tape_for(fandhe_ai::Device::Cuda(0))
@@ -397,6 +398,7 @@ fn composed_batch_upload_round_trips_on_cuda_tape() {
 #[cfg(target_os = "macos")]
 #[ignore = "実機（Metal）依存。Apple Silicon 実機で手動実行する"]
 fn composed_batch_upload_round_trips_on_metal_tape() {
+    let _g = test_lock().lock().unwrap_or_else(|p| p.into_inner());
     let (x, _) = gen_xy(0x1234);
     let parts = random_split(TensorDataset::new(x).unwrap(), &[16, 8]).unwrap();
     let tape = fandhe_ai::tape_for(fandhe_ai::Device::Metal)

@@ -8,6 +8,8 @@
 
 **結論**: 本イシューの受け入れ条件は「依存追加のユーザー承認**取得時**」と「**未取得時**」の 2 系統に分かれる。自動運転モード（ユーザーへの質問・承認待ち不可）では HTTP クライアント依存の追加承認・facade 公開面拡張の承認を得られないため、本ドキュメントは「承認未取得時」の系統として、承認判断に必要な材料（候補クレート・ライセンス実測・技術仕様案・承認後の実装手順・セキュリティ設計）を 1 箇所に確定させる。実装（`ModelRegistry::download` 本体・`api_surface.rs` 到達性テスト・進捗ログ機構）は承認後の別イシューへ引き継ぐ。
 
+**現在の状態（2026-10-07 追記・#2621）**: HTTP／TLS 依存は**承認待ちではなく再評価待ち**である。§14.3 の推奨案（`ureq =3.4.2`・`native-tls-no-default` 単独）は §15 の実測で HTTPS が成立しないと判明したため**取り下げ、承認対象から外した**。現時点の推奨は未定で、§14.5-1 の区分起案と §14.6 の承認チェックリストは現状のままでは承認できない。再評価で決める論点は §15.8 に整理した（新しい推奨は示していない。選び直しはユーザー判断）。
+
 ## 1. 背景
 
 対応する他フレームワーク機能: `torch.hub.load_state_dict_from_url`・`tf.keras.utils.get_file` 相当（汎用 URL ダウンロード＋キャッシュ＋ハッシュ検証）。親 #2082 は学習済み重みの配布方式（ローカルレジストリ・リモート取得・HF hub 連携）の設計記録を、兄弟 #2087 は `~/.fandhe-ai/models/<name>/<version>/model.safetensors` レイアウトのローカルレジストリ実装を担う。本 #2088 はその「リモート取得」部分で、**HTTPS URL から safetensors をダウンロードしてローカルレジストリへキャッシュする汎用機構のみ**が対象である（`http`・`file`・`ftp` 等は §6 のとおり拒否。2026-09-24 追記で表記を「HTTP(S)」から「HTTPS」へ統一。詳細は本節末尾の追記参照）。
@@ -49,6 +51,8 @@
 推奨候補（**確定はユーザー承認事項。§7-1**）: facade は同期 API のみを公開する設計（`load_safetensors_f32` 等）であり、本リポの設計方針（feature フラグなし・cfg ベース・非同期ランタイム不使用）とも整合するため、同期専用の `ureq`／`minreq`／`attohttpc` のいずれかを推奨する。`reqwest` は非同期ランタイム（`tokio`）を推移的に引き込み設計方針と相性が悪いため非推奨とする。3 候補間の最終選定は §8-1 のライセンス実測結果で行う。
 
 **追記（2026-10-03・#2621）**: 推奨 crate の選定は §14.3 で行った（未承認の起案）。本節の本文は書き換えない。
+
+**追記（2026-10-07・#2621）**: §14.3 の推奨案は §15 の実測で HTTPS が成立しないと判明したため取り下げた。現時点の推奨は未定である（再評価の論点は §15.8）。
 
 ## 4. 依存の配置案（列挙のみ。確定は親 #2082 とユーザー承認）
 
@@ -99,6 +103,8 @@
 ## 7. 承認事項（本イシュー時点ではいずれも未取得）
 
 **追記（2026-10-03・#2621）**: 区分番号・承認項目の現行版は §14（特に §14.2 の対応表・§14.6 のチェックリスト）を正とする。以下の本文は作成時点（2026-09-23〜24）の記述であり書き換えない。
+
+**追記（2026-10-07・#2621）**: §14.3 の推奨案を取り下げたため、§14.6 のチェックリストは「承認待ち」ではなく「再評価待ち」である（冒頭の「現在の状態」・§14.6・§15.8）。区分番号の読み替え（§14.2）は引き続き有効。
 
 1. HTTP クライアント（＋ TLS スタック）を許容依存へ新規区分として追加すること（現行の許容依存 9 区分〈`.claude/rules/deps-policy.md`〉に続く第 10 区分相当。配置案（§4）の選択を含む）
 2. facade 公開面の拡張: `ModelRegistry::download`・`ModelRegistry::download_with`・`DownloadOptions`・`Sha256Pin`・`DownloadProgress`（§5。2026-09-24 追記で pin・進捗の渡し口を追加）と `ModelError` の追加バリアントの追加、および `api_surface.rs` 到達性テストの追加
@@ -170,8 +176,8 @@ HTTP クライアント候補 4 種を feature 組合せ×ターゲット別に�
 2. 推移依存数: `cargo tree --locked -e normal,build --target <t> --prefix none` の出力を `sort -u` し、ルート自身を除いた個数
 3. ライセンス式: `cargo metadata --locked --format-version 1 --filter-platform <t>` の resolve に含まれる全パッケージの `license` を `jq` で抽出し、`MPL`・`GPL`・`CDLA`・`OpenSSL`・`BSD-3`・`AND` 結合・`0BSD` 等を機械的に洗い出す
 4. `cargo deny --manifest-path <pkg>/Cargo.toml --locked check --config <deny.toml> licenses bans sources`。設定はルート `deny.toml` の複製に `[graph] targets = ["<t>"]` を足したもの（allow リストは不変。ターゲット別判定のため）。さらにルート `deny.toml` そのまま（全ターゲット）でも実行した
-5. **`cargo build`／`cargo check` は実行していない**（未承認 crate の build script〈`aws-lc-sys`・`openssl-sys`・`ring`〉を走らせないため）。システムライブラリ要件は `cargo tree` の依存関係から判断した
-6. `advisories` は未実施（承認後に実施する。依存を追加する PR では `deny-checks` に含まれ CI が検査する）
+5. **`cargo build`／`cargo check` は実行していない**（未承認 crate の build script〈`aws-lc-sys`・`openssl-sys`・`ring`〉を走らせないため）。システムライブラリ要件は `cargo tree` の依存関係から判断した（**2026-10-07 追記**: `ureq` の 3 構成は使い捨てプロジェクトで実ビルド済み → §15.3）
+6. `advisories` は未実施（承認後に実施する。依存を追加する PR では `deny-checks` に含まれ CI が検査する）（**2026-10-07 追記**: `ureq` の 3 構成は使い捨てプロジェクトで実施済み → §15.3）
 
 ルート `deny.toml` の allow は `MIT`・`Apache-2.0`・`Apache-2.0 WITH LLVM-exception`・`ISC`・`Zlib`・`Unicode-3.0`・`Unlicense`・`BSD-2-Clause` の 8 種で、本実測では免除も緩和もしていない（fail は測定結果として記録）。
 
@@ -200,12 +206,14 @@ HTTP クライアント候補 4 種を feature 組合せ×ターゲット別に�
 
 読み取れること（事実のみ）:
 
-- 現行 allow で通る組合せは「TLS なし」を除くと、`ureq`⑥（`native-tls-no-default`）・`minreq`③④（`https-native-tls`・`https-openssl`）だけである。いずれも OS の TLS（Linux は OpenSSL、macOS は Security.framework、Windows は schannel）を使う。
+- 現行 allow で通る組合せは「TLS なし」を除くと、`ureq`⑥（`native-tls-no-default`）・`minreq`③④（`https-native-tls`・`https-openssl`）だけである。いずれも OS の TLS（Linux は OpenSSL、macOS は Security.framework、Windows は schannel）を使う。（**2026-10-07 追記**: `ureq`⑥ についての「OS の TLS を使う」は依存関係からの読み取りで、実測と一致しなかった。⑥ 単独では TLS の実装が組み込まれず、HTTPS は実行時 panic、生成バイナリは `libssl`／`libcrypto` にリンクされない → §15.3・§15.4。`minreq`③④ は未ビルドのまま → §15.7）
 - rustls 系は全組合せで現行 allow 外を含む。要因は `subtle`（BSD-3-Clause）、`webpki-roots`／`webpki-root-certs`（CDLA-Permissive-2.0）、`aws-lc-sys`（複合式中の BSD-3-Clause）、`encoding_rs`（BSD-3-Clause との AND）で、いずれもコピーレフトではなく許容的ライセンスだが、**allow リストへの追加はユーザー承認事項**（deps-policy・license-matrix §1）である。
 - MPL 等コピーレフトの推移的混入は、`attohttpc` の**直接ライセンス**（MPL-2.0）以外では検出されなかった（全 feature 組合せ・全ターゲット。`GPL`／`LGPL`／`AGPL`／`MPL`／`EPL`／`CDDL` の式を機械抽出し、該当は `attohttpc` のみ）。
 - `ring 0.17.14` は式 `Apache-2.0 AND ISC` で、両識別子が allow に含まれるため通る（`ureq` ①②はこの経路を含む）。`aws-lc-rs 1.18.1`（`ISC AND (Apache-2.0 OR ISC)`）も通るが、同 `aws-lc-sys` は複合式の中に BSD-3-Clause を含み落ちる。
 
 **注記（2026-10-03・#2621）**: `ureq`③（`rustls-no-provider`＋`platform-verifier`）は暗号プロバイダを同梱しない。`cargo info ureq@3.4.2` の feature 定義では `rustls = [rustls-no-provider, _ring, rustls-webpki-roots]` で、`_ring`（`rustls` の `ring` 有効化）は内部 feature のため、③は単体では TLS が成立しない構成である。実使用には呼び出し側での別途のプロバイダ指定が要り、現行 allow で通るかの判定対象としては不完全（実測数値は変更しない）。
+
+**注記（2026-10-07・#2621）**: `ureq`⑥（`native-tls-no-default`）も、単体では HTTPS が成立しないことを実ビルドで確認した（実行時 panic。native-tls の実装は feature `native-tls`〈④〉でのみ有効になる）。⑥ の「`deny licenses` ok」は HTTPS が成立しない構成に対する判定である（実測数値は変更しない）。詳細は §15.4。
 
 ### 13.3 重点検証点の結果
 
@@ -223,11 +231,11 @@ HTTP クライアント候補 4 種を feature 組合せ×ターゲット別に�
 
 ### 13.4 システムライブラリ・ビルド要件・MSRV
 
-ライセンスとは別の運用上の制約。`cargo build` は実行していないため依存関係と manifest からの判断であり、実ビルドでの確認は承認後の実装手順（§8）で行う。
+ライセンスとは別の運用上の制約。`cargo build` は実行していないため依存関係と manifest からの判断であり、実ビルドでの確認は承認後の実装手順（§8）で行う。（**2026-10-07 追記**: `ureq` の `native-tls` 系・`rustls`〈`ring`〉の実ビルド結果は §15.3・§15.6。`aws-lc-sys`・`minreq`・`attohttpc`・`reqwest` は未ビルドのまま）
 
 | 経路 | 要件 |
 |---|---|
-| `native-tls`／`https-native-tls`／`attohttpc` 既定 | Linux は `openssl-sys 0.9.117`（システム OpenSSL の開発ヘッダ／ライブラリ、または `vendored` feature）。macOS は `security-framework 3.7.0`、Windows は `schannel 0.1.29` で追加の C ライブラリ不要。§3 の「環境非依存の開発コンテナ」方針との整合は要検証 |
+| `native-tls`／`https-native-tls`／`attohttpc` 既定 | Linux は `openssl-sys 0.9.117`（システム OpenSSL の開発ヘッダ／ライブラリ、または `vendored` feature）。macOS は `security-framework 3.7.0`、Windows は `schannel 0.1.29` で追加の C ライブラリ不要。§3 の「環境非依存の開発コンテナ」方針との整合は要検証（**2026-10-07 追記**: `Dockerfile` に `libssl-dev` が無いことを確認した。`ureq` の feature `native-tls` は実行時にも `libssl.so.3`／`libcrypto.so.3` へ動的リンクする → §15.3・§15.6） |
 | `minreq` `https-openssl` | 全ターゲットで `openssl-sys`（`openssl/vendored` を feature に含むため、C ツールチェーンで OpenSSL をソースビルドする経路） |
 | `aws-lc-sys`（`reqwest` `rustls`・`minreq` の rustls 系・`attohttpc` rustls） | `cmake`（`cmake 0.1.58`）と C コンパイラを要する build script。全ターゲットで依存に現れる |
 | `ring`（`ureq` `rustls`） | C／アセンブリのビルド（`cc`）。cmake は不要 |
@@ -246,7 +254,7 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 ### 14.1 位置づけ
 
 - **本節は未承認の起案である。承認の代行は行わない**。依存追加・`.claude/rules/deps-policy.md`／`deny.toml`／`Cargo.toml`／`Cargo.lock` の変更は本 PR に含めない。
-- 根拠は §13 の実測（#2620）のみで、新たな `cargo build`／実測は行っていない。API・feature の確認は `cargo info`・docs.rs の公開ドキュメントによる。固定版は 2026-10-03 時点の crates.io 解決版であり、承認後の依存追加 PR で再実測する。
+- 根拠は §13 の実測（#2620）のみで、新たな `cargo build`／実測は行っていない。API・feature の確認は `cargo info`・docs.rs の公開ドキュメントによる。固定版は 2026-10-03 時点の crates.io 解決版であり、承認後の依存追加 PR で再実測する。（**2026-10-07 追記**: 使い捨てプロジェクトでの実ビルド・挙動確認を §15 に記録した。**推奨案の構成は HTTPS が成立しなかった**〈§15.4・§15.8〉。このため §14.3 の推奨は取り下げて承認対象から外し、§14.5-1・§14.6 は再評価待ちとした。本節の本文は経緯として起案時点のまま残す）
 - 承認を得ても本 doc は deps-policy を書き換えない。規約・`license-matrix.md`・`deny.toml` への正式反映は承認後の別 PR で行う。
 
 ### 14.2 区分番号の対応表（旧記述 → 現行）
@@ -261,37 +269,41 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 ### 14.3 推奨 crate の選定
 
+> **推奨の取り下げ（2026-10-07・#2621）**: 本節の推奨案（`ureq =3.4.2`・`default-features = false`・`features = ["native-tls-no-default"]`）は、§15 の実測（2026-10-07）で **HTTPS が成立しないと判明した**（実行時 panic。§15.4）。このため**推奨を取り下げ、承認対象から外す**。採用可能な構成は再評価が必要で、**現時点の推奨は未定**である。本節の「代替案」「次点」も、取り下げた推奨案との比較で付けた位置づけであり、新しい推奨を意味しない。再評価で決める論点は §15.8 にまとめた。以下の本文は起案時点（2026-10-03）の経緯として残す（承認依頼としては読まない）。
+
 **除外**: `attohttpc`（直接ライセンスが MPL-2.0。§13.2）・`reqwest`（推移依存 90〜108 個で `tokio` を内包。現行 allow で通る組合せなし）。
 
-現行 allow で `licenses` が通る 3 組合せの比較（§13.2・§13.4 の値を引用。`cargo build` は未実行）:
+現行 allow で `licenses` が通る 3 組合せの比較（§13.2・§13.4 の値を引用。`cargo build` は未実行。**2026-10-07 追記**: `ureq` ⑥ の実ビルド結果は §15.3）:
 
 | 軸 | `ureq =3.4.2` ⑥ `native-tls-no-default` | `minreq =3.0.0` ③ `https-native-tls` | `minreq` ④ `https-openssl` |
 |---|---|---|---|
 | (a) 直接ライセンスと deps-policy の適合基準（MIT OR Apache-2.0 系） | MIT OR Apache-2.0。合致 | ISC。allow 内だが基準の記述から外れ、例外扱いの記録が要る | 同左 |
 | (b) §5・§6 の API 要件 | 下表のとおり大半を公開 API で確認 | 未確認（承認後に確認） | 未確認（承認後に確認） |
 | (c) 推移依存数（x86_64-linux／aarch64-linux／aarch64-darwin／x86_64-windows）・MSRV | 34／34／29／19・1.85 | 21／21／15／5・1.63 | 19／19／19／19・1.63 |
-| (d) システムライブラリ | Linux は `openssl-sys`（OpenSSL 開発パッケージ）が要る | 同左 | `openssl/vendored` により C ツールチェーンでソースビルド（全ターゲット） |
+| (d) システムライブラリ | Linux は `openssl-sys`（OpenSSL 開発パッケージ）が要る（**2026-10-07 追記**: ⑥ はビルド時に OpenSSL 開発パッケージを使うが、生成バイナリは `libssl`／`libcrypto` にリンクされなかった。HTTPS が成立した feature `native-tls` は実行時にも OpenSSL の共有ライブラリが要る → §15.3） | 同左（未ビルド → §15.7） | `openssl/vendored` により C ツールチェーンでソースビルド（全ターゲット） |
 
 (b) の確認結果（`ureq =3.4.2`。docs.rs の公開ドキュメントによる。実装時に再確認する）:
 
 | 要件（§5・§6） | 確認結果 |
 |---|---|
-| リダイレクトの各ホップで `https` 限定を検証 | `max_redirects` の既定が 0（自動追従しない）。呼び出し側で `Location` を検証しながら手動追従できる。`https_only` 設定もある |
-| 接続・読み取りのタイムアウト | `timeout_connect`／`timeout_recv_body`／`timeout_global` 等を確認 |
-| ストリーミング受信・`Content-Length`／`ETag` の取得 | ボディのリーダー経由の受信とヘッダ取得ができる設計。サイズ上限・ハッシュ計算を逐次行えるかは承認後に実装で確認 |
-| `If-None-Match` の付与と 304 判別 | 任意ヘッダ付与と 304 の取得は可能な想定。ただし `>=400` をエラー化する既定の扱いは実装時に確認 |
-| 証明書検証を無効化しない既定 | 既定は検証有効。`disable_verification` が存在するため、facade からこの設定を出さないことを条件にする |
-| `native-tls-no-default` での実行時設定 | TLS プロバイダ（native-tls）とルート証明書源（OS ストア）をどう指定するかは**未確認（承認後に確認）**。同 feature は `webpki-root-certs` を含まない |
+| リダイレクトの各ホップで `https` 限定を検証 | `max_redirects` の既定が 0（自動追従しない）。呼び出し側で `Location` を検証しながら手動追従できる。`https_only` 設定もある（**2026-10-07 追記**: 実測では既定は 10 で自動追従した。`max_redirects(0)` の明示が要る → §15.5） |
+| 接続・読み取りのタイムアウト | `timeout_connect`／`timeout_recv_body`／`timeout_global` 等を確認（**2026-10-07 追記**: 実測では既定は `await_100` 以外すべて `None`〈無期限〉で、明示設定が要る。`timeout_recv_body` の発火は実測、`timeout_connect` は未検証 → §15.5・§15.7） |
+| ストリーミング受信・`Content-Length`／`ETag` の取得 | ボディのリーダー経由の受信とヘッダ取得ができる設計。サイズ上限・ハッシュ計算を逐次行えるかは承認後に実装で確認（**2026-10-07 追記**: 逐次受信・サイズ上限の挙動を実測 → §15.5） |
+| `If-None-Match` の付与と 304 判別 | 任意ヘッダ付与と 304 の取得は可能な想定。ただし `>=400` をエラー化する既定の扱いは実装時に確認（**2026-10-07 追記**: 304 は既定のまま `Ok`、`>=400` は `Err(StatusCode)` → §15.5） |
+| 証明書検証を無効化しない既定 | 既定は検証有効。`disable_verification` が存在するため、facade からこの設定を出さないことを条件にする（**2026-10-07 追記**: 既定の `disable_verification: false` と、未知の発行者・ホスト名不一致の拒否を feature `rustls`・`native-tls` で実測 → §15.4） |
+| `native-tls-no-default` での実行時設定 | TLS プロバイダ（native-tls）とルート証明書源（OS ストア）をどう指定するかは**未確認（承認後に確認）**。同 feature は `webpki-root-certs` を含まない（**2026-10-07 追記**: 同 feature 単独では HTTPS が成立しなかった → §15.4） |
 
-**推奨案**: `ureq =3.4.2`・`default-features = false`・`features = ["native-tls-no-default"]`。直接ライセンスが MIT OR Apache-2.0 で、現行 allow を変えずに `licenses` が通る。`minreq` は依存数が最小だが、直接ライセンスが基準外で API 要件も未確認のため次点とする。
+**推奨案（取り下げ済み・2026-10-07。承認対象外）**: `ureq =3.4.2`・`default-features = false`・`features = ["native-tls-no-default"]`。直接ライセンスが MIT OR Apache-2.0 で、現行 allow を変えずに `licenses` が通る。`minreq` は依存数が最小だが、直接ライセンスが基準外で API 要件も未確認のため次点とする。（**2026-10-07 追記**: この推奨案の構成は実測で HTTPS が成立しなかったため、推奨を取り下げた。「現行 allow を変えずに `licenses` が通る」は HTTPS が成立しない構成に対する判定だった〈§15.4〉。新しい推奨は定めておらず、再評価はユーザー判断を仰ぐ → §15.8）
 
-**代替案**（allow リスト変更の別途承認が要る）: `ureq` ②（`rustls`＝`ring`＋`webpki-roots`、推移依存 25 個）。システム OpenSSL が不要になる代わり、allow に `BSD-3-Clause`（`subtle`）と `CDLA-Permissive-2.0`（`webpki-roots`）の追加承認が要る（いずれもコピーレフトではない。§13.3）。
+**代替案**（allow リスト変更の別途承認が要る。**2026-10-07 追記**: 推奨案の取り下げ後も、これを新しい推奨に繰り上げてはいない）: `ureq` ②（`rustls`＝`ring`＋`webpki-roots`、推移依存 25 個）。システム OpenSSL が不要になる代わり、allow に `BSD-3-Clause`（`subtle`）と `CDLA-Permissive-2.0`（`webpki-roots`）の追加承認が要る（いずれもコピーレフトではない。§13.3）。（**2026-10-07 追記**: 「システム OpenSSL が不要」は実ビルドで確認したが、`ring` の build script は Linux → `aarch64-apple-darwin` のクロス lib ビルドで失敗した → §15.3・§15.6）
 
-**トレードオフ**: 推奨案は Linux のビルドに OpenSSL 開発パッケージを要求する。現行の `Dockerfile` は `pkg-config`・`build-essential` 等は入れるが `libssl-dev` を入れていない。CI の `ubuntu-latest` の有無は未確認。開発コンテナ・CI への導入要否は承認後の実ビルドで確認する（推測で「入っている」と書かない）。代替案はこの要件を避けられるが、allow 追加の承認が要る。
+**トレードオフ**（取り下げた推奨案と代替案の比較。経緯として残す）: 推奨案は Linux のビルドに OpenSSL 開発パッケージを要求する。現行の `Dockerfile` は `pkg-config`・`build-essential` 等は入れるが `libssl-dev` を入れていない。CI の `ubuntu-latest` の有無は未確認。開発コンテナ・CI への導入要否は承認後の実ビルドで確認する（推測で「入っている」と書かない）。代替案はこの要件を避けられるが、allow 追加の承認が要る。（**2026-10-07 追記**: `Dockerfile`・CI の事実確認と、代替案〈`ring`〉の Linux → `aarch64-apple-darwin` クロス lib ビルド失敗の実測は §15.6。`ubuntu-latest` の導入状況は未検証のまま）
 
 ### 14.4 配置案と `cfg` 範囲
 
 §4 の案 A／B／C を TLS 方式との組合せで再評価する。
+
+**2026-10-07 追記**: 下表の「推奨案（native-tls）」列は、取り下げた §14.3 の推奨案（`native-tls-no-default` 単独）を前提に書いたものである。列名と本文は経緯として残すが、TLS 方式が未定のため、配置案の比較は再評価で選ぶ構成に合わせてやり直す必要がある（論点は §15.8）。実測との差分は次の 2 点: (1) native-tls で HTTPS が成立した feature `native-tls` は、ビルド時の OpenSSL 開発パッケージに加えて実行時にも OpenSSL の共有ライブラリを要する（§15.3）。(2) rustls の列の「C コンパイラ程度」は、Linux → `aarch64-apple-darwin` のクロス lib ビルドが `ring` の build script で失敗した実測（§15.6）を含んでいない。`cfg(unix)` 限定の選択肢は TLS 方式に依存しない。
 
 | 配置案 | 推奨案（native-tls）との組合せ | 代替案（rustls）との組合せ |
 |---|---|---|
@@ -308,11 +320,13 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 ### 14.5 deps-policy 表形式の起案
 
-**1. 第 11 区分（HTTP クライアント／TLS）**
+> **再評価待ち（2026-10-07・#2621）**: 下の「1. 第 11 区分」の起案は、取り下げた §14.3 の推奨案を前提にしている。前提の構成が取り下げられたため、**現状のままでは承認できない（承認待ちではなく再評価待ち）**。crate・feature が決まるまで、この行は deps-policy へ転記できる形になっていない（論点は §15.8）。「2. dirfd 相対操作」（B-1／B-2）は HTTP／TLS の構成に依存せず、今回の取り下げの影響を受けない。
+
+**1. 第 11 区分（HTTP クライアント／TLS）**（前提の構成を取り下げ済み。表は経緯として残す）
 
 | 区分 | クレート | 条件 |
 |---|---|---|
-| HTTP クライアント／TLS（第 11 区分） | 推奨: `ureq`（`default-features = false`・`native-tls-no-default`） | `=3.4.2` 完全固定。`cfg` 範囲は §14.4 の承認結果に従う。用途は `ModelRegistry::download`／`download_with` による HTTPS 取得に限る。HTTP crate の型を facade の公開面に出さない（`api_surface.rs` のテストで担保。§8-5）。TLS 証明書検証を無効化するオプションを設けない（§6）。非同期ランタイム（`tokio`／`hyper`）を推移依存に含めない。依存追加 PR で `docs/license-matrix.md` に行を追加し `cargo tree` を再実測する。`cargo deny check advisories bans licenses sources` と `scripts/check-forbidden-deps.sh` を通す。代替案（`rustls`）を採る場合は allow 追加（`BSD-3-Clause`・`CDLA-Permissive-2.0`）を別途承認する。HF hub 連携の別クレート（#2243・#2622）が同じ区分を再利用する場合も承認単位は別とする |
+| HTTP クライアント／TLS（第 11 区分） | ~~推奨: `ureq`（`default-features = false`・`native-tls-no-default`）~~（取り下げ。HTTPS 不成立 → §15.4。crate・feature は未定） | `=3.4.2` 完全固定。`cfg` 範囲は §14.4 の承認結果に従う。用途は `ModelRegistry::download`／`download_with` による HTTPS 取得に限る。HTTP crate の型を facade の公開面に出さない（`api_surface.rs` のテストで担保。§8-5）。TLS 証明書検証を無効化するオプションを設けない（§6）。非同期ランタイム（`tokio`／`hyper`）を推移依存に含めない。依存追加 PR で `docs/license-matrix.md` に行を追加し `cargo tree` を再実測する。`cargo deny check advisories bans licenses sources` と `scripts/check-forbidden-deps.sh` を通す。代替案（`rustls`）を採る場合は allow 追加（`BSD-3-Clause`・`CDLA-Permissive-2.0`）を別途承認する。HF hub 連携の別クレート（#2243・#2622）が同じ区分を再利用する場合も承認単位は別とする |
 
 **2. dirfd 相対操作（§6・§7-5）**。第 10 区分 `libc` はすでに承認済みのため、新規区分ではなく次の二択にする。
 
@@ -323,15 +337,176 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 ### 14.6 承認チェックリスト（ユーザーが選ぶ。すべて未承認）
 
-- [ ] HTTP／TLS 依存の第 11 区分を新設すること、および crate と feature（推奨案 `ureq` `native-tls-no-default`／代替案 `rustls`）
-- [ ] 代替案を採る場合の allow 追加（`BSD-3-Clause`・`CDLA-Permissive-2.0`）
-- [ ] 配置案（A／B／C）と `cfg` 範囲（`cfg(unix)` 限定／全ターゲット）
-- [ ] dirfd 経路の扱い（B-1／B-2）
-- [ ] facade 公開面の拡張（§7-2 のとおり）
-- [ ] 承認後の実装 issue の起票（§9 の草案を基にする。起票自体もユーザー承認事項）
-- [ ] deps-policy・`docs/license-matrix.md`・`deny.toml` への正式反映を承認後の別 PR で行うこと
+> **再評価待ち（2026-10-07・#2621）**: 本チェックリストは、取り下げた §14.3 の推奨案を前提に作った。前提の構成が取り下げられたため、**現状のままでは承認できない（承認待ちではなく再評価待ち）**。とくに 1 項目めを現状の文面のまま承認すると、HTTPS 取得という設計目的を満たせない。各項目の扱いを【】で付した。再評価の論点は §15.8。
+
+- [ ] HTTP／TLS 依存の第 11 区分を新設すること、および crate と feature（推奨案 `ureq` `native-tls-no-default`／代替案 `rustls`）【取り下げた構成を前提にしている。「推奨案」は選べない。crate・feature は再評価後に書き直す】
+- [ ] 代替案を採る場合の allow 追加（`BSD-3-Clause`・`CDLA-Permissive-2.0`）【「代替案を採る場合」という条件が前提ごと変わった。HTTPS の成立を実測した `ureq =3.4.2` の構成は、いずれも allow の追加を要する（§15.4・§15.8）。追加する識別子は構成によって異なるため、再評価後に書き直す】
+- [ ] 配置案（A／B／C）と `cfg` 範囲（`cfg(unix)` 限定／全ターゲット）【§14.4 の比較は取り下げた推奨案の列を含む。TLS 方式が決まってから判断する】
+- [ ] dirfd 経路の扱い（B-1／B-2）【取り下げの影響なし。HTTP／TLS の構成に依存しない】
+- [ ] facade 公開面の拡張（§7-2 のとおり）【取り下げの影響なし。ただし実装は依存の承認が前提】
+- [ ] 承認後の実装 issue の起票（§9 の草案を基にする。起票自体もユーザー承認事項）【1〜3 項目めが決まった後の事項】
+- [ ] deps-policy・`docs/license-matrix.md`・`deny.toml` への正式反映を承認後の別 PR で行うこと【1〜3 項目めが決まった後の事項。反映する内容は未定】
 
 ### 14.7 承認後の手順との対応
 
-- §8-1 の「HTTP クライアント候補」は §14.5-1 の承認結果の crate・feature・`cfg` を指す。「OS 呼び出しラッパー」は新規依存ではなく、B-1 なら第 10 区分 `libc` の用途拡張、B-2 なら onnx-interop ヘルパーの公開を指す。
-- 依存追加 PR では、(1) §13 の実測を承認時点の解決版で再実測し、(2) 未実施の `cargo deny check advisories` を実施する。
+- §8-1 の「HTTP クライアント候補」は §14.5-1 の承認結果の crate・feature・`cfg` を指す。「OS 呼び出しラッパー」は新規依存ではなく、B-1 なら第 10 区分 `libc` の用途拡張、B-2 なら onnx-interop ヘルパーの公開を指す。（**2026-10-07 追記**: §14.5-1 は前提の構成を取り下げたため、承認結果として指せる crate・feature は現時点で存在しない）
+- 依存追加 PR では、(1) §13 の実測を承認時点の解決版で再実測し、(2) 未実施の `cargo deny check advisories` を実施する。（**2026-10-07 追記**: 使い捨てプロジェクトでの先行実施結果は §15.3。依存追加 PR での再実施は引き続き必要）
+
+## 15. 使い捨てプロジェクトでの検証結果（2026-10-07・#2621）
+
+**依存の採用は未承認のまま。本節は判断材料の実測記録である。** ユーザーが 2026-10-07 に承認した範囲は「workspace 外の使い捨てプロジェクトでの検証だけを先行する」ことに限られ、§14.6 の承認チェックリストはいずれも未承認のままである。本体の `Cargo.toml`／`Cargo.lock`／`deny.toml`・`.claude/rules/deps-policy.md`・`docs/license-matrix.md`・`docs/spec/` は変更していない。
+
+本節は実測した値だけを書く。実測していない事項は「未検証」と明記する（§15.7）。
+
+### 15.1 実行環境と対象
+
+| 項目 | 値 |
+|---|---|
+| 実測日 | 2026-10-07 |
+| 基準コミット | `33e8bbf274904f071a7db9c82bc46b6b74480e3c`（`origin/main`） |
+| 実行環境 | Linux・x86_64・rustc 1.98.1（cargo 1.98.1・cargo-deny 0.19.8） |
+| ホストのシステム要件の状態 | C コンパイラ（`cc`／`gcc`）・`pkg-config` あり。OpenSSL 3.5.5 と開発パッケージ（`libssl-dev`）導入済み。**`cmake` は未導入**。システムパッケージの追加導入は行っていない |
+| 実測対象 | 本体 workspace の外の使い捨てパッケージ（`target/` 配下〈git 管理外〉・空の `[workspace]` テーブル・構成ごとに別ディレクトリ・実測後に削除） |
+| 構成 N（§14.3 推奨案・§13.2 ⑥） | `ureq = { version = "=3.4.2", default-features = false, features = ["native-tls-no-default"] }` |
+| 構成 R（§14.3 代替案・§13.2 ②） | 同 `features = ["rustls"]` |
+| 構成 N′（補助。§13.2 ④） | 同 `features = ["native-tls"]`。構成 N で HTTPS が成立しなかった（§15.4）ため、切り分け用に追加で実測した |
+
+解決版（3 構成共通の `ureq 3.4.2`・`ureq-proto 0.6.4`・`rustls-pki-types 1.15.1` 以外）: 構成 N・N′ は `native-tls 0.2.18`・`openssl 0.10.81`・`openssl-sys 0.9.117`・`openssl-probe 0.2.1`、構成 R は `rustls 0.23.45`・`rustls-webpki 0.103.15`・`ring 0.17.14`・`subtle 2.6.1`・`webpki-roots 1.0.9`、構成 N′ のみ `webpki-root-certs 1.0.9`。
+
+### 15.2 実行コマンド
+
+構成ごとのディレクトリ（`<pkg>`）で次を実行した。
+
+1. `cargo generate-lockfile`
+2. `cargo build --locked -vv`（build script の実行有無と出力をログから確認）
+3. `cargo tree --locked -e normal --target x86_64-unknown-linux-gnu --prefix none`、同 `-e normal,build`（§13.1 手順 2 と同じ数え方。`sort -u` しルート自身を除く）、`cargo tree --locked -e normal -f '{p} {f}'`（feature 表示）、`cargo tree --locked -d`（重複）
+4. `cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu` の resolve に含まれる全パッケージの `license` を集計
+5. `cargo deny --locked check --config deny.toml advisories licenses`。`deny.toml` は使い捨てパッケージ内に置いた最小構成で、`[licenses] allow` はルート `deny.toml` の 8 種（§13.1）と同一（追加・免除なし）。使い捨てパッケージ自身には `license = "MIT OR Apache-2.0"` を付けた（付けない初回実行はルートパッケージ自身の `unlicensed` で fail したため。依存の判定には影響しない）。advisories は cargo-deny が取得した RustSec advisory-db（取得済み DB の先頭コミット日付 2026-10-03）に対する判定である
+6. `cargo build --locked --target aarch64-apple-darwin --lib`（CI の `cargo build (linux / aarch64-apple-darwin)` ジョブが行う Linux ホストからのクロス lib ビルドと同じ形。§15.6）
+7. 挙動確認: Python 標準ライブラリ（`http.server`・`ssl`）で 127.0.0.1 の空きポートに立てたローカルサーバ（平文 HTTP と、`openssl` コマンドで作ったローカル CA 署名の証明書〈SAN は `DNS:localhost` のみ〉による HTTPS）に対し、1 ケース 1 プロセスの最小 Rust プログラムを実行した。サーバは実測後に終了を確認した
+
+外部ネットワークへのアクセスは crates.io からの依存取得と、手順 5 の advisory-db 取得（cargo-deny の既定動作）だけである。
+
+### 15.3 2 構成の比較（x86_64-unknown-linux-gnu）
+
+| 軸 | 構成 N（`native-tls-no-default`） | 構成 R（`rustls`） | 構成 N′（`native-tls`。補助） |
+|---|---|---|---|
+| `cargo build`（ホスト） | 成功 | 成功 | 成功 |
+| 実行された build script | `httparse`・`libc`・`native-tls`・`openssl`・`openssl-sys`・`proc-macro2`・`quote` | `httparse`・`libc`・`ring`・`rustls` | 構成 N と同じ |
+| `links`（ネイティブリンク） | `openssl-sys` → システムの `libssl`／`libcrypto`（`cargo:rustc-link-lib=ssl`・`crypto`、`cargo:include=/usr/include`、`version_number=30500050`） | `ring` → 自前ビルドの静的ライブラリ（`rustc-link-lib=static=ring_core_0_17_14_`） | 構成 N と同じ |
+| ビルドに使われたシステム要件 | C コンパイラ・`pkg-config`・OpenSSL 開発パッケージ（ヘッダとライブラリ）。`cmake` は不要だった | C コンパイラ（`cc`）。`cmake`・OpenSSL は不要だった | 構成 N と同じ |
+| 生成バイナリの動的リンク（`ldd`） | `libssl`／`libcrypto` へのリンク**なし**（§15.4 のとおり native-tls のコードが組み込まれていない） | `libssl`／`libcrypto` へのリンクなし | `libssl.so.3`・`libcrypto.so.3` に動的リンク（実行環境にも OpenSSL の共有ライブラリが要る） |
+| 推移依存数（`-e normal`／`-e normal,build`） | 29／34 | 22／25 | 30／35 |
+| 重複バージョン（`cargo tree -d`） | なし | なし | なし |
+| ライセンス集合（`cargo metadata`） | `MIT OR Apache-2.0` 系 30（表記ゆれ `Apache-2.0 OR MIT`・`MIT/Apache-2.0` を含む）・`MIT` 2（`bytes`・`openssl-sys`）・`Apache-2.0` 1（`openssl`）・`(MIT OR Apache-2.0) AND Unicode-3.0` 1（`unicode-ident`） | `MIT OR Apache-2.0` 系 18・`ISC` 2（`rustls-webpki`・`untrusted`）・`MIT` 1（`bytes`）・`Apache-2.0 AND ISC` 1（`ring`）・`Apache-2.0 OR ISC OR MIT` 1（`rustls`）・**`BSD-3-Clause` 1（`subtle`）**・**`CDLA-Permissive-2.0` 1（`webpki-roots`）** | 構成 N の集合に **`CDLA-Permissive-2.0` 1（`webpki-root-certs`）** が加わる（構成 N との差分はこの 1 crate のみ） |
+| `cargo deny check licenses` | ok | FAILED（`subtle v2.6.1`〈BSD-3-Clause〉・`webpki-roots v1.0.9`〈CDLA-Permissive-2.0〉が allow 外） | FAILED（`webpki-root-certs v1.0.9`〈CDLA-Permissive-2.0〉が allow 外） |
+| `cargo deny check advisories` | ok（該当 advisory なし） | ok（該当 advisory なし） | ok（該当 advisory なし） |
+| HTTPS の成立（§15.4） | **不成立**（実行時 panic） | 成立 | 成立 |
+| Linux → `aarch64-apple-darwin` のクロス lib ビルド（§15.6） | 成功 | **失敗**（`ring` の build script） | 成功 |
+
+推移依存数（`-e normal,build`）は §13.2 の値（⑥ 34・② 25・④ 35）と一致した。`deny licenses` の結果も §13.2 と一致した。
+
+### 15.4 (c) TLS プロバイダとルート証明書源の実行時設定
+
+`Agent::new_with_defaults()` の `TlsConfig` を `{:?}` で表示した結果は、3 構成とも `TlsConfig { provider: Rustls, client_cert: None, root_certs: WebPki, use_sni: true, disable_verification: false }` だった。**有効にした feature によって既定値は変わらない**（native-tls 系の構成でも既定のプロバイダは `Rustls`、ルート証明書源は `WebPki`）。
+
+ローカル HTTPS サーバ（`https://localhost:<port>`）への GET の結果:
+
+| 設定（`TlsConfig::builder()`） | 構成 N | 構成 R | 構成 N′ |
+|---|---|---|---|
+| 既定（`Rustls`＋`WebPki`） | panic「`uri scheme is https, provider is Rustls but feature is not enabled: rustls`」 | `Err`（`InvalidCertificate(UnknownIssuer)`。ローカル CA は webpki-roots に無いため検証で拒否） | panic（構成 N と同じ文言） |
+| `provider(NativeTls)`＋ルート既定（`WebPki`） | panic「`uri scheme is https, provider is NativeTls but feature is not enabled: native-tls`」 | panic（左と同じ文言） | `Err`（`certificate verify failed`・`unable to get local issuer certificate`） |
+| `provider(NativeTls)`＋`RootCerts::PlatformVerifier` | panic（同上） | panic（同上） | `Err`（同上。OS の証明書ストアにローカル CA が無いため検証で拒否） |
+| `provider(NativeTls)`＋`RootCerts::Specific(ローカル CA)` | panic（同上） | panic（同上） | **`Ok` 200**（ボディ 65536 バイト受信） |
+| 上と同じ設定で `https://127.0.0.1:<port>`（証明書の SAN と不一致） | panic（同上） | panic（同上） | `Err`（`certificate verify failed`・`IP address mismatch`） |
+| `provider(Rustls)`＋`RootCerts::PlatformVerifier` | panic（`…Rustls but feature is not enabled: rustls`） | panic「`Rustls + PlatformVerifier requires feature: platform-verifier`」 | panic（構成 N と同じ） |
+| `provider(Rustls)`＋`RootCerts::Specific(ローカル CA)` | panic（同上） | **`Ok` 200**（ボディ 65536 バイト受信） | panic（同上） |
+| 上と同じ設定で `https://127.0.0.1:<port>` | panic（同上） | `Err`（`InvalidCertificate(NotValidForNameContext …)`） | panic（同上） |
+
+実測から言えること:
+
+- **構成 N（推奨案の `native-tls-no-default` 単独）は、`ureq =3.4.2` では HTTPS が成立しなかった。** `TlsProvider::NativeTls` を明示しても panic し、生成バイナリは `libssl` にリンクされていない。`ureq 3.4.2` のソースでは、native-tls のコネクタとモジュールが `#[cfg(feature = "native-tls")]` で括られており（`src/tls/mod.rs:14`・`src/unversioned/transport/mod.rs:389`）、`native-tls-no-default` は `dep:native-tls`・`dep:der`・`_tls` を有効にするだけで feature `native-tls` 自体を有効にしない（同 crate の `Cargo.toml` の `[features]`）。このため構成 N は `native-tls`／`openssl-sys` を依存に引き込み build script も走らせるが、TLS の実装は組み込まれない。§13.2 ⑥ の「`deny licenses` ok」は、この HTTPS が成立しない構成に対する判定だったことになる。
+- `ureq =3.4.2` で native-tls による HTTPS が成立したのは feature `native-tls`（構成 N′）で、この feature は `native-tls-webpki-roots`（`webpki-root-certs`・CDLA-Permissive-2.0）を必ず含む。**今回実測した範囲では、現行 allow のままで HTTPS が成立する `ureq =3.4.2` の構成は見つかっていない**（構成 N は HTTPS 不成立、構成 R・N′ は allow 外を含む）。
+- native-tls を使う場合（構成 N′）、プロバイダは自動選択されず、`TlsConfig::builder().provider(TlsProvider::NativeTls)` の明示が要る。OS の証明書ストアを使うには `root_certs(RootCerts::PlatformVerifier)` を指定する。
+- rustls（構成 R）は既定設定のまま動き、ルート証明書源は同梱の `webpki-roots` になる。OS ストア（`PlatformVerifier`）は feature `platform-verifier` が無いと panic する。
+- 証明書検証は既定で有効で（`disable_verification: false`）、未知の発行者・ホスト名不一致はいずれも `Err` で拒否された（構成 R・N′）。
+- 設定の不整合（feature 無効のプロバイダ指定・`PlatformVerifier` の feature 不足）は `Err` ではなく **panic** になる。facade から使う場合は、設定を固定し panic 経路に入らないことをテストで担保する必要がある。
+
+### 15.5 (d) ストリーミング受信・`If-None-Match`／304・`>=400` の挙動
+
+平文 HTTP のローカルサーバに対する観測（プロトコル挙動の確認であり TLS の確認ではない）。結果は 3 構成で同一だった。
+
+| 観点 | 操作 | 観測結果 |
+|---|---|---|
+| 既定値 | `Agent::new_with_defaults().config()` | `max_redirects=10`・`max_redirects_will_error=true`・`https_only=false`・`http_status_as_error=true`。タイムアウトは `await_100: Some(1s)` 以外すべて `None`（接続・受信とも既定では無期限） |
+| `Content-Length`／`ETag` の取得 | `Content-Length` 付き 200（65536 バイト） | `Ok` 200。`ETag` ヘッダ取得可。`body().content_length()` は `Some(65536)` |
+| ストリーミング受信 | `body_mut().as_reader()` を 8192 バイトのバッファで `read` | 8 回の `read` で 65536 バイト（逐次読み出しでき、サイズ計数・ハッシュ計算を挟める） |
+| チャンク応答 | サーバが 1000 バイト×5 チャンクを 0.2 秒間隔で送信 | `content_length()` は `None`。最初の `read` は 0 ms、全体は約 1000 ms で 5 回の `read`・計 5000 バイト（全体の到着を待たずに逐次受信している） |
+| サイズ上限 | `into_body().into_with_config().limit(1000).reader()` で 65536 バイトの応答を読む | 1000 バイト読んだ後 `Err`（`BodyExceedsLimit(1000)`） |
+| `If-None-Match` 一致 | `.header("If-None-Match", <ETag>)` | **`Ok` 304**（既定の `http_status_as_error=true` のままでもエラーにならない）。`ETag` 取得可・ボディ 0 バイト |
+| `If-None-Match` 不一致 | 別の値を付与 | `Ok` 200・ボディ全量 |
+| `>=400`（既定） | 404・500 | `Err(StatusCode(404))`・`Err(StatusCode(500))` |
+| `>=400`（`http_status_as_error(false)`） | 404 | `Ok` 404（ボディ 9 バイト取得可） |
+| リダイレクト（既定） | 302 → 同一サーバの別パス | **自動追従して `Ok` 200**（既定の `max_redirects` は 10） |
+| リダイレクト（`max_redirects(0)`） | 同上 | `Ok` 302（追従しない。`max_redirects_will_error` が `true`／`false` のどちらでも `Ok` 302 で、`Location` ヘッダを取得できた） |
+| `https_only(true)` | `http://` の URL | `Err(RequireHttpsOnly(<url>))` |
+| 受信タイムアウト | `timeout_recv_body(Some(500ms))`、サーバがボディ途中で 3 秒停止 | 5 バイト受信後、約 500 ms で `read` が `Err`（`Timeout(RecvBody)`） |
+
+§14.3 (b) の記述との差分（実測で判明した点）:
+
+- §14.3 の「`max_redirects` の既定が 0（自動追従しない）」は実測と一致しなかった。**既定は 10 で自動追従する**。各ホップで `https` 限定を検証するには、`max_redirects(0)` を明示して `Location` を手動で追うか、`https_only(true)` を併用する必要がある（`https_only(true)` がリダイレクト先にも効くかは未検証。§15.7）。
+- タイムアウトは既定で無効のため、§5・§6 の要件を満たすには明示設定が要る。
+- 304 は既定設定のまま `Ok` で受け取れ、`>=400` だけが `Err(StatusCode)` になる。304 判別のために `http_status_as_error(false)` へ切り替える必要はなかった。
+
+### 15.6 (e) OpenSSL 開発パッケージの有無と CI のクロスビルド
+
+リポジトリ内のファイルから確認できた事実:
+
+- `Dockerfile`（ベース `rust:1.88-slim-bookworm`）の `apt-get install` は `build-essential`・`pkg-config`・`git`・`make`・`curl`・`ca-certificates`・`python3` で、**`libssl-dev` は含まれない**。`cmake` も含まれない。
+- `.github/workflows/` 配下に `apt`／`apt-get` によるパッケージ導入・`openssl`／`libssl` の記述・`container:` 指定はない。CI は `ubuntu-latest` の初期状態に依存する。**`ubuntu-latest` のイメージに OpenSSL 開発パッケージが入っているかは、本リポジトリのファイルからは確認できず未検証**である。
+- `ci.yml` の `cargo build (linux / aarch64-apple-darwin)` ジョブは、Linux ホストから `cargo build --workspace --locked --target aarch64-apple-darwin --lib` を実行する。
+
+クロス lib ビルドの実測（今回のホスト。macOS 向けの C クロスコンパイラは未導入）:
+
+| 構成 | `cargo build --locked --target aarch64-apple-darwin --lib` |
+|---|---|
+| N | 成功（macOS 側は `openssl-sys` ではなく `security-framework` 系で、推移依存数 29〈`-e normal,build`〉） |
+| R | **失敗**: `error: failed to run custom build command for ring v0.17.14`。`cc: error: unrecognized command-line option '-arch'`・`'-mmacosx-version-min=11.0'`（ホストの `cc` が macOS 向けオプションを受け付けない） |
+| N′ | 成功（推移依存数 30） |
+
+構成 R を facade の無条件依存（§14.4 の案 A）にすると、macOS 向け C クロスコンパイラの無いホストでは同ジョブと同じ形のビルドが `ring` の build script で失敗する（今回のホストでの実測）。`ubuntu-latest` 上での成否は未検証である。
+
+### 15.7 未検証で残った点
+
+- 公開インターネット上のサーバに対する TLS の実通信（今回の HTTPS はローカル CA・ローカルサーバのみ）。`RootCerts::PlatformVerifier`（OS ストア）で実在の証明書チェーンが検証に通ること、`webpki-roots` での同確認。
+- OpenSSL 開発パッケージが**無い**環境での構成 N・N′ のビルド失敗の様子（今回のホストは導入済み。開発コンテナ・`ubuntu-latest` での実ビルドは未実施）。
+- `ubuntu-latest` に OpenSSL 開発パッケージ・macOS 向け C クロスコンパイラが入っているか。
+- `aarch64-unknown-linux-gnu`（DGX Spark GB10）・macOS 実機・Windows でのビルドと実行。`aarch64-apple-darwin` は lib のクロスビルドのみで、リンク・実行は未検証。
+- `ureq` の feature 定義（`native-tls-no-default` 単独で native-tls の実装が有効にならないこと）が上流の意図した仕様か不具合か、および `3.4.2` 以外の版での挙動。crates.io の最新版は実測時点で `3.4.2` だった。
+- `minreq`（§14.3 の次点）の実ビルドと API 挙動。`aws-lc-sys`（`cmake` 必須）を含む構成のビルド。
+- `https_only(true)` がリダイレクト先のホップにも適用されるか、`Location` が `http://` のときの挙動。接続タイムアウト（`timeout_connect`）・名前解決タイムアウトの実挙動。
+- gzip 等の圧縮応答（今回の構成は圧縮 feature を有効にしていない）、プロキシ環境変数の扱い、接続プールの挙動。
+- MSRV での実ビルド（今回は rustc 1.98.1 のみ。解決集合内で宣言された `rust-version` の最大は 3 構成とも 1.85）。
+
+### 15.8 判断材料としての要約（採否は未決定）
+
+- §14.3 の推奨案（`ureq =3.4.2`・`native-tls-no-default`）は、ビルド・`deny`（advisories／licenses）は通るが、**HTTPS が成立しないことを実測した**。推奨案はこのままでは採用できる状態にない。
+- 今回 HTTPS の成立を実測できた構成は R（`rustls`）と N′（`native-tls`）で、どちらも現行 allow 外のライセンスを含む（R: `BSD-3-Clause`・`CDLA-Permissive-2.0`、N′: `CDLA-Permissive-2.0`）。allow の追加はユーザー承認事項のままである。
+- システム要件は、N′ がビルド時・実行時とも OpenSSL（Linux）、R が C コンパイラのみで、R は Linux → `aarch64-apple-darwin` のクロス lib ビルドが今回のホストでは失敗した。
+- 上記を受けて、§14.3 の推奨は取り下げて承認対象から外し、§14.5-1・§14.6 は再評価待ちとした（各節の冒頭に明記）。**新しい推奨は本 doc では定めない**。構成の選び直しはユーザー判断である。
+
+**再評価で決める論点**（選択肢と、それぞれの未解決条件の列挙。並び順は優先度を意味しない。実測値は各参照先を正とする）:
+
+| 選択肢 | 実測で分かっていること | 決める前に残る条件 |
+|---|---|---|
+| `ureq =3.4.2`・feature `rustls`（構成 R） | ローカル CA を明示した HTTPS が成立（§15.4）。ホストのビルドは C コンパイラのみで成功、`cmake`・OpenSSL は不要（§15.3）。`deny advisories` は ok（§15.3） | allow に `BSD-3-Clause`（`subtle`）と `CDLA-Permissive-2.0`（`webpki-roots`）の追加承認が要る（§15.3）。Linux → `aarch64-apple-darwin` のクロス lib ビルドが `ring` の build script で失敗した（今回のホスト。`ubuntu-latest` では未検証。§15.6）。ルート証明書源は同梱の `webpki-roots` で、OS ストアを使うには feature `platform-verifier` が別途要る（その構成は未ビルド・未実測。§15.4） |
+| `ureq =3.4.2`・feature `native-tls`（構成 N′） | `provider(NativeTls)` を明示し、ローカル CA を指定した HTTPS が成立（§15.4）。Linux → `aarch64-apple-darwin` のクロス lib ビルドは成功（§15.6）。`deny advisories` は ok（§15.3） | allow に `CDLA-Permissive-2.0`（`webpki-root-certs`）の追加承認が要る（§15.3）。Linux ではビルド時に OpenSSL 開発パッケージ、実行時に `libssl.so.3`／`libcrypto.so.3` が要る（§15.3）。`Dockerfile` に `libssl-dev` が無く、`ubuntu-latest` の導入状況と、開発パッケージが無い環境でのビルドは未検証（§15.6・§15.7）。プロバイダは自動選択されず明示が要る（§15.4） |
+| `ureq` 以外（`minreq =3.0.0` の `https-native-tls`／`https-openssl`） | §13 のライセンス・推移依存数の実測のみ（現行 allow で `licenses` は ok。§13.2）。直接ライセンスは ISC（§13.3） | 実ビルド・HTTPS の成立・API 挙動（§5・§6 の要件）はいずれも未実測（§15.7）。`ureq` ⑥ と同じく「`licenses` ok」だけでは HTTPS の成立を意味しないため、同等の実測が要る |
+| `ureq` の別の版・別の feature 組合せ | HTTPS の成立は実測なし（`3.4.2` の ①・③ はライセンス・推移依存数のみ実測。いずれも allow 外を含む。§13.2） | `native-tls-no-default` 単独で実装が有効にならないのが上流の意図した仕様かどうか、`3.4.2` 以外の版での挙動は未検証（§15.7） |
+
+どの選択肢にも共通して残る条件:
+
+- 公開インターネット上のサーバに対する TLS の実通信、OS の証明書ストアによる実在の証明書チェーンの検証は未検証（§15.7）。
+- `aarch64-unknown-linux-gnu`（DGX Spark GB10）・macOS 実機でのビルドと実行は未検証（§15.7）。
+- TLS 設定の不整合は `Err` ではなく panic になる（§15.4）。リダイレクトの既定は 10 回の自動追従、タイムアウトの既定は無期限である（§15.5）。どの構成でも、§5・§6 の要件を満たす明示設定と、そのテストでの担保が要る。
+- 構成が決まった後に、§14.4（配置案と `cfg` 範囲）・§14.5-1（区分の起案）・§14.6（承認チェックリスト）をその構成で書き直す。§14.5-2 の dirfd 経路（B-1／B-2）は構成に依存しない。
