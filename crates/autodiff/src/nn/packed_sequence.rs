@@ -20,11 +20,10 @@
 //! または `Unsupported`→ホスト参照実装のフォールバックを持つ既存経路で、RNN セルも
 //! 既存の `BackendOps` メソッドを呼ぶ。本モジュールは GPU 専用カーネルを持たない。
 //!
-//! **公開形（未承認・保留）**: facade（`fandhe_ai`）への公開形は未承認で、承認依頼は
-//! #2677・公開自体は承認後の #2678・#2679。推奨案は決定記録
-//! `docs/autodiff-packed-sequence-decision.md` §7（推奨案の記録であり承認記録ではない）。
-//! 保留中は `PackedSequenceHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが facade への漏出を拒否する。
+//! **公開形**: facade（`fandhe_ai::nn::rnn`）へは #2679 で承認形の純再エクスポートとして公開済み
+//! （決定記録 `docs/autodiff-packed-sequence-decision.md` §7・§12）。承認形に含まれない経路
+//! （`Var`／`Tape` への委譲・`Rnn::forward_packed` 等）は `PackedSequenceHoldDoctestGuard`
+//! （`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の否定ガードが引き続き拒否する。
 //! このため本モジュールの追加物は **自由関数と本モジュール専用の型だけ**とし、facade が
 //! 再エクスポート済みの型（`Var`・`Tape`・`Rnn` など）へ inherent メソッドを足さない。
 //!

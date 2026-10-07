@@ -1,10 +1,9 @@
 //! `IterableDataset`・`IterableDataLoader`・`BatchSampler`（イシュー #2662・親 #2660）の
 //! 統合テスト。
 //!
-//! これらは **facade 非公開**（承認待ち #2677・公開は #2679。
-//! `docs/tensor-core-iterable-dataset-batch-sampler-decision.md`）のため、内部クレート
-//! `fandhe_ai_tensor_core::data` を直接 import する（`data_dataset_compose.rs` と同型）。
-//! facade 公開後は import を `fandhe_ai::data` へ切り替える。
+//! これらは #2679 で `fandhe_ai::data` へ公開済み（承認はルート #2499 のコメント。
+//! `docs/tensor-core-iterable-dataset-batch-sampler-decision.md` §5）のため、`fandhe_ai`
+//! のみを import する（`data_dataset_compose.rs` と同型）。
 //!
 //! 実 PyTorch 2.14.0 の実行値 fixture
 //! （`crates/tensor-core/tests/fixtures/iterable-batch-sampler-pytorch-reference/`）と突合する。
@@ -16,10 +15,10 @@ use std::sync::Mutex;
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::Sequential;
+use fandhe_ai::data::{BatchSampler, IterableDataLoader, IterableDataset};
 use fandhe_ai::data::{DataError, Sampler, SamplerDataLoader, TensorDataset};
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai_backend_cpu::assert_parity;
-use fandhe_ai_tensor_core::data::{BatchSampler, IterableDataLoader, IterableDataset};
 use serde_json::Value;
 
 fn test_lock() -> &'static Mutex<()> {

@@ -99,7 +99,7 @@ tolerance・baseline は変更していない。
 - `crates/backend-cpu/tests/scalar_op_parity.rs`: 全 variant 一覧へ追加し、負・ゼロ・正・境界入力の専用テストを追加。
 - `crates/facade/tests/activation_scalar_ops_backend_parity.rs`: CPU tape と NaiveOps tape の突合（属性なし）。CUDA／Metal 実機は `#[ignore]`（5 演算すべて）。
 
-## 7. facade 公開形の推奨案（未承認）
+## 7. facade 公開形の推奨案（ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§12 参照）
 
 推奨は 1 つ。#2146 → #2516／#2529 で確定済みの形をそのまま当てはめる。
 
@@ -151,3 +151,29 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機テスト（`cuda_ac
 - `docs/autodiff-trig-ops-decision.md`（#2634）・`docs/autodiff-scalar-unary-ops-decision.md`（#2145）・`docs/scalar-op-dispatch-design.md`
 - `docs/compat-api-scope.md` 5 節（適用記録）・`.claude/rules/coding-rust.md`（REQ-2 判定・カーネル境界検査）
 - PyTorch 2.14.0 実行値: `crates/autodiff/tests/fixtures/activation-scalar-ops-pytorch-reference/README.md`
+
+## 12. #2679 実装記録（`Sequential::add_*` の facade 公開）
+
+
+- 状態: **§7 のうち `compat::Sequential::add_*` 5 本を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 17 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子（`crates/facade/src/compat/sequential.rs`）: `add_selu(self) -> Self`・`add_celu(self, alpha: f32) -> Result<Self, AutodiffError>`・
+  `add_softsign(self) -> Self`・`add_hardsigmoid(self) -> Self`・`add_log_sigmoid(self) -> Self`。層は内部実装（`nn::activation::{Selu, Celu, Softsign, Hardsigmoid, LogSigmoid}`）を
+  `LayerSpec::Unsupported` で積む。`Var` の委譲メソッド 5 本は #2678 の担当で本イシューでは追加していない。
+- 記録に形が書かれていない点の扱い: **`save_model`／`load_model` の manifest kind** はどの記録にも形がなく（§8 が `model_io` への kind 追加をスコープ外とする）、
+  永続形式を無承認で広げない方針で kind を追加していない。`add_conv_transpose1d`／`add_unflatten`（#2521）と同じく `ModelIoError::UnsupportedModel` で拒否し、
+  保存先に何も作らない（受入条件の「非対応なら型付きエラーで拒否」）。kind の追加は後から非破壊に行えるが形の決定が要る。層は無状態のため
+  `nn::Module` の `as_*` フックは追加せず、`bind`／`trainable_parameters`／常駐経路（`forward_resident` 等）は層を素通しする（`Mish` と同じ）。
+- ガード（§9）の反転: `ActivationScalarOpsHoldDoctestGuard` から `add_*` の UFCS プローブ・トレイト・impl を削除し、`Var`／`Tape`／`Tensor<f32>` の同名メソッド・層型・モジュールの
+  プローブだけを残した（#2678 が `Var` 分を外す）。`add_*` の `fn` 宣言禁止は、`compat/sequential.rs` に承認シグネチャで各 1 件という正ガード
+  （`compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures`・`..._exposes_..._issue_2679`・workspace 宣言インベントリの期待値）へ反転した。
+- テスト: `crates/facade/tests/compat_sequential_activation_scalar_layers.rs`（f64 閉形式参照との統一複合判定・学習経路・RReLU 以外の層でのパラメータ素通し・`fit`・常駐経路・保存と ONNX の拒否）、
+  `compat_sequential_activation_scalar_layers_backend_parity.rs`（`#[ignore]`。実機は未実測で `docs/perf/logs/compat-sequential-activation-scalar-layers-2679/README.md` へ申し送り）。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。
+
+## 13. #2678 実装記録（Phase 4 の facade 公開）
+
+- 状態: **§7 の公開形を #2678 で承認形どおり公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 17を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2678 時点で当該コメントの承認に更新された（承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき）。
+- 公開した識別子: `Var::{selu,softsign,hardsigmoid,log_sigmoid}(&self)`・`Var::celu(&self, alpha: f32)`（`Sequential::add_*` は #2679 で公開済み）。本体は `crate::<module>::<fn>` への 1 行委譲（`Var`）／`&self.0` を渡すだけの 1 行委譲（`Tape`）に固定し、新規 `Op`・`BackendOps` メソッド・`AutodiffError` variant・`unsafe` は追加していない。
+- ガードの反転・縮小: `ActivationScalarOpsHoldDoctestGuard` から `Var` の impl・UFCS 行を外し、`activation_scalar_ops` モジュール名・層型 5 種・`Tape`／`Tensor<f32>` 上の同名メソッドのプローブだけを残した（先例 #2516）。`api_surface.rs` の否定ガードは、承認済みの型名を識別子表から外し、`Tape` の承認済みメソッドを `fn` 宣言走査から除外したうえで、承認形だけを許す正ガードへ反転した。宣言場所インベントリには `autodiff/src/var.rs`（`Tape` 分は `facade/src/lib.rs`）の各 1 件を追加した。
+- テスト: `crates/facade/tests/phase4_ops_facade.rs`（activation_scalar_and_softmin_threshold_methods。`fandhe_ai::` だけを import し、fn ポインタ型でシグネチャを固定して厳密に決まる値を確認）と、`crates/facade/tests/api_surface.rs` の正ガード（`var_phase4_ops_methods_are_thin_delegations`・`facade_reexports_phase4_ops_types_only_in_approved_shape`・`facade_tape_phase4_methods_are_thin_delegations`・各 `workspace_declares_*`）。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。CUDA／Metal 実機 parity は未実測で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` へ申し送る（新しい数値経路はなく、1 行委譲のため既存の各 `*_backend_parity.rs` の結果がそのまま適用される）。

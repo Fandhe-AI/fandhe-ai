@@ -9,12 +9,11 @@
 //! ホスト参照実装へフォールバック）、専用カーネルなしで到達可能。
 //! `crates/backend-*`・`crates/tensor-core` は変更しない。
 //!
-//! **facade 非公開（本イシューは内部実装と決定記録まで）**: 本モジュール・
-//! `nn::softmin_threshold` の層は facade から再エクスポートしない。
-//! `Var` メソッド化・`compat::Sequential::add_*` を含む公開面の拡張は承認
-//! 依頼 #2677・承認後の #2678・#2679 で扱う。保留は facade の
-//! `SoftminThresholdOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードで
-//! 機械固定する（`docs/autodiff-softmin-threshold-ops-decision.md` §7）。
+//! **公開形**: `compat::Sequential::add_*` は #2679 で facade へ公開済み
+//! （`docs/autodiff-softmin-threshold-ops-decision.md` §7・§12）。本モジュール・
+//! `nn::softmin_threshold` の層は facade から再エクスポートしない。`Var` メソッド化は
+//! #2678 の担当で、未承認経路は facade の `SoftminThresholdOpsHoldDoctestGuard` と
+//! `api_surface.rs` の否定ガードが機械固定する。
 //!
 //! **数値契約**（詳細は決定記録 §3）:
 //! - `softmin`: `softmax(-x)`。超越関数を含むため forward／backward とも
@@ -38,6 +37,10 @@
 //! `noise` の shape は、tape 操作・RNG 消費・メモリ確保の前にすべて検査し、
 //! 違反は型付きエラーで fail-closed に拒否する（エラー時に tape へ孤児
 //! ノードを残さない）。本番経路で `unwrap()`／`expect()` は使わない。
+//!
+//! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{softmin,tanhshrink,threshold,rrelu}`（`rrelu_with_noise` は公開しない）。本モジュール自体は facade から再エクスポートしない。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::{ShapeError, Tensor, rng};
 

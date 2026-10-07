@@ -1,14 +1,7 @@
-//! イシュー #2659（親 #2657）の `fandhe_ai_autodiff::nn::optim::{PolynomialLr,
-//! ChainedScheduler}` facade 公開保留（`crates/facade/src/lib.rs::
-//! LrSchedulerPolyChainedHoldDoctestGuard`）下での、公開 compat API
-//! （`Sequential::fit_with_callbacks`・`LrSchedule::per_epoch`）と内部スケジューラの
-//! 手動結線の契約テスト。
-//!
-//! **本ファイルは 2 型を内部クレートから直接 import する契約ファイル**であり
-//! （`compat_sequential_swa_manual.rs` と同型の位置づけ）、facade 再エクスポートのみを
-//! 使う契約のテストファイルへ混入させない。`LrScheduler` trait は facade
-//! （`fandhe_ai::optim::LrScheduler`）と同一の型であり、`LrSchedule::per_epoch` へそのまま
-//! 渡せる（`docs/autodiff-lr-scheduler-poly-chained-decision.md` §8）。
+//! イシュー #2659（親 #2657）の `PolynomialLr`・`ChainedScheduler`（#2679 で
+//! `fandhe_ai::optim` へ公開済み。`docs/autodiff-lr-scheduler-poly-chained-decision.md` §8）
+//! と公開 compat API（`Sequential::fit_with_callbacks`・`LrSchedule::per_epoch`）の
+//! 手動結線の契約テスト。`fandhe_ai` のみを import する。
 //!
 //! 検査項目: `history.lr` が各 epoch の `lr_at(epoch)` と bit 一致すること。flaky になりうる
 //! accuracy 比較は入れない。ホスト計算のみのため `#[ignore]` 分離は行わない。
@@ -16,8 +9,8 @@
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::Tensor;
 use fandhe_ai::compat::{Callback, FitConfig, Loss, LrSchedule, Optimizer, Sequential};
+use fandhe_ai::optim::{ChainedScheduler, PolynomialLr};
 use fandhe_ai::optim::{ExponentialLr, LrScheduler, SgdConfig};
-use fandhe_ai_autodiff::nn::optim::{ChainedScheduler, PolynomialLr};
 
 const N: usize = 16;
 const D_IN: usize = 4;

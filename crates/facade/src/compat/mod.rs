@@ -67,11 +67,9 @@
 
 mod array;
 mod callbacks;
-// イシュー #2665: Functional API の内部実装（#2667 で fit・evaluate〈`functional/train.rs`〉と
-// 保存・復元〈`model_io/functional_io.rs`〉を追加）。公開形は未承認のため `#[cfg(test)]` で隔離し、
-// `pub use` は足さない（詳細は `functional.rs` のモジュール doc と
-// `docs/facade-functional-api-decision.md`）。
-#[cfg(test)]
+// イシュー #2665 実装・#2679 公開: Functional API（#2667 で fit・evaluate〈`functional/train.rs`〉と
+// 保存・復元〈`model_io/functional_io.rs`〉を追加）。型は下の `pub use` で公開する（詳細は `functional.rs` の
+// モジュール doc と `docs/facade-functional-api-decision.md` §10・§16〜§18）。モジュール自体は非公開のまま。
 mod functional;
 mod logger_io;
 mod metrics;
@@ -87,7 +85,9 @@ pub use callbacks::{
 /// `Sequential::add_multihead_attention_with_config` の引数型（イシュー #2530・ルート #2499 の
 /// 承認形。再エクスポートはこの 1 行のみで `api_surface.rs` が完全一致で固定する）。
 pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;
+pub use functional::{FunctionalBuilder, FunctionalModel, Node};
 pub use metrics::{Metrics, MetricsResult};
+pub use model_io::functional_io::{load_functional_model, save_functional_model};
 pub use model_io::{ModelIoError, load_model, save_model};
 pub use sequential::{Sequential, SequentialVars};
 pub use training::{

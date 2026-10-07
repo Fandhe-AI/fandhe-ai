@@ -33,6 +33,10 @@
 //!
 //! **対象外**: `searchsorted` の `side`／`sorter`／`out_int32`・`out=`・整数 dtype 入力・
 //! int64 索引・`torch.histogram`／`histogramdd`・重みへの勾配。
+//!
+//! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{histc,searchsorted,bucketize}` と facade `Tape::{bincount,bincount_weighted}`。本モジュール自体は facade から再エクスポートしない。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::binning::{self, SearchSortedLayout};
 use fandhe_ai_tensor_core::{BackendError, ShapeError, Tensor};

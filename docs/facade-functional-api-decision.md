@@ -339,3 +339,22 @@ fixture の範囲（optimizer の定義・損失の reduction）では差分な�
 ### スコープ外（新規 Issue は未承認のため起票しない）
 
 `Lbfgs`・勾配累積・AMP・callbacks／validation／metrics・常駐経路・出力別 loss／`loss_weights`・重み共有・ONNX export・`bind` 相当の公開。承認依頼は #2677、公開と保留ガードの反転は #2679。
+
+## 19. #2679 実装記録（facade 公開）
+
+
+- 状態: **§10 の推奨形（§13 の承認事項 11 項目を含む）を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 27・28 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子: `fandhe_ai::compat`（`crates/facade/src/compat/mod.rs`）へ `pub use functional::{FunctionalBuilder, FunctionalModel, Node};` と
+  `pub use model_io::functional_io::{load_functional_model, save_functional_model};`。`#[cfg(test)]` 隔離を解除し、`FunctionalBuilder::{new, input, apply, concatenate, add, multiply, average, build}`・
+  `FunctionalModel::{forward, predict, set_training, train, eval, training, named_parameters, state_dict, load_state_dict, trainable_parameters, apply_parameters, compile, fit, evaluate}` を `pub` にした
+  （§4・§7・§17 に列挙のあるメソッド）。**`FunctionalVars` と `bind` は非公開のまま**（§13 項 11）、`is_compiled`（§4・§7 に列挙なし）と `FunctionalVars` のテスト専用メソッドは `#[cfg(test)]`。
+  結合層は §17 のとおりビルダーメソッドとして型と同時に公開し、`merge_ops` の自由関数は再エクスポートしない。`Var` 委譲・`Sequential::add_*` は不採用のまま。
+- 変更していないもの: manifest の形式名・`format_version`・検査順・エラー文言・上限定数（`MAX_*`）・`fs_guard` の共有（新しいファイル I/O の経路は作っていない）。
+- ガード（§9・§16〜§18）の反転: `FunctionalApiHoldDoctestGuard` は `FunctionalBuilder`・`FunctionalModel`・`Node`・保存入口の衝突プローブを削除し、`FunctionalVars`・モジュール `functional`・
+  `Sequential::apply`／`call` のプローブだけを残した。`facade_functional_api_stays_internal` は `facade_exposes_functional_api_only_in_approved_shape`（承認 `pub use` 2 文・`compat/functional.rs` の
+  `pub struct` 3 件と `pub(crate) struct FunctionalVars` 1 件・`compat/model_io/functional_io.rs` の素の `pub fn` 2 件を過不足なく固定し、`FunctionalVars` の公開・`pub mod functional`・別名再エクスポートを拒否）へ
+  反転し、`functional_api_types_are_reachable_via_facade_only`・`functional_api_usage_doctests_are_present_and_compiled` を追加した。`MergeOpsHoldDoctestGuard` は未承認経路（`merge_ops` の自由関数・
+  `Var` 等への結合メソッド・`Sequential::add_concatenate` 等）のガードとして維持した。
+- テスト: クレート内ユニットテスト（`functional/tests.rs`・`fit_tests.rs`・`fit_parity_tests.rs`・`merge_tests.rs`・`functional_io/tests.rs`）は維持。公開 API だけを使う統合テスト
+  `crates/facade/tests/compat_functional.rs`・`compat_functional_model_io.rs` を追加した。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。

@@ -100,7 +100,7 @@ fixture は実 PyTorch 2.14.0+cpu の実行値（生成条件・sha256 は `crat
 | `crates/facade/tests/softmin_threshold_ops_backend_parity.rs` | CPU 対 NaiveOps の 4 テスト（bit 一致 forward／backward、REQ-2 forward／backward。全演算を網羅）と CUDA／Metal の `#[ignore]` 8 件 |
 | `crates/facade/tests/api_surface.rs` | 保留ガードの 5 テスト（§9） |
 
-## 7. facade 公開形の推奨案（未承認）
+## 7. facade 公開形の推奨案（ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§12 参照）
 
 **本節は推奨案の記録であり、承認記録ではない。** 実際に得ていない承認はここにも、コミット・PR にも書かない。
 
@@ -144,3 +144,27 @@ CUDA（`Device::Cuda(0)`）・Metal（`Device::Metal`）の `#[ignore]` テス�
 - `crates/facade/tests/softmin_threshold_ops_backend_parity.rs`・`crates/facade/tests/api_surface.rs`・`crates/facade/src/lib.rs`
 - `docs/autodiff-activation-ops-decision.md`（#2146）・`docs/autodiff-trig-ops-decision.md`（#2634）・`docs/autodiff-packed-sequence-decision.md`（#2647）
 - `docs/compat-api-scope.md`（適用記録）
+
+## 12. #2679 実装記録（`Sequential::add_*` の facade 公開）
+
+
+- 状態: **§7 のうち `compat::Sequential::add_*` 4 本を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 18 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子（`crates/facade/src/compat/sequential.rs`）: `add_softmin(self, dim: usize) -> Self`（`dim` の範囲検査は forward 時）・`add_tanhshrink(self) -> Self`・
+  `add_threshold(self, threshold: f32, value: f32) -> Self`・`add_rrelu(self, lower: f32, upper: f32) -> Result<Self, AutodiffError>`（`lower`／`upper` は構築時に検証）。
+  `rrelu_with_noise`・層型・モジュールは非公開のまま。`Var` の委譲メソッドは #2678 の担当。
+- `RRelu` の追加時点の `training` は `true`（`Dropout` と同じ）で、`Sequential::set_training`／`eval` の伝播で推論時の固定傾き `(lower + upper) / 2` へ切り替わる。
+- 記録に形が書かれていない点の扱い: manifest kind（`activation-scalar-ops` 記録 §12 と同じ理由で追加せず `UnsupportedModel` で拒否）。**`forward_host` は 4 層とも未提供のまま**
+  （§7「bit 一致を検証してから」）で、`Sequential::predict` は既存の tape 経路フォールバックで動く。GPU 専用カーネルは追加していない。
+- ガード（§9）の反転: `SoftminThresholdOpsHoldDoctestGuard` から `add_*` のプローブを削除し、`Var`／`Tape`／`Tensor<f32>` のメソッド・層型・モジュールのプローブだけを残した。
+  `add_*` の `fn` 宣言は `compat/sequential.rs` に承認シグネチャで各 1 件という正ガードへ反転した（workspace 宣言インベントリの期待値に登録）。
+- テスト・実機申し送りは `autodiff-activation-scalar-ops-decision.md` §12 と共通（9 層を 1 つのテストファイルで検証）。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。
+
+## 13. #2678 実装記録（Phase 4 の facade 公開）
+
+- 状態: **§7 の公開形を #2678 で承認形どおり公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 18を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2678 時点で当該コメントの承認に更新された（承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき）。
+- 公開した識別子: `Var::softmin(&self, dim)`・`tanhshrink(&self)`・`threshold(&self, threshold, value)`・`rrelu(&self, lower, upper, training)`（`Sequential::add_*` は #2679 で公開済み）。本体は `crate::<module>::<fn>` への 1 行委譲（`Var`）／`&self.0` を渡すだけの 1 行委譲（`Tape`）に固定し、新規 `Op`・`BackendOps` メソッド・`AutodiffError` variant・`unsafe` は追加していない。
+- ガードの反転・縮小: `SoftminThresholdOpsHoldDoctestGuard` から `Var` の 4 本の UFCS 行を外し、`rrelu_with_noise`・`softmin_threshold_ops` モジュール名・層型 4 種・`Tape`／`Tensor<f32>` 上の同名メソッドのプローブを残した（先例 #2516）。`api_surface.rs` の否定ガードは、承認済みの型名を識別子表から外し、`Tape` の承認済みメソッドを `fn` 宣言走査から除外したうえで、承認形だけを許す正ガードへ反転した。宣言場所インベントリには `autodiff/src/var.rs`（`Tape` 分は `facade/src/lib.rs`）の各 1 件を追加した。
+- `rrelu_with_noise` は公開しない（推奨形に含まれない。`Var` 上の定義が増えないことを `phase4_held_items_remain_unexposed` が固定する）。
+- テスト: `crates/facade/tests/phase4_ops_facade.rs`（activation_scalar_and_softmin_threshold_methods。`fandhe_ai::` だけを import し、fn ポインタ型でシグネチャを固定して厳密に決まる値を確認）と、`crates/facade/tests/api_surface.rs` の正ガード（`var_phase4_ops_methods_are_thin_delegations`・`facade_reexports_phase4_ops_types_only_in_approved_shape`・`facade_tape_phase4_methods_are_thin_delegations`・各 `workspace_declares_*`）。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。CUDA／Metal 実機 parity は未実測で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` へ申し送る（新しい数値経路はなく、1 行委譲のため既存の各 `*_backend_parity.rs` の結果がそのまま適用される）。

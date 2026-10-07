@@ -330,6 +330,15 @@ impl Tape {
                 self.release_checkpoints_ending_at(id)?;
                 continue;
             };
+            // backward hook の発火（イシュー #2586・設計記録
+            // `docs/autodiff-forward-backward-hooks-design.md` §5.2・§5.5）。
+            // 勾配確定の直後・`grad::vjp` の前。登録簿・`nodes` のいずれの借用も
+            // 保持せずに呼ぶ（`backward_hooks_for` が `Arc` を複製して返す）。
+            // 同一ノード内は登録順、最初の `Err` で打ち切って伝播する。
+            // 未到達ノード（上の `continue` 側）では発火しない。
+            for hook in self.backward_hooks_for(id) {
+                hook(&upstream)?;
+            }
             // 本反復専用の借用（ブロック末で drop）。ノード自身の
             // forward 値（`out_value`）を層 1（fallible）経由で実体化
             // する。当該ノードが elementwise の遅延グラフ末端、または

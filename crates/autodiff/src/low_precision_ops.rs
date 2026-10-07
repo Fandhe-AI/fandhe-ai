@@ -33,6 +33,10 @@
 //! これにより ① activation checkpoint の解放対象外 ② `create_graph` が
 //! `requires_grad` な祖先に含まれた時点で拒否（子テープでの f32 再生による
 //! 精度後退を塞ぐ。`create_graph::validate_ancestors`）の 2 経路を塞ぐ。
+//!
+//! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{matmul,add,mul,relu,exp,tanh}_low_precision`。本モジュール自体は facade から再エクスポートしない。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, ScalarDType, ShapeError, Tensor, broadcast_shape,

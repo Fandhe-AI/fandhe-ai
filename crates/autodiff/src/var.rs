@@ -3623,8 +3623,10 @@ impl<'t> Var<'t> {
     ///
     /// 自由関数 `crate::low_precision_ops::matmul_low_precision`（イシュー
     /// #2628。elementwise 5 演算と同じ入口の並び）が本メソッドへ 1 行委譲
-    /// する。可視性は `pub(crate)` のまま（facade 公開は承認後の #2678）。
-    pub(crate) fn matmul_low_precision(
+    /// する。可視性は `pub`（イシュー #2678 で facade 公開を承認形どおりに実施。
+    /// 委譲の向きは自由関数 → 本メソッドのまま変えない。本体を移すと再帰か大きな
+    /// 移動になるため、決定記録 §6.5 の「自由関数への 1 行委譲」とは逆向き）。
+    pub fn matmul_low_precision(
         &self,
         other: &Var<'t>,
         dtype: fandhe_ai_tensor_core::ScalarDType,
@@ -4834,6 +4836,564 @@ impl<'t> Var<'t> {
     /// `InvalidArgument` で拒否する。
     pub fn glu(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
         crate::activation_ops::glu(self, dim)
+    }
+
+    // ---- fft_ops 委譲メソッド（FFT（rfft／irfft／fft／ifft／stft／istft。Phase 4 行 1）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::fft_ops` の自由関数（DFT は host 参照実装を経由）。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_fft_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-fft-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// 実入力の片側 FFT（`torch.fft.rfft` 相当）。イシュー #2678。`crate::fft_ops::rfft` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn rfft(
+        &self,
+        n: Option<usize>,
+        dim: Option<usize>,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fft_ops::rfft(self, n, dim, norm)
+    }
+
+    /// 片側スペクトルから実信号への逆 FFT（`torch.fft.irfft` 相当）。イシュー #2678。`crate::fft_ops::irfft` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn irfft(
+        &self,
+        n: Option<usize>,
+        dim: Option<usize>,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fft_ops::irfft(self, n, dim, norm)
+    }
+
+    /// 実入力の全域 FFT（`torch.fft.fft` 相当）。イシュー #2678。`crate::fft_ops::fft` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn fft(
+        &self,
+        n: Option<usize>,
+        dim: Option<usize>,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fft_ops::fft(self, n, dim, norm)
+    }
+
+    /// 全域 FFT の逆変換（`torch.fft.ifft` 相当）。イシュー #2678。`crate::fft_ops::ifft` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn ifft(
+        &self,
+        n: Option<usize>,
+        dim: Option<usize>,
+        norm: fandhe_ai_tensor_core::FftNorm,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fft_ops::ifft(self, n, dim, norm)
+    }
+
+    /// 短時間 FFT（`torch.stft` 相当）。イシュー #2678。`crate::fft_ops::stft` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn stft(
+        &self,
+        n_fft: usize,
+        window: Option<&Tensor<f32>>,
+        options: &crate::fft_ops::StftOptions,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fft_ops::stft(self, n_fft, window, options)
+    }
+
+    /// 短時間 FFT の逆変換（`torch.istft` 相当）。イシュー #2678。`crate::fft_ops::istft` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn istft(
+        &self,
+        n_fft: usize,
+        window: Option<&Tensor<f32>>,
+        options: &crate::fft_ops::IstftOptions,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fft_ops::istft(self, n_fft, window, options)
+    }
+
+    // ---- low_precision_ops 委譲メソッド（低精度 forward（add／mul／relu／exp／tanh。Phase 4 行 2。matmul は既存メソッドを公開）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::low_precision_ops` の自由関数。非対応バックエンドは型付きエラー（`Unsupported`）で拒否する。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_low_precision_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-low-precision-op-extension-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// elementwise 加算の opt-in 低精度 forward。イシュー #2678。`crate::low_precision_ops::add_low_precision` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn add_low_precision(
+        &self,
+        other: &Var<'t>,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::low_precision_ops::add_low_precision(self, other, dtype)
+    }
+
+    /// elementwise 乗算の opt-in 低精度 forward。イシュー #2678。`crate::low_precision_ops::mul_low_precision` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn mul_low_precision(
+        &self,
+        other: &Var<'t>,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::low_precision_ops::mul_low_precision(self, other, dtype)
+    }
+
+    /// ReLU の opt-in 低精度 forward。イシュー #2678。`crate::low_precision_ops::relu_low_precision` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn relu_low_precision(
+        &self,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::low_precision_ops::relu_low_precision(self, dtype)
+    }
+
+    /// exp の opt-in 低精度 forward。イシュー #2678。`crate::low_precision_ops::exp_low_precision` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn exp_low_precision(
+        &self,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::low_precision_ops::exp_low_precision(self, dtype)
+    }
+
+    /// tanh の opt-in 低精度 forward。イシュー #2678。`crate::low_precision_ops::tanh_low_precision` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn tanh_low_precision(
+        &self,
+        dtype: fandhe_ai_tensor_core::ScalarDType,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::low_precision_ops::tanh_low_precision(self, dtype)
+    }
+
+    // ---- trig_ops 委譲メソッド（逆三角・双曲線関数（Phase 4 行 3）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::trig_ops` の自由関数（既存 Op の合成）。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_trig_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-trig-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// 逆正接（`torch.atan` 相当）。イシュー #2678。`crate::trig_ops::atan` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn atan(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::atan(self)
+    }
+
+    /// 逆正弦（`torch.asin` 相当）。定義域外は NaN。イシュー #2678。`crate::trig_ops::asin` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn asin(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::asin(self)
+    }
+
+    /// 逆余弦（`torch.acos` 相当）。定義域外は NaN。イシュー #2678。`crate::trig_ops::acos` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn acos(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::acos(self)
+    }
+
+    /// 双曲線正弦（`torch.sinh` 相当）。イシュー #2678。`crate::trig_ops::sinh` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn sinh(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::sinh(self)
+    }
+
+    /// 双曲線余弦（`torch.cosh` 相当）。イシュー #2678。`crate::trig_ops::cosh` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn cosh(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::cosh(self)
+    }
+
+    /// 逆双曲線正弦（`torch.asinh` 相当）。イシュー #2678。`crate::trig_ops::asinh` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn asinh(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::asinh(self)
+    }
+
+    /// 逆双曲線余弦（`torch.acosh` 相当）。イシュー #2678。`crate::trig_ops::acosh` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn acosh(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::acosh(self)
+    }
+
+    /// 逆双曲線正接（`torch.atanh` 相当）。イシュー #2678。`crate::trig_ops::atanh` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn atanh(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::atanh(self)
+    }
+
+    /// 2 引数逆正接（`torch.atan2(self, other)` 相当。`self` が y・`other` が x）。イシュー #2678。`crate::trig_ops::atan2` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn atan2(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::trig_ops::atan2(self, other)
+    }
+
+    // ---- nonfinite_ops 委譲メソッド（非有限値の判定・置換（Phase 4 行 4）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::nonfinite_ops` の自由関数。判定 3 種は勾配を持たない bool テンソルを返す。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_nonfinite_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-nonfinite-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// NaN 判定（`torch.isnan` 相当）。イシュー #2678。`crate::nonfinite_ops::isnan` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn isnan(&self) -> Result<Tensor<bool>, AutodiffError> {
+        crate::nonfinite_ops::isnan(self)
+    }
+
+    /// ±inf 判定（`torch.isinf` 相当）。イシュー #2678。`crate::nonfinite_ops::isinf` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn isinf(&self) -> Result<Tensor<bool>, AutodiffError> {
+        crate::nonfinite_ops::isinf(self)
+    }
+
+    /// 有限値判定（`torch.isfinite` 相当）。イシュー #2678。`crate::nonfinite_ops::isfinite` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn isfinite(&self) -> Result<Tensor<bool>, AutodiffError> {
+        crate::nonfinite_ops::isfinite(self)
+    }
+
+    /// NaN・±inf の置換（`torch.nan_to_num` 相当）。イシュー #2678。`crate::nonfinite_ops::nan_to_num` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn nan_to_num(
+        &self,
+        nan: Option<f32>,
+        posinf: Option<f32>,
+        neginf: Option<f32>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::nonfinite_ops::nan_to_num(self, nan, posinf, neginf)
+    }
+
+    // ---- cumulative_ops 委譲メソッド（累積演算（cummax／cummin／logcumsumexp。Phase 4 行 5）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::cumulative_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_cumulative_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-cumulative-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// 指定軸の累積最大値と索引（`torch.cummax` 相当）。イシュー #2678。`crate::cumulative_ops::cummax` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn cummax(&self, dim: usize) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::cumulative_ops::cummax(self, dim)
+    }
+
+    /// 指定軸の累積最小値と索引（`torch.cummin` 相当）。イシュー #2678。`crate::cumulative_ops::cummin` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn cummin(&self, dim: usize) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::cumulative_ops::cummin(self, dim)
+    }
+
+    /// 指定軸の累積 log-sum-exp（`torch.logcumsumexp` 相当）。イシュー #2678。`crate::cumulative_ops::logcumsumexp` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn logcumsumexp(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::cumulative_ops::logcumsumexp(self, dim)
+    }
+
+    // ---- stat_reduce_ops 委譲メソッド（順序統計・NaN 無視縮約（Phase 4 行 6）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::stat_reduce_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_stat_reduce_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-stat-reduce-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// 中央値（`torch.median` 相当。偶数個は下側）。イシュー #2678。`crate::stat_reduce_ops::median` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn median(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::stat_reduce_ops::median(self, dim)
+    }
+
+    /// 指定軸の中央値と索引（`torch.median(dim)` 相当）。イシュー #2678。`crate::stat_reduce_ops::median_with_indices` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn median_with_indices(&self, dim: usize) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::stat_reduce_ops::median_with_indices(self, dim)
+    }
+
+    /// 指定軸の k 番目に小さい値と索引（`torch.kthvalue` 相当）。イシュー #2678。`crate::stat_reduce_ops::kthvalue` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn kthvalue(&self, k: usize, dim: usize) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::stat_reduce_ops::kthvalue(self, k, dim)
+    }
+
+    /// 分位数（`torch.quantile` 相当）。イシュー #2678。`crate::stat_reduce_ops::quantile` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn quantile(
+        &self,
+        q: f32,
+        dim: Option<usize>,
+        interpolation: fandhe_ai_tensor_core::QuantileInterpolation,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::stat_reduce_ops::quantile(self, q, dim, interpolation)
+    }
+
+    /// NaN を無視した平均（`torch.nanmean` 相当）。イシュー #2678。`crate::stat_reduce_ops::nanmean` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn nanmean(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::stat_reduce_ops::nanmean(self, dim)
+    }
+
+    /// NaN を無視した総和（`torch.nansum` 相当）。イシュー #2678。`crate::stat_reduce_ops::nansum` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn nansum(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::stat_reduce_ops::nansum(self, dim)
+    }
+
+    // ---- binning_ops 委譲メソッド（ヒストグラム・二分探索（Phase 4 行 7。bincount 系は `Tape` 側）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::binning_ops` の自由関数。戻り値は勾配を持たないテンソル。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_binning_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-binning-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// 等幅ヒストグラム（`torch.histc` 相当）。イシュー #2678。`crate::binning_ops::histc` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn histc(&self, bins: usize, min: f32, max: f32) -> Result<Tensor<f32>, AutodiffError> {
+        crate::binning_ops::histc(self, bins, min, max)
+    }
+
+    /// `self` を昇順列として `values` の挿入位置を求める（`torch.searchsorted` 相当）。イシュー #2678。`crate::binning_ops::searchsorted` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn searchsorted(
+        &self,
+        values: &Var<'t>,
+        right: bool,
+    ) -> Result<Tensor<i32>, AutodiffError> {
+        crate::binning_ops::searchsorted(self, values, right)
+    }
+
+    /// `self` の各要素の所属バケット索引（`torch.bucketize` 相当）。イシュー #2678。`crate::binning_ops::bucketize` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn bucketize(
+        &self,
+        boundaries: &Var<'t>,
+        right: bool,
+    ) -> Result<Tensor<i32>, AutodiffError> {
+        crate::binning_ops::bucketize(self, boundaries, right)
+    }
+
+    // ---- shape_view_ops 委譲メソッド（形状操作（Phase 4 行 8）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::shape_view_ops` の自由関数（既存 Op の合成）。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_shape_view_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-shape-view-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// 指定軸で分解する（`torch.unbind` 相当）。イシュー #2678。`crate::shape_view_ops::unbind` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn unbind(&self, dim: usize) -> Result<Vec<Var<'t>>, AutodiffError> {
+        crate::shape_view_ops::unbind(self, dim)
+    }
+
+    /// 指定軸を `sections` 個へ分割する（`torch.tensor_split` 相当）。イシュー #2678。`crate::shape_view_ops::tensor_split` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn tensor_split(&self, sections: usize, dim: usize) -> Result<Vec<Var<'t>>, AutodiffError> {
+        crate::shape_view_ops::tensor_split(self, sections, dim)
+    }
+
+    /// 指定軸を境界索引で分割する（`torch.tensor_split` の索引版）。イシュー #2678。`crate::shape_view_ops::tensor_split_indices` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn tensor_split_indices(
+        &self,
+        indices: &[usize],
+        dim: usize,
+    ) -> Result<Vec<Var<'t>>, AutodiffError> {
+        crate::shape_view_ops::tensor_split_indices(self, indices, dim)
+    }
+
+    /// 軸の移動（`torch.movedim` 相当）。イシュー #2678。`crate::shape_view_ops::movedim` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn movedim(
+        &self,
+        source: &[usize],
+        destination: &[usize],
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::shape_view_ops::movedim(self, source, destination)
+    }
+
+    /// 2 軸の入れ替え（`torch.swapaxes` 相当）。イシュー #2678。`crate::shape_view_ops::swapaxes` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn swapaxes(&self, axis0: usize, axis1: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::shape_view_ops::swapaxes(self, axis0, axis1)
+    }
+
+    /// 90 度回転（`torch.rot90` 相当）。イシュー #2678。`crate::shape_view_ops::rot90` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn rot90(&self, k: isize, dims: [usize; 2]) -> Result<Var<'t>, AutodiffError> {
+        crate::shape_view_ops::rot90(self, k, dims)
+    }
+
+    // ---- indexed_update_ops 委譲メソッド（索引付き更新（Phase 4 行 9）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::indexed_update_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_indexed_update_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-indexed-update-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// 縮約付き scatter（`torch.scatter_reduce` 相当）。イシュー #2678。`crate::indexed_update_ops::scatter_reduce` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn scatter_reduce(
+        &self,
+        dim: usize,
+        index: &Tensor<i32>,
+        src: &Var<'t>,
+        reduce: fandhe_ai_tensor_core::ScatterReduceMode,
+        include_self: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::indexed_update_ops::scatter_reduce(self, dim, index, src, reduce, include_self)
+    }
+
+    /// 索引加算（`torch.index_add` 相当。`alpha` は持たない）。イシュー #2678。`crate::indexed_update_ops::index_add` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn index_add(
+        &self,
+        dim: usize,
+        index: &Tensor<i32>,
+        source: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::indexed_update_ops::index_add(self, dim, index, source)
+    }
+
+    /// 索引コピー（`torch.index_copy` 相当）。イシュー #2678。`crate::indexed_update_ops::index_copy` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn index_copy(
+        &self,
+        dim: usize,
+        index: &Tensor<i32>,
+        source: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::indexed_update_ops::index_copy(self, dim, index, source)
+    }
+
+    /// マスク位置へ `source` を順に書き込む（`torch.masked_scatter` 相当）。イシュー #2678。`crate::indexed_update_ops::masked_scatter` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn masked_scatter(
+        &self,
+        mask: &Tensor<bool>,
+        source: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::indexed_update_ops::masked_scatter(self, mask, source)
+    }
+
+    // ---- tensor_product_ops 委譲メソッド（テンソル積・距離（Phase 4 行 10）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::tensor_product_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_tensor_product_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-tensor-product-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// クロネッカー積（`torch.kron` 相当）。イシュー #2678。`crate::tensor_product_ops::kron` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn kron(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        crate::tensor_product_ops::kron(self, other)
+    }
+
+    /// 末尾 `n` 軸と先頭 `n` 軸の縮約（`torch.tensordot(dims=n)` 相当）。イシュー #2678。`crate::tensor_product_ops::tensordot` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn tensordot(&self, other: &Var<'t>, n: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::tensor_product_ops::tensordot(self, other, n)
+    }
+
+    /// 軸指定の縮約（`torch.tensordot(dims=(a, b))` 相当）。イシュー #2678。`crate::tensor_product_ops::tensordot_axes` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn tensordot_axes(
+        &self,
+        other: &Var<'t>,
+        dims_self: &[usize],
+        dims_other: &[usize],
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::tensor_product_ops::tensordot_axes(self, other, dims_self, dims_other)
+    }
+
+    /// p ノルムの総当たり距離（`torch.cdist` 相当）。イシュー #2678。`crate::tensor_product_ops::cdist` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn cdist(&self, other: &Var<'t>, p: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::tensor_product_ops::cdist(self, other, p)
+    }
+
+    /// 3 次元ベクトルの外積（`torch.linalg.cross` 相当）。イシュー #2678。`crate::tensor_product_ops::cross` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn cross(&self, other: &Var<'t>, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::tensor_product_ops::cross(self, other, dim)
+    }
+
+    // ---- pad_ops 委譲メソッド（パディングモード（Phase 4 行 11。既存 `Var::pad` は不変）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::pad_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_pad_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-pad-modes-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// モード指定パディング（`torch.nn.functional.pad` のモード版）。イシュー #2678。`crate::pad_ops::pad_with_mode` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn pad_with_mode(
+        &self,
+        pads: &[(usize, usize)],
+        mode: fandhe_ai_tensor_core::PadMode,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::pad_ops::pad_with_mode(self, pads, mode)
+    }
+
+    // ---- activation_scalar_ops 委譲メソッド（スカラー活性化（Phase 4 行 17）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::activation_scalar_ops` の自由関数（既存 Op の合成）。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_activation_scalar_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-activation-scalar-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// SELU（`torch.nn.functional.selu` 相当）。イシュー #2678。`crate::activation_scalar_ops::selu` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn selu(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::selu(self)
+    }
+
+    /// CELU（`torch.nn.functional.celu` 相当）。`alpha` はゼロでない有限値（負値も受理）。イシュー #2678。`crate::activation_scalar_ops::celu` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn celu(&self, alpha: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::celu(self, alpha)
+    }
+
+    /// Softsign（`torch.nn.functional.softsign` 相当）。イシュー #2678。`crate::activation_scalar_ops::softsign` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn softsign(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::softsign(self)
+    }
+
+    /// Hardsigmoid（`torch.nn.functional.hardsigmoid` 相当）。イシュー #2678。`crate::activation_scalar_ops::hardsigmoid` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn hardsigmoid(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::hardsigmoid(self)
+    }
+
+    /// LogSigmoid（`torch.nn.functional.logsigmoid` 相当）。イシュー #2678。`crate::activation_scalar_ops::log_sigmoid` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn log_sigmoid(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::activation_scalar_ops::log_sigmoid(self)
+    }
+
+    // ---- softmin_threshold_ops 委譲メソッド（Softmin・閾値系活性化（Phase 4 行 18。`rrelu_with_noise` は公開しない）。イシュー #2678。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::softmin_threshold_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_softmin_threshold_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形・承認根拠は `docs/autodiff-softmin-threshold-ops-decision.md` §7 と `docs/compat-api-scope.md` §5.1。
+
+    /// Softmin（`torch.nn.functional.softmin` 相当）。イシュー #2678。`crate::softmin_threshold_ops::softmin` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn softmin(&self, dim: usize) -> Result<Var<'t>, AutodiffError> {
+        crate::softmin_threshold_ops::softmin(self, dim)
+    }
+
+    /// Tanhshrink（`torch.nn.functional.tanhshrink` 相当）。イシュー #2678。`crate::softmin_threshold_ops::tanhshrink` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn tanhshrink(&self) -> Result<Var<'t>, AutodiffError> {
+        crate::softmin_threshold_ops::tanhshrink(self)
+    }
+
+    /// Threshold（`torch.nn.functional.threshold` 相当）。イシュー #2678。`crate::softmin_threshold_ops::threshold` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn threshold(&self, threshold: f32, value: f32) -> Result<Var<'t>, AutodiffError> {
+        crate::softmin_threshold_ops::threshold(self, threshold, value)
+    }
+
+    /// RReLU（`torch.nn.functional.rrelu` 相当）。イシュー #2678。`crate::softmin_threshold_ops::rrelu` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn rrelu(&self, lower: f32, upper: f32, training: bool) -> Result<Var<'t>, AutodiffError> {
+        crate::softmin_threshold_ops::rrelu(self, lower, upper, training)
+    }
+
+    // ---- shape_view_ops 関連関数（meshgrid。イシュー #2678）----
+
+    /// 1 次元テンソル列から座標格子を作る（`torch.meshgrid` 相当）。イシュー #2678。
+    /// `crate::shape_view_ops::meshgrid` へ 1 行委譲する関連関数（`self` を取らない）。
+    pub fn meshgrid(
+        tensors: &[Var<'t>],
+        indexing: crate::shape_view_ops::MeshgridIndexing,
+    ) -> Result<Vec<Var<'t>>, AutodiffError> {
+        crate::shape_view_ops::meshgrid(tensors, indexing)
     }
 
     // ---- rearrange_ops 委譲メソッド（#2143 実装・#2511 公開。親 #2500・ルート #2499）----

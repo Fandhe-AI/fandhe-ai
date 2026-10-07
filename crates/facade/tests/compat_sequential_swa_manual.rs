@@ -1,16 +1,8 @@
-//! イシュー #2658（親 #2657）の `fandhe_ai_autodiff::nn::AveragedModel`
-//! facade 公開保留（`crates/facade/src/lib.rs::SwaHoldDoctestGuard`）下での、
-//! 公開 compat API（`compat::Sequential`）と内部 `AveragedModel` の手動結線の
-//! 契約テスト。
-//!
-//! **本ファイルは `fandhe_ai_autodiff::nn::AveragedModel` を直接 import する
-//! 契約ファイル**であり（`compat_sequential_ema_manual.rs` と同型の位置づけ）、
-//! facade 再エクスポートのみを使う契約のテストファイルへ混入させない。
-//! `compat::Sequential` は `fandhe_ai_autodiff::nn::Module` を実装しないため
-//! `from_module`／`apply`／`restore` は使えず、公開済みの `named_parameters()`／
-//! `state_dict()`／`load_state_dict()` と `AveragedModel::from_named`／
-//! `update_named`／`averaged_state_dict` を結線する
-//! （`docs/autodiff-swa-decision.md` §7）。
+//! イシュー #2658（親 #2657）の `AveragedModel`（#2679 で
+//! `fandhe_ai::optim::AveragedModel` として公開済み。`docs/autodiff-swa-decision.md` §7）と
+//! 公開 compat API（`compat::Sequential`）の手動結線の契約テスト。
+//! `compat::Sequential` の `named_parameters()`／`state_dict()`／`load_state_dict()` と
+//! `AveragedModel::from_named`／`update_named`／`averaged_state_dict` を結線する。
 //!
 //! 検査項目: 各 step 後スナップショットの `f64` 算術平均と SWA の平均が統一複合
 //! 判定（相対 1e-3 未満 または 絶対 1e-5 未満）で一致すること・平均重みへ差し替えた
@@ -21,9 +13,8 @@
 use std::collections::HashMap;
 
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::optim::{AdamW, AdamWConfig};
+use fandhe_ai::optim::{AdamW, AdamWConfig, AveragedModel};
 use fandhe_ai_autodiff::Reduction;
-use fandhe_ai_autodiff::nn::AveragedModel;
 use fandhe_ai_tensor_core::Tensor;
 
 const REL_TOL: f64 = 1e-3;

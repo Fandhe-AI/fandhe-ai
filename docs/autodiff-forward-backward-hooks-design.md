@@ -735,3 +735,65 @@ spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§14 の書き�
 
 コード変更、ガードの削除・縮小・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、
 spec 提案、依存追加、`unsafe`、tolerance 変更、§1〜§15 の書き換え。
+
+## 17. #2586（CPU 本体実装）の実装記録
+
+### 17.1 承認根拠と範囲
+
+- 承認の所在: ルート #2499 の 2026-10-07 付コメント（リポジトリ所有者 aLiz-Nancy 名義。
+  `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`）が、#2584 について
+  「本 doc §14 の推奨案（P5′ が成立しなければ差し戻す）」を承認し、各記録の「ユーザー承認まで着手しない」
+  条件を満たした扱いとする旨を述べている。承認は §14 に書かれた形に限る。
+- 本 PR は §15.6 の手順 2（autodiff 内部実装と否定ガードの縮小）のみを行う。facade 公開（手順 3）は #2587。
+  **`crates/facade/src/**` の本番コードは変更していない。**
+
+### 17.2 実装した名前と配置（すべて autodiff）
+
+| 項目 | 配置 |
+|---|---|
+| `HookHandle`（`Debug` のみ・フィールド非公開・accessor なし）・`HookRegistry`（`pub(crate)`） | `crates/autodiff/src/hooks.rs`（autodiff ルートへ `pub use HookHandle`） |
+| `Tape::register_backward_hook`・`Tape::remove_hook`・`backward_hooks_for`（`pub(crate)`）・`Tape::reset` での全消去 | `crates/autodiff/src/tape.rs`（`hooks: RefCell<HookRegistry>`） |
+| 発火（確定勾配の直後・`grad::vjp` の前。借用を保持せず FIFO・最初の `Err` で打ち切り） | `crates/autodiff/src/backward.rs::backward_impl` |
+| `nn::ForwardHooked<M>`・`nn::ForwardHookCtx<'a>`（構築子は `pub(crate)`） | `crates/autodiff/src/nn/forward_hook.rs` |
+
+新規 `Op`・`AutodiffError` variant・`Var` のメソッド／フィールド・依存・`unsafe` は追加していない。
+resident 葉への登録は `InvalidArgument`（P7）、`requires_grad == false` は `GradientTrackingDisabled`、
+別テープは `TapeMismatch`。
+
+### 17.3 §5.3 の精密化（レビューで判断してほしい点）
+
+§5.3 は defaulted メソッド（`as_linear` 等を含む）をすべて inner へ委譲すると読める。しかし
+`crates/autodiff/src/nn/container.rs` の `Sequential::forward` は `layer.as_linear()`／`next.as_relu()` で
+Linear→ReLU 融合を行い、**層の `forward` を呼ばずに** `linear.bind(tape)` へ直結する。`ForwardHooked<Linear>` が
+`as_linear` を委譲すると、`Sequential` に積んだ瞬間に hook が無音で一切発火しなくなる（記録の目的と矛盾）。
+
+採った形: 具象型ダウンキャスト／融合ヒント（`as_*`・`as_*_mut`・`as_relu`・`as_gelu`・`as_softmax`・`is_pooling`）は
+委譲せず trait 既定値（`None`／`false`）のままにする。包んだ層は融合・resident 対象から外れ、常に
+`Module::forward` 経由で実行されるため hook が必ず発火する。数値は非融合合成になるが、融合経路との差は既存の
+lazy 融合契約（REQ-2 複合判定の範囲内）と同じ性質で tolerance は変更しない。先例は facade
+`FacadeModuleAdapter`（`as_*` を委譲しない）。回帰テストは `tests/hooks.rs`
+（`wrapped_layer_inside_sequential_still_fires_despite_fusion_hints`・ソース走査
+`forward_hooked_delegates_every_module_method_except_fusion_hints`）。
+
+### 17.4 ガードの縮小
+
+`crates/facade/tests/api_surface.rs::workspace_declares_no_hook_registration_fns` を
+`workspace_declares_hook_registration_fns_only_on_autodiff_tape` へ改名し、期待集合を
+`autodiff/src/tape.rs::register_backward_hook`＝1・`autodiff/src/tape.rs::remove_hook`＝1 の完全一致へ縮小した
+（`register_forward_hook`・`remove_backward_hook` は引き続き workspace 全体で 0 件。P8）。
+`workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` の期待集合へ `ForwardHooked` の
+透過委譲 2 件（`forward_hook.rs::state_dict`・`load_state_dict`）を追加した（optimizer とは無関係の委譲実装）。
+`VarHooksHoldDoctestGuard`・`HOOKS_HOLD_PROBE_BODY`・`hooks_hold_doctest_*`・`autodiff_declares_no_register_hook_fn`・
+検出器の自己テストは不変（facade 未公開の保留は #2587 まで維持）。縮小後に `Var` へ同名 `pub fn` を一時注入して
+定義元インベントリが落ちることを確認した（注入は戻し済み）。
+
+### 17.5 検証と引き継ぎ
+
+- `crates/autodiff/tests/hooks.rs`（26 件）・`src/hooks.rs` の単体テスト・doctest 2 件で、FIFO／降順・確定勾配との
+  bit 一致・`Err` 打ち切り・hook 有無での勾配 bit 一致・`backward_accumulate` の原子性・`backward_create_graph`・
+  登録拒否・`remove_hook`・`reset` 後の誤発火なし・panic 後の `Tape` 健全性・`Send` を固定した。
+- 実機 parity の申し送りは発生しない（hook は数値経路を追加しない。§6・§14.7）。
+- #2587 へ: facade `impl Tape` 委譲 2 件・`HookHandle` ルート再エクスポート・`fandhe_ai::nn::{ForwardHooked, ForwardHookCtx}`・
+  P5′ の成立確認（`FacadeModuleAdapter<P>` は `P: DerefMut` を要求するため所有値を包むには `Box<M>` 等が要る点に注意。
+  成立しなければ実装せず差し戻す）・保留ガードの正ガード反転・`compat-api-scope.md` §5 の適用記録・
+  CPU 本番 ops（`backend-cpu`）での hook 有無 bit 一致テスト（autodiff は具象バックエンドに依存できないため facade 経由）。

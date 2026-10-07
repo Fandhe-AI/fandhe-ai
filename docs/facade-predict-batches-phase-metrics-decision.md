@@ -28,6 +28,16 @@ PhaseMetrics`（`get_phase_metrics`／`current_phase_metrics`／
 run_loader_inference` 経由でのみ到達でき、通常経路（公開 API のみ）
 ではバッチ反復推論・phase 計測は使えない。
 
+> **実装記録（#2582・#2583）**: 上の 2 段落は着手時点（#2192）の記録であり、現在は次のとおり
+> 公開済み。ルート #2499 のリポジトリ所有者アカウントの 2026-10-07 付けコメント
+> （issuecomment-6033824965）が本記録 §8 の推奨案を承認し、#2582 で §8.4 の確定形どおり公開した。
+> 公開名は 7 件（`compat::Sequential::predict_batches` と
+> `fandhe_ai::inference::{PhaseMetrics, PhaseStat, InferencePhase, PredictBatchInput,
+> get_phase_metrics, reset_phase_metrics}`）。改名は `run_loader_inference` → `predict_batches`・
+> `LoaderInferenceInput` → `PredictBatchInput`・`InferencePhaseStats` → `PhaseMetrics` 等
+> （§10.2）。`PredictBatchesHoldDoctestGuard` と保留テスト 5 関数は撤去し正ガードへ反転済み
+> （§10.3・§11.2）。
+
 ## §1 背景・要件（原文はイシュー本文。ここでは構造化要約のみを記す）
 
 - R1: `Sequential::predict_batches(&DataLoader) -> Vec<Tensor<f32>>`
@@ -188,6 +198,14 @@ CUDA／Metal 固有の処理は追加していない（ホスト側の反復・�
 `docs/perf/logs/` への申し送りも発生しない。
 
 ## §5 承認事項（未承認のため保留）
+
+> **実装記録（#2582・#2583）**: 本節は着手時点（#2192）の記録で、以下 5 論点は #2582 で §8.4 の
+> 確定形どおり公開済み（現行ガード名は §10.3・§11.2）。確定結果: (1) generic のまま公開し
+> `D::Batch: PredictBatchInput`（sealed）で境界化、(2) フィールドは private・accessor で読む
+> （`phase`／`total`／`batches`／`samples`／`since`。`PhaseMetrics` は `#[non_exhaustive]`）、
+> (3) `get_phase_metrics`・`reset_phase_metrics` の 2 つ（`current_phase_metrics` は作らない）、
+> (4) `pub mod inference` に昇格し `batch` は非公開のままフラットに再エクスポート、
+> (5) スレッド単位集計を維持。「承認後の作業手順」は #2582・#2583 で実施済み。
 
 facade 公開面の新設は次が未承認。`crates/facade/src/
 lib.rs::PredictBatchesHoldDoctestGuard`（正のプローブ doctest）・
@@ -399,6 +417,7 @@ CUDA／Metal: 新規カーネルは無く（ホスト側の反復・計測のみ
 ## §9 #2583（保留ガード反転・記録更新）の着手時判定
 
 本節は docs のみの停止記録である。承認を得たことを意味しない。
+（停止時点〈2026-10-05〉の記録であり、停止理由は #2582 の公開で解消した。実際の反転・記録更新は §11 を参照。）
 
 ### 9.1 判定
 
@@ -465,3 +484,110 @@ fail-closed 拒否（RNG 非消費）、計測値の飽和演算。
 - 承認依頼コメントの投稿・追跡 Issue の起票（ユーザー承認が必要）。
 - 依存追加・`unsafe`・tolerance／baseline の変更、spec 提案、ruleset・
   リポジトリ設定の変更。
+
+## §10 #2582（facade 公開）の実装記録
+
+### 10.1 承認根拠
+
+- ルート #2499 のリポジトリ所有者アカウントによる 2026-10-07 付けコメント
+  （issuecomment-6033824965）が、#2581 について「本記録 §8 の推奨案」を承認している。
+  本実装はその根拠に基づく（§8.4 の主案のみ。代替案〈`phase_metrics()` という名前・
+  open なトレイト・`dyn` 境界・プロセス全体集計・共通ローダー trait〉は承認範囲外で実装しない）。
+- 公開 API は `fandhe-ai =0.10.0` に対して追加のみ（非破壊）。依存・tolerance・baseline・
+  ガードレール閾値・`docs/spec/` は不変。新規 `unsafe` なし。
+
+### 10.2 公開した名前（§8.4 (a)〜(f) の確定形）
+
+| 公開パス | 内容 |
+|---|---|
+| `fandhe_ai::compat::Sequential::predict_batches` | `fn predict_batches<D>(&self, &DataLoader<D>) -> Result<Vec<Tensor<f32>>, AutodiffError> where D: Dataset, D::Batch: PredictBatchInput`（`DataLoader<D>` のみ受理。`shuffle=true` は `InvalidArgument`・RNG 非消費） |
+| `fandhe_ai::inference::PredictBatchInput` | sealed（private supertrait）。実装は `Tensor<f32>`・`(Tensor<f32>, B)`・`(Tensor<f32>, B, C)` の 3 形 |
+| `fandhe_ai::inference::PhaseMetrics` | `#[non_exhaustive]`・`Debug, Clone, Copy, Default, PartialEq, Eq`・フィールド private。`phase`／`total`／`batches`／`samples`／`since` |
+| `fandhe_ai::inference::PhaseStat` | フィールド private。`total_micros() -> u128`・`calls() -> u64`・`total() -> Duration`（`total()` は本実装で新規追加） |
+| `fandhe_ai::inference::InferencePhase` | `#[non_exhaustive]`・4 variant（`DataLoad`・`TapeBuild`・`Forward`・`DeviceTransfer`）。`DeviceTransfer` は CPU 固定経路では常に `calls == 0`（予約） |
+| `fandhe_ai::inference::{get_phase_metrics, reset_phase_metrics}` | thread-local 累計の読み出しとゼロ戻し。`current_phase_metrics` は作らない |
+
+- 集計単位はスレッド単位を維持（(f)）。`PhaseRecorder`・`NoopPhaseRecorder`・`TimingPhaseRecorder`・
+  `merge_inference_phase_stats` は `pub(crate)` のまま。`batch` モジュールは非公開で、
+  `inference/mod.rs` の 1 文の `pub use` でフラットに公開する（(e)）。
+- 改名: `run_loader_inference` → `predict_batches`、`LoaderInferenceInput` → `PredictBatchInput`、
+  `InferencePhaseStats` → `PhaseMetrics`、`inference_phase_stats_snapshot` → `get_phase_metrics`、
+  `clear_inference_phase_stats` → `reset_phase_metrics`。エラーメッセージ接頭辞も
+  `Sequential::predict_batches:` に更新。ロジック（逐次 `try_reserve(1)`・`shuffle` 拒否・
+  失敗時も thread-local へ merge・飽和演算）は不変。
+- `PredictBatchInput::inference_input` は記録に公開形の記載が無いが、sealed のため外部実装は
+  できず、メソッドは現名のまま置いた（doc に「利用者が呼ぶ必要は無い」と明記）。
+
+### 10.3 ガードの扱い
+
+- 削除: `PredictBatchesHoldDoctestGuard`（`lib.rs`）と `api_surface.rs` の保留テスト 5 関数
+  （`predict_batches_hold_doctest_globs_all_pub_modules`・`..._probe_body_matches_fixed_contract`・
+  `facade_does_not_reexport_or_declare_predict_batches_items`〈と自己テスト〉・
+  `workspace_declares_predict_batches_fn_names_nowhere`）と共用定数・走査関数。
+- 置換（最小の正ガード）: `facade_exposes_predict_batches_items_only_in_approved_shape`（＋自己テスト）・
+  `workspace_declares_predict_batches_fn_names_only_in_approved_locations`・
+  `inference_is_public_and_batch_stays_private`・
+  `predict_batches_public_surface_is_reachable_with_pinned_signatures`。
+- 他の保留 doctest の全 `pub mod` glob 一覧へ `use fandhe_ai::inference::*;` を追加
+  （`*_hold_doctest_globs_all_pub_modules` の集合一致検査のため。`GRAD_SCALER_PROBE_MODULES`・
+  `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` も追従）。
+- `GenerateHoldDoctestGuard` のプローブ縮小: `facade-generate-decision.md` §16 を参照。
+
+### 10.4 #2583 へ持ち越す事項（本 issue では行わない）
+
+- 正ガードの全数インベントリ化・doctest 存在検査。
+- `docs/compat-api-scope.md` §5 への適用記録、本 doc §0・§5 本文の実装記録。
+- 利用例の拡充。
+
+→ 以上は #2583 で完了した（§11）。
+
+## §11 #2583 ガード反転の仕上げと適用記録
+
+イシュー #2583（親 #2581）。#2582（PR #2824）で公開済みの承認形に対し、正ガードを「承認した形だけを
+許す」全数インベントリへ仕上げ、適用記録と利用例を足した。**公開面は増やしていない**
+（`crates/facade/src` の差分は doc コメントのみ）。
+
+### 11.1 着手時判定
+
+- 反転先の存在: #2582 は PR #2824（`origin/main` `16bb2da0`）でマージ済みで、§10.2 の 7 名が公開されている。
+- 承認の根拠: §10.1 と同じ（ルート #2499 のコメント `issuecomment-6033824965`。§8.4 の形だけが範囲）。
+  新しい承認は得ていないし、必要としない。`PredictBatchInput::inference_input` は §10.2 の判断を
+  踏襲し、新たな決定はしない。
+
+### 11.2 ガード対応表
+
+| 旧保留ガード（#2192） | #2582 の正ガード | #2583 の追加分 |
+|---|---|---|
+| `PredictBatchesHoldDoctestGuard`（`lib.rs`）・`predict_batches_hold_doctest_globs_all_pub_modules`・`..._probe_body_matches_fixed_contract` | 削除（他の保留 doctest の glob 一覧へ `inference` を追従） | — |
+| `facade_does_not_reexport_or_declare_predict_batches_items`（＋自己テスト） | `facade_exposes_predict_batches_items_only_in_approved_shape`（＋自己テスト） | — |
+| `workspace_declares_predict_batches_fn_names_nowhere` | `workspace_declares_predict_batches_fn_names_only_in_approved_locations` | — |
+| （対応なし） | `inference_is_public_and_batch_stays_private`・`predict_batches_public_surface_is_reachable_with_pinned_signatures` | `inference_phase_variants_are_exactly_approved_four`・`predict_batch_input_impls_are_exactly_approved_three`・`phase_metrics_and_phase_stat_pub_methods_are_exactly_approved`・`inference_internal_items_stay_crate_private`（自己テスト `predict_batches_inventory_guards_detect_each_category`）・`predict_batches_usage_doctests_are_present_and_compiled` |
+
+### 11.3 利用例
+
+- doctest: `inference/mod.rs` のモジュール doc・`Sequential::predict_batches` の `# Examples`・
+  `PhaseMetrics` の `# Examples`（#2583 で追加。ラベル付きデータセットと before/after 差分）。
+  いずれも `api_surface.rs` の `predict_batches_usage_doctests_are_present_and_compiled` が
+  「実際にコンパイルされる doctest ブロックの実在」を固定する。
+- 統合テスト: `crates/facade/tests/inference_predict_batches.rs`
+  （#2583 で `usage_example_labelled_dataset_with_before_after_metrics` を追加。計 14 件）。
+
+### 11.4 検出範囲と限界
+
+列挙名のトークン走査であり、マクロ生成・`use … as` 別名経由・別トレイト経由の間接実装は範囲外
+（`impl<T> PredictBatchInput for T` の一般形は承認 3 形と一致しないため検出される）。型レベルの
+到達性とシグネチャは `predict_batches_public_surface_is_reachable_with_pinned_signatures` が補完する。
+各走査は 0 件一致（検査対象の見失い）を失敗扱いにする。
+
+### 11.5 保留・対象外を継続する項目
+
+- 他ローダー（`SamplerDataLoader`／`PrefetchDataLoader`／`HookedDataLoader`）向けの別名メソッド。
+- プロセス全体集計、`phase_metrics()` 別名、open トレイト・`dyn` 境界。
+- `DeviceTransfer` の実計測（CPU 固定経路では常に `calls == 0`）。
+- `inference` 名前空間への generate() 配置（`docs/facade-generate-decision.md` 側の別論点）。
+
+### 11.6 不変事項
+
+公開面の増減なし（`fandhe-ai =0.10.0` 非破壊）・依存追加なし・`Cargo.toml`／`Cargo.lock`・tolerance・
+baseline・ガードレール閾値・`docs/spec` 不変・新規 `unsafe` なし・新規演算／カーネルなし
+（実機 parity の申し送り不要）。

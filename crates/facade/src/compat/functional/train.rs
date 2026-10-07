@@ -3,9 +3,10 @@
 //!
 //! 役割: `compat::functional`（グラフ構築と forward。#2665・#2666）に、`compat::Sequential` の
 //! Keras 風学習（`compile`／`fit`／`evaluate`）と同じ演算列を多入力・多出力グラフへ載せる。設計の正は
-//! `docs/facade-functional-api-decision.md` §7（学習）・§18（#2667 実装記録）。公開形は**未承認**
-//! （承認依頼は #2677。公開は承認後の #2679）のため、`functional.rs` と同じく `#[cfg(test)]` 隔離の
-//! `pub(crate)` に留め、facade の公開面へは出さない。
+//! `docs/facade-functional-api-decision.md` §7（学習）・§18（#2667 実装記録）。イシュー #2679 で
+//! `FunctionalModel::{trainable_parameters, apply_parameters, compile, fit, evaluate}` を公開した
+//! （承認はルート #2499 のコメント。§10・§13）。`bind`（`FunctionalVars` を返す）は**非公開のまま**
+//! （`pub(crate)`。`fit`／`evaluate` の内部が使う）。
 //!
 //! # 再利用と新設
 //!
@@ -179,7 +180,7 @@ impl FunctionalModel {
 
     /// 訓練対象パラメータ。ブロックの挿入順・各ブロック内は `Sequential::trainable_parameters` と
     /// 同じ順（`named_parameters` の通し番号順と一致。結合ノードは寄与しない）。
-    pub(crate) fn trainable_parameters(&self) -> Vec<&Tensor<f32>> {
+    pub fn trainable_parameters(&self) -> Vec<&Tensor<f32>> {
         self.blocks()
             .flat_map(|(_, b)| b.trainable_parameters())
             .collect()
@@ -191,10 +192,7 @@ impl FunctionalModel {
     /// 場合（独自層の `set_parameter` 失敗等）は適用済みブロックと失敗ブロックを適用前の値へ巻き戻し、
     /// 元のエラーを返す。巻き戻しも失敗した場合は部分適用の可能性を明示した `InvalidArgument` を返す
     /// （`load_state_dict` と同じ契約）。
-    pub(crate) fn apply_parameters(
-        &mut self,
-        updated: Vec<Tensor<f32>>,
-    ) -> Result<(), AutodiffError> {
+    pub fn apply_parameters(&mut self, updated: Vec<Tensor<f32>>) -> Result<(), AutodiffError> {
         let mut counts: Vec<(usize, usize)> = Vec::new();
         counts
             .try_reserve_exact(self.nodes.len())
@@ -262,11 +260,7 @@ impl FunctionalModel {
     ///
     /// `Optimizer::Lbfgs` は `InvalidArgument`（第 1 段の対象外。モジュール doc）。`OptimizerState::new` が
     /// 成功してから代入する（construct-before-assign。失敗時は `compiled` を変更しない）。
-    pub(crate) fn compile(
-        &mut self,
-        optimizer: Optimizer,
-        loss: Loss,
-    ) -> Result<(), AutodiffError> {
+    pub fn compile(&mut self, optimizer: Optimizer, loss: Loss) -> Result<(), AutodiffError> {
         if matches!(optimizer, Optimizer::Lbfgs(_)) {
             return Err(invalid(
                 "FunctionalModel::compile: Optimizer::Lbfgs は第 1 段で未対応（closure 駆動の更新経路が要るため）"
@@ -283,7 +277,8 @@ impl FunctionalModel {
         Ok(())
     }
 
-    /// `compile` 済みなら `true`。
+    /// `compile` 済みなら `true`（テスト専用の観測口。出荷コードは `compiled` を直接見る）。
+    #[cfg(test)]
     pub(crate) fn is_compiled(&self) -> bool {
         self.compiled.is_some()
     }
@@ -321,7 +316,7 @@ impl FunctionalModel {
     /// `batch_first=false` の MHA。サンプル数不一致・`batch_size == 0`・loss と目標 dtype の不整合は
     /// データ構築時／最初のバッチで `InvalidArgument`。`drop_last` で全バッチが落ちた epoch も
     /// `InvalidArgument`。
-    pub(crate) fn fit<T: FitTarget>(
+    pub fn fit<T: FitTarget>(
         &mut self,
         xs: &[&Tensor<f32>],
         ys: &[&Tensor<T>],
@@ -454,7 +449,7 @@ impl FunctionalModel {
 
     /// 評価（Keras `evaluate`）。eval モードで `forward`（`bind` なし）し、`fit` と同じ損失合計・同じ
     /// 集計でサンプル数重み付き平均を返す。モードは呼び出し前へ復元する。
-    pub(crate) fn evaluate<T: FitTarget>(
+    pub fn evaluate<T: FitTarget>(
         &mut self,
         xs: &[&Tensor<f32>],
         ys: &[&Tensor<T>],
@@ -530,7 +525,8 @@ impl<'m, 't> FunctionalVars<'m, 't> {
             })
     }
 
-    /// 訓練対象パラメータの `Var` 参照列（`FunctionalModel::trainable_parameters` と同じ並び）。
+    /// 訓練対象パラメータの `Var` 参照列（`FunctionalModel::trainable_parameters` と同じ並び。テスト専用の観測口）。
+    #[cfg(test)]
     pub(crate) fn trainable_vars(&self) -> Vec<&Var<'t>> {
         self.blocks
             .iter()

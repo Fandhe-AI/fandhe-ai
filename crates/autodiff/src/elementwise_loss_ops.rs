@@ -41,6 +41,10 @@
 //! ③確保前バイト数上限（`checked_bytes_for::<f32>`）→ ④スカラー引数・非追跡テンソルの値検査
 //! → ⑤実体化 → ⑥実体化後の値検査（`var >= 0`）→ ⑦forward → ⑧`push_eager`。エラー時に
 //! tape へ孤児ノードを残さない。
+//!
+//! **公開状況（イシュー #2678）**: `hinge_embedding_loss`・`soft_margin_loss` の公開は #2678 でも保留（`Reduction` の公開経路〈#2602〉が未整備のため）。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::{Tensor, require_same_shape};
 

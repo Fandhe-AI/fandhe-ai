@@ -128,3 +128,9 @@ CUDA／Metal の `#[ignore]` テスト（計 4 件）は本実行環境から実
 - `docs/autodiff-loss-ops-decision.md`（既存 7 損失の設計・数値契約）
 - `.claude/rules/coding-rust.md`（`f64` アキュムレータ契約・境界検査）
 - PyTorch 2.14.0 の実行値（`crates/autodiff/tests/fixtures/margin-focal-loss-pytorch-reference/`）
+
+## 12. #2678 での扱い（保留を維持）
+
+- ルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965）は、行 19・20 のうち `hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss` の 3 本だけを承認し、`Reduction` を `fandhe_ai::nn::loss::Reduction` の 1 経路で名指しできることを前提にしていた。#2678 の着手時点で #2602（`nn::loss` の公開）は未マージで、`crates/facade/src/nn/mod.rs` に `loss` モジュールがない。承認条件（記録に形が書かれていない点・前提が満たされない点は実装せず止める）に従い、本記録の対象（`Var::multilabel_margin_loss` を含む）は #2678 では公開せず、保留ガードと `api_surface.rs` の否定ガードを無変更のまま維持した。
+- `Reduction` の公開経路を本イシューで作らない（公開面の拡大にあたるため）。#2602 のマージ後に、3 本を `Var` の 1 行委譲で公開する残作業がある。オプション型を引数に取る損失 5 本とオプション型 5 つは引き続き保留（承認の対象外）。
+- 依存・tolerance・baseline・`docs/spec` は変更していない。

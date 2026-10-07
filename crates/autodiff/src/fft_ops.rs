@@ -45,6 +45,10 @@
 //! （PyTorch と同じ。linalg 系の「非有限は `InvalidArgument`」とは異なる）。
 //! 高階微分（`create_graph`）・activation checkpoint・f64 自動微分経路は
 //! 対象外。
+//!
+//! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{rfft,irfft,fft,ifft,stft,istft}` と `FftNorm`・`StftPadMode`・`StftOptions`・`IstftOptions`（クレートルート）。本モジュール自体は facade から再エクスポートしない。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::fft::{self, FftLayout, IstftParams, StftParams};
 use fandhe_ai_tensor_core::{BackendError, FftNorm, ShapeError, StftPadMode, Tensor};

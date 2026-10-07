@@ -2811,6 +2811,14 @@ pub struct Tape {
     /// 消費されず `Tape::reset` まで再利用可能）の契約も従来どおり
     /// 維持する。
     checkpoints: RefCell<HashMap<usize, Vec<CheckpointRegion>>>,
+    /// backward hook の登録簿（イシュー #2586・設計記録
+    /// `docs/autodiff-forward-backward-hooks-design.md` §4.1 案 C）。
+    /// `checkpoints` と同型の `Tape` 直属 side table で、`Tape::
+    /// register_backward_hook` が追記し `backward_impl`（`backward.rs`）が
+    /// 逆走査で発火する。`Tape::reset` で全消去する（NodeId 再利用による
+    /// 旧 hook の誤発火を防ぐ。同 §5.7）。hook 呼び出し中は借用を保持しない
+    /// （`backward_hooks_for` が `Arc` を複製して返す）。
+    hooks: RefCell<crate::hooks::HookRegistry>,
 }
 
 /// activation checkpointing の 1 区間。ノード ID の閉区間
@@ -2903,6 +2911,7 @@ impl Tape {
             epoch: Cell::new(0),
             retained_leaf_len: Cell::new(None),
             checkpoints: RefCell::new(HashMap::new()),
+            hooks: RefCell::new(crate::hooks::HookRegistry::default()),
         }
     }
 
@@ -3224,6 +3233,126 @@ impl Tape {
         // 経由のため `RefCell` を介さず直接クリアでき、実行中の借用が
         // 残っていても二重借用 panic にはならない）。
         self.checkpoints.get_mut().clear();
+        // backward hook（イシュー #2586）は葉プレフィックス上のノードに
+        // 登録されたものも含めて全消去する。旧 epoch のハンドルは
+        // `remove_hook` が epoch 不一致で拒否し、再利用される NodeId に
+        // 旧 hook が誤発火することもない（設計記録 §5.7。`seq` は維持）。
+        self.hooks.get_mut().clear();
+    }
+
+    /// `var` の勾配が確定した時点で呼ばれる観察専用 backward hook を登録する
+    /// （イシュー #2586。PyTorch `Tensor.register_hook` 相当の観察専用版。
+    /// 設計記録 `docs/autodiff-forward-backward-hooks-design.md` §5.2・§7・§14.2）。
+    ///
+    /// hook は `backward`／`backward_accumulate`／`backward_with_resident`／
+    /// `backward_create_graph`（1 階）の逆走査で、`var` のノードの確定勾配を
+    /// 受けて `grad::vjp` の直前に呼ばれる。同一ノードの複数 hook は登録順
+    /// （FIFO）、ノード間は `NodeId` 降順。hook が `Err` を返すとその時点で
+    /// 打ち切られ、同じ `Err` が `backward` の戻り値になる。hook は勾配を
+    /// 書き換えられず、登録の有無で勾配は bit 完全一致する。`'static` 境界により
+    /// `&Tape`／`Var` を捕捉できない（再入防止）。
+    ///
+    /// # Errors
+    ///
+    /// - `var` が別の `Tape` のもの: [`AutodiffError::TapeMismatch`]
+    /// - デバイス常駐葉（`Op::ResidentLeaf`）: [`AutodiffError::InvalidArgument`]
+    ///   （ホスト勾配を観察できる契約が成立しないため fail-closed）
+    /// - `requires_grad == false`（`var_no_grad`・`detach` 後）:
+    ///   [`AutodiffError::GradientTrackingDisabled`]
+    ///
+    /// いずれも登録簿は変更しない。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::{Arc, Mutex};
+    /// use fandhe_ai_autodiff::Tape;
+    /// use fandhe_ai_tensor_core::Tensor;
+    ///
+    /// let tape = Tape::new();
+    /// let x = tape.var(&Tensor::new(vec![1.0f32, 2.0], &[2]).unwrap());
+    /// let y = x.mul(&x).unwrap().sum(None).unwrap();
+    /// let seen = Arc::new(Mutex::new(Vec::new()));
+    /// let sink = Arc::clone(&seen);
+    /// let handle = tape
+    ///     .register_backward_hook(&x, move |g: &Tensor<f32>| {
+    ///         sink.lock().unwrap().push(g.contiguous().as_slice().unwrap().to_vec());
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    /// let grads = tape.backward(&y).unwrap();
+    /// assert_eq!(seen.lock().unwrap().len(), 1);
+    /// let g = grads.get(&x).unwrap().unwrap().contiguous();
+    /// assert_eq!(g.as_slice().unwrap(), &seen.lock().unwrap()[0][..]);
+    /// tape.remove_hook(handle).unwrap();
+    /// ```
+    pub fn register_backward_hook<F>(
+        &self,
+        var: &crate::var::Var<'_>,
+        hook: F,
+    ) -> Result<crate::hooks::HookHandle, AutodiffError>
+    where
+        F: Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + Sync + 'static,
+    {
+        if var.tape_id() != self.id {
+            return Err(AutodiffError::TapeMismatch);
+        }
+        let node = var.node_id().0;
+        {
+            let nodes = self.nodes.borrow();
+            let Some(n) = nodes.get(node) else {
+                return Err(AutodiffError::TapeMismatch);
+            };
+            if matches!(n.op, Op::ResidentLeaf { .. }) {
+                return Err(AutodiffError::InvalidArgument(
+                    "Tape::register_backward_hook: デバイス常駐葉（ResidentLeaf）には\
+                     登録できない（ホスト勾配の観察契約が成立しない）"
+                        .into(),
+                ));
+            }
+            if !n.requires_grad {
+                return Err(AutodiffError::GradientTrackingDisabled);
+            }
+        }
+        let seq = self
+            .hooks
+            .borrow_mut()
+            .insert(node, std::sync::Arc::new(hook))?;
+        Ok(crate::hooks::HookHandle {
+            tape_id: self.id,
+            epoch: self.epoch.get(),
+            node,
+            seq,
+        })
+    }
+
+    /// [`Tape::register_backward_hook`] が返したハンドルの hook を解除する
+    /// （値で消費するため二重解除は型上起きない。イシュー #2586・設計記録 §14.4 P3）。
+    ///
+    /// # Errors
+    ///
+    /// 別の `Tape` のハンドル、または [`Tape::reset`] より前に発行された
+    /// ハンドルは [`AutodiffError::TapeMismatch`]（registry は変更しない）。
+    pub fn remove_hook(&self, handle: crate::hooks::HookHandle) -> Result<(), AutodiffError> {
+        if handle.tape_id != self.id || handle.epoch != self.epoch.get() {
+            return Err(AutodiffError::TapeMismatch);
+        }
+        self.hooks.borrow_mut().remove(handle.node, handle.seq);
+        Ok(())
+    }
+
+    /// `id` に登録された backward hook を登録順に複製して返す
+    /// （`backward_impl` から呼ばれる。借用を返さないため hook 呼び出し中に
+    /// `RefCell` 借用は残らない。未登録なら空 `Vec`＝割り当てなし）。
+    pub(crate) fn backward_hooks_for(
+        &self,
+        id: usize,
+    ) -> Vec<std::sync::Arc<crate::hooks::BackwardHookFn>> {
+        let reg = self.hooks.borrow();
+        if reg.is_empty() {
+            return Vec::new();
+        }
+        reg.snapshot_for(id)
     }
 
     /// この `Tape` が保持する `ops`（バックエンド実行の必須所有値）への

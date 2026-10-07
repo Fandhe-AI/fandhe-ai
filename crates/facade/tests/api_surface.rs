@@ -45,17 +45,21 @@
 //! 保留。詳細は `docs/autodiff-var-operator-overload-design.md` §14）。
 //!
 //! `hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
-//! body_matches_fixed_contract`・`workspace_declares_no_hook_registration_
-//! fns`・`autodiff_declares_no_register_hook_fn` の 4 テストは
+//! body_matches_fixed_contract`・`workspace_declares_hook_registration_fns_
+//! only_on_autodiff_tape`・`autodiff_declares_no_register_hook_fn` の 4 テストは
 //! `VarHooksHoldDoctestGuard`（`VarBoolOpsHoldDoctestGuard` 系と同型の
 //! 正のプローブ 1 ブロック方式＋workspace 全体のソース走査＋
 //! `crates/autodiff/src/` 限定の `register_hook` allowlist 化ガード）で、
 //! forward・backward hooks（イシュー #2139。親 #2138・#2131）の facade
 //! 公開保留を固定する。#2139 は設計 doc §11 の承認事項 5 項目がそろう
 //! まで着手不可という設計判断（`docs/autodiff-forward-backward-hooks-
-//! design.md` §13）のため、本体実装（`crates/autodiff/**`）自体を
-//! 含まない保留固定 PR である（4 層構成の内訳は同 doc §13.3。
-//! `docs/compat-api-scope.md` §5 に同期する）。
+//! design.md` §13）のため、当初は本体実装（`crates/autodiff/**`）自体を
+//! 含まない保留固定 PR だった（4 層構成の内訳は同 doc §13.3。
+//! `docs/compat-api-scope.md` §5 に同期する）。承認（ルート #2499・
+//! 2026-10-07）後、イシュー #2586 で autodiff 本体（`Tape::
+//! register_backward_hook`・`remove_hook`）を実装し、workspace 全体の
+//! 定義元インベントリは「0 件」から「`autodiff/src/tape.rs` のみ」へ縮小した
+//! （同 doc §17）。facade 公開（保留 doctest の反転を含む）は #2587 で行う。
 
 use std::path::Path;
 
@@ -301,6 +305,12 @@ fn optim_module_reexports_exactly_expected_surface() {
             found.insert("ExponentialMovingAverage".to_string());
             continue;
         }
+        // #2679: SWA の `AveragedModel` も facade 独自ラッパーの承認形 1 文だけを受理する
+        // （形の網羅検査は `facade_exposes_swa_only_in_approved_shape`）。
+        if trimmed == SWA_APPROVED_REEXPORT_LINE {
+            found.insert("AveragedModel".to_string());
+            continue;
+        }
         let Some(prefix) = allowed_prefixes
             .iter()
             .find(|prefix| trimmed.starts_with(**prefix))
@@ -376,6 +386,22 @@ fn optim_module_reexports_exactly_expected_surface() {
         "LbfgsLineSearch",
         // #2560: facade 独自ラッパー（`crate::optim_ema`）の承認形。
         "ExponentialMovingAverage",
+        // #2679: facade 独自ラッパー（`crate::optim_swa`）の承認形。
+        "AveragedModel",
+        // #2679: Rprop・ASGD・Adafactor・Lion・PolynomialLr・ChainedScheduler・SwaLr・SwaAnneal
+        // の素の再エクスポート（承認は #2499 コメント。各決定記録 §8・§7）。
+        "Adafactor",
+        "AdafactorConfig",
+        "Asgd",
+        "AsgdConfig",
+        "ChainedScheduler",
+        "Lion",
+        "LionConfig",
+        "PolynomialLr",
+        "Rprop",
+        "RpropConfig",
+        "SwaAnneal",
+        "SwaLr",
         "ClipGradResult",
         "clip_grad_norm",
         "clip_grad_value",
@@ -3075,14 +3101,21 @@ fn data_module_reexports_exactly_expected_surface() {
     );
 
     let expected: std::collections::BTreeSet<String> = [
+        "BatchSampler",
         "Batches",
         "CollateFn",
+        // #2679: データセット合成・iterable・バッチサンプラー（`tensor-core-dataset-compose-decision.md` §5 ほか）。
+        "ConcatBatch",
+        "ConcatDataset",
         "DataError",
         "DataLoader",
         "DataLoaderConfig",
         "Dataset",
         "HookedBatches",
         "HookedDataLoader",
+        "IterableBatches",
+        "IterableDataLoader",
+        "IterableDataset",
         "PrefetchBatches",
         "PrefetchConfig",
         "PrefetchDataLoader",
@@ -3091,10 +3124,14 @@ fn data_module_reexports_exactly_expected_surface() {
         "SamplerBatches",
         "SamplerDataLoader",
         "SequentialSampler",
+        "StackSamples",
+        "Subset",
         "TensorDataset",
         "TransformFn",
         "WeightedRandomSampler",
         "default_collate",
+        "random_split",
+        "random_split_fractions",
     ]
     .into_iter()
     .map(str::to_string)
@@ -4657,11 +4694,27 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
     let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut offending_lines = Vec::new();
 
+    // rustfmt が 100 桁を超える `pub use` を複数行へ折り返すため、`;` までを 1 文として連結してから解析する。
+    let mut statements: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
     for line in content.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("pub use") {
+        let trimmed = line.trim();
+        if pending.is_none() && !trimmed.starts_with("pub use") {
             continue;
         }
+        let acc = pending.get_or_insert_with(String::new);
+        if !acc.is_empty() {
+            acc.push(' ');
+        }
+        acc.push_str(trimmed);
+        if trimmed.ends_with(';') {
+            statements.push(pending.take().unwrap_or_default());
+        }
+    }
+    if let Some(unterminated) = pending {
+        offending_lines.push(unterminated);
+    }
+    for trimmed in &statements {
         if !trimmed.starts_with(allowed_prefix) {
             offending_lines.push(trimmed.to_string());
             continue;
@@ -4695,6 +4748,10 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
         "Lstm",
         "LstmCellVars",
         "LstmSeqOutput",
+        // #2679: 可変長系列（packed sequence。`autodiff-packed-sequence-decision.md` §7）。
+        "PackedLstmSeqOutput",
+        "PackedRnnSeqOutput",
+        "PackedSequence",
         "Rnn",
         "RnnCellVars",
         "RnnConfig",
@@ -4702,8 +4759,18 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
         "StackedGru",
         "StackedLstm",
         "StackedLstmSeqOutput",
+        "StackedPackedLstmSeqOutput",
+        "StackedPackedRnnSeqOutput",
         "StackedRnn",
         "StackedRnnSeqOutput",
+        "gru_forward_packed",
+        "lstm_forward_packed",
+        "pack_padded_sequence",
+        "pad_packed_sequence",
+        "rnn_forward_packed",
+        "stacked_gru_forward_packed",
+        "stacked_lstm_forward_packed",
+        "stacked_rnn_forward_packed",
     ]
     .into_iter()
     .map(str::to_string)
@@ -7439,6 +7506,21 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "unscale_grads",
     // `data.rs`（イシュー #2505。Sampler／フック系の自由関数 `default_collate`）。
     "default_collate",
+    // `nn/rnn.rs`（イシュー #2679。可変長系列の自由関数 8 本）。
+    "pack_padded_sequence",
+    "pad_packed_sequence",
+    "rnn_forward_packed",
+    "gru_forward_packed",
+    "lstm_forward_packed",
+    "stacked_rnn_forward_packed",
+    "stacked_gru_forward_packed",
+    "stacked_lstm_forward_packed",
+    // `data.rs`（イシュー #2679。Dataset 合成の自由関数 2 本）。
+    "random_split",
+    "random_split_fractions",
+    // `compat/mod.rs`（イシュー #2679。Functional API の保存・読込入口）。
+    "save_functional_model",
+    "load_functional_model",
     // `nn/init.rs`（イシュー #2504。`torch.nn.init.*` 相当の初期化関数 9 個＋補助関数 2 個）。
     "uniform",
     "normal",
@@ -7451,6 +7533,9 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "trunc_normal",
     "calculate_gain",
     "calculate_fan_in_and_fan_out",
+    // `inference/mod.rs`（イシュー #2582。`predict_batches` の計測 accessor。承認形は決定記録 §8.4 (d)）。
+    "get_phase_metrics",
+    "reset_phase_metrics",
 ];
 
 /// facade src の全 `pub use` 文（`pub(..) use` はスコープ付き可視性の
@@ -9245,7 +9330,7 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
 }";
 
-/// [`workspace_declares_no_hook_registration_fns`] が検査する 4 つの
+/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape`] が検査する 4 つの
 /// 関数名。`register_hook` はあえて含めない（並行する #2182 の DataLoader
 /// transform フック等、正当な用途で使われうる汎用名のため。facade から
 /// 到達できないことは `VarHooksHoldDoctestGuard` の doctest が固定する）。
@@ -9342,18 +9427,21 @@ fn count_fn_declarations_by_name_detects_register_hook() {
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、
-/// [`HOOK_REGISTRATION_FN_NAMES`]（4 個）の `fn` 宣言が可視性・宣言文脈
-/// を問わず 1 件も存在しないことを固定する（`workspace_declares_custom_
-/// fn_only_on_tape`・`workspace_declares_bool_ops_fn_names_in_
-/// approved_places_only` と同型の workspace 全体インベントリだが、本イシュー
-/// #2139 は本体実装自体が承認待ちのため「唯一の定義元」ではなく「0 件」
-/// を期待値とする点が異なる）。facade のソース走査・
+/// [`HOOK_REGISTRATION_FN_NAMES`]（4 個）の `fn` 宣言の定義元集合を固定する
+/// （`workspace_declares_custom_fn_only_on_tape_and_facade_delegation` と
+/// 同型のインベントリ。イシュー #2586 で「0 件」から縮小した。縮小の根拠は
+/// `docs/autodiff-forward-backward-hooks-design.md` §14.7・§17）。
+///
+/// **期待集合は `crates/autodiff/src/tape.rs` の `register_backward_hook`・
+/// `remove_hook`（各 1 件）の完全一致**。`register_forward_hook`・
+/// `remove_backward_hook` は workspace 全体で 0 件のまま（§14.4 P8）。
+/// facade 側の委譲 2 件は #2587 で追加し、その際に本期待集合へ
+/// `facade/src/lib.rs` を足す。facade のソース走査・
 /// `VarHooksHoldDoctestGuard` の正のプローブはいずれも「facade から到達
-/// 可能か」しか見ないため、facade の外（`autodiff`・`backend-*`・
-/// `onnx-interop` 等）に同名の関数が新設された場合に備え、そもそもの
-/// 定義自体の不在を固定する多層防御の最内層とする。
+/// 可能か」しか見ないため、facade の外に同名関数が新設された場合に備え、
+/// 定義元自体を固定する多層防御の最内層とする。
 #[test]
-fn workspace_declares_no_hook_registration_fns() {
+fn workspace_declares_hook_registration_fns_only_on_autodiff_tape() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -9404,19 +9492,26 @@ fn workspace_declares_no_hook_registration_fns() {
         });
     }
 
-    assert!(
-        found.is_empty(),
-        "workspace 全体（crates/*/src/）に register_forward_hook／\
-         register_backward_hook／remove_hook／remove_backward_hook の \
-         `fn` 宣言が見つかった\
-         （イシュー #2139 は §11 の承認事項 5 項目がそろうまで着手不可\
-         という設計判断〈docs/autodiff-forward-backward-hooks-design.md\
-         §13〉に違反する可能性がある。承認済みの実装であれば本ガード\
-         自体を撤去すること）: {found:?}"
+    let expected: std::collections::BTreeMap<String, usize> = [
+        (
+            "autodiff/src/tape.rs::register_backward_hook".to_string(),
+            1usize,
+        ),
+        ("autodiff/src/tape.rs::remove_hook".to_string(), 1usize),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の register_forward_hook／\
+         register_backward_hook／remove_hook／remove_backward_hook の `fn` 宣言集合が \
+         `crates/autodiff/src/tape.rs` の register_backward_hook・remove_hook（各 1 件。\
+         イシュー #2586）のみという期待と一致しない（過不足いずれも fail-closed に検出する。\
+         facade 委譲を追加する #2587 では期待集合をあわせて更新すること）: {found:?}"
     );
 }
 
-/// [`workspace_declares_no_hook_registration_fns`] が使う
+/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape`] が使う
 /// [`count_fn_declarations_by_name`] が、対象 4 関数名を実際に検出
 /// できることを固定する合成入力の自己テスト（検出器自体が機能して
 /// いなければ、前者の「0 件」判定が空合格になり得るため）。
@@ -12336,6 +12431,151 @@ fn compat_sequential_exposes_activation_layers_add_methods_issue_2529_counts_dec
     assert_eq!(
         count_pub_fn_declarations("// pub fn add_mish() {}", "add_mish"),
         0
+    );
+}
+
+// =====================================================================
+// イシュー #2679（親 #2625・ルート #2499 Phase 4）: `compat::Sequential` の活性化 9 層
+// （`add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid`／`add_softmin`／
+// `add_tanhshrink`／`add_threshold`／`add_rrelu`）の正ガード。旧 `ActivationScalarOpsHoldDoctestGuard`・
+// `SoftminThresholdOpsHoldDoctestGuard` の `add_*` 衝突プローブと否定走査を、承認形だけを許す正ガード
+// （シグネチャ一致・`pub fn` ちょうど 1 件・場所は workspace インベントリが固定）へ反転した。承認形は
+// `docs/autodiff-activation-scalar-ops-decision.md` §7・`docs/autodiff-softmin-threshold-ops-decision.md` §7。
+// =====================================================================
+
+const ADD_SELU_PARAMS: &str = "mut self) -> Self";
+const ADD_CELU_PARAMS: &str = "mut self, alpha: f32) -> Result<Self, AutodiffError>";
+const ADD_SOFTSIGN_PARAMS: &str = "mut self) -> Self";
+const ADD_HARDSIGMOID_PARAMS: &str = "mut self) -> Self";
+const ADD_LOG_SIGMOID_PARAMS: &str = "mut self) -> Self";
+const ADD_SOFTMIN_PARAMS: &str = "mut self, dim: usize) -> Self";
+const ADD_TANHSHRINK_PARAMS: &str = "mut self) -> Self";
+const ADD_THRESHOLD_PARAMS: &str = "mut self, threshold: f32, value: f32) -> Self";
+const ADD_RRELU_PARAMS: &str = "mut self, lower: f32, upper: f32) -> Result<Self, AutodiffError>";
+
+const PHASE4_ACTIVATION_LAYER_ADD_METHODS: [(&str, &str); 9] = [
+    ("add_selu", ADD_SELU_PARAMS),
+    ("add_celu", ADD_CELU_PARAMS),
+    ("add_softsign", ADD_SOFTSIGN_PARAMS),
+    ("add_hardsigmoid", ADD_HARDSIGMOID_PARAMS),
+    ("add_log_sigmoid", ADD_LOG_SIGMOID_PARAMS),
+    ("add_softmin", ADD_SOFTMIN_PARAMS),
+    ("add_tanhshrink", ADD_TANHSHRINK_PARAMS),
+    ("add_threshold", ADD_THRESHOLD_PARAMS),
+    ("add_rrelu", ADD_RRELU_PARAMS),
+];
+
+/// `compat::Sequential` の 9 つの `add_*` が承認シグネチャで 1 件ずつ存在する。
+#[test]
+fn compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in PHASE4_ACTIVATION_LAYER_ADD_METHODS {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures`] の自己テスト。
+#[test]
+fn compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures_detects_offense()
+{
+    for (ok, name, params) in [
+        (
+            "pub fn add_selu(mut self) -> Self {",
+            "add_selu",
+            ADD_SELU_PARAMS,
+        ),
+        (
+            "pub fn add_celu(mut self, alpha: f32) -> Result<Self, AutodiffError> {",
+            "add_celu",
+            ADD_CELU_PARAMS,
+        ),
+        (
+            "pub fn add_softmin(mut self, dim: usize) -> Self {",
+            "add_softmin",
+            ADD_SOFTMIN_PARAMS,
+        ),
+        (
+            "pub fn add_threshold(mut self, threshold: f32, value: f32) -> Self {",
+            "add_threshold",
+            ADD_THRESHOLD_PARAMS,
+        ),
+        (
+            "pub fn add_rrelu(mut self, lower: f32, upper: f32) -> Result<Self, AutodiffError> {",
+            "add_rrelu",
+            ADD_RRELU_PARAMS,
+        ),
+    ] {
+        assert!(
+            sequential_spatial_add_signature_ok(ok, name, params),
+            "{ok}"
+        );
+    }
+    for (bad, name, params) in [
+        // 引数の追加
+        (
+            "pub fn add_selu(mut self, scale: f32) -> Self {",
+            "add_selu",
+            ADD_SELU_PARAMS,
+        ),
+        // 戻り値が Self（Result でない）
+        (
+            "pub fn add_celu(mut self, alpha: f32) -> Self {",
+            "add_celu",
+            ADD_CELU_PARAMS,
+        ),
+        // 戻り値が Result
+        (
+            "pub fn add_softmin(mut self, dim: usize) -> Result<Self, AutodiffError> {",
+            "add_softmin",
+            ADD_SOFTMIN_PARAMS,
+        ),
+        // 型違い（dim: isize）
+        (
+            "pub fn add_softmin(mut self, dim: isize) -> Self {",
+            "add_softmin",
+            ADD_SOFTMIN_PARAMS,
+        ),
+        // 引数順の入替
+        (
+            "pub fn add_threshold(mut self, value: f32, threshold: f32) -> Self {",
+            "add_threshold",
+            ADD_THRESHOLD_PARAMS,
+        ),
+        // 引数の欠落
+        (
+            "pub fn add_rrelu(mut self, lower: f32) -> Result<Self, AutodiffError> {",
+            "add_rrelu",
+            ADD_RRELU_PARAMS,
+        ),
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, name, params),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で 9 メソッドがそれぞれちょうど 1 件の `pub fn` として宣言されている
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード）。
+#[test]
+fn compat_sequential_exposes_phase4_activation_layers_add_methods_issue_2679() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut counts = [0usize; 9];
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        for (i, (name, _)) in PHASE4_ACTIVATION_LAYER_ADD_METHODS.iter().enumerate() {
+            counts[i] += count_pub_fn_declarations(content, name);
+        }
+    });
+    assert_eq!(
+        counts, [1; 9],
+        "src/compat 配下の活性化 9 層の add_* の pub fn 宣言数が各 1 件でない（counts={counts:?}）"
     );
 }
 
@@ -16032,7 +16272,8 @@ fn facade_reexports_optimizer_ext_items_only_in_approved_shape_detects_each_cate
 // doctest 足場と 2 テストは撤去し、否定ガードは承認した形だけを許す正ガードへ反転した
 // （`workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` は
 // 定義元インベントリのため不変）。形の記録は
-// `docs/autodiff-optimizer-state-dict-decision.md` §9・§11 を参照。
+// `docs/autodiff-optimizer-state-dict-decision.md` §9・§11 を参照。#2557 で trait 形状・
+// impl 集合・利用例 doctest プローブの正ガードを追加した（記録は同 §12）。
 // =====================================================================
 
 /// 承認した再エクスポート 1 文（空白を 1 個に正規化した形）。`src/optim.rs` にだけ置く。
@@ -16177,6 +16418,144 @@ fn optimizer_state_dict_is_reachable_via_facade_only() {
     let state = lbfgs.state_dict().expect("Lbfgs::state_dict");
     assert!(!state.is_empty());
 }
+// ---- #2557: 正ガードの強化（trait 形状固定・利用例 doctest プローブ・impl 集合固定）。
+// 記録は `docs/autodiff-optimizer-state-dict-decision.md` §12。
+
+/// `state_dict.rs` の内容から `OptimizerStateDict` trait の形状（ジェネリクス・supertrait
+/// なし／本体の `fn` 名が `state_dict`・`load_state_dict` の 2 件ちょうど／関連型・関連定数
+/// なし）の逸脱を返す。「sealing しない代わりにメソッドを追加しない」契約（決定記録 §9.4 (c)・
+/// §11.2）の機械固定。本体の `fn` トークンを全件数えるため、既定実装付きメソッドの追加も
+/// 集合不一致として検出する。検出範囲外: 引数・戻り値型の変更（シグネチャの正は
+/// `optimizer_state_dict_is_reachable_via_facade_only` の実呼び出し）。
+fn optimizer_state_dict_shape_violations(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    match trait_declared_surface(content, "OptimizerStateDict") {
+        None => out.push("OptimizerStateDict の宣言が見つからない".to_string()),
+        Some((plain, fns, assoc)) => {
+            if !plain {
+                out.push("ジェネリクスまたは supertrait が付いている".to_string());
+            }
+            if fns != ["state_dict", "load_state_dict"] {
+                out.push(format!("メソッド集合が承認形と不一致: {fns:?}"));
+            }
+            if assoc {
+                out.push("関連型または関連定数が追加されている".to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `(パス, 内容)` 群から `impl <path>::OptimizerStateDict for <型>` の型名集合を返す
+/// （コメント・文字列除去後のトークン走査）。検出範囲外: ジェネリック impl・マクロ生成・
+/// `use ... as` 別名経由の trait 名。
+fn optimizer_state_dict_impl_targets(
+    files: &[(String, String)],
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (_, content) in files {
+        let tokens = tokens_of(content);
+        for i in 0..tokens.len().saturating_sub(2) {
+            if tokens[i] != "OptimizerStateDict" || tokens[i + 1] != "for" {
+                continue;
+            }
+            let is_impl = tokens[..i]
+                .iter()
+                .rev()
+                .take_while(|t| !matches!(t.as_str(), ";" | "{" | "}"))
+                .any(|t| t == "impl");
+            if is_impl {
+                out.insert(tokens[i + 2].clone());
+            }
+        }
+    }
+    out
+}
+
+/// 正ガード（#2557）: trait の形状が承認形（決定記録 §9.4・§11.2）のままであること。
+#[test]
+fn optimizer_state_dict_trait_matches_approved_shape() {
+    let path = facade_crate_root().join("../autodiff/src/nn/optim/state_dict.rs");
+    let violations = optimizer_state_dict_shape_violations(&read_to_string_or_panic(&path));
+    assert!(
+        violations.is_empty(),
+        "OptimizerStateDict の形が承認形から逸脱している: {violations:?}"
+    );
+}
+
+/// 正ガード（#2557）: `autodiff` 内の impl 対象が承認した 10 型にちょうど一致し、`Lbfgs`
+/// を含まないこと（決定記録 §9.3・§11.2）。
+#[test]
+fn optimizer_state_dict_impls_are_exactly_approved_ten() {
+    let mut files = Vec::new();
+    visit_rs_files(&workspace_crates_dir().join("autodiff/src"), &mut |p, c| {
+        files.push((p.display().to_string(), c.to_string()));
+    });
+    let got = optimizer_state_dict_impl_targets(&files);
+    let want: std::collections::BTreeSet<String> = [
+        "AdamW", "Adam", "RmsProp", "Adagrad", "Lamb", "Adadelta", "Adamax", "NAdam", "RAdam",
+        "Sgd",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(
+        got, want,
+        "OptimizerStateDict の impl 対象が承認 10 型と不一致"
+    );
+}
+
+/// 正の doctest プローブ（#2557）: 利用例が facade の公開 doc に実在し、実際にコンパイル・
+/// 実行される形（`ignore` 等の指定なし）であること。ヘルパー自体の自己検証は
+/// `param_groups_usage_doctests_are_present_and_compiled` にある。
+#[test]
+fn optimizer_state_dict_usage_doctest_is_present_and_compiled() {
+    let optim = read_to_string_or_panic(&facade_crate_root().join("src/optim.rs"));
+    let v = doctest_probe_violations(
+        "optim.rs モジュール doc",
+        &inner_doc_lines(&optim),
+        &[
+            "use fandhe_ai::optim::",
+            "OptimizerStateDict",
+            "state_dict",
+            "load_state_dict",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// [`optimizer_state_dict_shape_violations`]・[`optimizer_state_dict_impl_targets`] の自己検証。
+#[test]
+fn optimizer_state_dict_shape_guards_detect_each_category() {
+    let ok = "pub trait OptimizerStateDict {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n";
+    assert!(optimizer_state_dict_shape_violations(ok).is_empty());
+    let bad = [
+        "pub trait OptimizerStateDict {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n fn extra(&self) {}\n}\n",
+        "pub trait OptimizerStateDict {\n fn state_dict(&self) -> X;\n}\n",
+        "pub trait OptimizerStateDict<T> {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n",
+        "pub trait OptimizerStateDict: Send {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n",
+        "pub trait OptimizerStateDict {\n type E;\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n",
+        "pub trait Other {}\n",
+    ];
+    for b in bad {
+        assert!(!optimizer_state_dict_shape_violations(b).is_empty(), "{b}");
+    }
+
+    let f = |s: &str| vec![("t.rs".to_string(), s.to_string())];
+    let got =
+        optimizer_state_dict_impl_targets(&f("impl super::OptimizerStateDict for AdamW {}\n\
+         impl crate::nn::optim::OptimizerStateDict for Sgd {}\n\
+         impl OptimizerStateDict for Lbfgs {}\n"));
+    assert_eq!(
+        got.into_iter().collect::<Vec<_>>(),
+        ["AdamW", "Lbfgs", "Sgd"]
+    );
+    let benign = optimizer_state_dict_impl_targets(&f(
+        "// impl OptimizerStateDict for Lbfgs {}\nlet s = \"impl OptimizerStateDict for Lbfgs\";\n\
+         fn g<T: OptimizerStateDict>() {}\n",
+    ));
+    assert!(benign.is_empty(), "{benign:?}");
+}
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、`fn state_dict`／
 /// `fn load_state_dict` の定義元集合を固定する
@@ -16242,13 +16621,17 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
     let expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/nn/module.rs::state_dict", 1usize),
         ("autodiff/src/nn/module.rs::load_state_dict", 1usize),
+        // #2586: `ForwardHooked<M>`（forward hook ラッパー）が `Module` の同名
+        // メソッドを inner へ透過委譲する実装（optimizer の state_dict とは無関係）。
+        ("autodiff/src/nn/forward_hook.rs::state_dict", 1usize),
+        ("autodiff/src/nn/forward_hook.rs::load_state_dict", 1usize),
         ("facade/src/compat/sequential.rs::state_dict", 1usize),
         ("facade/src/compat/sequential.rs::load_state_dict", 1usize),
         // #2395: facade 独自 `nn::Module` の defaulted メソッド（承認済み）。
         ("facade/src/nn/module.rs::state_dict", 1usize),
         ("facade/src/nn/module.rs::load_state_dict", 1usize),
-        // #2665: Functional API の内部実装（`#[cfg(test)]` 限定の `pub(crate)`。公開面ではなく
-        // 保留ガード `FunctionalApiHoldDoctestGuard` で非公開を固定。所在の登録であり緩和ではない）。
+        // #2665 実装・#2679 公開: Functional API（`FunctionalModel` の `state_dict`／`load_state_dict`。
+        // 公開面は `facade_exposes_functional_api_only_in_approved_shape` が固定。所在の登録であり緩和ではない）。
         ("facade/src/compat/functional.rs::state_dict", 1usize),
         ("facade/src/compat/functional.rs::load_state_dict", 1usize),
         ("autodiff/src/nn/optim/state_dict.rs::state_dict", 1usize),
@@ -17024,14 +17407,13 @@ fn ema_usage_doctests_are_present_and_compiled() {
 }
 
 // =====================================================================
-// イシュー #2658（親 #2657）: SWA（`AveragedModel`・`SwaLr`・`SwaAnneal`）
-// の facade 公開・`FitConfig`／`Sequential` 接続の保留を検査するテスト群。
-// `SwaHoldDoctestGuard`（`src/lib.rs`）の正のプローブ 1 ブロック方式の
-// ドリフト検査に加え、facade src 全体への非再エクスポート・非独自宣言
-// （型名）・非 inherent メソッド追加（`use_swa`／`swa_start`／`swa_lr`）を
-// 固定する。検出範囲は列挙名に限る（マクロ生成・別名経由までは保証しない。
-// `docs/autodiff-swa-decision.md` §9）。公開形は未承認（同 §7。承認依頼
-// #2677）。
+// イシュー #2658（親 #2657）で保留として導入し、イシュー #2679 で承認形の公開
+// （`optim::AveragedModel`＝facade 独自ラッパー、`optim::{SwaLr, SwaAnneal}`＝素の
+// 再エクスポート）へ反転した SWA の正ガード群。`SwaHoldDoctestGuard`（`src/lib.rs`。
+// `FitConfig`／`Sequential` への `use_swa`／`swa_start`／`swa_lr` 追加という未承認経路
+// 専用の衝突プローブ）のドリフト検査に加え、承認形だけを許すインベントリ
+// （`facade_exposes_swa_only_in_approved_shape`）・承認シグネチャのコンパイル時固定・
+// 正の doctest プローブを固定する（`docs/autodiff-swa-decision.md` §7・§9）。
 // =====================================================================
 
 /// `SwaHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import
@@ -17072,8 +17454,8 @@ fn swa_hold_doctest_probe_body_matches_fixed_contract() {
         actual, SWA_HOLD_PROBE_BODY,
         "SwaHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
          固定文言 SWA_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（型名 glob 衝突・inherent メソッド衝突の両方）の\
-         削除・弱体化・隠し行の混入がないか確認すること。"
+         プローブ（inherent メソッド衝突。型名 glob 衝突プローブは #2679 で\
+         承認形公開に伴い削除済み）の削除・弱体化・隠し行の混入がないか確認すること。"
     );
 }
 
@@ -17081,15 +17463,6 @@ fn swa_hold_doctest_probe_body_matches_fixed_contract() {
 /// 文言（`SwaHoldDoctestGuard` doc 内 doctest ブロックの glob 行を除いた
 /// 本文と 1 行単位で完全一致する）。
 const SWA_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_swa_hold_probe {\n\
-\x20\x20\x20\x20pub struct AveragedModel;\n\
-\x20\x20\x20\x20pub struct SwaLr;\n\
-\x20\x20\x20\x20pub struct SwaAnneal;\n\
-}\n\
-use __fandhe_swa_hold_probe::*;\n\
-\n\
-fn __probe_type(_: AveragedModel, _: SwaLr, _: SwaAnneal) {}\n\
 \n\
 struct __FandheSwaHoldMarker;\n\
 \n\
@@ -17141,150 +17514,298 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheSwaHoldMarker = x.swa_lr();\n\
 }";
 
-/// [`facade_does_not_reexport_or_declare_swa_items`]・その自己テストが共用
-/// する検出本体。facade src 全体の `pub use` から [`collect_pub_use_leaves`]
-/// で別名にする前の葉を集めて `AveragedModel`／`SwaLr`／`SwaAnneal` を検出し
-/// （単一行・複数行・ネスト group・別名も検出）、`trait`／`struct`／`enum`／
-/// `type` 直後の同名独自宣言と、`fn use_swa`／`fn swa_start`／`fn swa_lr`
-/// 宣言（可視性・宣言文脈を問わない）を違反として返す。検出範囲は列挙名に
-/// 限る（マクロ生成・別名経由の公開までは保証しない）。
-fn scan_swa_reexports_and_declarations(content: &str) -> Vec<String> {
-    const TYPE_NAMES: [&str; 3] = ["AveragedModel", "SwaLr", "SwaAnneal"];
-    const METHOD_NAMES: [&str; 3] = ["use_swa", "swa_start", "swa_lr"];
-    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-    let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
+/// SWA の `AveragedModel`（facade 独自ラッパー）の承認形 1 文（イシュー #2679）。
+/// `optim.rs` の `pub use` 行と完全一致する必要がある（`optim_module_reexports_exactly_
+/// expected_surface` が行単位で受理する形と同一）。
+const SWA_APPROVED_REEXPORT_LINE: &str = "pub use crate::optim_swa::AveragedModel;";
 
-    let mut i = 0usize;
-    while i < tokens.len() {
-        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-            let mut end = i + 2;
-            while end < tokens.len() && tokens[end] != ";" {
-                end += 1;
+/// `SwaLr`／`SwaAnneal`（内部クレートの素の再エクスポート）の承認形 1 文（イシュー #2679。
+/// 決定記録 `docs/autodiff-swa-decision.md` §7）。
+const SWA_APPROVED_LR_REEXPORT_LINE: &str =
+    "pub use fandhe_ai_autodiff::nn::optim::{SwaAnneal, SwaLr};";
+
+/// 承認した `AveragedModel` の独自宣言を置く唯一のファイル（`src` からの相対パス）。
+const SWA_APPROVED_DECL_FILE: &str = "optim_swa.rs";
+
+/// `(src からの相対パス, ソース内容)` の集合を走査し、SWA の公開形が承認形から外れている点を
+/// 違反として返す（[`facade_exposes_swa_only_in_approved_shape`]・自己テスト共用）。
+///
+/// - `AveragedModel` を識別子単位で含む `pub use` 文は `optim.rs` の
+///   [`SWA_APPROVED_REEXPORT_LINE`] 完全一致（トークン列比較。別名なし）だけを許し、ちょうど 1 件
+/// - `SwaLr`／`SwaAnneal` を識別子単位で含む `pub use` 文は `optim.rs` の
+///   [`SWA_APPROVED_LR_REEXPORT_LINE`] 完全一致だけを許し、ちょうど 1 件
+/// - `trait`／`struct`／`enum`／`type`／`union` による `AveragedModel` の宣言は
+///   [`SWA_APPROVED_DECL_FILE`] の 1 件だけを許す。`SwaLr`／`SwaAnneal` の独自宣言は常に違反
+/// - `use_swa`／`swa_start`／`swa_lr` という名前の `fn` 宣言は可視性・宣言文脈を問わず違反
+///   （`FitConfig`／`Sequential` への inherent メソッド追加＝`fit` への SWA 結線の禁止）
+fn swa_surface_violations(files: &[(String, String)]) -> Vec<String> {
+    const WRAPPER_NAME: &str = "AveragedModel";
+    const LR_NAMES: [&str; 2] = ["SwaLr", "SwaAnneal"];
+    const METHOD_NAMES: [&str; 3] = ["use_swa", "swa_start", "swa_lr"];
+    let wrapper_tokens =
+        tokenize_including_punctuation(SWA_APPROVED_REEXPORT_LINE.trim_end_matches(';'));
+    let lr_tokens =
+        tokenize_including_punctuation(SWA_APPROVED_LR_REEXPORT_LINE.trim_end_matches(';'));
+    let mut violations: Vec<String> = Vec::new();
+    let mut wrapper_reexports = 0usize;
+    let mut lr_reexports = 0usize;
+    let mut wrapper_decls = 0usize;
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let mut j = 0usize;
+        while j < tokens.len() {
+            if tokens[j] == "pub" && tokens.get(j + 1).map(String::as_str) == Some("use") {
+                let mut end = j + 2;
+                while end < tokens.len() && tokens[end] != ";" {
+                    end += 1;
+                }
+                let stmt = &tokens[j..end.min(tokens.len())];
+                if stmt.iter().any(|t| t == WRAPPER_NAME) {
+                    if rel == "optim.rs" && stmt == wrapper_tokens.as_slice() {
+                        wrapper_reexports += 1;
+                    } else {
+                        violations.push(format!("{rel}: 承認形以外の `{}`", stmt.join(" ")));
+                    }
+                }
+                if stmt.iter().any(|t| LR_NAMES.contains(&t.as_str())) {
+                    if rel == "optim.rs" && stmt == lr_tokens.as_slice() {
+                        lr_reexports += 1;
+                    } else {
+                        violations.push(format!("{rel}: 承認形以外の `{}`", stmt.join(" ")));
+                    }
+                }
+                j = end + 1;
+                continue;
             }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            for leaf in collect_pub_use_leaves(path_tokens) {
-                if TYPE_NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
+            j += 1;
+        }
+        for (i, tok) in tokens.iter().enumerate() {
+            let next = tokens.get(i + 1).map(String::as_str);
+            if matches!(tok.as_str(), "trait" | "struct" | "enum" | "type" | "union") {
+                if next == Some(WRAPPER_NAME) {
+                    if rel == SWA_APPROVED_DECL_FILE {
+                        wrapper_decls += 1;
+                    } else {
+                        violations
+                            .push(format!("{rel}: {tok} {WRAPPER_NAME} 宣言（承認外の場所）"));
+                    }
+                }
+                if let Some(n) = next.filter(|n| LR_NAMES.contains(n)) {
+                    violations.push(format!(
+                        "{rel}: {tok} {n} 宣言（内部クレートの型は再定義しない）"
+                    ));
                 }
             }
-            i = (end + 1).min(tokens.len());
-            continue;
+            if tok == "fn" && next.is_some_and(|n| METHOD_NAMES.contains(&n)) {
+                violations.push(format!(
+                    "{rel}: fn {} 宣言（FitConfig／Sequential への SWA 結線は未承認）",
+                    next.unwrap_or_default()
+                ));
+            }
         }
-        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
-            && tokens
-                .get(i + 1)
-                .map(|t| TYPE_NAMES.contains(&t.as_str()))
-                .unwrap_or(false)
-        {
-            offending.push(format!(
-                "{} {} 宣言",
-                tokens[i],
-                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
-            ));
-        }
-        if tokens[i] == "fn"
-            && tokens
-                .get(i + 1)
-                .map(|t| METHOD_NAMES.contains(&t.as_str()))
-                .unwrap_or(false)
-        {
-            offending.push(format!(
-                "fn {} 宣言",
-                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
-            ));
-        }
-        i += 1;
     }
-
-    offending
+    if wrapper_reexports != 1 {
+        violations.push(format!(
+            "src/optim.rs の承認形（`{SWA_APPROVED_REEXPORT_LINE}`）が {wrapper_reexports} 件\
+             （ちょうど 1 件である必要がある）"
+        ));
+    }
+    if lr_reexports != 1 {
+        violations.push(format!(
+            "src/optim.rs の承認形（`{SWA_APPROVED_LR_REEXPORT_LINE}`）が {lr_reexports} 件\
+             （ちょうど 1 件である必要がある）"
+        ));
+    }
+    if wrapper_decls != 1 {
+        violations.push(format!(
+            "src/{SWA_APPROVED_DECL_FILE} の {WRAPPER_NAME} 宣言が {wrapper_decls} 件\
+             （ちょうど 1 件である必要がある）"
+        ));
+    }
+    violations
 }
 
-/// facade src 全体に、`AveragedModel`／`SwaLr`／`SwaAnneal` を識別子単位で
-/// 含む `pub use` も、同名の独自 `trait`／`struct`／`enum`／`type` 宣言も、
-/// `use_swa`／`swa_start`／`swa_lr` という名前の `fn` 宣言も存在しないこと
-/// を固定する（`SwaHoldDoctestGuard` と多層防御を成す最内層のソース走査）。
+/// facade src 全体で SWA の公開が承認形（イシュー #2679。`src/optim.rs` の承認 2 文＋
+/// `src/optim_swa.rs` の独自ラッパー宣言 1 件）だけであり、`use_swa`／`swa_start`／`swa_lr` の
+/// `fn` 宣言（`fit` への結線）が存在しないことを固定する（`SwaHoldDoctestGuard` の
+/// inherent メソッド衝突プローブと多層防御を成す最内層のソース走査）。
 #[test]
-fn facade_does_not_reexport_or_declare_swa_items() {
+fn facade_exposes_swa_only_in_approved_shape() {
     let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_swa_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
     });
+    let violations = swa_surface_violations(&files);
     assert!(
-        offending.is_empty(),
-        "facade の公開面が SWA（イシュー #2658。AveragedModel／SwaLr／\
-         SwaAnneal／use_swa／swa_start／swa_lr）を再エクスポート、または\
-         独自宣言している（`docs/autodiff-swa-decision.md` §7 承認事項が\
-         未取得のまま公開しない設計判断に違反）: {offending:?}"
+        violations.is_empty(),
+        "facade の SWA 公開が承認形（イシュー #2679・`docs/autodiff-swa-decision.md` §7）から\
+         外れている: {violations:?}"
     );
 }
 
-/// [`scan_swa_reexports_and_declarations`] の自己テスト（正例・負例の
-/// 合成入力。3 型名・3 メソッド名のすべてを個別に検出できることを固定）。
+/// [`swa_surface_violations`] が承認形を受理し各類型を検出することの自己検証
+/// （検出器が空振りで常に通る状態を防ぐ）。
 #[test]
-fn facade_does_not_reexport_or_declare_swa_items_detects_each_category() {
-    for name in ["AveragedModel", "SwaLr", "SwaAnneal"] {
-        // 正例: 単一行 pub use。
+fn facade_exposes_swa_only_in_approved_shape_detects_each_category() {
+    let reexport = format!("{SWA_APPROVED_REEXPORT_LINE}\n{SWA_APPROVED_LR_REEXPORT_LINE}\n");
+    let decl = "pub struct AveragedModel { inner: u8 }\n".to_string();
+    let base = || {
+        vec![
+            ("optim.rs".to_string(), reexport.clone()),
+            (SWA_APPROVED_DECL_FILE.to_string(), decl.clone()),
+        ]
+    };
+    assert!(swa_surface_violations(&base()).is_empty());
+
+    // 違反: 承認形の欠落（再エクスポート・宣言）。
+    for skip in 0..2 {
+        let mut files = base();
+        files.remove(skip);
         assert!(
-            !scan_swa_reexports_and_declarations(&format!(
-                "pub use fandhe_ai_autodiff::nn::{name};"
-            ))
-            .is_empty(),
-            "pub use {name}"
-        );
-        // 正例: 複数行 pub use（ネスト group）。
-        assert!(
-            !scan_swa_reexports_and_declarations(&format!(
-                "pub use fandhe_ai_autodiff::nn::{{\n    optim::{{\n        {name},\n        Sgd,\n    }},\n    Linear,\n}};"
-            ))
-            .is_empty(),
-            "nested pub use {name}"
-        );
-        // 正例: 別名 pub use。
-        assert!(
-            !scan_swa_reexports_and_declarations(&format!(
-                "pub use fandhe_ai_autodiff::nn::{name} as Alias;"
-            ))
-            .is_empty(),
-            "alias pub use {name}"
-        );
-        // 正例: 独自宣言（struct／enum／trait／type）。
-        for kw in ["struct", "enum", "trait", "type"] {
-            assert!(
-                !scan_swa_reexports_and_declarations(&format!("pub {kw} {name};")).is_empty(),
-                "{kw} {name}"
-            );
-        }
-        // 負例: 非公開 use。
-        assert!(
-            scan_swa_reexports_and_declarations(&format!("use fandhe_ai_autodiff::nn::{name};"))
-                .is_empty(),
-            "private use {name}"
+            !swa_surface_violations(&files).is_empty(),
+            "欠落を検出しない: index {skip}"
         );
     }
-    // 正例: inherent メソッド追加（3 名）。
-    for method in ["use_swa", "swa_start", "swa_lr"] {
+
+    // 違反: 内部型の素の再エクスポート・別名・波括弧 group・別ファイル重複・別ファイル宣言・
+    // 重複宣言・SwaLr／SwaAnneal の独自宣言と承認外の再エクスポート・inherent メソッド追加。
+    for (rel, extra) in [
+        (
+            "optim.rs",
+            "pub use fandhe_ai_autodiff::nn::AveragedModel;\n",
+        ),
+        (
+            "optim.rs",
+            "pub use crate::optim_swa::AveragedModel as Swa;\n",
+        ),
+        (
+            "nn/mod.rs",
+            "pub use fandhe_ai_autodiff::nn::{\n    AveragedModel,\n    Linear,\n};\n",
+        ),
+        ("lib.rs", "pub use crate::optim_swa::AveragedModel;\n"),
+        ("optim.rs", "pub use crate::optim_swa::AveragedModel;\n"),
+        ("lib.rs", "pub struct AveragedModel;\n"),
+        (SWA_APPROVED_DECL_FILE, "pub struct AveragedModel;\n"),
+        (
+            "optim.rs",
+            "pub use fandhe_ai_autodiff::nn::optim::SwaLr;\n",
+        ),
+        (
+            "optim.rs",
+            "pub use fandhe_ai_autodiff::nn::optim::{SwaAnneal, SwaLr};\n",
+        ),
+        (
+            "nn/mod.rs",
+            "pub use fandhe_ai_autodiff::nn::optim::SwaAnneal as Anneal;\n",
+        ),
+        ("lib.rs", "pub enum SwaAnneal { Cos }\n"),
+        ("lib.rs", "pub struct SwaLr;\n"),
+        (
+            "compat/training.rs",
+            "impl FitConfig {\n    pub fn use_swa(mut self) -> Self {\n        self\n    }\n}\n",
+        ),
+        (
+            "compat/training.rs",
+            "impl FitConfig {\n    pub fn swa_start(mut self) -> Self {\n        self\n    }\n}\n",
+        ),
+        (
+            "compat/sequential.rs",
+            "impl Sequential {\n    pub fn swa_lr(&self) {}\n}\n",
+        ),
+    ] {
+        let mut files = base();
+        files.push((rel.to_string(), extra.to_string()));
         assert!(
-            !scan_swa_reexports_and_declarations(&format!(
-                "impl FitConfig {{\n    pub fn {method}(mut self) -> Self {{\n        self\n    }}\n}}"
-            ))
-            .is_empty(),
-            "fn {method}"
+            !swa_surface_violations(&files).is_empty(),
+            "検出できない類型: {rel}: {extra:?}"
         );
     }
-    // 負例: コメント・文字列リテラル中の出現。
-    assert!(scan_swa_reexports_and_declarations("// pub use ...::SwaLr;").is_empty());
-    assert!(scan_swa_reexports_and_declarations("let s = \"AveragedModel\";").is_empty());
-    // 負例: 無関係な pub use・fn 宣言。
-    assert!(
-        scan_swa_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::AdamW;").is_empty()
-    );
-    assert!(scan_swa_reexports_and_declarations("pub fn use_dropout(&self) {}").is_empty());
+
+    // 許容: コメント・文字列・非公開 use・無関係な pub use／fn。
+    let mut benign = base();
+    benign.push((
+        "compat/callbacks.rs".to_string(),
+        "// pub use x::AveragedModel;\n\
+         use crate::optim::AveragedModel;\n\
+         let s = \"SwaLr\";\n\
+         pub use fandhe_ai_autodiff::nn::AdamW;\n\
+         pub fn use_dropout(&self) {}\n"
+            .to_string(),
+    ));
+    assert!(swa_surface_violations(&benign).is_empty());
 }
 
+/// 承認した SWA 型のシグネチャ（決定記録 `docs/autodiff-swa-decision.md` §7）を `fandhe_ai`
+/// のみの import でコンパイル時に固定する（#2679。`fandhe_ai_autodiff` は import しない）。
+/// 関数ポインタ型注釈の代入が型検査を通ることが検査であり、メソッドの追加・引数や戻り値の
+/// 変更はここでコンパイルエラーになる。
+#[test]
+fn swa_types_are_reachable_via_facade_only() {
+    use std::collections::HashMap;
+
+    use fandhe_ai::nn::Module;
+    use fandhe_ai::optim::{AveragedModel as Swa, LrScheduler, SwaAnneal, SwaLr};
+    use fandhe_ai::{AutodiffError, Tensor};
+
+    type Named<'a> = Vec<(String, &'a Tensor<f32>)>;
+    type StateDict = HashMap<String, Tensor<f32>>;
+
+    let _new: fn(&[&Tensor<f32>]) -> Result<Swa, AutodiffError> = Swa::new;
+    let _from_named: fn(Named<'_>) -> Result<Swa, AutodiffError> = Swa::from_named;
+    let _from_module: fn(&dyn Module) -> Result<Swa, AutodiffError> = Swa::from_module;
+    let _n_averaged: fn(&Swa) -> u64 = Swa::n_averaged;
+    let _update: fn(&mut Swa, &[&Tensor<f32>]) -> Result<(), AutodiffError> = Swa::update;
+    let _update_named: fn(&mut Swa, Named<'_>) -> Result<(), AutodiffError> = Swa::update_named;
+    let _update_from_module: fn(&mut Swa, &dyn Module) -> Result<(), AutodiffError> =
+        Swa::update_from_module;
+    let _averaged: for<'a> fn(&'a Swa, &str) -> Option<&'a Tensor<f32>> = Swa::averaged;
+    let _averaged_parameters: for<'a> fn(&'a Swa) -> Vec<&'a Tensor<f32>> =
+        Swa::averaged_parameters;
+    let _averaged_state_dict: fn(&Swa) -> StateDict = Swa::averaged_state_dict;
+    let _apply: fn(&Swa, &mut dyn Module) -> Result<StateDict, AutodiffError> = Swa::apply;
+    let _restore: fn(&mut dyn Module, StateDict) -> Result<(), AutodiffError> = Swa::restore;
+
+    let _lr_new: fn(f32, f32, usize, SwaAnneal) -> Result<SwaLr, AutodiffError> = SwaLr::new;
+    // 振る舞いの最小確認: 不正な学習率は型付きエラー、`anneal_epochs` 以降は `swa_lr` 固定。
+    assert!(SwaLr::new(0.0, 0.1, 3, SwaAnneal::Cos).is_err());
+    let lr = SwaLr::new(0.1, 0.05, 2, SwaAnneal::Linear).unwrap();
+    assert_eq!(lr.lr_at(2), 0.05);
+    assert_ne!(SwaAnneal::Cos, SwaAnneal::Linear);
+}
+
+/// 正の doctest プローブ（#2679。`ema_usage_doctests_are_present_and_compiled` と同型）:
+/// SWA の利用例が facade の公開 doc に実在し、実際にコンパイル・実行される形で書かれて
+/// いることを固定する。
+#[test]
+fn swa_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let optim = read_to_string_or_panic(&root.join("src/optim.rs"));
+    let swa_rs = read_to_string_or_panic(&root.join("src/optim_swa.rs"));
+
+    let mut v = doctest_probe_violations(
+        "optim.rs モジュール doc（SWA 節）",
+        &inner_doc_lines(&optim),
+        &["AveragedModel", "SwaLr", "SwaAnneal"],
+    );
+    v.extend(doctest_probe_violations(
+        "AveragedModel の doc",
+        &doc_lines_above_fn(&swa_rs, "pub struct AveragedModel"),
+        &[
+            "use fandhe_ai::optim::AveragedModel",
+            "AveragedModel::new",
+            "averaged_parameters",
+        ],
+    ));
+    assert!(v.is_empty(), "{v:?}");
+    assert!(!doctest_probe_violations("t", &[], &["AveragedModel"]).is_empty());
+}
 // =====================================================================
 // LR スケジューラ拡張 5 種（イシュー #2176 実装・#2503 公開。親 #2499）の
 // 正ガード。旧 `LrSchedulerExtHoldDoctestGuard` 系の否定ガード 4 テストを
@@ -20633,12 +21154,6 @@ fn generate_hold_doctest_probe_body_matches_fixed_contract() {
 const GENERATE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_generate_hold_probe {\n\
-\x20\x20\x20\x20pub mod inference {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn generate() {}\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub struct GenerateConfig;\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub struct SamplingStrategy;\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub struct AutoregressiveModel;\n\
-\x20\x20\x20\x20}\n\
 \x20\x20\x20\x20pub fn generate() {}\n\
 \x20\x20\x20\x20pub struct GenerateConfig;\n\
 \x20\x20\x20\x20pub struct SamplingStrategy;\n\
@@ -20662,13 +21177,6 @@ impl __FandheGenerateHoldProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20fn generate(&self) -> __FandheGenerateHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheGenerateHoldMarker\n\
 \x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe_module_path() {\n\
-\x20\x20\x20\x20inference::generate();\n\
-\x20\x20\x20\x20let _ = inference::GenerateConfig;\n\
-\x20\x20\x20\x20let _ = inference::SamplingStrategy;\n\
-\x20\x20\x20\x20let _ = inference::AutoregressiveModel;\n\
 }\n\
 \n\
 fn __probe_free_fn() {\n\
@@ -20820,284 +21328,184 @@ fn facade_does_not_reexport_or_declare_generate_items_detects_each_category() {
 }
 
 // =====================================================================
-// PredictBatchesHoldDoctestGuard（イシュー #2192・親 #2131）:
-// `NpyIoHoldDoctestGuard`（#2189）系のテスト（`npy_io_hold_doctest_
-// globs_all_pub_modules`／`npy_io_hold_doctest_probe_body_matches_fixed_
-// contract`／`facade_does_not_reexport_or_declare_npy_io`／
-// `workspace_declares_npy_io_names_only_in_allowed_locations`）を鏡写し
-// にする。
+// イシュー #2582（親 #2581。ルート #2499 のリポジトリ所有者本人による 2026-10-07 付け承認
+// コメント〈issuecomment-6033824965。#2581 の
+// `docs/facade-predict-batches-phase-metrics-decision.md` §8 の推奨案を承認〉）:
+// `Sequential::predict_batches`・`fandhe_ai::inference::{PhaseMetrics, PhaseStat,
+// InferencePhase, PredictBatchInput, get_phase_metrics, reset_phase_metrics}` の facade 公開を
+// 固定する最小の正ガード。旧保留ガード（#2192。`PredictBatchesHoldDoctestGuard` と
+// 走査ガード 4 件・固定文言）を反転したもので、公開面は承認形（`inference/mod.rs` の 1 文の
+// `pub use`・`batch` 非公開・fn 宣言の所在）に完全一致で限定する。正ガードの全数インベントリ化と
+// doctest 存在検査は #2583 で本節末尾へ追加済み（検出範囲の限界はそちらのコメントを参照）。
 // =====================================================================
 
-/// `crates/facade/src/lib.rs` の `PredictBatchesHoldDoctestGuard` doc 内
-/// の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`npy_io_hold_doctest_globs_all_pub_modules` と同型）。
-#[test]
-fn predict_batches_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "PredictBatchesHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "PredictBatchesHoldDoctestGuard の doctest ブロックが glob import\
-         するモジュール集合が src/lib.rs の pub mod 宣言集合とドリフト\
-         している（declared={declared:?}, doctest={globbed:?}）。新しい\
-         pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
+/// `inference/mod.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの。6 名形）。
+const PREDICT_BATCHES_APPROVED_REEXPORT: &str = "batch::{InferencePhase,PhaseMetrics,PhaseStat,PredictBatchInput,get_phase_metrics,reset_phase_metrics}";
 
-/// [`predict_batches_hold_doctest_globs_all_pub_modules`] が glob import
-/// 集合の一致のみを固定するのに対し、本テストは doctest ブロックの
-/// **glob 以外の本文**が固定文言 [`PREDICT_BATCHES_HOLD_PROBE_BODY`] と
-/// 1 行たりとも違わず一致することを固定する（`npy_io_hold_doctest_probe_
-/// body_matches_fixed_contract` と同じ理由: rustdoc の `# ` 隠し行・
-/// プローブの削除・別名へのシャドーイング等で正のプローブを骨抜きにする
-/// 改変を機械的に拒否する）。
-#[test]
-fn predict_batches_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "PredictBatchesHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, PREDICT_BATCHES_HOLD_PROBE_BODY,
-        "PredictBatchesHoldDoctestGuard の doctest ブロック本文（glob 以外）\
-         が固定文言 PREDICT_BATCHES_HOLD_PROBE_BODY からドリフトしている。\
-         正のプローブ（__fandhe_predict_batches_hold_probe モジュール・\
-         __FandhePredictBatchesHoldProbe トレイト・__probe_* 関数）の\
-         削除・弱体化・隠し行の混入がないか確認すること。"
-    );
-}
+/// `inference/batch.rs` が `recorded` から公開 5 名を引き上げる `pub use`（`batch` は
+/// `pub(crate)` で、`inference/mod.rs` の承認形 1 文だけが facade の公開経路）。
+const PREDICT_BATCHES_BATCH_INTERNAL_REEXPORT: &str =
+    "recorded::{PhaseMetrics,PhaseStat,PredictBatchInput,get_phase_metrics,reset_phase_metrics}";
 
-/// [`predict_batches_hold_doctest_probe_body_matches_fixed_contract`] が
-/// 要求する固定文言。`crates/facade/src/lib.rs` の
-/// `PredictBatchesHoldDoctestGuard` doc 内の唯一の doctest ブロックから、
-/// ネスト `pub mod` の glob import 行（`use fandhe_ai::<mod>::*;`）を
-/// 除いた本文と 1 行単位で完全一致する必要がある（クレートルート自体の
-/// `use fandhe_ai::*;` は本文に含む）。
-const PREDICT_BATCHES_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_predict_batches_hold_probe {\n\
-\x20\x20\x20\x20pub struct PhaseMetrics;\n\
-\x20\x20\x20\x20pub fn get_phase_metrics() {}\n\
-\x20\x20\x20\x20pub fn current_phase_metrics() {}\n\
-\x20\x20\x20\x20pub fn reset_phase_metrics() {}\n\
-\x20\x20\x20\x20pub mod inference {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_predict_batches_hold_probe::*;\n\
-\n\
-struct __FandhePredictBatchesHoldMarker;\n\
-\n\
-trait __FandhePredictBatchesHoldProbe {\n\
-\x20\x20\x20\x20fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker;\n\
-\x20\x20\x20\x20fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;\n\
-\x20\x20\x20\x20fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;\n\
-}\n\
-\n\
-impl __FandhePredictBatchesHoldProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePredictBatchesHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePredictBatchesHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePredictBatchesHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe_free_fns(_: PhaseMetrics) {\n\
-\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
-\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20get_phase_metrics();\n\
-\x20\x20\x20\x20current_phase_metrics();\n\
-\x20\x20\x20\x20reset_phase_metrics();\n\
-\x20\x20\x20\x20inference::__mark();\n\
-}\n\
-\n\
-fn __probe_sequential(seq: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandhePredictBatchesHoldMarker =\n\
-\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::predict_batches(seq);\n\
-\x20\x20\x20\x20let _: __FandhePredictBatchesHoldMarker = seq.get_phase_metrics();\n\
-\x20\x20\x20\x20let _: __FandhePredictBatchesHoldMarker =\n\
-\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::current_phase_metrics(seq);\n\
-}";
-
-/// fn 名 4 個（イシュー #2192）。[`scan_predict_batches_reexports_and_declarations`]・
-/// [`workspace_declares_predict_batches_fn_names_nowhere`] が共用する。
-const PREDICT_BATCHES_FN_NAMES: [&str; 4] = [
-    "predict_batches",
-    "get_phase_metrics",
-    "current_phase_metrics",
-    "reset_phase_metrics",
+/// 公開 6 名の型・トレイト名（4 個）。
+const PREDICT_BATCHES_TYPE_NAMES: [&str; 4] = [
+    "InferencePhase",
+    "PhaseMetrics",
+    "PhaseStat",
+    "PredictBatchInput",
 ];
 
-/// [`facade_does_not_reexport_or_declare_predict_batches_items`]・その
-/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/src/**`）
-/// の `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を集め
-/// `PhaseMetrics` を検出し（単一行・複数行・ネストした group・別名も
-/// 検出）、`trait`／`struct`／`enum`／`type` 直後の `PhaseMetrics` 独自
-/// 宣言、[`PREDICT_BATCHES_FN_NAMES`]（4 個）の `fn` 宣言（可視性・宣言
-/// 文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出契約）、
-/// `pub mod inference` 宣言（facade 独自の `inference` 公開モジュール
-/// 新設）を違反として返す（`scan_npy_io_reexports_and_declarations` と
-/// 同型。`pub mod inference` 検出のみ追加）。
-fn scan_predict_batches_reexports_and_declarations(content: &str) -> Vec<String> {
-    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-    let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
+/// 公開 6 名のうち関数名（2 個）。
+const PREDICT_BATCHES_FREE_FN_NAMES: [&str; 2] = ["get_phase_metrics", "reset_phase_metrics"];
 
-    let mut i = 0usize;
-    while i < tokens.len() {
-        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-            let mut end = i + 2;
-            while end < tokens.len() && tokens[end] != ";" {
-                end += 1;
+/// 公開 6 名を識別子として含む `pub use` 文を `(ファイル相対パス, 空白なしトークン連結)` で、
+/// 4 名の `struct`／`enum`／`type`／`union`／`trait` 宣言を `(ファイル, "<decl:名前>")` で、
+/// `predict_batches`／`get_phase_metrics`／`reset_phase_metrics`／`current_phase_metrics` の
+/// `fn` 宣言（可視性・宣言文脈を問わない）を `(ファイル, "<fn:名前>")` で全件返す
+/// （コメント・文字列リテラルは無視）。
+fn predict_batches_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for (i, t) in tokens.iter().enumerate() {
+            if matches!(t.as_str(), "struct" | "enum" | "type" | "union" | "trait")
+                && let Some(n) = tokens.get(i + 1)
+                && PREDICT_BATCHES_TYPE_NAMES.contains(&n.as_str())
+            {
+                out.push((rel.clone(), format!("<decl:{n}>")));
             }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if leaf == "PhaseMetrics" {
-                    offending.push(format!("pub use leaf={leaf}"));
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                let stmt = &tokens[i + 2..end];
+                if stmt.iter().any(|x| {
+                    PREDICT_BATCHES_TYPE_NAMES.contains(&x.as_str())
+                        || PREDICT_BATCHES_FREE_FN_NAMES.contains(&x.as_str())
+                }) {
+                    // rustfmt が複数行へ折ると末尾カンマ（`,}`）が入るため正規化する。
+                    out.push((rel.clone(), stmt.concat().replace(",}", "}")));
                 }
             }
-            i = (end + 1).min(tokens.len());
-            continue;
         }
-        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
-            && tokens.get(i + 1).map(String::as_str) == Some("PhaseMetrics")
-        {
-            offending.push(format!("{} PhaseMetrics 宣言", tokens[i]));
-        }
-        if tokens[i] == "pub"
-            && tokens.get(i + 1).map(String::as_str) == Some("mod")
-            && tokens.get(i + 2).map(String::as_str) == Some("inference")
-        {
-            offending.push("pub mod inference 宣言".to_string());
-        }
-        i += 1;
-    }
-
-    for fn_name in PREDICT_BATCHES_FN_NAMES {
-        let count = count_fn_declarations_by_name(&tokens, fn_name);
-        if count > 0 {
-            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        for name in [
+            "predict_batches",
+            "get_phase_metrics",
+            "reset_phase_metrics",
+            "current_phase_metrics",
+        ] {
+            for _ in 0..count_fn_declarations_by_name(&tokens, name) {
+                out.push((rel.clone(), format!("<fn:{name}>")));
+            }
         }
     }
-    offending
+    out.sort();
+    out
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、`PhaseMetrics` を識別子
-/// 単位で含む `pub use`（複数行・ネストした group・別名含む）も、facade
-/// 独自の `trait`／`struct`／`enum`／`type` 宣言も、
-/// [`PREDICT_BATCHES_FN_NAMES`]（`predict_batches`／`get_phase_metrics`／
-/// `current_phase_metrics`／`reset_phase_metrics`）の `fn` 宣言も、
-/// `pub mod inference` 宣言も存在しないことを固定する
-/// （`PredictBatchesHoldDoctestGuard` の正のプローブと多層防御を成す
-/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_npy_io`
-/// と同型）。
+/// facade の公開は `inference/mod.rs` の承認形 1 文ちょうど 1 件で、型・トレイトの実体は
+/// `inference/batch.rs`、`predict_batches` は `compat/sequential.rs`、`get_phase_metrics`／
+/// `reset_phase_metrics` は `inference/batch.rs` にそれぞれ 1 件だけ（別名・分割・別ファイル・
+/// 独自型宣言・`current_phase_metrics`・重複宣言はすべて拒否。件数 0 の空振りも拒否）。
 #[test]
-fn facade_does_not_reexport_or_declare_predict_batches_items() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_predict_batches_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
-    });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面がバッチ推論・phase 計測（#2192 の\
-         `predict_batches`／`PhaseMetrics`／`get_phase_metrics`／\
-         `current_phase_metrics`／`reset_phase_metrics`／`pub mod\
-         inference`。内部実装限定の新規公開面。facade 公開は承認待ちの\
-         ため対象外という設計判断に違反）を再エクスポート、独自宣言、\
-         または同名の fn／pub mod を宣言している: {offending:?}"
+fn facade_exposes_predict_batches_items_only_in_approved_shape() {
+    let expected: Vec<(String, String)> = [
+        ("compat/sequential.rs", "<fn:predict_batches>"),
+        ("inference/batch.rs", "<decl:InferencePhase>"),
+        ("inference/batch.rs", "<decl:PhaseMetrics>"),
+        ("inference/batch.rs", "<decl:PhaseStat>"),
+        ("inference/batch.rs", "<decl:PredictBatchInput>"),
+        ("inference/batch.rs", "<fn:get_phase_metrics>"),
+        ("inference/batch.rs", "<fn:reset_phase_metrics>"),
+        (
+            "inference/batch.rs",
+            PREDICT_BATCHES_BATCH_INTERNAL_REEXPORT,
+        ),
+        ("inference/mod.rs", PREDICT_BATCHES_APPROVED_REEXPORT),
+    ]
+    .into_iter()
+    .map(|(f, s)| (f.to_string(), s.to_string()))
+    .collect();
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(
+        predict_batches_exposures(&facade_src_files()),
+        expected,
+        "predict_batches／PhaseMetrics 一式の facade 公開は inference/mod.rs の承認形 1 文と \
+         所定ファイルの宣言のみ（イシュー #2582・決定記録 §8.4）"
     );
 }
 
-/// [`facade_does_not_reexport_or_declare_predict_batches_items`] の自己
-/// テスト（各違反カテゴリの合成ソースを検出できることを固定する。
-/// `facade_model_io_public_surface_detects_each_category`
-/// と同型）。
+/// [`facade_exposes_predict_batches_items_only_in_approved_shape`] の自己テスト
+/// （承認形・各違反類型・無視されるべき入力を区別できること）。
 #[test]
-fn facade_does_not_reexport_or_declare_predict_batches_items_detects_each_category() {
-    // 正例: 単一行 pub use。
-    assert!(
-        !scan_predict_batches_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::PhaseMetrics;"
-        )
-        .is_empty()
+fn facade_exposes_predict_batches_items_only_in_approved_shape_detects_each_category() {
+    let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
+    let ok = "pub use batch::{InferencePhase, PhaseMetrics, PhaseStat, PredictBatchInput, get_phase_metrics, reset_phase_metrics};";
+    assert_eq!(
+        predict_batches_exposures(&f("inference/mod.rs", ok)),
+        vec![(
+            "inference/mod.rs".to_string(),
+            PREDICT_BATCHES_APPROVED_REEXPORT.to_string()
+        )]
     );
-    // 正例: 複数行 pub use（group）。
-    assert!(
-        !scan_predict_batches_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::{\n    Sequential,\n    PhaseMetrics,\n};"
-        )
-        .is_empty()
+    // 別ファイルは同一文でも (ファイル, 文) が承認形（inference/mod.rs）と一致しない。
+    assert_eq!(predict_batches_exposures(&f("lib.rs", ok))[0].0, "lib.rs");
+    for bad in [
+        "pub use batch::PhaseMetrics;",
+        "pub use batch::PhaseMetrics as PM;",
+        "pub use batch::{get_phase_metrics, reset_phase_metrics};",
+        "pub use batch::{PhaseMetrics, PhaseStat, InferencePhase, PredictBatchInput, get_phase_metrics, reset_phase_metrics};",
+        "pub use batch::{InferencePhase, PhaseMetrics, PhaseStat, PredictBatchInput, get_phase_metrics, reset_phase_metrics, current_phase_metrics};",
+        "pub use fandhe_ai_autodiff::nn::PhaseStat;",
+        "pub struct PhaseMetrics;",
+        "pub enum InferencePhase {}",
+        "pub trait PredictBatchInput {}",
+        "pub type PhaseStat = u8;",
+        "impl Sequential { pub fn predict_batches(&self) {} }",
+        "pub fn current_phase_metrics() {}",
+        "fn get_phase_metrics() {}",
+    ] {
+        let got = predict_batches_exposures(&f("inference/mod.rs", bad));
+        assert!(!got.is_empty(), "{bad}");
+        assert!(
+            got.iter()
+                .all(|(_, s)| s != PREDICT_BATCHES_APPROVED_REEXPORT),
+            "{bad}"
+        );
+    }
+    // 分割して 2 文にした場合は 2 件検出される（承認形 1 件の要求を満たさない）。
+    assert_eq!(
+        predict_batches_exposures(&f(
+            "inference/mod.rs",
+            "pub use a::PhaseMetrics; pub use a::get_phase_metrics;"
+        ))
+        .len(),
+        2
     );
-    // 正例: 別名 pub use。
-    assert!(
-        !scan_predict_batches_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::PhaseMetrics as Foo;"
-        )
-        .is_empty()
-    );
-    // 正例: 独自 struct 宣言。
-    assert!(
-        !scan_predict_batches_reexports_and_declarations("pub struct PhaseMetrics;").is_empty()
-    );
-    // 正例: predict_batches の fn 宣言。
-    assert!(
-        !scan_predict_batches_reexports_and_declarations(
-            "impl Sequential { pub fn predict_batches(&self) {} }"
-        )
-        .is_empty()
-    );
-    // 正例: get_phase_metrics の fn 宣言。
-    assert!(
-        !scan_predict_batches_reexports_and_declarations(
-            "pub fn get_phase_metrics() -> PhaseMetrics { todo!() }"
-        )
-        .is_empty()
-    );
-    // 正例: pub mod inference 宣言。
-    assert!(!scan_predict_batches_reexports_and_declarations("pub mod inference {}").is_empty());
-    // 負例: コメント中の出現。
-    assert!(
-        scan_predict_batches_reexports_and_declarations("// pub use ...::predict_batches;")
-            .is_empty()
-    );
-    // 負例: 無関係な型・関数名。
-    assert!(
-        scan_predict_batches_reexports_and_declarations(
-            "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
-        )
-        .is_empty()
-    );
-    // 負例: 非公開 `mod inference`（facade 内部実装。本イシューの内部
-    // 実装が使う `mod inference;` そのものは違反ではない）。
-    assert!(scan_predict_batches_reexports_and_declarations("mod inference;").is_empty());
+    for src in [
+        "// pub use x::PhaseMetrics;",
+        "let s = \"pub use x::get_phase_metrics;\";",
+        "use batch::PhaseMetrics;",
+        "pub(crate) use batch::{PhaseMetrics, get_phase_metrics};",
+        "impl PredictBatchInput for Tensor<f32> {}",
+        "// fn predict_batches() {}",
+    ] {
+        assert!(
+            predict_batches_exposures(&f("inference/mod.rs", src)).is_empty(),
+            "{src}"
+        );
+    }
 }
 
-/// workspace 全体（`crates/*/src/`）を再帰走査し、
-/// [`PREDICT_BATCHES_FN_NAMES`]（4 個）の `fn` 宣言が**どこにも存在しない
-/// こと**を固定する（`workspace_declares_npy_io_names_only_in_allowed_
-/// locations` と異なり、本イシューは facade 内部実装が `#[cfg(test)]`
-/// 限定のメソッド〈`Sequential::run_loader_inference` 等〉のみで、上記
-/// 4 名は一切使わない設計のため、期待集合は空）。
+/// workspace 全体（`crates/*/src/`）で `fn predict_batches` が `facade/src/compat/sequential.rs` に
+/// 1 件、`fn get_phase_metrics`・`fn reset_phase_metrics` が `facade/src/inference/batch.rs` に
+/// 各 1 件だけ宣言され、`fn current_phase_metrics` はどこにも無いこと（他クレートや別ファイルへの
+/// 同名宣言の混入＝迂回経路を拒否する。件数 0 の空振りも拒否）。
 #[test]
-fn workspace_declares_predict_batches_fn_names_nowhere() {
+fn workspace_declares_predict_batches_fn_names_only_in_approved_locations() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -21127,7 +21535,12 @@ fn workspace_declares_predict_batches_fn_names_nowhere() {
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in PREDICT_BATCHES_FN_NAMES {
+            for fn_name in [
+                "predict_batches",
+                "get_phase_metrics",
+                "reset_phase_metrics",
+                "current_phase_metrics",
+            ] {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -21141,19 +21554,518 @@ fn workspace_declares_predict_batches_fn_names_nowhere() {
         });
     }
 
-    assert!(
-        found.is_empty(),
-        "workspace 全体（crates/*/src/）に predict_batches／\
-         get_phase_metrics／current_phase_metrics／reset_phase_metrics\
-         のいずれかの `fn` 宣言が見つかった（期待集合は空。#2192 の内部\
-         実装はこれらの名前を一切使わない設計のため、見つかった場合は\
-         承認済みの実装か迂回経路の混入かを確認すること）: {found:?}"
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("facade/src/compat/sequential.rs::predict_batches", 1usize),
+        ("facade/src/inference/batch.rs::get_phase_metrics", 1),
+        ("facade/src/inference/batch.rs::reset_phase_metrics", 1),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "predict_batches／get_phase_metrics／reset_phase_metrics の `fn` 宣言が承認された所在と\
+         一致しない、または current_phase_metrics が宣言されている（イシュー #2582）"
     );
 }
 
+/// `pub mod inference` が公開され、その配下に `pub mod`（特に `batch`）が無いこと
+/// （`batch` は非公開のまま `inference/mod.rs` の `pub use` でフラットに公開する契約）。
+#[test]
+fn inference_is_public_and_batch_stays_private() {
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    assert!(
+        declared.contains("inference"),
+        "`pub mod inference` が公開モジュールとして検出されない: {declared:?}"
+    );
+    let nested: Vec<&String> = declared
+        .iter()
+        .filter(|m| m.starts_with("inference::"))
+        .collect();
+    assert!(
+        nested.is_empty(),
+        "`inference` 配下に pub mod が公開されている（batch は非公開のまま）: {nested:?}"
+    );
+}
+
+/// 公開面（`fandhe_ai::` のパスのみ）だけで 6 名と `Sequential::predict_batches` に到達でき、
+/// シグネチャが決定記録 §8.4 の形に一致することを型レベルで固定する実行時プローブ。
+#[test]
+fn predict_batches_public_surface_is_reachable_with_pinned_signatures() {
+    use fandhe_ai::data::{DataLoader, TensorDataset};
+    use fandhe_ai::inference::{
+        InferencePhase, PhaseMetrics, PhaseStat, PredictBatchInput, get_phase_metrics,
+        reset_phase_metrics,
+    };
+
+    type PredictBatchesFn = fn(
+        &fandhe_ai::compat::Sequential,
+        &DataLoader<TensorDataset<f32>>,
+    )
+        -> Result<Vec<fandhe_ai::Tensor<f32>>, fandhe_ai::AutodiffError>;
+    let _: PredictBatchesFn = fandhe_ai::compat::Sequential::predict_batches::<TensorDataset<f32>>;
+    let _: fn() -> PhaseMetrics = get_phase_metrics;
+    let _: fn() = reset_phase_metrics;
+    let _: fn(&PhaseMetrics, InferencePhase) -> PhaseStat = PhaseMetrics::phase;
+    let _: fn(&PhaseMetrics) -> PhaseStat = PhaseMetrics::total;
+    let _: fn(&PhaseMetrics) -> u64 = PhaseMetrics::batches;
+    let _: fn(&PhaseMetrics) -> u64 = PhaseMetrics::samples;
+    let _: fn(&PhaseMetrics, &PhaseMetrics) -> PhaseMetrics = PhaseMetrics::since;
+    let _: fn(&PhaseStat) -> u128 = PhaseStat::total_micros;
+    let _: fn(&PhaseStat) -> u64 = PhaseStat::calls;
+    let _: fn(&PhaseStat) -> std::time::Duration = PhaseStat::total;
+    fn assert_input<T: PredictBatchInput>() {}
+    assert_input::<fandhe_ai::Tensor<f32>>();
+    assert_input::<(fandhe_ai::Tensor<f32>, u8)>();
+    assert_input::<(fandhe_ai::Tensor<f32>, u8, u8)>();
+}
+
+// ---------------------------------------------------------------------
+// イシュー #2583（親 #2581）: 上記の最小の正ガードを「承認形だけを許す」全数インベントリへ
+// 仕上げる。対象は `inference/batch.rs` の型・トレイト・メソッド集合と crate 内専用項目の非公開、
+// および利用例 doctest の実在（決定記録 §11）。
+//
+// 検出範囲の限界（過剰保証しない）: 列挙名のトークン走査であり、マクロ生成・`use … as` 別名経由・
+// 別トレイト経由の間接実装は範囲外（`impl<T> PredictBatchInput for T` の一般形は承認 3 形と
+// 一致しないため検出される）。型レベルの到達性・シグネチャは
+// `predict_batches_public_surface_is_reachable_with_pinned_signatures` が補完する。
+// ---------------------------------------------------------------------
+
+/// `tokens` 中で `pat` と完全一致する連続トークン列の開始 index を全件返す。
+fn pb_find_seq(tokens: &[String], pat: &[&str]) -> Vec<usize> {
+    (0..tokens.len())
+        .filter(|&i| {
+            pat.iter()
+                .enumerate()
+                .all(|(k, p)| tokens.get(i + k).map(String::as_str) == Some(*p))
+        })
+        .collect()
+}
+
+/// `tokens[i]`（宣言の先頭トークン）の直前の属性列に `non_exhaustive` があるか。
+/// 直前の `;`・`{`・`}` までのトークンを属性領域として走査する（コメント・doc は除去済み）。
+fn pb_has_non_exhaustive_before(tokens: &[String], i: usize) -> bool {
+    tokens[..i]
+        .iter()
+        .rev()
+        .take_while(|t| !matches!(t.as_str(), ";" | "{" | "}"))
+        .any(|t| t == "non_exhaustive")
+}
+
+/// `pat`（`{` で終わる宣言ヘッダ）がちょうど 1 件あるとき、宣言先頭 index と本体トークン
+/// （`{` の直後〜対応する `}` の直前）を返す。0 件・複数件・閉じ欠落は `Err`。
+fn pb_single_block<'a>(
+    tokens: &'a [String],
+    pat: &[&str],
+    label: &str,
+) -> Result<(usize, &'a [String]), String> {
+    let starts = pb_find_seq(tokens, pat);
+    if starts.len() != 1 {
+        return Err(format!(
+            "{label}: `{}` の宣言がちょうど 1 件ではない（{} 件。検査対象の見失い・重複定義）",
+            pat.join(" "),
+            starts.len()
+        ));
+    }
+    let open = starts[0] + pat.len() - 1;
+    match matching_close(tokens, open, "{", "}") {
+        Some(close) => Ok((starts[0], &tokens[open + 1..close])),
+        None => Err(format!("{label}: 対応する閉じ括弧が見つからない")),
+    }
+}
+
+/// `InferencePhase` が `#[non_exhaustive]` 付きで承認 4 variant（本順）ちょうどであること
+/// （`batch.rs` のソース文字列を受け取り、違反を返す）。
+fn inference_phase_enum_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let (start, body) = match pb_single_block(
+        &tokens,
+        &["pub", "enum", "InferencePhase", "{"],
+        "InferencePhase",
+    ) {
+        Ok(v) => v,
+        Err(e) => return vec![e],
+    };
+    let mut v = Vec::new();
+    if !pb_has_non_exhaustive_before(&tokens, start) {
+        v.push("InferencePhase に #[non_exhaustive] が無い".to_string());
+    }
+    // `collect_top_level_enum_variant_idents` は深さ 1（`{` の内側）開始を前提とするため、
+    // 本体の末尾へ閉じ括弧を補って呼ぶ。
+    let mut with_close = body.to_vec();
+    with_close.push("}".to_string());
+    let variants = collect_top_level_enum_variant_idents(&with_close, 0);
+    let want = ["DataLoad", "TapeBuild", "Forward", "DeviceTransfer"].map(String::from);
+    if variants != want {
+        v.push(format!(
+            "InferencePhase の variant が承認形 4 種（本順）と不一致: {variants:?}"
+        ));
+    }
+    v
+}
+
+/// `impl [<…>] <trait_name> for <対象> {` の対象トークンを空白なしで連結して全件返す
+/// （`trait_name` は `for` の直前の識別子。パス修飾の有無は問わない）。
+fn pb_impl_targets(tokens: &[String], trait_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "impl" {
+            continue;
+        }
+        let Some(open) = tokens[i..].iter().position(|x| x == "{").map(|p| i + p) else {
+            continue;
+        };
+        let header = &tokens[i..open];
+        if let Some(f) = header.iter().position(|x| x == "for")
+            && f > 0
+            && header[f - 1] == trait_name
+        {
+            out.push(header[f + 1..].concat());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `PredictBatchInput` の形（sealed supertrait・メソッド 1 件・関連型／定数なし）と、
+/// `PredictBatchInput`／`Sealed` の impl 対象が承認 3 形ちょうどであること、
+/// `mod sealed` が非公開であること。
+fn predict_batch_input_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    match pb_single_block(
+        &tokens,
+        &[
+            "pub",
+            "trait",
+            "PredictBatchInput",
+            ":",
+            "sealed",
+            ":",
+            ":",
+            "Sealed",
+            "{",
+        ],
+        "PredictBatchInput",
+    ) {
+        Ok((_, body)) => {
+            let fns: Vec<&str> = body
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| *t == "fn")
+                .filter_map(|(k, _)| body.get(k + 1).map(String::as_str))
+                .collect();
+            if fns != ["inference_input"] {
+                v.push(format!("PredictBatchInput のメソッド集合が不一致: {fns:?}"));
+            }
+            if body.iter().any(|t| matches!(t.as_str(), "type" | "const")) {
+                v.push("PredictBatchInput に関連型／関連定数がある".to_string());
+            }
+        }
+        Err(e) => v.push(e),
+    }
+    let mut want: Vec<String> = ["Tensor<f32>", "(Tensor<f32>,B)", "(Tensor<f32>,B,C)"]
+        .map(String::from)
+        .to_vec();
+    want.sort();
+    for tr in ["PredictBatchInput", "Sealed"] {
+        let got = pb_impl_targets(&tokens, tr);
+        if got != want {
+            v.push(format!("{tr} の impl 対象が承認 3 形と不一致: {got:?}"));
+        }
+    }
+    if pb_find_seq(&tokens, &["mod", "sealed", "{"]).len() != 1 {
+        v.push("`mod sealed {` がちょうど 1 件ではない".to_string());
+    }
+    for i in pb_find_seq(&tokens, &["mod", "sealed"]) {
+        if i > 0 && tokens[i - 1] == "pub" {
+            v.push("`sealed` モジュールが公開されている".to_string());
+        }
+    }
+    v
+}
+
+/// `impl <type_name> { … }` ブロック群の深さ 0（ブロック直下）にある `pub fn` 名
+/// （`pub(crate)` 等は含めない）を昇順で返す。
+fn pb_pub_fn_names_in_inherent_impls(tokens: &[String], type_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in pb_find_seq(tokens, &["impl", type_name, "{"]) {
+        let open = i + 2;
+        let Some(close) = matching_close(tokens, open, "{", "}") else {
+            continue;
+        };
+        let mut depth = 0usize;
+        for j in open + 1..close {
+            match tokens[j].as_str() {
+                "{" => depth += 1,
+                "}" => depth = depth.saturating_sub(1),
+                "pub" if depth == 0 && tokens.get(j + 1).map(String::as_str) != Some("(") => {
+                    let k = skip_fn_declaration_qualifiers(tokens, j + 1);
+                    if tokens.get(k).map(String::as_str) == Some("fn")
+                        && let Some(n) = tokens.get(k + 1)
+                    {
+                        out.push(n.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `PhaseMetrics`／`PhaseStat` の公開メソッド集合・非公開フィールド・`#[non_exhaustive]`
+/// （`PhaseMetrics` のみ）が承認形のままであること。
+fn phase_metrics_surface_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    for (name, want, non_exhaustive) in [
+        (
+            "PhaseMetrics",
+            &["batches", "phase", "samples", "since", "total"][..],
+            true,
+        ),
+        ("PhaseStat", &["calls", "total", "total_micros"][..], false),
+    ] {
+        match pb_single_block(&tokens, &["pub", "struct", name, "{"], name) {
+            Ok((start, body)) => {
+                if body.iter().any(|t| t == "pub") {
+                    v.push(format!("{name} に pub フィールドがある"));
+                }
+                if non_exhaustive && !pb_has_non_exhaustive_before(&tokens, start) {
+                    v.push(format!("{name} に #[non_exhaustive] が無い"));
+                }
+            }
+            Err(e) => v.push(e),
+        }
+        let got = pb_pub_fn_names_in_inherent_impls(&tokens, name);
+        if got != want {
+            v.push(format!("{name} の pub fn 集合が承認形と不一致: {got:?}"));
+        }
+    }
+    v
+}
+
+/// crate 内専用項目が素の `pub`（`pub trait`／`pub struct`／`pub fn`／`pub use` での引き上げ
+/// を含む）で宣言・再エクスポートされていないこと（`pub(crate)` は許容）。
+fn predict_batches_internal_pub_violations(src: &str) -> Vec<String> {
+    const INTERNAL: [&str; 4] = [
+        "PhaseRecorder",
+        "NoopPhaseRecorder",
+        "TimingPhaseRecorder",
+        "merge_inference_phase_stats",
+    ];
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "pub" || tokens.get(i + 1).map(String::as_str) == Some("(") {
+            continue;
+        }
+        let is_use = tokens.get(i + 1).map(String::as_str) == Some("use");
+        let end = tokens[i..]
+            .iter()
+            .position(|x| x == ";" || (!is_use && x == "{"))
+            .map_or(tokens.len(), |p| i + p);
+        if let Some(n) = tokens[i + 1..end]
+            .iter()
+            .find(|x| INTERNAL.contains(&x.as_str()))
+        {
+            v.push(format!("crate 内専用項目 {n} が素の pub で現れる"));
+        }
+    }
+    v
+}
+
+/// 正ガード（#2583）: `InferencePhase` が承認 4 variant・`#[non_exhaustive]`。
+#[test]
+fn inference_phase_variants_are_exactly_approved_four() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/inference/batch.rs"));
+    let v = inference_phase_enum_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正ガード（#2583）: `PredictBatchInput` の形と impl 対象 3 形（決定記録 §10.2・§11.2）。
+#[test]
+fn predict_batch_input_impls_are_exactly_approved_three() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/inference/batch.rs"));
+    let v = predict_batch_input_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正ガード（#2583）: `PhaseMetrics`／`PhaseStat` の公開メソッド集合・フィールド非公開。
+#[test]
+fn phase_metrics_and_phase_stat_pub_methods_are_exactly_approved() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/inference/batch.rs"));
+    let v = phase_metrics_surface_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正ガード（#2583）: crate 内専用項目が facade の全ソースで素の `pub` にならない。
+#[test]
+fn inference_internal_items_stay_crate_private() {
+    let files = facade_src_files();
+    assert!(!files.is_empty(), "facade src を 1 件も読めない");
+    let mut v = Vec::new();
+    for (rel, content) in &files {
+        for e in predict_batches_internal_pub_violations(content) {
+            v.push(format!("{rel}: {e}"));
+        }
+    }
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 上記 4 走査関数の自己テスト（承認形は通り、各違反類型は検出される。コメント・文字列内は無視）。
+#[test]
+fn predict_batches_inventory_guards_detect_each_category() {
+    let enum_ok = "#[derive(Debug)] #[non_exhaustive] pub enum InferencePhase { DataLoad, TapeBuild, Forward, DeviceTransfer }";
+    assert!(inference_phase_enum_violations(enum_ok).is_empty());
+    for bad in [
+        "#[non_exhaustive] pub enum InferencePhase { DataLoad, TapeBuild, Forward }",
+        "#[non_exhaustive] pub enum InferencePhase { DataLoad, TapeBuild, Forward, DeviceTransfer, Extra }",
+        "#[non_exhaustive] pub enum InferencePhase { TapeBuild, DataLoad, Forward, DeviceTransfer }",
+        "pub enum InferencePhase { DataLoad, TapeBuild, Forward, DeviceTransfer }",
+        "// pub enum InferencePhase { DataLoad }",
+    ] {
+        assert!(!inference_phase_enum_violations(bad).is_empty(), "{bad}");
+    }
+
+    let input_ok = "mod sealed { pub trait Sealed {} }\n\
+        pub trait PredictBatchInput: sealed::Sealed { fn inference_input(&self) -> &Tensor<f32>; }\n\
+        impl sealed::Sealed for Tensor<f32> {}\n impl<B> sealed::Sealed for (Tensor<f32>, B) {}\n\
+        impl<B, C> sealed::Sealed for (Tensor<f32>, B, C) {}\n\
+        impl PredictBatchInput for Tensor<f32> { fn inference_input(&self) -> &Tensor<f32> { self } }\n\
+        impl<B> PredictBatchInput for (Tensor<f32>, B) { fn inference_input(&self) -> &Tensor<f32> { &self.0 } }\n\
+        impl<B, C> PredictBatchInput for (Tensor<f32>, B, C) { fn inference_input(&self) -> &Tensor<f32> { &self.0 } }\n";
+    assert!(predict_batch_input_violations(input_ok).is_empty());
+    for bad in [
+        input_ok.replace(": sealed::Sealed", ""),
+        input_ok.replace("mod sealed", "pub mod sealed"),
+        format!("{input_ok}impl PredictBatchInput for Vec<f32> {{}}\n"),
+        format!("{input_ok}impl sealed::Sealed for u8 {{}}\n"),
+        input_ok.replace(
+            "fn inference_input(&self) -> &Tensor<f32>;",
+            "fn inference_input(&self) -> &Tensor<f32>; fn extra(&self);",
+        ),
+        input_ok.replace(
+            "fn inference_input(&self) -> &Tensor<f32>;",
+            "type Out; fn inference_input(&self) -> &Tensor<f32>;",
+        ),
+        input_ok.replace(
+            "impl<B, C> PredictBatchInput for (Tensor<f32>, B, C)",
+            "impl<B, C> PredictBatchInput for (Tensor<f32>, B, C, u8)",
+        ),
+    ] {
+        assert!(!predict_batch_input_violations(&bad).is_empty(), "{bad}");
+    }
+    let benign = format!(
+        "// impl PredictBatchInput for Vec<f32> {{}}\n{input_ok}fn f() {{ let s = \"impl PredictBatchInput for u8 {{}}\"; }}"
+    );
+    assert!(predict_batch_input_violations(&benign).is_empty());
+
+    let surf_ok = "#[non_exhaustive] pub struct PhaseMetrics { a: u8 }\n\
+        pub struct PhaseStat { t: u8 }\n\
+        impl PhaseMetrics { pub fn phase(&self) {} pub fn total(&self) {} pub fn batches(&self) {} pub fn samples(&self) {} pub fn since(&self) {} fn merge(&mut self) {} pub(crate) fn x(&self) {} }\n\
+        impl PhaseStat { pub fn total_micros(&self) {} pub fn calls(&self) {} pub fn total(&self) {} fn add(&mut self) {} }\n";
+    assert!(phase_metrics_surface_violations(surf_ok).is_empty());
+    for bad in [
+        surf_ok.replace("fn merge(&mut self)", "pub fn merge(&mut self)"),
+        surf_ok.replace("fn add(&mut self)", "pub const fn add(&mut self)"),
+        surf_ok.replace("{ a: u8 }", "{ pub a: u8 }"),
+        surf_ok.replace("#[non_exhaustive] ", ""),
+        surf_ok.replace("pub fn since(&self) {}", ""),
+        format!("{surf_ok}impl PhaseStat {{ pub fn extra(&self) {{}} }}\n"),
+    ] {
+        assert!(!phase_metrics_surface_violations(&bad).is_empty(), "{bad}");
+    }
+
+    for bad in [
+        "pub trait PhaseRecorder {}",
+        "pub struct NoopPhaseRecorder;",
+        "pub fn merge_inference_phase_stats() {}",
+        "pub use recorded::{PhaseMetrics, TimingPhaseRecorder};",
+    ] {
+        assert!(
+            !predict_batches_internal_pub_violations(bad).is_empty(),
+            "{bad}"
+        );
+    }
+    for ok in [
+        "pub(crate) trait PhaseRecorder {}",
+        "pub(crate) use recorded::{TimingPhaseRecorder, merge_inference_phase_stats};",
+        "// pub trait PhaseRecorder {}",
+        "pub use recorded::{PhaseMetrics, PhaseStat};",
+    ] {
+        assert!(
+            predict_batches_internal_pub_violations(ok).is_empty(),
+            "{ok}"
+        );
+    }
+}
+
+/// 正の doctest プローブ（#2583。EMA の `ema_usage_doctests_are_present_and_compiled` と同型）:
+/// `predict_batches` の利用例が公開 doc 3 か所に実在し、実際にコンパイル・実行される形
+/// （`ignore` 等の指定なし）であること。検出器自体の負例は
+/// `param_groups_usage_doctests_are_present_and_compiled` が同じ [`doctest_probe_violations`]
+/// を踏んでいるため、ここでは空入力と隠し行の負例だけを置く。
+#[test]
+fn predict_batches_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let inference = read_to_string_or_panic(&root.join("src/inference/mod.rs"));
+    let sequential = read_to_string_or_panic(&root.join("src/compat/sequential.rs"));
+    let batch = read_to_string_or_panic(&root.join("src/inference/batch.rs"));
+
+    let mut v = doctest_probe_violations(
+        "inference/mod.rs モジュール doc",
+        &inner_doc_lines(&inference),
+        &[
+            "use fandhe_ai::inference::",
+            "get_phase_metrics",
+            "reset_phase_metrics",
+            "predict_batches",
+            "since",
+        ],
+    );
+    v.extend(doctest_probe_violations(
+        "Sequential::predict_batches の doc",
+        &doc_lines_above_fn(&sequential, "pub fn predict_batches"),
+        &[
+            "use fandhe_ai::compat::Sequential",
+            "DataLoader::new",
+            "predict_batches",
+        ],
+    ));
+    v.extend(doctest_probe_violations(
+        "PhaseMetrics の doc",
+        &doc_lines_above_fn(&batch, "pub struct PhaseMetrics"),
+        &[
+            "use fandhe_ai::inference::",
+            "PhaseMetrics",
+            "since",
+            "InferencePhase::",
+        ],
+    ));
+    assert!(v.is_empty(), "{v:?}");
+
+    assert!(!doctest_probe_violations("t", &[], &["predict_batches"]).is_empty());
+    let hidden = ["```", "# predict_batches", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &hidden, &["predict_batches"]).is_empty());
+}
+/// #2678 で承認形どおり facade `Tape` に公開した 5 メソッド
+/// （`bincount`・`bincount_weighted`・`jacobian`・`hessian`・`backward_detect_anomaly`）。
+/// 各グループの否定ガード走査はこれらの `fn` 宣言だけを除外し、薄い委譲・件数・
+/// 受け手は [`facade_tape_phase4_methods_are_thin_delegations`] が固定する。
+const FACADE_TAPE_APPROVED_FNS: [&str; 5] = [
+    "bincount",
+    "bincount_weighted",
+    "jacobian",
+    "hessian",
+    "backward_detect_anomaly",
+];
+
 // =====================================================================
 // FftOpsHoldDoctestGuard（イシュー #2631・#2632・#2633・親 #2630・ルート #2499 Phase 4）:
-// `PredictBatchesHoldDoctestGuard`（#2192）系のテストを鏡写しにする。
+// `PredictBatchesHoldDoctestGuard`（#2192。#2582 で削除済み）系のテストを鏡写しにする。
 // 実装は内部クレート（`fandhe_ai_autodiff::fft_ops::{rfft, irfft, fft, ifft, stft,
 // istft}`・`fandhe_ai_tensor_core::{FftNorm, StftPadMode, fft}`）に閉じ、facade
 // 公開形（`Var::rfft`／`Var::irfft`／`Var::stft`／`Var::istft` と `FftNorm`・
@@ -21164,7 +22076,7 @@ fn workspace_declares_predict_batches_fn_names_nowhere() {
 /// `crates/facade/src/lib.rs` の `FftOpsHoldDoctestGuard` doc 内の唯一の
 /// doctest ブロックが glob import するネスト `pub mod` 集合と、`src/lib.rs`
 /// の実際の `pub mod` 宣言集合が一致することを固定する
-/// （`predict_batches_hold_doctest_globs_all_pub_modules` と同型）。
+/// （#2582 で削除済みの旧 `predict_batches_hold_doctest_globs_all_pub_modules` と同型）。
 #[test]
 fn fft_ops_hold_doctest_globs_all_pub_modules() {
     let content = read_to_string_or_panic(&lib_rs_path());
@@ -21188,7 +22100,7 @@ fn fft_ops_hold_doctest_globs_all_pub_modules() {
 
 /// doctest ブロックの glob 以外の本文が固定文言 [`FFT_OPS_HOLD_PROBE_BODY`]
 /// と 1 行たりとも違わず一致することを固定する（正のプローブの削除・弱体化・
-/// 隠し行の混入を機械的に拒否する。`predict_batches_hold_doctest_probe_body_
+/// 隠し行の混入を機械的に拒否する。#2582 で削除済みの旧 `predict_batches_hold_doctest_probe_body_
 /// matches_fixed_contract` と同型）。
 #[test]
 fn fft_ops_hold_doctest_probe_body_matches_fixed_contract() {
@@ -21212,10 +22124,6 @@ fn fft_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const FFT_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_fft_hold_probe {\n\
-\x20\x20\x20\x20pub struct FftNorm;\n\
-\x20\x20\x20\x20pub struct StftOptions;\n\
-\x20\x20\x20\x20pub struct IstftOptions;\n\
-\x20\x20\x20\x20pub struct StftPadMode;\n\
 \x20\x20\x20\x20pub mod fft_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn rfft() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn irfft() {}\n\
@@ -21241,27 +22149,6 @@ trait __FandheFftHoldProbe {\n\
 \x20\x20\x20\x20fn istft(&self) -> __FandheFftHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheFftHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn rfft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn irfft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn fft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn ifft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn stft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn istft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheFftHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn rfft(&self) -> __FandheFftHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
@@ -21283,7 +22170,7 @@ impl __FandheFftHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: FftNorm, _: StftOptions, _: IstftOptions, _: StftPadMode) {\n\
+fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20fft_ops::rfft();\n\
@@ -21295,13 +22182,7 @@ fn __probe_free_fns(_: FftNorm, _: StftOptions, _: IstftOptions, _: StftPadMode)
 \x20\x20\x20\x20fft::__mark();\n\
 }\n\
 \n\
-fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::rfft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::irfft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::fft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::ifft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::stft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::istft(v);\n\
+fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::rfft(tape);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::irfft(tape);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::fft(tape);\n\
@@ -21315,19 +22196,11 @@ fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 const FFT_OPS_FN_NAMES: [&str; 6] = ["rfft", "irfft", "fft", "ifft", "stft", "istft"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-/// `StftOptions`／`IstftOptions`（autodiff）・`StftPadMode`／`StftParams`／
-/// `IstftParams`（tensor-core。イシュー #2633）を含む。
-const FFT_OPS_IDENTS: [&str; 9] = [
-    "fft_ops",
-    "FftNorm",
-    "FftError",
-    "fft",
-    "StftOptions",
-    "IstftOptions",
-    "StftPadMode",
-    "StftParams",
-    "IstftParams",
-];
+/// `StftParams`／`IstftParams`（tensor-core。イシュー #2633）を含む。承認済みの
+/// `FftNorm`・`StftPadMode`・`StftOptions`・`IstftOptions`（#2678）は本表から外し、
+/// 承認形の 1 文 1 行だけを許す正ガード（`facade_reexports_phase4_ops_types_only_in_approved_shape`）
+/// が別途固定する（モジュール経由の経路は `fft_ops`／`fft` が拒否する）。
+const FFT_OPS_IDENTS: [&str; 5] = ["fft_ops", "FftError", "fft", "StftParams", "IstftParams"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`FFT_OPS_IDENTS`] のうち型として存在するもの）。
@@ -21437,11 +22310,11 @@ fn facade_does_not_reexport_or_declare_fft_ops_detects_each_category() {
     assert!(offense("pub use fandhe_ai_autodiff::fft_ops;"));
     assert!(offense("pub use fandhe_ai_autodiff::fft_ops as spectral;"));
     // 正例: `FftNorm` の再エクスポート（単一行・group・別名）。
-    assert!(offense("pub use fandhe_ai_tensor_core::FftNorm;"));
-    assert!(offense(
+    assert!(!offense("pub use fandhe_ai_tensor_core::FftNorm;")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Device,\n    FftNorm,\n};"
-    ));
-    assert!(offense("pub use fandhe_ai_tensor_core::FftNorm as Norm;"));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("pub use fandhe_ai_tensor_core::FftNorm as Norm;")); // #2678: 承認済み（承認形は正ガードが固定）
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
         "pub use fandhe_ai_autodiff::fft_ops::{rfft, irfft};"
@@ -21459,7 +22332,7 @@ fn facade_does_not_reexport_or_declare_fft_ops_detects_each_category() {
     assert!(offense(
         "pub use fandhe_ai_autodiff::fft_ops::{IstftOptions, StftOptions};"
     ));
-    assert!(offense("pub use fandhe_ai_tensor_core::StftPadMode;"));
+    assert!(!offense("pub use fandhe_ai_tensor_core::StftPadMode;")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense(
         "pub use fandhe_ai_tensor_core::fft::StftParams as P;"
     ));
@@ -21534,7 +22407,7 @@ fn workspace_declares_fft_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = [
+    let mut expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/fft_ops.rs::rfft".to_string(), 1usize),
         ("autodiff/src/fft_ops.rs::irfft".to_string(), 1usize),
         ("autodiff/src/fft_ops.rs::fft".to_string(), 1usize),
@@ -21544,6 +22417,10 @@ fn workspace_declares_fft_ops_fn_names_only_in_allowed_locations() {
     ]
     .into_iter()
     .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["rfft", "irfft", "fft", "ifft", "stft", "istft"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の rfft／irfft／fft／ifft／stft／istft の `fn` 宣言が承認済みの\
@@ -21637,36 +22514,6 @@ trait __FandheTrigOpsHoldProbe {\n\
 \x20\x20\x20\x20fn atan2(&self) -> __FandheTrigOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheTrigOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn atan(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn asin(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn acos(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn sinh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cosh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn asinh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn acosh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn atanh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn atan2(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheTrigOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn atan(&self) -> __FandheTrigOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
@@ -21711,16 +22558,7 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20trig_ops::atan2();\n\
 }\n\
 \n\
-fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asin(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acos(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::sinh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::cosh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asinh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acosh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atanh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan2(v);\n\
+fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::atan(tape);\n\
 \x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::asin(tape);\n\
 \x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::acos(tape);\n\
@@ -21891,10 +22729,16 @@ fn workspace_declares_trig_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = TRIG_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = TRIG_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/trig_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "atan", "asin", "acos", "sinh", "cosh", "asinh", "acosh", "atanh", "atan2",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の atan／asin／acos／sinh／cosh／asinh／acosh／\
@@ -21979,21 +22823,6 @@ trait __FandheNonfiniteOpsHoldProbe {\n\
 \x20\x20\x20\x20fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheNonfiniteOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheNonfiniteOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
@@ -22049,15 +22878,11 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20tb: &fandhe_ai::Tensor<bool>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isnan(v);\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isinf(v);\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isfinite(v);\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::nan_to_num(v);\n\
 \x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isnan(tape);\n\
 \x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isinf(tape);\n\
 \x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isfinite(tape);\n\
@@ -22230,10 +23055,14 @@ fn workspace_declares_nonfinite_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = NONFINITE_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = NONFINITE_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/nonfinite_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["isnan", "isinf", "isfinite", "nan_to_num"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の isnan／isinf／isfinite／nan_to_num の `fn` 宣言が\
@@ -22319,18 +23148,6 @@ trait __FandheCumulativeOpsHoldProbe {\n\
 \x20\x20\x20\x20fn logcumsumexp(&self) -> __FandheCumulativeOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheCumulativeOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn cummax(&self) -> __FandheCumulativeOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cummin(&self) -> __FandheCumulativeOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn logcumsumexp(&self) -> __FandheCumulativeOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheCumulativeOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn cummax(&self) -> __FandheCumulativeOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
@@ -22365,13 +23182,10 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::cummax(v);\n\
-\x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::cummin(v);\n\
-\x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::logcumsumexp(v);\n\
 \x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::cummax(tape);\n\
 \x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::cummin(tape);\n\
 \x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::logcumsumexp(tape);\n\
@@ -22544,10 +23358,14 @@ fn workspace_declares_cumulative_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = CUMULATIVE_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = CUMULATIVE_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/cumulative_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["cummax", "cummin", "logcumsumexp"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の cummax／cummin／logcumsumexp の `fn` 宣言が\
@@ -22616,7 +23434,6 @@ fn stat_reduce_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const STAT_REDUCE_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_stat_reduce_hold_probe {\n\
-\x20\x20\x20\x20pub struct QuantileInterpolation;\n\
 \x20\x20\x20\x20pub struct StatReduceError;\n\
 \x20\x20\x20\x20pub mod stat_reduce_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn median() {}\n\
@@ -22641,27 +23458,6 @@ trait __FandheStatReduceOpsHoldProbe {\n\
 \x20\x20\x20\x20fn quantile(&self) -> __FandheStatReduceOpsHoldMarker;\n\
 \x20\x20\x20\x20fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker;\n\
 \x20\x20\x20\x20fn nansum(&self) -> __FandheStatReduceOpsHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheStatReduceOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn median(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn median_with_indices(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn kthvalue(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn quantile(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn nansum(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 }\n\
 \n\
 impl __FandheStatReduceOpsHoldProbe for fandhe_ai::Tape {\n\
@@ -22706,7 +23502,7 @@ impl __FandheStatReduceOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: QuantileInterpolation, _: StatReduceError) {\n\
+fn __probe_free_fns(_: StatReduceError) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20stat_reduce_ops::median();\n\
@@ -22719,16 +23515,10 @@ fn __probe_free_fns(_: QuantileInterpolation, _: StatReduceError) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median_with_indices(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::kthvalue(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::quantile(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nanmean(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nansum(v);\n\
 \x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median(tape);\n\
 \x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median_with_indices(tape);\n\
 \x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::kthvalue(tape);\n\
@@ -22753,12 +23543,7 @@ const STAT_REDUCE_OPS_FN_NAMES: [&str; 6] = [
 ];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const STAT_REDUCE_OPS_IDENTS: [&str; 4] = [
-    "stat_reduce_ops",
-    "stat_reduce",
-    "QuantileInterpolation",
-    "StatReduceError",
-];
+const STAT_REDUCE_OPS_IDENTS: [&str; 3] = ["stat_reduce_ops", "stat_reduce", "StatReduceError"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`STAT_REDUCE_OPS_IDENTS`] のうち型として存在するもの）。
@@ -22865,15 +23650,15 @@ fn facade_does_not_reexport_or_declare_stat_reduce_ops_detects_each_category() {
     ));
     assert!(offense("pub use fandhe_ai_tensor_core::stat_reduce;"));
     // 正例: 型の再エクスポート（単一行・group・別名）。
-    assert!(offense(
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::QuantileInterpolation;"
-    ));
-    assert!(offense(
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Device,\n    QuantileInterpolation,\n};"
-    ));
-    assert!(offense(
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::QuantileInterpolation as Interp;"
-    ));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("pub use fandhe_ai_tensor_core::StatReduceError;"));
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
@@ -22964,6 +23749,17 @@ fn workspace_declares_stat_reduce_ops_fn_names_only_in_allowed_locations() {
     // 無関係な既存 `fn median`（本イシューではリネームしない）。
     expected.insert("backend-cpu/src/gemm_blis/mod.rs::median".to_string(), 5);
     expected.insert("guardrail/src/report.rs::median".to_string(), 1);
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "median",
+        "median_with_indices",
+        "kthvalue",
+        "quantile",
+        "nanmean",
+        "nansum",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の median／median_with_indices／kthvalue／quantile／\
@@ -23143,14 +23939,9 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20ti: &fandhe_ai::Tensor<i32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::histc(v);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount(v);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount_weighted(v);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::searchsorted(v);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bucketize(v);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::histc(tape);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount(tape);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount_weighted(tape);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::searchsorted(tape);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bucketize(tape);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::histc(tf);\n\
@@ -23239,6 +24030,11 @@ fn scan_binning_ops_reexports_and_declarations(content: &str) -> Vec<String> {
     }
 
     for fn_name in BINNING_OPS_FN_NAMES {
+        // #2678: facade `Tape` の承認済みメソッド（`lib.rs` にちょうど 1 件・薄い委譲）は
+        // 正ガード（`facade_tape_phase4_methods_are_thin_delegations`）が固定するため除外する。
+        if FACADE_TAPE_APPROVED_FNS.contains(&fn_name) {
+            continue;
+        }
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -23303,8 +24099,8 @@ fn facade_does_not_reexport_or_declare_binning_ops_detects_each_category() {
     // 正例: fn 宣言・pub mod。
     assert!(offense("pub fn histc() {}"));
     assert!(offense("impl Var { pub fn histc(&self) {} }"));
-    assert!(offense("impl Tape { pub fn bincount(&self) {} }"));
-    assert!(offense("impl Tape { pub fn bincount_weighted(&self) {} }"));
+    assert!(!offense("impl Tape { pub fn bincount(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("impl Tape { pub fn bincount_weighted(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("impl Var { pub fn searchsorted(&self) {} }"));
     assert!(offense("impl Var { pub fn bucketize(&self) {} }"));
     assert!(offense("pub mod binning_ops {}"));
@@ -23366,10 +24162,18 @@ fn workspace_declares_binning_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = BINNING_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = BINNING_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/binning_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["histc", "searchsorted", "bucketize"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
+    // #2678: 承認形の facade `Tape` メソッド（`facade/src/lib.rs` に各 1 件）。
+    for n in ["bincount", "bincount_weighted"] {
+        expected.insert(format!("facade/src/lib.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の histc／bincount／bincount_weighted／searchsorted／\
@@ -23468,27 +24272,6 @@ trait __FandheLowPrecisionHoldProbe {\n\
 \x20\x20\x20\x20fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheLowPrecisionHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheLowPrecisionHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
@@ -23527,13 +24310,7 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20tanh_low_precision();\n\
 }\n\
 \n\
-fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::matmul_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::add_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::mul_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::relu_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::exp_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::tanh_low_precision(v);\n\
+fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::matmul_low_precision(tape);\n\
 \x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::add_low_precision(tape);\n\
 \x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::mul_low_precision(tape);\n\
@@ -23717,6 +24494,16 @@ fn workspace_declares_low_precision_ops_fn_names_only_in_allowed_locations() {
         expected.insert(format!("autodiff/src/low_precision_ops.rs::{fn_name}"), 1);
     }
     expected.insert("autodiff/src/var.rs::matmul_low_precision".to_string(), 1);
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "add_low_precision",
+        "mul_low_precision",
+        "relu_low_precision",
+        "exp_low_precision",
+        "tanh_low_precision",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の低精度 forward 入口の `fn` 宣言が承認済みの\
@@ -24786,9 +25573,10 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 11] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 12] = [
     "compat",
     "data",
+    "inference",
     "interop",
     "interop::onnx",
     "interop::safetensors",
@@ -24816,6 +25604,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use self::local::*;
     pub use fandhe_ai::compat::*;
     pub use fandhe_ai::data::*;
+    pub use fandhe_ai::inference::*;
     pub use fandhe_ai::interop::onnx::*;
     pub use fandhe_ai::interop::safetensors::*;
     pub use fandhe_ai::interop::*;
@@ -24906,7 +25695,6 @@ fn shape_view_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const SHAPE_VIEW_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_shape_view_hold_probe {\n\
-\x20\x20\x20\x20pub struct MeshgridIndexing;\n\
 \x20\x20\x20\x20pub mod shape_view_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn unbind() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn movedim() {}\n\
@@ -24929,30 +25717,6 @@ trait __FandheShapeViewOpsHoldProbe {\n\
 \x20\x20\x20\x20fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker;\n\
 \x20\x20\x20\x20fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker;\n\
 \x20\x20\x20\x20fn rot90(&self) -> __FandheShapeViewOpsHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheShapeViewOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn unbind(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn movedim(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn swapaxes(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensor_split(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn rot90(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 }\n\
 \n\
 impl __FandheShapeViewOpsHoldProbe for fandhe_ai::Tape {\n\
@@ -25003,7 +25767,7 @@ impl __FandheShapeViewOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: MeshgridIndexing) {\n\
+fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20shape_view_ops::unbind();\n\
@@ -25016,17 +25780,10 @@ fn __probe_free_fns(_: MeshgridIndexing) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::unbind(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::movedim(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::swapaxes(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split_indices(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::meshgrid(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::rot90(v);\n\
 \x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::unbind(tape);\n\
 \x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::movedim(tape);\n\
 \x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::swapaxes(tape);\n\
@@ -25054,7 +25811,7 @@ const SHAPE_VIEW_OPS_FN_NAMES: [&str; 7] = [
 ];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const SHAPE_VIEW_OPS_IDENTS: [&str; 2] = ["shape_view_ops", "MeshgridIndexing"];
+const SHAPE_VIEW_OPS_IDENTS: [&str; 1] = ["shape_view_ops"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`SHAPE_VIEW_OPS_IDENTS`] のうち型として存在するもの）。
@@ -25246,10 +26003,22 @@ fn workspace_declares_shape_view_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = SHAPE_VIEW_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = SHAPE_VIEW_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/shape_view_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "unbind",
+        "tensor_split",
+        "tensor_split_indices",
+        "movedim",
+        "swapaxes",
+        "rot90",
+        "meshgrid",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の unbind／movedim／swapaxes／tensor_split／\
@@ -25316,7 +26085,6 @@ fn indexed_update_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const INDEXED_UPDATE_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_indexed_update_hold_probe {\n\
-\x20\x20\x20\x20pub struct ScatterReduceMode;\n\
 \x20\x20\x20\x20pub mod indexed_update_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn scatter_reduce() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn index_add() {}\n\
@@ -25336,21 +26104,6 @@ trait __FandheIndexedUpdateOpsHoldProbe {\n\
 \x20\x20\x20\x20fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker;\n\
 \x20\x20\x20\x20fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker;\n\
 \x20\x20\x20\x20fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn scatter_reduce(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 }\n\
 \n\
 impl __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Tape {\n\
@@ -25383,7 +26136,7 @@ impl __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: ScatterReduceMode) {\n\
+fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20indexed_update_ops::scatter_reduce();\n\
@@ -25394,14 +26147,10 @@ fn __probe_free_fns(_: ScatterReduceMode) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::scatter_reduce(v);\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_add(v);\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_copy(v);\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::masked_scatter(v);\n\
 \x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::scatter_reduce(tape);\n\
 \x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_add(tape);\n\
 \x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_copy(tape);\n\
@@ -25421,8 +26170,7 @@ const INDEXED_UPDATE_OPS_FN_NAMES: [&str; 4] = [
 ];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const INDEXED_UPDATE_OPS_IDENTS: [&str; 3] =
-    ["indexed_update_ops", "indexed_update", "ScatterReduceMode"];
+const INDEXED_UPDATE_OPS_IDENTS: [&str; 2] = ["indexed_update_ops", "indexed_update"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`INDEXED_UPDATE_OPS_IDENTS`] のうち型として存在するもの）。
@@ -25529,13 +26277,15 @@ fn facade_does_not_reexport_or_declare_indexed_update_ops_detects_each_category(
     ));
     assert!(offense("pub use fandhe_ai_tensor_core::indexed_update;"));
     // 正例: 型の再エクスポート（単一行・group・別名・複数行・tensor-core ルート）。
-    assert!(offense("pub use fandhe_ai_tensor_core::ScatterReduceMode;"));
-    assert!(offense(
+    assert!(!offense(
+        "pub use fandhe_ai_tensor_core::ScatterReduceMode;"
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Tensor,\n    ScatterReduceMode,\n};"
-    ));
-    assert!(offense(
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::ScatterReduceMode as Mode;"
-    ));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
         "pub use fandhe_ai_autodiff::indexed_update_ops::{index_add, index_copy};"
@@ -25619,10 +26369,19 @@ fn workspace_declares_indexed_update_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = INDEXED_UPDATE_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = INDEXED_UPDATE_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/indexed_update_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "scatter_reduce",
+        "index_add",
+        "index_copy",
+        "masked_scatter",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の scatter_reduce／index_add／index_copy／\
@@ -25709,24 +26468,6 @@ trait __FandheTensorProductOpsHoldProbe {\n\
 \x20\x20\x20\x20fn cross(&self) -> __FandheTensorProductOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheTensorProductOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn kron(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensordot(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cdist(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cross(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheTensorProductOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn kron(&self) -> __FandheTensorProductOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
@@ -25774,15 +26515,10 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::kron(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot_axes(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cdist(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cross(v);\n\
 \x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::kron(tape);\n\
 \x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot(tape);\n\
 \x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot_axes(tape);\n\
@@ -25966,10 +26702,14 @@ fn workspace_declares_tensor_product_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = TENSOR_PRODUCT_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = TENSOR_PRODUCT_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/tensor_product_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["kron", "tensordot", "tensordot_axes", "cdist", "cross"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の kron／tensordot／tensordot_axes／cdist／cross の\
@@ -26037,7 +26777,6 @@ fn pad_modes_hold_doctest_probe_body_matches_fixed_contract() {
 const PAD_MODES_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_pad_modes_hold_probe {\n\
-\x20\x20\x20\x20pub struct PadMode;\n\
 \x20\x20\x20\x20pub struct PadModeError;\n\
 \x20\x20\x20\x20pub mod pad_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn pad_with_mode() {}\n\
@@ -26054,12 +26793,6 @@ trait __FandhePadModesHoldProbe {\n\
 \x20\x20\x20\x20fn pad_with_mode(&self) -> __FandhePadModesHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandhePadModesHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePadModesHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandhePadModesHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandhePadModesHoldMarker\n\
@@ -26072,7 +26805,7 @@ impl __FandhePadModesHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: PadMode, _: PadModeError) {\n\
+fn __probe_free_fns(_: PadModeError) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20pad_ops::pad_with_mode();\n\
@@ -26080,11 +26813,10 @@ fn __probe_free_fns(_: PadMode, _: PadModeError) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandhePadModesHoldMarker = fandhe_ai::Var::pad_with_mode(v);\n\
 \x20\x20\x20\x20let _: __FandhePadModesHoldMarker = fandhe_ai::Tape::pad_with_mode(tape);\n\
 \x20\x20\x20\x20let _: __FandhePadModesHoldMarker = fandhe_ai::Tensor::<f32>::pad_with_mode(tf);\n\
 }";
@@ -26094,7 +26826,7 @@ const PAD_MODES_FN_NAMES: [&str; 1] = ["pad_with_mode"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
 /// `StftPadMode`（既存の STFT 用 enum）・`Var::pad` は別トークンで対象外。
-const PAD_MODES_IDENTS: [&str; 4] = ["pad_ops", "pad_modes", "PadMode", "PadModeError"];
+const PAD_MODES_IDENTS: [&str; 3] = ["pad_ops", "pad_modes", "PadModeError"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`PAD_MODES_IDENTS`] のうち型として存在するもの）。
@@ -26197,12 +26929,12 @@ fn facade_does_not_reexport_or_declare_pad_modes_detects_each_category() {
     assert!(offense("pub use fandhe_ai_autodiff::pad_ops as padding;"));
     assert!(offense("pub use fandhe_ai_tensor_core::pad_modes;"));
     // 正例: 型の再エクスポート（単一行・group・別名・複数行・tensor-core ルート）。
-    assert!(offense("pub use fandhe_ai_tensor_core::PadMode;"));
+    assert!(!offense("pub use fandhe_ai_tensor_core::PadMode;")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("pub use fandhe_ai_tensor_core::PadModeError;"));
-    assert!(offense(
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Tensor,\n    PadMode,\n};"
-    ));
-    assert!(offense("pub use fandhe_ai_tensor_core::PadMode as Mode;"));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("pub use fandhe_ai_tensor_core::PadMode as Mode;")); // #2678: 承認済み（承認形は正ガードが固定）
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
         "pub use fandhe_ai_autodiff::pad_ops::pad_with_mode;"
@@ -26285,10 +27017,12 @@ fn workspace_declares_pad_modes_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = PAD_MODES_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = PAD_MODES_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/pad_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    expected.insert("autodiff/src/var.rs::pad_with_mode".to_string(), 1usize);
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の pad_with_mode の `fn` 宣言が承認済みの置き場所\
@@ -27938,13 +28672,15 @@ fn workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// PackedSequenceHoldDoctestGuard（イシュー #2647・親 #2625・ルート #2499 Phase 4）:
-// `LrnWeightReparamHoldDoctestGuard`（#2646）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::nn::packed_sequence`）に閉じ、facade 公開形（推奨は `fandhe_ai::nn::rnn` への
-// 純再エクスポート）は未承認（承認依頼は #2677。公開は承認後の #2678・#2679）。
-// 検出はトークン完全一致のみで行い、`forward_packed_host` など部分一致する別トークンは違反としない
-// （自己テストで固定）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、
-// doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+// PackedSequenceHoldDoctestGuard（イシュー #2647・親 #2625・ルート #2499 Phase 4。公開は #2679）:
+// 承認形（`fandhe_ai::nn::rnn` への型 5・自由関数 8 の純再エクスポート。
+// `docs/autodiff-packed-sequence-decision.md` §7。承認はルート #2499 のコメント）の公開に伴い、型名・自由関数名の
+// 衝突プローブと識別子検査を削除し、**未承認の経路**（モジュール `packed_sequence` の公開・`Var`／`Tape` への
+// 委譲メソッド・`Rnn` 等への `forward_packed`）だけを固定する縮小ガードにした。承認形は
+// `facade_exposes_packed_sequence_only_in_approved_shape` が過不足なく固定する。検出はトークン完全一致のみで行い、
+// `forward_packed_host` など部分一致する別トークンは違反としない（自己テストで固定）。検出範囲は本ソース走査が見る
+// トークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、doctest プローブが名前解決で触れる位置に限り、
+// マクロ生成や別名経由のメソッドまでは保証しない。
 // =====================================================================
 
 /// `PackedSequenceHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
@@ -27993,19 +28729,6 @@ fn packed_sequence_hold_doctest_probe_body_matches_fixed_contract() {
 const PACKED_SEQUENCE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_packed_sequence_hold_probe {\n\
-\x20\x20\x20\x20pub struct PackedSequence;\n\
-\x20\x20\x20\x20pub struct PackedRnnSeqOutput;\n\
-\x20\x20\x20\x20pub struct PackedLstmSeqOutput;\n\
-\x20\x20\x20\x20pub struct StackedPackedRnnSeqOutput;\n\
-\x20\x20\x20\x20pub struct StackedPackedLstmSeqOutput;\n\
-\x20\x20\x20\x20pub fn pack_padded_sequence() {}\n\
-\x20\x20\x20\x20pub fn pad_packed_sequence() {}\n\
-\x20\x20\x20\x20pub fn rnn_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn gru_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn lstm_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn stacked_rnn_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn stacked_gru_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn stacked_lstm_forward_packed() {}\n\
 \x20\x20\x20\x20pub mod packed_sequence {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
 \x20\x20\x20\x20}\n\
@@ -28116,23 +28839,9 @@ impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::StackedGru {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(\n\
-\x20\x20\x20\x20_0: PackedSequence,\n\
-\x20\x20\x20\x20_1: PackedRnnSeqOutput,\n\
-\x20\x20\x20\x20_2: PackedLstmSeqOutput,\n\
-\x20\x20\x20\x20_3: StackedPackedRnnSeqOutput,\n\
-\x20\x20\x20\x20_4: StackedPackedLstmSeqOutput,\n\
-) {\n\
-\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり\n\
+fn __probe_module() {\n\
+\x20\x20\x20\x20// 修飾なし参照（`use fandhe_ai::*;` が同名モジュールを glob 公開していれば、名前解決自体が曖昧になり\n\
 \x20\x20\x20\x20// E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20pack_padded_sequence();\n\
-\x20\x20\x20\x20pad_packed_sequence();\n\
-\x20\x20\x20\x20rnn_forward_packed();\n\
-\x20\x20\x20\x20gru_forward_packed();\n\
-\x20\x20\x20\x20lstm_forward_packed();\n\
-\x20\x20\x20\x20stacked_rnn_forward_packed();\n\
-\x20\x20\x20\x20stacked_gru_forward_packed();\n\
-\x20\x20\x20\x20stacked_lstm_forward_packed();\n\
 \x20\x20\x20\x20packed_sequence::__mark();\n\
 }\n\
 \n\
@@ -28194,24 +28903,16 @@ const PACKED_SEQUENCE_FN_NAMES: [&str; 9] = [
     "forward_packed",
 ];
 
-/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const PACKED_SEQUENCE_IDENTS: [&str; 15] = [
-    "packed_sequence",
-    "PackedSequence",
-    "PackedRnnSeqOutput",
-    "PackedLstmSeqOutput",
-    "StackedPackedRnnSeqOutput",
-    "StackedPackedLstmSeqOutput",
-    "pack_padded_sequence",
-    "pad_packed_sequence",
-    "rnn_forward_packed",
-    "gru_forward_packed",
-    "lstm_forward_packed",
-    "stacked_rnn_forward_packed",
-    "stacked_gru_forward_packed",
-    "stacked_lstm_forward_packed",
-    "forward_packed",
-];
+/// 引き続き禁止する識別子（`pub use` の経路に現れてはならない名前）。型 5・自由関数 8 は #2679 で
+/// `fandhe_ai::nn::rnn` の純再エクスポートとして承認・公開した（承認形のインベントリは
+/// `facade_exposes_packed_sequence_only_in_approved_shape`）ため含めない。モジュール名 `packed_sequence` は
+/// 承認形の経路セグメントとして現れるため識別子検査ではなく葉の検査（[`PACKED_SEQUENCE_BANNED_LEAF_NAMES`]）で
+/// 扱う。
+const PACKED_SEQUENCE_IDENTS: [&str; 1] = ["forward_packed"];
+
+/// 引き続き `pub use` の葉として禁止する名前（モジュール `packed_sequence` 自体の再エクスポート・別名公開と
+/// `forward_packed`）。
+const PACKED_SEQUENCE_BANNED_LEAF_NAMES: [&str; 2] = ["packed_sequence", "forward_packed"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
 const PACKED_SEQUENCE_TYPE_NAMES: [&str; 5] = [
@@ -28254,7 +28955,7 @@ fn scan_packed_sequence_reexports_and_declarations(content: &str) -> Vec<String>
                 offending.push("内部クレートの glob 再エクスポート".to_string());
             }
             for leaf in collect_pub_use_leaves(path_tokens) {
-                if PACKED_SEQUENCE_FN_NAMES.contains(&leaf.as_str()) {
+                if PACKED_SEQUENCE_BANNED_LEAF_NAMES.contains(&leaf.as_str()) {
                     offending.push(format!("pub use leaf={leaf}"));
                 }
             }
@@ -28316,22 +29017,19 @@ fn facade_does_not_reexport_or_declare_packed_sequence_detects_each_category() {
     assert!(offense(
         "pub use fandhe_ai_autodiff::nn::packed_sequence as ps;"
     ));
-    // 正例: 関数・型の個別再エクスポート（単一行・group・複数行）。
     assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::pack_padded_sequence;"
+        "pub use fandhe_ai_autodiff::nn::{packed_sequence, Rnn};"
     ));
+    // 正例: 禁止し続ける名前の再エクスポート。
     assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::{pad_packed_sequence};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::{\n    rnn_forward_packed,\n    PackedSequence,\n};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::StackedPackedLstmSeqOutput;"
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::forward_packed;"
     ));
     // 正例: 内部クレートの glob 再エクスポート。
     assert!(offense("pub use fandhe_ai_autodiff::*;"));
-    // 正例: 型の独自宣言。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::*;"
+    ));
+    // 正例: 型の独自宣言（承認形は純再エクスポートのみ。独自宣言は不可）。
     assert!(offense("pub struct PackedSequence;"));
     assert!(offense("pub struct PackedRnnSeqOutput { h: usize }"));
     assert!(offense("pub enum PackedLstmSeqOutput { A }"));
@@ -28349,6 +29047,14 @@ fn facade_does_not_reexport_or_declare_packed_sequence_detects_each_category() {
         "trait T { fn stacked_lstm_forward_packed(&self); }"
     ));
     assert!(offense("pub mod packed_sequence {}"));
+    // 負例（#2679 で承認）: 承認済み名の純再エクスポートは本走査の違反ではない
+    // （過不足の検査は承認形インベントリが担う）。
+    assert!(!offense(
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence};"
+    ));
+    assert!(!offense(
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{PackedSequence, PackedRnnSeqOutput};"
+    ));
     // 負例: 保留対象を部分文字列に含む別トークン。
     assert!(!offense("fn forward_packed_host() {}"));
     assert!(!offense("fn pack_padded_sequence_host() {}"));
@@ -28427,13 +29133,16 @@ fn workspace_declares_packed_sequence_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// ActivationScalarOpsHoldDoctestGuard（イシュー #2649・親 #2648）:
+// ActivationScalarOpsHoldDoctestGuard（イシュー #2649・親 #2648。`add_*` の公開は #2679）:
 // `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::activation_scalar_ops`・`nn::activation` の層 5 型・
-// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）に閉じ、facade 公開形
-// （`Var` の委譲メソッド・`compat::Sequential::add_*`）は未承認（承認依頼は #2677。公開は承認後の
-// #2678・#2679）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、
-// doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）に閉じる。`compat::Sequential::add_*` 5 本は #2679 で
+// 承認形（`docs/autodiff-activation-scalar-ops-decision.md` §7。承認はルート #2499 のコメント）として公開した
+// ため、`add_*` のプローブ・否定走査は正ガード（`compat_sequential_phase4_activation_layers_add_methods_*`・
+// 宣言場所インベントリ）へ反転し、本ガードは**未承認の経路**（`Var` の委譲メソッド〈#2678 が担当〉・
+// モジュール／層型の公開）だけを固定する。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／
+// `pub mod`／`fn` の宣言）と、doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは
+// 保証しない。
 // =====================================================================
 
 /// `ActivationScalarOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト
@@ -28508,32 +29217,6 @@ trait __FandheActivationScalarOpsHoldProbe {\n\
 \x20\x20\x20\x20fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
 }\n\
 \n\
-trait __FandheActivationScalarOpsHoldAddProbe {\n\
-\x20\x20\x20\x20fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheActivationScalarOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn celu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheActivationScalarOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
@@ -28570,24 +29253,6 @@ impl __FandheActivationScalarOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-impl __FandheActivationScalarOpsHoldAddProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_selu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_celu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_softsign(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe_free_fns(\n\
 \x20\x20\x20\x20_0: Selu,\n\
 \x20\x20\x20\x20_1: Celu,\n\
@@ -28606,31 +29271,20 @@ fn __probe_free_fns(\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::selu(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::selu(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::selu(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::celu(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::celu(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::celu(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::softsign(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::softsign(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::softsign(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::hardsigmoid(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::hardsigmoid(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::hardsigmoid(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::log_sigmoid(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::log_sigmoid(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::log_sigmoid(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_selu(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_celu(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_softsign(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_hardsigmoid(seq);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::compat::Sequential::add_log_sigmoid(seq);\n\
 }";
 
 /// 保留対象の fn 名（イシュー #2649。`activation_scalar_ops` の自由関数と `Var`／`Tape`／`Tensor` の
@@ -28710,10 +29364,10 @@ fn scan_activation_scalar_ops_reexports_and_declarations(content: &str) -> Vec<S
         i += 1;
     }
 
-    for fn_name in ACTIVATION_SCALAR_OPS_FN_NAMES
-        .iter()
-        .chain(ACTIVATION_SCALAR_OPS_ADD_NAMES.iter())
-    {
+    // `add_*` の `fn` 宣言は #2679 で承認形（`compat/sequential.rs` に各 1 件）として公開した。
+    // 場所と件数は `workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations`、
+    // シグネチャは `compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures` が固定する。
+    for fn_name in ACTIVATION_SCALAR_OPS_FN_NAMES {
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -28780,17 +29434,12 @@ fn facade_does_not_reexport_or_declare_activation_scalar_ops_detects_each_catego
     assert!(offense("impl Tape { pub fn softsign(&self) {} }"));
     assert!(offense("impl Var { pub fn hardsigmoid(&self) {} }"));
     assert!(offense("impl Var { pub fn log_sigmoid(&self) {} }"));
-    assert!(offense(
-        "impl Sequential { pub fn add_selu(self) -> Self { self } }"
+    // 負例（#2679 で承認）: `Sequential::add_*` の宣言は本走査の違反ではない
+    // （場所・件数・シグネチャは別テストが固定する）。
+    assert!(!offense(
+        "impl Sequential { pub fn add_selu(mut self) -> Self { self } }"
     ));
-    assert!(offense("impl Sequential { pub fn add_celu(self) {} }"));
-    assert!(offense("impl Sequential { pub fn add_softsign(self) {} }"));
-    assert!(offense(
-        "impl Sequential { pub fn add_hardsigmoid(self) {} }"
-    ));
-    assert!(offense(
-        "impl Sequential { pub fn add_log_sigmoid(self) {} }"
-    ));
+    assert!(!offense("impl Sequential { pub fn add_celu(self) {} }"));
     assert!(offense("pub mod activation_scalar_ops {}"));
     // 負例: コメント・文字列リテラル中の出現。
     assert!(!offense(
@@ -28854,7 +29503,7 @@ fn workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations()
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = ACTIVATION_SCALAR_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = ACTIVATION_SCALAR_OPS_FN_NAMES
         .iter()
         .map(|n| {
             (
@@ -28863,6 +29512,14 @@ fn workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations()
             )
         })
         .collect();
+    // #2679: `compat::Sequential::add_*` 5 本は承認形（`facade/src/compat/sequential.rs` に各 1 件）。
+    for n in ACTIVATION_SCALAR_OPS_ADD_NAMES {
+        expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1usize);
+    }
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["selu", "celu", "softsign", "hardsigmoid", "log_sigmoid"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の selu／celu／softsign／hardsigmoid／log_sigmoid の `fn` 宣言が\
@@ -28873,12 +29530,13 @@ fn workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations()
 }
 
 // =====================================================================
-// SoftminThresholdOpsHoldDoctestGuard（イシュー #2650・親 #2648・Phase 親 #2625・ルート #2499 Phase 4）:
-// `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::softmin_threshold_ops`・`fandhe_ai_autodiff::nn::softmin_threshold`）に閉じ、facade 公開形
-// （推奨は `Var` の 1 行委譲メソッド 4 本と `compat::Sequential::add_*` 4 本）は未承認（承認依頼は #2677。
-// 公開は承認後の #2678・#2679）。
-// 検出はトークン完全一致のみで行い、`threshold_mode` など部分一致する別トークンは違反としない
+// SoftminThresholdOpsHoldDoctestGuard（イシュー #2650・親 #2648・Phase 親 #2625・ルート #2499 Phase 4。
+// `add_*` の公開は #2679）: `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は
+// 内部クレート（`fandhe_ai_autodiff::softmin_threshold_ops`・`fandhe_ai_autodiff::nn::softmin_threshold`）に閉じる。
+// `compat::Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu` は #2679 で承認形
+// （`docs/autodiff-softmin-threshold-ops-decision.md` §7）として公開したため、`add_*` のプローブ・否定走査は
+// 正ガードへ反転し、本ガードは**未承認の経路**（`Var` の委譲メソッド〈#2678 が担当〉・モジュール／層型の公開）だけを
+// 固定する。検出はトークン完全一致のみで行い、`threshold_mode` など部分一致する別トークンは違反としない
 // （自己テストで固定）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、
 // doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
 // =====================================================================
@@ -28956,13 +29614,6 @@ trait __FandheSoftminThresholdOpsHoldProbe {\n\
 \x20\x20\x20\x20fn rrelu_with_noise(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
 }\n\
 \n\
-trait __FandheSoftminThresholdOpsHoldSequentialProbe {\n\
-\x20\x20\x20\x20fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-\x20\x20\x20\x20fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker;\n\
-}\n\
-\n\
 impl<'t> __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20fn softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
@@ -29017,21 +29668,6 @@ impl __FandheSoftminThresholdOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-impl __FandheSoftminThresholdOpsHoldSequentialProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_softmin(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_tanhshrink(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_threshold(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_rrelu(&self) -> __FandheSoftminThresholdOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheSoftminThresholdOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe_free_fns(\n\
 \x20\x20\x20\x20_0: Softmin,\n\
 \x20\x20\x20\x20_1: Tanhshrink,\n\
@@ -29052,12 +29688,7 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::softmin(v);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::tanhshrink(v);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::threshold(v);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu(v);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu_with_noise(v);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::softmin(tape);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::tanhshrink(tape);\n\
@@ -29069,19 +29700,20 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::threshold(tf);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu(tf);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tensor::<f32>::rrelu_with_noise(tf);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_softmin(seq);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_tanhshrink(seq);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_threshold(seq);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::compat::Sequential::add_rrelu(seq);\n\
 }";
 
-/// 保留対象 fn 名（`Var`／`Sequential` への inherent メソッドと自由関数の両方の経路を覆う）。
-const SOFTMIN_THRESHOLD_FN_NAMES: [&str; 9] = [
+/// 保留対象 fn 名（`Var` への inherent メソッドと自由関数の両方の経路を覆う）。
+const SOFTMIN_THRESHOLD_FN_NAMES: [&str; 5] = [
     "softmin",
     "tanhshrink",
     "threshold",
     "rrelu",
     "rrelu_with_noise",
+];
+
+/// `compat::Sequential` の追加メソッド名。イシュー #2679 で承認形（`facade/src/compat/sequential.rs` に各 1 件）
+/// として公開した（`docs/autodiff-softmin-threshold-ops-decision.md` §7）。
+const SOFTMIN_THRESHOLD_ADD_NAMES: [&str; 4] = [
     "add_softmin",
     "add_tanhshrink",
     "add_threshold",
@@ -29090,7 +29722,7 @@ const SOFTMIN_THRESHOLD_FN_NAMES: [&str; 9] = [
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前。トークン完全一致のため
 /// `ThresholdMode` のような別名は対象外）。
-const SOFTMIN_THRESHOLD_IDENTS: [&str; 15] = [
+const SOFTMIN_THRESHOLD_IDENTS: [&str; 11] = [
     "softmin_threshold_ops",
     "softmin_threshold",
     "Softmin",
@@ -29102,10 +29734,6 @@ const SOFTMIN_THRESHOLD_IDENTS: [&str; 15] = [
     "threshold",
     "rrelu",
     "rrelu_with_noise",
-    "add_softmin",
-    "add_tanhshrink",
-    "add_threshold",
-    "add_rrelu",
 ];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
@@ -29236,10 +29864,12 @@ fn facade_does_not_reexport_or_declare_softmin_threshold_ops_detects_each_catego
     assert!(offense("impl Var { pub fn tanhshrink(&self) {} }"));
     assert!(offense("impl Var { pub fn threshold(&self) {} }"));
     assert!(offense("impl Var { pub fn rrelu(&self) {} }"));
-    assert!(offense(
+    // 負例（#2679 で承認）: `Sequential::add_*` の宣言は本走査の違反ではない
+    // （場所・件数・シグネチャは別テストが固定する）。
+    assert!(!offense(
         "impl Sequential { pub fn add_rrelu(&mut self) {} }"
     ));
-    assert!(offense(
+    assert!(!offense(
         "impl Sequential { pub fn add_softmin(&mut self) {} }"
     ));
     assert!(offense("trait T { fn rrelu_with_noise(&self); }"));
@@ -29269,7 +29899,7 @@ fn facade_does_not_reexport_or_declare_softmin_threshold_ops_detects_each_catego
 ///
 /// 期待値は `autodiff/src/softmin_threshold_ops.rs` の自由関数 5 名が各 1 件と、無関係な既存宣言
 /// `autodiff/src/nn/activation.rs::threshold` 1 件（`Softplus` の `pub(crate)` アクセサ。本イシューとは無関係）。
-/// `add_*` 4 名は 0 件。これら以外への追加（`Var`／`Sequential` への inherent メソッド追加等）は fail-closed に
+/// `add_*` 4 名は `facade/src/compat/sequential.rs` に各 1 件（#2679）。これら以外への追加（`Var`／`Sequential` への inherent メソッド追加等）は fail-closed に
 /// 検出する。テスト用ヘルパーにも素の `fn softmin` などという名前を使わないこと（インベントリに数えられる）。
 #[test]
 fn workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations() {
@@ -29300,7 +29930,10 @@ fn workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations()
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in SOFTMIN_THRESHOLD_FN_NAMES {
+            for fn_name in SOFTMIN_THRESHOLD_FN_NAMES
+                .iter()
+                .chain(SOFTMIN_THRESHOLD_ADD_NAMES.iter())
+            {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -29325,6 +29958,14 @@ fn workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations()
     }
     // 無関係な既存宣言（`Softplus` の `pub(crate)` アクセサ）。
     expected.insert("autodiff/src/nn/activation.rs::threshold".to_string(), 1);
+    // #2679: `compat::Sequential::add_*` 4 本は承認形（`facade/src/compat/sequential.rs` に各 1 件）。
+    for n in SOFTMIN_THRESHOLD_ADD_NAMES {
+        expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1);
+    }
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["softmin", "tanhshrink", "threshold", "rrelu"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の softmin／tanhshrink／threshold／rrelu／rrelu_with_noise／add_* の `fn` 宣言が\
@@ -30116,171 +30757,15 @@ fn workspace_declares_margin_focal_loss_ops_fn_names_only_in_allowed_locations()
     );
 }
 // =====================================================================
-// OptimizerRpropAsgdHoldDoctestGuard（イシュー #2655・親 #2654）:
-// `MarginFocalLossOpsHoldDoctestGuard`（#2653）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::nn::optim::{Rprop, RpropConfig, Asgd, AsgdConfig}`）に閉じ、facade 公開形
-// （推奨は `fandhe_ai::optim` への 4 名の素の再エクスポート）は未承認（承認依頼は #2677。公開は承認後の
-// #2679）。検出はトークン完全一致のみで行い、`RpropLike`・`AsgdConfigExt` など部分一致する別トークンは違反としない
-// （自己テストで固定）。検出範囲は「doctest プローブが名前解決で触れる 4 名」と「facade src のトークン完全一致
-// （コメント・文字列リテラルを除く）」に限り、マクロ生成や、内部クレート側で別名を作ってからの公開までは保証しない。
+// Rprop・ASGD（イシュー #2655・親 #2654。公開は #2679）: 旧 `OptimizerRpropAsgdHoldDoctestGuard` 系の
+// 否定ガードを、承認形（`fandhe_ai::optim` への 4 名の素の再エクスポート。決定記録
+// `docs/autodiff-optimizer-rprop-asgd-decision.md` §8。承認はルート #2499 のコメント）だけを許す正ガード
+// （`facade_exposes_phase4_training_data_only_in_approved_shape`・`phase4_optim_types_are_reachable_via_facade_only`）
+// へ反転した。型の宣言場所インベントリは維持する。
 // =====================================================================
-
-/// `OptimizerRpropAsgdHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
-#[test]
-fn optimizer_rprop_asgd_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerRpropAsgdHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "OptimizerRpropAsgdHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
-         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// doctest ブロックの glob 以外の本文が固定文言 [`OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY`] と 1 行たりとも違わず
-/// 一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
-#[test]
-fn optimizer_rprop_asgd_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "OptimizerRpropAsgdHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY,
-        "OptimizerRpropAsgdHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
-         OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
-         （__fandhe_optimizer_rprop_asgd_hold_probe モジュール・__probe_types 関数）の削除・弱体化・\
-         隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`optimizer_rprop_asgd_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
-/// （`OptimizerRpropAsgdHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行を
-/// 除いた本文と 1 行単位で完全一致する）。
-const OPTIMIZER_RPROP_ASGD_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_optimizer_rprop_asgd_hold_probe {\n\
-\x20\x20\x20\x20pub struct Rprop;\n\
-\x20\x20\x20\x20pub struct RpropConfig;\n\
-\x20\x20\x20\x20pub struct Asgd;\n\
-\x20\x20\x20\x20pub struct AsgdConfig;\n\
-}\n\
-use __fandhe_optimizer_rprop_asgd_hold_probe::*;\n\
-\n\
-fn __probe_types(_: Rprop, _: RpropConfig, _: Asgd, _: AsgdConfig) {}";
 
 /// 保留対象の型名（facade src にトークンとして現れてはならない名前）。
 const OPTIMIZER_RPROP_ASGD_TYPE_NAMES: [&str; 4] = ["Rprop", "RpropConfig", "Asgd", "AsgdConfig"];
-
-/// [`facade_does_not_reexport_or_declare_optimizer_rprop_asgd`]・その自己テストが共用する検出本体。
-/// コメント・文字列リテラルを除いたトークン列に [`OPTIMIZER_RPROP_ASGD_TYPE_NAMES`] が（完全一致で）現れたら
-/// 違反とする。`pub use`（単一行・複数行・group・別名）、`struct`／`enum`／`type`／`trait` の独自宣言に加え、
-/// 非公開 `use`＋公開シグネチャや enum variant 経由の露出も拾う（保留中の facade がこれらの型名を書く理由が
-/// ないため）。内部クレートの glob 再エクスポートは名前が現れないため別途検出する。
-fn scan_optimizer_rprop_asgd_reexports_and_declarations(content: &str) -> Vec<String> {
-    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-    let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
-
-    for name in OPTIMIZER_RPROP_ASGD_TYPE_NAMES {
-        let count = tokens.iter().filter(|t| t.as_str() == name).count();
-        if count > 0 {
-            offending.push(format!("`{name}` トークンが {count} 件"));
-        }
-    }
-
-    let mut i = 0usize;
-    while i < tokens.len() {
-        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-            let mut end = i + 2;
-            while end < tokens.len() && tokens[end] != ";" {
-                end += 1;
-            }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let from_internal = path_tokens.iter().any(|t| t == "fandhe_ai_autodiff");
-            if from_internal && path_tokens.iter().any(|t| t == "*") {
-                offending.push("内部クレートの glob 再エクスポート".to_string());
-            }
-            i = (end + 1).min(tokens.len());
-            continue;
-        }
-        i += 1;
-    }
-    offending
-}
-
-/// facade src 全体（`crates/facade/src/**`）に Rprop／ASGD の保留対象の型名・再エクスポート・独自宣言が
-/// 存在しないことを固定する（`OptimizerRpropAsgdHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
-/// ソース走査ガード）。
-#[test]
-fn facade_does_not_reexport_or_declare_optimizer_rprop_asgd() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_optimizer_rprop_asgd_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
-    });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面が Rprop／ASGD の内部実装（#2655 の `nn::optim::{{Rprop, Asgd}}`。facade 公開形は未承認で\
-         承認依頼は #2677）の型名を参照、再エクスポート、または独自宣言している: {offending:?}"
-    );
-}
-
-/// [`facade_does_not_reexport_or_declare_optimizer_rprop_asgd`] の自己テスト（各違反カテゴリの合成ソースを
-/// 検出できること、および部分文字列に含む別トークン・コメント・文字列・無関係な `pub use` を誤検出しないことを
-/// 恒久的に固定する）。
-#[test]
-fn facade_does_not_reexport_or_declare_optimizer_rprop_asgd_detects_each_category() {
-    let offense = |src: &str| !scan_optimizer_rprop_asgd_reexports_and_declarations(src).is_empty();
-    // 正例: `pub use`（単一行・group・複数行・別名）。
-    assert!(offense("pub use fandhe_ai_autodiff::nn::optim::Rprop;"));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::{Adamax, Asgd};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::{\n    AsgdConfig,\n    RpropConfig,\n};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::Asgd as Averaged;"
-    ));
-    // 正例: 内部クレートの glob 再エクスポート。
-    assert!(offense("pub use fandhe_ai_autodiff::*;"));
-    // 正例: 独自宣言。
-    assert!(offense("pub struct Rprop;"));
-    assert!(offense("pub struct AsgdConfig { lr: f32 }"));
-    assert!(offense("pub enum Asgd { A }"));
-    assert!(offense("pub type RpropConfig = u8;"));
-    assert!(offense("pub trait Rprop {}"));
-    // 正例: 非公開 use＋公開シグネチャ、enum variant 経由の露出。
-    assert!(offense(
-        "use fandhe_ai_autodiff::nn::optim::Rprop; pub fn f(_: Rprop) {}"
-    ));
-    assert!(offense("pub enum Optimizer { Rprop(u8) }"));
-    assert!(offense("pub fn f() -> Asgd { todo!() }"));
-    // 負例: 保留対象を部分文字列に含む別トークン・大文字小文字違い。
-    assert!(!offense("pub struct RpropLike;"));
-    assert!(!offense("pub struct AsgdConfigExt;"));
-    assert!(!offense("fn rprop() {}"));
-    assert!(!offense("fn asgd_helper() {}"));
-    // 負例: コメント・文字列リテラル中の出現。
-    assert!(!offense("// pub use fandhe_ai_autodiff::nn::optim::Rprop;"));
-    assert!(!offense("let s = \"pub struct Asgd;\";"));
-    // 負例: 無関係な `pub use`。
-    assert!(!offense("pub use fandhe_ai_autodiff::nn::optim::Adamax;"));
-}
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`OPTIMIZER_RPROP_ASGD_TYPE_NAMES`] の型宣言
 /// （`struct`／`enum`／`type`／`trait`）が承認済みの置き場所だけに存在することを固定する。
@@ -30350,177 +30835,14 @@ fn workspace_declares_optimizer_rprop_asgd_types_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// OptimizerAdafactorLionHoldDoctestGuard（イシュー #2656・親 #2654）:
-// `OptimizerRpropAsgdHoldDoctestGuard`（#2655）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::nn::optim::{Adafactor, AdafactorConfig, Lion, LionConfig}`）に閉じ、facade 公開形
-// （推奨は `fandhe_ai::optim` への 4 名の素の再エクスポート）は未承認（承認依頼は #2677。公開は承認後の
-// #2679）。検出はトークン完全一致のみで行い、`AdafactorLike`・`LionConfigExt` など部分一致する別トークンは違反としない
-// （自己テストで固定）。検出範囲は「doctest プローブが名前解決で触れる 4 名」と「facade src のトークン完全一致
-// （コメント・文字列リテラルを除く）」に限り、マクロ生成や、内部クレート側で別名を作ってからの公開までは保証しない。
+// Adafactor・Lion（イシュー #2656・親 #2654。公開は #2679）: 旧否定ガードを、承認形（`fandhe_ai::optim` への
+// 4 名の素の再エクスポート。`docs/autodiff-optimizer-adafactor-lion-decision.md` §8）だけを許す正ガードへ
+// 反転した（Rprop・ASGD と同じ検査が束ねて担う）。型の宣言場所インベントリは維持する。
 // =====================================================================
-
-/// `OptimizerAdafactorLionHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
-#[test]
-fn optimizer_adafactor_lion_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines =
-        extract_hold_doctest_guard_doc(&content, "OptimizerAdafactorLionHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "OptimizerAdafactorLionHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
-         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// doctest ブロックの glob 以外の本文が固定文言 [`OPTIMIZER_ADAFACTOR_LION_HOLD_PROBE_BODY`] と 1 行たりとも違わず
-/// 一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
-#[test]
-fn optimizer_adafactor_lion_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines =
-        extract_hold_doctest_guard_doc(&content, "OptimizerAdafactorLionHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, OPTIMIZER_ADAFACTOR_LION_HOLD_PROBE_BODY,
-        "OptimizerAdafactorLionHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
-         OPTIMIZER_ADAFACTOR_LION_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
-         （__fandhe_optimizer_adafactor_lion_hold_probe モジュール・__probe_types 関数）の削除・弱体化・\
-         隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`optimizer_adafactor_lion_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
-/// （`OptimizerAdafactorLionHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行を
-/// 除いた本文と 1 行単位で完全一致する）。
-const OPTIMIZER_ADAFACTOR_LION_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_optimizer_adafactor_lion_hold_probe {\n\
-\x20\x20\x20\x20pub struct Adafactor;\n\
-\x20\x20\x20\x20pub struct AdafactorConfig;\n\
-\x20\x20\x20\x20pub struct Lion;\n\
-\x20\x20\x20\x20pub struct LionConfig;\n\
-}\n\
-use __fandhe_optimizer_adafactor_lion_hold_probe::*;\n\
-\n\
-fn __probe_types(_: Adafactor, _: AdafactorConfig, _: Lion, _: LionConfig) {}";
 
 /// 保留対象の型名（facade src にトークンとして現れてはならない名前）。
 const OPTIMIZER_ADAFACTOR_LION_TYPE_NAMES: [&str; 4] =
     ["Adafactor", "AdafactorConfig", "Lion", "LionConfig"];
-
-/// [`facade_does_not_reexport_or_declare_optimizer_adafactor_lion`]・その自己テストが共用する検出本体。
-/// コメント・文字列リテラルを除いたトークン列に [`OPTIMIZER_ADAFACTOR_LION_TYPE_NAMES`] が（完全一致で）現れたら
-/// 違反とする。`pub use`（単一行・複数行・group・別名）、`struct`／`enum`／`type`／`trait` の独自宣言に加え、
-/// 非公開 `use`＋公開シグネチャや enum variant 経由の露出も拾う（保留中の facade がこれらの型名を書く理由が
-/// ないため）。内部クレートの glob 再エクスポートは名前が現れないため別途検出する。
-fn scan_optimizer_adafactor_lion_reexports_and_declarations(content: &str) -> Vec<String> {
-    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-    let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
-
-    for name in OPTIMIZER_ADAFACTOR_LION_TYPE_NAMES {
-        let count = tokens.iter().filter(|t| t.as_str() == name).count();
-        if count > 0 {
-            offending.push(format!("`{name}` トークンが {count} 件"));
-        }
-    }
-
-    let mut i = 0usize;
-    while i < tokens.len() {
-        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-            let mut end = i + 2;
-            while end < tokens.len() && tokens[end] != ";" {
-                end += 1;
-            }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let from_internal = path_tokens.iter().any(|t| t == "fandhe_ai_autodiff");
-            if from_internal && path_tokens.iter().any(|t| t == "*") {
-                offending.push("内部クレートの glob 再エクスポート".to_string());
-            }
-            i = (end + 1).min(tokens.len());
-            continue;
-        }
-        i += 1;
-    }
-    offending
-}
-
-/// facade src 全体（`crates/facade/src/**`）に Adafactor／Lion の保留対象の型名・再エクスポート・独自宣言が
-/// 存在しないことを固定する（`OptimizerAdafactorLionHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
-/// ソース走査ガード）。
-#[test]
-fn facade_does_not_reexport_or_declare_optimizer_adafactor_lion() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_optimizer_adafactor_lion_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
-    });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面が Adafactor／Lion の内部実装（#2656 の `nn::optim::{{Adafactor, Lion}}`。facade 公開形は未承認で\
-         承認依頼は #2677）の型名を参照、再エクスポート、または独自宣言している: {offending:?}"
-    );
-}
-
-/// [`facade_does_not_reexport_or_declare_optimizer_adafactor_lion`] の自己テスト（各違反カテゴリの合成ソースを
-/// 検出できること、および部分文字列に含む別トークン・コメント・文字列・無関係な `pub use` を誤検出しないことを
-/// 恒久的に固定する）。
-#[test]
-fn facade_does_not_reexport_or_declare_optimizer_adafactor_lion_detects_each_category() {
-    let offense =
-        |src: &str| !scan_optimizer_adafactor_lion_reexports_and_declarations(src).is_empty();
-    // 正例: `pub use`（単一行・group・複数行・別名）。
-    assert!(offense("pub use fandhe_ai_autodiff::nn::optim::Adafactor;"));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::{Adamax, Lion};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::{\n    LionConfig,\n    AdafactorConfig,\n};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::Lion as Factored;"
-    ));
-    // 正例: 内部クレートの glob 再エクスポート。
-    assert!(offense("pub use fandhe_ai_autodiff::*;"));
-    // 正例: 独自宣言。
-    assert!(offense("pub struct Adafactor;"));
-    assert!(offense("pub struct LionConfig { lr: f32 }"));
-    assert!(offense("pub enum Lion { A }"));
-    assert!(offense("pub type AdafactorConfig = u8;"));
-    assert!(offense("pub trait Adafactor {}"));
-    // 正例: 非公開 use＋公開シグネチャ、enum variant 経由の露出。
-    assert!(offense(
-        "use fandhe_ai_autodiff::nn::optim::Adafactor; pub fn f(_: Adafactor) {}"
-    ));
-    assert!(offense("pub enum Optimizer { Adafactor(u8) }"));
-    assert!(offense("pub fn f() -> Lion { todo!() }"));
-    // 負例: 保留対象を部分文字列に含む別トークン・大文字小文字違い。
-    assert!(!offense("pub struct AdafactorLike;"));
-    assert!(!offense("pub struct LionConfigExt;"));
-    assert!(!offense("fn adafactor() {}"));
-    assert!(!offense("fn lion_helper() {}"));
-    // 負例: コメント・文字列リテラル中の出現。
-    assert!(!offense(
-        "// pub use fandhe_ai_autodiff::nn::optim::Adafactor;"
-    ));
-    assert!(!offense("let s = \"pub struct Lion;\";"));
-    // 負例: 無関係な `pub use`。
-    assert!(!offense("pub use fandhe_ai_autodiff::nn::optim::Adamax;"));
-}
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`OPTIMIZER_ADAFACTOR_LION_TYPE_NAMES`] の型宣言
 /// （`struct`／`enum`／`type`／`trait`）が承認済みの置き場所だけに存在することを固定する。
@@ -30590,176 +30912,13 @@ fn workspace_declares_optimizer_adafactor_lion_types_only_in_allowed_locations()
 }
 
 // =====================================================================
-// LrSchedulerPolyChainedHoldDoctestGuard（イシュー #2659・親 #2657）:
-// `OptimizerAdafactorLionHoldDoctestGuard`（#2656）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::nn::optim::{PolynomialLr, ChainedScheduler}`）に閉じ、facade 公開形
-// （推奨は `fandhe_ai::optim` への 2 名の素の再エクスポート）は未承認（承認依頼は #2677。公開は承認後の
-// #2679）。検出はトークン完全一致のみで行い、`PolynomialLrExt`・`ChainedSchedulerLike` など部分一致する別トークンは違反としない
-// （自己テストで固定）。検出範囲は「doctest プローブが名前解決で触れる 2 名」と「facade src のトークン完全一致
-// （コメント・文字列リテラルを除く）」に限り、マクロ生成や、内部クレート側で別名を作ってからの公開までは保証しない。
+// PolynomialLr・ChainedScheduler（イシュー #2659・親 #2657。公開は #2679）: 旧否定ガードを、承認形
+// （`fandhe_ai::optim` への素の再エクスポート。`docs/autodiff-lr-scheduler-poly-chained-decision.md` §8）だけを
+// 許す正ガードへ反転した。型の宣言場所インベントリは維持する。
 // =====================================================================
-
-/// `LrSchedulerPolyChainedHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
-#[test]
-fn lr_scheduler_poly_chained_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines =
-        extract_hold_doctest_guard_doc(&content, "LrSchedulerPolyChainedHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "LrSchedulerPolyChainedHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
-         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// doctest ブロックの glob 以外の本文が固定文言 [`LR_SCHEDULER_POLY_CHAINED_HOLD_PROBE_BODY`] と 1 行たりとも違わず
-/// 一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
-#[test]
-fn lr_scheduler_poly_chained_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines =
-        extract_hold_doctest_guard_doc(&content, "LrSchedulerPolyChainedHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, LR_SCHEDULER_POLY_CHAINED_HOLD_PROBE_BODY,
-        "LrSchedulerPolyChainedHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
-         LR_SCHEDULER_POLY_CHAINED_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
-         （__fandhe_lr_scheduler_poly_chained_hold_probe モジュール・__probe_types 関数）の削除・弱体化・\
-         隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`lr_scheduler_poly_chained_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
-/// （`LrSchedulerPolyChainedHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行を
-/// 除いた本文と 1 行単位で完全一致する）。
-const LR_SCHEDULER_POLY_CHAINED_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_lr_scheduler_poly_chained_hold_probe {\n\
-\x20\x20\x20\x20pub struct PolynomialLr;\n\
-\x20\x20\x20\x20pub struct ChainedScheduler;\n\
-}\n\
-use __fandhe_lr_scheduler_poly_chained_hold_probe::*;\n\
-\n\
-fn __probe_types(_: PolynomialLr, _: ChainedScheduler) {}";
 
 /// 保留対象の型名（facade src にトークンとして現れてはならない名前）。
 const LR_SCHEDULER_POLY_CHAINED_TYPE_NAMES: [&str; 2] = ["PolynomialLr", "ChainedScheduler"];
-
-/// [`facade_does_not_reexport_or_declare_lr_scheduler_poly_chained`]・その自己テストが共用する検出本体。
-/// コメント・文字列リテラルを除いたトークン列に [`LR_SCHEDULER_POLY_CHAINED_TYPE_NAMES`] が（完全一致で）現れたら
-/// 違反とする。`pub use`（単一行・複数行・group・別名）、`struct`／`enum`／`type`／`trait` の独自宣言に加え、
-/// 非公開 `use`＋公開シグネチャや enum variant 経由の露出も拾う（保留中の facade がこれらの型名を書く理由が
-/// ないため）。内部クレートの glob 再エクスポートは名前が現れないため別途検出する。
-fn scan_lr_scheduler_poly_chained_reexports_and_declarations(content: &str) -> Vec<String> {
-    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-    let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
-
-    for name in LR_SCHEDULER_POLY_CHAINED_TYPE_NAMES {
-        let count = tokens.iter().filter(|t| t.as_str() == name).count();
-        if count > 0 {
-            offending.push(format!("`{name}` トークンが {count} 件"));
-        }
-    }
-
-    let mut i = 0usize;
-    while i < tokens.len() {
-        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-            let mut end = i + 2;
-            while end < tokens.len() && tokens[end] != ";" {
-                end += 1;
-            }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let from_internal = path_tokens.iter().any(|t| t == "fandhe_ai_autodiff");
-            if from_internal && path_tokens.iter().any(|t| t == "*") {
-                offending.push("内部クレートの glob 再エクスポート".to_string());
-            }
-            i = (end + 1).min(tokens.len());
-            continue;
-        }
-        i += 1;
-    }
-    offending
-}
-
-/// facade src 全体（`crates/facade/src/**`）に PolynomialLr／ChainedScheduler の保留対象の型名・再エクスポート・独自宣言が
-/// 存在しないことを固定する（`LrSchedulerPolyChainedHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
-/// ソース走査ガード）。
-#[test]
-fn facade_does_not_reexport_or_declare_lr_scheduler_poly_chained() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_lr_scheduler_poly_chained_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
-    });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面が PolynomialLr／ChainedScheduler の内部実装（#2659 の `nn::optim::{{PolynomialLr, ChainedScheduler}}`。facade 公開形は未承認で\
-         承認依頼は #2677）の型名を参照、再エクスポート、または独自宣言している: {offending:?}"
-    );
-}
-
-/// [`facade_does_not_reexport_or_declare_lr_scheduler_poly_chained`] の自己テスト（各違反カテゴリの合成ソースを
-/// 検出できること、および部分文字列に含む別トークン・コメント・文字列・無関係な `pub use` を誤検出しないことを
-/// 恒久的に固定する）。
-#[test]
-fn facade_does_not_reexport_or_declare_lr_scheduler_poly_chained_detects_each_category() {
-    let offense =
-        |src: &str| !scan_lr_scheduler_poly_chained_reexports_and_declarations(src).is_empty();
-    // 正例: `pub use`（単一行・group・複数行・別名）。
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::PolynomialLr;"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::{StepLr, ChainedScheduler};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::{\n    ChainedScheduler,\n    PolynomialLr,\n};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::optim::ChainedScheduler as Chain;"
-    ));
-    // 正例: 内部クレートの glob 再エクスポート。
-    assert!(offense("pub use fandhe_ai_autodiff::*;"));
-    // 正例: 独自宣言。
-    assert!(offense("pub struct PolynomialLr;"));
-    assert!(offense("pub struct ChainedScheduler { lr: f32 }"));
-    assert!(offense("pub enum PolynomialLr { A }"));
-    assert!(offense("pub type ChainedScheduler = u8;"));
-    assert!(offense("pub trait PolynomialLr {}"));
-    // 正例: 非公開 use＋公開シグネチャ、enum variant 経由の露出。
-    assert!(offense(
-        "use fandhe_ai_autodiff::nn::optim::PolynomialLr; pub fn f(_: PolynomialLr) {}"
-    ));
-    assert!(offense("pub enum Sched { ChainedScheduler(u8) }"));
-    assert!(offense("pub fn f() -> ChainedScheduler { todo!() }"));
-    // 負例: 保留対象を部分文字列に含む別トークン・大文字小文字違い。
-    assert!(!offense("pub struct PolynomialLrExt;"));
-    assert!(!offense("pub struct ChainedSchedulerLike;"));
-    assert!(!offense("fn polynomial_lr() {}"));
-    assert!(!offense("fn chained_scheduler_helper() {}"));
-    // 負例: コメント・文字列リテラル中の出現。
-    assert!(!offense(
-        "// pub use fandhe_ai_autodiff::nn::optim::PolynomialLr;"
-    ));
-    assert!(!offense("let s = \"pub struct ChainedScheduler;\";"));
-    // 負例: 無関係な `pub use`。
-    assert!(!offense("pub use fandhe_ai_autodiff::nn::optim::StepLr;"));
-}
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`LR_SCHEDULER_POLY_CHAINED_TYPE_NAMES`] の型宣言
 /// （`struct`／`enum`／`type`／`trait`）が承認済みの置き場所だけに存在することを固定する。
@@ -30825,130 +30984,13 @@ fn workspace_declares_lr_scheduler_poly_chained_types_only_in_allowed_locations(
 }
 
 // =====================================================================
-// DatasetComposeHoldDoctestGuard（イシュー #2661・親 #2660）:
-// `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_tensor_core::data::{Subset, ConcatDataset, ConcatBatch, random_split, random_split_fractions}`）
-// に閉じ、facade 公開形（推奨は `fandhe_ai::data` への純再エクスポート）は未承認（承認依頼は #2677。公開は
-// 承認後の #2679）。検出はトークン完全一致のみで行い、`SubsetSampler` など部分一致する別トークンは違反と
-// しない（自己テストで固定）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`fn` の宣言）と、
-// doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+// Dataset 合成（イシュー #2661・親 #2660。公開は #2679）: 旧 `DatasetComposeHoldDoctestGuard` の doctest プローブを
+// 削除し（承認形の公開と衝突するため）、ソース走査を「内部クレートの glob 再エクスポート・型の独自宣言・同名 `fn`
+// 宣言（facade への inherent メソッド追加経路）の禁止」へ縮小した。承認形（`fandhe_ai::data` への
+// `Subset`・`ConcatDataset`・`ConcatBatch`・`random_split`・`random_split_fractions` の純再エクスポート。
+// `docs/tensor-core-dataset-compose-decision.md` §5）は `facade_exposes_phase4_training_data_only_in_approved_shape`
+// が過不足なく固定する。宣言場所インベントリは維持する。
 // =====================================================================
-
-/// `DatasetComposeHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
-/// `src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
-#[test]
-fn dataset_compose_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "DatasetComposeHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "DatasetComposeHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
-         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// doctest ブロックの glob 以外の本文が固定文言 [`DATASET_COMPOSE_HOLD_PROBE_BODY`] と 1 行たりとも違わず
-/// 一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
-#[test]
-fn dataset_compose_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "DatasetComposeHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, DATASET_COMPOSE_HOLD_PROBE_BODY,
-        "DatasetComposeHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
-         DATASET_COMPOSE_HOLD_PROBE_BODY からドリフトしている。正のプローブ（__fandhe_dataset_compose_hold_probe \
-         モジュール・__FandheDatasetComposeHold*Probe トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入が\
-         ないか確認すること。"
-    );
-}
-
-/// [`dataset_compose_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
-/// （`DatasetComposeHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import 行を
-/// 除いた本文と 1 行単位で完全一致する）。
-const DATASET_COMPOSE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_dataset_compose_hold_probe {\n\
-\x20\x20\x20\x20pub struct Subset;\n\
-\x20\x20\x20\x20pub struct ConcatDataset;\n\
-\x20\x20\x20\x20pub struct ConcatBatch;\n\
-\x20\x20\x20\x20pub fn random_split() {}\n\
-\x20\x20\x20\x20pub fn random_split_fractions() {}\n\
-}\n\
-use __fandhe_dataset_compose_hold_probe::*;\n\
-\n\
-struct __FandheDatasetComposeHoldMarker;\n\
-\n\
-trait __FandheDatasetComposeHoldProbe {\n\
-\x20\x20\x20\x20fn random_split(&self) -> __FandheDatasetComposeHoldMarker;\n\
-\x20\x20\x20\x20fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker;\n\
-\x20\x20\x20\x20fn subset(&self) -> __FandheDatasetComposeHoldMarker;\n\
-}\n\
-\n\
-trait __FandheDatasetComposeHoldBatchProbe {\n\
-\x20\x20\x20\x20fn concat_batches(&self) -> __FandheDatasetComposeHoldMarker;\n\
-}\n\
-\n\
-impl __FandheDatasetComposeHoldProbe for fandhe_ai::data::TensorDataset<f32> {\n\
-\x20\x20\x20\x20fn random_split(&self) -> __FandheDatasetComposeHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn subset(&self) -> __FandheDatasetComposeHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheDatasetComposeHoldProbe for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>> {\n\
-\x20\x20\x20\x20fn random_split(&self) -> __FandheDatasetComposeHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn subset(&self) -> __FandheDatasetComposeHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheDatasetComposeHoldBatchProbe for fandhe_ai::Tensor<f32> {\n\
-\x20\x20\x20\x20fn concat_batches(&self) -> __FandheDatasetComposeHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheDatasetComposeHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe_free_fns(_0: Subset, _1: ConcatDataset, _2: ConcatBatch) {\n\
-\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20random_split();\n\
-\x20\x20\x20\x20random_split_fractions();\n\
-}\n\
-\n\
-fn __probe_methods(\n\
-\x20\x20\x20\x20ds: &fandhe_ai::data::TensorDataset<f32>,\n\
-\x20\x20\x20\x20dl: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>,\n\
-\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-) {\n\
-\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::random_split(ds);\n\
-\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::random_split_fractions(ds);\n\
-\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::subset(ds);\n\
-\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::random_split(dl);\n\
-\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::random_split_fractions(dl);\n\
-\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::subset(dl);\n\
-\x20\x20\x20\x20let _: __FandheDatasetComposeHoldMarker = fandhe_ai::Tensor::<f32>::concat_batches(tf);\n\
-}";
 
 /// 保留対象の自由関数名（推奨公開形が自由関数の再エクスポートのため、名前そのものの漏出を検出する）。
 const DATASET_COMPOSE_FREE_FN_NAMES: [&str; 2] = ["random_split", "random_split_fractions"];
@@ -30962,16 +31004,14 @@ const DATASET_COMPOSE_FN_NAMES: [&str; 4] = [
     "concat_batches",
 ];
 
-/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const DATASET_COMPOSE_IDENTS: [&str; 7] = [
-    "Subset",
-    "ConcatDataset",
-    "ConcatBatch",
-    "random_split",
-    "random_split_fractions",
-    "subset",
-    "concat_batches",
-];
+/// 引き続き禁止する識別子（`pub use` の経路に現れてはならない名前）。型 3 名・自由関数 2 名は #2679 で
+/// `fandhe_ai::data` の純再エクスポートとして承認・公開した（承認形のインベントリは
+/// `facade_exposes_phase4_training_data_only_in_approved_shape`）ため含めない。`subset`・`concat_batches` は
+/// 内部クレートの trait／メソッド名で、facade の inherent メソッド追加経路の予防名として残す。
+const DATASET_COMPOSE_IDENTS: [&str; 2] = ["subset", "concat_batches"];
+
+/// 引き続き `pub use` の葉として禁止する fn 名（承認済みの自由関数 2 名を除く）。
+const DATASET_COMPOSE_BANNED_LEAF_NAMES: [&str; 2] = ["subset", "concat_batches"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
 const DATASET_COMPOSE_TYPE_NAMES: [&str; 3] = ["Subset", "ConcatDataset", "ConcatBatch"];
@@ -31004,7 +31044,7 @@ fn scan_dataset_compose_reexports_and_declarations(content: &str) -> Vec<String>
                 offending.push("内部クレートの glob 再エクスポート".to_string());
             }
             for leaf in collect_pub_use_leaves(path_tokens) {
-                if DATASET_COMPOSE_FN_NAMES.contains(&leaf.as_str()) {
+                if DATASET_COMPOSE_BANNED_LEAF_NAMES.contains(&leaf.as_str()) {
                     offending.push(format!("pub use leaf={leaf}"));
                 }
             }
@@ -31055,20 +31095,13 @@ fn facade_does_not_reexport_or_declare_dataset_compose() {
 #[test]
 fn facade_does_not_reexport_or_declare_dataset_compose_detects_each_category() {
     let offense = |src: &str| !scan_dataset_compose_reexports_and_declarations(src).is_empty();
-    // 正例: 個別再エクスポート（単一行・group・複数行・別名）。
-    assert!(offense("pub use fandhe_ai_tensor_core::data::Subset;"));
-    assert!(offense(
-        "pub use fandhe_ai_tensor_core::data::{DataLoader, ConcatDataset};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_tensor_core::data::{\n    random_split,\n    ConcatBatch,\n};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_tensor_core::data::random_split_fractions as rsf;"
-    ));
-    // 正例: 内部クレートの glob 再エクスポート。
+    // 正例: 禁止し続ける経路（内部クレートの glob 再エクスポート・禁止名の再エクスポート）。
     assert!(offense("pub use fandhe_ai_tensor_core::*;"));
-    // 正例: 型の独自宣言。
+    assert!(offense("pub use fandhe_ai_tensor_core::data::subset;"));
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::{\n    concat_batches,\n    DataLoader,\n};"
+    ));
+    // 正例: 型の独自宣言（承認形は純再エクスポートのみ。独自宣言は不可）。
     assert!(offense("pub struct Subset;"));
     assert!(offense("pub struct ConcatDataset { n: usize }"));
     assert!(offense("pub enum ConcatBatch { A }"));
@@ -31081,6 +31114,15 @@ fn facade_does_not_reexport_or_declare_dataset_compose_detects_each_category() {
         "impl DataLoader { pub fn random_split_fractions(&self) {} }"
     ));
     assert!(offense("trait T { fn concat_batches(&self); }"));
+    // 負例（#2679 で承認）: 承認済み名の純再エクスポートは本走査の違反ではない
+    // （過不足の検査は承認形インベントリが担う）。
+    assert!(!offense("pub use fandhe_ai_tensor_core::data::Subset;"));
+    assert!(!offense(
+        "pub use fandhe_ai_tensor_core::data::{random_split, random_split_fractions};"
+    ));
+    assert!(!offense(
+        "pub use fandhe_ai_tensor_core::data::{ConcatBatch, ConcatDataset, Subset};"
+    ));
     // 負例: 保留対象を部分文字列に含む別トークン。
     assert!(!offense("pub struct SubsetSampler;"));
     assert!(!offense("fn random_split_helper() {}"));
@@ -31088,10 +31130,10 @@ fn facade_does_not_reexport_or_declare_dataset_compose_detects_each_category() {
     // 負例: 呼び出し（宣言ではない）。
     assert!(!offense("fn f(d: D) { let s = d.subset(); }"));
     // 負例: コメント・文字列リテラル中の出現。
-    assert!(!offense("// pub use fandhe_ai_tensor_core::data::Subset;"));
+    assert!(!offense("// pub use fandhe_ai_tensor_core::data::subset;"));
     assert!(!offense("let s = \"pub fn random_split() {}\";"));
     // 負例: 非公開 use。
-    assert!(!offense("use fandhe_ai_tensor_core::data::Subset;"));
+    assert!(!offense("use fandhe_ai_tensor_core::data::subset;"));
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、Dataset 合成の型宣言と [`DATASET_COMPOSE_FN_NAMES`] の
@@ -31176,136 +31218,22 @@ fn workspace_declares_dataset_compose_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// IterableBatchSamplerHoldDoctestGuard（イシュー #2662・親 #2660）:
-// `DatasetComposeHoldDoctestGuard`（#2661）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_tensor_core::data::{IterableDataset, IterableDataLoader, IterableBatches, StackSamples,
-// BatchSampler}`）に閉じ、facade 公開形（推奨は `fandhe_ai::data` への純再エクスポート）は未承認
-// （承認依頼は #2677。公開は承認後の #2679）。検出はトークン完全一致のみで行い、`BatchSamplerConfig` など
-// 部分一致する別トークンは違反としない（自己テストで固定）。検出範囲は本ソース走査が見るトークン列
-// （`pub use` の経路・型／`fn` の宣言）と、doctest プローブが名前解決で触れる位置に限り、マクロ生成や
-// 別名経由のメソッドまでは保証しない。
+// IterableDataset／BatchSampler（イシュー #2662・親 #2660。公開は #2679）: 旧 doctest プローブを削除し
+// （承認形の公開と衝突するため）、ソース走査を縮小した（Dataset 合成と同じ扱い）。承認形（`fandhe_ai::data` への
+// 5 名の純再エクスポート。`docs/tensor-core-iterable-dataset-batch-sampler-decision.md` §5）は
+// `facade_exposes_phase4_training_data_only_in_approved_shape` が過不足なく固定する。宣言場所インベントリは維持する。
 // =====================================================================
 
-/// `IterableBatchSamplerHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod`
-/// 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
-#[test]
-fn iterable_batch_sampler_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines =
-        extract_hold_doctest_guard_doc(&content, "IterableBatchSamplerHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
-    assert_eq!(
-        declared, globbed,
-        "IterableBatchSamplerHoldDoctestGuard の doctest ブロックが glob import するモジュール集合が \
-         src/lib.rs の pub mod 宣言集合とドリフトしている（declared={declared:?}, doctest={globbed:?}）。\
-         新しい pub mod を追加した場合は doctest 側の use 一覧にも追加すること。"
-    );
-}
-
-/// doctest ブロックの glob 以外の本文が固定文言 [`ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY`] と 1 行たりとも
-/// 違わず一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を機械的に拒否する）。
-#[test]
-fn iterable_batch_sampler_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines =
-        extract_hold_doctest_guard_doc(&content, "IterableBatchSamplerHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
-    assert_eq!(
-        actual, ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY,
-        "IterableBatchSamplerHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
-         ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
-         （__fandhe_iterable_batch_sampler_hold_probe モジュール・__FandheIterableBatchSamplerHold*Probe \
-         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか確認すること。"
-    );
-}
-
-/// [`iterable_batch_sampler_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
-/// （`IterableBatchSamplerHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob
-/// import 行を除いた本文と 1 行単位で完全一致する）。
-const ITERABLE_BATCH_SAMPLER_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_iterable_batch_sampler_hold_probe {\n\
-\x20\x20\x20\x20pub struct IterableDataset;\n\
-\x20\x20\x20\x20pub struct IterableDataLoader;\n\
-\x20\x20\x20\x20pub struct IterableBatches;\n\
-\x20\x20\x20\x20pub struct StackSamples;\n\
-\x20\x20\x20\x20pub struct BatchSampler;\n\
-}\n\
-use __fandhe_iterable_batch_sampler_hold_probe::*;\n\
-\n\
-struct __FandheIterableBatchSamplerHoldMarker;\n\
-\n\
-trait __FandheIterableBatchSamplerHoldProbe {\n\
-\x20\x20\x20\x20fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;\n\
-\x20\x20\x20\x20fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker;\n\
-}\n\
-\n\
-trait __FandheIterableBatchSamplerHoldStackProbe {\n\
-\x20\x20\x20\x20fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;\n\
-}\n\
-\n\
-impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::TensorDataset<f32> {\n\
-\x20\x20\x20\x20fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>> {\n\
-\x20\x20\x20\x20fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-impl __FandheIterableBatchSamplerHoldStackProbe for fandhe_ai::Tensor<f32> {\n\
-\x20\x20\x20\x20fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIterableBatchSamplerHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe_types(_0: IterableDataset, _1: IterableDataLoader, _2: IterableBatches, _3: StackSamples, _4: BatchSampler) {}\n\
-\n\
-fn __probe_methods(\n\
-\x20\x20\x20\x20ds: &fandhe_ai::data::TensorDataset<f32>,\n\
-\x20\x20\x20\x20dl: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>,\n\
-\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-) {\n\
-\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::iter_samples(ds);\n\
-\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::with_batch_sampler(ds);\n\
-\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::iter_samples(dl);\n\
-\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::with_batch_sampler(dl);\n\
-\x20\x20\x20\x20let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::Tensor::<f32>::stack_samples(tf);\n\
-}";
 /// 保留対象の fn 名。`iter_samples`・`stack_samples` は内部クレートの trait メソッド、`with_batch_sampler` は
 /// 既存ローダー型への inherent メソッド追加経路の予防名（現在どこにも存在しない）。
 const ITERABLE_BATCH_SAMPLER_FN_NAMES: [&str; 3] =
     ["iter_samples", "stack_samples", "with_batch_sampler"];
 
-/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const ITERABLE_BATCH_SAMPLER_IDENTS: [&str; 8] = [
-    "IterableDataset",
-    "IterableDataLoader",
-    "IterableBatches",
-    "StackSamples",
-    "BatchSampler",
-    "iter_samples",
-    "stack_samples",
-    "with_batch_sampler",
-];
+/// 引き続き禁止する識別子（`pub use` の経路に現れてはならない名前）。型 5 名は #2679 で
+/// `fandhe_ai::data` の純再エクスポートとして承認・公開した（承認形のインベントリは
+/// `facade_exposes_phase4_training_data_only_in_approved_shape`）ため含めない。
+const ITERABLE_BATCH_SAMPLER_IDENTS: [&str; 3] =
+    ["iter_samples", "stack_samples", "with_batch_sampler"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
 const ITERABLE_BATCH_SAMPLER_TYPE_NAMES: [&str; 5] = [
@@ -31396,22 +31324,12 @@ fn facade_does_not_reexport_or_declare_iterable_batch_sampler() {
 fn facade_does_not_reexport_or_declare_iterable_batch_sampler_detects_each_category() {
     let offense =
         |src: &str| !scan_iterable_batch_sampler_reexports_and_declarations(src).is_empty();
-    // 正例: 個別再エクスポート（単一行・group・複数行・別名）。
-    assert!(offense(
-        "pub use fandhe_ai_tensor_core::data::BatchSampler;"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_tensor_core::data::{DataLoader, IterableDataset};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_tensor_core::data::{\n    IterableDataLoader,\n    StackSamples,\n};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_tensor_core::data::IterableBatches as IB;"
-    ));
-    // 正例: 内部クレートの glob 再エクスポート。
+    // 正例: 禁止し続ける経路（内部クレートの glob 再エクスポート・禁止名の再エクスポート）。
     assert!(offense("pub use fandhe_ai_tensor_core::*;"));
-    // 正例: 型の独自宣言。
+    assert!(offense(
+        "pub use fandhe_ai_tensor_core::data::{DataLoader, stack_samples};"
+    ));
+    // 正例: 型の独自宣言（承認形は純再エクスポートのみ。独自宣言は不可）。
     assert!(offense("pub struct BatchSampler;"));
     assert!(offense("pub struct IterableDataLoader { n: usize }"));
     assert!(offense("pub enum IterableBatches { A }"));
@@ -31423,6 +31341,14 @@ fn facade_does_not_reexport_or_declare_iterable_batch_sampler_detects_each_categ
     ));
     assert!(offense("trait T { fn iter_samples(&self); }"));
     assert!(offense("pub fn stack_samples() {}"));
+    // 負例（#2679 で承認）: 承認済み型の純再エクスポートは本走査の違反ではない
+    // （過不足の検査は承認形インベントリが担う）。
+    assert!(!offense(
+        "pub use fandhe_ai_tensor_core::data::BatchSampler;"
+    ));
+    assert!(!offense(
+        "pub use fandhe_ai_tensor_core::data::{IterableDataLoader, StackSamples};"
+    ));
     // 負例: 保留対象を部分文字列に含む別トークン。
     assert!(!offense("pub struct BatchSamplerConfig;"));
     assert!(!offense("fn iter_samples_helper() {}"));
@@ -31431,11 +31357,11 @@ fn facade_does_not_reexport_or_declare_iterable_batch_sampler_detects_each_categ
     assert!(!offense("fn f(d: D) { let s = d.iter_samples(); }"));
     // 負例: コメント・文字列リテラル中の出現。
     assert!(!offense(
-        "// pub use fandhe_ai_tensor_core::data::BatchSampler;"
+        "// pub use fandhe_ai_tensor_core::data::stack_samples;"
     ));
     assert!(!offense("let s = \"pub fn iter_samples() {}\";"));
     // 負例: 非公開 use。
-    assert!(!offense("use fandhe_ai_tensor_core::data::BatchSampler;"));
+    assert!(!offense("use fandhe_ai_tensor_core::data::stack_samples;"));
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、IterableDataset／BatchSampler の型宣言と
@@ -31531,13 +31457,598 @@ fn workspace_declares_iterable_batch_sampler_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// FunctionalApiHoldDoctestGuard（イシュー #2665・親 #2663・ルート #2499 Phase 4）:
-// `PackedSequenceHoldDoctestGuard`（#2647）系のテストを鏡写しにしつつ、実装が facade 内部
-// （`crates/facade/src/compat/functional.rs`。`#[cfg(test)]` 限定の `pub(crate)`）にある点が異なる。
-// そのため「facade src に同名の型宣言が 1 件も無い」方式は使えず、3 型名の宣言を「`compat/functional.rs` に
-// `pub(crate) struct` として各 1 件」だけに固定する inventory 方式にする（`facade_train_step_public_surface_
-// matches_approved_contract` が手本）。facade 公開形（推奨は `fandhe_ai::compat` へのモジュール再エクスポート）は
-// 未承認（承認依頼は #2677。公開は承認後の #2679）。
+// Phase 4 の学習系・データ系の承認形インベントリ（イシュー #2679・親 #2625。承認はルート #2499 の
+// コメント issuecomment-6033824965）。`fandhe_ai::optim`（Rprop・ASGD・Adafactor・Lion・
+// PolynomialLr・ChainedScheduler）と `fandhe_ai::data`（Dataset 合成・iterable・バッチサンプラー）の
+// 素の再エクスポートが、承認した `pub use` 文だけで過不足なく公開されていることを固定する。
+// =====================================================================
+
+/// 承認した素の再エクスポート文（`(src からの相対パス, 文)`）。文は `pub use` 1 文 1 行（トークン列で比較する
+/// ため空白・改行には依存しない）。各文はちょうど 1 件であること。
+const PHASE4_TRAINING_DATA_APPROVED_REEXPORTS: [(&str, &str); 9] = [
+    (
+        "optim.rs",
+        "pub use fandhe_ai_autodiff::nn::optim::{Adafactor, AdafactorConfig};",
+    ),
+    (
+        "optim.rs",
+        "pub use fandhe_ai_autodiff::nn::optim::{Asgd, AsgdConfig};",
+    ),
+    (
+        "optim.rs",
+        "pub use fandhe_ai_autodiff::nn::optim::{ChainedScheduler, PolynomialLr};",
+    ),
+    (
+        "optim.rs",
+        "pub use fandhe_ai_autodiff::nn::optim::{Lion, LionConfig};",
+    ),
+    (
+        "optim.rs",
+        "pub use fandhe_ai_autodiff::nn::optim::{Rprop, RpropConfig};",
+    ),
+    (
+        "data.rs",
+        "pub use fandhe_ai_tensor_core::data::{BatchSampler, IterableBatches, IterableDataLoader};",
+    ),
+    (
+        "data.rs",
+        "pub use fandhe_ai_tensor_core::data::{ConcatBatch, ConcatDataset, Subset};",
+    ),
+    (
+        "data.rs",
+        "pub use fandhe_ai_tensor_core::data::{IterableDataset, StackSamples};",
+    ),
+    (
+        "data.rs",
+        "pub use fandhe_ai_tensor_core::data::{random_split, random_split_fractions};",
+    ),
+];
+
+/// 上記の承認形に含まれる公開名（これらを識別子として含む `pub use` 文は承認形でなければならない）。
+const PHASE4_TRAINING_DATA_NAMES: [&str; 20] = [
+    "Rprop",
+    "RpropConfig",
+    "Asgd",
+    "AsgdConfig",
+    "Adafactor",
+    "AdafactorConfig",
+    "Lion",
+    "LionConfig",
+    "PolynomialLr",
+    "ChainedScheduler",
+    "Subset",
+    "ConcatDataset",
+    "ConcatBatch",
+    "random_split",
+    "random_split_fractions",
+    "IterableDataset",
+    "IterableDataLoader",
+    "IterableBatches",
+    "StackSamples",
+    "BatchSampler",
+];
+
+/// `(src からの相対パス, ソース内容)` の集合を走査し、Phase 4 学習系・データ系の公開形が承認形から外れている
+/// 点を違反として返す（[`facade_exposes_phase4_training_data_only_in_approved_shape`]・自己テスト共用）。
+///
+/// - 公開名を識別子単位で含む `pub use` 文は、[`PHASE4_TRAINING_DATA_APPROVED_REEXPORTS`] のいずれかと
+///   （ファイル・トークン列とも）完全一致しなければ違反（別名・別ファイル・グループ変形・glob を拒否）
+/// - 承認した各文はちょうど 1 件であること（欠落・重複を拒否）
+/// - `trait`／`struct`／`enum`／`type`／`union` による公開名の独自宣言は facade src のどこにあっても違反
+fn phase4_training_data_surface_violations(files: &[(String, String)]) -> Vec<String> {
+    approved_reexport_surface_violations(
+        files,
+        &PHASE4_TRAINING_DATA_NAMES,
+        &PHASE4_TRAINING_DATA_APPROVED_REEXPORTS,
+    )
+}
+
+/// 承認済み `pub use` 文だけを許す汎用インベントリ検査（[`phase4_training_data_surface_violations`]・
+/// [`packed_sequence_surface_violations`] 共用）。`names` を識別子として含む `pub use` 文は `approved`
+/// （`(src からの相対パス, 文)`）のいずれかとトークン列で完全一致しなければ違反、承認した各文はちょうど 1 件、
+/// `names` の独自宣言（`trait`／`struct`／`enum`／`type`／`union`）は違反。
+fn approved_reexport_surface_violations(
+    files: &[(String, String)],
+    names: &[&str],
+    approved_statements: &[(&str, &str)],
+) -> Vec<String> {
+    // rustfmt が 100 桁超の `pub use` を折り返すとき `}` 直前へ付ける末尾カンマは意味を持たないため、
+    // 承認形・走査対象の双方で取り除いてから比較する。
+    fn normalize(tokens: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "," && tokens.get(i + 1).map(String::as_str) == Some("}") {
+                continue;
+            }
+            out.push(t.clone());
+        }
+        out
+    }
+    let approved: Vec<(&str, Vec<String>)> = approved_statements
+        .iter()
+        .map(|(rel, line)| {
+            (
+                *rel,
+                normalize(&tokenize_including_punctuation(line.trim_end_matches(';'))),
+            )
+        })
+        .collect();
+    let mut counts = vec![0usize; approved.len()];
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let mut j = 0usize;
+        while j < tokens.len() {
+            if tokens[j] == "pub" && tokens.get(j + 1).map(String::as_str) == Some("use") {
+                let mut end = j + 2;
+                while end < tokens.len() && tokens[end] != ";" {
+                    end += 1;
+                }
+                let stmt = normalize(&tokens[j..end.min(tokens.len())]);
+                if stmt.iter().any(|t| names.contains(&t.as_str())) {
+                    match approved
+                        .iter()
+                        .position(|(a_rel, a_tokens)| a_rel == rel && *a_tokens == stmt)
+                    {
+                        Some(idx) => counts[idx] += 1,
+                        None => {
+                            violations.push(format!("{rel}: 承認形以外の `{}`", stmt.join(" ")))
+                        }
+                    }
+                }
+                j = end + 1;
+                continue;
+            }
+            j += 1;
+        }
+        for (i, tok) in tokens.iter().enumerate() {
+            if matches!(tok.as_str(), "trait" | "struct" | "enum" | "type" | "union")
+                && let Some(next) = tokens.get(i + 1)
+                && names.contains(&next.as_str())
+            {
+                violations.push(format!("{rel}: {tok} {next} 宣言（独自宣言は不可）"));
+            }
+        }
+    }
+    for ((rel, line), count) in approved_statements.iter().zip(counts) {
+        if count != 1 {
+            violations.push(format!(
+                "src/{rel} の承認形（`{line}`）が {count} 件（ちょうど 1 件である必要がある）"
+            ));
+        }
+    }
+    violations
+}
+
+/// facade src 全体で Phase 4 学習系・データ系の公開が承認形（9 文の素の再エクスポート）だけであることを
+/// 固定する。
+#[test]
+fn facade_exposes_phase4_training_data_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
+    });
+    let violations = phase4_training_data_surface_violations(&files);
+    assert!(
+        violations.is_empty(),
+        "facade の Phase 4 学習系・データ系の公開が承認形（イシュー #2679）から外れている: {violations:?}"
+    );
+}
+
+/// [`phase4_training_data_surface_violations`] が承認形を受理し各類型を検出することの自己検証。
+#[test]
+fn facade_exposes_phase4_training_data_only_in_approved_shape_detects_each_category() {
+    let base = || -> Vec<(String, String)> {
+        let mut optim = String::new();
+        let mut data = String::new();
+        for (rel, line) in PHASE4_TRAINING_DATA_APPROVED_REEXPORTS {
+            let dst = if rel == "optim.rs" {
+                &mut optim
+            } else {
+                &mut data
+            };
+            dst.push_str(line);
+            dst.push('\n');
+        }
+        vec![
+            ("optim.rs".to_string(), optim),
+            ("data.rs".to_string(), data),
+        ]
+    };
+    assert!(phase4_training_data_surface_violations(&base()).is_empty());
+
+    // 違反: 承認形の欠落（optim.rs の 1 文・data.rs の 1 文を落とす）。
+    for (target, needle) in [
+        ("optim.rs", "Rprop"),
+        ("data.rs", "random_split_fractions"),
+        ("data.rs", "IterableDataset"),
+    ] {
+        let mut files = base();
+        for (rel, content) in &mut files {
+            if rel == target {
+                *content = content
+                    .lines()
+                    .filter(|l| !l.contains(needle))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+        }
+        assert!(
+            !phase4_training_data_surface_violations(&files).is_empty(),
+            "欠落を検出しない: {target} {needle}"
+        );
+    }
+
+    // 違反: 別名・別ファイル・重複・グループ変形・独自宣言・内部型を別経路で公開。
+    for (rel, extra) in [
+        (
+            "optim.rs",
+            "pub use fandhe_ai_autodiff::nn::optim::Rprop as Rp;\n",
+        ),
+        (
+            "optim.rs",
+            "pub use fandhe_ai_autodiff::nn::optim::{Asgd, AsgdConfig};\n",
+        ),
+        (
+            "optim.rs",
+            "pub use fandhe_ai_autodiff::nn::optim::{Lion, LionConfig, Adam};\n",
+        ),
+        (
+            "nn/mod.rs",
+            "pub use fandhe_ai_autodiff::nn::optim::{Adafactor, AdafactorConfig};\n",
+        ),
+        (
+            "data.rs",
+            "pub use fandhe_ai_tensor_core::data::Subset as Sub;\n",
+        ),
+        (
+            "compat/mod.rs",
+            "pub use fandhe_ai_tensor_core::data::random_split;\n",
+        ),
+        (
+            "data.rs",
+            "pub use fandhe_ai_tensor_core::data::{\n    BatchSampler,\n    IterableBatches,\n};\n",
+        ),
+        ("lib.rs", "pub struct Lion;\n"),
+        ("lib.rs", "pub enum ChainedScheduler { A }\n"),
+        ("lib.rs", "pub trait IterableDataset {}\n"),
+        ("lib.rs", "pub type StackSamples = u8;\n"),
+    ] {
+        let mut files = base();
+        files.push((rel.to_string(), extra.to_string()));
+        assert!(
+            !phase4_training_data_surface_violations(&files).is_empty(),
+            "検出できない類型: {rel}: {extra:?}"
+        );
+    }
+
+    // 許容: コメント・文字列・非公開 use・部分一致する別トークン・無関係な pub use。
+    let mut benign = base();
+    benign.push((
+        "compat/callbacks.rs".to_string(),
+        "// pub use x::Rprop;\n\
+         use fandhe_ai_autodiff::nn::optim::Lion;\n\
+         let s = \"BatchSampler\";\n\
+         pub struct SubsetSampler;\n\
+         pub use fandhe_ai_autodiff::nn::optim::AdamW;\n"
+            .to_string(),
+    ));
+    assert!(phase4_training_data_surface_violations(&benign).is_empty());
+}
+
+/// 承認した optimizer・LR スケジューラ型の到達性とシグネチャを `fandhe_ai` のみの import で
+/// コンパイル時に固定する（#2679。`fandhe_ai_autodiff` は import しない）。
+#[test]
+fn phase4_optim_types_are_reachable_via_facade_only() {
+    use fandhe_ai::optim::{
+        Adafactor, AdafactorConfig, Asgd, AsgdConfig, ChainedScheduler, Lion, LionConfig,
+        LrScheduler, PolynomialLr, Rprop, RpropConfig,
+    };
+    use fandhe_ai::{AutodiffError, Tensor};
+
+    // clippy::type_complexity 回避の別名（型の中身は各決定記録 §8 のシグネチャそのまま）。
+    type Res<T> = Result<T, AutodiffError>;
+    type Stepped = Res<Vec<Tensor<f32>>>;
+    type Step<O> =
+        for<'a, 'b, 'c, 'd> fn(&'a mut O, &'b [(&'c Tensor<f32>, &'d Tensor<f32>)]) -> Stepped;
+
+    let _rprop_new: fn(RpropConfig) -> Res<Rprop> = Rprop::new;
+    let _rprop_step: Step<Rprop> = Rprop::step;
+    let _asgd_new: fn(AsgdConfig) -> Res<Asgd> = Asgd::new;
+    let _asgd_step: Step<Asgd> = Asgd::step;
+    let _asgd_avg: fn(&Asgd) -> Stepped = Asgd::averaged_params;
+    let _adafactor_new: fn(AdafactorConfig) -> Res<Adafactor> = Adafactor::new;
+    let _adafactor_step: Step<Adafactor> = Adafactor::step;
+    let _lion_new: fn(LionConfig) -> Res<Lion> = Lion::new;
+    let _lion_step: Step<Lion> = Lion::step;
+    let _poly_new: fn(f32, usize, f32) -> Res<PolynomialLr> = PolynomialLr::new;
+    let _chained_new: fn(f32, Vec<Box<dyn LrScheduler>>) -> Res<ChainedScheduler> =
+        ChainedScheduler::new;
+
+    // 振る舞いの最小確認: 不正な設定は型付きエラー、多項式減衰は `total_iters` 以降 0。
+    assert!(PolynomialLr::new(f32::NAN, 4, 1.0).is_err());
+    let poly = PolynomialLr::new(0.1, 4, 1.0).unwrap();
+    assert_eq!(poly.lr_at(4), 0.0);
+}
+
+/// 承認したデータセット合成・iterable・バッチサンプラー型の到達性とシグネチャを `fandhe_ai` のみの
+/// import でコンパイル時に固定する（#2679。`fandhe_ai_tensor_core` は import しない）。
+#[test]
+fn phase4_data_types_are_reachable_via_facade_only() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::data::{
+        BatchSampler, ConcatBatch, ConcatDataset, DataError, Dataset, IterableDataLoader,
+        IterableDataset, StackSamples, Subset, TensorDataset, random_split, random_split_fractions,
+    };
+
+    let _bs_new: fn(Vec<usize>, usize, bool) -> Result<BatchSampler, DataError> = BatchSampler::new;
+    // `IterableDataset` の利用者側実装（`iter_samples` は 1 epoch 分のストリームを返す）。
+    struct Counter(usize);
+    impl IterableDataset for Counter {
+        type Sample = Tensor<f32>;
+        fn iter_samples(&self) -> Box<dyn Iterator<Item = Result<Tensor<f32>, DataError>> + '_> {
+            Box::new(
+                (0..self.0).map(|i| Tensor::new(vec![i as f32], &[1]).map_err(DataError::from)),
+            )
+        }
+    }
+    let _idl_new: fn(Counter, usize, bool) -> Result<IterableDataLoader<Counter>, DataError> =
+        IterableDataLoader::new;
+    let loader = IterableDataLoader::new(Counter(5), 2, false).unwrap();
+    assert_eq!(loader.iter().count(), 3);
+    fn _assert_stack<S: StackSamples>() {}
+    fn _assert_concat<C: ConcatBatch>() {}
+    _assert_stack::<Tensor<f32>>();
+    _assert_concat::<Tensor<f32>>();
+
+    let features = Tensor::new((0..8).map(|v| v as f32).collect::<Vec<_>>(), &[8, 1]).unwrap();
+    let ds = TensorDataset::new(features).unwrap();
+    let parts = random_split(ds, &[5, 3]).unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].len(), 5);
+    let features = Tensor::new((0..4).map(|v| v as f32).collect::<Vec<_>>(), &[4, 1]).unwrap();
+    let ds = TensorDataset::new(features).unwrap();
+    let halves = random_split_fractions(ds, &[0.5, 0.5]).unwrap();
+    assert_eq!(halves.len(), 2);
+    let joined = ConcatDataset::new(halves.into_iter().collect::<Vec<Subset<_>>>()).unwrap();
+    assert_eq!(joined.len(), 4);
+}
+
+// =====================================================================
+// 可変長系列（packed sequence。イシュー #2679）の承認形インベントリ・到達性・正の doctest プローブ。
+// 承認形は `fandhe_ai::nn::rnn` への型 5・自由関数 8 の素の再エクスポート
+// （`docs/autodiff-packed-sequence-decision.md` §7）。
+// =====================================================================
+
+/// 承認した素の再エクスポート文（`nn/rnn.rs`。トークン列で比較するため折り返しに依存しない）。
+const PACKED_SEQUENCE_APPROVED_REEXPORTS: [(&str, &str); 5] = [
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{PackedLstmSeqOutput, PackedRnnSeqOutput, PackedSequence};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{StackedPackedLstmSeqOutput, StackedPackedRnnSeqOutput};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{gru_forward_packed, lstm_forward_packed, rnn_forward_packed};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{stacked_gru_forward_packed, stacked_lstm_forward_packed, stacked_rnn_forward_packed};",
+    ),
+];
+
+/// 上記の承認形に含まれる公開名。
+const PACKED_SEQUENCE_APPROVED_NAMES: [&str; 13] = [
+    "PackedSequence",
+    "PackedRnnSeqOutput",
+    "PackedLstmSeqOutput",
+    "StackedPackedRnnSeqOutput",
+    "StackedPackedLstmSeqOutput",
+    "pack_padded_sequence",
+    "pad_packed_sequence",
+    "rnn_forward_packed",
+    "gru_forward_packed",
+    "lstm_forward_packed",
+    "stacked_rnn_forward_packed",
+    "stacked_gru_forward_packed",
+    "stacked_lstm_forward_packed",
+];
+
+/// packed sequence の公開形が承認形から外れている点を違反として返す
+/// （[`facade_exposes_packed_sequence_only_in_approved_shape`]・自己テスト共用）。
+fn packed_sequence_surface_violations(files: &[(String, String)]) -> Vec<String> {
+    approved_reexport_surface_violations(
+        files,
+        &PACKED_SEQUENCE_APPROVED_NAMES,
+        &PACKED_SEQUENCE_APPROVED_REEXPORTS,
+    )
+}
+
+/// facade src 全体で packed sequence の公開が承認形（`nn/rnn.rs` の承認 5 文）だけであることを固定する。
+#[test]
+fn facade_exposes_packed_sequence_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
+    });
+    let violations = packed_sequence_surface_violations(&files);
+    assert!(
+        violations.is_empty(),
+        "facade の packed sequence 公開が承認形（イシュー #2679・`docs/autodiff-packed-sequence-decision.md` §7）\
+         から外れている: {violations:?}"
+    );
+}
+
+/// [`packed_sequence_surface_violations`] が承認形を受理し各類型を検出することの自己検証。
+#[test]
+fn facade_exposes_packed_sequence_only_in_approved_shape_detects_each_category() {
+    let base = || -> Vec<(String, String)> {
+        let mut rnn = String::new();
+        for (_, line) in PACKED_SEQUENCE_APPROVED_REEXPORTS {
+            rnn.push_str(line);
+            rnn.push('\n');
+        }
+        vec![("nn/rnn.rs".to_string(), rnn)]
+    };
+    assert!(packed_sequence_surface_violations(&base()).is_empty());
+
+    // 違反: 承認形の欠落。
+    for needle in [
+        "PackedSequence",
+        "pad_packed_sequence",
+        "stacked_rnn_forward_packed",
+    ] {
+        let mut files = base();
+        files[0].1 = files[0]
+            .1
+            .lines()
+            .filter(|l| !l.contains(needle))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !packed_sequence_surface_violations(&files).is_empty(),
+            "欠落を検出しない: {needle}"
+        );
+    }
+
+    // 違反: 別名・別ファイル・重複・グループ変形・独自宣言。
+    for (rel, extra) in [
+        (
+            "nn/rnn.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::pack_padded_sequence as pack;\n",
+        ),
+        (
+            "nn/rnn.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence};\n",
+        ),
+        (
+            "nn/mod.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::PackedSequence;\n",
+        ),
+        (
+            "lib.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::rnn_forward_packed;\n",
+        ),
+        ("lib.rs", "pub struct PackedSequence;\n"),
+        ("lib.rs", "pub enum PackedRnnSeqOutput { A }\n"),
+        ("lib.rs", "pub trait StackedPackedLstmSeqOutput {}\n"),
+    ] {
+        let mut files = base();
+        files.push((rel.to_string(), extra.to_string()));
+        assert!(
+            !packed_sequence_surface_violations(&files).is_empty(),
+            "検出できない類型: {rel}: {extra:?}"
+        );
+    }
+
+    // 許容: コメント・文字列・非公開 use・部分一致する別トークン。
+    let mut benign = base();
+    benign.push((
+        "compat/callbacks.rs".to_string(),
+        "// pub use x::PackedSequence;\n\
+         use fandhe_ai_autodiff::nn::packed_sequence::PackedSequence;\n\
+         let s = \"pack_padded_sequence\";\n\
+         pub struct PackedSequenceView;\n"
+            .to_string(),
+    ));
+    assert!(packed_sequence_surface_violations(&benign).is_empty());
+}
+
+/// 承認した packed sequence の型・自由関数のシグネチャを `fandhe_ai` のみの import でコンパイル時に固定する
+/// （#2679。`fandhe_ai_autodiff` は import しない）。
+#[test]
+fn packed_sequence_types_are_reachable_via_facade_only() {
+    use fandhe_ai::nn::rnn::{
+        Gru, GruCellVars, Lstm, PackedLstmSeqOutput, PackedRnnSeqOutput, PackedSequence, Rnn,
+        RnnCellVars, StackedGru, StackedLstm, StackedPackedLstmSeqOutput,
+        StackedPackedRnnSeqOutput, StackedRnn, gru_forward_packed, lstm_forward_packed,
+        pack_padded_sequence, pad_packed_sequence, rnn_forward_packed, stacked_gru_forward_packed,
+        stacked_lstm_forward_packed, stacked_rnn_forward_packed,
+    };
+    use fandhe_ai::{AutodiffError, Var};
+
+    // clippy::type_complexity 回避の別名（型の中身は決定記録 §7 のシグネチャそのまま）。呼び出し形と戻り値型を
+    // 型注釈付きの束縛で固定する（本関数は呼ばない。コンパイルが通ることが検査）。
+    type Res<T> = Result<T, AutodiffError>;
+    type SingleOut<'t, P> = Res<PackedRnnSeqOutput<'t, P>>;
+    type StackedOut<'t, P> = Res<StackedPackedRnnSeqOutput<'t, P>>;
+    type Padded<'t> = Res<(Var<'t>, Vec<usize>)>;
+
+    struct Models<'m> {
+        rnn: &'m Rnn,
+        gru: &'m Gru,
+        lstm: &'m Lstm,
+        srnn: &'m StackedRnn,
+        sgru: &'m StackedGru,
+        slstm: &'m StackedLstm,
+    }
+    fn _signatures<'t>(m: &Models<'_>, v: &Var<'t>, p: &PackedSequence<'t>) {
+        let _: Res<PackedSequence<'t>> = pack_padded_sequence(v, &[1usize], false, true);
+        let _: Padded<'t> = pad_packed_sequence(p, false, 0.0f32, None::<usize>);
+        let _: SingleOut<'t, RnnCellVars<'t>> = rnn_forward_packed(m.rnn, p, None);
+        let _: SingleOut<'t, GruCellVars<'t>> = gru_forward_packed(m.gru, p, None);
+        let _: Res<PackedLstmSeqOutput<'t>> = lstm_forward_packed(m.lstm, p, None, None);
+        let _: StackedOut<'t, RnnCellVars<'t>> = stacked_rnn_forward_packed(m.srnn, p, None);
+        let _: StackedOut<'t, GruCellVars<'t>> = stacked_gru_forward_packed(m.sgru, p, None);
+        let _: Res<StackedPackedLstmSeqOutput<'t>> =
+            stacked_lstm_forward_packed(m.slstm, p, None, None);
+    }
+    let _ = _signatures;
+
+    // 振る舞いの最小確認: 長さが非増加でない（`enforce_sorted = true`）入力は型付きエラー。
+    let tape = fandhe_ai::tape();
+    let x = fandhe_ai::Tensor::new(vec![0.0f32; 6], &[3, 2, 1]).unwrap();
+    assert!(pack_padded_sequence(&tape.var(&x), &[1, 3], false, true).is_err());
+}
+
+/// 正の doctest プローブ（#2679。`ema_usage_doctests_are_present_and_compiled` と同型）: packed sequence の
+/// 利用例が facade の公開 doc に実在し、実際にコンパイル・実行される形で書かれていることを固定する。
+#[test]
+fn packed_sequence_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let rnn = read_to_string_or_panic(&root.join("src/nn/rnn.rs"));
+    let v = doctest_probe_violations(
+        "nn/rnn.rs モジュール doc（可変長系列節）",
+        &inner_doc_lines(&rnn),
+        &[
+            "pack_padded_sequence",
+            "rnn_forward_packed",
+            "pad_packed_sequence",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    assert!(!doctest_probe_violations("t", &[], &["pack_padded_sequence"]).is_empty());
+}
+
+// =====================================================================
+// FunctionalApiHoldDoctestGuard（イシュー #2665・親 #2663・ルート #2499 Phase 4。公開は #2679）:
+// 承認形（`fandhe_ai::compat` への `FunctionalBuilder`・`FunctionalModel`・`Node`・`save_functional_model`・
+// `load_functional_model` の公開。`FunctionalVars` は内部のまま。`docs/facade-functional-api-decision.md`
+// §10・§13・§16〜§18。承認はルート #2499 のコメント）の公開に伴い、保留ガードを**未承認の経路**
+// （`FunctionalVars` の公開・モジュール `functional` の公開・`Sequential::apply`／`call`）だけを固定する縮小
+// ガードにし、承認形は `facade_exposes_functional_api_only_in_approved_shape` が過不足なく固定する
+// （`compat/mod.rs` の承認 `pub use` 2 文・`compat/functional.rs` の `pub struct` 3 件と
+// `pub(crate) struct FunctionalVars` 1 件・`compat/model_io/functional_io.rs` の素の `pub fn` 2 件）。
 // 検出範囲は本ソース走査が見るトークン列（`pub use` の経路・`pub mod`・型宣言・`impl Sequential` の fn）と
 // doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由までは保証しない。`Sequential` の inherent
 // メソッド名は `apply`／`call` の 2 つに限った契約である。
@@ -31589,12 +32100,7 @@ fn functional_api_hold_doctest_probe_body_matches_fixed_contract() {
 const FUNCTIONAL_API_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_functional_api_hold_probe {\n\
-\x20\x20\x20\x20pub struct FunctionalBuilder;\n\
-\x20\x20\x20\x20pub struct FunctionalModel;\n\
-\x20\x20\x20\x20pub struct Node;\n\
 \x20\x20\x20\x20pub struct FunctionalVars;\n\
-\x20\x20\x20\x20pub fn save_functional_model() {}\n\
-\x20\x20\x20\x20pub fn load_functional_model() {}\n\
 \x20\x20\x20\x20pub mod functional {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
 \x20\x20\x20\x20}\n\
@@ -31617,11 +32123,9 @@ impl __FandheFunctionalApiHoldProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node, _3: FunctionalVars) {}\n\
+fn __probe_types(_0: FunctionalVars) {}\n\
 \n\
-fn __probe_free_fns() {\n\
-\x20\x20\x20\x20save_functional_model();\n\
-\x20\x20\x20\x20load_functional_model();\n\
+fn __probe_module() {\n\
 \x20\x20\x20\x20functional::__mark();\n\
 }\n\
 \n\
@@ -31630,45 +32134,76 @@ fn __probe_methods(seq: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheFunctionalApiHoldMarker = fandhe_ai::compat::Sequential::call(seq);\n\
 }";
 
-/// 保留対象の型名。facade src での宣言は [`FUNCTIONAL_API_ALLOWED_FILE`] の `pub(crate) struct` 各 1 件だけを許す。
-const FUNCTIONAL_API_TYPE_NAMES: [&str; 4] = [
-    "FunctionalBuilder",
-    "FunctionalModel",
-    "Node",
-    "FunctionalVars",
-];
+/// 承認して公開する型名（イシュー #2679。`docs/facade-functional-api-decision.md` §10・§13・§16〜§18）。
+/// facade src での宣言は [`FUNCTIONAL_API_ALLOWED_FILE`] の `pub struct` 各 1 件だけを許す。
+const FUNCTIONAL_API_PUBLIC_TYPE_NAMES: [&str; 3] =
+    ["FunctionalBuilder", "FunctionalModel", "Node"];
 
-/// 内部実装の唯一の置き場所（facade `src` からの相対パス）。
+/// 公開しない学習用の束縛結果型（§13 項 11）。宣言は [`FUNCTIONAL_API_ALLOWED_FILE`] の `pub(crate) struct` 1 件だけを許し、
+/// どの `pub use` にも現れてはならない。
+const FUNCTIONAL_API_INTERNAL_TYPE_NAME: &str = "FunctionalVars";
+
+/// 実装の唯一の置き場所（facade `src` からの相対パス）。
 const FUNCTIONAL_API_ALLOWED_FILE: &str = "compat/functional.rs";
 
-/// 保存・復元入口の関数名（#2667）。宣言は [`FUNCTIONAL_API_IO_ALLOWED_FILE`] に各 1 件・`pub(crate)` だけを許す。
+/// 保存・復元入口の関数名（#2667。公開は #2679）。
 const FUNCTIONAL_API_IO_FN_NAMES: [&str; 2] = ["save_functional_model", "load_functional_model"];
+
+/// 保存・復元入口の宣言場所（facade `src` からの相対パス）。素の `pub fn` 各 1 件だけを許す。
+const FUNCTIONAL_API_IO_FILE: &str = "compat/model_io/functional_io.rs";
 
 /// 保存・復元入口の唯一の置き場所（workspace `crates` からの相対パス）。
 const FUNCTIONAL_API_IO_ALLOWED_FILE: &str = "facade/src/compat/model_io/functional_io.rs";
+
+/// 承認した `pub use`（`compat/mod.rs`。トークン列で比較するため折り返しに依存しない）。
+const FUNCTIONAL_API_APPROVED_REEXPORTS: [&str; 2] = [
+    "pub use functional::{FunctionalBuilder, FunctionalModel, Node};",
+    "pub use model_io::functional_io::{load_functional_model, save_functional_model};",
+];
+
+/// 承認形を置く唯一のファイル（facade `src` からの相対パス）。
+const FUNCTIONAL_API_REEXPORT_FILE: &str = "compat/mod.rs";
 
 /// [`scan_functional_api_surface`] の結果。
 #[derive(Debug, Default)]
 struct FunctionalApiScan {
     /// 違反の説明。
     offenses: Vec<String>,
-    /// 許可位置（[`FUNCTIONAL_API_ALLOWED_FILE`] の `pub(crate) struct`）で見つけた宣言名。
-    allowed_decls: Vec<String>,
+    /// 許可位置（[`FUNCTIONAL_API_ALLOWED_FILE`]）で見つけた公開型の `pub struct` 宣言名。
+    public_decls: Vec<String>,
+    /// 許可位置で見つけた [`FUNCTIONAL_API_INTERNAL_TYPE_NAME`] の `pub(crate) struct` 宣言名。
+    internal_decls: Vec<String>,
+    /// 承認した `pub use` の出現数（[`FUNCTIONAL_API_APPROVED_REEXPORTS`] と同順）。
+    approved_reexports: [usize; 2],
+    /// 保存・復元入口の素の `pub fn` 宣言名（[`FUNCTIONAL_API_IO_FILE`] のみで許可）。
+    io_pub_fns: Vec<String>,
 }
 
-/// [`facade_functional_api_stays_internal`]・その自己テストが共用する検出本体（1 ファイル分）。
+/// [`facade_exposes_functional_api_only_in_approved_shape`]・その自己テストが共用する検出本体（1 ファイル分）。
 /// `rel_path` は facade `src` からの相対パス。違反とするもの:
-/// - `pub use` の経路に `functional` または [`FUNCTIONAL_API_TYPE_NAMES`] のいずれかのトークンを含む
-///   （単一行・複数行・group・別名・glob を問わない。`#[cfg(test)] pub use` も doctest からは見えないため
-///   本走査が受け持つ）
-/// - `pub mod functional`
-/// - [`FUNCTIONAL_API_TYPE_NAMES`] の `struct`／`enum`／`type`／`trait` 宣言が許可位置の
-///   `pub(crate) struct` 以外の形・場所にある
+/// - `pub use` の経路に `functional`／`functional_io`／公開型名／保存・復元入口名／`FunctionalVars` のいずれかの
+///   トークンを含み、かつ [`FUNCTIONAL_API_REEXPORT_FILE`] の承認 2 文（トークン列の完全一致。別名・glob・
+///   グループ変形を拒否）でないもの
+/// - `pub mod functional`／`pub mod functional_io`
+/// - 公開型名・`FunctionalVars` の `struct`／`enum`／`type`／`trait` 宣言が許可位置の許可形（公開型は
+///   `pub struct`、`FunctionalVars` は `pub(crate) struct`）以外の形・場所にある
+/// - 保存・復元入口の素の `pub fn` が [`FUNCTIONAL_API_IO_FILE`] 以外にある
 /// - `impl Sequential` の fn に `apply`／`call` がある（可視性を問わない）
 fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiScan {
     let mut scan = FunctionalApiScan::default();
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
+    let approved: Vec<Vec<String>> = FUNCTIONAL_API_APPROVED_REEXPORTS
+        .iter()
+        .map(|s| tokenize_including_punctuation(s.trim_end_matches(';')))
+        .collect();
+    let is_api_name = |t: &str| {
+        t == "functional"
+            || t == "functional_io"
+            || t == FUNCTIONAL_API_INTERNAL_TYPE_NAME
+            || FUNCTIONAL_API_PUBLIC_TYPE_NAMES.contains(&t)
+            || FUNCTIONAL_API_IO_FN_NAMES.contains(&t)
+    };
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -31677,16 +32212,25 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
             while end < tokens.len() && tokens[end] != ";" {
                 end += 1;
             }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            if path_tokens.iter().any(|t| {
-                t == "functional"
-                    || t == "functional_io"
-                    || FUNCTIONAL_API_TYPE_NAMES.contains(&t.as_str())
-                    || FUNCTIONAL_API_IO_FN_NAMES.contains(&t.as_str())
-            }) {
-                scan.offenses.push(format!(
-                    "`pub use` が Functional API 名を経路に含む: {path_tokens:?}"
-                ));
+            let stmt: Vec<String> = tokens[i..end.min(tokens.len())].to_vec();
+            // rustfmt が折り返し時に付ける `}` 直前の末尾カンマは意味を持たないため取り除く。
+            let mut normalized: Vec<String> = Vec::with_capacity(stmt.len());
+            for (k, t) in stmt.iter().enumerate() {
+                if t == "," && stmt.get(k + 1).map(String::as_str) == Some("}") {
+                    continue;
+                }
+                normalized.push(t.clone());
+            }
+            if normalized.iter().any(|t| is_api_name(t)) {
+                match approved
+                    .iter()
+                    .position(|a| rel_path == FUNCTIONAL_API_REEXPORT_FILE && *a == normalized)
+                {
+                    Some(idx) => scan.approved_reexports[idx] += 1,
+                    None => scan.offenses.push(format!(
+                        "`pub use` が承認形以外で Functional API 名を経路に含む: {normalized:?}"
+                    )),
+                }
             }
             i = (end + 1).min(tokens.len());
             continue;
@@ -31714,28 +32258,45 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
                 && let Some(name) = tokens.get(j + 1)
                 && FUNCTIONAL_API_IO_FN_NAMES.contains(&name.as_str())
             {
-                scan.offenses.push(format!(
-                    "`pub fn {name}`（保存・復元入口は `pub(crate)` に限る）"
-                ));
+                let plain = j == i + 1;
+                if rel_path == FUNCTIONAL_API_IO_FILE && plain {
+                    scan.io_pub_fns.push(name.clone());
+                } else {
+                    scan.offenses.push(format!(
+                        "`pub fn {name}`（保存・復元入口は {FUNCTIONAL_API_IO_FILE} の素の `pub fn` 各 1 件に限る）"
+                    ));
+                }
             }
         }
         if matches!(tokens[i].as_str(), "struct" | "enum" | "type" | "trait")
             && let Some(name) = tokens.get(i + 1)
-            && FUNCTIONAL_API_TYPE_NAMES.contains(&name.as_str())
+            && (FUNCTIONAL_API_PUBLIC_TYPE_NAMES.contains(&name.as_str())
+                || name == FUNCTIONAL_API_INTERNAL_TYPE_NAME)
         {
             let is_pub_crate = i >= 4
                 && tokens[i - 4] == "pub"
                 && tokens[i - 3] == "("
                 && tokens[i - 2] == "crate"
                 && tokens[i - 1] == ")";
-            if rel_path == FUNCTIONAL_API_ALLOWED_FILE && tokens[i] == "struct" && is_pub_crate {
-                scan.allowed_decls.push(name.clone());
-            } else {
-                scan.offenses.push(format!(
-                    "`{} {name}` の宣言が許可位置（{FUNCTIONAL_API_ALLOWED_FILE} の `pub(crate) struct`）以外にある（{rel_path}）",
-                    tokens[i]
-                ));
+            let is_plain_pub = i >= 1 && tokens[i - 1] == "pub";
+            let internal = name == FUNCTIONAL_API_INTERNAL_TYPE_NAME;
+            if rel_path == FUNCTIONAL_API_ALLOWED_FILE && tokens[i] == "struct" {
+                if internal && is_pub_crate {
+                    scan.internal_decls.push(name.clone());
+                    i += 1;
+                    continue;
+                }
+                if !internal && is_plain_pub {
+                    scan.public_decls.push(name.clone());
+                    i += 1;
+                    continue;
+                }
             }
+            scan.offenses.push(format!(
+                "`{} {name}` の宣言が許可位置・許可形（{FUNCTIONAL_API_ALLOWED_FILE} の公開型は `pub struct`、\
+                 FunctionalVars は `pub(crate) struct`）以外にある（{rel_path}）",
+                tokens[i]
+            ));
         }
         i += 1;
     }
@@ -31751,99 +32312,197 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
     scan
 }
 
-/// facade src 全体に Functional API の公開・再エクスポート・迂回宣言が無く、内部実装の 3 型が
-/// `compat/functional.rs` に `pub(crate) struct` として各 1 件だけ存在することを固定する
-/// （`FunctionalApiHoldDoctestGuard` の正のプローブと多層防御を成すソース走査ガード）。欠落
-/// （走査の空振り）・二重宣言・素の `pub struct`・別ファイルの宣言をすべて検出する。
+/// 走査結果の集合から、承認形からの逸脱を違反として返す（[`facade_exposes_functional_api_only_in_approved_shape`]・
+/// 自己テスト共用）。
+fn functional_api_surface_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut violations: Vec<String> = Vec::new();
+    let mut public_decls: Vec<String> = Vec::new();
+    let mut internal_decls: Vec<String> = Vec::new();
+    let mut approved_counts = [0usize; 2];
+    let mut io_fns: Vec<String> = Vec::new();
+    for (rel, content) in files {
+        let scan = scan_functional_api_surface(rel, content);
+        for offense in scan.offenses {
+            violations.push(format!("{rel}: {offense}"));
+        }
+        public_decls.extend(scan.public_decls);
+        internal_decls.extend(scan.internal_decls);
+        io_fns.extend(scan.io_pub_fns);
+        for (k, c) in scan.approved_reexports.iter().enumerate() {
+            approved_counts[k] += c;
+        }
+    }
+    public_decls.sort();
+    internal_decls.sort();
+    io_fns.sort();
+    let mut expected_public: Vec<String> = FUNCTIONAL_API_PUBLIC_TYPE_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected_public.sort();
+    if public_decls != expected_public {
+        violations.push(format!(
+            "公開型 3 名が {FUNCTIONAL_API_ALLOWED_FILE} の `pub struct` として各 1 件ずつ存在しない\
+             （found={public_decls:?}）"
+        ));
+    }
+    if internal_decls != [FUNCTIONAL_API_INTERNAL_TYPE_NAME.to_string()] {
+        violations.push(format!(
+            "{FUNCTIONAL_API_INTERNAL_TYPE_NAME} が {FUNCTIONAL_API_ALLOWED_FILE} の `pub(crate) struct` として\
+             1 件だけ存在しない（found={internal_decls:?}）"
+        ));
+    }
+    let mut expected_io: Vec<String> = FUNCTIONAL_API_IO_FN_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected_io.sort();
+    if io_fns != expected_io {
+        violations.push(format!(
+            "保存・復元入口が {FUNCTIONAL_API_IO_FILE} の素の `pub fn` として各 1 件ずつ存在しない（found={io_fns:?}）"
+        ));
+    }
+    if approved_counts != [1, 1] {
+        violations.push(format!(
+            "{FUNCTIONAL_API_REEXPORT_FILE} の承認 `pub use` 2 文がちょうど 1 件ずつでない（counts={approved_counts:?}）"
+        ));
+    }
+    violations
+}
+
+/// facade src 全体で Functional API の公開が承認形（イシュー #2679）だけであることを固定する:
+/// `compat/mod.rs` の承認 `pub use` 2 文（`FunctionalBuilder`・`FunctionalModel`・`Node`・保存・復元入口 2 本）・
+/// `compat/functional.rs` の `pub struct` 3 件と `pub(crate) struct FunctionalVars` 1 件・
+/// `compat/model_io/functional_io.rs` の素の `pub fn` 2 件。`FunctionalVars` の公開・`pub mod functional`・
+/// 別名・別経路の再エクスポート・迂回宣言・`Sequential::apply`／`call` は fail-closed で拒否する
+/// （`FunctionalApiHoldDoctestGuard` の正のプローブと多層防御を成す）。
 #[test]
-fn facade_functional_api_stays_internal() {
+fn facade_exposes_functional_api_only_in_approved_shape() {
     let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    let mut allowed: Vec<String> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
         let rel = path
             .strip_prefix(&src_dir)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        let scan = scan_functional_api_surface(&rel, content);
-        for offense in scan.offenses {
-            offending.push(format!("{rel}: {offense}"));
-        }
-        allowed.extend(scan.allowed_decls);
+        files.push((rel, content.to_string()));
     });
-    allowed.sort();
-    let mut expected: Vec<String> = FUNCTIONAL_API_TYPE_NAMES
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    expected.sort();
+    let violations = functional_api_surface_violations(&files);
     assert!(
-        offending.is_empty(),
-        "facade の公開面が Functional API（#2665 の `compat/functional.rs`。facade 公開形は未承認で承認依頼は \
-         #2677）を公開・再エクスポート・迂回宣言している: {offending:?}"
-    );
-    assert_eq!(
-        allowed, expected,
-        "内部実装の 4 型（FunctionalBuilder／FunctionalModel／Node／FunctionalVars）が {FUNCTIONAL_API_ALLOWED_FILE} の \
-         `pub(crate) struct` として各 1 件ずつ存在しない（欠落・二重宣言・走査の空振りの疑い）"
+        violations.is_empty(),
+        "facade の Functional API 公開が承認形（イシュー #2679・`docs/facade-functional-api-decision.md` §10）\
+         から外れている: {violations:?}"
     );
 }
 
-/// [`facade_functional_api_stays_internal`] の自己テスト（各違反カテゴリの合成ソースを検出できること、
-/// および部分一致する別トークン・`FunctionalBuilder::apply`・コメント・文字列・非公開 `use` を誤検出しない
+/// [`facade_exposes_functional_api_only_in_approved_shape`] の自己テスト（各違反カテゴリの合成ソースを検出
+/// できること、承認形を受理すること、部分一致する別トークン・コメント・文字列・非公開 `use` を誤検出しない
 /// ことを恒久的に固定する）。
 #[test]
-fn facade_functional_api_stays_internal_detects_each_category() {
+fn facade_exposes_functional_api_only_in_approved_shape_detects_each_category() {
     let other = "compat/other.rs";
     let offense = |rel: &str, src: &str| !scan_functional_api_surface(rel, src).offenses.is_empty();
 
-    // 正例: `pub use`（単一行・複数行・別名・glob・ネスト group・モジュール名）。
+    // 承認形は違反ではなく集計される。
+    let ok = scan_functional_api_surface(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{FunctionalBuilder, FunctionalModel, Node};\n\
+         pub use model_io::functional_io::{load_functional_model, save_functional_model};\n",
+    );
+    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
+    assert_eq!(ok.approved_reexports, [1, 1]);
+    // rustfmt の折り返し・末尾カンマでも同じ。
+    let wrapped = scan_functional_api_surface(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{\n    FunctionalBuilder,\n    FunctionalModel,\n    Node,\n};\n",
+    );
+    assert!(wrapped.offenses.is_empty(), "{:?}", wrapped.offenses);
+    assert_eq!(wrapped.approved_reexports, [1, 0]);
+    let ok = scan_functional_api_surface(
+        FUNCTIONAL_API_ALLOWED_FILE,
+        "pub struct Node { index: usize }\npub struct FunctionalBuilder;\npub struct FunctionalModel;\n\
+         pub(crate) struct FunctionalVars;\n",
+    );
+    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
+    assert_eq!(
+        ok.public_decls,
+        ["Node", "FunctionalBuilder", "FunctionalModel"]
+    );
+    assert_eq!(ok.internal_decls, ["FunctionalVars"]);
+    let ok = scan_functional_api_surface(
+        FUNCTIONAL_API_IO_FILE,
+        "pub fn save_functional_model() {}\npub fn load_functional_model() {}\n",
+    );
+    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
+    assert_eq!(
+        ok.io_pub_fns,
+        ["save_functional_model", "load_functional_model"]
+    );
+
+    // 正例: 承認形以外の `pub use`（別名・別ファイル・glob・グループ変形・FunctionalVars・モジュール名）。
     assert!(offense(other, "pub use functional::FunctionalModel;"));
-    assert!(offense(other, "pub use crate::compat::functional::*;"));
     assert!(offense(
-        other,
-        "pub use functional::{\n    FunctionalBuilder as Builder,\n    other::Node,\n};"
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::FunctionalModel;"
     ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{FunctionalBuilder as Builder, FunctionalModel, Node};"
+    ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::{FunctionalBuilder, FunctionalModel, Node, FunctionalVars};"
+    ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use functional::FunctionalVars;"
+    ));
+    assert!(offense(other, "pub use crate::compat::functional::*;"));
     assert!(offense(other, "pub use super::Node as GraphNode;"));
     assert!(offense(
         other,
         "#[cfg(test)]\npub use functional::FunctionalBuilder;"
     ));
     assert!(offense(other, "pub use a::{b::{c::Node}};"));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use model_io::functional_io::*;"
+    ));
+    assert!(offense(
+        FUNCTIONAL_API_REEXPORT_FILE,
+        "pub use model_io::functional_io::save_functional_model as save;"
+    ));
+    assert!(offense(
+        other,
+        "pub use model_io::functional_io::{load_functional_model, save_functional_model};"
+    ));
     // 正例: `pub mod functional`／`pub mod functional_io`。
     assert!(offense(other, "pub mod functional;"));
     assert!(offense(other, "pub mod functional { }"));
     assert!(offense(other, "pub mod functional_io;"));
-    // 正例（#2667）: 保存・復元入口の公開（素の `pub fn`・修飾子付き・`pub use` 経路）。
+    // 正例: 保存・復元入口の素の `pub fn` が許可ファイル以外にある・修飾子付き。
     assert!(offense(other, "pub fn save_functional_model() {}"));
     assert!(offense(other, "pub fn load_functional_model() {}"));
     assert!(offense(other, "pub async fn load_functional_model() {}"));
     assert!(offense(
-        FUNCTIONAL_API_ALLOWED_FILE,
+        FUNCTIONAL_API_IO_FILE,
         "pub unsafe fn save_functional_model() {}"
     ));
-    assert!(offense(
-        other,
-        "pub use model_io::functional_io::save_functional_model;"
-    ));
-    assert!(offense(
-        other,
-        "pub use crate::x::load_functional_model as l;"
-    ));
-    assert!(offense(other, "pub use model_io::functional_io::*;"));
-    // 負例（#2667）: `pub(crate)`・非公開・部分一致の別名。
+    // 負例: `pub(crate)`・非公開・部分一致の別名・`mod` 宣言。
     assert!(!offense(other, "pub(crate) fn save_functional_model() {}"));
     assert!(!offense(other, "fn load_functional_model() {}"));
     assert!(!offense(other, "pub fn save_functional_models() {}"));
     assert!(!offense(other, "mod functional_io;"));
+    assert!(!offense(other, "pub(super) mod functional_io;"));
     assert!(!offense(other, "#[cfg(test)]\nmod functional_io;"));
     // 正例: 許可位置以外・許可形以外の宣言。
     assert!(offense(other, "pub struct Node;"));
     assert!(offense(other, "pub(crate) struct Node;"));
+    assert!(offense(other, "pub(crate) struct FunctionalVars;"));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
-        "pub struct FunctionalModel;"
+        "pub(crate) struct FunctionalModel;"
     ));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
@@ -31851,16 +32510,14 @@ fn facade_functional_api_stays_internal_detects_each_category() {
     ));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) enum Node { A }"
+        "pub struct FunctionalVars;"
     ));
+    assert!(offense(FUNCTIONAL_API_ALLOWED_FILE, "pub enum Node { A }"));
     assert!(offense(
         FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) type FunctionalModel = u8;"
+        "pub type FunctionalModel = u8;"
     ));
-    assert!(offense(
-        FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) trait Node {}"
-    ));
+    assert!(offense(FUNCTIONAL_API_ALLOWED_FILE, "pub trait Node {}"));
     // 正例: `impl Sequential` の apply／call（可視性を問わない）。
     assert!(offense(other, "impl Sequential { pub fn apply(&self) {} }"));
     assert!(offense(other, "impl Sequential { pub fn call(&self) {} }"));
@@ -31874,15 +32531,43 @@ fn facade_functional_api_stays_internal_detects_each_category() {
         "impl crate::compat::Sequential { pub fn apply(&self) {} }"
     ));
 
-    // 許可形は違反ではなく allowed_decls に記録される。
-    let ok = scan_functional_api_surface(
-        FUNCTIONAL_API_ALLOWED_FILE,
-        "pub(crate) struct Node { index: usize }\npub(crate) struct FunctionalBuilder;\n",
-    );
-    assert!(ok.offenses.is_empty(), "{:?}", ok.offenses);
-    assert_eq!(ok.allowed_decls, ["Node", "FunctionalBuilder"]);
-    // 許可位置の宣言は他ファイルでは違反（二重宣言・迂回宣言）。
-    assert!(offense(other, "pub(crate) struct FunctionalModel;"));
+    // 集合検査: 欠落・重複を検出する。
+    let full = || -> Vec<(String, String)> {
+        vec![
+            (
+                FUNCTIONAL_API_REEXPORT_FILE.to_string(),
+                "pub use functional::{FunctionalBuilder, FunctionalModel, Node};\n\
+                 pub use model_io::functional_io::{load_functional_model, save_functional_model};\n"
+                    .to_string(),
+            ),
+            (
+                FUNCTIONAL_API_ALLOWED_FILE.to_string(),
+                "pub struct Node;\npub struct FunctionalBuilder;\npub struct FunctionalModel;\n\
+                 pub(crate) struct FunctionalVars;\n"
+                    .to_string(),
+            ),
+            (
+                FUNCTIONAL_API_IO_FILE.to_string(),
+                "pub fn save_functional_model() {}\npub fn load_functional_model() {}\n"
+                    .to_string(),
+            ),
+        ]
+    };
+    assert!(functional_api_surface_violations(&full()).is_empty());
+    for skip in 0..3 {
+        let mut files = full();
+        files.remove(skip);
+        assert!(
+            !functional_api_surface_violations(&files).is_empty(),
+            "欠落を検出しない: index {skip}"
+        );
+    }
+    let mut dup = full();
+    dup.push((
+        FUNCTIONAL_API_REEXPORT_FILE.to_string(),
+        "pub use functional::{FunctionalBuilder, FunctionalModel, Node};\n".to_string(),
+    ));
+    assert!(!functional_api_surface_violations(&dup).is_empty());
 
     // 負例: 非公開の `mod`・`use`・内部型の利用・`FunctionalBuilder::apply`。
     assert!(!offense(other, "mod functional;"));
@@ -31907,11 +32592,107 @@ fn facade_functional_api_stays_internal_detects_each_category() {
     assert!(!offense(other, "let s = \"pub struct FunctionalModel;\";"));
     assert!(!offense(other, "/// pub mod functional;\nfn f() {}"));
 }
+/// 承認した Functional API の公開シグネチャ（`docs/facade-functional-api-decision.md` §4・§7・§10・§13）を
+/// `fandhe_ai` のみの import でコンパイル時に固定する（#2679）。関数ポインタ型注釈の代入が型検査を通ることが
+/// 検査であり、メソッドの追加・引数や戻り値の変更はここでコンパイルエラーになる。`FunctionalVars`・`bind`・
+/// `is_compiled` は公開しない（到達できないため本テストには現れない）。
+#[test]
+fn functional_api_types_are_reachable_via_facade_only() {
+    use std::collections::HashMap;
+
+    use fandhe_ai::compat::{
+        FitConfig, FitTarget, FunctionalBuilder, FunctionalModel, History, Loss, Node, Optimizer,
+        load_functional_model, save_functional_model,
+    };
+    use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
+
+    // clippy::type_complexity 回避の別名（型の中身は決定記録のシグネチャそのまま）。
+    type Res<T> = Result<T, AutodiffError>;
+    type Named<'a> = Res<Vec<(String, &'a Tensor<f32>)>>;
+    type StateDict = HashMap<String, Tensor<f32>>;
+    type Tensors<'a> = &'a [&'a Tensor<f32>];
+    type Outs = Res<Vec<Tensor<f32>>>;
+
+    let _new: fn() -> FunctionalBuilder = FunctionalBuilder::new;
+    let _input: fn(&mut FunctionalBuilder) -> Res<Node> = FunctionalBuilder::input;
+    let _apply: fn(&mut FunctionalBuilder, fandhe_ai::compat::Sequential, Node) -> Res<Node> =
+        FunctionalBuilder::apply;
+    let _concatenate: fn(&mut FunctionalBuilder, &[Node], usize) -> Res<Node> =
+        FunctionalBuilder::concatenate;
+    let _add: fn(&mut FunctionalBuilder, &[Node]) -> Res<Node> = FunctionalBuilder::add;
+    let _multiply: fn(&mut FunctionalBuilder, &[Node]) -> Res<Node> = FunctionalBuilder::multiply;
+    let _average: fn(&mut FunctionalBuilder, &[Node]) -> Res<Node> = FunctionalBuilder::average;
+    let _build: fn(FunctionalBuilder, &[Node], &[Node]) -> Res<FunctionalModel> =
+        FunctionalBuilder::build;
+
+    let _predict: for<'a> fn(&FunctionalModel, Tensors<'a>) -> Outs = FunctionalModel::predict;
+    let _set_training: fn(&mut FunctionalModel, bool) = FunctionalModel::set_training;
+    let _train: fn(&mut FunctionalModel) = FunctionalModel::train;
+    let _eval: fn(&mut FunctionalModel) = FunctionalModel::eval;
+    let _training: fn(&FunctionalModel) -> bool = FunctionalModel::training;
+    let _named: for<'a> fn(&'a FunctionalModel) -> Named<'a> = FunctionalModel::named_parameters;
+    let _state_dict: fn(&FunctionalModel) -> Res<StateDict> = FunctionalModel::state_dict;
+    let _load_state_dict: fn(&mut FunctionalModel, StateDict) -> Res<()> =
+        FunctionalModel::load_state_dict;
+    let _trainable: for<'a> fn(&'a FunctionalModel) -> Vec<&'a Tensor<f32>> =
+        FunctionalModel::trainable_parameters;
+    let _apply_parameters: fn(&mut FunctionalModel, Vec<Tensor<f32>>) -> Res<()> =
+        FunctionalModel::apply_parameters;
+    let _compile: fn(&mut FunctionalModel, Optimizer, Loss) -> Res<()> = FunctionalModel::compile;
+    let _fit: for<'a> fn(
+        &mut FunctionalModel,
+        Tensors<'a>,
+        Tensors<'a>,
+        FitConfig,
+    ) -> Res<History> = FunctionalModel::fit::<f32>;
+    let _evaluate: for<'a> fn(&mut FunctionalModel, Tensors<'a>, Tensors<'a>, usize) -> Res<f32> =
+        FunctionalModel::evaluate::<f32>;
+    fn _fit_target_is_public<T: FitTarget>() {}
+    _fit_target_is_public::<f32>();
+
+    // `forward` は呼び出し形だけを固定する（`Tape`／`Var` は facade の型）。
+    fn _forward<'t>(m: &FunctionalModel, tape: &'t Tape, xs: &[Var<'t>]) -> Res<Vec<Var<'t>>> {
+        m.forward(tape, xs)
+    }
+    let _ = _forward;
+
+    // 保存・復元入口の署名（`impl AsRef<Path>` は型引数で名指しできないため呼び出し形で固定する）。
+    type IoRes<T> = Result<T, fandhe_ai::compat::ModelIoError>;
+    fn _save(m: &FunctionalModel, dir: &std::path::Path) -> IoRes<()> {
+        save_functional_model(m, dir)
+    }
+    fn _load(dir: &std::path::Path) -> IoRes<FunctionalModel> {
+        load_functional_model(dir)
+    }
+    let _ = (_save, _load);
+
+    // 振る舞いの最小確認: 空の入出力は型付きエラー。
+    assert!(FunctionalBuilder::new().build(&[], &[]).is_err());
+}
+
+/// 正の doctest プローブ（#2679。`ema_usage_doctests_are_present_and_compiled` と同型）: Functional API の
+/// 利用例が facade の公開 doc に実在し、実際にコンパイル・実行される形で書かれていることを固定する。
+#[test]
+fn functional_api_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let functional = read_to_string_or_panic(&root.join("src/compat/functional.rs"));
+    let v = doctest_probe_violations(
+        "FunctionalBuilder の doc",
+        &doc_lines_above_fn(&functional, "pub struct FunctionalBuilder"),
+        &[
+            "use fandhe_ai::compat::{FunctionalBuilder, Sequential}",
+            "FunctionalBuilder::new",
+            "model.predict",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    assert!(!doctest_probe_violations("t", &[], &["FunctionalBuilder"]).is_empty());
+}
 
 /// workspace 全体（`crates/*/src/`）で `fn save_functional_model`／`fn load_functional_model` の宣言が
 /// [`FUNCTIONAL_API_IO_ALLOWED_FILE`]（`#[cfg(test)]` 隔離の内部実装。#2667）の各 1 件だけであることを固定する
-/// （所在の登録であり緩和ではない。公開は未承認で、承認依頼は #2677・公開は承認後の #2679。素の `pub` 宣言・
-/// `pub use` 経路・`pub mod functional_io` は `facade_functional_api_stays_internal` が拒否する）。
+/// （所在の登録であり緩和ではない。公開は #2679 で承認形になった。`pub use` の形・`pub mod functional_io` は
+/// `facade_exposes_functional_api_only_in_approved_shape` が固定する）。
 #[test]
 fn workspace_declares_functional_model_io_fn_names_only_in_allowed_location() {
     let crates_dir = workspace_crates_dir();
@@ -31973,10 +32754,11 @@ fn workspace_declares_functional_model_io_fn_names_only_in_allowed_location() {
 // MergeOpsHoldDoctestGuard（イシュー #2666・親 #2663・ルート #2499 Phase 4）:
 // `TensorProductOpsHoldDoctestGuard`（#2640）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::merge_ops`。新規 `Op`・`BackendOps` メソッドなし）と facade 内部の
-// `compat/functional.rs`（`#[cfg(test)]` 限定の `pub(crate)`）に閉じ、facade 公開形
-// （`FunctionalBuilder::{concatenate, add, multiply, average}` の公開）は未承認（承認依頼は
-// #2677。公開は承認後の #2679）。`add` は既存の承認済み公開 API（`Var::add`）と同名のため
-// 検出対象に含めない。
+// `compat/functional.rs` に閉じる。#2679 で承認形（`FunctionalBuilder::{concatenate, add, multiply, average}` を
+// 型と同時に公開。決定記録 §17）を公開したため、本ガードは承認形に含まれない経路（`merge_ops` の自由関数・
+// `Var`／`Tape`／`Tensor` の結合メソッド・`Sequential::add_*`）だけを固定する。ビルダーのメソッドは
+// 宣言場所インベントリ（`compat/functional.rs` に各 1 件）で許可済み。`add` は既存の承認済み公開 API
+// （`Var::add`）と同名のため検出対象に含めない。
 // =====================================================================
 
 /// `MergeOpsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import する
@@ -32504,15 +33286,6 @@ impl<'t> __FandheJacobianHessianHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-impl __FandheJacobianHessianHoldProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn jacobian(&self) -> __FandheJacobianHessianHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheJacobianHessianHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn hessian(&self) -> __FandheJacobianHessianHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheJacobianHessianHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheJacobianHessianHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn jacobian(&self) -> __FandheJacobianHessianHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheJacobianHessianHoldMarker\n\
@@ -32533,13 +33306,11 @@ fn __probe_free_fns() {\n\
 \n\
 fn __probe_methods(\n\
 \x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
-\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20_tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Var::jacobian(v);\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Var::hessian(v);\n\
-\x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tape::jacobian(tape);\n\
-\x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tape::hessian(tape);\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tensor::<f32>::jacobian(tf);\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tensor::<f32>::hessian(tf);\n\
 }";
@@ -32591,6 +33362,11 @@ fn scan_jacobian_hessian_reexports_and_declarations(content: &str) -> Vec<String
     }
 
     for fn_name in JACOBIAN_HESSIAN_FN_NAMES {
+        // #2678: facade `Tape` の承認済みメソッド（`lib.rs` にちょうど 1 件・薄い委譲）は
+        // 正ガード（`facade_tape_phase4_methods_are_thin_delegations`）が固定するため除外する。
+        if FACADE_TAPE_APPROVED_FNS.contains(&fn_name) {
+            continue;
+        }
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -32639,9 +33415,9 @@ fn facade_does_not_reexport_or_declare_jacobian_hessian_detects_each_category() 
     // 正例: 内部クレートの glob 再エクスポート。
     assert!(offense("pub use fandhe_ai_autodiff::*;"));
     // 正例: fn 宣言・pub mod。
-    assert!(offense("pub fn jacobian() {}"));
-    assert!(offense("impl Tape { pub fn jacobian(&self) {} }"));
-    assert!(offense("impl Var { pub fn hessian(&self) {} }"));
+    assert!(!offense("pub fn jacobian() {}")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("impl Tape { pub fn jacobian(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("impl Var { pub fn hessian(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("pub mod jacobian_ops {}"));
     // 負例: コメント・文字列リテラル中の出現。
     assert!(!offense("// pub use fandhe_ai_autodiff::jacobian_ops;"));
@@ -32704,10 +33480,14 @@ fn workspace_declares_jacobian_hessian_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = JACOBIAN_HESSIAN_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = JACOBIAN_HESSIAN_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/jacobian_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の facade `Tape` メソッド（`facade/src/lib.rs` に各 1 件）。
+    for n in ["jacobian", "hessian"] {
+        expected.insert(format!("facade/src/lib.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の jacobian／hessian の `fn` 宣言が承認前の内部実装の\
@@ -32841,7 +33621,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::gradcheck(v);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::backward_detect_anomaly(v);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::gradcheck(tape);\n\
-\x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::backward_detect_anomaly(tape);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::gradcheck(tf);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::backward_detect_anomaly(tf);\n\
 }";
@@ -32912,6 +33691,11 @@ fn scan_gradcheck_anomaly_reexports_and_declarations(content: &str) -> Vec<Strin
     }
 
     for fn_name in GRADCHECK_ANOMALY_FN_NAMES {
+        // #2678: facade `Tape` の承認済みメソッド（`lib.rs` にちょうど 1 件・薄い委譲）は
+        // 正ガード（`facade_tape_phase4_methods_are_thin_delegations`）が固定するため除外する。
+        if FACADE_TAPE_APPROVED_FNS.contains(&fn_name) {
+            continue;
+        }
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -32959,9 +33743,9 @@ fn facade_does_not_reexport_or_declare_gradcheck_anomaly_detects_each_category()
     assert!(offense("pub use fandhe_ai_autodiff::*;"));
     // 正例: fn 宣言・pub mod・struct 宣言。
     assert!(offense("pub fn gradcheck() {}"));
-    assert!(offense(
+    assert!(!offense(
         "impl Tape { pub fn backward_detect_anomaly(&self) {} }"
-    ));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("impl Var { pub fn gradcheck(&self) {} }"));
     assert!(offense("pub mod gradcheck {}"));
     assert!(offense("pub mod anomaly {}"));
@@ -33027,7 +33811,7 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = [
+    let mut expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/gradcheck.rs::gradcheck".to_string(), 1usize),
         (
             "autodiff/src/anomaly.rs::backward_detect_anomaly".to_string(),
@@ -33036,6 +33820,11 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
     ]
     .into_iter()
     .collect();
+    // #2678: 承認形の facade `Tape` メソッド（`facade/src/lib.rs` に各 1 件）。
+    expected.insert(
+        "facade/src/lib.rs::backward_detect_anomaly".to_string(),
+        1usize,
+    );
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の gradcheck／backward_detect_anomaly の `fn` 宣言が承認前の\
@@ -33043,4 +33832,565 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
+}
+
+// =====================================================================
+// #2678（親 #2625・ルート #2499 Phase 4）: 承認された演算・自動微分の公開に対する正ガード。
+// 旧否定ガード（`FftOpsHoldDoctestGuard` ほか 15 個の保留 doctest と各 `facade_does_not_
+// reexport_or_declare_*`）のうち、承認形で公開した経路を「承認形だけを許す」形へ反転した
+// （先例 #2516・#2519。承認根拠は `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1）。
+// 未承認の経路（モジュール再エクスポート・裸の自由関数・`Tape`／`Tensor` 上の配置・
+// `gradcheck`・`rrelu_with_noise`・保留行）は引き続き各否定ガードと保留 doctest が拒否する。
+// =====================================================================
+
+/// `autodiff/src/var.rs` の Phase 4 委譲メソッドの承認形本体（`crate::<module>::<fn>` の
+/// 自由関数への 1 行委譲。引数名も固定）。独自実装・スタブへのすり替えと検査の迂回を拒否する
+/// （[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。`matmul_low_precision` は本体を持つ
+/// 既存メソッドを `pub` にしただけで委譲の向きが逆（自由関数 → メソッド）のため本表の対象外とし、
+/// 代わりに自由関数側の本体を [`phase4_matmul_low_precision_free_fn_delegates_to_method`] が固定する。
+const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 62] = [
+    (
+        "fft_ops",
+        "rfft",
+        "crate : : fft_ops : : rfft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "irfft",
+        "crate : : fft_ops : : irfft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "fft",
+        "crate : : fft_ops : : fft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "ifft",
+        "crate : : fft_ops : : ifft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "stft",
+        "crate : : fft_ops : : stft ( self , n_fft , window , options )",
+    ),
+    (
+        "fft_ops",
+        "istft",
+        "crate : : fft_ops : : istft ( self , n_fft , window , options )",
+    ),
+    (
+        "low_precision_ops",
+        "add_low_precision",
+        "crate : : low_precision_ops : : add_low_precision ( self , other , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "mul_low_precision",
+        "crate : : low_precision_ops : : mul_low_precision ( self , other , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "relu_low_precision",
+        "crate : : low_precision_ops : : relu_low_precision ( self , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "exp_low_precision",
+        "crate : : low_precision_ops : : exp_low_precision ( self , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "tanh_low_precision",
+        "crate : : low_precision_ops : : tanh_low_precision ( self , dtype )",
+    ),
+    ("trig_ops", "atan", "crate : : trig_ops : : atan ( self )"),
+    ("trig_ops", "asin", "crate : : trig_ops : : asin ( self )"),
+    ("trig_ops", "acos", "crate : : trig_ops : : acos ( self )"),
+    ("trig_ops", "sinh", "crate : : trig_ops : : sinh ( self )"),
+    ("trig_ops", "cosh", "crate : : trig_ops : : cosh ( self )"),
+    ("trig_ops", "asinh", "crate : : trig_ops : : asinh ( self )"),
+    ("trig_ops", "acosh", "crate : : trig_ops : : acosh ( self )"),
+    ("trig_ops", "atanh", "crate : : trig_ops : : atanh ( self )"),
+    (
+        "trig_ops",
+        "atan2",
+        "crate : : trig_ops : : atan2 ( self , other )",
+    ),
+    (
+        "nonfinite_ops",
+        "isnan",
+        "crate : : nonfinite_ops : : isnan ( self )",
+    ),
+    (
+        "nonfinite_ops",
+        "isinf",
+        "crate : : nonfinite_ops : : isinf ( self )",
+    ),
+    (
+        "nonfinite_ops",
+        "isfinite",
+        "crate : : nonfinite_ops : : isfinite ( self )",
+    ),
+    (
+        "nonfinite_ops",
+        "nan_to_num",
+        "crate : : nonfinite_ops : : nan_to_num ( self , nan , posinf , neginf )",
+    ),
+    (
+        "cumulative_ops",
+        "cummax",
+        "crate : : cumulative_ops : : cummax ( self , dim )",
+    ),
+    (
+        "cumulative_ops",
+        "cummin",
+        "crate : : cumulative_ops : : cummin ( self , dim )",
+    ),
+    (
+        "cumulative_ops",
+        "logcumsumexp",
+        "crate : : cumulative_ops : : logcumsumexp ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "median",
+        "crate : : stat_reduce_ops : : median ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "median_with_indices",
+        "crate : : stat_reduce_ops : : median_with_indices ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "kthvalue",
+        "crate : : stat_reduce_ops : : kthvalue ( self , k , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "quantile",
+        "crate : : stat_reduce_ops : : quantile ( self , q , dim , interpolation )",
+    ),
+    (
+        "stat_reduce_ops",
+        "nanmean",
+        "crate : : stat_reduce_ops : : nanmean ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "nansum",
+        "crate : : stat_reduce_ops : : nansum ( self , dim )",
+    ),
+    (
+        "binning_ops",
+        "histc",
+        "crate : : binning_ops : : histc ( self , bins , min , max )",
+    ),
+    (
+        "binning_ops",
+        "searchsorted",
+        "crate : : binning_ops : : searchsorted ( self , values , right )",
+    ),
+    (
+        "binning_ops",
+        "bucketize",
+        "crate : : binning_ops : : bucketize ( self , boundaries , right )",
+    ),
+    (
+        "shape_view_ops",
+        "unbind",
+        "crate : : shape_view_ops : : unbind ( self , dim )",
+    ),
+    (
+        "shape_view_ops",
+        "tensor_split",
+        "crate : : shape_view_ops : : tensor_split ( self , sections , dim )",
+    ),
+    (
+        "shape_view_ops",
+        "tensor_split_indices",
+        "crate : : shape_view_ops : : tensor_split_indices ( self , indices , dim )",
+    ),
+    (
+        "shape_view_ops",
+        "movedim",
+        "crate : : shape_view_ops : : movedim ( self , source , destination )",
+    ),
+    (
+        "shape_view_ops",
+        "swapaxes",
+        "crate : : shape_view_ops : : swapaxes ( self , axis0 , axis1 )",
+    ),
+    (
+        "shape_view_ops",
+        "rot90",
+        "crate : : shape_view_ops : : rot90 ( self , k , dims )",
+    ),
+    (
+        "indexed_update_ops",
+        "scatter_reduce",
+        "crate : : indexed_update_ops : : scatter_reduce ( self , dim , index , src , reduce , include_self )",
+    ),
+    (
+        "indexed_update_ops",
+        "index_add",
+        "crate : : indexed_update_ops : : index_add ( self , dim , index , source )",
+    ),
+    (
+        "indexed_update_ops",
+        "index_copy",
+        "crate : : indexed_update_ops : : index_copy ( self , dim , index , source )",
+    ),
+    (
+        "indexed_update_ops",
+        "masked_scatter",
+        "crate : : indexed_update_ops : : masked_scatter ( self , mask , source )",
+    ),
+    (
+        "tensor_product_ops",
+        "kron",
+        "crate : : tensor_product_ops : : kron ( self , other )",
+    ),
+    (
+        "tensor_product_ops",
+        "tensordot",
+        "crate : : tensor_product_ops : : tensordot ( self , other , n )",
+    ),
+    (
+        "tensor_product_ops",
+        "tensordot_axes",
+        "crate : : tensor_product_ops : : tensordot_axes ( self , other , dims_self , dims_other )",
+    ),
+    (
+        "tensor_product_ops",
+        "cdist",
+        "crate : : tensor_product_ops : : cdist ( self , other , p )",
+    ),
+    (
+        "tensor_product_ops",
+        "cross",
+        "crate : : tensor_product_ops : : cross ( self , other , dim )",
+    ),
+    (
+        "pad_ops",
+        "pad_with_mode",
+        "crate : : pad_ops : : pad_with_mode ( self , pads , mode )",
+    ),
+    (
+        "activation_scalar_ops",
+        "selu",
+        "crate : : activation_scalar_ops : : selu ( self )",
+    ),
+    (
+        "activation_scalar_ops",
+        "celu",
+        "crate : : activation_scalar_ops : : celu ( self , alpha )",
+    ),
+    (
+        "activation_scalar_ops",
+        "softsign",
+        "crate : : activation_scalar_ops : : softsign ( self )",
+    ),
+    (
+        "activation_scalar_ops",
+        "hardsigmoid",
+        "crate : : activation_scalar_ops : : hardsigmoid ( self )",
+    ),
+    (
+        "activation_scalar_ops",
+        "log_sigmoid",
+        "crate : : activation_scalar_ops : : log_sigmoid ( self )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "softmin",
+        "crate : : softmin_threshold_ops : : softmin ( self , dim )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "tanhshrink",
+        "crate : : softmin_threshold_ops : : tanhshrink ( self )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "threshold",
+        "crate : : softmin_threshold_ops : : threshold ( self , threshold , value )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "rrelu",
+        "crate : : softmin_threshold_ops : : rrelu ( self , lower , upper , training )",
+    ),
+    (
+        "shape_view_ops",
+        "meshgrid",
+        "crate : : shape_view_ops : : meshgrid ( tensors , indexing )",
+    ),
+];
+
+/// [`PHASE4_VAR_EXPECTED_BODIES`] の各メソッドが `var.rs` に `pub fn` として 1 件だけ存在し、
+/// 本体が承認形（1 行委譲）と一致することを固定する。
+#[test]
+fn var_phase4_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (module, name, expected_body) in PHASE4_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}`（{module}）の本体が承認形（自由関数への 1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// `low_precision_ops::matmul_low_precision` の本体が `Var::matmul_low_precision` への
+/// 1 行委譲であること（#2678。本体を持つ既存メソッドを `pub` にした形の固定）。
+#[test]
+fn phase4_matmul_low_precision_free_fn_delegates_to_method() {
+    let content =
+        read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/low_precision_ops.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "matmul_low_precision").as_deref(),
+        Some("lhs . matmul_low_precision ( rhs , dtype )"),
+    );
+}
+
+/// facade `Tape` の Phase 4 メソッド 5 件の承認形本体（`&self.0`／`&child.0` を渡すだけの
+/// 1 行委譲。生の autodiff `Tape` は露出しない。REQ-12）。
+const PHASE4_FACADE_TAPE_EXPECTED_BODIES: [(&str, &str); 5] = [
+    (
+        "bincount",
+        "fandhe_ai_autodiff : : binning_ops : : bincount ( & self . 0 , input , minlength )",
+    ),
+    (
+        "bincount_weighted",
+        "fandhe_ai_autodiff : : binning_ops : : bincount_weighted ( & self . 0 , input , weights , minlength )",
+    ),
+    (
+        "jacobian",
+        "fandhe_ai_autodiff : : jacobian_ops : : jacobian ( & self . 0 , output , input )",
+    ),
+    (
+        "hessian",
+        "fandhe_ai_autodiff : : jacobian_ops : : hessian ( & self . 0 , loss , input , & child . 0 )",
+    ),
+    (
+        "backward_detect_anomaly",
+        "fandhe_ai_autodiff : : anomaly : : backward_detect_anomaly ( & self . 0 , loss )",
+    ),
+];
+
+/// facade `Tape` の 5 メソッドが `src/lib.rs` に `pub fn` として各 1 件だけあり、本体が承認形と
+/// 一致し、facade src の他ファイルには同名の宣言が無いことを固定する。
+#[test]
+fn facade_tape_phase4_methods_are_thin_delegations() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in PHASE4_FACADE_TAPE_EXPECTED_BODIES {
+        assert_eq!(
+            determinism_fn_body(&tokens, name).as_deref(),
+            Some(expected_body),
+            "facade の `Tape::{name}` の本体が承認形（1 行委譲）と一致しない"
+        );
+    }
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if path.ends_with("src/lib.rs") {
+            return;
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for (name, _) in PHASE4_FACADE_TAPE_EXPECTED_BODIES {
+            assert_eq!(
+                count_fn_declarations_by_name(&tokens, name),
+                0,
+                "{} に `fn {name}` 宣言がある（承認形は src/lib.rs の Tape のみ）",
+                path.display()
+            );
+        }
+    });
+}
+
+/// 型の再エクスポート 8 個（#2678）。
+const PHASE4_TYPE_NAMES: [&str; 8] = [
+    "FftNorm",
+    "StftPadMode",
+    "StftOptions",
+    "IstftOptions",
+    "QuantileInterpolation",
+    "ScatterReduceMode",
+    "PadMode",
+    "MeshgridIndexing",
+];
+
+/// 承認形の `pub use` 行（`src/lib.rs`。内部クレートのルート経由・別名なし・1 文 1 行）。
+const PHASE4_TYPE_APPROVED_LINES: [&str; 8] = [
+    "pub use fandhe_ai_tensor_core::FftNorm;",
+    "pub use fandhe_ai_tensor_core::StftPadMode;",
+    "pub use fandhe_ai_autodiff::StftOptions;",
+    "pub use fandhe_ai_autodiff::IstftOptions;",
+    "pub use fandhe_ai_tensor_core::QuantileInterpolation;",
+    "pub use fandhe_ai_tensor_core::ScatterReduceMode;",
+    "pub use fandhe_ai_tensor_core::PadMode;",
+    "pub use fandhe_ai_autodiff::MeshgridIndexing;",
+];
+
+/// facade src の 1 ファイル内容から、[`PHASE4_TYPE_NAMES`] のいずれかを識別子として含む
+/// `pub use`（可視性修飾付きを含む）宣言を、セミコロンまでの宣言全体（複数行・行途中の
+/// 開始を含む）を 1 件として空白正規化して集める検出本体。コメント・文字列リテラルは無視する。
+fn scan_phase4_type_pub_use_lines(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let bytes = cleaned.as_bytes();
+    let mut out = Vec::new();
+    for (idx, _) in cleaned.match_indices("use") {
+        // `use` が識別子の一部（`reuse`・`user` 等）でないこと。
+        let before_ok = idx == 0 || !is_ident_char(bytes[idx - 1] as char);
+        let after_ok = idx + 3 >= bytes.len() || !is_ident_char(bytes[idx + 3] as char);
+        if !before_ok || !after_ok {
+            continue;
+        }
+        // 直前（空白を除く）が `pub` または `pub(...)` の閉じ括弧であれば公開 use。
+        let head = cleaned[..idx].trim_end();
+        let is_pub = head.ends_with(')')
+            && head
+                .rfind("pub(")
+                .is_some_and(|i| i == 0 || !is_ident_char(head.as_bytes()[i - 1] as char))
+            || head.strip_suffix("pub").is_some_and(|rest| {
+                rest.is_empty() || !is_ident_char(rest.as_bytes()[rest.len() - 1] as char)
+            });
+        if !is_pub {
+            continue;
+        }
+        let decl_start = head.rfind("pub").unwrap_or(idx);
+        let decl_end = cleaned[idx..]
+            .find(';')
+            .map_or(cleaned.len(), |e| idx + e + 1);
+        let decl = &cleaned[decl_start..decl_end];
+        if PHASE4_TYPE_NAMES
+            .iter()
+            .any(|n| line_contains_identifier(decl, n))
+        {
+            out.push(decl.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    out
+}
+
+/// 8 型の再エクスポートが `src/lib.rs` の承認形 8 行だけ（各 1 件）であることを固定する
+/// （別名・モジュール経由・別ファイルからの再エクスポート・グループ形は fail。
+/// [`facade_reexports_topk_unique_types_only_in_approved_shape`] と同型）。
+#[test]
+fn facade_reexports_phase4_ops_types_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in scan_phase4_type_pub_use_lines(content) {
+            if path.ends_with("src/lib.rs") && PHASE4_TYPE_APPROVED_LINES.contains(&line.as_str()) {
+                approved.push(line);
+            } else {
+                offending.push(format!("{}: `{line}`", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が Phase 4 の型を承認形以外で再エクスポートしている（#2678）: {offending:?}"
+    );
+    approved.sort();
+    let mut expected: Vec<String> = PHASE4_TYPE_APPROVED_LINES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        approved, expected,
+        "src/lib.rs に承認形の再エクスポート行が各 1 件ずつ存在しない（検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_phase4_type_pub_use_lines`] の自己テスト（合成入力）。
+#[test]
+fn facade_reexports_phase4_ops_types_only_in_approved_shape_detects_each_category() {
+    let scan = scan_phase4_type_pub_use_lines;
+    for line in PHASE4_TYPE_APPROVED_LINES {
+        assert_eq!(scan(line), vec![line.to_string()]);
+    }
+    // 違反: 別名・モジュール経由・グループ形（承認形と文字列一致しない行として検出される）。
+    for src in [
+        "pub use fandhe_ai_tensor_core::FftNorm as Norm;",
+        "pub use fandhe_ai_autodiff::fft_ops::StftOptions;",
+        "pub use fandhe_ai_tensor_core::{PadMode, PadModeError};",
+        "pub use fandhe_ai_tensor_core::stat_reduce::QuantileInterpolation;",
+        "pub use fandhe_ai_autodiff::shape_view_ops::MeshgridIndexing;",
+        // 複数行・別名・行途中開始・可視性修飾付き（#2678 codex 指摘）。
+        "pub use fandhe_ai_tensor_core::{\n    Device,\n    FftNorm as ExtraNorm,\n};",
+        "pub use fandhe_ai_tensor_core::{\n    FftNorm,\n};",
+        "pub use fandhe_ai_tensor_core::\n    PadMode\n    ;",
+        "mod m { pub use fandhe_ai_tensor_core::PadMode as P; }",
+        "pub(crate) use fandhe_ai_tensor_core::{\n    PadMode,\n};",
+    ] {
+        let hits = scan(src);
+        assert_eq!(hits.len(), 1, "src={src:?}");
+        assert!(
+            !PHASE4_TYPE_APPROVED_LINES.contains(&hits[0].as_str()),
+            "src={src:?}"
+        );
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use fandhe_ai_tensor_core::FftNorm;",
+        "let s = \"pub use x::PadMode;\";",
+        "use fandhe_ai_tensor_core::ScatterReduceMode;",
+        "pub use fandhe_ai_tensor_core::MatrixNormOrd;",
+    ] {
+        assert!(scan(src).is_empty(), "src={src:?}");
+    }
+}
+
+/// 保留を維持した経路（#2678）が、ソース走査の否定ガードから外れていないことの固定。
+/// `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`rrelu_with_noise`・損失関連 8 本は
+/// facade／`Var` から到達できない（記録に形が書かれていない・`Reduction` の公開経路が未整備のため）。
+#[test]
+fn phase4_held_items_remain_unexposed() {
+    for src in [
+        "pub use fandhe_ai_autodiff::gradcheck;",
+        "pub use fandhe_ai_autodiff::gradcheck::GradcheckOptions;",
+        "pub struct GradcheckReport;",
+        "impl Tape { pub fn gradcheck(&self) {} }",
+    ] {
+        assert!(
+            !scan_gradcheck_anomaly_reexports_and_declarations(src).is_empty(),
+            "gradcheck 系の保留ガードが検出できない: {src:?}"
+        );
+    }
+    assert!(
+        !scan_softmin_threshold_reexports_and_declarations(
+            "impl Var { pub fn rrelu_with_noise(&self) {} }"
+        )
+        .is_empty()
+    );
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for name in [
+        "gradcheck",
+        "rrelu_with_noise",
+        "hinge_embedding_loss",
+        "soft_margin_loss",
+        "multilabel_margin_loss",
+    ] {
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, name),
+            0,
+            "var.rs に保留中の `fn {name}` がある"
+        );
+    }
 }

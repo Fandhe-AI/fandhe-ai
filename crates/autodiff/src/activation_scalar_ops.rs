@@ -10,12 +10,11 @@
 //! フォールバックして到達可能になる（`.claude/rules/security.md` A08:
 //! `Unsupported` 以外のエラーは握りつぶさず伝播する）。
 //!
-//! **公開形は未承認で保留**: facade への公開（`Var` 委譲メソッド・
-//! `compat::Sequential::add_*`）は承認依頼 #2677 の承認後に #2678・#2679 が
-//! 担当する。本モジュールは facade から再エクスポートしない
-//! （`facade::ActivationScalarOpsHoldDoctestGuard` と `api_surface.rs` の
-//! 否定ガードが機械固定。`docs/autodiff-activation-scalar-ops-decision.md`
-//! §7・§9）。
+//! **公開形**: `compat::Sequential::add_*` は #2679 で facade へ公開済み
+//! （`docs/autodiff-activation-scalar-ops-decision.md` §7・§12）。`Var` 委譲メソッドの
+//! 公開は #2678 の担当で、本モジュールは facade から再エクスポートしない
+//! （`facade::ActivationScalarOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードが
+//! 未承認経路を機械固定する。§9）。
 //!
 //! **数値契約**（詳細は決定記録 §3）: `NaN` は伝播、`±inf`・巨大有限入力は
 //! IEEE のまま（panic・マスクなし）。CELU のみ入口で `alpha == 0`・非有限
@@ -24,6 +23,10 @@
 //!
 //! **対象外**: `create_graph`（高階微分）・f64 自動微分・f16／bf16・
 //! activation checkpoint の対象化。
+//!
+//! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{selu,celu,softsign,hardsigmoid,log_sigmoid}`。本モジュール自体は facade から再エクスポートしない。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use crate::error::AutodiffError;
 use crate::var::Var;
