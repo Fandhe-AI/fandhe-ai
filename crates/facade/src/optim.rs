@@ -72,6 +72,27 @@
 //! # }
 //! ```
 //!
+//! **EMA（重みの指数移動平均。イシュー #2560・親 #2558。決定記録
+//! `docs/autodiff-ema-decision.md` §10・§13）**: [`crate::optim::ExponentialMovingAverage`]
+//! を facade 独自の薄いラッパーとして公開する。`compat::Sequential::fit_with_callbacks`
+//! への結線は [`crate::compat::Callback::Ema`] が担う。手動ループでは
+//! `named_parameters()` から構築し、step ごとに `update_named` を呼ぶ。
+//!
+//! ```
+//! use fandhe_ai::compat::{Loss, Optimizer, Sequential};
+//! use fandhe_ai::optim::{ExponentialMovingAverage, SgdConfig};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut model = Sequential::new().add_linear(2, 1, 7)?;
+//! model.compile(Optimizer::Sgd(SgdConfig::new(0.01)), Loss::Mse)?;
+//! let mut ema = ExponentialMovingAverage::from_named(0.9, model.named_parameters())?;
+//! ema.update_named(model.named_parameters())?;
+//! assert_eq!(ema.num_updates(), 1);
+//! model.load_state_dict(ema.shadow_state_dict())?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
 //! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
@@ -414,6 +435,10 @@
 // `pub use` は 1 文 1 行を維持する（複数行折返し禁止。`tests/api_surface.rs`
 // が `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査する
 // 契約に合わせる。`src/lib.rs` 冒頭コメントと同じ理由）。
+// イシュー #2560（親 #2558・ルート #2499 の承認コメント）: EMA を
+// `docs/autodiff-ema-decision.md` §10.2 (a)(b) の facade 独自ラッパー形で公開する
+// （内部 `nn::Module` を露出させないため素の再エクスポートは採らない）。
+pub use crate::optim_ema::ExponentialMovingAverage;
 pub use fandhe_ai_autodiff::nn::optim::{Adadelta, AdadeltaConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adagrad, AdagradConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};

@@ -18,7 +18,8 @@ facade（`fandhe_ai::optim` 等への再エクスポート・`compat::FitConfig`
 自動更新）は**別途ユーザー承認**が必要な facade 公開面拡張（親 #2131
 の「facade 公開面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則）で
 あり、本イシュー時点では未承認のため保留する（多層ガードで固定。
-§4・§7）。#2559 の着手時判定と承認依頼は §10。
+§4・§7）。#2559 の着手時判定と承認依頼は §10。**#2560 で §10 の推奨案を
+facade へ公開した（§13 で解消）**。
 
 ## §1 使い方（内部クレート）
 
@@ -71,6 +72,8 @@ averaged_param)`）とは丸めが異なるため bit 一致は主張しない**
   Module::load_state_dict` doc「アトミック性」節参照）。
 
 ## §4 承認事項（未承認）
+
+> §13（#2560）で §10.2・§10.3 の推奨案が承認・実装された。以下は着手時点の判定記録。
 
 以下は facade（crates.io 公開クレート）の新規公開面拡張に該当し、
 ユーザー承認を要する。承認事項の分類根拠:
@@ -176,6 +179,8 @@ parity テストは不要。デバイス常駐経路（`DeviceParamStore`）へ�
 保留ガード（`EmaHoldDoctestGuard`・`api_surface.rs` の EMA 否定ガード）・
 `docs/compat-api-scope.md` は変更しない。**以下の推奨案は未承認**で、承認前は
 兄弟 #2560（facade 公開の実装）・#2561（保留ガードの反転）に着手しない。
+
+> §13（#2560）で承認の事実を記録し、本節の推奨案を実装した。
 
 ### 10.1 着手時判定
 
@@ -357,8 +362,9 @@ facade 経由の利用例テストの追加（対象 API が存在しないた�
   `apply`／`restore` は既存 `load_state_dict` の原子性契約
   （ロールバック・失敗時の fail-closed エラー）を再利用し独自の
   書き戻し経路を作らない。
-- **A05 設定不備**: facade 公開面は未承認のため追加せず、保留ガード
-  で無承認の公開面拡大を機械的に遮断する。
+- **A05 設定不備**: facade 公開は §13 の承認形（`optim::ExponentialMovingAverage`・
+  `compat::EmaCallback`・`Callback::Ema`）に限る。内部 `nn::Module` は公開シグネチャへ
+  出さず、承認形以外の経路は `api_surface.rs` の正ガードと inherent メソッド衝突プローブで遮断する。
 - **A06 脆弱なコンポーネント**: 依存追加なし（`Cargo.toml`／
   `Cargo.lock` 不変）。
 - **A08 データ整合性**: 自己修復ループの判定経路・ガードレール
@@ -368,6 +374,64 @@ facade 経由の利用例テストの追加（対象 API が存在しないた�
   （`load_state_dict` の既存コストと同等）。
 - `unsafe` 追加なし・本番経路で `unwrap`/`expect` 不使用・秘密情報の
   扱いなし。
+
+## §13 #2560 facade 公開の実装
+
+イシュー #2560（親 #2558）。§10.2 の公開形と §10.3 の fail-closed 追加論点を実装した。
+
+### 13.1 承認の根拠
+
+- 根拠: ルート #2499 のコメント `issuecomment-6033824965`（2026-10-07、アカウント
+  `aLiz-Nancy`。#2558 について §10 の推奨案を承認し、記録に形が無い点は実装せず止める旨）。
+  #2558／#2560 の「Claude による承認の記録」コメントは補足であり承認の根拠ではない。
+- 承認が及ぶ範囲は §10.2・§10.3 に書かれた形。記録に推奨が無い点は以下 13.4 のとおり実装せず
+  fail-closed で止めた。
+
+### 13.2 公開した名前
+
+| 公開パス | 実体 |
+|---|---|
+| `fandhe_ai::optim::ExponentialMovingAverage` | `crates/facade/src/optim_ema.rs`（内部型を 1 フィールドで持つ薄いラッパー。`optim.rs` が `pub use crate::optim_ema::ExponentialMovingAverage;` の 1 文で公開。`mod optim_ema;` は private） |
+| `fandhe_ai::compat::EmaCallback` | `crates/facade/src/compat/callbacks.rs`（`new(decay)`・`decay`・`num_updates`・`shadow_state_dict`） |
+| `fandhe_ai::compat::Callback::Ema(EmaCallback)` | `#[non_exhaustive]` enum の末尾 variant。`FitConfig`・`Sequential` には何も足さない |
+
+`from_module`／`update_from_module`／`apply`／`restore` は facade の `nn::Module` を受け、
+`named_parameters`／`state_dict`／`load_state_dict` 経由で委譲する。新しいエラー型・variant は無い
+（名前集合・個数の不一致と構築時の `decay` 検証は `InvalidArgument`。shape 不一致は既存の
+`AutodiffError::Shape`）。
+
+### 13.3 記録から導出した解釈点（新しい承認ではない）
+
+1. `EmaCallback` は既存 payload 型と同じ `compat/callbacks.rs` に置き `compat` から再エクスポートする。
+2. shadow は fit 終了後も保持し、次の fit で継続する（`ModelCheckpoint` と同じ継続型）。初回のみ
+   最初の fit 開始時に `named_parameters()` から初期化する。別構成のモデルは既存検証で拒否する。
+   リセット API は無い。
+3. accessor は `decay`・`num_updates`・`shadow_state_dict`（未初期化の間は `None`）のみ。
+4. validation が無い fit でも、epoch 末の callbacks（`ModelCheckpoint`／`EarlyStopping` の snapshot）
+   は EMA 重みの下で実行する。したがって `restore_best_weights` が fit 終了時に書き戻すのは
+   EMA 重みの snapshot になる。評価の差し替えは成功・`Err`・打ち切りのどの経路でも生の重みへ復帰する。
+5. `DeviceParamStore`／常駐経路の検出機構は設けない。`fit` 経路は構造上常駐経路へ到達しない。
+   手動で併用すると shadow が stale 化する（doc に明記）。
+6. 記録に無い拒否（param groups・`LrSchedule`・`accumulate_steps > 1` 等との併用拒否）は追加しない。
+   `accumulate_steps > 1` は実際に step した時（端数 flush を含む）だけ更新する。
+
+### 13.4 未決のまま拒否した点（追加承認が必要）
+
+§10.2 (g) の「`compile_with_amp` の skip step を拒否するか追従するか」は論点提示のみで推奨が無い。
+実装は `Callback::Ema` と `compile_with_amp` の併用を fit 開始前に `InvalidArgument` で拒否する。
+追従（skip step では更新しない等）へ緩めるには別途承認を要する。
+
+### 13.5 ガードの変更と #2561 への残作業
+
+- `EmaHoldDoctestGuard` は型名 glob 衝突プローブだけを削除し、`FitConfig`／`Sequential` への
+  `use_ema`／`ema_decay` inherent メソッド衝突プローブを残した。プローブブロック数の下限
+  （`MIN_KNOWN_PROBE_BLOCKS` = 16）は実測でも下回らないため変更していない。
+- `api_surface.rs` は型名の否定ガードを正ガード `facade_exposes_ema_only_in_approved_shape`
+  （承認形 = `optim.rs` の 1 行＋`optim_ema.rs` の宣言 1 件。内部型の素の再エクスポート・別名・
+  重複・`use_ema`／`ema_decay` の `fn` 宣言は拒否）へ置き換え、`optim` の期待集合と
+  `Callback` variant 集合（7 個）を更新した。
+- #2561 に残す: 構造体名の改名・正の doctest プローブの仕上げ、`docs/compat-api-scope.md` §5
+  の適用記録、facade 経由の利用例の拡充。
 
 ## 非信頼データの扱い
 

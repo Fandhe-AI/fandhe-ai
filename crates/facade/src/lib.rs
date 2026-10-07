@@ -177,6 +177,10 @@ mod inference;
 /// サイズ上限（`fs_guard` モジュール doc 参照）。
 mod fs_guard;
 
+/// 非公開。`optim::ExponentialMovingAverage`（イシュー #2560）の実体。公開パスは
+/// `optim.rs` の `pub use` のみ（`optim_ema` モジュール自体は公開しない）。
+mod optim_ema;
+
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
 // （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。
@@ -2924,22 +2928,19 @@ struct LossOpsHoldDoctestGuard;
 /// 採る。
 ///
 /// [`fandhe_ai_autodiff::nn::ExponentialMovingAverage`]（内部クレート
-/// 限定。`crates/autodiff/src/nn/ema.rs`。イシュー #2179）は facade
-/// （`fandhe_ai::optim` 等）から再エクスポートしておらず、`compat::
-/// FitConfig`（`fit(use_ema=true)` 相当のフィールド／メソッド追加）・
-/// `compat::Sequential`（EMA 適用・復元メソッド追加）への接続も未実装
-/// のまま保留する（`docs/autodiff-ema-decision.md` §4「承認事項」節。
-/// 親 #2131 の「facade 公開面拡張は設計判断記録 → 承認 → 実装の 2 段」
-/// 規則に基づく）。
+/// 限定。`crates/autodiff/src/nn/ema.rs`。イシュー #2179）は、イシュー #2560 で
+/// `optim::ExponentialMovingAverage`（facade 独自ラッパー）として公開済み。
+/// `compat::FitConfig`（`fit(use_ema=true)` 相当のフィールド／メソッド追加）・
+/// `compat::Sequential`（EMA 適用・復元メソッド追加）への接続は行わない
+/// （`docs/autodiff-ema-decision.md` §10.2 (d)。`fit` への結線は
+/// `compat::Callback::Ema`）。
 ///
-/// 1. **型名の再エクスポート・独自宣言**（`OptimizerExtHoldDoctestGuard`（#2501 で削除済み）
-///    と同じ glob 衝突方式）: facade の全 `pub mod` を glob import した
-///    スコープに、本ブロック内でのみ定義したローカル
-///    `__fandhe_ema_hold_probe::ExponentialMovingAverage` を導入し、
-///    それを引数に取る `__probe_type` 関数を書く。facade がどの経路
-///    でこの名前を公開しても、ローカル定義との glob 衝突（E0659 等）で
-///    コンパイルが失敗する。ソース走査ガードは `crates/facade/tests/
-///    api_surface.rs::facade_does_not_reexport_or_declare_ema_items`。
+/// 1. **型名の再エクスポート・独自宣言**: `ExponentialMovingAverage` はイシュー #2560 で
+///    承認形（`optim::ExponentialMovingAverage`。facade 独自ラッパー）として公開済みの
+///    ため、型名 glob 衝突プローブは削除した。承認形以外の経路（内部型の素の再エクスポート・
+///    別名・他ファイルでの独自宣言）はソース走査ガード
+///    `crates/facade/tests/api_surface.rs::facade_exposes_ema_only_in_approved_shape`
+///    が拒否する。
 /// 2. **`compat::FitConfig`／`compat::Sequential` への inherent メソッド
 ///    追加**（`VarCustomHoldDoctestGuard`〈#2064〉と同じマーカー型
 ///    トレイト方式）: ローカル `__FandheEmaHoldProbe` トレイト
@@ -2956,12 +2957,12 @@ struct LossOpsHoldDoctestGuard;
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// ema_hold_doctest_globs_all_pub_modules`・
 /// `ema_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_ema_items`）との多層防御の
-/// 位置づけは `docs/autodiff-ema-decision.md` §4 を参照。
+/// `facade_exposes_ema_only_in_approved_shape`）との多層防御の
+/// 位置づけは `docs/autodiff-ema-decision.md` §4・§13 を参照。
 ///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
+/// 型は #2560 で公開済み（`fit` 結線は `compat::Callback::Ema`）。`FitConfig`／
+/// `Sequential` への `use_ema`／`ema_decay` inherent メソッド追加は引き続き禁止で、
+/// 本足場はその衝突プローブだけを残す（構造体名の改名・正ガードの仕上げは #2561）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2979,13 +2980,6 @@ struct LossOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
-///
-/// mod __fandhe_ema_hold_probe {
-///     pub struct ExponentialMovingAverage;
-/// }
-/// use __fandhe_ema_hold_probe::*;
-///
-/// fn __probe_type(_: ExponentialMovingAverage) {}
 ///
 /// struct __FandheEmaHoldMarker;
 ///
