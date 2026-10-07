@@ -7813,6 +7813,225 @@ struct IterableBatchSamplerHoldDoctestGuard;
 #[allow(dead_code)]
 struct FunctionalApiHoldDoctestGuard;
 
+/// Functional API の結合 4 演算（`merge_concatenate`・`merge_add`・`merge_multiply`・
+/// `merge_average`。イシュー #2666・親 #2663・ルート #2499 Phase 4）を facade 公開面から
+/// 締め出す保留ガード（`TensorProductOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `merge_ops`・
+/// 裸の自由関数 4 名・`Var`／`Tape`／`Tensor<f32>` 向けの 7 メソッド（`merge_*` 4 名と
+/// `concatenate`／`multiply`／`average`）を持つプローブ用トレイト・`compat::Sequential` 向けの
+/// 4 メソッド（`add_concatenate`／`add_add`／`add_multiply`／`add_average`）を持つプローブ用
+/// トレイトを置き、モジュール経由と修飾なしの関数呼び出し、および修飾付きメソッド呼び出しの
+/// 両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ公開するか、これらの型へ
+/// 同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する。
+///
+/// **検出範囲の限定**: 列挙した名前と型に限る。`add` は既存の承認済み公開 API（`Var::add`）と
+/// 同名のため対象外（結合の公開形は `FunctionalBuilder::add` として #2679 で型と同時に公開する
+/// 想定）。マクロ生成・別名経由の公開までは保証しない。
+///
+/// 実装は内部クレートと facade 内部に閉じている（`fandhe_ai_autodiff::merge_ops`・
+/// `compat/functional.rs` の `#[cfg(test)]` 限定 `pub(crate)`。新規 `Op`・`BackendOps`
+/// メソッドはない）。保留対象は facade 公開面のみで、公開形は未承認（承認依頼は #2677・公開自体は
+/// 承認後の #2679。推奨案は `docs/facade-functional-api-decision.md` §17。同記録は推奨案の
+/// 記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// merge_ops_hold_doctest_globs_all_pub_modules`・
+/// `merge_ops_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_merge_ops`・
+/// `workspace_declares_merge_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
+/// 同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_merge_ops_hold_probe {
+///     pub mod merge_ops {
+///         pub fn merge_concatenate() {}
+///         pub fn merge_add() {}
+///         pub fn merge_multiply() {}
+///         pub fn merge_average() {}
+///     }
+///     pub fn merge_concatenate() {}
+///     pub fn merge_add() {}
+///     pub fn merge_multiply() {}
+///     pub fn merge_average() {}
+/// }
+/// use __fandhe_merge_ops_hold_probe::*;
+///
+/// struct __FandheMergeOpsHoldMarker;
+///
+/// trait __FandheMergeOpsHoldProbe {
+///     fn merge_concatenate(&self) -> __FandheMergeOpsHoldMarker;
+///     fn merge_add(&self) -> __FandheMergeOpsHoldMarker;
+///     fn merge_multiply(&self) -> __FandheMergeOpsHoldMarker;
+///     fn merge_average(&self) -> __FandheMergeOpsHoldMarker;
+///     fn concatenate(&self) -> __FandheMergeOpsHoldMarker;
+///     fn multiply(&self) -> __FandheMergeOpsHoldMarker;
+///     fn average(&self) -> __FandheMergeOpsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheMergeOpsHoldProbe for fandhe_ai::Var<'t> {
+///     fn merge_concatenate(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_add(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_multiply(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_average(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn concatenate(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn multiply(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn average(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheMergeOpsHoldProbe for fandhe_ai::Tape {
+///     fn merge_concatenate(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_add(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_multiply(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_average(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn concatenate(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn multiply(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn average(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheMergeOpsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn merge_concatenate(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_add(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_multiply(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn merge_average(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn concatenate(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn multiply(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn average(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+/// }
+///
+/// trait __FandheMergeOpsSequentialHoldProbe {
+///     fn add_concatenate(&self) -> __FandheMergeOpsHoldMarker;
+///     fn add_add(&self) -> __FandheMergeOpsHoldMarker;
+///     fn add_multiply(&self) -> __FandheMergeOpsHoldMarker;
+///     fn add_average(&self) -> __FandheMergeOpsHoldMarker;
+/// }
+///
+/// impl __FandheMergeOpsSequentialHoldProbe for fandhe_ai::compat::Sequential {
+///     fn add_concatenate(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn add_add(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn add_multiply(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+///     fn add_average(&self) -> __FandheMergeOpsHoldMarker {
+///         __FandheMergeOpsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     merge_ops::merge_concatenate();
+///     merge_ops::merge_add();
+///     merge_ops::merge_multiply();
+///     merge_ops::merge_average();
+///     // 修飾なしの自由関数呼び出し（同名の関数を facade が glob 公開していれば同様に曖昧になる）。
+///     merge_concatenate();
+///     merge_add();
+///     merge_multiply();
+///     merge_average();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+///     seq: &fandhe_ai::compat::Sequential,
+/// ) {
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Var::merge_concatenate(v);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Var::merge_add(v);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Var::merge_multiply(v);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Var::merge_average(v);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Var::concatenate(v);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Var::multiply(v);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Var::average(v);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tape::merge_concatenate(tape);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tape::merge_add(tape);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tape::merge_multiply(tape);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tape::merge_average(tape);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tape::concatenate(tape);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tape::multiply(tape);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tape::average(tape);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tensor::<f32>::merge_concatenate(tf);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tensor::<f32>::merge_add(tf);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tensor::<f32>::merge_multiply(tf);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tensor::<f32>::merge_average(tf);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tensor::<f32>::concatenate(tf);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tensor::<f32>::multiply(tf);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::Tensor::<f32>::average(tf);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::compat::Sequential::add_concatenate(seq);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::compat::Sequential::add_add(seq);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::compat::Sequential::add_multiply(seq);
+///     let _: __FandheMergeOpsHoldMarker = fandhe_ai::compat::Sequential::add_average(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct MergeOpsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
