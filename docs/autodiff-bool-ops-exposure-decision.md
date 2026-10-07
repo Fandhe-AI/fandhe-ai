@@ -12,14 +12,14 @@ bool を返す比較 6 種（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／
 src/bool_ops.rs`）として実装した（案 C。§3 参照）。`Var` に inherent の
 `pub fn` は追加していない（#2141 時点の記述。比較 6 種・`masked_select` の
 7 件は #2510 で `Var` の委譲メソッドとして追加済み。logical 3 件は
-未公開のまま #2594 で扱う。公開形の推奨案は §6.2〔承認待ち〕。§6.1 参照）。新規 `Op`・`BackendOps` メソッド・VJP・tape
+#2596 で crate 直下の委譲関数として公開済み。§6.1・§6.2・§6.3 参照）。新規 `Op`・`BackendOps` メソッド・VJP・tape
 ノードは追加していない。facade 公開（`Var` への委譲メソッド追加）は
 #2141 時点では承認待ちのまま対象外とした（履歴。現状は比較 6 種・
-`masked_select` が #2510 で公開済みで、保留中なのは logical 3 件のみ）。
-logical 3 件の保留は `crates/facade/src/lib.rs::
-VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
-`crates/facade/tests/api_surface.rs` のソース走査・workspace インベント
-リ（4 テスト）で多層固定している。
+`masked_select` が #2510、logical 3 件が #2596 で公開済み）。
+承認形外の配置（`Var`／`Tensor`／`Tape` 上・`bool_ops` モジュール再
+エクスポート）は `crates/facade/src/lib.rs::VarBoolOpsHoldDoctestGuard`
+（正のプローブ doctest）と `crates/facade/tests/api_surface.rs` の
+ソース走査・workspace インベントリ（4 テスト）で引き続き多層固定している。
 
 ## §1 背景
 
@@ -89,7 +89,8 @@ VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
 1. facade 公開: `Var` への委譲メソッド 7 件（比較 6 種・`masked_select`）
    および logical 3 件の公開形（`Var` の関連関数にするか facade 直下の
    関数にするか）。**7 件は #2510 で適用済み（ルート #2499 一括承認）。
-   logical 3 件の公開形は未決のまま #2594（推奨案を §6.2 に記録・#2595・承認待ち。実装は承認後に #2596）**
+   logical 3 件は #2594 の §6.2 推奨案（B-1）がルート #2499 コメントで承認され、
+   #2596 で適用済み（§6.3）**
 2. 微分可能な `masked_select`
 3. `Var` 入力の logical 版
 4. GPU 専用カーネル（ホストでの bool 化・logical・select の GPU 化）
@@ -125,8 +126,8 @@ VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
   真理値表と NaN）
 
 承認取得後の追随: `Var::gt_bool` 等の薄い委譲メソッド 7 件は #2510 で実施済み
-（§6.1）。logical 3 件分の保留ガード（`VarBoolOpsHoldDoctestGuard`・対応する
-ソース走査）は #2594 まで残置し、その時点で撤去する。
+（§6.1）。logical 3 件分は #2596 で実施済み（§6.3）。`VarBoolOpsHoldDoctestGuard` は
+承認形外を拒むガードとして残置し、ソース走査のみ正ガード化した。
 
 ### §6.1 実装記録（#2510・ルート #2499 一括承認）
 
@@ -149,9 +150,9 @@ VarBoolOpsHoldDoctestGuard`（正のプローブ doctest）と
   実測申し送りは無い（既存の `bool_ops_backend_parity.rs`・
   `docs/perf/logs/bool-ops-2141/README.md` のまま）
 
-### §6.2 logical 3 件の facade 公開形（#2595・承認待ち）
+### §6.2 logical 3 件の facade 公開形（#2595・承認済み）
 
-**本節は推奨案の記録であり、承認の取得を意味しない。確定形ではない。**
+**本節は #2595 時点の推奨案の記録で、案 B-1 は #2596 の着手前にルート #2499 のコメントで承認された（§6.3）。以下の「承認待ち」「未取得」等の表記は #2595 時点の履歴である。**
 親 #2594・祖 #2542、実装は兄弟 #2596（承認後にのみ着手）。§6 項目 1 は
 logical 3 件の公開形を「`Var` の関連関数か facade 直下の関数か」の 2 案
 併記のまま推奨形を持たず、ルート #2499 の一括承認（記録済みの推奨形にのみ
@@ -266,7 +267,44 @@ pub fn logical_not(a: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError>
 - 新規 `Op`・カーネル・`unsafe`・依存なし。ホストのみの計算のため CUDA／Metal の
   新規 `#[ignore]` テスト・実測申し送りは不要
 
-#### 本節の位置づけ
+#### 本節の位置づけ（#2595 時点の履歴。承認取得後の実装は §6.3）
 
 承認は未取得。保留ガードと 4 テストは維持する。本節の追記は `crates/`・
 `Cargo.*`・tolerance・`docs/spec` を変更していない。
+
+### §6.3 実装記録（#2596・親 #2594。§6.2 案 B-1 の適用）
+
+- 承認の根拠: ルート #2499 のコメント
+  https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965
+  （2026-10-07T08:12:50Z）の表が「#2594: 本記録 §6.2 の推奨案」を承認している。
+  範囲は §6.2 に書かれた形（(a)〜(f) すべて推奨どおり）に限る。#2594・#2596 の
+  補足コメントは同コメントを根拠に指すだけで、承認の根拠は上記 URL とする。
+- 公開した名前（`crates/facade/src/lib.rs`。`fandhe_ai` 直下。新しい `pub mod` なし）:
+  `logical_and(a: &Tensor<bool>, b: &Tensor<bool>)`・`logical_or(同)`・
+  `logical_not(a: &Tensor<bool>)`。戻り値は `Result<Tensor<bool>, AutodiffError>`。
+  本体は `fandhe_ai_autodiff::bool_ops::<name>(..)` の 1 式委譲。doctest 付き。
+- ガード反転（`crates/facade/tests/api_surface.rs`）:
+  `BOOL_OPS_HELD_FN_NAMES` を `BOOL_OPS_APPROVED_ROOT_FN_NAMES` へ改名し、本体固定の
+  `BOOL_OPS_ROOT_EXPECTED_BODIES` を追加。`facade_does_not_reexport_or_declare_bool_ops`
+  を `facade_declares_logical_fns_only_as_approved_root_delegations` へ改名・正ガード化
+  （`bool_ops` を含む `pub use` 0 件／`Var` 委譲 7 名の fn 宣言 0 件／logical 3 件は
+  `lib.rs` に各 1 件・他に 0 件／本体の 1 式委譲をトークン一致で固定）。
+  `workspace_declares_bool_ops_fn_names_in_approved_places_only` の期待集合へ
+  `facade/src/lib.rs::<name>` を追加。到達性の正のプローブ
+  `logical_fns_are_reachable_via_facade_root` を追加。
+- 保留ガード doctest（`VarBoolOpsHoldDoctestGuard`）は (d) の決定どおり削除せず、
+  プローブ本体（`BOOL_OPS_HOLD_PROBE_BODY`）も不変。doc 散文のみを承認形外
+  （`Var`／`Tensor`／`Tape` 上の配置・`bool_ops` 再エクスポート）を拒むガードへ更新した。
+  直下の同名自由関数はプローブと衝突しないことを `cargo test -p fandhe-ai --doc` で確認。
+- 手動確認（fail-closed）: `lib.rs` への仮 `pub use fandhe_ai_autodiff::bool_ops;` で
+  doctest（E0659）とソース走査が失敗、`logical_and` 本体の引数入れ替えでソース走査が
+  失敗することを確認し元に戻した。
+- 利用テスト: `crates/facade/tests/bool_ops_logical_fns.rs`（6 件・CPU。真理値表・
+  ブロードキャスト・非 contiguous・`Shape` エラー・巨大 broadcast view の確保前拒否・
+  `Var` 比較との合成）。
+- CUDA／Metal: ホストのみの計算でカーネルを新設しないため新規 `#[ignore]` テスト・
+  実測申し送りは無い。
+- `fandhe-ai =0.10.0` 非破壊: 追加は直下の `pub fn` 3 件のみ。依存・tolerance・baseline・
+  ガードレール閾値・`docs/spec` は不変。
+- スコープ外のまま: 微分可能な `masked_select`・`Var` 入力の logical 版・GPU 専用
+  カーネル・`Tensor<bool>` の inherent メソッド／演算子（§6 項目 2〜4・案 D）。

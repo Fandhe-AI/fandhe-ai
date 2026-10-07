@@ -1489,6 +1489,65 @@ pub fn ones_like(like: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
     fandhe_ai_autodiff::ones_like(like)
 }
 
+/// 要素ごとの論理積（PyTorch `torch.logical_and` の bool 入力版。イシュー
+/// #2596・親 #2594）。NumPy 互換ブロードキャストに対応し、非微分・tape
+/// 非記録のホスト計算である。
+///
+/// `fandhe_ai_autodiff::bool_ops::logical_and`（#2141 実装）への 1 式委譲
+/// （composition root の crate 直下自由関数。比較 6 種と `masked_select` が
+/// `Var` 委譲である #2510 とは別形で、`docs/autodiff-bool-ops-exposure-
+/// decision.md` §6.2 の承認形 B-1）。ブロードキャスト不能な shape は
+/// `AutodiffError::Shape(..)` を返す。`Var`〈f32〉の入力は
+/// `Var::cast::<bool>()` か `Var::gt_bool` 等で bool 化してから渡す。
+///
+/// ```
+/// use fandhe_ai::{Tensor, logical_and, tape};
+///
+/// let t = tape();
+/// let x = t.var(&Tensor::new(vec![1.0, 5.0, 9.0], &[3])?);
+/// let lo = x.gt_bool(&t.var(&Tensor::new(vec![2.0; 3], &[3])?))?;
+/// let hi = x.lt_bool(&t.var(&Tensor::new(vec![8.0; 3], &[3])?))?;
+/// let mask = logical_and(&lo, &hi)?;
+/// assert_eq!(mask.contiguous().host_slice().into_owned(), vec![false, true, false]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn logical_and(a: &Tensor<bool>, b: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError> {
+    fandhe_ai_autodiff::bool_ops::logical_and(a, b)
+}
+
+/// 要素ごとの論理和（PyTorch `torch.logical_or` の bool 入力版。イシュー
+/// #2596）。契約は [`logical_and`] と同じ（ブロードキャスト・非微分・
+/// `AutodiffError::Shape(..)`）。
+///
+/// ```
+/// use fandhe_ai::{Tensor, logical_or};
+///
+/// let a = Tensor::new(vec![true, false, false], &[3])?;
+/// let b = Tensor::new(vec![false, false, true], &[3])?;
+/// let m = logical_or(&a, &b)?;
+/// assert_eq!(m.contiguous().host_slice().into_owned(), vec![true, false, true]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn logical_or(a: &Tensor<bool>, b: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError> {
+    fandhe_ai_autodiff::bool_ops::logical_or(a, b)
+}
+
+/// 要素ごとの否定（PyTorch `torch.logical_not` の bool 入力版。イシュー
+/// #2596）。契約は [`logical_and`] と同じ。巨大 broadcast view は確保前の
+/// 要素数検査で `AutodiffError::Shape(..)` になる（panic しない）。
+///
+/// ```
+/// use fandhe_ai::{Tensor, logical_not};
+///
+/// let a = Tensor::new(vec![true, false], &[2])?;
+/// let m = logical_not(&a)?;
+/// assert_eq!(m.contiguous().host_slice().into_owned(), vec![false, true]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn logical_not(a: &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError> {
+    fandhe_ai_autodiff::bool_ops::logical_not(a)
+}
+
 /// `device` に対応する具体 `BackendOps` を解決する（非公開）。
 ///
 /// composition root の中核: `Device` → 具体バックエンドクレートの
@@ -2027,7 +2086,7 @@ struct VarCustomHoldDoctestGuard;
 /// 次の「承認形外」の配置に絞られる:
 ///
 /// - logical 3 種（`logical_and`／`logical_or`／`logical_not`）の `Var`
-///   への配置（公開形は未決・#2594）
+///   への配置（承認形は crate 直下の委譲自由関数のみ。#2596 で公開済み）
 /// - 10 関数の `Tensor<bool>`／`Tensor<f32>`／`Tape` 上への配置
 /// - `bool_ops` モジュールの再エクスポート・別名 `pub use`
 ///
@@ -2045,14 +2104,19 @@ struct VarCustomHoldDoctestGuard;
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// bool_ops_hold_doctest_globs_all_pub_modules`・`bool_ops_hold_
-/// doctest_probe_body_matches_fixed_contract`・`facade_does_not_
-/// reexport_or_declare_bool_ops`・`workspace_declares_bool_ops_fn_
-/// names_in_approved_places_only`）との多層防御の位置づけは
+/// doctest_probe_body_matches_fixed_contract`・`facade_declares_logical_
+/// fns_only_as_approved_root_delegations`・`workspace_declares_bool_ops_
+/// fn_names_in_approved_places_only`）との多層防御の位置づけは
 /// `docs/autodiff-bool-ops-exposure-decision.md` §6「承認事項」・§6.1
 /// を参照。
 ///
-/// 撤去条件: #2594 で logical 3 種の公開形が承認・実装されたとき、本
-/// モジュール・本 doctest 自体を削除する（ソース走査側と同時に外す）。
+/// 残置の根拠（#2596。決定記録 §6.2 (d)）: logical 3 種は #2596 で
+/// `fandhe_ai::logical_*`（crate 直下の 1 式委譲 `pub fn`）として公開済み
+/// だが、本ガードは承認形外（`Var`／`Tensor`／`Tape` 上の配置と
+/// `bool_ops` モジュールの再エクスポート）を拒む役割で残す。プローブ本体
+/// は経路付き（`bool_ops::logical_and()`）・メソッド形・関連関数形でのみ
+/// 3 名を使うため、直下の同名自由関数とは衝突しない。撤去条件は `Var`
+/// 入力版等が別途承認されガードの前提が変わったときのみ。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
