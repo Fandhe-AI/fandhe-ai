@@ -301,6 +301,12 @@ pub struct FitConfig {
     /// [`Self::accumulate_steps`] で設定する（イシュー #2508 で公開。
     /// フィールド自体は非公開のまま。`Copy + Eq` も維持）。
     pub(super) accumulate_steps: u32,
+    /// 学習データ末尾の自動検証分割の割合（Keras `fit(validation_split=)`。
+    /// イシュー #2564）。`f32::to_bits` で保持して `Copy + Eq` derive を維持する
+    /// （`f32` は `Eq` を持たないため。`docs/compat-fit-sample-weighting-decision.md`
+    /// §11.1）。`None` は分割指定なし。範囲検査は fit 呼び出し時
+    /// （[`Sequential::fit_with_weights`] doc）。
+    pub(super) validation_split_bits: Option<u32>,
 }
 
 impl FitConfig {
@@ -327,6 +333,7 @@ impl FitConfig {
             shuffle: false,
             drop_last: false,
             accumulate_steps: 1,
+            validation_split_bits: None,
         }
     }
 
@@ -374,6 +381,112 @@ impl FitConfig {
     pub fn accumulate_steps(mut self, n: u32) -> Self {
         self.accumulate_steps = n;
         self
+    }
+
+    /// 学習データ末尾の割合 `fraction` を検証データとして自動分割する
+    /// （Keras `fit(validation_split=)` 相当。イシュー #2564。
+    /// `docs/compat-fit-sample-weighting-decision.md` §11.1）。
+    ///
+    /// シャッフルの前に `split_at = floor(N × (1 − fraction))` を求め、先頭
+    /// `split_at` 件を学習・末尾を検証に使う（`x`／`y` の第 0 軸の分割。
+    /// `sample_weight` も同位置で切り、学習側にだけ使う）。`fraction` の
+    /// 範囲検査は [`Self::new`] の `epochs == 0` や [`Self::accumulate_steps`]
+    /// の `n == 0` と同じ方針で fit 呼び出し時に行い、非有限・負値・`1` 以上・
+    /// 分割後の学習側／検証側が 0 件になる値・明示 `validation` との併用は
+    /// `AutodiffError::InvalidArgument` で拒否する。`0.0`（`-0.0` を含む）は
+    /// 分割なしとして扱う。
+    ///
+    /// 内部表現は `f32::to_bits` のため、`Eq` はビット比較になる:
+    /// `validation_split(0.0)` は未指定の [`Self::new`] と等しくなく、
+    /// `+0.0` と `-0.0` も別値（挙動はどちらも分割なし）。損失・optimizer に
+    /// 依存しないデータ分割のため、全ての fit 入口で同じ意味で働く。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::FitConfig;
+    ///
+    /// let cfg = FitConfig::new(10, 32).validation_split(0.2);
+    /// assert_ne!(cfg, FitConfig::new(10, 32));
+    /// assert_eq!(cfg, FitConfig::new(10, 32).validation_split(0.2));
+    /// assert_ne!(FitConfig::new(10, 32).validation_split(0.0), FitConfig::new(10, 32));
+    /// ```
+    pub fn validation_split(mut self, fraction: f32) -> Self {
+        self.validation_split_bits = Some(fraction.to_bits());
+        self
+    }
+}
+
+/// [`Sequential::fit_with_weights`] へ渡すクラス別・サンプル別の損失重み
+/// （Keras `fit(class_weight=, sample_weight=)` 相当。イシュー #2564。
+/// `docs/compat-fit-sample-weighting-decision.md` §11.1）。
+///
+/// [`FitConfig`] は `Copy + Eq` を公開契約にしているため、`HashMap` や借用
+/// スライスを持つ重みは別型として切り出した（`fandhe-ai =0.10.0` の公開 API を
+/// 壊さない）。フィールドは非公開で、[`Self::new`]・[`Self::class_weight`]・
+/// [`Self::sample_weight`] で組み立てる。`FitWeights::default()` と
+/// `FitWeights::new()` は等しく、重みなしを表す。
+///
+/// # 意味論
+///
+/// サンプル `i` の重みは `w_i = sample_weight[i] × class_weight.get(y_i)
+/// .unwrap_or(1.0)`、バッチ損失は `Σ w_i·l_i / N_batch`（Keras 流。`Σw` での
+/// 正規化ではない）。`History::loss` は重み付き値で、`val_loss`／`val_metrics`
+/// は重みなし（[`Sequential::evaluate`] と bit 一致。Keras 3 の `val_*` が
+/// `sample_weight` を使う挙動とは異なる）。
+///
+/// # 有効な組み合わせ（式が定義されていないものは fail-closed）
+///
+/// | 重み | 有効な損失 |
+/// |---|---|
+/// | `class_weight` | [`Loss::CrossEntropy`]（`i32` target）のみ |
+/// | `sample_weight` | [`Loss::CrossEntropy`]・[`Loss::Mse`] |
+///
+/// 上記以外の損失と、非既定の重み × [`Optimizer::Lbfgs`] は
+/// `AutodiffError::InvalidArgument` で拒否する。勾配累積・AMP との併用は
+/// 有効（重み付き損失を使うだけ）。
+///
+/// ```
+/// use fandhe_ai::compat::FitWeights;
+/// use std::collections::HashMap;
+///
+/// let sw = [1.0_f32, 2.0, 0.5];
+/// let w = FitWeights::new()
+///     .class_weight(HashMap::from([(1_u32, 3.0_f32)]))
+///     .sample_weight(&sw);
+/// assert_ne!(w, FitWeights::default());
+/// assert_eq!(FitWeights::new(), FitWeights::default());
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FitWeights<'a> {
+    class_weight: Option<HashMap<u32, f32>>,
+    sample_weight: Option<&'a [f32]>,
+}
+
+impl<'a> FitWeights<'a> {
+    /// 重みなし（`FitWeights::default()` と同じ）。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// クラス添字 → 重みの対応を指定する（キー無しのクラスは `1.0`。
+    /// `Loss::CrossEntropy` 限定）。キーは logits のクラス数 `C` 未満、値は
+    /// 有限かつ非負でなければならない（fit 呼び出し時に検査）。
+    pub fn class_weight(mut self, weights: HashMap<u32, f32>) -> Self {
+        self.class_weight = Some(weights);
+        self
+    }
+
+    /// 学習データ `x` と同じ長さのサンプル別重みを指定する（有限かつ非負。
+    /// `Loss::CrossEntropy`／`Loss::Mse` 限定。`validation_split` 併用時は
+    /// 分割前の長さを渡す）。
+    pub fn sample_weight(mut self, weights: &'a [f32]) -> Self {
+        self.sample_weight = Some(weights);
+        self
+    }
+
+    /// `FitWeights::default()` と異なる（いずれかが `Some`。空の
+    /// `HashMap` も `Some`）かどうか。重み付き経路へ入る境界。
+    fn is_non_default(&self) -> bool {
+        self.class_weight.is_some() || self.sample_weight.is_some()
     }
 }
 
@@ -459,6 +572,37 @@ pub trait FitTarget: Element + private::Sealed {
         let _ = target_batch;
         None
     }
+
+    /// `fit_with_weights` が最初の forward でクラス数 `c` を知った時点で、`y` 全体（全バッチ・
+    /// 全 epoch 分）の target がクラス範囲 `[0, c)` に収まることを検査する（パラメータ更新前の
+    /// 拒否。決定記録 §14.1）。クラス添字を持たない `f32` は既定の `Ok(())`。
+    #[doc(hidden)]
+    fn check_class_range(y: &Tensor<Self>, c: usize) -> Result<(), AutodiffError> {
+        let _ = (y, c);
+        Ok(())
+    }
+
+    /// [`Sequential::fit_with_weights`]（イシュー #2564）が非既定の重みで使う
+    /// 重み付き損失（`Σ w_i·l_i / N_batch`）。`sample` はこのバッチの
+    /// サンプル別重み（`[N_batch]`）、`class` は `Loss::CrossEntropy` のクラス別
+    /// 重み。許可する `loss`×`Self` の組（`Mse`×`f32`・`CrossEntropy`×`i32`）以外は
+    /// 既定どおり `InvalidArgument`（fail-closed。式が定義されていない組み合わせ）。
+    /// 重みが既定の経路はこのメソッドを通らず [`Self::loss_for`] を不変で使う
+    /// （bit 一致契約）。
+    #[doc(hidden)]
+    fn weighted_loss_for<'t>(
+        loss: Loss,
+        tape: &'t crate::Tape,
+        pred: &crate::Var<'t>,
+        target_batch: &Tensor<Self>,
+        sample: Option<&Tensor<f32>>,
+        class: Option<&HashMap<u32, f32>>,
+    ) -> Result<crate::Var<'t>, AutodiffError> {
+        let _ = (tape, pred, target_batch, sample, class);
+        Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::fit_with_weights: Loss::{loss:?} と target 型の組には重み付き損失が定義されていない"
+        )))
+    }
 }
 
 mod private {
@@ -486,6 +630,24 @@ impl FitTarget for f32 {
             Loss::CrossEntropy | Loss::Nll => Err(AutodiffError::InvalidArgument(format!(
                 "Sequential::fit/evaluate: Loss::{loss:?} には Tensor<i32> の \
                  target（クラス添字）が必要（Tensor<f32> が渡された）"
+            ))),
+        }
+    }
+
+    fn weighted_loss_for<'t>(
+        loss: Loss,
+        tape: &'t crate::Tape,
+        pred: &crate::Var<'t>,
+        target_batch: &Tensor<f32>,
+        sample: Option<&Tensor<f32>>,
+        class: Option<&HashMap<u32, f32>>,
+    ) -> Result<crate::Var<'t>, AutodiffError> {
+        match loss {
+            Loss::Mse if class.is_none() => weighted_mse_loss(tape, pred, target_batch, sample),
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::fit_with_weights: Loss::{loss:?}（Tensor<f32> target）には \
+                 重み付き損失が定義されていない（sample_weight は Mse のみ・class_weight は \
+                 CrossEntropy のみ）"
             ))),
         }
     }
@@ -527,6 +689,468 @@ impl FitTarget for i32 {
     fn as_class_targets(target_batch: &Tensor<i32>) -> Option<&Tensor<i32>> {
         Some(target_batch)
     }
+
+    fn check_class_range(y: &Tensor<i32>, c: usize) -> Result<(), AutodiffError> {
+        for (i, &yi) in y.host_slice().iter().enumerate() {
+            if usize::try_from(yi).ok().filter(|&k| k < c).is_none() {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::fit_with_weights: target[{i}] = {yi} がクラス範囲 [0, {c}) の外"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn weighted_loss_for<'t>(
+        loss: Loss,
+        tape: &'t crate::Tape,
+        pred: &crate::Var<'t>,
+        target_batch: &Tensor<i32>,
+        sample: Option<&Tensor<f32>>,
+        class: Option<&HashMap<u32, f32>>,
+    ) -> Result<crate::Var<'t>, AutodiffError> {
+        match loss {
+            Loss::CrossEntropy => {
+                weighted_cross_entropy_loss(tape, pred, target_batch, sample, class)
+            }
+            _ => Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::fit_with_weights: Loss::{loss:?}（Tensor<i32> target）には \
+                 重み付き損失が定義されていない（CrossEntropy のみ）"
+            ))),
+        }
+    }
+}
+
+/// `FitLoader::iter` が返すバッチ（`(x, y, サンプル別重み)`。重みなしは `None`）。
+type FitBatch<T> =
+    Result<(Tensor<f32>, Tensor<T>, Option<Tensor<f32>>), fandhe_ai_tensor_core::data::DataError>;
+
+/// [`Sequential::run_fit`] が使う `DataLoader` の 2 形態（サンプル別重みなし／あり）。
+/// 成分数が異なる型を 1 つのバッチ反復へ正規化し、重みなしの経路は従来の 2 成分
+/// ローダのまま保つ（イシュー #2564）。
+enum FitLoader<T: Element> {
+    Plain(DataLoader<(TensorDataset<f32>, TensorDataset<T>)>),
+    Weighted(DataLoader<(TensorDataset<f32>, TensorDataset<T>, TensorDataset<f32>)>),
+}
+
+impl<T: Element> FitLoader<T> {
+    fn iter(&self) -> Box<dyn Iterator<Item = FitBatch<T>> + '_> {
+        match self {
+            FitLoader::Plain(l) => Box::new(l.iter().map(|b| b.map(|(x, y)| (x, y, None)))),
+            FitLoader::Weighted(l) => {
+                Box::new(l.iter().map(|b| b.map(|(x, y, w)| (x, y, Some(w)))))
+            }
+        }
+    }
+}
+
+/// `validation_split`（[`FitConfig::validation_split`]）を検査し、分割位置
+/// `split_at = floor(N × (1 − s))` を返す（分割なしは `None`）。`±0.0` は分割なし。
+/// 非有限・負・`1` 以上・`split_at ∈ {0, N}`・明示 `validation` との併用・`x`／`y` の
+/// 第 0 軸不一致は `InvalidArgument`（モード変更前に呼ぶ）。
+fn resolve_validation_split(
+    method: &str,
+    bits: Option<u32>,
+    x_len: Option<usize>,
+    y_len: Option<usize>,
+    has_explicit_validation: bool,
+) -> Result<Option<usize>, AutodiffError> {
+    let Some(bits) = bits else {
+        return Ok(None);
+    };
+    let s = f32::from_bits(bits);
+    if s == 0.0 {
+        return Ok(None);
+    }
+    if !s.is_finite() || !(0.0..1.0).contains(&s) {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: validation_split は 0 以上 1 未満の有限値が必要（{s} が渡された）"
+        )));
+    }
+    if has_explicit_validation {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: validation_split と明示の validation は併用できない"
+        )));
+    }
+    let (Some(n), Some(ny)) = (x_len, y_len) else {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: validation_split には rank 1 以上の x／y が必要"
+        )));
+    };
+    if n != ny {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: x のサンプル数 {n} と y のサンプル数 {ny} が一致しない"
+        )));
+    }
+    let split_at = (n as f64 * (1.0 - s as f64)).floor() as usize;
+    if split_at == 0 || split_at >= n {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: validation_split = {s} は N = {n} では学習側（{split_at} 件）か\
+             検証側が 0 件になる"
+        )));
+    }
+    Ok(Some(split_at))
+}
+
+/// `x`／`y` を第 0 軸で `[0, at)`（学習）と `[at, N)`（検証）へ分ける（zero-copy の
+/// `narrow` view。`TensorDataset`／検証の `host_slice` が offset を扱える）。
+#[allow(clippy::type_complexity)]
+fn split_for_validation<T: FitTarget>(
+    method: &str,
+    x: &Tensor<f32>,
+    y: &Tensor<T>,
+    at: usize,
+) -> Result<(Tensor<f32>, Tensor<T>, Tensor<f32>, Tensor<T>), AutodiffError> {
+    let to_err = |e: crate::ShapeError| {
+        AutodiffError::InvalidArgument(format!("Sequential::{method}: validation_split: {e}"))
+    };
+    let n = x.shape().first().copied().unwrap_or(0);
+    let rest = n.saturating_sub(at);
+    Ok((
+        x.narrow(0, 0, at).map_err(to_err)?,
+        y.narrow(0, 0, at).map_err(to_err)?,
+        x.narrow(0, at, rest).map_err(to_err)?,
+        y.narrow(0, at, rest).map_err(to_err)?,
+    ))
+}
+
+/// `weights`（[`FitWeights`]）の入力検証と、損失・optimizer・フックとの組み合わせ検査
+/// （`docs/compat-fit-sample-weighting-decision.md` §11.1・§11.3。いずれも
+/// モード変更・パラメータ更新より前の fail-closed 拒否）。`n` は分割前のサンプル数。
+/// 許可リスト方式（`CrossEntropy`／`Mse` のみ）で、`Loss` の将来 variant は拒否側に倒れる。
+fn validate_fit_weights(
+    method: &str,
+    weights: &FitWeights<'_>,
+    n: usize,
+    loss: Loss,
+    is_lbfgs: bool,
+    has_custom_step: bool,
+) -> Result<(), AutodiffError> {
+    if !weights.is_non_default() {
+        return Ok(());
+    }
+    let bad = |msg: String| {
+        Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: {msg}"
+        )))
+    };
+    if let Some(sw) = weights.sample_weight {
+        if sw.len() != n {
+            return bad(format!(
+                "sample_weight の長さ {} が x のサンプル数 {n} と一致しない",
+                sw.len()
+            ));
+        }
+        if let Some((i, v)) = sw
+            .iter()
+            .enumerate()
+            .find(|(_, v)| !v.is_finite() || **v < 0.0)
+        {
+            return bad(format!(
+                "sample_weight[{i}] = {v} は有限かつ非負でなければならない"
+            ));
+        }
+        if !matches!(loss, Loss::CrossEntropy | Loss::Mse) {
+            return bad(format!(
+                "sample_weight は Loss::CrossEntropy／Loss::Mse でのみ有効（Loss::{loss:?} には重み付き式が定義されていない）"
+            ));
+        }
+    }
+    if let Some(cw) = &weights.class_weight {
+        if let Some((k, v)) = cw.iter().find(|(_, v)| !v.is_finite() || **v < 0.0) {
+            return bad(format!(
+                "class_weight[{k}] = {v} は有限かつ非負でなければならない"
+            ));
+        }
+        if !matches!(loss, Loss::CrossEntropy) {
+            return bad(format!(
+                "class_weight は Loss::CrossEntropy でのみ有効（Loss::{loss:?} が compile されている）"
+            ));
+        }
+    }
+    if is_lbfgs {
+        return bad("非既定の重みは Optimizer::Lbfgs と併用できない".to_string());
+    }
+    if has_custom_step {
+        return bad("非既定の重みはカスタム学習 step フックと併用できない".to_string());
+    }
+    Ok(())
+}
+
+/// 重み付き損失の係数テンソル用バッファを `try_reserve_exact` で確保する
+/// （巨大入力で abort しない。`.claude/rules/security.md` A03/A04）。
+fn alloc_coef(len: usize) -> Result<Vec<f32>, AutodiffError> {
+    let mut v: Vec<f32> = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| super::alloc_failed())?;
+    v.resize(len, 0.0);
+    Ok(v)
+}
+
+/// f64 で確定した損失係数を f32 へ落とす。有限な f64 が f32 で非有限になる
+/// （表現不能な）場合は、パラメータ更新前に型付きエラーで拒否する
+/// （`inf` 係数が loss・backward へ NaN を伝播するのを防ぐ）。
+fn checked_f32_coef(v: f64, what: &str) -> Result<f32, AutodiffError> {
+    let c = v as f32;
+    // 非ゼロの真値が f32 でゼロへアンダーフローする場合も、真のゼロ重み（損失から除外）と
+    // 区別できないため更新前に拒否する（レビュー指摘 #2823）。
+    if v.is_finite() && c.is_finite() && !(v != 0.0 && c == 0.0) {
+        Ok(c)
+    } else {
+        Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::fit_with_weights: {what} から導出した損失係数 {v} が f32 で表現できない\
+             （overflow またはゼロへのアンダーフロー）"
+        )))
+    }
+}
+
+/// `Loss::CrossEntropy` の係数 `w_i·cw(y_i)/N_batch` が、全サンプル・全バッチで f32 表現可能か
+/// を最初の更新前に検査する（バッチ内だけの検証では、後続バッチの表現不能な係数が先行バッチの
+/// 更新後に初めて見つかり「更新前に拒否する」契約を破るため。レビュー指摘 #2823）。
+/// 係数は `N_batch` に反比例して大きくなる。`shuffle = true` は所属バッチが epoch ごとに
+/// 変わるため、実際に現れうる最小の実バッチサイズ（端数バッチを含む。`drop_last` なら端数なし）
+/// で全サンプルを評価する。`shuffle = false` は所属バッチが固定なので各サンプルをその実バッチ
+/// サイズで評価し、`drop_last` で捨てられる端数バッチのサンプルは検査しない
+/// （最小バッチサイズで一律検査すると有限な入力を誤って拒否する。レビュー指摘 #2823）。
+fn check_ce_coefs_for_all_batches(
+    classes: &[i32],
+    batch_size: usize,
+    drop_last: bool,
+    shuffle: bool,
+    weights: &FitWeights<'_>,
+) -> Result<(), AutodiffError> {
+    let total = classes.len();
+    if total == 0 || batch_size == 0 {
+        return Ok(());
+    }
+    let rem = total % batch_size;
+    let max_nb = batch_size.min(total);
+    let min_nb = if rem > 0 && !drop_last { rem } else { max_nb };
+    for (i, &yi) in classes.iter().enumerate() {
+        let nb = if shuffle {
+            // overflow は最小サイズ・ゼロへのアンダーフローは最大サイズで最悪になる
+            // （係数は `N_batch` に反比例）。中間サイズはこの 2 端点の間に収まる。
+            if max_nb != min_nb {
+                let cw = class_weight_of(weights, yi);
+                let sw = sample_weight_at(weights.sample_weight, i) as f64;
+                checked_f32_coef(
+                    -(sw * cw as f64) / max_nb as f64,
+                    "sample_weight × class_weight",
+                )?;
+            }
+            min_nb
+        } else {
+            let start = (i / batch_size) * batch_size;
+            let actual = batch_size.min(total - start);
+            if drop_last && actual < batch_size {
+                continue;
+            }
+            actual
+        };
+        let cw = class_weight_of(weights, yi);
+        let sw = sample_weight_at(weights.sample_weight, i) as f64;
+        checked_f32_coef(
+            -(sw * cw as f64) / nb as f64,
+            "sample_weight × class_weight",
+        )?;
+    }
+    Ok(())
+}
+
+/// クラス `yi` の `class_weight`（未指定・未登録は `1.0`）。
+fn class_weight_of(weights: &FitWeights<'_>, yi: i32) -> f32 {
+    weights
+        .class_weight
+        .as_ref()
+        .and_then(|m| u32::try_from(yi).ok().and_then(|k| m.get(&k).copied()))
+        .unwrap_or(1.0)
+}
+
+/// サンプル別重みの `i` 番目（`sample` 未指定は `1.0`）。
+fn sample_weight_at(sample: Option<&[f32]>, i: usize) -> f32 {
+    sample.and_then(|t| t.get(i).copied()).unwrap_or(1.0)
+}
+
+/// 重み付き MSE: `(√(w_i / (N·M))·(pred − target))²` を総和する（`w_i / (N·M)` を `(pred − target)²` へ掛ける式と数学的に等価）
+/// （`mse_loss_with(Mean)` は `Σ_ij d_ij² / (N·M)` のため、`w_i = 1` で等価）。
+/// 既存 `Var` 演算（`sub`・`mul`・`sum`）の合成のみ（新規 `Op` なし）。
+fn weighted_mse_loss<'t>(
+    tape: &'t crate::Tape,
+    pred: &crate::Var<'t>,
+    target: &Tensor<f32>,
+    sample: Option<&Tensor<f32>>,
+) -> Result<crate::Var<'t>, AutodiffError> {
+    let shape = pred.to_tensor().shape().to_vec();
+    if shape.as_slice() != target.shape() || shape.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "Sequential::fit_with_weights: 重み付き MSE は pred と target の shape が一致し \
+             rank 1 以上であることが必要"
+                .to_string(),
+        ));
+    }
+    let n = shape[0];
+    let numel = shape
+        .iter()
+        .try_fold(1usize, |a, &d| a.checked_mul(d))
+        .ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "Sequential::fit_with_weights: 要素数が usize を超える".to_string(),
+            )
+        })?;
+    if n == 0 || numel == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "Sequential::fit_with_weights: 空のバッチには重み付き損失を定義できない".to_string(),
+        ));
+    }
+    let m = numel / n;
+    let sw = sample.map(|t| t.host_slice());
+    let mut coef = alloc_coef(numel)?;
+    // 係数 0（重み 0 または f32 でアンダーフロー）のサンプルは損失計算から除外する
+    // （非有限の差分に 0 を掛けると `inf × 0 = NaN` になるため。レビュー指摘 #2823）。
+    let mut zero_mask = vec![false; numel];
+    for i in 0..n {
+        let w = sample_weight_at(sw.as_deref(), i);
+        // 損失は `Σ (d·s_i)²`（`s_i = √(w_i/(N·M))`）で評価する。`d²` を先に f32 で作ると
+        // 最終結果が有限でも中間が overflow し、係数 `w_i/(N·M)` を先に f32 へ落とすと
+        // 小さい正の重みが 0 に丸められるため、平方根側の係数を f64 で確定する
+        // （レビュー指摘 #2823）。
+        let s = checked_f32_coef((w as f64 / (n as f64 * m as f64)).sqrt(), "sample_weight")?;
+        coef[i * m..(i + 1) * m].fill(s);
+        if s == 0.0 {
+            zero_mask[i * m..(i + 1) * m].fill(true);
+        }
+    }
+    let coef_t = Tensor::new(coef, &shape).map_err(AutodiffError::Shape)?;
+    let coef_v = tape.var_no_grad(&coef_t);
+    // 有限な残差 `pred − target` を先に求めて係数を掛ける（pred・target を別々に縮めてから
+    // 減算すると、大きな値同士の差で精度を失い、`s_i > 1` では積が overflow して残差 0 でも
+    // NaN になるため。レビュー指摘 #2823）。残差自体が f32 で overflow する行
+    // （例 pred=3e38, target=-3e38）が係数非 0 の行に存在する場合に限り、両オペランドを先に
+    // `s_i` で縮めてから減算する経路へ切り替える。
+    let target_v = tape.var_no_grad(target);
+    let pred_t = pred.to_tensor();
+    // 経路は要素ごとに選ぶ（別行の overflow が有限な行の計算を壊さないため。
+    // 例: 他行が overflow していても pred=target=3e38・s_i 大の行は残差 0 のまま）。
+    let overflow_mask: Vec<bool> = pred_t
+        .host_slice()
+        .iter()
+        .zip(target.host_slice().iter())
+        .zip(zero_mask.iter())
+        .map(|((&p, &t), &z)| !z && !(p - t).is_finite())
+        .collect();
+    let mut scaled = if overflow_mask.iter().any(|&b| b) {
+        // 残差先行側は overflow 要素を 0 へ置換し、縮小先行側は非 overflow 要素を 0 へ
+        // 置換して和を取る（`masked_fill` の VJP は置換位置の勾配を 0 にする）。
+        let keep: Vec<bool> = overflow_mask.iter().map(|&b| !b).collect();
+        let ov_t = Tensor::new(overflow_mask, &shape).map_err(AutodiffError::Shape)?;
+        let keep_t = Tensor::new(keep, &shape).map_err(AutodiffError::Shape)?;
+        let a = pred.sub(&target_v)?.mul(&coef_v)?.masked_fill(&ov_t, 0.0)?;
+        let b = pred
+            .mul(&coef_v)?
+            .sub(&target_v.mul(&coef_v)?)?
+            .masked_fill(&keep_t, 0.0)?;
+        a.add(&b)?
+    } else {
+        pred.sub(&target_v)?.mul(&coef_v)?
+    };
+    if zero_mask.iter().any(|&b| b) {
+        let mask_t = Tensor::new(zero_mask, &shape).map_err(AutodiffError::Shape)?;
+        scaled = scaled.masked_fill(&mask_t, 0.0)?;
+    }
+    scaled.mul(&scaled)?.sum(None)
+}
+
+/// 重み付き交差エントロピー: `−Σ_i w_i·cw(y_i)·log_softmax(pred)_{i,y_i} / N`。
+/// target 列の `log_softmax` を `gather` で選び `−w_i·cw(y_i)/N` を掛けて総和する
+/// （既存 `Var` 演算の合成のみ）。`pred` は `[N, C]`、`target` は `N` 要素。
+/// `class` のキーが `C` 以上・target が `[0, C)` 外は、添字 panic を避けるため
+/// 更新前（forward 後・backward 前）に `InvalidArgument` で拒否する。
+fn weighted_cross_entropy_loss<'t>(
+    tape: &'t crate::Tape,
+    pred: &crate::Var<'t>,
+    target: &Tensor<i32>,
+    sample: Option<&Tensor<f32>>,
+    class: Option<&HashMap<u32, f32>>,
+) -> Result<crate::Var<'t>, AutodiffError> {
+    let shape = pred.to_tensor().shape().to_vec();
+    let (n, c) = match shape.as_slice() {
+        [n, c] if *n > 0 && *c > 0 => (*n, *c),
+        _ => {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Sequential::fit_with_weights: 重み付き CrossEntropy の logits は shape [N, C]\
+                 （N, C > 0）が必要（{shape:?} が渡された）"
+            )));
+        }
+    };
+    if target.numel() != n {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::fit_with_weights: target の要素数 {} が logits の N = {n} と一致しない",
+            target.numel()
+        )));
+    }
+    if let Some(class) = class
+        && let Some(bad) = class.keys().find(|&&k| k as usize >= c)
+    {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::fit_with_weights: class_weight のキー {bad} がクラス数 C = {c} 以上"
+        )));
+    }
+    let total = n.checked_mul(c).ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "Sequential::fit_with_weights: N×C が usize を超える".to_string(),
+        )
+    })?;
+    let _ = total;
+    let sw = sample.map(|t| t.host_slice());
+    let mut coef = alloc_coef(n)?;
+    let mut zero_mask = vec![false; n];
+    let mut idx: Vec<i32> = Vec::new();
+    idx.try_reserve_exact(n)
+        .map_err(|_| super::alloc_failed())?;
+    let ys = target.host_slice();
+    for (i, &yi) in ys.iter().enumerate() {
+        let cls = usize::try_from(yi).ok().filter(|&k| k < c).ok_or_else(|| {
+            AutodiffError::InvalidArgument(format!(
+                "Sequential::fit_with_weights: target[{i}] = {yi} がクラス範囲 [0, {c}) の外"
+            ))
+        })?;
+        let cw = class
+            .and_then(|m| m.get(&(cls as u32)).copied())
+            .unwrap_or(1.0);
+        // 両因子を先に f64 へ昇格し、積と N での除算を終えてから 1 回だけ f32 へ落とす
+        // （f32 の積が除算前に overflow するのを避ける）。
+        let sw_i = sample_weight_at(sw.as_deref(), i) as f64;
+        let c = checked_f32_coef(
+            -(sw_i * cw as f64) / n as f64,
+            "sample_weight × class_weight",
+        )?;
+        coef[i] = c;
+        zero_mask[i] = c == 0.0;
+        idx.push(yi);
+    }
+    let coef_t = Tensor::new(coef, &[n, 1]).map_err(AutodiffError::Shape)?;
+    let idx_t = Tensor::new(idx, &[n, 1]).map_err(AutodiffError::Shape)?;
+    let coef_v = tape.var_no_grad(&coef_t);
+    // target の log_softmax のみを gather で選ぶ（非 target クラスへ 0 を掛けると
+    // `0 × -inf` が NaN になるため、疎な係数行列との積は使わない）。
+    // 係数 0 のサンプルは選択された log_softmax が非有限でも `-inf × 0 = NaN` に
+    // ならないよう、積の前に 0 へ置換して除外する（レビュー指摘 #2823）。
+    // 係数 0 の行は logits 自体を `log_softmax` の前に有限定数 0 へ置換する。gather 後の
+    // 置換だけでは `log_softmax` の VJP が未加工の forward 値（`inf` 行は NaN）を使うため、
+    // 勾配が NaN になり optimizer 経由でパラメータを汚染する（レビュー指摘 #2823）。
+    // `masked_fill` の VJP は置換位置の勾配を 0 にする。
+    let any_zero = zero_mask.iter().any(|&b| b);
+    let mask_t = Tensor::new(zero_mask, &[n, 1]).map_err(AutodiffError::Shape)?;
+    let logits = if any_zero {
+        pred.masked_fill(&mask_t, 0.0)?
+    } else {
+        *pred
+    };
+    let mut picked = logits.log_softmax(1)?.gather(1, &idx_t)?;
+    if any_zero {
+        picked = picked.masked_fill(&mask_t, 0.0)?;
+    }
+    picked.mul(&coef_v)?.sum(None)
 }
 
 /// `compile()` で構築した optimizer 本体（[`crate::optim::Sgd`]／
@@ -1131,6 +1755,30 @@ fn accumulate_grads_into(
     Ok(())
 }
 
+/// 重み付き fit（`fit_with_weights` の非既定重み）で、optimizer へ渡す直前の勾配に
+/// 非有限値（NaN／±inf）がないことを確認する（イシュー #2564・レビュー指摘 #2823）。
+///
+/// 検査位置は 2 段: (1) 各マイクロバッチの `grad_refs`（内部層 overflow の `inf × 0`）、
+/// (2) 累積境界・epoch 末端数 flush で `optimizer.step_dispatch` に渡す累積勾配
+/// （各マイクロバッチが有限でも [`accumulate_grads_into`] の f32 加算で overflow しうる）。
+/// 失敗は更新前に `InvalidArgument` を返すだけで、パラメータ・optimizer 状態へ触れない。
+fn ensure_finite_grads<'a>(
+    grads: impl IntoIterator<Item = &'a Tensor<f32>>,
+    method: &str,
+    stage: &str,
+) -> Result<(), AutodiffError> {
+    if grads
+        .into_iter()
+        .any(|g| g.host_slice().iter().any(|v| !v.is_finite()))
+    {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: 重み付き損失の勾配（{stage}）に非有限値（NaN／inf）が\
+             含まれるためパラメータ更新を拒否した（重み×勾配の overflow の疑い）"
+        )));
+    }
+    Ok(())
+}
+
 /// L-BFGS（イシュー #2172・親 #2131。2026-09-27 所有者承認）: 1 バッチ
 /// あたりの outer step を 1 回実行する（[`Sequential::run_fit`] の
 /// `OptimizerState::Lbfgs` 分岐から呼ばれる）。
@@ -1458,7 +2106,17 @@ impl Sequential {
         y: &Tensor<T>,
         config: FitConfig,
     ) -> Result<History, AutodiffError> {
-        self.fit_with_callbacks_named("fit", x, y, config, None, &mut [], &[], None)
+        self.fit_with_callbacks_named(
+            "fit",
+            x,
+            y,
+            config,
+            &FitWeights::default(),
+            None,
+            &mut [],
+            &[],
+            None,
+        )
     }
 
     /// [`Self::fit`] の拡張版（イシュー #1763・親 #1618）:
@@ -1607,6 +2265,7 @@ impl Sequential {
             x,
             y,
             config,
+            &FitWeights::default(),
             validation,
             callbacks,
             &[],
@@ -1666,6 +2325,7 @@ impl Sequential {
             x,
             y,
             config,
+            &FitWeights::default(),
             validation,
             callbacks,
             metrics,
@@ -1788,10 +2448,94 @@ impl Sequential {
             x,
             y,
             config,
+            &FitWeights::default(),
             validation,
             callbacks,
             metrics,
             Some(hook),
+        )
+    }
+
+    /// クラス別・サンプル別の損失重みと [`FitConfig::validation_split`] に対応した
+    /// `fit`（Keras `fit(class_weight=, sample_weight=)` 相当。イシュー #2564・
+    /// 親 #2562。公開形は `docs/compat-fit-sample-weighting-decision.md` §11.1）。
+    ///
+    /// [`Self::fit_with_metrics`] と同じ引数に `weights`（[`FitWeights`]）を加えた入口で、
+    /// 同じ非公開経路（`fit_with_callbacks_named`）へ委譲する。`weights` が
+    /// `FitWeights::default()` で `config` に `validation_split` が無いとき、演算列・
+    /// RNG 消費・戻り値は [`Self::fit_with_metrics`] と bit 完全一致する。
+    ///
+    /// 非既定の重みでは、バッチ損失を `Σ w_i·l_i / N_batch`
+    /// （`w_i = sample_weight[i] × class_weight.get(y_i).unwrap_or(1.0)`）にする。
+    /// `History::loss` は重み付き値、`val_loss`／`val_metrics` は重みなし
+    /// （[`Self::evaluate`] と bit 一致）。勾配累積・AMP とは併用できる。
+    /// 新規 `Op`／カーネルは追加せず、既存 `Var` 演算の合成のみのため CPU／CUDA／Metal
+    /// のいずれのバックエンドでも動く。
+    ///
+    /// # エラー（いずれも `InvalidArgument`。モード変更・パラメータ更新の前に拒否する）
+    ///
+    /// [`Self::fit_with_metrics`] の既存検査に加え:
+    /// - `sample_weight` の長さが `x` の第 0 軸と異なる・要素が非有限／負
+    /// - `class_weight` の値が非有限／負・キーが logits のクラス数 `C` 以上
+    ///   （最初のバッチで検出）・target が `[0, C)` の外
+    /// - `class_weight` が `Loss::CrossEntropy` 以外（`Nll` を含む）、`sample_weight` が
+    ///   `Loss::CrossEntropy`／`Loss::Mse` 以外、非既定の重みと `Optimizer::Lbfgs`
+    ///   の併用（式が定義されていない組み合わせは fail-closed）
+    /// - `validation_split` が非有限・負・`1` 以上・学習側／検証側が 0 件になる値、
+    ///   明示 `validation` との併用（[`FitConfig::validation_split`]）
+    ///
+    /// # 非有限値の拒否（イシュー #2564・レビュー指摘 #2823）
+    ///
+    /// 非既定の重みでは、optimizer へ渡す前に (1) 重み付き損失、(2) 各マイクロバッチの勾配、
+    /// (3) 累積境界・epoch 末の端数 flush で実際に渡す累積勾配（f32 加算の overflow を含む）を
+    /// 検査し、NaN／±inf があれば `InvalidArgument` を返す。拒否した更新は適用されず、
+    /// パラメータ・optimizer 状態は拒否時点の直前の状態のまま（それまでに成功した step は
+    /// 既存 `fit` 系と同じく巻き戻さない）。train／eval モードは呼び出し前へ復元する。
+    ///
+    /// # 例
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{FitConfig, FitWeights, Loss, Optimizer, Sequential};
+    /// use fandhe_ai::optim::SgdConfig;
+    /// use fandhe_ai::Tensor;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut model = Sequential::new().add_linear(2, 2, 7).unwrap();
+    /// model
+    ///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+    ///     .unwrap();
+    /// let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], &[4, 2]).unwrap();
+    /// let y = Tensor::new(vec![0i32, 1, 1, 0], &[4]).unwrap();
+    /// let sw = [1.0f32, 1.0, 2.0, 0.5];
+    /// let weights = FitWeights::new()
+    ///     .class_weight(HashMap::from([(1u32, 2.0f32)]))
+    ///     .sample_weight(&sw);
+    /// let history = model
+    ///     .fit_with_weights(&x, &y, FitConfig::new(2, 2), &weights, None, &mut [], &[])
+    ///     .unwrap();
+    /// assert_eq!(history.loss.len(), 2);
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_with_weights<T: FitTarget>(
+        &mut self,
+        x: &Tensor<f32>,
+        y: &Tensor<T>,
+        config: FitConfig,
+        weights: &FitWeights<'_>,
+        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
+        callbacks: &mut [Callback],
+        metrics: &[Metrics],
+    ) -> Result<History, AutodiffError> {
+        self.fit_with_callbacks_named(
+            "fit_with_weights",
+            x,
+            y,
+            config,
+            weights,
+            validation,
+            callbacks,
+            metrics,
+            None,
         )
     }
 
@@ -1812,6 +2556,7 @@ impl Sequential {
         x: &Tensor<f32>,
         y: &Tensor<T>,
         config: FitConfig,
+        weights: &FitWeights<'_>,
         validation: Option<(&Tensor<f32>, &Tensor<T>)>,
         callbacks: &mut [Callback],
         metrics: &[Metrics],
@@ -1954,6 +2699,68 @@ impl Sequential {
                 )));
             }
         }
+        // (1.9) validation_split（イシュー #2564）の解決。実際に検証データを生成する分割
+        // のときだけ「validation あり」として扱い（`docs/compat-fit-sample-weighting-
+        // decision.md` §11.4）、以降の validation 参照（callbacks／metrics／ロガー／
+        // `run_fit`）はすべて分割後の実効値を見る。`±0.0` は分割なし。
+        let split_at = match resolve_validation_split(
+            method,
+            config.validation_split_bits,
+            x.shape().first().copied(),
+            y.shape().first().copied(),
+            validation.is_some(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                self.compiled = Some(compiled);
+                return Err(e);
+            }
+        };
+        let split_owned = match split_at {
+            Some(at) => match split_for_validation(method, x, y, at) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    self.compiled = Some(compiled);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let (x, y, validation) = match &split_owned {
+            Some((x_tr, y_tr, x_val, y_val)) => (x_tr, y_tr, Some((x_val, y_val))),
+            None => (x, y, validation),
+        };
+        // 学習側の `sample_weight` も同じ位置で切る（検証側には使わない）。
+        let n_total = split_owned
+            .as_ref()
+            .map(|(x_tr, _, x_val, _)| {
+                x_tr.shape().first().copied().unwrap_or(0)
+                    + x_val.shape().first().copied().unwrap_or(0)
+            })
+            .or_else(|| x.shape().first().copied())
+            .unwrap_or(0);
+        if let Err(e) = validate_fit_weights(
+            method,
+            weights,
+            n_total,
+            compiled.loss,
+            matches!(compiled.optimizer, OptimizerState::Lbfgs(_)),
+            custom_step.is_some(),
+        ) {
+            self.compiled = Some(compiled);
+            return Err(e);
+        }
+        let sliced_weights;
+        let weights: &FitWeights<'_> = match (split_at, weights.sample_weight) {
+            (Some(at), Some(sw)) => {
+                sliced_weights = FitWeights {
+                    class_weight: weights.class_weight.clone(),
+                    sample_weight: sw.get(..at),
+                };
+                &sliced_weights
+            }
+            _ => weights,
+        };
         if validation.is_none()
             && let Some(offending) = callbacks.iter().find(|cb| cb.requires_validation())
         {
@@ -2107,6 +2914,7 @@ impl Sequential {
             x,
             y,
             config,
+            weights,
             validation,
             callbacks,
             metrics,
@@ -2145,6 +2953,7 @@ impl Sequential {
         x: &Tensor<f32>,
         y: &Tensor<T>,
         config: FitConfig,
+        weights: &FitWeights<'_>,
         validation: Option<(&Tensor<f32>, &Tensor<T>)>,
         callbacks: &mut [Callback],
         metrics: &[Metrics],
@@ -2155,13 +2964,29 @@ impl Sequential {
         };
         let x_dataset = TensorDataset::new(x.clone()).map_err(to_invalid_arg)?;
         let y_dataset = TensorDataset::new(y.clone()).map_err(to_invalid_arg)?;
-        let loader = DataLoader::new(
-            (x_dataset, y_dataset),
-            DataLoaderConfig::new(config.batch_size)
-                .shuffle(config.shuffle)
-                .drop_last(config.drop_last),
-        )
-        .map_err(to_invalid_arg)?;
+        let loader_config = DataLoaderConfig::new(config.batch_size)
+            .shuffle(config.shuffle)
+            .drop_last(config.drop_last);
+        // サンプル別重み（イシュー #2564）がある場合だけ第 3 成分として載せる。無い場合は
+        // 従来の 2 成分ローダのまま（成分数はシャッフルの RNG 消費に影響しない）。
+        let loader = match weights.sample_weight {
+            Some(sw) => {
+                let mut buf: Vec<f32> = Vec::new();
+                buf.try_reserve_exact(sw.len())
+                    .map_err(|_| super::alloc_failed())?;
+                buf.extend_from_slice(sw);
+                let w_tensor = Tensor::new(buf, &[sw.len()]).map_err(AutodiffError::Shape)?;
+                let w_dataset = TensorDataset::new(w_tensor).map_err(to_invalid_arg)?;
+                FitLoader::Weighted(
+                    DataLoader::new((x_dataset, y_dataset, w_dataset), loader_config)
+                        .map_err(to_invalid_arg)?,
+                )
+            }
+            None => FitLoader::Plain(
+                DataLoader::new((x_dataset, y_dataset), loader_config).map_err(to_invalid_arg)?,
+            ),
+        };
+        let weighted = weights.is_non_default();
 
         // `Vec::with_capacity` は capacity overflow（`config.epochs`
         // が巨大・`usize::MAX` 近辺等）で panic する（本番経路の panic
@@ -2216,6 +3041,7 @@ impl Sequential {
         // により、正常完走・`break 'epochs`（patience 打ち切り）・
         // エラーのいずれの経路でも必ずブロック直後の
         // `restore_best_weights` 処理へ到達する。
+        let mut targets_checked = false;
         let epoch_result: Result<(), AutodiffError> = 'epochs_block: {
             'epochs: for epoch_local in 0..config.epochs {
                 // (1) epoch 開始 LR 同期（[`Self::fit_with_callbacks`] doc
@@ -2247,8 +3073,8 @@ impl Sequential {
                 let mut acc: Option<Vec<Tensor<f32>>> = None;
                 let mut micro: u32 = 0;
 
-                for batch in &loader {
-                    let (x_batch, y_batch) = match batch {
+                for batch in loader.iter() {
+                    let (x_batch, y_batch, w_batch) = match batch {
                         Ok(v) => v,
                         Err(e) => {
                             break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
@@ -2336,7 +3162,45 @@ impl Sequential {
                             Ok(v) => v,
                             Err(e) => break 'epochs_block Err(e),
                         };
-                        let loss_var = match T::loss_for(compiled.loss, &tape, &pred, &y_batch) {
+                        // 非既定の重みでは、最初の forward でクラス数 C が判明した時点で
+                        // `y` 全体の target を検査する（最初の optimizer.step より前。
+                        // 後続バッチの不正 target で先行バッチが更新済みになるのを防ぐ）。
+                        if weighted
+                            && !targets_checked
+                            && let [_, c] = pred.to_tensor().shape()
+                        {
+                            if let Err(e) = T::check_class_range(y, *c) {
+                                break 'epochs_block Err(e);
+                            }
+                            if compiled.loss == Loss::CrossEntropy
+                                && let Some(cls) = T::as_class_targets(y)
+                                && let Err(e) = check_ce_coefs_for_all_batches(
+                                    &cls.host_slice(),
+                                    config.batch_size,
+                                    config.drop_last,
+                                    config.shuffle,
+                                    weights,
+                                )
+                            {
+                                break 'epochs_block Err(e);
+                            }
+                            targets_checked = true;
+                        }
+                        // 重みが既定なら従来どおり `T::loss_for`（bit 一致契約）。非既定の
+                        // ときだけ重み付き損失（イシュー #2564）。
+                        let loss_result = if weighted {
+                            T::weighted_loss_for(
+                                compiled.loss,
+                                &tape,
+                                &pred,
+                                &y_batch,
+                                w_batch.as_ref(),
+                                weights.class_weight.as_ref(),
+                            )
+                        } else {
+                            T::loss_for(compiled.loss, &tape, &pred, &y_batch)
+                        };
+                        let loss_var = match loss_result {
                             Ok(v) => v,
                             Err(e) => break 'epochs_block Err(e),
                         };
@@ -2353,6 +3217,14 @@ impl Sequential {
                                 )));
                             }
                         };
+                        // 非既定の重み: 非有限の損失は History へ記録せず更新前に拒否する
+                        // （重み付き和の f32 overflow 等。重みなし経路は従来どおり）。
+                        if weighted && !loss_scalar.is_finite() {
+                            break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::{method}: 重み付き損失が非有限（{loss_scalar}）の\
+                                 ためパラメータ更新を拒否した（重み×損失の overflow の疑い）"
+                            )));
+                        }
                         weighted_sum += loss_scalar as f64 * n_batch as f64;
                         count += n_batch;
 
@@ -2413,6 +3285,18 @@ impl Sequential {
                                 Ok(v) => v,
                                 Err(e) => break 'epochs_block Err(e),
                             };
+                            // 非既定の重み: ゼロ重み行を出力側でマスクしても、内部層の overflow
+                            // （`inf × 0 = NaN`）が勾配へ混入しうる。optimizer.step より前に
+                            // 非有限勾配を拒否し、パラメータ汚染を防ぐ（レビュー指摘 #2823）。
+                            if weighted
+                                && let Err(e) = ensure_finite_grads(
+                                    grad_refs.iter().copied(),
+                                    method,
+                                    "マイクロバッチ",
+                                )
+                            {
+                                break 'epochs_block Err(e);
+                            }
 
                             // 勾配累積（イシュー #2180）。AMP は
                             // `accumulate_steps > 1` と併用できない
@@ -2461,6 +3345,14 @@ impl Sequential {
                                         ));
                                     }
                                 };
+                                // 累積後の f32 加算 overflow は個々のマイクロバッチ検査では
+                                // 検出できないため、実際に渡す累積勾配を更新前に検査する。
+                                if weighted
+                                    && let Err(e) =
+                                        ensure_finite_grads(acc_buf.iter(), method, "累積境界")
+                                {
+                                    break 'epochs_block Err(e);
+                                }
                                 let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
                                 let stepped = match compiled.optimizer.step_dispatch(
                                     &param_refs,
@@ -2508,6 +3400,12 @@ impl Sequential {
                             )));
                         }
                     };
+                    if weighted
+                        && let Err(e) =
+                            ensure_finite_grads(acc_buf.iter(), method, "epoch 末の端数 flush")
+                    {
+                        break 'epochs_block Err(e);
+                    }
                     let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
                     let stepped = match compiled.optimizer.step_dispatch(
                         &param_refs,

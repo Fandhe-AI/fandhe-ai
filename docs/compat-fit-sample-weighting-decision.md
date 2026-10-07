@@ -395,3 +395,30 @@ sample_weight 適用は再開時に選択肢として提示する。新規 Issue
 - facade 経由の利用例テスト（対象 API が存在しない）。
 - §11.3 の承認依頼コメントの投稿、追跡 Issue の起票（ユーザー承認が必要）。
 - 依存追加・`unsafe`・tolerance の変更。
+
+## 14. #2564 実装記録（facade 公開）
+
+イシュー #2564（親 #2562）で §11.1 の確定形を facade へ公開した。着手条件はルート #2499 のコメント（id 6033824965・2026-10-07）の「#2562: §11.1 の確定形と §11.3 の推奨案（式が未定義の組み合わせは fail-closed）」を根拠とする。本節はそれ以上の承認を主張しない。§11.3 の推奨案どおり、式が未定義の組み合わせは `InvalidArgument` で拒否する。
+
+### 14.1 記録の文言から一意に導いた実装上の点
+
+1. 「非既定の重み」は `class_weight`／`sample_weight` のいずれかが `Some`（空 `HashMap` も `Some`）。`FitWeights::default()` との `PartialEq` と同じ境界。
+2. 検査順は既存検査列の後、validation を参照する既存検査（`Monitor::ValLoss` 系・metrics・ロガー準備）の前に validation_split を解決して実効 validation を確定し、重みの検査はロガーの副作用より前に置く。
+3. `class_weight` のキー `< C`・target 範囲・logits の rank は `C` が forward 後にしか分からないため、最初のバッチの forward 後・`backward`／`optimizer.step` の前に検査する（パラメータ更新前）。
+4. `validation_split` は `FitConfig` 上のビルダーのため全入口（`fit`・`fit_with_callbacks`・`fit_with_metrics`・`fit_with_train_step`・`fit_with_weights`）で同じデータ分割として働く。内部専用の `FunctionalModel::fit` は検証データを持たないため有効な分割を拒否する。
+5. 重み × カスタム step フックは公開 API から到達不能（`fit_with_train_step` は既定重みを渡す）。内部不変条件として `InvalidArgument` で防御するのみ。
+6. `sample_weight.len()` は分割前の `N` に対して検査し、その後同じ `split_at` で切って学習側のみ使う。
+
+### 14.2 非対象
+
+保留ガードの正ガード化・到達性テスト・`docs/compat-api-scope.md` §5 と `docs/compat-fit-evaluate-design.md` §3.7 の更新・索引ドリフト修正は #2565 の担当。新規 `Op`／`BackendOps`／VJP／カーネルを追加しない（既存 `Var` 演算の合成のみ）ため、実機 parity の申し送りは不要。
+
+### 14.3 非有限値の検査位置とエラー時の不変条件（レビュー指摘 #2823）
+
+非既定の重み（`weighted`）のときだけ、次の 3 か所で非有限（NaN／±inf）を `InvalidArgument` で拒否する（重みなしの既存経路は挙動不変）:
+
+1. 重み付き損失のスカラ（`History::loss` へ記録する前・backward の前）。
+2. 各マイクロバッチの勾配（ゼロ重み行の内部 overflow `inf × 0 = NaN` 対策）。
+3. optimizer へ渡す直前の累積勾配（通常の累積境界と epoch 末の端数 flush の両方）。各マイクロバッチが有限でも `accumulate_grads_into` の f32 加算で overflow しうるため（例: 二クラス・同一 logits・`sample_weight = 3e38`・`batch_size = 1` の 3 バッチ累積で bias 勾配が ±1.5e38 → 累積 ±inf）。勾配クリッピングは fit 経路になく optimizer 内部の処理のため、検査はクリップ前（optimizer 入力）で行う。
+
+不変条件: 拒否した更新はパラメータにも optimizer 状態にも適用されない（拒否時点の累積バッファは破棄）。train／eval モードは呼び出し前へ復元し、`compile` 状態は維持する。それまでに成功した step は既存 `fit` 系と同じく巻き戻さない。AMP 経路は `GradScaler::unscale` の非有限スキップ契約に従う（累積との併用は従来どおり拒否）。重みなしの `fit` 系の累積 overflow は別件で、本 PR では変更しない。

@@ -3268,51 +3268,35 @@ struct EmaHoldDoctestGuard;
 #[allow(dead_code)]
 struct SwaHoldDoctestGuard;
 
-/// イシュー #2177（親 #2131「PyTorch／TF 置き換えの API 網羅（対応表の
-/// 行内深掘り）」）の facade 公開保留を固定する doctest 足場。
-/// 旧 MHA 保留ガード（#2163。#2530 で撤去済み）と同型の「正のプローブ 1
-/// ブロック方式」を採る。
+/// イシュー #2177（親 #2131）の fit 重み付け公開の**残る禁止経路**を固定する
+/// doctest 足場（#2564 で承認形を公開済み）。承認形は `compat::FitWeights`・
+/// inherent `FitConfig::validation_split`・`FitWeights::{new, class_weight,
+/// sample_weight}`・inherent `Sequential::fit_with_weights` で、
+/// `docs/compat-fit-sample-weighting-decision.md` §11.1 の確定形（ルート #2499 の
+/// 承認コメント）に限る。旧版が持っていたローカル `FitWeights` 型プローブと
+/// `FitConfig::validation_split`／`Sequential::fit_with_weights` の UFCS 行は、
+/// 実在する inherent に解決され本 doctest 自体が壊れるため撤去した（§11.6）。
 ///
-/// 候補の公開面は 2 種に分かれる: (a) まだ存在しない新規型 `FitWeights`
-/// （型名の glob 衝突プローブ）、(b) 既存の公開型 `fandhe_ai::compat::
-/// {FitConfig, Sequential}` へのメソッド追加（トレイトプローブ）。
-///
-/// (a) `__fandhe_fit_weighting_hold_probe::FitWeights` をローカル
-/// 宣言する。facade が同名の型を `pub use`／`pub struct`／`pub type` の
-/// いずれで公開しても、`use fandhe_ai::compat::*;` の glob が同名を
-/// 持ち込み、ローカル定義との衝突（E0659）でコンパイルが失敗する
-/// （`CsvLogger` 等の旧保留ガード〈`CallbacksLoggersHoldDoctestGuard`。#2571 で削除済み〉と同方式）。
-///
-/// (b) `validation_split`／`class_weight`／`sample_weight` を
-/// `fandhe_ai::compat::FitConfig` へ、`fit_with_weights`／
-/// `fit_weighted` を `fandhe_ai::compat::Sequential` へ実装する
-/// `__FandheFitWeightHoldProbe` トレイトの衝突プローブ（`
-/// __FandheMhaOptionsAddProbe` と同方式）。`class_weight`／
-/// `sample_weight` を `FitConfig` 側のプローブに含めるのは、受入基準の
-/// 字面（`FitConfig` へ直接フィールド追加）どおりに実装すると
-/// `#[derive(Copy, Eq)]`（`crates/facade/src/compat/training.rs:175`）
-/// と衝突し 0.9.0 非破壊契約に反するため、その禁止された実装経路
-/// 自体も検出対象に含める設計判断による（`docs/compat-fit-sample-
-/// weighting-decision.md` §2）。**UFCS 形のみ**（`fandhe_ai::compat::
-/// FitConfig::validation_split(cfg)` 等）で呼ぶ（`FitConfig` の
-/// ビルダーは値で `self` を取る inherent メソッド、`Sequential::fit*`
-/// は `&mut self` を取る inherent メソッドのため、メソッド呼び出し形
-/// だと inherent 側が優先解決され衝突を検出できない——
-/// 旧 MHA 保留ガード（#2163。#2530 で撤去済み） doc の同一理由）。本プローブの
-/// トレイトメソッドはいずれも引数なし `&self` のみを取るため、facade
-/// 側に実引数を要求する本物の実装が追加されれば UFCS 呼び出しの引数
-/// 個数・型が一致せずコンパイルが失敗する。
+/// 「正のプローブ 1 ブロック方式」で、facade の全 `pub mod` を glob import
+/// したスコープに `__FandheFitWeightHoldProbe` トレイトを導入し、承認形に
+/// **ない**場所の名前を UFCS で呼ぶ: `FitConfig::{class_weight, sample_weight,
+/// fit_with_weights, fit_weighted}`（`FitConfig` は `Copy + Eq` を公開契約と
+/// するため重みを直接持たせる実装経路は不可）、`Sequential::{validation_split,
+/// class_weight, sample_weight, fit_weighted}`。facade が同名の inherent メソッドを
+/// 足すと inherent が優先解決され、引数なし `&self` のトレイト呼び出しが型・
+/// 引数不一致でコンパイル失敗する（メソッド呼び出し形だと衝突を検出できない
+/// ため UFCS のみ）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// fit_weighting_hold_doctest_globs_all_pub_modules`・
 /// `fit_weighting_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_fit_weighting_items`・
-/// `fit_config_keeps_copy_eq_for_0_9_0_compat`）との多層防御の位置
-/// づけは `docs/compat-fit-sample-weighting-decision.md` §7 を参照。
+/// `facade_does_not_reexport_or_declare_fit_weighting_items`〈承認位置の許可数を
+/// 固定。`FitWeights::class_weight`／`sample_weight` は `impl` の所有型を区別
+/// できないため「`training.rs` に各 1 件」で縛り、`FitConfig` 側への追加は本
+/// doctest のプローブが検出する〉・`fit_config_keeps_copy_eq_for_0_9_0_compat`）
+/// との多層防御の位置づけは同 doc §7・§11.6 を参照。
 ///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
+/// 正ガードへの反転・到達性テストは #2565 の担当。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -3331,11 +3315,6 @@ struct SwaHoldDoctestGuard;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
-///
-/// mod __fandhe_fit_weighting_hold_probe {
-///     pub struct FitWeights;
-/// }
-/// use __fandhe_fit_weighting_hold_probe::*;
 ///
 /// struct __FandheFitWeightHoldMarker;
 ///
@@ -3383,15 +3362,21 @@ struct SwaHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe(_: FitWeights, cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {
-///     let _: __FandheFitWeightHoldMarker =
-///         fandhe_ai::compat::FitConfig::validation_split(cfg);
+/// fn __probe(cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {
 ///     let _: __FandheFitWeightHoldMarker =
 ///         fandhe_ai::compat::FitConfig::class_weight(cfg);
 ///     let _: __FandheFitWeightHoldMarker =
 ///         fandhe_ai::compat::FitConfig::sample_weight(cfg);
 ///     let _: __FandheFitWeightHoldMarker =
-///         fandhe_ai::compat::Sequential::fit_with_weights(seq);
+///         fandhe_ai::compat::FitConfig::fit_with_weights(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::FitConfig::fit_weighted(cfg);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::Sequential::validation_split(seq);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::Sequential::class_weight(seq);
+///     let _: __FandheFitWeightHoldMarker =
+///         fandhe_ai::compat::Sequential::sample_weight(seq);
 ///     let _: __FandheFitWeightHoldMarker =
 ///         fandhe_ai::compat::Sequential::fit_weighted(seq);
 /// }
