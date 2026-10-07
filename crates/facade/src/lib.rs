@@ -167,11 +167,12 @@ pub mod interop;
 ///    `docs/facade-model-registry-decision.md` 参照）。
 pub mod model;
 
-/// バッチ推論（DataLoader 反復 `predict`）・推論フェーズ計測の内部実装
-/// （イシュー #2192・親 #2131）。facade 公開は承認待ちのため**非公開**
-/// （`pub mod` にしない）。詳細は [`inference::batch`] モジュール doc・
-/// `docs/facade-predict-batches-phase-metrics-decision.md` を参照。
-mod inference;
+// バッチ推論（`compat::Sequential::predict_batches`）の推論フェーズ計測公開面
+// （イシュー #2582・親 #2581。公開形は
+// `docs/facade-predict-batches-phase-metrics-decision.md` §8.4 の確定形）。
+// モジュール doc は `inference/mod.rs` の `//!` に置く（外側 `///` と併記すると
+// intra-doc link が親スコープで解決され壊れるため）。
+pub mod inference;
 
 /// 非公開。`model` と `compat::model_io`（#2369）が共有する no-follow 葉オープンと
 /// サイズ上限（`fs_guard` モジュール doc 参照）。
@@ -1629,6 +1630,7 @@ pub fn metal_onnx_gpu_execution_enabled() -> bool {
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// struct __FandheHoldMarker;
 ///
@@ -1737,6 +1739,7 @@ struct VarCustomHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_bool_hold_probe {
 ///     pub mod bool_ops {
@@ -1924,6 +1927,7 @@ struct VarBoolOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_hooks_hold_probe {
 ///     pub struct HookHandle;
@@ -2071,6 +2075,7 @@ struct VarHooksHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_activation_hold_probe {
 ///     pub mod activation_ops {
@@ -2189,6 +2194,7 @@ struct VarActivationOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_rng_dist_hold_probe {
 ///     pub struct Generator;
@@ -2240,6 +2246,7 @@ struct VarActivationOpsHoldDoctestGuard;
 ///     use fandhe_ai::interop::onnx::*;
 ///     use fandhe_ai::interop::safetensors::*;
 ///     use fandhe_ai::model::*;
+///     use fandhe_ai::inference::*;
 ///
 ///     mod __fandhe_rng_dist_normal_probe {
 ///         pub fn normal() {}
@@ -2322,6 +2329,7 @@ struct RngDistributionsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_spatial_hold_probe {
 ///     pub struct ConvTranspose1d;
@@ -2411,6 +2419,7 @@ struct SpatialLayersHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_conv3d_hold_probe {
 ///     pub mod conv3d_ops {
@@ -2503,6 +2512,7 @@ struct VarConv3dHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// struct __FandheAdaptiveMaxPoolMarker;
 ///
@@ -2589,6 +2599,7 @@ struct AdaptiveMaxGlobalPoolHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_dropout_embedding_bag_hold_probe {
 ///     pub struct Dropout2d;
@@ -2661,6 +2672,7 @@ struct DropoutEmbeddingBagHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// struct __FandheRnnConfigMarker;
 ///
@@ -2748,6 +2760,7 @@ struct RnnConfigHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_pixel_shuffle_hold_probe {
 ///     pub struct PixelShuffle;
@@ -2841,6 +2854,7 @@ struct PixelShuffleHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_loss_hold_probe {
 ///     pub mod loss_ops {
@@ -2967,6 +2981,7 @@ struct LossOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// struct __FandheEmaHoldMarker;
 ///
@@ -3047,6 +3062,7 @@ struct EmaHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// struct __FandheSwaHoldMarker;
 ///
@@ -3164,6 +3180,7 @@ struct SwaHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_fit_weighting_hold_probe {
 ///     pub struct FitWeights;
@@ -3272,6 +3289,7 @@ struct FitWeightingHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// struct __FandheTrainStepHoldMarker;
 ///
@@ -3362,6 +3380,7 @@ struct TrainStepHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_npy_io_hold_probe {
 ///     pub struct NpyError;
@@ -3471,6 +3490,7 @@ struct NpyIoHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// struct __FandheModelIoHoldMarker;
 ///
@@ -3515,8 +3535,7 @@ struct ModelIoHoldDoctestGuard;
 /// 固定する doctest 足場。`KvCacheHoldDoctestGuard`（#2084。#2579 で削除済み）と同型の
 /// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
 /// import したスコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_generate_hold_probe::{inference::{generate, GenerateConfig,
-/// SamplingStrategy, AutoregressiveModel}, generate, GenerateConfig,
+/// `__fandhe_generate_hold_probe::{generate, GenerateConfig,
 /// SamplingStrategy, AutoregressiveModel}` を導入し、実際に使う関数を
 /// 書く。facade がどの経路（`pub mod inference` 配下・crate ルート直下の
 /// 自由関数・別名エクスポート・facade 独自の `struct`／`trait` 宣言・
@@ -3533,6 +3552,17 @@ struct ModelIoHoldDoctestGuard;
 /// 方式。複数行・別名・独自宣言を検出〉）との多層防御の位置づけ・
 /// 承認未取得の経緯・承認依頼用の事前設計は
 /// `docs/facade-generate-decision.md` §8「承認事項」を参照。
+///
+/// **#2582 での縮小**: `fandhe_ai::inference`（`predict_batches`・`PhaseMetrics`
+/// 公開）が実在の公開モジュールになったため、プローブ内のローカル
+/// `pub mod inference { generate, .. }` は削除した（残すと
+/// `use fandhe_ai::inference::*;` が持ち込む `inference` と glob 衝突
+/// E0659 で doctest 自体が恒常的に落ちる）。検出力は等価に保たれる:
+/// 全 glob 一覧に `use fandhe_ai::inference::*;` を含めるため、
+/// `fandhe_ai::inference::generate` 等が公開されれば crate ルート直下の
+/// ローカル `generate`／`GenerateConfig`／`SamplingStrategy`／
+/// `AutoregressiveModel` と glob 衝突する（`docs/facade-generate-decision.md`
+/// の #2582 追記参照）。
 ///
 /// `workspace` 全体（facade 以外のクレート内部の private 宣言も含む）の
 /// 名前インベントリは、KvCache（#2084 §10.1）が codex-review 指摘
@@ -3561,14 +3591,9 @@ struct ModelIoHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_generate_hold_probe {
-///     pub mod inference {
-///         pub fn generate() {}
-///         pub struct GenerateConfig;
-///         pub struct SamplingStrategy;
-///         pub struct AutoregressiveModel;
-///     }
 ///     pub fn generate() {}
 ///     pub struct GenerateConfig;
 ///     pub struct SamplingStrategy;
@@ -3594,13 +3619,6 @@ struct ModelIoHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_module_path() {
-///     inference::generate();
-///     let _ = inference::GenerateConfig;
-///     let _ = inference::SamplingStrategy;
-///     let _ = inference::AutoregressiveModel;
-/// }
-///
 /// fn __probe_free_fn() {
 ///     generate();
 ///     let _ = GenerateConfig;
@@ -3619,111 +3637,8 @@ struct ModelIoHoldDoctestGuard;
 #[allow(dead_code)]
 struct GenerateHoldDoctestGuard;
 
-/// イシュー #2192（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `NpyIoHoldDoctestGuard`（#2189）と同型の「正のプローブ 1 ブロック
-/// 方式」を採る: facade の全 `pub mod` を glob import したスコープに、
-/// 本ブロック内でのみ定義したローカル
-/// `__fandhe_predict_batches_hold_probe::{PhaseMetrics, get_phase_metrics,
-/// current_phase_metrics, reset_phase_metrics, inference::__mark}` を
-/// 導入し、実際に使う名前・呼び出しを書く。facade がどの経路（`pub use`
-/// による再エクスポート・型宣言・`Sequential` への `predict_batches`／
-/// `get_phase_metrics`／`current_phase_metrics` inherent メソッド追加・
-/// `pub mod inference` の新設）でこれらの名前を公開しても、ローカル定義
-/// との glob 衝突（自由関数・モジュール名・型名の場合。E0659 等）または
-/// 呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッドより
-/// 優先解決されるため、本プローブの trait 経由呼び出しが型・引数不一致で
-/// コンパイル失敗する）でエラーコードに依存せずコンパイルが失敗する。
-///
-/// `crate::inference::batch`（DataLoader 反復推論・phase 計測の内部実装。
-/// `#[cfg(test)]` 限定で `Sequential::run_loader_inference` から到達
-/// 可能）は実装済みで、保留対象は facade 公開面 3 件（`predict_batches`・
-/// `PhaseMetrics`（`get_phase_metrics`／`current_phase_metrics`／
-/// `reset_phase_metrics` を含む計測アクセサ一式）・`pub mod inference`
-/// の新設）のみ。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// predict_batches_hold_doctest_globs_all_pub_modules`・
-/// `predict_batches_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_predict_batches_items`・
-/// `workspace_declares_predict_batches_fn_names_nowhere`）との多層防御の
-/// 位置づけ・承認未取得の経緯は `docs/facade-predict-batches-phase-
-/// metrics-decision.md` §5「承認事項」節を参照。
-///
-/// 承認（`predict_batches`・`PhaseMetrics` 一式・`pub mod inference` の
-/// 新設）を得た日が来たら、本モジュール・本 doctest 自体を削除する
-/// （ソース走査側の対応する否定ガードも同時に正ガードへ置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::nn::kv_cache::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_predict_batches_hold_probe {
-///     pub struct PhaseMetrics;
-///     pub fn get_phase_metrics() {}
-///     pub fn current_phase_metrics() {}
-///     pub fn reset_phase_metrics() {}
-///     pub mod inference {
-///         pub fn __mark() {}
-///     }
-/// }
-/// use __fandhe_predict_batches_hold_probe::*;
-///
-/// struct __FandhePredictBatchesHoldMarker;
-///
-/// trait __FandhePredictBatchesHoldProbe {
-///     fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker;
-///     fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;
-///     fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker;
-/// }
-///
-/// impl __FandhePredictBatchesHoldProbe for fandhe_ai::compat::Sequential {
-///     fn predict_batches(&self) -> __FandhePredictBatchesHoldMarker {
-///         __FandhePredictBatchesHoldMarker
-///     }
-///     fn get_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {
-///         __FandhePredictBatchesHoldMarker
-///     }
-///     fn current_phase_metrics(&self) -> __FandhePredictBatchesHoldMarker {
-///         __FandhePredictBatchesHoldMarker
-///     }
-/// }
-///
-/// fn __probe_free_fns(_: PhaseMetrics) {
-///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
-///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
-///     get_phase_metrics();
-///     current_phase_metrics();
-///     reset_phase_metrics();
-///     inference::__mark();
-/// }
-///
-/// fn __probe_sequential(seq: &fandhe_ai::compat::Sequential) {
-///     let _: __FandhePredictBatchesHoldMarker =
-///         fandhe_ai::compat::Sequential::predict_batches(seq);
-///     let _: __FandhePredictBatchesHoldMarker = seq.get_phase_metrics();
-///     let _: __FandhePredictBatchesHoldMarker =
-///         fandhe_ai::compat::Sequential::current_phase_metrics(seq);
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct PredictBatchesHoldDoctestGuard;
-
 /// イシュー #2631・#2632・#2633（親 #2630・ルート #2499 Phase 4。`rfft`／`irfft`／
-/// `fft`／`ifft`／`stft`／`istft`）の facade 公開保留を固定する doctest 足場。`PredictBatchesHoldDoctestGuard`（#2192）と同型の
+/// `fft`／`ifft`／`stft`／`istft`）の facade 公開保留を固定する doctest 足場。`PredictBatchesHoldDoctestGuard`（#2192。#2582 で削除済み）と同型の
 /// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob import
 /// したスコープに、本ブロック内でのみ定義したローカル
 /// `__fandhe_fft_hold_probe::{FftNorm, StftOptions, IstftOptions, StftPadMode,
@@ -3770,6 +3685,7 @@ struct PredictBatchesHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_fft_hold_probe {
 ///     pub struct FftNorm;
@@ -3919,6 +3835,7 @@ struct FftOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_trig_ops_hold_probe {
 ///     pub mod trig_ops {
@@ -4094,6 +4011,7 @@ struct TrigOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_nonfinite_hold_probe {
 ///     pub mod nonfinite_ops {
@@ -4257,6 +4175,7 @@ struct NonfiniteOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_cumulative_hold_probe {
 ///     pub mod cumulative_ops {
@@ -4390,6 +4309,7 @@ struct CumulativeOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_stat_reduce_hold_probe {
 ///     pub struct QuantileInterpolation;
@@ -4569,6 +4489,7 @@ struct StatReduceOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_binning_hold_probe {
 ///     pub struct BinningError;
@@ -4759,6 +4680,7 @@ struct BinningOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_low_precision_ops_hold_probe {
 ///     pub mod low_precision_ops {
@@ -4912,6 +4834,7 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_shape_view_hold_probe {
 ///     pub struct MeshgridIndexing;
@@ -5101,6 +5024,7 @@ struct ShapeViewOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_indexed_update_hold_probe {
 ///     pub struct ScatterReduceMode;
@@ -5246,6 +5170,7 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_tensor_product_hold_probe {
 ///     pub mod tensor_product_ops {
@@ -5405,6 +5330,7 @@ struct TensorProductOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_pad_modes_hold_probe {
 ///     pub struct PadMode;
@@ -5511,6 +5437,7 @@ struct PadModesHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_pool3d_hold_probe {
 ///     pub struct Pool3dParams;
@@ -5651,6 +5578,7 @@ struct Pool3dOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_conv_transpose3d_max_unpool_hold_probe {
 ///     pub struct ConvTranspose3d;
@@ -5833,6 +5761,7 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_fold_unfold_hold_probe {
 ///     pub struct Fold;
@@ -5970,6 +5899,7 @@ struct FoldUnfoldHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_lrn_weight_reparam_hold_probe {
 ///     pub struct LocalResponseNorm;
@@ -6143,6 +6073,7 @@ struct LrnWeightReparamHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_packed_sequence_hold_probe {
 ///     pub mod packed_sequence {
@@ -6338,6 +6269,7 @@ struct PackedSequenceHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_activation_scalar_ops_hold_probe {
 ///     pub struct Selu;
@@ -6503,6 +6435,7 @@ struct ActivationScalarOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_softmin_threshold_ops_hold_probe {
 ///     pub struct Softmin;
@@ -6667,6 +6600,7 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_elementwise_loss_ops_hold_probe {
 ///     pub struct BceWithLogitsOptions;
@@ -6808,6 +6742,7 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_margin_focal_loss_ops_hold_probe {
 ///     pub struct MultiMarginOptions;
@@ -6959,6 +6894,7 @@ struct MarginFocalLossOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_functional_api_hold_probe {
 ///     pub struct FunctionalVars;
@@ -7048,6 +6984,7 @@ struct FunctionalApiHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_merge_ops_hold_probe {
 ///     pub mod merge_ops {
@@ -7262,6 +7199,7 @@ struct MergeOpsHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_jacobian_hessian_hold_probe {
 ///     pub mod jacobian_ops {
@@ -7376,6 +7314,7 @@ struct JacobianHessianHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_gradcheck_anomaly_hold_probe {
 ///     pub mod gradcheck {

@@ -449,3 +449,24 @@ facade 経由の利用例）はすべて未達（blocked）である。
 - facade 経由の利用例テスト・doctest（対象 API が未公開のため）。
 - 承認依頼コメントの投稿・追跡 Issue の起票（ユーザー承認が必要）。
 - 依存追加・`unsafe`・tolerance の変更。
+
+## §16 追記（イシュー #2582）: `inference` 公開に伴う保留プローブの縮小
+
+`predict_batches`・`PhaseMetrics` の facade 公開（#2582。
+`facade-predict-batches-phase-metrics-decision.md` §10）で `fandhe_ai::inference` が実在の
+公開モジュールになった。`GenerateHoldDoctestGuard` のプローブはローカルの
+`pub mod inference { generate, .. }` を定義して `inference::generate()` を呼んでいたため、
+そのままでは `use fandhe_ai::inference::*;` が持ち込む `inference` と glob 衝突（E0659）し
+doctest が恒常的に落ちる。
+
+- **縮小内容**: ローカルの入れ子 `pub mod inference { ... }` と `__probe_module_path` を削除した。
+  ルート直下のローカル `generate`／`GenerateConfig`／`SamplingStrategy`／`AutoregressiveModel` と
+  `__probe_free_fn`・`__probe_inherent_method` は残す。`api_surface.rs` の
+  `GENERATE_HOLD_PROBE_BODY` も 1 行も違わず一致させた。
+- **検出力は等価**: 全 glob 一覧に `use fandhe_ai::inference::*;` を含めるため、
+  `fandhe_ai::inference::generate` 等が公開されればルート直下のローカル名と glob 衝突し
+  doctest が落ちる（`pub fn generate` を一時的に `inference` へ置いて doctest が失敗することを手元で確認）。
+- **保留は継続**: generate() の facade 公開は #2581 の公開後に別途着手する（§13.2・§13.5）。
+  走査ガード（`facade_does_not_expose_generate_items`・
+  `facade_does_not_reexport_or_declare_generate_items`）は変更していない。
+
