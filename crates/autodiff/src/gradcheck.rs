@@ -241,7 +241,10 @@ where
                     options.eps
                 )));
             }
-            if step <= 0.0 {
+            // 片側だけ潰れる場合（例: x=1.0f32 で eps が半 ULP 程度 → xp==x かつ xm<x）は
+            // 中心差分でなく片側差分になるため、step の正値検査だけでなく両側を個別に確認する。
+            let base_x = base[j];
+            if step <= 0.0 || xp <= base_x || xm >= base_x {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "gradcheck: eps={} が入力 {k} の要素 {j}（{x}）に対して小さすぎ、f32 で摂動が潰れる",
                     options.eps

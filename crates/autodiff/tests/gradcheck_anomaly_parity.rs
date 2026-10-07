@@ -466,6 +466,19 @@ fn gradcheck_rejects_eps_swallowed_by_f32() {
     );
 }
 
+#[test]
+fn gradcheck_rejects_one_sided_collapse_of_perturbation() {
+    // x=1.0f32 で eps=4e-8: x+eps は半 ULP 未満で 1.0 に戻り、x-eps は下側 ULP の
+    // 半分超なので 1.0 未満になる（step>0 だが片側差分になる）ケース。
+    let inputs = [t(vec![1.0], &[1])];
+    let opts = GradcheckOptions::new(4e-8, 1e-3, 1e-2, 1e-4).expect("有効な閾値");
+    let r = gradcheck(new_tape, |_t, xs| xs[0].mul(&xs[0]), &inputs, &opts);
+    assert!(
+        matches!(r, Err(AutodiffError::InvalidArgument(ref m)) if m.contains("eps")),
+        "{r:?}"
+    );
+}
+
 // =====================================================================
 // A1: anomaly detection
 // =====================================================================
