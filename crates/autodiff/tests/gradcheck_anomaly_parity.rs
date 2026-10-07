@@ -367,6 +367,26 @@ fn gradcheck_propagates_closure_error() {
 }
 
 #[test]
+fn gradcheck_rejects_non_finite_perturbation_before_evaluation() {
+    // 有限の入力 3e38 と有限の eps=1e38 でも f32 変換で x+eps が +inf になる。
+    // 非有限の摂動値を f へ渡さず InvalidArgument を返すこと（f は解析側の 1 回のみ）。
+    let inputs = [t(vec![3.0e38], &[1])];
+    let opts = GradcheckOptions::new(1e38, 1e-3, 1e-2, 1e-4).expect("有限・正の閾値");
+    let calls = Cell::new(0usize);
+    let r = gradcheck(
+        new_tape,
+        |_t, xs| {
+            calls.set(calls.get() + 1);
+            Ok(xs[0])
+        },
+        &inputs,
+        &opts,
+    );
+    assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))), "{r:?}");
+    assert_eq!(calls.get(), 1, "摂動点では f を評価しない");
+}
+
+#[test]
 fn gradcheck_rejects_shape_change_at_perturbed_point() {
     let inputs = [t(vec![1.0, 2.0], &[2])];
     let calls = Cell::new(0usize);

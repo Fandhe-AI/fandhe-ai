@@ -233,6 +233,14 @@ where
             let x = f64::from(base[j]);
             let (xp, xm) = ((x + options.eps) as f32, (x - options.eps) as f32);
             let step = f64::from(xp) - f64::from(xm);
+            // f32 変換で xp/xm が ±inf になり得る（例: 大きな入力）。非有限値を f に渡さない。
+            // NaN は `step <= 0.0` を素通りするため有限性を先に検査する。
+            if !(xp.is_finite() && xm.is_finite() && step.is_finite()) {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "gradcheck: 入力 {k} の要素 {j}（{x}）に eps={} を加減した摂動値が f32 で非有限になる",
+                    options.eps
+                )));
+            }
             if step <= 0.0 {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "gradcheck: eps={} が入力 {k} の要素 {j}（{x}）に対して小さすぎ、f32 で摂動が潰れる",
