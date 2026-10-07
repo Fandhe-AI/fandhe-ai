@@ -15,21 +15,16 @@
 //! `Lbfgs` はフラット化した大域状態のため本 trait ではなく同型の専用
 //! inherent API を持つ（`lbfgs.rs` 参照。イシュー #2366）。
 //!
-//! # facade 公開の保留（イシュー #2173 と同型の判断）
+//! # facade 公開（イシュー #2556 で公開済み）
 //!
-//! `AdamW`／`Adam`／`RmsProp`／`Adagrad`／`Lamb` は
-//! `crates/facade/src/optim.rs` で `fandhe_ai::optim` へ再エクスポート
-//! 済みの型だが、これらへ inherent `state_dict`／`load_state_dict` を
-//! 追加すると、その時点で facade の公開面が広がる。イシュー本文には
-//! 所有者の承認コメントがなく（`docs/autodiff-optimizer-state-dict-
-//! decision.md` §1）、親 #2131 は「facade 公開面の拡張は設計判断記録 →
-//! 承認 → 実装の 2 段」を定めているため、本イシューでは
-//! [`OptimizerStateDict`] を内部クレート限定（`fandhe_ai_autodiff`）に
-//! 留め、facade（`fandhe_ai::optim`）へは再エクスポートしない
-//! （`crates/facade/src/lib.rs::OptimizerStateDictHoldDoctestGuard`・
-//! `crates/facade/tests/api_surface.rs` の対応する否定ガードが多層防御
-//! で固定する。`nn/optim/param_group.rs` モジュール doc・
-//! `docs/autodiff-param-groups-decision.md` と同型の判断）。
+//! 当初（#2174）は facade の公開面を広げる承認がなく、[`OptimizerStateDict`]
+//! を内部クレート限定に留めていた。その後、ルート #2499 の承認コメント
+//! （issuecomment-6033824965）を根拠に #2556 で
+//! `crates/facade/src/optim.rs` から `fandhe_ai::optim::OptimizerStateDict`
+//! として素の再エクスポートで公開した（形は `docs/autodiff-optimizer-state-
+//! dict-decision.md` §9・§11。`crates/facade/tests/api_surface.rs` の
+//! `facade_reexports_optimizer_state_dict_only_in_approved_form` が承認形だけを
+//! 許す）。
 //!
 //! # キー配置（形式バージョン 1）
 //!
@@ -168,9 +163,13 @@ pub(crate) const BETA2_POW_T_KEY: &str = "beta2_pow_t.f64_u16x4";
 pub(crate) const MU_PRODUCT_KEY: &str = "mu_product";
 
 /// optimizer の内部状態を `HashMap<String, Tensor<f32>>` として取り出し
-/// ／書き戻す（モジュール冒頭 doc「キー配置」節）。`fandhe_ai_autodiff`
-/// 内部クレート限定の公開（facade 非公開。モジュール冒頭 doc「facade
-/// 公開の保留」節参照）。
+/// ／書き戻す（モジュール冒頭 doc「キー配置」節）。facade からは
+/// `fandhe_ai::optim::OptimizerStateDict` として到達できる（#2556。モジュール冒頭 doc
+/// 「facade 公開」節）。
+///
+/// **契約**: この trait は sealing しておらず、下流クレートも実装できる。
+/// そのため本 trait へメソッドを追加しない（追加は下流 impl を壊す破壊的変更になる。
+/// `docs/autodiff-optimizer-state-dict-decision.md` §9.4 (c)）。
 pub trait OptimizerStateDict {
     /// 現在の内部状態を [`Tensor<f32>`] のマップとして返す。
     ///

@@ -2,9 +2,9 @@
 //! safetensors 入出力（[`fandhe_ai::interop::safetensors`]）を組み合わせた
 //! 統合テスト。
 //!
-//! `fandhe_ai_autodiff::nn::optim::OptimizerStateDict` は facade
-//! 非公開の内部クレート限定 API（`crates/autodiff/src/nn/optim/
-//! state_dict.rs` モジュール冒頭 doc「facade 公開の保留」節）だが、
+//! `OptimizerStateDict` は #2556 で `fandhe_ai::optim` へ公開済み
+//! （facade だけを import する版は `optim_state_dict_facade.rs`。本ファイルは
+//! 公開前から内部クレートの型を直接 import する構成のまま残している）。
 //! `state_dict()` が返す `HashMap<String, Tensor<f32>>` 自体は facade の
 //! safetensors 入出力（純再エクスポート）へそのまま渡せる
 //! （`interop_safetensors_roundtrip.rs`・`compat_sequential_train.rs`

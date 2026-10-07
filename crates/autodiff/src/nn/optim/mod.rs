@@ -246,14 +246,14 @@ pub use state_dict::OptimizerStateDict;
 // `Lbfgs::state_dict`／`load_state_dict`／`history_len`。`lbfgs` モジュール
 // doc「状態の保存・復元」節・`docs/autodiff-lbfgs-decision.md` §10）。
 // `OptimizerStateDict` は実装しない（`Lbfgs` 自体は #2502 で facade 公開済みのため
-// inherent API は `fandhe_ai::optim::Lbfgs` から到達可能。trait の公開は #2555）。
+// inherent API は `fandhe_ai::optim::Lbfgs` から到達可能。trait は #2556 で公開済み）。
 
 // イシュー #2367: `crate::optim::Sgd` が `OptimizerStateDict` を実装した
 // （momentum の velocity を `state.<i>.momentum_buffer` として保存・復元。
 // `step_count` は持たない。`state_dict` モジュール doc・
 // `docs/autodiff-optimizer-state-dict-decision.md` §7）。`state_dict`
 // モジュールは `crate::optim::sgd` から共通ヘルパーへ到達するため
-// `pub(crate)` にしたが、trait の facade 再エクスポートは行わない。
+// `pub(crate)` にした（trait の facade 再エクスポートは #2556 で実施）。
 
 // イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）
 // を追加した（`param_group` モジュール冒頭 doc 参照）。`ParamGroup`／
@@ -305,11 +305,10 @@ pub use state_dict::OptimizerStateDict;
 // `NAdam`・`RAdam`（9 optimizer 全種）が実装する。既存 `step()`／
 // `step_with_slot_hparams` の演算列には一切触れていない（bit
 // ドリフトなし。新規 `Op`／`BackendOps`／カーネル／`unsafe`／依存は
-// 追加していない）。facade（`fandhe_ai::optim`）への公開は #2173
-// （param groups）と同じ理由で保留（`state_dict` モジュール冒頭 doc
-// 「facade 公開の保留」節・`crates/facade/src/lib.rs::
-// OptimizerStateDictHoldDoctestGuard`・
-// `docs/autodiff-optimizer-state-dict-decision.md` 参照）。
+// 追加していない）。facade（`fandhe_ai::optim`）へは #2556 で素の
+// 再エクスポートとして公開済み（`state_dict` モジュール冒頭 doc
+// 「facade 公開」節・`docs/autodiff-optimizer-state-dict-decision.md`
+// §9・§11 参照）。
 
 // イシュー #2176（親 #2131）: LR scheduler 5 種（[`MultiStepLr`]・
 // [`CosineAnnealingWarmRestarts`]・[`CyclicLr`]・[`LambdaLr`]・

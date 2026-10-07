@@ -5,6 +5,9 @@
 
 ## §0 結論
 
+> **更新（#2556）**: 以下の「内部クレート限定」「facade 公開は保留」は #2174 時点の記述で、
+> facade への公開は #2556 で実施済み（§11）。
+
 PyTorch `torch.optim.Optimizer.state_dict()`／`load_state_dict()` 相当の
 機能を、**`fandhe_ai_autodiff::nn::optim::OptimizerStateDict`**
 （`crates/autodiff/src/nn/optim/state_dict.rs`）として内部クレート限定
@@ -172,6 +175,9 @@ link は `cargo doc -D warnings` を落とすため、コード中のリンク�
 
 ## §4 facade 公開保留の多層防御（#2173 と同型）
 
+> **更新（#2556）**: 本節の `OptimizerStateDictHoldDoctestGuard` と 2 テストは #2556 で撤去し、
+> 否定ガードは正ガードへ反転した（§11）。以下は当時の記録。
+
 `crates/facade/src/lib.rs::OptimizerStateDictHoldDoctestGuard`（正の
 プローブ 1 ブロック方式。`ParamGroupsHoldDoctestGuard` と同型）と、
 `crates/facade/tests/api_surface.rs` の 4 テスト
@@ -183,6 +189,8 @@ link は `cargo doc -D warnings` を落とすため、コード中のリンク�
 surface` 等の期待集合は変更していない。
 
 ## §5 承認事項（未承認のため保留）
+
+> **更新（#2556）**: 項目 1 は §9 の推奨案 A で承認・公開済み（§11）。項目 2・3 は引き続き対象外。
 
 facade（`fandhe_ai::optim`）公開面の拡張は次のいずれも未承認:
 
@@ -269,6 +277,8 @@ momentum 付き `Sgd` を bit 一致で再開するための内部 API（manifes
 
 ## §9 #2556（facade 公開形）の着手時判定と承認依頼
 
+> **更新**: 本節の推奨案はルート #2499 のコメントで承認され、§11 で実装した。
+
 ### 9.1 経緯
 
 親 #2555（その親 #2542）は、学習の再開のため `OptimizerStateDict` を facade
@@ -352,6 +362,8 @@ momentum 付き `Sgd` を bit 一致で再開するための内部 API（manifes
 
 ## §10 #2557 着手時判定（#2556 未実装・§9 未承認のため停止）
 
+> **更新**: 停止の理由（§9 未承認・#2556 未実装）は §11 で解消した。
+
 調査基準は `origin/main` `795894c6`（2026-10-04 確認）。本節は停止の記録であり、
 承認を取得したことを意味しない。
 
@@ -390,3 +402,65 @@ momentum 付き `Sgd` を bit 一致で再開するための内部 API（manifes
 - `docs/compat-api-scope.md` §5 への適用記録（公開を適用していないため）
 - facade 経由の利用例 doctest・テストの追加（対象 API が存在しないため）
 - 追跡 Issue の起票・#2556 の reopen（ユーザー承認が必要）
+
+## §11 #2556 実装記録（facade 公開）
+
+### 11.1 承認の根拠
+
+§9.4 の (a)〜(e) は、ルート #2499 のコメント
+（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）の
+「#2555: §9 の推奨案（sealing はしない）」に記録された承認を根拠とする。本節はそれ以上の
+承認があったことを意味しない。記録に形が書かれていない論点は見つからなかった。
+
+### 11.2 確定形
+
+| 論点 | 確定形 |
+|---|---|
+| (a) 公開経路 | 案 A。`crates/facade/src/optim.rs` に `pub use fandhe_ai_autodiff::nn::optim::OptimizerStateDict;` を 1 文 1 行で追加（素の再エクスポート。inherent メソッドは追加しない） |
+| (b) 到達する impl | 10 型（`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・`Adadelta`・`Adamax`・`NAdam`・`RAdam`・`Sgd`） |
+| (c) sealing | しない。代わりに「trait へメソッドを追加しない」契約を trait doc に記録した（下流 impl を壊さないため） |
+| (d) `Lbfgs` | trait の対象外のまま（既存の inherent `state_dict`／`load_state_dict`／`history_len` を維持） |
+| (e) 進め方 | #2556 を reopen して本実装 |
+
+公開した名前は `fandhe_ai::optim::OptimizerStateDict` の 1 つだけ。`fandhe-ai =0.10.0` の
+既存の公開 API の削除・シグネチャ変更はなく、追加のみ。
+
+### 11.3 撤去・反転したガード
+
+- `crates/facade/src/lib.rs::OptimizerStateDictHoldDoctestGuard`（doctest 足場）を撤去。
+- `api_surface.rs`: `optimizer_state_dict_hold_doctest_globs_all_pub_modules`・
+  `optimizer_state_dict_hold_doctest_probe_body_matches_fixed_contract`・固定文言定数
+  `OPTIMIZER_STATE_DICT_HOLD_PROBE_BODY` を撤去。
+- `facade_does_not_reexport_or_declare_optimizer_state_dict`（否定ガード）を
+  `facade_reexports_optimizer_state_dict_only_in_approved_form`（正ガード）へ反転。
+  `OptimizerStateDict`／`state_dict` を識別子に含む `pub use` 文が、`src/optim.rs` の承認形 1 文
+  （別名なし・完全一致）だけであることを文単位で fail-closed に検査する（複数行の波括弧形・
+  他モジュールへの重複公開・欠落も検出）。検出器の自己検証は
+  `optimizer_state_dict_reexport_guard_detects_each_category`。
+- `optim_module_reexports_exactly_expected_surface` の期待集合へ `OptimizerStateDict` を追加。
+- `hold_doctest_probe_blocks_reference_every_glob_imported_item` の既知プローブ名の期待を、
+  削除済みの `__fandhe_optim_state_dict_hold_probe` から現存プローブ候補のいずれかへ変更。
+- `workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations`（定義元
+  インベントリ）は不変（素の再エクスポートは `fn` 宣言を増やさない）。
+
+### 11.4 追加したテスト
+
+- `crates/facade/tests/optim_state_dict_facade.rs`（`fandhe_ai` だけを import）: 10 型
+  （`Sgd` は momentum あり・なし）の保存→復元後に続きの `step()` が bit 一致、初回 step 前の
+  復元、`Sgd`（momentum なし）がスロットキーを持たないこと、キー欠落・余剰キー・shape 不一致で
+  load が失敗し状態が変わらないこと、`Adam` の状態を `AdamW` へ読み込む試みの拒否、
+  safetensors バイト列経由の復元。
+- `api_surface.rs::optimizer_state_dict_is_reachable_via_facade_only`: 10 型が trait 境界を
+  満たすことのコンパイル時固定。
+- `fandhe_ai::optim` のモジュール doc に、`step` → `state_dict` → safetensors バイト列 →
+  新規 optimizer へ `load_state_dict` → 次の `step` が一致する doctest を追加。
+
+### 11.5 #2557 へ残した事項
+
+`docs/compat-api-scope.md` §5 の適用記録、正ガードの追加強化、利用例の拡充は #2557 の範囲。
+
+### 11.6 検証
+
+実機（CUDA／Metal）parity はホスト値型のみのため不要（§6）。新規 `Op`／`BackendOps`／カーネル／
+`unsafe`／依存の追加はない。`Cargo.toml`／`Cargo.lock`／tolerance／baseline／`guardrail.toml`／
+`docs/spec` は変更していない。

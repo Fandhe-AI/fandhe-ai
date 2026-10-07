@@ -207,9 +207,62 @@
 //! に依存しない値型・純関数。位置対応契約（「呼び出し文脈」節）が
 //! そのまま適用される。**`crate::DeviceParamStore` 非対応**（決定記録
 //! §7）、**`crate::compat::Optimizer`（`compile()`）にも未統合**（同 §9）。
-//! 状態保存用の `OptimizerStateDict` trait は facade 非公開のままで、facade
-//! のみの import ではそのメソッドに到達しない（`ParamGroupStep` は #2553 で
-//! 公開済み。下記「param groups」節）。
+//! 状態保存用の `OptimizerStateDict` trait は #2556 で公開済み（下記
+//! 「optimizer 状態の保存・復元」節）。`ParamGroupStep` は #2553 で公開済み
+//! （下記「param groups」節）。
+//!
+//! # optimizer 状態の保存・復元（イシュー #2556・親 #2555）
+//!
+//! PyTorch の `Optimizer.state_dict()`／`load_state_dict()` 相当の trait
+//! [`crate::optim::OptimizerStateDict`] を、学習の再開（checkpoint からの継続）のため
+//! `fandhe_ai_autodiff::nn::optim` から素の再エクスポートで公開する
+//! （`docs/autodiff-optimizer-state-dict-decision.md` §9.3・§9.4 の推奨形。承認は
+//! ルート #2499 のコメント〈issuecomment-6033824965〉。実装記録は同 §11）。
+//!
+//! - 実装する型は `AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・`Adadelta`・
+//!   `Adamax`・`NAdam`・`RAdam`・`Sgd` の 10 種。`Lbfgs` は対象外で、シグネチャの
+//!   異なる inherent の `state_dict`／`load_state_dict`（#2366）をそのまま使う。
+//!   メソッドを呼ぶには `OptimizerStateDict` の import が要る。
+//! - `state_dict()` は `HashMap<String, Tensor<f32>>` を返し、
+//!   [`crate::interop::safetensors`] の保存・読込へそのまま渡せる。
+//! - **ハイパーパラメータ（config）は保存しない**。復元側は、保存時と同じ config で
+//!   `new` してから `load_state_dict` を呼ぶ。
+//! - キー集合は完全一致が必要で、種別マーカーにより別種の optimizer の状態
+//!   （例: `Adam` の状態を `AdamW` へ）は fail-closed で拒否される。
+//! - `load_state_dict` は全件を検証してから一括で書き込む。`Err` のとき optimizer の
+//!   状態は変わらない。
+//! - この trait は sealing しておらず、下流クレートも実装できる。このため trait へ
+//!   メソッドを追加しない契約とする（追加は破壊的変更になる）。
+//! - `compat::Sequential` の optimizer 状態 API（`fit` の再開）と、モデルと optimizer を
+//!   併せた complete checkpoint は対象外。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::interop::safetensors::{
+//!     load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes,
+//! };
+//! use fandhe_ai::optim::{AdamW, AdamWConfig, OptimizerStateDict};
+//!
+//! let p = Tensor::new(vec![1.0f32, -2.0], &[2]).unwrap();
+//! let g = Tensor::new(vec![0.5f32, 0.25], &[2]).unwrap();
+//!
+//! let mut opt = AdamW::new(AdamWConfig::default()).unwrap();
+//! let p1 = opt.step(&[(&p, &g)]).unwrap();
+//!
+//! // 保存: 状態を safetensors のバイト列へ。
+//! let bytes = save_safetensors_f32_to_bytes(&opt.state_dict().unwrap(), None).unwrap();
+//!
+//! // 復元: 同じ config で作り直して load する。
+//! let mut resumed = AdamW::new(AdamWConfig::default()).unwrap();
+//! resumed
+//!     .load_state_dict(load_safetensors_f32_from_bytes(&bytes).unwrap())
+//!     .unwrap();
+//!
+//! // 次の step が、中断しなかった場合と一致する。
+//! let a = opt.step(&[(&p1[0], &g)]).unwrap();
+//! let b = resumed.step(&[(&p1[0], &g)]).unwrap();
+//! assert_eq!(a[0].as_slice().unwrap(), b[0].as_slice().unwrap());
+//! ```
 //!
 //! # param groups（イシュー #2553・親 #2499）
 //!
@@ -331,8 +384,8 @@
 //!   `LbfgsConfig { line_search: LbfgsLineSearch::StrongWolfe, ..Default::default() }`
 //!   で指定できる。
 //! - `Lbfgs` の inherent `state_dict`／`load_state_dict`／`history_len`
-//!   （#2366）も到達可能になる。`OptimizerStateDict` trait の facade 公開は
-//!   本節の対象外（#2555）。
+//!   （#2366）も到達可能になる。`Lbfgs` は `OptimizerStateDict` を実装しない
+//!   （trait の対象外。下記「optimizer 状態の保存・復元」節）。
 //!
 //! ```
 //! use fandhe_ai::Tensor;
@@ -380,6 +433,10 @@ pub use fandhe_ai_autodiff::nn::optim::{LambdaLr, MultiStepLr, SequentialLr};
 pub use fandhe_ai_autodiff::nn::optim::{Lbfgs, LbfgsConfig, LbfgsLineSearch};
 pub use fandhe_ai_autodiff::nn::optim::{NAdam, NAdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{OneCycleAnneal, OneCycleLr, OneCycleLrConfig};
+// イシュー #2556（親 #2555・ルート #2499 の承認コメント）: 状態保存用の trait を
+// `docs/autodiff-optimizer-state-dict-decision.md` §9.3 の素の再エクスポートで公開する。
+// sealing しない（§9.4 (c)）ため、trait へメソッドを追加しない契約とする。
+pub use fandhe_ai_autodiff::nn::optim::OptimizerStateDict;
 // イシュー #2553（親 #2551・ルート #2499 の承認コメント）: param groups の 2 名を
 // `docs/autodiff-param-groups-decision.md` §9.2 項目 2 の素の再エクスポートで公開する。
 pub use fandhe_ai_autodiff::nn::optim::{ParamGroup, ParamGroupStep};

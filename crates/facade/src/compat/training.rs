@@ -51,9 +51,10 @@ use fandhe_ai_autodiff::nn::optim::Lbfgs;
 // 非 `pub` の import（再エクスポートは `optim.rs`。facade 内で `fn step_with_groups` は宣言しない）。
 use fandhe_ai_autodiff::nn::optim::{ParamGroup, ParamGroupStep as _};
 // イシュー #2372: `save_model`／`load_model` が optimizer 内部状態と GradScaler の
-// 状態を往復させるための内部専用 import（`pub use` にしない。facade 公開面へ
-// 出ないことは `tests/api_surface.rs` の `grad_scaler_from_state`／
-// `OptimizerStateDict` ガードが機械的に固定する）。
+// 状態を往復させるための内部専用 import（`pub use` にしない。`grad_scaler_from_state`
+// が facade 公開面へ出ないことは `tests/api_surface.rs` のガードが固定する。
+// `OptimizerStateDict` は #2556 で `optim.rs` から公開済みで、本 import はそれとは別の
+// 内部利用）。
 use fandhe_ai_autodiff::nn::optim::OptimizerStateDict;
 use fandhe_ai_autodiff::nn::optim::amp::grad_scaler_from_state;
 use fandhe_ai_tensor_core::Element;
