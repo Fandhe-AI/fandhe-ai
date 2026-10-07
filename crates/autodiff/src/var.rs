@@ -5331,7 +5331,7 @@ impl<'t> Var<'t> {
         crate::activation_scalar_ops::selu(self)
     }
 
-    /// CELU（`torch.nn.functional.celu` 相当）。`alpha` は正の有限値。イシュー #2678。`crate::activation_scalar_ops::celu` へ 1 行委譲する。
+    /// CELU（`torch.nn.functional.celu` 相当）。`alpha` はゼロでない有限値（負値も受理）。イシュー #2678。`crate::activation_scalar_ops::celu` へ 1 行委譲する。
     /// 引数検査・エラー契約は委譲先に従う。
     pub fn celu(&self, alpha: f32) -> Result<Var<'t>, AutodiffError> {
         crate::activation_scalar_ops::celu(self, alpha)

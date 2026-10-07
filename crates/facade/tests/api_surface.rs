@@ -34154,20 +34154,44 @@ const PHASE4_TYPE_APPROVED_LINES: [&str; 8] = [
 ];
 
 /// facade src の 1 ファイル内容から、[`PHASE4_TYPE_NAMES`] のいずれかを識別子として含む
-/// `pub use` 行（空白正規化済み）を集める検出本体。コメント・文字列リテラルは無視する。
+/// `pub use`（可視性修飾付きを含む）宣言を、セミコロンまでの宣言全体（複数行・行途中の
+/// 開始を含む）を 1 件として空白正規化して集める検出本体。コメント・文字列リテラルは無視する。
 fn scan_phase4_type_pub_use_lines(content: &str) -> Vec<String> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
-    cleaned
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("pub use") || l.starts_with("pub(crate) use"))
-        .filter(|l| {
-            PHASE4_TYPE_NAMES
-                .iter()
-                .any(|n| line_contains_identifier(l, n))
-        })
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect()
+    let bytes = cleaned.as_bytes();
+    let mut out = Vec::new();
+    for (idx, _) in cleaned.match_indices("use") {
+        // `use` が識別子の一部（`reuse`・`user` 等）でないこと。
+        let before_ok = idx == 0 || !is_ident_char(bytes[idx - 1] as char);
+        let after_ok = idx + 3 >= bytes.len() || !is_ident_char(bytes[idx + 3] as char);
+        if !before_ok || !after_ok {
+            continue;
+        }
+        // 直前（空白を除く）が `pub` または `pub(...)` の閉じ括弧であれば公開 use。
+        let head = cleaned[..idx].trim_end();
+        let is_pub = head.ends_with(')')
+            && head
+                .rfind("pub(")
+                .is_some_and(|i| i == 0 || !is_ident_char(head.as_bytes()[i - 1] as char))
+            || head.strip_suffix("pub").is_some_and(|rest| {
+                rest.is_empty() || !is_ident_char(rest.as_bytes()[rest.len() - 1] as char)
+            });
+        if !is_pub {
+            continue;
+        }
+        let decl_start = head.rfind("pub").unwrap_or(idx);
+        let decl_end = cleaned[idx..]
+            .find(';')
+            .map_or(cleaned.len(), |e| idx + e + 1);
+        let decl = &cleaned[decl_start..decl_end];
+        if PHASE4_TYPE_NAMES
+            .iter()
+            .any(|n| line_contains_identifier(decl, n))
+        {
+            out.push(decl.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    out
 }
 
 /// 8 型の再エクスポートが `src/lib.rs` の承認形 8 行だけ（各 1 件）であることを固定する
@@ -34217,6 +34241,12 @@ fn facade_reexports_phase4_ops_types_only_in_approved_shape_detects_each_categor
         "pub use fandhe_ai_tensor_core::{PadMode, PadModeError};",
         "pub use fandhe_ai_tensor_core::stat_reduce::QuantileInterpolation;",
         "pub use fandhe_ai_autodiff::shape_view_ops::MeshgridIndexing;",
+        // 複数行・別名・行途中開始・可視性修飾付き（#2678 codex 指摘）。
+        "pub use fandhe_ai_tensor_core::{\n    Device,\n    FftNorm as ExtraNorm,\n};",
+        "pub use fandhe_ai_tensor_core::{\n    FftNorm,\n};",
+        "pub use fandhe_ai_tensor_core::\n    PadMode\n    ;",
+        "mod m { pub use fandhe_ai_tensor_core::PadMode as P; }",
+        "pub(crate) use fandhe_ai_tensor_core::{\n    PadMode,\n};",
     ] {
         let hits = scan(src);
         assert_eq!(hits.len(), 1, "src={src:?}");
