@@ -360,6 +360,17 @@ impl FunctionalModel {
                 config.accumulate_steps
             )));
         }
+        // validation_split（#2564）は検証データを持たない本経路では扱えない。実効的に有効
+        // （`±0.0` 以外。NaN を含む）な指定は黙って無視せず fail-closed で拒否する。
+        if config
+            .validation_split_bits
+            .is_some_and(|b| f32::from_bits(b) != 0.0)
+        {
+            return Err(invalid(
+                "FunctionalModel::fit: validation_split は未対応（検証データを持たない）"
+                    .to_string(),
+            ));
+        }
         self.check_io_counts("fit", xs.len(), ys.len())?;
         for (_, block) in self.blocks() {
             block.reject_untracked_parametric_layer("FunctionalModel::fit")?;

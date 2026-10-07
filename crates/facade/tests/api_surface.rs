@@ -18187,11 +18187,6 @@ fn fit_weighting_hold_doctest_probe_body_matches_fixed_contract() {
 /// の `use fandhe_ai::*;` は本文に含む）。
 const FIT_WEIGHTING_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
-mod __fandhe_fit_weighting_hold_probe {\n\
-\x20\x20\x20\x20pub struct FitWeights;\n\
-}\n\
-use __fandhe_fit_weighting_hold_probe::*;\n\
-\n\
 struct __FandheFitWeightHoldMarker;\n\
 \n\
 trait __FandheFitWeightHoldProbe {\n\
@@ -18238,44 +18233,57 @@ impl __FandheFitWeightHoldProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe(_: FitWeights, cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
-\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::validation_split(cfg);\n\
+fn __probe(cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::class_weight(cfg);\n\
 \x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::sample_weight(cfg);\n\
 \x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
-\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::fit_with_weights(seq);\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::fit_with_weights(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::FitConfig::fit_weighted(cfg);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::validation_split(seq);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::class_weight(seq);\n\
+\x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
+\x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::sample_weight(seq);\n\
 \x20\x20\x20\x20let _: __FandheFitWeightHoldMarker =\n\
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::fit_weighted(seq);\n\
 }";
 
-/// [`facade_does_not_reexport_or_declare_fit_weighting_items`]・その
-/// 自己テストが共用する検出本体。facade src 全体（`crates/facade/
-/// src/**`）の `pub use` から [`collect_pub_use_leaves`] で別名にする
-/// 前の葉を集め `FitWeights` を検出し（単一行・複数行・ネストした
-/// group・別名も検出）、`trait`／`struct`／`enum`／`type` 直後の同名
-/// 独自宣言、および `validation_split`／`class_weight`／
-/// `sample_weight`／`fit_with_weights`／`fit_weighted` の `fn` 宣言を
-/// 違反として返す（`scan_callback_loggers_reexports_and_declarations`
-/// と同型。`class_weight`／`sample_weight` を候補名に含めるのは、
-/// 受入基準の字面〈`FitConfig` へ直接フィールド追加〉どおりの禁止された
-/// 実装経路自体も検出対象に含めるため。`crates/autodiff/src/loss_ops.rs`
-/// 等の内部クレート側の既存 `class_weight` 言及は走査対象外〈facade の
-/// `src` のみを走査するため〉）。
-fn scan_fit_weighting_reexports_and_declarations(content: &str) -> Vec<String> {
+/// 承認形（#2564。`docs/compat-fit-sample-weighting-decision.md` §11.1・§11.6）の
+/// 許可位置の総数。`compat/mod.rs` の `pub use` 葉 `FitWeights` 1・`compat/
+/// training.rs` の `struct FitWeights` 1・同ファイルの `fn validation_split`／
+/// `class_weight`／`sample_weight`／`fit_with_weights` 各 1。走査が空振り
+/// （0 件許可）で通ることを防ぐため、呼び出しテストで合計を固定する。
+const FIT_WEIGHTING_APPROVED_SITE_COUNT: usize = 6;
+
+/// [`facade_does_not_reexport_or_declare_fit_weighting_items`]・その自己テストが
+/// 共用する検出本体。`rel` は `crates/facade/src` からの相対パス（`/` 区切り）。
+/// 戻り値は（違反, 許可された承認位置の件数）。承認位置は `compat/mod.rs` の
+/// `pub use` 葉 `FitWeights`（別名 `as` は違反）・`compat/training.rs` の
+/// `struct FitWeights`・同ファイルの `fn validation_split`／`class_weight`／
+/// `sample_weight`／`fit_with_weights` 各 1 件のみ。それ以外の場所・2 件目以降・
+/// `trait`／`enum`／`type` による同名宣言・`fn fit_weighted`（全域）は違反。
+/// `class_weight`／`sample_weight` は `impl` の所有型を区別できないため位置と
+/// 件数で縛り、`FitConfig` 側への追加は `FitWeightingHoldDoctestGuard` が検出する。
+fn scan_fit_weighting_reexports_and_declarations(rel: &str, content: &str) -> (Vec<String>, usize) {
     const TYPE_NAMES: [&str; 1] = ["FitWeights"];
-    const FN_NAMES: [&str; 5] = [
+    const APPROVED_FN_NAMES: [&str; 4] = [
         "validation_split",
         "class_weight",
         "sample_weight",
         "fit_with_weights",
-        "fit_weighted",
     ];
+    let in_mod = rel == "compat/mod.rs";
+    let in_training = rel == "compat/training.rs";
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
+    let mut allowed = 0usize;
+    let mut use_leaf_count = 0usize;
+    let mut struct_count = 0usize;
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -18285,10 +18293,17 @@ fn scan_fit_weighting_reexports_and_declarations(content: &str) -> Vec<String> {
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
+            let aliased = path_tokens
+                .windows(2)
+                .any(|w| TYPE_NAMES.contains(&w[0].as_str()) && w[1] == "as");
+            for leaf in collect_pub_use_leaves(path_tokens) {
                 if TYPE_NAMES.contains(&leaf.as_str()) {
-                    offending.push(format!("pub use leaf={leaf}"));
+                    use_leaf_count += 1;
+                    if !in_mod || aliased || use_leaf_count > 1 {
+                        offending.push(format!("pub use leaf={leaf}（承認位置外・別名・重複）"));
+                    } else {
+                        allowed += 1;
+                    }
                 }
             }
             i = (end + 1).min(tokens.len());
@@ -18300,118 +18315,174 @@ fn scan_fit_weighting_reexports_and_declarations(content: &str) -> Vec<String> {
                 .map(|t| TYPE_NAMES.contains(&t.as_str()))
                 .unwrap_or(false)
         {
-            offending.push(format!(
-                "{} {} 宣言",
-                tokens[i],
-                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
-            ));
+            let is_struct = tokens[i] == "struct";
+            if is_struct {
+                struct_count += 1;
+            }
+            if is_struct && in_training && struct_count == 1 {
+                allowed += 1;
+            } else {
+                offending.push(format!(
+                    "{} {} 宣言（承認位置外・重複）",
+                    tokens[i],
+                    tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+                ));
+            }
         }
         i += 1;
     }
 
-    for name in FN_NAMES {
-        offending.extend(
-            (0..count_fn_declarations_by_name(&tokens, name)).map(|_| format!("fn {name} 宣言")),
-        );
+    for name in APPROVED_FN_NAMES {
+        let n = count_fn_declarations_by_name(&tokens, name);
+        if in_training && n >= 1 {
+            allowed += 1;
+            offending.extend((1..n).map(|_| format!("fn {name} 宣言（2 件目以降）")));
+        } else {
+            offending.extend((0..n).map(|_| format!("fn {name} 宣言（承認位置外）")));
+        }
     }
+    offending.extend(
+        (0..count_fn_declarations_by_name(&tokens, "fit_weighted"))
+            .map(|_| "fn fit_weighted 宣言（禁止）".to_string()),
+    );
 
-    offending
+    (offending, allowed)
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、`FitWeights`（型名）を
-/// 識別子単位で含む `pub use`（複数行・ネストした group・別名含む）も、
-/// facade 独自の `trait`／`struct`／`enum`／`type` 宣言も、
-/// `validation_split`／`class_weight`／`sample_weight`／
-/// `fit_with_weights`／`fit_weighted` の `fn` 宣言も存在しないことを
-/// 固定する（`FitWeightingHoldDoctestGuard` の正のプローブと多層防御を
-/// 成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_or_declare_callback_loggers` と同型）。
+/// facade src 全体（`crates/facade/src/**`）で、`FitWeights`／`validation_split`／
+/// `class_weight`／`sample_weight`／`fit_with_weights` の公開・宣言が承認位置
+/// （[`scan_fit_weighting_reexports_and_declarations`] doc）にちょうど
+/// [`FIT_WEIGHTING_APPROVED_SITE_COUNT`] 件だけあり、`fit_weighted` と承認位置外の
+/// 宣言・再エクスポートが無いことを固定する（`FitWeightingHoldDoctestGuard` の
+/// プローブと多層防御を成す最内層のソース走査ガード）。正ガードへの反転は #2565。
 #[test]
 fn facade_does_not_reexport_or_declare_fit_weighting_items() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
+    let mut allowed_total = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_fit_weighting_reexports_and_declarations(content) {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let (found, allowed) = scan_fit_weighting_reexports_and_declarations(&rel, content);
+        allowed_total += allowed;
+        for offense in found {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が fit() の重み付け拡張（#2177。FitWeights／\
-         validation_split／class_weight／sample_weight／\
-         fit_with_weights／fit_weighted）を再エクスポート、または\
-         独自宣言している（`docs/compat-fit-sample-weighting-decision.md`\
-         §2 承認事項が未取得のまま対象外としている設計判断に違反）: \
+        "facade の公開面が fit() の重み付け拡張（#2177・#2564。FitWeights／\
+         validation_split／class_weight／sample_weight／fit_with_weights／\
+         fit_weighted）を承認位置外で再エクスポート・宣言している\
+         （`docs/compat-fit-sample-weighting-decision.md` §11.1・§11.6）: \
          {offending:?}"
+    );
+    assert_eq!(
+        allowed_total, FIT_WEIGHTING_APPROVED_SITE_COUNT,
+        "承認位置の件数がドリフトしている（走査の空振り・承認形の取り下げ・重複の可能性）"
     );
 }
 
-/// [`scan_fit_weighting_reexports_and_declarations`]（[`facade_does_not_
-/// reexport_or_declare_fit_weighting_items`]）の自己テスト（正例・負例
-/// の合成入力）。
+/// [`scan_fit_weighting_reexports_and_declarations`] の自己テスト（正例・負例の
+/// 合成入力）。
 #[test]
 fn facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category() {
-    // 正例: 単一行 pub use（新規型）。
-    assert!(
-        !scan_fit_weighting_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::FitWeights;"
-        )
-        .is_empty()
+    let scan = scan_fit_weighting_reexports_and_declarations;
+    // 負例: 承認位置（許可として数えられ、違反は 0）。
+    let (v, a) = scan(
+        "compat/mod.rs",
+        "pub use training::{FitConfig, FitWeights};",
     );
-    // 正例: 複数行 pub use（group）。
-    assert!(
-        !scan_fit_weighting_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::{\n    FitConfig,\n    FitWeights,\n};"
-        )
-        .is_empty()
+    assert!(v.is_empty() && a == 1, "{v:?} {a}");
+    let (v, a) = scan(
+        "compat/training.rs",
+        "pub struct FitWeights<'a> { x: &'a [f32] }\n\
+         impl FitConfig { pub fn validation_split(self, f: f32) -> Self { self } }\n\
+         impl<'a> FitWeights<'a> { pub fn class_weight(self) {} pub fn sample_weight(self) {} }\n\
+         impl Sequential { pub fn fit_with_weights(&mut self) {} }",
     );
-    // 正例: 別名 pub use。
+    assert!(v.is_empty() && a == 5, "{v:?} {a}");
+    // 負例: コメント中の出現・無関係な名前。
     assert!(
-        !scan_fit_weighting_reexports_and_declarations(
-            "pub use fandhe_ai_facade::compat::FitWeights as Foo;"
-        )
-        .is_empty()
+        scan("compat/mod.rs", "// pub use ...::FitWeights;")
+            .0
+            .is_empty()
     );
-    // 正例: 独自 struct 宣言。
-    assert!(!scan_fit_weighting_reexports_and_declarations("pub struct FitWeights;").is_empty());
-    // 正例: validation_split の fn 宣言（ビルダー）。
     assert!(
-        !scan_fit_weighting_reexports_and_declarations(
-            "impl FitConfig { pub fn validation_split(self, f: f32) -> Self { self } }"
-        )
-        .is_empty()
-    );
-    // 正例: 受入基準の字面どおりの禁止経路（FitConfig への class_weight
-    // フィールド追加想定の fn 宣言）。
-    assert!(
-        !scan_fit_weighting_reexports_and_declarations(
-            "impl FitConfig { pub fn class_weight(self, w: HashMap<u32, f32>) -> Self { self } }"
-        )
-        .is_empty()
-    );
-    // 正例: fit_with_weights の fn 宣言。
-    assert!(
-        !scan_fit_weighting_reexports_and_declarations(
-            "impl Sequential { pub fn fit_with_weights(&mut self) {} }"
-        )
-        .is_empty()
-    );
-    // 負例: コメント中の出現。
-    assert!(
-        scan_fit_weighting_reexports_and_declarations("// pub use ...::FitWeights;").is_empty()
-    );
-    // 負例: 無関係な型・関数名。
-    assert!(
-        scan_fit_weighting_reexports_and_declarations(
+        scan(
+            "compat/training.rs",
             "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
         )
+        .0
+        .is_empty()
+    );
+    // 正例: 承認位置外の再エクスポート（別ファイル）・別名・重複。
+    assert!(!scan("lib.rs", "pub use compat::FitWeights;").0.is_empty());
+    assert!(
+        !scan("compat/mod.rs", "pub use training::FitWeights as Foo;")
+            .0
+            .is_empty()
+    );
+    assert!(
+        !scan(
+            "compat/mod.rs",
+            "pub use a::FitWeights; pub use b::{FitWeights};"
+        )
+        .0
+        .is_empty()
+    );
+    // 正例: 承認位置外の struct／enum／type 宣言・2 重宣言。
+    assert!(
+        !scan("compat/other.rs", "pub struct FitWeights;")
+            .0
+            .is_empty()
+    );
+    assert!(
+        !scan("compat/training.rs", "pub enum FitWeights {}")
+            .0
+            .is_empty()
+    );
+    assert!(
+        !scan(
+            "compat/training.rs",
+            "pub struct FitWeights; pub struct FitWeights;"
+        )
+        .0
+        .is_empty()
+    );
+    // 正例: 承認位置外の fn 宣言・2 件目・禁止名。
+    assert!(
+        !scan(
+            "compat/other.rs",
+            "impl FitConfig { pub fn class_weight(self) {} }"
+        )
+        .0
+        .is_empty()
+    );
+    assert!(
+        !scan(
+            "compat/training.rs",
+            "impl A { pub fn fit_with_weights(&mut self) {} } impl B { pub fn fit_with_weights(&mut self) {} }"
+        )
+        .0
+        .is_empty()
+    );
+    assert!(
+        !scan(
+            "compat/training.rs",
+            "impl Sequential { pub fn fit_weighted(&mut self) {} }"
+        )
+        .0
         .is_empty()
     );
 }
 
 /// `FitConfig` が `#[derive(Debug, Clone, Copy, PartialEq, Eq)]` を
-/// 維持していることを固定する（`crates/facade/src/compat/training.rs:
-/// 175`）。受入基準の字面（`HashMap<u32, f32>` の class_weight・
+/// 維持していることを固定する（`crates/facade/src/compat/training.rs` の
+/// `FitConfig` 定義。#2564 の `validation_split` も `f32::to_bits` の
+/// `Option<u32>` で保持してこの契約を守る）。受入基準の字面（`HashMap<u32, f32>` の class_weight・
 /// `&[f32]` の sample_weight を直接フィールド追加）どおりに実装すると
 /// `Copy`（`HashMap` 保持）・`Eq`（`f32` 保持）のいずれかが外れ、
 /// crates.io 出荷済み `fandhe-ai =0.9.0` の公開 API 非破壊契約に反する

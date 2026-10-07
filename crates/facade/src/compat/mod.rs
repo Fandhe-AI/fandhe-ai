@@ -91,7 +91,7 @@ pub use metrics::{Metrics, MetricsResult};
 pub use model_io::{ModelIoError, load_model, save_model};
 pub use sequential::{Sequential, SequentialVars};
 pub use training::{
-    AmpConfig, AmpDType, FitConfig, FitTarget, History, Loss, Optimizer, TrainStepFn,
+    AmpConfig, AmpDType, FitConfig, FitTarget, FitWeights, History, Loss, Optimizer, TrainStepFn,
     TrainStepOptimizer, TrainStepOutput,
 };
 
