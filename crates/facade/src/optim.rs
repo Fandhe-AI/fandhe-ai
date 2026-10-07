@@ -322,6 +322,12 @@
 //!   メソッドを追加しない契約とする（追加は破壊的変更になる）。
 //! - `compat::Sequential` の optimizer 状態 API（`fit` の再開）と、モデルと optimizer を
 //!   併せた complete checkpoint は対象外。
+//! - 公開面は `crates/facade/tests/api_surface.rs` の正ガード（
+//!   `facade_reexports_optimizer_state_dict_only_in_approved_form`・
+//!   `optimizer_state_dict_trait_matches_approved_shape`・
+//!   `optimizer_state_dict_impls_are_exactly_approved_ten`・
+//!   `optimizer_state_dict_usage_doctest_is_present_and_compiled` ほか。#2556・#2557）で
+//!   固定している。
 //!
 //! ```
 //! use fandhe_ai::Tensor;

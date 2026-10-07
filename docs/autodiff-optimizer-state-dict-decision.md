@@ -176,7 +176,7 @@ link は `cargo doc -D warnings` を落とすため、コード中のリンク�
 ## §4 facade 公開保留の多層防御（#2173 と同型）
 
 > **更新（#2556）**: 本節の `OptimizerStateDictHoldDoctestGuard` と 2 テストは #2556 で撤去し、
-> 否定ガードは正ガードへ反転した（§11）。以下は当時の記録。
+> 否定ガードは正ガードへ反転した（§11）。正ガードの強化は §12。以下は当時の記録。
 
 `crates/facade/src/lib.rs::OptimizerStateDictHoldDoctestGuard`（正の
 プローブ 1 ブロック方式。`ParamGroupsHoldDoctestGuard` と同型）と、
@@ -190,7 +190,7 @@ surface` 等の期待集合は変更していない。
 
 ## §5 承認事項（未承認のため保留）
 
-> **更新（#2556）**: 項目 1 は §9 の推奨案 A で承認・公開済み（§11）。項目 2・3 は引き続き対象外。
+> **更新（#2556）**: 項目 1 は §9 の推奨案 A で承認・公開済み（§11・§12）。項目 2・3 は引き続き対象外。
 
 facade（`fandhe_ai::optim`）公開面の拡張は次のいずれも未承認:
 
@@ -457,10 +457,49 @@ momentum 付き `Sgd` を bit 一致で再開するための内部 API（manifes
 
 ### 11.5 #2557 へ残した事項
 
-`docs/compat-api-scope.md` §5 の適用記録、正ガードの追加強化、利用例の拡充は #2557 の範囲。
+`docs/compat-api-scope.md` §5 の適用記録、正ガードの追加強化、利用例の拡充は #2557 の範囲（§12 で実施）。
 
 ### 11.6 検証
 
 実機（CUDA／Metal）parity はホスト値型のみのため不要（§6）。新規 `Op`／`BackendOps`／カーネル／
 `unsafe`／依存の追加はない。`Cargo.toml`／`Cargo.lock`／tolerance／baseline／`guardrail.toml`／
+`docs/spec` は変更していない。
+
+## §12 #2557 実装記録（正ガードの強化・適用記録・利用例）
+
+### 12.1 承認の根拠
+
+§11.1 と同じ（ルート #2499 のコメント issuecomment-6033824965 の記録）。本節は公開面を増やさず、
+新たな承認は得ていないし必要としない。
+
+### 12.2 追加した正ガード（`crates/facade/tests/api_surface.rs`）
+
+| テスト | 固定する内容 | 検出範囲外 |
+|---|---|---|
+| `optimizer_state_dict_trait_matches_approved_shape` | trait がジェネリクス・supertrait なし、本体の `fn` が `state_dict`・`load_state_dict` の 2 件ちょうど（既定実装付きの追加も検出）、関連型・関連定数なし（§9.4 (c)・§11.2） | 引数・戻り値型の変更（実呼び出しの `optimizer_state_dict_is_reachable_via_facade_only` が担う） |
+| `optimizer_state_dict_impls_are_exactly_approved_ten` | `crates/autodiff/src` の `impl <path>::OptimizerStateDict for <型>` が承認 10 型にちょうど一致し `Lbfgs` を含まない | ジェネリック impl・マクロ生成・別名経由の trait 名（trait 経路の到達は `optimizer_state_dict_is_reachable_via_facade_only` が補う） |
+| `optimizer_state_dict_usage_doctest_is_present_and_compiled` | `optim.rs` モジュール doc に、`ignore` 等の指定なしでコンパイルされる利用例が実在する | doctest の実体実行は `cargo test --doc` |
+| `optimizer_state_dict_shape_guards_detect_each_category` | 上記 2 検出器の自己検証（承認形は通り、各逸脱類型を検出する） | - |
+
+### 12.3 追加した利用例
+
+`optim_state_dict_facade.rs::resume_via_safetensors_file_path_is_bit_exact`:
+`save_safetensors_f32`／`load_safetensors_f32` のファイルパス経由で保存・復元し、続きの `step()`
+が bit 一致する（既存はバイト列経由のみ）。一時ディレクトリは OS の一時領域にプロセス ID 入りの
+一意名で作り、成否に関わらず削除する。
+
+### 12.4 更新した docs
+
+`docs/compat-api-scope.md` §5 の適用記録、本書 §4・§5・§11.5 の注記、`docs/README.md` の索引、
+`optim.rs` モジュール doc（公開面を固定する正ガード名の列挙）。
+
+### 12.5 対象外
+
+§11 と同じ: `compat::Sequential` の optimizer 状態 API（`fit` の再開）・complete checkpoint・
+sealing・`Lbfgs` の trait 対応・外部由来 safetensors の入力サイズ上限（上限値の決定は承認が必要）。
+
+### 12.6 検証
+
+テストとドキュメントのみの変更。新規 `Op`／`BackendOps`／カーネル／`unsafe`／依存の追加はなく、
+実機 parity は不要。`Cargo.toml`／`Cargo.lock`／tolerance／baseline／`guardrail.toml`／
 `docs/spec` は変更していない。
