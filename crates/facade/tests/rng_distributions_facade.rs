@@ -128,7 +128,7 @@ fn value_properties_hold() {
 }
 
 #[test]
-fn root_normal_differs_from_nn_init_normal() {
+fn root_normal_matches_nn_init_normal_for_same_seed() {
     let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
     fandhe_ai::manual_seed(51);
     let root = f32s(&fandhe_ai::normal(0.5, 2.0, &[3, 2]).unwrap());
