@@ -858,6 +858,7 @@ fn small_weight_with_large_residual_does_not_overflow() {
 /// 実サイズは 2。最小バッチサイズ 1 で一律検査すると有限な入力を誤拒否する。レビュー指摘 #2823）。
 #[test]
 fn no_shuffle_validates_coefficients_with_actual_batch_size() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::CrossEntropy)
         .unwrap();
@@ -937,4 +938,42 @@ fn zero_weight_row_with_internal_overflow_never_pollutes_params() {
     for p in m.trainable_parameters() {
         assert!(p.host_slice().iter().all(|v| v.is_finite()), "polluted");
     }
+}
+
+/// 正の CE 重みが f32 でゼロへアンダーフローする場合は、ゼロ重み扱いにせず更新前に拒否する。
+#[test]
+fn positive_ce_weight_underflow_is_rejected() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let x = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 1], &[2]).unwrap();
+    let w = FitWeights::new()
+        .sample_weight(&[1e-30, 1.0])
+        .class_weight(HashMap::from([(0u32, 1e-30f32)]));
+    let r = m.fit_with_weights(&x, &y, FitConfig::new(1, 2), &w, None, &mut [], &[]);
+    assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));
+}
+
+/// 残差を先に求めるため、`s_i > 1` で pred・target がともに大きく残差 0 でも NaN にならない。
+#[test]
+fn weighted_mse_large_equal_operands_and_scale_above_one_is_finite() {
+    let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
+        .unwrap();
+    let x = Tensor::new(vec![0.0f32], &[1, 1]).unwrap();
+    let pred = m.predict(&x).unwrap();
+    let y = Tensor::new(pred.host_slice().to_vec(), &[1, 1]).unwrap();
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, 1),
+            &FitWeights::new().sample_weight(&[1e30]),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(h.loss[0], 0.0);
 }

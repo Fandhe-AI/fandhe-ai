@@ -892,11 +892,14 @@ fn alloc_coef(len: usize) -> Result<Vec<f32>, AutodiffError> {
 /// （`inf` 係数が loss・backward へ NaN を伝播するのを防ぐ）。
 fn checked_f32_coef(v: f64, what: &str) -> Result<f32, AutodiffError> {
     let c = v as f32;
-    if v.is_finite() && c.is_finite() {
+    // 非ゼロの真値が f32 でゼロへアンダーフローする場合も、真のゼロ重み（損失から除外）と
+    // 区別できないため更新前に拒否する（レビュー指摘 #2823）。
+    if v.is_finite() && c.is_finite() && !(v != 0.0 && c == 0.0) {
         Ok(c)
     } else {
         Err(AutodiffError::InvalidArgument(format!(
-            "Sequential::fit_with_weights: {what} から導出した損失係数 {v} が f32 で表現できない"
+            "Sequential::fit_with_weights: {what} から導出した損失係数 {v} が f32 で表現できない\
+             （overflow またはゼロへのアンダーフロー）"
         )))
     }
 }
@@ -1007,10 +1010,24 @@ fn weighted_mse_loss<'t>(
     }
     let coef_t = Tensor::new(coef, &shape).map_err(AutodiffError::Shape)?;
     let coef_v = tape.var_no_grad(&coef_t);
-    // `pred − target` を f32 で先に作ると有限入力でも overflow しうる（例 pred=3e38,
-    // target=-3e38）。両オペランドを先に `s_i` で縮めてから減算する（レビュー指摘 #2823）。
+    // 有限な残差 `pred − target` を先に求めて係数を掛ける（pred・target を別々に縮めてから
+    // 減算すると、大きな値同士の差で精度を失い、`s_i > 1` では積が overflow して残差 0 でも
+    // NaN になるため。レビュー指摘 #2823）。残差自体が f32 で overflow する行
+    // （例 pred=3e38, target=-3e38）が係数非 0 の行に存在する場合に限り、両オペランドを先に
+    // `s_i` で縮めてから減算する経路へ切り替える。
     let target_v = tape.var_no_grad(target);
-    let mut scaled = pred.mul(&coef_v)?.sub(&target_v.mul(&coef_v)?)?;
+    let pred_t = pred.to_tensor();
+    let residual_overflows = pred_t
+        .host_slice()
+        .iter()
+        .zip(target.host_slice().iter())
+        .zip(zero_mask.iter())
+        .any(|((&p, &t), &z)| !z && !(p - t).is_finite());
+    let mut scaled = if residual_overflows {
+        pred.mul(&coef_v)?.sub(&target_v.mul(&coef_v)?)?
+    } else {
+        pred.sub(&target_v)?.mul(&coef_v)?
+    };
     if zero_mask.iter().any(|&b| b) {
         let mask_t = Tensor::new(zero_mask, &shape).map_err(AutodiffError::Shape)?;
         scaled = scaled.masked_fill(&mask_t, 0.0)?;
