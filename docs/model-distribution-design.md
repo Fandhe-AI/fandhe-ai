@@ -52,7 +52,7 @@
 | 役割 | 子 issue | 状態 | 成果物 |
 |---|---|---|---|
 | ローカルレジストリ | #2087 | CLOSED（実装済み） | `crates/facade/src/model.rs`（`ModelRegistry`／`ModelError`）・`docs/facade-model-registry-decision.md` |
-| リモート取得（URL ダウンロード） | #2088 | 設計記録のみ（依存追加のユーザー承認待ち） | `docs/model-download-design.md`（HTTP クライアント候補比較・技術仕様案・OWASP セキュリティ設計・承認後の実装手順） |
+| リモート取得（URL ダウンロード） | #2088 | 設計記録のみ（依存追加のユーザー承認待ち。**2026-10-07 追記**: HTTP／TLS 依存は推奨案の取り下げにより再評価待ち → §4 の追記） | `docs/model-download-design.md`（HTTP クライアント候補比較・技術仕様案・OWASP セキュリティ設計・承認後の実装手順） |
 | HF hub 連携 | #2082 のスコープ外。別クレートとしての設計は #2243（#2244〜#2246 に分解済み）で追跡 | #2243 OPEN | `docs/model-distribution-design.md` §5（本節） |
 
 ローカルレジストリ（#2087）はリモート取得（#2088）がキャッシュへ書き込む先として設計されており、両者は「入口の分離」（配置元に依らず `model.safetensors` レイアウトへ収束させる）という一貫した構成を取る。HF hub 連携は §5 のとおり別クレート（または opt-in の別経路）の責務であり、#2082 のスコープ外として #2243（#2244 境界と取得 API 案・#2245 認証トークンとセキュリティ・#2246 他ライブラリ対応表と依存承認事項）へ追跡を引き継ぐ。
@@ -65,6 +65,8 @@
 2. **キャッシュ書き込みの dirfd 相対操作用 OS 呼び出しラッパー（`libc` または `rustix` 等）の新規区分追加**（1 の第 10 区分に続く第 11 区分相当。両者は承認単位が異なるため別区分として扱う）。`std::fs` は dirfd 相対のオープン・rename を提供しないため、シンボリックリンク経由のキャッシュルート脱出対策（TOCTOU を構造的に閉じる設計。`docs/model-download-design.md` §6）の実装に必須。
 
 **追記（2026-10-03・#2621）**: 上記 1 は第 11 区分相当、2 は新規区分ではなく、2026-09-28 承認済みの第 10 区分 `libc` の用途拡張（または onnx-interop ヘルパーの公開）に読み替える。詳細・推奨・承認チェックリストは `docs/model-download-design.md` §14 を正とする（いずれも未承認）。上の本文は作成時点の記述であり書き換えない。
+
+**追記（2026-10-07・#2621）**: 同 doc §14.3 の推奨案（`ureq` の `native-tls-no-default` 単独構成）は、同 doc §15 の実測で HTTPS が成立しないと判明したため取り下げられた。上記 1 の HTTP／TLS 依存は「承認待ち」ではなく「再評価待ち」で、現時点の推奨は未定である（論点は同 doc §15.8）。上記 2 の読み替えは影響を受けない。
 
 上記 2 件に付随して、`docs/model-download-design.md` §7 は facade 公開面の拡張（`ModelRegistry::download`・`download_with`・`DownloadOptions`・`Sha256Pin`・`DownloadProgress` の追加・`api_surface.rs` 到達性テストの追加）も承認事項として列挙しているが、これは依存追加そのものではなく、1・2 の承認を前提に実施する公開面拡張である。`docs/license-matrix.md` への行追加・承認後の実装イシュー起票（`.claude/rules/out-of-scope-tracking.md` によりユーザー承認が必要）も同様に 1・2 の後続事項として同 doc §7 に記録されている。
 
