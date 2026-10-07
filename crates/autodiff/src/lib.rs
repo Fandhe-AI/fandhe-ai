@@ -267,6 +267,7 @@ pub mod indexed_update_ops;
 // 保留する（`docs/facade-generate-decision.md`）。
 pub mod generate;
 mod grad;
+mod hooks;
 pub mod indexing_ops;
 // ヤコビアン・ヘッセ行列（`jacobian`・`hessian`。イシュー #2670）。既存の `Tape::backward`／
 // `backward_create_graph` の要素ごとの繰り返しのみで、新規 Op・VJP はない。facade への公開は
@@ -355,6 +356,7 @@ pub use backward::Gradients;
 pub use create_graph::CreateGraphResult;
 pub use custom::CustomFunction;
 pub use error::AutodiffError;
+pub use hooks::HookHandle;
 pub use tape::{NodeId, Tape, TapeId};
 // `manual_seed`（イシュー #1724）・`randn`／`rand`／`randint`（イシュー
 // #1725）: PyTorch `torch.manual_seed`／`randn`／`rand`／`randint` 相当の
