@@ -41,6 +41,10 @@
 //! ⑤実体化 → ⑥forward → ⑦`push_eager`。エラー時に tape へ孤児ノードを残さない。
 //! `multilabel_margin_loss` は行あたり `O(C²)` 時間（target 数 × クラス数）だが確保量は
 //! 入力 numel と長さ `C` のマスクのみ。
+//!
+//! **公開状況（イシュー #2678）**: `multilabel_margin_loss` の公開は #2678 でも保留（`Reduction` の公開経路〈#2602〉が未整備のため）。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::{Tensor, require_same_shape};
 

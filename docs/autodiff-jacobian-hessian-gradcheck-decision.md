@@ -255,3 +255,13 @@ grep -rnE "fn (numeric_grad|finite_diff[a-z_]*|central_diff[a-z_]*|analytic_hess
 - facade 公開（`Tape::gradcheck`〈`TapeRef` アダプタ〉／`Tape::backward_detect_anomaly`＋`GradcheckOptions`／`GradcheckReport` の再エクスポート）: #2677 の承認後に #2678。
 - CUDA（GB10）・Metal（M4 Max）実機 parity: `docs/perf/logs/gradcheck-anomaly-2671/README.md`（未実測）。
 - `VarF64` 版 gradcheck・gradgradcheck・複数出力・`compat::Sequential::fit` への anomaly 結線・プロセスワイド／テープ単位の検出モード・テスト内に散在する私的な数値勾配ヘルパーの統合は本イシューの対象外。
+
+## 10. #2678 実装記録（Phase 4 の facade 公開）
+
+- 状態: **§7 の公開形を #2678 で承認形どおり公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 29・30を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2678 時点で当該コメントの承認に更新された（承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき）。
+- 公開した識別子: facade `Tape::jacobian(&self, output, input) -> Result<Tensor<f32>, _>`・`Tape::hessian(&self, loss, input, child: &Tape)`・`Tape::backward_detect_anomaly(&self, loss) -> Result<Gradients, _>`（いずれも `&self.0`／`&child.0` を渡すだけの 1 行委譲）。本体は `crate::<module>::<fn>` への 1 行委譲（`Var`）／`&self.0` を渡すだけの 1 行委譲（`Tape`）に固定し、新規 `Op`・`BackendOps` メソッド・`AutodiffError` variant・`unsafe` は追加していない。
+- ガードの反転・縮小: `JacobianHessianHoldDoctestGuard` は `Tape` の 2 本を外すと残すプローブが `jacobian_ops` モジュール名・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッドになり、`GradcheckAnomalyHoldDoctestGuard` は `Tape::backward_detect_anomaly` を外して `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`anomaly` モジュール名等のプローブを残した（先例 #2516）。`api_surface.rs` の否定ガードは、承認済みの型名を識別子表から外し、`Tape` の承認済みメソッドを `fn` 宣言走査から除外したうえで、承認形だけを許す正ガードへ反転した。宣言場所インベントリには `autodiff/src/var.rs`（`Tape` 分は `facade/src/lib.rs`）の各 1 件を追加した。
+- **`Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は保留した。** §3.4・§3.7・§9.4 は内部契約（`gradcheck(make_tape: Fn() -> Tape, f, inputs, options)`）と「facade 側はクロージャ引数を `TapeRef` に包むアダプタにする」ことしか定めておらず、facade メソッドのレシーバ（`&self` か関連関数か）と、newtype の `Tape` でテープ生成をどう受けるか（`tape_for` が fallible な点を含む）が書かれていない（複数の形が成り立つ。「記録に形が書かれていない点」）。型 2 つは `gradcheck` なしでは使えないため一緒に保留した。#2677 へ事実のみをコメント済み。
+- `Tape::hessian` は `backward_create_graph` と同じく `child: &Tape`（facade の `Tape`）を取り、本体は `&child.0` を渡す。
+- テスト: `crates/facade/tests/phase4_ops_facade.rs`（tape_jacobian_hessian_and_anomaly_signatures。`fandhe_ai::` だけを import し、fn ポインタ型でシグネチャを固定して厳密に決まる値を確認）と、`crates/facade/tests/api_surface.rs` の正ガード（`var_phase4_ops_methods_are_thin_delegations`・`facade_reexports_phase4_ops_types_only_in_approved_shape`・`facade_tape_phase4_methods_are_thin_delegations`・各 `workspace_declares_*`）。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。CUDA／Metal 実機 parity は未実測で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` へ申し送る（新しい数値経路はなく、1 行委譲のため既存の各 `*_backend_parity.rs` の結果がそのまま適用される）。

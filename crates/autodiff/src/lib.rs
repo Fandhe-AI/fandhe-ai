@@ -199,6 +199,10 @@
 //! （`ScalarUnaryOp` 5 variant への薄い委譲・新規 `Op` ゼロ）。facade 公開は
 //! 承認依頼 #2677 の承認待ちで保留（公開は #2678・#2679。
 //! `docs/autodiff-activation-scalar-ops-decision.md`）。
+//!
+//! **#2678 の更新**: 下の各モジュール記述にある「facade への公開は保留」のうち、承認形の `Var` 委譲メソッド・facade `Tape` のメソッド・
+//! 型のルート再エクスポート（`StftOptions`・`IstftOptions`・`MeshgridIndexing` は本クレートのルートから中継）は #2678 で公開済み。保留を維持したのは
+//! 損失 3 本・`gradcheck` 系・3D プーリング等（`docs/compat-api-scope.md` §5.1・§5 の適用記録〈#2678〉）。
 
 //! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
 //! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。
@@ -385,6 +389,11 @@ pub use fandhe_ai_tensor_core::creation::{
 // `topk_unique_ops` の入出力型（イシュー #2519。facade が `Var` の委譲メソッドと
 // ともに再エクスポートする。`QrVars`／`SvdVars` と同じ「ルート経由」の形）。
 pub use topk_unique_ops::{TopkOptions, UniqueOptions, UniqueOutput};
+// `fft_ops`／`shape_view_ops` の入力型（イシュー #2678。`Var::stft`／`istft`／
+// `meshgrid` の引数型。`TopkOptions` と同じ「ルート経由」の形で、モジュール
+// 自体は facade へ再エクスポートしない）。
+pub use fft_ops::{IstftOptions, StftOptions};
+pub use shape_view_ops::MeshgridIndexing;
 pub use var::{GateParams, QrVars, Reduction, SvdVars, Var, VarHostView};
 // `Var::eigh`／`Var::slogdet` の多出力戻り値型（イシュー #2515。承認 2026-10-07。
 // facade が再エクスポートする。`QrVars`／`SvdVars` と同じ「ルート経由」の形で、

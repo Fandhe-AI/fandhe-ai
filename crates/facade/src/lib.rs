@@ -245,6 +245,19 @@ pub use fandhe_ai_autodiff::SlogdetVars;
 // 再エクスポートしない（型だけを autodiff ルート経由で 1 文 1 行で公開する。
 // `api_surface.rs::facade_reexports_topk_unique_types_only_in_approved_shape`）。
 pub use fandhe_ai_autodiff::{TopkOptions, UniqueOptions, UniqueOutput};
+// Phase 4 の演算（`Var` の委譲メソッド。イシュー #2678・ルート #2499 の一括承認
+// `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1）の引数型。モジュール
+// （`fft_ops`・`shape_view_ops`・`pad_ops` 等）自体は再エクスポートせず、型だけを
+// 内部クレートのルート経由で 1 文 1 行・別名なしで公開する
+// （`tests/api_surface.rs::facade_reexports_phase4_ops_types_only_in_approved_shape`）。
+pub use fandhe_ai_autodiff::IstftOptions;
+pub use fandhe_ai_autodiff::MeshgridIndexing;
+pub use fandhe_ai_autodiff::StftOptions;
+pub use fandhe_ai_tensor_core::FftNorm;
+pub use fandhe_ai_tensor_core::PadMode;
+pub use fandhe_ai_tensor_core::QuantileInterpolation;
+pub use fandhe_ai_tensor_core::ScatterReduceMode;
+pub use fandhe_ai_tensor_core::StftPadMode;
 pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
 // `RngError`（イシュー #1725）: `randint` の戻り値型（`low >= high` の
 // 範囲不正を表す）。`Tape`／`BackendOps` を含まない単純なエラー型のため
@@ -676,6 +689,143 @@ impl Tape {
         child: &'c Tape,
     ) -> Result<CreateGraphResult<'c>, AutodiffError> {
         self.0.backward_create_graph(loss, &child.0)
+    }
+
+    /// 重みなしの度数カウント（`torch.bincount(input, minlength=…)` 相当。イシュー
+    /// #2678・`fandhe_ai_autodiff::binning_ops::bincount` への薄い委譲）。
+    ///
+    /// `Var` を取らない演算のため `BackendOps` へ到達する `Tape` が入口になる
+    /// （REQ-12 により生の autodiff `Tape` は露出しない）。`input` は 1 次元・非負のみ。
+    /// 出力長は `max(max(input) + 1, minlength)`。違反は型付きエラーで返る。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let counts = t.bincount(&Tensor::new(vec![0_i32, 1, 1, 3], &[4])?, 0)?;
+    /// assert_eq!(counts.host_slice().into_owned(), [1, 2, 0, 1]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bincount(
+        &self,
+        input: &Tensor<i32>,
+        minlength: usize,
+    ) -> Result<Tensor<i32>, AutodiffError> {
+        fandhe_ai_autodiff::binning_ops::bincount(&self.0, input, minlength)
+    }
+
+    /// 重み付きの度数カウント（`torch.bincount(input, weights, minlength)` 相当。
+    /// イシュー #2678・`fandhe_ai_autodiff::binning_ops::bincount_weighted` への
+    /// 薄い委譲）。
+    ///
+    /// 出力は detached（`weights` への勾配は流れない）。`weights` が別の `Tape` の
+    /// `Var` なら [`AutodiffError::TapeMismatch`]。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let w = t.var(&Tensor::new(vec![0.5_f32, 1.0, 2.0], &[3])?);
+    /// let out = t.bincount_weighted(&Tensor::new(vec![0_i32, 1, 1], &[3])?, &w, 0)?;
+    /// assert_eq!(out.host_slice().into_owned(), [0.5, 3.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bincount_weighted(
+        &self,
+        input: &Tensor<i32>,
+        weights: &Var<'_>,
+        minlength: usize,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        fandhe_ai_autodiff::binning_ops::bincount_weighted(&self.0, input, weights, minlength)
+    }
+
+    /// ヤコビアン `∂output/∂input`（`torch.autograd.functional.jacobian` の
+    /// reverse-mode 相当。イシュー #2678・`fandhe_ai_autodiff::jacobian_ops::jacobian`
+    /// への薄い委譲）。
+    ///
+    /// 戻り値は shape `output.shape ++ input.shape` の非微分ホスト値で、行 `i` は
+    /// `output` の平坦添字 `i` の `input` に関する勾配。`input` が勾配追跡なしなら
+    /// [`AutodiffError::GradientTrackingDisabled`]、別テープなら
+    /// [`AutodiffError::TapeMismatch`]。`output` の要素ごとに逆伝播するため計算量は
+    /// `output` の要素数に比例する。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let x = t.var(&Tensor::new(vec![1.0_f32, 2.0], &[2])?);
+    /// let y = x.mul(&x)?; // y_i = x_i^2
+    /// let j = t.jacobian(&y, &x)?;
+    /// assert_eq!(j.shape(), &[2, 2]);
+    /// assert_eq!(j.host_slice().into_owned(), [2.0, 0.0, 0.0, 4.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn jacobian(
+        &self,
+        output: &Var<'_>,
+        input: &Var<'_>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        fandhe_ai_autodiff::jacobian_ops::jacobian(&self.0, output, input)
+    }
+
+    /// ヘッセ行列 `∂²loss/∂input²`（`torch.autograd.functional.hessian` の
+    /// reverse-mode 相当。イシュー #2678・`fandhe_ai_autodiff::jacobian_ops::hessian`
+    /// への薄い委譲）。
+    ///
+    /// `child` は [`Tape::backward_create_graph`] と同じく [`tape`]／[`tape_for`] で作った
+    /// **空**の別 `Tape`。`loss` は要素数 1 でなければならない。対象は
+    /// `create_graph` 対応 Op の範囲で、非対応・非空の子などは
+    /// [`AutodiffError::Backward`] 等の既存エラー variant で拒否される。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![2.0_f32], &[1])?);
+    /// let loss = x.mul(&x)?.mul(&x)?.sum(None)?; // x^3
+    /// let h = t.hessian(&loss, &x, &child)?;
+    /// assert!((h.host_slice()[0] - 12.0).abs() < 1e-4); // 6x
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn hessian(
+        &self,
+        loss: &Var<'_>,
+        input: &Var<'_>,
+        child: &Tape,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        fandhe_ai_autodiff::jacobian_ops::hessian(&self.0, loss, input, &child.0)
+    }
+
+    /// 非有限値（NaN／±inf）を最初に生んだノードを検出する逆伝播（イシュー #2678・
+    /// `fandhe_ai_autodiff::anomaly::backward_detect_anomaly` への薄い委譲）。
+    ///
+    /// 正常時は [`Tape::backward`] と bit 一致の [`Gradients`] を返す。検出時の
+    /// [`AutodiffError::Backward`] のメッセージはノード種別名だけを含み、テンソル値や
+    /// 利用者定義名を含まない。検出は読み取りのみでテープを書き換えない。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let x = t.var(&Tensor::new(vec![3.0_f32], &[1])?);
+    /// let loss = x.mul(&x)?.sum(None)?;
+    /// let grads = t.backward_detect_anomaly(&loss)?;
+    /// assert_eq!(grads.get(&x)?.unwrap().host_slice().into_owned(), [6.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn backward_detect_anomaly(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {
+        fandhe_ai_autodiff::anomaly::backward_detect_anomaly(&self.0, loss)
     }
 
     /// [`fandhe_ai_autodiff::Tape::custom`] への委譲入口（イシュー #2549。
@@ -3637,27 +3787,21 @@ struct ModelIoHoldDoctestGuard;
 #[allow(dead_code)]
 struct GenerateHoldDoctestGuard;
 
-/// イシュー #2631・#2632・#2633（親 #2630・ルート #2499 Phase 4。`rfft`／`irfft`／
-/// `fft`／`ifft`／`stft`／`istft`）の facade 公開保留を固定する doctest 足場。`PredictBatchesHoldDoctestGuard`（#2192。#2582 で削除済み）と同型の
-/// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob import
-/// したスコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_fft_hold_probe::{FftNorm, StftOptions, IstftOptions, StftPadMode,
-/// fft_ops::{rfft, irfft, fft, ifft, stft, istft}, fft::__mark}`
-/// を導入し、実際に使う名前・呼び出しを書く。facade がどの経路（`pub use` に
-/// よる再エクスポート・型宣言・`Var`／`Tape` への `rfft`／`irfft`／`fft`／`ifft`／`stft`／`istft` inherent
-/// メソッド追加・`pub mod fft_ops`／`pub mod fft` の新設）でこれらの名前を
-/// 公開しても、ローカル定義との glob 衝突（モジュール名・型名の場合。E0659
-/// 等）または呼び出しシグネチャの不一致（inherent メソッドがトレイトメソッド
-/// より優先解決されるため、本プローブの `Type::method` 形式の呼び出しが型
-/// 不一致でコンパイル失敗する）でエラーコードに依存せずコンパイルが失敗する。
+/// FFT（`rfft`／`irfft`／`fft`／`ifft`／`stft`／`istft`。イシュー #2631〜#2633・親 #2630・ルート #2499 Phase 4）の
+/// 未承認経路を固定する doctest 足場（承認形は #2678 で公開済み）。`VarActivationOpsHoldDoctestGuard` と
+/// 同型の「正のプローブ 1 ブロック方式」を採る。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::fft_ops::{rfft,
-/// irfft, fft, ifft, stft, istft, StftOptions, IstftOptions}`・
-/// `fandhe_ai_tensor_core::{FftNorm, StftPadMode, fft}`）。保留対象は
-/// facade 公開面（`Var::rfft`／`Var::irfft`／`Var::fft`／`Var::ifft`／
-/// `Var::stft`／`Var::istft` の委譲メソッドと `FftNorm`・`StftOptions`・
-/// `IstftOptions`・`StftPadMode` の再エクスポート）のみで、公開形は未承認（承認依頼は #2677・公開自体は
-/// 承認後の #2678。推奨案は `docs/autodiff-fft-ops-decision.md` §7）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `fft_ops`・`fft`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
+///
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{rfft,irfft,fft,ifft,stft,istft}` と `FftNorm`・`StftPadMode`・`StftOptions`・`IstftOptions` の再エクスポートは承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロック、型 `FftNorm`・`StftOptions`・`IstftOptions`・`StftPadMode` のローカル定義（ルート再エクスポートと glob 衝突するため）を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `fft_ops`・`fft`・残した受け手（`Tape`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// fft_ops_hold_doctest_globs_all_pub_modules`・
@@ -3665,9 +3809,6 @@ struct GenerateHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_fft_ops`・
 /// `workspace_declares_fft_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御の位置づけは同決定記録 §9 を参照。
-///
-/// 承認を得た日が来たら、本モジュール・本 doctest 自体を削除する（ソース
-/// 走査側の対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -3688,10 +3829,6 @@ struct GenerateHoldDoctestGuard;
 /// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_fft_hold_probe {
-///     pub struct FftNorm;
-///     pub struct StftOptions;
-///     pub struct IstftOptions;
-///     pub struct StftPadMode;
 ///     pub mod fft_ops {
 ///         pub fn rfft() {}
 ///         pub fn irfft() {}
@@ -3717,27 +3854,6 @@ struct GenerateHoldDoctestGuard;
 ///     fn istft(&self) -> __FandheFftHoldMarker;
 /// }
 ///
-/// impl<'t> __FandheFftHoldProbe for fandhe_ai::Var<'t> {
-///     fn rfft(&self) -> __FandheFftHoldMarker {
-///         __FandheFftHoldMarker
-///     }
-///     fn irfft(&self) -> __FandheFftHoldMarker {
-///         __FandheFftHoldMarker
-///     }
-///     fn fft(&self) -> __FandheFftHoldMarker {
-///         __FandheFftHoldMarker
-///     }
-///     fn ifft(&self) -> __FandheFftHoldMarker {
-///         __FandheFftHoldMarker
-///     }
-///     fn stft(&self) -> __FandheFftHoldMarker {
-///         __FandheFftHoldMarker
-///     }
-///     fn istft(&self) -> __FandheFftHoldMarker {
-///         __FandheFftHoldMarker
-///     }
-/// }
-///
 /// impl __FandheFftHoldProbe for fandhe_ai::Tape {
 ///     fn rfft(&self) -> __FandheFftHoldMarker {
 ///         __FandheFftHoldMarker
@@ -3759,7 +3875,7 @@ struct GenerateHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_free_fns(_: FftNorm, _: StftOptions, _: IstftOptions, _: StftPadMode) {
+/// fn __probe_free_fns() {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
 ///     fft_ops::rfft();
@@ -3771,13 +3887,7 @@ struct GenerateHoldDoctestGuard;
 ///     fft::__mark();
 /// }
 ///
-/// fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
-///     let _: __FandheFftHoldMarker = fandhe_ai::Var::rfft(v);
-///     let _: __FandheFftHoldMarker = fandhe_ai::Var::irfft(v);
-///     let _: __FandheFftHoldMarker = fandhe_ai::Var::fft(v);
-///     let _: __FandheFftHoldMarker = fandhe_ai::Var::ifft(v);
-///     let _: __FandheFftHoldMarker = fandhe_ai::Var::stft(v);
-///     let _: __FandheFftHoldMarker = fandhe_ai::Var::istft(v);
+/// fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::rfft(tape);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::irfft(tape);
 ///     let _: __FandheFftHoldMarker = fandhe_ai::Tape::fft(tape);
@@ -3792,22 +3902,20 @@ struct FftOpsHoldDoctestGuard;
 
 /// 逆三角関数・双曲線関数（`atan`・`asin`・`acos`・`atan2`・`sinh`・`cosh`・
 /// `asinh`・`acosh`・`atanh`。イシュー #2634・親 #2625・ルート #2499
-/// Phase 4）を facade 公開面から締め出す保留ガード（`FftOpsHoldDoctestGuard`
+/// Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`FftOpsHoldDoctestGuard`
 /// と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `trig_ops` と 9 メソッドを持つプローブ用トレイトを置き、
-/// 修飾なしの関数呼び出しと `Var`／`Tape` の修飾付きメソッド呼び出しの両方を
-/// 行う。facade が同名のモジュール・関数を glob 可能な位置へ公開するか、
-/// `Var`／`Tape` へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
-/// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `trig_ops`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::trig_ops`・
-/// `fandhe_ai_tensor_core::{ScalarUnaryOp, ScalarBinaryOp}` の追加 variant）。
-/// 保留対象は facade 公開面（`Var::atan` 等の委譲メソッド）のみで、公開形は
-/// 未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-trig-ops-decision.md` §7。同記録は推奨案の記録であり
-/// 承認記録ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{atan,asin,acos,sinh,cosh,asinh,acosh,atanh,atan2}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `trig_ops`・残した受け手（`Tape`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// trig_ops_hold_doctest_globs_all_pub_modules`・
@@ -3815,9 +3923,6 @@ struct FftOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_trig_ops`・
 /// `workspace_declares_trig_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -3866,36 +3971,6 @@ struct FftOpsHoldDoctestGuard;
 ///     fn atan2(&self) -> __FandheTrigOpsHoldMarker;
 /// }
 ///
-/// impl<'t> __FandheTrigOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn atan(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn asin(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn acos(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn sinh(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn cosh(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn asinh(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn acosh(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn atanh(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-///     fn atan2(&self) -> __FandheTrigOpsHoldMarker {
-///         __FandheTrigOpsHoldMarker
-///     }
-/// }
-///
 /// impl __FandheTrigOpsHoldProbe for fandhe_ai::Tape {
 ///     fn atan(&self) -> __FandheTrigOpsHoldMarker {
 ///         __FandheTrigOpsHoldMarker
@@ -3940,16 +4015,7 @@ struct FftOpsHoldDoctestGuard;
 ///     trig_ops::atan2();
 /// }
 ///
-/// fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asin(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acos(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::sinh(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::cosh(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asinh(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acosh(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atanh(v);
-///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan2(v);
+/// fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
 ///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::atan(tape);
 ///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::asin(tape);
 ///     let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::acos(tape);
@@ -3966,24 +4032,20 @@ struct FftOpsHoldDoctestGuard;
 struct TrigOpsHoldDoctestGuard;
 
 /// 非有限値の判定・置換（`isnan`・`isinf`・`isfinite`・`nan_to_num`。イシュー #2635・
-/// 親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// 親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード
 /// （`TrigOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `nonfinite_ops` と 4 メソッドを持つプローブ用トレイトを置き、
-/// 修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>`／`Tensor<bool>` の
-/// 修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob
-/// 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、
-/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せず
-/// コンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、
-/// `tensor-core` 側への同名メソッド追加も検出する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `nonfinite_ops`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::nonfinite_ops`・
-/// `fandhe_ai_tensor_core::ScalarUnaryOp` の追加 variant）。保留対象は facade
-/// 公開面（`Var::isnan` 等の委譲メソッド）のみで、公開形は未承認（承認依頼は
-/// #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-nonfinite-ops-decision.md` §7。同記録は推奨案の記録であり
-/// 承認記録ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{isnan,isinf,isfinite,nan_to_num}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `nonfinite_ops`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// nonfinite_ops_hold_doctest_globs_all_pub_modules`・
@@ -3991,9 +4053,6 @@ struct TrigOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_nonfinite_ops`・
 /// `workspace_declares_nonfinite_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -4030,21 +4089,6 @@ struct TrigOpsHoldDoctestGuard;
 ///     fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker;
 ///     fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker;
 ///     fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker;
-/// }
-///
-/// impl<'t> __FandheNonfiniteOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {
-///         __FandheNonfiniteOpsHoldMarker
-///     }
-///     fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker {
-///         __FandheNonfiniteOpsHoldMarker
-///     }
-///     fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker {
-///         __FandheNonfiniteOpsHoldMarker
-///     }
-///     fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker {
-///         __FandheNonfiniteOpsHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheNonfiniteOpsHoldProbe for fandhe_ai::Tape {
@@ -4102,15 +4146,11 @@ struct TrigOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 ///     tb: &fandhe_ai::Tensor<bool>,
 /// ) {
-///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isnan(v);
-///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isinf(v);
-///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isfinite(v);
-///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::nan_to_num(v);
 ///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isnan(tape);
 ///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isinf(tape);
 ///     let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isfinite(tape);
@@ -4130,24 +4170,20 @@ struct TrigOpsHoldDoctestGuard;
 struct NonfiniteOpsHoldDoctestGuard;
 
 /// 累積最大・最小・累積 logsumexp（`cummax`・`cummin`・`logcumsumexp`。イシュー
-/// #2636・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// #2636・親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード
 /// （`NonfiniteOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `cumulative_ops`／`cumulative` と 3 メソッドを持つプローブ用
-/// トレイトを置き、修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>` の
-/// 修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob
-/// 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、
-/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せず
-/// コンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、
-/// `tensor-core` 側への同名メソッド追加も検出する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `cumulative_ops`・`cumulative`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::cumulative_ops`・
-/// `fandhe_ai_tensor_core::cumulative`・`BackendOps::scan_*`）。保留対象は facade
-/// 公開面（`Var::cummax` 等の委譲メソッド）のみで、公開形は未承認（承認依頼は
-/// #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-cumulative-ops-decision.md` §7。同記録は推奨案の記録であり
-/// 承認記録ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{cummax,cummin,logcumsumexp}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `cumulative_ops`・`cumulative`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// cumulative_ops_hold_doctest_globs_all_pub_modules`・
@@ -4155,9 +4191,6 @@ struct NonfiniteOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_cumulative_ops`・
 /// `workspace_declares_cumulative_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -4197,18 +4230,6 @@ struct NonfiniteOpsHoldDoctestGuard;
 ///     fn logcumsumexp(&self) -> __FandheCumulativeOpsHoldMarker;
 /// }
 ///
-/// impl<'t> __FandheCumulativeOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn cummax(&self) -> __FandheCumulativeOpsHoldMarker {
-///         __FandheCumulativeOpsHoldMarker
-///     }
-///     fn cummin(&self) -> __FandheCumulativeOpsHoldMarker {
-///         __FandheCumulativeOpsHoldMarker
-///     }
-///     fn logcumsumexp(&self) -> __FandheCumulativeOpsHoldMarker {
-///         __FandheCumulativeOpsHoldMarker
-///     }
-/// }
-///
 /// impl __FandheCumulativeOpsHoldProbe for fandhe_ai::Tape {
 ///     fn cummax(&self) -> __FandheCumulativeOpsHoldMarker {
 ///         __FandheCumulativeOpsHoldMarker
@@ -4243,13 +4264,10 @@ struct NonfiniteOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::cummax(v);
-///     let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::cummin(v);
-///     let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::logcumsumexp(v);
 ///     let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::cummax(tape);
 ///     let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::cummin(tape);
 ///     let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::logcumsumexp(tape);
@@ -4263,25 +4281,19 @@ struct NonfiniteOpsHoldDoctestGuard;
 struct CumulativeOpsHoldDoctestGuard;
 
 /// 順序統計・NaN 無視縮約（`median`・`kthvalue`・`quantile`・`nanmean`・`nansum`。
-/// イシュー #2637・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
-/// ガード（`CumulativeOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// イシュー #2637・親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`CumulativeOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `stat_reduce_ops`／`stat_reduce`・型 `QuantileInterpolation`／
-/// `StatReduceError`・6 メソッドを持つプローブ用トレイトを置き、修飾なしの関数呼び出しと
-/// `Var`／`Tape`／`Tensor<f32>` の修飾付きメソッド呼び出しの両方を行う。facade が
-/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の
-/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
-/// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `stat_reduce_ops`・`stat_reduce`、型 `StatReduceError`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::stat_reduce_ops`・
-/// `fandhe_ai_tensor_core::{stat_reduce, QuantileInterpolation, StatReduceError}`・
-/// `BackendOps::stat_*`）。保留対象は facade 公開面（`Var::median` 等の委譲メソッドと
-/// 引数型 `QuantileInterpolation` の再エクスポート）のみで、公開形は未承認（承認依頼は
-/// #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-stat-reduce-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
-/// ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{median,median_with_indices,kthvalue,quantile,nanmean,nansum}` と `QuantileInterpolation` の再エクスポートは承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロック、型 `QuantileInterpolation` のローカル定義（ルート再エクスポートと glob 衝突するため）を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `stat_reduce_ops`・`stat_reduce`、型 `StatReduceError`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// stat_reduce_ops_hold_doctest_globs_all_pub_modules`・
@@ -4289,9 +4301,6 @@ struct CumulativeOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_stat_reduce_ops`・
 /// `workspace_declares_stat_reduce_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -4312,7 +4321,6 @@ struct CumulativeOpsHoldDoctestGuard;
 /// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_stat_reduce_hold_probe {
-///     pub struct QuantileInterpolation;
 ///     pub struct StatReduceError;
 ///     pub mod stat_reduce_ops {
 ///         pub fn median() {}
@@ -4337,27 +4345,6 @@ struct CumulativeOpsHoldDoctestGuard;
 ///     fn quantile(&self) -> __FandheStatReduceOpsHoldMarker;
 ///     fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker;
 ///     fn nansum(&self) -> __FandheStatReduceOpsHoldMarker;
-/// }
-///
-/// impl<'t> __FandheStatReduceOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn median(&self) -> __FandheStatReduceOpsHoldMarker {
-///         __FandheStatReduceOpsHoldMarker
-///     }
-///     fn median_with_indices(&self) -> __FandheStatReduceOpsHoldMarker {
-///         __FandheStatReduceOpsHoldMarker
-///     }
-///     fn kthvalue(&self) -> __FandheStatReduceOpsHoldMarker {
-///         __FandheStatReduceOpsHoldMarker
-///     }
-///     fn quantile(&self) -> __FandheStatReduceOpsHoldMarker {
-///         __FandheStatReduceOpsHoldMarker
-///     }
-///     fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker {
-///         __FandheStatReduceOpsHoldMarker
-///     }
-///     fn nansum(&self) -> __FandheStatReduceOpsHoldMarker {
-///         __FandheStatReduceOpsHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheStatReduceOpsHoldProbe for fandhe_ai::Tape {
@@ -4402,7 +4389,7 @@ struct CumulativeOpsHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_free_fns(_: QuantileInterpolation, _: StatReduceError) {
+/// fn __probe_free_fns(_: StatReduceError) {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
 ///     stat_reduce_ops::median();
@@ -4415,16 +4402,10 @@ struct CumulativeOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median(v);
-///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median_with_indices(v);
-///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::kthvalue(v);
-///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::quantile(v);
-///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nanmean(v);
-///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nansum(v);
 ///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median(tape);
 ///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median_with_indices(tape);
 ///     let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::kthvalue(tape);
@@ -4444,24 +4425,19 @@ struct CumulativeOpsHoldDoctestGuard;
 struct StatReduceOpsHoldDoctestGuard;
 
 /// ヒストグラム・二分探索系（`histc`・`bincount`・`searchsorted`・`bucketize`。
-/// イシュー #2638・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
-/// ガード（`StatReduceOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// イシュー #2638・親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`StatReduceOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `binning_ops`／`binning`・型 `BinningError`・5 メソッドを持つ
-/// プローブ用トレイトを置き、修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>`／
-/// `Tensor<i32>`（`bincount` の入力型）の修飾付きメソッド呼び出しの両方を行う。facade が
-/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の
-/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
-/// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `binning_ops`・`binning`、型 `BinningError`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`・`Tensor<i32>`・`Var`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::binning_ops`・
-/// `fandhe_ai_tensor_core::{binning, BinningError}`・`BackendOps::binning_*`）。保留対象は
-/// facade 公開面（`Var::histc` 等の委譲メソッド）のみで、公開形は未承認（承認依頼は
-/// #2677・公開自体は承認後の #2678・#2679。推奨案は
-/// `docs/autodiff-binning-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
-/// ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{histc,searchsorted,bucketize}` と `Tape::{bincount,bincount_weighted}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `binning_ops`・`binning`、型 `BinningError`・残した受け手（`Tape`・`Tensor<f32>`・`Tensor<i32>`・`Var`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// binning_ops_hold_doctest_globs_all_pub_modules`・
@@ -4469,9 +4445,6 @@ struct StatReduceOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_binning_ops`・
 /// `workspace_declares_binning_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -4605,14 +4578,9 @@ struct StatReduceOpsHoldDoctestGuard;
 ///     tf: &fandhe_ai::Tensor<f32>,
 ///     ti: &fandhe_ai::Tensor<i32>,
 /// ) {
-///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::histc(v);
 ///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount(v);
 ///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount_weighted(v);
-///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::searchsorted(v);
-///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bucketize(v);
 ///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::histc(tape);
-///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount(tape);
-///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount_weighted(tape);
 ///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::searchsorted(tape);
 ///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bucketize(tape);
 ///     let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::histc(tf);
@@ -4634,25 +4602,20 @@ struct BinningOpsHoldDoctestGuard;
 /// `Var`／`Tape` の低精度 forward 入口（`matmul_low_precision`・
 /// `add_low_precision`・`mul_low_precision`・`relu_low_precision`・
 /// `exp_low_precision`・`tanh_low_precision`。イシュー #2628・親 #2626・
-/// ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード（
+/// ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（
 /// `FftOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `low_precision_ops`（と 6 関数のルート直下定義）および 6 メソッド
-/// を持つプローブ用トレイトを置き、修飾なし／修飾付きの両方で呼ぶ。facade が
-/// 同名のモジュール・関数を glob 可能な位置へ公開するか、`Var`／`Tape` へ同名の
-/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
-/// 不一致でエラーコードに依存せずコンパイルが失敗する。内部の
-/// `pub(crate)` な `Var::matmul_low_precision` は別クレートから見えず、同名
-/// トレイトメソッドを隠さないため 6 名すべてを対象にできる（`pub` に
-/// すると inherent が優先され本プローブが失敗する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `low_precision_ops`、クレートルート直下の裸の自由関数 `matmul_low_precision`・`add_low_precision`・`mul_low_precision`・`relu_low_precision`・`exp_low_precision`・`tanh_low_precision`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::low_precision_ops`・
-/// `fandhe_ai_tensor_core` の `*_low_precision`）。保留対象は facade 公開面
-/// （`Var::{matmul,add,mul,relu,exp,tanh}_low_precision(.., dtype)` の委譲
-/// メソッド）のみで、公開形は未承認（承認依頼は #2677・公開自体は承認後の
-/// #2678。推奨案は `docs/autodiff-low-precision-op-extension-decision.md`。
-/// 同記録は推奨案の記録であり承認記録ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{matmul,add,mul,relu,exp,tanh}_low_precision`（`matmul_low_precision` は既存メソッドの `pub` 化）は承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `low_precision_ops`、クレートルート直下の裸の自由関数 `matmul_low_precision`・`add_low_precision`・`mul_low_precision`・`relu_low_precision`・`exp_low_precision`・`tanh_low_precision`・残した受け手（`Tape`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// var_low_precision_ops_hold_doctest_globs_all_pub_modules`・
@@ -4660,9 +4623,6 @@ struct BinningOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_low_precision_ops`・
 /// `workspace_declares_low_precision_ops_fn_names_only_in_allowed_locations`）
 /// との多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -4711,27 +4671,6 @@ struct BinningOpsHoldDoctestGuard;
 ///     fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker;
 /// }
 ///
-/// impl<'t> __FandheLowPrecisionHoldProbe for fandhe_ai::Var<'t> {
-///     fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
-///         __FandheLowPrecisionHoldMarker
-///     }
-///     fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
-///         __FandheLowPrecisionHoldMarker
-///     }
-///     fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
-///         __FandheLowPrecisionHoldMarker
-///     }
-///     fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
-///         __FandheLowPrecisionHoldMarker
-///     }
-///     fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
-///         __FandheLowPrecisionHoldMarker
-///     }
-///     fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
-///         __FandheLowPrecisionHoldMarker
-///     }
-/// }
-///
 /// impl __FandheLowPrecisionHoldProbe for fandhe_ai::Tape {
 ///     fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {
 ///         __FandheLowPrecisionHoldMarker
@@ -4770,13 +4709,7 @@ struct BinningOpsHoldDoctestGuard;
 ///     tanh_low_precision();
 /// }
 ///
-/// fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
-///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::matmul_low_precision(v);
-///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::add_low_precision(v);
-///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::mul_low_precision(v);
-///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::relu_low_precision(v);
-///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::exp_low_precision(v);
-///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::tanh_low_precision(v);
+/// fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {
 ///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::matmul_low_precision(tape);
 ///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::add_low_precision(tape);
 ///     let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::mul_low_precision(tape);
@@ -4790,23 +4723,19 @@ struct BinningOpsHoldDoctestGuard;
 struct VarLowPrecisionOpsHoldDoctestGuard;
 
 /// 形状演算 6 種（`unbind`・`movedim`・`swapaxes`・`tensor_split`・`meshgrid`・`rot90`。
-/// イシュー #2639・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
-/// ガード（`StatReduceOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// イシュー #2639・親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`StatReduceOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `shape_view_ops`・型 `MeshgridIndexing`・7 メソッドを持つプローブ用
-/// トレイトを置き、修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>` の修飾付き
-/// メソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ
-/// 公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
-/// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は
-/// facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `shape_view_ops`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::shape_view_ops`。新規 `Op`・
-/// `BackendOps` メソッドはない）。保留対象は facade 公開面（`Var::unbind` 等の委譲メソッドと
-/// 引数型 `MeshgridIndexing` の再エクスポート）のみで、公開形は未承認（承認依頼は
-/// #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-shape-view-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
-/// ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{unbind,tensor_split,tensor_split_indices,movedim,swapaxes,rot90,meshgrid}` と `MeshgridIndexing` の再エクスポートは承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロック、型 `MeshgridIndexing` のローカル定義（ルート再エクスポートと glob 衝突するため）を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `shape_view_ops`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// shape_view_ops_hold_doctest_globs_all_pub_modules`・
@@ -4814,9 +4743,6 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_shape_view_ops`・
 /// `workspace_declares_shape_view_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -4837,7 +4763,6 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 /// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_shape_view_hold_probe {
-///     pub struct MeshgridIndexing;
 ///     pub mod shape_view_ops {
 ///         pub fn unbind() {}
 ///         pub fn movedim() {}
@@ -4860,30 +4785,6 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 ///     fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker;
 ///     fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker;
 ///     fn rot90(&self) -> __FandheShapeViewOpsHoldMarker;
-/// }
-///
-/// impl<'t> __FandheShapeViewOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn unbind(&self) -> __FandheShapeViewOpsHoldMarker {
-///         __FandheShapeViewOpsHoldMarker
-///     }
-///     fn movedim(&self) -> __FandheShapeViewOpsHoldMarker {
-///         __FandheShapeViewOpsHoldMarker
-///     }
-///     fn swapaxes(&self) -> __FandheShapeViewOpsHoldMarker {
-///         __FandheShapeViewOpsHoldMarker
-///     }
-///     fn tensor_split(&self) -> __FandheShapeViewOpsHoldMarker {
-///         __FandheShapeViewOpsHoldMarker
-///     }
-///     fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker {
-///         __FandheShapeViewOpsHoldMarker
-///     }
-///     fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker {
-///         __FandheShapeViewOpsHoldMarker
-///     }
-///     fn rot90(&self) -> __FandheShapeViewOpsHoldMarker {
-///         __FandheShapeViewOpsHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheShapeViewOpsHoldProbe for fandhe_ai::Tape {
@@ -4934,7 +4835,7 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_free_fns(_: MeshgridIndexing) {
+/// fn __probe_free_fns() {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
 ///     shape_view_ops::unbind();
@@ -4947,17 +4848,10 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::unbind(v);
-///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::movedim(v);
-///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::swapaxes(v);
-///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split(v);
-///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split_indices(v);
-///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::meshgrid(v);
-///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::rot90(v);
 ///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::unbind(tape);
 ///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::movedim(tape);
 ///     let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::swapaxes(tape);
@@ -4979,24 +4873,19 @@ struct VarLowPrecisionOpsHoldDoctestGuard;
 struct ShapeViewOpsHoldDoctestGuard;
 
 /// 索引付き更新 4 種（`scatter_reduce`・`index_add`・`index_copy`・`masked_scatter`。
-/// イシュー #2641・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
-/// ガード（`ShapeViewOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// イシュー #2641・親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`ShapeViewOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `indexed_update_ops`・`indexed_update`・型 `ScatterReduceMode`・4 メソッドを持つ
-/// プローブ用トレイトを置き、修飾なしの関数呼び出しと `Var`／`Tape`／`Tensor<f32>` の修飾付き
-/// メソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ
-/// 公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
-/// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は
-/// facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `indexed_update_ops`・`indexed_update`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::indexed_update_ops`・
-/// `fandhe_ai_tensor_core::indexed_update`。新規 `Op` は `scatter_reduce` 用の 1 つ、
-/// `BackendOps` メソッドは `indexed_scatter_reduce` のみ）。保留対象は facade 公開面
-/// （`Var::scatter_reduce` 等の委譲メソッドと引数型 `ScatterReduceMode` の再エクスポート）のみで、
-/// 公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
-/// `docs/autodiff-indexed-update-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
-/// ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{scatter_reduce,index_add,index_copy,masked_scatter}` と `ScatterReduceMode` の再エクスポートは承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロック、型 `ScatterReduceMode` のローカル定義（ルート再エクスポートと glob 衝突するため）を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `indexed_update_ops`・`indexed_update`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// indexed_update_ops_hold_doctest_globs_all_pub_modules`・
@@ -5004,9 +4893,6 @@ struct ShapeViewOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_indexed_update_ops`・
 /// `workspace_declares_indexed_update_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5027,7 +4913,6 @@ struct ShapeViewOpsHoldDoctestGuard;
 /// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_indexed_update_hold_probe {
-///     pub struct ScatterReduceMode;
 ///     pub mod indexed_update_ops {
 ///         pub fn scatter_reduce() {}
 ///         pub fn index_add() {}
@@ -5047,21 +4932,6 @@ struct ShapeViewOpsHoldDoctestGuard;
 ///     fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker;
 ///     fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker;
 ///     fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker;
-/// }
-///
-/// impl<'t> __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn scatter_reduce(&self) -> __FandheIndexedUpdateOpsHoldMarker {
-///         __FandheIndexedUpdateOpsHoldMarker
-///     }
-///     fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker {
-///         __FandheIndexedUpdateOpsHoldMarker
-///     }
-///     fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker {
-///         __FandheIndexedUpdateOpsHoldMarker
-///     }
-///     fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker {
-///         __FandheIndexedUpdateOpsHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Tape {
@@ -5094,7 +4964,7 @@ struct ShapeViewOpsHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_free_fns(_: ScatterReduceMode) {
+/// fn __probe_free_fns() {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
 ///     indexed_update_ops::scatter_reduce();
@@ -5105,14 +4975,10 @@ struct ShapeViewOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::scatter_reduce(v);
-///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_add(v);
-///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_copy(v);
-///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::masked_scatter(v);
 ///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::scatter_reduce(tape);
 ///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_add(tape);
 ///     let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_copy(tape);
@@ -5128,21 +4994,19 @@ struct ShapeViewOpsHoldDoctestGuard;
 struct IndexedUpdateOpsHoldDoctestGuard;
 
 /// テンソル積・距離・外積 4 演算（`kron`・`tensordot`〈`tensordot_axes`〉・`cdist`・`cross`。
-/// イシュー #2640・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
-/// ガード（`ShapeViewOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// イシュー #2640・親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`ShapeViewOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `tensor_product_ops`・5 メソッドを持つプローブ用トレイトを置き、修飾なしの
-/// 関数呼び出しと `Var`／`Tape`／`Tensor<f32>` の修飾付きメソッド呼び出しの両方を行う。
-/// facade が同名のモジュール・関数を glob 可能な位置へ公開するか、これらの型へ同名の
-/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する（新規型はないため型のプローブは置かない）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `tensor_product_ops`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::tensor_product_ops`。新規 `Op`・
-/// `BackendOps` メソッドはない）。保留対象は facade 公開面（`Var::kron` 等の委譲メソッド）
-/// のみで、公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-tensor-product-ops-decision.md` §7。同記録は推奨案の記録であり承認記録
-/// ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{kron,tensordot,tensordot_axes,cdist,cross}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `tensor_product_ops`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// tensor_product_ops_hold_doctest_globs_all_pub_modules`・
@@ -5150,9 +5014,6 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_tensor_product_ops`・
 /// `workspace_declares_tensor_product_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5191,24 +5052,6 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 ///     fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker;
 ///     fn cdist(&self) -> __FandheTensorProductOpsHoldMarker;
 ///     fn cross(&self) -> __FandheTensorProductOpsHoldMarker;
-/// }
-///
-/// impl<'t> __FandheTensorProductOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn kron(&self) -> __FandheTensorProductOpsHoldMarker {
-///         __FandheTensorProductOpsHoldMarker
-///     }
-///     fn tensordot(&self) -> __FandheTensorProductOpsHoldMarker {
-///         __FandheTensorProductOpsHoldMarker
-///     }
-///     fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker {
-///         __FandheTensorProductOpsHoldMarker
-///     }
-///     fn cdist(&self) -> __FandheTensorProductOpsHoldMarker {
-///         __FandheTensorProductOpsHoldMarker
-///     }
-///     fn cross(&self) -> __FandheTensorProductOpsHoldMarker {
-///         __FandheTensorProductOpsHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheTensorProductOpsHoldProbe for fandhe_ai::Tape {
@@ -5258,15 +5101,10 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::kron(v);
-///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot(v);
-///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot_axes(v);
-///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cdist(v);
-///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cross(v);
 ///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::kron(tape);
 ///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot(tape);
 ///     let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot_axes(tape);
@@ -5284,25 +5122,19 @@ struct IndexedUpdateOpsHoldDoctestGuard;
 struct TensorProductOpsHoldDoctestGuard;
 
 /// `pad` の非定数モード（`pad_with_mode`・`PadMode`。reflect／replicate／circular。
-/// イシュー #2642・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留
-/// ガード（`IndexedUpdateOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// イシュー #2642・親 #2625・ルート #2499 Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`IndexedUpdateOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
-/// モジュール `pad_ops`／`pad_modes`・型 `PadMode`／`PadModeError`・メソッド
-/// `pad_with_mode` を持つプローブ用トレイトを置き、修飾なしの関数呼び出しと
-/// `Var`／`Tape`／`Tensor<f32>` の修飾付きメソッド呼び出しの両方を行う。facade が
-/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の
-/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
-/// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `pad_ops`・`pad_modes`、型 `PadModeError`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::pad_ops`・
-/// `fandhe_ai_tensor_core::{pad_modes, PadMode, PadModeError}`・
-/// `BackendOps::pad_modes_forward`）。保留対象は facade 公開面
-/// （`Var::pad_with_mode` の委譲メソッドと `PadMode` の再エクスポート）のみで、公開形は
-/// 未承認（承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
-/// `docs/autodiff-pad-modes-decision.md` §7。同記録は推奨案の記録であり承認記録
-/// ではない）。既存の `Var::pad`（定数埋め）・`StftPadMode` には触れない。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::pad_with_mode` と `PadMode` の再エクスポートは承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロック、型 `PadMode` のローカル定義（ルート再エクスポートと glob 衝突するため）を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `pad_ops`・`pad_modes`、型 `PadModeError`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// pad_modes_hold_doctest_globs_all_pub_modules`・
@@ -5310,9 +5142,6 @@ struct TensorProductOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_pad_modes`・
 /// `workspace_declares_pad_modes_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5333,7 +5162,6 @@ struct TensorProductOpsHoldDoctestGuard;
 /// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_pad_modes_hold_probe {
-///     pub struct PadMode;
 ///     pub struct PadModeError;
 ///     pub mod pad_ops {
 ///         pub fn pad_with_mode() {}
@@ -5350,12 +5178,6 @@ struct TensorProductOpsHoldDoctestGuard;
 ///     fn pad_with_mode(&self) -> __FandhePadModesHoldMarker;
 /// }
 ///
-/// impl<'t> __FandhePadModesHoldProbe for fandhe_ai::Var<'t> {
-///     fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {
-///         __FandhePadModesHoldMarker
-///     }
-/// }
-///
 /// impl __FandhePadModesHoldProbe for fandhe_ai::Tape {
 ///     fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {
 ///         __FandhePadModesHoldMarker
@@ -5368,7 +5190,7 @@ struct TensorProductOpsHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_free_fns(_: PadMode, _: PadModeError) {
+/// fn __probe_free_fns(_: PadModeError) {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
 ///     pad_ops::pad_with_mode();
@@ -5376,11 +5198,10 @@ struct TensorProductOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandhePadModesHoldMarker = fandhe_ai::Var::pad_with_mode(v);
 ///     let _: __FandhePadModesHoldMarker = fandhe_ai::Tape::pad_with_mode(tape);
 ///     let _: __FandhePadModesHoldMarker = fandhe_ai::Tensor::<f32>::pad_with_mode(tf);
 /// }
@@ -6228,30 +6049,26 @@ struct LrnWeightReparamHoldDoctestGuard;
 struct PackedSequenceHoldDoctestGuard;
 
 /// SELU・CELU・Softsign・Hardsigmoid・LogSigmoid（`selu`・`celu`・`softsign`・
-/// `hardsigmoid`・`log_sigmoid`。イシュー #2649・親 #2648）の facade 公開保留ガード
+/// `hardsigmoid`・`log_sigmoid`。イシュー #2649・親 #2648）の未承認経路の facade 公開保留ガード
 /// （`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// `compat::Sequential::add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid` は
-/// イシュー #2679 で承認形（`docs/autodiff-activation-scalar-ops-decision.md` §7。承認はルート #2499 の
-/// コメント）として公開したため、`add_*` のプローブは削除した。残すのは**未承認の経路**
-/// （`Var`／`Tape`／`Tensor<f32>` への委譲メソッド、`activation_scalar_ops` モジュールの公開、層型の
-/// 再エクスポート。`Var` 委譲は #2678 が担当する）だけである。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `activation_scalar_ops`、型 `Selu`・`Celu`・`Softsign`・`Hardsigmoid`・`LogSigmoid`、クレートルート直下の裸の自由関数 `selu`・`celu`・`softsign`・`hardsigmoid`・`log_sigmoid`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 5 個・関数 5 個・モジュール
-/// `activation_scalar_ops` と、`Var`／`Tape`／`Tensor<f32>` 上の 5 メソッドを持つプローブ用トレイトを置き、
-/// 修飾なしの関数呼び出しと修飾付きメソッド呼び出し（UFCS）の両方を行う。facade が同名のモジュール・型・関数を
-/// glob 可能な位置へ公開するか、同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出し
-/// シグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。
-///
-/// 検出範囲は本プローブが列挙した名前・型に限る（マクロ生成や別名経由の公開までは保証しない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{selu,celu,softsign,hardsigmoid,log_sigmoid}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Var` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `activation_scalar_ops`、型 `Selu`・`Celu`・`Softsign`・`Hardsigmoid`・`LogSigmoid`、クレートルート直下の裸の自由関数 `selu`・`celu`・`softsign`・`hardsigmoid`・`log_sigmoid`・残した受け手（`Tape`・`Tensor<f32>`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// activation_scalar_ops_hold_doctest_globs_all_pub_modules`・
 /// `activation_scalar_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_activation_scalar_ops`・
 /// `workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// `Var` 委譲が承認・公開される日が来たら、本構造体・本 doctest 自体を削除する（#2678）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -6296,24 +6113,6 @@ struct PackedSequenceHoldDoctestGuard;
 ///     fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker;
 ///     fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
 ///     fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;
-/// }
-///
-/// impl<'t> __FandheActivationScalarOpsHoldProbe for fandhe_ai::Var<'t> {
-///     fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn celu(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
-///     fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {
-///         __FandheActivationScalarOpsHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheActivationScalarOpsHoldProbe for fandhe_ai::Tape {
@@ -6370,23 +6169,18 @@ struct PackedSequenceHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::selu(v);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::selu(tape);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::selu(tf);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::celu(v);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::celu(tape);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::celu(tf);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::softsign(v);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::softsign(tape);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::softsign(tf);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::hardsigmoid(v);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::hardsigmoid(tape);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::hardsigmoid(tf);
-///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::log_sigmoid(v);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::log_sigmoid(tape);
 ///     let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::log_sigmoid(tf);
 /// }
@@ -6397,27 +6191,25 @@ struct ActivationScalarOpsHoldDoctestGuard;
 
 /// 活性化 4 種（`softmin`・`tanhshrink`・`threshold`・`rrelu`／`rrelu_with_noise` と層 `Softmin`・`Tanhshrink`・
 /// `Threshold`・`RRelu`。`F.softmin`／`F.tanhshrink`／`F.threshold`／`F.rrelu` 相当。イシュー #2650・親 #2648・
-/// Phase 親 #2625）の facade 公開保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
+/// Phase 親 #2625）の未承認経路の facade 公開保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
 /// ブロック方式）。
 ///
-/// `compat::Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu` はイシュー #2679 で承認形
-/// （`docs/autodiff-softmin-threshold-ops-decision.md` §7。承認はルート #2499 のコメント）として公開したため、
-/// `add_*` のプローブは削除した。残すのは**未承認の経路**（`Var`／`Tape`／`Tensor<f32>` への委譲メソッド、
-/// `softmin_threshold_ops`／`softmin_threshold` モジュールの公開、層型の再エクスポート。`Var` 委譲は #2678 が
-/// 担当する）だけである。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `softmin_threshold_ops`・`softmin_threshold`、型 `Softmin`・`Tanhshrink`・`RRelu`・`Threshold`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`・`Var`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `softmin_threshold_ops`／
-/// `softmin_threshold`・型 `Softmin`／`Tanhshrink`／`RRelu`／`Threshold` と、プローブ用トレイトのメソッド
-/// （`Var`／`Tape`／`Tensor<f32>` の `softmin`／`tanhshrink`／`threshold`／`rrelu`／`rrelu_with_noise`）を置き、
-/// モジュール経由の関数呼び出しと修飾付きメソッド呼び出しの両方を行う。検出範囲は列挙したこれらの名前・型に限り、
-/// マクロ生成や別名経由のメソッドまでは保証しない。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{softmin,tanhshrink,threshold,rrelu}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `softmin_threshold_ops`・`softmin_threshold`、型 `Softmin`・`Tanhshrink`・`RRelu`・`Threshold`・`Var` 上の `rrelu_with_noise`（公開しない）・残した受け手（`Tape`・`Tensor<f32>`・`Var`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::softmin_threshold_ops_hold_doctest_globs_all_pub_modules`・
 /// `softmin_threshold_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_softmin_threshold_ops`・
 /// `workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// `Var` 委譲が承認・公開される日が来たら、本構造体・本 doctest 自体を削除する（#2678）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -6540,10 +6332,6 @@ struct ActivationScalarOpsHoldDoctestGuard;
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::softmin(v);
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::tanhshrink(v);
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::threshold(v);
-///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu(v);
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu_with_noise(v);
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::softmin(tape);
 ///     let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::tanhshrink(tape);
@@ -7157,31 +6945,25 @@ struct FunctionalApiHoldDoctestGuard;
 #[allow(dead_code)]
 struct MergeOpsHoldDoctestGuard;
 
-/// `jacobian`・`hessian`（イシュー #2670・親 #2668。`fandhe_ai_autodiff::jacobian_ops`）を facade 公開面から
-/// 締め出す保留ガード（`MergeOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// `jacobian`・`hessian`（イシュー #2670・親 #2668。`fandhe_ai_autodiff::jacobian_ops`）のうち未承認の経路を facade 公開面から締め出す保留ガード（`MergeOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `jacobian_ops`・
-/// 裸の自由関数 2 名（`jacobian`・`hessian`）・`Var`／`Tape`／`Tensor<f32>` 向けの同名 2 メソッドを持つ
-/// プローブ用トレイトを置き、モジュール経由と修飾なしの関数呼び出し、および修飾付きメソッド呼び出しの
-/// 両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ公開するか、これらの型へ同名の
-/// inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `jacobian_ops`、クレートルート直下の裸の自由関数 `jacobian`・`hessian`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tensor<f32>`・`Var`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// **検出範囲の限定**: 列挙した名前と型に限る。マクロ生成・別名経由の公開までは保証しない。
-///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::jacobian_ops`。新規 `Op`・`BackendOps`
-/// メソッドはない）。保留対象は facade 公開面のみで、公開形は未承認（承認依頼は #2677・公開自体は
-/// 承認後の #2678。推奨案は `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §3.7。同記録は
-/// 推奨案の記録であり承認記録ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Tape::{jacobian,hessian}` は承認形どおり公開済みのため、
+/// 該当する UFCS 行と、受け手 `Tape` の `impl` ブロックを外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `jacobian_ops`、クレートルート直下の裸の自由関数 `jacobian`・`hessian`・残した受け手（`Tensor<f32>`・`Var`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// jacobian_hessian_hold_doctest_globs_all_pub_modules`・
 /// `jacobian_hessian_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_jacobian_hessian`・
 /// `workspace_declares_jacobian_hessian_fn_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
-/// 同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -7226,15 +7008,6 @@ struct MergeOpsHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// impl __FandheJacobianHessianHoldProbe for fandhe_ai::Tape {
-///     fn jacobian(&self) -> __FandheJacobianHessianHoldMarker {
-///         __FandheJacobianHessianHoldMarker
-///     }
-///     fn hessian(&self) -> __FandheJacobianHessianHoldMarker {
-///         __FandheJacobianHessianHoldMarker
-///     }
-/// }
-///
 /// impl __FandheJacobianHessianHoldProbe for fandhe_ai::Tensor<f32> {
 ///     fn jacobian(&self) -> __FandheJacobianHessianHoldMarker {
 ///         __FandheJacobianHessianHoldMarker
@@ -7255,13 +7028,11 @@ struct MergeOpsHoldDoctestGuard;
 ///
 /// fn __probe_methods(
 ///     v: &fandhe_ai::Var<'_>,
-///     tape: &fandhe_ai::Tape,
+///     _tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
 ///     let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Var::jacobian(v);
 ///     let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Var::hessian(v);
-///     let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tape::jacobian(tape);
-///     let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tape::hessian(tape);
 ///     let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tensor::<f32>::jacobian(tf);
 ///     let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tensor::<f32>::hessian(tf);
 /// }
@@ -7271,32 +7042,26 @@ struct MergeOpsHoldDoctestGuard;
 struct JacobianHessianHoldDoctestGuard;
 
 /// `gradcheck`・`backward_detect_anomaly`（イシュー #2671・親 #2668。`fandhe_ai_autodiff::gradcheck`／
-/// `fandhe_ai_autodiff::anomaly`）を facade 公開面から締め出す保留ガード
+/// `fandhe_ai_autodiff::anomaly`）のうち未承認の経路を facade 公開面から締め出す保留ガード
 /// （`JacobianHessianHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `gradcheck`・`anomaly`・
-/// 裸の自由関数 2 名（`gradcheck`・`backward_detect_anomaly`）・単位構造体 2 名（`GradcheckOptions`・
-/// `GradcheckReport`）・`Var`／`Tape`／`Tensor<f32>` 向けの同名 2 メソッドを持つプローブ用トレイトを置き、
-/// モジュール経由と修飾なしの関数呼び出し、型の参照、修飾付きメソッド呼び出しをすべて行う。facade が
-/// 同名のモジュール・関数・型を glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを
-/// 公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する
-/// （モジュール `gradcheck` と関数 `gradcheck` は名前空間が別のため、プローブ内で共存させて両方を検査する）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `gradcheck`・`anomaly`、型 `GradcheckOptions`・`GradcheckReport`、クレートルート直下の裸の自由関数 `gradcheck`・`backward_detect_anomaly`）と、
+/// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`・`Var`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
+/// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// **検出範囲の限定**: 列挙した名前と型に限る。マクロ生成・別名経由の公開までは保証しない。
-///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::gradcheck`・`fandhe_ai_autodiff::anomaly`。新規
-/// `Op`・`BackendOps` メソッド・`AutodiffError` variant はない）。保留対象は facade 公開面のみで、公開形は
-/// 未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §3.7。同記録は推奨案の記録であり承認記録ではない）。
+/// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Tape::backward_detect_anomaly` は承認形どおり公開済みのため、
+/// 該当する UFCS 行を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `gradcheck`・`anomaly`、型 `GradcheckOptions`・`GradcheckReport`、クレートルート直下の裸の自由関数 `gradcheck`・`backward_detect_anomaly`（`gradcheck` 系は決定記録に facade シグネチャが無いため保留。公開しない）・残した受け手（`Tape`・`Tensor<f32>`・`Var`）上の、公開していない名前の同名メソッド。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// gradcheck_anomaly_hold_doctest_globs_all_pub_modules`・
 /// `gradcheck_anomaly_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_gradcheck_anomaly`・
 /// `workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
-/// 同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -7384,7 +7149,6 @@ struct JacobianHessianHoldDoctestGuard;
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::gradcheck(v);
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::backward_detect_anomaly(v);
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::gradcheck(tape);
-///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::backward_detect_anomaly(tape);
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::gradcheck(tf);
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::backward_detect_anomaly(tf);
 /// }

@@ -144,3 +144,11 @@ REQ-2 を外れた場合は tolerance を緩めず事実を記録する。
 - 同型の先行記録: `docs/autodiff-shape-view-ops-decision.md`（#2639）。
 - fixture の出自: `crates/autodiff/tests/fixtures/tensor-product-pytorch-reference/README.md`。
 - 契約: `.claude/rules/coding-rust.md`（FMA 契約・`f64` アキュムレータ・境界検査）・`.claude/rules/security.md`。
+
+## 12. #2678 実装記録（Phase 4 の facade 公開）
+
+- 状態: **§7 の公開形を #2678 で承認形どおり公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 10を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2678 時点で当該コメントの承認に更新された（承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき）。
+- 公開した識別子: `Var::kron(&self, other)`・`tensordot(&self, other, n)`・`tensordot_axes(&self, other, dims_self, dims_other)`・`cdist(&self, other, p)`・`cross(&self, other, dim)`。本体は `crate::<module>::<fn>` への 1 行委譲（`Var`）／`&self.0` を渡すだけの 1 行委譲（`Tape`）に固定し、新規 `Op`・`BackendOps` メソッド・`AutodiffError` variant・`unsafe` は追加していない。
+- ガードの反転・縮小: `TensorProductOpsHoldDoctestGuard` から `Var` の impl・UFCS 行を外し、`tensor_product_ops` モジュール名・`Tape` 上の同名メソッドのプローブだけを残した（先例 #2516）。`api_surface.rs` の否定ガードは、承認済みの型名を識別子表から外し、`Tape` の承認済みメソッドを `fn` 宣言走査から除外したうえで、承認形だけを許す正ガードへ反転した。宣言場所インベントリには `autodiff/src/var.rs`（`Tape` 分は `facade/src/lib.rs`）の各 1 件を追加した。
+- テスト: `crates/facade/tests/phase4_ops_facade.rs`（tensor_product_methods。`fandhe_ai::` だけを import し、fn ポインタ型でシグネチャを固定して厳密に決まる値を確認）と、`crates/facade/tests/api_surface.rs` の正ガード（`var_phase4_ops_methods_are_thin_delegations`・`facade_reexports_phase4_ops_types_only_in_approved_shape`・`facade_tape_phase4_methods_are_thin_delegations`・各 `workspace_declares_*`）。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。CUDA／Metal 実機 parity は未実測で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` へ申し送る（新しい数値経路はなく、1 行委譲のため既存の各 `*_backend_parity.rs` の結果がそのまま適用される）。

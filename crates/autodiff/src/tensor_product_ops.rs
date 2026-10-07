@@ -62,6 +62,10 @@
 //! エラーで孤児ノードを残さない）。積は `checked_mul`、確保は `checked_bytes_for` で
 //! 事前検査し、`broadcast_to` 由来で実体のない巨大 shape による capacity overflow
 //! panic を防ぐ。
+//!
+//! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{kron,tensordot,tensordot_axes,cdist,cross}`。本モジュール自体は facade から再エクスポートしない。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::{ShapeError, broadcast_shape};
 

@@ -38,6 +38,10 @@
 //! だけに流れる）。`index_add` の `alpha` は持たない（呼び出し側が `source` を事前に
 //! スケールすれば等価。隠し定数ノードが葉プレフィックスに入る副作用を避ける）。
 //! 高階微分（`create_graph`）・activation checkpoint・f64 自動微分経路は対象外。
+//!
+//! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{scatter_reduce,index_add,index_copy,masked_scatter}` と `ScatterReduceMode`（クレートルート）。本モジュール自体は facade から再エクスポートしない。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use fandhe_ai_tensor_core::indexed_update::{self, ScatterReduceLayout};
 use fandhe_ai_tensor_core::{BackendError, ScatterReduceMode, ShapeError, Tensor, broadcast_shape};
