@@ -4690,11 +4690,27 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
     let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut offending_lines = Vec::new();
 
+    // rustfmt が 100 桁を超える `pub use` を複数行へ折り返すため、`;` までを 1 文として連結してから解析する。
+    let mut statements: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
     for line in content.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("pub use") {
+        let trimmed = line.trim();
+        if pending.is_none() && !trimmed.starts_with("pub use") {
             continue;
         }
+        let acc = pending.get_or_insert_with(String::new);
+        if !acc.is_empty() {
+            acc.push(' ');
+        }
+        acc.push_str(trimmed);
+        if trimmed.ends_with(';') {
+            statements.push(pending.take().unwrap_or_default());
+        }
+    }
+    if let Some(unterminated) = pending {
+        offending_lines.push(unterminated);
+    }
+    for trimmed in &statements {
         if !trimmed.starts_with(allowed_prefix) {
             offending_lines.push(trimmed.to_string());
             continue;
@@ -4728,6 +4744,10 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
         "Lstm",
         "LstmCellVars",
         "LstmSeqOutput",
+        // #2679: 可変長系列（packed sequence。`autodiff-packed-sequence-decision.md` §7）。
+        "PackedLstmSeqOutput",
+        "PackedRnnSeqOutput",
+        "PackedSequence",
         "Rnn",
         "RnnCellVars",
         "RnnConfig",
@@ -4735,8 +4755,18 @@ fn nn_rnn_module_reexports_exactly_expected_surface() {
         "StackedGru",
         "StackedLstm",
         "StackedLstmSeqOutput",
+        "StackedPackedLstmSeqOutput",
+        "StackedPackedRnnSeqOutput",
         "StackedRnn",
         "StackedRnnSeqOutput",
+        "gru_forward_packed",
+        "lstm_forward_packed",
+        "pack_padded_sequence",
+        "pad_packed_sequence",
+        "rnn_forward_packed",
+        "stacked_gru_forward_packed",
+        "stacked_lstm_forward_packed",
+        "stacked_rnn_forward_packed",
     ]
     .into_iter()
     .map(str::to_string)
@@ -7472,6 +7502,15 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "unscale_grads",
     // `data.rs`（イシュー #2505。Sampler／フック系の自由関数 `default_collate`）。
     "default_collate",
+    // `nn/rnn.rs`（イシュー #2679。可変長系列の自由関数 8 本）。
+    "pack_padded_sequence",
+    "pad_packed_sequence",
+    "rnn_forward_packed",
+    "gru_forward_packed",
+    "lstm_forward_packed",
+    "stacked_rnn_forward_packed",
+    "stacked_gru_forward_packed",
+    "stacked_lstm_forward_packed",
     // `data.rs`（イシュー #2679。Dataset 合成の自由関数 2 本）。
     "random_split",
     "random_split_fractions",
@@ -28044,13 +28083,15 @@ fn workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// PackedSequenceHoldDoctestGuard（イシュー #2647・親 #2625・ルート #2499 Phase 4）:
-// `LrnWeightReparamHoldDoctestGuard`（#2646）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::nn::packed_sequence`）に閉じ、facade 公開形（推奨は `fandhe_ai::nn::rnn` への
-// 純再エクスポート）は未承認（承認依頼は #2677。公開は承認後の #2678・#2679）。
-// 検出はトークン完全一致のみで行い、`forward_packed_host` など部分一致する別トークンは違反としない
-// （自己テストで固定）。検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、
-// doctest プローブが名前解決で触れる位置に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+// PackedSequenceHoldDoctestGuard（イシュー #2647・親 #2625・ルート #2499 Phase 4。公開は #2679）:
+// 承認形（`fandhe_ai::nn::rnn` への型 5・自由関数 8 の純再エクスポート。
+// `docs/autodiff-packed-sequence-decision.md` §7。承認はルート #2499 のコメント）の公開に伴い、型名・自由関数名の
+// 衝突プローブと識別子検査を削除し、**未承認の経路**（モジュール `packed_sequence` の公開・`Var`／`Tape` への
+// 委譲メソッド・`Rnn` 等への `forward_packed`）だけを固定する縮小ガードにした。承認形は
+// `facade_exposes_packed_sequence_only_in_approved_shape` が過不足なく固定する。検出はトークン完全一致のみで行い、
+// `forward_packed_host` など部分一致する別トークンは違反としない（自己テストで固定）。検出範囲は本ソース走査が見る
+// トークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、doctest プローブが名前解決で触れる位置に限り、
+// マクロ生成や別名経由のメソッドまでは保証しない。
 // =====================================================================
 
 /// `PackedSequenceHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import するネスト `pub mod` 集合と、
@@ -28099,19 +28140,6 @@ fn packed_sequence_hold_doctest_probe_body_matches_fixed_contract() {
 const PACKED_SEQUENCE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_packed_sequence_hold_probe {\n\
-\x20\x20\x20\x20pub struct PackedSequence;\n\
-\x20\x20\x20\x20pub struct PackedRnnSeqOutput;\n\
-\x20\x20\x20\x20pub struct PackedLstmSeqOutput;\n\
-\x20\x20\x20\x20pub struct StackedPackedRnnSeqOutput;\n\
-\x20\x20\x20\x20pub struct StackedPackedLstmSeqOutput;\n\
-\x20\x20\x20\x20pub fn pack_padded_sequence() {}\n\
-\x20\x20\x20\x20pub fn pad_packed_sequence() {}\n\
-\x20\x20\x20\x20pub fn rnn_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn gru_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn lstm_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn stacked_rnn_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn stacked_gru_forward_packed() {}\n\
-\x20\x20\x20\x20pub fn stacked_lstm_forward_packed() {}\n\
 \x20\x20\x20\x20pub mod packed_sequence {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
 \x20\x20\x20\x20}\n\
@@ -28222,23 +28250,9 @@ impl __FandhePackedSequenceHoldRnnProbe for fandhe_ai::nn::rnn::StackedGru {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(\n\
-\x20\x20\x20\x20_0: PackedSequence,\n\
-\x20\x20\x20\x20_1: PackedRnnSeqOutput,\n\
-\x20\x20\x20\x20_2: PackedLstmSeqOutput,\n\
-\x20\x20\x20\x20_3: StackedPackedRnnSeqOutput,\n\
-\x20\x20\x20\x20_4: StackedPackedLstmSeqOutput,\n\
-) {\n\
-\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり\n\
+fn __probe_module() {\n\
+\x20\x20\x20\x20// 修飾なし参照（`use fandhe_ai::*;` が同名モジュールを glob 公開していれば、名前解決自体が曖昧になり\n\
 \x20\x20\x20\x20// E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20pack_padded_sequence();\n\
-\x20\x20\x20\x20pad_packed_sequence();\n\
-\x20\x20\x20\x20rnn_forward_packed();\n\
-\x20\x20\x20\x20gru_forward_packed();\n\
-\x20\x20\x20\x20lstm_forward_packed();\n\
-\x20\x20\x20\x20stacked_rnn_forward_packed();\n\
-\x20\x20\x20\x20stacked_gru_forward_packed();\n\
-\x20\x20\x20\x20stacked_lstm_forward_packed();\n\
 \x20\x20\x20\x20packed_sequence::__mark();\n\
 }\n\
 \n\
@@ -28300,24 +28314,16 @@ const PACKED_SEQUENCE_FN_NAMES: [&str; 9] = [
     "forward_packed",
 ];
 
-/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const PACKED_SEQUENCE_IDENTS: [&str; 15] = [
-    "packed_sequence",
-    "PackedSequence",
-    "PackedRnnSeqOutput",
-    "PackedLstmSeqOutput",
-    "StackedPackedRnnSeqOutput",
-    "StackedPackedLstmSeqOutput",
-    "pack_padded_sequence",
-    "pad_packed_sequence",
-    "rnn_forward_packed",
-    "gru_forward_packed",
-    "lstm_forward_packed",
-    "stacked_rnn_forward_packed",
-    "stacked_gru_forward_packed",
-    "stacked_lstm_forward_packed",
-    "forward_packed",
-];
+/// 引き続き禁止する識別子（`pub use` の経路に現れてはならない名前）。型 5・自由関数 8 は #2679 で
+/// `fandhe_ai::nn::rnn` の純再エクスポートとして承認・公開した（承認形のインベントリは
+/// `facade_exposes_packed_sequence_only_in_approved_shape`）ため含めない。モジュール名 `packed_sequence` は
+/// 承認形の経路セグメントとして現れるため識別子検査ではなく葉の検査（[`PACKED_SEQUENCE_BANNED_LEAF_NAMES`]）で
+/// 扱う。
+const PACKED_SEQUENCE_IDENTS: [&str; 1] = ["forward_packed"];
+
+/// 引き続き `pub use` の葉として禁止する名前（モジュール `packed_sequence` 自体の再エクスポート・別名公開と
+/// `forward_packed`）。
+const PACKED_SEQUENCE_BANNED_LEAF_NAMES: [&str; 2] = ["packed_sequence", "forward_packed"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名。
 const PACKED_SEQUENCE_TYPE_NAMES: [&str; 5] = [
@@ -28360,7 +28366,7 @@ fn scan_packed_sequence_reexports_and_declarations(content: &str) -> Vec<String>
                 offending.push("内部クレートの glob 再エクスポート".to_string());
             }
             for leaf in collect_pub_use_leaves(path_tokens) {
-                if PACKED_SEQUENCE_FN_NAMES.contains(&leaf.as_str()) {
+                if PACKED_SEQUENCE_BANNED_LEAF_NAMES.contains(&leaf.as_str()) {
                     offending.push(format!("pub use leaf={leaf}"));
                 }
             }
@@ -28422,22 +28428,19 @@ fn facade_does_not_reexport_or_declare_packed_sequence_detects_each_category() {
     assert!(offense(
         "pub use fandhe_ai_autodiff::nn::packed_sequence as ps;"
     ));
-    // 正例: 関数・型の個別再エクスポート（単一行・group・複数行）。
     assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::pack_padded_sequence;"
+        "pub use fandhe_ai_autodiff::nn::{packed_sequence, Rnn};"
     ));
+    // 正例: 禁止し続ける名前の再エクスポート。
     assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::{pad_packed_sequence};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::{\n    rnn_forward_packed,\n    PackedSequence,\n};"
-    ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::nn::packed_sequence::StackedPackedLstmSeqOutput;"
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::forward_packed;"
     ));
     // 正例: 内部クレートの glob 再エクスポート。
     assert!(offense("pub use fandhe_ai_autodiff::*;"));
-    // 正例: 型の独自宣言。
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::*;"
+    ));
+    // 正例: 型の独自宣言（承認形は純再エクスポートのみ。独自宣言は不可）。
     assert!(offense("pub struct PackedSequence;"));
     assert!(offense("pub struct PackedRnnSeqOutput { h: usize }"));
     assert!(offense("pub enum PackedLstmSeqOutput { A }"));
@@ -28455,6 +28458,14 @@ fn facade_does_not_reexport_or_declare_packed_sequence_detects_each_category() {
         "trait T { fn stacked_lstm_forward_packed(&self); }"
     ));
     assert!(offense("pub mod packed_sequence {}"));
+    // 負例（#2679 で承認）: 承認済み名の純再エクスポートは本走査の違反ではない
+    // （過不足の検査は承認形インベントリが担う）。
+    assert!(!offense(
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence};"
+    ));
+    assert!(!offense(
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{PackedSequence, PackedRnnSeqOutput};"
+    ));
     // 負例: 保留対象を部分文字列に含む別トークン。
     assert!(!offense("fn forward_packed_host() {}"));
     assert!(!offense("fn pack_padded_sequence_host() {}"));
@@ -31001,12 +31012,40 @@ const PHASE4_TRAINING_DATA_NAMES: [&str; 20] = [
 /// - 承認した各文はちょうど 1 件であること（欠落・重複を拒否）
 /// - `trait`／`struct`／`enum`／`type`／`union` による公開名の独自宣言は facade src のどこにあっても違反
 fn phase4_training_data_surface_violations(files: &[(String, String)]) -> Vec<String> {
-    let approved: Vec<(&str, Vec<String>)> = PHASE4_TRAINING_DATA_APPROVED_REEXPORTS
+    approved_reexport_surface_violations(
+        files,
+        &PHASE4_TRAINING_DATA_NAMES,
+        &PHASE4_TRAINING_DATA_APPROVED_REEXPORTS,
+    )
+}
+
+/// 承認済み `pub use` 文だけを許す汎用インベントリ検査（[`phase4_training_data_surface_violations`]・
+/// [`packed_sequence_surface_violations`] 共用）。`names` を識別子として含む `pub use` 文は `approved`
+/// （`(src からの相対パス, 文)`）のいずれかとトークン列で完全一致しなければ違反、承認した各文はちょうど 1 件、
+/// `names` の独自宣言（`trait`／`struct`／`enum`／`type`／`union`）は違反。
+fn approved_reexport_surface_violations(
+    files: &[(String, String)],
+    names: &[&str],
+    approved_statements: &[(&str, &str)],
+) -> Vec<String> {
+    // rustfmt が 100 桁超の `pub use` を折り返すとき `}` 直前へ付ける末尾カンマは意味を持たないため、
+    // 承認形・走査対象の双方で取り除いてから比較する。
+    fn normalize(tokens: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "," && tokens.get(i + 1).map(String::as_str) == Some("}") {
+                continue;
+            }
+            out.push(t.clone());
+        }
+        out
+    }
+    let approved: Vec<(&str, Vec<String>)> = approved_statements
         .iter()
         .map(|(rel, line)| {
             (
                 *rel,
-                tokenize_including_punctuation(line.trim_end_matches(';')),
+                normalize(&tokenize_including_punctuation(line.trim_end_matches(';'))),
             )
         })
         .collect();
@@ -31022,14 +31061,11 @@ fn phase4_training_data_surface_violations(files: &[(String, String)]) -> Vec<St
                 while end < tokens.len() && tokens[end] != ";" {
                     end += 1;
                 }
-                let stmt = &tokens[j..end.min(tokens.len())];
-                if stmt
-                    .iter()
-                    .any(|t| PHASE4_TRAINING_DATA_NAMES.contains(&t.as_str()))
-                {
+                let stmt = normalize(&tokens[j..end.min(tokens.len())]);
+                if stmt.iter().any(|t| names.contains(&t.as_str())) {
                     match approved
                         .iter()
-                        .position(|(a_rel, a_tokens)| a_rel == rel && a_tokens.as_slice() == stmt)
+                        .position(|(a_rel, a_tokens)| a_rel == rel && *a_tokens == stmt)
                     {
                         Some(idx) => counts[idx] += 1,
                         None => {
@@ -31045,13 +31081,13 @@ fn phase4_training_data_surface_violations(files: &[(String, String)]) -> Vec<St
         for (i, tok) in tokens.iter().enumerate() {
             if matches!(tok.as_str(), "trait" | "struct" | "enum" | "type" | "union")
                 && let Some(next) = tokens.get(i + 1)
-                && PHASE4_TRAINING_DATA_NAMES.contains(&next.as_str())
+                && names.contains(&next.as_str())
             {
                 violations.push(format!("{rel}: {tok} {next} 宣言（独自宣言は不可）"));
             }
         }
     }
-    for ((rel, line), count) in PHASE4_TRAINING_DATA_APPROVED_REEXPORTS.iter().zip(counts) {
+    for ((rel, line), count) in approved_statements.iter().zip(counts) {
         if count != 1 {
             violations.push(format!(
                 "src/{rel} の承認形（`{line}`）が {count} 件（ちょうど 1 件である必要がある）"
@@ -31261,6 +31297,239 @@ fn phase4_data_types_are_reachable_via_facade_only() {
     assert_eq!(halves.len(), 2);
     let joined = ConcatDataset::new(halves.into_iter().collect::<Vec<Subset<_>>>()).unwrap();
     assert_eq!(joined.len(), 4);
+}
+
+// =====================================================================
+// 可変長系列（packed sequence。イシュー #2679）の承認形インベントリ・到達性・正の doctest プローブ。
+// 承認形は `fandhe_ai::nn::rnn` への型 5・自由関数 8 の素の再エクスポート
+// （`docs/autodiff-packed-sequence-decision.md` §7）。
+// =====================================================================
+
+/// 承認した素の再エクスポート文（`nn/rnn.rs`。トークン列で比較するため折り返しに依存しない）。
+const PACKED_SEQUENCE_APPROVED_REEXPORTS: [(&str, &str); 5] = [
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{PackedLstmSeqOutput, PackedRnnSeqOutput, PackedSequence};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{StackedPackedLstmSeqOutput, StackedPackedRnnSeqOutput};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{gru_forward_packed, lstm_forward_packed, rnn_forward_packed};",
+    ),
+    (
+        "nn/rnn.rs",
+        "pub use fandhe_ai_autodiff::nn::packed_sequence::{stacked_gru_forward_packed, stacked_lstm_forward_packed, stacked_rnn_forward_packed};",
+    ),
+];
+
+/// 上記の承認形に含まれる公開名。
+const PACKED_SEQUENCE_APPROVED_NAMES: [&str; 13] = [
+    "PackedSequence",
+    "PackedRnnSeqOutput",
+    "PackedLstmSeqOutput",
+    "StackedPackedRnnSeqOutput",
+    "StackedPackedLstmSeqOutput",
+    "pack_padded_sequence",
+    "pad_packed_sequence",
+    "rnn_forward_packed",
+    "gru_forward_packed",
+    "lstm_forward_packed",
+    "stacked_rnn_forward_packed",
+    "stacked_gru_forward_packed",
+    "stacked_lstm_forward_packed",
+];
+
+/// packed sequence の公開形が承認形から外れている点を違反として返す
+/// （[`facade_exposes_packed_sequence_only_in_approved_shape`]・自己テスト共用）。
+fn packed_sequence_surface_violations(files: &[(String, String)]) -> Vec<String> {
+    approved_reexport_surface_violations(
+        files,
+        &PACKED_SEQUENCE_APPROVED_NAMES,
+        &PACKED_SEQUENCE_APPROVED_REEXPORTS,
+    )
+}
+
+/// facade src 全体で packed sequence の公開が承認形（`nn/rnn.rs` の承認 5 文）だけであることを固定する。
+#[test]
+fn facade_exposes_packed_sequence_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
+    });
+    let violations = packed_sequence_surface_violations(&files);
+    assert!(
+        violations.is_empty(),
+        "facade の packed sequence 公開が承認形（イシュー #2679・`docs/autodiff-packed-sequence-decision.md` §7）\
+         から外れている: {violations:?}"
+    );
+}
+
+/// [`packed_sequence_surface_violations`] が承認形を受理し各類型を検出することの自己検証。
+#[test]
+fn facade_exposes_packed_sequence_only_in_approved_shape_detects_each_category() {
+    let base = || -> Vec<(String, String)> {
+        let mut rnn = String::new();
+        for (_, line) in PACKED_SEQUENCE_APPROVED_REEXPORTS {
+            rnn.push_str(line);
+            rnn.push('\n');
+        }
+        vec![("nn/rnn.rs".to_string(), rnn)]
+    };
+    assert!(packed_sequence_surface_violations(&base()).is_empty());
+
+    // 違反: 承認形の欠落。
+    for needle in [
+        "PackedSequence",
+        "pad_packed_sequence",
+        "stacked_rnn_forward_packed",
+    ] {
+        let mut files = base();
+        files[0].1 = files[0]
+            .1
+            .lines()
+            .filter(|l| !l.contains(needle))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !packed_sequence_surface_violations(&files).is_empty(),
+            "欠落を検出しない: {needle}"
+        );
+    }
+
+    // 違反: 別名・別ファイル・重複・グループ変形・独自宣言。
+    for (rel, extra) in [
+        (
+            "nn/rnn.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::pack_padded_sequence as pack;\n",
+        ),
+        (
+            "nn/rnn.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence};\n",
+        ),
+        (
+            "nn/mod.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::PackedSequence;\n",
+        ),
+        (
+            "lib.rs",
+            "pub use fandhe_ai_autodiff::nn::packed_sequence::rnn_forward_packed;\n",
+        ),
+        ("lib.rs", "pub struct PackedSequence;\n"),
+        ("lib.rs", "pub enum PackedRnnSeqOutput { A }\n"),
+        ("lib.rs", "pub trait StackedPackedLstmSeqOutput {}\n"),
+    ] {
+        let mut files = base();
+        files.push((rel.to_string(), extra.to_string()));
+        assert!(
+            !packed_sequence_surface_violations(&files).is_empty(),
+            "検出できない類型: {rel}: {extra:?}"
+        );
+    }
+
+    // 許容: コメント・文字列・非公開 use・部分一致する別トークン。
+    let mut benign = base();
+    benign.push((
+        "compat/callbacks.rs".to_string(),
+        "// pub use x::PackedSequence;\n\
+         use fandhe_ai_autodiff::nn::packed_sequence::PackedSequence;\n\
+         let s = \"pack_padded_sequence\";\n\
+         pub struct PackedSequenceView;\n"
+            .to_string(),
+    ));
+    assert!(packed_sequence_surface_violations(&benign).is_empty());
+}
+
+/// 承認した packed sequence の型・自由関数のシグネチャを `fandhe_ai` のみの import でコンパイル時に固定する
+/// （#2679。`fandhe_ai_autodiff` は import しない）。
+#[test]
+fn packed_sequence_types_are_reachable_via_facade_only() {
+    use fandhe_ai::nn::rnn::{
+        Gru, GruCellVars, Lstm, PackedLstmSeqOutput, PackedRnnSeqOutput, PackedSequence, Rnn,
+        RnnCellVars, StackedGru, StackedLstm, StackedPackedLstmSeqOutput,
+        StackedPackedRnnSeqOutput, StackedRnn, gru_forward_packed, lstm_forward_packed,
+        pack_padded_sequence, pad_packed_sequence, rnn_forward_packed, stacked_gru_forward_packed,
+        stacked_lstm_forward_packed, stacked_rnn_forward_packed,
+    };
+    use fandhe_ai::{AutodiffError, Var};
+
+    let _pack: for<'t> fn(
+        &Var<'t>,
+        &[usize],
+        bool,
+        bool,
+    ) -> Result<PackedSequence<'t>, AutodiffError> = pack_padded_sequence;
+    let _pad: for<'t> fn(
+        &PackedSequence<'t>,
+        bool,
+        f32,
+        Option<usize>,
+    ) -> Result<(Var<'t>, Vec<usize>), AutodiffError> = pad_packed_sequence;
+    let _rnn: for<'t> fn(
+        &Rnn,
+        &PackedSequence<'t>,
+        Option<&Var<'t>>,
+    ) -> Result<PackedRnnSeqOutput<'t, RnnCellVars<'t>>, AutodiffError> = rnn_forward_packed;
+    let _gru: for<'t> fn(
+        &Gru,
+        &PackedSequence<'t>,
+        Option<&Var<'t>>,
+    ) -> Result<PackedRnnSeqOutput<'t, GruCellVars<'t>>, AutodiffError> = gru_forward_packed;
+    let _lstm: for<'t> fn(
+        &Lstm,
+        &PackedSequence<'t>,
+        Option<&Var<'t>>,
+        Option<&Var<'t>>,
+    ) -> Result<PackedLstmSeqOutput<'t>, AutodiffError> = lstm_forward_packed;
+    let _ = (
+        stacked_rnn_forward_packed,
+        stacked_gru_forward_packed,
+        stacked_lstm_forward_packed,
+    );
+    fn _assert_types(
+        _: Option<StackedRnn>,
+        _: Option<StackedGru>,
+        _: Option<StackedLstm>,
+        _: Option<StackedPackedRnnSeqOutput<'_, RnnCellVars<'_>>>,
+        _: Option<StackedPackedLstmSeqOutput<'_>>,
+    ) {
+    }
+
+    // 振る舞いの最小確認: 長さが非増加でない（`enforce_sorted = true`）入力は型付きエラー。
+    let tape = fandhe_ai::tape();
+    let x = fandhe_ai::Tensor::new(vec![0.0f32; 6], &[3, 2, 1]).unwrap();
+    assert!(pack_padded_sequence(&tape.var(&x), &[1, 3], false, true).is_err());
+}
+
+/// 正の doctest プローブ（#2679。`ema_usage_doctests_are_present_and_compiled` と同型）: packed sequence の
+/// 利用例が facade の公開 doc に実在し、実際にコンパイル・実行される形で書かれていることを固定する。
+#[test]
+fn packed_sequence_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let rnn = read_to_string_or_panic(&root.join("src/nn/rnn.rs"));
+    let v = doctest_probe_violations(
+        "nn/rnn.rs モジュール doc（可変長系列節）",
+        &inner_doc_lines(&rnn),
+        &[
+            "pack_padded_sequence",
+            "rnn_forward_packed",
+            "pad_packed_sequence",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    assert!(!doctest_probe_violations("t", &[], &["pack_padded_sequence"]).is_empty());
 }
 
 // =====================================================================
