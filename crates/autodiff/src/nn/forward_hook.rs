@@ -180,6 +180,12 @@ impl<M: Module> Module for ForwardHooked<M> {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         let input_shape = input.shape();
         let out = self.inner.forward(tape, input)?;
+        // ctx は引数 tape と出力ノード ID を組み合わせるため、出力が別テープ
+        // （または別世代）の Var だと範囲外 panic・無関係な値の観察になる。
+        // hook 呼び出し前に帰属を検証し fail-closed にする。
+        if out.tape_id() != tape.id || out.tape_epoch() != tape.epoch() {
+            return Err(AutodiffError::TapeMismatch);
+        }
         let ctx = ForwardHookCtx::from_tape(tape, &out, input_shape, out.shape());
         (self.hook)(&ctx)?;
         Ok(out)

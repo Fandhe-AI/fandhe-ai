@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid};
-use fandhe_ai_autodiff::nn::{ForwardHookCtx, ForwardHooked, Linear, Module, Sequential};
+use fandhe_ai_autodiff::nn::{ForwardHookCtx, ForwardHooked, Identity, Linear, Module, Sequential};
 use fandhe_ai_autodiff::{AutodiffError, CustomFunction, HookHandle, Tape, Var};
 use fandhe_ai_tensor_core::Tensor;
 
@@ -412,6 +412,23 @@ fn forward_hook_fires_once_with_shapes_and_output_value() {
     let y = hooked.forward(&tape, &x).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(observed.lock().unwrap().clone(), Some(bits(&y.to_tensor())));
+}
+
+/// 出力 Var が引数 tape に属さない場合は hook を呼ばず `TapeMismatch`（panic しない）。
+#[test]
+fn forward_hook_rejects_output_from_foreign_tape() {
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let hooked = ForwardHooked::new(Identity, move |ctx: &ForwardHookCtx<'_>| {
+        c.fetch_add(1, Ordering::SeqCst);
+        ctx.output_value().map(|_| ())
+    });
+    let xb = tape_b.var(&t(vec![1.0, 2.0], &[1, 2]));
+    let r = hooked.forward(&tape_a, &xb);
+    assert!(matches!(r, Err(AutodiffError::TapeMismatch)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 type ForwardHookBox = Box<dyn Fn(&ForwardHookCtx<'_>) -> Result<(), AutodiffError> + Send + Sync>;
