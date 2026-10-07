@@ -573,6 +573,15 @@ pub trait FitTarget: Element + private::Sealed {
         None
     }
 
+    /// `fit_with_weights` が最初の forward でクラス数 `c` を知った時点で、`y` 全体（全バッチ・
+    /// 全 epoch 分）の target がクラス範囲 `[0, c)` に収まることを検査する（パラメータ更新前の
+    /// 拒否。決定記録 §14.1）。クラス添字を持たない `f32` は既定の `Ok(())`。
+    #[doc(hidden)]
+    fn check_class_range(y: &Tensor<Self>, c: usize) -> Result<(), AutodiffError> {
+        let _ = (y, c);
+        Ok(())
+    }
+
     /// [`Sequential::fit_with_weights`]（イシュー #2564）が非既定の重みで使う
     /// 重み付き損失（`Σ w_i·l_i / N_batch`）。`sample` はこのバッチの
     /// サンプル別重み（`[N_batch]`）、`class` は `Loss::CrossEntropy` のクラス別
@@ -679,6 +688,17 @@ impl FitTarget for i32 {
 
     fn as_class_targets(target_batch: &Tensor<i32>) -> Option<&Tensor<i32>> {
         Some(target_batch)
+    }
+
+    fn check_class_range(y: &Tensor<i32>, c: usize) -> Result<(), AutodiffError> {
+        for (i, &yi) in y.host_slice().iter().enumerate() {
+            if usize::try_from(yi).ok().filter(|&k| k < c).is_none() {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::fit_with_weights: target[{i}] = {yi} がクラス範囲 [0, {c}) の外"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn weighted_loss_for<'t>(
@@ -917,7 +937,7 @@ fn weighted_mse_loss<'t>(
 }
 
 /// 重み付き交差エントロピー: `−Σ_i w_i·cw(y_i)·log_softmax(pred)_{i,y_i} / N`。
-/// `coef[i, y_i] = −w_i·cw(y_i)/N`（他は 0）を `log_softmax` へ掛けて総和する
+/// target 列の `log_softmax` を `gather` で選び `−w_i·cw(y_i)/N` を掛けて総和する
 /// （既存 `Var` 演算の合成のみ）。`pred` は `[N, C]`、`target` は `N` 要素。
 /// `class` のキーが `C` 以上・target が `[0, C)` 外は、添字 panic を避けるため
 /// 更新前（forward 後・backward 前）に `InvalidArgument` で拒否する。
@@ -956,8 +976,12 @@ fn weighted_cross_entropy_loss<'t>(
             "Sequential::fit_with_weights: N×C が usize を超える".to_string(),
         )
     })?;
+    let _ = total;
     let sw = sample.map(|t| t.host_slice());
-    let mut coef = alloc_coef(total)?;
+    let mut coef = alloc_coef(n)?;
+    let mut idx: Vec<i32> = Vec::new();
+    idx.try_reserve_exact(n)
+        .map_err(|_| super::alloc_failed())?;
     let ys = target.host_slice();
     for (i, &yi) in ys.iter().enumerate() {
         let cls = usize::try_from(yi).ok().filter(|&k| k < c).ok_or_else(|| {
@@ -968,12 +992,21 @@ fn weighted_cross_entropy_loss<'t>(
         let cw = class
             .and_then(|m| m.get(&(cls as u32)).copied())
             .unwrap_or(1.0);
-        let w = sample_weight_at(sw.as_deref(), i) * cw;
-        coef[i * c + cls] = (-(w as f64) / n as f64) as f32;
+        // 両因子を先に f64 へ昇格し、積と N での除算を終えてから 1 回だけ f32 へ落とす
+        // （f32 の積が除算前に overflow するのを避ける）。
+        let sw_i = sample_weight_at(sw.as_deref(), i) as f64;
+        coef[i] = (-(sw_i * cw as f64) / n as f64) as f32;
+        idx.push(yi);
     }
-    let coef_t = Tensor::new(coef, &[n, c]).map_err(AutodiffError::Shape)?;
+    let coef_t = Tensor::new(coef, &[n, 1]).map_err(AutodiffError::Shape)?;
+    let idx_t = Tensor::new(idx, &[n, 1]).map_err(AutodiffError::Shape)?;
     let coef_v = tape.var_no_grad(&coef_t);
-    pred.log_softmax(1)?.mul(&coef_v)?.sum(None)
+    // target の log_softmax のみを gather で選ぶ（非 target クラスへ 0 を掛けると
+    // `0 × -inf` が NaN になるため、疎な係数行列との積は使わない）。
+    pred.log_softmax(1)?
+        .gather(1, &idx_t)?
+        .mul(&coef_v)?
+        .sum(None)
 }
 
 /// `compile()` で構築した optimizer 本体（[`crate::optim::Sgd`]／
@@ -2832,6 +2865,7 @@ impl Sequential {
         // により、正常完走・`break 'epochs`（patience 打ち切り）・
         // エラーのいずれの経路でも必ずブロック直後の
         // `restore_best_weights` 処理へ到達する。
+        let mut targets_checked = false;
         let epoch_result: Result<(), AutodiffError> = 'epochs_block: {
             'epochs: for epoch_local in 0..config.epochs {
                 // (1) epoch 開始 LR 同期（[`Self::fit_with_callbacks`] doc
@@ -2952,6 +2986,18 @@ impl Sequential {
                             Ok(v) => v,
                             Err(e) => break 'epochs_block Err(e),
                         };
+                        // 非既定の重みでは、最初の forward でクラス数 C が判明した時点で
+                        // `y` 全体の target を検査する（最初の optimizer.step より前。
+                        // 後続バッチの不正 target で先行バッチが更新済みになるのを防ぐ）。
+                        if weighted
+                            && !targets_checked
+                            && let [_, c] = pred.to_tensor().shape()
+                        {
+                            if let Err(e) = T::check_class_range(y, *c) {
+                                break 'epochs_block Err(e);
+                            }
+                            targets_checked = true;
+                        }
                         // 重みが既定なら従来どおり `T::loss_for`（bit 一致契約）。非既定の
                         // ときだけ重み付き損失（イシュー #2564）。
                         let loss_result = if weighted {

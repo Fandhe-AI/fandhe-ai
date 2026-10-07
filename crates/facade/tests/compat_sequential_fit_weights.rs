@@ -77,10 +77,12 @@ fn bits(m: &Sequential) -> Vec<Vec<u32>> {
         .collect()
 }
 
-/// REQ-2 統一複合判定（相対 1e-3 未満または絶対 1e-5 未満）。
+/// REQ-2 統一複合判定。許容誤差の直書きを避け、`backend-cpu` の `parity::compare`
+/// （f64 計算・厳密 `<`・非有限は不合格）へ委譲する。
 fn close(a: f32, b: f32) -> bool {
-    let d = (a - b).abs();
-    d < 1e-5 || d <= 1e-3 * a.abs().max(b.abs())
+    fandhe_ai_backend_cpu::parity::compare(&[a], &[b])
+        .map(|r| r.passes())
+        .unwrap_or(false)
 }
 
 fn all_close(a: &[Vec<u32>], b: &[Vec<u32>]) -> bool {
@@ -637,4 +639,75 @@ fn undefined_loss_and_optimizer_combinations_are_rejected() {
         )
         .is_ok()
     );
+}
+// ---------------------------------------------------------------------
+// 5. レビュー指摘の回帰（#2823）
+// ---------------------------------------------------------------------
+
+/// 後続バッチの不正 target は、先行バッチの更新より前に拒否される（パラメータ不変）。
+#[test]
+fn late_batch_invalid_target_is_rejected_before_any_update() {
+    let (x, mut y) = {
+        let (x, y) = cls_data();
+        (x, y.host_slice().to_vec())
+    };
+    y[N - 1] = C as i32; // 最終バッチ（batch_size 4・shuffle なし）に範囲外
+    let y = Tensor::new(y, &[N]).unwrap();
+    let mut m = cls_model(Loss::CrossEntropy);
+    let before = bits(&m);
+    let r = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 4),
+        &FitWeights::new().class_weight(HashMap::from([(1u32, 2.0f32)])),
+        None,
+        &mut [],
+        &[],
+    );
+    assert_rejected(&mut m, r, &before, "late invalid target");
+}
+
+/// sample 1e19 × class 1e20 の積が f32 で overflow せず（f64 で積・除算してから f32 化）、損失が有限。
+#[test]
+fn huge_weight_product_does_not_overflow_in_f32() {
+    let (x, y) = cls_data();
+    let mut m = cls_model(Loss::CrossEntropy);
+    let mut sw = [0.0f32; N];
+    sw[0] = 1e19; // target 0 のサンプルのみ（1e19 × 1e20 = 1e39 は f32 では overflow）
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, N),
+            &FitWeights::new()
+                .sample_weight(&sw)
+                .class_weight(HashMap::from([(0u32, 1e20f32)])),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert!(h.loss[0].is_finite(), "loss = {}", h.loss[0]);
+}
+
+/// 極端な logits でも非 target クラスの `0 × -inf` が NaN を作らない。
+#[test]
+fn extreme_logits_do_not_produce_nan_loss() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::CrossEntropy)
+        .unwrap();
+    let x = Tensor::new(vec![f32::MAX], &[1, 1]).unwrap();
+    let y = Tensor::new(vec![0i32], &[1]).unwrap();
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, 1),
+            &FitWeights::new().class_weight(HashMap::from([(0u32, 1.0f32)])),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert!(!h.loss[0].is_nan(), "loss = {}", h.loss[0]);
 }
