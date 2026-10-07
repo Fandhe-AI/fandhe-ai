@@ -164,3 +164,45 @@ grep -rnE "fn (numeric_grad|finite_diff[a-z_]*|central_diff[a-z_]*|analytic_hess
 - `docs/autodiff-higher-order-grad-decision.md` §7・§17.3・§19.4、`docs/autodiff-low-precision-op-extension-decision.md`（章立ての先例）、`docs/autodiff-forward-mode-vmap-spec-proposal.md`、`docs/autodiff-retain-graph-accumulate-decision.md`、`docs/autodiff-linalg-ops-decision.md`
 - `docs/spec/04-requirements.md` REQ-9（:232・:235）・REQ-2
 - 本文中の `file:line` が参照するソース（基準 sha `f020e443`）
+
+## 8. 実装記録（#2670）
+
+本節は §3.2・§3.3・§3.6・§3.8 の推奨案のうち **jacobian／hessian の内部実装と保留ガード**を実装した記録である（イシュー #2670・親 #2668）。**facade 公開形は未承認のままで、承認依頼は #2677・公開は承認後の #2678**（本記録は承認記録ではない）。gradcheck・anomaly detection は #2671。
+
+### 8.1 実装
+
+| 項目 | 内容 |
+|---|---|
+| 置き場所 | `crates/autodiff/src/jacobian_ops.rs`（`pub mod jacobian_ops`）。自由関数のみで、`Var`・`Tape` へ inherent メソッドを足していない（`Var` は facade から再エクスポートされ公開面が広がるため） |
+| シグネチャ | `jacobian(tape: &Tape, output: &Var<'_>, input: &Var<'_>) -> Result<Tensor<f32>, AutodiffError>`／`hessian(tape: &Tape, loss: &Var<'_>, input: &Var<'_>, child: &Tape) -> Result<Tensor<f32>, AutodiffError>`（§3.2・§3.3 どおり） |
+| 変更しないもの | `backward.rs`・`grad.rs`・`create_graph.rs`・`AutodiffError`（variant 追加なし）・`Cargo.toml`／`Cargo.lock`・tolerance・baseline・`docs/spec/`。新規 `Op`・`BackendOps` メソッド・VJP・`unsafe` もなし |
+| jacobian の入口検査（テープへノードを足す前。順序固定） | ①`output`／`input` が `tape` の現世代に属さない → `TapeMismatch`（`Tape::reset` をまたいだ世代違いを含む）②`input` 非追跡 → `GradientTrackingDisabled`③`m`・`n`・`m×n` を検査付き乗算で算出（`ShapeError::ElementCountOverflow`）④`output` が追跡なし、または要素数 0 → backward を呼ばず全ゼロ（要素数 0 は空テンソル） |
+| hessian の入口検査（`backward_create_graph` の前。失敗時 `child` 無変更） | ①テープ不一致 → `TapeMismatch`②`input` 非追跡 → `GradientTrackingDisabled`③`loss` の要素数が 1 でない → `InvalidArgument`（`[]`・`[1]`・`[1,1]` は可）④`n×n` の検査付き乗算（`input` 要素数 0 は空テンソルを返し `child` は検査しない）。以降は `backward_create_graph` の既存検査（対象外 Op・非空の子テープ・デバイス不一致・checkpoint 済み親・追跡なし loss）を伝播 |
+| ゼロ行の扱い | jacobian: `Gradients::get` が `Ok(None)`（`input` へ届かない行）。hessian: `grad(input)`／`child_var(input)` が `None`、1 階勾配が定数（`requires_grad == false`。例: 入力に線形な loss）、子テープの backward で届かない行 |
+| 行の取り出し | jacobian・hessian 共用の非公開ヘルパー（#2671 の gradcheck も共用予定）。rank 0 は自身を 1 要素として使い、それ以外は `Var::contiguous`（非 contiguous のときのみノードを積む）→ `reshape([numel])` → 要素ごとに `narrow(0, i, 1)`。**補助ノード数は「`contiguous` 0〜1＋`reshape` 1＋`narrow` m」**で、§3.2 の「平坦化 1＋取り出し m」とは `contiguous` の分だけ異なる。1 要素の行は shape `[1]` のまま `backward` へ渡す（シードは全要素 1 の暗黙の総和なので `sum` ノードは足さない） |
+| 計算量 | backward を jacobian は出力要素数 `m` 回、hessian は入力要素数 `n` 回。結果は `m×n`（`n×n`）個の `f32` を確保する。大きな形状は呼び出し側の責任で避ける（モジュール doc に明記） |
+| hessian 後の `child` | 記録が残る（再利用前に呼び出し側が作り直す）。子テープ上の数値方式は 1 階 VJP と bit 同一を主張しない（`create_graph` の既存契約） |
+
+### 8.2 検証結果
+
+| 層 | 内容 | 結果 |
+|---|---|---|
+| J1 | PyTorch 2.14.0 実行値 fixture（`tests/fixtures/jacobian-hessian-pytorch-reference/`・生成条件と sha256 は同 `README.md`）の jacobian 9 件と forward 値を REQ-2 統一複合判定（`common::req2_close`）で全要素突合 | 全件 pass |
+| J2 | 同 hessian 9 件（二次形式・入力に線形・`tanh`・`exp`・小さな MLP・rank 0・`[1,1]` loss・`cat`＋`transpose`・`relu`）を同判定で突合 | 全件 pass |
+| J3 | 二次形式の閉形式 `A + Aᵀ`・`exp(x)·x` の平均の閉形式・スカラー出力の jacobian と `Tape::backward` の勾配の bit 一致・全 hessian ケースの対称性 | pass |
+| J4 | 非追跡入力・別テープ・非スカラー loss・非空の子テープ・非対象 Op（`Max`・rank 3 `matmul`）・追跡なし出力・入力へ届かない行・要素数 0・オーバーフロー（純関数の単体テスト）・呼び出し前後で既存ノード値と `backward` 結果が bit 不変 | pass。拒否時に `child` が空（非空の子テープ入力は 1 ノードのまま） |
+| J5 | `crates/facade/tests/jacobian_hessian_backend_parity.rs`: 実 `CpuBackendOps` tape と `NaiveOps` tape を `assert_parity` で突合＋手計算 1 件 | pass。CUDA／Metal 版は `#[ignore]`・**実機未実測**（`docs/perf/logs/jacobian-hessian-2670/README.md`） |
+
+保留ガードの検出力は、facade の `Tape` へ仮に `pub fn jacobian` を足して doctest・`facade_does_not_reexport_or_declare_jacobian_hessian`・インベントリが落ちることを一時変更で確認し、戻した（コミットしていない）。
+
+### 8.3 保留ガード（§3.8）
+
+- `crates/facade/src/lib.rs::JacobianHessianHoldDoctestGuard`（`#[cfg(doctest)]`。全 `pub mod` glob import のスコープへ、ローカルモジュール `jacobian_ops`・裸の自由関数 `jacobian`／`hessian`・`Var`／`Tape`／`Tensor<f32>` 向けの同名メソッドのプローブを置く正のプローブ 1 ブロック方式）。検出範囲は列挙した名前に限る。
+- `crates/facade/tests/api_surface.rs` の 5 テスト: `jacobian_hessian_hold_doctest_globs_all_pub_modules`・`jacobian_hessian_hold_doctest_probe_body_matches_fixed_contract`（固定文言 `JACOBIAN_HESSIAN_HOLD_PROBE_BODY`）・`facade_does_not_reexport_or_declare_jacobian_hessian`・同 `_detects_each_category`・`workspace_declares_jacobian_hessian_fn_names_only_in_allowed_locations`（期待値は `autodiff/src/jacobian_ops.rs::jacobian`／`::hessian` 各 1 件）。
+- 承認後（#2678）は doctest ガードを削除し、否定ガードを正ガードへ反転する。
+
+### 8.4 申し送り
+
+- facade 公開（`Tape::jacobian`／`Tape::hessian`）: #2677 の承認後に #2678。
+- CUDA（GB10）・Metal（M4 Max）実機 parity: `docs/perf/logs/jacobian-hessian-2670/README.md`（未実測）。
+- HVP 専用 API・複数入力・微分可能な jacobian・forward-mode／vmap・`VarF64` 版・create_graph 対象 Op の拡張は本イシューの対象外。

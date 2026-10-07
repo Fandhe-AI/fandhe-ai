@@ -2065,3 +2065,7 @@ facade 公開面は追加していない（保留ガード `DatasetComposeHoldDo
 **適用記録（イシュー #2662・親 #2660。内部クレート限定）**: `IterableDataset`・`IterableDataLoader`（と積み上げ用 `StackSamples`）・`BatchSampler`（`torch.utils.data` 相当）を内部クレート限定（`fandhe_ai_tensor_core::data`。ホスト側ユーティリティで、新規 `Op`・`BackendOps` メソッド・VJP・カーネルなし。既存の公開型・trait へは何も足していない）で実装した。
 facade 公開面は追加していない（保留ガード `IterableBatchSamplerHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形（`fandhe_ai::data` への純再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2679）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/tensor-core-iterable-dataset-batch-sampler-decision.md`。
+
+**適用記録（イシュー #2670・親 #2668。内部クレート限定）**: `jacobian`・`hessian` を内部クレート限定（`fandhe_ai_autodiff::jacobian_ops`。既存の `Tape::backward`／`backward_create_graph` の要素ごとの繰り返しのみで、新規 `Op`・`BackendOps` メソッド・VJP・カーネルなし。`Var`・`Tape` へ inherent メソッドは足していない）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `JacobianHessianHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形（`Tape::jacobian`／`Tape::hessian` の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-jacobian-hessian-gradcheck-decision.md` 「実装記録（#2670）」。
