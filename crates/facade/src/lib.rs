@@ -318,6 +318,12 @@ pub use fandhe_ai_autodiff::nn::EmbeddingBagMode;
 // 非公開で利用者は構築できない。`TapeRef` 版・子テープ構築ヘルパーは
 // §17.3 により公開しない（`tests/api_surface.rs` の正ガードが固定）。
 pub use fandhe_ai_autodiff::CreateGraphResult;
+// `HookHandle`（backward hook の解除用不透明ハンドル。イシュー #2587。
+// `Tape::register_backward_hook` の戻り値・`Tape::remove_hook` の引数型）も 1 文 1 行で
+// 再エクスポートする。承認根拠はルート #2499 のコメントによる #2584 の §14 推奨案の承認と
+// `docs/autodiff-forward-backward-hooks-design.md` §14.4 P3。フィールドは非公開で
+// `Clone`／`Copy` を持たず、利用者は構築できない。
+pub use fandhe_ai_autodiff::HookHandle;
 // `CastDType`／`CastElement`（イシュー #1750。`Var::cast`／`Tape::
 // var_from` の型境界・dtype タグ）も 1 文 1 行で再エクスポートする
 // （上記コメント「1 文 1 行を維持する」と同じ理由）。`CastOps`（動的
@@ -903,6 +909,80 @@ impl Tape {
         inputs: &[Var<'t>],
     ) -> Result<Var<'t>, AutodiffError> {
         self.0.custom(func, inputs)
+    }
+
+    /// [`fandhe_ai_autodiff::Tape::register_backward_hook`] への委譲入口（イシュー #2587・
+    /// 親 #2584。ルート #2499 のコメントによる #2584 の §14 推奨案の承認・
+    /// `docs/autodiff-forward-backward-hooks-design.md` §14.4 P2・§18）。
+    ///
+    /// `var` の勾配が確定した時点で呼ばれる観察専用の backward hook（PyTorch
+    /// `Tensor.register_hook` の観察専用版）を登録し、解除用の不透明ハンドル
+    /// [`HookHandle`] を返す。`facade::Tape` は内部の autodiff `Tape` を隠すため、本メソッドが
+    /// facade 経由の唯一の入口になる（`Var`・`compat::Sequential`・`TapeRef` には設けない）。
+    ///
+    /// # 契約
+    ///
+    /// - hook は `backward` 系（`backward`・`backward_accumulate`・`backward_create_graph`
+    ///   の 1 階）の逆走査で、当該ノードの確定勾配を受けて VJP の直前に呼ばれる。同一ノードの
+    ///   複数 hook は登録順（FIFO）、ノード間は `NodeId` 降順
+    /// - hook は勾配を書き換えられず、登録の有無で勾配は bit 一致する。`'static` 境界により
+    ///   `Tape`／`Var` を捕捉できない（再入防止）
+    /// - hook が `Err` を返すとその時点で打ち切られ、同じ `Err` が `backward` の戻り値になる
+    /// - [`Tape::reset`] で全 hook が消える（旧ハンドルの `remove_hook` は `TapeMismatch`）
+    ///
+    /// # エラー
+    ///
+    /// - 別の `Tape` の `var`: [`AutodiffError::TapeMismatch`]
+    /// - `requires_grad == false`（`var_no_grad` 系・`detach` 後）:
+    ///   [`AutodiffError::GradientTrackingDisabled`]
+    /// - デバイス常駐葉: [`AutodiffError::InvalidArgument`]
+    ///
+    /// # 使用例
+    ///
+    /// ```
+    /// use std::sync::{Arc, Mutex};
+    /// use fandhe_ai::Tensor;
+    ///
+    /// # fn main() -> Result<(), fandhe_ai::AutodiffError> {
+    /// let tape = fandhe_ai::tape();
+    /// let x = tape.var(&Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
+    /// let loss = x.mul(&x)?.sum(None)?;
+    /// let seen = Arc::new(Mutex::new(Vec::new()));
+    /// let sink = Arc::clone(&seen);
+    /// let handle = tape.register_backward_hook(&x, move |g: &Tensor<f32>| {
+    ///     sink.lock().unwrap().push(g.host_slice().to_vec());
+    ///     Ok(())
+    /// })?;
+    /// let grads = tape.backward(&loss)?;
+    /// assert_eq!(seen.lock().unwrap().len(), 1);
+    /// let dx = grads.get(&x)?.expect("x は loss に寄与する");
+    /// assert_eq!(dx.host_slice().as_ref(), &seen.lock().unwrap()[0][..]);
+    /// tape.remove_hook(handle)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn register_backward_hook<F>(
+        &self,
+        var: &Var<'_>,
+        hook: F,
+    ) -> Result<HookHandle, AutodiffError>
+    where
+        F: Fn(&Tensor<f32>) -> Result<(), AutodiffError> + Send + Sync + 'static,
+    {
+        self.0.register_backward_hook(var, hook)
+    }
+
+    /// [`fandhe_ai_autodiff::Tape::remove_hook`] への委譲入口（イシュー #2587・設計記録 §14.4 P2）。
+    ///
+    /// [`Self::register_backward_hook`] が返したハンドルの hook を解除する。ハンドルは値で
+    /// 消費されるため二重解除は型上起きない。
+    ///
+    /// # エラー
+    ///
+    /// 別の `Tape` のハンドル、または [`Tape::reset`] より前に発行されたハンドルは
+    /// [`AutodiffError::TapeMismatch`]（登録簿は変更しない）。
+    pub fn remove_hook(&self, handle: HookHandle) -> Result<(), AutodiffError> {
+        self.0.remove_hook(handle)
     }
 
     /// [`fandhe_ai_autodiff::nn::Rnn::forward_seq`] への委譲入口
@@ -2022,44 +2102,52 @@ struct VarCustomHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarBoolOpsHoldDoctestGuard;
 
-/// イシュー #2139（親 #2138・#2131）の facade 公開保留を固定する doctest
-/// 足場。`VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）／
-/// `VarBoolOpsHoldDoctestGuard`（直前の宣言）と同型の「正のプローブ 1
-/// ブロック方式」を採るが、本ガードは 2 種類の衝突プローブを併用する:
+/// イシュー #2139（親 #2138・#2131）の facade 公開保留を固定していた doctest
+/// 足場。#2587 で承認形（`Tape::{register_backward_hook, remove_hook}` の薄い委譲・
+/// `HookHandle`／`nn::ForwardHooked`／`nn::ForwardHookCtx` の公開。
+/// `docs/autodiff-forward-backward-hooks-design.md` §14.4・§18）を公開したため
+/// **部分反転**した（`VarBoolOpsHoldDoctestGuard`・`VarActivationOpsHoldDoctestGuard` と
+/// 同型。名称は据え置く）。承認形の正ガードは `crates/facade/tests/api_surface.rs` の
+/// `facade_tape_hook_methods_are_thin_delegations`・
+/// `facade_reexports_hook_items_only_in_approved_shape`・
+/// `hooks_are_reachable_via_facade_only` ほかが担う。本ガードは承認形**外**の配置を
+/// 引き続き fail-closed に固定する。2 種類の衝突プローブを併用する:
 ///
-/// (a) 型・モジュール名の衝突プローブ（`NnModuleHoldDoctestGuard`〈#2396 で削除済み〉方式）。
-/// facade の全 `pub mod` を glob import したスコープに、本ブロック内でのみ
-/// 定義したローカル型（`__fandhe_hooks_hold_probe::{HookHandle,
-/// ForwardHooked, ForwardHookCtx}`）とモジュール（`hooks`）を導入し、
-/// 実際に使う関数を書く。facade が同名の型・モジュールを glob で公開
-/// すると、名前解決が曖昧になり（E0659 等）コンパイルが失敗する。
+/// (a) モジュール名の衝突プローブ。facade の全 `pub mod` を glob import したスコープに、
+/// 本ブロック内でのみ定義したモジュール（`__fandhe_hooks_hold_probe::hooks`）を導入し、
+/// 実際に経路として解決させる。facade が `hooks` モジュールを公開すると（P4。承認形は
+/// `pub mod hooks` を設けない）名前解決が曖昧になり（E0659）コンパイルが失敗する。
+/// 型名（`HookHandle`／`ForwardHooked`／`ForwardHookCtx`）の衝突プローブは、承認形として
+/// 公開済みのため撤去した。
 ///
 /// (b) メソッド名の衝突プローブ（`VarBoolOpsHoldDoctestGuard` 方式）。
 /// `register_forward_hook`／`register_backward_hook`／`register_hook`／
 /// `remove_hook`／`remove_backward_hook` の 5 メソッドをトレイト
 /// （`__FandheHooksHoldProbe`）として `fandhe_ai::Var<'t>`／
 /// `fandhe_ai::Tape`／`fandhe_ai::compat::Sequential` に実装し、UFCS 形・
-/// メソッド呼び出し形の両方で呼ぶ。inherent メソッドはトレイトメソッド
-/// より優先して解決されるため、これらの型に同名の inherent メソッドが
-/// 追加されると、引数の数や型の不一致でコンパイルが失敗する。
+/// メソッド呼び出し形の両方で呼ぶ。inherent メソッドはトレイトメソッドより優先して
+/// 解決されるため、同名の inherent メソッドが追加されると、引数の数や型の不一致で
+/// コンパイルが失敗する。承認形で `Tape` に載った `register_backward_hook`・
+/// `remove_hook` の呼び出しは `__probe_tape` から外した（トレイト実装は 5 件のまま）。
+/// `Var`・`compat::Sequential` への 5 メソッド、`Tape` への `register_forward_hook`・
+/// `register_hook`・`remove_backward_hook`（P8。承認形外）は引き続き拒否する。
 ///
 /// facade の `Tape` は `pub struct Tape(pub(crate) fandhe_ai_autodiff::Tape)`
 /// という newtype で `Deref` を持たないため（`crate::tape::Tape` 参照）、
 /// 本プローブが検出できるのは facade 側に追加されたメソッドのみである。
 /// autodiff 側の `Tape` に追加された定義は `crates/facade/tests/
-/// api_surface.rs::workspace_declares_hook_registration_fns_only_on_autodiff_tape`（workspace
-/// 全体のソース走査）が捕捉する分担とする。
+/// api_surface.rs::workspace_declares_hook_registration_fns_only_on_autodiff_tape_and_facade_delegation`
+/// （workspace 全体のソース走査）が捕捉する分担とする。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
-/// body_matches_fixed_contract`・`workspace_declares_no_hook_registration_
-/// fns`）との多層防御の位置づけ・承認未取得の経緯は
-/// `docs/autodiff-forward-backward-hooks-design.md` §13「実装保留記録
-/// （イシュー #2139）」を参照。
+/// body_matches_fixed_contract`）との多層防御の位置づけ・承認の経緯は
+/// `docs/autodiff-forward-backward-hooks-design.md` §13・§18 を参照。
 ///
-/// 承認（設計 doc §11 の 5 項目）を得て facade 公開を実施する日が来たら、
-/// 本モジュール・本 doctest 自体を削除する（ソース走査側の対応する
-/// 否定ガードと同時に外す）。
+/// 撤去条件: P8 の承認外メソッド（`register_forward_hook`・`register_hook`・
+/// `remove_backward_hook`、`Var`／`compat::Sequential` への hook 登録メソッド）や
+/// `pub mod hooks` の公開が承認されたら、該当プローブを外す（ソース走査側の
+/// 対応する否定ガードと同時に）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2080,16 +2168,13 @@ struct VarBoolOpsHoldDoctestGuard;
 /// use fandhe_ai::inference::*;
 ///
 /// mod __fandhe_hooks_hold_probe {
-///     pub struct HookHandle;
-///     pub struct ForwardHooked;
-///     pub struct ForwardHookCtx;
 ///     pub mod hooks {
 ///         pub fn __probe() {}
 ///     }
 /// }
 /// use __fandhe_hooks_hold_probe::*;
 ///
-/// fn __probe_types(_: HookHandle, _: ForwardHooked, _: ForwardHookCtx) {
+/// fn __probe_types() {
 ///     hooks::__probe();
 /// }
 ///
@@ -2143,12 +2228,8 @@ struct VarBoolOpsHoldDoctestGuard;
 /// fn __probe_tape(x: &fandhe_ai::Tape) {
 ///     let _: __FandheHooksMarker = fandhe_ai::Tape::register_forward_hook(x);
 ///     let _: __FandheHooksMarker = x.register_forward_hook();
-///     let _: __FandheHooksMarker = fandhe_ai::Tape::register_backward_hook(x);
-///     let _: __FandheHooksMarker = x.register_backward_hook();
 ///     let _: __FandheHooksMarker = fandhe_ai::Tape::register_hook(x);
 ///     let _: __FandheHooksMarker = x.register_hook();
-///     let _: __FandheHooksMarker = fandhe_ai::Tape::remove_hook(x);
-///     let _: __FandheHooksMarker = x.remove_hook();
 ///     let _: __FandheHooksMarker = fandhe_ai::Tape::remove_backward_hook(x);
 ///     let _: __FandheHooksMarker = x.remove_backward_hook();
 /// }

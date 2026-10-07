@@ -1333,7 +1333,7 @@ src/**`）・facade 公開面（`crates/facade/src/**` 本番コード）のい�
 `crates/facade/src/lib.rs::VarHooksHoldDoctestGuard`（正のプローブ
 doctest）＋`crates/facade/tests/api_surface.rs` の 4 層構成（doctest
 ドリフト検査 2 件・workspace 全体の定義元インベントリ 1 件〈
-`workspace_declares_hook_registration_fns_only_on_autodiff_tape`〉・`crates/autodiff/src/`
+`workspace_declares_hook_registration_fns_only_on_autodiff_tape_and_facade_delegation`〈#2587 で改名〉〉・`crates/autodiff/src/`
 限定の `register_hook` allowlist 化ガード 1 件〈
 `autodiff_declares_no_register_hook_fn`。doctest 正のプローブが facade
 経由の到達可能性しか見ないため autodiff 側の本体実装を検出できない穴を
@@ -1348,9 +1348,26 @@ doctest）＋`crates/facade/tests/api_surface.rs` の 4 層構成（doctest
 `Tape::register_backward_hook`・`remove_hook`・`HookHandle`・`nn::ForwardHooked`・
 `nn::ForwardHookCtx` を実装した。facade は未公開のまま（`crates/facade/src/**` 不変）で、
 workspace 全体の定義元インベントリ（`workspace_declares_hook_registration_fns_only_on_
-autodiff_tape`）は `autodiff/src/tape.rs` のみ許す形へ縮小した（保留 doctest・
+autodiff_tape`。#2587 で `..._and_facade_delegation` へ改名）は `autodiff/src/tape.rs` のみ許す形へ縮小した（保留 doctest・
 `autodiff_declares_no_register_hook_fn` は維持）。経路 2 の適用記録は facade 公開を行う
 #2587 で追記する。実装記録は同 doc §17。
+
+**適用記録（経路 2。イシュー #2587・親 #2584・ルート #2499）**: forward／backward hooks の
+facade 公開を、ルート #2499 の 2026-10-07 付コメント
+（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`。リポジトリ所有者名義）が
+承認した `docs/autodiff-forward-backward-hooks-design.md` §14 の推奨案の形に限って実施した
+（承認は §14 に書かれた形のみ。P5′ はコンパイル上成立したため差し戻しなし）。公開した名前:
+`Tape::register_backward_hook`・`Tape::remove_hook`（facade `impl Tape` の autodiff `Tape` への 1 行委譲 2 件）、
+`fandhe_ai::HookHandle`（crate ルートの純再エクスポート）、`fandhe_ai::nn::ForwardHooked<M: nn::Module>`
+（facade 独自ラッパー。内部は `FacadeModuleAdapter<Box<M>>` で autodiff 側 `nn::ForwardHooked` を再利用）、
+`fandhe_ai::nn::ForwardHookCtx`（純再エクスポート）。`Var`・`compat::Sequential`・`TapeRef` には足しておらず、
+`pub mod hooks` も作っていない。`register_forward_hook`・`register_hook`・`remove_backward_hook` はどの型にも
+無い。保留ガード `VarHooksHoldDoctestGuard` は承認形外（`hooks` モジュール・`Var`／`compat::Sequential` への
+5 メソッド・`Tape` の承認外 3 メソッド）を拒否する形へ部分反転し、`api_surface.rs` に承認形の正ガード
+（薄い委譲・再エクスポート形・struct 宣言所在・公開 item／固有メソッド集合・単一実装・facade のみでの到達）を
+新設、定義元インベントリは `autodiff/src/tape.rs` と `facade/src/lib.rs` の委譲 2 件を許す形に更新した。
+利用例は `crates/facade/tests/hooks.rs` と doctest。公開 API は追加のみ（`fandhe-ai =0.10.0` 非破壊）で、
+実機 parity の申し送りは発生しない。実装記録は同 doc §18。
 
 **適用記録（経路 2。イシュー #2198・親 #2172・ルート #2131）**: L-BFGS
 （`fandhe_ai_autodiff::nn::optim::Lbfgs`。#2197 で内部クレート限定実装

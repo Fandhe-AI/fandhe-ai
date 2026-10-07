@@ -13,6 +13,10 @@
 //! doc「`Sequential::add_*` を設けない理由」参照）。
 //! 例外として [`crate::nn::kv_cache`]（#2579。`KvCache`・`StatefulAttention` の純再エクスポート）を
 //! 持つ。MHA 本体は引き続き `Sequential::add_*` 経由のみ。
+//! **#2587（hooks の承認形）**: facade 版 [`crate::nn::ForwardHooked`]（`nn::Module` 実装を包み
+//! `forward` 直後に観察専用 hook を 1 回呼ぶラッパー。非公開 `mod forward_hook` と `pub use`）と、その
+//! hook の引数型 [`crate::nn::ForwardHookCtx`]（autodiff からの純再エクスポート）を提供する
+//! （`docs/autodiff-forward-backward-hooks-design.md` §14.4・§18。`pub mod hooks` は設けない）。
 //!
 //! **例外（#2532・#2533。ルート #2499 の一括承認）**: `Transformer`・
 //! `TransformerDecoderLayer`・`TransformerConfig` は型として再エクスポートする
@@ -22,6 +26,7 @@
 //! `FeedForwardActivation` 等（facade 未公開）が必要で、facade だけでは行えない
 //! （承認形の範囲外のため `FeedForwardActivation` や `Tape` への委譲メソッドは追加していない）。
 mod container;
+mod forward_hook;
 pub mod init;
 pub mod kv_cache;
 mod module;
@@ -32,6 +37,10 @@ pub use container::{ModuleList, Sequential};
 // （`api_surface.rs` のトークン走査が両行の完全一致を別々に検査するため）。
 pub use container::{ModuleDict, summary};
 pub use module::Module;
+// #2587: forward hook の facade 版ラッパー（P5′）と ctx 型（autodiff からの純再エクスポート）。
+// 各 1 文 1 行で宣言する（`api_surface.rs` が行単位で固定する）。
+pub use fandhe_ai_autodiff::nn::ForwardHookCtx;
+pub use forward_hook::ForwardHooked;
 // #2532・#2533: Transformer／decoder 1 層の再エクスポート。上の行とは別の独立した 1 行で宣言する
 // （`api_surface.rs::facade_reexports_transformer_decoder_items_only_in_approved_shape` が
 // この 1 文の完全一致を要求する。#2533 で `Transformer` を加えた 3 名形）。

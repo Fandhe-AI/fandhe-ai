@@ -46,7 +46,7 @@
 //!
 //! `hooks_hold_doctest_globs_all_pub_modules`・`hooks_hold_doctest_probe_
 //! body_matches_fixed_contract`・`workspace_declares_hook_registration_fns_
-//! only_on_autodiff_tape`・`autodiff_declares_no_register_hook_fn` の 4 テストは
+//! only_on_autodiff_tape_and_facade_delegation`・`autodiff_declares_no_register_hook_fn` の 4 テストは
 //! `VarHooksHoldDoctestGuard`（`VarBoolOpsHoldDoctestGuard` 系と同型の
 //! 正のプローブ 1 ブロック方式＋workspace 全体のソース走査＋
 //! `crates/autodiff/src/` 限定の `register_hook` allowlist 化ガード）で、
@@ -59,7 +59,13 @@
 //! 2026-10-07）後、イシュー #2586 で autodiff 本体（`Tape::
 //! register_backward_hook`・`remove_hook`）を実装し、workspace 全体の
 //! 定義元インベントリは「0 件」から「`autodiff/src/tape.rs` のみ」へ縮小した
-//! （同 doc §17）。facade 公開（保留 doctest の反転を含む）は #2587 で行う。
+//! （同 doc §17）。#2587 で facade 公開を行い、保留 doctest を部分反転した
+//! （承認形外の配置の拒否は維持）。承認形の正ガードは
+//! `facade_tape_hook_methods_are_thin_delegations`・
+//! `facade_reexports_hook_items_only_in_approved_shape`・
+//! `hooks_declare_only_approved_items`・`nn_forward_hook_rs_public_items_match_expected_set`・
+//! `hooks_are_reachable_via_facade_only` で、定義元インベントリは
+//! `autodiff/src/tape.rs` と `facade/src/lib.rs` の委譲 2 件（同 doc §18）。
 
 use std::path::Path;
 
@@ -9244,16 +9250,13 @@ fn hooks_hold_doctest_probe_body_matches_fixed_contract() {
 const HOOKS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_hooks_hold_probe {\n\
-\x20\x20\x20\x20pub struct HookHandle;\n\
-\x20\x20\x20\x20pub struct ForwardHooked;\n\
-\x20\x20\x20\x20pub struct ForwardHookCtx;\n\
 \x20\x20\x20\x20pub mod hooks {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn __probe() {}\n\
 \x20\x20\x20\x20}\n\
 }\n\
 use __fandhe_hooks_hold_probe::*;\n\
 \n\
-fn __probe_types(_: HookHandle, _: ForwardHooked, _: ForwardHookCtx) {\n\
+fn __probe_types() {\n\
 \x20\x20\x20\x20hooks::__probe();\n\
 }\n\
 \n\
@@ -9307,12 +9310,8 @@ fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
 fn __probe_tape(x: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::register_forward_hook(x);\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = x.register_forward_hook();\n\
-\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::register_backward_hook(x);\n\
-\x20\x20\x20\x20let _: __FandheHooksMarker = x.register_backward_hook();\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::register_hook(x);\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = x.register_hook();\n\
-\x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::remove_hook(x);\n\
-\x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_hook();\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = fandhe_ai::Tape::remove_backward_hook(x);\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
 }\n\
@@ -9330,7 +9329,7 @@ fn __probe_sequential(x: &fandhe_ai::compat::Sequential) {\n\
 \x20\x20\x20\x20let _: __FandheHooksMarker = x.remove_backward_hook();\n\
 }";
 
-/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape`] が検査する 4 つの
+/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape_and_facade_delegation`] が検査する 4 つの
 /// 関数名。`register_hook` はあえて含めない（並行する #2182 の DataLoader
 /// transform フック等、正当な用途で使われうる汎用名のため。facade から
 /// 到達できないことは `VarHooksHoldDoctestGuard` の doctest が固定する）。
@@ -9435,13 +9434,14 @@ fn count_fn_declarations_by_name_detects_register_hook() {
 /// **期待集合は `crates/autodiff/src/tape.rs` の `register_backward_hook`・
 /// `remove_hook`（各 1 件）の完全一致**。`register_forward_hook`・
 /// `remove_backward_hook` は workspace 全体で 0 件のまま（§14.4 P8）。
-/// facade 側の委譲 2 件は #2587 で追加し、その際に本期待集合へ
-/// `facade/src/lib.rs` を足す。facade のソース走査・
+/// facade 側の委譲 2 件は #2587 で追加し、本期待集合へ `facade/src/lib.rs` の
+/// 同名各 1 件を足した（所在の登録であり緩和ではない。同名関数の本体は
+/// `facade_tape_hook_methods_are_thin_delegations` が固定する）。facade のソース走査・
 /// `VarHooksHoldDoctestGuard` の正のプローブはいずれも「facade から到達
 /// 可能か」しか見ないため、facade の外に同名関数が新設された場合に備え、
 /// 定義元自体を固定する多層防御の最内層とする。
 #[test]
-fn workspace_declares_hook_registration_fns_only_on_autodiff_tape() {
+fn workspace_declares_hook_registration_fns_only_on_autodiff_tape_and_facade_delegation() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
@@ -9498,6 +9498,13 @@ fn workspace_declares_hook_registration_fns_only_on_autodiff_tape() {
             1usize,
         ),
         ("autodiff/src/tape.rs::remove_hook".to_string(), 1usize),
+        // #2587: facade `impl Tape` の薄い委譲 2 件（承認形 P2。所在の登録であり緩和ではない。
+        // 本体の完全一致は `facade_tape_hook_methods_are_thin_delegations` が固定する）。
+        (
+            "facade/src/lib.rs::register_backward_hook".to_string(),
+            1usize,
+        ),
+        ("facade/src/lib.rs::remove_hook".to_string(), 1usize),
     ]
     .into_iter()
     .collect();
@@ -9507,11 +9514,11 @@ fn workspace_declares_hook_registration_fns_only_on_autodiff_tape() {
          register_backward_hook／remove_hook／remove_backward_hook の `fn` 宣言集合が \
          `crates/autodiff/src/tape.rs` の register_backward_hook・remove_hook（各 1 件。\
          イシュー #2586）のみという期待と一致しない（過不足いずれも fail-closed に検出する。\
-         facade 委譲を追加する #2587 では期待集合をあわせて更新すること）: {found:?}"
+         facade 委譲 2 件〈`facade/src/lib.rs`。イシュー #2587〉を含む）: {found:?}"
     );
 }
 
-/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape`] が使う
+/// [`workspace_declares_hook_registration_fns_only_on_autodiff_tape_and_facade_delegation`] が使う
 /// [`count_fn_declarations_by_name`] が、対象 4 関数名を実際に検出
 /// できることを固定する合成入力の自己テスト（検出器自体が機能して
 /// いなければ、前者の「0 件」判定が空合格になり得るため）。
@@ -9529,6 +9536,419 @@ fn count_fn_declarations_by_name_detects_hook_registration_fn_names() {
     }
 }
 
+// =====================================================================
+// #2587（親 #2584・ルート #2499）の hooks 正ガード。旧保留ガード
+// （`VarHooksHoldDoctestGuard`・定義元インベントリ）を、承認形
+// （`docs/autodiff-forward-backward-hooks-design.md` §14.4 P1〜P9）だけを許す形へ
+// 部分反転した（先例 #2510・#2516）。承認形外の配置（`pub mod hooks`・
+// `register_forward_hook` 等の追加・独自実装へのすり替え）は引き続き拒否する。
+// =====================================================================
+
+/// hooks 承認形が公開する 3 型名（`HookHandle`・`ForwardHooked`・`ForwardHookCtx`）。
+const HOOK_ITEM_NAMES: [&str; 3] = ["HookHandle", "ForwardHooked", "ForwardHookCtx"];
+
+/// `content`（1 ファイル分）の `pub use` から [`HOOK_ITEM_NAMES`] の葉を集める検出本体。
+/// 戻り値は (`(葉, パス文字列)` の再エクスポート一覧, 違反, `struct` 宣言名の一覧)。
+/// 別名（`as`）・hooks 経由の glob・同名の独自宣言（`trait`／`enum`／`type`／`fn`）・
+/// `mod hooks` 宣言は違反とする。`struct` 宣言の所在は呼び出し側が検査する。
+fn scan_hook_reexports_and_declarations(
+    content: &str,
+) -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut reexports: Vec<(String, String)> = Vec::new();
+    let mut offending: Vec<String> = Vec::new();
+    let mut struct_decls: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let joined = path_tokens.join("");
+            let has_alias = path_tokens.iter().any(|t| t == "as");
+            let has_glob = path_tokens.iter().any(|t| t == "*");
+            let hits: Vec<String> = collect_pub_use_leaves(path_tokens)
+                .into_iter()
+                .filter(|leaf| HOOK_ITEM_NAMES.contains(&leaf.as_str()))
+                .collect();
+            if (!hits.is_empty() && has_alias) || (has_glob && joined.contains("hook")) {
+                offending.push(format!("別名または hooks 経由 glob の pub use: {joined}"));
+            }
+            for leaf in hits {
+                reexports.push((leaf, joined.clone()));
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(
+            tokens[i].as_str(),
+            "struct" | "trait" | "enum" | "type" | "fn" | "mod"
+        ) && let Some(name) = tokens.get(i + 1)
+        {
+            if HOOK_ITEM_NAMES.contains(&name.as_str()) {
+                if tokens[i] == "struct" {
+                    struct_decls.push(name.clone());
+                } else {
+                    offending.push(format!("{} {name} 宣言", tokens[i]));
+                }
+            }
+            if tokens[i] == "mod" && name == "hooks" {
+                offending.push("mod hooks 宣言（P4: 公開 hooks モジュールは設けない）".into());
+            }
+        }
+        i += 1;
+    }
+    (reexports, offending, struct_decls)
+}
+
+/// 承認形の正ガード（#2587）。facade src 全体で `HookHandle` の `pub use` は
+/// `lib.rs` の `fandhe_ai_autodiff::HookHandle` ちょうど 1 件、`ForwardHookCtx` は
+/// `nn/mod.rs` の `fandhe_ai_autodiff::nn::ForwardHookCtx` ちょうど 1 件、`ForwardHooked` は
+/// `nn/mod.rs` の `forward_hook::ForwardHooked` ちょうど 1 件。別名・他ファイル・他パスは違反。
+/// facade 内の `struct` 宣言は `nn/forward_hook.rs` の `ForwardHooked` 1 件のみ。
+#[test]
+fn facade_reexports_hook_items_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut found: Vec<(String, String, String)> = Vec::new();
+    let mut struct_decls: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let (reexports, bad, structs) = scan_hook_reexports_and_declarations(content);
+        for b in bad {
+            offending.push(format!("{rel}: {b}"));
+        }
+        for (leaf, joined) in reexports {
+            found.push((rel.clone(), leaf, joined));
+        }
+        for s in structs {
+            struct_decls.push((rel.clone(), s));
+        }
+    });
+    found.sort();
+    let mut expected: Vec<(String, String, String)> = [
+        ("lib.rs", "HookHandle", "fandhe_ai_autodiff::HookHandle"),
+        (
+            "nn/mod.rs",
+            "ForwardHookCtx",
+            "fandhe_ai_autodiff::nn::ForwardHookCtx",
+        ),
+        ("nn/mod.rs", "ForwardHooked", "forward_hook::ForwardHooked"),
+    ]
+    .into_iter()
+    .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+    .collect();
+    expected.sort();
+    assert!(
+        offending.is_empty(),
+        "hooks 系 3 型の再エクスポート・宣言が承認形（§14.4 P3〜P5）外にある: {offending:?}"
+    );
+    assert_eq!(
+        found, expected,
+        "HookHandle／ForwardHooked／ForwardHookCtx の `pub use` が承認形の 3 件と一致しない（重複を含む）"
+    );
+    assert_eq!(
+        struct_decls,
+        vec![(
+            "nn/forward_hook.rs".to_string(),
+            "ForwardHooked".to_string()
+        )],
+        "facade 内の hooks 系 struct 宣言は nn/forward_hook.rs の ForwardHooked 1 件のみ（P5′）"
+    );
+}
+
+/// [`scan_hook_reexports_and_declarations`] の自己テスト（正例・負例の合成入力）。
+#[test]
+fn facade_reexports_hook_items_scanner_detects_each_category() {
+    let scan = scan_hook_reexports_and_declarations;
+    let (ok, bad, st) =
+        scan("pub use fandhe_ai_autodiff::HookHandle;\npub struct ForwardHooked<M>(M);");
+    assert!(bad.is_empty(), "{bad:?}");
+    assert_eq!(
+        ok,
+        vec![(
+            "HookHandle".to_string(),
+            "fandhe_ai_autodiff::HookHandle".to_string()
+        )]
+    );
+    assert_eq!(st, vec!["ForwardHooked".to_string()]);
+    // 違反: 別名。
+    assert!(
+        !scan("pub use fandhe_ai_autodiff::HookHandle as H;")
+            .1
+            .is_empty()
+    );
+    // 違反: hooks 経由 glob。
+    assert!(!scan("pub use fandhe_ai_autodiff::hooks::*;").1.is_empty());
+    // 違反: 同名の独自 trait／enum／type 宣言。
+    assert!(!scan("pub trait HookHandle {}").1.is_empty());
+    assert!(!scan("pub enum ForwardHookCtx {}").1.is_empty());
+    assert!(!scan("pub type ForwardHooked = u8;").1.is_empty());
+    // 違反: `mod hooks`（可視性を問わない）。
+    assert!(!scan("mod hooks;").1.is_empty());
+    assert!(!scan("pub mod hooks { }").1.is_empty());
+    // 別パスの再エクスポートは reexports に載り、呼び出し側が期待集合と照合して落とす。
+    let (other, _, _) = scan("pub use crate::x::ForwardHookCtx;");
+    assert_eq!(other[0].1, "crate::x::ForwardHookCtx");
+}
+
+/// 定義元インベントリ: workspace 全体（`crates/*/src/`）で `struct HookHandle`・
+/// `struct ForwardHookCtx`・`struct ForwardHooked` の宣言所在が承認形の 4 件に完全一致する
+/// （`autodiff/src/hooks.rs`・`autodiff/src/nn/forward_hook.rs` の 2 件・
+/// `facade/src/nn/forward_hook.rs`）。facade の外・独自型へのすり替えを fail-closed に検出する。
+#[test]
+fn workspace_declares_hook_structs_only_in_approved_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let entries = std::fs::read_dir(&crates_dir)
+        .unwrap_or_else(|e| panic!("crates ディレクトリが読めない: {e}"));
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .map(|e| {
+            e.unwrap_or_else(|err| panic!("エントリ列挙に失敗: {err}"))
+                .path()
+        })
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "検査対象のクレートを見失っている");
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for (i, t) in tokens.iter().enumerate() {
+                if t != "struct" {
+                    continue;
+                }
+                if let Some(name) = tokens.get(i + 1)
+                    && HOOK_ITEM_NAMES.contains(&name.as_str())
+                {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{name}")).or_insert(0) += 1;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/hooks.rs::HookHandle",
+        "autodiff/src/nn/forward_hook.rs::ForwardHookCtx",
+        "autodiff/src/nn/forward_hook.rs::ForwardHooked",
+        "facade/src/nn/forward_hook.rs::ForwardHooked",
+    ]
+    .into_iter()
+    .map(|s| (s.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "HookHandle／ForwardHookCtx／ForwardHooked の struct 宣言所在が承認形（#2586・#2587）と一致しない: {found:?}"
+    );
+}
+
+/// `tokens` から単一の `fn <name>`（可視性は問わない）の本体を空白連結で返す。
+/// 宣言がちょうど 1 件でなければ `None`（trait impl 内の非 `pub fn` 用。
+/// `determinism_fn_body` は `pub fn` 限定のため別に持つ）。
+fn sole_fn_body_any_visibility(tokens: &[String], fn_name: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        if token != "fn" || tokens.get(i + 1).map(String::as_str) != Some(fn_name) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        let open = (i..tokens.len()).find(|&j| tokens[j] == "{")?;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (j, t) in tokens.iter().enumerate().skip(open) {
+            match t.as_str() {
+                "{" => depth += 1,
+                "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        found = Some(tokens[open + 1..close?].join(" "));
+    }
+    found
+}
+
+/// `Tape::register_backward_hook`・`Tape::remove_hook`（#2587。§14.4 P2）が承認形
+/// （autodiff `Tape` への 1 行委譲・`pub fn` ちょうど 1 件ずつ）で、シグネチャが
+/// 承認形と一致することを固定する（先例 `facade_tape_custom_is_approved_thin_delegation`）。
+#[test]
+fn facade_tape_hook_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "register_backward_hook").as_deref(),
+        Some("self . 0 . register_backward_hook ( var , hook )"),
+        "Tape::register_backward_hook の本体が承認形（autodiff Tape への 1 行委譲）と一致しない"
+    );
+    assert_eq!(
+        determinism_fn_body(&tokens, "remove_hook").as_deref(),
+        Some("self . 0 . remove_hook ( handle )"),
+        "Tape::remove_hook の本体が承認形（autodiff Tape への 1 行委譲）と一致しない"
+    );
+    // 承認外の hook 系メソッドが facade lib.rs に無い（P8）。
+    for name in [
+        "register_forward_hook",
+        "register_hook",
+        "remove_backward_hook",
+    ] {
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, name),
+            0,
+            "{name} は承認形外（P8）"
+        );
+    }
+
+    // シグネチャ（P2）をコンパイル時に固定する。
+    type RemoveSig =
+        fn(&fandhe_ai::Tape, fandhe_ai::HookHandle) -> Result<(), fandhe_ai::AutodiffError>;
+    let _remove: RemoveSig = fandhe_ai::Tape::remove_hook;
+    fn register<F>(
+        tape: &fandhe_ai::Tape,
+        var: &fandhe_ai::Var<'_>,
+        hook: F,
+    ) -> Result<fandhe_ai::HookHandle, fandhe_ai::AutodiffError>
+    where
+        F: Fn(&fandhe_ai::Tensor<f32>) -> Result<(), fandhe_ai::AutodiffError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        fandhe_ai::Tape::register_backward_hook(tape, var, hook)
+    }
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&fandhe_ai::Tensor::<f32>::new(vec![1.0], &[1usize]).expect("fixture"));
+    let handle = register(&tape, &x, |_g| Ok(())).expect("register_backward_hook");
+    tape.remove_hook(handle).expect("remove_hook");
+}
+
+/// `src/nn/forward_hook.rs` の公開 item は `struct ForwardHooked` のみ・制限付き 0 件。
+/// 固有 pub fn は `new`・`inner`・`inner_mut`・`into_inner`（P6）、手書き trait impl は
+/// `Module` のみ（`Deref` 等で inner／hook へ抜ける経路を拒否する）。
+#[test]
+fn nn_forward_hook_rs_public_items_match_expected_set() {
+    let content = nn_src("forward_hook.rs");
+    let (public, restricted) = scan_top_level_pub_items(&content);
+    assert_eq!(public, pair_set(&[("struct", "ForwardHooked")]));
+    assert!(restricted.is_empty(), "制限付き pub item: {restricted:?}");
+    let (pubs, nonpub, traits) = scan_type_impl_surface(&content, "ForwardHooked");
+    let to_set = |xs: &[&str]| -> std::collections::BTreeSet<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    };
+    assert_eq!(pubs, to_set(&["new", "inner", "inner_mut", "into_inner"]));
+    assert!(
+        nonpub.is_empty(),
+        "ForwardHooked の非 pub 固有 fn: {nonpub:?}"
+    );
+    assert_eq!(traits, to_set(&["Module"]));
+}
+
+/// P5′ の単一実装の固定: facade 版 `ForwardHooked` は autodiff 側 `ForwardHooked` と
+/// `FacadeModuleAdapter` を使い、`forward` が autodiff `Module::forward` への 1 式委譲である。
+/// hook を直接呼ぶ・`ForwardHookCtx` を自前構築する（`from_tape`／`from_host`）実装へ
+/// すり替えられたら落ちる。
+#[test]
+fn nn_forward_hook_rs_delegates_to_autodiff_single_implementation() {
+    let content = nn_src("forward_hook.rs");
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for required in ["AutodiffForwardHooked", "FacadeModuleAdapter"] {
+        assert!(
+            tokens.iter().any(|t| t == required),
+            "{required} への参照が無い"
+        );
+    }
+    for forbidden in ["from_tape", "from_host", "unsafe", "unwrap", "expect"] {
+        assert!(
+            !tokens.iter().any(|t| t == forbidden),
+            "forward_hook.rs に {forbidden} がある（P5′・coding-rust.md 違反）"
+        );
+    }
+    assert!(
+        !tokens.windows(2).any(|w| w[0] == "hook" && w[1] == "("),
+        "hook クロージャの直接呼び出しがある（hook の呼び出しは autodiff の単一実装に任せる）"
+    );
+    assert_eq!(
+        sole_fn_body_any_visibility(&tokens, "forward").as_deref(),
+        Some("AutodiffModule : : forward ( & self . inner , tape . 0 , input )"),
+        "forward の本体が autodiff Module::forward への 1 式委譲と一致しない"
+    );
+    assert_eq!(
+        sole_fn_body_any_visibility(&tokens, "into_inner").as_deref(),
+        Some("* self . inner . into_inner ( ) . 0")
+    );
+}
+
+/// 承認形（#2587）が facade の import だけで到達できることを、型名・シグネチャ・最小動作で
+/// 固定する（先例 `tape_backward_create_graph_is_reachable_via_facade`）。
+#[test]
+fn hooks_are_reachable_via_facade_only() {
+    use fandhe_ai::nn::{ForwardHookCtx, ForwardHooked, Module};
+    use fandhe_ai::{AutodiffError, HookHandle, Tape, TapeRef, Tensor, Var};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Id;
+    impl Module for Id {
+        fn forward<'t>(
+            &self,
+            _tape: TapeRef<'t>,
+            input: &Var<'t>,
+        ) -> Result<Var<'t>, AutodiffError> {
+            Ok(*input)
+        }
+    }
+
+    // ForwardHooked の accessor 署名（P6）。
+    let _inner: fn(&ForwardHooked<Id>) -> &Id = ForwardHooked::<Id>::inner;
+    let _inner_mut: fn(&mut ForwardHooked<Id>) -> &mut Id = ForwardHooked::<Id>::inner_mut;
+    let _into: fn(ForwardHooked<Id>) -> Id = ForwardHooked::<Id>::into_inner;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    let hooked = ForwardHooked::new(Id, move |ctx: &ForwardHookCtx<'_>| {
+        // ForwardHookCtx のメソッド署名（P6）を戻り値型で固定する。
+        let input_shape: &[usize] = ctx.input_shape();
+        let output_shape: &[usize] = ctx.output_shape();
+        let value: Result<Tensor<f32>, AutodiffError> = ctx.output_value();
+        assert_eq!(input_shape, &[2usize][..]);
+        assert_eq!(output_shape, &[2usize][..]);
+        assert!(value.is_ok());
+        seen.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    let tape: Tape = fandhe_ai::tape();
+    let x = tape.var(&Tensor::<f32>::new(vec![1.0, 2.0], &[2usize]).expect("fixture"));
+    let y = hooked.forward(TapeRef::from(&tape), &x).expect("forward");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let handle: HookHandle = tape
+        .register_backward_hook(&y, |_g| Ok(()))
+        .expect("register_backward_hook");
+    tape.remove_hook(handle).expect("remove_hook");
+}
 // =====================================================================
 // #2144 実装・#2513 公開（親 #2500・ルート #2499）の正ガード。旧否定ガード
 // （`VarMatrixOpsHoldDoctestGuard`・対応するソース走査 4 件）を、承認形
@@ -16630,6 +17050,10 @@ fn workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations() 
         // #2395: facade 独自 `nn::Module` の defaulted メソッド（承認済み）。
         ("facade/src/nn/module.rs::state_dict", 1usize),
         ("facade/src/nn/module.rs::load_state_dict", 1usize),
+        // #2587: facade 版 `ForwardHooked<M>` が `Module` の同名メソッドを inner の facade
+        // `Module` へ透過委譲する実装（optimizer の state_dict とは無関係。所在の登録であり緩和ではない）。
+        ("facade/src/nn/forward_hook.rs::state_dict", 1usize),
+        ("facade/src/nn/forward_hook.rs::load_state_dict", 1usize),
         // #2665 実装・#2679 公開: Functional API（`FunctionalModel` の `state_dict`／`load_state_dict`。
         // 公開面は `facade_exposes_functional_api_only_in_approved_shape` が固定。所在の登録であり緩和ではない）。
         ("facade/src/compat/functional.rs::state_dict", 1usize),
@@ -25171,7 +25595,7 @@ fn nn_src(file: &str) -> String {
 }
 
 /// 正ガード: `src/nn/mod.rs` の全種別の公開 item が
-/// `pub mod init`・`pub mod kv_cache`（#2579）・`pub mod rnn` と `pub use` の 8 件（`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
+/// `pub mod init`・`pub mod kv_cache`（#2579）・`pub mod rnn` と `pub use` の 10 件（`ForwardHooked`・`ForwardHookCtx`〈#2587〉・`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
 /// `ModuleDict`／`summary` は #2402 で承認済み。`Transformer`／`TransformerConfig`／
 /// `TransformerDecoderLayer` は #2532・#2533 で承認済み）に完全一致する。
 /// `pub fn`／`pub struct` 等の追加や `pub mod container;` 等の新設は fail する。
@@ -25184,6 +25608,9 @@ fn nn_mod_public_items_match_expected_set() {
             ("mod", "init"),
             ("mod", "kv_cache"),
             ("mod", "rnn"),
+            // #2587: hooks の承認形（facade 版 `ForwardHooked` と autodiff 由来の `ForwardHookCtx`）。
+            ("use", "ForwardHookCtx"),
+            ("use", "ForwardHooked"),
             ("use", "Module"),
             ("use", "ModuleDict"),
             ("use", "ModuleList"),
