@@ -23,6 +23,10 @@
 //! **公開形は未承認（保留）**: facade（`fandhe_ai`）へは公開しない（承認依頼 #2677・公開
 //! #2678）。保留は facade の `GradcheckAnomalyHoldDoctestGuard` と `tests/api_surface.rs` の
 //! 否定ガードで機械固定している。
+//!
+//! **公開状況（イシュー #2678）**: facade `Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は #2678 でも保留（決定記録に facade シグネチャが書かれていないため）。
+//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
+//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
 use crate::error::AutodiffError;
 use crate::jacobian_ops::jacobian;

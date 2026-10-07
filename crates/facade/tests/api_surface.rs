@@ -21980,6 +21980,18 @@ fn predict_batches_usage_doctests_are_present_and_compiled() {
     let hidden = ["```", "# predict_batches", "```"].map(String::from);
     assert!(!doctest_probe_violations("t", &hidden, &["predict_batches"]).is_empty());
 }
+/// #2678 で承認形どおり facade `Tape` に公開した 5 メソッド
+/// （`bincount`・`bincount_weighted`・`jacobian`・`hessian`・`backward_detect_anomaly`）。
+/// 各グループの否定ガード走査はこれらの `fn` 宣言だけを除外し、薄い委譲・件数・
+/// 受け手は [`facade_tape_phase4_methods_are_thin_delegations`] が固定する。
+const FACADE_TAPE_APPROVED_FNS: [&str; 5] = [
+    "bincount",
+    "bincount_weighted",
+    "jacobian",
+    "hessian",
+    "backward_detect_anomaly",
+];
+
 // =====================================================================
 // FftOpsHoldDoctestGuard（イシュー #2631・#2632・#2633・親 #2630・ルート #2499 Phase 4）:
 // `PredictBatchesHoldDoctestGuard`（#2192。#2582 で削除済み）系のテストを鏡写しにする。
@@ -22041,10 +22053,6 @@ fn fft_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const FFT_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_fft_hold_probe {\n\
-\x20\x20\x20\x20pub struct FftNorm;\n\
-\x20\x20\x20\x20pub struct StftOptions;\n\
-\x20\x20\x20\x20pub struct IstftOptions;\n\
-\x20\x20\x20\x20pub struct StftPadMode;\n\
 \x20\x20\x20\x20pub mod fft_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn rfft() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn irfft() {}\n\
@@ -22070,27 +22078,6 @@ trait __FandheFftHoldProbe {\n\
 \x20\x20\x20\x20fn istft(&self) -> __FandheFftHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheFftHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn rfft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn irfft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn fft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn ifft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn stft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn istft(&self) -> __FandheFftHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheFftHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn rfft(&self) -> __FandheFftHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFftHoldMarker\n\
@@ -22112,7 +22099,7 @@ impl __FandheFftHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: FftNorm, _: StftOptions, _: IstftOptions, _: StftPadMode) {\n\
+fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20fft_ops::rfft();\n\
@@ -22124,13 +22111,7 @@ fn __probe_free_fns(_: FftNorm, _: StftOptions, _: IstftOptions, _: StftPadMode)
 \x20\x20\x20\x20fft::__mark();\n\
 }\n\
 \n\
-fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::rfft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::irfft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::fft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::ifft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::stft(v);\n\
-\x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Var::istft(v);\n\
+fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::rfft(tape);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::irfft(tape);\n\
 \x20\x20\x20\x20let _: __FandheFftHoldMarker = fandhe_ai::Tape::fft(tape);\n\
@@ -22144,19 +22125,11 @@ fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 const FFT_OPS_FN_NAMES: [&str; 6] = ["rfft", "irfft", "fft", "ifft", "stft", "istft"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-/// `StftOptions`／`IstftOptions`（autodiff）・`StftPadMode`／`StftParams`／
-/// `IstftParams`（tensor-core。イシュー #2633）を含む。
-const FFT_OPS_IDENTS: [&str; 9] = [
-    "fft_ops",
-    "FftNorm",
-    "FftError",
-    "fft",
-    "StftOptions",
-    "IstftOptions",
-    "StftPadMode",
-    "StftParams",
-    "IstftParams",
-];
+/// `StftParams`／`IstftParams`（tensor-core。イシュー #2633）を含む。承認済みの
+/// `FftNorm`・`StftPadMode`・`StftOptions`・`IstftOptions`（#2678）は本表から外し、
+/// 承認形の 1 文 1 行だけを許す正ガード（`facade_reexports_phase4_ops_types_only_in_approved_shape`）
+/// が別途固定する（モジュール経由の経路は `fft_ops`／`fft` が拒否する）。
+const FFT_OPS_IDENTS: [&str; 5] = ["fft_ops", "FftError", "fft", "StftParams", "IstftParams"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`FFT_OPS_IDENTS`] のうち型として存在するもの）。
@@ -22266,11 +22239,11 @@ fn facade_does_not_reexport_or_declare_fft_ops_detects_each_category() {
     assert!(offense("pub use fandhe_ai_autodiff::fft_ops;"));
     assert!(offense("pub use fandhe_ai_autodiff::fft_ops as spectral;"));
     // 正例: `FftNorm` の再エクスポート（単一行・group・別名）。
-    assert!(offense("pub use fandhe_ai_tensor_core::FftNorm;"));
-    assert!(offense(
+    assert!(!offense("pub use fandhe_ai_tensor_core::FftNorm;")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Device,\n    FftNorm,\n};"
-    ));
-    assert!(offense("pub use fandhe_ai_tensor_core::FftNorm as Norm;"));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("pub use fandhe_ai_tensor_core::FftNorm as Norm;")); // #2678: 承認済み（承認形は正ガードが固定）
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
         "pub use fandhe_ai_autodiff::fft_ops::{rfft, irfft};"
@@ -22288,7 +22261,7 @@ fn facade_does_not_reexport_or_declare_fft_ops_detects_each_category() {
     assert!(offense(
         "pub use fandhe_ai_autodiff::fft_ops::{IstftOptions, StftOptions};"
     ));
-    assert!(offense("pub use fandhe_ai_tensor_core::StftPadMode;"));
+    assert!(!offense("pub use fandhe_ai_tensor_core::StftPadMode;")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense(
         "pub use fandhe_ai_tensor_core::fft::StftParams as P;"
     ));
@@ -22363,7 +22336,7 @@ fn workspace_declares_fft_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = [
+    let mut expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/fft_ops.rs::rfft".to_string(), 1usize),
         ("autodiff/src/fft_ops.rs::irfft".to_string(), 1usize),
         ("autodiff/src/fft_ops.rs::fft".to_string(), 1usize),
@@ -22373,6 +22346,10 @@ fn workspace_declares_fft_ops_fn_names_only_in_allowed_locations() {
     ]
     .into_iter()
     .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["rfft", "irfft", "fft", "ifft", "stft", "istft"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の rfft／irfft／fft／ifft／stft／istft の `fn` 宣言が承認済みの\
@@ -22466,36 +22443,6 @@ trait __FandheTrigOpsHoldProbe {\n\
 \x20\x20\x20\x20fn atan2(&self) -> __FandheTrigOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheTrigOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn atan(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn asin(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn acos(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn sinh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cosh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn asinh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn acosh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn atanh(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn atan2(&self) -> __FandheTrigOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheTrigOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn atan(&self) -> __FandheTrigOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheTrigOpsHoldMarker\n\
@@ -22540,16 +22487,7 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20trig_ops::atan2();\n\
 }\n\
 \n\
-fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asin(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acos(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::sinh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::cosh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::asinh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::acosh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atanh(v);\n\
-\x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Var::atan2(v);\n\
+fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::atan(tape);\n\
 \x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::asin(tape);\n\
 \x20\x20\x20\x20let _: __FandheTrigOpsHoldMarker = fandhe_ai::Tape::acos(tape);\n\
@@ -22720,10 +22658,16 @@ fn workspace_declares_trig_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = TRIG_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = TRIG_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/trig_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "atan", "asin", "acos", "sinh", "cosh", "asinh", "acosh", "atanh", "atan2",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の atan／asin／acos／sinh／cosh／asinh／acosh／\
@@ -22808,21 +22752,6 @@ trait __FandheNonfiniteOpsHoldProbe {\n\
 \x20\x20\x20\x20fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheNonfiniteOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn isinf(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn isfinite(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn nan_to_num(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheNonfiniteOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn isnan(&self) -> __FandheNonfiniteOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheNonfiniteOpsHoldMarker\n\
@@ -22878,15 +22807,11 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20tb: &fandhe_ai::Tensor<bool>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isnan(v);\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isinf(v);\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::isfinite(v);\n\
-\x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Var::nan_to_num(v);\n\
 \x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isnan(tape);\n\
 \x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isinf(tape);\n\
 \x20\x20\x20\x20let _: __FandheNonfiniteOpsHoldMarker = fandhe_ai::Tape::isfinite(tape);\n\
@@ -23059,10 +22984,14 @@ fn workspace_declares_nonfinite_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = NONFINITE_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = NONFINITE_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/nonfinite_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["isnan", "isinf", "isfinite", "nan_to_num"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の isnan／isinf／isfinite／nan_to_num の `fn` 宣言が\
@@ -23148,18 +23077,6 @@ trait __FandheCumulativeOpsHoldProbe {\n\
 \x20\x20\x20\x20fn logcumsumexp(&self) -> __FandheCumulativeOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheCumulativeOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn cummax(&self) -> __FandheCumulativeOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cummin(&self) -> __FandheCumulativeOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn logcumsumexp(&self) -> __FandheCumulativeOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheCumulativeOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn cummax(&self) -> __FandheCumulativeOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheCumulativeOpsHoldMarker\n\
@@ -23194,13 +23111,10 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::cummax(v);\n\
-\x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::cummin(v);\n\
-\x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Var::logcumsumexp(v);\n\
 \x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::cummax(tape);\n\
 \x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::cummin(tape);\n\
 \x20\x20\x20\x20let _: __FandheCumulativeOpsHoldMarker = fandhe_ai::Tape::logcumsumexp(tape);\n\
@@ -23373,10 +23287,14 @@ fn workspace_declares_cumulative_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = CUMULATIVE_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = CUMULATIVE_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/cumulative_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["cummax", "cummin", "logcumsumexp"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の cummax／cummin／logcumsumexp の `fn` 宣言が\
@@ -23445,7 +23363,6 @@ fn stat_reduce_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const STAT_REDUCE_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_stat_reduce_hold_probe {\n\
-\x20\x20\x20\x20pub struct QuantileInterpolation;\n\
 \x20\x20\x20\x20pub struct StatReduceError;\n\
 \x20\x20\x20\x20pub mod stat_reduce_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn median() {}\n\
@@ -23470,27 +23387,6 @@ trait __FandheStatReduceOpsHoldProbe {\n\
 \x20\x20\x20\x20fn quantile(&self) -> __FandheStatReduceOpsHoldMarker;\n\
 \x20\x20\x20\x20fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker;\n\
 \x20\x20\x20\x20fn nansum(&self) -> __FandheStatReduceOpsHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheStatReduceOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn median(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn median_with_indices(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn kthvalue(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn quantile(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn nanmean(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn nansum(&self) -> __FandheStatReduceOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheStatReduceOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 }\n\
 \n\
 impl __FandheStatReduceOpsHoldProbe for fandhe_ai::Tape {\n\
@@ -23535,7 +23431,7 @@ impl __FandheStatReduceOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: QuantileInterpolation, _: StatReduceError) {\n\
+fn __probe_free_fns(_: StatReduceError) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20stat_reduce_ops::median();\n\
@@ -23548,16 +23444,10 @@ fn __probe_free_fns(_: QuantileInterpolation, _: StatReduceError) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::median_with_indices(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::kthvalue(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::quantile(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nanmean(v);\n\
-\x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Var::nansum(v);\n\
 \x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median(tape);\n\
 \x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::median_with_indices(tape);\n\
 \x20\x20\x20\x20let _: __FandheStatReduceOpsHoldMarker = fandhe_ai::Tape::kthvalue(tape);\n\
@@ -23582,12 +23472,7 @@ const STAT_REDUCE_OPS_FN_NAMES: [&str; 6] = [
 ];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const STAT_REDUCE_OPS_IDENTS: [&str; 4] = [
-    "stat_reduce_ops",
-    "stat_reduce",
-    "QuantileInterpolation",
-    "StatReduceError",
-];
+const STAT_REDUCE_OPS_IDENTS: [&str; 3] = ["stat_reduce_ops", "stat_reduce", "StatReduceError"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`STAT_REDUCE_OPS_IDENTS`] のうち型として存在するもの）。
@@ -23694,15 +23579,15 @@ fn facade_does_not_reexport_or_declare_stat_reduce_ops_detects_each_category() {
     ));
     assert!(offense("pub use fandhe_ai_tensor_core::stat_reduce;"));
     // 正例: 型の再エクスポート（単一行・group・別名）。
-    assert!(offense(
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::QuantileInterpolation;"
-    ));
-    assert!(offense(
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Device,\n    QuantileInterpolation,\n};"
-    ));
-    assert!(offense(
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::QuantileInterpolation as Interp;"
-    ));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("pub use fandhe_ai_tensor_core::StatReduceError;"));
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
@@ -23793,6 +23678,17 @@ fn workspace_declares_stat_reduce_ops_fn_names_only_in_allowed_locations() {
     // 無関係な既存 `fn median`（本イシューではリネームしない）。
     expected.insert("backend-cpu/src/gemm_blis/mod.rs::median".to_string(), 5);
     expected.insert("guardrail/src/report.rs::median".to_string(), 1);
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "median",
+        "median_with_indices",
+        "kthvalue",
+        "quantile",
+        "nanmean",
+        "nansum",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の median／median_with_indices／kthvalue／quantile／\
@@ -23972,14 +23868,9 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20ti: &fandhe_ai::Tensor<i32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::histc(v);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount(v);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bincount_weighted(v);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::searchsorted(v);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Var::bucketize(v);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::histc(tape);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount(tape);\n\
-\x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bincount_weighted(tape);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::searchsorted(tape);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tape::bucketize(tape);\n\
 \x20\x20\x20\x20let _: __FandheBinningOpsHoldMarker = fandhe_ai::Tensor::<f32>::histc(tf);\n\
@@ -24068,6 +23959,11 @@ fn scan_binning_ops_reexports_and_declarations(content: &str) -> Vec<String> {
     }
 
     for fn_name in BINNING_OPS_FN_NAMES {
+        // #2678: facade `Tape` の承認済みメソッド（`lib.rs` にちょうど 1 件・薄い委譲）は
+        // 正ガード（`facade_tape_phase4_methods_are_thin_delegations`）が固定するため除外する。
+        if FACADE_TAPE_APPROVED_FNS.contains(&fn_name) {
+            continue;
+        }
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -24132,8 +24028,8 @@ fn facade_does_not_reexport_or_declare_binning_ops_detects_each_category() {
     // 正例: fn 宣言・pub mod。
     assert!(offense("pub fn histc() {}"));
     assert!(offense("impl Var { pub fn histc(&self) {} }"));
-    assert!(offense("impl Tape { pub fn bincount(&self) {} }"));
-    assert!(offense("impl Tape { pub fn bincount_weighted(&self) {} }"));
+    assert!(!offense("impl Tape { pub fn bincount(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("impl Tape { pub fn bincount_weighted(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("impl Var { pub fn searchsorted(&self) {} }"));
     assert!(offense("impl Var { pub fn bucketize(&self) {} }"));
     assert!(offense("pub mod binning_ops {}"));
@@ -24195,10 +24091,18 @@ fn workspace_declares_binning_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = BINNING_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = BINNING_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/binning_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["histc", "searchsorted", "bucketize"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
+    // #2678: 承認形の facade `Tape` メソッド（`facade/src/lib.rs` に各 1 件）。
+    for n in ["bincount", "bincount_weighted"] {
+        expected.insert(format!("facade/src/lib.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の histc／bincount／bincount_weighted／searchsorted／\
@@ -24297,27 +24201,6 @@ trait __FandheLowPrecisionHoldProbe {\n\
 \x20\x20\x20\x20fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheLowPrecisionHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn mul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn relu_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn exp_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tanh_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheLowPrecisionHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn matmul_low_precision(&self) -> __FandheLowPrecisionHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheLowPrecisionHoldMarker\n\
@@ -24356,13 +24239,7 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20tanh_low_precision();\n\
 }\n\
 \n\
-fn __probe_methods(v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::matmul_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::add_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::mul_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::relu_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::exp_low_precision(v);\n\
-\x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Var::tanh_low_precision(v);\n\
+fn __probe_methods(_v: &fandhe_ai::Var<'_>, tape: &fandhe_ai::Tape) {\n\
 \x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::matmul_low_precision(tape);\n\
 \x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::add_low_precision(tape);\n\
 \x20\x20\x20\x20let _: __FandheLowPrecisionHoldMarker = fandhe_ai::Tape::mul_low_precision(tape);\n\
@@ -24546,6 +24423,16 @@ fn workspace_declares_low_precision_ops_fn_names_only_in_allowed_locations() {
         expected.insert(format!("autodiff/src/low_precision_ops.rs::{fn_name}"), 1);
     }
     expected.insert("autodiff/src/var.rs::matmul_low_precision".to_string(), 1);
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "add_low_precision",
+        "mul_low_precision",
+        "relu_low_precision",
+        "exp_low_precision",
+        "tanh_low_precision",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の低精度 forward 入口の `fn` 宣言が承認済みの\
@@ -25737,7 +25624,6 @@ fn shape_view_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const SHAPE_VIEW_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_shape_view_hold_probe {\n\
-\x20\x20\x20\x20pub struct MeshgridIndexing;\n\
 \x20\x20\x20\x20pub mod shape_view_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn unbind() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn movedim() {}\n\
@@ -25760,30 +25646,6 @@ trait __FandheShapeViewOpsHoldProbe {\n\
 \x20\x20\x20\x20fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker;\n\
 \x20\x20\x20\x20fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker;\n\
 \x20\x20\x20\x20fn rot90(&self) -> __FandheShapeViewOpsHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheShapeViewOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn unbind(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn movedim(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn swapaxes(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensor_split(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensor_split_indices(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn meshgrid(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn rot90(&self) -> __FandheShapeViewOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheShapeViewOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 }\n\
 \n\
 impl __FandheShapeViewOpsHoldProbe for fandhe_ai::Tape {\n\
@@ -25834,7 +25696,7 @@ impl __FandheShapeViewOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: MeshgridIndexing) {\n\
+fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20shape_view_ops::unbind();\n\
@@ -25847,17 +25709,10 @@ fn __probe_free_fns(_: MeshgridIndexing) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::unbind(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::movedim(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::swapaxes(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::tensor_split_indices(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::meshgrid(v);\n\
-\x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Var::rot90(v);\n\
 \x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::unbind(tape);\n\
 \x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::movedim(tape);\n\
 \x20\x20\x20\x20let _: __FandheShapeViewOpsHoldMarker = fandhe_ai::Tape::swapaxes(tape);\n\
@@ -25885,7 +25740,7 @@ const SHAPE_VIEW_OPS_FN_NAMES: [&str; 7] = [
 ];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const SHAPE_VIEW_OPS_IDENTS: [&str; 2] = ["shape_view_ops", "MeshgridIndexing"];
+const SHAPE_VIEW_OPS_IDENTS: [&str; 1] = ["shape_view_ops"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`SHAPE_VIEW_OPS_IDENTS`] のうち型として存在するもの）。
@@ -26077,10 +25932,22 @@ fn workspace_declares_shape_view_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = SHAPE_VIEW_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = SHAPE_VIEW_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/shape_view_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "unbind",
+        "tensor_split",
+        "tensor_split_indices",
+        "movedim",
+        "swapaxes",
+        "rot90",
+        "meshgrid",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の unbind／movedim／swapaxes／tensor_split／\
@@ -26147,7 +26014,6 @@ fn indexed_update_ops_hold_doctest_probe_body_matches_fixed_contract() {
 const INDEXED_UPDATE_OPS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_indexed_update_hold_probe {\n\
-\x20\x20\x20\x20pub struct ScatterReduceMode;\n\
 \x20\x20\x20\x20pub mod indexed_update_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn scatter_reduce() {}\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn index_add() {}\n\
@@ -26167,21 +26033,6 @@ trait __FandheIndexedUpdateOpsHoldProbe {\n\
 \x20\x20\x20\x20fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker;\n\
 \x20\x20\x20\x20fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker;\n\
 \x20\x20\x20\x20fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker;\n\
-}\n\
-\n\
-impl<'t> __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn scatter_reduce(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn index_add(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn index_copy(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn masked_scatter(&self) -> __FandheIndexedUpdateOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheIndexedUpdateOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 }\n\
 \n\
 impl __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Tape {\n\
@@ -26214,7 +26065,7 @@ impl __FandheIndexedUpdateOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: ScatterReduceMode) {\n\
+fn __probe_free_fns() {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20indexed_update_ops::scatter_reduce();\n\
@@ -26225,14 +26076,10 @@ fn __probe_free_fns(_: ScatterReduceMode) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::scatter_reduce(v);\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_add(v);\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::index_copy(v);\n\
-\x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Var::masked_scatter(v);\n\
 \x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::scatter_reduce(tape);\n\
 \x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_add(tape);\n\
 \x20\x20\x20\x20let _: __FandheIndexedUpdateOpsHoldMarker = fandhe_ai::Tape::index_copy(tape);\n\
@@ -26252,8 +26099,7 @@ const INDEXED_UPDATE_OPS_FN_NAMES: [&str; 4] = [
 ];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const INDEXED_UPDATE_OPS_IDENTS: [&str; 3] =
-    ["indexed_update_ops", "indexed_update", "ScatterReduceMode"];
+const INDEXED_UPDATE_OPS_IDENTS: [&str; 2] = ["indexed_update_ops", "indexed_update"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`INDEXED_UPDATE_OPS_IDENTS`] のうち型として存在するもの）。
@@ -26360,13 +26206,15 @@ fn facade_does_not_reexport_or_declare_indexed_update_ops_detects_each_category(
     ));
     assert!(offense("pub use fandhe_ai_tensor_core::indexed_update;"));
     // 正例: 型の再エクスポート（単一行・group・別名・複数行・tensor-core ルート）。
-    assert!(offense("pub use fandhe_ai_tensor_core::ScatterReduceMode;"));
-    assert!(offense(
+    assert!(!offense(
+        "pub use fandhe_ai_tensor_core::ScatterReduceMode;"
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Tensor,\n    ScatterReduceMode,\n};"
-    ));
-    assert!(offense(
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::ScatterReduceMode as Mode;"
-    ));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
         "pub use fandhe_ai_autodiff::indexed_update_ops::{index_add, index_copy};"
@@ -26450,10 +26298,19 @@ fn workspace_declares_indexed_update_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = INDEXED_UPDATE_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = INDEXED_UPDATE_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/indexed_update_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in [
+        "scatter_reduce",
+        "index_add",
+        "index_copy",
+        "masked_scatter",
+    ] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の scatter_reduce／index_add／index_copy／\
@@ -26540,24 +26397,6 @@ trait __FandheTensorProductOpsHoldProbe {\n\
 \x20\x20\x20\x20fn cross(&self) -> __FandheTensorProductOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheTensorProductOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn kron(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensordot(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn tensordot_axes(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cdist(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn cross(&self) -> __FandheTensorProductOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheTensorProductOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn kron(&self) -> __FandheTensorProductOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheTensorProductOpsHoldMarker\n\
@@ -26605,15 +26444,10 @@ fn __probe_free_fns() {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::kron(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::tensordot_axes(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cdist(v);\n\
-\x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Var::cross(v);\n\
 \x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::kron(tape);\n\
 \x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot(tape);\n\
 \x20\x20\x20\x20let _: __FandheTensorProductOpsHoldMarker = fandhe_ai::Tape::tensordot_axes(tape);\n\
@@ -26797,10 +26631,14 @@ fn workspace_declares_tensor_product_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = TENSOR_PRODUCT_OPS_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = TENSOR_PRODUCT_OPS_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/tensor_product_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["kron", "tensordot", "tensordot_axes", "cdist", "cross"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の kron／tensordot／tensordot_axes／cdist／cross の\
@@ -26868,7 +26706,6 @@ fn pad_modes_hold_doctest_probe_body_matches_fixed_contract() {
 const PAD_MODES_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
 mod __fandhe_pad_modes_hold_probe {\n\
-\x20\x20\x20\x20pub struct PadMode;\n\
 \x20\x20\x20\x20pub struct PadModeError;\n\
 \x20\x20\x20\x20pub mod pad_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn pad_with_mode() {}\n\
@@ -26885,12 +26722,6 @@ trait __FandhePadModesHoldProbe {\n\
 \x20\x20\x20\x20fn pad_with_mode(&self) -> __FandhePadModesHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandhePadModesHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePadModesHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandhePadModesHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn pad_with_mode(&self) -> __FandhePadModesHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandhePadModesHoldMarker\n\
@@ -26903,7 +26734,7 @@ impl __FandhePadModesHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: PadMode, _: PadModeError) {\n\
+fn __probe_free_fns(_: PadModeError) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20pad_ops::pad_with_mode();\n\
@@ -26911,11 +26742,10 @@ fn __probe_free_fns(_: PadMode, _: PadModeError) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandhePadModesHoldMarker = fandhe_ai::Var::pad_with_mode(v);\n\
 \x20\x20\x20\x20let _: __FandhePadModesHoldMarker = fandhe_ai::Tape::pad_with_mode(tape);\n\
 \x20\x20\x20\x20let _: __FandhePadModesHoldMarker = fandhe_ai::Tensor::<f32>::pad_with_mode(tf);\n\
 }";
@@ -26925,7 +26755,7 @@ const PAD_MODES_FN_NAMES: [&str; 1] = ["pad_with_mode"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
 /// `StftPadMode`（既存の STFT 用 enum）・`Var::pad` は別トークンで対象外。
-const PAD_MODES_IDENTS: [&str; 4] = ["pad_ops", "pad_modes", "PadMode", "PadModeError"];
+const PAD_MODES_IDENTS: [&str; 3] = ["pad_ops", "pad_modes", "PadModeError"];
 
 /// 型宣言（`struct`／`enum`／`type`／`trait`）の独自宣言を禁じる型名
 /// （[`PAD_MODES_IDENTS`] のうち型として存在するもの）。
@@ -27028,12 +26858,12 @@ fn facade_does_not_reexport_or_declare_pad_modes_detects_each_category() {
     assert!(offense("pub use fandhe_ai_autodiff::pad_ops as padding;"));
     assert!(offense("pub use fandhe_ai_tensor_core::pad_modes;"));
     // 正例: 型の再エクスポート（単一行・group・別名・複数行・tensor-core ルート）。
-    assert!(offense("pub use fandhe_ai_tensor_core::PadMode;"));
+    assert!(!offense("pub use fandhe_ai_tensor_core::PadMode;")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("pub use fandhe_ai_tensor_core::PadModeError;"));
-    assert!(offense(
+    assert!(!offense(
         "pub use fandhe_ai_tensor_core::{\n    Tensor,\n    PadMode,\n};"
-    ));
-    assert!(offense("pub use fandhe_ai_tensor_core::PadMode as Mode;"));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("pub use fandhe_ai_tensor_core::PadMode as Mode;")); // #2678: 承認済み（承認形は正ガードが固定）
     // 正例: 関数の個別再エクスポート。
     assert!(offense(
         "pub use fandhe_ai_autodiff::pad_ops::pad_with_mode;"
@@ -27116,10 +26946,12 @@ fn workspace_declares_pad_modes_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = PAD_MODES_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = PAD_MODES_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/pad_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    expected.insert("autodiff/src/var.rs::pad_with_mode".to_string(), 1usize);
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の pad_with_mode の `fn` 宣言が承認済みの置き場所\
@@ -29314,24 +29146,6 @@ trait __FandheActivationScalarOpsHoldProbe {\n\
 \x20\x20\x20\x20fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheActivationScalarOpsHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn celu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn softsign(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn hardsigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn log_sigmoid(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheActivationScalarOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn selu(&self) -> __FandheActivationScalarOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheActivationScalarOpsHoldMarker\n\
@@ -29386,23 +29200,18 @@ fn __probe_free_fns(\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::selu(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::selu(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::selu(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::celu(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::celu(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::celu(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::softsign(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::softsign(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::softsign(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::hardsigmoid(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::hardsigmoid(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::hardsigmoid(tf);\n\
-\x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Var::log_sigmoid(v);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tape::log_sigmoid(tape);\n\
 \x20\x20\x20\x20let _: __FandheActivationScalarOpsHoldMarker = fandhe_ai::Tensor::<f32>::log_sigmoid(tf);\n\
 }";
@@ -29636,6 +29445,10 @@ fn workspace_declares_activation_scalar_ops_fn_names_only_in_allowed_locations()
     for n in ACTIVATION_SCALAR_OPS_ADD_NAMES {
         expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1usize);
     }
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["selu", "celu", "softsign", "hardsigmoid", "log_sigmoid"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の selu／celu／softsign／hardsigmoid／log_sigmoid の `fn` 宣言が\
@@ -29805,10 +29618,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::softmin(v);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::tanhshrink(v);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::threshold(v);\n\
-\x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu(v);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Var::rrelu_with_noise(v);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::softmin(tape);\n\
 \x20\x20\x20\x20let _: __FandheSoftminThresholdOpsHoldMarker = fandhe_ai::Tape::tanhshrink(tape);\n\
@@ -30081,6 +29890,10 @@ fn workspace_declares_softmin_threshold_ops_fn_names_only_in_allowed_locations()
     // #2679: `compat::Sequential::add_*` 4 本は承認形（`facade/src/compat/sequential.rs` に各 1 件）。
     for n in SOFTMIN_THRESHOLD_ADD_NAMES {
         expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1);
+    }
+    // #2678: 承認形の `Var` 委譲メソッド（`autodiff/src/var.rs` に各 1 件）。
+    for n in ["softmin", "tanhshrink", "threshold", "rrelu"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1usize);
     }
     assert_eq!(
         found, expected,
@@ -33402,15 +33215,6 @@ impl<'t> __FandheJacobianHessianHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-impl __FandheJacobianHessianHoldProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn jacobian(&self) -> __FandheJacobianHessianHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheJacobianHessianHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn hessian(&self) -> __FandheJacobianHessianHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheJacobianHessianHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheJacobianHessianHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn jacobian(&self) -> __FandheJacobianHessianHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheJacobianHessianHoldMarker\n\
@@ -33431,13 +33235,11 @@ fn __probe_free_fns() {\n\
 \n\
 fn __probe_methods(\n\
 \x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
-\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20_tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Var::jacobian(v);\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Var::hessian(v);\n\
-\x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tape::jacobian(tape);\n\
-\x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tape::hessian(tape);\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tensor::<f32>::jacobian(tf);\n\
 \x20\x20\x20\x20let _: __FandheJacobianHessianHoldMarker = fandhe_ai::Tensor::<f32>::hessian(tf);\n\
 }";
@@ -33489,6 +33291,11 @@ fn scan_jacobian_hessian_reexports_and_declarations(content: &str) -> Vec<String
     }
 
     for fn_name in JACOBIAN_HESSIAN_FN_NAMES {
+        // #2678: facade `Tape` の承認済みメソッド（`lib.rs` にちょうど 1 件・薄い委譲）は
+        // 正ガード（`facade_tape_phase4_methods_are_thin_delegations`）が固定するため除外する。
+        if FACADE_TAPE_APPROVED_FNS.contains(&fn_name) {
+            continue;
+        }
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -33537,9 +33344,9 @@ fn facade_does_not_reexport_or_declare_jacobian_hessian_detects_each_category() 
     // 正例: 内部クレートの glob 再エクスポート。
     assert!(offense("pub use fandhe_ai_autodiff::*;"));
     // 正例: fn 宣言・pub mod。
-    assert!(offense("pub fn jacobian() {}"));
-    assert!(offense("impl Tape { pub fn jacobian(&self) {} }"));
-    assert!(offense("impl Var { pub fn hessian(&self) {} }"));
+    assert!(!offense("pub fn jacobian() {}")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("impl Tape { pub fn jacobian(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
+    assert!(!offense("impl Var { pub fn hessian(&self) {} }")); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("pub mod jacobian_ops {}"));
     // 負例: コメント・文字列リテラル中の出現。
     assert!(!offense("// pub use fandhe_ai_autodiff::jacobian_ops;"));
@@ -33602,10 +33409,14 @@ fn workspace_declares_jacobian_hessian_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = JACOBIAN_HESSIAN_FN_NAMES
+    let mut expected: std::collections::BTreeMap<String, usize> = JACOBIAN_HESSIAN_FN_NAMES
         .iter()
         .map(|n| (format!("autodiff/src/jacobian_ops.rs::{n}"), 1usize))
         .collect();
+    // #2678: 承認形の facade `Tape` メソッド（`facade/src/lib.rs` に各 1 件）。
+    for n in ["jacobian", "hessian"] {
+        expected.insert(format!("facade/src/lib.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の jacobian／hessian の `fn` 宣言が承認前の内部実装の\
@@ -33739,7 +33550,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::gradcheck(v);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::backward_detect_anomaly(v);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::gradcheck(tape);\n\
-\x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::backward_detect_anomaly(tape);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::gradcheck(tf);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::backward_detect_anomaly(tf);\n\
 }";
@@ -33810,6 +33620,11 @@ fn scan_gradcheck_anomaly_reexports_and_declarations(content: &str) -> Vec<Strin
     }
 
     for fn_name in GRADCHECK_ANOMALY_FN_NAMES {
+        // #2678: facade `Tape` の承認済みメソッド（`lib.rs` にちょうど 1 件・薄い委譲）は
+        // 正ガード（`facade_tape_phase4_methods_are_thin_delegations`）が固定するため除外する。
+        if FACADE_TAPE_APPROVED_FNS.contains(&fn_name) {
+            continue;
+        }
         let count = count_fn_declarations_by_name(&tokens, fn_name);
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
@@ -33857,9 +33672,9 @@ fn facade_does_not_reexport_or_declare_gradcheck_anomaly_detects_each_category()
     assert!(offense("pub use fandhe_ai_autodiff::*;"));
     // 正例: fn 宣言・pub mod・struct 宣言。
     assert!(offense("pub fn gradcheck() {}"));
-    assert!(offense(
+    assert!(!offense(
         "impl Tape { pub fn backward_detect_anomaly(&self) {} }"
-    ));
+    )); // #2678: 承認済み（承認形は正ガードが固定）
     assert!(offense("impl Var { pub fn gradcheck(&self) {} }"));
     assert!(offense("pub mod gradcheck {}"));
     assert!(offense("pub mod anomaly {}"));
@@ -33925,7 +33740,7 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
             }
         });
     }
-    let expected: std::collections::BTreeMap<String, usize> = [
+    let mut expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/gradcheck.rs::gradcheck".to_string(), 1usize),
         (
             "autodiff/src/anomaly.rs::backward_detect_anomaly".to_string(),
@@ -33934,6 +33749,11 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
     ]
     .into_iter()
     .collect();
+    // #2678: 承認形の facade `Tape` メソッド（`facade/src/lib.rs` に各 1 件）。
+    expected.insert(
+        "facade/src/lib.rs::backward_detect_anomaly".to_string(),
+        1usize,
+    );
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の gradcheck／backward_detect_anomaly の `fn` 宣言が承認前の\
@@ -33941,4 +33761,565 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
+}
+
+// =====================================================================
+// #2678（親 #2625・ルート #2499 Phase 4）: 承認された演算・自動微分の公開に対する正ガード。
+// 旧否定ガード（`FftOpsHoldDoctestGuard` ほか 15 個の保留 doctest と各 `facade_does_not_
+// reexport_or_declare_*`）のうち、承認形で公開した経路を「承認形だけを許す」形へ反転した
+// （先例 #2516・#2519。承認根拠は `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1）。
+// 未承認の経路（モジュール再エクスポート・裸の自由関数・`Tape`／`Tensor` 上の配置・
+// `gradcheck`・`rrelu_with_noise`・保留行）は引き続き各否定ガードと保留 doctest が拒否する。
+// =====================================================================
+
+/// `autodiff/src/var.rs` の Phase 4 委譲メソッドの承認形本体（`crate::<module>::<fn>` の
+/// 自由関数への 1 行委譲。引数名も固定）。独自実装・スタブへのすり替えと検査の迂回を拒否する
+/// （[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。`matmul_low_precision` は本体を持つ
+/// 既存メソッドを `pub` にしただけで委譲の向きが逆（自由関数 → メソッド）のため本表の対象外とし、
+/// 代わりに自由関数側の本体を [`phase4_matmul_low_precision_free_fn_delegates_to_method`] が固定する。
+const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 62] = [
+    (
+        "fft_ops",
+        "rfft",
+        "crate : : fft_ops : : rfft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "irfft",
+        "crate : : fft_ops : : irfft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "fft",
+        "crate : : fft_ops : : fft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "ifft",
+        "crate : : fft_ops : : ifft ( self , n , dim , norm )",
+    ),
+    (
+        "fft_ops",
+        "stft",
+        "crate : : fft_ops : : stft ( self , n_fft , window , options )",
+    ),
+    (
+        "fft_ops",
+        "istft",
+        "crate : : fft_ops : : istft ( self , n_fft , window , options )",
+    ),
+    (
+        "low_precision_ops",
+        "add_low_precision",
+        "crate : : low_precision_ops : : add_low_precision ( self , other , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "mul_low_precision",
+        "crate : : low_precision_ops : : mul_low_precision ( self , other , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "relu_low_precision",
+        "crate : : low_precision_ops : : relu_low_precision ( self , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "exp_low_precision",
+        "crate : : low_precision_ops : : exp_low_precision ( self , dtype )",
+    ),
+    (
+        "low_precision_ops",
+        "tanh_low_precision",
+        "crate : : low_precision_ops : : tanh_low_precision ( self , dtype )",
+    ),
+    ("trig_ops", "atan", "crate : : trig_ops : : atan ( self )"),
+    ("trig_ops", "asin", "crate : : trig_ops : : asin ( self )"),
+    ("trig_ops", "acos", "crate : : trig_ops : : acos ( self )"),
+    ("trig_ops", "sinh", "crate : : trig_ops : : sinh ( self )"),
+    ("trig_ops", "cosh", "crate : : trig_ops : : cosh ( self )"),
+    ("trig_ops", "asinh", "crate : : trig_ops : : asinh ( self )"),
+    ("trig_ops", "acosh", "crate : : trig_ops : : acosh ( self )"),
+    ("trig_ops", "atanh", "crate : : trig_ops : : atanh ( self )"),
+    (
+        "trig_ops",
+        "atan2",
+        "crate : : trig_ops : : atan2 ( self , other )",
+    ),
+    (
+        "nonfinite_ops",
+        "isnan",
+        "crate : : nonfinite_ops : : isnan ( self )",
+    ),
+    (
+        "nonfinite_ops",
+        "isinf",
+        "crate : : nonfinite_ops : : isinf ( self )",
+    ),
+    (
+        "nonfinite_ops",
+        "isfinite",
+        "crate : : nonfinite_ops : : isfinite ( self )",
+    ),
+    (
+        "nonfinite_ops",
+        "nan_to_num",
+        "crate : : nonfinite_ops : : nan_to_num ( self , nan , posinf , neginf )",
+    ),
+    (
+        "cumulative_ops",
+        "cummax",
+        "crate : : cumulative_ops : : cummax ( self , dim )",
+    ),
+    (
+        "cumulative_ops",
+        "cummin",
+        "crate : : cumulative_ops : : cummin ( self , dim )",
+    ),
+    (
+        "cumulative_ops",
+        "logcumsumexp",
+        "crate : : cumulative_ops : : logcumsumexp ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "median",
+        "crate : : stat_reduce_ops : : median ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "median_with_indices",
+        "crate : : stat_reduce_ops : : median_with_indices ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "kthvalue",
+        "crate : : stat_reduce_ops : : kthvalue ( self , k , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "quantile",
+        "crate : : stat_reduce_ops : : quantile ( self , q , dim , interpolation )",
+    ),
+    (
+        "stat_reduce_ops",
+        "nanmean",
+        "crate : : stat_reduce_ops : : nanmean ( self , dim )",
+    ),
+    (
+        "stat_reduce_ops",
+        "nansum",
+        "crate : : stat_reduce_ops : : nansum ( self , dim )",
+    ),
+    (
+        "binning_ops",
+        "histc",
+        "crate : : binning_ops : : histc ( self , bins , min , max )",
+    ),
+    (
+        "binning_ops",
+        "searchsorted",
+        "crate : : binning_ops : : searchsorted ( self , values , right )",
+    ),
+    (
+        "binning_ops",
+        "bucketize",
+        "crate : : binning_ops : : bucketize ( self , boundaries , right )",
+    ),
+    (
+        "shape_view_ops",
+        "unbind",
+        "crate : : shape_view_ops : : unbind ( self , dim )",
+    ),
+    (
+        "shape_view_ops",
+        "tensor_split",
+        "crate : : shape_view_ops : : tensor_split ( self , sections , dim )",
+    ),
+    (
+        "shape_view_ops",
+        "tensor_split_indices",
+        "crate : : shape_view_ops : : tensor_split_indices ( self , indices , dim )",
+    ),
+    (
+        "shape_view_ops",
+        "movedim",
+        "crate : : shape_view_ops : : movedim ( self , source , destination )",
+    ),
+    (
+        "shape_view_ops",
+        "swapaxes",
+        "crate : : shape_view_ops : : swapaxes ( self , axis0 , axis1 )",
+    ),
+    (
+        "shape_view_ops",
+        "rot90",
+        "crate : : shape_view_ops : : rot90 ( self , k , dims )",
+    ),
+    (
+        "indexed_update_ops",
+        "scatter_reduce",
+        "crate : : indexed_update_ops : : scatter_reduce ( self , dim , index , src , reduce , include_self )",
+    ),
+    (
+        "indexed_update_ops",
+        "index_add",
+        "crate : : indexed_update_ops : : index_add ( self , dim , index , source )",
+    ),
+    (
+        "indexed_update_ops",
+        "index_copy",
+        "crate : : indexed_update_ops : : index_copy ( self , dim , index , source )",
+    ),
+    (
+        "indexed_update_ops",
+        "masked_scatter",
+        "crate : : indexed_update_ops : : masked_scatter ( self , mask , source )",
+    ),
+    (
+        "tensor_product_ops",
+        "kron",
+        "crate : : tensor_product_ops : : kron ( self , other )",
+    ),
+    (
+        "tensor_product_ops",
+        "tensordot",
+        "crate : : tensor_product_ops : : tensordot ( self , other , n )",
+    ),
+    (
+        "tensor_product_ops",
+        "tensordot_axes",
+        "crate : : tensor_product_ops : : tensordot_axes ( self , other , dims_self , dims_other )",
+    ),
+    (
+        "tensor_product_ops",
+        "cdist",
+        "crate : : tensor_product_ops : : cdist ( self , other , p )",
+    ),
+    (
+        "tensor_product_ops",
+        "cross",
+        "crate : : tensor_product_ops : : cross ( self , other , dim )",
+    ),
+    (
+        "pad_ops",
+        "pad_with_mode",
+        "crate : : pad_ops : : pad_with_mode ( self , pads , mode )",
+    ),
+    (
+        "activation_scalar_ops",
+        "selu",
+        "crate : : activation_scalar_ops : : selu ( self )",
+    ),
+    (
+        "activation_scalar_ops",
+        "celu",
+        "crate : : activation_scalar_ops : : celu ( self , alpha )",
+    ),
+    (
+        "activation_scalar_ops",
+        "softsign",
+        "crate : : activation_scalar_ops : : softsign ( self )",
+    ),
+    (
+        "activation_scalar_ops",
+        "hardsigmoid",
+        "crate : : activation_scalar_ops : : hardsigmoid ( self )",
+    ),
+    (
+        "activation_scalar_ops",
+        "log_sigmoid",
+        "crate : : activation_scalar_ops : : log_sigmoid ( self )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "softmin",
+        "crate : : softmin_threshold_ops : : softmin ( self , dim )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "tanhshrink",
+        "crate : : softmin_threshold_ops : : tanhshrink ( self )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "threshold",
+        "crate : : softmin_threshold_ops : : threshold ( self , threshold , value )",
+    ),
+    (
+        "softmin_threshold_ops",
+        "rrelu",
+        "crate : : softmin_threshold_ops : : rrelu ( self , lower , upper , training )",
+    ),
+    (
+        "shape_view_ops",
+        "meshgrid",
+        "crate : : shape_view_ops : : meshgrid ( tensors , indexing )",
+    ),
+];
+
+/// [`PHASE4_VAR_EXPECTED_BODIES`] の各メソッドが `var.rs` に `pub fn` として 1 件だけ存在し、
+/// 本体が承認形（1 行委譲）と一致することを固定する。
+#[test]
+fn var_phase4_ops_methods_are_thin_delegations() {
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (module, name, expected_body) in PHASE4_VAR_EXPECTED_BODIES {
+        let actual = determinism_fn_body(&tokens, name);
+        assert_eq!(
+            actual.as_deref(),
+            Some(expected_body),
+            "var.rs の `Var::{name}`（{module}）の本体が承認形（自由関数への 1 行委譲）と一致しない"
+        );
+    }
+}
+
+/// `low_precision_ops::matmul_low_precision` の本体が `Var::matmul_low_precision` への
+/// 1 行委譲であること（#2678。本体を持つ既存メソッドを `pub` にした形の固定）。
+#[test]
+fn phase4_matmul_low_precision_free_fn_delegates_to_method() {
+    let content =
+        read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/low_precision_ops.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "matmul_low_precision").as_deref(),
+        Some("lhs . matmul_low_precision ( rhs , dtype )"),
+    );
+}
+
+/// facade `Tape` の Phase 4 メソッド 5 件の承認形本体（`&self.0`／`&child.0` を渡すだけの
+/// 1 行委譲。生の autodiff `Tape` は露出しない。REQ-12）。
+const PHASE4_FACADE_TAPE_EXPECTED_BODIES: [(&str, &str); 5] = [
+    (
+        "bincount",
+        "fandhe_ai_autodiff : : binning_ops : : bincount ( & self . 0 , input , minlength )",
+    ),
+    (
+        "bincount_weighted",
+        "fandhe_ai_autodiff : : binning_ops : : bincount_weighted ( & self . 0 , input , weights , minlength )",
+    ),
+    (
+        "jacobian",
+        "fandhe_ai_autodiff : : jacobian_ops : : jacobian ( & self . 0 , output , input )",
+    ),
+    (
+        "hessian",
+        "fandhe_ai_autodiff : : jacobian_ops : : hessian ( & self . 0 , loss , input , & child . 0 )",
+    ),
+    (
+        "backward_detect_anomaly",
+        "fandhe_ai_autodiff : : anomaly : : backward_detect_anomaly ( & self . 0 , loss )",
+    ),
+];
+
+/// facade `Tape` の 5 メソッドが `src/lib.rs` に `pub fn` として各 1 件だけあり、本体が承認形と
+/// 一致し、facade src の他ファイルには同名の宣言が無いことを固定する。
+#[test]
+fn facade_tape_phase4_methods_are_thin_delegations() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, expected_body) in PHASE4_FACADE_TAPE_EXPECTED_BODIES {
+        assert_eq!(
+            determinism_fn_body(&tokens, name).as_deref(),
+            Some(expected_body),
+            "facade の `Tape::{name}` の本体が承認形（1 行委譲）と一致しない"
+        );
+    }
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if path.ends_with("src/lib.rs") {
+            return;
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for (name, _) in PHASE4_FACADE_TAPE_EXPECTED_BODIES {
+            assert_eq!(
+                count_fn_declarations_by_name(&tokens, name),
+                0,
+                "{} に `fn {name}` 宣言がある（承認形は src/lib.rs の Tape のみ）",
+                path.display()
+            );
+        }
+    });
+}
+
+/// 型の再エクスポート 8 個（#2678）。
+const PHASE4_TYPE_NAMES: [&str; 8] = [
+    "FftNorm",
+    "StftPadMode",
+    "StftOptions",
+    "IstftOptions",
+    "QuantileInterpolation",
+    "ScatterReduceMode",
+    "PadMode",
+    "MeshgridIndexing",
+];
+
+/// 承認形の `pub use` 行（`src/lib.rs`。内部クレートのルート経由・別名なし・1 文 1 行）。
+const PHASE4_TYPE_APPROVED_LINES: [&str; 8] = [
+    "pub use fandhe_ai_tensor_core::FftNorm;",
+    "pub use fandhe_ai_tensor_core::StftPadMode;",
+    "pub use fandhe_ai_autodiff::StftOptions;",
+    "pub use fandhe_ai_autodiff::IstftOptions;",
+    "pub use fandhe_ai_tensor_core::QuantileInterpolation;",
+    "pub use fandhe_ai_tensor_core::ScatterReduceMode;",
+    "pub use fandhe_ai_tensor_core::PadMode;",
+    "pub use fandhe_ai_autodiff::MeshgridIndexing;",
+];
+
+/// facade src の 1 ファイル内容から、[`PHASE4_TYPE_NAMES`] のいずれかを識別子として含む
+/// `pub use`（可視性修飾付きを含む）宣言を、セミコロンまでの宣言全体（複数行・行途中の
+/// 開始を含む）を 1 件として空白正規化して集める検出本体。コメント・文字列リテラルは無視する。
+fn scan_phase4_type_pub_use_lines(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let bytes = cleaned.as_bytes();
+    let mut out = Vec::new();
+    for (idx, _) in cleaned.match_indices("use") {
+        // `use` が識別子の一部（`reuse`・`user` 等）でないこと。
+        let before_ok = idx == 0 || !is_ident_char(bytes[idx - 1] as char);
+        let after_ok = idx + 3 >= bytes.len() || !is_ident_char(bytes[idx + 3] as char);
+        if !before_ok || !after_ok {
+            continue;
+        }
+        // 直前（空白を除く）が `pub` または `pub(...)` の閉じ括弧であれば公開 use。
+        let head = cleaned[..idx].trim_end();
+        let is_pub = head.ends_with(')')
+            && head
+                .rfind("pub(")
+                .is_some_and(|i| i == 0 || !is_ident_char(head.as_bytes()[i - 1] as char))
+            || head.strip_suffix("pub").is_some_and(|rest| {
+                rest.is_empty() || !is_ident_char(rest.as_bytes()[rest.len() - 1] as char)
+            });
+        if !is_pub {
+            continue;
+        }
+        let decl_start = head.rfind("pub").unwrap_or(idx);
+        let decl_end = cleaned[idx..]
+            .find(';')
+            .map_or(cleaned.len(), |e| idx + e + 1);
+        let decl = &cleaned[decl_start..decl_end];
+        if PHASE4_TYPE_NAMES
+            .iter()
+            .any(|n| line_contains_identifier(decl, n))
+        {
+            out.push(decl.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    out
+}
+
+/// 8 型の再エクスポートが `src/lib.rs` の承認形 8 行だけ（各 1 件）であることを固定する
+/// （別名・モジュール経由・別ファイルからの再エクスポート・グループ形は fail。
+/// [`facade_reexports_topk_unique_types_only_in_approved_shape`] と同型）。
+#[test]
+fn facade_reexports_phase4_ops_types_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in scan_phase4_type_pub_use_lines(content) {
+            if path.ends_with("src/lib.rs") && PHASE4_TYPE_APPROVED_LINES.contains(&line.as_str()) {
+                approved.push(line);
+            } else {
+                offending.push(format!("{}: `{line}`", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が Phase 4 の型を承認形以外で再エクスポートしている（#2678）: {offending:?}"
+    );
+    approved.sort();
+    let mut expected: Vec<String> = PHASE4_TYPE_APPROVED_LINES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        approved, expected,
+        "src/lib.rs に承認形の再エクスポート行が各 1 件ずつ存在しない（検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_phase4_type_pub_use_lines`] の自己テスト（合成入力）。
+#[test]
+fn facade_reexports_phase4_ops_types_only_in_approved_shape_detects_each_category() {
+    let scan = scan_phase4_type_pub_use_lines;
+    for line in PHASE4_TYPE_APPROVED_LINES {
+        assert_eq!(scan(line), vec![line.to_string()]);
+    }
+    // 違反: 別名・モジュール経由・グループ形（承認形と文字列一致しない行として検出される）。
+    for src in [
+        "pub use fandhe_ai_tensor_core::FftNorm as Norm;",
+        "pub use fandhe_ai_autodiff::fft_ops::StftOptions;",
+        "pub use fandhe_ai_tensor_core::{PadMode, PadModeError};",
+        "pub use fandhe_ai_tensor_core::stat_reduce::QuantileInterpolation;",
+        "pub use fandhe_ai_autodiff::shape_view_ops::MeshgridIndexing;",
+        // 複数行・別名・行途中開始・可視性修飾付き（#2678 codex 指摘）。
+        "pub use fandhe_ai_tensor_core::{\n    Device,\n    FftNorm as ExtraNorm,\n};",
+        "pub use fandhe_ai_tensor_core::{\n    FftNorm,\n};",
+        "pub use fandhe_ai_tensor_core::\n    PadMode\n    ;",
+        "mod m { pub use fandhe_ai_tensor_core::PadMode as P; }",
+        "pub(crate) use fandhe_ai_tensor_core::{\n    PadMode,\n};",
+    ] {
+        let hits = scan(src);
+        assert_eq!(hits.len(), 1, "src={src:?}");
+        assert!(
+            !PHASE4_TYPE_APPROVED_LINES.contains(&hits[0].as_str()),
+            "src={src:?}"
+        );
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use fandhe_ai_tensor_core::FftNorm;",
+        "let s = \"pub use x::PadMode;\";",
+        "use fandhe_ai_tensor_core::ScatterReduceMode;",
+        "pub use fandhe_ai_tensor_core::MatrixNormOrd;",
+    ] {
+        assert!(scan(src).is_empty(), "src={src:?}");
+    }
+}
+
+/// 保留を維持した経路（#2678）が、ソース走査の否定ガードから外れていないことの固定。
+/// `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`rrelu_with_noise`・損失関連 8 本は
+/// facade／`Var` から到達できない（記録に形が書かれていない・`Reduction` の公開経路が未整備のため）。
+#[test]
+fn phase4_held_items_remain_unexposed() {
+    for src in [
+        "pub use fandhe_ai_autodiff::gradcheck;",
+        "pub use fandhe_ai_autodiff::gradcheck::GradcheckOptions;",
+        "pub struct GradcheckReport;",
+        "impl Tape { pub fn gradcheck(&self) {} }",
+    ] {
+        assert!(
+            !scan_gradcheck_anomaly_reexports_and_declarations(src).is_empty(),
+            "gradcheck 系の保留ガードが検出できない: {src:?}"
+        );
+    }
+    assert!(
+        !scan_softmin_threshold_reexports_and_declarations(
+            "impl Var { pub fn rrelu_with_noise(&self) {} }"
+        )
+        .is_empty()
+    );
+    let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for name in [
+        "gradcheck",
+        "rrelu_with_noise",
+        "hinge_embedding_loss",
+        "soft_margin_loss",
+        "multilabel_margin_loss",
+    ] {
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, name),
+            0,
+            "var.rs に保留中の `fn {name}` がある"
+        );
+    }
 }
