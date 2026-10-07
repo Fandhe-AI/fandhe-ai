@@ -27,6 +27,7 @@ use fandhe_ai::compat::{FitConfig, Loss, ModelIoError, Optimizer, Sequential, sa
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::optim::SgdConfig;
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
+use fandhe_ai_backend_cpu::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
 
 mod common;
 use common::temp_dir::TempDirGuard;
@@ -65,15 +66,15 @@ fn ramp(shape: &[usize], scale: f32) -> Tensor<f32> {
     )
 }
 
-/// REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）。tolerance は変更しない。
+/// REQ-2 統一複合判定。閾値は backend-cpu の定数を参照する（値は変更しない）。
 fn assert_close(label: &str, actual: &[f32], expected: &[f64]) {
     assert_eq!(actual.len(), expected.len(), "{label}: 長さ");
     for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
         let a = f64::from(*a);
         let diff = (a - e).abs();
-        let scale = a.abs().max(e.abs());
+        let scale = a.abs().max(e.abs()).max(1e-12);
         assert!(
-            diff < 1e-5 || diff < 1e-3 * scale,
+            diff / scale < RELATIVE_TOLERANCE || diff < ABSOLUTE_RESCUE_THRESHOLD,
             "{label}[{i}]: actual={a} expected={e} diff={diff}"
         );
     }
@@ -286,6 +287,9 @@ const LAYERS: [&str; 9] = [
 
 #[test]
 fn stateless_layers_add_no_parameters_and_pass_gradients_through() {
+    // RReLU は学習モードで共有 RNG を消費するため、シード再現性検査と排他する。
+    let _guard = rng_lock();
+    fandhe_ai::manual_seed(2679);
     for layer in LAYERS {
         let model = sandwich(layer);
         // Linear(weight, bias) × 2 のみ。9 層はパラメータを持たない。
@@ -317,6 +321,7 @@ fn stateless_layers_add_no_parameters_and_pass_gradients_through() {
 #[test]
 fn fit_decreases_loss_with_each_layer() {
     let _guard = rng_lock();
+    fandhe_ai::manual_seed(2679);
     for layer in LAYERS {
         let mut model = sandwich(layer);
         model

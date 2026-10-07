@@ -41,9 +41,10 @@ use crate::{AutodiffError, Tensor};
 /// let mut swa = AveragedModel::new(&[&w0])?;
 /// let w1 = Tensor::new(vec![3.0f32, 4.0], &[2])?;
 /// swa.update(&[&w1])?;
-/// // 平均値は初回更新の値の複製ではなく、構築時の値と等重みで平均される。
+/// // 初回更新（`n_averaged == 0`）は構築時の重みとは平均せず、更新値を複製する。
 /// assert_eq!(swa.n_averaged(), 1);
 /// assert_eq!(swa.averaged_parameters().len(), 1);
+/// assert_eq!(swa.averaged_parameters()[0].as_slice(), Some(&[3.0f32, 4.0][..]));
 /// # Ok(())
 /// # }
 /// ```

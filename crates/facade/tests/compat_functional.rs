@@ -57,16 +57,9 @@ fn det(rows: usize, cols: usize, salt: f32) -> Tensor<f32> {
     )
 }
 
-/// REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）。tolerance は変更しない。
+/// REQ-2 統一複合判定。閾値の直書きを避け、既存の `assert_parity` を再利用する（tolerance は不変）。
 fn assert_close(label: &str, actual: &[f32], expected: &[f32]) {
-    assert_eq!(actual.len(), expected.len(), "{label}: 長さ");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        let diff = (a - e).abs();
-        assert!(
-            diff < 1e-5 || diff < 1e-3 * a.abs().max(e.abs()),
-            "{label}[{i}]: actual={a} expected={e}"
-        );
-    }
+    fandhe_ai_backend_cpu::assert_parity(label, actual, expected);
 }
 
 fn seq() -> Sequential {
