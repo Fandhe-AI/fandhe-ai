@@ -5025,14 +5025,23 @@ fn workspace_declares_no_rnn_with_config_fn() {
     );
 }
 
-/// `compat::Sequential` に `add_rnn`／`add_lstm`／`add_gru` が存在
+/// `compat::Sequential` に `add_rnn`／`add_lstm`／`add_gru` および
+/// `add_stacked_rnn`／`add_stacked_lstm`／`add_stacked_gru`（#2534 案 A・
+/// 2026-10-07 承認。多層 RNN も Sequential に載せない）が存在
 /// しないことを固定する（承認スコープ「`Sequential::add_*` は追加
 /// しない」の機械固定。`nn_rnn_module_reexports_exactly_expected_
 /// surface` が Cell 型・`Module` の非再エクスポートを別途固定する）。
 #[test]
 fn compat_sequential_does_not_expose_rnn_add_methods() {
     let compat_dir = facade_crate_root().join("src/compat");
-    let forbidden = ["pub fn add_rnn", "pub fn add_lstm", "pub fn add_gru"];
+    let forbidden = [
+        "pub fn add_rnn",
+        "pub fn add_lstm",
+        "pub fn add_gru",
+        "pub fn add_stacked_rnn",
+        "pub fn add_stacked_lstm",
+        "pub fn add_stacked_gru",
+    ];
     let mut offenses = Vec::new();
     visit_rs_files(&compat_dir, &mut |path, content| {
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
@@ -5044,8 +5053,9 @@ fn compat_sequential_does_not_expose_rnn_add_methods() {
     });
     assert!(
         offenses.is_empty(),
-        "src/compat 配下に add_rnn／add_lstm／add_gru が見つかった\
-         （承認スコープ〈#1955〉は Sequential への追加を認めていない）: {offenses:?}"
+        "src/compat 配下に add_rnn／add_lstm／add_gru または \
+         add_stacked_rnn／add_stacked_lstm／add_stacked_gru が見つかった\
+         （承認スコープ〈#1955・#2534 案 A〉は Sequential への追加を認めていない）: {offenses:?}"
     );
 }
 
