@@ -13,7 +13,7 @@
 //! 型・メソッドはすべて `pub(crate)` に留める。出荷コードのどこからも呼ばれないため
 //! `#[cfg(test)]` を外すと `dead_code` になり、`#[allow]` で黙らせない方針（
 //! `.claude/rules/coding-rust.md`）とも衝突するため、先例の `predict_batches`（#2192。
-//! `crate::inference::batch`）と同じ `#[cfg(test)]` 隔離方式を採る。公開面が増えていないことは
+//! #2582 で facade 公開済み）が公開前に採っていた `#[cfg(test)]` 隔離方式を採る。公開面が増えていないことは
 //! `lib.rs::FunctionalApiHoldDoctestGuard`（正のプローブ）と
 //! `tests/api_surface.rs::facade_functional_api_stays_internal`（ソース走査）が固定する。
 //!
