@@ -3,6 +3,7 @@
 - 対象イシュー: #2664（親 #2663・ルート #2499 Phase 4）
 - 基準コミット: `c74c93f0`（`origin/main`）
 - 段階: **段階 0（docs のみ）**。`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec/` は変更しない
+- #2665 追補: 内部実装を追加済み（§16 実装記録。上記「段階 0」は #2664 時点の記述で、§16 が #2665 での `crates/facade` 変更を記録する。承認状態は未承認のまま）
 - 状態: 本記録の推奨案は**全項目「未承認」**。承認依頼は #2677 の一括依頼に委ね、公開は承認後の #2679 で行う。本記録は承認を代行せず、承認済みとも主張しない
 
 ## 0. 結論
@@ -170,3 +171,45 @@
 ## 15. 出典
 
 `docs/compat-api-scope.md`・`docs/reference-models-decision.md`・`docs/compat-model-io-decision.md`・`docs/facade-nn-module-exposure-decision.md`・`docs/facade-predict-batches-phase-metrics-decision.md`・`docs/autodiff-packed-sequence-decision.md`・§2 表の各コード行。
+
+## 16. #2665 実装記録（多入力グラフの構築と forward。facade 非公開・保留ガード付き）
+
+**承認状態は §13 のとおり未承認のまま**。本節は内部実装の記録であり承認記録ではない（承認依頼は #2677・公開は承認後の #2679）。
+
+### 配置と範囲
+
+- 実装: `crates/facade/src/compat/functional.rs`（`compat/mod.rs` で `#[cfg(test)] mod functional;`。型・メソッドはすべて `pub(crate)`）。出荷コードから呼ばれないため `#[cfg(test)]` を外すと `dead_code` になり、`#[allow]` で黙らせない方針と衝突する。`predict_batches`（#2192）と同じ隔離方式。型名は §10 の仮称（`FunctionalBuilder`・`FunctionalModel`・`Node`）をそのまま使い、#2679 の昇格を可視性変更で済ませる（昇格手順は `functional.rs` のモジュール doc）。
+- テストはクレート内ユニットテスト（`crates/facade/src/compat/functional/tests.rs`）。結合テスト（`tests/`）からは `pub(crate)` に届かない。
+- 実装範囲: ビルダー（`input`／`apply`／`build`）と検証・`forward`・`predict`・モード 4 メソッド・`named_parameters`／`state_dict`／`load_state_dict`（通し番号キー）。新規 `Op`・`BackendOps` メソッド・VJP は無く、既存 `Var` 演算の合成のみ。GPU は `tape_for(device)` の tape 上で到達できる。
+- 結合ノードは持たない（#2666）。ノード種別は内部 enum `NodeDef` で入力添字を `Vec` に持ち、variant の追加で拡張できる。fan-out（1 ノードを複数ブロックが消費）・多入力・多出力・連鎖は本段で検証済み。
+
+### #2667 への申し送り
+
+- `bind`／`trainable_parameters`／`apply_parameters`・`compile`／`fit`／`evaluate`・保存形式（§7・§8 と位置対応契約が一体のため分割しない。§4 の列挙のうち本段で実装しなかった項目）。
+- パラメータ勾配の PyTorch 照合（`Sequential::forward` は内部で葉を登録し勾配の取り出し口が無く、`bind` 経路が必要）。本段の fixture は出力と入力勾配のみ。
+- `predict` は `Sequential::predict` の tape 不要経路（Linear→ReLU 融合）を使わず `crate::tape()` 上の `forward` に統一した（第 1 段は単純さを優先）。
+
+### 本イシューで決めた細部
+
+- **層 0 個のブロックは `apply` で拒否**（§3 に規定なし）。§8 の「層範囲は重複なし・隙間なし」と相性が悪く、後から許可するのは非破壊・逆は破壊的なため安全側。
+- **入力ノードを出力へそのまま指定すること（素通し）は許可**（拒否規定が無く害がない。テストで固定）。
+- **`training()` は導出値**（全ブロックが train のとき `true`。ブロック 0 個なら `true`）。モデル側に別フラグを持たずブロックと食い違う状態を作らない。`build` はブロックのモードを同期しない（`Sequential::add_dropout` と同じ契約）。
+- **キー写像**: ブロックのローカルキー `"{j}.{name}"` を最初の `.` でのみ分割し `"{layer_start + j}.{name}"` へ写す（`to_global_key` 1 か所。名前側に `.` を含みうるため）。`layer_start` は Block ノードの挿入順に層数を `checked_add` で累積（活性化層も 1 層と数える）。
+- **`load_state_dict` は strict**。第 1 パスでキー集合の完全一致と shape 一致を、何も変更しないうちに検査し、第 2 パスでブロックごとに委譲する。失敗時は開始前のスナップショットで適用済みブロックを巻き戻す（`nn::Module::load_state_dict` の「2 パス + ベストエフォート・ロールバック」契約と同型）。
+- `NodeDef::Block` は `Box<Sequential>` を持つ（`clippy::large_enum_variant` 対策）。
+
+### 保留ガード
+
+- `crates/facade/src/lib.rs::FunctionalApiHoldDoctestGuard`（正のプローブ。`Sequential::apply`／`Sequential::call` の UFCS 呼び出しと、型 3・自由関数 2・モジュール `functional` の名前解決）。
+- `crates/facade/tests/api_surface.rs`: `functional_api_hold_doctest_globs_all_pub_modules`・`functional_api_hold_doctest_probe_body_matches_fixed_contract`・`facade_functional_api_stays_internal`（＋自己テスト `..._detects_each_category`。facade `src` 全体で `pub use` の経路・`pub mod functional`・3 型の宣言が許可位置〈`compat/functional.rs` の `pub(crate) struct` 各 1 件〉以外・`impl Sequential` の `apply`／`call` を検出）・`workspace_declares_functional_model_io_fn_names_nowhere`（`save_functional_model`／`load_functional_model` が workspace に 0 件。置き場所は #2667 が決めて期待を更新）。
+- 検出範囲は「走査が見るトークン列と doctest が名前解決で触れる位置」に限り、マクロ生成・別名経由までは保証しない。`Sequential` の inherent 名は `apply`／`call` の 2 つに限った契約で、正当な追加（`Module.apply` 相当等）と衝突する場合は本ガードを意識的に更新する。
+- 効くことの実証（作業ツリー上で一時変更し、実証後に元へ戻した）: `pub(crate) struct Node` を `pub struct Node` にすると `facade_functional_api_stays_internal` が失敗／`impl Sequential` に `pub fn call` を足すとソース走査と doctest（E0308）の両方が失敗。`compat/mod.rs` で `pub use functional::FunctionalModel;` を足す変更はコンパイラ自身が E0365 で拒否する（`pub(crate)` 型のため）。
+
+### §10 の宿題（既存ガードとの衝突 (i)）の調査結果
+
+`compat/functional.rs` を足した時点で反応したのは `workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` の 1 件のみ（`state_dict`／`load_state_dict` の `fn` 宣言が `facade/src/compat/functional.rs` に各 1 件増加）。期待集合へ所在を 2 件登録した（緩和ではなく所在の登録。コメントで #2665・非公開固定を明記）。`nn` 配下向けの `*_public_items_match_expected_set` と各 `*_hold_doctest_globs_all_pub_modules` は `pub mod` を増やさないため無影響。(ii)（#2679 の反転時）は未着手。
+
+### fixture・実機
+
+- PyTorch 2.14.0 実行値: `crates/facade/tests/fixtures/functional-graph-pytorch-reference/`（5 ケース。出自・sha256・再生成手順は同 README）。出力と入力勾配を `fandhe_ai_backend_cpu::parity::assert_parity`（統一複合判定。tolerance 定数は不変）で照合。
+- CUDA／Metal の実機 parity（`#[ignore]` 2 本）は未実測。`docs/perf/logs/functional-graph-2665/README.md` へ申し送り。

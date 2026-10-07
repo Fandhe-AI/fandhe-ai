@@ -7724,6 +7724,95 @@ struct DatasetComposeHoldDoctestGuard;
 #[allow(dead_code)]
 struct IterableBatchSamplerHoldDoctestGuard;
 
+/// Functional API（多入力・多出力グラフ。`FunctionalBuilder`・`FunctionalModel`・`Node`・
+/// `save_functional_model`・`load_functional_model`。イシュー #2665・親 #2663・ルート #2499 Phase 4）を
+/// facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
+/// ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 3 個・関数 2 個・
+/// モジュール `functional` と、`compat::Sequential` 上のメソッド `apply`／`call` を持つプローブ用
+/// トレイトを置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出し（UFCS）の両方を行う。facade が
+/// 同名のモジュール・型・関数を glob 可能な位置へ公開するか、`compat::Sequential` に同名の inherent
+/// メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せず
+/// コンパイルが失敗する。
+///
+/// 検出範囲は本プローブが名前解決で触れる名前と、ソース走査が見るトークン列に限る（マクロ生成や
+/// 別名経由の公開までは保証しない）。`Sequential` の inherent メソッド名は `apply`／`call` の 2 つに
+/// 限った契約で、将来の正当な追加（PyTorch `Module.apply` 相当等）と衝突した場合は本ガードを意識的に
+/// 更新すること。実装は facade 内部の `compat/functional.rs`（`#[cfg(test)]` 限定の `pub(crate)`）に
+/// あり、保留対象は facade 公開面のみ。公開形は未承認（承認依頼は #2677・公開自体は承認後の #2679。
+/// 推奨案は `docs/facade-functional-api-decision.md` §10。同記録は推奨案の記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// functional_api_hold_doctest_globs_all_pub_modules`・
+/// `functional_api_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_functional_api_stays_internal`・
+/// `workspace_declares_functional_model_io_fn_names_nowhere`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
+/// 同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_functional_api_hold_probe {
+///     pub struct FunctionalBuilder;
+///     pub struct FunctionalModel;
+///     pub struct Node;
+///     pub fn save_functional_model() {}
+///     pub fn load_functional_model() {}
+///     pub mod functional {
+///         pub fn __mark() {}
+///     }
+/// }
+/// use __fandhe_functional_api_hold_probe::*;
+///
+/// struct __FandheFunctionalApiHoldMarker;
+///
+/// trait __FandheFunctionalApiHoldProbe {
+///     fn apply(&self) -> __FandheFunctionalApiHoldMarker;
+///     fn call(&self) -> __FandheFunctionalApiHoldMarker;
+/// }
+///
+/// impl __FandheFunctionalApiHoldProbe for fandhe_ai::compat::Sequential {
+///     fn apply(&self) -> __FandheFunctionalApiHoldMarker {
+///         __FandheFunctionalApiHoldMarker
+///     }
+///     fn call(&self) -> __FandheFunctionalApiHoldMarker {
+///         __FandheFunctionalApiHoldMarker
+///     }
+/// }
+///
+/// fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node) {}
+///
+/// fn __probe_free_fns() {
+///     save_functional_model();
+///     load_functional_model();
+///     functional::__mark();
+/// }
+///
+/// fn __probe_methods(seq: &fandhe_ai::compat::Sequential) {
+///     let _: __FandheFunctionalApiHoldMarker = fandhe_ai::compat::Sequential::apply(seq);
+///     let _: __FandheFunctionalApiHoldMarker = fandhe_ai::compat::Sequential::call(seq);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct FunctionalApiHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;
