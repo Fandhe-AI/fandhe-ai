@@ -54,10 +54,10 @@ fn invalid(message: String) -> AutodiffError {
 
 /// `var` が `tape` に属さなければ `TapeMismatch` を返す。
 ///
-/// 所属判定は `Var::is_on_tape`（ノードを積まない読み取り専用判定）で行うため、不一致で
+/// 所属判定は `autodiff::Tape::owns`（ノードを積まない読み取り専用判定）で行うため、不一致で
 /// 拒否しても `tape` のノード数・メモリは増えない。
 fn ensure_on_tape(tape: &Tape, var: &Var<'_>) -> Result<(), AutodiffError> {
-    if !var.is_on_tape(&tape.0) {
+    if !tape.0.owns(var) {
         return Err(AutodiffError::TapeMismatch);
     }
     Ok(())
@@ -476,7 +476,7 @@ impl FunctionalModel {
     /// 第 1 パスでキー集合の完全一致（未知キー・欠落キーを拒否）と各テンソルの shape 一致を
     /// 何も変更しないうちに検査する。第 2 パスでブロックごとにローカルキーへ戻して
     /// `Sequential::load_state_dict` へ委譲し、途中で失敗した場合は開始前のスナップショットで
-    /// 適用済みブロックを巻き戻して元のエラーを返す。巻き戻し自体が失敗した場合は、
+    /// 適用済みブロックと失敗した現在のブロックを巻き戻して元のエラーを返す。巻き戻し自体が失敗した場合は、
     /// 適用失敗と巻き戻し失敗の双方と部分適用の可能性を示す `InvalidArgument` を返す。
     pub(crate) fn load_state_dict(
         &mut self,
@@ -550,7 +550,9 @@ impl FunctionalModel {
                 // 巻き戻し失敗は握りつぶさず、部分適用の可能性を明示して fail-closed に返す
                 // （`Module::load_state_dict` 契約・security.md A08）。
                 let mut rollback_failures: Vec<String> = Vec::new();
-                for ((done_index, _), snapshot) in plan.iter().zip(snapshots.iter()).take(applied) {
+                for ((done_index, _), snapshot) in
+                    plan.iter().zip(snapshots.iter()).take(applied + 1)
+                {
                     match self.nodes.get_mut(*done_index) {
                         Some(NodeDef::Block { block, .. }) => {
                             if let Err(rb) = block.load_state_dict(snapshot.clone()) {
@@ -563,7 +565,7 @@ impl FunctionalModel {
                 }
                 if !rollback_failures.is_empty() {
                     return Err(invalid(format!(
-                        "load_state_dict: ノード {index} の適用に失敗（{err}）し、先行ブロックの巻き戻しにも失敗した（{}）。モデルが部分適用のまま残っている可能性がある",
+                        "load_state_dict: ノード {index} の適用に失敗（{err}）し、失敗ブロック自身と先行ブロックの巻き戻しにも失敗した（{}）。モデルが部分適用のまま残っている可能性がある",
                         rollback_failures.join("; ")
                     )));
                 }

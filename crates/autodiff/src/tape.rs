@@ -2958,6 +2958,17 @@ impl Tape {
         crate::var::Var::from_raw(self, id)
     }
 
+    /// `var` がこのテープに属するかを、ノードを積まずに判定する（読み取り専用）。
+    ///
+    /// `Var::to_tape` は別テープの `Var` に対し転送先へ葉を積む副作用を持つため、所属検証
+    /// だけが目的の呼び出し側（facade の多入力グラフ forward。#2665）が tape を汚さずに不一致を
+    /// 拒否するために使う。`Var` は facade が再エクスポートするため `Var` 側にメソッドを
+    /// 生やすと承認範囲外の公開面になる。`Tape` は facade が再エクスポートしない
+    /// （`Tape::custom` と同じ置き場所の理由。PR #2804 レビュー指摘）。
+    pub fn owns(&self, var: &crate::var::Var<'_>) -> bool {
+        var.tape_id() == self.id
+    }
+
     /// ユーザー定義 forward／backward（[`crate::custom::CustomFunction`]）
     /// をこのテープへ登録する（イシュー #1946・案 B。
     /// `docs/autodiff-custom-function-decision.md` §12.4「入口」）。
