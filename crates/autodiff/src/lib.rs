@@ -267,6 +267,10 @@ pub mod indexed_update_ops;
 pub mod generate;
 mod grad;
 pub mod indexing_ops;
+// ヤコビアン・ヘッセ行列（`jacobian`・`hessian`。イシュー #2670）。既存の `Tape::backward`／
+// `backward_create_graph` の要素ごとの繰り返しのみで、新規 Op・VJP はない。facade への公開は
+// 保留（承認依頼 #2677・公開 #2678。`docs/autodiff-jacobian-hessian-gradcheck-decision.md`）。
+pub mod jacobian_ops;
 mod layout;
 pub mod linalg_ops;
 pub mod loss_ops;
