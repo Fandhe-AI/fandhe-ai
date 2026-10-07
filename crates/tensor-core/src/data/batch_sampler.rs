@@ -75,7 +75,7 @@ impl Sampler for BatchSampler {
 mod tests {
     use super::*;
     use crate::data::{SamplerDataLoader, SequentialSampler, TensorDataset};
-    use crate::rng::{manual_seed, with_global_rng};
+    use crate::rng::{global_rng_test_lock, manual_seed, with_global_rng};
     use crate::tensor::Tensor;
 
     fn drain(s: &mut impl Sampler) -> Vec<Vec<usize>> {
@@ -131,6 +131,10 @@ mod tests {
 
     #[test]
     fn does_not_consume_global_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         manual_seed(7);
         let expected = with_global_rng(|r| r.next_u64());
         manual_seed(7);
