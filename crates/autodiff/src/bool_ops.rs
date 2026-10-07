@@ -13,9 +13,10 @@
 //! `var.rs`）として facade（`fandhe_ai::Var`）経由で公開済み。本モジュール
 //! の自由関数そのもの・`bool_ops` モジュールの再エクスポートは引き続き
 //! 内部クレート限定である。logical 3 種（`logical_and`／`logical_or`／
-//! `logical_not`）は公開形が未決のため facade 非公開のまま保留
-//! （#2594。`crates/facade/src/lib.rs::VarBoolOpsHoldDoctestGuard` が
-//! 固定。`docs/autodiff-bool-ops-exposure-decision.md` §6）。
+//! `logical_not`）は #2596 で `fandhe_ai::logical_*`（facade 直下の 1 式
+//! 委譲 `pub fn`）として公開済み（`docs/autodiff-bool-ops-exposure-
+//! decision.md` §6.3）。承認形外の配置は
+//! `crates/facade/src/lib.rs::VarBoolOpsHoldDoctestGuard` が拒む。
 //!
 //! **数値契約**: 比較 6 種は IEEE 754 準拠（`NaN` を含む比較は `eq` を
 //! 含め常に偽・`ne` のみ真。`-0.0 == +0.0` は真）。出力は既存の f32

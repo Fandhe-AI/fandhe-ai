@@ -1474,7 +1474,7 @@ fandhe-ai --example main`）。承認取得後の移行手順（`src/models/` �
 `api_surface.rs` の期待値更新）は #2201 と同じ（`docs/reference-
 models-decision.md` §3.1）で、詳細は同 doc §10.1・§10.2 を参照。
 
-**保留記録（イシュー #2141・親 #2131。#2510 で 7 件を公開済みのため logical 3 件に縮小）**:
+**保留記録（イシュー #2141・親 #2131。#2510 で 7 件を公開済みのため logical 3 件に縮小。logical 3 件も #2596 で公開済み〈下記適用記録〉。以下は履歴）**:
 logical 3 種（`logical_and`／`logical_or`／`logical_not`）の facade 公開形（`Var` の
 関連関数か facade 直下の関数か）は未決のまま保留（#2594）。実装自体は
 `fandhe_ai_autodiff::bool_ops`（内部クレート限定の自由関数モジュール）。
@@ -1490,7 +1490,16 @@ bool 比較 6 種（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／
 非微分・tape 非記録）。新規の型・`pub use`・`Op`／`BackendOps`・VJP は追加していない。
 保留ガードは承認形のみを許す正ガードへ部分反転した（`workspace_declares_bool_ops_fn_names_in_approved_places_only`
 が委譲本体を固定。doctest は logical 3 件の保留を維持）。スコープ外: logical 3 件（#2594）・
-微分可能な `masked_select`・GPU 専用カーネル。
+微分可能な `masked_select`・GPU 専用カーネル。（#2596 で logical 3 件は下記のとおり公開済み。）
+
+**適用記録（経路 2。イシュー #2596・親 #2594。承認の根拠はルート #2499 のコメント https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965 〈2026-10-07〉の「#2594: `docs/autodiff-bool-ops-exposure-decision.md` §6.2 の推奨案」〉）**:
+`logical_and`／`logical_or`／`logical_not` を §6.2 案 B-1 の形で `fandhe_ai` 直下の委譲 `pub fn`
+3 件として公開した（`fandhe_ai_autodiff::bool_ops::<name>` への 1 式委譲・エラー型は
+`AutodiffError`・新しい `pub mod` なし）。`VarBoolOpsHoldDoctestGuard` は承認形外
+（`Var`／`Tensor`／`Tape` 上の配置・`bool_ops` 再エクスポート）を拒むガードとして残し、
+ソース走査を `facade_declares_logical_fns_only_as_approved_root_delegations` へ正ガード化した。
+`fandhe-ai =0.10.0` の公開 API は追加のみ。実装記録は同 doc §6.3。スコープ外: 微分可能な
+`masked_select`・`Var` 入力の logical 版・GPU 専用カーネル（§6 項目 2〜4）。
 
 > **更新（#2556）**: 下記の保留のうち `OptimizerStateDict` の再エクスポートは #2556 で公開済み
 > （`docs/autodiff-optimizer-state-dict-decision.md` §11）。保留ガードは正ガードへ反転した。

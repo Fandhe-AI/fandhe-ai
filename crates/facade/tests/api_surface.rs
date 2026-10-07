@@ -8262,7 +8262,9 @@ fn var_does_not_implement_arithmetic_operator_traits_while_2136_on_hold() {
 // =====================================================================
 // #2141（親 #2131）の facade 公開保留固定（`VarBoolOpsHoldDoctestGuard`）。
 // #2510 で比較 6 種・`masked_select` は `Var` 委譲として承認形へ部分反転済み
-// （logical 3 件・Tensor/Tape 上配置・モジュール再エクスポートは保留を維持）。
+// （Tensor/Tape 上配置・モジュール再エクスポートは保留を維持）。#2596 で
+// logical 3 件を crate 直下の 1 式委譲 `pub fn` として承認形へ反転済み
+// （`Var`／`Tensor`／`Tape` 上の配置とモジュール再エクスポートは引き続き拒否）。
 // `VarCustomHoldDoctestGuard`／`NnModuleHoldDoctestGuard`（#2396 で削除済み）系と同型の
 // 正のプローブ 1 ブロック方式のドリフト検査。承認事項・多層防御の
 // 位置づけは `docs/autodiff-bool-ops-exposure-decision.md` §6 参照。
@@ -8456,11 +8458,11 @@ fn __probe_tape(x: &fandhe_ai::Tape) {\n\
 }";
 
 /// bool 出力比較 6 種・logical 3 種・`masked_select`（10 個の関数名。
-/// イシュー #2141）。[`facade_does_not_reexport_or_declare_bool_ops`]・
+/// イシュー #2141）。[`facade_declares_logical_fns_only_as_approved_root_delegations`]・
 /// [`workspace_declares_bool_ops_fn_names_in_approved_places_only`]
-/// が共用する。#2510 で 7 件は `Var` 委譲として承認済みのため、承認分
-/// （[`BOOL_OPS_APPROVED_VAR_METHOD_NAMES`]）と保留分
-/// （[`BOOL_OPS_HELD_FN_NAMES`]）の連結として定義する。
+/// が共用する。#2510 で 7 件は `Var` 委譲、#2596 で logical 3 件は crate 直下の委譲
+/// 自由関数として承認済み（[`BOOL_OPS_APPROVED_VAR_METHOD_NAMES`]・
+/// [`BOOL_OPS_APPROVED_ROOT_FN_NAMES`]）。
 const BOOL_OPS_FN_NAMES: [&str; 10] = [
     "gt_bool",
     "ge_bool",
@@ -8487,8 +8489,29 @@ const BOOL_OPS_APPROVED_VAR_METHOD_NAMES: [&str; 7] = [
     "masked_select",
 ];
 
-/// 公開形が未決で保留のままの logical 3 件（#2594）。
-const BOOL_OPS_HELD_FN_NAMES: [&str; 3] = ["logical_and", "logical_or", "logical_not"];
+/// crate 直下の委譲自由関数として facade 公開が承認された logical 3 件
+/// （イシュー #2596・親 #2594・ルート #2499 コメント承認・
+/// `docs/autodiff-bool-ops-exposure-decision.md` §6.2 案 B-1）。
+const BOOL_OPS_APPROVED_ROOT_FN_NAMES: [&str; 3] = ["logical_and", "logical_or", "logical_not"];
+
+/// `crates/facade/src/lib.rs` の logical 3 件の本体の固定（トークンを空白
+/// 連結した形）。`bool_ops` 自由関数への 1 式委譲のみを許し、独自実装化や
+/// 確保前検査（`checked_bytes_for`）の迂回を拒否する。引数名 `a`／`b` も
+/// 固定の一部である。
+const BOOL_OPS_ROOT_EXPECTED_BODIES: [(&str, &str); 3] = [
+    (
+        "logical_and",
+        "fandhe_ai_autodiff : : bool_ops : : logical_and ( a , b )",
+    ),
+    (
+        "logical_or",
+        "fandhe_ai_autodiff : : bool_ops : : logical_or ( a , b )",
+    ),
+    (
+        "logical_not",
+        "fandhe_ai_autodiff : : bool_ops : : logical_not ( a )",
+    ),
+];
 
 /// `crates/autodiff/src/var.rs` の委譲メソッド本体の固定（トークンを
 /// 空白連結した形。`determinism_fn_body` の出力と照合する）。独自実装化
@@ -8507,17 +8530,31 @@ const BOOL_OPS_VAR_EXPECTED_BODIES: [(&str, &str); 7] = [
     ),
 ];
 
-/// facade src 全体（`crates/facade/src/**`）に、`bool_ops` を参照する
-/// `pub use`（`pub use fandhe_ai_autodiff::bool_ops;` 等のモジュール
-/// 再エクスポート・別名含む）も、[`BOOL_OPS_FN_NAMES`]（10 個）の `fn`
-/// 宣言（可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`]
-/// と同じ検出契約）も存在しないことを固定する（`VarBoolOpsHoldDoctestGuard`
-/// の正のプローブと多層防御を成す最内層のソース走査ガード。
-/// `facade_does_not_reexport_nn_module_or_containers` 系と同型）。
+/// 承認形（イシュー #2596・親 #2594・`docs/autodiff-bool-ops-exposure-
+/// decision.md` §6.2 案 B-1）の固定。facade src 全体で次を固定する:
+///
+/// - `bool_ops` を識別子に含む `pub use`（モジュール再エクスポート・別名）
+///   が 0 件。
+/// - `Var` 委譲 7 件（[`BOOL_OPS_APPROVED_VAR_METHOD_NAMES`]）の `fn` 宣言が
+///   0 件（実体は autodiff 側）。
+/// - logical 3 件（[`BOOL_OPS_APPROVED_ROOT_FN_NAMES`]）の `fn` 宣言が
+///   `lib.rs` にちょうど 1 件ずつ、他の facade src には 0 件。
+/// - 各 `pub fn` の本体が [`BOOL_OPS_ROOT_EXPECTED_BODIES`] と一致（独自実装化
+///   と確保前検査の迂回を拒否）。
+///
+/// `VarBoolOpsHoldDoctestGuard` の正のプローブと多層防御を成す最内層の
+/// ソース走査ガード（`facade_declares_determinism_fns_only_as_approved_root_
+/// delegations` と同型）。
 #[test]
-fn facade_does_not_reexport_or_declare_bool_ops() {
+fn facade_declares_logical_fns_only_as_approved_root_delegations() {
     let src_dir = facade_crate_root().join("src");
+    let lib_rs = lib_rs_path();
     let mut offending: Vec<String> = Vec::new();
+    let mut root_counts: std::collections::BTreeMap<&str, usize> = BOOL_OPS_APPROVED_ROOT_FN_NAMES
+        .iter()
+        .map(|n| (*n, 0usize))
+        .collect();
+    let mut root_seen = false;
     visit_rs_files(&src_dir, &mut |path, content| {
         for line in content.lines() {
             let trimmed = line.trim_start();
@@ -8530,24 +8567,93 @@ fn facade_does_not_reexport_or_declare_bool_ops() {
         }
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
         let tokens = tokenize_including_punctuation(&cleaned);
-        for fn_name in BOOL_OPS_FN_NAMES {
+        let is_root = path == lib_rs;
+        if is_root {
+            root_seen = true;
+        }
+        for fn_name in BOOL_OPS_APPROVED_VAR_METHOD_NAMES {
             let count = count_fn_declarations_by_name(&tokens, fn_name);
             if count > 0 {
                 offending.push(format!(
-                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった",
+                    "{}: `fn {fn_name}` 宣言が {count} 件見つかった（`Var` 委譲は autodiff 側のみ）",
                     path.display()
                 ));
             }
         }
+        for fn_name in BOOL_OPS_APPROVED_ROOT_FN_NAMES {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if is_root {
+                *root_counts.entry(fn_name).or_insert(0) += count;
+            } else if count > 0 {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が lib.rs 以外に {count} 件",
+                    path.display()
+                ));
+            }
+        }
+        if is_root {
+            for (fn_name, expected_body) in BOOL_OPS_ROOT_EXPECTED_BODIES {
+                match determinism_fn_body(&tokens, fn_name) {
+                    Some(body) if body == expected_body => {}
+                    other => offending.push(format!(
+                        "lib.rs: `{fn_name}` の本体が `fandhe_ai_autodiff::bool_ops::{fn_name}` への 1 式委譲のみではない（期待 `{expected_body}`・実際 {other:?}）"
+                    )),
+                }
+            }
+        }
     });
     assert!(
+        root_seen,
+        "facade src から lib.rs を見失った（fail-closed）: {}",
+        lib_rs.display()
+    );
+    assert_eq!(
+        BOOL_OPS_ROOT_EXPECTED_BODIES.len(),
+        BOOL_OPS_APPROVED_ROOT_FN_NAMES.len()
+    );
+    for (name, count) in &root_counts {
+        if *count != 1 {
+            offending.push(format!(
+                "lib.rs: `fn {name}` 宣言が {count} 件（ちょうど 1 件であること）"
+            ));
+        }
+    }
+    assert!(
         offending.is_empty(),
-        "facade の公開面が承認形（#2510。`Var` 委譲 7 件のみ。実体は autodiff\
-         側）の外で bool_ops を再エクスポート、または同名の fn を facade 側で\
-         宣言している: {offending:?}"
+        "facade の bool_ops 公開が承認形（#2510: `Var` 委譲 7 件は autodiff 側、\
+         #2596: crate 直下の `pub fn` 3 件が `fandhe_ai_autodiff::bool_ops::*` へ\
+         1 式委譲）から逸脱している（モジュール再エクスポート・別名・独自実装・\
+         `Var` 側 fn の facade 宣言は承認形外）: {offending:?}"
     );
 }
 
+/// `fandhe_ai::{logical_and, logical_or, logical_not}`（イシュー #2596）が
+/// facade 経由で到達でき、シグネチャが承認形であることを固定する正の
+/// プローブ。
+#[test]
+fn logical_fns_are_reachable_via_facade_root() {
+    use fandhe_ai::{AutodiffError, Tensor};
+    type Binary = fn(&Tensor<bool>, &Tensor<bool>) -> Result<Tensor<bool>, AutodiffError>;
+    type Unary = fn(&Tensor<bool>) -> Result<Tensor<bool>, AutodiffError>;
+    let _: Binary = fandhe_ai::logical_and;
+    let _: Binary = fandhe_ai::logical_or;
+    let _: Unary = fandhe_ai::logical_not;
+    let a = Tensor::new(vec![true, true, false, false], &[4]).expect("shape");
+    let b = Tensor::new(vec![true, false, true, false], &[4]).expect("shape");
+    let host = |t: Tensor<bool>| t.contiguous().host_slice().into_owned();
+    assert_eq!(
+        host(fandhe_ai::logical_and(&a, &b).expect("and")),
+        vec![true, false, false, false]
+    );
+    assert_eq!(
+        host(fandhe_ai::logical_or(&a, &b).expect("or")),
+        vec![true, true, true, false]
+    );
+    assert_eq!(
+        host(fandhe_ai::logical_not(&a).expect("not")),
+        vec![false, false, true, true]
+    );
+}
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`BOOL_OPS_FN_NAMES`]
 /// （10 個）の `fn` 宣言の定義元を固定する（#2510 で正ガードへ反転）。
 /// 承認済み 7 件は `crates/autodiff/src/bool_ops.rs`（自由関数）と
@@ -8613,12 +8719,15 @@ fn workspace_declares_bool_ops_fn_names_in_approved_places_only() {
     for name in BOOL_OPS_APPROVED_VAR_METHOD_NAMES {
         expected.insert(format!("autodiff/src/var.rs::{name}"), 1usize);
     }
+    for name in BOOL_OPS_APPROVED_ROOT_FN_NAMES {
+        expected.insert(format!("facade/src/lib.rs::{name}"), 1usize);
+    }
 
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の bool_ops 系 `fn` 宣言集合が\
          期待（bool_ops.rs に 10 件・承認済み 7 件は var.rs にも各 1 件。\
-         logical 3 件は bool_ops.rs のみ）と一致しない（過不足いずれも\
+         logical 3 件は facade/src/lib.rs にも各 1 件）と一致しない（過不足いずれも\
          fail-closed に検出する。新たな定義元が見つかった場合、それが\
          承認済みの実装なのか迂回経路の混入なのかを確認すること）: {found:?}"
     );
@@ -8637,7 +8746,6 @@ fn workspace_declares_bool_ops_fn_names_in_approved_places_only() {
         BOOL_OPS_VAR_EXPECTED_BODIES.len(),
         BOOL_OPS_APPROVED_VAR_METHOD_NAMES.len()
     );
-    let _ = BOOL_OPS_HELD_FN_NAMES;
 }
 
 // =====================================================================

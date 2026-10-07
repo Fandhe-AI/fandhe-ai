@@ -1,9 +1,11 @@
-//! `fandhe_ai_autodiff::bool_ops`（イシュー #2141・facade 非公開の内部
-//! 入口。`crates/autodiff/src/bool_ops.rs` モジュール doc 参照）の
+//! `fandhe_ai_autodiff::bool_ops`（イシュー #2141・内部入口。比較 6 種・
+//! `masked_select` は `Var` 委譲、logical 3 種は facade 直下の委譲関数として
+//! 公開済みだが、本テストは内部入口を直接検証する。
+//! `crates/autodiff/src/bool_ops.rs` モジュール doc 参照）の
 //! バックエンド間 parity テスト（`cast_backend_parity.rs`／
 //! `unique_backend_parity.rs` と同型）。
 //!
-//! `bool_ops` は facade から再エクスポートされないため、本テストは
+//! `bool_ops` モジュールは facade から再エクスポートされないため、本テストは
 //! `fandhe_ai_autodiff::bool_ops::*` を直接 use する（facade の dev
 //! 依存に `fandhe-ai-autodiff` が既に含まれている。`cast_backend_
 //! parity.rs` と同じ経路）。

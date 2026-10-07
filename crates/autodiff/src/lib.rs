@@ -164,8 +164,8 @@
 //! logical 3 種（`logical_and`／`logical_or`／`logical_not`）・
 //! `masked_select` を [`bool_ops`] へ追加した。いずれも非微分・tape
 //! 非記録の自由関数で、比較 6 種と `masked_select` は #2510 で `Var` の
-//! 委譲メソッドとして facade 公開済み。logical 3 種と自由関数自体は
-//! 公開しない（`docs/autodiff-bool-ops-exposure-decision.md`・
+//! 委譲メソッドとして、logical 3 種は #2596 で facade 直下の委譲関数として
+//! facade 公開済み。自由関数モジュール自体は再エクスポートしない（`docs/autodiff-bool-ops-exposure-decision.md`・
 //! モジュール doc 参照）。
 
 //! イシュー #2195（親 #2142「f64 autograd の最小集合」の第 1 段）で
