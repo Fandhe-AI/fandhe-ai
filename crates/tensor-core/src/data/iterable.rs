@@ -251,7 +251,7 @@ where
 mod tests {
     use super::*;
     use crate::data::{DataLoader, DataLoaderConfig, TensorDataset};
-    use crate::rng::{manual_seed, with_global_rng};
+    use crate::rng::{global_rng_test_lock, manual_seed, with_global_rng};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -432,6 +432,10 @@ mod tests {
 
     #[test]
     fn does_not_consume_global_rng() {
+        let _guard = global_rng_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         manual_seed(11);
         let expected = with_global_rng(|r| r.next_u64());
         manual_seed(11);
