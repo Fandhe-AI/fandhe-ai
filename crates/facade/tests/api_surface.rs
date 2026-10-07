@@ -4118,6 +4118,18 @@ fn scan_nn_init_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<S
             .get(i + 1)
             .map(|t| NN_INIT_NAMES.contains(&t.as_str()))
             .unwrap_or(false)
+            // #2593: crate ルートの承認済み委譲 `pub fn normal`（乱数分布。
+            // `nn::init::normal` とは別機能）だけは、本体が承認した 1 式委譲に
+            // 完全一致する場合に限り許可する（配置は
+            // `facade_declares_rng_distributions_only_as_approved_root_delegations`
+            // が lib.rs に固定）。
+            && !(tokens[i] == "fn"
+                && tokens.get(i + 1).map(String::as_str) == Some("normal")
+                && determinism_fn_body(&tokens, "normal").as_deref()
+                    == RNG_DISTRIBUTIONS_FN_EXPECTED_BODIES
+                        .iter()
+                        .find(|(n, _)| *n == "normal")
+                        .map(|(_, b)| *b))
         {
             offending.push(format!(
                 "{} {} 宣言",
@@ -11946,11 +11958,12 @@ fn workspace_declares_determinism_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// #2156（親 #2131）の facade 公開保留固定（`RngDistributionsHoldDoctestGuard`）。
-// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）と同型の正のプローブ 1
-// ブロック方式のドリフト検査に加え、workspace 全体のソース走査による
-// 定義元インベントリを持つ。承認事項・多層防御の位置づけは
-// `docs/rng-distributions-generator-decision.md` 参照。
+// #2156 実装・#2593 公開（親 #2591・ルート #2499 Phase 3）の RNG 分布・
+// `Generator` 正ガード。旧否定ガードを、承認形（crate ルートの委譲 `pub fn`
+// 3 件と `pub use fandhe_ai_tensor_core::Generator;` 1 行）だけを許す形へ
+// 部分反転した（先例 #2507。構造体名 `RngDistributionsHoldDoctestGuard` は
+// 維持し、`Var`／`Tensor<f32>` への同名メソッド追加だけを doctest が検出する）。
+// 公開形の記録は `docs/rng-distributions-generator-decision.md` §5 参照。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `RngDistributionsHoldDoctestGuard` doc
@@ -12012,13 +12025,6 @@ fn rng_distributions_hold_doctest_probe_body_matches_fixed_contract() {
 /// の `use fandhe_ai::*;` は本文に含む）。
 const RNG_DISTRIBUTIONS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
 \n\
-mod __fandhe_rng_dist_hold_probe {\n\
-\x20\x20\x20\x20pub struct Generator;\n\
-\x20\x20\x20\x20pub fn bernoulli() {}\n\
-\x20\x20\x20\x20pub fn multinomial() {}\n\
-}\n\
-use __fandhe_rng_dist_hold_probe::*;\n\
-\n\
 struct __FandheRngDistMarker;\n\
 \n\
 trait __FandheRngDistHoldProbe {\n\
@@ -12039,30 +12045,6 @@ impl __FandheRngDistHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn normal(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }\n\
 }\n\
 \n\
-fn __probe_free_fns(_: Generator) {\n\
-\x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
-\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
-\x20\x20\x20\x20bernoulli();\n\
-\x20\x20\x20\x20multinomial();\n\
-}\n\
-\n\
-// `normal` だけは `nn::init::normal`（#2504 で公開済み）が同名の\n\
-// 別機能として facade に存在するため、`nn::init` を除く全 `pub mod`\n\
-// だけを glob したスコープで衝突検査する（`nn::init` を含めると\n\
-// 常に曖昧になる）。\n\
-mod __fandhe_rng_dist_normal_scope {\n\
-\x20\x20\x20\x20use fandhe_ai::*;\n\
-\n\
-\x20\x20\x20\x20mod __fandhe_rng_dist_normal_probe {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20pub fn normal() {}\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20use __fandhe_rng_dist_normal_probe::*;\n\
-\n\
-\x20\x20\x20\x20pub fn __probe_normal() {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20normal();\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe_var(x: &fandhe_ai::Var<'_>) {\n\
 \x20\x20\x20\x20let _: __FandheRngDistMarker = fandhe_ai::Var::bernoulli(x);\n\
 \x20\x20\x20\x20let _: __FandheRngDistMarker = x.bernoulli();\n\
@@ -12075,29 +12057,56 @@ fn __probe_tensor_f32(x: &fandhe_ai::Tensor<f32>) {\n\
 \x20\x20\x20\x20let _: __FandheRngDistMarker = x.multinomial();\n\
 }";
 
-/// `bernoulli`・`multinomial`・`normal`（3 個の関数名。イシュー #2156）。
-/// `Generator`（型名）と合わせて
-/// [`facade_does_not_reexport_or_declare_rng_distributions`]・
+/// `bernoulli`・`multinomial`・`normal`（3 個の関数名。イシュー #2156・
+/// #2593）。[`facade_declares_rng_distributions_only_as_approved_root_delegations`]・
 /// [`workspace_declares_rng_distribution_names_only_in_allowed_locations`]
 /// が共用する。
 const RNG_DISTRIBUTIONS_FN_NAMES: [&str; 3] = ["bernoulli", "multinomial", "normal"];
 
-/// [`facade_does_not_reexport_or_declare_rng_distributions`]・その自己
-/// テストが共用する検出本体。facade src 全体（`crates/facade/src/**`）
-/// の `pub use` から [`collect_pub_use_leaves`] で別名にする前の葉を
-/// 集め `Generator` を検出し（単一行・複数行・ネストした group・別名も
-/// 検出）、`trait`／`struct`／`enum`／`type` 直後の `Generator` 独自
-/// 宣言、[`RNG_DISTRIBUTIONS_FN_NAMES`]（3 個）の `fn` 宣言（可視性・
-/// 宣言文脈を問わない。[`count_fn_declarations_by_name`] と同じ検出
-/// 契約）を違反として返す（`scan_kv_cache_reexports_and_declarations`
-/// と同型）。
-fn scan_rng_distributions_reexports_and_declarations(
+/// 承認形（イシュー #2593）の関数本体（トークンを空白連結した形）。引数名も
+/// 固定する。
+const RNG_DISTRIBUTIONS_FN_EXPECTED_BODIES: [(&str, &str); 3] = [
+    ("bernoulli", "fandhe_ai_autodiff : : bernoulli ( probs )"),
+    (
+        "multinomial",
+        "fandhe_ai_autodiff : : multinomial ( weights , num_samples , replacement )",
+    ),
+    (
+        "normal",
+        "fandhe_ai_autodiff : : normal ( mean , std , shape )",
+    ),
+];
+
+/// 承認形の `Generator` 再エクスポートの path トークン列
+/// （`pub use fandhe_ai_tensor_core::Generator;`。`::rng::` 経由・別名・
+/// group は承認形外）。
+const RNG_GENERATOR_APPROVED_USE_TOKENS: [&str; 4] =
+    ["fandhe_ai_tensor_core", ":", ":", "Generator"];
+
+/// [`facade_declares_rng_distributions_only_as_approved_root_delegations`]・
+/// その自己テストが共用する検出本体。1 ファイル分のソースを走査し、
+/// （違反, 承認形 `Generator` 再エクスポートの件数）を返す。
+///
+/// - `pub use` の葉: `Generator` は `is_root`（`src/lib.rs`）かつ path が
+///   [`RNG_GENERATOR_APPROVED_USE_TOKENS`] と完全一致する場合のみ承認形
+///   （件数に数える）。`bernoulli`／`multinomial` は常に違反。`normal` は
+///   既存承認済みの `src/nn/init.rs` の `fandhe_ai_autodiff::nn::init::`
+///   経路（別名なし。#2504。`facade_reexports_nn_init_items_only_in_approved_shape`
+///   が別途固定）だけを検査対象外とする。`rng` を識別子に含む `pub use`
+///   （モジュール丸ごとの再エクスポート）は違反。
+/// - `trait`／`struct`／`enum`／`type` の `Generator` 独自宣言は違反。
+/// - `fn` 宣言: `is_root` では 3 名がちょうど 1 件ずつで、本体が
+///   [`RNG_DISTRIBUTIONS_FN_EXPECTED_BODIES`] と完全一致すること。
+///   それ以外のファイルでは 0 件であること。
+fn scan_rng_distributions_surface(
     content: &str,
+    is_root: bool,
     is_nn_init_rs: bool,
-) -> Vec<String> {
+) -> (Vec<String>, usize) {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
+    let mut approved_generator = 0usize;
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -12107,18 +12116,24 @@ fn scan_rng_distributions_reexports_and_declarations(
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            // #2504: `nn::init::normal`（`torch.nn.init.normal_` 相当。RNG 分布 `normal`
-            // とは別機能）の承認済み再エクスポートだけを経路限定で許可する
-            // （`src/nn/init.rs`・接頭辞 `fandhe_ai_autodiff::nn::init::`・別名なし）。
+            if path_tokens.iter().any(|t| t == "rng") {
+                offending
+                    .push("pub use が `rng` を識別子に含む（モジュール再エクスポート）".into());
+            }
             let nn_init_shape_ok = is_nn_init_rs
                 && nn_init_approved_prefix(path_tokens)
                 && !path_tokens.iter().any(|t| t == "as");
-            for leaf in leaves {
+            for leaf in collect_pub_use_leaves(path_tokens) {
                 if leaf == "normal" && nn_init_shape_ok {
                     continue;
                 }
-                if leaf == "Generator" || RNG_DISTRIBUTIONS_FN_NAMES.contains(&leaf.as_str()) {
+                if leaf == "Generator" {
+                    if is_root && path_tokens == RNG_GENERATOR_APPROVED_USE_TOKENS.as_slice() {
+                        approved_generator += 1;
+                    } else {
+                        offending.push("pub use leaf=Generator（承認形外）".into());
+                    }
+                } else if RNG_DISTRIBUTIONS_FN_NAMES.contains(&leaf.as_str()) {
                     offending.push(format!("pub use leaf={leaf}"));
                 }
             }
@@ -12133,17 +12148,31 @@ fn scan_rng_distributions_reexports_and_declarations(
         i += 1;
     }
 
-    for fn_name in RNG_DISTRIBUTIONS_FN_NAMES {
+    for (fn_name, expected_body) in RNG_DISTRIBUTIONS_FN_EXPECTED_BODIES {
         let count = count_fn_declarations_by_name(&tokens, fn_name);
-        if count > 0 {
-            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        if !is_root {
+            if count > 0 {
+                offending.push(format!("`fn {fn_name}` 宣言が lib.rs 以外に {count} 件"));
+            }
+            continue;
+        }
+        if count != 1 {
+            offending.push(format!(
+                "lib.rs: `fn {fn_name}` 宣言が {count} 件（ちょうど 1 件であること）"
+            ));
+            continue;
+        }
+        match determinism_fn_body(&tokens, fn_name) {
+            Some(body) if body == expected_body => {}
+            other => offending.push(format!(
+                "lib.rs: `{fn_name}` の本体が `fandhe_ai_autodiff::{fn_name}` への委譲のみではない（期待 `{expected_body}`・実際 {other:?}）"
+            )),
         }
     }
-    offending
+    (offending, approved_generator)
 }
 
-/// `pub use` の path トークン列が `fandhe_ai_autodiff :: nn :: init :: …`
-/// で始まるか（`nn::init` の承認形の接頭辞）を判定する
+/// `pub use fandhe_ai_autodiff::nn::init::…` の接頭辞判定
 /// （[`optimizer_ext_approved_prefix`] と同型）。
 fn nn_init_approved_prefix(path_tokens: &[String]) -> bool {
     let want = [
@@ -12160,118 +12189,132 @@ fn nn_init_approved_prefix(path_tokens: &[String]) -> bool {
     path_tokens.len() >= want.len() && path_tokens.iter().zip(want).all(|(a, b)| a == b)
 }
 
-/// [`scan_rng_distributions_reexports_and_declarations`] の自己テスト。
-/// `normal` の承認済み `nn::init` 再エクスポートだけが経路限定で許可され、
-/// それ以外（別ファイル・別 path・別名・RNG 分布の `normal`）は違反になる。
+/// 承認形（イシュー #2593・ルート #2499 Phase 3 の承認）の固定: facade src
+/// 全体で、[`RNG_DISTRIBUTIONS_FN_NAMES`] の `fn` 宣言は `src/lib.rs` の
+/// 委譲 `pub fn` 各 1 件のみ（本体は 1 式委譲に完全一致）、`Generator` の
+/// `pub use` は `lib.rs` の `pub use fandhe_ai_tensor_core::Generator;`
+/// ちょうど 1 件のみ、モジュール再エクスポート・別名・独自宣言は無いこと
+/// を固定する（旧否定ガードの反転。[`facade_declares_determinism_fns_only_as_approved_root_delegations`]
+/// と同型）。
 #[test]
-fn scan_rng_distributions_allows_only_approved_nn_init_normal() {
-    let scan = scan_rng_distributions_reexports_and_declarations;
-    // 正例: src/nn/init.rs の承認形（group・単一とも）。
-    assert!(
-        scan(
-            "pub use fandhe_ai_autodiff::nn::init::{constant, normal, uniform};",
-            true
-        )
-        .is_empty()
-    );
-    assert!(scan("pub use fandhe_ai_autodiff::nn::init::normal;", true).is_empty());
-    // 負例: RNG 分布の `normal`（tensor_core::rng）は src/nn/init.rs でも違反。
-    assert!(!scan("pub use fandhe_ai_tensor_core::rng::normal;", true).is_empty());
-    // 負例: 承認形でも nn/init.rs 以外のファイルからは違反。
-    assert!(!scan("pub use fandhe_ai_autodiff::nn::init::normal;", false).is_empty());
-    // 負例: 別名。
-    assert!(!scan("pub use fandhe_ai_autodiff::nn::init::normal as n;", true).is_empty());
-    // 負例: 他の RNG 分布名・Generator は nn/init.rs でも違反のまま。
-    assert!(!scan("pub use fandhe_ai_autodiff::nn::init::bernoulli;", true).is_empty());
-    assert!(!scan("pub use fandhe_ai_tensor_core::rng::Generator;", true).is_empty());
-    // 負例: fn 宣言は従来どおり違反。
-    assert!(!scan("pub fn normal() {}", true).is_empty());
-}
-
-/// `RngDistributionsHoldDoctestGuard` の入れ子スコープ
-/// `__fandhe_rng_dist_normal_scope`（`nn::init` 衝突の回避用。#2504）が
-/// glob する集合が「`pub mod` 全集合から `nn::init` だけを除いたもの」と
-/// 完全一致し、ローカルの `normal` プローブと `normal();` 呼び出しを
-/// 保つことを固定する（`split_glob_imports_and_probe_body` は入れ子内の
-/// glob 行も外側と同じ集合へ吸収するため、別途検査が必要）。
-#[test]
-fn rng_distributions_normal_scope_globs_all_pub_modules_except_nn_init() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "RngDistributionsHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let start = block
-        .iter()
-        .position(|l| l.trim() == "mod __fandhe_rng_dist_normal_scope {")
-        .expect("入れ子スコープ __fandhe_rng_dist_normal_scope が見つからない");
-    let mut globs = std::collections::BTreeSet::new();
-    let mut inner: Vec<String> = Vec::new();
-    for line in &block[start + 1..] {
-        if line.trim() == "}" && !line.starts_with(' ') {
-            break;
-        }
-        let t = line.trim();
-        if let Some(path) = t
-            .strip_prefix("use fandhe_ai::")
-            .and_then(|r| r.strip_suffix("::*;"))
-            && !path.is_empty()
-        {
-            globs.insert(path.to_string());
-        }
-        inner.push(t.to_string());
-    }
-    let mut expected = declared;
-    assert!(
-        expected.remove("nn::init"),
-        "nn::init が pub mod 集合にない"
-    );
-    assert_eq!(
-        globs, expected,
-        "入れ子スコープの glob 集合が `pub mod` 全集合から nn::init を除いたものと不一致"
-    );
-    for needle in [
-        "use fandhe_ai::*;",
-        "pub fn normal() {}",
-        "use __fandhe_rng_dist_normal_probe::*;",
-        "normal();",
-    ] {
-        assert!(
-            inner.iter().any(|l| l == needle),
-            "入れ子スコープに `{needle}` がない（正のプローブの骨抜き）: {inner:?}"
-        );
-    }
-    assert!(
-        !inner.iter().any(|l| l.contains("nn::init")),
-        "入れ子スコープが nn::init を glob している（常に曖昧になりプローブが無意味化する）"
-    );
-}
-
-/// facade src 全体（`crates/facade/src/**`）に、`Generator` を識別子
-/// 単位で含む `pub use`（複数行・ネストした group・別名含む）も、
-/// facade 独自の `trait`／`struct`／`enum`／`type` 宣言も、
-/// [`RNG_DISTRIBUTIONS_FN_NAMES`]（`bernoulli`／`multinomial`／
-/// `normal`）の `fn` 宣言も存在しないことを固定する
-/// （`RngDistributionsHoldDoctestGuard` の正のプローブと多層防御を成す
-/// 最内層のソース走査ガード。`facade_does_not_reexport_or_declare_kv_
-/// cache_items` と同型）。
-#[test]
-fn facade_does_not_reexport_or_declare_rng_distributions() {
+fn facade_declares_rng_distributions_only_as_approved_root_delegations() {
     let src_dir = facade_crate_root().join("src");
+    let lib_rs = lib_rs_path();
     let mut offending: Vec<String> = Vec::new();
+    let mut root_seen = false;
+    let mut generator_total = 0usize;
     visit_rs_files(&src_dir, &mut |path, content| {
+        let is_root = path == lib_rs;
+        if is_root {
+            root_seen = true;
+        }
         let is_nn_init_rs = path.ends_with("src/nn/init.rs");
-        for offense in scan_rng_distributions_reexports_and_declarations(content, is_nn_init_rs) {
+        let (found, approved) = scan_rng_distributions_surface(content, is_root, is_nn_init_rs);
+        generator_total += approved;
+        for offense in found {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
     assert!(
-        offending.is_empty(),
-        "facade の公開面が RNG 確率分布サンプラー（#2156 の\
-         `bernoulli`／`multinomial`／`normal`／`Generator`。内部クレート\
-         限定の新規公開面。facade 公開は承認待ちのため対象外という設計\
-         判断に違反）を再エクスポート、独自宣言、または同名の fn を\
-         宣言している: {offending:?}"
+        root_seen,
+        "facade src から lib.rs を見失った（fail-closed）: {}",
+        lib_rs.display()
     );
+    if generator_total != 1 {
+        offending.push(format!(
+            "承認形の `pub use fandhe_ai_tensor_core::Generator;` が lib.rs に {generator_total} 件（ちょうど 1 件であること）"
+        ));
+    }
+    assert!(
+        offending.is_empty(),
+        "facade の RNG 分布・Generator 公開が承認形（イシュー #2593: crate\
+         ルートの委譲 `pub fn` 3 件と `pub use fandhe_ai_tensor_core::Generator;`\
+         1 行）から逸脱している: {offending:?}"
+    );
+}
+
+/// [`scan_rng_distributions_surface`] の自己テスト。承認形の断片は通り、
+/// 逸脱（`::rng::` 経由・別名・group・別ファイル・独自 `fn`／`struct`・
+/// モジュール再エクスポート・委譲本体の差し替え）は検出されること、
+/// `nn::init` の承認済み `normal` 再エクスポートだけが検査対象外になる
+/// ことを固定する。
+#[test]
+fn scan_rng_distributions_surface_accepts_only_approved_forms() {
+    let scan = scan_rng_distributions_surface;
+    let good_fns = "pub fn bernoulli(probs: &Tensor<f32>) -> Result<Tensor<f32>, RngError> {\n\
+        fandhe_ai_autodiff::bernoulli(probs) }\n\
+        pub fn multinomial(weights: &Tensor<f32>, num_samples: usize, replacement: bool) -> Result<Tensor<i32>, RngError> {\n\
+        fandhe_ai_autodiff::multinomial(weights, num_samples, replacement) }\n\
+        pub fn normal(mean: f32, std: f32, shape: &[usize]) -> Result<Tensor<f32>, RngError> {\n\
+        fandhe_ai_autodiff::normal(mean, std, shape) }\n";
+    let good_root = format!("pub use fandhe_ai_tensor_core::Generator;\n{good_fns}");
+    // 正例: 承認形の lib.rs 断片。
+    let (off, gen_count) = scan(&good_root, true, false);
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(gen_count, 1);
+    // 正例: nn/init.rs の既存承認形。
+    assert!(
+        scan(
+            "pub use fandhe_ai_autodiff::nn::init::{constant, normal, uniform};",
+            false,
+            true
+        )
+        .0
+        .is_empty()
+    );
+    // 負例: `::rng::` 経由・別名・group・別ファイル。
+    for bad in [
+        "pub use fandhe_ai_tensor_core::rng::Generator;",
+        "pub use fandhe_ai_tensor_core::Generator as G;",
+        "pub use fandhe_ai_tensor_core::{Generator, Tensor};",
+    ] {
+        let (off, gen_count) = scan(bad, true, false);
+        assert!(!off.is_empty() && gen_count == 0, "{bad}");
+    }
+    assert!(
+        !scan("pub use fandhe_ai_tensor_core::Generator;", false, false)
+            .0
+            .is_empty()
+    );
+    // 負例: 関数名・モジュールの再エクスポート。
+    for bad in [
+        "pub use fandhe_ai_tensor_core::rng::normal;",
+        "pub use fandhe_ai_autodiff::bernoulli;",
+        "pub use fandhe_ai_autodiff::multinomial as m;",
+        "pub use fandhe_ai_tensor_core::rng;",
+        "pub use fandhe_ai_autodiff::nn::init::normal as n;",
+    ] {
+        assert!(!scan(bad, false, true).0.is_empty(), "{bad}");
+    }
+    // 承認形でも nn/init.rs 以外の `normal` は違反。
+    assert!(
+        !scan(
+            "pub use fandhe_ai_autodiff::nn::init::normal;",
+            false,
+            false
+        )
+        .0
+        .is_empty()
+    );
+    // 負例: 独自宣言。
+    for bad in [
+        "struct Generator;",
+        "enum Generator {}",
+        "trait Generator {}",
+        "type Generator = u8;",
+    ] {
+        assert!(!scan(bad, false, false).0.is_empty(), "{bad}");
+    }
+    // 負例: lib.rs 以外の fn 宣言、lib.rs での欠落・本体差し替え・重複。
+    assert!(!scan("pub fn normal() {}", false, false).0.is_empty());
+    assert!(!scan("pub fn normal() {}", true, false).0.is_empty());
+    let swapped = good_fns.replace(
+        "fandhe_ai_autodiff::normal(mean, std, shape)",
+        "fandhe_ai_autodiff::normal(0.0, std, shape)",
+    );
+    assert!(!scan(&swapped, true, false).0.is_empty());
+    let dup = format!("{good_fns}pub fn bernoulli() {{}}\n");
+    assert!(!scan(&dup, true, false).0.is_empty());
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、
@@ -12334,6 +12377,10 @@ fn workspace_declares_rng_distribution_names_only_in_allowed_locations() {
 
     let expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/nn/init.rs::normal".to_string(), 1usize),
+        // 承認形の crate ルート委譲 `pub fn`（#2593）。
+        ("facade/src/lib.rs::bernoulli".to_string(), 1usize),
+        ("facade/src/lib.rs::multinomial".to_string(), 1usize),
+        ("facade/src/lib.rs::normal".to_string(), 1usize),
         ("tensor-core/src/rng.rs::bernoulli".to_string(), 2usize),
         ("tensor-core/src/rng.rs::multinomial".to_string(), 2usize),
         ("tensor-core/src/rng.rs::normal".to_string(), 2usize),
@@ -21613,7 +21660,7 @@ const NPY_IO_APPROVED_NAMES: [&str; 5] =
 /// 独自宣言（`trait`／`struct`／`enum`／`type` 直後の `NpyError`、
 /// [`NPY_IO_FN_NAMES`]〈4 個〉の `fn` 宣言。可視性・宣言文脈を問わない。
 /// [`count_fn_declarations_by_name`] と同じ検出契約）を第 2 要素として返す
-/// （`scan_rng_distributions_reexports_and_declarations` と同型）。
+/// （`scan_rng_distributions_surface〈#2593 で置換〉` と同型）。
 fn scan_npy_io_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<String>) {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);

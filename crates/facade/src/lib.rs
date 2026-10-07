@@ -266,6 +266,14 @@ pub use fandhe_ai_tensor_core::{BackendError, Device, PoolStats, Tensor};
 // は行単位で `Tape`／`BackendOps`／`new_with_ops` を検査するのみで抵触
 // しない）。
 pub use fandhe_ai_tensor_core::RngError;
+// `Generator`（イシュー #2593・2026-10-07 承認）: グローバル RNG
+// （`manual_seed`）と独立した乱数源。`bernoulli`／`multinomial`／`normal`
+// と同じ分布サンプラーを持つ（`Generator::new(seed)` から生成し、グローバル
+// RNG の列を変えない）。`RngError` と同じく `fandhe_ai_tensor_core::` 直下
+// 経由の 1 行 `pub use`（`::rng::` 経由にしない）。既知の制限: `randn`／
+// `rand`／`randint` の `Generator` 版は無い（`docs/rng-distributions-generator-decision.md`
+// §5.1）。
+pub use fandhe_ai_tensor_core::Generator;
 // `ShapeError`（イシュー #1725）: `randn`／`rand`（本 PR で新設したトップ
 // レベル `pub fn`）の戻り値型（形状不正を表す）。`Tensor::zeros` 等の
 // 既存メソッドも同型を返すが、それらは既存の再エクスポート型
@@ -1345,6 +1353,97 @@ pub fn randint(low: i32, high: i32, shape: &[usize]) -> Result<Tensor<i32>, RngE
     fandhe_ai_autodiff::randint(low, high, shape)
 }
 
+/// 確率テンソル `probs` の各要素を成功確率とするベルヌーイ試行を行い、
+/// 0.0／1.0 の `f32` テンソルを返す（PyTorch `torch.bernoulli` 相当。
+/// イシュー #2593）。`fandhe_ai_autodiff::bernoulli`（実体は
+/// `fandhe_ai_tensor_core::rng::bernoulli`）への薄い委譲で、ホスト側だけで
+/// 完結し `BackendOps` を経由しない。[`manual_seed`] が設定したグローバル
+/// RNG を消費する（独立した乱数源が必要なら [`Generator`] を使う）。
+///
+/// - 検証（各確率が有限かつ `[0, 1]`）を終えてから乱数を消費する。
+///   違反は [`RngError`] の該当 variant を返す。
+/// - 整数演算のみで構成されるためプラットフォーム横断で bit 同一の
+///   決定性を持つ。版をまたぐ乱数列の安定性は保証しない。
+/// - 乱数源（xorshift64*）は暗号論的に安全ではない。鍵・トークン等の
+///   生成には使わないこと。
+/// - 出力確保は `probs` の要素数に比例する。信頼できない入力をそのまま
+///   渡さないこと。
+///
+/// # 例
+///
+/// ```
+/// let probs = fandhe_ai::Tensor::new(vec![0.0f32, 1.0, 0.5], &[3]).unwrap();
+/// fandhe_ai::manual_seed(7);
+/// let a = fandhe_ai::bernoulli(&probs).unwrap().host_slice().to_vec();
+/// // 同じシードの `Generator` と bit 一致する。
+/// let mut g = fandhe_ai::Generator::new(7);
+/// let b = g.bernoulli(&probs).unwrap().host_slice().to_vec();
+/// assert_eq!(a, b);
+/// assert_eq!(a[0], 0.0);
+/// assert_eq!(a[1], 1.0);
+/// ```
+pub fn bernoulli(probs: &Tensor<f32>) -> Result<Tensor<f32>, RngError> {
+    fandhe_ai_autodiff::bernoulli(probs)
+}
+
+/// 重み `weights`（rank 1 または 2）に比例するカテゴリ抽出を行い、添字の
+/// `i32` テンソルを返す（PyTorch `torch.multinomial` 相当。イシュー
+/// #2593）。設計・到達経路・乱数源は [`bernoulli`] と同じ。
+///
+/// - 出力 dtype は `i32`（本リポの index 型契約に合わせた意図的な差異）。
+///   rank 1 は `[num_samples]`、rank 2 は `[行数, num_samples]`。
+/// - 検証を終えてから乱数を消費する。非復元（`replacement == false`）で
+///   カテゴリ数が `num_samples` に満たない等は [`RngError`] を返す。
+/// - 非復元抽出の計算量は `O(num_samples * n)`。信頼できない入力を
+///   そのまま渡さないこと。
+/// - プラットフォーム横断で bit 同一。暗号用途には使わない。
+///
+/// # 例
+///
+/// ```
+/// let w = fandhe_ai::Tensor::new(vec![0.0f32, 1.0, 0.0, 1.0], &[4]).unwrap();
+/// fandhe_ai::manual_seed(3);
+/// let idx = fandhe_ai::multinomial(&w, 2, false).unwrap();
+/// let mut v = idx.host_slice().to_vec();
+/// v.sort();
+/// assert_eq!(v, vec![1, 3]);
+/// ```
+pub fn multinomial(
+    weights: &Tensor<f32>,
+    num_samples: usize,
+    replacement: bool,
+) -> Result<Tensor<i32>, RngError> {
+    fandhe_ai_autodiff::multinomial(weights, num_samples, replacement)
+}
+
+/// 平均 `mean`・標準偏差 `std` の正規分布に従う乱数テンソルを生成する
+/// （PyTorch `torch.normal(mean, std, size)` のスカラー版相当。イシュー
+/// #2593）。設計・到達経路は [`bernoulli`] と同じ。
+///
+/// **注意**: `nn::init::normal`（PyTorch `nn.init.normal_` 相当）とは
+/// 別機能で、引数順も異なる（本関数は `mean, std, shape`、`nn::init::normal`
+/// は `shape, mean, std`）。本関数は `std == 0` でも乱数を消費し、エラー
+/// 型は [`RngError`]（負の `std` 等）である。`fandhe_ai::*` と
+/// `fandhe_ai::nn::init::*` を両方 glob import して裸の `normal` を使うと
+/// 曖昧になるため、修飾して呼ぶこと。
+///
+/// - 決定性は同一プロセス・同一プラットフォーム内に限る（超越関数を
+///   含むため）。版をまたぐ乱数列の安定性は保証しない。
+/// - 乱数源は暗号論的に安全ではない。鍵・トークン等の生成には使わない。
+/// - 出力確保は `shape` の要素数に比例する。信頼できない入力をそのまま
+///   渡さないこと。
+///
+/// # 例
+///
+/// ```
+/// fandhe_ai::manual_seed(1);
+/// let t = fandhe_ai::normal(2.0, 0.0, &[3]).unwrap();
+/// assert_eq!(t.host_slice().to_vec(), vec![2.0f32, 2.0, 2.0]);
+/// ```
+pub fn normal(mean: f32, std: f32, shape: &[usize]) -> Result<Tensor<f32>, RngError> {
+    fandhe_ai_autodiff::normal(mean, std, shape)
+}
+
 /// `[start, end)` を `step` 刻みで並べたテンソルを生成する（PyTorch
 /// `torch.arange` 相当。イシュー #1726）。[`randn`]／[`rand`]／
 /// [`randint`] と同じくホスト側だけで完結し `BackendOps` を経由しない
@@ -2375,44 +2474,29 @@ struct VarHooksHoldDoctestGuard;
 #[allow(dead_code)]
 struct VarActivationOpsHoldDoctestGuard;
 
-/// イシュー #2156（親 #2131）の facade 公開保留を固定する doctest 足場。
-/// `VarMatrixOpsHoldDoctestGuard`（#2144。#2513 で削除済み）・`KvCacheHoldDoctestGuard`
-/// （#2084。#2579 で削除済み）と同型の「正のプローブ 1 ブロック方式」を採る: facade の
-/// 全 `pub mod` を glob import したスコープに、本ブロック内でのみ定義
-/// したローカルの自由関数群（`__fandhe_rng_dist_hold_probe::{bernoulli,
-/// multinomial, normal, Generator}`）とトレイト
-/// （`__FandheRngDistHoldProbe`）を導入し、実際に使う関数・型を書く。
-/// facade がどの経路（`pub use fandhe_ai_tensor_core::rng::{bernoulli,
-/// multinomial, normal, Generator};` のような再エクスポート・`Tensor`／
-/// `Var` への inherent メソッド追加・別名 `pub use`・facade 独自の
-/// `struct Generator` 宣言）でこれらの名前を公開しても、ローカル定義
-/// との glob 衝突（自由関数・型名の場合。E0659 等）または呼び出し
-/// シグネチャの不一致（inherent メソッドがトレイトメソッドより優先
-/// 解決されるため、引数なしの `x.bernoulli()` 呼び出しが実際のシグネチャ
-/// （`Tensor<f32>::bernoulli(probs: &Tensor<f32>)` 等）と型・引数数不一致
-/// になる）でコンパイルが失敗する。
+/// イシュー #2156（親 #2131）の RNG 分布・`Generator` の facade 公開を
+/// 巡る doctest 足場。自由関数 `bernoulli`／`multinomial`／`normal` と
+/// `Generator` は**イシュー #2593 で承認形（crate ルートの委譲 `pub fn`
+/// 3 件と `pub use fandhe_ai_tensor_core::Generator;` 1 行。承認の根拠は
+/// ルート #2499 のコメント）として公開済み**のため、旧保留版にあった
+/// ローカル定義との glob 衝突プローブと入れ子スコープは撤去した。
+/// 本ガードは、`Var`／`Tensor<f32>` に同名の inherent メソッド
+/// （`bernoulli`／`multinomial`／`normal`）が追加されること（承認外。
+/// `docs/rng-distributions-generator-decision.md` §5.1.3 P4）だけを検出する
+/// 「正のプローブ 1 ブロック方式」を維持する: facade の全 `pub mod` を
+/// glob import したスコープに、トレイト（`__FandheRngDistHoldProbe`）を
+/// 導入しメソッド／パス構文で呼ぶ。inherent メソッドはトレイトメソッドより
+/// 優先解決されるため、実際に追加されると引数数・型の不一致でコンパイルが
+/// 失敗する。メソッド／パス構文のため、ルートの `normal` と
+/// `nn::init::normal` を両方 glob しても曖昧にならない。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// rng_distributions_hold_doctest_globs_all_pub_modules`・`rng_
 /// distributions_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_rng_distributions`・
+/// `facade_declares_rng_distributions_only_as_approved_root_delegations`・
 /// `workspace_declares_rng_distribution_names_only_in_allowed_locations`）
-/// との多層防御の位置づけ・承認未取得の経緯は
-/// `docs/rng-distributions-generator-decision.md` §「facade 保留と承認
-/// 依頼用の事前設計」を参照。
-///
-/// **注意**: `normal` は `crates/autodiff/src/nn/init.rs` の
-/// `nn::init::normal`（PyTorch `nn.init.normal_` 相当）と同名の別機能で
-/// ある。`nn::init` はイシュー #2504 で先に facade 公開されたため、自由
-/// 関数 `normal` の衝突プローブは `nn::init` を除く全 `pub mod` を glob
-/// した入れ子モジュール `__fandhe_rng_dist_normal_scope` に分離している
-/// （`docs/rng-distributions-generator-decision.md` §5）。`tensor_core::
-/// rng::normal` を公開する際は、この分離と `api_surface.rs` の
-/// ソース走査の経路限定許可を合わせて撤去する。
-///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
+/// との多層防御の位置づけ・承認の経緯は
+/// `docs/rng-distributions-generator-decision.md` §5 を参照。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -2433,13 +2517,6 @@ struct VarActivationOpsHoldDoctestGuard;
 /// use fandhe_ai::model::*;
 /// use fandhe_ai::inference::*;
 ///
-/// mod __fandhe_rng_dist_hold_probe {
-///     pub struct Generator;
-///     pub fn bernoulli() {}
-///     pub fn multinomial() {}
-/// }
-/// use __fandhe_rng_dist_hold_probe::*;
-///
 /// struct __FandheRngDistMarker;
 ///
 /// trait __FandheRngDistHoldProbe {
@@ -2458,42 +2535,6 @@ struct VarActivationOpsHoldDoctestGuard;
 ///     fn bernoulli(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
 ///     fn multinomial(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
 ///     fn normal(&self) -> __FandheRngDistMarker { __FandheRngDistMarker }
-/// }
-///
-/// fn __probe_free_fns(_: Generator) {
-///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
-///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
-///     bernoulli();
-///     multinomial();
-/// }
-///
-/// // `normal` だけは `nn::init::normal`（#2504 で公開済み）が同名の
-/// // 別機能として facade に存在するため、`nn::init` を除く全 `pub mod`
-/// // だけを glob したスコープで衝突検査する（`nn::init` を含めると
-/// // 常に曖昧になる）。
-/// mod __fandhe_rng_dist_normal_scope {
-///     use fandhe_ai::*;
-///     use fandhe_ai::compat::*;
-///     use fandhe_ai::optim::*;
-///     use fandhe_ai::data::*;
-///     use fandhe_ai::nn::*;
-///     use fandhe_ai::nn::rnn::*;
-///     use fandhe_ai::nn::kv_cache::*;
-///     use fandhe_ai::interop::*;
-///     use fandhe_ai::interop::onnx::*;
-///     use fandhe_ai::interop::safetensors::*;
-///     use fandhe_ai::interop::npy::*;
-///     use fandhe_ai::model::*;
-///     use fandhe_ai::inference::*;
-///
-///     mod __fandhe_rng_dist_normal_probe {
-///         pub fn normal() {}
-///     }
-///     use __fandhe_rng_dist_normal_probe::*;
-///
-///     pub fn __probe_normal() {
-///         normal();
-///     }
 /// }
 ///
 /// fn __probe_var(x: &fandhe_ai::Var<'_>) {

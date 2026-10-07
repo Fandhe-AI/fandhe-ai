@@ -21,6 +21,12 @@
 //! [`crate::AutodiffError`] は facade ルートで再エクスポート済みで、内部型は
 //! 露出しない。
 //!
+//! **注意（イシュー #2593）**: 本モジュールの `normal`（`nn.init.normal_`
+//! 相当。引数順 `shape, mean, std`）は、crate ルートの `fandhe_ai::normal`
+//! （`torch.normal` 相当の乱数分布。引数順 `mean, std, shape`）とは別機能
+//! である。両方を glob import して裸の `normal` を使うと曖昧になるため、
+//! 修飾して呼ぶこと。
+//!
 //! # 乱数源と決定性
 //!
 //! 乱数は**プロセスグローバル RNG**（[`crate::manual_seed`]）に従い、

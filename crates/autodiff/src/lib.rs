@@ -373,9 +373,9 @@ pub use tape::{NodeId, Tape, TapeId};
 // PyTorch `torch.bernoulli`／`torch.multinomial`／`torch.normal`／
 // `torch.Generator` 相当の確率分布サンプラーと、グローバル RNG 状態と
 // 完全に独立した乱数源。同じく `tensor-core::rng` が実体で本クレートは
-// 素通しするのみ。**facade への再委譲は保留**（ユーザー承認待ち。
-// `docs/rng-global-contract-design.md` §13・`docs/compat-api-scope.md`
-// §1.2）——`fandhe_ai_autodiff::normal`（本関数。引数順
+// 素通しするのみ。facade への再委譲はイシュー #2593 で承認形として
+// 実施済み（`docs/rng-distributions-generator-decision.md` §5.2・
+// `docs/compat-api-scope.md` §1.2）——`fandhe_ai_autodiff::normal`（本関数。引数順
 // `mean, std, shape`）と `nn::init::normal`（`shape, mean, std`）は
 // パスが異なるため衝突しない。
 pub use fandhe_ai_tensor_core::rng::{

@@ -127,7 +127,7 @@
 //! 反映する）で実装済み（設計判断は `docs/rng-global-contract-design.md`）。
 //! イシュー #2156 で確率分布サンプラー（[`rng::bernoulli`]／
 //! [`rng::multinomial`]／[`rng::normal`]）と、グローバル状態と独立した
-//! 乱数源 [`rng::Generator`] を実装済み（facade 公開は保留。
+//! 乱数源 [`rng::Generator`] を実装済み（facade 公開はイシュー #2593 で承認形として実施済み。
 //! `docs/rng-global-contract-design.md` §13）。
 //!
 //! `creation`（イシュー #1726。親 #1602）は `rng` の非乱数版カウンター

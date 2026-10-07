@@ -346,7 +346,7 @@ RNG 状態と完全に独立した乱数源 `Generator`（PyTorch `torch.Generat
 - **配置**: `crates/tensor-core/src/rng.rs`（既存の `randn`／`rand`／
   `randint`・`RngError` と同一ファイル）。`autodiff`（素通し `pub use`）
   は変更、`facade`（`crates/facade/**`）は保留 doctest 足場の追加のみ
-  （公開面は変更なし）
+  （#2156 時点では公開面の変更なし。#2593 で公開）
 - **消費契約**: `bernoulli` は 1 要素 1 抽選固定・`multinomial` は
   `m * num_samples` 回固定・`normal` は `randn` と同じ `ceil(numel/2)`
   組固定（`std == 0` でも同数消費。`nn::init::normal` は `std == 0` で
@@ -354,5 +354,6 @@ RNG 状態と完全に独立した乱数源 `Generator`（PyTorch `torch.Generat
 - **`Generator`**: `manual_seed(s)` 直後のグローバル自由関数と
   `Generator::new(s)` は bit 完全一致する（private コアの共有による
   機構的保証。`crates/autodiff/tests/random_parity.rs` で固定）
-- **facade 公開（経路 2）は未承認のまま保留**（`docs/rng-distributions-
-  generator-decision.md` §0・§5）
+- **facade 公開（経路 2）は #2593 で承認形として公開済み**（`fandhe_ai::
+  {bernoulli, multinomial, normal, Generator}`。`docs/rng-distributions-
+  generator-decision.md` §5.2）。版をまたぐ乱数列の安定性は保証しない

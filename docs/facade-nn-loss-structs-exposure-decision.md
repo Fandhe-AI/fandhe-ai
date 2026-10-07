@@ -109,7 +109,7 @@
 - root や他モジュールへの `pub use fandhe_ai_autodiff::nn::loss::…` を止める専用ガードは、`nn::loss` を grep した範囲では見つからなかった。#2602 で承認形以外の経路を拒否する正ガードを新設する
 - `facade_does_not_reexport_or_declare_loss_ops`（同 `:14768`）は、`pub use` 行が識別子 `loss_ops` を含む場合と、7 関数名の `fn` 宣言を拒否する。`nn::loss::…` 経路の `pub use` は `loss_ops` を含まないため抵触しない（テスト本体を読んで確認）
 - `LossOpsHoldDoctestGuard`（`crates/facade/src/lib.rs`）の doc は「オプション型の拒否は維持する」と述べるが、オプション型名を機械的に拒否するガードは見つからなかった（`api_surface.rs` での 5 型の出現は到達テストの import のみ）。**文言はあるが機械ガードは無い。本件の承認は、この文言を #2602 で上書きすることを含む**
-- `pub mod` を 1 つ足す場合の波及（#2602 で実施。件数は兄弟 PR で増減するため再計数する）: `*HoldDoctestGuard` の glob 一覧、`*_globs_all_pub_modules` テスト群（調査時 22 件）、`GRAD_SCALER_PROBE_MODULES`（`api_surface.rs:21311`・10 モジュール）、上記 nn 系 2 テストの期待値、`RngDistributionsHoldDoctestGuard` の入れ子スコープ
+- `pub mod` を 1 つ足す場合の波及（#2602 で実施。件数は兄弟 PR で増減するため再計数する）: `*HoldDoctestGuard` の glob 一覧、`*_globs_all_pub_modules` テスト群（調査時 22 件）、`GRAD_SCALER_PROBE_MODULES`（`api_surface.rs:21311`・10 モジュール）、上記 nn 系 2 テストの期待値、`RngDistributionsHoldDoctestGuard` の入れ子スコープ（#2593 で撤去済み）
 - 同ツリーで `pub mod` を足しうる兄弟 issue と glob 一覧の編集が競合しうる。rebase 時は双方の行を残す
 - `loss_ops` モジュール再エクスポートと `Tensor`／`Tape` 上の同名メソッドの拒否は維持する
 - 入力検査（shape・クロステープ・値域）は委譲先の autodiff 側に残り、純再エクスポートのため facade に迂回経路を作らない
