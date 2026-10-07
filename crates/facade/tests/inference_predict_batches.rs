@@ -315,3 +315,35 @@ fn public_signatures_are_pinned() {
     let _: fn() = reset_phase_metrics;
     let _: fn(&PhaseMetrics, &PhaseMetrics) -> PhaseMetrics = PhaseMetrics::since;
 }
+
+/// 利用例（#2583）: ラベル付きデータセットを `predict_batches` で推論し、
+/// `reset_phase_metrics()` → 1 回目 → 2 回目の順で呼んで「2 回目だけ」の差分を
+/// `since` で取る一連の手順（時間値は環境依存のため件数だけを固定する）。
+#[test]
+fn usage_example_labelled_dataset_with_before_after_metrics() {
+    let model = mlp_model();
+    let labels = Tensor::<i32>::new(vec![0, 1, 0, 1, 0], &[5]).unwrap();
+    let loader = DataLoader::new(
+        (
+            TensorDataset::new(make_features(5)).unwrap(),
+            TensorDataset::new(labels).unwrap(),
+        ),
+        DataLoaderConfig::new(2),
+    )
+    .unwrap();
+
+    reset_phase_metrics();
+    model.predict_batches(&loader).unwrap();
+    let before = get_phase_metrics();
+    let outputs = model.predict_batches(&loader).unwrap();
+    let delta = get_phase_metrics().since(&before);
+
+    // 5 サンプル・batch_size=2 → 3 バッチ（2・2・1）。累計は 2 回分、差分は 2 回目のみ。
+    assert_eq!(outputs.len(), 3);
+    assert_eq!(delta.batches(), 3);
+    assert_eq!(delta.samples(), 5);
+    assert_eq!(delta.total().calls(), 1);
+    assert_eq!(get_phase_metrics().batches(), 6);
+    assert_eq!(delta.phase(InferencePhase::Forward).calls(), 3);
+    assert_eq!(delta.phase(InferencePhase::DeviceTransfer).calls(), 0);
+}
