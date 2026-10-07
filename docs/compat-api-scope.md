@@ -372,12 +372,13 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   〈#2085・#2137・#2134〉に倣った内部クレート限定の非破壊追加であり、
   かつ 2026-09-24 にユーザー承認済み。`docs/kv-cache-design.md` §6
   承認事項 1）。**facade 公開（K-2。`add_stateful_attention`／
-  `StatefulAttention` 相当）は未承認のため保留し、
+  `StatefulAttention` 相当）は（#2084 時点では）未承認のため保留し、
   `crates/facade/tests/api_surface.rs` の否定ガード（`facade_does_not_
   expose_kv_cache_stateful_attention`・`KvCacheHoldDoctestGuard` の
   正のプローブ・`facade_does_not_reexport_or_declare_kv_cache_items` の
   多層構成。`docs/kv-cache-design.md` §10）で固定した
-  （Tier 1／Tier 2 表への行追加は引き続き行わない）
+  （Tier 1／Tier 2 表への行追加は引き続き行わない）。**その後 2026-10-07 にリポジトリ所有者本人が K-2 の公開形（`docs/kv-cache-design.md` §11.6 の P1〜P4 を推奨どおり）を承認し
+  （https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）、PR #2816（#2579）で `fandhe_ai::nn::kv_cache`・`Tape::stateful_attention_forward` として公開した。保留ガードは正ガードへ置換済み（同 doc §14）。本 bullet の「未承認・保留」は #2084 時点の記録であり、§5 適用記録・Tier 表の更新は #2580 で行う**
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
   の `max_vjp` は同値タイ発生時「最初に現れる最大要素 1 箇所のみ」へ

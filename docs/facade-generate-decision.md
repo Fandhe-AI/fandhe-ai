@@ -324,14 +324,28 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 - 選択肢 B（`SamplingStrategy`／`GenerateConfig` の先行公開）も未承認の
   一案であり採らない。
 
-### 14.2 承認後も残る構造的ブロッカー
+### 14.2 承認後も残る構造的ブロッカー（#2575 着手時点の記録）
 
-- `KvCache` が facade から到達できない（`KvCacheHoldDoctestGuard` で保留
-  固定中。#2577〜#2580 は open）。facade 利用者は
-  `AutoregressiveModel::forward_step` を実装できず `generate` を呼べない。
-- 配置の第一候補 `pub mod inference` は、非公開の `mod inference;`
-  （`crates/facade/src/lib.rs`）および predict_batches の保留ガード
-  （#2581〜#2583 は open）と衝突する。
+以下は 2026-10-05（#2575 着手時点）の記録である。現在の状態は各項目の
+「現状」を正とする。
+
+- **着手時点**: `KvCache` が facade から到達できなかった
+  （`KvCacheHoldDoctestGuard` で保留固定中。#2577〜#2580 は open）。この
+  ため facade 利用者は `AutoregressiveModel::forward_step` を実装できず
+  `generate` を呼べなかった。
+  **現状（2026-10-07）**: 解消済み。リポジトリ所有者本人が
+  `docs/kv-cache-design.md` §11.6 の P1〜P4 を承認し
+  （https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）、
+  PR #2816（#2579）で `fandhe_ai::nn::kv_cache` を公開した。
+  `KvCacheHoldDoctestGuard` は削除済みで、`KvCache` の到達不能は
+  `generate` 公開のブロッカーではなくなった。`generate` 自体は未公開の
+  ままで、公開は #2575／#2576 が担う。
+- **着手時点**: 配置の第一候補 `pub mod inference` は、非公開の
+  `mod inference;`（`crates/facade/src/lib.rs`）および predict_batches の
+  保留ガード（#2581〜#2583 は open）と衝突する。
+  **現状（2026-10-07）**: 未解消。predict_batches の公開（#2581〜#2583）は
+  同じコメントで承認済みだが未実装で、`generate` の配置はその公開後に
+  調整する（§14.4 の手順 3）。
 
 ### 14.3 現状維持するもの（撤去・反転しない）
 
@@ -350,6 +364,10 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 4. #2575（facade 公開）→ #2576（保留ガードの反転）。
 
 承認だけでは #2575 は解除されない。
+
+**現状（2026-10-07）**: 手順 1 は完了した（上記コメントで §13.2 の推奨案と
+§13.5 の選択肢 A を承認）。手順 2 は PR #2816 で `KvCache` の公開まで
+完了し、保留ガード側の docs 更新（#2580）が残る。手順 3・4 は未着手。
 
 ### 14.5 注記
 

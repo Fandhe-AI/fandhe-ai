@@ -106,10 +106,11 @@
 //!   `crate::attention::scaled_dot_product_attention` への置換・
 //!   `TransformerEncoderLayer` の decode 版**はいずれも対象外
 //!   （`docs/kv-cache-design.md` §7 スコープ外・§6 承認事項）。
-//! - **facade 公開（K-2）は未承認のため保留**: `add_stateful_attention`・
-//!   `StatefulAttention` 相当の facade `pub fn`／再エクスポートは
-//!   追加していない（`crates/facade/tests/api_surface.rs` の否定
-//!   ガードで固定。`docs/kv-cache-design.md` §6 承認事項 2）。
+//! - **facade 公開（K-2）は #2579 で公開済み**: `fandhe_ai::nn::kv_cache`
+//!   （`KvCache`・`StatefulAttention`・`MultiheadAttentionConfig` の
+//!   再エクスポート）と `Tape::stateful_attention_forward` で到達する
+//!   （`docs/kv-cache-design.md` §11.4）。構築入口は
+//!   [`StatefulAttention::from_config`]。
 
 use fandhe_ai_tensor_core::{Activation, ScalarDType, ShapeError, Tensor};
 
@@ -1870,6 +1871,40 @@ impl StatefulAttention {
         }
     }
 
+    /// [`MultiheadAttentionConfig`] から空キャッシュで構築する
+    /// （facade `fandhe_ai::nn::kv_cache` の構築入口。
+    /// `docs/kv-cache-design.md` §11.4 P2・イシュー #2579）。
+    ///
+    /// facade は `MultiheadAttention` 型を公開しないため、config から
+    /// 直接構築できる入口を設ける。`forward_with_cache` が拒否する
+    /// 非対応設定（`batch_first=false`・`kdim`／`vdim != embed_dim`）は
+    /// 構築時点で同じ条件で拒否し、構築後の forward で初めて失敗する
+    /// 経路を残さない。
+    ///
+    /// # Errors
+    ///
+    /// 上記非対応設定、および [`MultiheadAttention::from_config`] の
+    /// 検証エラー（`embed_dim`／`num_heads` が 0・割り切れない等）で
+    /// `AutodiffError::InvalidArgument` を返す。
+    pub fn from_config(
+        config: &MultiheadAttentionConfig,
+        seed: u64,
+    ) -> Result<StatefulAttention, AutodiffError> {
+        if !config.batch_first()
+            || config.kdim() != config.embed_dim()
+            || config.vdim() != config.embed_dim()
+        {
+            return Err(AutodiffError::InvalidArgument(
+                "StatefulAttention::from_config: batch_first=false・kdim/vdim != embed_dim は \
+                 対象外（self-attention 限定の K-1 設計）"
+                    .to_string(),
+            ));
+        }
+        Ok(StatefulAttention::new(MultiheadAttention::from_config(
+            config, seed,
+        )?))
+    }
+
     /// self-attention（`q = k = v = x_new`）として
     /// [`MultiheadAttentionVars::forward_with_cache`] を呼ぶ（1 行
     /// 委譲）。
@@ -2959,5 +2994,48 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    // --- StatefulAttention::from_config（イシュー #2579） ---
+
+    #[test]
+    fn stateful_attention_from_config_matches_new_with_same_seed() {
+        let cfg = MultiheadAttentionConfig::new(8, 2);
+        let a = StatefulAttention::from_config(&cfg, 7).unwrap();
+        let b = StatefulAttention::new(MultiheadAttention::from_config(&cfg, 7).unwrap());
+        let pa = a.mha().named_parameters();
+        let pb = b.mha().named_parameters();
+        assert_eq!(pa.len(), pb.len());
+        for ((na, ta), (nb, tb)) in pa.iter().zip(pb.iter()) {
+            assert_eq!(na, nb);
+            let ba: Vec<u32> = ta.as_slice().unwrap().iter().map(|v| v.to_bits()).collect();
+            let bb: Vec<u32> = tb.as_slice().unwrap().iter().map(|v| v.to_bits()).collect();
+            assert_eq!(ba, bb, "{na}");
+        }
+        assert_eq!(a.seq_len(), 0);
+    }
+
+    #[test]
+    fn stateful_attention_from_config_rejects_unsupported_configs() {
+        let cases = [
+            MultiheadAttentionConfig::new(8, 2).with_batch_first(false),
+            MultiheadAttentionConfig::new(8, 2).with_kdim(4),
+            MultiheadAttentionConfig::new(8, 2).with_vdim(4),
+        ];
+        for cfg in &cases {
+            assert!(matches!(
+                StatefulAttention::from_config(cfg, 0),
+                Err(AutodiffError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn stateful_attention_from_config_propagates_embed_heads_error() {
+        let cfg = MultiheadAttentionConfig::new(7, 2);
+        assert!(matches!(
+            StatefulAttention::from_config(&cfg, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
     }
 }

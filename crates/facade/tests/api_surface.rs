@@ -4733,8 +4733,10 @@ fn nn_rnn_module_is_pure_reexport() {
 /// 担う**: `nn::init` の facade 公開（条件付き手順 §4）で想定する
 /// `pub mod init;` 追加はこの完全一致検査により現時点では fail する。
 /// 承認後に実装する際は期待集合（`["init", "rnn"]` 等）へ更新する。
+/// #2579 で `pub mod kv_cache;`（KV キャッシュの純再エクスポート。
+/// `docs/kv-cache-design.md` §11.4 P1）を期待集合へ追加した。
 #[test]
-fn nn_mod_declares_only_init_and_rnn_submodules() {
+fn nn_mod_declares_only_approved_submodules() {
     let path = nn_mod_rs_path();
     let content = read_to_string_or_panic(&path);
     let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
@@ -4747,8 +4749,8 @@ fn nn_mod_declares_only_init_and_rnn_submodules() {
 
     assert_eq!(
         declared,
-        vec!["pub mod init;", "pub mod rnn;"],
-        "src/nn/mod.rs が宣言する pub mod が `pub mod init;`・`pub mod rnn;` の 2 件と一致しない\
+        vec!["pub mod init;", "pub mod kv_cache;", "pub mod rnn;"],
+        "src/nn/mod.rs が宣言する pub mod が `pub mod init;`・`pub mod kv_cache;`・`pub mod rnn;` の 3 件と一致しない\
          （nn 公開面の無断拡大を検知）: {declared:?}"
     );
 }
@@ -7718,274 +7720,213 @@ fn compat_sequential_has_no_introspection_methods() {
     }
 }
 
-/// KV キャッシュ付き attention（イシュー #2084・親 #2059。設計正本
-/// `docs/kv-cache-design.md` §6 承認事項 2）の facade 公開（K-2。
-/// `add_stateful_attention`・`StatefulAttention` 相当の 2 `pub fn`）は
-/// 未承認のため保留する。`facade_does_not_reexport_module_dict_or_summary`
-/// と同型の否定ガード: facade の src/ に①`fn add_stateful_attention`
-/// 宣言（可視性・宣言文脈を問わず。[`declares_fn_named`] 参照）、②
-/// `KvCache`／`StatefulAttention` を識別子単位で含む `pub use` 行、の
-/// いずれも存在しないことを固定する。承認取得後に薄い委譲 `pub fn`／
-/// 再エクスポートを追加する際は本テストを正ガードへ更新すること。
-///
-/// 本テストは多層防御の最内層（1 行単位の直列走査）であり、`src/lib.rs`
-/// の `KvCacheHoldDoctestGuard`（正のプローブ doctest）・
-/// `facade_does_not_reexport_or_declare_kv_cache_items`（トークン方式。
-/// 複数行・別名・独自宣言を検出）と多層で保留を固定する
-/// （`docs/kv-cache-design.md` §10）。workspace 全体（facade 以外の
-/// クレート内部の private 宣言も含む）の名前インベントリは、facade
-/// 到達可能性の保証と無関係な内部宣言まで固定してしまうため採用しない
-/// （codex-review 指摘。PR #2252）。
-#[test]
-fn facade_does_not_expose_kv_cache_stateful_attention() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        if declares_fn_named(content, "add_stateful_attention") {
-            offending.push(format!(
-                "{}: `fn add_stateful_attention` 宣言",
-                path.display()
-            ));
-        }
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with("pub use") {
-                continue;
+// =====================================================================
+// イシュー #2579（親 #2499 のリポジトリ所有者本人による 2026-10-07 付け承認コメント
+// 〈issue #2499 の issuecomment-6033824965。#2577 の §11.6 P1〜P4 を推奨どおりとする承認〉）: KV キャッシュ
+// （`KvCache`・`StatefulAttention`）の facade 公開を固定する正ガード群。旧保留ガード
+// （#2084。`KvCacheHoldDoctestGuard`・走査ガード 3 件・固定文言）を反転したもので、公開面は
+// 承認形（`nn/kv_cache.rs` の 1 文の再エクスポート・`Tape::stateful_attention_forward` 1 件）に
+// 完全一致で限定する。根拠は `docs/kv-cache-design.md` §11.4（P1〜P4）と §14（承認記録）。
+// =====================================================================
+
+/// `nn/kv_cache.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの。3 名形）。
+const KV_CACHE_APPROVED_REEXPORT: &str =
+    "fandhe_ai_autodiff::nn::{KvCache,MultiheadAttentionConfig,StatefulAttention}";
+
+/// `KvCache`／`StatefulAttention` を識別子として含む `pub use` 文を
+/// `(ファイル相対パス, 空白なしトークン連結)` で、facade 独自の `struct`／`enum`／`type`／
+/// `union`／`trait` 宣言を `(ファイル, "<decl>")` で、`add_stateful_attention` の `fn` 宣言
+/// （`Sequential` 経路は設けない契約。可視性を問わない）を `(ファイル, "<add_stateful_attention>")`
+/// で全件返す。コメント・文字列リテラルは無視する。
+/// （`MultiheadAttentionConfig` 側の公開は [`mha_config_exposures`] が別途固定する。）
+fn kv_cache_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
+    const NAMES: [&str; 2] = ["KvCache", "StatefulAttention"];
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for (i, t) in tokens.iter().enumerate() {
+            if matches!(t.as_str(), "struct" | "enum" | "type" | "union" | "trait")
+                && tokens
+                    .get(i + 1)
+                    .is_some_and(|n| NAMES.contains(&n.as_str()))
+            {
+                out.push((rel.clone(), "<decl>".to_string()));
             }
-            for ident in ["KvCache", "StatefulAttention"] {
-                if line_contains_identifier(trimmed, ident) {
-                    offending.push(format!(
-                        "{}: `{trimmed}` が `{ident}` を識別子単位で含む",
-                        path.display()
-                    ));
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                let stmt = &tokens[i + 2..end];
+                if stmt.iter().any(|x| NAMES.contains(&x.as_str())) {
+                    out.push((rel.clone(), stmt.concat()));
                 }
             }
         }
+        for _ in 0..count_fn_declarations_by_name(&tokens, "add_stateful_attention") {
+            out.push((rel.clone(), "<add_stateful_attention>".to_string()));
+        }
+    }
+    out
+}
+
+/// facade の `src/` 配下の全 `.rs` を `(src からの相対パス, 内容)` で集める。
+fn facade_src_files() -> Vec<(String, String)> {
+    let src_dir = facade_crate_root().join("src");
+    let mut files: Vec<(String, String)> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.push((rel, content.to_string()));
     });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面が KV キャッシュ（#2084 の K-2。`add_stateful_attention`／\
-         `KvCache`／`StatefulAttention`）を公開している（`docs/kv-cache-design.md` \
-         §6 承認事項 2 が未取得のまま対象外としている設計判断に違反）: {offending:?}"
-    );
+    files
 }
 
-/// `KvCacheHoldDoctestGuard` の唯一の doctest ブロックが glob import する
-/// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が
-/// 一致することを固定する（`nn_module_hold_doctest_globs_all_pub_modules`〈#2396 で削除済み〉・
-/// `bool_ops_hold_doctest_globs_all_pub_modules` と同型。新しい `pub mod`
-/// を facade へ追加した際、doctest 側の `use` 一覧の更新を機械的に強制
-/// する）。
+/// `KvCache`／`StatefulAttention` の公開は `nn/kv_cache.rs` の承認形 1 文ちょうど 1 件
+/// （別名・分割・順序違い・別ファイル・独自型宣言・`add_stateful_attention` 宣言は
+/// すべて拒否。件数 0 の空振りも拒否）。
 #[test]
-fn kv_cache_hold_doctest_globs_all_pub_modules() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "KvCacheHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
-    assert!(
-        !declared.is_empty(),
-        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
-         （テスト自体が検査対象を見失っている可能性がある）"
-    );
+fn facade_reexports_kv_cache_items_only_in_approved_shape() {
     assert_eq!(
-        declared, globbed,
-        "KvCacheHoldDoctestGuard の doctest ブロックが glob import する\
-         モジュール集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
-         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を\
-         追加した場合は doctest 側の use 一覧にも追加すること。"
+        kv_cache_exposures(&facade_src_files()),
+        vec![(
+            "nn/kv_cache.rs".to_string(),
+            KV_CACHE_APPROVED_REEXPORT.to_string()
+        )],
+        "KvCache／StatefulAttention の facade 公開は nn/kv_cache.rs の承認形 1 文のみ（イシュー #2579）"
     );
 }
 
-/// [`kv_cache_hold_doctest_globs_all_pub_modules`] が glob import 集合の
-/// 一致のみを固定するのに対し、本テストは doctest ブロックの **glob
-/// 以外の本文**（`__FandheKvHoldMarker`・`__fandhe_kv_hold_probe` モジュール・
-/// `__FandheKvHoldProbe` トレイト定義・`compat::Sequential` への実装・
-/// `__probe` 関数）が固定文言 [`KV_CACHE_HOLD_PROBE_BODY`] と 1 行たりとも
-/// 違わず一致することを固定する（rustdoc の `# ` 隠し行・プローブの削除・
-/// 別名へのシャドーイング等で正のプローブを骨抜きにする改変を機械的に
-/// 拒否する）。
+/// [`facade_reexports_kv_cache_items_only_in_approved_shape`] の自己テスト
+/// （承認形・各違反類型・無視されるべき入力を区別できること）。
 #[test]
-fn kv_cache_hold_doctest_probe_body_matches_fixed_contract() {
-    let content = read_to_string_or_panic(&lib_rs_path());
-    let doc_lines = extract_hold_doctest_guard_doc(&content, "KvCacheHoldDoctestGuard");
-    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
-    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
-    let actual = body.join("\n");
+fn facade_reexports_kv_cache_items_only_in_approved_shape_detects_each_category() {
+    let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
+    let ok =
+        "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, StatefulAttention};";
     assert_eq!(
-        actual, KV_CACHE_HOLD_PROBE_BODY,
-        "KvCacheHoldDoctestGuard の doctest ブロック本文（glob 以外）が\
-         固定文言 KV_CACHE_HOLD_PROBE_BODY からドリフトしている。正の\
-         プローブ（__fandhe_kv_hold_probe モジュール・__FandheKvHoldProbe\
-         トレイト・__probe 関数）の削除・弱体化・隠し行の混入がないか\
-         確認すること。"
+        kv_cache_exposures(&f("nn/kv_cache.rs", ok)),
+        vec![(
+            "nn/kv_cache.rs".to_string(),
+            KV_CACHE_APPROVED_REEXPORT.to_string()
+        )]
     );
+    // 別ファイルは同一文でも (ファイル, 文) が承認形（nn/kv_cache.rs）と一致しない。
+    assert_eq!(kv_cache_exposures(&f("lib.rs", ok))[0].0, "lib.rs");
+    for bad in [
+        "pub use fandhe_ai_autodiff::nn::KvCache;",
+        "pub use fandhe_ai_autodiff::nn::StatefulAttention as SA;",
+        "pub use fandhe_ai_autodiff::nn::{StatefulAttention, KvCache};",
+        "pub use fandhe_ai_autodiff::nn::{KvCache, StatefulAttention};",
+        "pub use fandhe_ai_autodiff::nn::{attention::{StatefulAttention}};",
+        "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttention, MultiheadAttentionConfig, StatefulAttention};",
+        "pub struct KvCache;",
+        "pub type StatefulAttention = u8;",
+        "pub trait KvCache {}",
+        "impl Sequential { fn add_stateful_attention(&mut self) {} }",
+    ] {
+        let got = kv_cache_exposures(&f("nn/kv_cache.rs", bad));
+        assert!(!got.is_empty(), "{bad}");
+        assert!(
+            got.iter().all(|(_, s)| s != KV_CACHE_APPROVED_REEXPORT),
+            "{bad}"
+        );
+    }
+    // 分割して 2 文にした場合は 2 件検出される（承認形 1 件の要求を満たさない）。
+    assert_eq!(
+        kv_cache_exposures(&f(
+            "nn/kv_cache.rs",
+            "pub use a::KvCache; pub use a::StatefulAttention;"
+        ))
+        .len(),
+        2
+    );
+    for src in [
+        "// pub use x::KvCache;",
+        "let s = \"pub use x::StatefulAttention;\";",
+        "use fandhe_ai_autodiff::nn::KvCache;",
+        "pub(crate) use fandhe_ai_autodiff::nn::StatefulAttention;",
+    ] {
+        assert!(
+            kv_cache_exposures(&f("nn/kv_cache.rs", src)).is_empty(),
+            "{src}"
+        );
+    }
 }
 
-/// [`kv_cache_hold_doctest_probe_body_matches_fixed_contract`] が要求
-/// する固定文言。`crates/facade/src/lib.rs` の `KvCacheHoldDoctestGuard`
-/// doc 内の唯一の doctest ブロックから、ネスト `pub mod` の glob import
-/// 行（`use fandhe_ai::<mod>::*;`）を除いた本文と 1 行単位で完全一致
-/// する必要がある（クレートルート自体の `use fandhe_ai::*;` は本文に
-/// 含む）。
-const KV_CACHE_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
-\n\
-mod __fandhe_kv_hold_probe {\n\
-\x20\x20\x20\x20pub struct KvCache;\n\
-\x20\x20\x20\x20pub struct StatefulAttention;\n\
-\x20\x20\x20\x20pub struct __FandheKvHoldMarker;\n\
-\x20\x20\x20\x20pub fn add_stateful_attention() -> __FandheKvHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheKvHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-use __fandhe_kv_hold_probe::*;\n\
-\n\
-trait __FandheKvHoldProbe {\n\
-\x20\x20\x20\x20fn add_stateful_attention(&self) -> __FandheKvHoldMarker;\n\
-}\n\
-\n\
-impl __FandheKvHoldProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_stateful_attention(&self) -> __FandheKvHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheKvHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
-fn __probe(_: KvCache, _: StatefulAttention, x: &fandhe_ai::compat::Sequential) {\n\
-\x20\x20\x20\x20let _: __FandheKvHoldMarker = add_stateful_attention();\n\
-\x20\x20\x20\x20let _: __FandheKvHoldMarker = fandhe_ai::compat::Sequential::add_stateful_attention(x);\n\
-\x20\x20\x20\x20let _: __FandheKvHoldMarker = x.add_stateful_attention();\n\
-}";
-
-/// [`facade_does_not_reexport_or_declare_kv_cache_items`]・その自己テスト
-/// が共用する検出本体。facade src 全体（`crates/facade/src/**`）の `pub use` から
-/// [`collect_pub_use_leaves`] で別名にする前の葉を集め `KvCache`／
-/// `StatefulAttention` を検出し（単一行・複数行・ネストした group・別名も
-/// 検出）、`trait`／`struct`／`enum`／`type` 直後の `KvCache`／
-/// `StatefulAttention` 独自宣言、`add_stateful_attention` の `fn` 宣言
-/// （可視性・宣言文脈を問わない。[`count_fn_declarations_by_name`] と同じ
-/// 検出契約）を違反として返す。
-fn scan_kv_cache_reexports_and_declarations(content: &str) -> Vec<String> {
-    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+/// `Tape::stateful_attention_forward` の本体が `StatefulAttention::forward` へ `&self.0` を
+/// 渡す 1 行委譲であることを固定する（#2579。独自実装・スタブへのすり替えを拒否）。
+#[test]
+fn tape_stateful_attention_forward_is_thin_delegation() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
-    let mut offending: Vec<String> = Vec::new();
-
-    let mut i = 0usize;
-    while i < tokens.len() {
-        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
-            let mut end = i + 2;
-            while end < tokens.len() && tokens[end] != ";" {
-                end += 1;
-            }
-            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let leaves = collect_pub_use_leaves(path_tokens);
-            for leaf in leaves {
-                if matches!(leaf.as_str(), "KvCache" | "StatefulAttention") {
-                    offending.push(format!("pub use leaf={leaf}"));
-                }
-            }
-            i = (end + 1).min(tokens.len());
-            continue;
-        }
-        if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
-            && matches!(
-                tokens.get(i + 1).map(String::as_str),
-                Some("KvCache") | Some("StatefulAttention")
-            )
-        {
-            offending.push(format!(
-                "{} {} 宣言",
-                tokens[i],
-                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
-            ));
-        }
-        i += 1;
-    }
-
-    let count = count_fn_declarations_by_name(&tokens, "add_stateful_attention");
-    if count > 0 {
-        offending.push(format!("`fn add_stateful_attention` 宣言が {count} 件"));
-    }
-    offending
+    assert_eq!(
+        determinism_fn_body(&tokens, "stateful_attention_forward").as_deref(),
+        Some("sa . forward ( & self . 0 , x_new )"),
+        "Tape::stateful_attention_forward の本体が承認形（`&self.0` を渡す 1 行委譲）と一致しない"
+    );
 }
 
-/// facade src 全体（`crates/facade/src/**`）に、`KvCache`／
-/// `StatefulAttention` を識別子単位で含む `pub use`（複数行・ネストした
-/// group・別名含む）も、facade 独自の `trait`／`struct`／`enum`／`type`
-/// 宣言も、`add_stateful_attention` の `fn` 宣言も存在しないことを固定
-/// する（`KvCacheHoldDoctestGuard` の正のプローブと多層防御を成す最内層
-/// のソース走査ガード。`facade_does_not_reexport_or_declare_bool_ops` と
-/// 同型。既存の 1 行単位走査
-/// `facade_does_not_expose_kv_cache_stateful_attention` の穴〈複数行
-/// `pub use`・facade 独自宣言〉を塞ぐ）。
+/// `stateful_attention_forward` の `fn` 宣言が workspace 内で `facade/src/lib.rs` の 1 件のみ
+/// であること（過不足とも fail-closed。#2579）。
 #[test]
-fn facade_does_not_reexport_or_declare_kv_cache_items() {
-    let src_dir = facade_crate_root().join("src");
-    let mut offending: Vec<String> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_kv_cache_reexports_and_declarations(content) {
-            offending.push(format!("{}: {offense}", path.display()));
-        }
-    });
-    assert!(
-        offending.is_empty(),
-        "facade の公開面が KV キャッシュ（#2084 の K-2。`KvCache`／\
-         `StatefulAttention`／`add_stateful_attention`）を再エクスポート、\
-         独自宣言、または同名の fn を宣言している（`docs/kv-cache-design.md` \
-         §6 承認事項 2 が未取得のまま対象外としている設計判断に違反）: {offending:?}"
+fn workspace_declares_stateful_attention_forward_only_in_facade_lib() {
+    let found = scan_workspace_fn_declarations(&["stateful_attention_forward"]);
+    let expected: std::collections::BTreeMap<String, usize> = std::iter::once((
+        "facade/src/lib.rs::stateful_attention_forward".to_string(),
+        1usize,
+    ))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "stateful_attention_forward の宣言集合が承認形（facade/src/lib.rs 1 件）と一致しない: {found:?}"
     );
 }
 
-/// [`scan_kv_cache_reexports_and_declarations`]（[`facade_does_not_
-/// reexport_or_declare_kv_cache_items`]）の自己テスト（正例・負例の合成
-/// 入力）。単一行・複数行・別名・独自宣言・fn 宣言の各正例と、コメントや
-/// 文字列リテラル中の出現・非公開 `use` の負例を検証する。
+/// 公開面だけ（`fandhe_ai` のみ import）で `from_config` → prefill → decode が通り、
+/// `Tape::stateful_attention_forward` のシグネチャが承認形であることを関数ポインタ型注釈で
+/// 固定する（実行時の正プローブ。#2579）。
 #[test]
-fn facade_does_not_reexport_or_declare_kv_cache_items_detects_each_category() {
-    // 正例: 単一行 pub use。
-    assert!(
-        !scan_kv_cache_reexports_and_declarations("pub use fandhe_ai_autodiff::nn::KvCache;")
-            .is_empty()
-    );
-    // 正例: 複数行 pub use（複数行グループ再エクスポートの穴）。
-    assert!(
-        !scan_kv_cache_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::{\n    KvCache,\n};"
-        )
-        .is_empty()
-    );
-    // 正例: ネストした group・別名。
-    assert!(
-        !scan_kv_cache_reexports_and_declarations(
-            "pub use fandhe_ai_autodiff::nn::{attention::{StatefulAttention as SA}};"
-        )
-        .is_empty()
-    );
-    // 正例: facade 独自宣言。
-    assert!(!scan_kv_cache_reexports_and_declarations("pub struct KvCache;").is_empty());
-    assert!(
-        !scan_kv_cache_reexports_and_declarations("pub type StatefulAttention = u8;").is_empty()
-    );
-    // 正例: fn 宣言（可視性を問わない）。
-    assert!(
-        !scan_kv_cache_reexports_and_declarations(
-            "impl Sequential { fn add_stateful_attention(&mut self) {} }"
-        )
-        .is_empty()
-    );
+fn kv_cache_is_reachable_via_facade_only() {
+    use fandhe_ai::nn::kv_cache::{KvCache, StatefulAttention};
+    use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
 
-    // 負例: 非公開 import。
-    assert!(
-        scan_kv_cache_reexports_and_declarations("use fandhe_ai_autodiff::nn::KvCache;").is_empty()
-    );
-    // 負例: コメント・文字列リテラル中の出現。
-    assert!(
-        scan_kv_cache_reexports_and_declarations(
-            "// pub use fandhe_ai_autodiff::nn::KvCache;\nlet s = \"KvCache\";"
-        )
-        .is_empty()
-    );
+    let _sig: for<'t> fn(
+        &'t Tape,
+        &mut StatefulAttention,
+        &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> = Tape::stateful_attention_forward;
+
+    // compat 側と nn::kv_cache 側の `MultiheadAttentionConfig` は同一型（型不一致なら
+    // コンパイルエラーになること自体が検証）。
+    let cfg: fandhe_ai::compat::MultiheadAttentionConfig =
+        fandhe_ai::nn::kv_cache::MultiheadAttentionConfig::new(4, 2);
+    let mut sa = StatefulAttention::from_config(&cfg, 0).expect("承認形の公開面で構築できる");
+    let cache: &KvCache = sa.cache();
+    assert_eq!(cache.seq_len(), 0);
+
+    let tape = fandhe_ai::tape();
+    let x = Tensor::new(
+        (0..8).map(|i| i as f32 * 0.1).collect::<Vec<f32>>(),
+        &[1, 2, 4],
+    )
+    .expect("test fixture");
+    let y = tape
+        .stateful_attention_forward(&mut sa, &tape.var(&x))
+        .expect("prefill");
+    assert_eq!(y.to_tensor().shape(), &[1usize, 2, 4]);
+    let t = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4], &[1, 1, 4]).expect("test fixture");
+    let y = tape
+        .stateful_attention_forward(&mut sa, &tape.var(&t))
+        .expect("decode");
+    assert_eq!(y.to_tensor().shape(), &[1usize, 1, 4]);
+    assert_eq!(sa.seq_len(), 3);
 }
-
 /// `fandhe_ai::Var`（`Var<'t>`・借用 `&Var<'t>`）が算術演算子トレイト
 /// （`Add`／`Sub`／`Mul`／`Div`／各 `*Assign`／`Neg`）を実装していない
 /// ことを固定する（イシュー #2136。実装計画 §3.2）。**`Var op Var`／
@@ -11879,7 +11820,7 @@ fn workspace_declares_rng_distribution_names_only_in_allowed_locations() {
 
 /// `SpatialLayersHoldDoctestGuard` の唯一の doctest ブロックが glob
 /// import するネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod`
-/// 宣言集合が一致することを固定する（`kv_cache_hold_doctest_globs_all_
+/// 宣言集合が一致することを固定する（#2579 で削除済みの旧 `kv_cache_hold_doctest_globs_all_
 /// pub_modules` と同型。新しい `pub mod` を facade へ追加した際、
 /// doctest 側の `use` 一覧の更新を機械的に強制する。イシュー #2159）。
 #[test]
@@ -13765,28 +13706,32 @@ fn mha_config_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
     out
 }
 
-/// facade src 全体で `MultiheadAttentionConfig` の公開は
-/// `compat/mod.rs` の `pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;`
-/// ちょうど 1 件（別名・グループ化・別ファイル・独自型宣言はすべて拒否）。
+/// facade src 全体で `MultiheadAttentionConfig` の公開は承認済みの 2 件のみ（別名・別ファイル・
+/// 独自型宣言・承認形外のグループ化はすべて拒否。完全一致検査）:
+/// - `compat/mod.rs` の `pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;`（#2530）
+/// - `nn/kv_cache.rs` の `pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig,
+///   StatefulAttention};`（#2579。`docs/kv-cache-design.md` §11.4 P2。`StatefulAttention::from_config`
+///   の引数型を facade から名指しするため。両者は同一型の再エクスポート）
+///
+/// 旧形（compat 1 件のみ）は #2579 の承認形（P2）と衝突するため、公開面 inventory を
+/// 承認済みの 2 件へ拡張した（tolerance・閾値の緩和ではない）。
 #[test]
 fn facade_reexports_multihead_attention_config_only_from_compat() {
-    let src_dir = facade_crate_root().join("src");
-    let mut files: Vec<(String, String)> = Vec::new();
-    visit_rs_files(&src_dir, &mut |path, content| {
-        let rel = path
-            .strip_prefix(&src_dir)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        files.push((rel, content.to_string()));
-    });
+    let mut got = mha_config_exposures(&facade_src_files());
+    got.sort();
     assert_eq!(
-        mha_config_exposures(&files),
-        vec![(
-            "compat/mod.rs".to_string(),
-            "fandhe_ai_autodiff::nn::MultiheadAttentionConfig".to_string()
-        )],
-        "MultiheadAttentionConfig の facade 公開は compat/mod.rs の承認形 1 件のみ（イシュー #2530）"
+        got,
+        vec![
+            (
+                "compat/mod.rs".to_string(),
+                "fandhe_ai_autodiff::nn::MultiheadAttentionConfig".to_string()
+            ),
+            (
+                "nn/kv_cache.rs".to_string(),
+                KV_CACHE_APPROVED_REEXPORT.to_string()
+            ),
+        ],
+        "MultiheadAttentionConfig の facade 公開は compat/mod.rs と nn/kv_cache.rs の承認形のみ（イシュー #2530・#2579）"
     );
 }
 
@@ -13805,6 +13750,7 @@ fn facade_reexports_multihead_attention_config_detects_offense() {
     for bad in [
         "pub use fandhe_ai_autodiff::nn::MultiheadAttentionConfig as Cfg;",
         "pub use fandhe_ai_autodiff::nn::{Linear, MultiheadAttentionConfig};",
+        "pub use fandhe_ai_autodiff::nn::{KvCache, StatefulAttention, MultiheadAttentionConfig};",
         "pub struct MultiheadAttentionConfig;",
     ] {
         let got = mha_config_exposures(&f("compat/mod.rs", bad));
@@ -13814,6 +13760,17 @@ fn facade_reexports_multihead_attention_config_detects_offense() {
             "{bad}"
         );
     }
+    // #2579 の承認形（nn/kv_cache.rs の 3 名グループ形）は承認形定数と一致して検出される。
+    assert_eq!(
+        mha_config_exposures(&f(
+            "nn/kv_cache.rs",
+            "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, StatefulAttention};"
+        )),
+        vec![(
+            "nn/kv_cache.rs".to_string(),
+            KV_CACHE_APPROVED_REEXPORT.to_string()
+        )]
+    );
     assert!(mha_config_exposures(&f("a.rs", "// pub use x::MultiheadAttentionConfig;")).is_empty());
 }
 
@@ -19907,8 +19864,8 @@ fn workspace_declares_npy_io_names_only_in_allowed_locations() {
 /// `generate()` 自己回帰ループ（イシュー #2191。設計正本
 /// `docs/facade-generate-decision.md`）の facade 公開（`inference::
 /// generate`／`GenerateConfig`／`SamplingStrategy`／`AutoregressiveModel`
-/// 相当）は未承認のため保留する。`facade_does_not_expose_kv_cache_
-/// stateful_attention` と同型の否定ガード: facade の src/ に①`fn
+/// 相当）は未承認のため保留する。#2579 で削除済みの旧 KV キャッシュ否定ガード
+/// （`facade_does_not_expose_kv_cache_stateful_attention`）と同型の否定ガード: facade の src/ に①`fn
 /// generate` 宣言（可視性・宣言文脈を問わず。[`declares_fn_named`]
 /// 参照）、②`GenerateConfig`／`SamplingStrategy`／
 /// `AutoregressiveModel` を識別子単位で含む `pub use` 行、のいずれも
@@ -19958,7 +19915,7 @@ fn facade_does_not_expose_generate_items() {
 
 /// `GenerateHoldDoctestGuard` の唯一の doctest ブロックが glob import する
 /// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が
-/// 一致することを固定する（`kv_cache_hold_doctest_globs_all_pub_modules`
+/// 一致することを固定する（#2579 で削除済みの旧 `kv_cache_hold_doctest_globs_all_pub_modules`
 /// と同型）。
 #[test]
 fn generate_hold_doctest_globs_all_pub_modules() {
@@ -23764,7 +23721,7 @@ fn nn_src(file: &str) -> String {
 }
 
 /// 正ガード: `src/nn/mod.rs` の全種別の公開 item が
-/// `pub mod rnn` と `pub use` の 8 件（`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
+/// `pub mod init`・`pub mod kv_cache`（#2579）・`pub mod rnn` と `pub use` の 8 件（`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
 /// `ModuleDict`／`summary` は #2402 で承認済み。`Transformer`／`TransformerConfig`／
 /// `TransformerDecoderLayer` は #2532・#2533 で承認済み）に完全一致する。
 /// `pub fn`／`pub struct` 等の追加や `pub mod container;` 等の新設は fail する。
@@ -23775,7 +23732,7 @@ fn nn_mod_public_items_match_expected_set() {
         public,
         pair_set(&[
             ("mod", "init"),
-            ("mod", "init"),
+            ("mod", "kv_cache"),
             ("mod", "rnn"),
             ("use", "Module"),
             ("use", "ModuleDict"),
@@ -24166,7 +24123,7 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 10] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 11] = [
     "compat",
     "data",
     "interop",
@@ -24175,6 +24132,7 @@ const GRAD_SCALER_PROBE_MODULES: [&str; 10] = [
     "model",
     "nn",
     "nn::init",
+    "nn::kv_cache",
     "nn::rnn",
     "optim",
 ];
@@ -24200,6 +24158,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use fandhe_ai::interop::*;
     pub use fandhe_ai::model::*;
     pub use fandhe_ai::nn::init::*;
+    pub use fandhe_ai::nn::kv_cache::*;
     pub use fandhe_ai::nn::rnn::*;
     pub use fandhe_ai::nn::*;
     pub use fandhe_ai::optim::*;
