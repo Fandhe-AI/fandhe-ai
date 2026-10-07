@@ -79,8 +79,8 @@ grep -rnE "fn (numeric_grad|finite_diff[a-z_]*|central_diff[a-z_]*|analytic_hess
 
 ### 3.4 gradcheck（推奨: クロージャ＋専用テープ、閾値は必須引数）
 
-- 摂動点での再評価が要るためクロージャ形が必須。内部の契約案: `gradcheck(tape: &mut Tape, f: F, inputs: &[Tensor<f32>], options: &GradcheckOptions) -> Result<GradcheckReport, AutodiffError>`、`F: for<'a> Fn(&'a Tape, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>`。クロージャへテープを渡す（渡さないと `var_no_grad` で定数を作れない）。facade 側は `TapeRef<'a>` に包んで渡す薄いアダプタとする（`unsafe` なし。1 行委譲ではない点に注意）。
-- テープは評価ごとに `reset` する専用テープとし、入口で空でなければ拒否する（`&mut` により生存中の `Var` が無いことをコンパイル時に保証）。`reset` の保持葉の扱いは #2671 着手時に確認して確定する。
+- 摂動点での再評価が要るためクロージャ形が必須。内部の契約案: `gradcheck(make_tape: M, f: F, inputs: &[Tensor<f32>], options: &GradcheckOptions) -> Result<GradcheckReport, AutodiffError>`、`M: Fn() -> Tape`、`F: for<'a> Fn(&'a Tape, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>`。クロージャへテープを渡す（渡さないと `var_no_grad` で定数を作れない）。facade 側は `TapeRef<'a>` に包んで渡す薄いアダプタとする（`unsafe` なし。1 行委譲ではない点に注意）。
+- **テープは評価ごとに新規作成する**。既存の `Tape::reset` は葉プレフィックス（`retained_leaf_len`。`tape.rs:3201-3218`）を保持して非葉ノードのみ切り詰めるため、評価ごとに `reset` しても入力葉は残り、摂動点ごとに入力を登録し直すと葉が蓄積して空テープには戻らない。このため `reset` 再利用方式は採らず、`make_tape` を呼んで解析用 1 回・摂動用（要素ごとの `+eps`／`-eps`）の評価ごとに新しい `Tape` を作る（ファクトリ引数にするのは、`Tape::new()`／`Tape::new_with_ops` のどのバックエンドで作るかを呼び出し側が決めるため）。入力ごとに摂動値は新テープへ `var` で登録する。評価後のテープは drop され、利用者のテープを変更しない。計算コストは評価回数に比例して増えるが、gradcheck はテスト・検証用途であり許容する。保持葉を再利用する案（`reset` 後に葉へ値を差し替える API の新設）は `Tape` の変更を伴うため不採用。
 - 数値方式: f32 の forward 値から中央差分を f64 で集計（既存テストヘルパーと同じ）。解析側は 3.2 と同じ行取り出し＋`backward`。
 - `GradcheckOptions`（`eps`・`atol`・`rtol`・`tau`）は**既定値を持たない必須引数**（`Default` を実装しない。有限・正値の検証で fail-closed）。既定値は新しい閾値定数になるため置かない。
 - **判定式**: 要素ごとに `abs = |a − n|`、`rel = abs / max(|a|, |n|, tau)` とし、`rel <= rtol` **または** `abs <= atol` で合格。どちらかが非有限なら不合格。#223 承認済みの grad-check テスト判定（`grad.rs:9685-9689`）と同じ式で、#2671 のテストは承認済みの組（`eps=1e-3`・`tau=1e-4`・`rtol=1e-2`・`atol=1e-3`）をそのまま渡せる。PyTorch の `allclose` 形（`atol + rtol·|n|`）は緩くなるため採らず、意図的な差として記録する。
