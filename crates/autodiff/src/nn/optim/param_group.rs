@@ -10,15 +10,12 @@
 //! データ型で、[`ParamGroupStep`] は各 optimizer が `step_with_groups`
 //! を実装するための trait である。
 //!
-//! **facade 非公開**（現時点）: 親イシュー #2131 は「facade 公開面の
-//! 拡張は設計判断記録 → 承認 → 実装の 2 段」と定めており、本イシュー・
-//! 親イシューのいずれにも所有者の承認コメントがない。このため本モジュール
-//! は内部クレート（`fandhe_ai_autodiff`）限定で実装し、`crates/facade/
-//! src/optim.rs`（名前指定の再エクスポート）からは一切参照しない。
-//! `crates/facade/src/lib.rs::ParamGroupsHoldDoctestGuard` と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが、facade がこの
-//! 名前を再エクスポート・宣言しないことを機械的に固定する（承認事項の
-//! 詳細は `docs/autodiff-param-groups-decision.md` §5 を参照）。
+//! **facade 公開済み**（イシュー #2553・親 #2551）: [`ParamGroup`]／
+//! [`ParamGroupStep`] は `fandhe_ai::optim` から素の再エクスポートで公開され、
+//! `compat::Sequential::compile_with_param_groups` が `fit` 系の全 optimizer
+//! step へ groups を適用する（形は `docs/autodiff-param-groups-decision.md`
+//! §9.2・§9.3、承認はルート #2499 のコメント）。`SlotHparams`／
+//! `resolve_slot_hparams` は `pub(crate)` のままで、facade からは到達できない。
 //!
 //! # スロット添字方式
 //!

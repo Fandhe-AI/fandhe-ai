@@ -278,6 +278,7 @@ impl FunctionalModel {
             optimizer: state,
             loss,
             amp: None,
+            param_groups: Vec::new(),
         });
         Ok(())
     }
@@ -415,7 +416,11 @@ impl FunctionalModel {
                     let grads = tape.backward(&loss_var)?;
                     let grad_refs = bound.trainable_grads(&grads)?;
                     let param_refs = self.trainable_parameters();
-                    compiled.optimizer.step(&param_refs, &grad_refs)?
+                    compiled.optimizer.step_dispatch(
+                        &param_refs,
+                        &grad_refs,
+                        &compiled.param_groups,
+                    )?
                 };
                 self.apply_parameters(stepped)?;
             }

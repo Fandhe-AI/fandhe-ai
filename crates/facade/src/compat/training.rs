@@ -47,6 +47,9 @@ use fandhe_ai_autodiff::loss_ops::l1_loss;
 // `OptimizerState::Lbfgs` は内部クレートの型を直接 import して保持する
 // （非 `pub use`。再エクスポートは `optim.rs` が担う）。
 use fandhe_ai_autodiff::nn::optim::Lbfgs;
+// param groups（#2553）: `step_with_groups` を `OptimizerState::step_grouped` から呼ぶための
+// 非 `pub` の import（再エクスポートは `optim.rs`。facade 内で `fn step_with_groups` は宣言しない）。
+use fandhe_ai_autodiff::nn::optim::{ParamGroup, ParamGroupStep as _};
 // イシュー #2372: `save_model`／`load_model` が optimizer 内部状態と GradScaler の
 // 状態を往復させるための内部専用 import（`pub use` にしない。facade 公開面へ
 // 出ないことは `tests/api_surface.rs` の `grad_scaler_from_state`／
@@ -693,6 +696,49 @@ impl OptimizerState {
         }
     }
 
+    /// [`Self::step`] の param groups 版（イシュー #2553。決定記録
+    /// `docs/autodiff-param-groups-decision.md` §9）。各 optimizer の
+    /// `ParamGroupStep::step_with_groups` へ委譲する。groups の検証違反は
+    /// optimizer 状態を変える前に `InvalidArgument` で返る。`Lbfgs` は
+    /// `compile_with_param_groups` が拒否済みのため通常到達しない防御的拒否。
+    fn step_grouped(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+        groups: &[ParamGroup],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        match self {
+            OptimizerState::Sgd(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::AdamW(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::Adam(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::RmsProp(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::Adagrad(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::Lamb(o) => o.step_with_groups(params, grads, groups),
+            OptimizerState::Lbfgs(_) => Err(AutodiffError::InvalidArgument(
+                "OptimizerState::step_grouped: Lbfgs は param groups と併用できない \
+                 （compile_with_param_groups が compile 時に拒否する）"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// `groups` が空なら既存の [`Self::step`]（`compile()` 経路と bit 一致）、
+    /// 空でなければ [`Self::step_grouped`] を呼ぶ。`run_fit` と functional の
+    /// 全 optimizer step 呼び出しがこの入口を通る（groups の迂回経路を作らない。
+    /// `Compiled::param_groups` と同じフィールド単位の借用で呼べる形にしている）。
+    pub(super) fn step_dispatch(
+        &mut self,
+        params: &[&Tensor<f32>],
+        grads: &[&Tensor<f32>],
+        groups: &[ParamGroup],
+    ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
+        if groups.is_empty() {
+            self.step(params, grads)
+        } else {
+            self.step_grouped(params, grads, groups)
+        }
+    }
+
     /// compiled optimizer が `set_lr` を持たない 3 者（`RmsProp`／
     /// `Adagrad`／`Lamb`。イシュー #2170）かどうか（`callbacks` に
     /// [`super::callbacks::Callback::LrSchedule`] が含まれる場合の
@@ -717,6 +763,10 @@ pub(super) struct Compiled {
     /// 継続する状態のため `FitConfig`（`Copy`＋`Eq` 導出済み）ではなく
     /// ここに保持する（`optimizer` と同じ理由）。
     pub(super) amp: Option<AmpState>,
+    /// [`Sequential::compile_with_param_groups`] で渡された param groups
+    /// （イシュー #2553。既定は空 = 従来の `compile()` 経路）。step 時の検証
+    /// （`resolve_slot_hparams`）が使うため compile 時には中身を検証しない。
+    pub(super) param_groups: Vec<ParamGroup>,
 }
 
 /// `save_model` が取り出す compile 状態の写し（イシュー #2372）。
@@ -798,6 +848,15 @@ impl Sequential {
 ///
 /// `config()` は `set_lr` 反映後の現在値を返す（LR scheduler の書き換えを含む）。
 pub(super) fn snapshot_of_compiled(compiled: &Compiled) -> Result<CompiledSnapshot, AutodiffError> {
+    // イシュー #2553: snapshot／manifest に param groups の欄が無い。黙って落とすと
+    // 復元後に学習率が変わるため fail-closed で拒否する（決定記録 §12）。
+    if !compiled.param_groups.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "save_model: param groups を持つ compile 状態（compile_with_param_groups）は \
+             保存に未対応。重みだけなら state_dict 系を使う"
+                .to_string(),
+        ));
+    }
     let (optimizer, optimizer_state, lbfgs_history_len) = match &compiled.optimizer {
         OptimizerState::Sgd(o) => (Optimizer::Sgd(*o.config()), o.state_dict()?, None),
         OptimizerState::AdamW(o) => (Optimizer::AdamW(*o.config()), o.state_dict()?, None),
@@ -874,6 +933,8 @@ pub(super) fn compiled_from_snapshot(
         optimizer: state,
         loss,
         amp,
+        // `save_model` は groups 非空を拒否する（#2553）ため復元は常に空。
+        param_groups: Vec::new(),
     })
 }
 
@@ -909,6 +970,8 @@ pub type TrainStepFn<'h, T> = dyn FnMut(
 /// （`docs/compat-train-step-hook-decision.md` §8.1）。
 pub struct TrainStepOptimizer<'a> {
     state: &'a mut OptimizerState,
+    /// compile 時の param groups（#2553。空なら従来どおり `step`）。
+    groups: &'a [ParamGroup],
 }
 
 impl TrainStepOptimizer<'_> {
@@ -930,7 +993,7 @@ impl TrainStepOptimizer<'_> {
         params: &[&Tensor<f32>],
         grads: &[&Tensor<f32>],
     ) -> Result<Vec<Tensor<f32>>, AutodiffError> {
-        self.state.step(params, grads)
+        self.state.step_dispatch(params, grads, self.groups)
     }
 
     /// 現在の学習率。epoch 開始時に `LrSchedule` callback が同期した値。
@@ -999,8 +1062,14 @@ type CustomStepOutcome = Result<(f32, Option<Vec<Tensor<f32>>>), AutodiffError>;
 /// `FnMut`（`Fn` ではない）にしているのは、状態を持つ自作 optimizer や
 /// 呼び出し回数の計測など、呼び出しごとに内部状態を変える利用を許す
 /// ため。
-type CustomStepHook<'h, T> =
-    dyn FnMut(&Sequential, &Tensor<f32>, &Tensor<T>, &mut OptimizerState) -> CustomStepOutcome + 'h;
+type CustomStepHook<'h, T> = dyn FnMut(
+        &Sequential,
+        &Tensor<f32>,
+        &Tensor<T>,
+        &mut OptimizerState,
+        &[ParamGroup],
+    ) -> CustomStepOutcome
+    + 'h;
 
 /// 勾配累積（イシュー #2180）: `acc`（累積中の勾配。位置は
 /// [`Sequential::trainable_grads`] と同じ順序契約）へ `grads`（このマイクロ
@@ -1150,6 +1219,118 @@ impl Sequential {
             optimizer: OptimizerState::new(optimizer)?,
             loss,
             amp: None,
+            param_groups: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// [`Self::compile`] の param groups 版（イシュー #2553・親 #2499。層別の
+    /// 学習率・weight decay。PyTorch の `param_groups` 相当。形は決定記録
+    /// `docs/autodiff-param-groups-decision.md` §9.2・§9.3、承認はルート #2499 の
+    /// コメント〈issuecomment-6033824965〉）。
+    ///
+    /// `param_groups` を [`Self::fit`] 系の全 optimizer step へ適用する。groups が
+    /// 空（`&[]`）なら [`Self::compile`] と同じ経路を通り bit 一致する。
+    ///
+    /// # スロット添字
+    ///
+    /// [`crate::optim::ParamGroup`] の `params` は、step に渡る
+    /// [`Self::trainable_parameters`] の位置（スロット添字）。これは
+    /// [`Self::named_parameters`] の列挙位置と同じ（層順・層内は weight → bias）。
+    /// どのグループにも属さないスロットは optimizer の config（`lr`・
+    /// `weight_decay`）を使う。
+    ///
+    /// # 検証の時点
+    ///
+    /// compile 後に層を足せるため、compile 時は groups の中身を検証しない。
+    /// [`Self::fit`] 系の入口で範囲外の添字（スロット数以上）を拒否し、step 時に
+    /// 空 `params`・重複・非有限・負値を optimizer 状態を変える前に拒否する。
+    ///
+    /// # 制約
+    ///
+    /// - `Optimizer::Lbfgs` と空でない groups は併用できない。
+    /// - AMP 併用の API はない（`compile_with_amp` は groups を持たない）。
+    /// - groups が空でないとき `Callback::LrSchedule` は [`Self::fit`] 系で拒否する
+    ///   （`History::lr` の意味は従来どおり optimizer の config の学習率）。
+    /// - groups が空でない compile 状態は `save_model` で保存できない。
+    /// - [`Self::fit_with_train_step`] のフック内 `opt.step` には compile 時の
+    ///   groups が適用される（スロット添字は `step` に渡した `params` の位置）。
+    /// - 再 compile は groups も置き換える。下流が同名メソッドを自前 trait で
+    ///   `Sequential` に実装していると、この inherent メソッドが優先される。
+    ///
+    /// # Errors
+    ///
+    /// `Lbfgs` と空でない groups の併用、optimizer のハイパーパラメータ検証違反で
+    /// `InvalidArgument`。失敗時は `self.compiled` を変更しない。
+    ///
+    /// # Examples
+    ///
+    /// 1 層目を `lr = 0`・`weight_decay = 0` のグループへ入れて凍結する。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential};
+    /// use fandhe_ai::optim::{ParamGroup, SgdConfig};
+    ///
+    /// let mut model = Sequential::new()
+    ///     .add_linear(2, 3, 1)
+    ///     .unwrap()
+    ///     .add_relu()
+    ///     .add_linear(3, 1, 2)
+    ///     .unwrap();
+    /// // named_parameters の列挙位置がスロット添字（"0." 接頭辞 = 1 層目）。
+    /// let first_layer: Vec<usize> = model
+    ///     .named_parameters()
+    ///     .iter()
+    ///     .enumerate()
+    ///     .filter_map(|(i, (name, _))| name.starts_with("0.").then_some(i))
+    ///     .collect();
+    /// let frozen = ParamGroup::new(first_layer.clone(), 0.0, 0.0);
+    /// model
+    ///     .compile_with_param_groups(
+    ///         Optimizer::Sgd(SgdConfig::new(0.1)),
+    ///         Loss::Mse,
+    ///         &[frozen],
+    ///     )
+    ///     .unwrap();
+    ///
+    /// let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3, 2]).unwrap();
+    /// let y = Tensor::new(vec![0.0f32, 1.0, 0.5], &[3, 1]).unwrap();
+    /// let before: Vec<Vec<f32>> = model
+    ///     .trainable_parameters()
+    ///     .iter()
+    ///     .map(|t| t.as_slice().unwrap().to_vec())
+    ///     .collect();
+    /// model.fit(&x, &y, FitConfig::new(2, 3)).unwrap();
+    /// let after = model.trainable_parameters();
+    /// for &i in &first_layer {
+    ///     assert_eq!(after[i].as_slice().unwrap(), before[i].as_slice());
+    /// }
+    /// // 2 層目の bias（グループ外）は config の lr で更新される。
+    /// assert_ne!(after[3].as_slice().unwrap(), before[3].as_slice());
+    /// ```
+    pub fn compile_with_param_groups(
+        &mut self,
+        optimizer: Optimizer,
+        loss: Loss,
+        param_groups: &[ParamGroup],
+    ) -> Result<(), AutodiffError> {
+        // `OptimizerState::new` より前に拒否（`compile_with_amp` の Lbfgs 拒否と同形）。
+        // Lbfgs は closure 駆動で `step_with_groups` を持たない。
+        if !param_groups.is_empty() && matches!(optimizer, Optimizer::Lbfgs(_)) {
+            return Err(AutodiffError::InvalidArgument(
+                "Sequential::compile_with_param_groups: Optimizer::Lbfgs は空でない \
+                 param_groups と併用できない（closure 駆動のため step_with_groups を持たない）"
+                    .to_string(),
+            ));
+        }
+        // construct-before-assign: 全構築成功後に代入し、失敗時は直前の compile 状態を残す。
+        let optimizer_state = OptimizerState::new(optimizer)?;
+        self.compiled = Some(Compiled {
+            optimizer: optimizer_state,
+            loss,
+            amp: None,
+            param_groups: param_groups.to_vec(),
         });
         Ok(())
     }
@@ -1232,6 +1413,7 @@ impl Sequential {
                 grad_scaler_config: amp.grad_scaler,
                 scaler,
             }),
+            param_groups: Vec::new(),
         });
         Ok(())
     }
@@ -1516,6 +1698,12 @@ impl Sequential {
     /// - `Optimizer::Lbfgs`（closure 駆動のためフックの `step` 経路と
     ///   併用できない）
     ///
+    /// # param groups との関係（イシュー #2553）
+    ///
+    /// [`Self::compile_with_param_groups`] で groups を設定していると、フック内
+    /// `opt.step` に compile 時の groups が適用される。スロット添字は `step` に
+    /// 渡した `params` の位置。
+    ///
     /// # 例
     ///
     /// ```
@@ -1570,9 +1758,10 @@ impl Sequential {
         let mut shim = |m: &Sequential,
                         xb: &Tensor<f32>,
                         yb: &Tensor<T>,
-                        opt: &mut OptimizerState|
+                        opt: &mut OptimizerState,
+                        groups: &[ParamGroup]|
          -> CustomStepOutcome {
-            let mut handle = TrainStepOptimizer { state: opt };
+            let mut handle = TrainStepOptimizer { state: opt, groups };
             let out = train_step(m, xb, yb, &mut handle)?;
             Ok((out.loss, out.updated))
         };
@@ -1736,6 +1925,36 @@ impl Sequential {
                  Adagrad／Lamb のいずれか）は set_lr を提供しないため \
                  Callback::LrSchedule と併用できない"
             )));
+        }
+        // (2.06) param groups（イシュー #2553。決定記録 §9.2 項目 3 の案 B）:
+        // groups が空でないとき `Callback::LrSchedule` は拒否する（`set_lr` は
+        // グループ外スロットにしか効かず、黙って意味が変わるため）。続けて
+        // 範囲外のスロット添字を件数検査で拒否する（空・重複・非有限・負値は
+        // step 時の `resolve_slot_hparams` が optimizer 状態の変更前に検出する）。
+        if !compiled.param_groups.is_empty() {
+            if callbacks
+                .iter()
+                .any(|cb| matches!(cb, Callback::LrSchedule(_)))
+            {
+                self.compiled = Some(compiled);
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: compile_with_param_groups で param groups を \
+                     設定した状態では Callback::LrSchedule と併用できない"
+                )));
+            }
+            let n_slots = self.trainable_parameters().len();
+            if let Some(slot) = compiled
+                .param_groups
+                .iter()
+                .flat_map(|g| g.params.iter().copied())
+                .find(|&slot| slot >= n_slots)
+            {
+                self.compiled = Some(compiled);
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: param_groups がスロット添字 {slot} を参照して \
+                     いるが、学習対象パラメータは {n_slots} 件"
+                )));
+            }
         }
         // (2.1) metrics（イシュー #2072）: validation set 上でのみ定義
         // される指標のため、metrics 非空かつ validation が None なら
@@ -1985,11 +2204,16 @@ impl Sequential {
                     // 触れることはない。
                     let updated: Option<Vec<Tensor<f32>>> = if let Some(hook) = custom_step.as_mut()
                     {
-                        let (loss_scalar, updated_from_hook) =
-                            match hook(&*self, &x_batch, &y_batch, &mut compiled.optimizer) {
-                                Ok(v) => v,
-                                Err(e) => break 'epochs_block Err(e),
-                            };
+                        let (loss_scalar, updated_from_hook) = match hook(
+                            &*self,
+                            &x_batch,
+                            &y_batch,
+                            &mut compiled.optimizer,
+                            &compiled.param_groups,
+                        ) {
+                            Ok(v) => v,
+                            Err(e) => break 'epochs_block Err(e),
+                        };
                         // 既存経路（本関数 doc「適用順序契約」節）と同一の
                         // サンプル数重み付き平均集計式。非有限値もそのまま
                         // 記録する（既存経路と同じ）。
@@ -2091,11 +2315,14 @@ impl Sequential {
                                 let unscaled_refs: Vec<&Tensor<f32>> =
                                     unscale_result.grads.iter().collect();
                                 let param_refs = self.trainable_parameters();
-                                let stepped =
-                                    match compiled.optimizer.step(&param_refs, &unscaled_refs) {
-                                        Ok(v) => v,
-                                        Err(e) => break 'epochs_block Err(e),
-                                    };
+                                let stepped = match compiled.optimizer.step_dispatch(
+                                    &param_refs,
+                                    &unscaled_refs,
+                                    &compiled.param_groups,
+                                ) {
+                                    Ok(v) => v,
+                                    Err(e) => break 'epochs_block Err(e),
+                                };
                                 // 適用順序契約（手順 6）: 非 skip step も
                                 // `scaler.update` を必ず呼ぶ（`amp` は
                                 // `compiled.amp.as_mut()` から借用済みの
@@ -2163,8 +2390,11 @@ impl Sequential {
                                     }
                                 };
                                 let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
-                                let stepped = match compiled.optimizer.step(&param_refs, &acc_refs)
-                                {
+                                let stepped = match compiled.optimizer.step_dispatch(
+                                    &param_refs,
+                                    &acc_refs,
+                                    &compiled.param_groups,
+                                ) {
                                     Ok(v) => v,
                                     Err(e) => break 'epochs_block Err(e),
                                 };
@@ -2203,7 +2433,11 @@ impl Sequential {
                         }
                     };
                     let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
-                    let stepped = match compiled.optimizer.step(&param_refs, &acc_refs) {
+                    let stepped = match compiled.optimizer.step_dispatch(
+                        &param_refs,
+                        &acc_refs,
+                        &compiled.param_groups,
+                    ) {
                         Ok(v) => v,
                         Err(e) => break 'epochs_block Err(e),
                     };

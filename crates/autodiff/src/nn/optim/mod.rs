@@ -97,9 +97,9 @@ pub use adamax::{Adamax, AdamaxConfig};
 pub use adamw::{AdamW, AdamWConfig};
 pub use asgd::{Asgd, AsgdConfig};
 // イシュー #2173（親 #2131）: param groups（層別学習率・weight decay）。
-// `ParamGroup`／`ParamGroupStep` は内部クレート限定の公開（facade 非
-// 公開。`param_group` モジュール冒頭 doc・
-// `docs/autodiff-param-groups-decision.md` 参照）。`SlotHparams` は
+// `ParamGroup`／`ParamGroupStep` は #2553 で facade（`fandhe_ai::optim`）へ
+// 公開済み（`param_group` モジュール冒頭 doc・
+// `docs/autodiff-param-groups-decision.md` §9・§12 参照）。`SlotHparams` は
 // 各 optimizer ファイルの `step_with_slot_hparams` 実装が使う内部専用
 // ヘルパーのため `pub(crate)` に留める（facade はもとより、クレート外
 // からも到達不能）。`resolve_slot_hparams` は `param_group.rs` 内の
@@ -264,10 +264,9 @@ pub use state_dict::OptimizerStateDict;
 // `groups = &[]` は既存 `step()` と bit 完全一致する（`crates/autodiff/
 // tests/nn_optim_param_groups.rs` が固定する）。親 #2131 が定める
 // 「facade 公開面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則に
-// より、`ParamGroup`／`ParamGroupStep` は本イシュー時点で所有者の承認
-// コメントがないため facade（`fandhe_ai::optim`）へは公開していない
-// （`crates/facade/src/lib.rs::ParamGroupsHoldDoctestGuard`・
-// `docs/autodiff-param-groups-decision.md` 参照）。新規 `Op`／
+// より、本イシュー時点では facade へ公開しなかったが、ルート #2499 の
+// 承認コメントを受けて #2553 で `fandhe_ai::optim` へ公開した
+// （`docs/autodiff-param-groups-decision.md` §9・§12 参照）。新規 `Op`／
 // `BackendOps` メソッド／VJP／カーネル／`unsafe`／依存は追加していない
 // （ホストの `Tensor<f32>` 経路のみ）。`crate::optim::device_store::
 // DeviceParamStore` の group 対応は対象外のまま。本イシュー時点では
