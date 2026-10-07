@@ -16035,7 +16035,8 @@ fn facade_reexports_optimizer_ext_items_only_in_approved_shape_detects_each_cate
 // doctest 足場と 2 テストは撤去し、否定ガードは承認した形だけを許す正ガードへ反転した
 // （`workspace_declares_optimizer_state_dict_fn_names_only_in_allowed_locations` は
 // 定義元インベントリのため不変）。形の記録は
-// `docs/autodiff-optimizer-state-dict-decision.md` §9・§11 を参照。
+// `docs/autodiff-optimizer-state-dict-decision.md` §9・§11 を参照。#2557 で trait 形状・
+// impl 集合・利用例 doctest プローブの正ガードを追加した（記録は同 §12）。
 // =====================================================================
 
 /// 承認した再エクスポート 1 文（空白を 1 個に正規化した形）。`src/optim.rs` にだけ置く。
@@ -16179,6 +16180,144 @@ fn optimizer_state_dict_is_reachable_via_facade_only() {
     let lbfgs = Lbfgs::new(LbfgsConfig::default()).expect("Lbfgs::new");
     let state = lbfgs.state_dict().expect("Lbfgs::state_dict");
     assert!(!state.is_empty());
+}
+// ---- #2557: 正ガードの強化（trait 形状固定・利用例 doctest プローブ・impl 集合固定）。
+// 記録は `docs/autodiff-optimizer-state-dict-decision.md` §12。
+
+/// `state_dict.rs` の内容から `OptimizerStateDict` trait の形状（ジェネリクス・supertrait
+/// なし／本体の `fn` 名が `state_dict`・`load_state_dict` の 2 件ちょうど／関連型・関連定数
+/// なし）の逸脱を返す。「sealing しない代わりにメソッドを追加しない」契約（決定記録 §9.4 (c)・
+/// §11.2）の機械固定。本体の `fn` トークンを全件数えるため、既定実装付きメソッドの追加も
+/// 集合不一致として検出する。検出範囲外: 引数・戻り値型の変更（シグネチャの正は
+/// `optimizer_state_dict_is_reachable_via_facade_only` の実呼び出し）。
+fn optimizer_state_dict_shape_violations(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    match trait_declared_surface(content, "OptimizerStateDict") {
+        None => out.push("OptimizerStateDict の宣言が見つからない".to_string()),
+        Some((plain, fns, assoc)) => {
+            if !plain {
+                out.push("ジェネリクスまたは supertrait が付いている".to_string());
+            }
+            if fns != ["state_dict", "load_state_dict"] {
+                out.push(format!("メソッド集合が承認形と不一致: {fns:?}"));
+            }
+            if assoc {
+                out.push("関連型または関連定数が追加されている".to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `(パス, 内容)` 群から `impl <path>::OptimizerStateDict for <型>` の型名集合を返す
+/// （コメント・文字列除去後のトークン走査）。検出範囲外: ジェネリック impl・マクロ生成・
+/// `use ... as` 別名経由の trait 名。
+fn optimizer_state_dict_impl_targets(
+    files: &[(String, String)],
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (_, content) in files {
+        let tokens = tokens_of(content);
+        for i in 0..tokens.len().saturating_sub(2) {
+            if tokens[i] != "OptimizerStateDict" || tokens[i + 1] != "for" {
+                continue;
+            }
+            let is_impl = tokens[..i]
+                .iter()
+                .rev()
+                .take_while(|t| !matches!(t.as_str(), ";" | "{" | "}"))
+                .any(|t| t == "impl");
+            if is_impl {
+                out.insert(tokens[i + 2].clone());
+            }
+        }
+    }
+    out
+}
+
+/// 正ガード（#2557）: trait の形状が承認形（決定記録 §9.4・§11.2）のままであること。
+#[test]
+fn optimizer_state_dict_trait_matches_approved_shape() {
+    let path = facade_crate_root().join("../autodiff/src/nn/optim/state_dict.rs");
+    let violations = optimizer_state_dict_shape_violations(&read_to_string_or_panic(&path));
+    assert!(
+        violations.is_empty(),
+        "OptimizerStateDict の形が承認形から逸脱している: {violations:?}"
+    );
+}
+
+/// 正ガード（#2557）: `autodiff` 内の impl 対象が承認した 10 型にちょうど一致し、`Lbfgs`
+/// を含まないこと（決定記録 §9.3・§11.2）。
+#[test]
+fn optimizer_state_dict_impls_are_exactly_approved_ten() {
+    let mut files = Vec::new();
+    visit_rs_files(&workspace_crates_dir().join("autodiff/src"), &mut |p, c| {
+        files.push((p.display().to_string(), c.to_string()));
+    });
+    let got = optimizer_state_dict_impl_targets(&files);
+    let want: std::collections::BTreeSet<String> = [
+        "AdamW", "Adam", "RmsProp", "Adagrad", "Lamb", "Adadelta", "Adamax", "NAdam", "RAdam",
+        "Sgd",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(
+        got, want,
+        "OptimizerStateDict の impl 対象が承認 10 型と不一致"
+    );
+}
+
+/// 正の doctest プローブ（#2557）: 利用例が facade の公開 doc に実在し、実際にコンパイル・
+/// 実行される形（`ignore` 等の指定なし）であること。ヘルパー自体の自己検証は
+/// `param_groups_usage_doctests_are_present_and_compiled` にある。
+#[test]
+fn optimizer_state_dict_usage_doctest_is_present_and_compiled() {
+    let optim = read_to_string_or_panic(&facade_crate_root().join("src/optim.rs"));
+    let v = doctest_probe_violations(
+        "optim.rs モジュール doc",
+        &inner_doc_lines(&optim),
+        &[
+            "use fandhe_ai::optim::",
+            "OptimizerStateDict",
+            "state_dict",
+            "load_state_dict",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// [`optimizer_state_dict_shape_violations`]・[`optimizer_state_dict_impl_targets`] の自己検証。
+#[test]
+fn optimizer_state_dict_shape_guards_detect_each_category() {
+    let ok = "pub trait OptimizerStateDict {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n";
+    assert!(optimizer_state_dict_shape_violations(ok).is_empty());
+    let bad = [
+        "pub trait OptimizerStateDict {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n fn extra(&self) {}\n}\n",
+        "pub trait OptimizerStateDict {\n fn state_dict(&self) -> X;\n}\n",
+        "pub trait OptimizerStateDict<T> {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n",
+        "pub trait OptimizerStateDict: Send {\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n",
+        "pub trait OptimizerStateDict {\n type E;\n fn state_dict(&self) -> X;\n fn load_state_dict(&mut self, s: Y) -> Z;\n}\n",
+        "pub trait Other {}\n",
+    ];
+    for b in bad {
+        assert!(!optimizer_state_dict_shape_violations(b).is_empty(), "{b}");
+    }
+
+    let f = |s: &str| vec![("t.rs".to_string(), s.to_string())];
+    let got =
+        optimizer_state_dict_impl_targets(&f("impl super::OptimizerStateDict for AdamW {}\n\
+         impl crate::nn::optim::OptimizerStateDict for Sgd {}\n\
+         impl OptimizerStateDict for Lbfgs {}\n"));
+    assert_eq!(
+        got.into_iter().collect::<Vec<_>>(),
+        ["AdamW", "Lbfgs", "Sgd"]
+    );
+    let benign = optimizer_state_dict_impl_targets(&f(
+        "// impl OptimizerStateDict for Lbfgs {}\nlet s = \"impl OptimizerStateDict for Lbfgs\";\n\
+         fn g<T: OptimizerStateDict>() {}\n",
+    ));
+    assert!(benign.is_empty(), "{benign:?}");
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、`fn state_dict`／
