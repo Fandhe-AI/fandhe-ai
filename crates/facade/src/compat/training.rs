@@ -131,7 +131,7 @@ impl AmpConfig {
 /// 呼び出し時点で固定・`scaler` は `fit` 呼び出しをまたいで継続する
 /// `GradScaler` 本体）。`GradScaler` は `Debug` を実装しないため
 /// [`OptimizerState`] と同様に手書き `Debug` を用意する。
-struct AmpState {
+pub(super) struct AmpState {
     dtype: ScalarDType,
     /// `dtype` の元になった facade 公開型。`save_model` が manifest の
     /// `amp.dtype`（`f16`／`bf16` の allowlist）へ書くために保持する
@@ -282,10 +282,10 @@ pub enum Optimizer {
 /// 相当にしたい呼び出し元は [`Self::shuffle`]`(true)` を明示する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FitConfig {
-    epochs: usize,
-    batch_size: usize,
-    shuffle: bool,
-    drop_last: bool,
+    pub(super) epochs: usize,
+    pub(super) batch_size: usize,
+    pub(super) shuffle: bool,
+    pub(super) drop_last: bool,
     /// 勾配累積のウィンドウ幅（イシュー #2180・親 #2131）。既定 `1`
     /// （既存挙動と bit 完全一致。R3）。`1` より大きい場合、
     /// [`Sequential::run_fit`] は `accumulate_steps` 回の backward ごとに
@@ -296,7 +296,7 @@ pub struct FitConfig {
     ///
     /// [`Self::accumulate_steps`] で設定する（イシュー #2508 で公開。
     /// フィールド自体は非公開のまま。`Copy + Eq` も維持）。
-    accumulate_steps: u32,
+    pub(super) accumulate_steps: u32,
 }
 
 impl FitConfig {
@@ -538,7 +538,7 @@ impl FitTarget for i32 {
 /// できず closure 駆動の `lbfgs_batch_step`（本ファイル下部）のみが
 /// 呼べる——[`Sequential::run_fit`] がバッチ処理の入口で分岐するため
 /// （本モジュール冒頭 doc 参照）。
-enum OptimizerState {
+pub(super) enum OptimizerState {
     Sgd(Sgd),
     AdamW(AdamW),
     Adam(Adam),
@@ -569,7 +569,7 @@ impl std::fmt::Debug for OptimizerState {
 }
 
 impl OptimizerState {
-    fn new(optimizer: Optimizer) -> Result<Self, AutodiffError> {
+    pub(super) fn new(optimizer: Optimizer) -> Result<Self, AutodiffError> {
         match optimizer {
             Optimizer::Sgd(config) => Ok(OptimizerState::Sgd(Sgd::new(config)?)),
             Optimizer::AdamW(config) => Ok(OptimizerState::AdamW(AdamW::new(config)?)),
@@ -585,7 +585,7 @@ impl OptimizerState {
     /// `Adagrad`／`Lamb` は `set_lr` を持たないが `lr()`（`history.lr`
     /// 記録用）は `config().lr` で常に取得できる。`Lbfgs` も
     /// `config().lr` で取得できる（`Lbfgs::set_lr` あり）。
-    fn lr(&self) -> f32 {
+    pub(super) fn lr(&self) -> f32 {
         match self {
             OptimizerState::Sgd(sgd) => sgd.config().lr,
             OptimizerState::AdamW(adamw) => adamw.config().lr,
@@ -643,7 +643,7 @@ impl OptimizerState {
     /// を検出した時点でバッチ処理そのものを `lbfgs_batch_step` へ分岐
     /// させ、本メソッドを一切呼ばないため、この arm は通常到達しない
     /// 防御的フォールバック（fail-closed。黙って no-op にしない）。
-    fn step(
+    pub(super) fn step(
         &mut self,
         params: &[&Tensor<f32>],
         grads: &[&Tensor<f32>],
@@ -710,13 +710,13 @@ impl OptimizerState {
 /// （非公開・`pub(super)` で `sequential.rs` からのみ到達可能）。
 #[derive(Debug)]
 pub(super) struct Compiled {
-    optimizer: OptimizerState,
-    loss: Loss,
+    pub(super) optimizer: OptimizerState,
+    pub(super) loss: Loss,
     /// [`Sequential::compile_with_amp`] で設定された AMP 状態（既定
     /// `None`。イシュー #1961）。`GradScaler` は fit 呼び出しをまたいで
     /// 継続する状態のため `FitConfig`（`Copy`＋`Eq` 導出済み）ではなく
     /// ここに保持する（`optimizer` と同じ理由）。
-    amp: Option<AmpState>,
+    pub(super) amp: Option<AmpState>,
 }
 
 /// `save_model` が取り出す compile 状態の写し（イシュー #2372）。
@@ -745,37 +745,9 @@ pub(super) struct AmpSnapshot {
 
 impl Sequential {
     /// compile 状態を取り出す（未 compile は `None`）。`save_model` から呼ばれる。
+    /// 本体は [`snapshot_of_compiled`]（Functional モデルの保存〈#2667〉と共有する自由関数）。
     pub(super) fn snapshot_compiled(&self) -> Result<Option<CompiledSnapshot>, AutodiffError> {
-        let Some(compiled) = self.compiled.as_ref() else {
-            return Ok(None);
-        };
-        // `config()` は `set_lr` 反映後の現在値を返す（LR scheduler の書き換えを含む）。
-        let (optimizer, optimizer_state, lbfgs_history_len) = match &compiled.optimizer {
-            OptimizerState::Sgd(o) => (Optimizer::Sgd(*o.config()), o.state_dict()?, None),
-            OptimizerState::AdamW(o) => (Optimizer::AdamW(*o.config()), o.state_dict()?, None),
-            OptimizerState::Adam(o) => (Optimizer::Adam(*o.config()), o.state_dict()?, None),
-            OptimizerState::RmsProp(o) => (Optimizer::RmsProp(*o.config()), o.state_dict()?, None),
-            OptimizerState::Adagrad(o) => (Optimizer::Adagrad(*o.config()), o.state_dict()?, None),
-            OptimizerState::Lamb(o) => (Optimizer::Lamb(*o.config()), o.state_dict()?, None),
-            OptimizerState::Lbfgs(o) => (
-                Optimizer::Lbfgs(*o.config()),
-                o.state_dict()?,
-                Some(o.history_len()),
-            ),
-        };
-        let amp = compiled.amp.as_ref().map(|a| AmpSnapshot {
-            dtype: a.amp_dtype,
-            grad_scaler_config: a.grad_scaler_config,
-            scale: a.scaler.scale(),
-            growth_tracker: a.scaler.growth_tracker(),
-        });
-        Ok(Some(CompiledSnapshot {
-            loss: compiled.loss,
-            optimizer,
-            optimizer_state,
-            lbfgs_history_len,
-            amp,
-        }))
+        self.compiled.as_ref().map(snapshot_of_compiled).transpose()
     }
 
     /// 訓練対象パラメータの shape 列（`Lbfgs::load_state_dict` の `slot_shapes`）。
@@ -812,56 +784,97 @@ impl Sequential {
     /// [`Self::snapshot_compiled`] の写しから compile 状態を復元する（`load_model` から呼ばれる）。
     ///
     /// construct-before-assign: optimizer の構築・状態の load・GradScaler の復元が
-    /// すべて成功してから `self.compiled` へ代入する（失敗時は変更しない）。値の範囲検証は
-    /// 各コンストラクタ（`*::new`・`grad_scaler_from_state`）へ委ねる。`Lbfgs`（#2373）は
-    /// `load_state_dict` が履歴件数・shape・有限性・到達可能性を検証する。
+    /// すべて成功してから `self.compiled` へ代入する（失敗時は変更しない）。本体は
+    /// [`compiled_from_snapshot`]（Functional モデルの復元〈#2667〉と共有する自由関数）。
     pub(super) fn restore_compiled(&mut self, snap: CompiledSnapshot) -> Result<(), AutodiffError> {
-        let CompiledSnapshot {
-            loss,
-            optimizer,
-            optimizer_state,
-            lbfgs_history_len,
-            amp,
-        } = snap;
-        // 多層防御: 履歴件数は Lbfgs のときだけ持つ。AMP との併用は compile_with_amp が拒否する組合せ。
-        let is_lbfgs = matches!(optimizer, Optimizer::Lbfgs(_));
-        if is_lbfgs != lbfgs_history_len.is_some() || (is_lbfgs && amp.is_some()) {
-            return Err(AutodiffError::InvalidArgument(
-                "Sequential の compile 状態の復元: Lbfgs の履歴件数・AMP の組合せが不正です"
-                    .to_string(),
-            ));
-        }
         let slot_shapes = self.lbfgs_slot_shapes();
-        let mut state = OptimizerState::new(optimizer)?;
-        match &mut state {
-            OptimizerState::Sgd(o) => o.load_state_dict(optimizer_state)?,
-            OptimizerState::AdamW(o) => o.load_state_dict(optimizer_state)?,
-            OptimizerState::Adam(o) => o.load_state_dict(optimizer_state)?,
-            OptimizerState::RmsProp(o) => o.load_state_dict(optimizer_state)?,
-            OptimizerState::Adagrad(o) => o.load_state_dict(optimizer_state)?,
-            OptimizerState::Lamb(o) => o.load_state_dict(optimizer_state)?,
-            OptimizerState::Lbfgs(o) => o.load_state_dict(
-                optimizer_state,
-                &slot_shapes,
-                lbfgs_history_len.unwrap_or(0),
-            )?,
-        }
-        let amp = match amp {
-            None => None,
-            Some(a) => Some(AmpState {
-                dtype: a.dtype.to_scalar_dtype(),
-                amp_dtype: a.dtype,
-                grad_scaler_config: a.grad_scaler_config,
-                scaler: grad_scaler_from_state(a.grad_scaler_config, a.scale, a.growth_tracker)?,
-            }),
-        };
-        self.compiled = Some(Compiled {
-            optimizer: state,
-            loss,
-            amp,
-        });
+        self.compiled = Some(compiled_from_snapshot(snap, &slot_shapes)?);
         Ok(())
     }
+}
+
+/// `compiled`（optimizer／loss／AMP）の写しを作る（`Sequential::snapshot_compiled` の本体）。
+/// Functional モデルの保存（`model_io::functional_io`。イシュー #2667）も共有する。
+///
+/// `config()` は `set_lr` 反映後の現在値を返す（LR scheduler の書き換えを含む）。
+pub(super) fn snapshot_of_compiled(compiled: &Compiled) -> Result<CompiledSnapshot, AutodiffError> {
+    let (optimizer, optimizer_state, lbfgs_history_len) = match &compiled.optimizer {
+        OptimizerState::Sgd(o) => (Optimizer::Sgd(*o.config()), o.state_dict()?, None),
+        OptimizerState::AdamW(o) => (Optimizer::AdamW(*o.config()), o.state_dict()?, None),
+        OptimizerState::Adam(o) => (Optimizer::Adam(*o.config()), o.state_dict()?, None),
+        OptimizerState::RmsProp(o) => (Optimizer::RmsProp(*o.config()), o.state_dict()?, None),
+        OptimizerState::Adagrad(o) => (Optimizer::Adagrad(*o.config()), o.state_dict()?, None),
+        OptimizerState::Lamb(o) => (Optimizer::Lamb(*o.config()), o.state_dict()?, None),
+        OptimizerState::Lbfgs(o) => (
+            Optimizer::Lbfgs(*o.config()),
+            o.state_dict()?,
+            Some(o.history_len()),
+        ),
+    };
+    let amp = compiled.amp.as_ref().map(|a| AmpSnapshot {
+        dtype: a.amp_dtype,
+        grad_scaler_config: a.grad_scaler_config,
+        scale: a.scaler.scale(),
+        growth_tracker: a.scaler.growth_tracker(),
+    });
+    Ok(CompiledSnapshot {
+        loss: compiled.loss,
+        optimizer,
+        optimizer_state,
+        lbfgs_history_len,
+        amp,
+    })
+}
+
+/// [`snapshot_of_compiled`] の写しから [`Compiled`] を構築する（`Sequential::restore_compiled` の
+/// 本体。値の範囲検証は各コンストラクタ〈`*::new`・`grad_scaler_from_state`〉へ委ねる）。
+/// `slot_shapes` は訓練対象パラメータの shape 列で `Lbfgs::load_state_dict` だけが使う。
+/// `Lbfgs`（#2373）は `load_state_dict` が履歴件数・shape・有限性・到達可能性を検証する。
+pub(super) fn compiled_from_snapshot(
+    snap: CompiledSnapshot,
+    slot_shapes: &[Vec<usize>],
+) -> Result<Compiled, AutodiffError> {
+    let CompiledSnapshot {
+        loss,
+        optimizer,
+        optimizer_state,
+        lbfgs_history_len,
+        amp,
+    } = snap;
+    // 多層防御: 履歴件数は Lbfgs のときだけ持つ。AMP との併用は compile_with_amp が拒否する組合せ。
+    let is_lbfgs = matches!(optimizer, Optimizer::Lbfgs(_));
+    if is_lbfgs != lbfgs_history_len.is_some() || (is_lbfgs && amp.is_some()) {
+        return Err(AutodiffError::InvalidArgument(
+            "Sequential の compile 状態の復元: Lbfgs の履歴件数・AMP の組合せが不正です"
+                .to_string(),
+        ));
+    }
+    let mut state = OptimizerState::new(optimizer)?;
+    match &mut state {
+        OptimizerState::Sgd(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::AdamW(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::Adam(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::RmsProp(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::Adagrad(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::Lamb(o) => o.load_state_dict(optimizer_state)?,
+        OptimizerState::Lbfgs(o) => {
+            o.load_state_dict(optimizer_state, slot_shapes, lbfgs_history_len.unwrap_or(0))?
+        }
+    }
+    let amp = match amp {
+        None => None,
+        Some(a) => Some(AmpState {
+            dtype: a.dtype.to_scalar_dtype(),
+            amp_dtype: a.dtype,
+            grad_scaler_config: a.grad_scaler_config,
+            scaler: grad_scaler_from_state(a.grad_scaler_config, a.scale, a.growth_tracker)?,
+        }),
+    };
+    Ok(Compiled {
+        optimizer: state,
+        loss,
+        amp,
+    })
 }
 
 /// 未 compile のモデルへ `fit`／`evaluate` を呼んだ場合の共通エラー。

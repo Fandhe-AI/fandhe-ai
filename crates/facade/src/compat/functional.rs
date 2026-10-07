@@ -28,10 +28,11 @@
 //! 結合ノード（Concatenate／Add／Multiply／Average。イシュー #2666）まで。結合ノードは
 //! [`FunctionalBuilder::concatenate`]・`add`・`multiply`・`average` で追加し、数値は
 //! `fandhe_ai_autodiff::merge_ops`（既存 `Var` 演算の合成）へ委譲する。結合ノードは層を
-//! 持たないため通し番号キーに影響しない。`bind`／`trainable_parameters`／`apply_parameters`／
-//! `compile`／`fit`／保存は #2667 の担当（保存形式では結合ノードの `op` 文字列 allowlist と
-//! `dim` パラメータの直列化が必要）で、ノード種別は内部 enum とし入力添字を複数持てる形に
-//! してある。shape の構築時推論は行わず（層側に推論 API
+//! 持たないため通し番号キーに影響しない。学習（`bind`／`trainable_parameters`／`apply_parameters`／
+//! `compile`／`fit`／`evaluate`。イシュー #2667）は子モジュール `train`、保存・復元
+//! （`save_functional_model`／`load_functional_model`）は `model_io::functional_io` が担う
+//! （いずれも本モジュールと同じ `#[cfg(test)]` 隔離の `pub(crate)`。設計記録 §18）。ノード種別は
+//! 内部 enum とし入力添字を複数持てる形にしてある。shape の構築時推論は行わず（層側に推論 API
 //! が無い）、不整合は forward 時に既存 `Var` 演算の型付きエラーで検出する。
 //!
 //! 数値は既存 `Var` 演算（`Sequential::forward`）の合成のみで、新規 `Op`・`BackendOps`
@@ -45,7 +46,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fandhe_ai_autodiff::merge_ops;
 
 use super::Sequential;
+use super::SequentialVars;
+use super::training::{Compiled, CompiledSnapshot, compiled_from_snapshot, snapshot_of_compiled};
 use crate::{AutodiffError, Tape, Tensor, Var};
+
+mod train;
+
+#[cfg(test)]
+mod fit_parity_tests;
+
+#[cfg(test)]
+mod fit_tests;
 
 #[cfg(test)]
 mod tests;
@@ -85,8 +96,8 @@ pub(crate) struct Node {
 
 /// 結合ノードの種別（非公開。Keras の `Concatenate`／`Add`／`Multiply`／`Average` 相当）。
 /// 数値は `merge_ops` の自由関数が持ち、ここは結線上の種別だけを表す。
-#[derive(Debug, Clone, Copy)]
-enum MergeKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MergeKind {
     /// 軸 `dim` で連結する。
     Concatenate { dim: usize },
     /// 要素ごとの加算。
@@ -97,8 +108,8 @@ enum MergeKind {
     Average,
 }
 
-/// グラフ上のノード定義（非公開）。
-enum NodeDef {
+/// グラフ上のノード定義（非公開。保存側 `model_io::functional_io` が読むため `compat` 内へ可視）。
+pub(super) enum NodeDef {
     /// 外部から値を受ける入力ノード（Keras `Input`）。
     Input,
     /// `Sequential` ブロックを入力ノード列へ適用するノード。現段階の入力は 1 件。
@@ -252,13 +263,20 @@ impl FunctionalBuilder {
         let mut srcs: Vec<usize> = Vec::new();
         srcs.try_reserve_exact(inputs.len())
             .map_err(|_| super::alloc_failed())?;
+        // 重複検出は線形時間（非信頼 manifest から最大 `MAX_ARRAY_LEN` 件の入力で呼ばれるため、
+        // `Vec::contains` の二乗時間を避ける。#2667）。
+        let mut seen = vec![false; self.nodes.len()];
         for node in inputs {
             let index = self.resolve(*node, what)?;
-            if srcs.contains(&index) {
+            let slot = seen
+                .get_mut(index)
+                .ok_or_else(|| invalid(format!("{what}: ノード添字 {index} が範囲外")))?;
+            if *slot {
                 return Err(invalid(format!(
                     "{what}: ノード {index} が重複して指定された"
                 )));
             }
+            *slot = true;
             srcs.push(index);
         }
         self.push_node(NodeDef::Merge { kind, inputs: srcs })
@@ -369,6 +387,7 @@ impl FunctionalBuilder {
             inputs: input_indices,
             outputs: output_indices,
             layer_starts,
+            compiled: None,
         })
     }
 }
@@ -380,17 +399,36 @@ impl FunctionalBuilder {
 /// 全ブロックを通した層の通し番号 `i` による `"{i}.{name}"`（`docs/facade-functional-api-
 /// decision.md` §4。Block ノードの挿入順に層数を累積）。
 pub(crate) struct FunctionalModel {
-    nodes: Vec<NodeDef>,
-    inputs: Vec<usize>,
-    outputs: Vec<usize>,
+    pub(super) nodes: Vec<NodeDef>,
+    pub(super) inputs: Vec<usize>,
+    pub(super) outputs: Vec<usize>,
     /// ノードごとの通し番号の先頭（入力ノードは次のブロックの先頭と同値で未使用）。
-    layer_starts: Vec<usize>,
+    pub(super) layer_starts: Vec<usize>,
+    /// `compile` 済みの optimizer／loss（イシュー #2667。`Sequential::compiled` と同じ型・同じ
+    /// 契約で、`fit` 中は一時的に取り外して必ず書き戻す）。ブロック側の `compiled` は `apply` が
+    /// 拒否するため常に `None`。
+    pub(super) compiled: Option<Compiled>,
+}
+
+/// [`FunctionalModel::bind`] が返す、1 学習ステップ分のテープ登録済みハンドル（イシュー #2667）。
+///
+/// 全ブロックを挿入順に `Sequential::bind` した `SequentialVars` を持ち、`forward`・
+/// `trainable_vars`・`trainable_grads` を提供する。パラメータの並びは「ブロックの挿入順 → 各ブロック内は
+/// `Sequential::trainable_parameters` と同じ順」で、`FunctionalModel::trainable_parameters`／
+/// `apply_parameters` と位置対応する（`fandhe_ai::optim` の `params[i]` ↔ `grads[i]` 契約）。
+/// 同一 tape 上で複数ブロックを `bind` する構成は ResNet examples に先例がある。
+/// 生 `Tape`・`BackendOps` は署名に出さない（REQ-12）。公開形は未承認のため内部型のまま
+/// （`docs/facade-functional-api-decision.md` §18）。
+pub(crate) struct FunctionalVars<'m, 't> {
+    model: &'m FunctionalModel,
+    /// `(ノード添字, bind 結果)` をブロックの挿入順に保持する。
+    blocks: Vec<(usize, SequentialVars<'m, 't>)>,
 }
 
 /// ブロックのローカルキー `"{j}.{name}"` を最初の `.` でのみ分割し、通し番号キー
 /// `"{layer_start + j}.{name}"` へ写す。名前側に `.` を含みうるため最初の 1 か所だけで分割する。
 /// 通し番号キーの採番規則は本関数 1 か所に置く。
-fn to_global_key(layer_start: usize, local: &str) -> Result<String, AutodiffError> {
+pub(super) fn to_global_key(layer_start: usize, local: &str) -> Result<String, AutodiffError> {
     let (index, name) = local.split_once('.').ok_or_else(|| {
         invalid(format!(
             "パラメータキー {local:?} が \"{{index}}.{{name}}\" 形式でない"
@@ -405,9 +443,20 @@ fn to_global_key(layer_start: usize, local: &str) -> Result<String, AutodiffErro
     Ok(format!("{global}.{name}"))
 }
 
+/// [`to_global_key`] の逆写像。通し番号キー `"{g}.{name}"` を、ブロックの先頭 `layer_start` を
+/// 引いたローカルキー `"{g - layer_start}.{name}"` へ戻す（保存形式の復元で、ブロックごとに
+/// `build_model`／`load_state_dict` が要求するローカルキーを作る。採番規則を 1 か所に保つため
+/// ここに置く）。`g < layer_start` は `None`。
+pub(super) fn to_local_key(layer_start: usize, global: &str) -> Option<String> {
+    let (index, name) = global.split_once('.')?;
+    let index: usize = index.parse().ok()?;
+    let local = index.checked_sub(layer_start)?;
+    Some(format!("{local}.{name}"))
+}
+
 impl FunctionalModel {
     /// ブロックノードの `(ノード添字, ブロック)` を挿入順に列挙する。
-    fn blocks(&self) -> impl Iterator<Item = (usize, &Sequential)> {
+    pub(super) fn blocks(&self) -> impl Iterator<Item = (usize, &Sequential)> {
         self.nodes
             .iter()
             .enumerate()
@@ -418,11 +467,36 @@ impl FunctionalModel {
     }
 
     /// 通し番号の先頭を引く（`build` が全ノード分を作るため常に存在する）。
-    fn layer_start(&self, node_index: usize) -> Result<usize, AutodiffError> {
+    pub(super) fn layer_start(&self, node_index: usize) -> Result<usize, AutodiffError> {
         self.layer_starts
             .get(node_index)
             .copied()
             .ok_or_else(|| invalid(format!("内部不整合: ノード {node_index} の層番号がない")))
+    }
+
+    /// 訓練対象パラメータの shape 列（ブロックの挿入順・`trainable_parameters` と同順）。
+    /// compile 状態の復元で `Lbfgs` 以外は使わないが、復元関数の契約どおり常に渡す。
+    pub(super) fn slot_shapes(&self) -> Vec<Vec<usize>> {
+        self.trainable_parameters()
+            .iter()
+            .map(|p| p.shape().to_vec())
+            .collect()
+    }
+
+    /// compile 状態の写し（未 compile は `None`）。保存側 `model_io::functional_io` が呼ぶ。
+    pub(super) fn compile_state_snapshot(&self) -> Result<Option<CompiledSnapshot>, AutodiffError> {
+        self.compiled.as_ref().map(snapshot_of_compiled).transpose()
+    }
+
+    /// [`Self::compile_state_snapshot`] の写しから compile 状態を復元する。construct-before-assign
+    /// （失敗時は `self.compiled` を変更しない）。復元側 `model_io::functional_io` が呼ぶ。
+    pub(super) fn restore_compile_state(
+        &mut self,
+        snap: CompiledSnapshot,
+    ) -> Result<(), AutodiffError> {
+        let slots = self.slot_shapes();
+        self.compiled = Some(compiled_from_snapshot(snap, &slots)?);
+        Ok(())
     }
 
     /// `inputs`（`build` に渡した `inputs` の順）を入力ノードへ束ね、ノードを挿入順に 1 回ずつ
@@ -432,6 +506,18 @@ impl FunctionalModel {
         &self,
         tape: &'t Tape,
         inputs: &[Var<'t>],
+    ) -> Result<Vec<Var<'t>>, AutodiffError> {
+        self.eval_graph(tape, inputs, &mut |_, block, x| block.forward(tape, x))
+    }
+
+    /// ノード評価の共通本体（[`Self::forward`] と `FunctionalVars::forward` が共用する。
+    /// 評価順・入力検査・結合演算を 1 か所に保ち、推論経路と学習経路で演算列がずれないようにする）。
+    /// ブロックノードの評価だけを `eval_block(ノード添字, ブロック, 入力)` へ委ねる。
+    fn eval_graph<'t>(
+        &self,
+        tape: &'t Tape,
+        inputs: &[Var<'t>],
+        eval_block: &mut dyn FnMut(usize, &Sequential, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
     ) -> Result<Vec<Var<'t>>, AutodiffError> {
         if inputs.len() != self.inputs.len() {
             return Err(invalid(format!(
@@ -470,7 +556,7 @@ impl FunctionalModel {
                         .copied()
                         .flatten()
                         .ok_or_else(|| invalid(format!("内部不整合: ノード {src} が未評価")))?;
-                    block.forward(tape, &x)?
+                    eval_block(index, block.as_ref(), &x)?
                 }
                 NodeDef::Merge { kind, inputs } => {
                     let mut xs: Vec<Var<'t>> = Vec::new();

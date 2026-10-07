@@ -30951,6 +30951,7 @@ mod __fandhe_functional_api_hold_probe {\n\
 \x20\x20\x20\x20pub struct FunctionalBuilder;\n\
 \x20\x20\x20\x20pub struct FunctionalModel;\n\
 \x20\x20\x20\x20pub struct Node;\n\
+\x20\x20\x20\x20pub struct FunctionalVars;\n\
 \x20\x20\x20\x20pub fn save_functional_model() {}\n\
 \x20\x20\x20\x20pub fn load_functional_model() {}\n\
 \x20\x20\x20\x20pub mod functional {\n\
@@ -30975,7 +30976,7 @@ impl __FandheFunctionalApiHoldProbe for fandhe_ai::compat::Sequential {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node) {}\n\
+fn __probe_types(_0: FunctionalBuilder, _1: FunctionalModel, _2: Node, _3: FunctionalVars) {}\n\
 \n\
 fn __probe_free_fns() {\n\
 \x20\x20\x20\x20save_functional_model();\n\
@@ -30989,10 +30990,21 @@ fn __probe_methods(seq: &fandhe_ai::compat::Sequential) {\n\
 }";
 
 /// 保留対象の型名。facade src での宣言は [`FUNCTIONAL_API_ALLOWED_FILE`] の `pub(crate) struct` 各 1 件だけを許す。
-const FUNCTIONAL_API_TYPE_NAMES: [&str; 3] = ["FunctionalBuilder", "FunctionalModel", "Node"];
+const FUNCTIONAL_API_TYPE_NAMES: [&str; 4] = [
+    "FunctionalBuilder",
+    "FunctionalModel",
+    "Node",
+    "FunctionalVars",
+];
 
 /// 内部実装の唯一の置き場所（facade `src` からの相対パス）。
 const FUNCTIONAL_API_ALLOWED_FILE: &str = "compat/functional.rs";
+
+/// 保存・復元入口の関数名（#2667）。宣言は [`FUNCTIONAL_API_IO_ALLOWED_FILE`] に各 1 件・`pub(crate)` だけを許す。
+const FUNCTIONAL_API_IO_FN_NAMES: [&str; 2] = ["save_functional_model", "load_functional_model"];
+
+/// 保存・復元入口の唯一の置き場所（workspace `crates` からの相対パス）。
+const FUNCTIONAL_API_IO_ALLOWED_FILE: &str = "facade/src/compat/model_io/functional_io.rs";
 
 /// [`scan_functional_api_surface`] の結果。
 #[derive(Debug, Default)]
@@ -31025,10 +31037,12 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            if path_tokens
-                .iter()
-                .any(|t| t == "functional" || FUNCTIONAL_API_TYPE_NAMES.contains(&t.as_str()))
-            {
+            if path_tokens.iter().any(|t| {
+                t == "functional"
+                    || t == "functional_io"
+                    || FUNCTIONAL_API_TYPE_NAMES.contains(&t.as_str())
+                    || FUNCTIONAL_API_IO_FN_NAMES.contains(&t.as_str())
+            }) {
                 scan.offenses.push(format!(
                     "`pub use` が Functional API 名を経路に含む: {path_tokens:?}"
                 ));
@@ -31038,9 +31052,31 @@ fn scan_functional_api_surface(rel_path: &str, content: &str) -> FunctionalApiSc
         }
         if tokens[i] == "pub"
             && tokens.get(i + 1).map(String::as_str) == Some("mod")
-            && tokens.get(i + 2).map(String::as_str) == Some("functional")
+            && matches!(
+                tokens.get(i + 2).map(String::as_str),
+                Some("functional" | "functional_io")
+            )
         {
-            scan.offenses.push("`pub mod functional`".to_string());
+            scan.offenses
+                .push("`pub mod functional`／`pub mod functional_io`".to_string());
+        }
+        // 素の `pub`（`pub(crate)` ではない）の保存・復元入口。`pub async fn` 等の修飾子付きも見る。
+        if tokens[i] == "pub" {
+            let mut j = i + 1;
+            while matches!(
+                tokens.get(j).map(String::as_str),
+                Some("async" | "const" | "unsafe" | "extern")
+            ) {
+                j += 1;
+            }
+            if tokens.get(j).map(String::as_str) == Some("fn")
+                && let Some(name) = tokens.get(j + 1)
+                && FUNCTIONAL_API_IO_FN_NAMES.contains(&name.as_str())
+            {
+                scan.offenses.push(format!(
+                    "`pub fn {name}`（保存・復元入口は `pub(crate)` に限る）"
+                ));
+            }
         }
         if matches!(tokens[i].as_str(), "struct" | "enum" | "type" | "trait")
             && let Some(name) = tokens.get(i + 1)
@@ -31108,7 +31144,7 @@ fn facade_functional_api_stays_internal() {
     );
     assert_eq!(
         allowed, expected,
-        "内部実装の 3 型（FunctionalBuilder／FunctionalModel／Node）が {FUNCTIONAL_API_ALLOWED_FILE} の \
+        "内部実装の 4 型（FunctionalBuilder／FunctionalModel／Node／FunctionalVars）が {FUNCTIONAL_API_ALLOWED_FILE} の \
          `pub(crate) struct` として各 1 件ずつ存在しない（欠落・二重宣言・走査の空振りの疑い）"
     );
 }
@@ -31134,9 +31170,33 @@ fn facade_functional_api_stays_internal_detects_each_category() {
         "#[cfg(test)]\npub use functional::FunctionalBuilder;"
     ));
     assert!(offense(other, "pub use a::{b::{c::Node}};"));
-    // 正例: `pub mod functional`。
+    // 正例: `pub mod functional`／`pub mod functional_io`。
     assert!(offense(other, "pub mod functional;"));
     assert!(offense(other, "pub mod functional { }"));
+    assert!(offense(other, "pub mod functional_io;"));
+    // 正例（#2667）: 保存・復元入口の公開（素の `pub fn`・修飾子付き・`pub use` 経路）。
+    assert!(offense(other, "pub fn save_functional_model() {}"));
+    assert!(offense(other, "pub fn load_functional_model() {}"));
+    assert!(offense(other, "pub async fn load_functional_model() {}"));
+    assert!(offense(
+        FUNCTIONAL_API_ALLOWED_FILE,
+        "pub unsafe fn save_functional_model() {}"
+    ));
+    assert!(offense(
+        other,
+        "pub use model_io::functional_io::save_functional_model;"
+    ));
+    assert!(offense(
+        other,
+        "pub use crate::x::load_functional_model as l;"
+    ));
+    assert!(offense(other, "pub use model_io::functional_io::*;"));
+    // 負例（#2667）: `pub(crate)`・非公開・部分一致の別名。
+    assert!(!offense(other, "pub(crate) fn save_functional_model() {}"));
+    assert!(!offense(other, "fn load_functional_model() {}"));
+    assert!(!offense(other, "pub fn save_functional_models() {}"));
+    assert!(!offense(other, "mod functional_io;"));
+    assert!(!offense(other, "#[cfg(test)]\nmod functional_io;"));
     // 正例: 許可位置以外・許可形以外の宣言。
     assert!(offense(other, "pub struct Node;"));
     assert!(offense(other, "pub(crate) struct Node;"));
@@ -31208,10 +31268,11 @@ fn facade_functional_api_stays_internal_detects_each_category() {
 }
 
 /// workspace 全体（`crates/*/src/`）で `fn save_functional_model`／`fn load_functional_model` の宣言が
-/// 0 件であることを固定する（保存・読込の入口は #2667 の担当で、置き場所が決まった時点で期待集合を更新する）。
+/// [`FUNCTIONAL_API_IO_ALLOWED_FILE`]（`#[cfg(test)]` 隔離の内部実装。#2667）の各 1 件だけであることを固定する
+/// （所在の登録であり緩和ではない。公開は未承認で、承認依頼は #2677・公開は承認後の #2679。素の `pub` 宣言・
+/// `pub use` 経路・`pub mod functional_io` は `facade_functional_api_stays_internal` が拒否する）。
 #[test]
-fn workspace_declares_functional_model_io_fn_names_nowhere() {
-    const NAMES: [&str; 2] = ["save_functional_model", "load_functional_model"];
+fn workspace_declares_functional_model_io_fn_names_only_in_allowed_location() {
     let crates_dir = workspace_crates_dir();
     let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(&crates_dir) else {
@@ -31241,7 +31302,7 @@ fn workspace_declares_functional_model_io_fn_names_nowhere() {
             scanned_files += 1;
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in NAMES {
+            for fn_name in FUNCTIONAL_API_IO_FN_NAMES {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -31255,11 +31316,15 @@ fn workspace_declares_functional_model_io_fn_names_nowhere() {
         });
     }
     assert!(scanned_files > 0, "走査したファイルが 0 件（走査の空振り）");
-    assert!(
-        found.is_empty(),
-        "workspace 全体（crates/*/src/）に save_functional_model／load_functional_model の `fn` 宣言が見つかった\
-         （期待集合は空。#2667 の実装時に置き場所を決めて本テストの期待を更新すること。承認前の実装・迂回経路の\
-         混入でないか確認すること）: {found:?}"
+    let expected: std::collections::BTreeMap<String, usize> = FUNCTIONAL_API_IO_FN_NAMES
+        .iter()
+        .map(|n| (format!("{FUNCTIONAL_API_IO_ALLOWED_FILE}::{n}"), 1usize))
+        .collect();
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の save_functional_model／load_functional_model の `fn` 宣言が\
+         承認前の内部実装の置き場所（{FUNCTIONAL_API_IO_ALLOWED_FILE} の各 1 件）と一致しない。\
+         迂回経路の混入か、未承認の公開でないか確認すること"
     );
 }
 
