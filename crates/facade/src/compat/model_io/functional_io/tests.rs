@@ -124,6 +124,10 @@ fn is_manifest_err<T>(r: &Result<T, ModelIoError>) -> bool {
 
 #[test]
 fn rich_graph_round_trips_bit_for_bit() {
+    let _guard = crate::compat::global_rng_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let dir = temp_path("roundtrip");
     let _guard = Cleanup(dir.clone());
     let mut model = rich_graph(true);

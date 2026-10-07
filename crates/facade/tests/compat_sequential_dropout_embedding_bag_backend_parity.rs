@@ -9,8 +9,18 @@
 //! M4 Max セッションへ申し送る
 //! （`docs/perf/logs/compat-sequential-dropout-embedding-bag-2528/README.md`）。
 
+use std::sync::{Mutex, MutexGuard};
+
 use fandhe_ai::compat::Sequential;
 use fandhe_ai::{Device, EmbeddingBagMode, Tensor};
+
+/// プロセスグローバル RNG（`manual_seed`）を操作・消費するテストの直列化用。
+/// `--include-ignored` で実機テストと CPU 参照テストが並走しても、`manual_seed`
+/// 後の乱数列が他テストの消費でずれないようにする。
+fn rng_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn dense(t: &Tensor<f32>) -> Vec<u32> {
     t.contiguous()
@@ -58,6 +68,7 @@ fn device_forward(model: &Sequential, x: &Tensor<f32>, device: Device) -> Tensor
 }
 
 fn run_bit_exact(device: Device) {
+    let _g = rng_lock();
     let m = dropout_model();
     let x = feature_input();
     fandhe_ai::manual_seed(77);
@@ -81,6 +92,7 @@ fn run_bit_exact(device: Device) {
 
 #[test]
 fn cpu_reference_runs_without_device() {
+    let _g = rng_lock();
     let _ = fandhe_ai::manual_seed;
     assert_eq!(
         dropout_model().predict(&feature_input()).unwrap().shape(),

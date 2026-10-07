@@ -119,3 +119,15 @@ pub use training::{
 fn alloc_failed() -> crate::AutodiffError {
     crate::AutodiffError::Shape(crate::ShapeError::ElementCountOverflow)
 }
+
+/// テスト直列化用ロック（`#[cfg(test)]` 限定・クレート内限定）。プロセス
+/// グローバル RNG（`manual_seed` とその状態）を操作・観測するテストと、
+/// グローバル RNG を暗黙に消費するテスト（`shuffle(true)` の `fit`・学習モード
+/// の dropout 等）を、facade 単体テストバイナリ内の並列実行で排他する。
+/// `tensor-core::rng::global_rng_test_lock` は `pub(crate)` のため別クレート
+/// からは使えず、同型の静的ロックを facade 側に置く（公開 API は変えない）。
+#[cfg(test)]
+pub(crate) fn global_rng_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
