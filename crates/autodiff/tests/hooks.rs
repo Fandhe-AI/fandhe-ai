@@ -467,11 +467,8 @@ fn forward_hook_that_reads_values_stays_within_composite_tolerance() {
     for (a, b) in [(&plain.0, &hooked.0), (&plain.1, &hooked.1)] {
         for (x, y) in a.iter().zip(b.iter()) {
             let (x, y) = (f32::from_bits(*x), f32::from_bits(*y));
-            let abs = (x - y).abs();
-            assert!(
-                abs < 1e-5 || abs / x.abs().max(f32::MIN_POSITIVE) < 1e-3,
-                "{x} vs {y}"
-            );
+            // 閾値・相対誤差の分母は common::req2_close に集約（分散定義しない）。
+            assert!(common::req2_close(f64::from(x), f64::from(y)), "{x} vs {y}");
         }
     }
 }
