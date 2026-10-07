@@ -545,20 +545,26 @@ P1」）を受けた是正である。
    受け入れ基準の改定
 2. 本リポジトリのユーザー承認を得たうえでの Issue 起票・本文書の更新
 
-### 5.1 Phase 4 公開形一覧（承認依頼 #2677。全行未承認）
+### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2679 担当の行は承認・公開済み）
 
-**本節は承認依頼であり、承認の記録ではない。全 30 行が未承認である。** 親 #2625・ルート #2499 の Phase 4
+**本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
 （内部実装＋保留ガードまで先行・公開は承認後）で内部クレートに実装した機能の公開形について、各決定記録に
 散らばっていた推奨案を 1 表に集約した（#2677）。表の公開形は各決定記録の推奨をそのまま転記したもので、本節で
 新しい推奨を作っていない。
 
-- #2677／#2678／#2679 にユーザーの承認コメントが付くまで、保留ガードの反転と facade 公開（`pub` の追加）は行わない。
-  承認の取得・記録は本節の範囲外で、承認を代行しない。
-- 公開の実施は #2678（演算・自動微分）と #2679（層・学習系）が担う。公開時は保留ガードと `api_surface.rs` の否定ガードを承認形の正ガードへ反転する。
+- **承認の状況**: 2026-10-07 のユーザー承認コメント（ルート #2499・issuecomment-6033824965）が、行 1〜11・16〜18・
+  21〜30 を各決定記録の推奨形で承認した（行 19・20 は `hinge_embedding_loss`・`soft_margin_loss`・
+  `multilabel_margin_loss` の 3 本だけ）。行 12〜15 の全体とオプション型を引数に取る損失 5 本・オプション型 5 つは
+  保留で、保留ガードは維持する。記録に形が書かれていない点は実装せずに承認依頼へ戻す条件つきである。
+- **#2679 担当の公開は完了した**: 行 16・21〜28 と、行 17・18 の `Sequential::add_*` は #2679 で公開済み
+  （下表の「公開先」欄に「公開済み」と書いた行。保留ガードは承認形の正ガードへ反転または縮小済み。反転後のガード名と
+  公開した識別子は §5 の適用記録〈#2679〉に記す）。行 17・18 の `Var` 委譲、行 19・20・29・30 と、行 1〜11 は
+  #2678（演算・自動微分）の担当で、本欄の記述は #2678 側の PR が更新する。
+- 公開時は保留ガードと `api_surface.rs` の否定ガードを承認形の正ガードへ反転する（#2679 で実施した型は §5 の適用記録）。
 - 行 12〜15 のように層化（`nn::MaxPool3d` 等と `Sequential::add_*`）が未実装の機能は、その旨を行に書いた。
 - 公開形の類型は 3 つ（`Var` の委譲メソッド／モジュール再エクスポート／`Sequential::add_*`）。どれにも当てはまらない推奨（facade `Tape` の委譲メソッド・facade 独自の薄いラッパー）は、決定記録の表現のまま書いた。
 - 「非破壊性」の † は、決定記録に非破壊の明記がない行（推奨形が追加のみであることは決定記録の推奨節から読み取れるが、公開時に `api_surface.rs` で確認する）。
-- 行とガードは `crates/facade/src/lib.rs` の `*HoldDoctestGuard` 30 個と 1 対 1 に対応する（Phase 4 以前に承認・公開済みの保留ガードは本表に含めない）。
+- 行とガードは、起票時点で `crates/facade/src/lib.rs` の `*HoldDoctestGuard` 30 個と 1 対 1 に対応していた（Phase 4 以前に承認・公開済みの保留ガードは本表に含めない）。#2679 で行 21・22・24・25・26 のガード 5 個は、残すべき未承認経路がないため削除した（宣言場所インベントリは維持）。
 
 | # | 機能（由来） | 公開形 | 非破壊性 | 保留ガード | 公開先 | 決定記録・承認事項の所在 |
 |---|---|---|---|---|---|---|
@@ -577,19 +583,19 @@ P1」）を受けた是正である。
 | 13 | ConvTranspose3d・MaxUnpool（#2644） | `Var::conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d` の委譲 4 本。**層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）は未実装** | 追加のみ | `ConvTranspose3dMaxUnpoolHoldDoctestGuard` | #2678（層化は #2679） | `autodiff-conv-transpose3d-max-unpool-decision.md` §7（重複索引の勾配規則など設計判断 3 件が承認事項） |
 | 14 | Fold・Unfold（#2645） | `Var::unfold`／`fold` の委譲 2 本。**層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は未実装** | 追加のみ | `FoldUnfoldHoldDoctestGuard` | #2678（層化は #2679） | `autodiff-fold-unfold-decision.md` §7（`Var::unfold` の名前が `torch.Tensor.unfold` と異なる意味になる点・引数順が承認事項） |
 | 15 | LRN・重み再パラメータ化（#2646） | `Var::local_response_norm`／`weight_norm`／`spectral_norm` の委譲 3 本。`SpectralNormState`・`norm_except_dim` の置き場所は決定記録上未決。**層化（`nn::LocalResponseNorm`・`Linear`／`Conv` への parametrization 結線）は未実装** | 追加のみ† | `LrnWeightReparamHoldDoctestGuard` | #2678（層化は #2679） | `autodiff-lrn-weight-reparam-decision.md` §7（承認事項 8 項目） |
-| 16 | 可変長系列（#2647） | モジュール再エクスポート（`fandhe_ai::nn::rnn` へ `PackedSequence`・出力型 4 種・自由関数 8 本を `pub use`）。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ† | `PackedSequenceHoldDoctestGuard` | #2678・#2679（同上） | `autodiff-packed-sequence-decision.md` §7（再エクスポート対象一覧・`PackedSequence::new` の扱い等が承認事項） |
-| 17 | 活性化 5 種（#2649） | `Var::selu`／`celu`／`softsign`／`hardsigmoid`／`log_sigmoid` の委譲 5 本（#2678）＋`Sequential::add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid`（#2679） | 追加のみ | `ActivationScalarOpsHoldDoctestGuard` | #2678・#2679 | `autodiff-activation-scalar-ops-decision.md` §7 |
-| 18 | Softmin・Tanhshrink・Threshold・RReLU（#2650） | `Var::softmin`／`tanhshrink`／`threshold`／`rrelu` の委譲 4 本（#2678）＋`Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu`（#2679）。`rrelu_with_noise` は公開しない | 追加のみ | `SoftminThresholdOpsHoldDoctestGuard` | #2678・#2679 | `autodiff-softmin-threshold-ops-decision.md` §7 |
+| 16 | 可変長系列（#2647） | モジュール再エクスポート（`fandhe_ai::nn::rnn` へ `PackedSequence`・出力型 4 種・自由関数 8 本を `pub use`）。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ† | `PackedSequenceHoldDoctestGuard` | #2679 で公開済み（`nn::rnn`。ガードは未承認経路〈`Var`／`Tape` 委譲等〉のプローブへ縮小） | `autodiff-packed-sequence-decision.md` §7（再エクスポート対象一覧・`PackedSequence::new` の扱い等が承認事項） |
+| 17 | 活性化 5 種（#2649） | `Var::selu`／`celu`／`softsign`／`hardsigmoid`／`log_sigmoid` の委譲 5 本（#2678）＋`Sequential::add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid`（#2679） | 追加のみ | `ActivationScalarOpsHoldDoctestGuard` | #2678・#2679（`Sequential::add_*` は #2679 で公開済み。`Var` 委譲は #2678） | `autodiff-activation-scalar-ops-decision.md` §7 |
+| 18 | Softmin・Tanhshrink・Threshold・RReLU（#2650） | `Var::softmin`／`tanhshrink`／`threshold`／`rrelu` の委譲 4 本（#2678）＋`Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu`（#2679）。`rrelu_with_noise` は公開しない | 追加のみ | `SoftminThresholdOpsHoldDoctestGuard` | #2678・#2679（`Sequential::add_*` は #2679 で公開済み。`Var` 委譲は #2678） | `autodiff-softmin-threshold-ops-decision.md` §7 |
 | 19 | 要素ごと損失 4 種（#2652） | `Var::bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss` の委譲 4 本。オプション型 2 つと `Reduction` の名指しは別論点（#2600 ツリー側の記録） | 追加のみ | `ElementwiseLossOpsHoldDoctestGuard` | #2678 | `autodiff-elementwise-loss-ops-decision.md` §7 |
 | 20 | マージン・focal 損失 4 種（#2653） | `Var::multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` の委譲 4 本。オプション型 3 つと `Reduction` の名指しは別論点（同上） | 追加のみ | `MarginFocalLossOpsHoldDoctestGuard` | #2678 | `autodiff-margin-focal-loss-ops-decision.md` §7 |
-| 21 | Rprop・ASGD（#2655） | `fandhe_ai::optim`（`crates/facade/src/optim.rs`）へ `Asgd`・`AsgdConfig`・`Rprop`・`RpropConfig` の素の再エクスポート | 追加のみ | `OptimizerRpropAsgdHoldDoctestGuard` | #2679 | `autodiff-optimizer-rprop-asgd-decision.md` §8 |
-| 22 | Adafactor・Lion（#2656） | `fandhe_ai::optim` へ `Adafactor`・`AdafactorConfig`・`Lion`・`LionConfig` の素の再エクスポート | 追加のみ | `OptimizerAdafactorLionHoldDoctestGuard` | #2679 | `autodiff-optimizer-adafactor-lion-decision.md` §8 |
-| 23 | SWA（#2658） | モジュール公開（`fandhe_ai::optim`）。`SwaLr`・`SwaAnneal` は純再エクスポート、`AveragedModel` は facade 独自の薄いラッパー（内部 `nn::Module` を露出しないため）。fit への結線は含めない | 追加のみ† | `SwaHoldDoctestGuard` | #2678・#2679（§5 の記録どおり。下の「公開先の要確認」参照） | `autodiff-swa-decision.md` §7（承認事項 5 件） |
-| 24 | `PolynomialLr`・`ChainedScheduler`（#2659） | `fandhe_ai::optim` へ `ChainedScheduler`・`PolynomialLr` の純再エクスポート（1 行追加。newtype・別名なし） | 追加のみ† | `LrSchedulerPolyChainedHoldDoctestGuard` | #2679 | `autodiff-lr-scheduler-poly-chained-decision.md` §8（承認事項: 型名・`total_iters == 0` と `power < 0` の拒否・`ChainedScheduler` の対応メンバー集合） |
-| 25 | データセット合成（#2661） | `fandhe_ai::data` へ `ConcatBatch`・`ConcatDataset`・`Subset`・`random_split`・`random_split_fractions` の純再エクスポート | 追加のみ | `DatasetComposeHoldDoctestGuard` | #2679 | `tensor-core-dataset-compose-decision.md` §5 |
-| 26 | iterable データセット・バッチサンプラー（#2662） | `fandhe_ai::data` へ `BatchSampler`・`IterableBatches`・`IterableDataLoader`・`IterableDataset`・`StackSamples` の純再エクスポート | 追加のみ | `IterableBatchSamplerHoldDoctestGuard` | #2679 | `tensor-core-iterable-dataset-batch-sampler-decision.md` §5 |
-| 27 | Functional API（#2665・#2667） | モジュール再エクスポート（`compat/mod.rs` の `pub use`。仮称 `FunctionalBuilder`・`FunctionalModel`・`Node`・`save_functional_model`・`load_functional_model`）。学習用ハンドル `FunctionalVars` は公開せず内部のまま。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ（同 §9） | `FunctionalApiHoldDoctestGuard` | #2679（決定記録の記述。§5 の適用記録はなし） | `facade-functional-api-decision.md` §10・§13（承認事項 11 項目。1 項目目が本書 §5 による対象範囲への組み入れ）・§18 |
-| 28 | Functional の結合層（#2666） | `FunctionalBuilder::{concatenate, add, multiply, average}` を #2679 で型と同時に公開（`merge_ops` の自由関数は再エクスポートしない） | 追加のみ（同 §9） | `MergeOpsHoldDoctestGuard` | #2679（同上） | `facade-functional-api-decision.md` §13・§17 |
+| 21 | Rprop・ASGD（#2655） | `fandhe_ai::optim`（`crates/facade/src/optim.rs`）へ `Asgd`・`AsgdConfig`・`Rprop`・`RpropConfig` の素の再エクスポート | 追加のみ | `OptimizerRpropAsgdHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-rprop-asgd-decision.md` §8 |
+| 22 | Adafactor・Lion（#2656） | `fandhe_ai::optim` へ `Adafactor`・`AdafactorConfig`・`Lion`・`LionConfig` の素の再エクスポート | 追加のみ | `OptimizerAdafactorLionHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-adafactor-lion-decision.md` §8 |
+| 23 | SWA（#2658） | モジュール公開（`fandhe_ai::optim`）。`SwaLr`・`SwaAnneal` は純再エクスポート、`AveragedModel` は facade 独自の薄いラッパー（内部 `nn::Module` を露出しないため）。fit への結線は含めない | 追加のみ† | `SwaHoldDoctestGuard` | #2679 で公開済み（`optim`。ガードは `fit` 結線〈`FitConfig`／`Sequential` のメソッド〉のプローブへ縮小） | `autodiff-swa-decision.md` §7（承認事項 5 件） |
+| 24 | `PolynomialLr`・`ChainedScheduler`（#2659） | `fandhe_ai::optim` へ `ChainedScheduler`・`PolynomialLr` の純再エクスポート（1 行追加。newtype・別名なし） | 追加のみ† | `LrSchedulerPolyChainedHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-lr-scheduler-poly-chained-decision.md` §8（承認事項: 型名・`total_iters == 0` と `power < 0` の拒否・`ChainedScheduler` の対応メンバー集合） |
+| 25 | データセット合成（#2661） | `fandhe_ai::data` へ `ConcatBatch`・`ConcatDataset`・`Subset`・`random_split`・`random_split_fractions` の純再エクスポート | 追加のみ | `DatasetComposeHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `tensor-core-dataset-compose-decision.md` §5 |
+| 26 | iterable データセット・バッチサンプラー（#2662） | `fandhe_ai::data` へ `BatchSampler`・`IterableBatches`・`IterableDataLoader`・`IterableDataset`・`StackSamples` の純再エクスポート | 追加のみ | `IterableBatchSamplerHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `tensor-core-iterable-dataset-batch-sampler-decision.md` §5 |
+| 27 | Functional API（#2665・#2667） | モジュール再エクスポート（`compat/mod.rs` の `pub use`。仮称 `FunctionalBuilder`・`FunctionalModel`・`Node`・`save_functional_model`・`load_functional_model`）。学習用ハンドル `FunctionalVars` は公開せず内部のまま。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ（同 §9） | `FunctionalApiHoldDoctestGuard` | #2679 で公開済み（`compat`。ガードは `FunctionalVars`・モジュール公開・`Sequential::apply`／`call` のプローブへ縮小） | `facade-functional-api-decision.md` §10・§13（承認事項 11 項目。1 項目目が本書 §5 による対象範囲への組み入れ）・§18 |
+| 28 | Functional の結合層（#2666） | `FunctionalBuilder::{concatenate, add, multiply, average}` を #2679 で型と同時に公開（`merge_ops` の自由関数は再エクスポートしない） | 追加のみ（同 §9） | `MergeOpsHoldDoctestGuard` | #2679 で公開済み（`FunctionalBuilder` のメソッド。ガードは `merge_ops` の自由関数・`Var` 等への結合メソッドのプローブとして維持） | `facade-functional-api-decision.md` §13・§17 |
 | 29 | jacobian・hessian（#2670） | facade `Tape` の委譲メソッド `Tape::jacobian`／`Tape::hessian`（`Var` 委譲・モジュール再エクスポートではない） | 追加のみ | `JacobianHessianHoldDoctestGuard` | #2678 | `autodiff-jacobian-hessian-gradcheck-decision.md` §3.7・§4（承認事項 (a)〜(k)）・§8 |
 | 30 | gradcheck・anomaly detection（#2671） | facade `Tape` の委譲メソッド `Tape::gradcheck`／`Tape::backward_detect_anomaly`＋`GradcheckOptions`／`GradcheckReport` のルート再エクスポート | 追加のみ | `GradcheckAnomalyHoldDoctestGuard` | #2678 | 同 §3.7・§4・§9 |
 
@@ -602,9 +608,30 @@ P1」）を受けた是正である。
 
 **公開先の要確認（§5 の適用記録と、機能の性質が食い違う点。記録は書き換えていない）**
 
-- 行 23（SWA）: 決定記録の推奨は `fandhe_ai::optim` への公開（学習系）だが、§5 の適用記録は #2678 と #2679 の両方を挙げている。
+- 行 23（SWA）: 決定記録の推奨は `fandhe_ai::optim` への公開（学習系）で、#2679 で公開した（§5 の適用記録は #2678 と #2679 の両方を挙げていた点は、公開した結果に合わせて #2679 が担当と整理した）。
 - 行 7・9・11（#2638・#2641・#2642）: 推奨形は `Var`／`Tape` の委譲メソッドと型の再エクスポート（演算系）だが、§5 の適用記録は #2678 と #2679 の両方を挙げている（層は推奨に含まれない）。
 - 行 16（可変長系列）は `nn::rnn` へのモジュール再エクスポートで、#2678・#2679 の両方を挙げている。
+
+**適用記録（経路 2。イシュー #2679・親 #2625。Phase 4 の層・学習系の公開）**: ルート #2499 の 2026-10-07 ユーザー承認コメント
+（issuecomment-6033824965。「Phase 4（#2625）」節で行 16〜18・21〜30 を各記録の推奨形で承認）に従い、`fandhe-ai =0.10.0` の
+公開 API を壊さない追加のみで次を公開した。依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
+
+- `fandhe_ai::nn::rnn`（行 16）: `PackedSequence`・`PackedRnnSeqOutput`・`PackedLstmSeqOutput`・`StackedPackedRnnSeqOutput`・`StackedPackedLstmSeqOutput` と
+  自由関数 8 本（`pack_padded_sequence`・`pad_packed_sequence`・`{rnn,gru,lstm}_forward_packed`・`stacked_{rnn,gru,lstm}_forward_packed`）の純再エクスポート。
+- `compat::Sequential::add_*`（行 17・18）: `add_selu`・`add_celu`・`add_softsign`・`add_hardsigmoid`・`add_log_sigmoid`・`add_softmin`・
+  `add_tanhshrink`・`add_threshold`・`add_rrelu`（`save_model` の kind は決定記録に形がないため追加せず `UnsupportedModel` で拒否）。
+- `fandhe_ai::optim`（行 21〜24）: `Rprop`・`Asgd`・`Adafactor`・`Lion`（各 `*Config` 付き）・`PolynomialLr`・`ChainedScheduler`・`SwaLr`・`SwaAnneal` の
+  素の再エクスポートと、facade 独自の薄いラッパー `AveragedModel`（EMA と同型。`fit` への結線なし）。
+- `fandhe_ai::data`（行 25・26）: `Subset`・`ConcatDataset`・`ConcatBatch`・`random_split`・`random_split_fractions` と
+  `BatchSampler`・`IterableBatches`・`IterableDataLoader`・`IterableDataset`・`StackSamples` の純再エクスポート。
+- `fandhe_ai::compat`（行 27・28）: `FunctionalBuilder`（結合 4 種のメソッドを含む）・`FunctionalModel`・`Node`・`save_functional_model`・`load_functional_model`。
+  `FunctionalVars` は非公開のまま。
+
+保留ガードの反転・縮小は `crates/facade/tests/api_surface.rs` に承認形だけを許す正ガード（`facade_exposes_phase4_training_data_only_in_approved_shape`・
+`facade_exposes_packed_sequence_only_in_approved_shape`・`facade_exposes_swa_only_in_approved_shape`・`facade_exposes_functional_api_only_in_approved_shape`・
+`compat_sequential_phase4_activation_layers_add_methods_have_approved_signatures`・各 `*_are_reachable_via_facade_only`・
+`*_usage_doctests_are_present_and_compiled`）として置いた。**実機（CUDA／Metal）の parity 実測は未実施**で、
+`docs/perf/logs/compat-sequential-activation-scalar-layers-2679/README.md` に実行コマンドと記入欄を置いた。
 
 **適用記録（経路 1 の適用例。イシュー #1591）**: 本改定（1／2 節の
 Tier 1／Tier 2 再編）は、実装リポ ルート #1570 のユーザー指示 → spec 提案

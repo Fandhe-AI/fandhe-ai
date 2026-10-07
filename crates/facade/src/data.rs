@@ -92,10 +92,33 @@
 //! assert_eq!(seen, vec![0.0, 1.0, 2.0, 3.0]);
 //! ```
 
+//! # Dataset 合成・iterable・バッチサンプラー（イシュー #2679）
+//!
+//! `Subset`・`ConcatDataset`・`ConcatBatch`・`random_split`・`random_split_fractions`
+//! （`docs/tensor-core-dataset-compose-decision.md` §5）と、`IterableDataset`・
+//! `IterableDataLoader`・`IterableBatches`・`StackSamples`・`BatchSampler`
+//! （`docs/tensor-core-iterable-dataset-batch-sampler-decision.md` §5）を、承認
+//! （ルート #2499 のコメント）に従い同じく純再エクスポートする。公開面は
+//! `api_surface.rs` の `facade_exposes_phase4_training_data_only_in_approved_shape` が固定する。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::data::{Dataset, TensorDataset, random_split};
+//!
+//! let features = Tensor::new(vec![0.0f32, 1.0, 2.0, 3.0], &[4, 1]).unwrap();
+//! let dataset = TensorDataset::new(features).unwrap();
+//! let parts = random_split(dataset, &[3, 1]).unwrap();
+//! assert_eq!((parts[0].len(), parts[1].len()), (3, 1));
+//! ```
+
+pub use fandhe_ai_tensor_core::data::{BatchSampler, IterableBatches, IterableDataLoader};
 pub use fandhe_ai_tensor_core::data::{Batches, DataError, DataLoader};
 pub use fandhe_ai_tensor_core::data::{CollateFn, TransformFn, default_collate};
+pub use fandhe_ai_tensor_core::data::{ConcatBatch, ConcatDataset, Subset};
 pub use fandhe_ai_tensor_core::data::{DataLoaderConfig, Dataset, TensorDataset};
 pub use fandhe_ai_tensor_core::data::{HookedBatches, HookedDataLoader};
+pub use fandhe_ai_tensor_core::data::{IterableDataset, StackSamples};
 pub use fandhe_ai_tensor_core::data::{PrefetchBatches, PrefetchConfig, PrefetchDataLoader};
 pub use fandhe_ai_tensor_core::data::{RandomSampler, Sampler, SequentialSampler};
 pub use fandhe_ai_tensor_core::data::{SamplerBatches, SamplerDataLoader, WeightedRandomSampler};
+pub use fandhe_ai_tensor_core::data::{random_split, random_split_fractions};

@@ -65,7 +65,7 @@
 - param group ごとの設定、optimizer／`compile()` への専用結線、GPU カーネル。
 - `docs/compat-api-scope.md` 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定・spec の改定・`MIN_KNOWN_PROBE_BLOCKS` の更新。
 
-## 8. facade 公開形の推奨案（未承認）
+## 8. facade 公開形の推奨案（ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§14 参照）
 
 - 推奨: 「モジュール再エクスポート」。`crates/facade/src/optim.rs` へ `pub use fandhe_ai_autodiff::nn::optim::{ChainedScheduler, PolynomialLr};` を 1 行追加する純再エクスポート（#2503 と同じ経路。newtype・別名なし）。公開時は保留ガードと否定ガードを正ガードへ置き換える。
 - 不採用: `Var` 委譲メソッド（テンソル演算ではない）、`Sequential::add_*`（層ではない）、crate ルート直下への配置、fit への専用結線（既存の `LrSchedule::per_epoch` で駆動できる）。
@@ -97,3 +97,13 @@
 - イシュー #2659（親 #2657・ルート #2499）、承認依頼 #2677、公開 #2679。
 - `docs/autodiff-lr-scheduler-ext-decision.md`、`docs/autodiff-swa-decision.md`。
 - PyTorch 2.14.0 `torch.optim.lr_scheduler.PolynomialLR`／`ChainedScheduler`（`inspect.getsource` で演算経路を確認。fixture README 参照）。
+
+## 14. #2679 実装記録（facade 公開）
+
+
+- 状態: **§8 の推奨形を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 24 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子: `fandhe_ai::optim` へ `pub use fandhe_ai_autodiff::nn::optim::{ChainedScheduler, PolynomialLr};`（newtype・別名なし）。`total_iters == 0`・`power < 0` の拒否と
+  `ChainedScheduler` の対応メンバー集合は内部実装のまま変更していない。
+- ガード（§8）の反転: `LrSchedulerPolyChainedHoldDoctestGuard` は削除し、`facade_exposes_phase4_training_data_only_in_approved_shape`・`phase4_optim_types_are_reachable_via_facade_only` が
+  承認形を固定する。宣言場所インベントリは維持。`compat_sequential_lr_scheduler_poly_chained_manual.rs` は `fandhe_ai::optim` 経由へ切り替えた。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。

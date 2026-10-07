@@ -5,9 +5,9 @@
 //! `save_model`／`load_model`（`model_io.rs`）と同じ 2 ファイル構成
 //! （`manifest.json` + `model.<gen>.safetensors`）で往復させる。形式の設計は
 //! `docs/facade-functional-api-decision.md` §8（S1 案）・§18（#2667 実装記録）、ファイル I/O の
-//! 脅威モデルは `docs/compat-model-io-decision.md` §12・§13 が正。公開形は**未承認**
-//! （承認依頼は #2677。公開は承認後の #2679）のため、`#[cfg(test)]` 隔離の `pub(crate)` に留める
-//! （`compat/mod.rs` の `functional` と同じ理由）。
+//! 脅威モデルは `docs/compat-model-io-decision.md` §12・§13 が正。イシュー #2679 で入口 2 本を
+//! `fandhe_ai::compat` へ公開した（承認はルート #2499 のコメント。`compat/mod.rs` が
+//! `pub use model_io::functional_io::{..}` で公開する。モジュール自体は非公開）。
 //!
 //! # 形式（`format = "fandhe-ai.compat.functional"`・`format_version = 1`）
 //!
@@ -132,7 +132,7 @@ struct ParsedFunctional {
 ///
 /// 検証・往復確認は `dir` へ触れる前にすべて完了し、失敗時は `dir` に何も残さない。非 unix は
 /// `ErrorKind::Unsupported` で `dir` に触れず拒否する。
-pub(crate) fn save_functional_model(
+pub fn save_functional_model(
     model: &FunctionalModel,
     dir: impl AsRef<Path>,
 ) -> Result<(), ModelIoError> {
@@ -437,9 +437,7 @@ fn render_functional_manifest(
 ///
 /// 重みと BatchNorm の running stats は safetensors の値を bit のまま設定し、`training` と compile
 /// 状態も復元する。途中で失敗しても部分的に構築したモデルは返さない。
-pub(crate) fn load_functional_model(
-    dir: impl AsRef<Path>,
-) -> Result<FunctionalModel, ModelIoError> {
+pub fn load_functional_model(dir: impl AsRef<Path>) -> Result<FunctionalModel, ModelIoError> {
     load_functional_with_limits(dir.as_ref(), MAX_MANIFEST_BYTES, MAX_MODEL_FILE_BYTES)
 }
 
