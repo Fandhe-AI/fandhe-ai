@@ -111,9 +111,11 @@ use crate::{
     InterpolateMode, LinearVars, ResidentLeaf, Tape, Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
-    Elu, Gelu, GeluTanh, Glu, Hardswish, Hardtanh, LeakyRelu, LogSoftmax, Mish, PRelu, PReluVars,
-    Relu, Relu6, Sigmoid, Silu, Softmax, Softplus, Tanh,
+    Celu, Elu, Gelu, GeluTanh, Glu, Hardsigmoid, Hardswish, Hardtanh, LeakyRelu, LogSigmoid,
+    LogSoftmax, Mish, PRelu, PReluVars, Relu, Relu6, Selu, Sigmoid, Silu, Softmax, Softplus,
+    Softsign, Tanh,
 };
+use fandhe_ai_autodiff::nn::softmin_threshold::{RRelu, Softmin, Tanhshrink, Threshold};
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
     AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d,
@@ -641,6 +643,111 @@ impl Sequential {
         let layer = PRelu::new(num_parameters, init)?;
         self.inner.push(Box::new(layer));
         self.specs.push(LayerSpec::PRelu { num_parameters });
+        Ok(self)
+    }
+
+    /// SELU 層を追加する（`nn::activation::Selu`。PyTorch `nn.SELU` 相当。イシュー #2679）。
+    /// ユニット構造体のため構築時検査は無く、[`Sequential::add_silu`] と同様融合対象外。
+    /// 無状態層のため学習経路・常駐経路を通過する。**`save_model` は未対応**
+    /// （manifest の kind／スキーマが未承認のため、`ModelIoError::UnsupportedModel` で拒否する。
+    /// `add_conv_transpose1d`／`add_unflatten` と同じ扱い）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new().add_selu();
+    /// let x = Tensor::new(vec![0.0, 1.0], &[1, 2])?;
+    /// let y = model.predict(&x)?;
+    /// assert_eq!(y.host_slice().into_owned()[0], 0.0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_selu(mut self) -> Self {
+        self.inner.push(Box::new(Selu));
+        self.specs.push(LayerSpec::Unsupported { kind: "selu" });
+        self
+    }
+
+    /// CELU 層を追加する（`nn::activation::Celu`。PyTorch `nn.CELU(alpha)` 相当。イシュー #2679）。
+    /// `alpha == 0` と非有限は構築時に `AutodiffError::InvalidArgument` で拒否する
+    /// （負は PyTorch と同じく受理）。保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。
+    pub fn add_celu(mut self, alpha: f32) -> Result<Self, AutodiffError> {
+        let layer = Celu::new(alpha)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported { kind: "celu" });
+        Ok(self)
+    }
+
+    /// Softsign 層を追加する（`nn::activation::Softsign`。`x / (1 + |x|)`。PyTorch `nn.Softsign`
+    /// 相当。イシュー #2679）。保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。
+    pub fn add_softsign(mut self) -> Self {
+        self.inner.push(Box::new(Softsign));
+        self.specs.push(LayerSpec::Unsupported { kind: "softsign" });
+        self
+    }
+
+    /// Hardsigmoid 層を追加する（`nn::activation::Hardsigmoid`。PyTorch `nn.Hardsigmoid` 相当。
+    /// イシュー #2679）。保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。
+    pub fn add_hardsigmoid(mut self) -> Self {
+        self.inner.push(Box::new(Hardsigmoid));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "hardsigmoid",
+        });
+        self
+    }
+
+    /// LogSigmoid 層を追加する（`nn::activation::LogSigmoid`。`log(sigmoid(x))`。PyTorch
+    /// `nn.LogSigmoid` 相当。イシュー #2679）。保存・融合・常駐経路の扱いは
+    /// [`Sequential::add_selu`] と同じ。
+    pub fn add_log_sigmoid(mut self) -> Self {
+        self.inner.push(Box::new(LogSigmoid));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "log_sigmoid",
+        });
+        self
+    }
+
+    /// Softmin 層を追加する（`nn::softmin_threshold::Softmin`。PyTorch `nn.Softmin(dim)` 相当。
+    /// イシュー #2679）。`dim` の範囲検査は forward 時（[`Sequential::add_softmax`] と同じ遅延検査契約）。
+    /// 保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。`forward_host` は未提供のため
+    /// `predict` は tape 経路へフォールバックする。
+    pub fn add_softmin(mut self, dim: usize) -> Self {
+        self.inner.push(Box::new(Softmin::new(dim)));
+        self.specs.push(LayerSpec::Unsupported { kind: "softmin" });
+        self
+    }
+
+    /// Tanhshrink 層を追加する（`nn::softmin_threshold::Tanhshrink`。`x - tanh(x)`。PyTorch
+    /// `nn.Tanhshrink` 相当。イシュー #2679）。扱いは [`Sequential::add_softmin`] と同じ。
+    pub fn add_tanhshrink(mut self) -> Self {
+        self.inner.push(Box::new(Tanhshrink));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "tanhshrink" });
+        self
+    }
+
+    /// Threshold 層を追加する（`nn::softmin_threshold::Threshold`。`x > threshold` ならそのまま、
+    /// それ以外は `value`。PyTorch `nn.Threshold(threshold, value)` 相当。イシュー #2679）。
+    /// 構築時検査は無い（`NaN` は IEEE のまま扱う）。扱いは [`Sequential::add_softmin`] と同じ。
+    pub fn add_threshold(mut self, threshold: f32, value: f32) -> Self {
+        self.inner.push(Box::new(Threshold::new(threshold, value)));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "threshold" });
+        self
+    }
+
+    /// RReLU 層を追加する（`nn::softmin_threshold::RRelu`。PyTorch `nn.RReLU(lower, upper)` 相当。
+    /// イシュー #2679）。`lower`／`upper` は有限かつ `lower <= upper`（違反は構築時に
+    /// `AutodiffError::InvalidArgument`）。追加時点の `training` は `true` で、以後は
+    /// [`Sequential::set_training`]／[`Sequential::eval`] の伝播で推論時の固定傾き
+    /// `(lower + upper) / 2` へ切り替わる（[`Sequential::add_dropout`] と同じ）。学習時の傾きは
+    /// グローバル RNG から引く。扱いは [`Sequential::add_softmin`] と同じ。
+    pub fn add_rrelu(mut self, lower: f32, upper: f32) -> Result<Self, AutodiffError> {
+        let layer = RRelu::new(lower, upper)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported { kind: "rrelu" });
         Ok(self)
     }
 

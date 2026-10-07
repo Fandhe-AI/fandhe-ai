@@ -75,7 +75,7 @@ fixture の検証範囲: 添字バッチ列・バッチ数（`len(BatchSampler)`
 （#2182・#2661 記録 §4 と同じ）。`Tape::var` アップロードの round-trip のみ `#[ignore]` で分離し
 （`iterable_batch_upload_round_trips_on_{cuda,metal}_tape`）、実機未実測として `docs/perf/logs/iterable-batch-sampler-2662/README.md` へ申し送る。
 
-## 5. facade 公開形の推奨案（1 つ。承認記録ではない）
+## 5. facade 公開形の推奨案（1 つ。ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§9 参照）
 
 **`fandhe_ai::data` への純再エクスポート**（`Var` 委譲・`Sequential::add_*` は該当しない）。本節は推奨案の記録であり、
 承認を得たことの記録ではない。承認後に次を行う。
@@ -117,3 +117,13 @@ fixture の検証範囲: 添字バッチ列・バッチ数（`len(BatchSampler)`
   `stack_samples` 4 件（trait 宣言 1 + `Tensor<T>`／2 要素／3 要素タプルの impl 各 1）。
 - ガードの実効性は、`crates/facade/src/data.rs` へ `BatchSampler` の再エクスポートを一時的に足して doctest（E0659）と
   `facade_does_not_reexport_or_declare_iterable_batch_sampler` が落ちることで確認済み（確認後に復元）。
+
+## 9. #2679 実装記録（facade 公開）
+
+
+- 状態: **§5 の推奨形を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 26 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子: `fandhe_ai::data` へ `pub use fandhe_ai_tensor_core::data::{BatchSampler, IterableBatches, IterableDataLoader};` と
+  `pub use fandhe_ai_tensor_core::data::{IterableDataset, StackSamples};`。
+- ガード: `IterableBatchSamplerHoldDoctestGuard` は削除し、ソース走査は内部クレートの glob 再エクスポート・型の独自宣言・`iter_samples`／`stack_samples`／`with_batch_sampler` の
+  `fn` 宣言の禁止へ縮小した（`tensor-core-dataset-compose-decision.md` §9 と同じ構成）。宣言場所インベントリは維持。`data_iterable_batch_sampler.rs` は `fandhe_ai::data` 経由へ切り替えた。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。

@@ -147,7 +147,7 @@ mu  = 1 / max(1, step - t0)                             # 同上
 許容誤差内の差が符号反転として増幅され、optimizer 自体の正しさと無関係に判定が
 揺れる。`DeviceParamStore` への結線・`compat::Optimizer` への variant 追加は対象外。
 
-## 8. facade 公開形の推奨案（未承認）
+## 8. facade 公開形の推奨案（ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§11 参照）
 
 推奨形は 1 つ: `crates/facade/src/optim.rs` に
 `pub use fandhe_ai_autodiff::nn::optim::{Asgd, AsgdConfig, Rprop, RpropConfig};`
@@ -188,3 +188,15 @@ mu  = 1 / max(1, step - t0)                             # 同上
 - `maximize`／`foreach`／`capturable`／`differentiable`・複素数・sparse 勾配
 - `docs/compat-api-scope.md` 1 節の対象範囲表・`docs/compat-feature-gap.md` の
   判定変更、spec 改定
+
+## 11. #2679 実装記録（facade 公開）
+
+
+- 状態: **§8 の推奨形を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 21 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子: `fandhe_ai::optim`（`crates/facade/src/optim.rs`）へ `pub use fandhe_ai_autodiff::nn::optim::{Asgd, AsgdConfig};` と
+  `pub use fandhe_ai_autodiff::nn::optim::{Rprop, RpropConfig};`。`compat::Optimizer` enum への variant 追加・`ParamGroupStep` の実装は行っていない（推奨形にない）。
+- ガード（§9）の反転: `OptimizerRpropAsgdHoldDoctestGuard` は型名のみのプローブで残すべき未承認経路がないため削除し、対応する doctest ドリフト検査・否定走査を削除した。
+  承認形の過不足は `facade_exposes_phase4_training_data_only_in_approved_shape`（`optim.rs` の承認 `pub use` のトークン列一致・独自宣言の禁止）、到達性は
+  `phase4_optim_types_are_reachable_via_facade_only`（`fandhe_ai` のみの import で署名を固定）が担う。`workspace_declares_optimizer_rprop_asgd_types_only_in_allowed_locations`
+  （宣言場所インベントリ）は維持した。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。

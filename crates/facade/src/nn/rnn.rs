@@ -70,6 +70,36 @@
 //! `dropout > 0` の場合 facade 経由の forward は常に学習モードとなる。
 //! 推論用途では `dropout = 0.0` で構築する。
 //!
+//! # 可変長系列（packed sequence。イシュー #2679・親 #2625）
+//!
+//! `torch.nn.utils.rnn` 相当の [`crate::nn::rnn::PackedSequence`]・出力型 4 種
+//! （[`crate::nn::rnn::PackedRnnSeqOutput`]・[`crate::nn::rnn::PackedLstmSeqOutput`]・
+//! [`crate::nn::rnn::StackedPackedRnnSeqOutput`]・[`crate::nn::rnn::StackedPackedLstmSeqOutput`]）と
+//! 自由関数 8 本（`pack_padded_sequence`・`pad_packed_sequence`・`rnn_forward_packed`・
+//! `gru_forward_packed`・`lstm_forward_packed`・`stacked_rnn_forward_packed`・
+//! `stacked_gru_forward_packed`・`stacked_lstm_forward_packed`）を、承認（ルート #2499 の
+//! コメント。`docs/autodiff-packed-sequence-decision.md` §7）に従い純再エクスポートする。
+//! 自由関数は生の `Tape` を取らず（tape は入力 `Var` から得る）、`Tape` 委譲メソッドは不要。
+//! `Var`／`Tape` への委譲メソッド・`Rnn::forward_packed`・`Sequential::add_*` は追加しない
+//! （承認形にないため。`PackedSequenceHoldDoctestGuard` が未承認経路を固定する）。
+//! `PackedSequence::new` は型の一部（検証付きコンストラクタ）として到達可能になる。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::nn::rnn::{Rnn, pack_padded_sequence, pad_packed_sequence, rnn_forward_packed};
+//!
+//! let tape = fandhe_ai::tape();
+//! let rnn = Rnn::new(2, 3, true, 0).unwrap();
+//! // padded 入力 [T=3, B=2, D=2]。系列長は [3, 2]（非増加）。
+//! let x = Tensor::new((0..12).map(|v| v as f32 * 0.1).collect(), &[3, 2, 2]).unwrap();
+//! let packed = pack_padded_sequence(&tape.var(&x), &[3, 2], false, true).unwrap();
+//! let out = rnn_forward_packed(&rnn, &packed, None).unwrap();
+//! // 有効な時刻のみ詰められた出力（3 + 2 = 5 行）を padded へ戻す。
+//! let (padded, lengths) = pad_packed_sequence(&out.output, false, 0.0, None).unwrap();
+//! assert_eq!(lengths, vec![3, 2]);
+//! assert_eq!(padded.to_tensor().shape(), &[3usize, 2, 3]);
+//! ```
+//!
 //! # 利用例
 //!
 //! ```
@@ -110,6 +140,19 @@
 //! assert!(grads.get(&out.params[0].weight_ih).unwrap().is_some());
 //! ```
 
+pub use fandhe_ai_autodiff::nn::packed_sequence::{
+    PackedLstmSeqOutput, PackedRnnSeqOutput, PackedSequence,
+};
+pub use fandhe_ai_autodiff::nn::packed_sequence::{
+    StackedPackedLstmSeqOutput, StackedPackedRnnSeqOutput,
+};
+pub use fandhe_ai_autodiff::nn::packed_sequence::{
+    gru_forward_packed, lstm_forward_packed, rnn_forward_packed,
+};
+pub use fandhe_ai_autodiff::nn::packed_sequence::{pack_padded_sequence, pad_packed_sequence};
+pub use fandhe_ai_autodiff::nn::packed_sequence::{
+    stacked_gru_forward_packed, stacked_lstm_forward_packed, stacked_rnn_forward_packed,
+};
 pub use fandhe_ai_autodiff::nn::{Gru, GruCellVars, Lstm, LstmCellVars, LstmSeqOutput};
 pub use fandhe_ai_autodiff::nn::{Rnn, RnnCellVars, RnnSeqOutput};
 pub use fandhe_ai_autodiff::nn::{RnnConfig, StackedGru, StackedLstm, StackedRnn};

@@ -23,9 +23,10 @@
 //!   を結線する。
 //!
 //! 学習率側（`SWALR` 相当）は `nn/optim/lr_scheduler.rs` の `SwaLr` が担う。
-//! facade への公開・`fit` 統合は未承認のため本イシューでは行わない
-//! （`docs/autodiff-swa-decision.md` §7。保留の機械的固定は
-//! `crates/facade/src/lib.rs::SwaHoldDoctestGuard`）。
+//! facade へは #2679 で公開した（`fandhe_ai::optim::AveragedModel`＝facade 独自の薄いラッパー・
+//! `SwaLr`／`SwaAnneal`＝素の再エクスポート。`docs/autodiff-swa-decision.md` §7・§14）。`fit` 統合は
+//! 未承認のまま行わない（`crates/facade/src/lib.rs::SwaHoldDoctestGuard` が `FitConfig`／`Sequential` への
+//! メソッド追加を固定する）。
 //!
 //! # EMA との関係
 //!

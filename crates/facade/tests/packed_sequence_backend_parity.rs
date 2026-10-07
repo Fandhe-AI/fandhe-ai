@@ -1,6 +1,7 @@
 //! `fandhe_ai_autodiff::nn::packed_sequence`（イシュー #2647・`pack_padded_sequence`／
-//! `pad_packed_sequence`／`PackedSequence` と RNN 系の packed 実行。facade 非公開のため
-//! `fandhe_ai_autodiff::nn::packed_sequence::*` を直接 use する。
+//! `pad_packed_sequence`／`PackedSequence` と RNN 系の packed 実行。#2679 で
+//! `fandhe_ai::nn::rnn` へ公開済みのため、型と自由関数は facade 経由で use する。生の
+//! `fandhe_ai_autodiff::Tape`〈`NaiveOps` との突き合わせ用〉だけは内部クレートから import する。
 //! `crates/autodiff/src/nn/packed_sequence.rs` モジュール doc 参照）のバックエンド間
 //! parity テスト（`tensor_product_ops_backend_parity.rs` と同型）。
 //!
@@ -17,13 +18,12 @@
 //! 経路が発動する形状は使わない。
 
 use fandhe_ai::Device;
-use fandhe_ai_autodiff::Var;
-use fandhe_ai_autodiff::nn::packed_sequence::{
-    PackedSequence, gru_forward_packed, lstm_forward_packed, pack_padded_sequence,
-    pad_packed_sequence, rnn_forward_packed, stacked_gru_forward_packed,
-    stacked_lstm_forward_packed,
+use fandhe_ai::nn::rnn::{
+    Gru, Lstm, PackedSequence, Rnn, RnnConfig, StackedGru, StackedLstm, gru_forward_packed,
+    lstm_forward_packed, pack_padded_sequence, pad_packed_sequence, rnn_forward_packed,
+    stacked_gru_forward_packed, stacked_lstm_forward_packed,
 };
-use fandhe_ai_autodiff::nn::{Gru, Lstm, Rnn, RnnConfig, StackedGru, StackedLstm};
+use fandhe_ai_autodiff::Var;
 use fandhe_ai_tensor_core::Tensor;
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
