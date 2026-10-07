@@ -124,6 +124,34 @@
 //! [`EarlyStopping::restore_best_weights`] との併用、または
 //! [`crate::interop::safetensors::load_safetensors_f32`] →
 //! [`Sequential::load_state_dict`] を呼び出し側が組み合わせて行う。
+//!
+//! # EMA（重みの指数移動平均。イシュー #2560・親 #2558。決定記録
+//! `docs/autodiff-ema-decision.md` §10・§13）
+//!
+//! [`Callback::Ema`]（[`EmaCallback`]）は [`crate::optim::ExponentialMovingAverage`]
+//! を `fit_with_callbacks` へ結線する opt-in の callback。`FitConfig`・`Sequential`
+//! へはフィールド・メソッドを足さない。
+//!
+//! - **更新位置**: optimizer の更新を `apply_parameters` した直後に shadow を更新する。
+//!   `accumulate_steps > 1` では実際に step した時（端数 flush を含む）のみ。
+//! - **評価時の差し替え**: epoch 末の validation と callbacks（`ModelCheckpoint`／
+//!   `EarlyStopping` の snapshot 取得を含む）は shadow へ差し替えた重みの下で実行し、
+//!   成功・失敗・打ち切りのいずれの経路でも生の重みへ復帰してから抜ける。したがって
+//!   `EarlyStopping::restore_best_weights` が fit 終了時に書き戻すのは EMA 重みの
+//!   snapshot になる。
+//! - **fit 終了時**: モデルの重みを自動上書きしない。呼び出し元が
+//!   [`EmaCallback::shadow_state_dict`] を `Sequential::load_state_dict` へ渡す。
+//! - **fit をまたぐ継続**: shadow と更新回数は fit 終了後も保持し、次の fit で継続する
+//!   （初回のみ fit 開始時に `named_parameters()` から初期化）。別構成のモデルへ使い回すと
+//!   名前集合の不一致は `InvalidArgument`、shape の不一致は `AutodiffError::Shape`（いずれも shadow 不変）。
+//! - **拒否（`InvalidArgument`。fit 開始前）**: `Callback::Ema` の複数指定・
+//!   `Optimizer::Lbfgs`・カスタム train_step フック（`fit_with_train_step`）・
+//!   `compile_with_amp`（AMP の skip step の扱いが決定記録 §10.2 (g) で未決のため）。
+//! - **対象外**: decay ウォームアップ・`BatchNorm` の running buffer・デバイス常駐経路
+//!   （`fit` 経路は構造上到達しない。手動で併用すると shadow が stale 化する）・SWA。
+//!
+//! 公開面は `api_surface.rs` の正ガード（`facade_exposes_ema_only_in_approved_shape`・
+//! `ema_types_are_reachable_via_facade_only`。イシュー #2561）で固定している。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -332,6 +360,12 @@ impl EarlyStopping {
         self.monitor.value_at(history, epoch_local)
     }
 
+    /// 監視指標が学習損失（`Monitor::Loss`）か（EMA 併用の fail-closed 検査用。
+    /// `ModelCheckpoint::monitors_train_loss` と同型。イシュー #2560）。
+    pub(super) fn monitors_train_loss(&self) -> bool {
+        matches!(self.monitor, Monitor::Loss)
+    }
+
     /// [`Sequential::fit_with_callbacks`] 呼び出し開始時に内部状態を
     /// リセットする（モジュール冒頭 doc「epoch 番号の数え方」節）。
     pub(super) fn reset_for_fit(&mut self) {
@@ -493,6 +527,13 @@ impl ModelCheckpoint {
     /// への委譲）。
     pub(super) fn monitor_value_at(&self, history: &History, epoch_local: usize) -> Option<f32> {
         self.monitor.value_at(history, epoch_local)
+    }
+
+    /// 監視指標が学習損失（`Monitor::Loss`）か（EMA 併用の fail-closed 検査用。
+    /// `Monitor::Loss` は EMA 差し替え前の生の重みの損失のため、EMA 重みでの
+    /// ベスト判定契約〈`docs/autodiff-ema-decision.md` §10.2 (e)〉を満たせない。イシュー #2560）。
+    pub(super) fn monitors_train_loss(&self) -> bool {
+        matches!(self.monitor, Monitor::Loss)
     }
 
     /// epoch 末に 1 回呼ぶ。`value` は `self.monitor` が指す指標値、
@@ -1162,6 +1203,128 @@ impl std::fmt::Debug for LambdaCallback {
             .finish()
     }
 }
+/// 重みの指数移動平均を `fit_with_callbacks` へ結線する callback（[`Callback::Ema`]。
+/// イシュー #2560）。モジュール doc「EMA」節が更新位置・評価時差し替え・拒否条件の正。
+///
+/// `training.rs`（`run_fit`）から、fit 開始時の初期化（`begin_fit`）・各 step 直後の
+/// 更新（`update`）・epoch 末評価時の shadow 取得（`shadow_for_eval`）で呼ばれる。
+/// shadow は [`crate::optim::ExponentialMovingAverage`] が保持し、fit 終了後も
+/// 残る（[`Self::shadow_state_dict`] で取り出し `Sequential::load_state_dict` へ渡す）。
+///
+/// # Examples
+///
+/// ```
+/// use fandhe_ai::compat::{Callback, EmaCallback, FitConfig, Loss, Optimizer, Sequential};
+/// use fandhe_ai::optim::SgdConfig;
+/// use fandhe_ai::Tensor;
+///
+/// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+/// model
+///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+///     .unwrap();
+/// let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).unwrap();
+/// let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+/// let mut cbs = [Callback::Ema(EmaCallback::new(0.9).unwrap())];
+/// model
+///     .fit_with_callbacks(&x, &y, FitConfig::new(3, 2), None, &mut cbs)
+///     .unwrap();
+/// let Callback::Ema(ema) = &cbs[0] else { unreachable!() };
+/// assert_eq!(ema.num_updates(), 3);
+/// // fit は重みを自動上書きしない。EMA 重みを使うときは呼び出し側が適用する。
+/// model.load_state_dict(ema.shadow_state_dict().unwrap()).unwrap();
+/// ```
+#[derive(Debug)]
+pub struct EmaCallback {
+    decay: f32,
+    /// 最初の fit 開始時に `named_parameters()` から遅延初期化する。
+    ema: Option<crate::optim::ExponentialMovingAverage>,
+}
+
+impl EmaCallback {
+    /// `decay`（有限かつ `[0, 1]`）で構築する。検証は内部型の構築と同一規則
+    /// （空パラメータ列で一度構築して結果だけ使い、検証ロジックを二重実装しない）。
+    ///
+    /// # Errors
+    /// `decay` が非有限または範囲外のとき [`AutodiffError::InvalidArgument`]。
+    pub fn new(decay: f32) -> Result<Self, AutodiffError> {
+        crate::optim::ExponentialMovingAverage::new(decay, &[])?;
+        Ok(Self { decay, ema: None })
+    }
+
+    /// 構築時に検証済みの `decay`。
+    pub fn decay(&self) -> f32 {
+        self.decay
+    }
+
+    /// shadow 更新の成功回数（fit 前は 0。fit をまたいで累積する）。
+    pub fn num_updates(&self) -> u64 {
+        self.ema.as_ref().map_or(0, |e| e.num_updates())
+    }
+
+    /// shadow のキー付きコピー。まだ fit が始まっておらず未初期化なら `None`。
+    pub fn shadow_state_dict(&self) -> Option<HashMap<String, Tensor<f32>>> {
+        self.ema.as_ref().map(|e| e.shadow_state_dict())
+    }
+
+    /// fit 開始時の初期化（未初期化のときだけ現在の重みから shadow を作る）。
+    pub(super) fn begin_fit(&mut self, model: &Sequential) -> Result<(), AutodiffError> {
+        if self.ema.is_none() {
+            self.ema = Some(crate::optim::ExponentialMovingAverage::from_named(
+                self.decay,
+                model.named_parameters(),
+            )?);
+            return Ok(());
+        }
+        // 初期化済み（fit をまたぐ継続）: 最初の step で `update_named` が不一致を検出して
+        // 拒否済みモデルに重み・optimizer 状態の変更を残さないよう、更新を伴わない
+        // 名前集合・shape の照合を fit 開始時に行う（codex 指摘・#2821）。
+        if let Some(ema) = self.ema.as_ref() {
+            let named = model.named_parameters();
+            let expected = ema.shadow_parameters().len();
+            if named.len() != expected {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Callback::Ema: 継続中の shadow のパラメータ数（{expected}）が \
+                     モデルのパラメータ数（{}）と一致しない",
+                    named.len()
+                )));
+            }
+            for (name, param) in &named {
+                let Some(shadow) = ema.shadow(name) else {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Callback::Ema: モデルのパラメータ `{name}` が継続中の shadow に無い"
+                    )));
+                };
+                if shadow.shape() != param.shape() {
+                    return Err(AutodiffError::Shape(crate::ShapeError::ShapeMismatch {
+                        lhs: shadow.shape().to_vec(),
+                        rhs: param.shape().to_vec(),
+                    }));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// optimizer の更新を適用した直後の shadow 更新。
+    pub(super) fn update(&mut self, model: &Sequential) -> Result<(), AutodiffError> {
+        match self.ema.as_mut() {
+            Some(e) => e.update_named(model.named_parameters()),
+            None => Err(AutodiffError::InvalidArgument(
+                "EmaCallback: begin_fit 前に update が呼ばれた（内部不変条件違反）".into(),
+            )),
+        }
+    }
+
+    /// epoch 末の評価時に差し替える shadow（未初期化は内部不変条件違反）。
+    pub(super) fn shadow_for_eval(&self) -> Result<HashMap<String, Tensor<f32>>, AutodiffError> {
+        self.shadow_state_dict().ok_or_else(|| {
+            AutodiffError::InvalidArgument(
+                "EmaCallback: begin_fit 前に shadow が要求された（内部不変条件違反）".into(),
+            )
+        })
+    }
+}
+
 /// [`Sequential::fit_with_callbacks`] へ渡す callback（閉じた集合。
 /// trait object によるユーザー拡張は対象外——`&mut Sequential` を
 /// callback へ渡すと `fit` 内部の借用構造〈`compiled` 取り外し・
@@ -1179,6 +1342,8 @@ pub enum Callback {
     JsonLogger(JsonLogger),
     /// epoch 末クロージャ（[`LambdaCallback`]。イシュー #2571）。
     Lambda(LambdaCallback),
+    /// 重みの指数移動平均（[`EmaCallback`]。イシュー #2560）。
+    Ema(EmaCallback),
 }
 
 impl Callback {
@@ -1187,7 +1352,10 @@ impl Callback {
             Callback::EarlyStopping(es) => es.requires_validation(),
             Callback::ModelCheckpoint(mc) => mc.requires_validation(),
             Callback::LrSchedule(ls) => ls.requires_validation(),
-            Callback::CsvLogger(_) | Callback::JsonLogger(_) | Callback::Lambda(_) => false,
+            Callback::CsvLogger(_)
+            | Callback::JsonLogger(_)
+            | Callback::Lambda(_)
+            | Callback::Ema(_) => false,
         }
     }
 
@@ -1212,7 +1380,10 @@ impl Callback {
             Callback::EarlyStopping(es) => Some(es.monitor),
             Callback::ModelCheckpoint(mc) => Some(mc.monitor),
             Callback::LrSchedule(ls) => ls.monitor(),
-            Callback::CsvLogger(_) | Callback::JsonLogger(_) | Callback::Lambda(_) => None,
+            Callback::CsvLogger(_)
+            | Callback::JsonLogger(_)
+            | Callback::Lambda(_)
+            | Callback::Ema(_) => None,
         }
     }
 }

@@ -983,6 +983,8 @@ fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
 その後ルート #2499 本文「承認範囲」節の一括承認により #2571 で公開した
 （本節末尾の「適用記録（経路 2。イシュー #2571 …）」参照）。
 
+**公開済み（イシュー #2560・親 #2558。詳細は `docs/autodiff-ema-decision.md` §13。適用記録は本書 §5 の「適用記録（経路 2。イシュー #2560・#2561 …）」を参照）**: 以下の保留記録は #2179 時点のもの。
+
 **保留記録（イシュー #2179・親 #2131）**: EMA（指数移動平均。PyTorch
 `torch.optim.swa_utils.AveragedModel`／Keras 3 `EMAOverlay` 相当）は
 内部クレート限定で `fandhe_ai_autodiff::nn::ExponentialMovingAverage`
@@ -999,7 +1001,7 @@ fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
 `FitConfig`／`Sequential` inherent メソッド衝突の 2 系統を 1 ブロックで
 兼ねる正のプローブ doctest）＋`crates/facade/tests/api_surface.rs` の
 3 テスト（doctest ドリフト検査 2 件・facade 再エクスポート／独自
-宣言／inherent メソッド追加の否定ガード）のみで、
+宣言／inherent メソッド追加の否定ガード。実数は自己テストを含め 4 件で、現行のガードは適用記録を参照）のみで、
 `compat::{training, sequential, mod}.rs` 本体・`Cargo.toml`／
 `Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。承認後の完全な
 公開 API 案は `docs/autodiff-ema-decision.md` §5 を参照。
@@ -1586,6 +1588,24 @@ groups の保存形式・`DeviceParamStore` 常駐経路は含まない。実装
 `LrSchedule` 併用（案 A）・groups の保存形式・`DeviceParamStore` 常駐経路・`Lbfgs` 併用・
 スロット添字の公開ヘルパー。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec` は不変、
 実機申し送りは不要。記録は同 decision doc §13。
+
+**適用記録（経路 2。イシュー #2560・#2561・親 #2558・ルート #2499 のコメント〈決定記録 §10 の推奨案での承認。`issuecomment-6033824965`〉に基づく）**:
+EMA（#2179 で内部クレート限定実装済み）を、決定記録（`docs/autodiff-ema-decision.md` §10・§13・§14）の
+推奨形どおり公開した。公開名は 3 件: `fandhe_ai::optim::ExponentialMovingAverage`（facade 独自の
+薄いラッパー。`crates/facade/src/optim_ema.rs`）・`fandhe_ai::compat::EmaCallback`・
+`compat::Callback::Ema(EmaCallback)`（`fit_with_callbacks` への結線）。`fandhe-ai =0.10.0` に対して
+追加のみ（`Callback` は `#[non_exhaustive]`、`FitConfig`〈`Copy + Eq`〉・`Sequential` は不変）。
+正ガード（#2561）: `facade_exposes_ema_only_in_approved_shape`（`EmaCallback` を含む承認形のインベントリ）・
+`facade_exposes_ema_only_in_approved_shape_detects_each_category`（自己テスト）・
+`ema_types_are_reachable_via_facade_only`・`ema_usage_doctests_are_present_and_compiled`。
+`EmaHoldDoctestGuard` は `FitConfig`／`Sequential` への `use_ema`／`ema_decay` 追加という禁止経路専用として
+名前を維持（ドリフト検査 2 件は不変。理由は決定記録 §14.3）。利用例は `optim.rs`・`optim_ema.rs`・
+`compat/callbacks.rs` の doctest と `crates/facade/tests/compat_sequential_fit_ema.rs`・
+`compat_sequential_ema_manual.rs`。保留を継続する項目: `compile_with_amp` 併用・`Monitor::Loss` の
+`ModelCheckpoint`／`EarlyStopping` 併用（いずれも fit 開始前に `InvalidArgument` で拒否）・decay ウォーム
+アップ・`BatchNorm` running buffer・`DeviceParamStore` 常駐経路・`FitConfig`／`Sequential` への接続。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec` は不変、実機申し送りは不要。
+詳細は決定記録 §13・§14。
 
 **適用記録（経路 2。イシュー #2505・親 #2500・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
 `Sampler`・`SequentialSampler`／`RandomSampler`／`WeightedRandomSampler`・

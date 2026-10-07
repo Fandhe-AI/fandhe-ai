@@ -30,11 +30,11 @@
 //!   結線して同等の効果を得る（`crates/facade/tests/
 //!   compat_sequential_ema_manual.rs`）。
 //!
-//! `fit(use_ema=true)` 相当の facade 自動結線（`compat::FitConfig` への
-//! フィールド追加）は facade（crates.io 公開クレート）の新規公開面
-//! 拡張に該当しユーザー承認が未取得のため、本イシューでは実装しない
-//! （`docs/autodiff-ema-decision.md` §4「承認事項」節。保留の機械的
-//! 固定は `crates/facade/src/lib.rs::EmaHoldDoctestGuard`）。
+//! facade への公開はイシュー #2560（親 #2558）で実施済み: 内部 `nn::Module` を
+//! 露出させないため素の再エクスポートではなく facade 独自の薄いラッパー
+//! `fandhe_ai::optim::ExponentialMovingAverage`（`crates/facade/src/optim_ema.rs`）
+//! として公開し、`fit` への結線は `compat::Callback::Ema`（`FitConfig` へは
+//! フィールドを足さない）が担う（`docs/autodiff-ema-decision.md` §10.2・§13）。
 //!
 //! # 数値契約
 //!

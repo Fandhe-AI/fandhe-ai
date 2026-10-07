@@ -18,7 +18,8 @@ facade（`fandhe_ai::optim` 等への再エクスポート・`compat::FitConfig`
 自動更新）は**別途ユーザー承認**が必要な facade 公開面拡張（親 #2131
 の「facade 公開面の拡張は設計判断記録 → 承認 → 実装の 2 段」規則）で
 あり、本イシュー時点では未承認のため保留する（多層ガードで固定。
-§4・§7）。#2559 の着手時判定と承認依頼は §10。
+§4・§7）。#2559 の着手時判定と承認依頼は §10。**#2560 で §10 の推奨案を
+facade へ公開した（§13 で解消）**。ガードの仕上げと適用記録は §14（#2561）。
 
 ## §1 使い方（内部クレート）
 
@@ -72,6 +73,13 @@ averaged_param)`）とは丸めが異なるため bit 一致は主張しない**
 
 ## §4 承認事項（未承認）
 
+> §13（#2560）で §10.2・§10.3 の推奨案が承認・実装された。以下は着手時点の判定記録。
+
+**実装記録（#2560・#2561）**: 公開した名前は §13.2 の 3 件（`optim::ExponentialMovingAverage`・
+`compat::EmaCallback`・`Callback::Ema`）。下記の保留対象 1 は承認形で公開、2（`FitConfig`／
+`Sequential` への `use_ema`／`ema_decay` 追加）は §10.2 (d) で不採用のまま禁止経路として固定、
+3（`fit` への結線）は `Callback::Ema` で実現した。現行のガード名と対応は §14.2。
+
 以下は facade（crates.io 公開クレート）の新規公開面拡張に該当し、
 ユーザー承認を要する。承認事項の分類根拠:
 
@@ -102,7 +110,13 @@ ema_hold_doctest_globs_all_pub_modules`・
 `ema_hold_doctest_probe_body_matches_fixed_contract`・
 `facade_does_not_reexport_or_declare_ema_items`）の多層防御で行う。
 
+（上記は着手時点の記録。ガードの実数は自己テストを含め 4 件だった。現行の名前は §14.2 を参照。）
+
 ## §5 承認後の facade 仕様案
+
+> **実装記録（#2560・#2561）**: 案 A（`FitConfig::use_ema`）は不採用。案 B を整形した
+> `Callback::Ema(EmaCallback)` を採用した（§10.2 (d)）。更新位置・評価時の shadow 差し替え・
+> fit 終了時に重みを自動上書きしない点は §13、ガードと適用記録は §14。
 
 `compat::FitConfig` は `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`
 のため、`ema_decay: f32` フィールドをそのまま追加すると `Eq` が
@@ -176,6 +190,8 @@ parity テストは不要。デバイス常駐経路（`DeviceParamStore`）へ�
 保留ガード（`EmaHoldDoctestGuard`・`api_surface.rs` の EMA 否定ガード）・
 `docs/compat-api-scope.md` は変更しない。**以下の推奨案は未承認**で、承認前は
 兄弟 #2560（facade 公開の実装）・#2561（保留ガードの反転）に着手しない。
+
+> §13（#2560）で承認の事実を記録し、本節の推奨案を実装した。
 
 ### 10.1 着手時判定
 
@@ -357,8 +373,9 @@ facade 経由の利用例テストの追加（対象 API が存在しないた�
   `apply`／`restore` は既存 `load_state_dict` の原子性契約
   （ロールバック・失敗時の fail-closed エラー）を再利用し独自の
   書き戻し経路を作らない。
-- **A05 設定不備**: facade 公開面は未承認のため追加せず、保留ガード
-  で無承認の公開面拡大を機械的に遮断する。
+- **A05 設定不備**: facade 公開は §13 の承認形（`optim::ExponentialMovingAverage`・
+  `compat::EmaCallback`・`Callback::Ema`）に限る。内部 `nn::Module` は公開シグネチャへ
+  出さず、承認形以外の経路は `api_surface.rs` の正ガード（§14.2）と inherent メソッド衝突プローブで遮断する。
 - **A06 脆弱なコンポーネント**: 依存追加なし（`Cargo.toml`／
   `Cargo.lock` 不変）。
 - **A08 データ整合性**: 自己修復ループの判定経路・ガードレール
@@ -368,6 +385,131 @@ facade 経由の利用例テストの追加（対象 API が存在しないた�
   （`load_state_dict` の既存コストと同等）。
 - `unsafe` 追加なし・本番経路で `unwrap`/`expect` 不使用・秘密情報の
   扱いなし。
+
+## §13 #2560 facade 公開の実装
+
+イシュー #2560（親 #2558）。§10.2 の公開形と §10.3 の fail-closed 追加論点を実装した。
+
+### 13.1 承認の根拠
+
+- 根拠: ルート #2499 のコメント `issuecomment-6033824965`（2026-10-07、アカウント
+  `aLiz-Nancy`。#2558 について §10 の推奨案を承認し、記録に形が無い点は実装せず止める旨）。
+  #2558／#2560 の「Claude による承認の記録」コメントは補足であり承認の根拠ではない。
+- 承認が及ぶ範囲は §10.2・§10.3 に書かれた形。記録に推奨が無い点は以下 13.4 のとおり実装せず
+  fail-closed で止めた。
+
+### 13.2 公開した名前
+
+| 公開パス | 実体 |
+|---|---|
+| `fandhe_ai::optim::ExponentialMovingAverage` | `crates/facade/src/optim_ema.rs`（内部型を 1 フィールドで持つ薄いラッパー。`optim.rs` が `pub use crate::optim_ema::ExponentialMovingAverage;` の 1 文で公開。`mod optim_ema;` は private） |
+| `fandhe_ai::compat::EmaCallback` | `crates/facade/src/compat/callbacks.rs`（`new(decay)`・`decay`・`num_updates`・`shadow_state_dict`） |
+| `fandhe_ai::compat::Callback::Ema(EmaCallback)` | `#[non_exhaustive]` enum の末尾 variant。`FitConfig`・`Sequential` には何も足さない |
+
+`from_module`／`update_from_module`／`apply`／`restore` は facade の `nn::Module` を受け、
+`named_parameters`／`state_dict`／`load_state_dict` 経由で委譲する。新しいエラー型・variant は無い
+（名前集合・個数の不一致と構築時の `decay` 検証は `InvalidArgument`。shape 不一致は既存の
+`AutodiffError::Shape`）。
+
+### 13.3 記録から導出した解釈点（新しい承認ではない）
+
+1. `EmaCallback` は既存 payload 型と同じ `compat/callbacks.rs` に置き `compat` から再エクスポートする。
+2. shadow は fit 終了後も保持し、次の fit で継続する（`ModelCheckpoint` と同じ継続型）。初回のみ
+   最初の fit 開始時に `named_parameters()` から初期化する。別構成のモデルは既存検証で拒否する。
+   リセット API は無い。
+3. accessor は `decay`・`num_updates`・`shadow_state_dict`（未初期化の間は `None`）のみ。
+4. validation が無い fit でも、epoch 末の callbacks（`ModelCheckpoint`／`EarlyStopping` の snapshot）
+   は EMA 重みの下で実行する。したがって `restore_best_weights` が fit 終了時に書き戻すのは
+   EMA 重みの snapshot になる。評価の差し替えは成功・`Err`・打ち切りのどの経路でも生の重みへ復帰する。
+5. `DeviceParamStore`／常駐経路の検出機構は設けない。`fit` 経路は構造上常駐経路へ到達しない。
+   手動で併用すると shadow が stale 化する（doc に明記）。
+6. 記録に無い拒否（param groups・`LrSchedule`・`accumulate_steps > 1` 等との併用拒否）は追加しない。
+   `accumulate_steps > 1` は実際に step した時（端数 flush を含む）だけ更新する。
+
+### 13.4 未決のまま拒否した点（追加承認が必要）
+
+§10.2 (g) の「`compile_with_amp` の skip step を拒否するか追従するか」は論点提示のみで推奨が無い。
+実装は `Callback::Ema` と `compile_with_amp` の併用を fit 開始前に `InvalidArgument` で拒否する。
+追従（skip step では更新しない等）へ緩めるには別途承認を要する。
+
+同様に、`Callback::Ema` と `Monitor::Loss`（訓練損失監視）の `ModelCheckpoint`／`EarlyStopping` の
+併用も記録に形が無い。`Monitor::Loss` は EMA 差し替え前の生の重みで計算した損失を指標にする一方、
+snapshot は EMA 重みを保存するため、指標と保存重みが食い違う。承認された「記録に形が無い点は実装せず
+止める」方針に従い fit 開始前に `InvalidArgument` で拒否した（`Monitor::ValLoss` 等は併用可）。
+緩める（生の重みの損失でベスト判定して EMA 重みを保存する等）には別途承認を要する。
+
+継続する `EmaCallback`（初期化済み）を別構成のモデルへ使い回した場合は、最初の step で
+`update_named` が不一致を検出して拒否済みモデルに重み・optimizer 状態の変更が残らないよう、
+fit 開始時に更新を伴わない名前集合・shape の照合で拒否する（名前集合・個数は `InvalidArgument`、
+shape は `Shape`）。
+
+### 13.5 ガードの変更と #2561 への残作業
+
+- `EmaHoldDoctestGuard` は型名 glob 衝突プローブだけを削除し、`FitConfig`／`Sequential` への
+  `use_ema`／`ema_decay` inherent メソッド衝突プローブを残した。プローブブロック数の下限
+  （`MIN_KNOWN_PROBE_BLOCKS` = 16）は実測でも下回らないため変更していない。
+- `api_surface.rs` は型名の否定ガードを正ガード `facade_exposes_ema_only_in_approved_shape`
+  （承認形 = `optim.rs` の 1 行＋`optim_ema.rs` の宣言 1 件。内部型の素の再エクスポート・別名・
+  重複・`use_ema`／`ema_decay` の `fn` 宣言は拒否）へ置き換え、`optim` の期待集合と
+  `Callback` variant 集合（7 個）を更新した。
+- #2561 に残す: 構造体名の改名・正の doctest プローブの仕上げ、`docs/compat-api-scope.md` §5
+  の適用記録、facade 経由の利用例の拡充。
+  → **§14 で完了**（改名は不要と判断。理由は §14.3）。
+
+## §14 #2561 ガード反転の仕上げと適用記録
+
+イシュー #2561（親 #2558）。#2560（PR #2821）で公開済みの承認形に対し、保留ガードを承認形だけを
+許す正ガードへ仕上げ、適用記録と利用例を足した。**公開面は増やしていない**
+（`crates/facade/src` の差分は doc コメントのみ）。
+
+### 14.1 着手時判定
+
+- 反転先の存在: #2560 は PR #2821（`origin/main` `01ecefd4`）でマージ済みで、
+  `optim::ExponentialMovingAverage`・`compat::EmaCallback`・`Callback::Ema` が公開されている。
+- 承認の根拠: §13.1 と同じ（ルート #2499 のコメント `issuecomment-6033824965`。§10.2・§10.3 の
+  形だけが範囲）。新しい承認は得ていないし、必要としない。
+
+### 14.2 ガード対応表（旧 → 現行）
+
+| 旧（保留） | 現行（正ガード） |
+|---|---|
+| `facade_does_not_reexport_or_declare_ema_items` | `facade_exposes_ema_only_in_approved_shape`（#2821 で置換。#2561 で `EmaCallback` を対象に追加: 宣言は `compat/callbacks.rs` の 1 件、`pub use` は `compat/mod.rs` の別名なし 1 件） |
+| 同 `…_detects_each_category` | `facade_exposes_ema_only_in_approved_shape_detects_each_category`（`EmaCallback` の欠落・別名・別ファイル・重複の各類型を追加） |
+| （なし） | `ema_types_are_reachable_via_facade_only`（`fandhe_ai` のみ import で承認シグネチャをコンパイル時固定） |
+| （なし） | `ema_usage_doctests_are_present_and_compiled`（利用例 doctest の実在とコンパイル対象であること） |
+| `ema_hold_doctest_globs_all_pub_modules`・`ema_hold_doctest_probe_body_matches_fixed_contract` | 不変（禁止経路 doctest のドリフト検査） |
+
+`Callback::Ema` の構築は既存の `fit_types_are_reachable_via_facade_only` が固定済み。
+
+### 14.3 `EmaHoldDoctestGuard` を改名しなかった理由
+
+§13.5 は「構造体名の改名」を #2561 の残作業に挙げていた。公開後も禁止経路専用の doctest を
+残した先例 `TrainStepHoldDoctestGuard`（#2569）は名前を変えず doc を「禁止経路専用」へ書き換えて
+おり、`lib.rs` のガード構造体は `*HoldDoctestGuard` で統一されている。残るプローブは未承認のまま
+（§10.2 (d) で不採用）の `FitConfig`／`Sequential` への `use_ema`／`ema_decay` 追加という保留の経路を
+止める役割で、名前と役割が一致するため、先例に合わせて改名せず doc だけを書き換えた
+（doctest 本文・固定文言 `EMA_HOLD_PROBE_BODY` は不変）。
+
+### 14.4 利用例
+
+- doctest 3 か所: `optim.rs` モジュール doc（手動ループ）・`optim_ema.rs` の
+  `ExponentialMovingAverage` doc・`compat/callbacks.rs` の `EmaCallback` doc（`fit_with_callbacks`）。
+- 統合テスト: `crates/facade/tests/compat_sequential_fit_ema.rs` に
+  `ema_weights_applied_after_fit_match_shadow_and_predict_finite`（fit 後の適用手順）を追加。
+  手動ループは既存の `compat_sequential_ema_manual.rs`。
+
+### 14.5 保留を継続する項目（追加承認が必要）
+
+- `Callback::Ema` と `compile_with_amp` の併用拒否・`Monitor::Loss` の `ModelCheckpoint`／
+  `EarlyStopping` との併用拒否（§13.4）。緩めていない。
+- decay ウォームアップ・`BatchNorm` の running buffer・`DeviceParamStore` 常駐経路の検出・
+  `FitConfig`／`Sequential` への接続（§10.2 (d) で不採用）。
+
+### 14.6 不変事項
+
+公開面を増やしていない。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・
+`docs/spec/` は不変。新規 `unsafe`・依存なし。ホスト `Tensor<f32>` のみで GPU 固有経路が無いため
+実機申し送りは不要（§7）。`compat-api-scope.md` §5 に適用記録を追記した。
 
 ## 非信頼データの扱い
 

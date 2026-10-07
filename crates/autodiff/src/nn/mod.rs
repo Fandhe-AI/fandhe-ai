@@ -209,11 +209,10 @@
 //! `apply`／`restore`（[`Module::load_state_dict`] へ委譲）で shadow
 //! 重みへ一時差し替え・復帰する。新規 `Op`／`BackendOps`／VJP／カーネル
 //! は追加しない（ホスト `Tensor<f32>` への要素ごとの `f32::mul_add`
-//! のみ）。facade（`fandhe_ai::optim` 再エクスポート・`compat::
-//! FitConfig` の `use_ema`／`ema_decay` 相当追加）は未承認のため保留
-//! する（`crates/facade/src/lib.rs` の `EmaHoldDoctestGuard`・
-//! `crates/facade/tests/api_surface.rs` の否定ガードで固定。
-//! `docs/autodiff-ema-decision.md` §4 承認事項）。
+//! のみ）。facade へはイシュー #2560 で `fandhe_ai::optim::
+//! ExponentialMovingAverage`（独自ラッパー）・`compat::Callback::Ema` として
+//! 公開済み（`docs/autodiff-ema-decision.md` §10.2・§13）。`FitConfig` への
+//! `use_ema`／`ema_decay` 追加は行わない。
 //! イシュー #2647（親 #2625）で可変長系列の [`packed_sequence`]
 //! （`pack_padded_sequence`／`pad_packed_sequence`／`PackedSequence` と
 //! `Rnn`／`Lstm`／`Gru`・`Stacked*` の packed 実行）を追加した。新規

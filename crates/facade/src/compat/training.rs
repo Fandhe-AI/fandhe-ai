@@ -1542,6 +1542,18 @@ impl Sequential {
     /// よって黙って失われることはない。複数の `EarlyStopping` が
     /// 該当する場合は `callbacks` の並び順で最後のものが勝つ。
     ///
+    /// # EMA（イシュー #2560）
+    ///
+    /// `callbacks` に [`super::callbacks::Callback::Ema`] があると、optimizer の更新を
+    /// `apply_parameters` した直後（`accumulate_steps > 1` では実際に step した時のみ）に
+    /// shadow を更新し、epoch 末の validation と callbacks は shadow へ差し替えた重みの下で
+    /// 実行して全経路で生の重みへ復帰する。fit 終了時にモデルの重みは上書きしない
+    /// （[`super::callbacks::EmaCallback::shadow_state_dict`] を呼び出し側が適用する）。
+    /// `Callback::Ema` の複数指定・`Optimizer::Lbfgs`・`compile_with_amp`・カスタム
+    /// train_step フック・`Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping`（EMA 重みでの
+    /// ベスト判定ができないため。`Monitor::ValLoss` 等を使う）との併用は `InvalidArgument`（決定記録
+    /// `docs/autodiff-ema-decision.md` §10.2・§13）。
+    ///
     /// # エラー
     ///
     /// [`Self::fit`] の既存エラー契約に加え:
@@ -1903,6 +1915,45 @@ impl Sequential {
                  trial パラメータ書き込みを実行できない）"
             )));
         }
+        // (1.8) EMA（イシュー #2560。決定記録 `docs/autodiff-ema-decision.md` §10.2 (g)・
+        // §10.3）の組み合わせ検査。いずれも fit 開始前の fail-closed 拒否:
+        // - `Callback::Ema` の複数指定（shadow が二重になり意味が定まらない）
+        // - L-BFGS（1 outer step 内の複数回評価で「step 直後」が定義できない）
+        // - カスタム train_step フック（更新位置をフック側が持つ）
+        // - AMP（skip step で shadow を更新するか否かが記録上未決のため、追従せず拒否）
+        let ema_count = callbacks
+            .iter()
+            .filter(|cb| matches!(cb, Callback::Ema(_)))
+            .count();
+        if ema_count > 0 {
+            let reason = if ema_count > 1 {
+                Some("Callback::Ema は複数指定できない")
+            } else if matches!(compiled.optimizer, OptimizerState::Lbfgs(_)) {
+                Some("Callback::Ema は Optimizer::Lbfgs と併用できない")
+            } else if custom_step.is_some() {
+                Some("Callback::Ema はカスタム学習 step フックと併用できない")
+            } else if callbacks.iter().any(|cb| match cb {
+                Callback::ModelCheckpoint(mc) => mc.monitors_train_loss(),
+                Callback::EarlyStopping(es) => es.monitors_train_loss(),
+                _ => false,
+            }) {
+                Some(
+                    "Callback::Ema は Monitor::Loss の ModelCheckpoint／EarlyStopping と併用できない（Monitor::Loss は EMA 差し替え前の生の重みの損失のため EMA 重みでベスト判定できない。Monitor::ValLoss 等を使う。docs/autodiff-ema-decision.md §10.2 (e)）",
+                )
+            } else if compiled.amp.is_some() {
+                Some(
+                    "Callback::Ema は compile_with_amp（AMP）と併用できない（AMP の skip step の扱いが未決のため。docs/autodiff-ema-decision.md §10.2 (g)）",
+                )
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                self.compiled = Some(compiled);
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: {reason}（イシュー #2560）"
+                )));
+            }
+        }
         if validation.is_none()
             && let Some(offending) = callbacks.iter().find(|cb| cb.requires_validation())
         {
@@ -2018,6 +2069,22 @@ impl Sequential {
             let r = match cb {
                 Callback::CsvLogger(l) => l.begin_fit(method, validation.is_some(), metrics),
                 Callback::JsonLogger(l) => l.begin_fit(method, validation.is_some(), metrics),
+                _ => Ok(()),
+            };
+            if let Err(e) = r {
+                for cb in callbacks.iter_mut() {
+                    cb.end_fit();
+                }
+                self.compiled = Some(compiled);
+                return Err(e);
+            }
+        }
+
+        // (2.7) EMA の shadow 初期化（イシュー #2560。初回のみ現在の重みから作り、
+        // 以降の fit では継続する）。失敗時はロガーと同じ後始末で `Err`。
+        for i in 0..callbacks.len() {
+            let r = match &mut callbacks[i] {
+                Callback::Ema(e) => e.begin_fit(&*self),
                 _ => Ok(()),
             };
             if let Err(e) = r {
@@ -2411,10 +2478,14 @@ impl Sequential {
                             }
                         }
                     };
-                    if let Some(updated) = updated
-                        && let Err(e) = self.apply_parameters(updated)
-                    {
-                        break 'epochs_block Err(e);
+                    if let Some(updated) = updated {
+                        if let Err(e) = self.apply_parameters(updated) {
+                            break 'epochs_block Err(e);
+                        }
+                        // EMA（イシュー #2560）: 実際に step した時だけ shadow を更新する。
+                        if let Err(e) = self.ema_update_after_step(callbacks) {
+                            break 'epochs_block Err(e);
+                        }
                     }
                 }
 
@@ -2449,6 +2520,9 @@ impl Sequential {
                     if let Err(e) = self.apply_parameters(stepped) {
                         break 'epochs_block Err(e);
                     }
+                    if let Err(e) = self.ema_update_after_step(callbacks) {
+                        break 'epochs_block Err(e);
+                    }
                 }
 
                 if count == 0 {
@@ -2461,93 +2535,114 @@ impl Sequential {
                 }
                 history.loss.push((weighted_sum / count as f64) as f32);
 
-                // (3) validation（[`Self::fit_with_callbacks`] doc「1 epoch
-                // の処理順序」節。metrics 計算はイシュー #2072・
-                // `run_evaluate_with_metrics` doc 参照）。
-                if let Some((x_val, y_val)) = validation {
-                    self.set_training(false);
-                    let v = self.run_evaluate_with_metrics::<T>(
-                        x_val,
-                        y_val,
-                        config.batch_size,
-                        compiled.loss,
-                        metrics,
-                        method,
-                    );
-                    self.set_training(true);
-                    match v {
-                        Ok((loss_v, metrics_v)) => {
-                            history.val_loss.push(loss_v);
-                            if let Some(m) = metrics_v {
-                                history.val_metrics.push(m);
+                // EMA（イシュー #2560）: epoch 末の validation と callbacks は shadow へ
+                // 差し替えた重みの下で実行し、成功・`Err`・打ち切りのどの経路でも
+                // 生の重みへ復帰してから抜ける。内側の `break 'eval Err(..)` は
+                // 必ず下の復帰処理を通る（`'epochs_block` へ素通りさせない）。
+                let ema_backup = match self.ema_swap_in(callbacks) {
+                    Ok(b) => b,
+                    Err(e) => break 'epochs_block Err(e),
+                };
+                let eval_outcome: Result<bool, AutodiffError> = 'eval: {
+                    // (3) validation（[`Self::fit_with_callbacks`] doc「1 epoch
+                    // の処理順序」節。metrics 計算はイシュー #2072・
+                    // `run_evaluate_with_metrics` doc 参照）。
+                    if let Some((x_val, y_val)) = validation {
+                        self.set_training(false);
+                        let v = self.run_evaluate_with_metrics::<T>(
+                            x_val,
+                            y_val,
+                            config.batch_size,
+                            compiled.loss,
+                            metrics,
+                            method,
+                        );
+                        self.set_training(true);
+                        match v {
+                            Ok((loss_v, metrics_v)) => {
+                                history.val_loss.push(loss_v);
+                                if let Some(m) = metrics_v {
+                                    history.val_metrics.push(m);
+                                }
                             }
+                            Err(e) => break 'eval Err(e),
                         }
-                        Err(e) => break 'epochs_block Err(e),
                     }
-                }
 
-                // (4) epoch 末 callbacks（スライス順。いずれかが学習打ち切り
-                // を要求しても、当該 epoch の他 callback はすべて処理して
-                // から打ち切る）。
-                let mut stop = false;
-                for cb in callbacks.iter_mut() {
-                    match cb {
-                        Callback::ModelCheckpoint(mc) => {
-                            if let Some(value) = mc.monitor_value_at(&history, epoch_local)
-                                && let Err(e) = mc.observe(value, self)
-                            {
-                                // `to_file` 指定時のファイル保存失敗
-                                // （イシュー #2073）。`observe` は永続化
-                                // に成功した場合のみ in-memory 側
-                                // （`best`／`best_epoch`／`state`）を
-                                // 前進させる契約のため、この epoch の
-                                // 更新はコミットされず改善前の値のまま
-                                // 据え置かれた状態で `'epochs_block` を
-                                // 抜ける（次回以降の
-                                // `fit_with_callbacks` 呼び出しで再試行
-                                // できる）。後続の `EarlyStopping::
-                                // restore_best_weights` 復元・train／
-                                // eval モード復元・`compiled` 書き戻しは
-                                // 通常どおり実行される（`callbacks.rs`
-                                // モジュール冒頭 doc「`ModelCheckpoint`
-                                // のファイル保存」節参照）。
-                                break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
-                                    "Sequential::{method}: ModelCheckpoint::to_file の保存に失敗した: {e}"
-                                )));
+                    // (4) epoch 末 callbacks（スライス順。いずれかが学習打ち切り
+                    // を要求しても、当該 epoch の他 callback はすべて処理して
+                    // から打ち切る）。
+                    let mut stop = false;
+                    for cb in callbacks.iter_mut() {
+                        match cb {
+                            Callback::ModelCheckpoint(mc) => {
+                                if let Some(value) = mc.monitor_value_at(&history, epoch_local)
+                                    && let Err(e) = mc.observe(value, self)
+                                {
+                                    // `to_file` 指定時のファイル保存失敗
+                                    // （イシュー #2073）。`observe` は永続化
+                                    // に成功した場合のみ in-memory 側
+                                    // （`best`／`best_epoch`／`state`）を
+                                    // 前進させる契約のため、この epoch の
+                                    // 更新はコミットされず改善前の値のまま
+                                    // 据え置かれた状態で `'epochs_block` を
+                                    // 抜ける（次回以降の
+                                    // `fit_with_callbacks` 呼び出しで再試行
+                                    // できる）。後続の `EarlyStopping::
+                                    // restore_best_weights` 復元・train／
+                                    // eval モード復元・`compiled` 書き戻しは
+                                    // 通常どおり実行される（`callbacks.rs`
+                                    // モジュール冒頭 doc「`ModelCheckpoint`
+                                    // のファイル保存」節参照）。
+                                    break 'eval Err(AutodiffError::InvalidArgument(format!(
+                                        "Sequential::{method}: ModelCheckpoint::to_file の保存に失敗した: {e}"
+                                    )));
+                                }
                             }
-                        }
-                        Callback::LrSchedule(ls) => {
-                            let value = ls.monitor_value_at(&history, epoch_local);
-                            if let Err(e) = ls.advance(value) {
-                                break 'epochs_block Err(e);
+                            Callback::LrSchedule(ls) => {
+                                let value = ls.monitor_value_at(&history, epoch_local);
+                                if let Err(e) = ls.advance(value) {
+                                    break 'eval Err(e);
+                                }
                             }
-                        }
-                        Callback::CsvLogger(l) => {
-                            if let Err(e) = l.write_epoch(method, &history, epoch_local) {
-                                break 'epochs_block Err(e);
+                            Callback::CsvLogger(l) => {
+                                if let Err(e) = l.write_epoch(method, &history, epoch_local) {
+                                    break 'eval Err(e);
+                                }
                             }
-                        }
-                        Callback::JsonLogger(l) => {
-                            if let Err(e) = l.write_epoch(method, &history, epoch_local) {
-                                break 'epochs_block Err(e);
+                            Callback::JsonLogger(l) => {
+                                if let Err(e) = l.write_epoch(method, &history, epoch_local) {
+                                    break 'eval Err(e);
+                                }
                             }
-                        }
-                        Callback::Lambda(l) => {
-                            if let Err(e) = l.invoke(epoch_local, &history) {
-                                break 'epochs_block Err(e);
+                            // EMA は epoch 末の動作を持たない（更新・差し替えは本ブロックの外側）。
+                            Callback::Ema(_) => {}
+                            Callback::Lambda(l) => {
+                                if let Err(e) = l.invoke(epoch_local, &history) {
+                                    break 'eval Err(e);
+                                }
                             }
-                        }
-                        Callback::EarlyStopping(es) => {
-                            if let Some(value) = es.monitor_value_at(&history, epoch_local)
-                                && es.observe(value, epoch_local, || self.state_dict())
-                            {
-                                stop = true;
+                            Callback::EarlyStopping(es) => {
+                                if let Some(value) = es.monitor_value_at(&history, epoch_local)
+                                    && es.observe(value, epoch_local, || self.state_dict())
+                                {
+                                    stop = true;
+                                }
                             }
                         }
                     }
+                    Ok(stop)
+                };
+                if let Some(backup) = ema_backup
+                    && let Err(e) = self.load_state_dict(backup)
+                {
+                    // 復帰失敗は評価側のエラーより優先して顕在化する（fail-closed）。
+                    break 'epochs_block Err(e);
                 }
-                if stop {
-                    break 'epochs;
+                match eval_outcome {
+                    Ok(true) => break 'epochs,
+                    Ok(false) => {}
+                    Err(e) => break 'epochs_block Err(e),
                 }
             }
             Ok(())
@@ -2581,6 +2676,34 @@ impl Sequential {
 
         Ok(history)
     }
+    /// `Callback::Ema` があれば、直前に適用した重みで shadow を更新する
+    /// （イシュー #2560。`run_fit` の step 直後 2 か所から呼ぶ。EMA が無ければ何もしない）。
+    fn ema_update_after_step(&self, callbacks: &mut [Callback]) -> Result<(), AutodiffError> {
+        for cb in callbacks.iter_mut() {
+            if let Callback::Ema(e) = cb {
+                e.update(self)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `Callback::Ema` があれば、モデルの重みを shadow へ差し替えて差し替え前の
+    /// `state_dict` を返す（無ければ `None`）。復帰は呼び出し側が全経路で行う。
+    fn ema_swap_in(
+        &mut self,
+        callbacks: &[Callback],
+    ) -> Result<Option<std::collections::HashMap<String, Tensor<f32>>>, AutodiffError> {
+        for cb in callbacks {
+            if let Callback::Ema(e) = cb {
+                let shadow = e.shadow_for_eval()?;
+                let backup = self.state_dict();
+                self.load_state_dict(shadow)?;
+                return Ok(Some(backup));
+            }
+        }
+        Ok(None)
+    }
+
     /// `x`／`y` に対する平均損失を評価する（Keras
     /// `model.evaluate(x, y, batch_size=)` 相当。学習は行わない）。
     ///
