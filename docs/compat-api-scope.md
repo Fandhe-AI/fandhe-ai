@@ -1652,14 +1652,15 @@ fail-closed（manifest 未対応。決定記録 §6 実装記録）。保留ガ�
 `eigh`／`slogdet`／`pinv`／`matrix_rank`／`lstsq`（#2150 で内部クレート限定実装済み）を、設計判断記録
 （`docs/autodiff-linalg-ops-decision.md` §0・§6）の推奨形どおり
 `Var::eigh`／`slogdet`／`pinv`／`matrix_rank`／`lstsq` の薄い委譲メソッド 5 件として公開した（本体は
-`linalg_ops` 自由関数への 1 行委譲。`linalg_ops` モジュール自体と `EighVars`／`SlogdetVars` 型は
-facade から再エクスポートしない。追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。
+`linalg_ops` 自由関数への 1 行委譲。`linalg_ops` モジュール自体は
+facade から再エクスポートしない（`EighVars`／`SlogdetVars` 型は 2026-10-07 承認で再エクスポート）。追加 API のみ。`fandhe-ai =0.10.0` の公開 API は非破壊）。
 新規の `Op`／`BackendOps`／VJP は追加していない。
 保留ガード（`VarLinalgOpsHoldDoctestGuard` と `api_surface.rs` の否定テスト 4 件）は承認形のみを
 許す正ガード（`facade_does_not_reexport_or_declare_linalg_ops`・
 `workspace_declares_linalg_ops_fn_names_only_in_approved_locations`・
 `var_linalg_ops_methods_are_thin_delegations`・`var_linalg_ops_are_reachable_via_facade_only`）へ
-反転した。型の再エクスポート（`QrVars` と揃える形）は未承認のまま対象外（決定記録 §6 の残る承認事項）。
+反転した。型 `EighVars`／`SlogdetVars` の再エクスポート（`QrVars` と揃える形）は 2026-10-07 承認（issue #2515 コメント）で
+追加済み（決定記録 §6）。
 GPU 専用カーネル（#2672）も対象外。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
 実機 parity は #2150 の申し送り（`docs/perf/logs/linalg-ops-2150/README.md`）が有効。
 
