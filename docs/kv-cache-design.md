@@ -583,3 +583,35 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 
 コード変更、ガードの削除・反転、`compat-api-scope.md` への適用記録、Issue 起票・コメント投稿、spec 提案、依存追加、`unsafe`、tolerance 変更。
 K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
+
+## 14. #2579 実装記録（facade 公開）
+
+§11.4 の P1〜P4 に沿って実装した。承認の根拠は §11・§12 に記録した範囲に限る（ルート #2499 の一括承認〈2026-10-04〉と #2577・#2579 の記録コメント〈Claude が記録したもの〉。ユーザー本人の個別承認コメントではない）。
+
+### 14.1 公開した名前
+
+| 項目 | 内容 |
+|---|---|
+| `fandhe_ai::nn::kv_cache`（`crates/facade/src/nn/kv_cache.rs`） | `KvCache`・`StatefulAttention`・`MultiheadAttentionConfig` の純再エクスポート 1 文。`compat::Sequential` にメソッドは追加していない |
+| `StatefulAttention::from_config(&MultiheadAttentionConfig, seed)`（autodiff） | 非対応設定（`batch_first=false`・`kdim`／`vdim != embed_dim`）を構築時に `InvalidArgument` で拒否し、`MultiheadAttention::from_config` へ委譲する |
+| `Tape::stateful_attention_forward`（`crates/facade/src/lib.rs`） | `sa.forward(&self.0, x_new)` の 1 行委譲 |
+
+新規 `Op`・`BackendOps`・カーネル・依存・`unsafe` は無く、数値経路は K-1 のままである。公開しないもの: `MultiheadAttention`・`MultiheadAttentionVars`・`forward_with_cache`。
+
+### 14.2 ガードの差し替え
+
+- 削除: `KvCacheHoldDoctestGuard` と、`api_surface.rs` の保留系 6 項目（§13.2）および `KV_CACHE_HOLD_PROBE_BODY`
+- 追加（正ガード）: `facade_reexports_kv_cache_items_only_in_approved_shape`（承認形 1 文への完全一致。自己テスト付き）・`tape_stateful_attention_forward_is_thin_delegation`・`workspace_declares_stateful_attention_forward_only_in_facade_lib`・`kv_cache_is_reachable_via_facade_only`
+- 期待集合の拡張: `nn_mod_declares_only_approved_submodules`（旧名 `..._init_and_rnn_...`）・`nn_mod_public_items_match_expected_set`・`GRAD_SCALER_PROBE_MODULES`。残る全 hold doctest の glob 一覧へ `nn::kv_cache::*` を追加した
+- 判断点: `facade_reexports_multihead_attention_config_only_from_compat`（#2530 の正ガード）は `MultiheadAttentionConfig` の公開を `compat/mod.rs` の 1 件に固定しており、P2 の再エクスポートと衝突した。期待集合を承認済みの 2 件（`compat/mod.rs` の単独形と `nn/kv_cache.rs` の 3 名グループ形）へ拡張し、完全一致検査は維持した。公開面 inventory の更新であり、tolerance・閾値の緩和ではない
+- 変更していないもの: `generate()` の保留ガード（`GenerateHoldDoctestGuard` 等。#2575 系の別スコープ）
+
+### 14.3 テスト
+
+- autodiff: `from_config` の単体テスト 3 件（`attention.rs`）
+- facade: `tests/kv_cache_facade.rs`（autodiff 直経路との一致・全系列 prefill との一致・状態推移と reset・エラー経路の原子性と `TapeMismatch`・拒否条件・backward）。判定は既存 `assert_parity` で定数は不変
+- doctest: `nn::kv_cache` モジュール doc に prefill → decode を 1 つ置いた
+
+### 14.4 #2580 へ残すもの
+
+`compat-api-scope.md` §5 の適用記録、本 doc §2・§6・§10 の実装記録、`docs/README.md`・`docs/compat-feature-gap.md` の更新。CUDA／Metal の実機 parity は未実測で、申し送り先は `docs/perf/logs/kv-cache-2084/README.md`。
