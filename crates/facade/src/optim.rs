@@ -232,6 +232,10 @@
 //! - `set_lr` は既定グループ（グループ外スロット）にだけ効く。
 //! - glob import（`use fandhe_ai::optim::*;`）の利用者が同名の型を自前で定義して
 //!   いると衝突しうる。
+//! - 公開面は `crates/facade/tests/api_surface.rs` の正ガード（
+//!   `facade_param_groups_public_surface_matches_approved_contract`・
+//!   `param_groups_types_match_approved_shape`・
+//!   `param_groups_usage_doctests_are_present_and_compiled` ほか。#2554）で固定している。
 //!
 //! ```
 //! use fandhe_ai::Tensor;

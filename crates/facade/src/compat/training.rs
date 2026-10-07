@@ -1246,6 +1246,10 @@ impl Sequential {
     /// [`Self::fit`] 系の入口で範囲外の添字（スロット数以上）を拒否し、step 時に
     /// 空 `params`・重複・非有限・負値を optimizer 状態を変える前に拒否する。
     ///
+    /// 公開面（本メソッドが `impl Sequential` 内に 1 件だけ存在すること）は
+    /// `crates/facade/tests/api_surface.rs` の
+    /// `facade_param_groups_public_surface_matches_approved_contract`（#2554）が固定している。
+    ///
     /// # 制約
     ///
     /// - `Optimizer::Lbfgs` と空でない groups は併用できない。
