@@ -901,12 +901,48 @@ fn checked_f32_coef(v: f64, what: &str) -> Result<f32, AutodiffError> {
     }
 }
 
+/// `Loss::CrossEntropy` の係数 `w_i·cw(y_i)/N_batch` が、全サンプル・全バッチで f32 表現可能か
+/// を最初の更新前に検査する（バッチ内だけの検証では、後続バッチの表現不能な係数が先行バッチの
+/// 更新後に初めて見つかり「更新前に拒否する」契約を破るため。レビュー指摘 #2823）。
+/// 係数は `N_batch` に反比例して大きくなるので、実際に現れる最小の実バッチサイズ
+/// （端数バッチを含む。`drop_last` なら端数なし）で全サンプルを評価すれば十分。
+fn check_ce_coefs_for_all_batches(
+    classes: &[i32],
+    batch_size: usize,
+    drop_last: bool,
+    weights: &FitWeights<'_>,
+) -> Result<(), AutodiffError> {
+    let total = classes.len();
+    if total == 0 || batch_size == 0 {
+        return Ok(());
+    }
+    let rem = total % batch_size;
+    let min_nb = if rem > 0 && !drop_last {
+        rem
+    } else {
+        batch_size.min(total)
+    };
+    for (i, &yi) in classes.iter().enumerate() {
+        let cw = weights
+            .class_weight
+            .as_ref()
+            .and_then(|m| u32::try_from(yi).ok().and_then(|k| m.get(&k).copied()))
+            .unwrap_or(1.0);
+        let sw = sample_weight_at(weights.sample_weight, i) as f64;
+        checked_f32_coef(
+            -(sw * cw as f64) / min_nb as f64,
+            "sample_weight × class_weight",
+        )?;
+    }
+    Ok(())
+}
+
 /// サンプル別重みの `i` 番目（`sample` 未指定は `1.0`）。
 fn sample_weight_at(sample: Option<&[f32]>, i: usize) -> f32 {
     sample.and_then(|t| t.get(i).copied()).unwrap_or(1.0)
 }
 
-/// 重み付き MSE: `coef_ij = w_i / (N·M)` を `(pred − target)²` へ掛けて総和する
+/// 重み付き MSE: `(√(w_i / (N·M))·(pred − target))²` を総和する（`w_i / (N·M)` を `(pred − target)²` へ掛ける式と数学的に等価）
 /// （`mse_loss_with(Mean)` は `Σ_ij d_ij² / (N·M)` のため、`w_i = 1` で等価）。
 /// 既存 `Var` 演算（`sub`・`mul`・`sum`）の合成のみ（新規 `Op` なし）。
 fn weighted_mse_loss<'t>(
@@ -941,13 +977,17 @@ fn weighted_mse_loss<'t>(
     let sw = sample.map(|t| t.host_slice());
     let mut coef = alloc_coef(numel)?;
     // 係数 0（重み 0 または f32 でアンダーフロー）のサンプルは損失計算から除外する
-    // （非有限の `d²` に 0 を掛けると `inf × 0 = NaN` になるため。レビュー指摘 #2823）。
+    // （非有限の差分に 0 を掛けると `inf × 0 = NaN` になるため。レビュー指摘 #2823）。
     let mut zero_mask = vec![false; numel];
     for i in 0..n {
         let w = sample_weight_at(sw.as_deref(), i);
-        let c = checked_f32_coef(w as f64 / (n as f64 * m as f64), "sample_weight")?;
-        coef[i * m..(i + 1) * m].fill(c);
-        if c == 0.0 {
+        // 損失は `Σ (d·s_i)²`（`s_i = √(w_i/(N·M))`）で評価する。`d²` を先に f32 で作ると
+        // 最終結果が有限でも中間が overflow し、係数 `w_i/(N·M)` を先に f32 へ落とすと
+        // 小さい正の重みが 0 に丸められるため、平方根側の係数を f64 で確定する
+        // （レビュー指摘 #2823）。
+        let s = checked_f32_coef((w as f64 / (n as f64 * m as f64)).sqrt(), "sample_weight")?;
+        coef[i * m..(i + 1) * m].fill(s);
+        if s == 0.0 {
             zero_mask[i * m..(i + 1) * m].fill(true);
         }
     }
@@ -958,7 +998,8 @@ fn weighted_mse_loss<'t>(
         let mask_t = Tensor::new(zero_mask, &shape).map_err(AutodiffError::Shape)?;
         d = d.masked_fill(&mask_t, 0.0)?;
     }
-    d.mul(&d)?.mul(&coef_v)?.sum(None)
+    let scaled = d.mul(&coef_v)?;
+    scaled.mul(&scaled)?.sum(None)
 }
 
 /// 重み付き交差エントロピー: `−Σ_i w_i·cw(y_i)·log_softmax(pred)_{i,y_i} / N`。
@@ -1036,9 +1077,19 @@ fn weighted_cross_entropy_loss<'t>(
     // `0 × -inf` が NaN になるため、疎な係数行列との積は使わない）。
     // 係数 0 のサンプルは選択された log_softmax が非有限でも `-inf × 0 = NaN` に
     // ならないよう、積の前に 0 へ置換して除外する（レビュー指摘 #2823）。
-    let mut picked = pred.log_softmax(1)?.gather(1, &idx_t)?;
-    if zero_mask.iter().any(|&b| b) {
-        let mask_t = Tensor::new(zero_mask, &[n, 1]).map_err(AutodiffError::Shape)?;
+    // 係数 0 の行は logits 自体を `log_softmax` の前に有限定数 0 へ置換する。gather 後の
+    // 置換だけでは `log_softmax` の VJP が未加工の forward 値（`inf` 行は NaN）を使うため、
+    // 勾配が NaN になり optimizer 経由でパラメータを汚染する（レビュー指摘 #2823）。
+    // `masked_fill` の VJP は置換位置の勾配を 0 にする。
+    let any_zero = zero_mask.iter().any(|&b| b);
+    let mask_t = Tensor::new(zero_mask, &[n, 1]).map_err(AutodiffError::Shape)?;
+    let logits = if any_zero {
+        pred.masked_fill(&mask_t, 0.0)?
+    } else {
+        *pred
+    };
+    let mut picked = logits.log_softmax(1)?.gather(1, &idx_t)?;
+    if any_zero {
         picked = picked.masked_fill(&mask_t, 0.0)?;
     }
     picked.mul(&coef_v)?.sum(None)
@@ -3029,6 +3080,17 @@ impl Sequential {
                             && let [_, c] = pred.to_tensor().shape()
                         {
                             if let Err(e) = T::check_class_range(y, *c) {
+                                break 'epochs_block Err(e);
+                            }
+                            if compiled.loss == Loss::CrossEntropy
+                                && let Some(cls) = T::as_class_targets(y)
+                                && let Err(e) = check_ce_coefs_for_all_batches(
+                                    &cls.host_slice(),
+                                    config.batch_size,
+                                    config.drop_last,
+                                    weights,
+                                )
+                            {
                                 break 'epochs_block Err(e);
                             }
                             targets_checked = true;

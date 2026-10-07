@@ -778,3 +778,78 @@ fn unrepresentable_coefficient_is_rejected_before_update() {
     );
     assert_rejected(&mut m, r, &before, "unrepresentable coef");
 }
+
+/// 後続バッチだけが表現不能な係数になる場合も、先行バッチの更新前に拒否する（レビュー指摘 #2823）。
+#[test]
+fn unrepresentable_coefficient_in_late_batch_is_rejected_before_update() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let before = bits(&m);
+    let x = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 0], &[2]).unwrap();
+    let r = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 1),
+        &FitWeights::new()
+            .sample_weight(&[1.0, 1e20])
+            .class_weight(HashMap::from([(0u32, 1e20f32)])),
+        None,
+        &mut [],
+        &[],
+    );
+    assert_rejected(&mut m, r, &before, "late unrepresentable coef");
+}
+
+/// ゼロ重みの行の logits が inf でも勾配・パラメータが NaN にならない。
+#[test]
+fn zero_weight_row_with_infinite_logits_keeps_params_finite() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let x = Tensor::new(vec![f32::MAX, 1.0], &[2, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 1], &[2]).unwrap();
+    m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 2),
+        &FitWeights::new().sample_weight(&[0.0, 1.0]),
+        None,
+        &mut [],
+        &[],
+    )
+    .unwrap();
+    for p in m.trainable_parameters() {
+        assert!(
+            p.host_slice().iter().all(|v| v.is_finite()),
+            "NaN/inf param"
+        );
+    }
+}
+
+/// 差分の二乗が f32 で overflow しても、最終結果が有限なら loss は有限（小さい重み）。
+#[test]
+fn small_weight_with_large_residual_does_not_overflow() {
+    let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
+        .unwrap();
+    let x = Tensor::new(vec![0.0f32], &[1, 1]).unwrap();
+    let y = Tensor::new(vec![1e20f32], &[1, 1]).unwrap();
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, 1),
+            &FitWeights::new().sample_weight(&[1e-20]),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert!(
+        h.loss[0].is_finite() && h.loss[0] > 0.0,
+        "loss = {}",
+        h.loss[0]
+    );
+}
