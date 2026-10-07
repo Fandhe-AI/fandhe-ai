@@ -1550,7 +1550,8 @@ impl Sequential {
     /// 実行して全経路で生の重みへ復帰する。fit 終了時にモデルの重みは上書きしない
     /// （[`super::callbacks::EmaCallback::shadow_state_dict`] を呼び出し側が適用する）。
     /// `Callback::Ema` の複数指定・`Optimizer::Lbfgs`・`compile_with_amp`・カスタム
-    /// train_step フックとの併用は `InvalidArgument`（決定記録
+    /// train_step フック・`Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping`（EMA 重みでの
+    /// ベスト判定ができないため。`Monitor::ValLoss` 等を使う）との併用は `InvalidArgument`（決定記録
     /// `docs/autodiff-ema-decision.md` §10.2・§13）。
     ///
     /// # エラー
@@ -1931,6 +1932,14 @@ impl Sequential {
                 Some("Callback::Ema は Optimizer::Lbfgs と併用できない")
             } else if custom_step.is_some() {
                 Some("Callback::Ema はカスタム学習 step フックと併用できない")
+            } else if callbacks.iter().any(|cb| match cb {
+                Callback::ModelCheckpoint(mc) => mc.monitors_train_loss(),
+                Callback::EarlyStopping(es) => es.monitors_train_loss(),
+                _ => false,
+            }) {
+                Some(
+                    "Callback::Ema は Monitor::Loss の ModelCheckpoint／EarlyStopping と併用できない（Monitor::Loss は EMA 差し替え前の生の重みの損失のため EMA 重みでベスト判定できない。Monitor::ValLoss 等を使う。docs/autodiff-ema-decision.md §10.2 (e)）",
+                )
             } else if compiled.amp.is_some() {
                 Some(
                     "Callback::Ema は compile_with_amp（AMP）と併用できない（AMP の skip step の扱いが未決のため。docs/autodiff-ema-decision.md §10.2 (g)）",

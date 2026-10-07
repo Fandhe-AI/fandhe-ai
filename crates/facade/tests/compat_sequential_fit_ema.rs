@@ -223,15 +223,15 @@ fn checkpoint_and_early_stopping_observe_ema_weights() {
     let mut model = build_model();
     let mut cbs = [
         ema_cb(DECAY),
-        Callback::ModelCheckpoint(ModelCheckpoint::new().monitor(Monitor::Loss)),
+        Callback::ModelCheckpoint(ModelCheckpoint::new().monitor(Monitor::ValLoss)),
         Callback::EarlyStopping(
             EarlyStopping::new(5)
-                .monitor(Monitor::Loss)
+                .monitor(Monitor::ValLoss)
                 .restore_best_weights(true),
         ),
     ];
     model
-        .fit_with_callbacks(&x, &y, FitConfig::new(1, N), None, &mut cbs)
+        .fit_with_callbacks(&x, &y, FitConfig::new(1, N), Some((&x, &y)), &mut cbs)
         .expect("fit");
     let shadow = dict_bits(&shadow_of(&cbs[0]));
     let Callback::ModelCheckpoint(mc) = &cbs[1] else {
@@ -324,6 +324,26 @@ fn rejected_combinations_leave_model_untouched() {
     )));
     assert_eq!(model_bits(&m), before);
     m.evaluate(&x, &y, N).expect("compile 状態が保持されている");
+
+    // (e) Monitor::Loss の ModelCheckpoint／EarlyStopping（生の重みの損失でベスト判定
+    // してしまうため拒否。§10.2 (e)）。
+    for cb in [
+        Callback::ModelCheckpoint(ModelCheckpoint::new().monitor(Monitor::Loss)),
+        Callback::EarlyStopping(EarlyStopping::new(2).monitor(Monitor::Loss)),
+    ] {
+        let mut m = build_model();
+        let before = model_bits(&m);
+        let mut cbs = [ema_cb(0.9), cb];
+        assert!(is_invalid_arg(m.fit_with_callbacks(
+            &x,
+            &y,
+            FitConfig::new(1, N),
+            None,
+            &mut cbs
+        )));
+        assert_eq!(model_bits(&m), before);
+        m.evaluate(&x, &y, N).expect("compile 状態が保持されている");
+    }
 }
 
 // 8. decay 検証と fit 前の状態。

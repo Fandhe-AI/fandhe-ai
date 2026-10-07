@@ -357,6 +357,12 @@ impl EarlyStopping {
         self.monitor.value_at(history, epoch_local)
     }
 
+    /// 監視指標が学習損失（`Monitor::Loss`）か（EMA 併用の fail-closed 検査用。
+    /// `ModelCheckpoint::monitors_train_loss` と同型。イシュー #2560）。
+    pub(super) fn monitors_train_loss(&self) -> bool {
+        matches!(self.monitor, Monitor::Loss)
+    }
+
     /// [`Sequential::fit_with_callbacks`] 呼び出し開始時に内部状態を
     /// リセットする（モジュール冒頭 doc「epoch 番号の数え方」節）。
     pub(super) fn reset_for_fit(&mut self) {
@@ -518,6 +524,13 @@ impl ModelCheckpoint {
     /// への委譲）。
     pub(super) fn monitor_value_at(&self, history: &History, epoch_local: usize) -> Option<f32> {
         self.monitor.value_at(history, epoch_local)
+    }
+
+    /// 監視指標が学習損失（`Monitor::Loss`）か（EMA 併用の fail-closed 検査用。
+    /// `Monitor::Loss` は EMA 差し替え前の生の重みの損失のため、EMA 重みでの
+    /// ベスト判定契約〈`docs/autodiff-ema-decision.md` §10.2 (e)〉を満たせない。イシュー #2560）。
+    pub(super) fn monitors_train_loss(&self) -> bool {
+        matches!(self.monitor, Monitor::Loss)
     }
 
     /// epoch 末に 1 回呼ぶ。`value` は `self.monitor` が指す指標値、
