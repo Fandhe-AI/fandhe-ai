@@ -77,6 +77,9 @@
 //! を facade 独自の薄いラッパーとして公開する。`compat::Sequential::fit_with_callbacks`
 //! への結線は [`crate::compat::Callback::Ema`] が担う。手動ループでは
 //! `named_parameters()` から構築し、step ごとに `update_named` を呼ぶ。
+//! 公開面（承認形のみ）は `api_surface.rs` の正ガード（`facade_exposes_ema_only_in_approved_shape`・
+//! `ema_types_are_reachable_via_facade_only`・`ema_usage_doctests_are_present_and_compiled`。
+//! イシュー #2561）で固定している。
 //!
 //! ```
 //! use fandhe_ai::compat::{Loss, Optimizer, Sequential};

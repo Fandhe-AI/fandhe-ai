@@ -147,6 +147,40 @@ fn ema_does_not_disturb_training_nor_overwrite_weights() {
     assert_ne!(dict_bits(&shadow_of(&cbs[0])), model_bits(&with));
 }
 
+// 2b. 利用手順（イシュー #2561）: fit 後は生の重みのまま。呼び出し側が shadow を
+// `load_state_dict` で適用して推論へ使う。適用後の重みは shadow と bit 一致し、予測は有限。
+#[test]
+fn ema_weights_applied_after_fit_match_shadow_and_predict_finite() {
+    let (x, y) = gen_data();
+    let mut model = build_model();
+    let mut cbs = [ema_cb(0.9)];
+    model
+        .fit_with_callbacks(&x, &y, FitConfig::new(3, 4), None, &mut cbs)
+        .expect("test fixture: fit");
+
+    let raw = model_bits(&model);
+    let shadow = shadow_of(&cbs[0]);
+    assert_ne!(
+        raw,
+        dict_bits(&shadow),
+        "fit 終了時に重みを自動上書きしない"
+    );
+
+    model
+        .load_state_dict(shadow.clone())
+        .expect("test fixture: shadow は同一モデル由来");
+    assert_eq!(model_bits(&model), dict_bits(&shadow));
+
+    let pred = model.predict(&x).expect("test fixture: predict");
+    assert!(
+        pred.contiguous()
+            .as_slice()
+            .expect("test fixture: contiguous 化済み")
+            .iter()
+            .all(|v| v.is_finite())
+    );
+}
+
 // 3. validation は shadow の下で評価され、epoch 後は生の重みへ復帰する。
 #[test]
 fn validation_runs_under_shadow_and_restores_raw_weights() {

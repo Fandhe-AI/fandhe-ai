@@ -16563,13 +16563,16 @@ fn scan_optimizer_enum_variants_for_lbfgs_detects_each_category() {
 }
 
 // =====================================================================
-// イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）: EMA
-// （`ExponentialMovingAverage`）の facade 公開・`FitConfig`／
-// `Sequential` 接続の保留を検査するテスト群。`EmaHoldDoctestGuard`
-// （`src/lib.rs`）の正のプローブ 1 ブロック方式のドリフト検査に加え、
-// facade src 全体への非再エクスポート・非独自宣言（型名）・非
-// inherent メソッド追加（`use_ema`／`ema_decay`）を固定する。承認事項
-// の位置づけは `docs/autodiff-ema-decision.md` §4 を参照。
+// イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）で保留として
+// 導入し、イシュー #2560（承認形の公開）・#2561（正ガードへの反転）で現在の形に
+// なった EMA の正ガード群。承認形（`optim::ExponentialMovingAverage`＝facade 独自
+// ラッパー、`compat::EmaCallback`＝`Callback::Ema` の中身）だけを許す
+// インベントリ（`facade_exposes_ema_only_in_approved_shape`）、承認シグネチャの
+// コンパイル時固定（`ema_types_are_reachable_via_facade_only`）、正の doctest
+// プローブ（`ema_usage_doctests_are_present_and_compiled`）に加え、
+// `EmaHoldDoctestGuard`（`src/lib.rs`。`FitConfig`／`Sequential` への `use_ema`／
+// `ema_decay` 追加という未承認経路専用の衝突プローブ）のドリフト検査を固定する。
+// 承認事項と実装記録は `docs/autodiff-ema-decision.md` §10・§13・§14 を参照。
 // =====================================================================
 
 /// `crates/facade/src/lib.rs` の `EmaHoldDoctestGuard` doc 内の唯一の
@@ -16676,6 +16679,13 @@ const EMA_APPROVED_REEXPORT_LINE: &str = "pub use crate::optim_ema::ExponentialM
 /// 承認した EMA 型の独自宣言を置く唯一のファイル（`src` からの相対パス）。
 const EMA_APPROVED_DECL_FILE: &str = "optim_ema.rs";
 
+/// `Callback::Ema` の中身 `EmaCallback`（#2560・決定記録 §10.2 (d)）の宣言を置く唯一のファイル。
+const EMA_CALLBACK_DECL_FILE: &str = "compat/callbacks.rs";
+
+/// `EmaCallback` を公開する唯一のファイル。再エクスポートは複数名を並べた波括弧 group の
+/// 一員であるため行の完全一致ではなく「このファイルで・別名なし・ちょうど 1 文」で判定する。
+const EMA_CALLBACK_REEXPORT_FILE: &str = "compat/mod.rs";
+
 /// `(src からの相対パス, ソース内容)` の集合を走査し、EMA の公開形が承認形から外れて
 /// いる点を違反として返す（[`facade_exposes_ema_only_in_approved_shape`]・自己テスト共用）。
 ///
@@ -16684,14 +16694,20 @@ const EMA_APPROVED_DECL_FILE: &str = "optim_ema.rs";
 ///   許し、ちょうど 1 件であること
 /// - `trait`／`struct`／`enum`／`type`／`union` による同名の宣言は
 ///   [`EMA_APPROVED_DECL_FILE`] の 1 件だけを許す（それ以外・重複は違反）
+/// - `EmaCallback` を識別子として含む `pub use` 文は [`EMA_CALLBACK_REEXPORT_FILE`] の
+///   別名なし（`as` の前後いずれにも現れない）ちょうど 1 件だけを許し、同名の型宣言は
+///   [`EMA_CALLBACK_DECL_FILE`] の 1 件だけを許す（それ以外・重複は違反）
 /// - `use_ema`／`ema_decay` という名前の `fn` 宣言は可視性・宣言文脈を問わず違反
 ///   （`FitConfig`／`Sequential` への inherent メソッド追加の禁止。決定記録 §10.2 (d)）
 fn ema_surface_violations(files: &[(String, String)]) -> Vec<String> {
     const TYPE_NAME: &str = "ExponentialMovingAverage";
+    const CALLBACK_NAME: &str = "EmaCallback";
     const METHOD_NAMES: [&str; 2] = ["use_ema", "ema_decay"];
     let mut violations: Vec<String> = Vec::new();
     let mut approved_reexports = 0usize;
     let mut approved_decls = 0usize;
+    let mut callback_reexports = 0usize;
+    let mut callback_decls = 0usize;
     for (rel, content) in files {
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
         let tokens = tokenize_including_punctuation(&cleaned);
@@ -16714,6 +16730,18 @@ fn ema_surface_violations(files: &[(String, String)]) -> Vec<String> {
                         violations.push(format!("{rel}: 承認形以外の `{}`", stmt.join(" ")));
                     }
                 }
+                if let Some(pos) = stmt.iter().position(|t| t == CALLBACK_NAME) {
+                    let aliased = stmt.get(pos + 1).map(String::as_str) == Some("as")
+                        || (pos > 0 && stmt[pos - 1] == "as");
+                    if rel == EMA_CALLBACK_REEXPORT_FILE && !aliased {
+                        callback_reexports += 1;
+                    } else {
+                        violations.push(format!(
+                            "{rel}: 承認形以外の `{CALLBACK_NAME}` 再エクスポート `{}`",
+                            stmt.join(" ")
+                        ));
+                    }
+                }
                 j = end + 1;
                 continue;
             }
@@ -16728,6 +16756,15 @@ fn ema_surface_violations(files: &[(String, String)]) -> Vec<String> {
                     approved_decls += 1;
                 } else {
                     violations.push(format!("{rel}: {tok} {TYPE_NAME} 宣言（承認外の場所）"));
+                }
+            }
+            if matches!(tok.as_str(), "trait" | "struct" | "enum" | "type" | "union")
+                && next == Some(CALLBACK_NAME)
+            {
+                if rel == EMA_CALLBACK_DECL_FILE {
+                    callback_decls += 1;
+                } else {
+                    violations.push(format!("{rel}: {tok} {CALLBACK_NAME} 宣言（承認外の場所）"));
                 }
             }
             if tok == "fn" && next.is_some_and(|n| METHOD_NAMES.contains(&n)) {
@@ -16750,12 +16787,25 @@ fn ema_surface_violations(files: &[(String, String)]) -> Vec<String> {
              （ちょうど 1 件である必要がある）"
         ));
     }
+    if callback_reexports != 1 {
+        violations.push(format!(
+            "src/{EMA_CALLBACK_REEXPORT_FILE} の `{CALLBACK_NAME}` 再エクスポートが \
+             {callback_reexports} 件（ちょうど 1 件である必要がある）"
+        ));
+    }
+    if callback_decls != 1 {
+        violations.push(format!(
+            "src/{EMA_CALLBACK_DECL_FILE} の {CALLBACK_NAME} 宣言が {callback_decls} 件\
+             （ちょうど 1 件である必要がある）"
+        ));
+    }
     violations
 }
 
 /// facade src 全体（`crates/facade/src/**`）で EMA の公開が承認形（#2560。`src/optim.rs` の
 /// `pub use crate::optim_ema::ExponentialMovingAverage;` 1 行＋`src/optim_ema.rs` の独自
-/// ラッパー宣言 1 件）だけであることを固定する。内部型の素の再エクスポート・別名・
+/// ラッパー宣言 1 件、および `compat::EmaCallback` の宣言 1 件＋`compat/mod.rs` の別名なし
+/// 再エクスポート 1 件。#2561 で `EmaCallback` を対象に追加）だけであることを固定する。内部型の素の再エクスポート・別名・
 /// 他ファイルでの宣言・`use_ema`／`ema_decay` の `fn` 宣言は fail-closed で拒否する
 /// （`EmaHoldDoctestGuard` の inherent メソッド衝突プローブと多層防御を成す）。
 #[test]
@@ -16784,17 +16834,28 @@ fn facade_exposes_ema_only_in_approved_shape() {
 fn facade_exposes_ema_only_in_approved_shape_detects_each_category() {
     let reexport = format!("{EMA_APPROVED_REEXPORT_LINE}\n");
     let decl = "pub struct ExponentialMovingAverage { inner: u8 }\n".to_string();
+    let cb_reexport =
+        "pub use callbacks::{\n    Callback, EmaCallback,\n    JsonLogger,\n};\n".to_string();
+    let cb_decl = "pub struct EmaCallback { decay: f32 }\n".to_string();
     let base = || {
         vec![
             ("optim.rs".to_string(), reexport.clone()),
             (EMA_APPROVED_DECL_FILE.to_string(), decl.clone()),
+            (EMA_CALLBACK_REEXPORT_FILE.to_string(), cb_reexport.clone()),
+            (EMA_CALLBACK_DECL_FILE.to_string(), cb_decl.clone()),
         ]
     };
     assert!(ema_surface_violations(&base()).is_empty());
 
-    // 違反: 承認形の欠落（再エクスポート・宣言のそれぞれ）。
-    assert!(!ema_surface_violations(&base()[1..]).is_empty());
-    assert!(!ema_surface_violations(&base()[..1]).is_empty());
+    // 違反: 承認形の欠落（再エクスポート・宣言のそれぞれ。EmaCallback 側を含む）。
+    for skip in 0..4 {
+        let mut files = base();
+        files.remove(skip);
+        assert!(
+            !ema_surface_violations(&files).is_empty(),
+            "欠落を検出しない: index {skip}"
+        );
+    }
 
     // 違反: 内部型の素の再エクスポート・別名・波括弧 group（複数行）・別ファイル重複・
     // 別ファイルでの独自宣言・重複宣言・inherent メソッド追加。
@@ -16823,6 +16884,23 @@ fn facade_exposes_ema_only_in_approved_shape_detects_each_category() {
         ("optim.rs", reexport.as_str()),
         ("lib.rs", "pub struct ExponentialMovingAverage;\n"),
         (EMA_APPROVED_DECL_FILE, decl.as_str()),
+        // EmaCallback: 別名（右・左）・別ファイルでの再エクスポート・重複再エクスポート・
+        // 別ファイルでの宣言・重複宣言。
+        (
+            EMA_CALLBACK_REEXPORT_FILE,
+            "pub use callbacks::{EmaCallback as Ema};\n",
+        ),
+        (
+            EMA_CALLBACK_REEXPORT_FILE,
+            "pub use callbacks::{Other as EmaCallback};\n",
+        ),
+        ("lib.rs", "pub use compat::EmaCallback;\n"),
+        (
+            EMA_CALLBACK_REEXPORT_FILE,
+            "pub use callbacks::EmaCallback;\n",
+        ),
+        ("compat/training.rs", "pub struct EmaCallback;\n"),
+        (EMA_CALLBACK_DECL_FILE, cb_decl.as_str()),
         (
             "compat/training.rs",
             "impl FitConfig {\n    pub fn use_ema(mut self, on: bool) -> Self {\n        self\n    }\n}\n",
@@ -16848,10 +16926,101 @@ fn facade_exposes_ema_only_in_approved_shape_detects_each_category() {
          use crate::optim::ExponentialMovingAverage;\n\
          let s = \"ExponentialMovingAverage\";\n\
          pub use fandhe_ai_autodiff::nn::AdamW;\n\
+         // pub use x::EmaCallback;\n\
+         use crate::compat::EmaCallback;\n\
          pub fn use_dropout(&self) {}\n"
             .to_string(),
     ));
     assert!(ema_surface_violations(&benign).is_empty());
+}
+
+/// 承認した EMA 型のシグネチャ（決定記録 `docs/autodiff-ema-decision.md` §10.2 (b)・
+/// §13.2）を `fandhe_ai` のみの import でコンパイル時に固定する（#2561。
+/// `fandhe_ai_autodiff` は import しない）。関数ポインタ型注釈の代入が型検査を通ることが
+/// 検査であり、メソッドの追加・引数や戻り値の変更はここでコンパイルエラーになる。
+/// `Callback::Ema` の構築は `fit_types_are_reachable_via_facade_only` が固定済み。
+#[test]
+fn ema_types_are_reachable_via_facade_only() {
+    use std::collections::HashMap;
+
+    use fandhe_ai::compat::EmaCallback;
+    use fandhe_ai::nn::Module;
+    use fandhe_ai::optim::ExponentialMovingAverage as Ema;
+    use fandhe_ai::{AutodiffError, Tensor};
+
+    // clippy::type_complexity 回避の別名（型の中身は決定記録 §13.2 のシグネチャそのまま）。
+    type Named<'a> = Vec<(String, &'a Tensor<f32>)>;
+    type StateDict = HashMap<String, Tensor<f32>>;
+
+    let _new: fn(f32, &[&Tensor<f32>]) -> Result<Ema, AutodiffError> = Ema::new;
+    let _from_named: fn(f32, Named<'_>) -> Result<Ema, AutodiffError> = Ema::from_named;
+    let _from_module: fn(f32, &dyn Module) -> Result<Ema, AutodiffError> = Ema::from_module;
+    let _decay: fn(&Ema) -> f32 = Ema::decay;
+    let _num_updates: fn(&Ema) -> u64 = Ema::num_updates;
+    let _update: fn(&mut Ema, &[&Tensor<f32>]) -> Result<(), AutodiffError> = Ema::update;
+    let _update_named: fn(&mut Ema, Named<'_>) -> Result<(), AutodiffError> = Ema::update_named;
+    let _update_from_module: fn(&mut Ema, &dyn Module) -> Result<(), AutodiffError> =
+        Ema::update_from_module;
+    let _shadow: for<'a> fn(&'a Ema, &str) -> Option<&'a Tensor<f32>> = Ema::shadow;
+    let _shadow_parameters: for<'a> fn(&'a Ema) -> Vec<&'a Tensor<f32>> = Ema::shadow_parameters;
+    let _shadow_state_dict: fn(&Ema) -> StateDict = Ema::shadow_state_dict;
+    let _apply: fn(&Ema, &mut dyn Module) -> Result<StateDict, AutodiffError> = Ema::apply;
+    let _restore: fn(&mut dyn Module, StateDict) -> Result<(), AutodiffError> = Ema::restore;
+
+    let _cb_new: fn(f32) -> Result<EmaCallback, AutodiffError> = EmaCallback::new;
+    let _cb_decay: fn(&EmaCallback) -> f32 = EmaCallback::decay;
+    let _cb_num_updates: fn(&EmaCallback) -> u64 = EmaCallback::num_updates;
+    let _cb_shadow: fn(&EmaCallback) -> Option<StateDict> = EmaCallback::shadow_state_dict;
+
+    // 振る舞いの最小確認: decay の範囲外は型付きエラー。
+    assert!(Ema::new(1.5, &[]).is_err());
+    assert!(EmaCallback::new(f32::NAN).is_err());
+}
+
+/// 正の doctest プローブ（#2561。param groups の #2554 と同型）: EMA の利用例が facade の
+/// 公開 doc に実在し、実際にコンパイル・実行される形（`ignore` 等の指定なし）で書かれて
+/// いることを固定する。否定の保証に `compile_fail` は使わない（stable rustdoc は
+/// エラーコードを照合しないため）。実体のコンパイル・実行は `cargo test --doc`。
+/// 検出器の自己テスト（`ignore`／`no_run`／隠し行等の負例）は
+/// `param_groups_usage_doctests_are_present_and_compiled` が同じ
+/// [`doctest_probe_violations`] を踏んでいるため、ここでは空入力の負例だけを置く。
+#[test]
+fn ema_usage_doctests_are_present_and_compiled() {
+    let root = facade_crate_root();
+    let optim = read_to_string_or_panic(&root.join("src/optim.rs"));
+    let ema_rs = read_to_string_or_panic(&root.join("src/optim_ema.rs"));
+    let callbacks = read_to_string_or_panic(&root.join("src/compat/callbacks.rs"));
+
+    let mut v = doctest_probe_violations(
+        "optim.rs モジュール doc（EMA 節）",
+        &inner_doc_lines(&optim),
+        &["ExponentialMovingAverage", "from_named", "update_named"],
+    );
+    v.extend(doctest_probe_violations(
+        "ExponentialMovingAverage の doc",
+        &doc_lines_above_fn(&ema_rs, "pub struct ExponentialMovingAverage"),
+        &[
+            "use fandhe_ai::optim::ExponentialMovingAverage",
+            "ExponentialMovingAverage::new",
+            "shadow_parameters",
+        ],
+    ));
+    v.extend(doctest_probe_violations(
+        "EmaCallback の doc",
+        &doc_lines_above_fn(&callbacks, "pub struct EmaCallback"),
+        &[
+            "use fandhe_ai::compat::",
+            "Callback::Ema",
+            "EmaCallback::new",
+            "shadow_state_dict",
+        ],
+    ));
+    assert!(v.is_empty(), "{v:?}");
+
+    // 自己テスト: 空入力・利用例の欠落は検出される。
+    assert!(!doctest_probe_violations("t", &[], &["ExponentialMovingAverage"]).is_empty());
+    let hidden = ["```", "# ExponentialMovingAverage", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &hidden, &["ExponentialMovingAverage"]).is_empty());
 }
 
 // =====================================================================

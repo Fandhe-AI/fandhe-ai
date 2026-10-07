@@ -2922,47 +2922,30 @@ struct PixelShuffleHoldDoctestGuard;
 #[allow(dead_code)]
 struct LossOpsHoldDoctestGuard;
 
-/// イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）の
-/// facade 公開保留を固定する doctest 足場。`OptimizerExtHoldDoctestGuard`
-/// （#2171。#2501 で削除済み）と同型の、2 系統の否定ガードを 1 ブロックで兼ねる方式を
-/// 採る。
+/// イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）で導入し、#2560 の公開後は
+/// **禁止経路専用**として維持する doctest 足場（`TrainStepHoldDoctestGuard`〈#2569〉と同じ扱い。
+/// 構造体名は `*HoldDoctestGuard` の統一と固定文言ドリフト検査の対象名を保つため変えない。
+/// 判断は `docs/autodiff-ema-decision.md` §14.3）。
 ///
-/// [`fandhe_ai_autodiff::nn::ExponentialMovingAverage`]（内部クレート
-/// 限定。`crates/autodiff/src/nn/ema.rs`。イシュー #2179）は、イシュー #2560 で
-/// `optim::ExponentialMovingAverage`（facade 独自ラッパー）として公開済み。
-/// `compat::FitConfig`（`fit(use_ema=true)` 相当のフィールド／メソッド追加）・
-/// `compat::Sequential`（EMA 適用・復元メソッド追加）への接続は行わない
-/// （`docs/autodiff-ema-decision.md` §10.2 (d)。`fit` への結線は
-/// `compat::Callback::Ema`）。
+/// 承認形は #2560 で公開済み: `optim::ExponentialMovingAverage`（facade 独自ラッパー）と
+/// `compat::EmaCallback`／`Callback::Ema`（`fit_with_callbacks` への結線）。
+/// 本足場が固定するのは**残る禁止経路**、すなわち `compat::FitConfig`（`fit(use_ema=true)` 相当）・
+/// `compat::Sequential`（EMA 適用・復元）への `use_ema`／`ema_decay` inherent メソッド追加
+/// （決定記録 §10.2 (d) で不採用）だけである。`VarCustomHoldDoctestGuard`〈#2064〉と同じ
+/// マーカー型トレイト方式で、ローカル `__FandheEmaHoldProbe` トレイトを両型へ実装し、
+/// メソッド形・型パス形の両方で呼び出す。facade がどちらかの型へ同名の inherent メソッドを
+/// 追加すると、優先解決される inherent メソッドの戻り値の型がプローブの期待型と一致せず
+/// 型不一致でコンパイルが失敗する。
 ///
-/// 1. **型名の再エクスポート・独自宣言**: `ExponentialMovingAverage` はイシュー #2560 で
-///    承認形（`optim::ExponentialMovingAverage`。facade 独自ラッパー）として公開済みの
-///    ため、型名 glob 衝突プローブは削除した。承認形以外の経路（内部型の素の再エクスポート・
-///    別名・他ファイルでの独自宣言）はソース走査ガード
-///    `crates/facade/tests/api_surface.rs::facade_exposes_ema_only_in_approved_shape`
-///    が拒否する。
-/// 2. **`compat::FitConfig`／`compat::Sequential` への inherent メソッド
-///    追加**（`VarCustomHoldDoctestGuard`〈#2064〉と同じマーカー型
-///    トレイト方式）: ローカル `__FandheEmaHoldProbe` トレイト
-///    （`use_ema`／`ema_decay` という名前のメソッドを持つ）を両型へ
-///    実装し、メソッド形・型パス形の両方で呼び出す。facade がどちらか
-///    の型へ同名の inherent メソッドを追加すると、優先解決される
-///    inherent メソッドの戻り値の型がプローブの期待型と一致せず型
-///    不一致でコンパイルが失敗する（承認後の実際のメソッド名・シグ
-///    ネチャは `docs/autodiff-ema-decision.md` §5「承認後の facade
-///    仕様案」で未確定のため、本足場の `use_ema`／`ema_decay` は
-///    「これらの名前を持つ inherent メソッドが facade 型に生えたら
-///    検出する」という最小契約に留める）。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// ema_hold_doctest_globs_all_pub_modules`・
-/// `ema_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_exposes_ema_only_in_approved_shape`）との多層防御の
-/// 位置づけは `docs/autodiff-ema-decision.md` §4・§13 を参照。
-///
-/// 型は #2560 で公開済み（`fit` 結線は `compat::Callback::Ema`）。`FitConfig`／
-/// `Sequential` への `use_ema`／`ema_decay` inherent メソッド追加は引き続き禁止で、
-/// 本足場はその衝突プローブだけを残す（構造体名の改名・正ガードの仕上げは #2561）。
+/// ソース走査の正ガード（#2561 で反転済み。`crates/facade/tests/api_surface.rs::
+/// facade_exposes_ema_only_in_approved_shape`・
+/// `facade_exposes_ema_only_in_approved_shape_detects_each_category`・
+/// `ema_types_are_reachable_via_facade_only`・
+/// `ema_usage_doctests_are_present_and_compiled`）が承認形の存在と形を固定し、
+/// 本 doctest は禁止経路専用として型検査レベルで維持する
+/// （`ema_hold_doctest_globs_all_pub_modules`・
+/// `ema_hold_doctest_probe_body_matches_fixed_contract` がドリフトを検出）。
+/// 多層防御の位置づけは `docs/autodiff-ema-decision.md` §4・§13・§14 を参照。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
