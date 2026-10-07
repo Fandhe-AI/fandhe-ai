@@ -1422,6 +1422,7 @@ lib.rs::FitWeightingHoldDoctestGuard`（正のプローブ doctest）＋
 2 件・facade 再エクスポート／独自宣言の否定ガード・`FitConfig` の
 `Copy + Eq` 維持固定）で機械固定した。詳細な承認事項・意味論・
 実装スケッチは `docs/compat-fit-sample-weighting-decision.md` §2〜§7。
+→ イシュー #2564 で公開、#2565 で正ガードへ反転済み（本節末尾側の適用記録「イシュー #2564・#2565」を参照）。
 
 **適用記録（#2181）**: AMP（`GradScaler`）の `DeviceParamStore` 常駐更新
 への結線は、1 節「Tier 2 に列挙済みの機能」（AMP 行）の実装に該当するため
@@ -2123,6 +2124,16 @@ facade `Tape::backward_create_graph`（`self.0.backward_create_graph(loss, &chil
 `fit_with_train_step_class_index_target_cross_entropy` を追加）。
 保留継続: `test_step_fn`／`predict_step_fn`・AMP／勾配累積／L-BFGS とフックの併用・`TrainStepOptimizer::set_lr`・`DeviceParamStore` 常駐経路でのフック（同 doc §6）、
 `Reduction` の facade 再エクスポート（#2538 の保留）。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。新規演算は無く CPU のみで検証できるため実機 parity の申し送りは不要。
+
+**適用記録（経路 2。イシュー #2564・#2565・親 #2562・ルート #2499 のコメント〈`issuecomment-6033824965`・2026-10-07〉の「#2562: `docs/compat-fit-sample-weighting-decision.md` §11.1 の確定形と §11.3 の推奨案〈式が未定義の組み合わせは fail-closed〉」に基づく）**:
+§11.1 の確定形どおり、`fandhe_ai::compat::FitWeights`（`compat/mod.rs` の `pub use` 葉 1 件。`FitWeights::{new, class_weight, sample_weight}`）・inherent `FitConfig::validation_split`・
+inherent `Sequential::fit_with_weights` の 6 要素を公開した（実施は #2564・PR #2823）。`fandhe-ai =0.10.0` の公開 API に追加のみ・非破壊（`FitConfig` は `Copy + Eq` のまま不変）。
+保留ガードは承認形だけを許す正ガードへ反転した（`facade_fit_weighting_public_surface_matches_approved_contract`・`facade_fit_weights_shape_matches_approved_contract`・
+`workspace_declares_fit_weighting_fn_names_only_in_approved_location`・`fit_weighting_items_are_reachable_via_facade_only`。実施は #2565、対応表は同 doc §15）。
+`FitWeightingHoldDoctestGuard` は禁止経路（`FitConfig::class_weight`／`sample_weight`／`fit_with_weights`／`fit_weighted`・`Sequential::validation_split`／`class_weight`／`sample_weight`／`fit_weighted`）専用の doctest として維持した。
+利用例は `crates/facade/tests/compat_sequential_fit_weights.rs`（#2564）と各公開項目の doctest、facade 単独 import の到達性テスト（#2565）。
+保留継続: 式が未定義の組み合わせ（`CrossEntropy`／`Mse` 以外の `sample_weight`・`CrossEntropy` 以外の `class_weight`・非既定の重み × `Lbfgs`）の `InvalidArgument` 拒否（fail-closed のまま）、`fit_weighted` 等の別名、`FitConfig` へ重みを持たせる形。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。新規演算は無く CPU のみで検証できるため実機 parity の申し送りは不要。
 
 **適用記録（経路 2。イシュー #2571・親 #2570・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:

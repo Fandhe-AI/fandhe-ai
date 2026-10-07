@@ -19074,8 +19074,21 @@ fn callback_logger_types_expose_only_approved_methods_and_traits_detects_each_ca
     assert!(!check_callback_logger_accessor_surface(&v).is_empty());
 }
 
-// #2177（親 #2131）の facade 公開保留固定（`FitWeightingHoldDoctestGuard`）。
-// 旧 `CallbacksLoggersHoldDoctestGuard`（#2178。#2571 で削除済み）と同型の 4 テスト構成。
+// =====================================================================
+// #2177（親 #2131）で `FitWeightingHoldDoctestGuard` による保留固定として導入し、
+// #2564 で承認形（`FitConfig::validation_split`・`FitWeights`・
+// `Sequential::fit_with_weights`。決定記録 §11.1・§11.6）の公開に合わせて縮小し、
+// #2565 で正ガードへ反転した facade 公開面の固定。ソース走査は「承認した形が
+// 承認した場所にちょうど 1 件ずつ存在すること」を固定する正ガード
+// （`facade_fit_weighting_public_surface_matches_approved_contract`・
+// `facade_fit_weights_shape_matches_approved_contract`・
+// `workspace_declares_fit_weighting_fn_names_only_in_approved_location`・
+// `fit_weighting_items_are_reachable_via_facade_only`）になった。残る禁止経路
+// （`FitConfig::class_weight`／`sample_weight`／`fit_with_weights`／`fit_weighted`・
+// `Sequential::validation_split`／`class_weight`／`sample_weight`／`fit_weighted`）は
+// `FitWeightingHoldDoctestGuard`（禁止経路専用へ縮小）が型検査レベルで維持する。
+// doctest 本体のドリフト検査 2 件と `fit_config_keeps_copy_eq_for_0_9_0_compat` は維持。
+// =====================================================================
 
 /// `crates/facade/src/lib.rs` の `FitWeightingHoldDoctestGuard` doc 内の
 /// doctest が glob import する `pub mod` 集合が、`src/lib.rs` の実際の
@@ -19197,38 +19210,38 @@ fn __probe(cfg: &fandhe_ai::compat::FitConfig, seq: &fandhe_ai::compat::Sequenti
 \x20\x20\x20\x20\x20\x20\x20\x20fandhe_ai::compat::Sequential::fit_weighted(seq);\n\
 }";
 
-/// 承認形（#2564。`docs/compat-fit-sample-weighting-decision.md` §11.1・§11.6）の
-/// 許可位置の総数。`compat/mod.rs` の `pub use` 葉 `FitWeights` 1・`compat/
-/// training.rs` の `struct FitWeights` 1・同ファイルの `fn validation_split`／
-/// `class_weight`／`sample_weight`／`fit_with_weights` 各 1。走査が空振り
-/// （0 件許可）で通ることを防ぐため、呼び出しテストで合計を固定する。
-const FIT_WEIGHTING_APPROVED_SITE_COUNT: usize = 6;
-
-/// [`facade_does_not_reexport_or_declare_fit_weighting_items`]・その自己テストが
-/// 共用する検出本体。`rel` は `crates/facade/src` からの相対パス（`/` 区切り）。
-/// 戻り値は（違反, 許可された承認位置の件数）。承認位置は `compat/mod.rs` の
-/// `pub use` 葉 `FitWeights`（別名 `as` は違反）・`compat/training.rs` の
-/// `struct FitWeights`・同ファイルの `fn validation_split`／`class_weight`／
-/// `sample_weight`／`fit_with_weights` 各 1 件のみ。それ以外の場所・2 件目以降・
-/// `trait`／`enum`／`type` による同名宣言・`fn fit_weighted`（全域）は違反。
-/// `class_weight`／`sample_weight` は `impl` の所有型を区別できないため位置と
-/// 件数で縛り、`FitConfig` 側への追加は `FitWeightingHoldDoctestGuard` が検出する。
-fn scan_fit_weighting_reexports_and_declarations(rel: &str, content: &str) -> (Vec<String>, usize) {
+/// [`facade_fit_weighting_public_surface_matches_approved_contract`]・その
+/// 自己テストが共用する検出本体（#2565 で正ガード化）。`rel`
+/// （`crates/facade/src` からの `/` 区切り相対パス）と `content` を受け、
+/// `(違反一覧, 確認できた承認要素の鍵一覧)` を返す。承認要素の鍵は次の 6 種
+/// （承認形は #2564・`docs/compat-fit-sample-weighting-decision.md` §11.1・§11.6）:
+/// (a) `compat/mod.rs` の `pub use` 葉 `use:FitWeights`（`as` による別名は葉の前後
+/// どちらでも場所を問わず違反）、(b) `compat/training.rs` の `struct:FitWeights`
+/// 宣言（`trait`／`enum`／`type` の同名宣言・他ファイルは違反）、(c) 同ファイルの
+/// `impl FitConfig` 内 `fn:validation_split`、(d) `impl FitWeights` 内
+/// `fn:class_weight`・`fn:sample_weight`、(e) `impl Sequential` 内
+/// `fn:fit_with_weights`。所有型は [`scan_type_impl_surface`] で判定するため、
+/// 別の型の `impl` に置かれた同名 fn・2 件目以降は違反になる。`fn fit_weighted`
+/// 宣言は全域で違反。鍵を返すのは、呼び出し側が「要素ごとにちょうど 1 件」を
+/// 数えて欠落・二重化・空振りを検出するため。
+fn scan_fit_weighting_reexports_and_declarations(
+    rel: &str,
+    content: &str,
+) -> (Vec<String>, Vec<String>) {
     const TYPE_NAMES: [&str; 1] = ["FitWeights"];
-    const APPROVED_FN_NAMES: [&str; 4] = [
-        "validation_split",
-        "class_weight",
-        "sample_weight",
-        "fit_with_weights",
+    // （fn 名, 所有型）。所有型の `impl` 内にある 1 件目だけが承認位置。
+    const APPROVED_FNS: [(&str, &str); 4] = [
+        ("validation_split", "FitConfig"),
+        ("class_weight", "FitWeights"),
+        ("sample_weight", "FitWeights"),
+        ("fit_with_weights", "Sequential"),
     ];
-    let in_mod = rel == "compat/mod.rs";
-    let in_training = rel == "compat/training.rs";
+    let is_mod_rs = rel == "compat/mod.rs";
+    let is_training_rs = rel == "compat/training.rs";
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
-    let mut allowed = 0usize;
-    let mut use_leaf_count = 0usize;
-    let mut struct_count = 0usize;
+    let mut allowed: Vec<String> = Vec::new();
 
     let mut i = 0usize;
     while i < tokens.len() {
@@ -19238,16 +19251,28 @@ fn scan_fit_weighting_reexports_and_declarations(rel: &str, content: &str) -> (V
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
-            let aliased = path_tokens
-                .windows(2)
-                .any(|w| TYPE_NAMES.contains(&w[0].as_str()) && w[1] == "as");
-            for leaf in collect_pub_use_leaves(path_tokens) {
-                if TYPE_NAMES.contains(&leaf.as_str()) {
-                    use_leaf_count += 1;
-                    if !in_mod || aliased || use_leaf_count > 1 {
-                        offending.push(format!("pub use leaf={leaf}（承認位置外・別名・重複）"));
+            // 別名（`X as FitWeights`・`FitWeights as X`）は場所を問わず違反。
+            let mut aliased_any = false;
+            for (j, t) in path_tokens.iter().enumerate() {
+                if !TYPE_NAMES.contains(&t.as_str()) {
+                    continue;
+                }
+                let before_as = j > 0 && path_tokens[j - 1] == "as";
+                let after_as = path_tokens.get(j + 1).map(String::as_str) == Some("as");
+                if before_as || after_as {
+                    aliased_any = true;
+                    offending.push(format!("pub use 別名 {t}（{rel}）"));
+                }
+            }
+            if !aliased_any {
+                for leaf in collect_pub_use_leaves(path_tokens) {
+                    if !TYPE_NAMES.contains(&leaf.as_str()) {
+                        continue;
+                    }
+                    if is_mod_rs {
+                        allowed.push(format!("use:{leaf}"));
                     } else {
-                        allowed += 1;
+                        offending.push(format!("pub use leaf={leaf}（{rel}）"));
                     }
                 }
             }
@@ -19255,115 +19280,304 @@ fn scan_fit_weighting_reexports_and_declarations(rel: &str, content: &str) -> (V
             continue;
         }
         if matches!(tokens[i].as_str(), "trait" | "struct" | "enum" | "type")
-            && tokens
+            && let Some(name) = tokens
                 .get(i + 1)
-                .map(|t| TYPE_NAMES.contains(&t.as_str()))
-                .unwrap_or(false)
+                .filter(|t| TYPE_NAMES.contains(&t.as_str()))
         {
-            let is_struct = tokens[i] == "struct";
-            if is_struct {
-                struct_count += 1;
-            }
-            if is_struct && in_training && struct_count == 1 {
-                allowed += 1;
+            let kind = tokens[i].as_str();
+            if is_training_rs && kind == "struct" {
+                allowed.push(format!("struct:{name}"));
             } else {
-                offending.push(format!(
-                    "{} {} 宣言（承認位置外・重複）",
-                    tokens[i],
-                    tokens.get(i + 1).map(String::as_str).unwrap_or_default()
-                ));
+                offending.push(format!("{kind} {name} 宣言（{rel}）"));
             }
         }
         i += 1;
     }
 
-    for name in APPROVED_FN_NAMES {
-        let n = count_fn_declarations_by_name(&tokens, name);
-        if in_training && n >= 1 {
-            allowed += 1;
-            offending.extend((1..n).map(|_| format!("fn {name} 宣言（2 件目以降）")));
-        } else {
-            offending.extend((0..n).map(|_| format!("fn {name} 宣言（承認位置外）")));
+    for (name, owner) in APPROVED_FNS {
+        let decls = count_fn_declarations_by_name(&tokens, name);
+        let in_owner_impl =
+            is_training_rs && scan_type_impl_surface(content, owner).0.contains(name);
+        for n in 0..decls {
+            if in_owner_impl && n == 0 {
+                allowed.push(format!("fn:{name}"));
+            } else {
+                offending.push(format!(
+                    "fn {name} 宣言（{rel}。所有型 {owner} の impl 外・重複）"
+                ));
+            }
         }
     }
     offending.extend(
         (0..count_fn_declarations_by_name(&tokens, "fit_weighted"))
-            .map(|_| "fn fit_weighted 宣言（禁止）".to_string()),
+            .map(|_| format!("fn fit_weighted 宣言（禁止。{rel}）")),
     );
 
     (offending, allowed)
 }
 
-/// facade src 全体（`crates/facade/src/**`）で、`FitWeights`／`validation_split`／
-/// `class_weight`／`sample_weight`／`fit_with_weights` の公開・宣言が承認位置
-/// （[`scan_fit_weighting_reexports_and_declarations`] doc）にちょうど
-/// [`FIT_WEIGHTING_APPROVED_SITE_COUNT`] 件だけあり、`fit_weighted` と承認位置外の
-/// 宣言・再エクスポートが無いことを固定する（`FitWeightingHoldDoctestGuard` の
-/// プローブと多層防御を成す最内層のソース走査ガード）。正ガードへの反転は #2565。
+/// 承認形（#2564・決定記録 §11.1・§11.6）の鍵 6 種。各ちょうど 1 件であることを
+/// 正ガードが固定する。
+const FIT_WEIGHTING_APPROVED_KEYS: [&str; 6] = [
+    "use:FitWeights",
+    "struct:FitWeights",
+    "fn:validation_split",
+    "fn:class_weight",
+    "fn:sample_weight",
+    "fn:fit_with_weights",
+];
+
+/// 承認要素の鍵一覧が [`FIT_WEIGHTING_APPROVED_KEYS`] とちょうど一致する
+/// （各 1 件。欠落・二重化・予期しない鍵なし）ことを検査し、逸脱を返す。
+fn fit_weighting_inventory_violations(allowed: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in FIT_WEIGHTING_APPROVED_KEYS {
+        let n = allowed.iter().filter(|k| k.as_str() == key).count();
+        if n == 0 {
+            out.push(format!("承認形の欠落: {key}"));
+        } else if n > 1 {
+            out.push(format!("承認形の二重化: {key}（{n} 件）"));
+        }
+    }
+    for k in allowed {
+        if !FIT_WEIGHTING_APPROVED_KEYS.contains(&k.as_str()) {
+            out.push(format!("承認形からの逸脱: {k}"));
+        }
+    }
+    out
+}
+
+/// 正ガード: facade src 全体（`crates/facade/src/**`）で、承認形（#2564・決定記録
+/// §11.1・§11.6）が承認した場所に 1 件ずつ存在し（`compat/mod.rs` の `pub use` 葉 1・
+/// `compat/training.rs` の `struct FitWeights` 1・所有型 `impl` 内の fn 4）、それ以外の
+/// 形・場所の再エクスポート／宣言・別名・`fn fit_weighted` が 0 件であることを固定する。
+/// 禁止経路（`FitConfig::class_weight` 等の所有型違い）は `FitWeightingHoldDoctestGuard`
+/// の型検査プローブと、本走査の所有型判定が二重に検出する。
 #[test]
-fn facade_does_not_reexport_or_declare_fit_weighting_items() {
+fn facade_fit_weighting_public_surface_matches_approved_contract() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
-    let mut allowed_total = 0usize;
+    let mut allowed_all: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
         let rel = path
             .strip_prefix(&src_dir)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let (found, allowed) = scan_fit_weighting_reexports_and_declarations(&rel, content);
-        allowed_total += allowed;
+        allowed_all.extend(allowed);
         for offense in found {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が fit() の重み付け拡張（#2177・#2564。FitWeights／\
-         validation_split／class_weight／sample_weight／fit_with_weights／\
-         fit_weighted）を承認位置外で再エクスポート・宣言している\
-         （`docs/compat-fit-sample-weighting-decision.md` §11.1・§11.6）: \
-         {offending:?}"
+        "承認形からの逸脱: facade の公開面が fit() の重み付けの承認形（#2564・\
+         `docs/compat-fit-sample-weighting-decision.md` §11.1・§11.6）以外の形で\
+         公開・宣言されている: {offending:?}"
     );
-    assert_eq!(
-        allowed_total, FIT_WEIGHTING_APPROVED_SITE_COUNT,
-        "承認位置の件数がドリフトしている（走査の空振り・承認形の取り下げ・重複の可能性）"
+    let violations = fit_weighting_inventory_violations(&allowed_all);
+    assert!(
+        violations.is_empty(),
+        "承認形の欠落・二重化（走査の空振りを含む）: {violations:?}"
     );
 }
 
-/// [`scan_fit_weighting_reexports_and_declarations`] の自己テスト（正例・負例の
-/// 合成入力）。
+/// `compat/training.rs` 内容から `FitWeights` と、承認した追加メソッドの所有型
+/// （`FitConfig`・`Sequential`）の形状の逸脱を返す。`FitWeights` は inherent pub fn が
+/// `new`／`class_weight`／`sample_weight` のみ・非 pub fn は内部ヘルパー
+/// `is_non_default` のみ・手書き trait impl なし・pub フィールドなし・直前属性が
+/// `#[derive(Debug, Clone, PartialEq, Default)]` のみ（`#[non_exhaustive]` なし）。
+fn fit_weighting_shape_violations(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let (public, nonpublic, traits) = scan_type_impl_surface(content, "FitWeights");
+    let expected: std::collections::BTreeSet<String> = ["new", "class_weight", "sample_weight"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if public != expected {
+        out.push(format!(
+            "FitWeights の inherent pub fn 集合が承認形と不一致: {public:?}"
+        ));
+    }
+    if nonpublic != ["is_non_default".to_string()] {
+        out.push(format!(
+            "FitWeights の非 pub fn が承認形（is_non_default のみ）と不一致: {nonpublic:?}"
+        ));
+    }
+    if !traits.is_empty() {
+        out.push(format!("FitWeights に手書き trait impl がある: {traits:?}"));
+    }
+    if struct_body_has_pub_field(content, "FitWeights") {
+        out.push("FitWeights に pub フィールドがある".to_string());
+    }
+    match attrs_before_pub_struct(content, "FitWeights") {
+        Some(a) if a == "#[derive(Debug,Clone,PartialEq,Default)]" => {}
+        Some(a) => out.push(format!("FitWeights の直前属性が承認形と不一致: {a:?}")),
+        None => out.push("FitWeights の宣言が見つからない".to_string()),
+    }
+    // 所有型の取り違え（`FitConfig` に重み、`Sequential` に split 等）の検出。
+    let (cfg, _, _) = scan_type_impl_surface(content, "FitConfig");
+    if !cfg.contains("validation_split") {
+        out.push("FitConfig に validation_split が無い".to_string());
+    }
+    for n in [
+        "class_weight",
+        "sample_weight",
+        "fit_with_weights",
+        "fit_weighted",
+    ] {
+        if cfg.contains(n) {
+            out.push(format!("FitConfig に承認外の {n} がある"));
+        }
+    }
+    let (seq, _, _) = scan_type_impl_surface(content, "Sequential");
+    if !seq.contains("fit_with_weights") {
+        out.push("Sequential に fit_with_weights が無い".to_string());
+    }
+    for n in [
+        "validation_split",
+        "class_weight",
+        "sample_weight",
+        "fit_weighted",
+    ] {
+        if seq.contains(n) {
+            out.push(format!("Sequential に承認外の {n} がある"));
+        }
+    }
+    out
+}
+
+/// 正ガード: `FitWeights` の形（公開メソッド 3・非公開ヘルパー 1・derive 4 種のみ・
+/// pub フィールド／手書き trait impl／`#[non_exhaustive]` なし）と、追加メソッドの
+/// 所有型を固定する（決定記録 §11.1）。
 #[test]
-fn facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category() {
+fn facade_fit_weights_shape_matches_approved_contract() {
+    let content = read_to_string_or_panic(&facade_crate_root().join("src/compat/training.rs"));
+    let violations = fit_weighting_shape_violations(&content);
+    assert!(
+        violations.is_empty(),
+        "FitWeights／所有型の形が承認形から逸脱している: {violations:?}"
+    );
+}
+
+/// workspace 全体で `fit_with_weights`／`fit_weighted`／`validation_split`／
+/// `sample_weight` の fn 宣言が `facade/src/compat/training.rs` の各 1 件（`fit_weighted`
+/// は 0 件）のみであること（過不足とも fail-closed）。`class_weight` は内部クレートに
+/// 無関係な既存宣言（`crates/autodiff/src/loss_ops.rs` の `pub fn class_weight`）があり、
+/// 内部クレートの都合で本ガードが揺れるのを避けるため名前リストに含めない（facade 内の
+/// `class_weight` は [`facade_fit_weighting_public_surface_matches_approved_contract`] と
+/// [`facade_fit_weights_shape_matches_approved_contract`] が固定する）。
+#[test]
+fn workspace_declares_fit_weighting_fn_names_only_in_approved_location() {
+    let found = scan_workspace_fn_declarations(&[
+        "fit_with_weights",
+        "fit_weighted",
+        "validation_split",
+        "sample_weight",
+    ]);
+    let expected: std::collections::BTreeMap<String, usize> =
+        ["fit_with_weights", "validation_split", "sample_weight"]
+            .iter()
+            .map(|n| (format!("facade/src/compat/training.rs::{n}"), 1))
+            .collect();
+    assert_eq!(
+        found, expected,
+        "fit の重み付けの fn 宣言が承認位置（facade の training.rs 内各 1 件）と不一致"
+    );
+}
+
+/// 承認形が facade だけの import で到達でき、シグネチャが固定されていること
+/// （`fandhe_ai_autodiff` は import しない。`train_step_types_are_reachable_via_facade_only`
+/// と同型）。`f32`／`i32` の両 target で `fit_with_weights` を型検査する。
+#[test]
+fn fit_weighting_items_are_reachable_via_facade_only() {
+    use fandhe_ai::compat::{Callback, FitConfig, FitWeights, History, Metrics, Sequential};
+    use fandhe_ai::{AutodiffError, Tensor};
+    use std::collections::HashMap;
+
+    // 実行しない型検査専用関数（`FitWeights<'a>` は lifetime を持つため fn ポインタへ強制しない）。
+    fn _check_weights(w: &[f32]) -> FitWeights<'_> {
+        let a: FitWeights<'_> = FitWeights::new();
+        let b: FitWeights<'_> = a.class_weight(HashMap::<u32, f32>::new());
+        b.sample_weight(w)
+    }
+    #[allow(clippy::type_complexity)]
+    fn _check_fit_f32(
+        m: &mut Sequential,
+        x: &Tensor<f32>,
+        y: &Tensor<f32>,
+        w: &FitWeights<'_>,
+        v: Option<(&Tensor<f32>, &Tensor<f32>)>,
+        cb: &mut [Callback],
+        mt: &[Metrics],
+    ) -> Result<History, AutodiffError> {
+        m.fit_with_weights::<f32>(x, y, FitConfig::new(1, 1), w, v, cb, mt)
+    }
+    #[allow(clippy::type_complexity)]
+    fn _check_fit_i32(
+        m: &mut Sequential,
+        x: &Tensor<f32>,
+        y: &Tensor<i32>,
+        w: &FitWeights<'_>,
+        v: Option<(&Tensor<f32>, &Tensor<i32>)>,
+        cb: &mut [Callback],
+        mt: &[Metrics],
+    ) -> Result<History, AutodiffError> {
+        m.fit_with_weights::<i32>(x, y, FitConfig::new(1, 1), w, v, cb, mt)
+    }
+
+    // validation_split: 既定との差・同値性・値の区別（self をそのまま返すスタブでは通らない）。
+    let f: fn(FitConfig, f32) -> FitConfig = FitConfig::validation_split;
+    let base = FitConfig::new(1, 1);
+    assert_ne!(f(base, 0.2), base, "0.2 はフィールドを書き換えるはず");
+    assert_eq!(f(base, 0.2), f(base, 0.2));
+    assert_ne!(f(base, 0.2), f(base, 0.3), "分割率の違いが区別されるはず");
+
+    // FitWeights: 重みなしは default と等しく、各指定で default と異なる。
+    assert_eq!(FitWeights::new(), FitWeights::default());
+    let samples = [1.0_f32, 2.0];
+    let cw = FitWeights::new().class_weight(HashMap::from([(0_u32, 2.0_f32)]));
+    let sw = FitWeights::new().sample_weight(&samples);
+    assert_ne!(cw, FitWeights::default());
+    assert_ne!(sw, FitWeights::default());
+    assert_ne!(cw, sw);
+}
+
+/// [`scan_fit_weighting_reexports_and_declarations`]・
+/// [`fit_weighting_inventory_violations`]・[`fit_weighting_shape_violations`]（正ガード
+/// 群）の自己テスト。違反カテゴリごとの合成入力が検出され、承認形は許可されることを
+/// 固定する。
+#[test]
+fn facade_fit_weighting_public_surface_guards_detect_each_category() {
     let scan = scan_fit_weighting_reexports_and_declarations;
-    // 負例: 承認位置（許可として数えられ、違反は 0）。
-    let (v, a) = scan(
+    // 負例（許可）: 承認形の再エクスポート・宣言・メソッド。
+    let (off, keys) = scan(
         "compat/mod.rs",
         "pub use training::{FitConfig, FitWeights};",
     );
-    assert!(v.is_empty() && a == 1, "{v:?} {a}");
-    let (v, a) = scan(
-        "compat/training.rs",
-        "pub struct FitWeights<'a> { x: &'a [f32] }\n\
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(keys, vec!["use:FitWeights".to_string()]);
+    let training_ok = "pub struct FitWeights<'a> { x: &'a [f32] }\n\
          impl FitConfig { pub fn validation_split(self, f: f32) -> Self { self } }\n\
          impl<'a> FitWeights<'a> { pub fn class_weight(self) {} pub fn sample_weight(self) {} }\n\
-         impl Sequential { pub fn fit_with_weights(&mut self) {} }",
-    );
-    assert!(v.is_empty() && a == 5, "{v:?} {a}");
+         impl Sequential { pub fn fit_with_weights(&mut self) {} }";
+    let (off, keys) = scan("compat/training.rs", training_ok);
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(keys.len(), 5, "{keys:?}");
     // 負例: コメント中の出現・無関係な名前。
-    assert!(
-        scan("compat/mod.rs", "// pub use ...::FitWeights;")
-            .0
-            .is_empty()
+    assert_eq!(
+        scan("compat/mod.rs", "// pub use ...::FitWeights;"),
+        (vec![], vec![])
     );
-    assert!(
+    assert_eq!(
         scan(
             "compat/training.rs",
             "pub struct FitConfig; impl FitConfig { pub fn new() {} }"
-        )
-        .0
-        .is_empty()
+        ),
+        (vec![], vec![])
     );
-    // 正例: 承認位置外の再エクスポート（別ファイル）・別名・重複。
+    // 正例: 承認位置外の再エクスポート（別ファイル）・別名（葉の前後）。
     assert!(!scan("lib.rs", "pub use compat::FitWeights;").0.is_empty());
     assert!(
         !scan("compat/mod.rs", "pub use training::FitWeights as Foo;")
@@ -19371,59 +19585,138 @@ fn facade_does_not_reexport_or_declare_fit_weighting_items_detects_each_category
             .is_empty()
     );
     assert!(
-        !scan(
-            "compat/mod.rs",
-            "pub use a::FitWeights; pub use b::{FitWeights};"
-        )
-        .0
-        .is_empty()
-    );
-    // 正例: 承認位置外の struct／enum／type 宣言・2 重宣言。
-    assert!(
-        !scan("compat/other.rs", "pub struct FitWeights;")
+        !scan("compat/mod.rs", "pub use training::Foo as FitWeights;")
             .0
             .is_empty()
     );
-    assert!(
-        !scan("compat/training.rs", "pub enum FitWeights {}")
-            .0
-            .is_empty()
-    );
-    assert!(
-        !scan(
-            "compat/training.rs",
-            "pub struct FitWeights; pub struct FitWeights;"
-        )
-        .0
-        .is_empty()
-    );
-    // 正例: 承認位置外の fn 宣言・2 件目・禁止名。
-    assert!(
-        !scan(
+    // 正例: 承認位置外の struct／enum／trait／type 宣言。
+    for (rel, src) in [
+        ("compat/other.rs", "pub struct FitWeights;"),
+        ("compat/training.rs", "pub enum FitWeights {}"),
+        ("compat/training.rs", "pub trait FitWeights {}"),
+        ("compat/training.rs", "pub type FitWeights = u8;"),
+    ] {
+        assert!(!scan(rel, src).0.is_empty(), "{rel}: {src}");
+    }
+    // 正例: 承認位置外の fn・2 件目・所有型違い・禁止名。
+    for (rel, src) in [
+        (
             "compat/other.rs",
-            "impl FitConfig { pub fn class_weight(self) {} }"
-        )
-        .0
-        .is_empty()
-    );
-    assert!(
-        !scan(
+            "impl FitConfig { pub fn validation_split(self) {} }",
+        ),
+        (
             "compat/training.rs",
-            "impl A { pub fn fit_with_weights(&mut self) {} } impl B { pub fn fit_with_weights(&mut self) {} }"
-        )
-        .0
-        .is_empty()
-    );
-    assert!(
-        !scan(
+            "impl Sequential { pub fn fit_with_weights(&mut self) {} pub fn fit_with_weights(&mut self) {} }",
+        ),
+        (
             "compat/training.rs",
-            "impl Sequential { pub fn fit_weighted(&mut self) {} }"
-        )
-        .0
-        .is_empty()
-    );
-}
+            "impl FitConfig { pub fn class_weight(self) {} }",
+        ),
+        (
+            "compat/training.rs",
+            "impl Sequential { pub fn validation_split(self) {} }",
+        ),
+        (
+            "compat/training.rs",
+            "impl FitConfig { pub fn fit_with_weights(&mut self) {} }",
+        ),
+        (
+            "compat/training.rs",
+            "impl FitWeights<'_> { pub fn fit_with_weights(&mut self) {} }",
+        ),
+        (
+            "compat/training.rs",
+            "impl Sequential { pub fn fit_weighted(&mut self) {} }",
+        ),
+    ] {
+        assert!(!scan(rel, src).0.is_empty(), "{rel}: {src}");
+    }
 
+    // インベントリ: 完全一致のみ許可。欠落・二重化・予期しない鍵は逸脱。
+    let full: Vec<String> = FIT_WEIGHTING_APPROVED_KEYS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(fit_weighting_inventory_violations(&full).is_empty());
+    let mut missing_dup = full.clone();
+    missing_dup.retain(|k| k != "fn:sample_weight");
+    missing_dup.push("use:FitWeights".to_string());
+    let v = fit_weighting_inventory_violations(&missing_dup);
+    assert!(
+        v.iter().any(|m| m.contains("欠落: fn:sample_weight")),
+        "{v:?}"
+    );
+    assert!(
+        v.iter().any(|m| m.contains("二重化: use:FitWeights")),
+        "{v:?}"
+    );
+    let mut extra = full;
+    extra.push("fn:fit_weighted".to_string());
+    assert!(!fit_weighting_inventory_violations(&extra).is_empty());
+
+    // 形状ガード: 承認形は通り、各逸脱は検出される。
+    let ok = "#[derive(Debug, Clone, PartialEq, Default)]\n\
+         pub struct FitWeights<'a> { c: &'a u8 }\n\
+         impl<'a> FitWeights<'a> {\n\
+         pub fn new() {} pub fn class_weight(self) {} pub fn sample_weight(self) {}\n\
+         fn is_non_default(&self) {}\n}\n\
+         impl FitConfig { pub fn validation_split(self) {} }\n\
+         impl Sequential { pub fn fit_with_weights(&mut self) {} }\n";
+    assert_eq!(fit_weighting_shape_violations(ok), Vec::<String>::new());
+    for (label, bad) in [
+        (
+            "pub fn 追加",
+            ok.replace(
+                "fn is_non_default",
+                "pub fn extra(&self) {} fn is_non_default",
+            ),
+        ),
+        (
+            "pub フィールド",
+            ok.replace("{ c: &'a u8 }", "{ pub c: &'a u8 }"),
+        ),
+        ("derive 変更", ok.replace("Default)]", "Default, Eq)]")),
+        (
+            "non_exhaustive 付与",
+            ok.replace("#[derive", "#[non_exhaustive]\n#[derive"),
+        ),
+        (
+            "trait impl 追加",
+            format!("{ok}impl Drop for FitWeights<'_> {{}}\n"),
+        ),
+        (
+            "非 pub ヘルパー追加",
+            ok.replace("fn is_non_default", "fn other(&self) {} fn is_non_default"),
+        ),
+        (
+            "FitConfig へ class_weight",
+            ok.replace(
+                "pub fn validation_split(self) {}",
+                "pub fn validation_split(self) {} pub fn class_weight(self) {}",
+            ),
+        ),
+        (
+            "Sequential へ validation_split",
+            ok.replace(
+                "pub fn fit_with_weights(&mut self) {}",
+                "pub fn fit_with_weights(&mut self) {} pub fn validation_split(self) {}",
+            ),
+        ),
+        (
+            "fit_with_weights 欠落",
+            ok.replace("pub fn fit_with_weights(&mut self) {}", ""),
+        ),
+        (
+            "validation_split 欠落",
+            ok.replace("pub fn validation_split(self) {}", ""),
+        ),
+    ] {
+        assert!(
+            !fit_weighting_shape_violations(&bad).is_empty(),
+            "形状ガードが逸脱を検出しない: {label}"
+        );
+    }
+}
 /// `FitConfig` が `#[derive(Debug, Clone, Copy, PartialEq, Eq)]` を
 /// 維持していることを固定する（`crates/facade/src/compat/training.rs` の
 /// `FitConfig` 定義。#2564 の `validation_split` も `f32::to_bits` の
