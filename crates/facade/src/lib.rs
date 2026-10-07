@@ -181,6 +181,10 @@ mod fs_guard;
 /// `optim.rs` の `pub use` のみ（`optim_ema` モジュール自体は公開しない）。
 mod optim_ema;
 
+/// 非公開。`optim::AveragedModel`（SWA。イシュー #2679）の実体。公開パスは
+/// `optim.rs` の `pub use` のみ（`optim_swa` モジュール自体は公開しない）。
+mod optim_swa;
+
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
 // （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。
@@ -3007,33 +3011,25 @@ struct LossOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct EmaHoldDoctestGuard;
 
-/// イシュー #2658（親 #2657）の SWA（`AveragedModel`・`SwaLr`・
-/// `SwaAnneal`）の facade 公開保留を固定する doctest 足場（`EmaHoldDoctestGuard`
-/// と同型の「正のプローブ 1 ブロック方式」）。facade 公開形は未承認
-/// （推奨案の記録のみ。`docs/autodiff-swa-decision.md` §7。承認依頼は
-/// #2677、公開は #2678・#2679）。
+/// イシュー #2658（親 #2657）で導入し、イシュー #2679 で承認形の公開
+/// （`optim::AveragedModel`＝facade 独自ラッパー、`optim::{SwaLr, SwaAnneal}`＝素の
+/// 再エクスポート。`docs/autodiff-swa-decision.md` §7）へ部分反転した SWA の保留
+/// ガード（`EmaHoldDoctestGuard` と同型の「正のプローブ 1 ブロック方式」）。
 ///
-/// 1. **型名の再エクスポート・独自宣言**: facade の全 `pub mod` を glob
-///    import したスコープに、本ブロック内でのみ定義したローカル
-///    `__fandhe_swa_hold_probe::{AveragedModel, SwaLr, SwaAnneal}` を導入し、
-///    3 名すべてを `__probe_type` の引数で参照する（未参照の `pub` 項目は
-///    横断監査が拒否する）。facade がいずれかの名前をどの経路で公開しても、
-///    ローカル定義との glob 衝突でコンパイルが失敗する。
-/// 2. **`compat::FitConfig`／`compat::Sequential` への inherent メソッド
-///    追加**: ローカル `__FandheSwaHoldProbe`（`use_swa`／`swa_start`／
-///    `swa_lr`）を両型へ実装し、UFCS 形とメソッド呼び出し形の両方で呼ぶ。
-///    同名の inherent メソッドが生えると戻り値型の不一致で失敗する。
+/// 型名の glob 衝突プローブは承認形の公開に伴い削除した。残すのは**未承認の経路**
+/// である `compat::FitConfig`／`compat::Sequential` への inherent メソッド追加
+/// （`fit` への SWA 結線）専用のプローブだけである: ローカル `__FandheSwaHoldProbe`
+/// （`use_swa`／`swa_start`／`swa_lr`）を両型へ実装し、UFCS 形とメソッド呼び出し形の
+/// 両方で呼ぶ。同名の inherent メソッドが生えると戻り値型の不一致で失敗する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// swa_hold_doctest_globs_all_pub_modules`・
 /// `swa_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_swa_items`）との多層防御の位置
-/// づけと検出範囲（列挙名のみ。マクロ生成・別名経由までは保証しない）は
+/// `facade_exposes_swa_only_in_approved_shape`）との多層防御の位置づけと検出範囲
+/// （列挙名のみ。マクロ生成・別名経由までは保証しない）は
 /// `docs/autodiff-swa-decision.md` §9 を参照。
 ///
-/// facade 公開（ユーザー承認）がされる日が来たら、本モジュール・本
-/// doctest 自体を削除する（ソース走査側の否定ガードも同時に正ガードへ
-/// 置き換える）。
+/// `fit` への結線が承認される日が来たら、本構造体・本 doctest 自体を削除する。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -3051,15 +3047,6 @@ struct EmaHoldDoctestGuard;
 /// use fandhe_ai::interop::onnx::*;
 /// use fandhe_ai::interop::safetensors::*;
 /// use fandhe_ai::model::*;
-///
-/// mod __fandhe_swa_hold_probe {
-///     pub struct AveragedModel;
-///     pub struct SwaLr;
-///     pub struct SwaAnneal;
-/// }
-/// use __fandhe_swa_hold_probe::*;
-///
-/// fn __probe_type(_: AveragedModel, _: SwaLr, _: SwaAnneal) {}
 ///
 /// struct __FandheSwaHoldMarker;
 ///
@@ -7023,393 +7010,6 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct MarginFocalLossOpsHoldDoctestGuard;
-
-/// Rprop・ASGD（`Rprop`・`RpropConfig`・`Asgd`・`AsgdConfig`。イシュー #2655・親 #2654）を
-/// facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
-/// ブロック方式。型名のみが対象で既存 facade 型への inherent メソッド追加を伴わないため
-/// メソッドプローブは置かない）。
-///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 4 個を置き、
-/// 4 名すべてを関数シグネチャで参照する。facade が glob 可能な位置へ同名の型を公開すると、
-/// 名前解決の曖昧性（E0659）でエラーコードに依存せずコンパイルが失敗する。
-///
-/// 検出範囲は本プローブが名前解決で触れる 4 名に限る（マクロ生成や、内部クレート側で別名を
-/// 作ってからの公開までは保証しない）。実装は内部クレートに閉じている
-/// （`fandhe_ai_autodiff::nn::optim`）。保留対象は facade 公開面のみで、公開形は未承認
-/// （承認依頼は #2677・公開自体は承認後の #2679。推奨案は
-/// `docs/autodiff-optimizer-rprop-asgd-decision.md` §8。同記録は推奨案の記録であり承認記録では
-/// ない）。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// optimizer_rprop_asgd_hold_doctest_globs_all_pub_modules`・
-/// `optimizer_rprop_asgd_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_optimizer_rprop_asgd`・
-/// `workspace_declares_optimizer_rprop_asgd_types_only_in_allowed_locations`）との多層防御として
-/// 働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
-/// 同時に正ガードへ置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::nn::kv_cache::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_optimizer_rprop_asgd_hold_probe {
-///     pub struct Rprop;
-///     pub struct RpropConfig;
-///     pub struct Asgd;
-///     pub struct AsgdConfig;
-/// }
-/// use __fandhe_optimizer_rprop_asgd_hold_probe::*;
-///
-/// fn __probe_types(_: Rprop, _: RpropConfig, _: Asgd, _: AsgdConfig) {}
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct OptimizerRpropAsgdHoldDoctestGuard;
-
-/// Adafactor・Lion（`Adafactor`・`AdafactorConfig`・`Lion`・`LionConfig`。イシュー #2656・親 #2654）を
-/// facade 公開面から締め出す保留ガード（`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1
-/// ブロック方式。型名のみが対象で既存 facade 型への inherent メソッド追加を伴わないため
-/// メソッドプローブは置かない）。
-///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 4 個を置き、
-/// 4 名すべてを関数シグネチャで参照する。facade が glob 可能な位置へ同名の型を公開すると、
-/// 名前解決の曖昧性（E0659）でエラーコードに依存せずコンパイルが失敗する。
-///
-/// 検出範囲は本プローブが名前解決で触れる 4 名に限る（マクロ生成や、内部クレート側で別名を
-/// 作ってからの公開までは保証しない）。実装は内部クレートに閉じている
-/// （`fandhe_ai_autodiff::nn::optim`）。保留対象は facade 公開面のみで、公開形は未承認
-/// （承認依頼は #2677・公開自体は承認後の #2679。推奨案は
-/// `docs/autodiff-optimizer-adafactor-lion-decision.md` §8。同記録は推奨案の記録であり承認記録では
-/// ない）。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// optimizer_adafactor_lion_hold_doctest_globs_all_pub_modules`・
-/// `optimizer_adafactor_lion_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_optimizer_adafactor_lion`・
-/// `workspace_declares_optimizer_adafactor_lion_types_only_in_allowed_locations`）との多層防御として
-/// 働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
-/// 同時に正ガードへ置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::nn::kv_cache::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_optimizer_adafactor_lion_hold_probe {
-///     pub struct Adafactor;
-///     pub struct AdafactorConfig;
-///     pub struct Lion;
-///     pub struct LionConfig;
-/// }
-/// use __fandhe_optimizer_adafactor_lion_hold_probe::*;
-///
-/// fn __probe_types(_: Adafactor, _: AdafactorConfig, _: Lion, _: LionConfig) {}
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct OptimizerAdafactorLionHoldDoctestGuard;
-
-/// PolynomialLR・ChainedScheduler（`PolynomialLr`・`ChainedScheduler`。イシュー #2659・親 #2657）を
-/// facade 公開面から締め出す保留ガード（`OptimizerAdafactorLionHoldDoctestGuard` と同型の正のプローブ 1
-/// ブロック方式。型名のみが対象で既存 facade 型への inherent メソッド追加を伴わないため
-/// メソッドプローブは置かない）。
-///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルの型 2 個を置き、
-/// 2 名すべてを関数シグネチャで参照する。facade が glob 可能な位置へ同名の型を公開すると、
-/// 名前解決の曖昧性（E0659）でエラーコードに依存せずコンパイルが失敗する。
-///
-/// 検出範囲は本プローブが名前解決で触れる 2 名に限る（マクロ生成や、内部クレート側で別名を
-/// 作ってからの公開までは保証しない）。実装は内部クレートに閉じている
-/// （`fandhe_ai_autodiff::nn::optim`。`LrScheduler` trait は不変）。保留対象は facade 公開面のみで、公開形は未承認
-/// （承認依頼は #2677・公開自体は承認後の #2679。推奨案は
-/// `docs/autodiff-lr-scheduler-poly-chained-decision.md` §8。同記録は推奨案の記録であり承認記録では
-/// ない）。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// lr_scheduler_poly_chained_hold_doctest_globs_all_pub_modules`・
-/// `lr_scheduler_poly_chained_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_lr_scheduler_poly_chained`・
-/// `workspace_declares_lr_scheduler_poly_chained_types_only_in_allowed_locations`）との多層防御として
-/// 働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
-/// 同時に正ガードへ置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::nn::kv_cache::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_lr_scheduler_poly_chained_hold_probe {
-///     pub struct PolynomialLr;
-///     pub struct ChainedScheduler;
-/// }
-/// use __fandhe_lr_scheduler_poly_chained_hold_probe::*;
-///
-/// fn __probe_types(_: PolynomialLr, _: ChainedScheduler) {}
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct LrSchedulerPolyChainedHoldDoctestGuard;
-
-/// 親 #2660 の Dataset 合成（`Subset`・`ConcatDataset`・`ConcatBatch`・`random_split`・`random_split_fractions`。
-/// `torch.utils.data` 相当。イシュー #2661）を facade 公開面から締め出す保留ガード
-/// （`PackedSequenceHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
-///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュールの型 3 個と自由関数 2 名、
-/// およびプローブ用トレイトのメソッド（`TensorDataset<f32>`／`DataLoader<TensorDataset<f32>>` の
-/// `random_split`／`random_split_fractions`／`subset`、`Tensor<f32>` の `concat_batches`）を置き、修飾なしの
-/// 関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名の型・関数を glob 可能な位置へ公開するか、
-/// これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する。検出範囲は列挙した名前・型に限り、マクロ生成や別名経由の
-/// メソッドまでは保証しない。
-///
-/// 実装は内部クレートに閉じている（`fandhe_ai_tensor_core::data`）。保留対象は facade 公開面のみで、公開形は
-/// 未承認（承認依頼は #2677・公開自体は承認後の #2679。推奨案は
-/// `docs/tensor-core-dataset-compose-decision.md` §5。同記録は推奨案の記録であり承認記録ではない）。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::dataset_compose_hold_doctest_globs_all_pub_modules`・
-/// `dataset_compose_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_dataset_compose`・
-/// `workspace_declares_dataset_compose_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::nn::kv_cache::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_dataset_compose_hold_probe {
-///     pub struct Subset;
-///     pub struct ConcatDataset;
-///     pub struct ConcatBatch;
-///     pub fn random_split() {}
-///     pub fn random_split_fractions() {}
-/// }
-/// use __fandhe_dataset_compose_hold_probe::*;
-///
-/// struct __FandheDatasetComposeHoldMarker;
-///
-/// trait __FandheDatasetComposeHoldProbe {
-///     fn random_split(&self) -> __FandheDatasetComposeHoldMarker;
-///     fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker;
-///     fn subset(&self) -> __FandheDatasetComposeHoldMarker;
-/// }
-///
-/// trait __FandheDatasetComposeHoldBatchProbe {
-///     fn concat_batches(&self) -> __FandheDatasetComposeHoldMarker;
-/// }
-///
-/// impl __FandheDatasetComposeHoldProbe for fandhe_ai::data::TensorDataset<f32> {
-///     fn random_split(&self) -> __FandheDatasetComposeHoldMarker {
-///         __FandheDatasetComposeHoldMarker
-///     }
-///     fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker {
-///         __FandheDatasetComposeHoldMarker
-///     }
-///     fn subset(&self) -> __FandheDatasetComposeHoldMarker {
-///         __FandheDatasetComposeHoldMarker
-///     }
-/// }
-///
-/// impl __FandheDatasetComposeHoldProbe for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>> {
-///     fn random_split(&self) -> __FandheDatasetComposeHoldMarker {
-///         __FandheDatasetComposeHoldMarker
-///     }
-///     fn random_split_fractions(&self) -> __FandheDatasetComposeHoldMarker {
-///         __FandheDatasetComposeHoldMarker
-///     }
-///     fn subset(&self) -> __FandheDatasetComposeHoldMarker {
-///         __FandheDatasetComposeHoldMarker
-///     }
-/// }
-///
-/// impl __FandheDatasetComposeHoldBatchProbe for fandhe_ai::Tensor<f32> {
-///     fn concat_batches(&self) -> __FandheDatasetComposeHoldMarker {
-///         __FandheDatasetComposeHoldMarker
-///     }
-/// }
-///
-/// fn __probe_free_fns(_0: Subset, _1: ConcatDataset, _2: ConcatBatch) {
-///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば E0659 でコンパイル失敗する）。
-///     random_split();
-///     random_split_fractions();
-/// }
-///
-/// fn __probe_methods(
-///     ds: &fandhe_ai::data::TensorDataset<f32>,
-///     dl: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>,
-///     tf: &fandhe_ai::Tensor<f32>,
-/// ) {
-///     let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::random_split(ds);
-///     let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::random_split_fractions(ds);
-///     let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::TensorDataset::<f32>::subset(ds);
-///     let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::random_split(dl);
-///     let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::random_split_fractions(dl);
-///     let _: __FandheDatasetComposeHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::subset(dl);
-///     let _: __FandheDatasetComposeHoldMarker = fandhe_ai::Tensor::<f32>::concat_batches(tf);
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct DatasetComposeHoldDoctestGuard;
-
-/// 親 #2660 の IterableDataset／BatchSampler（`IterableDataset`・`IterableDataLoader`・`IterableBatches`・
-/// `StackSamples`・`BatchSampler`。`torch.utils.data` 相当。イシュー #2662）を facade 公開面から締め出す保留ガード
-/// （`DatasetComposeHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
-///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュールの型 5 個、およびプローブ用
-/// トレイトのメソッド（`TensorDataset<f32>`／`DataLoader<TensorDataset<f32>>` の `iter_samples`／
-/// `with_batch_sampler`、`Tensor<f32>` の `stack_samples`）を置き、修飾なしの型使用と修飾付きメソッド呼び出しの
-/// 両方を行う。facade が同名の型を glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、
-/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する。検出範囲は
-/// 列挙した名前・型に限り、マクロ生成や別名経由のメソッドまでは保証しない。
-///
-/// 実装は内部クレートに閉じている（`fandhe_ai_tensor_core::data`）。保留対象は facade 公開面のみで、公開形は
-/// 未承認（承認依頼は #2677・公開自体は承認後の #2679。推奨案は
-/// `docs/tensor-core-iterable-dataset-batch-sampler-decision.md` §5。同記録は推奨案の記録であり承認記録ではない）。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::iterable_batch_sampler_hold_doctest_globs_all_pub_modules`・
-/// `iterable_batch_sampler_hold_doctest_probe_body_matches_fixed_contract`・
-/// `facade_does_not_reexport_or_declare_iterable_batch_sampler`・
-/// `workspace_declares_iterable_batch_sampler_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::nn::kv_cache::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::model::*;
-///
-/// mod __fandhe_iterable_batch_sampler_hold_probe {
-///     pub struct IterableDataset;
-///     pub struct IterableDataLoader;
-///     pub struct IterableBatches;
-///     pub struct StackSamples;
-///     pub struct BatchSampler;
-/// }
-/// use __fandhe_iterable_batch_sampler_hold_probe::*;
-///
-/// struct __FandheIterableBatchSamplerHoldMarker;
-///
-/// trait __FandheIterableBatchSamplerHoldProbe {
-///     fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;
-///     fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker;
-/// }
-///
-/// trait __FandheIterableBatchSamplerHoldStackProbe {
-///     fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker;
-/// }
-///
-/// impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::TensorDataset<f32> {
-///     fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {
-///         __FandheIterableBatchSamplerHoldMarker
-///     }
-///     fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {
-///         __FandheIterableBatchSamplerHoldMarker
-///     }
-/// }
-///
-/// impl __FandheIterableBatchSamplerHoldProbe for fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>> {
-///     fn iter_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {
-///         __FandheIterableBatchSamplerHoldMarker
-///     }
-///     fn with_batch_sampler(&self) -> __FandheIterableBatchSamplerHoldMarker {
-///         __FandheIterableBatchSamplerHoldMarker
-///     }
-/// }
-///
-/// impl __FandheIterableBatchSamplerHoldStackProbe for fandhe_ai::Tensor<f32> {
-///     fn stack_samples(&self) -> __FandheIterableBatchSamplerHoldMarker {
-///         __FandheIterableBatchSamplerHoldMarker
-///     }
-/// }
-///
-/// fn __probe_types(_0: IterableDataset, _1: IterableDataLoader, _2: IterableBatches, _3: StackSamples, _4: BatchSampler) {}
-///
-/// fn __probe_methods(
-///     ds: &fandhe_ai::data::TensorDataset<f32>,
-///     dl: &fandhe_ai::data::DataLoader<fandhe_ai::data::TensorDataset<f32>>,
-///     tf: &fandhe_ai::Tensor<f32>,
-/// ) {
-///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::iter_samples(ds);
-///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::TensorDataset::<f32>::with_batch_sampler(ds);
-///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::iter_samples(dl);
-///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::data::DataLoader::<fandhe_ai::data::TensorDataset<f32>>::with_batch_sampler(dl);
-///     let _: __FandheIterableBatchSamplerHoldMarker = fandhe_ai::Tensor::<f32>::stack_samples(tf);
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct IterableBatchSamplerHoldDoctestGuard;
 
 /// Functional API（多入力・多出力グラフ。`FunctionalBuilder`・`FunctionalModel`・`Node`・
 /// `FunctionalVars`（学習用の `bind` 結果。#2667）・`save_functional_model`・`load_functional_model`。

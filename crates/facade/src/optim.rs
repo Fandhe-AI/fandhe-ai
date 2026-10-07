@@ -96,6 +96,69 @@
 //! # }
 //! ```
 //!
+//! **Rprop・ASGD・Adafactor・Lion・PolynomialLr・ChainedScheduler（イシュー #2679・親 #2625。
+//! 承認はルート #2499 のコメント〈issuecomment-6033824965〉）**:
+//! [`crate::optim::Rprop`]／[`crate::optim::RpropConfig`]・
+//! [`crate::optim::Asgd`]／[`crate::optim::AsgdConfig`]・
+//! [`crate::optim::Adafactor`]／[`crate::optim::AdafactorConfig`]・
+//! [`crate::optim::Lion`]／[`crate::optim::LionConfig`]・
+//! [`crate::optim::PolynomialLr`]／[`crate::optim::ChainedScheduler`] を
+//! `fandhe_ai_autodiff::nn::optim` から素の再エクスポートで公開する
+//! （`docs/autodiff-optimizer-rprop-asgd-decision.md`・
+//! `docs/autodiff-optimizer-adafactor-lion-decision.md`・
+//! `docs/autodiff-lr-scheduler-poly-chained-decision.md` の各 §8）。いずれも
+//! `compat::Optimizer` enum には結線しない（手動ループで `step` を呼ぶ）。
+//! `ParamGroupStep` を持たない（グループ別学習率は対象外）。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::optim::{Lion, LionConfig, LrScheduler, PolynomialLr, Rprop, RpropConfig};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let p = Tensor::new(vec![1.0f32, 2.0], &[2])?;
+//! let g = Tensor::new(vec![0.5f32, -0.5], &[2])?;
+//! let mut rprop = Rprop::new(RpropConfig::default())?;
+//! assert_eq!(rprop.step(&[(&p, &g)])?.len(), 1);
+//! let mut lion = Lion::new(LionConfig::default())?;
+//! assert_eq!(lion.step(&[(&p, &g)])?.len(), 1);
+//! // 多項式減衰: total_iters 以降は 0。
+//! let poly = PolynomialLr::new(0.1, 4, 1.0)?;
+//! assert_eq!(poly.lr_at(4), 0.0);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! **SWA（確率的重み平均。イシュー #2679・親 #2625。決定記録
+//! `docs/autodiff-swa-decision.md` §7）**: [`crate::optim::SwaLr`]／
+//! [`crate::optim::SwaAnneal`]（学習率側。`SWALR` 相当）は内部クレートからの素の再エクスポート、
+//! [`crate::optim::AveragedModel`]（等重み平均の重み保持）は facade 独自の薄いラッパー
+//! （EMA の [`crate::optim::ExponentialMovingAverage`] と同型。内部 `nn::Module` を公開
+//! シグネチャへ出さないため）として公開する。`compat::Sequential::fit` へは結線せず
+//! （`FitConfig` に SWA 項目は無い）、手動ループで `update_named` を呼ぶ。
+//! 公開面（承認形のみ）は `api_surface.rs` の正ガード（`facade_exposes_swa_only_in_approved_shape`・
+//! `swa_types_are_reachable_via_facade_only`・`swa_usage_doctests_are_present_and_compiled`）で固定している。
+//!
+//! ```
+//! use fandhe_ai::compat::{Loss, Optimizer, Sequential};
+//! use fandhe_ai::optim::{AveragedModel, LrScheduler, SgdConfig, SwaAnneal, SwaLr};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut model = Sequential::new().add_linear(2, 1, 7)?;
+//! model.compile(Optimizer::Sgd(SgdConfig::new(0.01)), Loss::Mse)?;
+//! // 切替時点の lr から SWA 用の固定 lr へ 2 step かけて線形に移す。
+//! let swa_lr = SwaLr::new(0.05, 0.01, 2, SwaAnneal::Linear)?;
+//! assert_eq!(swa_lr.lr_at(2), 0.01);
+//! let mut swa = AveragedModel::from_named(model.named_parameters())?;
+//! swa.update_named(model.named_parameters())?;
+//! assert_eq!(swa.n_averaged(), 1);
+//! // 評価のため平均重みへ差し替え、退避値で元へ戻す。
+//! let backup = model.state_dict();
+//! model.load_state_dict(swa.averaged_state_dict())?;
+//! model.load_state_dict(backup)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
 //! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
 //! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
@@ -442,17 +505,24 @@
 // `docs/autodiff-ema-decision.md` §10.2 (a)(b) の facade 独自ラッパー形で公開する
 // （内部 `nn::Module` を露出させないため素の再エクスポートは採らない）。
 pub use crate::optim_ema::ExponentialMovingAverage;
+pub use crate::optim_swa::AveragedModel;
 pub use fandhe_ai_autodiff::nn::optim::{Adadelta, AdadeltaConfig};
+pub use fandhe_ai_autodiff::nn::optim::{Adafactor, AdafactorConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adagrad, AdagradConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adam, AdamConfig};
 pub use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
 pub use fandhe_ai_autodiff::nn::optim::{Adamax, AdamaxConfig};
+pub use fandhe_ai_autodiff::nn::optim::{Asgd, AsgdConfig};
+pub use fandhe_ai_autodiff::nn::optim::{ChainedScheduler, PolynomialLr};
 pub use fandhe_ai_autodiff::nn::optim::{ClipGradResult, clip_grad_value};
 pub use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingLr, ExponentialLr, LinearWarmupLr};
 pub use fandhe_ai_autodiff::nn::optim::{CosineAnnealingWarmRestarts, CyclicLr};
 pub use fandhe_ai_autodiff::nn::optim::{GradScaler, GradScalerConfig, UnscaleResult};
 pub use fandhe_ai_autodiff::nn::optim::{Lamb, LambConfig};
+pub use fandhe_ai_autodiff::nn::optim::{Lion, LionConfig};
+pub use fandhe_ai_autodiff::nn::optim::{Rprop, RpropConfig};
+pub use fandhe_ai_autodiff::nn::optim::{SwaAnneal, SwaLr};
 // イシュー #2502（親 #2500・ルート #2499 本文「承認範囲」節の一括承認）: L-BFGS
 // の 3 型を `docs/autodiff-lbfgs-decision.md` §8 の波括弧形で公開する
 // （`LbfgsConfig` は #2198 で公開済み。`Lbfgs`〈closure 駆動の本体〉・
