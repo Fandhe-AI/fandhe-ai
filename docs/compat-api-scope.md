@@ -983,6 +983,8 @@ fit_types_are_reachable_via_facade_only` のビルダー連鎖へ `.to_file(..)`
 その後ルート #2499 本文「承認範囲」節の一括承認により #2571 で公開した
 （本節末尾の「適用記録（経路 2。イシュー #2571 …）」参照）。
 
+**公開済み（イシュー #2560・親 #2558。詳細は `docs/autodiff-ema-decision.md` §13。`compat-api-scope.md` §5 への適用記録は #2561）**: 以下の保留記録は #2179 時点のもの。
+
 **保留記録（イシュー #2179・親 #2131）**: EMA（指数移動平均。PyTorch
 `torch.optim.swa_utils.AveragedModel`／Keras 3 `EMAOverlay` 相当）は
 内部クレート限定で `fandhe_ai_autodiff::nn::ExponentialMovingAverage`

@@ -1,7 +1,8 @@
 //! イシュー #2179（親 #2131「PyTorch／TF 置き換えの API 網羅」）の
-//! `fandhe_ai_autodiff::nn::ExponentialMovingAverage` facade 公開保留
-//! （`crates/facade/src/lib.rs::EmaHoldDoctestGuard`）下での受け入れ
-//! 条件 R5（MNIST 規模での EMA なし／ありの accuracy 定性確認）の
+//! `fandhe_ai_autodiff::nn::ExponentialMovingAverage` の facade 公開（#2560 で
+//! `fandhe_ai::optim::ExponentialMovingAverage`・`Callback::Ema` として公開済み。
+//! 公開経路のテストは `compat_sequential_fit_ema.rs`）以前の、内部型を直接使う
+//! 手動ループでの受け入れ条件 R5（MNIST 規模での EMA なし／ありの accuracy 定性確認）の
 //! 部分的な裏付け。
 //!
 //! **本ファイルは `fandhe_ai_autodiff::nn::ExponentialMovingAverage`／
@@ -19,9 +20,8 @@
 //! [`fandhe_ai_autodiff::nn::ExponentialMovingAverage::from_named`]／
 //! `update_named`／`shadow_state_dict` を結線する（
 //! `docs/autodiff-ema-decision.md` §2「facade 結線」節）。
-//! 承認後（`docs/autodiff-ema-decision.md` §4）に `fit(use_ema=true)`
-//! 統合を実装する際は、facade 再エクスポート版の別ファイル
-//! （`compat_sequential_fit_ema.rs` 想定）を新設する。
+//! facade 経由の `fit` 統合は別ファイル `compat_sequential_fit_ema.rs`
+//! （#2560）が担う。本ファイルは内部型を直接 import する契約ファイルのまま維持する。
 //!
 //! **数値判定の規律**: AC R5 は「定性的」（厳密な accuracy 改善の
 //! アサートはしない。flaky 化を避ける）。両 accuracy（EMA なし／あり）
