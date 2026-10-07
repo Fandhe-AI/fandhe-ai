@@ -7,8 +7,9 @@
 
 **#2515（親 #2500・ルート #2499 一括承認）で、本節の推奨形どおり `Var::eigh`／
 `slogdet`／`pinv`／`matrix_rank`／`lstsq` を `linalg_ops` 自由関数への 1 行委譲メソッド
-として公開した。`linalg_ops` モジュールと `EighVars`／`SlogdetVars` 型は facade・
-autodiff ルートへ再エクスポートしていない**（型の再エクスポートは §6 の残る承認事項）。
+として公開した。`linalg_ops` モジュールは facade・autodiff ルートへ再エクスポートして
+いない。`EighVars`／`SlogdetVars` 型は 2026-10-07 の承認により autodiff ルート・facade
+へ再エクスポートした**（§6 参照）。
 以下は #2150 時点の履歴記述。
 
 PyTorch `torch.linalg` 互換の 5 演算（`eigh`／`slogdet`／`pinv`／
@@ -28,11 +29,10 @@ autodiff/src/linalg_ops.rs`）として実装した（`reduce_ops`〈#2147〉・
 委譲メソッドと facade ガード〈`VarLinalgOpsHoldDoctestGuard`〉の
 撤去のみ、と記録していた。#2515 で実施済み）。
 
-多出力の戻り値型 `EighVars`／`SlogdetVars`（`linalg_ops.rs` 内）・
-値型 `EighFactors`／`SlogdetFactors`（`tensor-core::backend_ops`）も
-autodiff のクレートルート／facade へは再エクスポートしない
-（`Var::qr` の `QrVars` は承認済み公開だが、5 演算の戻り値型の再エクスポートは
-未承認のため対称にしていない）。
+多出力の戻り値型 `EighVars`／`SlogdetVars`（`linalg_ops.rs` 内）は #2150 時点では
+再エクスポートしていなかったが、2026-10-07 の承認（§6）で autodiff ルート／facade
+へ再エクスポートした。値型 `EighFactors`／`SlogdetFactors`（`tensor-core::backend_ops`）
+は引き続き再エクスポートしない。
 
 ## §1 PyTorch 対応表・差分
 
@@ -274,10 +274,16 @@ resolve_rcond` を `linalg_ops.rs` の入口で 1 回呼んで確定させた値
   （`linalg_ops_hold_doctest_globs_all_pub_modules`・
   `linalg_ops_hold_doctest_probe_body_matches_fixed_contract`）の削除
 
-**残る承認事項（未実施）**: `EighVars`／`SlogdetVars` の autodiff ルート／
-facade への再エクスポート（`QrVars` と揃える形）。現状 facade 利用者は
-`pub` フィールド（`eigenvalues`／`eigenvectors`／`sign`／`logabsdet`）で結果へ
-到達できるが、型名を書く使い方（型注釈・型名での分割代入）はできない。
+**実施済み（#2515 の残る承認事項・承認日 2026-10-07。承認の記録は issue #2515 のコメント）**:
+`EighVars`／`SlogdetVars` の autodiff ルート（`crates/autodiff/src/lib.rs` の
+`pub use linalg_ops::{EighVars, SlogdetVars};`）／facade
+（`crates/facade/src/lib.rs` の `pub use fandhe_ai_autodiff::EighVars;`・
+`pub use fandhe_ai_autodiff::SlogdetVars;`。`QrVars`／`SvdVars` と同じ 1 文 1 行）への
+再エクスポート。これにより facade 利用者は型注釈・型名での分割代入が可能になる
+（従来は `pub` フィールド〈`eigenvalues`／`eigenvectors`／`sign`／`logabsdet`〉経由のみ）。
+追加 API のみで `fandhe-ai =0.10.0` の公開 API は非破壊。`linalg_ops` モジュール自体は
+引き続き再エクスポートしない。正ガード `var_linalg_ops_are_reachable_via_facade_only`
+（`api_surface.rs`）が型名での到達を固定する。
 
 正ガード（承認形だけを許す。`api_surface.rs`）: ①`facade_does_not_reexport_or_
 declare_linalg_ops`（facade src の `pub use`／`fn` 宣言を直接走査）②`workspace_

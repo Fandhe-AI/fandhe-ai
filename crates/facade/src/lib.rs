@@ -225,6 +225,10 @@ pub use fandhe_ai_autodiff::VarHostView;
 // （上記コメント「1 文 1 行を維持する」と同じ理由）。
 pub use fandhe_ai_autodiff::QrVars;
 pub use fandhe_ai_autodiff::SvdVars;
+// `Var::eigh`／`Var::slogdet`（イシュー #2515）の多出力戻り値型。`QrVars`／`SvdVars`
+// と同じ書き方（1 文 1 行）で再エクスポートし、型注釈・型名での分割代入を可能にする。
+pub use fandhe_ai_autodiff::EighVars;
+pub use fandhe_ai_autodiff::SlogdetVars;
 // `topk_unique_ops`（イシュー #2153 実装・#2519 公開）の入出力型。
 // `Var::topk_with_options`／`unique_with_options`／`unique_consecutive` の
 // 引数（`TopkOptions`／`UniqueOptions`）と戻り値（`UniqueOutput`）で、これらが

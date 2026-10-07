@@ -227,7 +227,9 @@ CUDA（DGX Spark GB10）・Metal（M4 Max）実機での `Stacked*` の
 - 不変: `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/`・
   新規 `unsafe` なし・新規 Op／カーネルなし。
 
-## §10 イシュー #2536 の扱い（承認依頼・未承認・実施しない）
+## §10 イシュー #2536 の扱い（案 A 承認済み・2026-10-07）
+
+**2026-10-07 ユーザー承認（記録は issue #2534 のコメント）: 案 A（`compat::Sequential` には載せず、#2536 を「対象外として完了」とする）で確定した。** 案 B は採らない。案 C（`Stacked*` 単体の保存・復元 API）は今回採らず、後続の検討事項（記録作成 → 承認の 2 段を要する）とする。否定ガード `compat_sequential_does_not_expose_rnn_add_methods`（`crates/facade/tests/api_surface.rs`）の禁止集合へ `add_stacked_rnn`／`add_stacked_lstm`／`add_stacked_gru` を加えた（#2534）。以下は承認依頼時点（承認前）の記録で、「未承認・実施しない」等の表現は承認前の状態を指す。
 
 イシュー #2536 の受け入れ条件のうち、(1)「`nn_rnn_module_reexports_exactly_expected_surface`
 の期待集合更新」は #2535（PR #2727）で実施済み（§9「ガード反転」。期待集合 8 → 14）。
@@ -270,5 +272,6 @@ CUDA（DGX Spark GB10）・Metal（M4 Max）実機での `Stacked*` の
 ### 不変事項
 
 コード変更なし・新規 `unsafe` なし・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・
-`docs/spec/` 不変。#2536 は本記録では close しない（親 #2534 の完了条件に影響するため
-ユーザー判断を待つ）。
+`docs/spec/` 不変。（承認依頼時点の記述は「#2536 を close せずユーザー判断を待つ」だったが、
+#2536 は既に close 済みで、案 A の確定により「対象外として完了」扱いとなった。親 #2534 は
+本 PR〈否定ガードの禁止集合拡張と記録の訂正〉で完了する。）
