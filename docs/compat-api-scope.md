@@ -2069,3 +2069,7 @@ facade 公開面は追加していない（保留ガード `IterableBatchSampler
 **適用記録（イシュー #2670・親 #2668。内部クレート限定）**: `jacobian`・`hessian` を内部クレート限定（`fandhe_ai_autodiff::jacobian_ops`。既存の `Tape::backward`／`backward_create_graph` の要素ごとの繰り返しのみで、新規 `Op`・`BackendOps` メソッド・VJP・カーネルなし。`Var`・`Tape` へ inherent メソッドは足していない）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `JacobianHessianHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形（`Tape::jacobian`／`Tape::hessian` の委譲メソッド）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-jacobian-hessian-gradcheck-decision.md` 「実装記録（#2670）」。
+
+**適用記録（イシュー #2671・親 #2668。内部クレート限定）**: `gradcheck`・`backward_detect_anomaly` を内部クレート限定（`fandhe_ai_autodiff::gradcheck`・`fandhe_ai_autodiff::anomaly`。既存の `jacobian`／`Tape::backward` の合成のみで、新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・カーネルなし。`Var`・`Tape` へ inherent メソッドは足していない）で CPU 実装した。
+facade 公開面は追加していない（保留ガード `GradcheckAnomalyHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形（`Tape::gradcheck`／`Tape::backward_detect_anomaly` の委譲メソッドと `GradcheckOptions`／`GradcheckReport` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-jacobian-hessian-gradcheck-decision.md` 「実装記録（#2671）」。

@@ -8145,6 +8145,127 @@ struct MergeOpsHoldDoctestGuard;
 #[allow(dead_code)]
 struct JacobianHessianHoldDoctestGuard;
 
+/// `gradcheck`・`backward_detect_anomaly`（イシュー #2671・親 #2668。`fandhe_ai_autodiff::gradcheck`／
+/// `fandhe_ai_autodiff::anomaly`）を facade 公開面から締め出す保留ガード
+/// （`JacobianHessianHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `gradcheck`・`anomaly`・
+/// 裸の自由関数 2 名（`gradcheck`・`backward_detect_anomaly`）・単位構造体 2 名（`GradcheckOptions`・
+/// `GradcheckReport`）・`Var`／`Tape`／`Tensor<f32>` 向けの同名 2 メソッドを持つプローブ用トレイトを置き、
+/// モジュール経由と修飾なしの関数呼び出し、型の参照、修飾付きメソッド呼び出しをすべて行う。facade が
+/// 同名のモジュール・関数・型を glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを
+/// 公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する
+/// （モジュール `gradcheck` と関数 `gradcheck` は名前空間が別のため、プローブ内で共存させて両方を検査する）。
+///
+/// **検出範囲の限定**: 列挙した名前と型に限る。マクロ生成・別名経由の公開までは保証しない。
+///
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::gradcheck`・`fandhe_ai_autodiff::anomaly`。新規
+/// `Op`・`BackendOps` メソッド・`AutodiffError` variant はない）。保留対象は facade 公開面のみで、公開形は
+/// 未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
+/// `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §3.7。同記録は推奨案の記録であり承認記録ではない）。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// gradcheck_anomaly_hold_doctest_globs_all_pub_modules`・
+/// `gradcheck_anomaly_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_gradcheck_anomaly`・
+/// `workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
+/// 同時に正ガードへ置き換える）。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::model::*;
+///
+/// mod __fandhe_gradcheck_anomaly_hold_probe {
+///     pub mod gradcheck {
+///         pub fn __mark() {}
+///     }
+///     pub mod anomaly {
+///         pub fn __mark() {}
+///     }
+///     pub fn gradcheck() {}
+///     pub fn backward_detect_anomaly() {}
+///     pub struct GradcheckOptions;
+///     pub struct GradcheckReport;
+/// }
+/// use __fandhe_gradcheck_anomaly_hold_probe::*;
+///
+/// struct __FandheGradcheckAnomalyHoldMarker;
+///
+/// trait __FandheGradcheckAnomalyHoldProbe {
+///     fn gradcheck(&self) -> __FandheGradcheckAnomalyHoldMarker;
+///     fn backward_detect_anomaly(&self) -> __FandheGradcheckAnomalyHoldMarker;
+/// }
+///
+/// impl<'t> __FandheGradcheckAnomalyHoldProbe for fandhe_ai::Var<'t> {
+///     fn gradcheck(&self) -> __FandheGradcheckAnomalyHoldMarker {
+///         __FandheGradcheckAnomalyHoldMarker
+///     }
+///     fn backward_detect_anomaly(&self) -> __FandheGradcheckAnomalyHoldMarker {
+///         __FandheGradcheckAnomalyHoldMarker
+///     }
+/// }
+///
+/// impl __FandheGradcheckAnomalyHoldProbe for fandhe_ai::Tape {
+///     fn gradcheck(&self) -> __FandheGradcheckAnomalyHoldMarker {
+///         __FandheGradcheckAnomalyHoldMarker
+///     }
+///     fn backward_detect_anomaly(&self) -> __FandheGradcheckAnomalyHoldMarker {
+///         __FandheGradcheckAnomalyHoldMarker
+///     }
+/// }
+///
+/// impl __FandheGradcheckAnomalyHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn gradcheck(&self) -> __FandheGradcheckAnomalyHoldMarker {
+///         __FandheGradcheckAnomalyHoldMarker
+///     }
+///     fn backward_detect_anomaly(&self) -> __FandheGradcheckAnomalyHoldMarker {
+///         __FandheGradcheckAnomalyHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     gradcheck::__mark();
+///     anomaly::__mark();
+///     // 修飾なしの自由関数呼び出し（同名の関数を facade が glob 公開していれば同様に曖昧になる）。
+///     gradcheck();
+///     backward_detect_anomaly();
+/// }
+///
+/// fn __probe_types(_: Option<GradcheckOptions>, _: Option<GradcheckReport>) {}
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::gradcheck(v);
+///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::backward_detect_anomaly(v);
+///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::gradcheck(tape);
+///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::backward_detect_anomaly(tape);
+///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::gradcheck(tf);
+///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::backward_detect_anomaly(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct GradcheckAnomalyHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

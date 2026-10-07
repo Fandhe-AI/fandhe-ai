@@ -240,6 +240,7 @@
 pub mod activation_ops;
 pub mod activation_scalar_ops;
 mod adaptive_max_pool_ops;
+pub mod anomaly;
 mod attention;
 mod backward;
 pub mod binning_ops;
@@ -271,6 +272,11 @@ pub mod indexing_ops;
 // `backward_create_graph` の要素ごとの繰り返しのみで、新規 Op・VJP はない。facade への公開は
 // 保留（承認依頼 #2677・公開 #2678。`docs/autodiff-jacobian-hessian-gradcheck-decision.md`）。
 pub mod jacobian_ops;
+// 有限差分との勾配突合（`gradcheck`）と非有限値を生んだ Op の検出（`anomaly`。イシュー
+// #2671）。既存 `jacobian_ops::jacobian`／`Tape::backward` の合成のみで、新規 Op・VJP・
+// `AutodiffError` variant はない。facade への公開は保留（承認依頼 #2677・公開 #2678。
+// `docs/autodiff-jacobian-hessian-gradcheck-decision.md`）。
+pub mod gradcheck;
 mod layout;
 pub mod linalg_ops;
 pub mod loss_ops;

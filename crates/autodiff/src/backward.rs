@@ -106,6 +106,13 @@ impl Gradients {
         Ok(self.grads.get(var.node_id().0).and_then(|g| g.as_ref()))
     }
 
+    /// 勾配スロット列（添字 = ノード id。到達しなかったノードは `None`）の読み取り専用
+    /// ビュー。`anomaly::backward_detect_anomaly`（イシュー #2671）が非有限勾配を
+    /// 走査するための内部用途（`pub(crate)`。公開 API 面には出さず、値は書き換えない）。
+    pub(crate) fn grad_slots(&self) -> &[Option<Tensor<f32>>] {
+        &self.grads
+    }
+
     /// この `Gradients` を生んだ backward 呼び出しの resident
     /// フィンガープリント（`(store_id, backward_serial)`）を返す
     /// （イシュー #1212 の codex-review P0 是正）。`crate::optim::
