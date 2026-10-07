@@ -887,6 +887,20 @@ fn alloc_coef(len: usize) -> Result<Vec<f32>, AutodiffError> {
     Ok(v)
 }
 
+/// f64 で確定した損失係数を f32 へ落とす。有限な f64 が f32 で非有限になる
+/// （表現不能な）場合は、パラメータ更新前に型付きエラーで拒否する
+/// （`inf` 係数が loss・backward へ NaN を伝播するのを防ぐ）。
+fn checked_f32_coef(v: f64, what: &str) -> Result<f32, AutodiffError> {
+    let c = v as f32;
+    if v.is_finite() && c.is_finite() {
+        Ok(c)
+    } else {
+        Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::fit_with_weights: {what} から導出した損失係数 {v} が f32 で表現できない"
+        )))
+    }
+}
+
 /// サンプル別重みの `i` 番目（`sample` 未指定は `1.0`）。
 fn sample_weight_at(sample: Option<&[f32]>, i: usize) -> f32 {
     sample.and_then(|t| t.get(i).copied()).unwrap_or(1.0)
@@ -926,13 +940,24 @@ fn weighted_mse_loss<'t>(
     let m = numel / n;
     let sw = sample.map(|t| t.host_slice());
     let mut coef = alloc_coef(numel)?;
+    // 係数 0（重み 0 または f32 でアンダーフロー）のサンプルは損失計算から除外する
+    // （非有限の `d²` に 0 を掛けると `inf × 0 = NaN` になるため。レビュー指摘 #2823）。
+    let mut zero_mask = vec![false; numel];
     for i in 0..n {
         let w = sample_weight_at(sw.as_deref(), i);
-        coef[i * m..(i + 1) * m].fill((w as f64 / (n as f64 * m as f64)) as f32);
+        let c = checked_f32_coef(w as f64 / (n as f64 * m as f64), "sample_weight")?;
+        coef[i * m..(i + 1) * m].fill(c);
+        if c == 0.0 {
+            zero_mask[i * m..(i + 1) * m].fill(true);
+        }
     }
     let coef_t = Tensor::new(coef, &shape).map_err(AutodiffError::Shape)?;
     let coef_v = tape.var_no_grad(&coef_t);
-    let d = pred.sub(&tape.var_no_grad(target))?;
+    let mut d = pred.sub(&tape.var_no_grad(target))?;
+    if zero_mask.iter().any(|&b| b) {
+        let mask_t = Tensor::new(zero_mask, &shape).map_err(AutodiffError::Shape)?;
+        d = d.masked_fill(&mask_t, 0.0)?;
+    }
     d.mul(&d)?.mul(&coef_v)?.sum(None)
 }
 
@@ -979,6 +1004,7 @@ fn weighted_cross_entropy_loss<'t>(
     let _ = total;
     let sw = sample.map(|t| t.host_slice());
     let mut coef = alloc_coef(n)?;
+    let mut zero_mask = vec![false; n];
     let mut idx: Vec<i32> = Vec::new();
     idx.try_reserve_exact(n)
         .map_err(|_| super::alloc_failed())?;
@@ -995,7 +1021,12 @@ fn weighted_cross_entropy_loss<'t>(
         // 両因子を先に f64 へ昇格し、積と N での除算を終えてから 1 回だけ f32 へ落とす
         // （f32 の積が除算前に overflow するのを避ける）。
         let sw_i = sample_weight_at(sw.as_deref(), i) as f64;
-        coef[i] = (-(sw_i * cw as f64) / n as f64) as f32;
+        let c = checked_f32_coef(
+            -(sw_i * cw as f64) / n as f64,
+            "sample_weight × class_weight",
+        )?;
+        coef[i] = c;
+        zero_mask[i] = c == 0.0;
         idx.push(yi);
     }
     let coef_t = Tensor::new(coef, &[n, 1]).map_err(AutodiffError::Shape)?;
@@ -1003,10 +1034,14 @@ fn weighted_cross_entropy_loss<'t>(
     let coef_v = tape.var_no_grad(&coef_t);
     // target の log_softmax のみを gather で選ぶ（非 target クラスへ 0 を掛けると
     // `0 × -inf` が NaN になるため、疎な係数行列との積は使わない）。
-    pred.log_softmax(1)?
-        .gather(1, &idx_t)?
-        .mul(&coef_v)?
-        .sum(None)
+    // 係数 0 のサンプルは選択された log_softmax が非有限でも `-inf × 0 = NaN` に
+    // ならないよう、積の前に 0 へ置換して除外する（レビュー指摘 #2823）。
+    let mut picked = pred.log_softmax(1)?.gather(1, &idx_t)?;
+    if zero_mask.iter().any(|&b| b) {
+        let mask_t = Tensor::new(zero_mask, &[n, 1]).map_err(AutodiffError::Shape)?;
+        picked = picked.masked_fill(&mask_t, 0.0)?;
+    }
+    picked.mul(&coef_v)?.sum(None)
 }
 
 /// `compile()` で構築した optimizer 本体（[`crate::optim::Sgd`]／

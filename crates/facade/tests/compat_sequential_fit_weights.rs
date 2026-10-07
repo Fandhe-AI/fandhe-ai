@@ -711,3 +711,70 @@ fn extreme_logits_do_not_produce_nan_loss() {
         .unwrap();
     assert!(!h.loss[0].is_nan(), "loss = {}", h.loss[0]);
 }
+
+/// 重み 0 のサンプルは `d²` が f32 で overflow しても `inf × 0 = NaN` にならず除外される。
+#[test]
+fn zero_weight_sample_with_overflowing_square_is_excluded() {
+    let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
+        .unwrap();
+    let x = Tensor::new(vec![0.0f32, 0.0], &[2, 1]).unwrap();
+    let y = Tensor::new(vec![1e20f32, 0.0], &[2, 1]).unwrap();
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, 2),
+            &FitWeights::new().sample_weight(&[0.0, 1.0]),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert!(h.loss[0].is_finite(), "loss = {}", h.loss[0]);
+}
+
+/// CrossEntropy でも重み 0 のサンプルの `-inf` log_softmax が NaN を作らない。
+#[test]
+fn zero_weight_sample_with_infinite_log_softmax_is_excluded() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::CrossEntropy)
+        .unwrap();
+    let x = Tensor::new(vec![f32::MAX, 0.0], &[2, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 0], &[2]).unwrap();
+    let h = m
+        .fit_with_weights(
+            &x,
+            &y,
+            FitConfig::new(1, 2),
+            &FitWeights::new().sample_weight(&[0.0, 1.0]),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert!(!h.loss[0].is_nan(), "loss = {}", h.loss[0]);
+}
+
+/// 係数（sample × class / N）が f32 で表現できない場合は更新前に拒否する。
+#[test]
+fn unrepresentable_coefficient_is_rejected_before_update() {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let before = bits(&m);
+    let x = Tensor::new(vec![1.0f32], &[1, 1]).unwrap();
+    let y = Tensor::new(vec![0i32], &[1]).unwrap();
+    let r = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 1),
+        &FitWeights::new()
+            .sample_weight(&[1e20])
+            .class_weight(HashMap::from([(0u32, 1e20f32)])),
+        None,
+        &mut [],
+        &[],
+    );
+    assert_rejected(&mut m, r, &before, "unrepresentable coef");
+}
