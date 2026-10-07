@@ -465,3 +465,58 @@ fail-closed 拒否（RNG 非消費）、計測値の飽和演算。
 - 承認依頼コメントの投稿・追跡 Issue の起票（ユーザー承認が必要）。
 - 依存追加・`unsafe`・tolerance／baseline の変更、spec 提案、ruleset・
   リポジトリ設定の変更。
+
+## §10 #2582（facade 公開）の実装記録
+
+### 10.1 承認根拠
+
+- ルート #2499 のリポジトリ所有者アカウントによる 2026-10-07 付けコメント
+  （issuecomment-6033824965）が、#2581 について「本記録 §8 の推奨案」を承認している。
+  本実装はその根拠に基づく（§8.4 の主案のみ。代替案〈`phase_metrics()` という名前・
+  open なトレイト・`dyn` 境界・プロセス全体集計・共通ローダー trait〉は承認範囲外で実装しない）。
+- 公開 API は `fandhe-ai =0.10.0` に対して追加のみ（非破壊）。依存・tolerance・baseline・
+  ガードレール閾値・`docs/spec/` は不変。新規 `unsafe` なし。
+
+### 10.2 公開した名前（§8.4 (a)〜(f) の確定形）
+
+| 公開パス | 内容 |
+|---|---|
+| `fandhe_ai::compat::Sequential::predict_batches` | `fn predict_batches<D>(&self, &DataLoader<D>) -> Result<Vec<Tensor<f32>>, AutodiffError> where D: Dataset, D::Batch: PredictBatchInput`（`DataLoader<D>` のみ受理。`shuffle=true` は `InvalidArgument`・RNG 非消費） |
+| `fandhe_ai::inference::PredictBatchInput` | sealed（private supertrait）。実装は `Tensor<f32>`・`(Tensor<f32>, B)`・`(Tensor<f32>, B, C)` の 3 形 |
+| `fandhe_ai::inference::PhaseMetrics` | `#[non_exhaustive]`・`Debug, Clone, Copy, Default, PartialEq, Eq`・フィールド private。`phase`／`total`／`batches`／`samples`／`since` |
+| `fandhe_ai::inference::PhaseStat` | フィールド private。`total_micros() -> u128`・`calls() -> u64`・`total() -> Duration`（`total()` は本実装で新規追加） |
+| `fandhe_ai::inference::InferencePhase` | `#[non_exhaustive]`・4 variant（`DataLoad`・`TapeBuild`・`Forward`・`DeviceTransfer`）。`DeviceTransfer` は CPU 固定経路では常に `calls == 0`（予約） |
+| `fandhe_ai::inference::{get_phase_metrics, reset_phase_metrics}` | thread-local 累計の読み出しとゼロ戻し。`current_phase_metrics` は作らない |
+
+- 集計単位はスレッド単位を維持（(f)）。`PhaseRecorder`・`NoopPhaseRecorder`・`TimingPhaseRecorder`・
+  `merge_inference_phase_stats` は `pub(crate)` のまま。`batch` モジュールは非公開で、
+  `inference/mod.rs` の 1 文の `pub use` でフラットに公開する（(e)）。
+- 改名: `run_loader_inference` → `predict_batches`、`LoaderInferenceInput` → `PredictBatchInput`、
+  `InferencePhaseStats` → `PhaseMetrics`、`inference_phase_stats_snapshot` → `get_phase_metrics`、
+  `clear_inference_phase_stats` → `reset_phase_metrics`。エラーメッセージ接頭辞も
+  `Sequential::predict_batches:` に更新。ロジック（逐次 `try_reserve(1)`・`shuffle` 拒否・
+  失敗時も thread-local へ merge・飽和演算）は不変。
+- `PredictBatchInput::inference_input` は記録に公開形の記載が無いが、sealed のため外部実装は
+  できず、メソッドは現名のまま置いた（doc に「利用者が呼ぶ必要は無い」と明記）。
+
+### 10.3 ガードの扱い
+
+- 削除: `PredictBatchesHoldDoctestGuard`（`lib.rs`）と `api_surface.rs` の保留テスト 5 関数
+  （`predict_batches_hold_doctest_globs_all_pub_modules`・`..._probe_body_matches_fixed_contract`・
+  `facade_does_not_reexport_or_declare_predict_batches_items`〈と自己テスト〉・
+  `workspace_declares_predict_batches_fn_names_nowhere`）と共用定数・走査関数。
+- 置換（最小の正ガード）: `facade_exposes_predict_batches_items_only_in_approved_shape`（＋自己テスト）・
+  `workspace_declares_predict_batches_fn_names_only_in_approved_locations`・
+  `inference_is_public_and_batch_stays_private`・
+  `predict_batches_public_surface_is_reachable_with_pinned_signatures`。
+- 他の保留 doctest の全 `pub mod` glob 一覧へ `use fandhe_ai::inference::*;` を追加
+  （`*_hold_doctest_globs_all_pub_modules` の集合一致検査のため。`GRAD_SCALER_PROBE_MODULES`・
+  `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` も追従）。
+- `GenerateHoldDoctestGuard` のプローブ縮小: `facade-generate-decision.md` §16 を参照。
+
+### 10.4 #2583 へ持ち越す事項（本 issue では行わない）
+
+- 正ガードの全数インベントリ化・doctest 存在検査。
+- `docs/compat-api-scope.md` §5 への適用記録、本 doc §0・§5 本文の実装記録。
+- 利用例の拡充。
+
