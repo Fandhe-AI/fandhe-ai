@@ -4,6 +4,7 @@
 - 基準コミット: `c74c93f0`（`origin/main`）
 - 段階: **段階 0（docs のみ）**。`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec/` は変更しない
 - #2665 追補: 内部実装を追加済み（§16 実装記録。上記「段階 0」は #2664 時点の記述で、§16 が #2665 での `crates/facade` 変更を記録する。承認状態は未承認のまま）
+- #2666 追補: 結合 4 演算を内部実装済み（§17 実装記録。`crates/autodiff` の `merge_ops` と `compat/functional.rs` の結合ノード。承認状態は未承認のまま）
 - 状態: 本記録の推奨案は**全項目「未承認」**。承認依頼は #2677 の一括依頼に委ね、公開は承認後の #2679 で行う。本記録は承認を代行せず、承認済みとも主張しない
 
 ## 0. 結論
@@ -161,6 +162,8 @@
 4. 多出力 fit の意味論（単一 loss の合計）
 5. 結合層の broadcast 拒否
 6. 第 1 段の対象外項目（§14）
+7. 結合ノードの入力は 2 件以上（Concatenate を含む。§17）
+8. ビルダーでの同一ノードの重複指定の拒否（§17）
 
 承認依頼は #2677。承認が得られるまで本記録は未承認のまま保持する。
 
@@ -213,3 +216,47 @@
 
 - PyTorch 2.14.0 実行値: `crates/facade/tests/fixtures/functional-graph-pytorch-reference/`（5 ケース。出自・sha256・再生成手順は同 README）。出力と入力勾配を `fandhe_ai_backend_cpu::parity::assert_parity`（統一複合判定。tolerance 定数は不変）で照合。
 - CUDA／Metal の実機 parity（`#[ignore]` 2 本）は未実測。`docs/perf/logs/functional-graph-2665/README.md` へ申し送り。
+
+## 17. #2666 実装記録（結合層 Concatenate・Add・Multiply・Average。facade 非公開・保留ガード付き）
+
+**承認状態は §13 のとおり未承認のまま**。本節は内部実装の記録と推奨案であり承認記録ではない（承認依頼は #2677・公開は承認後の #2679。本イシューは #2677 へ書き込まず、承認を主張しない）。
+
+### 配置と範囲
+
+- 数値本体: `crates/autodiff/src/merge_ops.rs`（`pub mod merge_ops`。自由関数 `merge_concatenate`／`merge_add`／`merge_multiply`／`merge_average`）。合成は §6 のとおり（`Var::cat`・`Var::add`／`mul` の index 順左畳み込み・Average は和の後に `Var::div`）。**新規 `Op`・`BackendOps` メソッド・VJP なし**。名前は workspace 全体の `fn` 名 inventory ガードが成立する一意名にした（`add`／`mul`／`cat` は既存宣言が多く UFCS プローブが既存 inherent メソッドと衝突するため使えない）。
+- グラフ結線: `crates/facade/src/compat/functional.rs`（`#[cfg(test)]` 隔離の `pub(crate)` のまま）。`NodeDef::Merge { kind, inputs }`・非公開 enum `MergeKind` と、`FunctionalBuilder::{concatenate, add, multiply, average}`（§3 の Keras 名）を追加。`build` の到達性伝播・`forward`・`blocks()` を結合ノードへ拡張した（結合の入力が「どの出力にも寄与しない」と誤判定されない回帰テストあり）。結合ノードは層を持たないため通し番号キーに影響しない（テストで固定）。
+- shape の構築時推論はしない。不整合は forward 時に `AutodiffError::Shape` で検出する。`merge_ops` は facade へ再エクスポートしない。
+
+### §6 が未決だった細部（いずれも未承認の推奨）
+
+| 論点 | 決定 | 理由 |
+|---|---|---|
+| 最小入力数 | Concatenate を含む 4 種とも **2 件以上** | 一様性。後から 1 件を許すのは非破壊・逆は破壊的 |
+| ビルダーでの同一ノード重複 | **拒否**（autodiff 層の `merge_add(&[x, x])` は数式として自然なため拒否しない） | 結線ミスを成功させない（broadcast 拒否と同じ思想）。`build` の inputs／outputs 重複拒否と整合。後から許可は非破壊 |
+| Average の除数 | `var_no_grad` の定数・shape は `[1; rank]`（rank 0 なら `[]`）・件数は `n <= 2^24` | 出力 rank・shape を入力と同一に保つ。`n as f32` が厳密に表せる範囲 |
+| 検証順 | 件数 → 同一 tape → shape 完全一致 → 件数上限。すべて tape へノードを積む前 | 引数起因のエラーで孤児ノードを残さない（テストで `tape.len()` 不変を固定） |
+| PyTorch／Keras との意図した差分 | broadcast 拒否（`add_broadcastable` 等）・入力 1 件拒否・負の `dim` 非対応（`usize`）・ビルダーの重複ノード拒否 | fixture の `error_cases`（`torch_raises: false` かつ本実装が拒否する 7 件）と `INTENDED_DIFFS` が一対一 |
+
+### 公開形の推奨案（1 案・未承認）
+
+§10 と同一の**モジュール再エクスポート**。結合層は `FunctionalBuilder::{concatenate, add, multiply, average}` として #2679 で型と同時に公開する。`merge_ops` の自由関数は facade へ再エクスポートしない（内部に留める）。`Var` への委譲メソッドと `Sequential::add_*` は不採用（多入力を表せない／単一入力契約に合わない）。承認依頼は #2677 に委ねる。
+
+### 保留ガード
+
+- `crates/facade/src/lib.rs::MergeOpsHoldDoctestGuard`（正のプローブ。`merge_ops` モジュールと裸の自由関数 4 名・`Var`／`Tape`／`Tensor<f32>` への 7 名〈`merge_*` 4 + `concatenate`／`multiply`／`average`〉・`Sequential` への `add_concatenate`／`add_add`／`add_multiply`／`add_average` の UFCS 呼び出し）。
+- `crates/facade/tests/api_surface.rs`: `merge_ops_hold_doctest_globs_all_pub_modules`・`merge_ops_hold_doctest_probe_body_matches_fixed_contract`（固定文言 `MERGE_OPS_HOLD_PROBE_BODY`）・`facade_does_not_reexport_or_declare_merge_ops`（＋自己テスト `..._detects_each_category`）・`workspace_declares_merge_ops_fn_names_only_in_allowed_locations`（期待集合: `autodiff/src/merge_ops.rs::merge_*` 各 1 件・`facade/src/compat/functional.rs::{concatenate, multiply, average}` 各 1 件）。
+- **検出範囲の限定**: 列挙した名前と型に限る。ビルダーの `add` は既存の承認済み公開 API `Var::add` と同名の汎用名のため inventory 対象外。マクロ生成・別名経由は保証しない。#2679 の反転時はビルダー名の公開に合わせて本ガードを正ガードへ置き換える。
+- 効くことの実証（作業ツリー上で一時変更し、実証後に元へ戻した）: facade `lib.rs` に `pub use fandhe_ai_autodiff::merge_ops;` を足すと doctest が E0659（`merge_ops` is ambiguous）で失敗し `facade_does_not_reexport_or_declare_merge_ops` も失敗／autodiff の `impl Var` に `pub fn average` を足すと doctest（E0308）と `workspace_declares_merge_ops_fn_names_only_in_allowed_locations` が失敗／`impl Sequential` に `pub fn add_concatenate` を足すと doctest（E0308）・`facade_does_not_reexport_or_declare_merge_ops`・inventory の 3 つが失敗。
+
+### 既存ガードとの衝突調査
+
+`merge_ops`・`MergeKind`・ビルダーメソッド 4 名の追加で反応した既存ガードは無く、既存ガードの期待集合は変更していない（`api_surface` 全 488 件・doctest 全件 green）。`MIN_KNOWN_PROBE_BLOCKS` は下限値のため更新対象外（現状の検出数は下限を上回る）。
+
+### fixture・実機
+
+- PyTorch 2.14.0 実行値: `crates/autodiff/tests/fixtures/merge-ops-pytorch-reference/`（82 ケース＋ `error_cases` 13 件。非 contiguous 入力・同一テンソルの重複・多数件を含む）と `crates/facade/tests/fixtures/functional-merge-pytorch-reference/`（グラフ 6 ケース。結線・勾配合流・結合の連鎖）。出自・sha256・再生成手順は各 README。統一複合判定で照合し、tolerance 定数は不変。
+- CUDA／Metal の実機 parity（`#[ignore]` 4 本）は未実測。`docs/perf/logs/merge-ops-2666/README.md` へ申し送り。
+
+### #2667 への申し送り
+
+保存形式には結合ノードの `op` 文字列 allowlist（`concatenate`／`add`／`multiply`／`average`）と `dim` パラメータの直列化が必要。結合ノードは層を持たないため、層範囲の「重複なし・隙間なし」規則に影響しない。`bind`／`compile`／`fit` では結合ノードはパラメータを持たない純関数ノードとして扱える。

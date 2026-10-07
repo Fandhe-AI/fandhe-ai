@@ -24,10 +24,14 @@
 //!
 //! ノードの単位は `compat::Sequential` ブロック（所有渡し）。層語彙・保存・学習・`add_module`
 //! を再利用でき、層語彙を二重に持たない（REQ-9「薄いラッパー」）。本段が扱うのは
-//! 入力ノード・ブロックノード・fan-out（1 ノードを複数ブロックが消費）・多入力・多出力まで。
-//! 結合ノード（Concatenate／Add 等）は #2666、`bind`／`trainable_parameters`／
-//! `apply_parameters`／`compile`／`fit`／保存は #2667 の担当で、ノード種別は内部 enum とし
-//! 入力添字を複数持てる形にして追加可能にしてある。shape の構築時推論は行わず（層側に推論 API
+//! 入力ノード・ブロックノード・fan-out（1 ノードを複数ブロックが消費）・多入力・多出力・
+//! 結合ノード（Concatenate／Add／Multiply／Average。イシュー #2666）まで。結合ノードは
+//! [`FunctionalBuilder::concatenate`]・`add`・`multiply`・`average` で追加し、数値は
+//! `fandhe_ai_autodiff::merge_ops`（既存 `Var` 演算の合成）へ委譲する。結合ノードは層を
+//! 持たないため通し番号キーに影響しない。`bind`／`trainable_parameters`／`apply_parameters`／
+//! `compile`／`fit`／保存は #2667 の担当（保存形式では結合ノードの `op` 文字列 allowlist と
+//! `dim` パラメータの直列化が必要）で、ノード種別は内部 enum とし入力添字を複数持てる形に
+//! してある。shape の構築時推論は行わず（層側に推論 API
 //! が無い）、不整合は forward 時に既存 `Var` 演算の型付きエラーで検出する。
 //!
 //! 数値は既存 `Var` 演算（`Sequential::forward`）の合成のみで、新規 `Op`・`BackendOps`
@@ -38,11 +42,16 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fandhe_ai_autodiff::merge_ops;
+
 use super::Sequential;
 use crate::{AutodiffError, Tape, Tensor, Var};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod merge_tests;
 
 /// ビルダー ID の採番器。他ビルダー由来のハンドルの取り違えを検出するためのプロセス内一意値。
 static NEXT_BUILDER_ID: AtomicU64 = AtomicU64::new(1);
@@ -74,7 +83,21 @@ pub(crate) struct Node {
     index: usize,
 }
 
-/// グラフ上のノード定義（非公開）。結合ノード（#2666）はここへ variant を足す。
+/// 結合ノードの種別（非公開。Keras の `Concatenate`／`Add`／`Multiply`／`Average` 相当）。
+/// 数値は `merge_ops` の自由関数が持ち、ここは結線上の種別だけを表す。
+#[derive(Debug, Clone, Copy)]
+enum MergeKind {
+    /// 軸 `dim` で連結する。
+    Concatenate { dim: usize },
+    /// 要素ごとの加算。
+    Add,
+    /// 要素ごとの乗算。
+    Multiply,
+    /// 要素ごとの平均。
+    Average,
+}
+
+/// グラフ上のノード定義（非公開）。
 enum NodeDef {
     /// 外部から値を受ける入力ノード（Keras `Input`）。
     Input,
@@ -83,6 +106,18 @@ enum NodeDef {
         block: Box<Sequential>,
         inputs: Vec<usize>,
     },
+    /// 2 件以上のノードを 1 つへ合流させる結合ノード（#2666）。層を持たない。
+    Merge { kind: MergeKind, inputs: Vec<usize> },
+}
+
+impl NodeDef {
+    /// このノードが消費する上流ノード添字列（入力ノードは空）。`build` の到達性伝播が使う。
+    fn sources(&self) -> &[usize] {
+        match self {
+            NodeDef::Input => &[],
+            NodeDef::Block { inputs, .. } | NodeDef::Merge { inputs, .. } => inputs,
+        }
+    }
 }
 
 /// DAG を組み立てるアリーナ型ビルダー（`docs/facade-functional-api-decision.md` §3 案 A）。
@@ -172,6 +207,63 @@ impl FunctionalBuilder {
         })
     }
 
+    /// 軸 `dim` で連結する結合ノードを追加する（Keras `Concatenate`）。
+    ///
+    /// 拒否: 入力 2 件未満・他ビルダーのハンドル・範囲外添字・同一ノードの重複指定。shape の検査
+    /// （rank・`dim` 範囲・非連結軸の一致）は構築時には行わず、forward 時に型付きエラーで検出する。
+    pub(crate) fn concatenate(
+        &mut self,
+        inputs: &[Node],
+        dim: usize,
+    ) -> Result<Node, AutodiffError> {
+        self.add_merge("concatenate", MergeKind::Concatenate { dim }, inputs)
+    }
+
+    /// 要素ごとの加算ノードを追加する（Keras `Add`）。拒否規則は [`Self::concatenate`] と同じ。
+    pub(crate) fn add(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
+        self.add_merge("add", MergeKind::Add, inputs)
+    }
+
+    /// 要素ごとの乗算ノードを追加する（Keras `Multiply`）。拒否規則は [`Self::concatenate`] と同じ。
+    pub(crate) fn multiply(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
+        self.add_merge("multiply", MergeKind::Multiply, inputs)
+    }
+
+    /// 要素ごとの平均ノードを追加する（Keras `Average`）。拒否規則は [`Self::concatenate`] と同じ。
+    pub(crate) fn average(&mut self, inputs: &[Node]) -> Result<Node, AutodiffError> {
+        self.add_merge("average", MergeKind::Average, inputs)
+    }
+
+    /// 結合ノード追加の共通検証。入力 2 件未満（0 件を含む）・他ビルダー／範囲外ハンドル・
+    /// 同一ノードの重複指定を拒否する（重複は結線ミスを成功させない方針。`build` の
+    /// inputs／outputs 重複拒否と整合。後から許可するのは非破壊）。
+    fn add_merge(
+        &mut self,
+        what: &str,
+        kind: MergeKind,
+        inputs: &[Node],
+    ) -> Result<Node, AutodiffError> {
+        if inputs.len() < 2 {
+            return Err(invalid(format!(
+                "{what}: 入力は 2 件以上が必要（件数 {}）",
+                inputs.len()
+            )));
+        }
+        let mut srcs: Vec<usize> = Vec::new();
+        srcs.try_reserve_exact(inputs.len())
+            .map_err(|_| super::alloc_failed())?;
+        for node in inputs {
+            let index = self.resolve(*node, what)?;
+            if srcs.contains(&index) {
+                return Err(invalid(format!(
+                    "{what}: ノード {index} が重複して指定された"
+                )));
+            }
+            srcs.push(index);
+        }
+        self.push_node(NodeDef::Merge { kind, inputs: srcs })
+    }
+
     /// グラフを検証して [`FunctionalModel`] へ確定する（Keras `Model(inputs, outputs)`）。
     ///
     /// 拒否（すべて型付き `Err`）: `inputs`／`outputs` が空・他ビルダーのハンドル・範囲外・
@@ -242,8 +334,8 @@ impl FunctionalBuilder {
             if !reached.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            if let Some(NodeDef::Block { inputs, .. }) = self.nodes.get(index) {
-                for src in inputs {
+            if let Some(def) = self.nodes.get(index) {
+                for src in def.sources() {
                     if let Some(slot) = reached.get_mut(*src) {
                         *slot = true;
                     }
@@ -321,7 +413,7 @@ impl FunctionalModel {
             .enumerate()
             .filter_map(|(i, def)| match def {
                 NodeDef::Block { block, .. } => Some((i, block.as_ref())),
-                NodeDef::Input => None,
+                NodeDef::Input | NodeDef::Merge { .. } => None,
             })
     }
 
@@ -365,20 +457,38 @@ impl FunctionalModel {
                 Some(*var);
         }
         for (index, def) in self.nodes.iter().enumerate() {
-            let NodeDef::Block { block, inputs } = def else {
-                continue;
+            let y = match def {
+                NodeDef::Input => continue,
+                NodeDef::Block { block, inputs } => {
+                    let [src] = inputs.as_slice() else {
+                        return Err(invalid(format!(
+                            "内部不整合: ブロックノード {index} の入力数が 1 でない"
+                        )));
+                    };
+                    let x = values
+                        .get(*src)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| invalid(format!("内部不整合: ノード {src} が未評価")))?;
+                    block.forward(tape, &x)?
+                }
+                NodeDef::Merge { kind, inputs } => {
+                    let mut xs: Vec<Var<'t>> = Vec::new();
+                    xs.try_reserve_exact(inputs.len())
+                        .map_err(|_| super::alloc_failed())?;
+                    for src in inputs {
+                        xs.push(values.get(*src).copied().flatten().ok_or_else(|| {
+                            invalid(format!("内部不整合: ノード {src} が未評価"))
+                        })?);
+                    }
+                    match kind {
+                        MergeKind::Concatenate { dim } => merge_ops::merge_concatenate(&xs, *dim)?,
+                        MergeKind::Add => merge_ops::merge_add(&xs)?,
+                        MergeKind::Multiply => merge_ops::merge_multiply(&xs)?,
+                        MergeKind::Average => merge_ops::merge_average(&xs)?,
+                    }
+                }
             };
-            let [src] = inputs.as_slice() else {
-                return Err(invalid(format!(
-                    "内部不整合: ブロックノード {index} の入力数が 1 でない"
-                )));
-            };
-            let x = values
-                .get(*src)
-                .copied()
-                .flatten()
-                .ok_or_else(|| invalid(format!("内部不整合: ノード {src} が未評価")))?;
-            let y = block.forward(tape, &x)?;
             *values
                 .get_mut(index)
                 .ok_or_else(|| invalid(format!("内部不整合: ノード {index} が範囲外")))? = Some(y);
