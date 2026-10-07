@@ -1755,6 +1755,30 @@ fn accumulate_grads_into(
     Ok(())
 }
 
+/// 重み付き fit（`fit_with_weights` の非既定重み）で、optimizer へ渡す直前の勾配に
+/// 非有限値（NaN／±inf）がないことを確認する（イシュー #2564・レビュー指摘 #2823）。
+///
+/// 検査位置は 2 段: (1) 各マイクロバッチの `grad_refs`（内部層 overflow の `inf × 0`）、
+/// (2) 累積境界・epoch 末端数 flush で `optimizer.step_dispatch` に渡す累積勾配
+/// （各マイクロバッチが有限でも [`accumulate_grads_into`] の f32 加算で overflow しうる）。
+/// 失敗は更新前に `InvalidArgument` を返すだけで、パラメータ・optimizer 状態へ触れない。
+fn ensure_finite_grads<'a>(
+    grads: impl IntoIterator<Item = &'a Tensor<f32>>,
+    method: &str,
+    stage: &str,
+) -> Result<(), AutodiffError> {
+    if grads
+        .into_iter()
+        .any(|g| g.host_slice().iter().any(|v| !v.is_finite()))
+    {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "Sequential::{method}: 重み付き損失の勾配（{stage}）に非有限値（NaN／inf）が\
+             含まれるためパラメータ更新を拒否した（重み×勾配の overflow の疑い）"
+        )));
+    }
+    Ok(())
+}
+
 /// L-BFGS（イシュー #2172・親 #2131。2026-09-27 所有者承認）: 1 バッチ
 /// あたりの outer step を 1 回実行する（[`Sequential::run_fit`] の
 /// `OptimizerState::Lbfgs` 分岐から呼ばれる）。
@@ -2459,6 +2483,14 @@ impl Sequential {
     ///   の併用（式が定義されていない組み合わせは fail-closed）
     /// - `validation_split` が非有限・負・`1` 以上・学習側／検証側が 0 件になる値、
     ///   明示 `validation` との併用（[`FitConfig::validation_split`]）
+    ///
+    /// # 非有限値の拒否（イシュー #2564・レビュー指摘 #2823）
+    ///
+    /// 非既定の重みでは、optimizer へ渡す前に (1) 重み付き損失、(2) 各マイクロバッチの勾配、
+    /// (3) 累積境界・epoch 末の端数 flush で実際に渡す累積勾配（f32 加算の overflow を含む）を
+    /// 検査し、NaN／±inf があれば `InvalidArgument` を返す。拒否した更新は適用されず、
+    /// パラメータ・optimizer 状態は拒否時点の直前の状態のまま（それまでに成功した step は
+    /// 既存 `fit` 系と同じく巻き戻さない）。train／eval モードは呼び出し前へ復元する。
     ///
     /// # 例
     ///
@@ -3185,6 +3217,14 @@ impl Sequential {
                                 )));
                             }
                         };
+                        // 非既定の重み: 非有限の損失は History へ記録せず更新前に拒否する
+                        // （重み付き和の f32 overflow 等。重みなし経路は従来どおり）。
+                        if weighted && !loss_scalar.is_finite() {
+                            break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
+                                "Sequential::{method}: 重み付き損失が非有限（{loss_scalar}）の\
+                                 ためパラメータ更新を拒否した（重み×損失の overflow の疑い）"
+                            )));
+                        }
                         weighted_sum += loss_scalar as f64 * n_batch as f64;
                         count += n_batch;
 
@@ -3249,14 +3289,13 @@ impl Sequential {
                             // （`inf × 0 = NaN`）が勾配へ混入しうる。optimizer.step より前に
                             // 非有限勾配を拒否し、パラメータ汚染を防ぐ（レビュー指摘 #2823）。
                             if weighted
-                                && grad_refs
-                                    .iter()
-                                    .any(|g| g.host_slice().iter().any(|v| !v.is_finite()))
+                                && let Err(e) = ensure_finite_grads(
+                                    grad_refs.iter().copied(),
+                                    method,
+                                    "マイクロバッチ",
+                                )
                             {
-                                break 'epochs_block Err(AutodiffError::InvalidArgument(format!(
-                                    "Sequential::{method}: 重み付き損失の勾配に非有限値（NaN／inf）が\
-                                     含まれるためパラメータ更新を拒否した（内部層の overflow の疑い）"
-                                )));
+                                break 'epochs_block Err(e);
                             }
 
                             // 勾配累積（イシュー #2180）。AMP は
@@ -3306,6 +3345,14 @@ impl Sequential {
                                         ));
                                     }
                                 };
+                                // 累積後の f32 加算 overflow は個々のマイクロバッチ検査では
+                                // 検出できないため、実際に渡す累積勾配を更新前に検査する。
+                                if weighted
+                                    && let Err(e) =
+                                        ensure_finite_grads(acc_buf.iter(), method, "累積境界")
+                                {
+                                    break 'epochs_block Err(e);
+                                }
                                 let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
                                 let stepped = match compiled.optimizer.step_dispatch(
                                     &param_refs,
@@ -3353,6 +3400,12 @@ impl Sequential {
                             )));
                         }
                     };
+                    if weighted
+                        && let Err(e) =
+                            ensure_finite_grads(acc_buf.iter(), method, "epoch 末の端数 flush")
+                    {
+                        break 'epochs_block Err(e);
+                    }
                     let acc_refs: Vec<&Tensor<f32>> = acc_buf.iter().collect();
                     let stepped = match compiled.optimizer.step_dispatch(
                         &param_refs,

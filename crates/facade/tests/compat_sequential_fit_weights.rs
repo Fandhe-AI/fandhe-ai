@@ -9,8 +9,9 @@
 //! モード復元・compile 維持）。新規 `Op`／カーネルを持たないため実機依存テストは
 //! なし（`#[ignore]` 分離なし）。
 //!
-//! `shuffle(true)` やグローバル RNG を消費するテストは `compat_sequential_fit.rs` と
-//! 同型の `test_lock` で直列化する。
+//! グローバル RNG（`manual_seed`・shuffle・層初期化）を共有するため、本ファイルの全テストが
+//! `test_lock` で直列化する（`compat_sequential_fit.rs` と同型。ロック漏れの shuffle テストが
+//! bit 一致テストの RNG 系列を食う不安定を防ぐ）。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -155,6 +156,7 @@ fn host_log_softmax_nll(logits: &Tensor<f32>, y: &[i32]) -> Vec<f32> {
 
 #[test]
 fn class_and_sample_weights_match_hand_computed_loss() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let mut model = cls_model(Loss::CrossEntropy);
     let nll = host_log_softmax_nll(&model.predict(&x).unwrap(), y.host_slice().as_ref());
@@ -175,6 +177,7 @@ fn class_and_sample_weights_match_hand_computed_loss() {
 
 #[test]
 fn sample_weight_scaling_and_zero() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let base = cls_model(Loss::CrossEntropy)
         .fit(&x, &y, FitConfig::new(1, N))
@@ -228,6 +231,7 @@ fn sample_weight_scaling_and_zero() {
 
 #[test]
 fn mse_sample_weight_matches_unweighted_scaling() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = reg_data();
     let base = reg_model().fit(&x, &y, FitConfig::new(1, N)).unwrap().loss[0];
     let ones = [1.0f32; N];
@@ -252,6 +256,7 @@ fn mse_sample_weight_matches_unweighted_scaling() {
 
 #[test]
 fn weights_work_with_accumulation_and_amp() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let sw = [1.0f32; N];
     let w = FitWeights::new().sample_weight(&sw);
@@ -312,6 +317,7 @@ fn sample_weight_does_not_change_shuffle_order() {
 
 #[test]
 fn validation_split_matches_explicit_tail_validation() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let at = (N as f64 * (1.0 - 0.25)).floor() as usize; // 9
     let (xt, yt) = (x.narrow(0, 0, at).unwrap(), y.narrow(0, 0, at).unwrap());
@@ -351,6 +357,7 @@ fn validation_split_matches_explicit_tail_validation() {
 
 #[test]
 fn validation_split_is_effective_for_every_entry_and_enables_val_monitors() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let cfg = FitConfig::new(2, 4).validation_split(0.25);
     let h = cls_model(Loss::CrossEntropy).fit(&x, &y, cfg).unwrap();
@@ -383,6 +390,7 @@ fn validation_split_is_effective_for_every_entry_and_enables_val_monitors() {
 
 #[test]
 fn validation_split_applies_sample_weight_to_train_side_only() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let at = 9usize;
     let sw: Vec<f32> = (0..N).map(|i| 1.0 + i as f32).collect();
@@ -434,6 +442,7 @@ fn assert_rejected(
 
 #[test]
 fn invalid_inputs_are_rejected_without_side_effects() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let cfg = FitConfig::new(1, 4);
     let mut m = cls_model(Loss::CrossEntropy);
@@ -544,6 +553,7 @@ fn invalid_inputs_are_rejected_without_side_effects() {
 
 #[test]
 fn undefined_loss_and_optimizer_combinations_are_rejected() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let sw = [1.0f32; N];
     let cw = || HashMap::from([(0u32, 2.0f32)]);
@@ -647,6 +657,7 @@ fn undefined_loss_and_optimizer_combinations_are_rejected() {
 /// 後続バッチの不正 target は、先行バッチの更新より前に拒否される（パラメータ不変）。
 #[test]
 fn late_batch_invalid_target_is_rejected_before_any_update() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, mut y) = {
         let (x, y) = cls_data();
         (x, y.host_slice().to_vec())
@@ -670,6 +681,7 @@ fn late_batch_invalid_target_is_rejected_before_any_update() {
 /// sample 1e19 × class 1e20 の積が f32 で overflow せず（f64 で積・除算してから f32 化）、損失が有限。
 #[test]
 fn huge_weight_product_does_not_overflow_in_f32() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let (x, y) = cls_data();
     let mut m = cls_model(Loss::CrossEntropy);
     let mut sw = [0.0f32; N];
@@ -693,6 +705,7 @@ fn huge_weight_product_does_not_overflow_in_f32() {
 /// 極端な logits でも非 target クラスの `0 × -inf` が NaN を作らない。
 #[test]
 fn extreme_logits_do_not_produce_nan_loss() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::CrossEntropy)
         .unwrap();
@@ -715,6 +728,7 @@ fn extreme_logits_do_not_produce_nan_loss() {
 /// 重み 0 のサンプルは `d²` が f32 で overflow しても `inf × 0 = NaN` にならず除外される。
 #[test]
 fn zero_weight_sample_with_overflowing_square_is_excluded() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
         .unwrap();
@@ -737,6 +751,7 @@ fn zero_weight_sample_with_overflowing_square_is_excluded() {
 /// CrossEntropy でも重み 0 のサンプルの `-inf` log_softmax が NaN を作らない。
 #[test]
 fn zero_weight_sample_with_infinite_log_softmax_is_excluded() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::CrossEntropy)
         .unwrap();
@@ -759,6 +774,7 @@ fn zero_weight_sample_with_infinite_log_softmax_is_excluded() {
 /// 係数（sample × class / N）が f32 で表現できない場合は更新前に拒否する。
 #[test]
 fn unrepresentable_coefficient_is_rejected_before_update() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
         .unwrap();
@@ -782,6 +798,7 @@ fn unrepresentable_coefficient_is_rejected_before_update() {
 /// 後続バッチだけが表現不能な係数になる場合も、先行バッチの更新前に拒否する（レビュー指摘 #2823）。
 #[test]
 fn unrepresentable_coefficient_in_late_batch_is_rejected_before_update() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
         .unwrap();
@@ -805,6 +822,7 @@ fn unrepresentable_coefficient_in_late_batch_is_rejected_before_update() {
 /// ゼロ重みの行の logits が inf でも勾配・パラメータが NaN にならない。
 #[test]
 fn zero_weight_row_with_infinite_logits_keeps_params_finite() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
         .unwrap();
@@ -831,6 +849,7 @@ fn zero_weight_row_with_infinite_logits_keeps_params_finite() {
 /// 差分の二乗が f32 で overflow しても、最終結果が有限なら loss は有限（小さい重み）。
 #[test]
 fn small_weight_with_large_residual_does_not_overflow() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
         .unwrap();
@@ -862,11 +881,11 @@ fn no_shuffle_validates_coefficients_with_actual_batch_size() {
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::CrossEntropy)
         .unwrap();
-    let x = Tensor::new(vec![1.0f32, 1.0, 1.0], &[3, 1]).unwrap();
+    let x = Tensor::new(vec![0.0f32, 0.0, 0.0], &[3, 1]).unwrap();
     let y = Tensor::new(vec![0i32, 0, 0], &[3]).unwrap();
     let w = FitWeights::new()
         .sample_weight(&[1e19, 0.0, 0.0])
-        .class_weight(HashMap::from([(0u32, 5e19f32)]));
+        .class_weight(HashMap::from([(0u32, 4e19f32)]));
     // shuffle なし: サンプル 0 は実バッチサイズ 2 → 係数 2.5e38 で有限。
     m.fit_with_weights(
         &x,
@@ -894,6 +913,7 @@ fn no_shuffle_validates_coefficients_with_actual_batch_size() {
 /// 重み付き MSE の `pred − target` 自体が f32 で overflow する入力でも loss が有限。
 #[test]
 fn weighted_mse_subtraction_does_not_overflow() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
         .unwrap();
@@ -917,6 +937,7 @@ fn weighted_mse_subtraction_does_not_overflow() {
 /// （更新前に拒否されるか、有限のまま更新される）。
 #[test]
 fn zero_weight_row_with_internal_overflow_never_pollutes_params() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new()
         .add_linear(1, 4, 5)
         .unwrap()
@@ -943,6 +964,7 @@ fn zero_weight_row_with_internal_overflow_never_pollutes_params() {
 /// 正の CE 重みが f32 でゼロへアンダーフローする場合は、ゼロ重み扱いにせず更新前に拒否する。
 #[test]
 fn positive_ce_weight_underflow_is_rejected() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
         .unwrap();
@@ -958,6 +980,7 @@ fn positive_ce_weight_underflow_is_rejected() {
 /// 残差を先に求めるため、`s_i > 1` で pred・target がともに大きく残差 0 でも NaN にならない。
 #[test]
 fn weighted_mse_large_equal_operands_and_scale_above_one_is_finite() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
         .unwrap();
@@ -982,6 +1005,7 @@ fn weighted_mse_large_equal_operands_and_scale_above_one_is_finite() {
 /// （ゼロへのアンダーフロー）でも行い、更新前に拒否する（レビュー指摘 #2823）。
 #[test]
 fn shuffle_ce_underflow_at_max_batch_size_is_rejected_before_update() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
         .unwrap();
@@ -1016,6 +1040,7 @@ fn shuffle_ce_underflow_at_max_batch_size_is_rejected_before_update() {
 /// 別行の残差 overflow が、有限な行（pred=target・係数大）の計算を NaN にしない。
 #[test]
 fn weighted_mse_overflow_row_does_not_poison_finite_row() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     let mut m = Sequential::new().add_linear(1, 1, 7).unwrap();
     m.compile(Optimizer::Sgd(SgdConfig::new(0.0)), Loss::Mse)
         .unwrap();
@@ -1042,4 +1067,125 @@ fn weighted_mse_overflow_row_does_not_poison_finite_row() {
         )
         .unwrap();
     assert!(h.loss[0].is_finite(), "loss = {}", h.loss[0]);
+}
+// ---------------------------------------------------------------------
+// 5. 勾配累積で非有限化する重み付き勾配の拒否（レビュー指摘 #2823・P1）
+// ---------------------------------------------------------------------
+
+/// 各マイクロバッチの勾配は有限（bias ≈ ±1.5e38）だが f32 累積で ±inf になる最小構成。
+/// 入力 0 → logits = bias（同一）→ `softmax − onehot` ≈ ±0.5、係数 3e38 で bias 勾配 ≈ ±1.5e38。
+fn overflow_accumulation_model() -> Sequential {
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(
+        Optimizer::Adam(fandhe_ai::optim::AdamConfig::default()),
+        Loss::CrossEntropy,
+    )
+    .unwrap();
+    m
+}
+
+fn run_overflow_accumulation(
+    n: usize,
+    accumulate_steps: u32,
+) -> (
+    Sequential,
+    Result<fandhe_ai::compat::History, AutodiffError>,
+) {
+    let mut m = overflow_accumulation_model();
+    let x = Tensor::new(vec![0.0f32; n], &[n, 1]).unwrap();
+    let y = Tensor::new(vec![0i32; n], &[n]).unwrap();
+    let sw = vec![3e38f32; n];
+    let r = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 1).accumulate_steps(accumulate_steps),
+        &FitWeights::new().sample_weight(&sw),
+        None,
+        &mut [],
+        &[],
+    );
+    (m, r)
+}
+
+/// 拒否後に同一の良性 fit を実行し、新品モデルと bit 一致する（optimizer 状態を汚さない）。
+fn assert_state_clean_after_reject(mut m: Sequential, what: &str) {
+    let mut fresh = overflow_accumulation_model();
+    assert!(m.is_compiled(), "{what}");
+    let x = Tensor::new(vec![0.5f32, -0.5], &[2, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 1], &[2]).unwrap();
+    for model in [&mut m, &mut fresh] {
+        model
+            .fit_with_weights(
+                &x,
+                &y,
+                FitConfig::new(2, 1),
+                &FitWeights::new().sample_weight(&[1.0, 2.0]),
+                None,
+                &mut [],
+                &[],
+            )
+            .unwrap();
+    }
+    assert_eq!(bits(&m), bits(&fresh), "{what}: optimizer 状態が汚れた");
+}
+
+fn assert_rejected_ref(
+    model: &Sequential,
+    r: Result<fandhe_ai::compat::History, AutodiffError>,
+    before: &[Vec<u32>],
+    what: &str,
+) {
+    match r {
+        Err(AutodiffError::InvalidArgument(_)) => {}
+        other => panic!("{what}: InvalidArgument のはずが {other:?}"),
+    }
+    assert_eq!(bits(model), before, "{what}: パラメータが変化した");
+}
+
+/// 通常の累積境界（3 バッチ = accumulate_steps）で累積勾配が ±inf になる場合の拒否。
+#[test]
+fn accumulated_overflow_at_boundary_is_rejected_before_update() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = overflow_accumulation_model();
+    let (before, mode) = (bits(&fresh), fresh.training());
+    let (m, r) = run_overflow_accumulation(3, 3);
+    assert_rejected_ref(&m, r, &before, "boundary overflow");
+    assert_eq!(m.training(), mode);
+    assert_state_clean_after_reject(m, "boundary overflow");
+}
+
+/// epoch 末の端数 flush（accumulate_steps=5 に満たない 3 バッチ）で ±inf になる場合の拒否。
+#[test]
+fn accumulated_overflow_at_epoch_end_flush_is_rejected_before_update() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = overflow_accumulation_model();
+    let (before, mode) = (bits(&fresh), fresh.training());
+    let (m, r) = run_overflow_accumulation(3, 5);
+    assert_rejected_ref(&m, r, &before, "flush overflow");
+    assert_eq!(m.training(), mode);
+    assert_state_clean_after_reject(m, "flush overflow");
+}
+/// 係数（2.5e38）は f32 で表現可能でも、重み付き損失（係数 × -log p）が f32 で overflow して
+/// inf になる場合は、`History` へ inf を記録せず更新前に拒否する（パラメータ不変）。
+#[test]
+fn weighted_loss_overflow_is_rejected_before_update() {
+    let _g = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = Sequential::new().add_linear(1, 2, 5).unwrap();
+    m.compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::CrossEntropy)
+        .unwrap();
+    let before = bits(&m);
+    let x = Tensor::new(vec![1.0f32, 1.0, 1.0], &[3, 1]).unwrap();
+    let y = Tensor::new(vec![0i32, 0, 0], &[3]).unwrap();
+    let r = m.fit_with_weights(
+        &x,
+        &y,
+        FitConfig::new(1, 2),
+        &FitWeights::new()
+            .sample_weight(&[1e19, 0.0, 0.0])
+            .class_weight(HashMap::from([(0u32, 5e19f32)])),
+        None,
+        &mut [],
+        &[],
+    );
+    assert_rejected_ref(&m, r, &before, "loss overflow");
 }
