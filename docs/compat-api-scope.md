@@ -1329,7 +1329,7 @@ compat_optimizer_enum_has_lbfgs_variant`。variant がちょうど 1 個
 を撤去し、`optim_module_reexports_exactly_expected_surface` の期待集合と
 `lbfgs_types_are_reachable_via_facade_only` を正ガードとした。帰結として
 `Lbfgs` の inherent `state_dict`／`load_state_dict`／`history_len` も facade から
-到達可能になる。`OptimizerStateDict` trait は #2556 で公開済み（`Lbfgs` は対象外のまま。適用記録は #2557）。
+到達可能になる。`OptimizerStateDict` trait は #2556 で公開済み（`Lbfgs` は対象外のまま。適用記録は上記「適用記録（経路 2。イシュー #2556・#2557）」）。
 
 **#2177（`fit()` の class_weight・sample_weight・validation_split
 対応）は経路 2 未適用のまま承認待ちで保留した。** コード変更なし
@@ -1416,7 +1416,26 @@ bool 比較 6 種（`gt_bool`／`ge_bool`／`lt_bool`／`le_bool`／`eq_bool`／
 
 > **更新（#2556）**: 下記の保留のうち `OptimizerStateDict` の再エクスポートは #2556 で公開済み
 > （`docs/autodiff-optimizer-state-dict-decision.md` §11）。保留ガードは正ガードへ反転した。
-> 本節の適用記録は #2557 で書く。
+> 適用記録は下記「適用記録（経路 2。イシュー #2556・#2557）」。以下の保留記録は履歴として残し、
+> 現在も保留なのは `compat::Sequential` の optimizer 状態 API と complete checkpoint のみ。
+
+**適用記録（経路 2。イシュー #2556・#2557・親 #2555・ルート #2499。承認の根拠はルート #2499 の
+コメント〈issuecomment-6033824965〉の記録のみで、それ以上の承認はない）**:
+`fandhe_ai::optim::OptimizerStateDict` 1 つを、`src/optim.rs` の素の再エクスポート 1 行
+（`pub use fandhe_ai_autodiff::nn::optim::OptimizerStateDict;`）で公開した。到達する impl は
+`AdamW`・`Adam`・`RmsProp`・`Adagrad`・`Lamb`・`Adadelta`・`Adamax`・`NAdam`・`RAdam`・`Sgd`
+の 10 型で、`Lbfgs` は対象外（inherent のまま）。trait は sealing せず、代わりにメソッドを
+追加しない契約とした。保留ガード（`OptimizerStateDictHoldDoctestGuard` と 2 テスト・否定ガード）
+は #2556 で撤去・反転した。#2557 で次の正ガードを追加した:
+`optimizer_state_dict_trait_matches_approved_shape`（trait 形状固定）・
+`optimizer_state_dict_impls_are_exactly_approved_ten`（impl 集合固定）・
+`optimizer_state_dict_usage_doctest_is_present_and_compiled`（利用例 doctest プローブ）・
+`optimizer_state_dict_shape_guards_detect_each_category`（自己検証）。#2556 分は
+`facade_reexports_optimizer_state_dict_only_in_approved_form`・
+`optimizer_state_dict_is_reachable_via_facade_only`。利用例は `optim.rs` の doctest と
+`crates/facade/tests/optim_state_dict_facade.rs`（バイト列経由・ファイルパス経由）。記録は
+`docs/autodiff-optimizer-state-dict-decision.md` §11・§12。スコープ外: `compat::Sequential`
+の optimizer 状態 API・complete checkpoint・sealing・外部由来 safetensors の入力サイズ上限。
 
 **保留記録（イシュー #2174・親 #2131）**: `fandhe_ai::optim::
 OptimizerStateDict` の再エクスポートまたは `AdamW`／`Adam`／
