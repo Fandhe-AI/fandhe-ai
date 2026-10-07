@@ -218,16 +218,16 @@
 //! `Rnn`／`Lstm`／`Gru`・`Stacked*` の packed 実行）を追加した。新規
 //! `Op`／`BackendOps`／VJP／カーネルは追加せず、`nn` 直下・クレート
 //! ルートへの `pub use` も行わない（内部パス
-//! `nn::packed_sequence::*` のみ）。facade 公開は未承認のため保留する
-//! （`PackedSequenceHoldDoctestGuard`・`api_surface.rs` の否定ガードで
-//! 固定。`docs/autodiff-packed-sequence-decision.md` §7）。
+//! `nn::packed_sequence::*` のみ）。facade へは #2679 で
+//! `fandhe_ai::nn::rnn` の純再エクスポートとして公開済み
+//! （`docs/autodiff-packed-sequence-decision.md` §7・§12。`Var`／`Tape` への
+//! 委譲は未承認のまま `PackedSequenceHoldDoctestGuard` が固定する）。
 //! イシュー #2658（親 #2657）で等重み平均の [`AveragedModel`]（`swa`
 //! モジュール。PyTorch `AveragedModel` 既定 `avg_fn` 相当）と、学習率側の
 //! `optim::SwaLr`／`optim::SwaAnneal`（`SWALR` 相当）を追加した。新規
 //! `Op`／`BackendOps`／VJP／カーネルは追加しない（ホスト `f32` のみ）。
-//! facade 公開は未承認のため保留する（`SwaHoldDoctestGuard`・
-//! `api_surface.rs` の否定ガードで固定。`docs/autodiff-swa-decision.md`
-//! §7）。
+//! facade へは #2679 で公開済み（`fandhe_ai::optim`。`docs/autodiff-swa-decision.md`
+//! §7・§14）。`fit` への結線は未承認のまま `SwaHoldDoctestGuard` が固定する。
 
 mod attention;
 mod batch_norm;

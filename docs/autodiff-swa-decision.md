@@ -72,7 +72,7 @@
 
 tolerance 定数・baseline は新設・変更していない。実機非依存のため `#[ignore]` 分離は行わない。
 
-## 7. facade 公開形の推奨案（未承認）
+## 7. facade 公開形の推奨案（ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§14 参照）
 
 **これは推奨案の記録であり、承認を得た記録ではない。** 承認依頼は #2677、公開は承認後の #2678・#2679。
 
@@ -132,3 +132,21 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 - イシュー #2658・親 #2657・ルート #2499・承認依頼 #2677（公開は #2678・#2679）。
 - PyTorch 2.14.0 `torch.optim.swa_utils.AveragedModel`／`SWALR`（実行値 fixture。`crates/autodiff/tests/fixtures/swa-pytorch-reference/README.md`）。
 - `docs/autodiff-ema-decision.md`・`docs/autodiff-lr-scheduler-ext-decision.md`・`docs/autodiff-packed-sequence-decision.md`（構成の先例）。
+
+## 14. #2679 実装記録（facade 公開）
+
+
+- 状態: **§7 の推奨形を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 23 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子: `fandhe_ai::optim` へ `pub use fandhe_ai_autodiff::nn::optim::{SwaAnneal, SwaLr};`（素の再エクスポート。`SwaAnneal` に属性を足していない）と、
+  facade 独自の薄いラッパー `AveragedModel`（`crates/facade/src/optim_swa.rs`。公開パスは `fandhe_ai::optim::AveragedModel` のみ）。**`FitConfig`／`Sequential` への `fit` 結線は含めない**
+  （`use_swa`／`swa_start`／`swa_lr` の `fn` 宣言禁止と衝突プローブは維持）。
+- 記録の文言に従った判断（**確認依頼**）: §7 は「`AveragedModel` は EMA 記録 §10.2 (b) と同型」と書き、同型の実現形（`optim_ema.rs`）は facade の `&dyn nn::Module` を受ける 4 メソッド
+  （`from_module`・`update_from_module`・`apply`・`restore`）を含むため、本ラッパーも**同じ 4 メソッドを初回から含めた**（`from_module` 等は facade の `nn::Module` の
+  `named_parameters`／`state_dict`／`load_state_dict` 経由。内部 `nn::Module` は署名に出さない）。`anneal_epochs == 0` は内部実装のとおり全 step が `swa_lr`、
+  `base_lr`／`swa_lr` は有限かつ正（違反は `InvalidArgument`）で、facade 側では検証規則を変更していない。これらは承認コメントの「記録の推奨形」に従った解釈で、
+  別形を望む場合は #2677 へ差し戻す（公開済みの形を狭めるのは破壊的変更になる点に注意）。
+- ガード（§9）の反転: `SwaHoldDoctestGuard` の型名衝突プローブ（`AveragedModel`・`SwaLr`・`SwaAnneal`）を削除し、`FitConfig`／`Sequential` への `use_swa`／`swa_start`／`swa_lr`
+  メソッドのプローブだけを残した。否定走査 `facade_does_not_reexport_or_declare_swa_items` は `facade_exposes_swa_only_in_approved_shape`
+  （`optim.rs` の承認 2 文＋`optim_swa.rs` の宣言 1 件・メソッド名禁止）へ反転し、`swa_types_are_reachable_via_facade_only`・`swa_usage_doctests_are_present_and_compiled` を追加した。
+  `compat_sequential_swa_manual.rs` は `fandhe_ai::optim::AveragedModel` 経由へ切り替えた。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。

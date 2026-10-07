@@ -108,7 +108,7 @@
 | `crates/facade/tests/packed_sequence_backend_parity.rs` | CPU tape と NaiveOps tape の突合（pack／unpack は bit 一致・RNN 系は `assert_parity`）・手計算の期待値・CUDA／Metal 実機（`#[ignore]`） |
 | `crates/facade/tests/api_surface.rs` | 保留ガード 5 本（§9） |
 
-## 7. facade 公開形の推奨案（未承認）
+## 7. facade 公開形の推奨案（ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§12 参照）
 
 推奨は 1 つ。**モジュール再エクスポート**: `fandhe_ai::nn::rnn`（#1955・#2535 で確立した純再エクスポートモジュール）へ、`PackedSequence`・
 出力型 4 種・自由関数 8 本を `pub use` で追加する。
@@ -167,3 +167,22 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機テスト（`cuda_pa
   `docs/autodiff-rnn-cell-tape-design.md`（決定 2・§5）
 - `docs/compat-api-scope.md` 5 節（適用記録）・`.claude/rules/coding-rust.md`（REQ-2 判定・カーネル境界検査）
 - PyTorch 2.14.0 実行値: `crates/autodiff/tests/fixtures/packed-sequence-pytorch-reference/README.md`
+
+## 12. #2679 実装記録（facade 公開）
+
+
+- 状態: **§7 の推奨形を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 16 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子: `fandhe_ai::nn::rnn`（`crates/facade/src/nn/rnn.rs`）へ `PackedSequence`・`PackedRnnSeqOutput`・`PackedLstmSeqOutput`・
+  `StackedPackedRnnSeqOutput`・`StackedPackedLstmSeqOutput` と自由関数 8 本（`pack_padded_sequence`・`pad_packed_sequence`・
+  `rnn_forward_packed`・`gru_forward_packed`・`lstm_forward_packed`・`stacked_rnn_forward_packed`・`stacked_gru_forward_packed`・
+  `stacked_lstm_forward_packed`）を `pub use`（`fandhe_ai_autodiff::nn::packed_sequence` からの純再エクスポート）。
+- 記録に明記のない点の扱い: `PackedSequence::new`（検証付きコンストラクタ）は型の純再エクスポートに伴い到達可能になる。§0 が型の一部として
+  挙げているため newtype で隠さずそのまま公開した。`Var`／`Tape` への委譲・`Rnn::forward_packed`・`Sequential::add_*` は不採用のまま追加していない。
+- ガード（§9）の反転: `PackedSequenceHoldDoctestGuard` は型 5・自由関数 8 の衝突プローブを削除し、未承認経路（モジュール `packed_sequence` の公開・
+  `Var`／`Tape`／`Tensor<f32>` の同名メソッド・`Tape::*_forward_packed`・`Rnn` 等の `forward_packed`）のプローブだけに縮小した。
+  `facade_does_not_reexport_or_declare_packed_sequence` は承認形を違反としない走査（モジュール再エクスポート・`forward_packed`・型の独自宣言・同名 `fn` を禁止）へ
+  変更し、承認形の過不足は `facade_exposes_packed_sequence_only_in_approved_shape`（`nn/rnn.rs` の承認 5 文のトークン列一致）が固定する。
+  到達性は `packed_sequence_types_are_reachable_via_facade_only`、利用例は `nn::rnn` のモジュール doc の doctest
+  （`packed_sequence_usage_doctests_are_present_and_compiled` が存在を検査）。`fn` 宣言の場所インベントリは不変。
+- `packed_sequence_backend_parity.rs` は型・自由関数を `fandhe_ai::nn::rnn` 経由へ切り替えた（生の `Tape` との突き合わせだけ内部クレートを使う）。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。

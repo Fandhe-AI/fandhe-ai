@@ -340,10 +340,8 @@ pub use state_dict::OptimizerStateDict;
 // `decode_state_dict` のフラグ構成に載らないため）。`DeviceParamStore`
 // 非対応（ホスト `Tensor<f32>` 経由の `step()` のみ）。
 //
-// **facade（`fandhe_ai::optim`）へは未公開**（公開形は未承認。承認依頼
-// #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
-// OptimizerRpropAsgdHoldDoctestGuard`・`docs/autodiff-optimizer-rprop-
-// asgd-decision.md` 参照）。
+// **facade（`fandhe_ai::optim`）へは #2679 で公開済み**（素の再エクスポート。
+// `docs/autodiff-optimizer-rprop-asgd-decision.md` §8・§11 参照）。
 
 // イシュー #2656（親 #2654・ルート #2499 Phase 4）: Adafactor（[`Adafactor`]・
 // [`AdafactorConfig`]。Shazeer & Stern, 2018）と Lion（[`Lion`]・
@@ -359,10 +357,8 @@ pub use state_dict::OptimizerStateDict;
 // `variance` は既存 `decode_state_dict` のフラグ構成に載らない）。
 // `DeviceParamStore` 非対応（ホスト `Tensor<f32>` 経由の `step()` のみ）。
 //
-// **facade（`fandhe_ai::optim`）へは未公開**（公開形は未承認。承認依頼
-// #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
-// OptimizerAdafactorLionHoldDoctestGuard`・`docs/autodiff-optimizer-
-// adafactor-lion-decision.md` 参照）。
+// **facade（`fandhe_ai::optim`）へは #2679 で公開済み**（素の再エクスポート。
+// `docs/autodiff-optimizer-adafactor-lion-decision.md` §8・§11 参照）。
 
 // イシュー #2659（親 #2657・ルート #2499 Phase 4）: LR scheduler の
 // [`PolynomialLr`]（PyTorch `PolynomialLR` 相当）と [`ChainedScheduler`]
@@ -372,7 +368,5 @@ pub use state_dict::OptimizerStateDict;
 // 変更していない。`ChainedScheduler` が PyTorch と一致するメンバーは乗算型
 // に限る（`lr_scheduler` の [`ChainedScheduler`] doc 参照）。
 //
-// **facade（`fandhe_ai::optim`）へは未公開**（公開形は未承認。承認依頼
-// #2677・公開は承認後の #2679。`crates/facade/src/lib.rs::
-// LrSchedulerPolyChainedHoldDoctestGuard`・`docs/autodiff-lr-scheduler-
-// poly-chained-decision.md` 参照）。
+// **facade（`fandhe_ai::optim`）へは #2679 で公開済み**（素の再エクスポート。
+// `docs/autodiff-lr-scheduler-poly-chained-decision.md` §8・§14 参照）。

@@ -174,7 +174,7 @@ exp_avg = exp_avg*beta2 + grad*(1-beta2)      # 保存する移動平均の係�
 （#2171 §7・#2655 §7 と同じ判断）。`DeviceParamStore` への結線・
 `compat::Optimizer` への variant 追加は対象外。
 
-## 8. facade 公開形の推奨案（未承認）
+## 8. facade 公開形の推奨案（ルート #2499 の 2026-10-07 コメントで承認・#2679 で公開。§11 参照）
 
 推奨形は 1 つ: `crates/facade/src/optim.rs` に
 `pub use fandhe_ai_autodiff::nn::optim::{Adafactor, AdafactorConfig};` と
@@ -214,3 +214,13 @@ exp_avg = exp_avg*beta2 + grad*(1-beta2)      # 保存する移動平均の係�
 - `maximize`／`foreach`／`capturable`／`differentiable`・複素数・sparse 勾配
 - `docs/compat-api-scope.md` 1 節の対象範囲表・`docs/compat-feature-gap.md` の
   判定変更、spec 改定
+
+## 11. #2679 実装記録（facade 公開）
+
+
+- 状態: **§8 の推奨形を #2679 で公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 22 を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2679 時点で当該コメントの承認に更新された（#2677 の「承認の記録」コメントの割り振りでは公開は #2679）。承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき。
+- 公開した識別子: `fandhe_ai::optim` へ `pub use fandhe_ai_autodiff::nn::optim::{Adafactor, AdafactorConfig};` と
+  `pub use fandhe_ai_autodiff::nn::optim::{Lion, LionConfig};`（素の再エクスポート）。
+- ガード（§9）の反転: `OptimizerAdafactorLionHoldDoctestGuard` は削除し、`autodiff-optimizer-rprop-asgd-decision.md` §11 と同じ正ガード
+  （`facade_exposes_phase4_training_data_only_in_approved_shape`・`phase4_optim_types_are_reachable_via_facade_only`）が束ねて担う。宣言場所インベントリは維持した。
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。
