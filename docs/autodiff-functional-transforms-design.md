@@ -54,7 +54,7 @@
 - `Tape::hvp(&self, loss: &Var<'_>, input: &Var<'_>, vector: &Tensor<f32>, child: &Tape) -> Result<Tensor<f32>, AutodiffError>`
 - `Tape::vmap<'t, F>(&'t self, input: &Var<'t>, in_dim: usize, f: F) -> Result<Var<'t>, AutodiffError> where F: FnMut(&Var<'t>) -> Result<Var<'t>, AutodiffError>`
 
-選定理由（vmap）: `gradcheck` のように評価ごとに新テープを作る形にせず、**呼び出し側のテープ上のスライスを受けて同テープの `Var` を返す**。stack 後の結果が同一テープ上で微分可能に残り、`hvp` や vmap 内での勾配計算と合成できる。複数入力・`out_dim` の有無・`Fn` か `FnMut` かの細部は §11 の論点とし、公開形の承認依頼（§10 の issue 6）で確定する。
+選定理由（vmap）: `gradcheck` のように評価ごとに新テープを作る形にせず、**呼び出し側のテープ上のスライスを受けて同テープの `Var` を返す**。stack 後の結果が同一テープ上で微分可能に残り、`hvp`（vmap の出力を損失の一部にする形）や `vjp` と合成できる。**vmap のクロージャ内で勾配を取る合成（`vmap(grad)`＝per-sample gradient）は初期スコープ外**とする。理由: §3 の `grad` 相当（`backward`／`Gradients::get`）は `Tensor` を返し、`Tensor` を葉として再登録すると微分の接続が切れる。`backward_create_graph` の `grad` は子テープ上の `Var` で、`input` と同一テープを要求する vmap のクロージャ契約・§7 の `TapeMismatch` 検査に合わない。微分可能な per-sample gradient には、子テープ上で動くクロージャ型など別の公開形が要り、これは §11 の論点 6 として承認依頼に戻す。値だけが要る per-sample gradient は、呼び出し側が各スライスに対して `backward` を回す明示ループで得られる。複数入力・`out_dim` の有無・`Fn` か `FnMut` かの細部は §11 の論点とし、公開形の承認依頼（§10 の issue 6）で確定する。
 
 - エラー型: 新しい型・variant を足さず、既存 `AutodiffError` の variant（`TapeMismatch`／`GradientTrackingDisabled`／`InvalidArgument`／`Shape(..)`／`Backward`／`DeviceMismatch`）を再利用する。`AutodiffError` は `#[non_exhaustive]`（`crates/autodiff/src/error.rs:19`）で追加は非破壊だが、推奨は再利用。
 - `fandhe-ai =0.10.0` に対して追加のみ。既存シグネチャ・意味論・`FitConfig` は不変。
@@ -93,7 +93,7 @@
 
 ## 8. double-VJP 法（`jvp`／`jacfwd`）の実現可能性検証計画
 
-- 方法: `y = f(x)` に対し、子テープ上で葉 `u`（勾配追跡あり）を置き `s = Σ(y·u)`、`g = Jᵀu` を子テープの `Var` として得て、`t = Σ(g·v)` を `u` で微分する。`g` は `u` について線形なので `∂t/∂u = J v` が成り立ち、`f` の二階微分に依らない。
+- 方法: `y = f(x)` を記録した親テープ上に、勾配追跡ありの葉 `u` を置き、`s = Σ(y·u)` も親テープに記録する（`u` と `y` を同一テープに置く。子テープに `u` を置くと親テープの `y` との積が `TapeMismatch` になり、子テープも非空になって `backward_create_graph` の入口条件〈子テープが空〉を満たせない）。次に空の子テープ `child` に対して `backward_create_graph(s, child)` を呼び、`g = cg.grad(&x)`（`= Jᵀu` を子テープ上の `Var` として得たもの）を作る。`t = Σ(g·v)` を子テープ上で作り、`child.backward(t)` で `cg.child_var(&u)` の勾配を取る。`g` は `u` について線形なので `∂t/∂u = J v` が成り立ち、`f` の二階微分に依らない。
 - 対象 Op の範囲: `Op::supports_create_graph() == true` の集合（`tape.rs:2432`。`Leaf`／`Add`／`Mul`／`Relu`／`Exp`／`Tanh`／`Sigmoid`／`Sum`／`Mean`／`Reshape`／`BroadcastTo`／rank 2 `MatMul`／`Transpose`／`Permute`／`Narrow`／`Concat`／`Contiguous`／`Where`、再生可能な `ScalarUnary`／`ScalarBinary`）。
 - 非対象 Op の拒否: `backward_create_graph` の既存検査（`create_graph.rs` の `validate_ancestors`:397 が resident／fused・未対応 Op・rank 3 以上の `MatMul` 等を `Err(Backward)` で拒否）をそのまま使い、新しい拒否ロジックを足さない。`Op::Custom` も対象外（`docs/autodiff-custom-function-decision.md` §14）。
 - 成立の判定基準:
@@ -123,7 +123,7 @@
 | 2 | `feat(autodiff): hvp の内部実装` | 1 | `Tape::hessian·v` と統一複合判定で一致。非対象 Op の型付き拒否、失敗時に子テープ無変更 |
 | 3 | `feat(autodiff): ループ版 vmap の内部実装` | 1 | §7 の fail-closed 全件。バッチなし実行との一致。途中 `Err` 時のノードの扱いを doc に明記 |
 | 4 | `test(autodiff): vjp／hvp／vmap の PyTorch fixture と parity テスト` | 1〜3 | §6 の層。生成条件と sha256 を README に記す。実 `CpuBackendOps` が要るものは `crates/facade/tests/` |
-| 5 | `test(autodiff): vmap(grad) 等の合成の検証` | 2, 3 | per-sample gradient 等。同一テープ上での微分可能性 |
+| 5 | `test(autodiff): vmap と vjp／hvp の合成の検証` | 2, 3 | vmap 出力を損失の一部にした `hvp`／`vjp`。同一テープ上での微分可能性。`vmap(grad)`（per-sample gradient）は §5 のとおり初期スコープ外 |
 | 6 | `docs(facade): vjp／hvp／vmap の公開形の承認依頼` | 1〜3 | `docs/compat-api-scope.md` §5.1 への行追加と §11 の論点の確定依頼。**承認は実装 Agent が代行しない** |
 | 7 | `feat(facade): vjp／hvp を記録の形で公開` | 6 の承認 | 保留ガードを正ガードへ反転。薄い委譲の固定 |
 | 8 | `feat(facade): vmap を記録の形で公開` | 6 の承認 | 同上 |
@@ -140,10 +140,11 @@
 3. double-VJP の検証で差が統一複合判定を外れた場合の扱い（新しい判定契約は別途承認）。
 4. f16 等の低精度 forward を対象にするか（推奨: 初期スコープ外）。
 5. `supports_create_graph` の対象 Op 拡張。
+6. 微分可能な per-sample gradient（`vmap(grad)`）の公開形。子テープ上の `Var` を扱うクロージャ型など、`input` と同一テープを要求する §5 の契約とは別形が要る。
 
 ## 12. スコープ外・申し送り
 
-- スコープ外: ネイティブ forward-mode、バッチ規則型 vmap、`VarF64`、GPU 専用カーネル、実装そのもの、実装 issue の起票、`docs/compat-api-scope.md` §5.1 の行追加（issue 6 の仕事）。
+- スコープ外: ネイティブ forward-mode、バッチ規則型 vmap、`vmap(grad)`（per-sample gradient。§5・§11-6）、`VarF64`、GPU 専用カーネル、実装そのもの、実装 issue の起票、`docs/compat-api-scope.md` §5.1 の行追加（issue 6 の仕事）。
 - 要対応事項: facade 公開形の承認（ユーザー）、`jvp`／`jacfwd` を Tier 2 へ移す spec 追記（ユーザー側）。
 
 ## 13. セキュリティ観点
