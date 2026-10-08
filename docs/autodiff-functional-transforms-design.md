@@ -143,6 +143,8 @@
 5. `supports_create_graph` の対象 Op 拡張。
 6. 微分可能な per-sample gradient（`vmap(grad)`）の公開形。子テープ上の `Var` を扱うクロージャ型など、`input` と同一テープを要求する §5 の契約とは別形が要る。
 
+承認依頼の所在（#2879）: `docs/compat-api-scope.md` §5.1 の `F1`〜`F3` ブロック。詳細は §22。
+
 ## 12. スコープ外・申し送り
 
 - スコープ外: ネイティブ forward-mode、バッチ規則型 vmap、`vmap(grad)`（per-sample gradient。§5・§11-6）、`VarF64`、GPU 専用カーネル、実装そのもの、実装 issue の起票、`docs/compat-api-scope.md` §5.1 の行追加（issue 6 の仕事）。
@@ -240,3 +242,10 @@
 - **新規物**: `crates/*/src`・依存・tolerance・baseline・`unsafe` は追加していない。
 - **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認。
 - **スコープ外**: vmap 出力と vjp／hvp の合成ケース（#2878 は naive のみ）・double-VJP（#2880）の実機 parity、`VarF64`・f16、facade 公開（#2879 以降）、実機での実測そのもの。
+
+## 22. 承認依頼の所在（イシュー #2879・親 #2873）
+
+- §5 の公開形・§6 の判定方式・§9 の拡張要否・§11 の論点 1〜6 は、`docs/compat-api-scope.md` §5.1 末尾の「Phase 8 公開形（関数型 AD 変換。承認依頼 #2879）」ブロックへ転記した（行ラベル `F1`〜`F3`）。本記録 §1〜§19 の内容は変えていない。
+- 実装済みシグネチャ（`crates/autodiff/src/functional_ops.rs`）と §5 の差の要点は同ブロックに書いた。受け手の違い（自由関数と `Tape` メソッド）、実装で確定した細部（単一入力・dim 0 固定・`FnMut`・`child` 必須・shape 完全一致・空バッチ拒否）、`vjp`／`hvp` の追跡なし出力・損失に対する意味論の非対称（出力が追跡なしなら `vjp` は全ゼロ、損失が追跡なしなら `hvp` は `Err` を伝播。追跡なし入力は両方 `GradientTrackingDisabled`）、保留ガードの反転範囲の 4 点である。
+- §10 の仮番号と実 issue の対応（#2873 の sub-issues で確認）: 1→#2874・2→#2875・3→#2876・4→#2877・5→#2878（open）・6→#2879・9→#2880・11→#2881（open）。7・8・10 は未起票。親は sub-issues の実測で #2873（その親は Phase 8 #2872、ルート #2499）で、§15〜§19 の見出しにある「親 #2841」表記とずれている。本記録では見出しを書き換えず事実を併記するにとどめる。
+- 承認の状況: §5・§6・§9 と論点 1〜6 はすべて未承認のまま。承認は実装 Agent が代行しない。保留ガード `FunctionalTransformsHoldDoctestGuard` と `api_surface.rs` の否定ガードは維持している。
