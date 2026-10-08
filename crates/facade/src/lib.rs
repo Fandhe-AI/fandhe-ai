@@ -195,6 +195,10 @@ mod optim_ema;
 /// `optim.rs` の `pub use` のみ（`optim_swa` モジュール自体は公開しない）。
 mod optim_swa;
 
+/// 非公開。語彙 lookup 型のテキスト変換の内部実装（イシュー #2897 の骨格）。
+/// 公開形は未承認のため公開しない（`docs/facade-text-vectorization-design.md`）。
+mod text;
+
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
 // （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。
