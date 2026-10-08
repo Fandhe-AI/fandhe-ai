@@ -371,7 +371,10 @@ impl FitConfig {
     /// 呼び出し元が学習率を `1/N` にする（等価になるのは SGD〈momentum
     /// なし〉で各ウィンドウのサイズがそろう場合に限る。決定記録 §3）。
     ///
-    /// 既定は `1` で、既存の `fit` と bit 完全一致する。`n == 0` はここでは
+    /// 既定は `1` で、既存の `fit` と bit 完全一致する。`n > 1` では optimizer へ渡す
+    /// 累積勾配（累積境界・epoch 末の端数 flush）に NaN／±inf があると、重みなしの `fit`
+    /// 系でも更新前に `InvalidArgument` を返す（f32 加算の overflow がパラメータや
+    /// optimizer 状態を黙って汚染するのを防ぐ。イシュー #2855）。`n == 0` はここでは
     /// 検査せず（[`Self::new`] の `epochs == 0` と同じ方針）、
     /// [`Sequential::fit`] 呼び出し時に `AutodiffError::InvalidArgument` を
     /// 返す。`n > 1` は AMP（`compile_with_amp`）・`Optimizer::Lbfgs`・
@@ -1769,26 +1772,37 @@ fn accumulate_grads_into(
     Ok(())
 }
 
-/// 重み付き fit（`fit_with_weights` の非既定重み）で、optimizer へ渡す直前の勾配に
-/// 非有限値（NaN／±inf）がないことを確認する（イシュー #2564・レビュー指摘 #2823）。
+/// optimizer へ渡す直前の勾配に非有限値（NaN／±inf）がないことを確認する。
 ///
-/// 検査位置は 2 段: (1) 各マイクロバッチの `grad_refs`（内部層 overflow の `inf × 0`）、
-/// (2) 累積境界・epoch 末端数 flush で `optimizer.step_dispatch` に渡す累積勾配
-/// （各マイクロバッチが有限でも [`accumulate_grads_into`] の f32 加算で overflow しうる）。
+/// 呼び出し元は `run_fit` のみ。検査位置は 2 系統:
+/// (a) 重み付き fit（`fit_with_weights` の非既定重み。イシュー #2564・レビュー指摘 #2823）では
+/// 各マイクロバッチの `grad_refs`（内部層 overflow の `inf × 0`）と、累積境界・epoch 末端数
+/// flush の累積勾配の 2 段、(b) 重みなしを含む累積経路（`accumulate_steps > 1`。イシュー
+/// #2855）では累積境界・epoch 末端数 flush の累積勾配のみ（各マイクロバッチが有限でも
+/// [`accumulate_grads_into`] の f32 加算で overflow しうるため）。
+/// `weighted` はエラー文言の主語と原因だけを切り替える（重み付きの文言は #2823 のまま不変）。
 /// 失敗は更新前に `InvalidArgument` を返すだけで、パラメータ・optimizer 状態へ触れない。
 fn ensure_finite_grads<'a>(
     grads: impl IntoIterator<Item = &'a Tensor<f32>>,
     method: &str,
     stage: &str,
+    weighted: bool,
 ) -> Result<(), AutodiffError> {
     if grads
         .into_iter()
         .any(|g| g.host_slice().iter().any(|v| !v.is_finite()))
     {
-        return Err(AutodiffError::InvalidArgument(format!(
-            "Sequential::{method}: 重み付き損失の勾配（{stage}）に非有限値（NaN／inf）が\
-             含まれるためパラメータ更新を拒否した（重み×勾配の overflow の疑い）"
-        )));
+        return Err(AutodiffError::InvalidArgument(if weighted {
+            format!(
+                "Sequential::{method}: 重み付き損失の勾配（{stage}）に非有限値（NaN／inf）が\
+                 含まれるためパラメータ更新を拒否した（重み×勾配の overflow の疑い）"
+            )
+        } else {
+            format!(
+                "Sequential::{method}: 累積勾配（{stage}）に非有限値（NaN／inf）が\
+                 含まれるためパラメータ更新を拒否した（勾配累積の f32 加算 overflow の疑い）"
+            )
+        }));
     }
     Ok(())
 }
@@ -2239,6 +2253,10 @@ impl Sequential {
     ///   ElementCountOverflow)`（`super::alloc_failed`。以前の
     ///   `InvalidArgument(String)` から変更）。train／eval モードの
     ///   復元・`compiled` の書き戻しは他のエラーと同様に行われる
+    /// - `config.accumulate_steps > 1` で、optimizer へ渡す累積勾配（累積境界・
+    ///   epoch 末の端数 flush）に NaN／±inf が含まれる場合（f32 加算の overflow。
+    ///   イシュー #2855）→ 更新前に `InvalidArgument`。拒否した更新は適用されず、
+    ///   モード復元・`compiled` の書き戻しは他のエラーと同様に行われる
     /// - `CsvLogger`／`JsonLogger` のファイル準備（開始時）・書き込み
     ///   （epoch 末）の失敗、および append 時の既存ファイルの不整合
     ///   → `InvalidArgument`。`LambdaCallback` が返した `Err` はそのまま
@@ -2581,7 +2599,8 @@ impl Sequential {
     ///
     /// 非既定の重みでは、optimizer へ渡す前に (1) 重み付き損失、(2) 各マイクロバッチの勾配、
     /// (3) 累積境界・epoch 末の端数 flush で実際に渡す累積勾配（f32 加算の overflow を含む）を
-    /// 検査し、NaN／±inf があれば `InvalidArgument` を返す。拒否した更新は適用されず、
+    /// 検査し、NaN／±inf があれば `InvalidArgument` を返す。(3) は既定の重みでも
+    /// `accumulate_steps > 1` なら適用される（イシュー #2855）。拒否した更新は適用されず、
     /// パラメータ・optimizer 状態は拒否時点の直前の状態のまま（それまでに成功した step は
     /// 既存 `fit` 系と同じく巻き戻さない）。train／eval モードは呼び出し前へ復元する。
     ///
@@ -3095,6 +3114,14 @@ impl Sequential {
             ),
         };
         let weighted = weights.is_non_default();
+        // 非有限勾配の検査（イシュー #2855）。fit 系の全入口（重みなしの `fit`／
+        // `fit_with_callbacks`／`fit_with_metrics`／`fit_with_prefetch` と
+        // `fit_with_weights`）は本ループを共有し、`weighted == false` では (1) 損失スカラー、
+        // (2) マイクロバッチ単体の勾配、(3) 累積境界、(4) epoch 末の端数 flush の 4 検査が
+        // 走らない。うち (3)(4) だけを `accumulate_steps > 1` でも有効化する（optimizer へ
+        // 渡す累積勾配の f32 加算 overflow が黙ってパラメータを汚染するのを防ぐ）。
+        // (1)(2) は重み付き専用のままで、累積を使わない直接 step は挙動・bit とも不変。
+        let check_accumulated = weighted || config.accumulate_steps > 1;
 
         // `Vec::with_capacity` は capacity overflow（`config.epochs`
         // が巨大・`usize::MAX` 近辺等）で panic する（本番経路の panic
@@ -3401,6 +3428,7 @@ impl Sequential {
                                     grad_refs.iter().copied(),
                                     method,
                                     "マイクロバッチ",
+                                    weighted,
                                 )
                             {
                                 break 'epochs_block Err(e);
@@ -3455,9 +3483,13 @@ impl Sequential {
                                 };
                                 // 累積後の f32 加算 overflow は個々のマイクロバッチ検査では
                                 // 検出できないため、実際に渡す累積勾配を更新前に検査する。
-                                if weighted
-                                    && let Err(e) =
-                                        ensure_finite_grads(acc_buf.iter(), method, "累積境界")
+                                if check_accumulated
+                                    && let Err(e) = ensure_finite_grads(
+                                        acc_buf.iter(),
+                                        method,
+                                        "累積境界",
+                                        weighted,
+                                    )
                                 {
                                     break 'epochs_block Err(e);
                                 }
@@ -3508,9 +3540,13 @@ impl Sequential {
                             )));
                         }
                     };
-                    if weighted
-                        && let Err(e) =
-                            ensure_finite_grads(acc_buf.iter(), method, "epoch 末の端数 flush")
+                    if check_accumulated
+                        && let Err(e) = ensure_finite_grads(
+                            acc_buf.iter(),
+                            method,
+                            "epoch 末の端数 flush",
+                            weighted,
+                        )
                     {
                         break 'epochs_block Err(e);
                     }
