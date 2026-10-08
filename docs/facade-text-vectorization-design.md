@@ -168,7 +168,7 @@ impl TextVectorization {
 | 9 | `feat(facade): text を記録の形で公開する` | 1 の承認, 8 | `pub mod text` と承認形の定数・正ガード・利用例 doctest。保留ガードを反転 | core-builder | 承認後 |
 | 10 | `docs(facade): 周辺 docs と本記録への実装記録の追記` | 9 | §12 の更新対象 docs と本記録への実装記録 | docs-writer | なし |
 
-- 承認が下りるまでは 2〜8（すべて `pub(crate)` の内部実装とテスト）を先行できる。公開する 9 だけが承認待ち。
+- 承認が下りるまでは 2〜8（すべて `pub(crate)` の内部実装とテスト）を先行できる。公開する 9 だけが承認待ち。→ 現状（2026-10-08）: 承認は所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）で得られ、9 は #2937 で公開済み（§17）。論点 3 は ASCII のみ、Unicode と論点 6 は保留。
 - 規模の見積り（推測）: 内部実装の合計は数百〜千行程度（#2618 §9.3 の見積りと同範囲）。
 
 ## 12. スコープ外・申し送り
