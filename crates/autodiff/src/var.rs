@@ -4747,13 +4747,16 @@ impl<'t> Var<'t> {
         crate::loss_ops::margin_ranking_loss(self, x2, y, margin, reduction)
     }
 
-    // ---- 損失 3 本の委譲メソッド（イシュー #2677 の承認形。親 #2625・ルート #2499）----
+    // ---- 損失 3 本（#2677）＋ 5 本（#2854）の委譲メソッド（承認形。親 #2625／#2852・ルート #2499）----
     //
     // 実体は `crate::elementwise_loss_ops`／`crate::margin_focal_loss_ops` の自由関数。承認は
     // ルート #2499 の 2026-10-07 コメント（issuecomment-6033824965）で、`Reduction` は
     // `fandhe_ai::nn::loss::Reduction`（#2602）の 1 経路でのみ名指しする。本体は 1 行委譲に固定し、
     // facade の正ガード（`var_phase4_ops_methods_are_thin_delegations`）が検査の迂回を拒否する。
     // 公開形は `docs/autodiff-elementwise-loss-ops-decision.md` §7・`docs/autodiff-margin-focal-loss-ops-decision.md` §7。
+    // 後半の 5 本（オプション型を取る損失）は #2854 で追加した。承認はルート #2499 の 2026-10-08 コメント
+    // （issuecomment-6052732061）、形は `docs/facade-nn-loss-structs-exposure-decision.md` §11。
+    // オプション型は `fandhe_ai::nn::loss` の 1 経路でのみ名指しする。
 
     /// HingeEmbedding 損失（`torch.nn.functional.hinge_embedding_loss` 相当。`self` が input、
     /// `y` は非追跡で同 shape・厳密に ±1）。`crate::elementwise_loss_ops::hinge_embedding_loss` へ
@@ -4788,6 +4791,71 @@ impl<'t> Var<'t> {
         reduction: Reduction,
     ) -> Result<Var<'t>, AutodiffError> {
         crate::margin_focal_loss_ops::multilabel_margin_loss(self, target, reduction)
+    }
+
+    /// BCE-with-logits 損失のオプション指定版（`torch.nn.functional.binary_cross_entropy_with_logits`
+    /// 相当。`self` が logits、`target` は追跡対象の同 shape）。
+    /// `crate::elementwise_loss_ops::bce_with_logits_loss_with` へ 1 行委譲する。
+    /// 引数順は `(target, reduction, options)` で、他の 4 本と異なる。オプション型は
+    /// `fandhe_ai::nn::loss::BceWithLogitsOptions`、`reduction` は `fandhe_ai::nn::loss::Reduction`。
+    pub fn bce_with_logits_loss_with(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+        options: &crate::elementwise_loss_ops::BceWithLogitsOptions,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::elementwise_loss_ops::bce_with_logits_loss_with(self, target, reduction, options)
+    }
+
+    /// ガウス負の対数尤度損失（`torch.nn.functional.gaussian_nll_loss` 相当。`self` が input、
+    /// `target`・`var` は追跡対象）。`crate::elementwise_loss_ops::gaussian_nll_loss` へ 1 行委譲する。
+    /// オプション型は `fandhe_ai::nn::loss::GaussianNllOptions`、`reduction` は
+    /// `fandhe_ai::nn::loss::Reduction`。
+    pub fn gaussian_nll_loss(
+        &self,
+        target: &Var<'t>,
+        var: &Var<'t>,
+        options: &crate::elementwise_loss_ops::GaussianNllOptions,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::elementwise_loss_ops::gaussian_nll_loss(self, target, var, options, reduction)
+    }
+
+    /// MultiMargin 損失（`torch.nn.functional.multi_margin_loss` 相当。`target` はクラス添字）。
+    /// `crate::margin_focal_loss_ops::multi_margin_loss` へ 1 行委譲する。オプション型は
+    /// `fandhe_ai::nn::loss::MultiMarginOptions`、`reduction` は `fandhe_ai::nn::loss::Reduction`。
+    pub fn multi_margin_loss(
+        &self,
+        target: &Tensor<i32>,
+        options: &crate::margin_focal_loss_ops::MultiMarginOptions,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::margin_focal_loss_ops::multi_margin_loss(self, target, options, reduction)
+    }
+
+    /// MultiLabelSoftMargin 損失（`torch.nn.functional.multilabel_soft_margin_loss` 相当。
+    /// `target` は同 shape の 0／1）。`crate::margin_focal_loss_ops::multilabel_soft_margin_loss` へ
+    /// 1 行委譲する。オプション型は `fandhe_ai::nn::loss::MultiLabelSoftMarginOptions`、`reduction` は
+    /// `fandhe_ai::nn::loss::Reduction`。
+    pub fn multilabel_soft_margin_loss(
+        &self,
+        target: &Tensor<f32>,
+        options: &crate::margin_focal_loss_ops::MultiLabelSoftMarginOptions,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::margin_focal_loss_ops::multilabel_soft_margin_loss(self, target, options, reduction)
+    }
+
+    /// Sigmoid focal 損失（`torchvision.ops.sigmoid_focal_loss` 相当。`target` は同 shape の 0／1）。
+    /// `crate::margin_focal_loss_ops::sigmoid_focal_loss` へ 1 行委譲する。オプション型は
+    /// `fandhe_ai::nn::loss::SigmoidFocalLossOptions`、`reduction` は `fandhe_ai::nn::loss::Reduction`。
+    pub fn sigmoid_focal_loss(
+        &self,
+        target: &Tensor<f32>,
+        options: &crate::margin_focal_loss_ops::SigmoidFocalLossOptions,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::margin_focal_loss_ops::sigmoid_focal_loss(self, target, options, reduction)
     }
 
     /// トリプレットマージン損失（`torch.nn.TripletMarginLoss` 相当。`self` が anchor。

@@ -2,7 +2,7 @@
 
 > **2026-10-07 承認済み（推奨案どおり）。** 根拠は ルート #2499 の所有者コメント https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965 の「#2600: 本書 §4・§7 の推奨案（`Reduction` は root に出さない）」。以下の本文は承認前に書かれた推奨案の記録で、実装結果は末尾「10. 実装記録（#2602）」を参照。
 
-> **2026-10-08 追記: 損失のオプション型 5 つの公開パスと損失 5 本の `Var` 委譲は §11 に記録した（#2853。公開は #2854）。**
+> **2026-10-08 追記: 損失のオプション型 5 つの公開パスと損失 5 本の `Var` 委譲は §11 に記録した（#2853）。公開は #2854 で行った（§11.9）。**
 
 - イシュー: #2601（本記録の作成と承認依頼）・親 #2600・祖 #2542（Phase 3）・実装は #2602（承認後のみ）。§11 は #2853（親 #2852）・実装は #2854
 - 調査基準: main `cb34712b`（2026-10-05）。以下の `file_path:line` はこの時点の実測で、#2602 着手時に再確認する
@@ -272,3 +272,12 @@ pub fn sigmoid_focal_loss(
 ### 11.8 本 PR（#2853）で行わないこと
 
 facade／autodiff のコード変更、ガードの新設・削除・反転、依存・tolerance・baseline・`docs/spec/` の変更、Issue 起票、ruleset・リポジトリ設定の変更。
+
+### 11.9 実装記録（#2854）
+
+- 承認の根拠は §11.0 と同じ https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061。記録の形（§11.1〜§11.4）のまま実装し、形に無い点は足していない。
+- 公開: `crates/autodiff/src/nn/loss.rs` に `pub use` 2 文、`crates/facade/src/nn/loss.rs` に `fandhe_ai_autodiff::nn::loss::` 接頭辞の `pub use` 1 文（5 名）とモジュール doc（24 名・doctest）、`crates/autodiff/src/var.rs` に `Var` の 1 行委譲メソッド 5 本（引数順は §11.3 のとおり）。`fandhe_ai::nn::loss` は 24 名になった。
+- ガード（`crates/facade/tests/api_surface.rs`・`crates/facade/src/lib.rs`）: 2 つの保留 doctest（`ElementwiseLossOpsHoldDoctestGuard`・`MarginFocalLossOpsHoldDoctestGuard`）は削除せず、公開済みの型・`Var` メソッドのプローブを外して、モジュール名の再エクスポート拒否と `Tape`／`Tensor<f32>` 上の同名メソッド拒否だけを残した。固定文言・`*_IDENTS`・宣言場所インベントリ・`PHASE4_VAR_EXPECTED_BODIES`（76 → 81 件）・`NN_LOSS_NAMES`（19 → 24 名）を更新した。
+- 実測: `cargo test -p fandhe-ai --doc`（全 hold doctest の glob 一覧に `use fandhe_ai::nn::loss::*;` を含む構成）で、5 名の追加による名前衝突は起きなかった（§11.5 の確認事項）。
+- テスト: `crates/facade/tests/loss_var_delegates.rs` に 5 本それぞれの forward／backward の自由関数との bit 一致・閉形式値・不正オプションの型付きエラーを追加。新規カーネルが無いため CUDA／Metal の新規 `#[ignore]` テストと実測申し送りは無い。
+- 行わなかったこと: §11.6 の公開しないもの、依存・tolerance・baseline・`docs/spec/` の変更。
