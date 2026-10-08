@@ -8,11 +8,14 @@
 //! - V5: 副作用（補助ノード 2・既存値の bit 不変・決定性）。
 //! - H1〜H5: `hvp`（#2875）。閉形式・`hessian` との突合・fail-closed・ゼロ/空・副作用。
 //!
+//! - M1〜M6: `vmap`（#2876）。バッチなし一致（統一複合判定）・非 contiguous 出力・
+//!   Phase A／B の fail-closed・クロージャ `Err` 時のノード残存・決定性と微分可能性。
+//!
 //! 実 CPU `BackendOps` との一致・CUDA／Metal は本 issue の対象外（設計 §10 の 4・11）。
 
 mod common;
 
-use fandhe_ai_autodiff::functional_ops::{hvp, vjp};
+use fandhe_ai_autodiff::functional_ops::{hvp, vjp, vmap};
 use fandhe_ai_autodiff::jacobian_ops::{hessian, jacobian};
 use fandhe_ai_autodiff::{AutodiffError, Tape, Var};
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
@@ -627,4 +630,232 @@ fn h5_side_effects_and_determinism() {
         tape.backward(&loss).unwrap().get(&x).unwrap().unwrap(),
     ));
     assert_eq!(g_before, g_after);
+}
+// ---------------------------------------------------------------- M（vmap。#2876）
+
+fn assert_vars_close(actual: &Var<'_>, expected: &Var<'_>, ctx: &str) {
+    let e = expected.to_tensor();
+    let a = actual.to_tensor();
+    assert_eq!(a.shape(), e.shape(), "{ctx}: shape");
+    for (i, (&x, &y)) in host(&a).iter().zip(host(&e).iter()).enumerate() {
+        assert!(
+            common::req2_close(f64::from(x), f64::from(y)),
+            "{ctx}[{i}]: {x} vs {y}"
+        );
+    }
+}
+
+#[test]
+fn m1_matches_unbatched() {
+    // (a) 要素ごと
+    let tape = new_tape();
+    let x = tape.var(&t(seq(12, 1.0), &[4, 3]));
+    let got = vmap(&tape, &x, 0, |s| s.tanh().mul(s)).unwrap();
+    assert_vars_close(&got, &x.tanh().mul(&x).unwrap(), "elementwise");
+
+    // (b) 行列積
+    let w = tape.var_no_grad(&t(seq(15, 3.0), &[3, 5]));
+    let got = vmap(&tape, &x, 0, |s| {
+        s.reshape(&[1, 3])?.matmul(&w)?.tanh().reshape(&[5])
+    })
+    .unwrap();
+    assert_vars_close(&got, &x.matmul(&w).unwrap().tanh(), "matmul");
+
+    // (c) in_dim = 1（結果 [3, 2] は f(x) の転置と一致）
+    let x2 = tape.var(&t(seq(6, 2.0), &[2, 3]));
+    let got = vmap(&tape, &x2, 1, |s| s.tanh().mul(s)).unwrap();
+    let full = x2.tanh().mul(&x2).unwrap().transpose(0, 1).unwrap();
+    assert_vars_close(&got, &full, "in_dim=1");
+
+    // (d) スカラー出力
+    let got = vmap(&tape, &x, 0, |s| s.sum(None)).unwrap();
+    assert_vars_close(&got, &x.sum(Some(1)).unwrap(), "scalar out");
+
+    // (e) rank 1 入力（スライスは rank 0）
+    let x1 = tape.var(&t(seq(5, 4.0), &[5]));
+    let got = vmap(&tape, &x1, 0, |s| s.mul(s)).unwrap();
+    assert_vars_close(&got, &x1.mul(&x1).unwrap(), "rank1");
+}
+
+#[test]
+fn m2_non_contiguous_output_is_materialized() {
+    let tape = new_tape();
+    let x = tape.var(&t(seq(24, 1.0), &[2, 3, 4]));
+    let got = vmap(&tape, &x, 0, |s| s.transpose(0, 1)).unwrap();
+    assert_eq!(got.to_tensor().shape(), &[2, 4, 3]);
+    let full = x.transpose(1, 2).unwrap();
+    assert_vars_close(&got, &full, "transpose");
+
+    // stack を直接使うと非 contiguous で拒否される（contiguous 化が必要な理由）
+    let outs: Vec<Var<'_>> = x
+        .unbind(0)
+        .unwrap()
+        .iter()
+        .map(|s| s.transpose(0, 1).unwrap())
+        .collect();
+    assert!(matches!(
+        Var::stack(&outs, 0),
+        Err(AutodiffError::Shape(ShapeError::NonContiguousReshape))
+    ));
+}
+
+/// 呼び出し回数を数える恒等クロージャ（Phase A でクロージャが呼ばれないことの確認用）。
+fn counting<'t>(
+    c: &std::cell::Cell<usize>,
+) -> impl FnMut(&Var<'t>) -> Result<Var<'t>, AutodiffError> + '_ {
+    move |s| {
+        c.set(c.get() + 1);
+        Ok(*s)
+    }
+}
+
+#[test]
+fn m3_phase_a_fail_closed_keeps_tape() {
+    let tape = new_tape();
+    let other = new_tape();
+    let x = tape.var(&t(seq(6, 1.0), &[2, 3]));
+    let xo = other.var(&t(seq(6, 1.0), &[2, 3]));
+    let empty = tape.var(&t(vec![], &[0, 3]));
+    let scalar = tape.var(&t(vec![1.0], &[]));
+    let calls = std::cell::Cell::new(0usize);
+    let len0 = tape.len();
+
+    assert!(matches!(
+        vmap(&tape, &xo, 0, counting(&calls)),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    assert!(matches!(
+        vmap(&tape, &x, 2, counting(&calls)),
+        Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+            axis: 2,
+            rank: 2
+        }))
+    ));
+    assert!(matches!(
+        vmap(&tape, &scalar, 0, counting(&calls)),
+        Err(AutodiffError::Shape(ShapeError::AxisOutOfRange { .. }))
+    ));
+    assert!(matches!(
+        vmap(&tape, &empty, 0, counting(&calls)),
+        Err(AutodiffError::InvalidArgument(_))
+    ));
+    // 表の順序: 別テープかつ in_dim 不正 → TapeMismatch、in_dim 不正かつ空軸 → AxisOutOfRange
+    assert!(matches!(
+        vmap(&tape, &xo, 9, counting(&calls)),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    assert!(matches!(
+        vmap(&tape, &empty, 5, counting(&calls)),
+        Err(AutodiffError::Shape(ShapeError::AxisOutOfRange { .. }))
+    ));
+    assert_eq!(calls.get(), 0, "Phase A 失敗ではクロージャを呼ばない");
+    assert_eq!(tape.len(), len0, "Phase A 失敗ではテープ無変更");
+}
+
+#[test]
+fn m4_phase_b_fail_closed() {
+    let tape = new_tape();
+    let other = new_tape();
+    let x = tape.var(&t(seq(6, 1.0), &[3, 2]));
+    let foreign = other.var(&t(seq(2, 1.0), &[2]));
+    let before = host(&x.to_tensor());
+
+    // 別テープの出力（2 番目で検出 → 3 番目は呼ばれない）
+    let calls = std::cell::Cell::new(0usize);
+    let len0 = tape.len();
+    let r = vmap(&tape, &x, 0, |s| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            Ok(foreign)
+        } else {
+            Ok(*s)
+        }
+    });
+    assert!(matches!(r, Err(AutodiffError::TapeMismatch)));
+    assert_eq!(calls.get(), 2);
+    assert!(tape.len() > len0);
+
+    // 形状不一致
+    let calls = std::cell::Cell::new(0usize);
+    let r = vmap(&tape, &x, 0, |s| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            s.reshape(&[1, 2])
+        } else {
+            Ok(*s)
+        }
+    });
+    assert!(matches!(
+        r,
+        Err(AutodiffError::Shape(ShapeError::ShapeMismatch { .. }))
+    ));
+    assert_eq!(calls.get(), 2);
+
+    // 別テープかつ形状違い → TapeMismatch が先
+    let foreign3 = other.var(&t(seq(3, 1.0), &[3]));
+    let calls = std::cell::Cell::new(0usize);
+    let r = vmap(&tape, &x, 0, |s| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            Ok(foreign3)
+        } else {
+            Ok(*s)
+        }
+    });
+    assert!(matches!(r, Err(AutodiffError::TapeMismatch)));
+
+    assert_eq!(before, host(&x.to_tensor()), "既存ノードの値は不変");
+}
+
+#[test]
+fn m5_closure_err_propagates_and_leaves_nodes() {
+    let tape = new_tape();
+    let x = tape.var(&t(seq(8, 1.0), &[4, 2]));
+    let before: Vec<u32> = host(&x.to_tensor()).iter().map(|f| f.to_bits()).collect();
+    let len0 = tape.len();
+    let calls = std::cell::Cell::new(0usize);
+    let k = 2usize;
+    let r = vmap(&tape, &x, 0, |s| {
+        calls.set(calls.get() + 1);
+        if calls.get() == k + 1 {
+            Err(AutodiffError::InvalidArgument("test".into()))
+        } else {
+            Ok(s.tanh())
+        }
+    });
+    assert!(matches!(r, Err(AutodiffError::InvalidArgument(ref m)) if m == "test"));
+    assert_eq!(calls.get(), k + 1);
+    assert!(tape.len() > len0, "unbind 等のノードが残る");
+    let after: Vec<u32> = host(&x.to_tensor()).iter().map(|f| f.to_bits()).collect();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn m6_misc_and_differentiable() {
+    let tape = new_tape();
+    // 勾配追跡なし入力・B=1
+    let c = tape.var_no_grad(&t(seq(3, 1.0), &[1, 3]));
+    let got = vmap(&tape, &c, 0, |s| Ok(s.tanh())).unwrap();
+    assert_vars_close(&got, &c.tanh(), "b=1 no grad");
+
+    // 決定性（同一実行内の再実行比較。バッチなし実行との bit 一致ではない）
+    let x = tape.var(&t(seq(12, 1.0), &[4, 3]));
+    let a = vmap(&tape, &x, 0, |s| s.tanh().mul(s)).unwrap();
+    let b = vmap(&tape, &x, 0, |s| s.tanh().mul(s)).unwrap();
+    let bits = |v: &Var<'_>| {
+        host(&v.to_tensor())
+            .iter()
+            .map(|f| f.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&a), bits(&b));
+
+    // 同じテープ上で微分可能
+    let loss = a.sum(None).unwrap();
+    let g = host(tape.backward(&loss).unwrap().get(&x).unwrap().unwrap());
+    let ref_loss = x.tanh().mul(&x).unwrap().sum(None).unwrap();
+    let g_ref = host(tape.backward(&ref_loss).unwrap().get(&x).unwrap().unwrap());
+    for (i, (&p, &q)) in g.iter().zip(g_ref.iter()).enumerate() {
+        assert!(common::req2_close(f64::from(p), f64::from(q)), "grad[{i}]");
+    }
 }
