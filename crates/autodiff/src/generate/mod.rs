@@ -84,6 +84,10 @@ use crate::nn::KvCache;
 )]
 mod kv_rewind;
 
+// 連続バッチングのスケジューラ（第 1 段階。イシュー #2888）。autodiff 内部の公開に
+// 留め facade へは再エクスポートしない（承認待ち。`docs/compat-api-scope.md` §5.1 S3）。
+pub mod scheduler;
+
 /// 次トークンの選び方（イシュー #2191 受入条件 2）。`#[non_exhaustive]`
 /// は他の `AutodiffError` 系列挙型と同じ理由（公開 API 非破壊。
 /// `.claude/rules/security.md`）で、将来 nucleus（top-p）等を追加しても
