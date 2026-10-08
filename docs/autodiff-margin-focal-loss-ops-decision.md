@@ -95,7 +95,7 @@
 
 - 推奨は `Var` の 1 行委譲メソッド 4 本（`multi_margin_loss`・`multilabel_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss`）。既存 7 損失（#2538〜#2540）・兄弟 #2652 の推奨形と同形で、追加のみ・非破壊。
 - 推奨しない: モジュール再エクスポート、`Tensor`／`Tape` への配置、`Sequential::add_*`（損失は層ではない）、`compat::Loss` への variant 追加。
-- オプション型 3 つ（`MultiMarginOptions`・`MultiLabelSoftMarginOptions`・`SigmoidFocalLossOptions`）と `Reduction` の名指しは、既知ギャップ（`docs/autodiff-loss-ops-decision.md` の #2538 追記）と同じ論点で、#2600 ツリーの記録側で扱う。
+- オプション型 3 つ（`MultiMarginOptions`・`MultiLabelSoftMarginOptions`・`SigmoidFocalLossOptions`）と `Reduction` の名指しは、既知ギャップ（`docs/autodiff-loss-ops-decision.md` の #2538 追記）と同じ論点で、#2600 ツリーの記録側で扱う（オプション型の公開形は §14〈#2853〉）。
 - 承認依頼は #2677、公開は承認後の #2678（`var.rs` が対象ファイル）。本イシューでは `var.rs` にメソッドを足さない。
 
 ## 8. スコープ外
@@ -146,3 +146,9 @@ CUDA／Metal の `#[ignore]` テスト（計 4 件）は本実行環境から実
 - 保留ガード `MarginFocalLossOpsHoldDoctestGuard` は受け手 `Var` のプローブから公開した 1 本を外した形へ縮小した（`Tape`／`Tensor<f32>` への配置は専用トレイトで拒否を維持）。
   ソース走査は facade src に対して 4 名のまま、宣言場所インベントリは `margin_focal_loss_ops.rs` の自由関数 4 件に `var.rs` の 1 件を加えた。
 - テスト: `crates/facade/tests/loss_var_delegates.rs`（forward／backward が自由関数と bit 一致）。実機（CUDA／Metal）は §10 のまま未実測（新規カーネルなし）。
+
+## 14. 保留していた損失とオプション型の公開形（#2853）
+
+- §13 で保留していた `multi_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss` とオプション型 `MultiMarginOptions`・`MultiLabelSoftMarginOptions`・`SigmoidFocalLossOptions` の公開形を、ルート #2499 の 2026-10-08 コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）の承認範囲（オプション型は `fandhe_ai::nn::loss` へ再エクスポートし、損失は `Var` の 1 行委譲にする）に沿って決めた。
+  パス・完全なシグネチャ・構築方法の確認は `docs/facade-nn-loss-structs-exposure-decision.md` §11 を正とし、本節では書き写さない。公開（コード・ガード）は #2854 で行い、**本節の時点では保留のまま**。
+- モジュール `margin_focal_loss_ops` は引き続き再エクスポートしない。`Reduction` は `fandhe_ai::nn::loss::Reduction` の 1 経路のまま。
