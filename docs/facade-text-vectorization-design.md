@@ -10,6 +10,8 @@
   - `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`（2026-10-08）: 本件で **設計を記録する** 指示。承認範囲は設計と issue 分解の記録まで。同コメントの「保留していた公開を決定記録の形で実装してよい」は Phase 7 の別 issue に及ぶもので、#2858 には及ばない。
 - したがって §5 の配置、§6 の公開形、§7 の判定方式、§11 の issue 分解は **すべて推奨案であり未承認**。承認の代行はしない。
 
+- 承認（`issuecomment-6067263650` 項 1）と確定した公開形は §16（#2936）。
+
 ## 2. 境界（spec を正とする）
 
 正は `docs/spec/04-requirements.md:238`（REQ-9 2026-10-08 追記）。背景は `docs/tokenizer-non-target-spec-proposal.md` §9.2〜§9.7。
@@ -97,6 +99,8 @@ impl TextVectorization {
 - 既存 API は変えない。追加のみで `fandhe-ai =0.10.0` に対し非破壊。
 - 公開の手続きは `docs/compat-api-scope.md` §5 経路 2（ユーザー承認と issue 起票）。承認までは保留ガード（`*HoldDoctestGuard` の正のプローブ doctest と `crates/facade/tests/api_surface.rs` の否定ガード）で止め、承認後に正ガードへ反転する（`Tape::gradcheck` #2845／#2847 と同じ流れ）。
 
+- 承認（`issuecomment-6067263650` 項 1）と確定した公開形は §16（#2936）。
+
 ## 7. 数値一致の判定方式
 
 - 出力はすべて `i32` の id で、浮動小数点演算・GPU カーネル・`BackendOps` を通らない。判定は **整数の完全一致**（手で書いた期待 id 列との `==`）とする。統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は浮動小数点向けで、id が大きいと 1 ずれでも相対誤差が 1e-3 未満になり通ってしまうため適用しない。tolerance は新設せず、既存の tolerance も変更しない。FMA 契約と f64 アキュムレータ契約は浮動小数点の縮約がないので対象外。
@@ -145,6 +149,8 @@ impl TextVectorization {
 7. `Sequential` の層化（`Tensor<f32>` 前提とのずれ）
 8. callable の標準化・分割
 
+- 承認（`issuecomment-6067263650` 項 1）と確定した公開形は §16（#2936）。
+
 ## 11. 2 時間粒度の実装 issue 分解案
 
 共通条件: 依存・tolerance・baseline・ガードレール閾値・`docs/spec/`・既存公開シグネチャは変えない。1 issue 1 関心事・1 PR。番号は本表内の仮番号。
@@ -192,3 +198,101 @@ impl TextVectorization {
 - §5 の配置・§6 の公開形・§7 の判定方式・§8 の上限（参照のみ）・§9 の拡張要否・§10 の論点 1〜8 は、`docs/compat-api-scope.md` §5.1 末尾の「Phase 8 公開形（テキスト変換。承認依頼 #2896）」ブロックへ転記した（行ラベル `T1`〜`T5`）。本記録 §1〜§14 の内容は変えていない。
 - §11 の仮番号と実 issue の対応（親 #2895 の sub-issues で確認）: 1→#2896・2→#2897・3→#2898・4→#2899・5→#2900・6→#2901・7→#2902・8→#2903。9（facade 公開。承認後）・10（周辺 docs）は未起票。
 - 承認の状況: §5・§6・§7・§8 の既定値と論点 1〜8 はすべて未承認のまま。承認は実装 Agent が代行しない。保留ガードの名前と設置担当、`TextLimits` のフィールド名、`with_*` のメソッド名、各型の derive、`TextError` の variant のフィールド型などは未定で、承認時の決定事項として同ブロックに列挙した。
+- 承認（`issuecomment-6067263650` 項 1）と確定した公開形は §16（#2936）。
+
+## 16. 承認された公開形（#2936・親 #2935。§11 の分解案 9 の前段）
+
+本節は §6 の推奨形に、main にある内部実装（`ed466166`。`crates/facade/src/text/` は `f13e7e4a` と同一）のシグネチャを当てた**公開形の記録**である。コード（`crates/**`）・`Cargo.toml`／`Cargo.lock`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変更しない。`pub mod text`・保留ガードの反転・doctest は後続の #2937 が本節どおりに行う。§1〜§15 の本文は書き換えず、事実を併記する（§1・§6・§10・§15 から本節を指す）。
+
+### 16.1 承認の根拠と範囲
+
+- 根拠: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`（2026-10-08、リポジトリ所有者本人）の項 1。§1 の 2 URL（`6033824965`＝範囲、`6052732061`＝設計の記録まで）とは承認範囲が異なる。
+- 承認された範囲（これ以上に広げない）:
+  - 公開形は §6 の推奨形に、main の内部実装（`pub(crate)`）のシグネチャを当てたもの。まず記録に書き、その記録どおりに公開する
+  - 論点 1・2・4・5・7・8 は §10 の推奨どおり。論点 3 は ASCII のみ（Unicode の小文字化・空白は保留）。論点 6（出力モード・`StringLookup` 相当）は保留
+  - 保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路のプローブは残す
+  - `fandhe-ai =0.10.0` は追加のみ。依存・tolerance・baseline・ガードレール閾値は変えない
+  - 記録と実装の差をどちらに合わせるか決められない場合は、実装せず止めて承認依頼に戻す。16.4 は全差分に処置を与えており、この条件に当たる差はない
+
+### 16.2 公開パス
+
+- 公開パスは `fandhe_ai::text::{TextVectorization, TextVectorizationConfig, TextLimits, Standardize, Split, TextError}` の 6 名のみ。
+- 形: `crates/facade/src/lib.rs` の `mod text;` を `pub mod text;` にし、`text/mod.rs` で `pub use` によりフラットに公開する。サブモジュール（`adapt`・`error`・`limits`・`ngram`・`split`・`standardize`・`transform`・`vocab`・`integration_tests`）は非公開のまま。
+- クレートルート（`fandhe_ai::TextVectorization` 等）への再エクスポートはしない（承認文言は `fandhe_ai::text` を指すため、1 経路に限る。後から足すのは非破壊）。
+- 公開しない内部項目: `Vocabulary`・`TransformOptions`・`SplitIter`・自由関数（`adapt`・`transform`・`standardize`・`split`・`ngrams`・`ngram_count`）・予約定数（`PADDING_*`・`OOV_*`・`RESERVED_COUNT`）・上限定数（`DEFAULT_*`・`ABSOLUTE_*`）・`TextLimits` の `check_*` とアクセサ 9 本（アクセサは §6 にないため公開しない。後から足すのは非破壊）。
+
+### 16.3 確定シグネチャ
+
+| 公開名 | 確定形 | 出典 |
+|---|---|---|
+| `Standardize` | `#[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] pub enum Standardize { None, Lower, StripPunctuation, #[default] LowerAndStripPunctuation }`。小文字化は ASCII のみ、句読点除去は ASCII 句読点の削除、両方は小文字化→除去の順 | `crates/facade/src/text/standardize.rs:23-35` |
+| `Split` | 同 derive。`pub enum Split { None, #[default] Whitespace, Character }`。`Whitespace` は ASCII 空白、`Character` は `char` 単位、`None` は全体を 1 トークン | `split.rs:23-33` |
+| `TextLimits` | `#[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct TextLimits { /* 非公開 9 フィールド */ }`・`impl Default`（既定値は §8 の表）。`pub fn with_<フィールド名>(self, value: usize) -> Result<Self, TextError>` が 9 本: `with_max_batch`・`with_max_input_bytes`・`with_max_corpus_bytes`・`with_max_vocabulary_size`・`with_max_vocabulary_token_bytes`・`with_max_distinct_tokens`・`with_max_ngrams`・`with_max_output_sequence_length`・`with_max_output_elements`。絶対上限超過は `LimitAboveAbsoluteMaximum` | `limits.rs:54-148` |
+| `TextError` | `#[non_exhaustive] #[derive(Debug)] pub enum TextError`（variant は 17 個、下記）・`impl Display`・`impl std::error::Error`（`source()` は `Shape` のみ `Some`）。エラーは入力文字列・語彙の中身を持たない | `error.rs:21-150` |
+| `TextVectorizationConfig` | `#[non_exhaustive] #[derive(Debug, Clone, PartialEq, Eq, Default)] pub struct TextVectorizationConfig { pub max_tokens: Option<usize>, pub standardize: Standardize, pub split: Split, pub ngrams: Option<usize>, pub output_sequence_length: Option<usize>, pub limits: TextLimits }`。`Default` は `max_tokens: None`・`standardize: LowerAndStripPunctuation`・`split: Whitespace`・`ngrams: None`・`output_sequence_length: None`・`limits: TextLimits::default()`。ビルダ: `with_max_tokens(self, max_tokens: usize) -> Self`・`with_standardize(self, Standardize) -> Self`・`with_split(self, Split) -> Self`・`with_ngrams(self, n: usize) -> Self`・`with_output_sequence_length(self, len: usize) -> Self`・`with_limits(self, TextLimits) -> Self`（`Option` 型は `Some` を設定。`None` に戻すには `Default` かフィールド代入。検証は構築時。先例 `UniqueOptions`〈`crates/autodiff/src/topk_unique_ops.rs`〉）。`Copy` は付けない（後付けは非破壊・削除は破壊的なため） | §6（main に実体なし） |
+| `TextVectorization` | `#[derive(Clone)] pub struct TextVectorization { /* 非公開: config, vocabulary */ }`・手書き `Debug`（`config` と語彙件数のみ。語彙の全文を出さない）。メソッド 6 本: `pub fn from_vocabulary<S: AsRef<str>>(config: TextVectorizationConfig, vocabulary: &[S]) -> Result<Self, TextError>`・`pub fn adapt<S: AsRef<str>>(config: TextVectorizationConfig, corpus: &[S]) -> Result<Self, TextError>`・`pub fn transform<S: AsRef<str>>(&self, inputs: &[S]) -> Result<Tensor<i32>, TextError>`（形状 `[B, L]`。`Tensor` は `fandhe_ai::Tensor`）・`pub fn vocabulary(&self) -> &[String]`（index 0 = `""`、1 = `"[UNK]"`）・`pub fn vocabulary_size(&self) -> usize`（予約 2 件込み）・`pub fn config(&self) -> &TextVectorizationConfig` | §6（main に実体なし。本体は 16.4 の合成） |
+
+`TextError` の 17 variant とフィールド型（特記なき限りすべて `usize`）:
+`BatchTooLarge { len, max }`・`InputTooLong { index, len, max }`・`CorpusTooLarge { total_bytes, max }`・`VocabularyTooLarge { len, max }`・`VocabularyTokenTooLong { index, len, max }`・`EmptyVocabularyToken { index }`・`ReservedVocabularyToken { index }`・`DuplicateVocabularyToken { first, second }`・`InvalidMaxTokens { max_tokens }`・`InvalidNgrams { n, max }`・`OutputSequenceLengthTooLarge { len, max }`・`TooManyDistinctTokens { max }`・`OutputTooLarge { elements, max }`・`LimitAboveAbsoluteMaximum { limit: &'static str, value, max }`・`NgramCountOverflow { tokens, n }`・`FrequencyOverflow`（フィールドなし）・`Shape(ShapeError)`。`LimitAboveAbsoluteMaximum`・`NgramCountOverflow`・`FrequencyOverflow` の 3 つが §6 の 14 個への追加分。
+
+### 16.4 記録と実装の差分と処置
+
+| 項目 | §6／T ブロック | main 実装 | 処置 |
+|---|---|---|---|
+| `TextVectorization`・`TextVectorizationConfig` の実体 | §6 に形あり | 実体なし（部品 `Vocabulary`・`adapt`・`transform`・`TransformOptions` のみ） | 差ではなく欠落。#2937 が §6 の形で新設し、本体は内部関数の合成のみとする: `from_vocabulary` → 構築時検査 → `Vocabulary::from_tokens(&config.limits, vocabulary)`／`adapt` → 構築時検査 → 内部 `adapt(corpus, config.standardize, config.split, config.ngrams, config.max_tokens, &config.limits)`／`transform` → `TransformOptions { standardize, split, ngrams, output_sequence_length }` を組み内部 `transform(&self.vocabulary, &opts, &self.config.limits, inputs)`／`vocabulary`・`vocabulary_size` → `Vocabulary::tokens`・`vocabulary_size`。どちらに合わせるかを選ぶ場面がなく停止条件には当たらない。合成で書けない事情が出たら #2937 は公開せず承認依頼に戻る |
+| 構築時検査 | §8「`n`・`output_sequence_length` は構築時」 | 内部 `adapt` は `max_tokens`・`n` を入口で検査、`transform` は呼び出しごとに検査 | §8 に従い `from_vocabulary`・`adapt` の入口で `max_tokens`（`Some(m)` で m が 2 以下なら `InvalidMaxTokens`）・`check_ngrams`・`check_output_sequence_length` を先に行う。`transform` 側の再検査はそのまま残す（多重防御。結果は変わらない） |
+| `from_vocabulary` における `max_tokens` | 未記載 | `from_tokens` は受け取らない | 記録で決める（main に実体なし）: fail-closed。`Some(m)` で m が 2 以下は `InvalidMaxTokens { max_tokens: m }`、`vocabulary.len() + 2 > m`（`saturating_add`）は語彙の確保前に `VocabularyTooLarge { len, max: m }`。黙って無視・切り詰めはしない。新しい variant は足さない |
+| config の `with_*` 名・形 | 「`Default` + `with_*`」のみ | 実体なし | 記録で決める: 16.3 の 6 本・`-> Self`（先例 `UniqueOptions`） |
+| `TextLimits::with_*` の戻り値 | 「`with_*`」のみ | `-> Result<Self, TextError>` | 実装を採用（§8「絶対上限を超えたら `Err`」を満たす形） |
+| `TextError` の variant 数 | 14 | 17 | 実装を採用（§8 の絶対上限・`checked_mul`・`checked_add` を満たすための追加で、論点 5 は承認済み。`#[non_exhaustive]` のため今後の追加も非破壊）。`limit: &'static str` 型と `Display`・`Error` impl も公開の約束になる |
+| `Standardize`・`Split` の derive | `Default` のみ | `Debug, Clone, Copy, PartialEq, Eq, Default` | 実装を採用。derive は公開後に外せない（公開 API の約束） |
+| `TextVectorizationConfig` の derive | `Debug, Clone, PartialEq, Eq` | 実体なし | §6 に `Default` を加えた形（「Default + with_*」より）。`Copy` は付けない |
+
+後続で main のシグネチャが本表と食い違った場合は、公開せず承認依頼に戻す。
+
+### 16.5 契約として rustdoc に固定する挙動
+
+main が「実装上の選択・公開承認の際に確認」と注記していた点を、公開 doc の契約として固定する。
+
+- `adapt` はコーパス中の予約トークン（`""`・`"[UNK]"`）を数えない
+- `adapt` は語彙 1 件のバイト数を検査せず、`from_tokens` への上限を絶対上限へ緩める。このため `adapt` の結果を既定 `TextLimits` の `from_vocabulary` へ渡すと読み戻せない場合がある
+- 予約語の分類: `""` は `EmptyVocabularyToken`、`"[UNK]"` は `ReservedVocabularyToken`
+- 直接指定の語彙は標準化せず、lookup はバイト完全一致（大小文字を区別）
+- `transform`: `B = 0` は `[0, L]`（`None` なら `L = 0`）／`Split::None` と空入力 `""` は id 0（パディングと区別不能）／切り詰めは先頭 `L` 個を残す／`Some(0)` は `[B, 0]`／`max_output_sequence_length` は `Some(L)` にだけ適用し、`None` で導いた `L` は出力要素数の検査で抑える
+- id は 0 = パディング、1 = OOV、2.. = 語彙（直接指定は入力順、`adapt` は頻度降順・同頻度はバイト列の辞書順）。`Var::embedding(.., padding_idx: Some(0))` へ変換なしで渡せる
+- 判定方式（論点 4・§7）: 整数の完全一致。Keras との bit 互換は契約にしない。Keras に関する記述は「要出典確認」のまま断定しない
+
+### 16.6 保留ガードの反転範囲（#2937 への申し送り。本 issue では触らない）
+
+テキスト専用の `*HoldDoctestGuard` は存在しない。保留の実体は非公開 `mod text;`（`crates/facade/src/lib.rs`）と否定ガード `crates/facade/tests/text_module_hygiene.rs::text_module_is_not_exposed_from_facade`、および `text/mod.rs` の `#![cfg_attr(not(test), allow(dead_code, ...))]` である。
+
+反転するもの:
+
+1. `lib.rs` の `mod text;` を `pub mod text;` にし、doc の「公開形は未承認」を本記録への参照に書き換える
+2. `text_module_is_not_exposed_from_facade` を、`pub mod text;` がちょうど 1 件あり、`text/mod.rs` の `pub use` が 16.2 の 6 名だけであることを要求する正ガードへ反転する（同ファイルの `text_module_has_no_forbidden_constructs` は衛生契約であり変えない）
+3. `text/mod.rs` の `#![cfg_attr(not(test), allow(dead_code, ...))]` を撤去する（撤去で未使用になる内部項目が出たら削除か使用で解消し、`#[allow]` で黙らせない）
+4. `crates/facade/tests/api_surface.rs` で `collect_public_module_paths` と固定リストを照合する全ガード（各 `*HoldDoctestGuard` doctest の glob `use` 一覧・`GRAD_SCALER_PROBE_MODULES` 等）へ `text` を足す。件数は #2937 が `grep -n '"inference",' crates/facade/tests/api_surface.rs` と `grep -c 'collect_public_module_paths(&'` で数えて漏れなく更新する
+5. `fandhe_ai::text::…` 経由の到達プローブと利用例 doctest（`adapt` → `transform` → `Var::embedding(.., Some(0))`）を新設する
+
+残す否定プローブ（未承認経路）:
+
+- `text` 配下のサブモジュールを公開しない（フラットな 6 名のみ）・クレートルートへ再エクスポートしない
+- 内部項目（`Vocabulary`・`TransformOptions`・予約定数・上限定数・自由関数）に facade から到達できない
+- `Sequential::add_text_vectorization` 等の層化がない（論点 7）
+- callable の標準化・分割の入口がない（論点 8）
+- Unicode の小文字化・Unicode 空白分割の variant がない（論点 3 の Unicode 部分）
+- `multi_hot`／`count`／`tf_idf` 出力モード・`StringLookup` 相当がない（論点 6）
+- 否定ガードは stable rustdoc の `compile_fail` コード照合に頼らず、正のプローブとインベントリで組む
+
+### 16.7 論点の決着と保留を続ける論点
+
+- 確定: 論点 1（公開面・名前 `text`・`TextVectorization`・`transform`）・2（facade 内 `fandhe_ai::text`）・4（bit 互換は契約にしない）・5（`TextLimits` の既定値・絶対上限は §8 の表）・7（独立 struct・層化しない）・8（callable は入れない）は §10 の推奨どおり
+- 論点 3: ASCII 部分（`to_ascii_lowercase`・`split_ascii_whitespace`）のみ確定。**Unicode の大小文字変換・Unicode White_Space 分割は保留のまま**
+- **論点 6（出力モード `multi_hot`／`count`／`tf_idf`・`StringLookup` 相当）は保留のまま**
+- 対象外のまま: サブワードトークナイザ・Unicode 正規化・書記素クラスタ・語彙のファイル保存／読み込み・ragged 出力
+
+### 16.8 変えないもの・セキュリティ観点
+
+- 変えない: 依存・新規 `unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・閾値・`docs/spec/`・`fandhe-ai =0.10.0` の既存シグネチャ（追加のみ）・`FitConfig`
+- CUDA／Metal 実機 parity は対象なし（ホスト側処理のみ。§7）。`#[ignore]` テストも `docs/perf/logs/` への申し送りも作らない
+- #2937 への安全性の要求（§13 の再掲）: 入力検査は標準化・分割・確保より先（A03）、上限・`checked_*`・`isize::MAX` バイト検査（A04）、`from_vocabulary` の `max_tokens` 検査も確保前に fail-closed、`TextError`・`Debug` に入力文字列・語彙全文を入れない（A09）、依存追加なし（A06）
