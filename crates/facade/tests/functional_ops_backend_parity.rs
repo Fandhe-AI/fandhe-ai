@@ -1,5 +1,6 @@
-//! `fandhe_ai_autodiff::functional_ops::{vjp, hvp, vmap}`（イシュー #2877・親 #2841。facade 非公開のため
-//! `fandhe_ai_autodiff` を直接 use する。`crates/autodiff/src/functional_ops.rs` モジュール doc 参照）の
+//! `fandhe_ai_autodiff::functional_ops::{vjp, hvp, vmap}`（イシュー #2877・親 #2841。内部実装の parity 層であるため
+//! `fandhe_ai_autodiff` を直接 use する。facade 経由の結合テストは `functional_transforms_facade.rs`〈#2931〉。
+//! `crates/autodiff/src/functional_ops.rs` モジュール doc 参照）の
 //! バックエンド間 parity テスト（`jacobian_hessian_backend_parity.rs` と同型）。
 //!
 //! 属性なし: 実 `CpuBackendOps` を結線した tape と `Tape::new()`（`NaiveOps`）を突き合わせ、REQ-2

@@ -35523,9 +35523,14 @@ fn facade_reexports_spectral_norm_state_only_in_approved_shape_detects_each_cate
 /// トークン列中の全 `fn gradcheck` 宣言について、直前に `pub` があればそれを含め、本体 `{`（宣言
 /// なら `;`）の直前までを空白連結して返す（`pub` が無い宣言は `fn` から始まる文字列になり承認形と一致しない）。
 fn gradcheck_fn_signatures(tokens: &[String]) -> Vec<String> {
+    fn_signatures_by_name(tokens, "gradcheck")
+}
+
+/// [`gradcheck_fn_signatures`] の名前汎用版（#2931 の `vjp`／`hvp`／`vmap` の承認形検査と共用）。
+fn fn_signatures_by_name(tokens: &[String], fn_name: &str) -> Vec<String> {
     let mut out = Vec::new();
     for (i, token) in tokens.iter().enumerate() {
-        if token != "fn" || !fn_declaration_target_name_matches(tokens, i, "gradcheck") {
+        if token != "fn" || !fn_declaration_target_name_matches(tokens, i, fn_name) {
             continue;
         }
         let start = if i > 0 && tokens[i - 1] == "pub" {
@@ -35821,12 +35826,16 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// FunctionalTransformsHoldDoctestGuard（イシュー #2874・親 #2841）:
+// FunctionalTransformsHoldDoctestGuard（イシュー #2874・親 #2841）と #2931 での部分反転:
 // `GradcheckAnomalyHoldDoctestGuard`（#2671）系のテストの鏡写し。実装は内部クレート
-// （`fandhe_ai_autodiff::functional_ops`。現時点は `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`〈後 2 者は #2940〉。新規 `Op`・`BackendOps` メソッド・
-// `AutodiffError` variant なし）に閉じ、facade 公開形は未承認
-// （`docs/autodiff-functional-transforms-design.md` §5・§10。同記録は推奨案の記録であり承認記録ではない）。
-// 承認済みの除外はない。検出範囲は列挙した名前（`functional_ops`・`vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`）に限る。
+// （`fandhe_ai_autodiff::functional_ops`。`vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`〈後 2 者は #2940〉。新規 `Op`・`BackendOps` メソッド・
+// `AutodiffError` variant なし）に閉じる。公開形はルート #2499 のリポジトリ所有者コメント
+// （`issuecomment-6067263650` 項 1）で承認され、イシュー #2931 で facade `Tape` の inherent メソッド
+// `vjp`・`hvp`・`vmap` の 3 名だけを薄い委譲として公開した（`docs/autodiff-functional-transforms-design.md`
+// §23.4）。承認形は正ガード `facade_tape_functional_transforms_are_approved_thin_delegations` が固定し、
+// 否定ガードは「`src/lib.rs` の `impl Tape` 直下にある承認形シグネチャの 3 件」だけを除外する。
+// 未承認経路（モジュール `functional_ops`・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッド・`Tape` 上の `jvp`／`jacfwd`・
+// `pub use` での再エクスポート）は引き続き拒否する。検出範囲は列挙した名前に限る。
 // =====================================================================
 
 /// `FunctionalTransformsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import する
@@ -35917,16 +35926,12 @@ impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tape {\n\
-\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
-\x20\x20\x20\x20}\n\
+trait __FandheFunctionalTransformsHoldTapeProbe {\n\
+\x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+}\n\
+\n\
+impl __FandheFunctionalTransformsHoldTapeProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
@@ -35975,9 +35980,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);\n\
-\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vjp(tape);\n\
-\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::hvp(tape);\n\
-\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vmap(tape);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jvp(tape);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jacfwd(tape);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);\n\
@@ -36000,8 +36002,16 @@ const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 6] =
 /// facade src の `pub use` で [`FUNCTIONAL_TRANSFORMS_IDENTS`] を経路の識別子（トークン完全一致）単位で
 /// 含むもの（別名・複数行・ネストした group を含む）、内部クレート（`fandhe_ai_autodiff`／
 /// `fandhe_ai_tensor_core`）の glob 再エクスポート、`pub mod functional_ops` の宣言、
-/// [`FUNCTIONAL_TRANSFORMS_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない。承認済みの除外はない）を違反として返す。
-fn scan_functional_transforms_reexports_and_declarations(content: &str) -> Vec<String> {
+/// [`FUNCTIONAL_TRANSFORMS_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない）を違反として返す。
+///
+/// 例外（#2931）: `allow_approved_tape_methods` が真（呼び出し側が `src/lib.rs` と判定した場合だけ）のとき、
+/// 名前ごとに最大 1 件、(a) シグネチャが [`FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES`] と完全一致し、
+/// かつ (b) `impl Tape { … }` 直下の `pub fn` として存在する宣言だけを差し引く。
+/// 2 件目・別シグネチャ・`impl Var`／`impl Tensor` 内・他ファイル・裸の `pub fn` は違反のまま。
+fn scan_functional_transforms_reexports_and_declarations(
+    content: &str,
+    allow_approved_tape_methods: bool,
+) -> Vec<String> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
@@ -36037,14 +36047,78 @@ fn scan_functional_transforms_reexports_and_declarations(content: &str) -> Vec<S
         i += 1;
     }
 
+    let tape_impl_fns = pb_pub_fn_names_in_inherent_impls(&tokens, "Tape");
     for fn_name in FUNCTIONAL_TRANSFORMS_FN_NAMES {
-        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        let mut count = count_fn_declarations_by_name(&tokens, fn_name);
+        if allow_approved_tape_methods {
+            let approved_sig = FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES
+                .iter()
+                .find(|(n, _)| *n == fn_name)
+                .map(|(_, sig)| normalized_tokens(sig));
+            let sig_matches = fn_signatures_by_name(&tokens, fn_name)
+                .iter()
+                .filter(|sig| Some(*sig) == approved_sig.as_ref())
+                .count();
+            let in_tape_impl = tape_impl_fns.iter().filter(|n| *n == fn_name).count();
+            count -= sig_matches.min(in_tape_impl).min(1).min(count);
+        }
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
         }
     }
     offending
 }
+
+/// #2931 の承認形シグネチャ（`pub fn` から本体の `{` の直前まで。決定記録
+/// `docs/autodiff-functional-transforms-design.md` §23.1）。`'static`・`Send`・`Sync` 境界は持たない。
+const FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES: [(&str, &str); 3] = [
+    (
+        "vjp",
+        "pub fn vjp(
+    &self,
+    output: &Var<'_>,
+    input: &Var<'_>,
+    cotangent: &Tensor<f32>,
+) -> Result<Tensor<f32>, AutodiffError>",
+    ),
+    (
+        "hvp",
+        "pub fn hvp(
+    &self,
+    loss: &Var<'_>,
+    input: &Var<'_>,
+    vector: &Tensor<f32>,
+    child: &Tape,
+) -> Result<Tensor<f32>, AutodiffError>",
+    ),
+    (
+        "vmap",
+        "pub fn vmap<'t, F>(
+    &'t self,
+    input: &Var<'t>,
+    in_dim: usize,
+    f: F,
+) -> Result<Var<'t>, AutodiffError>
+where
+    F: FnMut(&Var<'t>) -> Result<Var<'t>, AutodiffError>,",
+    ),
+];
+
+/// #2931 の承認形の 1 行委譲本体（決定記録 §23.2。`{ }` の内側）。
+const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 3] = [
+    (
+        "vjp",
+        "fandhe_ai_autodiff::functional_ops::vjp(&self.0, output, input, cotangent)",
+    ),
+    (
+        "hvp",
+        "fandhe_ai_autodiff::functional_ops::hvp(&self.0, loss, input, vector, &child.0)",
+    ),
+    (
+        "vmap",
+        "fandhe_ai_autodiff::functional_ops::vmap(&self.0, input, in_dim, f)",
+    ),
+];
 
 /// facade src 全体（`crates/facade/src/**`）に関数型 AD ラッパーの保留対象の再エクスポート・同名
 /// `fn`・`pub mod` 宣言が存在しないことを固定する（`FunctionalTransformsHoldDoctestGuard` の正の
@@ -36054,14 +36128,16 @@ fn facade_does_not_reexport_or_declare_functional_transforms() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_functional_transforms_reexports_and_declarations(content) {
+        let is_lib_rs = path.ends_with("src/lib.rs");
+        for offense in scan_functional_transforms_reexports_and_declarations(content, is_lib_rs) {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
     assert!(
         offending.is_empty(),
-        "facade の公開面が関数型 AD ラッパーの内部実装（#2874 の `functional_ops`。facade 公開形は\
-         未承認）を再エクスポート、または同名の fn／pub mod を宣言している: {offending:?}"
+        "facade の公開面が関数型 AD ラッパーの内部実装（#2874 の `functional_ops`）を再エクスポート、\
+         または承認形（#2931・`src/lib.rs` の `impl Tape` 直下の `vjp`／`hvp`／`vmap` 各 1 件）以外の\
+         同名の fn／pub mod を宣言している: {offending:?}"
     );
 }
 
@@ -36069,8 +36145,12 @@ fn facade_does_not_reexport_or_declare_functional_transforms() {
 /// ソースを検出できることを恒久的に固定する）。
 #[test]
 fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_category() {
+    // 既定は `src/lib.rs` 以外扱い（承認例外なし）。
     let offense =
-        |src: &str| !scan_functional_transforms_reexports_and_declarations(src).is_empty();
+        |src: &str| !scan_functional_transforms_reexports_and_declarations(src, false).is_empty();
+    // `src/lib.rs` 扱い（#2931 の承認例外あり）。
+    let offense_lib =
+        |src: &str| !scan_functional_transforms_reexports_and_declarations(src, true).is_empty();
     // 正例: モジュール・関数の再エクスポート（別名・group・複数行を含む）。
     assert!(offense("pub use fandhe_ai_autodiff::functional_ops;"));
     assert!(offense("pub use fandhe_ai_autodiff::functional_ops as f;"));
@@ -36107,6 +36187,31 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
     assert!(!offense("fn jvp_impl() {}"));
     assert!(!offense("fn f(t: &Tape) { let _ = t.jacfwd(); }"));
     assert!(!offense("fn f(t: &Tape) { let _ = t.vjp(); }"));
+    // #2931: 承認例外は `lib.rs` 扱いの `impl Tape` 直下・承認形シグネチャ・名前ごとに 1 件だけ。
+    let mut all = String::from("impl Tape {\n");
+    for (_, sig) in FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES {
+        all.push_str(&format!("{sig}\n{{ x }}\n"));
+    }
+    all.push_str("}\n");
+    assert!(!offense_lib(&all), "承認形 3 件は lib.rs 扱いで無違反");
+    assert!(offense(&all), "lib.rs 以外扱いでは承認形でも違反");
+    // 別シグネチャ・`pub` 欠落・`'static` 境界の追加は違反のまま。
+    assert!(offense_lib("impl Tape { pub fn vjp(&self) {} }"));
+    assert!(offense_lib(&all.replace("pub fn hvp", "fn hvp")));
+    assert!(offense_lib(
+        &all.replace("F: FnMut(", "F: 'static + FnMut(")
+    ));
+    // 重複（2 件目）は違反。
+    assert!(offense_lib(&format!("{all}\n{all}")));
+    // `impl Var`／`impl Tensor` 内の承認シグネチャは違反。
+    assert!(offense_lib(&all.replace("impl Tape", "impl Var")));
+    assert!(offense_lib(&all.replace("impl Tape", "impl Tensor")));
+    // 裸の自由関数・再エクスポートは lib.rs 扱いでも違反のまま。
+    assert!(offense_lib("pub fn vjp() {}"));
+    assert!(offense_lib(&format!(
+        "{all}\npub use fandhe_ai_autodiff::functional_ops::vjp;"
+    )));
+    assert!(offense_lib(&format!("{all}\npub mod functional_ops {{}}")));
 }
 
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`FUNCTIONAL_TRANSFORMS_FN_NAMES`] の `fn` 宣言が
@@ -36118,6 +36223,9 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
 /// - `autodiff/src/functional_ops.rs::hvp`: #2875 の内部実装（同上）。
 ///
 /// - `autodiff/src/functional_ops.rs::vmap`: #2876 の内部実装（同上）。
+///
+/// - `facade/src/lib.rs::{vjp, hvp, vmap}`: #2931 で公開した `Tape` の承認形の薄い委譲（各 1 件。
+///   承認形は `facade_tape_functional_transforms_are_approved_thin_delegations` が固定する）。
 ///
 /// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`: #2940 の double-VJP 内部実装（`pub(crate)`。同上）。
 ///
@@ -36171,17 +36279,152 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
         ("autodiff/src/functional_ops.rs::jvp".to_string(), 1usize),
         ("autodiff/src/functional_ops.rs::jacfwd".to_string(), 1usize),
         ("autodiff/src/grad.rs::vjp".to_string(), 1usize),
+        ("facade/src/lib.rs::vjp".to_string(), 1usize),
+        ("facade/src/lib.rs::hvp".to_string(), 1usize),
+        ("facade/src/lib.rs::vmap".to_string(), 1usize),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd の `fn` 宣言が許可された置き場所\
-         （autodiff/src/functional_ops.rs・autodiff/src/grad.rs の各 1 件）と一致しない。\
+         （autodiff/src/functional_ops.rs・autodiff/src/grad.rs・facade/src/lib.rs の各 1 件）と一致しない。\
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
 }
+/// `src/lib.rs` の `Tape::vjp`／`hvp`／`vmap` が承認形（シグネチャ・1 行委譲本体・`impl Tape` 直下）で
+/// それぞれちょうど 1 件であることを検査する（#2931 の正ガード本体。検出範囲は列挙した 3 名に限り、
+/// マクロ生成までは保証しない）。
+fn check_facade_tape_functional_transforms_shape(lib_src: &str) -> Result<(), String> {
+    let cleaned: String = strip_comments_and_literals(lib_src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let tape_impl_fns = pb_pub_fn_names_in_inherent_impls(&tokens, "Tape");
+    for (name, sig) in FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES {
+        let sigs = fn_signatures_by_name(&tokens, name);
+        if sigs.len() != 1 {
+            return Err(format!(
+                "`fn {name}` が {} 件（1 件であるべき）",
+                sigs.len()
+            ));
+        }
+        if sigs[0] != normalized_tokens(sig) {
+            return Err(format!(
+                "`{name}` のシグネチャが承認形と不一致: {}",
+                sigs[0]
+            ));
+        }
+        let want_body = FUNCTIONAL_TRANSFORMS_APPROVED_BODIES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, b)| normalized_tokens(b));
+        match (determinism_fn_body(&tokens, name), want_body) {
+            (Some(body), Some(want)) if body == want => {}
+            (other, _) => return Err(format!("`{name}` の本体が承認形と不一致: {other:?}")),
+        }
+        if tape_impl_fns.iter().filter(|n| *n == name).count() != 1 {
+            return Err(format!(
+                "`{name}` が `impl Tape` 直下の `pub fn` として 1 件でない"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// facade の `Tape::vjp`／`hvp`／`vmap` が `src/lib.rs` にちょうど 1 件ずつ・承認形で存在し、facade src の
+/// 他ファイルには同名 `fn` が無いことを固定する正ガード（#2931）。
+#[test]
+fn facade_tape_functional_transforms_are_approved_thin_delegations() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    if let Err(e) = check_facade_tape_functional_transforms_shape(&content) {
+        panic!(
+            "facade の `Tape::vjp`／`hvp`／`vmap` が承認形（#2931・決定記録 §23.1〜§23.2）と一致しない: {e}"
+        );
+    }
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if path.ends_with("src/lib.rs") {
+            return;
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for fn_name in FUNCTIONAL_TRANSFORMS_FN_NAMES {
+            assert_eq!(
+                count_fn_declarations_by_name(&tokens, fn_name),
+                0,
+                "{} に `fn {fn_name}` 宣言がある（承認形は src/lib.rs の Tape のみ）",
+                path.display()
+            );
+        }
+    });
+}
+
+/// [`check_facade_tape_functional_transforms_shape`] の自己テスト（承認形は無違反・各違反類型を検出・
+/// 対象不在の空振りを拒否）。
+#[test]
+fn facade_tape_functional_transforms_are_approved_thin_delegations_detects_each_category() {
+    let mut ok = String::from("impl Tape {\n");
+    for ((_, sig), (_, body)) in FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES
+        .iter()
+        .zip(FUNCTIONAL_TRANSFORMS_APPROVED_BODIES.iter())
+    {
+        ok.push_str(&format!("{sig}\n{{\n{body}\n}}\n"));
+    }
+    ok.push_str("}\n");
+    assert!(check_facade_tape_functional_transforms_shape(&ok).is_ok());
+    // 空振り（対象不在）を拒否する。
+    assert!(check_facade_tape_functional_transforms_shape("impl Tape {}").is_err());
+    // 本体のすり替え。
+    let bad_body = ok.replace(
+        "&self.0, output, input, cotangent)",
+        "&self.0, input, output, cotangent)",
+    );
+    assert_ne!(bad_body, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&bad_body).is_err());
+    // `&self` の欠落・`'static` 境界の追加・`pub` の欠落。
+    let no_self = ok.replacen("pub fn vjp(\n    &self,\n", "pub fn vjp(\n", 1);
+    assert_ne!(no_self, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&no_self).is_err());
+    let with_static = ok.replace("F: FnMut(", "F: 'static + FnMut(");
+    assert_ne!(with_static, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&with_static).is_err());
+    let not_pub = ok.replace("pub fn hvp", "fn hvp");
+    assert_ne!(not_pub, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&not_pub).is_err());
+    // 重複。
+    let dup = format!("{ok}\n{ok}");
+    assert!(check_facade_tape_functional_transforms_shape(&dup).is_err());
+    // `impl Tape` 直下でない（`impl Var` 内）。
+    let wrong_recv = ok.replace("impl Tape", "impl Var");
+    assert!(check_facade_tape_functional_transforms_shape(&wrong_recv).is_err());
+}
+
+/// facade 公開面から `Tape::vjp`／`hvp`／`vmap` が型レベルで到達可能であることを固定し、CPU で 1 回ずつ
+/// 呼べることを確かめる（#2931。`vmap` の寿命の結び方もここで型固定する）。
+#[test]
+fn tape_functional_transforms_are_reachable_via_facade() {
+    use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
+    type VjpFn = fn(&Tape, &Var<'_>, &Var<'_>, &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError>;
+    type HvpFn =
+        fn(&Tape, &Var<'_>, &Var<'_>, &Tensor<f32>, &Tape) -> Result<Tensor<f32>, AutodiffError>;
+    let _vjp: VjpFn = Tape::vjp;
+    let _hvp: HvpFn = Tape::hvp;
+    fn square<'t>(s: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        s.mul(s)
+    }
+    let t = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = t.var(&Tensor::new(vec![1.0_f32, 2.0], &[2]).expect("tensor"));
+    let y = x.mul(&x).expect("mul");
+    let u = Tensor::new(vec![1.0_f32, 1.0], &[2]).expect("tensor");
+    assert!(t.vjp(&y, &x, &u).is_ok());
+    let loss = y.sum(None).expect("sum");
+    assert!(t.hvp(&loss, &x, &u, &child).is_ok());
+    let xb = t.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor"));
+    let vm: Result<Var<'_>, AutodiffError> = t.vmap(&xb, 0, square);
+    assert!(vm.is_ok());
+}
+
 // =====================================================================
 // #2678（親 #2625・ルート #2499 Phase 4）: 承認された演算・自動微分の公開に対する正ガード。
 // 旧否定ガード（`FftOpsHoldDoctestGuard` ほか 15 個の保留 doctest と各 `facade_does_not_

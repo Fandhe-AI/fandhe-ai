@@ -844,6 +844,157 @@ impl Tape {
         fandhe_ai_autodiff::jacobian_ops::hessian(&self.0, loss, input, &child.0)
     }
 
+    /// ベクトル・ヤコビ積 `cotangentᵀ · ∂output/∂input`（`torch.func.vjp` 相当。イシュー #2931・
+    /// 設計記録 `docs/autodiff-functional-transforms-design.md` §23。内部実装
+    /// `fandhe_ai_autodiff::functional_ops` の `vjp` への薄い委譲）。
+    ///
+    /// 戻り値は `input` と同じ shape の非微分のホスト値。`cotangent` は `output` と shape が完全一致
+    /// （ブロードキャストなし）でなければならない。
+    ///
+    /// # エラー（入口検査の順序）
+    ///
+    /// [`AutodiffError::TapeMismatch`] → [`AutodiffError::GradientTrackingDisabled`]（`input` が追跡なし）
+    /// → `cotangent` の shape 不一致（`Shape(ShapeMismatch)`）→ 要素数の検査。
+    ///
+    /// # 追跡なしの挙動（現状のまま・契約は変えない）
+    ///
+    /// 追跡なしの `output` に対しては全ゼロを返す（`Err` にならない）。追跡なしの `input` は
+    /// `Err(GradientTrackingDisabled)`。`hvp` とは `output`／`loss` の追跡なしの扱いが非対称。
+    ///
+    /// # 副作用
+    ///
+    /// 入口検査とゼロ返却分岐を通過した本体経路に限り、親テープへちょうど 2 ノード（余接の葉と `mul`）を
+    /// 足す。入口検査の失敗時、および要素数 0 または追跡なし `output` でゼロを返す場合は足さない。
+    ///
+    /// # 数値・適用範囲
+    ///
+    /// 数値は REQ-2 の統一複合判定で、`hvp` の 1 階 VJP との bit 同一は契約にしない。f32 の `Tape` のみ
+    /// （`VarF64`・低精度 forward は対象外）。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let x = t.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3])?);
+    /// let y = x.mul(&x)?; // y = x ⊙ x
+    /// let u = Tensor::new(vec![1.0_f32, 0.5, 2.0], &[3])?;
+    /// let g = t.vjp(&y, &x, &u)?; // 2x ⊙ u
+    /// assert_eq!(g.shape(), &[3]);
+    /// assert_eq!(g.host_slice().into_owned(), [2.0, 2.0, 12.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn vjp(
+        &self,
+        output: &Var<'_>,
+        input: &Var<'_>,
+        cotangent: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        fandhe_ai_autodiff::functional_ops::vjp(&self.0, output, input, cotangent)
+    }
+
+    /// ヘッセ・ベクトル積 `∂²loss/∂input² · vector`（reverse-over-reverse。`torch.func.hvp` 相当。
+    /// イシュー #2931・設計記録 §23。内部実装 `fandhe_ai_autodiff::functional_ops` の `hvp` への
+    /// 薄い委譲）。
+    ///
+    /// `child` は [`tape`]／[`tape_for`] で作った**空**の別 `Tape`（[`Tape::hessian`] と同じ契約）。
+    /// 戻り値は `input` と同じ shape の非微分のホスト値。
+    ///
+    /// # エラー（入口検査の順序。`vjp` とは異なる）
+    ///
+    /// [`AutodiffError::TapeMismatch`]（`loss`・`input` の順）→ [`AutodiffError::GradientTrackingDisabled`]
+    /// → `loss` の要素数 1（`[]`・`[1]`・`[1, 1]` は可。違反は [`AutodiffError::InvalidArgument`]）
+    /// → `vector` の shape 完全一致（`Shape(ShapeMismatch)`）→ `input` の要素数検査。`loss` の要素数と
+    /// `vector` の shape が両方不正な場合は `ShapeMismatch` ではなく `InvalidArgument` が返る。
+    ///
+    /// # 追跡なしの挙動（現状のまま・契約は変えない）
+    ///
+    /// 追跡なしの `loss` に対しては `backward_create_graph` の `Err` を伝播する（`vjp` の全ゼロ返却と
+    /// 非対称）。追跡なしの `input` は `Err(GradientTrackingDisabled)`。
+    ///
+    /// # 副作用
+    ///
+    /// 親テープへノードを足さない。子テープにはノードが残るので、呼び出し後の `child` は作り直す。
+    ///
+    /// # 数値・適用範囲
+    ///
+    /// 数値は REQ-2 の統一複合判定で、1 階 VJP との bit 同一は契約にしない。経路上の Op は
+    /// `create_graph` 対応（`supports_create_graph()` が真）のものに限る。f32 の `Tape` のみ
+    /// （`VarF64`・低精度 forward は対象外）。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let x = t.var(&Tensor::new(vec![2.0_f32], &[1])?);
+    /// let loss = x.mul(&x)?.mul(&x)?.sum(None)?; // x^3
+    /// let v = Tensor::new(vec![1.0_f32], &[1])?;
+    /// let hv = t.hvp(&loss, &x, &v, &child)?; // 6x ⊙ v
+    /// assert!((hv.host_slice()[0] - 12.0).abs() < 1e-4);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn hvp(
+        &self,
+        loss: &Var<'_>,
+        input: &Var<'_>,
+        vector: &Tensor<f32>,
+        child: &Tape,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        fandhe_ai_autodiff::functional_ops::hvp(&self.0, loss, input, vector, &child.0)
+    }
+
+    /// バッチ軸 `in_dim` に沿って `f` を各スライスへ適用し、結果を dim 0 に積む（`torch.func.vmap`
+    /// 相当のループ版。イシュー #2931・設計記録 §23。内部実装 `fandhe_ai_autodiff::functional_ops` の
+    /// `vmap` への薄い委譲）。
+    ///
+    /// 単一入力・`FnMut`。`out_dim` は無く、出力のバッチ軸は dim 0 固定。戻り値は同じテープ上の
+    /// 微分可能な [`Var`]。
+    ///
+    /// # エラー
+    ///
+    /// Phase A（テープ無変更）: [`AutodiffError::TapeMismatch`]・軸範囲外（`Shape(AxisOutOfRange)`）・
+    /// 空バッチ（[`AutodiffError::InvalidArgument`]）。Phase B: クロージャの `Err` の伝播、別テープの出力、
+    /// スライス間の出力形状不一致。
+    ///
+    /// # 副作用
+    ///
+    /// Phase B で失敗すると、それまでに足されたノードがテープに残る。
+    ///
+    /// # 数値・適用範囲
+    ///
+    /// バッチなし実行との bit 一致は契約にしない（REQ-2 の統一複合判定）。`vmap(grad)` は契約外で、
+    /// 値だけが要る場合は呼び出し側が明示ループで `backward` を回す。複数入力は無い。f32 の `Tape` のみ
+    /// （`VarF64`・低精度 forward は対象外）。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let x = t.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?);
+    /// let y = t.vmap(&x, 0, |s| s.mul(s))?; // 行ごとの二乗
+    /// let out = y.to_tensor();
+    /// assert_eq!(out.shape(), &[2, 3]);
+    /// assert_eq!(out.host_slice().into_owned(), [1.0, 4.0, 9.0, 16.0, 25.0, 36.0]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn vmap<'t, F>(
+        &'t self,
+        input: &Var<'t>,
+        in_dim: usize,
+        f: F,
+    ) -> Result<Var<'t>, AutodiffError>
+    where
+        F: FnMut(&Var<'t>) -> Result<Var<'t>, AutodiffError>,
+    {
+        fandhe_ai_autodiff::functional_ops::vmap(&self.0, input, in_dim, f)
+    }
+
     /// 非有限値（NaN／±inf）を最初に生んだノードを検出する逆伝播（イシュー #2678・
     /// `fandhe_ai_autodiff::anomaly::backward_detect_anomaly` への薄い委譲）。
     ///
@@ -7401,18 +7552,26 @@ struct JacobianHessianHoldDoctestGuard;
 #[allow(dead_code)]
 struct GradcheckAnomalyHoldDoctestGuard;
 
-/// `vjp`・`hvp`・`vmap`（イシュー #2874・親 #2841。内部実装 `fandhe_ai_autodiff::functional_ops`。
-/// 現時点の実装は `vjp`・`hvp`〈#2875〉・`vmap`〈#2876〉）の未承認経路を facade 公開面から締め出す保留ガード
-/// （`GradcheckAnomalyHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+/// `vjp`・`hvp`・`vmap`（イシュー #2874・親 #2841。内部実装 `fandhe_ai_autodiff::functional_ops`）の
+/// 未承認経路を facade 公開面から締め出す保留ガード（`GradcheckAnomalyHoldDoctestGuard` と同型の
+/// 正のプローブ 1 ブロック方式。#2678／#2847 と同じ部分反転の文体）。
 ///
-/// 公開形は未承認（`docs/autodiff-functional-transforms-design.md` §5 は推奨案の記録であり承認記録ではない）。
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、拒否する経路に対応するローカル定義
-/// （モジュール `functional_ops`、クレートルート直下の裸の自由関数 `vjp`・`hvp`・`vmap`、および #2940 の内部実装 `jvp`・`jacfwd`）と、同名メソッドを持つ
-/// プローブ用トレイト（受け手: `Var`・`Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）の
-/// メソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ公開するか、上の受け手へ
-/// 同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する。`hvp`／`vmap` は先に、`jvp`／`jacfwd`（#2940）は内部実装と同時にこの固定文言へ追加した。
-/// 以後の公開 issue は固定文言を書き換えずに済む。
+/// **部分反転（イシュー #2931）**: 公開形はルート #2499 のリポジトリ所有者コメント
+/// （`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）の項 1 で承認され、
+/// `Tape` の inherent メソッド `vjp`・`hvp`・`vmap` の 3 名だけを公開した（決定記録
+/// `docs/autodiff-functional-transforms-design.md` §23.4）。このため `Tape` 受け手のプローブ
+/// （`impl ... for fandhe_ai::Tape` と `fandhe_ai::Tape::vjp/hvp/vmap(tape)` の UFCS 3 行）は外した
+/// （inherent メソッドと名前が衝突して UFCS の解決が変わるため、impl ブロックごと外している）。
+/// 公開した 3 名の正ガードは `crates/facade/tests/api_surface.rs::
+/// facade_tape_functional_transforms_are_approved_thin_delegations` が担う。
+///
+/// 引き続き拒否する未承認経路: モジュール `functional_ops` の公開、クレートルート直下の裸の自由関数
+/// `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`（後 2 者は #2940 の内部実装）、`Var<'t>`・`Tensor<f32>` 上の同名メソッド、
+/// および `Tape` 上の `jvp`・`jacfwd`（`Tape` 受け手には専用のプローブ用トレイトで締める）。下の doctest は全 `pub mod` を glob import
+/// したスコープへ、これらに対応するローカル定義とプローブ用トレイトを置き、修飾なしの関数呼び出しと
+/// 修飾付き（UFCS）のメソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ
+/// 公開するか、上の受け手へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
+/// 不一致でエラーコードに依存せずコンパイルが失敗する。
 /// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
@@ -7481,16 +7640,12 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tape {
-///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {
-///         __FandheFunctionalTransformsHoldMarker
-///     }
-///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {
-///         __FandheFunctionalTransformsHoldMarker
-///     }
-///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
-///         __FandheFunctionalTransformsHoldMarker
-///     }
+/// trait __FandheFunctionalTransformsHoldTapeProbe {
+///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;
+/// }
+///
+/// impl __FandheFunctionalTransformsHoldTapeProbe for fandhe_ai::Tape {
 ///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
@@ -7539,9 +7694,6 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);
-///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vjp(tape);
-///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::hvp(tape);
-///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vmap(tape);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jvp(tape);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jacfwd(tape);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);
