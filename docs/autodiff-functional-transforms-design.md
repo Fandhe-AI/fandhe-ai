@@ -143,7 +143,7 @@
 5. `supports_create_graph` の対象 Op 拡張。
 6. 微分可能な per-sample gradient（`vmap(grad)`）の公開形。子テープ上の `Var` を扱うクロージャ型など、`input` と同一テープを要求する §5 の契約とは別形が要る。
 
-承認依頼の所在（#2879）: `docs/compat-api-scope.md` §5.1 の `F1`〜`F3` ブロック。詳細は §20。
+承認依頼の所在（#2879）: `docs/compat-api-scope.md` §5.1 の `F1`〜`F3` ブロック。詳細は §21。
 
 ## 12. スコープ外・申し送り
 
