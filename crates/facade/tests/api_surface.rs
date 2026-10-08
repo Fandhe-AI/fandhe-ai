@@ -36273,3 +36273,210 @@ fn f64_autograd_guards_detect_each_violation_class() {
         "宣言が無い入力を違反として扱えていない（走査空振り）"
     );
 }
+// =====================================================================
+// #2605（親 #2603・ルート #2499）: `Sequential::fit_with_prefetch`
+// （`PrefetchDataLoader` の fit 結線。決定記録
+// `docs/tensor-core-data-prefetch-decision.md` §4 の案 B）の正ガード。
+// 反転対象の保留ガードは存在しなかった（着手時に `fit_with_prefetch` 等が
+// `crates/` 全体で 0 件）ため、反転ではなく新設である。承認形
+// （`impl Sequential` の inherent メソッド 1 件のみ）が承認位置にちょうど
+// 1 件あり、不採用案（案 A: `FitConfig::prefetch`／`FitOptions`、案 C/D/E 系の
+// 別名入口）の形が 0 件であることを fail-closed で固定する。
+// =====================================================================
+
+/// 不採用案の fn 名（facade src のどこにも宣言されてはならない）。
+const FIT_PREFETCH_FORBIDDEN_FN_NAMES: [&str; 4] = [
+    "fit_prefetch",
+    "fit_loader",
+    "fit_batches",
+    "set_fit_prefetch",
+];
+
+/// `rel`（`crates/facade/src` からの `/` 区切り相対パス）と `content` を受け、
+/// `(違反一覧, 確認できた承認要素の鍵一覧)` を返す。承認要素の鍵は
+/// `compat/training.rs` の `impl Sequential` 内 `fn:fit_with_prefetch` のみ。
+fn scan_fit_with_prefetch_surface(rel: &str, content: &str) -> (Vec<String>, Vec<String>) {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+    let mut allowed: Vec<String> = Vec::new();
+
+    let decls = count_fn_declarations_by_name(&tokens, "fit_with_prefetch");
+    let in_impl_sequential = rel == "compat/training.rs"
+        && scan_type_impl_surface(content, "Sequential")
+            .0
+            .contains("fit_with_prefetch");
+    for n in 0..decls {
+        if in_impl_sequential && n == 0 {
+            allowed.push("fn:fit_with_prefetch".to_string());
+        } else {
+            offending.push(format!("fn fit_with_prefetch 宣言（{rel}）"));
+        }
+    }
+    for name in FIT_PREFETCH_FORBIDDEN_FN_NAMES {
+        for _ in 0..count_fn_declarations_by_name(&tokens, name) {
+            offending.push(format!("不採用案の fn {name} 宣言（{rel}）"));
+        }
+    }
+    // 案 A: `FitConfig` への `prefetch` 追加。
+    if scan_type_impl_surface(content, "FitConfig")
+        .0
+        .contains("prefetch")
+    {
+        offending.push(format!("不採用案の FitConfig::prefetch 宣言（{rel}）"));
+    }
+    // 案 A: 設定型 `FitOptions`。
+    for i in 0..tokens.len() {
+        if matches!(tokens[i].as_str(), "struct" | "enum" | "type" | "trait")
+            && tokens.get(i + 1).map(String::as_str) == Some("FitOptions")
+        {
+            offending.push(format!("不採用案の FitOptions 宣言（{rel}）"));
+        }
+    }
+    (offending, allowed)
+}
+
+/// 正ガード: facade src 全体で承認形が承認位置にちょうど 1 件あり、不採用案の形が
+/// 0 件であること（欠落・二重化・走査の空振りも fail-closed）。
+#[test]
+fn facade_exposes_fit_with_prefetch_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut allowed_all: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    visit_rs_files(&src_dir, &mut |path, content| {
+        scanned += 1;
+        let rel = path
+            .strip_prefix(&src_dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let (found, allowed) = scan_fit_with_prefetch_surface(&rel, content);
+        allowed_all.extend(allowed);
+        for offense in found {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(scanned > 0, "facade src を 1 ファイルも走査できなかった");
+    assert!(
+        offending.is_empty(),
+        "承認形（#2605・決定記録 §4）からの逸脱: {offending:?}"
+    );
+    assert_eq!(
+        allowed_all,
+        vec!["fn:fit_with_prefetch".to_string()],
+        "承認形 `impl Sequential::fit_with_prefetch` が compat/training.rs にちょうど 1 件必要"
+    );
+}
+
+#[test]
+fn facade_exposes_fit_with_prefetch_only_in_approved_shape_detects_each_category() {
+    let approved = "impl Sequential { pub fn fit_with_prefetch(&mut self) {} }";
+    let (off, ok) = scan_fit_with_prefetch_surface("compat/training.rs", approved);
+    assert!(off.is_empty(), "{off:?}");
+    assert_eq!(ok, vec!["fn:fit_with_prefetch".to_string()]);
+
+    // 別ファイル・impl 外・別型・2 件目は違反。
+    for (rel, src) in [
+        ("compat/other.rs", approved),
+        (
+            "compat/training.rs",
+            "pub fn fit_with_prefetch() {} impl Sequential {}",
+        ),
+        (
+            "compat/training.rs",
+            "impl FitConfig { pub fn fit_with_prefetch(&mut self) {} }",
+        ),
+        (
+            "compat/training.rs",
+            "impl Sequential { pub fn fit_with_prefetch(&mut self) {} pub fn fit_with_prefetch(&mut self) {} }",
+        ),
+    ] {
+        let (off, _) = scan_fit_with_prefetch_surface(rel, src);
+        assert!(!off.is_empty(), "違反を検出できていない: {rel} / {src}");
+    }
+
+    // 不採用案の各形。
+    for src in [
+        "impl Sequential { pub fn fit_prefetch(&mut self) {} }",
+        "impl Sequential { pub fn fit_loader(&mut self) {} }",
+        "impl Sequential { pub fn fit_batches(&mut self) {} }",
+        "impl FitConfig { pub fn set_fit_prefetch(self) -> Self { self } }",
+        "impl FitConfig { pub fn prefetch(self) -> Self { self } }",
+        "pub struct FitOptions;",
+        "pub enum FitOptions {}",
+        "pub type FitOptions = u8;",
+    ] {
+        let (off, _) = scan_fit_with_prefetch_surface("compat/training.rs", src);
+        assert!(!off.is_empty(), "不採用案を検出できていない: {src}");
+    }
+
+    // コメント・文字列リテラル内は無視する。
+    let masked = "// fn fit_prefetch() {}\n/// pub struct FitOptions;\nconst S: &str = \"fn fit_loader() {}\";";
+    let (off, ok) = scan_fit_with_prefetch_surface("compat/training.rs", masked);
+    assert!(off.is_empty() && ok.is_empty(), "{off:?} {ok:?}");
+}
+
+/// workspace 全体で `fn fit_with_prefetch` の宣言が
+/// `facade/src/compat/training.rs` の 1 件のみであること。
+#[test]
+fn workspace_declares_fit_with_prefetch_only_in_facade_training() {
+    let found = scan_workspace_fn_declarations(&["fit_with_prefetch"]);
+    let expected: std::collections::BTreeMap<String, usize> = [(
+        "facade/src/compat/training.rs::fit_with_prefetch".to_string(),
+        1,
+    )]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "fit_with_prefetch の fn 宣言が承認位置（facade の training.rs 内 1 件）と不一致"
+    );
+}
+
+/// `fandhe_ai` だけの import で `fit_with_prefetch` に到達でき、`f32`／`i32` の
+/// 両 target でシグネチャが成立すること（型境界の成立証明を兼ねる）。
+#[test]
+fn fit_with_prefetch_is_reachable_via_facade_only() {
+    use fandhe_ai::compat::{FitConfig, History, Loss, Optimizer, Sequential};
+    use fandhe_ai::data::PrefetchConfig;
+    use fandhe_ai::optim::SgdConfig;
+    use fandhe_ai::{AutodiffError, Tensor};
+
+    // 実行しない型検査専用関数。
+    fn _check_f32(
+        m: &mut Sequential,
+        x: &Tensor<f32>,
+        y: &Tensor<f32>,
+        p: PrefetchConfig,
+    ) -> Result<History, AutodiffError> {
+        m.fit_with_prefetch::<f32>(x, y, FitConfig::new(1, 1), p, None, &mut [], &[])
+    }
+    fn _check_i32(
+        m: &mut Sequential,
+        x: &Tensor<f32>,
+        y: &Tensor<i32>,
+        p: PrefetchConfig,
+    ) -> Result<History, AutodiffError> {
+        m.fit_with_prefetch::<i32>(x, y, FitConfig::new(1, 1), p, None, &mut [], &[])
+    }
+
+    let mut model = Sequential::new().add_linear(2, 1, 3).unwrap();
+    model
+        .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+        .unwrap();
+    let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &[3, 2]).unwrap();
+    let y = Tensor::new(vec![0.1f32, 0.2, 0.3], &[3, 1]).unwrap();
+    let h = model
+        .fit_with_prefetch(
+            &x,
+            &y,
+            FitConfig::new(2, 2),
+            PrefetchConfig::new(2, 2).unwrap(),
+            None,
+            &mut [],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(h.loss.len(), 2);
+}

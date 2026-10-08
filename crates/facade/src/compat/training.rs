@@ -22,6 +22,10 @@
 //! 受ける `fit` 入口は対象外のまま（`docs/compat-callbacks-design.md`
 //! §8 参照）。
 //!
+//! `PrefetchDataLoader` で学習バッチを先読みする入口 [`Sequential::fit_with_prefetch`]
+//! （イシュー #2605・親 #2603）は [`Sequential::fit_with_metrics`] と bit 一致する
+//! 追加入口で、他の入口との合成は提供しない。
+//!
 //! **カスタム学習 step フック（イシュー #2184・親 #2131・#2568）について**:
 //! [`Sequential::run_fit`] の既定バッチ処理を丸ごと差し替える内部
 //! フック（`CustomStepHook`）を、公開入口
@@ -59,7 +63,10 @@ use fandhe_ai_autodiff::nn::optim::OptimizerStateDict;
 use fandhe_ai_autodiff::nn::optim::amp::grad_scaler_from_state;
 use fandhe_ai_tensor_core::Element;
 use fandhe_ai_tensor_core::ScalarDType;
-use fandhe_ai_tensor_core::data::{DataLoader, DataLoaderConfig, TensorDataset};
+use fandhe_ai_tensor_core::data::{
+    DataLoader, DataLoaderConfig, Dataset, PrefetchConfig, PrefetchDataLoader, RandomSampler,
+    SequentialSampler, TensorDataset,
+};
 use std::collections::HashMap;
 
 use super::callbacks::Callback;
@@ -725,21 +732,28 @@ impl FitTarget for i32 {
 type FitBatch<T> =
     Result<(Tensor<f32>, Tensor<T>, Option<Tensor<f32>>), fandhe_ai_tensor_core::data::DataError>;
 
-/// [`Sequential::run_fit`] が使う `DataLoader` の 2 形態（サンプル別重みなし／あり）。
-/// 成分数が異なる型を 1 つのバッチ反復へ正規化し、重みなしの経路は従来の 2 成分
-/// ローダのまま保つ（イシュー #2564）。
+/// [`Sequential::run_fit`] が使うバッチ供給源の 3 形態（サンプル別重みなし／あり／
+/// prefetch 付き重みなし）。成分数が異なる型を 1 つのバッチ反復へ正規化し、
+/// 重みなしの経路は従来の 2 成分ローダのまま保つ（イシュー #2564）。
+/// `Prefetch` は `fit_with_prefetch`（イシュー #2605・親 #2603）専用で、
+/// `PrefetchDataLoader` が同一 seed・同一バッチ列を worker で先読みする
+/// （`docs/tensor-core-data-prefetch-decision.md` §4）。
 enum FitLoader<T: Element> {
     Plain(DataLoader<(TensorDataset<f32>, TensorDataset<T>)>),
     Weighted(DataLoader<(TensorDataset<f32>, TensorDataset<T>, TensorDataset<f32>)>),
+    Prefetch(PrefetchDataLoader<(TensorDataset<f32>, TensorDataset<T>)>),
 }
 
 impl<T: Element> FitLoader<T> {
-    fn iter(&self) -> Box<dyn Iterator<Item = FitBatch<T>> + '_> {
+    /// `PrefetchDataLoader::iter` が `&mut self` のため全形態で `&mut self`。
+    /// epoch ごとに呼ばれ、返したイテレータは epoch の `for` を抜けた時点で drop される。
+    fn iter(&mut self) -> Box<dyn Iterator<Item = FitBatch<T>> + '_> {
         match self {
             FitLoader::Plain(l) => Box::new(l.iter().map(|b| b.map(|(x, y)| (x, y, None)))),
             FitLoader::Weighted(l) => {
                 Box::new(l.iter().map(|b| b.map(|(x, y, w)| (x, y, Some(w)))))
             }
+            FitLoader::Prefetch(l) => Box::new(l.iter().map(|b| b.map(|(x, y)| (x, y, None)))),
         }
     }
 }
@@ -2116,6 +2130,7 @@ impl Sequential {
             &mut [],
             &[],
             None,
+            None,
         )
     }
 
@@ -2270,6 +2285,7 @@ impl Sequential {
             callbacks,
             &[],
             None,
+            None,
         )
     }
 
@@ -2330,6 +2346,79 @@ impl Sequential {
             callbacks,
             metrics,
             None,
+            None,
+        )
+    }
+
+    /// `PrefetchDataLoader`（バックグラウンド worker によるバッチ先読み）で学習バッチを
+    /// 供給する [`Self::fit_with_metrics`]（イシュー #2605・親 #2603・ルート #2499。
+    /// 公開形は `docs/tensor-core-data-prefetch-decision.md` §4 の推奨案）。
+    ///
+    /// 引数は [`Self::fit_with_metrics`] の並びに `prefetch`（[`crate::data::PrefetchConfig`]。
+    /// 値渡し）を `config` の直後へ加えたものだけで、新しい設定型・[`FitConfig`] への
+    /// フィールド追加はない。**意味論契約**: 任意の `(num_workers, prefetch_depth)` で
+    /// [`Self::fit_with_metrics`] と bit 一致する（`History`・最終パラメータ・epoch 後の
+    /// グローバル RNG 状態）。適用は学習ローダーのみで、validation／`evaluate` の
+    /// ローダーは従来どおり。
+    ///
+    /// [`Self::fit_with_train_step`]・[`Self::fit_with_weights`] とは併用できない
+    /// （合成入口は提供しない）。エラーは既存の `AutodiffError::InvalidArgument` へ
+    /// 写す（worker の起動失敗・panic を含む。失敗後もモデルの train／eval モードと
+    /// `compile` 状態は復元される）。epoch ごとに最大 `num_workers` 本のスレッドを
+    /// 生成・破棄する。
+    ///
+    /// **性能改善は保証しない**: 計測では worker 化による純粋な高速化は確認できていない
+    /// （`docs/perf/logs/data-loader-prefetch-2183/README.md`）。
+    ///
+    /// # 例
+    ///
+    /// ```
+    /// use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential};
+    /// use fandhe_ai::data::PrefetchConfig;
+    /// use fandhe_ai::optim::SgdConfig;
+    /// use fandhe_ai::Tensor;
+    ///
+    /// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+    /// model
+    ///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+    ///     .unwrap();
+    /// let x = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], &[4, 2]).unwrap();
+    /// let y = Tensor::new(vec![0.5f32, 0.7, 0.9, 1.1], &[4, 1]).unwrap();
+    /// let history = model
+    ///     .fit_with_prefetch(
+    ///         &x,
+    ///         &y,
+    ///         FitConfig::new(2, 2),
+    ///         PrefetchConfig::new(2, 2).unwrap(),
+    ///         None,
+    ///         &mut [],
+    ///         &[],
+    ///     )
+    ///     .unwrap();
+    /// assert_eq!(history.loss.len(), 2);
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub fn fit_with_prefetch<T: FitTarget>(
+        &mut self,
+        x: &Tensor<f32>,
+        y: &Tensor<T>,
+        config: FitConfig,
+        prefetch: PrefetchConfig,
+        validation: Option<(&Tensor<f32>, &Tensor<T>)>,
+        callbacks: &mut [Callback],
+        metrics: &[Metrics],
+    ) -> Result<History, AutodiffError> {
+        self.fit_with_callbacks_named(
+            "fit_with_prefetch",
+            x,
+            y,
+            config,
+            &FitWeights::default(),
+            validation,
+            callbacks,
+            metrics,
+            None,
+            Some(prefetch),
         )
     }
 
@@ -2453,6 +2542,7 @@ impl Sequential {
             callbacks,
             metrics,
             Some(hook),
+            None,
         )
     }
 
@@ -2536,6 +2626,7 @@ impl Sequential {
             callbacks,
             metrics,
             None,
+            None,
         )
     }
 
@@ -2561,6 +2652,7 @@ impl Sequential {
         callbacks: &mut [Callback],
         metrics: &[Metrics],
         custom_step: Option<&mut CustomStepHook<'_, T>>,
+        prefetch: Option<PrefetchConfig>,
     ) -> Result<History, AutodiffError> {
         // (1) 未 compile 検査・compiled の一時取り出し（借用衝突回避。
         // `run_fit` 内で `bind`〈&self 借用〉と `self.compiled`〈&mut
@@ -2919,6 +3011,7 @@ impl Sequential {
             callbacks,
             metrics,
             custom_step,
+            prefetch,
         );
 
         // ロガーのハンドル解放（イシュー #2571。全経路で必ず行う）。
@@ -2958,6 +3051,7 @@ impl Sequential {
         callbacks: &mut [Callback],
         metrics: &[Metrics],
         mut custom_step: Option<&mut CustomStepHook<'_, T>>,
+        prefetch: Option<PrefetchConfig>,
     ) -> Result<History, AutodiffError> {
         let to_invalid_arg = |e: fandhe_ai_tensor_core::data::DataError| {
             AutodiffError::InvalidArgument(format!("Sequential::{method}: {e}"))
@@ -2969,8 +3063,25 @@ impl Sequential {
             .drop_last(config.drop_last);
         // サンプル別重み（イシュー #2564）がある場合だけ第 3 成分として載せる。無い場合は
         // 従来の 2 成分ローダのまま（成分数はシャッフルの RNG 消費に影響しない）。
-        let loader = match weights.sample_weight {
-            Some(sw) => {
+        let mut loader = match (weights.sample_weight, prefetch) {
+            // prefetch は `fit_with_prefetch`（常に `FitWeights::default()`）専用で
+            // サンプル別重みとは併用しない（下の `Some(sw)` 腕は prefetch を無視する）。
+            (None, Some(cfg)) => {
+                let len = Dataset::len(&x_dataset);
+                let dataset = (x_dataset, y_dataset);
+                // sampler を先に作る（`ZeroBatchSize` → `validate` の順は `DataLoader::new` と同じ）。
+                let built = if config.shuffle {
+                    let sampler = RandomSampler::new(len, config.batch_size, config.drop_last)
+                        .map_err(to_invalid_arg)?;
+                    PrefetchDataLoader::new(dataset, sampler, cfg)
+                } else {
+                    let sampler = SequentialSampler::new(len, config.batch_size, config.drop_last)
+                        .map_err(to_invalid_arg)?;
+                    PrefetchDataLoader::new(dataset, sampler, cfg)
+                };
+                FitLoader::Prefetch(built.map_err(to_invalid_arg)?)
+            }
+            (Some(sw), _) => {
                 let mut buf: Vec<f32> = Vec::new();
                 buf.try_reserve_exact(sw.len())
                     .map_err(|_| super::alloc_failed())?;
@@ -2982,7 +3093,7 @@ impl Sequential {
                         .map_err(to_invalid_arg)?,
                 )
             }
-            None => FitLoader::Plain(
+            (None, None) => FitLoader::Plain(
                 DataLoader::new((x_dataset, y_dataset), loader_config).map_err(to_invalid_arg)?,
             ),
         };
