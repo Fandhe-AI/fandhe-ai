@@ -203,6 +203,8 @@
 //! **#2678 の更新**: 下の各モジュール記述にある「facade への公開は保留」のうち、承認形の `Var` 委譲メソッド・facade `Tape` のメソッド・
 //! 型のルート再エクスポート（`StftOptions`・`IstftOptions`・`MeshgridIndexing` は本クレートのルートから中継）は #2678 で公開済み。保留を維持したのは
 //! 損失 3 本・`gradcheck` 系・3D プーリング等（`docs/compat-api-scope.md` §5.1・§5 の適用記録〈#2678〉）。
+//! このうち損失 3 本（`hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss`）は #2602 のマージ後に #2677 で `Var` の 1 行委譲メソッドとして公開した
+//! （オプション型を取る損失 5 本とオプション型 5 つは保留のまま）。
 
 //! イシュー #2147（親 #2131）で `prod`／`logsumexp`／`any`／`all`／
 //! `norm_p`（p-ノルム）の 5 縮約を [`reduce_ops`] へ追加した。

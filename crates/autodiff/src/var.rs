@@ -4747,6 +4747,49 @@ impl<'t> Var<'t> {
         crate::loss_ops::margin_ranking_loss(self, x2, y, margin, reduction)
     }
 
+    // ---- 損失 3 本の委譲メソッド（イシュー #2677 の承認形。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::elementwise_loss_ops`／`crate::margin_focal_loss_ops` の自由関数。承認は
+    // ルート #2499 の 2026-10-07 コメント（issuecomment-6033824965）で、`Reduction` は
+    // `fandhe_ai::nn::loss::Reduction`（#2602）の 1 経路でのみ名指しする。本体は 1 行委譲に固定し、
+    // facade の正ガード（`var_phase4_ops_methods_are_thin_delegations`）が検査の迂回を拒否する。
+    // 公開形は `docs/autodiff-elementwise-loss-ops-decision.md` §7・`docs/autodiff-margin-focal-loss-ops-decision.md` §7。
+
+    /// HingeEmbedding 損失（`torch.nn.functional.hinge_embedding_loss` 相当。`self` が input、
+    /// `y` は非追跡で同 shape・厳密に ±1）。`crate::elementwise_loss_ops::hinge_embedding_loss` へ
+    /// 1 行委譲する。`reduction` は `fandhe_ai::nn::loss::Reduction`。
+    pub fn hinge_embedding_loss(
+        &self,
+        y: &Tensor<f32>,
+        margin: f32,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::elementwise_loss_ops::hinge_embedding_loss(self, y, margin, reduction)
+    }
+
+    /// SoftMargin 損失（`torch.nn.functional.soft_margin_loss` 相当。`y` は非追跡で同 shape・
+    /// 厳密に ±1）。`crate::elementwise_loss_ops::soft_margin_loss` へ 1 行委譲する。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`。
+    pub fn soft_margin_loss(
+        &self,
+        y: &Tensor<f32>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::elementwise_loss_ops::soft_margin_loss(self, y, reduction)
+    }
+
+    /// MultiLabelMargin 損失（`torch.nn.functional.multilabel_margin_loss` 相当。`target` は
+    /// `self` と同 shape のクラス添字で、行ごとに最初の負値の手前までが target 列）。
+    /// `crate::margin_focal_loss_ops::multilabel_margin_loss` へ 1 行委譲する。
+    /// `reduction` は `fandhe_ai::nn::loss::Reduction`。
+    pub fn multilabel_margin_loss(
+        &self,
+        target: &Tensor<i32>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::margin_focal_loss_ops::multilabel_margin_loss(self, target, reduction)
+    }
+
     /// トリプレットマージン損失（`torch.nn.TripletMarginLoss` 相当。`self` が anchor。
     /// イシュー #2167・#2539）。`crate::loss_ops::triplet_margin_loss` へ委譲する。
     /// テープ不一致・shape 不一致・`p < 1`・`eps` 負などは型付きエラーで拒否する。
