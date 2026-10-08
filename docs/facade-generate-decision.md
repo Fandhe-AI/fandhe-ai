@@ -2,7 +2,7 @@
 
 対応イシュー: #2191（親 #2084 と同系列の LLM 推論機能群。KV キャッシュ
 実装 #2084 の兄弟機能）。
-位置づけ: 実装（`crates/autodiff/src/generate.rs`）は完了済み。本 doc は
+位置づけ: 実装（`crates/autodiff/src/generate/mod.rs`）は完了済み。本 doc は
 その設計判断の記録と、facade（`fandhe_ai`）公開保留の多層固定・承認依頼
 用の事前設計を記す。tolerance／baseline／`Cargo.toml` 依存／ガードレール
 閾値／`docs/spec/`（正本）は一切変更しない。
@@ -26,7 +26,7 @@ K-1（autodiff 内部実装）／K-2（facade 公開）2 段構成と同型の�
   delegation-impl.md`「実装 Agent に依存クレートを自己判断で追加させ
   ない」と同種の「実装 Agent が単独で公開面を確定させない」制約）。
 - イシュー本文が挙げる配置（`crates/facade/src/inference/generate.rs`）
-  ではなく `crates/autodiff/src/generate.rs`（内部クレート）に実装した。
+  ではなく `crates/autodiff/src/generate/mod.rs`（内部クレート）に実装した。
   理由: facade 公開面自体が未承認のため、facade 側に実体を置くと
   「実装は private だが同一クレート内に存在する」という中間状態になり、
   `crates/facade/tests/api_surface.rs` の「facade 到達可能性」検査群
@@ -40,7 +40,7 @@ K-1（autodiff 内部実装）／K-2（facade 公開）2 段構成と同型の�
   `docs/kv-cache-design.md` §2 の mask 規則 (a) prefill・(b) decode に
   そのまま帰着させる設計にした（§2 参照）。
 
-## 2. API 確定（`crates/autodiff/src/generate.rs`）
+## 2. API 確定（`crates/autodiff/src/generate/mod.rs`）
 
 - `SamplingStrategy`（`#[non_exhaustive]` enum）: `Greedy`／`TopK(usize)`／
   `Temperature(f32)`。将来 nucleus（top-p）等を追加しても非破壊にする
@@ -149,7 +149,7 @@ K-1（autodiff 内部実装）／K-2（facade 公開）2 段構成と同型の�
 
 `docs/kv-cache-design.md` §10（KV キャッシュ facade 公開＝K-2 の保留
 固定）と同型の多層防御を、`generate()` に対しても構築した。以下 §7・
-§8 が、`crates/autodiff/src/generate.rs`・`crates/facade/src/lib.rs`
+§8 が、`crates/autodiff/src/generate/mod.rs`・`crates/facade/src/lib.rs`
 の doc コメントが参照する節番号である。
 
 ## 7. workspace 全体の名前インベントリを採らない理由
@@ -272,7 +272,7 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 | §8 項目 | (i) 記録上の状態 | (ii) 新たに分かった事実 | (iii) 推奨案（承認待ち） |
 |---|---|---|---|
 | 1. 配置 | 第一候補として `inference::{generate, GenerateConfig, SamplingStrategy, AutoregressiveModel}` の純再エクスポート（`nn::rnn` と同型）を挙げるのみ | facade には非公開の `mod inference;`（`crates/facade/src/lib.rs:170`）が既にあり、predict_batches のバッチ推論実装用で公開は #2581〜#2583 で保留中。`crates/facade/tests/api_surface.rs` の `facade_does_not_reexport_or_declare_predict_batches_items` は `pub mod inference` の宣言を違反として検出する。`docs/facade-predict-batches-phase-metrics-decision.md` §5 項目 4 でも `pub mod inference` への昇格は未承認。第一候補をそのまま採ると別ツリーの保留ガードと衝突する（本記録に未記載だった点） | 2 案併記。(A) predict_batches（#2581〜#2583）の決着後に `pub mod inference` へ相乗りする。(B) 別配置（例: `fandhe_ai::generate` サブモジュール）にする。推奨は (A)（#2191 本文の配置との整合・推論 API の名前空間一元化）。決定はユーザーに委ねる |
-| 2. `pub fn generate` の署名と型の公開範囲 | 「#2084 K-2 の先行承認が前提条件になりうる」と書くのみ | `AutoregressiveModel::forward_step(&self, &Tensor<i32>, &mut [KvCache])`（`crates/autodiff/src/generate.rs:223-238`）の実装には `KvCache` の名指しが要るが、`KvCache` は facade から到達できない（`KvCacheHoldDoctestGuard`〈`crates/facade/src/lib.rs`〉で保留固定。#2577〜#2580 は未完了）。`docs/kv-cache-design.md` §10.3 (a)(b) により K-2 後も `MultiheadAttention`／`forward_with_cache` は facade から到達できず、facade のみの利用者が KV キャッシュを結線する手段が無い。既存の `crates/facade/tests/generate_backend_parity.rs:23-28` は `fandhe_ai_autodiff` から直接 import しており、facade からの到達可能性の証明にはなっていない | `KvCache` の facade 公開（#2577 ツリー・`docs/kv-cache-design.md` §10.3）を先行条件として明記する。加えて `MultiheadAttention`／`forward_with_cache` の到達経路も必要 |
+| 2. `pub fn generate` の署名と型の公開範囲 | 「#2084 K-2 の先行承認が前提条件になりうる」と書くのみ | `AutoregressiveModel::forward_step(&self, &Tensor<i32>, &mut [KvCache])`（`crates/autodiff/src/generate/mod.rs` の `AutoregressiveModel::forward_step`）の実装には `KvCache` の名指しが要るが、`KvCache` は facade から到達できない（`KvCacheHoldDoctestGuard`〈`crates/facade/src/lib.rs`〉で保留固定。#2577〜#2580 は未完了）。`docs/kv-cache-design.md` §10.3 (a)(b) により K-2 後も `MultiheadAttention`／`forward_with_cache` は facade から到達できず、facade のみの利用者が KV キャッシュを結線する手段が無い。既存の `crates/facade/tests/generate_backend_parity.rs:23-28` は `fandhe_ai_autodiff` から直接 import しており、facade からの到達可能性の証明にはなっていない | `KvCache` の facade 公開（#2577 ツリー・`docs/kv-cache-design.md` §10.3）を先行条件として明記する。加えて `MultiheadAttention`／`forward_with_cache` の到達経路も必要 |
 | 3. `GenerateConfig` のフィールド公開方針 | 「5 フィールド公開か builder／getter か」を承認時判断として 2 案併記 | `generate` は `fandhe-ai-autodiff` の `pub mod generate`（`crates/autodiff/src/lib.rs:256`）で、導入コミット `bbb4ca89` は `v0.10.0` の祖先であり、5 つの pub フィールドを持つ `#[non_exhaustive]` struct は `fandhe-ai-autodiff =0.10.0` として出荷済み。autodiff 側の getter 化は同クレートの破壊的変更になる。facade 既存慣習（`RnnConfig` は private フィールド＋builder。`crates/autodiff/src/nn/rnn_stacked.rs`）とは形が異なる | autodiff の形（pub フィールド＋`#[non_exhaustive]`＋`new`／`with_*`＋`validate`）をそのまま再エクスポートする。理由は 0.10.0 を壊さないことと、`validate`（§3）が fail-closed で矛盾を拒否するため pub フィールド書き換えでも A03 の安全性が保たれること。facade newtype（builder／getter）案は追加的で非破壊だが二重管理になる |
 | 4. エラー型 | 「`AutodiffError` をそのまま出すか facade の集約方針に合わせるか」を承認時確定 | facade に統一の `Error` 型は無い。`AutodiffError` は既にルートから再エクスポート済み（`crates/facade/src/lib.rs:207`）で `#[non_exhaustive]`（`crates/autodiff/src/error.rs:19`） | 既存再エクスポートの `AutodiffError` を流用する |
 
@@ -564,7 +564,7 @@ docs 更新である。公開面は変更していない。
 いずれもトークン走査で、マクロ生成・`use … as` 別名経由の到達は範囲外（別名は承認形の完全一致が
 拒否する）。§7 の理由（`crates/self-repair` に同名のトレイトメソッドが複数あり、無関係な内部宣言を
 固定して正当な変更を落とす）を維持し、workspace 全体の `fn generate` インベントリは採らない。
-走査は facade `src/` と `autodiff/src/generate.rs` の 1 ファイルに限る。否定の保証に
+走査は facade `src/` と `autodiff/src/generate/mod.rs` の 1 ファイルに限る。否定の保証に
 `compile_fail` は使わない（stable rustdoc はエラーコードを照合しないため）。
 
 ### 18.4 利用例の所在
