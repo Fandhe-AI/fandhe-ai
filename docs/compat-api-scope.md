@@ -2516,3 +2516,49 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 - `generate_speculative` の正確な型パラメータ境界。
 
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
+
+**Phase 8 公開形（テキスト変換。承認依頼 #2896・親 #2895・Phase 8 #2872）**: 語彙 lookup 型テキスト変換（Keras `TextVectorization` 相当）の配置・公開形・判定方式の承認依頼。上の Phase 4 表（行 1〜30）・直前の `S1`〜`S3` とは別系統のため、行ラベルは `T1`〜`T5` とし他の番号空間と混ぜない（Phase 4 表の「行と保留ガードは `*HoldDoctestGuard` と 1 対 1」という前提も、保留ガード未設置のこの 5 行には当てはまらない）。以下は設計記録 `docs/facade-text-vectorization-design.md` §5・§6・§7・§8・§9・§10 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。承認根拠は範囲の異なる 2 つを別々に引く。ルート #2499 の 2026-10-07 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`）は #2618 折衷案の**範囲**（語彙 lookup 型の単語／文字レベル変換を対象内、サブワードトークナイザと Unicode 正規化表の自作を対象外）だけを承認しており、spec 変更履歴（`docs/spec/04-requirements.md:459`）は「配置・公開 API の追加は承認しない」と明記している。2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計と issue 分解の記録までである。公開（コード・`pub use`・保留ガードの反転）は承認後に別 issue（設計記録 §11 の仮番号 9）で行う。
+
+| # | 機能（由来） | 公開形（設計記録 §5・§6 の転記・未承認） | 非破壊性 | 保留ガード | 公開先 | 決定記録・承認事項の所在 |
+|---|---|---|---|---|---|---|
+| T1 | `text`（モジュール） | facade 内の新モジュール `fandhe_ai::text`。実体は `crates/facade/src/text/`。採らない案は 3 つ（コア外の新クレート・`tensor-core`・`autodiff` 配下）。`Sequential` の層にはしない（独立 struct） | 追加のみ（`fandhe-ai =0.10.0` の既存シグネチャ・意味論・`FitConfig` は不変） | 未設置（設計記録に名前なし・設置担当 issue も未確定。方針は設計記録 §6 末尾の `*HoldDoctestGuard` の正のプローブ doctest と `crates/facade/tests/api_surface.rs` の否定ガード） | 未公開（承認待ち） | 設計記録 §5・§6 |
+| T2 | `TextVectorization` | 非公開フィールドの struct（`Clone`・`Debug`。`Debug` は語彙の件数だけを出す）。メソッドは `from_vocabulary`・`adapt`・`transform`（`[B, L]` の `Tensor<i32>`）・`vocabulary`（index 0 = `""`、1 = `"[UNK]"`）・`vocabulary_size`・`config` の 6 本。メソッド名 `transform` と型名はそれ自体が承認論点 | 同上 | 同上 | 同上 | 設計記録 §6 |
+| T3 | `TextVectorizationConfig`・`Standardize`・`Split` | `TextVectorizationConfig` は `#[non_exhaustive]`・`Debug, Clone, PartialEq, Eq`。フィールドは `max_tokens`・`standardize`・`split`・`ngrams`・`output_sequence_length`・`limits`。`Default` と `with_*` ビルダ。`Standardize` は 4 値（`None`・`Lower`・`StripPunctuation`・`LowerAndStripPunctuation`、既定は `LowerAndStripPunctuation`）、`Split` は 3 値（`None`・`Whitespace`・`Character`、既定は `Whitespace`）。いずれも `#[non_exhaustive]` | 同上 | 同上 | 同上 | 設計記録 §3・§6 |
+| T4 | `TextLimits` | `#[non_exhaustive]`・`Debug, Clone, Copy, PartialEq, Eq`。フィールドは設計記録 §8 の各上限、`Default` と `with_*`。設定値が絶対上限を超えたら `Err`。API の入力上限でありガードレール閾値ではない | 同上 | 同上 | 同上 | 設計記録 §6・§8 |
+| T5 | `TextError` | facade 独自の自己完結型。`#[non_exhaustive]`・`Debug`。`AutodiffError` は使わない。variant 案は 14 個: `BatchTooLarge`・`InputTooLong`・`CorpusTooLarge`・`VocabularyTooLarge`・`VocabularyTokenTooLong`・`EmptyVocabularyToken`・`ReservedVocabularyToken`・`DuplicateVocabularyToken`・`InvalidMaxTokens`・`InvalidNgrams`・`OutputSequenceLengthTooLarge`・`TooManyDistinctTokens`・`OutputTooLarge`・`Shape(ShapeError)`。エラーには入力文字列の中身を入れない（index と長さのみ） | 同上 | 同上 | 同上 | 設計記録 §6・§13 |
+
+判定方式（設計記録 §7。未承認）:
+
+- 出力はすべて `i32` の id で浮動小数点演算・GPU カーネル・`BackendOps` を通らないため、判定は整数の完全一致（手書きの期待 id 列との `==`）とする。統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は、id が大きいと 1 ずれでも相対誤差が 1e-3 未満になり通ってしまうため適用しない。
+- tolerance は新設せず、既存の tolerance も変更しない。FMA 契約と f64 アキュムレータ契約は浮動小数点の縮約がないので対象外。
+- CUDA／Metal の実機 parity は対象がない（ホスト側のみの処理）。`#[ignore]` テストも `docs/perf/logs/` への申し送りも作らない。
+- `Var::embedding(.., Some(0))` との結線テストでは、形状が `[B, L, D]` になることとパディング位置の勾配が 0 であることを確かめる。
+
+拡張要否（設計記録 §9。推奨・未承認）: 依存追加・新規 `unsafe`・新規 `Op`／`BackendOps`／VJP はいずれも不要。別承認で必要になりうるもの: Unicode の大小文字変換、Unicode White_Space 分割、書記素クラスタ、callable、`multi_hot` 系の出力モード、`Sequential` の層化。入力上限（バッチ要素数・文字列バイト数・語彙数・n-gram 数・出力要素数等）の既定値・絶対上限は設計記録 §8 の表を正とし、本節では数値を二重管理しない。
+
+承認依頼する論点（設計記録 §10 の転記。推奨は設計記録にあるものだけ）:
+
+| 論点 | 内容 | 選択肢（設計記録にあるもの） | 推奨 |
+|---|---|---|---|
+| 1 | facade 公開面の追加（本書 §5 経路 2）と名前（`text`・`TextVectorization`・`transform`） | 上表 T1〜T5 の 1 案。別名の候補は設計記録にない | 設計記録 §6 の 1 案（未承認） |
+| 2 | 配置の確定 | facade 内部モジュール／コア外の新クレート／`tensor-core`／`autodiff` 配下（設計記録 §5） | facade 内の `fandhe_ai::text`（設計記録 §5。採らない案の理由は同節を参照） |
+| 3 | 小文字化と空白の定義 | ASCII（`to_ascii_lowercase`・`split_ascii_whitespace`）／Unicode の大小文字変換・Unicode White_Space（条件付き・別承認）（設計記録 §3） | 設計記録 §3 は ASCII を対象内、Unicode を条件付きとしている。Keras／TF の既定挙動との差は要出典確認 |
+| 4 | Keras との bit 互換を契約にするか | 契約にする（Python／TF の golden fixture と生成ツールの持ち込みが要る）／契約にしない（設計記録 §7） | 契約にしない。本ライブラリの仕様を doc で定義し、テストは手書きの期待値で行う（設計記録 §7） |
+| 5 | `TextLimits` の既定値・絶対上限 | 設計記録 §8 の表の値。`with_*` で変えられるが絶対上限は超えられない | 設計記録 §8 の表の既定値（推奨）列。数値は同節を参照先とし転記しない |
+| 6 | 出力モード `multi_hot`／`count`／`tf_idf`・`StringLookup` 相当を後で入れるか（一次資料の確認を含む） | 設計記録 §3 は第 1 段階の対象外（条件付き）とし、#2618 §9.5 にならい一次資料の確認後に別途範囲を決める、とだけ書く | 推奨なし |
+| 7 | `Sequential` の層化（`Tensor<f32>` 前提とのずれ） | 独立 struct で層化を保留／`add_text_vectorization` 等で層化（設計記録 §5） | 第 1 段階は独立 struct とし層化は保留（設計記録 §5。`Sequential` は `Tensor<f32>` 入力前提のため） |
+| 8 | callable の標準化・分割 | `Box<dyn Fn>` を公開面に加える／入れない（設計記録 §3） | 第 1 段階では入れない（設計記録 §3） |
+
+設計記録の Keras に関する記述（`standardize` の 4 値・`max_tokens` の数え方・n-gram の順・既定挙動）は一次資料で未確認の「要出典確認」であり、本節でも事実として断定しない。
+
+設計記録に形が書かれていない点（承認時に決めてほしい事項。本節は推奨を作らない）:
+
+- 保留ガードの名前と、どの issue で設置するか（設計記録 §6 は方針のみ。#2897〜#2903 はいずれも `pub(crate)` の内部実装で、ガードを置く issue は未確定）。
+- `TextLimits` の各フィールド名（設計記録 §6 は「§8 の各上限」とだけ記録）。
+- 各 `with_*` ビルダのメソッド名。
+- `Standardize`・`Split` の derive 一式（設計記録 §6 は `Default` だけを記録）。
+- `TextError` の各 variant のフィールドの型。
+- `Standardize` などを `fandhe_ai::text` 配下だけに置くか、クレートルートにも置くか。
+- `transform` という名前の確定（論点 1 に含まれる）。
+
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
