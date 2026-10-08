@@ -52,3 +52,7 @@ REQ-2 一致するはず。新しい tolerance／baseline の導入はない。�
 依存の丸め等で不一致が生じる場合）は本 README の「期待結果」を更新し、
 不一致の実測を型付き findings として PR へ記録すること（tolerance の
 単独緩和は行わない。`.claude/rules/coding-rust.md`）。
+
+## facade 公開経路について（#2580 追記）
+
+facade の `Tape::stateful_attention_forward` は `StatefulAttention::forward` への 1 行委譲で、数値経路は K-1 から変わらない。上記の測定コマンドと記入方針がそのまま有効で、新しい tolerance・baseline・実測値は追加していない。
