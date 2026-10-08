@@ -327,13 +327,13 @@ pub mod shape_view_ops;
 pub mod softmin_threshold_ops;
 // pos_weight 付き BCEWithLogits・HingeEmbedding・SoftMargin・GaussianNLL（`bce_with_logits_loss_with`・
 // `hinge_embedding_loss`・`soft_margin_loss`・`gaussian_nll_loss`。イシュー #2652）。新規 Op 4 種 +
-// ホスト参照実装。facade への公開は保留（承認依頼 #2677・公開 #2678。
-// `docs/autodiff-elementwise-loss-ops-decision.md`）。
+// ホスト参照実装。`Var` の委譲メソッドとオプション型は #2677・#2854 で facade 公開済み（本モジュール自体は
+// 再エクスポートしない。`docs/autodiff-elementwise-loss-ops-decision.md`）。
 pub mod elementwise_loss_ops;
 // MultiMargin・MultiLabelMargin・MultiLabelSoftMargin・sigmoid focal loss（`multi_margin_loss`・
 // `multilabel_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss`。イシュー #2653）。
-// 新規 Op 4 種 + ホスト参照実装。facade への公開は保留（承認依頼 #2677・公開 #2678。
-// `docs/autodiff-margin-focal-loss-ops-decision.md`）。
+// 新規 Op 4 種 + ホスト参照実装。`Var` の委譲メソッドとオプション型は #2677・#2854 で facade 公開済み
+// （本モジュール自体は再エクスポートしない。`docs/autodiff-margin-focal-loss-ops-decision.md`）。
 pub mod margin_focal_loss_ops;
 // 結合 4 演算（`merge_concatenate`・`merge_add`・`merge_multiply`・`merge_average`。
 // イシュー #2666）。既存 Op の合成のみ。facade への公開は保留（承認依頼 #2677・公開 #2679。

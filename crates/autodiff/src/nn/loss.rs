@@ -32,6 +32,10 @@
 //!   の薄いラッパー。PyTorch `nn.CTCLoss` 相当）を追加した。上記と同じ
 //!   「自由関数を呼ぶだけ」パターン。`Var::ctc_loss` は #2540 で facade 公開済み
 //!   （本構造体自体は #2602 で `fandhe_ai::nn::loss` へ公開済み）。
+//! - #2854（親イシュー #2852）で、`Var` の委譲メソッド 5 本（`bce_with_logits_loss_with` ほか）が取る
+//!   オプション型 5 つ（`BceWithLogitsOptions`・`GaussianNllOptions`・`MultiMarginOptions`・
+//!   `MultiLabelSoftMarginOptions`・`SigmoidFocalLossOptions`）を、既存のオプション型 4 つと同じ本モジュール
+//!   経由の 1 経路へ `pub use` した（実体は `elementwise_loss_ops`／`margin_focal_loss_ops`）。
 //!
 //! `Reduction`（mean/sum 縮約）は MSE・CrossEntropy の両損失で共有する
 //! ため `crate::var::Reduction`（#190 が定義）をそのまま再利用し、
@@ -43,6 +47,13 @@ use crate::error::AutodiffError;
 use crate::loss_ops;
 pub use crate::loss_ops::{
     CrossEntropyOptions, CtcLossOptions, PoissonNllOptions, TripletMarginOptions,
+};
+// #2854: オプション型 5 つ（実体は `elementwise_loss_ops`／`margin_focal_loss_ops`）を、既存 4 型と同じ
+// この 1 経路へ集約する。facade は `fandhe_ai_autodiff::nn::loss::` 接頭辞だけから再エクスポートする
+// （`docs/facade-nn-loss-structs-exposure-decision.md` §11.2）。
+pub use crate::elementwise_loss_ops::{BceWithLogitsOptions, GaussianNllOptions};
+pub use crate::margin_focal_loss_ops::{
+    MultiLabelSoftMarginOptions, MultiMarginOptions, SigmoidFocalLossOptions,
 };
 pub use crate::var::Reduction;
 use crate::var::Var;

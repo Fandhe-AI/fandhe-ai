@@ -150,5 +150,5 @@ CUDA／Metal の `#[ignore]` テスト（計 4 件）は本実行環境から実
 ## 14. 保留していた損失とオプション型の公開形（#2853）
 
 - §13 で保留していた `multi_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss` とオプション型 `MultiMarginOptions`・`MultiLabelSoftMarginOptions`・`SigmoidFocalLossOptions` の公開形を、ルート #2499 の 2026-10-08 コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）の承認範囲（オプション型は `fandhe_ai::nn::loss` へ再エクスポートし、損失は `Var` の 1 行委譲にする）に沿って決めた。
-  パス・完全なシグネチャ・構築方法の確認は `docs/facade-nn-loss-structs-exposure-decision.md` §11 を正とし、本節では書き写さない。公開（コード・ガード）は #2854 で行い、**本節の時点では保留のまま**。
+  パス・完全なシグネチャ・構築方法の確認は `docs/facade-nn-loss-structs-exposure-decision.md` §11 を正とし、本節では書き写さない。公開（コード・ガード）は #2854 で行い、**`Var` の 4 本とオプション型 3 つは公開済み**（本節の記述時点では保留だった。モジュール `margin_focal_loss_ops` は再エクスポートしないまま）。
 - モジュール `margin_focal_loss_ops` は引き続き再エクスポートしない。`Reduction` は `fandhe_ai::nn::loss::Reduction` の 1 経路のまま。

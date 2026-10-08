@@ -545,7 +545,7 @@ P1」）を受けた是正である。
    受け入れ基準の改定
 2. 本リポジトリのユーザー承認を得たうえでの Issue 起票・本文書の更新
 
-### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は保留継続〉。保留は行 19・20 のオプション型を取る 5 本と 5 型〈公開形は #2853 で記録済み・公開は #2854〉・行 30 の gradcheck〈シグネチャは #2846 で記録済み・#2847 で公開済み〉）
+### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本・オプション型を取る 5 本と 5 型〈#2854 で公開済み〉・行 30 の gradcheck〈#2847 で公開済み〉は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は保留継続〉）
 
 **本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
 （内部実装＋保留ガードまで先行・公開は承認後）で内部クレートに実装した機能の公開形について、各決定記録に
@@ -564,8 +564,8 @@ P1」）を受けた是正である。
   本節の #2677 の適用記録〈損失 3 本〉で公開した**）、行 30 の `Tape::gradcheck` と
   `GradcheckOptions`／`GradcheckReport`（決定記録に facade シグネチャが書かれていなかった。→ #2846 で決定記録 §11 に記録済み・公開は #2847）、行 12〜15 の全体（承認の対象外。→ 公開形は #2849 で各決定記録 §12 に記録済み。**行 12・13 の `Var` 委譲は #2850、行 14・15 の `Var` 委譲（と `SpectralNormState` の再エクスポート）は #2851 で公開済み〈本節末尾の各適用記録〉**）。
   **2026-10-08 追記（#2853）**: ルート #2499 のコメント（issuecomment-6052732061）で、オプション型 5 つは `fandhe_ai::nn::loss` へ再エクスポートし、損失 5 本は `Var` の 1 行委譲にする方向が承認され、その形（パス・完全なシグネチャ・構築確認）を `facade-nn-loss-structs-exposure-decision.md` §11 に記録した。公開は #2854 で、それまでは未公開のまま保留ガードを維持する。
-  現在も保留なのは、行 19・20 のオプション型を引数に取る損失 5 本（`bce_with_logits_loss_with`・`gaussian_nll_loss`・`multi_margin_loss`・
-  `multilabel_soft_margin_loss`・`sigmoid_focal_loss`）とオプション型 5 つ（承認の対象外）、`gradcheck` 系のうちモジュール名・裸の自由関数（`Tape::gradcheck` と型 2 つは #2847 で公開済み）と、行 12〜15 の層化（`nn::*` 層型・`Sequential::add_*`・行 15 の結線方式。`Var` 委譲は #2850・#2851 で公開済み）。`norm_except_dim`・`fold_ops` 等のモジュール再エクスポートも非公開のまま。
+  **2026-10-08 追記（#2854）**: 上の 5 本とオプション型 5 つを、記録の形（§11）のまま公開した（本節末尾の #2854 の適用記録）。
+  現在も保留なのは、`gradcheck` 系のうちモジュール名・裸の自由関数（`Tape::gradcheck` と型 2 つは #2847 で公開済み）、行 12〜15 の層化（`nn::*` 層型・`Sequential::add_*`・行 15 の結線方式。`Var` 委譲は #2850・#2851 で公開済み）、およびモジュール `elementwise_loss_ops`／`margin_focal_loss_ops` の再エクスポートと `Tape`／`Tensor` 上の同名メソッド。`norm_except_dim`・`fold_ops` 等のモジュール再エクスポートも非公開のまま。
 - 公開時は保留ガードと `api_surface.rs` の否定ガードを承認形の正ガードへ反転する（#2679 で実施した型は §5 の適用記録）。
 - 行 12〜15 のように層化（`nn::MaxPool3d` 等と `Sequential::add_*`）が未実装の機能は、その旨を行に書いた。
 - 公開形の類型は 3 つ（`Var` の委譲メソッド／モジュール再エクスポート／`Sequential::add_*`）。どれにも当てはまらない推奨（facade `Tape` の委譲メソッド・facade 独自の薄いラッパー）は、決定記録の表現のまま書いた。
@@ -592,8 +592,8 @@ P1」）を受けた是正である。
 | 16 | 可変長系列（#2647） | モジュール再エクスポート（`fandhe_ai::nn::rnn` へ `PackedSequence`・出力型 4 種・自由関数 8 本を `pub use`）。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ† | `PackedSequenceHoldDoctestGuard` | #2679 で公開済み（`nn::rnn`。ガードは未承認経路〈`Var`／`Tape` 委譲等〉のプローブへ縮小） | `autodiff-packed-sequence-decision.md` §7（再エクスポート対象一覧・`PackedSequence::new` の扱い等が承認事項） |
 | 17 | 活性化 5 種（#2649） | `Var::selu`／`celu`／`softsign`／`hardsigmoid`／`log_sigmoid` の委譲 5 本（#2678）＋`Sequential::add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid`（#2679） | 追加のみ | `ActivationScalarOpsHoldDoctestGuard` | #2678・#2679 で公開済み（`Var` 委譲は #2678、`Sequential::add_*` は #2679） | `autodiff-activation-scalar-ops-decision.md` §7 |
 | 18 | Softmin・Tanhshrink・Threshold・RReLU（#2650） | `Var::softmin`／`tanhshrink`／`threshold`／`rrelu` の委譲 4 本（#2678）＋`Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu`（#2679）。`rrelu_with_noise` は公開しない | 追加のみ | `SoftminThresholdOpsHoldDoctestGuard` | #2678・#2679 で公開済み（`Var` 委譲は #2678、`Sequential::add_*` は #2679。`rrelu_with_noise` は公開しない） | `autodiff-softmin-threshold-ops-decision.md` §7 |
-| 19 | 要素ごと損失 4 種（#2652） | `Var::bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss` の委譲 4 本。オプション型 2 つと `Reduction` の名指しは別論点（#2600 ツリー側の記録） | 追加のみ | `ElementwiseLossOpsHoldDoctestGuard` | オプション型 2 つの公開パスは `fandhe_ai::nn::loss`・シグネチャは `facade-nn-loss-structs-exposure-decision.md` §11 に記録済み（#2853。公開は #2854）。`hinge_embedding_loss`・`soft_margin_loss` は #2677 の適用記録で公開済み（`Var` 委譲 2 本。`Reduction` は `fandhe_ai::nn::loss::Reduction`。ガードは `bce_with_logits_loss_with`・`gaussian_nll_loss`・オプション型 2 つ・モジュールのプローブへ縮小）。他 2 本・オプション型は承認の対象外で保留 | `autodiff-elementwise-loss-ops-decision.md` §7・§14、`facade-nn-loss-structs-exposure-decision.md` §11 |
-| 20 | マージン・focal 損失 4 種（#2653） | `Var::multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` の委譲 4 本。オプション型 3 つと `Reduction` の名指しは別論点（同上） | 追加のみ | `MarginFocalLossOpsHoldDoctestGuard` | オプション型 3 つの公開パスは `fandhe_ai::nn::loss`・シグネチャは `facade-nn-loss-structs-exposure-decision.md` §11 に記録済み（#2853。公開は #2854）。`multilabel_margin_loss` は #2677 の適用記録で公開済み（`Var` 委譲 1 本。同上）。ガードは他 3 本・オプション型 3 つ・モジュールのプローブへ縮小。他 3 本・オプション型は承認の対象外で保留 | `autodiff-margin-focal-loss-ops-decision.md` §7・§14、`facade-nn-loss-structs-exposure-decision.md` §11 |
+| 19 | 要素ごと損失 4 種（#2652） | `Var::bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss` の委譲 4 本。オプション型 2 つと `Reduction` の名指しは別論点（#2600 ツリー側の記録） | 追加のみ | `ElementwiseLossOpsHoldDoctestGuard` | オプション型 2 つの公開パスは `fandhe_ai::nn::loss`・シグネチャは `facade-nn-loss-structs-exposure-decision.md` §11 に記録（#2853）。`hinge_embedding_loss`・`soft_margin_loss` は #2677、`bce_with_logits_loss_with`・`gaussian_nll_loss` とオプション型 2 つは #2854 の適用記録で公開済み（`Var` 委譲 4 本。`Reduction` は `fandhe_ai::nn::loss::Reduction`）。ガードはモジュール `elementwise_loss_ops` の再エクスポートと `Tape`／`Tensor<f32>` 上の同名メソッドの拒否だけへ縮小。この 2 点は保留 | `autodiff-elementwise-loss-ops-decision.md` §7・§14、`facade-nn-loss-structs-exposure-decision.md` §11 |
+| 20 | マージン・focal 損失 4 種（#2653） | `Var::multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` の委譲 4 本。オプション型 3 つと `Reduction` の名指しは別論点（同上） | 追加のみ | `MarginFocalLossOpsHoldDoctestGuard` | オプション型 3 つの公開パスは `fandhe_ai::nn::loss`・シグネチャは `facade-nn-loss-structs-exposure-decision.md` §11 に記録（#2853）。`multilabel_margin_loss` は #2677、`multi_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss` とオプション型 3 つは #2854 の適用記録で公開済み（`Var` 委譲 4 本。同上）。ガードはモジュール `margin_focal_loss_ops` の再エクスポートと `Tape`／`Tensor<f32>` 上の同名メソッドの拒否だけへ縮小。この 2 点は保留 | `autodiff-margin-focal-loss-ops-decision.md` §7・§14、`facade-nn-loss-structs-exposure-decision.md` §11 |
 | 21 | Rprop・ASGD（#2655） | `fandhe_ai::optim`（`crates/facade/src/optim.rs`）へ `Asgd`・`AsgdConfig`・`Rprop`・`RpropConfig` の素の再エクスポート | 追加のみ | `OptimizerRpropAsgdHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-rprop-asgd-decision.md` §8 |
 | 22 | Adafactor・Lion（#2656） | `fandhe_ai::optim` へ `Adafactor`・`AdafactorConfig`・`Lion`・`LionConfig` の素の再エクスポート | 追加のみ | `OptimizerAdafactorLionHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-adafactor-lion-decision.md` §8 |
 | 23 | SWA（#2658） | モジュール公開（`fandhe_ai::optim`）。`SwaLr`・`SwaAnneal` は純再エクスポート、`AveragedModel` は facade 独自の薄いラッパー（内部 `nn::Module` を露出しないため）。fit への結線は含めない | 追加のみ† | `SwaHoldDoctestGuard` | #2679 で公開済み（`optim`。ガードは `fit` 結線〈`FitConfig`／`Sequential` のメソッド〉のプローブへ縮小） | `autodiff-swa-decision.md` §7（承認事項 5 件） |
@@ -609,7 +609,7 @@ P1」）を受けた是正である。
 
 - 行 15: `SpectralNormState` の公開位置と、`norm_except_dim` の置き場所（`Tensor` 上のメソッド／自由関数の再エクスポート／公開しない）。→ #2849 で確定（`autodiff-lrn-weight-reparam-decision.md` §12）。
 - 行 14: `Var::unfold` の名前（`torch.Tensor.unfold` と別演算になる）と引数順（crate 内の `conv2d` 系に揃えるか PyTorch に揃えるか）。→ #2849 で確定（`autodiff-fold-unfold-decision.md` §12）。
-- 行 19・20: オプション型（`BceWithLogitsOptions`・`GaussianNllOptions`・`MultiMarginOptions` 等）と `Reduction` を公開面で名指しするか。（#2678 の結果: 承認は 3 本のみで、`Reduction` の公開経路〈#2602〉が未整備のため 3 本とも保留。**#2853 で決定**: オプション型は `fandhe_ai::nn::loss` の 1 経路で名指しする。形は `facade-nn-loss-structs-exposure-decision.md` §11。）
+- 行 19・20: オプション型（`BceWithLogitsOptions`・`GaussianNllOptions`・`MultiMarginOptions` 等）と `Reduction` を公開面で名指しするか。（#2678 の結果: 承認は 3 本のみで、`Reduction` の公開経路〈#2602〉が未整備のため 3 本とも保留。**#2853 で決定・#2854 で公開**: オプション型は `fandhe_ai::nn::loss` の 1 経路で名指しする。形は `facade-nn-loss-structs-exposure-decision.md` §11。）
 - 行 12〜15 の層化と、行 15 の parametrization の結線方式（重みの置換か層ラッパーか）。
 
 **公開先の要確認（§5 の適用記録と、機能の性質が食い違う点。記録は書き換えていない）**
@@ -681,6 +681,28 @@ P1」）を受けた是正である。
   `phase4_held_items_remain_unexposed` を保留の 5 本・5 型の否定（`var.rs` に `fn` なし、走査ガードが検出）に差し替えた。
 - テスト: `crates/facade/tests/loss_var_delegates.rs`（`fandhe_ai` の import だけで 3 本の到達・シグネチャ・forward／backward の自由関数との bit 一致・閉形式値・不正引数の型付きエラー）、
   `crates/facade/src/nn/loss.rs` のモジュール doc に facade 単独で完結する doctest。**実機（CUDA／Metal）の parity は既存の `*_loss_ops_backend_parity.rs`（`#[ignore]`）のまま未実測**（新規 GPU カーネルなし）。
+
+**適用記録（経路 2。イシュー #2854・親 #2852。オプション型を取る損失 5 本の公開）**: ルート #2499 の 2026-10-08 所有者コメント
+（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061。「オプション型は `fandhe_ai::nn::loss` へ再エクスポートし、損失は `Var` の 1 行委譲にする」）と、その形を書いた
+`facade-nn-loss-structs-exposure-decision.md` §11（#2853）のとおりに公開した。承認の範囲は記録の形に限り、それ以上は主張しない。
+`fandhe-ai =0.10.0` の公開 API を壊さない追加のみで、依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
+
+- 公開したオプション型 5 つ（`fandhe_ai::nn::loss::<型名>` の 1 経路のみ。別名・glob・crate ルート・`nn` 直下には出していない）:
+  `BceWithLogitsOptions`・`GaussianNllOptions`・`MultiMarginOptions`・`MultiLabelSoftMarginOptions`・`SigmoidFocalLossOptions`。
+  内部は `crates/autodiff/src/nn/loss.rs` の `pub use` 2 文で既存 4 型と同じ経路へ集約し、facade は `fandhe_ai_autodiff::nn::loss::` 接頭辞だけから再エクスポートした（`fandhe_ai::nn::loss` は 19 名から 24 名）。
+- 公開した `Var` の 1 行委譲メソッド 5 本（`crates/autodiff/src/var.rs`。新規 `Op`・カーネル・`unsafe` なし）:
+  `bce_with_logits_loss_with(&self, target: &Var<'t>, reduction: Reduction, options: &BceWithLogitsOptions)`（**この 1 本だけ `reduction` → `options` の順**）・
+  `gaussian_nll_loss(&self, target: &Var<'t>, var: &Var<'t>, options: &GaussianNllOptions, reduction: Reduction)`・
+  `multi_margin_loss(&self, target: &Tensor<i32>, options: &MultiMarginOptions, reduction: Reduction)`・
+  `multilabel_soft_margin_loss(&self, target: &Tensor<f32>, options: &MultiLabelSoftMarginOptions, reduction: Reduction)`・
+  `sigmoid_focal_loss(&self, target: &Tensor<f32>, options: &SigmoidFocalLossOptions, reduction: Reduction)`。戻り値はすべて `Result<Var<'t>, AutodiffError>`。
+- 保留を維持したもの（決定記録 §11.6）: モジュール `elementwise_loss_ops`／`margin_focal_loss_ops` の再エクスポート、`Tape`／`Tensor` 上の同名メソッド、裸の自由関数、nn 構造体、`compat::Loss` の variant。
+- ガード: `ElementwiseLossOpsHoldDoctestGuard`・`MarginFocalLossOpsHoldDoctestGuard` は構造体を残したまま、公開済みの型・`Var` メソッドのプローブを外し、モジュール名と `Tape`／`Tensor<f32>` 上の同名メソッドの拒否だけへ縮小した。
+  `api_surface.rs` では `NN_LOSS_NAMES` を 24 名へ、`PHASE4_VAR_EXPECTED_BODIES` を 81 件へ（5 本の本体を固定）、2 系統の宣言場所インベントリの `var.rs` を 4 名各 1 件へ、固定文言 2 つを新しい doctest 本文へ更新し、
+  `*_IDENTS` からオプション型名を外した（独自宣言の禁止〈`*_TYPE_NAMES`〉とモジュール経由の迂回拒否は維持し、自己テストに新 5 型の違反例・非違反例を追加）。
+- テスト: `crates/facade/tests/loss_var_delegates.rs`（`fandhe_ai` の import だけで 5 本の到達・シグネチャ・forward／backward の自由関数との bit 一致〈オプション既定値と非既定値・`Mean`／`Sum`〉・閉形式値・不正オプションの型付きエラー）、
+  `nn_loss_items_are_reachable_via_facade_only`、`crates/facade/src/nn/loss.rs` の facade 単独 doctest。glob 衝突は `cargo test -p fandhe-ai --doc` で確認した。
+  **実機（CUDA／Metal）の parity は既存の `*_loss_ops_backend_parity.rs`（`#[ignore]`）のまま**（新規 GPU カーネルなし）。
 
 **適用記録（経路 1 の適用例。イシュー #1591）**: 本改定（1／2 節の
 Tier 1／Tier 2 再編）は、実装リポ ルート #1570 のユーザー指示 → spec 提案
