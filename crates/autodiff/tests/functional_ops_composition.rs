@@ -394,8 +394,17 @@ fn c5_non_contiguous_closure_output() {
     };
     run_case(
         &c,
-        |_, s| Ok(s.transpose(0, 1)?.tanh()),
-        |_, x| Ok(x.transpose(1, 2)?.tanh()),
+        // transpose を最後に適用し、戻り値を非 contiguous に保つ（vmap 内の `contiguous()` が
+        // 恒等経路にならず `Op::Contiguous` の vjp／hvp を通る）。
+        |_, s| {
+            let out = s.tanh().transpose(0, 1)?;
+            assert!(
+                !out.value().is_contiguous(),
+                "クロージャ出力が非 contiguous であること"
+            );
+            Ok(out)
+        },
+        |_, x| x.tanh().transpose(1, 2),
         sum_loss,
     );
 }
