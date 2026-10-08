@@ -186,3 +186,9 @@ impl TextVectorization {
 - `docs/tokenizer-non-target-spec-proposal.md` §9.2〜§9.7、`docs/compat-api-scope.md` §5、`docs/facade-speculative-decoding-batching-design.md`（書式の先例）
 - ソース: §4 の各パス
 - Keras `TextVectorization` の公式ドキュメント（<https://keras.io/api/layers/preprocessing_layers/text/text_vectorization/>）: 本記録の作成では参照できていない。Keras の既定値・index 予約・`max_tokens` の数え方・n-gram の順に関する記述はすべて「要出典確認」であり、断定しない。
+
+## 15. 承認依頼の所在（イシュー #2896・親 #2895）
+
+- §5 の配置・§6 の公開形・§7 の判定方式・§8 の上限（参照のみ）・§9 の拡張要否・§10 の論点 1〜8 は、`docs/compat-api-scope.md` §5.1 末尾の「Phase 8 公開形（テキスト変換。承認依頼 #2896）」ブロックへ転記した（行ラベル `T1`〜`T5`）。本記録 §1〜§14 の内容は変えていない。
+- §11 の仮番号と実 issue の対応（親 #2895 の sub-issues で確認）: 1→#2896・2→#2897・3→#2898・4→#2899・5→#2900・6→#2901・7→#2902・8→#2903。9（facade 公開。承認後）・10（周辺 docs）は未起票。
+- 承認の状況: §5・§6・§7・§8 の既定値と論点 1〜8 はすべて未承認のまま。承認は実装 Agent が代行しない。保留ガードの名前と設置担当、`TextLimits` のフィールド名、`with_*` のメソッド名、各型の derive、`TextError` の variant のフィールド型などは未定で、承認時の決定事項として同ブロックに列挙した。
