@@ -3,7 +3,7 @@
 //!
 //! # 役割
 //!
-//! speculative decoding（#2886 の `generate::speculative`）では、target が
+//! speculative decoding（`generate::speculative`。#2886）では、target が
 //! draft の K トークンを 1 回の forward でまとめて検証する。この forward で
 //! target／draft 双方の [`KvCache`] が K トークン分進むため、棄却位置より
 //! 後ろをキャッシュから外す必要がある。本モジュールは設計 §4.1 の**案 (i)**
@@ -39,12 +39,6 @@
 //!   消費され使い回せない
 //! - B = 1 の制限は課さない（巻き戻し自体はバッチに依存しない。入口検査は
 //!   設計 §7 の順序で #2886 が行う）
-//!
-//! # 暫定の `dead_code` 抑止
-//!
-//! #2886 が呼び出すまで非テストビルドでは未使用になるため、`mod.rs` の
-//! `mod kv_rewind;` 宣言に `expect(dead_code)` を付けている。呼び出し開始後は
-//! `unfulfilled_lint_expectations` が落ちるので、**#2886 でこの属性を外す**こと。
 
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 

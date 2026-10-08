@@ -50,9 +50,9 @@
 //!
 //! # サブモジュール配置と可視性
 //!
-//! 本モジュールは `generate/mod.rs` のディレクトリ形式で、今後の
-//! `generate::speculative`（speculative decoding）・`generate::scheduler`
-//! （連続バッチング）が検証・サンプリングの非公開ヘルパー
+//! 本モジュールは `generate/mod.rs` のディレクトリ形式で、
+//! `generate::speculative`（speculative decoding。#2886）と今後の
+//! `generate::scheduler`（連続バッチング）が検証・サンプリングの非公開ヘルパー
 //! （`validate_forward_step_output`・`greedy_argmax`・`sample_step` 等）を
 //! 再利用する前提の配置である（`docs/facade-speculative-decoding-batching-design.md`
 //! §3・§4）。
@@ -73,20 +73,15 @@ use fandhe_ai_tensor_core::{ShapeError, Tensor};
 use crate::error::AutodiffError;
 use crate::nn::KvCache;
 
-// #2886（speculative.rs）が呼び出すまでの暫定。呼び出し後は
-// `unfulfilled_lint_expectations` が落ちて除去が強制される（#2885）。
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "#2886（speculative.rs）が呼び出すまでの暫定。呼び出し後は unfulfilled_lint_expectations で除去が強制される"
-    )
-)]
 mod kv_rewind;
 
 // 連続バッチングのスケジューラ（第 1 段階。イシュー #2888）。autodiff 内部の公開に
 // 留め facade へは再エクスポートしない（承認待ち。`docs/compat-api-scope.md` §5.1 S3）。
 pub mod scheduler;
+
+/// greedy 版 speculative decoding（#2886）。autodiff 内部の公開に留め、facade へは
+/// 再エクスポートしない（承認待ち。`docs/compat-api-scope.md` §5.1 S1）。
+pub mod speculative;
 
 /// 次トークンの選び方（イシュー #2191 受入条件 2）。`#[non_exhaustive]`
 /// は他の `AutodiffError` 系列挙型と同じ理由（公開 API 非破壊。
