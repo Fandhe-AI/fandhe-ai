@@ -343,6 +343,8 @@ pub mod margin_focal_loss_ops;
 // 結合 4 演算（`merge_concatenate`・`merge_add`・`merge_multiply`・`merge_average`。
 // イシュー #2666）。既存 Op の合成のみ。facade への公開は保留（承認依頼 #2677・公開 #2679。
 // `docs/facade-functional-api-decision.md` §17）。
+#[cfg(test)]
+mod double_vjp_feasibility_tests;
 pub mod merge_ops;
 pub mod stat_reduce_ops;
 mod tape;
