@@ -676,7 +676,7 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 - `KvCache`／`StatefulAttention` の `pub fn` 集合の凍結（承認記録に形が無いため未固定）
 - K-3（デバイス常駐）、`sdpa_compose` 置換、padding mask
 - CUDA／Metal 実機 parity は未実測（申し送り先 `docs/perf/logs/kv-cache-2084/README.md`）
-- `generate()` の公開は #2575／#2576
+- `generate()` の公開は #2575／#2576 → #2575 で公開・#2576 で正ガード仕上げ済み（`facade-generate-decision.md` §17・§18）
 
 ### 15.6 変更していないもの
 

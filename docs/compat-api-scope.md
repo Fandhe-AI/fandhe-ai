@@ -1205,7 +1205,7 @@ KV キャッシュ（K-2）を決定記録 §11.4（P1〜P4）の確定形どお
 Tier 1／Tier 2 表（§1.2・§1.3）への行追加は行っていない（#2822・#2826 の先例と同じ）。
 保留継続: `MultiheadAttention`・`MultiheadAttentionVars`・`forward_with_cache` の公開、
 `compat::Sequential::add_stateful_attention`、`StatefulAttention::new(mha)`／`mha()` の扱い（§11.4 P2 の残課題）、
-K-3（デバイス常駐キャッシュ）、`sdpa_compose` 置換、padding mask、`generate()` の公開（#2575／#2576）。
+K-3（デバイス常駐キャッシュ）、`sdpa_compose` 置換、padding mask、`generate()` の公開（#2575／#2576 → #2575 で公開済み。§5 の generate 適用記録を参照）。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec` は不変。CUDA／Metal 実機 parity は未実測で、
 申し送り先は `docs/perf/logs/kv-cache-2084/README.md`（新規カーネルなし）。
 詳細は `docs/kv-cache-design.md` §14・§15。
@@ -1623,6 +1623,8 @@ doctest）と `crates/facade/tests/api_surface.rs` の 4 テストで多層
 ガードは「承認形だけを許す」正ガードへ反転した（`facade_declares_rng_distributions_only_as_approved_root_delegations`）。`RngDistributionsHoldDoctestGuard` は `Var`／`Tensor<f32>` への同名メソッド追加を検出するプローブだけを残す部分反転。
 `Cargo.toml`／`Cargo.lock`・依存・`unsafe`・tolerance／baseline・`docs/spec/` は不変。詳細は `docs/rng-distributions-generator-decision.md` §5.2。
 
+> **更新（イシュー #2575・#2576）**: 下記の保留は #2575 で承認形どおり公開済みとなり、保留ガード（`GenerateHoldDoctestGuard` と `api_surface.rs` の保留系テスト）は削除・正ガードへ反転済み。下記は着手時点（#2191）の履歴であり、現行の公開形・ガードは直後の適用記録を正とする。
+
 **保留記録（イシュー #2191・親 #2084）**: 自己回帰生成ループ（3 戦略・
 KV キャッシュ結線・seed 決定性）の facade 公開（`pub fn generate` 等
 の署名・エラー型・`GenerateConfig` 型）は未承認のまま保留した。実装
@@ -1631,6 +1633,12 @@ KV キャッシュ結線・seed 決定性）の facade 公開（`pub fn generate
 doctest）とトークン方式の否定ガード（`facade_does_not_reexport_or_
 declare_generate_items` 等）で多層固定している。詳細は
 `docs/facade-generate-decision.md` §0・§1 を参照。
+
+**適用記録（経路 2。イシュー #2575・#2576・親 #2573・ルート #2499 のコメント〈決定記録 §13.2 推奨案・§13.5 選択肢 A の承認。`issuecomment-6033824965`〉に基づく）**:
+自己回帰生成ループを決定記録（`docs/facade-generate-decision.md` §13.2・§17）の確定形どおり公開した（実施は #2575・PR #2839）。公開名は `fandhe_ai::inference::{AutoregressiveModel, GenerateConfig, SamplingStrategy, generate}` の 4 件で、`inference/mod.rs` の純再エクスポート 1 文。エラー型は既存の `AutodiffError` を流用し、facade newtype・`Tape::generate`・`Sequential::generate` は作っていない。新しい `pub mod` はなく、`fandhe-ai =0.10.0` に対して追加のみ。
+ガード: #2575 で `GenerateHoldDoctestGuard` と保留系テスト群（走査 2 件・自己テスト・doctest 検査 2 件・固定文言）を削除し、`facade_exposes_generate_items_only_in_approved_shape`（＋自己テスト）・`generate_items_are_reachable_via_facade_inference_path` を導入。#2576 で `generate_usage_doctests_are_present_and_compiled`・`inference_module_reexports_exactly_expected_surface`・`generate_public_shape_matches_approved_inventory`（＋自己テスト `generate_public_shape_inventory_detects_each_category`）・`generate_public_field_types_and_variants_are_pinned` を追加した（全数インベントリ・doctest 実在検査・`inference/mod.rs` の `pub use` 全数固定。検出範囲の限界と workspace 全体インベントリを採らない理由は決定記録 §18.3）。
+利用例は `inference/mod.rs` のモジュール doc の doctest と `crates/facade/tests/generate_facade.rs`。Tier 1／Tier 2 表（§1.2・§1.3）への行追加は行っていない（#2822・#2826・#2580 の先例と同じ）。
+保留継続: `caches` を使う形の到達経路（決定記録 §17.4。#2573 の未決事項）、EOS 早期停止・top-p・beam search・repetition penalty・トークナイザ（決定記録 §11）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec`・`unsafe` は不変。CUDA／Metal 実機 parity は未実測で、申し送り先は `docs/perf/logs/generate-2191/README.md`。詳細は決定記録 §17・§18。
 
 > **更新（イシュー #2582・#2583）**: 下記の保留は #2582 で承認形どおり公開済みとなり、保留ガード
 > （`PredictBatchesHoldDoctestGuard` と `api_surface.rs` の 4 テスト）は正ガードへ反転済み。

@@ -7,6 +7,8 @@
 用の事前設計を記す。tolerance／baseline／`Cargo.toml` 依存／ガードレール
 閾値／`docs/spec/`（正本）は一切変更しない。
 
+> **更新（イシュー #2575・#2576）**: 本書 §0〜§15 は #2191 時点の判断と、承認前の停止記録（履歴）である。facade 公開は #2575 で承認形どおり実施済みで、保留ガードも削除・反転済み。現行の公開形は §17、#2576 で仕上げた正ガードは §18 を正とする。
+
 ## 0. 結論
 
 自己回帰生成ループ（3 戦略・KV キャッシュ結線・seed 決定性）は `fandhe_ai_
@@ -82,6 +84,8 @@ K-1（autodiff 内部実装）／K-2（facade 公開）2 段構成と同型の�
   生成）。`top_k > vocab_size` は HF が黙って clamp するのに対し、
   本実装は `AutodiffError::InvalidArgument` で拒否する（fail-closed。
   `.claude/rules/security.md` A03 方針。`validate_top_k_le_vocab`）。
+
+**実装記録（イシュー #2575・#2576）**: 本節の形（pub フィールド 5 つ・`#[non_exhaustive]`・`new`／`with_temperature`／`with_seed`・`validate` 非公開）は、そのまま facade 公開形になった（`fandhe_ai::inference::{AutoregressiveModel, GenerateConfig, SamplingStrategy, generate}` の純再エクスポート 1 文。§17）。#2576 の `generate_public_shape_matches_approved_inventory` がこの形を全数で固定する（§18.2）。
 
 ## 3. セキュリティ考慮（OWASP Top 10）
 
@@ -188,7 +192,11 @@ or_declare_generate_items`）を維持する。
    場合はそれに合わせる）に従うかは、facade の他機能の慣習を踏まえて
    承認時に確定する。
 
+**実装記録（イシュー #2575・#2576）**: 4 承認事項は 2026-10-07 付けの所有者承認（§17.1）で次のとおり決着した。(1) 配置は `fandhe_ai::inference` 相乗りの純再エクスポート。(2) `KvCache` は #2579 で公開済み。`forward_with_cache` への到達経路は §17.4 のとおり未決のまま（公開していない）。(3) `GenerateConfig` は pub フィールド形を踏襲。(4) エラー型は`AutodiffError` を流用。
+
 ## 9. 保留固定の多層構成
+
+> 本節は承認前（#2191 時点）の記録。表のガード（`GenerateHoldDoctestGuard` ほか）は #2575 で削除済みで、現行は §17.3・§18。
 
 | 迂回パターン | 塞ぐ層 |
 |---|---|
@@ -220,6 +228,8 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
   doctest_globs_all_pub_modules`・`generate_hold_doctest_probe_body_
   matches_fixed_contract` を削除するか、正ガード（実装した公開面が
   到達可能であることを検査するテスト）へ置き換える。
+
+**実施結果（イシュー #2575・#2576）**: 削除したもの（#2575）は `GenerateHoldDoctestGuard`、`facade_does_not_expose_generate_items`・`facade_does_not_reexport_or_declare_generate_items`（自己テスト含む）・`generate_hold_doctest_globs_all_pub_modules`・`generate_hold_doctest_probe_body_matches_fixed_contract`。置き換えた正ガードは、#2575 分が`facade_exposes_generate_items_only_in_approved_shape`（＋自己テスト）・`generate_items_are_reachable_via_facade_inference_path`、#2576 分が`generate_usage_doctests_are_present_and_compiled`・`inference_module_reexports_exactly_expected_surface`・`generate_public_shape_matches_approved_inventory`（＋自己テスト `generate_public_shape_inventory_detects_each_category`）・`generate_public_field_types_and_variants_are_pinned`（§18.2）。
 
 ## 11. スコープ外
 
@@ -389,6 +399,8 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 
 ## 15. #2576 着手時判定（§13 未承認・#2575 未出荷のため停止）
 
+> 本節は当時の停止記録。列挙ガードは #2575 で削除済みで、現行は §17.3・§18。
+
 本節は docs のみの停止記録であり、**承認を得たことを意味しない**。
 #2576（generate() の保留ガードの正ガードへの反転）は、反転先となる facade
 公開物が存在せず、決定記録に推奨形も確定していないため実装せず停止した。
@@ -523,3 +535,58 @@ facade のみで KV キャッシュを使うモデルは `RefCell<StatefulAttent
 正ガードの全数インベントリ化・doctest 存在検査、`docs/compat-api-scope.md` §5 の適用記録、
 本書 §2・§8・§10 の実装記録、`docs/compat-feature-gap.md` 等の周辺 docs。CUDA／Metal 実機
 parity は未実測のまま（`docs/perf/logs/generate-2191/README.md`）。
+→ #2576 で実施（§18）。
+
+## 18. 実装記録（イシュー #2576）: 正ガードの仕上げと docs 更新
+
+### 18.1 着手時判定
+
+基準は `origin/main` 850d33f2（PR #2839〈#2575〉マージ直後）。承認根拠は §17.1 と同一（ルート
+#2499 のリポジトリ所有者本人のコメント issuecomment-6033824965）。公開形は §17.2 と一致し、
+保留ガード（`GenerateHoldDoctestGuard` ほか）は #2575 で削除・最小の正ガードへ反転済みだった。
+したがって本イシューの実体は反転のやり直しではなく、§17.5 が申し送った「正ガードの仕上げ」と
+docs 更新である。公開面は変更していない。
+
+### 18.2 追加した正ガード（`crates/facade/tests/api_surface.rs`）
+
+| テスト | 塞ぐ迂回パターン（§9 の旧表との対応） |
+|---|---|
+| `generate_usage_doctests_are_present_and_compiled` | doctest の無効化（`ignore`／`no_run` 等・`# ` 隠し行・削除）。generate 固有の語を必須にし predict_batches の doctest との取り違えを防ぐ |
+| `inference_module_reexports_exactly_expected_surface` | `inference/mod.rs` への無関係な名前の別文再エクスポート（`MultiheadAttention` 等。§17.4 の未決事項を迂回して公開する経路）。可視性付き `use` が predict_batches 承認形と generate 承認形の 2 文ちょうど |
+| `generate_public_shape_matches_approved_inventory`（自己テスト `generate_public_shape_inventory_detects_each_category`） | autodiff 側の形の拡張（variant／フィールド／pub メソッドの追加・`#[non_exhaustive]` 欠落・`validate*` の公開）。公開面拡張は承認事項のため承認とセットで更新させる |
+| `generate_public_field_types_and_variants_are_pinned` | pub フィールド 5 つの型と `SamplingStrategy` 3 variant の構築形の変更（型注釈で固定） |
+
+既存の `generate_items_are_reachable_via_facade_inference_path`（`new`／`with_*`・`generate` の
+戻り型）と併せ、公開形が型・インベントリの両面から固定される。
+
+### 18.3 検出範囲の限界と §7 の維持
+
+いずれもトークン走査で、マクロ生成・`use … as` 別名経由の到達は範囲外（別名は承認形の完全一致が
+拒否する）。§7 の理由（`crates/self-repair` に同名のトレイトメソッドが複数あり、無関係な内部宣言を
+固定して正当な変更を落とす）を維持し、workspace 全体の `fn generate` インベントリは採らない。
+走査は facade `src/` と `autodiff/src/generate.rs` の 1 ファイルに限る。否定の保証に
+`compile_fail` は使わない（stable rustdoc はエラーコードを照合しないため）。
+
+### 18.4 利用例の所在
+
+`crates/facade/src/inference/mod.rs` のモジュール doc（doctest）と
+`crates/facade/tests/generate_facade.rs`。実在は `generate_usage_doctests_are_present_and_compiled` が固定する。
+
+### 18.5 維持したセキュリティ条件
+
+§13.4・§15.4 の A02（独立 `Generator`・暗号用途に使わない旨の注記）・A03（`validate` を非公開のまま
+`generate` 入口で必ず呼ぶ。インベントリが `validate*` の非公開を固定）・A04（`forward_step` 出力の
+shape／非有限値検査・`top_k > vocab` 拒否）は不変。
+
+### 18.6 保留継続と行わなかったこと
+
+保留継続: §17.4（`caches` を使う形の到達経路。#2573 の未決事項）・§11（EOS 早期停止・top-p・
+beam search・repetition penalty・トークナイザ）。行わなかったこと: 公開面の追加、autodiff 実装の変更、
+依存追加、tolerance／baseline／ガードレール閾値の変更、`docs/spec/` の編集、新規 `unsafe`。
+CUDA／Metal 実機 parity は未実測のまま（`docs/perf/logs/generate-2191/README.md`）。
+
+### 18.7 更新した docs
+
+`docs/compat-api-scope.md` §5（適用記録）・本書（§2・§8・§10・§9／§15 の注記・§17.5・本節）・
+`docs/README.md`・`docs/compat-feature-gap.md`・`docs/kv-cache-design.md`・
+`docs/facade-predict-batches-phase-metrics-decision.md`（いずれも履歴本文は不変で追記のみ）。
