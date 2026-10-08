@@ -133,6 +133,8 @@ tolerance・baseline は変更していない。PyTorch との差分を埋める
 
 ## 7. facade 公開形の推奨案（未承認）
 
+> #2849 で名前と引数順を確定した（§12）。公開は #2851。本節は確定前の推奨案として履歴を残す。
+
 推奨は 1 つ。`Var` の inherent 委譲メソッド 2 件として各自由関数への 1 行委譲で公開する（#2643・#2644 の推奨形と
 同じ方式）。
 
@@ -198,3 +200,51 @@ bit 一致する」ことの確認であり、新規 GPU カーネルの parity 
 - `docs/compat-api-scope.md` 5 節（適用記録）・`.claude/rules/coding-rust.md`（REQ-2 判定・f64 長軸縮約契約・
   カーネル境界検査）
 - PyTorch 2.14.0 実行値: `crates/autodiff/tests/fixtures/fold-unfold-pytorch-reference/README.md`
+
+## 12. #2849 決定記録（facade 公開形の確定）
+
+- 状態: **記録のみ（コード変更なし）。** §7 で未決だった `Var::unfold` の名前と引数順を 1 案に確定する。公開（`Var::unfold`／`fold` の委譲と保留ガードの反転）は #2851 が行う。**公開までは `FoldUnfoldHoldDoctestGuard` と `api_surface.rs` の否定ガードを維持する。**
+- 基準: `origin/main` `74171fb9`（2026-10-08）。
+- 承認の根拠: ルート #2499 の 2026-10-08 ユーザーコメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）が明示した点は、(1) 行 12〜15 は `Var` の委譲メソッドに限って公開する、(2) `Var::unfold` は `nn.functional.unfold` に対応する名前、(3) 引数順は crate 内の `conv2d` 系、(4) 層化（`Sequential::add_*` 等）は保留継続、の 4 点。バッチなし入力の非対応・`C = 0` の受理を現行のまま維持する点は、§7 の現行形を変えない方向からの導出である。
+
+### 12.1 確定シグネチャ
+
+```rust
+impl<'t> Var<'t> {
+    pub fn unfold(
+        &self,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Var<'t>, AutodiffError>;
+
+    pub fn fold(
+        &self,
+        output_size: [usize; 2],
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Var<'t>, AutodiffError>;
+}
+```
+
+- 内部自由関数 `crates/autodiff/src/fold_ops.rs` の `unfold`／`fold` と、第 1 引数 `input` を `self` に置き換えた以外の引数順・型・戻り値が一致する。1 行委譲。新規公開型なし。`fold_ops`・`tensor_core::fold` は再エクスポートしない。
+
+### 12.2 名前と引数順
+
+- 名前は `Var::unfold`／`Var::fold`。代替名（`unfold2d`／`im2col`）は採らない。`torch.nn.functional.unfold`（`nn.Unfold`）に対応し、`torch.Tensor.unfold`（次元方向のスライディング窓。別演算）とは異なる。
+- 引数順は crate 内の `conv2d` 系（`Var::conv2d` の `stride, padding, dilation`、`Var::max_pool2d` の `kernel_size, stride, padding, dilation`）に揃え、`kernel_size, stride, padding, dilation`（`fold` は先頭に `output_size`）とする。PyTorch の `dilation, padding, stride` 順は採らない。
+- `Var::unfold` の doc コメント先頭に置く文意: 「`torch.nn.functional.unfold`（`nn.Unfold`）相当の列展開。`torch.Tensor.unfold`（次元方向のスライディング窓）とは別の演算」。#2851 がこの文意で書く。
+- バッチなし入力の非対応・`C = 0` の受理は §5 の現行のまま。
+
+### 12.3 保留を続けるもの
+
+- 層化（`nn::Fold`／`nn::Unfold`・`Module` impl・保存復元フック・`compat::Sequential::add_fold`／`add_unfold`・resident 経路）。
+
+### 12.4 #2851 への申し送り
+
+- 反転するのは `Var` の委譲メソッド名（`fold`／`unfold`）のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`compat::Sequential::add_*`・モジュール再エクスポート・型名のプローブは未承認経路として維持する。
+- workspace インベントリは `var.rs` の委譲 1 件ずつを許可位置に加える。
+- 実機 parity は既存の `docs/perf/logs/fold-unfold-2645/README.md` を使う。
