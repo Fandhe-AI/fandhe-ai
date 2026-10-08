@@ -1,4 +1,4 @@
-//! 関数型 AD ラッパー `vjp`・`hvp`（イシュー #2874／#2875・親 #2841。契約の正は
+//! 関数型 AD ラッパー `vjp`・`hvp`・`vmap`（イシュー #2874／#2875／#2876・親 #2841。契約の正は
 //! `docs/autodiff-functional-transforms-design.md` §3〜§7・§10）。
 //!
 //! **新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant はゼロ**:
@@ -14,10 +14,11 @@
 //! `FunctionalTransformsHoldDoctestGuard` と `tests/api_surface.rs` の否定ガードで
 //! 機械固定している。`hvp`（#2875）は `backward_create_graph` で子テープへ 1 階勾配を
 //! 写し、子テープ上で `g ⊙ v` を `child.backward` する合成（既存の手組み HVP と同じ形）。
-//! ループ版 `vmap` も本モジュールへ入る予定で、検査ヘルパー（`jacobian_ops` の `checked_numel`・`check_on_tape`・`copy_grad_row`）を共用する。
+//! ループ版 `vmap`（#2876）は `unbind`→クロージャ適用→`contiguous`→`stack` の合成で、
+//! 検査ヘルパー（`jacobian_ops` の `checked_numel`・`check_on_tape`・`copy_grad_row`）を共用する。
 //!
-//! **共通の契約**: 単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。結果は非微分の
-//! ホスト値。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
+//! **共通の契約**: 単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。`vjp`／`hvp` の結果は
+//! 非微分のホスト値（`vmap` のみ同じテープ上の微分可能な `Var`）。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
 //! の挙動をそのまま伝播する。
 
 use crate::error::AutodiffError;
@@ -146,4 +147,87 @@ pub fn hvp(
         copy_grad_row(h, &mut data)?;
     }
     Tensor::new(data, &in_shape).map_err(AutodiffError::Shape)
+}
+
+/// ループ版 `vmap`（`torch.func.vmap` 相当の意味論）。`input` を `in_dim` 軸で `unbind` し、
+/// 各スライスへクロージャ `f` を順に適用して、結果を先頭軸（dim 0）へ `stack` した
+/// 同じテープ上の微分可能な [`Var`] を返す。新規 `Op`・VJP・variant は足さず、既存の
+/// `unbind`・`contiguous`・`stack` の合成のみ。性能は保証しない（ループ実行）。
+///
+/// 前提: `f` は副作用のない関数であること。バッチなしで実行した結果との一致は REQ-2 の
+/// 統一複合判定で見る（bit 一致は契約にしない。設計 §11-2）。`vmap(grad)`
+/// （クロージャ内で `backward` を呼ぶ per-sample gradient）は契約外で、値だけが必要なら
+/// 呼び出し側が明示ループで `backward` を回す（設計 §5・§11-6）。
+///
+/// **入口検査（順序固定）**
+///
+/// Phase A（テープ無変更。失敗しても `tape.len()` は不変）:
+/// 1. `input` が `tape` の現世代に属さない → `Err(TapeMismatch)`。
+/// 2. `in_dim >= rank`（rank 0 を含む）→ `Err(Shape(AxisOutOfRange))`。
+/// 3. `shape[in_dim] == 0`（空バッチ）→ `Err(InvalidArgument)`。結果形状は推定しない。
+///    `unbind` は零長軸に `Ok(vec![])` を返すため、`unbind` より前に自前で検査する。
+///
+/// Phase B（ノードが積まれる段階。`vmap` 自身の後処理〈`contiguous`・`stack`〉の前に全検査を終える）:
+/// 4. 各スライスについて `f` を呼び、`Err` はそのまま伝播する。
+/// 5. 各戻り値が `tape` の現世代に属さない → `Err(TapeMismatch)`（形状検査より先）。
+/// 6. 戻り値の shape が先頭出力と異なる → `Err(Shape(ShapeMismatch))`。
+/// 7. 結果の要素数 `B × numel(out_0)` を検査（`Err(Shape(ElementCountOverflow))`）。
+///
+/// **テープに残るノード**: Phase A の失敗では何も残らない。Phase B で失敗した場合
+/// （`f` の `Err`・別テープの出力・形状不一致・`contiguous`／`stack` の失敗〈`DeviceMismatch` 等の伝播〉）、
+/// `unbind` が積んだノード（スライスあたり最大 3）、それまでに `f` が積んだノード、
+/// `contiguous` 化の途中までのノードが残る。既存ノードの値は変えない。
+///
+/// 非 contiguous なクロージャ出力は `contiguous` で materialize してから `stack` する
+/// （`stack` は非 contiguous 要素を `NonContiguousReshape` で拒否するため）。
+/// 出力軸は先頭固定で `out_dim`・複数入力は扱わない（設計 §11-1）。
+pub fn vmap<'t, F>(
+    tape: &'t Tape,
+    input: &Var<'t>,
+    in_dim: usize,
+    mut f: F,
+) -> Result<Var<'t>, AutodiffError>
+where
+    F: FnMut(&Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    // Phase A
+    check_on_tape(tape, input)?;
+    let in_shape = input.shape();
+    let rank = in_shape.len();
+    if in_dim >= rank {
+        return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+            axis: in_dim,
+            rank,
+        }));
+    }
+    let batch = in_shape[in_dim];
+    if batch == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "vmap: in_dim={in_dim} の軸長が 0（空バッチは結果形状を推定できないため拒否。shape {in_shape:?}）"
+        )));
+    }
+
+    // Phase B
+    let slices = input.unbind(in_dim)?;
+    let mut outs: Vec<Var<'t>> = Vec::with_capacity(slices.len());
+    for s in &slices {
+        let out = f(s)?;
+        check_on_tape(tape, &out)?;
+        if let Some(first) = outs.first() {
+            let (lhs, rhs) = (first.shape(), out.shape());
+            if lhs != rhs {
+                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch { lhs, rhs }));
+            }
+        }
+        outs.push(out);
+    }
+    let out_numel = checked_numel(&outs[0].shape())?;
+    out_numel
+        .checked_mul(outs.len())
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+    let contiguous: Vec<Var<'t>> = outs
+        .iter()
+        .map(|o| o.contiguous())
+        .collect::<Result<_, _>>()?;
+    Var::stack(&contiguous, 0)
 }
