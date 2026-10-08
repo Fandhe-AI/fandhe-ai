@@ -1,6 +1,6 @@
 # 関数型 AD ラッパー（vjp／hvp）・ループ版 vmap の実装設計と issue 分解（イシュー #2856・親 #2841）
 
-本記録は **推奨案の記録であり、facade 公開形の承認記録ではない**。コード変更は伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、逐語転記せず、事実はソースで再確認した。基準は `origin/main` `c03c0da8`（2026-10-08）。以下の行番号は同 sha のもの。
+本記録は **推奨案の記録であり、facade 公開形の承認記録ではない**。コード変更は伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、逐語転記せず、事実はソースで再確認した。基準は `origin/main` `c03c0da8`（2026-10-08）。以下の行番号は同 sha のもの。 → #2930 で承認範囲と公開形を §23 に記録（公開は #2931）。
 
 ## 1. 位置づけ・承認根拠
 
@@ -248,4 +248,100 @@
 - §5 の公開形・§6 の判定方式・§9 の拡張要否・§11 の論点 1〜6 は、`docs/compat-api-scope.md` §5.1 末尾の「Phase 8 公開形（関数型 AD 変換。承認依頼 #2879）」ブロックへ転記した（行ラベル `F1`〜`F3`）。本記録 §1〜§19 の内容は変えていない。
 - 実装済みシグネチャ（`crates/autodiff/src/functional_ops.rs`）と §5 の差の要点は同ブロックに書いた。受け手の違い（自由関数と `Tape` メソッド）、実装で確定した細部（単一入力・dim 0 固定・`FnMut`・`child` 必須・shape 完全一致・空バッチ拒否）、`vjp`／`hvp` の追跡なし出力・損失に対する意味論の非対称（出力が追跡なしなら `vjp` は全ゼロ、損失が追跡なしなら `hvp` は `Err` を伝播。追跡なし入力は両方 `GradientTrackingDisabled`）、保留ガードの反転範囲の 4 点である。
 - §10 の仮番号と実 issue の対応（#2873 の sub-issues で確認）: 1→#2874・2→#2875・3→#2876・4→#2877・5→#2878・6→#2879・9→#2880・11→#2881（いずれも 2026-10-08 に close。本節の作成時点では #2878・#2881 が open だった）。7・8・10 は未起票。親は sub-issues の実測で #2873（その親は Phase 8 #2872、ルート #2499）で、§15〜§19 の見出しにある「親 #2841」表記とずれている。本記録では見出しを書き換えず事実を併記するにとどめる。
-- 承認の状況: §5・§6・§9 と論点 1〜6 はすべて未承認のまま。承認は実装 Agent が代行しない。保留ガード `FunctionalTransformsHoldDoctestGuard` と `api_surface.rs` の否定ガードは維持している。
+- 承認の状況: §5・§6・§9 と論点 1〜6 はすべて未承認のまま。承認は実装 Agent が代行しない。保留ガード `FunctionalTransformsHoldDoctestGuard` と `api_surface.rs` の否定ガードは維持している。 → #2930 で承認範囲と公開形を §23 に記録（公開は #2931）。
+
+## 23. 決定記録（イシュー #2930・親 #2873。facade 公開形）
+
+### 23.0 状態・基準・承認の根拠
+
+- 状態: **記録のみ**（コード変更なし）。公開は #2931。公開までは `FunctionalTransformsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の否定ガードを維持する。
+- 基準: `origin/main` `f4dc7573`（2026-10-08）。
+- 承認の根拠: ルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`、2026-10-08）の項 1「関数型 AD（承認依頼 #2879、行 F1〜F3）」の小項目と「全機能の共通事項」に限る。承認された点は次の箇条のとおり（要約。コメントにない承認は書かない）。
+  - F1〜F3 を facade `Tape` の薄い委譲メソッドとして公開する。
+  - 論点 1: 単一入力・`FnMut`・`child` は明示引数・`out_dim` は公開形に含めない（`stack` は dim 0 固定）。
+  - 論点 2: `vmap` とバッチなし実行の bit 一致は契約にしない（統一複合判定）。
+  - 論点 4: 低精度 forward は対象外。
+  - 追跡なしに対する挙動は現状のまま doc に明記し、契約は変えない。
+  - 論点 5・6 は保留。
+  - 共通事項: 保留ガードは公開した名前の分だけ反転し、未承認経路のプローブは残す。
+- 本記録の対象外: コメントの項 2（`jvp`／`jacfwd` の spec 追記）。facade 公開には改めて承認が要るとコメントにあることだけを併記する。
+
+### 23.1 facade シグネチャ
+
+```rust
+impl Tape {
+    pub fn vjp(&self, output: &Var<'_>, input: &Var<'_>, cotangent: &Tensor<f32>)
+        -> Result<Tensor<f32>, AutodiffError>;
+    pub fn hvp(&self, loss: &Var<'_>, input: &Var<'_>, vector: &Tensor<f32>, child: &Tape)
+        -> Result<Tensor<f32>, AutodiffError>;
+    pub fn vmap<'t, F>(&'t self, input: &Var<'t>, in_dim: usize, f: F)
+        -> Result<Var<'t>, AutodiffError>
+    where
+        F: FnMut(&Var<'t>) -> Result<Var<'t>, AutodiffError>;
+}
+```
+
+- 引数の順序と型は内部の自由関数（`crates/autodiff/src/functional_ops.rs` の `vjp`・`hvp`・`vmap`）から第 1 引数 `tape` を除いたものと一致する。`Var`・`Tensor`・`AutodiffError` は facade が再エクスポートする内部クレートの型と同一。
+- 境界は `F` の `FnMut` だけ。`'static`・`Send`・`Sync` は要求しない（内部も要求しない）。
+- 新しい型・`AutodiffError` の variant・モジュールの再エクスポートは足さない。
+
+### 23.2 委譲本体
+
+先例は `Tape::hessian` の 1 行委譲。
+
+- `vjp`: `fandhe_ai_autodiff::functional_ops::vjp(&self.0, output, input, cotangent)`
+- `hvp`: `fandhe_ai_autodiff::functional_ops::hvp(&self.0, loss, input, vector, &child.0)`
+- `vmap`: `fandhe_ai_autodiff::functional_ops::vmap(&self.0, input, in_dim, f)`。`&'t self` から `&'t self.0` を渡し、`Tape::var(&self) -> Var<'_>` と同じ寿命で結ぶ見込み。
+
+コンパイルできるかは確定事項ではなく、#2931 で確かめる。この形で通らなければ #2931 は実装を止めて承認依頼へ戻る。
+
+### 23.3 facade doc に書く契約（#2931 が rustdoc へ書き写す。いずれも現在の実装のまま）
+
+- 入口検査の順序: `TapeMismatch` → `GradientTrackingDisabled` → shape の完全一致（ブロードキャストなし）→ 要素数の検査。`hvp` は加えて `loss` の要素数 1（`[]`・`[1]`・`[1, 1]` は可）。`vmap` は Phase A と Phase B に分かれ、空バッチは `InvalidArgument`。
+- 追跡なしに対する挙動（現状のまま・契約は変えない）:
+  - 追跡なしの `output` に対して `vjp` は全ゼロを返す。
+  - 追跡なしの `loss` に対して `hvp` は `backward_create_graph` の `Err` を伝播する。
+  - 追跡なしの `input` に対しては、どちらも `Err(GradientTrackingDisabled)`。
+- 副作用: `vjp` は親テープへちょうど 2 ノードを足す。`hvp` は親テープへノードを足さず、子テープにはノードが残るので呼び出し後の子テープは作り直す。`vmap` は Phase B で失敗すると、それまでのノードが残る。
+- `child` は `tape()`／`tape_for()` で作った空の別 `Tape`（`hessian` と同じ契約）。
+- 数値: REQ-2 の統一複合判定。`vmap` とバッチなし実行の bit 一致、`hvp` と 1 階 VJP の bit 同一は契約にしない。
+- 適用範囲: `hvp` の経路上の Op は `supports_create_graph()` が真のものに限る（論点 5 は保留なので拡張しない）。低精度 forward は対象外で、f32 の `Tape` のみ（`VarF64` は対象外）。`vmap(grad)` は契約外（論点 6 は保留）で、値だけが要る場合は呼び出し側が明示ループで `backward` を回す。
+- 利用例の doctest は facade 単独で完結する形にする（例: `vmap` は `|s| s.mul(s)`、`vjp` は `x⊙x` から `2x⊙u`、`hvp` は `x³` から `6x⊙v`）。書けなければ #2931 は止まる。
+
+### 23.4 保留ガードの反転範囲
+
+- 公開する名前: facade `Tape` の inherent メソッド `vjp`・`hvp`・`vmap` の 3 つだけ。
+- `FunctionalTransformsHoldDoctestGuard` の正のプローブから外すもの: `__probe_methods` 内の `fandhe_ai::Tape::vjp(tape)`／`::hvp(tape)`／`::vmap(tape)` の 3 行、`impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tape`（inherent メソッドと名前が衝突して UFCS の解決が変わるため Tape への impl ブロックごと外す）、引数 `tape: &fandhe_ai::Tape`。
+- 残すもの（未承認経路のプローブ）: モジュール `functional_ops`（`functional_ops::__mark()`）、クレートルートの裸の自由関数 `vjp()`・`hvp()`・`vmap()`、`Var<'t>`・`Tensor<f32>` への probe trait の impl とそれぞれの UFCS 呼び出し 6 行。
+- `api_surface.rs` の追随（#2931 への指定）:
+  - `FUNCTIONAL_TRANSFORMS_HOLD_PROBE_BODY` を上記のプローブ本体へ更新する。
+  - `facade_does_not_reexport_or_declare_functional_transforms`: 例外は「`crates/facade/src/lib.rs` の `impl Tape` 内の `pub fn vjp`／`hvp`／`vmap` の 3 件ちょうど」に限る。`pub use` での `functional_ops`／`vjp`／`hvp`／`vmap` の再エクスポートは引き続き違反とする。自己テスト（`..._detects_each_category`）も、例外が正しく狭いことを確かめる形へ更新する。
+  - `workspace_declares_functional_transforms_fn_names_only_in_allowed_locations`: 期待集合を 4 件（`grad.rs::vjp`・`functional_ops.rs::{vjp, hvp, vmap}`）から 7 件（加えて `facade/src/lib.rs::{vjp, hvp, vmap}`）にする。
+  - 正ガードを新設する: 承認形の 3 メソッドのシグネチャと 1 行委譲本体をトークン列で固定する（`facade_tape_backward_create_graph_is_thin_delegation` と同じ系統）。
+- 検出範囲は既存ガードと同じく「列挙した名前・型・受け手に限る」。それ以上の保証は書かない。
+
+### 23.5 記録と実装の差の解消（`compat-api-scope.md` §5.1 の差 1〜4）
+
+| 差 | 内容 | 解消の根拠 |
+|---|---|---|
+| 1 | 受け手（自由関数か `Tape` メソッドか） | 「`Tape` の薄い委譲メソッドとして公開」 |
+| 2 | 実装で確定した細部（単一入力・dim 0 固定・`FnMut`・`child` 必須） | 論点 1 の各項目 |
+| 2 | 同上（shape の完全一致・`loss` の要素数 1・空バッチ拒否） | コメントが個別に承認した項目ではない。内部シグネチャをそのまま当てることに伴う「実装のまま」の挙動として §23.3 に書く |
+| 3 | `vjp`／`hvp` の非対称 | 「現状のまま doc に明記・契約は変えない」 |
+| 4 | 保留ガードの反転範囲 | 共通事項「公開した名前の分だけ反転・未承認経路のプローブは残す」 |
+
+- 用語の差: コメントは「追跡なし入力」と書くが、実装上の非対称の対象は追跡なしの `output`／`loss` である（追跡なしの `input` は両方とも `GradientTrackingDisabled`）。指示は「現状のまま」なので、実装の挙動をそのまま書く。この読み方は解釈として明示する。
+- 結論: 上の差はいずれも承認の範囲で決まり、停止事由はない。
+- 未決として残すもの（推奨は作らない）:
+  - 将来 `out_dim`・複数入力を足すときの拡張方法（新メソッドにするか引数化するか。引数化は破壊的変更になりうる）。
+  - 論点 5（`supports_create_graph` の対象拡張）・論点 6（`vmap(grad)` の公開形）は保留。
+  - 論点 3 はコメントで言及がなく、承認とも保留とも分類しない。#2880 では発動しておらず（§19）、`jvp`／`jacfwd` は項 2 の spec 経路で別に扱う。
+
+### 23.6 #2931 への申し送り
+
+- 23.1〜23.4 の実装、保留ガードと `api_surface.rs` の追随、正ガードの新設。
+- `functional_ops.rs` のモジュール doc と保留ガードの doc comment にある「未承認」記述の更新。
+- `compat-api-scope.md` §5 への適用記録の追加と、F1〜F3 の「公開先」列の更新。
+- CUDA／Metal の実機 parity: 既存の `#[ignore]` テスト（#2881）と `docs/perf/logs/functional-transforms-2881/README.md` で足りるかを判断する。facade 経由の `#[ignore]` テストを足す場合は `docs/perf/logs/<slug>-2931/README.md` へ申し送る（実測値は推測で書かない）。
+- 停止条件: `vmap` の寿命の結び方がコンパイルできない、または doctest が facade 単独で書けない場合は、実装せず承認依頼へ戻る。
+- 本節はコード・依存・tolerance・baseline・ガードレール閾値・`docs/spec` を変更しない。
