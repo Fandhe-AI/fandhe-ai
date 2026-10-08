@@ -7398,7 +7398,7 @@ struct JacobianHessianHoldDoctestGuard;
 struct GradcheckAnomalyHoldDoctestGuard;
 
 /// `vjp`・`hvp`・`vmap`（イシュー #2874・親 #2841。内部実装 `fandhe_ai_autodiff::functional_ops`。
-/// 現時点の実装は `vjp` のみで、`hvp`／`vmap` は後続 issue）の未承認経路を facade 公開面から締め出す保留ガード
+/// 現時点の実装は `vjp`・`hvp`〈#2875〉で、`vmap` は後続 issue）の未承認経路を facade 公開面から締め出す保留ガード
 /// （`GradcheckAnomalyHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
 /// 公開形は未承認（`docs/autodiff-functional-transforms-design.md` §5 は推奨案の記録であり承認記録ではない）。

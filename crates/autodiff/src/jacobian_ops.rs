@@ -197,7 +197,7 @@ pub fn jacobian(
 ///
 /// 呼び出し後の `child` には記録が残る（再利用前に呼び出し側が作り直す）。
 /// 子テープ上の数値方式は 1 階 VJP と bit 同一を主張しない（`create_graph` の
-/// 既存契約）。HVP 専用 API は含めない。
+/// 既存契約）。HVP 専用 API は含めない（内部限定の `functional_ops::hvp`〈#2875・facade 非公開〉が別にある）。
 pub fn hessian(
     tape: &Tape,
     loss: &Var<'_>,
