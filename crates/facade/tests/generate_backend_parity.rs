@@ -1,12 +1,12 @@
 //! `fandhe_ai_autodiff::generate`（イシュー #2191）の facade 横断 parity
 //! テスト（`kv_cache_backend_parity.rs` と同型）。
 //!
-//! facade は `generate`／`GenerateConfig` 相当の新規 `pub fn`／`pub
-//! struct` を追加していない（`docs/facade-generate-decision.md` §8。
-//! `crates/facade/tests/api_surface.rs` の否定ガードで固定）ため、本
-//! テストは内部クレート `fandhe_ai_autodiff` を直接使う（facade
-//! （`fandhe-ai`）の通常の `[dependencies]` であり、これは facade の
-//! テストコードが内部クレートへ直接依存すること自体を妨げない設計
+//! facade は #2575 で `fandhe_ai::inference::{generate, GenerateConfig, ..}` を純再エクスポート
+//! として公開済み（`docs/facade-generate-decision.md` §17。公開経路の単体テストは
+//! `generate_facade.rs`）。本テストは `Tape::new_with_ops` でバックエンドを選ぶ必要があり、
+//! facade には `BackendOps` 注入経路が無い（REQ-12）ため、引き続き内部クレート
+//! `fandhe_ai_autodiff` を直接使う（facade（`fandhe-ai`）の通常の `[dependencies]` であり、
+//! これは facade のテストコードが内部クレートへ直接依存すること自体を妨げない設計
 //! ——`kv_cache_backend_parity.rs` と同じ位置づけ）。
 //!
 //! - 属性なし: `CpuBackendOps`（`Tape::new_with_ops`）を使うモデルと

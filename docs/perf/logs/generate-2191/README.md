@@ -36,3 +36,15 @@ CPU（`CpuBackendOps`）版は上記テストファイルの属性なしテス�
 検証は `crates/autodiff/tests/nn_generate.rs`（18 件・全 pass。CPU の
 みで完結する `NaiveOps` 相当の直接テストのため実機非依存）で完結して
 いる。
+
+## facade 公開経路（#2575）について
+
+`crates/facade/tests/generate_facade.rs`（`fandhe_ai::inference` 経由）は CPU のみで動く
+属性なしテストで、CUDA／Metal 実機の実測は未実施である（本環境では測定不可）。facade には
+`BackendOps` 注入経路が無いため、実機 parity は引き続き上記 `generate_backend_parity.rs` の
+`--ignored` テストが担う。実機での記入欄:
+
+| 環境 | コマンド | 結果 | 記入日 |
+|---|---|---|---|
+| CUDA（GB10） | `cargo test -p fandhe-ai --test generate_backend_parity -- --ignored cuda` | 未実測 | |
+| Metal（M4 Max） | `cargo test -p fandhe-ai --test generate_backend_parity -- --ignored metal` | 未実測 | |

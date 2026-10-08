@@ -266,9 +266,8 @@ pub mod fft_ops;
 pub mod indexed_update_ops;
 // LLM 推論向け自己回帰生成ループ（イシュー #2191。`nn` とは別の推論
 // ループ層のためトップレベルに置く。`activation_ops`／
-// `topk_unique_ops` と同型）。facade（`fandhe_ai`）への公開は
-// `pub fn generate`／`GenerateConfig` の署名がユーザー承認事項のため
-// 保留する（`docs/facade-generate-decision.md`）。
+// `topk_unique_ops` と同型）。facade（`fandhe_ai::inference`）へはイシュー
+// #2575 で純再エクスポートとして公開済み（`docs/facade-generate-decision.md`）。
 pub mod generate;
 mod grad;
 mod hooks;

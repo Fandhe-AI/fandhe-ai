@@ -340,12 +340,15 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
   `KvCacheHoldDoctestGuard` は削除済みで、`KvCache` の到達不能は
   `generate` 公開のブロッカーではなくなった。`generate` 自体は未公開の
   ままで、公開は #2575／#2576 が担う。
+  **現状（2026-10-08）**: `generate` は #2575 で公開済み（§17）。
 - **着手時点**: 配置の第一候補 `pub mod inference` は、非公開の
   `mod inference;`（`crates/facade/src/lib.rs`）および predict_batches の
   保留ガード（#2581〜#2583 は open）と衝突する。
   **現状（2026-10-07）**: 未解消。predict_batches の公開（#2581〜#2583）は
   同じコメントで承認済みだが未実装で、`generate` の配置はその公開後に
   調整する（§14.4 の手順 3）。
+  **現状（2026-10-08）**: 解消済み。#2581 は PR #2824／#2826 で公開され、
+  `generate` は `fandhe_ai::inference` へ相乗りした（§17）。
 
 ### 14.3 現状維持するもの（撤去・反転しない）
 
@@ -368,6 +371,8 @@ facade 公開の承認を得た日が来たら、次を同時に行う（他の�
 **現状（2026-10-07）**: 手順 1 は完了した（上記コメントで §13.2 の推奨案と
 §13.5 の選択肢 A を承認）。手順 2 は PR #2816 で `KvCache` の公開まで
 完了し、保留ガード側の docs 更新（#2580）が残る。手順 3・4 は未着手。
+**現状（2026-10-08）**: 手順 3 は PR #2824／#2826 で完了し、手順 4 のうち #2575（公開）は
+完了した（§17）。#2576（保留ガードの正ガード仕上げ）が残る。
 
 ### 14.5 注記
 
@@ -470,3 +475,52 @@ doctest が恒常的に落ちる。
   走査ガード（`facade_does_not_expose_generate_items`・
   `facade_does_not_reexport_or_declare_generate_items`）は変更していない。
 
+## 17. 実装記録（イシュー #2575）: `generate()` の facade 公開
+
+### 17.1 承認の根拠
+
+公開形は、リポジトリ所有者本人のコメント
+https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965 の #2573 行
+（§13.2 の推奨案 + §13.5 選択肢 A、配置 (A)、着手は #2577・#2581 の公開後）で承認済み。
+KV キャッシュ（PR #2816）と `pub mod inference`（PR #2824／#2826）の公開後に着手した。
+
+### 17.2 公開した形（承認形のみ）
+
+- 配置: `fandhe_ai::inference` へ純再エクスポート（`crates/facade/src/inference/mod.rs` の
+  1 文）。公開名は `AutoregressiveModel`・`GenerateConfig`・`SamplingStrategy`・`generate` の 4 名。
+- `GenerateConfig` は autodiff の形をそのまま（pub フィールド 5 つ・`#[non_exhaustive]`・
+  `new`／`with_temperature`／`with_seed`。`validate` は非公開のまま `generate` 入口で呼ばれる）。
+  facade newtype・`Tape::generate`・`Sequential::generate` は作っていない。
+- エラー型は既存再エクスポートの `AutodiffError` を流用。
+- `fandhe-ai =0.10.0` の公開 API は追加のみ。依存・tolerance・baseline・ガードレール閾値・
+  `docs/spec/` は不変。新規 `unsafe` なし。
+
+### 17.3 差し替えたガード（#2575 で避けられない最小分）
+
+公開した瞬間に保留 doctest が glob 衝突し走査テストが落ちるため、同一変更で次を差し替えた。
+
+- 削除: `GenerateHoldDoctestGuard`、`api_surface.rs` の保留系テスト（走査 2 件・自己テスト・
+  doctest 検査 2 件・固定文言）。
+- 追加: `facade_exposes_generate_items_only_in_approved_shape`（承認形 1 文ちょうど 1 件・
+  独自宣言と `fn generate` が 0 件）とその自己テスト、`fandhe_ai::` パス経由の到達プローブ。
+  `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` へ `generate` を追加。
+- 公開経路テスト: `crates/facade/tests/generate_facade.rs`（3 戦略・shape・seed 決定性・
+  グローバル RNG 非消費・autodiff 直経路との同一性・fail-closed 検査・KV キャッシュ付き
+  モデルとキャッシュなし全系列再計算の `assert_parity` 突合）。
+
+### 17.4 未決事項（承認依頼が必要）
+
+§13.2 項目 2 は `MultiheadAttention`／`forward_with_cache` の到達経路も必要としたが、その形は
+記録に無い。一方 `docs/kv-cache-design.md` §11.4 P2／P3（承認済み）はそれらを公開しないと
+定めている。`KvCache` に外部から Tensor を入れるセッターは無く、facade のみの利用者は
+`forward_step` に渡される `caches` へ書き込めない。本イシューでは到達経路を追加していない。
+facade のみで KV キャッシュを使うモデルは `RefCell<StatefulAttention>` を内部に持ち
+`Tape::stateful_attention_forward` を呼ぶ形になる（渡された `caches` は使わず
+`num_kv_layers()` は 0。prefill 前の reset は利用者責務）。`caches` を使う形の公開が必要なら
+別途承認を得る（#2573）。
+
+### 17.5 #2576 への申し送り
+
+正ガードの全数インベントリ化・doctest 存在検査、`docs/compat-api-scope.md` §5 の適用記録、
+本書 §2・§8・§10 の実装記録、`docs/compat-feature-gap.md` 等の周辺 docs。CUDA／Metal 実機
+parity は未実測のまま（`docs/perf/logs/generate-2191/README.md`）。

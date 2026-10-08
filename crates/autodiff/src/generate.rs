@@ -1,13 +1,11 @@
 //! LLM 推論向けの自己回帰生成ループ（イシュー #2191。トークナイザは
 //! 対象外——入出力は token id 列〈`Tensor<i32>`〉に限る）。
 //!
-//! **facade 非公開・保留中**: 本モジュールはイシュー #2191 の受入条件
-//! （設定型・3 戦略・KV キャッシュ結線・loop 動作・seed 決定性）を
-//! すべてここで満たすが、facade（`fandhe_ai`）公開面への追加は
-//! `pub fn generate`／`GenerateConfig` の署名がユーザー承認事項のため
-//! 保留する（前例: #2084 K-1/K-2・#2156・#2184/#2180 と同型の 2 段構成）。
-//! 承認依頼用の設計・保留の多層固定は `docs/facade-generate-decision.md`
-//! を正とする。
+//! **facade 公開済み**: 本モジュールの `generate`／`GenerateConfig`／
+//! `SamplingStrategy`／`AutoregressiveModel` は、イシュー #2575 で facade
+//! （`fandhe_ai::inference`）へ純再エクスポートとして公開された（公開形・承認の
+//! 根拠・既知の制限は `docs/facade-generate-decision.md` §13・§17 を正とする）。
+//! 本クレートは内部クレートであり、サポートされる公開 API 面は facade のみ。
 //!
 //! # KV キャッシュ結線（#2084）
 //!
