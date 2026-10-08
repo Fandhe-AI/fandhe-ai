@@ -10,12 +10,14 @@
 //! `crates/autodiff/tests/functional_ops_pytorch_parity.rs` が担当する（facade の dev-deps は
 //! `serde` の derive を持たず、本ファイルは JSON を読まない）。
 //!
-//! CUDA／Metal 実機の `#[ignore]` テストは #2881 がこのファイル末尾へ追記する
-//! （`jacobian_hessian_backend_parity.rs` と同じ構成。形状は小さく Metal split-K 発動形状は使わない）。
+//! `#[ignore]`（イシュー #2881）: CUDA／Metal（`cfg(target_os = "macos")` 限定）の `BackendOps` を結線した
+//! tape と CPU tape の比較。実機に届かない環境では未実施のまま
+//! `docs/perf/logs/functional-transforms-2881/README.md` へ申し送る。形状は小さく、Metal split-K が
+//! 発動する形状は使わない（統一複合判定をそのまま適用できる）。
 
 use fandhe_ai_autodiff::Tape;
 use fandhe_ai_autodiff::functional_ops::{hvp, vjp, vmap};
-use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape 一致")
@@ -125,4 +127,40 @@ fn cpu_matches_hand_computed_values() {
     let m = vmap(&tape, &b, 0, |s| s.mul(s)).unwrap();
     assert_eq!(m.to_tensor().shape(), &[2, 2]);
     assert_eq!(m.to_tensor().host_slice().as_ref(), &[1.0, 4.0, 9.0, 16.0]);
+}
+
+// ---------------------------------------------------------------------
+// 実機バックエンド（`#[ignore]`）: GB10／Mac 実機セッションへ申し送る
+// （`docs/perf/logs/functional-transforms-2881/README.md`）。
+// ---------------------------------------------------------------------
+
+/// 実機 `BackendOps` を結線した tape（子テープも同一バックエンド）と CPU tape の `compute` 結果を比較する。
+fn assert_device_matches_cpu(make_ops: impl Fn() -> Box<dyn BackendOps + Send>, label: &str) {
+    let cpu = compute(&cpu_tape(), &cpu_tape());
+    let dev = compute(
+        &Tape::new_with_ops(make_ops()),
+        &Tape::new_with_ops(make_ops()),
+    );
+    assert_outs_match(&format!("cpu vs {label}"), &cpu, &dev);
+}
+
+/// vjp・hvp・vmap の CPU／Metal 実機比較。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/functional-transforms-2881/README.md 参照"]
+fn metal_functional_ops_match_cpu_reference() {
+    assert_device_matches_cpu(
+        || Box::new(fandhe_ai_backend_metal::MetalBackendOps::new()),
+        "metal",
+    );
+}
+
+/// vjp・hvp・vmap の CPU／CUDA 実機（DGX Spark GB10）比較。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/functional-transforms-2881/README.md 参照"]
+fn cuda_functional_ops_match_cpu_reference() {
+    assert_device_matches_cpu(
+        || Box::new(fandhe_ai_backend_cuda::CudaBackendOps::new(0)),
+        "cuda",
+    );
 }

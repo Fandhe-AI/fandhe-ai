@@ -143,7 +143,7 @@
 5. `supports_create_graph` の対象 Op 拡張。
 6. 微分可能な per-sample gradient（`vmap(grad)`）の公開形。子テープ上の `Var` を扱うクロージャ型など、`input` と同一テープを要求する §5 の契約とは別形が要る。
 
-承認依頼の所在（#2879）: `docs/compat-api-scope.md` §5.1 の `F1`〜`F3` ブロック。詳細は §21。
+承認依頼の所在（#2879）: `docs/compat-api-scope.md` §5.1 の `F1`〜`F3` ブロック。詳細は §22。
 
 ## 12. スコープ外・申し送り
 
@@ -233,7 +233,17 @@
 - **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認（§10 の 6〜8）。
 - **スコープ外**: double-VJP 検証（#2880）、CUDA／Metal 実機 parity（#2881）、facade 公開（#2879 以降）、`out_dim`・複数入力・`VarF64` 版・f16。
 
-## 21. 承認依頼の所在（イシュー #2879・親 #2873）
+## 21. 実装記録（#2881・親 #2841。§10 の分解案 11）
+
+- **追加したテスト**: `crates/facade/tests/functional_ops_backend_parity.rs` 末尾に `cuda_functional_ops_match_cpu_reference`（`#[ignore]`）と `metal_functional_ops_match_cpu_reference`（`#[ignore]`・`cfg(target_os = "macos")` 限定）を追記した。
+- **比較範囲と判定**: 既存 `compute` の vjp・hvp（子テープも実機バックエンド）・vmap・vmap(transpose) の 4 系統と形状を CPU tape と比較する。判定は REQ-2 統一複合判定（`assert_parity`）。形状は小さく Metal split-K は発動しない。
+- **申し送り**: 実機に届かないため未実測。測定コマンドと空の記入欄は `docs/perf/logs/functional-transforms-2881/README.md`。
+- **CI で走らない理由**: CUDA 側は `#[ignore]`、Metal 側はさらに `cfg(target_os = "macos")` のため Linux ではコンパイルもされない。
+- **新規物**: `crates/*/src`・依存・tolerance・baseline・`unsafe` は追加していない。
+- **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認。
+- **スコープ外**: vmap 出力と vjp／hvp の合成ケース（#2878 は naive のみ）・double-VJP（#2880）の実機 parity、`VarF64`・f16、facade 公開（#2879 以降）、実機での実測そのもの。
+
+## 22. 承認依頼の所在（イシュー #2879・親 #2873）
 
 - §5 の公開形・§6 の判定方式・§9 の拡張要否・§11 の論点 1〜6 は、`docs/compat-api-scope.md` §5.1 末尾の「Phase 8 公開形（関数型 AD 変換。承認依頼 #2879）」ブロックへ転記した（行ラベル `F1`〜`F3`）。本記録 §1〜§19 の内容は変えていない。
 - 実装済みシグネチャ（`crates/autodiff/src/functional_ops.rs`）と §5 の差の要点は同ブロックに書いた。受け手の違い（自由関数と `Tape` メソッド）、実装で確定した細部（単一入力・dim 0 固定・`FnMut`・`child` 必須・shape 完全一致・空バッチ拒否）、`vjp`／`hvp` の追跡なし出力・損失に対する意味論の非対称（出力が追跡なしなら `vjp` は全ゼロ、損失が追跡なしなら `hvp` は `Err` を伝播。追跡なし入力は両方 `GradientTrackingDisabled`）、保留ガードの反転範囲の 4 点である。
