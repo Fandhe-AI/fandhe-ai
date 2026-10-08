@@ -65,6 +65,9 @@ pub(crate) enum TextError {
         value: usize,
         max: usize,
     },
+    /// n-gram の生成数の上限見積り `tokens × n` が `usize` を超えた。設計記録 §6 の
+    /// variant 案にない追加分（§8 の `checked_mul` 検査を満たすため。公開時の承認対象）。
+    NgramCountOverflow { tokens: usize, n: usize },
     /// テンソル形状の不整合。
     Shape(ShapeError),
 }
@@ -121,6 +124,10 @@ impl fmt::Display for TextError {
                 f,
                 "上限の設定値が絶対上限を超えています（{limit}={value} > 絶対上限 {max}）"
             ),
+            TextError::NgramCountOverflow { tokens, n } => write!(
+                f,
+                "n-gram の生成数が数えられる範囲を超えています（トークン数 {tokens} × n={n}）"
+            ),
             TextError::Shape(e) => write!(f, "テンソル形状が不正です: {e}"),
         }
     }
@@ -176,6 +183,10 @@ mod tests {
                 limit: "max_ngrams",
                 value: 9,
                 max: 8,
+            },
+            TextError::NgramCountOverflow {
+                tokens: usize::MAX,
+                n: 2,
             },
             TextError::Shape(ShapeError::RankMismatch {
                 expected: 2,
