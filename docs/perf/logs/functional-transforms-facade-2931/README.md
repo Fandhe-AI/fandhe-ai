@@ -1,6 +1,6 @@
 # facade `Tape::vjp`／`hvp`／`vmap`（#2931）CUDA／Metal 実機未実測の申し送り
 
-`docs/autodiff-functional-transforms-design.md` §23・§24 参照。本実装エージェント実行環境は
+`docs/autodiff-functional-transforms-design.md` §23・§26 参照。本実装エージェント実行環境は
 CUDA／Metal 実機に到達できないため、`crates/facade/tests/functional_transforms_facade.rs` のうち
 CUDA（`Device::Cuda(0)`）・Metal（`Device::Metal`。`cfg(target_os = "macos")` 限定）を対象とする 2 テスト
 （`cuda_functional_transforms_match_cpu_reference`・`metal_functional_transforms_match_cpu_reference`）は

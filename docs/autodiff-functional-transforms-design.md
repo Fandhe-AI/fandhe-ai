@@ -254,7 +254,7 @@
 
 ### 23.0 状態・基準・承認の根拠
 
-- 状態: **記録のみ**（#2930 時点。コード変更なし）。公開は #2931。公開までは `FunctionalTransformsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の否定ガードを維持する。**→ #2931 で公開済み（§24、`compat-api-scope.md` §5 の適用記録）。**
+- 状態: **記録のみ**（#2930 時点。コード変更なし）。公開は #2931。公開までは `FunctionalTransformsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の否定ガードを維持する。**→ #2931 で公開済み（§26、`compat-api-scope.md` §5 の適用記録）。**
 - 基準: `origin/main` `f4dc7573`（2026-10-08）。
 - 承認の根拠: ルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`、2026-10-08）の項 1「関数型 AD（承認依頼 #2879、行 F1〜F3）」の小項目と「全機能の共通事項」に限る。承認された点は次の箇条のとおり（要約。コメントにない承認は書かない）。
   - F1〜F3 を facade `Tape` の薄い委譲メソッドとして公開する。
@@ -345,7 +345,7 @@ impl Tape {
 - CUDA／Metal の実機 parity: 既存の `#[ignore]` テスト（#2881）と `docs/perf/logs/functional-transforms-2881/README.md` で足りるかを判断する。facade 経由の `#[ignore]` テストを足す場合は `docs/perf/logs/<slug>-2931/README.md` へ申し送る（実測値は推測で書かない）。
 - 停止条件: `vmap` の寿命の結び方がコンパイルできない、または doctest が facade 単独で書けない場合は、実装せず承認依頼へ戻る。
 - 本節はコード・依存・tolerance・baseline・ガードレール閾値・`docs/spec` を変更しない。
-- **→ 上記は #2931 で実施した（§25）。**
+- **→ 上記は #2931 で実施した（§26）。**
 
 ## 24. 実装記録（#2940・親 #2939。§10 の分解案 10: `jvp`／`jacfwd` の内部実装）
 
@@ -364,8 +364,18 @@ impl Tape {
 - **承認状況**: ルート #2499 の所有者コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650 ）項 2 が示す、Tier 2 への移行（spec リポ Fandhe-AI/fandhe-ai-spec#81・実装リポ取り込み #2938。本記録の作成時点で #2938 は未マージ）と、その後の内部実装・公開形の記録までを根拠とする。facade 公開は承認範囲外で、公開形の記録と承認依頼は #2941。
 - **スコープ外**: facade 公開（#2941）、CUDA／Metal 実機 parity と `docs/perf/logs`（#2942）、`supports_create_graph` の拡張（論点 5）、`VarF64`・f16・複数入力・微分可能な `jvp`。
 
+## 25. 実装記録（#2942・親 #2939。jvp／jacfwd の CUDA／Metal 実機 parity 申し送り）
 
-## 25. 実装記録（イシュー #2931・親 #2873。facade 公開）
+- **追加したテスト**: `crates/facade/tests/functional_ops_jvp_backend_parity.rs`（新設）。属性なし 3 本（`cpu_double_vjp_matches_naive_reference`・`cpu_double_vjp_matches_jacobian`・`cpu_double_vjp_matches_hand_computed_values`）と、`cuda_double_vjp_jvp_jacfwd_match_cpu_reference`（`#[ignore]`）・`metal_double_vjp_jvp_jacfwd_match_cpu_reference`（`#[ignore]`・`cfg(target_os = "macos")` 限定）。
+- **`pub(crate)` のためミラー**: `jvp`／`jacfwd` は facade 非公開（可視性は #2940 の決定どおり変えない）で統合テストから呼べない。#2880 の `double_vjp_probe` と同様に、公開 API（`Tape::var`／`backward_create_graph`／`CreateGraph::grad`／`child_var`・子テープの `backward`・`Var::reshape`／`narrow`）だけで #2940 の手順を逐語ミラーした（`u` は全要素 1、`sum` ノードは足さない）。`jacfwd` ミラーは `g.reshape(&[n])` ＋ `narrow(0, k, 1)` で同一子テープ上の列ループを再現した（one-hot フォールバックは不要だった）。ヘルパー名は保留ガードに合わせ `fn jvp`／`fn jacfwd` を避けた（`double_vjp_jv`／`double_vjp_jac`）。#2941 等で公開が承認されたら本物の関数呼び出しへ置き換える。
+- **比較範囲と判定**: `supports_create_graph()` が真の Op のみ（matmul・broadcast add・tanh・sigmoid・exp・mul・transpose・narrow）の 2 フィクスチャで、ミラー jvp／jacfwd と同一バックエンドの `jacobian_ops::jacobian`（および f64 蓄積の `J·v`）を CPU tape と実機で比較する。判定は REQ-2 統一複合判定（`assert_parity`）。区分線形 Op は使っていない（0 近傍の符号割れによる偽の失敗を避ける）。形状は小さく Metal split-K は発動しない。
+- **申し送り**: 実機に届かないため未実測。測定コマンドと空の記入欄は `docs/perf/logs/functional-transforms-jvp-2942/README.md`。
+- **CI で走らない理由**: CUDA 側は `#[ignore]`、Metal 側はさらに `cfg(target_os = "macos")` のため Linux ではコンパイルもされない。
+- **新規物**: `crates/*/src`・依存・tolerance・baseline・`unsafe` は追加していない。
+- **承認状況**: facade 公開は承認範囲外で未承認（#2941）。
+- **スコープ外**: facade 公開・本物の関数への置換（#2941）、`supports_create_graph` の拡張（論点 5）、`VarF64`・f16、実機での実測そのもの。
+
+## 26. 実装記録（イシュー #2931・親 #2873。facade 公開）
 
 - 状態: **公開済み**。§23.1〜§23.4 の記録どおり、facade `Tape` の inherent メソッド `vjp`・`hvp`・`vmap` を内部 `fandhe_ai_autodiff::functional_ops` への 1 行委譲として公開した。シグネチャは §23.1 と完全一致する。§23.2 の停止条件（`vmap` の `&'t self` から `&'t self.0` を渡す寿命の結び方、facade 単独で書く doctest）は、いずれも問題なく通った（`Tape::vmap` は `Tape::custom` と同型の寿命）。
 - rustdoc: §23.3 の契約（入口検査の順序・追跡なしの非対称・副作用・`child` の契約・数値・適用範囲）を書き写し、3 メソッドそれぞれに facade 単独で完結する doctest（`vjp`: `x⊙x` から `2x⊙u`、`hvp`: `x³` から `6x⊙v`、`vmap`: `|s| s.mul(s)`）を付けた。内部関数は intra-doc link にせずバッククォートで書いた。
