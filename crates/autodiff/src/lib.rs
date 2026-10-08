@@ -284,6 +284,10 @@ pub mod jacobian_ops;
 // `GradcheckReport` のみ #2847 で公開（モジュール名・`anomaly` 系は保留。
 // `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §11・§12）。
 pub mod gradcheck;
+// 関数型 AD ラッパー（`vjp`。イシュー #2874）。既存 `Tape::backward` と `mul` の合成のみで、
+// 新規 Op・VJP・`AutodiffError` variant はない。facade への公開は保留
+// （`docs/autodiff-functional-transforms-design.md` §5・§10）。
+pub mod functional_ops;
 mod layout;
 pub mod linalg_ops;
 pub mod loss_ops;

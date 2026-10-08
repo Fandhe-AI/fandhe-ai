@@ -35821,6 +35821,317 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
+// FunctionalTransformsHoldDoctestGuard（イシュー #2874・親 #2841）:
+// `GradcheckAnomalyHoldDoctestGuard`（#2671）系のテストの鏡写し。実装は内部クレート
+// （`fandhe_ai_autodiff::functional_ops`。現時点は `vjp` のみ。新規 `Op`・`BackendOps` メソッド・
+// `AutodiffError` variant なし）に閉じ、facade 公開形は未承認
+// （`docs/autodiff-functional-transforms-design.md` §5・§10。同記録は推奨案の記録であり承認記録ではない）。
+// 承認済みの除外はない。検出範囲は列挙した名前（`functional_ops`・`vjp`・`hvp`・`vmap`）に限る。
+// =====================================================================
+
+/// `FunctionalTransformsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import する
+/// ネスト `pub mod` 集合と、`src/lib.rs` の実際の `pub mod` 宣言集合が一致することを固定する。
+#[test]
+fn functional_transforms_hold_doctest_globs_all_pub_modules() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "FunctionalTransformsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (globbed, _body) = split_glob_imports_and_probe_body(&block);
+    assert!(
+        !declared.is_empty(),
+        "src/lib.rs から pub mod 宣言を 1 件も抽出できなかった\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    assert_eq!(
+        declared, globbed,
+        "FunctionalTransformsHoldDoctestGuard の doctest ブロックが glob import するモジュール\
+         集合が src/lib.rs の pub mod 宣言集合とドリフトしている\
+         （declared={declared:?}, doctest={globbed:?}）。新しい pub mod を追加した\
+         場合は doctest 側の use 一覧にも追加すること。"
+    );
+}
+
+/// doctest ブロックの glob 以外の本文が固定文言 [`FUNCTIONAL_TRANSFORMS_HOLD_PROBE_BODY`] と
+/// 1 行たりとも違わず一致することを固定する（正のプローブの削除・弱体化・隠し行の混入を拒否する）。
+#[test]
+fn functional_transforms_hold_doctest_probe_body_matches_fixed_contract() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let doc_lines =
+        extract_hold_doctest_guard_doc(&content, "FunctionalTransformsHoldDoctestGuard");
+    let block = extract_single_bare_fenced_doctest_block(&doc_lines);
+    let (_globbed, body) = split_glob_imports_and_probe_body(&block);
+    let actual = body.join("\n");
+    assert_eq!(
+        actual, FUNCTIONAL_TRANSFORMS_HOLD_PROBE_BODY,
+        "FunctionalTransformsHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言\
+         FUNCTIONAL_TRANSFORMS_HOLD_PROBE_BODY からドリフトしている。正のプローブ\
+         （__fandhe_functional_transforms_hold_probe モジュール・__FandheFunctionalTransformsHoldProbe\
+         トレイト・__probe_* 関数）の削除・弱体化・隠し行の混入がないか確認すること。"
+    );
+}
+
+/// [`functional_transforms_hold_doctest_probe_body_matches_fixed_contract`] が要求する固定文言
+/// （`FunctionalTransformsHoldDoctestGuard` doc 内の唯一の doctest ブロックから、ネスト `pub mod` の
+/// glob import 行を除いた本文と 1 行単位で完全一致する）。
+const FUNCTIONAL_TRANSFORMS_HOLD_PROBE_BODY: &str = "use fandhe_ai::*;\n\
+\n\
+mod __fandhe_functional_transforms_hold_probe {\n\
+\x20\x20\x20\x20pub mod functional_ops {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20pub fn __mark() {}\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20pub fn vjp() {}\n\
+\x20\x20\x20\x20pub fn hvp() {}\n\
+\x20\x20\x20\x20pub fn vmap() {}\n\
+}\n\
+use __fandhe_functional_transforms_hold_probe::*;\n\
+\n\
+struct __FandheFunctionalTransformsHoldMarker;\n\
+\n\
+trait __FandheFunctionalTransformsHoldProbe {\n\
+\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+}\n\
+\n\
+impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
+\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+fn __probe_free_fns() {\n\
+\x20\x20\x20\x20// モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開して\n\
+\x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
+\x20\x20\x20\x20functional_ops::__mark();\n\
+\x20\x20\x20\x20// 修飾なしの自由関数呼び出し（同名の関数を facade が glob 公開していれば同様に曖昧になる）。\n\
+\x20\x20\x20\x20vjp();\n\
+\x20\x20\x20\x20hvp();\n\
+\x20\x20\x20\x20vmap();\n\
+}\n\
+\n\
+fn __probe_methods(\n\
+\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
+) {\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vjp(v);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::hvp(v);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap(v);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vjp(tape);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::hvp(tape);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vmap(tape);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);\n\
+}";
+
+/// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`hvp`／`vmap` は後続 issue の先取り）。
+const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 3] = ["vjp", "hvp", "vmap"];
+
+/// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
+const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 4] = ["functional_ops", "vjp", "hvp", "vmap"];
+
+/// [`facade_does_not_reexport_or_declare_functional_transforms`]・その自己テストが共用する検出本体。
+/// facade src の `pub use` で [`FUNCTIONAL_TRANSFORMS_IDENTS`] を経路の識別子（トークン完全一致）単位で
+/// 含むもの（別名・複数行・ネストした group を含む）、内部クレート（`fandhe_ai_autodiff`／
+/// `fandhe_ai_tensor_core`）の glob 再エクスポート、`pub mod functional_ops` の宣言、
+/// [`FUNCTIONAL_TRANSFORMS_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない。承認済みの除外はない）を違反として返す。
+fn scan_functional_transforms_reexports_and_declarations(content: &str) -> Vec<String> {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            for ident in FUNCTIONAL_TRANSFORMS_IDENTS {
+                if path_tokens.iter().any(|t| t == ident) {
+                    offending.push(format!("pub use が `{ident}` を含む"));
+                }
+            }
+            let from_internal = path_tokens
+                .iter()
+                .any(|t| t == "fandhe_ai_autodiff" || t == "fandhe_ai_tensor_core");
+            if from_internal && path_tokens.iter().any(|t| t == "*") {
+                offending.push("内部クレートの glob 再エクスポート".to_string());
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if tokens[i] == "pub"
+            && tokens.get(i + 1).map(String::as_str) == Some("mod")
+            && tokens.get(i + 2).map(String::as_str) == Some("functional_ops")
+        {
+            offending.push("pub mod functional_ops 宣言".to_string());
+        }
+        i += 1;
+    }
+
+    for fn_name in FUNCTIONAL_TRANSFORMS_FN_NAMES {
+        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        if count > 0 {
+            offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
+        }
+    }
+    offending
+}
+
+/// facade src 全体（`crates/facade/src/**`）に関数型 AD ラッパーの保留対象の再エクスポート・同名
+/// `fn`・`pub mod` 宣言が存在しないことを固定する（`FunctionalTransformsHoldDoctestGuard` の正の
+/// プローブと多層防御を成す最内層のソース走査ガード）。
+#[test]
+fn facade_does_not_reexport_or_declare_functional_transforms() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_functional_transforms_reexports_and_declarations(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が関数型 AD ラッパーの内部実装（#2874 の `functional_ops`。facade 公開形は\
+         未承認）を再エクスポート、または同名の fn／pub mod を宣言している: {offending:?}"
+    );
+}
+
+/// [`facade_does_not_reexport_or_declare_functional_transforms`] の自己テスト（各違反カテゴリの合成
+/// ソースを検出できることを恒久的に固定する）。
+#[test]
+fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_category() {
+    let offense =
+        |src: &str| !scan_functional_transforms_reexports_and_declarations(src).is_empty();
+    // 正例: モジュール・関数の再エクスポート（別名・group・複数行を含む）。
+    assert!(offense("pub use fandhe_ai_autodiff::functional_ops;"));
+    assert!(offense("pub use fandhe_ai_autodiff::functional_ops as f;"));
+    assert!(offense("pub use fandhe_ai_autodiff::functional_ops::vjp;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::functional_ops::{vjp as v, hvp};"
+    ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::{\n    Tape,\n    functional_ops::vmap,\n};"
+    ));
+    // 正例: 内部クレートの glob 再エクスポート。
+    assert!(offense("pub use fandhe_ai_autodiff::*;"));
+    // 正例: fn 宣言・pub mod。
+    assert!(offense("pub fn vjp() {}"));
+    assert!(offense("impl Tape { pub fn vjp(&self) {} }"));
+    assert!(offense("impl Var { pub fn hvp(&self) {} }"));
+    assert!(offense("impl Tensor { fn vmap(&self) {} }"));
+    assert!(offense("pub mod functional_ops {}"));
+    // 負例: コメント・文字列リテラル中の出現。
+    assert!(!offense("// pub use fandhe_ai_autodiff::functional_ops;"));
+    assert!(!offense("let s = \"pub fn vjp() {}\";"));
+    // 負例: 無関係な再エクスポート・非公開 use。
+    assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
+    assert!(!offense("use fandhe_ai_autodiff::functional_ops;"));
+    // 負例: 部分一致する別トークン・メソッド呼び出し。
+    assert!(!offense("fn matmul_vjp() {}"));
+    assert!(!offense("fn vjp_impl() {}"));
+    assert!(!offense("fn f(t: &Tape) { let _ = t.vjp(); }"));
+}
+
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`FUNCTIONAL_TRANSFORMS_FN_NAMES`] の `fn` 宣言が
+/// 許可された置き場所だけに存在することを固定する。
+///
+/// - `autodiff/src/functional_ops.rs::vjp`: #2874 の内部実装（facade からは再エクスポートしない）。
+/// - `autodiff/src/grad.rs::vjp`: 既存の Op ごとの VJP ディスパッチャ（`pub(crate)`。facade からは到達不能）。
+///
+/// `hvp`／`vmap` は現時点で 0 件。後続 issue が `functional_ops.rs` へ実装を足すときに期待集合へ 1 行ずつ追記する。
+#[test]
+fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        panic!(
+            "workspace crates ディレクトリが読めない: {}",
+            crates_dir.display()
+        );
+    };
+    let mut crate_dirs: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(
+        !crate_dirs.is_empty(),
+        "workspace crates ディレクトリ配下にクレートが 1 件も見つからない\
+         （テスト自体が検査対象を見失っている可能性がある）"
+    );
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            for fn_name in FUNCTIONAL_TRANSFORMS_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        ("autodiff/src/functional_ops.rs::vjp".to_string(), 1usize),
+        ("autodiff/src/grad.rs::vjp".to_string(), 1usize),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "workspace 全体（crates/*/src/）の vjp／hvp／vmap の `fn` 宣言が許可された置き場所\
+         （autodiff/src/functional_ops.rs・autodiff/src/grad.rs の各 1 件）と一致しない。\
+         迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
+         確認すること"
+    );
+}
+// =====================================================================
 // #2678（親 #2625・ルート #2499 Phase 4）: 承認された演算・自動微分の公開に対する正ガード。
 // 旧否定ガード（`FftOpsHoldDoctestGuard` ほか 15 個の保留 doctest と各 `facade_does_not_
 // reexport_or_declare_*`）のうち、承認形で公開した経路を「承認形だけを許す」形へ反転した

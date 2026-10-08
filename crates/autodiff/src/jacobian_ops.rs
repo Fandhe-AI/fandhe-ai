@@ -35,7 +35,8 @@ use crate::var::Var;
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 /// shape の要素数を `checked_mul` で求める（オーバーフロー時は型付きエラー）。
-fn checked_numel(shape: &[usize]) -> Result<usize, AutodiffError> {
+/// `functional_ops`（#2874）と共用する。
+pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize, AutodiffError> {
     shape.iter().try_fold(1usize, |acc, &d| {
         acc.checked_mul(d)
             .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))
@@ -57,8 +58,8 @@ fn concat_shapes(a: &[usize], b: &[usize]) -> Vec<usize> {
 }
 
 /// `v` がテープ `tape` の現世代に属することを検査する（クロステープ・
-/// `Tape::reset` 世代違いはどちらも `TapeMismatch`）。
-fn check_on_tape(tape: &Tape, v: &Var<'_>) -> Result<(), AutodiffError> {
+/// `Tape::reset` 世代違いはどちらも `TapeMismatch`）。`functional_ops`（#2874）と共用する。
+pub(crate) fn check_on_tape(tape: &Tape, v: &Var<'_>) -> Result<(), AutodiffError> {
     if v.tape_id() != tape.id || v.tape_epoch() != tape.epoch() {
         return Err(AutodiffError::TapeMismatch);
     }
@@ -105,8 +106,8 @@ impl<'t> FlatElements<'t> {
 }
 
 /// 勾配テンソル `g` を論理順のホスト値として `dst`（長さ `n`）へコピーする。
-/// 長さが `n` でなければ型付きエラー（panic しない）。
-fn copy_grad_row(g: &Tensor<f32>, dst: &mut [f32]) -> Result<(), AutodiffError> {
+/// 長さが `n` でなければ型付きエラー（panic しない）。`functional_ops`（#2874）と共用する。
+pub(crate) fn copy_grad_row(g: &Tensor<f32>, dst: &mut [f32]) -> Result<(), AutodiffError> {
     let host = g.host_slice();
     if host.len() != dst.len() {
         return Err(AutodiffError::Backward(format!(
