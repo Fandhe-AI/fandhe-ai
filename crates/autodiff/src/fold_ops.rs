@@ -5,12 +5,11 @@
 //! `groups = 1` で再利用するだけで、新規 `BackendOps` メソッド・新規カーネルは追加しない。
 //! K 軸は `(c, kh, kw)` row-major・L 軸は `(oh, ow)` row-major で PyTorch と同じ並び。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::unfold`／`Var::fold` の委譲メソッド）は未承認で、承認依頼は
-//! #2677（公開自体は承認後の #2678）。層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は #2679 の
-//! 対象で本イシューでは作らない。本モジュールは内部クレート限定の入口で、`Var` に inherent メソッドを
-//! 足さない。保留は `crates/facade/src/lib.rs` の `FoldUnfoldHoldDoctestGuard` と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する
-//! （`docs/autodiff-fold-unfold-decision.md`）。
+//! **facade 公開状況**: 入口の `Var::unfold`／`Var::fold`（本関数への 1 行委譲メソッド）は #2851 で facade へ
+//! 公開済み（モジュール自体は再エクスポートしない。公開形は `docs/autodiff-fold-unfold-decision.md` §12.1）。
+//! 層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は保留継続。残る保留は `crates/facade/src/lib.rs` の
+//! `FoldUnfoldHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定し、
+//! 公開済み側は同ファイルの正ガードが固定する。
 //!
 //! **経路**: ① `Conv2dParams::new`（0 の kernel／stride／dilation・`2·padding` オーバーフローを拒否）→
 //! ② shape 検査（`tensor_core::fold::{unfold,fold}_out_shape`。実体化・tape 操作より前。エラー時に

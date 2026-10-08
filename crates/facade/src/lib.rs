@@ -347,6 +347,12 @@ pub use fandhe_ai_autodiff::HookHandle;
 // `gradcheck` モジュールと裸の自由関数 `gradcheck` は再エクスポートしない
 // （`tests/api_surface.rs` の正ガードが固定）。
 pub use fandhe_ai_autodiff::gradcheck::{GradcheckOptions, GradcheckReport};
+// `SpectralNormState`（`Var::spectral_norm` の状態引数型。イシュー #2851）も 1 文 1 行（別名なし）で
+// 再エクスポートする。承認根拠はルート #2499 の issuecomment-6052732061 と
+// `docs/autodiff-lrn-weight-reparam-decision.md` §12.2。`weight_reparam_ops` モジュール・`norm_except_dim`・
+// `SPECTRAL_NORM_INIT_POWER_ITERATIONS` は再エクスポートしない（`tests/api_surface.rs` の正ガード
+// `facade_reexports_spectral_norm_state_only_in_approved_shape` と否定スキャンが固定）。
+pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;
 // `CastDType`／`CastElement`（イシュー #1750。`Var::cast`／`Tape::
 // var_from` の型境界・dtype タグ）も 1 文 1 行で再エクスポートする
 // （上記コメント「1 文 1 行を維持する」と同じ理由）。`CastOps`（動的
@@ -5807,31 +5813,29 @@ struct Pool3dOpsHoldDoctestGuard;
 struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 
 /// Fold と Unfold（`fold`・`unfold`。`F.fold`／`F.unfold`・`nn.Fold`／`nn.Unfold` 相当。イシュー #2645・
-/// 親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// 親 #2625・ルート #2499 Phase 4）のうち、未承認の経路を facade 公開面から締め出す保留ガード
 /// （`ConvTranspose3dMaxUnpoolHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `fold_ops`／`fold`・
-/// 型 `Fold`／`Unfold`・メソッド `fold`／`unfold`（`Var`／`Tape`／`Tensor<f32>`）と
-/// `add_fold`／`add_unfold`（`compat::Sequential`）を持つプローブ用トレイトを置き、修飾なしの関数呼び出しと
-/// 修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、
-/// これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
-/// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、
+/// **#2851 での部分反転**: `Var::fold`／`Var::unfold` の委譲メソッドは、ルート #2499 の
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061> の承認に基づき
+/// `docs/autodiff-fold-unfold-decision.md` §12.1 の形で公開した（`docs/compat-api-scope.md` §5.1）。
+/// そのため `Var` へのトレイト impl と UFCS 呼び出しは本プローブから外した（inherent メソッドと
+/// シグネチャが衝突するため）。公開済み側の正ガードは
+/// `crates/facade/tests/api_surface.rs`（`workspace_declares_fold_unfold_fn_names_only_in_allowed_locations`・
+/// `PHASE4_VAR_EXPECTED_BODIES`）が担う。
+///
+/// 引き続き拒否する未承認経路は、ローカルモジュール `fold_ops`／`fold`・型 `Fold`／`Unfold`・
+/// `Tape`／`Tensor<f32>` 上の同名メソッド・`add_fold`／`add_unfold`（`compat::Sequential`。層化は保留継続）である。
+/// 下の doctest は全 `pub mod` を glob import したスコープへこれらのプローブを置き、facade が同名のモジュール・型・関数を
+/// glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
+/// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、
 /// `tensor-core` 側への同名メソッド追加も検出する）。検出範囲はこれらの名前・型に限り、マクロ生成や別名経由の
 /// メソッドまでは保証しない。
-///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::fold_ops`・`fandhe_ai_tensor_core::fold`）。
-/// 保留対象は facade 公開面（`Var::fold`／`Var::unfold` の委譲メソッド）のみで、公開形は未承認
-/// （承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は `docs/autodiff-fold-unfold-decision.md` §7。
-/// 同記録は推奨案の記録であり承認記録ではない）。層化（`compat::Sequential::add_fold`／`add_unfold`）も同じ
-/// 保留に含める（#2679 の層結線がもう一方の漏出経路のため）。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::fold_unfold_hold_doctest_globs_all_pub_modules`・
 /// `fold_unfold_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_fold_unfold`・
 /// `workspace_declares_fold_unfold_fn_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5871,15 +5875,6 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 /// trait __FandheFoldUnfoldHoldProbe {
 ///     fn fold(&self) -> __FandheFoldUnfoldHoldMarker;
 ///     fn unfold(&self) -> __FandheFoldUnfoldHoldMarker;
-/// }
-///
-/// impl<'t> __FandheFoldUnfoldHoldProbe for fandhe_ai::Var<'t> {
-///     fn fold(&self) -> __FandheFoldUnfoldHoldMarker {
-///         __FandheFoldUnfoldHoldMarker
-///     }
-///     fn unfold(&self) -> __FandheFoldUnfoldHoldMarker {
-///         __FandheFoldUnfoldHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheFoldUnfoldHoldProbe for fandhe_ai::Tape {
@@ -5923,13 +5918,11 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 ///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
-///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Var::fold(v);
-///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Var::unfold(v);
 ///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::fold(tape);
 ///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::unfold(tape);
 ///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::fold(tf);
@@ -5944,34 +5937,32 @@ struct FoldUnfoldHoldDoctestGuard;
 
 /// LocalResponseNorm と重み再パラメータ化（`local_response_norm`・`weight_norm`・`norm_except_dim`・
 /// `spectral_norm`。`F.local_response_norm`・`torch._weight_norm`・`parametrizations.spectral_norm` 相当。
-/// イシュー #2646・親 #2625・ルート #2499 Phase 4）を facade 公開面から締め出す保留ガード
+/// イシュー #2646・親 #2625・ルート #2499 Phase 4）のうち、未承認の経路を facade 公開面から締め出す保留ガード
 /// （`FoldUnfoldHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `lrn_ops`／
-/// `weight_reparam_ops`／`lrn`／`weight_reparam`・型 `LocalResponseNorm`／`WeightNorm`／`SpectralNorm`／
-/// `SpectralNormState`・メソッド `local_response_norm`／`weight_norm`／`spectral_norm`／`norm_except_dim`
-/// （`Var`／`Tape`／`Tensor<f32>`）と `add_local_response_norm`／`add_weight_norm`／`add_spectral_norm`
-/// （`compat::Sequential`）を持つプローブ用トレイトを置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出しの
-/// 両方を行う。facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の inherent
-/// メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが
-/// 失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
-/// 検出範囲はこれらの名前・型に限り、マクロ生成や別名経由のメソッドまでは保証しない。
+/// **#2851 での部分反転**: `Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm` の委譲メソッドと
+/// `SpectralNormState` のクレートルート再エクスポートは、ルート #2499 の
+/// <https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061> の承認に基づき
+/// `docs/autodiff-lrn-weight-reparam-decision.md` §12.1・§12.2 の形で公開した（`docs/compat-api-scope.md` §5.1）。
+/// そのため下の `Var` 向け UFCS 呼び出し 3 行と、プローブモジュール内のローカル型 `SpectralNormState`
+/// （ルート再エクスポートと glob 衝突して E0659 になるため）を外した。`Var` へのトレイト impl は
+/// `norm_except_dim`（非公開のまま保留）のプローブのため残す。公開済み側の正ガードは
+/// `crates/facade/tests/api_surface.rs`（`facade_reexports_spectral_norm_state_only_in_approved_shape`・
+/// `workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations`・`PHASE4_VAR_EXPECTED_BODIES`）が担う。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::lrn_ops`・`fandhe_ai_autodiff::weight_reparam_ops`・
-/// `fandhe_ai_tensor_core::lrn`・`fandhe_ai_tensor_core::weight_reparam`）。保留対象は facade 公開面
-/// （`Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm` の委譲メソッドと
-/// `SpectralNormState` の公開位置）のみで、公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678・
-/// #2679。推奨案は `docs/autodiff-lrn-weight-reparam-decision.md` §7。同記録は推奨案の記録であり承認記録では
-/// ない）。層化（`compat::Sequential::add_*`・`Linear`／`Conv` への parametrization 結線）も同じ保留に
-/// 含める（#2679 の層結線がもう一方の漏出経路のため）。
+/// 引き続き拒否する未承認経路は、ローカルモジュール `lrn_ops`／`weight_reparam_ops`／`lrn`／`weight_reparam`・
+/// 型 `LocalResponseNorm`／`WeightNorm`／`SpectralNorm`・`Var::norm_except_dim` と `Tape`／`Tensor<f32>` 上の
+/// 同名メソッド・`add_local_response_norm`／`add_weight_norm`／`add_spectral_norm`（`compat::Sequential`。
+/// 層化・結線方式は保留継続）である。下の doctest は全 `pub mod` を glob import したスコープへこれらのプローブを置き、
+/// facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、
+/// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する
+/// （`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
+/// 検出範囲はこれらの名前・型に限り、マクロ生成や別名経由のメソッドまでは保証しない。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::lrn_weight_reparam_hold_doctest_globs_all_pub_modules`・
 /// `lrn_weight_reparam_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_lrn_weight_reparam`・
 /// `workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations`）との多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
-/// 正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5997,7 +5988,6 @@ struct FoldUnfoldHoldDoctestGuard;
 ///     pub struct LocalResponseNorm;
 ///     pub struct WeightNorm;
 ///     pub struct SpectralNorm;
-///     pub struct SpectralNormState;
 ///     pub mod lrn_ops {
 ///         pub fn local_response_norm() {}
 ///     }
@@ -6087,7 +6077,7 @@ struct FoldUnfoldHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// fn __probe_free_fns(_: LocalResponseNorm, _: WeightNorm, _: SpectralNorm, _: SpectralNormState) {
+/// fn __probe_free_fns(_: LocalResponseNorm, _: WeightNorm, _: SpectralNorm) {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり
 ///     // E0659 でコンパイル失敗する）。
 ///     lrn_ops::local_response_norm();
@@ -6104,9 +6094,6 @@ struct FoldUnfoldHoldDoctestGuard;
 ///     tf: &fandhe_ai::Tensor<f32>,
 ///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
-///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::local_response_norm(v);
-///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::weight_norm(v);
-///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::spectral_norm(v);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::norm_except_dim(v);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::local_response_norm(tape);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::weight_norm(tape);

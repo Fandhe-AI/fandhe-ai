@@ -29523,9 +29523,11 @@ fn workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locat
 // =====================================================================
 // FoldUnfoldHoldDoctestGuard（イシュー #2645・親 #2625・ルート #2499 Phase 4）:
 // `ConvTranspose3dMaxUnpoolHoldDoctestGuard`（#2644）系のテストを鏡写しにする。実装は内部クレート
-// （`fandhe_ai_autodiff::fold_ops`・`fandhe_ai_tensor_core::fold`）に閉じ、facade 公開形
-// （`Var::fold`／`Var::unfold` の委譲メソッド）は未承認（承認依頼は #2677。公開は承認後の #2678・
-// #2679）。層化（`compat::Sequential::add_fold`／`add_unfold`）も同じ保留に含める。
+// （`fandhe_ai_autodiff::fold_ops`・`fandhe_ai_tensor_core::fold`）に閉じる。#2851 で `Var::fold`／
+// `Var::unfold` の委譲メソッドだけを公開済み（承認根拠はルート #2499 の issuecomment-6052732061・
+// 公開形は `docs/autodiff-fold-unfold-decision.md` §12.1。公開側の正ガードは
+// `workspace_declares_fold_unfold_fn_names_only_in_allowed_locations` と `PHASE4_VAR_EXPECTED_BODIES`）。
+// モジュール・型・`Tape`／`Tensor` 上の同名メソッド・層化（`compat::Sequential::add_fold`／`add_unfold`）は保留継続。
 // `fold` は `Iterator::fold`・`fold_bits`・`try_fold` など既存コードで頻出する識別子のため、
 // 検出はトークン完全一致のみで行い、部分一致する別トークンは違反としない（自己テストで固定）。
 // 検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）に限り、
@@ -29597,15 +29599,6 @@ trait __FandheFoldUnfoldHoldProbe {\n\
 \x20\x20\x20\x20fn unfold(&self) -> __FandheFoldUnfoldHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheFoldUnfoldHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn fold(&self) -> __FandheFoldUnfoldHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFoldUnfoldHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn unfold(&self) -> __FandheFoldUnfoldHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFoldUnfoldHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheFoldUnfoldHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn fold(&self) -> __FandheFoldUnfoldHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFoldUnfoldHoldMarker\n\
@@ -29647,13 +29640,11 @@ fn __probe_free_fns(_: Fold, _: Unfold) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Var::fold(v);\n\
-\x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Var::unfold(v);\n\
 \x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::fold(tape);\n\
 \x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::unfold(tape);\n\
 \x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::fold(tf);\n\
@@ -29814,8 +29805,9 @@ fn facade_does_not_reexport_or_declare_fold_unfold_detects_each_category() {
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`FOLD_UNFOLD_FN_NAMES`] の `fn` 宣言が承認済みの
 /// 置き場所だけに存在することを固定する。
 ///
-/// 期待値は `autodiff/src/fold_ops.rs::fold` と `autodiff/src/fold_ops.rs::unfold` の各 1 件のみ
-/// （`add_fold`／`add_unfold` は 0 件。層化は #2679 の対象）。これら以外への追加は fail-closed に検出する。
+/// 期待値は `autodiff/src/fold_ops.rs::{fold, unfold}` の各 1 件と、#2851 で公開した
+/// `autodiff/src/var.rs::{fold, unfold}`（`Var` の 1 行委譲メソッド）の各 1 件のみ
+/// （`add_fold`／`add_unfold` は 0 件。層化は保留継続）。これら以外への追加は fail-closed に検出する。
 /// テスト用ヘルパーにも素の `fn fold`／`fn unfold` という名前を使わないこと（インベントリに数えられる）。
 #[test]
 fn workspace_declares_fold_unfold_fn_names_only_in_allowed_locations() {
@@ -29862,11 +29854,13 @@ fn workspace_declares_fold_unfold_fn_names_only_in_allowed_locations() {
     let mut expected: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for n in ["fold", "unfold"] {
         expected.insert(format!("autodiff/src/fold_ops.rs::{n}"), 1);
+        // #2851: `Var` の 1 行委譲メソッド（正ガード `PHASE4_VAR_EXPECTED_BODIES` が本体を固定）。
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
     }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の fold／unfold／add_fold／add_unfold の `fn` 宣言が承認済みの\
-         置き場所（autodiff/src/fold_ops.rs の fold と unfold 各 1 件のみ）と一致しない。迂回経路\
+         置き場所（autodiff/src/fold_ops.rs と autodiff/src/var.rs の fold と unfold 各 1 件のみ）と一致しない。迂回経路\
          （facade／Var／Sequential への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
@@ -29876,9 +29870,11 @@ fn workspace_declares_fold_unfold_fn_names_only_in_allowed_locations() {
 // LrnWeightReparamHoldDoctestGuard（イシュー #2646・親 #2625・ルート #2499 Phase 4）:
 // `FoldUnfoldHoldDoctestGuard`（#2645）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::{lrn_ops, weight_reparam_ops}`・`fandhe_ai_tensor_core::{lrn, weight_reparam}`）に
-// 閉じ、facade 公開形（`Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm` の委譲メソッド・
-// `SpectralNormState` の公開位置）は未承認（承認依頼は #2677。公開は承認後の #2678・#2679）。
-// 層化（`compat::Sequential::add_local_response_norm`／`add_weight_norm`／`add_spectral_norm`）も同じ保留に含める。
+// 閉じる。#2851 で `Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm` の委譲メソッドと
+// `SpectralNormState` のルート再エクスポート 1 行だけを公開済み（承認根拠はルート #2499 の
+// issuecomment-6052732061・公開形は `docs/autodiff-lrn-weight-reparam-decision.md` §12。公開側の正ガードは
+// `facade_reexports_spectral_norm_state_only_in_approved_shape`・`PHASE4_VAR_EXPECTED_BODIES`）。
+// `norm_except_dim`・モジュール・型・層化・結線方式は保留継続（`compat::Sequential::add_local_response_norm`／`add_weight_norm`／`add_spectral_norm`）も同じ保留に含める。
 // 検出はトークン完全一致のみで行い、`weight_norm_forward`・`spectral_norm_host`・`lrn_layout` など部分一致する
 // 別トークンは違反としない（自己テストで固定）。
 // 検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、doctest プローブが
@@ -29934,7 +29930,6 @@ mod __fandhe_lrn_weight_reparam_hold_probe {\n\
 \x20\x20\x20\x20pub struct LocalResponseNorm;\n\
 \x20\x20\x20\x20pub struct WeightNorm;\n\
 \x20\x20\x20\x20pub struct SpectralNorm;\n\
-\x20\x20\x20\x20pub struct SpectralNormState;\n\
 \x20\x20\x20\x20pub mod lrn_ops {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20pub fn local_response_norm() {}\n\
 \x20\x20\x20\x20}\n\
@@ -30024,7 +30019,7 @@ impl __FandheLrnWeightReparamHoldSequentialProbe for fandhe_ai::compat::Sequenti
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-fn __probe_free_fns(_: LocalResponseNorm, _: WeightNorm, _: SpectralNorm, _: SpectralNormState) {\n\
+fn __probe_free_fns(_: LocalResponseNorm, _: WeightNorm, _: SpectralNorm) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり\n\
 \x20\x20\x20\x20// E0659 でコンパイル失敗する）。\n\
 \x20\x20\x20\x20lrn_ops::local_response_norm();\n\
@@ -30041,9 +30036,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::local_response_norm(v);\n\
-\x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::weight_norm(v);\n\
-\x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::spectral_norm(v);\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::norm_except_dim(v);\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::local_response_norm(tape);\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::weight_norm(tape);\n\
@@ -30117,6 +30109,15 @@ fn scan_lrn_weight_reparam_reexports_and_declarations(content: &str) -> Vec<Stri
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            // #2851: 承認形（空白正規化した宣言全体が完全一致する 1 行）だけは違反にしない。
+            // 別名・group・可視性修飾付き・複数ファイルへの重複は正ガード
+            // （`facade_reexports_spectral_norm_state_only_in_approved_shape`）が拒否する。
+            if tokens[i..(end + 1).min(tokens.len())].join(" ")
+                == normalized_tokens(SPECTRAL_NORM_STATE_APPROVED_REEXPORT)
+            {
+                i = (end + 1).min(tokens.len());
+                continue;
+            }
             for ident in LRN_WEIGHT_REPARAM_IDENTS {
                 if path_tokens.iter().any(|t| t == ident) {
                     offending.push(format!("pub use が `{ident}` を含む"));
@@ -30203,9 +30204,16 @@ fn facade_does_not_reexport_or_declare_lrn_weight_reparam_detects_each_category(
     assert!(offense(
         "pub use fandhe_ai_autodiff::weight_reparam_ops::{\n    spectral_norm,\n    norm_except_dim,\n};"
     ));
-    assert!(offense(
-        "pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;"
-    ));
+    // #2851: 承認形の再エクスポート 1 行だけは違反にしない（別名・group・可視性修飾付き等は違反のまま）。
+    assert!(!offense(SPECTRAL_NORM_STATE_APPROVED_REEXPORT));
+    for src in [
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState as S;",
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::{SpectralNormState, norm_except_dim};",
+        "pub use fandhe_ai_autodiff::weight_reparam_ops;",
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::{SpectralNormState, SPECTRAL_NORM_INIT_POWER_ITERATIONS};",
+    ] {
+        assert!(offense(src), "src={src:?}");
+    }
     // 正例: 内部クレートの glob 再エクスポート。
     assert!(offense("pub use fandhe_ai_autodiff::*;"));
     assert!(offense("pub use fandhe_ai_tensor_core::*;"));
@@ -30261,8 +30269,9 @@ fn facade_does_not_reexport_or_declare_lrn_weight_reparam_detects_each_category(
 /// 置き場所だけに存在することを固定する。
 ///
 /// 期待値は `autodiff/src/lrn_ops.rs::local_response_norm` と
-/// `autodiff/src/weight_reparam_ops.rs::{weight_norm, norm_except_dim, spectral_norm}` の各 1 件のみ
-/// （`add_*` は 0 件。層化は #2679 の対象）。これら以外への追加は fail-closed に検出する。
+/// `autodiff/src/weight_reparam_ops.rs::{weight_norm, norm_except_dim, spectral_norm}` の各 1 件、
+/// #2851 で公開した `autodiff/src/var.rs::{local_response_norm, weight_norm, spectral_norm}`
+/// （`Var` の 1 行委譲メソッド）の各 1 件のみ（`add_*` は 0 件。層化は保留継続。`norm_except_dim` は非公開のまま）。これら以外への追加は fail-closed に検出する。
 /// テスト用ヘルパーにも素の `fn weight_norm`／`fn spectral_norm`／`fn local_response_norm`／
 /// `fn norm_except_dim` という名前を使わないこと（インベントリに数えられる）。
 #[test]
@@ -30315,11 +30324,17 @@ fn workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations() {
     for n in ["weight_norm", "norm_except_dim", "spectral_norm"] {
         expected.insert(format!("autodiff/src/weight_reparam_ops.rs::{n}"), 1);
     }
+    // #2851: `Var` の 1 行委譲メソッド 3 本（本体は `PHASE4_VAR_EXPECTED_BODIES` が固定）。
+    // `norm_except_dim` は非公開のまま（`var.rs` には現れない）。
+    for n in ["local_response_norm", "weight_norm", "spectral_norm"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の local_response_norm／weight_norm／norm_except_dim／spectral_norm／\
          add_* の `fn` 宣言が承認済みの置き場所（autodiff/src/lrn_ops.rs の local_response_norm と\
-         autodiff/src/weight_reparam_ops.rs の weight_norm・norm_except_dim・spectral_norm 各 1 件のみ）と\
+         autodiff/src/weight_reparam_ops.rs の weight_norm・norm_except_dim・spectral_norm 各 1 件、\
+         および autodiff/src/var.rs の local_response_norm・weight_norm・spectral_norm 各 1 件のみ）と\
          一致しない。迂回経路（facade／Var／Sequential への inherent メソッド追加等）の混入か、未承認の実装追加\
          でないか確認すること"
     );
@@ -35425,6 +35440,74 @@ const GRADCHECK_FN_APPROVED_BODY: &str = "fandhe_ai_autodiff::gradcheck::gradche
 const GRADCHECK_TYPES_APPROVED_REEXPORT: &str =
     "pub use fandhe_ai_autodiff::gradcheck::{GradcheckOptions, GradcheckReport};";
 
+/// #2851 の承認形の再エクスポート 1 行（決定記録 `docs/autodiff-lrn-weight-reparam-decision.md` §12.2。
+/// 別名なし・1 文 1 行・`src/lib.rs` のみ）。`weight_reparam_ops` モジュールや `norm_except_dim` は含めない。
+const SPECTRAL_NORM_STATE_APPROVED_REEXPORT: &str =
+    "pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;";
+
+/// `SpectralNormState` を識別子に含む `pub use`（`pub(...)` 付きを含む）宣言を空白正規化して集める。
+fn scan_spectral_norm_state_pub_use_lines(content: &str) -> Vec<String> {
+    scan_pub_use_decls_containing_idents(content, &["SpectralNormState"])
+}
+
+/// `SpectralNormState` の再エクスポートが facade src 全体で `src/lib.rs` の承認形 1 行だけであることを
+/// 固定する正ガード（#2851）。別名・group・別ファイル・可視性修飾付きは fail。
+#[test]
+fn facade_reexports_spectral_norm_state_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved = 0usize;
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in scan_spectral_norm_state_pub_use_lines(content) {
+            if path.ends_with("src/lib.rs") && line == SPECTRAL_NORM_STATE_APPROVED_REEXPORT {
+                approved += 1;
+            } else {
+                offending.push(format!("{}: `{line}`", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が SpectralNormState を承認形以外で再エクスポートしている（#2851）: {offending:?}"
+    );
+    assert_eq!(
+        approved, 1,
+        "src/lib.rs に承認形の再エクスポート行がちょうど 1 件ない（検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_spectral_norm_state_pub_use_lines`] の自己テスト（合成入力）。
+#[test]
+fn facade_reexports_spectral_norm_state_only_in_approved_shape_detects_each_category() {
+    let scan = scan_spectral_norm_state_pub_use_lines;
+    assert_eq!(
+        scan(SPECTRAL_NORM_STATE_APPROVED_REEXPORT),
+        vec![SPECTRAL_NORM_STATE_APPROVED_REEXPORT.to_string()]
+    );
+    for src in [
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState as S;",
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::{SpectralNormState, norm_except_dim};",
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::{\n    SpectralNormState,\n};",
+        "pub(crate) use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;",
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::{SpectralNormState, SPECTRAL_NORM_INIT_POWER_ITERATIONS};",
+    ] {
+        let hits = scan(src);
+        assert_eq!(hits.len(), 1, "src={src:?}");
+        assert_ne!(
+            hits[0], SPECTRAL_NORM_STATE_APPROVED_REEXPORT,
+            "src={src:?}"
+        );
+    }
+    for src in [
+        "// pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;",
+        "let s = \"pub use x::SpectralNormState;\";",
+        "use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;",
+        "pub use fandhe_ai_autodiff::HookHandle;",
+    ] {
+        assert!(scan(src).is_empty(), "src={src:?}");
+    }
+}
+
 /// トークン列中の全 `fn gradcheck` 宣言について、直前に `pub` があればそれを含め、本体 `{`（宣言
 /// なら `;`）の直前までを空白連結して返す（`pub` が無い宣言は `fn` から始まる文字列になり承認形と一致しない）。
 fn gradcheck_fn_signatures(tokens: &[String]) -> Vec<String> {
@@ -35739,7 +35822,7 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
 /// （[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。`matmul_low_precision` は本体を持つ
 /// 既存メソッドを `pub` にしただけで委譲の向きが逆（自由関数 → メソッド）のため本表の対象外とし、
 /// 代わりに自由関数側の本体を [`phase4_matmul_low_precision_free_fn_delegates_to_method`] が固定する。
-const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 71] = [
+const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 76] = [
     (
         "fft_ops",
         "rfft",
@@ -36064,6 +36147,31 @@ const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 71] = [
         "max_unpool3d",
         "crate : : max_unpool_ops : : max_unpool3d ( self , indices , kernel_size , stride , padding , output_size , )",
     ),
+    (
+        "fold_ops",
+        "unfold",
+        "crate : : fold_ops : : unfold ( self , kernel_size , stride , padding , dilation )",
+    ),
+    (
+        "fold_ops",
+        "fold",
+        "crate : : fold_ops : : fold ( self , output_size , kernel_size , stride , padding , dilation )",
+    ),
+    (
+        "lrn_ops",
+        "local_response_norm",
+        "crate : : lrn_ops : : local_response_norm ( self , size , alpha , beta , k )",
+    ),
+    (
+        "weight_reparam_ops",
+        "weight_norm",
+        "crate : : weight_reparam_ops : : weight_norm ( self , g , dim )",
+    ),
+    (
+        "weight_reparam_ops",
+        "spectral_norm",
+        "crate : : weight_reparam_ops : : spectral_norm ( self , state , training )",
+    ),
 ];
 
 /// [`PHASE4_VAR_EXPECTED_BODIES`] の各メソッドが `var.rs` に `pub fn` として 1 件だけ存在し、
@@ -36320,10 +36428,38 @@ fn phase4_held_items_remain_unexposed() {
         )
         .is_empty()
     );
+    // #2851: `Var` 委譲だけを公開した行 14・15 の保留維持分（モジュール・型・層化・`norm_except_dim`）。
+    for src in [
+        "pub use fandhe_ai_autodiff::fold_ops;",
+        "pub struct Fold;",
+        "pub struct Unfold;",
+        "impl Sequential { pub fn add_fold(&mut self) {} }",
+        "impl Sequential { pub fn add_unfold(&mut self) {} }",
+    ] {
+        assert!(
+            !scan_fold_unfold_reexports_and_declarations(src).is_empty(),
+            "Fold／Unfold の保留ガードが検出できない: {src:?}"
+        );
+    }
+    for src in [
+        "pub use fandhe_ai_autodiff::weight_reparam_ops::norm_except_dim;",
+        "pub use fandhe_ai_autodiff::weight_reparam_ops;",
+        "impl Tensor { pub fn norm_except_dim(&self) {} }",
+        "impl Var { pub fn norm_except_dim(&self) {} }",
+        "impl Sequential { pub fn add_weight_norm(&mut self) {} }",
+        "pub mod lrn_ops {}",
+        "pub struct WeightNorm;",
+    ] {
+        assert!(
+            !scan_lrn_weight_reparam_reexports_and_declarations(src).is_empty(),
+            "LRN／重み再パラメータ化の保留ガードが検出できない: {src:?}"
+        );
+    }
     let content = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/var.rs"));
     let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     for name in [
+        "norm_except_dim",
         "gradcheck",
         "rrelu_with_noise",
         "bce_with_logits_loss_with",

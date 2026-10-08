@@ -1,5 +1,6 @@
-//! `fandhe_ai_autodiff::fold_ops::{fold, unfold}`（イシュー #2645。facade 非公開のため
-//! `fandhe_ai_autodiff::*` を直接 use する。モジュール doc 参照）のバックエンド間 parity テスト
+//! `Var::fold`／`Var::unfold`（イシュー #2645 で実装・#2851 で facade 公開。実体は
+//! `fandhe_ai_autodiff::fold_ops::{fold, unfold}` への 1 行委譲で、本テストは #2851 以降 `Var` メソッド経由で
+//! 同じ経路を測る）のバックエンド間 parity テスト
 //! （`conv_transpose3d_max_unpool_backend_parity.rs` と同型）。
 //!
 //! 属性なし（`fandhe_ai::tape()`〈`CpuBackendOps`〉と `fandhe_ai_autodiff::Tape::new()`〈`NaiveOps`＝
@@ -16,7 +17,6 @@
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
-use fandhe_ai_autodiff::fold_ops::{fold, unfold};
 use fandhe_ai_tensor_core::Tensor;
 
 trait VarSource {
@@ -63,7 +63,7 @@ macro_rules! outputs_on {
         let tape = $tape;
         // --- unfold ---
         let x = tape.make_var(&t(wave(IMG.iter().product(), 0.043, 1.0), &IMG));
-        let y = unfold(&x, KERNEL, STRIDE, PADDING, DILATION).unwrap();
+        let y = x.unfold(KERNEL, STRIDE, PADDING, DILATION).unwrap();
         let unfold_out = y.to_tensor();
         let n_out: usize = unfold_out.shape().iter().product();
         let g = tape.make_var(&t(wave(n_out, 0.053, 0.7), unfold_out.shape()));
@@ -80,7 +80,7 @@ macro_rules! outputs_on {
         let col_shape = unfold_out.shape().to_vec();
         let n_col: usize = col_shape.iter().product();
         let c = tape.make_var(&t(wave(n_col, 0.071, 1.0), &col_shape));
-        let z = fold(&c, OUT_SIZE, KERNEL, STRIDE, PADDING, DILATION).unwrap();
+        let z = c.fold(OUT_SIZE, KERNEL, STRIDE, PADDING, DILATION).unwrap();
         let fold_out = z.to_tensor();
         let n_z: usize = fold_out.shape().iter().product();
         let gz = tape.make_var(&t(wave(n_z, 0.037, 0.9), fold_out.shape()));

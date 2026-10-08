@@ -1,13 +1,12 @@
 //! 重み再パラメータ化の自由関数（`weight_norm`・`norm_except_dim`・`spectral_norm`）と内部型
 //! [`SpectralNormState`]（イシュー #2646・親 #2625「Phase 4」・ルート #2499）。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::weight_norm`／`Var::spectral_norm` の委譲メソッドと
-//! `SpectralNormState` の公開位置）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
-//! 層化（`Linear`／`Conv` の重みへの parametrization 結線・`Sequential::add_*`・保存復元）は #2679 の
-//! 対象で本イシューでは作らない。本モジュールは内部クレート限定の入口で、`Var` に inherent メソッドを
-//! 足さない。保留は `crates/facade/src/lib.rs` の `LrnWeightReparamHoldDoctestGuard` と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する
-//! （`docs/autodiff-lrn-weight-reparam-decision.md`）。
+//! **facade 公開状況**: 入口の `Var::weight_norm`／`Var::spectral_norm`（本モジュールの関数への 1 行委譲
+//! メソッド）と `SpectralNormState`（クレートルートの別名なし再エクスポート 1 行）は #2851 で facade へ公開済み
+//! （モジュール自体は再エクスポートしない。公開形は `docs/autodiff-lrn-weight-reparam-decision.md` §12）。
+//! `norm_except_dim`・層化（`Linear`／`Conv` の重みへの parametrization 結線・`Sequential::add_*`・保存復元）は
+//! 保留継続。残る保留は `crates/facade/src/lib.rs` の `LrnWeightReparamHoldDoctestGuard` と
+//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定し、公開済み側は同ファイルの正ガードが固定する。
 //!
 //! **PyTorch 相当**:
 //!

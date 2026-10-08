@@ -1,5 +1,7 @@
-//! `fandhe_ai_autodiff::{lrn_ops, weight_reparam_ops}`（イシュー #2646。facade 非公開のため
-//! `fandhe_ai_autodiff::*` を直接 use する。モジュール doc 参照）のバックエンド間 parity テスト
+//! `Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm`（イシュー #2646 で実装・#2851 で
+//! facade 公開。実体は `fandhe_ai_autodiff::{lrn_ops, weight_reparam_ops}` への 1 行委譲で、本テストは #2851 以降
+//! `Var` メソッド経由で同じ経路を測る。`norm_except_dim` は非公開のため内部パスから import する）の
+//! バックエンド間 parity テスト
 //! （`pool3d_ops_backend_parity.rs` と同型）。
 //!
 //! 属性なし（`fandhe_ai::tape()`〈`CpuBackendOps`〉と `fandhe_ai_autodiff::Tape::new()`〈`NaiveOps`＝
@@ -15,11 +17,9 @@
 //! parity ではなく「`Unsupported` → ホストフォールバック経路が CPU tape と bit 一致すること」の確認である。
 
 use fandhe_ai::Device;
+use fandhe_ai::SpectralNormState;
 use fandhe_ai_autodiff::Var;
-use fandhe_ai_autodiff::lrn_ops::local_response_norm;
-use fandhe_ai_autodiff::weight_reparam_ops::{
-    SpectralNormState, norm_except_dim, spectral_norm, weight_norm,
-};
+use fandhe_ai_autodiff::weight_reparam_ops::norm_except_dim;
 use fandhe_ai_tensor_core::Tensor;
 
 trait VarSource {
@@ -68,7 +68,7 @@ macro_rules! outputs_on {
         // --- LocalResponseNorm（偶数 size・非既定パラメータ） ---
         let n_lrn: usize = LRN_SHAPE.iter().product();
         let x = tape.make_var(&t(wave(n_lrn, 0.043, 2.0), &LRN_SHAPE));
-        let y = local_response_norm(&x, 4, 0.3, 0.75, 1.5).unwrap();
+        let y = x.local_response_norm(4, 0.3, 0.75, 1.5).unwrap();
         let lrn_out = y.to_tensor();
         let g = tape.make_var(&t(wave(n_lrn, 0.053, 0.7), &LRN_SHAPE));
         let loss = y.mul(&g).unwrap().sum(None).unwrap();
@@ -94,7 +94,7 @@ macro_rules! outputs_on {
         );
         let v = tape.make_var(&v0);
         let gv = tape.make_var(&g0);
-        let w = weight_norm(&v, &gv, Some(1)).unwrap();
+        let w = v.weight_norm(&gv, Some(1)).unwrap();
         let wn_out = w.to_tensor();
         let up = tape.make_var(&t(wave(n_wn, 0.037, 0.9), &WN_SHAPE));
         let loss = w.mul(&up).unwrap().sum(None).unwrap();
@@ -114,7 +114,7 @@ macro_rules! outputs_on {
         )
         .unwrap();
         let sw = tape.make_var(&t(wave(n_sp, 0.091, 1.2), &SP_SHAPE));
-        let sy = spectral_norm(&sw, &mut st, true).unwrap();
+        let sy = sw.spectral_norm(&mut st, true).unwrap();
         let sp_out = sy.to_tensor();
         let sup = tape.make_var(&t(wave(n_sp, 0.029, 0.8), &SP_SHAPE));
         let loss = sy.mul(&sup).unwrap().sum(None).unwrap();
