@@ -1,4 +1,4 @@
-//! 関数型 AD ラッパー `vjp`（イシュー #2874・親 #2841。契約の正は
+//! 関数型 AD ラッパー `vjp`・`hvp`（イシュー #2874／#2875・親 #2841。契約の正は
 //! `docs/autodiff-functional-transforms-design.md` §3〜§7・§10）。
 //!
 //! **新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant はゼロ**:
@@ -12,8 +12,9 @@
 //!
 //! **公開形は未承認（保留）**: facade（`fandhe_ai`）へは公開しない。保留は facade の
 //! `FunctionalTransformsHoldDoctestGuard` と `tests/api_surface.rs` の否定ガードで
-//! 機械固定している。後続の `hvp`・ループ版 `vmap` も本モジュールへ入る予定で、
-//! 検査ヘルパー（`jacobian_ops` の `checked_numel`・`check_on_tape`・`copy_grad_row`）を共用する。
+//! 機械固定している。`hvp`（#2875）は `backward_create_graph` で子テープへ 1 階勾配を
+//! 写し、子テープ上で `g ⊙ v` を `child.backward` する合成（既存の手組み HVP と同じ形）。
+//! ループ版 `vmap` も本モジュールへ入る予定で、検査ヘルパー（`jacobian_ops` の `checked_numel`・`check_on_tape`・`copy_grad_row`）を共用する。
 //!
 //! **共通の契約**: 単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。結果は非微分の
 //! ホスト値。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
@@ -72,6 +73,77 @@ pub fn vjp(
     let mut data = vec![0.0f32; n];
     if let Some(g) = grads.get(input)? {
         copy_grad_row(g, &mut data)?;
+    }
+    Tensor::new(data, &in_shape).map_err(AutodiffError::Shape)
+}
+
+/// Hessian-vector product `Σ_j v_j · ∂g_j/∂input`（`g = ∂loss/∂input`。C² の範囲では
+/// `H·v`）。戻り値は shape が `input.shape()` の非微分ホスト値。`child` は呼び出し側が
+/// [`Tape::new_with_ops`] 等で構築した空の子テープ（[`Tape::backward_create_graph`] と
+/// 同じ契約）。`jacobian_ops::hessian` と `v` の積と REQ-2 統一複合判定で一致する。
+///
+/// **入口検査（`backward_create_graph` を呼ぶ前。失敗時は親・子テープとも無変更。順序固定）**:
+/// 1. `loss`／`input` が `tape` の現世代に属さない → `Err(TapeMismatch)`。
+/// 2. `input.requires_grad() == false` → `Err(GradientTrackingDisabled)`。
+/// 3. `loss` の要素数が 1 でない → `Err(InvalidArgument)`（`[]`・`[1]`・`[1, 1]` は可）。
+/// 4. `vector.shape() != input.shape()` → `Err(Shape(ShapeMismatch))`（ブロードキャスト不可）。
+/// 5. `input` の要素数 0 → 空テンソル（`child` は検査も変更もしない）。
+///
+/// 以降は `backward_create_graph` の既存検査（`supports_create_graph() == false` の Op・
+/// rank 3 以上の `MatMul`・非空の子テープ・デバイス不一致・追跡なし `loss` 等）をそのまま
+/// 伝播する（新しい検査・variant は足さない）。追跡なしの `loss` は `vjp` が全ゼロを返すのと
+/// 異なり `hessian` と同じく `Err` になる。1 階勾配が `input` へ届かない、または定数
+/// （`input` に線形な `loss`）の場合は全ゼロ。
+///
+/// 親テープへノードは足さない。子テープには写し・1 階勾配に加えてちょうど 2 ノード
+/// （`vector` の定数葉と `mul`）が残り、途中で `Err` でもそれまでの分は残る。呼び出し後の
+/// `child` は再利用せず作り直す。`mul` 結果は非スカラーだが `Tape::backward` が全要素 1 の
+/// シードを使うため暗黙に総和され、`sum` ノードは足さない（`vjp` と同じ理由）。
+/// `vector` の非有限値は検査せず伝播する。子テープ上の数値方式は 1 階 VJP と bit 同一を
+/// 主張しない（`create_graph` の既存契約）。
+pub fn hvp(
+    tape: &Tape,
+    loss: &Var<'_>,
+    input: &Var<'_>,
+    vector: &Tensor<f32>,
+    child: &Tape,
+) -> Result<Tensor<f32>, AutodiffError> {
+    check_on_tape(tape, loss)?;
+    check_on_tape(tape, input)?;
+    if !input.requires_grad() {
+        return Err(AutodiffError::GradientTrackingDisabled);
+    }
+    let loss_shape = loss.shape();
+    if checked_numel(&loss_shape)? != 1 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "hvp: loss の要素数は 1 である必要がある（shape {loss_shape:?}）"
+        )));
+    }
+    let in_shape = input.shape();
+    if vector.shape() != in_shape.as_slice() {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: in_shape,
+            rhs: vector.shape().to_vec(),
+        }));
+    }
+    let n = checked_numel(&in_shape)?;
+    if n == 0 {
+        return Tensor::zeros(&in_shape).map_err(AutodiffError::Shape);
+    }
+
+    let cg = tape.backward_create_graph(loss, child)?;
+    let (Some(g), Some(cx)) = (cg.grad(input)?, cg.child_var(input)?) else {
+        return Tensor::zeros(&in_shape).map_err(AutodiffError::Shape);
+    };
+    if !g.requires_grad() {
+        return Tensor::zeros(&in_shape).map_err(AutodiffError::Shape);
+    }
+    let vc = child.var_no_grad(vector);
+    let prod = g.mul(&vc)?;
+    let grads = child.backward(&prod)?;
+    let mut data = vec![0.0f32; n];
+    if let Some(h) = grads.get(&cx)? {
+        copy_grad_row(h, &mut data)?;
     }
     Tensor::new(data, &in_shape).map_err(AutodiffError::Shape)
 }

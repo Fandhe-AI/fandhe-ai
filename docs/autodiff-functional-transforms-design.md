@@ -169,3 +169,15 @@
 - **検証**: `crates/autodiff/tests/functional_ops_parity.rs`（閉形式・`jacobian` 転置積との突合・fail-closed・ゼロ／空・副作用）。バックエンドはテスト用 naive 実装のみ。
 - **承認状況**: 本実装は §1 の承認範囲（実装 issue の起票承認）の内側。facade 公開は未承認で、承認と公開は §10 の 6・7。
 - **スコープ外**: `hvp`・`vmap`・PyTorch fixture・実 CPU バックエンドとの突合・CUDA／Metal 実機 parity（§10 の 2・3・4・11）、`VarF64` 版・複数入力。
+
+## 16. 実装記録（#2875・親 #2841。§10 の分解案 2）
+
+- **実装した形**: `fandhe_ai_autodiff::functional_ops::hvp(tape, loss, input, vector, child) -> Result<Tensor<f32>, AutodiffError>`。`backward_create_graph` で子テープへ 1 階勾配 `g` を写し、`child.var_no_grad(vector)` との `mul` に `child.backward` を 1 回呼んで `child_var(input)` の勾配を取り出す（既存の手組み HVP と同じ形）。`mul` 結果は非スカラーだが `Tape::backward` が全要素 1 のシードを使い暗黙に総和されるため `sum` ノードは足さない（`vjp` と同じ理由）。新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe` はない。`supports_create_graph` の対象 Op は広げていない。
+- **入口検査（`backward_create_graph` の前。順序固定。失敗時は親・子テープとも無変更）**: (1) 別テープ・世代違いは `TapeMismatch`、(2) `input` が勾配追跡なしは `GradientTrackingDisabled`、(3) `loss` の要素数が 1 でなければ `InvalidArgument`（`[]`・`[1]`・`[1, 1]` は可）、(4) `vector` の shape が `input` と完全一致しなければ `Shape(ShapeMismatch)`（ブロードキャスト不可）、(5) `input` の要素数 0 は空テンソル（`child` は検査しない）。以降の拒否（`supports_create_graph() == false` の Op・rank 3 以上の `MatMul`・非空の子テープ等）は既存の `backward_create_graph` の検査をそのまま伝播し、新しい拒否ロジックは足していない。
+- **追跡なし `loss`**: `vjp` は全ゼロを返すが、`hvp` は `hessian` と同じく `backward_create_graph` の `Err` を伝播する（受け入れ条件が `hessian·v` との一致であるため。`child` への書き込み前に拒否される）。1 階勾配が `input` へ届かない・定数（`input` に線形な `loss`）の場合は全ゼロ。
+- **副作用**: 親テープにノードは足さない。子テープには写し・1 階勾配に加えてちょうど 2 ノード（`vector` の定数葉と `mul`）が残り、途中で `Err` でも残る。呼び出し後の `child` は再利用せず作り直す（`hessian` と同じ契約）。
+- **数値**: 子テープ上の数値方式は 1 階 VJP と bit 同一を主張しない（`create_graph` の既存契約）。新しい tolerance・baseline は作らない。
+- **保留ガード**: `api_surface.rs` の宣言インベントリの期待集合へ `autodiff/src/functional_ops.rs::hvp` を 1 件追加（計 3 件）。facade の doctest 本文は変更していない。
+- **検証**: `crates/autodiff/tests/functional_ops_parity.rs` の H1〜H5（閉形式・`jacobian_ops::hessian` と `v` の積との突合・fail-closed・ゼロ／空・副作用）。バックエンドはテスト用 naive 実装のみ。facade `Tape::hessian` は `jacobian_ops::hessian` への薄い委譲のため autodiff 層で突合した。
+- **承認状況**: 本実装は §1 の承認範囲（実装 issue の起票承認）の内側。facade 公開は未承認で、承認と公開は §10 の 6・7。
+- **スコープ外**: ループ版 `vmap`・PyTorch fixture と実 CPU バックエンドとの突合・`vmap` との合成・facade 公開・double-VJP 検証・CUDA／Metal 実機 parity（§10 の 3・4・5・6・7・9・11）、`VarF64` 版・複数入力・微分可能な `hvp`。
