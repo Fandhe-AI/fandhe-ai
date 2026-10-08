@@ -200,3 +200,9 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 - spec: `docs/spec/04-requirements.md:237`・`:458`（読むのみ）
 - `docs/facade-serving-infrastructure-spec-proposal.md`（§3・§5）、`docs/facade-generate-decision.md`（§13・§17.4）、`docs/kv-cache-design.md`（§3.5・§7・§15.5）、`docs/facade-predict-batches-phase-metrics-decision.md` §8.4、`docs/compat-api-scope.md` §5、`docs/autodiff-functional-transforms-design.md`（書式の先例）
 - ソース: `crates/autodiff/src/generate.rs`、`crates/autodiff/src/nn/attention.rs`、`crates/tensor-core/src/{rng.rs,tensor.rs}`、`crates/facade/src/inference/mod.rs`、`crates/facade/src/nn/kv_cache.rs`、`crates/facade/tests/api_surface.rs`
+
+## 15. 承認依頼の所在（イシュー #2883・親 #2882）
+
+- §5 の公開形・§6 の判定方式・§9 の拡張要否・§10 の論点 1〜8 は、`docs/compat-api-scope.md` §5.1 末尾の「Phase 8 公開形（承認依頼 #2883）」ブロックへ転記した（行ラベル `S1`〜`S3`）。本記録 §1〜§14 の内容は変えていない。
+- §11 の仮番号と実 issue の対応（親 #2882 の sub-issues で確認）: 1→#2883・2→#2884・3→#2885・4→#2886・5→#2887・7→#2888・8→#2889・10→#2890。6（サンプリング版。論点 1 でブロック）・9（facade 公開。承認後）・11（周辺 docs）は未起票。
+- 承認の状況: §5・§6・§9 と論点 1〜8 はすべて未承認のまま。承認は実装 Agent が代行しない。保留ガードの名前と設置担当、`RequestId`・`limits`・`step` の `model` 引数の型、失敗の表現型は未定で、承認時の決定事項として同ブロックに列挙した。
