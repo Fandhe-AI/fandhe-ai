@@ -1,6 +1,6 @@
 # 関数型 AD ラッパー（vjp／hvp）・ループ版 vmap の実装設計と issue 分解（イシュー #2856・親 #2841）
 
-本記録は **推奨案の記録であり、facade 公開形の承認記録ではない**。コード変更は伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、逐語転記せず、事実はソースで再確認した。基準は `origin/main` `c03c0da8`（2026-10-08）。以下の行番号は同 sha のもの。 → #2930 で承認範囲と公開形を §23 に記録（公開は #2931）。 → #2941 で `jvp`／`jacfwd` の facade 公開形を §25 に記録（承認依頼中・未公開）。
+本記録は **推奨案の記録であり、facade 公開形の承認記録ではない**。コード変更は伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、逐語転記せず、事実はソースで再確認した。基準は `origin/main` `c03c0da8`（2026-10-08）。以下の行番号は同 sha のもの。 → #2930 で承認範囲と公開形を §23 に記録（公開は #2931）。 → #2941 で `jvp`／`jacfwd` の facade 公開形を §26 に記録（承認依頼中・未公開）。
 
 ## 1. 位置づけ・承認根拠
 
@@ -360,7 +360,7 @@ impl Tape {
 - **共通ヘルパー**: #2880 のテスト 2 ファイルと重複していた `seq`／`pos`、ホスト f64 の `J·v`、全要素の REQ-2 判定ループを `tests/common/mod.rs`（`det_seq`／`det_pos`／`jacobian_times_vector_f64`／`assert_all_req2_close`）へ寄せた。閾値は `REQ2_*` 定数を経由し直書きしていない。`double_vjp_feasibility_tests` の `common` モジュールは同一ファイルの二重 `#[path]` 取り込み（`clippy::duplicate_mod`）を避けるため `pub(crate)` にして本テストと共用する。#2880 の検証内容（ケース一覧・基準 3 の機構検査）は変えていない。
 - **保留ガード**: `FunctionalTransformsHoldDoctestGuard` の正のプローブ（free 関数・3 つの受け手 × 2 名）と固定文言、`api_surface.rs` の `FUNCTIONAL_TRANSFORMS_FN_NAMES`／`IDENTS`・宣言インベントリ（`functional_ops.rs::{jvp, jacfwd}` 各 1 件）・自己テストへ `jvp`／`jacfwd` を追加し、facade 非公開を機械固定した。
 - **新規物**: 新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe`・tolerance・baseline はない。`supports_create_graph` の対象 Op も広げていない（§11 の論点 5 は保留のまま）。
-- **承認状況**: ルート #2499 の所有者コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650 ）項 2 が示す、Tier 2 への移行（spec リポ Fandhe-AI/fandhe-ai-spec#81・実装リポ取り込み #2938。本記録の作成時点で #2938 は未マージ → のちにマージ済み〈`f13e7e4a`〉）と、その後の内部実装・公開形の記録までを根拠とする。facade 公開は承認範囲外で、公開形の記録と承認依頼は #2941（§25）。
+- **承認状況**: ルート #2499 の所有者コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650 ）項 2 が示す、Tier 2 への移行（spec リポ Fandhe-AI/fandhe-ai-spec#81・実装リポ取り込み #2938。本記録の作成時点で #2938 は未マージ → のちにマージ済み〈`f13e7e4a`〉）と、その後の内部実装・公開形の記録までを根拠とする。facade 公開は承認範囲外で、公開形の記録と承認依頼は #2941（§26）。
 - **スコープ外**: facade 公開（#2941）、CUDA／Metal 実機 parity と `docs/perf/logs`（#2942）、`supports_create_graph` の拡張（論点 5）、`VarF64`・f16・複数入力・微分可能な `jvp`。
 
 ## 25. 実装記録（#2942・親 #2939。jvp／jacfwd の CUDA／Metal 実機 parity 申し送り）
