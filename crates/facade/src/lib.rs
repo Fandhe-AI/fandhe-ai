@@ -7397,6 +7397,130 @@ struct JacobianHessianHoldDoctestGuard;
 #[allow(dead_code)]
 struct GradcheckAnomalyHoldDoctestGuard;
 
+/// `vjp`・`hvp`・`vmap`（イシュー #2874・親 #2841。内部実装 `fandhe_ai_autodiff::functional_ops`。
+/// 現時点の実装は `vjp` のみで、`hvp`／`vmap` は後続 issue）の未承認経路を facade 公開面から締め出す保留ガード
+/// （`GradcheckAnomalyHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
+///
+/// 公開形は未承認（`docs/autodiff-functional-transforms-design.md` §5 は推奨案の記録であり承認記録ではない）。
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、拒否する経路に対応するローカル定義
+/// （モジュール `functional_ops`、クレートルート直下の裸の自由関数 `vjp`・`hvp`・`vmap`）と、同名メソッドを持つ
+/// プローブ用トレイト（受け手: `Var`・`Tape`・`Tensor<f32>`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）の
+/// メソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ公開するか、上の受け手へ
+/// 同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
+/// エラーコードに依存せずコンパイルが失敗する。後続 issue の `hvp`／`vmap` も同じ名前を先に締めてあるため、
+/// 固定文言を書き換えずに済む。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+///
+/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
+/// functional_transforms_hold_doctest_globs_all_pub_modules`・
+/// `functional_transforms_hold_doctest_probe_body_matches_fixed_contract`・
+/// `facade_does_not_reexport_or_declare_functional_transforms`・
+/// `workspace_declares_functional_transforms_fn_names_only_in_allowed_locations`）との多層防御として働く。
+///
+/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
+/// できること
+///
+/// ```
+/// use fandhe_ai::*;
+/// use fandhe_ai::compat::*;
+/// use fandhe_ai::optim::*;
+/// use fandhe_ai::data::*;
+/// use fandhe_ai::nn::*;
+/// use fandhe_ai::nn::init::*;
+/// use fandhe_ai::nn::rnn::*;
+/// use fandhe_ai::nn::kv_cache::*;
+/// use fandhe_ai::nn::loss::*;
+/// use fandhe_ai::interop::*;
+/// use fandhe_ai::interop::onnx::*;
+/// use fandhe_ai::interop::safetensors::*;
+/// use fandhe_ai::interop::npy::*;
+/// use fandhe_ai::model::*;
+/// use fandhe_ai::inference::*;
+///
+/// mod __fandhe_functional_transforms_hold_probe {
+///     pub mod functional_ops {
+///         pub fn __mark() {}
+///     }
+///     pub fn vjp() {}
+///     pub fn hvp() {}
+///     pub fn vmap() {}
+/// }
+/// use __fandhe_functional_transforms_hold_probe::*;
+///
+/// struct __FandheFunctionalTransformsHoldMarker;
+///
+/// trait __FandheFunctionalTransformsHoldProbe {
+///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker;
+/// }
+///
+/// impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {
+///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tape {
+///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tensor<f32> {
+///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+/// }
+///
+/// fn __probe_free_fns() {
+///     // モジュール経由の呼び出し（`use fandhe_ai::*;` が同名モジュールを glob 公開して
+///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
+///     functional_ops::__mark();
+///     // 修飾なしの自由関数呼び出し（同名の関数を facade が glob 公開していれば同様に曖昧になる）。
+///     vjp();
+///     hvp();
+///     vmap();
+/// }
+///
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vjp(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::hvp(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vjp(tape);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::hvp(tape);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vmap(tape);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);
+/// }
+/// ```
+#[cfg(doctest)]
+#[allow(dead_code)]
+struct FunctionalTransformsHoldDoctestGuard;
+
 #[cfg(test)]
 mod tape_ref_tests {
     use super::*;

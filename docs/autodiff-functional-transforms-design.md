@@ -157,3 +157,15 @@
 - spec: `docs/spec/04-requirements.md:236`・`:457`（読むのみ）
 - `docs/autodiff-forward-mode-vmap-spec-proposal.md`、`docs/autodiff-jacobian-hessian-gradcheck-decision.md`（§3.6・§11）、`docs/autodiff-higher-order-grad-decision.md`（§8・§17）、`docs/compat-api-scope.md` §5、`docs/autodiff-var-dtype-multiplexing-design.md`、`docs/autodiff-custom-function-decision.md` §14
 - ソース: `crates/autodiff/src/{backward.rs,create_graph.rs,jacobian_ops.rs,tape.rs,var.rs,shape_view_ops.rs,error.rs}`、`crates/facade/src/lib.rs`
+
+## 15. 実装記録（#2874・親 #2841。§10 の分解案 1）
+
+- **実装した形**: `fandhe_ai_autodiff::functional_ops::vjp(tape, output, input, cotangent) -> Result<Tensor<f32>, AutodiffError>`。余接を勾配追跡なしの定数葉 `u` にし、`output.mul(&u)` へ既存の `Tape::backward` を 1 回呼ぶ（非スカラー loss は全要素 1 のシードで暗黙に総和されるため `sum` ノードは足さない）。新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe` はない。
+- **入口検査（テープへノードを足す前。順序固定）**: (1) 別テープ・世代違いは `TapeMismatch`、(2) `input` が勾配追跡なしは `GradientTrackingDisabled`、(3) `cotangent` の shape が `output` と完全一致しなければ `Shape(ShapeMismatch)`（ブロードキャスト不可）、(4) 要素数を `checked_numel` で検査、(5) 要素数 0 または `output` が追跡なしならテープに触れず全ゼロ。
+- **補助ノード**: 成功時にちょうど 2 ノード（余接の葉と `mul`）。`backward` 等が途中で `Err` を返しても残る。値は変えない。追跡ありだが `input` に届かない出力は backward 経由で全ゼロ（この場合も 2 ノード増える）。
+- **ヘルパー共有方法（`hvp`・`vmap` と共用）**: `jacobian_ops.rs` の `checked_numel`・`check_on_tape`・`copy_grad_row` を `pub(crate)` にして `functional_ops.rs` から使う。共通モジュールへの移動はしない（差分最小で、後続の `hvp` も同じ 3 つを使える）。`FlatElements` は `vjp`／`hvp` に不要で、`vmap` は `unbind`／`stack` を使うため private のまま残す。`gradcheck.rs` の `checked_numel` の重複は統合しない。
+- **保留ガード**: facade の `FunctionalTransformsHoldDoctestGuard`（正のプローブ 1 ブロック）と `crates/facade/tests/api_surface.rs` の否定ガード 5 本（glob 集合・固定本文・再エクスポート／宣言走査とその自己テスト・workspace 宣言インベントリ）。対象はモジュール `functional_ops` と名前 `vjp`・`hvp`・`vmap`（後続 issue の固定文言書き換えを避けるため先取りして締める）。承認済みの除外はない。
+- **既存 `grad::vjp` との関係**: `crates/autodiff/src/grad.rs` の `pub(crate) fn vjp` は Op ごとの VJP ディスパッチャで別物。宣言インベントリの期待集合は `grad.rs::vjp` 1 件と `functional_ops.rs::vjp` 1 件の計 2 件。
+- **検証**: `crates/autodiff/tests/functional_ops_parity.rs`（閉形式・`jacobian` 転置積との突合・fail-closed・ゼロ／空・副作用）。バックエンドはテスト用 naive 実装のみ。
+- **承認状況**: 本実装は §1 の承認範囲（実装 issue の起票承認）の内側。facade 公開は未承認で、承認と公開は §10 の 6・7。
+- **スコープ外**: `hvp`・`vmap`・PyTorch fixture・実 CPU バックエンドとの突合・CUDA／Metal 実機 parity（§10 の 2・3・4・11）、`VarF64` 版・複数入力。
