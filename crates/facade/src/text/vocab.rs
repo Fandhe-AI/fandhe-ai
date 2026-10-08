@@ -61,7 +61,9 @@ impl Vocabulary {
         limits.check_vocabulary_size(total)?;
 
         // 全件の検査が終わるまで String を確保しない（借用で重複を検出する）。
-        let mut seen: HashMap<&str, usize> = HashMap::with_capacity(tokens.len());
+        // 未検査の要素に比例した事前確保はしない（先頭の不正要素で即 Err にできる入力に
+        // 件数分の確保が走らないよう、検証済み要素のみを段階的に挿入する。設計記録 §8・§13）。
+        let mut seen: HashMap<&str, usize> = HashMap::new();
         for (i, t) in tokens.iter().enumerate() {
             let t = t.as_ref();
             limits.check_vocabulary_token_len(i, t.len())?;
@@ -238,6 +240,17 @@ mod tests {
                 len: 7,
                 max: 6
             })
+        ));
+    }
+
+    #[test]
+    fn invalid_first_token_fails_before_scanning_rest() {
+        // 先頭が空文字列なら index 0 で即 Err（残りの大量要素は検査されない）。
+        let mut toks: Vec<String> = vec![String::new()];
+        toks.extend((0..50_000).map(|i| format!("t{i}")));
+        assert!(matches!(
+            Vocabulary::from_tokens(&TextLimits::default(), &toks),
+            Err(TextError::EmptyVocabularyToken { index: 0 })
         ));
     }
 
