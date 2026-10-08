@@ -261,7 +261,88 @@ grep -rnE "fn (numeric_grad|finite_diff[a-z_]*|central_diff[a-z_]*|analytic_hess
 - 状態: **§7 の公開形を #2678 で承認形どおり公開した。** 承認根拠はルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965。「Phase 4（#2625）」節で `docs/compat-api-scope.md` §5.1 の行 29・30を各決定記録の推奨形で承認）。本書中の「未承認」「承認依頼は #2677」の記述は、#2678 時点で当該コメントの承認に更新された（承認は推奨形に限り、記録に形が書かれていない点は実装せず承認依頼へ戻す条件つき）。
 - 公開した識別子: facade `Tape::jacobian(&self, output, input) -> Result<Tensor<f32>, _>`・`Tape::hessian(&self, loss, input, child: &Tape)`・`Tape::backward_detect_anomaly(&self, loss) -> Result<Gradients, _>`（いずれも `&self.0`／`&child.0` を渡すだけの 1 行委譲）。本体は `crate::<module>::<fn>` への 1 行委譲（`Var`）／`&self.0` を渡すだけの 1 行委譲（`Tape`）に固定し、新規 `Op`・`BackendOps` メソッド・`AutodiffError` variant・`unsafe` は追加していない。
 - ガードの反転・縮小: `JacobianHessianHoldDoctestGuard` は `Tape` の 2 本を外すと残すプローブが `jacobian_ops` モジュール名・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッドになり、`GradcheckAnomalyHoldDoctestGuard` は `Tape::backward_detect_anomaly` を外して `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`anomaly` モジュール名等のプローブを残した（先例 #2516）。`api_surface.rs` の否定ガードは、承認済みの型名を識別子表から外し、`Tape` の承認済みメソッドを `fn` 宣言走査から除外したうえで、承認形だけを許す正ガードへ反転した。宣言場所インベントリには `autodiff/src/var.rs`（`Tape` 分は `facade/src/lib.rs`）の各 1 件を追加した。
-- **`Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は保留した。** §3.4・§3.7・§9.4 は内部契約（`gradcheck(make_tape: Fn() -> Tape, f, inputs, options)`）と「facade 側はクロージャ引数を `TapeRef` に包むアダプタにする」ことしか定めておらず、facade メソッドのレシーバ（`&self` か関連関数か）と、newtype の `Tape` でテープ生成をどう受けるか（`tape_for` が fallible な点を含む）が書かれていない（複数の形が成り立つ。「記録に形が書かれていない点」）。型 2 つは `gradcheck` なしでは使えないため一緒に保留した。#2677 へ事実のみをコメント済み。
+- **`Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は保留した（→ facade シグネチャは §11 で確定。公開は #2847）。** §3.4・§3.7・§9.4 は内部契約（`gradcheck(make_tape: Fn() -> Tape, f, inputs, options)`）と「facade 側はクロージャ引数を `TapeRef` に包むアダプタにする」ことしか定めておらず、facade メソッドのレシーバ（`&self` か関連関数か）と、newtype の `Tape` でテープ生成をどう受けるか（`tape_for` が fallible な点を含む）が書かれていない（複数の形が成り立つ。「記録に形が書かれていない点」）。型 2 つは `gradcheck` なしでは使えないため一緒に保留した。#2677 へ事実のみをコメント済み。
 - `Tape::hessian` は `backward_create_graph` と同じく `child: &Tape`（facade の `Tape`）を取り、本体は `&child.0` を渡す。
 - テスト: `crates/facade/tests/phase4_ops_facade.rs`（tape_jacobian_hessian_and_anomaly_signatures。`fandhe_ai::` だけを import し、fn ポインタ型でシグネチャを固定して厳密に決まる値を確認）と、`crates/facade/tests/api_surface.rs` の正ガード（`var_phase4_ops_methods_are_thin_delegations`・`facade_reexports_phase4_ops_types_only_in_approved_shape`・`facade_tape_phase4_methods_are_thin_delegations`・各 `workspace_declares_*`）。
 - 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。CUDA／Metal 実機 parity は未実測で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` へ申し送る（新しい数値経路はなく、1 行委譲のため既存の各 `*_backend_parity.rs` の結果がそのまま適用される）。
+
+## 11. #2846 決定記録（`Tape::gradcheck` の facade シグネチャ）
+
+- 状態: **記録のみ（コード変更なし）。** 本節は §3.4・§3.7・§9.4・§10 が書いていなかった facade メソッドのレシーバとテープ生成の受け方を 1 案に定める。公開（`Tape::gradcheck`・`GradcheckOptions`・`GradcheckReport` の facade 公開と保留ガードの反転）は #2847 が行う。**公開までは `GradcheckAnomalyHoldDoctestGuard` と `api_surface.rs` の否定ガードを維持する。**
+- 基準: `origin/main` `36741049`（2026-10-08）。
+- 承認の根拠: ルート #2499 の 2026-10-08 ユーザーコメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）が示した次の 4 点の方向に限る。(1) `Tape::gradcheck` は `&self` を取らない関連関数、(2) テープは facade 内部で facade の通常の生成経路から作り、利用者にテープ生成関数を渡させない（生成失敗は `Err`）、(3) クロージャは `TapeRef<'a>` と `&[Var<'a>]` を受け `Result<Var<'a>, _>` を返す、(4) `GradcheckOptions`・`GradcheckReport` はクレートルートへ再エクスポート。下の 11.1〜11.2 のうち `device` 引数の有無と内部境界の変更は、(2) の「通常の生成経路」「生成失敗は `Err`」の 2 条件から導いた解釈であり、コメントが明示した文言ではない。
+
+### 11.1 facade シグネチャ
+
+```rust
+impl Tape {
+    pub fn gradcheck<F>(
+        device: Device,
+        f: F,
+        inputs: &[Tensor<f32>],
+        options: &GradcheckOptions,
+    ) -> Result<GradcheckReport, AutodiffError>
+    where
+        F: for<'a> Fn(TapeRef<'a>, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>;
+}
+```
+
+- レシーバなし（関連関数）。呼び出しは `Tape::gradcheck(device, f, &inputs, &options)`。検査のたびに新しいテープを作り既存テープに触れないため `&self` を取る意味がない。
+- 引数順は内部関数 `(make_tape, f, inputs, options)` の `make_tape` を `device` に置き換えた並び。
+- ジェネリック境界は `F` の 1 つだけ。`'static`・`Send`・`Sync` は要求しない（内部関数も要求しない）。
+- 戻り値とエラー型は内部関数と同じ。不一致は `Err` ではなく `Ok(report)` の `passed() == false`（§3.4 のまま）。判定式・`GradcheckOptions` に既定値を置かないこと・適用範囲・入口検査の順序は §3.4 と内部実装から変えない。
+
+### 11.2 テープの生成元と失敗時の扱い
+
+- 生成元は `tape_for(device)`（`crates/facade/src/lib.rs:1363`。`resolve_ops` を唯一の `Device` から `BackendOps` への変換点のまま使う）。評価ごとに 1 回呼ぶ（計 `1 + 2·Σn_k` 回）。
+- 失敗は `BackendError` を `AutodiffError::Backend(_)` へ包んで `Err` で返す（既存の `From<BackendError>`。`crates/autodiff/src/error.rs`。新しい variant なし）。途中の評価で生成が失敗した場合も同じ経路で `Err` とし、部分的な `GradcheckReport` は返さない。
+- 検査順序: 内部の入口検査（`inputs` が空・要素数オーバーフロー）が先、テープ生成はその後。「入力が空かつデバイス不正」は `InvalidArgument` が先に返る。facade 側でデバイスの事前検証は追加しない。
+- `device` は必須引数とし既定デバイスを暗黙に選ばない（CPU で検査するなら `Device::Cpu`。`tape()` と `tape_for(Device::Cpu)` はどちらも `CpuBackendOps::new()` を結線するため挙動は同じ）。閾値に既定値を置かない §3.4 の方針と揃える。
+- 既知のコスト: Metal では `tape_for` のたびにデバイス存在確認が走る（#2114）。gradcheck は検証用途のため許容する。
+- **内部の変更（#2847 への指定）**: 内部 `gradcheck`／`evaluate` の `M` 境界を `Fn() -> Tape` から `Fn() -> Result<Tape, AutodiffError>` へ変える（`make_tape()` に `?` を付ける）。`crates/autodiff/src/gradcheck.rs` はタグ `v0.10.0` に含まれない（2026-10-07 追加・#2810）ため出荷済み API は壊れない。内部の呼び出し元 `crates/autodiff/tests/gradcheck_anomaly_parity.rs`・`crates/facade/tests/gradcheck_anomaly_backend_parity.rs` は `Ok(..)` で包む修正が要る。§3.4 の「内部の契約案」はこの形へ読み替える。
+- facade 本体（アダプタ。1 行委譲ではない）:
+
+```rust
+fandhe_ai_autodiff::gradcheck::gradcheck(
+    || tape_for(device).map(|t| t.0).map_err(AutodiffError::Backend),
+    |t, xs| f(TapeRef::from_autodiff(t), xs),
+    inputs,
+    options,
+)
+```
+
+**不採用案**
+
+| 案 | 不採用の理由 |
+|---|---|
+| デバイス引数なしで `tape()`（CPU 固定） | 失敗経路が存在せず「生成失敗は `Err`」が空文になる。GPU 上の検査（`gradcheck_anomaly_backend_parity.rs` が想定）が facade から行えない |
+| 内部境界 `Fn() -> Tape` を保ち facade で 1 回だけ事前検証する | `resolve_ops` の変換を二重化する。評価途中の生成失敗を `Err` にできない（`panic!`／フォールバックが要る） |
+| 内部境界を保ち、失敗を `Cell` 等へ退避してダミーのテープを返す | 失敗後も評価が進み誤った結果を計算しうる（fail-closed でない） |
+| `&self` を取り受け手と同じバックエンドで新テープを作る | `Tape` から `BackendOps` を複製する経路が無く `Tape` 本体の変更が要る。承認された方向（関連関数）とも異なる |
+| 利用者にテープ生成クロージャを渡させる | 承認された方向に反する |
+
+### 11.3 再エクスポート位置
+
+- クレートルート `fandhe_ai::GradcheckOptions`・`fandhe_ai::GradcheckReport`。
+- 形: `crates/facade/src/lib.rs` に `pub use fandhe_ai_autodiff::gradcheck::{GradcheckOptions, GradcheckReport};` に相当する、別名・newtype なしの 1 文 1 行。`gradcheck` モジュール自体と裸の自由関数 `gradcheck` は再エクスポートしない。型の中身（非公開フィールド・`GradcheckOptions::new` の fail-closed 検査・`Default` 非実装・アクセサ）は変えない。
+
+### 11.4 `TapeRef<'a>` アダプタ
+
+- **要る。** 内部がクロージャへ渡すのは `&'a fandhe_ai_autodiff::Tape` で、facade の利用者はこの型を名指しできない。所有型の facade `Tape` は借用から作れないため、承認方向の「`Tape` または `TapeRef<'a>`」は `TapeRef<'a>` に確定する。
+- 形は 11.2 の本体の第 2 引数 `|t, xs| f(TapeRef::from_autodiff(t), xs)`。`TapeRef` は `Copy` で値渡し、`&[Var<'a>]` と戻り値はそのまま通す。`unsafe`・新しい型・トレイトなし。
+- クロージャ内の定数は `TapeRef::var_no_grad`、追加の葉は `TapeRef::var`／`var_from`。外側のテープで作った `Var` を返すと内部の検査で `Err(TapeMismatch)`（既存契約のまま）。
+
+### 11.5 anomaly 検出系の扱い
+
+- `Tape::backward_detect_anomaly` は #2678 で公開済みで本件では変更しない。
+- 保留ガードに残る anomaly 系（モジュール名 `anomaly`、裸の自由関数 `backward_detect_anomaly`、`Var`／`Tensor<f32>` 上の同名メソッド）は、決定記録に公開形が無いため**保留を続ける**。`compat::Sequential::fit` への結線、プロセスワイド／テープ単位の検出モードも §9.4 のとおり対象外。
+
+### 11.6 #2847 への申し送り
+
+- 内部 `gradcheck`／`evaluate` の `M` 境界の変更と、既存テスト 2 ファイルの追随。
+- `facade_tape_phase4_methods_are_thin_delegations`（`api_surface.rs`）の 1 行委譲表には載せられないため、`gradcheck` 用の正ガード（承認形の本体トークン列の固定）を別に置く。
+- `GradcheckAnomalyHoldDoctestGuard` から `Tape::gradcheck` と型 2 つのプローブを外し、残りの保留（`gradcheck`／`anomaly` モジュール名、裸の自由関数 2 つ、`Var`／`Tensor<f32>` 上のメソッド）を維持する。`GRADCHECK_ANOMALY_HOLD_PROBE_BODY`・否定ガード・宣言場所インベントリの更新を伴う。
+- `crates/autodiff/src/gradcheck.rs` のモジュール doc と `crates/autodiff/src/lib.rs` の「保留」記述の更新。
+- CUDA／Metal 実機 parity は未実測のまま `#[ignore]` で分離し、`docs/perf/logs/<slug>-2847/README.md` へ申し送る。
+- HRTB クロージャのアダプタがコンパイルできない等、本節の形で実装できない点が出たら、実装せず停止して承認依頼へ戻す。
+- 本節はコード・依存・tolerance・baseline・ガードレール閾値・`docs/spec` を変更しない。
