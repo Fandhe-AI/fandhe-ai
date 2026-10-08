@@ -419,13 +419,13 @@ sample_weight 適用は再開時に選択肢として提示する。新規 Issue
 
 ### 14.3 非有限値の検査位置とエラー時の不変条件（レビュー指摘 #2823）
 
-非既定の重み（`weighted`）のときだけ、次の 3 か所で非有限（NaN／±inf）を `InvalidArgument` で拒否する（重みなしの既存経路は挙動不変）:
+非既定の重み（`weighted`）のときだけ、次の 3 か所で非有限（NaN／±inf）を `InvalidArgument` で拒否する（重みなしの既存経路は、累積経路の 3. を除き挙動不変。3. は #2855 で `accumulate_steps > 1` に限り重みなしにも有効化した。§16）:
 
 1. 重み付き損失のスカラ（`History::loss` へ記録する前・backward の前）。
 2. 各マイクロバッチの勾配（ゼロ重み行の内部 overflow `inf × 0 = NaN` 対策）。
 3. optimizer へ渡す直前の累積勾配（通常の累積境界と epoch 末の端数 flush の両方）。各マイクロバッチが有限でも `accumulate_grads_into` の f32 加算で overflow しうるため（例: 二クラス・同一 logits・`sample_weight = 3e38`・`batch_size = 1` の 3 バッチ累積で bias 勾配が ±1.5e38 → 累積 ±inf）。勾配クリッピングは fit 経路になく optimizer 内部の処理のため、検査はクリップ前（optimizer 入力）で行う。
 
-不変条件: 拒否した更新はパラメータにも optimizer 状態にも適用されない（拒否時点の累積バッファは破棄）。train／eval モードは呼び出し前へ復元し、`compile` 状態は維持する。それまでに成功した step は既存 `fit` 系と同じく巻き戻さない。AMP 経路は `GradScaler::unscale` の非有限スキップ契約に従う（累積との併用は従来どおり拒否）。重みなしの `fit` 系の累積 overflow は別件で、本 PR では変更しない。
+不変条件: 拒否した更新はパラメータにも optimizer 状態にも適用されない（拒否時点の累積バッファは破棄）。train／eval モードは呼び出し前へ復元し、`compile` 状態は維持する。それまでに成功した step は既存 `fit` 系と同じく巻き戻さない。AMP 経路は `GradScaler::unscale` の非有限スキップ契約に従う（累積との併用は従来どおり拒否）。重みなしの `fit` 系の累積 overflow は別件として分離し、#2855 で累積経路に限り検査を有効化した（§16）。
 
 ## 15. #2565 実装記録（保留ガードの正ガード化）
 
@@ -464,3 +464,30 @@ workspace インベントリの名前リストから `class_weight` を外した
 ### 15.5 検証
 
 `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`・`cargo test -p fandhe-ai`（`api_surface`・`compat_sequential_fit_weights`・doctest を含む）・`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` を実行した（結果は PR の検証欄を参照）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
+
+## 16. #2855 実装記録（重みなしの累積経路の非有限拒否）
+
+イシュー #2855 で、重みなしの `fit` 系でも `accumulate_steps > 1` の累積経路に限り、optimizer へ渡す累積勾配が非有限なら更新前に拒否するようにした。承認の根拠は、イシューのコメントに記載されたルート #2499 のコメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）の「検査は累積経路に限る」という方向である。本節はそれ以上の承認を主張しない。
+
+### 16.1 調査結果
+
+- `fit`・`fit_with_callbacks`・`fit_with_metrics`・`fit_with_prefetch`・`fit_with_train_step`・`fit_with_weights` はすべて `fit_with_callbacks_named` → `run_fit` を通る共有ループで、重みなしの入口は既定の `FitWeights` を渡し `weighted = weights.is_non_default()` が偽になるだけである。`fit_with_validation` という名前のメソッドは存在せず、検証データ付きの入口（`fit_with_callbacks`／`fit_with_metrics` の `validation: Some(..)` と `FitConfig::validation_split`）を指すものと解釈した。
+- `weighted == false` で走らない検査は 4 か所: (1) 損失スカラー、(2) マイクロバッチ単体の勾配、(3) 累積境界の累積勾配、(4) epoch 末の端数 flush の累積勾配。このうち (3)(4) だけを今回有効化した。(1)(2) は重み付き専用のまま変更しない（直接 step の挙動・bit 一致を保つため）。
+- `fit_with_train_step`・`Optimizer::Lbfgs`・AMP は `accumulate_steps > 1` を引数検査で拒否済みで累積経路に到達しない。`FunctionalModel::fit` は別実装で `accumulate_steps != 1` を拒否するため対象外。
+
+### 16.2 条件・エラー型
+
+- 条件: `check_accumulated = weighted || config.accumulate_steps > 1` を (3)(4) の 2 か所で共有する。`accumulate_steps == 1`（既定）では偽のため、重みなしの直接 step はコード経路ごと不変である。`micro > 1` ではなく `accumulate_steps > 1` を採ったため、この設定下では加算が走らない窓（epoch 末 flush で `micro == 1`）やマイクロバッチ単体で既に非有限の勾配も、optimizer へ渡す前に拒否される。いずれも「累積経路で optimizer へ渡す累積勾配が非有限」に該当すると解釈した。
+- エラー型は重み付き経路と同じ `AutodiffError::InvalidArgument`。`ensure_finite_grads` に `weighted` 引数を足して主語と原因だけを切り替える（重み付きの文言は不変、重みなしは「累積勾配（{段階}）に非有限値（NaN／inf）が含まれるためパラメータ更新を拒否した（勾配累積の f32 加算 overflow の疑い）」）。値やユーザー入力は埋め込まない。
+- 不変条件は §14.3 と同じ: 拒否した更新はパラメータにも optimizer 状態にも適用されず、モード復元・`compile` 維持・`restore_best_weights` の共通経路を通り、成功済みの step は巻き戻さない。
+
+### 16.3 既存利用者への影響・性能
+
+- `accumulate_steps > 1` かつ累積勾配が非有限で、これまで非有限の更新が黙って適用されていた入力だけが `Err(InvalidArgument)` になる。有限入力は検査が読み取り走査のみのため bit 不変で、既存テスト T1〜T3（独立な手動窓ループとの bit 照合を含む）が無修正で通ることで確認する。
+- 公開 API のシグネチャ・`FitConfig` のフィールド（`Copy + Eq`）は不変。追加コストは累積経路の optimizer step 1 回につき全学習可能パラメータ要素の読み取り走査 1 回で、`accumulate_steps == 1` の利用者は 0。性能は計測していない。
+
+### 16.4 非対象・テスト・検証
+
+- 非対象: 損失スカラー・マイクロバッチ単体・累積を使わない直接 step の非有限、`FunctionalModel::fit`、累積の数値形式の変更。新規演算・カーネルがなく CPU ホスト計算のみのため実機 parity の申し送りは不要。
+- テスト: `crates/facade/tests/compat_sequential_accumulate.rs` の `unweighted_accumulated_overflow_*`（境界・端数 flush・各入口・途中窓）、有限入力の入口間 bit 一致、直接 step が対象外であることの固定。
+- 検証: `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`・`cargo test -p fandhe-ai`・`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`。

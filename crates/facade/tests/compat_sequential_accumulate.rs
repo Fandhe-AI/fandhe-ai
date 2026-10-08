@@ -10,6 +10,8 @@
 //! を使う。`forward_with_precision(None)`／`mse_loss_with(Mean)` と演算列が
 //! bit 同一）・大バッチ等価（T3。REQ-2 統一複合判定の既存定数を再利用。
 //! tolerance は不変）・`0`／AMP／L-BFGS 併用の fail-closed 拒否（T4〜T6）。
+//! 追加（イシュー #2855）: 重みなしでも累積勾配が非有限なら更新前に拒否
+//! （境界・端数 flush・各入口・途中窓。有限入力の bit 不変と直接 step の対象外を固定）。
 //! 決定記録は `docs/compat-grad-accumulation-decision.md`。
 //! ホスト計算のみで実機非依存（`#[ignore]` 不要）。
 
@@ -369,4 +371,202 @@ fn accumulate_steps_gt_one_rejected_with_lbfgs() {
         model.is_compiled(),
         "エラー後も compiled 状態が維持されるはず"
     );
+}
+// =================================================================
+// T7〜T12（イシュー #2855）: 重みなしの fit 系でも、累積経路
+// （`accumulate_steps > 1`）で optimizer へ渡す累積勾配が非有限なら
+// 更新前に拒否する。
+//
+// フィクスチャ: `Linear(1, 1)`・x = 0・Mse。weight 勾配は 0、bias 勾配は
+// `2 (b - y)` ≈ `-2 y`。y = -7.5e37 なら 1 件あたり ≈ 1.5e38（有限）で、
+// 同符号 3 件の f32 累積は ±inf になる。
+// =================================================================
+
+const OVERFLOW_Y: f32 = -7.5e37;
+
+fn overflow_model() -> Sequential {
+    let mut m = Sequential::new()
+        .add_linear(1, 1, 5)
+        .unwrap_or_else(|e| panic!("test fixture: 層の構築に失敗: {e}"));
+    m.compile(
+        Optimizer::Adam(fandhe_ai::optim::AdamConfig::default()),
+        Loss::Mse,
+    )
+    .unwrap_or_else(|e| panic!("test fixture: compile に失敗: {e}"));
+    m
+}
+
+fn col(vals: Vec<f32>) -> Tensor<f32> {
+    let n = vals.len();
+    Tensor::new(vals, &[n, 1]).unwrap_or_else(|e| panic!("test fixture: shape 構築に失敗: {e}"))
+}
+
+fn bits_of(m: &Sequential) -> Vec<Vec<u32>> {
+    m.trainable_parameters()
+        .iter()
+        .map(|t| t.host_slice().iter().map(|v| v.to_bits()).collect())
+        .collect()
+}
+
+fn overflow_data(n: usize) -> (Tensor<f32>, Tensor<f32>) {
+    (col(vec![0.0; n]), col(vec![OVERFLOW_Y; n]))
+}
+
+/// 拒否後に同一の良性 fit を実行し、新品モデルと bit 一致する（optimizer 状態を汚さない）。
+fn assert_state_clean_after_reject(mut m: Sequential, what: &str) {
+    assert!(m.is_compiled(), "{what}: compile が外れた");
+    let mut fresh = overflow_model();
+    let x = col(vec![0.5, -0.5]);
+    let y = col(vec![0.1, 0.2]);
+    for model in [&mut m, &mut fresh] {
+        model
+            .fit(&x, &y, FitConfig::new(2, 1))
+            .unwrap_or_else(|e| panic!("{what}: 良性 fit に失敗: {e}"));
+    }
+    assert_eq!(
+        bits_of(&m),
+        bits_of(&fresh),
+        "{what}: optimizer 状態が汚れた"
+    );
+}
+
+fn assert_rejected(r: Result<fandhe_ai::compat::History, AutodiffError>, what: &str) {
+    match r {
+        Err(AutodiffError::InvalidArgument(_)) => {}
+        other => panic!("{what}: InvalidArgument のはずが {other:?}"),
+    }
+}
+
+#[test]
+fn unweighted_accumulated_overflow_premise_microbatch_is_finite() {
+    // 前提の固定: 1 件だけ（端数 flush・加算なし）なら有限勾配で Ok、パラメータも有限。
+    let mut m = overflow_model();
+    let (x, y) = overflow_data(1);
+    m.fit(&x, &y, FitConfig::new(1, 1).accumulate_steps(2))
+        .unwrap_or_else(|e| panic!("単体の有限勾配は拒否されないはず: {e}"));
+    assert!(
+        bits_of(&m)
+            .iter()
+            .flatten()
+            .all(|b| f32::from_bits(*b).is_finite()),
+        "パラメータが非有限化した"
+    );
+}
+
+#[test]
+fn unweighted_accumulated_overflow_at_boundary_is_rejected_before_update() {
+    let mut m = overflow_model();
+    let (before, mode) = (bits_of(&m), m.training());
+    let (x, y) = overflow_data(3);
+    let r = m.fit(&x, &y, FitConfig::new(1, 1).accumulate_steps(3));
+    assert_rejected(r, "boundary");
+    assert_eq!(bits_of(&m), before, "パラメータが変化した");
+    assert_eq!(m.training(), mode);
+    assert_state_clean_after_reject(m, "boundary");
+}
+
+#[test]
+fn unweighted_accumulated_overflow_at_epoch_end_flush_is_rejected_before_update() {
+    let mut m = overflow_model();
+    let (before, mode) = (bits_of(&m), m.training());
+    let (x, y) = overflow_data(3);
+    let r = m.fit(&x, &y, FitConfig::new(1, 1).accumulate_steps(5));
+    assert_rejected(r, "flush");
+    assert_eq!(bits_of(&m), before, "パラメータが変化した");
+    assert_eq!(m.training(), mode);
+    assert_state_clean_after_reject(m, "flush");
+}
+
+#[test]
+fn unweighted_accumulated_overflow_is_rejected_for_every_entry() {
+    let (x, y) = overflow_data(3);
+    let (xv, yv) = overflow_data(1);
+    for steps in [3u32, 5] {
+        let cfg = FitConfig::new(1, 1).accumulate_steps(steps);
+        let mut m = overflow_model();
+        let before = bits_of(&m);
+        let r = m.fit_with_callbacks(&x, &y, cfg, Some((&xv, &yv)), &mut []);
+        assert_rejected(r, "fit_with_callbacks");
+        assert_eq!(bits_of(&m), before);
+
+        let mut m = overflow_model();
+        let r = m.fit_with_metrics(&x, &y, cfg, Some((&xv, &yv)), &mut [], &[]);
+        assert_rejected(r, "fit_with_metrics");
+        assert_eq!(bits_of(&m), before);
+
+        let mut m = overflow_model();
+        let r = m.fit_with_weights(
+            &x,
+            &y,
+            cfg,
+            &fandhe_ai::compat::FitWeights::default(),
+            Some((&xv, &yv)),
+            &mut [],
+            &[],
+        );
+        assert_rejected(r, "fit_with_weights(既定の重み)");
+        assert_eq!(bits_of(&m), before);
+    }
+}
+
+#[test]
+fn unweighted_accumulated_overflow_in_later_window_keeps_earlier_window() {
+    // 窓 1（有限・小）は適用され、窓 2（overflow）だけが拒否される。
+    let x = col(vec![0.0; 6]);
+    let mut ys = vec![0.1f32; 3];
+    ys.extend(vec![OVERFLOW_Y; 3]);
+    let y = col(ys);
+    let mut m = overflow_model();
+    let r = m.fit(&x, &y, FitConfig::new(1, 1).accumulate_steps(3));
+    assert_rejected(r, "later window");
+
+    let mut reference = overflow_model();
+    reference
+        .fit(
+            &col(vec![0.0; 3]),
+            &col(vec![0.1; 3]),
+            FitConfig::new(1, 1).accumulate_steps(3),
+        )
+        .unwrap_or_else(|e| panic!("参照 fit に失敗: {e}"));
+    assert_eq!(
+        bits_of(&m),
+        bits_of(&reference),
+        "先行窓までの更新と一致しない"
+    );
+}
+
+#[test]
+fn finite_accumulation_via_validation_entry_matches_plain_fit_bit_exact() {
+    // 有限入力の bit 不変（T2 の独立な手動参照に加え、入口間の一致を固定する）。
+    const TOTAL: usize = 7;
+    let (x, y) = gen_regression_data(0xBBBB, TOTAL);
+    let (xv, yv) = gen_regression_data(0xCCCC, 3);
+    let cfg = FitConfig::new(2, 1).accumulate_steps(3);
+    let mut a = build_model();
+    let mut b = build_model();
+    for m in [&mut a, &mut b] {
+        m.compile(Optimizer::Sgd(SgdConfig::new(0.05)), Loss::Mse)
+            .unwrap_or_else(|e| panic!("compile に失敗: {e}"));
+    }
+    let ha = a
+        .fit(&x, &y, cfg)
+        .unwrap_or_else(|e| panic!("fit に失敗: {e}"));
+    let hb = b
+        .fit_with_callbacks(&x, &y, cfg, Some((&xv, &yv)), &mut [])
+        .unwrap_or_else(|e| panic!("fit_with_callbacks に失敗: {e}"));
+    assert_eq!(ha.loss, hb.loss);
+    assert!(params_bit_exact(
+        &a.trainable_parameters(),
+        &b.trainable_parameters()
+    ));
+}
+
+#[test]
+fn direct_step_nonfinite_gradient_is_out_of_scope_and_unchanged() {
+    // 範囲の固定: `accumulate_steps == 1` の直接 step は #2855 の対象外で、従来どおり
+    // 検査しない（挙動を保証するものではなく、検査を累積経路に限る承認範囲の境界の固定）。
+    let mut m = overflow_model();
+    let x = col(vec![0.0]);
+    let y = col(vec![-3e38]);
+    assert!(m.fit(&x, &y, FitConfig::new(1, 1)).is_ok());
 }

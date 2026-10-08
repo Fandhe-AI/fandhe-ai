@@ -106,6 +106,13 @@ epoch 末に必ずフラッシュする理由は 2 つ:
 2. `fit(1) + fit(1) == fit(2)`（既存契約）を維持するため——
    `acc`／`micro` は fit 呼び出しをまたいで持ち越さない
 
+### 2.2.1 非有限の累積勾配の拒否（イシュー #2855）
+
+各マイクロバッチの勾配が有限でも f32 逐次加算で ±inf／NaN になりうる。`accumulate_steps > 1` では、
+重みの有無にかかわらず、ウィンドウ境界と epoch 末フラッシュで `optimizer.step` に渡す累積勾配を
+検査し、非有限なら更新前に `InvalidArgument` を返す。`accumulate_steps == 1` と有限入力は従来と
+bit 一致のまま。詳細は `docs/compat-fit-sample-weighting-decision.md` §16。
+
 ### 2.3 AMP との関係
 
 推奨方式（窓単位で `scale_loss`／`unscale`／`scaler.update` を揃える）
