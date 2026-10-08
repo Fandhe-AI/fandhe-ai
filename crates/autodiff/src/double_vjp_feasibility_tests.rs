@@ -4,10 +4,14 @@
 //! 統合テスト `tests/double_vjp_feasibility.rs` が公開 API から到達できる区分を担い、本
 //! モジュールはその残りを同じ手順（設計 `docs/autodiff-functional-transforms-design.md`
 //! §8）・同じ判定（REQ-2 統一複合判定。`create_graph.rs` の既存単体テストと同じ形でテスト内に
-//! 置き、新しい定数名・閾値は作らない）で確かめる。`#[cfg(test)]` 専用で本番ビルドに入らない。
+//! 置き、閾値は `tests/common/mod.rs` の共有定数を参照する）で確かめる。`#[cfg(test)]` 専用で本番ビルドに入らない。
 //! `jvp`／`jacfwd` の API は作らない。キンク（0・タイ）から離した入力を使う。
 
 use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor};
+
+// 統合テストと同じ REQ-2 判定実装を共有する（閾値の分散定義を避ける）。
+#[path = "../tests/common/mod.rs"]
+mod common;
 
 use crate::jacobian_ops::jacobian;
 use crate::test_support::test_ops;
@@ -27,11 +31,12 @@ fn seq(n: usize, seed: f32) -> Vec<f32> {
         .collect()
 }
 
-/// REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）。
+/// REQ-2 統一複合判定。閾値は統合テスト共通の `tests/common/mod.rs`
+/// （`REQ2_RELATIVE_TOLERANCE`／`REQ2_ABSOLUTE_RESCUE_THRESHOLD`）を単一の定義元として
+/// 参照し、本ファイルへ値を直書きしない（`autodiff` は `backend-cpu` へ依存できないため
+/// `parity` を直接は使えない。判定式は `backend-cpu::parity::compare` と揃えた共通実装）。
 fn close(actual: f64, expected: f64) -> bool {
-    let diff = (actual - expected).abs();
-    let scale = actual.abs().max(expected.abs()).max(1e-12);
-    diff / scale < 1e-3 || diff < 1e-5
+    common::req2_close(actual, expected)
 }
 
 fn double_vjp_probe(tape: &Tape, y: &Var<'_>, x: &Var<'_>, v: &Tensor<f32>, ctx: &str) -> Vec<f32> {
