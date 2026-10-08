@@ -203,3 +203,13 @@
 - **新規物**: tolerance・baseline・依存・`unsafe` は追加していない。
 - **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認（§10 の 6・8）。
 - **スコープ外**: vmap と vjp・hvp の合成（#2878）、double-VJP 検証（#2880）、CUDA／Metal 実機 `#[ignore]` テストと `docs/perf/logs/` への申し送り（#2881。facade 側ファイル末尾へ追記する）、facade 公開（#2879 以降）、`vmap(grad)`・`out_dim`・複数入力・`VarF64` 版・f16。
+
+## 19. 実装記録（#2878・親 #2841。§10 の分解案 5）
+
+- **追加したファイル**: `crates/autodiff/tests/functional_ops_composition.rs` のみ（`crates/*/src`・依存・tolerance・baseline・`unsafe` は無変更）。
+- **参照 3 系統**: R1 = 同一テープ上の batched 等価式、R2 = 明示ループ展開（`unbind` → f → `Var::stack`。`Var::contiguous` が `pub(crate)` のため in_dim=0 かつ f の出力が contiguous なケースに限る）、R3 = スライスごとの独立テープ（vjp は in_dim=0 で常に、hvp はバッチ方向に分離可能な損失に限る）。判定は REQ-2 統一複合判定（`common::req2_close`）。bit 一致は契約にしない（§11-2）。
+- **create_graph 対象 Op の制約**: `hvp` は `backward_create_graph` を通るため、経路上の Op は `supports_create_graph()` が真のもの（四則・relu/exp/tanh・sum・reshape・rank 2 matmul・transpose・narrow・concat 等）に限る。vmap 自身が積む Op（`Narrow`・`Reshape`・`Contiguous`・`Concat`）はすべて対象内。`max` 等は fail-closed 検証（C7）専用。
+- **ケース**: C1/C3（要素ごと・no-grad 重み付き matmul・スライスごとスカラー出力・rank 0 スライス・閉形式 `2x⊙u`／`6x⊙v`）、C2（vmap 出力と非 vmap 項の混在・`Jᵀu`）、C4（部分式としての vmap 出力・バッチ間結合損失）、C5（in_dim=1 のコピー経路・非 contiguous 出力・B=1）、C6（親テープ副作用: vjp は 2 ノード・hvp は 0 ノード、値の bit 不変、決定性、合成後の `backward`）、C7（対象外 Op の `hvp` 拒否と子テープ無変更・余接 shape 不一致）。全件 `hvp = hessian·v` と一致。
+- **`vmap(grad)`**: §5・§11-6 により扱わない（テスト・否定テストとも置かない）。
+- **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認（§10 の 6〜8）。
+- **スコープ外**: double-VJP 検証（#2880）、CUDA／Metal 実機 parity（#2881）、facade 公開（#2879 以降）、`out_dim`・複数入力・`VarF64` 版・f16。
