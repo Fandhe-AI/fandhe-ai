@@ -2574,7 +2574,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 - エラー型: 新しい型・variant を足さず、既存 `AutodiffError` を再利用する（設計記録 §5）。
 - 判定方式（設計記録 §6。未承認）: REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）をそのまま使う。`hvp` は 1 階 VJP と bit 同一を主張しない。`vmap` はバッチなし実行との一致を見る。新しい tolerance・baseline は作らない。
 - 拡張要否（設計記録 §9。推奨・未承認）: 依存追加・新規 `unsafe`・新規 `Op`／`BackendOps`／VJP はいずれも不要の見込み。
-- 検証の状態: `vmap` と `vjp`／`hvp` の合成検証（#2878）は `crates/autodiff/tests/functional_ops_composition.rs` として実装済みで、`hvp = hessian·v` との一致を確認済み（設計記録 §20）。ただし #2878 の issue 自体は open のままで、本承認依頼はこの実装済み範囲のみを根拠にする。CUDA/Metal 実機 parity（#2881）は `#[ignore]` テストを追加済み（設計記録 §21）だが実機では未実測で、成立したとは書かない。
+- 検証の状態: `vmap` と `vjp`／`hvp` の合成検証（#2878）は `crates/autodiff/tests/functional_ops_composition.rs` として実装済みで、`hvp = hessian·v` との一致を確認済み（設計記録 §20）。#2878 は 2026-10-08 に close した（本節の作成時点では open だった）。本承認依頼はこの実装済み範囲のみを根拠にする。CUDA/Metal 実機 parity（#2881。2026-10-08 に close）は `#[ignore]` テストと `docs/perf/logs/functional-transforms-2881/README.md` の申し送りまでで（設計記録 §21）、実機では未実測のため成立したとは書かない。
 
 実装済みの内部シグネチャ（`crates/autodiff/src/functional_ops.rs` の `vjp`・`hvp`・`vmap`）と設計記録 §5 の公開形の差（承認者が確認する事項）:
 
