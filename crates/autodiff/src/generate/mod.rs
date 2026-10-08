@@ -62,6 +62,10 @@
 //! - `pub(super)` は使わない。`generate` はクレート直下にあるため
 //!   `pub(super)` は `pub(crate)` と同じ範囲になり、クレート内の他経路から
 //!   検証を迂回した組み立てが可能になる
+//! - 子モジュール `kv_rewind`（KV キャッシュ巻き戻し。#2885）の項目は
+//!   `pub(super)` とする。子モジュール内の `pub(super)` は `generate` 配下
+//!   にしか見えず、上記の `generate` 直下の項目に関する方針とは矛盾しない
+//!   （クレート内の他経路へは露出しない。利用者は #2886 の `speculative`）
 //! - `validate*` は非公開を保つ（A03。facade の `api_surface.rs` の
 //!   公開形インベントリが固定。`docs/facade-generate-decision.md` §13.4・§18.5）
 
@@ -70,6 +74,13 @@ use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 use crate::nn::KvCache;
+
+// #2886（speculative）が使用するまで未使用。使用開始時にこの expect を撤去する。
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "#2886（speculative）が使用する。使用開始時に撤去")
+)]
+mod kv_rewind;
 
 /// 次トークンの選び方（イシュー #2191 受入条件 2）。`#[non_exhaustive]`
 /// は他の `AutodiffError` 系列挙型と同じ理由（公開 API 非破壊。
