@@ -14,7 +14,7 @@
     CUDA #1766・Metal #1768）を `groups = 1` で再利用し、`[N, 1, C·kH·kW, L]` ⇄ `[N, C·kH·kW, L]` の reshape だけを挟む。
   - 入口は `fandhe_ai_autodiff::fold_ops::{unfold, fold}`。専用 `Op::Unfold`／`Op::Fold` と VJP（互いの随伴）は
     `tape.rs`／`grad.rs`。shape 検査は `fandhe_ai_tensor_core::fold::{unfold_out_shape, fold_out_shape}`。
-- facade 公開は行わない。`FoldUnfoldHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
+- facade 公開は行わない（→ `Var` 委譲は #2851 で公開済み。§13）。`FoldUnfoldHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
   `crates/facade/tests/api_surface.rs` の否定ガードで機械固定した（§9）。
 - 層化（`nn::Fold`／`nn::Unfold`・`Module` impl・`Sequential::add_fold`／`add_unfold`・保存復元フック・resident 経路）は
   #2679 の対象で、本イシューでは実装していない（§8）。イシュー題名の「層として」は、内部クレートの自由関数と
@@ -248,3 +248,13 @@ impl<'t> Var<'t> {
 - 反転するのは `Var` の委譲メソッド名（`fold`／`unfold`）のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`compat::Sequential::add_*`・モジュール再エクスポート・型名のプローブは未承認経路として維持する。
 - workspace インベントリは `var.rs` の委譲 1 件ずつを許可位置に加える。
 - 実機 parity は既存の `docs/perf/logs/fold-unfold-2645/README.md` を使う。
+
+## 13. #2851 実施記録（`Var` 委譲の公開）
+
+承認根拠: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061（明示されたのは「行 12〜15 は `Var` 委譲に限って公開」「`Var::unfold` は `nn.functional.unfold` 対応名」「引数順は crate 内 `conv2d` 系」「層化は保留継続」の 4 点。シグネチャは §7 の 1 案から導いた §12.1 の形）。§7・§12 は書き換えていない。
+
+- **公開した名前**: `Var::unfold`・`Var::fold`（§12.1 のシグネチャどおり。追加のみ・`fandhe-ai =0.10.0` 非破壊）。委譲本体は `crates/autodiff/src/var.rs` にあり、`crate::fold_ops::unfold`／`fold` への 1 行委譲を `api_surface.rs::var_phase4_ops_methods_are_thin_delegations`（`PHASE4_VAR_EXPECTED_BODIES`）がトークン列で固定する。`Var::unfold` の doc コメントは §12.2 の文意（`torch.nn.functional.unfold` 相当・`torch.Tensor.unfold` とは別演算）で書いた。
+- **§9 のガードの現状**: `FoldUnfoldHoldDoctestGuard` は `Var` の `impl` ブロックと `Var::` の UFCS 行を外した部分反転（`Tape`／`Tensor<f32>`・`compat::Sequential::add_*`・モジュール・型のプローブは維持）。`fold_unfold_hold_doctest_probe_body_matches_fixed_contract` の固定文言も同じ形へ更新。`workspace_declares_fold_unfold_fn_names_only_in_allowed_locations` の期待値へ `autodiff/src/var.rs::{fold, unfold}` を各 1 件追加。`facade_does_not_reexport_or_declare_fold_unfold`（facade src の否定検査）は不変。
+- **テスト**: `crates/facade/tests/fold_unfold_lrn_weight_reparam_var_delegates.rs`（シグネチャ固定・自由関数との bit 一致〈値と勾配〉・窓並びと重なり倍率の閉形式・型付きエラー）。`fold_unfold_backend_parity.rs` は `Var` メソッド経由に切り替えた（テスト名・`#[ignore]`・判定・tolerance は不変）。
+- **実機**: CUDA／Metal は未実測（`docs/perf/logs/fold-unfold-2645/README.md` の記入欄は未記入のまま）。
+- **保留継続**: 層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_fold`／`add_unfold`）、`Tape`／`Tensor<f32>` 上の同名メソッド、モジュール・型の再エクスポート。

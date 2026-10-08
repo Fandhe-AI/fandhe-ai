@@ -1312,20 +1312,20 @@ pub(crate) enum Op {
     /// の随伴と同一規則）。非融合・非 checkpoint・高階微分非対応。
     MaxUnpool { input: NodeId, index: Tensor<i32> },
     /// Unfold（`F.unfold`／`nn.Unfold` 相当。入力 `[N, C, H, W]` → `[N, C·kH·kW, L]`。イシュー #2645・
-    /// `docs/autodiff-fold-unfold-decision.md`）。`crate::fold_ops::unfold` からのみ積まれ、facade には
-    /// 公開しない。実体は既存 `BackendOps::im2col`（`groups = 1`）の再利用。`params` は VJP
+    /// `docs/autodiff-fold-unfold-decision.md`）。`crate::fold_ops::unfold` からのみ積まれる（`Op` 自体は非公開。入口の
+    /// `Var::unfold` は #2851 で公開済み）。実体は既存 `BackendOps::im2col`（`groups = 1`）の再利用。`params` は VJP
     /// （`col2im`）に必要なため保持する。VJP は [`Op::Fold`] の随伴（`col2im`）。常に実体化済み
     /// （`push_eager`）・非 checkpoint・高階微分非対応。
     Unfold { input: NodeId, params: Conv2dParams },
     /// Fold（`F.fold`／`nn.Fold` 相当。入力 `[N, C·kH·kW, L]` → `[N, C, H, W]`。イシュー #2645）。
-    /// `crate::fold_ops::fold` からのみ積まれ、facade には公開しない。実体は既存
+    /// `crate::fold_ops::fold` からのみ積まれる（`Op` 自体は非公開。入口の `Var::fold` は #2851 で公開済み）。実体は既存
     /// `BackendOps::col2im`（`groups = 1`）の再利用。`output_size` は保持しない（VJP は
     /// `upstream.shape()` から導出する）。VJP は [`Op::Unfold`] の随伴（`im2col`）。分類は
     /// [`Op::Unfold`] と同じ。
     Fold { input: NodeId, params: Conv2dParams },
     /// LocalResponseNorm（`F.local_response_norm` 相当。入力 `[N, C, *S]`。イシュー #2646・
     /// `docs/autodiff-lrn-weight-reparam-decision.md`）。`crate::lrn_ops::local_response_norm`
-    /// からのみ積まれ、facade には公開しない。`params` は VJP（共有カーネル
+    /// からのみ積まれる（`Op` 自体は非公開。入口の `Var::local_response_norm` は #2851 で公開済み）。`params` は VJP（共有カーネル
     /// `tensor_core::lrn::local_response_norm_vjp_host`）に必要なため保持する。統計 `d` は保持せず
     /// backward で入力から再計算する。**既存 Op の合成にしない**（二乗が `f32` で先に確定し
     /// `f64` アキュムレータ契約に抵触するため）。常に実体化済み（`push_eager`）・非 checkpoint・
@@ -1335,7 +1335,7 @@ pub(crate) enum Op {
         params: fandhe_ai_tensor_core::lrn::LrnParams,
     },
     /// weight_norm（`torch._weight_norm(v, g, dim)` 相当。`w = v·(g/‖v‖)`。イシュー #2646）。
-    /// `crate::weight_reparam_ops::weight_norm` からのみ積まれ、facade には公開しない。
+    /// `crate::weight_reparam_ops::weight_norm` からのみ積まれる（`Op` 自体は非公開。入口の `Var::weight_norm` は #2851 で公開済み）。
     /// 2 入力（`v`・`g` の順に列挙）。`dim = None` はテンソル全体。VJP は共有カーネル
     /// `tensor_core::weight_reparam::weight_norm_vjp_host`（`g` 勾配は `f64` 縮約）。分類は
     /// [`Op::LocalResponseNorm`] と同じ。
@@ -1345,7 +1345,7 @@ pub(crate) enum Op {
         dim: Option<usize>,
     },
     /// spectral_norm（`out = W/σ`、`σ = uᵀ W_mat v`。イシュー #2646）。
-    /// `crate::weight_reparam_ops::spectral_norm` からのみ積まれ、facade には公開しない。`u`・`v` は
+    /// `crate::weight_reparam_ops::spectral_norm` からのみ積まれる（`Op` 自体は非公開。入口の `Var::spectral_norm` は #2851 で公開済み）。`u`・`v` は
     /// forward 時点の**非追跡スナップショット**（`Op::MaxPool3d { index }` と同じ payload の扱い。
     /// 勾配は流れない）。`σ` は保持せずスナップショットと入力値から再計算する。分類は
     /// [`Op::LocalResponseNorm`] と同じ。

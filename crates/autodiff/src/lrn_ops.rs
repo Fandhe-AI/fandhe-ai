@@ -1,12 +1,11 @@
 //! `local_response_norm` の自由関数（`F.local_response_norm` 相当。入力 `[N, C, *S]`・チャネル軸は
 //! dim 1。イシュー #2646・親 #2625「Phase 4」・ルート #2499）。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::local_response_norm` の委譲メソッド）は未承認で、承認依頼は
-//! #2677（公開自体は承認後の #2678）。層化（`nn::LocalResponseNorm`・`Module` impl・
-//! `Sequential::add_*`）は #2679 の対象で本イシューでは作らない。本モジュールは内部クレート限定の
-//! 入口で、`Var` に inherent メソッドを足さない。保留は `crates/facade/src/lib.rs` の
-//! `LrnWeightReparamHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の否定ガードが機械的に
-//! 固定する（`docs/autodiff-lrn-weight-reparam-decision.md`）。
+//! **facade 公開状況**: 入口の `Var::local_response_norm`（本関数への 1 行委譲メソッド）は #2851 で facade へ
+//! 公開済み（モジュール自体は再エクスポートしない。公開形は `docs/autodiff-lrn-weight-reparam-decision.md`
+//! §12.1）。層化（`nn::LocalResponseNorm`・`Module` impl・`Sequential::add_*`）は保留継続。残る保留は
+//! `crates/facade/src/lib.rs` の `LrnWeightReparamHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の
+//! 否定ガードが機械的に固定し、公開済み側は同ファイルの正ガードが固定する。
 //!
 //! **経路**: ① パラメータ（`size >= 1`・`alpha`／`beta`／`k` 有限）・rank・確保サイズの検査（実体化・
 //! tape 操作より前。エラー時に孤児ノードを残さない）→ ② 入力の実体化 → ③ `BackendOps::lrn_forward`

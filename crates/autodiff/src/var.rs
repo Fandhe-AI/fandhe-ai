@@ -5494,6 +5494,75 @@ impl<'t> Var<'t> {
         )
     }
 
+    // ---- fold_ops 委譲メソッド（Fold／Unfold（Phase 4 行 14）。イシュー #2851。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::fold_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装へのすり替えを facade の正ガード
+    // （`var_phase4_ops_methods_are_thin_delegations`）で拒否する。公開形は `docs/autodiff-fold-unfold-decision.md` §12.1。
+    // 層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は保留継続。
+
+    /// `torch.nn.functional.unfold`（`nn.Unfold`）相当の列展開。`torch.Tensor.unfold`（次元方向のスライディング窓）とは別の演算である。
+    /// `[N, C, H, W]` を `[N, C·kH·kW, L]` へ展開する。引数順は crate 内 `conv2d` 系（`kernel_size, stride, padding, dilation`）で、
+    /// PyTorch の `dilation, padding, stride` 順ではない。バッチなし入力は非対応、`C = 0` は受理する。
+    /// イシュー #2851。`crate::fold_ops::unfold` へ 1 行委譲し、引数検査・エラー契約は委譲先に従う。
+    pub fn unfold(
+        &self,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fold_ops::unfold(self, kernel_size, stride, padding, dilation)
+    }
+
+    /// `torch.nn.functional.fold`（`nn.Fold`）相当。`[N, C·kH·kW, L]` を `[N, C, H, W]` へ戻し、重なる窓は加算する。
+    /// `output_size` が先頭引数。イシュー #2851。`crate::fold_ops::fold` へ 1 行委譲し、引数検査・エラー契約は委譲先に従う。
+    pub fn fold(
+        &self,
+        output_size: [usize; 2],
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::fold_ops::fold(self, output_size, kernel_size, stride, padding, dilation)
+    }
+
+    // ---- lrn_ops／weight_reparam_ops 委譲メソッド（LRN・重み再パラメータ化（Phase 4 行 15）。イシュー #2851。親 #2625・ルート #2499）----
+    //
+    // 実体は各モジュールの自由関数。本体は 1 行委譲に固定し、正ガードで拒否する。公開形は
+    // `docs/autodiff-lrn-weight-reparam-decision.md` §12.1。層化・結線方式は保留継続。`norm_except_dim` は公開しない。
+
+    /// `torch.nn.functional.local_response_norm` 相当。非有限パラメータは拒否する。
+    /// イシュー #2851。`crate::lrn_ops::local_response_norm` へ 1 行委譲し、引数検査・エラー契約は委譲先に従う。
+    pub fn local_response_norm(
+        &self,
+        size: usize,
+        alpha: f32,
+        beta: f32,
+        k: f32,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::lrn_ops::local_response_norm(self, size, alpha, beta, k)
+    }
+
+    /// `torch.nn.utils.weight_norm` 相当（`w = g · v / ‖v‖`）。`self` が `v`。
+    /// `g` の shape は `dim = Some(d)` なら `d` 軸以外が長さ 1 の keepdim 形、`dim = None` なら rank 0 で、完全一致のみ受理する
+    /// （決定記録 §12.3）。`norm_except_dim` は公開していないため、初期値の `g` は利用者が自前で用意する。
+    /// イシュー #2851。`crate::weight_reparam_ops::weight_norm` へ 1 行委譲し、引数検査・エラー契約は委譲先に従う。
+    pub fn weight_norm(&self, g: &Var<'t>, dim: Option<usize>) -> Result<Var<'t>, AutodiffError> {
+        crate::weight_reparam_ops::weight_norm(self, g, dim)
+    }
+
+    /// `torch.nn.utils.spectral_norm` 相当。`self` が `weight`。`training = true` のときだけ `state` を更新し、失敗時は状態不変。
+    /// 勾配は `weight` のみへ流れる。乱数初期化は行わない（PyTorch の予備反復は `power_iterate(weight, 15)` で再現する）。rank 1 は非対応。
+    /// イシュー #2851。`crate::weight_reparam_ops::spectral_norm` へ 1 行委譲し、引数検査・エラー契約は委譲先に従う。
+    pub fn spectral_norm(
+        &self,
+        state: &mut crate::weight_reparam_ops::SpectralNormState,
+        training: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::weight_reparam_ops::spectral_norm(self, state, training)
+    }
+
     // ---- activation_scalar_ops 委譲メソッド（スカラー活性化（Phase 4 行 17）。イシュー #2678。親 #2625・ルート #2499）----
     //
     // 実体は `crate::activation_scalar_ops` の自由関数（既存 Op の合成）。本体は 1 行委譲に固定し、検査の迂回や独自実装への

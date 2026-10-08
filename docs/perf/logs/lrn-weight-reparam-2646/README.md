@@ -41,3 +41,5 @@ NaiveOps tape のホストフォールバックと bit 一致）。
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
 | 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+
+#2851 以降、本テストは `Var` のメソッド経由（`Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm`）で同じ経路を測る（テスト名・`#[ignore]`・判定は不変。上表の記入欄は未実測のまま）。

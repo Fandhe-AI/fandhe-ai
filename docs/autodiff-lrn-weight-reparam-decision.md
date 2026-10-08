@@ -19,7 +19,7 @@
     `fandhe_ai_autodiff::weight_reparam_ops::{weight_norm, norm_except_dim, spectral_norm}` と内部型
     `SpectralNormState`。専用 `Op::LocalResponseNorm`／`Op::WeightNorm`／`Op::SpectralNorm` と VJP は
     `tape.rs`／`grad.rs`。
-- facade 公開は行わない。`LrnWeightReparamHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
+- facade 公開は行わない（→ `Var` 委譲 3 件と `SpectralNormState` のルート再エクスポートは #2851 で公開済み。§13）。`LrnWeightReparamHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
   `crates/facade/tests/api_surface.rs` の否定ガードで機械固定した（§9）。
 - 層化（`nn::LocalResponseNorm`・`Module` impl・`Sequential::add_*`・`Linear`／`Conv` の重みへの parametrization 結線・
   保存復元フック）は #2679 の対象で、本イシューでは実装していない（§8）。イシュー題名の「LocalResponseNorm」は層名だが、
@@ -285,3 +285,15 @@ impl<'t> Var<'t> {
 - 反転するのは `Var` の委譲メソッド名 3 件のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`norm_except_dim`・`compat::Sequential::add_*`・モジュール再エクスポートのプローブは未承認経路として維持する。
 - workspace インベントリは `var.rs` の委譲 1 件ずつと、承認済みの `SpectralNormState` 再エクスポートを許可位置に加える。非破壊性の確認（行 15 の †）は公開時に `api_surface.rs` で行う。
 - 実機 parity は既存の `docs/perf/logs/lrn-weight-reparam-2646/README.md` を使う。
+
+## 13. #2851 実施記録（`Var` 委譲と `SpectralNormState` の公開）
+
+承認根拠: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061（明示されたのは「行 12〜15 は `Var` 委譲に限って公開」「層化と結線方式は保留継続」の 2 点。`SpectralNormState` の位置と `norm_except_dim` 非公開は §12 が導出と明記した形）。§7・§12 は書き換えていない。
+
+- **公開した名前**: `Var::local_response_norm`・`Var::weight_norm`・`Var::spectral_norm`（§12.1 のシグネチャどおり）と、facade クレートルートの別名なし 1 行 `pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;`（§12.2）。委譲本体は `crates/autodiff/src/var.rs` にあり、`PHASE4_VAR_EXPECTED_BODIES` がトークン列で固定する。再エクスポートの形は `api_surface.rs::facade_reexports_spectral_norm_state_only_in_approved_shape` が「`src/lib.rs` の承認形ちょうど 1 件・別名／group／別ファイルは 0 件」で固定する。
+- **非公開のまま**: `norm_except_dim`（`Var`／`Tape`／`Tensor` のメソッド・自由関数とも）・`SPECTRAL_NORM_INIT_POWER_ITERATIONS`・`lrn_ops`／`weight_reparam_ops` モジュール・層型名。`g` の初期値は利用者が §12.3 の shape 規約に従って自前で用意する（テストで実演）。
+- **§9 のガードの現状**: `LrnWeightReparamHoldDoctestGuard` は `Var::` の UFCS 3 行とプローブモジュール内のローカル型 `SpectralNormState`（ルート再エクスポートと glob 衝突するため）を外した部分反転。`Var` のトレイト impl は `norm_except_dim` 分のプローブとして残した。`facade_does_not_reexport_or_declare_lrn_weight_reparam` は承認形 1 行だけを免除する（別名・group・可視性修飾付きは違反のまま）。`workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations` へ `autodiff/src/var.rs::{local_response_norm, weight_norm, spectral_norm}` を各 1 件追加（`norm_except_dim` は `weight_reparam_ops.rs` の 1 件のみ）。
+- **行 15 の † の確認**: 追加のみ。新規 inherent メソッド 3 本とルート再エクスポート 1 型で、既存シグネチャ・意味論の変更はない。
+- **テスト**: `crates/facade/tests/fold_unfold_lrn_weight_reparam_var_delegates.rs`（シグネチャ固定・自由関数との bit 一致〈値・`dv`／`dg`・`spectral_norm` の更新後 `u`／`v` と `training = false` の状態不変〉・`g = ‖v‖` の恒等・型付きエラーと失敗時の状態不変）。`lrn_weight_reparam_backend_parity.rs` は `Var` メソッド経由に切り替えた（テスト名・`#[ignore]`・判定・tolerance は不変）。
+- **実機**: CUDA／Metal は未実測（`docs/perf/logs/lrn-weight-reparam-2646/README.md` の記入欄は未記入のまま）。
+- **保留継続**: 層化（`nn::LocalResponseNorm`・`Sequential::add_*`・保存復元フック）、重み再パラメータ化の結線方式、`Tape`／`Tensor<f32>` 上の同名メソッド、モジュール再エクスポート。

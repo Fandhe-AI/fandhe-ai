@@ -304,11 +304,13 @@ pub mod pool3d_ops;
 // `Var` の 1 行委譲メソッドとして #2850 で facade へ公開済み（モジュール自体は再エクスポートしない。
 // 層化は保留継続。`docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12・§13）。
 pub mod conv_transpose3d_ops;
-// Fold／Unfold（`fold`・`unfold`。イシュー #2645）。既存 `im2col`／`col2im` の再利用。facade への公開は
-// 保留（承認依頼 #2677・公開 #2678。`docs/autodiff-fold-unfold-decision.md`）。
+// Fold／Unfold（`fold`・`unfold`。イシュー #2645）。既存 `im2col`／`col2im` の再利用。`Var` の 1 行委譲
+// メソッドとして #2851 で facade へ公開済み（モジュール自体は再エクスポートしない。層化は保留継続。
+// `docs/autodiff-fold-unfold-decision.md` §12・§13）。
 pub mod fold_ops;
-// LocalResponseNorm（`local_response_norm`。イシュー #2646）。facade への公開は保留（承認依頼 #2677・
-// 公開 #2678。`docs/autodiff-lrn-weight-reparam-decision.md`）。
+// LocalResponseNorm（`local_response_norm`。イシュー #2646）。`Var` の 1 行委譲メソッドとして #2851 で
+// facade へ公開済み（モジュール自体は再エクスポートしない。層化は保留継続。
+// `docs/autodiff-lrn-weight-reparam-decision.md` §12・§13）。
 pub mod lrn_ops;
 pub mod max_unpool_ops;
 pub mod rearrange_ops;
@@ -349,8 +351,9 @@ pub mod topk_unique_ops;
 pub mod trig_ops;
 mod var;
 // 重み再パラメータ化（`weight_norm`・`norm_except_dim`・`spectral_norm`・`SpectralNormState`。
-// イシュー #2646）。facade への公開は保留（承認依頼 #2677・公開 #2678・層化 #2679。
-// `docs/autodiff-lrn-weight-reparam-decision.md`）。
+// イシュー #2646）。`weight_norm`／`spectral_norm` は `Var` の 1 行委譲メソッド、`SpectralNormState` は
+// クレートルート再エクスポート 1 行として #2851 で facade へ公開済み（モジュール自体・`norm_except_dim` は
+// 非公開のまま。層化・結線方式は保留継続。`docs/autodiff-lrn-weight-reparam-decision.md` §12・§13）。
 pub mod weight_reparam_ops;
 
 pub use backward::Gradients;
