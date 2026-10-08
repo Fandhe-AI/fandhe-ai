@@ -2135,6 +2135,14 @@ manifest 上限の閾値は変更しない）。load 側は改竄 manifest の�
 保留継続: `CtcLossOptions`・`Reduction`・`loss_ops` モジュールの facade 再エクスポート（推奨形外）・`nn::loss::CtcLoss` の公開（#2600）・GPU 専用カーネル。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。実機 parity は `docs/perf/logs/ctc-loss-2168/README.md` の申し送りが有効（ホスト計算経路は不変）。
 
+**適用記録（経路 2。イシュー #2602・親 #2600・ルート #2499。承認コメント https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）**:
+`docs/facade-nn-loss-structs-exposure-decision.md` §4 の承認形どおり、`fandhe_ai::nn::loss` を新設し `fandhe_ai_autodiff::nn::loss` の 19 名
+（損失構造体 14・`Reduction`・`CrossEntropyOptions`・`TripletMarginOptions`・`PoissonNllOptions`・`CtcLossOptions`）を明示列挙で純再エクスポートした
+（`fandhe-ai =0.10.0` の公開 API に追加のみ・非破壊）。`Reduction`・オプション型は `nn::loss` 経由のみで、crate root・`nn` 直下・`loss_ops` 経由には出さない。
+承認形は `api_surface.rs` の正ガード（`facade_reexports_nn_loss_items_only_in_approved_shape` ほか 5 件）と `nn_mod_*` の期待値拡張で固定した。
+保留継続: `loss_ops` モジュールの再エクスポート・`Tensor`／`Tape` 上の同名メソッド・Phase 4 保留中の損失 3 本・`CrossEntropyLoss` への `new`／`Default` 追加。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。新規カーネルがないため実機 parity の申し送りは不要。
+
 **適用記録（経路 2。イシュー #2550・#2549・親 #2542・ルート #2499 本文「承認範囲」節の一括承認に基づく）**:
 `docs/autodiff-custom-function-decision.md` §16.1 の確定形（単一案）どおり、`fandhe_ai::CustomFunction`（crate ルートの `pub use`）と
 facade `Tape::custom`（`self.0.custom(func, inputs)` の 1 行委譲）を公開した（`fandhe-ai =0.10.0` の公開 API に追加のみ・非破壊）。
