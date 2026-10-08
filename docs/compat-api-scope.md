@@ -2467,3 +2467,45 @@ facade 公開面は追加していない（保留ガード `GradcheckAnomalyHold
 **適用記録（イシュー #2850・親 #2499 Phase 4。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）**: 行 12・13 の公開形（決定記録 `autodiff-pool3d-ops-decision.md` §12.1・`autodiff-conv-transpose3d-max-unpool-decision.md` §12.1）のとおり、`Var::max_pool3d`（`(Var, Tensor<i32>)` を返す）・`avg_pool3d`・`conv_transpose3d`・`max_unpool1d`・`max_unpool2d`・`max_unpool3d` の 6 本を `Var` の 1 行委譲として公開した（追加のみ・`fandhe-ai =0.10.0` の既存 API は不変。委譲本体は `var_phase4_ops_methods_are_thin_delegations` が固定）。保留ガード `Pool3dOpsHoldDoctestGuard`・`ConvTranspose3dMaxUnpoolHoldDoctestGuard` は公開した名前（`Var` 受け手）の分だけ反転した。維持した保留: 層化（`nn::*` 層型・`compat::Sequential::add_*`）、モジュール名・内部型、`Tape`／`Tensor<f32>` 上の同名メソッド。承認コメントが明示したのは「行 12〜15 は `Var` 委譲に限って公開」「層化は保留継続」の 2 点で、シグネチャ確定は各決定記録 §7 の 1 案から導いた事項である。本書 1 節の対象範囲表・`compat-feature-gap.md` の判定列は変更していない。CUDA／Metal 実機は未実測（`docs/perf/logs/pool3d-ops-2643/README.md`・`docs/perf/logs/conv-transpose3d-max-unpool-2644/README.md`）。詳細は各決定記録 §13。
 
 **適用記録（イシュー #2851・親 #2499 Phase 4。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）**: 行 14・15 の公開形（決定記録 `autodiff-fold-unfold-decision.md` §12.1・`autodiff-lrn-weight-reparam-decision.md` §12.1・§12.2）のとおり、`Var::unfold`・`fold`・`local_response_norm`・`weight_norm`・`spectral_norm` の 5 本を `Var` の 1 行委譲として公開し、`SpectralNormState` をクレートルートへ別名なし 1 行で再エクスポートした（追加のみ・`fandhe-ai =0.10.0` の既存 API は不変。行 15 の † は新規 inherent メソッド 3 本とルート再エクスポート 1 型のみで既存シグネチャ・意味論の変更なしと確認。委譲本体は `var_phase4_ops_methods_are_thin_delegations`、再エクスポートの形は `facade_reexports_spectral_norm_state_only_in_approved_shape` が固定）。保留ガード `FoldUnfoldHoldDoctestGuard`・`LrnWeightReparamHoldDoctestGuard` は公開した名前（`Var` 受け手・`SpectralNormState`）の分だけ反転した。維持した保留: 層化（`nn::*` 層型・`compat::Sequential::add_*`）、重み再パラメータ化の結線方式、`norm_except_dim`・`SPECTRAL_NORM_INIT_POWER_ITERATIONS`、モジュール名・内部型、`Tape`／`Tensor<f32>` 上の同名メソッド。承認コメントが明示したのは「行 12〜15 は `Var` 委譲に限って公開」「`Var::unfold` は `nn.functional.unfold` 対応名」「引数順は crate 内 `conv2d` 系」「層化・結線方式は保留継続」で、`SpectralNormState` の位置と `norm_except_dim` 非公開は決定記録 §12 が導出と明記した形である。本書 1 節の対象範囲表・`compat-feature-gap.md` の判定列は変更していない。CUDA／Metal 実機は未実測（`docs/perf/logs/fold-unfold-2645/README.md`・`docs/perf/logs/lrn-weight-reparam-2646/README.md`）。詳細は各決定記録 §13。
+
+**Phase 8 公開形（承認依頼 #2883・親 #2882・Phase 8 #2872）**: speculative decoding・連続バッチングの公開形と判定方式の承認依頼。上の Phase 4 表（行 1〜30）とは別系統のため、行ラベルは `S1`〜`S3` とし Phase 4 の番号空間と混ぜない（Phase 4 表の「行と保留ガードは `*HoldDoctestGuard` と 1 対 1」という前提も、保留ガード未設置のこの 3 行には当てはまらない）。以下は設計記録 `docs/facade-speculative-decoding-batching-design.md` §5・§6・§9・§10 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。ルート #2499 の 2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計の記録までで、案 C の境界の承認（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`、2026-10-07）は「公開面の追加・数値判定方式・`Op`／`BackendOps` の拡張」を承認していない。公開（コード・`pub use`・保留ガードの反転）は承認後に別 issue（設計記録 §11 の仮番号 9）で行う。
+
+| # | 機能（由来） | 公開形（設計記録 §5 の転記・未承認） | 非破壊性 | 保留ガード | 公開先 | 決定記録・承認事項の所在 |
+|---|---|---|---|---|---|---|
+| S1 | `generate_speculative`（speculative decoding・greedy） | `fandhe_ai::inference` への追加。`GENERATE_APPROVED_REEXPORT` の 1 文は変えず別の `pub use` 文で足す。シグネチャは target・draft・`input_ids`・`&GenerateConfig`・`&SpeculativeConfig` を受け `Result<Tensor<i32>, AutodiffError>` を返す形に「相当」（正確な型パラメータ境界は未確定）。受理統計は返さない。B = 1 限定 | 追加のみ（`fandhe-ai =0.10.0` の既存シグネチャ・意味論・`FitConfig` は不変） | 未設置（設計記録に名前なし・設置担当 issue も未確定） | 未公開（承認待ち） | 設計記録 §5・§6.1・§7・§10 |
+| S2 | `SpeculativeConfig` | `#[non_exhaustive]`。フィールドは draft の先読み長 `k` のみ。`k == 0` は `Err(InvalidArgument)`、残り長を超える `k` は残り長に丸める | 同上 | 同上 | 同上 | 設計記録 §5・§7 |
+| S3 | `BatchScheduler`（連続バッチング第 1 段階。名前は案） | 素の `struct`。`new(limits)`（上限は必須）・`submit(input_ids, &GenerateConfig) -> Result<RequestId, AutodiffError>`・`step(&mut self, model) -> Result<usize, AutodiffError>`・`take_finished() -> Vec<(RequestId, Tensor<i32>)>`。要求ごとに `GenerateConfig` と独立シードを持つ。内部状態保持型モデルは対象外であることを doc の契約にする | 同上 | 同上 | 同上 | 設計記録 §5・§6.3・§7・§8・§10 |
+
+エラー型は既存の `AutodiffError` を流用し、新しい型・variant は足さない（設計記録 §5）。
+
+判定方式（設計記録 §6。未承認）:
+
+- greedy で状態を持たないテスト用モデルは token 列の完全一致。KV キャッシュ付きの実モデルでは token 列一致を事前登録の仮説とし、契約上の判定は位置ごとの logits に対する既存の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）に帰着させる。bit 一致は確定事実として書かない。
+- 連続バッチング第 1 段階は、各要求を単独で `generate` した結果との token 列完全一致。
+- サンプリング版は提案なし（論点 1）。新しい tolerance・baseline は作らない。
+
+拡張要否（設計記録 §9。推奨・未承認）: 依存追加・新規 `unsafe`・新規 `Op`／`BackendOps`／VJP はいずれも不要の見込み。
+
+承認依頼する論点（設計記録 §10 の転記。推奨は設計記録にあるものだけ）:
+
+| 論点 | 内容 | 選択肢（設計記録にあるもの） | 推奨 |
+|---|---|---|---|
+| 1 | サンプリング版の分布一致の判定契約（統計検定の標本数・有意水準） | 設計記録に列挙なし（§6.2 は tolerance・標本数を提案しないと明記） | 推奨なし。承認までサンプリング版（§11 の 6）はブロック |
+| 2 | greedy の token 列一致の仮説が実モデルで破れた場合の扱い | 設計記録に列挙なし（§6.1 は margin 付き入力で避け、破れたら承認依頼に戻すとする） | 推奨なし |
+| 3 | 内部状態保持型モデル（`facade-generate-decision.md` §17.4）への到達経路 | `caches` を使う形の公開／`AutoregressiveModel` の既定メソッドとしての巻き戻しフック（既存実装は壊れないが trait 拡張で公開面が変わる）／別 trait（既存に影響しないが型パラメータが増える） | 推奨なし（設計記録上「いずれも未決」） |
+| 4 | `KvCache` の公開メソッド追加（`truncate` 等）と「単一の書き手」不変条件の緩和 | §4.1 の (i) clone 保存・復元（公開面は増えない）／(ii) `pub(crate)` の切り詰め／(iii) `KvCache::truncate` の `pub` 追加 | 設計記録 §4.1 の推奨は (i)、次点は (ii)。(iii) は公開面の追加で承認事項 |
+| 5 | テンソル単位バッチ化に要る padding mask・可変長キャッシュ | 同じ `S_cached` の要求のグルーピング／padding mask・行単位 gather（§8.2） | 推奨なし（§8.1 の第 1 段階はこれを必要としない形） |
+| 6 | facade 公開面の追加そのもの | 上表 S1〜S3 の 1 案 | 設計記録 §5 の 1 案（未承認） |
+| 7 | paged attention | 条件付き（K-3 のデバイス常駐 KV と CPU 参照実装が成立するまで） | 推奨なし |
+| 8 | 連続バッチングで内部状態保持型モデルを扱うための要求ごとのモデル状態の分離方式 | 要求ごとに別インスタンスを渡す／モデル側の状態の退避・復元フック（trait 拡張か別 trait かは論点 3 と同じ） | 推奨なし（決まるまで第 1 段階は対象外） |
+
+設計記録に形が書かれていない点（承認時に決めてほしい事項。本節は推奨を作らない）:
+
+- 保留ガードの名前と、どの issue で設置するか（設計記録 §5 は「承認までは保留ガードで固定」と方針のみ）。
+- `RequestId` の型の定義。
+- `BatchScheduler::new(limits)` の `limits` の型・フィールド構成（同時要求数・キュー長・要求ごとの `max_length` の上限は必須、とだけ記録されている）。
+- `step` の `model` 引数の型（ジェネリック境界・`?Sized` の有無）。
+- 要求の途中で `forward_step` が失敗したときの失敗の表現型（設計記録 §7 は実装 issue で決めるとしている）。
+- `generate_speculative` の正確な型パラメータ境界。
+
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
