@@ -378,7 +378,7 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   正のプローブ・`facade_does_not_reexport_or_declare_kv_cache_items` の
   多層構成。`docs/kv-cache-design.md` §10）で固定した
   （Tier 1／Tier 2 表への行追加は引き続き行わない）。**その後 2026-10-07 にリポジトリ所有者本人が K-2 の公開形（`docs/kv-cache-design.md` §11.6 の P1〜P4 を推奨どおり）を承認し
-  （https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）、PR #2816（#2579）で `fandhe_ai::nn::kv_cache`・`Tape::stateful_attention_forward` として公開した。保留ガードは正ガードへ置換済み（同 doc §14）。本 bullet の「未承認・保留」は #2084 時点の記録であり、§5 適用記録・Tier 表の更新は #2580 で行う**
+  （https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）、PR #2816（#2579）で `fandhe_ai::nn::kv_cache`・`Tape::stateful_attention_forward` として公開した。保留ガードは正ガードへ置換済み（同 doc §14）。本 bullet の「未承認・保留」は #2084 時点の記録であり、§5 の適用記録を参照（Tier 1／Tier 2 表への行追加は行わない）**
 - **`amax`/`max` 縮約 API**（PyTorch `torch.amax` 相当）: 縮約 API 自体は
   Tier 1（1.2 節・#1601）で対象範囲となった。`crates/autodiff/src/grad.rs`
   の `max_vjp` は同値タイ発生時「最初に現れる最大要素 1 箇所のみ」へ
@@ -545,7 +545,7 @@ P1」）を受けた是正である。
    受け入れ基準の改定
 2. 本リポジトリのユーザー承認を得たうえでの Issue 起票・本文書の更新
 
-### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行は承認・公開済み。保留は行 12〜15・19・20 の一部・行 30 の gradcheck）
+### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本は承認・公開済み。保留は行 12〜15・行 19・20 のオプション型を取る 5 本と 5 型・行 30 の gradcheck）
 
 **本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
 （内部実装＋保留ガードまで先行・公開は承認後）で内部クレートに実装した機能の公開形について、各決定記録に
@@ -560,8 +560,11 @@ P1」）を受けた是正である。
   （下表の「公開先」欄に「公開済み」と書いた行。保留ガードは承認形の正ガードへ反転または縮小済み。反転後のガード名と
   公開した識別子は §5 の適用記録〈#2679〉に記す）。行 1〜11・17・18 の `Var` 委譲、行 29、行 30 の `Tape::backward_detect_anomaly` は
   #2678（演算・自動微分）で公開済み（公開した識別子と保留は §5 の適用記録〈#2678〉に記す）。**#2678 でも保留を維持したもの**: 行 19・20 の 3 本
-  （`Reduction` を `fandhe_ai::nn::loss::Reduction` で名指しできる前提が #2602 未マージで満たされない）、行 30 の `Tape::gradcheck` と
+  （`Reduction` を `fandhe_ai::nn::loss::Reduction` で名指しできる前提が #2602 未マージで満たされなかった。**#2602〈PR #2835〉のマージで前提が満たされ、
+  本節の #2677 の適用記録〈損失 3 本〉で公開した**）、行 30 の `Tape::gradcheck` と
   `GradcheckOptions`／`GradcheckReport`（決定記録に facade シグネチャが書かれていない）、行 12〜15 の全体（承認の対象外）。
+  現在も保留なのは、行 19・20 のオプション型を引数に取る損失 5 本（`bce_with_logits_loss_with`・`gaussian_nll_loss`・`multi_margin_loss`・
+  `multilabel_soft_margin_loss`・`sigmoid_focal_loss`）とオプション型 5 つ（承認の対象外）、`gradcheck` 系、行 12〜15。
 - 公開時は保留ガードと `api_surface.rs` の否定ガードを承認形の正ガードへ反転する（#2679 で実施した型は §5 の適用記録）。
 - 行 12〜15 のように層化（`nn::MaxPool3d` 等と `Sequential::add_*`）が未実装の機能は、その旨を行に書いた。
 - 公開形の類型は 3 つ（`Var` の委譲メソッド／モジュール再エクスポート／`Sequential::add_*`）。どれにも当てはまらない推奨（facade `Tape` の委譲メソッド・facade 独自の薄いラッパー）は、決定記録の表現のまま書いた。
@@ -588,8 +591,8 @@ P1」）を受けた是正である。
 | 16 | 可変長系列（#2647） | モジュール再エクスポート（`fandhe_ai::nn::rnn` へ `PackedSequence`・出力型 4 種・自由関数 8 本を `pub use`）。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ† | `PackedSequenceHoldDoctestGuard` | #2679 で公開済み（`nn::rnn`。ガードは未承認経路〈`Var`／`Tape` 委譲等〉のプローブへ縮小） | `autodiff-packed-sequence-decision.md` §7（再エクスポート対象一覧・`PackedSequence::new` の扱い等が承認事項） |
 | 17 | 活性化 5 種（#2649） | `Var::selu`／`celu`／`softsign`／`hardsigmoid`／`log_sigmoid` の委譲 5 本（#2678）＋`Sequential::add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid`（#2679） | 追加のみ | `ActivationScalarOpsHoldDoctestGuard` | #2678・#2679 で公開済み（`Var` 委譲は #2678、`Sequential::add_*` は #2679） | `autodiff-activation-scalar-ops-decision.md` §7 |
 | 18 | Softmin・Tanhshrink・Threshold・RReLU（#2650） | `Var::softmin`／`tanhshrink`／`threshold`／`rrelu` の委譲 4 本（#2678）＋`Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu`（#2679）。`rrelu_with_noise` は公開しない | 追加のみ | `SoftminThresholdOpsHoldDoctestGuard` | #2678・#2679 で公開済み（`Var` 委譲は #2678、`Sequential::add_*` は #2679。`rrelu_with_noise` は公開しない） | `autodiff-softmin-threshold-ops-decision.md` §7 |
-| 19 | 要素ごと損失 4 種（#2652） | `Var::bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss` の委譲 4 本。オプション型 2 つと `Reduction` の名指しは別論点（#2600 ツリー側の記録） | 追加のみ | `ElementwiseLossOpsHoldDoctestGuard` | #2678 では保留（`hinge_embedding_loss`・`soft_margin_loss` の公開は `Reduction` の公開経路〈#2602〉待ち。他 2 本・オプション型は承認の対象外） | `autodiff-elementwise-loss-ops-decision.md` §7 |
-| 20 | マージン・focal 損失 4 種（#2653） | `Var::multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` の委譲 4 本。オプション型 3 つと `Reduction` の名指しは別論点（同上） | 追加のみ | `MarginFocalLossOpsHoldDoctestGuard` | #2678 では保留（`multilabel_margin_loss` の公開は同上。他 3 本・オプション型は承認の対象外） | `autodiff-margin-focal-loss-ops-decision.md` §7 |
+| 19 | 要素ごと損失 4 種（#2652） | `Var::bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss` の委譲 4 本。オプション型 2 つと `Reduction` の名指しは別論点（#2600 ツリー側の記録） | 追加のみ | `ElementwiseLossOpsHoldDoctestGuard` | `hinge_embedding_loss`・`soft_margin_loss` は #2677 の適用記録で公開済み（`Var` 委譲 2 本。`Reduction` は `fandhe_ai::nn::loss::Reduction`。ガードは `bce_with_logits_loss_with`・`gaussian_nll_loss`・オプション型 2 つ・モジュールのプローブへ縮小）。他 2 本・オプション型は承認の対象外で保留 | `autodiff-elementwise-loss-ops-decision.md` §7 |
+| 20 | マージン・focal 損失 4 種（#2653） | `Var::multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` の委譲 4 本。オプション型 3 つと `Reduction` の名指しは別論点（同上） | 追加のみ | `MarginFocalLossOpsHoldDoctestGuard` | `multilabel_margin_loss` は #2677 の適用記録で公開済み（`Var` 委譲 1 本。同上）。ガードは他 3 本・オプション型 3 つ・モジュールのプローブへ縮小。他 3 本・オプション型は承認の対象外で保留 | `autodiff-margin-focal-loss-ops-decision.md` §7 |
 | 21 | Rprop・ASGD（#2655） | `fandhe_ai::optim`（`crates/facade/src/optim.rs`）へ `Asgd`・`AsgdConfig`・`Rprop`・`RpropConfig` の素の再エクスポート | 追加のみ | `OptimizerRpropAsgdHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-rprop-asgd-decision.md` §8 |
 | 22 | Adafactor・Lion（#2656） | `fandhe_ai::optim` へ `Adafactor`・`AdafactorConfig`・`Lion`・`LionConfig` の素の再エクスポート | 追加のみ | `OptimizerAdafactorLionHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-adafactor-lion-decision.md` §8 |
 | 23 | SWA（#2658） | モジュール公開（`fandhe_ai::optim`）。`SwaLr`・`SwaAnneal` は純再エクスポート、`AveragedModel` は facade 独自の薄いラッパー（内部 `nn::Module` を露出しないため）。fit への結線は含めない | 追加のみ† | `SwaHoldDoctestGuard` | #2679 で公開済み（`optim`。ガードは `fit` 結線〈`FitConfig`／`Sequential` のメソッド〉のプローブへ縮小） | `autodiff-swa-decision.md` §7（承認事項 5 件） |
@@ -648,7 +651,7 @@ P1」）を受けた是正である。
   `ScatterReduceMode`・`PadMode`・`MeshgridIndexing`。`fft_ops` 等のモジュールは再エクスポートしない。
 - **保留を維持した点（記録に形が書かれていない・前提が満たされない）**: ① 行 19・20 の 3 本（`hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss`）は `Reduction` を
   `fandhe_ai::nn::loss::Reduction` で名指しできる前提だが、#2602 が未マージで `nn::loss` がないため公開せず、`Reduction` の公開経路も本イシューでは作らない
-  （損失系 2 つの保留ガードと否定ガードは無変更）。② `Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は、`autodiff-jacobian-hessian-gradcheck-decision.md` §3.4・§3.7・§9.4 に
+  （損失系 2 つの保留ガードと否定ガードは無変更）。**→ #2602〈PR #2835〉のマージ後、下の #2677 の適用記録で公開した。**② `Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は、`autodiff-jacobian-hessian-gradcheck-decision.md` §3.4・§3.7・§9.4 に
   facade メソッドのレシーバとテープ生成の受け方が書かれていないため保留（#2677 へコメント済み）。③ 行 12〜15 は承認の対象外で一切触れていない。
 
 保留ガードの反転・縮小は、`FftOpsHoldDoctestGuard` ほか 14 個の `*HoldDoctestGuard` から公開した受け手の `impl`・UFCS 行と型のローカル定義を外す部分反転（先例 #2516・#2519）で、
@@ -656,6 +659,27 @@ P1」）を受けた是正である。
 （`var_phase4_ops_methods_are_thin_delegations`・`phase4_matmul_low_precision_free_fn_delegates_to_method`・`facade_tape_phase4_methods_are_thin_delegations`・
 `facade_reexports_phase4_ops_types_only_in_approved_shape`・`phase4_held_items_remain_unexposed`）を置き、各グループの宣言場所インベントリへ `var.rs`（と `facade/src/lib.rs`）の各 1 件を足した。
 利用テストは `crates/facade/tests/phase4_ops_facade.rs`。**実機（CUDA／Metal）の parity 実測は未実施**で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` に実行コマンドと記入欄を置いた。
+
+**適用記録（経路 2。イシュー #2677・親 #2625。Phase 4 の損失 3 本の公開）**: ルート #2499 の 2026-10-07 ユーザー承認コメント
+（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965。「Phase 4（#2625）」節で行 19・20 は `hinge_embedding_loss`・`soft_margin_loss`・
+`multilabel_margin_loss` の 3 本だけを承認）に従い、#2678（PR #2828）で `Reduction` の公開経路が未整備のため見送られた 3 本を、#2602（PR #2835）で
+`fandhe_ai::nn::loss::Reduction` が公開された後に、`fandhe-ai =0.10.0` の公開 API を壊さない追加のみで公開した。依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
+
+- 公開した `Var` の 1 行委譲メソッド 3 本（`crates/autodiff/src/var.rs`。新規 `Op`・`BackendOps` メソッド・`AutodiffError` variant・`unsafe` なし）:
+  `Var::hinge_embedding_loss(&self, y: &Tensor<f32>, margin: f32, reduction: Reduction) -> Result<Var<'t>, AutodiffError>`・
+  `Var::soft_margin_loss(&self, y: &Tensor<f32>, reduction: Reduction) -> Result<Var<'t>, AutodiffError>`・
+  `Var::multilabel_margin_loss(&self, target: &Tensor<i32>, reduction: Reduction) -> Result<Var<'t>, AutodiffError>`。
+  シグネチャは決定記録 §7 の「既存 7 損失と同形の `Var` 1 行委譲」と、自由関数
+  （`elementwise_loss_ops`／`margin_focal_loss_ops`）の引数列から一意に定まる（レシーバ = `input`）。`Reduction` は
+  `fandhe_ai::nn::loss::Reduction` の 1 経路のみで、crate ルートには出していない。モジュール `elementwise_loss_ops`／`margin_focal_loss_ops` は再エクスポートしない。
+- **保留のまま残したもの**: `bce_with_logits_loss_with`・`gaussian_nll_loss`・`multi_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss` の 5 本と、
+  オプション型 `BceWithLogitsOptions`・`GaussianNllOptions`・`MultiMarginOptions`・`MultiLabelSoftMarginOptions`・`SigmoidFocalLossOptions` の 5 つ（承認の対象外）。
+- 保留ガードの縮小: `ElementwiseLossOpsHoldDoctestGuard`・`MarginFocalLossOpsHoldDoctestGuard` から、受け手 `Var` の trait メソッド・UFCS 行のうち公開した 3 本を外した
+  （残すと公開した inherent メソッドと衝突してコンパイルできない）。承認していない受け手 `Tape`／`Tensor<f32>` への同名メソッドの配置は、専用トレイトで引き続き拒否する。
+  `api_surface.rs` では、公開した 3 本の本体を `var_phase4_ops_methods_are_thin_delegations` へ追加し、2 系統の宣言場所インベントリに `var.rs` の各 1 件を足し、
+  `phase4_held_items_remain_unexposed` を保留の 5 本・5 型の否定（`var.rs` に `fn` なし、走査ガードが検出）に差し替えた。
+- テスト: `crates/facade/tests/loss_var_delegates.rs`（`fandhe_ai` の import だけで 3 本の到達・シグネチャ・forward／backward の自由関数との bit 一致・閉形式値・不正引数の型付きエラー）、
+  `crates/facade/src/nn/loss.rs` のモジュール doc に facade 単独で完結する doctest。**実機（CUDA／Metal）の parity は既存の `*_loss_ops_backend_parity.rs`（`#[ignore]`）のまま未実測**（新規 GPU カーネルなし）。
 
 **適用記録（経路 1 の適用例。イシュー #1591）**: 本改定（1／2 節の
 Tier 1／Tier 2 再編）は、実装リポ ルート #1570 のユーザー指示 → spec 提案
@@ -683,7 +707,7 @@ REQ-9 の 2026-09-12 追記はこの除外事項自体を変更していない�
 
 **#1633（sparse／complex テンソルの非対応の明文化）の設計記録は `docs/tensor-core-sparse-complex-decision.md` として完了した。** 量子化／DDP と異なり除外事項「分散学習・量子化の網羅対応」には従属しない（sparse／complex は REQ-9 の「引き続き対象外」列挙にのみ現れ、格上げ条件表を持つ Won't 項目ではない）。コード変更なし。再開には本節の範囲拡張手続き（経路 1 または経路 2）を要する（同 doc §3・§9）。
 
-**#1962（推論・サービング〈KV キャッシュ・トークナイザ・グラフ最適化区分 B〉のスコープ・段階）の設計記録は `docs/facade-inference-serving-scope-decision.md` として完了した。** コード変更なし。トークナイザ・サービング基盤（paged attention・連続バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ）は実装リポ側の設計判断による非目標（2 節に独立 bullet として記録・spec 提案は未起票）。KV キャッシュ（自己回帰デコード用）は「未定義」残余のうち本節経路 2 の起票案あり（同 doc §9 の K-1／K-2。K-1 実装着手は 2026-09-24 にユーザー承認済み・K-2〈facade 公開〉はユーザー承認前）。グラフ最適化区分 B（`docs/autodiff-graph-optimization-scope-decision.md`）は段階 0 を維持しつつ HEAD 時点のゲート状況を更新し、B-1（GPU `run_fused` elementwise allowlist）のみ起票案（同 doc §9 の G-1）として記録した。#2086 でトークナイザ非目標の spec (b) 形式提案文案を `docs/tokenizer-non-target-spec-proposal.md` に記録（未起票）。#2193 で Python バインディング（PyO3／maturin 等）・TensorFlow 系モデル形式（SavedModel・TFLite・Keras H5）の非目標を実装リポ側で初めて決定記録化し、spec (b) 形式提案文案を `docs/python-binding-tf-format-non-target-spec-proposal.md` に記録（未起票）。
+**#1962（推論・サービング〈KV キャッシュ・トークナイザ・グラフ最適化区分 B〉のスコープ・段階）の設計記録は `docs/facade-inference-serving-scope-decision.md` として完了した。** コード変更なし。トークナイザ・サービング基盤（paged attention・連続バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ）は実装リポ側の設計判断による非目標（2 節に独立 bullet として記録・spec 提案は未起票）。KV キャッシュ（自己回帰デコード用）は「未定義」残余のうち本節経路 2 の起票案あり（同 doc §9 の K-1／K-2。K-1 実装着手は 2026-09-24 にユーザー承認済み・K-2〈facade 公開〉はユーザー承認前。**その後 2026-10-07 承認・#2579 で公開。§5 適用記録〈イシュー #2579・#2580〉参照**）。グラフ最適化区分 B（`docs/autodiff-graph-optimization-scope-decision.md`）は段階 0 を維持しつつ HEAD 時点のゲート状況を更新し、B-1（GPU `run_fused` elementwise allowlist）のみ起票案（同 doc §9 の G-1）として記録した。#2086 でトークナイザ非目標の spec (b) 形式提案文案を `docs/tokenizer-non-target-spec-proposal.md` に記録（未起票）。#2193 で Python バインディング（PyO3／maturin 等）・TensorFlow 系モデル形式（SavedModel・TFLite・Keras H5）の非目標を実装リポ側で初めて決定記録化し、spec (b) 形式提案文案を `docs/python-binding-tf-format-non-target-spec-proposal.md` に記録（未起票）。
 
 **適用記録（経路 2。イシュー #1955）**: RNN／LSTM／GRU（内部クレート実装は #1647 で完了済み）の facade 公開可否・公開形（`compat::Sequential::add_*` を設けるか／独立モジュールとして純再エクスポートするか）を issue コメントで 2026-09-17 にユーザー承認（「選択肢 C」: `Sequential::add_rnn`／`add_lstm`／`add_gru` は追加しない・`fandhe_ai::nn::rnn` として素の再エクスポートで公開する）。新規公開面は `pub mod nn`（`nn::rnn` の 8 型純再エクスポート）と `Tape` の委譲メソッド 3 件（`rnn_forward_seq`／`lstm_forward_seq`／`gru_forward_seq`）のみ。**委譲メソッドを追加した回避不能な理由**: `Rnn::forward_seq` 等は第 1 引数に生の `fandhe_ai_autodiff::Tape` を取るが、facade の `Tape` newtype（内部フィールドは `pub(crate)`）はこれを取り出す手段を持たないため、`&self.0` を渡すだけの薄い委譲を追加しない限り「facade のみの import で `forward_seq` に到達できる」という受入基準自体が構造的に満たせない（`Tape::step_device_param_store`〈#935〉・`Tape::backward_device_param_store`〈#1022〉と同型・同じ理由の前例）。新規 `Op`／`BackendOps`／VJP は追加していない（内部クレート `fandhe_ai_autodiff::nn::rnn` の実装は #1647 のまま不変）。`crates/facade/tests/api_surface.rs` に固定ガード 5 件（再エクスポート識別子の完全一致・純再エクスポート検査・`nn/mod.rs` の宣言限定・facade 経由到達の実行時固定・`compat::Sequential` への `add_rnn`／`add_lstm`／`add_gru` 非存在の否定ガード）を追加した。
 
@@ -1159,6 +1183,32 @@ K-1 実装着手（本節 §5 経路 2）は 2026-09-24 にユーザー承認済
 K-2 事前設計（`MultiheadAttention` 自体が facade 未到達である点・
 `compat::Sequential` へのメソッド追加は §9 の「`Module` 非実装」判断
 と矛盾する点を含む）を記録した（同 doc §10）。
+
+> **更新（イシュー #2579・#2580）**: 上の「K-2 は引き続き未承認」は #2083〜#2084 時点の記録である。
+> 現行は直後の適用記録（2026-10-07 承認・#2579 で公開）が正。
+
+**適用記録（経路 2。イシュー #2579・#2580・親 #2577・ルート #2499 のコメント〈決定記録 `docs/kv-cache-design.md` §11.6 の P1〜P4 を推奨どおりとする承認。`issuecomment-6033824965`〉に基づく）**:
+KV キャッシュ（K-2）を決定記録 §11.4（P1〜P4）の確定形どおり公開した（実施は #2579・PR #2816）。
+公開名は `fandhe_ai::nn::kv_cache::{KvCache, MultiheadAttentionConfig, StatefulAttention}`（純再エクスポート 1 文）と
+`Tape::stateful_attention_forward`（`StatefulAttention::forward` への 1 行委譲）。内部クレート側では
+`StatefulAttention::from_config` を追加した（`MultiheadAttention` 型を facade が公開しないための入口）。
+`fandhe-ai =0.10.0` に対して追加のみ。
+正ガード: #2579 で `facade_reexports_kv_cache_items_only_in_approved_shape`（＋自己テスト
+`..._detects_each_category`）・`tape_stateful_attention_forward_is_thin_delegation`・
+`workspace_declares_stateful_attention_forward_only_in_facade_lib`・`kv_cache_is_reachable_via_facade_only`
+を導入し、旧保留ガード（`KvCacheHoldDoctestGuard`・走査ガード 3 件・固定文言）を削除した。期待集合
+（`nn_mod_declares_only_approved_submodules` 等）も承認済みの公開面へ更新している。#2580 で
+`nn_kv_cache_module_is_pure_reexport`・`nn_kv_cache_module_reexports_exactly_expected_surface`
+（別文での `MultiheadAttentionVars` 追加という既存ガードの穴を塞ぐ）・`kv_cache_usage_doctests_are_present_and_compiled`・
+`stateful_attention_from_config_signature_is_pinned` を追加した。
+利用例は `nn/kv_cache.rs` のモジュール doc（prefill → decode の doctest）と `crates/facade/tests/kv_cache_facade.rs`。
+Tier 1／Tier 2 表（§1.2・§1.3）への行追加は行っていない（#2822・#2826 の先例と同じ）。
+保留継続: `MultiheadAttention`・`MultiheadAttentionVars`・`forward_with_cache` の公開、
+`compat::Sequential::add_stateful_attention`、`StatefulAttention::new(mha)`／`mha()` の扱い（§11.4 P2 の残課題）、
+K-3（デバイス常駐キャッシュ）、`sdpa_compose` 置換、padding mask、`generate()` の公開（#2575／#2576）。
+`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec` は不変。CUDA／Metal 実機 parity は未実測で、
+申し送り先は `docs/perf/logs/kv-cache-2084/README.md`（新規カーネルなし）。
+詳細は `docs/kv-cache-design.md` §14・§15。
 
 **#2132（`nn::Module`／`ModuleList` の facade 公開可否）の設計記録は
 `docs/facade-nn-module-exposure-decision.md` として完了した。** コード

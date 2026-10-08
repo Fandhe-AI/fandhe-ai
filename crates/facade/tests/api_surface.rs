@@ -8370,6 +8370,100 @@ fn kv_cache_is_reachable_via_facade_only() {
     assert_eq!(y.to_tensor().shape(), &[1usize, 1, 4]);
     assert_eq!(sa.seq_len(), 3);
 }
+// ---------------------------------------------------------------------
+// イシュー #2580: #2579 で導入した KV キャッシュ正ガードの補強（追加のみ。既存ガードの期待集合・
+// 検査本体は変更しない）。`nn/kv_cache.rs` の純再エクスポート契約・`pub use` 文の件数固定・
+// 利用例 doctest の実在固定・`from_config` 署名の固定を担う（`docs/kv-cache-design.md` §15）。
+// ---------------------------------------------------------------------
+
+fn nn_kv_cache_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/nn/kv_cache.rs")
+}
+
+/// `src/nn/kv_cache.rs` が facade 独自の型・関数を定義しない純再エクスポートモジュールで
+/// あることを固定する（`nn_loss_module_is_pure_reexport` の鏡写し。モジュール doc の契約）。
+#[test]
+fn nn_kv_cache_module_is_pure_reexport() {
+    let content = read_to_string_or_panic(&nn_kv_cache_rs_path());
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/nn/kv_cache.rs が facade 独自の公開宣言を定義している\
+         （純再エクスポートモジュールの契約違反）: {offending:?}"
+    );
+}
+
+/// `src/nn/kv_cache.rs` の `pub use` 文が承認形 1 文ちょうど 1 件であることを固定する。
+/// 既存の `facade_reexports_kv_cache_items_only_in_approved_shape` は `KvCache`／
+/// `StatefulAttention` を含む文しか拾わないため、同ファイルへ `MultiheadAttentionVars` 等を
+/// 別文で足す経路（§11.4 P2「`MultiheadAttention`・`MultiheadAttentionVars` は公開しない」）を
+/// 本テストが塞ぐ。件数 0 の空振りも拒否する。
+#[test]
+fn nn_kv_cache_module_reexports_exactly_expected_surface() {
+    fn pub_use_stmts(content: &str) -> Vec<String> {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        cleaned
+            .split(';')
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|f| f.starts_with("pub use") || f.starts_with("pub(crate) use"))
+            .map(|f| f.replace(' ', ""))
+            .collect()
+    }
+    let expected = format!("pubuse{KV_CACHE_APPROVED_REEXPORT}");
+    let found = pub_use_stmts(&read_to_string_or_panic(&nn_kv_cache_rs_path()));
+    assert_eq!(
+        found,
+        vec![expected.clone()],
+        "src/nn/kv_cache.rs の pub use が承認形 1 文と一致しない"
+    );
+
+    // 自己テスト: 追加文・欠落・別名は検出される。
+    let ok = format!("pub use {KV_CACHE_APPROVED_REEXPORT};");
+    assert_eq!(pub_use_stmts(&ok), vec![expected.clone()]);
+    let extra = format!("{ok}\npub use fandhe_ai_autodiff::nn::MultiheadAttentionVars;");
+    assert_ne!(pub_use_stmts(&extra), vec![expected.clone()]);
+    assert_ne!(pub_use_stmts("// 空"), vec![expected.clone()]);
+    let alias = "pub use fandhe_ai_autodiff::nn::{KvCache as K, MultiheadAttentionConfig, StatefulAttention};";
+    assert_ne!(pub_use_stmts(alias), vec![expected]);
+}
+
+/// 正の doctest プローブ（#2580。#2554／#2561 と同型）: KV キャッシュの利用例（prefill →
+/// decode）が `nn/kv_cache.rs` のモジュール doc に実在し、実際にコンパイル・実行される形
+/// （`ignore`／`no_run`／`compile_fail`・隠し行で無効化されていない）であることを固定する。
+/// 実体のコンパイル・実行は `cargo test --doc`。
+#[test]
+fn kv_cache_usage_doctests_are_present_and_compiled() {
+    let content = read_to_string_or_panic(&nn_kv_cache_rs_path());
+    let v = doctest_probe_violations(
+        "nn/kv_cache.rs モジュール doc",
+        &inner_doc_lines(&content),
+        &[
+            "use fandhe_ai::nn::kv_cache::",
+            "StatefulAttention::from_config",
+            "stateful_attention_forward",
+            "seq_len",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+
+    // 自己テスト: 空入力・隠し行・ignore 指定は検出される。
+    assert!(!doctest_probe_violations("t", &[], &["seq_len"]).is_empty());
+    let hidden = ["```", "# seq_len", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &hidden, &["seq_len"]).is_empty());
+    let ignored = ["```ignore", "seq_len", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &ignored, &["seq_len"]).is_empty());
+}
+
+/// `StatefulAttention::from_config` の署名を関数ポインタ型注釈で固定する（#2580。
+/// `MultiheadAttention` 型を facade が公開しないための入口であり、署名変更を検知する）。
+#[test]
+fn stateful_attention_from_config_signature_is_pinned() {
+    use fandhe_ai::AutodiffError;
+    use fandhe_ai::nn::kv_cache::{MultiheadAttentionConfig, StatefulAttention};
+    let _sig: fn(&MultiheadAttentionConfig, u64) -> Result<StatefulAttention, AutodiffError> =
+        StatefulAttention::from_config;
+}
+
 /// `fandhe_ai::Var`（`Var<'t>`・借用 `&Var<'t>`）が算術演算子トレイト
 /// （`Add`／`Sub`／`Mul`／`Div`／各 `*Assign`／`Neg`）を実装していない
 /// ことを固定する（イシュー #2136。実装計画 §3.2）。**`Var op Var`／
@@ -31310,19 +31404,16 @@ struct __FandheElementwiseLossOpsHoldMarker;\n\
 \n\
 trait __FandheElementwiseLossOpsHoldProbe {\n\
 \x20\x20\x20\x20fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker;\n\
+\x20\x20\x20\x20fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;\n\
+}\n\
+\n\
+trait __FandheElementwiseLossOpsApprovedMethodReceiverProbe {\n\
 \x20\x20\x20\x20fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;\n\
 \x20\x20\x20\x20fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;\n\
-\x20\x20\x20\x20fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;\n\
 }\n\
 \n\
 impl<'t> __FandheElementwiseLossOpsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
@@ -31334,12 +31425,6 @@ impl __FandheElementwiseLossOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
@@ -31349,13 +31434,25 @@ impl __FandheElementwiseLossOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheElementwiseLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
+}\n\
+\n\
+impl __FandheElementwiseLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheElementwiseLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -31378,8 +31475,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::bce_with_logits_loss_with(v);\n\
-\x20\x20\x20\x20let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::hinge_embedding_loss(v);\n\
-\x20\x20\x20\x20let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::soft_margin_loss(v);\n\
 \x20\x20\x20\x20let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::gaussian_nll_loss(v);\n\
 \x20\x20\x20\x20let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::bce_with_logits_loss_with(tape);\n\
 \x20\x20\x20\x20let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::hinge_embedding_loss(tape);\n\
@@ -31562,7 +31657,8 @@ fn facade_does_not_reexport_or_declare_elementwise_loss_ops_detects_each_categor
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`ELEMENTWISE_LOSS_FN_NAMES`] の `fn` 宣言が承認済みの
 /// 置き場所だけに存在することを固定する。
 ///
-/// 期待値は `autodiff/src/elementwise_loss_ops.rs` の自由関数 4 名が各 1 件。これら以外への追加
+/// 期待値は `autodiff/src/elementwise_loss_ops.rs` の自由関数 4 名が各 1 件と、#2677 で公開した
+/// `autodiff/src/var.rs` の `Var::hinge_embedding_loss`／`Var::soft_margin_loss` が各 1 件。これら以外への追加
 /// （`Var` への inherent メソッド追加等）は fail-closed に検出する。テスト用ヘルパー・eval カーネルにも
 /// 素の `fn hinge_embedding_loss` などという名前を使わないこと（インベントリに数えられる）。
 #[test]
@@ -31611,11 +31707,16 @@ fn workspace_declares_elementwise_loss_ops_fn_names_only_in_allowed_locations() 
     for n in ELEMENTWISE_LOSS_FN_NAMES {
         expected.insert(format!("autodiff/src/elementwise_loss_ops.rs::{n}"), 1);
     }
+    // #2677 で公開した承認形: `Var` の 1 行委譲メソッド（本体は
+    // `var_phase4_ops_methods_are_thin_delegations` が固定する）。
+    for n in ["hinge_embedding_loss", "soft_margin_loss"] {
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の bce_with_logits_loss_with／hinge_embedding_loss／soft_margin_loss／\
          gaussian_nll_loss の `fn` 宣言が承認済みの置き場所（autodiff/src/elementwise_loss_ops.rs の自由関数 4 名\
-         各 1 件のみ）と一致しない。迂回経路（facade／Var 等への inherent メソッド追加等）の混入か、\
+         各 1 件と、#2677 の autodiff/src/var.rs `Var::hinge_embedding_loss`／`Var::soft_margin_loss` 各 1 件のみ）と一致しない。迂回経路（facade／Var 等への inherent メソッド追加等）の混入か、\
          未承認の実装追加でないか確認すること"
     );
 }
@@ -31692,16 +31793,16 @@ struct __FandheMarginFocalLossOpsHoldMarker;\n\
 \n\
 trait __FandheMarginFocalLossOpsHoldProbe {\n\
 \x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
-\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
 \x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
 \x20\x20\x20\x20fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
 }\n\
 \n\
+trait __FandheMarginFocalLossOpsApprovedMethodReceiverProbe {\n\
+\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;\n\
+}\n\
+\n\
 impl<'t> __FandheMarginFocalLossOpsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
@@ -31716,9 +31817,6 @@ impl __FandheMarginFocalLossOpsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
@@ -31731,13 +31829,22 @@ impl __FandheMarginFocalLossOpsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
-\x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheMarginFocalLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tape {\n\
+\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+}\n\
+\n\
+impl __FandheMarginFocalLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tensor<f32> {\n\
+\x20\x20\x20\x20fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheMarginFocalLossOpsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -31761,7 +31868,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multi_margin_loss(v);\n\
-\x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multilabel_margin_loss(v);\n\
 \x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multilabel_soft_margin_loss(v);\n\
 \x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::sigmoid_focal_loss(v);\n\
 \x20\x20\x20\x20let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tape::multi_margin_loss(tape);\n\
@@ -31963,7 +32069,8 @@ fn facade_does_not_reexport_or_declare_margin_focal_loss_ops_detects_each_catego
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`MARGIN_FOCAL_LOSS_FN_NAMES`] の `fn` 宣言が承認済みの
 /// 置き場所だけに存在することを固定する。
 ///
-/// 期待値は `autodiff/src/margin_focal_loss_ops.rs` の自由関数 4 名が各 1 件。これら以外への追加
+/// 期待値は `autodiff/src/margin_focal_loss_ops.rs` の自由関数 4 名が各 1 件と、#2677 で公開した
+/// `autodiff/src/var.rs` の `Var::multilabel_margin_loss` が 1 件。これら以外への追加
 /// （`Var` への inherent メソッド追加等）は fail-closed に検出する。テスト用ヘルパー・eval カーネルにも
 /// 素の `fn multilabel_margin_loss` などという名前を使わないこと（インベントリに数えられる）。
 #[test]
@@ -32012,11 +32119,14 @@ fn workspace_declares_margin_focal_loss_ops_fn_names_only_in_allowed_locations()
     for n in MARGIN_FOCAL_LOSS_FN_NAMES {
         expected.insert(format!("autodiff/src/margin_focal_loss_ops.rs::{n}"), 1);
     }
+    // #2677 で公開した承認形: `Var` の 1 行委譲メソッド（本体は
+    // `var_phase4_ops_methods_are_thin_delegations` が固定する）。
+    expected.insert("autodiff/src/var.rs::multilabel_margin_loss".to_string(), 1);
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の multi_margin_loss／multilabel_margin_loss／multilabel_soft_margin_loss／\
          sigmoid_focal_loss の `fn` 宣言が承認済みの置き場所（autodiff/src/margin_focal_loss_ops.rs の自由関数 4 名\
-         各 1 件のみ）と一致しない。迂回経路（facade／Var 等への inherent メソッド追加等）の混入か、\
+         各 1 件と、#2677 の autodiff/src/var.rs `Var::multilabel_margin_loss` 1 件のみ）と一致しない。迂回経路（facade／Var 等への inherent メソッド追加等）の混入か、\
          未承認の実装追加でないか確認すること"
     );
 }
@@ -35112,7 +35222,7 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
 /// （[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。`matmul_low_precision` は本体を持つ
 /// 既存メソッドを `pub` にしただけで委譲の向きが逆（自由関数 → メソッド）のため本表の対象外とし、
 /// 代わりに自由関数側の本体を [`phase4_matmul_low_precision_free_fn_delegates_to_method`] が固定する。
-const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 62] = [
+const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 65] = [
     (
         "fft_ops",
         "rfft",
@@ -35391,6 +35501,22 @@ const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 62] = [
         "meshgrid",
         "crate : : shape_view_ops : : meshgrid ( tensors , indexing )",
     ),
+    // 損失 3 本（#2677。`Reduction` は `fandhe_ai::nn::loss::Reduction` の 1 経路）。
+    (
+        "elementwise_loss_ops",
+        "hinge_embedding_loss",
+        "crate : : elementwise_loss_ops : : hinge_embedding_loss ( self , y , margin , reduction )",
+    ),
+    (
+        "elementwise_loss_ops",
+        "soft_margin_loss",
+        "crate : : elementwise_loss_ops : : soft_margin_loss ( self , y , reduction )",
+    ),
+    (
+        "margin_focal_loss_ops",
+        "multilabel_margin_loss",
+        "crate : : margin_focal_loss_ops : : multilabel_margin_loss ( self , target , reduction )",
+    ),
 ];
 
 /// [`PHASE4_VAR_EXPECTED_BODIES`] の各メソッドが `var.rs` に `pub fn` として 1 件だけ存在し、
@@ -35620,8 +35746,11 @@ fn facade_reexports_phase4_ops_types_only_in_approved_shape_detects_each_categor
 }
 
 /// 保留を維持した経路（#2678）が、ソース走査の否定ガードから外れていないことの固定。
-/// `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`rrelu_with_noise`・損失関連 8 本は
-/// facade／`Var` から到達できない（記録に形が書かれていない・承認範囲外のため。`Reduction` の公開経路は #2602 で `nn::loss` に整備済みだが、これらの公開は別承認）。
+/// `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`rrelu_with_noise` と、オプション型を引数に取る損失 5 本
+/// （`bce_with_logits_loss_with`・`gaussian_nll_loss`・`multi_margin_loss`・`multilabel_soft_margin_loss`・
+/// `sigmoid_focal_loss`）・オプション型 5 つは facade／`Var` から到達できない（記録に形が書かれていない・承認範囲外のため）。
+/// 損失 3 本（`hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss`）は #2677 で公開済みで、
+/// 正ガードは `var_phase4_ops_methods_are_thin_delegations` と `crates/facade/tests/loss_var_delegates.rs`。
 #[test]
 fn phase4_held_items_remain_unexposed() {
     for src in [
@@ -35647,14 +35776,43 @@ fn phase4_held_items_remain_unexposed() {
     for name in [
         "gradcheck",
         "rrelu_with_noise",
-        "hinge_embedding_loss",
-        "soft_margin_loss",
-        "multilabel_margin_loss",
+        "bce_with_logits_loss_with",
+        "gaussian_nll_loss",
+        "multi_margin_loss",
+        "multilabel_soft_margin_loss",
+        "sigmoid_focal_loss",
     ] {
         assert_eq!(
             count_fn_declarations_by_name(&tokens, name),
             0,
             "var.rs に保留中の `fn {name}` がある"
+        );
+    }
+    // 保留の損失 5 本・オプション型 5 つは、損失 2 系統の facade src 走査ガードが引き続き検出する。
+    for src in [
+        "impl Var { pub fn bce_with_logits_loss_with(&self) {} }",
+        "impl Var { pub fn gaussian_nll_loss(&self) {} }",
+        "pub struct BceWithLogitsOptions;",
+        "pub struct GaussianNllOptions;",
+        "pub use fandhe_ai_autodiff::elementwise_loss_ops::BceWithLogitsOptions;",
+    ] {
+        assert!(
+            !scan_elementwise_loss_reexports_and_declarations(src).is_empty(),
+            "要素ごと損失の保留ガードが検出できない: {src:?}"
+        );
+    }
+    for src in [
+        "impl Var { pub fn multi_margin_loss(&self) {} }",
+        "impl Var { pub fn multilabel_soft_margin_loss(&self) {} }",
+        "impl Var { pub fn sigmoid_focal_loss(&self) {} }",
+        "pub struct MultiMarginOptions;",
+        "pub struct MultiLabelSoftMarginOptions;",
+        "pub struct SigmoidFocalLossOptions;",
+        "pub use fandhe_ai_autodiff::margin_focal_loss_ops::SigmoidFocalLossOptions;",
+    ] {
+        assert!(
+            !scan_margin_focal_loss_reexports_and_declarations(src).is_empty(),
+            "マージン・focal 損失の保留ガードが検出できない: {src:?}"
         );
     }
 }

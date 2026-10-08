@@ -121,3 +121,15 @@ CUDA／Metal の `#[ignore]` テスト（計 8 件）は本実行環境から実
 - ルート #2499 の 2026-10-07 ユーザー承認コメント（issuecomment-6033824965）は、行 19・20 のうち `hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss` の 3 本だけを承認し、`Reduction` を `fandhe_ai::nn::loss::Reduction` の 1 経路で名指しできることを前提にしていた。#2678 の着手時点で #2602（`nn::loss` の公開）は未マージで、`crates/facade/src/nn/mod.rs` に `loss` モジュールがない。承認条件（記録に形が書かれていない点・前提が満たされない点は実装せず止める）に従い、本記録の対象（`Var::hinge_embedding_loss`・`soft_margin_loss` を含む）は #2678 では公開せず、保留ガードと `api_surface.rs` の否定ガードを無変更のまま維持した。
 - `Reduction` の公開経路を本イシューで作らない（公開面の拡大にあたるため）。#2602 のマージ後に、3 本を `Var` の 1 行委譲で公開する残作業がある。オプション型を引数に取る損失 5 本とオプション型 5 つは引き続き保留（承認の対象外）。
 - 依存・tolerance・baseline・`docs/spec` は変更していない。
+
+## 13. #2677 での公開（`hinge_embedding_loss`・`soft_margin_loss`）
+
+- #2602（PR #2835）で `fandhe_ai::nn::loss::Reduction` が公開され、§12 の保留条件が満たされた。ルート #2499 の 2026-10-07 ユーザー承認コメント
+  （https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）に従い、§7 の推奨形（`Var` の 1 行委譲メソッド）で次の 2 本を公開した（`Refs #2677`）。
+  - `Var::hinge_embedding_loss(&self, y: &Tensor<f32>, margin: f32, reduction: Reduction) -> Result<Var<'t>, AutodiffError>`
+  - `Var::soft_margin_loss(&self, y: &Tensor<f32>, reduction: Reduction) -> Result<Var<'t>, AutodiffError>`
+- シグネチャは §7 の「既存 7 損失と同形の `Var` 1 行委譲」と自由関数の引数列から一意に定まる（レシーバ = `input`）。`Reduction` は `fandhe_ai::nn::loss::Reduction` の 1 経路のみ（root には出さない）。
+- **保留のまま**: `bce_with_logits_loss_with`・`gaussian_nll_loss` とオプション型 `BceWithLogitsOptions`・`GaussianNllOptions`（承認の対象外）。モジュール `elementwise_loss_ops` は再エクスポートしない。
+- §9 の層 1〜2（`ElementwiseLossOpsHoldDoctestGuard` と glob 集合一致）は、受け手 `Var` のプローブから公開した 2 本を外した形へ縮小した（`Tape`／`Tensor<f32>` への配置は専用トレイトで拒否を維持）。層 3 は固定文言を更新した。
+  層 4 のソース走査は facade src に対して 4 名のまま、宣言場所インベントリは `elementwise_loss_ops.rs` の自由関数 4 件に `var.rs` の 2 件を加えた。
+- テスト: `crates/facade/tests/loss_var_delegates.rs`（forward／backward が自由関数と bit 一致）。実機（CUDA／Metal）は §10 のまま未実測（新規カーネルなし）。

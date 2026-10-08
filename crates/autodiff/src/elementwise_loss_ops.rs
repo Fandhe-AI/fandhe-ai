@@ -42,7 +42,8 @@
 //! → ⑤実体化 → ⑥実体化後の値検査（`var >= 0`）→ ⑦forward → ⑧`push_eager`。エラー時に
 //! tape へ孤児ノードを残さない。
 //!
-//! **公開状況（イシュー #2678）**: `hinge_embedding_loss`・`soft_margin_loss` の公開は #2678 でも保留（`Reduction` の公開経路〈#2602〉が未整備のため）。
+//! **公開状況（イシュー #2678・#2677）**: `hinge_embedding_loss`・`soft_margin_loss` の公開は #2678 では保留（`Reduction` の公開経路〈#2602〉が未整備のため）だったが、
+//! #2602 のマージ後に #2677 で `Var` の 1 行委譲メソッドとして公開した。`bce_with_logits_loss_with`・`gaussian_nll_loss` とオプション型は保留のまま。
 //! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
 //! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
 
