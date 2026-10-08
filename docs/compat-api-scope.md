@@ -336,6 +336,9 @@ RNN 系・Embedding 等）・callbacks・`fit()`／`compile()`・Softmax・GELU 
   REQ-1 の自作コア範囲外の非信頼入力パース面（BPE／Unicode 正規化／
   語彙ファイルパース）を新設することが根拠。paged attention・連続
   バッチング・speculative decoding・量子化 KV・HTTP サーバ／スケジューラ
+  （注記: REQ-9 2026-10-08 追記で Tier 2 になり、連続バッチング第 1 段階と
+  greedy 版 speculative decoding は #2934 で `fandhe_ai::inference` へ公開済み。
+  他は引き続き対象外。設計記録 §17・§18）
   等のサービング基盤も同 doc §6 で非目標として整理済み。spec の
   「引き続き対象外」列挙への追記は spec 提案候補（未起票）として同 doc
   §9 に記録し、トークナイザ分の (b) 形式文案は
@@ -544,6 +547,8 @@ P1」）を受けた是正である。
 1. 正本 spec リポジトリ（`Fandhe-AI/fandhe-ai-spec`）側での REQ-9
    受け入れ基準の改定
 2. 本リポジトリのユーザー承認を得たうえでの Issue 起票・本文書の更新
+
+**適用記録（イシュー #2934・親 #2932。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650` の項 1）**: 第 1 段階の 3 名（`generate_speculative`〈greedy・B = 1〉・`SpeculativeConfig`・`BatchScheduler`）と署名に現れる `RequestId`・`SchedulerLimits` を、`fandhe_ai::inference` へ別の `pub use` 2 文で純再エクスポートした（facade 独自の型・メソッド・別名なし。`fandhe-ai =0.10.0` に対しては追加のみ）。`KvCache` の公開メソッド・`forward_with_cache` の可視性・依存・tolerance・baseline は不変。内部状態保持型が対象外であることを rustdoc の契約に明記した。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路（サンプリング版・`KvCache` の書き換え経路・`kv_rewind`・モジュール自体の再エクスポート）の否定プローブを追加した。論点 1・2・3・5・7・8 は保留のまま。詳細は設計記録 `docs/facade-speculative-decoding-batching-design.md` §18。
 
 ### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本・オプション型を取る 5 本と 5 型〈#2854 で公開済み〉・行 30 の gradcheck〈#2847 で公開済み〉は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は保留継続〉）
 
@@ -2521,11 +2526,11 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
 
-**承認と公開形の記録（#2933・親 #2932）**: 上の `S1`〜`S3` は承認依頼時点の転記として残す。ルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`、2026-10-08）の項 1 で、第 1 段階の 3 名（`generate_speculative`〈greedy・B = 1〉・`SpeculativeConfig`・`BatchScheduler`）の公開が、設計記録 §5 の推奨形に main の内部実装のシグネチャをそのまま当てた形で承認された。KV の巻き戻しは案 (i) のまま（`KvCache` の公開メソッドは増やさない）、内部状態保持型が対象外であることは doc の契約として明記する。確定した公開形（完全シグネチャ・`pub use` 文・ガード反転範囲）は設計記録 `docs/facade-speculative-decoding-batching-design.md` §17 を正とする。本記録は docs のみで、公開（コード・`pub use`・ガード反転）は #2934 が行うため、現時点の公開状態は未公開である。
+**承認と公開形の記録（#2933・親 #2932）**: 上の `S1`〜`S3` は承認依頼時点の転記として残す。ルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`、2026-10-08）の項 1 で、第 1 段階の 3 名（`generate_speculative`〈greedy・B = 1〉・`SpeculativeConfig`・`BatchScheduler`）の公開が、設計記録 §5 の推奨形に main の内部実装のシグネチャをそのまま当てた形で承認された。KV の巻き戻しは案 (i) のまま（`KvCache` の公開メソッドは増やさない）、内部状態保持型が対象外であることは doc の契約として明記する。確定した公開形（完全シグネチャ・`pub use` 文・ガード反転範囲）は設計記録 `docs/facade-speculative-decoding-batching-design.md` §17 を正とする。本記録は docs のみで、公開（コード・`pub use`・ガード反転）は #2934 が行うため、現時点の公開状態は未公開である。 → 公開は #2934 で実施済み（設計記録 §18）。
 
 | # | 公開名 | 確定シグネチャ（main の内部実装） | 公開パス | 保留ガード | 公開状態 |
 |---|---|---|---|---|---|
-| S1 | `generate_speculative` | `<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError>`（`T`・`D` は `AutoregressiveModel + ?Sized`。Greedy 以外と `num_kv_layers() == 0` は `Err`） | `fandhe_ai::inference` | S 専用は未設置。#2934 で正ガードを新設 | 未公開（#2934 で公開） |
+| S1 | `generate_speculative` | `<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError>`（`T`・`D` は `AutoregressiveModel + ?Sized`。Greedy 以外と `num_kv_layers() == 0` は `Err`） | `fandhe_ai::inference` | S 専用は未設置。#2934 で正ガード `facade_exposes_speculative_scheduler_items_only_in_approved_shape` を新設 | 公開済み（#2934） |
 | S2 | `SpeculativeConfig` | `#[non_exhaustive]`・`Debug, Clone, PartialEq`・`pub k: usize`・`new(k: usize) -> SpeculativeConfig` | 同上 | 同上 | 同上 |
 | S3 | `BatchScheduler`（署名に現れる `RequestId`・`SchedulerLimits` を含む） | `new(SchedulerLimits)`・`queued_len`・`active_len`・`submit(&mut self, &Tensor<i32>, &GenerateConfig) -> Result<RequestId, AutodiffError>`・`step<M: AutoregressiveModel + ?Sized>(&mut self, &M) -> Result<usize, AutodiffError>`・`take_finished() -> Vec<(RequestId, Tensor<i32>)>`・`take_failed() -> Vec<(RequestId, AutodiffError)>`。`RequestId` は不透明 `u64` newtype、`SchedulerLimits::new(max_active, max_queued, max_length) -> Result<SchedulerLimits, AutodiffError>`（`#[non_exhaustive]`・0 は拒否） | 同上 | 同上 | 同上 |
 
