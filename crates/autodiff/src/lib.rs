@@ -175,10 +175,10 @@
 //! backward を持つ（`add`/`mul` は `Tape::typed_ops_f64` が `Some`
 //! ならネイティブ実装へ委譲し `None`/`Unsupported` ならホスト参照実装
 //! へフォールバック、`div`/`pow` は常にホスト参照実装）。`Var`
-//! （本ファイル既存の f32 版）へ inherent メソッドは追加せず、facade
-//! も再エクスポートしない内部クレート限定 API（`docs/autodiff-
-//! var-dtype-multiplexing-design.md` §10 の承認事項はいずれも未承認の
-//! まま消費しない。設計判断・バックエンド別 dispatch 表は
+//! （本ファイル既存の f32 版）へ inherent メソッドは追加せず、facade も
+//! 再エクスポートしない（facade は #2599 で同名の newtype を承認形 D-2
+//! として別途公開。`docs/autodiff-var-dtype-multiplexing-design.md`
+//! §4.1・§10.1。設計判断・バックエンド別 dispatch 表は
 //! `f64_autograd` モジュール doc・同 doc §13 を参照）。
 
 //! イシュー #2144（親 #2131）で `tril`／`triu`／`diag`／`trace`／

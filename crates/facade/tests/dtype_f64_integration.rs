@@ -4,10 +4,14 @@
 //! 本ファイルは #2195 で導入済みの add／mul／div／pow 経路には触れず、
 //! #2196 で追加した 4 演算に限定する）。
 //!
-//! **facade 公開面（意図的な非変更）**: `f64_autograd`（`TapeF64`／
-//! `VarF64`）は facade へ再エクスポートされていない
-//! （`docs/autodiff-var-dtype-multiplexing-design.md` §10 承認事項は
-//! いずれも未承認のまま）。「facade 到達」とは、既存の公開 accessor
+//! **facade 公開面（#2599 での更新）**: 本ファイルの作成時（#2196）は
+//! `f64_autograd`（`TapeF64`／`VarF64`）は facade から到達できなかったが、
+//! #2599 で facade newtype（`fandhe_ai::TapeF64` 等。再エクスポートではない）が
+//! 承認形 D-2 で公開された（`docs/autodiff-var-dtype-multiplexing-design.md`
+//! §4.1・§10.1）。facade 経由の利用テストは `f64_autograd_facade.rs`。
+//! 本ファイルは `typed_ops_f64()` accessor と内部 `TapeF64` の bit 一致を
+//! 検証するため、任意の `BackendOps` を注入できる内部クレートを直接使い続ける。
+//! 「facade 到達」とは、既存の公開 accessor
 //! `fandhe_ai::tape()` → `Tape::typed_ops_f64()`（`TypedOps<f64>` の
 //! capability accessor。#2195 で追加済み・本イシューで変更しない）
 //! 経由で f64 の `gemm`／`sum`／`max` を計算できることを指す。

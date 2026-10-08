@@ -87,6 +87,10 @@
 //! [`TapeRef`]（#2394。[`nn::Module::forward`] の第 1 引数）は `var`／`var_from`／`var_no_grad` のみを持つ借用ハンドルで、
 //! [`Tape`] の公開メソッドは変えない。crate 外の入口は `From<&Tape>` のみ。
 //!
+//! [`TapeF64`]／[`VarF64`]／[`GradientsF64`]（#2599）は f64 専用の独立自動微分グラフで、
+//! 3 型とも本クレート所有の newtype（`docs/autodiff-var-dtype-multiplexing-design.md`
+//! §4.1・§10.1 の推奨案 D-2）。構築は [`TapeF64::new`]（facade [`Tape`] の借用）のみ。
+//!
 //! **`Var`／`Gradients`／`AutodiffError`／`LinearVars`（`autodiff` 由来）・
 //! `Tensor`（`tensor_core` 由来）の扱い**: これらは `BackendOps` 注入の
 //! 迂回経路を持たない値型・エラー型であるため、`facade` の正式な公開契約
@@ -1198,6 +1202,139 @@ impl std::fmt::Debug for TapeRef<'_> {
 impl<'t> From<&'t Tape> for TapeRef<'t> {
     fn from(tape: &'t Tape) -> Self {
         Self::from_autodiff(&tape.0)
+    }
+}
+// ---------------------------------------------------------------------------
+// f64 専用の独立自動微分グラフ（イシュー #2599・親 #2499／#2542）
+// ---------------------------------------------------------------------------
+//
+// `fandhe_ai_autodiff::f64_autograd` の `TapeF64`／`VarF64`／`GradientsF64` を、
+// `docs/autodiff-var-dtype-multiplexing-design.md` §4.1・§10.1 の推奨案 D-2
+// （3 型とも facade newtype・`lib.rs` 直下宣言・1 式委譲）で公開する。承認根拠:
+// https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965
+// （2026-10-07・#2597 の行）。承認範囲は同記録の形に限る。内部型は完全修飾パスで
+// のみ参照し、`pub use` での再エクスポートや trait impl は設けない
+// （`tests/api_surface.rs` の `f64_autograd_*` 正ガードが機械的に固定する）。
+
+/// f64 専用の独立自動微分グラフのテープ（f32 の [`Tape`] とは別の添字空間）。
+///
+/// 役割: f64 の葉ノード登録（[`Self::var`]／[`Self::var_no_grad`]）と逆伝播
+/// （[`Self::backward`]）を提供する。構築は借用元の facade [`Tape`] からのみ行い
+/// （[`Self::new`]）、生の `fandhe_ai_autodiff::Tape`／`BackendOps` は受け取らない
+/// （REQ-12）。内部実装 `fandhe_ai_autodiff::f64_autograd::TapeF64` への 1 式委譲。
+///
+/// 制約: f32 グラフとは独立であり、f32 の [`Var`] から勾配は流れない。f32 側の値は
+/// `Var::cast::<f64>()` が返す勾配の切れた `Tensor<f64>` を [`Self::var`] へ渡す
+/// 経路のみで取り込む。`matmul` は rank 2 限定、縮約は `dim: Option<usize>` のみ。
+/// 全軸 `sum` の CPU ネイティブとホストの bit 一致は 4096 要素以下。Metal は
+/// 常にホスト計算、`div`／`pow` は常にホスト計算。CUDA／Metal 実機 parity は未実測
+/// （`docs/perf/logs/f64-autograd-facade-2599/README.md` に申し送り）。
+/// `backward` の非スカラー loss は全要素 1 のシードで逆伝播する。
+///
+/// ```
+/// use fandhe_ai::{TapeF64, Tensor};
+///
+/// let tape = fandhe_ai::tape();
+/// let g = TapeF64::new(&tape);
+/// let x = g.var(&Tensor::<f64>::new(vec![3.0], &[1]).unwrap());
+/// let y = x.mul(&x).unwrap(); // y = x^2
+/// let grads = g.backward(&y.sum(None).unwrap()).unwrap();
+/// assert_eq!(grads.get(&x).unwrap().unwrap().as_slice().unwrap(), &[6.0]);
+/// ```
+pub struct TapeF64<'t>(pub(crate) fandhe_ai_autodiff::f64_autograd::TapeF64<'t>);
+
+impl<'t> TapeF64<'t> {
+    /// facade の [`Tape`] に結線した f64 グラフを作る（バックエンドは `tape` のもの）。
+    pub fn new(tape: &'t Tape) -> Self {
+        Self(fandhe_ai_autodiff::f64_autograd::TapeF64::new(&tape.0))
+    }
+
+    /// 勾配追跡ありの f64 葉ノードを登録する。
+    pub fn var(&self, value: &Tensor<f64>) -> VarF64<'_, 't> {
+        VarF64(self.0.var(value))
+    }
+
+    /// 勾配追跡なしの f64 葉ノードを登録する（`GradientsF64::get` は
+    /// [`AutodiffError::GradientTrackingDisabled`]）。
+    pub fn var_no_grad(&self, value: &Tensor<f64>) -> VarF64<'_, 't> {
+        VarF64(self.0.var_no_grad(value))
+    }
+
+    /// `loss` から逆伝播する。別テープの変数は [`AutodiffError::TapeMismatch`]、
+    /// 勾配追跡対象を持たない loss は [`AutodiffError::Backward`]。
+    pub fn backward(&self, loss: &VarF64<'_, 't>) -> Result<GradientsF64, AutodiffError> {
+        self.0.backward(&loss.0).map(GradientsF64)
+    }
+}
+
+/// [`TapeF64`] 上の f64 変数（`Copy` なハンドル）。
+///
+/// 役割: f64 の演算（`add`／`mul`／`div`／`pow`／`matmul`／`sum`／`mean`／`max`）を
+/// 内部 `VarF64` へ 1 式委譲する。意味論・エラー契約は内部実装と同一。
+#[derive(Clone, Copy)]
+pub struct VarF64<'g, 't>(pub(crate) fandhe_ai_autodiff::f64_autograd::VarF64<'g, 't>);
+
+impl<'g, 't> VarF64<'g, 't> {
+    /// 現在値の複製を返す。
+    pub fn value(&self) -> Tensor<f64> {
+        self.0.value()
+    }
+
+    /// 形状を返す。
+    pub fn shape(&self) -> Vec<usize> {
+        self.0.shape()
+    }
+
+    /// 要素ごとの加算（ブロードキャストあり）。
+    pub fn add(&self, other: &Self) -> Result<Self, AutodiffError> {
+        self.0.add(&other.0).map(VarF64)
+    }
+
+    /// 要素ごとの乗算（ブロードキャストあり）。
+    pub fn mul(&self, other: &Self) -> Result<Self, AutodiffError> {
+        self.0.mul(&other.0).map(VarF64)
+    }
+
+    /// 要素ごとの除算（常にホスト計算）。
+    pub fn div(&self, other: &Self) -> Result<Self, AutodiffError> {
+        self.0.div(&other.0).map(VarF64)
+    }
+
+    /// 要素ごとの冪乗（常にホスト計算）。
+    pub fn pow(&self, other: &Self) -> Result<Self, AutodiffError> {
+        self.0.pow(&other.0).map(VarF64)
+    }
+
+    /// 行列積（rank 2 限定）。
+    pub fn matmul(&self, other: &Self) -> Result<Self, AutodiffError> {
+        self.0.matmul(&other.0).map(VarF64)
+    }
+
+    /// 総和（`dim: None` で全軸、`Some(d)` で 1 軸。`keepdim` なし）。
+    pub fn sum(&self, dim: Option<usize>) -> Result<Self, AutodiffError> {
+        self.0.sum(dim).map(VarF64)
+    }
+
+    /// 平均（`sum` の後に 1 回だけ除算）。
+    pub fn mean(&self, dim: Option<usize>) -> Result<Self, AutodiffError> {
+        self.0.mean(dim).map(VarF64)
+    }
+
+    /// 最大値（`dim: None` で全軸、`Some(d)` で 1 軸）。
+    pub fn max(&self, dim: Option<usize>) -> Result<Self, AutodiffError> {
+        self.0.max(dim).map(VarF64)
+    }
+}
+
+/// [`TapeF64::backward`] の結果（葉ごとの f64 勾配）。
+pub struct GradientsF64(pub(crate) fandhe_ai_autodiff::f64_autograd::GradientsF64);
+
+impl GradientsF64 {
+    /// `var` の勾配を返す。loss から未到達なら `Ok(None)`、別テープなら
+    /// [`AutodiffError::TapeMismatch`]、`var_no_grad` の葉なら
+    /// [`AutodiffError::GradientTrackingDisabled`]。
+    pub fn get(&self, var: &VarF64<'_, '_>) -> Result<Option<&Tensor<f64>>, AutodiffError> {
+        self.0.get(&var.0)
     }
 }
 
