@@ -2475,7 +2475,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 **適用記録（イシュー #2876・親 #2841。内部クレート限定）**: ループ版 `vmap` を内部クレート限定（`fandhe_ai_autodiff::functional_ops::vmap`。既存の `unbind`・`contiguous`・`stack` の合成のみで、新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・カーネルなし）で実装した。facade 公開面は追加していない（保留ガードの宣言インベントリへ `functional_ops.rs::vmap` を登録して固定）。公開形は未承認。本書 5.1 節の表・1 節の対象範囲表は変更していない。詳細は `docs/autodiff-functional-transforms-design.md` 「17. 実装記録（#2876）」。 → 公開形の承認依頼は #2879 で §5.1 末尾の `F1`〜`F3`（Phase 8 公開形・関数型 AD 変換）へ追加した。 → #2930 で承認範囲と公開形を設計記録 §23 に記録（公開は #2931）。
 
-**適用記録（イシュー #2940・親 #2939。内部クレート限定）**: double-VJP 法の `jvp`／`jacfwd` を内部クレート限定（`fandhe_ai_autodiff::functional_ops` の `pub(crate)`。既存の `backward_create_graph` と子テープ上の `mul`／`backward` の合成のみで、新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe`・tolerance・baseline なし）で実装した。facade 公開面は追加していない（保留ガードの正のプローブ・固定文言・宣言インベントリへ `jvp`／`jacfwd` を登録して固定）。公開形は未承認。本書 5.1 節の表・1 節の対象範囲表は変更していない。詳細は `docs/autodiff-functional-transforms-design.md` 「23. 実装記録（#2940）」。
+**適用記録（イシュー #2940・親 #2939。内部クレート限定）**: double-VJP 法の `jvp`／`jacfwd` を内部クレート限定（`fandhe_ai_autodiff::functional_ops` の `pub(crate)`。既存の `backward_create_graph` と子テープ上の `mul`／`backward` の合成のみで、新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe`・tolerance・baseline なし）で実装した。facade 公開面は追加していない（保留ガードの正のプローブ・固定文言・宣言インベントリへ `jvp`／`jacfwd` を登録して固定）。公開形は未承認。本書 5.1 節の表・1 節の対象範囲表は変更していない。詳細は `docs/autodiff-functional-transforms-design.md` 「24. 実装記録（#2940）」。→ 公開形の承認依頼は #2941 で 5.1 節末尾の `F4`〜`F5` へ追加した（設計記録 §25）。
 
 **Phase 8 公開形（承認依頼 #2883・親 #2882・Phase 8 #2872）**: speculative decoding・連続バッチングの公開形と判定方式の承認依頼。上の Phase 4 表（行 1〜30）とは別系統のため、行ラベルは `S1`〜`S3` とし Phase 4 の番号空間と混ぜない（Phase 4 表の「行と保留ガードは `*HoldDoctestGuard` と 1 対 1」という前提も、保留ガード未設置のこの 3 行には当てはまらない）。以下は設計記録 `docs/facade-speculative-decoding-batching-design.md` §5・§6・§9・§10 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。ルート #2499 の 2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計の記録までで、案 C の境界の承認（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`、2026-10-07）は「公開面の追加・数値判定方式・`Op`／`BackendOps` の拡張」を承認していない。公開（コード・`pub use`・保留ガードの反転）は承認後に別 issue（設計記録 §11 の仮番号 9）で行う。 → 承認（`issuecomment-6067263650` 項 1）と確定した公開形は本ブロック末尾の「承認と公開形の記録（#2933）」と設計記録 §17。
 
@@ -2629,5 +2629,20 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 
 → 2026-10-08 の所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）項 1 で、F1〜F3 の公開と論点 1・2・4 が承認された（論点 5・6 は保留。論点 3 は言及なし）。承認範囲・確定した公開形・保留ガードの反転範囲（上の差 4）は設計記録 `docs/autodiff-functional-transforms-design.md` §23（#2930）に記録した。差 1〜3 も同 §23.5 で解消済み。`out_dim`・複数入力の拡張方法は未決、doctest の可否は #2931 で確かめる。公開は #2931（未公開）。上の「すべて未承認」の転記文は履歴として残す。
+
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
+
+**Phase 9 公開形（`jvp`／`jacfwd`。承認依頼 #2941・親 #2939・Phase 9 #2928）**: double-VJP 法の `jvp`／`jacfwd` の facade 公開形と論点の承認依頼。行ラベルは F 系を継続して `F4`・`F5` とする（`FunctionalTransformsHoldDoctestGuard` 1 個が覆うという F ブロックの前提がそのまま当てはまるため）。ただし `F1`〜`F3` は承認済み、`F4`・`F5` は**未承認**である。以下は設計記録 `docs/autodiff-functional-transforms-design.md` §25 の**転記**であり、新しい推奨・tolerance・baseline は作っていない。承認根拠は 2026-10-08 の所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）項 2 の最終段落のみ（内部実装と公開形の記録まで。facade 公開は記録後に改めて承認依頼）で、項 1 の承認（F1〜F3）は `jvp`／`jacfwd` に及ばない。承認は実装 Agent が代行しない。
+
+| # | 機能（由来） | 公開形（設計記録 §25.1 の転記・未承認） | 非破壊性 | 保留ガード | 公開先 | 決定記録・承認事項の所在 |
+|---|---|---|---|---|---|---|
+| F4 | `jvp`（#2940） | facade `Tape` の委譲メソッド `Tape::jvp(&self, output: &Var<'_>, input: &Var<'_>, tangent: &Tensor<f32>, child: &Tape) -> Result<Tensor<f32>, AutodiffError>`（結果 shape = `output.shape()`）。`child` は呼び出し側が用意する空の子テープ | 追加のみ（`fandhe-ai =0.10.0` の既存シグネチャ・意味論は不変） | `FunctionalTransformsHoldDoctestGuard` ＋ `crates/facade/tests/api_surface.rs` の否定ガードと宣言インベントリ | 未公開（承認依頼中・§25） | 設計記録 §8・§19・§24・§25 |
+| F5 | `jacfwd`（#2940） | `Tape::jacfwd(&self, output: &Var<'_>, input: &Var<'_>, child: &Tape) -> Result<Tensor<f32>, AutodiffError>`（結果 shape = `output.shape ++ input.shape`） | 同上 | 同上（`F4`・`F5` で F ブロックの 1 個を共有） | 同上 | 同上 |
+
+- 判定方式（設計記録 §25.3。未承認）: REQ-2 の統一複合判定。`jacobian` や 1 階 VJP との bit 同一は主張しない。新しい tolerance・baseline は作らない。
+- 拡張要否: 依存・`unsafe`・新規 `Op`／`BackendOps`／VJP はなし。内部可視性の `pub` 化と `expect(dead_code)` の撤去のみが公開時に必要（§25.2）。
+- 実装と公開形の差: 受け手の違い（内部は第 1 引数に `tape` を取る自由関数、公開は `&self.0` を渡す 1 行委譲）、内部が `pub(crate)` であること、`expect(dead_code)` が付いていること。
+- 論点（設計記録 §25.5）: J-a `jacfwd` を公開するか（推奨: 公開）／J-b `child` は明示引数（推奨: 明示）／J-c 名前（推奨: `jvp`／`jacfwd`）／J-d `tangent` は input 側 shape と完全一致（推奨: 実装のまま）／J-e 追跡なし `output` は全ゼロで `hvp` と非対称（推奨: 実装のまま。改めて確認を求める）／J-f 失敗時にも親テープへ 2 ノード残る（推奨: 実装のまま doc に明記）／J-g 内部は `pub fn`（推奨）か `#[doc(hidden)] pub` か。保留継続（推奨なし）: 論点 5、複数入力、`VarF64`・f16、微分可能な `jvp`。
+- 設計記録に形が書かれていない点: #2931 が §23.4 どおり `Tape` への probe trait impl ブロックごと外すと、`Tape::jvp`／`Tape::jacfwd` の doctest プローブも消える（ソース走査ガードと宣言インベントリは残る）。対処は (a) `jvp`／`jacfwd` の 2 メソッドだけ impl を残す／(b) ソース走査層のみで許容、のいずれかで、推奨は作らない（§25.4）。
 
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
