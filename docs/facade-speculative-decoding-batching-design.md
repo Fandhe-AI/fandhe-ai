@@ -120,6 +120,17 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 
 要求ごとに `Vec<KvCache>` と `Generator` を所有し、`step()` 1 回で進行中の各要求を 1 トークン進める同期スケジューラ。イテレーション単位で要求の追加・完了分の退出ができる。**テンソル単位のバッチ化による利得はない**（性能保証なしは spec どおり）。完了条件は当面 `max_length` 到達のみ（EOS 停止は生成ループ拡張の別系統で、本記録では先取りしない）。
 
+対象とするモデルの契約（§6.3 の単独実行一致と §7 の要求間の状態分離の前提）:
+
+| モデルの形 | `num_kv_layers()` | 第 1 段階での扱い |
+|---|---|---|
+| 生成状態を渡された `caches` だけに持つ形 | `> 0` | **対象**。要求ごとの `Vec<KvCache>` で状態が分かれる |
+| 状態を持たない形（毎回 prompt 全体から計算する等） | `0` | **対象**。要求間で共有する状態がない |
+| 内部状態保持型（§3 の `RefCell<StatefulAttention>` 等。`docs/facade-generate-decision.md` §17.4） | `0` | **対象外**。渡された `caches` を使わないため、同じ `model` で要求 A・B を交互に進めると内部 KV が混在する |
+
+- `num_kv_layers() == 0` だけでは状態なしと内部状態保持型を型でも実行時でも区別できない。第 1 段階はこれを**doc の契約**として `BatchScheduler`（と `step`）に明記し、内部状態保持型を渡した場合の出力は保証しない。
+- 内部状態保持型を対象に含めるには、要求ごとのモデル状態の分離（要求ごとに別インスタンスを渡す、またはモデル側の状態の退避・復元フック）が要る。これは trait・公開面の変更を伴うため承認事項とする（§10 論点 8）。
+
 ### 8.2 テンソル単位で束ねる段階（条件付き・承認事項）
 
 同じ `S_cached` の要求のグルーピング、または padding mask・行単位 gather が要る。`KvCache` のバッチ軸連結・分割や padding mask は、公開面と「単一の書き手」不変条件に触れるため分離して承認を取る（§10 論点 5）。
@@ -147,6 +158,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 5. テンソル単位バッチ化に要る padding mask・可変長キャッシュ。
 6. facade 公開面の追加そのもの（`docs/compat-api-scope.md` §5）。
 7. paged attention（条件付きのまま。K-3 が未着手）。
+8. 連続バッチングで内部状態保持型のモデル（§8.1 の表）を扱うための、要求ごとのモデル状態の分離方式。論点 3 と同じく trait の拡張か別 trait かが未決。決まるまで第 1 段階は内部状態保持型を対象外とする。
 
 ## 11. 2 時間粒度の実装 issue 分解案
 
@@ -154,14 +166,14 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 
 | # | タイトル案 | 依存 | 受け入れ条件の要点 | 担当 | 承認待ち |
 |---|---|---|---|---|---|
-| 1 | `docs(facade): speculative decoding・連続バッチングの公開形と判定方式の承認依頼` | なし | §10 論点 1〜7 の確定依頼、`compat-api-scope.md` §5.1 への行追加。承認は実装 Agent が代行しない | core-builder | 承認依頼そのもの |
+| 1 | `docs(facade): speculative decoding・連続バッチングの公開形と判定方式の承認依頼` | なし | §10 論点 1〜8 の確定依頼、`compat-api-scope.md` §5.1 への行追加。承認は実装 Agent が代行しない | core-builder | 承認依頼そのもの |
 | 2 | `refactor(autodiff): generate のヘルパーをサブモジュールから使えるようにする` | なし | `generate/` ディレクトリ化と `pub(super)` 化のみ。挙動・既存テスト・公開シグネチャ不変 | core-builder | なし |
 | 3 | `feat(autodiff): KV キャッシュ巻き戻しの内部実装` | 2 | 推奨 (i)（clone 保存・復元）。復元後の状態が呼び出し前と同一であることの単体テスト | core-builder | 論点 4 の結論次第で (ii) |
 | 4 | `feat(autodiff): speculative decoding（greedy）の内部実装` | 2, 3 | §7 の fail-closed 全件。B = 1 限定。境界ケース（§6.1） | core-builder | なし |
 | 5 | `test(autodiff): speculative greedy の一致テスト` | 4 | 状態なしモデルで token 列完全一致、KV モデルで位置ごとの logits を統一複合判定 | test-runner | 論点 2 の結論次第 |
 | 6 | `feat(autodiff): speculative decoding（サンプリング）の内部実装` | 4 | 決定性・グローバル RNG 非消費・受理確率の `f64` 突合 | core-builder | **論点 1 が未承認の間はブロック** |
-| 7 | `feat(autodiff): 連続バッチング スケジューラの第 1 段階` | 2 | §7 の上限必須化・失敗の切り離し。`step`／`take_finished` | core-builder | なし |
-| 8 | `test(autodiff): スケジューラの単独実行一致と非依存の検査` | 7 | 要求ごとに単独 `generate` と token 列完全一致、§8.3 の grep が 0 件 | test-runner | なし |
+| 7 | `feat(autodiff): 連続バッチング スケジューラの第 1 段階` | 2 | §7 の上限必須化・失敗の切り離し。`step`／`take_finished`。§8.1 の対象モデルの契約（内部状態保持型は対象外）を doc に明記 | core-builder | なし（内部状態保持型の対応は論点 8） |
+| 8 | `test(autodiff): スケジューラの単独実行一致と非依存の検査` | 7 | `num_kv_layers() > 0` のモデルと状態なしモデルの両方で、要求 A・B を交互に進めても各要求が単独 `generate` と token 列完全一致、§8.3 の grep が 0 件 | test-runner | なし |
 | 9 | `feat(facade): speculative decoding・連続バッチングを記録の形で公開` | 1 の承認, 4〜8 | 別 `pub use` 文、承認形定数・正ガード、doctest。保留ガードの反転 | core-builder | 承認後 |
 | 10 | `test(backend): CUDA／Metal 実機 parity の #[ignore] テストと perf/logs 申し送り` | 5, 8 | 実測値は推測で書かない | backend-builder | なし |
 | 11 | `docs(facade): 周辺 docs と本記録への実装記録の追記` | 9 | `compat-api-scope.md` §5 適用記録、`compat-feature-gap.md`、本記録への実装記録 | docs-writer | なし |
@@ -171,7 +183,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 ## 12. スコープ外・申し送り
 
 - スコープ外: 実装そのもの、実装 issue の起票、HTTP／API サーバ、量子化 KV、paged attention、EOS 停止・top-p などの生成ループ拡張、B > 1 の speculative decoding。
-- 要対応事項（ユーザー）: §10 の論点 1〜7 の承認。ruleset・branch protection・リポジトリ設定は変更しない。
+- 要対応事項（ユーザー）: §10 の論点 1〜8 の承認。ruleset・branch protection・リポジトリ設定は変更しない。
 
 ## 13. セキュリティ観点（OWASP）
 
