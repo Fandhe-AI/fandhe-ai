@@ -28,7 +28,7 @@
 | 本体 workspace に HTTP サーバ／クライアント依存はない | `grep -rniE 'hyper\|axum\|tiny_http\|tokio' Cargo.toml crates/*/Cargo.toml` が 0 件 |
 | `KvCache` はホスト上の contiguous 保持 | `crates/autodiff/src/nn/attention.rs:1554`。射影済み K/V を `[B, S_cached, E]` で保持し、バッチ内の全系列が同じ `S_cached` を共有する。系列ごとの可変長・ブロック管理はない。デバイス常駐は K-3 に切り出し済みで未着手（`docs/kv-cache-design.md` §2 案 B） |
 | `KvCache` の facade 公開は保留（記録時点。2026-10-07 に承認され PR #2816〈#2579〉で `fandhe_ai::nn::kv_cache` として公開。`docs/kv-cache-design.md` §14） | `KvCacheHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の否定ガード（#2579 で正ガードへ置換済み）。公開形の確定は Phase 3 の #2577〜#2580 |
-| `generate()` は 3 戦略のみ | `crates/autodiff/src/generate/mod.rs:446`。greedy／top-k／temperature。EOS 早期停止・pad・repetition penalty は対象外（同ファイル冒頭 `:46`）、top-p・draft model を差す口はない。facade は未公開（`GenerateHoldDoctestGuard`）。公開形は #2573〜#2576（open） |
+| `generate()` は 3 戦略のみ | `crates/autodiff/src/generate/mod.rs`（`pub fn generate`）。greedy／top-k／temperature。EOS 早期停止・pad・repetition penalty は対象外（同ファイル冒頭 `:46`）、top-p・draft model を差す口はない。facade は未公開（`GenerateHoldDoctestGuard`）。公開形は #2573〜#2576（open） |
 | `predict_batches` は内部実装済み・facade 未公開 | `docs/facade-predict-batches-phase-metrics-decision.md`。公開形は #2581〜#2583（open） |
 | `docs/model-download-design.md` §14 の「第 11 区分相当」は HTTP **クライアント**用 | #2621 の起案で、`ModelRegistry::download` のためのもの。サーバ用途を含まないため、**サーバ依存の根拠としては引用しない**。区分起案の書式の先例としてのみ参照する |
 
