@@ -3,9 +3,9 @@
 //!
 //! `docs/facade-text-vectorization-design.md` §8 の機械検査契約
 //! （`crates/facade/src/text/` にファイル・ネットワーク・スレッド・並列・
-//! 危険なブロックが現れない）と、公開形が未承認の間は `text` を facade へ
-//! 公開しないこと（`lib.rs` が非公開の `mod text;` のみ）を、コメントを含む
-//! 生テキストの照合で固定する。走査対象は固定パスのみで外部入力を取らない。
+//! 危険なブロックが現れない）と、`text` の公開が承認形（`lib.rs` の `pub mod text;`
+//! 1 件と `text/mod.rs` の 6 名の `pub use` のみ。イシュー #2937・設計記録 §16.2）に
+//! 限られることを、コメントを含む生テキストの照合で固定する。走査対象は固定パスのみで外部入力を取らない。
 
 use std::path::{Path, PathBuf};
 
@@ -56,14 +56,55 @@ fn text_module_has_no_forbidden_constructs() {
 }
 
 #[test]
-fn text_module_is_not_exposed_from_facade() {
+fn text_module_is_exposed_only_in_approved_shape() {
     let lib = std::fs::read_to_string(src_dir().join("lib.rs")).unwrap_or_default();
-    assert!(
-        lib.contains("\nmod text;"),
-        "lib.rs に非公開 `mod text;` がない"
+    assert_eq!(
+        lib.matches("\npub mod text;").count(),
+        1,
+        "lib.rs に `pub mod text;` がちょうど 1 件ない"
     );
-    assert!(!lib.contains("pub mod text"));
+    assert_eq!(lib.matches("\nmod text;").count(), 0);
     assert!(!lib.contains("pub(crate) mod text"));
+
+    // text/mod.rs の行頭 `pub use` は承認済みの 6 名だけ（別名・glob・pub mod を拒否）。
+    let text_mod =
+        std::fs::read_to_string(src_dir().join("text").join("mod.rs")).unwrap_or_default();
+    let mut names: Vec<String> = Vec::new();
+    for line in text_mod.lines() {
+        assert!(
+            !line.starts_with("pub mod"),
+            "text/mod.rs にサブモジュールの公開がある: {line}"
+        );
+        if let Some(rest) = line.strip_prefix("pub use ") {
+            assert!(
+                !rest.contains(" as ") && !rest.contains('*') && !rest.contains("crate::text"),
+                "承認外の形の pub use: {line}"
+            );
+            let (_, tail) = rest.split_once("::").unwrap_or(("", rest));
+            let tail = tail
+                .trim_end_matches(';')
+                .trim_matches(|c| c == '{' || c == '}');
+            names.extend(
+                tail.split(',')
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty()),
+            );
+        }
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "Split",
+            "Standardize",
+            "TextError",
+            "TextLimits",
+            "TextVectorization",
+            "TextVectorizationConfig"
+        ]
+    );
+
+    // サブモジュールは公開せず、クレートルートへの再エクスポートもしない。
     let mut files = Vec::new();
     collect_rs(&src_dir(), &mut files);
     for f in files {
@@ -73,5 +114,12 @@ fn text_module_is_not_exposed_from_facade() {
             "{} が text を再エクスポートしている",
             f.display()
         );
+        if f.starts_with(src_dir().join("text")) {
+            assert!(
+                !body.contains("\npub mod "),
+                "{} がサブモジュールを公開している",
+                f.display()
+            );
+        }
     }
 }

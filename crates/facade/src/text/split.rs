@@ -13,22 +13,28 @@
 //!   予約語と一致するため、lookup 段（#2900・#2902）での扱いは後続で決める
 //!
 //! 戻り値は入力を借用するイテレータでトークンごとの確保をしない。上限検査
-//! （`TextLimits`）は呼び出し側が入口で先に行う前提（設計記録 §8）。論点 3 は
-//! 未承認で、本実装は設計記録 §3 の推奨定義に従う。失敗しない純関数。
-//! derive 一式は内部実装上の選択で、公開時の derive は承認時の決定事項。
+//! （`TextLimits`）は呼び出し側が入口で先に行う前提（設計記録 §8）。論点 3 の
+//! ASCII 部分は承認済みで、Unicode White_Space 分割は保留（設計記録 §16.7）。
+//! 失敗しない純関数。公開型 `Split` は `fandhe_ai::text` へ再エクスポートされる
+//! （§16.2）。自由関数 `split` と `SplitIter` は非公開のまま。
 
 use std::str::{CharIndices, SplitAsciiWhitespace};
 
-/// 分割の方式。
+/// 分割の方式。空白の判定は ASCII に限る。
+///
+/// Unicode White_Space（全角空白・NBSP 等）での分割は保留中で、
+/// `#[non_exhaustive]` のため後から追加しても非破壊。
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Split {
-    /// 分割しない（入力全体を 1 トークン）。
+pub enum Split {
+    /// 分割しない（入力全体を 1 トークン）。空入力 `""` も 1 トークン（id 0）になる。
     None,
-    /// ASCII 空白で分割する（既定）。
+    /// ASCII 空白（SP・TAB・LF・FF・CR）だけで分割する（既定）。連続空白で空
+    /// トークンは出ない。Unicode White_Space（全角空白・NBSP 等）では分割しない。
     #[default]
     Whitespace,
-    /// Unicode スカラー値単位で分割する。
+    /// `char`（Unicode スカラー値）単位で分割する。書記素クラスタ単位ではなく、
+    /// 結合文字や ZWJ 絵文字は複数トークンに分かれる。
     Character,
 }
 

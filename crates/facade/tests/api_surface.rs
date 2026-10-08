@@ -27333,7 +27333,7 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 14] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 15] = [
     "compat",
     "data",
     "inference",
@@ -27348,6 +27348,7 @@ const GRAD_SCALER_PROBE_MODULES: [&str; 14] = [
     "nn::loss",
     "nn::rnn",
     "optim",
+    "text",
 ];
 
 /// 正のプローブ 2（glob 漏出）: ローカルの同名自由関数と facade の各公開モジュールを `pub use` の
@@ -27378,6 +27379,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use fandhe_ai::nn::rnn::*;
     pub use fandhe_ai::nn::*;
     pub use fandhe_ai::optim::*;
+    pub use fandhe_ai::text::*;
     pub use fandhe_ai::*;
 
     pub fn probe() -> Marker {
@@ -38402,4 +38404,445 @@ fn kv_rewind_stays_private_and_absent_from_facade() {
             "{rel}: facade に kv_rewind／KvSnapshot が現れてはならない"
         );
     }
+}
+// ---------------------------------------------------------------------
+// イシュー #2937（親 #2935）: 語彙 lookup 型のテキスト変換の facade 公開
+// （`docs/facade-text-vectorization-design.md` §16 の確定形。承認:
+// イシュー #2499 コメント 6067263650 の項 1）。
+//
+// 検出範囲の限界（過剰に保証しない）: いずれもトークン走査で、マクロ生成・`use … as` 別名経由の
+// 到達は範囲外（別名・glob・分割は承認形の完全一致が拒否する。型レベルの到達性・署名は到達
+// プローブが担う）。否定ガードは stable rustdoc の `compile_fail` コード照合を当てにせず、
+// 正のプローブとインベントリで組む。
+
+/// `text/mod.rs` の `pub use` 文を、空白なしトークン連結で全件返す（昇順）。
+fn text_pub_uses(files: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        if rel != "text/mod.rs" {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                out.push(tokens[i + 2..end].concat().replace(",}", "}"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `text/` 配下の全 `.rs` から、完全公開（`pub` で `pub(…)` でない）の
+/// `struct`／`enum`／`fn`／`const`／`static`／`type`／`trait`／`union`／`mod`／`use` 項目を
+/// `(ファイル, 種別:名前)` で全件返す（昇順）。
+fn text_pub_items(files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        if !rel.starts_with("text/") {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t != "pub" {
+                continue;
+            }
+            let Some(kind) = tokens.get(i + 1) else {
+                continue;
+            };
+            if matches!(
+                kind.as_str(),
+                "struct"
+                    | "enum"
+                    | "fn"
+                    | "const"
+                    | "static"
+                    | "type"
+                    | "trait"
+                    | "union"
+                    | "mod"
+                    | "use"
+            ) {
+                let name = tokens.get(i + 2).cloned().unwrap_or_default();
+                out.push((rel.clone(), format!("{kind}:{name}")));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `name` の `enum` 宣言（`text/` 配下）の variant 名を宣言順に返す（属性・フィールドは読み飛ばす）。
+fn text_enum_variants(files: &[(String, String)], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        if !rel.starts_with("text/") {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t != "enum" || tokens.get(i + 1).map(String::as_str) != Some(name) {
+                continue;
+            }
+            let Some(open) = tokens[i..].iter().position(|x| x == "{").map(|p| i + p) else {
+                continue;
+            };
+            let Some(close) = matching_close(&tokens, open, "{", "}") else {
+                continue;
+            };
+            let mut j = open + 1;
+            while j < close {
+                // 属性 `# [ … ]` を読み飛ばす。
+                while j < close && tokens[j] == "#" {
+                    j = matching_close(&tokens, j + 1, "[", "]").map_or(close, |c| c + 1);
+                }
+                if j >= close {
+                    break;
+                }
+                out.push(tokens[j].clone());
+                // variant の残り（フィールド）を、深さ 0 の `,` まで読み飛ばす。
+                let mut depth = 0usize;
+                while j < close {
+                    match tokens[j].as_str() {
+                        "{" | "(" | "[" => depth += 1,
+                        "}" | ")" | "]" => depth = depth.saturating_sub(1),
+                        "," if depth == 0 => {
+                            j += 1;
+                            break;
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `text` が公開モジュールで、配下のサブモジュールは公開されないこと。
+#[test]
+fn text_is_public_and_submodules_stay_private() {
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    assert!(
+        declared.contains("text"),
+        "`pub mod text` が公開モジュールとして検出されない: {declared:?}"
+    );
+    let nested: Vec<&String> = declared
+        .iter()
+        .filter(|m| m.starts_with("text::"))
+        .collect();
+    assert!(
+        nested.is_empty(),
+        "`text` 配下に pub mod が公開されている（フラットな 6 名のみ）: {nested:?}"
+    );
+}
+
+/// 正のガード: 公開は `text/mod.rs` の承認形 5 文（6 名）だけで、完全公開の項目は承認済みの
+/// 6 型と公開メソッドだけ。サブモジュールの公開・別名・glob・内部項目の公開はすべて拒否する。
+#[test]
+fn facade_exposes_text_items_only_in_approved_shape() {
+    let files = facade_src_files();
+    assert_eq!(
+        text_pub_uses(&files),
+        vec![
+            "error::TextError".to_string(),
+            "limits::TextLimits".to_string(),
+            "split::Split".to_string(),
+            "standardize::Standardize".to_string(),
+            "vectorization::{TextVectorization,TextVectorizationConfig}".to_string(),
+        ],
+        "text の公開は text/mod.rs の承認形 5 文（6 名）のみ（設計記録 §16.2）"
+    );
+
+    let mut expected: Vec<(String, String)> = Vec::new();
+    for (file, kinds) in [
+        ("text/error.rs", vec!["enum:TextError"]),
+        ("text/split.rs", vec!["enum:Split"]),
+        ("text/standardize.rs", vec!["enum:Standardize"]),
+        (
+            "text/vectorization.rs",
+            vec![
+                "struct:TextVectorization",
+                "struct:TextVectorizationConfig",
+                "fn:with_max_tokens",
+                "fn:with_standardize",
+                "fn:with_split",
+                "fn:with_ngrams",
+                "fn:with_output_sequence_length",
+                "fn:with_limits",
+                "fn:from_vocabulary",
+                "fn:adapt",
+                "fn:transform",
+                "fn:vocabulary",
+                "fn:vocabulary_size",
+                "fn:config",
+            ],
+        ),
+        (
+            "text/limits.rs",
+            vec![
+                "struct:TextLimits",
+                "fn:with_max_batch",
+                "fn:with_max_input_bytes",
+                "fn:with_max_corpus_bytes",
+                "fn:with_max_vocabulary_size",
+                "fn:with_max_vocabulary_token_bytes",
+                "fn:with_max_distinct_tokens",
+                "fn:with_max_ngrams",
+                "fn:with_max_output_sequence_length",
+                "fn:with_max_output_elements",
+            ],
+        ),
+        (
+            "text/mod.rs",
+            vec![
+                "use:error",
+                "use:limits",
+                "use:split",
+                "use:standardize",
+                "use:vectorization",
+            ],
+        ),
+    ] {
+        for k in kinds {
+            expected.push((file.to_string(), k.to_string()));
+        }
+    }
+    expected.sort();
+    assert_eq!(
+        text_pub_items(&files),
+        expected,
+        "text/ の完全公開項目は承認済みの 6 型・公開メソッド・`pub use` 5 文のみ（設計記録 §16.2・§16.3）"
+    );
+}
+
+/// 検出器が各カテゴリを拾えることの自己テスト（`facade_exposes_text_items_only_in_approved_shape` 用）。
+#[test]
+fn facade_exposes_text_items_only_in_approved_shape_detects_each_category() {
+    let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
+    for (src, want) in [
+        ("pub use vocab::Vocabulary;", "vocab::Vocabulary"),
+        ("pub use adapt::adapt;", "adapt::adapt"),
+        ("pub use split::Split as S;", "split::SplitasS"),
+        ("pub use split::*;", "split::*"),
+        ("pub use crate::text::Split;", "crate::text::Split"),
+    ] {
+        assert_eq!(
+            text_pub_uses(&f("text/mod.rs", src)),
+            vec![want.to_string()]
+        );
+    }
+    assert!(text_pub_uses(&f("lib.rs", "pub use text::Split;")).is_empty());
+    assert!(text_pub_uses(&f("text/mod.rs", "pub(crate) use a::B;")).is_empty());
+    for (src, want) in [
+        ("pub struct Vocabulary;", "struct:Vocabulary"),
+        ("pub fn standardize() {}", "fn:standardize"),
+        ("pub const PADDING_ID: i32 = 0;", "const:PADDING_ID"),
+        ("pub mod adapt;", "mod:adapt"),
+        ("pub trait T {}", "trait:T"),
+    ] {
+        assert_eq!(
+            text_pub_items(&f("text/vocab.rs", src)),
+            vec![("text/vocab.rs".to_string(), want.to_string())]
+        );
+    }
+    assert!(text_pub_items(&f("text/vocab.rs", "pub(crate) struct Vocabulary;")).is_empty());
+    assert!(text_pub_items(&f("other.rs", "pub struct Vocabulary;")).is_empty());
+    let src =
+        "#[non_exhaustive] pub enum E { A, #[default] B, C { x: usize, y: usize }, D(u8), E2 }";
+    assert_eq!(
+        text_enum_variants(&f("text/e.rs", src), "E"),
+        vec!["A", "B", "C", "D", "E2"]
+    );
+}
+
+/// 公開形の固定: `Standardize` 4・`Split` 3・`TextError` 17 variant のインベントリ。
+/// callable を受ける variant と Unicode 系 variant を足すと、ここで落ちる（論点 3 の Unicode 部分・論点 8）。
+#[test]
+fn text_public_shape_is_pinned() {
+    let files = facade_src_files();
+    assert_eq!(
+        text_enum_variants(&files, "Standardize"),
+        vec![
+            "None",
+            "Lower",
+            "StripPunctuation",
+            "LowerAndStripPunctuation"
+        ]
+    );
+    assert_eq!(
+        text_enum_variants(&files, "Split"),
+        vec!["None", "Whitespace", "Character"]
+    );
+    assert_eq!(
+        text_enum_variants(&files, "TextError"),
+        vec![
+            "BatchTooLarge",
+            "InputTooLong",
+            "CorpusTooLarge",
+            "VocabularyTooLarge",
+            "VocabularyTokenTooLong",
+            "EmptyVocabularyToken",
+            "ReservedVocabularyToken",
+            "DuplicateVocabularyToken",
+            "InvalidMaxTokens",
+            "InvalidNgrams",
+            "OutputSequenceLengthTooLarge",
+            "TooManyDistinctTokens",
+            "OutputTooLarge",
+            "LimitAboveAbsoluteMaximum",
+            "NgramCountOverflow",
+            "FrequencyOverflow",
+            "Shape",
+        ]
+    );
+}
+
+/// 未承認経路の否定ガード（トークン単位。コメント・文字列は無視）:
+/// - `text/` の外に `TextVectorization`／`text_vectorization` を含むトークンがない
+///   （クレートルート再エクスポート・`Sequential` への層化がない。論点 7）
+/// - 出力モード（`multi_hot`／`count`／`tf_idf`）と `StringLookup` 相当の識別子がない（論点 6）
+/// - 標準化・分割・本体に callable（`Fn`／`FnMut`／`FnOnce`／`dyn`）がない（論点 8）
+#[test]
+fn text_unapproved_paths_are_absent() {
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, content) in &facade_src_files() {
+        let tokens = tokens_of(content);
+        for t in &tokens {
+            let lower = t.to_ascii_lowercase();
+            if !rel.starts_with("text/")
+                && (t.contains("TextVectorization") || lower.contains("text_vectorization"))
+            {
+                violations.push(format!("{rel}: text 外に {t}"));
+            }
+            if matches!(
+                lower.as_str(),
+                "multi_hot" | "multihot" | "tf_idf" | "tfidf" | "stringlookup" | "string_lookup"
+            ) || t == "OutputMode"
+                || t == "output_mode"
+            {
+                violations.push(format!("{rel}: 出力モード／StringLookup 相当 {t}"));
+            }
+            if matches!(
+                rel.as_str(),
+                "text/standardize.rs" | "text/split.rs" | "text/vectorization.rs"
+            ) && matches!(t.as_str(), "Fn" | "FnMut" | "FnOnce" | "dyn")
+            {
+                violations.push(format!("{rel}: callable の入口 {t}"));
+            }
+        }
+        // クレートルート等への text 再エクスポート（`pub use … text …`）。
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                let stmt = &tokens[i + 2..end];
+                if !rel.starts_with("text/") && stmt.iter().any(|x| x == "text") {
+                    violations.push(format!("{rel}: text の再エクスポート {}", stmt.concat()));
+                }
+            }
+        }
+    }
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// 正のプローブ: 公開 6 名が `fandhe_ai::text` パスだけで到達でき、メソッド・ビルダ・`with_*` の署名が
+/// 確定形（設計記録 §16.3）に一致すること（コンパイルが通ること自体が検査）。
+#[test]
+fn text_items_are_reachable_via_facade_text_path() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::text::{
+        Split, Standardize, TextError, TextLimits, TextVectorization, TextVectorizationConfig,
+    };
+
+    type C = TextVectorizationConfig;
+    let _: fn(C, &[&'static str]) -> Result<TextVectorization, TextError> =
+        TextVectorization::from_vocabulary::<&str>;
+    let _: fn(C, &[String]) -> Result<TextVectorization, TextError> =
+        TextVectorization::adapt::<String>;
+    let _: fn(&TextVectorization, &[&'static str]) -> Result<Tensor<i32>, TextError> =
+        TextVectorization::transform::<&str>;
+    let _: fn(&TextVectorization) -> &[String] = TextVectorization::vocabulary;
+    let _: fn(&TextVectorization) -> usize = TextVectorization::vocabulary_size;
+    let _: fn(&TextVectorization) -> &C = TextVectorization::config;
+
+    let _: fn(C, usize) -> C = C::with_max_tokens;
+    let _: fn(C, Standardize) -> C = C::with_standardize;
+    let _: fn(C, Split) -> C = C::with_split;
+    let _: fn(C, usize) -> C = C::with_ngrams;
+    let _: fn(C, usize) -> C = C::with_output_sequence_length;
+    let _: fn(C, TextLimits) -> C = C::with_limits;
+
+    type L = TextLimits;
+    type LR = Result<TextLimits, TextError>;
+    let _: [fn(L, usize) -> LR; 9] = [
+        L::with_max_batch,
+        L::with_max_input_bytes,
+        L::with_max_corpus_bytes,
+        L::with_max_vocabulary_size,
+        L::with_max_vocabulary_token_bytes,
+        L::with_max_distinct_tokens,
+        L::with_max_ngrams,
+        L::with_max_output_sequence_length,
+        L::with_max_output_elements,
+    ];
+
+    // 公開フィールドと型。
+    let c = C::default();
+    let _: (
+        Option<usize>,
+        Standardize,
+        Split,
+        Option<usize>,
+        Option<usize>,
+        TextLimits,
+    ) = (
+        c.max_tokens,
+        c.standardize,
+        c.split,
+        c.ngrams,
+        c.output_sequence_length,
+        c.limits,
+    );
+    // derive の約束。
+    fn assert_copy_eq_default<T: Copy + Eq + Default + std::fmt::Debug>() {}
+    assert_copy_eq_default::<Standardize>();
+    assert_copy_eq_default::<Split>();
+    fn assert_copy_eq<T: Copy + Eq + std::fmt::Debug>() {}
+    assert_copy_eq::<TextLimits>();
+    fn assert_error<T: std::error::Error>() {}
+    assert_error::<TextError>();
+    fn assert_clone_debug<T: Clone + std::fmt::Debug>() {}
+    assert_clone_debug::<TextVectorization>();
+}
+
+/// 正の doctest プローブ: `text/mod.rs` の利用例が `adapt` → `transform` → `embedding` を通す形で実在し、
+/// 実際にコンパイル・実行される形（`ignore` 等の指定なし）で書かれていること。ASCII 限定の明記も固定する。
+#[test]
+fn text_usage_doctest_is_present_and_compiled() {
+    let text_mod = read_to_string_or_panic(&facade_crate_root().join("src/text/mod.rs"));
+    let doc = inner_doc_lines(&text_mod);
+    let v = doctest_probe_violations(
+        "text/mod.rs モジュール doc",
+        &doc,
+        &[
+            "TextVectorization::adapt",
+            ".transform(",
+            ".embedding(",
+            "Some(0)",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    let joined = doc.join("\n");
+    assert!(
+        joined.contains("ASCII") && joined.contains("小文字化") && joined.contains("空白分割"),
+        "公開 doc に小文字化と空白分割が ASCII 限定であることの明記がない"
+    );
 }

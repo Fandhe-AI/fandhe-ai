@@ -8,28 +8,34 @@
 //! - 句読点除去は `char::is_ascii_punctuation` の 32 文字を削除する（空白へは置換しない）
 //! - `LowerAndStripPunctuation` は小文字化 → 句読点除去の順で適用する
 //!
-//! 論点 3（ASCII に限るか・空白の定義）は `docs/compat-api-scope.md` 上で未承認。
-//! 本実装は設計記録 §3 の推奨定義に従う内部実装であり、承認結論が Unicode 側へ
-//! 変わった場合は本モジュールの差し替えで吸収する。
+//! 論点 3 のうち ASCII 部分は承認済み（`docs/facade-text-vectorization-design.md`
+//! §16.7）。Unicode の大小文字変換は保留で、`Standardize` は `#[non_exhaustive]`
+//! のため後から variant を足しても非破壊になる。
 //!
 //! 上限検査（`TextLimits`）は呼び出し側が入口で標準化・確保より先に行う前提
 //! （設計記録 §8）。出力バイト長は入力以下のため入口の上限は標準化後も保たれる。
 //! 失敗しない純関数であり、入力文字列をエラーへ出す経路を持たない。
-//! derive 一式は内部実装上の選択で、公開時の derive は承認時の決定事項。
+//! 公開型 `Standardize` は `fandhe_ai::text` へ再エクスポートされる（§16.2）。
+//! 自由関数 `standardize` は非公開のまま。
 
 use std::borrow::Cow;
 
-/// 標準化の方式。
+/// 標準化の方式。**小文字化・句読点除去はいずれも ASCII に限る**。
+///
+/// 非 ASCII 文字（`À`・全角句読点等）は小文字化も除去もされず、そのまま残る。
+/// Unicode 対応は保留中で、`#[non_exhaustive]` のため後から追加しても非破壊。
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum Standardize {
+pub enum Standardize {
     /// 何もしない。
     None,
-    /// ASCII 大文字のみ小文字化する。
+    /// ASCII 大文字（`A`〜`Z`）だけを小文字化する（`to_ascii_lowercase` 相当）。
+    /// 非 ASCII の大文字は変えない。
     Lower,
-    /// ASCII 句読点を削除する。
+    /// ASCII 句読点 32 文字（`char::is_ascii_punctuation`）だけを削除する。空白へは
+    /// 置換しない。非 ASCII の句読点は残る。
     StripPunctuation,
-    /// 小文字化してから句読点を削除する（既定）。
+    /// ASCII の小文字化をしてから ASCII 句読点を削除する（既定）。
     #[default]
     LowerAndStripPunctuation,
 }
