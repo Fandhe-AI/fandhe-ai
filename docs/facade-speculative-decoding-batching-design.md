@@ -206,3 +206,13 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 - §5 の公開形・§6 の判定方式・§9 の拡張要否・§10 の論点 1〜8 は、`docs/compat-api-scope.md` §5.1 末尾の「Phase 8 公開形（承認依頼 #2883）」ブロックへ転記した（行ラベル `S1`〜`S3`）。本記録 §1〜§14 の内容は変えていない。
 - §11 の仮番号と実 issue の対応（親 #2882 の sub-issues で確認）: 1→#2883・2→#2884・3→#2885・4→#2886・5→#2887・7→#2888・8→#2889・10→#2890。6（サンプリング版。論点 1 でブロック）・9（facade 公開。承認後）・11（周辺 docs）は未起票。
 - 承認の状況: §5・§6・§9 と論点 1〜8 はすべて未承認のまま。承認は実装 Agent が代行しない。保留ガードの名前と設置担当、`RequestId`・`limits`・`step` の `model` 引数の型、失敗の表現型は未定で、承認時の決定事項として同ブロックに列挙した。
+
+## 16. 実装記録（#2890・親 #2882。§11 の分解案 10）
+
+- 追加: `crates/facade/tests/speculative_batching_backend_parity.rs`。属性なし 3 件（`cpu_backend_ops_matches_naive_ops_for_speculative_greedy`・`cpu_backend_ops_matches_naive_ops_for_scheduler_greedy`・`comparison_detects_logits_divergence`）と、`#[ignore]` の CUDA 2 件・Metal 2 件（`cfg(target_os = "macos")` 限定）。
+- 比較範囲と判定: Greedy のみ。呼び出しごとの logits を REQ-2 統一複合判定（`assert_parity`）で突合し、呼び出し列の構造（回数・`seq_before`・ids・shape）の一致を要求する。token 列一致は事前登録の仮説 H1（全行 margin 前提。`SKIP_C` は #2887 と同値の固定値）で、破れた場合は §10 論点 2 へ戻す。スケジューラは同一バックエンドの単独 `generate` との一致（§6.3）も確認する。
+- 申し送り先: `docs/perf/logs/speculative-batching-2890/README.md`（CUDA／Metal 実機は未実測。記入欄は空）。
+- CI で走らない理由: CUDA は `#[ignore]`、Metal は cfg により Linux ではコンパイルもされない（`aarch64-apple-darwin` 向けの `cargo check` でコンパイルのみ確認）。
+- 新規物なし: `src`・依存・tolerance・baseline・`unsafe` は変更していない。
+- 承認状況: facade 公開（S1・S3）は未承認のまま。本記録は承認を代行しない。
+- スコープ外: バックエンド横断の TopK／Temperature 比較、サンプリング版 speculative、B > 1、`num_kv_layers() == 0` の speculative、facade 公開、周辺 docs と `compat-api-scope.md` の適用記録（行 11）。
