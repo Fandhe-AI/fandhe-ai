@@ -35823,10 +35823,10 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
 // =====================================================================
 // FunctionalTransformsHoldDoctestGuard（イシュー #2874・親 #2841）:
 // `GradcheckAnomalyHoldDoctestGuard`（#2671）系のテストの鏡写し。実装は内部クレート
-// （`fandhe_ai_autodiff::functional_ops`。現時点は `vjp`・`hvp`・`vmap`。新規 `Op`・`BackendOps` メソッド・
+// （`fandhe_ai_autodiff::functional_ops`。現時点は `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`〈後 2 者は #2940〉。新規 `Op`・`BackendOps` メソッド・
 // `AutodiffError` variant なし）に閉じ、facade 公開形は未承認
 // （`docs/autodiff-functional-transforms-design.md` §5・§10。同記録は推奨案の記録であり承認記録ではない）。
-// 承認済みの除外はない。検出範囲は列挙した名前（`functional_ops`・`vjp`・`hvp`・`vmap`）に限る。
+// 承認済みの除外はない。検出範囲は列挙した名前（`functional_ops`・`vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`）に限る。
 // =====================================================================
 
 /// `FunctionalTransformsHoldDoctestGuard` doc 内の唯一の doctest ブロックが glob import する
@@ -35884,6 +35884,8 @@ mod __fandhe_functional_transforms_hold_probe {\n\
 \x20\x20\x20\x20pub fn vjp() {}\n\
 \x20\x20\x20\x20pub fn hvp() {}\n\
 \x20\x20\x20\x20pub fn vmap() {}\n\
+\x20\x20\x20\x20pub fn jvp() {}\n\
+\x20\x20\x20\x20pub fn jacfwd() {}\n\
 }\n\
 use __fandhe_functional_transforms_hold_probe::*;\n\
 \n\
@@ -35893,6 +35895,8 @@ trait __FandheFunctionalTransformsHoldProbe {\n\
 \x20\x20\x20\x20fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 \x20\x20\x20\x20fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 \x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 }\n\
 \n\
 impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
@@ -35903,6 +35907,12 @@ impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -35917,6 +35927,12 @@ impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
 }\n\
 \n\
 impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tensor<f32> {\n\
@@ -35929,6 +35945,12 @@ impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
 }\n\
 \n\
 fn __probe_free_fns() {\n\
@@ -35939,6 +35961,8 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20vjp();\n\
 \x20\x20\x20\x20hvp();\n\
 \x20\x20\x20\x20vmap();\n\
+\x20\x20\x20\x20jvp();\n\
+\x20\x20\x20\x20jacfwd();\n\
 }\n\
 \n\
 fn __probe_methods(\n\
@@ -35949,19 +35973,28 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vjp(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::hvp(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap(v);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp(v);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vjp(tape);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::hvp(tape);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::vmap(tape);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jvp(tape);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jacfwd(tape);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp(tf);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jacfwd(tf);\n\
 }";
 
 /// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`hvp`／`vmap` は後続 issue の先取り）。
-const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 3] = ["vjp", "hvp", "vmap"];
+/// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`hvp`／`jvp` は後続 issue の先取り）。
+/// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`hvp`／`jacfwd` は後続 issue の先取り）。
+const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 5] = ["vjp", "hvp", "vmap", "jvp", "jacfwd"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 4] = ["functional_ops", "vjp", "hvp", "vmap"];
+const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 6] =
+    ["functional_ops", "vjp", "hvp", "vmap", "jvp", "jacfwd"];
 
 /// [`facade_does_not_reexport_or_declare_functional_transforms`]・その自己テストが共用する検出本体。
 /// facade src の `pub use` で [`FUNCTIONAL_TRANSFORMS_IDENTS`] を経路の識別子（トークン完全一致）単位で
@@ -36055,6 +36088,12 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
     assert!(offense("impl Tape { pub fn vjp(&self) {} }"));
     assert!(offense("impl Var { pub fn hvp(&self) {} }"));
     assert!(offense("impl Tensor { fn vmap(&self) {} }"));
+    assert!(offense("pub use fandhe_ai_autodiff::functional_ops::jvp;"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::functional_ops::{jacfwd as j, vjp};"
+    ));
+    assert!(offense("impl Tape { pub fn jacfwd(&self) {} }"));
+    assert!(offense("impl Var { fn jvp(&self) {} }"));
     assert!(offense("pub mod functional_ops {}"));
     // 負例: コメント・文字列リテラル中の出現。
     assert!(!offense("// pub use fandhe_ai_autodiff::functional_ops;"));
@@ -36065,6 +36104,8 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
     // 負例: 部分一致する別トークン・メソッド呼び出し。
     assert!(!offense("fn matmul_vjp() {}"));
     assert!(!offense("fn vjp_impl() {}"));
+    assert!(!offense("fn jvp_impl() {}"));
+    assert!(!offense("fn f(t: &Tape) { let _ = t.jacfwd(); }"));
     assert!(!offense("fn f(t: &Tape) { let _ = t.vjp(); }"));
 }
 
@@ -36077,6 +36118,8 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
 /// - `autodiff/src/functional_ops.rs::hvp`: #2875 の内部実装（同上）。
 ///
 /// - `autodiff/src/functional_ops.rs::vmap`: #2876 の内部実装（同上）。
+///
+/// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`: #2940 の double-VJP 内部実装（`pub(crate)`。同上）。
 ///
 /// 以後の実装を足すときは期待集合へ 1 行ずつ追記する。
 #[test]
@@ -36125,13 +36168,15 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
         ("autodiff/src/functional_ops.rs::vjp".to_string(), 1usize),
         ("autodiff/src/functional_ops.rs::hvp".to_string(), 1usize),
         ("autodiff/src/functional_ops.rs::vmap".to_string(), 1usize),
+        ("autodiff/src/functional_ops.rs::jvp".to_string(), 1usize),
+        ("autodiff/src/functional_ops.rs::jacfwd".to_string(), 1usize),
         ("autodiff/src/grad.rs::vjp".to_string(), 1usize),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         found, expected,
-        "workspace 全体（crates/*/src/）の vjp／hvp／vmap の `fn` 宣言が許可された置き場所\
+        "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd の `fn` 宣言が許可された置き場所\
          （autodiff/src/functional_ops.rs・autodiff/src/grad.rs の各 1 件）と一致しない。\
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"

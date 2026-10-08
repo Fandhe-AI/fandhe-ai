@@ -234,3 +234,41 @@ pub fn req2_close(actual: f64, expected: f64) -> bool {
     let rel = diff / scale;
     rel < REQ2_RELATIVE_TOLERANCE || diff < REQ2_ABSOLUTE_RESCUE_THRESHOLD
 }
+// ---------------------------------------------------------------------------
+// double-VJP 検証（#2880・#2940）の共通ヘルパー。tensor-core／std のみ使用し、
+// `fandhe_ai_autodiff` を参照しない（`src/*_tests.rs` から `#[path]` で取り込まれる
+// 単体側では `crate::` と名前が食い違うため）。
+// ---------------------------------------------------------------------------
+
+/// 符号が混在する決定的な値列（0 から離れた値になるよう位相をずらす）。
+pub fn det_seq(n: usize, seed: f32) -> Vec<f32> {
+    (0..n)
+        .map(|i| ((i as f32 + seed) * 0.37).sin() * 1.5)
+        .collect()
+}
+
+/// 全要素が正の決定的な値列（`sqrt`／`log*`／`pow` の定義域用）。
+pub fn det_pos(n: usize, seed: f32) -> Vec<f32> {
+    det_seq(n, seed).iter().map(|v| v.abs() + 0.4).collect()
+}
+
+/// ホスト f64 で蓄積した `J·v`（`jac` は行優先の `m × n`）。長さ不一致は panic（テスト専用）。
+pub fn jacobian_times_vector_f64(jac: &[f32], m: usize, n: usize, v: &[f32]) -> Vec<f64> {
+    assert_eq!(jac.len(), m * n, "jacobian の要素数");
+    assert_eq!(v.len(), n, "接ベクトルの要素数");
+    (0..m)
+        .map(|i| {
+            (0..n)
+                .map(|k| f64::from(jac[i * n + k]) * f64::from(v[k]))
+                .sum()
+        })
+        .collect()
+}
+
+/// 長さ一致と要素ごとの REQ-2 統一複合判定（閾値は `REQ2_*` を経由し直書きしない）。
+pub fn assert_all_req2_close(got: &[f32], expected: &[f64], ctx: &str) {
+    assert_eq!(got.len(), expected.len(), "{ctx}: 要素数");
+    for (i, (&a, &e)) in got.iter().zip(expected).enumerate() {
+        assert!(req2_close(f64::from(a), e), "{ctx}[{i}]: {a} vs {e}");
+    }
+}

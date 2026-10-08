@@ -11,7 +11,7 @@ use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor};
 
 // 統合テストと同じ REQ-2 判定実装を共有する（閾値の分散定義を避ける）。
 #[path = "../tests/common/mod.rs"]
-mod common;
+pub(crate) mod common;
 
 use crate::jacobian_ops::jacobian;
 use crate::test_support::test_ops;
@@ -26,17 +26,7 @@ fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
 }
 
 fn seq(n: usize, seed: f32) -> Vec<f32> {
-    (0..n)
-        .map(|i| ((i as f32 + seed) * 0.37).sin() * 1.5)
-        .collect()
-}
-
-/// REQ-2 統一複合判定。閾値は統合テスト共通の `tests/common/mod.rs`
-/// （`REQ2_RELATIVE_TOLERANCE`／`REQ2_ABSOLUTE_RESCUE_THRESHOLD`）を単一の定義元として
-/// 参照し、本ファイルへ値を直書きしない（`autodiff` は `backend-cpu` へ依存できないため
-/// `parity` を直接は使えない。判定式は `backend-cpu::parity::compare` と揃えた共通実装）。
-fn close(actual: f64, expected: f64) -> bool {
-    common::req2_close(actual, expected)
+    common::det_seq(n, seed)
 }
 
 fn double_vjp_probe(tape: &Tape, y: &Var<'_>, x: &Var<'_>, v: &Tensor<f32>, ctx: &str) -> Vec<f32> {
@@ -87,13 +77,8 @@ where
     let xa = ta.var(&t(xv, shape));
     let ya = build(&ta, &xa).unwrap();
     let got = double_vjp_probe(&ta, &ya, &xa, &t(vv.clone(), shape), ctx);
-    assert_eq!(got.len(), m, "{ctx}: 要素数");
-    for (i, &a) in got.iter().enumerate() {
-        let e: f64 = (0..n)
-            .map(|k| f64::from(jh[i * n + k]) * f64::from(vv[k]))
-            .sum();
-        assert!(close(f64::from(a), e), "{ctx}[{i}]: {a} vs {e}");
-    }
+    let expected = common::jacobian_times_vector_f64(&jh, m, n, &vv);
+    common::assert_all_req2_close(&got, &expected, ctx);
 }
 
 #[test]
