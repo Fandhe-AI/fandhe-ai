@@ -1,6 +1,6 @@
 //! `functional_ops` の double-VJP 版 `jvp`／`jacfwd` の受入テスト（イシュー #2940・親 #2939）。
 //!
-//! 契約の正は `docs/autodiff-functional-transforms-design.md` §8・§19・§23。比較先は
+//! 契約の正は `docs/autodiff-functional-transforms-design.md` §8・§19・§24。比較先は
 //! `jacobian_ops::jacobian`（facade の `Tape::jacobian` はこれへ 1 行委譲するだけで、autodiff から
 //! facade へは依存できない）。判定は REQ-2 統一複合判定を `tests/common/mod.rs` の共有定数・
 //! `req2_close` 経由でのみ行い、閾値は直書きしない。
