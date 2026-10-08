@@ -47,6 +47,23 @@
 //!   `AutodiffError::InvalidArgument` で拒否する（fail-closed。
 //!   `.claude/rules/security.md` A03 方針）
 //! - 出力は token id 列限定（`Tensor<i32>`）。トークナイザ結線は対象外
+//!
+//! # サブモジュール配置と可視性
+//!
+//! 本モジュールは `generate/mod.rs` のディレクトリ形式で、今後の
+//! `generate::speculative`（speculative decoding）・`generate::scheduler`
+//! （連続バッチング）が検証・サンプリングの非公開ヘルパー
+//! （`validate_forward_step_output`・`greedy_argmax`・`sample_step` 等）を
+//! 再利用する前提の配置である（`docs/facade-speculative-decoding-batching-design.md`
+//! §3・§4）。
+//!
+//! - 子モジュールは親の非公開項目を `super::` で呼べるため、ヘルパーの
+//!   可視性は変えない
+//! - `pub(super)` は使わない。`generate` はクレート直下にあるため
+//!   `pub(super)` は `pub(crate)` と同じ範囲になり、クレート内の他経路から
+//!   検証を迂回した組み立てが可能になる
+//! - `validate*` は非公開を保つ（A03。facade の `api_surface.rs` の
+//!   公開形インベントリが固定。`docs/facade-generate-decision.md` §13.4・§18.5）
 
 use fandhe_ai_tensor_core::rng::{Generator, RngError};
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
@@ -559,6 +576,47 @@ pub fn generate<M: AutoregressiveModel + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- 子モジュールからの到達性 ---------------------------------------
+
+    /// 非公開ヘルパーが子モジュール（今後の speculative／scheduler 相当）から
+    /// `super::` で参照できること（型注釈付き代入のコンパイル成功が検証）。
+    #[test]
+    fn private_helpers_are_reachable_from_child_module() {
+        mod child {
+            use crate::error::AutodiffError;
+            use fandhe_ai_tensor_core::Tensor;
+            use fandhe_ai_tensor_core::rng::Generator;
+
+            type SampleStepFn = fn(
+                &Tensor<f32>,
+                usize,
+                usize,
+                usize,
+                &super::super::GenerateConfig,
+                &mut Generator,
+            ) -> Result<Vec<i32>, AutodiffError>;
+            type BuildOutputFn =
+                fn(Vec<Vec<i32>>, usize, usize, bool) -> Result<Tensor<i32>, AutodiffError>;
+
+            pub(super) fn touch() {
+                let _: fn(&Tensor<f32>, usize, usize) -> Result<usize, AutodiffError> =
+                    super::super::validate_forward_step_output;
+                let _: fn(usize) -> Result<(), AutodiffError> =
+                    super::super::validate_vocab_le_i32_max;
+                let _: fn(&[f32]) -> usize = super::super::greedy_argmax;
+                let _: fn(&[f32], f32) -> Vec<f32> = super::super::softmax_weights_f64;
+                let _: fn(&[f32], usize) -> Vec<usize> = super::super::top_k_indices;
+                let _: SampleStepFn = super::super::sample_step;
+                let _: BuildOutputFn = super::super::build_output;
+                let _: fn(&super::super::GenerateConfig) -> Result<(), AutodiffError> =
+                    super::super::GenerateConfig::validate;
+                let _: fn(&super::super::GenerateConfig, usize) -> Result<(), AutodiffError> =
+                    super::super::GenerateConfig::validate_top_k_le_vocab;
+            }
+        }
+        child::touch();
+    }
 
     // --- GenerateConfig::new・validate --------------------------------
 

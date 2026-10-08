@@ -164,7 +164,7 @@ fn prompt_1d(data: Vec<i32>) -> Tensor<i32> {
     Tensor::new(data, &[len]).unwrap()
 }
 
-/// タイの最小 index を選ぶ最大値添字（`generate.rs::greedy_argmax` と
+/// タイの最小 index を選ぶ最大値添字（`generate/mod.rs::greedy_argmax` と
 /// 同じタイ規約。同モジュールの実体は `pub(crate)` のため本テストでは
 /// 独立に再実装する）。
 fn greedy_argmax(row: &[f32]) -> usize {

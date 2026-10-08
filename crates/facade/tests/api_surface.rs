@@ -22718,7 +22718,7 @@ fn generate_items_are_reachable_via_facade_inference_path() {
 // `generate_public_field_types_and_variants_are_pinned` が担う）。workspace 全体の `fn generate`
 // 宣言インベントリは決定記録 §7 が不採用としたため置かない（`crates/self-repair` に同名の
 // 無関係な内部宣言があり、正当な変更を落とすため）。走査は facade `src/` と
-// `autodiff/src/generate.rs` の 1 ファイルに限る。
+// `autodiff/src/generate/mod.rs` の 1 ファイルに限る。
 
 /// 正の doctest プローブ（#2576）: `generate` の利用例が `inference/mod.rs` のモジュール doc に
 /// 実在し、実際にコンパイル・実行される形（`ignore` 等の指定・隠し行なし）であること。
@@ -22804,7 +22804,7 @@ fn inference_module_reexports_exactly_expected_surface() {
     assert_ne!(pub_use_stmts_normalized(&alias), expected);
 }
 
-/// `autodiff/src/generate.rs` の公開形（承認形 = 決定記録 §2・§13.2・§17.2）の違反を返す。
+/// `autodiff/src/generate/mod.rs` の公開形（承認形 = 決定記録 §2・§13.2・§17.2）の違反を返す。
 /// 承認形: `SamplingStrategy` は `#[non_exhaustive]` で `Greedy`／`TopK(usize)`／`Temperature(f32)`
 /// の 3 variant、`GenerateConfig` は `#[non_exhaustive]` で pub フィールド 5 つと pub fn
 /// `new`／`with_temperature`／`with_seed` の 3 つ、`AutoregressiveModel` は
@@ -22906,10 +22906,10 @@ fn generate_public_shape_violations(src: &str) -> Vec<String> {
     v
 }
 
-/// 実ファイル（`autodiff/src/generate.rs`）の公開形が承認形の全数インベントリと一致すること。
+/// 実ファイル（`autodiff/src/generate/mod.rs`）の公開形が承認形の全数インベントリと一致すること。
 #[test]
 fn generate_public_shape_matches_approved_inventory() {
-    let src = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/generate.rs"));
+    let src = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/generate/mod.rs"));
     let v = generate_public_shape_violations(&src);
     assert!(
         v.is_empty(),
