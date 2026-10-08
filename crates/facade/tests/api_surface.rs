@@ -25571,6 +25571,8 @@ struct FnInfo {
     name: String,
     /// `->` 以降（`{`／`where`／`;` の手前まで）のトークン列。戻り値なしは空。
     ret: Vec<String>,
+    /// 本体 `{ ... }` の内側のトークン列（#2599。委譲本体の固定検査用）。本体なし（`;`）は空。
+    body: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -25660,7 +25662,25 @@ fn parse_fn_at(tokens: &[String], fn_idx: usize) -> Option<FnInfo> {
             j += 1;
         }
     }
-    Some(FnInfo { vis, name, ret })
+    // `where` 節を読み飛ばして本体の `{` を探す。
+    while let Some(t) = tokens.get(j) {
+        if matches!(t.as_str(), "{" | ";") {
+            break;
+        }
+        j += 1;
+    }
+    let body = if tokens.get(j).map(String::as_str) == Some("{") {
+        let close = matching_close(tokens, j, "{", "}")?;
+        tokens[j + 1..close].to_vec()
+    } else {
+        Vec::new()
+    };
+    Some(FnInfo {
+        vis,
+        name,
+        ret,
+        body,
+    })
 }
 
 /// `content` 内の `impl ... <type_name> ... { ... }`（固有 impl・trait impl の両方。
@@ -35433,4 +35453,505 @@ fn phase4_held_items_remain_unexposed() {
             "var.rs に保留中の `fn {name}` がある"
         );
     }
+}
+// ==== #2599 f64 独立自動微分グラフ（TapeF64／VarF64／GradientsF64）の正ガード ====
+//
+// 承認形（`docs/autodiff-var-dtype-multiplexing-design.md` §4.1・§10.1 の推奨案 D-2。
+// 承認根拠: ルート #2499 コメント
+// https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）だけを
+// 許す正ガード。3 型とも `src/lib.rs` 直下の facade newtype（フィールド `pub(crate)`・
+// 1 式委譲・trait impl なし・再エクスポートなし）であることを fail-closed に固定する。
+//
+// 注: #2599 着手時点で f64 専用の保留ガードは存在しなかった（保留を担っていたのは
+// 汎用の `facade_does_not_reexport_tape_or_backend_ops`／
+// `facade_pub_use_leaves_are_not_modules` のみ）。この 2 ガードは `pub use` 行だけを見る
+// 否定層として変更せず残し、本節は newtype 宣言の形（承認形）を固定する正ガードである。
+
+/// 承認形の公開面。`(型名, [(メソッド名, 本体の 1 式〈委譲先を完全修飾パスで固定〉)])`。
+const F64_AUTOGRAD_SURFACE: &[(&str, &[(&str, &str)])] = &[
+    (
+        "TapeF64",
+        &[
+            (
+                "new",
+                "Self(fandhe_ai_autodiff::f64_autograd::TapeF64::new(&tape.0))",
+            ),
+            ("var", "VarF64(self.0.var(value))"),
+            ("var_no_grad", "VarF64(self.0.var_no_grad(value))"),
+            ("backward", "self.0.backward(&loss.0).map(GradientsF64)"),
+        ],
+    ),
+    (
+        "VarF64",
+        &[
+            ("value", "self.0.value()"),
+            ("shape", "self.0.shape()"),
+            ("add", "self.0.add(&other.0).map(VarF64)"),
+            ("mul", "self.0.mul(&other.0).map(VarF64)"),
+            ("div", "self.0.div(&other.0).map(VarF64)"),
+            ("pow", "self.0.pow(&other.0).map(VarF64)"),
+            ("matmul", "self.0.matmul(&other.0).map(VarF64)"),
+            ("sum", "self.0.sum(dim).map(VarF64)"),
+            ("mean", "self.0.mean(dim).map(VarF64)"),
+            ("max", "self.0.max(dim).map(VarF64)"),
+        ],
+    ),
+    ("GradientsF64", &[("get", "self.0.get(&var.0)")]),
+];
+
+/// 承認形の型ごとの `(タプルフィールド可視性, derive)`。
+fn f64_autograd_expected_decl(type_name: &str) -> Vec<String> {
+    let mut rec: Vec<String> = ["pub", "(", "crate", ")", "|"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if type_name == "VarF64" {
+        rec.push("Clone".to_string());
+        rec.push("Copy".to_string());
+    }
+    rec
+}
+
+/// `content` 内の `struct <name>` 宣言ごとに、タプルフィールド可視性 4 トークン・区切り `|`・
+/// derive 名（ソート済み）を並べた記録を返す（`TapeRef` の宣言インベントリと同型）。
+fn f64_autograd_struct_decl_records(content: &str, name: &str) -> Vec<Vec<String>> {
+    let tokens = tokens_of(content);
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "struct" || tokens.get(i + 1).map(String::as_str) != Some(name) {
+            continue;
+        }
+        let mut j = i + 2;
+        if tokens.get(j).map(String::as_str) == Some("<") {
+            match matching_close(&tokens, j, "<", ">") {
+                Some(c) => j = c + 1,
+                None => {
+                    out.push(vec!["<unclosed generics>".to_string()]);
+                    continue;
+                }
+            }
+        }
+        if tokens.get(j).map(String::as_str) != Some("(") {
+            out.push(vec!["<not a tuple struct>".to_string()]);
+            continue;
+        }
+        let mut rec: Vec<String> = tokens
+            .get(j + 1..j + 5)
+            .map(<[String]>::to_vec)
+            .unwrap_or_default();
+        let mut derives = Vec::new();
+        let mut k = i;
+        if k > 0 && tokens[k - 1] == "pub" {
+            k -= 1;
+        }
+        while k > 0 && tokens[k - 1] == "]" {
+            let mut depth = 0usize;
+            let mut open = k - 1;
+            for m in (0..k).rev() {
+                if tokens[m] == "]" {
+                    depth += 1;
+                } else if tokens[m] == "[" {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = m;
+                        break;
+                    }
+                }
+            }
+            if tokens.get(open + 1).map(String::as_str) == Some("derive") {
+                derives.extend(
+                    tokens[open + 2..k - 1]
+                        .iter()
+                        .filter(|t| t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
+                        .cloned(),
+                );
+            }
+            k = open.saturating_sub(1);
+        }
+        derives.sort();
+        rec.push("|".to_string());
+        rec.extend(derives);
+        out.push(rec);
+    }
+    out
+}
+
+/// item 位置の `impl` ヘッダ（`impl` から `{`／`where`／`;` の手前まで）のうち、
+/// `names` のいずれかの識別子を含むものの件数。`impl From<VarF64> for X` や
+/// `impl Foo for Vec<TapeF64>` のような、対象型を self にしない impl の追加も数える。
+fn impl_headers_mentioning(content: &str, names: &[&str]) -> usize {
+    let tokens = tokens_of(content);
+    let mut count = 0;
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "impl" {
+            continue;
+        }
+        let item_pos = i == 0 || matches!(tokens[i - 1].as_str(), "}" | ";" | "]" | "{" | "unsafe");
+        if !item_pos {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < tokens.len() && !matches!(tokens[j].as_str(), "{" | "where" | ";") {
+            if names.contains(&tokens[j].as_str()) {
+                count += 1;
+                break;
+            }
+            j += 1;
+        }
+    }
+    count
+}
+
+/// 3 型の公開面（固有 impl の fn 集合・可視性・委譲本体・trait impl 不在）の違反一覧。
+fn f64_autograd_surface_violations(content: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let names: Vec<&str> = F64_AUTOGRAD_SURFACE.iter().map(|(n, _)| *n).collect();
+    for (ty, fns) in F64_AUTOGRAD_SURFACE {
+        let impls = collect_type_impls(content, ty);
+        for imp in &impls {
+            if let Some(tr) = &imp.trait_tokens {
+                v.push(format!("{ty}: trait impl `{}` は不可", trait_name(tr)));
+            }
+        }
+        let inherent: Vec<&ImplInfo> = impls.iter().filter(|i| i.trait_tokens.is_none()).collect();
+        if inherent.len() != 1 {
+            v.push(format!(
+                "{ty}: 固有 impl はちょうど 1 件（実際 {}）",
+                inherent.len()
+            ));
+        }
+        let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for imp in inherent {
+            for f in &imp.fns {
+                *seen.entry(f.name.clone()).or_insert(0) += 1;
+                if f.vis != FnVis::Public {
+                    v.push(format!("{ty}::{}: 公開（pub）でなければならない", f.name));
+                }
+                match fns.iter().find(|(n, _)| *n == f.name) {
+                    None => v.push(format!("{ty}::{}: 承認形に無い fn", f.name)),
+                    Some((_, body)) => {
+                        if f.body != tokens_of(body) {
+                            v.push(format!(
+                                "{ty}::{}: 本体が承認形の 1 式委譲 `{body}` と一致しない: {:?}",
+                                f.name, f.body
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for (name, _) in *fns {
+            if seen.get(*name) != Some(&1) {
+                v.push(format!(
+                    "{ty}::{name}: 承認形の fn がちょうど 1 件で存在しない（実際 {:?}）",
+                    seen.get(*name)
+                ));
+            }
+        }
+    }
+    let mentions = impl_headers_mentioning(content, &names);
+    if mentions != names.len() {
+        v.push(format!(
+            "3 型を含む impl ヘッダは固有 impl の {} 件のみ（実際 {mentions}）",
+            names.len()
+        ));
+    }
+    v
+}
+
+/// `content` の `pub use` 文が 3 型・`f64_autograd` を含む、または `f64_autograd` トークンが
+/// `fandhe_ai_autodiff::f64_autograd::<3 型>` の完全修飾形以外で現れる違反の一覧
+/// （`use ... as` 別名・`use fandhe_ai_autodiff::f64_autograd;` による短縮を拒否する）。
+fn f64_autograd_reexport_violations(content: &str) -> Vec<String> {
+    let tokens = tokens_of(content);
+    let watched = ["TapeF64", "VarF64", "GradientsF64", "f64_autograd"];
+    let mut v = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t == "use" && i > 0 && (tokens[i - 1] == "pub" || tokens[i - 1] == ")") {
+            let mut j = i + 1;
+            while j < tokens.len() && tokens[j] != ";" {
+                if watched.contains(&tokens[j].as_str()) {
+                    v.push(format!("pub use が `{}` を含む", tokens[j]));
+                }
+                j += 1;
+            }
+        }
+        if t == "f64_autograd" {
+            let ok_prefix = i >= 3
+                && tokens[i - 3] == "fandhe_ai_autodiff"
+                && tokens[i - 2] == ":"
+                && tokens[i - 1] == ":";
+            let ok_suffix = tokens.get(i + 1).map(String::as_str) == Some(":")
+                && tokens.get(i + 2).map(String::as_str) == Some(":")
+                && matches!(
+                    tokens.get(i + 3).map(String::as_str),
+                    Some("TapeF64" | "VarF64" | "GradientsF64")
+                );
+            if !(ok_prefix && ok_suffix) {
+                v.push(format!(
+                    "`f64_autograd` が完全修飾形以外で現れる（token {i}）"
+                ));
+            }
+        }
+    }
+    v
+}
+
+/// 正ガード (a): 3 型の `struct` 宣言が `src/` 全体で各ちょうど 1 件・`src/lib.rs` にあり、
+/// タプルフィールドが `pub(crate)`・derive は `VarF64` が `Clone`／`Copy` のみで他は空。
+/// 0 件（走査空振り）も fail。
+#[test]
+fn f64_autograd_declared_once_in_lib_with_crate_private_field() {
+    let src_dir = facade_crate_root().join("src");
+    for (ty, _) in F64_AUTOGRAD_SURFACE {
+        let mut decls: Vec<(String, Vec<String>)> = Vec::new();
+        visit_rs_files(&src_dir, &mut |path, content| {
+            for rec in f64_autograd_struct_decl_records(content, ty) {
+                decls.push((path.to_string_lossy().replace('\\', "/"), rec));
+            }
+        });
+        assert_eq!(
+            decls.len(),
+            1,
+            "struct {ty} の宣言は src/ 全体でちょうど 1 件: {decls:?}"
+        );
+        let (path, rec) = &decls[0];
+        assert!(path.ends_with("src/lib.rs"), "宣言は src/lib.rs: {path}");
+        assert_eq!(
+            rec,
+            &f64_autograd_expected_decl(ty),
+            "{ty}: フィールド可視性は pub(crate)・derive は承認形のみ"
+        );
+    }
+}
+
+/// 正ガード (b)(c): 公開メソッド集合の完全一致・本体の 1 式委譲固定・trait impl 不在
+/// （`src/` 全体の各ファイルを走査し、違反の合計が 0 であることを固定する）。
+#[test]
+fn f64_autograd_public_surface_is_exactly_approved_delegations() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let v = f64_autograd_surface_violations(&content);
+    assert!(
+        v.is_empty(),
+        "f64 autograd の facade 公開面が承認形（D-2）と一致しない: {v:#?}"
+    );
+    // 他ファイルに 3 型の impl／宣言が無いこと（lib.rs 以外での拡張経路の拒否）。
+    let src_dir = facade_crate_root().join("src");
+    let mut other = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, c| {
+        if path.ends_with("lib.rs") && path.parent() == Some(src_dir.as_path()) {
+            return;
+        }
+        for (ty, _) in F64_AUTOGRAD_SURFACE {
+            if !collect_type_impls(c, ty).is_empty() {
+                other.push(format!("{}: impl {ty}", path.display()));
+            }
+        }
+    });
+    assert!(
+        other.is_empty(),
+        "lib.rs 以外に 3 型の impl がある: {other:?}"
+    );
+}
+
+/// 正ガード (d): facade `src/` の `pub use` が 3 型・`f64_autograd` を再エクスポートせず、
+/// `f64_autograd` は完全修飾パスでのみ参照される。
+#[test]
+fn f64_autograd_not_reexported_from_facade() {
+    let src_dir = facade_crate_root().join("src");
+    let mut scanned = 0usize;
+    let mut v = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        scanned += 1;
+        for m in f64_autograd_reexport_violations(content) {
+            v.push(format!("{}: {m}", path.display()));
+        }
+    });
+    assert!(scanned > 0, "src/ を 1 件も走査できていない（走査空振り）");
+    assert!(v.is_empty(), "f64 autograd 型の再エクスポート検出: {v:?}");
+}
+
+/// 正ガード (e): 3 型の `struct` 宣言が workspace 全体（`crates/*/src/`）で
+/// `autodiff/src/f64_autograd.rs`（実体）と `facade/src/lib.rs`（newtype）の各 1 件のみ。
+#[test]
+fn f64_autograd_struct_declarations_workspace_inventory() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .expect("workspace crates ディレクトリが読める")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty(), "クレートが 1 件も見つからない");
+    for dir in &crate_dirs {
+        visit_rs_files(&dir.join("src"), &mut |path, content| {
+            for (ty, _) in F64_AUTOGRAD_SURFACE {
+                let n = f64_autograd_struct_decl_records(content, ty).len();
+                if n > 0 {
+                    let rel = path
+                        .strip_prefix(&crates_dir)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *found.entry(format!("{rel}::{ty}")).or_insert(0) += n;
+                }
+            }
+        });
+    }
+    let mut expected = std::collections::BTreeMap::new();
+    for (ty, _) in F64_AUTOGRAD_SURFACE {
+        expected.insert(format!("autodiff/src/f64_autograd.rs::{ty}"), 1usize);
+        expected.insert(format!("facade/src/lib.rs::{ty}"), 1usize);
+    }
+    assert_eq!(
+        found, expected,
+        "3 型の struct 宣言が承認済みの置き場所（autodiff 実体 + facade newtype）と不一致"
+    );
+}
+
+/// 正ガード (f): コンパイル時プローブ。名前解決・15 メソッドのシグネチャ・`VarF64: Copy`
+/// を型注釈と関数ポインタ代入で固定する（シグネチャ変更はコンパイルエラーで検出）。
+#[test]
+fn f64_autograd_signature_probe() {
+    use fandhe_ai::{AutodiffError, GradientsF64, Tape, TapeF64, Tensor, VarF64};
+
+    fn assert_copy<T: Copy>() {}
+
+    fn probe<'g, 't: 'g>() {
+        let _: fn(&'t Tape) -> TapeF64<'t> = TapeF64::new;
+        let _: for<'a, 'b> fn(&'a TapeF64<'t>, &'b Tensor<f64>) -> VarF64<'a, 't> = TapeF64::var;
+        let _: for<'a, 'b> fn(&'a TapeF64<'t>, &'b Tensor<f64>) -> VarF64<'a, 't> =
+            TapeF64::var_no_grad;
+        let _: for<'a, 'b, 'c> fn(
+            &'a TapeF64<'t>,
+            &'b VarF64<'c, 't>,
+        ) -> Result<GradientsF64, AutodiffError> = TapeF64::backward;
+        let _: fn(&VarF64<'g, 't>) -> Tensor<f64> = VarF64::value;
+        let _: fn(&VarF64<'g, 't>) -> Vec<usize> = VarF64::shape;
+        let _: fn(&VarF64<'g, 't>, &VarF64<'g, 't>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::add;
+        let _: fn(&VarF64<'g, 't>, &VarF64<'g, 't>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::mul;
+        let _: fn(&VarF64<'g, 't>, &VarF64<'g, 't>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::div;
+        let _: fn(&VarF64<'g, 't>, &VarF64<'g, 't>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::pow;
+        let _: fn(&VarF64<'g, 't>, &VarF64<'g, 't>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::matmul;
+        let _: fn(&VarF64<'g, 't>, Option<usize>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::sum;
+        let _: fn(&VarF64<'g, 't>, Option<usize>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::mean;
+        let _: fn(&VarF64<'g, 't>, Option<usize>) -> Result<VarF64<'g, 't>, AutodiffError> =
+            VarF64::max;
+        type GradLookup<'a> = Result<Option<&'a Tensor<f64>>, AutodiffError>;
+        let _: for<'a, 'b, 'c, 'd> fn(&'a GradientsF64, &'b VarF64<'c, 'd>) -> GradLookup<'a> =
+            GradientsF64::get;
+    }
+
+    probe();
+    assert_copy::<VarF64<'static, 'static>>();
+}
+
+/// 自己テスト (g): 実 `lib.rs` に変異を加えた合成入力で、各違反類型が検出できることを固定する
+/// （検出ロジックの空振り・緩みで正ガードが常に通る状態を防ぐ）。
+#[test]
+fn f64_autograd_guards_detect_each_violation_class() {
+    let base = read_to_string_or_panic(&lib_rs_path());
+    assert!(
+        f64_autograd_surface_violations(&base).is_empty(),
+        "変異前の lib.rs は違反 0 件であること"
+    );
+    let mutate = |from: &str, to: &str| -> String {
+        assert_eq!(base.matches(from).count(), 1, "変異対象が一意: {from}");
+        base.replacen(from, to, 1)
+    };
+    // 本体のすり替え（独自実装・スタブ）。
+    let swapped = mutate(
+        "self.0.add(&other.0).map(VarF64)",
+        "{ let _ = other; Ok(*self) }",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&swapped).is_empty(),
+        "本体すり替えを検出できない"
+    );
+    // 余分な pub fn。
+    let extra = mutate(
+        "    /// 現在値の複製を返す。\n",
+        "    pub fn extra(&self) {}\n    /// 現在値の複製を返す。\n",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&extra).is_empty(),
+        "余分な pub fn を検出できない"
+    );
+    // pub(crate) 化・削除相当（可視性の低下）。
+    let restricted = mutate(
+        "    pub fn shape(&self) -> Vec<usize> {\n        self.0.shape()",
+        "    pub(crate) fn shape(&self) -> Vec<usize> {\n        self.0.shape()",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&restricted).is_empty(),
+        "可視性の低下を検出できない"
+    );
+    // trait impl（Deref で内部型へ抜ける経路）。
+    let mut deref = base.clone();
+    deref.push_str(
+        "\nimpl std::ops::Deref for VarF64<'_, '_> {\n    type Target = \
+         fandhe_ai_autodiff::f64_autograd::VarF64<'static, 'static>;\n    fn deref(&self) -> \
+         &Self::Target {\n        todo!()\n    }\n}\n",
+    );
+    assert!(
+        !f64_autograd_surface_violations(&deref).is_empty(),
+        "Deref impl を検出できない"
+    );
+    // 対象型を self にしない impl。
+    let mut foreign = base.clone();
+    foreign.push_str("\nimpl From<VarF64<'_, '_>> for u8 {\n    fn from(_: VarF64<'_, '_>) -> u8 {\n        0\n    }\n}\n");
+    assert!(
+        !f64_autograd_surface_violations(&foreign).is_empty(),
+        "対象型を引数にした impl を検出できない"
+    );
+    // pub フィールド・derive 追加。
+    let pub_field = mutate(
+        "pub struct GradientsF64(pub(crate) ",
+        "pub struct GradientsF64(pub ",
+    );
+    assert_ne!(
+        f64_autograd_struct_decl_records(&pub_field, "GradientsF64")[0],
+        f64_autograd_expected_decl("GradientsF64"),
+        "pub フィールドを検出できない"
+    );
+    let derived = mutate(
+        "#[derive(Clone, Copy)]\npub struct VarF64",
+        "#[derive(Clone, Copy, Debug)]\npub struct VarF64",
+    );
+    assert_ne!(
+        f64_autograd_struct_decl_records(&derived, "VarF64")[0],
+        f64_autograd_expected_decl("VarF64"),
+        "derive 追加を検出できない"
+    );
+    // 再エクスポート（直接・別名・短縮 use）。
+    for src in [
+        "pub use fandhe_ai_autodiff::f64_autograd::TapeF64;",
+        "pub use fandhe_ai_autodiff::f64_autograd::VarF64 as V;",
+        "pub use fandhe_ai_autodiff::f64_autograd;",
+        "pub(crate) use fandhe_ai_autodiff::f64_autograd as f;",
+        "use fandhe_ai_autodiff::f64_autograd;",
+    ] {
+        assert!(
+            !f64_autograd_reexport_violations(src).is_empty(),
+            "再エクスポート／短縮を検出できない: {src}"
+        );
+    }
+    assert!(
+        f64_autograd_reexport_violations(&base).is_empty(),
+        "変異前の lib.rs は再エクスポート違反 0 件であること"
+    );
+    // 走査空振り: 3 型を持たない入力は「欠落」として違反になる。
+    assert!(
+        !f64_autograd_surface_violations("// empty").is_empty(),
+        "宣言が無い入力を違反として扱えていない（走査空振り）"
+    );
 }

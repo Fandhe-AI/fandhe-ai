@@ -2,9 +2,11 @@
 //! バックエンド別 parity テスト（`nn_module_freeze_backend_parity.rs`・
 //! `no_grad_detach_backend_parity.rs` と同型）。
 //!
-//! **facade 公開面（意図的な非変更）**: `f64_autograd` は facade へ
-//! 再エクスポートされていない（`docs/autodiff-var-dtype-multiplexing-
-//! design.md` §10 承認事項はいずれも未承認のまま）。本テストは内部
+//! **facade 公開面（#2599 での更新）**: `f64_autograd` は facade へ
+//! 再エクスポートされないが、#2599 で facade newtype（`fandhe_ai::TapeF64`
+//! 等）が承認形 D-2 で公開された（`docs/autodiff-var-dtype-multiplexing-
+//! design.md` §4.1・§10.1。facade 経由の利用テストは
+//! `f64_autograd_facade.rs`）。本テストは任意の `BackendOps` を注入するため内部
 //! クレート `fandhe_ai_autodiff::f64_autograd`・具体バックエンドクレート
 //! （`fandhe_ai_backend_cpu`／`fandhe_ai_backend_cuda`／
 //! `fandhe_ai_backend_metal`）を facade の依存経由で直接使う
