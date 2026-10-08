@@ -230,3 +230,13 @@
 - **`vmap(grad)`**: §5・§11-6 により扱わない（テスト・否定テストとも置かない）。
 - **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認（§10 の 6〜8）。
 - **スコープ外**: double-VJP 検証（#2880）、CUDA／Metal 実機 parity（#2881）、facade 公開（#2879 以降）、`out_dim`・複数入力・`VarF64` 版・f16。
+
+## 21. 実装記録（#2881・親 #2841。§10 の分解案 11）
+
+- **追加したテスト**: `crates/facade/tests/functional_ops_backend_parity.rs` 末尾に `cuda_functional_ops_match_cpu_reference`（`#[ignore]`）と `metal_functional_ops_match_cpu_reference`（`#[ignore]`・`cfg(target_os = "macos")` 限定）を追記した。
+- **比較範囲と判定**: 既存 `compute` の vjp・hvp（子テープも実機バックエンド）・vmap・vmap(transpose) の 4 系統と形状を CPU tape と比較する。判定は REQ-2 統一複合判定（`assert_parity`）。形状は小さく Metal split-K は発動しない。
+- **申し送り**: 実機に届かないため未実測。測定コマンドと空の記入欄は `docs/perf/logs/functional-transforms-2881/README.md`。
+- **CI で走らない理由**: CUDA 側は `#[ignore]`、Metal 側はさらに `cfg(target_os = "macos")` のため Linux ではコンパイルもされない。
+- **新規物**: `crates/*/src`・依存・tolerance・baseline・`unsafe` は追加していない。
+- **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認。
+- **スコープ外**: vmap 出力と vjp／hvp の合成ケース（#2878 は naive のみ）・double-VJP（#2880）の実機 parity、`VarF64`・f16、facade 公開（#2879 以降）、実機での実測そのもの。
