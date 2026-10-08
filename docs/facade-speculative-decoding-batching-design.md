@@ -8,6 +8,7 @@
 - 本記録の作成を指示した根拠: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`（2026-10-08、リポジトリ所有者本人）。承認範囲は **設計の記録まで**。
 - 案 C（REQ-9 の境界の段階化）自体の承認は別 URL（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`、2026-10-07。spec `docs/spec/04-requirements.md:458`）で、上記と混同しない。同行と `:237` は「公開面の追加・数値判定方式・`Op`／`BackendOps` の拡張は本追記では承認しない」と明記している。
 - したがって §5 の facade 公開形、§6 の判定方式、§8 の拡張要否は **すべて推奨案であり未承認**。承認の代行はしない。
+- 追記（#2933）: その後、`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650` 項 1 で第 1 段階の公開形（3 名・greedy・B = 1）が承認された。範囲と確定シグネチャは §17。判定方式・サンプリング版・論点 1・2・3・5・7・8 は未承認のまま。
 
 ## 2. 境界（spec を正とする）
 
@@ -61,6 +62,8 @@ REQ-2（統一複合判定）・REQ-8・REQ-12 は不変。新しい判定契約
 - (i)・(ii) が働くのは `num_kv_layers() > 0` のモデル（渡された `caches` を使う形）だけである。`num_kv_layers() == 0` の内部状態保持型は対象外（§10 論点 3）。
 
 ## 5. facade 公開形（推奨 1 案・未承認）
+
+> 追記（#2933）: 本節の推奨形は 2026-10-08 のルート #2499 コメント（`issuecomment-6067263650` 項 1）で第 1 段階の 3 名に限って承認され、確定した公開形は §17 に記録した。以下の本文は承認前の推奨の記録として残す。
 
 配置は `fandhe_ai::inference`。`GENERATE_APPROVED_REEXPORT` の 1 文は変えず、**別の `pub use` 文**で追加し、対応する承認形定数・正ガードを `api_surface.rs` に足す（実装 issue 側の受け入れ条件。本 docs PR では触らない）。
 
@@ -156,7 +159,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 3. §17.4 の到達経路: `caches` を使う形の公開、またはモデル側の巻き戻しフック。フックを `AutoregressiveModel` の既定メソッドとして足す案は既存実装を壊さないが trait の拡張で公開面の変更になる。別 trait にする案は既存実装に影響しない代わりに型パラメータが増える。いずれも未決。
 4. `KvCache` の公開メソッド追加（`truncate` 等）と「単一の書き手」不変条件の緩和。
 5. テンソル単位バッチ化に要る padding mask・可変長キャッシュ。
-6. facade 公開面の追加そのもの（`docs/compat-api-scope.md` §5）。
+6. facade 公開面の追加そのもの（`docs/compat-api-scope.md` §5）。（#2933 追記: 第 1 段階の 3 名に限り承認済み。§17 参照）
 7. paged attention（条件付きのまま。K-3 が未着手）。
 8. 連続バッチングで内部状態保持型のモデル（§8.1 の表）を扱うための、要求ごとのモデル状態の分離方式。論点 3 と同じく trait の拡張か別 trait かが未決。決まるまで第 1 段階は内部状態保持型を対象外とする。
 
@@ -183,7 +186,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 ## 12. スコープ外・申し送り
 
 - スコープ外: 実装そのもの、実装 issue の起票、HTTP／API サーバ、量子化 KV、paged attention、EOS 停止・top-p などの生成ループ拡張、B > 1 の speculative decoding。
-- 要対応事項（ユーザー）: §10 の論点 1〜8 の承認。ruleset・branch protection・リポジトリ設定は変更しない。
+- 要対応事項（ユーザー）: §10 の論点 1〜8 の承認。（#2933 追記: 論点 4・6 は §17 で決着。1・2・3・5・7・8 は保留継続）ruleset・branch protection・リポジトリ設定は変更しない。
 
 ## 13. セキュリティ観点（OWASP）
 
@@ -216,3 +219,95 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 - 新規物なし: `src`・依存・tolerance・baseline・`unsafe` は変更していない。
 - 承認状況: facade 公開（S1・S3）は未承認のまま。本記録は承認を代行しない。
 - スコープ外: バックエンド横断の TopK／Temperature 比較、サンプリング版 speculative、B > 1、`num_kv_layers() == 0` の speculative、facade 公開、周辺 docs と `compat-api-scope.md` の適用記録（行 11）。
+
+## 17. 承認された公開形（#2933・親 #2932。§11 の分解案 9 の前段）
+
+本節は §5 の推奨形に、main にある内部実装（`f4dc7573`）のシグネチャをそのまま当てた**公開形の記録**である。コード（`crates/**`）・`Cargo.toml`／`Cargo.lock`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変更しない。`pub use` の追加・保留ガードの反転・doctest は後続の #2934 が本節どおりに行う。§1〜§16 の本文は書き換えず、事実を併記する（§1・§5・§10・§12 から本節を指す）。
+
+### 17.1 承認の根拠と範囲
+
+- 根拠: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`（2026-10-08、リポジトリ所有者本人）の項 1。§1 の 2 URL（`6052732061`＝設計の記録まで、`6033824965`＝案 C の境界）とは承認範囲が異なる。
+- 承認された範囲（これ以上に広げない）:
+  - 第 1 段階の 3 名だけを公開する: `generate_speculative`（greedy・B = 1）・`SpeculativeConfig`・`BatchScheduler`。公開形は §5 の推奨形に main の内部実装のシグネチャをそのまま当てたもの
+  - KV の巻き戻しは §4.1 の案 (i)（clone 保存・復元）のまま。`KvCache` の公開メソッドは増やさない
+  - 内部状態保持型のモデルが対象外であることを doc の契約として明記する
+  - 論点 1・2・3・5・7・8 は保留。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路のプローブは残す
+  - `fandhe-ai =0.10.0` は追加のみ。依存・tolerance・baseline・ガードレール閾値は変えない
+- 記録と実装の差をどちらに合わせるか決められない場合は止めて承認依頼に戻す、という条件が付いている（17.4 で全件に処置を与えた）。
+
+### 17.2 公開パスと `pub use` 文
+
+- 公開パスは `fandhe_ai::inference::{generate_speculative, SpeculativeConfig, BatchScheduler, RequestId, SchedulerLimits}`。`BatchScheduler` の署名に現れる `RequestId`・`SchedulerLimits` は、利用者が名前を書けるよう同時に公開する。facade 独自の newtype・`Tape`／`Sequential` メソッド・別名は作らない（純再エクスポート）。
+- `GENERATE_APPROVED_REEXPORT` の 1 文は**変えない**。追加は**別の `pub use` 文を 2 文**とする（サブモジュールごとに 1 文。既存の PREDICT_BATCHES／GENERATE の 2 文と同型で、承認形の定数と 1 対 1 に対応する）。
+  - `pub use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, RequestId, SchedulerLimits};`
+  - `pub use fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig, generate_speculative};`
+- 入れ子 1 文（`generate::{scheduler::{…}, speculative::{…}}`）は採らない（定数との 1 対 1 対応が崩れ、ガードの正規化も複雑になるため）。承認形の定数名の案は `SCHEDULER_APPROVED_REEXPORT`・`SPECULATIVE_APPROVED_REEXPORT`（最終名は #2934 が決める）。
+
+### 17.3 確定シグネチャ（main `f4dc7573` の実装）
+
+| 公開名 | シグネチャ・属性 | 出典 |
+|---|---|---|
+| `SpeculativeConfig` | `#[derive(Debug, Clone, PartialEq)]`・`#[non_exhaustive]`・`pub k: usize`・`pub fn new(k: usize) -> SpeculativeConfig`。外部からは `new` でしか構築できない。derive は公開後に外せない（公開 API の約束になる） | `crates/autodiff/src/generate/speculative.rs:48-60` |
+| `generate_speculative` | `pub fn generate_speculative<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError> where T: AutoregressiveModel + ?Sized, D: AutoregressiveModel + ?Sized`。入力は `[T]` または `[1, T]` で出力 rank は入力に合わせる。受理統計は返さない。Greedy 以外は `Err(InvalidArgument)`。検査順 1〜9 は同関数の rustdoc を正とする | 同 `:155-183` |
+| `RequestId` | `#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)] pub struct RequestId(u64)`。不透明で、`submit` ごとに単調増加して採番される | `scheduler.rs:62-64` |
+| `SchedulerLimits` | `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`・`#[non_exhaustive]`・非公開フィールド。`pub fn new(max_active: usize, max_queued: usize, max_length: usize) -> Result<SchedulerLimits, AutodiffError>`（いずれか 0、または `max_length` 分の `i32` バッファが `isize::MAX` バイト超なら `Err(InvalidArgument)`）。アクセサ `max_active()`／`max_queued()`／`max_length()` | `scheduler.rs:66-112` |
+| `BatchScheduler` | derive なし（`Debug` は件数だけを出す手書き impl）。`new(limits: SchedulerLimits) -> BatchScheduler`・`queued_len(&self) -> usize`・`active_len(&self) -> usize`・`submit(&mut self, input_ids: &Tensor<i32>, config: &GenerateConfig) -> Result<RequestId, AutodiffError>`・`step<M: AutoregressiveModel + ?Sized>(&mut self, model: &M) -> Result<usize, AutodiffError>`・`take_finished(&mut self) -> Vec<(RequestId, Tensor<i32>)>`・`take_failed(&mut self) -> Vec<(RequestId, AutodiffError)>` | `scheduler.rs:205-385` |
+
+- エラー型は既存の `AutodiffError`（`fandhe_ai::AutodiffError`）をそのまま使い、新しい型・variant は足さない。
+- `step` の `Err` はスケジューラ全体の不変条件破れに予約され、第 1 段階では返す経路がない。要求単位の失敗は他の要求から切り離して `take_failed` に積む。
+
+### 17.4 記録と実装の差分と処置
+
+| 項目 | 設計記録 §5 | main 実装 | 処置 |
+|---|---|---|---|
+| `generate_speculative` の型境界 | 「相当」・未確定 | `<T, D>` とも `AutoregressiveModel + ?Sized` | 実装を採用（承認で委任済み） |
+| `SpeculativeConfig` の derive・構築 | `#[non_exhaustive]` のみ | `Debug, Clone, PartialEq` ＋ `new(k)`（`GenerateConfig` に合わせる） | 実装を採用。derive は公開の約束になることを明記 |
+| `k` の丸め | 「残り長に丸める」 | 残り長 `R ≥ 2` で `k_eff = min(k, R - 1)`、`R == 1` は target の 1 step decode（全受理時の bonus token を含めて `max_length` に収まるため） | 記録の文言が粗かっただけで矛盾ではない。実装の規則を正とする（`speculative.rs:27-31`・`:51-53`） |
+| `num_kv_layers() == 0` の speculative | 対象外（論点 3） | target／draft とも `Err(InvalidArgument)` で拒否 | 一致。黙って受けず fail-closed で拒否することを契約にする |
+| `limits` の型 | 承認時に決める事項 | `SchedulerLimits` | 実装を採用 |
+| `RequestId` | 承認時に決める事項 | 不透明 `u64` newtype | 実装を採用 |
+| 失敗の表現型 | 実装 issue で決める（§7） | `take_failed() -> Vec<(RequestId, AutodiffError)>` | 実装を採用 |
+| `queued_len`／`active_len`／手書き `Debug` | 記録にない | `pub` の inherent | Rust の可視性上、`BatchScheduler` を `pub use` すると pub の inherent メソッドはすべて公開される。裁量による拡張ではなく「実装のシグネチャをそのまま当てる」承認の帰結として列挙する |
+
+どの差も「どちらに合わせるか決められない」には当たらない（承認が選択を実装に委ねている）。後続で main のシグネチャが本表と食い違った場合は、公開せず承認依頼に戻す。
+
+### 17.5 対象モデルの契約（doc 契約として固定する）
+
+- `generate_speculative` が対象とするのは `num_kv_layers() > 0` で、生成状態を渡された `caches` だけに持つモデル。`num_kv_layers() == 0` は拒否する（fail-closed）。
+- `BatchScheduler` が対象とするのは「`caches` だけに状態を持つ型」と「状態なしの型」（§8.1 の表）。**内部状態保持型**は対象外で、出力を保証しない。
+- 内部状態保持型は「生成状態を渡された `caches` の外に持つ型」と定義し、`num_kv_layers()` の値では決めない。`num_kv_layers() > 0` を返しつつ内部に状態を持つ型も作れ、両関数とも型でも実行時でも検出できない。この点を利用者の保証事項として rustdoc に書く。
+- 既知の制限（論点 3 が保留中の帰結）: facade だけの利用者は `forward_with_cache` を使えず、`KvCache` にもセッターがない（`docs/facade-generate-decision.md` §17.4）。`caches` を正しく進めるモデルを facade の公開面だけで組む経路は現状では限られる。到達経路は本 issue でも #2934 でも追加しない。
+
+### 17.6 保留ガードの反転範囲（#2934 への申し送り。本 issue では触らない）
+
+S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scope.md` §5.1 S ブロックのとおり）。「反転」の実体は次の 3 つ。
+
+1. `crates/facade/tests/api_surface.rs` の `inference_module_reexports_exactly_expected_surface` の期待集合を 2 文から 4 文にする。
+2. `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `generate_speculative` を足す。
+3. 承認形の定数 2 個、各文 1 件ちょうどを要求する正ガード、`fandhe_ai::inference::…` 経由の到達プローブ、利用例の doctest を新設する。
+
+注意: 追加する 2 文はパスに `generate` トークンを含むため、現行の `generate_exposures`（`facade_exposes_generate_items_only_in_approved_shape`。期待 1 件）に拾われて落ちる。#2934 は (a) 当該ガードの期待集合へ新しい 2 文を加える、(b) 検出を葉が公開名のいずれかに絞る、のどちらかを選ぶ。どちらでも `GENERATE_APPROVED_REEXPORT` の文字列は変えない。
+
+残す否定プローブ（未承認経路）:
+
+- サンプリング版の入口がないこと（`SamplingStrategy::Greedy` 以外は `Err`）
+- `KvCache` の公開メソッド集合が `new/is_empty/seq_len/batch/embed_dim/clear/k/v` から増えていないこと（`truncate` 等なし。論点 4）
+- `kv_rewind`／`KvSnapshot` に facade から到達できないこと
+- `scheduler`／`speculative` のモジュール自体を facade で再エクスポートしないこと（フラットな名前だけ）
+- B > 1 と padding mask の経路がないこと
+
+否定ガードは stable rustdoc の `compile_fail` コード照合を当てにせず、正のプローブとインベントリで組む。
+
+### 17.7 保留を続ける論点
+
+- 論点 1（サンプリング版の判定契約）・2（greedy の token 列一致の仮説が破れた場合）・3（内部状態保持型への到達経路）・5（padding mask・可変長キャッシュ・テンソル単位のバッチ化）・7（paged attention）・8（スケジューラでの内部状態保持型の扱い）は保留のまま。
+- 論点 4 は案 (i) で確定し `KvCache` は不変。論点 6 は第 1 段階の 3 名（と署名に現れる `RequestId`・`SchedulerLimits`）に限って解消した。
+- 対象外のまま: B > 1、EOS 停止・top-p、受理統計、HTTP サーバ、量子化 KV、facade の `caches` 到達経路。
+
+### 17.8 変えないもの・セキュリティ観点
+
+- 依存・新規 `unsafe`・`Op`／`BackendOps`・tolerance・baseline・閾値・`docs/spec/`・`fandhe-ai =0.10.0` の既存シグネチャ（追加のみ）・`FitConfig`。
+- A04: `SchedulerLimits` の 3 上限は必須で 0 は拒否する（暗黙の無制限を作らない）。出力バッファは `checked_mul` と `isize::MAX` バイトで検査し、要求単位の失敗は他の要求から切り離す。
+- A03: 外部入力は token id と logits だけで、形状・語彙・有限性の検査順は 17.3 の rustdoc の検査順を正とする。
+- A02: `Generator` は非暗号の xorshift64* であり、生成 token をセキュリティ用途に使わない。
+- スケジューラは同期実行でスレッド・I/O を持たず、ネットワーク公開面はない。

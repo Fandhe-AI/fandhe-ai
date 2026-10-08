@@ -2475,7 +2475,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 **適用記録（イシュー #2876・親 #2841。内部クレート限定）**: ループ版 `vmap` を内部クレート限定（`fandhe_ai_autodiff::functional_ops::vmap`。既存の `unbind`・`contiguous`・`stack` の合成のみで、新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・カーネルなし）で実装した。facade 公開面は追加していない（保留ガードの宣言インベントリへ `functional_ops.rs::vmap` を登録して固定）。公開形は未承認。本書 5.1 節の表・1 節の対象範囲表は変更していない。詳細は `docs/autodiff-functional-transforms-design.md` 「17. 実装記録（#2876）」。 → 公開形の承認依頼は #2879 で §5.1 末尾の `F1`〜`F3`（Phase 8 公開形・関数型 AD 変換）へ追加した。
 
-**Phase 8 公開形（承認依頼 #2883・親 #2882・Phase 8 #2872）**: speculative decoding・連続バッチングの公開形と判定方式の承認依頼。上の Phase 4 表（行 1〜30）とは別系統のため、行ラベルは `S1`〜`S3` とし Phase 4 の番号空間と混ぜない（Phase 4 表の「行と保留ガードは `*HoldDoctestGuard` と 1 対 1」という前提も、保留ガード未設置のこの 3 行には当てはまらない）。以下は設計記録 `docs/facade-speculative-decoding-batching-design.md` §5・§6・§9・§10 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。ルート #2499 の 2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計の記録までで、案 C の境界の承認（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`、2026-10-07）は「公開面の追加・数値判定方式・`Op`／`BackendOps` の拡張」を承認していない。公開（コード・`pub use`・保留ガードの反転）は承認後に別 issue（設計記録 §11 の仮番号 9）で行う。
+**Phase 8 公開形（承認依頼 #2883・親 #2882・Phase 8 #2872）**: speculative decoding・連続バッチングの公開形と判定方式の承認依頼。上の Phase 4 表（行 1〜30）とは別系統のため、行ラベルは `S1`〜`S3` とし Phase 4 の番号空間と混ぜない（Phase 4 表の「行と保留ガードは `*HoldDoctestGuard` と 1 対 1」という前提も、保留ガード未設置のこの 3 行には当てはまらない）。以下は設計記録 `docs/facade-speculative-decoding-batching-design.md` §5・§6・§9・§10 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。ルート #2499 の 2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計の記録までで、案 C の境界の承認（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`、2026-10-07）は「公開面の追加・数値判定方式・`Op`／`BackendOps` の拡張」を承認していない。公開（コード・`pub use`・保留ガードの反転）は承認後に別 issue（設計記録 §11 の仮番号 9）で行う。 → 承認（`issuecomment-6067263650` 項 1）と確定した公開形は本ブロック末尾の「承認と公開形の記録（#2933）」と設計記録 §17。
 
 | # | 機能（由来） | 公開形（設計記録 §5 の転記・未承認） | 非破壊性 | 保留ガード | 公開先 | 決定記録・承認事項の所在 |
 |---|---|---|---|---|---|---|
@@ -2516,6 +2516,18 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 - `generate_speculative` の正確な型パラメータ境界。
 
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
+
+**承認と公開形の記録（#2933・親 #2932）**: 上の `S1`〜`S3` は承認依頼時点の転記として残す。ルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`、2026-10-08）の項 1 で、第 1 段階の 3 名（`generate_speculative`〈greedy・B = 1〉・`SpeculativeConfig`・`BatchScheduler`）の公開が、設計記録 §5 の推奨形に main の内部実装のシグネチャをそのまま当てた形で承認された。KV の巻き戻しは案 (i) のまま（`KvCache` の公開メソッドは増やさない）、内部状態保持型が対象外であることは doc の契約として明記する。確定した公開形（完全シグネチャ・`pub use` 文・ガード反転範囲）は設計記録 `docs/facade-speculative-decoding-batching-design.md` §17 を正とする。本記録は docs のみで、公開（コード・`pub use`・ガード反転）は #2934 が行うため、現時点の公開状態は未公開である。
+
+| # | 公開名 | 確定シグネチャ（main の内部実装） | 公開パス | 保留ガード | 公開状態 |
+|---|---|---|---|---|---|
+| S1 | `generate_speculative` | `<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError>`（`T`・`D` は `AutoregressiveModel + ?Sized`。Greedy 以外と `num_kv_layers() == 0` は `Err`） | `fandhe_ai::inference` | S 専用は未設置。#2934 で正ガードを新設 | 未公開（#2934 で公開） |
+| S2 | `SpeculativeConfig` | `#[non_exhaustive]`・`Debug, Clone, PartialEq`・`pub k: usize`・`new(k: usize) -> SpeculativeConfig` | 同上 | 同上 | 同上 |
+| S3 | `BatchScheduler`（署名に現れる `RequestId`・`SchedulerLimits` を含む） | `new(SchedulerLimits)`・`queued_len`・`active_len`・`submit(&mut self, &Tensor<i32>, &GenerateConfig) -> Result<RequestId, AutodiffError>`・`step<M: AutoregressiveModel + ?Sized>(&mut self, &M) -> Result<usize, AutodiffError>`・`take_finished() -> Vec<(RequestId, Tensor<i32>)>`・`take_failed() -> Vec<(RequestId, AutodiffError)>`。`RequestId` は不透明 `u64` newtype、`SchedulerLimits::new(max_active, max_queued, max_length) -> Result<SchedulerLimits, AutodiffError>`（`#[non_exhaustive]`・0 は拒否） | 同上 | 同上 | 同上 |
+
+「承認時に決めてほしい事項」の決着: 保留ガードの名前と設置担当は #2934（正ガードの新設。承認形の定数は `GENERATE_APPROVED_REEXPORT` と別の `pub use` 文）／`RequestId` は不透明 `u64` newtype／`limits` は `SchedulerLimits`（3 上限必須）／`step` の `model` は `&M`（`M: AutoregressiveModel + ?Sized`）／失敗の表現型は `take_failed() -> Vec<(RequestId, AutodiffError)>`／`generate_speculative` の型パラメータ境界は `T`・`D` とも `AutoregressiveModel + ?Sized`。
+
+論点表の決着: 論点 4 は案 (i) で確定（`KvCache` の公開メソッドは増やさない）／論点 6 は第 1 段階の 3 名に限って承認／論点 1・2・3・5・7・8 は保留継続（サンプリング版・内部状態保持型・padding mask・paged attention 等は公開しない）。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路のプローブは残す。本書 1 節の対象範囲表と `docs/compat-feature-gap.md` の判定列は #2934 の適用記録で扱い、本記録では変更していない。
 
 **Phase 8 公開形（テキスト変換。承認依頼 #2896・親 #2895・Phase 8 #2872）**: 語彙 lookup 型テキスト変換（Keras `TextVectorization` 相当）の配置・公開形・判定方式の承認依頼。上の Phase 4 表（行 1〜30）・直前の `S1`〜`S3` とは別系統のため、行ラベルは `T1`〜`T5` とし他の番号空間と混ぜない（Phase 4 表の「行と保留ガードは `*HoldDoctestGuard` と 1 対 1」という前提も、保留ガード未設置のこの 5 行には当てはまらない）。以下は設計記録 `docs/facade-text-vectorization-design.md` §5・§6・§7・§8・§9・§10 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。承認根拠は範囲の異なる 2 つを別々に引く。ルート #2499 の 2026-10-07 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`）は #2618 折衷案の**範囲**（語彙 lookup 型の単語／文字レベル変換を対象内、サブワードトークナイザと Unicode 正規化表の自作を対象外）だけを承認しており、spec 変更履歴（`docs/spec/04-requirements.md:459`）は「配置・公開 API の追加は承認しない」と明記している。2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計と issue 分解の記録までである。公開（コード・`pub use`・保留ガードの反転）は承認後に別 issue（設計記録 §11 の仮番号 9）で行う。
 
