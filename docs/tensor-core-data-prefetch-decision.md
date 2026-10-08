@@ -8,7 +8,7 @@
 
 - **内部クレート側（`tensor-core::data`）は実装済み**（本 PR）。`PrefetchConfig`（`num_workers`／`prefetch_depth` の検証付き設定）・`PrefetchDataLoader<D>`（`Sampler` の添字を worker スレッドへ分配して並列に `Dataset::batch` を実行し、結果を呼び出し順に並べ直す）・`PrefetchBatches<D>`（そのイテレータ）。
 - **rayon ではなく `std::thread`／`std::sync::mpsc` を使う**（§1.1。イシュータイトルは「rayon」と書いているが、本 PR の契約〈`Cargo.toml`／`Cargo.lock` 変更なし・依存追加は承認事項〉と両立しないため意図的に差し替えた。rayon への切り替え自体は §8 の承認事項として記録する）。
-- **（#2506 で facade 公開済み。§4・§8 参照。以下は #2183 時点の記録）** **facade 公開（`docs/compat-api-scope.md` §5 経路 2 相当）・`Sequential::fit` への結線はいずれも未承認のまま保留**（fit 結線の推奨案は #2604 で §4 に記録・承認待ち）。#2183・親 #2131 のいずれにも承認コメントは見当たらない（着手時点確認）。よって `crates/facade/src/**` は変更せず、`PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` は一切公開しない（兄弟イシュー #2182〈`docs/tensor-core-data-sampler-hooks-decision.md`〉と同型の保留パターン。ただし本イシューは新規の保留 doctest 足場を追加していない——理由は §5 参照）。既存の facade 公開面は不変。
+- **（#2506 で facade 公開済み。§4・§8 参照。以下は #2183 時点の記録）** **facade 公開（`docs/compat-api-scope.md` §5 経路 2 相当）・`Sequential::fit` への結線はいずれも未承認のまま保留**（fit 結線の推奨案は #2604 で §4 に記録。→ #2605 で実施済み）。#2183・親 #2131 のいずれにも承認コメントは見当たらない（着手時点確認）。よって `crates/facade/src/**` は変更せず、`PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` は一切公開しない（兄弟イシュー #2182〈`docs/tensor-core-data-sampler-hooks-decision.md`〉と同型の保留パターン。ただし本イシューは新規の保留 doctest 足場を追加していない——理由は §5 参照）。既存の facade 公開面は不変。
 - **本 PR のマージで #2183 は COMPLETED とする**（前例と同じ「保留記録を残した PR のマージで issue をクローズし、承認が得られたら新規 issue か reopen で経路 2 を実施する」方針）。
 
 ## 1. 依存・並行処理方式の設計判断
@@ -65,9 +65,9 @@
 - `data_types_are_reachable_via_facade_only` を拡張（`num_workers` が 0／2 の双方）し、`crates/facade/src/data.rs` に利用例 doctest を追加した。統合テスト `data_loader_prefetch.rs`・`#[ignore]` ベンチ `data_loader_prefetch_bench.rs` は `fandhe_ai::data` 経由の import へ切り替えた。
 - CUDA／Metal 実機 parity は対象外（ホスト側で完結し `Op`／`BackendOps`／VJP を経由しないため。#2505 と同じ扱い）。承認日は Issue #2506 記載のとおり。
 
-### #2604 fit 結線の公開形（推奨案・承認待ち。親 #2603・ルート #2499）
+### #2604 fit 結線の公開形（推奨案。#2605 で承認形として実装済み。親 #2603・ルート #2499）
 
-**本節は推奨案の記録であり、承認の取得を意味しない。確定形ではない。** `Sequential::fit` 系への結線は未実施のまま（`crates/` は無変更）。実装は承認後に #2605 で行い、承認コメントが付くまで着手しない。
+**本節の推奨案（案 B）は、ルート #2499 のコメント（2026-10-07、`issuecomment-6033824965`。#2603 を「決定記録 §4 の推奨案」で承認し、記録に形が無い点は実装せず止める条件付き）を根拠に #2605 で実装済み**（下記「#2605 実装記録」）。以下の比較・推奨の記述は #2604 時点の記録として残す（`crates/` は #2604 時点では無変更だった）。
 
 #### 着手時判定
 
@@ -143,6 +143,17 @@ Issue が例示する 3 類型との対応: 「`Var` 委譲」は非該当（結
 
 承認は未取得。本節の追記は `crates/`・`Cargo.*`・tolerance・`docs/spec` を変更していない。
 
+### #2605 実装記録（fit 結線。親 #2603・ルート #2499）
+
+- **公開名**: `impl Sequential`（`crates/facade/src/compat/training.rs`）の inherent メソッド 1 件 `fit_with_prefetch<T: FitTarget>(&mut self, x, y, config: FitConfig, prefetch: PrefetchConfig, validation, callbacks, metrics) -> Result<History, AutodiffError>`。`fit_with_metrics` の引数に `prefetch`（値渡し）を `config` の直後へ足しただけで、新しい設定型・`FitConfig` へのフィールド追加・新しいエラー variant はない。適用は学習ローダーのみ（validation／`evaluate` は従来のローダー）。`fit_with_train_step`・`fit_with_weights` とは併用不可（合成入口は作らない）。
+- **承認根拠**: ルート #2499 のコメント `issuecomment-6033824965`（2026-10-07）。決定事項 (a)〜(k) は §4 の推奨どおりで、記録に無い判断は行っていない。
+- **実装**: `run_fit` のバッチ供給源 `FitLoader` に `Prefetch` 形態を追加（`config.shuffle` に応じて `RandomSampler`／`SequentialSampler` を作り `PrefetchDataLoader::new`）。既存 4 入口は `prefetch = None` で従来の `DataLoader` 経路のまま（演算列・RNG 消費・エラー順は不変）。バッチループ本体は複製せず `FitLoader::iter` の 1 本に統一した。worker の起動失敗・panic は `next()` の `Err` として既存の `InvalidArgument` マッピングへ届き、train／eval モードと `compiled` の復元経路もそのまま働く（途中離脱時は `PrefetchBatches` の `Drop` が worker を join）。AMP・L-BFGS・勾配累積に追加の拒否条件は設けていない。
+- **型境界**: `PrefetchDataLoader` が要求する `Send + Sync + 'static` は `FitTarget`（`Element`）の既存境界のまま `f32`／`i32` の双方で成立し、`FitTarget`・`run_fit`・既存入口への境界追加、`unsafe`、tensor-core 側の変更は不要だった。
+- **ガード（反転ではなく新設）**: 着手時に fit 結線を対象とする保留ガード・否定テストは存在しなかった（`fit_with_prefetch`／`fit_prefetch`／`fit_loader`／`fit_batches`／`set_fit_prefetch`／`FitOptions` は `crates/` で 0 件）ため、正ガードを `crates/facade/tests/api_surface.rs` に新設した: `facade_exposes_fit_with_prefetch_only_in_approved_shape`（承認形がちょうど 1 件・不採用案の形が 0 件）・同 `…_detects_each_category`（自己テスト）・`workspace_declares_fit_with_prefetch_only_in_facade_training`（インベントリ）・`fit_with_prefetch_is_reachable_via_facade_only`（`f32`／`i32` の型検査と実行）。保留 doctest ガードは新設していない（汎用名では検出力がないため。§5 と同じ理由）。
+- **テスト・利用例**: `crates/facade/tests/compat_sequential_fit_prefetch.rs`（`(num_workers, prefetch_depth)` ∈ {(0,1),(2,2),(3,1)} × shuffle × drop_last で `fit_with_metrics` と `History`・最終パラメータ・epoch 後 RNG 状態を `to_bits` 比較。`i32` target + validation + metrics + `EarlyStopping` + Dropout、未 compile・`epochs == 0`・サンプル数不一致のエラー経路を含む）と `fit_with_prefetch` の doctest。
+- **GPU parity は対象外**: 新規 `Op`／`BackendOps`／VJP／カーネルがなくローダー層はホスト側で完結するため CUDA／Metal の `#[ignore]` テストは追加しない（#2506 と同じ扱い）。`fit_with_prefetch` 経由の性能再計測は任意の申し送り（W2 実測のとおり性能改善は保証しない）。
+- **0.10.0 非破壊**: 追加は inherent メソッド 1 件のみ。
+
 ## 5. 保留 doctest 足場を追加しない理由
 
 上記§4 の説明のとおり、`PrefetchHoldDoctestGuard` のような正のプローブ doctest は本イシューの新規公開名（汎用的なメソッド名）に対しては検出力を持たないため追加していない。ソース走査ガード（`facade_does_not_reexport_or_declare_prefetch`）とインベントリ（`workspace_declares_prefetch_names_only_in_tensor_core_data`）の 2 層で「facade 未公開」状態を機械固定する。
@@ -153,7 +164,7 @@ Issue が例示する 3 類型との対応: 「`Var` 委譲」は非該当（結
 - persistent workers（epoch をまたぐ worker スレッドの再利用）・`pin_memory`。
 - GPU DMA prefetch・デバイス常駐データセット（GPU 上でのバッチ切り出し）。
 - iterable-style dataset。
-- `Sequential::fit` への結線（§4・§8。facade 公開は #2506 で実施済み）。
+- `Sequential::fit` への結線（→ **#2605 で `Sequential::fit_with_prefetch` として実施済み**。§4）。
 
 ## 7. セキュリティ考慮（OWASP Top 10）
 
@@ -166,7 +177,7 @@ Issue が例示する 3 類型との対応: 「`Var` 委譲」は非該当（結
 
 - `rayon.workspace = true` を `fandhe-ai-tensor-core` の依存へ追加し、worker pool を rayon へ移すこと（manifest の変更。イシュータイトルが挙げる方式だが依存管理規約上の承認事項）。
 - facade（`fandhe_ai::data`）への `PrefetchConfig`／`PrefetchDataLoader`／`PrefetchBatches` の再エクスポート（`docs/compat-api-scope.md` §5 経路 2）。→ **#2506 で実施済み**（§4）。
-- `Sequential::fit` への結線。当初案「`FitConfig` に `num_workers`／`prefetch_depth` を追加」は親 #2603 の契約（フィールド追加は破壊的変更として扱い行わない）により不採用。公開形の推奨案は §4 の「#2604 fit 結線の公開形」小節に記録（承認待ち。実装は承認後に #2605）。
+- `Sequential::fit` への結線。当初案「`FitConfig` に `num_workers`／`prefetch_depth` を追加」は親 #2603 の契約（フィールド追加は破壊的変更として扱い行わない）により不採用。公開形の推奨案（案 B）は §4 の「#2604 fit 結線の公開形」小節に記録し、**#2605 で `Sequential::fit_with_prefetch` として実施済み**。
 
 ## 9. 実装記録
 

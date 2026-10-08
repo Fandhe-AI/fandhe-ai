@@ -1773,8 +1773,18 @@ doctest ドリフト検査 2 件）は削除し、否定ガード
 （`docs/tensor-core-data-prefetch-decision.md` §4・§8）のとおり実装した
 （`crates/facade/src/data.rs` の `pub use` 1 行追加のみ）。否定ガードは承認形のみを
 許す正ガード `facade_reexports_prefetch_items_only_in_approved_shape` へ反転し、
-定義元インベントリは維持する。`Sequential::fit` への結線（#2603）・rayon 化・
+定義元インベントリは維持する。`Sequential::fit` への結線（#2603。→ 下記 #2605 で実施）・rayon 化・
 `PREFETCH_MAX_*` 定数の公開は含まない。実装記録は同 decision doc §4。
+
+**適用記録（経路 2。イシュー #2605・親 #2603・ルート #2499 のコメント〈2026-10-07、`issuecomment-6033824965`〉に基づく）**:
+`PrefetchDataLoader` の fit 結線として `compat::Sequential::fit_with_prefetch`
+（inherent メソッド 1 件。`fit_with_metrics` の引数 + `prefetch: PrefetchConfig`）を
+`crates/facade/src/compat/training.rs` に公開した（`docs/tensor-core-data-prefetch-decision.md`
+§4 案 B・「#2605 実装記録」）。`fit_with_metrics` と bit 一致し、適用は学習ローダーのみ。
+案 A（`FitConfig` ビルダー）・案 C/D/E・rayon 化・`PREFETCH_MAX_*` の公開は含まない。保留ガードは
+存在しなかったため、正ガード `facade_exposes_fit_with_prefetch_only_in_approved_shape`（自己テスト・
+`workspace_declares_fit_with_prefetch_only_in_facade_training`・
+`fit_with_prefetch_is_reachable_via_facade_only` を含む）を新設した。
 
 **適用記録（経路 2。イシュー #2503・親 #2499・ルート #2499 本文「承認範囲」節の一括承認〈Phase 1〜3 の facade 公開を設計判断記録の推奨形で実装してよい〉に基づく）**:
 `MultiStepLr`・`CosineAnnealingWarmRestarts`・`CyclicLr`・`LambdaLr`・
