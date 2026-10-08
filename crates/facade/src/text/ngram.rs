@@ -27,6 +27,25 @@ fn ngram_count_upper_bound(tokens: usize, n: usize) -> Result<usize, TextError> 
         .ok_or(TextError::NgramCountOverflow { tokens, n })
 }
 
+/// `tokens` 個のトークンから作る 1〜`n`-gram の正確な件数を、文字列を確保せずに求める。
+///
+/// transform（#2902）が出力長を確保前に決めるために呼ぶ。`ngrams` の件数と一致する。
+pub(crate) fn ngram_count(
+    tokens: usize,
+    n: usize,
+    limits: &TextLimits,
+) -> Result<usize, TextError> {
+    limits.check_ngrams(n)?;
+    ngram_count_upper_bound(tokens, n)?;
+    let mut total: usize = 0;
+    for k in 1..=n.min(tokens) {
+        total = total
+            .checked_add(tokens - k + 1)
+            .ok_or(TextError::NgramCountOverflow { tokens, n })?;
+    }
+    Ok(total)
+}
+
 /// `tokens` から 1〜`n`-gram を設計記録 §3 の順で作る。
 pub(crate) fn ngrams<'a>(
     tokens: &[&'a str],
@@ -38,7 +57,7 @@ pub(crate) fn ngrams<'a>(
 
     // 正確な件数は上限見積り以下。過大確保を避けるため小さい方で確保する。
     let t = tokens.len();
-    let exact: usize = (1..=n.min(t)).map(|k| t - k + 1).sum();
+    let exact = ngram_count(t, n, limits)?;
     let mut out: Vec<Cow<'a, str>> = Vec::with_capacity(exact.min(cap));
 
     // `check_ngrams` により k >= 1（`windows(0)` は panic するため前提として必要）。
@@ -122,6 +141,29 @@ mod tests {
             Err(TextError::InvalidNgrams { n: 3, max: 2 })
         ));
         assert!(ngrams(&["a", "b", "c"], 2, &l).is_ok());
+    }
+
+    #[test]
+    fn ngram_count_matches_ngrams() {
+        let l = TextLimits::default();
+        for t in 0..=10usize {
+            let owned: Vec<String> = (0..t).map(|i| format!("w{i}")).collect();
+            let tokens: Vec<&str> = owned.iter().map(String::as_str).collect();
+            for n in 1..=8usize {
+                let Ok(out) = ngrams(&tokens, n, &l) else {
+                    panic!("ngrams must succeed");
+                };
+                assert!(matches!(ngram_count(t, n, &l), Ok(c) if c == out.len()));
+            }
+        }
+        assert!(matches!(
+            ngram_count(1, 0, &l),
+            Err(TextError::InvalidNgrams { .. })
+        ));
+        assert!(matches!(
+            ngram_count(usize::MAX, 2, &l),
+            Err(TextError::NgramCountOverflow { .. })
+        ));
     }
 
     #[test]
