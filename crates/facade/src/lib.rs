@@ -341,6 +341,12 @@ pub use fandhe_ai_autodiff::CreateGraphResult;
 // `docs/autodiff-forward-backward-hooks-design.md` §14.4 P3。フィールドは非公開で
 // `Clone`／`Copy` を持たず、利用者は構築できない。
 pub use fandhe_ai_autodiff::HookHandle;
+// `GradcheckOptions`／`GradcheckReport`（`Tape::gradcheck` の閾値引数型・結果型。イシュー
+// #2847）も 1 文 1 行（別名なし）で再エクスポートする。承認根拠はルート #2499 の
+// issuecomment-6052732061 と `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §11.3。
+// `gradcheck` モジュールと裸の自由関数 `gradcheck` は再エクスポートしない
+// （`tests/api_surface.rs` の正ガードが固定）。
+pub use fandhe_ai_autodiff::gradcheck::{GradcheckOptions, GradcheckReport};
 // `CastDType`／`CastElement`（イシュー #1750。`Var::cast`／`Tape::
 // var_from` の型境界・dtype タグ）も 1 文 1 行で再エクスポートする
 // （上記コメント「1 文 1 行を維持する」と同じ理由）。`CastOps`（動的
@@ -849,6 +855,56 @@ impl Tape {
     /// ```
     pub fn backward_detect_anomaly(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {
         fandhe_ai_autodiff::anomaly::backward_detect_anomaly(&self.0, loss)
+    }
+
+    /// 解析勾配（`backward` の合成）と中心差分の数値勾配を全入力要素で突合する
+    /// （イシュー #2847。決定記録 `docs/autodiff-jacobian-hessian-gradcheck-decision.md`
+    /// §11・§12。内部実装は `fandhe_ai_autodiff::gradcheck::gradcheck`）。
+    ///
+    /// 評価ごとに空の新しいテープが要るため、`&self` を取らず `device` から
+    /// [`tape_for`] で都度生成する関連関数である（利用者の既存テープには触れない）。
+    /// `f` は渡されたテープ（[`TapeRef`]）上で入力 [`Var`] 列から**単一の出力**を記録する。
+    /// 定数は `TapeRef::var_no_grad` で作る。
+    ///
+    /// - 評価回数は `1 + 2·Σn_k`（`n_k` は各入力の要素数）で、解析側は `m×n` の領域を確保する。
+    ///   大きな形状は呼び出し側の責任で避ける。Metal では評価ごとにデバイス存在確認が走る。
+    /// - 不一致は `Ok` の [`GradcheckReport::passed`] が `false`（`Err` ではない）。
+    /// - 入口検査（空の `inputs` 等）はテープ生成より先に行う。テープ生成の失敗は
+    ///   `Err(AutodiffError::Backend(_))`。
+    /// - `relu` の 0 付近等のキンク近傍・低精度 forward は適用外（偽陽性になりうる）。
+    ///
+    /// ```
+    /// use fandhe_ai::{Device, GradcheckOptions, Tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let options = GradcheckOptions::new(1e-3, 1e-3, 1e-2, 1e-4)?;
+    /// let x = Tensor::new(vec![0.5_f32, -1.0, 1.5, 2.0], &[4])?;
+    /// let report = Tape::gradcheck(Device::Cpu, |_t, xs| xs[0].mul(&xs[0]), &[x], &options)?;
+    /// assert!(report.passed());
+    /// // 検査要素数は 出力要素数 × 入力要素数（4 × 4）。
+    /// assert_eq!(report.checked_elements(), 16);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn gradcheck<F>(
+        device: Device,
+        f: F,
+        inputs: &[Tensor<f32>],
+        options: &GradcheckOptions,
+    ) -> Result<GradcheckReport, AutodiffError>
+    where
+        F: for<'a> Fn(TapeRef<'a>, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>,
+    {
+        fandhe_ai_autodiff::gradcheck::gradcheck(
+            || {
+                tape_for(device)
+                    .map(|t| t.0)
+                    .map_err(AutodiffError::Backend)
+            },
+            |t, xs| f(TapeRef::from_autodiff(t), xs),
+            inputs,
+            options,
+        )
     }
 
     /// [`fandhe_ai_autodiff::Tape::custom`] への委譲入口（イシュー #2549。
@@ -4015,6 +4071,8 @@ struct ModelIoHoldDoctestGuard;
 /// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Var::{rfft,irfft,fft,ifft,stft,istft}` と `FftNorm`・`StftPadMode`・`StftOptions`・`IstftOptions` の再エクスポートは承認形どおり公開済みのため、
 /// 該当する UFCS 行と、受け手 `Var` の `impl` ブロック、型 `FftNorm`・`StftOptions`・`IstftOptions`・`StftPadMode` のローカル定義（ルート再エクスポートと glob 衝突するため）を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
 /// 引き続き拒否する未承認経路: モジュール `fft_ops`・`fft`・残した受け手（`Tape`）上の、公開していない名前の同名メソッド。
+/// **#2847 での部分反転**（ルート #2499 の `issuecomment-6052732061`・決定記録 §11.5・§12）: `Tape::gradcheck`（関連関数）と型 `GradcheckOptions`・`GradcheckReport`（ルート再エクスポート）を承認形どおり公開したため、
+/// 型 2 つのローカル定義・`__probe_types`・`Tape::gradcheck` の UFCS 行を外した。モジュール名・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッドの保留は維持する（`Tape` の `impl` ブロックは #2678 の先例どおり残す）。
 /// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
 /// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
@@ -7329,7 +7387,7 @@ struct JacobianHessianHoldDoctestGuard;
 /// `fandhe_ai_autodiff::anomaly`）のうち未承認の経路を facade 公開面から締め出す保留ガード
 /// （`JacobianHessianHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
-/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `gradcheck`・`anomaly`、型 `GradcheckOptions`・`GradcheckReport`、クレートルート直下の裸の自由関数 `gradcheck`・`backward_detect_anomaly`）と、
+/// 下の doctest は全 `pub mod` を glob import したスコープへ、未承認経路に対応するローカル定義（モジュール `gradcheck`・`anomaly`、クレートルート直下の裸の自由関数 `gradcheck`・`backward_detect_anomaly`）と、
 /// 同名メソッドを持つプローブ用トレイト（受け手: `Tape`・`Tensor<f32>`・`Var`）を置き、修飾なしの関数呼び出しと修飾付き（UFCS）のメソッド呼び出しの両方を行う。
 /// facade が同名のモジュール・関数・型を glob 可能な位置へ公開するか、上の受け手へ同名の inherent メソッドを公開すると、
 /// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
@@ -7337,7 +7395,7 @@ struct JacobianHessianHoldDoctestGuard;
 /// **#2678 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
 /// `VarActivationOpsHoldDoctestGuard` の #2516 部分反転と同型）: `Tape::backward_detect_anomaly` は承認形どおり公開済みのため、
 /// 該当する UFCS 行を外した（残すと公開した inherent メソッドや再エクスポート型との衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは、同じトレイトの別メソッド分のプローブとして維持する。
-/// 引き続き拒否する未承認経路: モジュール `gradcheck`・`anomaly`、型 `GradcheckOptions`・`GradcheckReport`、クレートルート直下の裸の自由関数 `gradcheck`・`backward_detect_anomaly`（`gradcheck` 系は決定記録に facade シグネチャが無いため保留。公開しない）・残した受け手（`Tape`・`Tensor<f32>`・`Var`）上の、公開していない名前の同名メソッド。
+/// 引き続き拒否する未承認経路: モジュール `gradcheck`・`anomaly`、クレートルート直下の裸の自由関数 `gradcheck`・`backward_detect_anomaly`（公開しない）・`Var`／`Tensor<f32>` 上の同名メソッド・残した受け手（`Tape`・`Tensor<f32>`・`Var`）上の、公開していない名前の同名メソッド。
 /// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
 /// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
@@ -7376,8 +7434,6 @@ struct JacobianHessianHoldDoctestGuard;
 ///     }
 ///     pub fn gradcheck() {}
 ///     pub fn backward_detect_anomaly() {}
-///     pub struct GradcheckOptions;
-///     pub struct GradcheckReport;
 /// }
 /// use __fandhe_gradcheck_anomaly_hold_probe::*;
 ///
@@ -7425,16 +7481,13 @@ struct JacobianHessianHoldDoctestGuard;
 ///     backward_detect_anomaly();
 /// }
 ///
-/// fn __probe_types(_: Option<GradcheckOptions>, _: Option<GradcheckReport>) {}
-///
 /// fn __probe_methods(
 ///     v: &fandhe_ai::Var<'_>,
-///     tape: &fandhe_ai::Tape,
+///     _tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::gradcheck(v);
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::backward_detect_anomaly(v);
-///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::gradcheck(tape);
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::gradcheck(tf);
 ///     let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::backward_detect_anomaly(tf);
 /// }

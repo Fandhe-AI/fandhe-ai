@@ -1,5 +1,5 @@
 //! `fandhe_ai_autodiff::gradcheck::gradcheck`・`fandhe_ai_autodiff::anomaly::backward_detect_anomaly`
-//! （イシュー #2671。facade 非公開のため `fandhe_ai_autodiff` を直接 use する。各モジュール doc 参照）の
+//! （イシュー #2671。内部実装との突合のため `fandhe_ai_autodiff` を直接 use する。facade の `Tape::gradcheck` は #2847 で公開）の
 //! バックエンド間 parity テスト（`jacobian_hessian_backend_parity.rs` と同型）。
 //!
 //! 属性なし: 実 `CpuBackendOps` を結線した tape と `Tape::new()`（`NaiveOps`）を突き合わせる。
@@ -41,7 +41,7 @@ fn compute(make: &dyn Fn() -> Tape) -> Outs {
     let x = t(vec![0.3, -0.7, 1.1, 0.5, 0.2, -0.4], &[2, 3]);
 
     let report = gradcheck(
-        make,
+        || Ok(make()),
         |tape, xs| {
             let (w1, w2) = (tape.var_no_grad(&w1), tape.var_no_grad(&w2));
             xs[0].matmul(&w1)?.tanh().matmul(&w2)
@@ -113,7 +113,7 @@ fn cpu_matches_hand_computed_values() {
     assert!(msg.contains("forward") && msg.contains("node 1"), "{msg}");
 
     let report = gradcheck(
-        cpu_tape,
+        || Ok(cpu_tape()),
         |_t, xs| xs[0].mul(&xs[0]),
         &[t(vec![1.0, 2.0], &[2])],
         &opts(),

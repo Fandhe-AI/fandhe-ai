@@ -88,6 +88,11 @@ fn new_tape() -> Tape {
     Tape::new_with_ops(common::naive_ops())
 }
 
+/// `gradcheck` の `make_tape` 境界（#2847 で fallible 化）用。常に成功する。
+fn new_tape_ok() -> Result<Tape, AutodiffError> {
+    Ok(new_tape())
+}
+
 /// fixture 側 `gen_reference.py` のプログラムと同名・同式。
 fn build_program<'t>(
     name: &str,
@@ -124,7 +129,7 @@ fn run_gradcheck(
     let consts = case_consts(case);
     let inputs: Vec<Tensor<f32>> = case.xs.iter().map(Packed::tensor).collect();
     gradcheck(
-        new_tape,
+        new_tape_ok,
         |tape, xs| {
             let c: HashMap<String, Var<'_>> = consts
                 .iter()
@@ -255,7 +260,7 @@ impl CustomFunction for WrongIdentity {
 fn g2_wrong_vjp_fails_and_reports_worst_location() {
     let inputs = [t(vec![0.5, -1.0, 2.0], &[3])];
     let report = gradcheck(
-        new_tape,
+        new_tape_ok,
         |tape, xs| tape.custom(Arc::new(WrongIdentity), &[xs[0]]),
         &inputs,
         &approved_options(),
@@ -274,7 +279,7 @@ fn g2_wrong_vjp_fails_and_reports_worst_location() {
 fn g2_correct_vjp_passes() {
     let inputs = [t(vec![0.5, -1.0, 2.0], &[3])];
     let report = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_tape, xs| xs[0].mul(&xs[0]),
         &inputs,
         &approved_options(),
@@ -318,7 +323,7 @@ fn g3_records_numeric_jacobian_difference_against_pytorch_f64_without_gating() {
 #[test]
 fn gradcheck_rejects_empty_inputs() {
     let r = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, _x| Err(AutodiffError::InvalidArgument("unreachable".into())),
         &[],
         &approved_options(),
@@ -330,7 +335,7 @@ fn gradcheck_rejects_empty_inputs() {
 fn gradcheck_rejects_zero_element_output() {
     let inputs = [t(vec![1.0, 2.0], &[2])];
     let r = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, xs| xs[0].narrow(0, 0, 0),
         &inputs,
         &approved_options(),
@@ -346,7 +351,7 @@ fn gradcheck_rejects_output_from_another_tape() {
     let foreign = other.var(&t(vec![1.0, 2.0], &[2]));
     let inputs = [t(vec![1.0, 2.0], &[2])];
     let r = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, _xs| Ok(foreign),
         &inputs,
         &approved_options(),
@@ -358,7 +363,7 @@ fn gradcheck_rejects_output_from_another_tape() {
 fn gradcheck_propagates_closure_error() {
     let inputs = [t(vec![1.0], &[1])];
     let r = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, _xs| Err(AutodiffError::InvalidArgument("boom".into())),
         &inputs,
         &approved_options(),
@@ -374,7 +379,7 @@ fn gradcheck_rejects_non_finite_perturbation_before_evaluation() {
     let opts = GradcheckOptions::new(1e38, 1e-3, 1e-2, 1e-4).expect("有限・正の閾値");
     let calls = Cell::new(0usize);
     let r = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, xs| {
             calls.set(calls.get() + 1);
             Ok(xs[0])
@@ -391,7 +396,7 @@ fn gradcheck_rejects_shape_change_at_perturbed_point() {
     let inputs = [t(vec![1.0, 2.0], &[2])];
     let calls = Cell::new(0usize);
     let r = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, xs| {
             // 1 回目（解析側の基準点）だけ shape [2]、以後は shape [1] を返す。
             let n = calls.get();
@@ -415,7 +420,7 @@ fn gradcheck_calls_make_tape_once_plus_twice_per_input_element() {
     let report = gradcheck(
         || {
             made.set(made.get() + 1);
-            new_tape()
+            Ok(new_tape())
         },
         |_t, xs| {
             xs[0]
@@ -440,7 +445,7 @@ fn gradcheck_does_not_touch_callers_existing_tape() {
     let value_before = host(&y.to_tensor());
     let inputs = [t(vec![0.5, 1.5], &[2])];
     gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, xs| xs[0].mul(&xs[0]),
         &inputs,
         &approved_options(),
@@ -455,7 +460,7 @@ fn gradcheck_rejects_eps_swallowed_by_f32() {
     // |x| が大きく eps=1e-3 では f32 の丸めで x±eps が同値になる。
     let inputs = [t(vec![1.0e8], &[1])];
     let r = gradcheck(
-        new_tape,
+        new_tape_ok,
         |_t, xs| xs[0].mul(&xs[0]),
         &inputs,
         &approved_options(),
@@ -472,7 +477,7 @@ fn gradcheck_rejects_one_sided_collapse_of_perturbation() {
     // 半分超なので 1.0 未満になる（step>0 だが片側差分になる）ケース。
     let inputs = [t(vec![1.0], &[1])];
     let opts = GradcheckOptions::new(4e-8, 1e-3, 1e-2, 1e-4).expect("有効な閾値");
-    let r = gradcheck(new_tape, |_t, xs| xs[0].mul(&xs[0]), &inputs, &opts);
+    let r = gradcheck(new_tape_ok, |_t, xs| xs[0].mul(&xs[0]), &inputs, &opts);
     assert!(
         matches!(r, Err(AutodiffError::InvalidArgument(ref m)) if m.contains("eps")),
         "{r:?}"

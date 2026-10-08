@@ -20,13 +20,12 @@
 //! **テープの扱い**: 評価ごとに `make_tape` で新しいテープを作る（`Tape::reset` は葉
 //! プレフィックスを保持するため再利用しない）。利用者の既存テープには触れない。
 //!
-//! **公開形は未承認（保留）**: facade（`fandhe_ai`）へは公開しない（承認依頼 #2677・公開
-//! #2678）。保留は facade の `GradcheckAnomalyHoldDoctestGuard` と `tests/api_surface.rs` の
-//! 否定ガードで機械固定している。
-//!
-//! **公開状況（イシュー #2678）**: facade `Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は #2678 でも保留（決定記録に facade シグネチャが書かれていないため）。
-//! 上の「未承認」「保留」「承認依頼は #2677」の記述は #2677 時点のもので、承認形の公開は #2678 で行った
-//! （ルート #2499 の承認コメント issuecomment-6033824965・`docs/compat-api-scope.md` §5.1）。
+//! **公開状況（イシュー #2847）**: facade へは `Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport`
+//! だけを公開した（決定記録 `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §11・§12。
+//! 承認は #2499 の issuecomment-6052732061）。本モジュール自体と裸の自由関数 `gradcheck` は
+//! 内部クレートの面に留め、facade へは出さない。facade の `Tape::gradcheck` は `make_tape` で
+//! `tape_for(device)` を呼ぶため、テープ生成が失敗しうる（`make_tape` が `Result` を返す理由）。
+//! 以前の「公開形は未承認（保留）」の記述（#2677・#2678 時点）は #2847 で解消済み。
 
 use crate::error::AutodiffError;
 use crate::jacobian_ops::jacobian;
@@ -146,10 +145,10 @@ fn evaluate<M, F>(
     inputs: &[Tensor<f32>],
 ) -> Result<(Vec<usize>, Vec<f64>), AutodiffError>
 where
-    M: Fn() -> Tape,
+    M: Fn() -> Result<Tape, AutodiffError>,
     F: for<'a> Fn(&'a Tape, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>,
 {
-    let tape = make_tape();
+    let tape = make_tape()?;
     let vars: Vec<Var<'_>> = inputs.iter().map(|t| tape.var(t)).collect();
     let out = f(&tape, &vars)?;
     if out.tape_id() != tape.id || out.tape_epoch() != tape.epoch() {
@@ -170,7 +169,7 @@ where
 /// 検査付きで算出（オーバーフローは `Err(Shape(ElementCountOverflow))`）。続く評価で、
 /// 出力が渡されたテープに属さなければ `Err(TapeMismatch)`、出力の要素数が 0・摂動点で出力
 /// shape が変わる・`eps` が入力値に対して小さすぎて摂動が `f32` で潰れる場合は
-/// `Err(InvalidArgument)`（空虚な合格を返さない）。`f` と `make_tape` のエラーはそのまま伝播する。
+/// `Err(InvalidArgument)`（空虚な合格を返さない）。`f` と `make_tape` のエラー（テープ生成の失敗を含む）は入口検査の後、評価時にそのまま伝播する。
 ///
 /// 判定式・適用範囲・計算量はモジュール doc を参照。
 pub fn gradcheck<M, F>(
@@ -180,7 +179,7 @@ pub fn gradcheck<M, F>(
     options: &GradcheckOptions,
 ) -> Result<GradcheckReport, AutodiffError>
 where
-    M: Fn() -> Tape,
+    M: Fn() -> Result<Tape, AutodiffError>,
     F: for<'a> Fn(&'a Tape, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>,
 {
     if inputs.is_empty() {
@@ -194,7 +193,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
 
     // 解析側: 1 本のテープで出力を作り、入力ごとに jacobian（行 = 出力要素）を取る。
-    let tape = make_tape();
+    let tape = make_tape()?;
     let vars: Vec<Var<'_>> = inputs.iter().map(|t| tape.var(t)).collect();
     let out = f(&tape, &vars)?;
     if out.tape_id() != tape.id || out.tape_epoch() != tape.epoch() {
