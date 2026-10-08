@@ -222,7 +222,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 
 ## 17. 承認された公開形（#2933・親 #2932。§11 の分解案 9 の前段）
 
-本節は §5 の推奨形に、main にある内部実装（`f4dc7573`）のシグネチャをそのまま当てた**公開形の記録**である。コード（`crates/**`）・`Cargo.toml`／`Cargo.lock`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変更しない。`pub use` の追加・保留ガードの反転・doctest は後続の #2934 が本節どおりに行う。§1〜§16 の本文は書き換えず、事実を併記する（§1・§5・§10・§12 から本節を指す）。
+**公開は #2934 で実施済み（実装記録は §18）。** 本節は §5 の推奨形に、main にある内部実装（`f4dc7573`）のシグネチャをそのまま当てた**公開形の記録**である。コード（`crates/**`）・`Cargo.toml`／`Cargo.lock`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変更しない。`pub use` の追加・保留ガードの反転・doctest は後続の #2934 が本節どおりに行う。§1〜§16 の本文は書き換えず、事実を併記する（§1・§5・§10・§12 から本節を指す）。
 
 ### 17.1 承認の根拠と範囲
 
@@ -311,3 +311,49 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 - A03: 外部入力は token id と logits だけで、形状・語彙・有限性の検査順は 17.3 の rustdoc の検査順を正とする。
 - A02: `Generator` は非暗号の xorshift64* であり、生成 token をセキュリティ用途に使わない。
 - スケジューラは同期実行でスレッド・I/O を持たず、ネットワーク公開面はない。
+
+## 18. 実装記録（#2934・親 #2932。§11 の分解案 9）
+
+§17 の公開形どおりに `fandhe_ai::inference` へ公開した。承認根拠は §17.1（`issuecomment-6067263650` の項 1）。`Cargo.toml`／`Cargo.lock`・tolerance・baseline・ガードレール閾値・`docs/spec/`・`KvCache` の公開メソッド・`forward_with_cache` の可視性・`GENERATE_APPROVED_REEXPORT` の文字列は変えていない。`fandhe-ai =0.10.0` に対しては追加のみ。
+
+### 18.1 追加した `pub use`（`crates/facade/src/inference/mod.rs`）
+
+既存の generate の 1 文の後ろに、別の 2 文を足した（入れ子・glob・別名・モジュール再エクスポートなし）。
+
+- `pub use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, RequestId, SchedulerLimits};`
+- `pub use fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig, generate_speculative};`
+
+### 18.2 ガード反転の対応（§17.6 の 1〜3 と注意）
+
+| §17.6 | 実施内容（`crates/facade/tests/api_surface.rs`） |
+|---|---|
+| 1 | `inference_module_reexports_exactly_expected_surface` の期待集合を 4 文に変更。自己テストに 4 文版の正例と、追加文・欠落・別名・glob・モジュール再エクスポート・`pub(crate)` の負例を追加 |
+| 2 | `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` に `generate_speculative` を追加 |
+| 3 | 承認形の定数 `SCHEDULER_APPROVED_REEXPORT`／`SPECULATIVE_APPROVED_REEXPORT`、正ガード `facade_exposes_speculative_scheduler_items_only_in_approved_shape`（各 1 件ちょうど。自己テスト付き）、到達プローブ `speculative_scheduler_items_are_reachable_via_facade_inference_path`（署名・`?Sized` 境界・derive・内部クレートの型との同一性）、doctest 実在検査 `speculative_scheduler_usage_doctests_are_present_and_compiled` を新設 |
+| 注意 | 案 (a) を採用。`facade_exposes_generate_items_only_in_approved_shape` の期待を 3 文（generate・scheduler・speculative）に広げ、検出器 `generate_exposures` 本体と自己テストは変えていない（検出範囲を狭める案 (b) は採らず fail-closed の強さを保つ） |
+
+### 18.3 新設した否定インベントリ・プローブ
+
+- `speculative_scheduler_public_shape_is_pinned`: `BatchScheduler`／`SchedulerLimits`／`SpeculativeConfig` の pub fn 集合・フィールド・`#[non_exhaustive]`・`RequestId` の非公開フィールドと、`speculative.rs` の自由な pub fn が `generate_speculative` 1 件のみであること（サンプリング版の入口が無いことを兼ねる）。将来 pub メソッドを足すと本テストが落ちるため、承認とセットで更新する
+- `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler`: `KvCache` の公開メソッドが `new/is_empty/seq_len/batch/embed_dim/clear/k/v` の 8 件のままであること（`truncate` 等なし。論点 4）
+- `kv_rewind_stays_private_and_absent_from_facade`: `kv_rewind` が非公開で、facade に `kv_rewind`／`KvSnapshot` が現れないこと
+- モジュール自体・glob の再エクスポート禁止は 18.2 の 4 文完全一致と小文字葉 allowlist が担う
+- 検出範囲の限界: トークン走査のため、マクロ生成・`use … as` 別名経由の到達は範囲外。否定ガードは `compile_fail` のコード照合を使わず、正のプローブとインベントリで組む
+
+### 18.4 利用例 doctest の決定
+
+`BatchScheduler` は状態なしモデルで成功する例（単独 `generate` との一致まで確認）を付けた。`generate_speculative` は **facade の公開面だけでは成功する実行を示せない**（`num_kv_layers() == 0` は `Err` で拒否され、`caches` を進めるモデルを組む経路が facade に無い。論点 3 は保留）ため、fail-closed 契約（`num_kv_layers() == 0` と TopK の拒否）を示す例とした。成功経路は `crates/facade/tests/speculative_batching_facade.rs` の結合テストが担う。doctest のために `KvCache` のセッターや `truncate`、`forward_with_cache` の公開は足していない。
+
+### 18.5 対象モデルの契約の doc 化
+
+「内部状態保持型」を「生成状態を、渡された `caches` の外に持つ型」と定義し、`num_kv_layers()` の値では決まらない・型でも実行時でも検出できない・対象外で出力を保証しない・利用者が保証する、と facade の `inference` モジュール doc と autodiff の `BatchScheduler`／`generate_speculative` の rustdoc に書いた（従来の「内部状態保持型は `num_kv_layers() == 0` を返す」は §17.5 と食い違うため改めた）。
+
+### 18.6 テストと実機
+
+- 結合テスト `crates/facade/tests/speculative_batching_facade.rs`: スケジューラ×状態なし／KV モデルで単独 `generate` と完全一致、上限・不正要求の fail-closed、要求単位の失敗の切り離し、speculative の Greedy 一致（k・draft・prompt 長・`max_length`・rank 1／2 の掃引）、サンプリング・k = 0・B = 2・`num_kv_layers() == 0`・空 prompt・`max_length < T` の拒否
+- 表引き KV モデルは形状に依らない logits を返すため完全一致を要求する。実 MHA の logits による token 列一致の仮説（論点 2）と CPU 対 CUDA／Metal の parity は `speculative_batching_backend_parity.rs`（#2890）が担う。新しい `#[ignore]` テストは足していない
+- 実機（GB10／M4 Max）は未測定。申し送りは `docs/perf/logs/speculative-batching-facade-2934/README.md`
+
+### 18.7 保留・スコープ外
+
+論点 1・2・3・5・7・8 は保留のまま。B > 1、EOS 停止・top-p、受理統計、HTTP サーバ、量子化 KV、facade の `caches` 到達経路、実機測定は本 issue の対象外。

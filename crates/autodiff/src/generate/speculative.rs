@@ -10,8 +10,8 @@
 //!
 //! # 制限（いずれも設計記録の未承認論点または承認待ち事項に由来）
 //!
-//! - **facade 未公開**: `docs/compat-api-scope.md` §5.1 の S1 の承認待ち。
-//!   本モジュールは `autodiff` 内部の公開に留まり、facade からは到達できない
+//! - **facade 公開済み**: イシュー #2934 で `fandhe_ai::inference` へ純再エクスポート
+//!   （承認根拠・公開形は設計記録 §17。`docs/compat-api-scope.md` §5.1 S1）
 //! - **B = 1 限定**: 全系列の `S_cached` が共通である前提（`docs/kv-cache-design.md` §7）
 //! - **Greedy のみ**: サンプリング版は設計 §10 論点 1（未承認）でブロック中。
 //!   黙って greedy へ落とさず `InvalidArgument` で拒否する
@@ -148,6 +148,13 @@ fn rewind_to<M: AutoregressiveModel + ?Sized>(
 /// rank 1）。出力は `[max_length]` または `[1, max_length]`。
 ///
 /// 受理統計は返さない。`draft == target`（同一インスタンス可）でも動作する。
+///
+/// # 対象モデルの契約
+///
+/// 対象は `num_kv_layers() > 0` で、生成状態を渡された `caches` だけに持つモデル。
+/// 生成状態を `caches` の外（内部状態保持型。`RefCell<StatefulAttention>` 等）に持つ型は
+/// `num_kv_layers()` の値によらず対象外で、出力を保証しない（`> 0` を返しつつ内部にも
+/// 状態を持つ型は型でも実行時でも検出できないため、利用者が保証する。設計記録 §17.5）。
 ///
 /// # Errors
 ///

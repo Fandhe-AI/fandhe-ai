@@ -7931,6 +7931,9 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     "reset_phase_metrics",
     // `inference/mod.rs`（イシュー #2575。`generate` の自己回帰ループ。承認形は決定記録 §13.2・§17）。
     "generate",
+    // `inference/mod.rs`（イシュー #2934。greedy 版 speculative decoding。承認形は設計記録
+    // `facade-speculative-decoding-batching-design.md` §17.2。承認コメント issuecomment-6067263650 項 1）。
+    "generate_speculative",
 ];
 
 /// facade src の全 `pub use` 文（`pub(..) use` はスコープ付き可視性の
@@ -22550,6 +22553,16 @@ fn workspace_declares_npy_io_names_only_in_allowed_locations() {
 const GENERATE_APPROVED_REEXPORT: &str =
     "fandhe_ai_autodiff::generate::{AutoregressiveModel,GenerateConfig,SamplingStrategy,generate}";
 
+/// `inference/mod.rs` の連続バッチングのスケジューラ承認形（第 1 段階。イシュー #2934。公開形の正は
+/// `docs/facade-speculative-decoding-batching-design.md` §17.2、承認コメント issuecomment-6067263650
+/// 項 1）。`pub use` 文のトークンを空白なしで連結したもの（rustfmt 後の並び: 大文字が先）。
+const SCHEDULER_APPROVED_REEXPORT: &str =
+    "fandhe_ai_autodiff::generate::scheduler::{BatchScheduler,RequestId,SchedulerLimits}";
+
+/// `inference/mod.rs` の greedy 版 speculative decoding 承認形（イシュー #2934。出典は上と同じ）。
+const SPECULATIVE_APPROVED_REEXPORT: &str =
+    "fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig,generate_speculative}";
+
 /// 公開 4 名のうち型・トレイト名（3 個）。
 const GENERATE_TYPE_NAMES: [&str; 3] =
     ["AutoregressiveModel", "GenerateConfig", "SamplingStrategy"];
@@ -22598,15 +22611,29 @@ fn generate_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
 /// 分割・別ファイルの再エクスポートはすべて拒否する（件数 0 の空振りも拒否）。
 #[test]
 fn facade_exposes_generate_items_only_in_approved_shape() {
-    let expected = vec![(
-        "inference/mod.rs".to_string(),
-        GENERATE_APPROVED_REEXPORT.to_string(),
-    )];
+    // 期待は (ファイル, 文) のソート順。#2934 で追加した連続バッチング・speculative の承認形 2 文は
+    // パスに `generate` トークンを含むため本検出器にも掛かる（検出器は変えず期待を 3 文に広げる。
+    // 設計記録 §17.6・§18）。`GENERATE_APPROVED_REEXPORT` 自体は 1 文字も変えない。
+    let expected = vec![
+        (
+            "inference/mod.rs".to_string(),
+            SCHEDULER_APPROVED_REEXPORT.to_string(),
+        ),
+        (
+            "inference/mod.rs".to_string(),
+            SPECULATIVE_APPROVED_REEXPORT.to_string(),
+        ),
+        (
+            "inference/mod.rs".to_string(),
+            GENERATE_APPROVED_REEXPORT.to_string(),
+        ),
+    ];
     assert_eq!(
         generate_exposures(&facade_src_files()),
         expected,
-        "generate 一式の facade 公開は inference/mod.rs の承認形 1 文のみ\
-         （イシュー #2575・決定記録 §13.2・§17）"
+        "generate 一式の facade 公開は inference/mod.rs の承認形 1 文（イシュー #2575・決定記録 §13.2・§17）\
+         と、パスに generate を含む連続バッチング・speculative の承認形 2 文（イシュー #2934・\
+         設計記録 §17.2）のみ"
     );
 }
 
@@ -22767,40 +22794,55 @@ fn pub_use_stmts_normalized(src: &str) -> Vec<String> {
     out
 }
 
-/// `src/inference/mod.rs` の可視性付き `use` が、predict_batches 承認形（#2582）と generate
-/// 承認形（#2575）の 2 文ちょうどであることを固定する。`facade_exposes_generate_items_only_in_approved_shape`
-/// は 4 名のいずれかを含む文しか拾わないため、同ファイルへ無関係な名前（`MultiheadAttention`
-/// 等）を別文で足す経路を本テストが塞ぐ。件数 0 の空振りも拒否する。
+/// `src/inference/mod.rs` の可視性付き `use` が、predict_batches 承認形（#2582）・generate
+/// 承認形（#2575）・連続バッチング承認形と speculative 承認形（#2934）の 4 文ちょうどであること
+/// を固定する。`facade_exposes_generate_items_only_in_approved_shape` は 4 名のいずれかを含む文しか
+/// 拾わないため、同ファイルへ無関係な名前（`MultiheadAttention` 等）を別文で足す経路や、
+/// `scheduler`／`speculative` モジュール自体・glob の再エクスポートを本テストが塞ぐ。件数 0 の空振りも拒否する。
 #[test]
 fn inference_module_reexports_exactly_expected_surface() {
-    let mut expected = vec![
-        PREDICT_BATCHES_APPROVED_REEXPORT.to_string(),
-        GENERATE_APPROVED_REEXPORT.to_string(),
+    let approved = [
+        PREDICT_BATCHES_APPROVED_REEXPORT,
+        GENERATE_APPROVED_REEXPORT,
+        SCHEDULER_APPROVED_REEXPORT,
+        SPECULATIVE_APPROVED_REEXPORT,
     ];
+    let mut expected: Vec<String> = approved.iter().map(|s| s.to_string()).collect();
     expected.sort();
     let found = pub_use_stmts_normalized(&read_to_string_or_panic(
         &facade_crate_root().join("src/inference/mod.rs"),
     ));
     assert_eq!(
         found, expected,
-        "src/inference/mod.rs の pub use が承認形 2 文と一致しない（イシュー #2576）"
+        "src/inference/mod.rs の pub use が承認形 4 文と一致しない（イシュー #2576・#2934）"
     );
 
-    // 自己テスト: 承認形は許可、追加文・欠落・別名・pub(crate) は検出される。
-    let ok = format!(
-        "pub use {PREDICT_BATCHES_APPROVED_REEXPORT};\npub use {GENERATE_APPROVED_REEXPORT};"
-    );
+    // 自己テスト: 承認形は許可、追加文・欠落・別名・glob・モジュール再エクスポート・pub(crate) は検出される。
+    let ok: String = approved.iter().map(|a| format!("pub use {a};\n")).collect();
     assert_eq!(pub_use_stmts_normalized(&ok), expected);
-    let extra = format!("{ok}\npub use fandhe_ai_autodiff::nn::MultiheadAttention;");
-    assert_ne!(pub_use_stmts_normalized(&extra), expected);
-    let extra_crate = format!("{ok}\npub(crate) use x::Y;");
-    assert_ne!(pub_use_stmts_normalized(&extra_crate), expected);
+    for extra in [
+        "pub use fandhe_ai_autodiff::nn::MultiheadAttention;",
+        "pub(crate) use x::Y;",
+        "pub use fandhe_ai_autodiff::generate::scheduler;",
+        "pub use fandhe_ai_autodiff::generate::speculative::*;",
+        "pub use fandhe_ai_autodiff::generate::kv_rewind::KvSnapshot;",
+    ] {
+        assert_ne!(
+            pub_use_stmts_normalized(&format!("{ok}\n{extra}")),
+            expected,
+            "{extra}"
+        );
+    }
     assert_ne!(pub_use_stmts_normalized("// 空"), expected);
-    let missing = format!("pub use {PREDICT_BATCHES_APPROVED_REEXPORT};");
-    assert_ne!(pub_use_stmts_normalized(&missing), expected);
-    let alias = format!(
-        "pub use {PREDICT_BATCHES_APPROVED_REEXPORT};\npub use fandhe_ai_autodiff::generate::{{AutoregressiveModel as A, GenerateConfig, SamplingStrategy, generate}};"
-    );
+    for omit in approved {
+        let missing: String = approved
+            .iter()
+            .filter(|a| **a != omit)
+            .map(|a| format!("pub use {a};\n"))
+            .collect();
+        assert_ne!(pub_use_stmts_normalized(&missing), expected, "{omit}");
+    }
+    let alias = ok.replace("BatchScheduler,", "BatchScheduler as B,");
     assert_ne!(pub_use_stmts_normalized(&alias), expected);
 }
 
@@ -37848,4 +37890,516 @@ fn fit_with_prefetch_is_reachable_via_facade_only() {
         )
         .unwrap();
     assert_eq!(h.loss.len(), 2);
+}
+// --- speculative decoding（greedy）・連続バッチング第 1 段階（イシュー #2934・親 #2932）の facade 公開 ----
+//
+// 公開形の正は `docs/facade-speculative-decoding-batching-design.md` §17（承認根拠: リポジトリ所有者
+// 本人の承認コメント issuecomment-6067263650 の項 1）。S1〜S3 専用の保留ガードは存在しなかったため
+// （§17.6）、「反転」は次の正ガード新設と、未承認経路を締める否定プローブの追加で表す。
+// 検出範囲の限界（過剰に保証しない）: いずれもトークン走査で、マクロ生成・`use … as` 別名経由の到達は
+// 範囲外（別名・分割・モジュール再エクスポートは承認形の完全一致が拒否する。型レベルの到達性・署名は
+// 到達プローブが担う）。否定ガードは stable rustdoc の `compile_fail` コード照合を当てにせず、
+// 正のプローブとインベントリで組む。
+
+/// 公開 5 名のうち型名（4 個）。
+const SPEC_SCHED_TYPE_NAMES: [&str; 4] = [
+    "BatchScheduler",
+    "RequestId",
+    "SchedulerLimits",
+    "SpeculativeConfig",
+];
+
+/// facade `src/` から、(a) 公開 5 名または `scheduler`／`speculative`／`kv_rewind`／`KvSnapshot` を
+/// トークンとして含む `pub use` 文を `(ファイル, 空白なしトークン連結)`、(b) 4 型の
+/// `struct`／`enum`／`type`／`union`／`trait` 宣言を `(ファイル, "<decl:名前>")`、(c) `generate_speculative` の
+/// `fn` 宣言（可視性・文脈を問わない）を `(ファイル, "<fn:generate_speculative>")` で全件返す
+/// （コメント・文字列リテラルは無視。`pub(crate) use` は対象外）。
+fn speculative_scheduler_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if matches!(t.as_str(), "struct" | "enum" | "type" | "union" | "trait")
+                && let Some(n) = tokens.get(i + 1)
+                && SPEC_SCHED_TYPE_NAMES.contains(&n.as_str())
+            {
+                out.push((rel.clone(), format!("<decl:{n}>")));
+            }
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                let stmt = &tokens[i + 2..end];
+                if stmt.iter().any(|x| {
+                    SPEC_SCHED_TYPE_NAMES.contains(&x.as_str())
+                        || matches!(
+                            x.as_str(),
+                            "generate_speculative"
+                                | "scheduler"
+                                | "speculative"
+                                | "kv_rewind"
+                                | "KvSnapshot"
+                        )
+                }) {
+                    out.push((rel.clone(), stmt.concat().replace(",}", "}")));
+                }
+            }
+        }
+        for _ in 0..count_fn_declarations_by_name(&tokens, "generate_speculative") {
+            out.push((rel.clone(), "<fn:generate_speculative>".to_string()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// facade の speculative／スケジューラ公開は `inference/mod.rs` の承認形 2 文がそれぞれちょうど 1 件のみで、
+/// 別名・分割・別ファイル・glob・モジュール再エクスポート・facade 独自の型宣言・`fn generate_speculative`
+/// （`Tape`／`Sequential` への inherent メソッド追加を含む）・`kv_rewind`／`KvSnapshot` の再エクスポートは
+/// すべて拒否する（件数 0 の空振りも拒否）。
+#[test]
+fn facade_exposes_speculative_scheduler_items_only_in_approved_shape() {
+    let expected = vec![
+        (
+            "inference/mod.rs".to_string(),
+            SCHEDULER_APPROVED_REEXPORT.to_string(),
+        ),
+        (
+            "inference/mod.rs".to_string(),
+            SPECULATIVE_APPROVED_REEXPORT.to_string(),
+        ),
+    ];
+    assert_eq!(
+        speculative_scheduler_exposures(&facade_src_files()),
+        expected,
+        "speculative／スケジューラの facade 公開は inference/mod.rs の承認形 2 文のみ\
+         （イシュー #2934・設計記録 §17.2）"
+    );
+}
+
+/// [`facade_exposes_speculative_scheduler_items_only_in_approved_shape`] の自己テスト。
+#[test]
+fn facade_exposes_speculative_scheduler_items_only_in_approved_shape_detects_each_category() {
+    let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
+    let ok_s = "pub use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, RequestId, SchedulerLimits};";
+    let ok_p = "pub use fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig, generate_speculative};";
+    let both = format!("{ok_s}\n{ok_p}");
+    assert_eq!(
+        speculative_scheduler_exposures(&f("inference/mod.rs", &both)),
+        vec![
+            (
+                "inference/mod.rs".to_string(),
+                SCHEDULER_APPROVED_REEXPORT.to_string()
+            ),
+            (
+                "inference/mod.rs".to_string(),
+                SPECULATIVE_APPROVED_REEXPORT.to_string()
+            ),
+        ]
+    );
+    // 別ファイルは同一文でも (ファイル, 文) が承認形と一致しない。
+    assert_eq!(
+        speculative_scheduler_exposures(&f("lib.rs", ok_s))[0].0,
+        "lib.rs"
+    );
+    for bad in [
+        "pub use fandhe_ai_autodiff::generate::scheduler::BatchScheduler as B;",
+        "pub use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, RequestId};",
+        "pub use fandhe_ai_autodiff::generate::speculative::generate_speculative;",
+        "pub use fandhe_ai_autodiff::generate::speculative::*;",
+        "pub use fandhe_ai_autodiff::generate::scheduler;",
+        "pub use fandhe_ai_autodiff::generate::speculative as spec;",
+        "pub use fandhe_ai_autodiff::generate::kv_rewind::KvSnapshot;",
+        "pub use fandhe_ai_autodiff::generate::{scheduler::BatchScheduler};",
+        "pub struct BatchScheduler;",
+        "pub enum RequestId {}",
+        "pub type SchedulerLimits = u8;",
+        "pub trait SpeculativeConfig {}",
+        "pub fn generate_speculative() {}",
+        "impl Tape { pub fn generate_speculative(&self) {} }",
+        "fn generate_speculative() {}",
+    ] {
+        let got = speculative_scheduler_exposures(&f("inference/mod.rs", bad));
+        assert!(!got.is_empty(), "{bad}");
+        assert!(
+            got.iter().all(
+                |(_, s)| s != SCHEDULER_APPROVED_REEXPORT && s != SPECULATIVE_APPROVED_REEXPORT
+            ),
+            "{bad}"
+        );
+    }
+    for src in [
+        "// pub use a::BatchScheduler;",
+        "let s = \"pub use a::generate_speculative;\";",
+        "use a::BatchScheduler;",
+        "pub(crate) use a::{BatchScheduler, RequestId};",
+        "impl X for BatchScheduler {}",
+        "// fn generate_speculative() {}",
+    ] {
+        assert!(
+            speculative_scheduler_exposures(&f("inference/mod.rs", src)).is_empty(),
+            "{src}"
+        );
+    }
+}
+
+/// 正のプローブ: 公開 5 名が `fandhe_ai::inference` パスだけで到達でき、署名・`?Sized` 境界・derive が
+/// 承認形（設計記録 §17.3）に一致し、内部クレートの型と同一であること（コンパイルが通ること自体が検査）。
+#[test]
+fn speculative_scheduler_items_are_reachable_via_facade_inference_path() {
+    use fandhe_ai::inference::{
+        AutoregressiveModel, BatchScheduler, GenerateConfig, RequestId, SchedulerLimits,
+        SpeculativeConfig, generate_speculative,
+    };
+    use fandhe_ai::nn::kv_cache::KvCache;
+    use fandhe_ai::{AutodiffError, Tensor};
+
+    struct Probe;
+    impl AutoregressiveModel for Probe {
+        fn num_kv_layers(&self) -> usize {
+            0
+        }
+        fn forward_step(
+            &self,
+            new_ids: &Tensor<i32>,
+            _caches: &mut [KvCache],
+        ) -> Result<Tensor<f32>, AutodiffError> {
+            let n: usize = new_ids.shape().iter().product();
+            Tensor::new(
+                vec![0.0; n * 2],
+                &[new_ids.shape()[0], new_ids.shape()[1], 2],
+            )
+            .map_err(AutodiffError::from)
+        }
+    }
+
+    // 署名の固定（関数ポインタへの束縛）。
+    let _: fn(usize) -> SpeculativeConfig = SpeculativeConfig::new;
+    let _: fn(usize, usize, usize) -> Result<SchedulerLimits, AutodiffError> = SchedulerLimits::new;
+    let _: fn(&SchedulerLimits) -> usize = SchedulerLimits::max_active;
+    let _: fn(&SchedulerLimits) -> usize = SchedulerLimits::max_queued;
+    let _: fn(&SchedulerLimits) -> usize = SchedulerLimits::max_length;
+    let _: fn(SchedulerLimits) -> BatchScheduler = BatchScheduler::new;
+    let _: fn(&BatchScheduler) -> usize = BatchScheduler::queued_len;
+    let _: fn(&BatchScheduler) -> usize = BatchScheduler::active_len;
+    type SubmitFn =
+        fn(&mut BatchScheduler, &Tensor<i32>, &GenerateConfig) -> Result<RequestId, AutodiffError>;
+    let _: SubmitFn = BatchScheduler::submit;
+    let _: fn(&mut BatchScheduler, &Probe) -> Result<usize, AutodiffError> =
+        BatchScheduler::step::<Probe>;
+    type FinishedFn = fn(&mut BatchScheduler) -> Vec<(RequestId, Tensor<i32>)>;
+    let _: FinishedFn = BatchScheduler::take_finished;
+    type FailedFn = fn(&mut BatchScheduler) -> Vec<(RequestId, AutodiffError)>;
+    let _: FailedFn = BatchScheduler::take_failed;
+    type SpecFn = fn(
+        &Probe,
+        &Probe,
+        &Tensor<i32>,
+        &GenerateConfig,
+        &SpeculativeConfig,
+    ) -> Result<Tensor<i32>, AutodiffError>;
+    let _: SpecFn = generate_speculative::<Probe, Probe>;
+    // `?Sized` 境界（dyn モデルでも呼べること。呼び出しは実行せずコンパイルのみで検査する）。
+    fn dyn_models_are_accepted(
+        s: &mut BatchScheduler,
+        m: &dyn AutoregressiveModel,
+        ids: &Tensor<i32>,
+        cfg: &GenerateConfig,
+        spec: &SpeculativeConfig,
+    ) -> Result<(), AutodiffError> {
+        s.step(m)?;
+        generate_speculative(m, m, ids, cfg, spec)?;
+        Ok(())
+    }
+    let _ = dyn_models_are_accepted;
+
+    // derive の固定。
+    fn assert_spec<T: std::fmt::Debug + Clone + PartialEq>() {}
+    assert_spec::<SpeculativeConfig>();
+    fn assert_id<T: Copy + Eq + Ord + std::hash::Hash + std::fmt::Debug>() {}
+    assert_id::<RequestId>();
+    fn assert_limits<T: Copy + Eq + std::fmt::Debug>() {}
+    assert_limits::<SchedulerLimits>();
+    fn assert_debug<T: std::fmt::Debug>() {}
+    assert_debug::<BatchScheduler>();
+
+    // 公開フィールド `k` の読み出しと、型の同一性（内部クレートの型と同じであること）。
+    let spec = SpeculativeConfig::new(3);
+    let k: usize = spec.k;
+    assert_eq!(k, 3);
+    let _: fandhe_ai_autodiff::generate::speculative::SpeculativeConfig = spec;
+    let limits: fandhe_ai_autodiff::generate::scheduler::SchedulerLimits =
+        SchedulerLimits::new(1, 1, 2).unwrap();
+    let _: BatchScheduler = fandhe_ai_autodiff::generate::scheduler::BatchScheduler::new(limits);
+}
+
+/// 正の doctest プローブ: 連続バッチング・speculative の利用例が `inference/mod.rs` のモジュール doc に
+/// 実在し、実際にコンパイル・実行される形（`ignore` 等の指定・隠し行なし）であること。
+/// 実体のコンパイル・実行は `cargo test --doc`。
+#[test]
+fn speculative_scheduler_usage_doctests_are_present_and_compiled() {
+    let content = read_to_string_or_panic(&facade_crate_root().join("src/inference/mod.rs"));
+    let lines = inner_doc_lines(&content);
+    // 連続バッチングと speculative は別々の doctest ブロックで示す（各ブロックが自分の語を含むこと）。
+    for (label, needles) in [
+        (
+            "スケジューラ",
+            &[
+                "use fandhe_ai::inference::{",
+                "SchedulerLimits::new",
+                "BatchScheduler::new",
+                ".submit(",
+                ".step(&",
+                ".take_finished()",
+            ][..],
+        ),
+        (
+            "speculative",
+            &[
+                "use fandhe_ai::inference::{",
+                "SpeculativeConfig::new",
+                "generate_speculative(&",
+            ][..],
+        ),
+    ] {
+        let v = doctest_probe_violations(
+            &format!("inference/mod.rs モジュール doc（{label}）"),
+            &lines,
+            needles,
+        );
+        assert!(v.is_empty(), "{v:?}");
+    }
+}
+
+/// 実ファイルの `#[cfg(test)]` 以降を除いたソースを返す（テスト mod 内の `fn` を数えない）。
+fn without_test_mod(src: &str) -> &str {
+    src.find("#[cfg(test)]").map_or(src, |i| &src[..i])
+}
+
+/// `autodiff/src/generate/{scheduler.rs, speculative.rs}` の公開形が承認形（設計記録 §17.3）の
+/// 全数インベントリと一致しない箇所を返す。将来 pub メソッド・フィールドを足すと公開面が広がるため、
+/// 承認とセットで本インベントリを更新させる（厳密一致。§17.4 末行の帰結）。
+fn speculative_scheduler_public_shape_violations(sched_src: &str, spec_src: &str) -> Vec<String> {
+    let sched = tokens_of(without_test_mod(sched_src));
+    let spec = tokens_of(without_test_mod(spec_src));
+    let mut v = Vec::new();
+    let mut check = |label: &str, got: Vec<String>, want: &[&str]| {
+        let mut w: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+        w.sort();
+        if got != w {
+            v.push(format!("{label} の pub fn が承認形と不一致: {got:?}"));
+        }
+    };
+    check(
+        "impl BatchScheduler",
+        pb_pub_fn_names_in_inherent_impls(&sched, "BatchScheduler"),
+        &[
+            "new",
+            "queued_len",
+            "active_len",
+            "submit",
+            "step",
+            "take_finished",
+            "take_failed",
+        ],
+    );
+    check(
+        "impl SchedulerLimits",
+        pb_pub_fn_names_in_inherent_impls(&sched, "SchedulerLimits"),
+        &["new", "max_active", "max_queued", "max_length"],
+    );
+    check(
+        "impl SpeculativeConfig",
+        pb_pub_fn_names_in_inherent_impls(&spec, "SpeculativeConfig"),
+        &["new"],
+    );
+    // 型の本体（フィールド）。
+    match pb_single_block(
+        &spec,
+        &["pub", "struct", "SpeculativeConfig", "{"],
+        "SpeculativeConfig",
+    ) {
+        Ok((s, body)) => {
+            if body.concat().trim_end_matches(',') != "pubk:usize" {
+                v.push(format!(
+                    "SpeculativeConfig のフィールドが pub k のみではない: {}",
+                    body.concat()
+                ));
+            }
+            if !pb_has_non_exhaustive_before(&spec, s) {
+                v.push("SpeculativeConfig に #[non_exhaustive] が無い".to_string());
+            }
+        }
+        Err(e) => v.push(e),
+    }
+    match pb_single_block(
+        &sched,
+        &["pub", "struct", "SchedulerLimits", "{"],
+        "SchedulerLimits",
+    ) {
+        Ok((s, body)) => {
+            if body.concat().trim_end_matches(',')
+                != "max_active:usize,max_queued:usize,max_length:usize"
+            {
+                v.push(format!(
+                    "SchedulerLimits のフィールドが非公開 3 つのみではない: {}",
+                    body.concat()
+                ));
+            }
+            if !pb_has_non_exhaustive_before(&sched, s) {
+                v.push("SchedulerLimits に #[non_exhaustive] が無い".to_string());
+            }
+        }
+        Err(e) => v.push(e),
+    }
+    if pb_find_seq(
+        &sched,
+        &["pub", "struct", "RequestId", "(", "u64", ")", ";"],
+    )
+    .len()
+        != 1
+    {
+        v.push("RequestId が非公開フィールドの tuple struct 1 件ではない".to_string());
+    }
+    // speculative.rs の自由関数（深さ 0 の `pub fn`）は `generate_speculative` 1 件のみ
+    // （サンプリング版・B > 1 版の入口が無いことの否定プローブを兼ねる）。
+    let mut depth = 0usize;
+    let mut free_pub_fns = Vec::new();
+    for (i, t) in spec.iter().enumerate() {
+        match t.as_str() {
+            "{" => depth += 1,
+            "}" => depth = depth.saturating_sub(1),
+            "pub" if depth == 0 && spec.get(i + 1).map(String::as_str) != Some("(") => {
+                let k = skip_fn_declaration_qualifiers(&spec, i + 1);
+                if spec.get(k).map(String::as_str) == Some("fn")
+                    && let Some(n) = spec.get(k + 1)
+                {
+                    free_pub_fns.push(n.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    if free_pub_fns != ["generate_speculative"] {
+        v.push(format!(
+            "speculative.rs の自由な pub fn が generate_speculative 1 件のみではない: {free_pub_fns:?}"
+        ));
+    }
+    v
+}
+
+#[test]
+fn speculative_scheduler_public_shape_is_pinned() {
+    let dir = workspace_crates_dir().join("autodiff/src/generate");
+    let sched = read_to_string_or_panic(&dir.join("scheduler.rs"));
+    let spec = read_to_string_or_panic(&dir.join("speculative.rs"));
+    let v = speculative_scheduler_public_shape_violations(&sched, &spec);
+    assert!(
+        v.is_empty(),
+        "speculative／スケジューラの公開形が承認形（設計記録 §17.3・§17.4）と不一致\
+         （公開面の拡張は承認事項）: {v:?}"
+    );
+
+    // 自己テスト: 各類型の逸脱を検出する。
+    let mutate_s = |from: &str, to: &str| {
+        assert!(sched.contains(from), "{from}");
+        speculative_scheduler_public_shape_violations(&sched.replacen(from, to, 1), &spec)
+    };
+    let mutate_p = |from: &str, to: &str| {
+        assert!(spec.contains(from), "{from}");
+        speculative_scheduler_public_shape_violations(&sched, &spec.replacen(from, to, 1))
+    };
+    assert!(
+        !mutate_s(
+            "    pub fn queued_len(",
+            "    pub fn extra(&self) {}\n    pub fn queued_len("
+        )
+        .is_empty()
+    );
+    assert!(!mutate_s("    max_active: usize,", "    pub max_active: usize,").is_empty());
+    assert!(
+        !mutate_s(
+            "pub struct RequestId(u64);",
+            "pub struct RequestId(pub u64);"
+        )
+        .is_empty()
+    );
+    assert!(!mutate_p("    pub k: usize,", "    pub k: usize,\n    pub extra: u8,").is_empty());
+    assert!(
+        !mutate_p(
+            "pub fn generate_speculative<",
+            "pub fn generate_speculative_sampling() {}\npub fn generate_speculative<"
+        )
+        .is_empty()
+    );
+    // 空振り（対象不在）は拒否される。
+    assert!(!speculative_scheduler_public_shape_violations("", "").is_empty());
+}
+
+/// 否定プローブ: `KvCache` の公開メソッド集合が承認形（8 件）ちょうどで、`truncate`／`set_*` 等の
+/// 書き換え経路が増えていないこと（設計記録 §17.1 論点 3・4 は保留。`KvCache` は不変）。
+/// workspace の `crates/*/src` 全体の `impl KvCache` ブロックを走査する。
+#[test]
+fn kv_cache_public_methods_stay_unchanged_for_speculative_scheduler() {
+    let mut found: Vec<String> = Vec::new();
+    let mut blocks = 0usize;
+    let Ok(entries) = std::fs::read_dir(workspace_crates_dir()) else {
+        panic!("workspace crates ディレクトリが読めない");
+    };
+    for e in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        visit_rs_files(&e.join("src"), &mut |_p, content| {
+            let tokens = tokens_of(without_test_mod(content));
+            blocks += pb_find_seq(&tokens, &["impl", "KvCache", "{"]).len();
+            found.extend(pb_pub_fn_names_in_inherent_impls(&tokens, "KvCache"));
+        });
+    }
+    found.sort();
+    assert!(
+        blocks >= 1,
+        "impl KvCache が見つからない（検査対象の見失い）"
+    );
+    assert_eq!(
+        found,
+        [
+            "batch",
+            "clear",
+            "embed_dim",
+            "is_empty",
+            "k",
+            "new",
+            "seq_len",
+            "v"
+        ],
+        "KvCache の公開メソッドが承認形と不一致（truncate 等の追加は論点 4。承認事項）"
+    );
+}
+
+/// 否定プローブ: `kv_rewind` は autodiff 内で非公開のままで、facade の `src/` に `kv_rewind`／
+/// `KvSnapshot` のトークンが 1 件も無いこと（巻き戻し機構は公開しない。設計記録 §17.4）。
+#[test]
+fn kv_rewind_stays_private_and_absent_from_facade() {
+    let gen_mod = tokens_of(&read_to_string_or_panic(
+        &workspace_crates_dir().join("autodiff/src/generate/mod.rs"),
+    ));
+    let private_decls = pb_find_seq(&gen_mod, &["mod", "kv_rewind", ";"])
+        .into_iter()
+        .filter(|&i| i == 0 || !matches!(gen_mod[i - 1].as_str(), "pub" | ")"))
+        .count();
+    assert_eq!(
+        private_decls, 1,
+        "autodiff/src/generate/mod.rs に非公開の `mod kv_rewind;` がちょうど 1 件ある"
+    );
+    assert!(
+        pb_find_seq(&gen_mod, &["pub", "mod", "kv_rewind"]).is_empty()
+            && pb_find_seq(&gen_mod, &["pub", "(", "crate", ")", "mod", "kv_rewind"]).is_empty(),
+        "kv_rewind を公開してはならない"
+    );
+    for (rel, content) in facade_src_files() {
+        let tokens = tokens_of(&content);
+        assert!(
+            !tokens.iter().any(|t| t == "kv_rewind" || t == "KvSnapshot"),
+            "{rel}: facade に kv_rewind／KvSnapshot が現れてはならない"
+        );
+    }
 }

@@ -3,9 +3,9 @@
 //! parity テスト（イシュー #2890。設計記録
 //! `docs/facade-speculative-decoding-batching-design.md` §6.1・§6.3・§6.4・§11 行 10）。
 //!
-//! 両機能は autodiff の内部公開に留まり facade へは再エクスポートしていない
-//! （S1・S3 は承認待ち）。また facade には `BackendOps` を注入する経路が無い（REQ-12）
-//! ため、`generate_backend_parity.rs`・`kv_cache_backend_parity.rs` と同じ位置づけで
+//! 両機能は #2934 で facade `fandhe_ai::inference` へ純再エクスポート済み
+//! （結合テストは `speculative_batching_facade.rs`）。ただし facade には `BackendOps` を注入する
+//! 経路が無い（REQ-12）ため、`generate_backend_parity.rs`・`kv_cache_backend_parity.rs` と同じ位置づけで
 //! facade のテストコードから内部クレート `fandhe_ai_autodiff` を直接使う。
 //! CPU 上の一致は #2887（speculative）・#2889（scheduler）が autodiff 側で済ませている。
 //!
