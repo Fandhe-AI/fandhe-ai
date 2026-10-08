@@ -6,7 +6,8 @@
 //! 共通で使う `limits`（非信頼入力の上限）と `error`（型付きエラー）を置く。
 //! 配置・既定値・検査時機の正は `docs/facade-text-vectorization-design.md`
 //! §5・§6・§8。#2898 で標準化（`standardize`）と分割（`split`）の内部実装を
-//! 追加した（論点 3 は未承認のため設計記録 §3 の推奨定義に従う）。
+//! 追加した（論点 3 は未承認のため設計記録 §3 の推奨定義に従う）。#2900 で
+//! 語彙の直接指定と lookup（`vocab`）を追加した。
 //!
 //! 範囲外: サブワード分割・Unicode 正規化・ファイル形式の読み書き。ファイル・
 //! ネットワーク・スレッドは使わない（設計記録 §8 の機械検査契約。
@@ -28,3 +29,4 @@ pub(crate) mod error;
 pub(crate) mod limits;
 pub(crate) mod split;
 pub(crate) mod standardize;
+pub(crate) mod vocab;
