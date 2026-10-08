@@ -346,6 +346,9 @@ pub mod margin_focal_loss_ops;
 pub mod merge_ops;
 pub mod stat_reduce_ops;
 mod tape;
+// double-VJP 法の実現可能性検証テスト（イシュー #2880。テスト専用で本番公開面なし）。
+#[cfg(test)]
+mod double_vjp_feasibility_tests;
 #[cfg(test)]
 mod test_support;
 // テンソル積・距離・外積 4 演算（`kron`・`tensordot`・`cdist`・`cross`。イシュー #2640）。

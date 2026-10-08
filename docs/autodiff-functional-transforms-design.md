@@ -103,6 +103,7 @@
   4. 非対象 Op で型付きエラーになり、子テープが無変更であること。
 - 不成立の定義: 上のいずれかが満たせない、または既存契約（`create_graph` の対象 Op・`Op`／`BackendOps`）の変更が要る場合。その場合は実装せず承認依頼に戻す。
 - ゲート: 「成立した時点で Tier 2 へ移す」（spec `:236`）。`jvp`／`jacfwd` の実装 issue（§10 の 10）は、検証 issue（同 9）の成立と、spec 側の追記（ユーザー側の作業。実装 Agent は `docs/spec/` を編集しない）の両方に依存させ、自動では進めない。
+- **検証結果（#2880）: 成立**。判定基準 1〜4 を `Op::supports_create_graph()` の全区分で確認し、統一複合判定を外れた要素はなかった（詳細は §17）。成立しても Tier 2 への移行には spec 側の追記（ユーザー作業）と §10 の 10 の起票が要り、どちらも未実施である。
 
 ## 9. 依存追加・新規 `unsafe`・`Op`／`BackendOps` 拡張の要否
 
@@ -203,3 +204,19 @@
 - **新規物**: tolerance・baseline・依存・`unsafe` は追加していない。
 - **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認（§10 の 6・8）。
 - **スコープ外**: vmap と vjp・hvp の合成（#2878）、double-VJP 検証（#2880）、CUDA／Metal 実機 `#[ignore]` テストと `docs/perf/logs/` への申し送り（#2881。facade 側ファイル末尾へ追記する）、facade 公開（#2879 以降）、`vmap(grad)`・`out_dim`・複数入力・`VarF64` 版・f16。
+
+## 19. 実装記録（#2880・親 #2841。§10 の分解案 9: double-VJP 法の実現可能性検証）
+
+- **検証した形**: §8 の手順をテスト内の private ヘルパー `double_vjp_probe` として実行した（`u` を追跡ありの葉、`s = y ⊙ u`、`cg.grad(&x)` と `v` の積を子テープで逆伝播し `cg.child_var(&u)` の勾配を取る）。`jvp`／`jacfwd` の公開 API・内部 API は作っていない。`api_surface` の関数名インベントリ（`vjp`／`hvp`／`vmap`）の期待集合は変えていない。
+- **判定基準 1〜4 の結果**:
+  1. 閉形式 `x⊙x → 2x⊙v`・`tanh → (1−tanh²x)⊙v`・`relu → [x>0]⊙v`・`W x → W v` と一致し、二階項が混ざらないことを確認した。
+  2. 別テープの `jacobian_ops::jacobian` から作った `J·v`（ホスト f64 蓄積）と `common::req2_close` で全要素一致。新しい tolerance 定数・baseline は作っていない。
+  3. 全ケースで `child_var(&u)` が `Some`。`J ≢ 0` の区分では `grad(&x)` が `Some` で、子テープの backward が成功し `∂t/∂u` が `Some`（`None` をゼロへ丸めていない）。単体側では `grad(&x).requires_grad()` を直接 assert した。
+  4. `Max`・rank 3 `MatMul`・`Custom`・非対象 `ScalarUnary`（`Gelu`・`Selu`）で `Err(Backward)`、子テープ空、拒否呼び出しの前後で親テープ長が不変。新しい拒否ロジックは足していない。
+- **網羅した区分と置き場所**: 統合テスト `crates/autodiff/tests/double_vjp_feasibility.rs` に `Leaf`・`Add`（同形・bias パターン `[m,n]+[n]`・x が bias 側）・`Mul`・`Relu`／`Exp`／`Tanh`／`Sigmoid`・`Sum`／`Mean`（全体・軸指定）・`Reshape`／`BroadcastTo`／`Transpose`／`Permute`／`Narrow`・`Concat`（定数との連結・重複入力）・`Contiguous`（einsum 経由）・`MatMul`（x が左・右・両方）・`Where`・公開 `ScalarUnary` 16 種・公開 `ScalarBinary`（`Sub`／`Div`／`Pow`・比較 6 種〈J ≡ 0 の分岐〉）と合成ケース（MLP 形・`relu(tanh)`・`tanh(x)⊙x+exp(x)`）。`Var::scalar_unary`／`scalar_binary`／`contiguous` が `pub(crate)` のため、`ScalarUnary` の `Relu`／`Exp`／`Tanh`／`Sigmoid`・`ScalarBinary` の `Add`／`Mul`／`Maximum`／`Minimum`・`Contiguous` は `#[cfg(test)]` の単体テスト `crates/autodiff/src/double_vjp_feasibility_tests.rs` に置いた（`create_graph.rs` の既存単体テストと同じ前例。本番コードは変えていない）。
+- **キンク点**: 区分線形 Op の劣勾配規約は `build_cgrads` と `grad.rs` で独立に実装されているため、入力は 0・clamp 境界・`Maximum`／`Minimum` のタイから離した値にした。キンク上での一致は本検証の範囲外。
+- **副作用の契約**: 親テープへ足されるのは `u` と `mul` の 2 ノードのみ（`backward_create_graph` は足さない）。拒否時もこの 2 ノードは残る（`vjp` と同じ。事前検査は足さない）。
+- **新規物がないこと**: `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe`・tolerance・baseline はいずれも追加していない。`supports_create_graph` の対象も広げていない。
+- **範囲**: バックエンドはテスト用 naive 実装のみ。実 CPU バックエンド・CUDA／Metal 実機 parity は §10 の 4・11 の担当で、`#[ignore]` テストや実測ログは作っていない。
+- **承認状況**: 検証は成立したが、Tier 2 へ移したわけではない。移行には spec 側の追記（ユーザー作業）が必要で、`jvp`／`jacfwd` の実装 issue（§10 の 10）も未起票・未承認である。facade 公開形の承認も別である。
+- **スコープ外**: `jvp`／`jacfwd` の実装と公開、`supports_create_graph` の拡張（§11 の論点 5）、低精度 forward（論点 4）、`VarF64`、PyTorch fixture。
