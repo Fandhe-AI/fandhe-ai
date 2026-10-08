@@ -2,7 +2,9 @@
 
 > **2026-10-07 承認済み（推奨案どおり）。** 根拠は ルート #2499 の所有者コメント https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965 の「#2600: 本書 §4・§7 の推奨案（`Reduction` は root に出さない）」。以下の本文は承認前に書かれた推奨案の記録で、実装結果は末尾「10. 実装記録（#2602）」を参照。
 
-- イシュー: #2601（本記録の作成と承認依頼）・親 #2600・祖 #2542（Phase 3）・実装は #2602（承認後のみ）
+> **2026-10-08 追記: 損失のオプション型 5 つの公開パスと損失 5 本の `Var` 委譲は §11 に記録した（#2853。公開は #2854）。**
+
+- イシュー: #2601（本記録の作成と承認依頼）・親 #2600・祖 #2542（Phase 3）・実装は #2602（承認後のみ）。§11 は #2853（親 #2852）・実装は #2854
 - 調査基準: main `cb34712b`（2026-10-05）。以下の `file_path:line` はこの時点の実測で、#2602 着手時に再確認する
 - 承認状況: 2026-10-07 承認（上記コメント）。#2602 で実装済み
 
@@ -150,3 +152,123 @@ facade／autodiff のコード変更、ガードの新設・削除・反転、`d
 - `LossOpsHoldDoctestGuard` の doc の「オプション型の拒否は維持する」を、`nn::loss` 経由のみ公開済みと書き換えた（doctest 本文は不変）。全 hold doctest の glob 一覧（43 か所）に `use fandhe_ai::nn::loss::*;` を追加した
 - 到達テスト 3 件の import を `fandhe_ai::nn::loss` へ切り替え、facade のみで呼べることを検査する形にした。統合テスト `crates/facade/tests/nn_loss.rs` は 14 構造体の forward 値・勾配が対応する `Var` メソッドと bit 一致することを確認する
 - 行わなかったこと: `CrossEntropyLoss` への `new`／`Default` 追加（§7 (g)）、`loss_ops` の再エクスポート、`Tensor`／`Tape` 上の同名メソッド、Phase 4 保留中の損失 3 本の公開、依存・tolerance・baseline・`docs/spec/` の変更、CUDA／Metal の `#[ignore]` テスト（新規カーネルなし）
+
+## 11. オプション型 5 つの公開パスと損失 5 本の `Var` 委譲（#2853・承認済みの形）
+
+### 11.0 結論と承認の根拠
+
+- **オプション型 5 つは `fandhe_ai::nn::loss` の 1 経路だけで公開し、損失 5 本は `Var` の 1 行委譲メソッドにする。** 承認の根拠はルート #2499 の所有者コメント
+  https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061（2026-10-08）の「オプション型は `fandhe_ai::nn::loss` へ再エクスポートし、損失は `Var` の 1 行委譲にする」。#2853 側の参照コメントは https://github.com/Fandhe-AI/fandhe-ai/issues/2853#issuecomment-6052737704。
+  承認の範囲はこの方向と、それを本節に書いた形に限る。それ以上の承認は主張しない。
+- イシュー: #2853（本節）・親 #2852・Phase 7 親 #2841・ルート #2499。公開（コード・ガード）は #2854 で行い、本 PR では何も公開しない。
+- 調査基準: main `74171fb9`（2026-10-08）。`file_path:line` はこの時点の実測で、#2854 着手時に再確認する。
+
+### 11.1 オプション型 5 つの型名と公開パス
+
+| 型 | 定義（`crates/autodiff/src/`） | 公開パス |
+|---|---|---|
+| `BceWithLogitsOptions` | `elementwise_loss_ops.rs:62` | `fandhe_ai::nn::loss::BceWithLogitsOptions` |
+| `GaussianNllOptions` | `elementwise_loss_ops.rs:82` | `fandhe_ai::nn::loss::GaussianNllOptions` |
+| `MultiMarginOptions` | `margin_focal_loss_ops.rs:62` | `fandhe_ai::nn::loss::MultiMarginOptions` |
+| `MultiLabelSoftMarginOptions` | `margin_focal_loss_ops.rs:114` | `fandhe_ai::nn::loss::MultiLabelSoftMarginOptions` |
+| `SigmoidFocalLossOptions` | `margin_focal_loss_ops.rs`（`MultiLabelSoftMarginOptions` の直後） | `fandhe_ai::nn::loss::SigmoidFocalLossOptions` |
+
+- 明示列挙・別名なし・glob なしの純再エクスポート。クレートルート・`nn` 直下・モジュール別名（`elementwise_loss_ops`／`margin_focal_loss_ops`）には出さない（#2600 の「`Reduction` を root に出さない」と同じ方針）。
+- **`Reduction` は既存の `fandhe_ai::nn::loss::Reduction` の 1 経路のまま**で、経路を増やさない。
+- `fandhe_ai::nn::loss` の公開名は 19 名から 24 名（構造体 14・`Reduction`・オプション型 9）になる。§0〜§10 の「19 名」は当時の記録として書き換えない。
+
+### 11.2 内部の引き回し（既存 4 型と同じ方式）
+
+公開形（利用者に見えるパス）は承認どおり 1 つで、内部の引き回しは既存 4 型の方式（`crates/autodiff/src/nn/loss.rs:44-46` が `loss_ops` から `pub use`）から一意に定まる。未承認の新しい選択肢ではない。
+
+- 採用: 内部クレート `crates/autodiff/src/nn/loss.rs` に `pub use crate::elementwise_loss_ops::{BceWithLogitsOptions, GaussianNllOptions};` と `pub use crate::margin_focal_loss_ops::{MultiLabelSoftMarginOptions, MultiMarginOptions, SigmoidFocalLossOptions};` を足し、facade の `crates/facade/src/nn/loss.rs` は従来どおり `fandhe_ai_autodiff::nn::loss::` 接頭辞だけから 5 名を再エクスポートする。内部への追加は `pub use` 2 文の非破壊追加。
+- 理由: 正ガード `nn_loss_module_reexports_exactly_expected_surface`（`crates/facade/tests/api_surface.rs`）は facade `nn/loss.rs` の全 `pub use` が接頭辞 `fandhe_ai_autodiff::nn::loss::` を持つことを要求する。この契約を緩めずに済む。
+- 却下: facade が `fandhe_ai_autodiff::elementwise_loss_ops::…`／`margin_focal_loss_ops::…` から直接再エクスポートする案。接頭辞契約の緩和が要り、保留中のモジュール名が facade の `pub use` に現れて既存の否定ガード（`ELEMENTWISE_LOSS_IDENTS` 等）と衝突する。
+
+### 11.3 損失 5 本の `Var` 委譲シグネチャ
+
+導出規則: レシーバ = 自由関数の `input`、残りの引数は自由関数の順のまま、戻り値は `Result<Var<'t>, AutodiffError>`、本体は自由関数への 1 式委譲（PR #2837 の 3 本〈`crates/autodiff/src/var.rs` の `hinge_embedding_loss` ほか〉と同じ）。定義場所は `crates/autodiff/src/var.rs` の `impl<'t> Var<'t>`。
+
+```rust
+pub fn bce_with_logits_loss_with(
+    &self,
+    target: &Var<'t>,
+    reduction: Reduction,
+    options: &BceWithLogitsOptions,
+) -> Result<Var<'t>, AutodiffError>
+// 本体: crate::elementwise_loss_ops::bce_with_logits_loss_with(self, target, reduction, options)
+
+pub fn gaussian_nll_loss(
+    &self,
+    target: &Var<'t>,
+    var: &Var<'t>,
+    options: &GaussianNllOptions,
+    reduction: Reduction,
+) -> Result<Var<'t>, AutodiffError>
+// 本体: crate::elementwise_loss_ops::gaussian_nll_loss(self, target, var, options, reduction)
+
+pub fn multi_margin_loss(
+    &self,
+    target: &Tensor<i32>,
+    options: &MultiMarginOptions,
+    reduction: Reduction,
+) -> Result<Var<'t>, AutodiffError>
+// 本体: crate::margin_focal_loss_ops::multi_margin_loss(self, target, options, reduction)
+
+pub fn multilabel_soft_margin_loss(
+    &self,
+    target: &Tensor<f32>,
+    options: &MultiLabelSoftMarginOptions,
+    reduction: Reduction,
+) -> Result<Var<'t>, AutodiffError>
+// 本体: crate::margin_focal_loss_ops::multilabel_soft_margin_loss(self, target, options, reduction)
+
+pub fn sigmoid_focal_loss(
+    &self,
+    target: &Tensor<f32>,
+    options: &SigmoidFocalLossOptions,
+    reduction: Reduction,
+) -> Result<Var<'t>, AutodiffError>
+// 本体: crate::margin_focal_loss_ops::sigmoid_focal_loss(self, target, options, reduction)
+```
+
+- 利用者から見た型名: オプション型は `fandhe_ai::nn::loss::<型名>`、`Reduction` は `fandhe_ai::nn::loss::Reduction`、`Tensor` は `fandhe_ai::Tensor`、`AutodiffError` は facade の既存公開名。
+- **引数順の注意**: `bce_with_logits_loss_with` だけ `(target, reduction, options)` で、他 4 本は `(…, options, reduction)`。自由関数（`elementwise_loss_ops.rs:126`・`:240`、`margin_focal_loss_ops.rs:229`・`:338`・`:381`）の順をそのまま写した結果で、既存の `cross_entropy_loss_with`（reduction → options）と `triplet_margin_loss` 等（options → reduction）の先例に合う。順序を揃える変更は行わない（出荷済みの内部関数の順と食い違い、1 式委譲の固定とも合わなくなる）。
+
+### 11.4 オプション型の構築方法の確認（facade 単独で使えるか）
+
+結論: **5 つとも facade 単独で構築できる。「使えない場合は停止して列挙」の分岐には該当しない。**
+
+| 型 | `Default`（既定値） | ビルダー（`self` 消費・`Self` 返し） |
+|---|---|---|
+| `BceWithLogitsOptions` | derive（`pos_weight = None`） | `pos_weight(Tensor<f32>)` |
+| `GaussianNllOptions` | 手書き（`full = false`・`eps = 1e-6`） | `full(bool)`・`eps(f32)` |
+| `MultiMarginOptions` | 手書き（`p = 1`・`margin = 1.0`・`weight = None`） | `p(u8)`・`margin(f32)`・`weight(Tensor<f32>)` |
+| `MultiLabelSoftMarginOptions` | derive（`weight = None`） | `weight(Tensor<f32>)` |
+| `SigmoidFocalLossOptions` | 手書き（`alpha = Some(0.25)`・`gamma = 2.0`） | `alpha(Option<f32>)`・`gamma(f32)` |
+
+- 構築は `XOptions::default()` に続けてビルダーを連鎖する（例: `MultiMarginOptions::default().p(2).margin(0.5).weight(w)`、`SigmoidFocalLossOptions::default().alpha(None).gamma(0.0)`）。必要な型は `fandhe_ai::Tensor` と素のスカラー型だけで、facade から名指しできない型は引数に現れない。
+- 5 つとも `#[non_exhaustive]` かつ全フィールド非公開・`new` なしのため、構造体リテラルでは構築できない（意図どおり）。`Debug + Clone` のみで `Copy`・`PartialEq`・値の読み出し（`pub(crate)` のみ）は提供しない。
+- 公開後に契約として固定するもの: 型名、`Default` の既定値（上表）、ビルダーのメソッド名と引数型、`Debug + Clone`。`#[non_exhaustive]` と非公開フィールドにより将来のフィールド追加は非破壊。
+- 値の妥当性検査（`p` は 1 か 2、`eps`・`weight`・`pos_weight` は有限かつ非負、`alpha` は `[0, 1]` 等）は構築時ではなく損失の呼び出し時に委譲先の autodiff が型付きエラーで行う。facade は純再エクスポートと 1 式委譲だけで、検査の迂回経路を作らない。
+
+### 11.5 `fandhe-ai =0.10.0` 非破壊の確認
+
+- 追加のみ: `fandhe_ai::nn::loss` に 5 名、`Var` に 5 メソッド。既存項目のシグネチャ・意味論・`FitConfig` は不変。依存・`unsafe`・新規 `Op`・新規カーネルなし。
+- 名前衝突: 5 型名・5 メソッド名は 0.10.0 の facade 公開面に存在しない。`use fandhe_ai::nn::loss::*` の利用者のスコープに 5 名が増える点は、#2602 と同様に #2854 で `cargo test -p fandhe-ai --doc` により実測する（本記録では保証を断定しない）。
+
+### 11.6 公開しないもの
+
+クレートルート・`nn` 直下への再エクスポート、モジュール `elementwise_loss_ops`／`margin_focal_loss_ops` の再エクスポート、`Tensor`／`Tape` 上の同名メソッド、裸の自由関数、nn 構造体（`GaussianNllLoss` 等）、`BceWithLogitsLoss` の `pos_weight` 対応、`compat::Loss` への variant 追加、`reduction='none'`。いずれも保留またはスコープ外のまま。
+
+### 11.7 #2854 の実装スケッチ（本記録では実施しない）
+
+- `crates/autodiff/src/nn/loss.rs` の `pub use` 2 文、`crates/facade/src/nn/loss.rs` の `pub use` 5 名とモジュール doc（「19 名」の記述・doctest 追加）。
+- `crates/autodiff/src/var.rs` に委譲 5 本（doc に `fandhe_ai::nn::loss::…` の経路を書く）。
+- `crates/facade/src/lib.rs` の doc（オプション型 4 種の記述）と `ElementwiseLossOpsHoldDoctestGuard`・`MarginFocalLossOpsHoldDoctestGuard` の縮小（公開した型・メソッドのプローブを外し、モジュール名と `Tape`／`Tensor` 上の同名メソッドの拒否を残す）。
+- `crates/facade/tests/api_surface.rs`: `NN_LOSS_NAMES` 19 → 24、到達テスト、`ELEMENTWISE_LOSS_*`／マージン側の同種定数、`PHASE4_VAR_EXPECTED_BODIES` に 5 件、宣言場所インベントリ。
+- `crates/facade/tests/loss_var_delegates.rs` に 5 本（forward／backward が自由関数と bit 一致）。新規カーネルなしのため CUDA／Metal の新規 `#[ignore]`・実測申し送りは不要。
+
+### 11.8 本 PR（#2853）で行わないこと
+
+facade／autodiff のコード変更、ガードの新設・削除・反転、依存・tolerance・baseline・`docs/spec/` の変更、Issue 起票、ruleset・リポジトリ設定の変更。
