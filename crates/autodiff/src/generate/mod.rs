@@ -62,10 +62,8 @@
 //! - `pub(super)` は使わない。`generate` はクレート直下にあるため
 //!   `pub(super)` は `pub(crate)` と同じ範囲になり、クレート内の他経路から
 //!   検証を迂回した組み立てが可能になる
-//! - 子モジュール `kv_rewind`（KV キャッシュ巻き戻し。#2885）の項目は
-//!   `pub(super)` とする。子モジュール内の `pub(super)` は `generate` 配下
-//!   にしか見えず、上記の `generate` 直下の項目に関する方針とは矛盾しない
-//!   （クレート内の他経路へは露出しない。利用者は #2886 の `speculative`）
+//! - `kv_rewind`（KV キャッシュ巻き戻し。#2885）は非公開子モジュールで、項目は
+//!   `pub(super)`（`generate` 配下限定。1 段深いため `pub(crate)` より厳密に狭い）
 //! - `validate*` は非公開を保つ（A03。facade の `api_surface.rs` の
 //!   公開形インベントリが固定。`docs/facade-generate-decision.md` §13.4・§18.5）
 
@@ -75,10 +73,14 @@ use fandhe_ai_tensor_core::{ShapeError, Tensor};
 use crate::error::AutodiffError;
 use crate::nn::KvCache;
 
-// #2886（speculative）が使用するまで未使用。使用開始時にこの expect を撤去する。
+// #2886（speculative.rs）が呼び出すまでの暫定。呼び出し後は
+// `unfulfilled_lint_expectations` が落ちて除去が強制される（#2885）。
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "#2886（speculative）が使用する。使用開始時に撤去")
+    expect(
+        dead_code,
+        reason = "#2886（speculative.rs）が呼び出すまでの暫定。呼び出し後は unfulfilled_lint_expectations で除去が強制される"
+    )
 )]
 mod kv_rewind;
 

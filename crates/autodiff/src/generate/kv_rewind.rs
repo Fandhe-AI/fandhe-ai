@@ -1,277 +1,541 @@
-//! KV キャッシュ巻き戻しの内部部品（イシュー #2885。親 #2499 系列。設計正本
-//! `docs/facade-speculative-decoding-batching-design.md` §4.1 案 (i)・§7）。
+//! speculative decoding 用の KV キャッシュ巻き戻しヘルパー（イシュー #2885。
+//! 設計の正は `docs/facade-speculative-decoding-batching-design.md` §3・§4.1・§7）。
 //!
-//! speculative decoding（#2886）が target の検証 forward（draft の K トークン
-//! を 1 回で流す）の前に [`KvSnapshot::capture`] で `KvCache` 列を保存し、棄却時に
-//! [`KvSnapshot::restore`] で検証前の状態へ戻す。その後の受理分の再 forward
-//! （`forward_step`）は #2886 の責務で、本モジュールは差し替えのみを担う。
+//! # 役割
 //!
-//! # 不変条件
+//! speculative decoding（#2886 の `generate::speculative`）では、target が
+//! draft の K トークンを 1 回の forward でまとめて検証する。この forward で
+//! target／draft 双方の [`KvCache`] が K トークン分進むため、棄却位置より
+//! 後ろをキャッシュから外す必要がある。本モジュールは設計 §4.1 の**案 (i)**
+//! （検証 forward 前に `KvCache::clone()` を退避 → 棄却時に退避分へ復元 →
+//! 受理分だけを `forward_step` で再 forward）を `generate` 配下の内部
+//! ヘルパーとして提供する。`KvCache` は `Arc` 共有の `Tensor` を持つため
+//! clone は O(1) で、ヘルパー自身はバッファを確保しない。
 //!
-//! - `KvCache` の書き手は `MultiheadAttentionVars::forward_with_cache` のみ、
-//!   という不変条件を緩めない。本モジュールは `KvCache` に公開メソッドを足さず、
-//!   型全体の代入（`*cache = saved.clone()`）だけを行う。算術は一切行わない
-//!   （案 (ii) の `pub(crate)` 切り詰め・案 (iii) の `pub` 追加は採らない）
-//! - `KvCache::clone()` は `Tensor` の `Arc` 共有で O(1) であり、
-//!   `forward_with_cache` は `Var::cat` で作った新テンソルで丸ごと差し替える
-//!   ため、保存分の中身は後続 forward で変化しない（単体テストで固定）。
-//!   保存分を保持している間は旧テンソルのメモリが解放されない
+//! # 不変条件との関係
 //!
-//! # 対象外
+//! 復元は「過去に `forward_with_cache` が書いた `KvCache` 値を丸ごと書き戻す」
+//! だけである。`k`／`v` を個別に操作したり任意の `Tensor` を注入したりしない
+//! ため、「k／v は両方 Some か両方 None」「書き手は `forward_with_cache`
+//! のみ」の不変条件（`nn/attention.rs` の `KvCache` doc）は緩めない。`KvCache`
+//! への公開メソッド追加（案 (ii)）や `pub(crate)` 切り詰め（案 (iii)）は
+//! 設計 §10 論点 4 の承認事項であり本モジュールでは採らない。
 //!
-//! `num_kv_layers() == 0` のモデルには巻き戻す対象がなく、空の
-//! [`KvSnapshot`] の `restore` は no-op で `Ok` になる。内部状態保持型
-//! （`RefCell<StatefulAttention>` 等。`docs/facade-generate-decision.md`
-//! §17.4）は `num_kv_layers() == 0` で状態なし型と区別できず、本部品は内部状態
-//! を巻き戻せない。その型の speculative での扱いは設計記録 §10 の論点 3・8
-//! （未承認）であり本実装の対象外。
+//! # 可視性
+//!
+//! 項目は `pub(super)`（見える範囲は `crate::generate` 配下＝将来の兄弟
+//! `speculative.rs` を含む）。`generate` 直下のヘルパーでは `pub(super)` が
+//! `pub(crate)` と同じ範囲になるが、本モジュールは 1 段深いため `pub(super)`
+//! は厳密に狭い（#2894 の申し送り）。関数名は `validate` で始めない
+//! （facade `api_surface.rs` の `validate*` 非公開インベントリと紛れさせない）。
+//!
+//! # 対象外・失敗時の契約
+//!
+//! - `num_kv_layers() == 0` のモデルは巻き戻す対象がなく、黙って素通りさせず
+//!   `AutodiffError::InvalidArgument` で拒否する（設計 §4.1・§10 論点 3）
+//! - [`rewind_and_replay`] は失敗時に `Err` を返す前に退避時点の状態へ戻す
+//!   （複数層の `forward_step` は層をまたいで原子的でないため）。呼び出し側は
+//!   `Err` を伝播し、そのキャッシュで処理を続けないこと。[`KvSnapshot`] は値で
+//!   消費され使い回せない
+//! - B = 1 の制限は課さない（巻き戻し自体はバッチに依存しない。入口検査は
+//!   設計 §7 の順序で #2886 が行う）
+//!
+//! # 暫定の `dead_code` 抑止
+//!
+//! #2886 が呼び出すまで非テストビルドでは未使用になるため、`mod.rs` の
+//! `mod kv_rewind;` 宣言に `expect(dead_code)` を付けている。呼び出し開始後は
+//! `unfulfilled_lint_expectations` が落ちるので、**#2886 でこの属性を外す**こと。
+
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 use crate::nn::KvCache;
 
-/// 検証 forward 前の KV 状態の保存分（案 (i)）。
-#[derive(Debug, Clone)]
+use super::{AutoregressiveModel, validate_forward_step_output};
+
+/// 検証 forward 前に退避した KV キャッシュ配列（案 (i)）。
+///
+/// [`KvSnapshot::capture`] が作り、[`rewind_and_replay`] が値で消費する。
+#[derive(Debug)]
 pub(super) struct KvSnapshot {
-    layers: Vec<KvCache>,
+    caches: Vec<KvCache>,
+    seq_len: usize,
+    batch: Option<usize>,
+    embed_dim: Option<usize>,
 }
 
 impl KvSnapshot {
-    /// `caches` を層ごとに clone して保存する。`Arc` 共有のためデータは複製
-    /// されない。#2886 が検証 forward の直前に呼ぶ。
-    pub(super) fn capture(caches: &[KvCache]) -> KvSnapshot {
-        KvSnapshot {
-            layers: caches.to_vec(),
-        }
+    /// `caches` を退避する（`Arc` 共有の clone）。
+    ///
+    /// 層数ゼロ・層数不一致・層間で `seq_len`／`batch`／`embed_dim` が揃って
+    /// いない場合は巻き戻し位置が定まらないため `Err`。
+    pub(super) fn capture<M: AutoregressiveModel + ?Sized>(
+        model: &M,
+        caches: &[KvCache],
+    ) -> Result<KvSnapshot, AutodiffError> {
+        check_layer_count(model, caches.len())?;
+        let (seq_len, batch, embed_dim) = common_state(caches)?;
+        Ok(KvSnapshot {
+            caches: caches.to_vec(),
+            seq_len,
+            batch,
+            embed_dim,
+        })
     }
 
-    /// 保存分で `caches` を復元する。#2886 が棄却時に呼ぶ。
-    ///
-    /// 全層の検査を済ませてから書き込む（原子的）。いずれかの検査が失敗した
-    /// 場合は `caches` を一切変更せず `Err` を返す。**`Err` を受けた呼び出し側は
-    /// その `caches` で処理を続けてはならない**（握りつぶし禁止。fail-closed）。
-    /// 書き込み後の自己確認が失敗した場合も `Err` であり、同様に続行不可。
-    ///
-    /// # Errors
-    ///
-    /// - 層数が保存時と異なる、または現在の `seq_len` が保存時より短い
-    ///   （追記のみの履歴を前提とするため、`clear` 済み・別履歴の誤用）:
-    ///   `AutodiffError::InvalidArgument`
-    /// - 両方が非空で `batch`／`embed_dim` が保存時と異なる:
-    ///   `AutodiffError::InvalidArgument`
-    pub(super) fn restore(&self, caches: &mut [KvCache]) -> Result<(), AutodiffError> {
-        if caches.len() != self.layers.len() {
+    /// 退避時点の `S_cached`（全層共通）。
+    pub(super) fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+}
+
+fn check_layer_count<M: AutoregressiveModel + ?Sized>(
+    model: &M,
+    caches_len: usize,
+) -> Result<(), AutodiffError> {
+    let layers = model.num_kv_layers();
+    if layers == 0 || caches_len == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "kv_rewind: num_kv_layers() == 0（状態なしモデル）は KV キャッシュ巻き戻しの対象外"
+                .to_string(),
+        ));
+    }
+    if caches_len != layers {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "kv_rewind: caches の層数 {caches_len} が num_kv_layers() = {layers} と一致しない"
+        )));
+    }
+    Ok(())
+}
+
+/// 全層で共通の `(seq_len, batch, embed_dim)` を返す。揃っていなければ `Err`。
+type CommonState = (usize, Option<usize>, Option<usize>);
+
+fn common_state(caches: &[KvCache]) -> Result<CommonState, AutodiffError> {
+    let Some(first) = caches.first() else {
+        return Err(AutodiffError::InvalidArgument(
+            "kv_rewind: caches が空".to_string(),
+        ));
+    };
+    let state = (first.seq_len(), first.batch(), first.embed_dim());
+    for (i, c) in caches.iter().enumerate() {
+        if (c.seq_len(), c.batch(), c.embed_dim()) != state {
             return Err(AutodiffError::InvalidArgument(format!(
-                "KvSnapshot::restore: 層数が保存時と異なる（保存 {} / 現在 {}）",
-                self.layers.len(),
-                caches.len()
+                "kv_rewind: 層 {i} の KV キャッシュ状態が層 0 と揃っていない"
             )));
         }
-        for (i, (saved, cur)) in self.layers.iter().zip(caches.iter()).enumerate() {
-            if cur.seq_len() < saved.seq_len() {
-                return Err(AutodiffError::InvalidArgument(format!(
-                    "KvSnapshot::restore: 層 {i} の現在の seq_len {} が保存時の {} より短い\
-                     （追記のみの履歴でない）",
-                    cur.seq_len(),
-                    saved.seq_len()
-                )));
-            }
-            if !saved.is_empty()
-                && !cur.is_empty()
-                && (saved.batch() != cur.batch() || saved.embed_dim() != cur.embed_dim())
-            {
-                return Err(AutodiffError::InvalidArgument(format!(
-                    "KvSnapshot::restore: 層 {i} の batch／embed_dim が保存時と異なる"
-                )));
-            }
-        }
-        for (saved, cur) in self.layers.iter().zip(caches.iter_mut()) {
-            *cur = saved.clone();
-        }
-        // 書き込み後の自己確認（fail-closed）。
-        for (i, (saved, cur)) in self.layers.iter().zip(caches.iter()).enumerate() {
-            if cur.is_empty() != saved.is_empty()
-                || cur.seq_len() != saved.seq_len()
-                || cur.batch() != saved.batch()
-                || cur.embed_dim() != saved.embed_dim()
-            {
-                return Err(AutodiffError::InvalidArgument(format!(
-                    "KvSnapshot::restore: 層 {i} の復元後の状態が保存分と一致しない"
-                )));
-            }
-        }
-        Ok(())
     }
+    Ok(state)
+}
+
+/// 退避時点の状態へ丸ごと書き戻す（`KvCache` 値の代入のみ）。
+fn restore(caches: &mut [KvCache], snapshot: &KvSnapshot) -> Result<(), AutodiffError> {
+    if caches.len() != snapshot.caches.len() {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "kv_rewind: 復元先の層数 {} が退避時の {} と一致しない",
+            caches.len(),
+            snapshot.caches.len()
+        )));
+    }
+    for (dst, src) in caches.iter_mut().zip(&snapshot.caches) {
+        *dst = src.clone();
+    }
+    Ok(())
+}
+
+/// 退避分へ復元し、`accepted_ids`（`[B, L_acc]`）を再 forward する。
+///
+/// `L_acc == 0`（全棄却。speculative の正常結果）は復元のみで `Ok(None)`。
+/// `L_acc >= 1` は再 forward の logits（`[B, L_acc, V]`）を `Ok(Some(..))` で返す。
+/// 失敗時は退避時点へ戻してから `Err` を返す（モジュール doc 参照）。
+pub(super) fn rewind_and_replay<M: AutoregressiveModel + ?Sized>(
+    model: &M,
+    caches: &mut [KvCache],
+    snapshot: KvSnapshot,
+    accepted_ids: &Tensor<i32>,
+    expected_vocab: usize,
+) -> Result<Option<Tensor<f32>>, AutodiffError> {
+    // 層数検査（ここまで caches に触れない）
+    check_layer_count(model, caches.len())?;
+    if caches.len() != snapshot.caches.len() {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "kv_rewind: caches の層数 {} が退避時の {} と一致しない",
+            caches.len(),
+            snapshot.caches.len()
+        )));
+    }
+    // accepted_ids 検査（復元前に拒否）
+    let shape = accepted_ids.shape();
+    if shape.len() != 2 {
+        return Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    let (b, l_acc) = (shape[0], shape[1]);
+    if let Some(snap_b) = snapshot.batch
+        && snap_b != b
+    {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: shape.to_vec(),
+            rhs: vec![snap_b, l_acc],
+        }));
+    }
+    let expected_seq = snapshot.seq_len.checked_add(l_acc).ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "kv_rewind: seq_len + L_acc が usize をオーバーフローする".to_string(),
+        )
+    })?;
+
+    restore(caches, &snapshot)?;
+    // 全棄却は speculative の正常な結果なのでエラーにしない
+    if l_acc == 0 {
+        return Ok(None);
+    }
+    match replay(
+        model,
+        caches,
+        &snapshot,
+        accepted_ids,
+        (b, l_acc),
+        expected_seq,
+        expected_vocab,
+    ) {
+        Ok(logits) => Ok(Some(logits)),
+        Err(e) => {
+            // 層をまたいで原子的でない forward_step の途中状態を残さない。
+            // 復元自体は長さ検査済みで失敗しないため、元のエラーを優先して返す。
+            let _ = restore(caches, &snapshot);
+            Err(e)
+        }
+    }
+}
+
+fn replay<M: AutoregressiveModel + ?Sized>(
+    model: &M,
+    caches: &mut [KvCache],
+    snapshot: &KvSnapshot,
+    accepted_ids: &Tensor<i32>,
+    (b, l_acc): (usize, usize),
+    expected_seq: usize,
+    expected_vocab: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let logits = model.forward_step(accepted_ids, caches)?;
+    let vocab = validate_forward_step_output(&logits, b, l_acc)?;
+    if vocab != expected_vocab {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: logits.shape().to_vec(),
+            rhs: vec![b, l_acc, expected_vocab],
+        }));
+    }
+    let (seq_len, batch, embed_dim) = common_state(caches)?;
+    if seq_len != expected_seq
+        || batch != Some(b)
+        || (snapshot.embed_dim.is_some() && embed_dim != snapshot.embed_dim)
+    {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "kv_rewind: 再 forward 後の KV キャッシュが期待と異なる \
+             （seq_len {seq_len} / 期待 {expected_seq}、batch {batch:?} / 期待 {b}）"
+        )));
+    }
+    Ok(logits)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Tape;
-    use crate::nn::MultiheadAttention;
-    use fandhe_ai_tensor_core::Tensor;
+    use crate::nn::{LinearVars, MultiheadAttentionVars};
+    use std::cell::Cell;
 
+    const V: usize = 4;
     const E: usize = 4;
-    const H: usize = 2;
+    const HEADS: usize = 2;
 
-    fn seq(b: usize, len: usize, phase: f32) -> Tensor<f32> {
-        let data: Vec<f32> = (0..b * len * E)
-            .map(|i| (i as f32 * 0.37 + phase).sin())
-            .collect();
-        Tensor::new(data, &[b, len, E]).expect("test fixture: 形状とデータ長は一致")
+    fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
+        Tensor::new(data, shape).expect("fixture: shape とデータ長は一致させている")
     }
 
-    fn mha(seed: u64) -> MultiheadAttention {
-        MultiheadAttention::new(E, H, true, seed).expect("test fixture")
+    fn seq(seed: i64, len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|i| ((seed + i as i64 * 7) % 13 - 6) as f32 * 0.05)
+            .collect()
     }
 
-    /// 実際の `forward_with_cache` で `cache` を伸ばし、出力を返す。
-    fn step(m: &MultiheadAttention, x: &Tensor<f32>, cache: &mut KvCache) -> Tensor<f32> {
-        let tape = Tape::new();
-        let xv = tape.var(x);
-        m.bind(&tape)
-            .forward_with_cache(&xv, &xv, &xv, cache)
-            .expect("test fixture: forward_with_cache")
-            .to_tensor()
+    fn ids(v: Vec<i32>, b: usize) -> Tensor<i32> {
+        let l = v.len() / b;
+        Tensor::new(v, &[b, l]).expect("fixture")
     }
 
-    fn flat(t: &Tensor<f32>) -> (Vec<usize>, Vec<f32>) {
-        (t.shape().to_vec(), t.host_slice().to_vec())
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fault {
+        None,
+        /// N 回目（1 始まり）の forward_step 呼び出しで Err
+        FailAtCall(usize),
+        /// キャッシュを一切進めない
+        SkipCache,
+        /// 第 0 層のみ進める
+        OnlyFirstLayer,
+        /// 語彙サイズを V + 1 にする
+        BadVocab,
+        /// L 軸を +1 にする
+        BadLen,
     }
 
-    fn assert_same(a: &KvCache, b: &KvCache) {
-        assert_eq!(a.is_empty(), b.is_empty());
-        assert_eq!(a.seq_len(), b.seq_len());
-        assert_eq!(a.batch(), b.batch());
-        assert_eq!(a.embed_dim(), b.embed_dim());
-        assert_eq!(a.k().map(flat), b.k().map(flat));
-        assert_eq!(a.v().map(flat), b.v().map(flat));
+    /// `Embedding → MHA（KV キャッシュ付き）× layers → lm head` のテスト専用モデル。
+    struct TestModel {
+        layers: usize,
+        fault: Fault,
+        calls: Cell<usize>,
     }
 
-    /// REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）。
-    fn close(a: f32, b: f32) -> bool {
-        let d = (a as f64 - b as f64).abs();
-        d < 1e-5 || d / (b as f64).abs().max(f64::MIN_POSITIVE) < 1e-3
+    impl TestModel {
+        fn new(layers: usize, fault: Fault) -> TestModel {
+            TestModel {
+                layers,
+                fault,
+                calls: Cell::new(0),
+            }
+        }
     }
 
+    impl AutoregressiveModel for TestModel {
+        fn num_kv_layers(&self) -> usize {
+            self.layers
+        }
+
+        fn forward_step(
+            &self,
+            new_ids: &Tensor<i32>,
+            caches: &mut [KvCache],
+        ) -> Result<Tensor<f32>, AutodiffError> {
+            let n = self.calls.get() + 1;
+            self.calls.set(n);
+            if self.fault == Fault::FailAtCall(n) {
+                return Err(AutodiffError::InvalidArgument("fixture: 注入失敗".into()));
+            }
+            let tape = Tape::new();
+            let emb = tape.var(&t(seq(1, V * E), &[V, E]));
+            let mut x = emb.embedding(new_ids, None)?;
+            let run = match self.fault {
+                Fault::SkipCache => 0,
+                Fault::OnlyFirstLayer => 1.min(self.layers),
+                _ => self.layers,
+            };
+            for cache in caches.iter_mut().take(run) {
+                let lin = |s: i64| LinearVars {
+                    weight: tape.var(&t(seq(s, E * E), &[E, E])),
+                    bias: Some(tape.var(&t(seq(s + 1, E), &[E]))),
+                };
+                let mha = MultiheadAttentionVars::new(HEADS, lin(2), lin(4), lin(6), lin(8))?;
+                x = mha.forward_with_cache(&x, &x, &x, cache)?;
+            }
+            let (b, l) = (new_ids.shape()[0], new_ids.shape()[1]);
+            let flat = x.reshape(&[b * l, E])?;
+            let lm = LinearVars {
+                weight: tape.var(&t(seq(10, E * V), &[E, V])),
+                bias: Some(tape.var(&t(seq(9, V), &[V]))),
+            };
+            let logits = lm.forward(&flat)?.reshape(&[b, l, V])?.to_tensor();
+            Ok(match self.fault {
+                Fault::BadVocab => t(vec![0.0; b * l * (V + 1)], &[b, l, V + 1]),
+                Fault::BadLen => t(vec![0.0; b * (l + 1) * V], &[b, l + 1, V]),
+                _ => logits,
+            })
+        }
+    }
+
+    fn bits(t: &Tensor<f32>) -> Vec<u32> {
+        t.contiguous()
+            .host_slice()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    /// `KvCache` は `PartialEq` を持たない（公開面を広げない）ため bit 一致で比較する。
+    fn assert_kv_bit_eq(a: &[KvCache], b: &[KvCache]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!(x.is_empty(), y.is_empty());
+            assert_eq!(x.seq_len(), y.seq_len());
+            assert_eq!(x.batch(), y.batch());
+            assert_eq!(x.embed_dim(), y.embed_dim());
+            for (p, q) in [(x.k(), y.k()), (x.v(), y.v())] {
+                match (p, q) {
+                    (None, None) => {}
+                    (Some(p), Some(q)) => {
+                        assert_eq!(p.shape(), q.shape());
+                        assert_eq!(bits(p), bits(q));
+                    }
+                    _ => panic!("k/v の有無が不一致"),
+                }
+            }
+        }
+    }
+
+    /// prefill（3 トークン）済みのモデルとキャッシュを作る。
+    fn prefilled(layers: usize, fault: Fault) -> (TestModel, Vec<KvCache>) {
+        let model = TestModel::new(layers, fault);
+        let mut caches = vec![KvCache::new(); layers];
+        TestModel::new(layers, Fault::None)
+            .forward_step(&ids(vec![0, 1, 2], 1), &mut caches)
+            .expect("prefill");
+        (model, caches)
+    }
+
+    // T1: 往復で検証 forward 前と bit 一致する
     #[test]
-    fn restore_returns_cache_identical_to_pre_verify_state() {
-        let m = mha(11);
-        let mut caches = vec![KvCache::new()];
-        step(&m, &seq(1, 3, 0.0), &mut caches[0]);
-        let snap = KvSnapshot::capture(&caches);
-        let before = caches[0].clone();
-        step(&m, &seq(1, 2, 1.0), &mut caches[0]); // 検証 forward（L_new=2）
-        assert_eq!(caches[0].seq_len(), 5);
-        snap.restore(&mut caches).unwrap();
-        assert_eq!(caches[0].seq_len(), 3);
-        assert_same(&caches[0], &before);
+    fn restore_returns_to_pre_verify_state() {
+        for layers in [1, 2] {
+            let (model, mut caches) = prefilled(layers, Fault::None);
+            let before = caches.clone();
+            let snap = KvSnapshot::capture(&model, &caches).unwrap();
+            assert_eq!(snap.seq_len(), 3);
+            model
+                .forward_step(&ids(vec![3, 0, 1, 2], 1), &mut caches)
+                .unwrap();
+            assert_eq!(caches[0].seq_len(), 7);
+            // 検証 forward が退避側を書き換えていない
+            assert_kv_bit_eq(&snap.caches, &before);
+            restore(&mut caches, &snap).unwrap();
+            assert_kv_bit_eq(&caches, &before);
+        }
     }
 
-    #[test]
-    fn snapshot_is_unaffected_by_later_forward() {
-        let m = mha(11);
-        let mut caches = vec![KvCache::new()];
-        step(&m, &seq(1, 3, 0.0), &mut caches[0]);
-        let snap = KvSnapshot::capture(&caches);
-        let k_before = flat(snap.layers[0].k().unwrap());
-        let v_before = flat(snap.layers[0].v().unwrap());
-        step(&m, &seq(1, 1, 2.0), &mut caches[0]);
-        step(&m, &seq(1, 2, 3.0), &mut caches[0]);
-        assert_eq!(snap.layers[0].seq_len(), 3);
-        assert_eq!(flat(snap.layers[0].k().unwrap()), k_before);
-        assert_eq!(flat(snap.layers[0].v().unwrap()), v_before);
+    fn reference(layers: usize, accepted: Vec<i32>) -> (Vec<KvCache>, Tensor<f32>) {
+        let (model, mut caches) = prefilled(layers, Fault::None);
+        let logits = model.forward_step(&ids(accepted, 1), &mut caches).unwrap();
+        (caches, logits)
     }
 
+    // T2・T4: 部分受理・全受理の再 forward が新規キャッシュの同分割と bit 一致する
     #[test]
-    fn replay_after_restore_matches_straight_run() {
-        let m = mha(11);
-        let accepted = seq(1, 1, 4.0);
-
-        let mut rewound = vec![KvCache::new()];
-        step(&m, &seq(1, 3, 0.0), &mut rewound[0]);
-        let snap = KvSnapshot::capture(&rewound);
-        step(&m, &seq(1, 2, 1.0), &mut rewound[0]);
-        snap.restore(&mut rewound).unwrap();
-        let out_rewound = step(&m, &accepted, &mut rewound[0]);
-
-        let mut straight = [KvCache::new()];
-        step(&m, &seq(1, 3, 0.0), &mut straight[0]);
-        let out_straight = step(&m, &accepted, &mut straight[0]);
-
-        let (sa, da) = flat(&out_rewound);
-        let (sb, db) = flat(&out_straight);
-        assert_eq!(sa, sb);
-        assert!(da.iter().zip(&db).all(|(a, b)| close(*a, *b)));
-        assert_eq!(rewound[0].seq_len(), straight[0].seq_len());
+    fn replay_matches_fresh_split_forward() {
+        for layers in [1, 2] {
+            for accepted in [vec![3], vec![3, 0], vec![3, 0, 1, 2]] {
+                let (model, mut caches) = prefilled(layers, Fault::None);
+                let snap = KvSnapshot::capture(&model, &caches).unwrap();
+                model
+                    .forward_step(&ids(vec![3, 0, 1, 2], 1), &mut caches)
+                    .unwrap();
+                let got =
+                    rewind_and_replay(&model, &mut caches, snap, &ids(accepted.clone(), 1), V)
+                        .unwrap()
+                        .expect("L_acc >= 1");
+                let (want_caches, want_logits) = reference(layers, accepted.clone());
+                assert_eq!(caches[0].seq_len(), 3 + accepted.len());
+                assert_kv_bit_eq(&caches, &want_caches);
+                assert_eq!(bits(&got), bits(&want_logits));
+            }
+        }
     }
 
+    // T3: 全棄却は復元のみ・forward を呼ばない
     #[test]
-    fn restore_empty_snapshot_for_zero_layers_is_noop() {
-        let snap = KvSnapshot::capture(&[]);
+    fn zero_accepted_restores_without_forward() {
+        let (model, mut caches) = prefilled(2, Fault::None);
+        let before = caches.clone();
+        let snap = KvSnapshot::capture(&model, &caches).unwrap();
+        model
+            .forward_step(&ids(vec![3, 0], 1), &mut caches)
+            .unwrap();
+        let calls = model.calls.get();
+        let empty = Tensor::new(Vec::<i32>::new(), &[1, 0]).unwrap();
+        let out = rewind_and_replay(&model, &mut caches, snap, &empty, V).unwrap();
+        assert!(out.is_none());
+        assert_eq!(model.calls.get(), calls, "forward を呼ばない");
+        assert_kv_bit_eq(&caches, &before);
+    }
+
+    // T5: 状態なしモデルは対象外
+    #[test]
+    fn stateless_model_is_rejected() {
+        let model = TestModel::new(0, Fault::None);
         let mut caches: Vec<KvCache> = Vec::new();
-        snap.restore(&mut caches).unwrap();
-        assert!(caches.is_empty());
+        assert!(KvSnapshot::capture(&model, &caches).is_err());
+        let snap = KvSnapshot {
+            caches: Vec::new(),
+            seq_len: 0,
+            batch: None,
+            embed_dim: None,
+        };
+        assert!(rewind_and_replay(&model, &mut caches, snap, &ids(vec![0], 1), V).is_err());
     }
 
+    // T6: 層数不一致は caches に触れず拒否
     #[test]
-    fn restore_rejects_layer_count_mismatch_without_mutation() {
-        let m = mha(11);
-        let mut caches = vec![KvCache::new(), KvCache::new()];
-        step(&m, &seq(1, 2, 0.0), &mut caches[0]);
-        step(&m, &seq(1, 2, 0.5), &mut caches[1]);
-        let snap = KvSnapshot::capture(&caches);
-        let mut fewer = vec![caches[0].clone()];
-        let orig = fewer[0].clone();
-        assert!(snap.restore(&mut fewer).is_err());
-        assert_same(&fewer[0], &orig);
+    fn layer_count_mismatch_is_rejected_without_touching_caches() {
+        let (model, caches) = prefilled(2, Fault::None);
+        assert!(KvSnapshot::capture(&model, &caches[..1]).is_err());
+        let snap = KvSnapshot::capture(&model, &caches).unwrap();
+        let mut short = caches[..1].to_vec();
+        let before = short.clone();
+        let r = rewind_and_replay(&model, &mut short, snap, &ids(vec![0], 1), V);
+        assert!(r.is_err());
+        assert_kv_bit_eq(&short, &before);
     }
 
-    #[test]
-    fn restore_rejects_shorter_current_cache_without_mutation() {
-        let m = mha(11);
-        let mut caches = vec![KvCache::new()];
-        step(&m, &seq(1, 3, 0.0), &mut caches[0]);
-        let snap = KvSnapshot::capture(&caches);
-        caches[0].clear();
-        assert!(snap.restore(&mut caches).is_err());
-        assert!(caches[0].is_empty());
+    fn assert_fault_restores(fault: Fault) {
+        let (model, mut caches) = prefilled(2, fault);
+        let before = caches.clone();
+        let snap = KvSnapshot::capture(&model, &caches).unwrap();
+        model.calls.set(0);
+        let r = rewind_and_replay(&model, &mut caches, snap, &ids(vec![3, 0], 1), V);
+        assert!(r.is_err());
+        assert_kv_bit_eq(&caches, &before);
     }
 
+    // T7: 再 forward の Err は伝播し退避時点へ戻る
     #[test]
-    fn restore_rejects_batch_mismatch_without_mutation() {
-        let m = mha(11);
-        let mut caches = vec![KvCache::new()];
-        step(&m, &seq(1, 2, 0.0), &mut caches[0]);
-        let snap = KvSnapshot::capture(&caches);
-        let mut other = vec![KvCache::new()];
-        step(&m, &seq(2, 3, 0.0), &mut other[0]);
-        let orig = other[0].clone();
-        assert!(snap.restore(&mut other).is_err());
-        assert_same(&other[0], &orig);
+    fn forward_error_propagates_and_restores() {
+        assert_fault_restores(Fault::FailAtCall(1));
     }
 
+    // T8: キャッシュが進まない／一部の層だけ進む
     #[test]
-    fn multi_layer_restore_is_atomic_and_complete() {
-        let m = mha(11);
-        let mut caches = vec![KvCache::new(), KvCache::new()];
-        step(&m, &seq(1, 2, 0.0), &mut caches[0]);
-        step(&m, &seq(1, 2, 0.5), &mut caches[1]);
-        let snap = KvSnapshot::capture(&caches);
-        let before: Vec<KvCache> = caches.clone();
+    fn cache_not_advanced_is_detected_and_restores() {
+        assert_fault_restores(Fault::SkipCache);
+        assert_fault_restores(Fault::OnlyFirstLayer);
+    }
 
-        // 全層が伸びた状態から一括復元される。
-        step(&m, &seq(1, 2, 1.0), &mut caches[0]);
-        step(&m, &seq(1, 2, 1.5), &mut caches[1]);
-        snap.restore(&mut caches).unwrap();
-        assert_same(&caches[0], &before[0]);
-        assert_same(&caches[1], &before[1]);
+    // T9: logits の shape・vocab 不一致
+    #[test]
+    fn bad_logits_are_detected_and_restore() {
+        assert_fault_restores(Fault::BadVocab);
+        assert_fault_restores(Fault::BadLen);
+        let (model, mut caches) = prefilled(1, Fault::None);
+        let before = caches.clone();
+        let snap = KvSnapshot::capture(&model, &caches).unwrap();
+        let r = rewind_and_replay(&model, &mut caches, snap, &ids(vec![3], 1), V + 1);
+        assert!(r.is_err());
+        assert_kv_bit_eq(&caches, &before);
+    }
 
-        // 後ろの層だけ検査失敗: 先頭層も書き換わらない。
-        step(&m, &seq(1, 2, 2.0), &mut caches[0]);
-        caches[1].clear();
-        let grown0 = caches[0].clone();
-        assert!(snap.restore(&mut caches).is_err());
-        assert_same(&caches[0], &grown0);
-        assert!(caches[1].is_empty());
+    // T10: accepted_ids の rank・バッチ不一致は復元前に拒否（caches 不変）
+    #[test]
+    fn bad_accepted_ids_rejected_before_restore() {
+        let (model, mut caches) = prefilled(1, Fault::None);
+        let snap_a = KvSnapshot::capture(&model, &caches).unwrap();
+        let snap_b = KvSnapshot::capture(&model, &caches).unwrap();
+        // 検証 forward でキャッシュを進めた状態を「不変」の基準にする
+        model.forward_step(&ids(vec![3], 1), &mut caches).unwrap();
+        let advanced = caches.clone();
+        let rank1 = Tensor::new(vec![0i32, 1], &[2]).unwrap();
+        assert!(rewind_and_replay(&model, &mut caches, snap_a, &rank1, V).is_err());
+        assert_kv_bit_eq(&caches, &advanced);
+        let batch2 = ids(vec![0, 1], 2);
+        assert!(rewind_and_replay(&model, &mut caches, snap_b, &batch2, V).is_err());
+        assert_kv_bit_eq(&caches, &advanced);
+    }
+
+    // T11: 層間で seq_len が揃っていないキャッシュは capture で拒否
+    #[test]
+    fn misaligned_layers_are_rejected_at_capture() {
+        let (model, mut caches) = prefilled(2, Fault::None);
+        let only0 = TestModel::new(2, Fault::OnlyFirstLayer);
+        only0.forward_step(&ids(vec![3], 1), &mut caches).unwrap();
+        assert_ne!(caches[0].seq_len(), caches[1].seq_len());
+        assert!(KvSnapshot::capture(&model, &caches).is_err());
     }
 }
