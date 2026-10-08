@@ -25,9 +25,9 @@ REQ-2（統一複合判定）・REQ-8・REQ-12 は不変。新しい判定契約
 
 | 既存物 | 位置 | 本件での使い方 |
 |---|---|---|
-| `generate()` | `crates/autodiff/src/generate.rs:444` | 無状態関数。`caches`（`model.num_kv_layers()` 個の `KvCache`）と `Generator::new(config.seed)` を内部で 1 回確保（`:520-521`）、prefill `[B, T]`（`:526`）→ decode `[B, 1]`（`:541`）。EOS 早期停止・pad・top-p はなく常に `max_length` まで。**不変** |
-| `AutoregressiveModel` | `generate.rs:221` | `forward_step(&self, new_ids, &mut [KvCache])`。draft・target ともこの trait で受ける |
-| 非公開ヘルパー | `generate.rs`: `validate_forward_step_output`:252・`validate_vocab_le_i32_max`:283・`greedy_argmax`:295・`softmax_weights_f64`:309・`top_k_indices`:321・`sample_step`:344・`build_output`:403・`GenerateConfig::validate`:141・`validate_top_k_le_vocab`:202 | speculative 側で再利用する（可視性の拡張は §4）。サンプリングはホスト `f64`・独立 `Generator`（グローバル RNG 非消費） |
+| `generate()` | `crates/autodiff/src/generate/mod.rs`（`pub fn generate`） | 無状態関数。`caches`（`model.num_kv_layers()` 個の `KvCache`）と `Generator::new(config.seed)` を内部で 1 回確保、prefill `[B, T]` → decode `[B, 1]`。EOS 早期停止・pad・top-p はなく常に `max_length` まで。**不変** |
+| `AutoregressiveModel` | `generate/mod.rs`（`pub trait AutoregressiveModel`） | `forward_step(&self, new_ids, &mut [KvCache])`。draft・target ともこの trait で受ける |
+| 非公開ヘルパー | `generate/mod.rs`: `validate_forward_step_output`・`validate_vocab_le_i32_max`・`greedy_argmax`・`softmax_weights_f64`・`top_k_indices`・`sample_step`・`build_output`・`GenerateConfig::validate`・`validate_top_k_le_vocab` | speculative 側で再利用する（可視性の拡張は §4）。サンプリングはホスト `f64`・独立 `Generator`（グローバル RNG 非消費） |
 | `forward_with_cache` | `crates/autodiff/src/nn/attention.rs:1682` | キャッシュ非空かつ `L_new > 1` を mask 規則 (c)（`offset_allowed_mask`:1612、`allowed[i][j] = j <= s_prev + i`）で扱える。**target が draft の K トークンを 1 回の forward で検証できる根拠**。書き戻しはエラー時に呼び出し前の状態を保つ（原子的） |
 | `KvCache` | `attention.rs:1555` | `k`／`v` は `[B, S_cached, E]` のホスト `Tensor<f32>`。公開メソッドは `new`／`is_empty`／`seq_len`／`batch`／`embed_dim`／`clear`／`k`／`v` のみ。**切り詰め・セッターはない**。書き手は `forward_with_cache` のみという不変条件（doc `:1538-1548`）。`clone()` は `Arc` 共有でデータを複製しない |
 | `Tensor::narrow` | `crates/tensor-core/src/tensor.rs:515` | 算術なしの切り出し。巻き戻しに使える |
@@ -42,7 +42,7 @@ REQ-2（統一複合判定）・REQ-8・REQ-12 は不変。新しい判定契約
 ## 4. 内部実装の配置（推奨）
 
 - 担当は core-builder（`crates/autodiff`・`crates/facade`）。
-- **speculative decoding**: `crates/autodiff/src/generate/speculative.rs`（`generate.rs` のサブモジュール化）。理由: 非公開ヘルパーを `pub(super)` で共有でき、`pub(crate)` の面積を増やさない。別ファイル `generate_speculative.rs` 案はヘルパーを `pub(crate)` に広げる必要があり、推さない。既存 `generate` のシグネチャ・挙動は不変。
+- **speculative decoding**: `crates/autodiff/src/generate/speculative.rs`（`generate/mod.rs` のサブモジュール）。理由: 子モジュールは親の非公開項目へ `super::` で到達できるため、ヘルパーは非公開のまま `super::` で呼べ、`pub(crate)`／`pub(super)` の面積を増やさない。別ファイル `generate_speculative.rs` 案はヘルパーを `pub(crate)` に広げる必要があり、推さない。既存 `generate` のシグネチャ・挙動は不変。
 - **連続バッチング**: ホスト側ロジックのみ。同じく `crates/autodiff/src/generate/scheduler.rs`。
 - facade は純再エクスポート（`nn::rnn`・`nn::kv_cache`・`inference` の先例と同型）。facade 独自 newtype・`Sequential::*` への結線は作らない。
 
@@ -108,7 +108,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 | 両者 | `forward_step` の戻り shape が `[B, L_new, V]` でない、`V == 0`、`V > i32::MAX` | 既存 `validate_forward_step_output`／`validate_vocab_le_i32_max` を流用 |
 | 両者 | サンプリングに使う位置の logits が非有限 | 既存どおり `Err` |
 | 両者 | `top_k > vocab` | 既存 `validate_top_k_le_vocab` |
-| 出力 | `B × max_length` の `checked_mul` と `isize::MAX` バイト検査 | 既存方式（`generate.rs:480-503`）を踏襲 |
+| 出力 | `B × max_length` の `checked_mul` と `isize::MAX` バイト検査 | 既存方式（`generate/mod.rs` の `generate()` 内 `checked_mul`／`isize::MAX` 検査）を踏襲 |
 | スケジューラ | 同時要求数・キュー長・要求ごとの `max_length` の上限は**構築時に必須** | 超過は `Err(InvalidArgument)`。暗黙の無制限を許さない |
 | スケジューラ | 要求の途中で `forward_step` が `Err` | 当該要求を失敗として切り離し、他要求の状態は変えない（実装 issue で型を決める） |
 
@@ -167,7 +167,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 | # | タイトル案 | 依存 | 受け入れ条件の要点 | 担当 | 承認待ち |
 |---|---|---|---|---|---|
 | 1 | `docs(facade): speculative decoding・連続バッチングの公開形と判定方式の承認依頼` | なし | §10 論点 1〜8 の確定依頼、`compat-api-scope.md` §5.1 への行追加。承認は実装 Agent が代行しない | core-builder | 承認依頼そのもの |
-| 2 | `refactor(autodiff): generate のヘルパーをサブモジュールから使えるようにする` | なし | `generate/` ディレクトリ化と `pub(super)` 化のみ。挙動・既存テスト・公開シグネチャ不変 | core-builder | なし |
+| 2 | `refactor(autodiff): generate のヘルパーをサブモジュールから使えるようにする` | なし | `generate/` ディレクトリ化のみ（ヘルパーは非公開のまま `super::` で参照）。挙動・既存テスト・公開シグネチャ不変 | core-builder | なし |
 | 3 | `feat(autodiff): KV キャッシュ巻き戻しの内部実装` | 2 | 推奨 (i)（clone 保存・復元）。復元後の状態が呼び出し前と同一であることの単体テスト | core-builder | 論点 4 の結論次第で (ii) |
 | 4 | `feat(autodiff): speculative decoding（greedy）の内部実装` | 2, 3 | §7 の fail-closed 全件。B = 1 限定。境界ケース（§6.1） | core-builder | なし |
 | 5 | `test(autodiff): speculative greedy の一致テスト` | 4 | 状態なしモデルで token 列完全一致、KV モデルで位置ごとの logits を統一複合判定 | test-runner | 論点 2 の結論次第 |
@@ -199,7 +199,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 
 - spec: `docs/spec/04-requirements.md:237`・`:458`（読むのみ）
 - `docs/facade-serving-infrastructure-spec-proposal.md`（§3・§5）、`docs/facade-generate-decision.md`（§13・§17.4）、`docs/kv-cache-design.md`（§3.5・§7・§15.5）、`docs/facade-predict-batches-phase-metrics-decision.md` §8.4、`docs/compat-api-scope.md` §5、`docs/autodiff-functional-transforms-design.md`（書式の先例）
-- ソース: `crates/autodiff/src/generate.rs`、`crates/autodiff/src/nn/attention.rs`、`crates/tensor-core/src/{rng.rs,tensor.rs}`、`crates/facade/src/inference/mod.rs`、`crates/facade/src/nn/kv_cache.rs`、`crates/facade/tests/api_surface.rs`
+- ソース: `crates/autodiff/src/generate/mod.rs`、`crates/autodiff/src/nn/attention.rs`、`crates/tensor-core/src/{rng.rs,tensor.rs}`、`crates/facade/src/inference/mod.rs`、`crates/facade/src/nn/kv_cache.rs`、`crates/facade/tests/api_surface.rs`
 
 ## 15. 承認依頼の所在（イシュー #2883・親 #2882）
 

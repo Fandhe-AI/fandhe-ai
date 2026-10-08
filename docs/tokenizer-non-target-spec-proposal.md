@@ -208,7 +208,7 @@ REQ-9「引き続き対象外」列挙（該当箇所）の末尾へ、次の 1 
 | F2 | REQ-9「引き続き対象外」は `docs/spec/04-requirements.md:233` のまま。直後に日付付き追記 bullet が 2 本ある（`:234` #2193 Python バインディング・TF 形式、`:235` #2194 forward-mode AD・vmap・サービング基盤・特定ハブ連携）。トークナイザの記載は依然なし | `sed -n 233,235p docs/spec/04-requirements.md` |
 | F3 | サービング基盤（HTTP サーバ／スケジューラ・paged attention・連続バッチング・speculative decoding）は `:235` で spec に明記済み。よって **§5 承認事項 2 と §6 の「サービングは別提案に分離」は解消済み**（量子化 KV は除外事項「分散学習・量子化」に従属）。`:235` は KV キャッシュと推論 API（`predict` 系・自己回帰生成ループ）を対象範囲内と明記している | 同上 |
 | F4 | `Var::embedding` は `crates/autodiff/src/var.rs:4448` へ移動（入力は `index: &Tensor<i32>` のまま不変） | `grep -n "pub fn embedding" crates/autodiff/src/var.rs` |
-| F5 | 旧 §2 の「`tokeniz`／`トークナイザ` は 0 件」は成り立たない。ヒットは NLP トークナイザの実装ではない誤ヒットのみ: `crates/autodiff/src/generate.rs:1,51`（自己回帰生成ループ #2191 の doc。「トークナイザ結線は対象外・出力は token id `Tensor<i32>`」）と、`crates/autodiff/tests/architecture_boundaries.rs` の `tokenize_including_punctuation`（ソース字句を検査するテストヘルパ。`crates/facade/tests/api_surface.rs` にも同名ヘルパ） | `grep -rniE 'tokeniz\|トークナイザ' crates/ site/ README.md` |
+| F5 | 旧 §2 の「`tokeniz`／`トークナイザ` は 0 件」は成り立たない。ヒットは NLP トークナイザの実装ではない誤ヒットのみ: `crates/autodiff/src/generate/mod.rs:1,51`（自己回帰生成ループ #2191 の doc。「トークナイザ結線は対象外・出力は token id `Tensor<i32>`」）と、`crates/autodiff/tests/architecture_boundaries.rs` の `tokenize_including_punctuation`（ソース字句を検査するテストヘルパ。`crates/facade/tests/api_surface.rs` にも同名ヘルパ） | `grep -rniE 'tokeniz\|トークナイザ' crates/ site/ README.md` |
 | F6 | `generate()`（#2191）は内部実装済みだが **facade には未公開**（`crates/facade/src/lib.rs` に保留 doctest ガードのみ。公開は Phase 3 の別 issue）。出力は token id 列で、id → テキストの復号も利用者側の責務 | `grep -n -i generate crates/facade/src/lib.rs` |
 | F7 | `.claude/rules/deps-policy.md` は現在 10 区分（本体の直接依存は第 1〜8 区分と第 10 区分）。旧 doc の「9 区分」は当時の表記。`serde_json` は許容（シリアライズ区分）。`prost` は「ONNX の protobuf デコードのみ」に用途限定のため SentencePiece `.model`（protobuf）の読込には使えない | `.claude/rules/deps-policy.md` |
 
@@ -286,7 +286,7 @@ docs(requirements): REQ-9「引き続き対象外」列挙にサブワードト�
 4. A-1 実装 issue の起票可否（承認後に別途起票。本ツリーには含めない）。
 5. 外部 `tokenizers` crate は提案しない旨の確認。
 
-承認後に更新する文書（本 issue では変更しない）: `docs/compat-feature-gap.md:361`・`docs/compat-api-scope.md:331-344`・`crates/autodiff/src/generate.rs` の doc・スコアボード。
+承認後に更新する文書（本 issue では変更しない）: `docs/compat-feature-gap.md:361`・`docs/compat-api-scope.md:331-344`・`crates/autodiff/src/generate/mod.rs` の doc・スコアボード。
 
 ### §9.8 OWASP Top 10 観点
 
@@ -301,7 +301,7 @@ docs(requirements): REQ-9「引き続き対象外」列挙にサブワードト�
 |---|---|
 | `docs/spec/04-requirements.md:233-235` | REQ-9「引き続き対象外」と日付付き追記 2 本 |
 | `crates/autodiff/src/var.rs:4448` | `Var::embedding` の入力契約 |
-| `crates/autodiff/src/generate.rs:1,51` | 生成ループ doc（トークナイザ対象外の明記） |
+| `crates/autodiff/src/generate/mod.rs:1,51` | 生成ループ doc（トークナイザ対象外の明記） |
 | `docs/perf/logs/framework-compare-0.10.0-remeasure/scoreboard/body_0100.html:123` | スコアボード推論行 |
 | `.claude/rules/deps-policy.md` | 許容依存 10 区分 |
 | <https://keras.io/api/layers/preprocessing_layers/text/text_vectorization/> | `TextVectorization`（確認日 2026-10-03） |
