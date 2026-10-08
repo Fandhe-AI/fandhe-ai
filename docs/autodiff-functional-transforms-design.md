@@ -181,3 +181,14 @@
 - **検証**: `crates/autodiff/tests/functional_ops_parity.rs` の H1〜H5（閉形式・`jacobian_ops::hessian` と `v` の積との突合・fail-closed・ゼロ／空・副作用）。バックエンドはテスト用 naive 実装のみ。facade `Tape::hessian` は `jacobian_ops::hessian` への薄い委譲のため autodiff 層で突合した。
 - **承認状況**: 本実装は §1 の承認範囲（実装 issue の起票承認）の内側。facade 公開は未承認で、承認と公開は §10 の 6・7。
 - **スコープ外**: ループ版 `vmap`・PyTorch fixture と実 CPU バックエンドとの突合・`vmap` との合成・facade 公開・double-VJP 検証・CUDA／Metal 実機 parity（§10 の 3・4・5・6・7・9・11）、`VarF64` 版・複数入力・微分可能な `hvp`。
+
+## 17. 実装記録（#2876・親 #2841。§10 の分解案 3）
+
+- **実装した形**: `fandhe_ai_autodiff::functional_ops::vmap(tape, input, in_dim, f) -> Result<Var, AutodiffError>`（`f: FnMut(&Var) -> Result<Var, _>`）。`input.unbind(in_dim)` → 各スライスへ `f` → 出力の `contiguous` → `Var::stack(&outs, 0)` の合成で、結果は同じテープ上の微分可能な `Var`（`vjp`／`hvp` と違いホスト値ではない）。出力のバッチ軸は先頭固定（`out_dim`・複数入力・`Fn`／`FnMut` の確定は §11-1 の論点で未実装）。新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe` はない。`Var::vmap`／`Tape::vmap` の inherent メソッドは足さない（保留ガードの正のプローブが不在に依存するため）。
+- **入口検査（2 段階・順序固定）**: Phase A（テープ無変更）は (1) 別テープ・世代違いの `TapeMismatch`、(2) `in_dim >= rank` の `Shape(AxisOutOfRange)`、(3) 軸長 0 の `InvalidArgument`。`unbind` は零長軸に `Ok(vec![])` を返すため、(3) は `unbind` より前に自前で検査する。Phase B（ノードが積まれる）はスライスごとに `f` を呼び、直後に出力のテープ検査、次に先頭出力との形状検査を行う fail-fast とし、`contiguous`／`stack` の前に全検査を終える。結果要素数は `checked_numel` と検査付き乗算で確認する。
+- **補助ノード**: `unbind` 分（スライスあたり最大 3）、`f` が積んだ分、必要時のみ `contiguous`、`stack`（`unsqueeze`×B と `cat`）。Phase B で失敗した場合（`f` の `Err`・別テープ出力・形状不一致・`contiguous`／`stack` の失敗）はそれまでのノードが残る。既存ノードの値は変えない。
+- **数値**: バッチなし実行との一致は REQ-2 の統一複合判定で見る。bit 一致は契約にしない（§11-2）。新しい tolerance・baseline は作らない。
+- **保留ガード**: 宣言インベントリの期待集合へ `autodiff/src/functional_ops.rs::vmap` を追加（計 4 件）。facade の doctest 本文は変更していない。
+- **検証**: `crates/autodiff/tests/functional_ops_parity.rs` の M1〜M6（バッチなし一致・非 contiguous 出力・Phase A／B の fail-closed・クロージャ `Err` 時のノード残存・決定性と微分可能性）。バックエンドはテスト用 naive 実装のみ。
+- **承認状況**: 本実装は §1 の承認範囲（実装 issue の起票承認）の内側。facade 公開は未承認で、承認と公開は §10 の 6・8。
+- **スコープ外**: PyTorch `torch.func.vmap` fixture と実 CPU バックエンドとの突合（§10 の 4）、`vjp`／`hvp` との合成（§10 の 5）、facade 公開（§10 の 6・8）、CUDA／Metal 実機 parity（§10 の 11）、`vmap(grad)`・`out_dim`・複数入力・`VarF64` 版・f16。
