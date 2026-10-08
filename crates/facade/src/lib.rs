@@ -6710,23 +6710,31 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 /// facade 公開面から締め出す保留ガード（`SoftminThresholdOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
 /// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `elementwise_loss_ops`・
-/// 型 `BceWithLogitsOptions`／`GaussianNllOptions` と、プローブ用トレイトのメソッド（`Var`／`Tape`／`Tensor<f32>` の
-/// `bce_with_logits_loss_with`／`hinge_embedding_loss`／`soft_margin_loss`／`gaussian_nll_loss`）を置き、
+/// 型 `BceWithLogitsOptions`／`GaussianNllOptions` と、プローブ用トレイトのメソッド（`Var` は保留の
+/// `bce_with_logits_loss_with`／`gaussian_nll_loss` のみ。`Tape`／`Tensor<f32>` は `Var` では公開済みの `hinge_embedding_loss`／
+/// `soft_margin_loss` を含む 4 名。#2677 の部分反転で `Var` 側から公開した 2 名を外した）を置き、
 /// モジュール経由の関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型を glob 可能な
 /// 位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
 /// 不一致でエラーコードに依存せずコンパイルが失敗する。検出範囲は列挙したこれらの名前・型に限り、マクロ生成や
 /// 別名経由のメソッドまでは保証しない。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::elementwise_loss_ops`）。保留対象は facade 公開面のみで、
-/// 公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-elementwise-loss-ops-decision.md` §7。同記録は推奨案の記録であり承認記録ではない）。
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::elementwise_loss_ops`）。
+///
+/// **#2677 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// #2602 で `fandhe_ai::nn::loss::Reduction` が公開され前提が満たされた）: `Var::hinge_embedding_loss`・
+/// `Var::soft_margin_loss` は承認形（`Var` の 1 行委譲メソッド）どおり公開済みのため、受け手 `Var` 側の
+/// プローブ（trait メソッド・UFCS 行）から外した。残す保留対象は `bce_with_logits_loss_with`・`gaussian_nll_loss`
+/// （オプション型を引数に取るため承認の対象外）、オプション型 `BceWithLogitsOptions`・`GaussianNllOptions`、
+/// モジュール `elementwise_loss_ops`（再エクスポートしない）。承認していない受け手（`Tape`／`Tensor<f32>`）への
+/// 同名メソッドの配置は、専用トレイト `__FandheElementwiseLossOpsApprovedMethodReceiverProbe` の
+/// 衝突で引き続き拒否する。公開済み側の正ガード（薄い委譲・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::elementwise_loss_ops_hold_doctest_globs_all_pub_modules`・
 /// `elementwise_loss_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_elementwise_loss_ops`・
 /// `workspace_declares_elementwise_loss_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
 ///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 保留分の承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
 /// 正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
@@ -6765,19 +6773,16 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 ///
 /// trait __FandheElementwiseLossOpsHoldProbe {
 ///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker;
+///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;
+/// }
+///
+/// trait __FandheElementwiseLossOpsApprovedMethodReceiverProbe {
 ///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;
 ///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;
-///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker;
 /// }
 ///
 /// impl<'t> __FandheElementwiseLossOpsHoldProbe for fandhe_ai::Var<'t> {
 ///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {
-///         __FandheElementwiseLossOpsHoldMarker
-///     }
-///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
-///         __FandheElementwiseLossOpsHoldMarker
-///     }
-///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
 ///         __FandheElementwiseLossOpsHoldMarker
 ///     }
 ///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
@@ -6789,12 +6794,6 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 ///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {
 ///         __FandheElementwiseLossOpsHoldMarker
 ///     }
-///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
-///         __FandheElementwiseLossOpsHoldMarker
-///     }
-///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
-///         __FandheElementwiseLossOpsHoldMarker
-///     }
 ///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
 ///         __FandheElementwiseLossOpsHoldMarker
 ///     }
@@ -6804,13 +6803,25 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 ///     fn bce_with_logits_loss_with(&self) -> __FandheElementwiseLossOpsHoldMarker {
 ///         __FandheElementwiseLossOpsHoldMarker
 ///     }
+///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheElementwiseLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tape {
 ///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
 ///         __FandheElementwiseLossOpsHoldMarker
 ///     }
 ///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
 ///         __FandheElementwiseLossOpsHoldMarker
 ///     }
-///     fn gaussian_nll_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+/// }
+///
+/// impl __FandheElementwiseLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tensor<f32> {
+///     fn hinge_embedding_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
+///         __FandheElementwiseLossOpsHoldMarker
+///     }
+///     fn soft_margin_loss(&self) -> __FandheElementwiseLossOpsHoldMarker {
 ///         __FandheElementwiseLossOpsHoldMarker
 ///     }
 /// }
@@ -6833,8 +6844,6 @@ struct SoftminThresholdOpsHoldDoctestGuard;
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
 ///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::bce_with_logits_loss_with(v);
-///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::hinge_embedding_loss(v);
-///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::soft_margin_loss(v);
 ///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Var::gaussian_nll_loss(v);
 ///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::bce_with_logits_loss_with(tape);
 ///     let _: __FandheElementwiseLossOpsHoldMarker = fandhe_ai::Tape::hinge_embedding_loss(tape);
@@ -6854,23 +6863,32 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 /// facade 公開面から締め出す保留ガード（`SoftminThresholdOpsHoldDoctestGuard` と同型の正のプローブ 1 ブロック方式）。
 ///
 /// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール `margin_focal_loss_ops`・
-/// 型 `MultiMarginOptions`／`MultiLabelSoftMarginOptions`／`SigmoidFocalLossOptions` と、プローブ用トレイトのメソッド（`Var`／`Tape`／`Tensor<f32>` の
-/// `multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss`）を置き、
+/// 型 `MultiMarginOptions`／`MultiLabelSoftMarginOptions`／`SigmoidFocalLossOptions` と、プローブ用トレイトのメソッド（`Var` は保留の
+/// `multi_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` のみ。`Tape`／`Tensor<f32>` は `Var` では公開済みの
+/// `multilabel_margin_loss` を含む 4 名。#2677 の部分反転で `Var` 側から公開した 1 名を外した）を置き、
 /// モジュール経由の関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型を glob 可能な
 /// 位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
 /// 不一致でエラーコードに依存せずコンパイルが失敗する。検出範囲は列挙したこれらの名前・型に限り、マクロ生成や
 /// 別名経由のメソッドまでは保証しない。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::margin_focal_loss_ops`）。保留対象は facade 公開面のみで、
-/// 公開形は未承認（承認依頼は #2677・公開自体は承認後の #2678。推奨案は
-/// `docs/autodiff-margin-focal-loss-ops-decision.md` §7。同記録は推奨案の記録であり承認記録ではない）。
+/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::margin_focal_loss_ops`）。
+///
+/// **#2677 での部分反転**（ルート #2499 の一括承認 `issuecomment-6033824965`・`docs/compat-api-scope.md` §5.1。
+/// #2602 で `fandhe_ai::nn::loss::Reduction` が公開され前提が満たされた）: `Var::multilabel_margin_loss` は
+/// 承認形（`Var` の 1 行委譲メソッド）どおり公開済みのため、受け手 `Var` 側のプローブ（trait メソッド・UFCS 行）から
+/// 外した。残す保留対象は `multi_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss`
+/// （オプション型を引数に取るため承認の対象外）、オプション型 `MultiMarginOptions`・`MultiLabelSoftMarginOptions`・
+/// `SigmoidFocalLossOptions`、モジュール `margin_focal_loss_ops`（再エクスポートしない）。承認していない受け手
+/// （`Tape`／`Tensor<f32>`）への同名メソッドの配置は、専用トレイト
+/// `__FandheMarginFocalLossOpsApprovedMethodReceiverProbe` の衝突で引き続き拒否する。公開済み側の正ガード
+/// （薄い委譲・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::margin_focal_loss_ops_hold_doctest_globs_all_pub_modules`・
 /// `margin_focal_loss_ops_hold_doctest_probe_body_matches_fixed_contract`・
 /// `facade_does_not_reexport_or_declare_margin_focal_loss_ops`・
 /// `workspace_declares_margin_focal_loss_ops_fn_names_only_in_allowed_locations`）との多層防御として働く。
 ///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
+/// 保留分の承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも同時に
 /// 正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
@@ -6910,16 +6928,16 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 ///
 /// trait __FandheMarginFocalLossOpsHoldProbe {
 ///     fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;
-///     fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;
 ///     fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;
 ///     fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;
 /// }
 ///
+/// trait __FandheMarginFocalLossOpsApprovedMethodReceiverProbe {
+///     fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker;
+/// }
+///
 /// impl<'t> __FandheMarginFocalLossOpsHoldProbe for fandhe_ai::Var<'t> {
 ///     fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
-///         __FandheMarginFocalLossOpsHoldMarker
-///     }
-///     fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
 ///         __FandheMarginFocalLossOpsHoldMarker
 ///     }
 ///     fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
@@ -6934,9 +6952,6 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 ///     fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
 ///         __FandheMarginFocalLossOpsHoldMarker
 ///     }
-///     fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
-///         __FandheMarginFocalLossOpsHoldMarker
-///     }
 ///     fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
 ///         __FandheMarginFocalLossOpsHoldMarker
 ///     }
@@ -6949,13 +6964,22 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 ///     fn multi_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
 ///         __FandheMarginFocalLossOpsHoldMarker
 ///     }
-///     fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
-///         __FandheMarginFocalLossOpsHoldMarker
-///     }
 ///     fn multilabel_soft_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
 ///         __FandheMarginFocalLossOpsHoldMarker
 ///     }
 ///     fn sigmoid_focal_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
+///         __FandheMarginFocalLossOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheMarginFocalLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tape {
+///     fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
+///         __FandheMarginFocalLossOpsHoldMarker
+///     }
+/// }
+///
+/// impl __FandheMarginFocalLossOpsApprovedMethodReceiverProbe for fandhe_ai::Tensor<f32> {
+///     fn multilabel_margin_loss(&self) -> __FandheMarginFocalLossOpsHoldMarker {
 ///         __FandheMarginFocalLossOpsHoldMarker
 ///     }
 /// }
@@ -6979,7 +7003,6 @@ struct ElementwiseLossOpsHoldDoctestGuard;
 ///     tf: &fandhe_ai::Tensor<f32>,
 /// ) {
 ///     let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multi_margin_loss(v);
-///     let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multilabel_margin_loss(v);
 ///     let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::multilabel_soft_margin_loss(v);
 ///     let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Var::sigmoid_focal_loss(v);
 ///     let _: __FandheMarginFocalLossOpsHoldMarker = fandhe_ai::Tape::multi_margin_loss(tape);
