@@ -35823,7 +35823,7 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
 // =====================================================================
 // FunctionalTransformsHoldDoctestGuard（イシュー #2874・親 #2841）:
 // `GradcheckAnomalyHoldDoctestGuard`（#2671）系のテストの鏡写し。実装は内部クレート
-// （`fandhe_ai_autodiff::functional_ops`。現時点は `vjp` のみ。新規 `Op`・`BackendOps` メソッド・
+// （`fandhe_ai_autodiff::functional_ops`。現時点は `vjp`・`hvp`。新規 `Op`・`BackendOps` メソッド・
 // `AutodiffError` variant なし）に閉じ、facade 公開形は未承認
 // （`docs/autodiff-functional-transforms-design.md` §5・§10。同記録は推奨案の記録であり承認記録ではない）。
 // 承認済みの除外はない。検出範囲は列挙した名前（`functional_ops`・`vjp`・`hvp`・`vmap`）に限る。
@@ -36074,7 +36074,9 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
 /// - `autodiff/src/functional_ops.rs::vjp`: #2874 の内部実装（facade からは再エクスポートしない）。
 /// - `autodiff/src/grad.rs::vjp`: 既存の Op ごとの VJP ディスパッチャ（`pub(crate)`。facade からは到達不能）。
 ///
-/// `hvp`／`vmap` は現時点で 0 件。後続 issue が `functional_ops.rs` へ実装を足すときに期待集合へ 1 行ずつ追記する。
+/// - `autodiff/src/functional_ops.rs::hvp`: #2875 の内部実装（同上）。
+///
+/// `vmap` は現時点で 0 件。後続 issue が `functional_ops.rs` へ実装を足すときに期待集合へ 1 行ずつ追記する。
 #[test]
 fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations() {
     let crates_dir = workspace_crates_dir();
@@ -36119,6 +36121,7 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
     }
     let expected: std::collections::BTreeMap<String, usize> = [
         ("autodiff/src/functional_ops.rs::vjp".to_string(), 1usize),
+        ("autodiff/src/functional_ops.rs::hvp".to_string(), 1usize),
         ("autodiff/src/grad.rs::vjp".to_string(), 1usize),
     ]
     .into_iter()
