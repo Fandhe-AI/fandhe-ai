@@ -1,12 +1,12 @@
-# facade への `nn::loss` 損失構造体の公開形（決定記録・推奨案・未承認）
+# facade への `nn::loss` 損失構造体の公開形（決定記録・承認済み・#2602 で実装済み）
 
-> **本書は推奨案の記録であり、ユーザー承認の取得を意味しない。確定形ではない。** 承認が得られるまで facade 公開（#2602）は着手しない。コード変更はなく、変更対象は `docs/` のみである。
+> **2026-10-07 承認済み（推奨案どおり）。** 根拠は ルート #2499 の所有者コメント https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965 の「#2600: 本書 §4・§7 の推奨案（`Reduction` は root に出さない）」。以下の本文は承認前に書かれた推奨案の記録で、実装結果は末尾「10. 実装記録（#2602）」を参照。
 
 - イシュー: #2601（本記録の作成と承認依頼）・親 #2600・祖 #2542（Phase 3）・実装は #2602（承認後のみ）
 - 調査基準: main `cb34712b`（2026-10-05）。以下の `file_path:line` はこの時点の実測で、#2602 着手時に再確認する
-- 承認状況: 2026-10-05 時点で #2601・#2602 に承認コメントは 0 件（`gh issue view` で確認）。**未承認**
+- 承認状況: 2026-10-07 承認（上記コメント）。#2602 で実装済み
 
-## 0. 結論（未承認の推奨）
+## 0. 結論（承認済みの推奨）
 
 **`fandhe_ai::nn::loss` サブモジュールを新設し、`fandhe_ai_autodiff::nn::loss` の次の 19 名を明示列挙（glob・別名なし）で純再エクスポートする案（b-1・19 名）を推奨する。**
 
@@ -77,7 +77,7 @@
 | 14 + `Reduction` | 15 | 構築手段は揃う。オプション型を取る `new`／`forward_with` は既定値のみ使える |
 | 14 + `Reduction` + オプション 4 型 | 19 | 全引数型を名指しできる。**推奨** |
 
-## 4. 推奨案（未承認）
+## 4. 推奨案（承認済み）
 
 **(b-1) で 19 名。**
 
@@ -142,3 +142,11 @@
 ## 9. 本 PR で行わないこと
 
 facade／autodiff のコード変更、ガードの新設・削除・反転、`docs/compat-api-scope.md` の更新、Issue 起票、spec 提案、tolerance・依存の変更。
+
+## 10. 実装記録（#2602）
+
+- 公開: `crates/facade/src/nn/loss.rs` を新設し、`fandhe_ai_autodiff::nn::loss` の 19 名（損失構造体 14・`Reduction`・オプション型 4）を明示列挙で純再エクスポートした。`nn/mod.rs` に `pub mod loss;` を追加。`Reduction` とオプション型の経路はこの 1 本のみ（crate root・`nn` 直下・`loss_ops` 経由には出していない）
+- ガード（`crates/facade/tests/api_surface.rs`）: 期待値の拡張 3 件（`nn_mod_declares_only_approved_submodules`・`nn_mod_public_items_match_expected_set`・`GRAD_SCALER_PROBE_MODULES` と glob probe）。正ガードの新設 6 件（`facade_reexports_nn_loss_items_only_in_approved_shape` とその自己テスト・`nn_loss_module_reexports_exactly_expected_surface`・`nn_loss_module_is_pure_reexport`・`nn_loss_items_are_reachable_via_facade_only`）。既存の保留ガードに 14 構造体名を名指しするものは無かったため、反転ではなく期待値拡張と新設で対応した
+- `LossOpsHoldDoctestGuard` の doc の「オプション型の拒否は維持する」を、`nn::loss` 経由のみ公開済みと書き換えた（doctest 本文は不変）。全 hold doctest の glob 一覧（43 か所）に `use fandhe_ai::nn::loss::*;` を追加した
+- 到達テスト 3 件の import を `fandhe_ai::nn::loss` へ切り替え、facade のみで呼べることを検査する形にした。統合テスト `crates/facade/tests/nn_loss.rs` は 14 構造体の forward 値・勾配が対応する `Var` メソッドと bit 一致することを確認する
+- 行わなかったこと: `CrossEntropyLoss` への `new`／`Default` 追加（§7 (g)）、`loss_ops` の再エクスポート、`Tensor`／`Tape` 上の同名メソッド、Phase 4 保留中の損失 3 本の公開、依存・tolerance・baseline・`docs/spec/` の変更、CUDA／Metal の `#[ignore]` テスト（新規カーネルなし）

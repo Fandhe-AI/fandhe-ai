@@ -13,6 +13,8 @@
 //! doc「`Sequential::add_*` を設けない理由」参照）。
 //! 例外として [`crate::nn::kv_cache`]（#2579。`KvCache`・`StatefulAttention` の純再エクスポート）を
 //! 持つ。MHA 本体は引き続き `Sequential::add_*` 経由のみ。
+//! **#2602（損失構造体の承認形）**: [`crate::nn::loss`] は `fandhe_ai_autodiff::nn::loss` の損失構造体 14 種と
+//! 引数型 5 種（`Reduction`・オプション型 4 種）の純再エクスポート（`docs/facade-nn-loss-structs-exposure-decision.md` §4）。
 //! **#2587（hooks の承認形）**: facade 版 [`crate::nn::ForwardHooked`]（`nn::Module` 実装を包み
 //! `forward` 直後に観察専用 hook を 1 回呼ぶラッパー。非公開 `mod forward_hook` と `pub use`）と、その
 //! hook の引数型 [`crate::nn::ForwardHookCtx`]（autodiff からの純再エクスポート）を提供する
@@ -29,6 +31,7 @@ mod container;
 mod forward_hook;
 pub mod init;
 pub mod kv_cache;
+pub mod loss;
 mod module;
 pub mod rnn;
 

@@ -4319,6 +4319,319 @@ fn nn_init_items_are_reachable_via_facade_only() {
         (5, 4)
     );
 }
+/// `fandhe_ai::nn::loss`（イシュー #2602。親 #2600・ルート #2499 の一括承認・
+/// `docs/facade-nn-loss-structs-exposure-decision.md` §4）が公開する 19 名
+/// （損失構造体 14 種＋引数型 5 種）。承認形の正ガード
+/// [`facade_reexports_nn_loss_items_only_in_approved_shape`] と
+/// `nn_loss_module_reexports_exactly_expected_surface` が共用する。
+const NN_LOSS_NAMES: [&str; 19] = [
+    "BceLoss",
+    "BceWithLogitsLoss",
+    "CosineEmbeddingLoss",
+    "CrossEntropyLoss",
+    "CrossEntropyOptions",
+    "CtcLoss",
+    "CtcLossOptions",
+    "HuberLoss",
+    "KlDivLoss",
+    "L1Loss",
+    "MarginRankingLoss",
+    "MseLoss",
+    "NllLoss",
+    "PoissonNllLoss",
+    "PoissonNllOptions",
+    "Reduction",
+    "SmoothL1Loss",
+    "TripletMarginLoss",
+    "TripletMarginOptions",
+];
+
+/// 承認形の接頭辞 `fandhe_ai_autodiff :: nn :: loss ::` かどうか（トークン列で判定）。
+fn nn_loss_approved_prefix(path_tokens: &[String]) -> bool {
+    let want = [
+        "fandhe_ai_autodiff",
+        ":",
+        ":",
+        "nn",
+        ":",
+        ":",
+        "loss",
+        ":",
+        ":",
+    ];
+    path_tokens.len() >= want.len() && path_tokens.iter().zip(want).all(|(a, b)| a == b)
+}
+
+/// [`facade_reexports_nn_loss_items_only_in_approved_shape`]・その自己テストの検出本体
+/// （[`scan_nn_init_reexports_and_declarations`] の鏡写し）。承認形の出現葉を第 1 要素、
+/// 承認形外の `pub use`（別 path〈`loss_ops` 経由・`crate::nn::loss`・ルート直下を含む〉・`as` 別名・
+/// glob・モジュール別名）と同名の独自宣言を第 2 要素（違反）として返す。非 `pub` の `use` は対象外。
+fn scan_nn_loss_reexports_and_declarations(content: &str) -> (Vec<String>, Vec<String>) {
+    let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let mut approved: Vec<String> = Vec::new();
+    let mut offending: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while i < tokens.len() {
+        if tokens[i] == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+            let mut end = i + 2;
+            while end < tokens.len() && tokens[end] != ";" {
+                end += 1;
+            }
+            let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            let shape_ok = nn_loss_approved_prefix(path_tokens)
+                && !path_tokens.iter().any(|t| t == "as" || t == "*")
+                // モジュール自体の再エクスポート（`...::nn::loss;`）は接頭辞の後に葉が無い。
+                && path_tokens.len() > 9;
+            let mentions_loss_path = path_tokens
+                .windows(4)
+                .any(|w| w[0] == "nn" && w[1] == ":" && w[2] == ":" && w[3] == "loss");
+            let hits: Vec<String> = collect_pub_use_leaves(path_tokens)
+                .into_iter()
+                .filter(|leaf| NN_LOSS_NAMES.contains(&leaf.as_str()))
+                .collect();
+            if shape_ok {
+                approved.extend(hits);
+            } else {
+                for leaf in hits {
+                    offending.push(format!("承認形外の pub use leaf={leaf}"));
+                }
+                if mentions_loss_path {
+                    offending.push("承認形外の nn::loss 経由 pub use".to_string());
+                }
+            }
+            i = (end + 1).min(tokens.len());
+            continue;
+        }
+        if matches!(
+            tokens[i].as_str(),
+            "trait" | "struct" | "enum" | "type" | "union"
+        ) && tokens
+            .get(i + 1)
+            .map(|t| NN_LOSS_NAMES.contains(&t.as_str()))
+            .unwrap_or(false)
+        {
+            offending.push(format!(
+                "{} {} 宣言",
+                tokens[i],
+                tokens.get(i + 1).map(String::as_str).unwrap_or_default()
+            ));
+        }
+        i += 1;
+    }
+
+    (approved, offending)
+}
+
+/// 承認形の正ガード（#2602。先例: [`facade_reexports_nn_init_items_only_in_approved_shape`]）。
+/// facade src 全体で、[`NN_LOSS_NAMES`] の 19 名が `src/nn/loss.rs` の
+/// `pub use fandhe_ai_autodiff::nn::loss::…`（別名・glob なし）としてちょうど 1 回ずつ出現し、
+/// 他ファイルでの再エクスポート・迂回経路（`loss_ops`・ルート直下）・同名の独自宣言が存在しない
+/// ことを fail-closed に固定する。
+#[test]
+fn facade_reexports_nn_loss_items_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved_in_loss_rs: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let (approved, bad) = scan_nn_loss_reexports_and_declarations(content);
+        for offense in bad {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+        if path.ends_with("src/nn/loss.rs") {
+            approved_in_loss_rs.extend(approved);
+        } else {
+            for leaf in approved {
+                offending.push(format!(
+                    "{}: nn/loss.rs 以外での pub use leaf={leaf}",
+                    path.display()
+                ));
+            }
+        }
+    });
+    approved_in_loss_rs.sort();
+    let mut expected: Vec<String> = NN_LOSS_NAMES.iter().map(|s| s.to_string()).collect();
+    expected.sort();
+    assert!(
+        offending.is_empty(),
+        "facade の公開面が nn::loss（#2602）を承認形（src/nn/loss.rs の \
+         `pub use fandhe_ai_autodiff::nn::loss::…`・別名・glob なし）以外で再エクスポート、\
+         または独自宣言している（`docs/facade-nn-loss-structs-exposure-decision.md` §4）: {offending:?}"
+    );
+    assert_eq!(
+        approved_in_loss_rs, expected,
+        "src/nn/loss.rs に承認形の 19 識別子がちょうど 1 回ずつ存在しない\
+         （過不足・重複いずれも fail。検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_nn_loss_reexports_and_declarations`] の自己テスト（正例・各違反類型・無視される入力）。
+#[test]
+fn facade_reexports_nn_loss_items_only_in_approved_shape_detects_each_category() {
+    let scan = scan_nn_loss_reexports_and_declarations;
+    let (ok, bad) = scan("pub use fandhe_ai_autodiff::nn::loss::{MseLoss, Reduction};");
+    assert!(bad.is_empty());
+    assert_eq!(ok, vec!["MseLoss", "Reduction"]);
+    for src in [
+        // 別名。
+        "pub use fandhe_ai_autodiff::nn::loss::MseLoss as M;",
+        // glob。
+        "pub use fandhe_ai_autodiff::nn::loss::*;",
+        // モジュール別名・モジュール自体。
+        "pub use fandhe_ai_autodiff::nn::loss;",
+        "pub use fandhe_ai_autodiff::nn::loss as l;",
+        // 迂回経路（loss_ops・ルート直下・crate 内）。
+        "pub use fandhe_ai_autodiff::loss_ops::CtcLossOptions;",
+        "pub use fandhe_ai_autodiff::Reduction;",
+        "pub use crate::nn::loss::Reduction;",
+        // 同名の独自宣言。
+        "pub struct MseLoss;",
+        "pub enum Reduction {}",
+        "pub type L1Loss = u8;",
+    ] {
+        assert!(!scan(src).1.is_empty(), "違反を検出できない: {src:?}");
+    }
+    // 無視される: コメント・文字列リテラル・非公開 use・無関係な pub use。
+    for src in [
+        "// pub use fandhe_ai_autodiff::Reduction;",
+        "let s = \"MseLoss\";",
+        "use fandhe_ai_autodiff::Reduction;",
+        "pub use fandhe_ai_autodiff::nn::optim::AdamW;",
+    ] {
+        let (ok, bad) = scan(src);
+        assert!(ok.is_empty() && bad.is_empty(), "src={src:?}");
+    }
+}
+
+fn nn_loss_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/nn/loss.rs")
+}
+
+/// `src/nn/loss.rs` の `pub use` 文から `{...}` 内の識別子を抽出し、[`NN_LOSS_NAMES`] の
+/// 19 名と完全一致（過不足とも fail）することを固定する（`nn_init_module_reexports_exactly_expected_surface`
+/// の鏡写し。複数の `pub use` 文に分かれていてよい）。
+#[test]
+fn nn_loss_module_reexports_exactly_expected_surface() {
+    let content = read_to_string_or_panic(&nn_loss_rs_path());
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let allowed_prefix = "pub use fandhe_ai_autodiff::nn::loss::";
+    let mut found: Vec<String> = Vec::new();
+    let mut offending_lines = Vec::new();
+    for stmt in cleaned.split(';') {
+        let flat = stmt.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !flat.starts_with("pub use") {
+            continue;
+        }
+        let compact = flat.replace(' ', "");
+        let Some(rest) = compact.strip_prefix(&allowed_prefix.replace(' ', "")) else {
+            offending_lines.push(flat);
+            continue;
+        };
+        let (Some(open), Some(close)) = (rest.find('{'), rest.find('}')) else {
+            offending_lines.push(flat);
+            continue;
+        };
+        for ident in rest[open + 1..close].split(',') {
+            let ident = ident.trim();
+            if !ident.is_empty() {
+                found.push(ident.to_string());
+            }
+        }
+    }
+    assert!(
+        offending_lines.is_empty(),
+        "src/nn/loss.rs の pub use が fandhe_ai_autodiff::nn::loss:: 以外の接頭辞を持つか、\
+         `{{...}}` 形式でない行を含む: {offending_lines:?}"
+    );
+    found.sort();
+    let mut expected: Vec<String> = NN_LOSS_NAMES.iter().map(|s| s.to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "src/nn/loss.rs が再エクスポートする識別子が 19 名の期待集合と一致しない（重複を含む）"
+    );
+}
+
+/// `src/nn/loss.rs` が facade 独自の型・関数を定義しない純再エクスポートモジュールであることを
+/// 固定する（[`scan_forbidden_pub_items`] を再利用）。
+#[test]
+fn nn_loss_module_is_pure_reexport() {
+    let content = read_to_string_or_panic(&nn_loss_rs_path());
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/nn/loss.rs が facade 独自の公開宣言を定義している\
+         （純再エクスポートモジュールの契約違反）: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::nn::loss` の 19 名が facade のみを通じて到達可能であること（`fandhe_ai_autodiff` は
+/// import しない）。14 構造体を構築して `forward` を呼び、pub フィールド・`Copy`／`Clone` を固定する。
+#[test]
+fn nn_loss_items_are_reachable_via_facade_only() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::nn::loss::{
+        BceLoss, BceWithLogitsLoss, CosineEmbeddingLoss, CrossEntropyLoss, CrossEntropyOptions,
+        CtcLoss, CtcLossOptions, HuberLoss, KlDivLoss, L1Loss, MarginRankingLoss, MseLoss, NllLoss,
+        PoissonNllLoss, PoissonNllOptions, Reduction, SmoothL1Loss, TripletMarginLoss,
+        TripletMarginOptions,
+    };
+    let t = |d: &[f32], s: &[usize]| Tensor::new(d.to_vec(), s).expect("test fixture: tensor");
+    let tape = fandhe_ai::tape();
+    let p = tape.var(&t(&[0.25, 0.5, 0.75], &[3]));
+    let q = tape.var(&t(&[0.5, 0.5, 0.25], &[3]));
+    let r = Reduction::Mean;
+    MseLoss::new(r).forward(&p, &q).expect("mse");
+    L1Loss::new(r).forward(&p, &q).expect("l1");
+    HuberLoss::new(1.0, r).forward(&p, &q).expect("huber");
+    SmoothL1Loss::new(1.0, r)
+        .forward(&p, &q)
+        .expect("smooth_l1");
+    BceLoss::new(r).forward(&p, &q).expect("bce");
+    BceWithLogitsLoss::new(r)
+        .forward(&p, &q)
+        .expect("bce_logits");
+    KlDivLoss::new(r).forward(&p, &q).expect("kl");
+    let yr = t(&[1.0, -1.0, 1.0], &[3]);
+    MarginRankingLoss::new(0.1, r)
+        .forward(&p, &q, &yr)
+        .expect("margin_ranking");
+    let x = tape.var(&t(&[1.0, 0.0, 0.5, 0.5, 1.0, 0.0], &[2, 3]));
+    let z = tape.var(&t(&[0.5, 0.5, 0.0, 1.0, 0.0, 1.0], &[2, 3]));
+    CosineEmbeddingLoss::new(0.0, r)
+        .forward(&x, &z, &t(&[1.0, -1.0], &[2]))
+        .expect("cosine");
+    TripletMarginLoss::new(TripletMarginOptions::default(), r)
+        .forward(&x, &z, &x)
+        .expect("triplet");
+    PoissonNllLoss::new(PoissonNllOptions::default(), r)
+        .forward(&p, &q)
+        .expect("poisson");
+    let logits = tape.var(&t(&[1.0, 2.0, 0.5, -1.0, 0.0, 3.0], &[2, 3]));
+    let tg = Tensor::new(vec![1_i32, 2], &[2]).expect("targets");
+    let ce = CrossEntropyLoss {
+        class_dim: 1,
+        reduction: r,
+    };
+    ce.forward(&logits, &tg).expect("ce");
+    ce.forward_with(
+        &logits,
+        &tg,
+        &CrossEntropyOptions::default().label_smoothing(0.1),
+    )
+    .expect("ce_with");
+    NllLoss::new(1, r).forward(&logits, &tg).expect("nll");
+    let lp = tape.var(&t(&[(1.0f32 / 3.0).ln(); 9], &[3, 1, 3]));
+    let ctg = Tensor::new(vec![1_i32, 2], &[1, 2]).expect("ctc targets");
+    CtcLoss::new(CtcLossOptions::default(), r)
+        .forward(&lp, &ctg, &[3], &[2])
+        .expect("ctc");
+    // pub フィールドの読み出しと Copy／Clone。
+    let copy = ce;
+    assert_eq!((ce.class_dim, copy.class_dim), (1, 1));
+    let _ = TripletMarginLoss::default().clone();
+}
 /// facade 独自の `struct Tape`（`crates/facade/src/lib.rs`）の `pub fn custom` が
 /// 承認形（`self.0.custom(func, inputs)` の 1 行委譲・`pub fn` ちょうど 1 件）であり、
 /// シグネチャが §16.1 (c) と一致することを固定する（#2549。旧否定ガード
@@ -4833,7 +5146,8 @@ fn nn_rnn_module_is_pure_reexport() {
 /// `pub mod init;` 追加はこの完全一致検査により現時点では fail する。
 /// 承認後に実装する際は期待集合（`["init", "rnn"]` 等）へ更新する。
 /// #2579 で `pub mod kv_cache;`（KV キャッシュの純再エクスポート。
-/// `docs/kv-cache-design.md` §11.4 P1）を期待集合へ追加した。
+/// `docs/kv-cache-design.md` §11.4 P1）を、#2602 で `pub mod loss;`（損失構造体の純再エクスポート。
+/// `docs/facade-nn-loss-structs-exposure-decision.md` §4）を期待集合へ追加した。
 #[test]
 fn nn_mod_declares_only_approved_submodules() {
     let path = nn_mod_rs_path();
@@ -4848,8 +5162,13 @@ fn nn_mod_declares_only_approved_submodules() {
 
     assert_eq!(
         declared,
-        vec!["pub mod init;", "pub mod kv_cache;", "pub mod rnn;"],
-        "src/nn/mod.rs が宣言する pub mod が `pub mod init;`・`pub mod kv_cache;`・`pub mod rnn;` の 3 件と一致しない\
+        vec![
+            "pub mod init;",
+            "pub mod kv_cache;",
+            "pub mod loss;",
+            "pub mod rnn;"
+        ],
+        "src/nn/mod.rs が宣言する pub mod が `pub mod init;`・`pub mod kv_cache;`・`pub mod loss;`・`pub mod rnn;` の 4 件と一致しない\
          （nn 公開面の無断拡大を検知）: {declared:?}"
     );
 }
@@ -15752,14 +16071,12 @@ fn var_loss_ops_methods_are_thin_delegations() {
 
 /// facade の `fandhe_ai::Var` 経由で 2 メソッドへ到達でき、シグネチャが承認形と
 /// 一致し、実際に適用して厳密に決まる期待値が得られることを固定する（スタブでは
-/// 通らない。#2538）。`Reduction`／`CrossEntropyOptions` の facade 再エクスポートは
-/// 未承認（決定記録 §6）のため `fandhe_ai_autodiff` から import する。そのため
-/// テスト名は `_facade_only` ではなく `_facade_var` とする。
+/// 通らない。#2538）。`Reduction`／`CrossEntropyOptions` は #2602 以降 `fandhe_ai::nn::loss` から import する。
+/// テスト名は `Var` 経由の到達を示す `_facade_var` のまま。
 #[test]
 fn var_loss_ops_are_reachable_via_facade_var() {
+    use fandhe_ai::nn::loss::{CrossEntropyOptions, Reduction};
     use fandhe_ai::{AutodiffError, Tensor, Var};
-    use fandhe_ai_autodiff::Reduction;
-    use fandhe_ai_autodiff::loss_ops::CrossEntropyOptions;
 
     fn sig_l1<'t>() -> fn(&Var<'t>, &Var<'t>, Reduction) -> Result<Var<'t>, AutodiffError> {
         Var::<'t>::l1_loss
@@ -15805,9 +16122,8 @@ fn var_loss_ops_are_reachable_via_facade_var() {
 /// 承認形と一致し、厳密に決まる期待値が得られることを固定する（#2539）。
 #[test]
 fn var_distance_poisson_loss_ops_are_reachable_via_facade_var() {
+    use fandhe_ai::nn::loss::{PoissonNllOptions, Reduction, TripletMarginOptions};
     use fandhe_ai::{AutodiffError, Tensor, Var};
-    use fandhe_ai_autodiff::Reduction;
-    use fandhe_ai_autodiff::loss_ops::{PoissonNllOptions, TripletMarginOptions};
 
     type PairFn<'t> =
         fn(&Var<'t>, &Var<'t>, &Tensor<f32>, f32, Reduction) -> Result<Var<'t>, AutodiffError>;
@@ -15876,12 +16192,11 @@ fn var_distance_poisson_loss_ops_are_reachable_via_facade_var() {
 
 /// `Var::ctc_loss` が facade 経由で到達でき、シグネチャが承認形と一致し、閉形式で
 /// 決まる期待値が得られることを固定する（#2540。REQ-2 複合判定）。`Reduction`／
-/// `CtcLossOptions` の facade 再エクスポートは未承認のため `fandhe_ai_autodiff` から import する。
+/// `CtcLossOptions` は #2602 以降 `fandhe_ai::nn::loss` から import する。
 #[test]
 fn var_ctc_loss_is_reachable_via_facade_var() {
+    use fandhe_ai::nn::loss::{CtcLossOptions, Reduction};
     use fandhe_ai::{AutodiffError, Tensor, Var};
-    use fandhe_ai_autodiff::Reduction;
-    use fandhe_ai_autodiff::loss_ops::CtcLossOptions;
 
     type CtcFn<'t> = fn(
         &Var<'t>,
@@ -26226,7 +26541,7 @@ fn nn_src(file: &str) -> String {
 }
 
 /// 正ガード: `src/nn/mod.rs` の全種別の公開 item が
-/// `pub mod init`・`pub mod kv_cache`（#2579）・`pub mod rnn` と `pub use` の 10 件（`ForwardHooked`・`ForwardHookCtx`〈#2587〉・`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
+/// `pub mod init`・`pub mod kv_cache`（#2579）・`pub mod loss`（#2602）・`pub mod rnn` と `pub use` の 10 件（`ForwardHooked`・`ForwardHookCtx`〈#2587〉・`Module`・`ModuleDict`・`ModuleList`・`Sequential`・`summary`。
 /// `ModuleDict`／`summary` は #2402 で承認済み。`Transformer`／`TransformerConfig`／
 /// `TransformerDecoderLayer` は #2532・#2533 で承認済み）に完全一致する。
 /// `pub fn`／`pub struct` 等の追加や `pub mod container;` 等の新設は fail する。
@@ -26238,6 +26553,7 @@ fn nn_mod_public_items_match_expected_set() {
         pair_set(&[
             ("mod", "init"),
             ("mod", "kv_cache"),
+            ("mod", "loss"),
             ("mod", "rnn"),
             // #2587: hooks の承認形（facade 版 `ForwardHooked` と autodiff 由来の `ForwardHookCtx`）。
             ("use", "ForwardHookCtx"),
@@ -26631,7 +26947,7 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 13] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 14] = [
     "compat",
     "data",
     "inference",
@@ -26643,6 +26959,7 @@ const GRAD_SCALER_PROBE_MODULES: [&str; 13] = [
     "nn",
     "nn::init",
     "nn::kv_cache",
+    "nn::loss",
     "nn::rnn",
     "optim",
 ];
@@ -26671,6 +26988,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use fandhe_ai::model::*;
     pub use fandhe_ai::nn::init::*;
     pub use fandhe_ai::nn::kv_cache::*;
+    pub use fandhe_ai::nn::loss::*;
     pub use fandhe_ai::nn::rnn::*;
     pub use fandhe_ai::nn::*;
     pub use fandhe_ai::optim::*;
@@ -35417,7 +35735,7 @@ fn facade_reexports_phase4_ops_types_only_in_approved_shape_detects_each_categor
 
 /// 保留を維持した経路（#2678）が、ソース走査の否定ガードから外れていないことの固定。
 /// `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`rrelu_with_noise`・損失関連 8 本は
-/// facade／`Var` から到達できない（記録に形が書かれていない・`Reduction` の公開経路が未整備のため）。
+/// facade／`Var` から到達できない（記録に形が書かれていない・承認範囲外のため。`Reduction` の公開経路は #2602 で `nn::loss` に整備済みだが、これらの公開は別承認）。
 #[test]
 fn phase4_held_items_remain_unexposed() {
     for src in [

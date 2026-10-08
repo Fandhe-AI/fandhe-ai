@@ -172,3 +172,5 @@ LossOpsHoldDoctestGuard`・`crates/facade/tests/api_surface.rs` の
 #2509 追記: `l1_loss` が facade に届く経路は `compat::Loss::L1`（`compile()` 経由・非 `pub` の use 結線）のみになった。`Var` への委譲メソッドと `loss_ops` モジュールの再エクスポートは引き続き保留。
 
 #2538 追記（残る承認事項）: `CrossEntropyOptions`・`Reduction` の facade 再エクスポートは記録に推奨形がなく一括承認の範囲外。facade 単独の利用者は非既定オプションを名前で構築できない既知ギャップであり、公開するなら「記録追記 → ユーザー承認」が要る（兄弟 #2539／#2540 のオプション型も同じ論点）。
+
+#2602 追記: 上記ギャップは解消した。`Reduction` とオプション型 4 種は損失構造体 14 種とともに `fandhe_ai::nn::loss` 経由のみで公開済み（`docs/facade-nn-loss-structs-exposure-decision.md` §10）。`loss_ops` モジュールの再エクスポートと `Tensor`／`Tape` 上の同名メソッドは引き続き保留。
