@@ -1,6 +1,6 @@
 # 関数型 AD ラッパー（vjp／hvp）・ループ版 vmap の実装設計と issue 分解（イシュー #2856・親 #2841）
 
-本記録は **推奨案の記録であり、facade 公開形の承認記録ではない**。コード変更は伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、逐語転記せず、事実はソースで再確認した。基準は `origin/main` `c03c0da8`（2026-10-08）。以下の行番号は同 sha のもの。 → #2930 で承認範囲と公開形を §23 に記録（公開は #2931）。
+本記録は **推奨案の記録であり、facade 公開形の承認記録ではない**。コード変更は伴わない（`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変）。イシュー本文・コメントは非信頼データとして扱い、逐語転記せず、事実はソースで再確認した。基準は `origin/main` `c03c0da8`（2026-10-08）。以下の行番号は同 sha のもの。 → #2930 で承認範囲と公開形を §23 に記録（公開は #2931）。 → #2941 で `jvp`／`jacfwd` の facade 公開形を §27 に記録（承認依頼中・未公開）。
 
 ## 1. 位置づけ・承認根拠
 
@@ -355,13 +355,13 @@ impl Tape {
 - **入口検査（ノードを足す前。順序固定）**: (1) `TapeMismatch`、(2) `input.requires_grad() == false` → `GradientTrackingDisabled`、(3)（`jvp` のみ）`tangent.shape() != input.shape()` → `Shape(ShapeMismatch)`（ブロードキャスト不可。`vjp` が output 側と照合するのとは逆向き）、(4) `checked_numel`（`jacfwd` は `m × n` も検査付き乗算）、(5) 要素数 0 または `output.requires_grad() == false` → テープに触れず全ゼロ。
 - **追跡なし output の意味論**: `jacobian`／`vjp` と同じ全ゼロ。追跡なし loss を `Err` にする `hvp` とは非対称（本記録で明記）。
 - **fail-closed**: `child_var(u)` が `None` になるのは構造上の不変条件違反で、ゼロへ丸めず `Err(Backward)` にする。非対象 Op（`supports_create_graph() == false`）・rank 3 以上の `MatMul`・非空の子テープ・同一テープ・デバイス不一致・checkpoint 登録済みは、既存の `backward_create_graph`（`validate_ancestors` 等）が返す型付き `Err(Backward)` をそのまま伝播する。新しい拒否ロジック・variant は足していない。
-- **副作用**: 前段以降の失敗でも親テープにはちょうど 2 ノード（`u` と `mul`）が残る（`validate_ancestors` より前に積まれる。§19 と同じ）。既存ノードの値は不変。拒否時の子テープは空のまま。成功時の子テープには写し・1 階勾配・第 2 段の補助ノードが残る。子テープ上の数値は 1 階 VJP や `jacobian` と bit 同一を主張せず、統一複合判定で見る。
+- **副作用**: 前段以降の失敗でも親テープにはちょうど 2 ノード（`u` と `mul`）が残る（`validate_ancestors` より前に積まれる。§19 と同じ）。既存ノードの値は不変。拒否時の子テープの扱いは、空の別テープなら前段の事前検査による拒否では空のまま。非空の子テープは消去されず既存状態が維持され（拒否のみ）、親自身を子に渡した（同一テープの）場合は `double_vjp_stage` が追加した 2 ノードも残り、親への追加が子にも見える。成功時の子テープには写し・1 階勾配・第 2 段の補助ノードが残る。子テープ上の数値は 1 階 VJP や `jacobian` と bit 同一を主張せず、統一複合判定で見る。
 - **計算量**: `jvp` は親 backward 1 回＋子 backward 1 回、`jacfwd` は子 backward `n` 回。
 - **検証**: `crates/autodiff/src/functional_ops_jvp_tests.rs`（`#[cfg(test)]`。`pub(crate)` のため統合テストからは呼べない）。比較先は `jacobian_ops::jacobian`（facade の `Tape::jacobian` はこれへ 1 行委譲で、autodiff から facade へは依存できない）。J1 閉形式（`x⊙x`・`tanh`・`relu`・`Wx`・`sum`）、J2/J3 `jvp` 対 `jacobian·v`・`jacfwd` 対 `jacobian`（区分線形の `relu`／`abs`／`clamp`／`leaky_relu`／`Where`／`Maximum`／`Minimum` を含む、rank 0・非正方形・比較系 J ≡ 0）、J4 入口検査で親子テープ無変更、J5 非対象 Op（`Max`・rank 3 `MatMul`・`Custom`・`gelu`・`selu`・非空／同一テープの子）の拒否と子テープ無変更・親 +2 ノード、J6 決定性・既存ノード不変・`jacfwd` の列 k が `jvp(e_k)` と一致。統一複合判定を外れた要素はなかった。
 - **共通ヘルパー**: #2880 のテスト 2 ファイルと重複していた `seq`／`pos`、ホスト f64 の `J·v`、全要素の REQ-2 判定ループを `tests/common/mod.rs`（`det_seq`／`det_pos`／`jacobian_times_vector_f64`／`assert_all_req2_close`）へ寄せた。閾値は `REQ2_*` 定数を経由し直書きしていない。`double_vjp_feasibility_tests` の `common` モジュールは同一ファイルの二重 `#[path]` 取り込み（`clippy::duplicate_mod`）を避けるため `pub(crate)` にして本テストと共用する。#2880 の検証内容（ケース一覧・基準 3 の機構検査）は変えていない。
 - **保留ガード**: `FunctionalTransformsHoldDoctestGuard` の正のプローブ（free 関数・3 つの受け手 × 2 名）と固定文言、`api_surface.rs` の `FUNCTIONAL_TRANSFORMS_FN_NAMES`／`IDENTS`・宣言インベントリ（`functional_ops.rs::{jvp, jacfwd}` 各 1 件）・自己テストへ `jvp`／`jacfwd` を追加し、facade 非公開を機械固定した。
 - **新規物**: 新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe`・tolerance・baseline はない。`supports_create_graph` の対象 Op も広げていない（§11 の論点 5 は保留のまま）。
-- **承認状況**: ルート #2499 の所有者コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650 ）項 2 が示す、Tier 2 への移行（spec リポ Fandhe-AI/fandhe-ai-spec#81・実装リポ取り込み #2938。本記録の作成時点で #2938 は未マージ）と、その後の内部実装・公開形の記録までを根拠とする。facade 公開は承認範囲外で、公開形の記録と承認依頼は #2941。
+- **承認状況**: ルート #2499 の所有者コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650 ）項 2 が示す、Tier 2 への移行（spec リポ Fandhe-AI/fandhe-ai-spec#81・実装リポ取り込み #2938。本記録の作成時点で #2938 は未マージ → のちにマージ済み〈`f13e7e4a`〉）と、その後の内部実装・公開形の記録までを根拠とする。facade 公開は承認範囲外で、公開形の記録と承認依頼は #2941（§27）。
 - **スコープ外**: facade 公開（#2941）、CUDA／Metal 実機 parity と `docs/perf/logs`（#2942）、`supports_create_graph` の拡張（論点 5）、`VarF64`・f16・複数入力・微分可能な `jvp`。
 
 ## 25. 実装記録（#2942・親 #2939。jvp／jacfwd の CUDA／Metal 実機 parity 申し送り）
@@ -383,3 +383,70 @@ impl Tape {
 - 結合テスト: `crates/facade/tests/functional_transforms_facade.rs`。CPU では内部実装との一致（REQ-2 統一複合判定）・手計算値・エラー伝播・追跡なしの非対称・`vmap` 結果の微分可能性を固定し、CUDA／Metal は `#[ignore]` で分離した。実機は未実測で、申し送り先は `docs/perf/logs/functional-transforms-facade-2931/README.md`（内部 API 層は #2881 の README が担当）。
 - 維持した保留: §23.5 末尾の未決（`out_dim`・複数入力の拡張方法）、論点 5・6、モジュール `functional_ops`・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッドの拒否。`jvp`／`jacfwd` の facade 公開は改めて承認が要る。
 - 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
+
+## 27. 決定記録（イシュー #2941・親 #2939。`jvp`／`jacfwd` の facade 公開形・承認依頼）
+
+### 27.0 状態・基準・承認の根拠
+
+- 状態: **記録のみ・未承認・未公開**（コード変更なし）。`FunctionalTransformsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の否定ガードは維持する。`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変で、`fandhe-ai =0.10.0` の公開 API も変わらない。
+- 基準: `origin/main` `a18afc40`（2026-10-08）。行番号と内部シグネチャはこの sha のもの。
+- 承認の根拠: ルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）の**項 2 の最終段落のみ**。内容は、spec 側の Tier 2 移行後に実装 issue を起票し、内部実装と公開形の記録まで進めてよい、facade への公開は記録を書いたあとで改めて承認依頼に戻す、というものである（要約。コメントにない承認は書かない）。項 1 の承認（F1〜F3 と論点 1・2・4）は `vjp`／`hvp`／`vmap` に限られ、`jvp`／`jacfwd` には**及ばない**。承認は実装 Agent が代行しない。
+
+### 27.1 推奨 1 案: facade シグネチャ
+
+`Tape::vjp`／`hessian` と同じ、facade `Tape` の薄い委譲メソッド。引数順・型は内部関数（`crates/autodiff/src/functional_ops.rs` の `pub(crate) fn jvp`／`jacfwd`）から第 1 引数 `tape` を除いたものと一致する。
+
+```rust
+impl Tape {
+    pub fn jvp(&self, output: &Var<'_>, input: &Var<'_>, tangent: &Tensor<f32>, child: &Tape)
+        -> Result<Tensor<f32>, AutodiffError>;   // 結果 shape = output.shape()
+    pub fn jacfwd(&self, output: &Var<'_>, input: &Var<'_>, child: &Tape)
+        -> Result<Tensor<f32>, AutodiffError>;   // 結果 shape = output.shape ++ input.shape
+}
+```
+
+新しい型・`AutodiffError` variant・モジュール再エクスポート・裸の自由関数は足さない。`fandhe-ai =0.10.0` に対して追加のみ。
+
+### 27.2 委譲本体と公開時に必要な内部側の変更
+
+- 委譲本体（先例 `Tape::hessian` の `child: &Tape` → `&child.0`）: `jvp` は `fandhe_ai_autodiff::functional_ops::jvp(&self.0, output, input, tangent, &child.0)`、`jacfwd` は `…::jacfwd(&self.0, output, input, &child.0)`。
+- 公開時に必要になる内部側の変更（本 issue では行わない。公開 issue への申し送り）: (1) `pub(crate)` → `pub`（facade は他クレートの `pub(crate)` を呼べない。兄弟の `vjp`／`hvp`／`vmap` は既に `pub`）、(2) 両関数と private ヘルパーの `#[cfg_attr(not(test), expect(dead_code, …))]` の撤去（呼び出し元ができると unfulfilled 警告で `-D warnings` に落ちる設計）、(3) `functional_ops.rs` のモジュール doc にある「facade へ出さない」記述の更新。
+
+### 27.3 facade doc に書く契約（すべて現在の実装のまま）
+
+- 入口検査の順: `TapeMismatch` → `GradientTrackingDisabled`（`input` が追跡なし）→（`jvp` のみ）`tangent.shape() != input.shape()` で `Shape(ShapeMismatch)` → `checked_numel`（`jacfwd` は `m × n` も検査付き乗算）→ 要素数 0 または追跡なし `output` は全ゼロ（テープに触れない）。
+- `tangent` は **input** の shape と完全一致（ブロードキャスト不可）。`vjp` が output 側と照合するのとは逆向き。
+- 追跡なし `output` は全ゼロ（`jacobian`／`vjp` と同じ。追跡なし loss を `Err` にする `hvp` とは非対称）。追跡なし `input` は `GradientTrackingDisabled`。
+- 副作用: 入口検査通過後は、`backward_create_graph` 側の拒否（非対象 Op・rank 3 以上の `MatMul`・非空／同一の子テープ・デバイス不一致・checkpoint）でも親テープに 2 ノード（`u` と `mul`）が残る。`vjp` の「入口失敗時・ゼロ返却時はノードなし」とは異なる。拒否時の子テープは、空の別テープなら前段の事前検査による拒否では空のまま。非空の子テープは消去されず既存ノードが維持され、同一テープ（親自身）を渡した場合は `double_vjp_stage` が追加した 2 ノードも残り、親への追加が子にも見える。成功時の子テープにはノードが残るため再利用せず作り直す。`child` は `tape()`／`tape_for()` で作った空の別 `Tape`。
+- 適用範囲: 経路上の Op は `supports_create_graph()` が真のものに限る（非対象は既存 `validate_ancestors` の型付き `Err(Backward)`）。f32 `Tape` のみ（`VarF64`・f16 は対象外）、単一入力、結果は非微分のホスト値。
+- 数値: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。`jacobian` や 1 階 VJP との bit 同一は主張しない。計算量は `jvp` が親 backward 1 回＋子 backward 1 回、`jacfwd` が子 backward を入力要素数 `n` 回（`jacobian` は出力要素数 `m` 回）。
+- 実機 parity（CUDA／Metal）は #2942 の担当で未実測。値は書かない。
+- 利用例 doctest 案（公開 issue で facade 単独で完結するか確認）: `y = x⊙x` に対し `jvp` が `2x⊙v`、`jacfwd` が `diag(2x)`。書けなければ公開 issue は実装せず承認依頼へ戻る。
+
+### 27.4 保留ガードの反転範囲（推奨。承認時に確定）
+
+- 公開する名前: facade `Tape` の inherent メソッド `jvp`・`jacfwd` の 2 つだけ。
+- 外すもの: `__probe_methods` 内の `fandhe_ai::Tape::jvp(tape)`／`::jacfwd(tape)` の 2 行と、`Tape` への probe trait impl 内の同 2 メソッド。
+- 残すもの: モジュール `functional_ops`、裸の自由関数 `jvp()`・`jacfwd()`、`Var<'t>`・`Tensor<f32>` 受け手のプローブ。
+- `api_surface.rs`: 固定文言の更新、例外を「`crates/facade/src/lib.rs` の `impl Tape` 内の `pub fn jvp`／`jacfwd`」に限定、宣言インベントリへ `facade/src/lib.rs::{jvp, jacfwd}` を追加（件数は #2931 の前後で変わるため数字で固定せず名前で書く）、正ガード（シグネチャと 1 行委譲をトークン列で固定）を新設する。
+- **#2931 との相互作用（申し送り）**: §23.4 は #2931 に「`Tape` への probe trait impl ブロックごと外す」と指定したが、このブロックには #2940 で `jvp`／`jacfwd` のプローブも入っていた。**→ #2931 は選択肢 (a) の形で解決済み**: `Tape` 向けは専用 trait `__FandheFunctionalTransformsHoldTapeProbe`（`jvp`／`jacfwd` の 2 メソッドのみ）へ分離して維持し、UFCS プローブ（`fandhe_ai::Tape::jvp`／`jacfwd`）も維持している（`crates/facade/src/lib.rs` の `FunctionalTransformsHoldDoctestGuard` doc）。多層防御は減っていない。§23.4 本文は書き換えない。
+
+### 27.5 承認依頼の論点（推奨と選択肢。承認は代行しない）
+
+| 論点 | 内容 | 選択肢 | 推奨 |
+|---|---|---|---|
+| J-a | `jacfwd` を公開するか | 公開する／`jvp` のみ公開し `jacfwd` は内部に留める（§3 の「等価 API があれば新設しない」原則。結果は `Tape::jacobian` と同じ J） | 公開する。計算量が入力要素数に比例し `n < m` で有利という差があり §3 の「等価」に当たらない。ただし対象 Op が `supports_create_graph` の範囲に狭まる点を doc に明記する |
+| J-b | `child` の扱い | 明示引数／facade 内部で生成 | 明示引数（`hessian`・承認済み `hvp`・内部実装と同形。子テープの副作用を呼び出し側に見せる） |
+| J-c | 名前 | `jvp`／`jacfwd`（`torch.func` 名・保留ガードで先取り済み）／`jacobian_forward` 等の別名 | `jvp`／`jacfwd` |
+| J-d | `tangent` の shape 検査（input 側・完全一致・ブロードキャストなし） | 実装のまま契約にする／ブロードキャストを許す | 実装のまま |
+| J-e | 追跡なし `output` は全ゼロ（`hvp` と非対称） | 実装のまま doc に明記／`Err` にそろえる（意味論変更） | 実装のまま（`jacobian`／`vjp` と同じ）。項 1 の `vjp`／`hvp` 向け承認とは別に改めて確認を求める |
+| J-f | 失敗時にも親テープへ 2 ノード残る副作用 | 実装のまま doc に明記／入口で `validate_ancestors` 相当を先に走らせノードを残さない（実装変更） | 実装のまま doc に明記 |
+| J-g | 内部側の可視性 | `pub fn`（兄弟と同じ）／`#[doc(hidden)] pub` | `pub fn` |
+
+- 保留継続（推奨を作らない）: 論点 5（`supports_create_graph` の対象 Op 拡張）、複数入力、`VarF64`・f16、微分可能な `jvp`（結果を `Var` で返す形）。
+
+### 27.6 公開 issue への申し送り（未起票。承認後に起票）
+
+- 27.1〜27.4 の実装、27.2 の内部側変更、`docs/compat-api-scope.md` §5 の適用記録と `F4`・`F5` の公開先列の更新。
+- facade 経由の `#[ignore]` テストを足す場合は `docs/perf/logs/<slug>-<issue>/README.md` へ申し送る（#2942 と重複しないか確認。実測値は推測で書かない）。
+- 本節はコード・依存・tolerance・baseline・ガードレール閾値・`docs/spec` を変更しない。
