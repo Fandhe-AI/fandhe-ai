@@ -138,7 +138,10 @@
 //!   `EarlyStopping` の snapshot 取得を含む）は shadow へ差し替えた重みの下で実行し、
 //!   成功・失敗・打ち切りのいずれの経路でも生の重みへ復帰してから抜ける。したがって
 //!   `EarlyStopping::restore_best_weights` が fit 終了時に書き戻すのは EMA 重みの
-//!   snapshot になる。
+//!   snapshot になる。`Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` との併用も受理する
+//!   （イシュー #2844・決定記録 §15）: 判定値は生の重みで計算した訓練損失、保存・復元する重みは
+//!   EMA 重みで、両者は対応しない。EMA 重みでの評価値で判定するには `Monitor::ValLoss`／
+//!   `Monitor::ValMetric` を使う。
 //! - **fit 終了時**: モデルの重みを自動上書きしない。呼び出し元が
 //!   [`EmaCallback::shadow_state_dict`] を `Sequential::load_state_dict` へ渡す。
 //! - **fit をまたぐ継続**: shadow と更新回数は fit 終了後も保持し、次の fit で継続する
@@ -170,6 +173,8 @@ use super::training::History;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Monitor {
     /// 学習損失（[`History::loss`]）。
+    ///
+    /// `Callback::Ema` と併用した場合、判定値は EMA 重みで計算した値ではなく訓練損失で、保存・復元する重みは EMA 重みになる。EMA 重みでの評価値で判定するには `Monitor::ValLoss`／`Monitor::ValMetric` を使う（決定記録 `docs/autodiff-ema-decision.md` §15。イシュー #2844）。
     Loss,
     /// 検証損失（[`History::val_loss`]）。`validation` が `None` の
     /// `fit_with_callbacks` 呼び出しでは使えない
@@ -259,6 +264,8 @@ impl MonitorMode {
 /// 状態（`best`／`best_epoch`／`wait`／`stopped_epoch`／
 /// `best_state`）は [`Sequential::fit_with_callbacks`] 呼び出しの
 /// たびにリセットする（モジュール冒頭 doc「epoch 番号の数え方」節）。
+///
+/// `Callback::Ema` と併用した場合、判定値は EMA 重みで計算した値ではなく訓練損失で、保存・復元する重みは EMA 重みになる。EMA 重みでの評価値で判定するには `Monitor::ValLoss`／`Monitor::ValMetric` を使う（`Monitor::Loss` 監視時の注意。決定記録 `docs/autodiff-ema-decision.md` §15。イシュー #2844）。
 #[derive(Debug)]
 pub struct EarlyStopping {
     monitor: Monitor,
@@ -358,12 +365,6 @@ impl EarlyStopping {
     /// `training.rs` から `self.monitor` を直接読ませない薄いラッパー）。
     pub(super) fn monitor_value_at(&self, history: &History, epoch_local: usize) -> Option<f32> {
         self.monitor.value_at(history, epoch_local)
-    }
-
-    /// 監視指標が学習損失（`Monitor::Loss`）か（EMA 併用の fail-closed 検査用。
-    /// `ModelCheckpoint::monitors_train_loss` と同型。イシュー #2560）。
-    pub(super) fn monitors_train_loss(&self) -> bool {
-        matches!(self.monitor, Monitor::Loss)
     }
 
     /// [`Sequential::fit_with_callbacks`] 呼び出し開始時に内部状態を
@@ -527,13 +528,6 @@ impl ModelCheckpoint {
     /// への委譲）。
     pub(super) fn monitor_value_at(&self, history: &History, epoch_local: usize) -> Option<f32> {
         self.monitor.value_at(history, epoch_local)
-    }
-
-    /// 監視指標が学習損失（`Monitor::Loss`）か（EMA 併用の fail-closed 検査用。
-    /// `Monitor::Loss` は EMA 差し替え前の生の重みの損失のため、EMA 重みでの
-    /// ベスト判定契約〈`docs/autodiff-ema-decision.md` §10.2 (e)〉を満たせない。イシュー #2560）。
-    pub(super) fn monitors_train_loss(&self) -> bool {
-        matches!(self.monitor, Monitor::Loss)
     }
 
     /// epoch 末に 1 回呼ぶ。`value` は `self.monitor` が指す指標値、
@@ -1210,6 +1204,8 @@ impl std::fmt::Debug for LambdaCallback {
 /// 更新（`update`）・epoch 末評価時の shadow 取得（`shadow_for_eval`）で呼ばれる。
 /// shadow は [`crate::optim::ExponentialMovingAverage`] が保持し、fit 終了後も
 /// 残る（[`Self::shadow_state_dict`] で取り出し `Sequential::load_state_dict` へ渡す）。
+///
+/// `Callback::Ema` と併用した場合、判定値は EMA 重みで計算した値ではなく訓練損失で、保存・復元する重みは EMA 重みになる。EMA 重みでの評価値で判定するには `Monitor::ValLoss`／`Monitor::ValMetric` を使う（決定記録 `docs/autodiff-ema-decision.md` §15。イシュー #2844）。
 ///
 /// # Examples
 ///

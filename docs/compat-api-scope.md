@@ -1804,9 +1804,11 @@ EMA（#2179 で内部クレート限定実装済み）を、決定記録（`docs
 `EmaHoldDoctestGuard` は `FitConfig`／`Sequential` への `use_ema`／`ema_decay` 追加という禁止経路専用として
 名前を維持（ドリフト検査 2 件は不変。理由は決定記録 §14.3）。利用例は `optim.rs`・`optim_ema.rs`・
 `compat/callbacks.rs` の doctest と `crates/facade/tests/compat_sequential_fit_ema.rs`・
-`compat_sequential_ema_manual.rs`。保留を継続する項目: `compile_with_amp` 併用・`Monitor::Loss` の
-`ModelCheckpoint`／`EarlyStopping` 併用（いずれも fit 開始前に `InvalidArgument` で拒否）・decay ウォーム
-アップ・`BatchNorm` running buffer・`DeviceParamStore` 常駐経路・`FitConfig`／`Sequential` への接続。
+`compat_sequential_ema_manual.rs`。保留を継続する項目: `compile_with_amp` 併用（fit 開始前に
+`InvalidArgument` で拒否）・decay ウォームアップ・`BatchNorm` running buffer・`DeviceParamStore` 常駐経路・
+`FitConfig`／`Sequential` への接続。`Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` 併用は、
+#2844 で決定記録 §15 の形（判定値は生の重みの訓練損失・保存／復元重みは EMA 重み）により受理した
+（根拠: ルート #2499 のコメント `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`。§16）。
 `Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec` は不変、実機申し送りは不要。
 詳細は決定記録 §13・§14。
 

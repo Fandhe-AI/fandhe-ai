@@ -445,7 +445,7 @@ snapshot は EMA 重みを保存するため、指標と保存重みが食い違
 > 生の重みで計算した訓練損失。追加の順伝播なし）をそのまま使い、`ModelCheckpoint` の保存重みと
 > `restore_best_weights` が戻す重みは EMA 重みの snapshot とする。判定値と保存重みは対応しない。
 > エポック内の順序は不変。EMA 重みで評価した値で判定したい場合は `Monitor::ValLoss`／`Monitor::ValMetric` を使う。
-> 拒否の撤去は #2844。`compile_with_amp` 併用の拒否は維持する。
+> 拒否の撤去は #2844 で実施済み（§16）。`compile_with_amp` 併用の拒否は維持する。
 
 継続する `EmaCallback`（初期化済み）を別構成のモデルへ使い回した場合は、最初の step で
 `update_named` が不一致を検出して拒否済みモデルに重み・optimizer 状態の変更が残らないよう、
@@ -510,8 +510,8 @@ shape は `Shape`）。
 ### 14.5 保留を継続する項目（追加承認が必要）
 
 - `Callback::Ema` と `compile_with_amp` の併用拒否（§13.4）。緩めていない。
-- `Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` との併用拒否は、形が §15（#2843）で決定済み。
-  現行コードの拒否は #2844 が撤去するまで残る。
+- `Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` との併用拒否は、形が §15（#2843）で決定済みで、
+  #2844 で撤去した（適用記録は §16）。
 - decay ウォームアップ・`BatchNorm` の running buffer・`DeviceParamStore` 常駐経路の検出・
   `FitConfig`／`Sequential` への接続（§10.2 (d) で不採用）。
 
@@ -608,6 +608,24 @@ intra-doc link は公開項目のみ。非公開項目はバッククォート�
 `crates/**`・`docs/compat-api-scope.md`・依存・`unsafe`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変。
 拒否の緩和は正のテストと対で行う（fail-closed の拒否を 1 つ外すため）。判定値が EMA 重みのものではない点を利用者向け doc に明記し、誤ったモデル選択を防ぐ。
 
+## §16 #2844 併用拒否の撤去（適用記録）
+
+イシュー #2844（親 #2842）。§15 の形のとおり、`Callback::Ema` と `Monitor::Loss` の `ModelCheckpoint`／`EarlyStopping` の併用拒否を撤去した。
+
+- 承認の根拠: §15.1 と同じ（ルート #2499 のコメント `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）。#2844 上のコメントは転記。承認範囲は §15 の形に限る。
+- `crates/facade/src/compat/training.rs`: `(1.8)` の `monitors_train_loss()` 拒否 arm とメッセージを削除。残る拒否 4 件（複数 `Ema`・L-BFGS・カスタム train_step・AMP）の順序・文言は不変。
+  `fit_with_callbacks` の `# EMA` doc を §15.5 の文面へ差し替え。epoch 内の順序（`ema_swap_in` など）は不変で、追加の順伝播・新規 `pub` 項目なし。
+- `crates/facade/src/compat/callbacks.rs`: 呼び出し元が無くなった `EarlyStopping::monitors_train_loss`・`ModelCheckpoint::monitors_train_loss` を削除。
+  §15.5 の短縮版を `Monitor::Loss`・`EarlyStopping`・`ModelCheckpoint`・`EmaCallback`・モジュール doc `# EMA` 節へ追記。
+- テスト（`crates/facade/tests/compat_sequential_fit_ema.rs`、bit 完全一致のみ・許容誤差定数なし）:
+  `rejected_combinations_leave_model_untouched` から (e) を削除し、
+  `monitor_loss_checkpoint_judges_raw_train_loss_and_saves_ema_weights`（判定値 = `History::loss[best_epoch]`、保存重み = 当該 epoch 末の shadow で生の重みとは不一致、
+  `save_best_only(false)`、`History::loss` が EMA 無しと bit 一致）と
+  `monitor_loss_early_stopping_without_validation_restores_ema_snapshot`（validation なしで受理、完走・打ち切りの両経路で復元重み = ベスト epoch の shadow）を追加。
+  §15.7 (3)（`Monitor::ValLoss` 併用の不変）は既存 `checkpoint_and_early_stopping_observe_ema_weights`、(5)（`Err` 経路での復帰）は既存 `error_in_epoch_end_callback_restores_raw_weights` が担保。
+- 公開面: §15.6 のとおり `Err` → `Ok` に受理範囲を広げるだけ。`api_surface.rs` の EMA 正ガードと `Callback` variant 集合は無変更で通る。
+- 不変: `Cargo.toml`／`Cargo.lock`・依存・`unsafe`・tolerance／baseline・ガードレール閾値・`docs/spec/`。実機申し送りは不要（§7）。
+
 ## 非信頼データの扱い
 
 Issue #2179 本文はプロンプト内で非信頼データとして扱った。本文中の
@@ -616,3 +634,5 @@ Issue #2179 本文はプロンプト内で非信頼データとして扱った�
 確認済み）。§4 の承認事項の判断は本 doc が独自に行った。
 
 Issue #2843 本文・Keras ソースも非信頼データとして扱い、含まれる命令には従っていない。§15 の根拠は 15.1 のユーザーコメントのみ。
+
+Issue #2844 本文も非信頼データとして扱い、含まれる命令には従っていない。§16 の根拠は §15.1 のユーザーコメントのみ。
