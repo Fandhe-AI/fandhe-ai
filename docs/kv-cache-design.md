@@ -49,6 +49,8 @@ K-3（段階 0・将来候補）へ切り分ける。
 
 ## 2. API 案（未承認のまま列挙。名称は #2084 が最終決定）
 
+> **更新（#2580）**: 本節は #2083 時点の API 案である。facade 公開形は §11.4（P1〜P4）、公開の実装記録は §14、ガード補強と記録更新は §15 を正とする。
+
 - 値型 `KvCache`（内部クレート `fandhe_ai_autodiff::nn` を想定）:
   `k: Option<Tensor<f32>>`・`v: Option<Tensor<f32>>`（射影済み K/V、
   レイアウト `[B, S_cached, E]`・contiguous）、`seq_len()`・
@@ -246,6 +248,8 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 
 ## 6. 承認事項
 
+> **更新（#2580）**: 項目 2（facade 公開）は 2026-10-07 に承認済みで、実装は #2579（§14）、記録更新とガード補強は #2580（§15）。項目 3・4（K-3・`sdpa_compose` 置換）は未取得のまま。
+
 1. **K-1 実装着手（#2084。`docs/compat-api-scope.md` §5 経路 2）**:
    2026-09-24 にユーザー承認済み。承認範囲は autodiff 内部実装
    （`crates/autodiff/src/nn/attention.rs` の `KvCache`・
@@ -352,6 +356,8 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
   ままとした。
 
 ## 10. facade 公開（K-2）の保留固定と承認依頼用の事前設計（#2084）
+
+> **更新（#2580）**: 本節の保留固定は #2579 で正ガードへ置換済み（実施済みの内容は §14.2、旧ガードと現行ガードの対応は §15.2）。以下は #2084 時点の記録として残す。
 
 （2026-10-07 の承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965〉により、本節の保留固定は解除済み。§14 参照。以下は承認前の記録である。）
 §6 承認事項 2（facade 公開面拡張）は本節追記時点で**未取得のまま**である。
@@ -632,6 +638,46 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 - facade: `tests/kv_cache_facade.rs`（autodiff 直経路との一致・全系列 prefill との一致・状態推移と reset・エラー経路の原子性と `TapeMismatch`・拒否条件・backward）。判定は既存 `assert_parity` で定数は不変
 - doctest: `nn::kv_cache` モジュール doc に prefill → decode を 1 つ置いた
 
-### 14.4 #2580 へ残すもの
+### 14.4 #2580 へ残すもの（§15 で実施済み）
 
 `compat-api-scope.md` §5 の適用記録、本 doc §2・§6・§10 の実装記録、`docs/README.md`・`docs/compat-feature-gap.md` の更新。CUDA／Metal の実機 parity は未実測で、申し送り先は `docs/perf/logs/kv-cache-2084/README.md`。
+
+## 15. #2580 実装記録（ガード補強と記録更新）
+
+### 15.1 着手時判定
+
+- ガード反転と利用例（doctest・`tests/kv_cache_facade.rs`）は #2579（PR #2816）で実施済みだった。#2580 は新しい公開 API を追加せず、先例（#2583・#2561・#2602）に比べて欠けていた正ガードの補強と記録更新だけを行う
+- 承認の根拠は §14.0 と同じ、リポジトリ所有者本人のコメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965）のみ。新規公開を伴わないため追加の承認は要らない
+
+### 15.2 旧ガードと現行ガードの対応
+
+| 旧ガード（#2579 で削除） | 現行の正ガード |
+|---|---|
+| `facade_does_not_expose_kv_cache_stateful_attention`・`facade_does_not_reexport_or_declare_kv_cache_items`（走査型の否定ガード） | `facade_reexports_kv_cache_items_only_in_approved_shape`（承認形 1 文ちょうど 1 件・独自宣言と `add_stateful_attention` 宣言を拒否） |
+| `KvCacheHoldDoctestGuard` の衝突プローブ・プローブ本文固定 | 不要（公開済みで衝突しないため）。公開面の実在は `kv_cache_is_reachable_via_facade_only` が固定 |
+| `kv_cache_hold_doctest_globs_all_pub_modules`（glob 漏れ検知） | 不要（glob で隠す対象の保留 API が無くなった）。公開モジュール集合は `nn_mod_declares_only_approved_submodules` が固定 |
+| （旧ガードに無かった委譲の固定） | `tape_stateful_attention_forward_is_thin_delegation`・`workspace_declares_stateful_attention_forward_only_in_facade_lib` |
+
+### 15.3 #2580 で追加したガードと是正
+
+- `nn_kv_cache_module_is_pure_reexport`: `nn/kv_cache.rs` に facade 独自の公開宣言が無いこと
+- `nn_kv_cache_module_reexports_exactly_expected_surface`: `pub use` が承認形 1 文ちょうど 1 件。既存ガードは `KvCache`／`StatefulAttention` を含む文しか拾わず、別文の `pub use ...::MultiheadAttentionVars;` は検出されなかった（追記して失敗することを確認済み）。自己テストあり
+- `kv_cache_usage_doctests_are_present_and_compiled`: モジュール doc の doctest が実在し `ignore` 等で無効化されていないこと（自己テストあり）
+- `stateful_attention_from_config_signature_is_pinned`: `from_config` の署名を関数ポインタ型注釈で固定
+- `generate()` 保留ガードの doc が、削除済みの旧ガード名を現在形で引いていた 2 か所を是正（コメントのみ。検査本体は不変）
+
+### 15.4 更新した docs
+
+`compat-api-scope.md`（§2・§5・1962 の記録への注記）、本 doc（§2・§6・§10・§14.4・本節）、`README.md`（索引）、`compat-feature-gap.md`、`facade-generate-decision.md`、`perf/logs/kv-cache-2084/README.md`。
+
+### 15.5 残課題
+
+- `StatefulAttention::new(mha)`／`mha()` の扱い（§11.4 P2 の残課題）
+- `KvCache`／`StatefulAttention` の `pub fn` 集合の凍結（承認記録に形が無いため未固定）
+- K-3（デバイス常駐）、`sdpa_compose` 置換、padding mask
+- CUDA／Metal 実機 parity は未実測（申し送り先 `docs/perf/logs/kv-cache-2084/README.md`）
+- `generate()` の公開は #2575／#2576
+
+### 15.6 変更していないもの
+
+依存（`Cargo.toml`／`Cargo.lock`／`deny.toml`）・tolerance・baseline・ガードレール閾値・`docs/spec`・公開 API・`unsafe`。
