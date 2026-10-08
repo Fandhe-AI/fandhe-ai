@@ -194,7 +194,18 @@
 - **承認状況**: 本実装は §1 の承認範囲（実装 issue の起票承認）の内側。facade 公開は未承認で、承認と公開は §10 の 6・8。
 - **スコープ外**: PyTorch `torch.func.vmap` fixture と実 CPU バックエンドとの突合（§10 の 4）、`vjp`／`hvp` との合成（§10 の 5）、facade 公開（§10 の 6・8）、CUDA／Metal 実機 parity（§10 の 11）、`vmap(grad)`・`out_dim`・複数入力・`VarF64` 版・f16。
 
-## 18. 実装記録（#2880・親 #2841。§10 の分解案 9: double-VJP 法の実現可能性検証）
+## 18. 実装記録（#2877・親 #2841。§10 の分解案 4）
+
+- **追加したファイル**: `crates/autodiff/tests/fixtures/functional-transforms-pytorch-reference/`（`gen_reference.py`・`functional_transforms_reference.json`・`README.md`。生成条件と sha256 は README）、`crates/autodiff/tests/functional_ops_pytorch_parity.rs`（F0〜F4）、`crates/facade/tests/functional_ops_backend_parity.rs`（実 `CpuBackendOps` 対 naive と手計算値）。`crates/*/src`・`Cargo.toml`・`Cargo.lock` は変更していない。
+- **使った PyTorch API**: PyTorch 2.14.0+cpu。vjp は `torch.func.vjp`、vmap は `torch.func.vmap(in_dims=k, out_dims=0)`。**`torch.func.hvp` は存在しない**（`torch_func_has_hvp = false` を JSON に記録）ため、hvp の主参照は `torch.func.vjp(torch.func.grad(g), x)`（reverse-over-reverse）とし、`torch.autograd.functional.hvp` との一致をスクリプト内で assert して相互検証した。`[1, 1]` の loss は grad に渡す関数だけを `reshape(())` で包む。
+- **ケース数**: vjp 9 件・hvp 9 件・vmap 7 件（forward 値のみ。vmap 出力の backward・vjp・hvp は #2878）。診断用に f64 真値 `expected_f64` も保存した（ゲートには使わない）。
+- **判定不能**: 0 件（`INDETERMINATE` は空）。全ケースが REQ-2 統一複合判定で PyTorch 値と一致した。判定不能の項目は、fail を観測し f64 真値と比べて PyTorch 側が外れていると確認した場合に限り、ゲートを自前参照（vjp は `jacobian` の転置積・hvp は `hessian · v`・vmap はバッチなし実行）へ付け替える形で追加する。
+- **CPU 対 naive**: 実 `CpuBackendOps` のテープと `Tape::new()` の結果が `assert_parity` で一致し、手計算値（vjp `2x`・hvp `6x ⊙ v`・vmap `s ⊙ s`）とも一致した。
+- **新規物**: tolerance・baseline・依存・`unsafe` は追加していない。
+- **承認状況**: 本実装は §1 の承認範囲内。facade 公開は未承認（§10 の 6・8）。
+- **スコープ外**: vmap と vjp・hvp の合成（#2878）、double-VJP 検証（#2880）、CUDA／Metal 実機 `#[ignore]` テストと `docs/perf/logs/` への申し送り（#2881。facade 側ファイル末尾へ追記する）、facade 公開（#2879 以降）、`vmap(grad)`・`out_dim`・複数入力・`VarF64` 版・f16。
+
+## 19. 実装記録（#2880・親 #2841。§10 の分解案 9: double-VJP 法の実現可能性検証）
 
 - **検証した形**: §8 の手順をテスト内の private ヘルパー `double_vjp_probe` として実行した（`u` を追跡ありの葉、`s = y ⊙ u`、`cg.grad(&x)` と `v` の積を子テープで逆伝播し `cg.child_var(&u)` の勾配を取る）。`jvp`／`jacfwd` の公開 API・内部 API は作っていない。`api_surface` の関数名インベントリ（`vjp`／`hvp`／`vmap`）の期待集合は変えていない。
 - **判定基準 1〜4 の結果**:
