@@ -5506,12 +5506,12 @@ struct TensorProductOpsHoldDoctestGuard;
 struct PadModesHoldDoctestGuard;
 
 /// 3D プーリング（`max_pool3d`・`avg_pool3d`。イシュー #2643・親 #2625・ルート #2499
-/// Phase 4）を facade 公開面から締め出す保留ガード（`PadModesHoldDoctestGuard` と同型の
+/// Phase 4）のうち未承認の経路を facade 公開面から締め出す保留ガード（`PadModesHoldDoctestGuard` と同型の
 /// 正のプローブ 1 ブロック方式）。
 ///
 /// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
 /// モジュール `pool3d_ops`／`pool3d`・型 `Pool3dParams`／`MaxPool3d`／`AvgPool3d`・メソッド
-/// `max_pool3d`／`avg_pool3d`（`Var`／`Tape`／`Tensor<f32>`）と
+/// `max_pool3d`／`avg_pool3d`（`Tape`／`Tensor<f32>`。`Var` は #2850 で外した）と
 /// `add_max_pool3d`／`add_avg_pool3d`（`compat::Sequential`）を持つプローブ用トレイトを
 /// 置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名の
 /// モジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の inherent
@@ -5519,13 +5519,14 @@ struct PadModesHoldDoctestGuard;
 /// エラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポート
 /// されるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::pool3d_ops`・
-/// `fandhe_ai_tensor_core::pool3d`・`BackendOps::pool3d_max`／`pool3d_avg`）。保留対象は
-/// facade 公開面（`Var::max_pool3d`／`avg_pool3d` の委譲メソッド）のみで、公開形は
-/// 未承認（承認依頼は #2677・公開自体は承認後の #2678・#2679。推奨案は
-/// `docs/autodiff-pool3d-ops-decision.md` §7。同記録は推奨案の記録であり承認記録では
-/// ない）。層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`）も同じ保留に
-/// 含める（#2679 の層結線がもう一方の漏出経路のため）。
+/// **#2850 での部分反転**（承認根拠 `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`・
+/// 公開形は `docs/autodiff-pool3d-ops-decision.md` §12.1・`docs/compat-api-scope.md` §5.1。`PadModesHoldDoctestGuard` の #2678 部分反転と同型）:
+/// `Var::max_pool3d`／`Var::avg_pool3d` は記録 §12.1 の形で公開済みのため、受け手 `Var` の `impl` ブロックと該当する UFCS 行を外した
+/// （残すと公開した inherent メソッドとの衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは `Tape`・`Tensor<f32>` 上の同名メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `pool3d_ops`・`pool3d`、型 `Pool3dParams`／`MaxPool3d`／`AvgPool3d`、
+/// `Tape`・`Tensor<f32>` 上の `max_pool3d`／`avg_pool3d`、層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`。#2679 の層結線は保留継続）。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// pool3d_ops_hold_doctest_globs_all_pub_modules`・
@@ -5533,9 +5534,6 @@ struct PadModesHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_pool3d_ops`・
 /// `workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の
-/// 対応する否定ガードも同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5576,15 +5574,6 @@ struct PadModesHoldDoctestGuard;
 /// trait __FandhePool3dHoldProbe {
 ///     fn max_pool3d(&self) -> __FandhePool3dHoldMarker;
 ///     fn avg_pool3d(&self) -> __FandhePool3dHoldMarker;
-/// }
-///
-/// impl<'t> __FandhePool3dHoldProbe for fandhe_ai::Var<'t> {
-///     fn max_pool3d(&self) -> __FandhePool3dHoldMarker {
-///         __FandhePool3dHoldMarker
-///     }
-///     fn avg_pool3d(&self) -> __FandhePool3dHoldMarker {
-///         __FandhePool3dHoldMarker
-///     }
 /// }
 ///
 /// impl __FandhePool3dHoldProbe for fandhe_ai::Tape {
@@ -5628,13 +5617,11 @@ struct PadModesHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 ///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
-///     let _: __FandhePool3dHoldMarker = fandhe_ai::Var::max_pool3d(v);
-///     let _: __FandhePool3dHoldMarker = fandhe_ai::Var::avg_pool3d(v);
 ///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::max_pool3d(tape);
 ///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::avg_pool3d(tape);
 ///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::max_pool3d(tf);
@@ -5654,21 +5641,24 @@ struct Pool3dOpsHoldDoctestGuard;
 /// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカルモジュール
 /// `conv_transpose3d_ops`／`max_unpool_ops`／`conv_transpose3d`／`max_unpool`・型
 /// `ConvTranspose3d`／`MaxUnpool1d`／`MaxUnpool2d`／`MaxUnpool3d`／`MaxUnpoolLayout`・メソッド
-/// `conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d`（`Var`／`Tape`／
-/// `Tensor<f32>`）と `add_conv_transpose3d`／`add_max_unpool1d`／`add_max_unpool2d`／
+/// `conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d`（`Tape`／
+/// `Tensor<f32>`。`Var` は #2850 で外した）と `add_conv_transpose3d`／`add_max_unpool1d`／`add_max_unpool2d`／
 /// `add_max_unpool3d`（`compat::Sequential`）を持つプローブ用トレイトを置き、修飾なしの関数
 /// 呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob
 /// 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性
 /// または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は
 /// facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
 ///
-/// 実装は内部クレートに閉じている（`fandhe_ai_autodiff::conv_transpose3d_ops`・
-/// `fandhe_ai_autodiff::max_unpool_ops`・`fandhe_ai_tensor_core::conv_transpose3d`・
-/// `fandhe_ai_tensor_core::max_unpool`）。保留対象は facade 公開面（`Var::conv_transpose3d`／
-/// `Var::max_unpool1d/2d/3d` の委譲メソッド）のみで、公開形は未承認（承認依頼は #2677・公開自体は
-/// 承認後の #2678・#2679。推奨案は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §7。
-/// 同記録は推奨案の記録であり承認記録ではない）。層化（`compat::Sequential::add_conv_transpose3d`／
-/// `add_max_unpool1d/2d/3d`）も同じ保留に含める（#2679 の層結線がもう一方の漏出経路のため）。
+/// **#2850 での部分反転**（承認根拠 `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`・
+/// 公開形は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12.1・`docs/compat-api-scope.md` §5.1。`PadModesHoldDoctestGuard` の #2678 部分反転と同型）:
+/// `Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` は記録 §12.1 の形で公開済みのため、受け手 `Var` の `impl` ブロックと該当する UFCS 行を外した
+/// （残すと公開した inherent メソッドとの衝突でコンパイルが失敗する）。§12.2 の設計判断 3 件（`MaxUnpool` の索引受け渡し・`output_padding < stride` 拒否・`C = 0` 受理）は現行挙動のまま公開した。
+/// 残した受け手の `impl` ブロックは `Tape`・`Tensor<f32>` 上の同名メソッド分のプローブとして維持する。
+/// 引き続き拒否する未承認経路: モジュール `conv_transpose3d_ops`／`max_unpool_ops`／`conv_transpose3d`／`max_unpool`、
+/// 型 `ConvTranspose3d`／`MaxUnpool1d/2d/3d`／`MaxUnpoolLayout`、`Tape`・`Tensor<f32>` 上の同名メソッド、
+/// 層化（`compat::Sequential::add_conv_transpose3d`／`add_max_unpool1d/2d/3d`。#2679 の層結線は保留継続）。
+/// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
+/// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
 /// ソース走査ガード（`crates/facade/tests/api_surface.rs::
 /// conv_transpose3d_max_unpool_hold_doctest_globs_all_pub_modules`・
@@ -5676,9 +5666,6 @@ struct Pool3dOpsHoldDoctestGuard;
 /// `facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool`・
 /// `workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locations`）との
 /// 多層防御として働く。
-///
-/// 承認を得た日が来たら、本構造体・本 doctest 自体を削除する（ソース走査側の対応する否定ガードも
-/// 同時に正ガードへ置き換える）。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
@@ -5730,21 +5717,6 @@ struct Pool3dOpsHoldDoctestGuard;
 ///     fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
 ///     fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
 ///     fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
-/// }
-///
-/// impl<'t> __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Var<'t> {
-///     fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
-///         __FandheConvTranspose3dMaxUnpoolHoldMarker
-///     }
-///     fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
-///         __FandheConvTranspose3dMaxUnpoolHoldMarker
-///     }
-///     fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
-///         __FandheConvTranspose3dMaxUnpoolHoldMarker
-///     }
-///     fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
-///         __FandheConvTranspose3dMaxUnpoolHoldMarker
-///     }
 /// }
 ///
 /// impl __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Tape {
@@ -5811,15 +5783,11 @@ struct Pool3dOpsHoldDoctestGuard;
 /// }
 ///
 /// fn __probe_methods(
-///     v: &fandhe_ai::Var<'_>,
+///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
 ///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
-///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::conv_transpose3d(v);
-///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool1d(v);
-///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool2d(v);
-///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool3d(v);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::conv_transpose3d(tape);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool1d(tape);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool2d(tape);

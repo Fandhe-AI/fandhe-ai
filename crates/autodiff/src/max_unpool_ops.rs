@@ -1,12 +1,12 @@
 //! `max_unpool1d`／`max_unpool2d`／`max_unpool3d` の自由関数（`F.max_unpool1d/2d/3d` 相当。
 //! イシュー #2644・親 #2625「Phase 4」・ルート #2499）。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::max_unpool1d/2d/3d` の委譲メソッド）は未承認で、承認依頼は
-//! #2677（公開自体は承認後の #2678）。層化（`nn::MaxUnpool*`・`Sequential::add_*`）は #2679 の対象で
-//! 本イシューでは作らない。本モジュールは内部クレート限定の入口で、`Var` に inherent メソッドを足さない。
-//! 保留は `crates/facade/src/lib.rs` の `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する
-//! （`docs/autodiff-conv-transpose3d-max-unpool-decision.md`）。
+//! **facade 公開状況**: `Var::max_unpool1d/2d/3d`（本モジュールの自由関数への 1 行委譲）は #2850 で
+//! 公開済み（公開形は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12.1。索引は
+//! `Var::max_pool1d/2d/3d` が返す `Tensor<i32>` をそのまま渡せる）。モジュール自体は再エクスポートしない。
+//! 層化（`nn::MaxUnpool*`・`Sequential::add_*`）は保留継続で、`crates/facade/src/lib.rs` の
+//! `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の否定ガードが
+//! 機械的に固定する。
 //!
 //! **PyTorch 相当**: `F.max_unpool{1,2,3}d(input, indices, kernel_size, stride, padding, output_size)`。
 //! 入力 `[N, C, 空間...]`・`indices` は同 shape の `Tensor<i32>`（`Var::max_pool1d`／`max_pool2d`／

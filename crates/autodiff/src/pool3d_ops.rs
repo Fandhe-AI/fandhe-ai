@@ -1,13 +1,12 @@
 //! `max_pool3d`・`avg_pool3d` の自由関数（イシュー #2643・親 #2625「Phase 4」・ルート
 //! #2499）。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::max_pool3d`／`Var::avg_pool3d` の委譲メソッド）は
-//! 未承認で、承認依頼は #2677（公開自体は承認後の #2678）。層化（`nn::MaxPool3d`／
-//! `nn::AvgPool3d`・`Sequential::add_*`）は #2679 の対象で本イシューでは作らない。本モジュールは
-//! 内部クレート限定の入口で、`Var` に inherent メソッドを足さない。保留は
-//! `crates/facade/src/lib.rs` の `Pool3dOpsHoldDoctestGuard` と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する
-//! （`docs/autodiff-pool3d-ops-decision.md`）。
+//! **facade 公開状況**: `Var::max_pool3d`／`Var::avg_pool3d`（本モジュールの自由関数への 1 行委譲）は
+//! #2850 で公開済み（公開形は `docs/autodiff-pool3d-ops-decision.md` §12.1。委譲本体は
+//! `crates/facade/tests/api_surface.rs` の `var_phase4_ops_methods_are_thin_delegations` が固定）。
+//! モジュール自体は再エクスポートしない。層化（`nn::MaxPool3d`／`nn::AvgPool3d`・
+//! `Sequential::add_*`）は保留継続で、`crates/facade/src/lib.rs` の `Pool3dOpsHoldDoctestGuard` と
+//! `api_surface.rs` の否定ガードが機械的に固定する。
 //!
 //! **PyTorch 相当**:
 //!

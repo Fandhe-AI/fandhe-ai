@@ -1,5 +1,5 @@
-//! `fandhe_ai_autodiff::conv_transpose3d_ops`／`max_unpool_ops`（イシュー #2644。facade 非公開のため
-//! `fandhe_ai_autodiff::*` を直接 use する。各モジュール doc 参照）のバックエンド間 parity テスト
+//! `Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d`（イシュー #2644 で実装・#2850 で facade 公開。実体は
+//! `fandhe_ai_autodiff::conv_transpose3d_ops`／`max_unpool_ops`。各モジュール doc 参照）のバックエンド間 parity テスト
 //! （`pool3d_ops_backend_parity.rs` と同型）。
 //!
 //! 属性なし（`fandhe_ai::tape()`〈`CpuBackendOps`〉と `fandhe_ai_autodiff::Tape::new()`〈`NaiveOps`＝
@@ -19,8 +19,6 @@
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
-use fandhe_ai_autodiff::conv_transpose3d_ops::conv_transpose3d;
-use fandhe_ai_autodiff::max_unpool_ops::{max_unpool1d, max_unpool2d, max_unpool3d};
 use fandhe_ai_tensor_core::Tensor;
 
 trait VarSource {
@@ -75,8 +73,7 @@ macro_rules! outputs_on {
         let x = tape.make_var(&t(wave(CT_X.iter().product(), 0.043, 1.0), &CT_X));
         let w = tape.make_var(&t(wave(CT_W.iter().product(), 0.061, 0.5), &CT_W));
         let b = tape.make_var(&t(vec![0.1, -0.2, 0.3, 0.4, -0.5, 0.6], &[6]));
-        let y = conv_transpose3d(
-            &x,
+        let y = x.conv_transpose3d(
             &w,
             Some(&b),
             CT_STRIDE,
@@ -125,19 +122,19 @@ macro_rules! outputs_on {
         unpool_case!(
             [2, 2, 3],
             vec![1, 0, 5, 2, 4, 3, 1, 1, 5, 0, 2, 4],
-            |x, i| max_unpool1d(x, i, 2, None, 0, None)
+            |x, i| x.max_unpool1d(i, 2, None, 0, None)
         );
         // 2d: [1,2,2,3] -> 出力平面 4×6=24。
         unpool_case!(
             [1, 2, 2, 3],
             vec![2, 9, 16, 23, 6, 13, 0, 0, 5, 23, 11, 12],
-            |x, i| max_unpool2d(x, i, [2, 2], None, [0, 0], None)
+            |x, i| x.max_unpool2d(i, [2, 2], None, [0, 0], None)
         );
         // 3d: [1,1,2,2,2] -> 出力平面 4×4×4=64。
         unpool_case!(
             [1, 1, 2, 2, 2],
             vec![0, 63, 21, 42, 7, 35, 56, 14],
-            |x, i| max_unpool3d(x, i, [2, 2, 2], None, [0, 0, 0], None)
+            |x, i| x.max_unpool3d(i, [2, 2, 2], None, [0, 0, 0], None)
         );
         Outputs {
             ct_out,
