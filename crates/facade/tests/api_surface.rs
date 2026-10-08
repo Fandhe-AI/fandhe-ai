@@ -22495,7 +22495,7 @@ fn workspace_declares_npy_io_names_only_in_allowed_locations() {
 /// 公開形の正は `docs/facade-generate-decision.md` §13.2・§17。リポジトリ所有者本人の承認
 /// コメント issuecomment-6033824965 の #2573 行）。旧保留ガード（#2191。`GenerateHoldDoctestGuard`
 /// と走査ガード 3 件・固定文言）を反転した最小の正ガードで、全数インベントリ化と doctest
-/// 存在検査は #2576 で追加する。
+/// 存在検査は #2576 で本節末尾へ追加済み（検出範囲の限界はそちらのコメントを参照）。
 const GENERATE_APPROVED_REEXPORT: &str =
     "fandhe_ai_autodiff::generate::{AutoregressiveModel,GenerateConfig,SamplingStrategy,generate}";
 
@@ -22655,6 +22655,319 @@ fn generate_items_are_reachable_via_facade_inference_path() {
     let ids = Tensor::<i32>::new(vec![0], &[1, 1]).unwrap();
     let out: Result<Tensor<i32>, AutodiffError> = generate(&Probe, &ids, &cfg);
     assert_eq!(out.unwrap().shape(), &[1, 3]);
+}
+
+// --- generate()（イシュー #2576）正ガードの仕上げ（全数インベントリ・doctest 実在検査） ----
+//
+// 上の最小の正ガード（#2575）に、`docs/facade-generate-decision.md` §17.5 の申し送り分
+// （公開形の全数インベントリ・利用例 doctest の実在検査・`inference/mod.rs` の `pub use`
+// 全数固定）を足す。検出範囲の限界（過剰保証しない）: いずれも列挙名のトークン走査で、
+// マクロ生成・`use … as` 別名経由の到達は範囲外（別名は承認形の完全一致が拒否する。型レベルの
+// 到達性・署名は `generate_items_are_reachable_via_facade_inference_path` と
+// `generate_public_field_types_and_variants_are_pinned` が担う）。workspace 全体の `fn generate`
+// 宣言インベントリは決定記録 §7 が不採用としたため置かない（`crates/self-repair` に同名の
+// 無関係な内部宣言があり、正当な変更を落とすため）。走査は facade `src/` と
+// `autodiff/src/generate.rs` の 1 ファイルに限る。
+
+/// 正の doctest プローブ（#2576）: `generate` の利用例が `inference/mod.rs` のモジュール doc に
+/// 実在し、実際にコンパイル・実行される形（`ignore` 等の指定・隠し行なし）であること。
+/// predict_batches 用ブロックと取り違えないよう generate 固有の語を必須にする。
+/// 実体のコンパイル・実行は `cargo test --doc`。
+#[test]
+fn generate_usage_doctests_are_present_and_compiled() {
+    let content = read_to_string_or_panic(&facade_crate_root().join("src/inference/mod.rs"));
+    let needles = [
+        "use fandhe_ai::inference::{AutoregressiveModel",
+        "impl AutoregressiveModel for",
+        "GenerateConfig::new",
+        "SamplingStrategy::Greedy",
+        "generate(&",
+    ];
+    let v = doctest_probe_violations(
+        "inference/mod.rs モジュール doc（generate）",
+        &inner_doc_lines(&content),
+        &needles,
+    );
+    assert!(v.is_empty(), "{v:?}");
+
+    // 自己テスト: 空入力・隠し行・ignore 指定は検出される。
+    assert!(!doctest_probe_violations("t", &[], &needles).is_empty());
+    let hidden = ["```", "# generate(&", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &hidden, &["generate(&"]).is_empty());
+    let ignored = ["```ignore", "generate(&", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &ignored, &["generate(&"]).is_empty());
+}
+
+/// `src` 中の可視性付き（`pub`／`pub(...)`）`use` 文を、空白なし連結・末尾カンマ正規化・
+/// ソート済みで返す（`#[...]` 属性付き・入れ子 `mod` 内も拾う。可視性なしの `use` は対象外）。
+fn pub_use_stmts_normalized(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if t == "use" && i > 0 && matches!(tokens[i - 1].as_str(), "pub" | ")") {
+            let end = tokens[i..]
+                .iter()
+                .position(|x| x == ";")
+                .map_or(tokens.len(), |p| i + p);
+            out.push(tokens[i + 1..end].concat().replace(",}", "}"));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `src/inference/mod.rs` の可視性付き `use` が、predict_batches 承認形（#2582）と generate
+/// 承認形（#2575）の 2 文ちょうどであることを固定する。`facade_exposes_generate_items_only_in_approved_shape`
+/// は 4 名のいずれかを含む文しか拾わないため、同ファイルへ無関係な名前（`MultiheadAttention`
+/// 等）を別文で足す経路を本テストが塞ぐ。件数 0 の空振りも拒否する。
+#[test]
+fn inference_module_reexports_exactly_expected_surface() {
+    let mut expected = vec![
+        PREDICT_BATCHES_APPROVED_REEXPORT.to_string(),
+        GENERATE_APPROVED_REEXPORT.to_string(),
+    ];
+    expected.sort();
+    let found = pub_use_stmts_normalized(&read_to_string_or_panic(
+        &facade_crate_root().join("src/inference/mod.rs"),
+    ));
+    assert_eq!(
+        found, expected,
+        "src/inference/mod.rs の pub use が承認形 2 文と一致しない（イシュー #2576）"
+    );
+
+    // 自己テスト: 承認形は許可、追加文・欠落・別名・pub(crate) は検出される。
+    let ok = format!(
+        "pub use {PREDICT_BATCHES_APPROVED_REEXPORT};\npub use {GENERATE_APPROVED_REEXPORT};"
+    );
+    assert_eq!(pub_use_stmts_normalized(&ok), expected);
+    let extra = format!("{ok}\npub use fandhe_ai_autodiff::nn::MultiheadAttention;");
+    assert_ne!(pub_use_stmts_normalized(&extra), expected);
+    let extra_crate = format!("{ok}\npub(crate) use x::Y;");
+    assert_ne!(pub_use_stmts_normalized(&extra_crate), expected);
+    assert_ne!(pub_use_stmts_normalized("// 空"), expected);
+    let missing = format!("pub use {PREDICT_BATCHES_APPROVED_REEXPORT};");
+    assert_ne!(pub_use_stmts_normalized(&missing), expected);
+    let alias = format!(
+        "pub use {PREDICT_BATCHES_APPROVED_REEXPORT};\npub use fandhe_ai_autodiff::generate::{{AutoregressiveModel as A, GenerateConfig, SamplingStrategy, generate}};"
+    );
+    assert_ne!(pub_use_stmts_normalized(&alias), expected);
+}
+
+/// `autodiff/src/generate.rs` の公開形（承認形 = 決定記録 §2・§13.2・§17.2）の違反を返す。
+/// 承認形: `SamplingStrategy` は `#[non_exhaustive]` で `Greedy`／`TopK(usize)`／`Temperature(f32)`
+/// の 3 variant、`GenerateConfig` は `#[non_exhaustive]` で pub フィールド 5 つと pub fn
+/// `new`／`with_temperature`／`with_seed` の 3 つ、`AutoregressiveModel` は
+/// `num_kv_layers`／`forward_step` の 2 メソッド、`pub fn generate` は 1 件、`validate*` は
+/// いかなる可視性でも公開しない（`generate` 入口で必ず呼ばれる非公開検証。§13.4・§15.4）。
+/// 走査は対象アイテムのブロック内に限り、`#[cfg(test)] mod tests` の `fn` は数えない。
+/// 将来 variant／フィールド／メソッドを足す変更（top-p 等）は公開面の拡張で承認事項のため、
+/// 本インベントリを承認とセットで更新させる（fail-closed）意図で厳密一致にしている。
+fn generate_public_shape_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    let fn_names = |body: &[String], pub_only: bool| -> Vec<String> {
+        body.iter()
+            .enumerate()
+            .filter(|(_, t)| *t == "fn")
+            .filter(|(k, _)| !pub_only || (*k > 0 && matches!(body[*k - 1].as_str(), "pub" | ")")))
+            .filter_map(|(k, _)| body.get(k + 1).cloned())
+            .collect()
+    };
+    let mut blocks: Vec<Option<(usize, Vec<String>)>> = Vec::new();
+    for (pat, label) in [
+        (
+            &["pub", "enum", "SamplingStrategy", "{"][..],
+            "SamplingStrategy",
+        ),
+        (
+            &["pub", "struct", "GenerateConfig", "{"][..],
+            "GenerateConfig",
+        ),
+        (&["impl", "GenerateConfig", "{"][..], "impl GenerateConfig"),
+        (
+            &["pub", "trait", "AutoregressiveModel", "{"][..],
+            "AutoregressiveModel",
+        ),
+    ] {
+        match pb_single_block(&tokens, pat, label) {
+            Ok((start, body)) => blocks.push(Some((start, body.to_vec()))),
+            Err(e) => {
+                v.push(e);
+                blocks.push(None);
+            }
+        }
+    }
+    if let Some((s, body)) = &blocks[0] {
+        if !pb_has_non_exhaustive_before(&tokens, *s) {
+            v.push("SamplingStrategy に #[non_exhaustive] が無い".to_string());
+        }
+        let got = body.concat();
+        if got.trim_end_matches(',') != "Greedy,TopK(usize),Temperature(f32)" {
+            v.push(format!(
+                "SamplingStrategy の variant が承認 3 種と不一致: {got}"
+            ));
+        }
+    }
+    if let Some((s, body)) = &blocks[1] {
+        if !pb_has_non_exhaustive_before(&tokens, *s) {
+            v.push("GenerateConfig に #[non_exhaustive] が無い".to_string());
+        }
+        let got = body.concat();
+        let want = "pubmax_length:usize,pubtemperature:f32,pubtop_k:Option<usize>,pubstrategy:SamplingStrategy,pubseed:u64";
+        if got.trim_end_matches(',') != want {
+            v.push(format!(
+                "GenerateConfig のフィールドが承認 5 つと不一致: {got}"
+            ));
+        }
+    }
+    if let Some((_, body)) = &blocks[2] {
+        let got = fn_names(body, true);
+        if got != ["new", "with_temperature", "with_seed"] {
+            v.push(format!(
+                "GenerateConfig の pub fn が承認 3 つと不一致: {got:?}"
+            ));
+        }
+    }
+    if let Some((_, body)) = &blocks[3] {
+        let got = fn_names(body, false);
+        if got != ["num_kv_layers", "forward_step"] {
+            v.push(format!(
+                "AutoregressiveModel のメソッドが承認 2 つと不一致: {got:?}"
+            ));
+        }
+        if body.iter().any(|t| matches!(t.as_str(), "type" | "const")) {
+            v.push("AutoregressiveModel に関連型／関連定数がある".to_string());
+        }
+    }
+    if pb_find_seq(&tokens, &["pub", "fn", "generate"]).len() != 1 {
+        v.push("`pub fn generate` がちょうど 1 件ではない".to_string());
+    }
+    for (k, t) in tokens.iter().enumerate() {
+        if t == "fn"
+            && let Some(name) = tokens.get(k + 1)
+            && name.starts_with("validate")
+            && k > 0
+            && matches!(tokens[k - 1].as_str(), "pub" | ")")
+        {
+            v.push(format!("`{name}` が公開（pub／pub(...)）で宣言されている"));
+        }
+    }
+    v
+}
+
+/// 実ファイル（`autodiff/src/generate.rs`）の公開形が承認形の全数インベントリと一致すること。
+#[test]
+fn generate_public_shape_matches_approved_inventory() {
+    let src = read_to_string_or_panic(&workspace_crates_dir().join("autodiff/src/generate.rs"));
+    let v = generate_public_shape_violations(&src);
+    assert!(
+        v.is_empty(),
+        "generate の公開形が承認形（決定記録 §2・§17.2）と不一致（公開面の拡張は承認事項）: {v:?}"
+    );
+}
+
+/// [`generate_public_shape_violations`] の自己テスト（承認形は無違反・各違反類型を検出・
+/// 対象不在の空振りを拒否・テスト mod 内の `fn` は数えない）。
+#[test]
+fn generate_public_shape_inventory_detects_each_category() {
+    let ok = "\
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SamplingStrategy { Greedy, TopK(usize), Temperature(f32) }
+#[non_exhaustive]
+pub struct GenerateConfig {
+    pub max_length: usize,
+    pub temperature: f32,
+    pub top_k: Option<usize>,
+    pub strategy: SamplingStrategy,
+    pub seed: u64,
+}
+impl GenerateConfig {
+    pub fn new() {}
+    pub fn with_temperature() {}
+    pub fn with_seed() {}
+    fn validate() {}
+    fn validate_top_k_le_vocab() {}
+}
+pub trait AutoregressiveModel {
+    fn num_kv_layers(&self) -> usize;
+    fn forward_step(&self);
+}
+fn validate_forward_step_output() {}
+fn validate_vocab_le_i32_max() {}
+pub fn generate() {}
+#[cfg(test)]
+mod tests { pub fn helper() {} fn validate_x() {} }
+";
+    assert_eq!(generate_public_shape_violations(ok), Vec::<String>::new());
+    let mutate = |from: &str, to: &str| {
+        assert!(ok.contains(from), "{from}");
+        generate_public_shape_violations(&ok.replacen(from, to, 1))
+    };
+    for (from, to) in [
+        ("#[non_exhaustive]\npub enum", "pub enum"),
+        ("#[non_exhaustive]\npub struct", "pub struct"),
+        (
+            "TopK(usize), Temperature(f32)",
+            "TopK(usize), Temperature(f32), TopP(f32)",
+        ),
+        ("Greedy, TopK(usize)", "Greedy, TopK(u8)"),
+        ("pub seed: u64,", "pub seed: u32,"),
+        ("pub seed: u64,", "pub seed: u64, pub extra: u8,"),
+        ("    pub max_length: usize,\n", ""),
+        (
+            "    pub fn with_seed() {}",
+            "    pub fn with_seed() {}\n    pub fn with_top_p() {}",
+        ),
+        ("    fn validate() {}", "    pub fn validate() {}"),
+        (
+            "    fn validate_top_k_le_vocab() {}",
+            "    pub(crate) fn validate_top_k_le_vocab() {}",
+        ),
+        (
+            "fn validate_forward_step_output",
+            "pub fn validate_forward_step_output",
+        ),
+        (
+            "fn validate_vocab_le_i32_max",
+            "pub(crate) fn validate_vocab_le_i32_max",
+        ),
+        (
+            "    fn forward_step(&self);",
+            "    fn forward_step(&self);\n    fn extra(&self);",
+        ),
+        (
+            "    fn num_kv_layers(&self) -> usize;",
+            "    type X;\n    fn num_kv_layers(&self) -> usize;",
+        ),
+        ("pub fn generate() {}", ""),
+        (
+            "pub fn generate() {}",
+            "pub fn generate() {}\npub fn generate() {}",
+        ),
+    ] {
+        assert!(!mutate(from, to).is_empty(), "{from} -> {to}");
+    }
+    // 対象不在（空振り）は拒否される。
+    assert!(!generate_public_shape_violations("").is_empty());
+}
+
+/// 公開 5 フィールドの型と `SamplingStrategy` の 3 variant の構築形を型注釈で固定する
+/// （コンパイルが通ること自体が検査。値の振る舞いは `generate_facade.rs::config_constructors_and_public_fields`）。
+#[test]
+fn generate_public_field_types_and_variants_are_pinned() {
+    use fandhe_ai::inference::{GenerateConfig, SamplingStrategy};
+    let cfg = GenerateConfig::new(2, SamplingStrategy::Greedy);
+    let _: usize = cfg.max_length;
+    let _: f32 = cfg.temperature;
+    let _: Option<usize> = cfg.top_k;
+    let _: SamplingStrategy = cfg.strategy;
+    let _: u64 = cfg.seed;
+    let _: [SamplingStrategy; 3] = [
+        SamplingStrategy::Greedy,
+        SamplingStrategy::TopK(1usize),
+        SamplingStrategy::Temperature(1.0f32),
+    ];
 }
 
 // =====================================================================

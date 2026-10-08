@@ -467,7 +467,7 @@ CUDA／Metal: 新規カーネルは無く（ホスト側の反復・計測のみ
    検査）へ置換し、`compat-api-scope.md` §5 と本 doc §0・§5 へ実装記録を書き、
    facade 経由の利用例（`crates/facade/tests/inference_predict_batches.rs`・
    doctest）を追加する。
-4. `inference` 名前空間に置く generate()（`facade-generate-decision.md` §15.3）
+4. `inference` 名前空間に置く generate()（`facade-generate-decision.md` §15.3） → #2575 で公開済み（同 doc §17・§18）
    とは名前空間の調整が要る。
 
 承認だけでは解除されない（公開の実装が先）。
@@ -531,7 +531,7 @@ fail-closed 拒否（RNG 非消費）、計測値の飽和演算。
 - 他の保留 doctest の全 `pub mod` glob 一覧へ `use fandhe_ai::inference::*;` を追加
   （`*_hold_doctest_globs_all_pub_modules` の集合一致検査のため。`GRAD_SCALER_PROBE_MODULES`・
   `LOWERCASE_PUB_USE_LEAF_ALLOWLIST` も追従）。
-- `GenerateHoldDoctestGuard` のプローブ縮小: `facade-generate-decision.md` §16 を参照。
+- `GenerateHoldDoctestGuard` のプローブ縮小: `facade-generate-decision.md` §16 を参照。 （#2575 で当該ガードは削除済み。`facade-generate-decision.md` §17・§18）
 
 ### 10.4 #2583 へ持ち越す事項（本 issue では行わない）
 
@@ -584,7 +584,7 @@ fail-closed 拒否（RNG 非消費）、計測値の飽和演算。
 - 他ローダー（`SamplerDataLoader`／`PrefetchDataLoader`／`HookedDataLoader`）向けの別名メソッド。
 - プロセス全体集計、`phase_metrics()` 別名、open トレイト・`dyn` 境界。
 - `DeviceTransfer` の実計測（CPU 固定経路では常に `calls == 0`）。
-- `inference` 名前空間への generate() 配置（`docs/facade-generate-decision.md` 側の別論点）。
+- `inference` 名前空間への generate() 配置（`docs/facade-generate-decision.md` 側の別論点）。 → #2575 で公開済み（`facade-generate-decision.md` §17・§18）
 
 ### 11.6 不変事項
 
