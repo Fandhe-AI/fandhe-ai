@@ -7566,7 +7566,8 @@ struct GradcheckAnomalyHoldDoctestGuard;
 /// facade_tape_functional_transforms_are_approved_thin_delegations` が担う。
 ///
 /// 引き続き拒否する未承認経路: モジュール `functional_ops` の公開、クレートルート直下の裸の自由関数
-/// `vjp`・`hvp`・`vmap`、`Var<'t>`・`Tensor<f32>` 上の同名メソッド。下の doctest は全 `pub mod` を glob import
+/// `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`（後 2 者は #2940 の内部実装）、`Var<'t>`・`Tensor<f32>` 上の同名メソッド、
+/// および `Tape` 上の `jvp`・`jacfwd`（`Tape` 受け手には専用のプローブ用トレイトで締める）。下の doctest は全 `pub mod` を glob import
 /// したスコープへ、これらに対応するローカル定義とプローブ用トレイトを置き、修飾なしの関数呼び出しと
 /// 修飾付き（UFCS）のメソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ
 /// 公開するか、上の受け手へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
@@ -7606,6 +7607,8 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     pub fn vjp() {}
 ///     pub fn hvp() {}
 ///     pub fn vmap() {}
+///     pub fn jvp() {}
+///     pub fn jacfwd() {}
 /// }
 /// use __fandhe_functional_transforms_hold_probe::*;
 ///
@@ -7615,6 +7618,8 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     fn vjp(&self) -> __FandheFunctionalTransformsHoldMarker;
 ///     fn hvp(&self) -> __FandheFunctionalTransformsHoldMarker;
 ///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;
 /// }
 ///
 /// impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {
@@ -7625,6 +7630,26 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
 ///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+/// }
+///
+/// trait __FandheFunctionalTransformsHoldTapeProbe {
+///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;
+/// }
+///
+/// impl __FandheFunctionalTransformsHoldTapeProbe for fandhe_ai::Tape {
+///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
 /// }
@@ -7639,6 +7664,12 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker {
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
+///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
 /// }
 ///
 /// fn __probe_free_fns() {
@@ -7649,15 +7680,27 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     vjp();
 ///     hvp();
 ///     vmap();
+///     jvp();
+///     jacfwd();
 /// }
 ///
-/// fn __probe_methods(v: &fandhe_ai::Var<'_>, tf: &fandhe_ai::Tensor<f32>) {
+/// fn __probe_methods(
+///     v: &fandhe_ai::Var<'_>,
+///     tape: &fandhe_ai::Tape,
+///     tf: &fandhe_ai::Tensor<f32>,
+/// ) {
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vjp(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::hvp(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jvp(tape);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tape::jacfwd(tape);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp(tf);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jacfwd(tf);
 /// }
 /// ```
 #[cfg(doctest)]

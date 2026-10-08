@@ -19,12 +19,19 @@
 //! ループ版 `vmap`（#2876）は `unbind`→クロージャ適用→`contiguous`→`stack` の合成で、
 //! 検査ヘルパー（`jacobian_ops` の `checked_numel`・`check_on_tape`・`copy_grad_row`）を共用する。
 //!
+//! **double-VJP 法の `jvp`／`jacfwd`（イシュー #2940・親 #2939。設計 §8・§19）**:
+//! forward-mode の新規実装は持たず、`u` を追跡ありの葉とした `s = output ⊙ u` の 1 階勾配
+//! `g = ∂s/∂input = Jᵀu`（`u` について線形）を `backward_create_graph` で子テープへ写し、
+//! 第 2 段の VJP `∂(g ⊙ v)/∂u = J·v` を取る。`pub(crate)` で facade へは出さず（公開形は承認前）、
+//! 呼び出し元は現状 `#[cfg(test)]` の検証のみ。facade 非公開は上記の保留ガードに `jvp`／`jacfwd`
+//! を加えて機械固定している。
+//!
 //! **共通の契約**: 単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。`vjp`／`hvp` の結果は
 //! 非微分のホスト値（`vmap` のみ同じテープ上の微分可能な `Var`）。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
 //! の挙動をそのまま伝播する。
 
 use crate::error::AutodiffError;
-use crate::jacobian_ops::{check_on_tape, checked_numel, copy_grad_row};
+use crate::jacobian_ops::{FlatElements, check_on_tape, checked_numel, copy_grad_row};
 use crate::tape::Tape;
 use crate::var::Var;
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
@@ -232,4 +239,190 @@ where
         .map(|o| o.contiguous())
         .collect::<Result<_, _>>()?;
     Var::stack(&contiguous, 0)
+}
+
+/// double-VJP 法の前段（`jvp`／`jacfwd` 共通。#2940）。親テープへ追跡ありの葉 `u`（全要素 1）と
+/// `s = output ⊙ u` を足し、`backward_create_graph` で `g = Jᵀu` を子テープへ写して
+/// `(g, child 上の u)` を返す。`g` は `u` について線形なので `u` の値は結果に影響しない
+/// （全要素 1 で固定）。`J ≡ 0`（`input` へ勾配が届かない・`g` が定数）は `Ok(None)`。
+/// `child_var(u)` が `None` になるのは構造上の不変条件違反で、ゼロへ丸めず `Err(Backward)` にする。
+/// 親テープへは `backward_create_graph` の検査より前にちょうど 2 ノードが積まれる（失敗時も残る）。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
+    )
+)]
+fn double_vjp_stage<'c>(
+    tape: &Tape,
+    output: &Var<'_>,
+    input: &Var<'_>,
+    child: &'c Tape,
+) -> Result<Option<(Var<'c>, Var<'c>)>, AutodiffError> {
+    let u = tape.var(&Tensor::ones(&output.shape()).map_err(AutodiffError::Shape)?);
+    let s = output.mul(&u)?;
+    let cg = tape.backward_create_graph(&s, child)?;
+    let Some(cu) = cg.child_var(&u)? else {
+        return Err(AutodiffError::Backward(
+            "double-VJP: 余接葉 u の子テープ写しが存在しない（不変条件違反）".to_string(),
+        ));
+    };
+    match cg.grad(input)? {
+        Some(g) if g.requires_grad() => Ok(Some((g, cu))),
+        _ => Ok(None),
+    }
+}
+
+/// 列 `col`（長さ `m`）を行優先の結果 `data`（`m × n`）の第 `k` 列へ書く。長さ不一致は型付きエラー。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
+    )
+)]
+fn write_column(
+    data: &mut [f32],
+    n: usize,
+    k: usize,
+    col: &Tensor<f32>,
+) -> Result<(), AutodiffError> {
+    let host = col.host_slice();
+    let rows = data.len().checked_div(n).unwrap_or(0);
+    if host.len() != rows || k >= n {
+        return Err(AutodiffError::Backward(format!(
+            "jacfwd: 列の要素数（{}）が出力の要素数（{rows}）と一致しない、または列添字 {k} が範囲外",
+            host.len()
+        )));
+    }
+    for (i, v) in host.iter().enumerate() {
+        data[i * n + k] = *v;
+    }
+    Ok(())
+}
+
+/// ヤコビアン・ベクトル積 `J·v`（`J = ∂output/∂input`）を double-VJP 法で求める
+/// （イシュー #2940。`jacobian_ops::jacobian` の `J·v` と REQ-2 統一複合判定で一致する）。
+/// 戻り値は shape が `output.shape()` の非微分ホスト値。`child` は呼び出し側が
+/// [`Tape::new_with_ops`] 等で構築した空の子テープ（[`Tape::backward_create_graph`] と同じ契約）で、
+/// 呼び出し後は再利用しない。
+///
+/// **入口検査（ノードを足す前。順序固定。失敗時は親・子テープとも無変更）**:
+/// 1. `output`／`input` が `tape` の現世代に属さない → `Err(TapeMismatch)`。
+/// 2. `input.requires_grad() == false` → `Err(GradientTrackingDisabled)`。
+/// 3. `tangent.shape() != input.shape()` → `Err(Shape(ShapeMismatch))`（ブロードキャスト不可）。
+/// 4. 要素数を `checked_numel` で検査（`Err(Shape(ElementCountOverflow))`）。
+/// 5. 要素数 0、または `output.requires_grad() == false` → テープに触れず全ゼロ（`child` も検査しない。
+///    `jacobian`／`vjp` と同じ意味論で、追跡なし loss を `Err` にする `hvp` とは非対称）。
+///
+/// 以降は `backward_create_graph` の既存検査（`supports_create_graph() == false` の Op・rank 3 以上の
+/// `MatMul`・非空の子テープ・同一テープ・デバイス不一致・checkpoint 登録済み）をそのまま `Err(Backward)`
+/// 等で伝播する（新しい拒否ロジック・variant は足さない）。拒否時 `child` は空のまま。
+///
+/// **副作用**: 前段以降の失敗でも親テープへちょうど 2 ノード（全要素 1 の追跡あり葉 `u` と `mul`）が残る
+/// （既存ノードの値は不変）。成功時の子テープには写し・1 階勾配・第 2 段の補助ノードが残る。
+/// 子テープ上の数値は 1 階 VJP や `jacobian` と bit 同一を主張しない。非有限値は検査せず伝播する。
+/// 計算量は親 backward 1 回＋子 backward 1 回。f32 の [`Tape`] のみ（`VarF64`・f16 は対象外）。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
+    )
+)]
+pub(crate) fn jvp(
+    tape: &Tape,
+    output: &Var<'_>,
+    input: &Var<'_>,
+    tangent: &Tensor<f32>,
+    child: &Tape,
+) -> Result<Tensor<f32>, AutodiffError> {
+    check_on_tape(tape, output)?;
+    check_on_tape(tape, input)?;
+    if !input.requires_grad() {
+        return Err(AutodiffError::GradientTrackingDisabled);
+    }
+    let in_shape = input.shape();
+    if tangent.shape() != in_shape.as_slice() {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: in_shape,
+            rhs: tangent.shape().to_vec(),
+        }));
+    }
+    let out_shape = output.shape();
+    let n = checked_numel(&in_shape)?;
+    let m = checked_numel(&out_shape)?;
+    if n == 0 || m == 0 || !output.requires_grad() {
+        return Tensor::zeros(&out_shape).map_err(AutodiffError::Shape);
+    }
+
+    let mut data = vec![0.0f32; m];
+    if let Some((g, cu)) = double_vjp_stage(tape, output, input, child)? {
+        let prod = g.mul(&child.var_no_grad(tangent))?;
+        let grads = child.backward(&prod)?;
+        if let Some(h) = grads.get(&cu)? {
+            copy_grad_row(h, &mut data)?;
+        }
+    }
+    Tensor::new(data, &out_shape).map_err(AutodiffError::Shape)
+}
+
+/// ヤコビアン全体 `J = ∂output/∂input` を double-VJP 法で列ごとに求める（イシュー #2940。
+/// `jacobian_ops::jacobian` と REQ-2 統一複合判定で一致する）。戻り値は shape が
+/// `output.shape ++ input.shape` の非微分ホスト値。`child` の契約は [`jvp`] と同じ。
+///
+/// 前段（`g = Jᵀu`）を 1 回だけ作り、子テープ上で `g` の要素 `g_k = ∂(uᵀ output)/∂input_k` ごとに
+/// `child.backward` を回すと `∂g_k/∂u = J[:, k]`（第 2 段の VJP を列ごとに適用）が得られる。
+/// `input` の one-hot 接ベクトルで `jvp` を `n` 回呼ぶ方式と数学的に同じだが、子テープが 1 本で済み
+/// 親テープのノードも 2 個で済むため採らない。計算量は親 backward 1 回＋子 backward `n` 回。
+///
+/// **入口検査**は [`jvp`] と同じ（接ベクトルの shape 検査を除く）に加え、`m × n` を検査付き乗算で求める。
+/// 追跡なし `output`・要素数 0 はテープに触れず全ゼロ。副作用・拒否時の契約も [`jvp`] と同じ。
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
+    )
+)]
+pub(crate) fn jacfwd(
+    tape: &Tape,
+    output: &Var<'_>,
+    input: &Var<'_>,
+    child: &Tape,
+) -> Result<Tensor<f32>, AutodiffError> {
+    check_on_tape(tape, output)?;
+    check_on_tape(tape, input)?;
+    if !input.requires_grad() {
+        return Err(AutodiffError::GradientTrackingDisabled);
+    }
+    let out_shape = output.shape();
+    let in_shape = input.shape();
+    let m = checked_numel(&out_shape)?;
+    let n = checked_numel(&in_shape)?;
+    let total = m
+        .checked_mul(n)
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+    let mut result_shape = out_shape;
+    result_shape.extend_from_slice(&in_shape);
+    if total == 0 || !output.requires_grad() {
+        return Tensor::zeros(&result_shape).map_err(AutodiffError::Shape);
+    }
+
+    let mut data = vec![0.0f32; total];
+    if let Some((g, cu)) = double_vjp_stage(tape, output, input, child)? {
+        let elements = FlatElements::new(&g)?;
+        for k in 0..n {
+            let g_k = elements.element(k)?;
+            if !g_k.requires_grad() {
+                continue;
+            }
+            let grads = child.backward(&g_k)?;
+            if let Some(col) = grads.get(&cu)? {
+                write_column(&mut data, n, k, col)?;
+            }
+        }
+    }
+    Tensor::new(data, &result_shape).map_err(AutodiffError::Shape)
 }
