@@ -17,15 +17,17 @@
 //! `docs/perf/logs/f64-autograd-facade-2599/README.md`。
 
 use fandhe_ai::{AutodiffError, Device, GradientsF64, Tape, TapeF64, Tensor, VarF64};
+use fandhe_ai_backend_cpu::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
 
 fn t64(data: Vec<f64>, shape: &[usize]) -> Tensor<f64> {
     Tensor::<f64>::new(data, shape).expect("test fixture: tensor")
 }
 
-/// REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+/// REQ-2 統一複合判定。閾値は backend-cpu の `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD` を参照する（再定義しない）。
 fn req2_close(a: f64, b: f64) -> bool {
     let abs = (a - b).abs();
-    abs < 1e-5 || abs / a.abs().max(b.abs()).max(f64::MIN_POSITIVE) < 1e-3
+    abs < ABSOLUTE_RESCUE_THRESHOLD
+        || abs / a.abs().max(b.abs()).max(f64::MIN_POSITIVE) < RELATIVE_TOLERANCE
 }
 
 fn assert_close(actual: &[f64], expected: &[f64], what: &str) {
