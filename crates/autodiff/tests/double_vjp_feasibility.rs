@@ -44,14 +44,12 @@ fn numel(shape: &[usize]) -> usize {
 
 /// 符号混在の決定的な値列（0 から離れた値になるよう位相をずらす）。
 fn seq(n: usize, seed: f32) -> Vec<f32> {
-    (0..n)
-        .map(|i| ((i as f32 + seed) * 0.37).sin() * 1.5)
-        .collect()
+    common::det_seq(n, seed)
 }
 
 /// 全要素が正の決定的な値列（`sqrt`／`log*`／`pow` の定義域用）。
 fn pos(n: usize, seed: f32) -> Vec<f32> {
-    seq(n, seed).iter().map(|v| v.abs() + 0.4).collect()
+    common::det_pos(n, seed)
 }
 
 type Built<'t> = Result<Var<'t>, AutodiffError>;
@@ -126,25 +124,13 @@ where
     let m = numel(yb.value().shape());
     let jh = jac.host_slice().into_owned();
     assert_eq!(jh.len(), m * n, "{ctx}: jacobian 要素数");
-    let expected: Vec<f64> = (0..m)
-        .map(|i| {
-            (0..n)
-                .map(|k| f64::from(jh[i * n + k]) * f64::from(vv[k]))
-                .sum()
-        })
-        .collect();
+    let expected = common::jacobian_times_vector_f64(&jh, m, n, &vv);
 
     let ta = new_tape();
     let xa = ta.var(&t(xv, shape));
     let ya = build(&ta, &xa).unwrap();
     let got = double_vjp_probe(&ta, &ya, &xa, &v, expect_tracked, ctx);
-    assert_eq!(got.len(), expected.len(), "{ctx}: 要素数");
-    for (i, (&a, &e)) in got.iter().zip(&expected).enumerate() {
-        assert!(
-            common::req2_close(f64::from(a), e),
-            "{ctx}[{i}]: double-VJP {a} vs jacobian·v {e}"
-        );
-    }
+    common::assert_all_req2_close(&got, &expected, ctx);
 }
 
 fn k<'t>(tp: &'t Tape) -> Var<'t> {

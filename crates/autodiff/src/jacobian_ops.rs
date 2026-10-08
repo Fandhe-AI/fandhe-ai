@@ -70,14 +70,15 @@ pub(crate) fn check_on_tape(tape: &Tape, v: &Var<'_>) -> Result<(), AutodiffErro
 /// contiguous 化したうえで `[numel]` へ平坦化し `narrow` で 1 要素ずつ取り出す
 /// （`Var::flatten` は reshape 委譲で非 contiguous 入力に制約があるため、
 /// `pub(crate)` の `Var::contiguous` を先に挟む）。jacobian・hessian で共用し、
-/// 後続の gradcheck（#2671）も同じ取り出しを使う想定。
-struct FlatElements<'t> {
+/// 後続の gradcheck（#2671）も同じ取り出しを使う想定。`functional_ops::jacfwd`（#2940）も
+/// 第 2 段 VJP の列ごとの取り出しに共用する。
+pub(crate) struct FlatElements<'t> {
     flat: Var<'t>,
     scalar: bool,
 }
 
 impl<'t> FlatElements<'t> {
-    fn new(v: &Var<'t>) -> Result<FlatElements<'t>, AutodiffError> {
+    pub(crate) fn new(v: &Var<'t>) -> Result<FlatElements<'t>, AutodiffError> {
         let shape = v.shape();
         if shape.is_empty() {
             return Ok(FlatElements {
@@ -96,7 +97,7 @@ impl<'t> FlatElements<'t> {
     /// 平坦添字 `i` の要素（rank 0 は自身、それ以外は shape `[1]`）。
     /// shape `[1]` の非スカラーでも `Tape::backward` は全要素 1 のシード
     /// （暗黙の総和）なので `sum` ノードは足さない。
-    fn element(&self, i: usize) -> Result<Var<'t>, AutodiffError> {
+    pub(crate) fn element(&self, i: usize) -> Result<Var<'t>, AutodiffError> {
         if self.scalar {
             Ok(self.flat)
         } else {

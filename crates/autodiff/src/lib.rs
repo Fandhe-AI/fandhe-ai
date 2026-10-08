@@ -284,7 +284,8 @@ pub mod jacobian_ops;
 // `GradcheckReport` のみ #2847 で公開（モジュール名・`anomaly` 系は保留。
 // `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §11・§12）。
 pub mod gradcheck;
-// 関数型 AD ラッパー（`vjp`・`hvp`・`vmap`。イシュー #2874・#2875・#2876）。既存 `Tape::backward`／
+// 関数型 AD ラッパー（`vjp`・`hvp`・`vmap`。イシュー #2874・#2875・#2876。`jvp`／`jacfwd` は #2940 で
+// `pub(crate)` の内部実装のみ追加・facade 非公開）。既存 `Tape::backward`／
 // `backward_create_graph` と `mul`、`vmap` は `unbind`／`contiguous`／`stack` の合成のみで、
 // 新規 Op・VJP・`AutodiffError` variant はない。facade への公開は保留
 // （`docs/autodiff-functional-transforms-design.md` §5・§10）。
@@ -349,6 +350,9 @@ mod tape;
 // double-VJP 法の実現可能性検証テスト（イシュー #2880。テスト専用で本番公開面なし）。
 #[cfg(test)]
 mod double_vjp_feasibility_tests;
+// `jvp`／`jacfwd` の受入テスト（イシュー #2940。テスト専用）。
+#[cfg(test)]
+mod functional_ops_jvp_tests;
 #[cfg(test)]
 mod test_support;
 // テンソル積・距離・外積 4 演算（`kron`・`tensordot`・`cdist`・`cross`。イシュー #2640）。
