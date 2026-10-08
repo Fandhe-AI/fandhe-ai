@@ -9,7 +9,8 @@
 //! 追加した（論点 3 は未承認のため設計記録 §3 の推奨定義に従う）。#2899 で
 //! n-gram 生成（`ngram`）を、#2900 で語彙の直接指定と lookup（`vocab`）を
 //! 追加した。#2901 で adapt 型の語彙構築（`adapt`）を、#2902 で transform
-//! （`Tensor<i32>` への変換・切り詰め・0 埋め）を追加した。
+//! （`Tensor<i32>` への変換・切り詰め・0 埋め）を追加した。#2903 で結合テストと
+//! `Var::embedding` との結線テスト（`integration_tests`。テスト専用）を追加した。
 //!
 //! 範囲外: サブワード分割・Unicode 正規化・ファイル形式の読み書き。ファイル・
 //! ネットワーク・スレッドは使わない（設計記録 §8 の機械検査契約。
@@ -35,3 +36,6 @@ pub(crate) mod split;
 pub(crate) mod standardize;
 pub(crate) mod transform;
 pub(crate) mod vocab;
+
+#[cfg(test)]
+mod integration_tests;
