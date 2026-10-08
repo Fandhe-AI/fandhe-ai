@@ -179,6 +179,8 @@ pub mod model;
 // `docs/facade-predict-batches-phase-metrics-decision.md` §8.4 の確定形）。
 // モジュール doc は `inference/mod.rs` の `//!` に置く（外側 `///` と併記すると
 // intra-doc link が親スコープで解決され壊れるため）。
+// 同モジュールは自己回帰生成 `generate`（`AutoregressiveModel`／`GenerateConfig`／
+// `SamplingStrategy`／`generate`。イシュー #2575）も純再エクスポートで公開する。
 pub mod inference;
 
 /// 非公開。`model` と `compat::model_io`（#2369）が共有する no-follow 葉オープンと
@@ -3999,114 +4001,6 @@ struct NpyIoHoldDoctestGuard;
 #[cfg(doctest)]
 #[allow(dead_code)]
 struct ModelIoHoldDoctestGuard;
-
-/// イシュー #2191（`generate()` 自己回帰ループ）の facade 公開保留を
-/// 固定する doctest 足場。`KvCacheHoldDoctestGuard`（#2084。#2579 で削除済み）と同型の
-/// 「正のプローブ 1 ブロック方式」を採る: facade の全 `pub mod` を glob
-/// import したスコープに、本ブロック内でのみ定義したローカル
-/// `__fandhe_generate_hold_probe::{generate, GenerateConfig,
-/// SamplingStrategy, AutoregressiveModel}` を導入し、実際に使う関数を
-/// 書く。facade がどの経路（`pub mod inference` 配下・crate ルート直下の
-/// 自由関数・別名エクスポート・facade 独自の `struct`／`trait` 宣言・
-/// `Tape`／`compat::Sequential` への inherent メソッド追加）でこれらの
-/// 名前を公開しても、ローカル定義との glob 衝突（型・モジュール名の
-/// 場合。E0659 等）または呼び出しシグネチャの不一致（inherent メソッドが
-/// トレイトメソッドより優先解決されるため、本プローブの trait 経由
-/// 呼び出しが型・引数不一致でコンパイル失敗する）でエラーコードに
-/// 依存せずコンパイルが失敗する。
-///
-/// ソース走査ガード（`crates/facade/tests/api_surface.rs::
-/// facade_does_not_expose_generate_items`〈直列 1 行走査。内側の層として
-/// 維持〉・`facade_does_not_reexport_or_declare_generate_items`〈トークン
-/// 方式。複数行・別名・独自宣言を検出〉）との多層防御の位置づけ・
-/// 承認未取得の経緯・承認依頼用の事前設計は
-/// `docs/facade-generate-decision.md` §8「承認事項」を参照。
-///
-/// **#2582 での縮小**: `fandhe_ai::inference`（`predict_batches`・`PhaseMetrics`
-/// 公開）が実在の公開モジュールになったため、プローブ内のローカル
-/// `pub mod inference { generate, .. }` は削除した（残すと
-/// `use fandhe_ai::inference::*;` が持ち込む `inference` と glob 衝突
-/// E0659 で doctest 自体が恒常的に落ちる）。検出力は等価に保たれる:
-/// 全 glob 一覧に `use fandhe_ai::inference::*;` を含めるため、
-/// `fandhe_ai::inference::generate` 等が公開されれば crate ルート直下の
-/// ローカル `generate`／`GenerateConfig`／`SamplingStrategy`／
-/// `AutoregressiveModel` と glob 衝突する（`docs/facade-generate-decision.md`
-/// の #2582 追記参照）。
-///
-/// `workspace` 全体（facade 以外のクレート内部の private 宣言も含む）の
-/// 名前インベントリは、KvCache（#2084 §10.1）が codex-review 指摘
-/// （無関係な内部宣言まで固定してしまう）を受けて撤回した経緯と同じ
-/// 理由（`crates/self-repair` に `fn generate` を持つトレイトが複数
-/// あるため）で採用しない（`docs/facade-generate-decision.md` §7）。
-///
-/// facade 公開（承認事項: `docs/facade-generate-decision.md` §8）が
-/// ユーザー承認され実施する日が来たら、本モジュール・本 doctest 自体を
-/// 削除する（ソース走査側の対応する否定ガードも同時に正ガードへ
-/// 置き換える）。
-///
-/// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
-/// できること
-///
-/// ```
-/// use fandhe_ai::*;
-/// use fandhe_ai::compat::*;
-/// use fandhe_ai::optim::*;
-/// use fandhe_ai::data::*;
-/// use fandhe_ai::nn::*;
-/// use fandhe_ai::nn::init::*;
-/// use fandhe_ai::nn::rnn::*;
-/// use fandhe_ai::nn::kv_cache::*;
-/// use fandhe_ai::nn::loss::*;
-/// use fandhe_ai::interop::*;
-/// use fandhe_ai::interop::onnx::*;
-/// use fandhe_ai::interop::safetensors::*;
-/// use fandhe_ai::interop::npy::*;
-/// use fandhe_ai::model::*;
-/// use fandhe_ai::inference::*;
-///
-/// mod __fandhe_generate_hold_probe {
-///     pub fn generate() {}
-///     pub struct GenerateConfig;
-///     pub struct SamplingStrategy;
-///     pub struct AutoregressiveModel;
-/// }
-/// use __fandhe_generate_hold_probe::*;
-///
-/// struct __FandheGenerateHoldMarker;
-///
-/// trait __FandheGenerateHoldProbe {
-///     fn generate(&self) -> __FandheGenerateHoldMarker;
-/// }
-///
-/// impl __FandheGenerateHoldProbe for fandhe_ai::Tape {
-///     fn generate(&self) -> __FandheGenerateHoldMarker {
-///         __FandheGenerateHoldMarker
-///     }
-/// }
-///
-/// impl __FandheGenerateHoldProbe for fandhe_ai::compat::Sequential {
-///     fn generate(&self) -> __FandheGenerateHoldMarker {
-///         __FandheGenerateHoldMarker
-///     }
-/// }
-///
-/// fn __probe_free_fn() {
-///     generate();
-///     let _ = GenerateConfig;
-///     let _ = SamplingStrategy;
-///     let _ = AutoregressiveModel;
-/// }
-///
-/// fn __probe_inherent_method(tape: &fandhe_ai::Tape, seq: &fandhe_ai::compat::Sequential) {
-///     let _: __FandheGenerateHoldMarker = fandhe_ai::Tape::generate(tape);
-///     let _: __FandheGenerateHoldMarker = fandhe_ai::compat::Sequential::generate(seq);
-///     let _: __FandheGenerateHoldMarker = tape.generate();
-///     let _: __FandheGenerateHoldMarker = seq.generate();
-/// }
-/// ```
-#[cfg(doctest)]
-#[allow(dead_code)]
-struct GenerateHoldDoctestGuard;
 
 /// FFT（`rfft`／`irfft`／`fft`／`ifft`／`stft`／`istft`。イシュー #2631〜#2633・親 #2630・ルート #2499 Phase 4）の
 /// 未承認経路を固定する doctest 足場（承認形は #2678 で公開済み）。`VarActivationOpsHoldDoctestGuard` と
