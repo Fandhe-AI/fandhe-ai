@@ -1,6 +1,6 @@
-//! `fandhe_ai_autodiff::pool3d_ops`（イシュー #2643・`max_pool3d`／`avg_pool3d`。facade
-//! 非公開のため `fandhe_ai_autodiff::pool3d_ops::*` を直接 use する。
-//! `crates/autodiff/src/pool3d_ops.rs` モジュール doc 参照）のバックエンド間 parity テスト
+//! `Var::max_pool3d`／`Var::avg_pool3d`（イシュー #2643 で実装・#2850 で facade 公開。実体は
+//! `fandhe_ai_autodiff::pool3d_ops`。`crates/autodiff/src/pool3d_ops.rs` モジュール doc 参照）の
+//! バックエンド間 parity テスト
 //! （`cumulative_ops_backend_parity.rs` と同型）。
 //!
 //! 属性なし（`fandhe_ai::tape()`〈`CpuBackendOps::pool3d_*`〉と
@@ -20,7 +20,6 @@
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
-use fandhe_ai_autodiff::pool3d_ops::{avg_pool3d, max_pool3d};
 use fandhe_ai_tensor_core::Tensor;
 
 trait VarSource {
@@ -100,24 +99,32 @@ macro_rules! outputs_on {
             }};
         }
         let x = tape.make_var(&input());
-        let (mv, mi) = max_pool3d(&x, KERNEL, Some(STRIDE), PADDING, [1, 1, 1], false).unwrap();
-        let ai = avg_pool3d(&x, KERNEL, Some(STRIDE), PADDING, false, true).unwrap();
-        let ae = avg_pool3d(&x, KERNEL, Some(STRIDE), PADDING, false, false).unwrap();
+        let (mv, mi) = x
+            .max_pool3d(KERNEL, Some(STRIDE), PADDING, [1, 1, 1], false)
+            .unwrap();
+        let ai = x
+            .avg_pool3d(KERNEL, Some(STRIDE), PADDING, false, true)
+            .unwrap();
+        let ae = x
+            .avg_pool3d(KERNEL, Some(STRIDE), PADDING, false, false)
+            .unwrap();
         Outputs {
             max_v: mv.to_tensor(),
             max_i: indices(&mi),
             avg_incl: ai.to_tensor(),
             avg_excl: ae.to_tensor(),
             d_max: grad_of!(|x| {
-                max_pool3d(&x, KERNEL, Some(STRIDE), PADDING, [1, 1, 1], false)
+                x.max_pool3d(KERNEL, Some(STRIDE), PADDING, [1, 1, 1], false)
                     .unwrap()
                     .0
             }),
             d_avg_incl: grad_of!(|x| {
-                avg_pool3d(&x, KERNEL, Some(STRIDE), PADDING, false, true).unwrap()
+                x.avg_pool3d(KERNEL, Some(STRIDE), PADDING, false, true)
+                    .unwrap()
             }),
             d_avg_excl: grad_of!(|x| {
-                avg_pool3d(&x, KERNEL, Some(STRIDE), PADDING, false, false).unwrap()
+                x.avg_pool3d(KERNEL, Some(STRIDE), PADDING, false, false)
+                    .unwrap()
             }),
         }
     }};

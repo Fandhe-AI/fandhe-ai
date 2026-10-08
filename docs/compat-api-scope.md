@@ -545,7 +545,7 @@ P1」）を受けた是正である。
    受け入れ基準の改定
 2. 本リポジトリのユーザー承認を得たうえでの Issue 起票・本文書の更新
 
-### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本は承認・公開済み。保留は行 12〜15〈公開形は #2849 で各決定記録 §12 に記録済み・公開は #2850・#2851〉・行 19・20 のオプション型を取る 5 本と 5 型〈公開形は #2853 で記録済み・公開は #2854〉・行 30 の gradcheck〈シグネチャは #2846 で記録済み・#2847 で公開済み〉）
+### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本は承認・公開済み。行 12・13 の `Var` 委譲は #2850 で公開済み〈層化は保留継続〉。保留は行 14・15〈公開形は #2849 で各決定記録 §12 に記録済み・公開は #2851〉・行 19・20 のオプション型を取る 5 本と 5 型〈公開形は #2853 で記録済み・公開は #2854〉・行 30 の gradcheck〈シグネチャは #2846 で記録済み・#2847 で公開済み〉）
 
 **本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
 （内部実装＋保留ガードまで先行・公開は承認後）で内部クレートに実装した機能の公開形について、各決定記録に
@@ -562,10 +562,10 @@ P1」）を受けた是正である。
   #2678（演算・自動微分）で公開済み（公開した識別子と保留は §5 の適用記録〈#2678〉に記す）。**#2678 でも保留を維持したもの**: 行 19・20 の 3 本
   （`Reduction` を `fandhe_ai::nn::loss::Reduction` で名指しできる前提が #2602 未マージで満たされなかった。**#2602〈PR #2835〉のマージで前提が満たされ、
   本節の #2677 の適用記録〈損失 3 本〉で公開した**）、行 30 の `Tape::gradcheck` と
-  `GradcheckOptions`／`GradcheckReport`（決定記録に facade シグネチャが書かれていなかった。→ #2846 で決定記録 §11 に記録済み・公開は #2847）、行 12〜15 の全体（承認の対象外。→ 公開形は #2849 で各決定記録 §12 に記録済み・公開は行 12・13 が #2850、行 14・15 が #2851）。
+  `GradcheckOptions`／`GradcheckReport`（決定記録に facade シグネチャが書かれていなかった。→ #2846 で決定記録 §11 に記録済み・公開は #2847）、行 12〜15 の全体（承認の対象外。→ 公開形は #2849 で各決定記録 §12 に記録済み。**行 12・13 の `Var` 委譲は #2850 で公開済み〈本節末尾の #2850 の適用記録〉**、行 14・15 は #2851）。
   **2026-10-08 追記（#2853）**: ルート #2499 のコメント（issuecomment-6052732061）で、オプション型 5 つは `fandhe_ai::nn::loss` へ再エクスポートし、損失 5 本は `Var` の 1 行委譲にする方向が承認され、その形（パス・完全なシグネチャ・構築確認）を `facade-nn-loss-structs-exposure-decision.md` §11 に記録した。公開は #2854 で、それまでは未公開のまま保留ガードを維持する。
   現在も保留なのは、行 19・20 のオプション型を引数に取る損失 5 本（`bce_with_logits_loss_with`・`gaussian_nll_loss`・`multi_margin_loss`・
-  `multilabel_soft_margin_loss`・`sigmoid_focal_loss`）とオプション型 5 つ（承認の対象外）、`gradcheck` 系のうちモジュール名・裸の自由関数（`Tape::gradcheck` と型 2 つは #2847 で公開済み）、行 12〜15（公開形は #2849 で記録済み。公開は #2850・#2851）。
+  `multilabel_soft_margin_loss`・`sigmoid_focal_loss`）とオプション型 5 つ（承認の対象外）、`gradcheck` 系のうちモジュール名・裸の自由関数（`Tape::gradcheck` と型 2 つは #2847 で公開済み）、行 14・15（公開形は #2849 で記録済み。公開は #2851）と、行 12・13 の層化（`nn::*` 層型・`Sequential::add_*`。`Var` 委譲は #2850 で公開済み）。
 - 公開時は保留ガードと `api_surface.rs` の否定ガードを承認形の正ガードへ反転する（#2679 で実施した型は §5 の適用記録）。
 - 行 12〜15 のように層化（`nn::MaxPool3d` 等と `Sequential::add_*`）が未実装の機能は、その旨を行に書いた。
 - 公開形の類型は 3 つ（`Var` の委譲メソッド／モジュール再エクスポート／`Sequential::add_*`）。どれにも当てはまらない推奨（facade `Tape` の委譲メソッド・facade 独自の薄いラッパー）は、決定記録の表現のまま書いた。
@@ -585,8 +585,8 @@ P1」）を受けた是正である。
 | 9 | 索引付き更新（#2641） | `Var::scatter_reduce`／`index_add`／`index_copy`／`masked_scatter` の委譲 4 本＋`ScatterReduceMode` のルート再エクスポート | 追加のみ | `IndexedUpdateOpsHoldDoctestGuard` | #2678 で公開済み（同上） | `autodiff-indexed-update-ops-decision.md` §7（`index_add` の `alpha` を公開形に含めるかも承認事項） |
 | 10 | テンソル積・距離・外積（#2640） | `Var::kron`／`tensordot`／`tensordot_axes`／`cdist`／`cross` の委譲 5 本 | 追加のみ | `TensorProductOpsHoldDoctestGuard` | #2678 で公開済み | `autodiff-tensor-product-ops-decision.md` §7 |
 | 11 | pad の非定数モード（#2642） | `Var::pad_with_mode(pads, mode)`＋`PadMode` のルート再エクスポート（既存 `Var::pad` は不変。`ReflectionPad2d` 等の層は推奨に含めない） | 追加のみ | `PadModesHoldDoctestGuard` | #2678 で公開済み（同上） | `autodiff-pad-modes-decision.md` §7 |
-| 12 | 3D プーリング（#2643） | `Var::max_pool3d`（`(Var, Tensor<i32>)` を返す）／`avg_pool3d` の委譲 2 本。**層化（`nn::MaxPool3d`／`AvgPool3d`・`Sequential::add_*`）は未実装** | 追加のみ | `Pool3dOpsHoldDoctestGuard` | #2850（公開形は #2849 で確定。層化は保留継続） | `autodiff-pool3d-ops-decision.md` §7・§12 |
-| 13 | ConvTranspose3d・MaxUnpool（#2644） | `Var::conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d` の委譲 4 本。**層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）は未実装** | 追加のみ | `ConvTranspose3dMaxUnpoolHoldDoctestGuard` | #2850（公開形と設計判断 3 件は #2849 で確定。層化は保留継続） | `autodiff-conv-transpose3d-max-unpool-decision.md` §7・§12 |
+| 12 | 3D プーリング（#2643） | `Var::max_pool3d`（`(Var, Tensor<i32>)` を返す）／`avg_pool3d` の委譲 2 本。**層化（`nn::MaxPool3d`／`AvgPool3d`・`Sequential::add_*`）は未実装** | 追加のみ | `Pool3dOpsHoldDoctestGuard` | #2850 で `Var` 委譲を公開済み（公開形は #2849 で確定。保留ガードは公開した名前の分だけ正ガードへ反転。層化は保留継続） | `autodiff-pool3d-ops-decision.md` §7・§12 |
+| 13 | ConvTranspose3d・MaxUnpool（#2644） | `Var::conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d` の委譲 4 本。**層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）は未実装** | 追加のみ | `ConvTranspose3dMaxUnpoolHoldDoctestGuard` | #2850 で `Var` 委譲を公開済み（公開形と設計判断 3 件は #2849 で確定。保留ガードは公開した名前の分だけ正ガードへ反転。層化は保留継続） | `autodiff-conv-transpose3d-max-unpool-decision.md` §7・§12 |
 | 14 | Fold・Unfold（#2645） | `Var::unfold`／`fold` の委譲 2 本。**層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は未実装** | 追加のみ | `FoldUnfoldHoldDoctestGuard` | #2851（名前と引数順は #2849 で確定。層化は保留継続） | `autodiff-fold-unfold-decision.md` §7・§12 |
 | 15 | LRN・重み再パラメータ化（#2646） | `Var::local_response_norm`／`weight_norm`／`spectral_norm` の委譲 3 本。`SpectralNormState` はクレートルート・`norm_except_dim` は公開しない（#2849 で確定）。**層化（`nn::LocalResponseNorm`・`Linear`／`Conv` への parametrization 結線）は未実装** | 追加のみ† | `LrnWeightReparamHoldDoctestGuard` | #2851（公開形は #2849 で確定。層化と結線方式は保留継続） | `autodiff-lrn-weight-reparam-decision.md` §7・§12 |
 | 16 | 可変長系列（#2647） | モジュール再エクスポート（`fandhe_ai::nn::rnn` へ `PackedSequence`・出力型 4 種・自由関数 8 本を `pub use`）。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ† | `PackedSequenceHoldDoctestGuard` | #2679 で公開済み（`nn::rnn`。ガードは未承認経路〈`Var`／`Tape` 委譲等〉のプローブへ縮小） | `autodiff-packed-sequence-decision.md` §7（再エクスポート対象一覧・`PackedSequence::new` の扱い等が承認事項） |
@@ -2441,3 +2441,5 @@ facade 公開面は追加していない（保留ガード `GradcheckAnomalyHold
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-jacobian-hessian-gradcheck-decision.md` 「実装記録（#2671）」。**→ `Tape::gradcheck` と型 2 つは #2847 で公開した（本節末尾の #2847 の適用記録）。**
 
 **適用記録（イシュー #2847・親 #2499 Phase 4。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）**: 決定記録 `autodiff-jacobian-hessian-gradcheck-decision.md` §11 の形で、facade `Tape::gradcheck(device, f, inputs, options)`（関連関数・`TapeRef` アダプタ）と `GradcheckOptions`／`GradcheckReport` のクレートルート再エクスポート（別名なし・1 文 1 行）を公開した（追加のみ・`fandhe-ai =0.10.0` の既存 API は不変）。内部 `gradcheck` の `make_tape` 境界は `Fn() -> Result<Tape, AutodiffError>` へ変更（出荷済み API 外）。保留ガード `GradcheckAnomalyHoldDoctestGuard` は公開した名前の分だけ反転し、正ガード `facade_tape_gradcheck_matches_approved_shape`・`facade_reexports_gradcheck_types_only_in_approved_shape` を新設した。維持した保留: モジュール名 `gradcheck`／`anomaly`・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッド。`TapeRef` の公開面は不変（`custom` を持たないため `gradcheck` のクロージャ内で `CustomFunction` は使えない。追加は承認範囲外）。本書 1 節の対象範囲表・`compat-feature-gap.md` の判定列は変更していない。CUDA／Metal 実機は未実測（`docs/perf/logs/tape-gradcheck-facade-2847/README.md`）。詳細は決定記録 §12。
+
+**適用記録（イシュー #2850・親 #2499 Phase 4。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）**: 行 12・13 の公開形（決定記録 `autodiff-pool3d-ops-decision.md` §12.1・`autodiff-conv-transpose3d-max-unpool-decision.md` §12.1）のとおり、`Var::max_pool3d`（`(Var, Tensor<i32>)` を返す）・`avg_pool3d`・`conv_transpose3d`・`max_unpool1d`・`max_unpool2d`・`max_unpool3d` の 6 本を `Var` の 1 行委譲として公開した（追加のみ・`fandhe-ai =0.10.0` の既存 API は不変。委譲本体は `var_phase4_ops_methods_are_thin_delegations` が固定）。保留ガード `Pool3dOpsHoldDoctestGuard`・`ConvTranspose3dMaxUnpoolHoldDoctestGuard` は公開した名前（`Var` 受け手）の分だけ反転した。維持した保留: 層化（`nn::*` 層型・`compat::Sequential::add_*`）、モジュール名・内部型、`Tape`／`Tensor<f32>` 上の同名メソッド。承認コメントが明示したのは「行 12〜15 は `Var` 委譲に限って公開」「層化は保留継続」の 2 点で、シグネチャ確定は各決定記録 §7 の 1 案から導いた事項である。本書 1 節の対象範囲表・`compat-feature-gap.md` の判定列は変更していない。CUDA／Metal 実機は未実測（`docs/perf/logs/pool3d-ops-2643/README.md`・`docs/perf/logs/conv-transpose3d-max-unpool-2644/README.md`）。詳細は各決定記録 §13。

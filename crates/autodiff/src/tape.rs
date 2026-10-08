@@ -1274,8 +1274,8 @@ pub(crate) enum Op {
     /// （`mean = true`）。分類は [`Op::OrderSelect`] と同じ。
     Nanmean { input: NodeId, dim: Option<usize> },
     /// 3D max pooling（`torch.nn.functional.max_pool3d` 相当。NCDHW 固定。イシュー #2643・
-    /// `docs/autodiff-pool3d-ops-decision.md`）。`crate::pool3d_ops::max_pool3d` からのみ積まれ、
-    /// facade には公開しない。`index` は forward が確定した勝者索引（`(n, c)` 平面内 flat 添字
+    /// `docs/autodiff-pool3d-ops-decision.md`）。`crate::pool3d_ops::max_pool3d` からのみ積まれる
+    /// （`Op` 自体は非公開。入口の `Var::max_pool3d` は #2850 で公開済み）。`index` は forward が確定した勝者索引（`(n, c)` 平面内 flat 添字
     /// `d·H·W + h·W + w`。非追跡データ。`Op::MaxPool2d` と同じ payload）。`params` は VJP に
     /// 不要のため保持しない。**`Op::MaxPool2d` は VJP が rank 4 固定のため再利用しない**。
     /// VJP（`grad.rs`）は `Op::MaxPool2d` の rank 5 版（`[N·C, D·H·W]` へ reshape して
@@ -1292,7 +1292,7 @@ pub(crate) enum Op {
     },
     /// ConvTranspose3d（`torch.nn.functional.conv_transpose3d`／`nn.ConvTranspose3d` 相当。NCDHW
     /// 固定。イシュー #2644・`docs/autodiff-conv-transpose3d-max-unpool-decision.md`）。
-    /// `crate::conv_transpose3d_ops::conv_transpose3d` からのみ積まれ、facade には公開しない。
+    /// `crate::conv_transpose3d_ops::conv_transpose3d` からのみ積まれる（`Op` 自体は非公開。入口の `Var::conv_transpose3d` は #2850 で公開済み）。
     /// `weight`: `[Cin, Cout/groups, kD, kH, kW]`（`Op::Conv3d` と先頭 2 軸が逆）。`bias` は
     /// `None` 可。`output_padding` は保持しない（VJP は `upstream.shape()` から導出できる。
     /// `Op::ConvTranspose2d` と同型）。**常に実体化済み**（`push_eager`。GEMM を含む段階的合成の
@@ -1305,7 +1305,7 @@ pub(crate) enum Op {
         params: Conv3dParams,
     },
     /// MaxUnpool1d／2d／3d（`F.max_unpool1d/2d/3d` 相当。イシュー #2644）。1d／2d／3d 共通の
-    /// `(n, c)` 平面 scatter で、`crate::max_unpool_ops` からのみ積まれ facade には公開しない。
+    /// `(n, c)` 平面 scatter で、`crate::max_unpool_ops` からのみ積まれる（`Op` 自体は非公開。入口の `Var::max_unpool*` は #2850 で公開済み）。
     /// `index` は入力と同 shape の contiguous な `Tensor<i32>`（`(n, c)` 平面内 flat 添字。
     /// 非追跡データ）。パラメータは保持しない（VJP は `nodes[input].shape`／`upstream.shape()` と
     /// `index` から導出する）。VJP は `gather`＋last-writer マスク（`Op::Scatter { Overwrite }`

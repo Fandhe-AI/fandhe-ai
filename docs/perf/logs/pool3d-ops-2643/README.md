@@ -1,7 +1,7 @@
 # 3D プーリング 2 種（#2643）CUDA／Metal 実機未実測の申し送り
 
 `docs/autodiff-pool3d-ops-decision.md` §10 参照。本実装エージェント実行環境は CUDA／Metal 実機に
-到達できないため、`fandhe_ai_autodiff::pool3d_ops`（`max_pool3d`／`avg_pool3d`）の
+到達できないため、`fandhe_ai_autodiff::pool3d_ops`（`max_pool3d`／`avg_pool3d`。#2850 以降は同テストが facade 公開の `Var::max_pool3d`／`avg_pool3d` 経由で同じ経路を測る）の
 `crates/facade/tests/pool3d_ops_backend_parity.rs` のうち CUDA（`Device::Cuda(0)`）・Metal
 （`Device::Metal`。`cfg(target_os = "macos")` 限定）を対象とする 2 テスト
 （`cuda_pool3d_ops_match_cpu_reference`・`metal_pool3d_ops_match_cpu_reference`）は

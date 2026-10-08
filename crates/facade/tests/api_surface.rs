@@ -28706,9 +28706,10 @@ fn workspace_declares_pad_modes_fn_names_only_in_allowed_locations() {
 // Pool3dOpsHoldDoctestGuard（イシュー #2643・親 #2625・ルート #2499 Phase 4）:
 // `PadModesHoldDoctestGuard`（#2642）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::pool3d_ops`・`fandhe_ai_tensor_core::pool3d`）に閉じ、facade 公開形
-// （`Var::max_pool3d`／`Var::avg_pool3d` の委譲メソッド）は未承認（承認依頼は #2677。公開は
-// 承認後の #2678・#2679）。層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`）も
-// 同じ保留に含める。既存の 2D プーリング（`Var::max_pool2d`／`avg_pool2d` 等）は対象外で、
+// （`Var::max_pool3d`／`Var::avg_pool3d` の委譲メソッド）は #2850 で記録 §12.1 の形で公開済み
+// （`var_phase4_ops_methods_are_thin_delegations` が固定。承認根拠は #2499 の
+// `issuecomment-6052732061`）。層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`）と
+// `Tape`／`Tensor<f32>` 上の同名メソッドは保留継続（下のプローブ・インベントリが拒否する）。既存の 2D プーリング（`Var::max_pool2d`／`avg_pool2d` 等）は対象外で、
 // 保留対象の識別子とは別トークンとして扱う。
 // =====================================================================
 
@@ -28782,15 +28783,6 @@ trait __FandhePool3dHoldProbe {\n\
 \x20\x20\x20\x20fn avg_pool3d(&self) -> __FandhePool3dHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandhePool3dHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn max_pool3d(&self) -> __FandhePool3dHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePool3dHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn avg_pool3d(&self) -> __FandhePool3dHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePool3dHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandhePool3dHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn max_pool3d(&self) -> __FandhePool3dHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandhePool3dHoldMarker\n\
@@ -28832,13 +28824,11 @@ fn __probe_free_fns(_: Pool3dParams, _: MaxPool3d, _: AvgPool3d) {\n\
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Var::max_pool3d(v);\n\
-\x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Var::avg_pool3d(v);\n\
 \x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::max_pool3d(tape);\n\
 \x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::avg_pool3d(tape);\n\
 \x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::max_pool3d(tf);\n\
@@ -29021,8 +29011,9 @@ fn facade_does_not_reexport_or_declare_pool3d_ops_detects_each_category() {
 /// workspace 全体（`crates/*/src/`）を再帰走査し、[`POOL3D_OPS_FN_NAMES`] の
 /// `fn` 宣言が承認済みの置き場所だけに存在することを固定する。
 ///
-/// 期待値は `autodiff/src/pool3d_ops.rs::{max_pool3d, avg_pool3d}` の各 1 件のみ
-/// （`add_max_pool3d`／`add_avg_pool3d` は 0 件。層化は #2679 の対象）。これら以外への
+/// 期待値は `autodiff/src/pool3d_ops.rs::{max_pool3d, avg_pool3d}` と
+/// `autodiff/src/var.rs::{max_pool3d, avg_pool3d}`（#2850 の `Var` 委譲）の各 1 件のみ
+/// （`add_max_pool3d`／`add_avg_pool3d` は 0 件。層化は保留継続）。これら以外への
 /// 追加は fail-closed に検出する。
 #[test]
 fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
@@ -29066,15 +29057,21 @@ fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
             }
         });
     }
+    // `pool3d_ops.rs` の自由関数と、#2850 で公開した `var.rs` の委譲メソッド各 1 件。
     let expected: std::collections::BTreeMap<String, usize> = ["max_pool3d", "avg_pool3d"]
         .iter()
-        .map(|n| (format!("autodiff/src/pool3d_ops.rs::{n}"), 1usize))
+        .flat_map(|n| {
+            [
+                (format!("autodiff/src/pool3d_ops.rs::{n}"), 1usize),
+                (format!("autodiff/src/var.rs::{n}"), 1usize),
+            ]
+        })
         .collect();
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の max_pool3d／avg_pool3d／add_max_pool3d／\
          add_avg_pool3d の `fn` 宣言が承認済みの置き場所\
-         （autodiff/src/pool3d_ops.rs の max_pool3d／avg_pool3d 各 1 件のみ）と一致しない。\
+         （autodiff/src/pool3d_ops.rs と autodiff/src/var.rs の max_pool3d／avg_pool3d 各 1 件のみ）と一致しない。\
          迂回経路（facade／Var／Sequential への inherent メソッド追加等）の混入か、\
          未承認の実装追加でないか確認すること"
     );
@@ -29085,9 +29082,10 @@ fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
 // `Pool3dOpsHoldDoctestGuard`（#2643）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::conv_transpose3d_ops`・`fandhe_ai_autodiff::max_unpool_ops`・
 // `fandhe_ai_tensor_core::conv_transpose3d`・`fandhe_ai_tensor_core::max_unpool`）に閉じ、
-// facade 公開形（`Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` の委譲メソッド）は未承認
-// （承認依頼は #2677。公開は承認後の #2678・#2679）。層化（`compat::Sequential::add_conv_transpose3d`
-// ／`add_max_unpool1d/2d/3d`）も同じ保留に含める。既存の `Var::conv_transpose2d` は対象外で、
+// facade 公開形（`Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` の委譲メソッド）は #2850 で
+// 記録 §12.1 の形で公開済み（`var_phase4_ops_methods_are_thin_delegations` が固定。承認根拠は #2499 の
+// `issuecomment-6052732061`）。層化（`compat::Sequential::add_conv_transpose3d`／`add_max_unpool1d/2d/3d`）と
+// `Tape`／`Tensor<f32>` 上の同名メソッドは保留継続（下のプローブ・インベントリが拒否する）。既存の `Var::conv_transpose2d` は対象外で、
 // 保留対象の識別子とは別トークンとして扱う。
 // =====================================================================
 
@@ -29174,21 +29172,6 @@ trait __FandheConvTranspose3dMaxUnpoolHoldProbe {\n\
 \x20\x20\x20\x20fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
 }\n\
 \n\
-impl<'t> __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Var<'t> {\n\
-\x20\x20\x20\x20fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 impl __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Tape {\n\
 \x20\x20\x20\x20fn conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
@@ -29253,15 +29236,11 @@ fn __probe_free_fns(_: ConvTranspose3d, _: MaxUnpool1d, _: MaxUnpool2d, _: MaxUn
 }\n\
 \n\
 fn __probe_methods(\n\
-\x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
+\x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 \x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
-\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::conv_transpose3d(v);\n\
-\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool1d(v);\n\
-\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool2d(v);\n\
-\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Var::max_unpool3d(v);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::conv_transpose3d(tape);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool1d(tape);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tape::max_unpool2d(tape);\n\
@@ -29525,13 +29504,17 @@ fn workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locat
     );
     for n in ["max_unpool1d", "max_unpool2d", "max_unpool3d"] {
         expected.insert(format!("autodiff/src/max_unpool_ops.rs::{n}"), 1);
+        // #2850 で公開した `Var` 委譲メソッド。
+        expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
     }
+    expected.insert("autodiff/src/var.rs::conv_transpose3d".to_string(), 1);
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の conv_transpose3d／max_unpool1d／max_unpool2d／\
          max_unpool3d／add_conv_transpose3d／add_max_unpool1d／add_max_unpool2d／add_max_unpool3d の\
          `fn` 宣言が承認済みの置き場所（autodiff/src/conv_transpose3d_ops.rs の conv_transpose3d と\
-         autodiff/src/max_unpool_ops.rs の max_unpool1d／2d／3d 各 1 件のみ）と一致しない。\
+         autodiff/src/max_unpool_ops.rs の max_unpool1d／2d／3d 各 1 件、および #2850 の\
+         autodiff/src/var.rs の委譲メソッド各 1 件のみ）と一致しない。\
          迂回経路（facade／Var／Sequential への inherent メソッド追加等）の混入か、\
          未承認の実装追加でないか確認すること"
     );
@@ -35756,7 +35739,7 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
 /// （[`ACTIVATION_OPS_VAR_EXPECTED_BODIES`] と同型）。`matmul_low_precision` は本体を持つ
 /// 既存メソッドを `pub` にしただけで委譲の向きが逆（自由関数 → メソッド）のため本表の対象外とし、
 /// 代わりに自由関数側の本体を [`phase4_matmul_low_precision_free_fn_delegates_to_method`] が固定する。
-const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 65] = [
+const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 71] = [
     (
         "fft_ops",
         "rfft",
@@ -36050,6 +36033,36 @@ const PHASE4_VAR_EXPECTED_BODIES: [(&str, &str, &str); 65] = [
         "margin_focal_loss_ops",
         "multilabel_margin_loss",
         "crate : : margin_focal_loss_ops : : multilabel_margin_loss ( self , target , reduction )",
+    ),
+    (
+        "pool3d_ops",
+        "max_pool3d",
+        "crate : : pool3d_ops : : max_pool3d ( self , kernel_size , stride , padding , dilation , ceil_mode )",
+    ),
+    (
+        "pool3d_ops",
+        "avg_pool3d",
+        "crate : : pool3d_ops : : avg_pool3d ( self , kernel_size , stride , padding , ceil_mode , count_include_pad , )",
+    ),
+    (
+        "conv_transpose3d_ops",
+        "conv_transpose3d",
+        "crate : : conv_transpose3d_ops : : conv_transpose3d ( self , weight , bias , stride , padding , output_padding , dilation , groups , )",
+    ),
+    (
+        "max_unpool_ops",
+        "max_unpool1d",
+        "crate : : max_unpool_ops : : max_unpool1d ( self , indices , kernel_size , stride , padding , output_size , )",
+    ),
+    (
+        "max_unpool_ops",
+        "max_unpool2d",
+        "crate : : max_unpool_ops : : max_unpool2d ( self , indices , kernel_size , stride , padding , output_size , )",
+    ),
+    (
+        "max_unpool_ops",
+        "max_unpool3d",
+        "crate : : max_unpool_ops : : max_unpool3d ( self , indices , kernel_size , stride , padding , output_size , )",
     ),
 ];
 

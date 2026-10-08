@@ -14,7 +14,7 @@
     CPU は共有カーネルを呼ぶだけの override。CUDA／Metal は変更なし。
   - 入口は自由関数モジュール `fandhe_ai_autodiff::pool3d_ops`（`max_pool3d`／`avg_pool3d`）。専用 `Op` 2
     variant（`Op::MaxPool3d`／`Op::AvgPool3d`）と VJP は `grad.rs`。
-- facade 公開は行わない。`Pool3dOpsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
+- facade 公開は行わない（**→ `Var` 委譲 2 本は #2850 で公開済み。§13**）。`Pool3dOpsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
   `crates/facade/tests/api_surface.rs` の否定ガードで機械固定した。
 - 層化（`nn::MaxPool3d`／`nn::AvgPool3d`・`Module` impl・`Sequential::add_*`）は #2679 の対象で、本イシューでは
   実装していない（§8）。
@@ -243,3 +243,13 @@ impl<'t> Var<'t> {
 - 反転するのは `Var` の委譲メソッド名（`max_pool3d`／`avg_pool3d`）のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`compat::Sequential::add_*`・モジュール再エクスポート・層型名のプローブは未承認経路として維持する。
 - workspace インベントリは `var.rs` の委譲 1 件ずつを許可位置に加える。
 - 実機 parity は既存の `docs/perf/logs/pool3d-ops-2643/README.md` を使う。
+
+## 13. #2850 実施記録（`Var` 委譲の公開）
+
+承認根拠: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061（明示されたのは「行 12〜15 は `Var` 委譲に限って公開」「層化は保留継続」の 2 点。シグネチャは §7 の 1 案から導いた §12.1 の形）。§12 は書き換えていない。
+
+- **公開した名前**: `Var::max_pool3d`・`Var::avg_pool3d`（§12.1 のシグネチャどおり。追加のみ・`fandhe-ai =0.10.0` 非破壊）。委譲本体は `crates/autodiff/src/var.rs` にあり、`crate::pool3d_ops::max_pool3d`／`avg_pool3d` への 1 行委譲を `api_surface.rs::var_phase4_ops_methods_are_thin_delegations` がトークン列で固定する。
+- **§9 のガードの現状**: `Pool3dOpsHoldDoctestGuard` は `Var` の `impl` ブロックと `Var::` の UFCS 行を外した部分反転（`Tape`／`Tensor<f32>`・`compat::Sequential::add_*`・モジュール・型のプローブは維持）。`pool3d_ops_hold_doctest_probe_body_matches_fixed_contract` の固定文言も同じ形へ更新。`workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations` の期待値へ `autodiff/src/var.rs::{max_pool3d, avg_pool3d}` を各 1 件追加。`facade_does_not_reexport_or_declare_pool3d_ops`（facade src の否定検査）は不変。
+- **テスト**: `crates/facade/tests/pool3d_conv_transpose3d_max_unpool_var_delegates.rs`（シグネチャ固定・自由関数との bit 一致・閉形式・`ceil_mode=true` 拒否）。`pool3d_ops_backend_parity.rs` は `Var` メソッド経由に切り替えた（テスト名・`#[ignore]`・判定・tolerance は不変）。
+- **実機**: CUDA／Metal は未実測（`docs/perf/logs/pool3d-ops-2643/README.md` へ申し送り）。
+- **保留継続**: 層化（`nn::MaxPool3d`／`nn::AvgPool3d`・`Sequential::add_max_pool3d`／`add_avg_pool3d`）、`Tape`／`Tensor<f32>` 上の同名メソッド、モジュール・型の再エクスポート。

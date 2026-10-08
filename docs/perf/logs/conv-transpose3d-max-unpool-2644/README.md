@@ -1,7 +1,7 @@
 # ConvTranspose3d・MaxUnpool（#2644）CUDA／Metal 実機未実測の申し送り
 
 `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §10 参照。本実装エージェント実行環境は CUDA／Metal 実機に
-到達できないため、`fandhe_ai_autodiff::conv_transpose3d_ops`・`max_unpool_ops` の
+到達できないため、`fandhe_ai_autodiff::conv_transpose3d_ops`・`max_unpool_ops`（#2850 以降は同テストが facade 公開の `Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` 経由で同じ経路を測る）の
 `crates/facade/tests/conv_transpose3d_max_unpool_backend_parity.rs` のうち CUDA（`Device::Cuda(0)`）・Metal
 （`Device::Metal`。`cfg(target_os = "macos")` 限定）を対象とする 2 テスト
 （`cuda_conv_transpose3d_max_unpool_match_cpu_reference`・`metal_conv_transpose3d_max_unpool_match_cpu_reference`）は

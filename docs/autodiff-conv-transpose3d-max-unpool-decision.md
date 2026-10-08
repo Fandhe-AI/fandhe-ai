@@ -18,7 +18,7 @@ CPU 参照実装を先行し、facade 公開は記録 → 承認の 2 段」方�
     `gather`（VJP）を `(n, c)` 平面へ平坦化して再利用。入口は `fandhe_ai_autodiff::max_unpool_ops::
     max_unpool{1,2,3}d`。専用 `Op::MaxUnpool`（1 variant を 1d／2d／3d で共有）。shape 検査は
     `fandhe_ai_tensor_core::max_unpool::{max_unpool_layout, MaxUnpoolLayout}`。
-- facade 公開は行わない。`ConvTranspose3dMaxUnpoolHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
+- facade 公開は行わない（**→ `Var` 委譲 4 本は #2850 で公開済み。§13**）。`ConvTranspose3dMaxUnpoolHoldDoctestGuard`（`crates/facade/src/lib.rs`）と
   `crates/facade/tests/api_surface.rs` の否定ガードで機械固定した（§9）。
 - 層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Module` impl・`Sequential::add_*`・保存復元フック）は #2679 の
   対象で、本イシューでは実装していない（§8）。
@@ -306,3 +306,14 @@ impl<'t> Var<'t> {
 - 反転するのは `Var` の委譲メソッド名 4 件のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`compat::Sequential::add_*`・モジュール再エクスポート・層型名のプローブは未承認経路として維持する。
 - workspace インベントリは `var.rs` の委譲 1 件ずつを許可位置に加える。
 - 実機 parity は既存の `docs/perf/logs/conv-transpose3d-max-unpool-2644/README.md` を使う。
+
+## 13. #2850 実施記録（`Var` 委譲の公開）
+
+承認根拠: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061（明示されたのは「行 12〜15 は `Var` 委譲に限って公開」「層化は保留継続」の 2 点。シグネチャと §12.2 の設計判断 3 件は §7 の 1 案から導いた §12 の形）。§12 は書き換えていない。
+
+- **公開した名前**: `Var::conv_transpose3d`・`Var::max_unpool1d`・`Var::max_unpool2d`・`Var::max_unpool3d`（§12.1 のシグネチャどおり。追加のみ・`fandhe-ai =0.10.0` 非破壊）。委譲本体は `crates/autodiff/src/var.rs` にあり、`crate::conv_transpose3d_ops::conv_transpose3d`／`crate::max_unpool_ops::max_unpool{1,2,3}d` への 1 行委譲を `var_phase4_ops_methods_are_thin_delegations` が固定する。`conv_transpose3d` は `&self` 込み 8 引数のため `Var::conv_transpose2d` と同じ理由で `#[allow(clippy::too_many_arguments)]` を付けた。
+- **設計判断 3 件（§12.2）**: 現行挙動のまま公開した（`output_padding >= stride` 拒否・`C = 0` 受理・`kernel = 0` 拒否・索引は `Var::max_pool*` の `Tensor<i32>` をそのまま渡す）。
+- **§9 のガードの現状**: `ConvTranspose3dMaxUnpoolHoldDoctestGuard` は `Var` の `impl` ブロックと `Var::` の UFCS 4 行を外した部分反転（`Tape`／`Tensor<f32>`・`compat::Sequential::add_*`・モジュール・型のプローブは維持）。固定文言 `CONV_TRANSPOSE3D_MAX_UNPOOL_HOLD_PROBE_BODY` も同じ形へ更新。`workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locations` の期待値へ `autodiff/src/var.rs` の 4 件を追加。`facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool` は不変。
+- **テスト**: `crates/facade/tests/pool3d_conv_transpose3d_max_unpool_var_delegates.rs`（シグネチャ固定・自由関数との bit 一致・閉形式・往復・型付きエラー・`C = 0`）。`conv_transpose3d_max_unpool_backend_parity.rs` は `Var` メソッド経由に切り替えた（テスト名・`#[ignore]`・判定は不変）。
+- **実機**: CUDA／Metal は未実測（`docs/perf/logs/conv-transpose3d-max-unpool-2644/README.md` へ申し送り）。
+- **保留継続**: 層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）、`Tape`／`Tensor<f32>` 上の同名メソッド、モジュール・型の再エクスポート。

@@ -3,12 +3,11 @@
 //! 3 軸一般化で、新規 `BackendOps` メソッド・新規カーネルは追加しない（既存の `gemm_batched`＋
 //! `col2im3d` フックの合成。設計 `docs/conv-ops-design.md` §15・§16）。
 //!
-//! **facade 非公開（保留）**: 公開形（`Var::conv_transpose3d` の委譲メソッド）は未承認で、承認依頼は
-//! #2677（公開自体は承認後の #2678）。層化（`nn::ConvTranspose3d`・`Sequential::add_*`）は
-//! #2679 の対象で本イシューでは作らない。本モジュールは内部クレート限定の入口で、`Var` に
-//! inherent メソッドを足さない。保留は `crates/facade/src/lib.rs` の
-//! `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の否定ガードが
-//! 機械的に固定する（`docs/autodiff-conv-transpose3d-max-unpool-decision.md`）。
+//! **facade 公開状況**: `Var::conv_transpose3d`（本モジュールの自由関数への 1 行委譲）は #2850 で
+//! 公開済み（公開形は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12.1）。モジュール自体は
+//! 再エクスポートしない。層化（`nn::ConvTranspose3d`・`Sequential::add_*`）は保留継続で、
+//! `crates/facade/src/lib.rs` の `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と
+//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する。
 //!
 //! **経路**: ① 同一 tape・`Conv3dParams`・`output_padding < stride`・出力 shape・bias shape の検査
 //! （実体化・tape 操作より前。エラー時に孤児ノードを残さない）→ ② 入力の実体化 → ③ 段階的合成

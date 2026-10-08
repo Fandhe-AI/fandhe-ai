@@ -5362,6 +5362,138 @@ impl<'t> Var<'t> {
         crate::pad_ops::pad_with_mode(self, pads, mode)
     }
 
+    // ---- pool3d_ops 委譲メソッド（3D プーリング（Phase 4 行 12）。イシュー #2850。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::pool3d_ops` の自由関数。本体は 1 行委譲に固定し、検査の迂回や独自実装への
+    // すり替えを facade の正ガード（`var_phase4_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形は `docs/autodiff-pool3d-ops-decision.md` §12.1、承認根拠は同 §12 と `docs/compat-api-scope.md` §5.1。
+    // 層化（`nn::*` 層型・`compat::Sequential::add_*`）は保留継続。
+
+    /// 3D 最大プーリング（`torch.nn.functional.max_pool3d` 相当）。イシュー #2850。`crate::pool3d_ops::max_pool3d` へ 1 行委譲する。
+    /// 索引は `(n, c)` 平面内 flat 添字の `Tensor<i32>` で、`max_unpool3d` へそのまま渡せる。引数検査・エラー契約（`ceil_mode = true` は型付きエラー）は委譲先に従う。
+    pub fn max_pool3d(
+        &self,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        dilation: [usize; 3],
+        ceil_mode: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        crate::pool3d_ops::max_pool3d(self, kernel_size, stride, padding, dilation, ceil_mode)
+    }
+
+    /// 3D 平均プーリング（`torch.nn.functional.avg_pool3d` 相当）。イシュー #2850。`crate::pool3d_ops::avg_pool3d` へ 1 行委譲する。
+    /// 引数検査・エラー契約（`ceil_mode = true` は型付きエラー）は委譲先に従う。
+    pub fn avg_pool3d(
+        &self,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        ceil_mode: bool,
+        count_include_pad: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::pool3d_ops::avg_pool3d(
+            self,
+            kernel_size,
+            stride,
+            padding,
+            ceil_mode,
+            count_include_pad,
+        )
+    }
+
+    // ---- conv_transpose3d_ops／max_unpool_ops 委譲メソッド（3D 転置畳み込み・MaxUnpool（Phase 4 行 13）。イシュー #2850。親 #2625・ルート #2499）----
+    //
+    // 実体は `crate::conv_transpose3d_ops`／`crate::max_unpool_ops` の自由関数。本体は 1 行委譲に固定し、
+    // 検査の迂回や独自実装へのすり替えを facade の正ガード（`var_phase4_ops_methods_are_thin_delegations`）で拒否する。
+    // 公開形は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12.1、承認根拠は同 §12 と `docs/compat-api-scope.md` §5.1。
+    // 層化（`nn::*` 層型・`compat::Sequential::add_*`）は保留継続。
+
+    /// 3D 転置畳み込み（`torch.nn.functional.conv_transpose3d` 相当）。イシュー #2850。`crate::conv_transpose3d_ops::conv_transpose3d` へ 1 行委譲する。
+    /// 引数検査・エラー契約（`output_padding >= stride` 拒否等）は委譲先に従う。
+    #[allow(clippy::too_many_arguments)] // PyTorch `F.conv_transpose3d` の全引数を受理する公開形（記録 §12.1）のため（`conv_transpose2d` と同方針）。
+    pub fn conv_transpose3d(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: [usize; 3],
+        padding: [usize; 3],
+        output_padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::conv_transpose3d_ops::conv_transpose3d(
+            self,
+            weight,
+            bias,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+        )
+    }
+
+    /// 1D MaxUnpool（`torch.nn.functional.max_unpool1d` 相当）。イシュー #2850。`crate::max_unpool_ops::max_unpool1d` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn max_unpool1d(
+        &self,
+        indices: &Tensor<i32>,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        output_size: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::max_unpool_ops::max_unpool1d(
+            self,
+            indices,
+            kernel_size,
+            stride,
+            padding,
+            output_size,
+        )
+    }
+
+    /// 2D MaxUnpool（`torch.nn.functional.max_unpool2d` 相当）。イシュー #2850。`crate::max_unpool_ops::max_unpool2d` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn max_unpool2d(
+        &self,
+        indices: &Tensor<i32>,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        output_size: Option<[usize; 2]>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::max_unpool_ops::max_unpool2d(
+            self,
+            indices,
+            kernel_size,
+            stride,
+            padding,
+            output_size,
+        )
+    }
+
+    /// 3D MaxUnpool（`torch.nn.functional.max_unpool3d` 相当）。イシュー #2850。`crate::max_unpool_ops::max_unpool3d` へ 1 行委譲する。
+    /// 引数検査・エラー契約は委譲先に従う。
+    pub fn max_unpool3d(
+        &self,
+        indices: &Tensor<i32>,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        output_size: Option<[usize; 3]>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        crate::max_unpool_ops::max_unpool3d(
+            self,
+            indices,
+            kernel_size,
+            stride,
+            padding,
+            output_size,
+        )
+    }
+
     // ---- activation_scalar_ops 委譲メソッド（スカラー活性化（Phase 4 行 17）。イシュー #2678。親 #2625・ルート #2499）----
     //
     // 実体は `crate::activation_scalar_ops` の自由関数（既存 Op の合成）。本体は 1 行委譲に固定し、検査の迂回や独自実装への
