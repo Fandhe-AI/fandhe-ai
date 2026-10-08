@@ -142,6 +142,8 @@ tolerance・baseline は変更していない。
 
 ## 7. facade 公開形の推奨案（未承認）
 
+> #2849 で公開形を確定した（§12）。公開は #2850。本節は確定前の推奨案として履歴を残す。
+
 推奨は 1 つ。`Var` の inherent メソッド 2 件として `pool3d_ops` への 1 行委譲で公開する
 （`Var::max_pool2d`／`avg_pool2d` の 3 軸版。`Var::conv3d` と同じ公開方式）。
 
@@ -197,3 +199,47 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機テスト（`cuda_po
 - `docs/compat-api-scope.md` 5 節（適用記録）・`.claude/rules/coding-rust.md`（REQ-2 判定・f64 長軸縮約契約・
   カーネル境界検査）
 - PyTorch 2.14.0 実行値: `crates/autodiff/tests/fixtures/pool3d-pytorch-reference/README.md`
+
+## 12. #2849 決定記録（facade 公開形の確定）
+
+- 状態: **記録のみ（コード変更なし）。** §7 の公開形を 1 案に確定する。公開（`Var::max_pool3d`／`avg_pool3d` の委譲と保留ガードの反転）は #2850 が行う。**公開までは `Pool3dOpsHoldDoctestGuard` と `api_surface.rs` の否定ガードを維持する。**
+- 基準: `origin/main` `74171fb9`（2026-10-08）。
+- 承認の根拠: ルート #2499 の 2026-10-08 ユーザーコメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）が明示した点は、(1) 行 12〜15 は `Var` の委譲メソッドに限って公開する、(4) 層化（`nn::MaxPool3d` 等・`Sequential::add_*`）は保留を継続する、の 2 点に限る。下記のシグネチャ確定は、§7 に代替案が無かったこと（推奨は 1 案）と内部自由関数との一致確認から導いた事項であり、コメントが個別に明示した文言ではない。
+
+### 12.1 確定シグネチャ
+
+```rust
+impl<'t> Var<'t> {
+    pub fn max_pool3d(
+        &self,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        dilation: [usize; 3],
+        ceil_mode: bool,
+    ) -> Result<(Var<'t>, Tensor<i32>), AutodiffError>;
+
+    pub fn avg_pool3d(
+        &self,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        ceil_mode: bool,
+        count_include_pad: bool,
+    ) -> Result<Var<'t>, AutodiffError>;
+}
+```
+
+- 内部自由関数 `crates/autodiff/src/pool3d_ops.rs` の `max_pool3d`／`avg_pool3d` と、第 1 引数 `input` を `self` に置き換えた以外の引数順・型・戻り値が一致する。`Var` メソッドは 1 行委譲。
+- 新規公開型なし。`pool3d_ops`・`tensor_core::pool3d`・`Pool3dParams` は再エクスポートしない。
+- 挙動は §5 のとおり現行のまま公開する（索引は `Tensor<i32>`、`ceil_mode = true` は型付きエラー）。挙動を変える案は本件の範囲外。
+
+### 12.2 保留を続けるもの
+
+- 層化（内部層型 `nn::MaxPool3d`／`nn::AvgPool3d`・`Module` impl・保存復元フック・`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`・resident 経路）。
+
+### 12.3 #2850 への申し送り
+
+- 反転するのは `Var` の委譲メソッド名（`max_pool3d`／`avg_pool3d`）のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`compat::Sequential::add_*`・モジュール再エクスポート・層型名のプローブは未承認経路として維持する。
+- workspace インベントリは `var.rs` の委譲 1 件ずつを許可位置に加える。
+- 実機 parity は既存の `docs/perf/logs/pool3d-ops-2643/README.md` を使う。

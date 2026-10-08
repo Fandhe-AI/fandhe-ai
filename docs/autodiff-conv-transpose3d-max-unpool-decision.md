@@ -166,6 +166,8 @@ tolerance・baseline は変更していない。PyTorch との差分を埋める
 
 ## 7. facade 公開形の推奨案（未承認）
 
+> #2849 で公開形と設計判断 3 件を確定した（§12）。公開は #2850。本節は確定前の推奨案として履歴を残す。
+
 推奨は 1 つ。`Var` の inherent 委譲メソッド 4 件として各自由関数への 1 行委譲で公開する（`Var::conv_transpose2d`・
 `Var::conv3d`・#2643 の推奨形と同じ方式）。
 
@@ -232,3 +234,75 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機テスト（`cuda_co
 - `docs/compat-api-scope.md` 5 節（適用記録）・`.claude/rules/coding-rust.md`（REQ-2 判定・f64 長軸縮約契約・
   カーネル境界検査）
 - PyTorch 2.14.0 実行値: `crates/autodiff/tests/fixtures/conv-transpose3d-max-unpool-pytorch-reference/README.md`
+
+## 12. #2849 決定記録（facade 公開形の確定）
+
+- 状態: **記録のみ（コード変更なし）。** §7 の公開形と設計判断 3 件を 1 案に確定する。公開（`Var` の委譲 4 件と保留ガードの反転）は #2850 が行う。**公開までは `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と `api_surface.rs` の否定ガードを維持する。**
+- 基準: `origin/main` `74171fb9`（2026-10-08）。
+- 承認の根拠: ルート #2499 の 2026-10-08 ユーザーコメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）が明示した点は、(1) 行 12〜15 は `Var` の委譲メソッドに限って公開する、(4) 層化（`nn::MaxUnpool*` 等・`Sequential::add_*`）は保留を継続する、の 2 点に限る。シグネチャと設計判断 3 件の確定は、§7 の現行形を変えない方向（推奨の無い点は無し）から導いた事項であり、コメントが個別に明示した文言ではない。
+
+### 12.1 確定シグネチャ
+
+```rust
+impl<'t> Var<'t> {
+    pub fn conv_transpose3d(
+        &self,
+        weight: &Var<'t>,
+        bias: Option<&Var<'t>>,
+        stride: [usize; 3],
+        padding: [usize; 3],
+        output_padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+    ) -> Result<Var<'t>, AutodiffError>;
+
+    pub fn max_unpool1d(
+        &self,
+        indices: &Tensor<i32>,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        output_size: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError>;
+
+    pub fn max_unpool2d(
+        &self,
+        indices: &Tensor<i32>,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        output_size: Option<[usize; 2]>,
+    ) -> Result<Var<'t>, AutodiffError>;
+
+    pub fn max_unpool3d(
+        &self,
+        indices: &Tensor<i32>,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        output_size: Option<[usize; 3]>,
+    ) -> Result<Var<'t>, AutodiffError>;
+}
+```
+
+- 内部自由関数 `conv_transpose3d_ops.rs`／`max_unpool_ops.rs` と、第 1 引数 `input` を `self` に置き換えた以外の引数順・型・戻り値が一致する。1 行委譲。
+- 新規公開型なし。`conv_transpose3d_ops`・`max_unpool_ops`・`tensor_core::{conv_transpose3d, max_unpool}`・`MaxUnpoolLayout` は再エクスポートしない。
+
+### 12.2 設計判断 3 件（§7 の現行形のまま確定）
+
+- (a) 重複索引の勾配は forward の真の随伴（last-writer マスク）のまま。PyTorch 互換の単純 `gather` へは変えない。
+- (b) `output_padding >= stride` は各軸で拒否する（PyTorch 非互換のまま）。
+- (c) `C = 0` は受理（空出力）、`kernel = 0` は拒否する。
+
+いずれも §5・§7 の現行実装を維持する選択であり、挙動変更の承認ではない。
+
+### 12.3 保留を続けるもの
+
+- 層化（`nn::ConvTranspose3d`／`nn::MaxUnpool1d/2d/3d`・`Module` impl・保存復元フック・`compat::Sequential::add_conv_transpose3d`・resident 経路）。
+- `Sequential::add_max_unpool*` と、対になる MaxPool の索引の受け渡し方法の設計判断。
+
+### 12.4 #2850 への申し送り
+
+- 反転するのは `Var` の委譲メソッド名 4 件のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`compat::Sequential::add_*`・モジュール再エクスポート・層型名のプローブは未承認経路として維持する。
+- workspace インベントリは `var.rs` の委譲 1 件ずつを許可位置に加える。
+- 実機 parity は既存の `docs/perf/logs/conv-transpose3d-max-unpool-2644/README.md` を使う。

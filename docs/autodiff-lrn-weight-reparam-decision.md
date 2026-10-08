@@ -155,6 +155,8 @@ forward ごとに反復が走るため、1 記録につき forward は 1 回。�
 
 ## 7. facade 公開形の推奨案（未承認）
 
+> #2849 で `SpectralNormState` の位置と `norm_except_dim` の扱いを確定した（§12）。公開は #2851。本節は確定前の推奨案として履歴を残す。
+
 推奨は 1 つ。`Var` の inherent 委譲メソッド 3 件として各自由関数への 1 行委譲で公開する（既存の `rms_norm`／`layer_norm` と
 兄弟 #2643〜#2645 の推奨形との一貫性）。
 
@@ -220,3 +222,66 @@ bit 一致する」ことの確認であり、新規 GPU カーネルの parity 
 - `docs/compat-api-scope.md` 5 節（適用記録）・`.claude/rules/coding-rust.md`（REQ-2 判定・正規化統計の `f64` 契約・
   勾配の長軸縮約契約・カーネル境界検査）
 - PyTorch 2.14.0 実行値: `crates/autodiff/tests/fixtures/lrn-weight-reparam-pytorch-reference/README.md`
+
+## 12. #2849 決定記録（facade 公開形の確定）
+
+- 状態: **記録のみ（コード変更なし）。** §7 で未決だった `SpectralNormState` の公開位置と `norm_except_dim` の扱いを 1 案に確定する。公開（`Var` の委譲 3 件・`SpectralNormState` の再エクスポートと保留ガードの反転）は #2851 が行う。**公開までは `LrnWeightReparamHoldDoctestGuard` と `api_surface.rs` の否定ガードを維持する。**
+- 基準: `origin/main` `74171fb9`（2026-10-08）。
+- 承認の根拠: ルート #2499 の 2026-10-08 ユーザーコメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）が明示した点は、(1) 行 12〜15 は `Var` の委譲メソッドに限って公開する、(4) 層化と重み再パラメータ化の結線方式は保留継続、の 2 点に限る。`SpectralNormState` の位置と `norm_except_dim` 非公開は、コメントが明示した文言ではなく、既存の同種型の公開位置に合わせる最小限の公開という方向からの導出である。
+
+### 12.1 確定シグネチャ
+
+```rust
+impl<'t> Var<'t> {
+    pub fn local_response_norm(
+        &self,
+        size: usize,
+        alpha: f32,
+        beta: f32,
+        k: f32,
+    ) -> Result<Var<'t>, AutodiffError>;
+
+    /// self が `v`
+    pub fn weight_norm(
+        &self,
+        g: &Var<'t>,
+        dim: Option<usize>,
+    ) -> Result<Var<'t>, AutodiffError>;
+
+    /// self が `weight`
+    pub fn spectral_norm(
+        &self,
+        state: &mut SpectralNormState,
+        training: bool,
+    ) -> Result<Var<'t>, AutodiffError>;
+}
+```
+
+- 内部自由関数 `lrn_ops.rs`／`weight_reparam_ops.rs` と、第 1 引数（`input`／`v`／`weight`）を `self` に置き換えた以外の引数順・型・戻り値が一致する。1 行委譲。`lrn_ops`・`weight_reparam_ops` モジュールは再エクスポートしない。
+
+### 12.2 `SpectralNormState` の公開位置
+
+- 位置は facade クレートルート `fandhe_ai::SpectralNormState`。`StftOptions`・`GradcheckOptions` など `Var` メソッドの引数に取る既存の状態・オプション型と同じ位置である。
+- 経路は別名なし 1 行の `pub use fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState;`（`GradcheckOptions` と同じモジュール経由パス。`weight_reparam_ops` モジュール自体は再エクスポートしない。autodiff のクレートルートは変更しない）。型の形は変えない（`#[non_exhaustive]`・フィールド非公開）。
+- この `pub use` により `from_vectors`・アクセサ 6 本・`power_iterate` が到達可能になる。乱数初期化は持たない。PyTorch の予備反復は利用者が `power_iterate(weight, 15)` で再現する。
+
+### 12.3 `norm_except_dim` と定数
+
+- `norm_except_dim` は公開しない（`Var`／`Tape`／`Tensor` のメソッド・自由関数の再エクスポートのいずれも行わず、保留ガードの該当プローブを維持する）。理由は、公開を求める根拠が記録に無いことと、`Var::weight_norm`／`spectral_norm` の呼び出しに不要なことである。
+- 使い勝手上の制約として、利用者が `g` を自前で用意する場合の shape 規約を明記する。`weight_norm` は `g` を `norm_except_dim` の出力 shape と完全一致でのみ受理する。`dim = Some(d)` は `d` 軸以外が長さ 1 の keepdim 形、`dim = None` は rank 0。値は `d` 以外の全軸にわたる L2 ノルム。
+- `SPECTRAL_NORM_INIT_POWER_ITERATIONS` も公開しない（呼び出しに不要）。
+
+### 12.4 現行のまま確定する項目
+
+`g` の shape 完全一致・`dim: Option<usize>`（負の `dim` なし）・rank 1 の `spectral_norm` 非対応・非有限パラメータ（`alpha`／`beta`／`k`／`eps`）の拒否・乱数初期化なし。
+
+### 12.5 保留を続けるもの
+
+- 層化（`nn::LocalResponseNorm`・`compat::Sequential::add_*`・保存復元フック・resident 経路）。
+- 重み再パラメータ化の結線方式（`Linear`／`Conv` の重みの置換か層ラッパか）。
+
+### 12.6 #2851 への申し送り
+
+- 反転するのは `Var` の委譲メソッド名 3 件のプローブだけ。`Tape`／`Tensor<f32>` 上の同名メソッド・`norm_except_dim`・`compat::Sequential::add_*`・モジュール再エクスポートのプローブは未承認経路として維持する。
+- workspace インベントリは `var.rs` の委譲 1 件ずつと、承認済みの `SpectralNormState` 再エクスポートを許可位置に加える。非破壊性の確認（行 15 の †）は公開時に `api_surface.rs` で行う。
+- 実機 parity は既存の `docs/perf/logs/lrn-weight-reparam-2646/README.md` を使う。
