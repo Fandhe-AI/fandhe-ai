@@ -10,9 +10,11 @@
 //! 既存の Op ごとの VJP ディスパッチャ（`grad.rs` の `pub(crate) fn vjp`）とは
 //! 別物で、本モジュールは「出力と余接ベクトルの組」を受ける利用者向けの合成。
 //!
-//! **公開形は未承認（保留）**: facade（`fandhe_ai`）へは公開しない。保留は facade の
-//! `FunctionalTransformsHoldDoctestGuard` と `tests/api_surface.rs` の否定ガードで
-//! 機械固定している。`hvp`（#2875）は `backward_create_graph` で子テープへ 1 階勾配を
+//! **公開状況**: facade では `Tape::vjp`／`Tape::hvp`／`Tape::vmap` として公開済み（イシュー #2931・
+//! 設計記録 `docs/autodiff-functional-transforms-design.md` §23〜§24。本モジュールの自由関数への薄い委譲）。
+//! モジュール自体の再エクスポート・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッドは引き続き未承認で、
+//! facade の `FunctionalTransformsHoldDoctestGuard` と `tests/api_surface.rs` のガードが機械固定している。
+//! `hvp`（#2875）は `backward_create_graph` で子テープへ 1 階勾配を
 //! 写し、子テープ上で `g ⊙ v` を `child.backward` する合成（既存の手組み HVP と同じ形）。
 //! ループ版 `vmap`（#2876）は `unbind`→クロージャ適用→`contiguous`→`stack` の合成で、
 //! 検査ヘルパー（`jacobian_ops` の `checked_numel`・`check_on_tape`・`copy_grad_row`）を共用する。
