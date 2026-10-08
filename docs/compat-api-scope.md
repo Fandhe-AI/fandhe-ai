@@ -2645,6 +2645,6 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 - 拡張要否: 依存・`unsafe`・新規 `Op`／`BackendOps`／VJP はなし。内部可視性の `pub` 化と `expect(dead_code)` の撤去のみが公開時に必要（§27.2）。
 - 実装と公開形の差: 受け手の違い（内部は第 1 引数に `tape` を取る自由関数、公開は `&self.0` を渡す 1 行委譲）、内部が `pub(crate)` であること、`expect(dead_code)` が付いていること。
 - 論点（設計記録 §27.5）: J-a `jacfwd` を公開するか（推奨: 公開）／J-b `child` は明示引数（推奨: 明示）／J-c 名前（推奨: `jvp`／`jacfwd`）／J-d `tangent` は input 側 shape と完全一致（推奨: 実装のまま）／J-e 追跡なし `output` は全ゼロで `hvp` と非対称（推奨: 実装のまま。改めて確認を求める）／J-f 失敗時にも親テープへ 2 ノード残る（推奨: 実装のまま doc に明記）／J-g 内部は `pub fn`（推奨）か `#[doc(hidden)] pub` か。保留継続（推奨なし）: 論点 5、複数入力、`VarF64`・f16、微分可能な `jvp`。
-- 設計記録に形が書かれていない点: #2931 が §23.4 どおり `Tape` への probe trait impl ブロックごと外すと、`Tape::jvp`／`Tape::jacfwd` の doctest プローブも消える（ソース走査ガードと宣言インベントリは残る）。対処は (a) `jvp`／`jacfwd` の 2 メソッドだけ impl を残す／(b) ソース走査層のみで許容、のいずれかで、推奨は作らない（§27.4）。
+- 設計記録に形が書かれていない点だった #2931 との相互作用は解決済み: `Tape` 向けプローブは専用 trait `__FandheFunctionalTransformsHoldTapeProbe`（`jvp`／`jacfwd` の 2 メソッドのみ）へ分離して維持し、UFCS プローブも維持している（設計記録 §27.4）。
 
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。

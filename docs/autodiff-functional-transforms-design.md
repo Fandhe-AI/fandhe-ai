@@ -429,7 +429,7 @@ impl Tape {
 - 外すもの: `__probe_methods` 内の `fandhe_ai::Tape::jvp(tape)`／`::jacfwd(tape)` の 2 行と、`Tape` への probe trait impl 内の同 2 メソッド。
 - 残すもの: モジュール `functional_ops`、裸の自由関数 `jvp()`・`jacfwd()`、`Var<'t>`・`Tensor<f32>` 受け手のプローブ。
 - `api_surface.rs`: 固定文言の更新、例外を「`crates/facade/src/lib.rs` の `impl Tape` 内の `pub fn jvp`／`jacfwd`」に限定、宣言インベントリへ `facade/src/lib.rs::{jvp, jacfwd}` を追加（件数は #2931 の前後で変わるため数字で固定せず名前で書く）、正ガード（シグネチャと 1 行委譲をトークン列で固定）を新設する。
-- **#2931 との相互作用（申し送り）**: §23.4 は #2931 に「`Tape` への probe trait impl ブロックごと外す」と指定しているが、このブロックには #2940 で `jvp`／`jacfwd` のプローブも入った。#2931 が指定どおり外すと `Tape::jvp`／`Tape::jacfwd` の doctest プローブも消える。ソース走査ガードと宣言インベントリは引き続き検出するため保留自体は崩れないが、多層防御が 1 層減る。選択肢は (a) #2931 で `Tape` への impl を `jvp`／`jacfwd` の 2 メソッドだけ残す（inherent の `vjp`／`hvp`／`vmap` と名前衝突しない見込み。要コンパイル確認）、(b) ソース走査層のみで許容、の 2 つで、推奨は作らない。§23.4 本文は書き換えず、#2931 の担当へ申し送る。
+- **#2931 との相互作用（申し送り）**: §23.4 は #2931 に「`Tape` への probe trait impl ブロックごと外す」と指定したが、このブロックには #2940 で `jvp`／`jacfwd` のプローブも入っていた。**→ #2931 は選択肢 (a) の形で解決済み**: `Tape` 向けは専用 trait `__FandheFunctionalTransformsHoldTapeProbe`（`jvp`／`jacfwd` の 2 メソッドのみ）へ分離して維持し、UFCS プローブ（`fandhe_ai::Tape::jvp`／`jacfwd`）も維持している（`crates/facade/src/lib.rs` の `FunctionalTransformsHoldDoctestGuard` doc）。多層防御は減っていない。§23.4 本文は書き換えない。
 
 ### 27.5 承認依頼の論点（推奨と選択肢。承認は代行しない）
 
