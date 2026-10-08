@@ -8,8 +8,8 @@
 //! §5・§6・§8。#2898 で標準化（`standardize`）と分割（`split`）の内部実装を
 //! 追加した（論点 3 は未承認のため設計記録 §3 の推奨定義に従う）。#2899 で
 //! n-gram 生成（`ngram`）を、#2900 で語彙の直接指定と lookup（`vocab`）を
-//! 追加した。#2902 で transform（`Tensor<i32>` への変換・切り詰め・0 埋め）を
-//! 追加した。
+//! 追加した。#2901 で adapt 型の語彙構築（`adapt`）を、#2902 で transform
+//! （`Tensor<i32>` への変換・切り詰め・0 埋め）を追加した。
 //!
 //! 範囲外: サブワード分割・Unicode 正規化・ファイル形式の読み書き。ファイル・
 //! ネットワーク・スレッドは使わない（設計記録 §8 の機械検査契約。
@@ -27,6 +27,7 @@
     )
 )]
 
+pub(crate) mod adapt;
 pub(crate) mod error;
 pub(crate) mod limits;
 pub(crate) mod ngram;
