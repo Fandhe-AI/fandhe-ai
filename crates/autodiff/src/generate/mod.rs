@@ -75,6 +75,10 @@ use crate::nn::KvCache;
 
 mod kv_rewind;
 
+// 連続バッチングのスケジューラ（第 1 段階。イシュー #2888）。autodiff 内部の公開に
+// 留め facade へは再エクスポートしない（承認待ち。`docs/compat-api-scope.md` §5.1 S3）。
+pub mod scheduler;
+
 /// greedy 版 speculative decoding（#2886）。autodiff 内部の公開に留め、facade へは
 /// 再エクスポートしない（承認待ち。`docs/compat-api-scope.md` §5.1 S1）。
 pub mod speculative;
