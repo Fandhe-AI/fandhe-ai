@@ -545,7 +545,7 @@ P1」）を受けた是正である。
    受け入れ基準の改定
 2. 本リポジトリのユーザー承認を得たうえでの Issue 起票・本文書の更新
 
-### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本は承認・公開済み。保留は行 12〜15・行 19・20 のオプション型を取る 5 本と 5 型・行 30 の gradcheck〈シグネチャは #2846 で記録済み・公開は #2847〉）
+### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本は承認・公開済み。保留は行 12〜15・行 19・20 のオプション型を取る 5 本と 5 型・行 30 の gradcheck〈シグネチャは #2846 で記録済み・#2847 で公開済み〉）
 
 **本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
 （内部実装＋保留ガードまで先行・公開は承認後）で内部クレートに実装した機能の公開形について、各決定記録に
@@ -564,7 +564,7 @@ P1」）を受けた是正である。
   本節の #2677 の適用記録〈損失 3 本〉で公開した**）、行 30 の `Tape::gradcheck` と
   `GradcheckOptions`／`GradcheckReport`（決定記録に facade シグネチャが書かれていなかった。→ #2846 で決定記録 §11 に記録済み・公開は #2847）、行 12〜15 の全体（承認の対象外）。
   現在も保留なのは、行 19・20 のオプション型を引数に取る損失 5 本（`bce_with_logits_loss_with`・`gaussian_nll_loss`・`multi_margin_loss`・
-  `multilabel_soft_margin_loss`・`sigmoid_focal_loss`）とオプション型 5 つ（承認の対象外）、`gradcheck` 系（`Tape::gradcheck` のシグネチャは #2846 で記録済みだが公開は #2847 まで保留）、行 12〜15。
+  `multilabel_soft_margin_loss`・`sigmoid_focal_loss`）とオプション型 5 つ（承認の対象外）、`gradcheck` 系のうちモジュール名・裸の自由関数（`Tape::gradcheck` と型 2 つは #2847 で公開済み）、行 12〜15。
 - 公開時は保留ガードと `api_surface.rs` の否定ガードを承認形の正ガードへ反転する（#2679 で実施した型は §5 の適用記録）。
 - 行 12〜15 のように層化（`nn::MaxPool3d` 等と `Sequential::add_*`）が未実装の機能は、その旨を行に書いた。
 - 公開形の類型は 3 つ（`Var` の委譲メソッド／モジュール再エクスポート／`Sequential::add_*`）。どれにも当てはまらない推奨（facade `Tape` の委譲メソッド・facade 独自の薄いラッパー）は、決定記録の表現のまま書いた。
@@ -602,7 +602,7 @@ P1」）を受けた是正である。
 | 27 | Functional API（#2665・#2667） | モジュール再エクスポート（`compat/mod.rs` の `pub use`。仮称 `FunctionalBuilder`・`FunctionalModel`・`Node`・`save_functional_model`・`load_functional_model`）。学習用ハンドル `FunctionalVars` は公開せず内部のまま。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ（同 §9） | `FunctionalApiHoldDoctestGuard` | #2679 で公開済み（`compat`。ガードは `FunctionalVars`・モジュール公開・`Sequential::apply`／`call` のプローブへ縮小） | `facade-functional-api-decision.md` §10・§13（承認事項 11 項目。1 項目目が本書 §5 による対象範囲への組み入れ）・§18 |
 | 28 | Functional の結合層（#2666） | `FunctionalBuilder::{concatenate, add, multiply, average}` を #2679 で型と同時に公開（`merge_ops` の自由関数は再エクスポートしない） | 追加のみ（同 §9） | `MergeOpsHoldDoctestGuard` | #2679 で公開済み（`FunctionalBuilder` のメソッド。ガードは `merge_ops` の自由関数・`Var` 等への結合メソッドのプローブとして維持） | `facade-functional-api-decision.md` §13・§17 |
 | 29 | jacobian・hessian（#2670） | facade `Tape` の委譲メソッド `Tape::jacobian`／`Tape::hessian`（`Var` 委譲・モジュール再エクスポートではない） | 追加のみ | `JacobianHessianHoldDoctestGuard` | #2678 で公開済み | `autodiff-jacobian-hessian-gradcheck-decision.md` §3.7・§4（承認事項 (a)〜(k)）・§8 |
-| 30 | gradcheck・anomaly detection（#2671） | facade `Tape` の委譲メソッド `Tape::gradcheck`／`Tape::backward_detect_anomaly`＋`GradcheckOptions`／`GradcheckReport` のルート再エクスポート | 追加のみ | `GradcheckAnomalyHoldDoctestGuard` | `Tape::backward_detect_anomaly` は #2678 で公開済み。`Tape::gradcheck`・`GradcheckOptions`・`GradcheckReport` は保留（シグネチャは #2846 で決定記録 §11 に記録済み。公開は #2847 で、それまで保留ガードを維持） | 同 §3.7・§4・§9・§11 |
+| 30 | gradcheck・anomaly detection（#2671） | facade `Tape` の委譲メソッド `Tape::gradcheck`／`Tape::backward_detect_anomaly`＋`GradcheckOptions`／`GradcheckReport` のルート再エクスポート | 追加のみ | `GradcheckAnomalyHoldDoctestGuard` | `Tape::backward_detect_anomaly` は #2678 で公開済み。`Tape::gradcheck`・`GradcheckOptions`・`GradcheckReport` は #2847 で公開済み（シグネチャは #2846 で決定記録 §11 に記録。保留ガードは公開した名前の分だけ正ガードへ反転） | 同 §3.7・§4・§9・§11 |
 
 **承認時に決めてほしい事項（決定記録上、推奨が 1 案に定まっていない点）**
 
@@ -652,7 +652,7 @@ P1」）を受けた是正である。
 - **保留を維持した点（記録に形が書かれていない・前提が満たされない）**: ① 行 19・20 の 3 本（`hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss`）は `Reduction` を
   `fandhe_ai::nn::loss::Reduction` で名指しできる前提だが、#2602 が未マージで `nn::loss` がないため公開せず、`Reduction` の公開経路も本イシューでは作らない
   （損失系 2 つの保留ガードと否定ガードは無変更）。**→ #2602〈PR #2835〉のマージ後、下の #2677 の適用記録で公開した。**② `Tape::gradcheck` と `GradcheckOptions`／`GradcheckReport` は、`autodiff-jacobian-hessian-gradcheck-decision.md` §3.4・§3.7・§9.4 に
-  facade メソッドのレシーバとテープ生成の受け方が書かれていないため保留（#2677 へコメント済み）。**→ シグネチャは #2846 で同記録 §11 に記録済み。公開は #2847 で、公開までは保留を維持する。**③ 行 12〜15 は承認の対象外で一切触れていない。
+  facade メソッドのレシーバとテープ生成の受け方が書かれていないため保留（#2677 へコメント済み）。**→ シグネチャは #2846 で同記録 §11 に記録済み。#2847 で公開した（本節末尾の #2847 の適用記録）。**③ 行 12〜15 は承認の対象外で一切触れていない。
 
 保留ガードの反転・縮小は、`FftOpsHoldDoctestGuard` ほか 14 個の `*HoldDoctestGuard` から公開した受け手の `impl`・UFCS 行と型のローカル定義を外す部分反転（先例 #2516・#2519）で、
 `GradcheckAnomalyHoldDoctestGuard` は `Tape::backward_detect_anomaly` のプローブだけを外した。`crates/facade/tests/api_surface.rs` には承認形だけを許す正ガード
@@ -2437,4 +2437,6 @@ facade 公開面は追加していない（保留ガード `JacobianHessianHoldD
 
 **適用記録（イシュー #2671・親 #2668。内部クレート限定）**: `gradcheck`・`backward_detect_anomaly` を内部クレート限定（`fandhe_ai_autodiff::gradcheck`・`fandhe_ai_autodiff::anomaly`。既存の `jacobian`／`Tape::backward` の合成のみで、新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・カーネルなし。`Var`・`Tape` へ inherent メソッドは足していない）で CPU 実装した。
 facade 公開面は追加していない（保留ガード `GradcheckAnomalyHoldDoctestGuard` と `api_surface.rs` の否定ガードが固定）。公開形（`Tape::gradcheck`／`Tape::backward_detect_anomaly` の委譲メソッドと `GradcheckOptions`／`GradcheckReport` の再エクスポート）は未承認で、承認依頼は #2677（公開自体は承認後の #2678）。
-本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-jacobian-hessian-gradcheck-decision.md` 「実装記録（#2671）」。
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は `docs/autodiff-jacobian-hessian-gradcheck-decision.md` 「実装記録（#2671）」。**→ `Tape::gradcheck` と型 2 つは #2847 で公開した（本節末尾の #2847 の適用記録）。**
+
+**適用記録（イシュー #2847・親 #2499 Phase 4。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061）**: 決定記録 `autodiff-jacobian-hessian-gradcheck-decision.md` §11 の形で、facade `Tape::gradcheck(device, f, inputs, options)`（関連関数・`TapeRef` アダプタ）と `GradcheckOptions`／`GradcheckReport` のクレートルート再エクスポート（別名なし・1 文 1 行）を公開した（追加のみ・`fandhe-ai =0.10.0` の既存 API は不変）。内部 `gradcheck` の `make_tape` 境界は `Fn() -> Result<Tape, AutodiffError>` へ変更（出荷済み API 外）。保留ガード `GradcheckAnomalyHoldDoctestGuard` は公開した名前の分だけ反転し、正ガード `facade_tape_gradcheck_matches_approved_shape`・`facade_reexports_gradcheck_types_only_in_approved_shape` を新設した。維持した保留: モジュール名 `gradcheck`／`anomaly`・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッド。`TapeRef` の公開面は不変（`custom` を持たないため `gradcheck` のクロージャ内で `CustomFunction` は使えない。追加は承認範囲外）。本書 1 節の対象範囲表・`compat-feature-gap.md` の判定列は変更していない。CUDA／Metal 実機は未実測（`docs/perf/logs/tape-gradcheck-facade-2847/README.md`）。詳細は決定記録 §12。

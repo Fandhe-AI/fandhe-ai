@@ -35184,7 +35184,9 @@ fn workspace_declares_jacobian_hessian_fn_names_only_in_allowed_locations() {
 }
 
 // =====================================================================
-// GradcheckAnomalyHoldDoctestGuard（イシュー #2671・親 #2668）:
+// GradcheckAnomalyHoldDoctestGuard（イシュー #2671・親 #2668。#2847 で `Tape::gradcheck` と
+// `GradcheckOptions`／`GradcheckReport` のみ部分反転。正ガードは
+// `facade_tape_gradcheck_matches_approved_shape`・`facade_reexports_gradcheck_types_only_in_approved_shape`）:
 // `JacobianHessianHoldDoctestGuard`（#2670）系のテストを鏡写しにする。実装は内部クレート
 // （`fandhe_ai_autodiff::gradcheck`・`fandhe_ai_autodiff::anomaly`。新規 `Op`・`BackendOps` メソッド・
 // `AutodiffError` variant なし）に閉じ、facade 公開形（`Tape::gradcheck`／`Tape::backward_detect_anomaly`
@@ -35249,8 +35251,6 @@ mod __fandhe_gradcheck_anomaly_hold_probe {\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20pub fn gradcheck() {}\n\
 \x20\x20\x20\x20pub fn backward_detect_anomaly() {}\n\
-\x20\x20\x20\x20pub struct GradcheckOptions;\n\
-\x20\x20\x20\x20pub struct GradcheckReport;\n\
 }\n\
 use __fandhe_gradcheck_anomaly_hold_probe::*;\n\
 \n\
@@ -35298,16 +35298,13 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20backward_detect_anomaly();\n\
 }\n\
 \n\
-fn __probe_types(_: Option<GradcheckOptions>, _: Option<GradcheckReport>) {}\n\
-\n\
 fn __probe_methods(\n\
 \x20\x20\x20\x20v: &fandhe_ai::Var<'_>,\n\
-\x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
+\x20\x20\x20\x20_tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::gradcheck(v);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Var::backward_detect_anomaly(v);\n\
-\x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tape::gradcheck(tape);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::gradcheck(tf);\n\
 \x20\x20\x20\x20let _: __FandheGradcheckAnomalyHoldMarker = fandhe_ai::Tensor::<f32>::backward_detect_anomaly(tf);\n\
 }";
@@ -35343,6 +35340,15 @@ fn scan_gradcheck_anomaly_reexports_and_declarations(content: &str) -> Vec<Strin
                 end += 1;
             }
             let path_tokens = &tokens[i + 2..end.min(tokens.len())];
+            // #2847: 承認形（空白正規化した宣言全体が完全一致する 1 行）だけは違反にしない。
+            // 別名・1 型ずつ・複数ファイルへの重複は正ガード
+            // （`facade_reexports_gradcheck_types_only_in_approved_shape`）が拒否する。
+            if tokens[i..(end + 1).min(tokens.len())].join(" ")
+                == normalized_tokens(GRADCHECK_TYPES_APPROVED_REEXPORT)
+            {
+                i = (end + 1).min(tokens.len());
+                continue;
+            }
             for ident in GRADCHECK_ANOMALY_IDENTS {
                 if path_tokens.iter().any(|t| t == ident) {
                     offending.push(format!("pub use が `{ident}` を含む"));
@@ -35383,12 +35389,216 @@ fn scan_gradcheck_anomaly_reexports_and_declarations(content: &str) -> Vec<Strin
         if FACADE_TAPE_APPROVED_FNS.contains(&fn_name) {
             continue;
         }
-        let count = count_fn_declarations_by_name(&tokens, fn_name);
+        let mut count = count_fn_declarations_by_name(&tokens, fn_name);
+        // #2847: 承認形シグネチャの `pub fn gradcheck`（`Tape::gradcheck`）だけは違反にしない。
+        // 1 行委譲表（`FACADE_TAPE_APPROVED_FNS`）には載せられないため別扱い。
+        // 件数・本体は `facade_tape_gradcheck_matches_approved_shape` が固定する。
+        if fn_name == "gradcheck" {
+            let approved = gradcheck_fn_signatures(&tokens)
+                .iter()
+                .filter(|sig| **sig == normalized_tokens(GRADCHECK_FN_APPROVED_SIGNATURE))
+                .count();
+            count -= approved.min(count);
+        }
         if count > 0 {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
         }
     }
     offending
+}
+
+/// コメント・リテラルを除去してトークン化し空白連結した文字列（承認形との比較用）。
+fn normalized_tokens(src: &str) -> String {
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    tokenize_including_punctuation(&cleaned).join(" ")
+}
+
+/// #2847 の承認形 `Tape::gradcheck` のシグネチャ（`pub fn` から本体の `{` の直前まで。
+/// 決定記録 `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §11.1）。`&self`・`'static`・
+/// `Send`／`Sync` 境界は持たない。
+const GRADCHECK_FN_APPROVED_SIGNATURE: &str = "pub fn gradcheck<F>(
+    device: Device,
+    f: F,
+    inputs: &[Tensor<f32>],
+    options: &GradcheckOptions,
+) -> Result<GradcheckReport, AutodiffError>
+where
+    F: for<'a> Fn(TapeRef<'a>, &[Var<'a>]) -> Result<Var<'a>, AutodiffError>,";
+
+/// #2847 の承認形 `Tape::gradcheck` の本体（決定記録 §11.2。1 行委譲ではないアダプタ。
+/// 生成クロージャの `{ }` は rustfmt 整形後の形で、トークン列として固定する）。
+const GRADCHECK_FN_APPROVED_BODY: &str = "fandhe_ai_autodiff::gradcheck::gradcheck(
+    || {
+        tape_for(device)
+            .map(|t| t.0)
+            .map_err(AutodiffError::Backend)
+    },
+    |t, xs| f(TapeRef::from_autodiff(t), xs),
+    inputs,
+    options,
+)";
+
+/// #2847 の承認形の再エクスポート 1 行（決定記録 §11.3。別名なし・1 文 1 行・`src/lib.rs` のみ）。
+const GRADCHECK_TYPES_APPROVED_REEXPORT: &str =
+    "pub use fandhe_ai_autodiff::gradcheck::{GradcheckOptions, GradcheckReport};";
+
+/// トークン列中の全 `fn gradcheck` 宣言について、直前に `pub` があればそれを含め、本体 `{`（宣言
+/// なら `;`）の直前までを空白連結して返す（`pub` が無い宣言は `fn` から始まる文字列になり承認形と一致しない）。
+fn gradcheck_fn_signatures(tokens: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if token != "fn" || !fn_declaration_target_name_matches(tokens, i, "gradcheck") {
+            continue;
+        }
+        let start = if i > 0 && tokens[i - 1] == "pub" {
+            i - 1
+        } else {
+            i
+        };
+        let end = (i..tokens.len())
+            .find(|&j| tokens[j] == "{" || tokens[j] == ";")
+            .unwrap_or(tokens.len());
+        out.push(tokens[start..end].join(" "));
+    }
+    out
+}
+
+/// `src/lib.rs` の `Tape::gradcheck` が承認形（シグネチャ・本体）と一致することを検査する
+/// （#2847 の正ガード本体）。本体が 1 行委譲ではない（`tape_for` を呼ぶ生成クロージャと
+/// `TapeRef` へ包むアダプタを含む）ため [`facade_tape_phase4_methods_are_thin_delegations`]
+/// の表には載せない。検出範囲は `fn gradcheck` に限り、マクロ生成までは保証しない。
+fn check_facade_tape_gradcheck_shape(lib_src: &str) -> Result<(), String> {
+    let cleaned: String = strip_comments_and_literals(lib_src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let sigs = gradcheck_fn_signatures(&tokens);
+    if sigs.len() != 1 {
+        return Err(format!(
+            "`fn gradcheck` が {} 件（1 件であるべき）",
+            sigs.len()
+        ));
+    }
+    if sigs[0] != normalized_tokens(GRADCHECK_FN_APPROVED_SIGNATURE) {
+        return Err(format!("シグネチャが承認形と不一致: {}", sigs[0]));
+    }
+    match determinism_fn_body(&tokens, "gradcheck") {
+        Some(body) if body == normalized_tokens(GRADCHECK_FN_APPROVED_BODY) => Ok(()),
+        other => Err(format!("本体が承認形と不一致: {other:?}")),
+    }
+}
+
+/// facade の `Tape::gradcheck` が `src/lib.rs` にちょうど 1 件・承認形で存在し、facade src の
+/// 他ファイルには同名 `fn` が無いことを固定する正ガード（#2847）。
+#[test]
+fn facade_tape_gradcheck_matches_approved_shape() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    if let Err(e) = check_facade_tape_gradcheck_shape(&content) {
+        panic!("facade の `Tape::gradcheck` が承認形（#2847・決定記録 §11）と一致しない: {e}");
+    }
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        if path.ends_with("src/lib.rs") {
+            return;
+        }
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, "gradcheck"),
+            0,
+            "{} に `fn gradcheck` 宣言がある（承認形は src/lib.rs の Tape のみ）",
+            path.display()
+        );
+    });
+}
+
+/// [`check_facade_tape_gradcheck_shape`] の自己テスト（承認形は無違反・各違反類型を検出・
+/// 対象不在の空振りを拒否）。
+#[test]
+fn facade_tape_gradcheck_matches_approved_shape_detects_each_category() {
+    let ok = format!(
+        "impl Tape {{\n{GRADCHECK_FN_APPROVED_SIGNATURE}\n{{\n{GRADCHECK_FN_APPROVED_BODY}\n}}\n}}"
+    );
+    assert!(check_facade_tape_gradcheck_shape(&ok).is_ok());
+    // 空振り（対象不在）を拒否する。
+    assert!(check_facade_tape_gradcheck_shape("impl Tape {}").is_err());
+    // 本体のすり替え・シグネチャの変更（`&self` 追加・`'static` 境界・`pub` 欠落）・重複を拒否する。
+    let bad_body = ok.replace("options,\n)", "options,\n).map(|r| r)");
+    assert_ne!(bad_body, ok);
+    assert!(check_facade_tape_gradcheck_shape(&bad_body).is_err());
+    let with_self = ok.replace(
+        "gradcheck<F>(\n    device",
+        "gradcheck<F>(\n    &self,\n    device",
+    );
+    assert_ne!(with_self, ok);
+    assert!(check_facade_tape_gradcheck_shape(&with_self).is_err());
+    let with_static = ok.replace("F: for<'a>", "F: 'static + for<'a>");
+    assert_ne!(with_static, ok);
+    assert!(check_facade_tape_gradcheck_shape(&with_static).is_err());
+    let not_pub = ok.replace("pub fn gradcheck", "fn gradcheck");
+    assert_ne!(not_pub, ok);
+    assert!(check_facade_tape_gradcheck_shape(&not_pub).is_err());
+    let dup = format!("{ok}\n{ok}");
+    assert!(check_facade_tape_gradcheck_shape(&dup).is_err());
+}
+
+/// `GradcheckOptions`／`GradcheckReport` を識別子に含む `pub use`（`pub(...)` 付きを含む）宣言を
+/// 空白正規化して集める。
+fn scan_gradcheck_type_pub_use_lines(content: &str) -> Vec<String> {
+    scan_pub_use_decls_containing_idents(content, &["GradcheckOptions", "GradcheckReport"])
+}
+
+/// 型 2 つの再エクスポートが facade src 全体で `src/lib.rs` の承認形 1 行だけであることを固定する
+/// 正ガード（#2847）。別名・1 型ずつ・複数行・別ファイル・可視性修飾付きは fail。
+#[test]
+fn facade_reexports_gradcheck_types_only_in_approved_shape() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    let mut approved = 0usize;
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for line in scan_gradcheck_type_pub_use_lines(content) {
+            if path.ends_with("src/lib.rs") && line == GRADCHECK_TYPES_APPROVED_REEXPORT {
+                approved += 1;
+            } else {
+                offending.push(format!("{}: `{line}`", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が GradcheckOptions／GradcheckReport を承認形以外で再エクスポートしている（#2847）: {offending:?}"
+    );
+    assert_eq!(
+        approved, 1,
+        "src/lib.rs に承認形の再エクスポート行がちょうど 1 件ない（検査対象を見失った場合を含む）"
+    );
+}
+
+/// [`scan_gradcheck_type_pub_use_lines`] の自己テスト（合成入力）。
+#[test]
+fn facade_reexports_gradcheck_types_only_in_approved_shape_detects_each_category() {
+    let scan = scan_gradcheck_type_pub_use_lines;
+    assert_eq!(
+        scan(GRADCHECK_TYPES_APPROVED_REEXPORT),
+        vec![GRADCHECK_TYPES_APPROVED_REEXPORT.to_string()]
+    );
+    for src in [
+        "pub use fandhe_ai_autodiff::gradcheck::{GradcheckOptions as O, GradcheckReport};",
+        "pub use fandhe_ai_autodiff::gradcheck::GradcheckOptions;",
+        "pub use fandhe_ai_autodiff::gradcheck::{\n    GradcheckOptions,\n    GradcheckReport,\n    gradcheck,\n};",
+        "pub(crate) use fandhe_ai_autodiff::gradcheck::{GradcheckOptions, GradcheckReport};",
+        "mod m { pub use fandhe_ai_autodiff::gradcheck::GradcheckReport; }",
+    ] {
+        let hits = scan(src);
+        assert_eq!(hits.len(), 1, "src={src:?}");
+        assert_ne!(hits[0], GRADCHECK_TYPES_APPROVED_REEXPORT, "src={src:?}");
+    }
+    for src in [
+        "// pub use fandhe_ai_autodiff::gradcheck::GradcheckOptions;",
+        "let s = \"pub use x::GradcheckReport;\";",
+        "use fandhe_ai_autodiff::gradcheck::GradcheckOptions;",
+        "pub use fandhe_ai_autodiff::HookHandle;",
+    ] {
+        assert!(scan(src).is_empty(), "src={src:?}");
+    }
 }
 
 /// facade src 全体（`crates/facade/src/**`）に gradcheck／anomaly の保留対象の再エクスポート・同名
@@ -35423,6 +35633,14 @@ fn facade_does_not_reexport_or_declare_gradcheck_anomaly_detects_each_category()
     assert!(offense(
         "pub use fandhe_ai_autodiff::gradcheck::{GradcheckOptions as O, GradcheckReport};"
     ));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::gradcheck::GradcheckOptions;"
+    ));
+    // #2847: 承認形の再エクスポート 1 行・承認形シグネチャの `Tape::gradcheck` は違反にしない。
+    assert!(!offense(GRADCHECK_TYPES_APPROVED_REEXPORT));
+    assert!(!offense(&format!(
+        "impl Tape {{\n{GRADCHECK_FN_APPROVED_SIGNATURE}\n{{\n{GRADCHECK_FN_APPROVED_BODY}\n}}\n}}"
+    )));
     assert!(offense(
         "pub use fandhe_ai_autodiff::{\n    Tape,\n    anomaly::backward_detect_anomaly,\n};"
     ));
@@ -35512,6 +35730,9 @@ fn workspace_declares_gradcheck_anomaly_fn_names_only_in_allowed_locations() {
         "facade/src/lib.rs::backward_detect_anomaly".to_string(),
         1usize,
     );
+    // #2847: 承認形の facade `Tape::gradcheck`（`facade/src/lib.rs` に 1 件。形は
+    // `facade_tape_gradcheck_matches_approved_shape` が固定する）。
+    expected.insert("facade/src/lib.rs::gradcheck".to_string(), 1usize);
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の gradcheck／backward_detect_anomaly の `fn` 宣言が承認前の\
@@ -35949,6 +36170,12 @@ const PHASE4_TYPE_APPROVED_LINES: [&str; 8] = [
 /// `pub use`（可視性修飾付きを含む）宣言を、セミコロンまでの宣言全体（複数行・行途中の
 /// 開始を含む）を 1 件として空白正規化して集める検出本体。コメント・文字列リテラルは無視する。
 fn scan_phase4_type_pub_use_lines(content: &str) -> Vec<String> {
+    scan_pub_use_decls_containing_idents(content, &PHASE4_TYPE_NAMES)
+}
+
+/// [`scan_phase4_type_pub_use_lines`]・[`scan_gradcheck_type_pub_use_lines`] 共通の検出本体。
+/// `names` のいずれかを識別子として含む `pub use` 宣言を空白正規化して集める。
+fn scan_pub_use_decls_containing_idents(content: &str, names: &[&str]) -> Vec<String> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let bytes = cleaned.as_bytes();
     let mut out = Vec::new();
@@ -35976,10 +36203,7 @@ fn scan_phase4_type_pub_use_lines(content: &str) -> Vec<String> {
             .find(';')
             .map_or(cleaned.len(), |e| idx + e + 1);
         let decl = &cleaned[decl_start..decl_end];
-        if PHASE4_TYPE_NAMES
-            .iter()
-            .any(|n| line_contains_identifier(decl, n))
-        {
+        if names.iter().any(|n| line_contains_identifier(decl, n)) {
             out.push(decl.split_whitespace().collect::<Vec<_>>().join(" "));
         }
     }
@@ -36059,7 +36283,7 @@ fn facade_reexports_phase4_ops_types_only_in_approved_shape_detects_each_categor
 }
 
 /// 保留を維持した経路（#2678）が、ソース走査の否定ガードから外れていないことの固定。
-/// `gradcheck`・`GradcheckOptions`・`GradcheckReport`・`rrelu_with_noise` と、オプション型を引数に取る損失 5 本
+/// `Var` 上の `gradcheck`（`Tape::gradcheck` と型 2 つは #2847 で公開済み）・モジュール再エクスポート・`rrelu_with_noise` と、オプション型を引数に取る損失 5 本
 /// （`bce_with_logits_loss_with`・`gaussian_nll_loss`・`multi_margin_loss`・`multilabel_soft_margin_loss`・
 /// `sigmoid_focal_loss`）・オプション型 5 つは facade／`Var` から到達できない（記録に形が書かれていない・承認範囲外のため）。
 /// 損失 3 本（`hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss`）は #2677 で公開済みで、
@@ -36070,7 +36294,7 @@ fn phase4_held_items_remain_unexposed() {
         "pub use fandhe_ai_autodiff::gradcheck;",
         "pub use fandhe_ai_autodiff::gradcheck::GradcheckOptions;",
         "pub struct GradcheckReport;",
-        "impl Tape { pub fn gradcheck(&self) {} }",
+        "impl Var { pub fn gradcheck(&self) {} }",
     ] {
         assert!(
             !scan_gradcheck_anomaly_reexports_and_declarations(src).is_empty(),

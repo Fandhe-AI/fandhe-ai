@@ -202,7 +202,7 @@
 //!
 //! **#2678 の更新**: 下の各モジュール記述にある「facade への公開は保留」のうち、承認形の `Var` 委譲メソッド・facade `Tape` のメソッド・
 //! 型のルート再エクスポート（`StftOptions`・`IstftOptions`・`MeshgridIndexing` は本クレートのルートから中継）は #2678 で公開済み。保留を維持したのは
-//! 損失 3 本・`gradcheck` 系・3D プーリング等（`docs/compat-api-scope.md` §5.1・§5 の適用記録〈#2678〉）。
+//! 損失 3 本・`anomaly` 系・3D プーリング等（`gradcheck` 系は #2847 で `Tape::gradcheck` と型 2 つのみ公開）（`docs/compat-api-scope.md` §5.1・§5 の適用記録〈#2678〉）。
 //! このうち損失 3 本（`hinge_embedding_loss`・`soft_margin_loss`・`multilabel_margin_loss`）は #2602 のマージ後に #2677 で `Var` の 1 行委譲メソッドとして公開した
 //! （オプション型を取る損失 5 本とオプション型 5 つは保留のまま）。
 
@@ -280,8 +280,9 @@ pub mod indexing_ops;
 pub mod jacobian_ops;
 // 有限差分との勾配突合（`gradcheck`）と非有限値を生んだ Op の検出（`anomaly`。イシュー
 // #2671）。既存 `jacobian_ops::jacobian`／`Tape::backward` の合成のみで、新規 Op・VJP・
-// `AutodiffError` variant はない。facade への公開は保留（承認依頼 #2677・公開 #2678。
-// `docs/autodiff-jacobian-hessian-gradcheck-decision.md`）。
+// `AutodiffError` variant はない。facade へは `Tape::gradcheck`・`GradcheckOptions`・
+// `GradcheckReport` のみ #2847 で公開（モジュール名・`anomaly` 系は保留。
+// `docs/autodiff-jacobian-hessian-gradcheck-decision.md` §11・§12）。
 pub mod gradcheck;
 mod layout;
 pub mod linalg_ops;
