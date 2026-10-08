@@ -20,8 +20,8 @@
 //! - エラーと `Debug` は index・長さ・件数だけを持ち、語彙の文字列を漏らさない
 //!   （OWASP A09）。
 //!
-//! 型名・メソッド名は内部実装上の選択で、公開形は設計記録 §11 の 9 の承認時に
-//! 決める。facade へは公開しない（`pub(crate)`）。
+//! 本型は内部型で `fandhe_ai::text` へは公開しない（`pub(crate)`。設計記録 §16.2）。
+//! 公開の `TextVectorization` が保持して `lookup`／`tokens` を呼ぶ。
 
 use std::collections::HashMap;
 use std::fmt;

@@ -10,7 +10,7 @@
 //! `OnnxError`・`ModelError` と同型の自己完結型（内部クレートのエラー enum は
 //! 抱えない。例外は形状不整合を表す `ShapeError` のみ）。
 //!
-//! 公開形は未承認のため `pub(crate)`。facade への公開は設計記録 §11 の 9。
+//! `fandhe_ai::text::TextError` として公開される（設計記録 §16.2・§16.3）。
 
 use std::fmt;
 
@@ -18,9 +18,12 @@ use crate::ShapeError;
 
 /// テキスト変換の失敗を表す型付きエラー。`#[non_exhaustive]`: 後続段の variant
 /// 追加を非破壊にするため。
+///
+/// どの variant も入力文字列・語彙の中身を持たない（位置・長さ・件数・上限値だけ）。
+/// `Display`／`Debug` からも文字列は漏れない。
 #[non_exhaustive]
 #[derive(Debug)]
-pub(crate) enum TextError {
+pub enum TextError {
     /// バッチ要素数（`transform`）またはコーパス件数（`adapt`）が上限超過。
     BatchTooLarge { len: usize, max: usize },
     /// `index` 番目の入力文字列のバイト数が上限超過。

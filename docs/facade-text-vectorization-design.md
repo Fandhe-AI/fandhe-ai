@@ -296,3 +296,35 @@ main が「実装上の選択・公開承認の際に確認」と注記してい
 - 変えない: 依存・新規 `unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・閾値・`docs/spec/`・`fandhe-ai =0.10.0` の既存シグネチャ（追加のみ）・`FitConfig`
 - CUDA／Metal 実機 parity は対象なし（ホスト側処理のみ。§7）。`#[ignore]` テストも `docs/perf/logs/` への申し送りも作らない
 - #2937 への安全性の要求（§13 の再掲）: 入力検査は標準化・分割・確保より先（A03）、上限・`checked_*`・`isize::MAX` バイト検査（A04）、`from_vocabulary` の `max_tokens` 検査も確保前に fail-closed、`TextError`・`Debug` に入力文字列・語彙全文を入れない（A09）、依存追加なし（A06）
+
+## 17. 実装記録（#2937・親 #2935。§16 の適用）
+
+本節は §16 の確定形を `fandhe_ai::text` として公開した記録である。§16 本文は書き換えず併記する。承認の範囲は §16.1（`issuecomment-6067263650` 項 1）に限り、これを超える公開はしていない。
+
+### 17.1 公開した名前と形
+
+- `crates/facade/src/lib.rs`: `mod text;` を `pub mod text;` にした。クレート doc の公開面に 7 項（text 公開面）を追記し、43 個の `*HoldDoctestGuard` doctest の glob 一覧へ `use fandhe_ai::text::*;` を足した（`grep -c 'use fandhe_ai::text::\*'` が 43）。
+- `crates/facade/src/text/mod.rs`: 公開は次の `pub use` 5 文（6 名）だけ。サブモジュールは `pub(crate) mod` のまま。`//!` を利用者向けの公開 rustdoc に書き直し、ASCII 限定・§16.5 の契約・利用例 doctest 2 本を載せた。
+  - `pub use error::TextError;`／`pub use limits::TextLimits;`／`pub use split::Split;`／`pub use standardize::Standardize;`／`pub use vectorization::{TextVectorization, TextVectorizationConfig};`
+- 可視性の反転: `Standardize`・`Split`・`TextLimits`（と `with_*` 9 本）・`TextError` を各サブモジュール内で `pub` にした（`pub mod` から `pub(crate)` 項目は再エクスポートできないため）。derive・variant・フィールドは変えていない。
+- 新設 `text/vectorization.rs`（非公開サブモジュール）: `TextVectorizationConfig`（§16.3 の derive・既定値・ビルダ 6 本）と `TextVectorization`（メソッド 6 本・手書き `Debug`）。本体は §16.4 の内部関数の合成のみで、新しいアルゴリズムは持たない。
+
+### 17.2 構築時検査の順序
+
+`from_vocabulary`: `max_tokens`（`Some(m)` で `m <= 2` は `InvalidMaxTokens`）→ 語彙数（予約 2 件込みの `saturating_add` が `m` 超なら確保前に `VocabularyTooLarge { len, max: m }`）→ `check_ngrams` → `check_output_sequence_length` → `Vocabulary::from_tokens`。`adapt`: `max_tokens` → `check_ngrams` → `check_output_sequence_length` → 内部 `adapt`（内部側の再検査は多重防御として残す）。新しい `TextError` variant は足していない。
+
+### 17.3 dead_code の解消
+
+`text/mod.rs` の `#![cfg_attr(not(test), allow(dead_code, ...))]` を撤去した。公開型の結線で本番経路から使われるようになり、未使用になったのは `TextLimits` のアクセサ 8 本（`max_batch`・`max_input_bytes`・`max_corpus_bytes`・`max_vocabulary_size`・`max_vocabulary_token_bytes`・`max_ngrams`・`max_output_sequence_length`・`max_output_elements`。`max_distinct_tokens` は本番で使用）だけで、`#[cfg(test)]` でテストビルドに限った（アクセサは §16.2 のとおり公開しない）。`#[allow]` は使っていない。
+
+### 17.4 ガード
+
+- 反転: `text_module_hygiene.rs::text_module_is_not_exposed_from_facade` → `text_module_is_exposed_only_in_approved_shape`（`pub mod text;` がちょうど 1 件、`text/mod.rs` の `pub use` が 6 名だけ、別名・glob・`pub mod`・`pub use crate::text` なし）。`text_module_has_no_forbidden_constructs` は変えていない。
+- 追随: `api_surface.rs` の `GRAD_SCALER_PROBE_MODULES`（14 → 15 件、`text` を追加）と `grad_scaler_from_state_glob_probe`、および 43 個の `*HoldDoctestGuard` の glob 一覧。
+- 新設（`api_surface.rs`）: `text_is_public_and_submodules_stay_private`・`facade_exposes_text_items_only_in_approved_shape`（検出器の自己テスト付き）・`text_public_shape_is_pinned`（`Standardize` 4・`Split` 3・`TextError` 17 variant のインベントリ）・`text_items_are_reachable_via_facade_text_path`（署名の型レベル固定）・`text_usage_doctest_is_present_and_compiled`。
+- 残した否定プローブ: `text_unapproved_paths_are_absent`（`text/` の外に `TextVectorization` 系のトークンがない＝クレートルート再エクスポート・`Sequential` への層化なし〈論点 7〉／出力モード・`StringLookup` 相当の識別子なし〈論点 6〉／標準化・分割・本体に callable の入口なし〈論点 8〉）、variant インベントリ（Unicode 系 variant なし〈論点 3 の Unicode 部分〉）、完全公開項目のインベントリ（内部項目が公開されていない）。否定ガードは stable rustdoc の `compile_fail` コード照合に頼らず、正のプローブとインベントリで組んだ。
+- 新設の結合テスト `crates/facade/tests/text_vectorization_facade.rs`（公開パスのみ・CPU のみ）で §16.5 の契約を整数の完全一致で固定した。
+
+### 17.5 変えなかったもの
+
+依存（`Cargo.toml`／`Cargo.lock`）・新規 `unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・ガードレール閾値・`docs/spec/`・`fandhe-ai =0.10.0` の既存シグネチャ（追加のみ）・`FitConfig`。CUDA／Metal の実機 parity はホスト側処理のみのため対象なし（§16.8）で、`#[ignore]` テストも `docs/perf/logs/` への申し送りも作っていない。論点 3 の Unicode 部分と論点 6 は保留のまま。

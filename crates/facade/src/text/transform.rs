@@ -21,7 +21,7 @@
 //!   `L` は出力要素数の検査で抑える
 //!
 //! 数値一致は整数の完全一致で判定する（浮動小数点向けの統一複合判定は適用しない）。
-//! エラーは入力文字列を保持しない（OWASP A09）。公開形は未承認のため `pub(crate)`。
+//! エラーは入力文字列を保持しない（OWASP A09）。内部型で `fandhe_ai::text` へは公開しない。
 
 use super::error::TextError;
 use super::limits::TextLimits;
@@ -30,7 +30,7 @@ use super::split::{Split, split};
 use super::standardize::{Standardize, standardize};
 use super::vocab::{PADDING_ID, Vocabulary};
 
-/// transform の設定。公開形は未承認で、フィールド構成は内部実装上の選択。
+/// transform の設定（内部型）。公開の `TextVectorizationConfig` から組み立てられる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TransformOptions {
     /// 標準化の方式。

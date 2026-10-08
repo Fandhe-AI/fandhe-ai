@@ -17,7 +17,8 @@
 //! - 「1 入力から作る n-gram 数」の `checked_mul` 検査は n-gram 生成段
 //!   （設計記録 §11 の 4）が担う。
 //!
-//! 公開形は未承認のため `pub(crate)`（公開は設計記録 §11 の 9）。
+//! 公開するのは `TextLimits` 本体と `with_*` 9 本だけ（設計記録 §16.2）。アクセサ・
+//! `check_*`・`DEFAULT_*`／`ABSOLUTE_*` 定数は非公開のまま。
 
 use super::error::TextError;
 
@@ -50,10 +51,29 @@ pub(crate) const ABSOLUTE_MAX_NGRAMS: usize = 8;
 pub(crate) const ABSOLUTE_MAX_OUTPUT_ELEMENTS: usize =
     isize::MAX as usize / std::mem::size_of::<i32>();
 
-/// 非信頼入力の上限集合。`Default` が設計記録 §8 の既定値。
+/// 非信頼入力（文字列バッチ・コーパス・語彙・設定値）の上限集合。
+///
+/// `TextVectorizationConfig::limits` に載せる。検査は標準化・分割・メモリ確保より
+/// 先に長さだけで行い、超過は [`TextError`] で返す。`Default` の既定値と
+/// 各 `with_*` の絶対上限は次のとおり（`with_*` は絶対上限を超えると
+/// [`TextError::LimitAboveAbsoluteMaximum`] を返す）。
+///
+/// | `with_*` | 既定値 | 絶対上限 |
+/// |---|---|---|
+/// | `with_max_batch`（バッチ要素数・コーパス件数） | 65,536 | なし |
+/// | `with_max_input_bytes`（1 文字列のバイト数） | 1 MiB | `isize::MAX` |
+/// | `with_max_corpus_bytes`（`adapt` のコーパス総バイト数） | 256 MiB | `isize::MAX` |
+/// | `with_max_vocabulary_size`（予約 2 件を含む語彙数） | 2^24 | `i32::MAX` |
+/// | `with_max_vocabulary_token_bytes`（語彙 1 件のバイト数） | 4 KiB | `isize::MAX` |
+/// | `with_max_distinct_tokens`（`adapt` 中の異なり語数） | 2^24 | なし |
+/// | `with_max_ngrams`（n-gram の n） | 8 | 8（下げる方向のみ） |
+/// | `with_max_output_sequence_length` | 2^20 | なし |
+/// | `with_max_output_elements`（出力 `B × L`） | 2^28 | `isize::MAX / 4` |
+///
+/// 値を読み戻すアクセサは公開しない。
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TextLimits {
+pub struct TextLimits {
     max_batch: usize,
     max_input_bytes: usize,
     max_corpus_bytes: usize,
@@ -92,85 +112,88 @@ fn within_absolute(limit: &'static str, value: usize, max: usize) -> Result<usiz
 
 impl TextLimits {
     /// バッチ要素数・コーパス件数の上限（絶対上限なし）。
-    pub(crate) fn with_max_batch(mut self, value: usize) -> Result<Self, TextError> {
+    pub fn with_max_batch(mut self, value: usize) -> Result<Self, TextError> {
         self.max_batch = within_absolute("max_batch", value, usize::MAX)?;
         Ok(self)
     }
     /// 1 文字列のバイト数の上限（絶対上限 `isize::MAX`）。
-    pub(crate) fn with_max_input_bytes(mut self, value: usize) -> Result<Self, TextError> {
+    pub fn with_max_input_bytes(mut self, value: usize) -> Result<Self, TextError> {
         self.max_input_bytes = within_absolute("max_input_bytes", value, ABSOLUTE_MAX_BYTES)?;
         Ok(self)
     }
     /// コーパス総バイト数の上限（絶対上限 `isize::MAX`）。
-    pub(crate) fn with_max_corpus_bytes(mut self, value: usize) -> Result<Self, TextError> {
+    pub fn with_max_corpus_bytes(mut self, value: usize) -> Result<Self, TextError> {
         self.max_corpus_bytes = within_absolute("max_corpus_bytes", value, ABSOLUTE_MAX_BYTES)?;
         Ok(self)
     }
     /// 語彙数（予約 2 件を含む）の上限（絶対上限 `i32::MAX`）。
-    pub(crate) fn with_max_vocabulary_size(mut self, value: usize) -> Result<Self, TextError> {
+    pub fn with_max_vocabulary_size(mut self, value: usize) -> Result<Self, TextError> {
         self.max_vocabulary_size =
             within_absolute("max_vocabulary_size", value, ABSOLUTE_MAX_VOCABULARY_SIZE)?;
         Ok(self)
     }
     /// 語彙 1 件のバイト数の上限（絶対上限 `isize::MAX`）。
-    pub(crate) fn with_max_vocabulary_token_bytes(
-        mut self,
-        value: usize,
-    ) -> Result<Self, TextError> {
+    pub fn with_max_vocabulary_token_bytes(mut self, value: usize) -> Result<Self, TextError> {
         self.max_vocabulary_token_bytes =
             within_absolute("max_vocabulary_token_bytes", value, ABSOLUTE_MAX_BYTES)?;
         Ok(self)
     }
     /// `adapt` 中の異なり語数の上限（絶対上限なし）。
-    pub(crate) fn with_max_distinct_tokens(mut self, value: usize) -> Result<Self, TextError> {
+    pub fn with_max_distinct_tokens(mut self, value: usize) -> Result<Self, TextError> {
         self.max_distinct_tokens = within_absolute("max_distinct_tokens", value, usize::MAX)?;
         Ok(self)
     }
     /// n-gram の n の上限（絶対上限 8。下げる方向のみ）。
-    pub(crate) fn with_max_ngrams(mut self, value: usize) -> Result<Self, TextError> {
+    pub fn with_max_ngrams(mut self, value: usize) -> Result<Self, TextError> {
         self.max_ngrams = within_absolute("max_ngrams", value, ABSOLUTE_MAX_NGRAMS)?;
         Ok(self)
     }
     /// `output_sequence_length` の上限（絶対上限なし）。
-    pub(crate) fn with_max_output_sequence_length(
-        mut self,
-        value: usize,
-    ) -> Result<Self, TextError> {
+    pub fn with_max_output_sequence_length(mut self, value: usize) -> Result<Self, TextError> {
         self.max_output_sequence_length =
             within_absolute("max_output_sequence_length", value, usize::MAX)?;
         Ok(self)
     }
     /// 出力要素数 `B × L` の上限（絶対上限 `isize::MAX / size_of::<i32>()`）。
-    pub(crate) fn with_max_output_elements(mut self, value: usize) -> Result<Self, TextError> {
+    pub fn with_max_output_elements(mut self, value: usize) -> Result<Self, TextError> {
         self.max_output_elements =
             within_absolute("max_output_elements", value, ABSOLUTE_MAX_OUTPUT_ELEMENTS)?;
         Ok(self)
     }
 
+    // アクセサはテスト専用（公開しない。設計記録 §16.2・§17）。本番経路は `check_*` を使う。
+    #[cfg(test)]
     pub(crate) fn max_batch(&self) -> usize {
         self.max_batch
     }
+    #[cfg(test)]
     pub(crate) fn max_input_bytes(&self) -> usize {
         self.max_input_bytes
     }
+    #[cfg(test)]
     pub(crate) fn max_corpus_bytes(&self) -> usize {
         self.max_corpus_bytes
     }
+    #[cfg(test)]
     pub(crate) fn max_vocabulary_size(&self) -> usize {
         self.max_vocabulary_size
     }
+    #[cfg(test)]
     pub(crate) fn max_vocabulary_token_bytes(&self) -> usize {
         self.max_vocabulary_token_bytes
     }
     pub(crate) fn max_distinct_tokens(&self) -> usize {
         self.max_distinct_tokens
     }
+    #[cfg(test)]
     pub(crate) fn max_ngrams(&self) -> usize {
         self.max_ngrams
     }
+    #[cfg(test)]
     pub(crate) fn max_output_sequence_length(&self) -> usize {
         self.max_output_sequence_length
     }
+    #[cfg(test)]
     pub(crate) fn max_output_elements(&self) -> usize {
         self.max_output_elements
     }
