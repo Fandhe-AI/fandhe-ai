@@ -3,6 +3,8 @@
 //! （`optim::ExponentialMovingAverage`・`compat::{Callback::Ema, EmaCallback}`）のみを
 //! import し、内部クレートは直接 import しない。
 //!
+//! `Monitor::Loss` 併用の受理（決定記録 §15・イシュー #2844）もここで固定する。
+//!
 //! 判定はすべて bit 完全一致で行い、許容誤差定数は追加・変更しない。実機（CUDA／Metal）
 //! 非依存のホスト計算のみのため `#[ignore]` 分離は行わない。
 
@@ -358,26 +360,133 @@ fn rejected_combinations_leave_model_untouched() {
     )));
     assert_eq!(model_bits(&m), before);
     m.evaluate(&x, &y, N).expect("compile 状態が保持されている");
+    // (e) の Monitor::Loss 併用は #2844 で拒否を撤去済み（決定記録 §15）。受理側は下記
+    // テスト 7b／7c が正のテストとして担保する。
+}
 
-    // (e) Monitor::Loss の ModelCheckpoint／EarlyStopping（生の重みの損失でベスト判定
-    // してしまうため拒否。§10.2 (e)）。
-    for cb in [
-        Callback::ModelCheckpoint(ModelCheckpoint::new().monitor(Monitor::Loss)),
-        Callback::EarlyStopping(EarlyStopping::new(2).monitor(Monitor::Loss)),
-    ] {
-        let mut m = build_model();
-        let before = model_bits(&m);
-        let mut cbs = [ema_cb(0.9), cb];
-        assert!(is_invalid_arg(m.fit_with_callbacks(
-            &x,
-            &y,
-            FitConfig::new(1, N),
-            None,
-            &mut cbs
-        )));
-        assert_eq!(model_bits(&m), before);
-        m.evaluate(&x, &y, N).expect("compile 状態が保持されている");
+/// EMA なしの参照モデルを 1 epoch（全件 1 バッチ = 1 step）ずつ `fit` し、各 epoch 末の
+/// (shadow, 生の重み) を記録する（テスト 1 と同じ手法。SGD は状態を持たないため 1 epoch ずつの
+/// `fit` と k epoch の `fit` は bit 一致する）。戻り値の最後の要素は参照モデル自身。
+type DictBits = BTreeMap<String, Vec<u32>>;
+fn reference_trace(epochs: usize) -> (Vec<DictBits>, Vec<DictBits>, Sequential) {
+    let (x, y) = gen_data();
+    let mut reference = build_model();
+    let mut ema = ExponentialMovingAverage::from_named(DECAY, reference.named_parameters())
+        .expect("from_named");
+    let (mut shadows, mut raws) = (Vec::new(), Vec::new());
+    for _ in 0..epochs {
+        reference.fit(&x, &y, FitConfig::new(1, N)).expect("fit");
+        ema.update_named(reference.named_parameters())
+            .expect("update");
+        shadows.push(dict_bits(&ema.shadow_state_dict()));
+        raws.push(model_bits(&reference));
     }
+    (shadows, raws, reference)
+}
+
+// 7b. 決定記録 §15.2: Ema + ModelCheckpoint(Monitor::Loss)（validation なし）。
+// 判定値 = 生の重みの訓練損失（History::loss）、保存重み = その epoch 末の EMA shadow。
+// 併用の拒否撤去は #2844。ValLoss 併用の不変はテスト 6、Err 経路の復帰はテスト 5 が担保。
+#[test]
+fn monitor_loss_checkpoint_judges_raw_train_loss_and_saves_ema_weights() {
+    let (x, y) = gen_data();
+    let epochs = 4;
+    let (shadows, raws, reference) = reference_trace(epochs);
+
+    for save_best_only in [true, false] {
+        let mut model = build_model();
+        let mut cbs = [
+            ema_cb(DECAY),
+            Callback::ModelCheckpoint(
+                ModelCheckpoint::new()
+                    .monitor(Monitor::Loss)
+                    .save_best_only(save_best_only),
+            ),
+        ];
+        let h = model
+            .fit_with_callbacks(&x, &y, FitConfig::new(epochs, N), None, &mut cbs)
+            .expect("併用は受理される（#2844）");
+        // 前提: EMA 併用でも学習は乱れない（追加の順伝播なし・History::loss 不変）。
+        assert_eq!(model_bits(&model), model_bits(&reference));
+        let mut plain = build_model();
+        let h_plain = plain
+            .fit_with_callbacks(&x, &y, FitConfig::new(epochs, N), None, &mut [])
+            .expect("fit");
+        let lb = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        assert_eq!(lb(&h.loss), lb(&h_plain.loss));
+
+        let Callback::ModelCheckpoint(mc) = &cbs[1] else {
+            panic!("test fixture");
+        };
+        let be = mc.best_epoch().expect("best あり");
+        assert_eq!(
+            mc.best_value().expect("best あり").to_bits(),
+            h.loss[be].to_bits()
+        );
+        let saved = dict_bits(mc.best_state_dict().expect("snapshot"));
+        // 保存重みは EMA 重み（save_best_only(false) では最終 epoch 末の shadow）。
+        let saved_epoch = if save_best_only { be } else { epochs - 1 };
+        assert_eq!(saved, shadows[saved_epoch]);
+        assert_ne!(saved, raws[saved_epoch]);
+    }
+}
+
+// 7c. 決定記録 §15.2: Ema + EarlyStopping(Monitor::Loss).restore_best_weights（validation なし）。
+#[test]
+fn monitor_loss_early_stopping_without_validation_restores_ema_snapshot() {
+    let (x, y) = gen_data();
+    let epochs = 4;
+    let (shadows, raws, _) = reference_trace(epochs);
+
+    // 完走: 訓練損失は改善し続け、fit 後の重みはベスト epoch 末の shadow に戻る。
+    let mut model = build_model();
+    let mut cbs = [
+        ema_cb(DECAY),
+        Callback::EarlyStopping(
+            EarlyStopping::new(epochs)
+                .monitor(Monitor::Loss)
+                .restore_best_weights(true),
+        ),
+    ];
+    let h = model
+        .fit_with_callbacks(&x, &y, FitConfig::new(epochs, N), None, &mut cbs)
+        .expect("validation なしでも受理される（#2844）");
+    let Callback::EarlyStopping(es) = &cbs[1] else {
+        panic!("test fixture");
+    };
+    let be = es.best_epoch().expect("best あり");
+    assert_eq!(
+        es.best_value().expect("best あり").to_bits(),
+        h.loss[be].to_bits()
+    );
+    assert_eq!(model_bits(&model), shadows[be]);
+    assert_ne!(model_bits(&model), raws[be]);
+
+    // 打ち切り: 巨大な min_delta で 2 epoch 目以降を「改善なし」にし patience=1 で停止させる。
+    // 打ち切り後も差し替えは残らず、restore_best_weights の書き戻しだけが効く。
+    let mut model = build_model();
+    let mut cbs = [
+        ema_cb(DECAY),
+        Callback::EarlyStopping(
+            EarlyStopping::new(1)
+                .monitor(Monitor::Loss)
+                .min_delta(1.0e9)
+                .expect("有効な min_delta")
+                .restore_best_weights(true),
+        ),
+    ];
+    let h = model
+        .fit_with_callbacks(&x, &y, FitConfig::new(epochs, N), None, &mut cbs)
+        .expect("fit");
+    let Callback::EarlyStopping(es) = &cbs[1] else {
+        panic!("test fixture");
+    };
+    let stopped = es.stopped_epoch().expect("打ち切られる");
+    assert!(h.loss.len() < epochs);
+    assert_eq!(h.loss.len(), stopped + 1);
+    let be = es.best_epoch().expect("best あり");
+    assert_eq!(model_bits(&model), shadows[be]);
+    assert_ne!(model_bits(&model), raws[be]);
 }
 
 // 8. decay 検証と fit 前の状態。
