@@ -362,3 +362,14 @@ impl Tape {
 - **新規物**: 新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe`・tolerance・baseline はない。`supports_create_graph` の対象 Op も広げていない（§11 の論点 5 は保留のまま）。
 - **承認状況**: ルート #2499 の所有者コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650 ）項 2 が示す、Tier 2 への移行（spec リポ Fandhe-AI/fandhe-ai-spec#81・実装リポ取り込み #2938。本記録の作成時点で #2938 は未マージ）と、その後の内部実装・公開形の記録までを根拠とする。facade 公開は承認範囲外で、公開形の記録と承認依頼は #2941。
 - **スコープ外**: facade 公開（#2941）、CUDA／Metal 実機 parity と `docs/perf/logs`（#2942）、`supports_create_graph` の拡張（論点 5）、`VarF64`・f16・複数入力・微分可能な `jvp`。
+
+## 25. 実装記録（#2942・親 #2939。jvp／jacfwd の CUDA／Metal 実機 parity 申し送り）
+
+- **追加したテスト**: `crates/facade/tests/functional_ops_jvp_backend_parity.rs`（新設）。属性なし 3 本（`cpu_double_vjp_matches_naive_reference`・`cpu_double_vjp_matches_jacobian`・`cpu_double_vjp_matches_hand_computed_values`）と、`cuda_double_vjp_jvp_jacfwd_match_cpu_reference`（`#[ignore]`）・`metal_double_vjp_jvp_jacfwd_match_cpu_reference`（`#[ignore]`・`cfg(target_os = "macos")` 限定）。
+- **`pub(crate)` のためミラー**: `jvp`／`jacfwd` は facade 非公開（可視性は #2940 の決定どおり変えない）で統合テストから呼べない。#2880 の `double_vjp_probe` と同様に、公開 API（`Tape::var`／`backward_create_graph`／`CreateGraph::grad`／`child_var`・子テープの `backward`・`Var::reshape`／`narrow`）だけで #2940 の手順を逐語ミラーした（`u` は全要素 1、`sum` ノードは足さない）。`jacfwd` ミラーは `g.reshape(&[n])` ＋ `narrow(0, k, 1)` で同一子テープ上の列ループを再現した（one-hot フォールバックは不要だった）。ヘルパー名は保留ガードに合わせ `fn jvp`／`fn jacfwd` を避けた（`double_vjp_jv`／`double_vjp_jac`）。#2941 等で公開が承認されたら本物の関数呼び出しへ置き換える。
+- **比較範囲と判定**: `supports_create_graph()` が真の Op のみ（matmul・broadcast add・tanh・sigmoid・exp・mul・transpose・narrow）の 2 フィクスチャで、ミラー jvp／jacfwd と同一バックエンドの `jacobian_ops::jacobian`（および f64 蓄積の `J·v`）を CPU tape と実機で比較する。判定は REQ-2 統一複合判定（`assert_parity`）。区分線形 Op は使っていない（0 近傍の符号割れによる偽の失敗を避ける）。形状は小さく Metal split-K は発動しない。
+- **申し送り**: 実機に届かないため未実測。測定コマンドと空の記入欄は `docs/perf/logs/functional-transforms-jvp-2942/README.md`。
+- **CI で走らない理由**: CUDA 側は `#[ignore]`、Metal 側はさらに `cfg(target_os = "macos")` のため Linux ではコンパイルもされない。
+- **新規物**: `crates/*/src`・依存・tolerance・baseline・`unsafe` は追加していない。
+- **承認状況**: facade 公開は承認範囲外で未承認（#2941）。
+- **スコープ外**: facade 公開・本物の関数への置換（#2941）、`supports_create_graph` の拡張（論点 5）、`VarF64`・f16、実機での実測そのもの。
