@@ -165,7 +165,7 @@
 
 - **実装した形**: `fandhe_ai_autodiff::functional_ops::vjp(tape, output, input, cotangent) -> Result<Tensor<f32>, AutodiffError>`。余接を勾配追跡なしの定数葉 `u` にし、`output.mul(&u)` へ既存の `Tape::backward` を 1 回呼ぶ（非スカラー loss は全要素 1 のシードで暗黙に総和されるため `sum` ノードは足さない）。新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe` はない。
 - **入口検査（テープへノードを足す前。順序固定）**: (1) 別テープ・世代違いは `TapeMismatch`、(2) `input` が勾配追跡なしは `GradientTrackingDisabled`、(3) `cotangent` の shape が `output` と完全一致しなければ `Shape(ShapeMismatch)`（ブロードキャスト不可）、(4) 要素数を `checked_numel` で検査、(5) 要素数 0 または `output` が追跡なしならテープに触れず全ゼロ。
-- **補助ノード**: 成功時にちょうど 2 ノード（余接の葉と `mul`）。`backward` 等が途中で `Err` を返しても残る。値は変えない。追跡ありだが `input` に届かない出力は backward 経由で全ゼロ（この場合も 2 ノード増える）。
+- **補助ノード**: 入口検査とゼロ返却分岐（(5)）を通過した本体経路に限り、ちょうど 2 ノード（余接の葉と `mul`）。入口検査の失敗時とゼロ返却時はノードを足さない。`backward` 等が途中で `Err` を返しても残る。値は変えない。追跡ありだが `input` に届かない出力は backward 経由で全ゼロ（この場合も 2 ノード増える）。
 - **ヘルパー共有方法（`hvp`・`vmap` と共用）**: `jacobian_ops.rs` の `checked_numel`・`check_on_tape`・`copy_grad_row` を `pub(crate)` にして `functional_ops.rs` から使う。共通モジュールへの移動はしない（差分最小で、後続の `hvp` も同じ 3 つを使える）。`FlatElements` は `vjp`／`hvp` に不要で、`vmap` は `unbind`／`stack` を使うため private のまま残す。`gradcheck.rs` の `checked_numel` の重複は統合しない。
 - **保留ガード**: facade の `FunctionalTransformsHoldDoctestGuard`（正のプローブ 1 ブロック）と `crates/facade/tests/api_surface.rs` の否定ガード 5 本（glob 集合・固定本文・再エクスポート／宣言走査とその自己テスト・workspace 宣言インベントリ）。対象はモジュール `functional_ops` と名前 `vjp`・`hvp`・`vmap`（後続 issue の固定文言書き換えを避けるため先取りして締める）。承認済みの除外はない。
 - **既存 `grad::vjp` との関係**: `crates/autodiff/src/grad.rs` の `pub(crate) fn vjp` は Op ごとの VJP ディスパッチャで別物。宣言インベントリの期待集合は `grad.rs::vjp` 1 件と `functional_ops.rs::vjp` 1 件の計 2 件。
@@ -297,12 +297,12 @@ impl Tape {
 
 ### 23.3 facade doc に書く契約（#2931 が rustdoc へ書き写す。いずれも現在の実装のまま）
 
-- 入口検査の順序: `TapeMismatch` → `GradientTrackingDisabled` → shape の完全一致（ブロードキャストなし）→ 要素数の検査。`hvp` は加えて `loss` の要素数 1（`[]`・`[1]`・`[1, 1]` は可）。`vmap` は Phase A と Phase B に分かれ、空バッチは `InvalidArgument`。
+- 入口検査の順序（`vjp` と `hvp` で異なる）: `vjp` は `TapeMismatch` → `GradientTrackingDisabled` → `cotangent` の shape 完全一致（ブロードキャストなし）→ 要素数の検査。`hvp` は `TapeMismatch`（`loss`・`input` の順）→ `GradientTrackingDisabled` → `loss` の要素数 1（`[]`・`[1]`・`[1, 1]` は可。不正なら `InvalidArgument`）→ `vector` の shape 完全一致（`ShapeMismatch`）→ `input` の要素数検査で、`loss` の要素数と `vector` の shape が両方不正なら `ShapeMismatch` ではなく `InvalidArgument` が返る。`vmap` は Phase A と Phase B に分かれ、空バッチは `InvalidArgument`。
 - 追跡なしに対する挙動（現状のまま・契約は変えない）:
   - 追跡なしの `output` に対して `vjp` は全ゼロを返す。
   - 追跡なしの `loss` に対して `hvp` は `backward_create_graph` の `Err` を伝播する。
   - 追跡なしの `input` に対しては、どちらも `Err(GradientTrackingDisabled)`。
-- 副作用: `vjp` は親テープへちょうど 2 ノードを足す。`hvp` は親テープへノードを足さず、子テープにはノードが残るので呼び出し後の子テープは作り直す。`vmap` は Phase B で失敗すると、それまでのノードが残る。
+- 副作用: `vjp` が親テープへ足す補助ノードはちょうど 2 ノード（余接の葉と `mul`）だが、これは入口検査とゼロ返却分岐を通過した本体経路に限る。入口検査の失敗時、および要素数 0 または `output` が追跡なしでゼロを返す場合は、ノードを足さない。`hvp` は親テープへノードを足さず、子テープにはノードが残るので呼び出し後の子テープは作り直す。`vmap` は Phase B で失敗すると、それまでのノードが残る。
 - `child` は `tape()`／`tape_for()` で作った空の別 `Tape`（`hessian` と同じ契約）。
 - 数値: REQ-2 の統一複合判定。`vmap` とバッチなし実行の bit 一致、`hvp` と 1 階 VJP の bit 同一は契約にしない。
 - 適用範囲: `hvp` の経路上の Op は `supports_create_graph()` が真のものに限る（論点 5 は保留なので拡張しない）。低精度 forward は対象外で、f32 の `Tape` のみ（`VarF64` は対象外）。`vmap(grad)` は契約外（論点 6 は保留）で、値だけが要る場合は呼び出し側が明示ループで `backward` を回す。
