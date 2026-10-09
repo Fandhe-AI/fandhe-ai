@@ -41,7 +41,7 @@ cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored 
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA（speculative） | 未実測 | |
-| 未実測 | DGX Spark GB10 | 上記 CUDA（scheduler） | 未実測 | |
+| 2026-10-09 | DGX Spark GB10 | `cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored --nocapture cuda`（speculative） | pass 1 / fail 0（`cuda_speculative_greedy_matches_cpu` ok） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・`rustc 1.97.0 (2d8144b78 2026-07-07)`。同一コマンドで speculative・scheduler の 2 テストを実行（running 2 tests） |
+| 2026-10-09 | DGX Spark GB10 | `cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored --nocapture cuda`（scheduler） | pass 1 / fail 0（`cuda_scheduler_greedy_matches_cpu` ok） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・`rustc 1.97.0 (2d8144b78 2026-07-07)`。同一コマンドで speculative・scheduler の 2 テストを実行（running 2 tests） |
 | 未実測 | Apple Silicon（M4 Max） | 上記 Metal（speculative） | 未実測 | |
 | 未実測 | Apple Silicon（M4 Max） | 上記 Metal（scheduler） | 未実測 | |

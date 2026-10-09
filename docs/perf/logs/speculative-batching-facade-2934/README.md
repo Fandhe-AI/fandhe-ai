@@ -25,5 +25,5 @@ facade パス経由の結合テスト `crates/facade/tests/speculative_batching_
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
+| 2026-10-09 | DGX Spark GB10 | `cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored --nocapture cuda` | pass 2 / fail 0（`cuda_scheduler_greedy_matches_cpu` ok・`cuda_speculative_greedy_matches_cpu` ok。running 2 tests） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・`rustc 1.97.0 (2d8144b78 2026-07-07)`。`speculative-batching-2890` と同一の実行結果 |
 | 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
