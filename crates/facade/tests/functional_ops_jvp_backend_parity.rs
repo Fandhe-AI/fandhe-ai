@@ -1,13 +1,14 @@
 //! `fandhe_ai_autodiff::functional_ops::{jvp, jacfwd}`（イシュー #2940・親 #2939）の double-VJP 手順の
 //! バックエンド間 parity テスト（イシュー #2942。`functional_ops_backend_parity.rs`〈#2881〉と同型）。
 //!
-//! **`jvp`／`jacfwd` は `pub(crate)` のため統合テストから直接呼べない**（facade 公開は #2941 の担当で
-//! 未承認。可視性もここでは変えない）。そこで #2880 の `double_vjp_probe`
+//! **ミラー方針**: `jvp`／`jacfwd` は #2956 で facade `Tape::jvp`／`Tape::jacfwd` として公開済みだが、
+//! 本ファイルは #2942 の実測対象（`docs/perf/logs/` の GB10 実測記録が指す）としてミラーを意図的に維持し、
+//! ロジックは変えない。#2880 の `double_vjp_probe`
 //! （`crates/autodiff/tests/double_vjp_feasibility.rs`）と同様に、公開 API だけで #2940 の手順
 //! （追跡ありの葉 `u` = 全要素 1、`s = output ⊙ u`〈`sum` は足さない〉、`backward_create_graph`、
 //! `jvp` は子テープ上で `g ⊙ v` を backward、`jacfwd` は `g` の要素ごとに子テープを backward）を
-//! 逐語ミラーする。#2941 等で公開が承認されたら本物の関数呼び出しへ置き換える。ヘルパー名に
-//! `jvp`／`jacfwd` の `fn` 名を使わないのは facade の保留ガード（`api_surface.rs`）に合わせるため。
+//! 逐語ミラーする。本物の API 呼び出しとの突き合わせは `functional_transforms_jvp_facade.rs`（CPU）が担う。
+//! ヘルパー名に `jvp`／`jacfwd` の `fn` 名を使わないのは facade の保留ガード（`api_surface.rs`）に合わせるため。
 //!
 //! 属性なし: 実 `CpuBackendOps` tape と `Tape::new()`（`NaiveOps`）の突合、`jacobian_ops::jacobian`
 //! との突合、手計算の閉形式。判定は REQ-2 統一複合判定（`fandhe_ai_backend_cpu::parity::assert_parity`）。

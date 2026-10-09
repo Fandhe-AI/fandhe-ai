@@ -5,8 +5,8 @@
 //! facade へは依存できない）。判定は REQ-2 統一複合判定を `tests/common/mod.rs` の共有定数・
 //! `req2_close` 経由でのみ行い、閾値は直書きしない。
 //!
-//! `pub(crate)` の内部実装なので統合テスト（`tests/`）からは呼べず、`#[cfg(test)]` の単体テストで
-//! 検証する（#2880 の `double_vjp_feasibility_tests` と同じ形）。テスト関数・ヘルパーの名前は
+//! `jvp`／`jacfwd` は #2956 で facade `Tape::jvp`／`Tape::jacfwd` として公開済みだが、本ファイルは
+//! 内部実装の `#[cfg(test)]` 単体テストとして維持する（#2880 の `double_vjp_feasibility_tests` と同じ形）。テスト関数・ヘルパーの名前は
 //! `jvp`／`jacfwd` と完全一致させない（facade `api_surface` の宣言インベントリが
 //! `crates/*/src` 全体を走査するため）。入力はキンク（0・clamp 境界・タイ）から離す。
 

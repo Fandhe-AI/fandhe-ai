@@ -22,9 +22,10 @@
 //! **double-VJP 法の `jvp`／`jacfwd`（イシュー #2940・親 #2939。設計 §8・§19）**:
 //! forward-mode の新規実装は持たず、`u` を追跡ありの葉とした `s = output ⊙ u` の 1 階勾配
 //! `g = ∂s/∂input = Jᵀu`（`u` について線形）を `backward_create_graph` で子テープへ写し、
-//! 第 2 段の VJP `∂(g ⊙ v)/∂u = J·v` を取る。`pub(crate)` で facade へは出さず（公開形は承認前）、
-//! 呼び出し元は現状 `#[cfg(test)]` の検証のみ。facade 非公開は上記の保留ガードに `jvp`／`jacfwd`
-//! を加えて機械固定している。
+//! 第 2 段の VJP `∂(g ⊙ v)/∂u = J·v` を取る。facade の `Tape::jvp`／`Tape::jacfwd` として
+//! 公開済み（イシュー #2956・設計記録 §28）。facade からは薄い 1 行委譲で呼ばれる。
+//! `Tape` 以外の経路（モジュール再エクスポート・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッド）は
+//! 引き続き未承認で、facade の保留ガードが機械固定している。
 //!
 //! **共通の契約**: 単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。`vjp`／`hvp` の結果は
 //! 非微分のホスト値（`vmap` のみ同じテープ上の微分可能な `Var`）。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
@@ -247,13 +248,6 @@ where
 /// （全要素 1 で固定）。`J ≡ 0`（`input` へ勾配が届かない・`g` が定数）は `Ok(None)`。
 /// `child_var(u)` が `None` になるのは構造上の不変条件違反で、ゼロへ丸めず `Err(Backward)` にする。
 /// 親テープへは `backward_create_graph` の検査より前にちょうど 2 ノードが積まれる（失敗時も残る）。
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
-    )
-)]
 fn double_vjp_stage<'c>(
     tape: &Tape,
     output: &Var<'_>,
@@ -275,13 +269,6 @@ fn double_vjp_stage<'c>(
 }
 
 /// 列 `col`（長さ `m`）を行優先の結果 `data`（`m × n`）の第 `k` 列へ書く。長さ不一致は型付きエラー。
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
-    )
-)]
 fn write_column(
     data: &mut [f32],
     n: usize,
@@ -324,14 +311,7 @@ fn write_column(
 /// （既存ノードの値は不変）。成功時の子テープには写し・1 階勾配・第 2 段の補助ノードが残る。
 /// 子テープ上の数値は 1 階 VJP や `jacobian` と bit 同一を主張しない。非有限値は検査せず伝播する。
 /// 計算量は親 backward 1 回＋子 backward 1 回。f32 の [`Tape`] のみ（`VarF64`・f16 は対象外）。
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
-    )
-)]
-pub(crate) fn jvp(
+pub fn jvp(
     tape: &Tape,
     output: &Var<'_>,
     input: &Var<'_>,
@@ -379,14 +359,7 @@ pub(crate) fn jvp(
 ///
 /// **入口検査**は [`jvp`] と同じ（接ベクトルの shape 検査を除く）に加え、`m × n` を検査付き乗算で求める。
 /// 追跡なし `output`・要素数 0 はテープに触れず全ゼロ。副作用・拒否時の契約も [`jvp`] と同じ。
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "#2940: facade 公開承認前の内部実装。現時点の呼び出し元は #[cfg(test)] の検証のみ"
-    )
-)]
-pub(crate) fn jacfwd(
+pub fn jacfwd(
     tape: &Tape,
     output: &Var<'_>,
     input: &Var<'_>,
