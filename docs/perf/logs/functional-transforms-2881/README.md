@@ -36,5 +36,5 @@ cargo test -p fandhe-ai --test functional_ops_backend_parity -- --ignored --noca
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
+| 2026-10-09 | DGX Spark GB10 | `cargo test -p fandhe-ai --test functional_ops_backend_parity -- --ignored --nocapture cuda` | pass 1 / fail 0（`cuda_functional_ops_match_cpu_reference` ok。running 1 test） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・`rustc 1.97.0 (2d8144b78 2026-07-07)` |
 | 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
