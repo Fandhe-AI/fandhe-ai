@@ -388,7 +388,7 @@ impl Tape {
 
 ### 27.0 状態・基準・承認の根拠
 
-- 状態: **記録のみ・未承認・未公開**（コード変更なし）。`FunctionalTransformsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の否定ガードは維持する。`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変で、`fandhe-ai =0.10.0` の公開 API も変わらない。
+- 状態: **記録のみ・未承認・未公開**（コード変更なし）。→ **2026-10-09 に承認され、#2956 で公開済み（§28）。** 以下は承認依頼時点の記録として残す。`FunctionalTransformsHoldDoctestGuard`（`crates/facade/src/lib.rs`）と `crates/facade/tests/api_surface.rs` の否定ガードは維持する。`crates/**`・`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec/` は不変で、`fandhe-ai =0.10.0` の公開 API も変わらない。
 - 基準: `origin/main` `a18afc40`（2026-10-08）。行番号と内部シグネチャはこの sha のもの。
 - 承認の根拠: ルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）の**項 2 の最終段落のみ**。内容は、spec 側の Tier 2 移行後に実装 issue を起票し、内部実装と公開形の記録まで進めてよい、facade への公開は記録を書いたあとで改めて承認依頼に戻す、というものである（要約。コメントにない承認は書かない）。項 1 の承認（F1〜F3 と論点 1・2・4）は `vjp`／`hvp`／`vmap` に限られ、`jvp`／`jacfwd` には**及ばない**。承認は実装 Agent が代行しない。
 
@@ -450,3 +450,15 @@ impl Tape {
 - 27.1〜27.4 の実装、27.2 の内部側変更、`docs/compat-api-scope.md` §5 の適用記録と `F4`・`F5` の公開先列の更新。
 - facade 経由の `#[ignore]` テストを足す場合は `docs/perf/logs/<slug>-<issue>/README.md` へ申し送る（#2942 と重複しないか確認。実測値は推測で書かない）。
 - 本節はコード・依存・tolerance・baseline・ガードレール閾値・`docs/spec` を変更しない。
+
+## 28. 実装記録（イシュー #2956・親 #2928。`jvp`／`jacfwd` の facade 公開）
+
+- 状態: **公開済み**。承認の根拠はルート #2499 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6079384681`）の項 1 である。コメントに書かれた範囲（`Tape::jvp`／`Tape::jacfwd` の 2 メソッド公開、論点 J-a〜J-g を推奨どおり、保留ガードの部分反転、追加のみ・依存／tolerance／baseline／閾値／`unsafe` なし）だけを実装した。保留継続は論点 5（`supports_create_graph` の対象拡張）・複数入力・`VarF64`／f16・微分可能な `jvp`。v0.11.0 のリリースは別の手順で、本変更では版数を上げていない。
+- 公開した形: §27.1 と完全一致する。`Tape::jvp(&self, output, input, tangent: &Tensor<f32>, child: &Tape) -> Result<Tensor<f32>, AutodiffError>` と `Tape::jacfwd(&self, output, input, child: &Tape) -> Result<Tensor<f32>, AutodiffError>`。本体は `fandhe_ai_autodiff::functional_ops::{jvp, jacfwd}` への 1 行委譲（§27.2）で、記録と内部実装（#2940）に差はなかったため停止条件には当たらなかった。
+- 内部側の変更: `functional_ops.rs` の `jvp`／`jacfwd` を `pub(crate)` から `pub fn` にし（J-g）、`double_vjp_stage`・`write_column`・`jvp`・`jacfwd` の 4 か所の `expect(dead_code)` を撤去した。モジュール doc の公開状況を更新した。モジュール自体の再エクスポートは行わない。
+- rustdoc: §27.3 の契約（入口検査の順序・追跡なし `output` は全ゼロで `hvp` は `Err` の非対称・失敗時も親テープに 2 ノード残る・`child` は空の子テープ・`tangent` は `input` と shape 完全一致・`supports_create_graph()` が真の Op に限る・REQ-2 統一複合判定・計算量）を書いた。doctest は 2 本あり、`jvp` は `x⊙x` から `2x⊙v` を `Tape::jacobian` とのホスト積と照合し、`jacfwd` は `diag(2x)` を `Tape::jacobian` と照合する（facade だけで書けた）。
+- 保留ガード: `FunctionalTransformsHoldDoctestGuard` から `Tape` 受け手のプローブ用トレイトと impl・UFCS 2 行を外し、引数を `_tape` にした（`GradcheckAnomalyHoldDoctestGuard` と同じ先例）。`functional_ops` モジュール・裸の自由関数 5 名・`Var`／`Tensor<f32>` 上の 5 メソッドのプローブは残した。`api_surface.rs` は固定文言、承認シグネチャと本体を 3 件から 5 件へ、宣言インベントリを 11 件へ更新し、到達性テストと自己テスト（別シグネチャ・`impl Var` 内・裸の関数・本体のすり替えの検出）を足した。
+- 結合テスト: `crates/facade/tests/functional_transforms_jvp_facade.rs`（CPU のみ・`#[ignore]` なし）。`Tape::jvp` を `Tape::jacobian` と接ベクトルの積に、`Tape::jacfwd` を `Tape::jacobian` に突き合わせた（mul・非正方形 matmul→tanh・sum・ブロードキャスト add・rank 0。REQ-2 統一複合判定）。エラー伝播、非対象 Op（`max`）と空でない子テープの拒否、追跡なし `output` の全ゼロ（`hvp` は `Err`）を固定した。失敗時に親テープへ 2 ノード残る点は、facade からノード数を観測できる公開 API がないため #2940 の内部テストに任せた。
+- ミラーテストを維持した理由: §25 には「公開されたら本物の関数呼び出しへ置き換える」とあるが、`functional_ops_jvp_backend_parity.rs` のミラーは #2942／#2954 の GB10 実測記録の対象であり、置き換えると記録の意味が変わる。このためロジックは変えずモジュール doc だけを更新した（意図的に見送り）。置き換えるかどうかはユーザーの確認を経て別 Issue で扱う。
+- 実機: 新しいカーネルやデバイス挙動の変更はなく、デバイス上の確認は #2942 の既存 `#[ignore]` テストが担当する。実測記録（`docs/perf/logs/functional-transforms-jvp-2942/README.md`）では CUDA（GB10）は pass、Metal（M4 Max）は未実測である。facade 経由の `#[ignore]` テストは足していない。
+- 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
