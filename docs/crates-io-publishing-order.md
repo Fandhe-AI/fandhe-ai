@@ -547,6 +547,18 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > `fandhe-ai-onnx-interop`・`prost`・`prost-derive` のみ）。`git diff
 > v0.10.0..HEAD -- crates/` は空（ピン更新時点）。
 
+> **追補（2026-10-09）**: `.github/workflows/release-all.yml`
+> （`mode: publish` run 37933003465。main `6b14fdb4`。事前の `verify`〈dry-run〉は
+> run 37925912879 で success）により公開 7 クレートの **v0.11.0 の公開を完了した**
+> （`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
+> `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`・`fandhe-ai-onnx-interop`・
+> `fandhe-ai` の 7 クレートすべてについて sparse index で `0.11.0` の反映を
+> 確認済み）。版数バンプは #2958（§11 手順 1）。リリースタグ `v0.11.0` は注釈付き
+> タグ（メッセージ `release: v0.11.0`）としてコミット `6b14fdb4` に付与し push 済み。
+> **framework-compare の承認ピン（`fandhe-ai =0.10.0`）は本追補時点では未更新**であり、
+> 更新はユーザー承認待ち（承認後に `fandhe-ai =0.10.0` → `=0.11.0` へ更新し、本節へ
+> 追補する）。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -878,6 +890,12 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-09（v0.11.0 公開完了）: `.github/workflows/release-all.yml`（`mode: publish`
+  run 37933003465。事前 dry-run〈verify〉run 37925912879）で公開 7 クレートの v0.11.0
+  公開を完了した（7 クレート sparse index 反映確認済み）。タグ `v0.11.0` は
+  コミット `6b14fdb4` へ注釈付きで付与し push 済み。公開日はこの時点で記録した。
+  framework-compare の承認ピン（`fandhe-ai =0.10.0`）は未更新で、ユーザー承認待ち
+  （§10 追補 2026-10-09 を参照）。
 - 2026-10-09（v0.11.0 リリースサイクル）: 公開 7 クレートの `workspace.version` を
   0.10.0 → 0.11.0 へ lockstep バンプした（0.10.0 公開〈2026-10-03〉以降の 213
   コミット。#2499 ツリー〈対応表「部分的」の引き上げ〉: Phase 1〜4 の facade 公開と
