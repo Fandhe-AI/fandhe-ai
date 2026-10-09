@@ -60,7 +60,7 @@ prost.workspace = true
 # （crates.io 公開クレート間 path 依存の公開要件。イシュー #881 で確定した方針を
 # 7 クレート目〈#1963〉へ適用。`docs/crates-io-publishing-order.md`。workspace
 # 公開バージョンと完全一致させる）。
-fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.10.0" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.11.0" }
 # 数値型区分の許容依存（deps-policy.md）。workspace には既に固定済みで
 # `tensor-core`/`backend-cpu` 等が使用中のため新規追加ではない。`onnx-interop` では
 # `Cast(to=FLOAT16)`（イシュー #274）が `half::f16` を直接生成するために必要。
@@ -74,7 +74,7 @@ half.workspace = true
 # 本変更は workspace 内 path 依存の追加であり外部依存の新規追加ではない）。
 # `version` 併記は `fandhe-ai-tensor-core` と同じ理由（crates.io 公開クレート
 # 間 path 依存の公開要件。`docs/crates-io-publishing-order.md`）。
-fandhe-ai-autodiff = { path = "../autodiff", version = "=0.10.0" }
+fandhe-ai-autodiff = { path = "../autodiff", version = "=0.11.0" }
 
 # external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）に
 # 使う。`cfg(unix)` 限定（`crates/backend-metal/Cargo.toml` の

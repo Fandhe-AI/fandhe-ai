@@ -102,7 +102,17 @@ members = [
 # 基盤——を含めて crates.io へ公開し（`fandhe-ai-onnx-interop` の初回公開を含む
 # 7 クレート）、framework-compare の対戦成績を `fandhe-ai =0.10.0` で再判定する
 # ため 0.9.0 → 0.10.0 とする。
-version = "0.10.0"
+#
+# v0.11.0（2026-10）: 0.10.0 公開（2026-10-03）以降の 213 コミット——#2499 ツリー
+# （対応表「部分的」の引き上げ）——を含めて crates.io へ公開するため 0.10.0 → 0.11.0
+# とする。Phase 1〜4 の facade 公開と新規実装（LR スケジューラ・Lbfgs・Adadelta 系
+# optimizer・各種層／Var 委譲メソッド・損失・PrefetchDataLoader・決定論モード・
+# CustomFunction・高階微分・jacobian／hessian／gradcheck・FFT／STFT・3D プーリング・
+# Fold／Unfold・hooks・KV キャッシュ・generate()・EMA・param groups・npy／npz・
+# f64 自動微分・Functional API 等）と、Phase 7〜9（関数型 AD〈vjp・hvp・vmap・jvp・
+# jacfwd〉・speculative decoding〈greedy〉・連続バッチング第 1 段階・テキスト変換
+# `fandhe_ai::text`）。
+version = "0.11.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

@@ -878,6 +878,17 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-09（v0.11.0 リリースサイクル）: 公開 7 クレートの `workspace.version` を
+  0.10.0 → 0.11.0 へ lockstep バンプした（0.10.0 公開〈2026-10-03〉以降の 213
+  コミット。#2499 ツリー〈対応表「部分的」の引き上げ〉: Phase 1〜4 の facade 公開と
+  新規実装・Phase 7〜9〈関数型 AD〈vjp・hvp・vmap・jvp・jacfwd〉・
+  speculative decoding〈greedy〉・連続バッチング第 1 段階・テキスト変換
+  `fandhe_ai::text`〉。§11 手順 1）。内部依存 `version = "=0.11.0"`（6 クレート・
+  12 箇所）・ルート `Cargo.lock`（`cargo update -w --offline`）・
+  `scripts/bench/oss-gemm-compare/Cargo.lock`（`fandhe-ai-*` 4 クレート・
+  `bench-harness` のみ狙い撃ち）を更新した。公開日は公開完了後に記録する。
+  framework-compare の承認ピン（`fandhe-ai =0.10.0`）は本バンプでは更新せず、
+  公開完了後にユーザー承認を得て別途更新する。
 - 2026-10-03（v0.10.0 ピン更新）: `.github/workflows/release-all.yml`（run
   37112020053）で v0.10.0 の crates.io 公開が完了した（7 クレート反映確認済み。
   `fandhe-ai-onnx-interop` は初回公開＝13 節の公開準備の実 publish 完了）ことを
