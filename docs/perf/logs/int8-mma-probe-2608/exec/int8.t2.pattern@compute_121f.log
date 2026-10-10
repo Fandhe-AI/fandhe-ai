@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/int8_mma_probe_real_device.rs (<home>/work/target-fandhe-ai/release/deps/int8_mma_probe_real_device-4facaa0b5a9533f1)
+
+running 1 test
+SM121_PROBE_JSON {"v":1,"kind":"env","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","device":"NVIDIA GB10","cc":"12.1","nvrtc":"13.0"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","arch":"compute_121f","stage":"ctl","status":"ok","code":"-","detail":"ctl.copy S1..S6 all ok"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","arch":"compute_121f","stage":"nvrtc_ptx","status":"ok","code":"-","detail":"arch=compute_121f ptx_bytes=3066 .version 9.0 .target sm_121f"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","arch":"sm_121f","stage":"nvrtc_cubin","status":"ok","code":"-","detail":"arch=sm_121f ptx_bytes=3066 .version 9.0 .target sm_121f"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","arch":"compute_121f","stage":"module_load","status":"ok","code":"-","detail":"binary_version=121 ptx_version=121 num_regs=22"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","arch":"compute_121f","stage":"launch","status":"ok","code":"-","detail":"grid=1 block=32"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","arch":"compute_121f","stage":"sync","status":"ok","code":"-","detail":"out_words=128"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","arch":"compute_121f","stage":"verify","status":"ok","code":"-","detail":"words=128 bit_exact"}
+SM121_PROBE_JSON {"v":1,"kind":"done","phase":"exec","probe":"int8.t2.pattern","target":"compute_121f","cells":7,"mismatch":0}
+test int8_mma_probe_exec_selected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.36s
+
+rc=0
