@@ -52,6 +52,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 
 - **CUDA**: ネイティブ `double` で内部計算し出力時に 1 回だけ `f32` へ落とす（`docs/autodiff-linalg-design.md` §3.5 と同契約。f64 ネイティブカーネルの先例は `crates/backend-cuda/src/typed_f64.rs`）。CPU 参照実装は `mul_add` を使わず乗算・減算を別々に行うため、カーネルは FMA 縮約を明示禁止する（`__dmul_rn`／`__dsub_rn`／`__ddiv_rn`／`__dsqrt_rn`、または NVRTC の fmad 無効化）。目標は CPU と bit 一致だが、**受け入れ判定は REQ-2 統一複合判定**とし bit 一致は受け入れ条件にしない。matmul 系 FMA 契約（`f32::mul_add`）は不変で、線形代数は「FMA なしの CPU 線形代数参照実装に合わせる」別軸として扱う
 - **Metal**: ネイティブ f32（#2672／#2676 の指定）。`MathMode::Safe` と `precise::` 系（除算・sqrt）で FMA 縮約を抑止する。soft_f64（`crates/backend-metal/src/soft_f64.rs`）は不採用: 正しく丸めた sqrt がなく Cholesky／QR を bit 一致させられない／LU 更新は O(n³) でエミュレーションコストが過大。ホストの f64 フォールバックに対し**精度クラスが変わる**
+- **Metal QR のノルム計算のスケール対策**: CPU の `qr` は列ノルム `norm_x` と反射ベクトルノルム `norm_v` を f64 の二乗和で求めるが、Metal のネイティブ f32 で素朴に二乗和を取ると、条件数 1 の `A = 1e20 × I₂` でも二乗が overflow して NaN（`1e-20` 倍では underflow して 0）になる。Metal の `norm_x`・`norm_v`（および Householder 係数に使う他のノルム・二乗和）は、`.claude/rules/coding-rust.md` の正規化統計と同方針で **scale/ssq 方式（LAPACK SLASSQ 系。最大絶対値を `scale` に括り出し、残りを比の二乗で蓄積して二乗を直接計算しない）**を用い、NaN／inf 入力の伝播を明示的に扱う。CUDA はネイティブ `double` のため同方式は不要だが、`1e20` 倍の二乗（1e40）は f64 範囲内であることを確認対象に含める
 - **エラー写像**: カーネル検出の「ピボット厳密 0」（**solve／inv に限る**。det は特異行列で `0.0` を正常に返す CPU 契約〈`backend-cpu::linalg::det`・`docs/autodiff-linalg-design.md`〉に合わせ、ピボット 0 をエラーにせず `0.0` を返す分岐を #2676 へ申し送る）「非正定値の対角」「Jacobi 非収束」はデバイス側フラグを読み戻して `BackendError::InvalidArgument`。`Unsupported` は「未実装またはゲート OFF」に限る。非有限値は CPU と同じ（LU 素通し・Cholesky 拒否・eigh は入口で `require_finite` が拒否）。n = 0 はデバイス初期化前にホストで CPU と同じ結果を返す
 - **REQ-8**: カーネル側の手動境界チェックを省略しない。確保前にバイト数上限検査と shape 検査（`require_square_2d` 相当）を行い、ゲート判定はデバイス初期化より前に置く
 
@@ -60,6 +61,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 - 結論: **実測ベースライン方式は現時点で不要**
 - 理由: §3 の方式は各出力要素の算術順序を CPU 参照実装の逐次ループと同一に保つため、`.claude/rules/coding-rust.md` の「単一の連続 K ループと異なる結合順序で部分和を求めるカーネル」に当たらない。統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満、`assert_parity`）を厳密ゼロ fail でそのまま適用する
 - Metal f32 と CPU f64 の差は結合順序ではなく精度クラスの差であり、baseline 方式の適用対象外。baseline で吸収しない。代わりに parity 入力集合を固定する: 対角優位行列・既知の κ を持つ SPD 行列・n ≤ 64 程度、条件数 κ ≤ 1e3 を上限とし、悪条件入力は受け入れ集合に入れない
+- 条件数とは独立した**大小スケール入力**（行列全体を `1e20` 倍・`1e-20` 倍した対角優位行列・SPD 行列、`1e20 × I₂` を含む）を parity の確認対象に加える。f32 の二乗が overflow／underflow する領域であり、Metal QR（`norm_x`・`norm_v`）が NaN／0 を返さず統一複合判定を満たすことを確認する（条件数上限 κ ≤ 1e3 とは別軸）
 - 将来ブロック化・並列リダクションで順序を変える場合や実機で fail が出た場合も tolerance は緩めない。カーネルを是正するか、別の決定記録とユーザー承認を経て baseline 方式（または spec への提案）を検討する
 - 実機 parity は `#[ignore]` で分離し、未実測は `docs/perf/logs/<slug>-<issue>/README.md` へ申し送る（子 issue の責務）
 
