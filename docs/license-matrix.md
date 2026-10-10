@@ -191,6 +191,14 @@ v0.10.0 では自社クレート `fandhe-ai-onnx-interop`（初回公開）が f
 
 v0.11.0 へのピン更新（2026-10-10）では `Cargo.lock` の差分は自社 7 クレートの版・checksum のみで、外部依存の追加・更新・削除はない。上表の `fandhe-ai-onnx-interop` は 0.11.0 へ更新（ライセンス式 `MIT OR Apache-2.0` に変更なし）、`prost`・`prost-derive` は 0.14.4 のまま。
 
+dependabot PR #2959（2026-10-11 所有者承認。承認記録は `docs/framework-compare-harness-decision.md` 4 節）では推移的依存 `rustls` を 0.23.43 から 0.23.45 へ更新した。同じ依存解決で `tempfile` の `getrandom` 参照が 0.4.3 から既存エントリの 0.3.4 へ切り替わる（crate の追加・削除はない）。ライセンス式は `cargo metadata --locked` で実測し、更新前から変更はない（2026-10-11）。`cargo deny ... advisories bans licenses sources` の再実測結果は `advisories ok, bans ok, licenses ok, sources ok`:
+
+| crate | version | license（`cargo metadata` 実測） |
+|-------|---------|-----------------------------------|
+| `rustls` | 0.23.45 | `Apache-2.0 OR ISC OR MIT` |
+| `tempfile` | 3.27.0 | `MIT OR Apache-2.0` |
+| `getrandom` | 0.3.4 | `MIT OR Apache-2.0` |
+
 推移的依存を含む全域監査は CI（`ci.yml` の `deps-forbidden` ジョブ
 「フレームワーク横並びベンチの依存監査」ステップ）で毎回再実行し、本表への転記
 のみに依拠しない（cargo-deny の fail-closed 機械検査が一次情報源）。同 workspace の
