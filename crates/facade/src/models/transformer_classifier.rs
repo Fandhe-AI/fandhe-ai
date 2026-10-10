@@ -153,13 +153,20 @@ impl TransformerClassifier {
                 ))
             })?;
         // 確保前に総要素数の上限を検証する（巨大 config で `vec!` が capacity overflow で
-        // panic／OOM するのを防ぐ）。位置符号 + embed + 各層（attention 4*e^2 + FFN 2*e*ff）
-        // + head の飽和算術による見積もり。
+        // panic／OOM するのを防ぐ）。位置符号 + embed + 各層 + head の飽和算術による見積もり。
+        // 各層は重み（attention 4*e^2 + FFN 2*e*ff）に加え、projection の bias
+        // （4*e + ff + e）・2 つの LayerNorm（gamma/beta 計 4*e）・層ごとのオブジェクト
+        // コスト（`PER_LAYER_OVERHEAD_ELEMS`）を数える。極小次元かつ層数が巨大な config が
+        // 重み項だけの見積もりをすり抜けて数百万層を確保するのを防ぐ。
+        const PER_LAYER_OVERHEAD_ELEMS: usize = 4096;
         let e = config.embed_dim;
         let per_layer = e
             .saturating_mul(e)
             .saturating_mul(4)
-            .saturating_add(e.saturating_mul(config.dim_feedforward).saturating_mul(2));
+            .saturating_add(e.saturating_mul(config.dim_feedforward).saturating_mul(2))
+            .saturating_add(e.saturating_mul(9))
+            .saturating_add(config.dim_feedforward)
+            .saturating_add(PER_LAYER_OVERHEAD_ELEMS);
         let estimated = pos_elems
             .saturating_add(config.in_features.saturating_mul(e))
             .saturating_add(per_layer.saturating_mul(config.num_layers))
@@ -430,6 +437,13 @@ mod tests {
         ));
         let mut c = cfg(4);
         c.num_layers = usize::MAX;
+        assert!(matches!(
+            TransformerClassifier::new(c, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        // 極小次元 + 巨大層数（重み項のみの見積もりでは上限未満になる境界）も拒否する。
+        let mut c = cfg(4);
+        c.num_layers = 1 << 27;
         assert!(matches!(
             TransformerClassifier::new(c, 0),
             Err(AutodiffError::InvalidArgument(_))
