@@ -10,7 +10,7 @@
 # `--pinned-h2d` を常に MEASURE_ERROR で拒否する（`bench-fandhe/src/
 # main.rs` dispatch 参照）。`set_cuda_pinned_h2d_enabled`/
 # `cuda_pinned_h2d_enabled` API は crates.io 公開版 `fandhe-ai =0.8.0`
-# には未収録だったが `=0.10.0`（v0.10.0 ピン更新）で収録済みのため
+# には未収録だったが `=0.11.0`（v0.11.0 ピン更新）で収録済みのため
 # registry 解決のままでも到達可能になったが、feature 分岐自体は既定 OFF
 # のまま維持する（挙動変更は本イシューのスコープ外）ため、本スクリプトは
 # 引き続き `pinned-h2d-toggle` feature を有効化して計測する。
@@ -19,7 +19,7 @@
 # この patch は本スクリプトの CLI 引数としてのみ与え、
 # `scripts/bench/framework-compare/Cargo.toml`／`.cargo/config.toml` へは
 # コミットしない）は**本スクリプトでは必須**（未設定なら下記の検証で
-# fail-closed に exit 1）。API 自体は registry 版 `=0.10.0` で到達可能
+# fail-closed に exit 1）。API 自体は registry 版 `=0.11.0` で到達可能
 # だが、本スクリプトは HEAD ソース計測を主目的とするため path patch を
 # 要求する（「API が registry で使える」ことと「本 A/B スクリプトが
 # path patch を要求する」ことは別の事項）。
