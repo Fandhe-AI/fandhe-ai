@@ -6,6 +6,8 @@
 
 基準コミット: `a66bec26de8d81618623ad29c0ae9c8a8e8a9f4f`（2026-09-14）。`file_path:line` は同コミット時点のもの。後続の変更で行番号がずれる可能性があるため、参照する際は当該コミット、または近傍のコミットで再確認すること。
 
+**#2610 追記（2026-10-11）**: 基準は main `78fbaca3`・spec submodule pin `ca83de61`。以下の既存記述は 2026-09-14 時点の履歴として残し、書き換えない。#2610 時点の状況は各節末尾の「#2610 注記」と `docs/int8-quant-grade-up-verification-plan.md` §2.0 を参照。承認は得ていない。
+
 ## 0. 結論（最初に読む）
 
 **本 issue は量子化カーネル・`Op`・`BackendOps`・`Var`・facade のコード実装を行わない。** #1628（DDP。設計記録は `docs/facade-multi-gpu-ddp-decision.md`）と同型の**「段階 0 ＝ 現時点では非対応と明文化し、格上げ条件の充足状況と再開条件を記録する docs のみの変更」**として実装する。
@@ -28,6 +30,8 @@ issue には性質の異なる 2 件のコメントがある。
 → 実装リポ内の承認コメント（第 2 コメント）では spec 側の取り決め（`:363`）を上書きできないため、**安全側（コード実装なし）へ倒す**。この解決内容を本ドキュメント・PR 本文に明記する。
 
 ### 0.2 issue 受け入れ条件の扱い
+
+**#2610 注記（事実の訂正）**: 下記の「本 issue は close しない」は 2026-09-14 時点の方針である。実際には #1627 は 2026-09-14T11:20:03Z に PR #1836 本文の `Closes #1627` により自動 close された（state CLOSED）。扱い（reopen／別 issue で追跡／CLOSED のまま追跡）は `docs/int8-quant-grade-up-verification-plan.md` §8 項 4 の承認事項であり、reopen はしていない。
 
 issue 本文の受け入れ条件（`Op`／`BackendOps`／`Var` 追加・VJP・parity テスト・`compat-api-scope.md` 更新・fmt／clippy）は **量子化の実装が spec 側で REQ として承認された後の別 issue** へ引き継ぐ。本 PR で満たすのは「`docs/compat-api-scope.md` の対象範囲記述更新」と「fmt／clippy 通過（docs のみのため no-op 確認）」のみ。**本 issue は close しない**（#1652／#1775／#1628 と同じく段階 0・blocked のまま）。
 
@@ -71,6 +75,8 @@ grep -rn "s8\b\|int8\|m16n8k32\|f8f6f4" crates/ | grep -v "compute_121"
 # => backend-metal/src/tile.rs の `bytes8`（padding 変数）4 件のみ。量子化関連 0 件
 ```
 
+**#2610 注記（2026-10-11 時点）**: (b) は INT8 側が実測済み（#2608）。(c) は取り方の案のみ（#2609。未計測）。(d) は閾値案のみ（#2609。実測は s32 段の bit 一致だけ）。(e) は机上確認のままで、許容依存は現行 10 区分（INT8 による追加なし）。表の判定欄は 2026-09-14 時点の記述であり、最新は `docs/int8-quant-grade-up-verification-plan.md` §2.0。
+
 ## 3. 設計（記録内容。決定は「段階 0 採用」のみ）
 
 ### 3.1 段階 0（採用）
@@ -90,8 +96,8 @@ grep -rn "s8\b\|int8\|m16n8k32\|f8f6f4" crates/ | grep -v "compute_121"
 ### 3.3 再開条件・起票候補（本 PR では起票しない。`.claude/rules/out-of-scope-tracking.md` の承認規則に従う）
 
 1. (b) 向け: `#[ignore]` 実機プローブ `crates/backend-cuda/tests/int8_mma_probe_real_device.rs`（`tma_probe_real_device.rs` 同型。`compute_121`→`121a`→`121f` の順に NVRTC コンパイル・小形状実行・ホスト `i32` 参照との bit 一致）。**本 issue では追加しない**（GB10 実機到達手段なし・`crates/` 変更がスコープ争点になるため）。→ その後 #2608 で追加・GB10 実測済み（`docs/perf/logs/int8-mma-probe-2608/README.md`。INT8 のみ・FP8 は未実施）。
-2. (d) 向け: quantize–dequantize 参照実装との一致判定＋スケール前提付き f32 誤差上限の閾値案・実測。
-3. (c) 向け: Transformer 複合 WL 実機ベースライン（既存の親 #154 系列の記入）。
+2. (d) 向け: quantize–dequantize 参照実装との一致判定＋スケール前提付き f32 誤差上限の閾値案・実測。→ #2609 で閾値案を追加（`docs/int8-quant-grade-up-verification-plan.md` §5.1。f32 段の実測は未実施）。
+3. (c) 向け: Transformer 複合 WL 実機ベースライン（既存の親 #154 系列の記入）。→ #2609 で取り方の案と記入欄を追加（`docs/perf/logs/int8-quant-baseline-2609/README.md`。未計測）。
 4. a〜e 充足後: Phase 4 要件見直しで新 REQ（REQ-15 候補・Could）を spec 側へ提案（`docs/spec-proposal-fp8-int8-quant-gemm.md` を更新して再提出）→ 承認後に実装 issue（G-16 量子化キャスト／G-17 量子化 GEMM 相当）を起票。
 
 (b)〜(e) の段階別検証計画（プローブ設計・ベンチ残ギャップ・判定式骨子・設計確認項目・spec 提案文案の集約）は `docs/int8-quant-grade-up-verification-plan.md`（#2075）を参照。
@@ -120,7 +126,11 @@ grep -rn "s8\b\|int8\|m16n8k32\|f8f6f4" crates/ | grep -v "compute_121"
 3. 格上げ条件 a〜e のうち (a) を除く 4 条件が未達のまま（§2.1）で、実装着手の前提条件（spec 側の格上げ判断）が成立していない。
 4. コード実装（`Op`／`BackendOps`／`Var`／facade）に着手すると、後で spec 側の除外事項ゲートと矛盾したまま実装コードだけが先行する状態になり、#584（G-1 提案。CLOSED）と同じ手戻りを再発させる。
 
+**#2610 注記**: 項 3 の「(a) を除く 4 条件が未達」は 2026-09-14 時点である。2026-10-11 時点では (b) の INT8 側が実測済みだが、(c)(d)(e) は未達のままで、除外事項ゲートは解除されていない。
+
 ## 7. 承認事項（実装着手の前提。列挙のみ）
+
+**#2610 注記**: 最新の承認事項は `docs/int8-quant-grade-up-verification-plan.md` §8（#2610 で選択肢形式に再構成）を正とする。いずれも承認は得ていない。
 
 1. spec 側の格上げ条件表における (a) の「未達」表記の更新可否（実質充足の判断）。
 2. 格上げ条件 (b)〜(e) を満たすための後続作業（§3.3）の実施可否・優先順位。
