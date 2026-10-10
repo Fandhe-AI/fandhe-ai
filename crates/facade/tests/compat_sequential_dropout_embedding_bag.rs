@@ -32,7 +32,11 @@ use fandhe_ai::{AutodiffError, BackendError, EmbeddingBagMode, Tensor};
 mod common;
 use common::temp_dir::TempDirGuard;
 
-/// グローバル RNG（`manual_seed`）を触るテストの直列化ロック。
+/// グローバル RNG を触るテストの直列化ロック。
+///
+/// `manual_seed` を呼ぶテストだけでなく、グローバル RNG を暗黙に引くテスト
+/// （学習モードの dropout 系 `predict`／`forward`、`shuffle(true)` の `fit`、`rand`／`randn` 系）も
+/// 取ること。取らないと並走テストが `manual_seed` と乱数消費の間で系列を進め、bit 一致が揺れる（#2968）。
 fn rng_lock() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -128,6 +132,8 @@ fn forward_time_checks_reject_bad_rank_and_ids() {
 
 #[test]
 fn eval_mode_makes_dropout_layers_identity() {
+    // 末尾の学習モード `predict` が `feature_dropout_mask` 経由でグローバル RNG を N×C 回引くため直列化する。
+    let _guard = rng_lock();
     let x = ramp(&[2, 3, 4, 5], 1.0);
     let mut model = Sequential::new()
         .add_dropout2d(0.5)
