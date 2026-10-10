@@ -309,7 +309,7 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機への到達手段が�
 
 ## §8 スコープ外
 
-- GPU 専用カーネル（CUDA／Metal の `linalg_*` 実装。別イシュー）
+- GPU 専用カーネル（CUDA／Metal の `linalg_*` 実装。別イシュー。設計判断は `docs/backend-gpu-linalg-decision.md`）
 - バッチ次元 `[..., n, n]`
 - `eigh` の `UPLO='U'`
 - `lstsq` の `residuals`／`rank`／`singular_values` 返却・driver 選択

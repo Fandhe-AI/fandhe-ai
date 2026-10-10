@@ -187,7 +187,7 @@ single_input`／`svd_multi_output_gradient_accumulates_to_single_input` で検�
 ## 5. スコープ外（`.claude/rules/out-of-scope-tracking.md` 対象）
 
 - バッチ次元（`[..., n, n]`）対応（#1600 bmm と同時期に検討）
-- GPU（CUDA／Metal）カーネル実装（本イシューは `Unsupported` フォールバック止まり）
+- GPU（CUDA／Metal）カーネル実装（本イシューは `Unsupported` フォールバック止まり。設計判断は `docs/backend-gpu-linalg-decision.md`）
 - `det` の特異行列における勾配（SVD 経路）・`svd` の重複特異値での勾配・`qr` の `m<n`
   backward・`svd(full_matrices=true)`・`cholesky(upper=true)`・`matrix_norm` の一般
   `p`／`dim` 指定は対象外。`torch.linalg.eigh`／`lstsq`／`pinv`／`matrix_rank`／
