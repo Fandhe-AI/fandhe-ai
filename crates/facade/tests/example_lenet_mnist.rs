@@ -1,6 +1,8 @@
 //! `LeNet`（参照モデル定義。イシュー #2201・親 #2190）の統合テスト。
 //!
-//! `crates/facade/examples/models/lenet.rs` を `#[path]` で直接取り込み、
+//! `fandhe_ai::models::LeNet`（#2974 で公開）を使い、PyTorch 対応表は
+//! `crates/facade/examples/models/lenet.rs` を `#[path]` で直接取り込んで検証する。
+//!
 //! `crates/facade/tests/example_mlp_mnist.rs` と同型の観点（構造・
 //! forward・学習）を検証する。合成 MNIST 相当データ
 //! （`example_models_common`）を使う（実 MNIST ではない）。
@@ -11,9 +13,9 @@ mod lenet;
 
 use example_models_common::{IMAGE_LEN, NUM_CLASSES, synthetic_mnist_flat};
 use fandhe_ai::compat::{FitConfig, Loss, Optimizer};
+use fandhe_ai::models::LeNet;
 use fandhe_ai::optim::AdamConfig;
 use fandhe_ai::{AutodiffError, Tensor};
-use lenet::LeNet;
 
 fn synthetic_batch(n: usize, seed: u64) -> (Tensor<f32>, Tensor<i32>) {
     let (data, labels) = synthetic_mnist_flat(n, seed);
@@ -32,7 +34,7 @@ fn lenet_structure_matches_pytorch_reference() {
     assert_eq!(model.num_classes(), NUM_CLASSES);
 
     let named = model.sequential().named_parameters();
-    let map = model.pytorch_param_map().unwrap();
+    let map = lenet::lenet_pytorch_param_map(&model).unwrap();
     assert_eq!(named.len(), map.len());
     assert_eq!(
         named.len(),
@@ -161,10 +163,10 @@ fn lenet_pytorch_param_map_detects_sequential_mut_replacement() {
     let mut model = LeNet::new(NUM_CLASSES, 1).unwrap();
     // sequential_mut() 経由で内部 Sequential を全く別の構成へ差し替える
     // と、構成値から計算した対応表と実パラメータが不整合になる。
-    // pytorch_param_map() はこれを検出して Err を返すこと。
+    // lenet_pytorch_param_map() はこれを検出して Err を返すこと。
     *model.sequential_mut() = fandhe_ai::compat::Sequential::new();
     assert!(matches!(
-        model.pytorch_param_map(),
+        lenet::lenet_pytorch_param_map(&model),
         Err(AutodiffError::InvalidArgument(_))
     ));
 }

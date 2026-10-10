@@ -6,19 +6,16 @@
 //! 組めることを実行可能なコードで示す。`cargo run -p fandhe-ai --example
 //! reference_models` で実行できる。
 //!
-//! rustdoc は `examples/` 配下を doctest しないため、AC3（「各型の生成と
-//! forward を doctest で実行できる」）は本 example と統合テスト
-//! （`crates/facade/tests/example_mlp_mnist.rs`・
-//! `crates/facade/tests/example_lenet_mnist.rs`）で代替する
-//! （`docs/reference-models-decision.md` 参照）。AC5（PyTorch との層ごとの
-//! 重み対応を目視で確認できる）は本 example が標準出力へ表示する対応表で
-//! 満たす。
+//! 各型の生成と predict の doctest は `crates/facade/src/models/mod.rs` にある
+//! （#2974 で `fandhe_ai::models` として公開）。本 example は AC5（PyTorch との層ごとの
+//! 重み対応を目視で確認できる）を、標準出力へ表示する対応表で満たす（対応表は facade の
+//! 公開面に含めず `examples/models/` に置く。`docs/reference-models-decision.md` §11）。
+//! 統合テストは `crates/facade/tests/example_mlp_mnist.rs`・`example_lenet_mnist.rs`。
 
 mod models;
 
 use fandhe_ai::compat::Sequential;
-use models::lenet::LeNet;
-use models::mlp::Mlp;
+use fandhe_ai::models::{LeNet, Mlp};
 
 fn print_param_map(
     title: &str,
@@ -73,15 +70,17 @@ fn run_mlp() -> Result<(), Box<dyn std::error::Error>> {
 
     print_param_map(
         "Mlp <-> PyTorch nn.Sequential(Linear, ReLU, Dropout, ...)",
-        eval_mlp.pytorch_param_map()?.into_iter().map(|m| {
-            (
-                m.fandhe_key,
-                m.pytorch_key,
-                m.fandhe_shape,
-                m.pytorch_shape,
-                m.transpose,
-            )
-        }),
+        models::mlp::mlp_pytorch_param_map(&eval_mlp, 784, &[256, 128], 10)?
+            .into_iter()
+            .map(|m| {
+                (
+                    m.fandhe_key,
+                    m.pytorch_key,
+                    m.fandhe_shape,
+                    m.pytorch_shape,
+                    m.transpose,
+                )
+            }),
     );
     Ok(())
 }
@@ -107,15 +106,17 @@ fn run_lenet() -> Result<(), Box<dyn std::error::Error>> {
 
     print_param_map(
         "LeNet <-> PyTorch Conv2d(1,6,5) -> Conv2d(6,16,5) -> Linear(256,120) -> Linear(120,10)",
-        eval_lenet.pytorch_param_map()?.into_iter().map(|m| {
-            (
-                m.fandhe_key,
-                m.pytorch_key,
-                m.fandhe_shape,
-                m.pytorch_shape,
-                m.transpose,
-            )
-        }),
+        models::lenet::lenet_pytorch_param_map(&eval_lenet)?
+            .into_iter()
+            .map(|m| {
+                (
+                    m.fandhe_key,
+                    m.pytorch_key,
+                    m.fandhe_shape,
+                    m.pytorch_shape,
+                    m.transpose,
+                )
+            }),
     );
 
     // `Sequential` を経由した学習系 API がそのまま呼べることも示す
