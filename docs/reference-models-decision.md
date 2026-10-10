@@ -539,3 +539,65 @@ exposure-decision.md` §13.5 の「承認取得後に実施する変更範囲」
   カーネルは変更なし。`fandhe-ai =0.11.0` の既存公開 API は追加のみ
 - 後続: `ResNet`／`TransformerClassifier` の公開（Phase 11-2）。§3.1・§3.2 の保留は
   `Mlp`／`LeNet` については本節で解消
+
+## 11.8 #2975（Phase 11-2）の実装記録
+
+承認の出典は §11.6 と同じ（イシュー #2499 の所有者コメント issuecomment-6097478475）。本節が
+#2541 の 2 段目で、これで 2 段とも完了した（#2541・#2973 を閉じる操作は所有者が行う）。
+
+- 公開名: `fandhe_ai::models::{ResNet, ResNetBlock, TransformerClassifier,
+  TransformerClassifierConfig}`（§11.7 の 2 名と合わせて 6 名）。`models/mod.rs` の
+  `pub use` 1 名 1 文で公開し、クレートルートへは再エクスポートしない。サブモジュール
+  （`resnet`・`transformer_classifier`・`train_support`）は非公開
+- 公開メソッド: `ResNet`／`TransformerClassifier` は `new`・`forward`・`predict`・
+  `named_parameters`・`set_training`・`training`（examples の `is_training` から改名）・
+  `train_step`。ゲッターは `ResNet::{depth, width, num_classes, num_blocks, blocks}`・
+  `ResNetBlock::has_projection_shortcut`・`TransformerClassifier::config`・
+  `TransformerClassifierConfig::cifar10`。examples の `Transformer`／`TransformerConfig` は
+  `nn::Transformer`（エンコーダ・デコーダ）との衝突を避けて改名した
+- 公開しないもの: `ReferenceModule`／`Trainable`、`cross_entropy_mean`・`scalar_of`・
+  `fit_epochs`・`accuracy`・`predict_in_eval`・`sub_tensor_*`・`synthetic_cifar10`・
+  `to_row_tokens`（examples に残す）
+
+### 承認文面の解釈（停止条項に当たらないよう安全側に決めた点）
+
+1. `ResNet::new`／`TransformerClassifier::new` は公開する。承認コメントは `new` を `Mlp`／
+   `LeNet` の項にしか書かないが、同じ所有者のイシュー受け入れ条件が `new` を明記しており、
+   構築手段がなければ `cifar10` プリセットを公開する意味もない
+2. `ResNetBlock` は型と `has_projection_shortcut` だけを公開する。ブロックの `new`・`forward`・
+   `named_parameters`・`set_training` は非公開（`ResNet::blocks()` から観察するのみ）。公開面を
+   広げるには別の承認が要る
+3. `TransformerClassifierConfig` は examples の現行形のまま（`Debug`・`Clone`・`Copy` と pub
+   フィールド 8 個）。`config()` が参照用ゲッターとして承認されておりフィールドを読めなければ
+   意味がないため。`#[non_exhaustive]` や derive の追加は承認外で行わない。フィールド集合は
+   0.11 系の非破壊契約として固定される（`api_surface.rs` では `other:<field>` 8 件を期待値に
+   明示）
+4. `train_step` の損失計算は `models/train_support.rs`（非公開、`pub(super)`）に複製した。
+   gather 方式・`1/N` 重み・入力検証・メッセージは examples と同一。examples 側のコピーは
+   評価用ヘルパー `heldout_loss` が使い続ける（`#[allow(dead_code)]` で黙らせない）。あわせて
+   更新後パラメータの書き戻しは素のスライスと `debug_assert_eq!` をやめ、`get`／`checked_add` による
+   型付き `Err` にした（演算の意味は不変）
+5. 保存は対象外。新しい型は `compat::Sequential` を外へ出さず `nn::Module` も実装しないため
+   `save_model`／`load_model` へ渡す経路が生じない。専用のエラー型は作らず、経路の不在を
+   `api_surface.rs` のインベントリ（メソッド集合の完全一致）と `models_unapproved_paths_are_absent`
+   （`state_dict`・`sequential`・`Module`・trait 実装の不在）で固定する
+
+### examples とテスト
+
+- `examples/models/{resnet,transformer}.rs` は公開型への `ReferenceModule`／`Trainable` の委譲
+  だけの薄い shim。`Type::method` のパス呼び出しでは inherent が優先されるため再帰しない
+- `heldout_loss`（`reference_module.rs`）を追加し、`main.rs` と両統合テストで held-out loss を
+  確認する。AC4 の判定式・定数（10 epoch・0.50・N・batch・lr）は不変で、既存の学習テストは
+  同じ結果のまま通る
+- ブロック単体のテストは src の単体テスト（`models::resnet::tests`）へ移した
+- 新規 `crates/facade/tests/models_reference_cifar_facade.rs`: 公開パスだけで `train_step` の
+  損失が有限・train モードへの切替・型付きエラー・eval の `predict` と `forward` の bit 一致・
+  `use fandhe_ai::nn::*; use fandhe_ai::models::*;` の併用（名前衝突の正のプローブ）を確認
+- 正ガード（`api_surface.rs`）は §11.7 の 6 件を 6 名へ拡張（`pub use` 6 文・メソッドと
+  フィールドのインベントリ・署名プローブ・doctest プローブ・保存経路の不在）
+
+### 不変・該当なし
+
+- 依存・tolerance・baseline・ガードレール閾値・`docs/spec/`・`unsafe`・CI は変更なし。
+  `fandhe-ai =0.11.0` の既存公開 API は追加のみ
+- GPU parity は該当なし（新しいカーネル・演算を足していない。§10.7 と同じ理由）

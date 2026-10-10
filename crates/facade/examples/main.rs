@@ -23,10 +23,12 @@ mod transformer;
 
 use fandhe_ai::Tensor;
 use fandhe_ai::optim::{Adam, AdamConfig};
-use reference_module::{ReferenceModule, accuracy, fit_epochs, predict_in_eval, sub_tensor_f32};
+use reference_module::{
+    ReferenceModule, accuracy, fit_epochs, heldout_loss, predict_in_eval, sub_tensor_f32,
+};
 use resnet::ResNet;
 use synthetic_cifar::{IMG_C, IMG_H, IMG_W, NUM_CLASSES, synthetic_cifar10, to_row_tokens};
-use transformer::{Transformer, TransformerConfig};
+use transformer::{TransformerClassifier, TransformerClassifierConfig};
 
 const EPOCHS: usize = 10;
 const BATCH_SIZE: usize = 16;
@@ -166,6 +168,8 @@ fn run_resnet() -> Result<(), Box<dyn std::error::Error>> {
     }
     let test_acc = accuracy(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES)?;
     println!("ResNet held-out accuracy = {test_acc:.4}");
+    let test_loss = heldout_loss(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES)?;
+    println!("ResNet held-out loss = {test_loss:.4}");
     // 学習後、`ResNet::predict`（モード切り替えなし契約。モジュール doc
     // 参照）を eval モードへ明示的に切り替えてから呼ぶ（`*_predict_
     // shape_and_eval_determinism` テストと同じ呼び出し規律。冒頭の
@@ -197,8 +201,8 @@ fn run_transformer() -> Result<(), Box<dyn std::error::Error>> {
     let x_test = token_tensor(to_row_tokens(&test_flat, N_TEST)?, N_TEST)?;
     let y_test = labels_tensor(test_labels, N_TEST)?;
 
-    let config = TransformerConfig::cifar10(32, 4, 2, NUM_CLASSES)?;
-    let mut model = Transformer::new(config, 0x7777_7777)?;
+    let config = TransformerClassifierConfig::cifar10(32, 4, 2, NUM_CLASSES)?;
+    let mut model = TransformerClassifier::new(config, 0x7777_7777)?;
     let seen_config = model.config();
     println!(
         "構成: seq_len={} in_features={} embed_dim={} num_heads={} num_layers={} num_classes={}",
@@ -235,6 +239,8 @@ fn run_transformer() -> Result<(), Box<dyn std::error::Error>> {
     }
     let test_acc = accuracy(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES)?;
     println!("Transformer held-out accuracy = {test_acc:.4}");
+    let test_loss = heldout_loss(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES)?;
+    println!("Transformer held-out loss = {test_loss:.4}");
     // `run_resnet` と同じ理由で、学習後の `Transformer::predict` は
     // eval モードへ明示的に切り替えてから呼ぶ。
     ReferenceModule::set_training(&mut model, false);

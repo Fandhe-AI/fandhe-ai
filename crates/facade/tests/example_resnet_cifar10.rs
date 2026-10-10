@@ -1,4 +1,4 @@
-//! `ResNet`（参照モデル定義。イシュー #2202・親 #2190）の統合テスト。
+//! `ResNet`（参照モデル。イシュー #2202・親 #2190。公開は #2975）の統合テスト。
 //!
 //! `crates/facade/examples/models/{resnet,reference_module,
 //! synthetic_cifar}.rs` を `#[path]` で直接取り込み、
@@ -24,12 +24,13 @@ mod synthetic_cifar;
 
 use std::sync::{Mutex, OnceLock};
 
+use fandhe_ai::models::ResNetBlock;
 use fandhe_ai::optim::{Adam, AdamConfig};
 use fandhe_ai::{AutodiffError, Tensor};
 use reference_module::{
-    ReferenceModule, Trainable, accuracy, fit_epochs, predict_in_eval, sub_tensor_f32,
+    ReferenceModule, accuracy, fit_epochs, heldout_loss, predict_in_eval, sub_tensor_f32,
 };
-use resnet::{ResNet, ResNetBlock};
+use resnet::ResNet;
 use synthetic_cifar::{IMG_C, IMG_H, IMG_W, NUM_CLASSES, synthetic_cifar10, to_row_tokens};
 
 /// グローバル状態は使わないが、学習系テストは決定的シード運用の
@@ -122,15 +123,7 @@ fn resnet_rejects_invalid_args() {
         ResNet::new(2, 4, NUM_CLASSES, 1),
         Err(AutodiffError::InvalidArgument(_))
     ));
-
-    assert!(matches!(
-        ResNetBlock::new(0, 4, 1, 1),
-        Err(AutodiffError::InvalidArgument(_))
-    ));
-    assert!(matches!(
-        ResNetBlock::new(4, 4, 0, 1),
-        Err(AutodiffError::InvalidArgument(_))
-    ));
+    // ブロック単体の引数検証は src の単体テスト（`models::resnet::tests`）へ移した（#2975）。
 }
 
 #[test]
@@ -152,26 +145,27 @@ fn resnet_rejects_width_multiplication_overflow() {
 
 #[test]
 fn resnet_block_and_model_implement_reference_module() {
-    let block = ResNetBlock::new(4, 8, 2, 0x5555_6666).unwrap();
-    assert!(block.has_projection_shortcut());
-    let block_params = ReferenceModule::named_parameters(&block);
-    // main（conv(weight+bias)+BN(weight+bias) を 2 段）8 +
-    // shortcut（conv(weight+bias)+BN(weight+bias)）4 = 12 パラメータ
-    // テンソル（`nn::Conv2d`／`nn::BatchNorm2d` はいずれも
-    // weight・bias の 2 テンソルを持つ契約。running_mean／running_var は
-    // `named_parameters` に含めない。`crates/autodiff/src/nn/
-    // batch_norm.rs` 参照）。
+    // block 単体は非公開 API のため、`ResNet::new(8, 4, ..)` の block 1（4→8・stride 2・
+    // projection shortcut あり）を `layer.1.` 接頭辞で絞って検証する。
+    let model_for_block = ResNet::new(8, 4, NUM_CLASSES, 0x5555_6666).unwrap();
+    assert!(model_for_block.blocks()[1].has_projection_shortcut());
+    let all_params = ReferenceModule::named_parameters(&model_for_block);
+    let block_params: Vec<_> = all_params
+        .iter()
+        .filter(|(name, _)| name.starts_with("layer.1."))
+        .collect();
+    // main（conv(weight+bias)+BN(weight+bias) を 2 段）8 + shortcut 4 = 12 パラメータテンソル。
     assert_eq!(block_params.len(), 12);
     assert!(
         block_params
             .iter()
-            .any(|(name, _)| name.starts_with("main.")),
+            .any(|(name, _)| name.starts_with("layer.1.main.")),
         "main 経路のパラメータ名は main. プレフィックスを持つ"
     );
     assert!(
         block_params
             .iter()
-            .any(|(name, _)| name.starts_with("shortcut.")),
+            .any(|(name, _)| name.starts_with("layer.1.shortcut.")),
         "projection shortcut を持つ block は shortcut. プレフィックスのパラメータも持つ"
     );
 
@@ -608,6 +602,8 @@ fn resnet_synthetic_cifar10_ten_epochs_reaches_50_percent_accuracy() {
 
     let history = fit_epochs(&mut model, &x_train, &y_train, &mut opt, EPOCHS, BATCH_SIZE).unwrap();
     let test_acc = accuracy(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES).unwrap();
+    let test_loss = heldout_loss(&mut model, &x_test, &y_test, BATCH_SIZE, NUM_CLASSES).unwrap();
+    assert!(test_loss.is_finite(), "held-out loss が非有限: {test_loss}");
 
     assert!(
         history.iter().all(|v| v.is_finite()),
