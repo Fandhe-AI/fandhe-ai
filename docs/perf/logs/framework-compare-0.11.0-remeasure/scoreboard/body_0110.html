@@ -29,10 +29,10 @@
 </div>
 
 <h2>役割・機能の対応表 — fandhe-ai は何であり、何でないか</h2>
-<p class="note"><b>注記</b>: <b>この対応表は 0.10.0 版の内容のまま</b>（v0.11.0 タグ基準の監査結果〈<code>docs/perf/framework-compare-feature-matrix-0.11.0.md</code>〉への更新は #2682 で行う）。以下は 2026-10-03 に <code>fandhe-ai =0.10.0</code>（タグ <code>v0.10.0</code>）の facade 公開面で再監査した記述。facade の <code>pub use</code>／<code>pub mod</code> から到達できるものだけを「ある」とし、内部クレートに実装があっても facade から到達できないもの（高階微分・generate()・KV キャッシュ・npy／npz・Adadelta 等）は「未公開」と書いている。0.9.0 時点の行ごとの再判定は <code>docs/perf/framework-compare-feature-matrix-0.9.0.md</code>（#1938）。</p>
+<p class="note"><b>注記</b>: fandhe-ai 列は 2026-10-09 にタグ <code>v0.11.0</code>（<code>fandhe-ai =0.11.0</code>）の facade 公開面で再監査した結果（<code>docs/perf/framework-compare-feature-matrix-0.11.0.md</code>・#2681）に合わせて更新した。facade の <code>pub use</code>／<code>pub mod</code> から到達できるものだけを「ある」とし、内部クレートに実装があっても facade から到達できないもの（<code>Var::custom</code>・3D プーリングの層型・参照モデル・サンプリング版 speculative 等）は「未公開」と書いている。0.10.0 で「部分的」だった 9 行は 9 行とも「部分的」のまま（未公開・保留が残るため）で、本文を 0.11.0 の公開面に合わせた（バックエンド・ハードは再監査で「0.10.0 から変化なし」）。層・役割・言語・配布・固有の仕組み・性能実測の 4 行は再監査の対象外のため 0.10.0 版の記述のまま。</p>
 <p class="note">他列は各プロジェクトの公開ドキュメント上の一般的事実。Hugging Face と LangChain は fandhe-ai と同じ層の製品ではなく、性能比較の相手ではない。</p>
 <div class="wrap"><table class="pos"><thead><tr><th>項目</th>
-<th>fandhe-ai 0.10.0</th>
+<th>fandhe-ai 0.11.0</th>
 <th>PyTorch</th>
 <th>TensorFlow (Keras 3)</th>
 <th>SciPy / NumPy</th>
@@ -56,7 +56,7 @@
 <td class="pc"><span class="pill win">ある</span><span class="pt">Python・JS</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">dtype</span><span class="ds">autograd 演算は f32</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">autograd を通る演算は f32 のみ。f64／f16／bf16 は勾配なしの 8 演算（TypedOps）。compile_with_amp で Linear／Conv2d／MHA の forward を f16／bf16 化（f32 master weight・GradScaler）。CUDA TF32／3×TF32 は既定 OFF の opt-in</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">autograd は f32 の Tape／Var に加え、f64 の TapeF64／VarF64（add／mul／div／pow／matmul／sum／mean／max）を公開。f16／bf16 を値型とする Tape／Var はない。勾配なしの 8 演算（TypedOps）、compile_with_amp（Linear／Conv2d／MHA の forward を f16／bf16 化・f32 master weight）、低精度 forward の opt-in（matmul_low_precision ほか 6 演算）。CUDA TF32／3×TF32 は既定 OFF の opt-in</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">f16/bf16/f32/f64/int/bool/量子化型</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">同左＋mixed precision policy</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">f32/f64/complex/int（NN 用の低精度型はない）</span></td>
@@ -64,7 +64,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">自動微分</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">動的テープ・1 階のみ。no_grad 相当（var_no_grad・detach）・勾配蓄積・checkpoint・層単位の requires_grad／freeze はある。高階微分・カスタム VJP は内部実装のみで facade 未公開</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">動的テープ。0.11.0 で高階微分（backward_create_graph）・jacobian／hessian・カスタム VJP（CustomFunction）・backward hook・gradcheck・関数型 AD（vjp／hvp／vmap／jvp／jacfwd。jvp／jacfwd は create_graph 対応 Op に限る）・set_deterministic を公開。no_grad 相当・勾配蓄積・checkpoint は従来どおり。Var::custom・add_custom は未公開</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">動的 autograd・高階・カスタム Function・functorch</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">GradientTape・高階・tf.function</span></td>
 <td class="pc"><span class="pill loss">ない</span><span class="pt">なし（有限差分・手書き勾配）</span></td>
@@ -72,7 +72,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">演算の範囲</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">Var の演算約 110（算術・比較・活性化・softmax・conv／pool・attention・RNN セル・損失・正規化・形状・gather／scatter・sort／topk・cumsum・einsum・線形代数）。線形代数は CPU のみ（CUDA／Metal は Unsupported）。数千 op 級の網羅ではない</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">Var の演算（算術・比較・活性化・softmax・conv／pool・attention・RNN セル・損失・正規化・形状・gather／scatter・sort／topk・cumsum・einsum・線形代数）に、FFT（rfft）・median・kron・pad モード・3D プーリング・conv_transpose3d・local_response_norm・logical 演算等を追加。線形代数は CPU のみ（CUDA／Metal は Unsupported）。数千 op 級の網羅ではない</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">網羅（数千 op）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">網羅</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">線形代数・FFT・疎行列・最適化（NN 向けではない）</span></td>
@@ -80,7 +80,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">NN 層・モデル構築</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">Sequential に 30 種の add_*（Linear・活性化・Conv1d／2d・Pool 6 種・BatchNorm・LayerNorm・RMSNorm・Embedding・MHA・TransformerEncoder・Dropout）＋独自層の add_module。RNN／LSTM／GRU は nn::rnn、nn::Module に state_dict。Transformer デコーダ・GroupNorm 等は未公開</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">Sequential の add_* は 65 種（add_module を含む。0.10.0 は 31）。Conv3d・GroupNorm・Transformer（エンコーダ・デコーダ層・全体）・SELU 等を追加し、FunctionalBuilder（Functional API）・nn::Transformer・nn::loss・nn::rnn・KvCache を公開。3D プーリング・ConvTranspose3d・Fold 等の層型と参照モデル（Mlp・LeNet・ResNet・Transformer）は未公開、活性化 9 層は save_model 非対応</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.nn 網羅</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras レイヤー網羅</span></td>
 <td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
@@ -88,7 +88,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">最適化・学習ループ</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">SGD・Adam・AdamW・RMSprop・Adagrad・LAMB・L-BFGS、LR scheduler 7 種、grad clip、DataLoader（batch／shuffle）、fit／evaluate／callbacks／metrics、AMP。param groups・EMA・Adadelta／NAdam 等・マルチワーカー DataLoader は未公開</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">SGD・Adam・AdamW・RMSprop・Adagrad・LAMB・L-BFGS に Adadelta・Adafactor・Adamax・ASGD・Lion・Rprop・NAdam・RAdam を追加、LR scheduler に PolynomialLr・CyclicLr を追加。param groups・OptimizerStateDict・EMA・SWA（AveragedModel）・fit_with_weights・train_step フック、PrefetchDataLoader・IterableDataset・random_split、fit／callbacks・AMP。SWA の fit 結線と FitConfig への EMA 追加は未公開</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.optim 網羅・DataLoader・AMP</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras optimizer 網羅・fit()・tf.data</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">scipy.optimize（L-BFGS 等。NN 学習用ではない）</span></td>
@@ -104,7 +104,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">相互運用（重み・モデル形式）</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">facade から ONNX import（36 op・推論専用）・export（import 済みモデルの往復と Sequential 6 層）・safetensors 保存／読込（F32）・save_model／load_model。npy／npz は内部クレートのみで未公開</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">facade から ONNX import（推論専用）・export（import 済みモデルの往復に限る）・safetensors 保存／読込（F32）・save_model／load_model（Functional モデルを含む）。0.11.0 で npy／npz の読み書き（load_npy・save_npz 等）を公開。Tensor 上の load_npy 等のメソッドは未公開</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.export・ONNX export・safetensors</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">SavedModel・TFLite・ONNX（tf2onnx）</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">npy/npz・scipy.io（MATLAB・netCDF）</span></td>
@@ -112,7 +112,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">事前学習済みモデル</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">同梱重み・ダウンロード・モデルハブはない。ONNX／safetensors の取り込みと、ローカル配置済み重みを読む ModelRegistry（読み取り専用）がある</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">同梱重み・ダウンロード・モデルハブはない。ONNX／safetensors／npy・npz の取り込みと、ローカル配置済み重みを読む ModelRegistry（読み取り専用）がある。参照モデル（ResNet 等）の公開は未決</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torchvision・torch.hub</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras Applications・TF Hub</span></td>
 <td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
@@ -120,7 +120,7 @@
 <td class="pc"><span class="pill near">部分的</span><span class="pt">モデルは API・ローカルランタイム経由で利用</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">推論・サービング</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">predict／predict_resident（デバイス常駐チェーン）・ONNX の run。generate()・KV キャッシュは内部実装のみで facade 未公開。量子化・トークナイザ・グラフコンパイルなし</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">predict／predict_resident・predict_batches・ONNX の run に加え、0.11.0 で generate()・KvCache・speculative decoding（greedy・バッチ 1）・連続バッチング第 1 段階（BatchScheduler）・テキスト変換（語彙 lookup 型の TextVectorization）を公開。サンプリング版 speculative・量子化は未公開、グラフコンパイル・サブワードトークナイザは対象外</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.compile・TorchScript・量子化・TorchServe</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">TFLite・TF Serving・XLA</span></td>
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>

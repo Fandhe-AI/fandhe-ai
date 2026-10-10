@@ -128,7 +128,15 @@ fandhe-ai 自身の reuse 行の中央値（時間比 0.11.0 ÷ 0.10.0。gemm・
 
 ## 役割・機能の対応表（計測外）
 
-ページ下部の「役割・機能の対応表」は **0.10.0 版の内容のまま**にしてある。対応表は #2682 で v0.11.0 タグ基準の監査結果（`docs/perf/framework-compare-feature-matrix-0.11.0.md`）へ更新する。
+ページ下部の「役割・機能の対応表」の fandhe-ai 列は、#2682 で v0.11.0 タグ基準の監査結果（`docs/perf/framework-compare-feature-matrix-0.11.0.md`・#2681。2026-10-09 にタグ `v0.11.0` の facade 公開面で再監査）へ更新した。
+
+| 項目 | 内容 |
+|---|---|
+| 判定基準 | 0.10.0 版と同じ。facade の `pub use`／`pub mod` から到達できるものだけを「ある」とし、内部クレートにだけ実装があるもの（`Var::custom`・3D プーリングの層型・参照モデル・サンプリング版 speculative 等）は「未公開」と書く |
+| 判定 | 0.10.0 で「部分的」だった 9 行は、未公開・保留が残るため 9 行とも「部分的」のまま |
+| 本文を更新した行 | dtype（`TapeF64`／`VarF64`・低精度 forward の opt-in）、自動微分（高階微分・カスタム VJP・関数型 AD）、演算の範囲（FFT 等の追加。根拠のない演算数「約 110」は削除）、NN 層（`add_*` 31 → 65・Transformer デコーダ・GroupNorm 等）、最適化（optimizer 8 種・scheduler 2 種の追加・param groups・EMA・SWA）、相互運用（npy／npz の公開。ONNX export は import 済みモデルの往復に限る）、事前学習済みモデル（取り込み手段に npy／npz）、推論（`generate()`・KV キャッシュ・speculative decoding・連続バッチング・テキスト変換） |
+| 変えていない行 | バックエンド・ハード（再監査で「0.10.0 から変化なし」）。層・役割・言語・配布・固有の仕組み・本ページの性能実測の 4 行は再監査の対象外のため 0.10.0 版の記述のまま |
+| 他列 | PyTorch・TensorFlow・SciPy・Hugging Face・LangChain の列は変更していない |
 
 ## スクリプトの失敗検知
 
@@ -167,4 +175,4 @@ python3 scoreboard/gen_0110.py \
 
 ## 公開先
 
-未公開。#2682 の対応表更新後に公開する。
+スコアボードは claude.ai Artifact として公開した（非公開の個人 Artifact。<https://claude.ai/artifact/6q53rzd19gD8rJwfVHdh6L>）。#2682 の対応表更新を反映した版で、0.10.0 版のページは上書きしていない。
