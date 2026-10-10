@@ -3,9 +3,9 @@
 #
 # 失敗検知: 各段階の失敗（run_all_cuda.sh の非ゼロ終了・個別計測の失敗・期待行数との不一致）は
 # FAILED に記録し、最後に非ゼロで終了する。期待行数は 0.11.0 の構成（stage1 112 行・skipped 0、
-# stage2 8 行、stage3 28 行）に固定している。計測後に PR #2498 の codex P2 を受けて追加した。
-# 2026-10-03 の 5 ラウンドを実際に回したのは、この検知を入れる前の版（コミット 8c152036 の本ファイル）。
-# その 5 ラウンドに失敗がなかったことは README の「DGX スクリプトの失敗検知（事後確認）」で確認済み。
+# stage2 8 行、stage3 28 行）に固定している。この検知は 0.10.0 の計測後に PR #2498 の codex P2 を受けて追加した。
+# 0.11.0 の 5 ラウンド（2026-10-10・main 624d0ee4）は、この検知を含む本版で回した（gb10/run*/run.log）。
+# 0.10.0 計測時の経緯（コミット 8c152036 の版で回したこと・事後確認）は `docs/perf/logs/framework-compare-0.10.0-remeasure/README.md` を参照。
 set -uo pipefail
 export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 ROOT="${HOME}/work/rust-ai-library-run"; FC="${ROOT}/scripts/bench/framework-compare"
