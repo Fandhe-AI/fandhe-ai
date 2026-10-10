@@ -24,15 +24,16 @@ R6: 規則は実測後に緩和しない。変更が必要なら人間承認を�
 ```sh
 env PATH=...:$PATH CARGO_TARGET_DIR=... \
   cargo test -p bench-harness --release --test transformer_workload \
-  -- transformer_block_forward_bench_cuda_prefusion --ignored --nocapture
-# 同様に transformer_block_forward_bench_cuda_fused
+  -- transformer_block_forward_bench_cuda_prefusion --exact --ignored --nocapture
+# 同様に（いずれも --exact を付ける）
+#       transformer_block_forward_bench_cuda_fused
 #       transformer_block_forward_cuda_fused_parity
 ```
 
 PyTorch 基準（`torch==2.13.0+cu130`）:
 
 ```sh
-python3 scripts/bench-transformer-pytorch.py
+python3 scripts/bench-transformer-pytorch.py --device cuda
 ```
 
 記入欄（単位は `transformer-workload-baseline.md` §3 に従う）:
