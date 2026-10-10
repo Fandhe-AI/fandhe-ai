@@ -22,13 +22,15 @@ use fandhe_ai_tensor_core::{BackendOps, Tensor};
 static GATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// ゲートを ON にし、drop で OFF へ戻す。
-struct GateOn<'a>(#[allow(dead_code)] std::sync::MutexGuard<'a, ()>);
+struct GateOn<'a> {
+    _guard: std::sync::MutexGuard<'a, ()>,
+}
 
 impl<'a> GateOn<'a> {
     fn new(on: bool) -> Self {
         let g = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_gpu_linalg_enabled(on);
-        Self(g)
+        Self { _guard: g }
     }
 }
 
