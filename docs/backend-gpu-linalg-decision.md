@@ -52,7 +52,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 
 - **CUDA**: ネイティブ `double` で内部計算し出力時に 1 回だけ `f32` へ落とす（`docs/autodiff-linalg-design.md` §3.5 と同契約。f64 ネイティブカーネルの先例は `crates/backend-cuda/src/typed_f64.rs`）。CPU 参照実装は `mul_add` を使わず乗算・減算を別々に行うため、カーネルは FMA 縮約を明示禁止する（`__dmul_rn`／`__dsub_rn`／`__ddiv_rn`／`__dsqrt_rn`、または NVRTC の fmad 無効化）。目標は CPU と bit 一致だが、**受け入れ判定は REQ-2 統一複合判定**とし bit 一致は受け入れ条件にしない。matmul 系 FMA 契約（`f32::mul_add`）は不変で、線形代数は「FMA なしの CPU 線形代数参照実装に合わせる」別軸として扱う
 - **Metal**: ネイティブ f32（#2672／#2676 の指定）。`MathMode::Safe` と `precise::` 系（除算・sqrt）で FMA 縮約を抑止する。soft_f64（`crates/backend-metal/src/soft_f64.rs`）は不採用: 正しく丸めた sqrt がなく Cholesky／QR を bit 一致させられない／LU 更新は O(n³) でエミュレーションコストが過大。ホストの f64 フォールバックに対し**精度クラスが変わる**
-- **エラー写像**: カーネル検出の「ピボット厳密 0」「非正定値の対角」「Jacobi 非収束」はデバイス側フラグを読み戻して `BackendError::InvalidArgument`。`Unsupported` は「未実装またはゲート OFF」に限る。非有限値は CPU と同じ（LU 素通し・Cholesky 拒否・eigh は入口で `require_finite` が拒否）。n = 0 はデバイス初期化前にホストで CPU と同じ結果を返す
+- **エラー写像**: カーネル検出の「ピボット厳密 0」（**solve／inv に限る**。det は特異行列で `0.0` を正常に返す CPU 契約〈`backend-cpu::linalg::det`・`docs/autodiff-linalg-design.md`〉に合わせ、ピボット 0 をエラーにせず `0.0` を返す分岐を #2676 へ申し送る）「非正定値の対角」「Jacobi 非収束」はデバイス側フラグを読み戻して `BackendError::InvalidArgument`。`Unsupported` は「未実装またはゲート OFF」に限る。非有限値は CPU と同じ（LU 素通し・Cholesky 拒否・eigh は入口で `require_finite` が拒否）。n = 0 はデバイス初期化前にホストで CPU と同じ結果を返す
 - **REQ-8**: カーネル側の手動境界チェックを省略しない。確保前にバイト数上限検査と shape 検査（`require_square_2d` 相当）を行い、ゲート判定はデバイス初期化より前に置く
 
 ## 5. parity 判定方式
