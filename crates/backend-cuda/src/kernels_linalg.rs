@@ -207,6 +207,6 @@ mod tests {
         assert_eq!(LINALG_LU_BLOCK_DIM, 256);
         assert!(LINALG_LU_F64.contains("#define LU_BLOCK 256"));
         assert!(LINALG_LU_BLOCK_DIM.is_power_of_two());
-        assert!(LINALG_SOLVE_BLOCK_DIM > 0);
+        const { assert!(LINALG_SOLVE_BLOCK_DIM > 0) };
     }
 }
