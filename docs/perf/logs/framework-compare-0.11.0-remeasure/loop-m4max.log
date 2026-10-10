@@ -1,0 +1,12 @@
+run1: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:45:01Z
+run2: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:46:11Z
+run3: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:47:22Z
+run4: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:48:32Z
+run5: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:49:42Z
+ALL-DONE completed=5/5
+run1: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:50:52Z
+run2: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:52:03Z
+run3: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:53:13Z
+run4: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:54:24Z
+run5: done. rows=      48 pyrows=      32 skipped=       4 2026-10-10T08:55:34Z
+ALL-DONE completed=5/5
