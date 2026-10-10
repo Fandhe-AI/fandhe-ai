@@ -6,7 +6,9 @@
 //! `mod models;` で取り込み、統合テスト側は本ファイルを経由せず `#[path]` で個別に
 //! 直接取り込む（各ファイルは単独で完結する）。
 //!
-//! `resnet.rs`／`transformer.rs`（イシュー #2202）は意図的に本モジュールへ登録していない。
+//! `resnet.rs`／`transformer.rs`（イシュー #2202。モデル本体は #2975 で
+//! `fandhe_ai::models::{ResNet, TransformerClassifier}` として公開済みで、examples 側には
+//! `ReferenceModule`／`Trainable` への委譲だけが残る）は意図的に本モジュールへ登録していない。
 //! 学習 script が `crates/facade/examples/main.rs`（`reference_models.rs` とは別の
 //! runnable example）であり、`#[path]` による個別取り込み方式を採るため
 //! （`docs/reference-models-decision.md` #2202 節「配置・取り込み方」参照）。

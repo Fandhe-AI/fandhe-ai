@@ -211,9 +211,11 @@ mod optim_swa;
 // intra-doc link が親スコープで解決され壊れるため）。
 pub mod text;
 
-// 参照モデル `Mlp`／`LeNet`（PyTorch の定番モデル。イシュー #2974・親 #2541 の Phase 11-1）。
+// 参照モデル `Mlp`／`LeNet`／`ResNet`／`ResNetBlock`／`TransformerClassifier`／
+// `TransformerClassifierConfig`（PyTorch の定番モデル。イシュー #2974・親 #2541 の Phase 11-1 と
+// #2975 の Phase 11-2）。
 // 承認: イシュー #2499 コメント 6097478475（`docs/reference-models-decision.md` §11）。
-// 公開パスは `models` の 2 名のみで、サブモジュールは非公開・クレートルートへの
+// 公開パスは `models` の 6 名のみで、サブモジュールは非公開・クレートルートへの
 // 再エクスポートはしない。モジュール doc は `models/mod.rs` の `//!` に置く（外側 `///` と
 // 併記すると intra-doc link が親スコープで解決され壊れるため）。
 pub mod models;
