@@ -128,7 +128,13 @@ fandhe-ai 自身の reuse 行の中央値（時間比 0.11.0 ÷ 0.10.0。gemm・
 
 ## 役割・機能の対応表（計測外）
 
-ページ下部の「役割・機能の対応表」は **0.10.0 版の内容のまま**にしてある。対応表は #2682 で v0.11.0 タグ基準の監査結果（`docs/perf/framework-compare-feature-matrix-0.11.0.md`）へ更新する。
+ページ下部の「役割・機能の対応表」の fandhe-ai 列は、タグ `v0.11.0`（`6b14fdb4`）の facade 公開面で再監査した結果（監査記録の日付 2026-10-09・`docs/perf/framework-compare-feature-matrix-0.11.0.md`）に更新した（#2682）。
+
+| 項目 | 内容 |
+|---|---|
+| 判定基準 | facade の `pub use`／`pub mod` から到達できるものだけを公開扱いとする。未公開・保留が 1 項目でも残る行は「部分的」。承認済みの非目標（対象外）は行を下げない |
+| 主な変化 | 9 行とも判定は「部分的」のまま、内訳が公開側へ動いた。`Sequential::add_*` 31→65、optimizer 拡充・param groups・EMA・SWA、高階微分・関数型 AD、`generate`・KV キャッシュ・speculative decoding、npy／npz、f64 autograd。監査対象外の 4 行は 0.10.0 版を継承し、層・役割の公開モジュール列挙（`inference`・`text` 追加）のみ更新。実機 parity は一部のみ実測済みで、残りは未実測 |
+| 他列 | PyTorch・TensorFlow・SciPy・Hugging Face・LangChain の列は変更していない |
 
 ## スクリプトの失敗検知
 
@@ -167,4 +173,4 @@ python3 scoreboard/gen_0110.py \
 
 ## 公開先
 
-未公開。#2682 の対応表更新後に公開する。
+未公開。対応表は #2682 で更新済み。Artifact としての公開は所有者の操作で行う。
