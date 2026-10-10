@@ -323,7 +323,6 @@ fn tops_check(_input: &[u32], out: &[u32]) -> Outcome {
 
 // ------------------------------------------------------------ プローブ表
 
-#[allow(clippy::too_many_arguments)]
 fn spec(
     id: &'static str,
     src: &'static str,
