@@ -353,6 +353,12 @@ required-features = ["internal-diagnostics"]
 name = "sm121_isa_probe_exec_real_device"
 required-features = ["internal-diagnostics"]
 
+# イシュー #2608: INT8 MMA プローブも #2122 の共有ハーネス（`device.context()` 等）を
+# `#[path]` で取り込むため、同じ理由で `internal-diagnostics` feature を要求する。
+[[test]]
+name = "int8_mma_probe_real_device"
+required-features = ["internal-diagnostics"]
+
 # `tests/setmaxnreg_common/mod.rs`（`device.context()`/`device.stream()` を
 # 使う共有ヘルパー）を `mod setmaxnreg_common;` で取り込む 4 ファイル。
 # 直接 grep では検出されない間接使用のため見落としやすい（PR #1390 再修正

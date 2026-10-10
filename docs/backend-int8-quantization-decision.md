@@ -89,7 +89,7 @@ grep -rn "s8\b\|int8\|m16n8k32\|f8f6f4" crates/ | grep -v "compute_121"
 
 ### 3.3 再開条件・起票候補（本 PR では起票しない。`.claude/rules/out-of-scope-tracking.md` の承認規則に従う）
 
-1. (b) 向け: `#[ignore]` 実機プローブ `crates/backend-cuda/tests/int8_mma_probe_real_device.rs`（`tma_probe_real_device.rs` 同型。`compute_121`→`121a`→`121f` の順に NVRTC コンパイル・小形状実行・ホスト `i32` 参照との bit 一致）。**本 issue では追加しない**（GB10 実機到達手段なし・`crates/` 変更がスコープ争点になるため）。
+1. (b) 向け: `#[ignore]` 実機プローブ `crates/backend-cuda/tests/int8_mma_probe_real_device.rs`（`tma_probe_real_device.rs` 同型。`compute_121`→`121a`→`121f` の順に NVRTC コンパイル・小形状実行・ホスト `i32` 参照との bit 一致）。**本 issue では追加しない**（GB10 実機到達手段なし・`crates/` 変更がスコープ争点になるため）。→ その後 #2608 で追加・GB10 実測済み（`docs/perf/logs/int8-mma-probe-2608/README.md`。INT8 のみ・FP8 は未実施）。
 2. (d) 向け: quantize–dequantize 参照実装との一致判定＋スケール前提付き f32 誤差上限の閾値案・実測。
 3. (c) 向け: Transformer 複合 WL 実機ベースライン（既存の親 #154 系列の記入）。
 4. a〜e 充足後: Phase 4 要件見直しで新 REQ（REQ-15 候補・Could）を spec 側へ提案（`docs/spec-proposal-fp8-int8-quant-gemm.md` を更新して再提出）→ 承認後に実装 issue（G-16 量子化キャスト／G-17 量子化 GEMM 相当）を起票。

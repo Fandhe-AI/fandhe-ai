@@ -26,12 +26,12 @@ cargo run -p docs-site -- --out dist/
 ## インストール
 
 本ライブラリは Rust の `stable` チャンネルを前提としています（リポジトリ直下の
-[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io（v0.4.0・
-2026-08-29 公開済み）から利用できます。
+[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io（v0.11.0・
+2026-10-09 公開済み）から利用できます。
 
 ```toml
 [dependencies]
-fandhe-ai = "0.4.0"
+fandhe-ai = "0.11.0"
 ```
 
 公開ドキュメントは以下のとおりです。
@@ -96,11 +96,11 @@ cargo run -p fandhe-ai --example getting_started
 | `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`tape()`／`tape_for(Device)`）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`（`Sgd`／`AdamW` 等）・デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）の 4 つを確定入口として提供します（[`docs/compat-api-scope.md`](docs/compat-api-scope.md) §0） |
 | `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
 
-上記 6 クレートが crates.io 公開対象です（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
+上記 6 クレートと、下記の `fandhe-ai-onnx-interop` の計 7 クレートが crates.io 公開対象です（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
 ディレクトリ名（`crates/tensor-core` 等）はリネーム前のまま維持しており、
 `[package] name`（crates.io 公開名）のみ `fandhe-ai` prefix 付きへ変更しています。
 相互運用（ONNX／safetensors）を担う `fandhe-ai-onnx-interop`（`crates/onnx-interop`）は
-次回リリースサイクルから 7 クレート目として crates.io 公開対象に加わります。
+v0.10.0（2026-10-03）から 7 クレート目として crates.io に公開しています。
 ONNX import／export は `fandhe_ai::interop::onnx`（`OnnxModel`／
 `OnnxValue`／`OnnxError`・`OnnxModel::{from_bytes, from_path, run,
 to_bytes, to_path}`・`OnnxExportOptions`）として `fandhe-ai` から公開済み
@@ -128,7 +128,7 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 - **crates.io 公開済み**: 初回公開 v0.3.0（6 クレート: `fandhe-ai`・
   `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
   `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`）を 2026-08-23 に、
-  最新 v0.4.0 を 2026-08-29 に公開済み
+  最新 v0.11.0 を 2026-10-09 に公開済み（公開履歴の正は [`docs/crates-io-publishing-order.md`](docs/crates-io-publishing-order.md) §10）
 - **ドキュメントサイト公開済み**: https://fandhe-ai.github.io/fandhe-ai/
 - **実装の進行状況**: コア（テンソル・autodiff・演算グラフ／カーネル融合機構）・
   3 バックエンド（CPU／CUDA／Metal）の実装と性能実測を継続中
@@ -281,7 +281,7 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 
 ### ロードマップ・タスク
 
-`docs/spec/06-roadmap.md` のマイルストーン（M0〜M5）と `docs/spec/05-tasks.md` のタスク（4h 粒度）に従って実装します。M0（workspace・CI・依存監査ベースライン）は完了し、コア・3 バックエンドの実装と性能実測、crates.io 公開（v0.4.0）・ドキュメントサイト公開まで到達しています（「ステータス」節参照）。未着手・進行中の作業は GitHub Issues で追跡しています。
+`docs/spec/06-roadmap.md` のマイルストーン（M0〜M5）と `docs/spec/05-tasks.md` のタスク（4h 粒度）に従って実装します。M0（workspace・CI・依存監査ベースライン）は完了し、コア・3 バックエンドの実装と性能実測、crates.io 公開（最新 v0.11.0）・ドキュメントサイト公開まで到達しています（「ステータス」節参照）。未着手・進行中の作業は GitHub Issues で追跡しています。
 
 ### Conventional Commits と git hooks
 

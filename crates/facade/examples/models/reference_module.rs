@@ -10,9 +10,9 @@
 //! 内部の `fandhe_ai_autodiff::nn::Module` を impl することもしない
 //! （公開パス限定の方針）。本ファイルはその代わりに、PyTorch
 //! `nn.Module` に似せた examples 限定の利用者コードとして
-//! `ReferenceModule` trait を定義し、`resnet.rs`／`transformer.rs` の
-//! 各型（ブロック・モデル本体の両方）に実装させることで層積層の
-//! trait 化を示す。
+//! `ReferenceModule` trait を定義し、`resnet.rs`／`transformer.rs` が
+//! 公開型 `fandhe_ai::models::{ResNet, TransformerClassifier}`（#2975 で公開）へ
+//! examples 側で実装する。
 //!
 //! `resnet.rs`・`transformer.rs`・`crates/facade/examples/main.rs`・
 //! `crates/facade/tests/example_resnet_cifar10.rs`・
@@ -175,6 +175,68 @@ pub fn scalar_of(t: &Tensor<f32>) -> Result<f32, AutodiffError> {
             "scalar_of: loss テンソルの shape が [] ではない".to_string(),
         )
     })
+}
+
+/// eval モードで `x`／`y` の標本平均 cross-entropy loss を計算する（held-out loss の
+/// 報告用）。バッチごとの mean loss にバッチ長を掛けて標本合計へ戻し、最後に標本数で
+/// 割る。呼び出し前の training モードを保存し、成功・失敗いずれの経路でも復元する
+/// （`accuracy` と同じ方針）。公開面の `train_step` は損失ヘルパーを持たないため、本関数が
+/// examples 側の `cross_entropy_mean`／`scalar_of` の消費者になる（#2975）。
+pub fn heldout_loss<M: ReferenceModule>(
+    model: &mut M,
+    x: &Tensor<f32>,
+    y: &Tensor<i32>,
+    batch_size: usize,
+    num_classes: usize,
+) -> Result<f32, AutodiffError> {
+    if batch_size == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "heldout_loss: batch_size は 0 より大きい必要がある".to_string(),
+        ));
+    }
+    let x_shape = x.shape();
+    if x_shape.is_empty() || x_shape[0] == 0 {
+        return Err(AutodiffError::InvalidArgument(
+            "heldout_loss: x は rank 1 以上かつ空でない必要がある".to_string(),
+        ));
+    }
+    let n = x_shape[0];
+    if y.shape() != [n] {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "heldout_loss: x の先頭軸長 {n} と y の shape {:?} が一致しない",
+            y.shape()
+        )));
+    }
+    let original_training = model.is_training();
+    model.set_training(false);
+    let result = heldout_loss_in_eval(model, x, y, n, batch_size, num_classes);
+    model.set_training(original_training);
+    result
+}
+
+/// [`heldout_loss`] の評価ループ本体（eval 設定済み・入力検証済みが前提）。
+fn heldout_loss_in_eval<M: ReferenceModule>(
+    model: &M,
+    x: &Tensor<f32>,
+    y: &Tensor<i32>,
+    n: usize,
+    batch_size: usize,
+    num_classes: usize,
+) -> Result<f32, AutodiffError> {
+    let mut total = 0.0f32;
+    let mut start = 0;
+    while start < n {
+        let len = batch_size.min(n - start);
+        let xb = sub_tensor_f32(x, start, len)?;
+        let yb = sub_tensor_i32(y, start, len)?;
+        let tape = fandhe_ai::tape();
+        let xv = tape.var(&xb);
+        let logits = model.forward(&tape, &xv)?;
+        let loss = cross_entropy_mean(&tape, &logits, &yb, num_classes)?;
+        total += scalar_of(&loss.to_tensor())? * len as f32;
+        start += len;
+    }
+    Ok(total / n as f32)
 }
 
 /// eval モードで `x` を推論し `Tensor<f32>` を返す（`ResNet::predict`／

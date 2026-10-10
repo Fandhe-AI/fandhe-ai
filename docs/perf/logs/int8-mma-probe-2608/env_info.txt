@@ -1,0 +1,5 @@
+device: NVIDIA GB10 (compute capability 12.1) / driver 580.173.02 / aarch64
+nvcc: cuda_13.0.r13.0 (V13.0.88) / NVRTC 13.0
+node: <cuda-node>（GPU utilization 0% を実行前に確認）
+build: cargo test -p fandhe-ai-backend-cuda --all-features --release --test int8_mma_probe_real_device
+source: base 58fe16ff + 本イシューの未コミット差分を rsync（ノード側に .git なし）

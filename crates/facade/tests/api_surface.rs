@@ -27333,7 +27333,7 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 15] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 16] = [
     "compat",
     "data",
     "inference",
@@ -27342,6 +27342,7 @@ const GRAD_SCALER_PROBE_MODULES: [&str; 15] = [
     "interop::onnx",
     "interop::safetensors",
     "model",
+    "models",
     "nn",
     "nn::init",
     "nn::kv_cache",
@@ -27373,6 +27374,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use fandhe_ai::interop::safetensors::*;
     pub use fandhe_ai::interop::*;
     pub use fandhe_ai::model::*;
+    pub use fandhe_ai::models::*;
     pub use fandhe_ai::nn::init::*;
     pub use fandhe_ai::nn::kv_cache::*;
     pub use fandhe_ai::nn::loss::*;
@@ -38889,4 +38891,442 @@ fn text_usage_doctest_is_present_and_compiled() {
         joined.contains("ASCII") && joined.contains("小文字化") && joined.contains("空白分割"),
         "公開 doc に小文字化と空白分割が ASCII 限定であることの明記がない"
     );
+}
+// ---------------------------------------------------------------------
+// イシュー #2974（親 #2541・Phase 11-1）: 参照モデル `Mlp`／`LeNet` の facade 公開、
+// イシュー #2975（Phase 11-2）で `ResNet`／`ResNetBlock`／`TransformerClassifier`／
+// `TransformerClassifierConfig` へ拡張
+// （`docs/reference-models-decision.md` §11。承認: イシュー #2499 コメント 6097478475）。
+//
+// 検出範囲の限界（過剰に保証しない）: いずれもトークン走査で、マクロ生成・`use … as` 別名経由の
+// 到達は範囲外（別名・glob・分割は承認形の完全一致が拒否する。型レベルの到達性・署名は到達
+// プローブが担う）。否定ガードは stable rustdoc の `compile_fail` コード照合を当てにせず、
+// 正のプローブとインベントリで組む。
+
+/// `models/mod.rs` の `pub use` 文を、空白なしトークン連結で全件返す（昇順）。
+fn models_pub_uses(files: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        if rel != "models/mod.rs" {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                out.push(tokens[i + 2..end].concat().replace(",}", "}"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `models/` 配下の全 `.rs` から、完全公開（`pub` で `pub(…)` でない）の項目を
+/// `(ファイル, 種別:名前)` で全件返す（昇順）。`pub` の直後が `(` でも種別語でもない
+/// トークン（`pub` フィールド・`pub async fn` 等）は `other:<トークン>` として返し、
+/// 種別一覧をすり抜ける公開を検出する。
+fn models_pub_items(files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        if !rel.starts_with("models/") {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t != "pub" {
+                continue;
+            }
+            let Some(kind) = tokens.get(i + 1) else {
+                continue;
+            };
+            if kind == "(" {
+                continue;
+            }
+            if matches!(
+                kind.as_str(),
+                "struct"
+                    | "enum"
+                    | "fn"
+                    | "const"
+                    | "static"
+                    | "type"
+                    | "trait"
+                    | "union"
+                    | "mod"
+                    | "use"
+            ) {
+                let name = tokens.get(i + 2).cloned().unwrap_or_default();
+                out.push((rel.clone(), format!("{kind}:{name}")));
+            } else {
+                out.push((rel.clone(), format!("other:{kind}")));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `models` が公開モジュールで、配下のサブモジュールは公開されないこと。
+#[test]
+fn models_is_public_and_submodules_stay_private() {
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    assert!(
+        declared.contains("models"),
+        "`pub mod models` が公開モジュールとして検出されない: {declared:?}"
+    );
+    let nested: Vec<&String> = declared
+        .iter()
+        .filter(|m| m.starts_with("models::"))
+        .collect();
+    assert!(
+        nested.is_empty(),
+        "`models` 配下に pub mod が公開されている（フラットな 6 名のみ）: {nested:?}"
+    );
+}
+
+/// 正のガード: 公開は `models/mod.rs` の承認形 6 文（6 名）だけで、完全公開の項目は承認済みの
+/// 6 型と承認済みメソッド・構成値フィールドだけ。サブモジュールの公開・別名・glob・pub フィールド・
+/// 未承認メソッド（PyTorch 対応表等）の公開はすべて拒否する。
+#[test]
+fn facade_exposes_models_items_only_in_approved_shape() {
+    let files = facade_src_files();
+    assert_eq!(
+        models_pub_uses(&files),
+        vec![
+            "lenet::LeNet".to_string(),
+            "mlp::Mlp".to_string(),
+            "resnet::ResNet".to_string(),
+            "resnet::ResNetBlock".to_string(),
+            "transformer_classifier::TransformerClassifier".to_string(),
+            "transformer_classifier::TransformerClassifierConfig".to_string(),
+        ],
+        "models の公開は models/mod.rs の承認形 6 文（6 名）のみ（決定記録 §11・§11.8）"
+    );
+
+    let mut expected: Vec<(String, String)> = Vec::new();
+    for (file, kinds) in [
+        (
+            "models/mlp.rs",
+            vec![
+                "struct:Mlp",
+                "fn:new",
+                "fn:with_seed",
+                "fn:forward",
+                "fn:predict",
+                "fn:sequential",
+                "fn:sequential_mut",
+                "fn:dropout",
+            ],
+        ),
+        (
+            "models/lenet.rs",
+            vec![
+                "struct:LeNet",
+                "fn:new",
+                "fn:forward",
+                "fn:predict",
+                "fn:sequential",
+                "fn:sequential_mut",
+                "fn:num_classes",
+            ],
+        ),
+        (
+            "models/resnet.rs",
+            // `fn:new` は 1 件だけ（`ResNetBlock::new` は非公開。公開されると件数不一致で検出）。
+            vec![
+                "struct:ResNetBlock",
+                "fn:has_projection_shortcut",
+                "struct:ResNet",
+                "fn:new",
+                "fn:forward",
+                "fn:predict",
+                "fn:named_parameters",
+                "fn:set_training",
+                "fn:training",
+                "fn:train_step",
+                "fn:depth",
+                "fn:width",
+                "fn:num_classes",
+                "fn:num_blocks",
+                "fn:blocks",
+            ],
+        ),
+        (
+            "models/transformer_classifier.rs",
+            vec![
+                "struct:TransformerClassifierConfig",
+                "other:seq_len",
+                "other:in_features",
+                "other:embed_dim",
+                "other:num_heads",
+                "other:num_layers",
+                "other:dim_feedforward",
+                "other:mlp_hidden",
+                "other:num_classes",
+                "fn:cifar10",
+                "struct:TransformerClassifier",
+                "fn:new",
+                "fn:forward",
+                "fn:predict",
+                "fn:named_parameters",
+                "fn:set_training",
+                "fn:training",
+                "fn:train_step",
+                "fn:config",
+            ],
+        ),
+        (
+            "models/mod.rs",
+            vec![
+                "use:lenet",
+                "use:mlp",
+                "use:resnet",
+                "use:resnet",
+                "use:transformer_classifier",
+                "use:transformer_classifier",
+            ],
+        ),
+    ] {
+        for k in kinds {
+            expected.push((file.to_string(), k.to_string()));
+        }
+    }
+    expected.sort();
+    assert_eq!(
+        models_pub_items(&files),
+        expected,
+        "models/ の完全公開項目は承認済みの 6 型・公開メソッド・構成値フィールド・`pub use` 6 文のみ\
+         （決定記録 §11・§11.8。`train_support.rs` は公開項目なし）"
+    );
+}
+
+/// 検出器が各カテゴリを拾えることの自己テスト（`facade_exposes_models_items_only_in_approved_shape` 用）。
+#[test]
+fn facade_exposes_models_items_only_in_approved_shape_detects_each_category() {
+    let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
+    for (src, want) in [
+        ("pub use mlp::*;", "mlp::*"),
+        ("pub use mlp::Mlp as M;", "mlp::MlpasM"),
+        ("pub use resnet::ResNet;", "resnet::ResNet"),
+        (
+            "pub use transformer_classifier::*;",
+            "transformer_classifier::*",
+        ),
+    ] {
+        assert_eq!(
+            models_pub_uses(&f("models/mod.rs", src)),
+            vec![want.to_string()]
+        );
+    }
+    assert!(models_pub_uses(&f("lib.rs", "pub use models::Mlp;")).is_empty());
+    assert!(models_pub_uses(&f("models/mod.rs", "pub(crate) use a::B;")).is_empty());
+    for (src, want) in [
+        ("pub fn pytorch_param_map() {}", "fn:pytorch_param_map"),
+        ("pub struct MlpParamMap;", "struct:MlpParamMap"),
+        ("pub trait ReferenceModule {}", "trait:ReferenceModule"),
+        ("pub mod mlp;", "mod:mlp"),
+        ("struct S { pub model: u8 }", "other:model"),
+        ("pub async fn f() {}", "other:async"),
+        ("pub fn is_training() {}", "fn:is_training"),
+        ("pub fn cross_entropy_mean() {}", "fn:cross_entropy_mean"),
+    ] {
+        assert_eq!(
+            models_pub_items(&f("models/mlp.rs", src)),
+            vec![("models/mlp.rs".to_string(), want.to_string())]
+        );
+    }
+    assert!(models_pub_items(&f("models/mlp.rs", "pub(crate) struct Mlp;")).is_empty());
+    assert!(models_pub_items(&f("other.rs", "pub struct Mlp;")).is_empty());
+}
+
+/// 未承認経路の否定ガード（トークン単位。コメント・文字列は無視）:
+/// - facade の `src/` に PyTorch 対応表（`pytorch_param_map`・`MlpParamMap`・`LeNetParamMap`）と
+///   trait 化（`ReferenceModule`・`Trainable`）の識別子、examples 限定の学習ユーティリティ
+///   （`is_training`・`fit_epochs`・`predict_in_eval`・`sub_tensor_*`・`synthetic_cifar10`・
+///   `to_row_tokens`）の識別子がない（examples に残す。決定記録 §11・§11.8）。
+///   `cross_entropy_mean`／`scalar_of` は `models/train_support.rs` の非公開コピーが同名のため
+///   識別子では拒否せず、公開されていないことを `pub` 項目インベントリの完全一致が担保する
+/// - `models/` の外に 6 型のいずれかを含む `pub use`（クレートルートへの再エクスポート）がない
+/// - `models/` 配下に保存経路が生じていない（`nn::Module` の実装・`sequential` アクセサ・
+///   `state_dict` を新型に持たせない。`Mlp`／`LeNet` の `sequential` は承認済みの例外）
+#[test]
+fn models_unapproved_paths_are_absent() {
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, content) in &facade_src_files() {
+        let tokens = tokens_of(content);
+        for t in &tokens {
+            if matches!(
+                t.as_str(),
+                "pytorch_param_map"
+                    | "MlpParamMap"
+                    | "LeNetParamMap"
+                    | "ReferenceModule"
+                    | "Trainable"
+                    | "is_training"
+                    | "fit_epochs"
+                    | "predict_in_eval"
+                    | "sub_tensor_f32"
+                    | "sub_tensor_i32"
+                    | "synthetic_cifar10"
+                    | "to_row_tokens"
+            ) {
+                violations.push(format!("{rel}: 未承認の識別子 {t}"));
+            }
+        }
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                let stmt = &tokens[i + 2..end];
+                if !rel.starts_with("models/")
+                    && stmt.iter().any(|x| {
+                        matches!(
+                            x.as_str(),
+                            "models"
+                                | "Mlp"
+                                | "LeNet"
+                                | "ResNet"
+                                | "ResNetBlock"
+                                | "TransformerClassifier"
+                                | "TransformerClassifierConfig"
+                        )
+                    })
+                {
+                    violations.push(format!("{rel}: models の再エクスポート {}", stmt.concat()));
+                }
+            }
+        }
+    }
+    // 保存経路の不在（R5）: ResNet／TransformerClassifier は `nn::Module` 実装・`state_dict`・
+    // `sequential` アクセサを持たない（`compat::save_model`／`load_model` へ渡す経路を作らない）。
+    for (rel, content) in &facade_src_files() {
+        if !matches!(
+            rel.as_str(),
+            "models/resnet.rs" | "models/transformer_classifier.rs" | "models/train_support.rs"
+        ) {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if matches!(
+                t.as_str(),
+                "state_dict" | "sequential" | "sequential_mut" | "Module"
+            ) {
+                violations.push(format!("{rel}: 保存経路を生む識別子 {t}"));
+            }
+            if t == "impl" && tokens[i + 1..].iter().take(6).any(|x| x == "for") {
+                violations.push(format!("{rel}: trait 実装（impl … for …）が存在する"));
+            }
+        }
+    }
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// 正のプローブ: 公開 6 型が `fandhe_ai::models` パスだけで到達でき、メソッドの署名が
+/// 承認形（決定記録 §11）に一致すること（コンパイルが通ること自体が検査）。
+#[test]
+fn models_items_are_reachable_via_facade_models_path() {
+    use fandhe_ai::compat::Sequential;
+    use fandhe_ai::models::{
+        LeNet, Mlp, ResNet, ResNetBlock, TransformerClassifier, TransformerClassifierConfig,
+    };
+    use fandhe_ai::optim::Adam;
+    use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
+
+    let _: fn(usize, &[usize], usize, f32) -> Result<Mlp, AutodiffError> = Mlp::new;
+    type MlpWithSeed = fn(usize, &[usize], usize, f32, u64) -> Result<Mlp, AutodiffError>;
+    let _: MlpWithSeed = Mlp::with_seed;
+    let _: for<'a, 'b, 't> fn(&'a Mlp, &'t Tape, &'b Var<'t>) -> Result<Var<'t>, AutodiffError> =
+        Mlp::forward;
+    let _: fn(&Mlp, &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> = Mlp::predict;
+    let _: fn(&Mlp) -> &Sequential = Mlp::sequential;
+    let _: fn(&mut Mlp) -> &mut Sequential = Mlp::sequential_mut;
+    let _: fn(&Mlp) -> f32 = Mlp::dropout;
+
+    let _: fn(usize, u64) -> Result<LeNet, AutodiffError> = LeNet::new;
+    let _: for<'a, 'b, 't> fn(&'a LeNet, &'t Tape, &'b Var<'t>) -> Result<Var<'t>, AutodiffError> =
+        LeNet::forward;
+    let _: fn(&LeNet, &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> = LeNet::predict;
+    let _: fn(&LeNet) -> &Sequential = LeNet::sequential;
+    let _: fn(&mut LeNet) -> &mut Sequential = LeNet::sequential_mut;
+    let _: fn(&LeNet) -> usize = LeNet::num_classes;
+
+    // ResNet／ResNetBlock（#2975）。
+    let _: fn(usize, usize, usize, u64) -> Result<ResNet, AutodiffError> = ResNet::new;
+    let _: for<'a, 'b, 't> fn(&'a ResNet, &'t Tape, &'b Var<'t>) -> Result<Var<'t>, AutodiffError> =
+        ResNet::forward;
+    let _: fn(&ResNet, &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> = ResNet::predict;
+    type NamedParams<'a, M> = fn(&'a M) -> Vec<(String, &'a Tensor<f32>)>;
+    let _: NamedParams<'_, ResNet> = ResNet::named_parameters;
+    let _: fn(&mut ResNet, bool) = ResNet::set_training;
+    let _: fn(&ResNet) -> bool = ResNet::training;
+    type ResNetTrainStep =
+        fn(&mut ResNet, &Tensor<f32>, &Tensor<i32>, &mut Adam) -> Result<f32, AutodiffError>;
+    let _: ResNetTrainStep = ResNet::train_step;
+    let _: fn(&ResNet) -> usize = ResNet::depth;
+    let _: fn(&ResNet) -> usize = ResNet::width;
+    let _: fn(&ResNet) -> usize = ResNet::num_classes;
+    let _: fn(&ResNet) -> usize = ResNet::num_blocks;
+    let _: fn(&ResNet) -> &[ResNetBlock] = ResNet::blocks;
+    let _: fn(&ResNetBlock) -> bool = ResNetBlock::has_projection_shortcut;
+
+    // TransformerClassifier／TransformerClassifierConfig（#2975）。
+    type TcNew =
+        fn(TransformerClassifierConfig, u64) -> Result<TransformerClassifier, AutodiffError>;
+    let _: TcNew = TransformerClassifier::new;
+    type TcCifar10 =
+        fn(usize, usize, usize, usize) -> Result<TransformerClassifierConfig, AutodiffError>;
+    let _: TcCifar10 = TransformerClassifierConfig::cifar10;
+    let _: for<'a, 'b, 't> fn(
+        &'a TransformerClassifier,
+        &'t Tape,
+        &'b Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> = TransformerClassifier::forward;
+    let _: fn(&TransformerClassifier, &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> =
+        TransformerClassifier::predict;
+    let _: NamedParams<'_, TransformerClassifier> = TransformerClassifier::named_parameters;
+    let _: fn(&mut TransformerClassifier, bool) = TransformerClassifier::set_training;
+    let _: fn(&TransformerClassifier) -> bool = TransformerClassifier::training;
+    type TcTrainStep = fn(
+        &mut TransformerClassifier,
+        &Tensor<f32>,
+        &Tensor<i32>,
+        &mut Adam,
+    ) -> Result<f32, AutodiffError>;
+    let _: TcTrainStep = TransformerClassifier::train_step;
+    let _: fn(&TransformerClassifier) -> TransformerClassifierConfig =
+        TransformerClassifier::config;
+}
+
+/// 正の doctest プローブ: `models/mod.rs` の利用例が `Mlp::new`・`LeNet::new`・`.predict(` を通す形で
+/// 実在し、実際にコンパイル・実行される形（`ignore` 等の指定なし）で書かれていること。
+#[test]
+fn models_usage_doctest_is_present_and_compiled() {
+    let models_mod = read_to_string_or_panic(&facade_crate_root().join("src/models/mod.rs"));
+    let doc = inner_doc_lines(&models_mod);
+    // Mlp／LeNet の例と、ResNet／TransformerClassifier の例は別ブロック（各ブロックが必須の
+    // プローブを全て含む形で検査する）。
+    let mut v = doctest_probe_violations(
+        "models/mod.rs モジュール doc（Mlp／LeNet）",
+        &doc,
+        &["Mlp::new", "LeNet::new", ".predict("],
+    );
+    v.extend(doctest_probe_violations(
+        "models/mod.rs モジュール doc（ResNet／TransformerClassifier）",
+        &doc,
+        &[
+            "ResNet::new",
+            "TransformerClassifier::new",
+            "TransformerClassifierConfig::cifar10",
+            ".predict(",
+            ".train_step(",
+        ],
+    ));
+    assert!(v.is_empty(), "{v:?}");
 }

@@ -12,7 +12,7 @@
 # を合成したもの。
 #
 # `--readout` override（`bench-fandhe` 側実装）は `Var::host_view` 等
-# （#1335。crates.io 公開版 `fandhe-ai =0.10.0`〈v0.10.0 ピン更新。#1487 の
+# （#1335。crates.io 公開版 `fandhe-ai =0.11.0`〈v0.11.0 ピン更新。#1487 の
 # `=0.8.0` 時点から既に収録済み〉に収録済み）自体は要求せず
 # （`readout_uses_borrowed_view` の device
 # 文字列 1 個の runtime 分岐のみ）、`AB_PATCH_FACADE_PATH` は本スクリプト

@@ -9,8 +9,8 @@
 
 ## 1. 目的と位置づけ
 
-- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.10.0`。2026-10-03 に crates.io 公開済み
-  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.10.0 リリースサイクルで `=0.9.0` から更新）を、既存 ML フレームワーク
+- 目的: fandhe-ai（crates.io 公開版 `fandhe-ai =0.11.0`。2026-10-09 に crates.io 公開済み
+  〈`docs/crates-io-publishing-order.md` §10 追補〉。v0.11.0 リリースサイクルで `=0.10.0` から更新）を、既存 ML フレームワーク
   `candle-core =0.11.0`・`burn =0.21.0` と**同一プロトコル**（同一シード・同一入力・
   同一の同期境界・warmup 20 → 計測 20・中央値 + Q1/Q3）で横並び計測する
 - 本 workspace はベンチ専用ツール（全クレート `publish = false`・非配布）であり、
@@ -30,7 +30,7 @@
   `Cargo.toml`／`Cargo.lock`）への混入は引き続き禁止で、ルート Cargo.lock・
   `cargo tree` に対する `scripts/check-forbidden-deps.sh` が fail-closed に検出する
 - 直接依存は `=x.y.z` 完全固定（`burn =0.21.0`・`candle-core =0.11.0`・
-  `fandhe-ai =0.10.0`）で、`Cargo.lock` をコミットして再現性を確保する
+  `fandhe-ai =0.11.0`）で、`Cargo.lock` をコミットして再現性を確保する
 - 同 workspace の `Cargo.lock` は比較対象という性質上、依存禁止リストのクレート
   （`burn-*`・`candle-*`・`cubecl`・`ndarray`・`tch` 等の推移的混入を含む）を
   **意図的に含む**。このため禁止リスト grep（`check_lock`）は適用せず、代わりに
@@ -38,7 +38,7 @@
   （`check_framework_compare`）を毎回実行する:
   1. `Cargo.lock` の存在（不在はエラー）
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
-  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.10.0）の存在
+  3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.11.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出。加えて各エントリが
      `source = "registry+https://github.com/rust-lang/crates.io-index"` を
      伴うことを要求する＝path/git 依存への差し替えで `source`/`checksum` 行が
@@ -146,6 +146,15 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   推移的依存として加わる（外部依存の新規追加はこれのみ。ライセンスは
   `docs/license-matrix.md` 8b）。`git diff v0.10.0..HEAD -- crates/` は空
   （ピン更新時点）
+- 2026-10-10: 所有者の明示指示（2026-10-10「ok」）に基づき、v0.11.0 の crates.io
+  公開（2026-10-09・`release-all.yml` run 37933003465・tag `v0.11.0` =
+  `6b14fdb4`。7 クレート公開）を受けて `fandhe-ai` 承認ピンを `=0.10.0` から
+  `=0.11.0` へ更新。`Cargo.lock` の差分は自社 7 クレートの版・checksum のみで、
+  外部依存の追加・更新・削除はない（`cargo update -p fandhe-ai --precise
+  0.11.0`）。ピン更新理由は v0.10.0 公開（2026-10-03）以降の facade／各バックエンド
+  の変更（`jvp`／`jacfwd` の公開を含む）を crates.io 公開版としてフレームワーク
+  横並びベンチの比較対象に反映するため。ライセンス・監査は
+  `docs/license-matrix.md` 8b（2026-10-10 再実測）。
 
 ## 5. tch-rs を計測対象に含めない判断
 
