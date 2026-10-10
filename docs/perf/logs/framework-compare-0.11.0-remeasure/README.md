@@ -173,4 +173,4 @@ python3 scoreboard/gen_0110.py \
 
 ## 公開先
 
-未公開。対応表は #2682 で更新済み。Artifact としての公開は所有者の操作で行う。
+スコアボードは claude.ai Artifact として公開した（非公開の個人 Artifact。<https://claude.ai/artifact/HnsM8QtUmorkrd8s9KuRH9>。2026-10-10・main `05c94bf4` の `gen_0110.py` 出力。対応表は #2682 で更新済み）。0.10.0 版のページ（<https://claude.ai/artifact/WHm2rindpSRHoGBNF1B6dX>）は上書きしていない。
