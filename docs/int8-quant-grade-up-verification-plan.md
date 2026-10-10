@@ -1,4 +1,4 @@
-# INT8／FP8 量子化 GEMM の格上げ条件 (b)〜(e) 検証計画（#2075）
+# INT8／FP8 量子化 GEMM の格上げ条件 (b)〜(e) 検証計画（#2075・#2609 で (a)(c)(d) の案を追記）
 
 イシュー #2075「docs(spec): INT8 量子化の格上げ条件検証計画」に対応する。親: #1573（Tier 2）・ルート: #1570。
 
@@ -6,11 +6,19 @@
 
 基準コミット: `0de82718`（main HEAD。2026-09-22 時点）。`file_path:line` は同コミット近傍のもの。後続の変更で行番号がずれる可能性があるため、参照する際は当該コミット、または近傍のコミットで再確認すること。
 
+**#2609 追記（2026-10-11）**: 格上げ条件 (a)・(c)・(d) の案と根拠を §2.1・§4.1・§5.1 に追記した（基準は `ccc7fd5e`〈main HEAD〉。#2608 のマージ後）。上記 #2075 時点の基準コミット行は履歴として残す。spec への引用行番号（`docs/spec/04-requirements.md:358-366` 等）は spec submodule の作業ツリー内容に基づく。pin コミットとずれている場合があるため、投稿前（#2610）に pin で再確認すること。
+
 ## 0. 結論（最初に読む）
 
 - コード変更なし。段階 0（`docs/backend-int8-quantization-decision.md` §3.1）は不変。#1627 は格上げ条件充足・Phase 4 新 REQ 承認まで実装着手不可のまま open（本 PR で close しない）。
 - 正本 spec への提案文案（§7）は本 PR では**未起票**。投稿可否はユーザー承認事項（§8）。
 - 2026-09-17 のユーザー承認（イシュー #1964・CLOSED）は「選択肢 C（量子化・DDP とも現状維持）」であり、「任意で A（spec 側の条件 (a) 表記更新提案）」は明示承認されていない。本 doc の §7 文案に (a) 表記更新を含める場合も、その投稿可否は別途承認が必要（§8 項 1）。
+- **#2609 の結論**（条件 a・c・d の案と根拠。**いずれの条件も充足は宣言しない**。判断は spec 側）:
+  - (a): 量子化経路用の新しい parity 基準は不要。spec (a) は「REQ-2 改定〈spec #56〉確定と Tensor Core 経路の基準確定」であり、状況は §2.1 のとおり実質充足と読める。表記更新の文案は §2.1 に置くが**未投稿**。
+  - (c): 取り方の案は §4.1（CUDA は既存テストの関数名完全一致・5 プロセス中央値、Metal は実行経路が未実装のため案 i／案 ii の選択が承認事項）。**実機は未計測**。測定コマンドと記入欄は `docs/perf/logs/int8-quant-baseline-2609/README.md`。
+  - (d): 閾値案は §5.1。(d-1) は閾値 0〈bit 完全一致〉、(d-2) は f64 真値に対する要素ごとの決定論的上界 `E(m,n)`（係数 1.0・解析値）。要約形の係数は `c = 2/127 + 1/127² ≈ 0.01581`。
+  - **実測の範囲**: spec (d) の「実測付き」のうち、実測済みなのは s32 段の bit 一致（#2608）だけである。f32 段（power-of-2 スケール適用・block 間 f64 合算）と (d-2) の係数確認は、quantize–dequantize 参照実装が必要で、これは spec の除外事項ゲート（`docs/spec/04-requirements.md:365`）で止まっているため**未実施**（阻害要因）。
+  - REQ-2 の `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・`ParityBaseline`・`guardrail.toml` は不変。承認事項は §8 項 9〜13 に列挙したが、**いずれも承認は得ていない**。
 - 条件ラベルの対応（issue 本文の記載と正本 spec の格上げ条件表 a〜e〈`docs/spec/04-requirements.md:360-361`〉は表現が異なるため、本 doc は spec 表の a〜g を正規軸として扱う）:
 
   | issue 記載項目 | 対応する spec 条件 |
@@ -37,6 +45,8 @@
 - **(e)** 依存追加なしで成立する設計が確認されていること。机上では成立する見込みだが実装確認は**未達**（§6）。
 - **(f)(g)**（Could→Should 条件。`:361`）: (f) 量子化 GEMM 試作の実測で f16 経路比のスループット改善が確認されること、(g) REQ-2／REQ-7 の既存閾値を一切変更せずに数値一致検証が成立すること。本 doc では (f) の判定式の骨子のみ §5 に含める。
 
+- **#2609 の案への導線**: (a) → §2.1、(c) → §4.1、(d) → §5.1。上記の「未達」表記は spec 側の表記であり、本 doc では維持する。
+
 HEAD 時点の再確認コマンドと結果:
 
 ```
@@ -50,6 +60,27 @@ grep -rn "mma.sync.aligned" crates/backend-cuda/src
 ```
 
 `docs/backend-int8-quantization-decision.md` §2.1（#1627・2026-09-14 基準）の判定と一致し、HEAD（2026-09-22）でも状況変化なし。
+
+### 2.1 条件 (a) の案（#2609。parity 基準の状況の論証と表記更新案）
+
+**ラベルの区別**: spec (a) が求めるのは「REQ-2 改定〈spec #56〉が確定し、CUDA Tensor Core 経路の parity 基準が定まっていること」である。**量子化経路用の新しい parity 基準を作ることではない**。量子化経路の基準は spec (d)（§5・§5.1）に置く。
+
+根拠（引用は `docs/spec/04-requirements.md` の作業ツリー基準。pin で再確認すること）:
+
+- spec #56 は 2026-08-29 に CLOSED（本 doc §2 の記載を継承）。
+- REQ-2 の 2026-09-02 追記（`:84`）: 統一複合判定を恒常的に満たさない Tensor Core 経路について、形状別の受け入れ判定方式を正式化した。
+- REQ-2 の 2026-09-12 追記（`:98`〜`:101`）: 実測ベースライン非後退方式の適用対象を「単一の連続 K ループと異なる結合順序で部分和を求めるカーネル全般」へ一般化した。tolerance 定数は変更していない（`:101`）。
+- 実装リポ側の決定記録: `docs/cuda-tensor-core-parity-judgment-decision.md`（CUDA 形状二分方式）、`docs/backend-metal-splitk-parity-judgment-decision.md`（Metal 全形状一律 baseline 方式）。
+- 実装: `crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline`、`crates/backend-metal/tests/common/splitk_parity_baseline.rs`。
+
+量子化経路との関係:
+
+- INT8 の s32 累積は整数演算で、結合順序に依存しない。block 間合算は §5 の数値契約で順序と型〈`f64`、Metal は soft-f64〉を固定する。このため INT8 経路は「結合順序が異なるカーネル」に当たらず、`ParityBaseline` 方式は不要で、バックエンド間は**bit 完全一致**で判定できる（参照実装・CUDA・Metal の三者。NaN はクラス一致）。
+- FP8（fp32 累積で MMA 内の順序が非固定）には 2026-09-12 追記の非後退方式が適用されうる。適用要否は本 issue の対象外とし、§9 へ申し送る。
+
+表記更新の文案（**未投稿**。#1964 で明示承認されていないため、投稿可否は §8 項 1・9。確定は #2610）:
+
+> (a) の「未達」を「REQ-2 の 2026-09-02／2026-09-12 追記により Tensor Core 経路・split-K 経路の判定方式は確定済み。残りは spec 側の確認」へ更新する。
 
 ## 3. 条件 (b): sm_121 INT8／FP8 MMA 発行可否プローブの設計（記述のみ・本 PR では追加しない）
 
@@ -85,6 +116,25 @@ grep -rn "mma.sync.aligned" crates/backend-cuda/src
 
 **(c) 充足の定義**: CUDA・Metal の「改善前」行と PyTorch 基準行が実機値で埋まり、量子化の期待効果を測る分母（対 PyTorch 比）が存在すること。REQ-8 は本行に下限を設定しない方針（`docs/spec/04-requirements.md:360` (c) 注記）を維持する。
 
+### 4.1 #2609 の取り方の案（未計測）
+
+分母の定義は再定義せず、上記の単一真実源（`baseline_spec()`・`docs/perf/transformer-workload-baseline.md` §2〜§5）を引用する。測定コマンドと記入欄は `docs/perf/logs/int8-quant-baseline-2609/README.md`。
+
+- **CUDA（GB10）**:
+  - 3 テスト（`transformer_block_forward_bench_cuda_prefusion`・`transformer_block_forward_bench_cuda_fused`・`transformer_block_forward_cuda_fused_parity`）を**関数名の完全一致**で個別実行する。部分一致フィルタは使わない（`transformer-workload-baseline.md` §7）。
+  - 1 テストにつき 1 プロセスを 5 回実行し、各 `BenchReport::to_json` の median を集めて 5 run の中央値を取る。Q1／Q3 も併記する。
+  - PyTorch の分母は `scripts/bench-transformer-pytorch.py` を同じ 5 run 方式で取る。
+  - per-op ホスト転送が計測値に含まれる既知の制約を注記する。
+- **Metal（M4 Max）**: 複合ワークロードの実行経路（`transformer_workload_metal.rs` 相当）が未実装のため、そのままでは測れない。
+  - 案 i: 専用の実行経路を別 issue で実装する。`baseline_spec()` と同じ定義を保てるため推奨。
+  - 案 ii: facade `TransformerEncoderLayer`（#2068）を Metal で動かして代替分母にする。定義の差分を注記する必要がある。
+  - どちらにするかは承認事項（§8 項 11）。切り出し先の既存 Issue は 2026-10-11 の再検索（`gh issue list --state all --search "transformer_workload_metal"`）でも**未特定**。
+- **CPU（M4 Max）**: 参考行とする。(c) の充足要件〈CUDA・Metal〉には数えない。
+- **共通**: `env_info.txt` と、腕の同定用の `.rev-stamp` を記録する。ホスト名は `<cuda-node>` プレースホルダにする。計測中はビルドを並走させない。事前登録規則は実測前に固定し、事後に緩めない。
+- **量子化効果の分母は 2 層**に分ける。(1) 複合ワークロードの対 PyTorch 比（spec (c)）。(2) GEMM 単体の f16 `mma_f16` 行（spec (f)。§5 のスループット判定）。#2608 の TOPS（中央値 約 244）は合否ゲートにも分母にも使わない（`RULE.txt` J5 を踏襲）。
+
+(c) 充足の定義は上記のまま。REQ-8 の下限は設定しない。
+
 ## 5. 条件 (d): 量子化経路専用の数値許容基準（判定式の骨子・事前登録）
 
 spec「承認時に固定する契約」（`docs/spec/04-requirements.md:362`）を前提として継承する:
@@ -118,6 +168,39 @@ spec「承認時に固定する契約」（`docs/spec/04-requirements.md:362`）
 
 **明記**: 上記はいずれも REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）の緩和ではなく、量子化経路専用の**別基準の新設**である。`crates/backend-cpu/src/parity.rs` の `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD` 定数、`crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline` は不変。量子化経路に REQ-2 判定をそのまま適用しない根拠は `docs/spec-proposal-fp8-int8-quant-gemm.md` §3 を参照。
 
+### 5.1 #2609 の閾値案（具体式・解析係数。**実測は未実施**）
+
+既存の事前登録（形のみ固定・閾値定数は空欄）を具体化する案である。**解析値であり、GB10 での確認は保留中**（阻害要因は §0 のとおり）。REQ-2 の定数と `ParityBaseline` は変えず、量子化経路専用の別基準を新設する案とする。
+
+**記号**: 出力要素 (m, n) と K-block b（長さ 128）ごとに量子化ステップ `Δ_a[m,b]`・`Δ_b[b,n]` を置く（「per-token・K=128 ブロックスケール」が A は per-token のみの読み方でも成り立つ一般形）。`Δ = pow2ceil(max(amax_block, 1e-4) / 127)`。`q = round_half_even(x/Δ)`。切り上げにより `|x/Δ| ≤ 127` が保証され clamp は発生しないため、量子化誤差は `|e| ≤ Δ/2`。
+
+**(d-1) quantize–dequantize 参照実装との一致（閾値 = 0）**:
+- 判定は bit 完全一致（`fail_count == 0`）。NaN は quiet NaN へ正規化してクラス一致で比較する。
+- 実測済み: s32 段のホスト `i32` 参照との bit 一致（`int8.t2.pattern`）と `int8.k128.pos/neg = ±2,064,512`（`128 × 127² = 2,064,512`）。出典は `docs/perf/logs/int8-mma-probe-2608/README.md`。
+- 未実測: f32 段（s32→f32 RNE、`Δ_out` を 1 回乗算、block 間 `f64` 逐次和、最後に 1 回 narrow）。§5 の契約どおりで、ゲート解除後の実装 issue に持ち越す。
+
+**(d-2) f64 真値に対する誤差上限（合否ゲート）**:
+- 比較の相手は f64 の真値 `C64 = Σ_k a·b`。f32 参照 GEMM の丸めを閾値に混ぜないため。先例は `scripts/bench/framework-compare/parity_torch_truth.py` の厳密真値との突合。
+- 要素ごとの決定論的上界（導出: `ab − (a−e_a)(b−e_b) = a·e_b + b·e_a − e_a·e_b`）:
+
+  `E(m,n) = Σ_k ( |a_mk|·Δ_b[b(k),n]/2 + |b_kn|·Δ_a[m,b(k)]/2 + Δ_a·Δ_b/4 )`
+- 判定式の案: `|C_q(m,n) − C64(m,n)| ≤ E(m,n) + u·|C64(m,n)| + γ_nb`。`u = 2^-24`（最終の f32 narrow 1 回分）、`γ_nb` は block 間 f64 合算の丸め上界（`nb·2^-53·Σ|partial|` 程度で実質無視できる）。
+- `E` は厳密な上界なので**係数は 1.0（解析値）**とする。違反が 1 件でもあれば実装バグとして fail-closed にし、事後に緩めない。
+- 要約形（spec 文案向け・データ非依存）: `|diff| ≤ c·K·A·B`。`A = max(amax_a, 1e-4)`、`B = max(amax_b, 1e-4)`。`Δ ≤ 2·amax/127` を代入すると `c = 2/127 + 1/127² ≈ 0.01581`。
+- √K 形式（RMS 見積り）は参考統計に限る。誤差を独立同分布とみなす仮定・3σ 相当・線形 K 形式の判定結果との併記を事前登録とし、単独で合否ゲートにしない。
+
+**入力契約**（閾値式が成り立つ範囲。案）:
+- 非有限入力〈NaN／±inf〉は型付きエラーで拒否する。
+- `Δ` の下限は `pow2ceil(1e-4/127) = 2^-20`（`1e-4/127 ≈ 7.87e-7`、`2^-21 ≈ 4.77e-7 < 7.87e-7 ≤ 2^-20 ≈ 9.54e-7`）。よって `Δ_a·Δ_b ≥ 2^-40` で、`s32·Δ_out` は f32 の正規数範囲に入る。
+- `pow2ceil(amax/127)` が overflow する入力や `|s32|·Δ_out` が f32 を overflow する入力は契約外として型付きエラーで拒否する。エラー型の設計は確定しない。
+
+**実測プロトコルの案**（ゲート解除後に実施。`docs/perf/logs/int8-quant-baseline-2609/README.md` へ申し送り）:
+- 入力分布: 一様・正規・外れ値混入〈heavy-tail〉・同符号最悪値・amax < 1e-4〈clamp 経路〉。
+- 形状: K ∈ {128, 512, 4096, 16384}。M・N は既存 GEMM ベースライン形状から選ぶ。決定的シード。
+- 記録項目: `diff / E` の最大値と分位点、√K 統計、違反件数（0 を期待）。対象は CPU 参照・CUDA・Metal。
+
+**提案する値**: (d-1) = 0、(d-2) = 係数 1.0（要素ごとの上界 `E`）、要約形 `c ≈ 0.01581`。いずれも案であり、確定にはユーザー承認と spec 側の承認が必要。スループット (f) は本 issue の対象外で、上記の骨子を変えない。
+
 ## 6. 条件 (e): 依存追加なしで成立する設計の確認項目（yes/no で確認できる粒度）
 
 | 確認項目 | HEAD での事実 |
@@ -141,6 +224,8 @@ spec「承認時に固定する契約」（`docs/spec/04-requirements.md:362`）
 
 姉妹イシュー #2074（DDP 側）の同形式文案と対応させ、書式を揃える。
 
+**#2609 注記**: 本節の文案の最新化と、承認後の投稿は #2610 の担当である。#2609 では §2.1・§4.1・§5.1 の材料を追記したのみで、本節の文案は書き換えていない。
+
 ## 8. ユーザー承認事項（未実施・列挙のみ）
 
 1. spec (b) 形式提案（§7）の投稿可否。(a) 表記更新を同時に含めるか。
@@ -151,13 +236,22 @@ spec「承認時に固定する契約」（`docs/spec/04-requirements.md:362`）
 6. 外部 FP8 crate を選ぶ場合の依存追加（`.claude/rules/deps-policy.md`。現状は `u8` newtype 自作案が既定）。
 7. INT8 s32 累積の K 上限（§5 (d-1)「overflow の扱い」。`K_safe = 133,144`）超過時の代替設計（chunked 累積／`i64` アキュムレータ拡張）の採否・実装可否（block 長 128 契約を維持する限り本 PR の事前検証は形式境界の登録に留まり実装しない）。
 8. (d-1) block 間合算契約（§5「block 間合算の数値契約」。参照実装・CUDA の `f64` 逐次加算・Metal の binary64 ソフトウェアエミュレーション新規モジュール〈`crates/backend-metal/src/soft_f64.rs` と同型〉）の実装可否。
+9. (a) 表記更新文案（§2.1）の採否。項 1 と合わせて扱う。
+10. (d-1) 閾値 0 と (d-2) 係数 1.0（要素ごとの上界 `E`）、要約係数 `c ≈ 0.01581`（§5.1）の採否。
+11. (c) Metal 実行経路を案 i（専用経路）と案 ii（facade 代替）のどちらにするか、切り出し issue の起票可否（§4.1）。
+12. (d-2) の誤差分布を実測するためのテスト専用ホストシミュレーション（#2608 と同様に `#[ignore]` か test 限定で、本番経路は変えない）の起票・実施可否。spec の除外事項ゲート（`:365`）との関係を含めて判断する。
+13. 入力契約（非有限入力・overflow を型付きエラーで拒否。§5.1）の採否。
+
+上記 9〜13 は #2609 で追加した。**いずれも承認は得ていない。**
 
 ## 9. スコープ外・申し送り
 
 - FP8／INT8 カーネル実装・quantize–dequantize 参照実装・dynamic／static 選択・キャリブレーション手法（issue 本文のスコープ外を継承）。
 - `docs/cuda-tensor-core-knowledge.md` §2.4「インライン PTX の NVRTC 受理は未検証」の陳腐化是正（§3 参照。本 PR では触れない）。
 - Metal 複合ワークロード実行経路の切り出し先確認（§4 の 2。該当 Issue 未特定）。
-- 実機実測は `docs/perf/logs/int8-mma-probe-<issue 番号>/` へ申し送り（本 PR ではディレクトリを作成しない）。
+- 実機実測は `docs/perf/logs/int8-mma-probe-<issue 番号>/` へ申し送り（#2075 時点ではディレクトリを作成しなかった。#2608 で `int8-mma-probe-2608/` を作成。#2609 で (c)・(d-2) 用の `docs/perf/logs/int8-quant-baseline-2609/`〈測定コマンドと記入欄のみ。値は未記入〉を新設）。
+- FP8（E4M3／E5M2）の実行プローブと parity 方式（2026-09-12 追記の非後退方式を適用するかを含む）。#2609 の対象外。
+- (c) の実機計測、Metal 実行経路の実装、(d-2) の実測はユーザー承認後に別 issue とする。起票は承認を得てから行う。
 
 ## 10. セキュリティ観点（OWASP Top 10）
 
@@ -166,6 +260,7 @@ spec「承認時に固定する契約」（`docs/spec/04-requirements.md:362`）
 - **A06 脆弱・古いコンポーネント**: 依存追加なし（INT8 は `i8` プリミティブ・FP8 は `u8` newtype 案）。外部 FP8 crate 採用は承認事項（§8 項 6）として列挙するのみで、本 PR では選定・追加を行わない。
 - **情報漏えい**: 実ホスト名・内部パス・ユーザー名を記載していない（`<cuda-node>` プレースホルダ方式。`docs/real-hardware-verification-env.md` の方式・`.claude/rules/security.md`）。
 - **非信頼データの扱い**: イシュー #2075・#1964・#2074 の本文・コメントは要約のみを転記し、命令文は運ばない。本計画の立案・検証過程で命令注入・矛盾指示は検出されなかった。
+- **#2609 追記**: コード・設定は変更しない。(A03) 将来の実装案として、量子化入力の非有限値・overflow を型付きエラーで先に拒否する入力検証を §5.1 の入力契約に明記した。測定コマンドにユーザー入力を展開する形は書いていない。(A08) 除外事項ゲート（`:365`）を迂回しない。閾値は実測前に事前登録し、事後に緩めない。(d-2) は違反ゼロ前提の fail-closed で、√K 形式を単独の合否ゲートにしない。(A06) 依存追加なし。情報漏えい: ホスト名は `<cuda-node>`、`docs/real-hardware-verification-env.local.md` は参照も転記もしていない。イシュー #2609・#2607・#2608・#605 の本文は要約のみを使い、命令文は運んでいない。
 
 ## 11. 出典一覧
 
@@ -191,3 +286,9 @@ spec「承認時に固定する契約」（`docs/spec/04-requirements.md:362`）
 - `crates/backend-cuda/tests/common/parity_baseline.rs::ParityBaseline`
 - イシュー #1964（CLOSED・2026-09-17 承認記録）
 - イシュー #2074（DDP 側の姉妹検証計画。条件 (a) の対応関係整理）
+- `docs/perf/logs/int8-mma-probe-2608/`（#2608。INT8 MMA の s32 段 bit 一致と TOPS の実測。`RULE.txt` J5）
+- `docs/perf/logs/int8-quant-baseline-2609/README.md`（#2609。(c)・(d-2) の測定コマンドと記入欄）
+- `docs/spec/04-requirements.md:84,98-101`（REQ-2 の 2026-09-02／2026-09-12 追記）
+- `docs/cuda-tensor-core-parity-judgment-decision.md`・`docs/backend-metal-splitk-parity-judgment-decision.md`（形状別判定方式の決定記録）
+- `crates/backend-metal/tests/common/splitk_parity_baseline.rs`（Metal split-K の baseline 方式）
+- `scripts/bench/framework-compare/parity_torch_truth.py`（厳密真値との突合の先例）
