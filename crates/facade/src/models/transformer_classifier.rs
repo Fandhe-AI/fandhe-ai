@@ -26,7 +26,7 @@ use crate::compat::Sequential;
 use crate::optim::Adam;
 use crate::{AutodiffError, Tape, Tensor, Var};
 
-use super::train_support::{cross_entropy_mean, scalar_of, take_updated};
+use super::train_support::{check_model_size, cross_entropy_mean, scalar_of, take_updated};
 
 /// [`TransformerClassifier::new`] の構成値。
 ///
@@ -143,7 +143,7 @@ impl TransformerClassifier {
         // `config` は pub フィールドで任意値を構築できるため、位置符号テンソルの要素数
         // `seq_len * embed_dim` の overflow を先に検査する（wrap-around すると確保サイズと
         // 後段のインデックス計算が食い違う）。
-        config
+        let pos_elems = config
             .seq_len
             .checked_mul(config.embed_dim)
             .ok_or_else(|| {
@@ -152,6 +152,20 @@ impl TransformerClassifier {
                     config.seq_len, config.embed_dim
                 ))
             })?;
+        // 確保前に総要素数の上限を検証する（巨大 config で `vec!` が capacity overflow で
+        // panic／OOM するのを防ぐ）。位置符号 + embed + 各層（attention 4*e^2 + FFN 2*e*ff）
+        // + head の飽和算術による見積もり。
+        let e = config.embed_dim;
+        let per_layer = e
+            .saturating_mul(e)
+            .saturating_mul(4)
+            .saturating_add(e.saturating_mul(config.dim_feedforward).saturating_mul(2));
+        let estimated = pos_elems
+            .saturating_add(config.in_features.saturating_mul(e))
+            .saturating_add(per_layer.saturating_mul(config.num_layers))
+            .saturating_add(e.saturating_mul(config.mlp_hidden))
+            .saturating_add(config.mlp_hidden.saturating_mul(config.num_classes));
+        check_model_size("TransformerClassifier::new", estimated)?;
 
         let embed = Sequential::new().add_linear(config.in_features, config.embed_dim, seed)?;
 
@@ -383,5 +397,43 @@ impl TransformerClassifier {
     /// 構成値の参照用ゲッター。
     pub fn config(&self) -> TransformerClassifierConfig {
         self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(seq_len: usize) -> TransformerClassifierConfig {
+        TransformerClassifierConfig {
+            seq_len,
+            in_features: 1,
+            embed_dim: 1,
+            num_heads: 1,
+            num_layers: 1,
+            dim_feedforward: 1,
+            mlp_hidden: 1,
+            num_classes: 1,
+        }
+    }
+
+    /// 巨大 config でも panic／abort せず `InvalidArgument` を返す（正のプローブ）。
+    #[test]
+    fn new_rejects_huge_config_without_panic() {
+        assert!(matches!(
+            TransformerClassifier::new(cfg(usize::MAX), 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            TransformerClassifier::new(cfg(1 << 40), 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        let mut c = cfg(4);
+        c.num_layers = usize::MAX;
+        assert!(matches!(
+            TransformerClassifier::new(c, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(TransformerClassifier::new(cfg(4), 0).is_ok());
     }
 }

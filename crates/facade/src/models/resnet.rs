@@ -28,7 +28,7 @@ use crate::compat::Sequential;
 use crate::optim::Adam;
 use crate::{AutodiffError, Tape, Tensor, Var};
 
-use super::train_support::{cross_entropy_mean, scalar_of, take_updated};
+use super::train_support::{check_model_size, cross_entropy_mean, scalar_of, take_updated};
 
 /// BatchNorm2d の `eps`（PyTorch `nn.BatchNorm2d` 既定）。
 const BN_EPS: f32 = 1e-5;
@@ -217,6 +217,19 @@ impl ResNet {
                 "ResNet::new: block 総数（3 * n。n={n}）が usize の範囲を超える"
             ))
         })?;
+
+        // 確保前に総パラメータ数の上限を検証する（巨大 depth／width で `Vec::with_capacity`
+        // や各層の確保が panic／OOM するのを防ぐ）。block あたり 3x3 conv 2 枚の最大
+        // チャネル（4*width）基準の保守的な上限見積もり。
+        let per_block = width_x4
+            .saturating_mul(width_x4)
+            .saturating_mul(18)
+            .saturating_add(width_x4.saturating_mul(8));
+        let estimated = total_blocks
+            .saturating_mul(per_block)
+            .saturating_add(width_x4.saturating_mul(num_classes))
+            .saturating_add(width.saturating_mul(27));
+        check_model_size("ResNet::new", estimated)?;
 
         let stem = Sequential::new()
             .add_conv2d(3, width, [3, 3], [1, 1], [1, 1], [1, 1], 1, seed)?
@@ -483,6 +496,25 @@ impl ResNet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 巨大 depth／width でも panic／abort せず `InvalidArgument` を返す（正のプローブ）。
+    #[test]
+    fn new_rejects_huge_arguments_without_panic() {
+        assert!(matches!(
+            ResNet::new(usize::MAX - 1, 1, 1, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            ResNet::new(8, 1 << 20, 10, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            ResNet::new(8, 4, 1 << 40, 0),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        // 小さな正常系は上限検証を通る。
+        assert!(ResNet::new(8, 4, 10, 0).is_ok());
+    }
 
     #[test]
     fn block_rejects_zero_arguments() {

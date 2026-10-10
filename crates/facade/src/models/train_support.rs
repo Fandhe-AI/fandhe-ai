@@ -110,6 +110,25 @@ pub(super) fn take_updated(
     Ok(slice.to_vec())
 }
 
+/// コンストラクタが確保するパラメータ・定数テンソルの総要素数の上限（`f32` で 4 GiB 相当）。
+///
+/// `ResNet::new`／`TransformerClassifier::new` は公開引数が任意の `usize` を取りうるため、
+/// 巨大引数で `vec!`／`Vec::with_capacity` が capacity overflow で panic したり OOM で
+/// abort したりするのを、確保前の上限検証で `AutodiffError::InvalidArgument` に変換する
+/// （本番経路の panic 禁止。`.claude/rules/coding-rust.md`）。
+pub(super) const MAX_MODEL_ELEMS: usize = 1 << 30;
+
+/// 見積もった総要素数（呼び出し側が `saturating_*` で求めた値）が上限以内か検証する。
+pub(super) fn check_model_size(ctx: &str, estimated_elems: usize) -> Result<(), AutodiffError> {
+    if estimated_elems > MAX_MODEL_ELEMS {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{ctx}: 確保するパラメータ要素数の見積もり（{estimated_elems}）が上限 \
+             {MAX_MODEL_ELEMS} を超える"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
