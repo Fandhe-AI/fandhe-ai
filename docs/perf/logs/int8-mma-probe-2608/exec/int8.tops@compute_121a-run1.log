@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/int8_mma_probe_real_device.rs (<home>/work/target-fandhe-ai/release/deps/int8_mma_probe_real_device-4facaa0b5a9533f1)
+
+running 1 test
+SM121_PROBE_JSON {"v":1,"kind":"env","phase":"exec","probe":"int8.tops","target":"compute_121a","device":"NVIDIA GB10","cc":"12.1","nvrtc":"13.0"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.tops","target":"compute_121a","arch":"compute_121a","stage":"ctl","status":"ok","code":"-","detail":"ctl.copy S1..S6 all ok"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.tops","target":"compute_121a","arch":"compute_121a","stage":"nvrtc_ptx","status":"ok","code":"-","detail":"arch=compute_121a ptx_bytes=3600 .version 9.0 .target sm_121a"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.tops","target":"compute_121a","arch":"sm_121a","stage":"nvrtc_cubin","status":"ok","code":"-","detail":"arch=sm_121a ptx_bytes=3600 .version 9.0 .target sm_121a"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.tops","target":"compute_121a","arch":"compute_121a","stage":"module_load","status":"ok","code":"-","detail":"binary_version=121 ptx_version=121 num_regs=30"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.tops","target":"compute_121a","arch":"compute_121a","stage":"launch","status":"ok","code":"-","detail":"grid=384 block=32"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.tops","target":"compute_121a","arch":"compute_121a","stage":"sync","status":"ok","code":"-","detail":"out_words=3072"}
+SM121_PROBE_JSON {"v":1,"kind":"cell","phase":"exec","probe":"int8.tops","target":"compute_121a","arch":"compute_121a","stage":"verify","status":"ok","code":"-","detail":"tops=244.481 elapsed_ns=3372992 ops=824633720832 chains=4 iters=65536 grid=384 bit_exact"}
+SM121_PROBE_JSON {"v":1,"kind":"done","phase":"exec","probe":"int8.tops","target":"compute_121a","cells":7,"mismatch":0}
+test int8_mma_probe_exec_selected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.37s
+
+rc=0

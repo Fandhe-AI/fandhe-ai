@@ -1,0 +1,38 @@
+# イシュー #2608: GB10 での INT8 MMA（mma.sync m16n8k32 s32.s8.s8.s32）実行プローブ 判定規則
+# 実測前に固定する（事後に緩和・変更しない）。出典: docs/int8-quant-grade-up-verification-plan.md §3・§5。
+# 受理段（S1〜S3）の記録は #2122（docs/perf/logs/sm121-isa-probe-2122/、policy=accept_only）。
+# 本規則は実行段（S4 起動・S5 同期・S6 bit 一致）と TOPS を扱う。充足の宣言は行わない（spec 側の判断）。
+
+PROBE: int8.t1.ones    policy=verify expect=D 全 128 語 == 32（A=B=全 1, C=0。fragment 配置に依存しない）
+PROBE: int8.t2.pattern policy=verify expect=ホスト i32 参照モデルと bit 一致（layout=unverified）
+PROBE: int8.k128.pos   policy=verify expect=全語 == +2064512（a=b=127, mma 4 連鎖 = K128）
+PROBE: int8.k128.neg   policy=verify expect=全語 == -2064512（a=127, b=-127, mma 4 連鎖）
+PROBE: int8.tops       policy=verify expect=全 block の 4 連鎖 d0 == ITERS*32 かつ globaltimer 単調（TOPS は記録のみ）
+
+TARGET: compute_121 compute_121a compute_121f
+DEVTARGET: compute_86   # 開発機スモーク（結果を判定に使わない）
+
+# 判定
+J1: t1 mismatch => 命令の実行意味論の不成立（fragment 配置に依存しないため）。
+J2: t1 ok かつ t2 mismatch => 判定不能（参照モデルの fragment 配置が未検証〈layout=unverified〉。ハード不良とは判定しない）。
+J3: いずれかの正式 target で S1〜S5 ok かつ t1・t2・k128.pos・k128.neg の S6 が全て ok
+    => 条件 (b) の INT8 側の充足「候補」（宣言は spec 側）。
+J4: 全 target で S4 以降が失敗 => 不成立（エラーコードを記録）。
+J5: TOPS は合否ゲートにしない。「単一命令ループの発行レート」であり gemm-optimization-baseline.md の
+    mma_f16 行とは参考比較のみ。spec (f) の判定式には使わない。
+J6: %globaltimer が NVRTC で受理されない場合 TOPS は「計測不能（エラー全文）」とし、他プローブの結果は独立に残す。
+
+# 参照モデル（Tier 2）の登録式（行 r=0..15, k=0..31, 列 c=0..7）
+A[r][k] = ((r*37 + k*91 + 11) % 251) - 125   （例外: A[0][0]=-128, A[1][1]=127）
+B[k][c] = ((k*53 + c*29 + 7) % 247) - 123    （例外: B[0][0]=-128, B[31][7]=127）
+C[r][c] = r*1000003 - c*7919 - 5000000
+fragment: g=lane>>2, t=lane&3, 下位バイトが要素 0。
+  a0/a2: 行 g, a1/a3: 行 g+8, a0/a1: 列 t*4+i, a2/a3: 列 t*4+16+i
+  b0: k=t*4+i, b1: k=t*4+16+i, 列 g
+  c0,c1: 行 g, 列 t*2+{0,1}; c2,c3: 行 g+8
+  出力 d は c と同配置（lane×4 語）。
+
+# TOPS パラメータ（実測前固定）
+CHAINS=4  ITERS=65536  GRID=384（GB10 48 SM x 8）  BLOCK=32  A=B=全 1
+TOPS = 8192 * CHAINS * ITERS * GRID / (max(t_end) - min(t_start))[ns] / 1e3
+PROCESS: 各 (probe, target) を 1 プロセス、外部 timeout=120 秒。TOPS は 3 target x 5 プロセスの中央値。
