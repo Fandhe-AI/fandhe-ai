@@ -168,25 +168,28 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 `=0.7.0` へ更新後の 2026-09-06 再実測を v0.7.0 リリースサイクル〈イシュー #1185〉で追記。
 `=0.8.0` へ更新後の 2026-09-10 再実測をイシュー #1487 で追記。
 `=0.9.0` へ更新後の 2026-09-17 再実測を v0.9.0 リリースサイクルで追記。
-`=0.10.0` へ更新後の 2026-10-03 再実測を v0.10.0 リリースサイクルで追記）:
+`=0.10.0` へ更新後の 2026-10-03 再実測を v0.10.0 リリースサイクルで追記。
+`=0.11.0` へ更新後の 2026-10-10 再実測を v0.11.0 リリースサイクルで追記）:
 
 - 対象 `Cargo.lock`: `scripts/bench/framework-compare/Cargo.lock`
-- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-10-03 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
-- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-10-03 再実測）:
+- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果（2026-10-10 再実測）: `advisories ok, bans ok, licenses ok, sources ok`
+- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値。2026-10-10 再実測。`fandhe-ai` 以外の 2 crate は 2026-10-03 から変更なし）:
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
 | `burn` | 0.21.0 | `MIT OR Apache-2.0` |
 | `candle-core` | 0.11.0 | `MIT OR Apache-2.0` |
-| `fandhe-ai` | 0.10.0 | `MIT OR Apache-2.0`（2026-10-03 に `=0.9.0` から更新。v0.10.0 リリースサイクル。直接依存 3 crate のライセンス式に変更なし） |
+| `fandhe-ai` | 0.11.0 | `MIT OR Apache-2.0`（2026-10-10 に `=0.10.0` から更新。v0.11.0 リリースサイクル。直接依存 3 crate のライセンス式に変更なし） |
 
 v0.10.0 では自社クレート `fandhe-ai-onnx-interop`（初回公開）が facade の通常依存として加わったため、`Cargo.lock` へ新規の推移的依存を実測した（`cargo metadata --locked` の `license` フィールド。2026-10-03）。追加は自社 1 crate と、第 3 区分（相互運用）の承認済み依存 `prost` のみで、他の外部依存の追加はない（`libc`・`safetensors` は既存エントリ。`safetensors 0.7.0` は既存の別版と並存）:
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
-| `fandhe-ai-onnx-interop` | 0.10.0 | `MIT OR Apache-2.0` |
+| `fandhe-ai-onnx-interop` | 0.11.0 | `MIT OR Apache-2.0` |
 | `prost` | 0.14.4 | `Apache-2.0` |
 | `prost-derive` | 0.14.4 | `Apache-2.0` |
+
+v0.11.0 へのピン更新（2026-10-10）では `Cargo.lock` の差分は自社 7 クレートの版・checksum のみで、外部依存の追加・更新・削除はない。上表の `fandhe-ai-onnx-interop` は 0.11.0 へ更新（ライセンス式 `MIT OR Apache-2.0` に変更なし）、`prost`・`prost-derive` は 0.14.4 のまま。
 
 推移的依存を含む全域監査は CI（`ci.yml` の `deps-forbidden` ジョブ
 「フレームワーク横並びベンチの依存監査」ステップ）で毎回再実行し、本表への転記
