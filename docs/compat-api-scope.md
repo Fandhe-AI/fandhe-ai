@@ -1529,7 +1529,7 @@ issue では公開面へ到達しかねないコード自体を `crates/facade/s
 存在しないため（ソース走査の否定ガードのみを追加する設計は #2212 の
 レビューで受け入れられなかった前例と同じ判断軸）。承認取得後の移行手順
 （`src/models/` への移設・`pub mod models`／`pub use`・本物の doctest
-への切り替え）は `docs/reference-models-decision.md` §5 を参照。
+への切り替え）は `docs/reference-models-decision.md` §3.1 を参照。**（2026-10-10 追記: `Mlp`／`LeNet` は #2974 で `fandhe_ai::models` として公開済み。本段落の「未適用」は承認前の記録として残す。下記「適用記録（経路 2。イシュー #2974）」参照）**
 
 **#2202（参照モデル実装。`ResNetBlock`／`ResNet`／`Transformer`）は
 経路 2 未適用のまま承認待ちで保留した。** イシュー本文の承認事項節は
@@ -2658,3 +2658,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
 
 **適用記録（イシュー #2956・親 #2928。承認: https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6079384681 の項 1）**: 設計記録 `autodiff-functional-transforms-design.md` §27.1 の形で、facade `Tape::jvp`・`Tape::jacfwd` の 2 メソッド（`F4`・`F5`）を内部 `fandhe_ai_autodiff::functional_ops` の `jvp`／`jacfwd`（#2956 で `pub(crate)` から `pub fn` 化）への 1 行委譲として公開した（追加のみ・`fandhe-ai =0.10.0` の既存 API は不変。新規 `Op`・`BackendOps` メソッド・VJP・`AutodiffError` variant・依存・`unsafe`・tolerance・baseline なし）。承認範囲は F4・F5 の公開と論点 J-a〜J-g（推奨どおり）で、保留ガード `FunctionalTransformsHoldDoctestGuard` は `Tape` 受け手の分だけ反転し（プローブ用トレイトと impl・UFCS 2 行を除去）、正ガードは承認形 5 名・宣言インベントリは 11 件になった。維持した保留: モジュール `functional_ops` の再エクスポート・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッド・`supports_create_graph` の対象拡張（論点 5）・複数入力・`VarF64`／f16・微分可能な `jvp`。実機は #2942 の既存 `#[ignore]` テストが担当する（CUDA は pass、Metal は未実測）。本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。詳細は設計記録 §28。
+
+**適用記録（経路 2。イシュー #2974・親 #2541・Phase 11-1。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6097478475`）**: 参照モデル `Mlp`／`LeNet`（examples の利用者コード。#2201）を `fandhe_ai::models::{Mlp, LeNet}` として公開した（`lib.rs` の `pub mod models;`、`models/mod.rs` の `pub use` 2 文。サブモジュールは非公開・クレートルートへ再エクスポートしない）。公開メソッドは両モデルの `new`・`forward`・`predict`・`sequential`・`sequential_mut` と、`Mlp::with_seed`・`Mlp::dropout`・`LeNet::num_classes`。PyTorch 対応表（`pytorch_param_map`・`MlpParamMap`・`LeNetParamMap`）と `ReferenceModule`／`Trainable` の trait 化は公開せず examples に残す。保存は `sequential()` 経由で既存の `save_model`／`load_model` を使い、新しい保存経路は足していない。`crates/facade/tests/api_surface.rs` に正ガード 6 件（`models_is_public_and_submodules_stay_private`・`facade_exposes_models_items_only_in_approved_shape`・同 `_detects_each_category`・`models_unapproved_paths_are_absent`・`models_items_are_reachable_via_facade_models_path`・`models_usage_doctest_is_present_and_compiled`）を追加した。不変事項: 依存追加なし・tolerance／baseline／ガードレール閾値の変更なし・`docs/spec/` 不変・新規 `unsafe` なし。`ResNet`／`TransformerClassifier` は後続の Phase 11-2 で扱う（#2541 は 2 段完了後に閉じる）。詳細は `docs/reference-models-decision.md` §11.6〜§11.7。

@@ -1,6 +1,7 @@
 //! `Mlp`（参照モデル定義。イシュー #2201・親 #2190）の統合テスト。
 //!
-//! `crates/facade/examples/models/mlp.rs` を `#[path]` で直接取り込み、
+//! `fandhe_ai::models::Mlp`（#2974 で公開）を使い、PyTorch 対応表は
+//! `crates/facade/examples/models/mlp.rs` を `#[path]` で直接取り込んで検証する。
 //! `crates/facade/examples/reference_models.rs`（runnable example）とは
 //! 別に、公開 API（`compat::Sequential` 経由）だけで組んだ MLP の構造・
 //! forward・学習が成立することを検証する。
@@ -16,9 +17,9 @@ use std::sync::{Mutex, OnceLock};
 
 use example_models_common::{IMAGE_LEN, NUM_CLASSES, synthetic_mnist_flat};
 use fandhe_ai::compat::{FitConfig, Loss, Optimizer};
+use fandhe_ai::models::Mlp;
 use fandhe_ai::optim::AdamConfig;
 use fandhe_ai::{AutodiffError, Tensor};
-use mlp::Mlp;
 
 /// グローバル RNG（`fandhe_ai::manual_seed`／Dropout のマスク抽選）を
 /// 消費するテストを直列化する（先例:
@@ -45,7 +46,7 @@ fn mlp_structure_matches_pytorch_reference() {
     assert_eq!(model.dropout(), 0.2);
 
     let named = model.sequential().named_parameters();
-    let map = model.pytorch_param_map().unwrap();
+    let map = mlp::mlp_pytorch_param_map(&model, IMAGE_LEN, &[256, 128], NUM_CLASSES).unwrap();
 
     // named_parameters() は weight → bias の層順（モジュール doc の順序
     // 契約）。対応表も同じ順で weight/bias を積んでいるため、そのまま
@@ -208,7 +209,7 @@ fn mlp_new_validates_dropout_even_with_empty_hidden_dims() {
 
     // 隠れ層なし・有効な dropout は成功し、対応表は入力層 1 層分のみ。
     let model = Mlp::new(IMAGE_LEN, &[], NUM_CLASSES, 0.5).unwrap();
-    let map = model.pytorch_param_map().unwrap();
+    let map = mlp::mlp_pytorch_param_map(&model, IMAGE_LEN, &[], NUM_CLASSES).unwrap();
     assert_eq!(map.len(), 2);
     assert_eq!(map[0].fandhe_key, "0.weight");
     assert_eq!(map[1].fandhe_key, "0.bias");
@@ -219,10 +220,10 @@ fn mlp_pytorch_param_map_detects_sequential_mut_replacement() {
     let mut model = Mlp::new(IMAGE_LEN, &[256, 128], NUM_CLASSES, 0.2).unwrap();
     // sequential_mut() 経由で内部 Sequential を全く別の構成へ差し替える
     // と、構成値から計算した対応表と実パラメータが不整合になる。
-    // pytorch_param_map() はこれを検出して Err を返すこと。
+    // mlp_pytorch_param_map() はこれを検出して Err を返すこと。
     *model.sequential_mut() = fandhe_ai::compat::Sequential::new();
     assert!(matches!(
-        model.pytorch_param_map(),
+        mlp::mlp_pytorch_param_map(&model, IMAGE_LEN, &[256, 128], NUM_CLASSES),
         Err(AutodiffError::InvalidArgument(_))
     ));
 }
