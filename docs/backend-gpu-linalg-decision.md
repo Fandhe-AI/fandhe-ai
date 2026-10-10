@@ -91,4 +91,12 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 
 ## 10. 実測状況
 
-コード変更なし。実機実測は子 issue の担当。
+コード変更なし（本記録作成時点）。実機実測は子 issue の担当。
+
+### #2674（CUDA LU 系）の実施内容
+
+- ゲート `fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled`（既定 OFF・facade 非公開。保留ガードは
+  `crates/facade/tests/api_surface.rs::facade_does_not_expose_gpu_linalg_optin`）、LU／代入カーネルソース、
+  NVRTC ロード、入力検証、ホスト後処理の複製を追加（`unsafe` なし）。
+- **カーネル起動（新規 `unsafe` 2 ブロック）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の
+  `Unsupported`。承認依頼と残作業は `docs/perf/logs/cuda-linalg-lu-2674/README.md`。実機は未実測。

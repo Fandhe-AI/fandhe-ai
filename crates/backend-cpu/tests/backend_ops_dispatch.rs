@@ -237,7 +237,9 @@ fn cpu_elementwise_and_reduction_are_fully_implemented() {
 }
 
 /// 線形代数（イシュー #1621）は CUDA／Metal とも GPU カーネル未実装の
-/// ため、実機の有無に関わらず常に `BackendError::Unsupported` を返し
+/// ため（CUDA の LU 系は #2674 で内部 opt-in ゲート
+/// `fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled` の背後に
+/// 追加されたが既定 OFF のため本テストの前提は不変）、実機の有無に関わらず常に `BackendError::Unsupported` を返し
 /// panic しないことを確認する（`Self::sum`／`Self::max`〈汎用
 /// reduction〉と同じ「明示オーバーライドで未実装を宣言する」契約。
 /// `device_handle()` を経由しないため `CudaUnavailable`／Metal 側の
