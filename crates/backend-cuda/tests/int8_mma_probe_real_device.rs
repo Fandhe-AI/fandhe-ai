@@ -443,6 +443,9 @@ fn int8_mma_probe_exec_selected() {
     let (virt, real) = stage_archs(&probe, target);
     let mut cells = 1u64;
     let mut mismatches = 0u64;
+    // 終了判定は fail-closed（codex P2）: ctl と全段が Ok で、かつ S6 が実施されたときだけ成立。
+    let mut failures = u64::from(!ctl.is_ok());
+    let mut s6_ok = false;
     run_pipeline(device.as_ref(), &probe, target, &mut |cell: Cell| {
         let arch = if cell.stage == Stage::S2NvrtcCubin {
             real
@@ -453,6 +456,12 @@ fn int8_mma_probe_exec_selected() {
         cells += 1;
         if cell.status == Status::Mismatch {
             mismatches += 1;
+        }
+        if !cell.is_ok() {
+            failures += 1;
+        }
+        if cell.stage == Stage::S6Verify && cell.is_ok() {
+            s6_ok = true;
         }
     });
     Record::new()
@@ -468,6 +477,12 @@ fn int8_mma_probe_exec_selected() {
         mismatches, 0,
         "S6 で不一致を記録した（{id} on {target_name}）"
     );
+    // TOPS 計測不能（elapsed_ns=0）は tops_check が bit 一致の Match として扱うため例外分岐は不要。
+    assert_eq!(
+        failures, 0,
+        "対照または実行段が Ok でない（デバイス初期化・NVRTC・module_load・launch・sync 失敗等。{id} on {target_name}）"
+    );
+    assert!(s6_ok, "S6 が実施されていない（{id} on {target_name}）");
 }
 
 // ------------------------------------------------------------ ホストのみのテスト（CI で実行）
