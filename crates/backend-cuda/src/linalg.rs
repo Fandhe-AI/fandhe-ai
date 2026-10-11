@@ -325,11 +325,25 @@ pub fn eigh_sort_and_normalize(
     evals: &[f64],
     vecs_row_major: &[f64],
     n: usize,
-) -> (Vec<f64>, Vec<f64>) {
+) -> Result<(Vec<f64>, Vec<f64>), CudaError> {
+    let nn = n
+        .checked_mul(n)
+        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+            detail: "linalg eigh 後処理: n*n が usize を超える".to_string(),
+        })?;
+    if evals.len() < n || vecs_row_major.len() < nn {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "linalg eigh 後処理: 入力長が不足（evals={} < n={n} または vecs={} < n*n={nn}）",
+                evals.len(),
+                vecs_row_major.len()
+            ),
+        });
+    }
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
     let sorted_evals: Vec<f64> = order.iter().map(|&i| evals[i]).collect();
-    let mut out = vec![0.0f64; n * n];
+    let mut out = vec![0.0f64; nn];
     let mut col_buf = vec![0.0f64; n];
     for (new_idx, &old_idx) in order.iter().enumerate() {
         for (row, slot) in col_buf.iter_mut().enumerate() {
@@ -340,22 +354,42 @@ pub fn eigh_sort_and_normalize(
             out[row * n + new_idx] = x;
         }
     }
-    (sorted_evals, out)
+    Ok((sorted_evals, out))
 }
 
 /// QR カーネルの出力（`r_work`: `m*n` の上三角化済み作業行列、`q_work`: `m*k`）
 /// から `R`（`k*n`・下三角を 0）と `Q`（`m*k`）を作り、対角が負の行は `R` の行と
 /// `Q` の列を反転して `Q R = A` を保つ（`backend-cpu/src/linalg.rs::qr` の後段と
 /// 同一。反転は丸めと可換なので bit 一致に影響しない）。戻り値は `(R, Q)`。
-pub fn qr_finalize(r_work: &[f64], q_work: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+pub fn qr_finalize(
+    r_work: &[f64],
+    q_work: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>), CudaError> {
     let k = m.min(n);
-    let mut r = vec![0.0f64; k * n];
+    let overflow = |name: &str| CudaError::InvalidElementwiseShape {
+        detail: format!("linalg QR 後処理: {name} が usize を超える"),
+    };
+    let mn = m.checked_mul(n).ok_or_else(|| overflow("m*n"))?;
+    let mk = m.checked_mul(k).ok_or_else(|| overflow("m*k"))?;
+    let kn = k.checked_mul(n).ok_or_else(|| overflow("k*n"))?;
+    if r_work.len() < mn || q_work.len() < mk {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "linalg QR 後処理: 入力長が不足（r_work={} < m*n={mn} または q_work={} < m*k={mk}）",
+                r_work.len(),
+                q_work.len()
+            ),
+        });
+    }
+    let mut r = vec![0.0f64; kn];
     for row in 0..k {
         for c in 0..n {
             r[row * n + c] = if c < row { 0.0 } else { r_work[row * n + c] };
         }
     }
-    let mut q = q_work[..m * k].to_vec();
+    let mut q = q_work[..mk].to_vec();
     for i in 0..k {
         if r[i * n + i] < 0.0 {
             for c in 0..n {
@@ -366,7 +400,7 @@ pub fn qr_finalize(r_work: &[f64], q_work: &[f64], m: usize, n: usize) -> (Vec<f
             }
         }
     }
-    (r, q)
+    Ok((r, q))
 }
 
 /// cholesky・QR・eigh の 3 カーネル（`double`）のコンパイル済みハンドル。
@@ -469,7 +503,7 @@ mod tests {
         // 固有値 [2, 0.0, -0.0]。total_cmp では -0.0 < 0.0。列 j は e_j。
         let evals = [2.0, 0.0, -0.0];
         let vecs = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        let (e, v) = eigh_sort_and_normalize(&evals, &vecs, 3);
+        let (e, v) = eigh_sort_and_normalize(&evals, &vecs, 3).unwrap();
         assert!(e[0].is_sign_negative() && e[0] == 0.0);
         assert!(e[1].is_sign_positive() && e[1] == 0.0);
         assert_eq!(e[2], 2.0);
@@ -478,11 +512,11 @@ mod tests {
         assert_eq!(v[3 + 1], 1.0);
         assert_eq!(v[2], 1.0);
         // 同値固有値は元の順序を保つ（安定）。
-        let (e2, v2) = eigh_sort_and_normalize(&[1.0, 1.0], &[1.0, 0.0, 0.0, 1.0], 2);
+        let (e2, v2) = eigh_sort_and_normalize(&[1.0, 1.0], &[1.0, 0.0, 0.0, 1.0], 2).unwrap();
         assert_eq!(e2, vec![1.0, 1.0]);
         assert_eq!(v2, vec![1.0, 0.0, 0.0, 1.0]);
         // 列の符号は最大絶対値成分が正になる。
-        let (_, v3) = eigh_sort_and_normalize(&[1.0], &[-1.0], 1);
+        let (_, v3) = eigh_sort_and_normalize(&[1.0], &[-1.0], 1).unwrap();
         assert_eq!(v3, vec![1.0]);
     }
 
@@ -491,13 +525,25 @@ mod tests {
         // m=3, n=2, k=2。R 作業行列 (0,0) が負、(1,0) に残差。
         let r_work = [-2.0, 1.0, 1e-17, 3.0, 0.0, 0.0];
         let q_work = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; // 3x2
-        let (r, q) = qr_finalize(&r_work, &q_work, 3, 2);
+        let (r, q) = qr_finalize(&r_work, &q_work, 3, 2).unwrap();
         assert_eq!(r.len(), 4);
         assert_eq!(&r[..2], &[2.0, -1.0]);
         assert_eq!(&r[2..], &[0.0, 3.0]);
         assert_eq!(q[0], -1.0);
         assert_eq!(q[1], 0.0);
         assert_eq!(q[3], 1.0);
+    }
+
+    #[test]
+    fn post_processing_rejects_short_buffers_and_overflow() {
+        assert!(eigh_sort_and_normalize(&[], &[], 1).is_err());
+        assert!(eigh_sort_and_normalize(&[1.0], &[], 1).is_err());
+        assert!(eigh_sort_and_normalize(&[], &[], usize::MAX).is_err());
+        assert!(eigh_sort_and_normalize(&[], &[], 0).is_ok());
+        assert!(qr_finalize(&[], &[], 1, 1).is_err());
+        assert!(qr_finalize(&[1.0], &[], 1, 1).is_err());
+        assert!(qr_finalize(&[], &[], usize::MAX, 2).is_err());
+        assert!(qr_finalize(&[], &[], 0, 0).is_ok());
     }
 
     /// ゲートの既定は OFF（本クレート単体テストはゲートを書き換えないため
