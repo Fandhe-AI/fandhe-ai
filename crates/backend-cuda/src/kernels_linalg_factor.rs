@@ -102,6 +102,9 @@ extern "C" __global__ void linalg_cholesky_f64(
 pub(crate) const LINALG_QR_F64: &str = r#"
 #define QR_BLOCK 256
 
+// ストライドループ変数は long long とする。int だと最終要素の後の `+= QR_BLOCK` が
+// INT_MAX を超えて符号付きオーバーフロー（UB）になる（validate_qr_dims が
+// (i32::MAX, 1) 等を許可するため。REQ-8 境界保護）。
 extern "C" __global__ void linalg_qr_f64(
     double* r, double* q, double* refl, int* refl_valid, int m, int n) {
     __shared__ int s_valid;
@@ -144,13 +147,13 @@ extern "C" __global__ void linalg_qr_f64(
         __syncthreads();
         if (s_valid != 0) {
             double norm_v = s_norm_v;
-            for (int i = tid; i < m - col; i += QR_BLOCK) {
+            for (long long i = tid; i < m - col; i += QR_BLOCK) {
                 if (i < m - col) {
                     refl[col * m + i] = __ddiv_rn(refl[col * m + i], norm_v);
                 }
             }
             __syncthreads();
-            for (int c = col + tid; c < n; c += QR_BLOCK) {
+            for (long long c = col + tid; c < n; c += QR_BLOCK) {
                 if (c < n) {
                     double dot = 0.0;
                     for (int i = 0; i < m - col; ++i) {
@@ -172,13 +175,13 @@ extern "C" __global__ void linalg_qr_f64(
 
     // Q = E_k（単位行列の先頭 k 列）から出発し、有効な反射を逆順に適用する。
     int qtotal = m * k;
-    for (int idx = tid; idx < qtotal; idx += QR_BLOCK) {
+    for (long long idx = tid; idx < qtotal; idx += QR_BLOCK) {
         if (idx < qtotal) {
             q[idx] = 0.0;
         }
     }
     __syncthreads();
-    for (int i = tid; i < k; i += QR_BLOCK) {
+    for (long long i = tid; i < k; i += QR_BLOCK) {
         if (i < k) {
             q[i * k + i] = 1.0;
         }
@@ -186,7 +189,7 @@ extern "C" __global__ void linalg_qr_f64(
     __syncthreads();
     for (int col = k - 1; col >= 0; --col) {
         if (refl_valid[col] != 0) {
-            for (int c = tid; c < k; c += QR_BLOCK) {
+            for (long long c = tid; c < k; c += QR_BLOCK) {
                 if (c < k) {
                     double dot = 0.0;
                     for (int i = 0; i < m - col; ++i) {
