@@ -182,18 +182,20 @@ on:
     branches: [main]
   push:
     branches: [main]
-    # docs 系のみの push（main へのマージ）では CI を回さない。push には required status
+    # Markdown のみの push（main へのマージ）では CI を回さない。push には required status
     # checks が無く、キャッシュ基盤となる main の target キャッシュも Cargo.lock/コード
     # 変更時にしか更新されないため安全。PR 側は必須チェック維持のため workflow 単位の
     # paths を使えず、各ジョブ内の scripts/ci-detect.sh で同等の省略を行う。
-    # site/ と crates/ は docs-site のテスト・doc 属性が実読込するため除外しない。
-    paths-ignore:
-      - "docs/**"
-      - ".claude/**"
-      - ".agents/**"
-      - "skills-lock.json"
-      - "*.md"
-      - "LICENSE-*"
+    # `paths-ignore` は否定パターンを使えないため `paths` で表現する（後ろのパターンが
+    # 前の否定を上書きする）: 全件対象 → md・LICENSE を除外 → site/・crates/ 配下は
+    # md も対象に戻す（docs-site のテスト・doc 属性が実読込しうるため）。
+    # docs/ 配下の .json（テスト入力）・.sh は文書ではないため対象のまま。
+    paths:
+      - "**"
+      - "!**/*.md"
+      - "!LICENSE-*"
+      - "site/**"
+      - "crates/**"
 
 permissions:
   contents: read

@@ -18,14 +18,15 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${DIR}/lib.sh"
 
-# is_docs_only_path <path>: ビルド・テスト・検査の結果に影響しない docs 系パスか。
+# is_docs_only_path <path>: ビルド・テスト・検査の結果に影響しない純粋な文書（Markdown と
+# ライセンス本文）か。docs/ 配下でも .json（テストの検証入力）・.sh（契約検査対象）・
+# サブモジュール（docs/spec の gitlink）等は文書ではないためコード扱いにする。
 # site/ は docs-site クレートのテストが実読込するため、crates/ 配下の md は
 # include_str!/doc 属性で取り込まれうるため、いずれも対象外（= コード扱い）。
 is_docs_only_path() {
   case "$1" in
     site/* | crates/*) return 1 ;;
-    docs/* | .claude/* | .agents/* | skills-lock.json | LICENSE-APACHE | LICENSE-MIT) return 0 ;;
-    *.md) return 0 ;;
+    *.md | LICENSE-APACHE | LICENSE-MIT) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -50,7 +51,7 @@ if ! has_cargo; then
   echo "::notice::Cargo.toml が未追加のため cargo 系ステップをスキップしました（workspace 作成後に有効化されます）"
 elif [ "${EVENT_NAME:-}" = "pull_request" ] && docs_only; then
   emit false
-  echo "::notice::docs 系ファイルのみの変更のため cargo 系ステップをスキップしました（scripts/ci-detect.sh）"
+  echo "::notice::Markdown のみの変更のため cargo 系ステップをスキップしました（scripts/ci-detect.sh）"
 else
   emit true
 fi
