@@ -489,6 +489,17 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin
 
+      # イシュー #3003: backend-metal を macOS ターゲット・internal-diagnostics 無効で
+      # clippy 検査する（rust-ci の clippy は Linux の --all-features のため、この構成の
+      # dead_code 警告を検知できなかった）。`--all-targets` は criterion → alloca の
+      # ネイティブ C クロスビルドで失敗するため `--lib --tests` にする（上の cargo check
+      # と同じ理由。Makefile／scripts/check-cross.sh metal-tests と同一コマンド）。
+      # 新規ジョブは立てず既存 build ジョブへのステップ追加とする（ruleset の required
+      # contexts 更新を避ける。backend-cuda の #2299 ステップと同方針）。
+      - name: cargo clippy（backend-metal・macOS ターゲット・internal-diagnostics 無効）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo clippy -p fandhe-ai-backend-metal --lib --tests --locked --target aarch64-apple-darwin -- -D warnings
+
       # イシュー #753 レビュー指摘（codex-review P2）: `backend-cpu::gemm_blis::cache_params`
       # モジュールは本番未結線のため `#[cfg(test)]` 限定でしかコンパイルされず、内部の
       # `sysctl_ffi`（`cfg(target_os = "macos")` 限定）は Linux CI の通常

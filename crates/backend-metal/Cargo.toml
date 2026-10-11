@@ -57,10 +57,10 @@ objc2-metal.workspace = true
 # クレート外の利用者が安全な公開 API の組み合わせだけで「診断・ベンチ専用の
 # 生アクセス手段」（GPU タイムスタンプ収集の内部境界・encode/synchronize
 # の分離計測用エンコード専用入口）を得てしまう懸念に対応する。この feature
-# を有効化しない既定ビルドでは両 API とも `pub(crate)` に絞られ crate 外部
-# から到達不能（`crates/backend-metal/src/context.rs::BatchGpuTimestamps`・
-# `synchronize_with_gpu_timestamps` および `crates/backend-metal/src/
-# gemm.rs::MetalGemm::encode_tiled_prepared` の doc コメント参照）。
+# を有効化しない既定ビルドでは両 API とも crate 外部から到達不能
+# （`encode_tiled_prepared` は既定ビルドに存在せず、`BatchGpuTimestamps`・
+# `synchronize_with_gpu_timestamps` はテストビルドでのみ `pub(crate)`。
+# 各 doc コメント参照）。
 # `examples/gemm_transpose_route_ab_bench.rs`（`--gpu-timestamps` opt-in）
 # のみが `required-features` 経由で本 feature を要求する。deps-policy.md
 # 「バックエンド切替は feature フラグなしの cfg ベース」はバックエンド選択
@@ -79,6 +79,17 @@ objc2-metal.workspace = true
 # 指定なし・既定ビルドで `pub`）自体の数値契約ゲートはイシュー #1513 で
 # 解除済み（本 feature とは独立。`gemm.rs::SPLIT_K_NUMERIC_CONTRACT_
 # APPROVED` 参照）。
+#
+# イシュー #3003: 診断専用の項目は既定ビルド（本 feature 無効）で dead_code
+# 警告を出さないよう cfg で外す（`backend-cuda` の #2299 と同型の判断基準）:
+#   - test と本 feature の両方から使う項目 →
+#     `#[cfg(any(test, feature = "internal-diagnostics"))]`
+#   - feature 無効側の `pub(crate)` 版（診断テストからだけ使う） →
+#     `#[cfg(all(test, not(feature = "internal-diagnostics")))]`
+#   - どちらからも使わない項目 → 削除
+# `#[allow(dead_code)]` は使わない。feature 無効・有効の両方で
+# `cargo clippy -p fandhe-ai-backend-metal --all-targets -- -D warnings`
+# を警告 0 件に保つ。
 internal-diagnostics = []
 
 [dev-dependencies]

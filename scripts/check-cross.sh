@@ -16,6 +16,10 @@ case "${1:-}" in
     # -p fandhe-ai-backend-metal --tests に限定する。
     ensure_rust_target aarch64-apple-darwin
     cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin
+    # イシュー #3003: macOS・internal-diagnostics 無効の lib／lib test で出る
+    # dead_code 警告の再発防止（Linux の --all-features clippy では見えない構成）。
+    # --all-targets は criterion → alloca のクロス C ビルドで失敗するため --lib --tests。
+    cargo clippy -p fandhe-ai-backend-metal --lib --tests --locked --target aarch64-apple-darwin -- -D warnings
     ;;
   cpu-tests)
     # イシュー #753（codex-review P2）: backend-cpu::gemm_blis::cache_params は
