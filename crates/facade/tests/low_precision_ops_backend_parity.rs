@@ -182,3 +182,62 @@ fn metal_low_precision_ops_match_cpu_reference() {
 fn cuda_low_precision_ops_match_cpu_reference() {
     assert_device_matches_cpu(Device::Cuda(0), "cuda");
 }
+/// 実機診断（#2629）: 12 組合せすべての CPU 対 実機の差分を 1 行ずつ出力し、
+/// 全組合せを出し終えてから同じ統一複合判定（`compare`／`passes`。tolerance は
+/// 新設せず不変）で集約 assert する。上の `assert_device_matches_cpu` は最初の
+/// 失敗で panic し残りの組合せが見えなくなるため、実測記録
+/// （`docs/perf/logs/low-precision-ops-2628/README.md`）用に別立てしている。
+fn report_device_vs_cpu(device: Device, label: &str) {
+    let device_tape =
+        fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテストのため成功するはず");
+    let mut failed = Vec::new();
+    for d in DTYPES {
+        for op in OPS {
+            let xs_t = inputs(op);
+            let cpu_tape = fandhe_ai::tape();
+            let cpu_xs: Vec<Var<'_>> = xs_t.iter().map(|x| cpu_tape.var(x)).collect();
+            let y_cpu = run(op, &cpu_xs, d).to_tensor();
+            let dev_xs: Vec<Var<'_>> = xs_t.iter().map(|x| device_tape.var(x)).collect();
+            let y_dev = run(op, &dev_xs, d).to_tensor();
+            let (a, b) = (y_dev.host_slice(), y_cpu.host_slice());
+            let bit_eq = a
+                .iter()
+                .zip(b.iter())
+                .filter(|(p, q)| p.to_bits() == q.to_bits())
+                .count();
+            match fandhe_ai_backend_cpu::parity::compare(a.as_ref(), b.as_ref()) {
+                Ok(r) => {
+                    println!(
+                        "REPORT {label} {op} {d:?}: total={} bit_eq={bit_eq} fail={} max_abs={:e} max_rel={:e} passes={}",
+                        r.total,
+                        r.fail_count,
+                        r.max_abs_diff,
+                        r.max_rel_err,
+                        r.passes()
+                    );
+                    if !r.passes() {
+                        failed.push(format!("{op} {d:?}"));
+                    }
+                }
+                Err(e) => {
+                    println!("REPORT {label} {op} {d:?}: error={e:?}");
+                    failed.push(format!("{op} {d:?}"));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "parity 不合格の組合せ: {failed:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。診断用（#2629）"]
+fn metal_low_precision_ops_parity_report() {
+    report_device_vs_cpu(Device::Metal, "metal");
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。診断用（#2629）"]
+fn cuda_low_precision_ops_parity_report() {
+    report_device_vs_cpu(Device::Cuda(0), "cuda");
+}
