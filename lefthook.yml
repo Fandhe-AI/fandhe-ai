@@ -1,6 +1,8 @@
 # Git hooks 定義（lefthook）。`make hooks`（lefthook install）で導入する。
 #
-# 方針（.claude/rules/conventional-commits.md・ci.md。Fandhe-AI/rust-ai-library-v1 と同一）:
+# 方針（.claude/rules/git-hooks.md・conventional-commits.md・ci.md。Fandhe-AI/rust-ai-library-v1 と同一）:
+# - フックの追加・変更時は .claude/rules/git-hooks.md の方針（時間予算・CI との役割分担・
+#   判断手順）に従う。CI と重複する検査は原則置かない（例外は同ルールの「明示的な例外」節に列挙）
 # - --no-verify によるスキップは禁止
 # - Cargo.toml 未追加（M0 の TASK-1.1 で workspace 作成予定）の間、cargo 系ジョブは
 #   スキップする（CI 側の detect ステップ判定と同一方針。ci.md 参照）
@@ -29,17 +31,32 @@ pre-commit:
           echo "skip: Cargo.toml 未追加または rustfmt 未導入"
         fi
 
-    # 秘密情報の混入検査（.claude/rules/security.md）。.env 系ファイルの stage を拒否する
+    # 秘密情報の混入検査（.claude/rules/security.md）。資格情報ファイルの stage を拒否する。
+    # 判定は create-commit スキルの RE_CREDFILE / RE_CREDFILE_OK の対と同一の正規表現を
+    # ベースにする（`(^|/)` アンカーでサブディレクトリ内の `.env.*` も検出し、
+    # 拡張子なしの SSH 鍵 `id_rsa` / `id_ed25519` も拒否する。一方 `.env.example` 等の
+    # 雛形・`id_rsa.pub` 等の公開鍵は許可リストで通す。拡張子 `.env` は旧パターンの
+    # 検出範囲を維持するため追加している。Fandhe-AI/fandhe-container と同一実装）
     - name: secrets-guard
       run: |
-        for f in {staged_files}; do
-          case "$f" in
-            *.env|.env.*|*.pem|*.key)
-              echo "NG: 秘密情報ファイルがステージされています: $f" >&2
-              exit 1
-              ;;
-          esac
-        done
+        # プロセス起動回数をファイル数に比例させないため、awk 1 本で全パスを判定する。
+        # 正規表現は awk -v ではなく ENVIRON で渡す（-v はバックスラッシュをエスケープとして
+        # 解釈し `\.` が崩れるため）。BSD awk は UTF-8 ロケールで不正なマルチバイト列に
+        # 当たると異常終了するため LC_ALL=C で照合する（パターンは ASCII のみ）。
+        # awk 自体が失敗した場合は判定できていないパスが残るため fail-closed で拒否する
+        re='(^|/)\.env(\..+)?$|(^|/)(id_rsa|id_ed25519)(\..+)?$|\.(pem|p12|pfx|key|env)$'
+        re_ok='\.(example|sample|template|pub)$'
+        if ! hits=$(printf '%s\n' {staged_files} \
+          | LC_ALL=C RE="$re" RE_OK="$re_ok" awk '$0 ~ ENVIRON["RE"] && $0 !~ ENVIRON["RE_OK"]'); then
+          echo "NG: ファイル名の判定に失敗したため秘密情報の検査を完了できません" >&2
+          exit 1
+        fi
+        if [ -n "$hits" ]; then
+          printf '%s\n' "$hits" | while IFS= read -r f; do
+            echo "NG: 秘密情報ファイルがステージされています: $f" >&2
+          done
+          exit 1
+        fi
 
 commit-msg:
   jobs:
