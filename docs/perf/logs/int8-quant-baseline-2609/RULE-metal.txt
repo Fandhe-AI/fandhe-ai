@@ -1,0 +1,14 @@
+# 事前登録規則（イシュー #2998・Metal 代替分母〈案 ii〉。実測開始前に固定し、事後に緩和しない）
+# 出典: RULE.txt の R1〜R6 を継承し、Metal 固有の規則を厳しくする方向にのみ追加したもの。変更が必要なら人間承認を得る。
+
+PLACEHOLDER: <metal-node>=Mac mini（Apple M4）ノード。実ホスト名・ユーザー名・絶対パスはログへ書かず、~ と <metal-node> に置換する（M5）。
+
+継承: RULE.txt の R1（1 run=1 プロセス・5 run の median_secs の中央値・Q1/Q3 は bench_harness::stats と同定義）／R2（関数名 --exact）／R3（計測中ビルド禁止）／R4（.rev-stamp・env_info.txt 回収）／R5／R6、DISCARD_MAC（run 前 load1<2.0 を最大 30 分待ち、満たさなければ参考扱いと明記）、PARTIAL（5 run そろわない腕は中央値を出さず未検証と記録）。
+ARMS_METAL: facade-metal（必須。transformer_encoder_facade_forward_bench_metal_relu）／pytorch-mps（対 PyTorch 比の基準）。parity-metal は pass/fail のみ記録し時間表に入れない。
+ORDER_METAL: run=1..5 の各 run で facade-metal -> pytorch-mps の順に交互実行する。
+M1: 計測に先立ち metal_transformer_encoder_matches_cpu（parity-metal）を 1 回実行し、pass しなければ分母を記録しない（fail-closed）。
+M2: 腕 A（facade・ReLU 固定）のみ必須。autodiff 直結 GELU 腕は実施しない（未実施と明記する）。
+M3: 対 PyTorch 比は「facade=ReLU 固定」対「PyTorch=GELU」の非対称を含む。表の注記に必ず書く。
+M4: 計測中は他のビルド・計測を並走させない。env_info.txt に uptime（計測前後）を記録する。
+M5: 本値は baseline_spec() 同一定義の分母ではなく代替分母。transformer-workload-baseline.md §7 の Metal 表（baseline_spec 系列）へは転記せず、(c) の充足も宣言しない。案 i 実装後に置き換える前提。
+RATIO: 対 PyTorch 比 = facade-metal の 5 run 中央値 / pytorch-mps の 5 run 中央値（秒）。1 より大きければ遅い。

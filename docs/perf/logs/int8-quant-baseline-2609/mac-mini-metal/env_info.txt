@@ -1,0 +1,9 @@
+host: <metal-node>
+date: 2026-10-11
+chip: Apple M4 (10 コア)
+os: macOS 27.0.1
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+torch: 未計測（<metal-node> の python3 は 3.15.0 で torch の wheel が無く pip install torch が "No matching distribution" で失敗。/usr/bin/python3 は 3.9.6。PyTorch MPS 行は未計測。README §2.2）
+rev-stamp: 52e864918cdf091456ed3ea7803666941600bb57（転送元 HEAD。転送後にノード側 .rev-stamp で一致確認済み・作業ツリー clean）
+load1: 各 run 前後は load-facade-metal-run{1..5}.txt（run 前はすべて 2.0 未満）。全 run 終了後の uptime は load averages 1.72 3.17 2.38。
+note: 計測前に metal_transformer_encoder_matches_cpu（parity-metal-run1.log）が pass。ログ中の絶対パスは ~ に置換済み。

@@ -1,6 +1,6 @@
 # INT8 量子化の格上げ条件 (c)・(d-2) 測定の申し送り（イシュー #2609）
 
-`docs/int8-quant-grade-up-verification-plan.md` §4.1・§5.1 の案に対応する、実機測定コマンドと実測記録の文書である。(c) の GB10 分と Mac mini（Apple M4）CPU 参考行は #2997 で記入済み（2026-10-11）。Metal 分母は #2998、(d-2) は未実施（#2999 は not planned・spec#83 で範囲外と確定）。**本文書は条件 (c)・(d) の充足を宣言しない**（判断は spec 側）。計測値は記録のみで、閾値・baseline・REQ-8 下限へは反映しない。
+`docs/int8-quant-grade-up-verification-plan.md` §4.1・§5.1 の案に対応する、実機測定コマンドと実測記録の文書である。(c) の GB10 分と Mac mini（Apple M4）CPU 参考行は #2997 で記入済み（2026-10-11）。Metal 分母は #2998（facade 代替分母の Metal 側は記入済み・PyTorch MPS 基準と対 PyTorch 比は未計測。§2.2）、(d-2) は未実施（#2999 は not planned・spec#83 で範囲外と確定）。**本文書は条件 (c)・(d) の充足を宣言しない**（判断は spec 側）。計測値は記録のみで、閾値・baseline・REQ-8 下限へは反映しない。
 
 ## 1. 事前登録規則の案（実測前に固定し、事後に緩めない）
 
@@ -56,11 +56,49 @@ parity（run1..5）: run1=pass, run2=pass, run3=pass, run4=pass, run5=pass
 - 注記: per-op ホスト転送が計測値に含まれる。fused と prefusion の差分には「linear 側の真の融合効果」と「softmax のホスト→GPU 移行効果」が混ざる（`transformer-workload-baseline.md` §7 の非対称性の注記）。
 - ノードには常駐サービスの GPU プロセスが 2 件あり、停止していない（run 前の utilization.gpu 0〜2% を確認）。
 
-### 2.2 Metal（Mac mini〈Apple M4〉）
+### 2.2 Metal（Mac mini〈Apple M4〉。案 ii: facade 代替分母）
 
-案 ii（facade `TransformerEncoderLayer` で代替分母）に決定済み（#2995・2026-10-11）。計測は #2998 の担当で、本 issue では測らない。以下は #2609 時点の記述。
+案 ii（facade `TransformerEncoderLayer` で代替分母）は所有者判断（#2995・2026-10-11）で決定済み。計測は #2998（2026-10-11）。規則は `RULE-metal.txt`（実測前コミットで固定）、生ログ・JSON・`env_info.txt` は `mac-mini-metal/`。案 i（`baseline_spec()` と同一定義の専用実行経路）は所有者判断で量子化の格上げ後に回されており、本節では実装しない。
 
-複合ワークロードの実行経路（`transformer_workload_metal.rs` 相当）が未実装のため、**現時点では測定不能**。案 i（専用経路）か案 ii（facade `TransformerEncoderLayer` 代替）かは承認待ち（計画 doc §8 項 11）。記入欄は `transformer-workload-baseline.md` §7 の Metal 表を使う。
+**本行は `baseline_spec()` 同一定義の分母ではなく代替分母**である。`transformer-workload-baseline.md` §7 の Metal 表（`baseline_spec()` 系列）には転記しない。案 i の実装後に置き換える前提。
+
+定義差分（正は `crates/bench-harness/src/transformer_workload.rs::baseline_spec()` と `crates/facade/tests/transformer_encoder_metal_denominator.rs`）:
+
+| 項目 | `baseline_spec()`（§4.1 の分母） | 本計測（facade 経路） |
+|---|---|---|
+| d_model / n_heads / d_ff / batch / seq_len / 層数 | 512 / 8 / 2048 / 8 / 128 / 1 | 同じ（`baseline_spec()` から取得） |
+| 精度・norm | f32・post-norm・LayerNorm eps 1e-5 | 同じ |
+| FFN 活性化 | GELU | **ReLU 固定**（`add_transformer_encoder`。facade は GELU を公開しない） |
+| attention | テスト内の手書き合成 | `nn::MultiheadAttention` の `Var` 演算合成 |
+| 重み・入力 | `Xorshift64Star` + `SEED` | 入力は同じ生成器・`SEED`。重みは autodiff `nn::init` のシード導出（`SEED` 流用） |
+| 実行経路 | backend ops 直呼び | autodiff tape 経由。反復ごとに `tape_for(Device::Metal)` を作り直す（`predict` と同じ運用） |
+| ホスト転送 | （CUDA は per-op 転送を含む） | `MetalBackendOps` の各演算はホスト常駐 `Tensor` を返すため per-op 転送を含む |
+
+実行コマンド（`docs/real-hardware-verification-env.md` §7。`orchestrate_mac.sh <arm> <run>` が 1 呼び出し = 1 プロセス。`OUT` は #2998 用に別ディレクトリ）:
+
+```sh
+cargo test -p fandhe-ai --release --test compat_sequential_layers_backend_parity \
+  -- metal_transformer_encoder_matches_cpu --exact --ignored --nocapture   # 前提ゲート（parity-metal）
+BENCH_TRANSFORMER_METAL_REPORT=<json> cargo test -p fandhe-ai --release \
+  --test transformer_encoder_metal_denominator \
+  -- transformer_encoder_facade_forward_bench_metal_relu --exact --ignored --nocapture
+# PyTorch 基準: python3 scripts/bench-transformer-pytorch.py --device mps --output <json>
+```
+
+実測（2026-10-11。前提ゲート `metal_transformer_encoder_matches_cpu` は pass。転送元 HEAD `52e86491`。`aggregate.py mac-mini-metal --arms facade-metal` の出力を転記）:
+
+| 腕 | run1 | run2 | run3 | run4 | run5 | 中央値 | Q1 | Q3 | 対 PyTorch 比 |
+|---|---|---|---|---|---|---|---|---|---|
+| facade-metal（ReLU） | 68.972 | 69.992 | 69.359 | 69.730 | 69.829 | 69.730 | 69.359 | 69.829 | 未計測 |
+| pytorch-mps（GELU） | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | - | - | - |
+
+単位: ms（各 run の median_secs を 1000 倍）。run 前 load1 はすべて 2.0 未満（`mac-mini-metal/load-*.txt`）。
+
+- **PyTorch MPS 基準は未計測**。`<metal-node>` の python3 は 3.15.0 で torch の wheel が無く、`pip install torch` が失敗した（`/usr/bin/python3` は 3.9.6）。このため**対 PyTorch 比は算出できず、(c) の分母（比）はまだ埋まっていない**。torch 2.13.0 を導入できる Python（3.10〜3.13 系）を用意したうえで `orchestrate_mac.sh pytorch-mps <run>`（`PYVENV` で venv を指定）を 5 run 実行し、本表の行を埋める（申し送り）。値は推測で埋めない。
+- 比を出す際の注記: facade は ReLU 固定、PyTorch 基準は GELU で活性化が非対称（`RULE-metal.txt` M3）。
+- 補助計測 `tape_for(Device::Metal)` 単体の median は 1.39〜1.50e-5 秒（5 run の中央値 14 µs。`mac-mini-metal/facade-metal-run*.log` の `arm=facade_tape_for`）。facade 腕の約 69.7 ms に対し tape 生成・デバイス存在検証の固定費は無視できる。
+- autodiff 直結 GELU 腕は未実施（`RULE-metal.txt` M2）。
+- 本記録は条件 (c) の充足を宣言しない（判断は spec 側）。計測値は閾値・baseline・REQ-8 下限へ反映しない。
 
 ### 2.3 CPU（Mac mini〈Apple M4〉。参考行）
 

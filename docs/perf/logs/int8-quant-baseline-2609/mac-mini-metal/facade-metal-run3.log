@@ -1,0 +1,58 @@
+warning: struct `BatchGpuTimestamps` is never constructed
+   --> crates/backend-metal/src/context.rs:144:19
+    |
+144 | pub(crate) struct BatchGpuTimestamps {
+    |                   ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `from_raw`, `labels`, and `kernel_gpu_secs` are never used
+   --> crates/backend-metal/src/context.rs:152:8
+    |
+150 | impl BatchGpuTimestamps {
+    | ----------------------- associated items in this implementation
+151 |     /// `0.0`（未開始／完了通知未受領）を `None` へ変換して保持する。
+152 |     fn from_raw(gpu_start_secs: f64, gpu_end_secs: f64, meta: &BatchMeta) -> Self {
+    |        ^^^^^^^^
+...
+161 |     pub fn labels(&self) -> &[&'static str] {
+    |            ^^^^^^
+...
+168 |     pub fn kernel_gpu_secs(&self) -> Option<f64> {
+    |            ^^^^^^^^^^^^^^^
+
+warning: methods `synchronize_with_gpu_timestamps` and `synchronize_with_gpu_timestamps_impl` are never used
+   --> crates/backend-metal/src/context.rs:691:19
+    |
+242 | impl MetalContext {
+    | ----------------- methods in this implementation
+...
+691 |     pub(crate) fn synchronize_with_gpu_timestamps(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+699 |     fn synchronize_with_gpu_timestamps_impl(&self) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `encode_tiled_nn_recorded` and `encode_tiled_prepared` are never used
+    --> crates/backend-metal/src/gemm.rs:2777:8
+     |
+ 781 | impl MetalGemm {
+     | -------------- methods in this implementation
+...
+2777 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2899 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running tests/transformer_encoder_metal_denominator.rs (~/work/target-fandhe-ai/release/deps/transformer_encoder_metal_denominator-620140b1534f2d16)
+
+running 1 test
+int8_c_metal_denominator arm=facade_relu report={"schema_version":"1","name":"transformer-encoder-facade-metal-relu","backend":"metal","warmup":20,"iters":20,"median_secs":0.069358791,"q1_secs":0.069103834,"q3_secs":0.070281709,"samples_secs":[0.070281709,0.068681625,0.070639916,0.069262333,0.069438709,0.069733667,0.069358791,0.068502041,0.071693583,0.069161,0.069218333,0.071698291,0.070036416,0.069326042,0.068191834,0.072845333,0.069103834,0.067749667,0.071589916,0.069068583]}
+int8_c_metal_denominator arm=facade_tape_for report={"schema_version":"1","name":"transformer-encoder-facade-metal-tape-for","backend":"metal","warmup":20,"iters":20,"median_secs":0.000013833,"q1_secs":0.000013666,"q3_secs":0.000016125,"samples_secs":[0.000014167,0.000013833,0.000016542,0.000013667,0.000016333,0.000013583,0.000013666,0.000013583,0.00001575,0.000013833,0.000016458,0.000016791,0.000013542,0.000016125,0.000015,0.000013833,0.000013791,0.000013583,0.00001675,0.000013417]}
+test transformer_encoder_facade_forward_bench_metal_relu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s
+
