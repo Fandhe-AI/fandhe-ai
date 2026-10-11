@@ -4449,7 +4449,7 @@ impl BackendOps for CudaBackendOps {
     /// の背後にある。ゲート OFF なら従来どおり `device_handle()`（driver
     /// 初期化）を経由せず `Unsupported` を返し、`Var` 側がホスト `f64` 参照
     /// 実装へフォールバックする（既存契約不変）。ゲート ON 時の流れは
-    /// [`lu_gate_prepare`] 参照。
+    /// `lu_gate_prepare` 参照。
     fn linalg_inv(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         if lu_gate_prepare("linalg_inv", a.shape(), None)? {
             return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
