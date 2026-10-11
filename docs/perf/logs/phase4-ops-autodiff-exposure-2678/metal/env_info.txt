@@ -1,0 +1,22 @@
+== before ==
+hostname: masked
+date_utc: 2026-10-11T06:46:24Z
+rev: c8e1ceb1
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+Apple M4
+rustc 1.99.0 (b940084d7 2026-09-28)
+15:46  up 15:20, 1 user, load averages: 3.15 1.68 1.46
+== after ==
+hostname: masked
+date_utc: 2026-10-11T06:47:18Z
+rev: c8e1ceb1
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+Apple M4
+rustc 1.99.0 (b940084d7 2026-09-28)
+15:47  up 15:21, 1 user, load averages: 13.02 5.14 2.78
+stamp_after: c8e1ceb11a5935f9ae87f29fcc8fc6e1185fa933
+# note: Hostname, username and personal paths masked (~ -> ~). load average: 計測前の値は直前の他負荷を含み、計測後の値は本計測自身のビルド由来。
