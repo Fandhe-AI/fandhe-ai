@@ -1,4 +1,5 @@
 # fandhe-ai の品質ゲート CI。
+# ジョブの追加・変更時は .claude/rules/github-actions.md に従う。
 #
 # fmt / clippy / test / cargo-deny のベースライン品質ゲートは Fandhe-AI/actions の
 # rust-base-ci reusable workflow（rust-ci ジョブ）へ集約した（イシュー #325。
@@ -181,13 +182,27 @@ on:
     branches: [main]
   push:
     branches: [main]
+    # docs 系のみの push（main へのマージ）では CI を回さない。push には required status
+    # checks が無く、キャッシュ基盤となる main の target キャッシュも Cargo.lock/コード
+    # 変更時にしか更新されないため安全。PR 側は必須チェック維持のため workflow 単位の
+    # paths を使えず、各ジョブ内の scripts/ci-detect.sh で同等の省略を行う。
+    # site/ と crates/ は docs-site のテスト・doc 属性が実読込するため除外しない。
+    paths-ignore:
+      - "docs/**"
+      - ".claude/**"
+      - ".agents/**"
+      - "skills-lock.json"
+      - "*.md"
+      - "LICENSE-*"
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # PR は新 push で古い run を取り消す。main（push）は取り消さない（途中で止めると
+  # main 基盤の target キャッシュ保存が欠けるため）。
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # --------------------------------------------------
@@ -320,18 +335,17 @@ jobs:
         # persist-credentials: false（fmt ジョブと同一方針）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          # pull_request では scripts/ci-detect.sh が第 1 親との差分で docs のみの変更を判定するため 2 を取る
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
 
       - name: Cargo.toml の有無を判定
         id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml が未追加のため cargo build をスキップしました（workspace 作成後に有効化されます）"
-          fi
+        # Cargo.toml の有無に加え、pull_request で docs 系ファイルのみの変更なら false を出して
+        # 後続の cargo 系ステップを省く（判定ロジックは scripts/ci-detect.sh）。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-detect.sh
 
       # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
       # rust-toolchain.toml（stable + rustfmt/clippy）へ同期する（rust-ci ジョブが使う
@@ -539,6 +553,8 @@ jobs:
         # persist-credentials: false（fmt ジョブと同一方針）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          # pull_request では scripts/ci-detect.sh が第 1 親との差分で docs のみの変更を判定するため 2 を取る
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
 
       # 検査ロジック自体の退行を、実環境の toolkit 有無に関わらず常時検出する
@@ -548,14 +564,11 @@ jobs:
 
       - name: Cargo.toml の有無を判定
         id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml が未追加のため cargo build（toolkit 非搭載検証）をスキップしました（workspace 作成後に有効化されます）"
-          fi
+        # Cargo.toml の有無に加え、pull_request で docs 系ファイルのみの変更なら false を出して
+        # 後続の cargo 系ステップを省く（判定ロジックは scripts/ci-detect.sh）。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-detect.sh
 
       # fail-closed: runner に toolkit が導入されていれば「非搭載環境での検証」という
       # 本ジョブの前提が成立しないため、cargo build の前に明示的に失敗させる。
@@ -672,6 +685,8 @@ jobs:
         # persist-credentials: false（fmt ジョブと同一方針）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          # pull_request では scripts/ci-detect.sh が第 1 親との差分で docs のみの変更を判定するため 2 を取る
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
 
       # 検査ロジック自体の退行（正規表現の破損・grep 消失等）を、実データの有無に関わらず
@@ -682,13 +697,11 @@ jobs:
 
       - name: Cargo.toml の有無を判定
         id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-          fi
+        # Cargo.toml の有無に加え、pull_request で docs 系ファイルのみの変更なら false を出して
+        # 後続の cargo 系ステップを省く（判定ロジックは scripts/ci-detect.sh）。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-detect.sh
 
       # 本体 workspace ルート Cargo.lock・OSS 直接比較ハーネス
       # （scripts/bench/oss-gemm-compare/。許容依存第 9 区分・イシュー #755。
@@ -975,6 +988,8 @@ jobs:
         # persist-credentials: false（fmt ジョブと同一方針）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          # pull_request では scripts/ci-detect.sh が第 1 親との差分で docs のみの変更を判定するため 2 を取る
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
 
       # 検査ロジック自体の退行（テストファイル・fixture の無言削除／リネーム）を、
@@ -990,14 +1005,11 @@ jobs:
 
       - name: Cargo.toml の有無を判定
         id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml が未追加のため guardrail 2 層検証をスキップしました（workspace 作成後に有効化されます）"
-          fi
+        # Cargo.toml の有無に加え、pull_request で docs 系ファイルのみの変更なら false を出して
+        # 後続の cargo 系ステップを省く（判定ロジックは scripts/ci-detect.sh）。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-detect.sh
 
       # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
       # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
@@ -1076,6 +1088,8 @@ jobs:
         # persist-credentials: false（fmt ジョブと同一方針）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          # pull_request では scripts/ci-detect.sh が第 1 親との差分で docs のみの変更を判定するため 2 を取る
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
 
       # 検査ロジック自体の退行（bench ワークロード example の無言削除・リネーム）を、
@@ -1085,14 +1099,11 @@ jobs:
 
       - name: Cargo.toml の有無を判定
         id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml が未追加のため検証ゲートをスキップしました（workspace 作成後に有効化されます）"
-          fi
+        # Cargo.toml の有無に加え、pull_request で docs 系ファイルのみの変更なら false を出して
+        # 後続の cargo 系ステップを省く（判定ロジックは scripts/ci-detect.sh）。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-detect.sh
 
       # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
       # rust-toolchain.toml（stable + rustfmt/clippy）へ同期する（build ジョブと同一方針。
