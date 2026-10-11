@@ -1,0 +1,58 @@
+warning: struct `BatchGpuTimestamps` is never constructed
+   --> crates/backend-metal/src/context.rs:144:19
+    |
+144 | pub(crate) struct BatchGpuTimestamps {
+    |                   ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `from_raw`, `labels`, and `kernel_gpu_secs` are never used
+   --> crates/backend-metal/src/context.rs:152:8
+    |
+150 | impl BatchGpuTimestamps {
+    | ----------------------- associated items in this implementation
+151 |     /// `0.0`（未開始／完了通知未受領）を `None` へ変換して保持する。
+152 |     fn from_raw(gpu_start_secs: f64, gpu_end_secs: f64, meta: &BatchMeta) -> Self {
+    |        ^^^^^^^^
+...
+161 |     pub fn labels(&self) -> &[&'static str] {
+    |            ^^^^^^
+...
+168 |     pub fn kernel_gpu_secs(&self) -> Option<f64> {
+    |            ^^^^^^^^^^^^^^^
+
+warning: methods `synchronize_with_gpu_timestamps` and `synchronize_with_gpu_timestamps_impl` are never used
+   --> crates/backend-metal/src/context.rs:691:19
+    |
+242 | impl MetalContext {
+    | ----------------- methods in this implementation
+...
+691 |     pub(crate) fn synchronize_with_gpu_timestamps(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+699 |     fn synchronize_with_gpu_timestamps_impl(&self) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `encode_tiled_nn_recorded` and `encode_tiled_prepared` are never used
+    --> crates/backend-metal/src/gemm.rs:2777:8
+     |
+ 781 | impl MetalGemm {
+     | -------------- methods in this implementation
+...
+2777 |     fn encode_tiled_nn_recorded(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2899 |     pub(crate) fn encode_tiled_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fandhe-ai-backend-metal` (lib) generated 4 warnings
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 1.00s
+     Running tests/stat_reduce_ops_backend_parity.rs (~/work/target-fandhe-ai/release/deps/stat_reduce_ops_backend_parity-4cfb995461ae81ae)
+
+running 1 test
+test metal_stat_reduce_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.06s
+
+rc=0
