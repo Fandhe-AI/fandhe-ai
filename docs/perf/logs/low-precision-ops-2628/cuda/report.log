@@ -1,0 +1,20 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/low_precision_ops_backend_parity.rs (~/work/target-fandhe-ai/release/deps/low_precision_ops_backend_parity-4c958074b1633bdc)
+
+running 1 test
+test cuda_low_precision_ops_parity_report ... REPORT cuda matmul F16: total=4 bit_eq=4 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda add F16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda mul F16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda relu F16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda exp F16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda tanh F16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda matmul Bf16: total=4 bit_eq=4 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda add Bf16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda mul Bf16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda relu Bf16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda exp Bf16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+REPORT cuda tanh Bf16: total=6 bit_eq=6 fail=0 max_abs=0e0 max_rel=0e0 passes=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.56s
+

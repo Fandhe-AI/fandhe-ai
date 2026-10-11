@@ -1,0 +1,20 @@
+   Compiling rand_chacha v0.9.0
+   Compiling fandhe-ai-backend-cpu v0.11.0 (~/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (~/work/rust-ai-library-run/crates/tensor-core)
+   Compiling cudarc v0.19.8
+   Compiling fandhe-ai-autodiff v0.11.0 (~/work/rust-ai-library-run/crates/autodiff)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (~/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling bench-harness v0.11.0 (~/work/rust-ai-library-run/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (~/work/rust-ai-library-run/crates/onnx-interop)
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 10.32s
+     Running tests/low_precision_ops_backend_parity.rs (~/work/target-fandhe-ai/release/deps/low_precision_ops_backend_parity-4c958074b1633bdc)
+
+running 1 test
+test cuda_low_precision_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.68s
+
