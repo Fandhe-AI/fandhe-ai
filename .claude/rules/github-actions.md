@@ -51,7 +51,7 @@ GitHub Actions cache はリポジトリ単位で上限 **20GB**（本リポジ�
 
 - **保存は main の push のみ**。target キャッシュは `actions/cache/restore` + `actions/cache/save`（`if: ... && github.ref == 'refs/heads/main' && steps.<restore>.outputs.cache-hit != 'true'`）に分離し、PR は restore のみにする。キーはソースを含まない（toolchain 実解決版数 + `Cargo.lock`）ため PR は初回 push から main のキャッシュに exact hit する。`Cargo.lock` を変える PR だけが restore-keys の前方一致（main の旧キー）からの差分ビルドになる
 - **キーに SHA・run_id 等の一意値を入れない**。restore-keys は同一 toolchain 版数スコープの前方一致に限定する（イシュー #917）
-- **workspace メンバーの成果物を保存しない**。cargo を実行する最後のステップの後・save の前に `scripts/ci-prune-target.sh` を置く（統合テスト・example バイナリ、メンバーの rlib/rmeta、incremental、`doc/`・`tmp/` を削除し依存 crate の成果物だけを残す。保存はキー未保存時の 1 回だけで、メンバー成果物は次の run では必ず古いため価値が無い）。workflow 共通 env の `CARGO_INCREMENTAL=0`・`CARGO_PROFILE_DEV_DEBUG=line-tables-only` も維持する
+- **workspace メンバーの成果物を保存しない**。cargo を実行する最後のステップの後・save の前に `scripts/ci-prune-target.sh` を置く（統合テスト・example バイナリ、メンバーの rlib/rmeta、incremental、`doc/`・`tmp/` を削除し依存 crate の成果物だけを残す。`deps/` はメンバーの `.fingerprint/<package>-<hex>` の hex で判定し、target 名では判定しない〈統合テスト `cast` と依存 crate `cast` のような同名衝突で依存側を消すため〉。保存はキー未保存時の 1 回だけで、メンバー成果物は次の run では必ず古いため価値が無い）。workflow 共通 env の `CARGO_INCREMENTAL=0`・`CARGO_PROFILE_DEV_DEBUG=line-tables-only` も維持する
 - **保存内容（prune・env・プロファイル・ビルドコマンド）を変えたらキーの版セグメント（`target-<job-id>-v<N>-`）を上げる**。既存キーに exact hit すると保存がスキップされ、新しい内容が永久に保存されない。旧版への restore-keys フォールバックは付けない（中身の fingerprint が合わず、復元時間だけがかかる）。同じキーを使う他 workflow（`guardrail-regression-schedule.yml`）も同時に上げ、そちらは restore のみにする
 - **復元が節約時間より長いキャッシュは持たない**。`Cache Size` と復元ステップの所要時間、ヒット時とミス時のジョブ時間を比較して判断する
 - 共通側 reusable workflow（`rust-ci` の `rust-base-ci-*` キー）の設計は Fandhe-AI/actions 側を正とし、本リポジトリでは変更しない（同様の prune・`CARGO_INCREMENTAL=0` は共通側で実装済み）
