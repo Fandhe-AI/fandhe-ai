@@ -1,0 +1,10 @@
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.72s
+     Running tests/tensor_product_ops_backend_parity.rs (~/work/target-fandhe-ai/release/deps/tensor_product_ops_backend_parity-884deed54884ad7a)
+
+running 1 test
+test cuda_tensor_product_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.56s
+
+rc=0

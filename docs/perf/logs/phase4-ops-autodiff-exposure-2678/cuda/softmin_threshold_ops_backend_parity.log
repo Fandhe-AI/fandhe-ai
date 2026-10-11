@@ -1,0 +1,13 @@
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.51s
+     Running tests/softmin_threshold_ops_backend_parity.rs (~/work/target-fandhe-ai/release/deps/softmin_threshold_ops_backend_parity-dd7b38fb6946787c)
+
+running 4 tests
+test cuda_bit_exact_backward_matches_cpu_reference ... ok
+test cuda_bit_exact_forward_matches_cpu_reference ... ok
+test cuda_req2_backward_matches_cpu_reference_within_tolerance ... ok
+test cuda_req2_forward_matches_cpu_reference_within_tolerance ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.40s
+
+rc=0
