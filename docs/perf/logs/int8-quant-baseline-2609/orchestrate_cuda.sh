@@ -31,14 +31,28 @@ while :; do
   if [ "${waited}" -ge 300 ]; then echo "GPU が混雑(${util}%)のため実行しない" >&2; exit 4; fi
   sleep 10; waited=$((waited + 10))
 done
+# nvidia-smi の採取失敗は握りつぶさず ${OCC}.smifail へ記録する。監視不能な run は
+# 「別プロセス不在」と区別できないため RUN_INVALID として集計から除外する（RULE.txt DISCARD_CUDA）。
+SMIFAIL="${OCC}.smifail"
+SMIOK="${OCC}.smiok"
+rm -f "${SMIFAIL}" "${SMIOK}"
 {
   echo "pre util=${util}% waited=${waited}s"
   echo "pre compute-apps:"
-  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader || true
+  if ! nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; then
+    echo "pre compute-apps query failed" >> "${SMIFAIL}"
+  fi
 } > "${OCC}"
 
 # run 中の compute-apps を 1 秒間隔で採取する（別プロセス判定用）。
-( while :; do nvidia-smi --query-compute-apps=process_name --format=csv,noheader >> "${OCC}.samples" 2>/dev/null || true; sleep 1; done ) &
+( while :; do
+    if nvidia-smi --query-compute-apps=process_name --format=csv,noheader >> "${OCC}.samples" 2>/dev/null; then
+      echo 1 >> "${SMIOK}"
+    else
+      echo "sample query failed" >> "${SMIFAIL}"
+    fi
+    sleep 1
+  done ) &
 SAMPLER=$!
 trap 'kill ${SAMPLER} 2>/dev/null || true' EXIT
 
@@ -65,10 +79,18 @@ status=$?
 set -e
 
 kill "${SAMPLER}" 2>/dev/null || true
+wait "${SAMPLER}" 2>/dev/null || true
 {
   echo "post compute-apps:"
-  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader || true
-  echo "post util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader | head -1)"
+  if ! nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; then
+    echo "post compute-apps query failed" >> "${SMIFAIL}"
+  fi
+  if post_util="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader | head -1)" && [ -n "${post_util}" ]; then
+    echo "post util=${post_util}"
+  else
+    echo "post util query failed" >> "${SMIFAIL}"
+    echo "post util=UNKNOWN"
+  fi
   echo "foreign process names during run (transformer_workload / python 以外):"
   if [ -e "${OCC}.samples" ]; then
     grep -v -e '^$' -e 'transformer_workload' -e 'python' "${OCC}.samples" | sort -u || true
@@ -80,15 +102,31 @@ if [ -e "${OCC}.samples" ]; then
   foreign="$(grep -v -e '^$' -e 'transformer_workload' -e 'python' "${OCC}.samples" | sort -u || true)"
 fi
 rm -f "${OCC}.samples"
-if [ -n "${foreign}" ]; then
+# 監視不能判定: 採取失敗が 1 件でもある、または run 中に成功した採取が 0 回の run は無効。
+smi_unmonitored=""
+if [ -s "${SMIFAIL}" ]; then
+  smi_unmonitored="nvidia-smi 採取失敗 $(wc -l < "${SMIFAIL}" | tr -d ' ') 件: $(sort -u "${SMIFAIL}" | tr '\n' ';')"
+elif [ ! -s "${SMIOK}" ]; then
+  smi_unmonitored="run 中に成功した nvidia-smi 採取が 0 回"
+fi
+rm -f "${SMIFAIL}" "${SMIOK}"
+if [ -n "${smi_unmonitored}" ]; then
+  echo "SMI_UNMONITORED: ${smi_unmonitored}" >> "${OCC}"
+fi
+if [ -n "${foreign}" ] || [ -n "${smi_unmonitored}" ]; then
   # 無効 run として記録し、破棄ログを *.discarded-<epoch> へ退避する（取り直し時に既存ログ停止へ掛からないようにする）。
   # aggregate.py は gpu-occupancy-*.txt の RUN_INVALID 行も拒否するため、退避しない手運用でも集計に混入しない。
-  echo "RUN_INVALID: foreign process detected (discarded; rerun required)" >> "${OCC}"
+  if [ -n "${foreign}" ]; then
+    echo "RUN_INVALID: foreign process detected (discarded; rerun required)" >> "${OCC}"
+  fi
+  if [ -n "${smi_unmonitored}" ]; then
+    echo "RUN_INVALID: nvidia-smi unmonitorable (discarded; rerun required)" >> "${OCC}"
+  fi
   stamp="$(date +%s)"
   for f in "${LOG}" "${JSON}" "${OCC}"; do
     if [ -e "${f}" ]; then mv "${f}" "${f}.discarded-${stamp}"; fi
   done
-  echo "done. arm=${ARM} run=${RUN} status=${status} INVALID_FOREIGN_PROCESS (discarded)"
+  echo "done. arm=${ARM} run=${RUN} status=${status} RUN_INVALID (discarded)"
   exit 5
 fi
 echo "done. arm=${ARM} run=${RUN} status=${status}"
