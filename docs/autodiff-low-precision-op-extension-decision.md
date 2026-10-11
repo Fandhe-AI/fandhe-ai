@@ -156,7 +156,7 @@ R1 で #2628 が守る事項:
 | P3 | `Unsupported`（テープ長不変）・`InvalidArgument`・クロステープ拒否・`low_precision` フラグ・eager／融合非参加・checkpoint 非解放・`create_graph` 拒否（5 Op）と `requires_grad == false` の許容を確認 |
 | P4 | **PyTorch 2.14.0+cpu**（Python 3.14.4）で 19 ケース × {float16, bfloat16} の全 38 組合せが実行でき、F16・Bf16 とも統一複合判定を満たした。**判定不能に分類した組合せはない**（`INDETERMINATE` は空） |
 | P5 | `MatMul`／`Add`／`Mul`／`Relu` の入力勾配は両 dtype で PyTorch f32 autograd と統一複合判定を満たした。`Exp`／`Tanh`（非ゲート・観測値）: `exp_random` は f16 で fail 0（最大相対誤差 7.8e-4）・bf16 で fail 10（同 6.7e-3）、`tanh_random` は f16 で fail 3（同 6.5e-3）・bf16 で fail 5（同 2.3e-2）。§3.4 の机上計算（飽和域で f32 勾配との差が判定を超えうる）と整合する |
-| P6 | `#[ignore]`（`cuda_low_precision_ops_match_cpu_reference`・Metal は `cfg(target_os = "macos")` ＋ `#[ignore]`）。実機未実測（`docs/perf/logs/low-precision-ops-2628/README.md`）。P6 の不一致は判定不能にせず通常の parity 失敗として扱う |
+| P6 | `#[ignore]`（`cuda_low_precision_ops_match_cpu_reference`・Metal は `cfg(target_os = "macos")` ＋ `#[ignore]`）。実機実測済み（#2629・2026-10-11）: GB10・M4 Max とも全 12 組合せ（6 Op × {F16, Bf16}）が CPU と bit 一致で pass（`docs/perf/logs/low-precision-ops-2628/README.md`）。P6 の不一致は判定不能にせず通常の parity 失敗として扱う |
 
 fixture は `crates/autodiff/tests/fixtures/low-precision-ops-pytorch-reference/`（生成スクリプト・JSON・README。生成条件と sha256 は README）。
 
@@ -166,7 +166,7 @@ fixture は `crates/autodiff/tests/fixtures/low-precision-ops-pytorch-reference/
 
 ### 6.6 実機未実測・スコープ外
 
-- CUDA／Metal 実機の P6 は #2629（実機ツリー #2683）へ申し送る（`docs/perf/logs/low-precision-ops-2628/README.md`）。Metal の bf16 accessor の実機可用性は未検証。
+- CUDA／Metal 実機の P6 は #2629 で実測済み（両実機 pass・`docs/perf/logs/low-precision-ops-2628/README.md`）。Metal の bf16 accessor は実機で利用可能（`Some`）と確定した。検証範囲は小形状のみ。
 - `Sum`／`Max`／`Min` 等の低精度化・`TypedOps` 拡張・backward の低精度化・`create_graph` の低精度対応（dtype 保持）・融合の dtype 対応・GPU 専用カーネルは対象外。
 - `var.rs` のテスト用モック `ComputingLowPrecisionBackendOps` の `test_support` への統合は今回は行わない。
 

@@ -1,0 +1,10 @@
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.44s
+     Running tests/amp_conv_mha_low_precision_backend_parity.rs (~/work/target-fandhe-ai/release/deps/amp_conv_mha_low_precision_backend_parity-fd506866c6440a7b)
+
+running 2 tests
+test cuda_mha_low_precision_forward_bf16_matches_cpu ... ok
+test cuda_mha_low_precision_forward_f16_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+

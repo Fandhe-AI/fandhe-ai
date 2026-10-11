@@ -37,6 +37,7 @@ done
 |---|---|---|---|
 | GB10 | 上記機能の `*_backend_parity.rs`（`--ignored cuda_`） | 未実測 | |
 | M4 Max | 上記機能の `*_backend_parity.rs`（`--ignored metal_`） | 未実測 | |
+| GB10・M4 Max | `low_precision_ops` のみ実測済み（#2629。両実機 pass・他機能は未実測のまま。`docs/perf/logs/low-precision-ops-2628/README.md`） | pass | 2026-10-11 |
 
 ## 保留（本イシューでは公開していない）
 

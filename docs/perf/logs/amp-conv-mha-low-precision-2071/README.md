@@ -66,7 +66,7 @@ Metal 実機での実行時は `metal_` 部分一致フィルタを付けて CUD
 
 | 項目 | 値 |
 |------|----|
-| 実行日時（UTC） | 未実測 |
-| ホスト | masked |
-| CUDA / Metal 実測結果 | 未実測 |
-| verdict | undetermined |
+| 実行日時（UTC） | 2026-10-11（#2629 の副次実測。コミット `56b9d6ec`。受け入れ判定には使わない） |
+| ホスト | masked（GB10〈CUDA 13.0・driver 580.173.02〉／Apple M4 Max〈macOS 27.0.1〉） |
+| CUDA / Metal 実測結果 | `--test amp_conv_mha_low_precision_backend_parity -- --ignored --nocapture --test-threads=1 cuda_`（exit 0）= `2 passed; 0 failed`（`cuda/ignored.log`）／同 `metal_`（exit 0）= `2 passed; 0 failed`（`metal/ignored.log`）。`env_info.txt` は各ディレクトリ |
+| verdict | pass（MHA の f16・bf16 forward が CPU と統一複合判定内。2 実機） |

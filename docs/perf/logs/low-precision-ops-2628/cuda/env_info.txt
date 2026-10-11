@@ -1,0 +1,15 @@
+hostname: masked
+date_utc: 2026-10-11T04:45:38Z
+rev: 56b9d6ec
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+pid, process_name
+427276, /opt/llm-infra/comfyui-env/bin/python
+1241474, /opt/llm-infra/venvs/kokoro/bin/python3
+Build cuda_13.0.r13.0/compiler.36424714_0
+rustc 1.97.0 (2d8144b78 2026-07-07)
+ 13:45:38 up 45 days,  1:12, 10 users,  load average: 0.00, 0.03, 0.02
+pid, process_name
+427276, /opt/llm-infra/comfyui-env/bin/python
+1241474, /opt/llm-infra/venvs/kokoro/bin/python3
+ 13:45:52 up 45 days,  1:12, 10 users,  load average: 1.31, 0.32, 0.11
