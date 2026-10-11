@@ -6,9 +6,10 @@ RULE.txt R1（5 run の median_secs の中央値・Q1/Q3・対 PyTorch 比）ど
 README.md §2.1 / §2.3 へはこの出力を手で直さず転記する。
 
 使い方:
-  python3 -I aggregate.py <ログdir> --arms prefusion,fused,pytorch [--parity] [--baseline pytorch] [--require-occupancy]
-  （CUDA 腕は --require-occupancy 必須: gpu-occupancy-*.txt 欠損の run を拒否する。
-   <arm>-run<N>.status が非ゼロの run は常に拒否する）
+  python3 -I aggregate.py <ログdir> --arms prefusion,fused,pytorch [--parity] [--baseline pytorch] [--require-occupancy] [--legacy-no-status]
+  （CUDA 腕は --require-occupancy 必須: gpu-occupancy-*.txt 欠損・監視終了記録なしの run を拒否する。
+   <arm>-run<N>.status は必須（欠損・非ゼロの run は拒否）。status を書かない旧版スクリプトで
+   採取済みのログの再集計に限り --legacy-no-status で欠損を許容する）
   python3 -I aggregate.py --self-test
 
 厳格方針（寛容パース禁止）: JSON 欠損・パース不能・run 欠損・非有限値・負値・
@@ -37,15 +38,25 @@ def median_q1_q3(vals):
     return pick(s, 0.5), pick(s, 0.25), pick(s, 0.75)
 
 
-def check_run_status(d, stem):
+def check_run_status(d, stem, legacy_no_status=False):
     """orchestrate_*.sh が書く <stem>.status（計測コマンドの終了コード）が非ゼロなら run を拒否する。
-    status ファイルが無い run（スクリプト改修前の記録済みログ）は検査できないため通す。"""
+    status ファイルが無い run は既定で拒否する（終了コード保存前に中断された run を通さない）。
+    スクリプト改修前に記録済みのログ（status を書かない版で採取）の再集計に限り、
+    明示オプション --legacy-no-status で欠損を許容する。"""
     sp = os.path.join(d, stem + ".status")
-    if os.path.isfile(sp):
-        with open(sp, encoding="utf-8") as f:
-            v = f.read().strip()
-        if v != "0":
-            raise ValueError("失敗終了した run（status=%s）: %s" % (v, sp))
+    if not os.path.isfile(sp):
+        if legacy_no_status:
+            return
+        raise ValueError("終了記録（status）欠損: %s" % sp)
+    with open(sp, encoding="utf-8") as f:
+        v = f.read().strip()
+    if v != "0":
+        raise ValueError("失敗終了した run（status=%s）: %s" % (v, sp))
+
+
+# orchestrate_cuda.sh が計測後の監視終了処理の最後に追記する行（監視完了の記録）。
+OCC_DONE_MARKER = re.compile(r"^foreign process names during run", re.M)
+OCC_POST_UTIL = re.compile(r"^post util=(?!UNKNOWN)\S", re.M)
 
 
 def check_occupancy(d, arm, run, require_occupancy):
@@ -57,15 +68,19 @@ def check_occupancy(d, arm, run, require_occupancy):
             raise ValueError("occupancy 監視ログ欠損: %s" % occ)
         return
     with open(occ, encoding="utf-8", errors="replace") as f:
-        if re.search(r"^RUN_INVALID", f.read(), re.M):
-            raise ValueError("無効 run（RUN_INVALID）: %s" % occ)
+        text = f.read()
+    if re.search(r"^RUN_INVALID", text, re.M):
+        raise ValueError("無効 run（RUN_INVALID）: %s" % occ)
+    if require_occupancy and not (OCC_DONE_MARKER.search(text) and OCC_POST_UTIL.search(text)):
+        # ファイルは開始前に作られるため、存在だけでは監視完了を意味しない。
+        raise ValueError("occupancy 監視が完了していない（終了処理の記録なし）: %s" % occ)
 
 
-def load_run(d, arm, run, require_occupancy=False):
+def load_run(d, arm, run, require_occupancy=False, legacy_no_status=False):
     path = os.path.join(d, "%s-run%d.json" % (arm, run))
     if not os.path.isfile(path):
         raise ValueError("run 欠損: %s" % path)
-    check_run_status(d, "%s-run%d" % (arm, run))
+    check_run_status(d, "%s-run%d" % (arm, run), legacy_no_status)
     check_occupancy(d, arm, run, require_occupancy)
     with open(path, encoding="utf-8") as f:
         try:
@@ -85,13 +100,13 @@ def load_run(d, arm, run, require_occupancy=False):
     return j["median_secs"]
 
 
-def arm_stats(d, arm, require_occupancy=False):
-    per_run = {r: load_run(d, arm, r, require_occupancy) for r in RUNS}
+def arm_stats(d, arm, require_occupancy=False, legacy_no_status=False):
+    per_run = {r: load_run(d, arm, r, require_occupancy, legacy_no_status) for r in RUNS}
     med, q1, q3 = median_q1_q3(list(per_run.values()))
     return per_run, med, q1, q3
 
 
-def parity_results(d, require_occupancy=False):
+def parity_results(d, require_occupancy=False, legacy_no_status=False):
     out = {}
     for r in RUNS:
         path = os.path.join(d, "parity-run%d.log" % r)
@@ -102,7 +117,7 @@ def parity_results(d, require_occupancy=False):
         ok = re.search(r"^test result: ok\. 1 passed; 0 failed", text, re.M) is not None
         bad = re.search(r"FAILED|panicked", text) is not None
         # 失敗終了・無効 run・監視ログ欠損の parity は pass と表示させない（RULE.txt DISCARD_CUDA）。
-        check_run_status(d, "parity-run%d" % r)
+        check_run_status(d, "parity-run%d" % r, legacy_no_status)
         check_occupancy(d, "parity", r, require_occupancy)
         out[r] = "pass" if (ok and not bad) else "FAIL"
     return out
@@ -125,8 +140,8 @@ def ms(x):
     return "%.3f" % (x * 1000.0)
 
 
-def render(d, arms, baseline, parity, require_occupancy=False):
-    stats = {a: arm_stats(d, a, require_occupancy) for a in arms}
+def render(d, arms, baseline, parity, require_occupancy=False, legacy_no_status=False):
+    stats = {a: arm_stats(d, a, require_occupancy, legacy_no_status) for a in arms}
     ref = {a: reference_only_runs(d, a) for a in arms}
     lines = ["| 腕 | " + " | ".join("run%d" % r for r in RUNS)
              + " | 中央値 | Q1 | Q3 | 対 PyTorch 比 |",
@@ -152,7 +167,7 @@ def render(d, arms, baseline, parity, require_occupancy=False):
                          + " は開始前 load1 が基準（< 2.0）を満たさず参考扱い（load1 高）。"
                          "この腕の中央値・Q1・Q3 も参考扱いで、(c) の充足要件に数えない。")
     if parity:
-        res = parity_results(d, require_occupancy)
+        res = parity_results(d, require_occupancy, legacy_no_status)
         lines.append("")
         lines.append("parity（run1..5）: " + ", ".join("run%d=%s" % (r, res[r]) for r in RUNS))
     return "\n".join(lines)
@@ -176,61 +191,77 @@ def self_test():
         for r in RUNS:
             write(d, "a", r, 0.010 * r)
             write(d, "pytorch", r, 0.005)
-        out = render(d, ["a", "pytorch"], "pytorch", False)
+        must_fail(lambda: render(d, ["a", "pytorch"], "pytorch", False), "status 欠損（新規 run）")
+        out = render(d, ["a", "pytorch"], "pytorch", False, legacy_no_status=True)
         assert "30.000" in out and "6.00" in out, out  # 中央値 0.030s / 0.005s = 6.00
         # 参考扱い（load1 高）の注記
         with open(os.path.join(d, "load-a-run2.txt"), "w") as f:
             f.write("pre load1=3.1 waited=1800s note=REFERENCE_ONLY_load1_high\n")
         with open(os.path.join(d, "load-pytorch-run1.txt"), "w") as f:
             f.write("pre load1=0.5 waited=0s note=load1_ok\n")
-        out = render(d, ["a", "pytorch"], "pytorch", False)
+        out = render(d, ["a", "pytorch"], "pytorch", False, legacy_no_status=True)
         assert "参考扱い（load1 高）" in out and "a の run2" in out and "pytorch（参考" not in out, out
         os.remove(os.path.join(d, "load-a-run2.txt"))
         # run 欠損
         os.remove(os.path.join(d, "a-run3.json"))
-        must_fail(lambda: arm_stats(d, "a"), "run 欠損")
+        must_fail(lambda: arm_stats(d, "a", legacy_no_status=True), "run 欠損")
         # 無効 run（occupancy に RUN_INVALID）
         write(d, "a", 3, 0.03)
         with open(os.path.join(d, "gpu-occupancy-a-run3.txt"), "w") as f:
             f.write("pre util=0%\nRUN_INVALID: foreign process detected\n")
-        must_fail(lambda: arm_stats(d, "a"), "無効 run")
+        must_fail(lambda: arm_stats(d, "a", legacy_no_status=True), "無効 run")
         # CUDA 腕: 監視ログ欠損は --require-occupancy で拒否、Mac 腕（既定）では通す
         os.remove(os.path.join(d, "gpu-occupancy-a-run3.txt"))
-        arm_stats(d, "a")
-        must_fail(lambda: arm_stats(d, "a", True), "occupancy 監視ログ欠損")
+        arm_stats(d, "a", legacy_no_status=True)
+        must_fail(lambda: arm_stats(d, "a", True, True), "occupancy 監視ログ欠損")
+        for r in (1, 2, 4, 5):
+            with open(os.path.join(d, "gpu-occupancy-a-run%d.txt" % r), "w") as f:
+                f.write("pre util=0%\npost util=1 %\nforeign process names during run (x):\n")
+        # 監視終了記録のない occupancy（開始前に作られただけ）は --require-occupancy で拒否
+        with open(os.path.join(d, "gpu-occupancy-a-run3.txt"), "w") as f:
+            f.write("pre util=0% waited=0s\npre compute-apps:\n")
+        must_fail(lambda: arm_stats(d, "a", True, True), "監視未完了 occupancy")
+        arm_stats(d, "a", False, True)
+        with open(os.path.join(d, "gpu-occupancy-a-run3.txt"), "a") as f:
+            f.write("post util=1 %\nforeign process names during run (transformer_workload / python 以外):\n")
+        arm_stats(d, "a", True, True)
+        os.remove(os.path.join(d, "gpu-occupancy-a-run3.txt"))
         # 失敗終了 run（status 非ゼロ）
         with open(os.path.join(d, "a-run3.status"), "w") as f:
             f.write("125\n")
-        must_fail(lambda: arm_stats(d, "a"), "失敗終了 run")
-        with open(os.path.join(d, "a-run3.status"), "w") as f:
-            f.write("0\n")
+        must_fail(lambda: arm_stats(d, "a", legacy_no_status=True), "失敗終了 run")
+        for r in RUNS:
+            with open(os.path.join(d, "a-run%d.status" % r), "w") as f:
+                f.write("0\n")
         arm_stats(d, "a")
         os.remove(os.path.join(d, "a-run3.status"))
+        must_fail(lambda: arm_stats(d, "a"), "status 欠損")
         # 負値
         write(d, "a", 3, -1.0)
-        must_fail(lambda: arm_stats(d, "a"), "負値")
+        must_fail(lambda: arm_stats(d, "a", legacy_no_status=True), "負値")
         # NaN（json.dump は NaN を許す）
         write(d, "a", 3, float("nan"))
-        must_fail(lambda: arm_stats(d, "a"), "NaN")
+        must_fail(lambda: arm_stats(d, "a", legacy_no_status=True), "NaN")
         # iters < 20
         write(d, "a", 3, 0.03, iters=5)
-        must_fail(lambda: arm_stats(d, "a"), "iters 不足")
+        must_fail(lambda: arm_stats(d, "a", legacy_no_status=True), "iters 不足")
         # パース不能
         with open(os.path.join(d, "a-run3.json"), "w") as f:
             f.write("{broken")
-        must_fail(lambda: arm_stats(d, "a"), "JSON 不正")
+        must_fail(lambda: arm_stats(d, "a", legacy_no_status=True), "JSON 不正")
         # parity: pass マーカー無しは FAIL
         for r in RUNS:
             with open(os.path.join(d, "parity-run%d.log" % r), "w") as f:
                 f.write("test result: ok. 1 passed; 0 failed; 0 ignored\n" if r != 2 else "nothing\n")
-        res = parity_results(d)
+        res = parity_results(d, legacy_no_status=True)
         assert res[1] == "pass" and res[2] == "FAIL", res
         # parity の無効 run（occupancy に RUN_INVALID）は拒否
         with open(os.path.join(d, "gpu-occupancy-parity-run1.txt"), "w") as f:
             f.write("RUN_INVALID: foreign process detected\n")
-        must_fail(lambda: parity_results(d), "parity 無効 run")
+        must_fail(lambda: parity_results(d, legacy_no_status=True), "parity 無効 run")
         os.remove(os.path.join(d, "gpu-occupancy-parity-run1.txt"))
-        must_fail(lambda: parity_results(d, True), "parity 監視ログ欠損")
+        must_fail(lambda: parity_results(d, True, True), "parity 監視ログ欠損")
+        must_fail(lambda: parity_results(d), "parity status 欠損")
         with open(os.path.join(d, "parity-run1.status"), "w") as f:
             f.write("1\n")
         must_fail(lambda: parity_results(d), "parity 失敗終了 run")
@@ -249,6 +280,7 @@ def main(argv):
     baseline = None
     parity = "--parity" in argv
     require_occupancy = "--require-occupancy" in argv
+    legacy_no_status = "--legacy-no-status" in argv
     for i, a in enumerate(argv):
         if a == "--arms":
             arms = argv[i + 1].split(",")
@@ -259,7 +291,7 @@ def main(argv):
     if baseline is not None and baseline not in arms:
         raise SystemExit("--baseline は --arms に含める")
     try:
-        print(render(d, arms, baseline, parity, require_occupancy))
+        print(render(d, arms, baseline, parity, require_occupancy, legacy_no_status))
     except ValueError as e:
         print("集計失敗: %s" % e, file=sys.stderr)
         return 1

@@ -13,7 +13,7 @@ R5: #2608 の TOPS（約 244）は合否ゲート・分母に使わない。
 R6: 規則は実測後に緩和しない。変更が必要なら人間承認を得る。
 ```
 
-#2997 では上記を `RULE.txt`（腕・実行順・破棄条件・分位点定義）に具体化し、実測開始前に固定した。集計は `aggregate.py`（`--self-test` 付き）、実行は `orchestrate_cuda.sh`／`orchestrate_mac.sh`（1 呼び出し = 1 プロセス）を使った。
+#2997 では上記を `RULE.txt`（腕・実行順・破棄条件・分位点定義）に具体化し、実測開始前に固定した。集計は `aggregate.py`（`--self-test` 付き）、実行は `orchestrate_cuda.sh`／`orchestrate_mac.sh`（1 呼び出し = 1 プロセス）を使った。`aggregate.py` は新規 run の `<arm>-run<N>.status`（終了コード記録）を必須とし、CUDA 腕は `--require-occupancy` で監視終了記録のない occupancy も拒否する。本記録は status を書かない版のスクリプトで採取したため、再集計には明示オプション `--legacy-no-status` が必要。
 
 ## 2. (c) 実機ベースライン
 
