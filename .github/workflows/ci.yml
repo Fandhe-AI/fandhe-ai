@@ -76,10 +76,13 @@
 #     (1) 保存前に `scripts/ci-prune-target.sh` でメンバー成果物を削除し依存 crate の
 #     成果物だけを残す、(2) workflow 共通 env で CARGO_INCREMENTAL=0・dev/test
 #     プロファイルの debuginfo を line-tables-only にする、の 2 点を target キャッシュを
-#     持つ 4 ジョブすべてに適用する。キーの版セグメント（`target-<job-id>-v2-`）は
+#     持つ 4 ジョブすべてに適用する。キーの版セグメント（`target-<job-id>-v3-`）は
 #     保存内容（prune・env・プロファイル）を変えたら上げる（既存キーに exact hit すると
 #     保存がスキップされ新しい内容が永久に保存されないため。旧版へのフォールバックは
-#     付けない）
+#     付けない）。v3 は Cargo.toml へ `[profile.dev.package."*"]` を追加したことによる
+#     bump（依存のビルドスクリプト・proc-macro が debuginfo なし → line-tables-only に
+#     変わり、それらに依存する crate の `-C metadata` も連鎖して変わるため、v2 の blob
+#     では依存が毎回再ビルドされる）
 #   - deps-forbidden は `cargo tree`（依存解決・フェッチのみでビルドしない）のみ実行する
 #     ため registry キャッシュのみとし target キャッシュは持たない
 #   - ci-complete は checkout・toolchain セットアップを行わない判定専用ジョブのため
@@ -221,8 +224,11 @@ permissions:
 #     行番号のみに減らす（panic・バックトレースの file:line は残る）。統合テスト約 760
 #     本が依存グラフ全体を静的リンクするため、full debuginfo はリンク時間と target
 #     サイズの主因になる。release（verification-gates の test --release）は既定で
-#     debuginfo なしのため影響しない。Cargo.toml の [profile] はローカル開発・
-#     `make ci` と共用のため変更しない
+#     debuginfo なしのため影響しない。依存（workspace メンバー以外）は Cargo.toml の
+#     `[profile.dev.package."*"]` でも同じ line-tables-only に固定済み（ローカル開発・
+#     `make ci` と共用。package 指定は profile 本体より優先されるが値が同じため衝突しない）。
+#     Cargo.toml ではメンバーを full debuginfo のまま残しているため、メンバーまで
+#     行番号のみにする本 env は CI 側で引き続き必要
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -453,9 +459,9 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-build-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-build-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-build-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-build-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: cargo build（Linux ホスト）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -663,9 +669,9 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-build-no-cuda-toolkit-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-build-no-cuda-toolkit-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-build-no-cuda-toolkit-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-build-no-cuda-toolkit-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: cargo build（toolkit 非搭載）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -1114,9 +1120,9 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-guardrail-regression-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-guardrail-regression-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: 1 層目（REQ-4・判定器単体）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -1235,9 +1241,9 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-verification-gates-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-verification-gates-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-verification-gates-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-verification-gates-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       # target キャッシュ復元結果の記録（イシュー #919）。
       # cache-matched-key が空なら miss、cache-primary-key と一致すれば exact、
