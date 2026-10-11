@@ -15,6 +15,24 @@
 //! Stage B では実機出力との bit 比較（診断）にも使う。`objc2` 系 FFI に触れない
 //! ため `cfg(target_os = "macos")` を付けない（`adam_model.rs` と同じ判断）。
 
+use crate::linalg::{LinalgDimError, invalid};
+
+/// `a*b` を `checked_mul` で求める（オーバーフローは型付きエラー）。
+fn mul(op: &str, a: usize, b: usize) -> Result<usize, LinalgDimError> {
+    a.checked_mul(b)
+        .ok_or_else(|| invalid(format!("{op}: 次元積 {a}*{b} が usize を超える")))
+}
+
+/// 入力スライス長が期待値と一致することを検証する。
+fn expect_len(op: &str, name: &str, actual: usize, expected: usize) -> Result<(), LinalgDimError> {
+    if actual != expected {
+        return Err(invalid(format!(
+            "{op}: {name} の長さ {actual} が期待値 {expected} と一致しない"
+        )));
+    }
+    Ok(())
+}
+
 /// LU 分解の結果（MSL `linalg_lu_f32` の `a`・`perm`・`status` に対応）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LuModelOut {
@@ -29,7 +47,11 @@ pub struct LuModelOut {
 }
 
 /// `shaders/linalg.metal::linalg_lu_f32` の逐語モデル（部分ピボット LU）。
-pub fn lu_factor_f32(a: &[f32], n: usize) -> LuModelOut {
+pub fn lu_factor_f32(a: &[f32], n: usize) -> Result<LuModelOut, LinalgDimError> {
+    expect_len("lu_factor_f32", "a", a.len(), mul("lu_factor_f32", n, n)?)?;
+    if u32::try_from(n).is_err() {
+        return Err(invalid(format!("lu_factor_f32: n={n} が u32 を超える")));
+    }
     let mut lu = a.to_vec();
     let mut perm: Vec<u32> = (0..n as u32).collect();
     let mut swap_count = 0u32;
@@ -52,12 +74,12 @@ pub fn lu_factor_f32(a: &[f32], n: usize) -> LuModelOut {
         }
         let pivot = lu[k * n + k];
         if pivot == 0.0 {
-            return LuModelOut {
+            return Ok(LuModelOut {
                 lu,
                 perm,
                 singular: true,
                 swap_count,
-            };
+            });
         }
         // フェーズ 1: 乗数（行ごと独立）。
         for i in (k + 1)..n {
@@ -74,22 +96,37 @@ pub fn lu_factor_f32(a: &[f32], n: usize) -> LuModelOut {
             }
         }
     }
-    LuModelOut {
+    Ok(LuModelOut {
         lu,
         perm,
         singular: false,
         swap_count,
-    }
+    })
 }
 
 /// `shaders/linalg.metal::linalg_lu_solve_f32` の逐語モデル。`b` は `n*k`
 /// （行優先）で、右辺 1 列ごとに前進・後退代入する。`lu.singular` なら `None`
-/// （カーネルは何も書かない）。
-pub fn lu_solve_f32(lu: &LuModelOut, b: &[f32], n: usize, k: usize) -> Option<Vec<f32>> {
-    if lu.singular {
-        return None;
+/// （カーネルは何も書かない）。`lu`・`b` の長さと置換添字の範囲は入口で検証し、
+/// 不整合は `Err`（panic させない）。
+pub fn lu_solve_f32(
+    lu: &LuModelOut,
+    b: &[f32],
+    n: usize,
+    k: usize,
+) -> Result<Option<Vec<f32>>, LinalgDimError> {
+    let op = "lu_solve_f32";
+    let nn = mul(op, n, n)?;
+    let nk = mul(op, n, k)?;
+    expect_len(op, "lu.lu", lu.lu.len(), nn)?;
+    expect_len(op, "lu.perm", lu.perm.len(), n)?;
+    expect_len(op, "b", b.len(), nk)?;
+    if lu.perm.iter().any(|&p| p as usize >= n) {
+        return Err(invalid(format!("{op}: lu.perm に範囲外の添字（n={n}）")));
     }
-    let mut x = vec![0.0f32; n * k];
+    if lu.singular {
+        return Ok(None);
+    }
+    let mut x = vec![0.0f32; nk];
     for c in 0..k {
         for i in 0..n {
             let mut sum = b[lu.perm[i] as usize * k + c];
@@ -106,20 +143,22 @@ pub fn lu_solve_f32(lu: &LuModelOut, b: &[f32], n: usize, k: usize) -> Option<Ve
             x[i * k + c] = sum / lu.lu[i * n + i];
         }
     }
-    Some(x)
+    Ok(Some(x))
 }
 
 /// `shaders/linalg.metal::linalg_cholesky_f32` の逐語モデル（下三角のみ読む）。
 /// 非正定値（対角が非有限または非正）は `None`。
-pub fn cholesky_f32(a: &[f32], n: usize) -> Option<Vec<f32>> {
-    let mut l = vec![0.0f32; n * n];
+pub fn cholesky_f32(a: &[f32], n: usize) -> Result<Option<Vec<f32>>, LinalgDimError> {
+    let nn = mul("cholesky_f32", n, n)?;
+    expect_len("cholesky_f32", "a", a.len(), nn)?;
+    let mut l = vec![0.0f32; nn];
     for j in 0..n {
         let mut sum = a[j * n + j];
         for k in 0..j {
             sum -= l[j * n + k] * l[j * n + k];
         }
         if !sum.is_finite() || sum <= 0.0 {
-            return None;
+            return Ok(None);
         }
         let ljj = sum.sqrt();
         l[j * n + j] = ljj;
@@ -131,17 +170,19 @@ pub fn cholesky_f32(a: &[f32], n: usize) -> Option<Vec<f32>> {
             l[i * n + j] = s / ljj;
         }
     }
-    Some(l)
+    Ok(Some(l))
 }
 
 /// `shaders/linalg.metal::linalg_qr_f32` の逐語モデル。戻り値は `(r_work, q_work)`
 /// （`r_work`: `m*n` の上三角化済み作業行列、`q_work`: `m*k`）。対角符号の正規化は
 /// `crate::linalg::qr_finalize`（ホスト）が行う。
-pub fn qr_f32(a: &[f32], m: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
+pub fn qr_f32(a: &[f32], m: usize, n: usize) -> Result<(Vec<f32>, Vec<f32>), LinalgDimError> {
     let k = m.min(n);
+    expect_len("qr_f32", "a", a.len(), mul("qr_f32", m, n)?)?;
+    let mk = mul("qr_f32", m, k)?;
     let mut r = a.to_vec();
     // 反射ベクトル保存領域（列 col の v は `v[col*m ..]` に長さ m-col）。
-    let mut v = vec![0.0f32; m * k];
+    let mut v = vec![0.0f32; mk];
     let mut applied = vec![false; k];
     for col in 0..k {
         let len = m - col;
@@ -150,8 +191,20 @@ pub fn qr_f32(a: &[f32], m: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
         if norm_x == 0.0 {
             continue;
         }
-        let alpha = if x[0] >= 0.0 { -norm_x } else { norm_x };
-        let mut vv = x.clone();
+        // `vv[0] = x0 - alpha` は |x0| が最大近傍（例 2e38）だと alpha との加算で
+        // overflow するため、列を最大絶対値 `amax` で正規化してから反射ベクトルを
+        // 形成する（v は後段で正規化されるためスケール不変。非有限は素通し）。
+        // MSL `linalg_qr_f32` も同一演算列（イシュー #2676 codex 指摘）。
+        let amax = x.iter().fold(0.0f32, |acc, e| acc.max(e.abs()));
+        let inv_scale = if amax.is_finite() && amax > 0.0 {
+            amax
+        } else {
+            1.0
+        };
+        let xs: Vec<f32> = x.iter().map(|e| e / inv_scale).collect();
+        let norm_xs = crate::linalg::scale_ssq_norm_f32(&xs);
+        let alpha = if xs[0] >= 0.0 { -norm_xs } else { norm_xs };
+        let mut vv = xs;
         vv[0] -= alpha;
         let norm_v = crate::linalg::scale_ssq_norm_f32(&vv);
         if norm_v == 0.0 {
@@ -170,7 +223,10 @@ pub fn qr_f32(a: &[f32], m: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
             }
             for (i, &vi) in vv.iter().enumerate() {
                 let idx = (col + i) * n + c;
-                r[idx] -= (2.0f32 * vi) * dot;
+                // `2*vi*dot` を 1 項で作ると |r|≈2e38 で overflow するため、
+                // `vi*dot` を 2 回引く（2 倍は厳密で積は同値。MSL も同形）。
+                let t = vi * dot;
+                r[idx] = (r[idx] - t) - t;
             }
         }
         v[col * m..col * m + len].copy_from_slice(&vv);
@@ -199,5 +255,5 @@ pub fn qr_f32(a: &[f32], m: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
             }
         }
     }
-    (r, q)
+    Ok((r, q))
 }

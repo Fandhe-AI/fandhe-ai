@@ -3540,7 +3540,10 @@ impl BackendOps for MetalBackendOps {
         let k = b.shape()[1];
         crate::linalg::validate_lu_dims(n, k)
             .map_err(|e| BackendError::InvalidArgument(format!("linalg_solve: {e}")))?;
-        if n == 0 || k == 0 {
+        // n == 0 のみ空結果を直接返す。n > 0 で k == 0 の場合も A の特異性検査が
+        // 必要（CPU／CUDA 経路は特異なら InvalidArgument）なため、空結果へ短絡せず
+        // 非空と同じ経路（起動保留→ホスト参照へフォールバック）に通す。
+        if n == 0 {
             return Tensor::new(Vec::new(), &[n, k]).map_err(BackendError::ShapeMismatch);
         }
         Err(linalg_launch_pending("linalg_solve"))

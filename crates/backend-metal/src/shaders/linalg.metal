@@ -42,12 +42,12 @@ using namespace metal;
 // LAPACK SLASSQ 系 overflow-safe 2-ノルム。`crate::linalg::scale_ssq_norm_f32`
 // と演算列が同一（scale=0・ssq=1 から添字昇順）。`p[i * stride]`（i < len）を読む。
 // ---------------------------------------------------------------------------
-static inline float scale_ssq_norm(device const float* p, uint stride, uint len) {
+static inline float scale_ssq_norm(device const float* p, uint stride, uint len, float div) {
     float scale = 0.0f;
     float ssq = 1.0f;
     bool has_inf = false;
     for (uint i = 0; i < len; i++) {
-        float x = p[i * stride];
+        float x = precise::divide(p[i * stride], div);
         if (isnan(x)) {
             return NAN;
         }
@@ -280,6 +280,8 @@ kernel void linalg_qr_f32(
     }
     threadgroup float norm_x_tg;
     threadgroup float norm_v_tg;
+    threadgroup float amax_tg;
+    threadgroup float norm_xs_tg;
     uint kk = min(m, n);
 
     for (uint col = 0; col < kk; col++) {
@@ -287,22 +289,39 @@ kernel void linalg_qr_f32(
         // 直前の反復が読む threadgroup 変数を thread 0 が上書きしないための区切り。
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         if (tid == 0) {
-            norm_x_tg = scale_ssq_norm(r + col * n + col, n, len);
+            norm_x_tg = scale_ssq_norm(r + col * n + col, n, len, 1.0f);
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         float norm_x = norm_x_tg;
         if (norm_x == 0.0f) {
             continue;
         }
-        float x0 = r[col * n + col];
-        float alpha = (x0 >= 0.0f) ? -norm_x : norm_x;
+        // 列を最大絶対値 amax で正規化してから反射ベクトルを形成する（xi - alpha の
+        // overflow 回避。v は後段で正規化されるためスケール不変。ホストモデル
+        // `linalg_model::qr_f32` と同一演算列）。
+        if (tid == 0) {
+            float amax = 0.0f;
+            for (uint i = 0; i < len; i++) {
+                amax = max(amax, fabs(r[(col + i) * n + col]));
+            }
+            amax_tg = (isfinite(amax) && amax > 0.0f) ? amax : 1.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+        float amax_s = amax_tg;
+        if (tid == 0) {
+            norm_xs_tg = scale_ssq_norm(r + col * n + col, n, len, amax_s);
+        }
+        threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+        float norm_xs = norm_xs_tg;
+        float x0s = precise::divide(r[col * n + col], amax_s);
+        float alpha = (x0s >= 0.0f) ? -norm_xs : norm_xs;
         for (uint i = tid; i < len; i += tg_size) {
-            float xi = r[(col + i) * n + col];
+            float xi = precise::divide(r[(col + i) * n + col], amax_s);
             v[col * m + i] = (i == 0) ? (xi - alpha) : xi;
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         if (tid == 0) {
-            norm_v_tg = scale_ssq_norm(v + col * m, 1, len);
+            norm_v_tg = scale_ssq_norm(v + col * m, 1, len, 1.0f);
         }
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
         float norm_v = norm_v_tg;
@@ -326,7 +345,9 @@ kernel void linalg_qr_f32(
             if (dot != 0.0f) {
                 for (uint i = 0; i < len; i++) {
                     uint idx = (col + i) * n + c;
-                    r[idx] = r[idx] - (2.0f * v[col * m + i]) * dot;
+                    // 2*vi*dot の 1 項化は |r|≈2e38 で overflow するため vi*dot を 2 回引く。
+                    float t = v[col * m + i] * dot;
+                    r[idx] = (r[idx] - t) - t;
                 }
             }
         }

@@ -49,8 +49,8 @@ fn rhs(n: usize, k: usize, seed: u64) -> Vec<f32> {
 }
 
 fn model_solve(a: &[f32], b: &[f32], n: usize, k: usize) -> Vec<f32> {
-    let lu = lu_factor_f32(a, n);
-    lu_solve_f32(&lu, b, n, k).expect("非特異")
+    let lu = lu_factor_f32(a, n).expect("dims");
+    lu_solve_f32(&lu, b, n, k).expect("dims").expect("非特異")
 }
 
 fn model_inv(a: &[f32], n: usize) -> Vec<f32> {
@@ -62,7 +62,7 @@ fn model_inv(a: &[f32], n: usize) -> Vec<f32> {
 }
 
 fn model_det(a: &[f32], n: usize) -> f32 {
-    let lu = lu_factor_f32(a, n);
+    let lu = lu_factor_f32(a, n).expect("dims");
     if lu.singular {
         return 0.0;
     }
@@ -140,9 +140,13 @@ fn pivoting_matches_cpu_when_row_swap_required() {
 fn singular_matrix_is_flagged_and_det_is_zero() {
     let cpu = CpuBackendOps::new();
     let a = vec![1.0f32, 2.0, 2.0, 4.0];
-    let lu = lu_factor_f32(&a, 2);
+    let lu = lu_factor_f32(&a, 2).expect("dims");
     assert!(lu.singular);
-    assert!(lu_solve_f32(&lu, &[1.0, 1.0], 2, 1).is_none());
+    assert!(
+        lu_solve_f32(&lu, &[1.0, 1.0], 2, 1)
+            .expect("dims")
+            .is_none()
+    );
     assert_eq!(model_det(&a, 2), 0.0);
     let at = t(a, &[2, 2]);
     assert!(cpu.linalg_inv(&at).is_err());
@@ -151,11 +155,11 @@ fn singular_matrix_is_flagged_and_det_is_zero() {
 
 #[test]
 fn nan_input_passes_through_lu_but_cholesky_rejects() {
-    let lu = lu_factor_f32(&[f32::NAN, 1.0, 1.0, 2.0], 2);
+    let lu = lu_factor_f32(&[f32::NAN, 1.0, 1.0, 2.0], 2).expect("dims");
     assert!(!lu.singular);
     let cpu = CpuBackendOps::new();
     let a = vec![f32::NAN, 1.0, 1.0, 2.0];
-    assert!(cholesky_f32(&a, 2).is_none());
+    assert!(cholesky_f32(&a, 2).expect("dims").is_none());
     assert!(cpu.linalg_cholesky(&t(a, &[2, 2])).is_err());
 }
 
@@ -165,18 +169,18 @@ fn cholesky_matches_cpu_and_rejects_non_spd() {
     for (i, n) in [1usize, 2, 3, 8, 17, 64].into_iter().enumerate() {
         for scale in [1.0f32, 1e20, 1e-20] {
             let a = spd(n, 300 + i as u64, scale);
-            let model = cholesky_f32(&a, n).expect("SPD");
+            let model = cholesky_f32(&a, n).expect("dims").expect("SPD");
             let reference = s(&cpu.linalg_cholesky(&t(a, &[n, n])).expect("cpu"));
             assert_parity(&format!("cholesky n={n} scale={scale}"), &model, &reference);
         }
     }
     let not_spd = vec![1.0f32, 2.0, 2.0, 1.0];
-    assert!(cholesky_f32(&not_spd, 2).is_none());
+    assert!(cholesky_f32(&not_spd, 2).expect("dims").is_none());
     assert!(cpu.linalg_cholesky(&t(not_spd, &[2, 2])).is_err());
 }
 
 fn model_qr(a: &[f32], m: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
-    let (r_work, q_work) = qr_f32(a, m, n);
+    let (r_work, q_work) = qr_f32(a, m, n).expect("dims");
     qr_finalize(&r_work, &q_work, m, n).expect("finalize")
 }
 
@@ -213,4 +217,36 @@ fn qr_rank_deficient_zero_column_matches_cpu() {
     let reference = cpu.linalg_qr(&t(a, &[5, 3])).expect("cpu qr");
     assert_parity("qr R rank-deficient", &r, &s(&reference.r));
     assert_parity("qr Q rank-deficient", &q, &s(&reference.q));
+}
+
+#[test]
+fn model_rejects_bad_dims_without_panic() {
+    // イシュー #2676 codex P1: 公開モデル関数は無検証の添字アクセスで panic しない。
+    assert!(lu_factor_f32(&[], 1).is_err());
+    assert!(cholesky_f32(&[], 1).is_err());
+    assert!(qr_f32(&[1.0], 2, 2).is_err());
+    assert!(lu_factor_f32(&[], 0).is_ok());
+    assert!(lu_factor_f32(&[1.0], usize::MAX).is_err());
+    let lu = lu_factor_f32(&[1.0, 0.0, 0.0, 1.0], 2).expect("dims");
+    assert!(lu_solve_f32(&lu, &[1.0], 2, 1).is_err());
+    let mut bad = lu.clone();
+    bad.perm = vec![0, 7];
+    assert!(lu_solve_f32(&bad, &[1.0, 1.0], 2, 1).is_err());
+    let mut short = lu;
+    short.lu.truncate(1);
+    assert!(lu_solve_f32(&short, &[1.0, 1.0], 2, 1).is_err());
+}
+
+#[test]
+fn qr_householder_does_not_overflow_near_f32_max() {
+    // イシュー #2676 codex P2: A=[2e38] で vv[0]-=alpha が overflow し NaN になっていた。
+    for m in [1usize, 3] {
+        let a: Vec<f32> = (0..m).map(|i| if i == 0 { 2e38 } else { 1e38 }).collect();
+        let (r, q) = model_qr(&a, m, 1);
+        assert!(
+            r.iter().chain(q.iter()).all(|v| v.is_finite()),
+            "m={m}: {r:?} {q:?}"
+        );
+        assert!(r[0] > 0.0);
+    }
 }

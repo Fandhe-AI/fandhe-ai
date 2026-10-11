@@ -38,7 +38,23 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::error::MetalError;
+/// 本モジュールと `linalg_model` の入力検証エラー（`detail` に不整合内容）。
+/// `crate::error::MetalError` は `cfg(target_os = "macos")` 限定で Linux CI に
+/// 存在しないため、非 macOS でもビルドできるよう本モジュール専用の型を持つ。
+/// `ops.rs` は `{e}` で整形して `BackendError::InvalidArgument` へ写す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinalgDimError {
+    /// 具体的な不整合内容。
+    pub detail: String,
+}
+
+impl std::fmt::Display for LinalgDimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid linalg shape: {}", self.detail)
+    }
+}
+
+impl std::error::Error for LinalgDimError {}
 
 /// カーネルが使う threadgroup 幅（`shaders/linalg.metal` はストライドに
 /// `threads_per_threadgroup` を使うため正しさは幅に依存しない。Stage B では
@@ -73,13 +89,13 @@ pub(crate) mod test_support {
     }
 }
 
-fn invalid(detail: String) -> MetalError {
-    MetalError::InvalidElementwiseShape { detail }
+pub(crate) fn invalid(detail: String) -> LinalgDimError {
+    LinalgDimError { detail }
 }
 
 /// `a*b` 要素の f32 バッファがカーネルの `uint` 添字と確保上限に収まる
 /// ことを検証する共通部。
-fn check_numel(op: &str, name: &str, a: usize, b: usize) -> Result<usize, MetalError> {
+fn check_numel(op: &str, name: &str, a: usize, b: usize) -> Result<usize, LinalgDimError> {
     let numel = a
         .checked_mul(b)
         .ok_or_else(|| invalid(format!("{op}: {name} が usize を超える")))?;
@@ -101,7 +117,7 @@ fn check_numel(op: &str, name: &str, a: usize, b: usize) -> Result<usize, MetalE
 
 /// LU 系（`n`: 行列次元・`k`: 右辺列数）のサイズを、デバイス初期化・確保より
 /// 前に検証する（OWASP A03。`backend-cpu::linalg::checked_numel_for` と同じ規律）。
-pub fn validate_lu_dims(n: usize, k: usize) -> Result<(), MetalError> {
+pub fn validate_lu_dims(n: usize, k: usize) -> Result<(), LinalgDimError> {
     let limit = u32::MAX as usize;
     if n > limit || k > limit {
         return Err(invalid(format!(
@@ -114,7 +130,7 @@ pub fn validate_lu_dims(n: usize, k: usize) -> Result<(), MetalError> {
 }
 
 /// 正方行列分解（cholesky）のサイズ検証。
-pub fn validate_square_factor_dims(op: &str, n: usize) -> Result<(), MetalError> {
+pub fn validate_square_factor_dims(op: &str, n: usize) -> Result<(), LinalgDimError> {
     if n > u32::MAX as usize {
         return Err(invalid(format!("{op}: n={n} が u32 を超える")));
     }
@@ -123,7 +139,7 @@ pub fn validate_square_factor_dims(op: &str, n: usize) -> Result<(), MetalError>
 }
 
 /// QR のサイズ検証（`m*n`・反射ベクトル保存領域 `m*k`、`k = min(m,n)`）。
-pub fn validate_qr_dims(m: usize, n: usize) -> Result<(), MetalError> {
+pub fn validate_qr_dims(m: usize, n: usize) -> Result<(), LinalgDimError> {
     if m > u32::MAX as usize || n > u32::MAX as usize {
         return Err(invalid(format!(
             "linalg QR: m・n は u32 に収まる必要がある: m={m}, n={n}"
@@ -209,7 +225,7 @@ pub fn qr_finalize(
     q_work: &[f32],
     m: usize,
     n: usize,
-) -> Result<(Vec<f32>, Vec<f32>), MetalError> {
+) -> Result<(Vec<f32>, Vec<f32>), LinalgDimError> {
     let k = m.min(n);
     let overflow = |name: &str| invalid(format!("linalg QR 後処理: {name} が usize を超える"));
     let mn = m.checked_mul(n).ok_or_else(|| overflow("m*n"))?;
