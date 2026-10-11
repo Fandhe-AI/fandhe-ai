@@ -132,5 +132,15 @@ if [ -n "${foreign}" ] || [ -n "${smi_unmonitored}" ]; then
   echo "done. arm=${ARM} run=${RUN} status=${status} RUN_INVALID (discarded)"
   exit 5
 fi
+# 計測コマンド自体が失敗（タイムアウト 124 等）した run も、通常名の JSON が残って集計されないよう退避する。
+echo "${status}" > "${OUT}/${ARM}-run${RUN}.status"
+if [ "${status}" -ne 0 ]; then
+  stamp="$(date +%s)"
+  for f in "${LOG}" "${JSON}" "${OCC}" "${OUT}/${ARM}-run${RUN}.status"; do
+    if [ -e "${f}" ]; then mv "${f}" "${f}.discarded-${stamp}"; fi
+  done
+  echo "done. arm=${ARM} run=${RUN} status=${status} FAILED (discarded)"
+  exit "${status}"
+fi
 echo "done. arm=${ARM} run=${RUN} status=${status}"
 exit "${status}"

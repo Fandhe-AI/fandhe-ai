@@ -6,7 +6,9 @@ RULE.txt R1（5 run の median_secs の中央値・Q1/Q3・対 PyTorch 比）ど
 README.md §2.1 / §2.3 へはこの出力を手で直さず転記する。
 
 使い方:
-  python3 -I aggregate.py <ログdir> --arms prefusion,fused,pytorch [--parity] [--baseline pytorch]
+  python3 -I aggregate.py <ログdir> --arms prefusion,fused,pytorch [--parity] [--baseline pytorch] [--require-occupancy]
+  （CUDA 腕は --require-occupancy 必須: gpu-occupancy-*.txt 欠損の run を拒否する。
+   <arm>-run<N>.status が非ゼロの run は常に拒否する）
   python3 -I aggregate.py --self-test
 
 厳格方針（寛容パース禁止）: JSON 欠損・パース不能・run 欠損・非有限値・負値・
@@ -35,16 +37,36 @@ def median_q1_q3(vals):
     return pick(s, 0.5), pick(s, 0.25), pick(s, 0.75)
 
 
-def load_run(d, arm, run):
+def check_run_status(d, stem):
+    """orchestrate_*.sh が書く <stem>.status（計測コマンドの終了コード）が非ゼロなら run を拒否する。
+    status ファイルが無い run（スクリプト改修前の記録済みログ）は検査できないため通す。"""
+    sp = os.path.join(d, stem + ".status")
+    if os.path.isfile(sp):
+        with open(sp, encoding="utf-8") as f:
+            v = f.read().strip()
+        if v != "0":
+            raise ValueError("失敗終了した run（status=%s）: %s" % (v, sp))
+
+
+def check_occupancy(d, arm, run, require_occupancy):
+    """異種プロセス混入で無効化された run を拒否する（RULE.txt DISCARD_CUDA）。
+    require_occupancy（CUDA 腕）では監視ログ欠損も拒否する（監視なしの run を有効扱いにしない）。"""
+    occ = os.path.join(d, "gpu-occupancy-%s-run%d.txt" % (arm, run))
+    if not os.path.isfile(occ):
+        if require_occupancy:
+            raise ValueError("occupancy 監視ログ欠損: %s" % occ)
+        return
+    with open(occ, encoding="utf-8", errors="replace") as f:
+        if re.search(r"^RUN_INVALID", f.read(), re.M):
+            raise ValueError("無効 run（RUN_INVALID）: %s" % occ)
+
+
+def load_run(d, arm, run, require_occupancy=False):
     path = os.path.join(d, "%s-run%d.json" % (arm, run))
     if not os.path.isfile(path):
         raise ValueError("run 欠損: %s" % path)
-    # 異種プロセス混入で無効化された run は集計に含めない（RULE.txt DISCARD_CUDA）。
-    occ = os.path.join(d, "gpu-occupancy-%s-run%d.txt" % (arm, run))
-    if os.path.isfile(occ):
-        with open(occ, encoding="utf-8", errors="replace") as f:
-            if re.search(r"^RUN_INVALID", f.read(), re.M):
-                raise ValueError("無効 run（RUN_INVALID）: %s" % occ)
+    check_run_status(d, "%s-run%d" % (arm, run))
+    check_occupancy(d, arm, run, require_occupancy)
     with open(path, encoding="utf-8") as f:
         try:
             j = json.load(f)
@@ -63,13 +85,13 @@ def load_run(d, arm, run):
     return j["median_secs"]
 
 
-def arm_stats(d, arm):
-    per_run = {r: load_run(d, arm, r) for r in RUNS}
+def arm_stats(d, arm, require_occupancy=False):
+    per_run = {r: load_run(d, arm, r, require_occupancy) for r in RUNS}
     med, q1, q3 = median_q1_q3(list(per_run.values()))
     return per_run, med, q1, q3
 
 
-def parity_results(d):
+def parity_results(d, require_occupancy=False):
     out = {}
     for r in RUNS:
         path = os.path.join(d, "parity-run%d.log" % r)
@@ -79,12 +101,9 @@ def parity_results(d):
             text = f.read()
         ok = re.search(r"^test result: ok\. 1 passed; 0 failed", text, re.M) is not None
         bad = re.search(r"FAILED|panicked", text) is not None
-        # 無効 run（RUN_INVALID）の parity は pass と表示させない（RULE.txt DISCARD_CUDA）。
-        occ = os.path.join(d, "gpu-occupancy-parity-run%d.txt" % r)
-        if os.path.isfile(occ):
-            with open(occ, encoding="utf-8", errors="replace") as f:
-                if re.search(r"^RUN_INVALID", f.read(), re.M):
-                    raise ValueError("無効 run（RUN_INVALID）: %s" % occ)
+        # 失敗終了・無効 run・監視ログ欠損の parity は pass と表示させない（RULE.txt DISCARD_CUDA）。
+        check_run_status(d, "parity-run%d" % r)
+        check_occupancy(d, "parity", r, require_occupancy)
         out[r] = "pass" if (ok and not bad) else "FAIL"
     return out
 
@@ -106,8 +125,8 @@ def ms(x):
     return "%.3f" % (x * 1000.0)
 
 
-def render(d, arms, baseline, parity):
-    stats = {a: arm_stats(d, a) for a in arms}
+def render(d, arms, baseline, parity, require_occupancy=False):
+    stats = {a: arm_stats(d, a, require_occupancy) for a in arms}
     ref = {a: reference_only_runs(d, a) for a in arms}
     lines = ["| 腕 | " + " | ".join("run%d" % r for r in RUNS)
              + " | 中央値 | Q1 | Q3 | 対 PyTorch 比 |",
@@ -133,7 +152,7 @@ def render(d, arms, baseline, parity):
                          + " は開始前 load1 が基準（< 2.0）を満たさず参考扱い（load1 高）。"
                          "この腕の中央値・Q1・Q3 も参考扱いで、(c) の充足要件に数えない。")
     if parity:
-        res = parity_results(d)
+        res = parity_results(d, require_occupancy)
         lines.append("")
         lines.append("parity（run1..5）: " + ", ".join("run%d=%s" % (r, res[r]) for r in RUNS))
     return "\n".join(lines)
@@ -175,7 +194,18 @@ def self_test():
         with open(os.path.join(d, "gpu-occupancy-a-run3.txt"), "w") as f:
             f.write("pre util=0%\nRUN_INVALID: foreign process detected\n")
         must_fail(lambda: arm_stats(d, "a"), "無効 run")
+        # CUDA 腕: 監視ログ欠損は --require-occupancy で拒否、Mac 腕（既定）では通す
         os.remove(os.path.join(d, "gpu-occupancy-a-run3.txt"))
+        arm_stats(d, "a")
+        must_fail(lambda: arm_stats(d, "a", True), "occupancy 監視ログ欠損")
+        # 失敗終了 run（status 非ゼロ）
+        with open(os.path.join(d, "a-run3.status"), "w") as f:
+            f.write("125\n")
+        must_fail(lambda: arm_stats(d, "a"), "失敗終了 run")
+        with open(os.path.join(d, "a-run3.status"), "w") as f:
+            f.write("0\n")
+        arm_stats(d, "a")
+        os.remove(os.path.join(d, "a-run3.status"))
         # 負値
         write(d, "a", 3, -1.0)
         must_fail(lambda: arm_stats(d, "a"), "負値")
@@ -199,6 +229,11 @@ def self_test():
         with open(os.path.join(d, "gpu-occupancy-parity-run1.txt"), "w") as f:
             f.write("RUN_INVALID: foreign process detected\n")
         must_fail(lambda: parity_results(d), "parity 無効 run")
+        os.remove(os.path.join(d, "gpu-occupancy-parity-run1.txt"))
+        must_fail(lambda: parity_results(d, True), "parity 監視ログ欠損")
+        with open(os.path.join(d, "parity-run1.status"), "w") as f:
+            f.write("1\n")
+        must_fail(lambda: parity_results(d), "parity 失敗終了 run")
     print("self-test OK")
 
 
@@ -213,6 +248,7 @@ def main(argv):
     arms = None
     baseline = None
     parity = "--parity" in argv
+    require_occupancy = "--require-occupancy" in argv
     for i, a in enumerate(argv):
         if a == "--arms":
             arms = argv[i + 1].split(",")
@@ -223,7 +259,7 @@ def main(argv):
     if baseline is not None and baseline not in arms:
         raise SystemExit("--baseline は --arms に含める")
     try:
-        print(render(d, arms, baseline, parity))
+        print(render(d, arms, baseline, parity, require_occupancy))
     except ValueError as e:
         print("集計失敗: %s" % e, file=sys.stderr)
         return 1

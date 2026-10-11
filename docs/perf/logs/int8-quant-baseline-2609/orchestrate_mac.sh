@@ -92,6 +92,17 @@ case "${ARM}" in
 esac
 status=$?
 set -e
+# 終了コードを保存し、非ゼロ（失敗・タイムアウト・残存プロセス検出 125 等）の run は成果物を退避する
+# （通常名の JSON が残って aggregate.py に正常 run として集計されるのを防ぐ。取り直し時の既存ログ停止も回避）。
+echo "${status}" > "${OUT}/${ARM}-run${RUN}.status"
 echo "post load1=$(sysctl -n vm.loadavg | awk '{print $2}')" >> "${OUT}/load-${ARM}-run${RUN}.txt"
+if [ "${status}" -ne 0 ]; then
+  stamp="$(date +%s)"
+  for f in "${LOG}" "${JSON}" "${OUT}/${ARM}-run${RUN}.status"; do
+    if [ -e "${f}" ]; then mv "${f}" "${f}.discarded-${stamp}"; fi
+  done
+  echo "done. arm=${ARM} run=${RUN} status=${status} FAILED (discarded)"
+  exit "${status}"
+fi
 echo "done. arm=${ARM} run=${RUN} status=${status}"
 exit "${status}"
