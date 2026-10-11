@@ -10,10 +10,13 @@
 
 | 環境 | 用途 | 実行方法 |
 |------|------|---------|
-| Mac（Apple M4 Max・64GB・macOS 26.6） | Metal バックエンド実機テスト・ベンチ（#379） | ローカル直接実行 |
+| Mac mini（`<metal-node>`。Apple M4 10 コア・16GB・macOS 27） | Metal バックエンド実機テスト・ベンチ・計測（2026-10-11 から） | SSH リモート実行（§7） |
+| 開発機 Mac（Apple M4 Max・64GB） | 実装・ビルド・CPU テスト・CUDA ノードへの転送元。**Metal の計測・実機 parity の記録には使わない** | ローカル直接実行 |
 | DGX Spark GB10（`<cuda-node>`） | CUDA バックエンド実機テスト・ベンチ（#388） | SSH リモート実行 |
 
 Mac 上では CUDA テストは実行不可（hardware 非対応）。
+
+**Metal の実行先の変更（2026-10-11 所有者指示）**: 開発機の M4 Max は他アプリが常駐して負荷が安定せず、計測値・実機テストの再現性を担保できないため、Metal の計測と実機 parity の記録は専用の Mac mini（`<metal-node>`）で行う。2026-10-11 より前の Metal 実測記録は M4 Max の値で、Mac mini（M4）の値とは性能を直接比較できない。記録には必ず `env_info.txt`（チップ名・macOS・rustc）を添え、どちらの機体の値かを明示する。
 
 ## 2. CUDA 実機ノード（`<cuda-node>`）
 
@@ -230,14 +233,23 @@ ssh "$CUDA_NODE" 'nvidia-smi --query-compute-apps=pid,process_name,used_memory -
 
 ## 7. Mac 側（Metal）
 
-### 7.1 実機テスト・ベンチ
+### 7.1 実機テスト・ベンチ（Mac mini `<metal-node>` で実行）
 
-Mac 上でそのまま実行：
+`<metal-node>` の実ホスト名はシェル変数 `METAL_NODE` として扱う（`export METAL_NODE="<実ホスト名>"`。実値は `docs/real-hardware-verification-env.local.md`）。転送は CUDA ノードと同じ rsync 方式（§3 のコマンドの転送先を `"$METAL_NODE":~/work/rust-ai-library-run/` に置き換える。`.git/`・`.claude/worktrees/` は転送しない）で、ビルドキャッシュも同じく同期ツリー外の `$HOME/work/target-fandhe-ai` に置く。非対話 SSH では PATH が通らないため `zsh -lc` で包む:
 
 ```bash
-cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
-cargo bench -p fandhe-ai-backend-metal --bench gemm_metal_f32 --release -- --ignored
+ssh "$METAL_NODE" 'cat ~/work/rust-ai-library-run/.rev-stamp'   # 転送リビジョンの確認
+ssh "$METAL_NODE" 'zsh -lc "cd ~/work/rust-ai-library-run && \
+  CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture"'
+ssh "$METAL_NODE" 'zsh -lc "cd ~/work/rust-ai-library-run && \
+  CARGO_TARGET_DIR=\$HOME/work/target-fandhe-ai \
+  cargo bench -p fandhe-ai-backend-metal --bench gemm_metal_f32 --release -- --ignored"'
 ```
+
+- Xcode 本体は不要（Command Line Tools のみで可）。Metal シェーダは実行時に `newLibraryWithSource` でコンパイルされる（2026-10-11 実測: `tests/device.rs` の `select_metal_device_on_real_hardware` が pass）
+- 内蔵 SSD は 228GiB と小さい。target ディレクトリは `$HOME/work/target-fandhe-ai` の 1 つに保ち、worktree ごとに作らない
+- 長時間の計測は SSH 切断で止まらないよう `nohup` で切り離し、ログをファイルへ出して回収する（macOS には `setsid` がない）
 
 ### 7.2 PyTorch MPS 参照計測
 
