@@ -36,8 +36,9 @@ Mac mini（Apple M4・10 コア・16 GB）へ移した（2026-10-11 所有者指
 - **Python 3 FW**: Python 3.12.15（uv 管理・ユーザー領域）。`venv-torch` は torch 2.14.0・scipy 1.18.1・numpy 2.5.4、
   `venv-tf` は tensorflow 2.16.2・tensorflow-metal 1.2.0・numpy 1.26.4・keras 3.15.1。FW の版は M4 Max 計測と同じ。
 - **bench_py.py**: `docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py`（sha256 `9fd2c08f…2409b`。全文は `RULE.txt`）。
-  M4 Max 計測が使った版の記録はないが、Python 3 FW の checksum は M4 Max 系列 B の中央値行と全 32 セルで一致した
-  （TensorFlow CPU の学習 loss のみ 2e-8 の差）。checksum の一致は同じ入力・同じ計算であることの確認で、スクリプトの bit 同一性の証明ではない。
+  M4 Max 計測が使った版の記録はない。Python 3 FW の checksum は、M4 Max 系列 B の中央値行と 32 セル中 30 セルで完全一致した。
+  残る 2 セル（TensorFlow CPU の gemm N=256 と学習 loss）は相対差 2e-8・1.9e-7。fandhe-ai／candle／burn 側は 48 セル中 47 セルが完全一致で、
+  candle infer Metal のみ相対差 1.9e-8。checksum の一致は同じ入力・同じ計算であることの確認で、スクリプトの bit 同一性の証明ではない。
 - **日時**: 2026-10-11 11:45:34Z〜12:16:26Z（系列 A 11:45:34Z〜12:02:30Z・系列 B 12:02:30Z〜12:16:26Z）。`RULE.txt` の固定は 11:45:34Z（結果が出る前）。
 - **負荷**: 各 run 開始時の load1（`uptime_before.txt`）は系列 A が 1.34／1.65／1.96／3.70／2.85、系列 B が 2.67／2.49／2.67／2.63／1.85。
   計測ハーネス自身が run 後の load1 を 3 前後まで押し上げるため、系列 B のゲートは直前 run の残余の減衰待ちとして働いた
