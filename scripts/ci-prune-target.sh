@@ -43,6 +43,20 @@ if [ ! -d "${target_dir}" ]; then
   exit 0
 fi
 [ -L "${target_dir}" ] && die "target が symlink のため prune を中止します"
+real_target="$(cd "${target_dir}" && pwd -P)"
+
+# assert_real_dir <dir>: 列挙・削除の起点にするディレクトリ自身が symlink でなく、実体が
+# target 配下にあることを検証する（親ディレクトリの symlink 経由で target 外を列挙・
+# 削除しないため。find は既定で symlink を辿らないが、cd した先は辿るため明示検査する）。
+assert_real_dir() {
+  local real
+  [ -L "$1" ] && die "symlink のため prune を中止します: $1"
+  real="$(cd "$1" && pwd -P)" || die "ディレクトリへ移動できません: $1"
+  case "${real}" in
+    "${real_target}" | "${real_target}"/*) ;;
+    *) die "実体が target 配下にないため prune を中止します: $1 -> ${real}" ;;
+  esac
+}
 
 # size_of <path>: du -s の KiB 値（存在しなければ 0）。
 size_of() {
@@ -92,12 +106,16 @@ flush_rm() {
 # list_names <dir>: 直下のエントリ名を 1 行 1 件で出す（後段の sed が厳密な正規表現で
 # 絞り込むため、改行を含む名前は一致せず対象外になる）。
 list_names() {
+  assert_real_dir "$1"
   (cd "$1" && find . -mindepth 1 -maxdepth 1) | sed 's|^\./||'
 }
 
 prune_profile() { # $1=プロファイルディレクトリ（target[/<triple>]/{debug,release}）
   local profile="$1" d n n_units=0 n_deps=0
-  [ -L "${profile}" ] && die "${profile} が symlink のため prune を中止します"
+  assert_real_dir "${profile}"
+  for d in .fingerprint build deps; do
+    if [ -e "${profile}/${d}" ] || [ -L "${profile}/${d}" ]; then assert_real_dir "${profile}/${d}"; fi
+  done
   : >"${work}/hashes"
   # 2. .fingerprint/ と build/ のメンバーユニット（`<package>-<hex>` の package 名で判定し、
   #    hex を集める）。名前は空白・改行を含まない形（sed の正規表現で検証）だけを扱う。
