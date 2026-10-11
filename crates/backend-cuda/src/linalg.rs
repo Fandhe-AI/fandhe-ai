@@ -14,6 +14,14 @@
 //!   linalg.rs::lu_diag_product` と同一演算列の意図的複製。クレート間依存を
 //!   作らない。設計記録 §3）。
 //!
+//! - 分解系 3 演算（`linalg_cholesky`／`linalg_qr`／`linalg_eigh`。イシュー
+//!   #2675）は同じゲートの背後にあり、[`validate_square_factor_dims`]・
+//!   [`validate_qr_dims`]（サイズ検証）、[`normalize_max_abs_sign`]・
+//!   [`eigh_sort_and_normalize`]・[`qr_finalize`]（ホスト後処理。
+//!   `backend-cpu/src/linalg.rs` の同名処理と同一演算列の意図的複製）、
+//!   [`CudaLinalgFactor::new`]（`kernels_linalg_factor.rs` の 3 カーネルの
+//!   NVRTC コンパイル・ロード）を提供する。
+//!
 //! # 公開範囲
 //!
 //! 本モジュールは `backend-cuda` 内 `pub` だが **`facade` へは再公開しない**
@@ -37,6 +45,9 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_linalg::{
     LINALG_LU_BLOCK_DIM, LINALG_LU_F64, LINALG_LU_SOLVE_F64, LINALG_SOLVE_BLOCK_DIM,
+};
+use crate::kernels_linalg_factor::{
+    LINALG_CHOLESKY_F64, LINALG_EIGH_F64, LINALG_FACTOR_BLOCK_DIM, LINALG_QR_F64,
 };
 use crate::nvrtc::compile_ptx;
 
@@ -225,9 +236,315 @@ impl CudaLinalg {
     }
 }
 
+/// 分解系 3 カーネルの block 次元（grid は `(1,1,1)`）。
+pub const FACTOR_BLOCK_DIM: u32 = LINALG_FACTOR_BLOCK_DIM;
+
+/// 要素数 `numel` が `i32::MAX` 以内かつ `f64` バイト数が `isize::MAX` 以内に
+/// 収まることを検証する（`validate_lu_dims` と同じ規律）。
+fn check_numel(op: &str, name: &str, numel: usize) -> Result<(), CudaError> {
+    let invalid = |detail: String| CudaError::InvalidElementwiseShape { detail };
+    if numel > i32::MAX as usize {
+        return Err(invalid(format!(
+            "{op}: {name}={numel} が i32::MAX を超える（カーネルの添字型）"
+        )));
+    }
+    let bytes = numel
+        .checked_mul(std::mem::size_of::<f64>())
+        .ok_or_else(|| invalid(format!("{op}: {name} のバイト数が usize を超える")))?;
+    if bytes > isize::MAX as usize {
+        return Err(invalid(format!(
+            "{op}: {name} のバイト数が確保上限（isize::MAX）を超える"
+        )));
+    }
+    Ok(())
+}
+
+/// 正方行列 `[n,n]` を扱う分解（cholesky・eigh）のサイズ検証。デバイス初期化・
+/// 確保より前に呼ぶ（OWASP A03）。`n`・`n*n` が `i32` に収まり、`n*n` 要素の
+/// `f64` バッファ（eigh は作業行列・固有ベクトルの 2 本）が確保上限以内。
+pub fn validate_square_factor_dims(op: &str, n: usize) -> Result<(), CudaError> {
+    if n > i32::MAX as usize {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!("{op}: n は i32 に収まる必要がある（カーネル引数型）: n={n}"),
+        });
+    }
+    let numel = n
+        .checked_mul(n)
+        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+            detail: format!("{op}: n*n が usize を超える"),
+        })?;
+    check_numel(op, "n*n", numel)
+}
+
+/// reduced QR（`A: [m,n]`、`k = min(m,n)`）のサイズ検証。作業行列 `m*n`・
+/// `Q` の `m*k`・`R` 出力の `k*n`・反射ベクトル格納の `k*m` の各バッファが
+/// `i32`／確保上限に収まること、`m`・`n` 自体が `i32` に収まることを確認する。
+pub fn validate_qr_dims(m: usize, n: usize) -> Result<(), CudaError> {
+    let limit = i32::MAX as usize;
+    if m > limit || n > limit {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!("linalg QR: m・n は i32 に収まる必要がある: m={m}, n={n}"),
+        });
+    }
+    let k = m.min(n);
+    for (name, a, b) in [("m*n", m, n), ("m*k", m, k), ("k*n", k, n), ("k*m", k, m)] {
+        let numel = a
+            .checked_mul(b)
+            .ok_or_else(|| CudaError::InvalidElementwiseShape {
+                detail: format!("linalg QR: {name} が usize を超える"),
+            })?;
+        check_numel("linalg QR", name, numel)?;
+    }
+    Ok(())
+}
+
+/// ベクトルの符号を「最大絶対値成分（厳密 `>`・同値は最小添字）が正」に
+/// 正規化する（`backend-cpu/src/linalg.rs::normalize_max_abs_sign` と同一。
+/// eigh の固有ベクトル列に適用する。設計記録 §3 のホスト後処理の複製）。
+pub fn normalize_max_abs_sign(v: &mut [f64]) {
+    let mut max_abs = 0.0;
+    let mut max_idx = 0usize;
+    for (idx, &x) in v.iter().enumerate() {
+        if x.abs() > max_abs {
+            max_abs = x.abs();
+            max_idx = idx;
+        }
+    }
+    if v.get(max_idx).is_some_and(|&x| x < 0.0) {
+        for x in v.iter_mut() {
+            *x = -*x;
+        }
+    }
+}
+
+/// eigh カーネルの未ソート出力（`evals`: `n`、`vecs_row_major`: `n*n`・列が
+/// 固有ベクトル）を、固有値の昇順（`total_cmp` の安定ソート）に並べ替え、
+/// 各列へ [`normalize_max_abs_sign`] を適用して `(固有値, 行優先固有ベクトル)`
+/// で返す（`backend-cpu/src/linalg.rs::eigh` の後段と同一）。`f32` 化は呼び出し側。
+pub fn eigh_sort_and_normalize(
+    evals: &[f64],
+    vecs_row_major: &[f64],
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>), CudaError> {
+    let nn = n
+        .checked_mul(n)
+        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+            detail: "linalg eigh 後処理: n*n が usize を超える".to_string(),
+        })?;
+    if evals.len() < n || vecs_row_major.len() < nn {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "linalg eigh 後処理: 入力長が不足（evals={} < n={n} または vecs={} < n*n={nn}）",
+                evals.len(),
+                vecs_row_major.len()
+            ),
+        });
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| evals[i].total_cmp(&evals[j]));
+    let sorted_evals: Vec<f64> = order.iter().map(|&i| evals[i]).collect();
+    let mut out = vec![0.0f64; nn];
+    let mut col_buf = vec![0.0f64; n];
+    for (new_idx, &old_idx) in order.iter().enumerate() {
+        for (row, slot) in col_buf.iter_mut().enumerate() {
+            *slot = vecs_row_major[row * n + old_idx];
+        }
+        normalize_max_abs_sign(&mut col_buf);
+        for (row, &x) in col_buf.iter().enumerate() {
+            out[row * n + new_idx] = x;
+        }
+    }
+    Ok((sorted_evals, out))
+}
+
+/// QR カーネルの出力（`r_work`: `m*n` の上三角化済み作業行列、`q_work`: `m*k`）
+/// から `R`（`k*n`・下三角を 0）と `Q`（`m*k`）を作り、対角が負の行は `R` の行と
+/// `Q` の列を反転して `Q R = A` を保つ（`backend-cpu/src/linalg.rs::qr` の後段と
+/// 同一。反転は丸めと可換なので bit 一致に影響しない）。戻り値は `(R, Q)`。
+pub fn qr_finalize(
+    r_work: &[f64],
+    q_work: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>), CudaError> {
+    let k = m.min(n);
+    let overflow = |name: &str| CudaError::InvalidElementwiseShape {
+        detail: format!("linalg QR 後処理: {name} が usize を超える"),
+    };
+    let mn = m.checked_mul(n).ok_or_else(|| overflow("m*n"))?;
+    let mk = m.checked_mul(k).ok_or_else(|| overflow("m*k"))?;
+    let kn = k.checked_mul(n).ok_or_else(|| overflow("k*n"))?;
+    if r_work.len() < mn || q_work.len() < mk {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "linalg QR 後処理: 入力長が不足（r_work={} < m*n={mn} または q_work={} < m*k={mk}）",
+                r_work.len(),
+                q_work.len()
+            ),
+        });
+    }
+    let mut r = vec![0.0f64; kn];
+    for row in 0..k {
+        for c in 0..n {
+            r[row * n + c] = if c < row { 0.0 } else { r_work[row * n + c] };
+        }
+    }
+    let mut q = q_work[..mk].to_vec();
+    for i in 0..k {
+        if r[i * n + i] < 0.0 {
+            for c in 0..n {
+                r[i * n + c] = -r[i * n + c];
+            }
+            for row in 0..m {
+                q[row * k + i] = -q[row * k + i];
+            }
+        }
+    }
+    Ok((r, q))
+}
+
+/// cholesky・QR・eigh の 3 カーネル（`double`）のコンパイル済みハンドル。
+/// LU 側の [`CudaLinalg`] とは別型にして、LU の経路で余分なカーネルを
+/// コンパイルしない。
+pub struct CudaLinalgFactor {
+    stream: Arc<CudaStream>,
+    ordinal: usize,
+    cholesky: CudaFunction,
+    qr: CudaFunction,
+    eigh: CudaFunction,
+}
+
+impl CudaLinalgFactor {
+    /// `device` 上で 3 カーネルを NVRTC コンパイル・ロードする
+    /// （[`CudaLinalg::new`] と同一手順。safe API のみ）。
+    pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
+        let arch = device.arch();
+        let load = |src: &str, name: &str| -> Result<CudaFunction, CudaError> {
+            let ptx = compile_ptx(src, arch)?;
+            Ok(device.context().load_module(ptx)?.load_function(name)?)
+        };
+        Ok(Self {
+            stream: device.stream().clone(),
+            ordinal: device.ordinal(),
+            cholesky: load(LINALG_CHOLESKY_F64, "linalg_cholesky_f64")?,
+            qr: load(LINALG_QR_F64, "linalg_qr_f64")?,
+            eigh: load(LINALG_EIGH_F64, "linalg_eigh_f64")?,
+        })
+    }
+
+    /// 構築元デバイスの ordinal。
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+
+    /// 構築元デバイスのストリーム。
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+
+    /// Cholesky カーネル（`linalg_cholesky_f64`）。
+    pub fn cholesky_function(&self) -> &CudaFunction {
+        &self.cholesky
+    }
+
+    /// QR カーネル（`linalg_qr_f64`）。
+    pub fn qr_function(&self) -> &CudaFunction {
+        &self.qr
+    }
+
+    /// eigh カーネル（`linalg_eigh_f64`）。
+    pub fn eigh_function(&self) -> &CudaFunction {
+        &self.eigh
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn square_factor_dims_boundaries() {
+        assert!(validate_square_factor_dims("t", 0).is_ok());
+        assert!(validate_square_factor_dims("t", 46_340).is_ok());
+        assert!(validate_square_factor_dims("t", 46_341).is_err());
+        assert!(validate_square_factor_dims("t", usize::MAX).is_err());
+    }
+
+    #[test]
+    fn qr_dims_boundaries() {
+        assert!(validate_qr_dims(0, 0).is_ok());
+        assert!(validate_qr_dims(64, 8).is_ok());
+        assert!(validate_qr_dims(8, 64).is_ok());
+        assert!(validate_qr_dims(i32::MAX as usize, 1).is_ok());
+        assert!(validate_qr_dims(i32::MAX as usize, 2).is_err());
+        assert!(validate_qr_dims(usize::MAX, 1).is_err());
+        assert!(validate_qr_dims(1, usize::MAX).is_err());
+        assert!(validate_qr_dims(46_341, 46_341).is_err());
+    }
+
+    #[test]
+    fn normalize_sign_rules() {
+        let mut v = [1.0, -3.0, 2.0];
+        normalize_max_abs_sign(&mut v);
+        assert_eq!(v, [-1.0, 3.0, -2.0]);
+        // 同値は最小添字が採用される（厳密 >）。
+        let mut v = [-2.0, 2.0];
+        normalize_max_abs_sign(&mut v);
+        assert_eq!(v, [2.0, -2.0]);
+        let mut z = [0.0, 0.0];
+        normalize_max_abs_sign(&mut z);
+        assert_eq!(z, [0.0, 0.0]);
+        let mut e: [f64; 0] = [];
+        normalize_max_abs_sign(&mut e);
+    }
+
+    #[test]
+    fn eigh_sort_is_ascending_stable_with_total_cmp() {
+        // 固有値 [2, 0.0, -0.0]。total_cmp では -0.0 < 0.0。列 j は e_j。
+        let evals = [2.0, 0.0, -0.0];
+        let vecs = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let (e, v) = eigh_sort_and_normalize(&evals, &vecs, 3).unwrap();
+        assert!(e[0].is_sign_negative() && e[0] == 0.0);
+        assert!(e[1].is_sign_positive() && e[1] == 0.0);
+        assert_eq!(e[2], 2.0);
+        // 新しい列 0 は旧列 2（e_2）、列 1 は旧列 1、列 2 は旧列 0。
+        assert_eq!(v[2 * 3], 1.0);
+        assert_eq!(v[3 + 1], 1.0);
+        assert_eq!(v[2], 1.0);
+        // 同値固有値は元の順序を保つ（安定）。
+        let (e2, v2) = eigh_sort_and_normalize(&[1.0, 1.0], &[1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        assert_eq!(e2, vec![1.0, 1.0]);
+        assert_eq!(v2, vec![1.0, 0.0, 0.0, 1.0]);
+        // 列の符号は最大絶対値成分が正になる。
+        let (_, v3) = eigh_sort_and_normalize(&[1.0], &[-1.0], 1).unwrap();
+        assert_eq!(v3, vec![1.0]);
+    }
+
+    #[test]
+    fn qr_finalize_zeroes_lower_and_flips_negative_diagonal() {
+        // m=3, n=2, k=2。R 作業行列 (0,0) が負、(1,0) に残差。
+        let r_work = [-2.0, 1.0, 1e-17, 3.0, 0.0, 0.0];
+        let q_work = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; // 3x2
+        let (r, q) = qr_finalize(&r_work, &q_work, 3, 2).unwrap();
+        assert_eq!(r.len(), 4);
+        assert_eq!(&r[..2], &[2.0, -1.0]);
+        assert_eq!(&r[2..], &[0.0, 3.0]);
+        assert_eq!(q[0], -1.0);
+        assert_eq!(q[1], 0.0);
+        assert_eq!(q[3], 1.0);
+    }
+
+    #[test]
+    fn post_processing_rejects_short_buffers_and_overflow() {
+        assert!(eigh_sort_and_normalize(&[], &[], 1).is_err());
+        assert!(eigh_sort_and_normalize(&[1.0], &[], 1).is_err());
+        assert!(eigh_sort_and_normalize(&[], &[], usize::MAX).is_err());
+        assert!(eigh_sort_and_normalize(&[], &[], 0).is_ok());
+        assert!(qr_finalize(&[], &[], 1, 1).is_err());
+        assert!(qr_finalize(&[1.0], &[], 1, 1).is_err());
+        assert!(qr_finalize(&[], &[], usize::MAX, 2).is_err());
+        assert!(qr_finalize(&[], &[], 0, 0).is_ok());
+    }
 
     /// ゲートの既定は OFF（本クレート単体テストはゲートを書き換えないため
     /// 並列実行でも競合しない。書き換えは統合テスト側で直列化する）。

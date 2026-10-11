@@ -34,13 +34,14 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
-    DType, DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
-    InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction, Pool2dParams,
-    QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey, SegmentResource,
-    SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, adaptive_pool2d_out_shape,
-    batch_norm_layout, gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode,
-    one_hot_out_shape, pad_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    DType, DispatchFailureCell, EighFactors, FusionPlan, GruBackwardOutput, GruPointwiseOutput,
+    HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
+    Pool2dParams, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey,
+    SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape, im2col_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, pool2d_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -179,6 +180,51 @@ fn lu_launch_pending(op: &str) -> BackendError {
     BackendError::Unsupported(format!(
         "CudaBackendOps::{op}: CUDA 線形代数カーネルの起動（新規 unsafe）は\
          ユーザー承認待ち（イシュー #2674）"
+    ))
+}
+
+/// 分解系 3 演算（`linalg_cholesky`／`linalg_qr`／`linalg_eigh`）の共通前段
+/// （イシュー #2675・設計記録 §4.4 の結線順序。`lu_gate_prepare` の分解系版）。
+///
+/// 1. ゲート OFF（既定）→ `Unsupported`（デバイスに触れない）。
+/// 2. rank-2 検査（`ShapeMismatch(RankMismatch)`）。
+/// 3. `require_square` なら正方検査（`InvalidArgument`。CPU の
+///    `require_square_2d` と同じ判定規律）。
+///
+/// サイズ検証は呼び出し側が演算別の関数（`validate_square_factor_dims`／
+/// `validate_qr_dims`）で続ける。
+fn linalg_gate_prepare(
+    op: &str,
+    shape: &[usize],
+    require_square: bool,
+) -> Result<(), BackendError> {
+    if !crate::linalg::gpu_linalg_enabled() {
+        return Err(BackendError::Unsupported(format!(
+            "CudaBackendOps::{op}: GPU 線形代数は opt-in ゲート OFF（既定）。\
+             fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled(true) で有効化（イシュー #2675）"
+        )));
+    }
+    if shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    if require_square && shape[0] != shape[1] {
+        return Err(BackendError::InvalidArgument(format!(
+            "{op}: 正方行列（[n,n]）が必要（形状 {shape:?}）"
+        )));
+    }
+    Ok(())
+}
+
+/// 分解系のカーネル起動が未実装（新規 `unsafe` のユーザー承認待ち）であることを
+/// 示す fail-closed の `Unsupported`（`lu_launch_pending` と同じ扱い。
+/// `Var` 側はホスト `f64` へフォールバックする）。
+fn factor_launch_pending(op: &str) -> BackendError {
+    BackendError::Unsupported(format!(
+        "CudaBackendOps::{op}: CUDA 線形代数カーネルの起動（新規 unsafe）は\
+         ユーザー承認待ち（イシュー #2675）"
     ))
 }
 
@@ -4473,18 +4519,57 @@ impl BackendOps for CudaBackendOps {
         Err(lu_launch_pending("linalg_det"))
     }
 
-    fn linalg_cholesky(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "CudaBackendOps::linalg_cholesky: 線形代数カーネル未実装（イシュー #1621 \
-             スコープ外）"
-                .into(),
-        ))
+    /// Cholesky 分解（イシュー #2675）。LU 系と同じ内部 opt-in ゲートの背後に
+    /// あり、ゲート OFF ならデバイスに触れず `Unsupported`（`Var` がホスト
+    /// `f64` へフォールバック）。ゲート ON では `linalg_gate_prepare`→サイズ
+    /// 検証→`n == 0` はホストで `[0,0]`→それ以外は起動保留の `Unsupported`
+    /// （新規 unsafe の承認待ち。`factor_launch_pending`）。
+    fn linalg_cholesky(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg_gate_prepare("linalg_cholesky", a.shape(), true)?;
+        let n = a.shape()[0];
+        crate::linalg::validate_square_factor_dims("linalg_cholesky", n)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_cholesky: {e}")))?;
+        if n == 0 {
+            return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
+        }
+        Err(factor_launch_pending("linalg_cholesky"))
     }
 
-    fn linalg_qr(&self, _a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
-        Err(BackendError::Unsupported(
-            "CudaBackendOps::linalg_qr: 線形代数カーネル未実装（イシュー #1621 スコープ外）".into(),
-        ))
+    /// reduced QR（イシュー #2675）。入口の流れは [`Self::linalg_cholesky`] と
+    /// 同じ（正方性は要求しない）。空入力は CPU と同じ形（`k = min(m,n)`、
+    /// `Q: [m,k]`・`R: [k,n]`）をホストで返す。
+    fn linalg_qr(&self, a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
+        linalg_gate_prepare("linalg_qr", a.shape(), false)?;
+        let (m, n) = (a.shape()[0], a.shape()[1]);
+        crate::linalg::validate_qr_dims(m, n)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_qr: {e}")))?;
+        if m == 0 || n == 0 {
+            let k = m.min(n);
+            return Ok(QrFactors {
+                q: Tensor::new(Vec::new(), &[m, k]).map_err(BackendError::ShapeMismatch)?,
+                r: Tensor::new(Vec::new(), &[k, n]).map_err(BackendError::ShapeMismatch)?,
+            });
+        }
+        Err(factor_launch_pending("linalg_qr"))
+    }
+
+    /// 対称固有値分解（イシュー #2675。これまで CUDA ではオーバーライドが
+    /// なく trait 既定の `Unsupported` に落ちていた）。入口の流れは
+    /// [`Self::linalg_cholesky`] と同じ。空入力は `eigenvalues [0]`・
+    /// `eigenvectors [0,0]`。
+    fn linalg_eigh(&self, a: &Tensor<f32>) -> Result<EighFactors, BackendError> {
+        linalg_gate_prepare("linalg_eigh", a.shape(), true)?;
+        let n = a.shape()[0];
+        crate::linalg::validate_square_factor_dims("linalg_eigh", n)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_eigh: {e}")))?;
+        if n == 0 {
+            return Ok(EighFactors {
+                eigenvalues: Tensor::new(Vec::new(), &[0]).map_err(BackendError::ShapeMismatch)?,
+                eigenvectors: Tensor::new(Vec::new(), &[0, 0])
+                    .map_err(BackendError::ShapeMismatch)?,
+            });
+        }
+        Err(factor_launch_pending("linalg_eigh"))
     }
 
     fn linalg_svd(&self, _a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {

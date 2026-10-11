@@ -100,3 +100,12 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
   NVRTC ロード、入力検証、ホスト後処理の複製を追加（`unsafe` なし）。
 - **カーネル起動（新規 `unsafe` 2 ブロック）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の
   `Unsupported`。承認依頼と残作業は `docs/perf/logs/cuda-linalg-lu-2674/README.md`。実機は未実測。
+
+### #2675（CUDA cholesky・QR・eigh）の実施内容
+
+- 同じゲート（`set_gpu_linalg_enabled`。既定 OFF・facade 非公開）の背後に、Cholesky・reduced Householder QR・巡回 Jacobi
+  eigh の `double` カーネルソース（`kernels_linalg_factor.rs`）、サイズ検証、ホスト後処理（符号正規化・昇順ソート・QR 仕上げ）、
+  NVRTC ロード（`CudaLinalgFactor`）を追加した（`unsafe` なし）。`linalg_eigh` は CUDA 初のオーバーライド。
+- **カーネル起動（新規 `unsafe` 3 ブロック）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の
+  `Unsupported`。承認依頼と残作業は `docs/perf/logs/cuda-linalg-chol-qr-eigh-2675/README.md`。実機は未実測。
+- 公開形は §7 の推奨を参照（本 issue では facade 公開しない）。

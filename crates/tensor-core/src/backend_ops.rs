@@ -4490,7 +4490,9 @@ pub trait BackendOps {
     /// `L: [n,n]`〈下三角、`A = L Lᵀ`〉）。イシュー #1621。
     ///
     /// # デフォルト実装
-    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約
+    /// （CUDA は #2675 で LU 系と同じ内部 opt-in ゲート〈既定 OFF〉の背後に
+    /// 追加。既定では `Unsupported` のまま）。
     /// 非正定値（対角が非有限または非正）の場合は
     /// [`BackendError::InvalidArgument`]。
     fn linalg_cholesky(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -4503,7 +4505,8 @@ pub trait BackendOps {
     /// reduced QR 分解（`A: [m,n]` → [`QrFactors`]）。イシュー #1621。
     ///
     /// # デフォルト実装
-    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約。
+    /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約
+    /// （CUDA は #2675 で内部 opt-in ゲート〈既定 OFF〉の背後に追加）。
     fn linalg_qr(&self, _a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
         Err(BackendError::Unsupported(
             "linalg_qr: default fail-safe (no device-side linear-algebra kernel available)".into(),
@@ -4547,7 +4550,8 @@ pub trait BackendOps {
     /// # デフォルト実装
     /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約
     /// （`fandhe_ai_autodiff::linalg_ops::eigh` がこの `Unsupported` のみを
-    /// ホスト参照実装 `eval::linalg::eigh` へフォールバックする）。巡回
+    /// ホスト参照実装 `eval::linalg::eigh` へフォールバックする。CUDA は
+    /// #2675 で内部 opt-in ゲート〈既定 OFF〉の背後にオーバーライドを追加）。巡回
     /// Jacobi 法が反復上限内に収束しない場合は
     /// [`BackendError::InvalidArgument`] を返す契約とする。
     fn linalg_eigh(&self, _a: &Tensor<f32>) -> Result<EighFactors, BackendError> {
