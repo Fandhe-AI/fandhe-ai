@@ -20,7 +20,7 @@ fandhe-ai/
 ├── LICENSE-APACHE           # Apache License 2.0 全文（MIT/Apache-2.0 デュアルライセンス）
 ├── LICENSE-MIT              # MIT ライセンス本文（同上）
 ├── Makefile                 # make setup / ci / docker-* タスクランナー
-├── lefthook.yml             # git hooks（rustfmt-check・secrets-guard・commit-msg・pre-push）
+├── lefthook.yml             # git hooks（rustfmt-check・secrets-guard・commit-msg。CI と重複する clippy・test は置かない）
 ├── .editorconfig            # インデント・改行規約
 ├── Dockerfile / compose.yaml # 環境非依存の開発コンテナ（CPU バックエンドのみ）
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）

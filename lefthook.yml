@@ -4,7 +4,13 @@
 # - --no-verify によるスキップは禁止
 # - Cargo.toml 未追加（M0 の TASK-1.1 で workspace 作成予定）の間、cargo 系ジョブは
 #   スキップする（CI 側の detect ステップ判定と同一方針。ci.md 参照）
-# - 重いチェック（clippy・test）は pre-push に置き、pre-commit は整形チェックのみで軽量に保つ
+# - GitHub Actions（ci.yml の rust-ci・各固有ジョブ）が PR ごとに必ず実行するチェック
+#   （clippy・test 等）はローカルフックで重複実行しない。pre-push の clippy・test は
+#   1 回の push に 7〜13 分かかり開発速度を落としていたため廃止した（2026-10-11 所有者指示）。
+#   手元で CI 相当を確認したい場合は `make ci` を使う
+# - フックには「1 秒未満で終わる」または「push 後では手遅れ／CI で検査していない」ものだけを
+#   置く: staged の rustfmt 検査（CI 往復の差し戻しを避ける軽量ガード）・秘密情報ファイルの
+#   stage 拒否（push 後では漏えいを取り消せない）・Conventional Commits 検証（CI 未検査）
 
 pre-commit:
   parallel: true
@@ -49,22 +55,4 @@ commit-msg:
           echo "NG: Conventional Commits 形式ではありません: $msg" >&2
           echo "形式: <type>(<scope>): <説明>  （type: feat|fix|perf|refactor|test|docs|build|ci|chore）" >&2
           exit 1
-        fi
-
-pre-push:
-  jobs:
-    # clippy・test は CI と同一条件（Cargo.toml 未追加ならスキップ）
-    - name: clippy
-      run: |
-        if [ -f Cargo.toml ]; then
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-        else
-          echo "skip: Cargo.toml 未追加"
-        fi
-    - name: test
-      run: |
-        if [ -f Cargo.toml ]; then
-          cargo test --workspace --all-features
-        else
-          echo "skip: Cargo.toml 未追加"
         fi
