@@ -28,6 +28,12 @@ on:
 permissions:
   contents: read
 
+# ci.yml の workflow 共通 env と同値にする（target キャッシュの成果物と fingerprint を
+# 一致させ、ci.yml が main で保存したキャッシュを本 workflow で再利用するため）。
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 concurrency:
   group: guardrail-regression-schedule
   # 実行中の検証を途中破棄すると 2 層検証の結果が欠落し「結果継続確認」の趣旨に反するため、
@@ -111,19 +117,20 @@ jobs:
           echo "clippy=${clippy_ver}" >> "${GITHUB_OUTPUT}"
 
       # target: ci.yml の guardrail-regression ジョブ（main への push 契機で先に走る）が
-      # 保存するキャッシュと同一キーを使う。ビルド内容が同一（guardrail クレートの debug
-      # テスト成果物のみ）であり、schedule 実行は main の最新 target キャッシュを restore
-      # できる。完全一致ヒット時は actions/cache が再保存しないためキャッシュ容量も
-      # 浪費しない（イシュー #468 の判断）。restore-keys は toolchain 実解決版数スコープ
-      # 内の前方一致に限定する（イシュー #917）。
-      - name: Cache cargo target
+      # 保存するキャッシュと同一キーを restore のみで使う。ビルド内容が同一（guardrail
+      # クレートの debug テスト成果物のみ）であり、schedule 実行は main の最新 target
+      # キャッシュを restore できる。保存は ci.yml 側（保存前 prune 付き）に一本化し、
+      # 本 workflow からは保存しない（prune なしの blob で同一キーを先取りしないため）。
+      # キーの版セグメント（`-v2-`）は ci.yml と同時に上げる。restore-keys は toolchain
+      # 実解決版数スコープ内の前方一致に限定する（イシュー #917）。
+      - name: Cache cargo target（restore のみ）
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-guardrail-regression-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-guardrail-regression-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: 1 層目（REQ-4・判定器単体）
         if: steps.detect.outputs.has_cargo == 'true'

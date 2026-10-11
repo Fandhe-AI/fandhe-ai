@@ -65,23 +65,34 @@
 #     クロス clippy〈イシュー #2349・#2391〉）・build-no-cuda-toolkit（Linux debug + test 成果物）・
 #     guardrail-regression（guardrail クレートの debug テスト成果物）・
 #     verification-gates（debug build + release test + clippy 成果物）で target 内容が
-#     ジョブごとに異なるため分離する（混在させると復元・保存サイズが無駄に膨らむ。
-#     verification-gates は他ジョブより成果物が大きくなりうるため、キャッシュ容量
-#     〈リポジトリ上限・LRU 退避〉を圧迫する場合の縮小策〈release のみ保存する等〉は
-#     #468 以降の判断に委ねる）
+#     ジョブごとに異なるため分離する（混在させると復元・保存サイズが無駄に膨らむ）
+#   - target サイズ（2026-10-11 実測で改訂）: キーはソースを含まず保存はキー未保存時の
+#     1 回だけのため、workspace メンバーの成果物（統合テスト約 760 本・example の
+#     バイナリ、メンバーの rlib/rmeta、incremental、rustdoc）は次の run では必ず古く
+#     再ビルドされ、キャッシュ価値が無い。改訂前は build-no-cuda-toolkit の target が
+#     未圧縮 10.5GB（保存 9.8GB）に達し、復元に 5〜7 分かかって依存ビルド約 15 秒しか
+#     節約せず、保存のたびにリポジトリ上限内の他キャッシュを追い出していた。対策として
+#     (1) 保存前に `scripts/ci-prune-target.sh` でメンバー成果物を削除し依存 crate の
+#     成果物だけを残す、(2) workflow 共通 env で CARGO_INCREMENTAL=0・dev/test
+#     プロファイルの debuginfo を line-tables-only にする、の 2 点を target キャッシュを
+#     持つ 4 ジョブすべてに適用する。キーの版セグメント（`target-<job-id>-v2-`）は
+#     保存内容（prune・env・プロファイル）を変えたら上げる（既存キーに exact hit すると
+#     保存がスキップされ新しい内容が永久に保存されないため。旧版へのフォールバックは
+#     付けない）
 #   - deps-forbidden は `cargo tree`（依存解決・フェッチのみでビルドしない）のみ実行する
 #     ため registry キャッシュのみとし target キャッシュは持たない
 #   - ci-complete は checkout・toolchain セットアップを行わない判定専用ジョブのため
 #     キャッシュを持たない
-#   - 保存タイミングは `actions/cache` 既定（ジョブ成功時・完全一致キー存在時は再保存
-#     なし）とする。ソース変更のみでは target キャッシュを更新しない設計であり、依存
-#     コンパイルの再利用が支配的な高速化要因であるため、コミットごとの保存は
-#     キャッシュ容量（リポジトリ上限・LRU 退避）の浪費になる
-#   - verification-gates ジョブの target キャッシュのみ `actions/cache/restore` +
-#     明示 `actions/cache/save` の分離構成を使う（ヒット種別ログ記録のため。イシュー
-#     #919。alloc_tracker_serial.rs 間欠失敗のキャッシュ起因切り分け）。保存条件
-#     （`cache-hit != 'true'` かつステップ既定の `success()`）は上記の複合アクション
-#     既定と同値であり、他ジョブの target キャッシュは従来どおり複合アクションのまま
+#   - 保存タイミング: target キャッシュは `actions/cache/restore` + 明示
+#     `actions/cache/save` に分離し、保存は main への push・ジョブ成功時・完全一致キー
+#     未保存時のみとする（PR は restore のみ）。ソース変更のみでは target キャッシュを
+#     更新しない設計であり、依存コンパイルの再利用が支配的な高速化要因であるため、
+#     コミットごとの保存や PR ごとの保存はキャッシュ容量（リポジトリ上限 20GB・10GB 超過分は
+#     課金。LRU 退避）の浪費になる。キーはソースを含まないため PR は初回 push から main の
+#     キャッシュに exact hit し、Cargo.lock を変える PR だけが restore-keys による前方一致
+#     （main の旧キー）からの差分ビルドになる。分離構成はヒット種別の記録（verification-gates。
+#     イシュー #919。alloc_tracker_serial.rs 間欠失敗のキャッシュ起因切り分け）にも使う。
+#     registry キャッシュ（数 MB〜100MB 程度）は複合アクション `actions/cache` 既定のまま
 #     とする
 #   - ブランチスコープ（GitHub Actions cache の既定挙動）: PR ブランチで保存した
 #     キャッシュは当該 PR に閉じ、main（push トリガー）で保存したキャッシュが全 PR の
@@ -199,6 +210,21 @@ on:
 
 permissions:
   contents: read
+
+# target キャッシュの縮小とビルド短縮のための CI 共通設定（本ファイル冒頭コメントの
+# キャッシュ設計「target サイズ」参照）。reusable workflow（rust-ci）には env が
+# 引き継がれないため、本リポ固有ジョブにのみ効く（rust-ci 側は共通側が
+# CARGO_INCREMENTAL=0 を設定済み）。
+#   - CARGO_INCREMENTAL=0: 使い捨て VM では incremental の恩恵が無く、成果物が膨らむだけ
+#   - CARGO_PROFILE_DEV_DEBUG=line-tables-only: dev / test プロファイルの debuginfo を
+#     行番号のみに減らす（panic・バックトレースの file:line は残る）。統合テスト約 760
+#     本が依存グラフ全体を静的リンクするため、full debuginfo はリンク時間と target
+#     サイズの主因になる。release（verification-gates の test --release）は既定で
+#     debuginfo なしのため影響しない。Cargo.toml の [profile] はローカル開発・
+#     `make ci` と共用のため変更しない
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -417,14 +443,15 @@ jobs:
       # target（build ジョブ専用。本ファイル冒頭コメントのキャッシュ設計参照）。
       # restore-keys は toolchain 実解決版数スコープ内の前方一致に限定する（旧版数の
       # target を新版数の run へ復元しない。イシュー #917）。
-      - name: Cache cargo target
+      - name: Cache cargo target（restore）
+        id: cache-target-restore
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-build-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-build-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-build-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-build-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: cargo build（Linux ホスト）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -520,6 +547,18 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc -p fandhe-ai-backend-metal -p fandhe-ai-backend-cpu --no-deps --locked --target aarch64-apple-darwin
 
+      # 保存前 prune と main 限定保存（本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: target の prune（キャッシュ保存前）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/ci-prune-target.sh
+
+      - name: Cache cargo target（save）
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
+
   # --------------------------------------------------
   # CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・イシュー #35／
   # TASK-2.3・イシュー #56）。
@@ -614,14 +653,15 @@ jobs:
 
       # target（build-no-cuda-toolkit ジョブ専用。本ファイル冒頭コメントのキャッシュ設計参照）。
       # restore-keys は toolchain 実解決版数スコープ内の前方一致に限定する（イシュー #917）。
-      - name: Cache cargo target
+      - name: Cache cargo target（restore）
+        id: cache-target-restore
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-build-no-cuda-toolkit-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-build-no-cuda-toolkit-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-build-no-cuda-toolkit-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-build-no-cuda-toolkit-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: cargo build（toolkit 非搭載）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -657,6 +697,18 @@ jobs:
       - name: cargo clippy（backend-cuda・internal-diagnostics 無効）
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo clippy -p fandhe-ai-backend-cuda --all-targets --locked -- -D warnings
+
+      # 保存前 prune と main 限定保存（本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: target の prune（キャッシュ保存前）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/ci-prune-target.sh
+
+      - name: Cache cargo target（save）
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
 
   # --------------------------------------------------
   # 依存禁止リストの機械検査（TASK-1.2・REQ-1）。
@@ -1052,14 +1104,15 @@ jobs:
       # target（guardrail-regression ジョブ専用。guardrail クレートの debug テスト
       # 成果物のみのため他ジョブと内容が異なり分離する。本ファイル冒頭コメント参照）。
       # restore-keys は toolchain 実解決版数スコープ内の前方一致に限定する（イシュー #917）。
-      - name: Cache cargo target
+      - name: Cache cargo target（restore）
+        id: cache-target-restore
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-guardrail-regression-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-guardrail-regression-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: 1 層目（REQ-4・判定器単体）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -1068,6 +1121,18 @@ jobs:
       - name: 2 層目（REQ-5・除外適用後）
         if: steps.detect.outputs.has_cargo == 'true'
         run: bash scripts/run-guardrail-regression.sh layer2
+
+      # 保存前 prune と main 限定保存（本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: target の prune（キャッシュ保存前）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/ci-prune-target.sh
+
+      - name: Cache cargo target（save）
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
 
   # --------------------------------------------------
   # AI 自律メンテナンス検証ゲート（build/test/clippy。TASK-6.1c・イシュー #199）。
@@ -1148,10 +1213,9 @@ jobs:
           echo "clippy=${clippy_ver}" >> "${GITHUB_OUTPUT}"
 
       # target（verification-gates ジョブ専用。debug build + release test + clippy の
-      # 成果物を含み他ジョブと内容が大きく異なるため分離する。本ファイル冒頭コメント参照。
-      # キャッシュ容量〈リポジトリ上限・LRU 退避〉を圧迫する場合は release のみ保存する等の
-      # 縮小策を #468 以降で検討する）。restore-keys は toolchain 実解決版数スコープ内の
-      # 前方一致に限定する（イシュー #917）。
+      # 成果物を含み他ジョブと内容が大きく異なるため分離する。保存前 prune・main 限定保存は
+      # 本ファイル冒頭コメントのキャッシュ設計参照）。restore-keys は toolchain 実解決版数
+      # スコープ内の前方一致に限定する（イシュー #917）。
       #
       # イシュー #919: alloc_tracker_serial.rs の間欠失敗（PR #914 で black_box 観測点を
       # 追加済みだが根本原因未確定）の有力仮説の 1 つが、本キャッシュの restore-keys
@@ -1167,9 +1231,9 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-verification-gates-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-verification-gates-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-verification-gates-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-verification-gates-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       # target キャッシュ復元結果の記録（イシュー #919）。
       # cache-matched-key が空なら miss、cache-primary-key と一致すれば exact、
@@ -1214,14 +1278,18 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: bash scripts/run-verification-gates.sh clippy
 
+      # 保存前 prune（本ファイル冒頭コメントのキャッシュ設計「target サイズ」参照）。
+      - name: target の prune（キャッシュ保存前）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/ci-prune-target.sh
+
       # target キャッシュの保存（イシュー #919。restore/save 分離構成の対）。
-      # 完全一致時（cache-hit == 'true'）は再保存しない・ジョブ成功時のみ保存という、
-      # 複合アクション `actions/cache` 既定の保存セマンティクス（本ファイル冒頭コメント
-      # 「保存タイミング」節）と同値になるよう、ステップ既定の success() に加えて
-      # cache-hit を明示検査する。key は cache-primary-key を再参照し hashFiles の
-      # 二重計算を避ける。
+      # 完全一致時（cache-hit == 'true'）は再保存しない・ジョブ成功時のみ保存・main の
+      # push でのみ保存（本ファイル冒頭コメント「保存タイミング」節）。ステップ既定の
+      # success() に加えて cache-hit を明示検査する。key は cache-primary-key を再参照し
+      # hashFiles の二重計算を避ける。
       - name: Cache cargo target（save）
-        if: steps.detect.outputs.has_cargo == 'true' && steps.cache-target-restore.outputs.cache-hit != 'true'
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/

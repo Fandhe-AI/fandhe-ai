@@ -41,9 +41,48 @@ runner 方針・fail-closed 集約・SHA 固定などの基本規約は `ci.md` 
 - [ ] `runs-on: ubuntu-latest`・`timeout-minutes` 必須・`permissions` は最小・`persist-credentials: false`（`ci.md`）
 - [ ] 第三者 action はコミット SHA で固定する。`Fandhe-AI/actions` は `@latest`（`ci.md`）
 - [ ] checkout は `fetch-depth` 既定（1）。submodule は取得しない。差分が要るときだけ必要最小の深さにする
-- [ ] cargo 系ジョブは registry / target キャッシュを付ける（キー設計は `ci.yml` 冒頭コメント）。重複した `cargo build` を増やさない
+- [ ] cargo 系ジョブは registry / target キャッシュを付ける（キー設計は `ci.yml` 冒頭コメント、方針は下記「キャッシュ方針」）。重複した `cargo build` を増やさない
 - [ ] lefthook と同じ検査を CI にもフックにも置かない（フックに置くのは 1 秒未満のものだけ。`git-hooks.md`）
 - [ ] 追加後に `actionlint` と `bash scripts/check-workflow-runner-policy.sh check` を通す
+
+## キャッシュ方針
+
+GitHub Actions cache はリポジトリ単位で上限 **20GB**（本リポジトリは 2026-10-11 に 10GB から引き上げ）。超えると最終アクセスの古い順に追い出され（LRU）、7 日アクセスの無いものは削除される。Actions の予算は **$10/月（超過時停止）** で、**10GB を超えた分は 1GB あたり月 $0.07 の課金**になる。20GB は余裕分であり、常用は 10GB 以内に収める。
+
+- **保存は main の push のみ**。target キャッシュは `actions/cache/restore` + `actions/cache/save`（`if: ... && github.ref == 'refs/heads/main' && steps.<restore>.outputs.cache-hit != 'true'`）に分離し、PR は restore のみにする。キーはソースを含まない（toolchain 実解決版数 + `Cargo.lock`）ため PR は初回 push から main のキャッシュに exact hit する。`Cargo.lock` を変える PR だけが restore-keys の前方一致（main の旧キー）からの差分ビルドになる
+- **キーに SHA・run_id 等の一意値を入れない**。restore-keys は同一 toolchain 版数スコープの前方一致に限定する（イシュー #917）
+- **workspace メンバーの成果物を保存しない**。cargo を実行する最後のステップの後・save の前に `scripts/ci-prune-target.sh` を置く（統合テスト・example バイナリ、メンバーの rlib/rmeta、incremental、`doc/`・`tmp/` を削除し依存 crate の成果物だけを残す。保存はキー未保存時の 1 回だけで、メンバー成果物は次の run では必ず古いため価値が無い）。workflow 共通 env の `CARGO_INCREMENTAL=0`・`CARGO_PROFILE_DEV_DEBUG=line-tables-only` も維持する
+- **保存内容（prune・env・プロファイル・ビルドコマンド）を変えたらキーの版セグメント（`target-<job-id>-v<N>-`）を上げる**。既存キーに exact hit すると保存がスキップされ、新しい内容が永久に保存されない。旧版への restore-keys フォールバックは付けない（中身の fingerprint が合わず、復元時間だけがかかる）。同じキーを使う他 workflow（`guardrail-regression-schedule.yml`）も同時に上げ、そちらは restore のみにする
+- **復元が節約時間より長いキャッシュは持たない**。`Cache Size` と復元ステップの所要時間、ヒット時とミス時のジョブ時間を比較して判断する
+- 共通側 reusable workflow（`rust-ci` の `rust-base-ci-*` キー）の設計は Fandhe-AI/actions 側を正とし、本リポジトリでは変更しない（同様の prune・`CARGO_INCREMENTAL=0` は共通側で実装済み）
+
+計測:
+
+```bash
+# キャッシュ一覧（キー・ref・サイズ MB・作成・最終アクセス）と使用量
+gh api --paginate "repos/Fandhe-AI/fandhe-ai/actions/caches?per_page=100" \
+  -q '.actions_caches[]|[.key,.ref,(.size_in_bytes/1048576|floor),.created_at,.last_accessed_at]|@tsv'
+gh api repos/Fandhe-AI/fandhe-ai/actions/cache/usage
+# ジョブごとの復元・保存結果（exact は primary key と一致、restore-keys 経由は別キー、miss は Cache not found）
+gh run view <run-id> --log --job <job-id> | grep -E "Cache (restored from key|not found|saved with key)|Cache Size|prune 完了|target: "
+```
+
+`scripts/ci-prune-target.sh` は削除前後の target サイズとプロファイル別内訳をログとジョブサマリに出す。
+
+### 実測（2026-10-11）
+
+変更前（直近 13 run。PR 7・main push 6）:
+
+| キャッシュ | 保存サイズ | 状況 |
+|-----------|-----------|------|
+| `target-build-no-cuda-toolkit-*` | 9.8GB（未圧縮 10.5GB） | 単独で上限 10GB をほぼ使い切り、保存のたびに他のキャッシュを追い出していた。PR も自ブランチに 9.8GB を保存。exact hit でも復元に 5〜7 分（ダウンロード約 1.5 分 + 展開）かかり、節約できるのは依存ビルド約 15 秒のみ。ジョブ時間はヒット時 16〜20 分、ミス時 16 分で、ヒットの方が遅かった |
+| `target-verification-gates-*` | 1.1GB | 13 run 中 4 回 miss（追い出し） |
+| `target-build-*` | 0.5GB | 毎回 exact hit |
+| `target-guardrail-regression-*` | 0.13GB | 13 run 中 2 回 miss |
+| `rust-base-ci-*-test-v3-*`（rust-ci） | — | 13 run 中 4 回 miss。main で保存した直後に追い出され一覧に残らない |
+| registry 系・`cargo-deny-bin` 等 | 合計 0.25GB 未満 | ほぼ exact hit |
+
+変更後: PR #TBD で計測（下記）。
 
 ## 計測方法
 

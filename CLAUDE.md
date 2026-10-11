@@ -36,6 +36,7 @@ fandhe-ai/
 │   ├── lib.sh / help.sh / setup.sh / rustup.sh / hooks.sh / lint.sh / deny.sh / doc-warnings.sh # Makefile の入口が呼ぶ共通ヘルパーと環境構築・品質チェック
 │   ├── build-cross.sh / build-no-cuda.sh / check-cross.sh / test-ignored.sh / bench-harness.sh / ci-checks.sh # 同上（クロスビルド・実機テスト・計測・CI 共用検査の一括実行）
 │   ├── ci-detect.sh         # ci.yml 各ジョブの detect ステップ（Cargo.toml 有無・PR が docs のみなら cargo 系を省く）
+│   ├── ci-prune-target.sh   # ci.yml の target キャッシュ保存前に workspace メンバー成果物を削除（依存 crate の成果物のみ残す。CI 専用）
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
 │   ├── check-workflow-runner-policy.sh # self-hosted runner 逆戻り防止の fail-closed 契約検査の呼び出し面（ci.yml・Makefile 共用）
 │   ├── check-workflow-runner-policy.py # 同検査の本体（python3 標準ライブラリのみの自前 YAML サブセットパーサー方式。追加依存なしで表記トリック迂回を遮断）
