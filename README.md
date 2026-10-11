@@ -189,6 +189,8 @@ make lint
 
 仕様書 submodule は private リポジトリのため、アクセス権のない環境では submodule 取得ステップが失敗します。この場合も `docs/spec` 抜き（空ディレクトリ）で `cargo build --workspace`・`cargo test --workspace`（`#[ignore]` を除く通常テスト）は成立することを実測確認済みです（#463）。docs/spec 配下のファイル読み取りに依存するテストは 3 件のみで、いずれも `#[ignore]` により通常実行から分離されています（`crates/autodiff/tests/poc_v2_2_parity.rs`・`crates/backend-cpu/tests/gemm_parity.rs`・`crates/tensor-core/tests/poc_v2_1_parity.rs`）。submodule 未取得の環境でこれら 3 件を `--ignored` 指定で実行すると、evidence ファイルを読めない旨のエラーで失敗することを実測確認済みです。
 
+ビルド成果物（`target/`）は数十 GB に膨らみやすいため、ルート `Cargo.toml` の `[profile.dev.package."*"]` で依存クレート（workspace 外）のデバッグ情報を行番号のみにしています（`dev`・`test` に効き、本リポのクレートは full debuginfo のままです。panic 位置・バックトレースの行番号は残り、デバッガで依存の変数・型を見られなくなるだけです）。溜まった古い成果物は `cargo install cargo-sweep` のうえ `cargo sweep --time 14`（14 日以上使われていない成果物を削除）や `cargo sweep --installed`（rustup に現存しないツールチェーンでビルドした成果物を削除）で消せます。
+
 ### Make ターゲット
 
 Makefile は薄い入口で、処理の定義は `scripts/*.sh` にあります（Make を使わない場合の同等コマンドは `scripts/help.sh`）。ターゲットの追加・変更時の手順は [`.claude/rules/makefile.md`](.claude/rules/makefile.md)、設計指針は make skill（`.claude/skills/make`）を参照してください。

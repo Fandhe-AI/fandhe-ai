@@ -121,16 +121,16 @@ jobs:
       # クレートの debug テスト成果物のみ）であり、schedule 実行は main の最新 target
       # キャッシュを restore できる。保存は ci.yml 側（保存前 prune 付き）に一本化し、
       # 本 workflow からは保存しない（prune なしの blob で同一キーを先取りしないため）。
-      # キーの版セグメント（`-v2-`）は ci.yml と同時に上げる。restore-keys は toolchain
+      # キーの版セグメント（`-v3-`）は ci.yml と同時に上げる。restore-keys は toolchain
       # 実解決版数スコープ内の前方一致に限定する（イシュー #917）。
       - name: Cache cargo target（restore のみ）
         if: steps.detect.outputs.has_cargo == 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-guardrail-regression-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-guardrail-regression-v2-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+            target-guardrail-regression-v3-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: 1 層目（REQ-4・判定器単体）
         if: steps.detect.outputs.has_cargo == 'true'
