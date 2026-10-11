@@ -81,14 +81,11 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
-      # target（docs-site ジョブ専用。ci.yml の build 系ジョブと内容が異なるため分離する）。
-      - name: Cache cargo target
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: target/
-          key: target-docs-site-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: |
-            target-docs-site-${{ runner.os }}-
+      # target キャッシュは持たない（2026-10-11 に廃止）。docs-site は外部依存ゼロで、
+      # target にはメンバー自身の成果物（コンパイル約 10 秒）しか入らない。キーに
+      # ソースも rustc 版数も入っておらず、ソース変更や runner の rustc 更新後も古い
+      # target に exact hit し続けて再コンパイルになるだけで、節約が無い
+      # （.claude/rules/github-actions.md「キャッシュ方針」）。
 
       # 本リポは Cargo.lock コミット方針（.claude/rules/deps-policy.md）のため
       # `--locked` を付与し、意図しない依存解決の書き換え・runner 汚染を防止する
