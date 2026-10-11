@@ -119,7 +119,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | `.claude/rules/japanese-style.md` | 日本語出力スタイル |
 | `.claude/rules/conventional-commits.md` | Conventional Commits 詳細規約（`--no-verify` 禁止） |
 | `.claude/rules/makefile.md` | Makefile は薄い入口・scripts/ の規約・ターゲット追加時の手順（`Makefile`・`scripts/**` 編集時のみ読み込み） |
-| `.claude/rules/github-actions.md` | ワークフローの発火条件・必須チェック・ジョブ追加チェックリスト・計測方法（`.github/workflows/**` 編集時のみ読み込み） |
+| `.claude/rules/github-actions.md` | ワークフローの発火条件・必須チェック・ジョブ追加チェックリスト・キャッシュ方針（上限 10GB・main 限定保存・キー設計・サイズ）・計測方法（`.github/workflows/**` 編集時のみ読み込み） |
 | `.claude/rules/git-hooks.md` | lefthook 編集ルール（pre-commit は通常コミットで 1 秒未満・CI と重複する検査は置かない・明示的な例外）。`lefthook.yml` 編集時のみ読み込み |
 | `.claude/rules/code-comment-style.md` | コメント規約（役割・責務・呼び出し文脈・spec 根拠を埋め込む） |
 | `.claude/rules/out-of-scope-tracking.md` | 実装対象外の追跡規約（スコープ外事項を放置しない） |
