@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/transformer_workload.rs (~/work/target-fandhe-ai/release/deps/transformer_workload-e90959957e974dc2)
+
+running 1 test
+{"schema_version":"1","name":"transformer-block-forward-cuda-fused","backend":"cuda","warmup":20,"iters":20,"median_secs":0.120930424,"q1_secs":0.120566919,"q3_secs":0.121233192,"samples_secs":[0.120449814,0.12115676,0.120777703,0.120891384,0.121072423,0.120930424,0.121233192,0.120380662,0.120596151,0.12107668,0.120466198,0.122973675,0.120548215,0.12083412,0.123973068,0.124732126,0.120566919,0.120431751,0.123039931,0.12374582]}
+test transformer_block_forward_bench_cuda_fused ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 5.30s
+

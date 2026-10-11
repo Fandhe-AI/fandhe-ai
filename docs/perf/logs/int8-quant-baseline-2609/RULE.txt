@@ -1,0 +1,26 @@
+# 事前登録規則（イシュー #2997。実測開始前に固定し、事後に緩和しない）
+# 出典: README.md §1 の R1〜R6 を具体化したもの。変更が必要なら人間承認を得る。
+
+PLACEHOLDER: <cuda-node>=DGX Spark GB10 ノード / <metal-node>=Mac mini（Apple M4）ノード。実ホスト名・ユーザー名・絶対パスはログへ書かず、~ と上記プレースホルダに置換する。
+
+R1: 1 run = 1 プロセス。腕ごとに 5 run を取り、各 run の JSON の median_secs を集めた 5 値の中央値を採用する。Q1/Q3 は同 5 値から bench_harness::stats::median_q1_q3 と同じ定義（ソート後 idx=round-half-away(p*(n-1))）で求めて併記する。
+R2: Rust テストは cargo test ... -- <関数名> --exact --ignored --nocapture で個別実行する（--exact 必須。部分一致だと transformer_block_forward_bench_cpu にもかかるため）。
+R3: 計測中はビルドを並走させない。ビルドは計測前に 1 回だけ（cargo build -p bench-harness --release --tests）。失敗したら計測しない。
+R4: .rev-stamp（転送元 HEAD）と env_info.txt を回収する。
+R5: #2608 の TOPS（約 244）は分母・合否ゲートに使わない。
+R6: 規則は実測後に緩和しない。tolerance・baseline・閾値・REQ-8 下限は変更しない。計測値は記録のみで、(c) の充足は宣言しない（判断は spec 側）。
+
+ARMS_CUDA: prefusion fused pytorch-cuda （時間表の対象）。parity は pass/fail のみ記録し時間表に入れない。
+ARMS_MAC: rust-cpu pytorch-cpu （参考行。(c) の充足要件に数えない）。
+ORDER_CUDA: run=1..5 の各 run で prefusion -> fused -> parity -> pytorch-cuda の順に交互実行する（時間帯のゆらぎを腕の間で分散させるため）。
+ORDER_MAC: run=1..5 の各 run で rust-cpu -> pytorch-cpu の順に交互実行する。
+FILTER_CUDA: transformer_block_forward_bench_cuda_prefusion / transformer_block_forward_bench_cuda_fused / transformer_block_forward_cuda_fused_parity
+FILTER_MAC: transformer_block_forward_bench_cpu
+JSON_ENV: BENCH_TRANSFORMER_REPORT_CUDA_PREFUSION / BENCH_TRANSFORMER_REPORT_CUDA_FUSED / BENCH_TRANSFORMER_REPORT（CPU）。PyTorch は scripts/bench-transformer-pytorch.py --device {cuda|cpu} --output <run.json>（warmup/iters は既定 20/20）。
+RATIO: 対 PyTorch 比 = Rust 腕の 5 run 中央値 / PyTorch 腕の 5 run 中央値（秒）。1 より大きければ遅い。定義は docs/perf/transformer-workload-baseline.md §5 を正とし再定義しない。
+PARITY: transformer_block_forward_cuda_fused_parity を run ごとに 1 回（計 5 回）実行し、pass/fail を記録する。1 回でも fail したらその事実を記録する（tolerance は変更しない）。
+NO_CONSTANT_GATE: 定数ゲートの切り替え（ドリフトガード系テストの除外規定）は本計測に存在しないため、除外規定は設けない。
+
+DISCARD_CUDA: 各 run の前に nvidia-smi の utilization.gpu が 5% 以下になるまで最大 300 秒待ち、満たさなければ run を実行しない。run 中は 1 秒間隔で compute-apps を採取し、プロセス名が transformer_workload または python 以外のものが現れた run は破棄して取り直す。破棄・取り直しの事実はログに残す。常駐サービスは停止しない（sudo も使わない）。
+DISCARD_MAC: 各 run の前に load1 を記録する。開始前に load1 < 2.0 を最大 30 分待ち、満たさない run は「参考扱い（load1 高）」と明記して記録する。他の cargo・ベンチを並走させない。
+PARTIAL: 5 run そろわない腕は中央値を計算せず「未検証」と記録する（欠損を成功扱いにしない）。aggregate.py は run 欠損・JSON 不正・負値・NaN/inf・warmup/iters < 20 を例外にする。

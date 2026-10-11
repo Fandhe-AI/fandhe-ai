@@ -1,6 +1,6 @@
 # INT8 量子化の格上げ条件 (c)・(d-2) 測定の申し送り（イシュー #2609）
 
-`docs/int8-quant-grade-up-verification-plan.md` §4.1・§5.1 の案に対応する、**実機測定コマンドと記入欄のみ**の文書である。値はすべて未記入で、**本文書は条件 (c)・(d) の充足を宣言しない**（判断は spec 側）。実測は承認後の別 issue で行う。
+`docs/int8-quant-grade-up-verification-plan.md` §4.1・§5.1 の案に対応する、実機測定コマンドと実測記録の文書である。(c) の GB10 分と Mac mini（Apple M4）CPU 参考行は #2997 で記入済み（2026-10-11）。Metal 分母は #2998、(d-2) は未実施（#2999 は not planned・spec#83 で範囲外と確定）。**本文書は条件 (c)・(d) の充足を宣言しない**（判断は spec 側）。計測値は記録のみで、閾値・baseline・REQ-8 下限へは反映しない。
 
 ## 1. 事前登録規則の案（実測前に固定し、事後に緩めない）
 
@@ -12,6 +12,8 @@ R4: 腕の同定のため .rev-stamp と env_info.txt を回収する。ホス�
 R5: #2608 の TOPS（約 244）は合否ゲート・分母に使わない。
 R6: 規則は実測後に緩和しない。変更が必要なら人間承認を得る。
 ```
+
+#2997 では上記を `RULE.txt`（腕・実行順・破棄条件・分位点定義）に具体化し、実測開始前に固定した。集計は `aggregate.py`（`--self-test` 付き）、実行は `orchestrate_cuda.sh`／`orchestrate_mac.sh`（1 呼び出し = 1 プロセス）を使った。
 
 ## 2. (c) 実機ベースライン
 
@@ -36,23 +38,42 @@ PyTorch 基準（`torch==2.13.0+cu130`）:
 python3 scripts/bench-transformer-pytorch.py --device cuda
 ```
 
-記入欄（単位は `transformer-workload-baseline.md` §3 に従う）:
+実測記録（2026-10-11。`cuda/` に生ログ・JSON・`env_info.txt`・`.rev-stamp`。`aggregate.py` の出力を転記。各 run は 1 プロセス、5 run の median_secs の中央値。腕は run ごとに prefusion → fused → parity → pytorch の順で交互実行）:
 
 | 腕 | run1 | run2 | run3 | run4 | run5 | 中央値 | Q1 | Q3 | 対 PyTorch 比 |
 |---|---|---|---|---|---|---|---|---|---|
-| Rust prefusion | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） |
-| Rust fused | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） |
-| PyTorch | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） | 1.00（基準） |
+| prefusion | 141.872 | 142.102 | 115.413 | 145.101 | 118.367 | 141.872 | 118.367 | 142.102 | 219.60 |
+| fused | 120.929 | 122.988 | 120.812 | 120.930 | 123.648 | 120.930 | 120.929 | 122.988 | 187.18 |
+| pytorch | 0.646 | 0.647 | 0.646 | 0.646 | 0.645 | 0.646 | 0.646 | 0.646 | 1.00（基準） |
 
-注記: per-op ホスト転送が計測値に含まれる。
+単位: ms（各 run の median_secs を 1000 倍。中央値・Q1・Q3 は 5 run の値から算出）。対 PyTorch 比は Rust 腕の中央値 / PyTorch 腕の中央値（1 より大きければ遅い）。
 
-### 2.2 Metal（M4 Max）
+parity（run1..5）: run1=pass, run2=pass, run3=pass, run4=pass, run5=pass
+
+- PyTorch 基準は `torch==2.13.0+cu130`（`scripts/bench-transformer-pytorch.py --device cuda`、warmup/iters 20/20）。
+- prefusion は run 間のばらつきが大きい（115〜145 ms。run3・run5 が低い）。他プロセスの混入は検出されておらず（`cuda/gpu-occupancy-*.txt`。run 前の GPU utilization は 0〜2%）、原因は未調査。5 run 中央値（141.872 ms）をそのまま採用し、取り直しは行っていない。
+- 対 PyTorch 比が約 190〜220 倍と大きいのは、attention の bmm・LayerNorm・GELU・残差がホストの naive 実装のままで、`CudaBackendOps` が per-op にホスト転送するため（`transformer-workload-baseline.md` §7）。
+- 注記: per-op ホスト転送が計測値に含まれる。fused と prefusion の差分には「linear 側の真の融合効果」と「softmax のホスト→GPU 移行効果」が混ざる（`transformer-workload-baseline.md` §7 の非対称性の注記）。
+- ノードには常駐サービスの GPU プロセスが 2 件あり、停止していない（run 前の utilization.gpu 0〜2% を確認）。
+
+### 2.2 Metal（Mac mini〈Apple M4〉）
+
+案 ii（facade `TransformerEncoderLayer` で代替分母）に決定済み（#2995・2026-10-11）。計測は #2998 の担当で、本 issue では測らない。以下は #2609 時点の記述。
 
 複合ワークロードの実行経路（`transformer_workload_metal.rs` 相当）が未実装のため、**現時点では測定不能**。案 i（専用経路）か案 ii（facade `TransformerEncoderLayer` 代替）かは承認待ち（計画 doc §8 項 11）。記入欄は `transformer-workload-baseline.md` §7 の Metal 表を使う。
 
-### 2.3 CPU（M4 Max。参考行）
+### 2.3 CPU（Mac mini〈Apple M4〉。参考行）
 
-`docs/perf/transformer-workload-measurement.md` の記入待ちテンプレートを使う。(c) の充足要件には数えない。
+(c) の充足要件には数えない。2026-10-11 の Mac mini（Apple M4・10 コア・macOS 27.0.1）の実測（`mac-mini-cpu/`）。M4 Max（開発機）の過去実測とは直接比較しない。
+
+| 腕 | run1 | run2 | run3 | run4 | run5 | 中央値 | Q1 | Q3 | 対 PyTorch 比 |
+|---|---|---|---|---|---|---|---|---|---|
+| rust-cpu | 254.009 | 253.772 | 275.802 | 253.950 | 253.845 | 253.950 | 253.845 | 254.009 | - |
+
+単位: ms（各 run の median_secs を 1000 倍。中央値・Q1・Q3 は 5 run の値から算出）。対 PyTorch 比は Rust 腕の中央値 / PyTorch 腕の中央値（1 より大きければ遅い）。
+
+- 各 run 前の load1 は 2.0 未満（`mac-mini-cpu/load-*.txt`）。run3 の 275.802 ms は外れ値で、5 run 中央値には影響しない（原因は未調査）。
+- **PyTorch CPU 行は未計測（未検証）**: Mac mini の利用可能な Python が 3.9.6（macOS CLT）と 3.15.0（Homebrew）のみで、`torch==2.13.0` の wheel が存在しなかった（3.9 は 2.8.0 まで、3.15 は該当版なし）。版を変えると基準が変わるため、別版では測っていない。Python 3.10〜3.13 の導入は共有ノードの環境変更になるため行っていない。したがって Rust CPU の対 PyTorch 比は存在しない。
 
 ## 3. (d-2) 係数確認の実測プロトコル（実施不能。案のみ）
 
@@ -69,4 +90,13 @@ quantize–dequantize 参照実装が必要で、spec の除外事項ゲート�
 
 ## 4. 環境記録
 
-`env_info.txt` は計測時に作成する（ホスト名は `<cuda-node>` に置換し、実接続情報・ユーザー名・絶対パスは書かない）。
+- GB10: `cuda/env_info.txt`（ホスト名は `<cuda-node>`）、`cuda/.rev-stamp`
+- Mac mini: `mac-mini-cpu/env_info.txt`（ホスト名は `<metal-node>`）、`mac-mini-cpu/.rev-stamp`
+- ログ内の絶対パスは `~` に置換済み。実接続情報・ユーザー名は書かない。
+- 転送した HEAD は両機とも `53e817e6`。`crates/`・`Cargo.toml`・`Cargo.lock` は無変更で、HEAD との差分は本ディレクトリの計測スクリプトとログのみ。
+
+## 5. 申し送り（人間承認事項）
+
+- 本ログの値は**記録のみ**。閾値・baseline・REQ-8 下限、`docs/perf/transformer-workload-baseline.md` §7 の表への転記は人間承認後に行う（未転記）。
+- (c) の充足は宣言しない（判断は spec 側）。Metal 分母は #2998、PyTorch CPU 参考行は Python 3.10〜3.13 を用意できた時点で再計測する。
+- prefusion の run 間ばらつきと run3（Mac CPU）の外れ値の原因調査は本 issue の範囲外。

@@ -29,7 +29,7 @@ REQ-2 の追記は `:84`（2026-09-02）・`:98-101`（2026-09-12 一般化）�
 - 2026-09-17 のユーザー承認（イシュー #1964・CLOSED）は「選択肢 C（量子化・DDP とも現状維持）」であり、「任意で A（spec 側の条件 (a) 表記更新提案）」は明示承認されていない。本 doc の §7 文案に (a) 表記更新を含める場合も、その投稿可否は別途承認が必要（§8 項 1）。
 - **#2609 の結論**（条件 a・c・d の案と根拠。**いずれの条件も充足は宣言しない**。判断は spec 側）:
   - (a): 量子化経路用の新しい parity 基準は不要。spec (a) は「REQ-2 改定〈spec #56〉確定と Tensor Core 経路の基準確定」であり、状況は §2.1 のとおり実質充足と読める。表記更新の文案は §2.1 に置くが**未投稿**。
-  - (c): 取り方の案は §4.1（CUDA は既存テストの関数名完全一致・5 プロセス中央値、Metal は実行経路が未実装のため案 i／案 ii の選択が承認事項）。**実機は未計測**。測定コマンドと記入欄は `docs/perf/logs/int8-quant-baseline-2609/README.md`。
+  - (c): 取り方の案は §4.1（CUDA は既存テストの関数名完全一致・5 プロセス中央値、Metal は実行経路が未実装のため案 i／案 ii の選択が承認事項）。**GB10 と Mac mini CPU 参考行は #2997 で実測記録あり（2026-10-11。充足の判断は spec 側）。Metal は #2998 の担当**。測定コマンドと実測記録は `docs/perf/logs/int8-quant-baseline-2609/README.md`。
   - (d): 閾値案は §5.1。(d-1) は閾値 0〈bit 完全一致〉、(d-2) は f64 真値に対する要素ごとの決定論的上界 `E(m,n)`（係数 1.0・解析値）。要約形の係数は `c = 2/127 + 1/127² ≈ 0.01581`。
   - **実測の範囲**: spec (d) の「実測付き」のうち、実測済みなのは s32 段の bit 一致（#2608）だけである。f32 段（power-of-2 スケール適用・block 間 f64 合算）と (d-2) の係数確認は、quantize–dequantize 参照実装が必要で、これは spec の除外事項ゲート（`docs/spec/04-requirements.md:365`）で止まっているため**未実施**（阻害要因）。
   - REQ-2 の `RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`・`ParityBaseline`・`guardrail.toml` は不変。承認事項は §8 項 9〜13 に列挙したが、**いずれも承認は得ていない**。
@@ -93,7 +93,7 @@ grep -rn "mma.sync.aligned" crates/backend-cuda/src
 |---|---|---|---|
 | (a) | REQ-2 の `:84`（2026-09-02）・`:98-101`（2026-09-12 一般化）で判定方式は正式化済み。spec 表の表記は「未達」のまま。INT8 は bit 一致で判定でき `ParityBaseline` 方式は不要 | 本 doc §2.1・`.claude/rules/coding-rust.md` | spec 側の表記更新（提案 A の切り離し項目） |
 | (b) | INT8 は実測済み。compute_121／121a／121f の全 target で S1〜S6 が ok・bit 一致。FP8 の実行プローブは**未実施**（受理段のみ #2122） | `docs/perf/logs/int8-mma-probe-2608/README.md`・`crates/backend-cuda/tests/int8_mma_probe_real_device.rs` | FP8 の実行プローブ |
-| (c) | **未計測**。取り方の案（§4.1）と記入欄があるだけで、分母は存在しない。Metal の実行経路は未実装 | `docs/perf/logs/int8-quant-baseline-2609/README.md` | 実機計測（承認事項 §8 項 2） |
+| (c) | **GB10・Mac mini CPU 参考行は #2997 で実測記録あり（2026-10-11。充足は宣言しない）。Metal は未計測**（案 ii。#2998） | `docs/perf/logs/int8-quant-baseline-2609/README.md` | 実機計測（承認事項 §8 項 2） |
 | (d) | 閾値案: (d-1)=0、(d-2) 係数 1.0、要約係数 `c ≈ 0.01581`（§5.1）。実測済みは s32 段の bit 一致のみ。f32 段は quantize–dequantize 参照実装が要り、それ自体が取り決め（`:370`）で止まっている | 本 doc §5.1 | f32 段・係数確認の実測（承認事項 §8 項 3） |
 | (e) | 机上確認の表（§6）。INT8 は `i8` プリミティブ、FP8 は `u8` newtype 案。spec 表の「許容依存 8 区分」は現行の 10 区分に合わせる表記直しが要る | 本 doc §6・`.claude/rules/deps-policy.md` | 実装確認・表記直し（提案 A） |
 | (f)(g) | 未着手 | `:368` | Could 格上げ後 |
@@ -153,7 +153,7 @@ grep -rn "mma.sync.aligned" crates/backend-cuda/src
 
 **(c) 充足の定義**: CUDA・Metal の「改善前」行と PyTorch 基準行が実機値で埋まり、量子化の期待効果を測る分母（対 PyTorch 比）が存在すること。REQ-8 は本行に下限を設定しない方針（`docs/spec/04-requirements.md:360` (c) 注記）を維持する。
 
-### 4.1 #2609 の取り方の案（未計測）
+### 4.1 #2609 の取り方の案（GB10・Mac mini CPU は #2997 で実測記録あり。Metal は未計測）
 
 分母の定義は再定義せず、上記の単一真実源（`baseline_spec()`・`docs/perf/transformer-workload-baseline.md` §2〜§5）を引用する。測定コマンドと記入欄は `docs/perf/logs/int8-quant-baseline-2609/README.md`。
 
@@ -166,7 +166,7 @@ grep -rn "mma.sync.aligned" crates/backend-cuda/src
   - 案 i: 専用の実行経路を別 issue で実装する。`baseline_spec()` と同じ定義を保てるため推奨。
   - 案 ii: facade `TransformerEncoderLayer`（#2068）を Metal で動かして代替分母にする。定義の差分を注記する必要がある。
   - どちらにするかは承認事項（§8 項 11）。切り出し先の既存 Issue は 2026-10-11 の再検索（`gh issue list --state all --search "transformer_workload_metal"`）でも**未特定**。
-- **CPU（M4 Max）**: 参考行とする。(c) の充足要件〈CUDA・Metal〉には数えない。
+- **CPU（Mac mini〈Apple M4〉。#2995 の判断で M4 Max から変更。実測は `docs/perf/logs/int8-quant-baseline-2609/` に記録、PyTorch CPU 行のみ未計測）**: 参考行とする。(c) の充足要件〈CUDA・Metal〉には数えない。
 - **共通**: `env_info.txt` と、腕の同定用の `.rev-stamp` を記録する。ホスト名は `<cuda-node>` プレースホルダにする。計測中はビルドを並走させない。事前登録規則は実測前に固定し、事後に緩めない。
 - **量子化効果の分母は 2 層**に分ける。(1) 複合ワークロードの対 PyTorch 比（spec (c)）。(2) GEMM 単体の f16 `mma_f16` 行（spec (f)。§5 のスループット判定）。#2608 の TOPS（中央値 約 244）は合否ゲートにも分母にも使わない（`RULE.txt` J5 を踏襲）。
 
@@ -294,7 +294,7 @@ Won't・条件付きとされ、格上げ条件表（Won't→Could の a〜e、C
 |---|---|---|---|
 | (a) | REQ-2 の判定方式は `:84`・`:98-101` で正式化済み | `docs/int8-quant-grade-up-verification-plan.md` §2.1 | 表記更新（下記） |
 | (b) | INT8 は GB10 の全 3 target で bit 一致。FP8 の実行プローブは未実施 | `docs/perf/logs/int8-mma-probe-2608/README.md` | FP8 の実行プローブ |
-| (c) | 未計測（取り方の案と記入欄のみ） | 同 §4.1・`docs/perf/logs/int8-quant-baseline-2609/README.md` | 実機計測 |
+| (c) | GB10・Mac mini CPU は #2997 で実測記録あり。Metal は未計測 | 同 §4.1・`docs/perf/logs/int8-quant-baseline-2609/README.md` | 実機計測 |
 | (d) | 閾値案: (d-1) bit 完全一致、(d-2) 要素ごとの上界（係数 1.0）。s32 段のみ実測済み | 同 §5.1 | f32 段・係数確認の実測 |
 | (e) | 机上確認（INT8 は `i8`、FP8 は `u8` newtype 案） | 同 §6 | 実装確認 |
 

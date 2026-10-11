@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# 役割: イシュー #2997 の GB10（<cuda-node>）実測で「1 腕 × 1 run = 1 プロセス」を実行する。
+# 呼び出し文脈: 開発機から `ssh <cuda-node> './docs/perf/logs/int8-quant-baseline-2609/orchestrate_cuda.sh <arm> <run>'`
+# の形でノード側同期ツリー上で呼ぶ（docs/real-hardware-verification-env.md §3〜§6 の方式）。
+# 規則の正は RULE.txt（腕・順序・破棄条件）。腕名・run 番号は allowlist と照合し eval は使わない。
+# 変数は ${VAR} 形式（bash 3.2 の全角文字連結事故を避ける）。完了マーカーは行頭 "done." （rc= は使わない）。
+set -euo pipefail
+
+ARM="${1:-}"
+RUN="${2:-}"
+case "${ARM}" in prefusion|fused|parity|pytorch) ;; *) echo "bad arm: ${ARM}" >&2; exit 2 ;; esac
+case "${RUN}" in 1|2|3|4|5) ;; *) echo "bad run: ${RUN}" >&2; exit 2 ;; esac
+
+ROOT="${ROOT:-${HOME}/work/rust-ai-library-run}"
+OUT="${OUT:-${HOME}/work/int8-2997-logs}"
+PYVENV="${PYVENV:-${HOME}/poc5-pytorch}"
+export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/work/target-fandhe-ai}"
+TIMEOUT_SECS="${TIMEOUT_SECS:-900}"
+mkdir -p "${OUT}"
+LOG="${OUT}/${ARM}-run${RUN}.log"
+JSON="${OUT}/${ARM}-run${RUN}.json"
+OCC="${OUT}/gpu-occupancy-${ARM}-run${RUN}.txt"
+if [ -e "${LOG}" ]; then echo "既存ログがあるため停止: ${LOG}" >&2; exit 3; fi
+
+# 開始前ゲート: utilization.gpu <= 5% になるまで最大 300 秒待つ（RULE.txt DISCARD_CUDA）。
+waited=0
+while :; do
+  util="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | head -1 | tr -d ' ')"
+  if [ "${util}" -le 5 ]; then break; fi
+  if [ "${waited}" -ge 300 ]; then echo "GPU が混雑(${util}%)のため実行しない" >&2; exit 4; fi
+  sleep 10; waited=$((waited + 10))
+done
+{
+  echo "pre util=${util}% waited=${waited}s"
+  echo "pre compute-apps:"
+  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader || true
+} > "${OCC}"
+
+# run 中の compute-apps を 1 秒間隔で採取する（別プロセス判定用）。
+( while :; do nvidia-smi --query-compute-apps=process_name --format=csv,noheader >> "${OCC}.samples" 2>/dev/null || true; sleep 1; done ) &
+SAMPLER=$!
+trap 'kill ${SAMPLER} 2>/dev/null || true' EXIT
+
+cd "${ROOT}"
+set +e
+case "${ARM}" in
+  prefusion)
+    BENCH_TRANSFORMER_REPORT_CUDA_PREFUSION="${JSON}" timeout "${TIMEOUT_SECS}" \
+      cargo test -p bench-harness --release --test transformer_workload \
+      -- transformer_block_forward_bench_cuda_prefusion --exact --ignored --nocapture > "${LOG}" 2>&1 ;;
+  fused)
+    BENCH_TRANSFORMER_REPORT_CUDA_FUSED="${JSON}" timeout "${TIMEOUT_SECS}" \
+      cargo test -p bench-harness --release --test transformer_workload \
+      -- transformer_block_forward_bench_cuda_fused --exact --ignored --nocapture > "${LOG}" 2>&1 ;;
+  parity)
+    timeout "${TIMEOUT_SECS}" \
+      cargo test -p bench-harness --release --test transformer_workload \
+      -- transformer_block_forward_cuda_fused_parity --exact --ignored --nocapture > "${LOG}" 2>&1 ;;
+  pytorch)
+    timeout "${TIMEOUT_SECS}" "${PYVENV}/bin/python" scripts/bench-transformer-pytorch.py \
+      --device cuda --output "${JSON}" > "${LOG}" 2>&1 ;;
+esac
+status=$?
+set -e
+
+kill "${SAMPLER}" 2>/dev/null || true
+{
+  echo "post compute-apps:"
+  nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader || true
+  echo "post util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader | head -1)"
+  echo "foreign process names during run (transformer_workload / python 以外):"
+  if [ -e "${OCC}.samples" ]; then
+    grep -v -e '^$' -e 'transformer_workload' -e 'python' "${OCC}.samples" | sort -u || true
+  fi
+} >> "${OCC}"
+rm -f "${OCC}.samples"
+echo "done. arm=${ARM} run=${RUN} status=${status}"

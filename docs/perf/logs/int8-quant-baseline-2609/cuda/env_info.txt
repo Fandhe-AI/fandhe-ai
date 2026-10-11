@@ -1,0 +1,10 @@
+host: <cuda-node>
+date: 2026-10-11
+gpu: NVIDIA GB10 (compute capability 12.1 / sm_121), driver 580.173.02
+cuda: release 13.0, V13.0.88 (nvcc) / NVRTC は同 toolkit
+arch: aarch64 (Ubuntu 24.04)
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+torch: 2.13.0+cu130 (torch.cuda.is_available()=True。リポ外の既存 venv を読み取り専用で利用。追加・更新なし)
+rev-stamp: 53e817e6c31223029a9fb6b14a0ea6da5f6395d8 (cuda/.rev-stamp。転送元 HEAD。HEAD との差分は docs 配下の計測スクリプト・ログのみで crates/ は無変更)
+build: cargo build -p bench-harness --release --tests (1 回。CARGO_TARGET_DIR は同期ツリー外)
+resident services: GPU 上に常駐サービス 2 件（<resident-service-A>・<resident-service-B>）が存在。停止していない。run 前の utilization.gpu は 0〜2%。
