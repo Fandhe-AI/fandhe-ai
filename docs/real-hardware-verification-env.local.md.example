@@ -22,6 +22,8 @@ cp docs/real-hardware-verification-env.local.md.example docs/real-hardware-verif
 | 常駐サービスの実名・GPU メモリ使用量 | `<ここにサービス名と使用量を列挙>` | ノード選定理由・停止禁止事項の根拠 | docs/real-hardware-verification-env.md 2.4・6.2 節 |
 | PyTorch 参照計測用 venv の絶対パス | `PYTORCH_VENV_PYTHON=<ここに絶対パス>` | `python` 実行パス | docs/real-hardware-verification-env.md 5.1 節 |
 | CUDA ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | `<ここにユーザー名・ディレクトリ>` | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 3〜4 節 |
+| Metal 実機ノード（Mac mini）の SSH ホスト名 | `METAL_NODE=<ここに実ホスト名>` | シェル変数 `METAL_NODE`（`export METAL_NODE="<実ホスト名>"`。クォート必須の理由は CUDA_NODE と同じ） | docs/real-hardware-verification-env.md 1・7 節 |
+| Metal ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | `<ここにユーザー名・ディレクトリ>` | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 7 節 |
 
 ## 注意
 
