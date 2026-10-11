@@ -34,6 +34,7 @@ echo "pre load1=${load1} waited=${waited}s note=${note}" > "${OUT}/load-${ARM}-r
 # 子を専用プロセスグループ（setpgrp）で起動し、タイムアウト時はグループ全体へ TERM→KILL を送り、
 # グループ内の全プロセスが消えたこと（kill 0 が ESRCH）を確認してから戻る。
 # alarm+exec では cargo だけが終了し cargo が起動した計測バイナリが残って後続 run と並走する（RULE.txt DISCARD_MAC に反する）ため。
+# INT/HUP/TERM 受信時も同じ停止経路を通り、終了コードは 128+シグナル番号。
 # 終了コード: タイムアウト 124（coreutils timeout 準拠）／通常終了後にグループへ残存があり KILL した場合 125／停止確認不能 126。
 with_timeout() {
   local secs="$1"; shift
@@ -44,7 +45,12 @@ with_timeout() {
     if ($pid == 0) { setpgrp(0, 0); exec @ARGV or die "exec: $!"; }
     setpgrp($pid, $pid);
     my $timedout = 0;
+    my $sig = 0;
     my $st;
+    # SSH 切断（HUP）・中断（INT）・TERM を受けても子グループを孤児化させない。
+    # ハンドラは waitpid を中断して下のグループ停止経路（TERM→KILL→消滅確認）へ合流させる。
+    my %signo = (HUP => 1, INT => 2, TERM => 15);
+    for my $n (keys %signo) { $SIG{$n} = sub { $sig = $signo{$n}; die "signal\n" }; }
     eval {
       local $SIG{ALRM} = sub { die "timeout\n" };
       alarm $secs;
@@ -66,6 +72,7 @@ with_timeout() {
     }
     waitpid($pid, 0) unless defined $st;
     if (kill(0, -$pid)) { print STDERR "with_timeout: process group still alive\n"; exit 126; }
+    exit(128 + $sig) if $sig;
     exit 124 if $timedout;
     exit 125 if $leftover;
     exit(($st & 127) ? 128 + ($st & 127) : ($st >> 8));

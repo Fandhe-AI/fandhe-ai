@@ -79,6 +79,12 @@ def parity_results(d):
             text = f.read()
         ok = re.search(r"^test result: ok\. 1 passed; 0 failed", text, re.M) is not None
         bad = re.search(r"FAILED|panicked", text) is not None
+        # 無効 run（RUN_INVALID）の parity は pass と表示させない（RULE.txt DISCARD_CUDA）。
+        occ = os.path.join(d, "gpu-occupancy-parity-run%d.txt" % r)
+        if os.path.isfile(occ):
+            with open(occ, encoding="utf-8", errors="replace") as f:
+                if re.search(r"^RUN_INVALID", f.read(), re.M):
+                    raise ValueError("無効 run（RUN_INVALID）: %s" % occ)
         out[r] = "pass" if (ok and not bad) else "FAIL"
     return out
 
@@ -160,6 +166,10 @@ def self_test():
                 f.write("test result: ok. 1 passed; 0 failed; 0 ignored\n" if r != 2 else "nothing\n")
         res = parity_results(d)
         assert res[1] == "pass" and res[2] == "FAIL", res
+        # parity の無効 run（occupancy に RUN_INVALID）は拒否
+        with open(os.path.join(d, "gpu-occupancy-parity-run1.txt"), "w") as f:
+            f.write("RUN_INVALID: foreign process detected\n")
+        must_fail(lambda: parity_results(d), "parity 無効 run")
     print("self-test OK")
 
 
