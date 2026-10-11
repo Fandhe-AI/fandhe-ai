@@ -136,10 +136,11 @@ pub struct BatchGpuTimestamps {
     labels: Vec<&'static str>,
 }
 
-/// [`Self`] doc コメント参照。既定ビルド（`internal-diagnostics` feature
-/// 無効）ではクレート内部限定に絞る（`gemm_reuse_phase_diag_tests.rs`
-/// の `#[cfg(test)]` 診断テストは crate 内部のためこの可視性で到達できる）。
-#[cfg(not(feature = "internal-diagnostics"))]
+/// [`Self`] doc コメント参照。呼び出し元が `gemm_reuse_phase_diag_tests.rs`
+/// 等の `#[cfg(test)]` 診断テストだけのため、feature 無効かつテストビルド
+/// でのみ `pub(crate)` として存在させる（lib ビルドでは dead_code になる
+/// ためコンパイルしない。イシュー #3003）。
+#[cfg(all(test, not(feature = "internal-diagnostics")))]
 #[derive(Debug, Clone)]
 pub(crate) struct BatchGpuTimestamps {
     gpu_start_secs: Option<f64>,
@@ -147,6 +148,8 @@ pub(crate) struct BatchGpuTimestamps {
     labels: Vec<&'static str>,
 }
 
+// 型（上の 2 分岐）が存在するビルドでのみ impl を出す（#3003）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
 impl BatchGpuTimestamps {
     /// `0.0`（未開始／完了通知未受領）を `None` へ変換して保持する。
     fn from_raw(gpu_start_secs: f64, gpu_end_secs: f64, meta: &BatchMeta) -> Self {
@@ -684,10 +687,9 @@ impl MetalContext {
     }
 
     /// [`Self::synchronize_with_gpu_timestamps`] doc コメント参照。
-    /// 既定ビルド（`internal-diagnostics` feature 無効）ではクレート
-    /// 内部限定に絞る（`gemm_reuse_phase_diag_tests.rs` の `#[cfg(test)]`
-    /// 診断テストは crate 内部のためこの可視性で到達できる）。
-    #[cfg(not(feature = "internal-diagnostics"))]
+    /// 呼び出し元は `#[cfg(test)]` 診断テストだけのため、feature 無効かつ
+    /// テストビルドでのみ `pub(crate)` として存在させる（イシュー #3003）。
+    #[cfg(all(test, not(feature = "internal-diagnostics")))]
     pub(crate) fn synchronize_with_gpu_timestamps(
         &self,
     ) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
@@ -695,7 +697,9 @@ impl MetalContext {
     }
 
     /// [`Self::synchronize_with_gpu_timestamps`] の実体（可視性ゲートの
-    /// 両分岐から共有する。イシュー #1259）。
+    /// 両分岐から共有する。イシュー #1259）。上記ラッパーが存在する
+    /// ビルド（テスト／feature 有効）でのみコンパイルする（#3003）。
+    #[cfg(any(test, feature = "internal-diagnostics"))]
     fn synchronize_with_gpu_timestamps_impl(&self) -> Result<Vec<BatchGpuTimestamps>, MetalError> {
         let mut collected = Vec::new();
         let result = self.synchronize_observed(|cmd_buf, meta| {

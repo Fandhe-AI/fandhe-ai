@@ -2401,8 +2401,7 @@ impl MetalGemm {
     /// [`Self::dispatch_auto_with_route`] doc コメント参照。既定ビルド
     /// （`internal-diagnostics` feature 無効）ではクレート内部限定に絞る。
     /// `Self::dispatch_auto` が常にこの入口へ委譲するため dead_code には
-    /// ならない（`encode_tiled_prepared` と異なり `#[allow(dead_code)]`
-    /// は不要）。
+    /// ならない。
     #[cfg(not(feature = "internal-diagnostics"))]
     pub(crate) fn dispatch_auto_with_route(
         &self,
@@ -2773,6 +2772,11 @@ impl MetalGemm {
     /// `label` は呼び出し元が渡す（`ctx.encode` のバッチラベル。診断
     /// テストは `batch.labels()` を assert するため、既存呼び出し元の
     /// ラベル文字列は本切り出しの前後で変更しない）。
+    ///
+    /// 呼び出し元（`diag_encode_tiled_nn`〈`cfg(test)`〉・feature 版
+    /// `encode_tiled_prepared`）が存在するビルドでのみコンパイルする
+    /// （イシュー #3003）。
+    #[cfg(any(test, feature = "internal-diagnostics"))]
     #[allow(clippy::too_many_arguments)]
     fn encode_tiled_nn_recorded(
         &self,
@@ -2863,40 +2867,13 @@ impl MetalGemm {
     /// 当初は無条件 `pub`（crates.io 公開クレートの恒久的な公開 API 面）へ
     /// 追加したが、`context.rs::BatchGpuTimestamps` doc コメントと同じ
     /// 懸念に該当するため、`internal-diagnostics` feature（既定 OFF）
-    /// 限定の `pub` とし、既定ビルドでは `pub(crate)` に絞る
-    /// （`Cargo.toml` の feature コメント参照。`backend-cuda` の
-    /// `CudaDevice::context`/`stream` と同型の 2 分岐構成）。
+    /// 限定の `pub` とする。crate 内に呼び出し元がないため、既定ビルドでは
+    /// コンパイルしない（`pub(crate)` 版は dead_code になるため削除。
+    /// イシュー #3003。診断テストは `cfg(test)` の `diag_encode_tiled_nn`
+    /// を使う。`Cargo.toml` の feature コメント参照）。
     #[cfg(feature = "internal-diagnostics")]
     #[allow(clippy::too_many_arguments)]
     pub fn encode_tiled_prepared(
-        &self,
-        ctx: &MetalContext,
-        a_buf: &MetalBuffer,
-        b_buf: &MetalBuffer,
-        c_buf: &MetalBuffer,
-        m_eff: usize,
-        n_eff: usize,
-        k_eff: usize,
-        cfg: TileConfig,
-    ) -> Result<TileConfig, MetalError> {
-        self.encode_tiled_nn_recorded(
-            ctx,
-            "gemm_tiled_prepared",
-            a_buf,
-            b_buf,
-            c_buf,
-            m_eff,
-            n_eff,
-            k_eff,
-            cfg,
-        )
-    }
-
-    /// [`Self::encode_tiled_prepared`] doc コメント参照。既定ビルド
-    /// （`internal-diagnostics` feature 無効）ではクレート内部限定に絞る。
-    #[cfg(not(feature = "internal-diagnostics"))]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn encode_tiled_prepared(
         &self,
         ctx: &MetalContext,
         a_buf: &MetalBuffer,
