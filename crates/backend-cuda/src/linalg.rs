@@ -112,8 +112,27 @@ fn frexp(x: f64) -> (f64, i32) {
 }
 
 /// `m · 2^e`（[`frexp`] の逆演算）。
+///
+/// `2^e` を一度に作ると、積が有限でも `2^e` 単体が overflow／underflow する
+/// （例: `m=0.9, e=1024`）。ゼロ・非有限の仮数は先に素通しし
+/// （`0 · Inf = NaN` を避ける）、指数は ±1000 ずつ段階的に掛ける。
+/// 最終合成が `f64` 範囲外のときのみ `Inf`／`0.0` になる。
 fn ldexp(m: f64, e: i32) -> f64 {
-    m * 2f64.powi(e)
+    if m == 0.0 || !m.is_finite() {
+        return m;
+    }
+    const STEP: i32 = 1000;
+    let mut result = m;
+    let mut remaining = e;
+    while remaining != 0 {
+        let step = remaining.clamp(-STEP, STEP);
+        result *= 2f64.powi(step);
+        remaining -= step;
+        if result == 0.0 || !result.is_finite() {
+            break;
+        }
+    }
+    result
 }
 
 /// LU 対角（`diag`）の総積（置換符号 `sign` 込み）を仮数・指数分離で
@@ -238,6 +257,21 @@ mod tests {
         assert!((lu_diag_product(&[2.0, 3.0], -1.0) + 6.0).abs() < 1e-12);
         assert_eq!(lu_diag_product(&[], 1.0), 1.0);
         assert_eq!(lu_diag_product(&[2.0, 0.0], 1.0), 0.0);
+    }
+
+    #[test]
+    fn diag_product_recomposition_avoids_intermediate_overflow() {
+        // 積が有限でも 2^1024 単体は overflow する（PRRT_kwDOTuUCJc6rJBKF）。
+        assert_eq!(lu_diag_product(&[1e308], 1.0), 1e308);
+        assert_eq!(lu_diag_product(&[-1e308], 1.0), -1e308);
+        // 大値の後に 0 があっても 0 * Inf = NaN にならない。
+        assert_eq!(lu_diag_product(&[1e308, 1e308, 0.0], 1.0), 0.0);
+        assert_eq!(lu_diag_product(&[1e308, 0.0], 1.0), 0.0);
+        // 範囲外のときのみ Inf／0.0。
+        assert_eq!(lu_diag_product(&[1e308, 10.0], 1.0), f64::INFINITY);
+        assert_eq!(lu_diag_product(&[1e308, 10.0], -1.0), f64::NEG_INFINITY);
+        assert_eq!(lu_diag_product(&[1e-300, 1e-300], 1.0), 0.0);
+        assert!(lu_diag_product(&[f64::NAN, 2.0], 1.0).is_nan());
     }
 
     #[test]
