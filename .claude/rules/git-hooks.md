@@ -46,7 +46,10 @@ time lefthook run pre-commit --all-files
 
 - `{staged_files}` に限定し、`glob` / `exclude` で対象を絞った 1 秒未満の検査
 - CI ではコミット単位で検知できない、または push 後では遅いもの
-    - secrets-guard（秘密情報ファイルの stage 拒否）: push 後では漏えいを取り消せない。CI に同等の検査はない
+    - secrets-guard（秘密情報ファイルの stage 拒否）: push 後では漏えいを取り消せない。CI に同等の検査はない。
+        判定は create-commit スキルの `RE_CREDFILE` / `RE_CREDFILE_OK` をベースにした正規表現（サブディレクトリの
+        `.env.*`・`id_rsa` / `id_ed25519` を拒否し、`.example` / `.sample` / `.template` / `.pub` は許可）で、
+        Fandhe-AI/fandhe-container と同一実装。パターンを変える場合は create-commit スキル側との整合を確認する
     - commit-msg（Conventional Commits 検証）: CI ではコミットメッセージ・PR タイトルを検査していない
 
 ### 明示的な例外
@@ -63,6 +66,8 @@ time lefthook run pre-commit --all-files
 - `{staged_files}` と `glob` / `exclude` で対象を絞る
 - cargo 系ジョブは `Cargo.toml` 不在時・ツール未導入時に skip する既存の書き方（CI の `detect` ステップと同一方針）に合わせる
 - rustfmt は `Cargo.toml` の `edition` を明示指定する（未指定だと edition 2015 で検査してしまう。既存ジョブのコメント参照）
+- ファイル単位の判定はファイル数に比例してプロセスを起動しない（`for` ループ内で grep 等を起動せず、awk 1 本で一括判定する）。
+    判定コマンド自体が失敗した場合は fail-closed で拒否する（secrets-guard の実装を参照）
 - 条件付き実行が必要な場合は lefthook の `skip` / `only` を使ってよい
     （`.claude/skills/lefthook/references/examples/skip.md`）
 

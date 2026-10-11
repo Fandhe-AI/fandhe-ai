@@ -297,7 +297,7 @@ test(scope): テスト追加・修正
 git hooks は [lefthook](https://lefthook.dev/)（`lefthook.yml`）で管理し、commit 時に以下が自動実行されます（いずれも 1 秒未満）。
 
 - staged の `.rs` に対する `rustfmt --check`（整形ガード）
-- 秘密情報ファイル（`.env`・`*.pem`・`*.key` 等）の stage 拒否
+- 秘密情報ファイル（サブディレクトリを含む `.env`・`.env.*`、`*.pem`・`*.key`・`id_rsa` 等。`.env.example` 等の雛形と `*.pub` は許可）の stage 拒否
 - Conventional Commits 形式検証
 
 clippy・test など GitHub Actions が PR ごとに実行するチェックは、開発速度を優先してローカルフック（pre-push）では実行しません。push 前に手元で確認したい場合は下記の `make ci` を使ってください。フックを追加・変更する際の方針（時間予算・CI との役割分担）は [`.claude/rules/git-hooks.md`](.claude/rules/git-hooks.md) を参照してください。
