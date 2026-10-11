@@ -151,7 +151,9 @@ G-12（#602）のスコープである CUDA 実行経路（Phase G 融合カー�
   transformer-workload-baseline.md` 改訂時の既知の制約。デバイス常駐化による
   転送削減は本イシューのスコープ外）
 
-**未実測の理由（fail-closed。#602 実装計画 §10）**: 本イシューの実装作業を行った
+**追記（#2997・2026-10-11）**: GB10 実機の実測記録は `docs/perf/logs/int8-quant-baseline-2609/`（5 プロセス中央値）にある。本節の表への転記は人間承認後に行う（未転記）。
+
+**未実測の理由（fail-closed。#602 実装計画 §10。#602 時点の記述）**: 本イシューの実装作業を行った
 worktree は DGX Spark GB10 実機ではなく、CUDA driver（`nvidia-smi` で確認可能）はあるが
 NVRTC（`libnvrtc.so`。CUDA toolkit 由来）を欠く別の GPU（sm_121 と異なる sm 世代）の
 開発ボックスであり、`docs/real-hardware-verification-env.local.md`（実機接続情報。

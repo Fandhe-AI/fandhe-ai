@@ -1,0 +1,9 @@
+pre util=0% waited=0s
+pre compute-apps:
+427276, <resident-service-A>/python, 170 MiB
+1241474, <resident-service-B>/python3, 1258 MiB
+post compute-apps:
+427276, <resident-service-A>/python, 170 MiB
+1241474, <resident-service-B>/python3, 1258 MiB
+post util=0 %
+foreign process names during run (transformer_workload / python 以外):

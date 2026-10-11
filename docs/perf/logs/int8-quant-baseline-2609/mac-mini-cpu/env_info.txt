@@ -1,0 +1,9 @@
+host: <metal-node>
+date: 2026-10-11
+chip: Apple M4 (10 コア), memory 16GiB (17179869184 bytes)
+os: macOS 27.0.1
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+torch: 未導入（PyTorch CPU 行は未計測。理由は README §2.3）
+rev-stamp: 53e817e6c31223029a9fb6b14a0ea6da5f6395d8 (mac-mini-cpu/.rev-stamp。転送元 HEAD。crates/ は無変更)
+load1: 各 run 前後の値は load-rust-cpu-run{1..5}.txt。ノード常時負荷は 1.2〜2 程度で、run 前 load1 はすべて 2.0 未満（RULE.txt DISCARD_MAC を満たす）。run5 の run 後 load1=2.77 は run 自身による上昇。
+note: 2026-10-11 より前の M4 Max（開発機）の値とは直接比較しない。
