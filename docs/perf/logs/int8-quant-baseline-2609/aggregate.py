@@ -89,12 +89,26 @@ def parity_results(d):
     return out
 
 
+def reference_only_runs(d, arm):
+    """load ログに REFERENCE_ONLY_load1_high を持つ run 番号（RULE.txt DISCARD_MAC: 参考扱い）。
+    load ログは Mac 腕のみ存在するため、ファイルが無い腕（CUDA）は空とする。"""
+    out = []
+    for r in RUNS:
+        path = os.path.join(d, "load-%s-run%d.txt" % (arm, r))
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                if re.search(r"note=REFERENCE_ONLY_load1_high", f.read()):
+                    out.append(r)
+    return out
+
+
 def ms(x):
     return "%.3f" % (x * 1000.0)
 
 
 def render(d, arms, baseline, parity):
     stats = {a: arm_stats(d, a) for a in arms}
+    ref = {a: reference_only_runs(d, a) for a in arms}
     lines = ["| 腕 | " + " | ".join("run%d" % r for r in RUNS)
              + " | 中央値 | Q1 | Q3 | 対 PyTorch 比 |",
              "|---|" + "---|" * (len(RUNS) + 4)]
@@ -106,11 +120,18 @@ def render(d, arms, baseline, parity):
             ratio = "1.00（基準）"
         else:
             ratio = "%.2f" % (med / stats[baseline][1])
-        lines.append("| %s | " % a + " | ".join(ms(per_run[r]) for r in RUNS)
+        label = a + ("（参考扱い・load1 高）" if ref[a] else "")
+        lines.append("| %s | " % label + " | ".join(ms(per_run[r]) for r in RUNS)
                      + " | %s | %s | %s | %s |" % (ms(med), ms(q1), ms(q3), ratio))
     lines.append("")
     lines.append("単位: ms（各 run の median_secs を 1000 倍。中央値・Q1・Q3 は 5 run の値から算出）。"
                  "対 PyTorch 比は Rust 腕の中央値 / PyTorch 腕の中央値（1 より大きければ遅い）。")
+    for a in arms:
+        if ref[a]:
+            lines.append("")
+            lines.append("注記: %s の " % a + ", ".join("run%d" % r for r in ref[a])
+                         + " は開始前 load1 が基準（< 2.0）を満たさず参考扱い（load1 高）。"
+                         "この腕の中央値・Q1・Q3 も参考扱いで、(c) の充足要件に数えない。")
     if parity:
         res = parity_results(d)
         lines.append("")
@@ -138,6 +159,14 @@ def self_test():
             write(d, "pytorch", r, 0.005)
         out = render(d, ["a", "pytorch"], "pytorch", False)
         assert "30.000" in out and "6.00" in out, out  # 中央値 0.030s / 0.005s = 6.00
+        # 参考扱い（load1 高）の注記
+        with open(os.path.join(d, "load-a-run2.txt"), "w") as f:
+            f.write("pre load1=3.1 waited=1800s note=REFERENCE_ONLY_load1_high\n")
+        with open(os.path.join(d, "load-pytorch-run1.txt"), "w") as f:
+            f.write("pre load1=0.5 waited=0s note=load1_ok\n")
+        out = render(d, ["a", "pytorch"], "pytorch", False)
+        assert "参考扱い（load1 高）" in out and "a の run2" in out and "pytorch（参考" not in out, out
+        os.remove(os.path.join(d, "load-a-run2.txt"))
         # run 欠損
         os.remove(os.path.join(d, "a-run3.json"))
         must_fail(lambda: arm_stats(d, "a"), "run 欠損")

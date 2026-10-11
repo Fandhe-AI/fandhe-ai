@@ -8,6 +8,9 @@ set -euo pipefail
 
 ARM="${1:-}"
 RUN="${2:-}"
+# RULE.txt の腕名 pytorch-cuda を受理し、ログ・JSON・集計の腕名は記録済みの pytorch に正規化する
+# （aggregate.py --arms ...,pytorch と一致させる。既存の pytorch-run*.{log,json} を改名しない）。
+if [ "${ARM}" = "pytorch-cuda" ]; then ARM="pytorch"; fi
 case "${ARM}" in prefusion|fused|parity|pytorch) ;; *) echo "bad arm: ${ARM}" >&2; exit 2 ;; esac
 case "${RUN}" in 1|2|3|4|5) ;; *) echo "bad run: ${RUN}" >&2; exit 2 ;; esac
 
