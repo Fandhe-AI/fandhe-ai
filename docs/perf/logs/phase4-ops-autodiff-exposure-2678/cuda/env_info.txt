@@ -1,0 +1,26 @@
+== before ==
+hostname: masked
+date_utc: 2026-10-11T06:20:59Z
+rev: 784b4e79
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+pid, process_name
+427276, <resident-process>
+1241474, <resident-process>
+Cuda compilation tools, release 13.0, V13.0.88
+rustc 1.97.0 (2d8144b78 2026-07-07)
+ 15:20:59 up 45 days,  2:47, 10 users,  load average: 0.00, 0.00, 0.00
+== after ==
+hostname: masked
+date_utc: 2026-10-11T06:21:23Z
+rev: 784b4e79
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+pid, process_name
+427276, <resident-process>
+1241474, <resident-process>
+Cuda compilation tools, release 13.0, V13.0.88
+rustc 1.97.0 (2d8144b78 2026-07-07)
+ 15:21:24 up 45 days,  2:48, 10 users,  load average: 1.71, 0.43, 0.14
+stamp_after: 784b4e79aae1dfb0b3d59439dc6347590c0a3b53
+# note: resident process exec paths replaced by <resident-process> (pid and count kept; more conservative than #2628). Hostname, username and personal paths masked.

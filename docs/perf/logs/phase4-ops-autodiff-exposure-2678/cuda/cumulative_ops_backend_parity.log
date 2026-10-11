@@ -1,0 +1,10 @@
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.54s
+     Running tests/cumulative_ops_backend_parity.rs (~/work/target-fandhe-ai/release/deps/cumulative_ops_backend_parity-65c3007072cbbb03)
+
+running 1 test
+test cuda_cumulative_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.36s
+
+rc=0

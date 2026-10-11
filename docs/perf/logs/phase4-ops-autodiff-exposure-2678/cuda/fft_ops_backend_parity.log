@@ -1,0 +1,18 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (~/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.11.0 (~/work/rust-ai-library-run/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (~/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (~/work/rust-ai-library-run/crates/autodiff)
+   Compiling bench-harness v0.11.0 (~/work/rust-ai-library-run/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (~/work/rust-ai-library-run/crates/onnx-interop)
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 9.95s
+     Running tests/fft_ops_backend_parity.rs (~/work/target-fandhe-ai/release/deps/fft_ops_backend_parity-f339cf6f45afc334)
+
+running 3 tests
+test cuda_fft_c2c_matches_cpu_reference ... ok
+test cuda_fft_matches_cpu_reference ... ok
+test cuda_stft_matches_cpu_reference ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.35s
+
+rc=0

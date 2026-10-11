@@ -1,0 +1,10 @@
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.44s
+     Running tests/jacobian_hessian_backend_parity.rs (~/work/target-fandhe-ai/release/deps/jacobian_hessian_backend_parity-89f8587b71b09125)
+
+running 1 test
+test cuda_jacobian_hessian_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.50s
+
+rc=0
