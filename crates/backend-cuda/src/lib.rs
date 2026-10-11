@@ -414,6 +414,7 @@ mod kernels_fused_elementwise;
 mod kernels_huber;
 mod kernels_kl_div;
 mod kernels_layer_norm;
+mod kernels_linalg;
 mod kernels_log_softmax_backward;
 mod kernels_mma;
 mod kernels_mma_tf32;
@@ -423,6 +424,9 @@ mod kernels_nll;
 mod kernels_norm_backward;
 mod kernels_rmsnorm;
 mod kernels_rnn_cell;
+// イシュー #2674: LU 系線形代数の内部 opt-in ゲート（既定 OFF・facade 非公開）。
+// 設計判断は docs/backend-gpu-linalg-decision.md。
+pub mod linalg;
 // イシュー #1700: `ScalarUnaryOp`／`ScalarBinaryOp`（`tensor-core::
 // scalar_op`）の式テンプレート基盤（NVRTC ソース生成）。固定カーネル
 // 集合の `kernels_elementwise` とは異なり、kind ごとにソースを実行時

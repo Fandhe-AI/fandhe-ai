@@ -39330,3 +39330,60 @@ fn models_usage_doctest_is_present_and_compiled() {
     ));
     assert!(v.is_empty(), "{v:?}");
 }
+
+/// CUDA の LU 系線形代数 opt-in ゲート（イシュー #2674。`fandhe_ai_backend_cuda::linalg::
+/// set_gpu_linalg_enabled`／`gpu_linalg_enabled`）を facade が公開しないことを固定する保留ガード
+/// （公開形の推奨は `docs/backend-gpu-linalg-decision.md` §7。公開は承認後の別 issue）。
+/// コメント行を除く facade `src/` の全行で、ゲート関数名・`backend_cuda::linalg` 経路・
+/// `fandhe_ai_backend_cuda` の glob 再エクスポートを検出する。
+fn scan_gpu_linalg_optin_exposure(content: &str) -> Vec<String> {
+    let mut offenses = Vec::new();
+    for line in content.lines() {
+        let t = line.trim_start();
+        if t.starts_with("//") {
+            continue;
+        }
+        for token in [
+            "set_gpu_linalg_enabled",
+            "gpu_linalg_enabled",
+            "backend_cuda::linalg",
+        ] {
+            if t.contains(token) {
+                offenses.push(format!("`{token}` を含む行: {t}"));
+            }
+        }
+        if t.starts_with("pub use fandhe_ai_backend_cuda::*") {
+            offenses.push(format!("backend-cuda の glob 再エクスポート: {t}"));
+        }
+    }
+    offenses
+}
+
+#[test]
+fn facade_does_not_expose_gpu_linalg_optin() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for offense in scan_gpu_linalg_optin_exposure(content) {
+            offending.push(format!("{}: {offense}", path.display()));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade が CUDA の GPU 線形代数 opt-in ゲート（#2674。公開は承認後の別 issue）を公開している: \
+         {offending:?}"
+    );
+}
+
+#[test]
+fn facade_does_not_expose_gpu_linalg_optin_detects_each_category() {
+    let offense = |src: &str| !scan_gpu_linalg_optin_exposure(src).is_empty();
+    assert!(offense(
+        "pub use fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled;"
+    ));
+    assert!(offense("pub fn gpu_linalg_enabled() -> bool { false }"));
+    assert!(offense("pub use fandhe_ai_backend_cuda::*;"));
+    assert!(!offense("// pub use fandhe_ai_backend_cuda::linalg::x;"));
+    assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
+    assert!(!offense("fn linalg_inv_helper() {}"));
+}
