@@ -36,6 +36,7 @@ fandhe-ai/
 │   ├── lib.sh / help.sh / setup.sh / rustup.sh / hooks.sh / lint.sh / deny.sh / doc-warnings.sh # Makefile の入口が呼ぶ共通ヘルパーと環境構築・品質チェック
 │   ├── build-cross.sh / build-no-cuda.sh / check-cross.sh / test-ignored.sh / bench-harness.sh / ci-checks.sh # 同上（クロスビルド・実機テスト・計測・CI 共用検査の一括実行）
 │   ├── ci-detect.sh         # ci.yml 各ジョブの detect ステップ（Cargo.toml 有無・PR が docs のみなら cargo 系を省く）
+│   ├── ci-prune-target.sh   # ci.yml の target キャッシュ保存前に workspace メンバー成果物を削除（依存 crate の成果物のみ残す。CI 専用）
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
 │   ├── check-workflow-runner-policy.sh # self-hosted runner 逆戻り防止の fail-closed 契約検査の呼び出し面（ci.yml・Makefile 共用）
 │   ├── check-workflow-runner-policy.py # 同検査の本体（python3 標準ライブラリのみの自前 YAML サブセットパーサー方式。追加依存なしで表記トリック迂回を遮断）
@@ -118,7 +119,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | `.claude/rules/japanese-style.md` | 日本語出力スタイル |
 | `.claude/rules/conventional-commits.md` | Conventional Commits 詳細規約（`--no-verify` 禁止） |
 | `.claude/rules/makefile.md` | Makefile は薄い入口・scripts/ の規約・ターゲット追加時の手順（`Makefile`・`scripts/**` 編集時のみ読み込み） |
-| `.claude/rules/github-actions.md` | ワークフローの発火条件・必須チェック・ジョブ追加チェックリスト・計測方法（`.github/workflows/**` 編集時のみ読み込み） |
+| `.claude/rules/github-actions.md` | ワークフローの発火条件・必須チェック・ジョブ追加チェックリスト・キャッシュ方針（上限 10GB・main 限定保存・キー設計・サイズ）・計測方法（`.github/workflows/**` 編集時のみ読み込み） |
 | `.claude/rules/git-hooks.md` | lefthook 編集ルール（pre-commit は通常コミットで 1 秒未満・CI と重複する検査は置かない・明示的な例外）。`lefthook.yml` 編集時のみ読み込み |
 | `.claude/rules/code-comment-style.md` | コメント規約（役割・責務・呼び出し文脈・spec 根拠を埋め込む） |
 | `.claude/rules/out-of-scope-tracking.md` | 実装対象外の追跡規約（スコープ外事項を放置しない） |
