@@ -345,6 +345,9 @@ jobs:
       # ホステッド（使い捨て VM）向けキャッシュ設計の確立（#622）。詳細は本ジョブ
       # 直上のコメント参照
       cache: true
+      # 保存は main の push のみ（PR は restore のみ）。本ファイル冒頭コメントの
+      # キャッシュ設計「保存タイミング」と同じ方針（Fandhe-AI/actions#165 で追加された入力）
+      cache-save: ${{ github.ref == 'refs/heads/main' }}
 
   # --------------------------------------------------
   # cargo build（TASK-2.1b・イシュー #50）。

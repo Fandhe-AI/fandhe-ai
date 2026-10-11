@@ -47,7 +47,7 @@ runner 方針・fail-closed 集約・SHA 固定などの基本規約は `ci.md` 
 
 ## キャッシュ方針
 
-GitHub Actions cache はリポジトリ単位で上限 **20GB**（本リポジトリは 2026-10-11 に 10GB から引き上げ）。超えると最終アクセスの古い順に追い出され（LRU）、7 日アクセスの無いものは削除される。Actions の予算は **$10/月（超過時停止）** で、**10GB を超えた分は 1GB あたり月 $0.07 の課金**になる。20GB は余裕分であり、常用は 10GB 以内に収める。
+GitHub Actions cache はリポジトリ単位で上限 **20GB**（本リポジトリは 2026-10-11 に 10GB から引き上げ）。超えると最終アクセスの古い順に追い出され（LRU）、7 日アクセスの無いものは削除される。Org の Actions 予算は **$10（超過で停止）** で、**10GB を超えた分は 1GB あたり月 $0.07 の課金**になる。20GB は余裕分であり、常用は 10GB 以内に収める。
 
 - **保存は main の push のみ**。target キャッシュは `actions/cache/restore` + `actions/cache/save`（`if: ... && github.ref == 'refs/heads/main' && steps.<restore>.outputs.cache-hit != 'true'`）に分離し、PR は restore のみにする。キーはソースを含まない（toolchain 実解決版数 + `Cargo.lock`）ため PR は初回 push から main のキャッシュに exact hit する。`Cargo.lock` を変える PR だけが restore-keys の前方一致（main の旧キー）からの差分ビルドになる
 - **キーに SHA・run_id 等の一意値を入れない**。restore-keys は同一 toolchain 版数スコープの前方一致に限定する（イシュー #917）
@@ -57,7 +57,7 @@ GitHub Actions cache はリポジトリ単位で上限 **20GB**（本リポジ�
 - **workspace メンバーの成果物を保存しない**。cargo を実行する最後のステップの後・save の前に `scripts/ci-prune-target.sh` を置く（統合テスト・example バイナリ、メンバーの rlib/rmeta、incremental、`doc/`・`tmp/` を削除し依存 crate の成果物だけを残す。`deps/` はメンバーの `.fingerprint/<package>-<hex>` の hex で判定し、target 名では判定しない〈統合テスト `cast` と依存 crate `cast` のような同名衝突で依存側を消すため〉。保存はキー未保存時の 1 回だけで、メンバー成果物は次の run では必ず古いため価値が無い）。workflow 共通 env の `CARGO_INCREMENTAL=0`・`CARGO_PROFILE_DEV_DEBUG=line-tables-only` も維持する
 - **保存内容（prune・env・プロファイル・ビルドコマンド）を変えたらキーの版セグメント（`target-<job-id>-v<N>-`）を上げる**。既存キーに exact hit すると保存がスキップされ、新しい内容が永久に保存されない。旧版への restore-keys フォールバックは付けない（中身の fingerprint が合わず、復元時間だけがかかる）。同じキーを使う他 workflow（`guardrail-regression-schedule.yml`）も同時に上げ、そちらは restore のみにする
 - **復元が節約時間より長いキャッシュは持たない**。`Cache Size` と復元ステップの所要時間、ヒット時とミス時のジョブ時間を比較して判断する
-- 共通側 reusable workflow（`rust-ci` の `rust-base-ci-*` キー）の設計は Fandhe-AI/actions 側を正とし、本リポジトリでは変更しない（同様の prune・`CARGO_INCREMENTAL=0` は共通側で実装済み）。ただし 2026-10-11 時点の共通側キーは `hashFiles('**/Cargo.lock')` で rustc 版数を含まないため、上記 2 点の問題がある（make スキル追加〈#3007〉の直後に `rust-base-ci-*` のキーが変わり miss したのはこのため）。修正は Fandhe-AI/actions 側で行う
+- 共通側 reusable workflow（`rust-ci` の `rust-base-ci-*` キー）のキー設計・prune は Fandhe-AI/actions 側を正とし、本リポジトリでは変更しない。呼び出し側では `cache: true` と `cache-save: ${{ github.ref == 'refs/heads/main' }}`（main の push のみ保存）を渡す。共通側キーは Fandhe-AI/actions#165 でルートの `Cargo.lock` のみ・rustc 版入り（`v4`）になった。それ以前は `hashFiles('**/Cargo.lock')` で rustc 版を含まず、make スキル追加（#3007）だけで `rust-base-ci-*` のキーが変わって miss していた
 
 計測:
 
