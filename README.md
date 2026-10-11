@@ -191,6 +191,8 @@ make lint
 
 ### Make ターゲット
 
+Makefile は薄い入口で、処理の定義は `scripts/*.sh` にあります（Make を使わない場合の同等コマンドは `scripts/help.sh`）。ターゲットの追加・変更時の手順は [`.claude/rules/makefile.md`](.claude/rules/makefile.md)、設計指針は make skill（`.claude/skills/make`）を参照してください。
+
 | ターゲット | 内容 |
 |-----------|------|
 | `make setup` | 開発環境の一括構築（submodule・rustup・lefthook） |

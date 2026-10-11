@@ -19,7 +19,7 @@ fandhe-ai/
 ├── README.md                # 開発環境構築・実装方針の要点
 ├── LICENSE-APACHE           # Apache License 2.0 全文（MIT/Apache-2.0 デュアルライセンス）
 ├── LICENSE-MIT              # MIT ライセンス本文（同上）
-├── Makefile                 # make setup / ci / docker-* タスクランナー
+├── Makefile                 # 薄い入口のタスクランナー（make help で一覧。処理の定義は scripts/ 側。規約は .claude/rules/makefile.md）
 ├── lefthook.yml             # git hooks（rustfmt-check・secrets-guard・commit-msg。CI と重複する clippy・test は置かない）
 ├── .editorconfig            # インデント・改行規約
 ├── Dockerfile / compose.yaml # 環境非依存の開発コンテナ（CPU バックエンドのみ）
@@ -33,6 +33,9 @@ fandhe-ai/
 │                             # onnx-interop・guardrail・self-repair・bench-harness・facade（composition root・compat 公開面）・
 │                             # docs-site（GitHub Pages 公開ツリー向け SSG。開発者・CI 専用）
 ├── scripts/
+│   ├── lib.sh / help.sh / setup.sh / rustup.sh / hooks.sh / lint.sh / deny.sh / doc-warnings.sh # Makefile の入口が呼ぶ共通ヘルパーと環境構築・品質チェック
+│   ├── build-cross.sh / build-no-cuda.sh / check-cross.sh / test-ignored.sh / bench-harness.sh / ci-checks.sh # 同上（クロスビルド・実機テスト・計測・CI 共用検査の一括実行）
+│   ├── ci-detect.sh         # ci.yml 各ジョブの detect ステップ（Cargo.toml 有無・PR が docs のみなら cargo 系を省く）
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
 │   ├── check-workflow-runner-policy.sh # self-hosted runner 逆戻り防止の fail-closed 契約検査の呼び出し面（ci.yml・Makefile 共用）
 │   ├── check-workflow-runner-policy.py # 同検査の本体（python3 標準ライブラリのみの自前 YAML サブセットパーサー方式。追加依存なしで表記トリック迂回を遮断）
@@ -114,6 +117,8 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | `.claude/rules/security.md` | OWASP Top 10・秘密情報混入防止・自己修復ループのガードレール |
 | `.claude/rules/japanese-style.md` | 日本語出力スタイル |
 | `.claude/rules/conventional-commits.md` | Conventional Commits 詳細規約（`--no-verify` 禁止） |
+| `.claude/rules/makefile.md` | Makefile は薄い入口・scripts/ の規約・ターゲット追加時の手順（`Makefile`・`scripts/**` 編集時のみ読み込み） |
+| `.claude/rules/github-actions.md` | ワークフローの発火条件・必須チェック・ジョブ追加チェックリスト・計測方法（`.github/workflows/**` 編集時のみ読み込み） |
 | `.claude/rules/git-hooks.md` | lefthook 編集ルール（pre-commit は通常コミットで 1 秒未満・CI と重複する検査は置かない・明示的な例外）。`lefthook.yml` 編集時のみ読み込み |
 | `.claude/rules/code-comment-style.md` | コメント規約（役割・責務・呼び出し文脈・spec 根拠を埋め込む） |
 | `.claude/rules/out-of-scope-tracking.md` | 実装対象外の追跡規約（スコープ外事項を放置しない） |
@@ -126,7 +131,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 - **実装フロー**: create-plan・implement-issue・implement-issue-tree・implement-review・implement-review-pr
 - **ドキュメント**: update-docs・comment-code
 - **スキル管理**: init-claude・update-claude・contribute-skill・sync-skills-lock
-- **技術リファレンス**: rust・nvidia-cuda・apple-silicon・amd-rocm・lefthook・editorconfig・commitlint・github-docs
+- **技術リファレンス**: rust・nvidia-cuda・apple-silicon・amd-rocm・lefthook・editorconfig・commitlint・github-docs・make
 
 ## Conventions
 
