@@ -69,9 +69,10 @@
 #   - target サイズ（2026-10-11 実測で改訂）: キーはソースを含まず保存はキー未保存時の
 #     1 回だけのため、workspace メンバーの成果物（統合テスト約 760 本・example の
 #     バイナリ、メンバーの rlib/rmeta、incremental、rustdoc）は次の run では必ず古く
-#     再ビルドされ、キャッシュ価値が無い。改訂前は build-no-cuda-toolkit の target が
-#     未圧縮 10.5GB（保存 9.8GB）に達し、復元に 5〜7 分かかって依存ビルド約 15 秒しか
-#     節約せず、保存のたびにリポジトリ上限内の他キャッシュを追い出していた。対策として
+#     再ビルドされ、キャッシュ価値が無い。改訂前は build-no-cuda-toolkit の target
+#     キャッシュが 1 件 10.5GB（9,999MiB）に達し、復元に 5〜7 分かかって依存ビルド約
+#     15 秒しか節約せず、保存のたびにリポジトリ上限内の他キャッシュを追い出していた
+#     （改訂後は約 120MB。実測は .claude/rules/github-actions.md「キャッシュ方針」）。対策として
 #     (1) 保存前に `scripts/ci-prune-target.sh` でメンバー成果物を削除し依存 crate の
 #     成果物だけを残す、(2) workflow 共通 env で CARGO_INCREMENTAL=0・dev/test
 #     プロファイルの debuginfo を line-tables-only にする、の 2 点を target キャッシュを

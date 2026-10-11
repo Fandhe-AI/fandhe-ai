@@ -55,79 +55,85 @@ fmt_mib() {
 
 before_kib="$(size_of "${target_dir}")"
 
-# メンバー package 名。--no-deps は依存解決・ネットワーク不要（workspace 内のみを見る）。
-members="|"
-while IFS= read -r n; do
-  # 区切り文字・glob 文字を含まないことの保証（case パターンへ埋め込むため）。
-  [[ "${n}" =~ ^[A-Za-z0-9_-]+$ ]] || die "想定外の package 名を検出したため prune を中止します: ${n}"
-  members+="${n}|"
-done < <(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name' | sort -u)
-[ "${members}" = "|" ] && die "cargo metadata から workspace メンバーを取得できませんでした"
+work="$(mktemp -d)"
+trap 'rm -rf -- "${work}"' EXIT
+
+# メンバー package 名（1 行 1 件）。--no-deps は依存解決・ネットワーク不要。
+cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name' | sort -u >"${work}/members"
+[ -s "${work}/members" ] || die "cargo metadata から workspace メンバーを取得できませんでした"
+if grep -vqE '^[A-Za-z0-9_-]+$' "${work}/members"; then
+  die "想定外の package 名を検出したため prune を中止します: $(grep -vE '^[A-Za-z0-9_-]+$' "${work}/members" | head -n 1)"
+fi
 
 # メンバーと同名の crates.io 依存（Cargo.lock で source を持つ package）があれば中止する。
-while IFS= read -r n; do
-  case "${members}" in
-    *"|${n}|"*) die "workspace メンバーと同名の依存 crate があるため prune を中止します: ${n}" ;;
-  esac
-done < <(awk '/^\[\[package\]\]/ { name = "" } /^name = / { name = $3 } /^source = / { gsub(/"/, "", name); print name }' Cargo.lock)
+awk '/^\[\[package\]\]/ { name = "" } /^name = / { name = $3 } /^source = / { gsub(/"/, "", name); print name }' Cargo.lock |
+  sort -u >"${work}/lock-deps"
+dup="$(comm -12 "${work}/members" "${work}/lock-deps" | head -n 1)"
+[ -n "${dup}" ] && die "workspace メンバーと同名の依存 crate があるため prune を中止します: ${dup}"
 
 removed=0
-safe_rm() { # $1=削除対象 $2=許可される親ディレクトリ（境界チェック）
-  local p="$1" base="$2"
-  case "${p}" in
-    "${base}"/*) ;;
-    *) die "削除対象が想定ディレクトリ配下ではありません: ${p}" ;;
+queue=()
+# queue_rm <path> <base>: 境界・symlink を検査して削除キューへ積む（削除は flush_rm で一括）。
+queue_rm() {
+  case "$1" in
+    "$2"/*) ;;
+    *) die "削除対象が想定ディレクトリ配下ではありません: $1" ;;
   esac
-  [ -L "${p}" ] && die "symlink は削除対象にしません: ${p}"
-  rm -rf -- "${p}"
-  removed=$((removed + 1))
+  [ -L "$1" ] && die "symlink は削除対象にしません: $1"
+  queue+=("$1")
 }
+flush_rm() {
+  [ "${#queue[@]}" -eq 0 ] && return 0
+  printf '%s\0' "${queue[@]}" | xargs -0 rm -rf --
+  removed=$((removed + ${#queue[@]}))
+  queue=()
+}
+
+# list_names <dir>: 直下のエントリ名を 1 行 1 件で出す（後段の sed が厳密な正規表現で
+# 絞り込むため、改行を含む名前は一致せず対象外になる）。
+list_names() {
+  (cd "$1" && find . -mindepth 1 -maxdepth 1) | sed 's|^\./||'
+}
+
 prune_profile() { # $1=プロファイルディレクトリ（target[/<triple>]/{debug,release}）
-  local profile="$1" d e b pkg h hashes="|" n_units=0 n_deps=0
+  local profile="$1" d n n_units=0 n_deps=0
   [ -L "${profile}" ] && die "${profile} が symlink のため prune を中止します"
-  # 2. .fingerprint/ と build/ のメンバーユニット（package 名で判定し、hex を集める）。
+  : >"${work}/hashes"
+  # 2. .fingerprint/ と build/ のメンバーユニット（`<package>-<hex>` の package 名で判定し、
+  #    hex を集める）。名前は空白・改行を含まない形（sed の正規表現で検証）だけを扱う。
   for d in .fingerprint build; do
     [ -d "${profile}/${d}" ] || continue
-    while IFS= read -r -d '' e; do
-      b="${e##*/}"
-      pkg="${b%-*}"
-      h="${b##*-}"
-      [[ "${h}" =~ ^[0-9a-f]{16}$ ]] || continue
-      case "${members}" in
-        *"|${pkg}|"*)
-          hashes+="${h}|"
-          safe_rm "${e}" "${profile}"
-          n_units=$((n_units + 1))
-          ;;
-      esac
-    done < <(find "${profile}/${d}" -mindepth 1 -maxdepth 1 -print0)
+    while read -r n h; do
+      queue_rm "${profile}/${d}/${n}" "${profile}"
+      printf '%s\n' "${h}" >>"${work}/hashes"
+      n_units=$((n_units + 1))
+    done < <(list_names "${profile}/${d}" |
+      sed -nE 's/^([A-Za-z0-9_-]+)-([0-9a-f]{16})$/\1 \2 &/p' |
+      awk 'NR == FNR { m[$1]; next } ($1 in m) { print $3, $2 }' "${work}/members" -)
   done
   # 3. deps/ はメンバーユニットの hex に一致するものだけ。
   if [ -d "${profile}/deps" ]; then
-    while IFS= read -r -d '' e; do
-      b="${e##*/}"
-      [[ "${b}" =~ ^[A-Za-z0-9_]+-([0-9a-f]{16})(\..*)?$ ]] || continue
-      case "${hashes}" in
-        *"|${BASH_REMATCH[1]}|"*)
-          safe_rm "${e}" "${profile}"
-          n_deps=$((n_deps + 1))
-          ;;
-      esac
-    done < <(find "${profile}/deps" -mindepth 1 -maxdepth 1 -print0)
-  fi
-  if [ "${n_units}" -gt 0 ] && [ "${n_deps}" -eq 0 ] && [ -d "${profile}/deps" ]; then
-    # ハッシュ対応（.fingerprint と deps のファイル名）が cargo の変更で崩れた場合の検知。
-    # 削除漏れはキャッシュが大きくなるだけで正しさには影響しないため警告に留める。
-    echo "::warning::${profile#"${target_dir}"/}: メンバーの fingerprint ${n_units} 件に対応する deps/ の成果物が見つかりませんでした（cargo のファイル名規則の変更を確認してください）"
+    while IFS= read -r n; do
+      queue_rm "${profile}/deps/${n}" "${profile}"
+      n_deps=$((n_deps + 1))
+    done < <(list_names "${profile}/deps" |
+      sed -nE 's/^(lib)?[A-Za-z0-9_]+-([0-9a-f]{16})(\.[^ ]*)?$/\2 &/p' |
+      awk 'NR == FNR { h[$1]; next } ($1 in h) { print $2 }' "${work}/hashes" -)
+    if [ "${n_units}" -gt 0 ] && [ "${n_deps}" -eq 0 ]; then
+      # ハッシュ対応（.fingerprint と deps のファイル名）が cargo の変更で崩れた場合の検知。
+      # 削除漏れはキャッシュが大きくなるだけで正しさには影響しないため警告に留める。
+      echo "::warning::${profile#"${target_dir}"/}: メンバーの fingerprint ${n_units} 件に対応する deps/ の成果物が見つかりませんでした（cargo のファイル名規則の変更を確認してください）"
+    fi
   fi
   # 4. uplift 成果物（プロファイル直下の通常ファイル。.cargo-lock 等のドットファイルは残す）と
   #    examples/・incremental/。
-  while IFS= read -r -d '' e; do
-    safe_rm "${e}" "${profile}"
+  while IFS= read -r -d '' n; do
+    queue_rm "${n}" "${profile}"
   done < <(find "${profile}" -mindepth 1 -maxdepth 1 -type f ! -name '.*' -print0)
   for d in examples incremental; do
-    if [ -e "${profile}/${d}" ]; then safe_rm "${profile}/${d}" "${profile}"; fi
+    if [ -e "${profile}/${d}" ]; then queue_rm "${profile}/${d}" "${profile}"; fi
   done
+  flush_rm
 }
 
 # target/{debug,release} と、--target 指定時の target/<triple>/{debug,release}。
@@ -152,14 +158,15 @@ for p in "${profiles[@]}"; do
 done
 # doc/（`cargo doc --no-deps` の出力はメンバーのみ）と tmp/（CARGO_TARGET_TMPDIR）。
 while IFS= read -r -d '' d; do
-  safe_rm "${d}" "${target_dir}"
+  queue_rm "${d}" "${target_dir}"
 done < <(find "${target_dir}" -mindepth 1 -maxdepth 2 -type d \( -name doc -o -name tmp \) -print0)
+flush_rm
 
 after_kib="$(size_of "${target_dir}")"
 
 {
   echo "prune 完了: ${removed} エントリを削除"
-  echo "target: $(fmt_mib "${before_kib}") → $(fmt_mib "${after_kib}")（未圧縮。キャッシュ保存サイズは zstd 圧縮後）"
+  echo "target: $(fmt_mib "${before_kib}") → $(fmt_mib "${after_kib}")（ディスク上。キャッシュの Cache Size は圧縮後）"
   echo "削除前のプロファイル別内訳:"
   printf '  %s\n' "${summary[@]}"
 } >&2
@@ -168,7 +175,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
     echo "### target prune（キャッシュ保存前）"
     echo ""
-    echo "- target: $(fmt_mib "${before_kib}") → $(fmt_mib "${after_kib}")（未圧縮）"
+    echo "- target: $(fmt_mib "${before_kib}") → $(fmt_mib "${after_kib}")（ディスク上）"
     printf -- '- 削除前 %s\n' "${summary[@]}"
   } >>"${GITHUB_STEP_SUMMARY}"
 fi

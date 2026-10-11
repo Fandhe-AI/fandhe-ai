@@ -75,14 +75,23 @@ gh run view <run-id> --log --job <job-id> | grep -E "Cache (restored from key|no
 
 | キャッシュ | 保存サイズ | 状況 |
 |-----------|-----------|------|
-| `target-build-no-cuda-toolkit-*` | 9.8GB（未圧縮 10.5GB） | 単独で上限 10GB をほぼ使い切り、保存のたびに他のキャッシュを追い出していた。PR も自ブランチに 9.8GB を保存。exact hit でも復元に 5〜7 分（ダウンロード約 1.5 分 + 展開）かかり、節約できるのは依存ビルド約 15 秒のみ。ジョブ時間はヒット時 16〜20 分、ミス時 16 分で、ヒットの方が遅かった |
+| `target-build-no-cuda-toolkit-*` | 10.5GB（9,999MiB） | 単独で上限 10GB をほぼ使い切り、保存のたびに他のキャッシュを追い出していた。PR も自ブランチに同サイズを保存。exact hit でも復元に 5〜7 分（ダウンロード約 1.5 分 + 展開）かかり、節約できるのは依存ビルド約 15 秒のみ。ジョブ時間はヒット時 16〜20 分、ミス時 16 分で、ヒットの方が遅かった |
 | `target-verification-gates-*` | 1.1GB | 13 run 中 4 回 miss（追い出し） |
 | `target-build-*` | 0.5GB | 毎回 exact hit |
 | `target-guardrail-regression-*` | 0.13GB | 13 run 中 2 回 miss |
 | `rust-base-ci-*-test-v3-*`（rust-ci） | — | 13 run 中 4 回 miss。main で保存した直後に追い出され一覧に残らない |
 | registry 系・`cargo-deny-bin` 等 | 合計 0.25GB 未満 | ほぼ exact hit |
 
-変更後: PR #TBD で計測（下記）。
+変更後（PR #3010。計測のため一時的に PR からも保存した 1 回目〈miss〉と 2 回目〈exact hit〉）:
+
+| ジョブ | 保存サイズ（前 → 後） | prune 前 → 後（ディスク上） | ジョブ時間（前 → 後・hit 時） |
+|-------|---------------------|---------------------------|-----------------------------|
+| build-no-cuda-toolkit | 10.5GB → 116MB | 23.8GB → 0.5GB | 16〜20 分 → 6.6 分（miss 時 7.7 分） |
+| verification-gates | 1.1GB → 143MB | 3.7GB → 0.5GB | 約 10.5 分 → 10.5 分 |
+| build | 520MB → 245MB | 1.9GB → 1.1GB | 1.5〜2 分 → 1.8 分 |
+| guardrail-regression | 125MB → 54MB | 0.4GB → 0.2GB | 約 20 秒 → 22 秒 |
+
+target キャッシュ 4 件の合計は 11.8GB → 0.56GB。rust-ci（`rust-base-ci-*`）・registry 系を合わせても main のキャッシュは 1GB 未満で、PR ごとの保存が無くなるため上限 20GB はもちろん課金の発生する 10GB にも届かない。build-no-cuda-toolkit の短縮は主に debuginfo 削減（統合テストバイナリのリンク・書き込み量の減少）と、巨大キャッシュの復元・保存（各 3〜7 分）が無くなったことによる。
 
 ## 計測方法
 
