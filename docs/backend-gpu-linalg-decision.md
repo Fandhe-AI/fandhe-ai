@@ -109,3 +109,16 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 - **カーネル起動（新規 `unsafe` 3 ブロック）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の
   `Unsupported`。承認依頼と残作業は `docs/perf/logs/cuda-linalg-chol-qr-eigh-2675/README.md`。実機は未実測。
 - 公開形は §7 の推奨を参照（本 issue では facade 公開しない）。
+
+### #2676（Metal LU 系・cholesky・QR）の実施内容
+
+- 内部 opt-in ゲート（`fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled`。既定 OFF・facade 非公開）の背後に、
+  部分ピボット LU・LU 代入・cholesky・reduced Householder QR の f32 MSL カーネル（`shaders/linalg.metal`。
+  `#pragma clang fp contract(off)`・`precise::sqrt`／`precise::divide`・QR は scale/ssq ノルム）、サイズ検証、
+  ホスト後処理の複製、パイプライン構築（`MetalLinalg::new`）、カーネルと演算順序が同一の f32 ホスト逐語モデル
+  （`linalg_model.rs`）を追加した（`unsafe` なし）。Metal の eigh は §2 のとおり対象外。
+- 起動前の数値契約検証: f32 ホストモデルと CPU 参照実装（f64）を統一複合判定（`assert_parity`・厳密ゼロ fail）で
+  突き合わせるテストを Linux でも実行する（`tests/linalg_model_parity.rs`）。MSL の構文は M4 Max 実機で
+  パイプライン構築が通ることを確認した（`docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md`）。
+- **カーネル起動（新規 `unsafe`）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の `Unsupported`。
+  承認依頼と残作業は同 perf log。実機 parity は未実測。

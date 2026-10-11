@@ -39332,7 +39332,8 @@ fn models_usage_doctest_is_present_and_compiled() {
 }
 
 /// CUDA の LU 系線形代数 opt-in ゲート（イシュー #2674。`fandhe_ai_backend_cuda::linalg::
-/// set_gpu_linalg_enabled`／`gpu_linalg_enabled`）を facade が公開しないことを固定する保留ガード
+/// set_gpu_linalg_enabled`／`gpu_linalg_enabled`）と Metal の同種ゲート（イシュー #2676。
+/// `fandhe_ai_backend_metal::linalg::*`）を facade が公開しないことを固定する保留ガード
 /// （公開形の推奨は `docs/backend-gpu-linalg-decision.md` §7。公開は承認後の別 issue）。
 /// コメント行を除く facade `src/` の全行で、ゲート関数名・`backend_cuda::linalg` 経路・
 /// `fandhe_ai_backend_cuda` の glob 再エクスポートを検出する。
@@ -39347,6 +39348,7 @@ fn scan_gpu_linalg_optin_exposure(content: &str) -> Vec<String> {
             "set_gpu_linalg_enabled",
             "gpu_linalg_enabled",
             "backend_cuda::linalg",
+            "backend_metal::linalg",
         ] {
             if t.contains(token) {
                 offenses.push(format!("`{token}` を含む行: {t}"));
@@ -39354,6 +39356,9 @@ fn scan_gpu_linalg_optin_exposure(content: &str) -> Vec<String> {
         }
         if t.starts_with("pub use fandhe_ai_backend_cuda::*") {
             offenses.push(format!("backend-cuda の glob 再エクスポート: {t}"));
+        }
+        if t.starts_with("pub use fandhe_ai_backend_metal::*") {
+            offenses.push(format!("backend-metal の glob 再エクスポート: {t}"));
         }
     }
     offenses
@@ -39383,6 +39388,10 @@ fn facade_does_not_expose_gpu_linalg_optin_detects_each_category() {
     ));
     assert!(offense("pub fn gpu_linalg_enabled() -> bool { false }"));
     assert!(offense("pub use fandhe_ai_backend_cuda::*;"));
+    assert!(offense(
+        "pub use fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled;"
+    ));
+    assert!(offense("pub use fandhe_ai_backend_metal::*;"));
     assert!(!offense("// pub use fandhe_ai_backend_cuda::linalg::x;"));
     assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
     assert!(!offense("fn linalg_inv_helper() {}"));

@@ -4445,7 +4445,7 @@ pub trait BackendOps {
     /// # デフォルト実装
     /// `gemm_checksum` と同じ非破壊拡張パターン。既定は
     /// [`BackendError::Unsupported`]（GPU バックエンドは本イシュー時点で
-    /// 未実装。CUDA の LU 系は #2674 で内部 opt-in ゲート〈既定 OFF〉の
+    /// 未実装。CUDA の LU 系は #2674・Metal の LU 系は #2676 で内部 opt-in ゲート〈既定 OFF〉の
     /// 背後に追加され、既定では `Unsupported` のまま。`fandhe_ai_autodiff::var::Var::inv` がこの `Unsupported`
     /// のみをホスト参照実装 `eval::linalg::inv` へフォールバックし、
     /// それ以外のエラー〈特異行列の `InvalidArgument` 等〉は伝播する）。
@@ -4491,8 +4491,8 @@ pub trait BackendOps {
     ///
     /// # デフォルト実装
     /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約
-    /// （CUDA は #2675 で LU 系と同じ内部 opt-in ゲート〈既定 OFF〉の背後に
-    /// 追加。既定では `Unsupported` のまま）。
+    /// （CUDA は #2675・Metal は #2676 で LU 系と同じ内部 opt-in ゲート〈既定 OFF〉の
+    /// 背後に追加。既定では `Unsupported` のまま）。
     /// 非正定値（対角が非有限または非正）の場合は
     /// [`BackendError::InvalidArgument`]。
     fn linalg_cholesky(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -4506,7 +4506,7 @@ pub trait BackendOps {
     ///
     /// # デフォルト実装
     /// [`Self::linalg_inv`] と同じ非破壊拡張・フォールバック契約
-    /// （CUDA は #2675 で内部 opt-in ゲート〈既定 OFF〉の背後に追加）。
+    /// （CUDA は #2675・Metal は #2676 で内部 opt-in ゲート〈既定 OFF〉の背後に追加）。
     fn linalg_qr(&self, _a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
         Err(BackendError::Unsupported(
             "linalg_qr: default fail-safe (no device-side linear-algebra kernel available)".into(),
