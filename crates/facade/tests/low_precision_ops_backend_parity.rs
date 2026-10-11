@@ -18,6 +18,12 @@
 //! `docs/perf/logs/low-precision-ops-2628/README.md` へ申し送る。**P6 の不一致は
 //! 「判定不能」にせず通常の parity 失敗として扱う**（P4 の第三者比較対象と
 //! 異なり同一 dtype 同士・自実装同士の比較のため。tolerance は不変）。
+//!
+//! `#[ignore]` の大形状診断（#2994。`cuda_low_precision_matmul_large_shape_report`）:
+//! f16 の大形状 matmul が CUDA の Tensor Core 経路（`mma.sync`）に乗る形状を
+//! CPU と突き合わせ、形状ごとの 4 指標と ulp 分布を記録する。**記録専用**で
+//! 統一複合判定の fail 数は assert しない（tolerance 緩和ではない。扱いの提案は
+//! README に書く）。
 
 use fandhe_ai::Device;
 use fandhe_ai_autodiff::Var;
@@ -240,4 +246,130 @@ fn metal_low_precision_ops_parity_report() {
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。診断用（#2629）"]
 fn cuda_low_precision_ops_parity_report() {
     report_device_vs_cpu(Device::Cuda(0), "cuda");
+}
+
+// ---------------------------------------------------------------------
+// 大形状診断（#2994）
+// ---------------------------------------------------------------------
+
+/// 大形状診断の形状表（m, n, k, seed）。lhs は `seed`、rhs は `seed + 1` の
+/// `Xorshift64Star` で [-1, 1) を生成する（`amp_conv_mha_low_precision_backend_
+/// parity.rs` と同じ生成法）。`crates/backend-cuda/tests/common/parity_baseline.rs`
+/// の `ParityPath::MmaF16` 行とは入力生成経路が異なるため数値は直接比較できない。
+/// 後ろ 2 形状は非整列（n%8≠0 または k%8≠0）で WMMA へフォールバックする想定。
+const LARGE_SHAPES: &[(usize, usize, usize, u64)] = &[
+    (64, 64, 64, 11),
+    (128, 128, 128, 12),
+    (256, 256, 256, 13),
+    (512, 512, 512, 14),
+    (1024, 1024, 1024, 15),
+    (256, 256, 1024, 16),
+    (128, 128, 100, 17),
+    (65, 63, 33, 18),
+];
+
+/// f16／bf16 のビット列を「大小順に単調な整数」へ写す（ulp 差の算出用）。
+fn ordered_bits(dtype: ScalarDType, v: f32) -> i32 {
+    let raw = match dtype {
+        ScalarDType::F16 => fandhe_ai_tensor_core::f16::from_f32(v).to_bits(),
+        _ => fandhe_ai_tensor_core::bf16::from_f32(v).to_bits(),
+    } as i32;
+    if raw & 0x8000 != 0 {
+        -(raw & 0x7fff)
+    } else {
+        raw
+    }
+}
+
+/// 経路の**予測**（観測ではない）。f16 は `gemm_auto.rs::select_f16_matrix_unit_impl`
+/// と同条件（n%8==0 && k%8==0 && m.div_ceil(64)<=65535 なら mma）を再現する。
+/// bf16 は `typed_bf16.rs` が f32 昇格後 `gemm_fp32_strict` へ委譲するため
+/// Tensor Core を通らない。
+fn predicted_route(
+    dtype: ScalarDType,
+    mma_available: bool,
+    (m, n, k): (usize, usize, usize),
+) -> &'static str {
+    if dtype != ScalarDType::F16 {
+        return "fp32_strict(non-TC)";
+    }
+    if mma_available && n % 8 == 0 && k % 8 == 0 && m.div_ceil(64) <= 65535 {
+        "f16:Mma"
+    } else {
+        "f16:Wmma-or-Tiled"
+    }
+}
+
+/// 大形状 matmul の CPU 対 CUDA 診断。assert は shape 一致・`compare` が `Ok`・
+/// 全要素有限のみ。統一複合判定の fail 数は記録だけで panic しない
+/// （Tensor Core 経路は結合順序が単一 K ループと異なり、決定記録
+/// `docs/cuda-tensor-core-parity-judgment-decision.md` §1.1 のとおり fail 非ゼロが
+/// 想定されるため。tolerance・baseline・`compare`／`passes` には触れない）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。診断用（#2994）"]
+fn cuda_low_precision_matmul_large_shape_report() {
+    let dev = fandhe_ai_backend_cuda::CudaDevice::new(0).expect("CUDA 実機が必要");
+    let cc = dev.compute_capability();
+    let auto = fandhe_ai_backend_cuda::CudaGemmAuto::new(&dev).expect("CudaGemmAuto 構築");
+    let mma = auto.mma_available();
+    println!(
+        "ROUTE cuda cc={cc:?} mma_available={mma} reason={:?} (predicted)",
+        auto.mma_unavailable_reason()
+    );
+    let cuda_tape = fandhe_ai::tape_for(Device::Cuda(0)).expect("CUDA tape");
+    let (mut zero, mut nonzero) = (Vec::new(), Vec::new());
+    for d in DTYPES {
+        for &(m, n, k, seed) in LARGE_SHAPES {
+            let mut a = bench_harness::rng::Xorshift64Star::new(seed);
+            let mut b = bench_harness::rng::Xorshift64Star::new(seed + 1);
+            let lhs = Tensor::new(a.fill_vec(m * k), &[m, k]).unwrap();
+            let rhs = Tensor::new(b.fill_vec(k * n), &[k, n]).unwrap();
+            let cpu_tape = fandhe_ai::tape();
+            let y_cpu = matmul_low_precision(&cpu_tape.var(&lhs), &cpu_tape.var(&rhs), d)
+                .unwrap()
+                .to_tensor();
+            let y_dev = matmul_low_precision(&cuda_tape.var(&lhs), &cuda_tape.var(&rhs), d)
+                .unwrap()
+                .to_tensor();
+            assert_eq!(y_cpu.shape(), y_dev.shape(), "{d:?} {m}x{n}x{k}: shape");
+            let (dv, cv) = (y_dev.host_slice(), y_cpu.host_slice());
+            assert!(
+                dv.iter().all(|v| v.is_finite()),
+                "{d:?} {m}x{n}x{k}: 非有限出力"
+            );
+            let bit_eq = dv
+                .iter()
+                .zip(cv.iter())
+                .filter(|(p, q)| p.to_bits() == q.to_bits())
+                .count();
+            let (mut u0, mut u1, mut ugt1) = (0usize, 0usize, 0usize);
+            for (p, q) in dv.iter().zip(cv.iter()) {
+                match (ordered_bits(d, *p) - ordered_bits(d, *q)).abs() {
+                    0 => u0 += 1,
+                    1 => u1 += 1,
+                    _ => ugt1 += 1,
+                }
+            }
+            let r = fandhe_ai_backend_cpu::parity::compare(dv.as_ref(), cv.as_ref())
+                .unwrap_or_else(|e| panic!("{d:?} {m}x{n}x{k}: compare Err {e:?}"));
+            assert_eq!(r.total, m * n);
+            println!(
+                "REPORT cuda matmul-large {d:?} {m}x{n}x{k} seed={seed} route={} total={} bit_eq={bit_eq} fail={} mean_abs={:e} max_abs={:e} max_rel={:e} ulp0={u0} ulp1={u1} ulp_gt1={ugt1} strict_pass={}",
+                predicted_route(d, mma, (m, n, k)),
+                r.total,
+                r.fail_count,
+                r.mean_abs_diff,
+                r.max_abs_diff,
+                r.max_rel_err,
+                r.passes()
+            );
+            let tag = format!("{d:?}@{m}x{n}x{k}");
+            if r.fail_count == 0 {
+                zero.push(tag)
+            } else {
+                nonzero.push(tag)
+            }
+        }
+    }
+    println!("SUMMARY strict_zero_fail={zero:?} nonzero_fail={nonzero:?}");
 }

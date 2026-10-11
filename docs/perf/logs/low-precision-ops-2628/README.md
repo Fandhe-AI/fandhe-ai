@@ -54,3 +54,50 @@ CPU 版（P1・非有限出力）は同テストファイルの属性なしテ�
 ### 検証範囲の注意
 
 入力は `inputs()` 固定の小形状（最大 6 要素）のみ。大形状での Tensor Core 経路の結合順序差は本実測の範囲外。
+
+## #2994 大形状（Tensor Core 経路）
+
+状態: **undetermined（未実測）**。実装時の隔離 worktree に実機接続情報（`docs/real-hardware-verification-env.local.md`。gitignore 対象）がなく、GB10 へ到達できなかった。下記コマンドの実測結果を「実測記入欄（#2994）」へ追記すること。
+
+### 対象と経路
+
+診断テスト `cuda_low_precision_matmul_large_shape_report`（`crates/facade/tests/low_precision_ops_backend_parity.rs`）。CPU と CUDA の `matmul_low_precision` を比較する。入力は `Xorshift64Star`（lhs=`seed`・rhs=`seed+1`、[-1,1)）。既存 `ParityPath::MmaF16` baseline とは入力生成経路が異なり、数値は直接比較できない。
+
+| 形状 m×n×k | seed | f16 の予測経路 |
+|---|---|---|
+| 64×64×64 / 128×128×128 / 256×256×256 / 512×512×512 / 1024×1024×1024 | 11〜15 | Mma（`mma.sync`） |
+| 256×256×1024 | 16 | Mma |
+| 128×128×100（k%8≠0） | 17 | Wmma フォールバック |
+| 65×63×33（n%8≠0） | 18 | Wmma フォールバック |
+
+- **bf16 は Tensor Core 経路を通らない**。`typed_bf16.rs` は f32 へ昇格して `gemm_fp32_strict`（単一の連続 K ループ）へ委譲する。bf16 は「f32 strict 経路」として同形状を測る。
+- ログの `route=` は**予測**（`mma_available` と整列条件からの再現）であり観測ではない。観測は `backend-cuda` の `F16MatrixUnitImpl` 診断（feature `internal-diagnostics`）が必要で、本 issue の対象外とした。
+
+### 測定コマンド
+
+```bash
+cargo test -p fandhe-ai --release --test low_precision_ops_backend_parity -- --ignored --exact --nocapture --test-threads=1 cuda_low_precision_matmul_large_shape_report
+```
+
+出力: `ROUTE` 行（cc・mma_available）、形状 × dtype ごとの `REPORT` 行（total・bit_eq・fail・mean_abs・max_abs・max_rel・ulp0/ulp1/ulp_gt1）、`SUMMARY` 行。ログは `cuda/large_shape_report.log`・`cuda/env_info_large.txt` に、ホスト名を `masked`・絶対パスを `~` に置換して保存する。
+
+### 事前登録判定規則（実測前に固定）
+
+1. 合否基準は REQ-2 統一複合判定のまま。tolerance・baseline・`compare`／`passes` は変更しない。テストが assert するのは shape 一致・`compare` が `Ok`・全要素有限・`total==m*n` のみで、fail 数は記録専用（緩和ではない）。
+2. f16（Mma／Wmma）で fail=0 → 「厳密ゼロ fail 成立形状」として記録。fail≠0 → 形状二分方式（`docs/cuda-tensor-core-parity-judgment-decision.md`）の baseline 非後退方式の候補として**提案のみ**書き、`ParityBaseline` 行の候補値（fail_count・mean/max_abs・max_rel の実測値）を添える。baseline 追加は人間承認事項で別 issue・別 PR とする。
+3. bf16（f32 strict）で fail が出た場合: 出力 dtype 量子化（bf16 の 1 ulp は相対 約 3.9e-3〜7.8e-3 で `RELATIVE_TOLERANCE` 1e-3 より大きい）による丸め反転の可能性がある。`ulp_gt1=0` なら全差分が 1 ulp 以内であり量子化起因の可能性を示し、`ulp_gt1>0` ならカーネル側の差を示す。判定方式は決定記録・spec の論点として提案のみ。tolerance 変更は提案しない。
+4. `Unsupported`・`Err` は fail として記録。実機に届かなければ `undetermined`。
+
+### 実測記入欄（#2994）
+
+| 日付 | 実機 | コミット（`.rev-stamp`） | exit | 備考 |
+|---|---|---|---|---|
+| 未実測 | DGX Spark GB10 | - | - | undetermined |
+
+形状 × dtype の結果表・baseline 化の提案は実測後に追記する。
+
+### スコープ外・申し送り
+
+- baseline 行の追加・更新（実測後、人間承認を経て別 issue）
+- bf16 で fail が出た場合の判定方式の決定（決定記録・spec 側の論点）
+- Metal の大形状 parity、`F16MatrixUnitImpl` の facade 経由の実観測（公開面の拡張を伴う）
