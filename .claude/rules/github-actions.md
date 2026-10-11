@@ -47,7 +47,9 @@ runner 方針・fail-closed 集約・SHA 固定などの基本規約は `ci.md` 
 
 ## キャッシュ方針
 
-GitHub Actions cache はリポジトリ単位で上限 **20GB**（本リポジトリは 2026-10-11 に 10GB から引き上げ）。超えると最終アクセスの古い順に追い出され（LRU）、7 日アクセスの無いものは削除される。Org の Actions 予算は **$10（超過で停止）** で、**10GB を超えた分は 1GB あたり月 $0.07 の課金**になる。20GB は余裕分であり、常用は 10GB 以内に収める。
+GitHub Actions cache はリポジトリ単位で上限 **10GB**。超えると最終アクセスの古い順に追い出され（LRU）、7 日アクセスの無いものは削除される。Org の Actions 予算は **$0（超過不可）** のため上限は引き上げられない。10GB の中でヒット率を最大化する。
+
+容量の見積もり（2026-10-11 実測。下記「実測」）: main の 1 世代（全キャッシュ）は約 0.9GB。キーが切り替わる（ルート `Cargo.lock` の変更は直近 30 日で 8 回、runner の rustc 更新は約 6 週ごと）と新旧の世代が最大 7 日並存するが、週 3 回切り替わっても約 3GB で、上限に届かないため追い出しは起きない。新しくキャッシュを足すときは「main の 1 世代 × 週あたりのキー切替回数 + 1」が 10GB に収まることを確認する
 
 - **保存は main の push のみ**。target キャッシュは `actions/cache/restore` + `actions/cache/save`（`if: ... && github.ref == 'refs/heads/main' && steps.<restore>.outputs.cache-hit != 'true'`）に分離し、PR は restore のみにする。キーはソースを含まない（toolchain 実解決版数 + `Cargo.lock`）ため PR は初回 push から main のキャッシュに exact hit する。`Cargo.lock` を変える PR だけが restore-keys の前方一致（main の旧キー）からの差分ビルドになる
 - **キーに SHA・run_id 等の一意値を入れない**。restore-keys は同一 toolchain 版数スコープの前方一致に限定する（イシュー #917）
@@ -94,7 +96,7 @@ gh run view <run-id> --log --job <job-id> | grep -E "Cache (restored from key|no
 | build | 520MB → 245MB | 1.9GB → 1.1GB | 1.5〜2 分 → 1.8 分 |
 | guardrail-regression | 125MB → 54MB | 0.4GB → 0.2GB | 約 20 秒 → 22 秒 |
 
-target キャッシュ 4 件の合計は 11.8GB → 0.56GB。rust-ci（`rust-base-ci-*`）・registry 系を合わせても main のキャッシュは 1GB 未満で、PR ごとの保存が無くなるため上限 20GB はもちろん課金の発生する 10GB にも届かない。build-no-cuda-toolkit の短縮は主に debuginfo 削減（統合テストバイナリのリンク・書き込み量の減少）と、巨大キャッシュの復元・保存（各 3〜7 分）が無くなったことによる。
+target キャッシュ 4 件の合計は 11.8GB → 0.56GB。main の 1 世代は、これに rust-ci（`rust-base-ci-*` の clippy 56MB・test 99MB・deny 34MB・cargo-deny 4MB）と registry 系（112MB）を合わせて約 0.9GB。PR からの保存も無くなるため、上限 10GB に対して 10 倍程度の余裕がある。build-no-cuda-toolkit の短縮は主に debuginfo 削減（統合テストバイナリのリンク・書き込み量の減少）と、巨大キャッシュの復元・保存（各 3〜7 分）が無くなったことによる。
 
 ## 計測方法
 
