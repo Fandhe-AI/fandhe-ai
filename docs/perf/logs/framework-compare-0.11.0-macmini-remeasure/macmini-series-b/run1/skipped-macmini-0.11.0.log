@@ -1,0 +1,4 @@
+bench-burn gemm metal 512 fresh: MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor is all-zero or non-finite; refusing to record timing
+bench-burn gemm metal 1024 fresh: MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor is all-zero or non-finite; refusing to record timing
+bench-burn gemm metal 2048 fresh: MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor is all-zero or non-finite; refusing to record timing
+bench-burn gemm metal 4096 fresh: MEASURE_ERROR: gemm checksum is degenerate (0) — result tensor is all-zero or non-finite; refusing to record timing

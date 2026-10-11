@@ -1,0 +1,10 @@
+事前宣言（2026-10-11T11:45:34Z、系列 A・B いずれの結果も出る前に固定）
+- 機体: Mac mini（Apple M4・10 コア・16 GB・計測専用機。平常 load1 約 1.3）。M4 Max 開発機の 0.11.0 計測（framework-compare-0.11.0-remeasure）の再計測にあたる。
+- 系列 A（macmini-0110a/）: ゲートなし 5 run（run1 のみビルド込み）。
+- 系列 B（macmini-0110b/）: 各 run 開始前に load1 < 3.0 を最大 30 分待つゲート付き（Mac mini は計測専用機で平常 load1 ≈ 1.3 のため、M4 Max 版の 8.0 から 3.0 に変更）。
+- 採否: 系列 B は 5 run すべてがゲートを通過して完走した場合のみ正式値とする。1〜4 run の部分完走・GATE-TIMEOUT は参考扱いとし、系列 A を正式値とする。
+- いずれの場合も両系列を併記し、A/B 間で verdict が反転したセルをノイズ帯として明示する。
+- 0.10.0 → 0.11.0 の絶対 ms 差分は参考値。判定は同一 run 内の対戦相手比（verdict）を主とする。
+- Python 参照 FW（PyTorch 2.14.0・TensorFlow 2.16.2＋tensorflow-metal 1.2.0・SciPy 1.18.1。Python 3.12.15〈uv 管理〉、venv-torch は numpy 2.5.4、venv-tf は numpy 1.26.4・keras 3.15.1）は各 run 内で Rust セルの直後に計測し、Rust 側と同じ 5 run 中央値・同じ採否規則に従う。
+- bench_py.py: リポジトリの docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py（main 624d0ee4 時点。sha256 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b）。0.11.0 の M4 Max 計測が使った版の記録はない。624d0ee4 の scripts/bench/framework-compare/ 配下には bench_py.py が存在しない。
+- ツリー同定: 624d0ee4（main・PR #2962 マージ後・registry fandhe-ai 0.11.0）。git archive 624d0ee4 scripts/bench/framework-compare を展開して .rev-stamp（フル SHA）を置き、rsync で転送した。GB10 計測と同一ツリー。
