@@ -48,3 +48,4 @@ status=$?
 set -e
 echo "post load1=$(sysctl -n vm.loadavg | awk '{print $2}')" >> "${OUT}/load-${ARM}-run${RUN}.txt"
 echo "done. arm=${ARM} run=${RUN} status=${status}"
+exit "${status}"

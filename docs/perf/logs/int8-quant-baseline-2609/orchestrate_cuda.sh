@@ -74,5 +74,22 @@ kill "${SAMPLER}" 2>/dev/null || true
     grep -v -e '^$' -e 'transformer_workload' -e 'python' "${OCC}.samples" | sort -u || true
   fi
 } >> "${OCC}"
+# 異種プロセス判定: 採取結果から transformer_workload / python 以外が現れた run は無効（RULE.txt DISCARD_CUDA）。
+foreign=""
+if [ -e "${OCC}.samples" ]; then
+  foreign="$(grep -v -e '^$' -e 'transformer_workload' -e 'python' "${OCC}.samples" | sort -u || true)"
+fi
 rm -f "${OCC}.samples"
+if [ -n "${foreign}" ]; then
+  # 無効 run として記録し、破棄ログを *.discarded-<epoch> へ退避する（取り直し時に既存ログ停止へ掛からないようにする）。
+  # aggregate.py は gpu-occupancy-*.txt の RUN_INVALID 行も拒否するため、退避しない手運用でも集計に混入しない。
+  echo "RUN_INVALID: foreign process detected (discarded; rerun required)" >> "${OCC}"
+  stamp="$(date +%s)"
+  for f in "${LOG}" "${JSON}" "${OCC}"; do
+    if [ -e "${f}" ]; then mv "${f}" "${f}.discarded-${stamp}"; fi
+  done
+  echo "done. arm=${ARM} run=${RUN} status=${status} INVALID_FOREIGN_PROCESS (discarded)"
+  exit 5
+fi
 echo "done. arm=${ARM} run=${RUN} status=${status}"
+exit "${status}"

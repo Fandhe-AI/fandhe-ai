@@ -39,6 +39,12 @@ def load_run(d, arm, run):
     path = os.path.join(d, "%s-run%d.json" % (arm, run))
     if not os.path.isfile(path):
         raise ValueError("run 欠損: %s" % path)
+    # 異種プロセス混入で無効化された run は集計に含めない（RULE.txt DISCARD_CUDA）。
+    occ = os.path.join(d, "gpu-occupancy-%s-run%d.txt" % (arm, run))
+    if os.path.isfile(occ):
+        with open(occ, encoding="utf-8", errors="replace") as f:
+            if re.search(r"^RUN_INVALID", f.read(), re.M):
+                raise ValueError("無効 run（RUN_INVALID）: %s" % occ)
     with open(path, encoding="utf-8") as f:
         try:
             j = json.load(f)
@@ -129,6 +135,12 @@ def self_test():
         # run 欠損
         os.remove(os.path.join(d, "a-run3.json"))
         must_fail(lambda: arm_stats(d, "a"), "run 欠損")
+        # 無効 run（occupancy に RUN_INVALID）
+        write(d, "a", 3, 0.03)
+        with open(os.path.join(d, "gpu-occupancy-a-run3.txt"), "w") as f:
+            f.write("pre util=0%\nRUN_INVALID: foreign process detected\n")
+        must_fail(lambda: arm_stats(d, "a"), "無効 run")
+        os.remove(os.path.join(d, "gpu-occupancy-a-run3.txt"))
         # 負値
         write(d, "a", 3, -1.0)
         must_fail(lambda: arm_stats(d, "a"), "負値")
