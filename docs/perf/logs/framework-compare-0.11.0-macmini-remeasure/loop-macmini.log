@@ -1,0 +1,18 @@
+loop start 2026-10-11T11:45:34Z
+== series A ==
+run1: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T11:52:58Z
+run2: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T11:55:21Z
+run3: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T11:57:43Z
+run4: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T12:00:07Z
+run5: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T12:02:30Z
+ALL-DONE completed=5/5
+A rc=0 2026-10-11T12:02:30Z
+== series B ==
+run1: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T12:04:53Z
+run2: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T12:08:16Z
+run3: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T12:10:39Z
+run4: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T12:13:02Z
+run5: done. rows=      48 pyrows=      32 skipped=       4 2026-10-11T12:16:26Z
+ALL-DONE completed=5/5
+B rc=0 2026-10-11T12:16:26Z
+loop end
