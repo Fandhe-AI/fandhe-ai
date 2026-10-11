@@ -32,9 +32,10 @@ is_docs_only_path() {
 }
 
 # docs_only: 変更ファイルが 1 件以上あり、全て docs 系なら 0。
+# リネーム元も判定するため --no-renames で削除元と追加先の両方を列挙する。
 docs_only() {
   local files f
-  files="$(git diff --name-only HEAD^1 HEAD 2>/dev/null)" || return 1
+  files="$(git diff --no-renames --name-only HEAD^1 HEAD 2>/dev/null)" || return 1
   [ -n "${files}" ] || return 1
   while IFS= read -r f; do
     is_docs_only_path "${f}" || return 1
