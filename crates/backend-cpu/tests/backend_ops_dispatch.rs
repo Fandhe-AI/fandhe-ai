@@ -237,7 +237,7 @@ fn cpu_elementwise_and_reduction_are_fully_implemented() {
 }
 
 /// 線形代数（イシュー #1621）は CUDA／Metal とも GPU カーネル未実装の
-/// ため（CUDA の LU 系は #2674 で内部 opt-in ゲート
+/// ため（CUDA の LU 系は #2674、cholesky・QR・eigh は #2675 で内部 opt-in ゲート
 /// `fandhe_ai_backend_cuda::linalg::set_gpu_linalg_enabled` の背後に
 /// 追加されたが既定 OFF のため本テストの前提は不変）、実機の有無に関わらず常に `BackendError::Unsupported` を返し
 /// panic しないことを確認する（`Self::sum`／`Self::max`〈汎用

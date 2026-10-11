@@ -415,6 +415,8 @@ mod kernels_huber;
 mod kernels_kl_div;
 mod kernels_layer_norm;
 mod kernels_linalg;
+// 分解系 3 カーネル（cholesky・QR・eigh。イシュー #2675・docs/backend-gpu-linalg-decision.md）
+mod kernels_linalg_factor;
 mod kernels_log_softmax_backward;
 mod kernels_mma;
 mod kernels_mma_tf32;
