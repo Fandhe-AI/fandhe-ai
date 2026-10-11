@@ -554,7 +554,7 @@ jobs:
         run: bash scripts/ci-prune-target.sh
 
       - name: Cache cargo target（save）
-        if: steps.detect.outputs.has_cargo == 'true' && (github.ref == 'refs/heads/main' || github.head_ref == 'ci/cache-tuning') && steps.cache-target-restore.outputs.cache-hit != 'true'
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
@@ -705,7 +705,7 @@ jobs:
         run: bash scripts/ci-prune-target.sh
 
       - name: Cache cargo target（save）
-        if: steps.detect.outputs.has_cargo == 'true' && (github.ref == 'refs/heads/main' || github.head_ref == 'ci/cache-tuning') && steps.cache-target-restore.outputs.cache-hit != 'true'
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
@@ -1129,7 +1129,7 @@ jobs:
         run: bash scripts/ci-prune-target.sh
 
       - name: Cache cargo target（save）
-        if: steps.detect.outputs.has_cargo == 'true' && (github.ref == 'refs/heads/main' || github.head_ref == 'ci/cache-tuning') && steps.cache-target-restore.outputs.cache-hit != 'true'
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
@@ -1290,7 +1290,7 @@ jobs:
       # success() に加えて cache-hit を明示検査する。key は cache-primary-key を再参照し
       # hashFiles の二重計算を避ける。
       - name: Cache cargo target（save）
-        if: steps.detect.outputs.has_cargo == 'true' && (github.ref == 'refs/heads/main' || github.head_ref == 'ci/cache-tuning') && steps.cache-target-restore.outputs.cache-hit != 'true'
+        if: steps.detect.outputs.has_cargo == 'true' && github.ref == 'refs/heads/main' && steps.cache-target-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
