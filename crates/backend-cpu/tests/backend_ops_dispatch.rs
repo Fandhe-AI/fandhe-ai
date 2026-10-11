@@ -349,6 +349,9 @@ fn cuda_linalg_ops_return_unsupported_not_panic() {
 /// [`cuda_linalg_ops_return_unsupported_not_panic`] の Metal 版
 /// （`cfg(target_os = "macos")` 限定。`deps-policy.md` の Metal 分離
 /// 方針と同じ）。
+/// Metal の LU 系・cholesky・QR は #2676 で内部 opt-in ゲート
+/// `fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled` の背後に追加されたが
+/// 既定 OFF のため本テストの前提は不変。
 #[cfg(target_os = "macos")]
 #[test]
 fn metal_linalg_ops_return_unsupported_not_panic() {

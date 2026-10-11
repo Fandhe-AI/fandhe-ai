@@ -750,6 +750,17 @@ pub(crate) mod spec_source;
 // 触れないため、`cfg(target_os = "macos")` を付けず Linux（本実装
 // 環境・CI）でも `AtomicBool` の単体テストが回るようにしてある。
 pub mod split_k_runtime;
+// 線形代数（LU 系・cholesky・QR。イシュー #2676・親 #2672）の内部 opt-in
+// ゲート・サイズ検証・ホスト後処理（`linalg`）と MSL 4 カーネルの f32 ホスト逐語
+// モデル（`linalg_model`）。`objc2` 系 FFI に触れないため `cfg(target_os =
+// "macos")` を付けず Linux（CI）でも単体テストが回る（`split_k_runtime`／
+// `scan_model` と同じ判断）。`facade` へは再公開しない（公開は別 issue）。
+pub mod linalg;
+pub mod linalg_model;
+// MSL ソース保持とパイプライン構築（safe API のみ。`MetalContext` を使うため
+// macOS 限定）。カーネル起動の新規 unsafe は承認待ち（`linalg` 冒頭参照）。
+#[cfg(target_os = "macos")]
+pub mod linalg_kernel;
 pub mod tile;
 // Metal train forward の encode-only 合流 opt-in（イシュー #2113）。
 // `split_k_runtime` と同じ設計判断で cfg を付けず Linux でも既定値の

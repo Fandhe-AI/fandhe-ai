@@ -481,6 +481,49 @@ fn checked_gate_width(gates: usize, hidden: usize) -> Result<usize, BackendError
     ))
 }
 
+/// 線形代数 5 演算の共通前段（イシュー #2676・設計記録 §4.4 の結線順序）。
+///
+/// 1. ゲート OFF（既定）→ `Unsupported`（デバイスに触れない）。
+/// 2. rank-2 検査（`ShapeMismatch(RankMismatch)`）。
+/// 3. `require_square` なら正方検査（`InvalidArgument`。CPU の
+///    `require_square_2d` と同じ判定規律）。
+///
+/// サイズ検証は呼び出し側が演算別の関数（`crate::linalg::validate_*`）で続ける。
+fn linalg_gate_prepare(
+    op: &str,
+    shape: &[usize],
+    require_square: bool,
+) -> Result<(), BackendError> {
+    if !crate::linalg::gpu_linalg_enabled() {
+        return Err(BackendError::Unsupported(format!(
+            "MetalBackendOps::{op}: GPU 線形代数は opt-in ゲート OFF（既定）。\
+             fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled(true) で有効化（イシュー #2676）"
+        )));
+    }
+    if shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: shape.len(),
+        }));
+    }
+    if require_square && shape[0] != shape[1] {
+        return Err(BackendError::InvalidArgument(format!(
+            "{op}: 正方行列（[n,n]）が必要（形状 {shape:?}）"
+        )));
+    }
+    Ok(())
+}
+
+/// カーネル起動が未実装（新規 `unsafe` のユーザー承認待ち）であることを示す
+/// fail-closed の `Unsupported`。`Var` 側は `Unsupported` のみホスト `f64` へ
+/// フォールバックするため、ゲート OFF と挙動が変わらない。
+fn linalg_launch_pending(op: &str) -> BackendError {
+    BackendError::Unsupported(format!(
+        "MetalBackendOps::{op}: Metal 線形代数カーネルの起動（新規 unsafe）は\
+         ユーザー承認待ち（イシュー #2676）"
+    ))
+}
+
 /// `shape` の要素積を `checked_mul` の連鎖で求め、`usize` オーバー
 /// フロー時は `ShapeError::ElementCountOverflow` を返す
 /// （`checked_bytes_for` 内の複製ロジックを独立関数化したもの。
@@ -3456,54 +3499,97 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(data, &shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// 線形代数（イシュー #1621・`docs/autodiff-linalg-design.md`）は
-    /// GPU カーネル未実装（設計文書「スコープ外」節）。既定
-    /// `Unsupported` を明示オーバーライドし、`device_handle()` を経由
-    /// しない（`Self::sum`／`Self::max` と同じ方針。`backend-cuda::ops::
-    /// CudaBackendOps` と同様の対称な整備）。
-    fn linalg_inv(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::linalg_inv: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
-                .into(),
-        ))
+    /// 線形代数 5 演算（`linalg_inv`／`solve`／`det`／`cholesky`／`qr`）の入口
+    /// （イシュー #2676・`docs/backend-gpu-linalg-decision.md` §4・§6）。
+    ///
+    /// 既定（内部 opt-in ゲート OFF）は従来どおり `Unsupported` で、`Var` 側が
+    /// ホスト `f64` 参照実装へフォールバックする（`device_handle()` を経由しない）。
+    /// ゲート ON 時も、カーネル起動（新規 `unsafe`）がユーザー承認待ちのため
+    /// 非空入力は fail-closed の `Unsupported` を返す（Stage A。`crate::linalg`
+    /// 冒頭）。Stage B で守るエラー写像: solve／inv のピボット 0 は
+    /// `InvalidArgument`、**det のピボット 0 は `0.0`**、非正定値は
+    /// `InvalidArgument`、`Unsupported` は未実装またはゲート OFF に限る、
+    /// デバイス失敗は `map_metal_error`。det はホストで `lu_diag_product`
+    /// （diag を f64 化）× `permutation_sign` を計算して `as f32` する。
+    fn linalg_inv(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg_gate_prepare("linalg_inv", a.shape(), true)?;
+        let n = a.shape()[0];
+        crate::linalg::validate_lu_dims(n, n)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_inv: {e}")))?;
+        if n == 0 {
+            return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
+        }
+        Err(linalg_launch_pending("linalg_inv"))
     }
 
-    fn linalg_solve(
-        &self,
-        _a: &Tensor<f32>,
-        _b: &Tensor<f32>,
-    ) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::linalg_solve: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
-                .into(),
-        ))
+    fn linalg_solve(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg_gate_prepare("linalg_solve", a.shape(), true)?;
+        let n = a.shape()[0];
+        if b.shape().len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: b.shape().len(),
+            }));
+        }
+        if b.shape()[0] != n {
+            return Err(BackendError::InvalidArgument(format!(
+                "linalg_solve: a の行数 {n} と b の行数 {} が一致しない",
+                b.shape()[0]
+            )));
+        }
+        let k = b.shape()[1];
+        crate::linalg::validate_lu_dims(n, k)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_solve: {e}")))?;
+        // n == 0 のみ空結果を直接返す。n > 0 で k == 0 の場合も A の特異性検査が
+        // 必要（CPU／CUDA 経路は特異なら InvalidArgument）なため、空結果へ短絡せず
+        // 非空と同じ経路（起動保留→ホスト参照へフォールバック）に通す。
+        if n == 0 {
+            return Tensor::new(Vec::new(), &[n, k]).map_err(BackendError::ShapeMismatch);
+        }
+        Err(linalg_launch_pending("linalg_solve"))
     }
 
-    fn linalg_det(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::linalg_det: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
-                .into(),
-        ))
+    fn linalg_det(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg_gate_prepare("linalg_det", a.shape(), true)?;
+        let n = a.shape()[0];
+        crate::linalg::validate_lu_dims(n, n)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_det: {e}")))?;
+        if n == 0 {
+            // 空積は 1（CPU 参照実装と同じ）。
+            return Tensor::new(vec![1.0f32], &[]).map_err(BackendError::ShapeMismatch);
+        }
+        Err(linalg_launch_pending("linalg_det"))
     }
 
-    fn linalg_cholesky(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::linalg_cholesky: 線形代数カーネル未実装（イシュー #1621 \
-             スコープ外）"
-                .into(),
-        ))
+    fn linalg_cholesky(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        linalg_gate_prepare("linalg_cholesky", a.shape(), true)?;
+        let n = a.shape()[0];
+        crate::linalg::validate_square_factor_dims("linalg_cholesky", n)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_cholesky: {e}")))?;
+        if n == 0 {
+            return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
+        }
+        Err(linalg_launch_pending("linalg_cholesky"))
     }
 
-    fn linalg_qr(&self, _a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::linalg_qr: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
-                .into(),
-        ))
+    fn linalg_qr(&self, a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
+        linalg_gate_prepare("linalg_qr", a.shape(), false)?;
+        let (m, n) = (a.shape()[0], a.shape()[1]);
+        crate::linalg::validate_qr_dims(m, n)
+            .map_err(|e| BackendError::InvalidArgument(format!("linalg_qr: {e}")))?;
+        if m == 0 || n == 0 {
+            let k = m.min(n);
+            return Ok(QrFactors {
+                q: Tensor::new(Vec::new(), &[m, k]).map_err(BackendError::ShapeMismatch)?,
+                r: Tensor::new(Vec::new(), &[k, n]).map_err(BackendError::ShapeMismatch)?,
+            });
+        }
+        Err(linalg_launch_pending("linalg_qr"))
     }
 
     fn linalg_svd(&self, _a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {
         Err(BackendError::Unsupported(
-            "MetalBackendOps::linalg_svd: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
+            "MetalBackendOps::linalg_svd: 線形代数カーネル未実装（SVD は GPU 化の対象外。イシュー #1621）"
                 .into(),
         ))
     }
