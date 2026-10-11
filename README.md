@@ -300,7 +300,7 @@ git hooks は [lefthook](https://lefthook.dev/)（`lefthook.yml`）で管理し�
 - 秘密情報ファイル（`.env`・`*.pem`・`*.key` 等）の stage 拒否
 - Conventional Commits 形式検証
 
-clippy・test など GitHub Actions が PR ごとに実行するチェックは、開発速度を優先してローカルフック（pre-push）では実行しません。push 前に手元で確認したい場合は下記の `make ci` を使ってください。
+clippy・test など GitHub Actions が PR ごとに実行するチェックは、開発速度を優先してローカルフック（pre-push）では実行しません。push 前に手元で確認したい場合は下記の `make ci` を使ってください。フックを追加・変更する際の方針（時間予算・CI との役割分担）は [`.claude/rules/git-hooks.md`](.claude/rules/git-hooks.md) を参照してください。
 
 `--no-verify` による bypass は [`.claude/rules/conventional-commits.md`](.claude/rules/conventional-commits.md) で禁止されています。
 

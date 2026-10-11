@@ -114,6 +114,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | `.claude/rules/security.md` | OWASP Top 10・秘密情報混入防止・自己修復ループのガードレール |
 | `.claude/rules/japanese-style.md` | 日本語出力スタイル |
 | `.claude/rules/conventional-commits.md` | Conventional Commits 詳細規約（`--no-verify` 禁止） |
+| `.claude/rules/git-hooks.md` | lefthook 編集ルール（pre-commit は通常コミットで 1 秒未満・CI と重複する検査は置かない・明示的な例外）。`lefthook.yml` 編集時のみ読み込み |
 | `.claude/rules/code-comment-style.md` | コメント規約（役割・責務・呼び出し文脈・spec 根拠を埋め込む） |
 | `.claude/rules/out-of-scope-tracking.md` | 実装対象外の追跡規約（スコープ外事項を放置しない） |
 

@@ -1,6 +1,8 @@
 # Git hooks 定義（lefthook）。`make hooks`（lefthook install）で導入する。
 #
-# 方針（.claude/rules/conventional-commits.md・ci.md。Fandhe-AI/rust-ai-library-v1 と同一）:
+# 方針（.claude/rules/git-hooks.md・conventional-commits.md・ci.md。Fandhe-AI/rust-ai-library-v1 と同一）:
+# - フックの追加・変更時は .claude/rules/git-hooks.md の方針（時間予算・CI との役割分担・
+#   判断手順）に従う。CI と重複する検査は原則置かない（例外は同ルールの「明示的な例外」節に列挙）
 # - --no-verify によるスキップは禁止
 # - Cargo.toml 未追加（M0 の TASK-1.1 で workspace 作成予定）の間、cargo 系ジョブは
 #   スキップする（CI 側の detect ステップ判定と同一方針。ci.md 参照）
