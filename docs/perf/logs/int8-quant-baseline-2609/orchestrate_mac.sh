@@ -7,11 +7,11 @@ set -euo pipefail
 
 ARM="${1:-}"
 RUN="${2:-}"
-case "${ARM}" in rust-cpu|pytorch-cpu) ;; *) echo "bad arm: ${ARM}" >&2; exit 2 ;; esac
+case "${ARM}" in rust-cpu|pytorch-cpu|facade-metal|pytorch-mps|parity-metal) ;; *) echo "bad arm: ${ARM}" >&2; exit 2 ;; esac
 case "${RUN}" in 1|2|3|4|5) ;; *) echo "bad run: ${RUN}" >&2; exit 2 ;; esac
 
 ROOT="${ROOT:-${HOME}/work/rust-ai-library-run}"
-OUT="${OUT:-${HOME}/work/int8-2997-logs}"
+OUT="${OUT:-${HOME}/work/int8-2997-logs}"  # #2998 は OUT=~/work/int8-2998-logs で呼ぶ
 PYVENV="${PYVENV:-${HOME}/work/venv-torch-cpu}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/work/target-fandhe-ai}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-1800}"
@@ -86,6 +86,18 @@ case "${ARM}" in
     BENCH_TRANSFORMER_REPORT="${JSON}" with_timeout "${TIMEOUT_SECS}" \
       cargo test -p bench-harness --release --test transformer_workload \
       -- transformer_block_forward_bench_cpu --exact --ignored --nocapture > "${LOG}" 2>&1 ;;
+  facade-metal)
+    # イシュー #2998（案 ii）: facade TransformerEncoderLayer の Metal 代替分母。規則は RULE-metal.txt。
+    BENCH_TRANSFORMER_METAL_REPORT="${JSON}" with_timeout "${TIMEOUT_SECS}" \
+      cargo test -p fandhe-ai --release --test transformer_encoder_metal_denominator \
+      -- transformer_encoder_facade_forward_bench_metal_relu --exact --ignored --nocapture > "${LOG}" 2>&1 ;;
+  parity-metal)
+    with_timeout "${TIMEOUT_SECS}" \
+      cargo test -p fandhe-ai --release --test compat_sequential_layers_backend_parity \
+      -- metal_transformer_encoder_matches_cpu --exact --ignored --nocapture > "${LOG}" 2>&1 ;;
+  pytorch-mps)
+    with_timeout "${TIMEOUT_SECS}" "${PYVENV}/bin/python" scripts/bench-transformer-pytorch.py \
+      --device mps --output "${JSON}" > "${LOG}" 2>&1 ;;
   pytorch-cpu)
     with_timeout "${TIMEOUT_SECS}" "${PYVENV}/bin/python" scripts/bench-transformer-pytorch.py \
       --device cpu --output "${JSON}" > "${LOG}" 2>&1 ;;
