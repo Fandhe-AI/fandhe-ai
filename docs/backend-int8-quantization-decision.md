@@ -31,7 +31,7 @@ issue には性質の異なる 2 件のコメントがある。
 
 ### 0.2 issue 受け入れ条件の扱い
 
-**#2610 注記（事実の訂正）**: 下記の「本 issue は close しない」は 2026-09-14 時点の方針である。実際には #1627 は 2026-09-14T11:20:03Z に PR #1836 本文の `Closes #1627` により自動 close された（state CLOSED）。扱い（reopen／別 issue で追跡／CLOSED のまま追跡）は `docs/int8-quant-grade-up-verification-plan.md` §8 項 4 の承認事項であり、reopen はしていない。
+**#2610 注記（事実の訂正）**: 下記の「本 issue は close しない」は 2026-09-14 時点の方針である。実際には #1627 は 2026-09-14T11:20:03Z に PR #1836 本文の `Closes #1627` により自動 close された（state CLOSED）。扱い（reopen／別 issue で追跡／CLOSED のまま追跡）は `docs/int8-quant-grade-up-verification-plan.md` §8 項 4 の承認事項であり、reopen はしていない。項 4 は 2026-10-11 に #2995 で決定済みで、CLOSED のまま #2991 で追跡する（`docs/int8-quant-grade-up-verification-plan.md` §8.2）。
 
 issue 本文の受け入れ条件（`Op`／`BackendOps`／`Var` 追加・VJP・parity テスト・`compat-api-scope.md` 更新・fmt／clippy）は **量子化の実装が spec 側で REQ として承認された後の別 issue** へ引き継ぐ。本 PR で満たすのは「`docs/compat-api-scope.md` の対象範囲記述更新」と「fmt／clippy 通過（docs のみのため no-op 確認）」のみ。**本 issue は close しない**（#1652／#1775／#1628 と同じく段階 0・blocked のまま）。
 
