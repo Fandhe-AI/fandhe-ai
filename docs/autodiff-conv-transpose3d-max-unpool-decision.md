@@ -317,3 +317,10 @@ impl<'t> Var<'t> {
 - **テスト**: `crates/facade/tests/pool3d_conv_transpose3d_max_unpool_var_delegates.rs`（シグネチャ固定・自由関数との bit 一致・閉形式・往復・型付きエラー・`C = 0`）。`conv_transpose3d_max_unpool_backend_parity.rs` は `Var` メソッド経由に切り替えた（テスト名・`#[ignore]`・判定は不変）。
 - **実機**: CUDA／Metal は未実測（`docs/perf/logs/conv-transpose3d-max-unpool-2644/README.md` へ申し送り）。
 - **保留継続**: 層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）、`Tape`／`Tensor<f32>` 上の同名メソッド、モジュール・型の再エクスポート。
+
+## 14. 2026-10-11 所有者判断の反映（#3020）
+
+- 層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）の保留継続は D-A で解除する。公開形は #3025 の記録を正とし、実装は #3030・#3034。
+- 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
+- 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
+- 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
