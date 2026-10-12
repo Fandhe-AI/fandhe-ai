@@ -662,3 +662,11 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 | `crates/autodiff/src/create_graph.rs` のモジュール doc 更新 | #2735（#2545） |
 | `api_surface.rs` の否定ガード 2 件の差し替え | #2735（#2545。§19.2） |
 | `docs/compat-api-scope.md`・`docs/compat-feature-gap.md` の記録 | #2546（本節） |
+
+## 20. 2026-10-11 所有者判断の反映（#3020）
+
+- §16 が「スコープ外のまま残す」とした Op 群（`Pad`・`MaskedFill`・`Gather`・`Scatter`・`MseLoss`・`CrossEntropyLoss` ほか）と §19.4 の保留継続は、D-A により対象 Op 拡張として実装へ進む（#3075）。
+- Gelu（erf）は依存追加不可の制約が従来どおり残る。
+- 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
+- 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
+- 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
