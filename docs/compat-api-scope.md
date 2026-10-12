@@ -2711,3 +2711,20 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。依存追加なし・tolerance／baseline／ガードレール閾値の変更なし・`docs/spec/` 不変・新規 `unsafe` なし。
 
 **適用記録（イシュー #3022・親 #3018。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3022#issuecomment-6111750000`）**: nn 層型名の公開方針を決定記録 `docs/facade-nn-layer-type-exposure-decision.md` に記録した（コード変更なし）。推奨は (i)+(iv) で、層型名の一括公開はせず、型名を名指しする必要・facade 単独の呼び出し経路・正ガード同時追加の 3 条件を満たす場合のみ個別承認で出す。`SpatialLayersHoldDoctestGuard` の 5 型（`ConvTranspose1d`・`Upsample`・`ZeroPad2d`・`Identity`・`Unflatten`）は公開対象外として確定し、ガードは現状維持。承認は推奨形への包括承認であり、本書 1 節の対象範囲表は変更していない。`crates/**`・`docs/spec`・依存・tolerance／baseline は不変。
+
+**適用記録（イシュー #3021・親 #3019・ルート #3018 Phase 1。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3021#issuecomment-6111746880`）**: 対応表（`docs/perf/framework-compare-feature-matrix-0.11.0.md`）で「対象外」または「不算入」として確定する 10 項目の所有者確認結果を記録する。項目 1 は 2026-10-11 に所有者が確定済み。項目 2〜10 は 2026-10-12 の所有者回答（上記コメント）で全て推奨どおりと確定した。「変更」と回答された項目は無いため、実装 issue の起票提案（`update-issue-tree`）は不要である。区分の意味は次のとおり。「対象外」は承認済みの非目標で対応表の行を下げない。「不算入」は注記として残し行の判定に使わない（項目 4・7）。項目 9・10 は「条件付き」とする。
+
+| 項 | 確定内容 | 根拠 |
+|---|---|---|
+| 1 | D-0 の除外名は対象外（2026-10-11 確定。層型名は含めず #3022 で決める） | `docs/autodiff-custom-function-decision.md` §16.2・`docs/autodiff-functional-transforms-design.md` §23.4 |
+| 2 | f16／bf16 を値型とする `Tape`／`Var` は案 C（opt-in の低精度 forward のみ）を最終形とし対象外 | `docs/autodiff-var-dtype-multiplexing-design.md` §0・§10 |
+| 3 | `jvp` の f16 対応は対象外（f32 `Tape` 限定を契約とする） | `docs/autodiff-functional-transforms-design.md` §23.3・§27.3 |
+| 4 | int／bool 演算・線形代数の網羅は REQ-9 Tier 2 の列挙（本書 §1.3）を基準とし、「数千 op 級」は注記として不算入 | spec REQ-9 |
+| 5 | 同梱重みは #1965 判断 2（2026-09-17 承認。事前学習済み重みの同梱・配布は本ライブラリのスコープ外）を出所に対象外 | #1965 の承認コメント |
+| 6 | speculative の greedy 仮説（論点 2）は破れていないとして閉じる | `docs/perf/logs/speculative-batching-2890/README.md`（GB10・M4 Max の parity が 2026-10-09 に pass） |
+| 7 | beam search・top-p・EOS 停止・repetition penalty・ストリーミング生成は不算入。算入する場合は別 issue | `docs/facade-generate-decision.md` §11 |
+| 8 | Metal の eigh・SVD と CUDA の SVD は GPU 線形代数のスコープ外 | `docs/backend-gpu-linalg-decision.md` §2・§9 |
+| 9 | ROCm の表記は「Won't・条件付き」。実装は #3151 以降 | spec REQ-2・#1965 判断 1 |
+| 10 | `nccl` feature は複数 GPU 機が無い間は条件付き対象外。初期形は #3142 のホスト側 collective | spec の DDP 条件表 (c)(d) |
+
+項目 5 の整合確認: `docs/model-distribution-design.md` §5・§7 は、汎用の URL ダウンロード・ローカルキャッシュ・ハッシュ検証をコア（facade）の責務とし、HF hub 連携を別クレートとする。これは利用者が重みを取得・管理する汎用機構であり、本ライブラリによる事前学習済み重みの同梱・ホスティングを対象外とする #1965 判断 2 とは矛盾しない。矛盾は見つからなかったため所有者へ戻す事項は無い。不変事項: 本書 §1 の対象範囲表・`docs/compat-feature-gap.md` の判定列・`crates/facade`・`docs/spec/`・依存・tolerance・baseline は変更していない。#3023（監査記述の訂正）と #3269（0.12.0 版の監査記録）は、本記録を「対象外」「不算入」の出所として参照する。
