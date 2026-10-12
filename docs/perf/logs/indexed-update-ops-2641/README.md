@@ -1,5 +1,7 @@
 # 索引付き更新 4 種（#2641）CUDA／Metal 実機未実測の申し送り
 
+> CUDA は #2992、Metal は #2993 で実測済み（2026-10-11。詳細は `docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md`）。以下の「未実測」は記入時点の記述（履歴）で、結果は末尾「実測記入欄」を正とする。
+
 `docs/autodiff-indexed-update-ops-decision.md` §10 参照。本実装エージェント実行環境は CUDA／Metal 実機に
 到達できないため、`fandhe_ai_autodiff::indexed_update_ops`（`scatter_reduce`／`index_add`／`index_copy`／
 `masked_scatter`）の `crates/facade/tests/indexed_update_ops_backend_parity.rs` のうち CUDA
@@ -41,5 +43,5 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+| 2026-10-11 | NVIDIA GB10（driver 580.173.02・CUDA 13.0） | `cargo test -p fandhe-ai --release --test indexed_update_ops_backend_parity -- --ignored --nocapture --test-threads=1 cuda_` | pass（`cuda_indexed_update_ops_match_cpu_reference`。1 passed; 0 failed） | 実測は #2992・PR #3006。ログ `docs/perf/logs/phase4-ops-autodiff-exposure-2678/cuda/indexed_update_ops_backend_parity.log`・`cuda/env_info.txt`。対象コミット `784b4e79` |
+| 2026-10-11 | Mac mini（Apple M4・macOS 27.0.1） | `cargo test -p fandhe-ai --release --test indexed_update_ops_backend_parity -- --ignored --nocapture --test-threads=1 metal_` | pass（`metal_indexed_update_ops_match_cpu_reference`。1 passed; 0 failed） | 実測は #2993・PR #3008。ログ `docs/perf/logs/phase4-ops-autodiff-exposure-2678/metal/indexed_update_ops_backend_parity.log`・`metal/env_info.txt`。対象コミット `c8e1ceb1` |

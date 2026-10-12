@@ -551,7 +551,7 @@ P1」）を受けた是正である。
 
 **適用記録（イシュー #2934・親 #2932。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650` の項 1）**: 第 1 段階の 3 名（`generate_speculative`〈greedy・B = 1〉・`SpeculativeConfig`・`BatchScheduler`）と署名に現れる `RequestId`・`SchedulerLimits` を、`fandhe_ai::inference` へ別の `pub use` 2 文で純再エクスポートした（facade 独自の型・メソッド・別名なし。`fandhe-ai =0.10.0` に対しては追加のみ）。`KvCache` の公開メソッド・`forward_with_cache` の可視性・依存・tolerance・baseline は不変。内部状態保持型が対象外であることを rustdoc の契約に明記した。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路（サンプリング版・`KvCache` の書き換え経路・`kv_rewind`・モジュール自体の再エクスポート）の否定プローブを追加した。論点 1・2・3・5・7・8 は保留のまま。詳細は設計記録 `docs/facade-speculative-decoding-batching-design.md` §18。
 
-### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本・オプション型を取る 5 本と 5 型〈#2854 で公開済み〉・行 30 の gradcheck〈#2847 で公開済み〉は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は保留継続〉）
+### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本・オプション型を取る 5 本と 5 型〈#2854 で公開済み〉・行 30 の gradcheck〈#2847 で公開済み〉は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。公開形は #3025 の記録を正とする〉）
 
 **本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
 （内部実装＋保留ガードまで先行・公開は承認後）で内部クレートに実装した機能の公開形について、各決定記録に
@@ -571,7 +571,7 @@ P1」）を受けた是正である。
   `GradcheckOptions`／`GradcheckReport`（決定記録に facade シグネチャが書かれていなかった。→ #2846 で決定記録 §11 に記録済み・公開は #2847）、行 12〜15 の全体（承認の対象外。→ 公開形は #2849 で各決定記録 §12 に記録済み。**行 12・13 の `Var` 委譲は #2850、行 14・15 の `Var` 委譲（と `SpectralNormState` の再エクスポート）は #2851 で公開済み〈本節末尾の各適用記録〉**）。
   **2026-10-08 追記（#2853）**: ルート #2499 のコメント（issuecomment-6052732061）で、オプション型 5 つは `fandhe_ai::nn::loss` へ再エクスポートし、損失 5 本は `Var` の 1 行委譲にする方向が承認され、その形（パス・完全なシグネチャ・構築確認）を `facade-nn-loss-structs-exposure-decision.md` §11 に記録した。公開は #2854 で、それまでは未公開のまま保留ガードを維持する。
   **2026-10-08 追記（#2854）**: 上の 5 本とオプション型 5 つを、記録の形（§11）のまま公開した（本節末尾の #2854 の適用記録）。
-  現在も保留なのは、`gradcheck` 系のうちモジュール名・裸の自由関数（`Tape::gradcheck` と型 2 つは #2847 で公開済み）、行 12〜15 の層化（`nn::*` 層型・`Sequential::add_*`・行 15 の結線方式。`Var` 委譲は #2850・#2851 で公開済み）、およびモジュール `elementwise_loss_ops`／`margin_focal_loss_ops` の再エクスポートと `Tape`／`Tensor` 上の同名メソッド。`norm_except_dim`・`fold_ops` 等のモジュール再エクスポートも非公開のまま。
+  現在も保留なのは、`gradcheck` 系のうちモジュール名・裸の自由関数（`Tape::gradcheck` と型 2 つは #2847 で公開済み）、~~行 12〜15 の層化（`nn::*` 層型・`Sequential::add_*`・行 15 の結線方式。`Var` 委譲は #2850・#2851 で公開済み）~~〈行 12〜15 の層化は 2026-10-11 D-A により推奨形で実装へ進むため保留から外れた。公開形は #3025 の記録を正とし、行 15 の結線方式は #3046〉、およびモジュール `elementwise_loss_ops`／`margin_focal_loss_ops` の再エクスポートと `Tape`／`Tensor` 上の同名メソッド。`norm_except_dim`・`fold_ops` 等のモジュール再エクスポートも非公開のまま。
 - 公開時は保留ガードと `api_surface.rs` の否定ガードを承認形の正ガードへ反転する（#2679 で実施した型は §5 の適用記録）。
 - 行 12〜15 のように層化（`nn::MaxPool3d` 等と `Sequential::add_*`）が未実装の機能は、その旨を行に書いた。
 - 公開形の類型は 3 つ（`Var` の委譲メソッド／モジュール再エクスポート／`Sequential::add_*`）。どれにも当てはまらない推奨（facade `Tape` の委譲メソッド・facade 独自の薄いラッパー）は、決定記録の表現のまま書いた。
@@ -591,10 +591,10 @@ P1」）を受けた是正である。
 | 9 | 索引付き更新（#2641） | `Var::scatter_reduce`／`index_add`／`index_copy`／`masked_scatter` の委譲 4 本＋`ScatterReduceMode` のルート再エクスポート | 追加のみ | `IndexedUpdateOpsHoldDoctestGuard` | #2678 で公開済み（同上） | `autodiff-indexed-update-ops-decision.md` §7（`index_add` の `alpha` を公開形に含めるかも承認事項） |
 | 10 | テンソル積・距離・外積（#2640） | `Var::kron`／`tensordot`／`tensordot_axes`／`cdist`／`cross` の委譲 5 本 | 追加のみ | `TensorProductOpsHoldDoctestGuard` | #2678 で公開済み | `autodiff-tensor-product-ops-decision.md` §7 |
 | 11 | pad の非定数モード（#2642） | `Var::pad_with_mode(pads, mode)`＋`PadMode` のルート再エクスポート（既存 `Var::pad` は不変。`ReflectionPad2d` 等の層は推奨に含めない） | 追加のみ | `PadModesHoldDoctestGuard` | #2678 で公開済み（同上） | `autodiff-pad-modes-decision.md` §7 |
-| 12 | 3D プーリング（#2643） | `Var::max_pool3d`（`(Var, Tensor<i32>)` を返す）／`avg_pool3d` の委譲 2 本。**層化（`nn::MaxPool3d`／`AvgPool3d`・`Sequential::add_*`）は未実装** | 追加のみ | `Pool3dOpsHoldDoctestGuard` | #2850 で `Var` 委譲を公開済み（公開形は #2849 で確定。保留ガードは公開した名前の分だけ正ガードへ反転。層化は保留継続） | `autodiff-pool3d-ops-decision.md` §7・§12 |
-| 13 | ConvTranspose3d・MaxUnpool（#2644） | `Var::conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d` の委譲 4 本。**層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）は未実装** | 追加のみ | `ConvTranspose3dMaxUnpoolHoldDoctestGuard` | #2850 で `Var` 委譲を公開済み（公開形と設計判断 3 件は #2849 で確定。保留ガードは公開した名前の分だけ正ガードへ反転。層化は保留継続） | `autodiff-conv-transpose3d-max-unpool-decision.md` §7・§12 |
-| 14 | Fold・Unfold（#2645） | `Var::unfold`／`fold` の委譲 2 本。**層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は未実装** | 追加のみ | `FoldUnfoldHoldDoctestGuard`（`Var` 受け手は反転済み。残りは未承認経路の保留） | #2851 で `Var` 委譲を公開済み（名前と引数順は #2849 で確定。層化は保留継続） | `autodiff-fold-unfold-decision.md` §7・§12 |
-| 15 | LRN・重み再パラメータ化（#2646） | `Var::local_response_norm`／`weight_norm`／`spectral_norm` の委譲 3 本。`SpectralNormState` はクレートルート・`norm_except_dim` は公開しない（#2849 で確定）。**層化（`nn::LocalResponseNorm`・`Linear`／`Conv` への parametrization 結線）は未実装** | 追加のみ† | `LrnWeightReparamHoldDoctestGuard`（`Var` 受け手 3 件と `SpectralNormState` は反転済み。残りは未承認経路の保留） | #2851 で `Var` 委譲と `SpectralNormState` 再エクスポートを公開済み（公開形は #2849 で確定。層化と結線方式は保留継続） | `autodiff-lrn-weight-reparam-decision.md` §7・§12 |
+| 12 | 3D プーリング（#2643） | `Var::max_pool3d`（`(Var, Tensor<i32>)` を返す）／`avg_pool3d` の委譲 2 本。**層化（`nn::MaxPool3d`／`AvgPool3d`・`Sequential::add_*`）は未実装** | 追加のみ | `Pool3dOpsHoldDoctestGuard` | #2850 で `Var` 委譲を公開済み（公開形は #2849 で確定。保留ガードは公開した名前の分だけ正ガードへ反転。層化は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。公開形は #3025 の記録を正とする） | `autodiff-pool3d-ops-decision.md` §7・§12 |
+| 13 | ConvTranspose3d・MaxUnpool（#2644） | `Var::conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d` の委譲 4 本。**層化（`nn::ConvTranspose3d`／`nn::MaxUnpool*`・`Sequential::add_*`）は未実装** | 追加のみ | `ConvTranspose3dMaxUnpoolHoldDoctestGuard` | #2850 で `Var` 委譲を公開済み（公開形と設計判断 3 件は #2849 で確定。保留ガードは公開した名前の分だけ正ガードへ反転。層化は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。公開形は #3025 の記録を正とする） | `autodiff-conv-transpose3d-max-unpool-decision.md` §7・§12 |
+| 14 | Fold・Unfold（#2645） | `Var::unfold`／`fold` の委譲 2 本。**層化（`nn::Fold`／`nn::Unfold`・`Sequential::add_*`）は未実装** | 追加のみ | `FoldUnfoldHoldDoctestGuard`（`Var` 受け手は反転済み。残りは未承認経路の保留） | #2851 で `Var` 委譲を公開済み（名前と引数順は #2849 で確定。層化は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。公開形は #3025 の記録を正とする） | `autodiff-fold-unfold-decision.md` §7・§12 |
+| 15 | LRN・重み再パラメータ化（#2646） | `Var::local_response_norm`／`weight_norm`／`spectral_norm` の委譲 3 本。`SpectralNormState` はクレートルート・`norm_except_dim` は公開しない（#2849 で確定）。**層化（`nn::LocalResponseNorm`・`Linear`／`Conv` への parametrization 結線）は未実装** | 追加のみ† | `LrnWeightReparamHoldDoctestGuard`（`Var` 受け手 3 件と `SpectralNormState` は反転済み。残りは未承認経路の保留） | #2851 で `Var` 委譲と `SpectralNormState` 再エクスポートを公開済み（公開形は #2849 で確定。層化と結線方式は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。層化の公開形は #3025、結線方式は #3046 を正とする） | `autodiff-lrn-weight-reparam-decision.md` §7・§12 |
 | 16 | 可変長系列（#2647） | モジュール再エクスポート（`fandhe_ai::nn::rnn` へ `PackedSequence`・出力型 4 種・自由関数 8 本を `pub use`）。`Var` 委譲・`Sequential::add_*` は不採用 | 追加のみ† | `PackedSequenceHoldDoctestGuard` | #2679 で公開済み（`nn::rnn`。ガードは未承認経路〈`Var`／`Tape` 委譲等〉のプローブへ縮小） | `autodiff-packed-sequence-decision.md` §7（再エクスポート対象一覧・`PackedSequence::new` の扱い等が承認事項） |
 | 17 | 活性化 5 種（#2649） | `Var::selu`／`celu`／`softsign`／`hardsigmoid`／`log_sigmoid` の委譲 5 本（#2678）＋`Sequential::add_selu`／`add_celu`／`add_softsign`／`add_hardsigmoid`／`add_log_sigmoid`（#2679） | 追加のみ | `ActivationScalarOpsHoldDoctestGuard` | #2678・#2679 で公開済み（`Var` 委譲は #2678、`Sequential::add_*` は #2679） | `autodiff-activation-scalar-ops-decision.md` §7 |
 | 18 | Softmin・Tanhshrink・Threshold・RReLU（#2650） | `Var::softmin`／`tanhshrink`／`threshold`／`rrelu` の委譲 4 本（#2678）＋`Sequential::add_softmin`／`add_tanhshrink`／`add_threshold`／`add_rrelu`（#2679）。`rrelu_with_noise` は公開しない | 追加のみ | `SoftminThresholdOpsHoldDoctestGuard` | #2678・#2679 で公開済み（`Var` 委譲は #2678、`Sequential::add_*` は #2679。`rrelu_with_noise` は公開しない） | `autodiff-softmin-threshold-ops-decision.md` §7 |
@@ -617,6 +617,7 @@ P1」）を受けた是正である。
 - 行 14: `Var::unfold` の名前（`torch.Tensor.unfold` と別演算になる）と引数順（crate 内の `conv2d` 系に揃えるか PyTorch に揃えるか）。→ #2849 で確定（`autodiff-fold-unfold-decision.md` §12）。
 - 行 19・20: オプション型（`BceWithLogitsOptions`・`GaussianNllOptions`・`MultiMarginOptions` 等）と `Reduction` を公開面で名指しするか。（#2678 の結果: 承認は 3 本のみで、`Reduction` の公開経路〈#2602〉が未整備のため 3 本とも保留。**#2853 で決定・#2854 で公開**: オプション型は `fandhe_ai::nn::loss` の 1 経路で名指しする。形は `facade-nn-loss-structs-exposure-decision.md` §11。）
 - 行 12〜15 の層化と、行 15 の parametrization の結線方式（重みの置換か層ラッパーか）。
+  → **2026-10-11 D-A で推奨形により実装へ進む。公開形は #3025 の記録を正とし、結線方式は #3046（適用記録は §5 末尾）。**
 
 **公開先の要確認（§5 の適用記録と、機能の性質が食い違う点。記録は書き換えていない）**
 
@@ -2663,6 +2664,53 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（経路 2。イシュー #2974・親 #2541・Phase 11-1。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6097478475`）**: 参照モデル `Mlp`／`LeNet`（examples の利用者コード。#2201）を `fandhe_ai::models::{Mlp, LeNet}` として公開した（`lib.rs` の `pub mod models;`、`models/mod.rs` の `pub use` 2 文。サブモジュールは非公開・クレートルートへ再エクスポートしない）。公開メソッドは両モデルの `new`・`forward`・`predict`・`sequential`・`sequential_mut` と、`Mlp::with_seed`・`Mlp::dropout`・`LeNet::num_classes`。PyTorch 対応表（`pytorch_param_map`・`MlpParamMap`・`LeNetParamMap`）と `ReferenceModule`／`Trainable` の trait 化は公開せず examples に残す。保存は `sequential()` 経由で既存の `save_model`／`load_model` を使い、新しい保存経路は足していない。`crates/facade/tests/api_surface.rs` に正ガード 6 件（`models_is_public_and_submodules_stay_private`・`facade_exposes_models_items_only_in_approved_shape`・同 `_detects_each_category`・`models_unapproved_paths_are_absent`・`models_items_are_reachable_via_facade_models_path`・`models_usage_doctest_is_present_and_compiled`）を追加した。不変事項: 依存追加なし・tolerance／baseline／ガードレール閾値の変更なし・`docs/spec/` 不変・新規 `unsafe` なし。`ResNet`／`TransformerClassifier` は後続の Phase 11-2 で扱う（#2541 は 2 段完了後に閉じる）。詳細は `docs/reference-models-decision.md` §11.6〜§11.7。
 
 **適用記録（経路 2。イシュー #2975・親 #2541・Phase 11-2。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6097478475`）**: 参照モデル `ResNet`／`ResNetBlock`／`TransformerClassifier`／`TransformerClassifierConfig`（examples の利用者コード。#2202。旧名 `Transformer`／`TransformerConfig` は `nn::Transformer` との衝突を避けて改名）を `fandhe_ai::models` として公開した（`models/mod.rs` の `pub use` 4 文を追加。サブモジュールは非公開・クレートルートへ再エクスポートしない）。公開メソッドは `ResNet`／`TransformerClassifier` の `new`・`forward`・`predict`・`named_parameters`・`set_training`・`training`・`train_step` とゲッター（`ResNet::{depth, width, num_classes, num_blocks, blocks}`・`TransformerClassifier::config`・`TransformerClassifierConfig::cifar10`）、`ResNetBlock::has_projection_shortcut` のみ。`ReferenceModule`／`Trainable` の trait 化と学習ユーティリティは公開せず examples に残す。保存経路は持たない。正ガードは `api_surface.rs` の #2974 節を 6 名へ拡張した。不変事項: 依存追加なし・tolerance／baseline／ガードレール閾値の変更なし・`docs/spec/` 不変・新規 `unsafe` なし。#2541 は 2 段完了。詳細は `docs/reference-models-decision.md` §11.8。
+
+**適用記録（2026-10-11 所有者判断 D-A／D-B／D-C／D-P／D-0。イシュー #3020・親 #3018。承認: 2026-10-11 の所有者判断〈#3018 ツリー起票の根拠。#3020 本文に記載〉）**: 経路は本節の手続き 2（ユーザー承認）に当たる。本記録は所有者判断の**記録の反映**であり、新規の承認ではない。公開 API・依存・tolerance・baseline・`docs/spec/` は変更しない。各項目は「実装へ進める」承認であり、個別の依存最終承認・spec 改訂・実機手配・個々の `unsafe` 監査は下表のとおり別ゲートとして残る。
+
+*D-A（推奨形で一括承認。従来の保留のまま実装できる項目）*:
+
+| 項目 | 従来の保留の所在 | 公開形の正 | 担当 issue |
+|------|------------------|------------|-----------|
+| 3D 層化（pool3d・convT3d・unpool・fold・lrn） | 本節 5.1 行 12〜15・`autodiff-pool3d-ops-decision.md`／`autodiff-conv-transpose3d-max-unpool-decision.md`／`autodiff-fold-unfold-decision.md`／`autodiff-lrn-weight-reparam-decision.md` | #3025 の決定記録 | #3025〜#3046 |
+| SWA の fit 結線 | `autodiff-swa-decision.md` §7 | 同 issue の決定記録（`autodiff-swa-decision.md` §15） | #3056 |
+| `save_model` の kind 追加 | 各保存経路の決定記録 | 同 issue の決定記録 | #3051 |
+| `vmap(grad)` | `autodiff-functional-transforms-design.md` §27.5 | 同 issue の決定記録 | #3069 |
+| `jvp` の拡張（複数入力・微分可能な `jvp`） | `autodiff-functional-transforms-design.md` §27.5 | 同 issue の決定記録 | #3062・#3065 |
+| 二階微分の対象 Op 拡張 | `autodiff-higher-order-grad-decision.md` §16・§19.4 | 同 issue の決定記録 | #3075 |
+| Unicode（`TextVectorization`） | 各決定記録 | 同 issue の決定記録 | #3089 |
+| 出力モード（`TextVectorization`・`StringLookup` 相当） | 各決定記録 | 同 issue の決定記録 | #3090 |
+| generate 系 | 各決定記録 | 同 issue の決定記録 | #3094〜#3108（D-A に含まれる範囲と #3114〈グラフコンパイル区分 B〉は Phase 4 親 #3088 配下の各 issue の決定記録を正とする） |
+| `ModelRegistry` 書き込み | 各決定記録 | 同 issue の決定記録 | #3117 |
+
+条件: 各 issue で決定記録に公開形を書き、その形のまま実装まで進む。**記録に形が無い点だけ承認依頼へ戻す**。
+
+*D-B（実装へ進める 4 件。各ゲートは残る）*:
+
+| 項目 | 担当 issue | 残るゲート |
+|------|-----------|-----------|
+| HTTPS ダウンロード | #3121 | 依存クレートの最終承認（`deps-policy.md`。依存の追加・更新はユーザー承認必須） |
+| HF Hub 連携（別クレート） | #3128 | 同上 |
+| DDP | #3141 配下 | 依存の最終承認・spec の改訂（条件表は #3142 で fandhe-ai-spec へ起票）・実機の手配 |
+| ROCm | #3150 配下 | 依存の最終承認・spec の改訂（格上げは #3151 で fandhe-ai-spec へ起票）・実機の手配（#3152） |
+
+*D-C（性能側の 4 件）*:
+
+| 項目 | 担当 issue | 備考 |
+|------|-----------|------|
+| SME カーネルの本番化 | #3229 | — |
+| 入力勾配の計算省略 | #3244 | — |
+| GPU 線形代数の `unsafe`（Phase 5） | Phase 5 配下 | 個々の `unsafe` ブロックの security-auditor 監査は従来どおり必須（監査記録は #3134） |
+| ベンチ fandhe 側の非対称是正 | #3263 | — |
+
+**D-C の範囲外は未承認**: 新しい `unsafe`・公開 API の追加・既定精度（#3262 は所有者確認の issue）は、Phase 11 の決定記録 issue で個別に確認を得る。
+
+*D-0*: 除外名は**対象外で確定（2026-10-11）**。除外名は `Var::custom` 系・`functional_ops` 自由関数・gradcheck 自由関数・`elementwise_loss_ops`／`margin_focal_loss_ops`／`fold_ops` の再エクスポート・`norm_except_dim`・`Tensor` の npy inherent・`FitConfig` への EMA である。層型名は含めない。残りの確認項目は #3021、層型名の方針は #3022 で扱う。
+
+*D-P*: 性能は相手（比較対象のフレームワーク）を上回ることを目標とする。これは目標の記録であり、既存の tolerance・baseline・REQ-2 判定の変更ではなく、新しい承認でもない。
+
+本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。依存追加なし・tolerance／baseline／ガードレール閾値の変更なし・`docs/spec/` 不変・新規 `unsafe` なし。
+
+**適用記録（イシュー #3022・親 #3018。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3022#issuecomment-6111750000`）**: nn 層型名の公開方針を決定記録 `docs/facade-nn-layer-type-exposure-decision.md` に記録した（コード変更なし）。推奨は (i)+(iv) で、層型名の一括公開はせず、型名を名指しする必要・facade 単独の呼び出し経路・正ガード同時追加の 3 条件を満たす場合のみ個別承認で出す。`SpatialLayersHoldDoctestGuard` の 5 型（`ConvTranspose1d`・`Upsample`・`ZeroPad2d`・`Identity`・`Unflatten`）は公開対象外として確定し、ガードは現状維持。承認は推奨形への包括承認であり、本書 1 節の対象範囲表は変更していない。`crates/**`・`docs/spec`・依存・tolerance／baseline は不変。
 
 **適用記録（イシュー #3021・親 #3019・ルート #3018 Phase 1。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3021#issuecomment-6111746880`）**: 対応表（`docs/perf/framework-compare-feature-matrix-0.11.0.md`）で「対象外」または「不算入」として確定する 10 項目の所有者確認結果を記録する。項目 1 は 2026-10-11 に所有者が確定済み。項目 2〜10 は 2026-10-12 の所有者回答（上記コメント）で全て推奨どおりと確定した。「変更」と回答された項目は無いため、実装 issue の起票提案（`update-issue-tree`）は不要である。区分の意味は次のとおり。「対象外」は承認済みの非目標で対応表の行を下げない。「不算入」は注記として残し行の判定に使わない（項目 4・7）。項目 9・10 は「条件付き」とする。
 

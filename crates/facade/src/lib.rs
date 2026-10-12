@@ -165,8 +165,12 @@ pub mod nn;
 /// [`interop::onnx`]（ONNX import／export。`OnnxModel`／`OnnxValue`／
 /// `OnnxError`・`OnnxModel::{from_bytes, from_path, from_path_with_limits, run,
 /// to_bytes, to_path}`・`OnnxExportOptions`・`OnnxExternalDataLimits`
-/// 〈external data 読み込み予算。#2360〉。export は #2018 で公開済み・roundtrip
-/// export ラッパー限定）に加え、[`interop::safetensors`]（safetensors
+/// 〈external data 読み込み予算。#2360〉。export は 2 経路で、`to_bytes`／`to_path`
+/// は import 済みモデルの roundtrip export〈#2018〉、`OnnxModel::from_sequential`
+/// は `compat::Sequential` の対応 6 層〈`Linear`／`ReLU`／`Softmax`／`LayerNorm`／
+/// `GELU`〈erf 版〉／`Conv2d`。#2037・#2076〉から ONNX グラフを組み立てる。対応外の層は
+/// `UnsupportedLayer` で拒否する。`docs/facade-onnx-export-exposure-decision.md` §17）
+/// に加え、[`interop::safetensors`]（safetensors
 /// save／load 純再エクスポート。イシュー #2019）と [`interop::npy`]（npy／npz
 /// 読み書き純再エクスポート。イシュー #2590）を提供する
 /// （`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-

@@ -297,3 +297,10 @@ impl<'t> Var<'t> {
 - **テスト**: `crates/facade/tests/fold_unfold_lrn_weight_reparam_var_delegates.rs`（シグネチャ固定・自由関数との bit 一致〈値・`dv`／`dg`・`spectral_norm` の更新後 `u`／`v` と `training = false` の状態不変〉・`g = ‖v‖` の恒等・型付きエラーと失敗時の状態不変）。`lrn_weight_reparam_backend_parity.rs` は `Var` メソッド経由に切り替えた（テスト名・`#[ignore]`・判定・tolerance は不変）。
 - **実機**: CUDA／Metal は未実測（`docs/perf/logs/lrn-weight-reparam-2646/README.md` の記入欄は未記入のまま）。
 - **保留継続**: 層化（`nn::LocalResponseNorm`・`Sequential::add_*`・保存復元フック）、重み再パラメータ化の結線方式、`Tape`／`Tensor<f32>` 上の同名メソッド、モジュール再エクスポート。
+
+## 14. 2026-10-11 所有者判断の反映（#3020）
+
+- LRN の層化（`nn::LocalResponseNorm`）は #3042、weight_norm／spectral_norm の結線は #3046。結線方式は #3025 の記録で決める。保留継続は D-A で解除する。
+- 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
+- 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
+- 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。

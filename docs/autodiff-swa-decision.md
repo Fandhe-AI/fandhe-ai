@@ -150,3 +150,10 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
   （`optim.rs` の承認 2 文＋`optim_swa.rs` の宣言 1 件・メソッド名禁止）へ反転し、`swa_types_are_reachable_via_facade_only`・`swa_usage_doctests_are_present_and_compiled` を追加した。
   `compat_sequential_swa_manual.rs` は `fandhe_ai::optim::AveragedModel` 経由へ切り替えた。
 - 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。
+
+## 15. 2026-10-11 所有者判断の反映（#3020）
+
+- §7 の「fit への結線は初回公開形に含めない」は、D-A により推奨形で実装へ進む。担当は #3056。公開形は同 issue で本記録に書く。
+- 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
+- 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
+- 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
