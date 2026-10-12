@@ -2709,3 +2709,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 *D-P*: 性能は相手（比較対象のフレームワーク）を上回ることを目標とする。これは目標の記録であり、既存の tolerance・baseline・REQ-2 判定の変更ではなく、新しい承認でもない。
 
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。依存追加なし・tolerance／baseline／ガードレール閾値の変更なし・`docs/spec/` 不変・新規 `unsafe` なし。
+
+**適用記録（イシュー #3022・親 #3018。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3022#issuecomment-6111750000`）**: nn 層型名の公開方針を決定記録 `docs/facade-nn-layer-type-exposure-decision.md` に記録した（コード変更なし）。推奨は (i)+(iv) で、層型名の一括公開はせず、型名を名指しする必要・facade 単独の呼び出し経路・正ガード同時追加の 3 条件を満たす場合のみ個別承認で出す。`SpatialLayersHoldDoctestGuard` の 5 型（`ConvTranspose1d`・`Upsample`・`ZeroPad2d`・`Identity`・`Unflatten`）は公開対象外として確定し、ガードは現状維持。承認は推奨形への包括承認であり、本書 1 節の対象範囲表は変更していない。`crates/**`・`docs/spec`・依存・tolerance／baseline は不変。
