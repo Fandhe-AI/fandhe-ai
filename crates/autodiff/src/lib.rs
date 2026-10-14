@@ -309,7 +309,7 @@ pub mod pad_ops;
 pub mod pool3d_ops;
 // ConvTranspose3d と MaxUnpool1d／2d／3d（`conv_transpose3d`・`max_unpool{1,2,3}d`。イシュー #2644）。
 // `Var` の 1 行委譲メソッドとして #2850 で facade へ公開済み（モジュール自体は再エクスポートしない。
-// autodiff 側の `nn::ConvTranspose3d` は #3031 で追加済み、facade 側の `Sequential::add_conv_transpose3d` は #3032 で公開済み（`add_max_unpool*` の層化は保留継続）。
+// autodiff 側の `nn::ConvTranspose3d` は #3031 で追加済み、facade 側の `Sequential::add_conv_transpose3d` は #3032 で公開済み（`nn::MaxUnpool{1,2,3}d` は #3035 で追加済み。facade 側は未公開）。
 // `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12・§13・§16）。
 pub mod conv_transpose3d_ops;
 // Fold／Unfold（`fold`・`unfold`。イシュー #2645）。既存 `im2col`／`col2im` の再利用。`Var` の 1 行委譲

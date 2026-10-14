@@ -345,3 +345,13 @@ impl<'t> Var<'t> {
 
 - facade の `compat::Sequential::add_conv_transpose3d` を公開した（公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` §3・§17）。§16 の層 struct `nn::ConvTranspose3d` を `bias = true` で生成する薄い層結線で、autodiff 側のコード変更はコメントのみ。
 - `ConvTranspose3dMaxUnpoolHoldDoctestGuard` は `add_conv_transpose3d` の分だけ反転。保存（kind `conv_transpose3d`）は #3033 で対応済み、常駐は `Unsupported`。facade 越しの `predict`／`forward`／学習 1 step は `Var::conv_transpose3d` 直書きの参照と bit 一致を確認した。
+
+## 18. #3035 実施記録（`nn::MaxUnpool1d`・`2d`・`3d` の層 struct）
+
+- **追加した型**: `fandhe_ai_autodiff::nn::MaxUnpool1d`・`MaxUnpool2d`・`MaxUnpool3d`（`crates/autodiff/src/nn/max_unpool.rs`。公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` §3・§6・§12）。`new(kernel_size, stride: Option<..>, padding) -> Result<Self, AutodiffError>`、固有メソッド `forward(&self, input, indices, output_size)`。無状態で `Debug`／`Clone`／`PartialEq`。
+- **構築時の検査**: `kernel_size`・`stride = Some(..)` の 0 軸、`2 * padding` の `usize` オーバーフローを `InvalidArgument` で拒否する。`padding` と `kernel_size` の大小は入力長に依存するため構築時には検査せず、forward 側（`max_unpool_layout`）の `Shape` エラーに任せる。`stride = None` は `kernel_size` に解決して保持する。
+- **委譲**: `forward` は `Var::max_unpool{1,2,3}d` へ 1 行委譲する。新規 `Op`／`BackendOps`／カーネルなし。forward 値・入力勾配は直呼びと bit 一致（重複索引の勾配規則は §12.2(a) のまま）。
+- **`Module`／`as_*` フックを設けない理由**: 入力が値と索引 `Tensor<i32>` の 2 つで `Module::forward`（単入力・単出力）に載らないため（#3025 §3・§12 の読み替え）。Issue #3035 本文・受入条件にある `Module` 実装と `as_*` フックの記述とは差があるが、Issue 本文自身が公開形を #3025 の記録に委ねているため記録に従った。Issue 本文の調整は `update-issue-tree` での対応を要する。
+- **テスト**: `crates/autodiff/tests/nn_max_unpool.rs`（構築・forward の型付きエラーと孤児ノードなし・直呼びとの forward 値／入力勾配 bit 一致・`output_size`／padding／重複索引・再利用性）。
+- **未変更**: facade の公開面・`FunctionalBuilder` の pool／unpool ノード・`save_model`・`Sequential::add_max_unpool*`（設けない。#3025 §6）。
+- **実機**: CUDA／Metal は未実測。依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。

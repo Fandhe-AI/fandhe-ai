@@ -247,6 +247,7 @@ mod forward_hook;
 mod identity;
 pub mod init;
 mod linear;
+mod max_unpool;
 mod module;
 mod norm;
 mod normalization;
@@ -292,6 +293,7 @@ pub use flatten::Flatten;
 pub use forward_hook::{ForwardHookCtx, ForwardHooked};
 pub use identity::Identity;
 pub use linear::{Linear, LinearVars, linear_forward_low_precision};
+pub use max_unpool::{MaxUnpool1d, MaxUnpool2d, MaxUnpool3d};
 pub use module::{Module, RequiresGradSnapshot};
 pub use norm::{
     LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, RMS_NORM_DEFAULT_EPS, RmsNorm, RmsNormVars,
