@@ -313,7 +313,8 @@ pub mod pool3d_ops;
 // `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12・§13・§16）。
 pub mod conv_transpose3d_ops;
 // Fold／Unfold（`fold`・`unfold`。イシュー #2645）。既存 `im2col`／`col2im` の再利用。`Var` の 1 行委譲
-// メソッドとして #2851 で facade へ公開済み（モジュール自体は再エクスポートしない。層化は保留継続。
+// メソッドとして #2851 で facade へ公開済み（モジュール自体は再エクスポートしない。autodiff 側の層 struct
+// `nn::Fold`／`Unfold` は #3039 で追加済み・facade の `Sequential::add_*` は未公開。
 // `docs/autodiff-fold-unfold-decision.md` §12・§13）。
 pub mod fold_ops;
 // LocalResponseNorm（`local_response_norm`。イシュー #2646）。`Var` の 1 行委譲メソッドとして #2851 で

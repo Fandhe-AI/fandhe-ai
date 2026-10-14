@@ -270,3 +270,11 @@ impl<'t> Var<'t> {
 
 - Fold／Unfold の層化の公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` を正とする（§3 の Unfold・Fold 行（常駐経路は §5 のとおり拒否））。
 - 基づく判断: 2026-10-11 の所有者判断 D-A。本節は記録の参照であり新規承認ではない。既存本文は書き換えていない。
+
+## 16. #3039 実施記録（autodiff 側の層 struct）
+
+- `crates/autodiff/src/nn/fold.rs` に `nn::Unfold`・`nn::Fold` を追加した（公開形は #3025 の記録 §3 のとおり。引数順は `kernel_size, stride, padding, dilation`、`Fold` は先頭に `output_size`）。`Var::unfold`／`fold` への 1 行委譲で、新規 `Op`／`BackendOps`／VJP／カーネルは無い。
+- `new` は `Conv2dParams::new` の検査（0 の kernel／stride／dilation・`2*padding` オーバーフロー）を再利用して前倒しし、`Fold` の `output_size` の 0 は forward 時と同じ `ShapeError::ShapeMismatch` で拒否する。窓超過・`K`／`L` 不整合・rank は入力 shape 依存のため forward 時に拒否される（孤児ノード無し）。
+- `Module` 実装は `nn/module.rs`。`supports_forward_host()=false`（tape 経路との bit 一致が未検証の host 経路を作らない）、`is_pooling()=false`、無状態。`Module::as_unfold`／`as_fold`（既定 `None`・読み取り専用）を追加した。既存フックの追加のみで非破壊。後続の facade 結線が使わない場合は撤去してよい。
+- facade（`Sequential::add_fold`／`add_unfold`・`LayerSpec`・`save_model` kind・保留ガード反転）は未変更で後続 issue の範囲。CUDA／Metal 実機は未実測。依存・tolerance・`docs/spec` は変更していない。既存本文は書き換えていない。
+- テスト: `crates/autodiff/tests/nn_fold_unfold.rs`（`Var` 直呼びとの forward・入力勾配 bit 一致、往復、非有限値、不正引数拒否、孤児ノード無し、フック）。

@@ -233,6 +233,9 @@
 //! （backward hook は `Tape::register_backward_hook`。設計記録
 //! `docs/autodiff-forward-backward-hooks-design.md` §5.3・§17）。新規
 //! `Op`／`BackendOps`／VJP／カーネルは追加しない。facade 公開は #2587 で行う。
+//! イシュー #3039（親 #3018）で `fold` モジュールの [`Unfold`]／[`Fold`]（`Var::unfold`／`fold` への
+//! 1 行委譲の無状態層）を追加した。新規 `Op`／`BackendOps`／VJP／カーネルは無い。facade の
+//! `Sequential::add_*` は後続 issue の範囲。
 
 mod attention;
 mod batch_norm;
@@ -243,6 +246,7 @@ mod ema;
 mod embedding;
 mod embedding_bag;
 mod flatten;
+mod fold;
 mod forward_hook;
 mod identity;
 pub mod init;
@@ -290,6 +294,7 @@ pub use embedding::{Embedding, EmbeddingVars};
 pub(crate) use embedding_bag::embedding_bag_forward;
 pub use embedding_bag::{EmbeddingBag, EmbeddingBagMode, EmbeddingBagVars};
 pub use flatten::Flatten;
+pub use fold::{Fold, Unfold};
 pub use forward_hook::{ForwardHookCtx, ForwardHooked};
 pub use identity::Identity;
 pub use linear::{Linear, LinearVars, linear_forward_low_precision};
