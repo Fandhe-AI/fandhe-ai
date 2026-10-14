@@ -1959,8 +1959,9 @@ tolerance／baseline・`docs/spec/` は不変。実機 parity は #2143 の申�
 （薄い委譲メソッド）の 4 名として公開した（forward 本体は `autodiff::nn` 内 `pub(crate)` の共有関数へ集約。
 型の再エクスポート・自由関数での公開は行わない。追加 API のみで `fandhe-ai =0.10.0` の公開 API は非破壊）。
 新規の `Op`／`BackendOps`／VJP は追加していない。学習経路（`bind`／`trainable_*`／`apply_parameters`）へ
-結線し、`ConvTranspose1d` の常駐経路は `Unsupported`、`save_model` は両層とも `UnsupportedModel` で
-fail-closed（manifest 未対応。決定記録 §6 実装記録）。保留ガードは該当名のみ縮小し、承認形だけを許す正ガード
+結線し、`ConvTranspose1d` の常駐経路は `Unsupported`。`save_model` は当初両層とも `UnsupportedModel` で
+fail-closed（manifest 未対応。決定記録 §6 実装記録）だったが、イシュー #3055 で manifest kind
+`conv_transpose1d`／`unflatten` により保存・復元に対応した（ONNX export は引き続き未対応。`docs/compat-model-io-decision.md` 追補 #3055）。保留ガードは該当名のみ縮小し、承認形だけを許す正ガード
 4 件を新設した。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・`docs/spec/` は不変。
 残り 3 層は #2522 の担当。実機 parity は #2159 の申し送りが有効。
 

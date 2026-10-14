@@ -9,11 +9,12 @@
 //! - 学習経路: `trainable_parameters`／`bind().trainable_vars()`／`trainable_grads()`／
 //!   `state_dict` の順序・件数の一致、`apply_parameters` の shape 保存更新、SGD で loss 減少。
 //! - 常駐経路: `ConvTranspose1d` は `BackendError::Unsupported`、`Unflatten` のみは通過。
-//! - 保存・ONNX export: manifest／opset が未対応のため型付きエラーで fail-closed。
+//! - 保存は manifest kind で往復できる（イシュー #3055）。ONNX export は opset 未対応のため
+//!   型付きエラーで fail-closed。
 
 use std::path::PathBuf;
 
-use fandhe_ai::compat::{FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model};
+use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, save_model};
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
@@ -307,7 +308,7 @@ fn resident_path_rejects_conv_transpose1d_but_not_unflatten() {
 // ---------------------------------------------------------------- 保存・ONNX（fail-closed）
 
 #[test]
-fn save_model_rejects_both_layers_without_touching_dir() {
+fn save_model_accepts_both_layers() {
     for (tag, model) in [
         (
             "ct1d",
@@ -321,12 +322,9 @@ fn save_model_rejects_both_layers_without_touching_dir() {
         ),
     ] {
         let dir = unique_missing_dir(tag);
-        let err = save_model(&model, &dir).unwrap_err();
-        assert!(
-            matches!(err, ModelIoError::UnsupportedModel { .. }),
-            "{tag}: {err:?}"
-        );
-        assert!(!dir.exists(), "{tag}: 拒否時に保存先を作ってはならない");
+        save_model(&model, &dir).unwrap_or_else(|e| panic!("{tag}: 保存できるはず: {e:?}"));
+        assert!(dir.join("manifest.json").exists(), "{tag}");
+        std::fs::remove_dir_all(&dir).expect("後始末");
     }
 }
 

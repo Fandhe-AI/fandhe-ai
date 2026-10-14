@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 53 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 55 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -311,7 +311,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 53 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 55 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -340,6 +340,8 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Conv3d { .. } => Some("conv3d"),
         LayerSpec::ConvTranspose2d { .. } => Some("conv_transpose2d"),
         LayerSpec::Conv1d { .. } => Some("conv1d"),
+        LayerSpec::ConvTranspose1d { .. } => Some("conv_transpose1d"),
+        LayerSpec::Unflatten { .. } => Some("unflatten"),
         LayerSpec::LayerNorm { .. } => Some("layer_norm"),
         LayerSpec::RmsNorm { .. } => Some("rms_norm"),
         LayerSpec::BatchNorm1d { .. } => Some("batch_norm1d"),
@@ -508,6 +510,24 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
             ),
             ("bias", vec![*out_channels]),
         ],
+        // イシュー #3055: weight は `[in, out/groups, k]`（Conv1d と先頭 2 軸が逆）。
+        LayerSpec::ConvTranspose1d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            groups,
+            ..
+        } => vec![
+            (
+                "weight",
+                vec![
+                    *in_channels,
+                    out_channels.checked_div(*groups).unwrap_or(0),
+                    *kernel_size,
+                ],
+            ),
+            ("bias", vec![*out_channels]),
+        ],
         LayerSpec::Conv1d {
             in_channels,
             out_channels,
@@ -600,6 +620,7 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::AdaptiveMaxPool1d { .. }
         | LayerSpec::GlobalPool { .. }
         | LayerSpec::Upsample { .. }
+        | LayerSpec::Unflatten { .. }
         | LayerSpec::ZeroPad2d { .. }
         | LayerSpec::Identity
         | LayerSpec::GroupNorm { .. }
@@ -793,6 +814,11 @@ fn put_opt_pair(f: &mut ParamFields, base: &str, v: Option<[usize; 2]>) {
 /// 確保しないための上限。`InterpolateMode::Trilinear` の 3 軸が最大。イシュー #2522）。
 const UPSAMPLE_MAX_SIZE_LEN: usize = 3;
 
+/// `Unflatten` の `sizes` に許す軸数の上限（`size_0`..`size_7` の固定キー。`MAX_OBJECT_KEYS`
+/// に対し `dim`・`size_len` と合わせて 10 キーで収める。`Upsample` と同型。イシュー #3055・
+/// 決定記録 `docs/compat-model-io-decision.md` の #3052 追補 §1）。
+const UNFLATTEN_MAX_SIZE_LEN: usize = 8;
+
 /// `InterpolateMode` ↔ manifest 文字列 + `align_corners`（allowlist の正）。
 /// `InterpolateMode` は `#[non_exhaustive]` のため、未知 variant は `None`（保存側が
 /// `UnsupportedModel` で fail-closed にする）。`align_corners` を持たない mode は常に `false`。
@@ -974,6 +1000,33 @@ fn render_params(spec: &LayerSpec) -> String {
             put_num(&mut f, "padding", *padding);
             put_num(&mut f, "dilation", *dilation);
             put_num(&mut f, "groups", *groups);
+        }
+        LayerSpec::ConvTranspose1d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+        } => {
+            put_num(&mut f, "in_channels", *in_channels);
+            put_num(&mut f, "out_channels", *out_channels);
+            put_num(&mut f, "kernel_size", *kernel_size);
+            put_num(&mut f, "stride", *stride);
+            put_num(&mut f, "padding", *padding);
+            put_num(&mut f, "output_padding", *output_padding);
+            put_num(&mut f, "dilation", *dilation);
+            put_num(&mut f, "groups", *groups);
+        }
+        LayerSpec::Unflatten { dim, sizes } => {
+            // 保存前検査（`collect_checked_state`）で 1..=8 軸を確認済み。
+            put_num(&mut f, "dim", *dim);
+            put_num(&mut f, "size_len", sizes.len());
+            for i in 0..UNFLATTEN_MAX_SIZE_LEN {
+                put_opt(&mut f, &format!("size_{i}"), sizes.get(i).copied());
+            }
         }
         LayerSpec::LayerNorm {
             normalized_size,
@@ -1318,6 +1371,16 @@ fn collect_checked_state(model: &Sequential) -> Result<CheckedState, ModelIoErro
                 reason: format!(
                     "層 {i}（upsample）の size 軸数（{}）または mode が保存に未対応です",
                     size.len()
+                ),
+            });
+        }
+        if let LayerSpec::Unflatten { sizes, .. } = spec
+            && !(1..=UNFLATTEN_MAX_SIZE_LEN).contains(&sizes.len())
+        {
+            return Err(ModelIoError::UnsupportedModel {
+                reason: format!(
+                    "層 {i}（unflatten）の sizes 軸数（{}）が 1..={UNFLATTEN_MAX_SIZE_LEN} の範囲外のため保存できません",
+                    sizes.len()
                 ),
             });
         }
@@ -1974,6 +2037,31 @@ fn build_model(
                     *groups,
                     0,
                 )
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::ConvTranspose1d {
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                padding,
+                output_padding,
+                dilation,
+                groups,
+            } => model
+                .add_conv_transpose1d(
+                    *in_channels,
+                    *out_channels,
+                    *kernel_size,
+                    *stride,
+                    *padding,
+                    *output_padding,
+                    *dilation,
+                    *groups,
+                    0,
+                )
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Unflatten { dim, sizes } => model
+                .add_unflatten(*dim, sizes.clone())
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::LayerNorm {
                 normalized_size,
@@ -2868,6 +2956,65 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 groups,
             })
         }
+        "conv_transpose1d" => {
+            let p = Params::new(
+                params,
+                &[
+                    "in_channels",
+                    "out_channels",
+                    "kernel_size",
+                    "stride",
+                    "padding",
+                    "output_padding",
+                    "dilation",
+                    "groups",
+                ],
+            )?;
+            let in_channels = p.usize("in_channels")?;
+            let out_channels = p.usize("out_channels")?;
+            let groups = p.usize("groups")?;
+            check_conv_groups(in_channels, out_channels, groups)?;
+            Ok(LayerSpec::ConvTranspose1d {
+                in_channels,
+                out_channels,
+                kernel_size: p.usize("kernel_size")?,
+                stride: p.usize("stride")?,
+                padding: p.usize("padding")?,
+                output_padding: p.usize("output_padding")?,
+                dilation: p.usize("dilation")?,
+                groups,
+            })
+        }
+        "unflatten" => {
+            let p = Params::new(
+                params,
+                &[
+                    "dim", "size_len", "size_0", "size_1", "size_2", "size_3", "size_4", "size_5",
+                    "size_6", "size_7",
+                ],
+            )?;
+            let dim = p.usize("dim")?;
+            let size_len = p.usize("size_len")?;
+            if !(1..=UNFLATTEN_MAX_SIZE_LEN).contains(&size_len) {
+                return Err(manifest_error(
+                    "unflatten の size_len は 1..=8 である必要があります",
+                ));
+            }
+            let mut sizes = Vec::with_capacity(size_len);
+            for i in 0..UNFLATTEN_MAX_SIZE_LEN {
+                let v = p.opt_usize(&format!("size_{i}"))?;
+                match (i < size_len, v) {
+                    (true, Some(x)) => sizes.push(x),
+                    (false, None) => {}
+                    _ => {
+                        return Err(manifest_error(
+                            "unflatten の size_i は size_len 未満が整数、以上が null である必要があります",
+                        ));
+                    }
+                }
+            }
+            Ok(LayerSpec::Unflatten { dim, sizes })
+        }
         "layer_norm" => {
             let p = Params::new(params, &["normalized_size", "eps"])?;
             Ok(LayerSpec::LayerNorm {
@@ -3613,7 +3760,7 @@ mod tests {
         ));
     }
 
-    /// 53 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 55 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3828,6 +3975,20 @@ mod tests {
                 mode: GlobalPoolMode::Max,
                 keepdims: false,
             },
+            LayerSpec::ConvTranspose1d {
+                in_channels: 4,
+                out_channels: 6,
+                kernel_size: 3,
+                stride: 2,
+                padding: 1,
+                output_padding: 1,
+                dilation: 2,
+                groups: 2,
+            },
+            LayerSpec::Unflatten {
+                dim: 1,
+                sizes: vec![2, 3, 4],
+            },
             LayerSpec::Upsample {
                 size: vec![6, 6],
                 mode: InterpolateMode::Nearest,
@@ -3858,7 +4019,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 53, "kind allowlist は 53 種: {kinds:?}");
+        assert_eq!(kinds.len(), 55, "kind allowlist は 55 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -3876,9 +4037,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 53 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 55 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("53 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("55 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -3886,7 +4047,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("53 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("55 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -4137,6 +4298,71 @@ mod tests {
                 "upsample",
                 r#"{"mode":"nearest","align_corners":false,"size_len":2,"size_0":4.5,"size_1":4,"size_2":null}"#,
             ),
+            // イシュー #3055: conv_transpose1d / unflatten の非信頼入力。
+            (
+                "conv_transpose1d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size":3,"stride":1,"padding":0,"output_padding":0,"dilation":1,"groups":0}"#,
+            ),
+            (
+                "conv_transpose1d",
+                r#"{"in_channels":4,"out_channels":3,"kernel_size":3,"stride":1,"padding":0,"output_padding":0,"dilation":1,"groups":2}"#,
+            ),
+            (
+                "conv_transpose1d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size":-3,"stride":1,"padding":0,"output_padding":0,"dilation":1,"groups":1}"#,
+            ),
+            (
+                "conv_transpose1d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size":3.5,"stride":1,"padding":0,"output_padding":0,"dilation":1,"groups":1}"#,
+            ),
+            (
+                "conv_transpose1d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size":3,"stride":1,"padding":0,"dilation":1,"groups":1}"#,
+            ),
+            (
+                "conv_transpose1d",
+                r#"{"in_channels":4,"out_channels":2,"kernel_size":3,"stride":1,"padding":0,"output_padding":0,"dilation":1,"groups":1,"x":1}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1,"size_len":0,"size_0":null,"size_1":null,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1,"size_len":9,"size_0":1,"size_1":1,"size_2":1,"size_3":1,"size_4":1,"size_5":1,"size_6":1,"size_7":1}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1,"size_len":2,"size_0":2,"size_1":2,"size_2":2,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1,"size_len":2,"size_0":2,"size_1":null,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1,"size_len":2,"size_0":-2,"size_1":2,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1,"size_len":2,"size_0":2.5,"size_1":2,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":-1,"size_len":1,"size_0":2,"size_1":null,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1.5,"size_len":1,"size_0":2,"size_1":null,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"size_len":1,"size_0":2,"size_1":null,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null}"#,
+            ),
+            (
+                "unflatten",
+                r#"{"dim":1,"size_len":1,"size_0":2,"size_1":null,"size_2":null,"size_3":null,"size_4":null,"size_5":null,"size_6":null,"size_7":null,"size_8":null}"#,
+            ),
         ] {
             assert!(
                 is_manifest_err(spec_from_kind(kind, &p(params))),
@@ -4334,7 +4560,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("53 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("55 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {
