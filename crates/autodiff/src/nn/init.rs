@@ -277,6 +277,16 @@ pub(crate) const TRANSFORMER_ENC_STACK_SEED_SALT: u64 = 16;
 /// `nn::transformer` の decoder スタック層導出用ソルト（上記参照）。
 pub(crate) const TRANSFORMER_DEC_STACK_SEED_SALT: u64 = 17;
 
+/// `Linear::parametrize_spectral_norm`（イシュー #3048。決定記録
+/// `docs/facade-weight-reparam-wiring-decision.md`）が単一の呼び出し
+/// シードから `SpectralNormState` の初期ベクトル `u0`（長さ out）・`v0`
+/// （長さ in）を独立に導出するためのソルト。既存の `WEIGHT_SEED_SALT`〜
+/// `TRANSFORMER_DEC_STACK_SEED_SALT`（0..=17）と衝突しない値（18・19）を
+/// 割り当てる。
+pub(crate) const SPECTRAL_U_SEED_SALT: u64 = 18;
+/// `SpectralNormState` の `v0` 導出用ソルト（上記参照）。
+pub(crate) const SPECTRAL_V_SEED_SALT: u64 = 19;
+
 pub(crate) fn derive_seed(seed: u64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

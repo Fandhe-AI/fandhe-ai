@@ -39396,3 +39396,130 @@ fn facade_does_not_expose_gpu_linalg_optin_detects_each_category() {
     assert!(!offense("pub use fandhe_ai_tensor_core::MatrixNormOrd;"));
     assert!(!offense("fn linalg_inv_helper() {}"));
 }
+// =====================================================================
+// イシュー #3048（親 #3018・ルート #2499）: `compat::Sequential::parametrize_weight_norm`／
+// `parametrize_spectral_norm`（Linear への weight_norm・spectral_norm 結線）の正ガード。
+// 承認形（`docs/facade-weight-reparam-wiring-decision.md` §5）は `Sequential` の公開 2 メソッド
+// （追加のみ・既存シグネチャ不変）で、本体は autodiff `Linear::parametrize_*` への委譲に限る。
+// LRN・重み再パラメータ化の保留ガード（`LrnWeightReparamHoldDoctestGuard`）の反転と
+// ソース走査インベントリテストは #3050 の担当で、本ガードはそれらに触れない。
+// =====================================================================
+
+/// 公開 2 メソッドの `fn` 名。
+const PARAMETRIZE_LINEAR_FN_NAMES: [&str; 2] =
+    ["parametrize_weight_norm", "parametrize_spectral_norm"];
+
+/// workspace 全体（`crates/*/src/`）で [`PARAMETRIZE_LINEAR_FN_NAMES`] の `fn` 宣言の定義元集合を
+/// 固定する（facade の公開メソッドと autodiff `Linear` の本体の 2 箇所ずつ。過不足とも
+/// fail-closed。迂回実装の混入検出）。
+#[test]
+fn workspace_declares_parametrize_linear_fn_names_only_in_approved_locations() {
+    let crates_dir = workspace_crates_dir();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut crate_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&crates_dir)
+        .expect("workspace crates ディレクトリが読めない")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crate_dirs.sort();
+    assert!(!crate_dirs.is_empty());
+    for crate_dir in &crate_dirs {
+        let src_dir = crate_dir.join("src");
+        if !src_dir.is_dir() {
+            continue;
+        }
+        visit_rs_files(&src_dir, &mut |path, content| {
+            let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+            let tokens = tokenize_including_punctuation(&cleaned);
+            let rel = path
+                .strip_prefix(&crates_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for fn_name in PARAMETRIZE_LINEAR_FN_NAMES {
+                let count = count_fn_declarations_by_name(&tokens, fn_name);
+                if count > 0 {
+                    *found.entry(format!("{rel}::{fn_name}")).or_insert(0) += count;
+                }
+            }
+        });
+    }
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/nn/linear.rs::parametrize_weight_norm",
+        "autodiff/src/nn/linear.rs::parametrize_spectral_norm",
+        "facade/src/compat/sequential.rs::parametrize_weight_norm",
+        "facade/src/compat/sequential.rs::parametrize_spectral_norm",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "#3048 の 2 名の fn 宣言の定義元集合が承認形とずれている: {found:?}"
+    );
+}
+
+const PARAMETRIZE_WEIGHT_NORM_PARAMS: &str =
+    "mut self, layer_index: usize, dim: Option<usize>, ) -> Result<Self, AutodiffError>";
+const PARAMETRIZE_SPECTRAL_NORM_PARAMS: &str = "mut self, layer_index: usize, n_power_iterations: usize, eps: f32, seed: u64, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential` の 2 メソッドが承認シグネチャで 1 件ずつ存在し、本体が autodiff
+/// `Linear::parametrize_*` への委譲を含む。
+#[test]
+fn compat_sequential_parametrize_linear_methods_have_approved_signatures_and_delegate() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params, delegation) in [
+        (
+            "parametrize_weight_norm",
+            PARAMETRIZE_WEIGHT_NORM_PARAMS,
+            "linear . parametrize_weight_norm ( dim ) ?",
+        ),
+        (
+            "parametrize_spectral_norm",
+            PARAMETRIZE_SPECTRAL_NORM_PARAMS,
+            "linear . parametrize_spectral_norm ( n_power_iterations , eps , seed ) ?",
+        ),
+    ] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+        let body = determinism_fn_body(&tokens, name).expect("本体が取得できる");
+        assert!(
+            body.contains(delegation),
+            "{name} の本体が autodiff Linear への委譲（{delegation}）を含まない: {body}"
+        );
+    }
+}
+
+/// [`compat_sequential_parametrize_linear_methods_have_approved_signatures_and_delegate`] の
+/// 自己テスト（不正シグネチャを拒否できること）。
+#[test]
+fn compat_sequential_parametrize_linear_signature_check_detects_offense() {
+    let ok = "pub fn parametrize_weight_norm(mut self, layer_index: usize, dim: Option<usize>,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "parametrize_weight_norm",
+        PARAMETRIZE_WEIGHT_NORM_PARAMS
+    ));
+    for bad in [
+        "pub fn parametrize_weight_norm(mut self, layer_index: usize, dim: Option<usize>) -> Self {",
+        "pub fn parametrize_weight_norm(&mut self, layer_index: usize, dim: Option<usize>) -> Result<Self, AutodiffError> {",
+        "pub fn parametrize_weight_norm(mut self, dim: Option<usize>, layer_index: usize) -> Result<Self, AutodiffError> {",
+        "pub fn parametrize_weight_norm(mut self, layer_index: usize, dim: usize) -> Result<Self, AutodiffError> {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(
+                bad,
+                "parametrize_weight_norm",
+                PARAMETRIZE_WEIGHT_NORM_PARAMS
+            ),
+            "{bad}"
+        );
+    }
+}
