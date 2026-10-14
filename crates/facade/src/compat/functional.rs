@@ -16,7 +16,10 @@
 //! `facade_exposes_functional_api_only_in_approved_shape`（承認形のインベントリ）と
 //! `lib.rs::FunctionalApiHoldDoctestGuard`（未承認経路のプローブ）が固定する。
 //!
-//! 公開メソッドは `FunctionalBuilder::{new, input, apply, concatenate, add, multiply, average, build}`、
+//! 公開メソッドは `FunctionalBuilder::{new, input, apply, concatenate, add, multiply, average,
+//! max_pool{1,2,3}d_with_indices, max_unpool{1,2,3}d, build}`（MaxPool 索引・MaxUnpool は #3036。
+//! `Sequential` には載せず本ビルダー限定。`docs/compat-sequential-3d-fold-lrn-layers-decision.md` §6。
+//! 保存は未対応で `UnsupportedModel`、対応は #3037）、
 //! `FunctionalModel::{forward, predict, set_training, train, eval, training, named_parameters, state_dict,
 //! load_state_dict, trainable_parameters, apply_parameters, compile, fit, evaluate}`。doc から非公開項目
 //! （`FunctionalVars`・`bind`）へ intra-doc link は張らない（`rustdoc::private_intra_doc_links` を避けるため）。
@@ -45,6 +48,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fandhe_ai_autodiff::merge_ops;
+use fandhe_ai_autodiff::nn::{MaxUnpool1d, MaxUnpool2d, MaxUnpool3d};
 
 use super::Sequential;
 use super::SequentialVars;
@@ -109,6 +113,105 @@ pub(super) enum MergeKind {
     Average,
 }
 
+/// `max_pool*_with_indices` ノードの次元別引数（非公開。`ceil_mode=false` 固定）。
+/// 引数型は `Var::max_pool{1,2,3}d` と一致させ、`stride: None` は raw のまま保持する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PoolSpec {
+    /// 1D（入力 `[N, C, L]`）。
+    D1 {
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        dilation: usize,
+    },
+    /// 2D（入力 `[N, C, H, W]`）。
+    D2 {
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    },
+    /// 3D（入力 `[N, C, D, H, W]`）。
+    D3 {
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        dilation: [usize; 3],
+    },
+}
+
+/// `max_unpool*` ノードの次元別引数（非公開）。構築時に `nn::MaxUnpool*::new` で検証済み。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnpoolSpec {
+    /// 1D。
+    D1 {
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        output_size: Option<usize>,
+    },
+    /// 2D。
+    D2 {
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        output_size: Option<[usize; 2]>,
+    },
+    /// 3D。
+    D3 {
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        output_size: Option<[usize; 3]>,
+    },
+}
+
+impl PoolSpec {
+    /// 次元数（unpool との対応検査用）。
+    fn dims(&self) -> usize {
+        match self {
+            PoolSpec::D1 { .. } => 1,
+            PoolSpec::D2 { .. } => 2,
+            PoolSpec::D3 { .. } => 3,
+        }
+    }
+}
+
+impl UnpoolSpec {
+    /// 次元数（pool との対応検査用）。
+    fn dims(&self) -> usize {
+        match self {
+            UnpoolSpec::D1 { .. } => 1,
+            UnpoolSpec::D2 { .. } => 2,
+            UnpoolSpec::D3 { .. } => 3,
+        }
+    }
+
+    /// 構築時検証（0 次元・`2 * padding` オーバーフロー）。`nn::MaxUnpool*::new` に委ねる。
+    fn validate(&self) -> Result<(), AutodiffError> {
+        match *self {
+            UnpoolSpec::D1 {
+                kernel_size,
+                stride,
+                padding,
+                ..
+            } => MaxUnpool1d::new(kernel_size, stride, padding).map(|_| ()),
+            UnpoolSpec::D2 {
+                kernel_size,
+                stride,
+                padding,
+                ..
+            } => MaxUnpool2d::new(kernel_size, stride, padding).map(|_| ()),
+            UnpoolSpec::D3 {
+                kernel_size,
+                stride,
+                padding,
+                ..
+            } => MaxUnpool3d::new(kernel_size, stride, padding).map(|_| ()),
+        }
+    }
+}
+
 /// グラフ上のノード定義（非公開。保存側 `model_io::functional_io` が読むため `compat` 内へ可視）。
 pub(super) enum NodeDef {
     /// 外部から値を受ける入力ノード（Keras `Input`）。
@@ -120,6 +223,14 @@ pub(super) enum NodeDef {
     },
     /// 2 件以上のノードを 1 つへ合流させる結合ノード（#2666）。層を持たない。
     Merge { kind: MergeKind, inputs: Vec<usize> },
+    /// MaxPool（値と索引を返す。#3036）。値は通常のノード値、索引は副スロットとして `eval_graph` が保持する。
+    /// `inputs` は 1 件。層を持たない。
+    MaxPoolIndices { spec: PoolSpec, inputs: Vec<usize> },
+    /// MaxUnpool（#3036）。`inputs` は `[特徴量ノード, 索引元の MaxPoolIndices ノード]` の 2 件。層を持たない。
+    MaxUnpool {
+        spec: UnpoolSpec,
+        inputs: Vec<usize>,
+    },
 }
 
 impl NodeDef {
@@ -127,7 +238,10 @@ impl NodeDef {
     fn sources(&self) -> &[usize] {
         match self {
             NodeDef::Input => &[],
-            NodeDef::Block { inputs, .. } | NodeDef::Merge { inputs, .. } => inputs,
+            NodeDef::Block { inputs, .. }
+            | NodeDef::Merge { inputs, .. }
+            | NodeDef::MaxPoolIndices { inputs, .. }
+            | NodeDef::MaxUnpool { inputs, .. } => inputs,
         }
     }
 }
@@ -302,6 +416,237 @@ impl FunctionalBuilder {
             srcs.push(index);
         }
         self.push_node(NodeDef::Merge { kind, inputs: srcs })
+    }
+
+    /// 1D MaxPool ノードを追加する。値は通常のノード値、索引は [`Self::max_unpool1d`] の `indices_from`
+    /// から参照できる（`ceil_mode=false` 固定）。引数は `Var::max_pool1d` と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::FunctionalBuilder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut b = FunctionalBuilder::new();
+    /// let x = b.input()?;
+    /// let pooled = b.max_pool1d_with_indices(x, 2, None, 0, 1)?;
+    /// let up = b.max_unpool1d(pooled, pooled, 2, None, 0, None)?;
+    /// let mut model = b.build(&[x], &[up])?;
+    /// model.eval();
+    /// let input = Tensor::new(vec![1.0f32, 3.0, 2.0, 0.0], &[1, 1, 4])?;
+    /// let out = model.predict(&[&input])?;
+    /// assert_eq!(out[0].shape(), &[1, 1, 4]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn max_pool1d_with_indices(
+        &mut self,
+        input: Node,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        dilation: usize,
+    ) -> Result<Node, AutodiffError> {
+        self.add_max_pool_indices(
+            "max_pool1d_with_indices",
+            PoolSpec::D1 {
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+            },
+            input,
+        )
+    }
+
+    /// 2D MaxPool ノードを追加する（[`Self::max_pool1d_with_indices`] の 2D 版。`Var::max_pool2d` 相当）。
+    pub fn max_pool2d_with_indices(
+        &mut self,
+        input: Node,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Node, AutodiffError> {
+        self.add_max_pool_indices(
+            "max_pool2d_with_indices",
+            PoolSpec::D2 {
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+            },
+            input,
+        )
+    }
+
+    /// 3D MaxPool ノードを追加する（[`Self::max_pool1d_with_indices`] の 3D 版。`Var::max_pool3d` 相当）。
+    pub fn max_pool3d_with_indices(
+        &mut self,
+        input: Node,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        dilation: [usize; 3],
+    ) -> Result<Node, AutodiffError> {
+        self.add_max_pool_indices(
+            "max_pool3d_with_indices",
+            PoolSpec::D3 {
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+            },
+            input,
+        )
+    }
+
+    /// 1D MaxUnpool ノードを追加する。`input` は復元する特徴量ノード、`indices_from` は索引を提供する
+    /// `max_pool1d_with_indices` ノード（同次元のみ）。索引は消費されないため 1 つの pool を複数の unpool が
+    /// 参照できる。引数は `Var::max_unpool1d` と同じ。
+    ///
+    /// 拒否: 他ビルダーのハンドル・`indices_from` が同次元の pool ノードでない・0 次元・`padding` の 2 倍の
+    /// オーバーフロー。索引の範囲・shape の検査は forward 時に `Var` 側が行う。
+    pub fn max_unpool1d(
+        &mut self,
+        input: Node,
+        indices_from: Node,
+        kernel_size: usize,
+        stride: Option<usize>,
+        padding: usize,
+        output_size: Option<usize>,
+    ) -> Result<Node, AutodiffError> {
+        self.add_max_unpool(
+            "max_unpool1d",
+            UnpoolSpec::D1 {
+                kernel_size,
+                stride,
+                padding,
+                output_size,
+            },
+            input,
+            indices_from,
+        )
+    }
+
+    /// 2D MaxUnpool ノードを追加する（[`Self::max_unpool1d`] の 2D 版）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::{FunctionalBuilder, Sequential};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // SegNet 型: pool の索引を後段の unpool で再利用する。
+    /// let mut b = FunctionalBuilder::new();
+    /// let x = b.input()?;
+    /// let pooled = b.max_pool2d_with_indices(x, [2, 2], None, [0, 0], [1, 1])?;
+    /// let mid = b.apply(Sequential::new().add_relu(), pooled)?;
+    /// let up = b.max_unpool2d(mid, pooled, [2, 2], None, [0, 0], None)?;
+    /// let mut model = b.build(&[x], &[up])?;
+    /// model.eval();
+    /// let input = Tensor::new((0..16).map(|v| v as f32).collect(), &[1, 1, 4, 4])?;
+    /// let out = model.predict(&[&input])?;
+    /// assert_eq!(out[0].shape(), &[1, 1, 4, 4]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn max_unpool2d(
+        &mut self,
+        input: Node,
+        indices_from: Node,
+        kernel_size: [usize; 2],
+        stride: Option<[usize; 2]>,
+        padding: [usize; 2],
+        output_size: Option<[usize; 2]>,
+    ) -> Result<Node, AutodiffError> {
+        self.add_max_unpool(
+            "max_unpool2d",
+            UnpoolSpec::D2 {
+                kernel_size,
+                stride,
+                padding,
+                output_size,
+            },
+            input,
+            indices_from,
+        )
+    }
+
+    /// 3D MaxUnpool ノードを追加する（[`Self::max_unpool1d`] の 3D 版）。
+    pub fn max_unpool3d(
+        &mut self,
+        input: Node,
+        indices_from: Node,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        output_size: Option<[usize; 3]>,
+    ) -> Result<Node, AutodiffError> {
+        self.add_max_unpool(
+            "max_unpool3d",
+            UnpoolSpec::D3 {
+                kernel_size,
+                stride,
+                padding,
+                output_size,
+            },
+            input,
+            indices_from,
+        )
+    }
+
+    /// MaxPool ノード追加の共通処理。
+    fn add_max_pool_indices(
+        &mut self,
+        what: &str,
+        spec: PoolSpec,
+        input: Node,
+    ) -> Result<Node, AutodiffError> {
+        let src = self.resolve(input, what)?;
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(1)
+            .map_err(|_| super::alloc_failed())?;
+        inputs.push(src);
+        self.push_node(NodeDef::MaxPoolIndices { spec, inputs })
+    }
+
+    /// MaxUnpool ノード追加の共通処理。`indices_from` が同次元の MaxPoolIndices ノードであることと、
+    /// 引数（0 次元・オーバーフロー）を構築時に検査する。
+    fn add_max_unpool(
+        &mut self,
+        what: &str,
+        spec: UnpoolSpec,
+        input: Node,
+        indices_from: Node,
+    ) -> Result<Node, AutodiffError> {
+        let src = self.resolve(input, what)?;
+        let pool = self.resolve(indices_from, what)?;
+        match self.nodes.get(pool) {
+            Some(NodeDef::MaxPoolIndices {
+                spec: pool_spec, ..
+            }) => {
+                if pool_spec.dims() != spec.dims() {
+                    return Err(invalid(format!(
+                        "{what}: indices_from（ノード {pool}）の pool は {} 次元で、unpool の次元 {} と一致しない",
+                        pool_spec.dims(),
+                        spec.dims()
+                    )));
+                }
+            }
+            _ => {
+                return Err(invalid(format!(
+                    "{what}: indices_from（ノード {pool}）は max_pool*_with_indices ノードでない"
+                )));
+            }
+        }
+        spec.validate()?;
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(2)
+            .map_err(|_| super::alloc_failed())?;
+        inputs.push(src);
+        inputs.push(pool);
+        self.push_node(NodeDef::MaxUnpool { spec, inputs })
     }
 
     /// グラフを検証して [`FunctionalModel`] へ確定する（Keras `Model(inputs, outputs)`）。
@@ -484,7 +829,10 @@ impl FunctionalModel {
             .enumerate()
             .filter_map(|(i, def)| match def {
                 NodeDef::Block { block, .. } => Some((i, block.as_ref())),
-                NodeDef::Input | NodeDef::Merge { .. } => None,
+                NodeDef::Input
+                | NodeDef::Merge { .. }
+                | NodeDef::MaxPoolIndices { .. }
+                | NodeDef::MaxUnpool { .. } => None,
             })
     }
 
@@ -558,6 +906,12 @@ impl FunctionalModel {
             .try_reserve_exact(self.nodes.len())
             .map_err(|_| super::alloc_failed())?;
         values.resize(self.nodes.len(), None);
+        // MaxPoolIndices ノードの索引の副スロット（値スロットと同じ添字。pool 以外は `None`）。
+        let mut indices: Vec<Option<Tensor<i32>>> = Vec::new();
+        indices
+            .try_reserve_exact(self.nodes.len())
+            .map_err(|_| super::alloc_failed())?;
+        indices.resize(self.nodes.len(), None);
         for (slot, var) in self.inputs.iter().zip(inputs) {
             *values
                 .get_mut(*slot)
@@ -565,38 +919,109 @@ impl FunctionalModel {
                 Some(*var);
         }
         for (index, def) in self.nodes.iter().enumerate() {
-            let y = match def {
-                NodeDef::Input => continue,
-                NodeDef::Block { block, inputs } => {
-                    let [src] = inputs.as_slice() else {
-                        return Err(invalid(format!(
-                            "内部不整合: ブロックノード {index} の入力数が 1 でない"
-                        )));
-                    };
-                    let x = values
-                        .get(*src)
-                        .copied()
-                        .flatten()
-                        .ok_or_else(|| invalid(format!("内部不整合: ノード {src} が未評価")))?;
-                    eval_block(index, block.as_ref(), &x)?
-                }
-                NodeDef::Merge { kind, inputs } => {
-                    let mut xs: Vec<Var<'t>> = Vec::new();
-                    xs.try_reserve_exact(inputs.len())
-                        .map_err(|_| super::alloc_failed())?;
-                    for src in inputs {
-                        xs.push(values.get(*src).copied().flatten().ok_or_else(|| {
-                            invalid(format!("内部不整合: ノード {src} が未評価"))
-                        })?);
+            let y =
+                match def {
+                    NodeDef::Input => continue,
+                    NodeDef::Block { block, inputs } => {
+                        let [src] = inputs.as_slice() else {
+                            return Err(invalid(format!(
+                                "内部不整合: ブロックノード {index} の入力数が 1 でない"
+                            )));
+                        };
+                        let x =
+                            values.get(*src).copied().flatten().ok_or_else(|| {
+                                invalid(format!("内部不整合: ノード {src} が未評価"))
+                            })?;
+                        eval_block(index, block.as_ref(), &x)?
                     }
-                    match kind {
-                        MergeKind::Concatenate { dim } => merge_ops::merge_concatenate(&xs, *dim)?,
-                        MergeKind::Add => merge_ops::merge_add(&xs)?,
-                        MergeKind::Multiply => merge_ops::merge_multiply(&xs)?,
-                        MergeKind::Average => merge_ops::merge_average(&xs)?,
+                    NodeDef::Merge { kind, inputs } => {
+                        let mut xs: Vec<Var<'t>> = Vec::new();
+                        xs.try_reserve_exact(inputs.len())
+                            .map_err(|_| super::alloc_failed())?;
+                        for src in inputs {
+                            xs.push(values.get(*src).copied().flatten().ok_or_else(|| {
+                                invalid(format!("内部不整合: ノード {src} が未評価"))
+                            })?);
+                        }
+                        match kind {
+                            MergeKind::Concatenate { dim } => {
+                                merge_ops::merge_concatenate(&xs, *dim)?
+                            }
+                            MergeKind::Add => merge_ops::merge_add(&xs)?,
+                            MergeKind::Multiply => merge_ops::merge_multiply(&xs)?,
+                            MergeKind::Average => merge_ops::merge_average(&xs)?,
+                        }
                     }
-                }
-            };
+                    NodeDef::MaxPoolIndices { spec, inputs } => {
+                        let [src] = inputs.as_slice() else {
+                            return Err(invalid(format!(
+                                "内部不整合: MaxPool ノード {index} の入力数が 1 でない"
+                            )));
+                        };
+                        let x =
+                            values.get(*src).copied().flatten().ok_or_else(|| {
+                                invalid(format!("内部不整合: ノード {src} が未評価"))
+                            })?;
+                        let (y, idx) = match *spec {
+                            PoolSpec::D1 {
+                                kernel_size,
+                                stride,
+                                padding,
+                                dilation,
+                            } => x.max_pool1d(kernel_size, stride, padding, dilation, false)?,
+                            PoolSpec::D2 {
+                                kernel_size,
+                                stride,
+                                padding,
+                                dilation,
+                            } => x.max_pool2d(kernel_size, stride, padding, dilation, false)?,
+                            PoolSpec::D3 {
+                                kernel_size,
+                                stride,
+                                padding,
+                                dilation,
+                            } => x.max_pool3d(kernel_size, stride, padding, dilation, false)?,
+                        };
+                        *indices.get_mut(index).ok_or_else(|| {
+                            invalid(format!("内部不整合: ノード {index} が範囲外"))
+                        })? = Some(idx);
+                        y
+                    }
+                    NodeDef::MaxUnpool { spec, inputs } => {
+                        let [src, pool] = inputs.as_slice() else {
+                            return Err(invalid(format!(
+                                "内部不整合: MaxUnpool ノード {index} の入力数が 2 でない"
+                            )));
+                        };
+                        let x =
+                            values.get(*src).copied().flatten().ok_or_else(|| {
+                                invalid(format!("内部不整合: ノード {src} が未評価"))
+                            })?;
+                        let idx = indices.get(*pool).and_then(Option::as_ref).ok_or_else(|| {
+                            invalid(format!("内部不整合: ノード {pool} の索引が未評価"))
+                        })?;
+                        match *spec {
+                            UnpoolSpec::D1 {
+                                kernel_size,
+                                stride,
+                                padding,
+                                output_size,
+                            } => x.max_unpool1d(idx, kernel_size, stride, padding, output_size)?,
+                            UnpoolSpec::D2 {
+                                kernel_size,
+                                stride,
+                                padding,
+                                output_size,
+                            } => x.max_unpool2d(idx, kernel_size, stride, padding, output_size)?,
+                            UnpoolSpec::D3 {
+                                kernel_size,
+                                stride,
+                                padding,
+                                output_size,
+                            } => x.max_unpool3d(idx, kernel_size, stride, padding, output_size)?,
+                        }
+                    }
+                };
             *values
                 .get_mut(index)
                 .ok_or_else(|| invalid(format!("内部不整合: ノード {index} が範囲外")))? = Some(y);

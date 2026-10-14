@@ -5992,7 +5992,11 @@ struct Pool3dOpsHoldDoctestGuard;
 /// 残した受け手の `impl` ブロックは `Tape`・`Tensor<f32>` 上の同名メソッド分のプローブとして維持する。
 /// 引き続き拒否する未承認経路: モジュール `conv_transpose3d_ops`／`max_unpool_ops`／`conv_transpose3d`／`max_unpool`、
 /// 型 `ConvTranspose3d`／`MaxUnpool1d/2d/3d`／`MaxUnpoolLayout`、`Tape`・`Tensor<f32>` 上の同名メソッド、
-/// 層化（`compat::Sequential::add_max_unpool1d/2d/3d`。#2679 の層結線は保留継続）。
+/// `compat::Sequential::add_max_unpool1d/2d/3d`（#3036 で「公開しない経路」として確定。MaxUnpool は入力が値と索引の 2 つで
+/// `Module::forward` の単入力に載らないため `Sequential` へ層化しない。決定記録 §6 案 A）。
+/// **#3036 の整理**: MaxUnpool の公開は `compat::FunctionalBuilder::{max_pool{1,2,3}d_with_indices, max_unpool{1,2,3}d}` で行った。
+/// これらは本ガードのプローブの受け手（`Sequential`／`Tape`／`Tensor<f32>`・型名・モジュール名）に含まれないためコンパイル衝突せず、
+/// 反転すべきプローブは無い（プローブ本文は不変）。保存は未対応で `UnsupportedModel`（対応は #3037）。
 /// **#3032 での部分反転**: `compat::Sequential::add_conv_transpose3d` は決定記録 `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3 の形で公開済みのため、受け手 `Sequential` の `impl` ブロック内の同名メソッドと UFCS 行を外した（残すと inherent メソッドとの衝突でコンパイルが失敗する）。`add_max_unpool*`・`Tape`／`Tensor<f32>` 上の同名メソッド・モジュール・型名の否定は維持する。
 /// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
 /// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。

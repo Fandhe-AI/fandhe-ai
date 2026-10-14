@@ -212,6 +212,15 @@ fn prepare_functional_save(
                 layer_start,
                 layer_len: 0,
             }),
+            // MaxPool 索引・MaxUnpool ノードは manifest の op に未対応（#3037）。黙って欠落させず、
+            // `dir` へ何も書く前のこの準備段で fail-closed に拒否する。
+            NodeDef::MaxPoolIndices { .. } | NodeDef::MaxUnpool { .. } => {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: format!(
+                        "ノード {index}: max_pool*_with_indices／max_unpool* ノードを含む Functional モデルの保存は未対応です（#3037 で対応）"
+                    ),
+                });
+            }
             NodeDef::Block { block, inputs } => {
                 let layer_len = block.layers().len();
                 // 総層数の上限は `Sequential` 形式と同じ（ブロック単位でも `collect_checked_state` が検査）。
