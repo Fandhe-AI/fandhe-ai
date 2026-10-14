@@ -162,6 +162,14 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   切り替わる（`tempfile` の要求範囲内。crate の追加・削除はない）。承認済みピン
   （burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.11.0）・`deny.toml`・契約検査は
   変更しない。ライセンス・監査は `docs/license-matrix.md` 8b（2026-10-11 再実測）。
+- 2026-10-14: 所有者の明示承認（2026-10-14。framework-compare の `Cargo.lock` の
+  `rustls` を 0.23.46 へ上げることのみ。他の依存は変えない）に基づき、PR #3300 による
+  推移的依存 `rustls` の `0.23.45` → `0.23.46` 更新（パッチ版）を承認。更新理由は
+  rustls 0.23.46 未満を対象とする RustSec 勧告 RUSTSEC-2026-0346〜0349 の公開
+  （0.23.46 で修正）。`Cargo.lock` の差分は `rustls` の版・checksum のみで、crate の
+  追加・削除や他の依存の更新はない。承認済みピン（burn 0.21.0・candle-core 0.11.0・
+  fandhe-ai 0.11.0）・`deny.toml`・契約検査は変更しない。ライセンス・監査は
+  `docs/license-matrix.md` 8b（2026-10-14 再実測）。
 
 ## 5. tch-rs を計測対象に含めない判断
 
