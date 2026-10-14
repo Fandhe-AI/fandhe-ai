@@ -195,9 +195,11 @@ dependabot PR #2959（2026-10-11 所有者承認。承認記録は `docs/framewo
 
 | crate | version | license（`cargo metadata` 実測） |
 |-------|---------|-----------------------------------|
-| `rustls` | 0.23.45 | `Apache-2.0 OR ISC OR MIT` |
+| `rustls` | 0.23.46 | `Apache-2.0 OR ISC OR MIT`（2026-10-14 に 0.23.45 から更新。PR #3300） |
 | `tempfile` | 3.27.0 | `MIT OR Apache-2.0` |
 | `getrandom` | 0.3.4 | `MIT OR Apache-2.0` |
+
+PR #3300（2026-10-14 所有者承認。承認記録は `docs/framework-compare-harness-decision.md` 4 節）では、RustSec 勧告 RUSTSEC-2026-0346〜0349（rustls 0.23.46 未満が対象。0.23.46 で修正）に対応するため推移的依存 `rustls` を 0.23.45 から 0.23.46 へ更新した。`Cargo.lock` の差分は `rustls` の版・checksum のみで、crate の追加・削除や他の依存の更新はない。上表の `rustls` は 0.23.46 へ更新した。ライセンス式は `cargo metadata --locked` の実測と crates.io の公開情報の両方で `Apache-2.0 OR ISC OR MIT` であり、0.23.45 から変更はない（2026-10-14）。`cargo deny ... advisories bans licenses sources` の再実測結果は `advisories ok, bans ok, licenses ok, sources ok`（2026-10-14）。
 
 推移的依存を含む全域監査は CI（`ci.yml` の `deps-forbidden` ジョブ
 「フレームワーク横並びベンチの依存監査」ステップ）で毎回再実行し、本表への転記
