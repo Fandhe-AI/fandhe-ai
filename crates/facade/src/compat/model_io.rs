@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 60 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 62 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -311,7 +311,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 60 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 62 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -360,6 +360,8 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Transformer { .. } => Some("transformer"),
         LayerSpec::MaxPool2d { .. } => Some("max_pool2d"),
         LayerSpec::MaxPool1d { .. } => Some("max_pool1d"),
+        LayerSpec::MaxPool3d { .. } => Some("max_pool3d"),
+        LayerSpec::AvgPool3d { .. } => Some("avg_pool3d"),
         LayerSpec::AvgPool2d { .. } => Some("avg_pool2d"),
         LayerSpec::AvgPool1d { .. } => Some("avg_pool1d"),
         LayerSpec::AdaptiveAvgPool2d { .. } => Some("adaptive_avg_pool2d"),
@@ -622,6 +624,8 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::AlphaDropout { .. }
         | LayerSpec::MaxPool2d { .. }
         | LayerSpec::MaxPool1d { .. }
+        | LayerSpec::MaxPool3d { .. }
+        | LayerSpec::AvgPool3d { .. }
         | LayerSpec::AvgPool2d { .. }
         | LayerSpec::AvgPool1d { .. }
         | LayerSpec::AdaptiveAvgPool2d { .. }
@@ -818,6 +822,13 @@ fn put_triple(f: &mut ParamFields, base: &str, v: [usize; 3]) {
 fn put_opt_pair(f: &mut ParamFields, base: &str, v: Option<[usize; 2]>) {
     put_opt(f, &format!("{base}_h"), v.map(|x| x[0]));
     put_opt(f, &format!("{base}_w"), v.map(|x| x[1]));
+}
+
+/// `Option<[usize; 3]>` を `{base}_d`／`_h`／`_w` へ展開する（`put_opt_pair` の 3 軸版。#3029）。
+fn put_opt_triple(f: &mut ParamFields, base: &str, v: Option<[usize; 3]>) {
+    put_opt(f, &format!("{base}_d"), v.map(|x| x[0]));
+    put_opt(f, &format!("{base}_h"), v.map(|x| x[1]));
+    put_opt(f, &format!("{base}_w"), v.map(|x| x[2]));
 }
 
 /// `Upsample` の `size` に許す軸数の上限（`size_0`..`size_2` の固定キー。非信頼な整数から
@@ -1146,6 +1157,28 @@ fn render_params(spec: &LayerSpec) -> String {
             put_opt_pair(&mut f, "stride", *stride);
             put_pair(&mut f, "padding", *padding);
             put_pair(&mut f, "dilation", *dilation);
+        }
+        LayerSpec::MaxPool3d {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        } => {
+            put_triple(&mut f, "kernel_size", *kernel_size);
+            put_opt_triple(&mut f, "stride", *stride);
+            put_triple(&mut f, "padding", *padding);
+            put_triple(&mut f, "dilation", *dilation);
+        }
+        LayerSpec::AvgPool3d {
+            kernel_size,
+            stride,
+            padding,
+            count_include_pad,
+        } => {
+            put_triple(&mut f, "kernel_size", *kernel_size);
+            put_opt_triple(&mut f, "stride", *stride);
+            put_triple(&mut f, "padding", *padding);
+            put_bool(&mut f, "count_include_pad", *count_include_pad);
         }
         LayerSpec::MaxPool1d {
             kernel_size,
@@ -2192,6 +2225,22 @@ fn build_model(
             } => model
                 .add_max_pool2d(*kernel_size, *stride, *padding, *dilation)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::MaxPool3d {
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+            } => model
+                .add_max_pool3d(*kernel_size, *stride, *padding, *dilation)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::AvgPool3d {
+                kernel_size,
+                stride,
+                padding,
+                count_include_pad,
+            } => model
+                .add_avg_pool3d(*kernel_size, *stride, *padding, *count_include_pad)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::MaxPool1d {
                 kernel_size,
                 stride,
@@ -2746,6 +2795,23 @@ impl<'a> Params<'a> {
     }
 }
 
+impl Params<'_> {
+    /// `{base}_d`／`_h`／`_w` が「全 `null`」または「全整数」の `Option<[usize; 3]>`。
+    /// 部分 `null` は書き手が出さない形のため `Manifest` で拒否する（`opt_pair` の 3 軸版。#3029）。
+    fn opt_triple(&self, base: &str) -> Result<Option<[usize; 3]>, ModelIoError> {
+        let d = self.opt_usize(&format!("{base}_d"))?;
+        let h = self.opt_usize(&format!("{base}_h"))?;
+        let w = self.opt_usize(&format!("{base}_w"))?;
+        match (d, h, w) {
+            (Some(d), Some(h), Some(w)) => Ok(Some([d, h, w])),
+            (None, None, None) => Ok(None),
+            _ => Err(manifest_error(format!(
+                "{base}_d・{base}_h・{base}_w は全て null か全て整数である必要があります"
+            ))),
+        }
+    }
+}
+
 /// conv の groups 整合（`groups >= 1`・`in`／`out` の割り切れ）。非信頼な整数による
 /// 除算パニックを、期待 shape を導く前にここで `Manifest` として拒否する。
 fn check_conv_groups(
@@ -3197,6 +3263,54 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 stride: p.opt_pair("stride")?,
                 padding: p.pair("padding")?,
                 dilation: p.pair("dilation")?,
+            })
+        }
+        "max_pool3d" => {
+            let p = Params::new(
+                params,
+                &[
+                    "kernel_size_d",
+                    "kernel_size_h",
+                    "kernel_size_w",
+                    "stride_d",
+                    "stride_h",
+                    "stride_w",
+                    "padding_d",
+                    "padding_h",
+                    "padding_w",
+                    "dilation_d",
+                    "dilation_h",
+                    "dilation_w",
+                ],
+            )?;
+            Ok(LayerSpec::MaxPool3d {
+                kernel_size: p.triple("kernel_size")?,
+                stride: p.opt_triple("stride")?,
+                padding: p.triple("padding")?,
+                dilation: p.triple("dilation")?,
+            })
+        }
+        "avg_pool3d" => {
+            let p = Params::new(
+                params,
+                &[
+                    "kernel_size_d",
+                    "kernel_size_h",
+                    "kernel_size_w",
+                    "stride_d",
+                    "stride_h",
+                    "stride_w",
+                    "padding_d",
+                    "padding_h",
+                    "padding_w",
+                    "count_include_pad",
+                ],
+            )?;
+            Ok(LayerSpec::AvgPool3d {
+                kernel_size: p.triple("kernel_size")?,
+                stride: p.opt_triple("stride")?,
+                padding: p.triple("padding")?,
+                count_include_pad: p.bool("count_include_pad")?,
             })
         }
         "max_pool1d" => {
@@ -3785,7 +3899,7 @@ mod tests {
         ));
     }
 
-    /// 60 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 62 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3941,6 +4055,30 @@ mod tests {
                 dim_feedforward: 16,
                 eps: 1e-5,
             },
+            LayerSpec::MaxPool3d {
+                kernel_size: [2, 3, 2],
+                stride: Some([1, 2, 1]),
+                padding: [1, 1, 0],
+                dilation: [1, 1, 2],
+            },
+            LayerSpec::MaxPool3d {
+                kernel_size: [2, 2, 2],
+                stride: None,
+                padding: [0, 0, 0],
+                dilation: [1, 1, 1],
+            },
+            LayerSpec::AvgPool3d {
+                kernel_size: [2, 3, 2],
+                stride: Some([1, 2, 1]),
+                padding: [1, 1, 0],
+                count_include_pad: false,
+            },
+            LayerSpec::AvgPool3d {
+                kernel_size: [2, 2, 2],
+                stride: None,
+                padding: [0, 0, 0],
+                count_include_pad: true,
+            },
             LayerSpec::MaxPool2d {
                 kernel_size: [2, 2],
                 stride: Some([2, 1]),
@@ -4049,7 +4187,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 60, "kind allowlist は 60 種: {kinds:?}");
+        assert_eq!(kinds.len(), 62, "kind allowlist は 62 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -4067,9 +4205,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 60 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 62 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("60 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("62 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -4077,7 +4215,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("60 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("62 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -4167,6 +4305,43 @@ mod tests {
             (
                 "conv3d",
                 r#"{"in_channels":4,"out_channels":2,"kernel_size_d":3,"kernel_size_h":3,"kernel_size_w":3,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"groups":1,"x":1}"#,
+            ),
+            // イシュー #3029: max_pool3d / avg_pool3d の非信頼入力（_d 欠落・stride 部分 null・負値・小数・余分なキー・型違い）。
+            (
+                "max_pool3d",
+                r#"{"kernel_size_h":2,"kernel_size_w":2,"stride_d":null,"stride_h":null,"stride_w":null,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1}"#,
+            ),
+            (
+                "max_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":null,"stride_h":1,"stride_w":null,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1}"#,
+            ),
+            (
+                "max_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":-1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1}"#,
+            ),
+            (
+                "max_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0.5,"dilation_d":1,"dilation_h":1,"dilation_w":1}"#,
+            ),
+            (
+                "max_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"dilation_d":1,"dilation_h":1,"dilation_w":1,"x":1}"#,
+            ),
+            (
+                "avg_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":null,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"count_include_pad":true}"#,
+            ),
+            (
+                "avg_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"count_include_pad":1}"#,
+            ),
+            (
+                "avg_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0}"#,
+            ),
+            (
+                "avg_pool3d",
+                r#"{"kernel_size_d":2,"kernel_size_h":2,"kernel_size_w":2,"stride_d":1,"stride_h":1,"stride_w":1,"padding_d":0,"padding_h":0,"padding_w":0,"count_include_pad":true,"dilation_d":1}"#,
             ),
             // イシュー #2525: group_norm / instance_norm の非信頼入力（キー欠落・未知キー・型違い）。
             ("group_norm", r#"{"groups":2}"#),
@@ -4601,7 +4776,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("60 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("62 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

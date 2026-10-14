@@ -392,6 +392,20 @@ pub(super) enum LayerSpec {
         padding: usize,
         dilation: usize,
     },
+    /// `nn::MaxPool3d`（イシュー #3029。`ceil_mode=false` 固定のため manifest へは書かない）。
+    MaxPool3d {
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        dilation: [usize; 3],
+    },
+    /// `nn::AvgPool3d`（イシュー #3029。`ceil_mode=false`・`dilation=[1,1,1]` 固定）。
+    AvgPool3d {
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        count_include_pad: bool,
+    },
     AvgPool2d {
         kernel_size: [usize; 2],
         stride: Option<[usize; 2]>,
@@ -1814,8 +1828,8 @@ impl Sequential {
     /// `ceil_mode=false` 固定。`stride` を省略（`None`）すると `kernel_size` と同じ値になる。
     /// 入力は `NCDHW`（rank 5）。無状態層で学習可能パラメータを持たず、値のみ返す（索引は返さない）。
     /// 不正引数（0 次元・`2*padding > kernel_size`）は `Pool3dParams::new` の検査で `Err` になり panic しない。
-    /// 常駐経路は `is_pooling` 経由で `Unsupported`（fail-closed）。保存は後続 issue（`max_pool3d` kind）
-    /// までは `UnsupportedModel`（`LayerSpec::Unsupported`）で拒否する。
+    /// 常駐経路は `is_pooling` 経由で `Unsupported`（fail-closed）。`save_model` は `max_pool3d` kind
+    /// として保存・復元できる（イシュー #3029）。
     ///
     /// ```
     /// use fandhe_ai::compat::Sequential;
@@ -1831,8 +1845,12 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = MaxPool3d::new(kernel_size, stride, padding, dilation)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "max_pool3d" });
+        self.specs.push(LayerSpec::MaxPool3d {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        });
         Ok(self)
     }
 
@@ -1855,8 +1873,12 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = AvgPool3d::new(kernel_size, stride, padding, count_include_pad)?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "avg_pool3d" });
+        self.specs.push(LayerSpec::AvgPool3d {
+            kernel_size,
+            stride,
+            padding,
+            count_include_pad,
+        });
         Ok(self)
     }
 

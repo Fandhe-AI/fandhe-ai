@@ -277,3 +277,5 @@ impl<'t> Var<'t> {
 ## 17. #3028 実施記録（facade 結線）
 
 `Sequential::add_max_pool3d`／`add_avg_pool3d` を公開した（#3025 §3 の形・`LayerSpec::Unsupported` で保存は fail-closed。保存 kind は後続 `-c`）。`Pool3dOpsHoldDoctestGuard` は `Sequential` 受け手の分のみ反転し、`Tape`／`Tensor<f32>`・モジュール・型名の否定は維持。`nn::MaxPool3d`／`AvgPool3d` の `as_*` フックは未使用のまま維持。
+
+#3029 で `LayerSpec` を実 variant 化し、`save_model` を `max_pool3d`／`avg_pool3d` kind で対応した（上記の「保存は fail-closed」は #3029 以降は解消済み）。

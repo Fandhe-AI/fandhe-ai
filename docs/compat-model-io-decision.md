@@ -1612,3 +1612,12 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - allowlist は本 PR 単独で 53 → 55 種（#3053／#3054 のマージ後は 64 種）。`format_version` は 2 のまま、既存 kind のスキーマ・上限定数・tolerance・依存は不変。旧リーダーは未知 kind を `UnsupportedModel` で拒否する。
 - `save_functional_model` は `spec_kind` を共有するため functional 側にも allowlist 拡張が及ぶ（網羅確認は #3051）。ONNX export はこの 2 層について引き続き `OnnxError::UnsupportedLayer` で対象外。
 - 11 層一括（活性化 9 層を含む）の「`save_model` で拒否されない」テストは、活性化 9 層が未実装のため未完了。#3053／#3054 のうち後にマージされる側、または #3051 で完成させる。
+
+## 追補（イシュー #3029）: max_pool3d・avg_pool3d の保存・復元
+
+- kind は `max_pool3d`（12 キー: `kernel_size_{d,h,w}`・`stride_{d,h,w}`・`padding_{d,h,w}`・`dilation_{d,h,w}`）と `avg_pool3d`（10 キー: kernel×3・stride×3・padding×3・`count_include_pad`）。12 キーは `MAX_OBJECT_KEYS = 16` に収まる。`ceil_mode=false`・avg の `dilation=[1,1,1]` は固定値のため manifest に書かない。
+- `stride` は「全 null か全整数」。部分 null は `Manifest` で拒否する（`Params::opt_triple`）。0 次元・`2*padding > kernel` 等の意味検査は `add_*` に委ね `Autodiff` とする。
+- 無パラメータ層のため期待パラメータキーは 0 本。`LayerSpec::Unsupported` から実 variant（`MaxPool3d`／`AvgPool3d`）へ置換した。
+- allowlist は実装時点で 60 → 62 種。`format_version` は 2 のまま、旧リーダーは未知 kind を `spec_from_kind` の `_` 分岐で `UnsupportedModel` として fail-closed 拒否する。
+- `save_functional_model` は `spec_kind` を共有する。ONNX export は引き続き `UnsupportedLayer`。
+- 層経路の実機 parity テストは `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-pool3d-3029/README.md`）。tolerance・baseline は不変。
