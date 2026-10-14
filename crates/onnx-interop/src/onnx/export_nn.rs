@@ -255,6 +255,17 @@ pub fn export_parts_from_layers(layers: &[Box<dyn Module>]) -> Result<NnExportPa
         };
 
         if let Some(linear) = layer.as_linear() {
+            // 再パラメータ化済み（weight_norm／spectral_norm。イシュー #3048）の `weight()` は
+            // 生の一次テンソルで有効重みではない。黙って誤った重みを出力しないよう fail-closed で拒否する。
+            if linear.is_parametrized() {
+                return Err(ExportError::InvalidLayerParameter {
+                    index,
+                    reason:
+                        "Linear の weight が再パラメータ化（weight_norm／spectral_norm）済みのため \
+                             ONNX export は非対応（有効重みを出力できない）"
+                            .to_string(),
+                });
+            }
             let weight = linear.weight();
             if weight.rank() != 2 {
                 return Err(ExportError::InvalidLayerParameter {

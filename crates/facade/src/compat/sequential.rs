@@ -462,6 +462,128 @@ impl Sequential {
         Ok(self)
     }
 
+    /// 作成済みの `Linear` 層（`layer_index` 番目。活性化層を含む全層の位置）の重みを
+    /// weight_norm（`w = g · v / ‖v‖`。PyTorch `torch.nn.utils.weight_norm` 相当）へ再パラメータ化する
+    /// （イシュー #3048。決定記録 `docs/facade-weight-reparam-wiring-decision.md` §5 D-A (a)）。
+    ///
+    /// 本体は `fandhe_ai_autodiff::nn::Linear::parametrize_weight_norm` への薄い委譲（REQ-9）。
+    /// `dim` は `None`／`Some(0)`（in 軸ごと）／`Some(1)`（out 軸ごと。PyTorch の `dim=0` 相当）。
+    /// 適用直後の有効重みは元の重みと一致する。
+    ///
+    /// - `named_parameters`／`trainable_parameters` の並びは `parametrizations.weight.original0`（g）
+    ///   → `parametrizations.weight.original1`（v）→ `bias`（`trainable_vars`／`trainable_grads`／
+    ///   `apply_parameters` も同じ順序契約）。
+    /// - 次はいずれも `InvalidArgument` で拒否する: 添字が範囲外・対象が `Linear` でない・二重適用・
+    ///   `compile` 後（optimizer のパラメータ数が固定済みのため。compile 前に適用すること）。
+    /// - 非対応（型付きエラーで拒否）: デバイス常駐経路（`init_device_param_store` 等は
+    ///   `BackendError::Unsupported`）・低精度（AMP）forward・`save_model`（`UnsupportedModel`）・
+    ///   ONNX export。`predict` は tape 経路で有効重みを再構成して動作する。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new()
+    ///     .add_linear(3, 2, /* seed = */ 7)?
+    ///     .parametrize_weight_norm(0, Some(1))?;
+    /// let names: Vec<String> = model.named_parameters().into_iter().map(|(n, _)| n).collect();
+    /// assert_eq!(
+    ///     names,
+    ///     [
+    ///         "0.parametrizations.weight.original0",
+    ///         "0.parametrizations.weight.original1",
+    ///         "0.bias",
+    ///     ]
+    /// );
+    /// let x = Tensor::new(vec![0.1_f32, 0.2, 0.3], &[1, 3])?;
+    /// assert_eq!(model.predict(&x)?.shape(), [1, 2]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn parametrize_weight_norm(
+        mut self,
+        layer_index: usize,
+        dim: Option<usize>,
+    ) -> Result<Self, AutodiffError> {
+        self.check_parametrize_target("Sequential::parametrize_weight_norm", layer_index)?;
+        let training = self.inner.training();
+        let linear = self.parametrize_target_mut(layer_index)?;
+        linear.parametrize_weight_norm(dim)?;
+        Module::set_training(linear, training);
+        self.specs[layer_index] = LayerSpec::Unsupported {
+            kind: "linear_weight_norm",
+        };
+        Ok(self)
+    }
+
+    /// 作成済みの `Linear` 層（`layer_index` 番目）の重みを spectral_norm（`w = W / σ`。PyTorch
+    /// `torch.nn.utils.spectral_norm` 相当）へ再パラメータ化する（イシュー #3048。決定記録 §5 D-A (a)）。
+    ///
+    /// 本体は `fandhe_ai_autodiff::nn::Linear::parametrize_spectral_norm` への薄い委譲。`u0`／`v0` は
+    /// `seed` から決定的に導出し、予備反復 15 回を行う。`n_power_iterations >= 1`・`eps` が有限かつ非負。
+    /// train モード（既定）の forward 1 回ごとに power iteration で状態が進み、`eval()` では進まない
+    /// （同一 step で forward を複数回呼ぶとその回数だけ進む。PyTorch と同じ契約）。
+    /// 並びは `parametrizations.weight.original` → `bias`。拒否条件・非対応経路は
+    /// [`Sequential::parametrize_weight_norm`] と同じ。
+    pub fn parametrize_spectral_norm(
+        mut self,
+        layer_index: usize,
+        n_power_iterations: usize,
+        eps: f32,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        self.check_parametrize_target("Sequential::parametrize_spectral_norm", layer_index)?;
+        let training = self.inner.training();
+        let linear = self.parametrize_target_mut(layer_index)?;
+        linear.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+        Module::set_training(linear, training);
+        self.specs[layer_index] = LayerSpec::Unsupported {
+            kind: "linear_spectral_norm",
+        };
+        Ok(self)
+    }
+
+    /// `parametrize_*` の共通の事前検査（イシュー #3048）。状態を変更する前に、添字範囲・対象が
+    /// 未再パラメータ化の `Linear` であること・`compile` 前であることを確認する。
+    fn check_parametrize_target(&self, ctx: &str, layer_index: usize) -> Result<(), AutodiffError> {
+        if self.compiled.is_some() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "{ctx}: compile 後は適用できない（optimizer のパラメータ数が固定済み。\
+                 compile 前に適用すること）"
+            )));
+        }
+        let layers = self.inner.layers();
+        let Some(layer) = layers.get(layer_index) else {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "{ctx}: layer_index {layer_index} は範囲外（層数 {}）",
+                layers.len()
+            )));
+        };
+        match layer.as_linear() {
+            None => Err(AutodiffError::InvalidArgument(format!(
+                "{ctx}: 層 {layer_index} は Linear ではない"
+            ))),
+            Some(linear) if linear.is_parametrized() => Err(AutodiffError::InvalidArgument(
+                format!("{ctx}: 層 {layer_index} はすでに再パラメータ化済み"),
+            )),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// `check_parametrize_target` 通過後の対象 `Linear` の可変参照（到達しない `None` は型付きエラー）。
+    fn parametrize_target_mut(&mut self, layer_index: usize) -> Result<&mut Linear, AutodiffError> {
+        self.inner
+            .layers_mut()
+            .get_mut(layer_index)
+            .and_then(|layer| layer.as_linear_mut())
+            .ok_or_else(|| {
+                AutodiffError::InvalidArgument(format!(
+                    "Sequential::parametrize: 層 {layer_index} が Linear ではない"
+                ))
+            })
+    }
+
     /// ReLU 層を追加する（`nn::activation::Relu`。shape 不変の演算のため
     /// 構造的に失敗しえず `Result` を返さない）。
     pub fn add_relu(mut self) -> Self {
@@ -2266,6 +2388,15 @@ impl Sequential {
             .filter_map(|layer| layer.as_linear())
             .map(|linear| linear.bind(&tape.0))
             .collect();
+        // イシュー #3048: weight_norm 済み Linear の補助葉 g を `linears` と平行に保持する
+        // （`LinearVars` へフィールドを足すと外部の struct リテラル構築を壊すため別ベクタ）。
+        let linear_gs = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_linear())
+            .map(|linear| linear.bind_weight_norm_g(&tape.0))
+            .collect();
         let conv2ds = self
             .inner
             .layers()
@@ -2387,6 +2518,7 @@ impl Sequential {
         SequentialVars {
             model: self,
             linears,
+            linear_gs,
             conv2ds,
             conv1ds,
             conv_transpose1ds,
@@ -2417,7 +2549,9 @@ impl Sequential {
     pub fn trainable_parameters(&self) -> Vec<&Tensor<f32>> {
         let mut out = Vec::new();
         for layer in self.inner.layers() {
-            if let Some(linear) = layer.as_linear() {
+            // イシュー #3048: 再パラメータ化済み Linear は汎用の `named_parameters` 分岐
+            // （g → v → bias／original → bias）へ落とす。
+            if let Some(linear) = layer.as_linear().filter(|l| !l.is_parametrized()) {
                 out.push(linear.weight());
                 if let Some(bias) = linear.bias() {
                     out.push(bias);
@@ -2537,7 +2671,10 @@ impl Sequential {
     /// （黙示フォールバックを作らない。`.claude/rules/security.md` A04）。
     fn contains_resident_unsupported_layer(&self) -> bool {
         self.inner.layers().iter().any(|layer| {
-            layer.as_conv2d().is_some()
+            // イシュー #3048: 再パラメータ化済み Linear は有効重みを device 常駐で再構成しない
+            // （生の weight を有効重みと誤読して黙って誤る経路を作らない）。
+            layer.as_linear().is_some_and(|l| l.is_parametrized())
+                || layer.as_conv2d().is_some()
                 || layer.as_conv1d().is_some()
                 || layer.as_conv_transpose1d().is_some()
                 || layer.as_conv_transpose2d().is_some()
@@ -2802,7 +2939,10 @@ impl Sequential {
         let mut rebuilt: Vec<Rebuilt> = Vec::new();
         let mut generic_updates: Vec<GenericUpdate> = Vec::new();
         for (layer_index, layer) in self.inner.layers().iter().enumerate() {
-            if let Some(linear) = layer.as_linear() {
+            // イシュー #3048: 再パラメータ化済み Linear は `Linear::from_parameters` で層を作り直す
+            // と再パラメータ化が黙って消えるため、汎用（`set_parameter` の shape 保存置換）側へ回す。
+            // 2b の条件と厳密に揃える（`rebuilt` 列がずれないように）。
+            if let Some(linear) = layer.as_linear().filter(|l| !l.is_parametrized()) {
                 let (new_weight, new_bias) = take_weight_bias(
                     &mut updated,
                     layer_index,
@@ -2942,7 +3082,7 @@ impl Sequential {
         // 2b: 検証済みの `Rebuilt` を同じ層順で代入する（失敗し得ない）。
         let mut rebuilt = rebuilt.into_iter();
         for layer in self.inner.layers_mut().iter_mut() {
-            if let Some(linear) = layer.as_linear_mut() {
+            if let Some(linear) = layer.as_linear_mut().filter(|l| !l.is_parametrized()) {
                 if let Some(Rebuilt::Linear(new_linear)) = rebuilt.next() {
                     *linear = new_linear;
                 }
@@ -3304,6 +3444,9 @@ impl Sequential {
 pub struct SequentialVars<'m, 't> {
     model: &'m Sequential,
     linears: Vec<LinearVars<'t>>,
+    /// イシュー #3048。`linears` と平行（Linear 層ごと 1 件）の weight_norm 補助葉 `g`。
+    /// weight_norm 済みでない層は `None`。
+    linear_gs: Vec<Option<Var<'t>>>,
     conv2ds: Vec<Conv2dVars<'t>>,
     conv1ds: Vec<Conv1dVars<'t>>,
     /// イシュー #2521。`ConvTranspose1d` 層の bind 結果（層順）。
@@ -3417,6 +3560,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         // `docs/inference-forward-fixed-cost-design.md` §3.1 の
         // bit-exactness 契約を学習側でも壊さない）。
         let mut linears = self.linears.iter();
+        let mut linear_gs = self.linear_gs.iter();
         let mut conv2ds = self.conv2ds.iter();
         let mut conv1ds = self.conv1ds.iter();
         let mut conv_transpose1ds = self.conv_transpose1ds.iter();
@@ -3436,7 +3580,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut i = 0;
         while i < layers.len() {
             let layer = &layers[i];
-            if layer.as_linear().is_some() {
+            if let Some(linear) = layer.as_linear() {
                 let vars = linears.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
                         "SequentialVars::forward: bind 済み LinearVars が model.layers の \
@@ -3450,10 +3594,20 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 } else {
                     Activation::None
                 };
+                let g = linear_gs.next().and_then(|g| g.as_ref());
                 current = match low_precision {
+                    Some(_) if linear.is_parametrized() => {
+                        // イシュー #3048: 低精度経路は生の weight で計算して黙って誤るため拒否する
+                        // （有効重みの低精度計算は本イシューのスコープ外）。
+                        return Err(AutodiffError::InvalidArgument(
+                            "SequentialVars::forward: 再パラメータ化済み Linear（weight_norm／\
+                             spectral_norm）は低精度（AMP）forward 非対応（イシュー #3048）"
+                                .to_string(),
+                        ));
+                    }
                     Some(dtype) => linear_forward_low_precision(vars, &current, act, dtype)?,
-                    None if fuse_relu => vars.forward_with_activation(&current, act)?,
-                    None => vars.forward(&current)?,
+                    // 非再パラメータ化は従来の `forward`／`forward_with_activation` と bit 同一。
+                    None => linear.forward_bound(vars, g, &current, fuse_relu)?,
                 };
                 i += if fuse_relu { 2 } else { 1 };
             } else if layer.as_conv2d().is_some() {
@@ -3678,6 +3832,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
     pub fn trainable_vars(&self) -> Vec<&Var<'t>> {
         let mut out = Vec::new();
         let mut linears = self.linears.iter();
+        let mut linear_gs = self.linear_gs.iter();
         let mut conv2ds = self.conv2ds.iter();
         let mut conv1ds = self.conv1ds.iter();
         let mut conv_transpose1ds = self.conv_transpose1ds.iter();
@@ -3695,7 +3850,12 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut transformers = self.transformers.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
+                let g = linear_gs.next().and_then(|g| g.as_ref());
                 if let Some(vars) = linears.next() {
+                    // イシュー #3048: 再パラメータ化は `named_parameters` と同じ順（g → v → bias）。
+                    if let Some(g) = g {
+                        out.push(g);
+                    }
                     out.push(&vars.weight);
                     if let Some(bias) = &vars.bias {
                         out.push(bias);
@@ -3828,6 +3988,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
             .reject_untracked_parametric_layer("SequentialVars::trainable_grads")?;
         let mut out = Vec::new();
         let mut linears = self.linears.iter();
+        let mut linear_gs = self.linear_gs.iter();
         let mut conv2ds = self.conv2ds.iter();
         let mut conv1ds = self.conv1ds.iter();
         let mut conv_transpose1ds = self.conv_transpose1ds.iter();
@@ -3845,7 +4006,12 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut transformers = self.transformers.iter();
         for layer in self.model.inner.layers() {
             if layer.as_linear().is_some() {
+                let g = linear_gs.next().and_then(|g| g.as_ref());
                 if let Some(vars) = linears.next() {
+                    // イシュー #3048: weight_norm の g の勾配を先に積む（順序は trainable_vars と同じ）。
+                    if let Some(g) = g {
+                        push_weight_bias(&mut out, grads, g, None)?;
+                    }
                     push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
                 }
             } else if layer.as_conv2d().is_some() {

@@ -167,3 +167,18 @@ grep -n 'expected_buffer_keys\|format_version' crates/facade/src/compat/model_io
 - `docs/facade-nn-layer-type-exposure-decision.md`
 - `docs/compat-api-scope.md` §5.1 行 15・§5 末尾の適用記録（#3020）
 - 承認根拠: 2026-10-11 所有者判断 D-A（#3018 ツリー起票の根拠）。本記録は記録の反映であり新規の承認ではない。
+
+## 16. 実装記録（#3048）
+
+`Linear` への結線を実装した（親 #3046）。§5〜§10 の推奨形（(a) 層内再パラメータ化）のとおりで、承認は §15 の D-A の再掲であり新規ではない。
+
+- **層**: `autodiff::nn::Linear` に private の `reparam`（`WeightNorm { g, dim }`／`SpectralNorm { state: RefCell<SpectralNormState> }`）と `training` を追加した。`weight` スロットは weight_norm で `v`、spectral_norm で `original` を指す。`weight()` のシグネチャは不変（doc に「再パラメータ化時は生の一次テンソル」と明記）。`RefCell` による `Sync` 喪失は `cargo check --workspace --all-targets` で問題なしを確認した（`Mutex` への切替は不要）。
+- **公開名**: facade は `Sequential::parametrize_weight_norm(self, layer_index, dim)`／`parametrize_spectral_norm(self, layer_index, n_power_iterations, eps, seed)`。autodiff 側の inherent は `parametrize_*`／`with_*`／`is_parametrized`／`weight_norm_g`／`weight_norm_dim`／`spectral_norm_state`／`bind_weight_norm_g`／`forward_bound`。`fn weight_norm`・`fn spectral_norm` のトークン完全一致は使わない（保留ガードと衝突しない）。
+- **§14.1 の実測結果**: (1) `*Vars` へのフィールド追加は `mha_backend_parity.rs` 等の struct リテラル構築を壊すため**別名 `bind_weight_norm_g` へ切替えた（採用）**。`LinearVars` は不変。(2) **compile 後適用の拒否で足りた**: `parametrize_*` を `compile` 済みで `InvalidArgument` にするだけで、optimizer スロット数のずれは生じない（`fit` 後のモデルへ適用する経路は無い）。(3) rank 0 の `g` の safetensors 往復は #3050、`ConvTranspose3d` は #3049 以降。
+- **順序**: 層内の並びは weight_norm が `parametrizations.weight.original0`（g）→ `original1`（v）→ `bias`、spectral_norm が `original` → `bias`。`named_parameters`・`trainable_parameters`・`trainable_vars`・`trainable_grads`・`apply_parameters` で一致させた。
+- **`apply_parameters`**: 再パラメータ化 Linear は `Linear::from_parameters` での作り直し（再パラメータ化が黙って消える）を避け、`set_parameter` の shape 保存置換（`GenericUpdate`）側へ回す。1 パス目と 2b の条件を同じ `filter` で揃え、`rebuilt` 列のずれを防ぐ。
+- **spectral_norm の状態**: `training` は再パラメータ化済みの層だけが保持する（非再パラメータ化の `Linear` の `training()` は従来どおり常に `true`。`tests/nn_module_freeze.rs` の既存契約を維持）。train の forward 1 回ごとに状態が進み、eval と失敗 forward では進まない（入力 shape は状態更新の前に検査）。facade の `parametrize_*` は適用直後にコンテナのモードを層へ同期する。同一 step で forward を複数回呼ぶとその回数だけ進む（PyTorch と同じ）。
+- **fail-closed（§10）**: 常駐経路は `contains_resident_unsupported_layer` に含めて `BackendError::Unsupported`、`predict` は `supports_forward_host=false` により tape 経路へ落ちる（host 経路の副作用なし）、`forward_host`／`forward_host_with_activation` は `Unsupported`、低精度（AMP）forward は `InvalidArgument`、ONNX export は `ExportError::InvalidLayerParameter`、`save_model` は `LayerSpec::Unsupported { kind: "linear_weight_norm" | "linear_spectral_norm" }` による既存の `UnsupportedModel`（専用 variant と新 kind は #3050）。旧複製 `autodiff/src/compat/sequential.rs` は層を外部から差し込めないため再パラメータ化 Linear に到達せず変更していない。
+- **テスト**: `crates/autodiff/tests/nn_linear_reparam.rs`（層単体）・`crates/facade/tests/compat_sequential_parametrize_linear.rs`（`Var::weight_norm`／`spectral_norm` を直接使った参照との損失・勾配 bit 一致、複数 step の状態進行一致、optimizer 往復・`fit`、各拒否経路）・`api_surface.rs` の正ガード（定義元集合・承認シグネチャ・委譲本体）。ReLU 融合ケースは tolerance 定数を変えず REQ-2 の統一複合判定で比較する。
+- **#3050 への申し送り**: 本実装は消費箇所を個別にゲートした。生の `weight()` を有効重みと誤読する経路の漏れを機械検査するソース走査インベントリテストは #3050 の必須条件のまま。保留ガード（`LrnWeightReparamHoldDoctestGuard`）には触れていない。
+- CUDA／Metal 実機は対象外（新規カーネルなし。§12）。

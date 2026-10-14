@@ -13,14 +13,38 @@
 //! 分離する。呼び出し元は毎ステップ `Linear::bind(&tape)` で
 //! `LinearVars` を作り直し、`forward` を呼ぶ。
 
+use std::cell::RefCell;
+
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, ScalarDType, ShapeError, Tensor, broadcast_shape, gemm_out_shape,
 };
 
 use crate::error::AutodiffError;
-use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, uniform_init};
+use crate::nn::init::{
+    BIAS_SEED_SALT, SPECTRAL_U_SEED_SALT, SPECTRAL_V_SEED_SALT, WEIGHT_SEED_SALT, derive_seed,
+    uniform_init,
+};
 use crate::tape::Tape;
 use crate::var::Var;
+use crate::weight_reparam_ops::{
+    SPECTRAL_NORM_INIT_POWER_ITERATIONS, SpectralNormState, norm_except_dim,
+};
+
+/// `Linear` の `weight` スロットを再パラメータ化した状態（イシュー #3048。
+/// 決定記録 `docs/facade-weight-reparam-wiring-decision.md` §5〜§10 の
+/// 「(a) 層内再パラメータ化」）。`Linear` 型自身が保持するため、
+/// `as_linear()` で `Linear` として観測される層の経路（`Sequential` の bind・
+/// 学習・保存）が型を変えずに再パラメータ化を扱える。
+///
+/// - `WeightNorm`: `weight` スロットが `v`、ここが `g`（`dim` 以外が 1 の keepdim 形、
+///   `dim = None` は rank 0）。有効重みは `Var::weight_norm(v, g, dim)`。
+/// - `SpectralNorm`: `weight` スロットが `original`。有効重みは
+///   `Var::spectral_norm(original, state, training)`。状態は forward が `&self` のため
+///   `RefCell`（`nn/batch_norm.rs` の running stats が先例）。
+enum WeightReparam {
+    WeightNorm { g: Tensor<f32>, dim: Option<usize> },
+    SpectralNorm { state: RefCell<SpectralNormState> },
+}
 
 /// 全結合層のパラメータ本体。`weight` は `[in_features, out_features]`
 /// （PoC-v2-2 の `x.matmul(w)` 慣習。転置は持たない）、`bias` は
@@ -34,6 +58,13 @@ pub struct Linear {
     /// （全コンストラクタで初期化。`nn/module.rs`「反映タイミング」
     /// 節参照）。
     requires_grad: bool,
+    /// `weight` スロットの再パラメータ化状態（イシュー #3048）。`None` が従来の
+    /// 素の重み。`Some` のとき `weight` は「生の一次テンソル」（weight_norm の `v`・
+    /// spectral_norm の `original`）を指す。全コンストラクタで `None` 初期化。
+    reparam: Option<WeightReparam>,
+    /// train／eval モード（イシュー #3048）。`spectral_norm` が train の forward でだけ
+    /// 状態を更新するために保持する（`Module::set_training` の実体）。既定 `true`。
+    training: bool,
 }
 
 impl Linear {
@@ -84,6 +115,8 @@ impl Linear {
             weight,
             bias,
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -137,6 +170,8 @@ impl Linear {
             weight,
             bias,
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -153,8 +188,214 @@ impl Linear {
         LinearVars { weight, bias }
     }
 
+    /// `weight` スロットのテンソル。**再パラメータ化済み（[`Self::is_parametrized`]）の層では
+    /// 有効重みではなく生の一次テンソル**（weight_norm の `v`・spectral_norm の `original`）を
+    /// 返す（イシュー #3048。シグネチャ不変の代わりに意味が変わる点を呼び出し側が
+    /// `is_parametrized` で判別する）。有効重みを使う計算は [`Self::forward_bound`] 経由に
+    /// 限る。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
+    }
+
+    /// `weight` が再パラメータ化（weight_norm／spectral_norm）済みか（イシュー #3048）。
+    /// `Sequential` の bind・学習・常駐・host・ONNX の各消費箇所が、生の `weight()` を有効重みと
+    /// 誤読しないよう分岐するための判定。
+    pub fn is_parametrized(&self) -> bool {
+        self.reparam.is_some()
+    }
+
+    /// weight_norm 適用済みなら `g`（`dim` 以外が 1 の keepdim 形、`dim = None` は rank 0）。
+    pub fn weight_norm_g(&self) -> Option<&Tensor<f32>> {
+        match &self.reparam {
+            Some(WeightReparam::WeightNorm { g, .. }) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// weight_norm 適用済みなら適用時の `dim`（`Some(None)` は `dim = None`）。
+    pub fn weight_norm_dim(&self) -> Option<Option<usize>> {
+        match &self.reparam {
+            Some(WeightReparam::WeightNorm { dim, .. }) => Some(*dim),
+            _ => None,
+        }
+    }
+
+    /// spectral_norm 適用済みなら現在の状態の複製（`u`／`v`・`eps`・反復回数）。複製のため
+    /// 取得後に層の状態は進まない（参照実装との突合用）。
+    pub fn spectral_norm_state(&self) -> Option<SpectralNormState> {
+        match &self.reparam {
+            Some(WeightReparam::SpectralNorm { state }) => {
+                state.try_borrow().ok().map(|st| st.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// `weight` を weight_norm（`w = g · v / ‖v‖`）へ再パラメータ化する（イシュー #3048。
+    /// 決定記録 §5 D-A (a)）。`weight` スロットは `v` になり、`g` は
+    /// `norm_except_dim(weight, dim)` で初期化するため、適用直後の有効重みは元の重みと一致する。
+    ///
+    /// `dim` は `None`（テンソル全体）／`Some(0)`（in 軸ごと）／`Some(1)`（out 軸ごと。
+    /// PyTorch `nn.Linear` の `dim=0`〈out 軸ごと〉相当は、転置を持たない `[in, out]` の本層では
+    /// `Some(1)`）。検証・計算を先に済ませてから代入するため、失敗時は層が変化しない。
+    /// 二重適用は `InvalidArgument`。compile 後の適用は facade
+    /// `Sequential::parametrize_weight_norm` が拒否する。
+    pub fn parametrize_weight_norm(&mut self, dim: Option<usize>) -> Result<(), AutodiffError> {
+        if self.reparam.is_some() {
+            return Err(AutodiffError::InvalidArgument(
+                "Linear::parametrize_weight_norm: already parametrized".to_string(),
+            ));
+        }
+        if matches!(dim, Some(d) if d > 1) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "Linear::parametrize_weight_norm: dim must be None, Some(0) or Some(1) for a \
+                 rank-2 weight (dim={dim:?})"
+            )));
+        }
+        let g = norm_except_dim(&self.weight, dim)?;
+        self.reparam = Some(WeightReparam::WeightNorm { g, dim });
+        Ok(())
+    }
+
+    /// `weight` を spectral_norm（`w = W / σ`）へ再パラメータ化する（イシュー #3048。決定記録
+    /// §5 D-A (a)）。`weight` スロットは `original` になる。行軸は `[in, out]` の out 軸（`dim = 1`）
+    /// 固定。`u0`（長さ out）・`v0`（長さ in）は `seed` から決定的に導出し
+    /// （`nn/init.rs` の `SPECTRAL_U_SEED_SALT`／`SPECTRAL_V_SEED_SALT`）、PyTorch の初期化と同じく
+    /// `SPECTRAL_NORM_INIT_POWER_ITERATIONS` 回の予備反復を行う。`n_power_iterations >= 1`・
+    /// `eps` が有限かつ非負は `SpectralNormState::from_vectors` が検証する。失敗時は層が変化しない。
+    pub fn parametrize_spectral_norm(
+        &mut self,
+        n_power_iterations: usize,
+        eps: f32,
+        seed: u64,
+    ) -> Result<(), AutodiffError> {
+        if self.reparam.is_some() {
+            return Err(AutodiffError::InvalidArgument(
+                "Linear::parametrize_spectral_norm: already parametrized".to_string(),
+            ));
+        }
+        let in_features = self.weight.shape()[0];
+        let out_features = self.weight.shape()[1];
+        let bound = 1.0 / (in_features.max(1) as f32).sqrt();
+        let u0 = uniform_init(out_features, bound, derive_seed(seed, SPECTRAL_U_SEED_SALT));
+        let v0 = uniform_init(in_features, bound, derive_seed(seed, SPECTRAL_V_SEED_SALT));
+        let mut state = SpectralNormState::from_vectors(
+            self.weight.shape(),
+            1,
+            &u0,
+            &v0,
+            n_power_iterations,
+            eps,
+        )?;
+        state.power_iterate(&self.weight, SPECTRAL_NORM_INIT_POWER_ITERATIONS)?;
+        self.reparam = Some(WeightReparam::SpectralNorm {
+            state: RefCell::new(state),
+        });
+        Ok(())
+    }
+
+    /// [`Self::parametrize_weight_norm`] の `self` 消費版（ビルダー用）。
+    pub fn with_weight_norm(mut self, dim: Option<usize>) -> Result<Linear, AutodiffError> {
+        self.parametrize_weight_norm(dim)?;
+        Ok(self)
+    }
+
+    /// [`Self::parametrize_spectral_norm`] の `self` 消費版（ビルダー用）。
+    pub fn with_spectral_norm(
+        mut self,
+        n_power_iterations: usize,
+        eps: f32,
+        seed: u64,
+    ) -> Result<Linear, AutodiffError> {
+        self.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+        Ok(self)
+    }
+
+    /// weight_norm 適用済みの層の `g` を `tape` の葉として登録する（それ以外は `None`）。
+    /// `LinearVars` へフィールドを足すと外部の struct リテラル構築を壊す（破壊的変更）ため、
+    /// `bind` は不変のまま補助葉だけ別名で登録する（決定記録 §14.1）。`requires_grad` は
+    /// `weight` と同じフラグを使う。
+    pub fn bind_weight_norm_g<'t>(&self, tape: &'t Tape) -> Option<Var<'t>> {
+        self.weight_norm_g()
+            .map(|g| tape.var_with_requires_grad(g, self.requires_grad))
+    }
+
+    /// 再パラメータ化を含む 1 ステップ分の forward（イシュー #3048）。`vars` は [`Self::bind`]、
+    /// `g` は [`Self::bind_weight_norm_g`] の結果。`fuse_relu` は次層が ReLU の場合の epilogue 融合。
+    ///
+    /// 非再パラメータ化層は従来の `LinearVars::forward`／`forward_with_activation(Relu)` と
+    /// bit 同一。再パラメータ化層は有効重みを tape 上で再構成してから同じ演算列を適用する。
+    /// 入力 shape は有効重み再構成（spectral_norm は状態を進める）より前に検査するため、
+    /// shape 不一致の入力では状態が進まない。spectral_norm の更新は train モードの forward 1 回につき
+    /// 1 回（PyTorch と同じ契約。同一 step で複数回 forward すると複数回進む）。
+    pub fn forward_bound<'t>(
+        &self,
+        vars: &LinearVars<'t>,
+        g: Option<&Var<'t>>,
+        input: &Var<'t>,
+        fuse_relu: bool,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let w_eff = match &self.reparam {
+            None => {
+                return if fuse_relu {
+                    vars.forward_with_activation(input, Activation::Relu)
+                } else {
+                    vars.forward(input)
+                };
+            }
+            Some(reparam) => {
+                // rank≥3 を暗黙受理しない 2 次元厳密検査（`LinearVars::forward` と同じ境界）を、
+                // 状態更新を伴う再構成より先に行う。
+                gemm_out_shape(&input.shape(), &vars.weight.shape())?;
+                match reparam {
+                    WeightReparam::WeightNorm { dim, .. } => {
+                        let g = g.ok_or_else(|| {
+                            AutodiffError::InvalidArgument(
+                                "Linear::forward_bound: weight_norm の g が bind されていない"
+                                    .to_string(),
+                            )
+                        })?;
+                        vars.weight.weight_norm(g, *dim)?
+                    }
+                    WeightReparam::SpectralNorm { state } => {
+                        let mut st = state.try_borrow_mut().map_err(|_| {
+                            AutodiffError::InvalidArgument(
+                                "Linear::forward_bound: spectral_norm 状態が使用中（再入）"
+                                    .to_string(),
+                            )
+                        })?;
+                        vars.weight.spectral_norm(&mut st, self.training)?
+                    }
+                }
+            }
+        };
+        if fuse_relu {
+            input.linear_act(&w_eff, vars.bias.as_ref(), Activation::Relu)
+        } else {
+            let y = input.matmul(&w_eff)?;
+            match &vars.bias {
+                Some(bias) => y.add(bias),
+                None => Ok(y),
+            }
+        }
+    }
+
+    /// `Module::set_training` の実体（イシュー #3048。spectral_norm の更新可否のみに効く）。
+    ///
+    /// **再パラメータ化済みの層だけがモードを保持する**。非再パラメータ化の `Linear` は従来どおり
+    /// train／eval で挙動が変わらない無状態層として扱い、`training()` は常に `true` のまま
+    /// （`nn/module.rs` の `set_training` 契約と `tests/nn_module_freeze.rs` の既存契約を変えない）。
+    /// 再パラメータ化の適用前に呼んだ値は保持されないため、適用後に呼び直す
+    /// （facade `Sequential::parametrize_*` が適用直後にコンテナのモードを同期する）。
+    pub(crate) fn set_training(&mut self, training: bool) {
+        if self.reparam.is_some() {
+            self.training = training;
+        }
+    }
+
+    /// `Module::training` の実体。
+    pub(crate) fn training(&self) -> bool {
+        self.training
     }
 
     pub fn bias(&self) -> Option<&Tensor<f32>> {
@@ -184,28 +425,32 @@ impl Linear {
         name: &str,
         value: Tensor<f32>,
     ) -> Result<(), AutodiffError> {
-        match name {
-            "weight" => {
-                if value.shape() != self.weight.shape() {
-                    return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
-                        lhs: value.shape().to_vec(),
-                        rhs: self.weight.shape().to_vec(),
-                    }));
+        // 再パラメータ化済みは分解パラメータのキー（`named_parameters` と対称。
+        // イシュー #3048）だけ受理し、`weight` は拒否する。いずれも shape 保存置換のみで、
+        // 再パラメータ化状態・`training`・`requires_grad` は保持する。
+        if let Some(reparam) = &mut self.reparam {
+            match (reparam, name) {
+                (WeightReparam::WeightNorm { g, .. }, "parametrizations.weight.original0") => {
+                    return replace_same_shape(g, value);
                 }
-                self.weight = value;
-                Ok(())
+                (WeightReparam::WeightNorm { .. }, "parametrizations.weight.original1")
+                | (WeightReparam::SpectralNorm { .. }, "parametrizations.weight.original") => {
+                    return replace_same_shape(&mut self.weight, value);
+                }
+                (_, "weight") => {
+                    return Err(AutodiffError::InvalidArgument(
+                        "Linear::set_parameter: `weight` is parametrized; use the \
+                         `parametrizations.weight.*` keys"
+                            .to_string(),
+                    ));
+                }
+                _ => {}
             }
+        }
+        match name {
+            "weight" if self.reparam.is_none() => replace_same_shape(&mut self.weight, value),
             "bias" => match &mut self.bias {
-                Some(current) => {
-                    if value.shape() != current.shape() {
-                        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
-                            lhs: value.shape().to_vec(),
-                            rhs: current.shape().to_vec(),
-                        }));
-                    }
-                    *current = value;
-                    Ok(())
-                }
+                Some(current) => replace_same_shape(current, value),
                 None => Err(AutodiffError::InvalidArgument(format!(
                     "Linear::set_parameter: no parameter named `{name}` (this layer has no bias)"
                 ))),
@@ -250,12 +495,33 @@ impl Linear {
         input: &Tensor<f32>,
         act: Activation,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            return Err(AutodiffError::Backend(
+                fandhe_ai_tensor_core::BackendError::Unsupported(
+                    "Linear::forward_host_with_activation: weight が再パラメータ化済み（有効重みを \
+                     host 経路で再構成しない。イシュー #3048）"
+                        .to_string(),
+                ),
+            ));
+        }
         let out_shape = gemm_out_shape(input.shape(), self.weight.shape())?;
         if let Some(ref bias) = self.bias {
             broadcast_shape(&out_shape, bias.shape())?;
         }
         Ok(ops.gemm_bias_act(input, &self.weight, self.bias.as_ref(), act)?)
     }
+}
+
+/// shape 保存置換の共通処理（`Linear::set_parameter`）。shape 不一致は `ShapeMismatch`。
+fn replace_same_shape(slot: &mut Tensor<f32>, value: Tensor<f32>) -> Result<(), AutodiffError> {
+    if value.shape() != slot.shape() {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: value.shape().to_vec(),
+            rhs: slot.shape().to_vec(),
+        }));
+    }
+    *slot = value;
+    Ok(())
 }
 
 /// `Linear::bind` が返す、1 ステップ分のテープに登録済みパラメータ。
@@ -514,6 +780,8 @@ mod tests {
             weight,
             bias: Some(bad_bias),
             requires_grad: true,
+            reparam: None,
+            training: true,
         };
         let input = Tensor::new(vec![0.0_f32; 2 * 4], &[2, 4]).unwrap();
 

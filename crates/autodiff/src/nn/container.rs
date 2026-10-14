@@ -75,7 +75,7 @@ use crate::error::AutodiffError;
 use crate::nn::module::{Module, NodeKey, RequiresGradSnapshot};
 use crate::tape::Tape;
 use crate::var::Var;
-use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 /// PyTorch `nn.ModuleList` 相当: forward を持たない子 `Module` の
 /// 保持器。`set_training`／`training`・`named_parameters` は自身が
@@ -571,11 +571,10 @@ impl Module for Sequential {
             if let Some(linear) = layer.as_linear() {
                 let fuse_relu = layers.get(i + 1).is_some_and(|next| next.as_relu());
                 let bound = linear.bind(tape);
-                current = if fuse_relu {
-                    bound.forward_with_activation(&current, Activation::Relu)?
-                } else {
-                    bound.forward(&current)?
-                };
+                // 再パラメータ化済み（イシュー #3048）は補助葉 g を登録し有効重みを再構成する。
+                // 非再パラメータ化は従来と bit 同一（`forward_bound` が従来経路へ委譲）。
+                let g = linear.bind_weight_norm_g(tape);
+                current = linear.forward_bound(&bound, g.as_ref(), &current, fuse_relu)?;
                 i += if fuse_relu { 2 } else { 1 };
             } else {
                 current = layer.forward(tape, &current)?;

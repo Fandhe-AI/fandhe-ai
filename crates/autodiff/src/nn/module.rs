@@ -1142,7 +1142,11 @@ fn collect_named_modules<'a>(
 /// `LinearVars::forward` を呼ぶ（`nn/linear.rs` 参照）。
 impl Module for Linear {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        self.bind(tape).forward(input)
+        // 再パラメータ化済み（イシュー #3048）は補助葉 `g` も登録し、有効重みを
+        // `forward_bound` が再構成する（非再パラメータ化は従来と bit 同一）。
+        let vars = self.bind(tape);
+        let g = self.bind_weight_norm_g(tape);
+        self.forward_bound(&vars, g.as_ref(), input, false)
     }
 
     fn as_linear(&self) -> Option<&Linear> {
@@ -1155,8 +1159,30 @@ impl Module for Linear {
 
     /// 命名契約（`Module::named_parameters` doc §「命名契約」）:
     /// `weight`（常に）→ `bias`（`Some` の場合のみ）の順。
+    ///
+    /// 再パラメータ化済み（イシュー #3048。PyTorch `parametrize` の命名に合わせる）:
+    /// weight_norm は `parametrizations.weight.original0`（g）→
+    /// `parametrizations.weight.original1`（v）→ `bias`、spectral_norm は
+    /// `parametrizations.weight.original` → `bias`。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = vec![("weight".to_string(), self.weight())];
+        let mut out = if self.is_parametrized() {
+            let mut v = Vec::new();
+            if let Some(g) = self.weight_norm_g() {
+                v.push(("parametrizations.weight.original0".to_string(), g));
+                v.push((
+                    "parametrizations.weight.original1".to_string(),
+                    self.weight(),
+                ));
+            } else {
+                v.push((
+                    "parametrizations.weight.original".to_string(),
+                    self.weight(),
+                ));
+            }
+            v
+        } else {
+            vec![("weight".to_string(), self.weight())]
+        };
         if let Some(bias) = self.bias() {
             out.push(("bias".to_string(), bias));
         }
@@ -1180,6 +1206,22 @@ impl Module for Linear {
 
     fn requires_grad(&self) -> bool {
         Linear::requires_grad(self)
+    }
+
+    /// spectral_norm の更新可否に効く（イシュー #3048）。非再パラメータ化の `Linear` では
+    /// 挙動に影響しない。
+    fn set_training(&mut self, training: bool) {
+        Linear::set_training(self, training);
+    }
+
+    fn training(&self) -> bool {
+        Linear::training(self)
+    }
+
+    /// 再パラメータ化済みは `false`（イシュー #3048）。有効重みの再構成は tape 経路のみで、
+    /// `predict` は事前判定で tape 経路へ落ちる（host 経路の副作用を一切起こさない）。
+    fn supports_forward_host(&self) -> bool {
+        !self.is_parametrized()
     }
 
     /// [`Module::forward`]（`Linear::bind(tape).forward(input)`。
@@ -1220,6 +1262,14 @@ impl Module for Linear {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            // 生の `weight()` を有効重みとして誤読する経路を作らない（イシュー #3048）。
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Linear::forward_host: weight が再パラメータ化済み（有効重みを host 経路で \
+                 再構成しない。tape 経路を使う）"
+                    .to_string(),
+            )));
+        }
         gemm_out_shape(input.shape(), self.weight().shape())?;
         let y = ops.gemm(input, self.weight())?;
         match self.bias() {
