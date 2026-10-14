@@ -19,11 +19,11 @@
 
 ## 2. 共通規約
 
-- 固定値（manifest に書かない）: `ceil_mode=false`・avg の `dilation=[1,1,1]`・`bias=true`・`seed`（`add_conv_transpose3d` のみ seed 引数あり。保存しない。重みは `load_state_dict` で上書き）。
+- 固定値（manifest に書かない）: `ceil_mode=false`・`bias=true`・`seed`（`add_conv_transpose3d` のみ seed 引数あり。保存しない。重みは `load_state_dict` で上書き）。
 - AMP 低精度は無視して f32 で forward する（`add_conv3d` と同じ）。
 - tape 不要の推論経路は全新規層で `supports_forward_host() = false`（`Mish`・`Glu`・`PRelu` の先例。tape 経路との bit 一致を未検証のまま副作用を二重化しない安全側）。bit 一致を検証できた層のみ後続 issue が個別に有効化してよい。
 - ONNX export は新規 6 層とも既存どおり `UnsupportedLayer`（fail-closed。拡張はスコープ外）。exhaustive match のコンパイルと拒否テストで確認する。
-- Sequential の新 kind は 6 個（`max_pool3d`・`avg_pool3d`・`conv_transpose3d`・`unfold`・`fold`・`local_response_norm`）。kind allowlist の件数アサーション（`model_io.rs` のテストの `== 53`）は並行 issue で変動するため、件数でなく名前集合の包含で書く、または実装時点の main に合わせて更新することを後続へ申し送る。
+- Sequential の新 kind は 6 個（`max_pool3d`・`avg_pool3d`・`conv_transpose3d`・`unfold`・`fold`・`local_response_norm`）。kind allowlist の件数アサーション（`crates/facade/src/compat/model_io.rs` のテストの `assert_eq!(kinds.len(), 53, ...)`〈3861 行付近〉、および `crates/facade/tests/compat_sequential_model_io.rs`・`compat_sequential_model_io_layers.rs` の `ALL_KINDS: [&str; 53]`）は並行 issue で変動するため、件数でなく名前集合の包含で書く、または実装時点の main に合わせて更新することを後続へ申し送る。
 
 ## 3. グループ別公開形（1 行 1 層）
 

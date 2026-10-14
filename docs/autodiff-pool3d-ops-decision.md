@@ -263,5 +263,5 @@ impl<'t> Var<'t> {
 
 ## 15. 層化の公開形（#3025）
 
-- pool3d（MaxPool3d／AvgPool3d） の層化の公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` を正とする（§3 の MaxPool3d・AvgPool3d 行）。
+- pool3d（MaxPool3d／AvgPool3d）の層化の公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` を正とする（§3 の MaxPool3d・AvgPool3d 行）。
 - 基づく判断: 2026-10-11 の所有者判断 D-A。本節は記録の参照であり新規承認ではない。既存本文は書き換えていない。
