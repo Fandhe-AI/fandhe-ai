@@ -16,7 +16,11 @@
 //! `Sequential` 形式と同じに保つ）、`nodes` は
 //! `{index, op, inputs:[..], layer_start, layer_len, params:{..}}` の平坦配列、`inputs` は入力ノードの
 //! 添字列（`build` に渡した順。件数だけでは順序を復元できないため設計記録 §8 の「入力数」から改めた）、
-//! `outputs` は出力ノードの添字列（同順）。`params` は `concatenate` の `{"dim": n}` だけで、他は `{}`。
+//! `outputs` は出力ノードの添字列（同順）。`params` は `concatenate` の `{"dim": n}` と、pool／unpool 6 op
+//! （`max_pool{1,2,3}d_indices`・`max_unpool{1,2,3}d`。イシュー #3037。キーは `Sequential` の `max_pool{1,2,3}d`
+//! と同流儀の平坦キーで 3D でも 12 個）だけが持ち、他は `{}`。unpool の `inputs` は `[特徴量, 索引元 pool]` の 2 件
+//! で、索引元は同次元の pool ノードでなければならない（safetensors を開く前に検証）。`format_version` は 1
+//! のまま（旧リーダーは未知 op を `UnsupportedModel` で fail-closed に拒否する）。
 //! 既存 `load_model` が拒否する（最上位キーの集合が異なるため `Manifest`）形式であり、逆も同様
 //! （形式の相互排他）。
 //!
@@ -44,13 +48,15 @@ use fandhe_ai_tensor_core::Tensor;
 use super::compiled::{CompiledMeta, OPTIMIZER_PREFIX, check_slot_shapes, parse_compiled};
 use super::{
     CheckedState, Json, LoadedTensors, MANIFEST_FILE_NAME, MAX_ARRAY_LEN, MAX_LAYERS,
-    MAX_MANIFEST_BYTES, ModelIoError, ParsedLayers, Parser, as_arr, as_str, as_u64, as_usize,
-    build_model, collect_checked_state, exact_fields, is_valid_safetensors_file_name,
-    manifest_error, map_leaf_error, parse_layers_and_keys, read_checked_tensors, render_key_shapes,
-    render_params, save_platform_check, spec_kind,
+    MAX_MANIFEST_BYTES, ModelIoError, ParamFields, Params, ParsedLayers, Parser, as_arr, as_str,
+    as_u64, as_usize, build_model, collect_checked_state, exact_fields,
+    is_valid_safetensors_file_name, manifest_error, map_leaf_error, parse_layers_and_keys, put_num,
+    put_opt, put_opt_pair, put_opt_triple, put_pair, put_triple, read_checked_tensors,
+    render_fields, render_key_shapes, render_params, save_platform_check, spec_kind,
 };
 use crate::compat::functional::{
-    FunctionalBuilder, FunctionalModel, MergeKind, Node, NodeDef, to_global_key, to_local_key,
+    FunctionalBuilder, FunctionalModel, MergeKind, Node, NodeDef, PoolSpec, UnpoolSpec,
+    to_global_key, to_local_key,
 };
 use crate::compat::sequential::{LayerSpec, Sequential};
 use crate::compat::training::Optimizer;
@@ -59,6 +65,8 @@ use crate::interop::safetensors::save_safetensors_f32_to_bytes;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_pool;
 
 /// manifest の `format` 値（`Sequential` 形式の `fandhe-ai.compat.sequential` と別名にして相互排他にする）。
 const FUNCTIONAL_FORMAT_NAME: &str = "fandhe-ai.compat.functional";
@@ -71,6 +79,10 @@ enum NodeOp {
     Input,
     Block,
     Merge(MergeKind),
+    /// `max_pool{1,2,3}d_with_indices`（値と索引。#3037）。入力 1 件・層なし。
+    MaxPoolIndices(PoolSpec),
+    /// `max_unpool{1,2,3}d`（#3037）。入力は `[特徴量, 索引元 pool]` の 2 件・層なし。
+    MaxUnpool(UnpoolSpec),
 }
 
 impl NodeOp {
@@ -83,8 +95,177 @@ impl NodeOp {
             NodeOp::Merge(MergeKind::Add) => "add",
             NodeOp::Merge(MergeKind::Multiply) => "multiply",
             NodeOp::Merge(MergeKind::Average) => "average",
+            NodeOp::MaxPoolIndices(spec) => match spec.dims() {
+                1 => "max_pool1d_indices",
+                2 => "max_pool2d_indices",
+                _ => "max_pool3d_indices",
+            },
+            NodeOp::MaxUnpool(spec) => match spec.dims() {
+                1 => "max_unpool1d",
+                2 => "max_unpool2d",
+                _ => "max_unpool3d",
+            },
         }
     }
+
+    /// 次元数（pool のみ。unpool の `indices_from` 次元一致検査に使う）。
+    fn pool_dims(self) -> Option<usize> {
+        match self {
+            NodeOp::MaxPoolIndices(spec) => Some(spec.dims()),
+            _ => None,
+        }
+    }
+}
+
+/// pool／unpool ノードの `params` を描画する。キーは `Sequential` の `max_pool{1,2,3}d` と同流儀
+/// （1D は素のキー・2D は `_h`／`_w`・3D は `_d`／`_h`／`_w`。`ceil_mode` は固定 false のため書かない）。
+fn render_pool_node_params(op: NodeOp) -> Option<String> {
+    let mut f: ParamFields = Vec::new();
+    match op {
+        NodeOp::MaxPoolIndices(PoolSpec::D1 {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        }) => {
+            put_num(&mut f, "kernel_size", kernel_size);
+            put_opt(&mut f, "stride", stride);
+            put_num(&mut f, "padding", padding);
+            put_num(&mut f, "dilation", dilation);
+        }
+        NodeOp::MaxPoolIndices(PoolSpec::D2 {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        }) => {
+            put_pair(&mut f, "kernel_size", kernel_size);
+            put_opt_pair(&mut f, "stride", stride);
+            put_pair(&mut f, "padding", padding);
+            put_pair(&mut f, "dilation", dilation);
+        }
+        NodeOp::MaxPoolIndices(PoolSpec::D3 {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        }) => {
+            put_triple(&mut f, "kernel_size", kernel_size);
+            put_opt_triple(&mut f, "stride", stride);
+            put_triple(&mut f, "padding", padding);
+            put_triple(&mut f, "dilation", dilation);
+        }
+        NodeOp::MaxUnpool(UnpoolSpec::D1 {
+            kernel_size,
+            stride,
+            padding,
+            output_size,
+        }) => {
+            put_num(&mut f, "kernel_size", kernel_size);
+            put_opt(&mut f, "stride", stride);
+            put_num(&mut f, "padding", padding);
+            put_opt(&mut f, "output_size", output_size);
+        }
+        NodeOp::MaxUnpool(UnpoolSpec::D2 {
+            kernel_size,
+            stride,
+            padding,
+            output_size,
+        }) => {
+            put_pair(&mut f, "kernel_size", kernel_size);
+            put_opt_pair(&mut f, "stride", stride);
+            put_pair(&mut f, "padding", padding);
+            put_opt_pair(&mut f, "output_size", output_size);
+        }
+        NodeOp::MaxUnpool(UnpoolSpec::D3 {
+            kernel_size,
+            stride,
+            padding,
+            output_size,
+        }) => {
+            put_triple(&mut f, "kernel_size", kernel_size);
+            put_opt_triple(&mut f, "stride", stride);
+            put_triple(&mut f, "padding", padding);
+            put_opt_triple(&mut f, "output_size", output_size);
+        }
+        _ => return None,
+    }
+    Some(render_fields(&f))
+}
+
+/// pool／unpool ノードの `params` キー集合（`Params::new` の完全一致検査用）。
+fn pool_node_keys(op_name: &str) -> Vec<String> {
+    let dims = match op_name.bytes().find(u8::is_ascii_digit) {
+        Some(b'1') => 1,
+        Some(b'2') => 2,
+        _ => 3,
+    };
+    let last = if op_name.contains("unpool") {
+        "output_size"
+    } else {
+        "dilation"
+    };
+    let mut keys = Vec::new();
+    for base in ["kernel_size", "stride", "padding", last] {
+        match dims {
+            1 => keys.push(base.to_string()),
+            2 => {
+                keys.push(format!("{base}_h"));
+                keys.push(format!("{base}_w"));
+            }
+            _ => {
+                keys.push(format!("{base}_d"));
+                keys.push(format!("{base}_h"));
+                keys.push(format!("{base}_w"));
+            }
+        }
+    }
+    keys
+}
+
+/// pool／unpool の `op` 文字列から [`NodeOp`] を読む（`params` はキー集合の完全一致・型・非負整数）。
+fn parse_pool_node(op_name: &str, params: &Json) -> Result<NodeOp, ModelIoError> {
+    let keys = pool_node_keys(op_name);
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let p = Params::new(params, &key_refs)?;
+    Ok(match op_name {
+        "max_pool1d_indices" => NodeOp::MaxPoolIndices(PoolSpec::D1 {
+            kernel_size: p.usize("kernel_size")?,
+            stride: p.opt_usize("stride")?,
+            padding: p.usize("padding")?,
+            dilation: p.usize("dilation")?,
+        }),
+        "max_pool2d_indices" => NodeOp::MaxPoolIndices(PoolSpec::D2 {
+            kernel_size: p.pair("kernel_size")?,
+            stride: p.opt_pair("stride")?,
+            padding: p.pair("padding")?,
+            dilation: p.pair("dilation")?,
+        }),
+        "max_pool3d_indices" => NodeOp::MaxPoolIndices(PoolSpec::D3 {
+            kernel_size: p.triple("kernel_size")?,
+            stride: p.opt_triple("stride")?,
+            padding: p.triple("padding")?,
+            dilation: p.triple("dilation")?,
+        }),
+        "max_unpool1d" => NodeOp::MaxUnpool(UnpoolSpec::D1 {
+            kernel_size: p.usize("kernel_size")?,
+            stride: p.opt_usize("stride")?,
+            padding: p.usize("padding")?,
+            output_size: p.opt_usize("output_size")?,
+        }),
+        "max_unpool2d" => NodeOp::MaxUnpool(UnpoolSpec::D2 {
+            kernel_size: p.pair("kernel_size")?,
+            stride: p.opt_pair("stride")?,
+            padding: p.pair("padding")?,
+            output_size: p.opt_pair("output_size")?,
+        }),
+        _ => NodeOp::MaxUnpool(UnpoolSpec::D3 {
+            kernel_size: p.triple("kernel_size")?,
+            stride: p.opt_triple("stride")?,
+            padding: p.triple("padding")?,
+            output_size: p.opt_triple("output_size")?,
+        }),
+    })
 }
 
 /// manifest の `nodes[]` 1 件（保存側が組み立て・復元側が検証して読む共通表現）。
@@ -212,15 +393,18 @@ fn prepare_functional_save(
                 layer_start,
                 layer_len: 0,
             }),
-            // MaxPool 索引・MaxUnpool ノードは manifest の op に未対応（#3037）。黙って欠落させず、
-            // `dir` へ何も書く前のこの準備段で fail-closed に拒否する。
-            NodeDef::MaxPoolIndices { .. } | NodeDef::MaxUnpool { .. } => {
-                return Err(ModelIoError::UnsupportedModel {
-                    reason: format!(
-                        "ノード {index}: max_pool*_with_indices／max_unpool* ノードを含む Functional モデルの保存は未対応です（#3037 で対応）"
-                    ),
-                });
-            }
+            NodeDef::MaxPoolIndices { spec, inputs } => nodes.push(NodeRecord {
+                op: NodeOp::MaxPoolIndices(*spec),
+                inputs: inputs.clone(),
+                layer_start,
+                layer_len: 0,
+            }),
+            NodeDef::MaxUnpool { spec, inputs } => nodes.push(NodeRecord {
+                op: NodeOp::MaxUnpool(*spec),
+                inputs: inputs.clone(),
+                layer_start,
+                layer_len: 0,
+            }),
             NodeDef::Block { block, inputs } => {
                 let layer_len = block.layers().len();
                 // 総層数の上限は `Sequential` 形式と同じ（ブロック単位でも `collect_checked_state` が検査）。
@@ -410,6 +594,9 @@ fn render_functional_manifest(
         }
         let params = match node.op {
             NodeOp::Merge(MergeKind::Concatenate { dim }) => format!("{{\"dim\":{dim}}}"),
+            NodeOp::MaxPoolIndices(_) | NodeOp::MaxUnpool(_) => {
+                render_pool_node_params(node.op).unwrap_or_else(|| "{}".to_string())
+            }
             _ => "{}".to_string(),
         };
         s.push_str(&format!(
@@ -568,6 +755,99 @@ fn load_functional_with_limits(
             NodeOp::Merge(MergeKind::Add) => builder.add(&sources),
             NodeOp::Merge(MergeKind::Multiply) => builder.multiply(&sources),
             NodeOp::Merge(MergeKind::Average) => builder.average(&sources),
+            NodeOp::MaxPoolIndices(spec) => {
+                let [src] = sources.as_slice() else {
+                    return Err(manifest_error(format!(
+                        "nodes[{index}] の pool ノードは入力 1 件が必要です"
+                    )));
+                };
+                match spec {
+                    PoolSpec::D1 {
+                        kernel_size,
+                        stride,
+                        padding,
+                        dilation,
+                    } => builder.max_pool1d_with_indices(
+                        *src,
+                        kernel_size,
+                        stride,
+                        padding,
+                        dilation,
+                    ),
+                    PoolSpec::D2 {
+                        kernel_size,
+                        stride,
+                        padding,
+                        dilation,
+                    } => builder.max_pool2d_with_indices(
+                        *src,
+                        kernel_size,
+                        stride,
+                        padding,
+                        dilation,
+                    ),
+                    PoolSpec::D3 {
+                        kernel_size,
+                        stride,
+                        padding,
+                        dilation,
+                    } => builder.max_pool3d_with_indices(
+                        *src,
+                        kernel_size,
+                        stride,
+                        padding,
+                        dilation,
+                    ),
+                }
+            }
+            NodeOp::MaxUnpool(spec) => {
+                let [feature, pool] = sources.as_slice() else {
+                    return Err(manifest_error(format!(
+                        "nodes[{index}] の unpool ノードは入力 2 件が必要です"
+                    )));
+                };
+                match spec {
+                    UnpoolSpec::D1 {
+                        kernel_size,
+                        stride,
+                        padding,
+                        output_size,
+                    } => builder.max_unpool1d(
+                        *feature,
+                        *pool,
+                        kernel_size,
+                        stride,
+                        padding,
+                        output_size,
+                    ),
+                    UnpoolSpec::D2 {
+                        kernel_size,
+                        stride,
+                        padding,
+                        output_size,
+                    } => builder.max_unpool2d(
+                        *feature,
+                        *pool,
+                        kernel_size,
+                        stride,
+                        padding,
+                        output_size,
+                    ),
+                    UnpoolSpec::D3 {
+                        kernel_size,
+                        stride,
+                        padding,
+                        output_size,
+                    } => builder.max_unpool3d(
+                        *feature,
+                        *pool,
+                        kernel_size,
+                        stride,
+                        padding,
+                        output_size,
+                    ),
+                }
+            }
         }
         .map_err(ModelIoError::Autodiff)?;
         handles.push(handle);
@@ -799,6 +1079,8 @@ fn parse_nodes(items: &[Json], layer_count: usize) -> Result<Vec<NodeRecord>, Mo
                     dim: as_usize(pf[0], "nodes[].params.dim")?,
                 })
             }
+            "max_pool1d_indices" | "max_pool2d_indices" | "max_pool3d_indices" | "max_unpool1d"
+            | "max_unpool2d" | "max_unpool3d" => parse_pool_node(op_name, params)?,
             _ => {
                 return Err(ModelIoError::UnsupportedModel {
                     reason: format!("未対応のノード種別 {} です", super::clip(op_name)),
@@ -817,6 +1099,8 @@ fn parse_nodes(items: &[Json], layer_count: usize) -> Result<Vec<NodeRecord>, Mo
             NodeOp::Input => (inputs.is_empty(), layer_len == 0),
             NodeOp::Block => (inputs.len() == 1, layer_len >= 1),
             NodeOp::Merge(_) => (inputs.len() >= 2, layer_len == 0),
+            NodeOp::MaxPoolIndices(_) => (inputs.len() == 1, layer_len == 0),
+            NodeOp::MaxUnpool(_) => (inputs.len() == 2, layer_len == 0),
         };
         if !arity_ok {
             return Err(manifest_error(format!(
@@ -827,6 +1111,17 @@ fn parse_nodes(items: &[Json], layer_count: usize) -> Result<Vec<NodeRecord>, Mo
             return Err(manifest_error(format!(
                 "nodes[{i}] の layer_len が op {op_name} の規則に合いません"
             )));
+        }
+        // unpool の `indices_from`（inputs[1]）は同次元の pool ノードでなければならない
+        // （`FunctionalBuilder::max_unpool*` の構築時検査と同じ規則を safetensors を開く前に確認する）。
+        // 前方参照・自己参照は上の `src >= i` 検査で拒否済みのため `nodes[..i]` だけを見ればよい。
+        if let NodeOp::MaxUnpool(spec) = op {
+            let pool = inputs.get(1).copied().and_then(|j| nodes.get(j));
+            if pool.and_then(|n| n.op.pool_dims()) != Some(spec.dims()) {
+                return Err(manifest_error(format!(
+                    "nodes[{i}] の unpool の索引元は同次元の max_pool*_indices ノードである必要があります"
+                )));
+            }
         }
         if matches!(op, NodeOp::Merge(_)) {
             // 作業領域の値に「最後に見たノード添字 + 1」を書き、同一ノードの再出現を検出する。

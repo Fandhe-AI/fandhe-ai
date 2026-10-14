@@ -19,7 +19,7 @@
 //! 公開メソッドは `FunctionalBuilder::{new, input, apply, concatenate, add, multiply, average,
 //! max_pool{1,2,3}d_with_indices, max_unpool{1,2,3}d, build}`（MaxPool 索引・MaxUnpool は #3036。
 //! `Sequential` には載せず本ビルダー限定。`docs/compat-sequential-3d-fold-lrn-layers-decision.md` §6。
-//! 保存は未対応で `UnsupportedModel`、対応は #3037）、
+//! 保存・復元は #3037 で対応済み。manifest の op 6 種を追加、`format_version` 1 据え置き）、
 //! `FunctionalModel::{forward, predict, set_training, train, eval, training, named_parameters, state_dict,
 //! load_state_dict, trainable_parameters, apply_parameters, compile, fit, evaluate}`。doc から非公開項目
 //! （`FunctionalVars`・`bind`）へ intra-doc link は張らない（`rustdoc::private_intra_doc_links` を避けるため）。
@@ -168,7 +168,7 @@ pub(super) enum UnpoolSpec {
 
 impl PoolSpec {
     /// 次元数（unpool との対応検査用）。
-    fn dims(&self) -> usize {
+    pub(super) fn dims(&self) -> usize {
         match self {
             PoolSpec::D1 { .. } => 1,
             PoolSpec::D2 { .. } => 2,
@@ -179,7 +179,7 @@ impl PoolSpec {
 
 impl UnpoolSpec {
     /// 次元数（pool との対応検査用）。
-    fn dims(&self) -> usize {
+    pub(super) fn dims(&self) -> usize {
         match self {
             UnpoolSpec::D1 { .. } => 1,
             UnpoolSpec::D2 { .. } => 2,

@@ -12,11 +12,11 @@
 //! - SegNet 型（pool → ブロック → unpool）・fan-out・重なり窓の学習 1 step が手組みの backward + SGD と一致する
 //! - `predict`／`evaluate` が `forward` と整合する
 //! - 拒否系が panic せず型付きエラーになる
-//! - 保存は `UnsupportedModel` で拒否し、保存先に何も作らない（実 op 化は #3037）
+//! - 保存→復元の往復は #3037 で実装済み（旧「保存拒否」の固定は往復成功の検証へ置換。詳細は `compat_functional_model_io.rs`）
 
 use fandhe_ai::compat::{
-    FitConfig, FunctionalBuilder, FunctionalModel, Loss, ModelIoError, Optimizer, Sequential,
-    save_functional_model,
+    FitConfig, FunctionalBuilder, FunctionalModel, Loss, Optimizer, Sequential,
+    load_functional_model, save_functional_model,
 };
 use fandhe_ai::optim::SgdConfig;
 use fandhe_ai::{AutodiffError, Tensor, tape};
@@ -420,17 +420,18 @@ fn forward_rejects_input_from_another_tape() {
     ));
 }
 
-// ---- 保存は fail-closed ----
+// ---- 保存→復元（#3037。旧「保存は fail-closed」の固定を往復成功へ置換） ----
 
 #[test]
-fn save_rejects_max_pool_unpool_graph_without_touching_dir() {
-    let model = segnet([2, 2], None, [0, 0]);
+fn save_then_load_round_trips_max_pool_unpool_graph() {
+    let mut model = segnet([2, 2], None, [0, 0]);
+    model.eval();
     let guard = TempDirGuard::new("functional_max_unpool_save");
     let dir = guard.path().join("m");
-    let err = save_functional_model(&model, &dir).unwrap_err();
-    assert!(
-        matches!(err, ModelIoError::UnsupportedModel { .. }),
-        "{err:?}"
-    );
-    assert!(!dir.exists(), "拒否時は保存先に何も作らない");
+    save_functional_model(&model, &dir).unwrap();
+    let loaded = load_functional_model(&dir).unwrap();
+    let x = det(&[1, 1, 4, 4], 0.3);
+    let a = model.predict(&[&x]).unwrap();
+    let b = loaded.predict(&[&x]).unwrap();
+    assert_eq!(bits(&a[0]), bits(&b[0]));
 }

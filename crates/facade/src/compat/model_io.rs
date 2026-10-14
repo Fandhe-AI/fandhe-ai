@@ -1322,6 +1322,12 @@ fn render_params(spec: &LayerSpec) -> String {
         | LayerSpec::Identity
         | LayerSpec::Unsupported { .. } => {}
     }
+    render_fields(&f)
+}
+
+/// `ParamFields` を `params` の JSON object 文字列にする（`render_params` と Functional 形式の
+/// ノード params 描画〈`functional_io`・イシュー #3037〉が共用する）。
+fn render_fields(f: &ParamFields) -> String {
     let body: Vec<String> = f.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
     format!("{{{}}}", body.join(","))
 }
