@@ -44,7 +44,7 @@ use crate::nn::padding::ZeroPad2d;
 use crate::nn::pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 use crate::nn::pooling::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AvgPool1d,
-    AvgPool2d, GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d,
+    AvgPool2d, AvgPool3d, GlobalPool, GlobalPoolMode, MaxPool1d, MaxPool2d, MaxPool3d,
 };
 use crate::nn::transformer::Transformer;
 use crate::nn::transformer_decoder_layer::TransformerDecoderLayer;
@@ -317,6 +317,17 @@ pub trait Module {
         None
     }
 
+    /// [`Module::as_conv3d`] と同型の読み取り専用フック（イシュー #3027）。
+    /// `MaxPool3d` 層向け。既定 `None`。無状態層のため `_mut` 版は置かない。
+    fn as_max_pool3d(&self) -> Option<&MaxPool3d> {
+        None
+    }
+
+    /// [`Module::as_max_pool3d`] の `AvgPool3d` 版（イシュー #3027）。既定 `None`。
+    fn as_avg_pool3d(&self) -> Option<&AvgPool3d> {
+        None
+    }
+
     /// [`Module::as_linear`] と同型の明示フック（イシュー #1760・親
     /// #1618）。`compat::Sequential` の学習経路（`bind`／
     /// `trainable_parameters`／`apply_parameters` 等）が `LayerNorm` 層
@@ -521,14 +532,15 @@ pub trait Module {
 
     /// この層が Pooling（[`MaxPool2d`]／[`MaxPool1d`]／[`AvgPool2d`]／
     /// [`AvgPool1d`]／[`AdaptiveAvgPool2d`]／[`AdaptiveAvgPool1d`]／
-    /// [`AdaptiveMaxPool2d`]／[`AdaptiveMaxPool1d`]／[`GlobalPool`]）
+    /// [`AdaptiveMaxPool2d`]／[`AdaptiveMaxPool1d`]／[`GlobalPool`]／
+    /// [`MaxPool3d`]／[`AvgPool3d`]）
     /// かどうか（イシュー #1957・#2160）。`as_relu` と同じ bool フック
     /// 方式（`docs/compat-api-scope.md` §1 の閉集合維持。用途が
     /// `fandhe_ai_facade::compat::sequential::Sequential::
     /// contains_resident_unsupported_layer` の真偽判定のみであり
     /// 型付き参照を必要とする消費者が無いため、`as_conv2d` 等と異なり
     /// `Option<&T>` ではなく bool を返す）。既定は `false`
-    /// （Pooling 9 型のみオーバーライドする）。
+    /// （Pooling 11 型のみオーバーライドする）。
     fn is_pooling(&self) -> bool {
         false
     }
@@ -1858,6 +1870,49 @@ impl Module for MaxPool1d {
 
     fn is_pooling(&self) -> bool {
         true
+    }
+}
+
+/// `MaxPool3d::forward` への委譲（イシュー #3027）。`values` のみを返す
+/// （索引が必要な場合は `MaxPool3d::forward` を直接呼ぶ）。`forward_host` は
+/// 既定（`Unsupported`）のまま、tape 経路との bit 一致を検証していない
+/// host 経路を作らないため `supports_forward_host` を `false` へ申告する
+/// （[`Mish`] と同型）。
+impl Module for MaxPool3d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (values, _index) = MaxPool3d::forward(self, input)?;
+        Ok(values)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+
+    fn as_max_pool3d(&self) -> Option<&MaxPool3d> {
+        Some(self)
+    }
+}
+
+/// `AvgPool3d::forward` への委譲（イシュー #3027。`MaxPool3d` と同型）。
+impl Module for AvgPool3d {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        AvgPool3d::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn is_pooling(&self) -> bool {
+        true
+    }
+
+    fn as_avg_pool3d(&self) -> Option<&AvgPool3d> {
+        Some(self)
     }
 }
 
@@ -3744,7 +3799,7 @@ mod tests {
         );
     }
 
-    /// [`Module::is_pooling`] が Pooling 9 型でのみ `true` を返し、
+    /// [`Module::is_pooling`] が Pooling 11 型でのみ `true` を返し、
     /// 他の層（`Relu`・`Linear`）では既定の `false` のままであること
     /// を確認する（イシュー #1957・#2160。`compat::Sequential::
     /// contains_resident_unsupported_layer` の判定入口として使う
@@ -3760,6 +3815,8 @@ mod tests {
         let adaptive_max_pool2d = AdaptiveMaxPool2d::new([2, 2]).unwrap();
         let adaptive_max_pool1d = AdaptiveMaxPool1d::new(2).unwrap();
         let global_pool = GlobalPool::new(GlobalPoolMode::Avg, true);
+        let max_pool3d = MaxPool3d::new([2, 2, 2], None, [0, 0, 0], [1, 1, 1]).unwrap();
+        let avg_pool3d = AvgPool3d::new([2, 2, 2], None, [0, 0, 0], true).unwrap();
 
         assert!(Module::is_pooling(&max_pool2d));
         assert!(Module::is_pooling(&max_pool1d));
@@ -3770,6 +3827,8 @@ mod tests {
         assert!(Module::is_pooling(&adaptive_max_pool2d));
         assert!(Module::is_pooling(&adaptive_max_pool1d));
         assert!(Module::is_pooling(&global_pool));
+        assert!(Module::is_pooling(&max_pool3d));
+        assert!(Module::is_pooling(&avg_pool3d));
 
         assert!(!Module::is_pooling(&Relu));
         let linear = Linear::new(3, 2, true, 7).unwrap();

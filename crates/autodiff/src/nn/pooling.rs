@@ -17,10 +17,16 @@
 //! 従う）。`MaxPool1d`／`MaxPool2d` の `Module::forward` は
 //! `(values, index)` のうち `values` のみを返す（索引が必要な場合は
 //! [`MaxPool2d::forward`]／[`MaxPool1d::forward`] を直接呼ぶ）。
+//!
+//! 3D 版 [`MaxPool3d`]／[`AvgPool3d`]（イシュー #3027・親 #3019）は
+//! [`Var::max_pool3d`]／[`Var::avg_pool3d`] の薄いラッパー（`NCDHW` 入力・
+//! `ceil_mode=false` 固定・新規 `Op`／`BackendOps` なし）。公開形の正は
+//! `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3。
 
 use crate::adaptive_max_pool_ops;
 use crate::error::AutodiffError;
 use crate::var::Var;
+use fandhe_ai_tensor_core::pool3d::Pool3dParams;
 use fandhe_ai_tensor_core::{Pool2dParams, ShapeError, Tensor};
 
 /// PyTorch `torch.nn.MaxPool2d` 相当（`ceil_mode=false` 固定）。
@@ -502,5 +508,79 @@ impl GlobalPool {
             }
         };
         Ok(reduced)
+    }
+}
+
+/// PyTorch `torch.nn.MaxPool3d` 相当（`ceil_mode=false` 固定。イシュー #3027）。
+/// [`Var::max_pool3d`] への薄い層ラッパーで、構築時に [`Pool3dParams::new`] の
+/// 検査（0 次元拒否・`padding <= kernel_size/2`・`2*padding` オーバーフロー拒否）を
+/// 前倒しする。`facade` の `Sequential::add_max_pool3d` は後続 issue の範囲。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaxPool3d {
+    params: Pool3dParams,
+}
+
+impl MaxPool3d {
+    /// `kernel_size`／`stride`（省略時 `kernel_size` と同じ）／`padding`／
+    /// `dilation` から構築する。不正引数は型付きエラー。
+    pub fn new(
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        dilation: [usize; 3],
+    ) -> Result<Self, AutodiffError> {
+        let params = Pool3dParams::new(kernel_size, stride, padding, dilation)
+            .map_err(AutodiffError::Backend)?;
+        Ok(Self { params })
+    }
+
+    /// `NCDHW` 入力に対し [`Var::max_pool3d`] へ委譲し `(values, index)` を返す
+    /// （`index` の意味は [`MaxPool2d::forward`] と同型）。`Module::forward` は
+    /// `values` のみを返すため、索引が必要な場合は本メソッドを直接呼ぶ。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<(Var<'t>, Tensor<i32>), AutodiffError> {
+        input.max_pool3d(
+            self.params.kernel_size(),
+            Some(self.params.stride()),
+            self.params.padding(),
+            self.params.dilation(),
+            false,
+        )
+    }
+}
+
+/// PyTorch `torch.nn.AvgPool3d` 相当（`ceil_mode=false`・`dilation=[1,1,1]` 固定。
+/// イシュー #3027）。[`Var::avg_pool3d`] への薄い層ラッパー。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AvgPool3d {
+    params: Pool3dParams,
+    count_include_pad: bool,
+}
+
+impl AvgPool3d {
+    /// `kernel_size`／`stride`（省略時 `kernel_size` と同じ）／`padding`／
+    /// `count_include_pad` から構築する。不正引数は型付きエラー。
+    pub fn new(
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        count_include_pad: bool,
+    ) -> Result<Self, AutodiffError> {
+        let params = Pool3dParams::new(kernel_size, stride, padding, [1, 1, 1])
+            .map_err(AutodiffError::Backend)?;
+        Ok(Self {
+            params,
+            count_include_pad,
+        })
+    }
+
+    /// `NCDHW` 入力に対し [`Var::avg_pool3d`] へ委譲する。
+    pub fn forward<'t>(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        input.avg_pool3d(
+            self.params.kernel_size(),
+            Some(self.params.stride()),
+            self.params.padding(),
+            false,
+            self.count_include_pad,
+        )
     }
 }
