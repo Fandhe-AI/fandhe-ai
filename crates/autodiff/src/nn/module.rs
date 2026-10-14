@@ -32,7 +32,7 @@ use crate::nn::batch_norm::{
     BATCH_NORM_1D_RANKS, BATCH_NORM_2D_RANKS, BatchNorm1d, BatchNorm2d, BatchNormCore,
 };
 use crate::nn::container::{ModuleDict, ModuleList};
-use crate::nn::conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d};
+use crate::nn::conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, ConvTranspose3d};
 use crate::nn::embedding::Embedding;
 use crate::nn::embedding_bag::EmbeddingBag;
 use crate::nn::flatten::Flatten;
@@ -314,6 +314,17 @@ pub trait Module {
 
     /// [`Module::as_conv3d`] の可変版。
     fn as_conv3d_mut(&mut self) -> Option<&mut Conv3d> {
+        None
+    }
+
+    /// [`Module::as_conv3d`] と同型のフック（イシュー #3031）。`ConvTranspose3d` 層向け。既定 `None`。
+    /// facade の `Sequential` への結線は後続 issue の範囲。
+    fn as_conv_transpose3d(&self) -> Option<&ConvTranspose3d> {
+        None
+    }
+
+    /// [`Module::as_conv_transpose3d`] の可変版。
+    fn as_conv_transpose3d_mut(&mut self) -> Option<&mut ConvTranspose3d> {
         None
     }
 
@@ -1437,6 +1448,51 @@ impl Module for Conv3d {
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         Conv3d::forward_host(self, ops, input)
+    }
+}
+
+/// `ConvTranspose3d::bind(tape).forward(input)`（`nn/conv.rs` 参照。イシュー #3031）。
+impl Module for ConvTranspose3d {
+    fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.bind(tape).forward(input)
+    }
+
+    fn as_conv_transpose3d(&self) -> Option<&ConvTranspose3d> {
+        Some(self)
+    }
+
+    fn as_conv_transpose3d_mut(&mut self) -> Option<&mut ConvTranspose3d> {
+        Some(self)
+    }
+
+    /// 命名契約は `Conv3d` と同型（`weight` → `bias`）。
+    fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
+        let mut out = vec![("weight".to_string(), self.weight())];
+        if let Some(bias) = self.bias() {
+            out.push(("bias".to_string(), bias));
+        }
+        out
+    }
+
+    fn set_parameter(&mut self, name: &str, value: Tensor<f32>) -> Result<(), AutodiffError> {
+        ConvTranspose3d::set_parameter(self, name, value)
+    }
+
+    fn set_requires_grad(&mut self, requires_grad: bool) -> Result<(), AutodiffError> {
+        ConvTranspose3d::set_requires_grad(self, requires_grad);
+        Ok(())
+    }
+
+    fn requires_grad(&self) -> bool {
+        ConvTranspose3d::requires_grad(self)
+    }
+
+    fn forward_host(
+        &self,
+        ops: &dyn BackendOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        ConvTranspose3d::forward_host(self, ops, input)
     }
 }
 

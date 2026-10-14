@@ -279,7 +279,8 @@ pub use container::{ModuleDict, ModuleList, Sequential, summary};
 pub(crate) use conv::conv_transpose1d_forward;
 pub use conv::{
     Conv1d, Conv1dVars, Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d,
-    ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, conv2d_forward_low_precision,
+    ConvTranspose1dVars, ConvTranspose2d, ConvTranspose2dVars, ConvTranspose3d,
+    ConvTranspose3dVars, conv2d_forward_low_precision,
 };
 pub use dropout::{AlphaDropout, Dropout, Dropout2d};
 pub(crate) use dropout::{alpha_dropout_forward, dropout2d_forward};

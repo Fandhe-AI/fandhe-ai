@@ -329,3 +329,14 @@ impl<'t> Var<'t> {
 
 - ConvTranspose3d・MaxUnpool の層化の公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` を正とする（§3 の ConvTranspose3d 行（manifest は §4 の 8 キー文字列畳み込み）と MaxUnpool 行（Sequential に層化せず `FunctionalBuilder` 経由・§6））。
 - 基づく判断: 2026-10-11 の所有者判断 D-A。本節は記録の参照であり新規承認ではない。既存本文は書き換えていない。
+
+## 16. #3031 実施記録（`nn::ConvTranspose3d` の層 struct）
+
+- **追加した型**: `fandhe_ai_autodiff::nn::ConvTranspose3d`・`ConvTranspose3dVars`（`crates/autodiff/src/nn/conv.rs`。§15 のとおり `ConvTranspose2d` と同型・`nn/conv.rs` に同居）。引数は `(in_channels, out_channels, kernel_size, stride, padding, output_padding, dilation, groups, bias, seed)`。
+- **検査順**: `Conv3dParams::new` → 各軸 `output_padding < stride`（PyTorch 非互換のまま。§5・§12.2）→ `in_channels == 0` → `groups` 整合 → `out_channels >= groups`。初期化 bound は PyTorch 準拠の `fan_in = (out/groups)·kD·kH·kW`。
+- **委譲**: `ConvTranspose3dVars::forward` は `conv_transpose3d_ops::conv_transpose3d`（`Var::conv_transpose3d` と同一の自由関数）へ 1 行委譲する。新規 `Op`／`BackendOps`／カーネルなし。`forward_host` は同じ `conv_transpose3d_forward`（`pub(crate)` 化。ロジック不変）を直接呼び、tape 経路と bit 一致する。
+- **`Module` 実装**: `as_conv_transpose3d`／`as_conv_transpose3d_mut` フックを追加。`supports_forward_host` は既定 `true` のまま。
+- **テスト**: `crates/autodiff/tests/nn_conv_transpose3d.rs`（構築・forward の型付きエラーと孤児ノードなし・`Var::conv_transpose3d` 直呼びとの forward 値／全勾配 bit 一致・`forward_host` との bit 一致・決定性・初期化 bound・パラメータ API・フック）。
+- **未変更（後続 `-b` の範囲）**: facade の `Sequential::add_conv_transpose3d`・`LayerSpec`・`save_model` kind・保留ガード反転。
+- **実機**: CUDA／Metal は未実測。
+- 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
