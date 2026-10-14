@@ -602,7 +602,7 @@ P1」）を受けた是正である。
 | 20 | マージン・focal 損失 4 種（#2653） | `Var::multi_margin_loss`／`multilabel_margin_loss`／`multilabel_soft_margin_loss`／`sigmoid_focal_loss` の委譲 4 本。オプション型 3 つと `Reduction` の名指しは別論点（同上） | 追加のみ | `MarginFocalLossOpsHoldDoctestGuard` | オプション型 3 つの公開パスは `fandhe_ai::nn::loss`・シグネチャは `facade-nn-loss-structs-exposure-decision.md` §11 に記録（#2853）。`multilabel_margin_loss` は #2677、`multi_margin_loss`・`multilabel_soft_margin_loss`・`sigmoid_focal_loss` とオプション型 3 つは #2854 の適用記録で公開済み（`Var` 委譲 4 本。同上）。ガードはモジュール `margin_focal_loss_ops` の再エクスポートと `Tape`／`Tensor<f32>` 上の同名メソッドの拒否だけへ縮小。この 2 点は保留 | `autodiff-margin-focal-loss-ops-decision.md` §7・§14、`facade-nn-loss-structs-exposure-decision.md` §11 |
 | 21 | Rprop・ASGD（#2655） | `fandhe_ai::optim`（`crates/facade/src/optim.rs`）へ `Asgd`・`AsgdConfig`・`Rprop`・`RpropConfig` の素の再エクスポート | 追加のみ | `OptimizerRpropAsgdHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-rprop-asgd-decision.md` §8 |
 | 22 | Adafactor・Lion（#2656） | `fandhe_ai::optim` へ `Adafactor`・`AdafactorConfig`・`Lion`・`LionConfig` の素の再エクスポート | 追加のみ | `OptimizerAdafactorLionHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-optimizer-adafactor-lion-decision.md` §8 |
-| 23 | SWA（#2658） | モジュール公開（`fandhe_ai::optim`）。`SwaLr`・`SwaAnneal` は純再エクスポート、`AveragedModel` は facade 独自の薄いラッパー（内部 `nn::Module` を露出しないため）。fit への結線は含めない | 追加のみ† | `SwaHoldDoctestGuard` | #2679 で公開済み（`optim`。ガードは `fit` 結線〈`FitConfig`／`Sequential` のメソッド〉のプローブへ縮小） | `autodiff-swa-decision.md` §7（承認事項 5 件） |
+| 23 | SWA（#2658） | モジュール公開（`fandhe_ai::optim`）。`SwaLr`・`SwaAnneal` は純再エクスポート、`AveragedModel` は facade 独自の薄いラッパー（内部 `nn::Module` を露出しないため）。fit への結線は初回公開形に含めない（履歴。2026-10-11 の D-A で反転し、`Callback::Swa(SwaCallback)` として形を `autodiff-swa-decision.md` §16 で確定。実装は #3058・#3059） | 追加のみ† | `SwaHoldDoctestGuard` | #2679 で公開済み（`optim`。ガードは `fit` 結線〈`FitConfig`／`Sequential` のメソッド〉のプローブへ縮小） | `autodiff-swa-decision.md` §7（承認事項 5 件） |
 | 24 | `PolynomialLr`・`ChainedScheduler`（#2659） | `fandhe_ai::optim` へ `ChainedScheduler`・`PolynomialLr` の純再エクスポート（1 行追加。newtype・別名なし） | 追加のみ† | `LrSchedulerPolyChainedHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `autodiff-lr-scheduler-poly-chained-decision.md` §8（承認事項: 型名・`total_iters == 0` と `power < 0` の拒否・`ChainedScheduler` の対応メンバー集合） |
 | 25 | データセット合成（#2661） | `fandhe_ai::data` へ `ConcatBatch`・`ConcatDataset`・`Subset`・`random_split`・`random_split_fractions` の純再エクスポート | 追加のみ | `DatasetComposeHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `tensor-core-dataset-compose-decision.md` §5 |
 | 26 | iterable データセット・バッチサンプラー（#2662） | `fandhe_ai::data` へ `BatchSampler`・`IterableBatches`・`IterableDataLoader`・`IterableDataset`・`StackSamples` の純再エクスポート | 追加のみ | `IterableBatchSamplerHoldDoctestGuard`（#2679 で削除） | #2679 で公開済み | `tensor-core-iterable-dataset-batch-sampler-decision.md` §5 |
@@ -622,6 +622,7 @@ P1」）を受けた是正である。
 **公開先の要確認（§5 の適用記録と、機能の性質が食い違う点。記録は書き換えていない）**
 
 - 行 23（SWA）: 決定記録の推奨は `fandhe_ai::optim` への公開（学習系）で、#2679 で公開した（§5 の適用記録は #2678 と #2679 の両方を挙げていた点は、公開した結果に合わせて #2679 が担当と整理した）。
+- 行 23（SWA の fit 結線。#3057）: 公開形のみを `autodiff-swa-decision.md` §16 で確定した（`Callback::Swa(SwaCallback)`・`FitConfig`／`Sequential` 不変・`update_bn` はスコープ外）。公開 API は未追加で、§1 の対象範囲表と `compat-feature-gap.md` は不変。実装は #3058・#3059。
 - 行 7・9・11（#2638・#2641・#2642）: 推奨形は `Var`／`Tape` の委譲メソッドと型の再エクスポート（演算系）だが、§5 の適用記録は #2678 と #2679 の両方を挙げている（層は推奨に含まれない）。#2677 の承認の記録どおり #2678 が公開した。
 - 行 16（可変長系列）は `nn::rnn` へのモジュール再エクスポートで、#2678・#2679 の両方を挙げている。
 
@@ -2673,7 +2674,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 | 項目 | 従来の保留の所在 | 公開形の正 | 担当 issue |
 |------|------------------|------------|-----------|
 | 3D 層化（pool3d・convT3d・unpool・fold・lrn） | 本節 5.1 行 12〜15・`autodiff-pool3d-ops-decision.md`／`autodiff-conv-transpose3d-max-unpool-decision.md`／`autodiff-fold-unfold-decision.md`／`autodiff-lrn-weight-reparam-decision.md` | #3025 の決定記録 | #3025〜#3046 |
-| SWA の fit 結線 | `autodiff-swa-decision.md` §7 | 同 issue の決定記録（`autodiff-swa-decision.md` §15） | #3056 |
+| SWA の fit 結線 | `autodiff-swa-decision.md` §7 | 同 issue の決定記録（`autodiff-swa-decision.md` §15・§16） | #3056・#3057 |
 | `save_model` の kind 追加 | 各保存経路の決定記録 | 同 issue の決定記録 | #3051 |
 | `vmap(grad)` | `autodiff-functional-transforms-design.md` §27.5 | 同 issue の決定記録 | #3069 |
 | `jvp` の拡張（複数入力・微分可能な `jvp`） | `autodiff-functional-transforms-design.md` §27.5 | 同 issue の決定記録 | #3062・#3065 |
