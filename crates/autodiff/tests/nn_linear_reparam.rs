@@ -139,6 +139,22 @@ fn run_forward(layer: &Linear, x: &Tensor<f32>) -> Result<Vec<u32>, AutodiffErro
 }
 
 #[test]
+fn spectral_state_not_advanced_when_forward_fails_after_reconstruction() {
+    // 別 Tape の input は shape 検査を通るが matmul でクロステープエラーになる。
+    // 有効重み再構成後の失敗でも状態は進まない（forward 全体成功後にコミット）。
+    let x = t((0..6).map(|i| i as f32 * 0.1).collect(), &[2, 3]);
+    let layer = linear().with_spectral_norm(1, 1e-12, SEED).unwrap();
+    let before = layer.spectral_norm_state().unwrap();
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
+    let xv = tape_b.var(&x);
+    let vars = layer.bind(&tape_a);
+    assert!(layer.forward_bound(&vars, None, &xv, false).is_err());
+    assert!(layer.forward_bound(&vars, None, &xv, true).is_err());
+    assert_eq!(before, layer.spectral_norm_state().unwrap());
+}
+
+#[test]
 fn spectral_state_advances_only_in_train_and_not_on_failed_forward() {
     let x = t((0..6).map(|i| i as f32 * 0.1).collect(), &[2, 3]);
     let mut layer = linear().with_spectral_norm(1, 1e-12, SEED).unwrap();
@@ -208,9 +224,8 @@ fn module_forward_matches_bound_forward_for_weight_norm() {
     let y_wn = wn.forward(&tape, &xv).unwrap().to_tensor();
     let (a, b) = (y_plain.host_slice(), y_wn.host_slice());
     for (p, q) in a.iter().zip(b.iter()) {
-        let diff = (p - q).abs();
         assert!(
-            diff / p.abs().max(f32::MIN_POSITIVE) < 1e-3 || diff < 1e-5,
+            common::req2_close(f64::from(*p), f64::from(*q)),
             "{p} vs {q}"
         );
     }

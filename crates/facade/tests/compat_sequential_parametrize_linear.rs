@@ -21,13 +21,10 @@ use fandhe_ai::interop::onnx::OnnxModel;
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
 use fandhe_ai_autodiff::nn::Linear;
+use fandhe_ai_backend_cpu::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
 
 mod common;
 use common::temp_dir::TempDirGuard;
-
-/// REQ-2 の統一複合判定の定数（`.claude/rules/coding-rust.md`。本テストでは変更しない）。
-const RELATIVE_TOLERANCE: f32 = 1e-3;
-const ABSOLUTE_RESCUE_THRESHOLD: f32 = 1e-5;
 
 const IN: usize = 3;
 const OUT: usize = 4;
@@ -56,8 +53,9 @@ fn ramp(shape: &[usize], scale: f32) -> Tensor<f32> {
 fn assert_close(actual: &[f32], expected: &[f32], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: 要素数");
     for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        let diff = (a - e).abs();
-        let rel = diff / e.abs().max(f32::MIN_POSITIVE);
+        // REQ-2 統一複合判定。閾値は正本定数（`backend-cpu::parity`）を参照する。
+        let diff = f64::from((a - e).abs());
+        let rel = diff / f64::from(e.abs()).max(f64::from(f32::MIN_POSITIVE));
         assert!(
             rel < RELATIVE_TOLERANCE || diff < ABSOLUTE_RESCUE_THRESHOLD,
             "{what}[{i}]: actual={a} expected={e}"

@@ -335,6 +335,9 @@ impl Linear {
         input: &Var<'t>,
         fuse_relu: bool,
     ) -> Result<Var<'t>, AutodiffError> {
+        // spectral_norm の更新後状態。forward 全体（matmul・linear_act・bias 加算）が成功した
+        // 場合だけ元の状態へコミットする（決定記録 §8「forward が失敗しても状態は進まない」）。
+        let mut pending_state: Option<SpectralNormState> = None;
         let w_eff = match &self.reparam {
             None => {
                 return if fuse_relu {
@@ -345,7 +348,7 @@ impl Linear {
             }
             Some(reparam) => {
                 // rank≥3 を暗黙受理しない 2 次元厳密検査（`LinearVars::forward` と同じ境界）を、
-                // 状態更新を伴う再構成より先に行う。
+                // 有効重みの再構成より先に行う。
                 gemm_out_shape(&input.shape(), &vars.weight.shape())?;
                 match reparam {
                     WeightReparam::WeightNorm { dim, .. } => {
@@ -358,26 +361,40 @@ impl Linear {
                         vars.weight.weight_norm(g, *dim)?
                     }
                     WeightReparam::SpectralNorm { state } => {
-                        let mut st = state.try_borrow_mut().map_err(|_| {
+                        let st = state.try_borrow().map_err(|_| {
                             AutodiffError::InvalidArgument(
                                 "Linear::forward_bound: spectral_norm 状態が使用中（再入）"
                                     .to_string(),
                             )
                         })?;
-                        vars.weight.spectral_norm(&mut st, self.training)?
+                        let mut next = st.clone();
+                        let w = vars.weight.spectral_norm(&mut next, self.training)?;
+                        pending_state = Some(next);
+                        w
                     }
                 }
             }
         };
-        if fuse_relu {
-            input.linear_act(&w_eff, vars.bias.as_ref(), Activation::Relu)
+        let out = if fuse_relu {
+            input.linear_act(&w_eff, vars.bias.as_ref(), Activation::Relu)?
         } else {
             let y = input.matmul(&w_eff)?;
             match &vars.bias {
-                Some(bias) => y.add(bias),
-                None => Ok(y),
+                Some(bias) => y.add(bias)?,
+                None => y,
             }
+        };
+        if let (Some(next), Some(WeightReparam::SpectralNorm { state })) =
+            (pending_state, &self.reparam)
+        {
+            let mut st = state.try_borrow_mut().map_err(|_| {
+                AutodiffError::InvalidArgument(
+                    "Linear::forward_bound: spectral_norm 状態が使用中（再入）".to_string(),
+                )
+            })?;
+            *st = next;
         }
+        Ok(out)
     }
 
     /// `Module::set_training` の実体（イシュー #3048。spectral_norm の更新可否のみに効く）。
