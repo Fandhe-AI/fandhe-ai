@@ -5978,7 +5978,7 @@ struct Pool3dOpsHoldDoctestGuard;
 /// `conv_transpose3d_ops`／`max_unpool_ops`／`conv_transpose3d`／`max_unpool`・型
 /// `ConvTranspose3d`／`MaxUnpool1d`／`MaxUnpool2d`／`MaxUnpool3d`／`MaxUnpoolLayout`・メソッド
 /// `conv_transpose3d`／`max_unpool1d`／`max_unpool2d`／`max_unpool3d`（`Tape`／
-/// `Tensor<f32>`。`Var` は #2850 で外した）と `add_conv_transpose3d`／`add_max_unpool1d`／`add_max_unpool2d`／
+/// `Tensor<f32>`。`Var` は #2850 で、`compat::Sequential::add_conv_transpose3d` は #3032 で外した）と `add_max_unpool1d`／`add_max_unpool2d`／
 /// `add_max_unpool3d`（`compat::Sequential`）を持つプローブ用トレイトを置き、修飾なしの関数
 /// 呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名のモジュール・型・関数を glob
 /// 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性
@@ -5992,7 +5992,8 @@ struct Pool3dOpsHoldDoctestGuard;
 /// 残した受け手の `impl` ブロックは `Tape`・`Tensor<f32>` 上の同名メソッド分のプローブとして維持する。
 /// 引き続き拒否する未承認経路: モジュール `conv_transpose3d_ops`／`max_unpool_ops`／`conv_transpose3d`／`max_unpool`、
 /// 型 `ConvTranspose3d`／`MaxUnpool1d/2d/3d`／`MaxUnpoolLayout`、`Tape`・`Tensor<f32>` 上の同名メソッド、
-/// 層化（`compat::Sequential::add_conv_transpose3d`／`add_max_unpool1d/2d/3d`。#2679 の層結線は保留継続）。
+/// 層化（`compat::Sequential::add_max_unpool1d/2d/3d`。#2679 の層結線は保留継続）。
+/// **#3032 での部分反転**: `compat::Sequential::add_conv_transpose3d` は決定記録 `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3 の形で公開済みのため、受け手 `Sequential` の `impl` ブロック内の同名メソッドと UFCS 行を外した（残すと inherent メソッドとの衝突でコンパイルが失敗する）。`add_max_unpool*`・`Tape`／`Tensor<f32>` 上の同名メソッド・モジュール・型名の否定は維持する。
 /// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
 /// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
@@ -6088,16 +6089,12 @@ struct Pool3dOpsHoldDoctestGuard;
 /// }
 ///
 /// trait __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe {
-///     fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
 ///     fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
 ///     fn add_max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
 ///     fn add_max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;
 /// }
 ///
 /// impl __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe for fandhe_ai::compat::Sequential {
-///     fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
-///         __FandheConvTranspose3dMaxUnpoolHoldMarker
-///     }
 ///     fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {
 ///         __FandheConvTranspose3dMaxUnpoolHoldMarker
 ///     }
@@ -6134,7 +6131,6 @@ struct Pool3dOpsHoldDoctestGuard;
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool1d(tf);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool2d(tf);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool3d(tf);
-///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose3d(seq);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool1d(seq);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool2d(seq);
 ///     let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool3d(seq);

@@ -29295,7 +29295,8 @@ fn facade_declares_pool3d_add_names_only_in_approved_form() {
 // `fandhe_ai_tensor_core::conv_transpose3d`・`fandhe_ai_tensor_core::max_unpool`）に閉じ、
 // facade 公開形（`Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` の委譲メソッド）は #2850 で
 // 記録 §12.1 の形で公開済み（`var_phase4_ops_methods_are_thin_delegations` が固定。承認根拠は #2499 の
-// `issuecomment-6052732061`）。層化（`compat::Sequential::add_conv_transpose3d`／`add_max_unpool1d/2d/3d`）と
+// `issuecomment-6052732061`）。`compat::Sequential::add_conv_transpose3d` は #3032 で公開済み（正ガードは
+// `add_conv_transpose3d_signature_matches_approved_contract` ほか）。層化（`add_max_unpool1d/2d/3d`）と
 // `Tape`／`Tensor<f32>` 上の同名メソッドは保留継続（下のプローブ・インベントリが拒否する）。既存の `Var::conv_transpose2d` は対象外で、
 // 保留対象の識別子とは別トークンとして扱う。
 // =====================================================================
@@ -29414,16 +29415,12 @@ impl __FandheConvTranspose3dMaxUnpoolHoldProbe for fandhe_ai::Tensor<f32> {\n\
 }\n\
 \n\
 trait __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe {\n\
-\x20\x20\x20\x20fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
 \x20\x20\x20\x20fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
 \x20\x20\x20\x20fn add_max_unpool2d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
 \x20\x20\x20\x20fn add_max_unpool3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker;\n\
 }\n\
 \n\
 impl __FandheConvTranspose3dMaxUnpoolHoldSequentialProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_conv_transpose3d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
-\x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn add_max_unpool1d(&self) -> __FandheConvTranspose3dMaxUnpoolHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheConvTranspose3dMaxUnpoolHoldMarker\n\
 \x20\x20\x20\x20}\n\
@@ -29460,7 +29457,6 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool1d(tf);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool2d(tf);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::Tensor::<f32>::max_unpool3d(tf);\n\
-\x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_conv_transpose3d(seq);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool1d(seq);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool2d(seq);\n\
 \x20\x20\x20\x20let _: __FandheConvTranspose3dMaxUnpoolHoldMarker = fandhe_ai::compat::Sequential::add_max_unpool3d(seq);\n\
@@ -29468,7 +29464,19 @@ fn __probe_methods(\n\
 
 /// 保留対象 fn 名（イシュー #2644）。`add_*` は #2679 の層結線（`compat::Sequential`）が漏出経路に
 /// なりうるため含める。
-const CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES: [&str; 8] = [
+const CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES: [&str; 7] = [
+    "conv_transpose3d",
+    "max_unpool1d",
+    "max_unpool2d",
+    "max_unpool3d",
+    "add_max_unpool1d",
+    "add_max_unpool2d",
+    "add_max_unpool3d",
+];
+
+/// workspace 全体の `fn` 宣言インベントリ対象（保留対象 7 名 + #3032 で公開した
+/// `Sequential::add_conv_transpose3d`）。
+const CONV_TRANSPOSE3D_MAX_UNPOOL_WORKSPACE_FN_NAMES: [&str; 8] = [
     "conv_transpose3d",
     "max_unpool1d",
     "max_unpool2d",
@@ -29637,7 +29645,8 @@ fn facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool_detects_each_
     assert!(offense("impl Var { pub fn max_unpool1d(&self) {} }"));
     assert!(offense("impl Var { pub fn max_unpool2d(&self) {} }"));
     assert!(offense("impl Tensor { pub fn max_unpool3d(&self) {} }"));
-    assert!(offense(
+    // `Sequential::add_conv_transpose3d` は #3032 で公開済み（承認形は別テストが固定するためここでは違反ではない）。
+    assert!(!offense(
         "impl Sequential { pub fn add_conv_transpose3d(&mut self) {} }"
     ));
     assert!(offense(
@@ -29695,7 +29704,7 @@ fn workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locat
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES {
+            for fn_name in CONV_TRANSPOSE3D_MAX_UNPOOL_WORKSPACE_FN_NAMES {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -29719,15 +29728,123 @@ fn workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locat
         expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
     }
     expected.insert("autodiff/src/var.rs::conv_transpose3d".to_string(), 1);
+    // #3032 で公開した `Sequential::add_conv_transpose3d`（承認ファイルに 1 件）。
+    expected.insert(
+        "facade/src/compat/sequential.rs::add_conv_transpose3d".to_string(),
+        1,
+    );
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の conv_transpose3d／max_unpool1d／max_unpool2d／\
          max_unpool3d／add_conv_transpose3d／add_max_unpool1d／add_max_unpool2d／add_max_unpool3d の\
          `fn` 宣言が承認済みの置き場所（autodiff/src/conv_transpose3d_ops.rs の conv_transpose3d と\
          autodiff/src/max_unpool_ops.rs の max_unpool1d／2d／3d 各 1 件、および #2850 の\
-         autodiff/src/var.rs の委譲メソッド各 1 件のみ）と一致しない。\
+         autodiff/src/var.rs の委譲メソッド各 1 件、および #3032 の\
+         facade/src/compat/sequential.rs の add_conv_transpose3d 1 件のみ）と一致しない。\
          迂回経路（facade／Var／Sequential への inherent メソッド追加等）の混入か、\
          未承認の実装追加でないか確認すること"
+    );
+}
+
+const ADD_CONV_TRANSPOSE3D_PARAMS: &str = "mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], output_padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_conv_transpose3d` が承認シグネチャ（決定記録
+/// `compat-sequential-3d-fold-lrn-layers-decision.md` §3）で 1 件存在する（イシュー #3032）。
+#[test]
+fn add_conv_transpose3d_signature_matches_approved_contract() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        count_fn_declarations_by_name(&tokens, "add_conv_transpose3d"),
+        1
+    );
+    assert!(
+        sequential_spatial_add_signature_ok(
+            &cleaned,
+            "add_conv_transpose3d",
+            ADD_CONV_TRANSPOSE3D_PARAMS
+        ),
+        "add_conv_transpose3d のシグネチャが承認形と一致しない"
+    );
+}
+
+/// [`add_conv_transpose3d_signature_matches_approved_contract`] の自己テスト。
+#[test]
+fn add_conv_transpose3d_signature_matches_approved_contract_detects_offense() {
+    let ok = "pub fn add_conv_transpose3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], output_padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        "add_conv_transpose3d",
+        ADD_CONV_TRANSPOSE3D_PARAMS
+    ));
+    for bad in [
+        // padding と output_padding の入替
+        "pub fn add_conv_transpose3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], output_padding: [usize; 3], padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // 2 軸
+        "pub fn add_conv_transpose3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], output_padding: [usize; 2], dilation: [usize; 2], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // seed 欠落
+        "pub fn add_conv_transpose3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], output_padding: [usize; 3], dilation: [usize; 3], groups: usize,) -> Result<Self, AutodiffError> {",
+        // &mut self
+        "pub fn add_conv_transpose3d(&mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], output_padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_conv_transpose3d(mut self, in_channels: usize, out_channels: usize, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], output_padding: [usize; 3], dilation: [usize; 3], groups: usize, seed: u64,) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(
+                bad,
+                "add_conv_transpose3d",
+                ADD_CONV_TRANSPOSE3D_PARAMS
+            ),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_conv_transpose3d(` がちょうど 1 件
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード。イシュー #3032）。
+#[test]
+fn compat_sequential_exposes_add_conv_transpose3d_issue_3032() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut n = 0usize;
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        n += count_pub_fn_declarations(content, "add_conv_transpose3d");
+    });
+    assert_eq!(n, 1, "add_conv_transpose3d の pub fn 宣言数が 1 件でない");
+}
+
+/// [`compat_sequential_exposes_add_conv_transpose3d_issue_3032`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_add_conv_transpose3d_issue_3032_counts_declarations() {
+    let one = "    pub fn add_conv_transpose3d(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_conv_transpose3d"), 1);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_conv_transpose3d"), 2);
+    assert_eq!(count_pub_fn_declarations(one, "add_conv_transpose2d"), 0);
+}
+
+/// facade src 全体で `fn add_conv_transpose3d` が `compat/sequential.rs` にちょうど 1 件、
+/// 他ファイルに 0 件であることを固定する（#3032）。
+#[test]
+fn facade_declares_add_conv_transpose3d_only_in_approved_form() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let allowed = usize::from(path.ends_with("compat/sequential.rs"));
+        let count = count_fn_declarations_by_name(&tokens, "add_conv_transpose3d");
+        if count != allowed {
+            offending.push(format!(
+                "{}: `fn add_conv_transpose3d` 宣言が {count} 件（許容 {allowed} 件）",
+                path.display()
+            ));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "add_conv_transpose3d が承認形から逸脱: {offending:?}"
     );
 }
 

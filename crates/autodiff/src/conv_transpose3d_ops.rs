@@ -5,7 +5,7 @@
 //!
 //! **facade 公開状況**: `Var::conv_transpose3d`（本モジュールの自由関数への 1 行委譲）は #2850 で
 //! 公開済み（公開形は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12.1）。モジュール自体は
-//! 再エクスポートしない。autodiff 側の層 struct `nn::ConvTranspose3d` は #3031 で追加済み。facade 側の層化（`Sequential::add_*`）は保留継続で、
+//! 再エクスポートしない。autodiff 側の層 struct `nn::ConvTranspose3d` は #3031 で追加済み。facade 側の `Sequential::add_conv_transpose3d` は #3032 で公開済み（`add_max_unpool*` の層化は保留継続）で、
 //! `crates/facade/src/lib.rs` の `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と
 //! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する。
 //!
