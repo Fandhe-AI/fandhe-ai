@@ -7,6 +7,8 @@
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
 //!
+//! 無引数の活性化 5 層（selu・softsign・hardsigmoid・log_sigmoid・tanhshrink。イシュー #3053）の往復・改竄拒否は末尾のテストが受け持つ（上記 53 種の配列は不変）。
+//!
 //! 衝突注入・TOCTOU・網羅的な改竄行列は #2375・#2376。BN の running stats の保存・復元は #2371（`compat_sequential_model_io_batch_norm.rs`）。
 //! 実機（CUDA／Metal）は不要（ホスト側の I/O と層の再構築のみ）。
 
@@ -617,6 +619,73 @@ fn model_exceeding_manifest_structure_bound_is_rejected_before_writing() {
             .expect("構築できるはず");
     }
     assert_save_rejected("too-many-keys", &model, true);
+}
+
+// ---------------------------------------------------------------------
+// 無引数の活性化 5 層（イシュー #3053。kind の `params` は常に `{}`）
+// ---------------------------------------------------------------------
+
+const NULLARY_KINDS: [&str; 5] = [
+    "selu",
+    "softsign",
+    "hardsigmoid",
+    "log_sigmoid",
+    "tanhshrink",
+];
+
+fn nullary_model() -> Sequential {
+    let mut m = Sequential::new()
+        .add_linear(3, 4, 5)
+        .expect("構築できるはず")
+        .add_selu()
+        .add_softsign()
+        .add_hardsigmoid()
+        .add_log_sigmoid()
+        .add_tanhshrink()
+        .add_linear(4, 2, 6)
+        .expect("構築できるはず");
+    m.eval();
+    m
+}
+
+#[test]
+fn nullary_activation_layers_round_trip_bit_identically() {
+    // 正負・0 付近・大きい値で各活性化の分岐領域を通す。
+    let input = Tensor::new(
+        vec![
+            -9.0, -1.5, 0.0, 0.25, 1.0, 6.5, -0.0, 3.0, -4.0, 0.5, -0.25, 12.0,
+        ],
+        &[4, 3],
+    )
+    .unwrap();
+    let kinds = round_trip("nullary-acts", &nullary_model(), &input);
+    for k in NULLARY_KINDS {
+        assert!(kinds.contains(k), "kind {k} が manifest にある: {kinds:?}");
+    }
+}
+
+#[test]
+fn nullary_activation_tampered_params_are_rejected() {
+    for kind in NULLARY_KINDS {
+        let from = format!("\"kind\":\"{kind}\",\"params\":{{}}");
+        let dir_guard = TempDirGuard::new(&format!("nullary-tamper-{kind}"));
+        let dir = dir_guard.path().join("m");
+        save_model(&nullary_model(), &dir).expect("保存できるはず");
+        let text = std::fs::read_to_string(dir.join("manifest.json")).expect("読めるはず");
+        assert!(text.contains(&from), "{kind}: 置換対象 {from} がある");
+        // 余分キー・非 object（null・配列）はいずれも `Manifest` で拒否する（無引数のため
+        // 「キー欠落」は成立せず、params の型違いがそれに相当する）。
+        for bad in [r#"{"q":1}"#, "null", "[]"] {
+            let to = format!("\"kind\":\"{kind}\",\"params\":{bad}");
+            std::fs::write(dir.join("manifest.json"), text.replacen(&from, &to, 1))
+                .expect("書けるはず");
+            let err = load_err(&dir);
+            assert!(
+                matches!(err, ModelIoError::Manifest { .. }),
+                "{kind} {bad}: {err}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

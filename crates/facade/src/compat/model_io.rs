@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 55 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 60 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -311,7 +311,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 55 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 60 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -328,6 +328,11 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::LogSoftmax { .. } => Some("log_softmax"),
         LayerSpec::Softplus { .. } => Some("softplus"),
         LayerSpec::Mish => Some("mish"),
+        LayerSpec::Selu => Some("selu"),
+        LayerSpec::Softsign => Some("softsign"),
+        LayerSpec::Hardsigmoid => Some("hardsigmoid"),
+        LayerSpec::LogSigmoid => Some("log_sigmoid"),
+        LayerSpec::Tanhshrink => Some("tanhshrink"),
         LayerSpec::Hardtanh { .. } => Some("hardtanh"),
         LayerSpec::Relu6 => Some("relu6"),
         LayerSpec::Glu { .. } => Some("glu"),
@@ -603,6 +608,11 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::LogSoftmax { .. }
         | LayerSpec::Softplus { .. }
         | LayerSpec::Mish
+        | LayerSpec::Selu
+        | LayerSpec::Softsign
+        | LayerSpec::Hardsigmoid
+        | LayerSpec::LogSigmoid
+        | LayerSpec::Tanhshrink
         | LayerSpec::Hardtanh { .. }
         | LayerSpec::Relu6
         | LayerSpec::Glu { .. }
@@ -1223,6 +1233,11 @@ fn render_params(spec: &LayerSpec) -> String {
         | LayerSpec::Gelu
         | LayerSpec::GeluTanh
         | LayerSpec::Mish
+        | LayerSpec::Selu
+        | LayerSpec::Softsign
+        | LayerSpec::Hardsigmoid
+        | LayerSpec::LogSigmoid
+        | LayerSpec::Tanhshrink
         | LayerSpec::Relu6
         | LayerSpec::Identity
         | LayerSpec::Unsupported { .. } => {}
@@ -1938,6 +1953,11 @@ fn build_model(
                 .add_softplus(*beta, *threshold)
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Mish => model.add_mish(),
+            LayerSpec::Selu => model.add_selu(),
+            LayerSpec::Softsign => model.add_softsign(),
+            LayerSpec::Hardsigmoid => model.add_hardsigmoid(),
+            LayerSpec::LogSigmoid => model.add_log_sigmoid(),
+            LayerSpec::Tanhshrink => model.add_tanhshrink(),
             LayerSpec::Hardtanh { min_val, max_val } => model
                 .add_hardtanh(*min_val, *max_val)
                 .map_err(ModelIoError::Autodiff)?,
@@ -2797,6 +2817,11 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
             })
         }
         "mish" => none(LayerSpec::Mish),
+        "selu" => none(LayerSpec::Selu),
+        "softsign" => none(LayerSpec::Softsign),
+        "hardsigmoid" => none(LayerSpec::Hardsigmoid),
+        "log_sigmoid" => none(LayerSpec::LogSigmoid),
+        "tanhshrink" => none(LayerSpec::Tanhshrink),
         "relu6" => none(LayerSpec::Relu6),
         "hardtanh" => {
             let p = Params::new(params, &["min_val", "max_val"])?;
@@ -3760,7 +3785,7 @@ mod tests {
         ));
     }
 
-    /// 55 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 60 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3786,6 +3811,11 @@ mod tests {
                 threshold: 20.0,
             },
             LayerSpec::Mish,
+            LayerSpec::Selu,
+            LayerSpec::Softsign,
+            LayerSpec::Hardsigmoid,
+            LayerSpec::LogSigmoid,
+            LayerSpec::Tanhshrink,
             LayerSpec::Hardtanh {
                 min_val: -2.0,
                 max_val: 3.0,
@@ -4019,7 +4049,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 55, "kind allowlist は 55 種: {kinds:?}");
+        assert_eq!(kinds.len(), 60, "kind allowlist は 60 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -4037,9 +4067,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 55 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 60 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("55 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("60 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -4047,7 +4077,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("55 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("60 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -4227,6 +4257,17 @@ mod tests {
             ),
             // イシュー #2529: mish / relu6 / hardtanh / glu / prelu の非信頼入力。
             ("mish", r#"{"x":1}"#),
+            // イシュー #3053: 無引数 5 層は `params` が `{}` 以外（余分キー・非 object）なら拒否。
+            ("selu", r#"{"x":1}"#),
+            ("selu", "null"),
+            ("softsign", r#"{"x":1}"#),
+            ("softsign", "[]"),
+            ("hardsigmoid", r#"{"x":1}"#),
+            ("hardsigmoid", "null"),
+            ("log_sigmoid", r#"{"x":1}"#),
+            ("log_sigmoid", "[]"),
+            ("tanhshrink", r#"{"x":1}"#),
+            ("tanhshrink", "null"),
             ("relu6", r#"{"x":1}"#),
             ("hardtanh", r#"{}"#),
             ("hardtanh", r#"{"min_val":-1.0}"#),
@@ -4560,7 +4601,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("55 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("60 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

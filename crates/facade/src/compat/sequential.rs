@@ -312,6 +312,16 @@ pub(super) enum LayerSpec {
     },
     /// イシュー #2529。
     Mish,
+    /// イシュー #3053。無引数（`params` は `{}`）。
+    Selu,
+    /// イシュー #3053。無引数。
+    Softsign,
+    /// イシュー #3053。無引数。
+    Hardsigmoid,
+    /// イシュー #3053。無引数。
+    LogSigmoid,
+    /// イシュー #3053。無引数。
+    Tanhshrink,
     /// イシュー #2529。
     Hardtanh {
         min_val: f32,
@@ -786,9 +796,8 @@ impl Sequential {
 
     /// SELU 層を追加する（`nn::activation::Selu`。PyTorch `nn.SELU` 相当。イシュー #2679）。
     /// ユニット構造体のため構築時検査は無く、[`Sequential::add_silu`] と同様融合対象外。
-    /// 無状態層のため学習経路・常駐経路を通過する。**`save_model` は未対応**
-    /// （manifest の kind／スキーマが未承認のため、`ModelIoError::UnsupportedModel` で拒否する。
-    /// `add_conv_transpose1d`／`add_unflatten` と同じ扱い）。
+    /// 無状態層のため学習経路・常駐経路を通過する。`save_model`／`load_model`
+    /// は無引数 kind `selu`（`params` は `{}`）で往復できる（イシュー #3053）。
     ///
     /// ```
     /// use fandhe_ai::Tensor;
@@ -804,13 +813,14 @@ impl Sequential {
     /// ```
     pub fn add_selu(mut self) -> Self {
         self.inner.push(Box::new(Selu));
-        self.specs.push(LayerSpec::Unsupported { kind: "selu" });
+        self.specs.push(LayerSpec::Selu);
         self
     }
 
     /// CELU 層を追加する（`nn::activation::Celu`。PyTorch `nn.CELU(alpha)` 相当。イシュー #2679）。
     /// `alpha == 0` と非有限は構築時に `AutodiffError::InvalidArgument` で拒否する
-    /// （負は PyTorch と同じく受理）。保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。
+    /// （負は PyTorch と同じく受理）。融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。保存は未対応（`save_model` は
+    /// `UnsupportedModel` を返す）。将来のスキーマは `alpha` を持つため無引数 kind ではない（#3053 の対象外）。
     pub fn add_celu(mut self, alpha: f32) -> Result<Self, AutodiffError> {
         let layer = Celu::new(alpha)?;
         self.inner.push(Box::new(layer));
@@ -819,38 +829,35 @@ impl Sequential {
     }
 
     /// Softsign 層を追加する（`nn::activation::Softsign`。`x / (1 + |x|)`。PyTorch `nn.Softsign`
-    /// 相当。イシュー #2679）。保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。
+    /// 相当。イシュー #2679）。融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ（保存は無引数 kind で対応。#3053）。
     pub fn add_softsign(mut self) -> Self {
         self.inner.push(Box::new(Softsign));
-        self.specs.push(LayerSpec::Unsupported { kind: "softsign" });
+        self.specs.push(LayerSpec::Softsign);
         self
     }
 
     /// Hardsigmoid 層を追加する（`nn::activation::Hardsigmoid`。PyTorch `nn.Hardsigmoid` 相当。
-    /// イシュー #2679）。保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。
+    /// イシュー #2679）。融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ（保存は無引数 kind で対応。#3053）。
     pub fn add_hardsigmoid(mut self) -> Self {
         self.inner.push(Box::new(Hardsigmoid));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "hardsigmoid",
-        });
+        self.specs.push(LayerSpec::Hardsigmoid);
         self
     }
 
     /// LogSigmoid 層を追加する（`nn::activation::LogSigmoid`。`log(sigmoid(x))`。PyTorch
-    /// `nn.LogSigmoid` 相当。イシュー #2679）。保存・融合・常駐経路の扱いは
-    /// [`Sequential::add_selu`] と同じ。
+    /// `nn.LogSigmoid` 相当。イシュー #2679）。融合・常駐経路の扱いは
+    /// [`Sequential::add_selu`] と同じ（保存は無引数 kind で対応。#3053）。
     pub fn add_log_sigmoid(mut self) -> Self {
         self.inner.push(Box::new(LogSigmoid));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "log_sigmoid",
-        });
+        self.specs.push(LayerSpec::LogSigmoid);
         self
     }
 
     /// Softmin 層を追加する（`nn::softmin_threshold::Softmin`。PyTorch `nn.Softmin(dim)` 相当。
     /// イシュー #2679）。`dim` の範囲検査は forward 時（[`Sequential::add_softmax`] と同じ遅延検査契約）。
-    /// 保存・融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。`forward_host` は未提供のため
-    /// `predict` は tape 経路へフォールバックする。
+    /// 融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。保存は未対応（`save_model` は
+    /// `UnsupportedModel` を返す）。将来のスキーマは `dim` を持つため無引数 kind ではない（#3053 の対象外）。
+    /// `forward_host` は未提供のため `predict` は tape 経路へフォールバックする。
     pub fn add_softmin(mut self, dim: usize) -> Self {
         self.inner.push(Box::new(Softmin::new(dim)));
         self.specs.push(LayerSpec::Unsupported { kind: "softmin" });
@@ -858,11 +865,11 @@ impl Sequential {
     }
 
     /// Tanhshrink 層を追加する（`nn::softmin_threshold::Tanhshrink`。`x - tanh(x)`。PyTorch
-    /// `nn.Tanhshrink` 相当。イシュー #2679）。扱いは [`Sequential::add_softmin`] と同じ。
+    /// `nn.Tanhshrink` 相当。イシュー #2679）。扱いは [`Sequential::add_softmin`] と同じだが、`save_model`／`load_model` は
+    /// 無引数 kind `tanhshrink` で往復できる（イシュー #3053）。
     pub fn add_tanhshrink(mut self) -> Self {
         self.inner.push(Box::new(Tanhshrink));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "tanhshrink" });
+        self.specs.push(LayerSpec::Tanhshrink);
         self
     }
 

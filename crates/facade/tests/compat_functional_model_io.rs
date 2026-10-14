@@ -169,12 +169,51 @@ fn formats_are_mutually_exclusive() {
     assert!(load_model(&sdir).is_ok());
 }
 
+/// 構成を記録できない利用者定義層（保存対象外の例）。
+struct CustomIdentity;
+impl fandhe_ai::nn::Module for CustomIdentity {
+    fn forward<'t>(
+        &self,
+        _tape: fandhe_ai::TapeRef<'t>,
+        input: &fandhe_ai::Var<'t>,
+    ) -> Result<fandhe_ai::Var<'t>, fandhe_ai::AutodiffError> {
+        Ok(input.tanh())
+    }
+}
+
+/// 無引数の活性化 5 層（イシュー #3053）は `spec_kind` 共有により functional でも往復できる。
 #[test]
-fn unsupported_layer_is_rejected_without_touching_dir() {
-    // `add_selu` は manifest の kind を持たない（保存不能。`Sequential` と同じ扱い）。
+fn nullary_activation_layers_round_trip_in_functional_graph() {
     let mut b = FunctionalBuilder::new();
     let x = b.input().unwrap();
-    let y = b.apply(lin(3, 2, 5).add_selu(), x).unwrap();
+    let blk = lin(3, 4, 7)
+        .add_selu()
+        .add_softsign()
+        .add_hardsigmoid()
+        .add_log_sigmoid()
+        .add_tanhshrink();
+    let y = b.apply(blk, x).unwrap();
+    let mut model = b.build(&[x], &[y]).unwrap();
+    model.eval();
+    let guard = TempDirGuard::new("functional_nullary_act");
+    let dir = guard.path().join("m");
+    save_functional_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_functional_model(&dir).expect("復元できるはず");
+    let input = det(6, 3, 0.1);
+    let want = model.predict(&[&input]).unwrap();
+    let got = loaded.predict(&[&input]).unwrap();
+    for (w, g) in want.iter().zip(&got) {
+        assert_eq!(bits(w), bits(g));
+    }
+}
+
+#[test]
+fn unsupported_layer_is_rejected_without_touching_dir() {
+    // 利用者定義層（`add_module`）は manifest の kind を持たない（恒久的に保存不能。
+    // `Sequential` と同じ扱い。組み込み層は #3051 配下で順次保存対応されるため例に使わない）。
+    let mut b = FunctionalBuilder::new();
+    let x = b.input().unwrap();
+    let y = b.apply(lin(3, 2, 5).add_module(CustomIdentity), x).unwrap();
     let model = b.build(&[x], &[y]).unwrap();
 
     let guard = TempDirGuard::new("functional_unsupported");
