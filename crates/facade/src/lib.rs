@@ -5862,8 +5862,7 @@ struct PadModesHoldDoctestGuard;
 ///
 /// 下の doctest は全 `pub mod` を glob import したスコープへ、ローカル
 /// モジュール `pool3d_ops`／`pool3d`・型 `Pool3dParams`／`MaxPool3d`／`AvgPool3d`・メソッド
-/// `max_pool3d`／`avg_pool3d`（`Tape`／`Tensor<f32>`。`Var` は #2850 で外した）と
-/// `add_max_pool3d`／`add_avg_pool3d`（`compat::Sequential`）を持つプローブ用トレイトを
+/// `max_pool3d`／`avg_pool3d`（`Tape`／`Tensor<f32>`。`Var` は #2850 で、`compat::Sequential::add_*` は #3028 で外した）を持つプローブ用トレイトを
 /// 置き、修飾なしの関数呼び出しと修飾付きメソッド呼び出しの両方を行う。facade が同名の
 /// モジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の inherent
 /// メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの不一致で
@@ -5875,7 +5874,8 @@ struct PadModesHoldDoctestGuard;
 /// `Var::max_pool3d`／`Var::avg_pool3d` は記録 §12.1 の形で公開済みのため、受け手 `Var` の `impl` ブロックと該当する UFCS 行を外した
 /// （残すと公開した inherent メソッドとの衝突でコンパイルが失敗する）。残した受け手の `impl` ブロックは `Tape`・`Tensor<f32>` 上の同名メソッド分のプローブとして維持する。
 /// 引き続き拒否する未承認経路: モジュール `pool3d_ops`・`pool3d`、型 `Pool3dParams`／`MaxPool3d`／`AvgPool3d`、
-/// `Tape`・`Tensor<f32>` 上の `max_pool3d`／`avg_pool3d`、層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`。#2679 の層結線は保留継続）。
+/// `Tape`・`Tensor<f32>` 上の `max_pool3d`／`avg_pool3d`。
+/// **#3028 での部分反転**: `compat::Sequential::add_max_pool3d`／`add_avg_pool3d` は決定記録 `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3 の形で公開済みのため、受け手 `Sequential` の `impl` ブロックと UFCS 行を外した（残すと inherent メソッドとの衝突でコンパイルが失敗する）。
 /// **検出範囲の限定**: 列挙した名前・型・受け手に限り、マクロ生成や別名経由の公開までは保証しない。
 /// 公開済み側の正ガード（薄い委譲・シグネチャ・到達性）は `crates/facade/tests/api_surface.rs` が固定する。
 ///
@@ -5947,20 +5947,6 @@ struct PadModesHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// trait __FandhePool3dHoldSequentialProbe {
-///     fn add_max_pool3d(&self) -> __FandhePool3dHoldMarker;
-///     fn add_avg_pool3d(&self) -> __FandhePool3dHoldMarker;
-/// }
-///
-/// impl __FandhePool3dHoldSequentialProbe for fandhe_ai::compat::Sequential {
-///     fn add_max_pool3d(&self) -> __FandhePool3dHoldMarker {
-///         __FandhePool3dHoldMarker
-///     }
-///     fn add_avg_pool3d(&self) -> __FandhePool3dHoldMarker {
-///         __FandhePool3dHoldMarker
-///     }
-/// }
-///
 /// fn __probe_free_fns(_: Pool3dParams, _: MaxPool3d, _: AvgPool3d) {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して
 ///     // いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。
@@ -5973,14 +5959,11 @@ struct PadModesHoldDoctestGuard;
 ///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
-///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
 ///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::max_pool3d(tape);
 ///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::avg_pool3d(tape);
 ///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::max_pool3d(tf);
 ///     let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::avg_pool3d(tf);
-///     let _: __FandhePool3dHoldMarker = fandhe_ai::compat::Sequential::add_max_pool3d(seq);
-///     let _: __FandhePool3dHoldMarker = fandhe_ai::compat::Sequential::add_avg_pool3d(seq);
 /// }
 /// ```
 #[cfg(doctest)]

@@ -28805,8 +28805,9 @@ fn workspace_declares_pad_modes_fn_names_only_in_allowed_locations() {
 // （`fandhe_ai_autodiff::pool3d_ops`・`fandhe_ai_tensor_core::pool3d`）に閉じ、facade 公開形
 // （`Var::max_pool3d`／`Var::avg_pool3d` の委譲メソッド）は #2850 で記録 §12.1 の形で公開済み
 // （`var_phase4_ops_methods_are_thin_delegations` が固定。承認根拠は #2499 の
-// `issuecomment-6052732061`）。層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`）と
-// `Tape`／`Tensor<f32>` 上の同名メソッドは保留継続（下のプローブ・インベントリが拒否する）。既存の 2D プーリング（`Var::max_pool2d`／`avg_pool2d` 等）は対象外で、
+// `issuecomment-6052732061`）。層化（`compat::Sequential::add_max_pool3d`／`add_avg_pool3d`）は #3028 で
+// 決定記録 `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3 の形で公開済み（承認形の正ガードは
+// `add_pool3d_signatures_match_approved_contract` ほか）。`Tape`／`Tensor<f32>` 上の同名メソッドは保留継続（下のプローブ・インベントリが拒否する）。既存の 2D プーリング（`Var::max_pool2d`／`avg_pool2d` 等）は対象外で、
 // 保留対象の識別子とは別トークンとして扱う。
 // =====================================================================
 
@@ -28898,20 +28899,6 @@ impl __FandhePool3dHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-trait __FandhePool3dHoldSequentialProbe {\n\
-\x20\x20\x20\x20fn add_max_pool3d(&self) -> __FandhePool3dHoldMarker;\n\
-\x20\x20\x20\x20fn add_avg_pool3d(&self) -> __FandhePool3dHoldMarker;\n\
-}\n\
-\n\
-impl __FandhePool3dHoldSequentialProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_max_pool3d(&self) -> __FandhePool3dHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePool3dHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_avg_pool3d(&self) -> __FandhePool3dHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandhePool3dHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe_free_fns(_: Pool3dParams, _: MaxPool3d, _: AvgPool3d) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開して\n\
 \x20\x20\x20\x20// いれば、名前解決自体が曖昧になり E0659 でコンパイル失敗する）。\n\
@@ -28924,19 +28911,19 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::max_pool3d(tape);\n\
 \x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Tape::avg_pool3d(tape);\n\
 \x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::max_pool3d(tf);\n\
 \x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::Tensor::<f32>::avg_pool3d(tf);\n\
-\x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::compat::Sequential::add_max_pool3d(seq);\n\
-\x20\x20\x20\x20let _: __FandhePool3dHoldMarker = fandhe_ai::compat::Sequential::add_avg_pool3d(seq);\n\
 }";
 
-/// 3D プーリングの保留対象 fn 名（イシュー #2643）。`add_*` は #2679 の層結線
-/// （`compat::Sequential`）が漏出経路になりうるため含める。
-const POOL3D_OPS_FN_NAMES: [&str; 4] = [
+/// 3D プーリングの保留対象 fn 名（イシュー #2643）。`add_*` は #3028 で公開済みのため
+/// 保留対象から外した（承認形は [`POOL3D_WORKSPACE_FN_NAMES`] の走査と正ガードが固定する）。
+const POOL3D_OPS_FN_NAMES: [&str; 2] = ["max_pool3d", "avg_pool3d"];
+
+/// workspace 全体の `fn` 宣言インベントリ対象（保留対象 2 名 + #3028 で公開した `Sequential::add_*`）。
+const POOL3D_WORKSPACE_FN_NAMES: [&str; 4] = [
     "max_pool3d",
     "avg_pool3d",
     "add_max_pool3d",
@@ -29082,10 +29069,11 @@ fn facade_does_not_reexport_or_declare_pool3d_ops_detects_each_category() {
     assert!(offense("pub fn max_pool3d() {}"));
     assert!(offense("impl Var { pub fn avg_pool3d(&self) {} }"));
     assert!(offense("impl Tensor { pub fn max_pool3d(&self) {} }"));
-    assert!(offense(
+    // `Sequential::add_*` は #3028 で公開済み（承認形は別テストが固定するためここでは違反ではない）。
+    assert!(!offense(
         "impl Sequential { pub fn add_max_pool3d(&mut self) {} }"
     ));
-    assert!(offense(
+    assert!(!offense(
         "impl Sequential { pub fn add_avg_pool3d(&mut self) {} }"
     ));
     assert!(offense("trait T { fn avg_pool3d(&self); }"));
@@ -29110,7 +29098,7 @@ fn facade_does_not_reexport_or_declare_pool3d_ops_detects_each_category() {
 ///
 /// 期待値は `autodiff/src/pool3d_ops.rs::{max_pool3d, avg_pool3d}` と
 /// `autodiff/src/var.rs::{max_pool3d, avg_pool3d}`（#2850 の `Var` 委譲）の各 1 件のみ
-/// （`add_max_pool3d`／`add_avg_pool3d` は 0 件。層化は保留継続）。これら以外への
+/// と `facade/src/compat/sequential.rs::{add_max_pool3d, add_avg_pool3d}`（#3028 で公開）の各 1 件。これら以外への
 /// 追加は fail-closed に検出する。
 #[test]
 fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
@@ -29141,7 +29129,7 @@ fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in POOL3D_OPS_FN_NAMES {
+            for fn_name in POOL3D_WORKSPACE_FN_NAMES {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -29155,7 +29143,7 @@ fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
         });
     }
     // `pool3d_ops.rs` の自由関数と、#2850 で公開した `var.rs` の委譲メソッド各 1 件。
-    let expected: std::collections::BTreeMap<String, usize> = ["max_pool3d", "avg_pool3d"]
+    let mut expected: std::collections::BTreeMap<String, usize> = ["max_pool3d", "avg_pool3d"]
         .iter()
         .flat_map(|n| {
             [
@@ -29164,13 +29152,139 @@ fn workspace_declares_pool3d_ops_fn_names_only_in_allowed_locations() {
             ]
         })
         .collect();
+    // #3028 で公開した `Sequential::add_*`（承認ファイルに各 1 件）。
+    for n in ["add_max_pool3d", "add_avg_pool3d"] {
+        expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1usize);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の max_pool3d／avg_pool3d／add_max_pool3d／\
          add_avg_pool3d の `fn` 宣言が承認済みの置き場所\
-         （autodiff/src/pool3d_ops.rs と autodiff/src/var.rs の max_pool3d／avg_pool3d 各 1 件のみ）と一致しない。\
+         （autodiff/src/pool3d_ops.rs と autodiff/src/var.rs の max_pool3d／avg_pool3d 各 1 件、
+         facade/src/compat/sequential.rs の add_max_pool3d／add_avg_pool3d 各 1 件のみ）と一致しない。\
          迂回経路（facade／Var／Sequential への inherent メソッド追加等）の混入か、\
          未承認の実装追加でないか確認すること"
+    );
+}
+
+const ADD_MAX_POOL3D_PARAMS: &str = "mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], dilation: [usize; 3], ) -> Result<Self, AutodiffError>";
+const ADD_AVG_POOL3D_PARAMS: &str = "mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], count_include_pad: bool, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_max_pool3d`／`add_avg_pool3d` が承認シグネチャ（決定記録
+/// `compat-sequential-3d-fold-lrn-layers-decision.md` §3）で 1 件ずつ存在する（イシュー #3028）。
+#[test]
+fn add_pool3d_signatures_match_approved_contract() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in [
+        ("add_max_pool3d", ADD_MAX_POOL3D_PARAMS),
+        ("add_avg_pool3d", ADD_AVG_POOL3D_PARAMS),
+    ] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`add_pool3d_signatures_match_approved_contract`] の自己テスト。
+#[test]
+fn add_pool3d_signatures_match_approved_contract_detects_offense() {
+    let ok_max = "pub fn add_max_pool3d(mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], dilation: [usize; 3],) -> Result<Self, AutodiffError> {";
+    let ok_avg = "pub fn add_avg_pool3d(mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], count_include_pad: bool,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok_max,
+        "add_max_pool3d",
+        ADD_MAX_POOL3D_PARAMS
+    ));
+    assert!(sequential_spatial_add_signature_ok(
+        ok_avg,
+        "add_avg_pool3d",
+        ADD_AVG_POOL3D_PARAMS
+    ));
+    for bad in [
+        // 引数順の入替（padding と dilation）
+        "pub fn add_max_pool3d(mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, dilation: [usize; 3], padding: [usize; 3],) -> Result<Self, AutodiffError> {",
+        // 2 軸
+        "pub fn add_max_pool3d(mut self, kernel_size: [usize; 2], stride: Option<[usize; 2]>, padding: [usize; 2], dilation: [usize; 2],) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_max_pool3d(mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], dilation: [usize; 3],) -> Self {",
+        // &mut self
+        "pub fn add_max_pool3d(&mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], dilation: [usize; 3],) -> Result<Self, AutodiffError> {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_max_pool3d", ADD_MAX_POOL3D_PARAMS),
+            "{bad}"
+        );
+    }
+    for bad in [
+        // count_include_pad の型違い
+        "pub fn add_avg_pool3d(mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], count_include_pad: usize,) -> Result<Self, AutodiffError> {",
+        // stride が Option でない
+        "pub fn add_avg_pool3d(mut self, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], count_include_pad: bool,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_avg_pool3d(mut self, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], count_include_pad: bool,) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_avg_pool3d", ADD_AVG_POOL3D_PARAMS),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_max_pool3d(`／`add_avg_pool3d(` がそれぞれちょうど 1 件
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード。イシュー #3028）。
+#[test]
+fn compat_sequential_exposes_pool3d_add_methods_issue_3028() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let (mut max_n, mut avg_n) = (0usize, 0usize);
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        max_n += count_pub_fn_declarations(content, "add_max_pool3d");
+        avg_n += count_pub_fn_declarations(content, "add_avg_pool3d");
+    });
+    assert_eq!(
+        (max_n, avg_n),
+        (1, 1),
+        "add_max_pool3d／add_avg_pool3d の pub fn 宣言数が各 1 件でない"
+    );
+}
+
+/// [`compat_sequential_exposes_pool3d_add_methods_issue_3028`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_pool3d_add_methods_issue_3028_counts_declarations() {
+    let one = "    pub fn add_max_pool3d(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_max_pool3d"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_avg_pool3d"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_max_pool3d"), 2);
+}
+
+/// facade src 全体で `fn add_max_pool3d`／`add_avg_pool3d` が `compat/sequential.rs` にちょうど 1 件、
+/// 他ファイルに 0 件であることを固定する（`facade_declares_conv3d_names_only_in_approved_form` と同型。#3028）。
+#[test]
+fn facade_declares_pool3d_add_names_only_in_approved_form() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let allowed = usize::from(path.ends_with("compat/sequential.rs"));
+        for fn_name in ["add_max_pool3d", "add_avg_pool3d"] {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count != allowed {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件（許容 {allowed} 件）",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "3D プーリングの add_* が承認形から逸脱: {offending:?}"
     );
 }
 

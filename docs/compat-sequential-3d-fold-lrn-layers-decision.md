@@ -98,3 +98,9 @@ Sequential 保存は `format_version: 2` 据え置き。新 kind を足しても
 ## 13. 出典
 
 `autodiff-pool3d-ops-decision.md`・`autodiff-conv-transpose3d-max-unpool-decision.md`・`autodiff-fold-unfold-decision.md`・`autodiff-lrn-weight-reparam-decision.md`（各 §12・§14）、`facade-nn-layer-type-exposure-decision.md`、`facade-functional-api-decision.md`、`compat-model-io-decision.md`、`compat-api-scope.md` §5.1・§5 末尾。
+
+## 14. #3028 実施記録（pool3d の `Sequential::add_*` 公開）
+
+- `add_max_pool3d`／`add_avg_pool3d` を §3 の形で公開。`LayerSpec::Unsupported { kind: "max_pool3d" | "avg_pool3d" }` を採用し、`save_model` は `UnsupportedModel` で fail-closed（`celu` 等の先例と同型）。実 variant（12 キー／10 キー）への置換と保存・復元は後続 `-c` の範囲。
+- 常駐経路は新規結線なしで `is_pooling()` 経由の `Unsupported`。学習経路（`fit`・`bind`）も無パラメータ層として新規結線不要。ONNX export は `UnsupportedLayer` のまま。
+- 保留ガード `Pool3dOpsHoldDoctestGuard` は `Sequential` 受け手の分のみ反転。`nn::*` 層型名・`forward_host`・実機 parity は対象外。
