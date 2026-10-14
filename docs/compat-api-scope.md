@@ -632,7 +632,7 @@ P1」）を受けた是正である。
 - `fandhe_ai::nn::rnn`（行 16）: `PackedSequence`・`PackedRnnSeqOutput`・`PackedLstmSeqOutput`・`StackedPackedRnnSeqOutput`・`StackedPackedLstmSeqOutput` と
   自由関数 8 本（`pack_padded_sequence`・`pad_packed_sequence`・`{rnn,gru,lstm}_forward_packed`・`stacked_{rnn,gru,lstm}_forward_packed`）の純再エクスポート。
 - `compat::Sequential::add_*`（行 17・18）: `add_selu`・`add_celu`・`add_softsign`・`add_hardsigmoid`・`add_log_sigmoid`・`add_softmin`・
-  `add_tanhshrink`・`add_threshold`・`add_rrelu`（`save_model` の kind は決定記録に形がないため追加せず `UnsupportedModel` で拒否）。
+  `add_tanhshrink`・`add_threshold`・`add_rrelu`（`save_model` の kind は決定記録に形がないため追加せず `UnsupportedModel` で拒否 → #3052 で `compat-model-io-decision.md` 追補へ kind・スキーマを記載済み。実装は #3051・#3055 まで拒否のまま）。
 - `fandhe_ai::optim`（行 21〜24）: `Rprop`・`Asgd`・`Adafactor`・`Lion`（各 `*Config` 付き）・`PolynomialLr`・`ChainedScheduler`・`SwaLr`・`SwaAnneal` の
   素の再エクスポートと、facade 独自の薄いラッパー `AveragedModel`（EMA と同型。`fit` への結線なし）。
 - `fandhe_ai::data`（行 25・26）: `Subset`・`ConcatDataset`・`ConcatBatch`・`random_split`・`random_split_fractions` と
