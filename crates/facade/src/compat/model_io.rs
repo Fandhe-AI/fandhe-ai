@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 62 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 63 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -311,7 +311,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 62 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 63 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -344,6 +344,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Conv2d { .. } => Some("conv2d"),
         LayerSpec::Conv3d { .. } => Some("conv3d"),
         LayerSpec::ConvTranspose2d { .. } => Some("conv_transpose2d"),
+        LayerSpec::ConvTranspose3d { .. } => Some("conv_transpose3d"),
         LayerSpec::Conv1d { .. } => Some("conv1d"),
         LayerSpec::ConvTranspose1d { .. } => Some("conv_transpose1d"),
         LayerSpec::Unflatten { .. } => Some("unflatten"),
@@ -513,6 +514,26 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
                     out_channels.checked_div(*groups).unwrap_or(0),
                     kernel_size[0],
                     kernel_size[1],
+                ],
+            ),
+            ("bias", vec![*out_channels]),
+        ],
+        // イシュー #3033: weight は `[in, out/groups, kD, kH, kW]`。
+        LayerSpec::ConvTranspose3d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            groups,
+            ..
+        } => vec![
+            (
+                "weight",
+                vec![
+                    *in_channels,
+                    out_channels.checked_div(*groups).unwrap_or(0),
+                    kernel_size[0],
+                    kernel_size[1],
+                    kernel_size[2],
                 ],
             ),
             ("bias", vec![*out_channels]),
@@ -819,6 +840,13 @@ fn put_triple(f: &mut ParamFields, base: &str, v: [usize; 3]) {
     put_num(f, &format!("{base}_w"), v[2]);
 }
 
+/// `[usize; 3]` を正準形の文字列 `"d,h,w"` 1 キーへ畳む（イシュー #3033。`conv_transpose3d` は
+/// 平坦形だと 18 キーになり `MAX_OBJECT_KEYS` を超えるため。決定記録 §3）。数字とカンマのみで
+/// エスケープ不要。
+fn put_triple_str(f: &mut ParamFields, key: &str, v: [usize; 3]) {
+    f.push((key.to_string(), format!("\"{},{},{}\"", v[0], v[1], v[2])));
+}
+
 fn put_opt_pair(f: &mut ParamFields, base: &str, v: Option<[usize; 2]>) {
     put_opt(f, &format!("{base}_h"), v.map(|x| x[0]));
     put_opt(f, &format!("{base}_w"), v.map(|x| x[1]));
@@ -1003,6 +1031,25 @@ fn render_params(spec: &LayerSpec) -> String {
             put_pair(&mut f, "padding", *padding);
             put_pair(&mut f, "output_padding", *output_padding);
             put_pair(&mut f, "dilation", *dilation);
+            put_num(&mut f, "groups", *groups);
+        }
+        LayerSpec::ConvTranspose3d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+        } => {
+            put_num(&mut f, "in_channels", *in_channels);
+            put_num(&mut f, "out_channels", *out_channels);
+            put_triple_str(&mut f, "kernel_size", *kernel_size);
+            put_triple_str(&mut f, "stride", *stride);
+            put_triple_str(&mut f, "padding", *padding);
+            put_triple_str(&mut f, "output_padding", *output_padding);
+            put_triple_str(&mut f, "dilation", *dilation);
             put_num(&mut f, "groups", *groups);
         }
         LayerSpec::Conv1d {
@@ -2071,6 +2118,28 @@ fn build_model(
                     0,
                 )
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::ConvTranspose3d {
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                padding,
+                output_padding,
+                dilation,
+                groups,
+            } => model
+                .add_conv_transpose3d(
+                    *in_channels,
+                    *out_channels,
+                    *kernel_size,
+                    *stride,
+                    *padding,
+                    *output_padding,
+                    *dilation,
+                    *groups,
+                    0,
+                )
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Conv1d {
                 in_channels,
                 out_channels,
@@ -2796,6 +2865,34 @@ impl<'a> Params<'a> {
 }
 
 impl Params<'_> {
+    /// 正準形の文字列 `"d,h,w"` を `[usize; 3]` として読む（イシュー #3033）。文字列のみ受理し、
+    /// 要素ちょうど 3 個・各要素 ASCII 数字のみ・`usize` に収まること、さらに再整形して元文字列と
+    /// 一致すること（先頭ゼロ・空白・符号を拒否。`as_f32` と同型の正準形方針）を要求する。
+    fn triple_str(&self, key: &str) -> Result<[usize; 3], ModelIoError> {
+        let raw = as_str(self.get(key)?, key)?;
+        let parts: Vec<&str> = raw.split(',').collect();
+        if parts.len() != 3 {
+            return Err(manifest_error(format!(
+                "{key} は \"d,h,w\" 形式である必要があります"
+            )));
+        }
+        let mut out = [0usize; 3];
+        for (slot, part) in out.iter_mut().zip(&parts) {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(manifest_error(format!(
+                    "{key} の要素は非負 10 進整数である必要があります"
+                )));
+            }
+            *slot = part
+                .parse::<usize>()
+                .map_err(|_| manifest_error(format!("{key} が usize に収まりません")))?;
+        }
+        if format!("{},{},{}", out[0], out[1], out[2]) != raw {
+            return Err(manifest_error(format!("{key} が正準な表記ではありません")));
+        }
+        Ok(out)
+    }
+
     /// `{base}_d`／`_h`／`_w` が「全 `null`」または「全整数」の `Option<[usize; 3]>`。
     /// 部分 `null` は書き手が出さない形のため `Manifest` で拒否する（`opt_pair` の 3 軸版。#3029）。
     fn opt_triple(&self, base: &str) -> Result<Option<[usize; 3]>, ModelIoError> {
@@ -3017,6 +3114,35 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 padding: p.pair("padding")?,
                 output_padding: p.pair("output_padding")?,
                 dilation: p.pair("dilation")?,
+                groups,
+            })
+        }
+        "conv_transpose3d" => {
+            let p = Params::new(
+                params,
+                &[
+                    "in_channels",
+                    "out_channels",
+                    "kernel_size",
+                    "stride",
+                    "padding",
+                    "output_padding",
+                    "dilation",
+                    "groups",
+                ],
+            )?;
+            let in_channels = p.usize("in_channels")?;
+            let out_channels = p.usize("out_channels")?;
+            let groups = p.usize("groups")?;
+            check_conv_groups(in_channels, out_channels, groups)?;
+            Ok(LayerSpec::ConvTranspose3d {
+                in_channels,
+                out_channels,
+                kernel_size: p.triple_str("kernel_size")?,
+                stride: p.triple_str("stride")?,
+                padding: p.triple_str("padding")?,
+                output_padding: p.triple_str("output_padding")?,
+                dilation: p.triple_str("dilation")?,
                 groups,
             })
         }
@@ -3899,7 +4025,7 @@ mod tests {
         ));
     }
 
-    /// 62 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 63 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -3971,6 +4097,26 @@ mod tests {
                 output_padding: [1, 0],
                 dilation: [1, 1],
                 groups: 2,
+            },
+            LayerSpec::ConvTranspose3d {
+                in_channels: 4,
+                out_channels: 6,
+                kernel_size: [2, 3, 1],
+                stride: [2, 3, 1],
+                padding: [0, 1, 0],
+                output_padding: [1, 2, 0],
+                dilation: [1, 2, 1],
+                groups: 2,
+            },
+            LayerSpec::ConvTranspose3d {
+                in_channels: 2,
+                out_channels: 3,
+                kernel_size: [10, 100, 1],
+                stride: [11, 101, 2],
+                padding: [0, 0, 0],
+                output_padding: [10, 100, 1],
+                dilation: [1, 1, 1],
+                groups: 1,
             },
             LayerSpec::Conv1d {
                 in_channels: 4,
@@ -4183,11 +4329,72 @@ mod tests {
         ]
     }
 
+    /// `conv_transpose3d` の正常な params から `key` だけを差し替える（`None` は欠落、
+    /// 既存キーでなければ余分なキーの追加）。非信頼入力の拒否表（イシュー #3033）用。
+    fn ct3d(key: &str, val: Option<&str>) -> String {
+        let mut fields: Vec<(String, String)> = vec![
+            ("in_channels".into(), "4".into()),
+            ("out_channels".into(), "2".into()),
+            ("kernel_size".into(), r#""3,3,3""#.into()),
+            ("stride".into(), r#""2,2,2""#.into()),
+            ("padding".into(), r#""0,0,0""#.into()),
+            ("output_padding".into(), r#""0,0,0""#.into()),
+            ("dilation".into(), r#""1,1,1""#.into()),
+            ("groups".into(), "1".into()),
+        ];
+        match (fields.iter().position(|(k, _)| k == key), val) {
+            (Some(i), Some(v)) => fields[i].1 = v.to_string(),
+            (Some(i), None) => {
+                fields.remove(i);
+            }
+            (None, Some(v)) => fields.push((key.to_string(), v.to_string())),
+            (None, None) => {}
+        }
+        let body: Vec<String> = fields.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
+        format!("{{{}}}", body.join(","))
+    }
+
+    #[test]
+    fn conv_transpose3d_rejects_untrusted_params() {
+        let bad: [(&str, Option<&str>); 18] = [
+            ("kernel_size", Some(r#""3,3""#)),
+            ("kernel_size", Some(r#""3,3,3,3""#)),
+            ("kernel_size", Some(r#""3,,3""#)),
+            ("kernel_size", Some(r#""03,3,3""#)),
+            ("kernel_size", Some(r#""3, 3,3""#)),
+            ("kernel_size", Some(r#""+3,3,3""#)),
+            ("kernel_size", Some(r#""-3,3,3""#)),
+            ("kernel_size", Some(r#""1.5,3,3""#)),
+            ("kernel_size", Some("3")),
+            ("kernel_size", Some("true")),
+            ("kernel_size", Some("[3,3,3]")),
+            ("kernel_size", Some(r#""18446744073709551616,1,1""#)),
+            ("groups", Some("0")),
+            ("groups", Some("3")),
+            ("dilation", None),
+            ("x", Some("1")),
+            ("output_padding", Some("null")),
+            ("kernel_size", Some(r#""３,3,3""#)),
+        ];
+        for (key, val) in bad {
+            let json = parse_json(&ct3d(key, val)).expect("字句としては正しい JSON");
+            assert!(
+                matches!(
+                    spec_from_kind("conv_transpose3d", &json),
+                    Err(ModelIoError::Manifest { .. })
+                ),
+                "{key}={val:?}"
+            );
+        }
+        let ok = parse_json(&ct3d("kernel_size", Some(r#""0,10,333""#))).expect("json");
+        assert!(spec_from_kind("conv_transpose3d", &ok).is_ok());
+    }
+
     #[test]
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 62, "kind allowlist は 62 種: {kinds:?}");
+        assert_eq!(kinds.len(), 63, "kind allowlist は 63 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -4205,9 +4412,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 62 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 63 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("62 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("63 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -4215,7 +4422,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("62 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("63 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -4776,7 +4983,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("62 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("63 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

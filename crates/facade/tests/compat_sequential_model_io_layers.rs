@@ -922,3 +922,145 @@ fn tampered_pool3d_manifests_are_rejected() {
         "{err}"
     );
 }
+// ---------------------------------------------------------------------
+// イシュー #3033: conv_transpose3d の保存・復元
+// ---------------------------------------------------------------------
+// 三つ組（kernel_size・stride・padding・output_padding・dilation）は正準形の文字列 "d,h,w" 1 キーに
+// 畳まれる（平坦形は 18 キーとなり object キー上限 16 を超えるため。決定記録 §3）。
+
+/// rank 5 入力 `[1, 4, 2, 2, 2]`。conv_transpose3d（groups=2・全パラメータ非自明）→ relu →
+/// conv_transpose3d（非対称の三つ組・groups=1）。
+fn deconv3d_model() -> Sequential {
+    let mut m = Sequential::new()
+        .add_conv_transpose3d(
+            4,
+            6,
+            [2, 3, 1],
+            [2, 3, 1],
+            [0, 1, 0],
+            [1, 2, 0],
+            [1, 2, 1],
+            2,
+            33,
+        )
+        .map(|m| m.add_relu())
+        .and_then(|m| {
+            m.add_conv_transpose3d(
+                6,
+                4,
+                [1, 2, 3],
+                [1, 1, 2],
+                [0, 0, 0],
+                [0, 0, 0],
+                [1, 1, 1],
+                1,
+                34,
+            )
+        })
+        .expect("構築できるはず");
+    m.eval();
+    m
+}
+
+fn deconv3d_input() -> Tensor<f32> {
+    let shape = [1, 4, 2, 2, 2];
+    let n: usize = shape.iter().product();
+    Tensor::new((0..n).map(|i| (i as f32) * 0.07 - 0.5).collect(), &shape).unwrap()
+}
+
+#[test]
+fn conv_transpose3d_round_trips_bit_identically_and_keeps_format_version_2() {
+    let kinds = round_trip("deconv3d", &deconv3d_model(), &deconv3d_input());
+    assert!(kinds.contains("conv_transpose3d"), "{kinds:?}");
+    let (_guard, _dir, text) = manifest_of(&deconv3d_model(), "deconv3d-manifest");
+    assert!(
+        text.contains("\"format_version\":2"),
+        "format_version は 2 のまま"
+    );
+    assert!(
+        text.contains("\"kernel_size\":\"2,3,1\"") && text.contains("\"output_padding\":\"1,2,0\""),
+        "{text}"
+    );
+}
+
+fn deconv3d_tampered(label: &str, from: &str, to: &str) -> ModelIoError {
+    let (_guard, dir, text) = manifest_of(&deconv3d_model(), label);
+    assert!(text.contains(from), "{label}: 置換対象 {from} がある");
+    std::fs::write(dir.join("manifest.json"), text.replacen(from, to, 1)).expect("書けるはず");
+    load_err(&dir)
+}
+
+#[test]
+fn tampered_conv_transpose3d_manifests_are_rejected() {
+    let head = "\"kind\":\"conv_transpose3d\",\"params\":{";
+    let manifest_cases = [
+        ("missing-key", "\"dilation\":\"1,2,1\",", ""),
+        (
+            "extra-key",
+            head,
+            "\"kind\":\"conv_transpose3d\",\"params\":{\"x\":1,",
+        ),
+        (
+            "negative",
+            "\"kernel_size\":\"2,3,1\"",
+            "\"kernel_size\":\"-2,3,1\"",
+        ),
+        (
+            "fractional",
+            "\"kernel_size\":\"2,3,1\"",
+            "\"kernel_size\":\"2.5,3,1\"",
+        ),
+        ("int-for-string", "\"stride\":\"2,3,1\"", "\"stride\":2"),
+        ("two-elements", "\"stride\":\"2,3,1\"", "\"stride\":\"2,3\""),
+        (
+            "four-elements",
+            "\"stride\":\"2,3,1\"",
+            "\"stride\":\"2,3,1,1\"",
+        ),
+        (
+            "leading-zero",
+            "\"stride\":\"2,3,1\"",
+            "\"stride\":\"02,3,1\"",
+        ),
+        ("space", "\"stride\":\"2,3,1\"", "\"stride\":\"2, 3,1\""),
+        ("sign", "\"stride\":\"2,3,1\"", "\"stride\":\"+2,3,1\""),
+        (
+            "overflow",
+            "\"stride\":\"2,3,1\"",
+            "\"stride\":\"18446744073709551616,3,1\"",
+        ),
+        ("groups-not-dividing", "\"groups\":2", "\"groups\":4"),
+        ("groups-zero", "\"groups\":2", "\"groups\":0"),
+    ];
+    for (label, from, to) in manifest_cases {
+        let err = deconv3d_tampered(&format!("deconv3d-t-{label}"), from, to);
+        assert!(
+            matches!(err, ModelIoError::Manifest { .. }),
+            "{label}: {err}"
+        );
+    }
+    // 意味違反（`output_padding >= stride`）は層コンストラクタの検査（`Autodiff`）。
+    let err = deconv3d_tampered(
+        "deconv3d-t-output-padding",
+        "\"output_padding\":\"1,2,0\"",
+        "\"output_padding\":\"2,2,0\"",
+    );
+    assert!(matches!(err, ModelIoError::Autodiff(_)), "{err}");
+    // manifest の shape を変えると期待キー・shape と safetensors が食い違い `Mismatch`。
+    let err = deconv3d_tampered(
+        "deconv3d-t-shape",
+        "\"kernel_size\":\"2,3,1\"",
+        "\"kernel_size\":\"2,3,2\"",
+    );
+    assert!(matches!(err, ModelIoError::Mismatch { .. }), "{err}");
+    // 未知 kind は `UnsupportedModel`。
+    let err = deconv3d_tampered(
+        "deconv3d-t-kind",
+        "\"kind\":\"conv_transpose3d\"",
+        "\"kind\":\"conv_transpose4d\"",
+    );
+    assert!(
+        matches!(err, ModelIoError::UnsupportedModel { .. }),
+        "{err}"
+    );
+}

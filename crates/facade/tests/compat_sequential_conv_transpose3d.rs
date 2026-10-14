@@ -7,14 +7,14 @@
 //! - 出力 shape が PyTorch 式と一致し、`predict`／`forward`／`Var::conv_transpose3d` が bit 完全一致。
 //! - backward（入力・weight・bias 勾配）と学習 1 step が `Var` 直書きの参照グラフと bit 一致し、
 //!   `compile`／`fit` が `first_untracked_parametric_layer` に弾かれない。
-//! - 常駐経路は `Unsupported`、保存は後続 issue（kind `conv_transpose3d`）まで `UnsupportedModel`
-//!   （fail-closed）、ONNX export は `UnsupportedLayer`。
+//! - 常駐経路は `Unsupported`、保存は kind `conv_transpose3d`（#3033）で往復可能
+//!   、ONNX export は `UnsupportedLayer`（fail-closed）。
 //!
 //! ホストフォールバック経路のため実機（CUDA／Metal）非依存。実機 parity は未実測のまま。
 
 use std::path::PathBuf;
 
-use fandhe_ai::compat::{FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model};
+use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, load_model, save_model};
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
@@ -334,18 +334,25 @@ fn resident_path_rejects_conv_transpose3d_fail_closed() {
 // ---------------------------------------------------------------- 保存・ONNX（fail-closed）
 
 #[test]
-fn save_model_is_rejected_until_follow_up_issue() {
-    // 保存（kind `conv_transpose3d`・8 キー）は後続 issue。それまで `UnsupportedModel` で拒否し、
-    // 保存先に何も作らない。後続で実装する際は本テストを round trip へ置換する。
+fn save_model_accepts_conv_transpose3d_and_restores_bit_identically() {
+    // イシュー #3033 で保存対応済み（kind `conv_transpose3d`・8 キー）。詳細な往復・改ざん拒否は
+    // `compat_sequential_model_io_layers.rs` が担い、ここでは `UnsupportedModel` で拒否されなくなったことと
+    // 復元後の `predict` の bit 一致だけを確認する。
     let model = single_layer();
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("fandhe_ai_3032_save_{}", std::process::id()));
-    let err = save_model(&model, &dir).unwrap_err();
-    assert!(
-        matches!(err, ModelIoError::UnsupportedModel { .. }),
-        "{err:?}"
+    let dir: PathBuf = std::env::temp_dir().join(format!(
+        "fandhe_ai_3033_save_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    save_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_model(&dir).expect("復元できるはず");
+    let _ = std::fs::remove_dir_all(&dir);
+    let x = tensor(ramp(2 * 3 * 3 * 3, 0.003, -0.3), &[1, 2, 3, 3, 3]);
+    assert_eq!(
+        dense_vec(&model.predict(&x).unwrap()),
+        dense_vec(&loaded.predict(&x).unwrap())
     );
-    assert!(!dir.exists(), "拒否時は dir に何も作らない");
 }
 
 #[test]

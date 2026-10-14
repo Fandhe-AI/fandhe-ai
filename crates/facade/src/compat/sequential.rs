@@ -262,6 +262,17 @@ pub(super) enum LayerSpec {
         dilation: [usize; 2],
         groups: usize,
     },
+    /// イシュー #3033。bias あり固定（`add_conv_transpose3d`。`seed` は保存しない）。
+    ConvTranspose3d {
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: [usize; 3],
+        stride: [usize; 3],
+        padding: [usize; 3],
+        output_padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+    },
     Conv1d {
         in_channels: usize,
         out_channels: usize,
@@ -1250,8 +1261,8 @@ impl Sequential {
     /// `(D-1)*stride - 2*padding + dilation*(k-1) + output_padding + 1`（各軸）。
     /// `output_padding >= stride`（意図的な PyTorch 非互換）・0 の stride／kernel・
     /// `groups` の割り切れ違反は `Err`。常駐経路は非対応（`BackendError::Unsupported`）、
-    /// AMP 低精度は無視して f32 で forward する。`save_model` は後続 issue（kind
-    /// `conv_transpose3d` の manifest）まで `UnsupportedModel` で fail-closed にする。
+    /// AMP 低精度は無視して f32 で forward する。`save_model`／`load_model` は kind
+    /// `conv_transpose3d` として保存・復元できる（イシュー #3033。`seed` は保存しない）。
     ///
     /// # Examples
     ///
@@ -1292,8 +1303,15 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(conv));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "conv_transpose3d",
+        self.specs.push(LayerSpec::ConvTranspose3d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
         });
         Ok(self)
     }
