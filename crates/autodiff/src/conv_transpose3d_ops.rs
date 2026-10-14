@@ -5,7 +5,7 @@
 //!
 //! **facade 公開状況**: `Var::conv_transpose3d`（本モジュールの自由関数への 1 行委譲）は #2850 で
 //! 公開済み（公開形は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12.1）。モジュール自体は
-//! 再エクスポートしない。層化（`nn::ConvTranspose3d`・`Sequential::add_*`）は保留継続で、
+//! 再エクスポートしない。autodiff 側の層 struct `nn::ConvTranspose3d` は #3031 で追加済み。facade 側の層化（`Sequential::add_*`）は保留継続で、
 //! `crates/facade/src/lib.rs` の `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と
 //! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定する。
 //!
@@ -149,7 +149,7 @@ fn materialize_one<'t>(x: &Var<'t>) -> Result<Tensor<f32>, AutodiffError> {
 /// `conv3d_with_fallback` に慣れた読み手ほど誤読しやすい。bias を `[1, Cout, 1, 1, 1]` へ reshape
 /// してから加算するのは、右詰め broadcast による `W` 軸誤加算を避けるため。`N = 0` は GEMM・col2im3d を
 /// 呼ばず空テンソルを返す。
-fn conv_transpose3d_forward(
+pub(crate) fn conv_transpose3d_forward(
     ops: &dyn BackendOps,
     input: &Tensor<f32>,
     weight: &Tensor<f32>,
