@@ -1591,3 +1591,15 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - 実装後に保存側の現行拒否（`UnsupportedModel`「層 i（kind）は保存に未対応です」）が残るのは `add_module` 由来の `module` 層のみ。
 - `format_version`・上限定数（`MAX_JSON_DEPTH`・`MAX_OBJECT_KEYS`・`MAX_ARRAY_LEN`・`MAX_LAYERS`）・tolerance・依存・既存 kind のスキーマは変更しない。
 - `save_functional_model` は `spec_kind` を共有する（`functional_io.rs`）ため allowlist の拡張は functional 側にも及ぶ。網羅確認は #3051 で行う。ONNX export の対象外は本記録の範囲外。
+
+## 追補（イシュー #3055）: conv_transpose1d・unflatten の保存・復元の実装記録
+
+#3052 追補で確定した kind 名・スキーマのうち、`conv_transpose1d`・`unflatten` の 2 層を実装した。「本記録の時点では `Unsupported`」とした #3052 追補の記述は、この 2 層について解消した（活性化 9 層は #3053／#3054 の担当で本追補の対象外）。
+
+- `LayerSpec` に `ConvTranspose1d { in_channels, out_channels, kernel_size, stride, padding, output_padding, dilation, groups }`（bias 固定）と `Unflatten { dim, sizes: Vec<usize> }` を追加し、`add_conv_transpose1d`・`add_unflatten` が `Unsupported` ではなくこれらを積む。
+- スキーマは #3052 追補 §1 どおり。`unflatten` は `size_len`（1..=`UNFLATTEN_MAX_SIZE_LEN` = 8）と `size_0`〜`size_7`（`size_len` 未満が整数、以上が `null`）の 10 キー。`conv_transpose1d` は 8 キーのスカラー整数で、期待パラメータは `weight: [in, out/groups, k]`・`bias: [out]`（`unflatten` は 0 本）。
+- 保存前検査: `sizes.len()` が 1..=8 でない `Unflatten` は `UnsupportedModel` で拒否し、`dir` に何も作らない。
+- load 側の拒否分類: キー過不足・整数欄の小数／負数・`size_len` 範囲外・`null` 詰め違反・`groups == 0`／割り切れ違反（期待 shape の除算より前に `check_conv_groups`）は `Manifest`。`output_padding >= stride`・空 sizes は `add_*` が `Autodiff`。`unflatten` の `dim` 範囲・サイズ積の不一致は `Unflatten::new` が構築時に検査せず forward 時の `AutodiffError::Shape` となるため、load は成功する。
+- allowlist は本 PR 単独で 53 → 55 種（#3053／#3054 のマージ後は 64 種）。`format_version` は 2 のまま、既存 kind のスキーマ・上限定数・tolerance・依存は不変。旧リーダーは未知 kind を `UnsupportedModel` で拒否する。
+- `save_functional_model` は `spec_kind` を共有するため functional 側にも allowlist 拡張が及ぶ（網羅確認は #3051）。ONNX export はこの 2 層について引き続き `OnnxError::UnsupportedLayer` で対象外。
+- 11 層一括（活性化 9 層を含む）の「`save_model` で拒否されない」テストは、活性化 9 層が未実装のため未完了。#3053／#3054 のうち後にマージされる側、または #3051 で完成させる。

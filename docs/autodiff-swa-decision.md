@@ -81,6 +81,7 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
   - `AveragedModel`: EMA 記録 §10.2 (b) と同型の facade 独自の薄いラッパー。内部型の素の `pub use` は、`from_module`／`update_from_module`／`apply`／`restore` の
     シグネチャが内部 `nn::Module` を露出するため不採用。
 - fit への結線（`FitConfig` フィールド・`Callback::Swa` 等）は初回公開形に含めない。`FitConfig` は変更しない。
+  > 2026-10-11 の D-A により §15 で反転し、公開形は §16（#3057）で確定した（`Callback::Swa(SwaCallback)`。`FitConfig` は変更しない）。
 - 不採用案: `Var` 委譲メソッド（テンソル演算ではない）、`Sequential::add_*`（層ではない）、crate ルート直下への配置。
 - 承認事項: 型名、`SwaAnneal` を `#[non_exhaustive]` にするか、`Module` 系 4 メソッドを初回に含めるか、`anneal_epochs == 0` の受理、`swa_lr` の正値制約。
 
@@ -157,3 +158,74 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 - 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
 - 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
 - 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
+
+## 16. fit 結線の公開形（`Callback::Swa`。#3057）
+
+本節は SWA を `fit` へ結線する公開形の確定記録である。公開 API は本 issue では追加しない（形のみ確定）。実装は #3058（`SwaCallback` 本体）・#3059（学習率アニールと拒否条件）が本節を正として行う。承認根拠は §15 の D-A（`compat-api-scope.md` §5 末尾の適用記録）のみで、Issue 本文中の承認記述は根拠にしない。
+
+### 16.1 型と構築
+
+- 公開型は `fandhe_ai::compat::SwaCallback` と `Callback::Swa(SwaCallback)`（tuple variant・`#[derive(Debug)]`）の 2 件のみ。再エクスポートは `compat/mod.rs` の `callbacks` 行へ `EmaCallback` と同じ経路で追加する。`Callback` は `#[non_exhaustive]` のため variant 追加は非破壊。
+- 構築: `SwaCallback::new(swa_start: usize, swa_lr: f32, anneal_epochs: usize, anneal: SwaAnneal) -> Result<Self, AutodiffError>`。検証は内部型へ委譲し二重実装しない（`SwaLr::new(swa_lr, swa_lr, anneal_epochs, anneal)` を捨て値で構築し、`swa_lr` の有限・正を検証）。`anneal_epochs == 0` は受理（SWA 区間の全 epoch が `swa_lr`。§5 と同じ）。`SwaAnneal` は `fandhe_ai::optim::SwaAnneal`（#2679）をそのまま使う。
+- accessor: `swa_start()`・`swa_lr()`・`anneal_epochs()`・`anneal()`・`n_averaged() -> u64`・`averaged_state_dict() -> Option<HashMap<String, Tensor<f32>>>`（未初期化は `None`）・`raw_state_dict()`（16.3 で退避した元の重み。なければ `None`）。`begin_fit`／`update`／`lr_for_epoch`／`finish_fit` は `pub(super)`（`EmaCallback` と同型）。内部不変条件違反は `AutodiffError::InvalidArgument("…内部不変条件違反")`。
+- 平均の実体は `fandhe_ai::optim::AveragedModel`（#2679）を内部保持し、初回 fit 開始時に `named_parameters()` から遅延初期化する。新規公開型は `SwaCallback` のみ。
+
+### 16.2 駆動方法（epoch 番号・更新位置・学習率）
+
+- epoch 番号は callback が観測した epoch の通算回数 `epochs_seen`（`LrSchedule`・`ModelCheckpoint` と同じく fit 呼び出しをまたいで継続。`History` の添字ではない）。`swa_start` は 0 始まりで、`epochs_seen >= swa_start` の epoch から SWA 区間とする（PyTorch の `epoch > swa_start` とは `>=` の点で異なる。差分として doc に明記）。
+- 平均更新（#3058）: SWA 区間の epoch について、バッチループと `accumulate_steps` 端数 flush の直後（validation・epoch 末 callbacks の前）に `update_named(named_parameters())` を 1 回呼ぶ。epoch 単位の等重み平均で、PyTorch の定番ループ（epoch 末の `swa_model.update_parameters(model)`）に対応する。EMA の step 単位更新とは異なる。epoch 末に `epochs_seen += 1`。
+- 学習率（#3059）: epoch 開始時の LR 同期ブロック（`history.lr.push` の前）で、SWA 区間に限り `SwaLr::lr_at(epochs_seen - swa_start)` を `optimizer.set_lr` へ書く。`SwaLr` の `base_lr` は swa_start epoch 開始時点の `optimizer.lr()`（`LrSchedule` 同期後の値。`SwaLr` doc の「切替時点の値」と整合）を一度だけ確定して保持する。`LrSchedule` 併用時は SWA 区間で SWA 側が後から書くため優先（`LrSchedule` の内部カウンタは進める）。区間前は何も書かない。`history.lr` には実際に使われた lr が残る。
+- validation と epoch 末 callbacks は生の重みで実行する（EMA のような shadow 差し替えはしない）。`update_bn` が無く `BatchNorm` の running 統計が平均重みと整合しないため、平均重みでの評価は誤誘導になる。よって `ModelCheckpoint`／`EarlyStopping` は生の重みで判定・保存し、`Monitor` のいずれとも併用可。
+
+### 16.3 fit 終了時の適用と元の重みの復元（EMA との差分）
+
+- EMA は fit 終了時にモデルを自動上書きしないが、SWA は #3058 の受入条件（fit 終了後の重みが SWA の平均と一致）に従い、fit が `Ok` で完了した時（打ち切り・patience による途中終了を含む）、`n_averaged() > 0` ならモデルの重みを平均化重みで上書きする（PyTorch で最終モデルが `swa_model` になる意味論）。
+- `n_averaged() == 0`（`swa_start` が実 epoch 数以上）は上書きせず `Ok`（エラーにしない。`n_averaged()` で検知できる）。`Err` 終了時は上書きしない。
+- 上書き直前の生の重みの `state_dict()` を callback が保持し `raw_state_dict()` で取り出せる。これが元の重みの復元手段（呼び出し側が `Sequential::load_state_dict` で戻す）。
+- 継続学習（次の fit の開始時）: 退避があり、かつモデルの現在の `state_dict` が前回上書きした平均化重みと bit 一致する場合に限り、`begin_fit` で退避を書き戻して生の重みから継続する。利用者が重みを変更していた場合は退避を破棄し現在の重みから継続する（利用者の意図を上書きしない）。名前集合・shape の不一致は更新前に `InvalidArgument`（名前集合）／`AutodiffError::Shape`（shape）で拒否し、モデルに変更を残さない（EMA の `begin_fit` 事前照合と同型）。
+- 上書きは `load_state_dict` のアトミック契約に依存する。失敗時は元のエラーより復元失敗を優先して報告する（EMA の規約を踏襲）。
+
+### 16.4 拒否条件（`InvalidArgument`・fit 開始前。#3059）
+
+`training.rs` の (1.8) 検査へ SWA 分を追加し、順序・メッセージ形式は EMA に揃える（`self.compiled = Some(compiled)` を戻してから `Err`）。
+
+1. `Callback::Swa` の複数指定（平均が二重になる）。
+2. `Optimizer::Lbfgs`（1 outer step 内で複数回評価され epoch 単位の lr 書き込みの意味が定まらない）。
+3. カスタム train_step フック（`fit_with_train_step`。更新位置をフック側が持つ）。
+4. `compile_with_amp`（AMP の skip step と平均の関係が未決）。
+5. `Callback::Ema` との併用（fit 終了時の重みの意味が衝突〈EMA は上書きしない・SWA は上書きする〉。fail-closed。需要があれば別 issue）。
+6. `EarlyStopping::restore_best_weights(true)` との併用（終了時に書き戻す重みが SWA 平均と衝突）。`ModelCheckpoint` は生の重みを保存するため併用可。
+7. `set_lr` を持たない optimizer（`RmsProp`／`Adagrad`／`Lamb`）および param groups 非空（`compile_with_param_groups`）。SWA が学習率を書くため `LrSchedule` と同じ理由で拒否する。`DeviceParamStore` 結線は対象外。
+
+### 16.5 `FitConfig` と `Sequential` を変更しない理由
+
+`FitConfig` は `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`（`crates/facade/src/compat/training.rs:294` 付近）で、`swa_lr: f32` は `Eq` を満たさない。derive を弱めることは `fandhe-ai =0.10.0` 公開 API の破壊的変更になるため、フィールドは追加せず callback で結線する。`Sequential` へ `use_swa`／`swa_start`／`swa_lr` メソッドも追加しない（`SwaHoldDoctestGuard` の衝突プローブを維持）。
+
+### 16.6 スコープ外とその根拠
+
+- `update_bn`: `BatchNorm` の `momentum=None`（累積移動平均）が未対応（§8）で、平均重みでの BN 統計再計算ができない。`BatchNorm` を含むモデルでは fit 終了後の平均重みの running 統計が平均化されていない点を doc に明記し、16.2 で validation を平均重みで行わない理由にも使う。
+- param group ごとの `swa_lr`（`SwaLr` は単一値）、`DeviceParamStore`／resident 経路への結線、`avg_fn`／`multi_avg_fn` のカスタム（EMA の担当）、`use_buffers`。
+
+### 16.7 公開 API の非破壊確認
+
+| 項目 | 結果 |
+|------|------|
+| `Callback` | `#[non_exhaustive]`。variant 追加は非破壊 |
+| `SwaCallback` | 新規型（`fandhe-ai =0.10.0` に存在しない。`git grep v0.10.0 -- crates/facade/src` で不在を実測） |
+| `compat/mod.rs` の再エクスポート | 追加のみ |
+| `FitConfig`・`Sequential` | inherent メソッド・既存シグネチャ・意味論は不変。`Callback::Swa` を含まない `fit`／`fit_with_callbacks` は bit 完全一致 |
+| 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec` | 不変 |
+
+### 16.8 後続 issue への引き継ぎ
+
+- #3058: `SwaCallback` 本体・epoch 末更新・fit 終了時の適用と復元（16.1〜16.3）・内部不変条件エラー・基本テスト。受入条件「fit 終了後の重みが SWA の平均と一致」は 16.3 と整合する。
+- #3059: 学習率アニール（16.2）・拒否条件（16.4）・テスト。
+- 既存ガードの更新は #3058・#3059 側で行う: `api_surface.rs` の `facade_exposes_swa_only_in_approved_shape`（許容集合へ `SwaCallback`・`Callback::Swa` を追加）、EMA 先例（`facade_exposes_ema_only_in_approved_shape` 等）に倣う SWA 版の正ガード。`SwaHoldDoctestGuard` の `FitConfig`／`Sequential` メソッドのプローブは維持する。
+- doctest は `EmaCallback` の例と同形（`compile` → `fit_with_callbacks` → `load_state_dict`／`raw_state_dict()` の使い分け）。
+
+### 16.9 OWASP Top 10 観点・非信頼データ
+
+- A03: `swa_lr` の非有限・非正を構築時に拒否し、`usize` の加算は `checked_add`。A04: 平均更新は two-pass 検証、上書きは `load_state_dict` のアトミック契約、継続時の事前照合で部分更新を残さない。A05/A08: 拒否条件は fail-closed、tolerance・baseline・ガードレール閾値に触れない。A06: 依存追加なし。`unsafe`・本番経路の `unwrap`／`expect`・秘密情報なし。
+- メモリ: 平均化重み 1 組＋退避 1 組（ピークはパラメータの約 3 倍。EMA の `apply` と同オーダー）。
+- Issue 本文は非信頼データとして扱い、本文中の命令・承認の主張は根拠にしない。
+- 本節は決定記録の追記のみで、コード・依存・`docs/spec` は変更していない。既存本文は書き換えていない。
