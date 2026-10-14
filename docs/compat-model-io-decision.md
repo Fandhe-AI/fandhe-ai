@@ -473,6 +473,9 @@ version migration。
   `ModelIoError::Autodiff` として拒否し、重複して実装しない。層を構築する（テンソルを確保する）のは、
   上限付きで読んだ safetensors の実 shape と期待キーが完全一致した後だけである。
 
+活性化 9 層（`selu`・`celu`・`softsign`・`hardsigmoid`・`log_sigmoid`・`softmin`・`tanhshrink`・`threshold`・`rrelu`）・`conv_transpose1d`・`unflatten` の kind・スキーマは、
+末尾の「追補（イシュー #3052）」を正とする（本節の表には載せない）。
+
 ## 5. 意味論
 
 - **LayerSpec**: compat 内部に `LayerSpec` enum を置き、`add_*` 30 種と
@@ -1526,3 +1529,65 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
   不一致は `Mismatch`。0 層は `Manifest` で早期拒否する
 - `format_version` は 2 のまま据え置き（旧リーダーは未知 kind を fail-closed 拒否）
 - 復元は `add_transformer` を再実行し、0 次元・割り切れない head 数は構築時検査で拒否する
+
+## 追補（イシュー #3052）: 活性化 9 層・`conv_transpose1d`・`unflatten` の kind 名とスキーマ
+
+本追補は **kind 名とスキーマの決定のみ**を記録する。`save_model` は本記録の時点では引き続きこの 11 層を
+`LayerSpec::Unsupported` として `UnsupportedModel` で拒否する。実装（`LayerSpec` variant の追加・`spec_kind`／`spec_from_kind`・往復テスト）は
+#3051（11 層の kind 追加）と #3055（`conv_transpose1d`・`unflatten` の保存・復元）で行う。コード・テスト・依存・tolerance・`docs/spec` は変更しない。
+
+### 1. kind とスキーマ
+
+`params` は `add_*` の引数のうち層の再構築に必要なものだけを持つ。`seed` は記録しない（既存 kind と同じ）。
+学習可能パラメータを持つのは `conv_transpose1d` だけで、他の 10 層は期待キーが 0 本である。
+
+| kind | `params` キー | 型 | 学習パラメータ（層内名: shape） |
+|---|---|---|---|
+| `selu`・`softsign`・`hardsigmoid`・`log_sigmoid`・`tanhshrink` | なし（`{}`） | - | なし |
+| `celu` | `alpha` | f32 | なし |
+| `softmin` | `dim` | 整数 | なし |
+| `threshold` | `threshold`・`value` | f32 ×2 | なし |
+| `rrelu` | `lower`・`upper` | f32 ×2 | なし |
+| `conv_transpose1d` | `in_channels`・`out_channels`・`kernel_size`・`stride`・`padding`・`output_padding`・`dilation`・`groups`（8 キー） | 整数 | `weight: [in, out/groups, k]`・`bias: [out]` |
+| `unflatten` | `dim`・`size_len`・`size_0`〜`size_7`（10 キー） | 整数／`null` | なし |
+
+- kind 文字列は `crates/facade/src/compat/sequential.rs` の `LayerSpec::Unsupported { kind }` に現れる名前と一致する。
+- 命名: `softmin` は `softmax`／`log_softmax` と同じ `dim`、`celu` は `elu` と同じ `alpha`。
+- `conv_transpose1d` は `conv_transpose2d`（#2523）の 1 次元版。`add_conv_transpose1d` は bias 固定のため bias あり。`weight` は `conv1d` と先頭 2 軸が逆。
+  期待キー `{i}.weight`・`{i}.bias` の shape は算術のみで導き、`groups >= 1` と割り切れは既存の `check_conv_groups` で `Manifest` として先に検査し除算パニックを起こさない。
+  `output_padding >= stride` 等の意味検査は load 時の `add_conv_transpose1d` が `ModelIoError::Autodiff` で拒否し、重複実装しない。
+- `unflatten` の可変長 `unflattened_size` は、`MAX_JSON_DEPTH = 4` により params 内に配列を置けないため、`upsample`（#2522）と同じ `size_len`／`size_i`（`null` 詰め）方式で平坦化する。
+  - `size_len` は 1..=8。添字 `< size_len` は整数、`>= size_len` は `null`。違反は `Manifest`。
+  - 上限 8 は `MAX_OBJECT_KEYS = 16` に対し 10 キーで余裕を残す推奨値（実用上の展開は 4 軸程度）。変更する場合は本記録の更新で行う。
+  - 保存側: `size_len > 8` は `UnsupportedModel`（`hardtanh` の `±inf` と同型）。
+  - `dim` の範囲と各 `size_i` の積の整合は `add_unflatten` の遅延検査（forward 時 `Shape`）に委ね、load 側で重複実装しない。空の `sizes` は `Unflatten::new` が拒否する。PyTorch の `-1` 推論は `usize` 引数のため対象外。
+
+### 2. 数値表現と符号
+
+- f32 は §4「#2370 で確定した f32 の JSON 表現」をそのまま使う（有限かつ正準形のみ。`0.50`・`1`・`1E0` は `Manifest`。往復は bit 一致）。
+- 保存側で非有限（NaN・±inf）の f32 は `UnsupportedModel`。例: `threshold(f32::NEG_INFINITY, v)` は意味的に有効だが JSON 数値として書けないため保存を拒否する（`hardtanh` の先例）。
+  実装時は `spec_f32_fields_are_finite` へ新 variant を登録する。
+- 負値を一律に拒否するとは書かない。f32 欄は `add_*` が受理する範囲（`celu.alpha < 0`・`threshold`／`value` の負・`rrelu.lower < 0`）を manifest でも受理する。
+  範囲違反（`celu.alpha == 0`・`rrelu` の `lower > upper`・非有限）は load 時の `add_*` が `ModelIoError::Autodiff` で拒否し、manifest パーサの責務ではない。
+  整数欄（`dim`・各サイズ・conv 引数・`size_len`）への小数・負数は `Json::Num` にならず `Manifest`。
+
+### 3. `rrelu` の乱数の扱い
+
+- 保存するのは `lower`・`upper` の 2 つだけ。学習／評価の別は新フィールドを足さず、manifest 最上位の既存 `training` フラグに載せる（load が全層を `set_training` で揃える。`dropout`／`dropout2d`／`alpha_dropout` と同じ）。
+  層ごとのモード不一致は既存の層モード一致検査（§5）が `UnsupportedModel` で拒否する。
+- **乱数状態（グローバル RNG）は保存しない**。学習時の傾きは呼び出しごとにグローバル RNG から引くため層の状態ではなく、`dropout` もマスク乱数を保存しない先例と揃う。
+- 帰結: eval 時は固定傾き `(lower + upper) / 2` で決定的に往復一致する。学習モードで復元した出力は RNG のシード・消費位置が一致しない限り元モデルと一致せず、再現性は利用者側の RNG 設定の責務。
+  `Sequential` を eval 状態で保存すれば決定的な往復になる。`rrelu_with_noise`（非公開）は対象外。
+
+### 4. load 側の規則・件数・互換
+
+- 既存の `Params`／`as_*` を再利用し、新しい拒否パターンは増やさない: キー欠落・余分・重複は `Manifest`、整数欄への小数・負数は `Manifest`、f32 欄への整数表記・非正準・非有限は `Manifest`、
+  `unflatten` の `size_len` 範囲外と `null` 詰め違反は `Manifest`。意味検査は `add_*` に委ねる（`ModelIoError::Autodiff`）。
+- 層を構築する（テンソルを確保する）のは、上限付きで読んだ safetensors の実 shape が期待キーと完全一致した後だけ。期待キーは `conv_transpose1d` が 2 本、他の 10 層は 0 本。
+  期待キー・shape は非信頼な整数から算術のみで導き、`Vec` の事前確保に使わない。
+- allowlist は **53 → 64 種**（+11）。
+- `format_version` は **2 のまま据え置き**。新 kind は既存ファイルに存在せず、新リーダーは旧ファイルを読める。旧リーダーは未知 kind を `spec_from_kind` の `_` 分岐で
+  **`UnsupportedModel` として fail-closed 拒否**する（先例: #2373・#2509・#2529・#2530・#2532・#2533。#2532 追補の「`Manifest` で拒否」はコードと食い違うため、本追補は `UnsupportedModel` を正とする）。
+- 実装後に保存側の現行拒否（`UnsupportedModel`「層 i（kind）は保存に未対応です」）が残るのは `add_module` 由来の `module` 層のみ。
+- `format_version`・上限定数（`MAX_JSON_DEPTH`・`MAX_OBJECT_KEYS`・`MAX_ARRAY_LEN`・`MAX_LAYERS`）・tolerance・依存・既存 kind のスキーマは変更しない。
+- `save_functional_model` は `spec_kind` を共有する（`functional_io.rs`）ため allowlist の拡張は functional 側にも及ぶ。網羅確認は #3051 で行う。ONNX export の対象外は本記録の範囲外。
