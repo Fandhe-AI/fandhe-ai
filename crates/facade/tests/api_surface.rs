@@ -29524,7 +29524,15 @@ const CONV_TRANSPOSE3D_MAX_UNPOOL_MOD_NAMES: [&str; 4] = [
 /// `type`／`trait` による [`CONV_TRANSPOSE3D_MAX_UNPOOL_TYPE_NAMES`] の独自宣言、
 /// [`CONV_TRANSPOSE3D_MAX_UNPOOL_MOD_NAMES`] の `pub mod` 宣言、
 /// [`CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES`] の `fn` 宣言（可視性・宣言文脈を問わない）を違反として返す。
-fn scan_conv_transpose3d_max_unpool_reexports_and_declarations(content: &str) -> Vec<String> {
+///
+/// `is_functional_rs` が `true`（`compat/functional.rs`）のときに限り、`max_unpool1d`／`2d`／`3d` の `fn`
+/// 宣言を各 1 件まで許容する（#3036 で公開した `FunctionalBuilder::max_unpool*`。決定記録
+/// `compat-sequential-3d-fold-lrn-layers-decision.md` §6）。2 件目・他ファイル・他 fn 名・`add_max_unpool*` は
+/// 従来どおり違反（存在そのものの保証は `functional_builder_max_pool_unpool_signatures_match_approved_contract`）。
+fn scan_conv_transpose3d_max_unpool_reexports_and_declarations(
+    content: &str,
+    is_functional_rs: bool,
+) -> Vec<String> {
     let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut offending: Vec<String> = Vec::new();
@@ -29574,7 +29582,10 @@ fn scan_conv_transpose3d_max_unpool_reexports_and_declarations(content: &str) ->
 
     for fn_name in CONV_TRANSPOSE3D_MAX_UNPOOL_FN_NAMES {
         let count = count_fn_declarations_by_name(&tokens, fn_name);
-        if count > 0 {
+        let allowed = usize::from(
+            is_functional_rs && matches!(fn_name, "max_unpool1d" | "max_unpool2d" | "max_unpool3d"),
+        );
+        if count > allowed {
             offending.push(format!("`fn {fn_name}` 宣言が {count} 件"));
         }
     }
@@ -29589,7 +29600,10 @@ fn facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool() {
     let src_dir = facade_crate_root().join("src");
     let mut offending: Vec<String> = Vec::new();
     visit_rs_files(&src_dir, &mut |path, content| {
-        for offense in scan_conv_transpose3d_max_unpool_reexports_and_declarations(content) {
+        let is_functional_rs = path.ends_with("compat/functional.rs");
+        for offense in
+            scan_conv_transpose3d_max_unpool_reexports_and_declarations(content, is_functional_rs)
+        {
             offending.push(format!("{}: {offense}", path.display()));
         }
     });
@@ -29605,8 +29619,28 @@ fn facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool() {
 /// 合成ソースを検出できることを恒久的に固定する）。
 #[test]
 fn facade_does_not_reexport_or_declare_conv_transpose3d_max_unpool_detects_each_category() {
-    let offense =
-        |src: &str| !scan_conv_transpose3d_max_unpool_reexports_and_declarations(src).is_empty();
+    let offense = |src: &str| {
+        !scan_conv_transpose3d_max_unpool_reexports_and_declarations(src, false).is_empty()
+    };
+    // #3036: `compat/functional.rs` に限り max_unpool{1,2,3}d の fn 宣言を各 1 件許容する。
+    let functional_offense = |src: &str| {
+        !scan_conv_transpose3d_max_unpool_reexports_and_declarations(src, true).is_empty()
+    };
+    assert!(!functional_offense(
+        "impl FunctionalBuilder { pub fn max_unpool2d(&mut self) {} }"
+    ));
+    assert!(functional_offense(
+        "impl A { pub fn max_unpool2d(&mut self) {} pub fn max_unpool2d(&mut self) {} }"
+    ));
+    assert!(functional_offense(
+        "impl A { pub fn add_max_unpool2d(&mut self) {} }"
+    ));
+    assert!(functional_offense(
+        "impl A { pub fn conv_transpose3d(&self) {} }"
+    ));
+    assert!(offense(
+        "impl FunctionalBuilder { pub fn max_unpool2d(&mut self) {} }"
+    ));
     // 正例: モジュールの再エクスポート（別名含む）。
     assert!(offense("pub use fandhe_ai_autodiff::conv_transpose3d_ops;"));
     assert!(offense("pub use fandhe_ai_autodiff::max_unpool_ops;"));
@@ -29733,9 +29767,14 @@ fn workspace_declares_conv_transpose3d_max_unpool_fn_names_only_in_allowed_locat
         "facade/src/compat/sequential.rs::add_conv_transpose3d".to_string(),
         1,
     );
+    // #3036 で公開した `FunctionalBuilder::max_unpool{1,2,3}d`（承認ファイルに各 1 件）。
+    for n in ["max_unpool1d", "max_unpool2d", "max_unpool3d"] {
+        expected.insert(format!("facade/src/compat/functional.rs::{n}"), 1);
+    }
     assert_eq!(
         found, expected,
-        "workspace 全体（crates/*/src/）の conv_transpose3d／max_unpool1d／max_unpool2d／\
+        "（#3036 で facade/src/compat/functional.rs の max_unpool1d／2d／3d 各 1 件を追加）\
+         workspace 全体（crates/*/src/）の conv_transpose3d／max_unpool1d／max_unpool2d／\
          max_unpool3d／add_conv_transpose3d／add_max_unpool1d／add_max_unpool2d／add_max_unpool3d の\
          `fn` 宣言が承認済みの置き場所（autodiff/src/conv_transpose3d_ops.rs の conv_transpose3d と\
          autodiff/src/max_unpool_ops.rs の max_unpool1d／2d／3d 各 1 件、および #2850 の\
@@ -29797,6 +29836,79 @@ fn add_conv_transpose3d_signature_matches_approved_contract_detects_offense() {
                 "add_conv_transpose3d",
                 ADD_CONV_TRANSPOSE3D_PARAMS
             ),
+            "{bad}"
+        );
+    }
+}
+
+/// `FunctionalBuilder` の MaxPool 索引・MaxUnpool 6 メソッドの承認シグネチャ（決定記録
+/// `compat-sequential-3d-fold-lrn-layers-decision.md` §6 案 A。イシュー #3036）。`ceil_mode`・`seed` なし。
+const FUNCTIONAL_MAX_POOL_UNPOOL_SIGNATURES: [(&str, &str); 6] = [
+    (
+        "max_pool1d_with_indices",
+        "&mut self, input: Node, kernel_size: usize, stride: Option<usize>, padding: usize, dilation: usize, ) -> Result<Node, AutodiffError>",
+    ),
+    (
+        "max_pool2d_with_indices",
+        "&mut self, input: Node, kernel_size: [usize; 2], stride: Option<[usize; 2]>, padding: [usize; 2], dilation: [usize; 2], ) -> Result<Node, AutodiffError>",
+    ),
+    (
+        "max_pool3d_with_indices",
+        "&mut self, input: Node, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], dilation: [usize; 3], ) -> Result<Node, AutodiffError>",
+    ),
+    (
+        "max_unpool1d",
+        "&mut self, input: Node, indices_from: Node, kernel_size: usize, stride: Option<usize>, padding: usize, output_size: Option<usize>, ) -> Result<Node, AutodiffError>",
+    ),
+    (
+        "max_unpool2d",
+        "&mut self, input: Node, indices_from: Node, kernel_size: [usize; 2], stride: Option<[usize; 2]>, padding: [usize; 2], output_size: Option<[usize; 2]>, ) -> Result<Node, AutodiffError>",
+    ),
+    (
+        "max_unpool3d",
+        "&mut self, input: Node, indices_from: Node, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], output_size: Option<[usize; 3]>, ) -> Result<Node, AutodiffError>",
+    ),
+];
+
+/// `compat/functional.rs` の `FunctionalBuilder` が MaxPool 索引・MaxUnpool 6 メソッドを承認シグネチャで
+/// 各 1 件持つ（脱落・重複・引数順の改変を拒否する正ガード。イシュー #3036）。
+#[test]
+fn functional_builder_max_pool_unpool_signatures_match_approved_contract() {
+    let path = facade_crate_root().join("src/compat/functional.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in FUNCTIONAL_MAX_POOL_UNPOOL_SIGNATURES {
+        assert_eq!(
+            count_fn_declarations_by_name(&tokens, name),
+            1,
+            "{name} の fn 宣言数が 1 件でない"
+        );
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`functional_builder_max_pool_unpool_signatures_match_approved_contract`] の自己テスト。
+#[test]
+fn functional_builder_max_pool_unpool_signatures_detects_offense() {
+    let (name, params) = FUNCTIONAL_MAX_POOL_UNPOOL_SIGNATURES[4];
+    let ok = format!("pub fn {name}({params} {{");
+    assert!(sequential_spatial_add_signature_ok(&ok, name, params));
+    for bad in [
+        // input と indices_from の入替
+        "pub fn max_unpool2d(&mut self, indices_from: Node, input: Node, kernel_size: [usize; 2], stride: Option<[usize; 2]>, padding: [usize; 2], output_size: Option<[usize; 2]>,) -> Result<Node, AutodiffError> {",
+        // 3 軸
+        "pub fn max_unpool2d(&mut self, input: Node, indices_from: Node, kernel_size: [usize; 3], stride: Option<[usize; 3]>, padding: [usize; 3], output_size: Option<[usize; 3]>,) -> Result<Node, AutodiffError> {",
+        // output_size 欠落
+        "pub fn max_unpool2d(&mut self, input: Node, indices_from: Node, kernel_size: [usize; 2], stride: Option<[usize; 2]>, padding: [usize; 2],) -> Result<Node, AutodiffError> {",
+        // 戻り値が Node
+        "pub fn max_unpool2d(&mut self, input: Node, indices_from: Node, kernel_size: [usize; 2], stride: Option<[usize; 2]>, padding: [usize; 2], output_size: Option<[usize; 2]>,) -> Node {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, name, params),
             "{bad}"
         );
     }
