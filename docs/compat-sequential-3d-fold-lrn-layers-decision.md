@@ -122,3 +122,14 @@ Sequential 保存は `format_version: 2` 据え置き。新 kind を足しても
 - §17 の `LayerSpec::Unsupported { kind: "conv_transpose3d" }` を実 variant `ConvTranspose3d` へ置換し、`save_model`／`load_model` を `conv_transpose3d` kind（8 キー・三つ組は `"d,h,w"` 正準形）で結線した（スキーマは `compat-model-io-decision.md` の #3033 追補）。
 - 層経路の実機 parity `#[ignore]` テストを追加。実測は #3171・#3172（`docs/perf/logs/compat-sequential-conv-transpose3d-3033/README.md`）。
 - 公開 API 追加なし・`format_version` 2 据え置き・上限定数・tolerance・baseline・依存・`docs/spec` は不変。
+
+## 19. #3036 実施記録（MaxUnpool の `FunctionalBuilder` 公開）
+
+- Issue 本文は `Sequential` 向け雛形のままだが、本記録 §3・§6・§12 を正とし次の形で実施した。`LayerSpec` variant・`Sequential::add_max_unpool*` は作らない。
+- `compat::FunctionalBuilder` に 6 メソッドを追加（追加のみ）: `max_pool{1,2,3}d_with_indices(input, kernel_size, stride, padding, dilation)`・`max_unpool{1,2,3}d(input, indices_from, kernel_size, stride, padding, output_size)`。いずれも `Result<Node, AutodiffError>`。`ceil_mode=false` 固定・`seed` なし・引数型は `Var::max_pool*`／`Var::max_unpool*` と一致。新規公開型・モジュールなし。
+- ノードは `NodeDef::{MaxPoolIndices, MaxUnpool}`（非公開）。索引は pool ノードの副スロットとして `eval_graph` が保持し、unpool は `[特徴量, 索引元 pool]` の 2 入力。`forward`・`predict`・`fit`・`evaluate` は共通本体を通る。構築時に `indices_from` の種別・同次元・0 次元・`2*padding` オーバーフローを `InvalidArgument` で拒否し、索引の範囲・shape は forward 時に `Var` が検査する。1 つの pool の索引を複数の unpool が参照する fan-out と、特徴量＝pool 自身も許可する。
+- 保存は `save_functional_model` が `UnsupportedModel` で fail-closed（書き込み前に拒否）。manifest の op 追加と復元時の `indices_from` 検証は #3037（§12 の読み替え）。
+- 常駐経路: Functional に入口が無く該当なし（§3）。`Sequential` に `add_max_unpool*` が無いことは保留プローブ `ConvTranspose3dMaxUnpoolHoldDoctestGuard`（プローブ本文は不変・doc のみ更新）と `api_surface.rs` が固定する。
+- `api_surface.rs`: `max_unpool{1,2,3}d` の `fn` 宣言走査は `compat/functional.rs` に限り各 1 件を許可（他ファイル・2 件目・`add_max_unpool*` は従来どおり違反）。6 メソッドの承認シグネチャを正ガードで固定。
+- 受け入れ条件との差分: 「保留ガードの反転」はプローブの受け手外のため該当なし（反転ではなく doc 更新と正ガード追加）、「常駐経路の `Unsupported` 結線」は該当なし。
+- 依存・tolerance・baseline・`format_version`・`docs/spec` は不変。実機 parity（CUDA／Metal）は対象外。

@@ -358,3 +358,9 @@ fixture の範囲（optimizer の定義・損失の reduction）では差分な�
 - テスト: クレート内ユニットテスト（`functional/tests.rs`・`fit_tests.rs`・`fit_parity_tests.rs`・`merge_tests.rs`・`functional_io/tests.rs`）は維持。公開 API だけを使う統合テスト
   `crates/facade/tests/compat_functional.rs`・`compat_functional_model_io.rs` を追加した。
 - 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。
+
+## 20. #3036 追補（MaxPool 索引・MaxUnpool ノード）
+
+- `FunctionalBuilder` に `max_pool{1,2,3}d_with_indices`・`max_unpool{1,2,3}d` の 6 メソッドを追加した（追加のみ・§10 の公開型・再エクスポートは不変）。公開形・動機（MaxUnpool は入力が値と索引の 2 つで `Sequential` に載らない）は `compat-sequential-3d-fold-lrn-layers-decision.md` §6・§19 を正とする。
+- 内部は `NodeDef::{MaxPoolIndices, MaxUnpool}`。索引は pool ノードの副スロットで、`eval_graph` 共通本体が保持するため `forward`／`predict`／`fit`／`evaluate` の演算列は一致する。層を持たないため通し番号キーに影響しない。
+- 保存は `UnsupportedModel` で fail-closed（実 op 化は #3037）。
