@@ -1621,3 +1621,12 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - allowlist は実装時点で 60 → 62 種。`format_version` は 2 のまま、旧リーダーは未知 kind を `spec_from_kind` の `_` 分岐で `UnsupportedModel` として fail-closed 拒否する。
 - `save_functional_model` は `spec_kind` を共有する。ONNX export は引き続き `UnsupportedLayer`。
 - 層経路の実機 parity テストは `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-pool3d-3029/README.md`）。tolerance・baseline は不変。
+
+## 追補（イシュー #3033）: conv_transpose3d の保存・復元
+
+- kind は `conv_transpose3d`（8 キー: `in_channels`・`out_channels`・`kernel_size`・`stride`・`padding`・`output_padding`・`dilation`・`groups`）。期待パラメータは `weight: [in, out/groups, kD, kH, kW]`・`bias: [out]`。`seed` と `bias=true` は固定値のため manifest に書かない。
+- 三つ組 5 本は正準形の文字列 `"d,h,w"`（10 進・先頭ゼロなし・空白なし・符号なし・要素ちょうど 3 個）の 1 キーへ畳む。平坦形（`{base}_{d,h,w}`）だと 18 キーになり `MAX_OBJECT_KEYS = 16` を超えて「書けても読めない」manifest になるため採らない。上限定数は不変（変更には再承認が要る）。
+- load 側は `Params::triple_str` で厳格に読む: 文字列のみ受理（数値・bool・null・配列は `Manifest`）、要素数 3・各要素 ASCII 数字のみ・`usize` に収まること、再整形して元文字列と一致すること（正準形以外は改ざんとして `Manifest`）。意味検査（0 次元・`output_padding >= stride` 等）は既存の `add_conv_transpose3d` に委ね `Autodiff`。groups は期待 shape の除算より前に `check_conv_groups`。
+- allowlist は実装時点で 62 → 63 種。`format_version` は 2 のまま、旧リーダーは未知 kind を `spec_from_kind` の `_` 分岐で `UnsupportedModel` として fail-closed 拒否する。
+- ONNX export は引き続き `UnsupportedLayer`。
+- 層経路の実機 parity テストは `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-conv-transpose3d-3033/README.md`）。tolerance・baseline・依存は不変。

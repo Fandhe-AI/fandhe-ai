@@ -116,3 +116,9 @@ Sequential 保存は `format_version: 2` 据え置き。新 kind を足しても
 - 結線した箇所（`add_conv_transpose2d`／`add_conv3d` と同型）: `bind`・`SequentialVars::forward`・`trainable_vars`・`trainable_grads`・`first_untracked_parametric_layer`（独自層扱いの回避）・`contains_resident_unsupported_layer`（常駐は `BackendError::Unsupported`）。AMP 低精度は無視して f32 で forward。ONNX export は `UnsupportedLayer` のまま。
 - 保留ガード `ConvTranspose3dMaxUnpoolHoldDoctestGuard` は `add_conv_transpose3d` の分のみ反転（残すと inherent メソッドと衝突するため）。`add_max_unpool*`・`Tape`／`Tensor<f32>`・モジュール・型名の否定は維持。`api_surface.rs` に承認シグネチャの正ガードを追加。
 - `nn::*` 層型名の公開（#3022 方針）・`supports_forward_host` の見直し・実機 parity は対象外。依存・tolerance・baseline・`docs/spec` は不変。
+
+## 18. #3033 実施記録（conv_transpose3d の保存対応）
+
+- §17 の `LayerSpec::Unsupported { kind: "conv_transpose3d" }` を実 variant `ConvTranspose3d` へ置換し、`save_model`／`load_model` を `conv_transpose3d` kind（8 キー・三つ組は `"d,h,w"` 正準形）で結線した（スキーマは `compat-model-io-decision.md` の #3033 追補）。
+- 層経路の実機 parity `#[ignore]` テストを追加。実測は #3171・#3172（`docs/perf/logs/compat-sequential-conv-transpose3d-3033/README.md`）。
+- 公開 API 追加なし・`format_version` 2 据え置き・上限定数・tolerance・baseline・依存・`docs/spec` は不変。
