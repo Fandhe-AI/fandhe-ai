@@ -324,3 +324,8 @@ impl<'t> Var<'t> {
 - 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
 - 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
 - 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
+
+## 15. 層化の公開形（#3025）
+
+- ConvTranspose3d・MaxUnpool の層化の公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` を正とする（§3 の ConvTranspose3d 行（manifest は §4 の 8 キー文字列畳み込み）と MaxUnpool 行（Sequential に層化せず `FunctionalBuilder` 経由・§6））。
+- 基づく判断: 2026-10-11 の所有者判断 D-A。本節は記録の参照であり新規承認ではない。既存本文は書き換えていない。
