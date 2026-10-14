@@ -4,7 +4,7 @@
 //! **facade 公開状況**: `Var::max_unpool1d/2d/3d`（本モジュールの自由関数への 1 行委譲）は #2850 で
 //! 公開済み（公開形は `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §12.1。索引は
 //! `Var::max_pool1d/2d/3d` が返す `Tensor<i32>` をそのまま渡せる）。モジュール自体は再エクスポートしない。
-//! 層化（`nn::MaxUnpool*`・`Sequential::add_*`）は保留継続で、`crates/facade/src/lib.rs` の
+//! 層化（`nn::MaxUnpool*`・`Sequential::add_max_unpool*`）は保留継続（`Sequential::add_conv_transpose3d` は #3032 で公開済み）で、`crates/facade/src/lib.rs` の
 //! `ConvTranspose3dMaxUnpoolHoldDoctestGuard` と `crates/facade/tests/api_surface.rs` の否定ガードが
 //! 機械的に固定する。
 //!

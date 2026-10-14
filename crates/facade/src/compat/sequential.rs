@@ -120,15 +120,15 @@ use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
     AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars,
     Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d,
-    ConvTranspose2dVars, Dropout, Dropout2d, Embedding, EmbeddingBag, EmbeddingBagVars,
-    EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm, Identity, InstanceNorm,
-    LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, MaxPool3d,
-    Module, MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
-    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, Transformer,
-    TransformerConfig, TransformerDecoderLayer, TransformerDecoderLayerVars,
-    TransformerEncoderLayer, TransformerEncoderLayerVars, TransformerVars, Unflatten, Upsample,
-    ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
-    multihead_attention_forward_low_precision,
+    ConvTranspose2dVars, ConvTranspose3d, ConvTranspose3dVars, Dropout, Dropout2d, Embedding,
+    EmbeddingBag, EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool,
+    GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear,
+    MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention, MultiheadAttentionConfig,
+    MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
+    Sequential as NnSequential, Transformer, TransformerConfig, TransformerDecoderLayer,
+    TransformerDecoderLayerVars, TransformerEncoderLayer, TransformerEncoderLayerVars,
+    TransformerVars, Unflatten, Upsample, ZeroPad2d, conv2d_forward_low_precision,
+    linear_forward_low_precision, multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -1239,6 +1239,61 @@ impl Sequential {
             output_padding,
             dilation,
             groups,
+        });
+        Ok(self)
+    }
+
+    /// 3 次元転置畳み込み層を追加する（`nn::ConvTranspose3d`。イシュー #3032・
+    /// 親 #3018。公開形の正本は `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3）。
+    /// [`Sequential::add_conv_transpose2d`] の 3 軸版で、bias あり固定。weight は
+    /// `[in_channels, out_channels/groups, kD, kH, kW]`。出力サイズは PyTorch と同じ
+    /// `(D-1)*stride - 2*padding + dilation*(k-1) + output_padding + 1`（各軸）。
+    /// `output_padding >= stride`（意図的な PyTorch 非互換）・0 の stride／kernel・
+    /// `groups` の割り切れ違反は `Err`。常駐経路は非対応（`BackendError::Unsupported`）、
+    /// AMP 低精度は無視して f32 で forward する。`save_model` は後続 issue（kind
+    /// `conv_transpose3d` の manifest）まで `UnsupportedModel` で fail-closed にする。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// use fandhe_ai::Tensor;
+    ///
+    /// let model = Sequential::new()
+    ///     .add_conv_transpose3d(2, 3, [3, 3, 3], [2, 2, 2], [0, 0, 0], [0, 0, 0], [1, 1, 1], 1, 7)
+    ///     .unwrap();
+    /// let x = Tensor::new(vec![0.5_f32; 2 * 2 * 2 * 2], &[1, 2, 2, 2, 2]).unwrap();
+    /// let y = model.predict(&x).unwrap();
+    /// assert_eq!(y.shape(), &[1, 3, 5, 5, 5]);
+    /// ```
+    #[allow(clippy::too_many_arguments)] // PyTorch `nn.ConvTranspose3d` の全引数を受理する必要があるため。
+    pub fn add_conv_transpose3d(
+        mut self,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: [usize; 3],
+        stride: [usize; 3],
+        padding: [usize; 3],
+        output_padding: [usize; 3],
+        dilation: [usize; 3],
+        groups: usize,
+        seed: u64,
+    ) -> Result<Self, AutodiffError> {
+        let conv = ConvTranspose3d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+            true,
+            seed,
+        )?;
+        self.inner.push(Box::new(conv));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "conv_transpose3d",
         });
         Ok(self)
     }
@@ -2539,6 +2594,13 @@ impl Sequential {
             .filter_map(|layer| layer.as_conv_transpose2d())
             .map(|conv| conv.bind(&tape.0))
             .collect();
+        let conv_transpose3ds = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.as_conv_transpose3d())
+            .map(|conv| conv.bind(&tape.0))
+            .collect();
         // イシュー #1760: LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／
         // Embedding／MultiheadAttention も同じ層順フィルタ方式で収集
         // する。`BatchNorm1d::bind`／`BatchNorm2d::bind` はいずれも同一
@@ -2631,6 +2693,7 @@ impl Sequential {
             conv_transpose1ds,
             conv3ds,
             conv_transpose2ds,
+            conv_transpose3ds,
             layer_norms,
             rms_norms,
             batch_norms,
@@ -2704,6 +2767,7 @@ impl Sequential {
                 && layer.as_conv_transpose1d().is_none()
                 && layer.as_conv_transpose2d().is_none()
                 && layer.as_conv3d().is_none()
+                && layer.as_conv_transpose3d().is_none()
                 && layer.as_layer_norm().is_none()
                 && layer.as_rms_norm().is_none()
                 && layer.as_batch_norm1d().is_none()
@@ -2786,6 +2850,7 @@ impl Sequential {
                 || layer.as_conv_transpose1d().is_some()
                 || layer.as_conv_transpose2d().is_some()
                 || layer.as_conv3d().is_some()
+                || layer.as_conv_transpose3d().is_some()
                 || layer.as_group_norm().is_some()
                 || layer.as_instance_norm().is_some()
                 || layer.as_layer_norm().is_some()
@@ -3562,6 +3627,8 @@ pub struct SequentialVars<'m, 't> {
     conv3ds: Vec<Conv3dVars<'t>>,
     /// イシュー #2523。`ConvTranspose2d` 層の bind 結果（層順）。
     conv_transpose2ds: Vec<ConvTranspose2dVars<'t>>,
+    /// イシュー #3032。`ConvTranspose3d` 層の bind 結果（層順）。
+    conv_transpose3ds: Vec<ConvTranspose3dVars<'t>>,
     /// イシュー #1760。`layer_norms`／`rms_norms`／`embeddings`／`mhas`
     /// は `Var<'t>` のみを保持し `'m` を借用しない（`nn::norm::
     /// LayerNormVars`／`RmsNormVars`・`nn::embedding::EmbeddingVars`・
@@ -3673,6 +3740,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut conv_transpose1ds = self.conv_transpose1ds.iter();
         let mut conv3ds = self.conv3ds.iter();
         let mut conv_transpose2ds = self.conv_transpose2ds.iter();
+        let mut conv_transpose3ds = self.conv_transpose3ds.iter();
         let mut layer_norms = self.layer_norms.iter();
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
@@ -3771,6 +3839,17 @@ impl<'m, 't> SequentialVars<'m, 't> {
                     AutodiffError::InvalidArgument(
                         "SequentialVars::forward: bind 済み ConvTranspose2dVars が model.layers の \
                          ConvTranspose2d 層数より少ない（bind/forward 間の層数対応が崩れた）"
+                            .to_string(),
+                    )
+                })?;
+                current = vars.forward(&current)?;
+                i += 1;
+            } else if layer.as_conv_transpose3d().is_some() {
+                // イシュー #3032: AMP 低精度は無視して f32 で forward する。
+                let vars = conv_transpose3ds.next().ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "SequentialVars::forward: bind 済み ConvTranspose3dVars が model.layers の \
+                         ConvTranspose3d 層数より少ない（bind/forward 間の層数対応が崩れた）"
                             .to_string(),
                     )
                 })?;
@@ -3945,6 +4024,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut conv_transpose1ds = self.conv_transpose1ds.iter();
         let mut conv3ds = self.conv3ds.iter();
         let mut conv_transpose2ds = self.conv_transpose2ds.iter();
+        let mut conv_transpose3ds = self.conv_transpose3ds.iter();
         let mut layer_norms = self.layer_norms.iter();
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
@@ -3998,6 +4078,13 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 }
             } else if layer.as_conv_transpose2d().is_some()
                 && let Some(vars) = conv_transpose2ds.next()
+            {
+                out.push(&vars.weight);
+                if let Some(bias) = &vars.bias {
+                    out.push(bias);
+                }
+            } else if layer.as_conv_transpose3d().is_some()
+                && let Some(vars) = conv_transpose3ds.next()
             {
                 out.push(&vars.weight);
                 if let Some(bias) = &vars.bias {
@@ -4101,6 +4188,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut conv_transpose1ds = self.conv_transpose1ds.iter();
         let mut conv3ds = self.conv3ds.iter();
         let mut conv_transpose2ds = self.conv_transpose2ds.iter();
+        let mut conv_transpose3ds = self.conv_transpose3ds.iter();
         let mut layer_norms = self.layer_norms.iter();
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
@@ -4139,6 +4227,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             } else if layer.as_conv_transpose2d().is_some()
                 && let Some(vars) = conv_transpose2ds.next()
+            {
+                push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
+            } else if layer.as_conv_transpose3d().is_some()
+                && let Some(vars) = conv_transpose3ds.next()
             {
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             } else if layer.as_layer_norm().is_some()

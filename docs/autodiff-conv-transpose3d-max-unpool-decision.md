@@ -340,3 +340,8 @@ impl<'t> Var<'t> {
 - **未変更（後続 `-b` の範囲）**: facade の `Sequential::add_conv_transpose3d`・`LayerSpec`・`save_model` kind・保留ガード反転。
 - **実機**: CUDA／Metal は未実測。
 - 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
+
+## 17. #3032 実施記録（`Sequential::add_conv_transpose3d` の公開）
+
+- facade の `compat::Sequential::add_conv_transpose3d` を公開した（公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` §3・§17）。§16 の層 struct `nn::ConvTranspose3d` を `bias = true` で生成する薄い層結線で、autodiff 側のコード変更はコメントのみ。
+- `ConvTranspose3dMaxUnpoolHoldDoctestGuard` は `add_conv_transpose3d` の分だけ反転。保存（kind `conv_transpose3d`）は後続 `-c`、常駐は `Unsupported`。facade 越しの `predict`／`forward`／学習 1 step は `Var::conv_transpose3d` 直書きの参照と bit 一致を確認した。
