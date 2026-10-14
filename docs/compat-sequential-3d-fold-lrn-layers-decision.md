@@ -104,3 +104,8 @@ Sequential 保存は `format_version: 2` 据え置き。新 kind を足しても
 - `add_max_pool3d`／`add_avg_pool3d` を §3 の形で公開。`LayerSpec::Unsupported { kind: "max_pool3d" | "avg_pool3d" }` を採用し、`save_model` は `UnsupportedModel` で fail-closed（`celu` 等の先例と同型）。実 variant（12 キー／10 キー）への置換と保存・復元は後続 `-c` の範囲。
 - 常駐経路は新規結線なしで `is_pooling()` 経由の `Unsupported`。学習経路（`fit`・`bind`）も無パラメータ層として新規結線不要。ONNX export は `UnsupportedLayer` のまま。
 - 保留ガード `Pool3dOpsHoldDoctestGuard` は `Sequential` 受け手の分のみ反転。`nn::*` 層型名・`forward_host`・実機 parity は対象外。
+
+## 15. #3029 実施記録（pool3d の保存対応）
+
+- §14 の `LayerSpec::Unsupported` を実 variant（`MaxPool3d`／`AvgPool3d`）へ置換し、`save_model`／`load_model` を `max_pool3d`／`avg_pool3d` kind で結線した（スキーマは `compat-model-io-decision.md` の #3029 追補）。
+- 層経路の実機 parity `#[ignore]` テストを追加。実測は #3171・#3172。

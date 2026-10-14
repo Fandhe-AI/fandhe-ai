@@ -804,3 +804,121 @@ fn unflatten_with_more_than_eight_axes_is_rejected_before_writing() {
         .expect("構築できるはず");
     assert_save_rejected("unflatten-9-axes", &model, false);
 }
+// ---------------------------------------------------------------------
+// イシュー #3029: max_pool3d・avg_pool3d の保存・復元
+// ---------------------------------------------------------------------
+// 両層は無パラメータ層のため safetensors のパラメータキー過不足は成立せず、改竄の主対象は
+// manifest の params（キー集合・型・範囲）になる。
+
+/// rank 5 入力 `[2, 2, 5, 6, 6]`。conv3d → max_pool3d（stride Some・padding／dilation 非自明）→
+/// avg_pool3d（stride None・`count_include_pad=false`）。
+fn pool3d_model() -> Sequential {
+    let mut m = Sequential::new()
+        .add_conv3d(2, 4, [2, 2, 2], [1, 1, 1], [0, 0, 0], [1, 1, 1], 1, 29)
+        .and_then(|m| m.add_max_pool3d([2, 3, 2], Some([1, 2, 1]), [1, 1, 0], [1, 1, 2]))
+        .and_then(|m| m.add_avg_pool3d([2, 2, 2], None, [1, 0, 0], false))
+        .expect("構築できるはず");
+    m.eval();
+    m
+}
+
+/// 全要素が異なる ramp 入力（max のタイブレークに依存させない）。
+fn pool3d_input() -> Tensor<f32> {
+    let shape = [2, 2, 5, 6, 6];
+    let n: usize = shape.iter().product();
+    Tensor::new((0..n).map(|i| (i as f32) * 0.013 - 1.7).collect(), &shape).unwrap()
+}
+
+#[test]
+fn pool3d_layers_round_trip_bit_identically_and_keep_format_version_2() {
+    let kinds = round_trip("pool3d", &pool3d_model(), &pool3d_input());
+    for k in ["max_pool3d", "avg_pool3d"] {
+        assert!(kinds.contains(k), "kind {k} が manifest にある: {kinds:?}");
+    }
+    let (_guard, _dir, text) = manifest_of(&pool3d_model(), "pool3d-manifest");
+    assert!(
+        text.contains("\"format_version\":2"),
+        "format_version は 2 のまま"
+    );
+    assert!(
+        text.contains("\"kind\":\"avg_pool3d\",\"params\":{")
+            && text.contains("\"count_include_pad\":false"),
+        "{text}"
+    );
+}
+
+#[test]
+fn pool3d_none_stride_and_count_include_pad_true_round_trip() {
+    let mut m = Sequential::new()
+        .add_max_pool3d([2, 2, 2], None, [0, 0, 0], [1, 1, 1])
+        .and_then(|m| m.add_avg_pool3d([2, 2, 2], Some([1, 1, 1]), [0, 0, 0], true))
+        .expect("構築できるはず");
+    m.eval();
+    let x = Tensor::new(
+        (0..2 * 2 * 6 * 6 * 6).map(|i| (i as f32) * 0.01).collect(),
+        &[2, 2, 6, 6, 6],
+    )
+    .unwrap();
+    round_trip("pool3d-none-stride", &m, &x);
+}
+
+fn pool3d_tampered(label: &str, from: &str, to: &str) -> ModelIoError {
+    let (_guard, dir, text) = manifest_of(&pool3d_model(), label);
+    assert!(text.contains(from), "{label}: 置換対象 {from} がある");
+    std::fs::write(dir.join("manifest.json"), text.replacen(from, to, 1)).expect("書けるはず");
+    load_err(&dir)
+}
+
+#[test]
+fn tampered_pool3d_manifests_are_rejected() {
+    let max_head = "\"kind\":\"max_pool3d\",\"params\":{";
+    // 構造違反（キー欠落・余分なキー・負値・小数・型違い・stride 部分 null）は `Manifest`。
+    let manifest_cases = [
+        ("missing-key", "\"kernel_size_d\":2,", ""),
+        (
+            "extra-key",
+            max_head,
+            "\"kind\":\"max_pool3d\",\"params\":{\"x\":1,",
+        ),
+        ("negative", "\"stride_d\":1", "\"stride_d\":-1"),
+        ("fractional", "\"padding_w\":0", "\"padding_w\":0.5"),
+        ("string", "\"dilation_h\":1", "\"dilation_h\":\"1\""),
+        ("partial-null", "\"stride_h\":2", "\"stride_h\":null"),
+        (
+            "bool-for-int",
+            "\"kernel_size_w\":2",
+            "\"kernel_size_w\":true",
+        ),
+        (
+            "int-for-bool",
+            "\"count_include_pad\":false",
+            "\"count_include_pad\":0",
+        ),
+    ];
+    for (label, from, to) in manifest_cases {
+        let err = pool3d_tampered(&format!("pool3d-t-{label}"), from, to);
+        assert!(
+            matches!(err, ModelIoError::Manifest { .. }),
+            "{label}: {err}"
+        );
+    }
+    // 意味違反は層コンストラクタの検査（`Autodiff`）。
+    let autodiff_cases = [
+        ("kernel-zero", "\"kernel_size_h\":3", "\"kernel_size_h\":0"),
+        ("padding-over-half", "\"padding_d\":1", "\"padding_d\":2"),
+    ];
+    for (label, from, to) in autodiff_cases {
+        let err = pool3d_tampered(&format!("pool3d-t-{label}"), from, to);
+        assert!(matches!(err, ModelIoError::Autodiff(_)), "{label}: {err}");
+    }
+    // 未知 kind は `UnsupportedModel`。
+    let err = pool3d_tampered(
+        "pool3d-t-kind",
+        "\"kind\":\"max_pool3d\"",
+        "\"kind\":\"max_pool4d\"",
+    );
+    assert!(
+        matches!(err, ModelIoError::UnsupportedModel { .. }),
+        "{err}"
+    );
+}

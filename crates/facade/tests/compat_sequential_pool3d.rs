@@ -7,14 +7,14 @@
 //! - backward の入力勾配が直接グラフと bit 完全一致（Max・Avg 各 1）。
 //! - 学習 1 step（`Conv3d → Pool3d → Flatten → Linear`）が参照グラフの 1 step と bit 一致し、
 //!   `compile`／`fit` が動く。pool 層は `trainable_parameters` の件数・順序を変えない。
-//! - 常駐経路は `Unsupported`（fail-closed）。保存は後続 issue（`max_pool3d`／`avg_pool3d` kind）までは
-//!   `UnsupportedModel` で fail-closed。ONNX export は `UnsupportedLayer`。
+//! - 常駐経路は `Unsupported`（fail-closed）。保存・復元は `max_pool3d`／`avg_pool3d` kind（イシュー #3029）で bit 一致。
+//!   ONNX export は `UnsupportedLayer`。
 //!
 //! ホストフォールバック経路のため実機（CUDA／Metal）非依存。実機 parity は未実測のまま。
 
 use std::path::PathBuf;
 
-use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, save_model};
+use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, load_model, save_model};
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
@@ -366,28 +366,24 @@ fn resident_path_rejects_pool3d_fail_closed() {
 // ---------------------------------------------------------------- 保存・ONNX（fail-closed）
 
 #[test]
-fn save_model_rejects_pool3d_until_follow_up_issue() {
-    let cases = [
-        (
-            "max_pool3d",
-            Sequential::new()
-                .add_max_pool3d(K, None, [0; 3], [1; 3])
-                .unwrap(),
-        ),
-        (
-            "avg_pool3d",
-            Sequential::new()
-                .add_avg_pool3d(K, None, [0; 3], true)
-                .unwrap(),
-        ),
-    ];
-    for (kind, model) in &cases {
-        let dir = unique_dir(kind);
-        let _g = DirGuard(dir.clone());
-        let err = save_model(model, &dir).unwrap_err();
-        assert!(format!("{err:?}").contains(kind), "{err:?}");
-        assert!(!dir.exists(), "保存先が作られてはならない: {kind}");
-    }
+fn save_model_round_trips_pool3d_bit_identically() {
+    let model = Sequential::new()
+        .add_max_pool3d(K, Some([1, 1, 1]), [1, 0, 0], [1; 3])
+        .and_then(|m| m.add_avg_pool3d(K, None, [0; 3], false))
+        .unwrap();
+    let dir = unique_dir("roundtrip");
+    let _g = DirGuard(dir.clone());
+    save_model(&model, &dir).expect("pool3d は保存できる（#3029）");
+    let loaded = load_model(&dir).expect("復元できる");
+    let x = tensor(ramp(2 * 5 * 5 * 5, 0.07, -3.0), &[1, 2, 5, 5, 5]);
+    let (a, b) = (model.predict(&x).unwrap(), loaded.predict(&x).unwrap());
+    assert_eq!(a.shape(), b.shape());
+    assert!(
+        dense_vec(&a)
+            .iter()
+            .zip(dense_vec(&b))
+            .all(|(p, q)| p.to_bits() == q.to_bits())
+    );
 }
 
 #[test]
