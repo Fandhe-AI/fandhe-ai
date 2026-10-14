@@ -4,8 +4,8 @@
 //! **facade 公開状況**: `Var::max_pool3d`／`Var::avg_pool3d`（本モジュールの自由関数への 1 行委譲）は
 //! #2850 で公開済み（公開形は `docs/autodiff-pool3d-ops-decision.md` §12.1。委譲本体は
 //! `crates/facade/tests/api_surface.rs` の `var_phase4_ops_methods_are_thin_delegations` が固定）。
-//! モジュール自体は再エクスポートしない。層化（`nn::MaxPool3d`／`nn::AvgPool3d`・
-//! `Sequential::add_*`）は保留継続で、`crates/facade/src/lib.rs` の `Pool3dOpsHoldDoctestGuard` と
+//! モジュール自体は再エクスポートしない。autodiff 側の層 struct（`nn::MaxPool3d`／`nn::AvgPool3d`）は #3027 で追加済み。
+//! facade の `Sequential::add_*` は未公開で保留継続であり、`crates/facade/src/lib.rs` の `Pool3dOpsHoldDoctestGuard` と
 //! `api_surface.rs` の否定ガードが機械的に固定する。
 //!
 //! **PyTorch 相当**:

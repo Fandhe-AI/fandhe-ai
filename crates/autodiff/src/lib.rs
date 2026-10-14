@@ -303,8 +303,9 @@ pub mod nonfinite_ops;
 pub mod optim;
 pub mod pad_ops;
 // 3D プーリング 2 演算（`max_pool3d`・`avg_pool3d`。イシュー #2643）。`Var` の 1 行委譲メソッドとして
-// #2850 で facade へ公開済み（モジュール自体は再エクスポートしない。層化は保留継続。
-// `docs/autodiff-pool3d-ops-decision.md` §12・§13）。
+// #2850 で facade へ公開済み（モジュール自体は再エクスポートしない。autodiff 側の層 struct `nn::MaxPool3d`／
+// `AvgPool3d` は #3027 で追加済み。facade の `Sequential::add_*` は未公開で保留継続。
+// `docs/autodiff-pool3d-ops-decision.md` §12・§13・§16）。
 pub mod pool3d_ops;
 // ConvTranspose3d と MaxUnpool1d／2d／3d（`conv_transpose3d`・`max_unpool{1,2,3}d`。イシュー #2644）。
 // `Var` の 1 行委譲メソッドとして #2850 で facade へ公開済み（モジュール自体は再エクスポートしない。

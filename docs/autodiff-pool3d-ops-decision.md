@@ -265,3 +265,11 @@ impl<'t> Var<'t> {
 
 - pool3d（MaxPool3d／AvgPool3d）の層化の公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` を正とする（§3 の MaxPool3d・AvgPool3d 行）。
 - 基づく判断: 2026-10-11 の所有者判断 D-A。本節は記録の参照であり新規承認ではない。既存本文は書き換えていない。
+
+## 16. #3027 実施記録（autodiff 側の層 struct）
+
+- `crates/autodiff/src/nn/pooling.rs` に `nn::MaxPool3d`・`nn::AvgPool3d` を追加した（公開形は #3025 の記録 §3 のとおり）。`Var::max_pool3d`／`avg_pool3d` への 1 行委譲で、新規 `Op`／`BackendOps` は無い。`ceil_mode=false` 固定、`AvgPool3d` は `dilation=[1,1,1]` 固定。`new` が `Pool3dParams::new` の検査（0 次元・padding 上限・`2*padding` オーバーフロー）を前倒しする。
+- `Module` 実装は `nn/module.rs`。`is_pooling()=true`（Pooling 11 型）、`supports_forward_host()=false`（tape 経路との bit 一致が未検証の host 経路を作らない。`Mish` と同型）。`Module::forward` は `MaxPool3d` で値のみ返し、索引は固有 `forward` から得る。
+- `Module::as_max_pool3d`／`as_avg_pool3d`（既定 `None`・読み取り専用）を追加した。既存フックの追加のみで非破壊。後続の facade 結線が使わない場合は撤去してよい。
+- facade（`Sequential::add_*`・`LayerSpec`・`save_model` kind・保留ガード反転）は未変更で後続 issue の範囲。CUDA／Metal 実機は未実測。依存・tolerance・`docs/spec` は変更していない。既存本文は書き換えていない。
+- テスト: `crates/autodiff/tests/nn_pooling3d.rs`（`Var` 直呼びとの forward・索引・入力勾配 bit 一致、不正引数拒否、孤児ノード無し）。
