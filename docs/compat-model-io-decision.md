@@ -1591,3 +1591,12 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - 実装後に保存側の現行拒否（`UnsupportedModel`「層 i（kind）は保存に未対応です」）が残るのは `add_module` 由来の `module` 層のみ。
 - `format_version`・上限定数（`MAX_JSON_DEPTH`・`MAX_OBJECT_KEYS`・`MAX_ARRAY_LEN`・`MAX_LAYERS`）・tolerance・依存・既存 kind のスキーマは変更しない。
 - `save_functional_model` は `spec_kind` を共有する（`functional_io.rs`）ため allowlist の拡張は functional 側にも及ぶ。網羅確認は #3051 で行う。ONNX export の対象外は本記録の範囲外。
+
+### 適用記録（イシュー #3053。無引数の活性化 5 層）
+
+- `selu`・`softsign`・`hardsigmoid`・`log_sigmoid`・`tanhshrink` の 5 kind を `LayerSpec` の無引数 variant として実装した（`compat/sequential.rs`・`compat/model_io.rs` の `spec_kind`・`expected_parameter_keys`・`render_params`・`build_model_fresh`・`spec_from_kind`）。
+  `params` は `{}`、期待キーは 0 本。`spec_from_kind` は既存の `Params::new(params, &[])` を使い、余分キー・非 object を `Manifest` で拒否する（新しい拒否パターンは追加していない）。
+  無引数のため「キー欠落」は成立せず、`params` の型違い（`null`・配列）がそれに相当する。
+- allowlist は本イシュー時点で 53 → 58 種（最終の 64 種は #3051 配下の残り 6 種で到達）。`format_version` は 2 のまま。既存 kind のスキーマ・上限定数・tolerance・依存は不変。
+- `save_functional_model` は `spec_kind` 共有により 5 層を往復できる（`tests/compat_functional_model_io.rs` で確認）。
+- テスト: 単体（`model_io.rs` の 58 種往復・拒否表）、統合（`tests/compat_sequential_model_io_layers.rs` の bit 一致往復と改竄拒否、`tests/compat_sequential_activation_scalar_layers.rs`）。実機（CUDA／Metal）は不要（ホスト側の I/O のみ）。

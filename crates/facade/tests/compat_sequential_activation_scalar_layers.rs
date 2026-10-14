@@ -14,8 +14,9 @@
 //!   `Linear` と組んだ `fit` で loss が下がる
 //! - `set_training`／`eval` の RReLU への伝播（推論時は固定傾き `(lower + upper) / 2`）
 //! - 常駐経路: 無状態層は通過し `predict` と bit 一致する・未対応層（`PRelu`）を混ぜると従来どおり `Unsupported`
-//! - `save_model` は未対応（manifest の kind が未承認）のため `ModelIoError::UnsupportedModel` で拒否し、
-//!   保存先に何も作らない
+//! - `save_model`／`load_model` は無引数 5 層（selu・softsign・hardsigmoid・log_sigmoid・tanhshrink。
+//!   イシュー #3053）で bit 一致往復し、残り 4 層（celu・softmin・threshold・rrelu）は未対応のため
+//!   `ModelIoError::UnsupportedModel` で拒否して保存先に何も作らない
 //!
 //! 実機 parity は `compat_sequential_activation_scalar_layers_backend_parity.rs`（`#[ignore]`）。
 
@@ -23,7 +24,9 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use fandhe_ai::compat::{FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model};
+use fandhe_ai::compat::{
+    FitConfig, Loss, ModelIoError, Optimizer, Sequential, load_model, save_model,
+};
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::optim::SgdConfig;
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
@@ -442,9 +445,34 @@ fn resident_path_still_rejects_unsupported_layers_mixed_with_new_layers() {
 // 保存・ONNX（未対応を型付きエラーで拒否する）
 // ---------------------------------------------------------------------
 
+/// 保存・復元に対応済みの無引数 5 層（イシュー #3053）。残り 4 層は #3051 配下で対応予定。
+const SAVABLE_LAYERS: [&str; 5] = [
+    "selu",
+    "softsign",
+    "hardsigmoid",
+    "log_sigmoid",
+    "tanhshrink",
+];
+
+#[test]
+fn savable_layers_round_trip_bit_identically() {
+    let input = Tensor::new(vec![-3.0, -0.5, 0.0, 0.25, 2.0, 7.0], &[3, 2]).unwrap();
+    for layer in SAVABLE_LAYERS {
+        let model = sandwich(layer);
+        let guard = TempDirGuard::new(&format!("scalar_layers_roundtrip_{layer}"));
+        let dir = guard.path().join("m");
+        save_model(&model, &dir).unwrap_or_else(|e| panic!("{layer}: 保存できるはず: {e}"));
+        let loaded = load_model(&dir).unwrap_or_else(|e| panic!("{layer}: 復元できるはず: {e}"));
+        let a = model.predict(&input).unwrap().host_slice().into_owned();
+        let b = loaded.predict(&input).unwrap().host_slice().into_owned();
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&a), bits(&b), "{layer}: predict 出力が bit 一致");
+    }
+}
+
 #[test]
 fn save_model_rejects_each_layer_without_touching_dir() {
-    for layer in LAYERS {
+    for layer in LAYERS.iter().filter(|l| !SAVABLE_LAYERS.contains(l)) {
         let model = sandwich(layer);
         let guard = TempDirGuard::new(&format!("scalar_layers_save_{layer}"));
         let dir = guard.path().join("m");
