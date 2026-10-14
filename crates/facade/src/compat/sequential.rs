@@ -118,12 +118,12 @@ use fandhe_ai_autodiff::nn::activation::{
 use fandhe_ai_autodiff::nn::softmin_threshold::{RRelu, Softmin, Tanhshrink, Threshold};
 use fandhe_ai_autodiff::nn::{
     AdaptiveAvgPool1d, AdaptiveAvgPool2d, AdaptiveMaxPool1d, AdaptiveMaxPool2d, AlphaDropout,
-    AvgPool1d, AvgPool2d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars, Conv2d,
-    Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d,
+    AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars,
+    Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d,
     ConvTranspose2dVars, Dropout, Dropout2d, Embedding, EmbeddingBag, EmbeddingBagVars,
     EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool, GroupNorm, Identity, InstanceNorm,
-    LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, Module,
-    MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
+    LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear, MaxPool1d, MaxPool2d, MaxPool3d,
+    Module, MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
     PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, Transformer,
     TransformerConfig, TransformerDecoderLayer, TransformerDecoderLayerVars,
     TransformerEncoderLayer, TransformerEncoderLayerVars, TransformerVars, Unflatten, Upsample,
@@ -1806,6 +1806,57 @@ impl Sequential {
             padding,
             count_include_pad,
         });
+        Ok(self)
+    }
+
+    /// 3 次元 MaxPool 層を追加する（`nn::MaxPool3d`。PyTorch `nn.MaxPool3d` 相当。イシュー #3028・
+    /// 公開形の正は `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3）。
+    /// `ceil_mode=false` 固定。`stride` を省略（`None`）すると `kernel_size` と同じ値になる。
+    /// 入力は `NCDHW`（rank 5）。無状態層で学習可能パラメータを持たず、値のみ返す（索引は返さない）。
+    /// 不正引数（0 次元・`2*padding > kernel_size`）は `Pool3dParams::new` の検査で `Err` になり panic しない。
+    /// 常駐経路は `is_pooling` 経由で `Unsupported`（fail-closed）。保存は後続 issue（`max_pool3d` kind）
+    /// までは `UnsupportedModel`（`LayerSpec::Unsupported`）で拒否する。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// let model = Sequential::new().add_max_pool3d([2, 2, 2], None, [0, 0, 0], [1, 1, 1]);
+    /// assert!(model.is_ok());
+    /// ```
+    pub fn add_max_pool3d(
+        mut self,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        dilation: [usize; 3],
+    ) -> Result<Self, AutodiffError> {
+        let layer = MaxPool3d::new(kernel_size, stride, padding, dilation)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "max_pool3d" });
+        Ok(self)
+    }
+
+    /// 3 次元 AvgPool 層を追加する（`nn::AvgPool3d`。PyTorch `nn.AvgPool3d` 相当。イシュー #3028）。
+    /// `ceil_mode=false`・`dilation=[1,1,1]` 固定。`count_include_pad` は PyTorch の同名引数と同じ意味。
+    /// 入力は `NCDHW`（rank 5）。その他の契約（常駐は `Unsupported`・保存は後続 issue まで
+    /// `UnsupportedModel`）は [`Sequential::add_max_pool3d`] と同じ。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// let model = Sequential::new().add_avg_pool3d([2, 2, 2], None, [0, 0, 0], true);
+    /// assert!(model.is_ok());
+    /// ```
+    pub fn add_avg_pool3d(
+        mut self,
+        kernel_size: [usize; 3],
+        stride: Option<[usize; 3]>,
+        padding: [usize; 3],
+        count_include_pad: bool,
+    ) -> Result<Self, AutodiffError> {
+        let layer = AvgPool3d::new(kernel_size, stride, padding, count_include_pad)?;
+        self.inner.push(Box::new(layer));
+        self.specs
+            .push(LayerSpec::Unsupported { kind: "avg_pool3d" });
         Ok(self)
     }
 
