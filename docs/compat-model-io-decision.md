@@ -1630,3 +1630,14 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - allowlist は実装時点で 62 → 63 種。`format_version` は 2 のまま、旧リーダーは未知 kind を `spec_from_kind` の `_` 分岐で `UnsupportedModel` として fail-closed 拒否する。
 - ONNX export は引き続き `UnsupportedLayer`。
 - 層経路の実機 parity テストは `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-conv-transpose3d-3033/README.md`）。tolerance・baseline・依存は不変。
+
+## 追補（イシュー #3037）: Functional manifest への MaxPool 索引・MaxUnpool op の追加
+
+- 対象は `fandhe-ai.compat.functional` 形式（`save_functional_model`／`load_functional_model`）。MaxUnpool は `Sequential` に載せない確定形（`docs/compat-sequential-3d-fold-lrn-layers-decision.md` §6 案 A・§12）のため、Issue 本文の「Sequential の kind 追加」は「Functional manifest の op 追加」へ読み替えた。`Sequential` の `format_version` 2・kind allowlist（63 種）は不変。
+- 追加する `op` は 6 種: `max_pool1d_indices`・`max_pool2d_indices`・`max_pool3d_indices`・`max_unpool1d`・`max_unpool2d`・`max_unpool3d`。`nodes[].params` は平坦キー（`Sequential` の `max_pool{1,2,3}d` と同流儀。`ceil_mode` は固定 false のため書かない）:
+  - pool: `kernel_size`・`stride`（null 可）・`padding`・`dilation`。2D は各 `_h`／`_w`、3D は各 `_d`／`_h`／`_w`。
+  - unpool: `kernel_size`・`stride`（null 可）・`padding`・`output_size`（null 可）。展開は同上。3D でも 12 キーで `MAX_OBJECT_KEYS = 16` に収まる（上限定数は不変）。
+- 構造検証は safetensors を開く前に完了する: params は**キー集合の完全一致**・非負整数（`stride`／`output_size` は全て null か全て整数）、pool は入力 1 件・unpool は入力 2 件（`[特徴量, 索引元 pool]`）・いずれも `layer_len == 0`、unpool の `inputs[1]`（`indices_from`）は同次元の pool ノードであること（Block・Input・Merge・別 unpool・次元違いは `Manifest`。前方参照・自己参照は既存の `inputs[j] < index` 検査で拒否）。特徴量と索引元が同一の pool・1 つの pool を複数 unpool が参照する fan-out は許可する（`FunctionalBuilder` の挙動と一致）。
+- 復元は `FunctionalBuilder::{max_pool*_with_indices, max_unpool*}` を呼ぶため、0 次元・`2 * padding` オーバーフロー（unpool 側）は構築時に `ModelIoError::Autodiff` となる。pool の 0 次元は構築時検査がなく forward 時に型付きエラーになる（panic しない。テストで固定）。
+- `format_version` は 1 据え置き。旧リーダーは未知 op を `UnsupportedModel` で fail-closed に拒否する。ONNX export は対象外のまま。
+- 層（Functional グラフ）経路の実機 parity テストは `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-max-unpool-3037/README.md`）。tolerance・baseline・依存は不変。

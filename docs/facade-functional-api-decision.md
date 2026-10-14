@@ -363,4 +363,10 @@ fixture の範囲（optimizer の定義・損失の reduction）では差分な�
 
 - `FunctionalBuilder` に `max_pool{1,2,3}d_with_indices`・`max_unpool{1,2,3}d` の 6 メソッドを追加した（追加のみ・§10 の公開型・再エクスポートは不変）。公開形・動機（MaxUnpool は入力が値と索引の 2 つで `Sequential` に載らない）は `compat-sequential-3d-fold-lrn-layers-decision.md` §6・§19 を正とする。
 - 内部は `NodeDef::{MaxPoolIndices, MaxUnpool}`。索引は pool ノードの副スロットで、`eval_graph` 共通本体が保持するため `forward`／`predict`／`fit`／`evaluate` の演算列は一致する。層を持たないため通し番号キーに影響しない。
-- 保存は `UnsupportedModel` で fail-closed（実 op 化は #3037）。
+- 保存は `UnsupportedModel` で fail-closed だった（#3037 で実 op 化。§21）。
+
+## 21. #3037 実施記録（MaxPool 索引・MaxUnpool ノードの保存・復元）
+
+- manifest の `op` に `max_pool{1,2,3}d_indices`・`max_unpool{1,2,3}d` を追加し、`save_functional_model` の fail-closed 拒否を往復実装へ置換した。`format_version` 1 据え置き・最上位キー 13 個不変。スキーマと検証規則は `docs/compat-model-io-decision.md` の #3037 追補が正。
+- 復元時に unpool の `indices_from` が同次元の pool ノードであることを safetensors を開く前に検証する。公開 API の追加はない（入口は #2679 で公開済み）。
+- 実機 parity（層経路）は `#[ignore]` で追加・未実測（#3171・#3172）。

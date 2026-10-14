@@ -495,6 +495,7 @@ docs/
     │   ├── logs/compat-sequential-dropout-embedding-bag-2528/ # `compat::Sequential::add_dropout2d`／`add_alpha_dropout`／`add_embedding_bag`（イシュー #2528）の CUDA／Metal 実機 parity（forward を CPU と bit 完全一致で比較）の実行コマンド・結果記入欄のみを記載する README。実機は未実測のまま GB10／Mac セッションへ申し送り
     │   ├── logs/compat-sequential-adaptive-max-global-pool-2527/ # `compat::Sequential::add_adaptive_max_pool2d`／`add_adaptive_max_pool1d`／`add_global_pool`（イシュー #2527）の CUDA／Metal 実機 parity（forward を CPU と bit 完全一致で比較）の実行コマンド・結果記入欄のみを記載する README。実機は未実測のまま GB10／Mac セッションへ申し送り
     │   ├── logs/compat-sequential-conv3d-2524/ # `compat::Sequential::add_conv3d`（イシュー #2524）の CUDA／Metal 実機 parity（forward・backward を REQ-2 統一複合判定で CPU と比較）の実行コマンド・結果記入欄のみを記載
+    │   ├── logs/compat-sequential-max-unpool-3037/ # `compat::FunctionalBuilder` の MaxPool 索引・MaxUnpool 層（Functional グラフ）経路（イシュー #3037）の CUDA／Metal 実機 parity の実行コマンド・結果記入欄のみを記載（実測は #3171・#3172）
     │   ├── logs/compat-sequential-conv-transpose3d-3033/ # `compat::Sequential` の ConvTranspose3d 層経路（イシュー #3033）の CUDA／Metal 実機 parity の実行コマンド・結果記入欄のみを記載（実測は #3171・#3172）
     │   ├── logs/compat-sequential-pool3d-3029/ # `compat::Sequential` の Pool3d 層経路（イシュー #3029）の CUDA／Metal 実機 parity（ホストフォールバック経路）の実行コマンド・結果記入欄のみを記載（実測は #3171・#3172）
     │   ├── logs/compat-sequential-conv-transpose2d-2523/ # `compat::Sequential::add_conv_transpose2d`（イシュー #2523）の CUDA／Metal 実機 parity（forward・backward を REQ-2 統一複合判定で CPU と比較）の実行コマンド・結果記入欄のみを記載する README。実機は未実測のまま GB10／Mac セッションへ申し送り
