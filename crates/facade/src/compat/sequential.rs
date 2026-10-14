@@ -271,6 +271,22 @@ pub(super) enum LayerSpec {
         dilation: usize,
         groups: usize,
     },
+    /// イシュー #3055。bias あり固定（`add_conv_transpose1d`）。
+    ConvTranspose1d {
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        dilation: usize,
+        groups: usize,
+    },
+    /// イシュー #3055。`sizes` は `add_unflatten` の `unflattened_size`。
+    Unflatten {
+        dim: usize,
+        sizes: Vec<usize>,
+    },
     LayerNorm {
         normalized_size: usize,
         eps: f32,
@@ -420,8 +436,8 @@ pub(super) enum LayerSpec {
     PixelUnshuffle {
         downscale_factor: usize,
     },
-    /// 保存対象外の層（`add_module` の利用者定義層と、manifest スキーマ未対応の組み込み層
-    /// 〈`conv_transpose1d`／`unflatten`。イシュー #2521〉。`kind` はエラー文言で読む）。
+    /// 保存対象外の層（`add_module` の利用者定義層と、manifest スキーマ未対応の組み込み層。
+    /// `kind` はエラー文言で読む）。
     Unsupported {
         kind: &'static str,
     },
@@ -909,8 +925,9 @@ impl Sequential {
     /// 出力長は PyTorch と同じ `(L-1)*stride - 2*padding + dilation*(k-1) +
     /// output_padding + 1`。`output_padding >= stride` や `groups` の割り切れ違反は
     /// `Err`。常駐経路は非対応（`BackendError::Unsupported`）、AMP 低精度は無視して
-    /// f32 で forward する（Conv1d と同じ）。`save_model` は manifest 未対応のため
-    /// `ModelIoError::UnsupportedModel` で拒否する。
+    /// f32 で forward する（Conv1d と同じ）。
+    /// `save_model`／`load_model` は manifest kind `conv_transpose1d` で保存・復元できる
+    /// （イシュー #3055）。
     ///
     /// # Examples
     ///
@@ -951,8 +968,15 @@ impl Sequential {
             seed,
         )?;
         self.inner.push(Box::new(conv));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "conv_transpose1d",
+        self.specs.push(LayerSpec::ConvTranspose1d {
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
         });
         Ok(self)
     }
@@ -1080,17 +1104,20 @@ impl Sequential {
     /// `unflattened_size` の複数軸へ展開する（[`Sequential::add_flatten`] の逆変換・
     /// `Var::unflatten` への委譲）。空の `unflattened_size` は `Unflatten::new` が
     /// 拒否するため `Result` を返す。`dim` 範囲・積の不一致は forward 時に
-    /// `AutodiffError::Shape`。パラメータを持たず常駐経路も通過する。`save_model` は
-    /// 可変長 `sizes` を manifest で表せないため `UnsupportedModel` で拒否する。
+    /// `AutodiffError::Shape`。パラメータを持たず常駐経路も通過する。
+    /// `save_model`／`load_model` は manifest kind `unflatten` で保存・復元できる
+    /// （`sizes` は 1..=8 軸。固定キー `size_0`..`size_7`。イシュー #3055）。
     pub fn add_unflatten(
         mut self,
         dim: usize,
         unflattened_size: Vec<usize>,
     ) -> Result<Self, AutodiffError> {
-        let layer = Unflatten::new(dim, unflattened_size)?;
+        let layer = Unflatten::new(dim, unflattened_size.clone())?;
         self.inner.push(Box::new(layer));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "unflatten" });
+        self.specs.push(LayerSpec::Unflatten {
+            dim,
+            sizes: unflattened_size,
+        });
         Ok(self)
     }
 
