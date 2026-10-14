@@ -36,6 +36,7 @@ use crate::nn::conv::{Conv1d, Conv2d, Conv3d, ConvTranspose1d, ConvTranspose2d, 
 use crate::nn::embedding::Embedding;
 use crate::nn::embedding_bag::EmbeddingBag;
 use crate::nn::flatten::Flatten;
+use crate::nn::fold::{Fold, Unfold};
 use crate::nn::identity::Identity;
 use crate::nn::linear::Linear;
 use crate::nn::norm::{LayerNorm, RmsNorm};
@@ -336,6 +337,17 @@ pub trait Module {
 
     /// [`Module::as_max_pool3d`] の `AvgPool3d` 版（イシュー #3027）。既定 `None`。
     fn as_avg_pool3d(&self) -> Option<&AvgPool3d> {
+        None
+    }
+
+    /// [`Module::as_max_pool3d`] と同型の読み取り専用フック（イシュー #3039）。
+    /// `Unfold` 層向け。既定 `None`。無状態層のため `_mut` 版は置かない。
+    fn as_unfold(&self) -> Option<&Unfold> {
+        None
+    }
+
+    /// [`Module::as_unfold`] の `Fold` 版（イシュー #3039）。既定 `None`。
+    fn as_fold(&self) -> Option<&Fold> {
         None
     }
 
@@ -1968,6 +1980,38 @@ impl Module for AvgPool3d {
     }
 
     fn as_avg_pool3d(&self) -> Option<&AvgPool3d> {
+        Some(self)
+    }
+}
+
+/// `Unfold::forward` への委譲（イシュー #3039）。`forward_host` は既定（`Unsupported`）のまま、
+/// tape 経路との bit 一致を検証していない host 経路を作らないため `supports_forward_host` を
+/// `false` へ申告する（[`MaxPool3d`] と同型）。pooling ではないので `is_pooling` は既定 `false`。
+impl Module for Unfold {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Unfold::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn as_unfold(&self) -> Option<&Unfold> {
+        Some(self)
+    }
+}
+
+/// `Fold::forward` への委譲（イシュー #3039。[`Unfold`] と同型）。
+impl Module for Fold {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        Fold::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn as_fold(&self) -> Option<&Fold> {
         Some(self)
     }
 }
