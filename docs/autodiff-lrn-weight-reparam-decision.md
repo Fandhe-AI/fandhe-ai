@@ -304,3 +304,4 @@ impl<'t> Var<'t> {
 - 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
 - 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
 - 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
+- 結線方式は #3047 で確定した（`facade-weight-reparam-wiring-decision.md`。(a) 層内再パラメータ化・公開名 `Sequential::parametrize_*`）。既存本文は書き換えていない。
