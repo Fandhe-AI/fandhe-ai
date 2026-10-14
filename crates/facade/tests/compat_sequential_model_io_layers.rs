@@ -1,8 +1,8 @@
-//! `fandhe_ai::compat::{save_model, load_model}` の全 53 層対応（イシュー #2370・親 #2362）の
+//! `fandhe_ai::compat::{save_model, load_model}` の全 55 層対応（イシュー #2370・親 #2362）の
 //! 統合テスト。facade の公開 API と `std` のみで次の受入基準を検証する。
 //!
-//! - (a) 53 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
-//!   `predict` 出力が bit 一致する（53 種の網羅は保存した manifest の `kind` 集合で検査する）。
+//! - (a) 55 種の `add_*` をそれぞれ 1 層以上含むモデルの save → load で、パラメータと
+//!   `predict` 出力が bit 一致する（55 種の網羅は保存した manifest の `kind` 集合で検査する）。
 //! - (b) 深い異種スタック（`add_transformer_encoder` を複数含む数十層）で bit 一致する。
 //! - (c) `kind`・`params` の改竄（未知 kind・範囲外の値・キーの過不足・型違い）を拒否する。
 //! - fail-closed: 層のモードがモデル全体と異なる・利用者定義層・構造上限超過のモデルは、`dir` に何も作らず型付きエラーで拒否する。
@@ -23,8 +23,8 @@ use fandhe_ai::{AutodiffError, EmbeddingBagMode, GlobalPoolMode, InterpolateMode
 mod common;
 use common::temp_dir::TempDirGuard;
 
-/// allowlist の 53 kind（`compat::Sequential` の `add_*` と 1 対 1）。
-const ALL_KINDS: [&str; 53] = [
+/// allowlist の 55 kind（`compat::Sequential` の `add_*` と 1 対 1）。
+const ALL_KINDS: [&str; 55] = [
     "linear",
     "relu",
     "sigmoid",
@@ -78,6 +78,8 @@ const ALL_KINDS: [&str; 53] = [
     "instance_norm",
     "pixel_shuffle",
     "pixel_unshuffle",
+    "conv_transpose1d",
+    "unflatten",
 ];
 
 type Built = Result<Sequential, AutodiffError>;
@@ -158,7 +160,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------
-// (a) 53 種の bit 一致
+// (a) 55 種の bit 一致
 // ---------------------------------------------------------------------
 
 /// rank 2 入力 `[3, 6]`: 活性化・正規化・dropout・BatchNorm1d（rank 2）・softmax 系。
@@ -252,6 +254,20 @@ fn cnn1d_model() -> Built {
     Ok(m)
 }
 
+/// イシュー #3055。入力 `[3, 6]`: linear → unflatten（`[3, 2, 4]`）→ conv_transpose1d
+/// （groups・stride・padding・output_padding・dilation を非自明な値にする）→ flatten → linear。
+/// 出力長は `(4-1)*2 - 2*1 + 2*(3-1) + 1 + 1 = 10`。
+fn deconv1d_model() -> Built {
+    let mut m = Sequential::new()
+        .add_linear(6, 8, 61)?
+        .add_unflatten(1, vec![2, 4])?
+        .add_conv_transpose1d(2, 4, 3, 2, 1, 1, 2, 2, 62)?
+        .add_flatten(1, 2)
+        .add_linear(40, 2, 63)?;
+    m.eval();
+    Ok(m)
+}
+
 /// 整数 id 入力 `[2, 5]`: embedding（padding_idx あり）・MHA・TE・layer_norm。
 fn sequence_model(padding_idx: Option<usize>) -> Built {
     let mut m = Sequential::new()
@@ -330,8 +346,13 @@ fn all_thirty_layer_kinds_round_trip_bit_identically() {
             &ids(&[2, 5], 10),
         ));
     }
+    seen.extend(round_trip(
+        "deconv1d",
+        &deconv1d_model().expect("構築できるはず"),
+        &tensor(&[3, 6], 4.5),
+    ));
     let expected: BTreeSet<String> = ALL_KINDS.iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(seen, expected, "53 種の kind をすべて往復させたはず");
+    assert_eq!(seen, expected, "55 種の kind をすべて往復させたはず");
 }
 
 /// train モードのまま保存・復元しても `training` フラグが往復し、dropout を含む構成で
@@ -665,4 +686,121 @@ fn nullary_activation_tampered_params_are_rejected() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// イシュー #3055: conv_transpose1d・unflatten の保存・復元
+// ---------------------------------------------------------------------
+
+fn manifest_of(model: &Sequential, label: &str) -> (TempDirGuard, std::path::PathBuf, String) {
+    let guard = TempDirGuard::new(label);
+    let dir = guard.path().join("m");
+    save_model(model, &dir).expect("保存できるはず");
+    let text = std::fs::read_to_string(dir.join("manifest.json")).expect("読めるはず");
+    (guard, dir, text)
+}
+
+fn deconv_manifest(label: &str) -> (TempDirGuard, std::path::PathBuf, String) {
+    manifest_of(&deconv1d_model().expect("構築できるはず"), label)
+}
+
+fn deconv_tampered(label: &str, from: &str, to: &str) -> ModelIoError {
+    let (_guard, dir, text) = deconv_manifest(label);
+    assert!(text.contains(from), "{label}: 置換対象 {from} がある");
+    std::fs::write(dir.join("manifest.json"), text.replacen(from, to, 1)).expect("書けるはず");
+    match load_model(&dir) {
+        Ok(_) => panic!("{label}: 改竄された manifest は拒否されるはず"),
+        Err(e) => e,
+    }
+}
+
+#[test]
+fn conv_transpose1d_unflatten_restore_arguments_and_keep_format_version_2() {
+    let model = deconv1d_model().expect("構築できるはず");
+    let (_guard, dir, text) = manifest_of(&model, "deconv-args");
+    assert!(
+        text.contains("\"format_version\":2"),
+        "format_version は 2 のまま"
+    );
+    assert!(text.contains(
+        "\"kind\":\"conv_transpose1d\",\"params\":{\"in_channels\":2,\"out_channels\":4,\"kernel_size\":3,\"stride\":2,\"padding\":1,\"output_padding\":1,\"dilation\":2,\"groups\":2}"
+    ), "{text}");
+    assert!(text.contains("\"kind\":\"unflatten\",\"params\":{\"dim\":1,\"size_len\":2,\"size_0\":2,\"size_1\":4,\"size_2\":null"), "{text}");
+    let loaded = load_model(&dir).expect("復元できるはず");
+    let x = tensor(&[3, 6], 4.5);
+    let y = loaded.predict(&x).expect("predict できるはず");
+    assert_eq!(y.shape(), &[3, 2]);
+    // 復元した conv_transpose1d の weight shape は `[in, out/groups, k]`。
+    assert_eq!(loaded.state_dict()["2.weight"].shape(), &[2, 2, 3]);
+}
+
+#[test]
+fn eleven_layer_subset_of_new_kinds_is_savable() {
+    // #3053／#3054（活性化 9 層）は別イシュー。本イシューの 2 層が拒否されないことのみ確認する。
+    let model = Sequential::new()
+        .add_unflatten(1, vec![1, 6])
+        .and_then(|m| m.add_conv_transpose1d(1, 1, 1, 1, 0, 0, 1, 1, 1))
+        .expect("構築できるはず");
+    let (_g, _d, text) = manifest_of(&model, "deconv-two");
+    let kinds = kinds_of(&text);
+    assert!(kinds.contains("conv_transpose1d") && kinds.contains("unflatten"));
+}
+
+#[test]
+fn tampered_conv_transpose1d_and_unflatten_manifests_are_rejected() {
+    for (label, from, to) in [
+        ("ct-groups-zero", "\"groups\":2}", "\"groups\":0}"),
+        ("ct-groups-indivisible", "\"groups\":2}", "\"groups\":3}"),
+        (
+            "ct-negative",
+            "\"kernel_size\":3,\"stride\":2",
+            "\"kernel_size\":-3,\"stride\":2",
+        ),
+        ("ct-real", "\"stride\":2", "\"stride\":2.0"),
+        ("ct-missing-key", "\"output_padding\":1,", ""),
+        (
+            "ct-extra-key",
+            "\"dilation\":2,",
+            "\"dilation\":2,\"bias\":true,",
+        ),
+        ("uf-size-len-zero", "\"size_len\":2", "\"size_len\":0"),
+        ("uf-size-len-nine", "\"size_len\":2", "\"size_len\":9"),
+        ("uf-null-pack-short", "\"size_len\":2", "\"size_len\":3"),
+        ("uf-null-pack-long", "\"size_len\":2", "\"size_len\":1"),
+        ("uf-negative", "\"size_0\":2", "\"size_0\":-2"),
+        ("uf-dim-real", "\"dim\":1,", "\"dim\":1.5,"),
+    ] {
+        let err = deconv_tampered(label, from, to);
+        assert!(
+            matches!(err, ModelIoError::Manifest { .. }),
+            "{label}: {err}"
+        );
+    }
+    // 意味検査は add_* に委ねる（Autodiff）。
+    let label = "ct-output-padding-ge-stride";
+    let err = deconv_tampered(label, "\"output_padding\":1", "\"output_padding\":2");
+    assert!(matches!(err, ModelIoError::Autodiff(_)), "{label}: {err}");
+}
+
+#[test]
+fn tampered_conv_transpose1d_weight_shape_is_rejected() {
+    let (_g, dir, text) = deconv_manifest("ct-shape");
+    assert!(text.contains("\"shape\":[2,2,3]"));
+    std::fs::write(
+        dir.join("manifest.json"),
+        text.replacen("\"shape\":[2,2,3]", "\"shape\":[2,2,4]", 1),
+    )
+    .expect("書けるはず");
+    assert!(matches!(
+        load_err(&dir),
+        ModelIoError::Mismatch { .. } | ModelIoError::Manifest { .. }
+    ));
+}
+
+#[test]
+fn unflatten_with_more_than_eight_axes_is_rejected_before_writing() {
+    let model = Sequential::new()
+        .add_unflatten(1, vec![1; 9])
+        .expect("構築できるはず");
+    assert_save_rejected("unflatten-9-axes", &model, false);
 }
