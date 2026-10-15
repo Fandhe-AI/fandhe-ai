@@ -590,3 +590,50 @@ fn neighbouring_unsupported_norm_op_stays_fail_closed() {
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
 }
+
+// --- 6. 巨大 upstream（レビュー指摘 PR #3346）: g=3e38 でも構造側が有限 ---------------------
+
+fn check_huge_upstream(kind: Kind, affine: bool) {
+    // Rms: [1,2]・g=3e38（修正前は dxhat⊙xhat の f32 和が 6e38 で overflow し inf が混入した）。
+    // Layer: [1,4]・g=1e37 の回帰確認。g をさらに上げると HVP の途中値（cotangent の行方向和）
+    // が g の hidden 倍になり f32 に収まらない（決定記録 §23.3 の既知の限界）。
+    let (shape, x0, c, v): (Vec<usize>, Vec<f32>, Vec<f32>, Vec<f32>) = match kind {
+        Kind::Rms => (
+            vec![1, 2],
+            vec![1.0, 1.0],
+            vec![3e38, 3e38],
+            vec![1.0, -1.0],
+        ),
+        Kind::Layer => (
+            vec![1, 4],
+            vec![1.0, -1.0, 1.0, -1.0],
+            vec![1e37, -1e37, 1e37, -1e37],
+            vec![1.0, -1.0, 1.0, -1.0],
+        ),
+    };
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0, &shape));
+    let loss = build_norm(&tape, &x, kind, 1e-5, affine, &c, &shape).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gx = cg.grad(&x).unwrap().unwrap();
+    let cx = cg.child_var(&x).unwrap().unwrap();
+    let vc = child.var_no_grad(&t(v, &shape));
+    let prod = gx.mul(&vc).unwrap().sum(None).unwrap();
+    let hv = dense(child.backward(&prod).unwrap().get(&cx).unwrap().unwrap());
+    assert_finite(&hv, "huge upstream: HVP");
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let cg2 = child.backward_create_graph(&prod, &grand).unwrap();
+    let hv2 = dense(&cg2.grad(&cx).unwrap().unwrap().to_tensor());
+    assert_finite(&hv2, "huge upstream: 孫テープ再生");
+}
+
+#[test]
+fn rms_norm_huge_upstream_keeps_structure_finite() {
+    check_huge_upstream(Kind::Rms, false);
+}
+
+#[test]
+fn layer_norm_huge_upstream_keeps_structure_finite() {
+    check_huge_upstream(Kind::Layer, false);
+}

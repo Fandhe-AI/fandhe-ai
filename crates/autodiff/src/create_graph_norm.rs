@@ -44,10 +44,11 @@
 //!
 //! # 既知の限界
 //!
-//! upstream `g` が極端に大きい（例: `g=[3e38,3e38]`）と、構造側の `Mean(dxhat⊙xhat)` の
-//! f32 和が overflow しうる。`cg.grad` の値は V3 なので 1 階と一致するが、構造側の `inf` は
-//! Hessian・孫テープ再生に入る。`g` は入口検査の時点で未知のため事前判定できない
-//! （g スケーリングは後続候補。決定記録 §23 に記録）。
+//! `dxhat = g·w` は行ごとの 2 のべき乗 `gs` で割ってから縮約し、最後に `gs` を掛けて復元する
+//! （`g=[3e38,3e38]` でも `Mean(dxhat⊙xhat)` が overflow しない）。`g` が非有限、または
+//! `g·w` が f32 に収まらない場合は構築時に `Err(Backward)` で拒否する。
+//! `dw`／`db` の行方向 `Sum` は 1 階も f32 要素積のため、行をまたぐ合計の overflow は残る
+//! （決定記録 §23.3）。
 
 use fandhe_ai_tensor_core::{BackendOps, Tensor, row_norm_layout};
 
@@ -212,6 +213,41 @@ fn scale_consts<'c>(
     Ok((child.var_no_grad(&s_t), child.var_no_grad(&e_t)))
 }
 
+/// upstream 側のスケール `gs`（行ごとの 2 のべき乗。`[rows, 1]`）の定数葉を作る。
+/// `dxhat = g·w` の行最大絶対値（f64）から指数を決める。`g` が非有限、または `dxhat` が
+/// f32 に収まらない（1 階側も overflow する）場合は型付きエラーで拒否する。`dxhat/gs` を縮約へ
+/// 渡すことで `Mean(dxhat⊙xhat)` の f32 部分和が `g=3e38` のような有限入力で overflow するのを
+/// 避ける（レビュー指摘 PR #3346。復元は `gs` を最後に掛ける）。
+fn upstream_scale<'c>(
+    child: &'c Tape,
+    dy: &[f32],
+    w: Option<&[f32]>,
+    rows: usize,
+    hidden: usize,
+) -> Result<Var<'c>, AutodiffError> {
+    let mut exps = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let mut mx = 0.0f64;
+        for i in 0..hidden {
+            let g = f64::from(dy[r * hidden + i]);
+            if !g.is_finite() {
+                return Err(reject("upstream に非有限要素がある"));
+            }
+            let d = match w {
+                Some(w) => g * f64::from(w[i]),
+                None => g,
+            };
+            if d.abs() > f64::from(f32::MAX) {
+                return Err(reject("dxhat = g·w が f32 に収まらない"));
+            }
+            mx = mx.max(d.abs());
+        }
+        exps.push(pow2_ceil_exponent(mx));
+    }
+    let gs: Vec<f32> = exps.iter().map(|&e| 2f64.powi(e) as f32).collect();
+    Ok(child.var_no_grad(&Tensor::new(gs, &[rows, 1])?))
+}
+
 /// 構造 `structure` の VJP 値を `value`（ホスト関数の結果）へ差し替えた `Op::Contiguous`
 /// ノードを子テープへ積む。`Contiguous` の VJP は恒等なので二階の微分は `structure` を流れる。
 fn tag_with_host_value<'c>(
@@ -327,13 +363,19 @@ pub(crate) fn rms_norm_cgrads<'c>(
 
     let mut out = Vec::new();
     if need_x {
+        let gs_c = upstream_scale(child, &dy, w_slice.as_deref(), rows, hidden)?;
         let dxhat = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,
-        };
+        }
+        .div(&gs_c)?;
         let mean_dot = keep_dim(&dxhat.mul(&xhat)?.mean(Some(1))?)?;
         let inner = dxhat.sub(&xhat.mul(&mean_dot)?)?;
-        let dx_s = rstd_s.div(&s_c)?.mul(&inner)?.reshape(&x_shape)?;
+        let dx_s = rstd_s
+            .div(&s_c)?
+            .mul(&inner)?
+            .mul(&gs_c)?
+            .reshape(&x_shape)?;
         let v = tag_with_host_value(child, &dx_s, build_tensor(dx_host, &x_shape))?;
         out.push((targets.input, v));
     }
@@ -415,14 +457,20 @@ pub(crate) fn layer_norm_cgrads<'c>(
 
     let mut out = Vec::new();
     if need_x {
+        let gs_c = upstream_scale(child, &dy, w_slice.as_deref(), rows, hidden)?;
         let dxhat = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,
-        };
+        }
+        .div(&gs_c)?;
         let mean_dxhat = keep_dim(&dxhat.mean(Some(1))?)?;
         let mean_dot = keep_dim(&dxhat.mul(&xhat)?.mean(Some(1))?)?;
         let inner = dxhat.sub(&mean_dxhat)?.sub(&xhat.mul(&mean_dot)?)?;
-        let dx_s = rstd_s.div(&s_c)?.mul(&inner)?.reshape(&x_shape)?;
+        let dx_s = rstd_s
+            .div(&s_c)?
+            .mul(&inner)?
+            .mul(&gs_c)?
+            .reshape(&x_shape)?;
         let v = tag_with_host_value(child, &dx_s, build_tensor(dx_host, &x_shape))?;
         out.push((targets.input, v));
     }
