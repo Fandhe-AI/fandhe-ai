@@ -778,19 +778,49 @@ fn each_op_records_exactly_one_node() {
     assert_eq!(tape.len(), before + 2);
 }
 
+/// イシュー #3085 で 3D プールは `create_graph` 対応になった（旧: 型付きエラー）。成功し、`cg.grad` が
+/// 1 階 `Tape::backward` の勾配と bit 一致することを確かめる。
 #[test]
-fn create_graph_is_a_typed_error_not_a_panic() {
-    let tape = Tape::new_with_ops(common::naive_ops());
-    let child = Tape::new_with_ops(common::naive_ops());
-    let x = cube(&tape);
-    let loss = avg_pool3d(&x, [2, 2, 2], None, [0; 3], false, true)
-        .unwrap()
-        .sum(None)
-        .unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
-    let (v, _) = max_pool3d(&x, [2, 2, 2], None, [0; 3], [1; 3], false).unwrap();
-    let loss = v.sum(None).unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+fn create_graph_succeeds_and_matches_first_order() {
+    for use_max in [false, true] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = cube(&tape);
+        let y = if use_max {
+            max_pool3d(&x, [2, 2, 2], None, [0; 3], [1; 3], false)
+                .unwrap()
+                .0
+        } else {
+            avg_pool3d(&x, [2, 2, 2], None, [0; 3], false, true).unwrap()
+        };
+        let loss = y.mul(&y).unwrap().sum(None).unwrap();
+        let want = tape.backward(&loss).unwrap();
+        let want: Vec<u32> = want
+            .get(&x)
+            .unwrap()
+            .expect("x は到達")
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let cg = tape
+            .backward_create_graph(&loss, &child)
+            .expect("3D プールは create_graph 対応");
+        let got: Vec<u32> = cg
+            .grad(&x)
+            .unwrap()
+            .expect("x は到達")
+            .to_tensor()
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(got, want, "use_max={use_max}");
+    }
 }
 
 #[test]

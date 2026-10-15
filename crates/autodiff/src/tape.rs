@@ -1323,12 +1323,13 @@ pub(crate) enum Op {
     /// `d·H·W + h·W + w`。非追跡データ。`Op::MaxPool2d` と同じ payload）。`params` は VJP に
     /// 不要のため保持しない。**`Op::MaxPool2d` は VJP が rank 4 固定のため再利用しない**。
     /// VJP（`grad.rs`）は `Op::MaxPool2d` の rank 5 版（`[N·C, D·H·W]` へ reshape して
-    /// `scatter_with_fallback`〈`Add`〉）。非融合・非 checkpoint・高階微分非対応。
+    /// `scatter_with_fallback`〈`Add`〉）。非融合・非 checkpoint。高階微分（`create_graph`）は #3085 で対応
+    /// （決定記録 §29。記録済み `index` を固定して `gather`／`scatter_add` で再生・VJP を積む）。
     MaxPool3d { input: NodeId, index: Tensor<i32> },
     /// 3D average pooling（`torch.nn.functional.avg_pool3d` 相当。イシュー #2643）。
     /// `params`／`count_include_pad` は VJP（共有カーネル
     /// `tensor_core::pool3d::avg_pool3d_vjp_host`）に必要なため保持する（`Op::AvgPool2d` と同型）。
-    /// 分類は [`Op::MaxPool3d`] と同じ。
+    /// 分類は [`Op::MaxPool3d`] と同じ（`create_graph` は V3。決定記録 §29）。
     AvgPool3d {
         input: NodeId,
         params: fandhe_ai_tensor_core::pool3d::Pool3dParams,
@@ -1564,7 +1565,8 @@ pub(crate) enum Op {
     /// 含む窓を row-major で走査し `f64` アキュムレータへ加算する。
     /// 設計 doc §8）に必要なため保持する（`Op::Conv2d` が `params` を
     /// 保持する方針と同型）。`BackendOps::avg_pool2d` に対応メソッドが
-    /// あるため非融合対象（`push_eager` で常に実体化）。
+    /// あるため非融合対象（`push_eager` で常に実体化）。`create_graph` は #3085 で
+    /// 対応（V3。決定記録 §29）。
     AvgPool2d {
         input: NodeId,
         params: Pool2dParams,
@@ -1576,7 +1578,8 @@ pub(crate) enum Op {
     /// `[Hout, Wout]` は `nodes[id].shape` から導出可能なため保持
     /// しない（`Op::OneHot` の `num_classes` 非保持方針と同型）。
     /// `BackendOps::adaptive_avg_pool2d` に対応メソッドがあるため
-    /// 非融合対象（`push_eager` で常に実体化）。
+    /// 非融合対象（`push_eager` で常に実体化）。`create_graph` は #3085 で対応
+    /// （V3。決定記録 §29）。
     AdaptiveAvgPool2d { input: NodeId },
     /// ユーザー定義 forward／backward プラグイン（案 B。イシュー #1946・
     /// `docs/autodiff-custom-function-decision.md` §12.4）。`inputs` の
@@ -2490,6 +2493,10 @@ impl Op {
     /// `Cummax`・`Cummin`・`Cumsum`）はイシュー #3083（決定記録 §25）で `true` になった。
     /// `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま。
     ///
+    /// プーリング族（`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・
+    /// `AdaptiveAvgPool2d`）はイシュー #3085（決定記録 §29）で `true` になった。
+    /// 隣接する `MaxUnpool` は `false` のまま。
+    ///
     /// 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・
     /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §26）で `true`
     /// になった（残る 16 variant は fail-closed のまま。§26 の表）。
@@ -2538,6 +2545,12 @@ impl Op {
             // `Conv3d`／`ConvTranspose3d` は引き続き `false`（#3080(b)）。
             | Op::Conv2d { .. }
             | Op::ConvTranspose2d { .. }
+            // プーリング族（イシュー #3085・決定記録 §29。Max 系は index 固定、Avg 系は V3）。
+            | Op::MaxPool2d { .. }
+            | Op::MaxPool3d { .. }
+            | Op::AvgPool2d { .. }
+            | Op::AvgPool3d { .. }
+            | Op::AdaptiveAvgPool2d { .. }
             | Op::Unfold { .. }
             | Op::Fold { .. }
             | Op::Where { .. }
@@ -2623,8 +2636,6 @@ impl Op {
             // イシュー #2631・#2632・#2633 の FFT 6 演算も初期スコープ外（非対応）。
             | Op::Rfft { .. }
             | Op::Logcumsumexp { .. }
-            | Op::MaxPool3d { .. }
-            | Op::AvgPool3d { .. }
             | Op::PadMode { .. }
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
@@ -2649,9 +2660,6 @@ impl Op {
             | Op::SpectralNorm { .. }
             | Op::Conv3d { .. }
             | Op::OneHot { .. }
-            | Op::MaxPool2d { .. }
-            | Op::AvgPool2d { .. }
-            | Op::AdaptiveAvgPool2d { .. }
             // `Op::Custom`（イシュー #1946・ユーザー定義 forward／backward
             // プラグイン。`docs/autodiff-custom-function-decision.md`）は
             // 子テープ方式の高階微分（`create_graph`）に対応しない。
@@ -5268,6 +5276,53 @@ mod conv3d_op_tests {
                 weight: NodeId(1),
                 bias: None,
                 params: p,
+            }
+            .supports_create_graph()
+        );
+    }
+
+    #[test]
+    fn pooling_family_supports_create_graph() {
+        // イシュー #3085: プーリング 5 variant は対象。隣接する MaxUnpool は fail-closed のまま。
+        let p2 = Pool2dParams::new([2, 2], Some([2, 2]), [0, 0], [1, 1]).unwrap();
+        let p3 = fandhe_ai_tensor_core::pool3d::Pool3dParams::new([2, 2, 2], None, [0; 3], [1; 3])
+            .unwrap();
+        let idx = || Tensor::<i32>::zeros(&[1]).unwrap();
+        assert!(
+            Op::MaxPool2d {
+                input: NodeId(0),
+                index: idx()
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::MaxPool3d {
+                input: NodeId(0),
+                index: idx()
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::AvgPool2d {
+                input: NodeId(0),
+                params: p2,
+                count_include_pad: true
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::AvgPool3d {
+                input: NodeId(0),
+                params: p3,
+                count_include_pad: false
+            }
+            .supports_create_graph()
+        );
+        assert!(Op::AdaptiveAvgPool2d { input: NodeId(0) }.supports_create_graph());
+        assert!(
+            !Op::MaxUnpool {
+                input: NodeId(0),
+                index: idx()
             }
             .supports_create_graph()
         );

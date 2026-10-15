@@ -3505,22 +3505,7 @@ pub(crate) fn vjp(
             count_include_pad,
         } => {
             let input_shape = nodes[input.0].shape.clone();
-            let layout = fandhe_ai_tensor_core::pool3d::pool3d_layout(&input_shape, &params)
-                .map_err(AutodiffError::Shape)?;
-            let upstream_c = upstream.contiguous();
-            if upstream_c.shape() != layout.out_shape() {
-                return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
-                    lhs: upstream_c.shape().to_vec(),
-                    rhs: layout.out_shape().to_vec(),
-                }));
-            }
-            let data = fandhe_ai_tensor_core::pool3d::avg_pool3d_vjp_host(
-                &upstream_c.host_slice(),
-                &layout,
-                count_include_pad,
-            )
-            .map_err(AutodiffError::Shape)?;
-            let d_input = Tensor::new(data, &input_shape).map_err(AutodiffError::Shape)?;
+            let d_input = avg_pool3d_vjp(upstream, &input_shape, &params, count_include_pad)?;
             vec![(input, d_input)]
         }
         // `lrn_ops::local_response_norm`（イシュー #2646）。ホスト側のみの VJP。入力値から統計 `d` を
@@ -7153,7 +7138,7 @@ pub(crate) fn log_softmax_vjp_along(
 /// イシュー #1728）。`pos = out_idx*stride + k*dilation - padding` を
 /// `checked_*` のみで計算し、`padding` を超える減算はアンダーフロー
 /// として `None` を返す。
-fn pool_window_input_pos(
+pub(crate) fn pool_window_input_pos(
     out_idx: usize,
     stride: usize,
     k: usize,
@@ -7179,7 +7164,7 @@ fn pool_window_input_pos(
 /// row-major 順になる（浮動小数点和は特定アキュムレータへの加算列の
 /// 順序のみに依存し、外側ループの構造には依存しない）。forward
 /// （`avg_pool2d`）と同じ divisor 規約（`count_include_pad`）を使う。
-fn avg_pool2d_vjp(
+pub(crate) fn avg_pool2d_vjp(
     upstream: &Tensor<f32>,
     input_shape: &[usize],
     params: &Pool2dParams,
@@ -7277,12 +7262,39 @@ fn avg_pool2d_vjp(
     Tensor::new(out, input_shape).map_err(AutodiffError::Shape)
 }
 
+/// [`Op::AvgPool3d`] の VJP 本体（1 階 `Tape::backward` の腕と `create_graph` の V3 ホスト値
+/// （`create_graph/pool.rs`。イシュー #3085）が共有する単一情報源）。レイアウトを再構築し共有カーネル
+/// `avg_pool3d_vjp_host`（`f64` アキュムレータ・1 回 downcast）へ委譲する。
+pub(crate) fn avg_pool3d_vjp(
+    upstream: &Tensor<f32>,
+    input_shape: &[usize],
+    params: &fandhe_ai_tensor_core::pool3d::Pool3dParams,
+    count_include_pad: bool,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let layout = fandhe_ai_tensor_core::pool3d::pool3d_layout(input_shape, params)
+        .map_err(AutodiffError::Shape)?;
+    let upstream_c = upstream.contiguous();
+    if upstream_c.shape() != layout.out_shape() {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: upstream_c.shape().to_vec(),
+            rhs: layout.out_shape().to_vec(),
+        }));
+    }
+    let data = fandhe_ai_tensor_core::pool3d::avg_pool3d_vjp_host(
+        &upstream_c.host_slice(),
+        &layout,
+        count_include_pad,
+    )
+    .map_err(AutodiffError::Shape)?;
+    Tensor::new(data, input_shape).map_err(AutodiffError::Shape)
+}
+
 /// [`Op::AdaptiveAvgPool2d`] の VJP 本体（イシュー #1728・設計
 /// `docs/pooling-ops-design.md` §8）。[`avg_pool2d_vjp`] と同じ
 /// 出力 major 加算順の原則を、[`adaptive_window`]（forward と共有
 /// する単一情報源）が定める可変窓へ適用する。divisor は常に実際の
 /// 窓要素数（`count_include_pad=true` 相当）。
-fn adaptive_avg_pool2d_vjp(
+pub(crate) fn adaptive_avg_pool2d_vjp(
     upstream: &Tensor<f32>,
     input_shape: &[usize],
 ) -> Result<Tensor<f32>, AutodiffError> {

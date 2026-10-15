@@ -1139,3 +1139,46 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 28.7 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・`STAGE_BOUND_GUARD` 等の閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文（`LayerNorm`／`RmsNorm` の構造は共通関数へ切り出しただけで、組む Op と値は不変。子テープへ積むノードの順序が一部入れ替わるのみ）。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。
+
+## 29. 実装記録（#3085・プーリング Op 群の create_graph 対応。親 #3076）
+
+§21.2・§21.3 の「#3085 プーリング」の実装記録。コードは `crates/autodiff/src/create_graph/pool.rs`、`create_graph.rs` の `replay_op`／`build_cgrads`、`tape.rs` の `Op::supports_create_graph`。
+
+### 29.1 対象にしたもの・残したもの
+
+| variant | 方式 | forward 再生 | 子テープへ積む Op | 値の扱い |
+|---|---|---|---|---|
+| `MaxPool2d`（`adaptive_max_pool2d` が記録するものを含む） | V1（記録済み `index` の固定） | `contiguous → reshape [N·C, H·W] → gather(1, index) → reshape` | `Contiguous`・`Reshape`・`Gather`・`Scatter` | 1 階と同じ `scatter_with_fallback(Add)`（`f64` 決定的集約）で bit 一致 |
+| `MaxPool3d` | 同上（`[N·C, D·H·W]`） | 同上 | 同上 | 同上 |
+| `AvgPool2d` | V3 | `avg_pool2d`（`ceil_mode=false`） | `Contiguous`・`Reshape`・`Mul`・`Gather`・`Scatter` | 1 階と同じ `avg_pool2d_vjp` を `push_v3` で登録 |
+| `AvgPool3d` | V3 | `avg_pool3d`（`ceil_mode=false`） | 同上 | `grad::avg_pool3d_vjp`（1 階の腕から抜き出し。式・評価順は不変） |
+| `AdaptiveAvgPool2d` | V3 | `adaptive_avg_pool2d`（出力サイズはノード shape から） | 同上 | 1 階と同じ `adaptive_avg_pool2d_vjp` |
+
+残したもの（fail-closed のまま）: `MaxUnpool`（§21.2 C 区分）。`Conv3d`／`ConvTranspose3d` は #3080(b)。
+
+### 29.2 §21.2・§21.3 からの差分
+
+- **Max 系は V2 ではなく V1 になった**: argmax をホストで再計算せず、forward が確定した `index`（先勝ちタイ・NaN 規則込み）をそのまま使う。タイ規則は構造上 1 階と一致する。`index` が入力空間の範囲外なら子テープへ書く前に型付きエラーにする。
+- **Avg 系の構造は `Fold` 経由ではなく索引の合成に統一した**: Adaptive は窓の大きさが可変（`H % Ho != 0` では固定の kernel/stride にならない）、3D には fold が無いため、§21.3 の「`Fold`（col2im）経由」は `AvgPool2d` にしか当てはまらない。3 variant を同一の構造（`g` を `[N·C, 出力空間]` へ平坦化 → 窓ごとの `1/divisor` を掛ける → `gather(1, 出力位置)` → `zeros.scatter_add(1, 入力位置)` → 入力 shape へ）に揃えた。窓の列挙は 1 階と同じ情報源（`pool_window_input_pos`・`adaptive_window`・`pool3d_layout` の窓規約）から作る。
+- 索引テンソルは `[N·C, E]`（`E` は 1 平面の窓要素の総数）。`i32` の範囲と `N·C·E` の桁あふれは確保前に型付きエラーで拒否する。
+
+### 29.3 数値契約
+
+- 値は 1 階のホスト関数（`f64` アキュムレータ・1 回 downcast）を `push_v3` で登録するため `cg.grad` は 1 階と bit 一致する。構造側の f32 演算は逆 divisor との要素積（絶対値が `|g|` を超えない）と、`scatter_with_fallback(Add)`（`f64` 集約）だけで、孫テープで再生しても f32 逐次和へ落ちず、§23.3 の P1 の型（`Contiguous` タグ再生で `inf`）は起きない。孫テープでの値の差は REQ-2 の範囲として受け入れる（§21.1(3)）。
+- tolerance・baseline・FMA 契約・依存・`unsafe` は変更していない。
+
+### 29.4 テスト
+
+- `crates/autodiff/tests/create_graph_pool.rs`: Hessian と有限差分の突合（平均系は重なり・padding・`count_include_pad`、Adaptive は 4→2・5→3、最大系はタイなしの入力・重なり・padding・dilation）、先勝ちタイの解析曲率と重複索引の 1 階 bit 一致（`first_order()` も）、平均系の値が打ち消し入力で 1 階と bit 一致すること、3e38 の上流での 1 階・`cg.grad`・二階の有限性、`jvp_create_graph`（孫テープ）が独立な参照と一致すること、`MaxUnpool` の fail-closed と `child` が空のままであること。
+- `create_graph/pool.rs` の単体テスト: 構造値が 1 階のホスト関数と REQ-2 で一致、Max の gather 再生が forward と bit 一致（NaN・タイ・負値）、範囲外 `index` が型付きエラー。
+- `tests/pool3d_parity.rs`: 旧 `create_graph_is_a_typed_error_not_a_panic` を、成功して 1 階勾配と bit 一致する確認へ反転した。`tape.rs` に `pooling_family_supports_create_graph` を追加。
+- f32 overflow を引き起こす平均系の打ち消し入力は divisor があるため構成できなかった。構成できない回帰ベクトルは主張しない（代わりに大振幅の上流での有限性を確認）。
+
+### 29.5 所有者へ戻す論点・申し送り
+
+- CUDA／Metal 実機での create_graph とプーリングを組み合わせた parity 実測は未実施（#3168・#3169 系への申し送り）。
+- §21.4 のサブイシュー（(a) Max 系／(b) Avg 系）は起票されていなかったため、5 variant を本イシューで扱った。
+
+### 29.6 変えていないもの
+
+1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・公開 API（`api_surface`）。
