@@ -310,3 +310,12 @@ impl<'t> Var<'t> {
 
 - LRN の層化の公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` を正とする（§3 の LocalResponseNorm 行。層化の対象は LRN のみで、weight_norm／spectral_norm の結線は #3046・#3047）。
 - 基づく判断: 2026-10-11 の所有者判断 D-A。本節は記録の参照であり新規承認ではない。既存本文は書き換えていない。
+
+## 16. #3043 実施記録（autodiff 側の層 struct）
+
+- `crates/autodiff/src/nn/lrn.rs` に `nn::LocalResponseNorm` を追加した（公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` §3〈#3025〉のとおり。引数順は `size, alpha, beta, k`、既定値なし）。`Var::local_response_norm` への 1 行委譲で、新規 `Op`／`BackendOps`／VJP／カーネルは無い。
+- `new` は `LrnParams::new` の検査（`size == 0`・非有限 `alpha`／`beta`／`k`）を前倒しし、`Var` 経路と同じ写像で `AutodiffError::InvalidArgument` を返す。rank・確保サイズは入力 shape 依存のため forward 時に拒否される（孤児ノード無し）。
+- `size > C` は PyTorch と同じく受理する（窓は手動クリップ）。issue 本文の「kernel 超過」に相当する拒否は LRN には存在しない。
+- `Module` 実装は `nn/module.rs`。`supports_forward_host()=false`・`is_pooling()=false`・無状態。`Module::as_local_response_norm`（既定 `None`・読み取り専用。後続で未使用なら撤去可）を追加した。
+- facade（`Sequential::add_local_response_norm`・`LayerSpec`・`save_model` kind・常駐経路拒否・保留ガード反転）は未変更で後続 issue の範囲。CUDA／Metal 実機は未実測。依存・tolerance・`docs/spec` は変更していない。既存本文は書き換えていない。
+- テスト: `crates/autodiff/tests/nn_local_response_norm.rs`。

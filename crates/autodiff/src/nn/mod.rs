@@ -236,6 +236,9 @@
 //! イシュー #3039（親 #3018）で `fold` モジュールの [`Unfold`]／[`Fold`]（`Var::unfold`／`fold` への
 //! 1 行委譲の無状態層）を追加した。新規 `Op`／`BackendOps`／VJP／カーネルは無い。facade の
 //! `Sequential::add_*` は後続 issue の範囲。
+//! イシュー #3043（親 #3018）で `lrn` モジュールの [`LocalResponseNorm`]（`Var::local_response_norm` への
+//! 1 行委譲の無状態層）を追加した。新規 `Op`／`BackendOps`／VJP／カーネルは無い。facade の
+//! `Sequential::add_*` は後続 issue の範囲。
 
 mod attention;
 mod batch_norm;
@@ -251,6 +254,7 @@ mod forward_hook;
 mod identity;
 pub mod init;
 mod linear;
+mod lrn;
 mod max_unpool;
 mod module;
 mod norm;
@@ -298,6 +302,7 @@ pub use fold::{Fold, Unfold};
 pub use forward_hook::{ForwardHookCtx, ForwardHooked};
 pub use identity::Identity;
 pub use linear::{Linear, LinearVars, linear_forward_low_precision};
+pub use lrn::LocalResponseNorm;
 pub use max_unpool::{MaxUnpool1d, MaxUnpool2d, MaxUnpool3d};
 pub use module::{Module, RequiresGradSnapshot};
 pub use norm::{
