@@ -2244,6 +2244,16 @@ impl Sequential {
     /// （各バッチ時点の生の重みで計算した値。EMA 重みで計算した値ではない）を使い、保存・`restore_best_weights` で戻す重みは EMA 重みになる。
     /// 判定値と保存重みは対応しない。EMA 重みで評価した値で判定したい場合は `Monitor::ValLoss`／`Monitor::ValMetric` を使う（決定記録 §15。イシュー #2844）。
     ///
+    /// # SWA（イシュー #3058）
+    ///
+    /// `callbacks` に [`super::callbacks::Callback::Swa`] があると、epoch 末（validation・
+    /// epoch 末 callbacks より前。それらは生の重みで実行する）に `epochs_seen >= swa_start` の
+    /// epoch で等重み平均を更新し、fit が `Ok` で終わったとき（学習打ち切りを含む）モデルの重みを
+    /// 平均化重みで上書きする。上書き直前の生の重み（`restore_best_weights` の書き戻し後）は
+    /// [`super::callbacks::SwaCallback::raw_state_dict`] から取り出せる。`Err` 終了では上書きしない。
+    /// 学習率アニールと併用拒否条件は #3059 で導入予定で、現時点では未ガード
+    /// （決定記録 `docs/autodiff-swa-decision.md` §16・§17）。
+    ///
     /// # エラー
     ///
     /// [`Self::fit`] の既存エラー契約に加え:
@@ -3011,6 +3021,22 @@ impl Sequential {
             }
         }
 
+        // (2.8) SWA の初期化・継続時の退避復元（イシュー #3058。生の重みの書き戻しを
+        // 含むため train モード切替前の最後の前処理）。失敗時は EMA と同じ後始末で `Err`。
+        for i in 0..callbacks.len() {
+            let r = match &mut callbacks[i] {
+                Callback::Swa(s) => s.begin_fit(self),
+                _ => Ok(()),
+            };
+            if let Err(e) = r {
+                for cb in callbacks.iter_mut() {
+                    cb.end_fit();
+                }
+                self.compiled = Some(compiled);
+                return Err(e);
+            }
+        }
+
         // (3) train モードへ切り替え（Dropout 入りモデルのマスク適用の
         // ため）。復元は成功・失敗いずれの経路でも必ず行う。
         let prev_training = self.training();
@@ -3577,6 +3603,12 @@ impl Sequential {
                 }
                 history.loss.push((weighted_sum / count as f64) as f32);
 
+                // SWA（イシュー #3058）: 生の重みで epoch 末の平均を更新する。validation と
+                // callbacks は生の重みで走り、EMA の差し替えより前に行う。
+                if let Err(e) = self.swa_update_after_epoch(callbacks) {
+                    break 'epochs_block Err(e);
+                }
+
                 // EMA（イシュー #2560）: epoch 末の validation と callbacks は shadow へ
                 // 差し替えた重みの下で実行し、成功・`Err`・打ち切りのどの経路でも
                 // 生の重みへ復帰してから抜ける。内側の `break 'eval Err(..)` は
@@ -3659,6 +3691,8 @@ impl Sequential {
                             }
                             // EMA は epoch 末の動作を持たない（更新・差し替えは本ブロックの外側）。
                             Callback::Ema(_) => {}
+                            // SWA の更新は epoch 末 callbacks ループの外（上の `swa_update_after_epoch`）。
+                            Callback::Swa(_) => {}
                             Callback::Lambda(l) => {
                                 if let Err(e) = l.invoke(epoch_local, &history) {
                                     break 'eval Err(e);
@@ -3716,7 +3750,31 @@ impl Sequential {
             return Err(e);
         }
 
+        // SWA（イシュー #3058）: `Ok` 終了時のみ平均化重みを適用する（`restore_best_weights` の
+        // 書き戻しの後なので、退避される生の重みは復元後のもの）。
+        self.swa_finish_fit(callbacks)?;
+
         Ok(history)
+    }
+
+    /// `Callback::Swa` があれば epoch 末の平均を更新する（イシュー #3058。`run_fit` から呼ぶ）。
+    fn swa_update_after_epoch(&self, callbacks: &mut [Callback]) -> Result<(), AutodiffError> {
+        for cb in callbacks.iter_mut() {
+            if let Callback::Swa(s) = cb {
+                s.update_after_epoch(self)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `Callback::Swa` があれば fit 正常終了時に平均化重みを適用する（イシュー #3058）。
+    fn swa_finish_fit(&mut self, callbacks: &mut [Callback]) -> Result<(), AutodiffError> {
+        for cb in callbacks.iter_mut() {
+            if let Callback::Swa(s) = cb {
+                s.finish_fit(self)?;
+            }
+        }
+        Ok(())
     }
     /// `Callback::Ema` があれば、直前に適用した重みで shadow を更新する
     /// （イシュー #2560。`run_fit` の step 直後 2 か所から呼ぶ。EMA が無ければ何もしない）。

@@ -80,7 +80,7 @@ mod training;
 pub use array::{ArrayData, array};
 pub use callbacks::{
     Callback, CsvLogger, EarlyStopping, EmaCallback, JsonLogger, LambdaCallback, LrSchedule,
-    ModelCheckpoint, Monitor, MonitorMode,
+    ModelCheckpoint, Monitor, MonitorMode, SwaCallback,
 };
 /// `Sequential::add_multihead_attention_with_config` の引数型（イシュー #2530・ルート #2499 の
 /// 承認形。再エクスポートはこの 1 行のみで `api_surface.rs` が完全一致で固定する）。
