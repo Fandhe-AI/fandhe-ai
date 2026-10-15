@@ -63,8 +63,11 @@
 //! （`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`。実装は `conv` サブモジュール、
 //! 決定記録 §23）を拡張済み。`F32` 以外の `compute_dtype` を持つ `Conv2d`
 //! （低精度 forward）は [`validate_ancestors`] が明示拒否する。`Conv3d`・
-//! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。`MaskedFill`・`Gather`・
-//! `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss`・`L1Loss`・
+//! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。イシュー #3083 で索引・累積族
+//! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
+//! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
+//! `Logcumsumexp` は引き続き対象外（fail-closed）。`MaskedFill`・
+//! `Pad`・`MseLoss`・`CrossEntropyLoss`・`L1Loss`・
 //! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
 //! `CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`・
 //! `PoissonNllLoss`（イシュー #2167。同型の理由で対象外）・
@@ -111,6 +114,7 @@ use crate::tape::{NodeId, Op, Tape, TapeId, TapeNode, materialize_fallible};
 use crate::var::Var;
 
 mod conv;
+mod index_cum;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -465,6 +469,37 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 id.0
             )));
         }
+        // `ScatterReduce` は `#[non_exhaustive]`。未知 variant は子テープへ
+        // 書き込む前にここで拒否する（イシュー #3083。`child.is_empty()` を保つ）。
+        if let Op::Scatter { reduce, .. } = &node.op
+            && !matches!(
+                reduce,
+                fandhe_ai_tensor_core::ScatterReduce::Add
+                    | fandhe_ai_tensor_core::ScatterReduce::Overwrite
+            )
+        {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: 未知の ScatterReduce variant {reduce:?}（NodeId({}))は非対応",
+                id.0
+            )));
+        }
+        // `Embedding` の `padding_idx` は forward で検査済みだが、cgrad が行マスクを
+        // 構築するため入口で範囲を再確認する（境界検査を省略しない。REQ-8）。
+        if let Op::Embedding {
+            weight,
+            padding_idx: Some(p),
+            ..
+        } = &node.op
+        {
+            let w_shape = &parent_nodes[weight.0].shape;
+            if w_shape.len() != 2 || *p >= w_shape[0] {
+                return Err(AutodiffError::Backward(format!(
+                    "create_graph: Embedding の padding_idx={p} が weight shape {w_shape:?} \
+                     の範囲外（NodeId({}))",
+                    id.0
+                )));
+            }
+        }
         if let Op::MatMul(a, b) = node.op {
             let a_rank = parent_nodes[a.0].shape.len();
             let b_rank = parent_nodes[b.0].shape.len();
@@ -702,6 +737,28 @@ fn replay_op<'c>(
         Op::Fold { input, params } => {
             conv::replay_fold(shape, &get_mirror(mirror, input)?, &params)
         }
+        // 索引・累積族（イシュー #3083。方式は `index_cum` モジュール doc 参照）。
+        // `Sort`／`Topk`／`Cummax`／`Cummin` は値の選択のみのため `gather` で再生する。
+        Op::Gather { input, dim, index }
+        | Op::Sort { input, dim, index }
+        | Op::Topk { input, dim, index }
+        | Op::Cummax { input, dim, index }
+        | Op::Cummin { input, dim, index } => get_mirror(mirror, input)?.gather(dim, &index),
+        Op::Embedding { weight, index, .. } => get_mirror(mirror, weight)?.gather(0, &index),
+        Op::Scatter {
+            input,
+            dim,
+            index,
+            src,
+            reduce,
+        } => index_cum::replay_scatter(
+            &get_mirror(mirror, input)?,
+            &get_mirror(mirror, src)?,
+            dim,
+            &index,
+            reduce,
+        ),
+        Op::Cumsum { input, dim } => get_mirror(mirror, input)?.cumsum(dim),
         // `cond` は forward 時点（`Var::where_cond`）で `a`／`b` と
         // 同じ `out_shape` へ broadcast 済みの f32 マスク（`c != 0.0`
         // 判定契約。`Op::Where` doc 参照）として `Op` へ焼き込まれて
@@ -1607,6 +1664,65 @@ fn build_cgrads<'c>(
             Op::Fold { input, params } => {
                 let d = conv::fold_vjp(&g, &params)?;
                 accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
+            // 索引・累積族（イシュー #3083。方式は `index_cum` モジュール doc 参照）。
+            Op::Gather { input, dim, index }
+            | Op::Sort { input, dim, index }
+            | Op::Topk { input, dim, index }
+            | Op::Cummax { input, dim, index }
+            | Op::Cummin { input, dim, index } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = index_cum::gather_like_vjp(child, &g, &input_shape, dim, &index)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Embedding {
+                weight,
+                index,
+                padding_idx,
+            } => {
+                if parent_nodes[weight.0].requires_grad {
+                    let weight_shape = parent_nodes[weight.0].shape.clone();
+                    let d =
+                        index_cum::embedding_vjp(child, &g, &weight_shape, &index, padding_idx)?;
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+            }
+            Op::Scatter {
+                input,
+                dim,
+                index,
+                src,
+                reduce,
+            } => {
+                let input_shape = parent_nodes[input.0].shape.clone();
+                let src_shape = parent_nodes[src.0].shape.clone();
+                let r = index_cum::scatter_vjp(
+                    child,
+                    &g,
+                    &index_cum::ScatterSpec {
+                        input_shape: &input_shape,
+                        src_shape: &src_shape,
+                        dim,
+                        index: &index,
+                        reduce,
+                    },
+                    parent_nodes[input.0].requires_grad,
+                    parent_nodes[src.0].requires_grad,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_src {
+                    accumulate(&parent_nodes, &mut cgrads, src, d)?;
+                }
+            }
+            Op::Cumsum { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = index_cum::cumsum_cgrad(child, &g, dim)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
             }
             _ => {
                 return Err(AutodiffError::Backward(

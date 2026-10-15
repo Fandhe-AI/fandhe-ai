@@ -5955,7 +5955,7 @@ fn interpolate_area_vjp(
 /// バックエンドクレートへ依存できないため重複実装する。
 /// `.claude/rules/coding-rust.md`）。`index` の値は呼び出し元
 /// （`Var::scatter`／`scatter_add` の forward）が範囲検査済みの前提。
-fn scatter_overwrite_last_writer_mask(
+pub(crate) fn scatter_overwrite_last_writer_mask(
     index: &Tensor<i32>,
     dim: usize,
     input_shape: &[usize],
@@ -7348,7 +7348,7 @@ fn adaptive_avg_pool2d_vjp(
 /// lane ごとに `f64` の和を保持し、各ステップで直前の要素を加算して
 /// から、その時点の和を書き出す（末尾要素の勾配は `g[n-1]` そのもの、
 /// 以降は逆順に累積していく）。
-fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+pub(crate) fn cumsum_vjp_along(upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
     let shape = upstream.shape().to_vec();
     // `softmax_vjp_along` と同じ早期 return（部分積オーバーフロー
     // 回避）。
