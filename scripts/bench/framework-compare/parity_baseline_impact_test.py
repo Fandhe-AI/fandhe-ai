@@ -247,8 +247,8 @@ class ComputeScaleTest(unittest.TestCase):
 
 class ClassifyTest(unittest.TestCase):
     """`threshold` は既定 `None` だと `classify()` 内部で
-    `get_absolute_rescue_threshold()`（正本 `crates/backend-cpu/src/
-    parity.rs` を実ファイル読み取り）へフォールバックし、本テストが前提と
+    `get_absolute_rescue_threshold()`（正本 `crates/tensor-core/src/
+    tolerance.rs` を実ファイル読み取り）へフォールバックし、本テストが前提と
     する fixture-only 環境（実ファイル非依存）が崩れる（codex-review
     指摘・PR #1421）。本クラスの全ケースは実測済みの正本値（1e-5。
     `AbsoluteRescueThresholdTest.test_matches_backend_cpu_contract` で
@@ -335,7 +335,7 @@ class ClassifyTest(unittest.TestCase):
 
 class AbsoluteRescueThresholdTest(unittest.TestCase):
     """`ABSOLUTE_RESCUE_THRESHOLD` の抽出（codex-review 指摘・PR #1421
-    P1）が正本 `crates/backend-cpu/src/parity.rs` の値と一致することを
+    P1）が正本 `crates/tensor-core/src/tolerance.rs` の値（backend-cpu は再エクスポート）と一致することを
     機械照合する。`summarize_test.py::ToleranceDriftTests` と同趣旨。
     """
 
@@ -357,6 +357,30 @@ class AbsoluteRescueThresholdTest(unittest.TestCase):
     def test_missing_const_is_fail_closed(self):
         with self.assertRaises(pbi.BaselineParseError):
             pbi._extract_f64_const("no such constant here", "ABSOLUTE_RESCUE_THRESHOLD")
+
+    def test_backend_cpu_reexports_canonical_constants(self):
+        if not os.path.isfile(pbi._BACKEND_CPU_REEXPORT_PATH):
+            self.skipTest("crates/ を含まない実行環境のため skip（実行環境制約）")
+        pbi.verify_backend_cpu_reexport()
+
+    def test_reexport_missing_is_fail_closed(self):
+        import tempfile
+
+        cases = (
+            "pub const RELATIVE_TOLERANCE: f64 = 1e-3;\n",
+            "pub use fandhe_ai_tensor_core::tolerance::{RELATIVE_TOLERANCE};\n",
+            "// pub use fandhe_ai_tensor_core::tolerance::{RELATIVE_TOLERANCE, ABSOLUTE_RESCUE_THRESHOLD};\n",
+        )
+        for body in cases:
+            with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as f:
+                f.write(body)
+            try:
+                with self.assertRaises(pbi.BaselineParseError, msg=body):
+                    pbi.verify_backend_cpu_reexport(path=f.name)
+            finally:
+                os.unlink(f.name)
+        with self.assertRaises(pbi.BaselineParseError):
+            pbi.verify_backend_cpu_reexport(path="/nonexistent/parity.rs")
 
     def test_missing_file_is_fail_closed(self):
         with self.assertRaises(pbi.BaselineParseError):

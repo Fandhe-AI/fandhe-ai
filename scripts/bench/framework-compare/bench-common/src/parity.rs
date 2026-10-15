@@ -42,7 +42,8 @@ use crate::BenchError;
 
 /// 本体 `backend-cpu::parity::RELATIVE_TOLERANCE` と同値の相対誤差閾値。
 ///
-/// **正は `crates/backend-cpu/src/parity.rs::RELATIVE_TOLERANCE`**。本
+/// **正は `crates/tensor-core/src/tolerance.rs::RELATIVE_TOLERANCE`**
+/// （`backend-cpu::parity` は再エクスポート）。本
 /// ワークスペースは独立 workspace（`.claude/rules/deps-policy.md` 第 9
 /// 区分）のため本体クレートへ path 依存できず、値をここへ再定義する
 /// 以外の選択肢がない。乖離は `tests::parity_tolerances_match_backend_cpu_contract`
@@ -1731,8 +1732,39 @@ mod tests {
         );
     }
 
+    /// `backend-cpu::parity` が正本（tensor-core）の同名 2 定数を `pub use` で
+    /// 再エクスポートしていることを確認する。外れると上の照合は正本だけを見るため
+    /// backend-cpu の実判定とのずれを検出できなくなる（fail-closed に panic）。
+    #[test]
+    fn backend_cpu_reexports_canonical_tolerances() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../crates/backend-cpu/src/parity.rs");
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "本体 backend-cpu parity.rs を読めない（{}）: {err}",
+                path.display()
+            )
+        });
+        let needle = "pub use fandhe_ai_tensor_core::tolerance::{";
+        let start = source
+            .lines()
+            .position(|l| l.starts_with(needle))
+            .unwrap_or_else(|| {
+                panic!("backend-cpu parity.rs に `{needle}` の再エクスポートが無い")
+            });
+        let decl: String = source.lines().skip(start).collect::<Vec<_>>().join("\n");
+        let end = decl.find("};").expect("再エクスポートの終端 `};` が無い");
+        let list = &decl[needle.len()..end];
+        for name in ["RELATIVE_TOLERANCE", "ABSOLUTE_RESCUE_THRESHOLD"] {
+            assert!(
+                list.split(',').any(|n| n.trim() == name),
+                "{name} が backend-cpu parity.rs で再エクスポートされていない"
+            );
+        }
+    }
+
     /// `pub const <name>: f64 = <value>;` 形式の宣言から数値を取り出す。
-    /// 本体 `crates/backend-cpu/src/parity.rs` の宣言スタイル固定を前提に
+    /// 本体 `crates/tensor-core/src/tolerance.rs` の宣言スタイル固定を前提に
     /// した簡易パーサー（正規表現クレートを追加しないため文字列走査で
     /// 十分。宣言が見つからない・数値化できない場合は fail-closed に
     /// panic する）。

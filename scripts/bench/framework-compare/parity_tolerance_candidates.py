@@ -37,7 +37,7 @@
 
 `docs/perf/cuda-gemm-candle-gate-remeasurement.md` §5 は N=2048 で candle 側
 CUDA/CPU GEMM 出力が現行複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
-未満。`crates/backend-cpu/src/parity.rs::RELATIVE_TOLERANCE`/
+未満。`crates/tensor-core/src/tolerance.rs::RELATIVE_TOLERANCE`/
 `ABSOLUTE_RESCUE_THRESHOLD`）を各 2 要素ずつ外れ「判定不能」になることを
 記録し、`parity_dump_truth.py`（イシュー #1184）はその fail 要素が
 「累積過程で膨らんだ部分和がキャンセレーションで縮小した通常の丸め誤差」

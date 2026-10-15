@@ -105,8 +105,8 @@ _CAND_SPEC.loader.exec_module(parity_tolerance_candidates)
 
 
 # ---------------------------------------------------------------------------
-# 既存救済（既存複合判定）の絶対誤差閾値を正本 `crates/backend-cpu/src/
-# parity.rs::ABSOLUTE_RESCUE_THRESHOLD` から直接抽出する（ハードコード
+# 既存救済（既存複合判定）の絶対誤差閾値を正本 `crates/tensor-core/src/
+# tolerance.rs::ABSOLUTE_RESCUE_THRESHOLD` から直接抽出する（ハードコード
 # 分離・乖離検出のため。`summarize_test.py::_extract_f64_const` と同じ
 # 抽出方式を用いる。codex-review 指摘・PR #1421 P1。値そのものの変更は
 # `.claude/rules/coding-rust.md` によりユーザー承認必須のためこの
@@ -116,6 +116,39 @@ _CAND_SPEC.loader.exec_module(parity_tolerance_candidates)
 _BACKEND_CPU_PARITY_PATH = os.path.join(
     _HERE, "..", "..", "..", "crates", "tensor-core", "src", "tolerance.rs"
 )
+
+# 本体 backend-cpu 側の再エクスポート元（`parity::RELATIVE_TOLERANCE` 等の公開パス）。
+_BACKEND_CPU_REEXPORT_PATH = os.path.join(
+    _HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+)
+_REEXPORT_NAMES = ("RELATIVE_TOLERANCE", "ABSOLUTE_RESCUE_THRESHOLD")
+
+
+def verify_backend_cpu_reexport(path: str = _BACKEND_CPU_REEXPORT_PATH) -> None:
+    """`backend-cpu::parity` が正本（tensor-core）の同名 2 定数を `pub use` で
+    再エクスポートしていることを確認する（fail-closed）。再エクスポートが外れる
+    （backend-cpu 側で別値を再定義する等）と、正本だけを読む本スクリプトが
+    backend-cpu の実判定とずれるため、ここで検出する。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            source = f.read()
+    except OSError as err:
+        raise BaselineParseError(
+            f"本体 backend-cpu parity.rs を読めない（{path}）: {err}。パスがずれていないか確認すること"
+        ) from err
+    match = re.search(
+        r"^pub use fandhe_ai_tensor_core::tolerance::\{([^}]*)\};", source, re.MULTILINE
+    )
+    exported = (
+        {n.strip() for n in match.group(1).split(",") if n.strip()} if match else set()
+    )
+    missing = [n for n in _REEXPORT_NAMES if n not in exported]
+    if missing:
+        raise BaselineParseError(
+            "backend-cpu parity.rs が tensor-core::tolerance の "
+            f"{missing} を `pub use` で再エクスポートしていない（正本とのずれの可能性）"
+        )
 
 
 def _extract_f64_const(source: str, name: str) -> float:
@@ -145,6 +178,7 @@ def load_absolute_rescue_threshold(path: str = _BACKEND_CPU_PARITY_PATH) -> floa
         raise BaselineParseError(
             f"本体 tolerance.rs を読めない（{path}）: {err}。パスがずれていないか確認すること"
         ) from err
+    verify_backend_cpu_reexport()
     return _extract_f64_const(source, "ABSOLUTE_RESCUE_THRESHOLD")
 
 
@@ -459,7 +493,7 @@ def classify(
     """`bound` に対する 1 行の 3 クラス分類。
 
     `threshold` は既存救済（既存複合判定）の絶対誤差閾値。省略時は正本
-    `crates/backend-cpu/src/parity.rs::ABSOLUTE_RESCUE_THRESHOLD` から
+    `crates/tensor-core/src/tolerance.rs::ABSOLUTE_RESCUE_THRESHOLD` から
     読み取った値（`get_absolute_rescue_threshold()`）を使う。値を直書き
     すると正本が変更された際に無断で乖離するため（codex-review 指摘・
     PR #1421 P1）、呼び出し側でのハードコードは避けること。
@@ -741,8 +775,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     # `render_markdown` は内部の `classify()` 経由で `threshold` 省略時に
-    # `get_absolute_rescue_threshold()`（正本 `crates/backend-cpu/src/
-    # parity.rs` を実ファイル読み取り）を呼ぶため、`parse_baselines` とは
+    # `get_absolute_rescue_threshold()`（正本 `crates/tensor-core/src/
+    # tolerance.rs` を実ファイル読み取り）を呼ぶため、`parse_baselines` とは
     # 別に `BaselineParseError` を送出しうる（正本ファイル欠落・宣言スタイル
     # 変更）。`parse_baselines` 同様 fail-closed で捕捉する（PR #1421
     # レビュー指摘）。

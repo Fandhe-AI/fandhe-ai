@@ -885,8 +885,8 @@ def _devices_in_train_infer(rows, task, mode="fresh"):
 # 本体の数値一致契約と同一（`.claude/rules/coding-rust.md`「バックエンド構成」節）:
 # 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。ここを緩めない。
 #
-# 正は `crates/backend-cpu/src/parity.rs`（RELATIVE_TOLERANCE /
-# ABSOLUTE_RESCUE_THRESHOLD）。本ハーネスは独立 workspace（deps-policy.md
+# 正は `crates/tensor-core/src/tolerance.rs`（RELATIVE_TOLERANCE /
+# ABSOLUTE_RESCUE_THRESHOLD。`backend-cpu::parity` は再エクスポート）。本ハーネスは独立 workspace（deps-policy.md
 # 第 9 区分）で本体クレートを import できないため値をここへ再定義して
 # いるが、本体側だけが変更されると静かに乖離しうる。乖離は
 # `summarize_test.py::ToleranceDriftTests` が本体ソースを直接読んで
