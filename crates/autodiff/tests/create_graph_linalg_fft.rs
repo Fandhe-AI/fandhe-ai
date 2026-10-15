@@ -1,6 +1,6 @@
 //! 線形代数 Op（`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`）と FFT 4 件（`Rfft`・`Irfft`・`Fft`・
 //! `Ifft`）の `create_graph`（`Tape::backward_create_graph`）対応（イシュー #3086・親 #3076・決定記録
-//! `docs/autodiff-higher-order-grad-decision.md` §21.2・§29）の受け入れ条件を直接検証する統合テスト。
+//! `docs/autodiff-higher-order-grad-decision.md` §21.2・§30）の受け入れ条件を直接検証する統合テスト。
 //!
 //! - Hessian を `Tape::backward` の 5 点中央差分（`create_graph` を経由しない独立経路）と REQ-2 統一
 //!   複合判定（`common::req2_close`）で突合する（FFT は norm 3 種 × 長さ縮小／同長／拡大 × rank 1／2・
@@ -8,7 +8,7 @@
 //!   まとめて混合項も検査する）。
 //! - `cg.first_order()` が `Tape::backward` と bit 同一、`cg.grad(..)` が REQ-2 判定で一致する。
 //! - 閉包性: 子テープ上の勾配を孫テープへ再生（`child.backward_create_graph`）しても二階の値が一致する。
-//! - 総括的な適用判定（決定記録 §29）: 拒否域の入力は `Err(Backward)` かつ `child.is_empty()`、
+//! - 総括的な適用判定（決定記録 §30）: 拒否域の入力は `Err(Backward)` かつ `child.is_empty()`、
 //!   拒否のあと同じ `child` で再試行できる。ほどほどの大きさの入力は受理され全段が有限で一致する。
 //! - fail-closed に固定した 15 件（`Stft`・`Istft`・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・
 //!   `QrQ`／`QrR`・`SvdU`／`SvdS`／`SvdVh`・`EighValues`／`EighVectors`・`SlogdetSign`・`MatrixRank`）が
@@ -535,7 +535,7 @@ fn solve_overflowing_state_is_rejected() {
 
 #[test]
 fn det_large_input_is_rejected() {
-    // diag(1e20, 1e20): det = 1e40 は f32 を超える（V3 が必要な域。本 issue では拒否。§29）。
+    // diag(1e20, 1e20): det = 1e40 は f32 を超える（V3 が必要な域。本 issue では拒否。§30）。
     assert_rejected_and_child_reusable(
         "det diag(1e20)",
         |_tape, x| x.det(),

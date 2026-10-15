@@ -1,6 +1,6 @@
 //! 線形代数 Op（`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`）と FFT 4 件（`Rfft`・`Irfft`・
 //! `Fft`・`Ifft`）の `create_graph` 対応（イシュー #3086・親 #3076・決定記録
-//! `docs/autodiff-higher-order-grad-decision.md` §21.2・§29）。
+//! `docs/autodiff-higher-order-grad-decision.md` §21.2・§30）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `replay_op`（forward 再生）・`build_cgrads`
 //! （1 階 VJP の子テープ記録）・`validate_ancestors`（入口の事前拒否）から呼ばれる。
@@ -173,7 +173,7 @@ fn stage_ok(v: f64) -> bool {
 
 fn reject(what: &str) -> AutodiffError {
     invalid(format!(
-        "{what}（f32 の子テープ構造が f64 の 1 階と食い違いうる入力。決定記録 §29。\
+        "{what}（f32 の子テープ構造が f64 の 1 階と食い違いうる入力。決定記録 §30。\
          拒否は保守的で、実際に overflow するとは限らない）"
     ))
 }

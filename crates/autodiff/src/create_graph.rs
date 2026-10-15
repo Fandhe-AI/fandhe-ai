@@ -67,8 +67,9 @@
 //! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。イシュー #3083 で索引・累積族
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
-//! `Logcumsumexp` は引き続き対象外（fail-closed）。`MaskedFill`・`Pad` は引き続き対象外。
-//! イシュー #3086（決定記録 §29）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
+//! `Logcumsumexp` は引き続き対象外（fail-closed）。イシュー #3084 で `Pad`・`PadMode`・`MaskedFill`
+//! （実装は `pad_mask` サブモジュール、決定記録 §29）を拡張済み。
+//! イシュー #3086（決定記録 §30）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
 //! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
 //! `Stft`・`Istft`・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・
 //! `SlogdetSign`・`MatrixRank` の 15 件は fail-closed に固定した。
@@ -123,6 +124,7 @@ use crate::var::Var;
 mod conv;
 mod index_cum;
 mod linalg_fft;
+mod pad_mask;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -832,6 +834,16 @@ fn replay_op<'c>(
             reduce,
         ),
         Op::Cumsum { input, dim } => get_mirror(mirror, input)?.cumsum(dim),
+        // Pad 族（イシュー #3084）。forward の検証（上限・確保・shape）を迂回しないよう
+        // 公開 `Var` メソッド／`pad_with_mode` へ委譲する。`mask` は forward 時点で
+        // 出力 shape へ broadcast 済みの f32（`c != 0.0`）。
+        Op::Pad { input, pads, value } => get_mirror(mirror, input)?.pad(&pads, value),
+        Op::MaskedFill { input, mask, value } => {
+            get_mirror(mirror, input)?.masked_fill(&f32_mask_to_bool(&mask)?, value)
+        }
+        Op::PadMode { input, pads, mode } => {
+            crate::pad_ops::pad_with_mode(&get_mirror(mirror, input)?, &pads, mode)
+        }
         // `cond` は forward 時点（`Var::where_cond`）で `a`／`b` と
         // 同じ `out_shape` へ broadcast 済みの f32 マスク（`c != 0.0`
         // 判定契約。`Op::Where` doc 参照）として `Op` へ焼き込まれて
@@ -2074,6 +2086,27 @@ fn build_cgrads<'c>(
                 if parent_nodes[input.0].requires_grad {
                     let input_shape = parent_nodes[input.0].shape.clone();
                     let d = index_cum::gather_like_vjp(child, &g, &input_shape, dim, &index)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // Pad 族（イシュー #3084。方式は `pad_mask` モジュール doc 参照）。
+            Op::Pad { input, pads, .. } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = pad_mask::pad_cgrad(&g, &input_shape, &pads)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::MaskedFill { input, mask, .. } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = pad_mask::masked_fill_cgrad(child, &g, &f32_mask_to_bool(&mask)?)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::PadMode { input, pads, mode } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = pad_mask::pad_mode_cgrad(child, &g, &input_shape, &pads, mode)?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }

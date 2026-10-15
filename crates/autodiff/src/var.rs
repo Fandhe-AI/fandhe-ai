@@ -3314,8 +3314,8 @@ impl<'t> Var<'t> {
     /// ときのみホスト参照実装 `eval::pad` へフォールバック。確保前
     /// 上限検査もここで再実行する——唯一の確保前チェックポイント）
     /// → ④戻り shape 検証（`.claude/rules/security.md` A08）→
-    /// ⑤`push_eager`（非融合・常実体化。`value` は forward 記録値へ
-    /// 焼き込み済みのため `Op::Pad` 自身は保持しない）。
+    /// ⑤`push_eager`（非融合・常実体化。`value` は子テープの forward 再生
+    /// （`create_graph`。イシュー #3084）専用に `Op::Pad` へ保持する。VJP は使わない）。
     pub fn pad(&self, pads: &[(usize, usize)], value: f32) -> Result<Var<'t>, AutodiffError> {
         let in_shape = self.shape();
         let out_shape = pad_out_shape(&in_shape, pads).map_err(AutodiffError::Shape)?;
@@ -3350,6 +3350,7 @@ impl<'t> Var<'t> {
             Op::Pad {
                 input: self.id,
                 pads: pads.to_vec(),
+                value,
             },
             value_out,
         );
@@ -4436,6 +4437,7 @@ impl<'t> Var<'t> {
             Op::MaskedFill {
                 input: self.id,
                 mask: mask_f32,
+                value,
             },
             value_out,
         );
