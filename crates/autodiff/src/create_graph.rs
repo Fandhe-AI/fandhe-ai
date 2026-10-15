@@ -904,8 +904,6 @@ fn log_softmax_cgrad_v3<'c>(
     let g_value = child_value(child, g)?;
     let s_lane = lane_scale(&g_value, dim)?;
     let pieces = log_softmax_split_count(out_value, &g_value, &s_lane, dim);
-    let s_c = child.var_no_grad(&s_lane).broadcast_to(&shape)?;
-    let gs = g.div(&s_c)?;
     // 二階の逆伝播の保護（codex-review 指摘・PR #3344。決定記録 §24.1b）:
     // `exp(y)·Σgs` の係数 `Σgs`（最大 `n`）が `exp` ノードへの寄与 `-s·Σgs`
     // を f32 範囲外へ押し出す。`q = exp(y + ln n) = n·p`・`mean_gs = Σgs / n`
@@ -918,18 +916,22 @@ fn log_softmax_cgrad_v3<'c>(
     let n_lane = shape[dim] as f32;
     let ln_n = child.var_no_grad(&Tensor::full(&shape, n_lane.ln())?);
     let inv_nk = child.var_no_grad(&Tensor::full(&shape, 1.0 / (n_lane * pieces as f32))?);
-    let mean_gs_k = reduce_dim_bcast(&gs, dim, &shape)?.mul(&inv_nk)?;
+    // `s ⊙ (gs − q·mean_gs) = g − q·mean_g` と恒等変形し、`s` を掛ける積を
+    // 作らない（codex-review 指摘・PR #3344。入力依存の `g` でも `mean_gs_k`
+    // 側へ `-s·q`（最大 `n·s`）が逆伝播しない）。`mean_g_k = Σ(g/(n·pieces))`
+    // は各項 `≤ max|g|/n` で縮約が overflow しない。
+    let mean_g_k = reduce_dim_bcast(&g.mul(&inv_nk)?, dim, &shape)?;
     let mut sub: Option<Var<'c>> = None;
     for _ in 0..pieces {
         let y_k = x_m.log_softmax(dim)?;
-        let term = y_k.add(&ln_n)?.exp().mul(&mean_gs_k)?;
+        let term = y_k.add(&ln_n)?.exp().mul(&mean_g_k)?;
         sub = Some(match sub {
             Some(acc) => acc.add(&term)?,
             None => term,
         });
     }
     let sub = sub.ok_or_else(|| AutodiffError::Backward("LogSoftmax 分割数が 0".into()))?;
-    let composed = gs.sub(&sub)?.mul(&s_c)?;
+    let composed = g.sub(&sub)?;
     let host = crate::grad::log_softmax_vjp_dispatch(child.ops(), out_value, &g_value, dim)?;
     push_v3(child, &composed, host)
 }

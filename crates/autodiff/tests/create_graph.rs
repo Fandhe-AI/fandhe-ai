@@ -2911,6 +2911,43 @@ fn create_graph_log_softmax_skewed_large_upstream_second_order_is_finite() {
     assert_large_scale_hessian(true, [0.0, 9.0f32.ln()], [3e38, 3e38]);
 }
 
+// codex-review 指摘（PR #3344）: 上流勾配 `g` が入力依存（`loss = Σ y²·5e37`）
+// の場合に `mean_gs` 側へ `-s·q`（≈ 4.14e38）が逆伝播して Hessian が
+// 汚染されていた。真の Hessian は各要素約 ±1.04e38 で有限。
+#[test]
+fn create_graph_log_softmax_input_dependent_large_upstream_hessian_is_finite() {
+    fn build<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let y = x.log_softmax(1)?;
+        let c = tape.var_no_grad(&t(vec![5e37f32; 2], &[1, 2]));
+        y.mul(&y)?.mul(&c)?.sum(None)
+    }
+    let x0 = [9.0f32.ln(), 0.0];
+    let h = analytic_hessian(build, &x0, &[1, 2]);
+    // f64 閉形式: loss = c Σ y², y = x - lse。H = 2c·Σ_i(J_ik J_ij + y_i ∇²y_i)。
+    let p = [0.9f64, 0.1];
+    let y = [p[0].ln(), p[1].ln()];
+    let c = 5e37f64;
+    for k in 0..2 {
+        for j in 0..2 {
+            let d = |a: usize, b: usize| if a == b { 1.0 } else { 0.0 };
+            // J[i][k] = δ_ik - p_k。∇²y_i[k][j] = -p_k(δ_kj - p_j)。
+            let mut e = 0.0;
+            for i in 0..2 {
+                let jk = d(i, k) - p[k];
+                let jj = d(i, j) - p[j];
+                e += 2.0 * jk * jj + 2.0 * y[i] * (-p[k] * (d(k, j) - p[j]));
+            }
+            let expected = c * e;
+            let got = h[k][j];
+            assert!(got.is_finite(), "Hessian[{k}][{j}] が非有限: {h:?}");
+            assert!(
+                (got - expected).abs() <= 1e-3 * expected.abs() + 1e-5,
+                "Hessian[{k}][{j}] {got} vs {expected}"
+            );
+        }
+    }
+}
+
 #[test]
 fn create_graph_softmax_skewed_large_upstream_second_order_is_finite() {
     assert_large_scale_hessian(false, [9.0f32.ln(), 0.0], [3e38, -3e38]);
