@@ -42,14 +42,27 @@
 //!   (d) `eps == 0` で `max|x_i − x_0|` が `2^-100` 未満（定数行・極小偏差行。`rstd=inf`）
 //! - `RmsNorm`: (a) 非有限要素 (d') `eps == 0` の全ゼロ行
 //!
-//! # 既知の限界
+//! # 総括的な適用判定（構造段の上界。決定記録 §27.3）
 //!
-//! `dxhat = g·w` は行ごとの 2 のべき乗 `gs` で割ってから縮約し、最後に `gs` を掛けて復元する
-//! （`g=[3e38,3e38]` でも `Mean(dxhat⊙xhat)` が overflow しない）。`g` が非有限、または
-//! `g·w` が f32 に収まらない、または `hidden·max(1,rstd)·max|g·w|` が `2^125` 以上の場合は構築時に
-//! `Err(Backward)` で拒否する（逆伝播の行方向縮約の overflow を避けるため）。
-//! `dw`／`db` の行方向 `Sum` は 1 階も f32 要素積のため、行をまたぐ合計の overflow は残る
-//! （決定記録 §27.3）。
+//! 上の入口検査は親の `x` だけで決まる。upstream `g`・`w`・`rstd` の組み合わせで構造の
+//! 中間値が f32 を超える経路（`g=3e38` の縮約、`hidden·g` 規模の cotangent 和、低分散行の
+//! `rstd` 増幅、`w=0` で `g·w` 検査を素通りする dw 経路の `rstd_s` cotangent 等。いずれも
+//! PR #3346 のレビュー指摘）は個別条件では網羅できないため、子テープの構造を組む前に
+//! [`check_structure_stages`] が **構造の各段を f64 で再計算し、その絶対値の上界**を一括で
+//! 判定する。対象は dx／dw／db 構造の forward の各段（行方向和・行をまたぐ和を含む）と、
+//! 二階の逆伝播（`cg.grad` の出力へ入る cotangent の各要素が絶対値 1 以下という前提）で
+//! 各段に現れる cotangent・部分和・微分係数との積の上界で、境界ノード（`x`・`w`・`g` の
+//! 写し）へ出る cotangent までを含む。どれか 1 段でも `2^125` 以上（または非有限）なら
+//! `Err(Backward)` で拒否する（`child` は `backward_create_graph` のロールバックで空へ戻る）。
+//! 上界は符号を見ない最悪値なので、拒否は「実際に overflow する」ことを意味しない
+//! （保守的な拒否。構造の forward 出力も判定するので、1 階の値が有限でも `2^125` 以上なら
+//! 拒否する。孫テープ再生では `Op::Contiguous` が構造の f32 値を再計算するため）。
+//! 上に挙げた個別の経路は既知の失敗例であり、網羅を主張するのはこの判定の方である。
+//! 保証は判定を通った入力に限り、判定を通った入力では 1 階・`cg.grad`・二階（seed の各要素の
+//! 絶対値 ≤ 1）・孫テープ再生が有限で、`cg.grad` は 1 階と REQ-2 判定で一致する。孫テープ側で
+//! 子テープ上の正規化の写しが再び微分される場合は、そこでも同じ判定が走り、通らなければ同じく
+//! 型付きエラーになる。`g` を作る上流の Op の逆伝播、絶対値 1 を超える seed、三階以上の微分は
+//! 対象外。
 
 use fandhe_ai_tensor_core::{BackendOps, Tensor, row_norm_layout};
 
@@ -61,6 +74,11 @@ use crate::var::Var;
 
 /// `Mean`（f32 部分和）が overflow しうるとみなす閾値 `2^125`（f32 最大値 `2^128` に対する余裕）。
 const MEAN_OVERFLOW_GUARD: f64 = 4.253_529_586_511_73e37;
+/// 総括的な適用判定（[`check_structure_stages`]）で、構造の 1 段の上界がこれ以上なら拒否する
+/// 閾値 `2^125`（`MEAN_OVERFLOW_GUARD` と同値）。上界は f64 で符号を見ない最悪値として求めるので
+/// 部分和の順序には依存しない。f32 最大値 `2^128` との 8 倍の差は、f32 丸めの累積と
+/// 「seed の絶対値 1 以下」の前提の外側へのわずかな余裕として置く。
+const STAGE_BOUND_GUARD: f64 = MEAN_OVERFLOW_GUARD;
 /// `eps == 0` の `LayerNorm` で「偏差が極小で `rstd` を安全に作れない」とみなす閾値 `2^-100`。
 const TINY_DEVIATION_GUARD: f64 = 7.888_609_052_210_118e-31;
 
@@ -214,73 +232,234 @@ fn scale_consts<'c>(
     Ok((child.var_no_grad(&s_t), child.var_no_grad(&e_t)))
 }
 
-/// 行ごとの真の `rstd = 1/√(var_or_ms + eps)`（f64）。`centered == true` は LayerNorm
-/// （平均を引いた分散）、`false` は RmsNorm（二乗平均）。`upstream_scale` の増幅項に使う。
-fn row_rstd(data: &[f32], rows: usize, hidden: usize, eps: f32, centered: bool) -> Vec<f64> {
-    (0..rows)
-        .map(|r| {
-            let row = &data[r * hidden..(r + 1) * hidden];
-            let n = hidden as f64;
-            let mean = if centered {
-                row.iter().map(|&v| f64::from(v)).sum::<f64>() / n
+/// [`check_structure_stages`] の入力。`rms_norm_cgrads`／`layer_norm_cgrads` が構造を組む直前に
+/// 組み立てる。`src` は構造が `x/s` に使う行データ（`RmsNorm` は `x`、`LayerNorm` は子テープ上の
+/// `dev2` の実値）、`exps` はその行スケール `s` の指数で、どちらも構造と同じ値を渡す。
+struct StageCheck<'a> {
+    /// `LayerNorm`（中心化と `mean_dxhat` 項を持つ）なら `true`。
+    centered: bool,
+    src: &'a [f32],
+    exps: &'a [i32],
+    eps: f32,
+    /// 子テープ上の upstream `g` の実値（`[rows, hidden]` の密）。
+    dy: &'a [f32],
+    w: Option<&'a [f32]>,
+    rows: usize,
+    hidden: usize,
+    /// dx／dw／db の各構造を実際に組むか（追跡されている寄与先だけ）。
+    build_dx: bool,
+    build_dw: bool,
+    build_db: bool,
+    /// 子テープ上の `x`・`g`・`w` の写しが勾配を受け取るか。受け取らないノードへの cotangent は
+    /// `backward.rs` が捨てるので判定しない（`Tape::backward` の `requires_grad` 規約）。
+    x_tracked: bool,
+    g_tracked: bool,
+    w_tracked: bool,
+}
+
+/// 構造の 1 段の上界 `v` を判定する。非有限または `2^125` 以上なら型付きエラー。
+fn stage(v: f64, what: &str) -> Result<(), AutodiffError> {
+    if v.is_finite() && v.abs() < STAGE_BOUND_GUARD {
+        Ok(())
+    } else {
+        Err(reject(&format!(
+            "構造段の上界判定: {what} の上界 {v:e} が 2^125 以上で f32 の安全域を外れる"
+        )))
+    }
+}
+
+/// 総括的な適用判定（モジュール doc「総括的な適用判定」・決定記録 §27.3）。`rms_norm_cgrads`／
+/// `layer_norm_cgrads` が子テープへ構造を積む前に呼ぶ。dx／dw／db 構造の forward の各段を f64 で
+/// 再計算し、二階の逆伝播の各段の cotangent の上界を「`cg.grad` 出力への seed の各要素が絶対値
+/// 1 以下」として f64 で積み上げ、どれか 1 段でも f32 の安全域（`2^125` 未満）を外れれば拒否する。
+/// 上界は構造の演算順（`binary_partials` の `Div` 係数 `-(a/b)/b`・`Sqrt` の `0.5/y`・`Mean` の
+/// `1/hidden` を含む）を逐語でなぞり、各段の「cotangent × 微分係数」と行方向の部分和を三角不等式で
+/// 押さえる。定数葉（`s`・`gs`・`gs/hidden`・`eps/s²`）への寄与は捨てられるので判定しない。
+/// 戻り値は dx 構造が使う upstream スケール `gs` の行ごとの指数（`build_dx == false` なら空）。
+fn check_structure_stages(c: &StageCheck<'_>) -> Result<Vec<i32>, AutodiffError> {
+    let h = c.hidden;
+    let n = h as f64;
+    if c.dy.iter().any(|v| !v.is_finite()) {
+        return Err(reject("upstream に非有限要素がある"));
+    }
+    let wv = |i: usize| c.w.map_or(1.0, |w| f64::from(w[i]));
+    let mut gs_exps = Vec::with_capacity(if c.build_dx { c.rows } else { 0 });
+    // 行をまたぐ和（dw／db 構造の `Sum(0)` と、w への cotangent の行方向蓄積）。
+    let mut col_dw = vec![0.0f64; h];
+    let mut col_db = vec![0.0f64; h];
+    let mut a_w = vec![0.0f64; h];
+    for r in 0..c.rows {
+        let src = &c.src[r * h..(r + 1) * h];
+        let g: Vec<f64> = c.dy[r * h..(r + 1) * h]
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect();
+        let e = c.exps[r];
+        let s = 2f64.powi(e);
+        // 構造と同じく f64 で計算して f32 へ丸めた `eps/s²`。
+        let eps_s = f64::from((f64::from(c.eps) / 2f64.powi(2 * e)) as f32);
+
+        // --- forward（統計量）: xs = src/s・ms・rstd_s・xhat・rstd = rstd_s/s ---
+        let xs: Vec<f64> = src.iter().map(|&v| f64::from(v) / s).collect();
+        let sq_sum: f64 = xs.iter().map(|v| v * v).sum();
+        stage(sq_sum, "二乗和 Σ(x/s)²")?;
+        let a = sq_sum / n + eps_s;
+        if a.is_nan() || a <= 0.0 {
+            return Err(reject(
+                "スケール後の分散と eps/s² の和が 0 で rstd が非有限",
+            ));
+        }
+        let rs = 1.0 / a.sqrt();
+        stage(rs * rs, "rstd_s²（Div の分母側係数）")?;
+        let k = rs / s;
+        stage(k, "rstd = rstd_s/s")?;
+        let xhat: Vec<f64> = xs.iter().map(|v| v * rs).collect();
+        let gw: Vec<f64> = (0..h).map(|i| g[i] * wv(i)).collect();
+        for v in &gw {
+            stage(*v, "dxhat = g·w")?;
+        }
+
+        // 二階の逆伝播で行内に集まる cotangent の上界（seed の各要素の絶対値 ≤ 1）。
+        let mut a_xhat = vec![0.0f64; h];
+        let mut a_g = vec![0.0f64; h];
+        let mut a_rs = 0.0f64;
+
+        if c.build_dx {
+            let m = gw.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let ge = pow2_ceil_exponent(m);
+            gs_exps.push(ge);
+            let gs = 2f64.powi(ge);
+            let gsh = gs / n;
+            let dxhat: Vec<f64> = gw.iter().map(|v| v / gs).collect();
+            // forward: dot_gs = Σ(dxhat·xhat)·gs/hidden（LayerNorm は sum_gs も）・inner・dx。
+            let p_abs: f64 = dxhat.iter().zip(&xhat).map(|(d, x)| (d * x).abs()).sum();
+            stage(p_abs, "Σ|dxhat·xhat|")?;
+            stage(p_abs * gsh, "mean_dot·gs")?;
+            let dot = dxhat.iter().zip(&xhat).map(|(d, x)| d * x).sum::<f64>() * gsh;
+            let sumg = if c.centered {
+                let sa: f64 = dxhat.iter().map(|d| d.abs()).sum();
+                stage(sa * gsh, "mean_dxhat·gs")?;
+                dxhat.iter().sum::<f64>() * gsh
             } else {
                 0.0
             };
-            let ms = row
+            let mut inner_abs = 0.0f64;
+            for i in 0..h {
+                let q = xhat[i] * dot;
+                stage(gw[i].abs() + sumg.abs() + q.abs(), "dx の内側項")?;
+                let inner = gw[i] - sumg - q;
+                stage(k * inner, "dx 構造の出力")?;
+                inner_abs += inner.abs();
+            }
+            // backward: dx = (rstd_s/s)·inner。inner へ k、k へ Σ|inner|、rstd_s へ Σ|inner|/s。
+            stage(inner_abs, "rstd_s/s への cotangent")?;
+            a_rs += inner_abs / s;
+            let mut a_dxhat = vec![0.0f64; h];
+            if c.centered {
+                // sum_gs = Σdxhat·gsh → cotangent n·k が gsh 倍されて各 dxhat へ。
+                stage(n * k, "sum_gs への cotangent")?;
+                let a_sum0 = n * k * gsh;
+                stage(a_sum0, "Σdxhat への cotangent")?;
+                a_dxhat.fill(a_sum0);
+            }
+            // q = xhat·dot_gs → xhat へ k·|dot|、dot_gs へ k·Σ|xhat|、それが gsh 倍で Σ(dxhat·xhat) へ。
+            let xhat_abs: f64 = xhat.iter().map(|v| v.abs()).sum();
+            stage(k * xhat_abs, "mean_dot·gs への cotangent")?;
+            let a_dot0 = k * xhat_abs * gsh;
+            stage(a_dot0, "Σ(dxhat·xhat) への cotangent")?;
+            for i in 0..h {
+                a_xhat[i] += k * dot.abs() + a_dot0 * dxhat[i].abs();
+                a_dxhat[i] += a_dot0 * xhat[i].abs();
+                stage(a_dxhat[i], "dxhat への cotangent")?;
+                // dxhat = gw/gs と inner の gw 項。
+                let a_gw = k + a_dxhat[i] / gs;
+                stage(a_gw, "g·w への cotangent")?;
+                a_g[i] += a_gw * wv(i).abs();
+                a_w[i] += a_gw * g[i].abs();
+            }
+        }
+        if c.build_dw {
+            // dw = Σ_rows g·xhat。seed u_j が各行へ broadcast される。
+            for i in 0..h {
+                let prod = g[i].abs() * xhat[i].abs();
+                stage(prod, "g·xhat")?;
+                col_dw[i] += prod;
+                a_xhat[i] += g[i].abs();
+                a_g[i] += xhat[i].abs();
+            }
+        }
+        if c.build_db {
+            for i in 0..h {
+                col_db[i] += g[i].abs();
+                a_g[i] += 1.0;
+            }
+        }
+        if c.g_tracked {
+            for v in &a_g {
+                stage(*v, "g への cotangent")?;
+            }
+        }
+        if c.x_tracked && (c.build_dx || c.build_dw) {
+            // xhat = xs·rstd_s → xs へ a_xhat·rstd_s、rstd_s へ Σ a_xhat·|xs|。
+            for v in &a_xhat {
+                stage(*v, "xhat への cotangent")?;
+            }
+            a_rs += a_xhat
                 .iter()
-                .map(|&v| (f64::from(v) - mean).powi(2))
-                .sum::<f64>()
-                / n;
-            1.0 / (ms + f64::from(eps)).sqrt()
-        })
-        .collect()
+                .zip(&xs)
+                .map(|(a, x)| a * x.abs())
+                .sum::<f64>();
+            stage(a_rs, "rstd_s への cotangent")?;
+            // rstd_s = 1/r（Div の分母側係数 -(1/r)/r = -rstd_s²）→ r = √a（係数 0.5/r）→ ms → 二乗。
+            let a_r = a_rs * rs * rs;
+            stage(a_r, "√(ms+eps/s²) への cotangent")?;
+            let a_a = a_r * 0.5 * rs;
+            stage(a_a, "ms への cotangent")?;
+            let a_sq = a_a / n;
+            let mut a_src = vec![0.0f64; h];
+            for i in 0..h {
+                let a_xs = a_xhat[i] * rs + 2.0 * a_sq * xs[i].abs();
+                stage(a_xs, "x/s への cotangent")?;
+                a_src[i] = a_xs / s;
+                stage(a_src[i], "正規化入力への cotangent")?;
+            }
+            if c.centered {
+                // dev2 = dev − Mean(dev)、dev = d − Mean(d)、d = x − x_ref（x_ref は行の先頭要素）。
+                let s2: f64 = a_src.iter().sum();
+                stage(s2, "Mean(dev) への cotangent")?;
+                let a_dev: Vec<f64> = a_src.iter().map(|v| v + s2 / n).collect();
+                let s1: f64 = a_dev.iter().sum();
+                stage(s1, "Mean(d) への cotangent")?;
+                let a_d: Vec<f64> = a_dev.iter().map(|v| v + s1 / n).collect();
+                let s0: f64 = a_d.iter().sum();
+                stage(s0, "x_ref への cotangent")?;
+                for (i, v) in a_d.iter().enumerate() {
+                    stage(if i == 0 { v + s0 } else { *v }, "x への cotangent")?;
+                }
+            }
+        }
+    }
+    for v in &col_dw {
+        stage(*v, "dw 構造の行をまたぐ和")?;
+    }
+    for v in &col_db {
+        stage(*v, "db 構造の行をまたぐ和")?;
+    }
+    if c.w_tracked {
+        for v in &a_w {
+            stage(*v, "w への cotangent")?;
+        }
+    }
+    Ok(gs_exps)
 }
 
-/// upstream 側のスケール `gs`（行ごとの 2 のべき乗。`[rows, 1]`）の定数葉を作る。
-/// `dxhat = g·w` の行最大絶対値（f64）から指数を決める。`g` が非有限、または `dxhat` が
-/// f32 に収まらない（1 階側も overflow する）場合は型付きエラーで拒否する。`dxhat/gs` を縮約へ
-/// 渡すことで `Mean(dxhat⊙xhat)` の f32 部分和が `g=3e38` のような有限入力で overflow するのを
-/// 避ける（レビュー指摘 PR #3346。復元は `gs` を最後に掛ける）。
-fn upstream_scale<'c>(
-    child: &'c Tape,
-    dy: &[f32],
-    w: Option<&[f32]>,
-    rstd: &[f64],
-    rows: usize,
-    hidden: usize,
-) -> Result<Var<'c>, AutodiffError> {
-    let mut exps = Vec::with_capacity(rows);
-    for r in 0..rows {
-        let mut mx = 0.0f64;
-        for i in 0..hidden {
-            let g = f64::from(dy[r * hidden + i]);
-            if !g.is_finite() {
-                return Err(reject("upstream に非有限要素がある"));
-            }
-            let d = match w {
-                Some(w) => g * f64::from(w[i]),
-                None => g,
-            };
-            if d.abs() > f64::from(f32::MAX) {
-                return Err(reject("dxhat = g·w が f32 に収まらない"));
-            }
-            mx = mx.max(d.abs());
-        }
-        // 逆伝播は cotangent を行方向に足し合わせる（`mean_dot` 等への縮約）ため、f32 の和が
-        // `hidden · max|g·w|` に達しうる。さらに `xhat`／`rstd` の cotangent は
-        // `v·(rstd_s/s) = v·rstd`（真の rstd）経由で流れるため、実際に overflow する積は
-        // `hidden · rstd · max|g·w|` 規模になる（低分散行で増幅。PR #3346 Bugbot 指摘）。
-        // 増幅は 1 以上のときだけ見て、これが 2^125 以上の行は型付きエラーで拒否する
-        // （`gs` を縮約の手前まで持ち越しても cotangent 和は避けられず、実測で NaN になる）。
-        if hidden as f64 * rstd[r].max(1.0) * mx >= MEAN_OVERFLOW_GUARD {
-            return Err(reject(
-                "hidden · max(1, rstd) · max|g·w| が 2^125 以上で逆伝播の行方向縮約が overflow しうる",
-            ));
-        }
-        exps.push(pow2_ceil_exponent(mx));
-    }
+/// upstream 側のスケール `gs`（行ごとの 2 のべき乗。`[rows, 1]`）の定数葉を作る。指数は
+/// [`check_structure_stages`] が `dxhat = g·w` の行最大絶対値（f64）から決めたもの。`dxhat/gs` を
+/// 縮約へ渡すことで `Mean(dxhat⊙xhat)` の f32 部分和が `g=3e38` のような有限入力で overflow する
+/// のを避ける（レビュー指摘 PR #3346。復元は縮約の直後に `gs/hidden` を掛けて行う）。
+fn gs_const<'c>(child: &'c Tape, exps: &[i32]) -> Result<Var<'c>, AutodiffError> {
     let gs: Vec<f32> = exps.iter().map(|&e| 2f64.powi(e) as f32).collect();
-    Ok(child.var_no_grad(&Tensor::new(gs, &[rows, 1])?))
+    Ok(child.var_no_grad(&Tensor::new(gs, &[exps.len(), 1])?))
 }
 
 /// `gs/hidden`（行ごと。`[rows, 1]`）の定数葉。縮約（`Sum`）の直後にこれを掛けて `gs` を復元する。
@@ -395,15 +574,33 @@ pub(crate) fn rms_norm_cgrads<'c>(
     let dy = dense_vec(&child_value(child, &g)?);
     let (dx_host, dw_host) = rmsnorm_vjp_rows(&x_slice, w_slice.as_deref(), eps, rows, hidden, &dy);
 
-    // 構造（S1）。
+    // 総括的な適用判定（構造を積む前。モジュール doc「総括的な適用判定」）。
     let x_m = get(mirror, targets.input)?;
     let w_m = targets.weight.map(|id| get(mirror, id)).transpose()?;
-    let x2 = rows_hidden_2d(&x_m, rows, hidden)?;
-    let g2 = rows_hidden_2d(&g, rows, hidden)?;
     let exps: Vec<i32> = row_maxabs(&x_slice, rows, hidden)
         .into_iter()
         .map(|m| scale_exponent(m, eps))
         .collect();
+    let gs_exps = check_structure_stages(&StageCheck {
+        centered: false,
+        src: &x_slice,
+        exps: &exps,
+        eps,
+        dy: &dy,
+        w: w_slice.as_deref(),
+        rows,
+        hidden,
+        build_dx: need_x,
+        build_dw: need_w && dw_host.is_some(),
+        build_db: false,
+        x_tracked: x_m.requires_grad(),
+        g_tracked: g.requires_grad(),
+        w_tracked: w_m.as_ref().is_some_and(Var::requires_grad),
+    })?;
+
+    // 構造（S1）。
+    let x2 = rows_hidden_2d(&x_m, rows, hidden)?;
+    let g2 = rows_hidden_2d(&g, rows, hidden)?;
     let (s_c, eps_s) = scale_consts(child, &exps, eps)?;
     let one = child.var_no_grad(&Tensor::full(&[1], 1.0f32)?);
 
@@ -414,14 +611,7 @@ pub(crate) fn rms_norm_cgrads<'c>(
 
     let mut out = Vec::new();
     if need_x {
-        let gs_c = upstream_scale(
-            child,
-            &dy,
-            w_slice.as_deref(),
-            &row_rstd(&x_slice, rows, hidden, eps, false),
-            rows,
-            hidden,
-        )?;
+        let gs_c = gs_const(child, &gs_exps)?;
         let gw = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,
@@ -504,6 +694,24 @@ pub(crate) fn layer_norm_cgrads<'c>(
         .into_iter()
         .map(|mx| scale_exponent(mx, eps))
         .collect();
+    // 総括的な適用判定（中心化の 4 ノードの後・統計量と dx／dw／db の構造の前。ここで拒否しても
+    // `backward_create_graph` のロールバックが `child` を空へ戻す）。
+    let gs_exps = check_structure_stages(&StageCheck {
+        centered: true,
+        src: &dev2_host,
+        exps: &exps,
+        eps,
+        dy: &dy,
+        w: w_slice.as_deref(),
+        rows,
+        hidden,
+        build_dx: need_x,
+        build_dw: need_w && dw_host.is_some(),
+        build_db: need_b && db_host.is_some(),
+        x_tracked: x_m.requires_grad(),
+        g_tracked: g.requires_grad(),
+        w_tracked: w_m.as_ref().is_some_and(Var::requires_grad),
+    })?;
     let (s_c, eps_s) = scale_consts(child, &exps, eps)?;
     let one = child.var_no_grad(&Tensor::full(&[1], 1.0f32)?);
 
@@ -514,14 +722,7 @@ pub(crate) fn layer_norm_cgrads<'c>(
 
     let mut out = Vec::new();
     if need_x {
-        let gs_c = upstream_scale(
-            child,
-            &dy,
-            w_slice.as_deref(),
-            &row_rstd(&x_slice, rows, hidden, eps, true),
-            rows,
-            hidden,
-        )?;
+        let gs_c = gs_const(child, &gs_exps)?;
         let gw = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,

@@ -11,6 +11,9 @@
 //!   REQ-2 判定で一致する。
 //! - 入口検査の拒否条件（非有限・overflow 域・`eps=0` の退化行）が `Err(Backward)` かつ
 //!   `child.is_empty()` を保つこと、隣接する fail-closed Op が拒否のままであることを固定する。
+//! - 構造段の上界による総括的な適用判定（決定記録 §27.3）を正のプローブで確かめる: レビューで
+//!   指摘された入力は拒否されて `child` が空になり、掃引した全ケースで「受理なら 1 階・`cg.grad`・
+//!   二階・孫テープ再生が有限かつ一致、拒否なら `Err(Backward)` で `child` が空」が成り立つ。
 //!
 //! 損失は `sum(norm(x) ⊙ c)`（`c` は非一様な固定定数）または `tanh` 合成を使う。affine なしの
 //! `sum(norm(x)²)` はほぼ定数で Hessian が 0 に近く検出力が弱いため避ける。
@@ -387,7 +390,7 @@ fn layer_norm_mixed_x_w_term_matches_finite_difference() {
 
 // --- 4. §21.3 必須ベクトル: 1 階・cg.grad・孫テープ再生の 3 段が有限かつ一致 -------------------
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Kind {
     Rms,
     Layer,
@@ -591,54 +594,361 @@ fn neighbouring_unsupported_norm_op_stays_fail_closed() {
     assert!(child.is_empty());
 }
 
-// --- 6. 巨大 upstream（レビュー指摘 PR #3346）: g=3e38 でも構造側が有限 ---------------------
+// --- 6. 総括的な適用判定（PR #3346 のレビュー指摘の全類型）: 受理なら有限・一致、拒否なら child 空 ---
+//
+// 指摘はいずれも「有限な入力・upstream で、構造（cg.grad・二階の逆伝播・孫テープ再生）の
+// 中間値が f32 を超える」類型だった（g=3e38 の縮約、hidden·g 規模の cotangent 和、低分散行の
+// rstd 増幅、w=0 で g·w 検査を素通りする dw 経路）。経路ごとの個別条件ではなく、構造の各段の
+// 上界を一括で判定する（`create_graph_norm::check_structure_stages`。決定記録 §27.3）。ここでは
+// 判定の契約「受理された入力は 1 階・cg.grad・二階（seed の各要素の絶対値 ≤ 1）・孫テープ再生が
+// 有限かつ一致し、拒否された入力は `Err(Backward)` で child が空」を正のプローブで確かめる。
 
-fn check_huge_upstream(kind: Kind, affine: bool) {
-    // Rms: [1,2]・g=2e37（修正前は dxhat⊙xhat の f32 和が 6e38 で overflow し inf が混入した）。
-    // Layer: [1,4]・g=1e37 の回帰確認。g をさらに上げると HVP の途中値（cotangent の行方向和）
-    // が g の hidden 倍になり f32 に収まらない（決定記録 §27.3 の既知の限界）。
-    let (shape, x0, c, v): (Vec<usize>, Vec<f32>, Vec<f32>, Vec<f32>) = match kind {
-        Kind::Rms => (
-            vec![1, 2],
-            vec![1.0, 1.0],
-            vec![2e37, 2e37],
-            vec![1.0, -1.0],
-        ),
-        Kind::Layer => (
-            vec![1, 4],
-            vec![1.0, -1.0, 1.0, -1.0],
-            vec![1e37, -1e37, 1e37, -1e37],
-            vec![1.0, -1.0, 1.0, -1.0],
-        ),
-    };
+const PROBE_EPS: f32 = 1e-5;
+
+/// 正のプローブの結果。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Outcome {
+    Accepted,
+    Rejected,
+}
+
+/// 二階の seed を掛ける 1 階勾配（`cg.grad` の対象）。
+#[derive(Clone, Copy, Debug)]
+enum Wrt {
+    X,
+    W,
+    B,
+}
+
+/// `w`／`b` の扱い。`Tracked` は追跡ありの葉、`Const` は追跡なしの定数。
+#[derive(Clone, Debug)]
+enum Affine {
+    Tracked(Vec<f32>),
+    Const(Vec<f32>),
+}
+
+/// 正のプローブの 1 ケース。損失は `sum(norm(x; w, b) ⊙ c)`（`c` が upstream `g`）、
+/// `quadratic` なら `sum(norm ⊙ norm ⊙ c)`（upstream `g = 2c·norm` が入力に依存する）。二階は
+/// `sum(cg.grad(wrt) ⊙ seed)` を child 上で逆伝播する。
+#[derive(Clone, Debug)]
+struct Probe {
+    kind: Kind,
+    quadratic: bool,
+    x0: Vec<f32>,
+    shape: Vec<usize>,
+    c: Vec<f32>,
+    w: Option<Affine>,
+    b: Option<Affine>,
+    wrt: Wrt,
+    seed: Vec<f32>,
+}
+
+fn affine_var<'t>(tape: &'t Tape, a: &Option<Affine>, h: usize) -> Option<Var<'t>> {
+    a.as_ref().map(|a| match a {
+        Affine::Tracked(v) => tape.var(&t(v.clone(), &[h])),
+        Affine::Const(v) => tape.var_no_grad(&t(v.clone(), &[h])),
+    })
+}
+
+/// 判定の契約を 1 ケースについて確かめ、受理／拒否を返す。
+fn probe(p: &Probe) -> Outcome {
+    let ctx = format!("{p:?}");
+    let h = *p.shape.last().unwrap();
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(x0, &shape));
-    let loss = build_norm(&tape, &x, kind, 1e-5, affine, &c, &shape).unwrap();
-    let cg = tape.backward_create_graph(&loss, &child).unwrap();
-    let gx = cg.grad(&x).unwrap().unwrap();
-    let cx = cg.child_var(&x).unwrap().unwrap();
-    let vc = child.var_no_grad(&t(v, &shape));
-    let prod = gx.mul(&vc).unwrap().sum(None).unwrap();
-    let hv = dense(child.backward(&prod).unwrap().get(&cx).unwrap().unwrap());
-    assert_finite(&hv, "huge upstream: HVP");
+    let x = tape.var(&t(p.x0.clone(), &p.shape));
+    let w = affine_var(&tape, &p.w, h);
+    let b = affine_var(&tape, &p.b, h);
+    let y = match p.kind {
+        Kind::Rms => x.rms_norm(w.as_ref(), PROBE_EPS),
+        Kind::Layer => x.layer_norm(w.as_ref(), b.as_ref(), PROBE_EPS),
+    }
+    .expect("forward");
+    let cc = tape.var_no_grad(&t(p.c.clone(), &p.shape));
+    let yc = if p.quadratic { y.mul(&y).unwrap() } else { y };
+    let loss = yc.mul(&cc).unwrap().sum(None).unwrap();
+    let (target, target_shape) = match p.wrt {
+        Wrt::X => (x, p.shape.clone()),
+        Wrt::W => (w.expect("wrt=W には w が要る"), vec![h]),
+        Wrt::B => (b.expect("wrt=B には b が要る"), vec![h]),
+    };
+
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert!(matches!(e, AutodiffError::Backward(_)), "{ctx}: {e:?}");
+            assert!(child.is_empty(), "{ctx}: 拒否時に child が空へ戻る");
+            return Outcome::Rejected;
+        }
+    };
+
+    // 1 階と cg.grad。
+    let plain = dense(tape.backward(&loss).unwrap().get(&target).unwrap().unwrap());
+    assert_finite(&plain, &format!("{ctx}: 1 階"));
+    let gt = cg.grad(&target).unwrap().unwrap();
+    let gt_v = dense(&gt.to_tensor());
+    assert_finite(&gt_v, &format!("{ctx}: cg.grad"));
+    assert_req2(&gt_v, &plain, &format!("{ctx}: cg.grad vs 1 階"));
+
+    // 線形損失の db = Σ_rows g は追跡対象に依存しない（二階は恒等ゼロで、seed 付きの和は
+    // 追跡なしになり child.backward が拒否する）。db 構造の二階は quadratic 側で確かめる。
+    if !p.quadratic && matches!(p.wrt, Wrt::B) {
+        return Outcome::Accepted;
+    }
+
+    // 二階: 追跡ありの境界ノード（x・w・b の写し）すべてへの勾配が有限。
+    let sv = child.var_no_grad(&t(p.seed.clone(), &target_shape));
+    let prod = gt.mul(&sv).unwrap().sum(None).unwrap();
+    let mut leaves = vec![cg.child_var(&x).unwrap().unwrap()];
+    for v in [w, b].into_iter().flatten() {
+        // 追跡なしの定数（`Affine::Const`）は写しを持たない。
+        if let Ok(Some(cv)) = cg.child_var(&v) {
+            leaves.push(cv);
+        }
+    }
+    let grads = child
+        .backward(&prod)
+        .unwrap_or_else(|e| panic!("{ctx}: child.backward の失敗 {e:?}"));
+    let hv: Vec<Option<Vec<f32>>> = leaves
+        .iter()
+        .map(|l| grads.get(l).unwrap().map(dense))
+        .collect();
+    for v in hv.iter().flatten() {
+        assert_finite(v, &format!("{ctx}: 二階（child.backward）"));
+    }
+
+    // 孫テープ再生: 同じ二階勾配が有限かつ child と一致。child 上の二階のグラフが正規化の写し
+    // （quadratic の `g = 2c·norm` 等）を含むと、孫テープ側でも同じ判定が二階の cotangent を
+    // upstream として走る。そこで拒否された場合も契約どおり `Err(Backward)` で grand が空になる。
     let grand = Tape::new_with_ops(common::naive_ops());
-    let cg2 = child.backward_create_graph(&prod, &grand).unwrap();
-    let hv2 = dense(&cg2.grad(&cx).unwrap().unwrap().to_tensor());
-    assert_finite(&hv2, "huge upstream: 孫テープ再生");
+    let cg2 = match child.backward_create_graph(&prod, &grand) {
+        Ok(cg2) => cg2,
+        Err(e) => {
+            assert!(matches!(e, AutodiffError::Backward(_)), "{ctx}: 孫 {e:?}");
+            assert!(
+                grand.is_empty(),
+                "{ctx}: 孫テープ再生の拒否時に grand が空へ戻る"
+            );
+            return Outcome::Accepted;
+        }
+    };
+    for (l, h1) in leaves.iter().zip(&hv) {
+        if let (Some(g2), Some(h1)) = (cg2.grad(l).unwrap(), h1) {
+            let v = dense(&g2.to_tensor());
+            assert_finite(&v, &format!("{ctx}: 孫テープ再生"));
+            assert_req2(&v, h1, &format!("{ctx}: 孫 vs child"));
+        }
+    }
+    Outcome::Accepted
+}
+
+fn ones(n: usize) -> Vec<f32> {
+    vec![1.0; n]
+}
+
+fn alternating(n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+        .collect()
+}
+
+fn scaled(v: &[f32], s: f32) -> Vec<f32> {
+    v.iter().map(|a| a * s).collect()
+}
+
+fn row_probe(kind: Kind, x0: Vec<f32>, c: Vec<f32>, seed: Vec<f32>) -> Probe {
+    let shape = vec![1, x0.len()];
+    Probe {
+        kind,
+        quadratic: false,
+        x0,
+        shape,
+        c,
+        w: None,
+        b: None,
+        wrt: Wrt::X,
+        seed,
+    }
+}
+
+/// レビューで指摘された入力そのもの（または同型の LayerNorm 版）。いずれも構造の中間値が f32 を
+/// 超えるので拒否され、child は空へ戻る。
+fn review_examples() -> Vec<(&'static str, Probe)> {
+    let alt4 = alternating(4);
+    let lowvar_ln = vec![1.0f32, 1.001, 1.0, 1.001];
+    let lowvar_rms = vec![1e-3f32; 4];
+    vec![
+        (
+            "一巡目: RmsNorm x=[1,1]・g=[3e38,3e38] の Mean(dxhat⊙xhat)",
+            row_probe(Kind::Rms, vec![1.0, 1.0], vec![3e38, 3e38], ones(2)),
+        ),
+        (
+            "二巡目: LayerNorm x=[1,-1,1,-1]・g=±1e38・v=[1,-1,1,-1] の gs 復元",
+            row_probe(Kind::Layer, alt4.clone(), scaled(&alt4, 1e38), alt4.clone()),
+        ),
+        (
+            "Bugbot: LayerNorm 低分散行の rstd 増幅（g=±1e36）",
+            row_probe(Kind::Layer, lowvar_ln, scaled(&alt4, 1e36), ones(4)),
+        ),
+        (
+            "Bugbot: RmsNorm 低分散行の rstd 増幅（g=±1e36）",
+            row_probe(Kind::Rms, lowvar_rms, scaled(&alt4, 1e36), ones(4)),
+        ),
+        (
+            "四巡目: RmsNorm x=[0.75×4]・w=0（追跡）・g=8e37 の dw 経路",
+            Probe {
+                w: Some(Affine::Tracked(vec![0.0; 4])),
+                wrt: Wrt::W,
+                ..row_probe(Kind::Rms, vec![0.75; 4], vec![8e37; 4], ones(4))
+            },
+        ),
+        (
+            "四巡目（:539 同型）: LayerNorm x=[1,-1,1,-1]・w=0（追跡）・g=8e37 の dw 経路",
+            Probe {
+                w: Some(Affine::Tracked(vec![0.0; 4])),
+                wrt: Wrt::W,
+                ..row_probe(Kind::Layer, alt4.clone(), vec![8e37; 4], ones(4))
+            },
+        ),
+        (
+            "先回り: LayerNorm [3,4]・b（追跡）・g=1e38 の db 行をまたぐ和",
+            Probe {
+                kind: Kind::Layer,
+                quadratic: true,
+                x0: pattern(12, 7.0),
+                shape: vec![3, 4],
+                c: vec![1e38; 12],
+                w: Some(Affine::Tracked(pattern(4, 3.0))),
+                b: Some(Affine::Tracked(pattern(4, 5.0))),
+                wrt: Wrt::B,
+                seed: ones(4),
+            },
+        ),
+    ]
 }
 
 #[test]
-fn rms_norm_huge_upstream_keeps_structure_finite() {
-    check_huge_upstream(Kind::Rms, false);
+fn review_examples_are_rejected_with_empty_child() {
+    for (label, p) in review_examples() {
+        assert_eq!(probe(&p), Outcome::Rejected, "{label}");
+    }
 }
 
 #[test]
-fn layer_norm_huge_upstream_keeps_structure_finite() {
-    check_huge_upstream(Kind::Layer, false);
+fn review_examples_at_moderate_scale_are_accepted_and_finite() {
+    // 同じ入力で upstream を 1e30 倍へ下げると判定を通り、全段が有限かつ一致する
+    // （拒否が過剰に広くないことの正のプローブ）。
+    for (label, mut p) in review_examples() {
+        let peak = p.c.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        p.c = scaled(&p.c, 1e30 / peak);
+        assert_eq!(probe(&p), Outcome::Accepted, "{label}（1e30 倍）");
+    }
 }
 
-// --- 7. 二巡目指摘（PR #3346）: hidden·g が 2^125 以上の入力は型付きエラーで拒否 ------------
+/// 掃引用の 1 行ぶんの `x`（幅 `h`）。定数行・交互符号・低分散・小スケール・大振幅を含む。
+fn sweep_rows(h: usize) -> Vec<Vec<f32>> {
+    vec![
+        vec![0.75; h],
+        alternating(h),
+        (0..h)
+            .map(|i| if i % 2 == 0 { 1.0 } else { 1.001 })
+            .collect(),
+        vec![1e-3; h],
+        (0..h)
+            .map(|i| [1e20, 2e20, -1e20].get(i).copied().unwrap_or(0.5))
+            .collect(),
+    ]
+}
+
+/// kind ごとの affine 構成と、二階の seed を掛けられる微分対象。
+fn sweep_affines(kind: Kind, w0: &[f32]) -> Vec<(Option<Affine>, Option<Affine>, Vec<Wrt>)> {
+    let mut v = vec![
+        (None, None, vec![Wrt::X]),
+        (
+            Some(Affine::Tracked(w0.to_vec())),
+            None,
+            vec![Wrt::X, Wrt::W],
+        ),
+        (Some(Affine::Const(w0.to_vec())), None, vec![Wrt::X]),
+    ];
+    if let Kind::Layer = kind {
+        v.push((
+            Some(Affine::Tracked(w0.to_vec())),
+            Some(Affine::Tracked(pattern(w0.len(), 5.0))),
+            vec![Wrt::X, Wrt::W, Wrt::B],
+        ));
+    }
+    v
+}
+
+#[test]
+fn sweep_every_structure_path_is_finite_or_rejected() {
+    // dx／dw／db 構造・weight なし／あり（0 と非ゼロ）／定数・bias・幅 4／32・行数 1／3・
+    // upstream の大きさ・seed の符号パターンを掛け合わせ、どのケースも「受理なら全段が有限で一致」
+    // 「拒否なら child 空」を満たすことを確かめる。個別経路の見落としがあれば受理側の有限性検査が
+    // 落ちる（幅 32 は行方向和が forward の各段より大きくなり、cotangent 側の判定が効く範囲）。
+    let scales = [1.0f32, 1e30, 1e36, 3e36, 1e37, 3e37, 8e37, 1e38, 3e38];
+    // quadratic（g = 2c·norm）は上限を下げる。判定が守るのは正規化の構造と、そこから g へ出る
+    // cotangent までで、g を作る上流の Mul の逆伝播（cotangent × 2c）と、その先の写しの 1 階 VJP
+    // は対象外（決定記録 §27.3）。真の二階微分は 2c·rstd²（低分散行・定数行で rstd ≈ 316）規模に
+    // なり、c ≳ 1e33 では真値そのものが f32 を超えて inf が正解になるため、有限性を問える範囲に限る。
+    let quadratic_scales = [1.0f32, 1e20, 1e30];
+    let (mut accepted, mut rejected) = (0usize, 0usize);
+    for (kind, h) in [Kind::Rms, Kind::Layer]
+        .into_iter()
+        .flat_map(|k| [(k, 4usize), (k, 32)])
+    {
+        for w0 in [vec![0.0f32; h], pattern(h, 3.0)] {
+            for (w, b, wrts) in sweep_affines(kind, &w0) {
+                for row in sweep_rows(h) {
+                    // 行をまたぐ和（dw／db の Sum(0)）は幅 4 で確かめ、幅 32 は実行時間を抑えて 1 行のみ。
+                    let row_counts: &[usize] = if h == 4 { &[1, 3] } else { &[1] };
+                    for &rows in row_counts {
+                        let x0: Vec<f32> = (0..rows)
+                            .flat_map(|r| row.iter().map(move |v| v * (1.0 + 0.25 * r as f32)))
+                            .collect();
+                        let n = x0.len();
+                        let modes = scales
+                            .iter()
+                            .map(|&s| (s, false))
+                            .chain(quadratic_scales.iter().map(|&s| (s, true)));
+                        for (scale, quadratic) in modes {
+                            for cpat in [ones(n), alternating(n)] {
+                                for &wrt in &wrts {
+                                    let sn = if let Wrt::X = wrt { n } else { h };
+                                    for seed in [ones(sn), alternating(sn)] {
+                                        let p = Probe {
+                                            kind,
+                                            quadratic,
+                                            x0: x0.clone(),
+                                            shape: vec![rows, h],
+                                            c: scaled(&cpat, scale),
+                                            w: w.clone(),
+                                            b: b.clone(),
+                                            wrt,
+                                            seed,
+                                        };
+                                        match probe(&p) {
+                                            Outcome::Accepted => accepted += 1,
+                                            Outcome::Rejected => rejected += 1,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 判定が全拒否・全受理に退化していないこと。
+    assert!(
+        accepted > 0 && rejected > 0,
+        "accepted={accepted} rejected={rejected}"
+    );
+}
+
+// --- 7. 拒否時の child の空性と再試行（PR #3346 三巡目指摘） --------------------------------
 
 fn layer_hvp_with_upstream(c: Vec<f32>) -> Result<Vec<f32>, AutodiffError> {
     let shape = [1usize, 4];
@@ -660,19 +970,16 @@ fn layer_hvp_with_upstream(c: Vec<f32>) -> Result<Vec<f32>, AutodiffError> {
 
 #[test]
 fn layer_norm_upstream_1e38_is_rejected_instead_of_nan_hvp() {
-    // x=[1,-1,1,-1]・g=±1e38（hidden·g = 4e38 > f32::MAX）。以前は HVP が NaN になった。
+    // x=[1,-1,1,-1]・g=±1e38。判定導入前は HVP が NaN になった（真の HVP は約 ±3e33 で有限）。
     let err = layer_hvp_with_upstream(vec![1e38, -1e38, 1e38, -1e38]).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
 }
 
 #[test]
-fn layer_norm_upstream_just_below_guard_hvp_stays_finite() {
-    // hidden·g = 4e37 < 2^125 は受理され、HVP が有限。
-    let hv = layer_hvp_with_upstream(vec![1e37, -1e37, 1e37, -1e37]).expect("受理される範囲");
-    assert_finite(&hv, "g=1e37: HVP");
+fn layer_norm_moderate_upstream_hvp_stays_finite() {
+    let hv = layer_hvp_with_upstream(vec![1e30, -1e30, 1e30, -1e30]).expect("受理される範囲");
+    assert_finite(&hv, "g=1e30: HVP");
 }
-
-// --- 8. 三巡目レビュー指摘（PR #3346）: 拒否時に child が空へ戻る・rstd 増幅を守る ------------
 
 /// `x` と upstream `c`（shape `[1, h]`）で create_graph を試み、HVP を返す。
 fn try_build(
@@ -701,7 +1008,7 @@ fn rejected_upstream_leaves_child_empty_and_allows_retry() {
     for kind in [Kind::Layer, Kind::Rms] {
         let child = Tape::new_with_ops(common::naive_ops());
         let x0 = vec![1.0f32, -1.0, 1.0, -1.0];
-        // upstream 拒否（build_mirror・構造構築の後で判明する経路）。
+        // upstream 拒否（build_mirror・中心化ノードの後で判明する経路）。
         let err = try_build(kind, x0.clone(), vec![1e38, -1e38, 1e38, -1e38], &child).unwrap_err();
         assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
         assert!(child.is_empty(), "拒否後に child が空へ戻る");
@@ -712,24 +1019,5 @@ fn rejected_upstream_leaves_child_empty_and_allows_retry() {
         // 同じ child で再試行できる。
         let hv = try_build(kind, x0, vec![1.0, -1.0, 1.0, -1.0], &child).expect("再試行は成功");
         assert_finite(&hv, "retry");
-    }
-}
-
-#[test]
-fn low_variance_row_rstd_amplification_is_guarded() {
-    // 低分散行（rstd≈300）。hidden·g=4e36 は旧ガード（2^125≈4.3e37）を通るが、rstd 増幅後は
-    // 超える。拒否され child は空へ戻る。g が十分小さければ受理され HVP は有限。
-    for (kind, x0) in [
-        (Kind::Layer, vec![1.0f32, 1.001, 1.0, 1.001]),
-        (Kind::Rms, vec![1e-3f32, 1e-3, 1e-3, 1e-3]),
-    ] {
-        let child = Tape::new_with_ops(common::naive_ops());
-        let big = vec![1e36f32, -1e36, 1e36, -1e36];
-        let err = try_build(kind, x0.clone(), big, &child).unwrap_err();
-        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
-        assert!(child.is_empty());
-        let small = vec![1e33f32, -1e33, 1e33, -1e33];
-        let hv = try_build(kind, x0, small, &child).expect("受理される範囲");
-        assert_finite(&hv, "低分散行 HVP");
     }
 }
