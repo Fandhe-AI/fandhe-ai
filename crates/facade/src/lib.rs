@@ -364,6 +364,12 @@ pub use fandhe_ai_autodiff::nn::EmbeddingBagMode;
 // 非公開で利用者は構築できない。`TapeRef` 版・子テープ構築ヘルパーは
 // §17.3 により公開しない（`tests/api_surface.rs` の正ガードが固定）。
 pub use fandhe_ai_autodiff::CreateGraphResult;
+// `JvpCreateGraphResult`（微分可能な jvp の結果型。イシュー #3068。`Tape::jvp_create_graph` の
+// 戻り値型）も `CreateGraphResult` と同じ先例で 1 文 1 行で再エクスポートする。承認根拠は
+// 2026-10-11 の所有者判断 D-A（一括承認）と `docs/autodiff-functional-transforms-design.md`
+// §31.1。フィールドは非公開で利用者は構築できない。経路は必ずクレートルート経由とする
+// （`functional_ops::` 経由は `tests/api_surface.rs` の関数型 AD 正ガードが拒否）。
+pub use fandhe_ai_autodiff::JvpCreateGraphResult;
 // `HookHandle`（backward hook の解除用不透明ハンドル。イシュー #2587。
 // `Tape::register_backward_hook` の戻り値・`Tape::remove_hook` の引数型）も 1 文 1 行で
 // 再エクスポートする。承認根拠はルート #2499 のコメントによる #2584 の §14 推奨案の承認と
@@ -1137,6 +1143,92 @@ impl Tape {
         child: &Tape,
     ) -> Result<Tensor<f32>, AutodiffError> {
         fandhe_ai_autodiff::functional_ops::jvp_multi(&self.0, output, inputs, tangents, &child.0)
+    }
+
+    /// 微分可能なヤコビアン・ベクトル積 `J·v`（`torch.func.jvp` を `create_graph=True` で使う形に相当。
+    /// イシュー #3068・設計記録 `docs/autodiff-functional-transforms-design.md` §31。内部実装
+    /// `fandhe_ai_autodiff::functional_ops::jvp_create_graph` への薄い委譲で、追加のみ。
+    /// 既存の [`Tape::jvp`]（非微分のホスト値）は変えない）。
+    ///
+    /// `child`（中間）と `grandchild`（結果を置く）は呼び出し側が用意する空の `Tape` で、どちらも
+    /// `self` と別のもの、かつ互いに別でなければならない。結果の [`JvpCreateGraphResult::output`] は
+    /// `grandchild` 上の `Var<'g>`（shape = `output.shape()`）。成功後も失敗後も 2 枚のテープは再利用せず
+    /// 作り直す。
+    ///
+    /// # 微分の繋がり方
+    ///
+    /// 元の入力についての微分は [`JvpCreateGraphResult::child_var`] で 2 段（親→子→孫）の写しを引き、
+    /// `grandchild.backward(..)` で得る。親テープの `Var` そのものとは微分で繋がらない
+    /// （`backward_create_graph` の写しが境界）。`child_var` が `Ok(None)` を返すのは、結果がその変数に
+    /// 依存しないとき。`TapeMismatch`／`GradientTrackingDisabled` は `CreateGraphResult::child_var` と
+    /// 同じ契約。
+    ///
+    /// # 入口検査（順序固定。ノードを足す前）
+    ///
+    /// 1〜4 は [`Tape::jvp`] と同じ（別テープ → `TapeMismatch`、追跡なしの入力 →
+    /// `GradientTrackingDisabled`、`tangent` の shape 不一致 → `Shape(ShapeMismatch)`、要素数
+    /// オーバーフロー → `Shape(ElementCountOverflow)`）。5 はテープの事前検査で、同一テープ →
+    /// `Backward`、デバイス不一致 → `DeviceMismatch`、空でないテープ → `Backward`。5 までで失敗すれば
+    /// 3 枚のテープとも無変更。
+    ///
+    /// # ゼロ経路
+    ///
+    /// 追跡なしの `output`、要素数 0、`J ≡ 0` のとき、`output()` は `grandchild` 上の全ゼロの追跡なし葉
+    /// 1 個で、写しはすべて `None`。
+    ///
+    /// # ノードの残り方
+    ///
+    /// 1 段目・2 段目での拒否と成功時には親へ 2 ノードが残り、子・孫テープにも補助ノードが残る
+    /// （詳細は設計記録 §31.4 の表）。
+    ///
+    /// # 数値・適用範囲
+    ///
+    /// 経路上の Op は `Op::supports_create_graph()` が真のものに限る。f32 の `Tape`・単一入力のみ。
+    /// `output()` の値は REQ-2 統一複合判定の範囲で [`Tape::jvp`] と一致し、bit 同一は契約にしない。
+    /// 計算量は親 backward 1 回＋子 backward 1 回＋孫テープへの記録 1 回。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let t = tape();
+    /// let child = tape();
+    /// let grandchild = tape();
+    /// let x = t.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0], &[3])?);
+    /// let y = x.mul(&x)?; // y = x ⊙ x
+    /// let v = Tensor::new(vec![1.0_f32, 0.5, 2.0], &[3])?;
+    /// let res = t.jvp_create_graph(&y, &x, &v, &child, &grandchild)?;
+    /// // output() = 2x ⊙ v = [2, 2, 12]
+    /// let jv = res.output().value().host_slice().into_owned();
+    /// for (a, b) in jv.iter().zip([2.0_f32, 2.0, 12.0]) {
+    ///     assert!((a - b).abs() < 1e-4);
+    /// }
+    /// // さらに微分すると d(Σ 2x⊙v)/dx = 2v = [2, 1, 4]。
+    /// let grads = grandchild.backward(&res.output().sum(None)?)?;
+    /// let xc = res.child_var(&x)?.expect("結果は x に依存する");
+    /// let g = grads.get(&xc)?.expect("勾配あり").host_slice().into_owned();
+    /// for (a, b) in g.iter().zip([2.0_f32, 1.0, 4.0]) {
+    ///     assert!((a - b).abs() < 1e-4);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn jvp_create_graph<'g>(
+        &self,
+        output: &Var<'_>,
+        input: &Var<'_>,
+        tangent: &Tensor<f32>,
+        child: &Tape,
+        grandchild: &'g Tape,
+    ) -> Result<JvpCreateGraphResult<'g>, AutodiffError> {
+        fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+            &self.0,
+            output,
+            input,
+            tangent,
+            &child.0,
+            &grandchild.0,
+        )
     }
 
     /// バッチ軸 `in_dim` に沿って `f` を各スライスへ適用し、結果を dim 0 に積む（`torch.func.vmap`
@@ -7821,8 +7913,13 @@ struct GradcheckAnomalyHoldDoctestGuard;
 /// （承認形と衝突するため）。一方、裸の自由関数・`Var<'t>`・`Tensor<f32>` 上の `jvp_multi` は未承認の
 /// 受け手として本 doctest のプローブに新規に加えた。
 ///
+/// **追加の承認公開（イシュー #3068）**: 同じ所有者判断 D-A に基づき `Tape` の inherent メソッド
+/// `jvp_create_graph`（微分可能な jvp。設計記録 §31。承認形は計 7 名）を追加で公開した。保留ガードに
+/// 反転対象はなく、`Tape` 受け手のプローブは足さない（承認形と衝突するため）。一方、裸の自由関数・
+/// `Var<'t>`・`Tensor<f32>` 上の `jvp_create_graph` は未承認の受け手として本 doctest のプローブに新規に加えた。
+///
 /// 引き続き拒否する未承認経路: モジュール `functional_ops` の公開、クレートルート直下の裸の自由関数
-/// `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`・`jvp_multi`、および `Var<'t>`・`Tensor<f32>` 上の同名メソッド。下の doctest は全 `pub mod` を glob import
+/// `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph`、および `Var<'t>`・`Tensor<f32>` 上の同名メソッド。下の doctest は全 `pub mod` を glob import
 /// したスコープへ、これらに対応するローカル定義とプローブ用トレイトを置き、修飾なしの関数呼び出しと
 /// 修飾付き（UFCS）のメソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ
 /// 公開するか、上の受け手へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
@@ -7867,6 +7964,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     pub fn jvp() {}
 ///     pub fn jacfwd() {}
 ///     pub fn jvp_multi() {}
+///     pub fn jvp_create_graph() {}
 /// }
 /// use __fandhe_functional_transforms_hold_probe::*;
 ///
@@ -7879,6 +7977,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker;
 ///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;
 ///     fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker;
 /// }
 ///
 /// impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {
@@ -7898,6 +7997,9 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
 ///     fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
 /// }
@@ -7921,6 +8023,9 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker {
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
+///     fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
 /// }
 ///
 /// fn __probe_free_fns() {
@@ -7934,6 +8039,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     jvp();
 ///     jacfwd();
 ///     jvp_multi();
+///     jvp_create_graph();
 /// }
 ///
 /// fn __probe_methods(
@@ -7947,12 +8053,14 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp_multi(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp_create_graph(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jacfwd(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_multi(tf);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_create_graph(tf);
 /// }
 /// ```
 #[cfg(doctest)]
