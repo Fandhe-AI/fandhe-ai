@@ -6273,11 +6273,16 @@ struct FoldUnfoldHoldDoctestGuard;
 ///
 /// 引き続き拒否する未承認経路は、ローカルモジュール `lrn_ops`／`weight_reparam_ops`／`lrn`／`weight_reparam`・
 /// 型 `LocalResponseNorm`／`WeightNorm`／`SpectralNorm`・`Var::norm_except_dim` と `Tape`／`Tensor<f32>` 上の
-/// 同名メソッド・`add_weight_norm`／`add_spectral_norm`（`compat::Sequential`。
-/// 層化・結線方式は保留継続）である。
+/// 同名メソッドである（層化・結線は #3050 までに `compat::Sequential::parametrize_weight_norm`／
+/// `parametrize_spectral_norm` として公開済みのため、未採用名 `add_weight_norm`／`add_spectral_norm` の
+/// プローブは外した。復活は `api_surface.rs` の workspace インベントリが検出する）。
 /// **#3044 での部分反転**: `compat::Sequential::add_local_response_norm` は
 /// `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3 の承認形で公開したため、`Sequential` 向けのトレイト impl と
-/// UFCS 呼び出しから同名だけを外した（inherent メソッドと衝突するため。`add_weight_norm`／`add_spectral_norm` は残す）。
+/// UFCS 呼び出しから同名だけを外した（inherent メソッドと衝突するため）。
+/// **#3050 での反転**: `Sequential` 向けのトレイト・impl・UFCS 呼び出し（`add_weight_norm`／`add_spectral_norm`）を
+/// 外した（公開名は `parametrize_*` に確定し、`add_*` 名は採用されなかったため。`save_model`／`load_model` 対応も同時に追加）。
+/// 残る保留は決定記録 `docs/autodiff-lrn-weight-reparam-decision.md` で非公開と確定した名前
+/// （`norm_except_dim`・`Tape`／`Tensor<f32>` 上の同名メソッド・モジュール・型）である。
 /// 公開済み側の正ガードは `crates/facade/tests/api_surface.rs::add_local_response_norm_signature_matches_approved_contract`
 /// 等が担う。
 ///
@@ -6389,20 +6394,6 @@ struct FoldUnfoldHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// trait __FandheLrnWeightReparamHoldSequentialProbe {
-///     fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
-///     fn add_spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
-/// }
-///
-/// impl __FandheLrnWeightReparamHoldSequentialProbe for fandhe_ai::compat::Sequential {
-///     fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
-///         __FandheLrnWeightReparamHoldMarker
-///     }
-///     fn add_spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
-///         __FandheLrnWeightReparamHoldMarker
-///     }
-/// }
-///
 /// fn __probe_free_fns(_: LocalResponseNorm, _: WeightNorm, _: SpectralNorm) {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり
 ///     // E0659 でコンパイル失敗する）。
@@ -6418,7 +6409,6 @@ struct FoldUnfoldHoldDoctestGuard;
 ///     v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
-///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Var::norm_except_dim(v);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tape::local_response_norm(tape);
@@ -6429,8 +6419,6 @@ struct FoldUnfoldHoldDoctestGuard;
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::weight_norm(tf);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::spectral_norm(tf);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::norm_except_dim(tf);
-///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_weight_norm(seq);
-///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_spectral_norm(seq);
 /// }
 /// ```
 #[cfg(doctest)]

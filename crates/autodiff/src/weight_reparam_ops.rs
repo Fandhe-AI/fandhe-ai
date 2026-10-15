@@ -4,9 +4,12 @@
 //! **facade 公開状況**: 入口の `Var::weight_norm`／`Var::spectral_norm`（本モジュールの関数への 1 行委譲
 //! メソッド）と `SpectralNormState`（クレートルートの別名なし再エクスポート 1 行）は #2851 で facade へ公開済み
 //! （モジュール自体は再エクスポートしない。公開形は `docs/autodiff-lrn-weight-reparam-decision.md` §12）。
-//! `norm_except_dim`・層化（`Linear`／`Conv` の重みへの parametrization 結線・`Sequential::add_*`・保存復元）は
-//! 保留継続。残る保留は `crates/facade/src/lib.rs` の `LrnWeightReparamHoldDoctestGuard` と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定し、公開済み側は同ファイルの正ガードが固定する。
+//! `norm_except_dim` は保留継続（非公開）。層化（`Linear`／`Conv` の重みへの parametrization 結線）と保存復元は
+//! `compat::Sequential::parametrize_weight_norm`／`parametrize_spectral_norm`（#3048・#3049）と
+//! `save_model`／`load_model`（#3050。`SpectralNormState` の `u`／`v` は `pub(crate)` の bit 厳密復元経路で戻す）で
+//! 公開済み。残る保留は `crates/facade/src/lib.rs` の `LrnWeightReparamHoldDoctestGuard` と
+//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定し、公開済み側は同ファイルの正ガードと
+//! ダウンキャスト消費箇所のインベントリ（`parametrize_downcast_sites_are_gated_or_exempt`）が固定する。
 //!
 //! **PyTorch 相当**:
 //!
