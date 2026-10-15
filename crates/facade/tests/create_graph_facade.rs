@@ -368,7 +368,7 @@ fn softmax_create_graph_matches_first_order_and_finite_difference_via_facade() {
 fn log_softmax_create_graph_matches_first_order_and_finite_difference_via_facade() {
     check_softmax_family(true);
 }
-// --- 損失 Op 第 1 弾（イシュー #3082・決定記録 §25）。実 CPU バックエンド
+// --- 損失 Op 第 1 弾（イシュー #3082・決定記録 §26）。実 CPU バックエンド
 //     （融合 `mse_loss_backward`／`nll_loss_backward` 経路を持つ `fandhe_ai::tape()`）
 //     で、1 階との REQ-2 一致と Hessian 列和の中央差分突合を行う。
 

@@ -941,11 +941,11 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
 
-## 25. 実装記録（#3082・損失 Op 第 1 弾の create_graph 対応）
+## 26. 実装記録（#3082・損失 Op 第 1 弾の create_graph 対応）
 
 §21.4 の損失族のうち、1 階 VJP が f32 の要素式だけで f64 縮約契約を持たない 5 variant を `supports_create_graph` の対象に加えた（網羅 match のまま）。残りは fail-closed のまま下表に記録する。サブイシューの起票は所有者承認が要るため行っていない。
 
-### 25.1 対象にした 5 variant と方式
+### 26.1 対象にした 5 variant と方式
 
 | variant | 方式 | 二階の構造 |
 |---|---|---|
@@ -961,7 +961,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - 範囲外の `targets` 添字は 1 階と同じくスキップする（forward が検査済み。panic しない）。空テンソルは 1 階と同じく全ゼロを返す。
 - `replay_op` は公開 `Var` メソッド（`mse_loss_with`・`l1_loss`・`huber_loss_impl`・`cross_entropy_loss`・`nll_loss`）へ委譲し、forward の検証を迂回しない。`huber_loss_impl` は `pub(crate)` にした（公開 API は不変）。未知の `HuberKind` は `Err(Backward)` に倒す。
 
-### 25.2 残した 16 variant（fail-closed のまま）
+### 26.2 残した 16 variant（fail-closed のまま）
 
 | 族（§21.4） | variant | 理由・後続 |
 |---|---|---|
@@ -970,18 +970,66 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 | (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
 | 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
 
-### 25.3 `reduction` と既知の差
+### 26.3 `reduction` と既知の差
 
 - `crate::var::Reduction` は `Mean`／`Sum` の 2 variant だけで、`None` は存在しない。`None` の追加は公開 API の変更なので本 issue では行わない（所有者承認が必要）。両 variant をすべての対象損失で検証し、「none 相当」は要素ごとの二乗誤差（非スカラー損失）の Hessian テストで代替した。
 - `L1Loss` は `d == 0` かつ `g` が `±inf` のとき、1 階は `inf·0 = NaN` だが子テープは 0 になる。§21.1 V2 の規則を優先した結果。
 
-### 25.4 テスト
+### 26.4 テスト
 
 - `crates/autodiff/tests/create_graph.rs`: 5 損失 × `Mean`／`Sum` の Hessian と有限差分の REQ-2 一致（恒等入力・`tanh` 連鎖・MSE の閉形式）、CE・NLL のクラス軸バリエーション（軸 0・最終軸・rank 3 中間軸）、`CE ≡ NLL∘LogSoftmax` の Hessian 突合、pred・target 両方を追跡する混合二階微分、`first_order()` と `Tape::backward` の bit 一致、`jvp_create_graph` の孫テープ再生と方向微分の突合、none 相当、大きな logits（`±1e30`）の有限性、空テンソル、残る損失（`KlDivLoss`）の拒否。
 - `crates/autodiff/src/tape.rs`: 5 variant が `true`・隣接する `KlDivLoss` が `false` を固定する単体テスト。
 - `crates/facade/tests/create_graph_facade.rs`: 実 CPU バックエンド（融合 `mse_loss_backward`・`nll_loss_backward` 経路）で、1 階との REQ-2 一致と Hessian 列和の中央差分突合。
 - 5 損失は V3 でないため、`cg.grad` と 1 階の bit 一致は主張せず REQ-2 で比較する。1 階 `first_order()` が `Tape::backward` と bit 同一である点（§21.1(1)）は構造上保たれる。
 
-### 25.5 変更していないもの
+### 26.5 変更していないもの
 
 1 階 `Tape::backward`・`grad.rs`・`backward.rs` の値、tolerance・baseline、FMA 契約、依存（`Cargo.toml`・`Cargo.lock`）、`unsafe`、公開 API、`docs/spec`、既存節の本文。CUDA／Metal 実機実測は未実施（#3080 と同じく申し送り）。
+
+
+## 25. 実装記録（#3083・索引・累積 Op の create_graph 対応）
+
+§21.2 の「索引 V1・累積 V3・選択 V2」のうち、`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum` の 8 variant を `supports_create_graph` の対象に加えた（網羅 match のまま）。実装は `crates/autodiff/src/create_graph/index_cum.rs`。承認範囲は §20（D-A）の一括承認で、新しい承認は得ていない。
+
+### 25.1 11 variant の扱い
+
+| variant | 本 PR | 方式 | replay（写しの forward） | cgrad（子テープへ積む式） |
+|---|---|---|---|---|
+| `Gather` | 対象 | V1 | `gather(dim, index)` | `zeros.scatter_add(dim, index, g)` |
+| `Scatter`（Add／Overwrite） | 対象 | V1＋V2 | reduce に応じて `scatter_add`／`scatter` | d_src は `gather`（Overwrite は last-writer マスクの `where_cond`）。d_input は Add が恒等、Overwrite が `g.scatter(dim, index, 0)` |
+| `Embedding` | 対象 | V1＋V2 | `weight.gather(0, index)` | `scatter_add`（dim 0）の後に `padding_idx` 行を `where_cond` で 0 |
+| `Sort`・`Topk` | 対象 | V2 | `gather(dim, index)` | Gather と同じ |
+| `Cummax`・`Cummin` | 対象 | V2 | `gather(dim, index)` | Gather と同じ（索引は必ず重複する） |
+| `Cumsum` | 対象 | V3 | `cumsum(dim)` | 構造 `flip → cumsum → flip`、値 `cumsum_vjp_along` |
+| `IndexedScatterReduce` | fail-closed のまま | — | — | 1 階 VJP がモードごとに入力依存のホストカーネル（prod／amax／amin のタイ規則）で、replayable な `Var` 演算だけの構造グラフを組めない |
+| `Cumprod` | fail-closed のまま | — | — | 1 階は `WideFloat` の Horner 型再帰。合成グラフでは §21.1(5) の overflow 契約を保てない |
+| `Logcumsumexp` | fail-closed のまま | — | — | 1 階は lane ごとの f64 prefix 再計算。合成すると `exp` の中間 overflow が出るため S1 スケーリングの設計が要り、2h 枠を超える |
+
+- 残る 3 variant は §21.4 の (a)(b) の残りに当たる。起票には所有者承認が要るため本 PR では起票していない。
+- 閉包性（§21.1(4)）: `Gather` の cgrad は `Scatter{Add}`、`Scatter` の d_src は `Gather` を積むため、両者は同時に対象にした。`Var::flip` は `index_select` 経由で `Op::Gather` になる。ほかに積む Op は `Where`・`Narrow`・`Contiguous`・`Cumsum` で、いずれも対象。
+
+### 25.2 方式の要点
+
+- 索引系は 1 階と同じ `scatter_with_fallback(Add)` を同じ引数で通るため、`cg.grad` は 1 階と bit 一致する（重複索引は `ScatterReduce::Add` の f64 決定的集約）。
+- `Sort`・`Topk`・`Cummax`・`Cummin` の `Op` payload は `descending`／`largest` を持たない。写しは値を選ぶだけの `Var::gather` で再生する（値は親と bit 一致）。§21.1(2) からの逸脱は子テープ上の Op タグが `Gather` になる点だけで、VJP は 1 階と同じ scatter_add(Add) である。
+- `Scatter` の d_src は `src_shape[axis] < input_shape[axis]` の非 dim 軸ごとに `g.narrow(axis, 0, len)` してから `gather` する（1 階と同じ）。Overwrite の d_src は `mul` ではなく `where_cond` で選ぶ（`inf*0` を作らない）。
+- `ScatterReduce` は `#[non_exhaustive]`。未知 variant は `validate_ancestors` が子テープへ書く前に拒否する（`child.is_empty()` を保つ）。`replay_op`・`build_cgrads` の `_ =>` は多層防御として残す。`Embedding` の `padding_idx` の範囲も入口で再確認する。
+- `Cumsum` の値は 1 階と同じホスト関数 `cumsum_vjp_along`（lane ごとの f64 アキュムレータ）。構造 `flip → cumsum → flip` の前方値がホスト値と bit 一致することを単体テストで確認した（`cumsum_structure_value_matches_host_bitwise`。桁落ち列・`[3e38, -3e38, 3e38]` を含む）。そのため孫テープで `Op::Contiguous` が構造を再計算しても §23.3 の P1（f32 へ落ちて inf になる問題）は起きず、`ConvWeightGradHost` 型の専用ホスト値 Op は不要と判断した。空テンソルは 1 階に揃えゼロ定数の葉を返す。
+
+### 25.3 Embedding の padding_idx の二階の意味論（所有者へ戻す論点）
+
+写しを `Gather` として再生するため、二階の逆伝播は forward 経路を通って行 `padding_idx` へ流れる寄与を 0 にしない。これは「1 階勾配関数を有限差分で微分した値」と一致する（forward は行 `p` の値を実際に使い、1 階勾配の行 `p` は常に 0 のため `H[p, *] = 0`、`H[*, p]` は forward 経由で非零）。一方 PyTorch の double backward とは行 `p` の混合二階項で異なりうる。受入条件が有限差分突合のため本方式を採った。PyTorch 準拠へ寄せるかは所有者判断として残す。
+
+### 25.4 テスト
+
+- `crates/autodiff/tests/create_graph.rs`（「索引・累積族」節）:
+  - Hessian の有限差分突合（REQ-2 判定・tolerance 不変）: Gather（重複索引・dim 0／1）・Scatter Add（input と src の混合ブロック・非 dim 軸 narrow・重複索引）・Scatter Overwrite（重複索引・最後の書き手）・Embedding（重複 id・`padding_idx` あり／なし・行 `p` と他行が結合する `(Σy)²` 項）・Sort（昇順／降順）・Topk・Cummax・Cummin（重複索引）・Cumsum（軸 0／最終軸／rank 3 中間軸）。loss は y³⊙c で勾配が 2 次多項式のため中央差分が厳密になる。
+  - `cg.grad` と `Tape::backward` の突合（線形 loss は bit 一致、連鎖 loss は REQ-2）と `first_order()` の bit 同一。
+  - Cumsum の数値回帰: 桁落ち列 `[1, 1e8, -1e8, 1]`（f64 縮約 2 と f32 逐次和 1 が分かれる）と `[3e38, -3e38, 3e38]` で 1 階と `cg.grad` が bit 一致、孫テープ（`jvp_create_graph`）も有限。
+  - 孫テープ: `scatter_add → cumsum → gather` を含む関数の `jvp_create_graph` を独立な方向微分と突合。
+  - fail-closed: `create_graph_rejects_custom_downstream_of_gather`・`create_graph_rejects_unsupported_op_cumprod`・`create_graph_rejects_gather_mixed_with_unsupported_op_and_keeps_child_empty`（いずれも拒否時 `child.is_empty()`）。旧 `create_graph_rejects_unsupported_op_gather` は廃止（Gather が対象になったため）。`Logcumsumexp`・`IndexedScatterReduce` の既存拒否テストは変更なしで green。
+- 内部単体テスト: `tape.rs::index_cumulative_family_supports_create_graph`（8 件が true・3 件が false）、`index_cum.rs` の構造値 bit 一致と `replay_scatter`。
+
+### 25.5 変更していないもの
+
+1 階 `Tape::backward` の値（`grad.rs` の差分は `cumsum_vjp_along`・`scatter_overwrite_last_writer_mask` の可視性を `pub(crate)` にしただけ）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。CUDA／Metal 実機での create_graph×索引系の実測は未実施（#3168・#3169 へ申し送り）。
