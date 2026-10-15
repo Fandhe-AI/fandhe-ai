@@ -681,11 +681,13 @@ fn create_graph_rejects_unsupported_op_gelu() {
 }
 
 #[test]
-fn create_graph_rejects_unsupported_op_softmax() {
+fn create_graph_rejects_unsupported_op_logsumexp() {
+    // イシュー #3077 で Softmax は対象になったため、fail-closed のまま
+    // 残る隣接 Op（`LogSumExp`）で拒否契約を維持する。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
-    let loss = x.softmax(1).unwrap().sum(None).unwrap();
+    let loss = x.logsumexp(Some(1)).unwrap().sum(None).unwrap();
 
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
@@ -2042,6 +2044,255 @@ fn create_graph_rejects_unsupported_op_gather() {
     let index = fandhe_ai_tensor_core::Tensor::<i32>::new(vec![0, 0, 1], &[3]).expect("index");
     let loss = x.gather(0, &index).unwrap().sum(None).unwrap();
 
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+// --- Softmax／LogSoftmax（イシュー #3077・V3 方式。決定記録 §21.3・§22） ---
+
+const W23: [f32; 6] = [0.3, -1.2, 0.7, 2.0, -0.5, 1.1];
+const X23: [f32; 6] = [0.2, -0.4, 0.9, 1.3, -0.7, 0.1];
+
+fn w_const<'t>(tape: &'t Tape, shape: &[usize]) -> Var<'t> {
+    let n = flat_len(shape);
+    let data: Vec<f32> = (0..n).map(|i| W23[i % 6] + 0.05 * i as f32).collect();
+    tape.var_no_grad(&t(data, shape))
+}
+
+fn build_softmax_d1<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(1)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_softmax_d0<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(0)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_softmax_rank3_mid<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(1)?.mul(&w_const(tape, &[2, 3, 2]))?.sum(None)
+}
+fn build_softmax_self_sq<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x.softmax(1)?;
+    y.mul(&y)?.sum(None)
+}
+fn build_softmax_times_x<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(1)?.mul(x)?.sum(None)
+}
+fn build_softmax_after_tanh<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.tanh().softmax(1)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_log_softmax_d1<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_log_softmax_d0<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(0)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_log_softmax_rank3_mid<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?.mul(&w_const(tape, &[2, 3, 2]))?.sum(None)
+}
+fn build_log_softmax_self_sq<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x.log_softmax(1)?;
+    y.mul(&y)?.sum(None)
+}
+fn build_log_softmax_times_x<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?.mul(x)?.sum(None)
+}
+fn build_log_softmax_after_tanh<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.tanh()
+        .log_softmax(1)?
+        .mul(&w_const(tape, &[2, 3]))?
+        .sum(None)
+}
+
+fn check_hessian<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError> + Copy,
+{
+    let numeric = finite_diff_hessian(build, x0, shape, 1e-2);
+    let analytic = analytic_hessian(build, x0, shape);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+fn x12() -> Vec<f32> {
+    (0..12).map(|i| X23[i % 6] + 0.07 * i as f32).collect()
+}
+
+#[test]
+fn hessian_softmax_matches_finite_difference() {
+    check_hessian(build_softmax_d1, &X23, &[2, 3]);
+    check_hessian(build_softmax_d0, &X23, &[2, 3]);
+    check_hessian(build_softmax_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(build_softmax_self_sq, &X23, &[2, 3]);
+    check_hessian(build_softmax_times_x, &X23, &[2, 3]);
+    check_hessian(build_softmax_after_tanh, &X23, &[2, 3]);
+}
+
+#[test]
+fn hessian_log_softmax_matches_finite_difference() {
+    check_hessian(build_log_softmax_d1, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_d0, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(build_log_softmax_self_sq, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_times_x, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_after_tanh, &X23, &[2, 3]);
+}
+
+fn assert_first_order_bit_equal<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let first = cg.first_order().get(&x).unwrap().unwrap();
+    let gx = cg.grad(&x).unwrap().unwrap();
+    for i in 0..flat_len(shape) {
+        let idx = unravel(i, shape);
+        assert_eq!(
+            first.get(&idx).unwrap().to_bits(),
+            gx.value().get(&idx).unwrap().to_bits(),
+            "V3: cg.grad は 1 階と bit 一致のはず (i={i})"
+        );
+    }
+}
+
+#[test]
+fn create_graph_softmax_first_order_is_bit_identical() {
+    assert_first_order_bit_equal(build_softmax_d1, &X23, &[2, 3]);
+    assert_first_order_bit_equal(build_softmax_d0, &X23, &[2, 3]);
+    assert_first_order_bit_equal(build_log_softmax_d1, &X23, &[2, 3]);
+    assert_first_order_bit_equal(build_log_softmax_rank3_mid, &x12(), &[2, 3, 2]);
+}
+
+#[test]
+fn create_graph_softmax_first_order_chain_matches_req2() {
+    for build in [build_softmax_after_tanh, build_log_softmax_after_tanh] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(X23.to_vec(), &[2, 3]));
+        let loss = build(&tape, &x).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let first = cg.first_order().get(&x).unwrap().unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap();
+        for i in 0..6 {
+            let idx = unravel(i, &[2, 3]);
+            assert!(common::req2_close(
+                gx.value().get(&idx).unwrap() as f64,
+                first.get(&idx).unwrap() as f64
+            ));
+        }
+    }
+}
+
+/// overflow 回帰（決定記録 §8・§21.3）。段 1: 1 階が有限、段 2: `cg.grad`
+/// が有限かつ 1 階と bit 一致、段 3: `jvp_create_graph` の出力が有限で
+/// 解析式と REQ-2 判定で一致。
+fn overflow_regression(x0: [f32; 2], w: [f32; 2], log: bool, expected_jvp: f64) {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), &[1, 2]));
+    let wv = tape.var_no_grad(&t(w.to_vec(), &[1, 2]));
+    let y = if log {
+        x.log_softmax(1).unwrap()
+    } else {
+        x.softmax(1).unwrap()
+    };
+    let loss = y.mul(&wv).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let first = cg.first_order().get(&x).unwrap().unwrap();
+    let gx = cg.grad(&x).unwrap().unwrap();
+    for i in 0..2 {
+        let a = first.get(&[0, i]).unwrap();
+        let b = gx.value().get(&[0, i]).unwrap();
+        assert!(a.is_finite(), "段 1: 1 階が有限 (i={i}) {a}");
+        assert!(b.is_finite(), "段 2: cg.grad が有限 (i={i}) {b}");
+        assert_eq!(a.to_bits(), b.to_bits(), "段 2: 1 階と bit 一致 (i={i})");
+    }
+
+    // 段 3: jvp_create_graph（孫テープ再生）。
+    let tape2 = Tape::new_with_ops(common::naive_ops());
+    let child2 = Tape::new_with_ops(common::naive_ops());
+    let grand2 = Tape::new_with_ops(common::naive_ops());
+    let x2 = tape2.var(&t(x0.to_vec(), &[1, 2]));
+    let wv2 = tape2.var_no_grad(&t(w.to_vec(), &[1, 2]));
+    let y2 = if log {
+        x2.log_softmax(1).unwrap()
+    } else {
+        x2.softmax(1).unwrap()
+    };
+    let out = y2.mul(&wv2).unwrap();
+    let tangent = t(vec![1.0, -1.0], &[1, 2]);
+    let r = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape2, &out, &x2, &tangent, &child2, &grand2,
+    )
+    .unwrap();
+    let out_var = r.output();
+    let v = out_var.value();
+    let mut total = 0.0f64;
+    for i in 0..2 {
+        let e = v.get(&[0, i]).unwrap();
+        assert!(e.is_finite(), "段 3: jvp 出力が有限 (i={i}) {e}");
+        total += e as f64;
+    }
+    assert!(
+        common::req2_close(total, expected_jvp),
+        "{total} vs {expected_jvp}"
+    );
+}
+
+#[test]
+fn create_graph_softmax_large_upstream_does_not_overflow() {
+    // y=[0.25,0.75]、d/dx softmax·w の J·t の総和は
+    // Σ_i w_i (J t)_i。J=diag(y)-yyᵀ、t=[1,-1] → Jt=[0.25+... ] を f64 で算出。
+    let y = [0.25f64, 0.75];
+    let t_ = [1.0f64, -1.0];
+    let yt: f64 = y.iter().zip(t_.iter()).map(|(a, b)| a * b).sum();
+    let jt: Vec<f64> = (0..2).map(|i| y[i] * t_[i] - y[i] * yt).collect();
+    let w = [3e38f32, -3e38];
+    let expected: f64 = (0..2).map(|i| w[i] as f64 * jt[i]).sum();
+    overflow_regression([0.0, 3.0f32.ln()], w, false, expected);
+}
+
+#[test]
+fn create_graph_log_softmax_large_upstream_does_not_overflow() {
+    // log_softmax の J = I - 1·yᵀ（y=[.5,.5]）、t=[1,-1] → Jt = t - 1·(y·t)=t。
+    let w = [2e38f32, 2e38];
+    let expected = w[0] as f64 - w[1] as f64;
+    overflow_regression([0.0, 0.0], w, true, expected);
+}
+
+#[test]
+fn create_graph_softmax_empty_tensor_returns_zero_shaped_grad() {
+    for shape in [[0usize, 3], [2, 0]] {
+        for log in [false, true] {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(vec![], &shape));
+            let y = if log {
+                x.log_softmax(1).unwrap()
+            } else {
+                x.softmax(1).unwrap()
+            };
+            let loss = y.sum(None).unwrap();
+            let cg = tape.backward_create_graph(&loss, &child).unwrap();
+            let gx = cg.grad(&x).unwrap().unwrap();
+            assert_eq!(gx.value().shape(), shape.as_slice());
+        }
+    }
+}
+
+#[test]
+fn create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let loss = x
+        .softmax(1)
+        .unwrap()
+        .logsumexp(Some(1))
+        .unwrap()
+        .sum(None)
+        .unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
