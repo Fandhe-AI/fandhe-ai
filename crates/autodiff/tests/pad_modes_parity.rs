@@ -704,16 +704,30 @@ fn chained_backward_and_shared_input_accumulate() {
     assert_eq!(dx.host_slice().into_owned(), vec![2.0, 4.0, 4.0]);
 }
 
+/// create_graph はイシュー #3084（決定記録 §29）で対応済み。`cg.grad` が 1 階 `backward` と
+/// bit 一致する（V3: 値は同じ `pad_modes_vjp_host`）。旧 fail-closed テストの置換。
 #[test]
-fn create_graph_is_a_typed_error_not_a_panic() {
-    let tape = Tape::new_with_ops(common::naive_ops());
-    let child = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0, 2.0], &[2]));
-    let loss = pad_with_mode(&x, &[(1, 1)], PadMode::Replicate)
-        .unwrap()
-        .sum(None)
-        .unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+fn create_graph_succeeds_and_matches_first_order() {
+    for mode in [PadMode::Reflect, PadMode::Replicate, PadMode::Circular] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![1.0, 2.0], &[2]));
+        let loss = pad_with_mode(&x, &[(1, 1)], mode)
+            .unwrap()
+            .sum(None)
+            .unwrap();
+        let plain = tape.backward(&loss).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let p = plain.get(&x).unwrap().unwrap();
+        let g = cg.grad(&x).unwrap().unwrap();
+        for i in 0..2 {
+            assert_eq!(
+                p.get(&[i]).unwrap().to_bits(),
+                g.value().get(&[i]).unwrap().to_bits(),
+                "{mode:?} i={i}"
+            );
+        }
+    }
 }
 
 #[test]
