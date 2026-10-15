@@ -287,10 +287,10 @@ impl Tape {
     ///    勾配を得る（`loss.requires_grad() == false` の拒否もここで
     ///    既存どおり発生する）。
     ///
-    /// 4〜7 のいずれかで失敗した場合、`child` へは一切書き込まない
-    /// （4 の事前検査により `child` の空性が確認済みであること、6 が
-    /// `build_mirror`／`build_cgrads` より前に走ることの両方に
-    /// より、途中失敗で `child` へノードが残ることはない）。
+    /// 4〜7 のいずれかで失敗した場合、`child` は空のまま残る（4 の事前検査により
+    /// `child` の空性が確認済みであること、6 が `build_mirror`／`build_cgrads` より前に
+    /// 走ることに加え、`build_mirror`／`build_cgrads` の途中失敗では積んだノードを
+    /// [`Tape::rollback_to`] で取り除く）。
     pub fn backward_create_graph<'c>(
         &self,
         loss: &Var<'_>,
@@ -343,8 +343,21 @@ impl Tape {
 
         let n = self.nodes.borrow().len();
         let mut mirror: Vec<Option<Var<'c>>> = vec![None; n];
-        build_mirror(self, child, &ancestors, &mut mirror)?;
-        let cgrads = build_cgrads(self, child, &ancestors, &mirror, loss.node_id())?;
+        // `build_mirror`／`build_cgrads` は子テープへノードを積んだ後でも失敗しうる
+        // （例: LayerNorm／RmsNorm の upstream 値は子テープ上で初めて分かり、構築の途中で
+        // 拒否される。PR #3346 レビュー指摘）。失敗時は積んだノードをすべて取り除いて
+        // `child` を空へ戻し、同じ `child` での再試行を可能にする（空性検査を通る）。
+        let point = child.rollback_point();
+        let built = build_mirror(self, child, &ancestors, &mut mirror)
+            .and_then(|()| build_cgrads(self, child, &ancestors, &mirror, loss.node_id()));
+        let cgrads = match built {
+            Ok(c) => c,
+            Err(e) => {
+                mirror.clear();
+                child.rollback_to(point);
+                return Err(e);
+            }
+        };
 
         Ok(CreateGraphResult {
             first_order,

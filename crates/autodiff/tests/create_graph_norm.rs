@@ -1,5 +1,5 @@
 //! `Op::LayerNorm`・`Op::RmsNorm` の `create_graph`（`Tape::backward_create_graph`）対応
-//! （イシュー #3078・親 #3075・決定記録 `docs/autodiff-higher-order-grad-decision.md` §21.3・§24）
+//! （イシュー #3078・親 #3075・決定記録 `docs/autodiff-higher-order-grad-decision.md` §21.3・§25）
 //! の受け入れ条件を直接検証する統合テスト。
 //!
 //! - Hessian を `Tape::backward` の中央差分（`create_graph` を経由しない独立経路）と REQ-2 統一
@@ -596,7 +596,7 @@ fn neighbouring_unsupported_norm_op_stays_fail_closed() {
 fn check_huge_upstream(kind: Kind, affine: bool) {
     // Rms: [1,2]・g=2e37（修正前は dxhat⊙xhat の f32 和が 6e38 で overflow し inf が混入した）。
     // Layer: [1,4]・g=1e37 の回帰確認。g をさらに上げると HVP の途中値（cotangent の行方向和）
-    // が g の hidden 倍になり f32 に収まらない（決定記録 §24.3 の既知の限界）。
+    // が g の hidden 倍になり f32 に収まらない（決定記録 §25.3 の既知の限界）。
     let (shape, x0, c, v): (Vec<usize>, Vec<f32>, Vec<f32>, Vec<f32>) = match kind {
         Kind::Rms => (
             vec![1, 2],
@@ -670,4 +670,66 @@ fn layer_norm_upstream_just_below_guard_hvp_stays_finite() {
     // hidden·g = 4e37 < 2^125 は受理され、HVP が有限。
     let hv = layer_hvp_with_upstream(vec![1e37, -1e37, 1e37, -1e37]).expect("受理される範囲");
     assert_finite(&hv, "g=1e37: HVP");
+}
+
+// --- 8. 三巡目レビュー指摘（PR #3346）: 拒否時に child が空へ戻る・rstd 増幅を守る ------------
+
+/// `x` と upstream `c`（shape `[1, h]`）で create_graph を試み、HVP を返す。
+fn try_build(
+    kind: Kind,
+    x0: Vec<f32>,
+    c: Vec<f32>,
+    child: &Tape,
+) -> Result<Vec<f32>, AutodiffError> {
+    let shape = [1usize, x0.len()];
+    let v = vec![1.0f32; x0.len()];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0, &shape));
+    let loss = build_norm(&tape, &x, kind, 1e-5, false, &c, &shape).unwrap();
+    let cg = tape.backward_create_graph(&loss, child)?;
+    let gx = cg.grad(&x).unwrap().unwrap();
+    let cx = cg.child_var(&x).unwrap().unwrap();
+    let vc = child.var_no_grad(&t(v, &shape));
+    let prod = gx.mul(&vc).unwrap().sum(None).unwrap();
+    Ok(dense(
+        child.backward(&prod).unwrap().get(&cx).unwrap().unwrap(),
+    ))
+}
+
+#[test]
+fn rejected_upstream_leaves_child_empty_and_allows_retry() {
+    for kind in [Kind::Layer, Kind::Rms] {
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x0 = vec![1.0f32, -1.0, 1.0, -1.0];
+        // upstream 拒否（build_mirror・構造構築の後で判明する経路）。
+        let err = try_build(kind, x0.clone(), vec![1e38, -1e38, 1e38, -1e38], &child).unwrap_err();
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        assert!(child.is_empty(), "拒否後に child が空へ戻る");
+        // 非有限 upstream でも同様。
+        let err = try_build(kind, x0.clone(), vec![f32::NAN, 1.0, 1.0, 1.0], &child).unwrap_err();
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        assert!(child.is_empty());
+        // 同じ child で再試行できる。
+        let hv = try_build(kind, x0, vec![1.0, -1.0, 1.0, -1.0], &child).expect("再試行は成功");
+        assert_finite(&hv, "retry");
+    }
+}
+
+#[test]
+fn low_variance_row_rstd_amplification_is_guarded() {
+    // 低分散行（rstd≈300）。hidden·g=4e36 は旧ガード（2^125≈4.3e37）を通るが、rstd 増幅後は
+    // 超える。拒否され child は空へ戻る。g が十分小さければ受理され HVP は有限。
+    for (kind, x0) in [
+        (Kind::Layer, vec![1.0f32, 1.001, 1.0, 1.001]),
+        (Kind::Rms, vec![1e-3f32, 1e-3, 1e-3, 1e-3]),
+    ] {
+        let child = Tape::new_with_ops(common::naive_ops());
+        let big = vec![1e36f32, -1e36, 1e36, -1e36];
+        let err = try_build(kind, x0.clone(), big, &child).unwrap_err();
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        assert!(child.is_empty());
+        let small = vec![1e33f32, -1e33, 1e33, -1e33];
+        let hv = try_build(kind, x0, small, &child).expect("受理される範囲");
+        assert_finite(&hv, "低分散行 HVP");
+    }
 }

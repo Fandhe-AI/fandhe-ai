@@ -1,6 +1,6 @@
 //! `Op::LayerNorm`・`Op::RmsNorm` の `create_graph`（子テープ方式の二階微分）対応
 //! （イシュー #3078・親 #3075。方針の正は
-//! `docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3「#3078」、実装記録は §24）。
+//! `docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3「#3078」、実装記録は §25）。
 //!
 //! [`crate::create_graph`] の `validate_ancestors`／`replay_op`／`build_cgrads` から呼ばれる
 //! 行方向正規化専用の補助モジュール。`create_graph.rs` 本体を肥大させず、並行する
@@ -46,10 +46,10 @@
 //!
 //! `dxhat = g·w` は行ごとの 2 のべき乗 `gs` で割ってから縮約し、最後に `gs` を掛けて復元する
 //! （`g=[3e38,3e38]` でも `Mean(dxhat⊙xhat)` が overflow しない）。`g` が非有限、または
-//! `g·w` が f32 に収まらない、または `hidden·max|g·w|` が `2^125` 以上の場合は構築時に
+//! `g·w` が f32 に収まらない、または `hidden·max(1,rstd)·max|g·w|` が `2^125` 以上の場合は構築時に
 //! `Err(Backward)` で拒否する（逆伝播の行方向縮約の overflow を避けるため）。
 //! `dw`／`db` の行方向 `Sum` は 1 階も f32 要素積のため、行をまたぐ合計の overflow は残る
-//! （決定記録 §24.3）。
+//! （決定記録 §25.3）。
 
 use fandhe_ai_tensor_core::{BackendOps, Tensor, row_norm_layout};
 
@@ -67,7 +67,7 @@ const TINY_DEVIATION_GUARD: f64 = 7.888_609_052_210_118e-31;
 fn reject(what: &str) -> AutodiffError {
     AutodiffError::Backward(format!(
         "create_graph: {what}（LayerNorm／RmsNorm の S1 構造が安全に扱えない入力。\
-         docs/autodiff-higher-order-grad-decision.md §24 参照）"
+         docs/autodiff-higher-order-grad-decision.md §25 参照）"
     ))
 }
 
@@ -214,6 +214,28 @@ fn scale_consts<'c>(
     Ok((child.var_no_grad(&s_t), child.var_no_grad(&e_t)))
 }
 
+/// 行ごとの真の `rstd = 1/√(var_or_ms + eps)`（f64）。`centered == true` は LayerNorm
+/// （平均を引いた分散）、`false` は RmsNorm（二乗平均）。`upstream_scale` の増幅項に使う。
+fn row_rstd(data: &[f32], rows: usize, hidden: usize, eps: f32, centered: bool) -> Vec<f64> {
+    (0..rows)
+        .map(|r| {
+            let row = &data[r * hidden..(r + 1) * hidden];
+            let n = hidden as f64;
+            let mean = if centered {
+                row.iter().map(|&v| f64::from(v)).sum::<f64>() / n
+            } else {
+                0.0
+            };
+            let ms = row
+                .iter()
+                .map(|&v| (f64::from(v) - mean).powi(2))
+                .sum::<f64>()
+                / n;
+            1.0 / (ms + f64::from(eps)).sqrt()
+        })
+        .collect()
+}
+
 /// upstream 側のスケール `gs`（行ごとの 2 のべき乗。`[rows, 1]`）の定数葉を作る。
 /// `dxhat = g·w` の行最大絶対値（f64）から指数を決める。`g` が非有限、または `dxhat` が
 /// f32 に収まらない（1 階側も overflow する）場合は型付きエラーで拒否する。`dxhat/gs` を縮約へ
@@ -223,6 +245,7 @@ fn upstream_scale<'c>(
     child: &'c Tape,
     dy: &[f32],
     w: Option<&[f32]>,
+    rstd: &[f64],
     rows: usize,
     hidden: usize,
 ) -> Result<Var<'c>, AutodiffError> {
@@ -244,11 +267,14 @@ fn upstream_scale<'c>(
             mx = mx.max(d.abs());
         }
         // 逆伝播は cotangent を行方向に足し合わせる（`mean_dot` 等への縮約）ため、f32 の和が
-        // `hidden · max|g·w|` に達しうる。これが 2^125 以上の行は型付きエラーで拒否する（`gs` を縮約の手前まで持ち越しても
-        // xhat・rstd への cotangent 和は避けられず、実測で NaN になる。f32 上限ちょうどでは遅い）。
-        if hidden as f64 * mx >= MEAN_OVERFLOW_GUARD {
+        // `hidden · max|g·w|` に達しうる。さらに `xhat`／`rstd` の cotangent は
+        // `v·(rstd_s/s) = v·rstd`（真の rstd）経由で流れるため、実際に overflow する積は
+        // `hidden · rstd · max|g·w|` 規模になる（低分散行で増幅。PR #3346 Bugbot 指摘）。
+        // 増幅は 1 以上のときだけ見て、これが 2^125 以上の行は型付きエラーで拒否する
+        // （`gs` を縮約の手前まで持ち越しても cotangent 和は避けられず、実測で NaN になる）。
+        if hidden as f64 * rstd[r].max(1.0) * mx >= MEAN_OVERFLOW_GUARD {
             return Err(reject(
-                "hidden · max|g·w| が 2^125 以上で逆伝播の行方向縮約が overflow しうる",
+                "hidden · max(1, rstd) · max|g·w| が 2^125 以上で逆伝播の行方向縮約が overflow しうる",
             ));
         }
         exps.push(pow2_ceil_exponent(mx));
@@ -388,7 +414,14 @@ pub(crate) fn rms_norm_cgrads<'c>(
 
     let mut out = Vec::new();
     if need_x {
-        let gs_c = upstream_scale(child, &dy, w_slice.as_deref(), rows, hidden)?;
+        let gs_c = upstream_scale(
+            child,
+            &dy,
+            w_slice.as_deref(),
+            &row_rstd(&x_slice, rows, hidden, eps, false),
+            rows,
+            hidden,
+        )?;
         let gw = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,
@@ -481,7 +514,14 @@ pub(crate) fn layer_norm_cgrads<'c>(
 
     let mut out = Vec::new();
     if need_x {
-        let gs_c = upstream_scale(child, &dy, w_slice.as_deref(), rows, hidden)?;
+        let gs_c = upstream_scale(
+            child,
+            &dy,
+            w_slice.as_deref(),
+            &row_rstd(&x_slice, rows, hidden, eps, true),
+            rows,
+            hidden,
+        )?;
         let gw = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,
