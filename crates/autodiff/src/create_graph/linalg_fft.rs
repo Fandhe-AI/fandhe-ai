@@ -287,6 +287,16 @@ fn all_stage_ok(v: &[f64]) -> bool {
     v.iter().all(|&x| stage_ok(x))
 }
 
+/// REQ-2 統一複合判定の相対許容誤差（`fandhe_ai_backend_cpu::parity::RELATIVE_TOLERANCE` と同値）。
+/// `autodiff` は具体バックエンドクレートへ依存しない不変条件（`tests/architecture_boundaries.rs`）
+/// のため同定数を直接 import できず、本モジュール 1 箇所へ写して値を変えない（緩和はユーザー承認事項）。
+const REQ2_RELATIVE_TOLERANCE: f64 = 1e-3;
+/// REQ-2 統一複合判定の絶対許容誤差（`fandhe_ai_backend_cpu::parity::ABSOLUTE_RESCUE_THRESHOLD` と同値）。
+/// 出典・扱いは [`REQ2_RELATIVE_TOLERANCE`] と同じ。
+const REQ2_ABSOLUTE_RESCUE_THRESHOLD: f64 = 1e-5;
+/// 保守的な相対判定の閾値。許容の半分を使い、f32 構造の見積り上界に余裕を持たせる（許容自体は不変）。
+const CONSERVATIVE_RELATIVE_TOLERANCE: f64 = REQ2_RELATIVE_TOLERANCE / 2.0;
+
 /// f32 の子テープ構造の丸め誤差が REQ-2 の複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）に
 /// 収まるかの保守的検査。`reference` は f64 の真値、`magnitude` は同じ式の絶対値積（`|X||G||X|` 等）、
 /// `terms` は構造内の積和の総項数（段の長さ）。誤差上界を `(2 * terms + 4) * 2^-23 * magnitude`
@@ -296,7 +306,7 @@ fn rounding_ok(reference: &[f64], magnitude: &[f64], terms: usize) -> bool {
     let coeff = (2 * terms + 4) as f64 * (-23f64).exp2();
     reference.iter().zip(magnitude).all(|(&r, &m)| {
         let bound = coeff * m;
-        bound < 1e-5 || bound <= 5e-4 * r.abs()
+        bound < REQ2_ABSOLUTE_RESCUE_THRESHOLD || bound <= CONSERVATIVE_RELATIVE_TOLERANCE * r.abs()
     })
 }
 
@@ -411,7 +421,7 @@ fn det_second_order_rounding_ok(x: &[f64], det: f64, gv: f64, n: usize) -> bool 
     let scale = det.abs() * gv.abs();
     ax.iter().enumerate().all(|(i, &v)| {
         let m = scale * (total * v + rows[i / n] * cols[i % n]);
-        coeff * m < 1e-5
+        coeff * m < REQ2_ABSOLUTE_RESCUE_THRESHOLD
     })
 }
 

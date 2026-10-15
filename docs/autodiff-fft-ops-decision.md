@@ -413,4 +413,4 @@ workspace インベントリ期待値（`autodiff/src/fft_ops.rs` の `stft`／`
 
 ## 追記（#3086）高階微分（create_graph）の対応範囲
 
-上の各節にある「高階微分非対応」は #3086 時点の記述から更新した。`Rfft`・`Irfft`・`Fft`・`Ifft` の 4 件は `Tape::backward_create_graph` の対象になった（随伴を別の FFT とゼロ詰め／切り詰めで子テープへ積む V1 方式。数値契約は `docs/autodiff-higher-order-grad-decision.md` §29）。`Stft`・`Istft` は反射パディング（`PadMode`）が再生できないため fail-closed のまま。
+上の各節にある「高階微分非対応」は #3086 時点の記述から更新した。`Rfft`・`Irfft`・`Fft`・`Ifft` の 4 件は `Tape::backward_create_graph` の対象になった（随伴を別の FFT とゼロ詰め／切り詰めで子テープへ積む V1 方式。数値契約は `docs/autodiff-higher-order-grad-decision.md` §29）。`Stft`・`Istft` は窓とフレームの overlap-add を再生可能な `Var` 演算で組むと O(T) 個のノードが要るため fail-closed のまま（反射パディングの `PadMode` は #3084 で再生可能になっており、保留理由ではない）。

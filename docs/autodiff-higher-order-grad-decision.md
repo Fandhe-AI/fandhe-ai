@@ -1186,7 +1186,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 | `Fft`・`Ifft` | 実装 | V1 | 随伴は逆向きの FFT（`norm` は `Backward <-> Forward` を入れ替え、`Ortho` は不変）に、実軸の `narrow`／ゼロ定数との `concat` を足すだけで書ける。積む Op: `Ifft`／`Fft`・`Narrow`・`Concat` |
 | `Rfft` | 実装 | V1 | `irfft(g * h, n, dim, swap(norm))`。`h` は DC と（`n` 偶数の）Nyquist で 1、それ以外で 0.5 のホスト定数（0 を含まないので `inf * 0` は起きない）。積む Op: `Irfft`・`Mul`・`Narrow`・`Concat` |
 | `Irfft` | 実装 | V1 | `rfft(g, n, dim, swap(norm)) * c`。`c` は DC と Nyquist で 1、それ以外で 2。bin 軸を入力の bin 数 `m` へ合わせる。積む Op: `Rfft`・`Mul`・`Narrow`・`Concat` |
-| `Stft`・`Istft` | fail-closed | — | `center=true` の反射パディングに `PadMode` が要るが再生できない（#3084）。窓とフレームの overlap-add を再生可能な `Var` 演算で組むには O(T) 個のノードが要る（§21.2） |
+| `Stft`・`Istft` | fail-closed | — | 窓とフレームの overlap-add を再生可能な `Var` 演算で組むには O(T) 個のノードが要る（§21.2）。`center=true` の反射パディングは #3084 で `PadMode` が再生可能になったため保留理由ではない |
 | `Inv` | 実装 | V1 | `dA = -(X^T g X^T)`（`X` は `Inv` ノードの写し）。積む Op: `Transpose`・`MatMul`（`matmul_fp32_strict`）・`ScalarUnary{Neg}` |
 | `Solve` | 実装 | V1 | `dB = solve(A^T, g)`、`dA = -dB X^T`。積む Op: `Solve`・`Transpose`・`Contiguous`・`MatMul`・`Neg` |
 | `SlogdetLogAbsDet` | 実装 | V1 | `dA = broadcast(g) * inv(A)^T`。積む Op: `BroadcastTo`・`Inv`・`Transpose`・`Mul` |
@@ -1225,7 +1225,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1. `Det`・`Inv`・`Solve`・`SlogdetLogAbsDet` で判定に引っかかる入力を、拒否ではなく §21.2 の S2／V4（行別スケール＋チャンク）で受理する方向へ広げるか。
 2. `SlogdetSign` を損失に使う経路は fail-closed のため create_graph 全体が拒否される（使い勝手上の制約）。
-3. `Stft`・`Istft` は `PadMode` が再生できるようになったら（#3084）再検討する。
+3. `Stft`・`Istft` は overlap-add の構造（O(T) 個のノードが要る）を解く設計が決まったら再検討する（`PadMode` は #3084 で再生可能になり、保留理由ではなくなった）。
 4. 分解系（`Svd*`・`Eigh*`・`Qr*`）の縮退の扱いを決めたうえでの起票（起票にはユーザーの承認が要るため本 issue では行っていない）。
 5. CUDA／Metal 実機での `cg.grad` の parity は未確認（線形代数の forward は GPU からホスト f64 へフォールバックする。#3168・#3169 と同じ申し送り）。
 
