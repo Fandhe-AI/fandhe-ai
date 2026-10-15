@@ -46,7 +46,8 @@
 //!
 //! `dxhat = g·w` は行ごとの 2 のべき乗 `gs` で割ってから縮約し、最後に `gs` を掛けて復元する
 //! （`g=[3e38,3e38]` でも `Mean(dxhat⊙xhat)` が overflow しない）。`g` が非有限、または
-//! `g·w` が f32 に収まらない場合は構築時に `Err(Backward)` で拒否する。
+//! `g·w` が f32 に収まらない、または `hidden·max|g·w|` が `2^125` 以上の場合は構築時に
+//! `Err(Backward)` で拒否する（逆伝播の行方向縮約の overflow を避けるため）。
 //! `dw`／`db` の行方向 `Sum` は 1 階も f32 要素積のため、行をまたぐ合計の overflow は残る
 //! （決定記録 §24.3）。
 
@@ -242,10 +243,34 @@ fn upstream_scale<'c>(
             }
             mx = mx.max(d.abs());
         }
+        // 逆伝播は cotangent を行方向に足し合わせる（`mean_dot` 等への縮約）ため、f32 の和が
+        // `hidden · max|g·w|` に達しうる。これが 2^125 以上の行は型付きエラーで拒否する（`gs` を縮約の手前まで持ち越しても
+        // xhat・rstd への cotangent 和は避けられず、実測で NaN になる。f32 上限ちょうどでは遅い）。
+        if hidden as f64 * mx >= MEAN_OVERFLOW_GUARD {
+            return Err(reject(
+                "hidden · max|g·w| が 2^125 以上で逆伝播の行方向縮約が overflow しうる",
+            ));
+        }
         exps.push(pow2_ceil_exponent(mx));
     }
     let gs: Vec<f32> = exps.iter().map(|&e| 2f64.powi(e) as f32).collect();
     Ok(child.var_no_grad(&Tensor::new(gs, &[rows, 1])?))
+}
+
+/// `gs/hidden`（行ごと。`[rows, 1]`）の定数葉。縮約（`Sum`）の直後にこれを掛けて `gs` を復元する。
+/// `Mean` の逆伝播が cotangent を行方向に足し合わせる前に `gs` を掛けないため、`gs`・hidden 倍の
+/// 中間 overflow を避ける（レビュー指摘 PR #3346 の二巡目。`gs/hidden` は f64 で計算し f32 へ丸める）。
+fn gs_over_hidden<'c>(
+    child: &'c Tape,
+    gs: &Var<'c>,
+    hidden: usize,
+) -> Result<Var<'c>, AutodiffError> {
+    let v = dense_vec(&child_value(child, gs)?);
+    let c: Vec<f32> = v
+        .iter()
+        .map(|&g| (f64::from(g) / hidden as f64) as f32)
+        .collect();
+    Ok(child.var_no_grad(&Tensor::new(c, &[v.len(), 1])?))
 }
 
 /// 構造 `structure` の VJP 値を `value`（ホスト関数の結果）へ差し替えた `Op::Contiguous`
@@ -364,18 +389,17 @@ pub(crate) fn rms_norm_cgrads<'c>(
     let mut out = Vec::new();
     if need_x {
         let gs_c = upstream_scale(child, &dy, w_slice.as_deref(), rows, hidden)?;
-        let dxhat = match &w_m {
+        let gw = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,
-        }
-        .div(&gs_c)?;
-        let mean_dot = keep_dim(&dxhat.mul(&xhat)?.mean(Some(1))?)?;
-        let inner = dxhat.sub(&xhat.mul(&mean_dot)?)?;
-        let dx_s = rstd_s
-            .div(&s_c)?
-            .mul(&inner)?
-            .mul(&gs_c)?
-            .reshape(&x_shape)?;
+        };
+        let dxhat = gw.div(&gs_c)?;
+        // `mean_dot·gs` は縮約の直後に `gs/hidden` を掛けて作る（逆伝播で縮約前に大きな
+        // cotangent が復元されない）。
+        let gsh = gs_over_hidden(child, &gs_c, hidden)?;
+        let dot_gs = keep_dim(&dxhat.mul(&xhat)?.sum(Some(1))?)?.mul(&gsh)?;
+        let inner = gw.sub(&xhat.mul(&dot_gs)?)?;
+        let dx_s = rstd_s.div(&s_c)?.mul(&inner)?.reshape(&x_shape)?;
         let v = tag_with_host_value(child, &dx_s, build_tensor(dx_host, &x_shape))?;
         out.push((targets.input, v));
     }
@@ -458,19 +482,16 @@ pub(crate) fn layer_norm_cgrads<'c>(
     let mut out = Vec::new();
     if need_x {
         let gs_c = upstream_scale(child, &dy, w_slice.as_deref(), rows, hidden)?;
-        let dxhat = match &w_m {
+        let gw = match &w_m {
             Some(w) => g2.mul(w)?,
             None => g2,
-        }
-        .div(&gs_c)?;
-        let mean_dxhat = keep_dim(&dxhat.mean(Some(1))?)?;
-        let mean_dot = keep_dim(&dxhat.mul(&xhat)?.mean(Some(1))?)?;
-        let inner = dxhat.sub(&mean_dxhat)?.sub(&xhat.mul(&mean_dot)?)?;
-        let dx_s = rstd_s
-            .div(&s_c)?
-            .mul(&inner)?
-            .mul(&gs_c)?
-            .reshape(&x_shape)?;
+        };
+        let dxhat = gw.div(&gs_c)?;
+        let gsh = gs_over_hidden(child, &gs_c, hidden)?;
+        let sum_gs = keep_dim(&dxhat.sum(Some(1))?)?.mul(&gsh)?;
+        let dot_gs = keep_dim(&dxhat.mul(&xhat)?.sum(Some(1))?)?.mul(&gsh)?;
+        let inner = gw.sub(&sum_gs)?.sub(&xhat.mul(&dot_gs)?)?;
+        let dx_s = rstd_s.div(&s_c)?.mul(&inner)?.reshape(&x_shape)?;
         let v = tag_with_host_value(child, &dx_s, build_tensor(dx_host, &x_shape))?;
         out.push((targets.input, v));
     }

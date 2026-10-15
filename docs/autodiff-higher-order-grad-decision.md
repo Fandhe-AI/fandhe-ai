@@ -933,8 +933,9 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 ### 24.3 既知の限界
 
-- upstream `g` のスケーリング（PR #3346 レビュー指摘への対応）: `dxhat = g·w` を行ごとの 2 のべき乗 `gs`（f64 の行最大絶対値から決める）で割ってから `Mean` へ渡し、`dx` の構造へ `gs` を掛けて復元する。`g=[3e38,3e38]`（RmsNorm・`x=[1,1]`）で構造・HVP・孫テープ再生が有限であることをテストで固定した。`g` が非有限、または `g·w` が f32 に収まらない場合は `Err(Backward)` で拒否する。
-- 残る限界: HVP の途中値（`mean_dot` への cotangent の行方向和）は `g` の hidden 倍に達するため、`hidden·g` が f32 に収まらない入力では `child.backward` が非有限になりうる（LayerNorm の `g=[1e38,-1e38,1e38,-1e38]` で確認。Hessian の真値自体が f32 近傍）。`dw`／`db` の行をまたぐ `Sum` も 1 階の f32 要素積と同程度の範囲に限る。
+- upstream `g` のスケーリング（PR #3346 レビュー指摘への対応）: `dxhat = g·w` を行ごとの 2 のべき乗 `gs`（f64 の行最大絶対値から決める）で割ってから `Sum` へ渡し、縮約の**直後**に `gs/hidden`（定数葉）を掛けて `mean_dxhat·gs`・`mean_dot·gs` を作る。`dx` の構造は `rstd/s · (g·w − mean_dxhat·gs − xhat·mean_dot·gs)` で、`gs` を縮約の手前（逆伝播では縮約の後ろ）で復元しない。縮約の手前で復元すると、逆伝播で `mean_dot` への cotangent の行方向和が `hidden·gs` に達し overflow するため（二巡目指摘）。`g=[2e37,2e37]`（RmsNorm・`x=[1,1]`）と LayerNorm `g=±1e37`（hidden=4）で構造・HVP・孫テープ再生が有限であることをテストで固定した。
+- **型付きエラーでの拒否（二巡目指摘の最終形）**: 上の並べ替えでも、`xhat`・`rstd` への cotangent の行方向和は `hidden·max|g·w|` 規模に達するため、LayerNorm `x=[1,-1,1,-1]`・`g=±1e38`・`v=[1,-1,1,-1]` では HVP が NaN になった（実測。`g=±8e37` も NaN）。真の HVP は有限（約 ±3e33）だがこれは構造側の中間 overflow であり、スケール保持だけでは避けられない。そこで `hidden·max|g·w| ≥ 2^125`、`g` が非有限、`g·w` が f32 に収まらない行は構築時に `Err(Backward)` で拒否する（`upstream_scale`）。`g=±1e37`（`hidden·g=4e37 < 2^125`）は受理され有限、`g=±1e38` は拒否をテストで固定した。閾値は `Mean` の部分和ガード（`MEAN_OVERFLOW_GUARD`）と同値で、NaN になる範囲より保守的に置いた。拒否範囲を狭める（S2 化）かは所有者判断。
+- 残る限界: `dw`／`db` の行をまたぐ `Sum` は 1 階の f32 要素積と同程度の範囲に限る。
 - 1 階側も要素積 `dy·w`・`dy·xhat` は f32 で計算するので、要素単位の overflow は 1 階と同じ挙動になる。
 - CUDA／Metal 実機での `cg.grad` の parity は未確認（申し送り）。
 

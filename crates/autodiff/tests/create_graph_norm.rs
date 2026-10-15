@@ -594,14 +594,14 @@ fn neighbouring_unsupported_norm_op_stays_fail_closed() {
 // --- 6. 巨大 upstream（レビュー指摘 PR #3346）: g=3e38 でも構造側が有限 ---------------------
 
 fn check_huge_upstream(kind: Kind, affine: bool) {
-    // Rms: [1,2]・g=3e38（修正前は dxhat⊙xhat の f32 和が 6e38 で overflow し inf が混入した）。
+    // Rms: [1,2]・g=2e37（修正前は dxhat⊙xhat の f32 和が 6e38 で overflow し inf が混入した）。
     // Layer: [1,4]・g=1e37 の回帰確認。g をさらに上げると HVP の途中値（cotangent の行方向和）
     // が g の hidden 倍になり f32 に収まらない（決定記録 §24.3 の既知の限界）。
     let (shape, x0, c, v): (Vec<usize>, Vec<f32>, Vec<f32>, Vec<f32>) = match kind {
         Kind::Rms => (
             vec![1, 2],
             vec![1.0, 1.0],
-            vec![3e38, 3e38],
+            vec![2e37, 2e37],
             vec![1.0, -1.0],
         ),
         Kind::Layer => (
@@ -636,4 +636,38 @@ fn rms_norm_huge_upstream_keeps_structure_finite() {
 #[test]
 fn layer_norm_huge_upstream_keeps_structure_finite() {
     check_huge_upstream(Kind::Layer, false);
+}
+
+// --- 7. 二巡目指摘（PR #3346）: hidden·g が 2^125 以上の入力は型付きエラーで拒否 ------------
+
+fn layer_hvp_with_upstream(c: Vec<f32>) -> Result<Vec<f32>, AutodiffError> {
+    let shape = [1usize, 4];
+    let x0 = vec![1.0f32, -1.0, 1.0, -1.0];
+    let v = vec![1.0f32, -1.0, 1.0, -1.0];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0, &shape));
+    let loss = build_norm(&tape, &x, Kind::Layer, 1e-5, false, &c, &shape).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child)?;
+    let gx = cg.grad(&x).unwrap().unwrap();
+    let cx = cg.child_var(&x).unwrap().unwrap();
+    let vc = child.var_no_grad(&t(v, &shape));
+    let prod = gx.mul(&vc).unwrap().sum(None).unwrap();
+    Ok(dense(
+        child.backward(&prod).unwrap().get(&cx).unwrap().unwrap(),
+    ))
+}
+
+#[test]
+fn layer_norm_upstream_1e38_is_rejected_instead_of_nan_hvp() {
+    // x=[1,-1,1,-1]・g=±1e38（hidden·g = 4e38 > f32::MAX）。以前は HVP が NaN になった。
+    let err = layer_hvp_with_upstream(vec![1e38, -1e38, 1e38, -1e38]).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+}
+
+#[test]
+fn layer_norm_upstream_just_below_guard_hvp_stays_finite() {
+    // hidden·g = 4e37 < 2^125 は受理され、HVP が有限。
+    let hv = layer_hvp_with_upstream(vec![1e37, -1e37, 1e37, -1e37]).expect("受理される範囲");
+    assert_finite(&hv, "g=1e37: HVP");
 }
