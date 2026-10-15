@@ -1706,11 +1706,11 @@ mod tests {
         // bench-common (scripts/bench/framework-compare/bench-common) から
         // リポジトリルートまでは 4 階層上（framework-compare → bench →
         // scripts → root）。
-        let backend_cpu_parity_path =
-            std::path::Path::new(manifest_dir).join("../../../../crates/backend-cpu/src/parity.rs");
+        let backend_cpu_parity_path = std::path::Path::new(manifest_dir)
+            .join("../../../../crates/tensor-core/src/tolerance.rs");
         let source = std::fs::read_to_string(&backend_cpu_parity_path).unwrap_or_else(|err| {
             panic!(
-                "本体 parity.rs を読めない（{}）: {err}。\
+                "本体 tolerance.rs を読めない（{}）: {err}。\
                  パスがずれていないか確認すること",
                 backend_cpu_parity_path.display()
             )
@@ -1740,15 +1740,15 @@ mod tests {
         let needle = format!("pub const {name}: f64 = ");
         let start = source.find(&needle).unwrap_or_else(|| {
             panic!(
-                "本体 parity.rs に `{needle}` の宣言が見つからない（宣言スタイルが変わった可能性）"
+                "本体 tolerance.rs に `{needle}` の宣言が見つからない（宣言スタイルが変わった可能性）"
             )
         });
         let rest = &source[start + needle.len()..];
         let end = rest.find(';').unwrap_or_else(|| {
-            panic!("本体 parity.rs の `{name}` 宣言に終端の `;` が見つからない")
+            panic!("本体 tolerance.rs の `{name}` 宣言に終端の `;` が見つからない")
         });
         rest[..end].trim().parse::<f64>().unwrap_or_else(|err| {
-            panic!("本体 parity.rs の `{name}` 宣言値を f64 として解釈できない: {err}")
+            panic!("本体 tolerance.rs の `{name}` 宣言値を f64 として解釈できない: {err}")
         })
     }
 

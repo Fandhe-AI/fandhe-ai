@@ -114,7 +114,7 @@ _CAND_SPEC.loader.exec_module(parity_tolerance_candidates)
 # ---------------------------------------------------------------------------
 
 _BACKEND_CPU_PARITY_PATH = os.path.join(
-    _HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+    _HERE, "..", "..", "..", "crates", "tensor-core", "src", "tolerance.rs"
 )
 
 
@@ -128,7 +128,7 @@ def _extract_f64_const(source: str, name: str) -> float:
     match = re.search(rf"pub const {re.escape(name)}: f64 = ([^;]+);", source)
     if match is None:
         raise BaselineParseError(
-            f"本体 parity.rs に `pub const {name}: f64 = ...;` の宣言が"
+            f"本体 tolerance.rs に `pub const {name}: f64 = ...;` の宣言が"
             "見つからない（宣言スタイルが変わった可能性）"
         )
     return float(match.group(1).strip())
@@ -143,7 +143,7 @@ def load_absolute_rescue_threshold(path: str = _BACKEND_CPU_PARITY_PATH) -> floa
             source = f.read()
     except OSError as err:
         raise BaselineParseError(
-            f"本体 parity.rs を読めない（{path}）: {err}。パスがずれていないか確認すること"
+            f"本体 tolerance.rs を読めない（{path}）: {err}。パスがずれていないか確認すること"
         ) from err
     return _extract_f64_const(source, "ABSOLUTE_RESCUE_THRESHOLD")
 

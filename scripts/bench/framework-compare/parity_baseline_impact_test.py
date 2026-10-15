@@ -341,11 +341,11 @@ class AbsoluteRescueThresholdTest(unittest.TestCase):
 
     def test_matches_backend_cpu_contract(self):
         backend_cpu_parity_path = os.path.join(
-            HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+            HERE, "..", "..", "..", "crates", "tensor-core", "src", "tolerance.rs"
         )
         if not os.path.isfile(backend_cpu_parity_path):
             self.skipTest(
-                f"本体 parity.rs が見つからない（{backend_cpu_parity_path}）。"
+                f"本体 tolerance.rs が見つからない（{backend_cpu_parity_path}）。"
                 "crates/ を含まない実行環境のため skip（実行環境制約）"
             )
         with open(backend_cpu_parity_path, encoding="utf-8") as f:
