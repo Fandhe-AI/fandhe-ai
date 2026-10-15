@@ -1,5 +1,5 @@
 //! `Op::LayerNorm`・`Op::RmsNorm` の `create_graph`（`Tape::backward_create_graph`）対応
-//! （イシュー #3078・親 #3075・決定記録 `docs/autodiff-higher-order-grad-decision.md` §21.3・§25）
+//! （イシュー #3078・親 #3075・決定記録 `docs/autodiff-higher-order-grad-decision.md` §21.3・§27）
 //! の受け入れ条件を直接検証する統合テスト。
 //!
 //! - Hessian を `Tape::backward` の中央差分（`create_graph` を経由しない独立経路）と REQ-2 統一
@@ -596,7 +596,7 @@ fn neighbouring_unsupported_norm_op_stays_fail_closed() {
 fn check_huge_upstream(kind: Kind, affine: bool) {
     // Rms: [1,2]・g=2e37（修正前は dxhat⊙xhat の f32 和が 6e38 で overflow し inf が混入した）。
     // Layer: [1,4]・g=1e37 の回帰確認。g をさらに上げると HVP の途中値（cotangent の行方向和）
-    // が g の hidden 倍になり f32 に収まらない（決定記録 §25.3 の既知の限界）。
+    // が g の hidden 倍になり f32 に収まらない（決定記録 §27.3 の既知の限界）。
     let (shape, x0, c, v): (Vec<usize>, Vec<f32>, Vec<f32>, Vec<f32>) = match kind {
         Kind::Rms => (
             vec![1, 2],

@@ -941,6 +941,51 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
 
+## 26. 実装記録（#3082・損失 Op 第 1 弾の create_graph 対応）
+
+§21.4 の損失族のうち、1 階 VJP が f32 の要素式だけで f64 縮約契約を持たない 5 variant を `supports_create_graph` の対象に加えた（網羅 match のまま）。残りは fail-closed のまま下表に記録する。サブイシューの起票は所有者承認が要るため行っていない。
+
+### 26.1 対象にした 5 variant と方式
+
+| variant | 方式 | 二階の構造 |
+|---|---|---|
+| `MseLoss` | V1 | `dpred = (pred − target) ⊙ s`、`dtarget = −dpred`。`s` は Mean で `(g·2)/n`、Sum で `g·2` |
+| `L1Loss` | V2 | `sign(d)` は区分定数。`pos`／`neg`／`nan` のマスクを親の値から作り `where_cond` で選ぶ。`d == 0` は 0、NaN は `d_m` を通して伝播する |
+| `HuberLoss`（`Huber`／`SmoothL1`） | V1＋V2 | 二次領域（`!(|d| >= delta)`）は `g_b ⊙ d`（`SmoothL1` は `d/delta`）、線形領域は `g_b ⊙ copysign(delta または 1, d)`（非零定数）。`where_cond` で選ぶ |
+| `CrossEntropyLoss` | V1 | `dlogits = (softmax(logits) − onehot) ⊙ s`。子テープに `Softmax` を積む。`onehot` は親の `targets` から作る定数 |
+| `NllLoss` | V2 | `dinput = where(onehot_mask, −s, 0)`。入力について定数なので、二階の寄与は `g` を経由する分だけ |
+
+- 上流勾配 `g` は子テープ上の `Var` のまま扱う（損失が根でない場合や孫テープ再生で、二階の勾配が `g` を通って流れるため）。scale は `g` に定数を掛ける・割る形で作り、演算順は 1 階（`mse_loss_scale`・`nll_loss_scale` 等）に合わせた。
+- float の target は追跡可能な入力として扱い、`dtarget` は子テープの `Var`（`dpred.neg()`）にした。`requires_grad == false` の target は `accumulate` が捨てる。
+- 区分定数の部分は §21.1 V2 に従い `where_cond` で作り、`g.mul(0/1 定数)` は使わない（`inf·0 = NaN` を避ける）。
+- 範囲外の `targets` 添字は 1 階と同じくスキップする（forward が検査済み。panic しない）。空テンソルは 1 階と同じく全ゼロを返す。
+- `replay_op` は公開 `Var` メソッド（`mse_loss_with`・`l1_loss`・`huber_loss_impl`・`cross_entropy_loss`・`nll_loss`）へ委譲し、forward の検証を迂回しない。`huber_loss_impl` は `pub(crate)` にした（公開 API は不変）。未知の `HuberKind` は `Err(Backward)` に倒す。
+
+### 26.2 残した 16 variant（fail-closed のまま）
+
+| 族（§21.4） | variant | 理由・後続 |
+|---|---|---|
+| (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | 未着手。次弾の候補 |
+| (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | 未着手 |
+| (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
+| 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
+
+### 26.3 `reduction` と既知の差
+
+- `crate::var::Reduction` は `Mean`／`Sum` の 2 variant だけで、`None` は存在しない。`None` の追加は公開 API の変更なので本 issue では行わない（所有者承認が必要）。両 variant をすべての対象損失で検証し、「none 相当」は要素ごとの二乗誤差（非スカラー損失）の Hessian テストで代替した。
+- `L1Loss` は `d == 0` かつ `g` が `±inf` のとき、1 階は `inf·0 = NaN` だが子テープは 0 になる。§21.1 V2 の規則を優先した結果。
+
+### 26.4 テスト
+
+- `crates/autodiff/tests/create_graph.rs`: 5 損失 × `Mean`／`Sum` の Hessian と有限差分の REQ-2 一致（恒等入力・`tanh` 連鎖・MSE の閉形式）、CE・NLL のクラス軸バリエーション（軸 0・最終軸・rank 3 中間軸）、`CE ≡ NLL∘LogSoftmax` の Hessian 突合、pred・target 両方を追跡する混合二階微分、`first_order()` と `Tape::backward` の bit 一致、`jvp_create_graph` の孫テープ再生と方向微分の突合、none 相当、大きな logits（`±1e30`）の有限性、空テンソル、残る損失（`KlDivLoss`）の拒否。
+- `crates/autodiff/src/tape.rs`: 5 variant が `true`・隣接する `KlDivLoss` が `false` を固定する単体テスト。
+- `crates/facade/tests/create_graph_facade.rs`: 実 CPU バックエンド（融合 `mse_loss_backward`・`nll_loss_backward` 経路）で、1 階との REQ-2 一致と Hessian 列和の中央差分突合。
+- 5 損失は V3 でないため、`cg.grad` と 1 階の bit 一致は主張せず REQ-2 で比較する。1 階 `first_order()` が `Tape::backward` と bit 同一である点（§21.1(1)）は構造上保たれる。
+
+### 26.5 変更していないもの
+
+1 階 `Tape::backward`・`grad.rs`・`backward.rs` の値、tolerance・baseline、FMA 契約、依存（`Cargo.toml`・`Cargo.lock`）、`unsafe`、公開 API、`docs/spec`、既存節の本文。CUDA／Metal 実機実測は未実施（#3080 と同じく申し送り）。
+
 
 ## 25. 実装記録（#3083・索引・累積 Op の create_graph 対応）
 
@@ -989,12 +1034,12 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の値（`grad.rs` の差分は `cumsum_vjp_along`・`scatter_overwrite_last_writer_mask` の可視性を `pub(crate)` にしただけ）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。CUDA／Metal 実機での create_graph×索引系の実測は未実施（#3168・#3169 へ申し送り）。
 
-## 26. 実装記録（#3078・§21.3「#3078 LayerNorm・RmsNorm」の実装）
+## 27. 実装記録（#3078・§21.3「#3078 LayerNorm・RmsNorm」の実装）
 
 - 親は #3075、方針の正は §21.1（V3・S1・閉包性）と §21.3。本節は実装した形と、§21.3 から外れた点だけを書く。
 - 変更ファイル: `crates/autodiff/src/create_graph_norm.rs`（新規）・`create_graph.rs`・`tape.rs`・`grad.rs`（`rmsnorm_vjp_rows`／`layer_norm_vjp_rows` を `pub(crate)` にしただけ。本体・数値は不変で 1 階は bit 同一）・`lib.rs`。テストは `crates/autodiff/tests/create_graph_norm.rs`。
 
-### 26.1 実装形
+### 27.1 実装形
 
 - `supports_create_graph` は `Op::RmsNorm`・`Op::LayerNorm` を `true` にした（網羅 match のまま。ワイルドカードは足していない）。`replay_op` は `Var::rms_norm`／`layer_norm` へ委譲し、`build_cgrads` は `create_graph_norm::{rms_norm_cgrads, layer_norm_cgrads}` の寄与列を `accumulate` する。
 - **値（V3）**: `dx`・`dw`・`db` の値は 1 階と同じ `*_vjp_rows`。`dy` は子テープ上の `g` の実値（`reduce_bias_grad_var` と同じ借用パターン）。CPU・`naive_ops` では 1 階 VJP も同じ関数へフォールバックするので、`g` が親の upstream と bit 一致する範囲では `cg.grad` は 1 階と bit 同一。CUDA は 1 階が専用カーネルを通るため、REQ-2 統一複合判定の範囲の一致のみを主張する。`db` も `reduce_bias_grad_var` ではなく V3 で書く（`rows == 1` の符号付きゼロの扱いを 1 階と揃えるため）。
@@ -1002,7 +1047,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - **`LayerNorm` の中心化**: `x_ref=Narrow(x,1,0,1)`・`d=x−x_ref`・`m=Mean(d)`・`dev=d−m`・補正 `dev2=dev−Mean(dev)`。`s` は中心化前の `x` ではなく `dev2` の子テープ上の実値から決める。
 - **積む Op**: `Reshape`・`Contiguous`・`Narrow`・`Mean`・`Sum`・`Mul`・`Add`・`ScalarBinary{Sub, Div}`・`ScalarUnary{Sqrt}`。すべて `supports_create_graph == true` なので孫テープ再生（`backward_create_graph` の再帰・`jvp_create_graph`）が通る。`Rsqrt`／`Reciprocal`／`Op::Var`・`BroadcastTo` は使っていない。
 
-### 26.2 §21.3 より狭い拒否（所有者へ戻す論点）
+### 27.2 §21.3 より狭い拒否（所有者へ戻す論点）
 
 §21.3 は「`d=x−x_ref` が非有限、または `rstd_scaled` が非有限になる入力は S2 へ切り替える」とした。S2（ホストの統計定数と二階の項の手書き合成）は 1 イシューの粒度を超え、誤ると Hessian が黙って誤値になるため、本実装は S2 を作らず、**子テープへ書く前**の `validate_ancestors`（`create_graph_norm::validate_norm_s1`）で次の入力を `Err(AutodiffError::Backward)` として拒否する。拒否時に `child` は空のまま保たれる。**これは新しい承認ではなく、S2 または代替の採否を所有者へ戻す。**
 
@@ -1013,7 +1058,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 §21.3 の必須ベクトル（`x=1e20`・`[16777216,16777218]`・`[1e-30,1e-30]`/`eps=1e-5`・`[1e30,1e30]`/`eps=1e-5`・全ゼロ行）はいずれもこの判定を通り、1 階・`cg.grad`・孫テープ再生が有限かつ REQ-2 判定で一致する（テストで固定）。将来の代替案として「S0 前スケーリング（中心化の前に `x` を行ごとの 2 のべき乗で割る）」も候補に残すが実装していない。
 
-### 26.3 既知の限界
+### 27.3 既知の限界
 
 - upstream `g` のスケーリング（PR #3346 レビュー指摘への対応）: `dxhat = g·w` を行ごとの 2 のべき乗 `gs`（f64 の行最大絶対値から決める）で割ってから `Sum` へ渡し、縮約の**直後**に `gs/hidden`（定数葉）を掛けて `mean_dxhat·gs`・`mean_dot·gs` を作る。`dx` の構造は `rstd/s · (g·w − mean_dxhat·gs − xhat·mean_dot·gs)` で、`gs` を縮約の手前（逆伝播では縮約の後ろ）で復元しない。縮約の手前で復元すると、逆伝播で `mean_dot` への cotangent の行方向和が `hidden·gs` に達し overflow するため（二巡目指摘）。`g=[2e37,2e37]`（RmsNorm・`x=[1,1]`）と LayerNorm `g=±1e37`（hidden=4）で構造・HVP・孫テープ再生が有限であることをテストで固定した。
 - **型付きエラーでの拒否（二巡目指摘の最終形）**: 上の並べ替えでも、`xhat`・`rstd` への cotangent の行方向和は `hidden·max|g·w|` 規模に達するため、LayerNorm `x=[1,-1,1,-1]`・`g=±1e38`・`v=[1,-1,1,-1]` では HVP が NaN になった（実測。`g=±8e37` も NaN）。真の HVP は有限（約 ±3e33）だがこれは構造側の中間 overflow であり、スケール保持だけでは避けられない。そこで `hidden·max|g·w| ≥ 2^125`、`g` が非有限、`g·w` が f32 に収まらない行は構築時に `Err(Backward)` で拒否する（`upstream_scale`）。`g=±1e37`（`hidden·g=4e37 < 2^125`）は受理され有限、`g=±1e38` は拒否をテストで固定した。閾値は `Mean` の部分和ガード（`MEAN_OVERFLOW_GUARD`）と同値で、NaN になる範囲より保守的に置いた。拒否範囲を狭める（S2 化）かは所有者判断。
@@ -1022,10 +1067,10 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - 1 階側も要素積 `dy·w`・`dy·xhat` は f32 で計算するので、要素単位の overflow は 1 階と同じ挙動になる。
 - CUDA／Metal 実機での `cg.grad` の parity は未確認（申し送り）。
 
-### 26.4 テスト
+### 27.4 テスト
 
-`crates/autodiff/tests/create_graph_norm.rs`: Hessian の有限差分突合（RmsNorm の weight なし／あり・LayerNorm の weight・bias 4 通り・rank 1／2／3・`x`／`w`／`b` 各微分・`x`×`w` の混合項・tanh 合成）、`first_order` の bit 同一と `cg.grad` の REQ-2 一致、§21.3 必須ベクトルの 3 段（1 階・`cg.grad`・孫テープ再生）、`eps=0` の非退化行の受理、§23.2 の拒否と `child.is_empty()`、fail-closed のまま残る隣接 Op（`LocalResponseNorm`）。有限差分は測定側の丸め雑音を抑えるため 5 点中央差分（h=1e-2）を使う（判定式・tolerance は不変）。
+`crates/autodiff/tests/create_graph_norm.rs`: Hessian の有限差分突合（RmsNorm の weight なし／あり・LayerNorm の weight・bias 4 通り・rank 1／2／3・`x`／`w`／`b` 各微分・`x`×`w` の混合項・tanh 合成）、`first_order` の bit 同一と `cg.grad` の REQ-2 一致、§21.3 必須ベクトルの 3 段（1 階・`cg.grad`・孫テープ再生）、`eps=0` の非退化行の受理、§27.2 の拒否と `child.is_empty()`、fail-closed のまま残る隣接 Op（`LocalResponseNorm`）。有限差分は測定側の丸め雑音を抑えるため 5 点中央差分（h=1e-2）を使う（判定式・tolerance は不変）。
 
-### 26.5 変更していないもの
+### 27.5 変更していないもの
 
 1 階 `Tape::backward` の数値、tolerance・baseline、FMA 契約、依存、`unsafe`、`docs/spec`、既存節の本文。
