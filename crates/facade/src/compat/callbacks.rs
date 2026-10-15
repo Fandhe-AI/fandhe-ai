@@ -1382,6 +1382,9 @@ pub struct SwaCallback {
     avg: Option<crate::optim::AveragedModel>,
     /// fit 終了時に平均化重みで上書きする直前の生の重み。
     raw: Option<HashMap<String, Tensor<f32>>>,
+    /// `begin_fit` が前 fit の退避を取り出して生の重みへ戻した状態か
+    /// （`finish_fit` で解除。`Err` 終了時は `abort_fit` が平均化重みへ戻す）。
+    restored_for_fit: bool,
 }
 
 /// 2 つの state_dict が全キー・全要素で bit 一致するか（`SwaCallback::begin_fit` の継続判定用）。
@@ -1427,6 +1430,7 @@ impl SwaCallback {
             epochs_seen: 0,
             avg: None,
             raw: None,
+            restored_for_fit: false,
         })
     }
 
@@ -1512,6 +1516,7 @@ impl SwaCallback {
                         self.raw = Some(raw);
                         return Err(e);
                     }
+                    self.restored_for_fit = true;
                 }
             } else {
                 self.raw = None;
@@ -1535,8 +1540,24 @@ impl SwaCallback {
         Ok(())
     }
 
+    /// fit が `Err` で終わったときの後始末。`begin_fit` が前 fit の退避を取り出して生の重みへ
+    /// 戻していた場合に限り、現在の（生の）重みを退避へ戻し、モデルを平均化重みへ戻す
+    /// （成功済み fit の平均化結果と `raw_state_dict()` を失わせない）。
+    pub(super) fn abort_fit(&mut self, model: &mut Sequential) {
+        if !std::mem::take(&mut self.restored_for_fit) {
+            return;
+        }
+        let Some(avg) = self.avg.as_ref() else { return };
+        let backup = model.state_dict();
+        // 失敗時はモデル不変（アトミック契約）。その場合は退避も作らない。
+        if model.load_state_dict(avg.averaged_state_dict()).is_ok() {
+            self.raw = Some(backup);
+        }
+    }
+
     /// fit 正常終了時の平均化重み適用。`n_averaged() == 0` なら何もしない。
     pub(super) fn finish_fit(&mut self, model: &mut Sequential) -> Result<(), AutodiffError> {
+        self.restored_for_fit = false;
         let Some(avg) = self.avg.as_ref() else {
             return Err(Self::invariant("finish"));
         };

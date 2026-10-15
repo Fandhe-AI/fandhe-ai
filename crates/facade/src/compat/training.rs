@@ -3056,6 +3056,15 @@ impl Sequential {
             prefetch,
         );
 
+        // SWA: `Err` 終了時は begin_fit で戻した生の重みから平均化重みへ復帰する（イシュー #3058）。
+        if result.is_err() {
+            for cb in callbacks.iter_mut() {
+                if let Callback::Swa(s) = cb {
+                    s.abort_fit(self);
+                }
+            }
+        }
+
         // ロガーのハンドル解放（イシュー #2571。全経路で必ず行う）。
         for cb in callbacks.iter_mut() {
             cb.end_fit();

@@ -184,6 +184,32 @@ fn err_path_does_not_overwrite() {
     assert!(s.raw_state_dict().is_none());
 }
 
+// 4b. 成功 fit の後の継続 fit が Err で終わっても、平均化重みと退避が保たれる（Bugbot 指摘）。
+#[test]
+fn continuation_err_keeps_averaged_weights_and_raw_backup() {
+    let (x, y) = gen_data();
+    let mut model = build_model();
+    let mut cbs = [swa_cb(0)];
+    model
+        .fit_with_callbacks(&x, &y, FitConfig::new(2, 8), None, &mut cbs)
+        .expect("test fixture");
+    let averaged = model_bits(&model);
+    let raw = dict_bits(&swa_of(&cbs[0]).raw_state_dict().expect("退避あり"));
+    let n = swa_of(&cbs[0]).n_averaged();
+    let r = model.fit_with_callbacks(
+        &x,
+        &y,
+        FitConfig::new(2, 32).drop_last(true),
+        None,
+        &mut cbs,
+    );
+    assert!(is_invalid_arg(r));
+    assert_eq!(model_bits(&model), averaged);
+    let s = swa_of(&cbs[0]);
+    assert_eq!(s.n_averaged(), n);
+    assert_eq!(dict_bits(&s.raw_state_dict().expect("退避保持")), raw);
+}
+
 // 5. 継続学習: 2 + 2 epoch と 4 epoch 一括が bit 一致する。
 #[test]
 fn split_fit_matches_single_fit() {
