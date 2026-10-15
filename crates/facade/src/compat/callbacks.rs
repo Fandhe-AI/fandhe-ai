@@ -153,6 +153,14 @@
 //! - **対象外**: decay ウォームアップ・`BatchNorm` の running buffer・デバイス常駐経路
 //!   （`fit` 経路は構造上到達しない。手動で併用すると shadow が stale 化する）・SWA。
 //!
+//! # SWA（確率的重み平均。イシュー #3058・親 #3057。決定記録 `docs/autodiff-swa-decision.md` §16・§17）
+//!
+//! [`Callback::Swa`]（[`SwaCallback`]）は [`crate::optim::AveragedModel`] を `fit_with_callbacks`
+//! へ結線する opt-in の callback。epoch 末（validation・epoch 末 callbacks より前）に生の重みで
+//! 等重み平均を更新し、fit が `Ok` で終わったとき平均化重みでモデルを上書きする（上書き前の
+//! 重みは [`SwaCallback::raw_state_dict`] に退避）。学習率アニールと併用拒否条件は #3059。
+//! 詳細は [`SwaCallback`] の doc を参照。
+//!
 //! 公開面は `api_surface.rs` の正ガード（`facade_exposes_ema_only_in_approved_shape`・
 //! `ema_types_are_reachable_via_facade_only`。イシュー #2561）で固定している。
 
@@ -1321,6 +1329,272 @@ impl EmaCallback {
     }
 }
 
+/// 継続 fit 開始時点の（平均, `epochs_seen`, 退避した生の重み）。
+type FitSnapshot = (
+    crate::optim::AveragedModel,
+    usize,
+    HashMap<String, Tensor<f32>>,
+);
+
+/// 確率的重み平均（SWA）を `fit_with_callbacks` へ結線する callback（[`Callback::Swa`]。
+/// イシュー #3058・親 #3057。決定記録 `docs/autodiff-swa-decision.md` §16・§17 が正）。
+///
+/// `training.rs`（`run_fit`）から、fit 開始時の初期化・退避復元（`begin_fit`）・epoch 末の
+/// 平均更新（`update_after_epoch`）・fit 正常終了時の平均化重み適用（`finish_fit`）で呼ばれる。
+/// 平均の保持は [`crate::optim::AveragedModel`] が担う。
+///
+/// - **更新位置**: epoch 末（validation・epoch 末 callbacks より前）に、`epochs_seen >= swa_start`
+///   （0 始まり。PyTorch の `epoch > swa_start` とは 1 ずれる）の epoch の生の重みで等重み平均を更新する。
+///   `epochs_seen` は fit をまたいで通算する。validation と epoch 末 callbacks は生の重みで実行する。
+/// - **fit 終了時**: `Ok` で終わり `n_averaged() > 0` のとき、モデルの重みを平均化重みで上書きし、
+///   上書き直前の生の重みを [`Self::raw_state_dict`] に退避する。`Err` 経路では上書きしない。
+///   生の重みへ戻すには `raw_state_dict()` を `Sequential::load_state_dict` へ渡す。
+/// - **継続**: 次の fit の開始時、モデルの重みが前回の平均化重みと bit 一致なら退避から生の重みを
+///   書き戻して継続し、利用者が重みを変えていれば退避を破棄して現在の重みから継続する。
+/// - **対象外**: `BatchNorm` の running 統計は平均化されない（`update_bn` 相当は未対応）。
+///   学習率アニール（`swa_lr`／`anneal_epochs`／`anneal` の適用）と併用拒否条件は #3059 で導入予定で、
+///   現時点ではこれらの値は保持するだけで学習率へは作用せず、拒否も行わない。
+///
+/// # Examples
+///
+/// ```
+/// use fandhe_ai::compat::{Callback, FitConfig, Loss, Optimizer, Sequential, SwaCallback};
+/// use fandhe_ai::optim::{SgdConfig, SwaAnneal};
+/// use fandhe_ai::Tensor;
+///
+/// let mut model = Sequential::new().add_linear(2, 1, 7).unwrap();
+/// model
+///     .compile(Optimizer::Sgd(SgdConfig::new(0.1)), Loss::Mse)
+///     .unwrap();
+/// let x = Tensor::new(vec![0.0f32, 1.0, 1.0, 0.0], &[2, 2]).unwrap();
+/// let y = Tensor::new(vec![1.0f32, 1.0], &[2, 1]).unwrap();
+/// let mut cbs = [Callback::Swa(SwaCallback::new(1, 0.05, 0, SwaAnneal::Cos).unwrap())];
+/// model
+///     .fit_with_callbacks(&x, &y, FitConfig::new(3, 2), None, &mut cbs)
+///     .unwrap();
+/// let Callback::Swa(swa) = &cbs[0] else { unreachable!() };
+/// assert_eq!(swa.n_averaged(), 2);
+/// // fit は Ok 終了時に平均化重みへ上書き済み。生の重みへ戻すときは退避を適用する。
+/// model.load_state_dict(swa.raw_state_dict().unwrap()).unwrap();
+/// ```
+#[derive(Debug)]
+pub struct SwaCallback {
+    swa_start: usize,
+    swa_lr: f32,
+    anneal_epochs: usize,
+    anneal: crate::optim::SwaAnneal,
+    /// 通算の完了 epoch 数（fit をまたいで累積）。
+    epochs_seen: usize,
+    /// 最初の fit 開始時に `named_parameters()` から遅延初期化する。
+    avg: Option<crate::optim::AveragedModel>,
+    /// fit 終了時に平均化重みで上書きする直前の生の重み。
+    raw: Option<HashMap<String, Tensor<f32>>>,
+    /// `begin_fit` が前 fit の退避を取り出して生の重みへ戻した状態か
+    /// （`finish_fit` で解除。`Err` 終了時は `abort_fit` が平均化重みへ戻す）。
+    restored_for_fit: bool,
+    /// 継続 fit 開始時点の（平均, `epochs_seen`）。`Err` 終了時に失敗 fit が進めた平均・カウンタを
+    /// 巻き戻すためのスナップショット（`AveragedModel` の更新は新テンソルへの差し替えのため
+    /// shallow clone で独立する。decision §16.3）。
+    fit_snapshot: Option<FitSnapshot>,
+}
+
+/// 2 つの state_dict が全キー・全要素で bit 一致するか（`SwaCallback::begin_fit` の継続判定用）。
+fn state_dicts_bit_equal(
+    a: &HashMap<String, Tensor<f32>>,
+    b: &HashMap<String, Tensor<f32>>,
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().all(|(k, ta)| {
+        let Some(tb) = b.get(k) else { return false };
+        if ta.shape() != tb.shape() {
+            return false;
+        }
+        let (ca, cb) = (ta.contiguous(), tb.contiguous());
+        match (ca.as_slice(), cb.as_slice()) {
+            (Some(xa), Some(xb)) => xa.iter().zip(xb).all(|(p, q)| p.to_bits() == q.to_bits()),
+            _ => false,
+        }
+    })
+}
+
+impl SwaCallback {
+    /// 平均開始 epoch（0 始まり）・SWA 学習率・アニール長・アニール形で構築する。
+    /// `swa_lr` の検証（有限かつ正）は内部型 `SwaLr::new` へ委ね二重実装しない。
+    /// `anneal_epochs == 0` は受理する。
+    ///
+    /// # Errors
+    /// `swa_lr` が非有限または 0 以下のとき [`AutodiffError::InvalidArgument`]。
+    pub fn new(
+        swa_start: usize,
+        swa_lr: f32,
+        anneal_epochs: usize,
+        anneal: crate::optim::SwaAnneal,
+    ) -> Result<Self, AutodiffError> {
+        crate::optim::SwaLr::new(swa_lr, swa_lr, anneal_epochs, anneal)?;
+        Ok(Self {
+            swa_start,
+            swa_lr,
+            anneal_epochs,
+            anneal,
+            epochs_seen: 0,
+            avg: None,
+            raw: None,
+            restored_for_fit: false,
+            fit_snapshot: None,
+        })
+    }
+
+    /// 平均を開始する epoch（0 始まり）。
+    pub fn swa_start(&self) -> usize {
+        self.swa_start
+    }
+
+    /// 構築時に検証済みの SWA 学習率。
+    pub fn swa_lr(&self) -> f32 {
+        self.swa_lr
+    }
+
+    /// アニール長（epoch 数）。
+    pub fn anneal_epochs(&self) -> usize {
+        self.anneal_epochs
+    }
+
+    /// アニール形。
+    pub fn anneal(&self) -> crate::optim::SwaAnneal {
+        self.anneal
+    }
+
+    /// 平均更新の成功回数（fit 前は 0。fit をまたいで累積する）。
+    pub fn n_averaged(&self) -> u64 {
+        self.avg.as_ref().map_or(0, |a| a.n_averaged())
+    }
+
+    /// 平均化重みのキー付きコピー。まだ fit が始まっておらず未初期化なら `None`。
+    pub fn averaged_state_dict(&self) -> Option<HashMap<String, Tensor<f32>>> {
+        self.avg.as_ref().map(|a| a.averaged_state_dict())
+    }
+
+    /// fit 終了時に平均化重みで上書きする直前の生の重み（複製）。退避が無ければ `None`。
+    pub fn raw_state_dict(&self) -> Option<HashMap<String, Tensor<f32>>> {
+        self.raw.clone()
+    }
+
+    fn invariant(what: &str) -> AutodiffError {
+        AutodiffError::InvalidArgument(format!(
+            "SwaCallback: begin_fit 前に {what} が呼ばれた（内部不変条件違反）"
+        ))
+    }
+
+    /// fit 開始時の初期化・照合・退避復元。失敗時はモデルも callback も変更しない。
+    pub(super) fn begin_fit(&mut self, model: &mut Sequential) -> Result<(), AutodiffError> {
+        let Some(avg) = self.avg.as_ref() else {
+            self.avg = Some(crate::optim::AveragedModel::from_named(
+                model.named_parameters(),
+            )?);
+            return Ok(());
+        };
+        // 継続: 名前集合・shape を更新を伴わずに照合する（`EmaCallback::begin_fit` と同型）。
+        {
+            let named = model.named_parameters();
+            let expected = avg.averaged_parameters().len();
+            if named.len() != expected {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Callback::Swa: 継続中の平均のパラメータ数（{expected}）が \
+                     モデルのパラメータ数（{}）と一致しない",
+                    named.len()
+                )));
+            }
+            for (name, param) in &named {
+                let Some(a) = avg.averaged(name) else {
+                    return Err(AutodiffError::InvalidArgument(format!(
+                        "Callback::Swa: モデルのパラメータ `{name}` が継続中の平均に無い"
+                    )));
+                };
+                if a.shape() != param.shape() {
+                    return Err(AutodiffError::Shape(crate::ShapeError::ShapeMismatch {
+                        lhs: a.shape().to_vec(),
+                        rhs: param.shape().to_vec(),
+                    }));
+                }
+            }
+        }
+        if self.raw.is_some() && avg.n_averaged() > 0 {
+            if state_dicts_bit_equal(&model.state_dict(), &avg.averaged_state_dict()) {
+                if let Some(raw) = self.raw.take() {
+                    // 失敗時はモデル不変（`load_state_dict` のアトミック契約）。退避は戻す。
+                    let raw_snapshot = raw.clone();
+                    if let Err(e) = model.load_state_dict(raw.clone()) {
+                        self.raw = Some(raw);
+                        return Err(e);
+                    }
+                    self.restored_for_fit = true;
+                    self.fit_snapshot = Some((avg.clone(), self.epochs_seen, raw_snapshot));
+                }
+            } else {
+                self.raw = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// epoch 末の平均更新（`epochs_seen >= swa_start` のときだけ平均へ加える）。
+    pub(super) fn update_after_epoch(&mut self, model: &Sequential) -> Result<(), AutodiffError> {
+        let Some(avg) = self.avg.as_mut() else {
+            return Err(Self::invariant("update"));
+        };
+        let next = self.epochs_seen.checked_add(1).ok_or_else(|| {
+            AutodiffError::InvalidArgument("SwaCallback: epoch 数が usize を超えた".into())
+        })?;
+        if self.epochs_seen >= self.swa_start {
+            avg.update_named(model.named_parameters())?;
+        }
+        self.epochs_seen = next;
+        Ok(())
+    }
+
+    /// fit が `Err` で終わったときの後始末。`begin_fit` が前 fit の退避を取り出して生の重みへ
+    /// 戻していた場合に限り、現在の（生の）重みを退避へ戻し、モデルを平均化重みへ戻す
+    /// （成功済み fit の平均化結果と `raw_state_dict()` を失わせない）。
+    pub(super) fn abort_fit(&mut self, model: &mut Sequential) {
+        if !std::mem::take(&mut self.restored_for_fit) {
+            self.fit_snapshot = None;
+            return;
+        }
+        // 失敗 fit が進めた平均・epoch カウンタを fit 開始時点へ巻き戻す（§16.3）。
+        let mut snap_raw = None;
+        if let Some((snap_avg, snap_epochs, raw)) = self.fit_snapshot.take() {
+            self.avg = Some(snap_avg);
+            self.epochs_seen = snap_epochs;
+            snap_raw = Some(raw);
+        }
+        let Some(avg) = self.avg.as_ref() else { return };
+        let backup = model.state_dict();
+        // 失敗時はモデル不変（アトミック契約）。その場合は退避も作らない。
+        // 退避は fit 開始時点の生の重み（成功済み fit の `raw_state_dict()`）へ戻す。
+        if model.load_state_dict(avg.averaged_state_dict()).is_ok() {
+            self.raw = Some(snap_raw.unwrap_or(backup));
+        }
+    }
+
+    /// fit 正常終了時の平均化重み適用。`n_averaged() == 0` なら何もしない。
+    pub(super) fn finish_fit(&mut self, model: &mut Sequential) -> Result<(), AutodiffError> {
+        self.restored_for_fit = false;
+        self.fit_snapshot = None;
+        let Some(avg) = self.avg.as_ref() else {
+            return Err(Self::invariant("finish"));
+        };
+        if avg.n_averaged() == 0 {
+            return Ok(());
+        }
+        let backup = model.state_dict();
+        model.load_state_dict(avg.averaged_state_dict())?;
+        self.raw = Some(backup);
+        Ok(())
+    }
+}
+
 /// [`Sequential::fit_with_callbacks`] へ渡す callback（閉じた集合。
 /// trait object によるユーザー拡張は対象外——`&mut Sequential` を
 /// callback へ渡すと `fit` 内部の借用構造〈`compiled` 取り外し・
@@ -1340,6 +1614,8 @@ pub enum Callback {
     Lambda(LambdaCallback),
     /// 重みの指数移動平均（[`EmaCallback`]。イシュー #2560）。
     Ema(EmaCallback),
+    /// 確率的重み平均（[`SwaCallback`]。イシュー #3058）。
+    Swa(SwaCallback),
 }
 
 impl Callback {
@@ -1351,7 +1627,8 @@ impl Callback {
             Callback::CsvLogger(_)
             | Callback::JsonLogger(_)
             | Callback::Lambda(_)
-            | Callback::Ema(_) => false,
+            | Callback::Ema(_)
+            | Callback::Swa(_) => false,
         }
     }
 
@@ -1379,7 +1656,8 @@ impl Callback {
             Callback::CsvLogger(_)
             | Callback::JsonLogger(_)
             | Callback::Lambda(_)
-            | Callback::Ema(_) => None,
+            | Callback::Ema(_)
+            | Callback::Swa(_) => None,
         }
     }
 }
@@ -1387,6 +1665,22 @@ impl Callback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SWA の内部不変条件違反（begin_fit 前の更新・適用）は panic ではなく型付きエラー（#3058）。
+    #[test]
+    fn swa_internal_invariant_violations_are_typed_errors() {
+        let mut model = Sequential::new().add_linear(2, 1, 1).expect("test fixture");
+        let mut cb =
+            SwaCallback::new(0, 0.1, 0, crate::optim::SwaAnneal::Cos).expect("test fixture");
+        assert!(matches!(
+            cb.update_after_epoch(&model),
+            Err(AutodiffError::InvalidArgument(m)) if m.contains("内部不変条件違反")
+        ));
+        assert!(matches!(
+            cb.finish_fit(&mut model),
+            Err(AutodiffError::InvalidArgument(m)) if m.contains("内部不変条件違反")
+        ));
+    }
 
     fn hist(loss: Vec<f32>, val_loss: Vec<f32>) -> History {
         History {

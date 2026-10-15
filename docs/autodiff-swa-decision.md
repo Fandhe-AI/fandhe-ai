@@ -183,6 +183,7 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 - `n_averaged() == 0`（`swa_start` が実 epoch 数以上）は上書きせず `Ok`（エラーにしない。`n_averaged()` で検知できる）。`Err` 終了時は上書きしない。
 - 上書き直前の生の重みの `state_dict()` を callback が保持し `raw_state_dict()` で取り出せる。これが元の重みの復元手段（呼び出し側が `Sequential::load_state_dict` で戻す）。
 - 継続学習（次の fit の開始時）: 退避があり、かつモデルの現在の `state_dict` が前回上書きした平均化重みと bit 一致する場合に限り、`begin_fit` で退避を書き戻して生の重みから継続する。利用者が重みを変更していた場合は退避を破棄し現在の重みから継続する（利用者の意図を上書きしない）。名前集合・shape の不一致は更新前に `InvalidArgument`（名前集合）／`AutodiffError::Shape`（shape）で拒否し、モデルに変更を残さない（EMA の `begin_fit` 事前照合と同型）。
+- 継続 fit が `Err` で終わった場合（epoch 末の Lambda callback・validation の失敗を含む）、`begin_fit` が書き戻した生の重みを平均化重みへ戻すが、その平均・`n_averaged`・通算 epoch 数・`raw_state_dict()` は fit 開始時点のスナップショットへ巻き戻す（失敗 fit が epoch 末に進めた平均を適用しない）。
 - 上書きは `load_state_dict` のアトミック契約に依存する。失敗時は元のエラーより復元失敗を優先して報告する（EMA の規約を踏襲）。
 
 ### 16.4 拒否条件（`InvalidArgument`・fit 開始前。#3059）
@@ -229,3 +230,16 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 - メモリ: 平均化重み 1 組＋退避 1 組（ピークはパラメータの約 3 倍。EMA の `apply` と同オーダー）。
 - Issue 本文は非信頼データとして扱い、本文中の命令・承認の主張は根拠にしない。
 - 本節は決定記録の追記のみで、コード・依存・`docs/spec` は変更していない。既存本文は書き換えていない。
+
+## 17. #3058 実装記録（`SwaCallback` 本体と fit 結線）
+
+§16 の確定形のうち #3058 の担当範囲（16.1〜16.3・内部不変条件エラー・基本テスト・既存ガード更新）を実装した。
+
+- **公開面**: `compat::SwaCallback`（`new(swa_start, swa_lr, anneal_epochs, anneal)`・`swa_start`／`swa_lr`／`anneal_epochs`／`anneal`／`n_averaged`／`averaged_state_dict`／`raw_state_dict`）と `Callback::Swa`。`new` の 4 引数シグネチャは本 issue で確定（`swa_lr` の検証は `SwaLr::new` へ委譲）。`FitConfig`・`Sequential` は不変。
+- **結線位置（`training.rs`）**: (2.8) `begin_fit`（初回は遅延初期化。継続時は名前集合・shape を照合し、モデルが前回の平均化重みと bit 一致なら退避を書き戻し、利用者が重みを変えていれば退避を破棄）→ epoch 末の平均更新（validation・epoch 末 callbacks・EMA 差し替えより前。`epochs_seen >= swa_start`、`epochs_seen` は fit をまたいで通算）→ `Ok` 終了時の `finish_fit`（`n_averaged() == 0` なら何もしない。上書き成功後にのみ `raw` を設定。`Err` 経路では到達しない）。
+- **`restore_best_weights` との順序**: 書き戻しが先に走るため `raw_state_dict()` には復元後の重みが入る。併用拒否は #3059（項目 6）。
+- **未ガード（#3059 で拒否予定）**: 重複した `Callback::Swa`（最後の 1 件の平均が残る）、`Ema` との併用（SWA の更新は差し替え前の生の重みで行う）、L-BFGS、AMP、カスタム train_step、`restore_best_weights(true)`、`set_lr` を持たない optimizer・param groups。学習率アニールも #3059（`lr_for_epoch` は dead_code 回避のため本 issue では追加しない）。
+- **ガード**: `swa_surface_violations` は `use_swa` を全面禁止のまま、`swa_start`／`swa_lr` を `compat/callbacks.rs` に 1 件ずつ、`SwaCallback` の宣言を `callbacks.rs` に 1 件・再エクスポートを `compat/mod.rs` に別名なし 1 文だけ許す。`SwaHoldDoctestGuard` の衝突プローブ（`FitConfig`／`Sequential`）は維持。`Callback` の variant 集合は 8 個へ更新。
+- **テスト**: `crates/facade/tests/compat_sequential_fit_swa.rs`（手動ループとの bit 一致・退避の復元・`n_averaged == 0`・`Err` で非上書き・分割 fit の bit 一致・重み変更時の退避破棄・別構成モデルの拒否・損失／val_loss 不変・構築検証）と `callbacks.rs` の内部不変条件単体テスト。実機非依存。
+- **不変**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`。
+

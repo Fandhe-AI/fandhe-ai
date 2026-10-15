@@ -3930,7 +3930,10 @@ struct EmaHoldDoctestGuard;
 /// （列挙名のみ。マクロ生成・別名経由までは保証しない）は
 /// `docs/autodiff-swa-decision.md` §9 を参照。
 ///
-/// `fit` への結線が承認される日が来たら、本構造体・本 doctest 自体を削除する。
+/// イシュー #3058 で `Callback::Swa(SwaCallback)` として結線が公開されたが（決定記録 §16・§17）、
+/// `FitConfig`／`Sequential` へは SWA 用メソッドを足さない契約（§16）は不変のため、プローブは維持する
+/// （`SwaCallback` の accessor `swa_start`／`swa_lr` は別型の inherent メソッドで衝突しない）。
+/// 将来これらの契約自体が変わる日が来たら、本構造体・本 doctest を削除する。
 ///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること

@@ -3850,7 +3850,9 @@ fn fit_types_are_reachable_via_facade_only() {
     use fandhe_ai::compat::{
         Callback, CsvLogger, EarlyStopping, EmaCallback, FitConfig, FitTarget, History, JsonLogger,
         LambdaCallback, Loss, LrSchedule, ModelCheckpoint, Monitor, MonitorMode, Optimizer,
+        SwaCallback,
     };
+    use fandhe_ai::optim::SwaAnneal;
 
     let _loss_mse = Loss::Mse;
     let _loss_ce = Loss::CrossEntropy;
@@ -3932,6 +3934,10 @@ fn fit_types_are_reachable_via_facade_only() {
     let _cb_lambda = Callback::Lambda(LambdaCallback::on_epoch_end(|_, _| Ok(())));
     // イシュー #2560: EMA（`EmaCallback`・`Callback::Ema`）も facade のみ import で構築できる。
     let _cb_ema = Callback::Ema(EmaCallback::new(0.9).expect("test fixture: decay 0.9 は有効値"));
+    // イシュー #3058: SWA（`SwaCallback`・`Callback::Swa`）も facade のみ import で構築できる。
+    let _cb_swa = Callback::Swa(
+        SwaCallback::new(0, 0.05, 0, SwaAnneal::Cos).expect("test fixture: swa_lr 0.05 は有効値"),
+    );
 
     // `Sgd::set_lr`（イシュー #1763。LR scheduler 結線用の学習率更新
     // API）が facade 経由でも到達可能であることを固定する。
@@ -18585,12 +18591,21 @@ const SWA_APPROVED_DECL_FILE: &str = "optim_swa.rs";
 ///   [`SWA_APPROVED_LR_REEXPORT_LINE`] 完全一致だけを許し、ちょうど 1 件
 /// - `trait`／`struct`／`enum`／`type`／`union` による `AveragedModel` の宣言は
 ///   [`SWA_APPROVED_DECL_FILE`] の 1 件だけを許す。`SwaLr`／`SwaAnneal` の独自宣言は常に違反
-/// - `use_swa`／`swa_start`／`swa_lr` という名前の `fn` 宣言は可視性・宣言文脈を問わず違反
-///   （`FitConfig`／`Sequential` への inherent メソッド追加＝`fit` への SWA 結線の禁止）
+/// - `use_swa` という名前の `fn` 宣言は可視性・宣言文脈を問わず違反。`swa_start`／`swa_lr` の
+///   `fn` 宣言は `compat/callbacks.rs`（`SwaCallback` の accessor。イシュー #3058・決定記録
+///   `docs/autodiff-swa-decision.md` §16.1）にそれぞれちょうど 1 件だけを許す。`callbacks.rs`
+///   内で `FitConfig`／`Sequential` へ inherent メソッドを足す経路は `SwaHoldDoctestGuard` の
+///   コンパイル時衝突プローブ（変更しない）が検出する多層防御の分担とする
+/// - `SwaCallback` の型宣言は `compat/callbacks.rs` にちょうど 1 件、`SwaCallback` を含む
+///   `pub use` 文は `compat/mod.rs` に別名なしでちょうど 1 文（`EmaCallback` 規則と同型）
 fn swa_surface_violations(files: &[(String, String)]) -> Vec<String> {
     const WRAPPER_NAME: &str = "AveragedModel";
     const LR_NAMES: [&str; 2] = ["SwaLr", "SwaAnneal"];
-    const METHOD_NAMES: [&str; 3] = ["use_swa", "swa_start", "swa_lr"];
+    const BANNED_METHOD: &str = "use_swa";
+    const ACCESSOR_NAMES: [&str; 2] = ["swa_start", "swa_lr"];
+    const CALLBACK_NAME: &str = "SwaCallback";
+    const CALLBACK_FILE: &str = "compat/callbacks.rs";
+    const CALLBACK_REEXPORT_FILE: &str = "compat/mod.rs";
     let wrapper_tokens =
         tokenize_including_punctuation(SWA_APPROVED_REEXPORT_LINE.trim_end_matches(';'));
     let lr_tokens =
@@ -18599,6 +18614,9 @@ fn swa_surface_violations(files: &[(String, String)]) -> Vec<String> {
     let mut wrapper_reexports = 0usize;
     let mut lr_reexports = 0usize;
     let mut wrapper_decls = 0usize;
+    let mut callback_decls = 0usize;
+    let mut callback_reexports = 0usize;
+    let mut accessor_decls = [0usize; 2];
     for (rel, content) in files {
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
         let tokens = tokenize_including_punctuation(&cleaned);
@@ -18615,6 +18633,13 @@ fn swa_surface_violations(files: &[(String, String)]) -> Vec<String> {
                         wrapper_reexports += 1;
                     } else {
                         violations.push(format!("{rel}: 承認形以外の `{}`", stmt.join(" ")));
+                    }
+                }
+                if stmt.iter().any(|t| t == CALLBACK_NAME) {
+                    if rel == CALLBACK_REEXPORT_FILE && !stmt.iter().any(|t| t == "as") {
+                        callback_reexports += 1;
+                    } else {
+                        violations.push(format!("{rel}: 承認外の `{}`", stmt.join(" ")));
                     }
                 }
                 if stmt.iter().any(|t| LR_NAMES.contains(&t.as_str())) {
@@ -18640,17 +18665,36 @@ fn swa_surface_violations(files: &[(String, String)]) -> Vec<String> {
                             .push(format!("{rel}: {tok} {WRAPPER_NAME} 宣言（承認外の場所）"));
                     }
                 }
+                if next == Some(CALLBACK_NAME) {
+                    if rel == CALLBACK_FILE {
+                        callback_decls += 1;
+                    } else {
+                        violations
+                            .push(format!("{rel}: {tok} {CALLBACK_NAME} 宣言（承認外の場所）"));
+                    }
+                }
                 if let Some(n) = next.filter(|n| LR_NAMES.contains(n)) {
                     violations.push(format!(
                         "{rel}: {tok} {n} 宣言（内部クレートの型は再定義しない）"
                     ));
                 }
             }
-            if tok == "fn" && next.is_some_and(|n| METHOD_NAMES.contains(&n)) {
+            if tok == "fn" && next == Some(BANNED_METHOD) {
                 violations.push(format!(
-                    "{rel}: fn {} 宣言（FitConfig／Sequential への SWA 結線は未承認）",
-                    next.unwrap_or_default()
+                    "{rel}: fn {BANNED_METHOD} 宣言（FitConfig／Sequential への SWA 結線は未承認）"
                 ));
+            }
+            if tok == "fn"
+                && let Some(idx) = ACCESSOR_NAMES.iter().position(|n| Some(*n) == next)
+            {
+                if rel == CALLBACK_FILE {
+                    accessor_decls[idx] += 1;
+                } else {
+                    violations.push(format!(
+                        "{rel}: fn {} 宣言（承認外の場所。SwaCallback の accessor は {CALLBACK_FILE} のみ）",
+                        ACCESSOR_NAMES[idx]
+                    ));
+                }
             }
         }
     }
@@ -18671,6 +18715,25 @@ fn swa_surface_violations(files: &[(String, String)]) -> Vec<String> {
             "src/{SWA_APPROVED_DECL_FILE} の {WRAPPER_NAME} 宣言が {wrapper_decls} 件\
              （ちょうど 1 件である必要がある）"
         ));
+    }
+    if callback_decls != 1 {
+        violations.push(format!(
+            "src/{CALLBACK_FILE} の {CALLBACK_NAME} 宣言が {callback_decls} 件\
+             （ちょうど 1 件である必要がある）"
+        ));
+    }
+    if callback_reexports != 1 {
+        violations.push(format!(
+            "src/{CALLBACK_REEXPORT_FILE} の {CALLBACK_NAME} 再エクスポートが {callback_reexports} 件\
+             （別名なしでちょうど 1 文である必要がある）"
+        ));
+    }
+    for (name, n) in ACCESSOR_NAMES.iter().zip(accessor_decls) {
+        if n != 1 {
+            violations.push(format!(
+                "src/{CALLBACK_FILE} の fn {name} 宣言が {n} 件（ちょうど 1 件である必要がある）"
+            ));
+        }
     }
     violations
 }
@@ -18709,12 +18772,23 @@ fn facade_exposes_swa_only_in_approved_shape_detects_each_category() {
         vec![
             ("optim.rs".to_string(), reexport.clone()),
             (SWA_APPROVED_DECL_FILE.to_string(), decl.clone()),
+            (
+                "compat/callbacks.rs".to_string(),
+                "pub struct SwaCallback { a: u8 }\n\
+                 impl SwaCallback {\n    pub fn swa_start(&self) -> usize { 0 }\n    \
+                 pub fn swa_lr(&self) -> f32 { 0.0 }\n}\n"
+                    .to_string(),
+            ),
+            (
+                "compat/mod.rs".to_string(),
+                "pub use callbacks::{Callback, SwaCallback};\n".to_string(),
+            ),
         ]
     };
     assert!(swa_surface_violations(&base()).is_empty());
 
-    // 違反: 承認形の欠落（再エクスポート・宣言）。
-    for skip in 0..2 {
+    // 違反: 承認形の欠落（再エクスポート・宣言・SwaCallback の宣言／再エクスポート）。
+    for skip in 0..4 {
         let mut files = base();
         files.remove(skip);
         assert!(
@@ -18756,6 +18830,19 @@ fn facade_exposes_swa_only_in_approved_shape_detects_each_category() {
         ),
         ("lib.rs", "pub enum SwaAnneal { Cos }\n"),
         ("lib.rs", "pub struct SwaLr;\n"),
+        ("lib.rs", "pub struct SwaCallback;\n"),
+        ("compat/callbacks.rs", "pub struct SwaCallback;\n"),
+        ("compat/mod.rs", "pub use callbacks::SwaCallback;\n"),
+        ("compat/mod.rs", "pub use callbacks::SwaCallback as Swa;\n"),
+        ("lib.rs", "pub use compat::SwaCallback;\n"),
+        (
+            "compat/callbacks.rs",
+            "impl Other {\n    pub fn swa_start(&self) {}\n}\n",
+        ),
+        (
+            "compat/callbacks.rs",
+            "impl Other {\n    pub fn swa_lr(&self) {}\n}\n",
+        ),
         (
             "compat/training.rs",
             "impl FitConfig {\n    pub fn use_swa(mut self) -> Self {\n        self\n    }\n}\n",
@@ -18799,6 +18886,7 @@ fn facade_exposes_swa_only_in_approved_shape_detects_each_category() {
 fn swa_types_are_reachable_via_facade_only() {
     use std::collections::HashMap;
 
+    use fandhe_ai::compat::SwaCallback;
     use fandhe_ai::nn::Module;
     use fandhe_ai::optim::{AveragedModel as Swa, LrScheduler, SwaAnneal, SwaLr};
     use fandhe_ai::{AutodiffError, Tensor};
@@ -18827,6 +18915,21 @@ fn swa_types_are_reachable_via_facade_only() {
     let lr = SwaLr::new(0.1, 0.05, 2, SwaAnneal::Linear).unwrap();
     assert_eq!(lr.lr_at(2), 0.05);
     assert_ne!(SwaAnneal::Cos, SwaAnneal::Linear);
+
+    // `SwaCallback`（イシュー #3058・決定記録 §16.1）のシグネチャ固定。
+    let _cb_new: fn(usize, f32, usize, SwaAnneal) -> Result<SwaCallback, AutodiffError> =
+        SwaCallback::new;
+    let _cb_start: fn(&SwaCallback) -> usize = SwaCallback::swa_start;
+    let _cb_lr: fn(&SwaCallback) -> f32 = SwaCallback::swa_lr;
+    let _cb_anneal_epochs: fn(&SwaCallback) -> usize = SwaCallback::anneal_epochs;
+    let _cb_anneal: fn(&SwaCallback) -> SwaAnneal = SwaCallback::anneal;
+    let _cb_n: fn(&SwaCallback) -> u64 = SwaCallback::n_averaged;
+    let _cb_avg: fn(&SwaCallback) -> Option<StateDict> = SwaCallback::averaged_state_dict;
+    let _cb_raw: fn(&SwaCallback) -> Option<StateDict> = SwaCallback::raw_state_dict;
+    assert!(SwaCallback::new(0, f32::NAN, 0, SwaAnneal::Cos).is_err());
+    let cb = SwaCallback::new(2, 0.05, 0, SwaAnneal::Cos).unwrap();
+    assert_eq!(cb.n_averaged(), 0);
+    assert!(cb.averaged_state_dict().is_none() && cb.raw_state_dict().is_none());
 }
 
 /// 正の doctest プローブ（#2679。`ema_usage_doctests_are_present_and_compiled` と同型）:
@@ -18851,6 +18954,12 @@ fn swa_usage_doctests_are_present_and_compiled() {
             "AveragedModel::new",
             "averaged_parameters",
         ],
+    ));
+    let callbacks_rs = read_to_string_or_panic(&root.join("src/compat/callbacks.rs"));
+    v.extend(doctest_probe_violations(
+        "SwaCallback の doc",
+        &doc_lines_above_fn(&callbacks_rs, "pub struct SwaCallback"),
+        &["Callback::Swa", "SwaCallback::new", "raw_state_dict"],
     ));
     assert!(v.is_empty(), "{v:?}");
     assert!(!doctest_probe_violations("t", &[], &["AveragedModel"]).is_empty());
@@ -19550,9 +19659,9 @@ fn facade_declares_callback_loggers_only_in_approved_shape_detects_each_category
 }
 
 /// `compat::Callback` enum（`crates/facade/src/compat/callbacks.rs`）の
-/// variant 集合が承認済みの 7 個（既存 3 + #2571 の `CsvLogger`／
+/// variant 集合が承認済みの 8 個（既存 3 + #2571 の `CsvLogger`／
 /// `JsonLogger`／`Lambda`。並びは決定記録 §3 のとおり。末尾の `Ema` は #2560・
-/// `docs/autodiff-ema-decision.md` §10.2 (d)）と完全一致する
+/// `docs/autodiff-ema-decision.md` §10.2 (d)。末尾の `Swa` は #3058・`docs/autodiff-swa-decision.md` §16）と完全一致する
 /// ことを固定する。`#[non_exhaustive]` のため追加自体は非破壊だが、
 /// 承認なしの variant 追加を検出する（`compat_loss_enum_variants_are_
 /// exactly_mse_and_cross_entropy` の `Callback` 版）。
@@ -19596,8 +19705,9 @@ fn compat_callback_enum_variants_are_exactly_approved_set() {
             "JsonLogger".to_string(),
             "Lambda".to_string(),
             "Ema".to_string(),
+            "Swa".to_string(),
         ],
-        "compat::Callback の variant 集合が承認済みの 7 個からドリフトして\
+        "compat::Callback の variant 集合が承認済みの 8 個からドリフトして\
          いる（`docs/compat-callbacks-loggers-decision.md` §3・\
          `docs/autodiff-ema-decision.md` §10.2 (d) 参照）: {variants:?}"
     );
