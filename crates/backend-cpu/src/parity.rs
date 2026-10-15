@@ -22,9 +22,9 @@
 
 use crate::gemm::GemmError;
 
-/// REQ-2 統一複合判定の許容誤差定数。正本は `tensor-core::req2_tolerance`（autodiff と共有する
-/// 単一定義）で、本モジュールは再エクスポートのみ行う。値の変更はユーザー承認必須。
-pub use fandhe_ai_tensor_core::req2_tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
+// 閾値の定義は共通層 `tensor-core::tolerance` に一本化（autodiff の create_graph 検査と共有。
+// 値の変更はユーザー承認必須）。既存の公開パス `parity::RELATIVE_TOLERANCE` 等は再エクスポートで維持。
+pub use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
 
 /// [`compare`]・[`assert_parity`] の入力検証エラー。
 ///

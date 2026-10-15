@@ -133,7 +133,7 @@ tolerance・baseline は変更していない。
   Avg／Max の勾配の中心差分（f64 の独立リファレンス窓走査）・重なり窓の勾配加算（手計算）・非連続入力・
   モック `BackendOps` による `Unsupported` フォールバックと他エラーの伝播と誤 shape（値・索引）・引数エラーと
   孤児ノード無し・空バッチ・巨大 broadcast view の確保前拒否・テープ記録数（各 1 ノード）・`create_graph` が
-  型付きエラーであること・run-to-run 決定性。
+  型付きエラーであること（#3085 で成功する確認へ反転）・run-to-run 決定性。
 - `crates/backend-cpu/tests/pool3d_parity.rs`・`backend_ops_dispatch.rs`: `CpuBackendOps::pool3d_*` の直接呼び出し
   （解析値・strided 入力・型付きエラー・決定性）、CUDA（macOS では Metal も）の `pool3d_*` が `Unsupported` を
   返し panic しないこと。
@@ -166,7 +166,7 @@ tolerance・baseline は変更していない。
 - facade 公開（#2677 の承認後に #2678）と層化（#2679）。
 - CUDA／Metal の GPU 専用カーネルと実機計測（§10）。
 - `ceil_mode = true`・`divisor_override`・バッチなし rank 4 入力・索引の `int64` 化・channels_last。
-- `create_graph`（高階微分）・activation checkpoint 対象化・f64／f16／bf16 自動微分経路。
+- `create_graph`（高階微分。#3085 で対応済み）・activation checkpoint 対象化・f64／f16／bf16 自動微分経路。
 - AdaptiveAvgPool3d・AdaptiveMaxPool3d・FractionalMaxPool・LPPool（MaxUnpool は #2644）。
 - ONNX export マッピング・`docs/compat-api-scope.md` 1 節の対象範囲表の拡張・`docs/compat-feature-gap.md` の判定変更・
   spec（REQ-9）の改定。

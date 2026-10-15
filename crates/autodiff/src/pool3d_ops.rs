@@ -27,7 +27,8 @@
 //!
 //! **数値契約**: Max は比較・選択のみ（値は入力要素と bit 一致・タイ先勝ち・NaN 伝播）。Avg は
 //! `f64` アキュムレータで 1 回だけ `f32` へ downcast（規則の正は
-//! `fandhe_ai_tensor_core::pool3d`）。非有限入力は拒否せず伝播する。高階微分（`create_graph`）・
+//! `fandhe_ai_tensor_core::pool3d`）。非有限入力は拒否せず伝播する。高階微分（`create_graph`）は
+//! #3085 で対応済み（`docs/autodiff-higher-order-grad-decision.md` §29。`create_graph/pool.rs`）。
 //! activation checkpoint・f64 自動微分経路は対象外。
 
 use fandhe_ai_tensor_core::pool3d::{self, Pool3dLayout, Pool3dParams};

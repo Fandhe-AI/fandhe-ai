@@ -84,7 +84,9 @@
 //! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・
 //! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
-//! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。それ以外の追跡対象 Op・rank≥3 の
+//! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。プーリング族
+//! （`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`。イシュー #3085）も対象——
+//! 方式は `pool` サブモジュール doc と決定記録 §30（`MaxUnpool` は対象外）。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -125,6 +127,7 @@ mod conv;
 mod index_cum;
 mod linalg_fft;
 mod pad_mask;
+mod pool;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -811,6 +814,23 @@ fn replay_op<'c>(
         Op::Unfold { input, params } => conv::replay_unfold(&get_mirror(mirror, input)?, &params),
         Op::Fold { input, params } => {
             conv::replay_fold(shape, &get_mirror(mirror, input)?, &params)
+        }
+        // プーリング族（イシュー #3085。方式は `pool` モジュール doc 参照）。
+        Op::MaxPool2d { input, index } | Op::MaxPool3d { input, index } => {
+            pool::replay_max_pool(&get_mirror(mirror, input)?, &index, shape)
+        }
+        Op::AvgPool2d {
+            input,
+            params,
+            count_include_pad,
+        } => pool::replay_avg_pool2d(&get_mirror(mirror, input)?, &params, count_include_pad),
+        Op::AvgPool3d {
+            input,
+            params,
+            count_include_pad,
+        } => pool::replay_avg_pool3d(&get_mirror(mirror, input)?, &params, count_include_pad),
+        Op::AdaptiveAvgPool2d { input } => {
+            pool::replay_adaptive_avg_pool2d(&get_mirror(mirror, input)?, shape)
         }
         // 索引・累積族（イシュー #3083。方式は `index_cum` モジュール doc 参照）。
         // `Sort`／`Topk`／`Cummax`／`Cummin` は値の選択のみのため `gather` で再生する。
@@ -2076,6 +2096,55 @@ fn build_cgrads<'c>(
             Op::Fold { input, params } => {
                 let d = conv::fold_vjp(&g, &params)?;
                 accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
+            // プーリング族（イシュー #3085。方式は `pool` モジュール doc 参照）。
+            Op::MaxPool2d { input, index } | Op::MaxPool3d { input, index } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = pool::max_pool_vjp(child, &g, &input_shape, &index)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::AvgPool2d {
+                input,
+                params,
+                count_include_pad,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = pool::avg_pool2d_cgrad(
+                        child,
+                        &g,
+                        &input_shape,
+                        &params,
+                        count_include_pad,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::AvgPool3d {
+                input,
+                params,
+                count_include_pad,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = pool::avg_pool3d_cgrad(
+                        child,
+                        &g,
+                        &input_shape,
+                        &params,
+                        count_include_pad,
+                    )?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::AdaptiveAvgPool2d { input } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = pool::adaptive_avg_pool2d_cgrad(child, &g, &input_shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
             }
             // 索引・累積族（イシュー #3083。方式は `index_cum` モジュール doc 参照）。
             Op::Gather { input, dim, index }

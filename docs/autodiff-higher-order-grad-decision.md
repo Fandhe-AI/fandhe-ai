@@ -1175,9 +1175,52 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の値（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・checkpoint の適格性（`Pad`・`PadMode`・`MaskedFill` は非適格のまま）・facade の公開面。承認範囲は §20（D-A）の一括承認であり、新しい承認は得ていない。CUDA／Metal 実機での create_graph×pad 系の実測は未実施（申し送り先の Issue 起票は所有者承認事項のため本変更では起票していない）。`Dropout`・`Interpolate`・`MaxUnpool` など §21.2 C 群、`PadMode` の activation checkpoint 対応、`f64` 自動微分経路は対象外のまま。
 
-## 30. 実装記録（#3086・線形代数 Op と FFT の create_graph 対応の可否と対応分。親 #3076）
+## 30. 実装記録（#3085・プーリング Op 群の create_graph 対応。親 #3076）
 
-### 30.1 23 件の判断
+§21.2・§21.3 の「#3085 プーリング」の実装記録。コードは `crates/autodiff/src/create_graph/pool.rs`、`create_graph.rs` の `replay_op`／`build_cgrads`、`tape.rs` の `Op::supports_create_graph`。
+
+### 30.1 対象にしたもの・残したもの
+
+| variant | 方式 | forward 再生 | 子テープへ積む Op | 値の扱い |
+|---|---|---|---|---|
+| `MaxPool2d`（`adaptive_max_pool2d` が記録するものを含む） | V1（記録済み `index` の固定） | `contiguous → reshape [N·C, H·W] → gather(1, index) → reshape` | `Contiguous`・`Reshape`・`Gather`・`Scatter` | 1 階と同じ `scatter_with_fallback(Add)`（`f64` 決定的集約）で bit 一致 |
+| `MaxPool3d` | 同上（`[N·C, D·H·W]`） | 同上 | 同上 | 同上 |
+| `AvgPool2d` | V3 | `avg_pool2d`（`ceil_mode=false`） | `Contiguous`・`Reshape`・`Mul`・`Gather`・`Scatter` | 1 階と同じ `avg_pool2d_vjp` を `push_v3` で登録 |
+| `AvgPool3d` | V3 | `avg_pool3d`（`ceil_mode=false`） | 同上 | `grad::avg_pool3d_vjp`（1 階の腕から抜き出し。式・評価順は不変） |
+| `AdaptiveAvgPool2d` | V3 | `adaptive_avg_pool2d`（出力サイズはノード shape から） | 同上 | 1 階と同じ `adaptive_avg_pool2d_vjp` |
+
+残したもの（fail-closed のまま）: `MaxUnpool`（§21.2 C 区分）。`Conv3d`／`ConvTranspose3d` は #3080(b)。
+
+### 30.2 §21.2・§21.3 からの差分
+
+- **Max 系は V2 ではなく V1 になった**: argmax をホストで再計算せず、forward が確定した `index`（先勝ちタイ・NaN 規則込み）をそのまま使う。タイ規則は構造上 1 階と一致する。`index` が入力空間の範囲外なら子テープへ書く前に型付きエラーにする。
+- **Avg 系の構造は `Fold` 経由ではなく索引の合成に統一した**: Adaptive は窓の大きさが可変（`H % Ho != 0` では固定の kernel/stride にならない）、3D には fold が無いため、§21.3 の「`Fold`（col2im）経由」は `AvgPool2d` にしか当てはまらない。3 variant を同一の構造（`g` を `[N·C, 出力空間]` へ平坦化 → 窓の分類ごとに `gather(1, 出力位置)` → `1/s` → `zeros.scatter_add(1, 入力位置)` → `s/d` → 入力 shape へ）に揃えた。窓の列挙は 1 階と同じ情報源（`pool_window_input_pos`・`adaptive_window`・`pool3d_layout` の窓規約）から作る。
+- 索引テンソルは `[N·C, E]`（`E` は 1 平面の窓要素の総数）。`i32` の範囲と `N·C·E` の桁あふれは確保前に型付きエラーで拒否する。
+
+### 30.3 数値契約
+
+- 値は 1 階のホスト関数（`f64` アキュムレータ・1 回 downcast）を `push_v3` で登録するため `cg.grad` は 1 階と bit 一致する。構造側は窓を divisor `d` ごとに `gather` → `1/s` → `scatter_add`（`f64` 集約）→ `s/d` で組む（`s` は `d` 以下の最大の 2 のべき乗。重み `s/d ∈ (0.5, 1]`。codex-review 指摘・PR #3352）。(a) 除算の前に窓内を `f64` で集約するため相殺する上流でも丸め誤差が残らない。(b) 集約前に厳密な `1/s` を掛けて窓内和を `|g|` 程度に抑える。(c) 重みを 1 以下にするため、二階の逆伝播で seed を増幅する乗算が無く（`d=3` で `seed=3e38` が `inf` になる旧構造を解消）、`gather` の VJP が集約する値は `|seed|·m/d ≤ |seed|` に収まる（§21.1(5)）。(d) divisor が異なる分類（`count_include_pad=false` の境界窓・Adaptive の不均一窓）は部分和を f32 で丸めてから足すため、桁違いの打ち消しで孫テープ再生値が 1 階値から外れうる。構造を組む前にホストで構造を模擬し（`check_structure_contract`）、REQ-2 複合判定を外れる入力・集約前中間和が f32 範囲を超える入力は型付きエラーで拒否する（§27.3 と同型の fail-closed。保証は判定を通った入力に限る。同一 `g` の再生を前提とし、tolerance は不変）。
+- tolerance・baseline・FMA 契約・依存・`unsafe` は変更していない。
+
+### 30.4 テスト
+
+- `crates/autodiff/tests/create_graph_pool.rs`: Hessian と有限差分の突合（平均系は重なり・padding・`count_include_pad`、Adaptive は 4→2・5→3、最大系はタイなしの入力・重なり・padding・dilation）、先勝ちタイの解析曲率と重複索引の 1 階 bit 一致（`first_order()` も）、平均系の値が打ち消し入力で 1 階と bit 一致すること、3e38 の上流での 1 階・`cg.grad`・二階の有限性、`jvp_create_graph`（孫テープ）が独立な参照と一致すること、`MaxUnpool` の fail-closed と `child` が空のままであること。
+- `create_graph/pool.rs` の単体テスト: 構造値が 1 階のホスト関数と REQ-2 で一致、Max の gather 再生が forward と bit 一致（NaN・タイ・負値）、範囲外 `index` が型付きエラー。
+- `tests/pool3d_parity.rs`: 旧 `create_graph_is_a_typed_error_not_a_panic` を、成功して 1 階勾配と bit 一致する確認へ反転した。`tape.rs` に `pooling_family_supports_create_graph` を追加。
+- f32 overflow を引き起こす平均系の打ち消し入力は divisor があるため構成できなかった。構成できない回帰ベクトルは主張しない（代わりに大振幅の上流での有限性を確認）。
+
+### 30.5 所有者へ戻す論点・申し送り
+
+- CUDA／Metal 実機での create_graph とプーリングを組み合わせた parity 実測は未実施（#3168・#3169 系への申し送り）。
+- §21.4 のサブイシュー（(a) Max 系／(b) Avg 系）は起票されていなかったため、5 variant を本イシューで扱った。
+
+### 30.6 変えていないもの
+
+1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・公開 API（`api_surface`）。
+
+## 31. 実装記録（#3086・線形代数 Op と FFT の create_graph 対応の可否と対応分。親 #3076）
+
+### 31.1 23 件の判断
 
 §21.2 を正とした（#3086 の issue は `Stft`・`Istft` を実装側に置く案だったが、§21.2 の理由が成立するため fail-closed にした）。
 
@@ -1199,13 +1242,13 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 件数: 実装 8（FFT 4・線形代数 4）、fail-closed 15、合計 23。
 
-### 30.2 FFT の数値契約
+### 31.2 FFT の数値契約
 
 - 値は 1 階 VJP（`fandhe_ai_tensor_core::fft::*_vjp_host`）と REQ-2 統一複合判定で一致する。bit 同一は主張しない（子テープは `Var` の FFT 呼び出し、1 階はホスト関数で、どちらも f64 内部だが定数 2 のべき乗の掛け順が異なる）。
 - 掛ける定数（0.5・2・ゼロ詰め）は 2 のべき乗で丸めに影響しない。FFT は有限和で段をまたぐ増幅がないため overflow の上界判定は付けない。真の値が f32 を超える場合だけ 1 階と同じく `inf` になる。
 - `FftNorm` は `#[non_exhaustive]`。未知 variant は `validate_ancestors` が子テープへ書く前に `Err(Backward)` で拒否する（`check_fft_norm`）。
 
-### 30.3 線形代数の数値契約と総括的な適用判定
+### 31.3 線形代数の数値契約と総括的な適用判定
 
 1 階 VJP は f64 の LU で計算し f32 へ丸めるのは最後の 1 回だけだが、子テープの構造は f32 の `Var` 演算の連鎖である。そのため構造を積む前に f64 参照（`eval::linalg::inv_and_det_f64`。読み取り専用の補助関数で既存関数の数値は不変）で各段の値と上界を求め、次のいずれかなら `Err(Backward)` で拒否する（呼び出し側のロールバックで `child` は空へ戻る。§27.3・§28.3 と同じ形）。
 
@@ -1215,13 +1258,13 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 保証範囲: 判定を通った入力では、`cg.grad` が 1 階と REQ-2 で一致し、seed が 1 以下の二階・孫テープへの再生が有限になる。対象外は §27.3 と同じ（上流 Op・|seed|>1・三階以上・真の値が f32 を超える場合）。判定は保守的で、拒否されても実際に overflow するとは限らない。`Det` は V3 を作らなかったため、`A = diag(1e20, 1e20)`（`det = 1e40`）のような「V3 なら受理できる」入力は拒否する。
 
-### 30.4 テスト
+### 31.4 テスト
 
 - `crates/autodiff/tests/create_graph_linalg_fft.rs`: 8 件の Hessian を 5 点中央差分と REQ-2 判定で突合（FFT は norm 3 種 × 長さ縮小・同長・拡大 × rank 1〜3・dim 先頭／中央、`Solve` は `A`・`B` の混合項を含む）。1 階の bit 同一・`cg.grad` の REQ-2 一致・孫テープ再生の一致。拒否例（`A=[[1e-39]]` の `Inv`、`A=[[1e-10]]`・`B=[[1e30]]` の `Solve`、`diag(1e20)` の `Det`）が `Err(Backward)` で `child` が空・同じ `child` で再試行できること。ほどほどの入力が受理されること。fail-closed の 15 件が型付きエラーで拒否されること、`requires_grad == false` の部分木の fail-closed Op は定数として扱われること。
 - `tape.rs` の `linalg_fft_family_supports_create_graph`: 8 件が `true`、隣接 5 件が `false`。
 - 二次形式の FFT 損失は勾配が入力に対し厳密に線形なので、f32 の勾配丸め雑音を抑えるため刻み 0.5 の中央差分を使った（判定式・tolerance は変えていない）。
 
-### 30.5 所有者へ戻す論点
+### 31.5 所有者へ戻す論点
 
 1. `Det`・`Inv`・`Solve`・`SlogdetLogAbsDet` で判定に引っかかる入力を、拒否ではなく §21.2 の S2／V4（行別スケール＋チャンク）で受理する方向へ広げるか。
 2. `SlogdetSign` を損失に使う経路は fail-closed のため create_graph 全体が拒否される（使い勝手上の制約）。
@@ -1229,6 +1272,6 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 4. 分解系（`Svd*`・`Eigh*`・`Qr*`）の縮退の扱いを決めたうえでの起票（起票にはユーザーの承認が要るため本 issue では行っていない）。
 5. CUDA／Metal 実機での `cg.grad` の parity は未確認（線形代数の forward は GPU からホスト f64 へフォールバックする。#3168・#3169 と同じ申し送り）。
 
-### 30.6 変えていないもの
+### 31.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・`STAGE_BOUND_GUARD` の値・FMA 契約・依存・`unsafe`・`docs/spec`・facade の公開面。

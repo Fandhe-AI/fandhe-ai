@@ -287,8 +287,8 @@ fn all_stage_ok(v: &[f64]) -> bool {
     v.iter().all(|&x| stage_ok(x))
 }
 
-/// REQ-2 統一複合判定の許容誤差定数（正本は `tensor-core::req2_tolerance`。値は変えない）。
-use fandhe_ai_tensor_core::req2_tolerance::{
+/// REQ-2 統一複合判定の許容誤差定数（正本は `tensor-core::tolerance`。値は変えない）。
+use fandhe_ai_tensor_core::tolerance::{
     ABSOLUTE_RESCUE_THRESHOLD as REQ2_ABSOLUTE_RESCUE_THRESHOLD,
     RELATIVE_TOLERANCE as REQ2_RELATIVE_TOLERANCE,
 };
