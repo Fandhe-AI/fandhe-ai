@@ -941,6 +941,51 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
 
+## 26. 実装記録（#3082・損失 Op 第 1 弾の create_graph 対応）
+
+§21.4 の損失族のうち、1 階 VJP が f32 の要素式だけで f64 縮約契約を持たない 5 variant を `supports_create_graph` の対象に加えた（網羅 match のまま）。残りは fail-closed のまま下表に記録する。サブイシューの起票は所有者承認が要るため行っていない。
+
+### 26.1 対象にした 5 variant と方式
+
+| variant | 方式 | 二階の構造 |
+|---|---|---|
+| `MseLoss` | V1 | `dpred = (pred − target) ⊙ s`、`dtarget = −dpred`。`s` は Mean で `(g·2)/n`、Sum で `g·2` |
+| `L1Loss` | V2 | `sign(d)` は区分定数。`pos`／`neg`／`nan` のマスクを親の値から作り `where_cond` で選ぶ。`d == 0` は 0、NaN は `d_m` を通して伝播する |
+| `HuberLoss`（`Huber`／`SmoothL1`） | V1＋V2 | 二次領域（`!(|d| >= delta)`）は `g_b ⊙ d`（`SmoothL1` は `d/delta`）、線形領域は `g_b ⊙ copysign(delta または 1, d)`（非零定数）。`where_cond` で選ぶ |
+| `CrossEntropyLoss` | V1 | `dlogits = (softmax(logits) − onehot) ⊙ s`。子テープに `Softmax` を積む。`onehot` は親の `targets` から作る定数 |
+| `NllLoss` | V2 | `dinput = where(onehot_mask, −s, 0)`。入力について定数なので、二階の寄与は `g` を経由する分だけ |
+
+- 上流勾配 `g` は子テープ上の `Var` のまま扱う（損失が根でない場合や孫テープ再生で、二階の勾配が `g` を通って流れるため）。scale は `g` に定数を掛ける・割る形で作り、演算順は 1 階（`mse_loss_scale`・`nll_loss_scale` 等）に合わせた。
+- float の target は追跡可能な入力として扱い、`dtarget` は子テープの `Var`（`dpred.neg()`）にした。`requires_grad == false` の target は `accumulate` が捨てる。
+- 区分定数の部分は §21.1 V2 に従い `where_cond` で作り、`g.mul(0/1 定数)` は使わない（`inf·0 = NaN` を避ける）。
+- 範囲外の `targets` 添字は 1 階と同じくスキップする（forward が検査済み。panic しない）。空テンソルは 1 階と同じく全ゼロを返す。
+- `replay_op` は公開 `Var` メソッド（`mse_loss_with`・`l1_loss`・`huber_loss_impl`・`cross_entropy_loss`・`nll_loss`）へ委譲し、forward の検証を迂回しない。`huber_loss_impl` は `pub(crate)` にした（公開 API は不変）。未知の `HuberKind` は `Err(Backward)` に倒す。
+
+### 26.2 残した 16 variant（fail-closed のまま）
+
+| 族（§21.4） | variant | 理由・後続 |
+|---|---|---|
+| (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | 未着手。次弾の候補 |
+| (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | 未着手 |
+| (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
+| 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
+
+### 26.3 `reduction` と既知の差
+
+- `crate::var::Reduction` は `Mean`／`Sum` の 2 variant だけで、`None` は存在しない。`None` の追加は公開 API の変更なので本 issue では行わない（所有者承認が必要）。両 variant をすべての対象損失で検証し、「none 相当」は要素ごとの二乗誤差（非スカラー損失）の Hessian テストで代替した。
+- `L1Loss` は `d == 0` かつ `g` が `±inf` のとき、1 階は `inf·0 = NaN` だが子テープは 0 になる。§21.1 V2 の規則を優先した結果。
+
+### 26.4 テスト
+
+- `crates/autodiff/tests/create_graph.rs`: 5 損失 × `Mean`／`Sum` の Hessian と有限差分の REQ-2 一致（恒等入力・`tanh` 連鎖・MSE の閉形式）、CE・NLL のクラス軸バリエーション（軸 0・最終軸・rank 3 中間軸）、`CE ≡ NLL∘LogSoftmax` の Hessian 突合、pred・target 両方を追跡する混合二階微分、`first_order()` と `Tape::backward` の bit 一致、`jvp_create_graph` の孫テープ再生と方向微分の突合、none 相当、大きな logits（`±1e30`）の有限性、空テンソル、残る損失（`KlDivLoss`）の拒否。
+- `crates/autodiff/src/tape.rs`: 5 variant が `true`・隣接する `KlDivLoss` が `false` を固定する単体テスト。
+- `crates/facade/tests/create_graph_facade.rs`: 実 CPU バックエンド（融合 `mse_loss_backward`・`nll_loss_backward` 経路）で、1 階との REQ-2 一致と Hessian 列和の中央差分突合。
+- 5 損失は V3 でないため、`cg.grad` と 1 階の bit 一致は主張せず REQ-2 で比較する。1 階 `first_order()` が `Tape::backward` と bit 同一である点（§21.1(1)）は構造上保たれる。
+
+### 26.5 変更していないもの
+
+1 階 `Tape::backward`・`grad.rs`・`backward.rs` の値、tolerance・baseline、FMA 契約、依存（`Cargo.toml`・`Cargo.lock`）、`unsafe`、公開 API、`docs/spec`、既存節の本文。CUDA／Metal 実機実測は未実施（#3080 と同じく申し送り）。
+
 
 ## 25. 実装記録（#3083・索引・累積 Op の create_graph 対応）
 

@@ -368,3 +368,91 @@ fn softmax_create_graph_matches_first_order_and_finite_difference_via_facade() {
 fn log_softmax_create_graph_matches_first_order_and_finite_difference_via_facade() {
     check_softmax_family(true);
 }
+// --- 損失 Op 第 1 弾（イシュー #3082・決定記録 §26）。実 CPU バックエンド
+//     （融合 `mse_loss_backward`／`nll_loss_backward` 経路を持つ `fandhe_ai::tape()`）
+//     で、1 階との REQ-2 一致と Hessian 列和の中央差分突合を行う。
+
+const LOSS_X: [f32; 6] = [0.3, -2.0, 1.9, 0.2, -0.2, 3.0];
+
+fn mse_target(tape: &Tape) -> Var<'_> {
+    tape.var_no_grad(&t(vec![0.0, 0.5, 0.4, 0.0, 0.0, 1.0], &[2, 3]))
+}
+
+fn mse_loss_at<'t>(tape: &'t Tape, x: &Var<'t>) -> Var<'t> {
+    x.tanh()
+        .mse_loss_with(&mse_target(tape), fandhe_ai_autodiff::Reduction::Mean)
+        .expect("mse_loss")
+}
+
+fn nll_loss_at<'t>(x: &Var<'t>) -> Var<'t> {
+    let targets = Tensor::new(vec![2i32, 0], &[2]).expect("targets");
+    x.log_softmax(1)
+        .expect("log_softmax")
+        .nll_loss(&targets, 1, fandhe_ai_autodiff::Reduction::Mean)
+        .expect("nll_loss")
+}
+
+fn grad_sum_at(x0: &[f32], nll: bool) -> f64 {
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&t(x0.to_vec(), &[2, 3]));
+    let loss = if nll {
+        nll_loss_at(&x)
+    } else {
+        mse_loss_at(&tape, &x)
+    };
+    let grads = tape.backward(&loss).expect("backward");
+    vals(grads.get(&x).unwrap().expect("grad"))
+        .iter()
+        .map(|&v| v as f64)
+        .sum()
+}
+
+fn check_loss(nll: bool) {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(LOSS_X.to_vec(), &[2, 3]));
+    let loss = if nll {
+        nll_loss_at(&x)
+    } else {
+        mse_loss_at(&tape, &x)
+    };
+    let plain = {
+        let grads = tape.backward(&loss).expect("backward");
+        vals(grads.get(&x).unwrap().expect("grad"))
+    };
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("MseLoss／NllLoss は create_graph 対象");
+    let g = cg.grad(&x).unwrap().expect("grad");
+    for (a, b) in plain.iter().zip(vals(&g.value()).iter()) {
+        assert!(req2_close(*a as f64, *b as f64), "1 階: {a} vs {b}");
+    }
+    let grads2 = child
+        .backward(&g.sum(None).unwrap())
+        .expect("child backward");
+    let xc = cg.child_var(&x).unwrap().expect("mirror");
+    let h = vals(grads2.get(&xc).unwrap().expect("second order"));
+    let eps = 1e-2_f32;
+    for i in 0..6 {
+        let mut xp = LOSS_X;
+        let mut xm = LOSS_X;
+        xp[i] += eps;
+        xm[i] -= eps;
+        let num = (grad_sum_at(&xp, nll) - grad_sum_at(&xm, nll)) / (2.0 * eps as f64);
+        assert!(
+            req2_close(h[i] as f64, num),
+            "i={i} analytic={} numeric={num}",
+            h[i]
+        );
+    }
+}
+
+#[test]
+fn mse_loss_create_graph_matches_first_order_and_finite_difference_via_facade() {
+    check_loss(false);
+}
+
+#[test]
+fn nll_loss_create_graph_matches_first_order_and_finite_difference_via_facade() {
+    check_loss(true);
+}
