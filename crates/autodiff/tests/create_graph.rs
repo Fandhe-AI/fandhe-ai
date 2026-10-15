@@ -2057,6 +2057,560 @@ fn create_graph_rejects_unsupported_op_gather() {
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
 }
+// ===========================================================================
+// 2D 畳み込み族（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）の
+// create_graph 対応（イシュー #3080・決定記録 §23）。
+//
+// - Hessian: 1 本の葉 `p` から `narrow`＋`reshape` で x・w・(b) を切り出し、
+//   純ブロックと混合ブロックをまとめて有限差分と突合する。
+// - 子テープ上の 1 階勾配（`cg.grad`）を `Tape::backward` と突合する。
+// - V3（d_weight／d_bias）の前方値が 1 階と bit 一致することを、
+//   f32 逐次和では overflow するが f64 縮約では有限になる入力で固定する。
+// - 孫テープ（3 段目）・fail-closed（Conv3d）。
+// ===========================================================================
+
+#[derive(Clone, Copy, PartialEq)]
+enum ConvKind {
+    Conv2d,
+    ConvTranspose2d,
+}
+
+#[derive(Clone, Copy)]
+struct ConvCfg {
+    kind: ConvKind,
+    n: usize,
+    cin: usize,
+    cout: usize,
+    hw: [usize; 2],
+    k: [usize; 2],
+    stride: [usize; 2],
+    padding: [usize; 2],
+    dilation: [usize; 2],
+    output_padding: [usize; 2],
+    groups: usize,
+    has_bias: bool,
+}
+
+impl ConvCfg {
+    fn new(kind: ConvKind, groups: usize, has_bias: bool) -> Self {
+        Self {
+            kind,
+            n: 2,
+            cin: 2,
+            cout: 2,
+            hw: [3, 3],
+            k: [2, 2],
+            stride: [1, 1],
+            padding: [0, 0],
+            dilation: [1, 1],
+            output_padding: [0, 0],
+            groups,
+            has_bias,
+        }
+    }
+
+    fn x_shape(&self) -> Vec<usize> {
+        vec![self.n, self.cin, self.hw[0], self.hw[1]]
+    }
+
+    fn w_shape(&self) -> Vec<usize> {
+        match self.kind {
+            ConvKind::Conv2d => vec![self.cout, self.cin / self.groups, self.k[0], self.k[1]],
+            ConvKind::ConvTranspose2d => {
+                vec![self.cin, self.cout / self.groups, self.k[0], self.k[1]]
+            }
+        }
+    }
+
+    fn sizes(&self) -> (usize, usize, usize) {
+        (
+            flat_len(&self.x_shape()),
+            flat_len(&self.w_shape()),
+            if self.has_bias { self.cout } else { 0 },
+        )
+    }
+
+    fn p_len(&self) -> usize {
+        let (a, b, c) = self.sizes();
+        a + b + c
+    }
+
+    /// 決定的な擬似値（[-0.8, 0.8] 程度）。
+    fn p0(&self) -> Vec<f32> {
+        (0..self.p_len())
+            .map(|i| (((i * 37 + 11) % 17) as f32 - 8.0) * 0.1)
+            .collect()
+    }
+
+    fn forward<'t>(
+        &self,
+        x: &Var<'t>,
+        w: &Var<'t>,
+        b: Option<&Var<'t>>,
+    ) -> Result<Var<'t>, AutodiffError> {
+        match self.kind {
+            ConvKind::Conv2d => {
+                x.conv2d(w, b, self.stride, self.padding, self.dilation, self.groups)
+            }
+            ConvKind::ConvTranspose2d => x.conv_transpose2d(
+                w,
+                b,
+                self.stride,
+                self.padding,
+                self.output_padding,
+                self.dilation,
+                self.groups,
+            ),
+        }
+    }
+
+    /// loss = sum(y ⊙ y ⊙ c)（多項式。純ブロックが非ゼロ。勾配が x・w・b の 3 次以下の
+    /// 多項式のため、中央差分の h² 項が Richardson 外挿で厳密に消え、h を大きく取れる）。
+    fn build<'t>(&self, tape: &'t Tape, p: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let (nx, nw, nb) = self.sizes();
+        let x = p.narrow(0, 0, nx)?.reshape(&self.x_shape())?;
+        let w = p.narrow(0, nx, nw)?.reshape(&self.w_shape())?;
+        let b = if self.has_bias {
+            Some(p.narrow(0, nx + nw, nb)?)
+        } else {
+            None
+        };
+        let y = self.forward(&x, &w, b.as_ref())?;
+        let ys = y.to_tensor().shape().to_vec();
+        let coef: Vec<f32> = (0..flat_len(&ys))
+            .map(|i| 0.5 + ((i * 13 + 5) % 11) as f32 * 0.1)
+            .collect();
+        let c = tape.var_no_grad(&t(coef, &ys));
+        y.mul(&y)?.mul(&c)?.sum(None)
+    }
+}
+
+fn check_conv_cfg(cfg: ConvCfg) {
+    let p0 = cfg.p0();
+    let shape = [p0.len()];
+    // f32 勾配の丸めノイズ（`ulp / 2h`）が小さい Hessian 成分で REQ-2 の絶対許容
+    // （1e-5）を超えるため、h を大きく取り Richardson 外挿（`(4·D(h) − D(2h)) / 3`）で
+    // 補う（多項式 loss では打ち切り誤差が厳密に消える）。tolerance 自体は変更しない。
+    let d1 = finite_diff_hessian(|tp, p| cfg.build(tp, p), &p0, &shape, 1e-1);
+    let d2 = finite_diff_hessian(|tp, p| cfg.build(tp, p), &p0, &shape, 2e-1);
+    let numeric: Vec<Vec<f64>> = d1
+        .iter()
+        .zip(&d2)
+        .map(|(r1, r2)| {
+            r1.iter()
+                .zip(r2)
+                .map(|(a, b)| (4.0 * a - b) / 3.0)
+                .collect()
+        })
+        .collect();
+    let analytic = analytic_hessian(|tp, p| cfg.build(tp, p), &p0, &shape);
+    assert_hessian_close(&analytic, &numeric);
+
+    // 子テープ上の 1 階勾配（cg.grad）と Tape::backward の一致、
+    // first_order() が素の backward と bit 同一であること。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let p = tape.var(&t(p0.clone(), &shape));
+    let loss = cfg.build(&tape, &p).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gp_plain = plain.get(&p).unwrap().unwrap();
+    let gp_first = cg.first_order().get(&p).unwrap().unwrap();
+    let gp_child = cg.grad(&p).unwrap().unwrap();
+    for i in 0..p0.len() {
+        assert_eq!(
+            gp_plain.get(&[i]).unwrap().to_bits(),
+            gp_first.get(&[i]).unwrap().to_bits(),
+            "first_order は素の backward と bit 同一のはず"
+        );
+        let expected = gp_plain.get(&[i]).unwrap() as f64;
+        let actual = gp_child.value().get(&[i]).unwrap() as f64;
+        assert!(
+            common::req2_close(actual, expected),
+            "cg.grad[{i}]={actual} backward={expected}"
+        );
+    }
+}
+
+#[test]
+fn hessian_conv2d_matches_finite_difference_bias_groups_matrix() {
+    for groups in [1usize, 2] {
+        for has_bias in [false, true] {
+            check_conv_cfg(ConvCfg::new(ConvKind::Conv2d, groups, has_bias));
+        }
+    }
+}
+
+#[test]
+fn hessian_conv2d_stride_padding_and_dilation() {
+    let mut a = ConvCfg::new(ConvKind::Conv2d, 1, true);
+    a.n = 1;
+    a.hw = [4, 4];
+    a.stride = [2, 2];
+    a.padding = [1, 1];
+    check_conv_cfg(a);
+
+    let mut b = ConvCfg::new(ConvKind::Conv2d, 1, true);
+    b.n = 1;
+    b.hw = [4, 4];
+    b.dilation = [2, 2];
+    check_conv_cfg(b);
+}
+
+#[test]
+fn hessian_conv_transpose2d_matches_finite_difference_bias_groups_matrix() {
+    for groups in [1usize, 2] {
+        for has_bias in [false, true] {
+            check_conv_cfg(ConvCfg::new(ConvKind::ConvTranspose2d, groups, has_bias));
+        }
+    }
+}
+
+#[test]
+fn hessian_conv_transpose2d_stride_output_padding_and_dilation() {
+    // stride=2・output_padding=1: replay の output_padding 導出（out − base）を検証する。
+    let mut a = ConvCfg::new(ConvKind::ConvTranspose2d, 1, true);
+    a.n = 1;
+    a.hw = [2, 2];
+    a.stride = [2, 2];
+    a.output_padding = [1, 1];
+    check_conv_cfg(a);
+
+    let mut b = ConvCfg::new(ConvKind::ConvTranspose2d, 1, true);
+    b.n = 1;
+    b.hw = [2, 2];
+    b.dilation = [2, 2];
+    b.padding = [1, 1];
+    check_conv_cfg(b);
+}
+
+// --- Unfold／Fold 単体（窓が重なる設定） --------------------------------------
+
+fn build_unfold_sq<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let xr = x.reshape(&[1, 2, 3, 3])?;
+    let u = xr.unfold([2, 2], [1, 1], [0, 0], [1, 1])?;
+    let us = u.to_tensor().shape().to_vec();
+    let coef: Vec<f32> = (0..flat_len(&us))
+        .map(|i| 0.3 + (i % 7) as f32 * 0.1)
+        .collect();
+    let c = tape.var_no_grad(&t(coef, &us));
+    u.mul(&u)?.mul(&c)?.sum(None)
+}
+
+#[test]
+fn hessian_unfold_overlapping_windows_matches_finite_difference() {
+    let x0: Vec<f32> = (0..18)
+        .map(|i| ((i * 7 + 3) % 11) as f32 * 0.1 - 0.5)
+        .collect();
+    let numeric = finite_diff_hessian(build_unfold_sq, &x0, &[18], 1e-3);
+    let analytic = analytic_hessian(build_unfold_sq, &x0, &[18]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+fn build_fold_sq<'t>(tape: &'t Tape, z: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // [1, 2*2*2, 4] -> fold([3, 3], k=2, s=1) -> [1, 2, 3, 3]（窓が重なる）。
+    let zr = z.reshape(&[1, 8, 4])?;
+    let f = zr.fold([3, 3], [2, 2], [1, 1], [0, 0], [1, 1])?;
+    let fs = f.to_tensor().shape().to_vec();
+    let coef: Vec<f32> = (0..flat_len(&fs))
+        .map(|i| 0.4 + (i % 5) as f32 * 0.1)
+        .collect();
+    let c = tape.var_no_grad(&t(coef, &fs));
+    f.mul(&f)?.mul(&c)?.sum(None)
+}
+
+#[test]
+fn hessian_fold_overlapping_windows_matches_finite_difference() {
+    let z0: Vec<f32> = (0..32)
+        .map(|i| ((i * 5 + 1) % 13) as f32 * 0.1 - 0.6)
+        .collect();
+    let numeric = finite_diff_hessian(build_fold_sq, &z0, &[32], 1e-3);
+    let analytic = analytic_hessian(build_fold_sq, &z0, &[32]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+// --- V3: overflow 回帰（f32 逐次和では inf・f64 縮約では有限） -----------------
+
+const BIG: f32 = 3.0e38;
+
+/// N=3・1×1 カーネル・H=W=1。`x=[1,1,-1]`・`g=c=[BIG;3]`（loss = sum(y ⊙ c)）で
+/// d_weight = Σ x·g = BIG（f64 縮約で有限。f32 逐次和なら 2·BIG で inf）。
+/// `cg.grad(w)` の前方値が 1 階と bit 一致し、二階（∂gw/∂x = c）も有限で一致すること。
+fn conv_overflow_case(kind: ConvKind) {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 1.0, -1.0], &[3, 1, 1, 1]));
+    let w = tape.var(&t(vec![1.0], &[1, 1, 1, 1]));
+    let y = match kind {
+        ConvKind::Conv2d => x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 1).unwrap(),
+        ConvKind::ConvTranspose2d => x
+            .conv_transpose2d(&w, None, [1, 1], [0, 0], [0, 0], [1, 1], 1)
+            .unwrap(),
+    };
+    let c = tape.var_no_grad(&t(vec![BIG; 3], &[3, 1, 1, 1]));
+    let loss = y.mul(&c).unwrap().sum(None).unwrap();
+
+    let plain = tape.backward(&loss).unwrap();
+    let dw_plain = plain.get(&w).unwrap().unwrap().get(&[0, 0, 0, 0]).unwrap();
+    assert!(dw_plain.is_finite(), "1 階の d_weight は f64 縮約で有限");
+
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gw = cg.grad(&w).unwrap().unwrap();
+    let dw_child = gw.value().get(&[0, 0, 0, 0]).unwrap();
+    assert_eq!(
+        dw_plain.to_bits(),
+        dw_child.to_bits(),
+        "V3: cg.grad(w) の前方値は 1 階と bit 一致"
+    );
+
+    // 二階: ∂(gw)/∂x_i = g_i = BIG（有限）。
+    let cx = cg.child_var(&x).unwrap().unwrap();
+    let grads2 = child.backward(&gw).unwrap();
+    let dx2 = grads2.get(&cx).unwrap().unwrap();
+    for i in 0..3 {
+        let v = dx2.get(&[i, 0, 0, 0]).unwrap();
+        assert!(
+            v.is_finite() && (v - BIG).abs() <= BIG * 1e-6,
+            "dx2[{i}]={v}"
+        );
+    }
+
+    // 3 段目（孫テープ）: gw を更に create_graph で微分できる（閉包性）。
+    // 孫テープでの再生値も 1 階と同じホスト関数（f64 縮約）で再計算されるため
+    // overflow しない（`Op::ConvWeightGradHost`。決定記録 §23.3）。
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let cg2 = child
+        .backward_create_graph(&gw, &grand)
+        .expect("子テープ上の勾配は更に create_graph で微分できる（閉包性）");
+    let g_cx = cg2.grad(&cx).unwrap().unwrap();
+    for i in 0..3 {
+        let v = g_cx.value().get(&[i, 0, 0, 0]).unwrap();
+        assert!(v.is_finite(), "3 段目の勾配 [{i}] は有限のはず: {v}");
+    }
+
+    // 孫テープ上で gw の非線形関数 h = (gw·1e-38)² を作って更に微分する。
+    // 通常の backward で有限な x 勾配は孫テープ側でも有限・一致すること
+    // （補正値 gw=3e38 が孫テープ再生で inf に化けないこと）。
+    let child2 = Tape::new_with_ops(common::naive_ops());
+    let cg_b = tape.backward_create_graph(&loss, &child2).unwrap();
+    let gw_b = cg_b.grad(&w).unwrap().unwrap();
+    let s = child2.var_no_grad(&t(vec![1.0e-38], &[1, 1, 1, 1]));
+    let scaled = gw_b.mul(&s).unwrap();
+    let h = scaled.mul(&scaled).unwrap().sum(None).unwrap();
+    let cx_b = cg_b.child_var(&x).unwrap().unwrap();
+    let plain_h = child2.backward(&h).unwrap();
+    let dx_plain = plain_h.get(&cx_b).unwrap().unwrap();
+    let grand2 = Tape::new_with_ops(common::naive_ops());
+    let cg3 = child2.backward_create_graph(&h, &grand2).unwrap();
+    let dx_grand = cg3.grad(&cx_b).unwrap().unwrap();
+    for i in 0..3 {
+        let p = dx_plain.get(&[i, 0, 0, 0]).unwrap();
+        let q = dx_grand.value().get(&[i, 0, 0, 0]).unwrap();
+        assert!(p.is_finite() && q.is_finite(), "[{i}] plain={p} grand={q}");
+        assert_eq!(p.to_bits(), q.to_bits(), "[{i}] 孫テープ再生値の維持");
+    }
+}
+
+#[test]
+fn conv2d_weight_grad_overflow_matches_first_order_bitwise() {
+    conv_overflow_case(ConvKind::Conv2d);
+}
+
+#[test]
+fn conv_transpose2d_weight_grad_overflow_matches_first_order_bitwise() {
+    conv_overflow_case(ConvKind::ConvTranspose2d);
+}
+
+fn conv_bias_overflow_case(kind: ConvKind) {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var_no_grad(&t(vec![0.5, 0.5, 0.5], &[3, 1, 1, 1]));
+    let w = tape.var_no_grad(&t(vec![1.0], &[1, 1, 1, 1]));
+    let b = tape.var(&t(vec![0.0], &[1]));
+    let y = match kind {
+        ConvKind::Conv2d => x.conv2d(&w, Some(&b), [1, 1], [0, 0], [1, 1], 1).unwrap(),
+        ConvKind::ConvTranspose2d => x
+            .conv_transpose2d(&w, Some(&b), [1, 1], [0, 0], [0, 0], [1, 1], 1)
+            .unwrap(),
+    };
+    let c = tape.var_no_grad(&t(vec![BIG, BIG, -BIG], &[3, 1, 1, 1]));
+    let loss = y.mul(&c).unwrap().sum(None).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let db_plain = plain.get(&b).unwrap().unwrap().get(&[0]).unwrap();
+    assert!(db_plain.is_finite());
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let db_child = cg.grad(&b).unwrap().unwrap().value().get(&[0]).unwrap();
+    assert_eq!(db_plain.to_bits(), db_child.to_bits());
+}
+
+#[test]
+fn conv2d_bias_grad_overflow_matches_first_order_bitwise() {
+    conv_bias_overflow_case(ConvKind::Conv2d);
+}
+
+#[test]
+fn conv_transpose2d_bias_grad_overflow_matches_first_order_bitwise() {
+    conv_bias_overflow_case(ConvKind::ConvTranspose2d);
+}
+
+// --- 境界: 負の base の転置畳み込み・ゼロ次元チャネルの bias 勾配 ---------------
+
+/// `in=1, k=1, stride=3, padding=1, dilation=1, output_padding=2`（各軸）:
+/// `(in−1)·s + d(k−1) + 1 − 2p = −1` で base が負になるが forward は有効。
+/// create_graph が拒否せず、1 階と一致すること（Bugbot・codex P2）。
+#[test]
+fn conv_transpose2d_negative_base_output_padding_is_replayable() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.5], &[1, 1, 1, 1]));
+    let w = tape.var(&t(vec![2.0], &[1, 1, 1, 1]));
+    let y = x
+        .conv_transpose2d(&w, None, [3, 3], [1, 1], [2, 2], [1, 1], 1)
+        .unwrap();
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("負の base でも有効な転置畳み込みは再生できる");
+    let dx_plain = plain.get(&x).unwrap().unwrap().get(&[0, 0, 0, 0]).unwrap();
+    let dx_child = cg
+        .grad(&x)
+        .unwrap()
+        .unwrap()
+        .value()
+        .get(&[0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(dx_plain.to_bits(), dx_child.to_bits());
+    // 孫テープ側（再生）でも `output_padding` が導出できること。
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let gx = cg.grad(&x).unwrap().unwrap();
+    child
+        .backward_create_graph(&gx.sum(None).unwrap(), &grand)
+        .expect("子テープ上の転置畳み込みも再生できる");
+}
+
+/// 1×1 入力・3×3 カーネル・stride 3・padding 2・output_padding 2（Bugbot の例。
+/// `(in−1)s + d(k−1) + 1 < 2p`）。
+#[test]
+fn conv_transpose2d_small_input_large_padding_is_replayable() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.5], &[1, 1, 1, 1]));
+    let w = tape.var(&t((0..9).map(|i| i as f32 * 0.1).collect(), &[1, 1, 3, 3]));
+    let y = x
+        .conv_transpose2d(&w, None, [3, 3], [2, 2], [2, 2], [1, 1], 1)
+        .unwrap();
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gw = cg.grad(&w).unwrap().unwrap();
+    let grand = Tape::new_with_ops(common::naive_ops());
+    child
+        .backward_create_graph(&gw.sum(None).unwrap(), &grand)
+        .expect("再生で output_padding を導出できる");
+}
+
+/// 入力チャネル 0 でも bias 勾配は出力が非空なら通常の backward と一致する。
+#[test]
+fn conv_bias_grad_with_zero_in_channels_matches_first_order() {
+    for kind in [ConvKind::Conv2d, ConvKind::ConvTranspose2d] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&Tensor::<f32>::zeros(&[1, 0, 1, 1]).unwrap());
+        let (w, y);
+        let b = tape.var(&t(vec![1.0], &[1]));
+        match kind {
+            ConvKind::Conv2d => {
+                w = tape.var(&Tensor::<f32>::zeros(&[1, 0, 1, 1]).unwrap());
+                y = x.conv2d(&w, Some(&b), [1, 1], [0, 0], [1, 1], 1).unwrap();
+            }
+            ConvKind::ConvTranspose2d => {
+                w = tape.var(&Tensor::<f32>::zeros(&[0, 1, 1, 1]).unwrap());
+                y = x
+                    .conv_transpose2d(&w, Some(&b), [1, 1], [0, 0], [0, 0], [1, 1], 1)
+                    .unwrap();
+            }
+        }
+        let loss = y.sum(None).unwrap();
+        let plain = tape.backward(&loss).unwrap();
+        let db_plain = plain.get(&b).unwrap().unwrap().get(&[0]).unwrap();
+        assert_eq!(db_plain, 1.0);
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let db = cg.grad(&b).unwrap().unwrap().value().get(&[0]).unwrap();
+        assert_eq!(db.to_bits(), db_plain.to_bits());
+    }
+}
+
+// --- 孫テープ: jvp_create_graph（親→子→孫） -----------------------------------
+
+fn conv_jvp_case(kind: ConvKind) {
+    let cfg = ConvCfg::new(kind, 1, true);
+    let p0 = cfg.p0();
+    let shape = [p0.len()];
+    let tangent: Vec<f32> = (0..p0.len())
+        .map(|i| ((i * 3 + 1) % 7) as f32 * 0.1 - 0.3)
+        .collect();
+
+    let out_at = |pv: &[f32]| -> Vec<f64> {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let p = tape.var(&t(pv.to_vec(), &shape));
+        let loss = cfg.build(&tape, &p).unwrap();
+        vec![loss.value().get(&[]).unwrap() as f64]
+    };
+    // 独立な中央差分の方向微分。
+    let h = 1e-3f32;
+    let plus: Vec<f32> = p0.iter().zip(&tangent).map(|(a, v)| a + h * v).collect();
+    let minus: Vec<f32> = p0.iter().zip(&tangent).map(|(a, v)| a - h * v).collect();
+    let numeric = (out_at(&plus)[0] - out_at(&minus)[0]) / (2.0 * h as f64);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let p = tape.var(&t(p0.clone(), &shape));
+    let loss = cfg.build(&tape, &p).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &p,
+        &t(tangent.clone(), &shape),
+        &child,
+        &grand,
+    )
+    .expect("Conv 系を含む関数でも jvp_create_graph が成立する（閉包性）");
+    let jv = res.output().value().get(&[]).unwrap() as f64;
+    assert!(
+        common::req2_close(jv, numeric),
+        "jvp={jv} numeric={numeric}"
+    );
+}
+
+#[test]
+fn jvp_create_graph_through_conv2d_matches_directional_derivative() {
+    conv_jvp_case(ConvKind::Conv2d);
+}
+
+#[test]
+fn jvp_create_graph_through_conv_transpose2d_matches_directional_derivative() {
+    conv_jvp_case(ConvKind::ConvTranspose2d);
+}
+
+// --- fail-closed: 3D 族は #3080(b) まで拒否のまま ------------------------------
+
+#[test]
+fn create_graph_still_rejects_conv3d() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.5; 8], &[1, 1, 2, 2, 2]));
+    let w = tape.var(&t(vec![0.25; 8], &[1, 1, 2, 2, 2]));
+    let y = x
+        .conv3d(&w, None, [1, 1, 1], [0, 0, 0], [1, 1, 1], 1)
+        .expect("conv3d forward");
+    let loss = y.sum(None).unwrap();
+    let err = tape
+        .backward_create_graph(&loss, &child)
+        .expect_err("Conv3d は fail-closed で拒否されるはず");
+    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+    assert!(child.is_empty());
+}
 
 // --- Gelu・GeluTanh・Erf（イシュー #3081。決定記録 §22） --------------------
 
