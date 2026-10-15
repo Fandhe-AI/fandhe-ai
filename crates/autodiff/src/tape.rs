@@ -1419,11 +1419,13 @@ pub(crate) enum Op {
         /// 挙動不変）。`Var::conv2d_low_precision`（`nn::conv::
         /// conv2d_forward_low_precision` の唯一の呼び出し元）のみが
         /// `F16`／`Bf16` を記録する opt-in 経路。`Op::Conv2d` は
-        /// `is_checkpoint_eligible() == false`（常に実体化済み）かつ
-        /// `supports_create_graph() == false`（二階微分 replay 対象外）
-        /// のため、本フィールドは checkpoint 解放判定・create_graph
-        /// replay のいずれにも影響しない——`grad::vjp` の `Op::Conv2d`
-        /// 分岐も本フィールドを見ず常に f32 backward を行う
+        /// `is_checkpoint_eligible() == false`（常に実体化済み）のため、
+        /// 本フィールドは checkpoint 解放判定に影響しない。create_graph
+        /// （イシュー #3080）は `supports_create_graph() == true` だが、
+        /// `F32` 以外の `Conv2d` は子テープへ精度情報を持たず静かに f32 再生
+        /// されるため `create_graph::validate_ancestors` が本フィールドで
+        /// 明示拒否する（fail-closed）。`grad::vjp` の `Op::Conv2d` 分岐は
+        /// 本フィールドを見ず常に f32 backward を行う
         /// （`compute_dtype` は forward 経路の記録専用）。
         compute_dtype: ScalarDType,
     },
@@ -2448,6 +2450,16 @@ impl Op {
             | Op::Narrow { .. }
             | Op::Concat { .. }
             | Op::Contiguous { .. }
+            // 2D 畳み込み族（イシュー #3080・決定記録 §21・§22）。`Conv2d`／
+            // `ConvTranspose2d`／`Unfold`／`Fold` は `replay_op`（公開 `Var`
+            // メソッドへの委譲）と `build_cgrads`（unfold／fold＋rank 2
+            // strict matmul の合成）が対応済み。低精度 `Conv2d` は
+            // `validate_ancestors` が `compute_dtype` で明示拒否する。
+            // `Conv3d`／`ConvTranspose3d` は引き続き `false`（#3080(b)）。
+            | Op::Conv2d { .. }
+            | Op::ConvTranspose2d { .. }
+            | Op::Unfold { .. }
+            | Op::Fold { .. }
             | Op::Where { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
@@ -2543,12 +2555,8 @@ impl Op {
             | Op::Topk { .. }
             | Op::Interpolate { .. }
             | Op::Pad { .. }
-            | Op::Conv2d { .. }
-            | Op::ConvTranspose2d { .. }
             | Op::ConvTranspose3d { .. }
             | Op::MaxUnpool { .. }
-            | Op::Unfold { .. }
-            | Op::Fold { .. }
             | Op::LocalResponseNorm { .. }
             | Op::WeightNorm { .. }
             | Op::SpectralNorm { .. }
@@ -5153,6 +5161,31 @@ mod conv3d_op_tests {
         assert!(!op.is_checkpoint_eligible());
     }
 
+    /// イシュー #3080: 2D 畳み込み族は create_graph 対応（`true`）。3D 族は #3080(b) まで `false`。
+    #[test]
+    fn conv2d_family_supports_create_graph() {
+        let p = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        assert!(
+            Op::Conv2d {
+                input: NodeId(0),
+                weight: NodeId(1),
+                bias: None,
+                params: p.clone(),
+                compute_dtype: ScalarDType::F32,
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::ConvTranspose2d {
+                input: NodeId(0),
+                weight: NodeId(1),
+                bias: None,
+                params: p,
+            }
+            .supports_create_graph()
+        );
+    }
+
     #[test]
     fn conv3d_op_does_not_support_create_graph() {
         let op = Op::Conv3d {
@@ -5411,7 +5444,7 @@ mod typed_ops_accessor_tests {
 }
 
 /// `Op::Unfold`／`Op::Fold`（イシュー #2645）のメタ性質固定: checkpoint 対象外・create_graph replay
-/// 対象外・`for_each_input` が入力ノードのみを列挙する（`Op::Conv2d` と同じ最小・安全側の判断）。
+/// 対象（#3080）・`for_each_input` が入力ノードのみを列挙する（`Op::Conv2d` と同じ最小・安全側の判断）。
 #[cfg(test)]
 mod fold_unfold_op_tests {
     use super::*;
@@ -5433,7 +5466,8 @@ mod fold_unfold_op_tests {
             },
         ] {
             assert!(!op.is_checkpoint_eligible());
-            assert!(!op.supports_create_graph());
+            // イシュー #3080 で create_graph 対応済み（`Op::supports_create_graph`）。
+            assert!(op.supports_create_graph());
             let mut seen = Vec::new();
             op.for_each_input(|id| seen.push(id.0));
             assert_eq!(seen, vec![4]);
