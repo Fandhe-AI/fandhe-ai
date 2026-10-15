@@ -58,7 +58,8 @@
 //! 限定。#1943）の 12 variant に加え、イシュー #2062 で
 //! `ScalarUnary`（#3081 で `Gelu`・`GeluTanh`・`Erf` も対象）・`ScalarBinary`（既知 13
 //! variant すべて）・`Transpose`・`Permute`・`Narrow`・`Concat`・
-//! `Contiguous`・`Where` を拡張済み（[`scalar_unary_replayable`]／
+//! `Contiguous`・`Where`・`RmsNorm`・`LayerNorm`（#3078。`create_graph_norm`
+//! モジュール doc 参照）を拡張済み（[`scalar_unary_replayable`]／
 //! [`scalar_binary_replayable`] 参照）。さらにイシュー #3080 で 2D 畳み込み族
 //! （`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`。実装は `conv` サブモジュール、
 //! 決定記録 §23）を拡張済み。`F32` 以外の `compute_dtype` を持つ `Conv2d`
@@ -291,10 +292,10 @@ impl Tape {
     ///    勾配を得る（`loss.requires_grad() == false` の拒否もここで
     ///    既存どおり発生する）。
     ///
-    /// 4〜7 のいずれかで失敗した場合、`child` へは一切書き込まない
-    /// （4 の事前検査により `child` の空性が確認済みであること、6 が
-    /// `build_mirror`／`build_cgrads` より前に走ることの両方に
-    /// より、途中失敗で `child` へノードが残ることはない）。
+    /// 4〜7 のいずれかで失敗した場合、`child` は空のまま残る（4 の事前検査により
+    /// `child` の空性が確認済みであること、6 が `build_mirror`／`build_cgrads` より前に
+    /// 走ることに加え、`build_mirror`／`build_cgrads` の途中失敗では積んだノードを
+    /// `Tape::rollback_to` で取り除く）。
     pub fn backward_create_graph<'c>(
         &self,
         loss: &Var<'_>,
@@ -347,8 +348,21 @@ impl Tape {
 
         let n = self.nodes.borrow().len();
         let mut mirror: Vec<Option<Var<'c>>> = vec![None; n];
-        build_mirror(self, child, &ancestors, &mut mirror)?;
-        let cgrads = build_cgrads(self, child, &ancestors, &mirror, loss.node_id())?;
+        // `build_mirror`／`build_cgrads` は子テープへノードを積んだ後でも失敗しうる
+        // （例: LayerNorm／RmsNorm の upstream 値は子テープ上で初めて分かり、構築の途中で
+        // 拒否される。PR #3346 レビュー指摘）。失敗時は積んだノードをすべて取り除いて
+        // `child` を空へ戻し、同じ `child` での再試行を可能にする（空性検査を通る）。
+        let point = child.rollback_point();
+        let built = build_mirror(self, child, &ancestors, &mut mirror)
+            .and_then(|()| build_cgrads(self, child, &ancestors, &mirror, loss.node_id()));
+        let cgrads = match built {
+            Ok(c) => c,
+            Err(e) => {
+                mirror.clear();
+                child.rollback_to(point);
+                return Err(e);
+            }
+        };
 
         Ok(CreateGraphResult {
             first_order,
@@ -513,6 +527,9 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 )));
             }
         }
+        // RmsNorm／LayerNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
+        // `child` へ書く前に拒否する（イシュー #3078。`create_graph_norm` モジュール doc）。
+        crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
     }
     Ok(())
 }
@@ -768,6 +785,9 @@ fn replay_op<'c>(
         Op::Where { cond, a, b } => {
             let cond_bool = f32_mask_to_bool(&cond)?;
             Var::where_cond(&cond_bool, &get_mirror(mirror, a)?, &get_mirror(mirror, b)?)
+        }
+        Op::RmsNorm { .. } | Op::LayerNorm { .. } => {
+            crate::create_graph_norm::replay_norm(&op, mirror)
         }
         // 損失 Op 第 1 弾（イシュー #3082・決定記録 §26）。公開 `Var` メソッドへ
         // 委譲し、forward の検証（shape・delta・targets 範囲）を迂回しない。
@@ -1784,6 +1804,49 @@ fn build_cgrads<'c>(
                     let db = reduce_bias_grad_var(child, &db_full, &b_shape)?;
                     accumulate(&parent_nodes, &mut cgrads, a, da)?;
                     accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                }
+            }
+            Op::RmsNorm { input, weight, eps } => {
+                let targets = crate::create_graph_norm::Targets {
+                    input,
+                    weight,
+                    bias: None,
+                };
+                let contributions = crate::create_graph_norm::rms_norm_cgrads(
+                    child,
+                    &parent_nodes,
+                    parent_ops,
+                    mirror,
+                    g,
+                    &targets,
+                    eps,
+                )?;
+                for (target, v) in contributions {
+                    accumulate(&parent_nodes, &mut cgrads, target, v)?;
+                }
+            }
+            Op::LayerNorm {
+                input,
+                weight,
+                bias,
+                eps,
+            } => {
+                let targets = crate::create_graph_norm::Targets {
+                    input,
+                    weight,
+                    bias,
+                };
+                let contributions = crate::create_graph_norm::layer_norm_cgrads(
+                    child,
+                    &parent_nodes,
+                    parent_ops,
+                    mirror,
+                    g,
+                    &targets,
+                    eps,
+                )?;
+                for (target, v) in contributions {
+                    accumulate(&parent_nodes, &mut cgrads, target, v)?;
                 }
             }
             // 2D 畳み込み族（イシュー #3080。方式は `conv` モジュール doc 参照）。

@@ -6002,7 +6002,7 @@ pub(crate) fn scatter_overwrite_last_writer_mask(
 /// 確定してから `f64` へ昇格して蓄積する」契約に厳密に従う（コメント
 /// が挙げる代表例そのもの）。`rows == 0 || hidden == 0` は
 /// [`eval::rmsnorm_rows`] と同じ早期 return で空／ゼロ出力を返す。
-fn rmsnorm_vjp_rows(
+pub(crate) fn rmsnorm_vjp_rows(
     x: &[f32],
     w: Option<&[f32]>,
     eps: f32,
@@ -6066,7 +6066,7 @@ fn rmsnorm_vjp_rows(
 /// してから `f64` 蓄積・`dw`／`db` の行方向蓄積も同型）。`has_bias` は
 /// forward で `bias` が `Some` だったか（`weight` の有無とは独立）を
 /// 表し、`db` を計算するかどうかを決める。
-fn layer_norm_vjp_rows(
+pub(crate) fn layer_norm_vjp_rows(
     x: &[f32],
     w: Option<&[f32]>,
     has_bias: bool,

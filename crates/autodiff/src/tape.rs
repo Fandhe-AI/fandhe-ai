@@ -2426,7 +2426,10 @@ impl Op {
     /// これを逐語再現しないため対象外とした。#1943・
     /// `docs/autodiff-higher-order-grad-decision.md` §14）の 12
     /// variant に加え、`Transpose`・`Permute`・`Narrow`・`Concat`・
-    /// `Contiguous`・`Where` は無条件で `true`（#2062）。
+    /// `Contiguous`・`Where` は無条件で `true`（#2062）。イシュー #3078 で
+    /// `RmsNorm`・`LayerNorm` も `true`（V3 値＋S1 構造。入力が非有限・
+    /// overflow 域の場合は `create_graph_norm::validate_norm_s1` が入口で
+    /// 拒否する。決定記録 §27）。
     ///
     /// `Op::ScalarUnary`／`Op::ScalarBinary` は **payload（`op` フィールド
     /// の具体的な variant）まで見て判定する**（[`scalar_unary_
@@ -2513,7 +2516,10 @@ impl Op {
             | Op::L1Loss { .. }
             | Op::HuberLoss { .. }
             | Op::CrossEntropyLoss { .. }
-            | Op::NllLoss { .. } => true,
+            | Op::NllLoss { .. }
+            // 行方向正規化（イシュー #3078・決定記録 §27）。V3 値＋S1 構造。
+            | Op::RmsNorm { .. }
+            | Op::LayerNorm { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2544,8 +2550,6 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::RmsNorm { .. }
-            | Op::LayerNorm { .. }
             | Op::BatchNorm { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
