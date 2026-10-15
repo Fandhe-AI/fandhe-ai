@@ -1275,3 +1275,11 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 31.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・`STAGE_BOUND_GUARD` の値・FMA 契約・依存・`unsafe`・`docs/spec`・facade の公開面。
+
+## 32. 実装記録（#3087・facade 経由の確認と拒否基準の差し替え。親 #3075）
+
+- facade の `backward_create_graph`・`hvp`・`jvp`・`jacfwd`・`jvp_multi` で、§22〜§31 で拡張した Op 族の代表を確認するテストを足した（対応表は `autodiff-functional-transforms-design.md` §34.1）。§21.6 の基準テストに対応する facade 側のテストは `crates/facade/tests/create_graph_facade.rs` の `*_create_graph_via_facade`（17 件）。
+- 拒否の基準 Op を `LogSumExp`・`Max`（C 区分。将来の拡張で対象になりうる）から恒久対象外の `Op::Custom`（§21.2 A 区分）に替えた。`.is_err()` は `Err(AutodiffError::Backward(_))` の一致に強めた。
+- 1 階 `first_order()` は素の `backward` と bit 一致。`cg.grad` は §9 (i) のとおり REQ-2 が契約で、gelu・gelu_tanh・inv・det・huber・cross_entropy は REQ-2、それ以外は実測で bit 一致のため bit 一致で固定した。
+- GPU 実機（LayerNorm・Conv2d・MaxPool2d）は `#[ignore]` で追加。実測は #3168・#3169 へ申し送る（`docs/perf/logs/create-graph-extended-ops-3087/README.md`）。
+- 変えていないもの: 公開 API・1 階 `backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・`crates/autodiff/src`。

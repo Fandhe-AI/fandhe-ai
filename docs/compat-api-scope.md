@@ -2647,6 +2647,8 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 → 2026-10-08 の所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）項 1 で、F1〜F3 の公開と論点 1・2・4 が承認された（論点 5・6 は保留。論点 3 は言及なし）。承認範囲・確定した公開形・保留ガードの反転範囲（上の差 4）は設計記録 `docs/autodiff-functional-transforms-design.md` §23（#2930）に記録した。差 1〜3 も同 §23.5 で解消済み。`out_dim`・複数入力の拡張方法は未決、doctest の可否は #2931 で確かめる。**→ 公開は #2931 で行った（本節末尾の #2931 の適用記録）。** 上の「すべて未承認」の転記文は履歴として残す。
 
+→ #3087 追記: 論点 5 は D-A（2026-10-11・#3020）で実装へ進み、#3077〜#3086 で `supports_create_graph` の対象 Op を拡張した。現在の対象は同関数の網羅 match と `docs/autodiff-higher-order-grad-decision.md` §21.2 を正とする。facade の `backward_create_graph`・`hvp`・`jvp`・`jacfwd` で拡張 Op を通す確認は #3087（設計記録 `autodiff-functional-transforms-design.md` §34・決定記録 §32）。2484・2670 行付近の適用記録は履歴としてそのまま残す。
+
 本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は変更していない。facade 公開面は追加していない。
 
 **Phase 9 公開形（`jvp`／`jacfwd`。承認依頼 #2941・親 #2939・Phase 9 #2928）**: double-VJP 法の `jvp`／`jacfwd` の facade 公開形と論点の承認依頼。行ラベルは F 系を継続して `F4`・`F5` とする（`FunctionalTransformsHoldDoctestGuard` 1 個が覆うという F ブロックの前提がそのまま当てはまるため）。ただし `F1`〜`F3` は承認済み、`F4`・`F5` は依頼時点では**未承認**だった（→ 2026-10-09 の所有者コメント `issuecomment-6079384681` 項 1 で承認、#2956 で公開済み。以下の「未承認」の転記文は履歴として残す）。以下は設計記録 `docs/autodiff-functional-transforms-design.md` §27 の**転記**であり、新しい推奨・tolerance・baseline は作っていない。承認根拠は 2026-10-08 の所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650`）項 2 の最終段落のみ（内部実装と公開形の記録まで。facade 公開は記録後に改めて承認依頼）で、項 1 の承認（F1〜F3）は `jvp`／`jacfwd` に及ばない。承認は実装 Agent が代行しない。
