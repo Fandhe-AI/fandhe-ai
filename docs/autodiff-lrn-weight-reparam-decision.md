@@ -203,6 +203,8 @@ forward ごとに反復が走るため、1 記録につき forward は 1 回。�
 | `facade_does_not_reexport_or_declare_lrn_weight_reparam`（＋自己テスト） | facade src の再エクスポート・`pub mod lrn_ops`／`weight_reparam_ops`／`lrn`／`weight_reparam`・型 4 件の独自宣言・7 名の `fn` 宣言の否定検査。検出はトークン完全一致のみで、`weight_norm_forward`・`spectral_norm_host`・`lrn_layout` 等の別トークン・呼び出し・コメント／文字列・非公開 `use` を誤検出しないことを自己テストで固定 |
 | `workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations` | workspace 全体で 4 名の `fn` 宣言が承認済みの置き場所の各 1 件のみ・`add_*` は 0 件 |
 
+（#3050 で `LrnWeightReparamHoldDoctestGuard` の `compat::Sequential` 向け `add_weight_norm`／`add_spectral_norm` のプローブを外した。上表のうち当該 2 名の記述は設計時点のもので、現状は「実施記録 §18」を参照。）
+
 検出範囲は上記トークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、プローブが名前解決で触れる位置に限る。
 マクロ生成や別名経由のメソッドまでは保証しない。stable rustdoc は `compile_fail` のコードを照合しないため、否定ガードは
 正のプローブ＋インベントリで組んでいる。実装中に `Var` へ同名メソッド `weight_norm` を一時的に足し、doctest が型不一致で
@@ -324,3 +326,12 @@ impl<'t> Var<'t> {
 
 - `compat::Sequential::add_local_response_norm` を公開した（公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` §3・実施記録は同 §23）。保存は後続 `-c` まで `UnsupportedModel`、常駐経路は `Unsupported`。
 - §9 の保留ガード表のうち `Sequential` 受け手の `add_local_response_norm` のみ反転済み。`add_weight_norm`／`add_spectral_norm`・`Tape`／`Tensor<f32>`・モジュール・型の否定は維持している。
+
+## 18. #3050 実施記録（保存・復元の対応と保留ガードの残りの反転）
+
+- 結線した Linear・Conv 6 種の `save_model`／`load_model` に対応した（スキーマ・設計判断は `facade-weight-reparam-wiring-decision.md` §18）。承認は 2026-10-11 の所有者判断 D-A の再掲で新規ではない。`format_version` は 2 のまま・tolerance・parity baseline・依存は不変。
+- **反転した範囲**: `LrnWeightReparamHoldDoctestGuard` の `compat::Sequential` 向けトレイト・impl・UFCS 呼び出し（`add_weight_norm`／`add_spectral_norm`）と、`api_surface.rs` の固定文言 `LRN_WEIGHT_REPARAM_HOLD_PROBE_BODY`・facade src 走査の保留 fn 名（6 → 4 名）。公開名は `parametrize_*` に確定しており `add_*` 名は採用されなかったため、プローブを残す意味がない。未採用名の復活は workspace インベントリ（`add_*` は 0 件を期待。`LRN_WEIGHT_REPARAM_WORKSPACE_FN_NAMES`）が引き続き検出する（一時的に `Sequential::add_weight_norm` を足して失敗することを手元で確認し、元へ戻した）。
+- **維持した範囲**（決定記録が非公開と確定）: `norm_except_dim`（`Var`／`Tape`／`Tensor<f32>`）、`Tape`／`Tensor<f32>` 上の `local_response_norm`／`weight_norm`／`spectral_norm`、モジュール `lrn_ops`／`weight_reparam_ops`／`lrn`／`weight_reparam`・型 `LocalResponseNorm`／`WeightNorm`／`SpectralNorm`。
+- **追加したガード**: 対象層ダウンキャスト（`.as_linear(`／`.as_conv*(` とその `_mut`）の消費 fn を autodiff・facade・onnx-interop の `src/` から列挙し、各 fn に再パラメータ化の判定（`is_parametrized`／`Reparam`）か理由付きの免除登録を要求するソース走査インベントリ（`parametrize_downcast_sites_are_gated_or_exempt` と自己テスト）。未登録の新規消費箇所と、免除表の過不足はいずれも fail-closed。決定記録 §10 が #3050 の必須条件とした「生の `weight()` を有効重みと誤読する経路」の機械検査にあたる。
+- `autodiff` の公開面は変えていない（`SpectralNormState::from_exact_parts` は `pub(crate)`。層の `restore_spectral_norm_vectors` は内部クレートの inherent メソッドで、facade からは再エクスポートされない）。
+- CUDA／Metal 実機は対象外（新規カーネルなし）。
