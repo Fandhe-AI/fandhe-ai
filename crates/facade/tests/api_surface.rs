@@ -40015,8 +40015,8 @@ fn workspace_declares_parametrize_linear_fn_names_only_in_approved_locations() {
         // #3049: Conv 6 層の実体は `impl_conv_reparam!` マクロ 1 箇所（6 層で同一コードを複製しない）。
         "autodiff/src/nn/conv.rs::parametrize_weight_norm",
         "autodiff/src/nn/conv.rs::parametrize_spectral_norm",
-        "facade/src/compat/sequential.rs::parametrize_weight_norm",
-        "facade/src/compat/sequential.rs::parametrize_spectral_norm",
+        "facade/src/compat/sequential.rs::impl Sequential::parametrize_weight_norm",
+        "facade/src/compat/sequential.rs::impl Sequential::parametrize_spectral_norm",
     ]
     .iter()
     .map(|k| (k.to_string(), 1usize))
@@ -40149,18 +40149,67 @@ const PARAMETRIZE_DOWNCAST_ACCESSORS: [&str; 14] = [
 /// 同一 fn 本体にあれば「再パラメータ化を考慮している」とみなすトークン。
 const PARAMETRIZE_GATE_TOKENS: [&str; 2] = ["is_parametrized", "Reparam"];
 
-/// `src` の対象層ダウンキャスト呼び出しを囲む `fn` 名ごとに `(呼び出し数, 判定トークンの有無)` を返す。
-/// 本体を持たない宣言（`;` 終端）は対象外。入れ子の `fn` は最内の `fn` に帰属させる。
+/// 走査の入れ子ブロック枠（`fn`・`impl`・`trait`・`mod`）。
+struct ScanFrame {
+    /// 識別子の 1 区間（`fn` 名・`impl` ヘッダ・`trait`／`mod` 名）。
+    label: String,
+    is_fn: bool,
+    /// 本体開始時の波括弧深さ。
+    depth: usize,
+}
+
+/// `impl` ヘッダのトークン列を `impl Module for Sequential<'t>` のような 1 文字列へ整形する
+/// （英数字トークン同士の間のみ空白を入れる。`where` 句以降は呼び出し側で切る）。
+fn join_header_tokens(tokens: &[String]) -> String {
+    let mut out = String::new();
+    let mut prev_word = false;
+    for t in tokens {
+        let word = t
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'');
+        if prev_word && word {
+            out.push(' ');
+        }
+        out.push_str(t);
+        prev_word = word;
+    }
+    out
+}
+
+/// `src` の対象層ダウンキャスト呼び出しを囲む `fn` ごとに `(呼び出し数, 判定トークンの有無)` を返す。
+/// キーは `impl`・`trait`・`mod`・外側 `fn` を `::` で連ねた修飾名（例: `impl Module for Sequential::forward`）で、
+/// 別 impl の同名メソッド（`forward` 等）を混同しない（PR #3328 レビュー指摘）。同一ファイル内で修飾名まで
+/// 同じ `fn` が複数ある場合は 2 個目以降に `#<出現順>` を付ける（定義位置による区別。出現順が変われば
+/// 免除表との不一致で fail-closed に失敗する）。本体を持たない宣言（`;` 終端）は対象外。
+/// 入れ子の `fn` は最内の `fn` に帰属させる。
 fn scan_parametrize_downcast_sites(src: &str) -> std::collections::BTreeMap<String, (usize, bool)> {
     let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
     let tokens = tokenize_including_punctuation(&cleaned);
     let mut sites: std::collections::BTreeMap<String, (usize, bool)> = Default::default();
-    // (fn 名, 本体開始時の波括弧深さ)
-    let mut stack: Vec<(String, usize)> = Vec::new();
-    let mut pending: Option<String> = None;
+    // 修飾名ごとの本体付き fn の出現数（同名 fn の定義位置区別用）。
+    let mut seen: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut stack: Vec<ScanFrame> = Vec::new();
+    // 本体の `{` を待っている枠: (ラベルの下書き, is_fn, impl ヘッダ収集中か)
+    let mut pending: Option<(Vec<String>, bool, bool)> = None;
     let mut depth = 0usize;
     let mut paren = 0usize;
+    let qualified = |stack: &[ScanFrame], last: &str| -> String {
+        let mut parts: Vec<&str> = stack.iter().map(|f| f.label.as_str()).collect();
+        parts.push(last);
+        parts.join("::")
+    };
     for (i, tok) in tokens.iter().enumerate() {
+        // impl ヘッダの収集（`where` 句より前のトークンのみ。先頭の `impl` は下書きに入済み）。
+        if let Some((buf, false, collecting)) = pending.as_mut()
+            && *collecting
+        {
+            if tok == "where" {
+                *collecting = false;
+            } else if tok != "{" && tok != ";" {
+                buf.push(tok.clone());
+            }
+        }
         match tok.as_str() {
             "fn" => {
                 if let Some(name) = tokens.get(i + 1)
@@ -40168,8 +40217,28 @@ fn scan_parametrize_downcast_sites(src: &str) -> std::collections::BTreeMap<Stri
                         .chars()
                         .next()
                         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && pending.is_none()
                 {
-                    pending = Some(name.clone());
+                    pending = Some((vec![name.clone()], true, false));
+                    paren = 0;
+                }
+            }
+            "impl" | "trait" | "mod" if pending.is_none() && paren == 0 => {
+                let item_start = i == 0
+                    || matches!(
+                        tokens[i - 1].as_str(),
+                        "}" | ";" | "{" | "]" | "unsafe" | "pub"
+                    );
+                if item_start {
+                    pending = Some(if tok == "impl" {
+                        (vec!["impl".to_string()], false, true)
+                    } else {
+                        (
+                            vec![tok.clone(), tokens.get(i + 1).cloned().unwrap_or_default()],
+                            false,
+                            false,
+                        )
+                    });
                     paren = 0;
                 }
             }
@@ -40179,29 +40248,51 @@ fn scan_parametrize_downcast_sites(src: &str) -> std::collections::BTreeMap<Stri
             "{" => {
                 depth += 1;
                 if paren == 0
-                    && let Some(name) = pending.take()
+                    && let Some((buf, is_fn, _)) = pending.take()
                 {
-                    stack.push((name, depth));
+                    let mut label = if is_fn {
+                        buf[0].clone()
+                    } else if buf[0] == "impl" {
+                        join_header_tokens(&buf)
+                    } else {
+                        buf.join(" ")
+                    };
+                    if is_fn {
+                        let n = seen.entry(qualified(&stack, &label)).or_insert(0);
+                        *n += 1;
+                        if *n > 1 {
+                            label = format!("{label}#{n}");
+                        }
+                    }
+                    stack.push(ScanFrame {
+                        label,
+                        is_fn,
+                        depth,
+                    });
                 }
             }
             "}" => {
-                if stack.last().is_some_and(|(_, d)| *d == depth) {
+                if stack.last().is_some_and(|f| f.depth == depth) {
                     stack.pop();
                 }
                 depth = depth.saturating_sub(1);
             }
             other => {
-                let Some((name, _)) = stack.last() else {
+                let Some(frame) = stack.last() else {
                     continue;
                 };
+                if !frame.is_fn {
+                    continue;
+                }
+                let key = qualified(&stack[..stack.len() - 1], &frame.label);
                 let is_call = PARAMETRIZE_DOWNCAST_ACCESSORS.contains(&other)
                     && tokens.get(i + 1).map(String::as_str) == Some("(")
                     && i > 0
                     && (tokens[i - 1] == "." || tokens[i - 1] == ":");
                 if is_call {
-                    sites.entry(name.clone()).or_insert((0, false)).0 += 1;
+                    sites.entry(key).or_insert((0, false)).0 += 1;
                 } else if PARAMETRIZE_GATE_TOKENS.contains(&other) {
-                    sites.entry(name.clone()).or_insert((0, false)).1 = true;
+                    sites.entry(key).or_insert((0, false)).1 = true;
                 }
             }
         }
@@ -40209,40 +40300,40 @@ fn scan_parametrize_downcast_sites(src: &str) -> std::collections::BTreeMap<Stri
     sites.retain(|_, (calls, _)| *calls > 0);
     sites
 }
-
-/// 判定を持たないダウンキャスト消費 fn の免除表（`"<crates 相対パス>::<fn 名>"` → 理由）。
+/// 判定を持たないダウンキャスト消費 fn の免除表（`"<crates 相対パス>::<修飾名>"` → 理由。修飾名は
+/// `impl …::`・`mod …::` を含み、別 impl の同名メソッドと混同しない。同名・同修飾は `#<出現順>` で区別）。
 /// 「生の `weight()` を有効重みとして読まない」ことを根拠にする。新しい消費箇所を足すときは、
 /// 再パラメータ化の判定を入れるか、ここへ理由付きで登録する（レビュー対象）。
 const PARAMETRIZE_DOWNCAST_EXEMPT: &[(&str, &str)] = &[
     // --- autodiff 非推奨シム（`autodiff::compat`。facade 非公開）---
     (
-        "autodiff/src/compat/sequential.rs::apply_parameters",
+        "autodiff/src/compat/sequential.rs::impl Sequential::apply_parameters",
         "非推奨シム。再パラメータ化の公開入口（`parametrize_*`）は facade `Sequential` のみで、シムは対象外",
     ),
     (
-        "autodiff/src/compat/sequential.rs::bind",
+        "autodiff/src/compat/sequential.rs::impl Sequential::bind",
         "同上（非推奨シム）",
     ),
     (
-        "autodiff/src/compat/sequential.rs::forward",
+        "autodiff/src/compat/sequential.rs::impl<'m,'t>SequentialVars<'m,'t>::forward",
         "同上（非推奨シム）",
     ),
     (
-        "autodiff/src/compat/sequential.rs::trainable_parameters",
+        "autodiff/src/compat/sequential.rs::impl Sequential::trainable_parameters",
         "同上（非推奨シム）",
     ),
     // --- autodiff `nn::Sequential` ---
     (
-        "autodiff/src/nn/container.rs::forward",
+        "autodiff/src/nn/container.rs::impl Module for Sequential::forward",
         "`Linear::forward_bound` が再パラメータ化を内部で分岐し有効重みを再構成する（補助葉 g は `bind_weight_norm_g`。#3048）",
     ),
     (
-        "autodiff/src/nn/container.rs::module_list_set_requires_grad_rollback_preserves_nested_mixed_state",
+        "autodiff/src/nn/container.rs::mod tests::module_list_set_requires_grad_rollback_preserves_nested_mixed_state",
         "テスト。非再パラメータ化の Linear の `requires_grad` だけを参照する",
     ),
     // --- facade `compat::Sequential` ---
     (
-        "facade/src/compat/sequential.rs::bind",
+        "facade/src/compat/sequential.rs::impl Sequential::bind",
         "`*::bind` は生の weight を葉へ登録するだけ（有効重みは `forward_bound` が再構成。g は `bind_weight_norm_g` が別葉で登録。#3048・#3049）",
     ),
     (
@@ -40250,31 +40341,31 @@ const PARAMETRIZE_DOWNCAST_EXEMPT: &[(&str, &str)] = &[
         "Conv の weight_norm 補助葉 g を登録するだけ（weight は読まない。#3049）",
     ),
     (
-        "facade/src/compat/sequential.rs::build_device_chain_steps",
+        "facade/src/compat/sequential.rs::impl Sequential::build_device_chain_steps",
         "常駐経路。入口 `contains_resident_unsupported_layer` が再パラメータ化済み Linear・Conv を型付きで拒否するため到達しない",
     ),
     (
-        "facade/src/compat/sequential.rs::first_untracked_parametric_layer",
+        "facade/src/compat/sequential.rs::impl Sequential::first_untracked_parametric_layer",
         "層種別の判定のみ（weight を読まない）",
     ),
     (
-        "facade/src/compat/sequential.rs::forward_from_flat_leaves",
+        "facade/src/compat/sequential.rs::impl Sequential::forward_from_flat_leaves",
         "常駐経路（`build_device_chain_steps` と同じ理由）",
     ),
     (
-        "facade/src/compat/sequential.rs::parametrize_spectral_norm",
+        "facade/src/compat/sequential.rs::impl Sequential::parametrize_spectral_norm",
         "再パラメータ化の適用入口そのもの（事前検査 `check_parametrize_target` が二重適用・対象外を拒否）",
     ),
     (
-        "facade/src/compat/sequential.rs::parametrize_weight_norm",
+        "facade/src/compat/sequential.rs::impl Sequential::parametrize_weight_norm",
         "同上",
     ),
     (
-        "facade/src/compat/sequential.rs::predict_tape_free_with_ops",
+        "facade/src/compat/sequential.rs::impl Sequential::predict_tape_free_with_ops",
         "`Linear::forward_host_with_activation` と `supports_forward_host` が再パラメータ化済みを型付きで拒否し tape 経路へフォールバックする（#3048）",
     ),
     (
-        "facade/src/compat/sequential.rs::restore_spectral_norm_vectors",
+        "facade/src/compat/sequential.rs::impl Sequential::restore_spectral_norm_vectors",
         "load 専用の復元入口。層側が spectral_norm 未適用を `InvalidArgument` で拒否する（#3050）",
     ),
     (
@@ -40282,16 +40373,16 @@ const PARAMETRIZE_DOWNCAST_EXEMPT: &[(&str, &str)] = &[
         "spectral_norm の `u`／`v` の読み出し専用（weight を読まない。#3050）",
     ),
     (
-        "facade/src/compat/sequential.rs::trainable_grads",
+        "facade/src/compat/sequential.rs::impl<'m,'t>SequentialVars<'m,'t>::trainable_grads",
         "層順カーソルで g → weight → bias の勾配を積む（g のカーソルを同時に消費。`trainable_vars` と同じ順序契約。#3048・#3049）",
     ),
     (
-        "facade/src/compat/sequential.rs::trainable_vars",
+        "facade/src/compat/sequential.rs::impl<'m,'t>SequentialVars<'m,'t>::trainable_vars",
         "同上（g → weight → bias の順で Var を積む）",
     ),
     // --- facade `nn` アダプタ・ONNX export ---
     (
-        "facade/src/nn/module.rs::adapter_host_inference_is_fail_closed",
+        "facade/src/nn/module.rs::mod tests::adapter_host_inference_is_fail_closed",
         "テスト。`as_linear` が `None` を返すことの確認のみ",
     ),
     (
@@ -40402,9 +40493,41 @@ fn parametrize_downcast_scan_detects_ungated_gated_and_ignores_comments_and_defi
     let r = scan(
         "fn outer(l: &dyn Module) { l.is_parametrized(); fn inner(l: &dyn Module) { l.as_linear(); } }",
     );
-    assert_eq!(r.get("inner"), Some(&(1, false)));
+    assert_eq!(r.get("outer::inner"), Some(&(1, false)));
     assert!(!r.contains_key("outer"));
     // 未知のメソッド名・部分一致は無視する。
     let r = scan("fn n(l: &dyn Module) { l.as_linear_like(); l.as_linearx(); }");
     assert!(r.is_empty(), "{r:?}");
+    // 別 impl の同名メソッドは区別され、一方の判定が他方へ共有されない（PR #3328 レビュー指摘）。
+    let r = scan(
+        "impl A { fn forward(&self, l: &dyn Module) { l.as_linear().is_some_and(|x| x.is_parametrized()); } } \
+         impl Module for B { fn forward(&self, l: &dyn Module) { l.as_linear(); } }",
+    );
+    assert_eq!(r.get("impl A::forward"), Some(&(1, true)));
+    assert_eq!(r.get("impl Module for B::forward"), Some(&(1, false)));
+    assert_eq!(r.len(), 2, "{r:?}");
+    // 修飾名まで同じ fn は定義順の `#n` で区別する。
+    let r = scan(
+        "impl C { fn f(&self, l: &dyn Module) { l.is_parametrized(); l.as_linear(); } \
+         fn f(&self, l: &dyn Module) { l.as_linear(); } }",
+    );
+    assert_eq!(r.get("impl C::f"), Some(&(1, true)));
+    assert_eq!(r.get("impl C::f#2"), Some(&(1, false)));
+    // `mod`・戻り値の `impl Trait` に惑わされない。
+    let r = scan("mod tests { fn g() -> impl Iterator<Item = u8> { x.as_linear(); e() } }");
+    assert_eq!(r.get("mod tests::g"), Some(&(1, false)));
+    // メソッド（impl／mod 配下）の免除キーは fn 名単独でなく `impl …::`／`mod …::` の修飾を含む
+    // （同名メソッド間で免除が共有されない）。`forward` は複数 impl に存在するため必ず修飾される。
+    for (k, _) in PARAMETRIZE_DOWNCAST_EXEMPT {
+        assert!(
+            k.contains(".rs::"),
+            "免除キーは `<crates 相対パス>::<修飾名>` 形式: {k}"
+        );
+        if k.ends_with("::forward") {
+            assert!(
+                k.contains("::impl"),
+                "同名メソッド `forward` の免除キーは impl で修飾する: {k}"
+            );
+        }
+    }
 }
