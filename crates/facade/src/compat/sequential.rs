@@ -494,11 +494,42 @@ pub(super) enum LayerSpec {
         beta: f32,
         k: f32,
     },
+    /// イシュー #3050。`parametrize_weight_norm`／`parametrize_spectral_norm` で再パラメータ化した層
+    /// （Linear・Conv 6 種のみ。基底が他の層の場合は従来どおり [`LayerSpec::Unsupported`]）。
+    /// `base` は再パラメータ化前の `add_*` の構成で、load が基底を `add_*` で組み直してから
+    /// 同じ `parametrize_*` を再適用するために保持する（決定記録 §7）。
+    Reparam {
+        base: Box<LayerSpec>,
+        reparam: ReparamSpec,
+    },
     /// 保存対象外の層（`add_module` の利用者定義層と、manifest スキーマ未対応の組み込み層。
     /// `kind` はエラー文言で読む）。
     Unsupported {
         kind: &'static str,
     },
+}
+
+/// [`LayerSpec::Reparam`] の再パラメータ化の種別と引数（イシュー #3050。`compat::model_io` 専用）。
+/// `spectral_norm` の `seed` は保持しない（初期 `u`／`v` は load が保存済みの値で上書きするため）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum ReparamSpec {
+    WeightNorm { dim: Option<usize> },
+    SpectralNorm { n_power_iterations: usize, eps: f32 },
+}
+
+/// `parametrize_*` の対象で、かつ `save_model` が基底構成から復元できる基底層か（Linear・Conv 6 種）。
+/// それ以外（`add_module` 由来の `Unsupported` 等）は `Reparam` に包まず従来の `Unsupported` を保つ。
+fn reparam_base_is_savable(spec: &LayerSpec) -> bool {
+    matches!(
+        spec,
+        LayerSpec::Linear { .. }
+            | LayerSpec::Conv1d { .. }
+            | LayerSpec::Conv2d { .. }
+            | LayerSpec::Conv3d { .. }
+            | LayerSpec::ConvTranspose1d { .. }
+            | LayerSpec::ConvTranspose2d { .. }
+            | LayerSpec::ConvTranspose3d { .. }
+    )
 }
 
 impl Default for Sequential {
@@ -551,8 +582,10 @@ impl Sequential {
     /// - 次はいずれも `InvalidArgument` で拒否する: 添字が範囲外・対象が `Linear` でない・二重適用・
     ///   `compile` 後（optimizer のパラメータ数が固定済みのため。compile 前に適用すること）。
     /// - 非対応（型付きエラーで拒否）: デバイス常駐経路（`init_device_param_store` 等は
-    ///   `BackendError::Unsupported`）・低精度（AMP）forward・`save_model`（`UnsupportedModel`）・
-    ///   ONNX export。`predict` は tape 経路で有効重みを再構成して動作する。
+    ///   `BackendError::Unsupported`）・低精度（AMP）forward・ONNX export。`predict` は tape 経路で有効重みを
+    ///   再構成して動作する。
+    /// - `save_model`／`load_model` に対応する（イシュー #3050。manifest kind は基底 7 種 × weight_norm／
+    ///   spectral_norm の 14 種。spectral_norm の `u`／`v` は buffer として保存し bit のまま復元する）。
     ///
     /// ```
     /// use fandhe_ai::Tensor;
@@ -637,7 +670,7 @@ impl Sequential {
             return Err(parametrize_unsupported_layer_error(layer_index));
         };
         layer.set_training(training);
-        self.specs[layer_index] = LayerSpec::Unsupported { kind };
+        self.wrap_reparam_spec(layer_index, kind, ReparamSpec::WeightNorm { dim });
         Ok(self)
     }
 
@@ -704,8 +737,58 @@ impl Sequential {
             return Err(parametrize_unsupported_layer_error(layer_index));
         };
         layer.set_training(training);
-        self.specs[layer_index] = LayerSpec::Unsupported { kind };
+        self.wrap_reparam_spec(
+            layer_index,
+            kind,
+            ReparamSpec::SpectralNorm {
+                n_power_iterations,
+                eps,
+            },
+        );
         Ok(self)
+    }
+
+    /// `parametrize_*` 成功後の構成記録の更新（イシュー #3050）。基底が保存可能な 7 種なら
+    /// `Reparam { base, reparam }` に包み（`save_model` が保存・`load_model` が基底を組み直して再適用）、
+    /// それ以外は従来どおり `Unsupported { kind }`（`save_model` が `UnsupportedModel` で拒否）にする。
+    fn wrap_reparam_spec(&mut self, layer_index: usize, kind: &'static str, reparam: ReparamSpec) {
+        let slot = &mut self.specs[layer_index];
+        let base = std::mem::replace(slot, LayerSpec::Unsupported { kind });
+        if reparam_base_is_savable(&base) {
+            *slot = LayerSpec::Reparam {
+                base: Box::new(base),
+                reparam,
+            };
+        }
+    }
+
+    /// 再パラメータ化済みの `layer_index` 番目の spectral_norm の `u`／`v` を保存済みの値へ bit のまま
+    /// 復元する（`compat::model_io::build_model` 専用。イシュー #3050）。Linear・Conv 6 種のダウンキャストは
+    /// `parametrize_*` と同型。対象外・未適用・長さ／有限性違反は型付きエラーで、状態は変わらない。
+    pub(super) fn restore_spectral_norm_vectors(
+        &mut self,
+        layer_index: usize,
+        u: &[f32],
+        v: &[f32],
+    ) -> Result<(), AutodiffError> {
+        let layer = self.parametrize_layer_mut(layer_index)?;
+        if let Some(l) = layer.as_linear_mut() {
+            l.restore_spectral_norm_vectors(u, v)
+        } else if let Some(c) = layer.as_conv2d_mut() {
+            c.restore_spectral_norm_vectors(u, v)
+        } else if let Some(c) = layer.as_conv1d_mut() {
+            c.restore_spectral_norm_vectors(u, v)
+        } else if let Some(c) = layer.as_conv3d_mut() {
+            c.restore_spectral_norm_vectors(u, v)
+        } else if let Some(c) = layer.as_conv_transpose1d_mut() {
+            c.restore_spectral_norm_vectors(u, v)
+        } else if let Some(c) = layer.as_conv_transpose2d_mut() {
+            c.restore_spectral_norm_vectors(u, v)
+        } else if let Some(c) = layer.as_conv_transpose3d_mut() {
+            c.restore_spectral_norm_vectors(u, v)
+        } else {
+            Err(parametrize_unsupported_layer_error(layer_index))
+        }
     }
 
     /// `parametrize_*` の共通の事前検査（イシュー #3048）。状態を変更する前に、添字範囲・対象が
@@ -4809,6 +4892,31 @@ fn parametrize_state(layer: &dyn Module) -> Option<bool> {
         Some(c.is_parametrized())
     } else {
         layer.as_conv_transpose3d().map(|c| c.is_parametrized())
+    }
+}
+
+/// `layer` が spectral_norm 適用済みの Linear／Conv 6 種なら現在の状態の複製を返す
+/// （`save_model` が `u`／`v` を buffer として保存するための読み出し。イシュー #3050）。
+/// 適用済みでない・対象外の層は `None`。
+pub(super) fn spectral_state_of(
+    layer: &dyn Module,
+) -> Option<fandhe_ai_autodiff::weight_reparam_ops::SpectralNormState> {
+    if let Some(l) = layer.as_linear() {
+        l.spectral_norm_state()
+    } else if let Some(c) = layer.as_conv2d() {
+        c.spectral_norm_state()
+    } else if let Some(c) = layer.as_conv1d() {
+        c.spectral_norm_state()
+    } else if let Some(c) = layer.as_conv3d() {
+        c.spectral_norm_state()
+    } else if let Some(c) = layer.as_conv_transpose1d() {
+        c.spectral_norm_state()
+    } else if let Some(c) = layer.as_conv_transpose2d() {
+        c.spectral_norm_state()
+    } else {
+        layer
+            .as_conv_transpose3d()
+            .and_then(|c| c.spectral_norm_state())
     }
 }
 
