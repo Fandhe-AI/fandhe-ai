@@ -327,6 +327,25 @@ pub fn pad_modes_vjp_host(
     Ok(acc.into_iter().map(|v| v as f32).collect())
 }
 
+/// 出力の行優先順に並べた「入力の平坦添字」の表（`out[o] = x[table[o]]`）。
+///
+/// forward（[`pad_modes_host`]）・VJP（[`pad_modes_vjp_host`]）と同じ内部走査
+/// （`walk_sources`）から作るため、写像の情報源は 1 つに保たれる。autodiff の
+/// `create_graph`（イシュー #3084）が VJP を平坦 `scatter_add` の構造として子テープへ
+/// 積むための添字表で、長さは `layout.out_numel()`。確保は `try_reserve_exact`
+/// で、失敗は [`ShapeError::ElementCountOverflow`]。
+pub fn pad_modes_source_indices(layout: &PadModesLayout) -> Result<Vec<usize>, PadModeError> {
+    let mut table: Vec<usize> = Vec::new();
+    table
+        .try_reserve_exact(layout.out_numel)
+        .map_err(|_| PadModeError::Shape(ShapeError::ElementCountOverflow))?;
+    walk_sources(layout, |src| {
+        table.push(src);
+        Ok(())
+    })?;
+    Ok(table)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +356,41 @@ mod tests {
     }
 
     const X: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+
+    /// `(入力 shape, pads, mode)`。
+    type Case<'a> = (&'a [usize], &'a [(usize, usize)], PadMode);
+
+    #[test]
+    fn source_indices_match_forward_on_iota() {
+        let cases: [Case; 5] = [
+            (&[5], &[(2, 3)], PadMode::Reflect),
+            (&[3, 4], &[(1, 2), (3, 1)], PadMode::Replicate),
+            (&[3, 4], &[(2, 3), (1, 4)], PadMode::Circular),
+            (&[2, 3, 4], &[(1, 1), (0, 2), (2, 0)], PadMode::Reflect),
+            (&[2, 3], &[(0, 0), (0, 0)], PadMode::Circular),
+        ];
+        for (shape, pads, mode) in cases {
+            let layout = pad_modes_layout(shape, pads, mode).unwrap();
+            let n: usize = shape.iter().product();
+            let iota: Vec<f32> = (0..n).map(|i| i as f32).collect();
+            let want: Vec<usize> = pad_modes_host(&iota, &layout)
+                .unwrap()
+                .into_iter()
+                .map(|v| v as usize)
+                .collect();
+            assert_eq!(pad_modes_source_indices(&layout).unwrap(), want);
+        }
+    }
+
+    #[test]
+    fn source_indices_empty_and_rank0() {
+        let l = pad_modes_layout(&[], &[], PadMode::Reflect).unwrap();
+        assert_eq!(pad_modes_source_indices(&l).unwrap(), vec![0]);
+        let l = pad_modes_layout(&[0, 3], &[(0, 0), (1, 1)], PadMode::Replicate);
+        if let Ok(l) = l {
+            assert!(pad_modes_source_indices(&l).unwrap().is_empty());
+        }
+    }
 
     #[test]
     fn forward_1d_hand_values() {

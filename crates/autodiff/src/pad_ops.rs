@@ -23,7 +23,7 @@
 //!
 //! **数値契約**: forward は算術を含まない純粋なコピーで bit 完全一致（規則の正は
 //! `fandhe_ai_tensor_core::pad_modes`）。backward は添字重複の scatter-add を `f64`
-//! アキュムレータで蓄積し 1 回だけ `f32` へ downcast する。高階微分（`create_graph`）・
+//! アキュムレータで蓄積し 1 回だけ `f32` へ downcast する。`create_graph` はイシュー #3084（決定記録 §29）で対応済み。
 //! activation checkpoint・f64 自動微分経路は対象外。
 //!
 //! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::pad_with_mode` と `PadMode`（クレートルート）。本モジュール自体は facade から再エクスポートしない。

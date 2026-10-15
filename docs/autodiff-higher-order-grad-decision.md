@@ -1139,3 +1139,37 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 28.7 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・`STAGE_BOUND_GUARD` 等の閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文（`LayerNorm`／`RmsNorm` の構造は共通関数へ切り出しただけで、組む Op と値は不変。子テープへ積むノードの順序が一部入れ替わるのみ）。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。
+
+## 29. 実装記録（#3084・`Pad`・`PadMode`・`MaskedFill` の create_graph 対応。親 #3076）
+
+### 29.1 対象と方式
+
+§21.2 の B 表どおり 3 variant を `supports_create_graph() == true` にした。実装は `crates/autodiff/src/create_graph/pad_mask.rs`（cgrad）と `create_graph.rs`（replay・分岐）。
+
+| Op | replay（写しの forward） | cgrad（子テープへ積む式） | 方式 | 積む Op |
+|---|---|---|---|---|
+| `Pad` | `mirror(input).pad(&pads, value)` | 各軸へ `narrow(axis, before, input_len)` を連鎖（1 階と同じ順序） | V1 | `Narrow` |
+| `MaskedFill` | `mirror(input).masked_fill(mask_bool, value)` | `where_cond(mask, 0, g)`（`mul` は `inf*0=NaN` のため使わない） | V1／V2 | `Where` |
+| `PadMode` | `pad_with_mode(&mirror(input), &pads, mode)` | `g` の平坦化 → `zeros.scatter_add(0, idx, ·)` → 入力 shape へ reshape。値は 1 階と同じ `pad_modes_vjp_host`（`f64` 縮約・1 回 downcast）で `push_v3` により結合 | V3 | `Reshape`・`Contiguous`・`Scatter` |
+
+- `PadMode` を V3 にした理由: §21.2 は族の方式を V1／V2 としているが、`PadMode` の 1 階 VJP は添字重複を `f64` で縮約する契約（`docs/autodiff-pad-modes-decision.md`）を持つ。§21.1(5) の原則（`f64` 縮約は V3）に従い、バックエンドの `scatter` 実装に依らず値が 1 階と bit 一致することを構造上保証する。
+- 添字表 `idx`（出力の行優先順の入力平坦添字）は tensor-core に追加した `pad_modes::pad_modes_source_indices` から得る。forward・VJP と同じ内部走査（`walk_sources`）を共有し、写像を autodiff 側へ複製しない。内部クレートへの非破壊の追加で、facade の pad_modes 保留ガード（`api_surface.rs`）の対象外。`usize → i32` は `try_from` で行い、失敗は型付き `Err`（panic・wrap しない）。空テンソル（`in_numel == 0`／`out_numel == 0`）は 1 階に揃えゼロ定数を返す。
+
+### 29.2 payload の変更
+
+`Op::Pad` と `Op::MaskedFill` に `value: f32` を追加した（§21.5）。子テープの forward 再生（replay）専用で、VJP は使わない。`Op` は `pub(crate)` のため facade の公開面は変わらない。`grad.rs` の差分は束縛の `..` とコメントのみで、1 階の値は不変（テストで bit 同一を固定）。
+
+### 29.3 閉包性
+
+積む Op（`Narrow`・`Where`・`Reshape`・`Contiguous`・`Scatter`）はすべて `supports_create_graph == true`。孫テープで再生すると `PadMode` の V3 ノード（`Contiguous`）は構造（`scatter_add`）を再計算する。これは §21.1(3) の受け入れ範囲内で、`jvp_create_graph` のテストで確認した。
+
+### 29.4 テスト
+
+- `crates/autodiff/tests/create_graph.rs`「Pad・PadMode・MaskedFill 族」節: `value ≠ 0` の Hessian と `value = 0` との対照、pad の連続適用、broadcast する mask、attention 型（`-1e4` → softmax）、`value = -inf` で勾配が有限かつマスク位置が 0、3 モードの Hessian（reflect／replicate〈pad が軸長超〉／circular）、1 階 bit 一致（線形 loss）と REQ-2 判定（連鎖 loss）、桁落ち入力（`[1,1e8,-1e8,1]`）での 1 階 bit 一致、`jvp_create_graph`（孫テープ）、空テンソル・恒等形、`cumprod` との混在拒否（`Err(Backward)`・`child` 空）。判定は既存の `finite_diff_hessian`・`assert_hessian_close`・`req2_close` を使い、tolerance は追加・変更していない。
+- fail-closed の差し替え: 旧 `create_graph_rejects_unsupported_op_masked_fill` は廃止し、fail-closed のまま残る隣接 Op（`cumprod`）との混在拒否テストへ置換した（単独の `cumprod` 拒否は既存 `create_graph_rejects_unsupported_op_cumprod`）。
+- `crates/autodiff/tests/pad_modes_parity.rs`: 旧 `create_graph_is_a_typed_error_not_a_panic` を `create_graph_succeeds_and_matches_first_order`（3 モードで `cg.grad` が 1 階と bit 一致）へ置換した。
+- 単体: `tape.rs::pad_mask_family_supports_create_graph`、`pad_mask.rs` の構造値テスト、tensor-core の `pad_modes_source_indices` テスト（`pad_modes_host` に iota を与えた結果との一致）。
+
+### 29.5 変えていないもの・申し送り
+
+1 階 `Tape::backward` の値（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文・checkpoint の適格性（`Pad`・`PadMode`・`MaskedFill` は非適格のまま）・facade の公開面。承認範囲は §20（D-A）の一括承認であり、新しい承認は得ていない。CUDA／Metal 実機での create_graph×pad 系の実測は未実施（申し送り先の Issue 起票は所有者承認事項のため本変更では起票していない）。`Dropout`・`Interpolate`・`MaxUnpool` など §21.2 C 群、`PadMode` の activation checkpoint 対応、`f64` 自動微分経路は対象外のまま。
