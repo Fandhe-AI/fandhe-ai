@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 63 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 65 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -311,7 +311,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 63 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 65 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -362,6 +362,8 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::MaxPool2d { .. } => Some("max_pool2d"),
         LayerSpec::MaxPool1d { .. } => Some("max_pool1d"),
         LayerSpec::MaxPool3d { .. } => Some("max_pool3d"),
+        LayerSpec::Unfold { .. } => Some("unfold"),
+        LayerSpec::Fold { .. } => Some("fold"),
         LayerSpec::AvgPool3d { .. } => Some("avg_pool3d"),
         LayerSpec::AvgPool2d { .. } => Some("avg_pool2d"),
         LayerSpec::AvgPool1d { .. } => Some("avg_pool1d"),
@@ -646,6 +648,8 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::MaxPool2d { .. }
         | LayerSpec::MaxPool1d { .. }
         | LayerSpec::MaxPool3d { .. }
+        | LayerSpec::Unfold { .. }
+        | LayerSpec::Fold { .. }
         | LayerSpec::AvgPool3d { .. }
         | LayerSpec::AvgPool2d { .. }
         | LayerSpec::AvgPool1d { .. }
@@ -1202,6 +1206,30 @@ fn render_params(spec: &LayerSpec) -> String {
         } => {
             put_pair(&mut f, "kernel_size", *kernel_size);
             put_opt_pair(&mut f, "stride", *stride);
+            put_pair(&mut f, "padding", *padding);
+            put_pair(&mut f, "dilation", *dilation);
+        }
+        LayerSpec::Unfold {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        } => {
+            put_pair(&mut f, "kernel_size", *kernel_size);
+            put_pair(&mut f, "stride", *stride);
+            put_pair(&mut f, "padding", *padding);
+            put_pair(&mut f, "dilation", *dilation);
+        }
+        LayerSpec::Fold {
+            output_size,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        } => {
+            put_pair(&mut f, "output_size", *output_size);
+            put_pair(&mut f, "kernel_size", *kernel_size);
+            put_pair(&mut f, "stride", *stride);
             put_pair(&mut f, "padding", *padding);
             put_pair(&mut f, "dilation", *dilation);
         }
@@ -2300,6 +2328,23 @@ fn build_model(
             } => model
                 .add_max_pool2d(*kernel_size, *stride, *padding, *dilation)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Unfold {
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+            } => model
+                .add_unfold(*kernel_size, *stride, *padding, *dilation)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Fold {
+                output_size,
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+            } => model
+                .add_fold(*output_size, *kernel_size, *stride, *padding, *dilation)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::MaxPool3d {
                 kernel_size,
                 stride,
@@ -3397,6 +3442,51 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 dilation: p.pair("dilation")?,
             })
         }
+        "unfold" => {
+            let p = Params::new(
+                params,
+                &[
+                    "kernel_size_h",
+                    "kernel_size_w",
+                    "stride_h",
+                    "stride_w",
+                    "padding_h",
+                    "padding_w",
+                    "dilation_h",
+                    "dilation_w",
+                ],
+            )?;
+            Ok(LayerSpec::Unfold {
+                kernel_size: p.pair("kernel_size")?,
+                stride: p.pair("stride")?,
+                padding: p.pair("padding")?,
+                dilation: p.pair("dilation")?,
+            })
+        }
+        "fold" => {
+            let p = Params::new(
+                params,
+                &[
+                    "output_size_h",
+                    "output_size_w",
+                    "kernel_size_h",
+                    "kernel_size_w",
+                    "stride_h",
+                    "stride_w",
+                    "padding_h",
+                    "padding_w",
+                    "dilation_h",
+                    "dilation_w",
+                ],
+            )?;
+            Ok(LayerSpec::Fold {
+                output_size: p.pair("output_size")?,
+                kernel_size: p.pair("kernel_size")?,
+                stride: p.pair("stride")?,
+                padding: p.pair("padding")?,
+                dilation: p.pair("dilation")?,
+            })
+        }
         "max_pool3d" => {
             let p = Params::new(
                 params,
@@ -4031,7 +4121,7 @@ mod tests {
         ));
     }
 
-    /// 63 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 65 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -4332,7 +4422,108 @@ mod tests {
             LayerSpec::PixelUnshuffle {
                 downscale_factor: 2,
             },
+            LayerSpec::Unfold {
+                kernel_size: [2, 3],
+                stride: [1, 2],
+                padding: [1, 0],
+                dilation: [1, 2],
+            },
+            LayerSpec::Unfold {
+                kernel_size: [1, 1],
+                stride: [1, 1],
+                padding: [0, 0],
+                dilation: [1, 1],
+            },
+            LayerSpec::Fold {
+                output_size: [5, 7],
+                kernel_size: [2, 3],
+                stride: [1, 2],
+                padding: [1, 0],
+                dilation: [1, 2],
+            },
+            LayerSpec::Fold {
+                output_size: [123, 456],
+                kernel_size: [1, 1],
+                stride: [1, 1],
+                padding: [0, 0],
+                dilation: [1, 1],
+            },
         ]
+    }
+
+    /// `fold` の正常な params から `key` だけを差し替える（`None` は欠落、既存キーでなければ
+    /// 余分なキーの追加）。非信頼入力の拒否表（イシュー #3041）用。
+    fn fold_params(key: &str, val: Option<&str>) -> String {
+        let mut fields: Vec<(String, String)> = [
+            ("output_size_h", "5"),
+            ("output_size_w", "7"),
+            ("kernel_size_h", "2"),
+            ("kernel_size_w", "3"),
+            ("stride_h", "1"),
+            ("stride_w", "2"),
+            ("padding_h", "1"),
+            ("padding_w", "0"),
+            ("dilation_h", "1"),
+            ("dilation_w", "2"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        match (fields.iter().position(|(k, _)| k == key), val) {
+            (Some(i), Some(v)) => fields[i].1 = v.to_string(),
+            (Some(i), None) => {
+                fields.remove(i);
+            }
+            (None, Some(v)) => fields.push((key.to_string(), v.to_string())),
+            (None, None) => {}
+        }
+        let body: Vec<String> = fields.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
+        format!("{{{}}}", body.join(","))
+    }
+
+    #[test]
+    fn fold_and_unfold_reject_untrusted_params() {
+        let parse = |s: &str| parse_json(s).expect("JSON として読めるはず");
+        // u64 超過の整数は JSON 字句の段階で拒否される（spec_from_kind へ届かない）。
+        assert!(parse_json(&fold_params("stride_h", Some("18446744073709551616"))).is_err());
+        let bad: [(&str, Option<&str>); 11] = [
+            ("output_size_h", None),
+            ("dilation_w", None),
+            ("x", Some("1")),
+            ("stride_h", Some("-1")),
+            ("stride_h", Some("1.5")),
+            ("stride_h", Some(r#""1""#)),
+            ("stride_h", Some("true")),
+            ("stride_h", Some("null")),
+            ("stride_h", Some("[1]")),
+            ("kernel_size_w", None),
+            ("padding_h", Some("-0.5")),
+        ];
+        for (key, val) in bad {
+            let json = parse(&fold_params(key, val));
+            assert!(
+                spec_from_kind("fold", &json).is_err(),
+                "fold は {key}={val:?} を拒否するはず"
+            );
+        }
+        // unfold は output_size を持たないため、fold の正常 params をそのまま渡すと余分なキーで拒否される。
+        assert!(spec_from_kind("unfold", &parse(&fold_params("x", None))).is_err());
+        let unfold_ok = parse(
+            r#"{"kernel_size_h":2,"kernel_size_w":3,"stride_h":1,"stride_w":2,"padding_h":1,"padding_w":0,"dilation_h":1,"dilation_w":2}"#,
+        );
+        assert!(spec_from_kind("unfold", &unfold_ok).is_ok());
+        let unfold_missing = parse(
+            r#"{"kernel_size_h":2,"kernel_size_w":3,"stride_h":1,"stride_w":2,"padding_h":1,"padding_w":0,"dilation_h":1}"#,
+        );
+        assert!(spec_from_kind("unfold", &unfold_missing).is_err());
+        assert!(
+            spec_from_kind(
+                "fold",
+                &parse(&fold_params("output_size_h", Some("100000")))
+            )
+            .is_ok()
+        );
+        assert!(spec_from_kind("fold", &parse(&fold_params("x", None))).is_ok());
     }
 
     /// `conv_transpose3d` の正常な params から `key` だけを差し替える（`None` は欠落、
@@ -4400,7 +4591,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 63, "kind allowlist は 63 種: {kinds:?}");
+        assert_eq!(kinds.len(), 65, "kind allowlist は 65 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -4418,9 +4609,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 63 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 65 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("63 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("65 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -4428,7 +4619,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("63 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("65 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -4989,7 +5180,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("63 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("65 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

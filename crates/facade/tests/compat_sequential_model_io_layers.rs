@@ -1064,3 +1064,137 @@ fn tampered_conv_transpose3d_manifests_are_rejected() {
         "{err}"
     );
 }
+
+// ---------------------------------------------------------------------
+// イシュー #3041: unfold／fold の保存・復元
+// ---------------------------------------------------------------------
+// 無パラメータ層。平坦形（unfold 8 キー・fold 10 キー。object キー上限 16 以内。決定記録 §3）。
+
+/// 入力 `[1, 2, 5, 5]`。unfold → fold（output_size = 入力の空間形状）→ relu。
+fn fold_unfold_model() -> Sequential {
+    let mut m = Sequential::new()
+        .add_unfold([2, 3], [1, 2], [1, 0], [1, 1])
+        .and_then(|m| m.add_fold([5, 5], [2, 3], [1, 2], [1, 0], [1, 1]))
+        .map(|m| m.add_relu())
+        .expect("構築できるはず");
+    m.eval();
+    m
+}
+
+fn fold_unfold_input() -> Tensor<f32> {
+    let shape = [1, 2, 5, 5];
+    let n: usize = shape.iter().product();
+    Tensor::new((0..n).map(|i| (i as f32) * 0.05 - 0.6).collect(), &shape).unwrap()
+}
+
+#[test]
+fn unfold_fold_round_trip_bit_identically_and_keep_format_version_2() {
+    let kinds = round_trip("fold-unfold", &fold_unfold_model(), &fold_unfold_input());
+    assert!(
+        kinds.contains("unfold") && kinds.contains("fold"),
+        "{kinds:?}"
+    );
+    let (_guard, _dir, text) = manifest_of(&fold_unfold_model(), "fold-unfold-manifest");
+    assert!(
+        text.contains("\"format_version\":2"),
+        "format_version は 2 のまま"
+    );
+    assert!(
+        text.contains("\"output_size_h\":5") && text.contains("\"dilation_w\":1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn unfold_only_and_fold_only_models_round_trip_independently() {
+    let mut unfold = Sequential::new()
+        .add_unfold([2, 3], [1, 2], [1, 0], [1, 2])
+        .expect("構築できるはず");
+    unfold.eval();
+    let kinds = round_trip("unfold-only", &unfold, &fold_unfold_input());
+    assert!(
+        kinds.contains("unfold") && !kinds.contains("fold"),
+        "{kinds:?}"
+    );
+
+    // unfold(K=[2,3], S=[1,2], P=[1,0], D=[1,1]) の列形状は [1, 12, 12]。
+    let mut fold = Sequential::new()
+        .add_fold([5, 5], [2, 3], [1, 2], [1, 0], [1, 1])
+        .expect("構築できるはず");
+    fold.eval();
+    let cols = Tensor::new(
+        (0..12 * 12).map(|i| (i as f32) * 0.01 - 0.3).collect(),
+        &[1, 12, 12],
+    )
+    .unwrap();
+    let kinds = round_trip("fold-only", &fold, &cols);
+    assert!(
+        kinds.contains("fold") && !kinds.contains("unfold"),
+        "{kinds:?}"
+    );
+}
+
+fn fold_tampered(label: &str, from: &str, to: &str) -> ModelIoError {
+    let (_guard, dir, text) = manifest_of(&fold_unfold_model(), label);
+    assert!(text.contains(from), "{label}: 置換対象 {from} がある");
+    std::fs::write(dir.join("manifest.json"), text.replacen(from, to, 1)).expect("書けるはず");
+    load_err(&dir)
+}
+
+#[test]
+fn tampered_unfold_fold_manifests_are_rejected() {
+    let manifest_cases = [
+        ("unfold-missing-key", "\"dilation_w\":1}", "}"),
+        (
+            "unfold-extra-key",
+            "\"kind\":\"unfold\",\"params\":{",
+            "\"kind\":\"unfold\",\"params\":{\"x\":1,",
+        ),
+        (
+            "fold-extra-key",
+            "\"kind\":\"fold\",\"params\":{",
+            "\"kind\":\"fold\",\"params\":{\"x\":1,",
+        ),
+        ("negative", "\"stride_h\":1", "\"stride_h\":-1"),
+        ("fractional", "\"stride_h\":1", "\"stride_h\":1.5"),
+        ("string", "\"stride_h\":1", "\"stride_h\":\"1\""),
+        ("bool", "\"stride_h\":1", "\"stride_h\":true"),
+        ("null", "\"stride_h\":1", "\"stride_h\":null"),
+        (
+            "overflow",
+            "\"stride_h\":1",
+            "\"stride_h\":18446744073709551616",
+        ),
+        ("fold-missing-output-size", "\"output_size_h\":5,", ""),
+    ];
+    for (label, from, to) in manifest_cases {
+        let err = fold_tampered(&format!("fold-t-{label}"), from, to);
+        assert!(
+            matches!(err, ModelIoError::Manifest { .. }),
+            "{label}: {err}"
+        );
+    }
+    // 意味違反（0 次元）は層コンストラクタの検査（`Autodiff`）。
+    for (label, from, to) in [
+        ("kernel-zero", "\"kernel_size_h\":2", "\"kernel_size_h\":0"),
+        ("stride-zero", "\"stride_w\":2", "\"stride_w\":0"),
+        (
+            "output-size-zero",
+            "\"output_size_w\":5",
+            "\"output_size_w\":0",
+        ),
+    ] {
+        let err = fold_tampered(&format!("fold-t-{label}"), from, to);
+        assert!(matches!(err, ModelIoError::Autodiff(_)), "{label}: {err}");
+    }
+    // 未知 kind は `UnsupportedModel`。
+    let err = fold_tampered(
+        "fold-t-kind",
+        "\"kind\":\"unfold\"",
+        "\"kind\":\"unfold3d\"",
+    );
+    assert!(
+        matches!(err, ModelIoError::UnsupportedModel { .. }),
+        "{err}"
+    );
+}

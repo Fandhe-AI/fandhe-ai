@@ -5,13 +5,13 @@
 //! - 無効引数（0 次元・`2*padding` オーバーフロー・`Fold` の `output_size` の 0）が `Err`（panic しない）。
 //! - `predict`／`forward` が `Var::unfold`／`fold` の直接呼び出しと bit 完全一致。
 //! - 入力勾配が直接グラフと bit 完全一致。学習 1 step が参照グラフと bit 一致し `compile`／`fit` が動く。
-//! - 常駐経路は `Unsupported`（fail-closed。決定記録 §5）。`save_model` は後続 issue（`-c`）まで
-//!   `UnsupportedModel`（`-c` が本テストを成功系へ書き換える）。ONNX export は `UnsupportedLayer`。
+//! - 常駐経路は `Unsupported`（fail-closed。決定記録 §5）。`save_model` は kind `unfold`／`fold` として
+//!   保存・復元できる（イシュー #3041）。ONNX export は `UnsupportedLayer`。
 //!
 //! ホストフォールバック経路のため実機（CUDA／Metal）非依存。実機 parity は未実測のまま（#3171・#3172）。
 #![cfg(unix)]
 
-use fandhe_ai::compat::{FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model};
+use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, load_model, save_model};
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
@@ -377,21 +377,27 @@ fn resident_path_rejects_fold_unfold_fail_closed() {
 
 // ---------------------------------------------------------------- 保存・ONNX（fail-closed）
 
-/// 保存対応は後続 `-c`（`LayerSpec` 実 variant 化）の担当。それまでは `UnsupportedModel` で
-/// 書き込み前に拒否する。`-c` は本テストを成功系（ラウンドトリップ bit 一致）へ書き換えること。
+/// 保存・復元（イシュー #3041。詳細な往復・改ざん検査は `compat_sequential_model_io_layers.rs`）。
+/// 復元後の predict が元モデルと bit 一致し、保存先 `dir` が作られること。
 #[test]
-fn save_model_rejects_fold_unfold_as_unsupported_model() {
-    let unfold = Sequential::new().add_unfold(K, S, P, D).unwrap();
-    let fold = Sequential::new().add_fold([4, 5], K, S, P, D).unwrap();
-    for (tag, model) in [("unfold", &unfold), ("fold", &fold)] {
-        let guard = TempDirGuard::new(&format!("fold_unfold_reject_{tag}"));
+fn save_model_round_trips_fold_unfold() {
+    let mut unfold = Sequential::new().add_unfold(K, S, P, D).unwrap();
+    let mut fold = Sequential::new().add_fold([4, 5], K, S, P, D).unwrap();
+    unfold.eval();
+    fold.eval();
+    for (tag, model, input) in [("unfold", &unfold, image()), ("fold", &fold, columns())] {
+        let guard = TempDirGuard::new(&format!("fold_unfold_save_{tag}"));
         let dir = guard.path().join("m");
-        let err = save_model(model, &dir).unwrap_err();
-        assert!(
-            matches!(err, ModelIoError::UnsupportedModel { .. }),
-            "{tag}: {err:?}"
+        save_model(model, &dir).unwrap_or_else(|e| panic!("{tag}: 保存できるはず: {e:?}"));
+        assert!(dir.exists(), "{tag}: 保存時は dir が作られる");
+        let loaded = load_model(&dir).unwrap_or_else(|e| panic!("{tag}: 復元できるはず: {e:?}"));
+        let a = dense_vec(&model.predict(&input).unwrap());
+        let b = dense_vec(&loaded.predict(&input).unwrap());
+        assert_eq!(
+            a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "{tag}: predict は bit 一致"
         );
-        assert!(!dir.exists(), "拒否時は dir に何も作らない");
     }
 }
 
