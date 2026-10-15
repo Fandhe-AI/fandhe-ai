@@ -94,6 +94,7 @@ docs/
     │   ├── logs/functional-transforms-2881/ # vjp・hvp・vmap（#2881）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果〈新規カーネルではなく既存カーネルの新しい呼び出し形の確認〉・記入欄）
     │   ├── logs/functional-transforms-jvp-2942/ # jvp・jacfwd（#2942）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（`pub(crate)` のため公開 API で double-VJP 手順をミラーしたテスト。測定コマンド・期待結果・記入欄）。#2931 で §26 に facade 公開の実装記録（`Tape::vjp`／`hvp`／`vmap` を公開済み・保留ガードを 3 名分だけ部分反転・正ガード新設）を追記
     │   ├── logs/functional-transforms-jvp-multi-3064/ # 複数入力 `jvp`（`Tape::jvp_multi`。#3064）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄。実測は #3171・#3172）
+    │   ├── logs/functional-transforms-vmap-grad-3073/ # サンプルごとの勾配 `Tape::vmap_grad`（#3073）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄。実測は #3171・#3172）
     │   ├── logs/functional-transforms-facade-2931/ # facade `Tape::vjp`／`hvp`／`vmap`（#2931）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄。内部 API 層は #2881 の README が担当）
     │   ├── logs/speculative-batching-2890/ # speculative decoding・連続バッチング（#2890）の CUDA／Metal 実機 `#[ignore]` parity テスト未実測の申し送り（測定コマンド・期待結果・記入欄）
     │   ├── logs/speculative-batching-facade-2934/ # speculative decoding・連続バッチングの facade 公開（#2934）の実機未実測の申し送り（測定コマンドは #2890 を参照・記入欄）

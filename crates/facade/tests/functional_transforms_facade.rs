@@ -11,8 +11,14 @@
 //! ないため未実測のまま GB10／Mac セッションへ申し送る
 //! （`docs/perf/logs/functional-transforms-facade-2931/README.md`）。内部 API 層の実機 parity は
 //! `functional_ops_backend_parity.rs`（#2881）が担当し、本ファイルは facade 層を担当する。
+//!
+//! `Tape::vmap_grad`（#3072・§32）の結合テスト（#3073）も本ファイルが担当する。参照は `vmap` 系を
+//! 経由しない明示ループ（スライスごとに新しいテープで `backward`）で、判定は `assert_parity` のみ
+//! （tolerance は足さず変えない）。実機は `docs/perf/logs/functional-transforms-vmap-grad-3073/README.md`
+//! へ申し送る。`DeviceMismatch`・結果要素数オーバーフロー・子テープの世代は facade から観測できず未検証
+//! （§32.9・§32.10 と同じ）。
 
-use fandhe_ai::{AutodiffError, Device, Tape, Tensor, Var, tape, tape_for};
+use fandhe_ai::{AutodiffError, Device, ShapeError, Tape, TapeRef, Tensor, Var, tape, tape_for};
 use fandhe_ai_autodiff::Tape as InnerTape;
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -300,4 +306,228 @@ fn vmap_accepts_fnmut_closure_called_once_per_slice() {
     });
     assert!(y.is_ok());
     assert_eq!(calls, 3);
+}
+// ---------------------------------------------------------------------
+// `Tape::vmap_grad`（イシュー #3073・設計記録 §32）: ループ参照との一致・エラー経路・実機 parity
+// ---------------------------------------------------------------------
+
+type LossFn = for<'c> fn(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
+
+/// 決定的な入力系列（内部単体テスト `functional_ops_vmap_grad.rs` と同じ `sin` 系列）。
+fn seq(n: usize, seed: f32) -> Vec<f32> {
+    (0..n)
+        .map(|i| ((i as f32 + seed) * 0.37).sin() * 1.5)
+        .collect()
+}
+
+fn vg_loss_sq<'c>(_t: TapeRef<'c>, s: &Var<'c>) -> Result<Var<'c>, AutodiffError> {
+    s.mul(s)?.sum(None)
+}
+
+fn vg_loss_tanh<'c>(_t: TapeRef<'c>, s: &Var<'c>) -> Result<Var<'c>, AutodiffError> {
+    s.tanh().sum(None)
+}
+
+/// 要素数 3 のスライスを `[1, 3] @ [3, 2]` で射影する matmul 合成（定数は `var_no_grad`）。
+fn vg_loss_matmul<'c>(tr: TapeRef<'c>, s: &Var<'c>) -> Result<Var<'c>, AutodiffError> {
+    let w = tr.var_no_grad(&t(seq(6, 3.0), &[3, 2]));
+    s.reshape(&[1, 3])?.matmul(&w)?.tanh().sum(None)
+}
+
+fn vg_cases() -> [(&'static str, LossFn); 3] {
+    [
+        ("sq", vg_loss_sq),
+        ("tanh", vg_loss_tanh),
+        ("matmul", vg_loss_matmul),
+    ]
+}
+
+const VG_SHAPES: [(&[usize], usize); 5] = [
+    (&[1, 3], 0),
+    (&[4, 3], 0),
+    (&[3, 4], 1),
+    (&[2, 3, 1], 0),
+    (&[3, 2, 1], 1),
+];
+
+fn slice_shape_of(shape: &[usize], in_dim: usize) -> Vec<usize> {
+    shape
+        .iter()
+        .enumerate()
+        .filter(|&(a, _)| a != in_dim)
+        .map(|(_, &d)| d)
+        .collect()
+}
+
+/// 参照: `vmap`／`vmap_grad`／`vjp` を経由せず、スライスごとに新しいテープで `backward` する
+/// 明示ループ（§32.4・§23.3 の「`vmap` 実装を経由しない参照」）。結果は dim 0 方向に連結する。
+fn vg_loop_reference(input: &Tensor<f32>, in_dim: usize, f: LossFn) -> Vec<f32> {
+    let b = input.shape()[in_dim];
+    let slice_shape = slice_shape_of(input.shape(), in_dim);
+    let mut out = Vec::new();
+    for i in 0..b {
+        let sl = input
+            .narrow(in_dim, i, 1)
+            .expect("test fixture: narrow")
+            .contiguous()
+            .reshape(&slice_shape)
+            .expect("test fixture: reshape");
+        let tp = tape();
+        let s = tp.var(&sl);
+        let loss = f(TapeRef::from(&tp), &s).expect("test fixture: loss");
+        let g = tp.backward(&loss).expect("test fixture: backward");
+        out.extend(
+            g.get(&s)
+                .expect("test fixture: get")
+                .expect("勾配あり")
+                .host_slice()
+                .iter()
+                .copied(),
+        );
+    }
+    out
+}
+
+/// 損失 × 形状の表で `Tape::vmap_grad`（子テープ `child` 使い回し）を CPU ループ参照と比較する。
+/// 各ケースの結果を返し、呼び出し側が別デバイスの結果と比較できるようにする。
+fn vg_run_table(child: &mut Tape, label: &str) -> Vec<(String, Vec<f32>)> {
+    let mut all = Vec::new();
+    for (name, f) in vg_cases() {
+        for (shape, in_dim) in VG_SHAPES {
+            let n: usize = shape.iter().product();
+            let x = t(seq(n, 1.0), shape);
+            let got = Tape::vmap_grad(&x, in_dim, child, f).expect("vmap_grad 成功");
+            let mut exp_shape = vec![shape[in_dim]];
+            exp_shape.extend(slice_shape_of(shape, in_dim));
+            let ctx = format!("{label} {name} {shape:?} in_dim={in_dim}");
+            assert_eq!(got.shape(), exp_shape, "{ctx}: shape");
+            let got = got.host_slice().into_owned();
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                &ctx,
+                &got,
+                &vg_loop_reference(&x, in_dim, f),
+            );
+            all.push((ctx, got));
+        }
+    }
+    all
+}
+
+#[test]
+fn vmap_grad_matches_loop_reference_across_losses_and_dims() {
+    let mut child = tape();
+    vg_run_table(&mut child, "cpu");
+    assert_eq!(child.leaf_count(), 0, "戻り時の子テープは空");
+}
+
+#[test]
+fn vmap_grad_sum_of_squares_matches_closed_form() {
+    let x = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]);
+    let mut child = tape();
+    let g = Tape::vmap_grad(&x, 0, &mut child, vg_loss_sq).expect("成功");
+    assert_eq!(g.shape(), &[2, 4]);
+    let expected: Vec<f32> = x.host_slice().iter().map(|v| 2.0 * v).collect();
+    fandhe_ai_backend_cpu::parity::assert_parity("2x", g.host_slice().as_ref(), &expected);
+}
+
+#[test]
+fn vmap_grad_errors_propagate() {
+    let mut child = tape();
+    let x = t(seq(6, 1.0), &[2, 3]);
+
+    // Phase A: 範囲外の in_dim（rank 2 の axis 2、rank 0 の axis 0）
+    let r = Tape::vmap_grad(&x, 2, &mut child, vg_loss_sq);
+    assert!(
+        matches!(
+            r,
+            Err(AutodiffError::Shape(ShapeError::AxisOutOfRange { .. }))
+        ),
+        "{r:?}"
+    );
+    let scalar = t(vec![1.0], &[]);
+    let r = Tape::vmap_grad(&scalar, 0, &mut child, vg_loss_sq);
+    assert!(
+        matches!(
+            r,
+            Err(AutodiffError::Shape(ShapeError::AxisOutOfRange { .. }))
+        ),
+        "{r:?}"
+    );
+
+    // Phase A: 空バッチ
+    let empty = t(vec![], &[0, 3]);
+    let r = Tape::vmap_grad(&empty, 0, &mut child, vg_loss_sq);
+    assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))), "{r:?}");
+
+    // Phase B: 1 要素でない損失
+    let r = Tape::vmap_grad(&x, 0, &mut child, |_t, s| Ok(s.tanh()));
+    assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))), "{r:?}");
+    assert_eq!(child.leaf_count(), 0);
+
+    // Phase B: 別テープの損失（要素数検査より先に TapeMismatch）
+    let other: &'static Tape = Box::leak(Box::new(tape()));
+    let foreign = other.var(&t(vec![1.0, 2.0], &[2]));
+    let r = Tape::vmap_grad(&x, 0, &mut child, |_t, _s| Ok(foreign));
+    assert!(matches!(r, Err(AutodiffError::TapeMismatch)), "{r:?}");
+    assert_eq!(child.leaf_count(), 0);
+
+    // Phase B: クロージャの Err がそのまま伝播する
+    let r = Tape::vmap_grad(&x, 0, &mut child, |_t, _s| {
+        Err(AutodiffError::Backward("closure".to_string()))
+    });
+    match r {
+        Err(AutodiffError::Backward(m)) => assert_eq!(m, "closure"),
+        other => panic!("closure の Err が伝播すべき: {other:?}"),
+    }
+
+    // 失敗後も同じ子テープで成功呼び出しが通る（空に戻っている）
+    let ok = Tape::vmap_grad(&x, 0, &mut child, vg_loss_sq).expect("失敗後の再利用");
+    assert_eq!(ok.shape(), &[2, 3]);
+    assert_eq!(child.leaf_count(), 0);
+
+    // Phase A: 空でない子テープ
+    let mut dirty = tape();
+    {
+        let _leaf = dirty.var(&t(vec![1.0], &[1]));
+    }
+    let r = Tape::vmap_grad(&x, 0, &mut dirty, vg_loss_sq);
+    assert!(matches!(r, Err(AutodiffError::Backward(_))), "{r:?}");
+}
+
+#[test]
+fn vmap_grad_closure_is_fnmut_called_once_per_slice() {
+    let x = t(seq(9, 1.0), &[3, 3]);
+    let mut child = tape();
+    let mut calls = 0usize;
+    let g = Tape::vmap_grad(&x, 0, &mut child, |_t, s| {
+        calls += 1;
+        s.mul(s)?.sum(None)
+    });
+    assert!(g.is_ok());
+    assert_eq!(calls, 3);
+}
+
+/// 実機の子テープで `Tape::vmap_grad` した結果を CPU（子テープ・ループ参照）と REQ-2 判定で比較する。
+fn assert_vmap_grad_device_matches_cpu(device: Device, label: &str) {
+    let cpu = vg_run_table(&mut tape(), "cpu");
+    let mut dev_child: Tape = tape_for(device).expect("実機テープ生成");
+    let dev = vg_run_table(&mut dev_child, label);
+    for ((ctx, c), (_, d)) in cpu.iter().zip(&dev) {
+        fandhe_ai_backend_cpu::parity::assert_parity(&format!("cpu vs {ctx}"), d, c);
+    }
+}
+
+/// facade 経由 `Tape::vmap_grad` の CPU／Metal 実機比較。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/functional-transforms-vmap-grad-3073/README.md 参照"]
+fn metal_vmap_grad_matches_cpu_reference() {
+    assert_vmap_grad_device_matches_cpu(Device::Metal, "metal");
+}
+
+/// facade 経由 `Tape::vmap_grad` の CPU／CUDA 実機（DGX Spark GB10）比較。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/functional-transforms-vmap-grad-3073/README.md 参照"]
+fn cuda_vmap_grad_matches_cpu_reference() {
+    assert_vmap_grad_device_matches_cpu(Device::Cuda(0), "cuda");
 }
