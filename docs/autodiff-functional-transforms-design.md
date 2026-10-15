@@ -828,8 +828,9 @@ where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
 | `pow`（同 shape） | `g` に定数係数を `mul` | 足りる | なし | `ln a` も定数係数に入るため `log` 演算は不要。f32 版 `build_cgrads`（`create_graph.rs` 1063 行以降）の a==0 の NaN 安全化は、線形化した定数係数側で扱える見込み（推測） |
 | ブロードキャストを伴う `add`／`mul`／`div`／`pow` | 入力 shape への縮約が要る（`reduce_to_shape_f64` 相当） | 足りない | `reshape`（size-1 軸を残す形）または縮約専用の追跡演算 | `sum(Some(axis))` は軸を落とすだけで size-1 軸を残せない |
 | `matmul` | `g.matmul(bᵀ の定数)`・`aᵀ の定数.matmul(g)` | 足りる | なし（`jvp` のみの場合） | 転置した定数はホスト側 `Tensor::transpose` で作れる（`matmul_vjp_f64` 1268 行に前例）。`hvp` 系の完全な create_graph では追跡演算の `transpose` が要る（推測） |
-| `sum(None)`／`mean(None)` | `g` に ones 定数を `mul`（ブロードキャスト） | 足りる | なし | スカラー `g` に限る |
-| `sum(Some(axis))`／`mean(Some(axis))` | 縮約した軸を `g` に挿し戻す（`unreduce_broadcast_f64` 1291 行相当） | 足りない | `reshape` と `broadcast_to`（または `Unreduce`／`ReduceTo` の対） | 右詰めブロードキャストで偶然通るのは先頭軸だけ |
+| `sum(None)` | `g` に ones 定数を `mul`（ブロードキャスト） | 足りる | なし | スカラー `g` に限る |
+| `mean(None)` | `g` に「`1/n` を要素に持つ定数」（`n` は縮約要素数）を `mul`、または `g` を `n` で `div` してからブロードキャスト（既存 `mean_vjp_f64` と同じ除算後ブロードキャスト。2 要素なら `[g/2, g/2]`） | 足りる（`mul`／`div` は既存 8 演算内） | なし | スカラー `g` に限る。`1/n` 係数を落とすと `sum` と同じ `[g, g]` になり誤り |
+| `sum(Some(axis))`／`mean(Some(axis))` | 縮約した軸を `g` に挿し戻す（`unreduce_broadcast_f64` 1291 行相当）。`mean` は挿し戻しの前後いずれかで縮約軸長 `n` による `1/n` 係数（`div` または `mul`）を掛ける | | 足りない | `reshape` と `broadcast_to`（または `Unreduce`／`ReduceTo` の対） | 右詰めブロードキャストで偶然通るのは先頭軸だけ |
 | `max` | first-match の one-hot マスク（`max_first_match_vjp_f64` 1356 行）を定数にして挿し戻す | 足りない | 上と同じ | f32 側が対象外なので揃えて対象外にするのが妥当（推測） |
 
 結論: `reshape`／`broadcast_to`（または `ReduceTo`／`Unreduce` の対）を新しい `OpF64` variant として足し、その VJP を `TapeF64::backward` に実装しないと、縮約系とブロードキャストを伴う演算は扱えない。同 shape の要素演算・`matmul`・スカラー縮約だけなら既存 8 演算で閉じる。
