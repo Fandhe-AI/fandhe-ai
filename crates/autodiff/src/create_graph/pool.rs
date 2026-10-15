@@ -160,10 +160,7 @@ pub(super) fn max_pool_vjp<'c>(
         .reshape(input_shape)
 }
 
-/// 窓の分類（divisor・窓要素数が同じ窓は同じ重み定数で扱える）。
-type WindowClass = (usize, usize);
-
-/// 同一分類の窓が持つ（出力位置, 入力位置）の対応表。
+/// 同一 divisor の窓が持つ（出力位置, 入力位置）の対応表。
 #[derive(Default)]
 struct ClassIndex {
     /// 窓に属する要素ごとの出力位置（`[0, out_spatial)`）。
@@ -172,12 +169,12 @@ struct ClassIndex {
     dst: Vec<i32>,
 }
 
-/// 窓構造の索引表（1 平面ぶん。全 `N·C` 平面で共通）。窓を `(divisor, 窓要素数)` で
+/// 窓構造の索引表（1 平面ぶん。全 `N·C` 平面で共通）。窓を divisor で
 /// 分類して保持する（精度・overflow 方針は [`window_scatter_structure`] 参照）。
 struct WindowPlan {
     in_spatial: usize,
     out_spatial: usize,
-    classes: std::collections::BTreeMap<WindowClass, ClassIndex>,
+    classes: std::collections::BTreeMap<usize, ClassIndex>,
 }
 
 impl WindowPlan {
@@ -206,7 +203,7 @@ impl WindowPlan {
                 "create_graph: プーリングの窓要素数または divisor が 0（契約違反）".into(),
             ));
         }
-        let class = self.classes.entry((divisor, members.len())).or_default();
+        let class = self.classes.entry(divisor).or_default();
         for &m in members {
             class.src.push(o as i32);
             class.dst.push(m as i32);
@@ -369,25 +366,21 @@ fn plan_avg3d(
 }
 
 /// 平均系 VJP の構造。`g`（`[N, C, 出力空間…]`）を `[N·C, 出力空間]` へ平坦化し、窓の
-/// 分類 `(divisor d, 窓要素数 m)` ごとに
-/// `zeros.scatter_add(dst, gather(g, src) · (1/s)) · (s/d)`（`s = m` 以上の最小の 2 のべき乗）
-/// を作って足す。積む Op はすべて replayable。
+/// divisor `d` ごとに `zeros.scatter_add(dst, gather(g, src) · (1/s)) · (s/d)`
+/// （`s = d` 以下の最大の 2 のべき乗。`s/d ∈ (0.5, 1]`）を作って足す。積む Op はすべて
+/// replayable。窓要素数 `m ≤ d` の窓は同じ分類へ混在させる（`1/s` は窓要素数に依らない）。
 ///
-/// 数値設計（codex-review 指摘・PR #3352。決定記録 §21.1(3)・(5)）:
+/// 数値設計（codex-review 指摘・PR #3352。決定記録 §21.1(3)・(5)・§30.3）:
 /// - **除算の前に窓内を集約する**: `g · (1/d)` を f32 で確定してから集約すると、相殺する上流
-///   （例 `[1e8, 1e8, -199999984]`）で丸め誤差が残り、孫テープで合成が再計算されたとき
-///   1 階のホスト値（`f64` 蓄積）と REQ-2 の範囲で食い違う。分類内は同じ `d` なので、
-///   `scatter_add` の `f64` 決定的集約で窓内の和を 1 回の丸めで作ってから `s/d` を掛ける。
-/// - **集約前に `1/s` を掛ける**: 窓内の和は `m·|g|` まで膨らむため、真の結果が有限でも
-///   f32 の中間和が `inf` になりうる。`1/s`（2 のべき乗で厳密）を集約の前に掛けて和を
-///   `|g|` 以下に保つ。
-/// - **二階の逆伝播（`gather` の VJP が `scatter_add` で窓内の seed を集約する）**: 重み
-///   `s/d`（`d ≥ m·…` ゆえ `s/d < 2`）を集約の外側（出力側）に置くので、逆向きでは seed に
-///   先に `s/d` が掛かり、続く `gather`・`1/s`・`scatter_add` の集約値は `|seed|/d` 程度に
-///   収まる（`seed` に先に窓内和を取らない）。
-/// - 残余: 異なる分類（`count_include_pad = false` の境界窓など）の部分和は f32 で丸めて
-///   から足すため、分類間で桁違いの打ち消しが起きる入力では 1 階値との差が残りうる
-///   （1 階値自体は `push_v3` のホスト値で bit 一致のまま。決定記録 §30）。
+///   で丸め誤差が残り、孫テープ再生で 1 階のホスト値（`f64` 蓄積）と食い違う。`1/s` は 2 の
+///   べき乗で厳密なので、`scatter_add` の `f64` 決定的集約で窓内の和を 1 回の丸めで作る。
+/// - **集約前に `1/s` を掛ける**: 窓内の和が `m·|g|` まで膨らむのを `|g|` 程度に抑える。
+/// - **重みは 1 以下**: 逆伝播で seed に掛かる `s/d` を増幅側（> 1）にしない。`s/d` が 1 超
+///   だと有限な seed（例 `3e38`・`d = 3`）が最初の乗算で `inf` になる。逆向きの集約値は
+///   `|seed|·m/d ≤ |seed|` に収まる。
+/// - 残余: divisor が異なる分類の部分和は f32 で丸めてから足すため、桁違いの打ち消しが
+///   起きる入力では 1 階値と食い違いうる。[`check_structure_contract`] がホストで構造を
+///   模擬し、REQ-2 の範囲を外れる入力・f32 範囲を超える中間和は型付きエラーで拒否する。
 fn window_scatter_structure<'c>(
     child: &'c Tape,
     g: &Var<'c>,
@@ -407,7 +400,7 @@ fn window_scatter_structure<'c>(
         Ok(child.var_no_grad(&Tensor::new(vec![v], &[1, 1])?))
     };
     let mut acc: Option<Var<'c>> = None;
-    for (&(divisor, members), class) in &plan.classes {
+    for (&divisor, class) in &plan.classes {
         let e = class.src.len();
         let replicate = |one: &[i32]| -> Result<Tensor<i32>, AutodiffError> {
             let mut v = Vec::with_capacity(nc * e);
@@ -418,7 +411,7 @@ fn window_scatter_structure<'c>(
         };
         let src_index = replicate(&class.src)?;
         let dst_index = replicate(&class.dst)?;
-        let s = members.next_power_of_two();
+        let s = pow2_floor(divisor);
         let mut picked = g_flat.gather(1, &src_index)?;
         if s > 1 {
             picked = picked.mul(&scalar(1.0 / s as f32)?)?;
@@ -435,6 +428,59 @@ fn window_scatter_structure<'c>(
         });
     }
     acc.ok_or_else(overflow)?.reshape(input_shape)
+}
+
+/// `d` 以下の最大の 2 のべき乗（`d ≥ 1`）。
+fn pow2_floor(d: usize) -> usize {
+    1usize << (usize::BITS - 1 - d.leading_zeros())
+}
+
+/// 構造（[`window_scatter_structure`]）をホストで模擬し、1 階のホスト値 `host` との REQ-2
+/// 複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）と、集約前中間和の f32 範囲を検査する。
+/// 範囲外は孫テープ再生で誤値が復活するため構築時に型付きエラーで拒否する（§27.3 と同型の
+/// fail-closed。tolerance は変更しない）。
+fn check_structure_contract(
+    plan: &WindowPlan,
+    g: &Tensor<f32>,
+    host: &Tensor<f32>,
+    input_shape: &[usize],
+) -> Result<(), AutodiffError> {
+    let nc = input_shape[0] * input_shape[1];
+    let gv = g.host_slice();
+    let hv = host.host_slice();
+    let reject = |why: &str| invalid(format!("平均プーリングの構造合成が数値契約の範囲外: {why}"));
+    for plane in 0..nc {
+        let gp = &gv[plane * plan.out_spatial..(plane + 1) * plan.out_spatial];
+        let mut total = vec![0.0f32; plan.in_spatial];
+        for (&divisor, class) in &plan.classes {
+            let s = pow2_floor(divisor);
+            let mut sums = vec![0.0f64; plan.in_spatial];
+            for (&o, &i) in class.src.iter().zip(&class.dst) {
+                sums[i as usize] += f64::from(gp[o as usize]) / s as f64;
+            }
+            let weight = (s as f64 / divisor as f64) as f32;
+            for (t, &sm) in total.iter_mut().zip(&sums) {
+                if sm.abs() > f64::from(f32::MAX) {
+                    return Err(reject("集約前の中間和が f32 の範囲を超える"));
+                }
+                *t += (sm as f32) * weight;
+            }
+        }
+        let hp = &hv[plane * plan.in_spatial..(plane + 1) * plan.in_spatial];
+        for (&sv, &h) in total.iter().zip(hp) {
+            if h.is_nan() && sv.is_nan() {
+                continue;
+            }
+            let d = (sv - h).abs();
+            if h.is_finite() && !(d < 1e-5 || d / h.abs() < 1e-3) || h.is_finite() != sv.is_finite()
+            {
+                return Err(reject(
+                    "分類間の f32 丸めが 1 階値と REQ-2 の範囲で一致しない",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 空の上流・入力は 1 階の扱いに揃えゼロ定数を返す。
@@ -463,6 +509,7 @@ pub(super) fn avg_pool2d_cgrad<'c>(
     let plan = plan_avg2d(input_shape, &g.shape(), params, count_include_pad)?;
     let composed = window_scatter_structure(child, g, input_shape, &plan)?;
     let host = avg_pool2d_vjp(&value_of(child, g)?, input_shape, params, count_include_pad)?;
+    check_structure_contract(&plan, &value_of(child, g)?, &host, input_shape)?;
     push_v3(child, &composed, host)
 }
 
@@ -478,6 +525,7 @@ pub(super) fn adaptive_avg_pool2d_cgrad<'c>(
     let plan = plan_adaptive2d(input_shape, &g.shape())?;
     let composed = window_scatter_structure(child, g, input_shape, &plan)?;
     let host = adaptive_avg_pool2d_vjp(&value_of(child, g)?, input_shape)?;
+    check_structure_contract(&plan, &value_of(child, g)?, &host, input_shape)?;
     push_v3(child, &composed, host)
 }
 
@@ -495,6 +543,7 @@ pub(super) fn avg_pool3d_cgrad<'c>(
     let plan = plan_avg3d(input_shape, params, count_include_pad)?;
     let composed = window_scatter_structure(child, g, input_shape, &plan)?;
     let host = avg_pool3d_vjp(&value_of(child, g)?, input_shape, params, count_include_pad)?;
+    check_structure_contract(&plan, &value_of(child, g)?, &host, input_shape)?;
     push_v3(child, &composed, host)
 }
 
@@ -628,5 +677,39 @@ mod tests {
         assert!(max_pool_vjp(&tape, &g, &[1, 1, 4, 4], &idx).is_err());
         let idx = Tensor::<i32>::new(vec![0, 1, 2, -1], &[1, 1, 2, 2]).unwrap();
         assert!(max_pool_vjp(&tape, &g, &[1, 1, 4, 4], &idx).is_err());
+    }
+
+    /// 逆伝播で seed を増幅しない（重み ≤ 1）: `d = 3` の平均で有限な seed `3e38` が有限のまま。
+    #[test]
+    fn backward_seed_is_not_amplified() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let params = Pool2dParams::new([1, 3], Some([1, 1]), [0, 0], [1, 1]).unwrap();
+        let ishape = [1usize, 1, 1, 4];
+        let oshape = [1usize, 1, 1, 2];
+        let g = tape.var(&Tensor::new(vec![1.0f32, 1.0], &oshape).unwrap());
+        let plan = plan_avg2d(&ishape, &oshape, &params, true).unwrap();
+        let s = window_scatter_structure(&tape, &g, &ishape, &plan).unwrap();
+        let seed = tape.var_no_grad(&Tensor::new(vec![3.0e38f32; 4], &ishape).unwrap());
+        let loss = s.mul(&seed).unwrap().sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dg = grads.get(&g).unwrap().expect("g");
+        assert!(
+            dg.host_slice().iter().all(|v| v.is_finite()),
+            "{:?}",
+            dg.host_slice()
+        );
+    }
+
+    /// 分類間の f32 丸めで 1 階値から外れる入力は型付きエラーで拒否される。
+    #[test]
+    fn cross_class_rounding_is_rejected() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let params = Pool2dParams::new([1, 3], Some([1, 1]), [0, 1], [1, 1]).unwrap();
+        let ishape = [1usize, 1, 1, 3];
+        let oshape = [1usize, 1, 1, 3];
+        let g =
+            tape.var(&Tensor::new(vec![100_000_008.0f32, -150_000_016.0, 0.0], &oshape).unwrap());
+        let r = avg_pool2d_cgrad(&tape, &g, &ishape, &params, false);
+        assert!(r.is_err());
     }
 }
