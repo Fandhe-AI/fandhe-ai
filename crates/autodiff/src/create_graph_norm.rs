@@ -1,6 +1,6 @@
 //! `Op::LayerNorm`・`Op::RmsNorm` の `create_graph`（子テープ方式の二階微分）対応
 //! （イシュー #3078・親 #3075。方針の正は
-//! `docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3「#3078」、実装記録は §25）。
+//! `docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3「#3078」、実装記録は §26）。
 //!
 //! [`crate::create_graph`] の `validate_ancestors`／`replay_op`／`build_cgrads` から呼ばれる
 //! 行方向正規化専用の補助モジュール。`create_graph.rs` 本体を肥大させず、並行する
@@ -49,7 +49,7 @@
 //! `g·w` が f32 に収まらない、または `hidden·max(1,rstd)·max|g·w|` が `2^125` 以上の場合は構築時に
 //! `Err(Backward)` で拒否する（逆伝播の行方向縮約の overflow を避けるため）。
 //! `dw`／`db` の行方向 `Sum` は 1 階も f32 要素積のため、行をまたぐ合計の overflow は残る
-//! （決定記録 §25.3）。
+//! （決定記録 §26.3）。
 
 use fandhe_ai_tensor_core::{BackendOps, Tensor, row_norm_layout};
 
@@ -67,7 +67,7 @@ const TINY_DEVIATION_GUARD: f64 = 7.888_609_052_210_118e-31;
 fn reject(what: &str) -> AutodiffError {
     AutodiffError::Backward(format!(
         "create_graph: {what}（LayerNorm／RmsNorm の S1 構造が安全に扱えない入力。\
-         docs/autodiff-higher-order-grad-decision.md §25 参照）"
+         docs/autodiff-higher-order-grad-decision.md §26 参照）"
     ))
 }
 
