@@ -7,7 +7,7 @@
 //! `Var` として再現する。値は 1 階と同じホスト関数で計算し（V3。f64 縮約契約
 //! を維持するため bit 同一）、二階の微分が流れる構造は replayable な `Var`
 //! 演算（`Mul`・`Sub`・`Mean`・`Sum`・`Sqrt`・`Div`・`Reshape`・`Permute`・
-//! `Contiguous` のみ。`Op::supports_create_graph` が `true` の Op に閉じる＝
+//! `Contiguous` のみ。ホスト値は `Op::BatchNormGradHost` が孫テープでも再計算。`Op::supports_create_graph` が `true` の Op に閉じる＝
 //! 孫テープ再生で閉じる）の合成で組む。
 //!
 //! **方式の割り当て（出力ごと）**:
@@ -25,12 +25,12 @@
 //! 本モジュールも `replay_op` も更新しない（`Var::` プリミティブとホスト関数
 //! だけを呼び、`RefCell` の buffer へ触れる経路がない）。
 
-use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor};
+use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor, batch_norm_layout};
 
 use crate::error::AutodiffError;
 use crate::eval::{build_tensor, dense_vec};
 use crate::grad::batch_norm_vjp_channels;
-use crate::tape::{Op, Tape, materialize_fallible};
+use crate::tape::{BatchNormGradKind, Op, Tape, materialize_fallible};
 use crate::var::Var;
 
 /// 2 のべき乗スケールに使う指数の下限・上限（f32 の正規数範囲）。
@@ -364,13 +364,57 @@ fn eval_row_xhat<'c>(
     mul_pow2_per_row(child, &scaled, &exps)
 }
 
-/// `S`（構造グラフ）に `value`（ホスト関数で計算した値）を載せた
-/// `Op::Contiguous`（VJP が恒等で前方値に依存しない）ノードを積む（V3）。
-fn with_host_value<'c>(
+/// BatchNorm の `dx`／`dw`／`db` ホスト値ノード（`Op::BatchNormGradHost`）を
+/// 子テープへ登録する。`structure` は二階微分経路、前方値は 1 階と同じ
+/// `batch_norm_vjp_channels`（f64 縮約）を `g`・`x`・`weight` の実体値へ適用して
+/// 求める（V3）。孫テープでの再生（`replay_op`）からも同じ関数で呼ばれ、値は
+/// 常にホスト関数で再計算される（f32 の構造側で overflow した補正が復元される。
+/// 決定記録 §21.1(5)）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn host_grad_node<'c>(
     child: &'c Tape,
     structure: &Var<'c>,
-    value: Tensor<f32>,
+    g: &Var<'c>,
+    x: &Var<'c>,
+    w: Option<&Var<'c>>,
+    has_bias: bool,
+    eps: f32,
+    fixed_stats: Option<(Tensor<f32>, Tensor<f32>)>,
+    kind: BatchNormGradKind,
 ) -> Result<Var<'c>, AutodiffError> {
+    let x_t = host_tensor(child, x)?;
+    let (n, c, spatial) = batch_norm_layout(x_t.shape())?;
+    let g_t = host_tensor(child, g)?;
+    let w_dense = match w {
+        Some(w) => Some(dense_vec(&host_tensor(child, w)?)),
+        None => None,
+    };
+    let fixed_dense = fixed_stats
+        .as_ref()
+        .map(|(mu, var)| (dense_vec(mu), dense_vec(var)));
+    let (dx, dw, db) = batch_norm_vjp_channels(
+        &dense_vec(&x_t),
+        w_dense.as_deref(),
+        has_bias,
+        eps,
+        n,
+        c,
+        spatial,
+        &dense_vec(&g_t),
+        fixed_dense
+            .as_ref()
+            .map(|(mu, var)| (mu.as_slice(), var.as_slice())),
+    );
+    let missing = || {
+        AutodiffError::Backward(
+            "create_graph: BatchNorm ホスト値の出力が欠落（内部契約違反）".into(),
+        )
+    };
+    let value = match kind {
+        BatchNormGradKind::Dx => build_tensor(dx, x_t.shape()),
+        BatchNormGradKind::Dw => build_tensor(dw.ok_or_else(missing)?, &[c]),
+        BatchNormGradKind::Db => build_tensor(db.ok_or_else(missing)?, &[c]),
+    };
     if structure.shape() != value.shape() {
         return Err(AutodiffError::Backward(
             "create_graph: BatchNorm の構造グラフとホスト値の shape が不一致（内部契約違反）"
@@ -378,12 +422,43 @@ fn with_host_value<'c>(
         ));
     }
     let id = child.push_eager(
-        Op::Contiguous {
-            input: structure.node_id(),
+        Op::BatchNormGradHost {
+            structure: structure.node_id(),
+            g: g.node_id(),
+            x: x.node_id(),
+            weight: w.map(|w| w.node_id()),
+            has_bias,
+            eps,
+            fixed_stats,
+            kind,
         },
         value,
     );
     Ok(Var::from_raw(child, id))
+}
+
+/// 上流勾配行 `v: [c, m]` の縮約用前置スケール指数 `s_g`（行ごと）。`v` を `2^s_g` で
+/// 割ってから縮約すると巨大値の和（`Σv`）が f32 で overflow しない。
+/// 上限 `sg_cap = ceil(log2 m) + 2`: 逆伝播では復元倍率 `2^(s_g - p_s2)` が `inv_sg` の
+/// 縮小より先に単位シードへ掛かるため、`s_g` が大きいと累積倍率が f32 を超える
+/// （x=[0,0]・上流 1e38 で 2^135）。縮約の安全は `|t| <= max|v|/(4m)` で足りる
+/// （`Σ|t·x̂| <= m·|t|max`）ので、`s_g` を上限で打ち切って累積倍率を `rstd·2^sg_cap`
+/// 以下に抑える。
+fn row_sg_exps<'c>(
+    child: &'c Tape,
+    v: &Var<'c>,
+    c: usize,
+    m_len: usize,
+) -> Result<Vec<i32>, AutodiffError> {
+    let dv = host_values(child, v)?;
+    let sg_cap = m_len.next_power_of_two().trailing_zeros() as i32 + 2;
+    Ok(row_abs_max(&dv, c, m_len)
+        .iter()
+        .map(|&(mx, inf)| {
+            let e = if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) };
+            e.min(sg_cap)
+        })
+        .collect())
 }
 
 /// [`batch_norm_cgrads`] の入力（親テープ側の実測値と子テープの写し）。
@@ -395,8 +470,6 @@ pub(crate) struct BatchNormCgradInputs<'a, 'c> {
     pub fixed_stats: Option<&'a (Tensor<f32>, Tensor<f32>)>,
     /// 親テープ上の `x` の実体値（`[n, c, ...]`）。
     pub x_host: &'a Tensor<f32>,
-    /// 親テープ上の `weight` の実体値。
-    pub w_host: Option<&'a Tensor<f32>>,
     pub need_dx: bool,
     pub n: usize,
     pub c: usize,
@@ -422,28 +495,6 @@ pub(crate) fn batch_norm_cgrads<'c>(
     let x_shape = inp.x_host.shape().to_vec();
     let g_rows = to_channel_rows(g, n, c, spatial)?;
     let x_rows = to_channel_rows(&inp.x_mirror, n, c, spatial)?;
-
-    // 1 階 VJP と同じホスト関数で一度だけ値を得る（V3）。`dx` は train のみ使う。
-    let g_val = host_tensor(child, g)?;
-    let x_dense = dense_vec(inp.x_host);
-    let w_dense = inp.w_host.map(dense_vec);
-    let dy_dense = dense_vec(&g_val);
-    let fixed_dense = inp
-        .fixed_stats
-        .map(|(mu, var)| (dense_vec(mu), dense_vec(var)));
-    let (dx_host, dw_host, db_host) = batch_norm_vjp_channels(
-        &x_dense,
-        w_dense.as_deref(),
-        inp.has_bias,
-        inp.eps,
-        n,
-        c,
-        spatial,
-        &dy_dense,
-        fixed_dense
-            .as_ref()
-            .map(|(mu, var)| (mu.as_slice(), var.as_slice())),
-    );
 
     // `dx̂ = g ⊙ w`（1 階と同じ f32 積）。
     let dxhat = match &inp.w_mirror {
@@ -479,21 +530,8 @@ pub(crate) fn batch_norm_cgrads<'c>(
             Some((rstd_s, p_s2_exps)) => {
                 // dx̂ を行ごとの 2 のべき乗 s_g で割ってから縮約する（巨大な
                 // 上流勾配での `Σdx̂` overflow を避ける。dx は dx̂ について線形）。
-                let dv = host_values(child, &dxhat)?;
-                // 上限 `sg_cap = ceil(log2 m) + 2`（m は行長）: 逆伝播では復元倍率
-                // `2^(s_g - p_s2)` が `inv_sg` の縮小より先に単位シードへ掛かるため、
-                // s_g が大きいと累積倍率が f32 を超える（x=[0,0]・上流 1e38 で 2^135）。
-                // 縮約の安全は `|t| <= max|dx̂|/(4m)` で足りる（Σ|t·x̂| <= m·|t|max）
-                // ので、s_g を上限で打ち切って累積倍率を `rstd·2^sg_cap` 以下に抑える。
-                let m_len = n * spatial;
-                let sg_cap = m_len.next_power_of_two().trailing_zeros() as i32 + 2;
-                let sg_exp: Vec<i32> = row_abs_max(&dv, c, m_len)
-                    .iter()
-                    .map(|&(mx, inf)| {
-                        let e = if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) };
-                        e.min(sg_cap)
-                    })
-                    .collect();
+                // 上限 `sg_cap = ceil(log2 m) + 2` の根拠は `row_sg_exps` を参照。
+                let sg_exp = row_sg_exps(child, &dxhat, c, n * spatial)?;
                 let inv_sg: Vec<f32> = sg_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
                 let t = dxhat.mul(&const_col(child, &inv_sg)?)?;
                 let mean_t = as_col(&t.mean(Some(1))?)?;
@@ -507,7 +545,17 @@ pub(crate) fn batch_norm_cgrads<'c>(
                     .collect();
                 let rows = mul_pow2_per_row(child, &scaled, &exps)?;
                 let s = from_channel_rows(&rows, n, c, spatial, &x_shape)?;
-                Some(with_host_value(child, &s, build_tensor(dx_host, &x_shape))?)
+                Some(host_grad_node(
+                    child,
+                    &s,
+                    g,
+                    &inp.x_mirror,
+                    inp.w_mirror.as_ref(),
+                    inp.has_bias,
+                    inp.eps,
+                    inp.fixed_stats.cloned(),
+                    BatchNormGradKind::Dx,
+                )?)
             }
             None => {
                 // eval の dx は V1: 定数 rstd との要素積のみ。
@@ -526,19 +574,55 @@ pub(crate) fn batch_norm_cgrads<'c>(
         None
     };
 
-    let dw = match (&inp.w_mirror, dw_host) {
-        (Some(_), Some(dw_host)) => {
-            let s = g_rows.mul(&xhat)?.sum(Some(1))?;
-            Some(with_host_value(child, &s, build_tensor(dw_host, &[c]))?)
-        }
-        _ => None,
-    };
-    let db = match db_host {
-        Some(db_host) => {
-            let s = g_rows.sum(Some(1))?;
-            Some(with_host_value(child, &s, build_tensor(db_host, &[c]))?)
+    let dw = match &inp.w_mirror {
+        Some(w) => {
+            // train: `Σ_m x̂ = 0` なので `dw = Σ g·x̂ = Σ (g - mean g)·x̂`。値・`g` への勾配は
+            // 不変だが、`x̂` への余接が中心化済みの `g - mean g` になり、一様な巨大 `g`
+            // （`1e38` 等）では相殺が `rstd_s`・`inv_s2` の倍率より先に起きる（倍率適用後に
+            // 相殺すると `inf - inf` で NaN。§21.1(5)）。`mean g` の overflow を避けるため
+            // `g` を 2 のべき乗 `2^s_g` で割って中心化し、縮約後に `2^s_g` を戻す。
+            // eval は統計が定数で `Σ_m x̂ ≠ 0` のため中心化しない。
+            let s = if train_ctx.is_some() {
+                let sg_exp = row_sg_exps(child, &g_rows, c, n * spatial)?;
+                let inv_sg: Vec<f32> = sg_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
+                let t = g_rows.mul(&const_col(child, &inv_sg)?)?;
+                let tc = t.sub(&as_col(&t.mean(Some(1))?)?)?;
+                let part = as_col(&tc.mul(&xhat)?.sum(Some(1))?)?;
+                mul_pow2_per_row(child, &part, &sg_exp)?
+                    .contiguous()?
+                    .reshape(&[c])?
+            } else {
+                g_rows.mul(&xhat)?.sum(Some(1))?
+            };
+            Some(host_grad_node(
+                child,
+                &s,
+                g,
+                &inp.x_mirror,
+                Some(w),
+                inp.has_bias,
+                inp.eps,
+                inp.fixed_stats.cloned(),
+                BatchNormGradKind::Dw,
+            )?)
         }
         None => None,
+    };
+    let db = if inp.has_bias {
+        let s = g_rows.sum(Some(1))?;
+        Some(host_grad_node(
+            child,
+            &s,
+            g,
+            &inp.x_mirror,
+            inp.w_mirror.as_ref(),
+            true,
+            inp.eps,
+            inp.fixed_stats.cloned(),
+            BatchNormGradKind::Db,
+        )?)
+    } else {
+        None
     };
     Ok(BatchNormCgrads { dx, dw, db })
 }

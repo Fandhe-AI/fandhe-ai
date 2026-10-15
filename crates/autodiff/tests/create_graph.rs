@@ -3549,3 +3549,68 @@ fn batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite() {
         }
     }
 }
+/// Codex P1 回帰（#3348）: train の `dw` を子テープで逆伝播するとき、中心化より先に
+/// 上流勾配 `1e38` へ `rstd_s`・`inv_s2` が掛かり `inf - inf` で NaN になった。
+/// この損失の混合二階勾配 `∂dw/∂x` は 0（一様な上流勾配は中心化で消える）。
+#[test]
+fn batch_norm_create_graph_train_dw_huge_uniform_upstream_mixed_hessian_is_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 0.0], &[2, 1]));
+    let w = tape.var(&t(vec![1.0], &[1]));
+    let y = x.batch_norm(Some(&w), None, 1e-5).unwrap();
+    let k = tape.var_no_grad(&t(vec![1e38, 1e38], &[2, 1]));
+    let loss = y.mul(&k).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let dw = cg.grad(&w).unwrap().expect("dw");
+    assert!(
+        dw.value()
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .all(|v| v.is_finite())
+    );
+    let s = dw.sum(None).unwrap();
+    let hv = child.backward(&s).unwrap();
+    let cx = cg.child_var(&x).unwrap().unwrap();
+    if let Some(h) = hv.get(&cx).unwrap() {
+        let hd = h.contiguous().as_slice().unwrap().to_vec();
+        assert!(hd.iter().all(|v| v.is_finite() && *v == 0.0), "{hd:?}");
+    }
+}
+
+/// Codex P1 回帰（#3348）: ホスト補正値（f64 縮約の `db`）が孫テープへの再生で
+/// 失われ、構造側の f32 逐次和（`2e38 + 2e38`）の `inf` に置き換わった。
+/// `db` は有限（約 `2e38`）で、`(db·1e-38)²` の孫テープ勾配も有限でなければならない。
+#[test]
+fn batch_norm_create_graph_host_db_survives_grandchild_replay() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0; 3], &[3, 1]));
+    let b = tape.var(&t(vec![1.0], &[1]));
+    let y = x
+        .batch_norm_infer(
+            None,
+            Some(&b),
+            &t(vec![0.0], &[1]),
+            &t(vec![1.0], &[1]),
+            1e-5,
+        )
+        .unwrap();
+    let k = tape.var_no_grad(&t(vec![1e38, 1e38, -1e38], &[3, 1]));
+    let loss = y.mul(&y).unwrap().mul(&k).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let db = cg.grad(&b).unwrap().expect("db");
+    let db_v = db.value().contiguous().as_slice().unwrap().to_vec();
+    assert!(db_v.iter().all(|v| v.is_finite() && *v > 1e38), "{db_v:?}");
+    let scale = child.var_no_grad(&t(vec![1e-38], &[1]));
+    let sc = db.mul(&scale).unwrap();
+    let s = sc.mul(&sc).unwrap().sum(None).unwrap();
+    let cg2 = child.backward_create_graph(&s, &grand).unwrap();
+    let cb = cg.child_var(&b).unwrap().unwrap();
+    let g2 = cg2.grad(&cb).unwrap().expect("d s / d b");
+    let gv = g2.value().contiguous().as_slice().unwrap().to_vec();
+    assert!(gv.iter().all(|v| v.is_finite()), "{gv:?}");
+}

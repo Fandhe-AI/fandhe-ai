@@ -675,6 +675,32 @@ fn replay_op<'c>(
                 transposed,
             )
         }
+        // BatchNorm の dx／dw／db ホスト値ノード（イシュー #3079）: 孫テープでも
+        // 1 階と同じホスト関数で値を再計算する（f64 縮約の補正を失わない）。
+        Op::BatchNormGradHost {
+            structure,
+            g,
+            x,
+            weight,
+            has_bias,
+            eps,
+            fixed_stats,
+            kind,
+        } => {
+            let structure_m = get_mirror(mirror, structure)?;
+            let w_m = weight.map(|w| get_mirror(mirror, w)).transpose()?;
+            crate::create_graph_norm::host_grad_node(
+                structure_m.tape(),
+                &structure_m,
+                &get_mirror(mirror, g)?,
+                &get_mirror(mirror, x)?,
+                w_m.as_ref(),
+                has_bias,
+                eps,
+                fixed_stats,
+                kind,
+            )
+        }
         // 2D 畳み込み族（イシュー #3080）。公開 `Var` メソッドへの委譲で、
         // forward と同じカーネルを通るため写しの値は親と一致する。
         Op::Conv2d {
@@ -966,7 +992,7 @@ fn build_cgrads<'c>(
                 // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, input, g)?;
             }
-            Op::ConvWeightGradHost { structure, .. } => {
+            Op::ConvWeightGradHost { structure, .. } | Op::BatchNormGradHost { structure, .. } => {
                 // 恒等で `structure` のみへ（`grad.rs` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, structure, g)?;
             }
@@ -996,10 +1022,6 @@ fn build_cgrads<'c>(
                 // 方式（V3＋S1／eval の dx は V1）は `create_graph_norm.rs`
                 // と決定記録 §24 を参照。
                 let x_host = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
-                let w_host = match weight {
-                    Some(w) => Some(materialize_fallible(&parent_nodes, parent_ops, w)?.clone()),
-                    None => None,
-                };
                 let (n_, c_, spatial_) = batch_norm_layout(x_host.shape())?;
                 let inputs = crate::create_graph_norm::BatchNormCgradInputs {
                     x_mirror: get_mirror(mirror, input)?,
@@ -1008,7 +1030,6 @@ fn build_cgrads<'c>(
                     eps,
                     fixed_stats: fixed_stats.as_ref(),
                     x_host: &x_host,
-                    w_host: w_host.as_ref(),
                     need_dx: parent_nodes[input.0].requires_grad,
                     n: n_,
                     c: c_,

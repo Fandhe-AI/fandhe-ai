@@ -3228,7 +3228,7 @@ pub(crate) fn vjp(
         }
         // d_weight のホスト値ノード（`tape::Op::ConvWeightGradHost` doc）。
         // 微分経路は `structure` のみ（恒等）。
-        Op::ConvWeightGradHost { structure, .. } => {
+        Op::ConvWeightGradHost { structure, .. } | Op::BatchNormGradHost { structure, .. } => {
             vec![(structure, upstream.clone())]
         }
         // `Var::one_hot`（**非微分演算**。イシュー #1755）。クラス id

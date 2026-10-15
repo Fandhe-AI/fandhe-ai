@@ -37,6 +37,14 @@ use crate::error::AutodiffError;
 use crate::grad::cast_to_f32_with_fallback;
 use crate::var::matmul_forward;
 
+/// [`Op::BatchNormGradHost`] が表す出力（`batch_norm_vjp_channels` の戻り値の選択）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchNormGradKind {
+    Dx,
+    Dw,
+    Db,
+}
+
 /// テープの識別子。プロセス全体で単調増加するカウンタから発行する。
 ///
 /// ポインタ等値（`ptr::eq`）ではなく専用 ID を用いる理由: スコープ末で
@@ -680,6 +688,23 @@ pub(crate) enum Op {
         x: NodeId,
         params: Conv2dParams,
         transposed: bool,
+    },
+    /// BatchNorm の `dx`／`dw`／`db` を子テープへ記録するホスト値ノード（イシュー
+    /// #3079・決定記録 §24）。`structure` は二階微分経路（2 のべき乗スケール付きの
+    /// 合成グラフ）、`g`（上流勾配）・`x`・`weight` は 1 階 VJP と同じホスト関数
+    /// （`grad::batch_norm_vjp_channels`。f64 縮約）へ渡すオペランド。
+    /// `Op::Contiguous` と異なり孫テープでの再生時にも同じホスト関数で値を
+    /// 再計算するため、ホスト側 f64 縮約の補正値が f32 構造側の再計算（overflow）で
+    /// 失われない（§21.1(5)）。VJP は恒等で `structure` のみへ渡す。
+    BatchNormGradHost {
+        structure: NodeId,
+        g: NodeId,
+        x: NodeId,
+        weight: Option<NodeId>,
+        has_bias: bool,
+        eps: f32,
+        fixed_stats: Option<(Tensor<f32>, Tensor<f32>)>,
+        kind: BatchNormGradKind,
     },
     /// 行方向 RMSNorm（イシュー #1596）。`BackendOps` に対応メソッド
     /// （`rmsnorm`。既存の `run_fused` canonical プラン一致経路とは別の
@@ -1856,7 +1881,7 @@ impl Op {
             // として `docs/autodiff-checkpoint-design.md` に記録済み。
             Op::Contiguous { .. } => false,
             // `Op::ConvWeightGradHost` も実体化演算で再導出分岐が無い。
-            Op::ConvWeightGradHost { .. } => false,
+            Op::ConvWeightGradHost { .. } | Op::BatchNormGradHost { .. } => false,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -2122,6 +2147,20 @@ impl Op {
                 f(*structure);
                 f(*g);
                 f(*x);
+            }
+            Op::BatchNormGradHost {
+                structure,
+                g,
+                x,
+                weight,
+                ..
+            } => {
+                f(*structure);
+                f(*g);
+                f(*x);
+                if let Some(w) = weight {
+                    f(*w);
+                }
             }
             Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
             Op::Sum { input, .. }
@@ -2479,6 +2518,7 @@ impl Op {
             | Op::Concat { .. }
             | Op::Contiguous { .. }
             | Op::ConvWeightGradHost { .. }
+            | Op::BatchNormGradHost { .. }
             // 2D 畳み込み族（イシュー #3080・決定記録 §21・§23）。`Conv2d`／
             // `ConvTranspose2d`／`Unfold`／`Fold` は `replay_op`（公開 `Var`
             // メソッドへの委譲）と `build_cgrads`（unfold／fold＋rank 2
