@@ -27,10 +27,15 @@
 //! `Tape` 以外の経路（モジュール再エクスポート・裸の自由関数・`Var`／`Tensor<f32>` 上の同名メソッド）は
 //! 引き続き未承認で、facade の保留ガードが機械固定している。
 //!
-//! **共通の契約**: 単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。`vjp`／`hvp` の結果は
+//! 複数入力版 `jvp_multi`（イシュー #3063・設計記録 §30）は同じ前段（`double_vjp_front`）を共用し、
+//! 入力ごとの `g_i` を子テープ上でスカラー和へ畳んで `child.backward` を 1 回だけ呼ぶ。facade の
+//! `Tape::jvp_multi` から 1 行委譲で呼ばれる。
+//!
+//! **共通の契約**: `jvp_multi` 以外は単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。`vjp`／`hvp` の結果は
 //! 非微分のホスト値（`vmap` のみ同じテープ上の微分可能な `Var`）。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
 //! の挙動をそのまま伝播する。
 
+use crate::create_graph::CreateGraphResult;
 use crate::error::AutodiffError;
 use crate::jacobian_ops::{FlatElements, check_on_tape, checked_numel, copy_grad_row};
 use crate::tape::Tape;
@@ -254,6 +259,21 @@ fn double_vjp_stage<'c>(
     input: &Var<'_>,
     child: &'c Tape,
 ) -> Result<Option<(Var<'c>, Var<'c>)>, AutodiffError> {
+    let (cg, cu) = double_vjp_front(tape, output, child)?;
+    match cg.grad(input)? {
+        Some(g) if g.requires_grad() => Ok(Some((g, cu))),
+        _ => Ok(None),
+    }
+}
+
+/// double-VJP 法の前段の本体（`double_vjp_stage`・`jvp_multi` 共通。#3063）。親テープへ追跡ありの葉 `u` と
+/// `s = output ⊙ u` を足して `backward_create_graph` を 1 回だけ呼び、`(CreateGraphResult, child 上の u)` を返す。
+/// 入力ごとの `g_i = J_iᵀu` の取り出しは呼び出し側が行う。親テープへの操作列は単一入力版と同一。
+fn double_vjp_front<'c>(
+    tape: &Tape,
+    output: &Var<'_>,
+    child: &'c Tape,
+) -> Result<(CreateGraphResult<'c>, Var<'c>), AutodiffError> {
     let u = tape.var(&Tensor::ones(&output.shape()).map_err(AutodiffError::Shape)?);
     let s = output.mul(&u)?;
     let cg = tape.backward_create_graph(&s, child)?;
@@ -262,10 +282,7 @@ fn double_vjp_stage<'c>(
             "double-VJP: 余接葉 u の子テープ写しが存在しない（不変条件違反）".to_string(),
         ));
     };
-    match cg.grad(input)? {
-        Some(g) if g.requires_grad() => Ok(Some((g, cu))),
-        _ => Ok(None),
-    }
+    Ok((cg, cu))
 }
 
 /// 列 `col`（長さ `m`）を行優先の結果 `data`（`m × n`）の第 `k` 列へ書く。長さ不一致は型付きエラー。
@@ -398,4 +415,110 @@ pub fn jacfwd(
         }
     }
     Tensor::new(data, &result_shape).map_err(AutodiffError::Shape)
+}
+
+/// 複数入力のヤコビアン・ベクトル積 `J·v = Σ_i J_i·v_i`（`J_i = ∂output/∂inputs[i]`）を double-VJP 法で求める
+/// （イシュー #3063・親 #3062。設計記録 §30。facade の `Tape::jvp_multi` から 1 行委譲で呼ばれる。
+/// `torch.func.jvp` に複数の primals／tangents を渡す形に相当）。戻り値は shape が `output.shape()` の
+/// 非微分ホスト値。`child` の契約は [`jvp`] と同じ（空の子テープ。呼び出し後は再利用しない）。
+///
+/// **入口検査（ノードを足す前。順序固定。違反が複数あれば最初のものを返す。失敗時は親・子テープとも無変更）**:
+/// 1. `inputs.len() != tangents.len()` → `Err(InvalidArgument)`。
+/// 2. `inputs` が空 → `Err(InvalidArgument)`。
+/// 3. `output`、続いて `inputs` を添字順に現世代検査 → `Err(TapeMismatch)`。
+/// 4. 追跡なしの入力（添字順）→ `Err(GradientTrackingDisabled)`。
+/// 5. 同一 `Var` の重複指定 → `Err(InvalidArgument)`（二重計上の誤用を防ぐ fail-closed）。
+/// 6. `tangents[i].shape() != inputs[i].shape()`（添字順。ブロードキャスト不可）→ `Err(Shape(ShapeMismatch))`。
+/// 7. 要素数を `checked_numel` で検査（`Err(Shape(ElementCountOverflow))`）。
+/// 8. 出力の要素数 0・`output.requires_grad() == false`・全入力の要素数 0 → テープに触れず全ゼロ
+///    （`child` も検査しない）。
+///
+/// 入力が 1 つのときはエラーの種類・順序とも [`jvp`] と一致する。
+///
+/// **算法**: 親 backward は `backward_create_graph` 1 回のみ。`g_i = J_iᵀu` を入力ごとに取り出し、
+/// 子テープ上で `p_i = Σ(g_i ⊙ v_i)`（スカラー）を `add` で畳み込んだ合計を `child.backward` 1 回に渡す
+/// （`∂/∂u = Σ J_i·v_i`）。計算量は入力数に依らず親 1 回＋子 1 回。寄与する入力が無ければ全ゼロ。
+///
+/// **副作用**: 入口検査後の失敗でも親テープへちょうど 2 ノード（`u` と `mul`）が残る（入力数に依らない）。
+/// 成功時の子テープには写し・1 階勾配・第 2 段の補助ノードが残る。結果は REQ-2 統一複合判定で
+/// `jacobian` 由来の `Σ J_i·v_i` と一致し、入力 1 つでも [`jvp`] と bit 同一は主張しない。
+/// 非有限値は検査せず伝播する。f32 の [`Tape`] のみ。
+pub fn jvp_multi(
+    tape: &Tape,
+    output: &Var<'_>,
+    inputs: &[&Var<'_>],
+    tangents: &[&Tensor<f32>],
+    child: &Tape,
+) -> Result<Tensor<f32>, AutodiffError> {
+    if inputs.len() != tangents.len() {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "jvp_multi: inputs の数（{}）と tangents の数（{}）が一致しない",
+            inputs.len(),
+            tangents.len()
+        )));
+    }
+    if inputs.is_empty() {
+        return Err(AutodiffError::InvalidArgument(
+            "jvp_multi: inputs が空".to_string(),
+        ));
+    }
+    check_on_tape(tape, output)?;
+    for input in inputs {
+        check_on_tape(tape, input)?;
+    }
+    if inputs.iter().any(|v| !v.requires_grad()) {
+        return Err(AutodiffError::GradientTrackingDisabled);
+    }
+    for (i, a) in inputs.iter().enumerate() {
+        if inputs[..i].iter().any(|b| b.node_id() == a.node_id()) {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "jvp_multi: inputs[{i}] が重複指定されている"
+            )));
+        }
+    }
+    for (input, tangent) in inputs.iter().zip(tangents) {
+        let in_shape = input.shape();
+        if tangent.shape() != in_shape.as_slice() {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: in_shape,
+                rhs: tangent.shape().to_vec(),
+            }));
+        }
+    }
+    let out_shape = output.shape();
+    let m = checked_numel(&out_shape)?;
+    let mut all_empty = true;
+    for input in inputs {
+        if checked_numel(&input.shape())? != 0 {
+            all_empty = false;
+        }
+    }
+    if m == 0 || all_empty || !output.requires_grad() {
+        return Tensor::zeros(&out_shape).map_err(AutodiffError::Shape);
+    }
+
+    let mut data = vec![0.0f32; m];
+    let (cg, cu) = double_vjp_front(tape, output, child)?;
+    let mut total: Option<Var<'_>> = None;
+    for (input, tangent) in inputs.iter().zip(tangents) {
+        if tangent.shape().iter().product::<usize>() == 0 {
+            continue;
+        }
+        let Some(g) = cg.grad(input)? else { continue };
+        if !g.requires_grad() {
+            continue;
+        }
+        let p = g.mul(&child.var_no_grad(tangent))?.sum(None)?;
+        total = Some(match total {
+            Some(acc) => acc.add(&p)?,
+            None => p,
+        });
+    }
+    if let Some(total) = total {
+        let grads = child.backward(&total)?;
+        if let Some(h) = grads.get(&cu)? {
+            copy_grad_row(h, &mut data)?;
+        }
+    }
+    Tensor::new(data, &out_shape).map_err(AutodiffError::Shape)
 }

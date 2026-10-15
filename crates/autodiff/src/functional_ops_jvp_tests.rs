@@ -505,3 +505,328 @@ fn j6_jacfwd_columns_match_one_hot_tangent_products() {
         common::assert_all_req2_close(&col, &expected, &format!("column {kk}"));
     }
 }
+
+// ------------------------------------------------------------ M: 複数入力版（#3063）
+
+/// 複数入力版の呼び出し（テスト名・ヘルパー名は宣言インベントリ対策で関数名と完全一致させない）。
+fn multi_jv<'t>(
+    tape: &'t Tape,
+    y: &Var<'t>,
+    xs: &[&Var<'t>],
+    vs: &[&Tensor<f32>],
+    child: &Tape,
+) -> Result<Tensor<f32>, AutodiffError> {
+    crate::functional_ops::jvp_multi(tape, y, xs, vs, child)
+}
+
+/// `build`（入力 k 個）で作った出力に対し、入力ごとの `jacobian` 由来の参照 `Σ J_i·v_i`（f64 合計）と
+/// 統一複合判定で突合する。
+fn check_multi<F>(shapes: &[Vec<usize>], xvs: &[Vec<f32>], ctx: &str, build: F)
+where
+    F: for<'t> Fn(&'t Tape, &[Var<'t>]) -> Built<'t>,
+{
+    let vvs: Vec<Vec<f32>> = shapes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| seq(s.iter().product(), 5.0 + i as f32))
+        .collect();
+
+    // 参照
+    let tb = new_tape();
+    let xb: Vec<Var<'_>> = shapes
+        .iter()
+        .zip(xvs)
+        .map(|(s, d)| tb.var(&t(d.clone(), s)))
+        .collect();
+    let yb = build(&tb, &xb).unwrap();
+    let m: usize = yb.shape().iter().product();
+    let mut expected = vec![0.0f64; m];
+    for (i, x) in xb.iter().enumerate() {
+        let jh = jacobian(&tb, &yb, x).unwrap().host_slice().into_owned();
+        let n: usize = shapes[i].iter().product();
+        let part = common::jacobian_times_vector_f64(&jh, m, n, &vvs[i]);
+        for (e, p) in expected.iter_mut().zip(part) {
+            *e += p;
+        }
+    }
+
+    let ta = new_tape();
+    let xa: Vec<Var<'_>> = shapes
+        .iter()
+        .zip(xvs)
+        .map(|(s, d)| ta.var(&t(d.clone(), s)))
+        .collect();
+    let ya = build(&ta, &xa).unwrap();
+    let tangents: Vec<Tensor<f32>> = shapes
+        .iter()
+        .zip(&vvs)
+        .map(|(s, d)| t(d.clone(), s))
+        .collect();
+    let xr: Vec<&Var<'_>> = xa.iter().collect();
+    let tr: Vec<&Tensor<f32>> = tangents.iter().collect();
+    let child = new_tape();
+    let got = multi_jv(&ta, &ya, &xr, &tr, &child)
+        .unwrap_or_else(|e| panic!("{ctx}: 複数入力 jvp 失敗: {e:?}"));
+    assert_eq!(got.shape(), yb.shape().as_slice(), "{ctx}: shape");
+    common::assert_all_req2_close(&got.host_slice(), &expected, ctx);
+}
+
+#[test]
+fn m1_multi_input_matches_jacobian_sum() {
+    // mul: x2⊙v1 + x1⊙v2
+    check_multi(
+        &[vec![5], vec![5]],
+        &[seq(5, 1.0), seq(5, 2.0)],
+        "mul",
+        |_, x| x[0].mul(&x[1]),
+    );
+    // matmul→tanh（W・x とも追跡あり・非正方形）
+    check_multi(
+        &[vec![3, 4], vec![4, 2]],
+        &[seq(12, 1.0), seq(8, 2.0)],
+        "tanh(Wx)",
+        |_, x| Ok(x[0].matmul(&x[1])?.tanh()),
+    );
+    // ブロードキャスト add
+    check_multi(
+        &[vec![2, 3], vec![3]],
+        &[seq(6, 1.0), seq(3, 2.0)],
+        "bcast add",
+        |_, x| x[0].add(&x[1]),
+    );
+    // 3 入力の合成
+    check_multi(
+        &[vec![4], vec![4], vec![4]],
+        &[seq(4, 1.0), seq(4, 2.0), seq(4, 3.0)],
+        "tanh(a*b)+c",
+        |_, x| x[0].mul(&x[1])?.tanh().add(&x[2]),
+    );
+    // rank 0 の入力を含む
+    check_multi(
+        &[vec![], vec![3]],
+        &[vec![0.7], seq(3, 2.0)],
+        "rank0",
+        |_, x| x[1].mul(&x[0]),
+    );
+}
+
+#[test]
+fn m1_closed_form_mul() {
+    let (a, b) = (seq(4, 1.0), seq(4, 2.0));
+    let (va, vb) = (t(seq(4, 5.0), &[4]), t(seq(4, 6.0), &[4]));
+    let tape = new_tape();
+    let x1 = tape.var(&t(a.clone(), &[4]));
+    let x2 = tape.var(&t(b.clone(), &[4]));
+    let y = x1.mul(&x2).unwrap();
+    let child = new_tape();
+    let got = multi_jv(&tape, &y, &[&x1, &x2], &[&va, &vb], &child).unwrap();
+    let (va, vb) = (va.host_slice(), vb.host_slice());
+    let e: Vec<f64> = (0..4)
+        .map(|i| f64::from(b[i]) * f64::from(va[i]) + f64::from(a[i]) * f64::from(vb[i]))
+        .collect();
+    common::assert_all_req2_close(&got.host_slice(), &e, "x2*v1 + x1*v2");
+}
+
+#[test]
+fn m2_single_input_matches_single_and_zero_contribution_inputs_drop_out() {
+    let tape = new_tape();
+    let x1 = tape.var(&t(seq(4, 1.0), &[4]));
+    let x2 = tape.var(&t(seq(4, 2.0), &[4]));
+    let x3 = tape.var(&t(seq(0, 1.0), &[0]));
+    let y = x1.tanh().mul(&x1).unwrap();
+    let (v1, v2, v3) = (t(seq(4, 5.0), &[4]), t(seq(4, 6.0), &[4]), t(vec![], &[0]));
+    let child = new_tape();
+    let single = jvp(&tape, &y, &x1, &v1, &child).unwrap();
+    // k=1
+    let child = new_tape();
+    let one = multi_jv(&tape, &y, &[&x1], &[&v1], &child).unwrap();
+    common::assert_all_req2_close(
+        &one.host_slice(),
+        &single
+            .host_slice()
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect::<Vec<_>>(),
+        "k=1",
+    );
+    // y が x2 に依存しない（J_2 ≡ 0）・要素数 0 の入力混在
+    let child = new_tape();
+    let multi = multi_jv(&tape, &y, &[&x1, &x2, &x3], &[&v1, &v2, &v3], &child).unwrap();
+    common::assert_all_req2_close(
+        &multi.host_slice(),
+        &single
+            .host_slice()
+            .iter()
+            .map(|&v| f64::from(v))
+            .collect::<Vec<_>>(),
+        "J2=0 と空入力",
+    );
+}
+
+#[test]
+fn m3_entry_checks_and_ordering() {
+    let tape = new_tape();
+    let x1 = tape.var(&t(seq(3, 1.0), &[3]));
+    let x2 = tape.var(&t(seq(3, 2.0), &[3]));
+    let nx = tape.var_no_grad(&t(seq(3, 3.0), &[3]));
+    let y = x1.mul(&x2).unwrap();
+    let v = t(seq(3, 5.0), &[3]);
+    let other = new_tape();
+    let ox = other.var(&t(seq(3, 1.0), &[3]));
+    let len = tape.len();
+    let child = new_tape();
+    let check = |e: AutodiffError, expect: &str, ctx: &str| {
+        let ok = match expect {
+            "invalid" => matches!(e, AutodiffError::InvalidArgument(_)),
+            "mismatch" => matches!(e, AutodiffError::TapeMismatch),
+            "notrack" => matches!(e, AutodiffError::GradientTrackingDisabled),
+            "shape" => matches!(e, AutodiffError::Shape(ShapeError::ShapeMismatch { .. })),
+            _ => false,
+        };
+        assert!(ok, "{ctx}: {e:?}");
+        assert_eq!(tape.len(), len, "{ctx}: 親テープが変化した");
+        assert!(child.is_empty(), "{ctx}: 子テープが変化した");
+    };
+    let bad = [t(vec![1.0], &[1]), t(seq(3, 1.0), &[3, 1])];
+
+    check(
+        multi_jv(&tape, &y, &[&x1, &x2], &[&v], &child).unwrap_err(),
+        "invalid",
+        "長さ不一致",
+    );
+    check(
+        multi_jv(&tape, &y, &[], &[], &child).unwrap_err(),
+        "invalid",
+        "空",
+    );
+    check(
+        multi_jv(&tape, &y, &[&x1, &ox], &[&v, &v], &child).unwrap_err(),
+        "mismatch",
+        "別テープ入力",
+    );
+    check(
+        multi_jv(&tape, &ox.tanh(), &[&x1, &x2], &[&v, &v], &child).unwrap_err(),
+        "mismatch",
+        "別テープ output",
+    );
+    check(
+        multi_jv(&tape, &y, &[&x1, &nx], &[&v, &v], &child).unwrap_err(),
+        "notrack",
+        "追跡なし",
+    );
+    check(
+        multi_jv(&tape, &y, &[&x1, &x1], &[&v, &v], &child).unwrap_err(),
+        "invalid",
+        "重複",
+    );
+    for b in &bad {
+        check(
+            multi_jv(&tape, &y, &[&x1, &x2], &[&v, b], &child).unwrap_err(),
+            "shape",
+            "tangent shape",
+        );
+    }
+    // 順序: 長さ不一致 > TapeMismatch > 追跡なし > 重複 > shape
+    check(
+        multi_jv(&tape, &y, &[&x1, &ox], &[&v], &child).unwrap_err(),
+        "invalid",
+        "長さ>mismatch",
+    );
+    check(
+        multi_jv(&tape, &y, &[&nx, &ox], &[&v, &v], &child).unwrap_err(),
+        "mismatch",
+        "mismatch>追跡なし",
+    );
+    check(
+        multi_jv(&tape, &y, &[&nx, &x2], &[&bad[0], &v], &child).unwrap_err(),
+        "notrack",
+        "追跡なし>shape",
+    );
+    check(
+        multi_jv(&tape, &y, &[&x1, &x1], &[&bad[0], &v], &child).unwrap_err(),
+        "invalid",
+        "重複>shape",
+    );
+    // k=1 は単一版と同じエラー
+    let e1 = jvp(&tape, &y, &nx, &v, &child).unwrap_err();
+    let e2 = multi_jv(&tape, &y, &[&nx], &[&v], &child).unwrap_err();
+    assert_eq!(format!("{e1:?}"), format!("{e2:?}"));
+    let e1 = jvp(&tape, &y, &x1, &bad[0], &child).unwrap_err();
+    let e2 = multi_jv(&tape, &y, &[&x1], &[&bad[0]], &child).unwrap_err();
+    assert_eq!(format!("{e1:?}"), format!("{e2:?}"));
+}
+
+#[test]
+fn m4_zero_return_paths_do_not_touch_tapes() {
+    let tape = new_tape();
+    let x1 = tape.var(&t(seq(3, 1.0), &[3]));
+    let x2 = tape.var(&t(seq(3, 2.0), &[3]));
+    let e1 = tape.var(&t(vec![], &[0]));
+    let ny = tape.var_no_grad(&t(seq(4, 2.0), &[4]));
+    let empty_y = tape.var(&t(vec![], &[0]));
+    let y = x1.mul(&x2).unwrap();
+    let v = t(seq(3, 5.0), &[3]);
+    let ev = t(vec![], &[0]);
+    let len = tape.len();
+    let child = new_tape();
+    let r = multi_jv(&tape, &ny, &[&x1, &x2], &[&v, &v], &child).unwrap();
+    assert_eq!(r.shape(), &[4]);
+    assert!(r.host_slice().iter().all(|&z| z == 0.0));
+    let r = multi_jv(&tape, &empty_y, &[&x1, &x2], &[&v, &v], &child).unwrap();
+    assert_eq!(r.shape(), &[0]);
+    let r = multi_jv(&tape, &y, &[&e1], &[&ev], &child).unwrap();
+    assert_eq!(r.shape(), &[3]);
+    assert!(r.host_slice().iter().all(|&z| z == 0.0));
+    assert_eq!(tape.len(), len);
+    assert!(child.is_empty());
+}
+
+#[test]
+fn m5_unsupported_ops_and_bad_child_are_rejected_with_two_parent_nodes() {
+    let tape = new_tape();
+    let x1 = tape.var(&t(seq(6, 1.0), &[2, 3]));
+    let x2 = tape.var(&t(seq(6, 2.0), &[2, 3]));
+    let y = x1.add(&x2).unwrap().max(None).unwrap();
+    let v = t(seq(6, 5.0), &[2, 3]);
+    let child = new_tape();
+    let len = tape.len();
+    let e = multi_jv(&tape, &y, &[&x1, &x2], &[&v, &v], &child).unwrap_err();
+    assert!(matches!(e, AutodiffError::Backward(_)), "{e:?}");
+    assert!(child.is_empty());
+    assert_eq!(tape.len(), len + 2);
+
+    // 非空の子・同一テープ
+    let tape = new_tape();
+    let x1 = tape.var(&t(seq(3, 1.0), &[3]));
+    let x2 = tape.var(&t(seq(3, 2.0), &[3]));
+    let y = x1.mul(&x2).unwrap();
+    let v = t(seq(3, 5.0), &[3]);
+    let child = new_tape();
+    let _ = child.var(&t(vec![1.0], &[1]));
+    let clen = child.len();
+    let e = multi_jv(&tape, &y, &[&x1, &x2], &[&v, &v], &child).unwrap_err();
+    assert!(matches!(e, AutodiffError::Backward(_)), "{e:?}");
+    assert_eq!(child.len(), clen);
+    let e = multi_jv(&tape, &y, &[&x1, &x2], &[&v, &v], &tape).unwrap_err();
+    assert!(matches!(e, AutodiffError::Backward(_)), "{e:?}");
+}
+
+#[test]
+fn m6_multi_is_deterministic_and_does_not_mutate_existing_nodes() {
+    let run = || {
+        let tape = new_tape();
+        let x1 = tape.var(&t(seq(6, 1.0), &[2, 3]));
+        let x2 = tape.var(&t(seq(3, 2.0), &[3]));
+        let y = x1.tanh().mul(&x2).unwrap();
+        let yv = y.value().host_slice().into_owned();
+        let (v1, v2) = (t(seq(6, 5.0), &[2, 3]), t(seq(3, 6.0), &[3]));
+        let child = new_tape();
+        let a = multi_jv(&tape, &y, &[&x1, &x2], &[&v1, &v2], &child)
+            .unwrap()
+            .host_slice()
+            .into_owned();
+        assert_eq!(y.value().host_slice().into_owned(), yv);
+        a
+    };
+    assert_eq!(run(), run(), "複数入力 jvp が bit 一致しない");
+}
