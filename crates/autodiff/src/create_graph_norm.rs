@@ -412,9 +412,19 @@ pub(crate) fn batch_norm_cgrads<'c>(
                 // dx̂ を行ごとの 2 のべき乗 s_g で割ってから縮約する（巨大な
                 // 上流勾配での `Σdx̂` overflow を避ける。dx は dx̂ について線形）。
                 let dv = host_values(child, &dxhat)?;
-                let sg_exp: Vec<i32> = row_abs_max(&dv, c, n * spatial)
+                // 上限 `sg_cap = ceil(log2 m) + 2`（m は行長）: 逆伝播では復元倍率
+                // `2^(s_g - p_s2)` が `inv_sg` の縮小より先に単位シードへ掛かるため、
+                // s_g が大きいと累積倍率が f32 を超える（x=[0,0]・上流 1e38 で 2^135）。
+                // 縮約の安全は `|t| <= max|dx̂|/(4m)` で足りる（Σ|t·x̂| <= m·|t|max）
+                // ので、s_g を上限で打ち切って累積倍率を `rstd·2^sg_cap` 以下に抑える。
+                let m_len = n * spatial;
+                let sg_cap = m_len.next_power_of_two().trailing_zeros() as i32 + 2;
+                let sg_exp: Vec<i32> = row_abs_max(&dv, c, m_len)
                     .iter()
-                    .map(|&(mx, inf)| if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) })
+                    .map(|&(mx, inf)| {
+                        let e = if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) };
+                        e.min(sg_cap)
+                    })
                     .collect();
                 let inv_sg: Vec<f32> = sg_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
                 let t = dxhat.mul(&const_col(child, &inv_sg)?)?;

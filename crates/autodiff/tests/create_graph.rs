@@ -2913,3 +2913,26 @@ fn batch_norm_create_graph_huge_constant_input_second_order_is_finite() {
         }
     }
 }
+
+/// Codex P1 回帰: train で `s_g` の復元倍率が `inv_sg` より先に逆伝播され
+/// 2^135 が単位シードへ掛かり二階勾配が NaN になった（x=[0,0]・上流 1e38）。
+/// この損失の Hessian は 0 で、`child.backward` の結果は有限かつ 0。
+#[test]
+fn batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 0.0], &[2, 1]));
+    let w = tape.var(&t(vec![1.0], &[1]));
+    let y = x.batch_norm(Some(&w), None, 1e-5).unwrap();
+    let k = tape.var_no_grad(&t(vec![1e38, 1e38], &[2, 1]));
+    let loss = y.mul(&k).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let dx = cg.grad(&x).unwrap().expect("dx");
+    let s = dx.sum(None).unwrap();
+    let hv = child.backward(&s).unwrap();
+    let cx = cg.child_var(&x).unwrap().unwrap();
+    if let Some(h) = hv.get(&cx).unwrap() {
+        let hd = h.contiguous().as_slice().unwrap().to_vec();
+        assert!(hd.iter().all(|v| v.is_finite() && *v == 0.0), "{hd:?}");
+    }
+}

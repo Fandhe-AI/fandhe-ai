@@ -897,6 +897,12 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - 空入力の判定を形状の積から `shape.contains(&0)` へ変更した（`[usize::MAX, 2, 0]` で積が overflow して panic するため）。
 - テスト: `batch_norm_create_graph_huge_constant_input_second_order_is_finite`・`batch_norm_create_graph_rejects_overflowing_empty_shape`・overflow 回帰ベクトルへ `const-3e38-*` を追加。
 
+### 23.5b レビュー指摘の是正（Codex P1・`s_g` 復元倍率の逆伝播順）
+
+- 原因: train の dx は `dx̂` を `2^-s_g` で縮小して縮約し、最後に `2^(s_g - p_s2)` で復元する直列構造のため、逆伝播では復元倍率が縮小より先に単位シードへ掛かる。`x=[0,0]`・`eps=1e-5`・上流 `[1e38,1e38]` は `s_g=127`・`p_s2=-8` で `2^135` が掛かり二階勾配が `inf`→`NaN` になった（本来 Hessian は 0）。±100 の段分割は累積倍率を守らない。
+- 是正: `s_g` を `ceil(log2 m) + 2`（m は行長 `n·spatial`）で打ち切る。縮約の安全は `|t| <= max|dx̂|/(4m)`（`Σ|t·x̂| <= m·max|t|`・`|x̂| <= √m`）で足りるため、逆伝播の累積倍率は `rstd·2^(ceil(log2 m)+2)` 以下に収まる。小さい上流勾配は従来どおり `s_g` が負で拡大側。dx の値は 1 階のホスト値で上書きされるため値は不変。
+- 回帰テスト: `batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero`（上記ケースで二階勾配が有限かつ 0）。
+
 ### 23.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。
