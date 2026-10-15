@@ -2240,6 +2240,25 @@ fn overflow_regression(x0: [f32; 2], w: [f32; 2], log: bool, expected_jvp: f64) 
     );
 }
 
+/// 小スケール上流勾配の回帰（codex-review 指摘・PR #3344）。
+/// `x=[0,0]`・`loss = Σ log_softmax(x)² · 1e-40` では上流勾配の最大絶対値が
+/// 非正規数級になる。除算の微分係数 `1/s` が overflow して有限の
+/// Hessian が `inf`／`NaN` に汚染されないこと。
+#[test]
+fn create_graph_log_softmax_tiny_upstream_hessian_is_finite() {
+    fn build<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let y = x.log_softmax(1)?;
+        let c = tape.var_no_grad(&t(vec![1e-40f32; 2], &[1, 2]));
+        y.mul(&y)?.mul(&c)?.sum(None)
+    }
+    let h = analytic_hessian(build, &[0.0, 0.0], &[1, 2]);
+    for row in &h {
+        for v in row {
+            assert!(v.is_finite() && v.abs() < 1e-30, "Hessian が汚染: {h:?}");
+        }
+    }
+}
+
 #[test]
 fn create_graph_softmax_large_upstream_does_not_overflow() {
     // y=[0.25,0.75]、d/dx softmax·w の J·t の総和は

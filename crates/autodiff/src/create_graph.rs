@@ -711,7 +711,16 @@ fn softmax_cgrad_v3<'c>(
 
 /// レーンごとのスケール `s = max|g|`（`dim` 軸を長さ 1 にした shape）。
 /// `s == 0` と非有限（`g` に `inf`／`NaN`）のレーンは `1`（IEEE 伝播を
-/// 構造側へ任せる。§22）。
+/// 構造側へ任せる。§22）。有限の小さい `max|g|` は下限
+/// [`LANE_SCALE_FLOOR`] で持ち上げる（codex-review 指摘・PR #3344:
+/// `g.div(&s)` の VJP は `1/s`・`-g/s²` を f32 で先に評価するため、
+/// 非正規数級の `s` では二階微分の係数が `inf` になる。構造式は任意の
+/// `s > 0` で数学的に同値なので下限を設けても 1 階値・二階の意味は
+/// 不変）。
+/// `lane_scale` の下限（`2^-20`）。`1/s² ≤ 2^40`・`|g|/s² ≤ 2^20/…` が
+/// いずれも f32 で有限に収まる大きさ。
+const LANE_SCALE_FLOOR: f32 = 9.536_743e-7;
+
 fn lane_scale(g: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, AutodiffError> {
     let shape = g.shape().to_vec();
     let outer: usize = shape[..dim].iter().product();
@@ -733,7 +742,11 @@ fn lane_scale(g: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, AutodiffError>
                     m = v;
                 }
             }
-            s.push(if m == 0.0 || !m.is_finite() { 1.0 } else { m });
+            s.push(if m == 0.0 || !m.is_finite() {
+                1.0
+            } else {
+                m.max(LANE_SCALE_FLOOR)
+            });
         }
     }
     let mut sshape = shape;
