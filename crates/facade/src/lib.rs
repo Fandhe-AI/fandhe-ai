@@ -6157,7 +6157,11 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 /// `PHASE4_VAR_EXPECTED_BODIES`）が担う。
 ///
 /// 引き続き拒否する未承認経路は、ローカルモジュール `fold_ops`／`fold`・型 `Fold`／`Unfold`・
-/// `Tape`／`Tensor<f32>` 上の同名メソッド・`add_fold`／`add_unfold`（`compat::Sequential`。層化は保留継続）である。
+/// `Tape`／`Tensor<f32>` 上の同名メソッドである。
+/// **#3040 での部分反転**: `compat::Sequential::add_fold`／`add_unfold` は `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3 の
+/// 承認形で公開したため、`Sequential` 向けのトレイト impl と UFCS 呼び出しは本プローブから外した（inherent メソッドと衝突するため）。
+/// 公開済み側の正ガードは `crates/facade/tests/api_surface.rs::add_fold_unfold_signatures_match_approved_contract` 等が担う。
+///
 /// 下の doctest は全 `pub mod` を glob import したスコープへこれらのプローブを置き、facade が同名のモジュール・型・関数を
 /// glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、名前解決の曖昧性または
 /// 呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する（`Tensor` は facade から再エクスポートされるため、
@@ -6229,20 +6233,6 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 ///     }
 /// }
 ///
-/// trait __FandheFoldUnfoldHoldSequentialProbe {
-///     fn add_fold(&self) -> __FandheFoldUnfoldHoldMarker;
-///     fn add_unfold(&self) -> __FandheFoldUnfoldHoldMarker;
-/// }
-///
-/// impl __FandheFoldUnfoldHoldSequentialProbe for fandhe_ai::compat::Sequential {
-///     fn add_fold(&self) -> __FandheFoldUnfoldHoldMarker {
-///         __FandheFoldUnfoldHoldMarker
-///     }
-///     fn add_unfold(&self) -> __FandheFoldUnfoldHoldMarker {
-///         __FandheFoldUnfoldHoldMarker
-///     }
-/// }
-///
 /// fn __probe_free_fns(_: Fold, _: Unfold) {
 ///     // 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり
 ///     // E0659 でコンパイル失敗する）。
@@ -6255,14 +6245,11 @@ struct ConvTranspose3dMaxUnpoolHoldDoctestGuard;
 ///     _v: &fandhe_ai::Var<'_>,
 ///     tape: &fandhe_ai::Tape,
 ///     tf: &fandhe_ai::Tensor<f32>,
-///     seq: &fandhe_ai::compat::Sequential,
 /// ) {
 ///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::fold(tape);
 ///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::unfold(tape);
 ///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::fold(tf);
 ///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::unfold(tf);
-///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::compat::Sequential::add_fold(seq);
-///     let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::compat::Sequential::add_unfold(seq);
 /// }
 /// ```
 #[cfg(doctest)]
