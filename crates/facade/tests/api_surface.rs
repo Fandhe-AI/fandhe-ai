@@ -18964,6 +18964,274 @@ fn swa_usage_doctests_are_present_and_compiled() {
     assert!(v.is_empty(), "{v:?}");
     assert!(!doctest_probe_violations("t", &[], &["AveragedModel"]).is_empty());
 }
+
+// =====================================================================
+// イシュー #3060（親 #3057・決定記録 `docs/autodiff-swa-decision.md` §19）:
+// `Callback::Swa(SwaCallback)` の形の正ガードと、`FitConfig` への SWA フィールド追加
+// （禁止経路）の補強ガード。旧来の保留ガード `SwaHoldDoctestGuard` は禁止経路
+// （`FitConfig`／`Sequential` への `use_swa`／`swa_start`／`swa_lr` 追加）専用として残る。
+// =====================================================================
+
+/// 正ガード（型レベル）: `Callback::Swa` は `SwaCallback` を 1 つだけ持つ tuple variant で、
+/// facade の公開パスだけで構築・分解できる。payload の型変更・struct variant 化・要素追加は
+/// ここでコンパイルエラーになる（variant 名の集合を見る
+/// `compat_callback_enum_variants_are_exactly_approved_set` は payload を見ないため補う）。
+#[test]
+fn callback_swa_variant_is_constructible_and_destructurable_via_facade_only() {
+    use fandhe_ai::compat::{Callback, SwaCallback};
+    use fandhe_ai::optim::SwaAnneal;
+
+    let ctor: fn(SwaCallback) -> Callback = Callback::Swa;
+    let cb = ctor(SwaCallback::new(1, 0.05, 0, SwaAnneal::Cos).expect("test fixture"));
+    let Callback::Swa(inner) = &cb else {
+        panic!("Callback::Swa のはず");
+    };
+    let _: &SwaCallback = inner;
+    assert_eq!(inner.n_averaged(), 0);
+}
+
+/// 先頭から `{` の直後（`start`）以降のトップレベルをカンマで区切った要素（トークン列）を返す。
+/// `(`・`[`・`{`・`<` の深さを追跡し、深さ 0 の `}` で終了する。`#[...]` 属性は各要素の先頭から除く。
+fn top_level_comma_segments(tokens: &[String], start: usize) -> Vec<Vec<String>> {
+    let mut segments: Vec<Vec<String>> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < tokens.len() {
+        let t = tokens[i].as_str();
+        if depth == 0 && t == "#" && tokens.get(i + 1).map(String::as_str) == Some("[") {
+            // 属性は読み飛ばす（対応する `]` まで）。
+            let mut bd = 0usize;
+            i += 1;
+            while i < tokens.len() {
+                match tokens[i].as_str() {
+                    "[" => bd += 1,
+                    "]" => {
+                        bd -= 1;
+                        if bd == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        match t {
+            "(" | "[" | "{" | "<" => depth += 1,
+            ")" | "]" | ">" => depth = depth.saturating_sub(1),
+            "}" => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            "," if depth == 0 => {
+                if !cur.is_empty() {
+                    segments.push(std::mem::take(&mut cur));
+                }
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(tokens[i].clone());
+        i += 1;
+    }
+    if !cur.is_empty() {
+        segments.push(cur);
+    }
+    segments
+}
+
+/// `Callback` enum 本体（`start` は `{` の直後）の `Swa` variant が承認形
+/// `Swa ( SwaCallback )` にちょうど 1 件だけ一致するかを検査して違反を返す（純関数。
+/// 自己テストでも使う）。unit 形・struct 形・`Box<..>`・別名経由・要素追加・欠落・重複を検出する。
+fn callback_swa_variant_violations(tokens: &[String], start: usize) -> Vec<String> {
+    let approved: Vec<String> = ["Swa", "(", "SwaCallback", ")"].map(String::from).to_vec();
+    let swa: Vec<Vec<String>> = top_level_comma_segments(tokens, start)
+        .into_iter()
+        .filter(|s| s.first().map(String::as_str) == Some("Swa"))
+        .collect();
+    let mut v = Vec::new();
+    if swa.len() != 1 {
+        v.push(format!(
+            "`Swa` variant がちょうど 1 件ではない: {} 件",
+            swa.len()
+        ));
+    }
+    for s in &swa {
+        if *s != approved {
+            v.push(format!(
+                "`Swa` variant が承認形 `Swa(SwaCallback)` ではない: {s:?}"
+            ));
+        }
+    }
+    v
+}
+
+fn callback_enum_body_start(src: &str) -> Option<(Vec<String>, usize)> {
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let starts: Vec<usize> = (0..tokens.len())
+        .filter(|&i| {
+            ["pub", "enum", "Callback", "{"]
+                .iter()
+                .enumerate()
+                .all(|(k, w)| tokens.get(i + k).map(String::as_str) == Some(*w))
+        })
+        .map(|i| i + 4)
+        .collect();
+    (starts.len() == 1).then(|| (tokens, starts[0]))
+}
+
+/// 正ガード（ソース走査）: `compat::Callback` の `Swa` variant は `Swa(SwaCallback)` の形で
+/// ちょうど 1 件。`pub enum Callback {` が 0 件・2 件以上のときは検査対象を見失ったとして失敗する。
+#[test]
+fn compat_callback_swa_variant_has_exact_approved_shape() {
+    let path = facade_crate_root().join("src/compat/callbacks.rs");
+    let content = read_to_string_or_panic(&path);
+    let (tokens, start) = callback_enum_body_start(&content)
+        .expect("callbacks.rs 内の `pub enum Callback {` 宣言がちょうど 1 件ではない");
+    let v = callback_swa_variant_violations(&tokens, start);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// [`callback_swa_variant_violations`] の自己テスト（承認形の受理と各違反類型の検出）。
+#[test]
+fn compat_callback_swa_variant_has_exact_approved_shape_detects_each_category() {
+    let violations = |body: &str| {
+        let src = format!("pub enum Callback {{ {body} }}");
+        let (tokens, start) = callback_enum_body_start(&src).expect("fixture");
+        callback_swa_variant_violations(&tokens, start)
+    };
+    assert!(violations("Ema(EmaCallback), Swa(SwaCallback),").is_empty());
+    assert!(violations("Swa(SwaCallback)").is_empty());
+    assert!(violations("# [ doc = \"x\" ] Swa(SwaCallback),").is_empty());
+    for bad in [
+        "Swa { cb: SwaCallback },",
+        "Swa(Box<SwaCallback>),",
+        "Swa(SwaCallback, u8),",
+        "Swa,",
+        "Swa(crate::compat::SwaCallback),",
+        "Swa(Swa2),",
+        "Ema(EmaCallback),",
+        "Swa(SwaCallback), Swa(SwaCallback),",
+    ] {
+        assert!(!violations(bad).is_empty(), "検出されない: {bad}");
+    }
+    // コメント中・文字列中の出現は違反にしない。
+    assert!(violations("Ema(EmaCallback), Swa(SwaCallback), // Swa { x: u8 }").is_empty());
+    assert!(violations("Swa(SwaCallback), /* Swa, */").is_empty());
+}
+
+/// 識別子を `_` と小文字→大文字の境界で単語に分解する（`swa_lr_bits`／`SwaStart` → `swa`/`Swa` を含む）。
+fn identifier_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if c == '_' {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && prev_lower && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        prev_lower = c.is_ascii_lowercase();
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+/// `pub struct FitConfig {` 本体のフィールド名のうち、単語が `swa`（大文字小文字不問）に完全一致する
+/// ものを返す。検出範囲は「`training.rs` の `FitConfig` 本体に直接書かれたフィールド名」のみで、
+/// マクロ生成・別名経由・別の型への追加は保証しない（`SwaHoldDoctestGuard` の公開メソッド
+/// プローブと `swa_surface_violations` が補う）。`swap_axes` のような別単語は違反にしない。
+fn fit_config_swa_field_violations(src: &str) -> Result<Vec<String>, String> {
+    let cleaned: String = strip_comments_and_literals(src).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let starts: Vec<usize> = (0..tokens.len())
+        .filter(|&i| {
+            ["pub", "struct", "FitConfig", "{"]
+                .iter()
+                .enumerate()
+                .all(|(k, w)| tokens.get(i + k).map(String::as_str) == Some(*w))
+        })
+        .map(|i| i + 4)
+        .collect();
+    if starts.len() != 1 {
+        return Err(format!(
+            "`pub struct FitConfig {{` 宣言がちょうど 1 件ではない: {} 件",
+            starts.len()
+        ));
+    }
+    let mut v = Vec::new();
+    for seg in top_level_comma_segments(&tokens, starts[0]) {
+        let colon = (0..seg.len()).find(|&k| {
+            seg[k] == ":"
+                && seg.get(k + 1).map(String::as_str) != Some(":")
+                && (k == 0 || seg[k - 1] != ":")
+        });
+        let Some(k) = colon.filter(|&k| k > 0) else {
+            continue;
+        };
+        let name = &seg[k - 1];
+        if identifier_words(name)
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case("swa"))
+        {
+            v.push(name.clone());
+        }
+    }
+    Ok(v)
+}
+
+/// 補強ガード（#3060。禁止経路）: `FitConfig` に SWA 用のフィールドを足さない。`FitConfig` は
+/// `Copy + Eq` を保つ公開型で、SWA は `Callback::Swa` で渡す（決定記録 §16.1・§19）。
+#[test]
+fn fit_config_declares_no_swa_fields() {
+    let content = read_to_string_or_panic(&facade_crate_root().join("src/compat/training.rs"));
+    let v = fit_config_swa_field_violations(&content).expect("検査対象を見失った");
+    assert!(v.is_empty(), "FitConfig に SWA 用フィールドがある: {v:?}");
+}
+
+/// [`fit_config_swa_field_violations`] の自己テスト。
+#[test]
+fn fit_config_declares_no_swa_fields_detects_each_category() {
+    let check = |fields: &str| {
+        fit_config_swa_field_violations(&format!("pub struct FitConfig {{ {fields} }}"))
+            .expect("fixture")
+    };
+    // 現行相当のフィールド（属性・doc・可視性修飾つき）は受理する。
+    assert!(check(
+        "pub(super) epochs: usize, /// doc\n pub(super) shuffle: bool, # [ allow ( dead_code ) ] pub(super) lr: Option<std::num::NonZeroU32>,"
+    )
+    .is_empty());
+    assert!(check("pub(super) swap_axes: bool,").is_empty());
+    assert_eq!(check("swa_lr_bits: Option<u32>,"), vec!["swa_lr_bits"]);
+    assert_eq!(check("pub(super) use_swa: bool,"), vec!["use_swa"]);
+    assert_eq!(check("SwaStart: usize,"), vec!["SwaStart"]);
+    // コメント中の出現は違反にしない。
+    assert!(check("epochs: usize, // swa_start: usize\n").is_empty());
+    // 宣言が無い・複数ある場合は fail-closed（Err）。
+    assert!(fit_config_swa_field_violations("pub struct Other { a: u8 }").is_err());
+    assert!(
+        fit_config_swa_field_violations(
+            "pub struct FitConfig { a: u8 } pub struct FitConfig { b: u8 }"
+        )
+        .is_err()
+    );
+}
+
 // =====================================================================
 // LR スケジューラ拡張 5 種（イシュー #2176 実装・#2503 公開。親 #2499）の
 // 正ガード。旧 `LrSchedulerExtHoldDoctestGuard` 系の否定ガード 4 テストを

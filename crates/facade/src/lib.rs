@@ -3935,6 +3935,13 @@ struct EmaHoldDoctestGuard;
 /// （`SwaCallback` の accessor `swa_start`／`swa_lr` は別型の inherent メソッドで衝突しない）。
 /// 将来これらの契約自体が変わる日が来たら、本構造体・本 doctest を削除する。
 ///
+/// イシュー #3060 で `Callback::Swa(SwaCallback)` の形の正ガード（`api_surface.rs` の
+/// `callback_swa_variant_*`・`compat_callback_swa_variant_has_exact_approved_shape`・
+/// `fit_config_declares_no_swa_fields`）が揃い、SWA の保留は解消した。本構造体は
+/// `EmaHoldDoctestGuard` と同じく禁止経路（`FitConfig`／`Sequential` への SWA 用メソッド追加）
+/// 専用のプローブとして残す。公開した名前に当たるプローブは #2679 で削除済みで、#3060 で外すものは無い
+/// （決定記録 §19）。
+///
 /// # 正のプローブ: 全 `pub mod` glob import 済みのスコープでコンパイル
 /// できること
 ///
