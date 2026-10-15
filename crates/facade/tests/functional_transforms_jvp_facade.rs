@@ -11,7 +11,7 @@
 //! `Tape::jacobian` と接ベクトルの積を全入力にまたがり f64 で一括合計し最後に 1 回だけ f32 へ丸めた値
 //! （§30.2。入力ごとに f32 で足すと丸め順序が変わるため単一版の `reference_jv` は流用しない）。
 //! 固定するエラー契約: 長さ不一致・空配列・別テープ・追跡なし入力・重複指定・shape 不一致・検査順序（§30.2 ①〜⑥）、
-//! 非対象 Op（`max`）・空でない子テープ（`Backward`）、追跡なし `output` の全ゼロ。親テープに残る 2 ノードの副作用は
+//! 恒久対象外の Op（`Tape::custom`）・空でない子テープ（`Backward`）、追跡なし `output` の全ゼロ。親テープに残る 2 ノードの副作用は
 //! facade からノード数を観測する公開 API がないため内部テスト（`functional_ops_jvp_tests.rs` の M5）に任せる。
 //! 複数入力の実機 parity は `functional_transforms_jvp_multi_backend_parity.rs`（`#[ignore]`）が担当する。
 //!
@@ -19,15 +19,21 @@
 //! CPU 結合テストする。固定するもの: `y = x ⊙ x` で `output() = 2x ⊙ v` かつ `Tape::jvp` と REQ-2 で一致、孫テープの
 //! `backward` が `child_var` の写しに `2v` を返す、スカラー損失での `Tape::hvp`／`Tape::hessian`（ホスト積）との整合、
 //! `child_var` の意味論（`Ok(None)`・`TapeMismatch`・`GradientTrackingDisabled`）、入口検査 1〜4 のエラー伝播と
-//! テープ事前検査（同一テープ・空でないテープ → `Backward`）、ゼロ経路、非対象 Op（`max`）の拒否。
+//! テープ事前検査（同一テープ・空でないテープ → `Backward`）、ゼロ経路、恒久対象外の Op（`Tape::custom`）の拒否。
 //! `DeviceMismatch` は CPU だけでは作れないため未検証（内部 #3067 でも未検証。§31.9）。親テープに残るノード数は
 //! facade から観測できないため内部テスト（C6／C7）に任せる。実機 parity は #3168・#3169 の範囲。
 //!
 //! 実機（CUDA／Metal）の parity は #2942 の既存 `#[ignore]` テスト
 //! （`functional_ops_jvp_backend_parity.rs`）が担当し、本ファイルは facade 層を CPU で担当する。
+//! イシュー #3087（決定記録 `docs/autodiff-higher-order-grad-decision.md` §32）: #3077〜#3086 で `create_graph`
+//! 対象へ広げた Op の代表（softmax・layer_norm・conv2d・gelu_tanh・cumsum・pad・avg_pool2d・rfft・solve）を
+//! `jvp`／`jacfwd`／`jvp_multi` で `Tape::jacobian` と突き合わせる。拒否の基準は `max`（C 区分で将来対象になりうる）
+//! ではなく恒久対象外の `Tape::custom`（A 区分）。実機は #3168・#3169 へ申し送る。
 //! 本ファイルのテスト関数名は宣言インベントリ（`api_surface.rs`。`crates/*/src` のみ走査）の対象外。
 
-use fandhe_ai::{AutodiffError, ShapeError, Tape, Tensor, Var, tape};
+use std::sync::Arc;
+
+use fandhe_ai::{AutodiffError, CustomFunction, FftNorm, ShapeError, Tape, Tensor, Var, tape};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape 一致")
@@ -35,6 +41,31 @@ fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
 
 fn host(x: &Tensor<f32>) -> Vec<f32> {
     x.host_slice().into_owned()
+}
+
+/// 恒久対象外の `Tape::custom` 用の恒等関数（拒否の基準 Op。`Op::Custom` は §21.2 A 区分。
+/// `LogSumExp`・`Max` は C 区分で将来の拡張で対象になりうるため基準にしない。イシュー #3087）。
+struct IdentityFn;
+
+impl CustomFunction for IdentityFn {
+    fn name(&self) -> &str {
+        "identity"
+    }
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].clone())
+    }
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        _requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        Ok(vec![Some(upstream.clone())])
+    }
 }
 
 /// `jacobian`（形状 `output.shape ++ input.shape`）と接ベクトルの積を f64 で蓄積した参照値。
@@ -172,13 +203,16 @@ fn unsupported_ops_and_dirty_child_tape_are_rejected() {
     let x = t0.var(&t(vec![1.0, 3.0, 2.0], &[3]));
     let v = t(vec![1.0, 1.0, 1.0], &[3]);
 
-    // supports_create_graph() が偽の Op（max）を経由する出力は型付きの Err。
-    let m = x.max(None).unwrap();
-    assert!(
-        t0.jvp(&m, &x, &t(vec![1.0, 1.0, 1.0], &[3]), &tape())
-            .is_err()
-    );
-    assert!(t0.jacfwd(&m, &x, &tape()).is_err());
+    // 恒久対象外の Op（`Tape::custom`）を経由する出力は型付きの `Backward` エラー。
+    let m = t0.custom(Arc::new(IdentityFn), &[x]).unwrap();
+    assert!(matches!(
+        t0.jvp(&m, &x, &t(vec![1.0, 1.0, 1.0], &[3]), &tape()),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(matches!(
+        t0.jacfwd(&m, &x, &tape()),
+        Err(AutodiffError::Backward(_))
+    ));
 
     // 空でない子テープは拒否される。
     let y = x.mul(&x).unwrap();
@@ -462,8 +496,9 @@ fn multi_input_unsupported_ops_and_dirty_child_are_rejected() {
     let x2 = t0.var(&t(vec![0.5, 0.5, 0.5], &[3]));
     let v = t(vec![1.0, 1.0, 1.0], &[3]);
 
-    // supports_create_graph() が偽の Op（max）を経由する出力は型付きの Err。
-    let m = x1.mul(&x2).unwrap().max(None).unwrap();
+    // 恒久対象外の Op（`Tape::custom`）を経由する出力は型付きの `Backward` エラー。
+    let prod = x1.mul(&x2).unwrap();
+    let m = t0.custom(Arc::new(IdentityFn), &[prod]).unwrap();
     assert!(matches!(
         t0.jvp_multi(&m, &[&x1, &x2], &[&v, &v], &tape()),
         Err(AutodiffError::Backward(_))
@@ -759,10 +794,80 @@ fn create_graph_unsupported_op_is_rejected() {
     let t0 = tape();
     let x = t0.var(&t(vec![1.0, 3.0, 2.0], &[3]));
     let v = t(vec![1.0, 1.0, 1.0], &[3]);
-    let m = x.max(None).unwrap();
+    let m = t0.custom(Arc::new(IdentityFn), &[x]).unwrap();
     let (child, grand) = (tape(), tape());
     assert!(matches!(
         t0.jvp_create_graph(&m, &x, &v, &child, &grand),
         Err(AutodiffError::Backward(_))
     ));
+}
+
+#[test]
+fn jvp_and_jacfwd_match_jacobian_on_extended_ops() {
+    let x6 = vec![0.5_f32, 1.1, -0.6, 0.2, -1.3, 0.8];
+    let v6 = vec![0.6_f32, -0.2, 0.3, 0.9, -0.5, 0.4];
+    check_against_jacobian("softmax", x6.clone(), &[2, 3], v6.clone(), move |tp, x| {
+        let w = tp.var_no_grad(&t(vec![0.3, -1.2, 0.7, 2.0, -0.5, 1.1], &[2, 3]));
+        x.softmax(1).unwrap().mul(&w).unwrap()
+    });
+    check_against_jacobian("layer_norm", x6.clone(), &[2, 3], v6.clone(), |tp, x| {
+        let w = tp.var_no_grad(&t(vec![1.2, 0.7, -0.4], &[3]));
+        let b = tp.var_no_grad(&t(vec![0.1, -0.2, 0.3], &[3]));
+        x.layer_norm(Some(&w), Some(&b), 1e-5).unwrap()
+    });
+    let x9 = vec![0.3_f32, -0.8, 1.2, 0.1, -0.4, 0.9, 0.5, -0.2, 0.7];
+    let v9 = vec![0.6_f32, -0.2, 0.3, 0.9, -0.5, 0.4, 0.1, -0.7, 0.2];
+    check_against_jacobian("conv2d", x9.clone(), &[1, 1, 3, 3], v9.clone(), |tp, x| {
+        let w = tp.var_no_grad(&t(vec![0.5, -0.3, 0.2, 0.8], &[1, 1, 2, 2]));
+        x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 1).unwrap()
+    });
+    check_against_jacobian("gelu_tanh", x6.clone(), &[2, 3], v6.clone(), |_, x| {
+        x.gelu_tanh().unwrap()
+    });
+    check_against_jacobian("cumsum", x6.clone(), &[2, 3], v6.clone(), |_, x| {
+        x.cumsum(1).unwrap()
+    });
+    check_against_jacobian("pad", x6.clone(), &[2, 3], v6.clone(), |_, x| {
+        x.pad(&[(1, 0), (0, 1)], 0.0).unwrap()
+    });
+    check_against_jacobian("avg_pool2d", x9, &[1, 1, 3, 3], v9, |_, x| {
+        x.avg_pool2d([2, 2], Some([1, 1]), [0, 0], false, true)
+            .unwrap()
+    });
+    check_against_jacobian(
+        "rfft",
+        vec![0.5, -1.0, 0.25, 2.0],
+        &[4],
+        vec![0.6, -0.2, 0.3, 0.9],
+        |_, x| x.rfft(None, None, FftNorm::Backward).unwrap(),
+    );
+    check_against_jacobian(
+        "solve",
+        vec![2.0, 0.5, 0.3, 1.5],
+        &[2, 2],
+        vec![0.6, -0.2, 0.3, 0.9],
+        |tp, a| {
+            let b = tp.var_no_grad(&t(vec![1.0, -2.0], &[2, 1]));
+            a.solve(&b).unwrap()
+        },
+    );
+}
+
+/// 複数入力: conv2d の入力 `x1` と重み `x2` の両方を追跡して `jvp_multi` を `jacobian` 和と突き合わせる。
+#[test]
+fn multi_input_matches_jacobian_sum_on_conv2d() {
+    let xs = vec![
+        (
+            vec![0.3, -0.8, 1.2, 0.1, -0.4, 0.9, 0.5, -0.2, 0.7],
+            vec![1, 1, 3, 3],
+        ),
+        (vec![0.5, -0.3, 0.2, 0.8], vec![1, 1, 2, 2]),
+    ];
+    let vs = vec![
+        vec![0.6, -0.2, 0.3, 0.9, -0.5, 0.4, 0.1, -0.7, 0.2],
+        vec![0.3, 0.1, -0.4, 0.2],
+    ];
+    check_multi_against_jacobian("multi conv2d", &xs, &vs, |_, l| {
+        l[0].conv2d(&l[1], None, [1, 1], [0, 0], [1, 1], 1).unwrap()
+    });
 }

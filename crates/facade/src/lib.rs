@@ -732,6 +732,10 @@ impl Tape {
     /// `TapeMismatch`／`DeviceMismatch`／`GradientTrackingDisabled`。
     /// 拒否時は `child` へ何も書き込まない。
     ///
+    /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
+    /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
     ///
@@ -853,6 +857,10 @@ impl Tape {
     /// `create_graph` 対応 Op の範囲で、非対応・非空の子などは
     /// [`AutodiffError::Backward`] 等の既存エラー variant で拒否される。
     ///
+    /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
+    /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
+    ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
     ///
@@ -953,6 +961,9 @@ impl Tape {
     /// 数値は REQ-2 の統一複合判定で、1 階 VJP との bit 同一は契約にしない。経路上の Op は
     /// `create_graph` 対応（`supports_create_graph()` が真）のものに限る。f32 の `Tape` のみ
     /// （`VarF64`・低精度 forward は対象外）。
+    /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
+    /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1011,6 +1022,9 @@ impl Tape {
     /// f32 の `Tape` のみ（`VarF64`・f16 は対象外）、入力は単一（複数入力は [`Tape::jvp_multi`]）、結果は非微分のホスト値。数値は REQ-2 の
     /// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で一致し、`jacobian` や 1 階 VJP との
     /// bit 同一は契約にしない。計算量は親 backward 1 回＋子 backward 1 回。
+    /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
+    /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1107,6 +1121,9 @@ impl Tape {
     /// 経路上の Op は `Op::supports_create_graph()` が真のものに限る。f32 の `Tape` のみ、結果は非微分の
     /// ホスト値。数値は REQ-2 統一複合判定で `jacobian` 由来の `Σ J_i·v_i` と一致する（bit 同一は契約にしない）。
     /// 計算量は入力数に依らず親 backward 1 回＋子 backward 1 回。
+    /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
+    /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
@@ -1186,6 +1203,9 @@ impl Tape {
     /// 経路上の Op は `Op::supports_create_graph()` が真のものに限る。f32 の `Tape`・単一入力のみ。
     /// `output()` の値は REQ-2 統一複合判定の範囲で [`Tape::jvp`] と一致し、bit 同一は契約にしない。
     /// 計算量は親 backward 1 回＋子 backward 1 回＋孫テープへの記録 1 回。
+    /// 対象 Op の正本は `fandhe_ai_autodiff` の `Op::supports_create_graph` の網羅 match と決定記録
+    /// `docs/autodiff-higher-order-grad-decision.md` §21.2・§22〜§31（#3077〜#3086 で正規化・畳み込み 2D・Gelu・損失・
+    /// 索引累積・Pad・プーリング・線形代数／FFT の一部へ拡大）。`Tape::custom` のユーザー定義関数は恒久的に対象外。
     ///
     /// ```
     /// use fandhe_ai::{tape, Tensor};
