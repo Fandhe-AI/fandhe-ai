@@ -9,6 +9,8 @@
 //!
 //! 無引数の活性化 5 層（selu・softsign・hardsigmoid・log_sigmoid・tanhshrink。イシュー #3053）の往復・改竄拒否は末尾のテストが受け持つ（上記 53 種の配列は不変）。
 //!
+//! 引数つきの活性化 4 層（celu・softmin・threshold・rrelu。イシュー #3054）の往復・改竄拒否も末尾のテストが受け持つ。
+//!
 //! 衝突注入・TOCTOU・網羅的な改竄行列は #2375・#2376。BN の running stats の保存・復元は #2371（`compat_sequential_model_io_batch_norm.rs`）。
 //! 実機（CUDA／Metal）は不要（ホスト側の I/O と層の再構築のみ）。
 
@@ -592,6 +594,14 @@ fn layer_mode_differing_from_model_is_rejected() {
         .add_batch_norm1d(2, 1e-5, 0.1)
         .expect("構築できるはず");
     assert_save_rejected("mode-bn", &with_bn, false);
+
+    // RReLU は train／eval で forward が変わるため同様に拒否する（イシュー #3054）。
+    let mut model = Sequential::new()
+        .add_linear(2, 2, 1)
+        .expect("構築できるはず");
+    model.eval();
+    let with_rrelu = model.add_rrelu(0.125, 0.3).expect("構築できるはず");
+    assert_save_rejected("mode-rrelu", &with_rrelu, false);
 }
 
 #[test]
@@ -604,6 +614,18 @@ fn non_finite_f32_argument_is_rejected() {
     assert_save_rejected(
         "inf-alpha",
         &Sequential::new().add_elu(f32::INFINITY),
+        false,
+    );
+    // Threshold は構築時検査が無いため保存側の有限性検査が唯一の防壁（イシュー #3054）。
+    // celu・rrelu は構築時に非有限を拒否するためモデル自体を作れない。
+    assert_save_rejected(
+        "inf-threshold",
+        &Sequential::new().add_threshold(f32::NEG_INFINITY, 0.0),
+        false,
+    );
+    assert_save_rejected(
+        "nan-threshold-value",
+        &Sequential::new().add_threshold(0.0, f32::NAN),
         false,
     );
 }
@@ -736,14 +758,41 @@ fn conv_transpose1d_unflatten_restore_arguments_and_keep_format_version_2() {
 
 #[test]
 fn eleven_layer_subset_of_new_kinds_is_savable() {
-    // #3053／#3054（活性化 9 層）は別イシュー。本イシューの 2 層が拒否されないことのみ確認する。
-    let model = Sequential::new()
+    // 活性化 9 層（#3053・#3054）と conv_transpose1d・unflatten（#3055）の 11 層すべてを含む
+    // モデルが保存でき、eval で往復して bit 一致する（#3055 追補の「11 層一括」の完成）。
+    let mut model = Sequential::new()
         .add_unflatten(1, vec![1, 6])
         .and_then(|m| m.add_conv_transpose1d(1, 1, 1, 1, 0, 0, 1, 1, 1))
-        .expect("構築できるはず");
-    let (_g, _d, text) = manifest_of(&model, "deconv-two");
-    let kinds = kinds_of(&text);
-    assert!(kinds.contains("conv_transpose1d") && kinds.contains("unflatten"));
+        .expect("構築できるはず")
+        .add_selu()
+        .add_celu(-0.75)
+        .expect("構築できるはず")
+        .add_softsign()
+        .add_hardsigmoid()
+        .add_log_sigmoid()
+        .add_tanhshrink()
+        .add_threshold(-0.5, 2.0)
+        .add_rrelu(0.125, 0.3)
+        .expect("構築できるはず")
+        .add_softmin(2);
+    model.eval();
+    let input = Tensor::new(vec![-2.0, -0.5, 0.0, 0.5, 1.0, 3.0], &[1, 6]).unwrap();
+    let kinds = round_trip("eleven-layers", &model, &input);
+    for k in [
+        "conv_transpose1d",
+        "unflatten",
+        "selu",
+        "celu",
+        "softsign",
+        "hardsigmoid",
+        "log_sigmoid",
+        "tanhshrink",
+        "threshold",
+        "rrelu",
+        "softmin",
+    ] {
+        assert!(kinds.contains(k), "kind {k} が manifest にある: {kinds:?}");
+    }
 }
 
 #[test]
@@ -1303,5 +1352,204 @@ fn tampered_local_response_norm_manifests_are_rejected() {
     assert!(
         matches!(err, ModelIoError::UnsupportedModel { .. }),
         "{err}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// イシュー #3054: 引数つきの活性化 4 層（celu・softmin・threshold・rrelu）
+// ---------------------------------------------------------------------
+
+fn param_act_model() -> Sequential {
+    let mut m = Sequential::new()
+        .add_linear(3, 4, 5)
+        .expect("構築できるはず")
+        .add_celu(-0.75)
+        .expect("構築できるはず")
+        .add_threshold(-0.5, 2.0)
+        .add_rrelu(0.125, 0.3)
+        .expect("構築できるはず")
+        .add_softmin(1)
+        .add_linear(4, 2, 6)
+        .expect("構築できるはず");
+    // rrelu の predict がグローバル RNG を消費しないよう評価モードで保存する（決定記録 #3052 §3）。
+    m.eval();
+    m
+}
+
+fn param_act_input() -> Tensor<f32> {
+    // 正負・0・閾値の境界（-0.5）・大きい値で各層の分岐を通す。
+    Tensor::new(
+        vec![
+            -9.0, -1.5, 0.0, 0.25, 1.0, 6.5, -0.0, 3.0, -0.5, 0.5, -0.25, 12.0,
+        ],
+        &[4, 3],
+    )
+    .unwrap()
+}
+
+/// dir 直下の `*.safetensors` のファイル名（manifest が参照する名前。比較時に正規化する用）。
+fn weights_file_name(dir: &Path) -> String {
+    std::fs::read_dir(dir)
+        .expect("読めるはず")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.ends_with(".safetensors"))
+        .unwrap_or_default()
+}
+
+#[test]
+fn param_activation_layers_round_trip_bit_identically() {
+    let model = param_act_model();
+    let kinds = round_trip("param-acts", &model, &param_act_input());
+    for k in ["celu", "softmin", "threshold", "rrelu"] {
+        assert!(kinds.contains(k), "kind {k} が manifest にある: {kinds:?}");
+    }
+    let (_g, dir, text) = manifest_of(&model, "param-acts-manifest");
+    for needle in [
+        "\"kind\":\"celu\",\"params\":{\"alpha\":-0.75}",
+        "\"kind\":\"softmin\",\"params\":{\"dim\":1}",
+        "\"kind\":\"threshold\",\"params\":{\"threshold\":-0.5,\"value\":2.0}",
+        "\"kind\":\"rrelu\",\"params\":{\"lower\":0.125,\"upper\":0.3}",
+        "\"format_version\":2",
+    ] {
+        assert!(text.contains(needle), "{needle} が manifest にある: {text}");
+    }
+    // 再保存した manifest が（ファイル名を除き）一致する＝f32 の正準形が往復で崩れない。
+    let loaded = load_model(&dir).expect("復元できるはず");
+    let guard2 = TempDirGuard::new("param-acts-resave");
+    let dir2 = guard2.path().join("m");
+    save_model(&loaded, &dir2).expect("再保存できるはず");
+    let text2 = std::fs::read_to_string(dir2.join("manifest.json")).expect("読めるはず");
+    assert_eq!(
+        text.replace(&weights_file_name(&dir), "W"),
+        text2.replace(&weights_file_name(&dir2), "W")
+    );
+}
+
+#[test]
+fn signed_zero_and_negative_arguments_round_trip_bit_exactly() {
+    let mut m = Sequential::new()
+        .add_threshold(-0.0, -1.0)
+        .add_celu(-2.5)
+        .expect("構築できるはず");
+    m.eval();
+    let input = Tensor::new(vec![-1.0, -0.0, 0.0, 2.0], &[2, 2]).unwrap();
+    round_trip("param-acts-neg", &m, &input);
+}
+
+fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .expect("読めるはず")
+        .map(|e| {
+            let e = e.expect("読めるはず");
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).expect("読めるはず"),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn param_activation_tampered_params_are_rejected() {
+    let guard = TempDirGuard::new("param-acts-tamper");
+    let dir = guard.path().join("m");
+    save_model(&param_act_model(), &dir).expect("保存できるはず");
+    let path = dir.join("manifest.json");
+    let original = std::fs::read_to_string(&path).expect("読めるはず");
+    let manifest_cases: [(&str, &str, &str); 12] = [
+        (
+            "alpha-missing",
+            "\"params\":{\"alpha\":-0.75}",
+            "\"params\":{}",
+        ),
+        ("rrelu-extra", "\"upper\":0.3}", "\"upper\":0.3,\"x\":1}"),
+        ("alpha-int", "\"alpha\":-0.75", "\"alpha\":-1"),
+        ("lower-noncanonical", "\"lower\":0.125", "\"lower\":0.1250"),
+        ("alpha-string", "\"alpha\":-0.75", "\"alpha\":\"NaN\""),
+        ("value-null", "\"value\":2.0", "\"value\":null"),
+        ("dim-real", "\"dim\":1}", "\"dim\":1.5}"),
+        ("dim-negative", "\"dim\":1}", "\"dim\":-1}"),
+        (
+            "celu-null",
+            "\"params\":{\"alpha\":-0.75}",
+            "\"params\":null",
+        ),
+        ("softmin-array", "\"params\":{\"dim\":1}", "\"params\":[]"),
+        ("threshold-missing", "\"threshold\":-0.5,", ""),
+        ("lower-int", "\"lower\":0.125", "\"lower\":0"),
+    ];
+    let autodiff_cases: [(&str, &str, &str); 2] = [
+        ("alpha-zero", "\"alpha\":-0.75", "\"alpha\":0.0"),
+        (
+            "rrelu-lower-gt-upper",
+            "\"lower\":0.125,\"upper\":0.3",
+            "\"lower\":0.5,\"upper\":0.1",
+        ),
+    ];
+    for (expect_manifest, cases) in [(true, &manifest_cases[..]), (false, &autodiff_cases[..])] {
+        for (label, from, to) in cases {
+            assert!(original.contains(from), "{label}: 置換対象 {from} がある");
+            std::fs::write(&path, original.replacen(from, to, 1)).expect("書けるはず");
+            let before = snapshot(&dir);
+            let err = load_err(&dir);
+            if expect_manifest {
+                assert!(
+                    matches!(err, ModelIoError::Manifest { .. }),
+                    "{label}: {err}"
+                );
+            } else {
+                assert!(matches!(err, ModelIoError::Autodiff(_)), "{label}: {err}");
+            }
+            assert_eq!(before, snapshot(&dir), "{label}: load は dir を変えない");
+        }
+    }
+    // 陽性対照: 元の内容に戻すと読める（拒否が偽陽性でない）。
+    std::fs::write(&path, &original).expect("書けるはず");
+    assert!(load_model(&dir).is_ok());
+}
+
+#[test]
+fn softmin_out_of_range_dim_loads_and_fails_at_forward() {
+    // dim の範囲は forward 時の遅延検査（決定記録 #3052）。load は成功し predict が型付きエラーになる。
+    let guard = TempDirGuard::new("softmin-dim-oob");
+    let dir = guard.path().join("m");
+    save_model(&param_act_model(), &dir).expect("保存できるはず");
+    let path = dir.join("manifest.json");
+    let text = std::fs::read_to_string(&path).expect("読めるはず");
+    let from = "\"kind\":\"softmin\",\"params\":{\"dim\":1}";
+    assert!(text.contains(from));
+    std::fs::write(
+        &path,
+        text.replacen(from, "\"kind\":\"softmin\",\"params\":{\"dim\":9999}", 1),
+    )
+    .expect("書けるはず");
+    let loaded = load_model(&dir).expect("load は成功するはず");
+    assert!(loaded.predict(&param_act_input()).is_err());
+}
+
+#[test]
+fn rrelu_train_mode_round_trip_restores_training_flag() {
+    let mut m = Sequential::new()
+        .add_linear(3, 4, 5)
+        .expect("構築できるはず")
+        .add_rrelu(0.125, 0.3)
+        .expect("構築できるはず");
+    assert!(m.training());
+    let (_g, dir, _text) = manifest_of(&m, "rrelu-train");
+    let mut loaded = load_model(&dir).expect("復元できるはず");
+    assert!(loaded.training(), "training が復元される");
+    // 層のモードも揃っている（再保存がモード不一致で拒否されない）。
+    let g2 = TempDirGuard::new("rrelu-train-resave");
+    save_model(&loaded, g2.path().join("m")).expect("再保存できるはず");
+    m.eval();
+    loaded.eval();
+    let x = param_act_input();
+    assert_bit_identical(
+        &m.predict(&x).unwrap(),
+        &loaded.predict(&x).unwrap(),
+        "eval 後の predict",
     );
 }

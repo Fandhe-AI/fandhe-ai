@@ -207,6 +207,33 @@ fn nullary_activation_layers_round_trip_in_functional_graph() {
     }
 }
 
+/// 引数つきの活性化 4 層（イシュー #3054）も `spec_kind` 共有により functional で往復できる。
+#[test]
+fn param_activation_layers_round_trip_in_functional_graph() {
+    let mut b = FunctionalBuilder::new();
+    let x = b.input().unwrap();
+    let blk = lin(3, 4, 7)
+        .add_celu(-0.75)
+        .unwrap()
+        .add_threshold(-0.5, 2.0)
+        .add_rrelu(0.125, 0.3)
+        .unwrap()
+        .add_softmin(1);
+    let y = b.apply(blk, x).unwrap();
+    let mut model = b.build(&[x], &[y]).unwrap();
+    model.eval();
+    let guard = TempDirGuard::new("functional_param_act");
+    let dir = guard.path().join("m");
+    save_functional_model(&model, &dir).expect("保存できるはず");
+    let loaded = load_functional_model(&dir).expect("復元できるはず");
+    let input = det(6, 3, 0.1);
+    let want = model.predict(&[&input]).unwrap();
+    let got = loaded.predict(&[&input]).unwrap();
+    for (w, g) in want.iter().zip(&got) {
+        assert_eq!(bits(w), bits(g));
+    }
+}
+
 #[test]
 fn unsupported_layer_is_rejected_without_touching_dir() {
     // 利用者定義層（`add_module`）は manifest の kind を持たない（恒久的に保存不能。
