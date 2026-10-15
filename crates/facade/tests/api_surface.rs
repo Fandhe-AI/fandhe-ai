@@ -36888,6 +36888,7 @@ mod __fandhe_functional_transforms_hold_probe {\n\
 \x20\x20\x20\x20pub fn vmap() {}\n\
 \x20\x20\x20\x20pub fn jvp() {}\n\
 \x20\x20\x20\x20pub fn jacfwd() {}\n\
+\x20\x20\x20\x20pub fn jvp_multi() {}\n\
 }\n\
 use __fandhe_functional_transforms_hold_probe::*;\n\
 \n\
@@ -36899,6 +36900,7 @@ trait __FandheFunctionalTransformsHoldProbe {\n\
 \x20\x20\x20\x20fn vmap(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 \x20\x20\x20\x20fn jvp(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 \x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 }\n\
 \n\
 impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
@@ -36915,6 +36917,9 @@ impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -36935,6 +36940,9 @@ impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
 }\n\
 \n\
 fn __probe_free_fns() {\n\
@@ -36947,6 +36955,7 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20vmap();\n\
 \x20\x20\x20\x20jvp();\n\
 \x20\x20\x20\x20jacfwd();\n\
+\x20\x20\x20\x20jvp_multi();\n\
 }\n\
 \n\
 fn __probe_methods(\n\
@@ -36959,20 +36968,30 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp_multi(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jacfwd(tf);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_multi(tf);\n\
 }";
 
 /// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`Tape` 上の承認形 5 名
 /// だけは `src/lib.rs` の例外として許可される）。
-const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 5] = ["vjp", "hvp", "vmap", "jvp", "jacfwd"];
+const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 6] =
+    ["vjp", "hvp", "vmap", "jvp", "jacfwd", "jvp_multi"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 6] =
-    ["functional_ops", "vjp", "hvp", "vmap", "jvp", "jacfwd"];
+const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 7] = [
+    "functional_ops",
+    "vjp",
+    "hvp",
+    "vmap",
+    "jvp",
+    "jacfwd",
+    "jvp_multi",
+];
 
 /// [`facade_does_not_reexport_or_declare_functional_transforms`]・その自己テストが共用する検出本体。
 /// facade src の `pub use` で [`FUNCTIONAL_TRANSFORMS_IDENTS`] を経路の識別子（トークン完全一致）単位で
@@ -37047,7 +37066,7 @@ fn scan_functional_transforms_reexports_and_declarations(
 
 /// #2931（`vjp`／`hvp`／`vmap`）・#2956（`jvp`／`jacfwd`。設計記録 §27.1・§28）の承認形シグネチャ（`pub fn` から本体の `{` の直前まで。決定記録
 /// `docs/autodiff-functional-transforms-design.md` §23.1）。`'static`・`Send`・`Sync` 境界は持たない。
-const FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES: [(&str, &str); 5] = [
+const FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES: [(&str, &str); 6] = [
     (
         "vjp",
         "pub fn vjp(
@@ -37097,10 +37116,20 @@ where
     child: &Tape,
 ) -> Result<Tensor<f32>, AutodiffError>",
     ),
+    (
+        "jvp_multi",
+        "pub fn jvp_multi(
+    &self,
+    output: &Var<'_>,
+    inputs: &[&Var<'_>],
+    tangents: &[&Tensor<f32>],
+    child: &Tape,
+) -> Result<Tensor<f32>, AutodiffError>",
+    ),
 ];
 
-/// #2931・#2956 の承認形の 1 行委譲本体（決定記録 §23.2・§27.2。`{ }` の内側）。
-const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 5] = [
+/// #2931・#2956・#3063 の承認形の 1 行委譲本体（決定記録 §23.2・§27.2。`{ }` の内側）。
+const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 6] = [
     (
         "vjp",
         "fandhe_ai_autodiff::functional_ops::vjp(&self.0, output, input, cotangent)",
@@ -37121,6 +37150,10 @@ const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 5] = [
         "jacfwd",
         "fandhe_ai_autodiff::functional_ops::jacfwd(&self.0, output, input, &child.0)",
     ),
+    (
+        "jvp_multi",
+        "fandhe_ai_autodiff::functional_ops::jvp_multi(&self.0, output, inputs, tangents, &child.0)",
+    ),
 ];
 
 /// facade src 全体（`crates/facade/src/**`）に関数型 AD ラッパーの保留対象の再エクスポート・同名
@@ -37139,7 +37172,7 @@ fn facade_does_not_reexport_or_declare_functional_transforms() {
     assert!(
         offending.is_empty(),
         "facade の公開面が関数型 AD ラッパーの内部実装（#2874 の `functional_ops`）を再エクスポート、\
-         または承認形（#2931・#2956・`src/lib.rs` の `impl Tape` 直下の `vjp`／`hvp`／`vmap`／`jvp`／`jacfwd` 各 1 件）以外の\
+         または承認形（#2931・#2956・`src/lib.rs` の `impl Tape` 直下の `vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi` 各 1 件）以外の\
          同名の fn／pub mod を宣言している: {offending:?}"
     );
 }
@@ -37196,7 +37229,7 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
         all.push_str(&format!("{sig}\n{{ x }}\n"));
     }
     all.push_str("}\n");
-    assert!(!offense_lib(&all), "承認形 5 件は lib.rs 扱いで無違反");
+    assert!(!offense_lib(&all), "承認形 6 件は lib.rs 扱いで無違反");
     assert!(offense(&all), "lib.rs 以外扱いでは承認形でも違反");
     // 別シグネチャ・`pub` 欠落・`'static` 境界の追加は違反のまま。
     assert!(offense_lib("impl Tape { pub fn vjp(&self) {} }"));
@@ -37213,6 +37246,20 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
         "impl Var { pub fn jacfwd(&self, output: &Var<'_>, input: &Var<'_>, child: &Tape) -> Result<Tensor<f32>, AutodiffError> { fandhe_ai_autodiff::functional_ops::jacfwd(&self.0, output, input, &child.0) } }"
     ));
     assert!(offense_lib("pub fn jvp() {}"));
+    // #3063: `jvp_multi` の裸の自由関数・再エクスポート・`impl Var` 内の承認形は違反のまま。
+    assert!(offense_lib("pub fn jvp_multi() {}"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::functional_ops::jvp_multi;"
+    ));
+    assert!(offense_lib(&format!(
+        "{all}\npub use fandhe_ai_autodiff::functional_ops::jvp_multi;"
+    )));
+    assert!(offense_lib(
+        "impl Var { pub fn jvp_multi(&self, output: &Var<'_>, inputs: &[&Var<'_>], tangents: &[&Tensor<f32>], child: &Tape) -> Result<Tensor<f32>, AutodiffError> { fandhe_ai_autodiff::functional_ops::jvp_multi(&self.0, output, inputs, tangents, &child.0) } }"
+    ));
+    assert!(offense_lib(
+        &all.replace("tangents: &[&Tensor<f32>]", "tangents: &[&Var<'_>]")
+    ));
     // 重複（2 件目）は違反。
     assert!(offense_lib(&format!("{all}\n{all}")));
     // `impl Var`／`impl Tensor` 内の承認シグネチャは違反。
@@ -37239,7 +37286,7 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
 /// - `facade/src/lib.rs::{vjp, hvp, vmap, jvp, jacfwd}`: #2931・#2956 で公開した `Tape` の承認形の薄い委譲
 ///   （各 1 件。承認形は `facade_tape_functional_transforms_are_approved_thin_delegations` が固定する）。
 ///
-/// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`: #2940 の double-VJP 内部実装（#2956 で `pub fn` 化。
+/// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`・`::jvp_multi`（#3063）: #2940 の double-VJP 内部実装（#2956 で `pub fn` 化。
 ///   facade 以外へは再エクスポートしない）。
 ///
 /// 以後の実装を足すときは期待集合へ 1 行ずつ追記する。
@@ -37291,25 +37338,30 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
         ("autodiff/src/functional_ops.rs::vmap".to_string(), 1usize),
         ("autodiff/src/functional_ops.rs::jvp".to_string(), 1usize),
         ("autodiff/src/functional_ops.rs::jacfwd".to_string(), 1usize),
+        (
+            "autodiff/src/functional_ops.rs::jvp_multi".to_string(),
+            1usize,
+        ),
         ("autodiff/src/grad.rs::vjp".to_string(), 1usize),
         ("facade/src/lib.rs::vjp".to_string(), 1usize),
         ("facade/src/lib.rs::hvp".to_string(), 1usize),
         ("facade/src/lib.rs::vmap".to_string(), 1usize),
         ("facade/src/lib.rs::jvp".to_string(), 1usize),
         ("facade/src/lib.rs::jacfwd".to_string(), 1usize),
+        ("facade/src/lib.rs::jvp_multi".to_string(), 1usize),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         found, expected,
-        "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd の `fn` 宣言が許可された置き場所\
+        "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd／jvp_multi の `fn` 宣言が許可された置き場所\
          （autodiff/src/functional_ops.rs・autodiff/src/grad.rs・facade/src/lib.rs の各 1 件）と一致しない。\
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
 }
-/// `src/lib.rs` の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd` が承認形（シグネチャ・1 行委譲本体・
-/// `impl Tape` 直下）でそれぞれちょうど 1 件であることを検査する（#2931・#2956 の正ガード本体。検出範囲は列挙した 5 名に限り、
+/// `src/lib.rs` の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi` が承認形（シグネチャ・1 行委譲本体・
+/// `impl Tape` 直下）でそれぞれちょうど 1 件であることを検査する（#2931・#2956 の正ガード本体。検出範囲は列挙した 6 名に限り、
 /// マクロ生成までは保証しない）。
 fn check_facade_tape_functional_transforms_shape(lib_src: &str) -> Result<(), String> {
     let cleaned: String = strip_comments_and_literals(lib_src).into_iter().collect();
@@ -37353,7 +37405,7 @@ fn facade_tape_functional_transforms_are_approved_thin_delegations() {
     let content = read_to_string_or_panic(&lib_rs_path());
     if let Err(e) = check_facade_tape_functional_transforms_shape(&content) {
         panic!(
-            "facade の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd` が承認形（#2931・#2956・決定記録 §23.1〜§23.2・§27.1〜§27.2）と一致しない: {e}"
+            "facade の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi` が承認形（#2931・#2956・決定記録 §23.1〜§23.2・§27.1〜§27.2）と一致しない: {e}"
         );
     }
     let src_dir = facade_crate_root().join("src");
@@ -37399,6 +37451,13 @@ fn facade_tape_functional_transforms_are_approved_thin_delegations_detects_each_
     );
     assert_ne!(jvp_swap, ok);
     assert!(check_facade_tape_functional_transforms_shape(&jvp_swap).is_err());
+    // #3063: `jvp_multi` の本体のすり替え（`inputs`／`tangents` の入れ替え・`&child.0` の脱落）。
+    let multi_swap = ok.replace("inputs, tangents, &child.0)", "tangents, inputs, &child.0)");
+    assert_ne!(multi_swap, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&multi_swap).is_err());
+    let multi_drop_child = ok.replace("inputs, tangents, &child.0)", "inputs, tangents, child)");
+    assert_ne!(multi_drop_child, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&multi_drop_child).is_err());
     // 本体のすり替え。
     let bad_body = ok.replace(
         "&self.0, output, input, cotangent)",
@@ -37439,6 +37498,15 @@ fn tape_functional_transforms_are_reachable_via_facade() {
     type JacfwdFn = fn(&Tape, &Var<'_>, &Var<'_>, &Tape) -> Result<Tensor<f32>, AutodiffError>;
     let _jvp: JvpFn = Tape::jvp;
     let _jacfwd: JacfwdFn = Tape::jacfwd;
+    // #3063: 複数入力版。
+    type JvpMultiFn = fn(
+        &Tape,
+        &Var<'_>,
+        &[&Var<'_>],
+        &[&Tensor<f32>],
+        &Tape,
+    ) -> Result<Tensor<f32>, AutodiffError>;
+    let _jvp_multi: JvpMultiFn = Tape::jvp_multi;
     fn square<'t>(s: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         s.mul(s)
     }
@@ -37455,6 +37523,8 @@ fn tape_functional_transforms_are_reachable_via_facade() {
     assert!(t.jvp(&y, &x, &u, &jvp_child).is_ok());
     let jacfwd_child = fandhe_ai::tape();
     assert!(t.jacfwd(&y, &x, &jacfwd_child).is_ok());
+    let multi_child = fandhe_ai::tape();
+    assert!(t.jvp_multi(&y, &[&x], &[&u], &multi_child).is_ok());
     let xb = t.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor"));
     let vm: Result<Var<'_>, AutodiffError> = t.vmap(&xb, 0, square);
     assert!(vm.is_ok());
