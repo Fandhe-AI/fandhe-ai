@@ -544,6 +544,18 @@ fn det_large_input_is_rejected() {
     );
 }
 
+/// 回帰（PR #3353 指摘）: det(A) と inv(A) の経路が打ち消し合う悪条件入力は、二階が厳密に 0 の
+/// ところ f32 で約 4e-3 残り REQ-2 の絶対誤差条件を破るため、型付きエラーで拒否する。
+#[test]
+fn det_second_order_cancellation_is_rejected() {
+    assert_rejected_and_child_reusable(
+        "det [[1,2],[3,6.001]]",
+        |_tape, x| x.det(),
+        &[1.0, 2.0, 3.0, 6.001],
+        &[2, 2],
+    );
+}
+
 /// 正のプローブ: ほどほどの大きさ・条件数の入力は受理され、全段が有限で 1 階と一致する。
 #[test]
 fn moderate_scale_inputs_are_accepted_and_finite() {
@@ -554,6 +566,10 @@ fn moderate_scale_inputs_are_accepted_and_finite() {
     ];
     for (name, a0) in cases {
         for kind in 0..4 {
+            // Det の二階は 2 経路の桁落ち上界が大きい入力（対角スケール差）を拒否する（上の回帰参照）。
+            if kind == 2 && name != "dense" {
+                continue;
+            }
             let tape = Tape::new_with_ops(common::naive_ops());
             let child = Tape::new_with_ops(common::naive_ops());
             let a = tape.var(&t(a0.clone(), &[2, 2]));

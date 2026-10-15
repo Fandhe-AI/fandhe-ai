@@ -388,6 +388,29 @@ pub(super) fn guard_solve(
     Ok(())
 }
 
+/// `Det` の二階微分 `det * (tr(X S) * X^T - X^T S^T X^T)`（`X = inv(A)`、`S` は seed）は、det(A) と
+/// inv(A) の経路が大きな同符号反対項を打ち消し合う（`det` が小さい悪条件入力で桁落ち。例: f32 の
+/// `[[1,2],[3,6.001]]` は厳密に 0 の二階が約 4e-3 残る）。2 項は別経路の f32 丸めを持ち相殺しない
+/// ため、基底 seed `E_kl` ごとの絶対値積（2 項の大きさ）の総和（`|S| <= 1` の任意 seed の上界）に
+/// 丸め誤差係数 `(2n+4) * 2^-23` を掛けて見積もり、全要素で絶対 1e-5 未満に収まらなければ拒否する
+/// （tolerance は緩めない。保守的で、実際には許容内の入力も拒否しうる）。
+fn det_second_order_rounding_ok(x: &[f64], det: f64, n: usize) -> bool {
+    let coeff = (2 * n + 4) as f64 * (-23f64).exp2();
+    let ax = abs_vec(&transpose(x, n, n));
+    let mut mag = vec![0.0f64; n * n];
+    for k in 0..n * n {
+        let (kr, kc) = (k / n, k % n);
+        // |tr(X E_kl)| = |X[kc][kr]|。
+        let tr = x[kc * n + kr].abs();
+        for (i, m) in mag.iter_mut().enumerate() {
+            // |X^T E^T X^T|[i] = |X^T[a][kc]| * |X^T[kr][b]|（i = a*n + b）。
+            let t2 = ax[(i / n) * n + kc] * ax[kr * n + i % n];
+            *m += det.abs() * (tr * ax[i] + t2);
+        }
+    }
+    mag.iter().all(|&m| coeff * m < 1e-5)
+}
+
 /// `SlogdetLogAbsDet`（`scale = 1`）と `Det`（`scale = det`）の判定。`g` は形状 `[]`。
 pub(super) fn guard_det_like(
     a: &Tensor<f32>,
@@ -410,6 +433,11 @@ pub(super) fn guard_det_like(
         && (!with_det || (stage_ok(det) && stage_ok(scale))))
     {
         return Err(reject("行列式系: 構造の段が overflow／ゼロ化域に入る"));
+    }
+    if with_det && !det_second_order_rounding_ok(&x, det, n) {
+        return Err(reject(
+            "Det: 二階微分の det と inv の経路間の桁落ちが REQ-2 の許容を超えうる",
+        ));
     }
     let bx = n as f64 * max_abs(&x);
     let extra = gv.abs().max(1.0) * if with_det { det.abs().max(1.0) } else { 1.0 };
