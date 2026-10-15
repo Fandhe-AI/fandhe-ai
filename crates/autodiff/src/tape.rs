@@ -2405,12 +2405,10 @@ impl Op {
     /// 定義）——`ScalarUnaryOp`／`ScalarBinaryOp` は `tensor-core` 側で
     /// `#[non_exhaustive]` のため、判定を 1 か所に集約することで
     /// `validate_ancestors`／`build_mirror`／`replay_op`／`build_cgrads`
-    /// の判断が食い違わないようにする。`ScalarUnaryOp::Gelu`（誤差関数
-    /// 版 GELU）・`ScalarUnaryOp::GeluTanh` は、導関数を `Var` 演算の
-    /// 合成だけでは再現できない（`Gelu` は `erf` を要し依存追加禁止
-    /// 〈`.claude/rules/deps-policy.md`〉、`GeluTanh` は本イシューの
-    /// スコープでは見送り。`docs/autodiff-higher-order-grad-decision.md`
-    /// §16 参照）ため `false` のまま残る。それ以外の `ScalarUnaryOp`・
+    /// の判断が食い違わないようにする。`ScalarUnaryOp::Gelu`・`GeluTanh`・
+    /// `Erf` はイシュー #3081（決定記録 §21.5・§22）で `true` になった
+    /// （`Gelu` の `Φ(x)` は子テープへ `Erf` として記録するため `Erf` も
+    /// 同時に対象。依存追加なし）。`ScalarUnaryOp`・
     /// `ScalarBinaryOp` の既知 variant はすべて `true`。
     ///
     /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Gather`・

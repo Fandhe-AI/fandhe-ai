@@ -56,7 +56,7 @@
 //! 対象）**: `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・
 //! `Sum`・`Mean`・`Reshape`・`BroadcastTo`・`MatMul`（rank 2 × rank 2
 //! 限定。#1943）の 12 variant に加え、イシュー #2062 で
-//! `ScalarUnary`（`Gelu`・`GeluTanh` を除く）・`ScalarBinary`（既知 13
+//! `ScalarUnary`（#3081 で `Gelu`・`GeluTanh`・`Erf` も対象）・`ScalarBinary`（既知 13
 //! variant すべて）・`Transpose`・`Permute`・`Narrow`・`Concat`・
 //! `Contiguous`・`Where` を拡張済み（[`scalar_unary_replayable`]／
 //! [`scalar_binary_replayable`] 参照）。`MaskedFill`・`Gather`・
@@ -110,11 +110,11 @@ use crate::var::Var;
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
 /// への薄い委譲で全 variant 対応）とは異なり、[`build_cgrads`] の VJP
 /// 合成は variant ごとに手書きのため、ここで対応済み variant のみを
-/// 許可する。`ScalarUnaryOp::Gelu`（誤差関数版）は導関数が `erf` を要し
-/// `Var` 演算の合成だけでは再現できないため対象外
-/// （`docs/autodiff-higher-order-grad-decision.md` §16）。`GeluTanh` は
-/// 本イシューのスコープでは見送り（`.claude/rules/out-of-scope-
-/// tracking.md` で追跡）。`ScalarUnaryOp` は `tensor-core` 側で
+/// 許可する。`Gelu`（誤差関数版）・`GeluTanh`・`Erf` はイシュー #3081
+/// （決定記録 §21.5・§22）で対象へ追加した。`Gelu` の導関数は `Φ(x)` に
+/// `erf` を要するため `Erf` を `Var::scalar_unary` で子テープへ記録し、
+/// その `Erf` 自体も孫テープでの再生（閉包性）のため同時に対象にする。
+/// `GeluTanh` は飽和域の死に枝を安全化して `NaN` を避ける。`ScalarUnaryOp` は `tensor-core` 側で
 /// `#[non_exhaustive]` のため、末尾のワイルドカードは未知 variant を
 /// 安全側の `false` へ倒す（`tape.rs::supports_create_graph` doc
 /// 「例外」参照）。イシュー #2649 の `Selu`／`Celu`／`Softsign`／
@@ -142,6 +142,9 @@ pub(crate) fn scalar_unary_replayable(op: ScalarUnaryOp) -> bool {
             | ScalarUnaryOp::Softplus { .. }
             | ScalarUnaryOp::Clamp { .. }
             | ScalarUnaryOp::PowScalar { .. }
+            | ScalarUnaryOp::Gelu
+            | ScalarUnaryOp::GeluTanh
+            | ScalarUnaryOp::Erf
     )
 }
 
@@ -647,7 +650,7 @@ fn child_value(child: &Tape, v: &Var<'_>) -> Result<Tensor<f32>, AutodiffError> 
     Ok(materialize_fallible(&nodes, child.ops(), v.node_id())?.clone())
 }
 
-/// V3（`docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3・§22）の
+/// V3（`docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3・§23）の
 /// 値と構造の結合。値 `host_value` は 1 階 VJP と同じホスト関数の結果、
 /// 構造 `composed` は二階微分を流すための `Var` 演算グラフ。値を持つ
 /// `Op::Contiguous`（恒等 VJP）ノードとして子テープへ登録する。
@@ -686,12 +689,20 @@ fn reduce_dim_bcast<'c>(
 /// `Op::Softmax` の create_graph（V3。イシュー #3077）。値は 1 階と同じ
 /// `grad::softmax_vjp_along`（f64 縮約）、構造は `y⊙g − y⊙Σ(g⊙y)`
 /// （`Σy=1`・`y≥0` ゆえ中間値が `max|g|` 以下で overflow しない並べ方）。
+///
+/// 二階の逆伝播（codex-review 指摘・PR #3344）: `y` を 1 つのノードで
+/// 3 箇所に使うと、`y` への寄与（`g`・`dot`・`g·(-y)` の各項）が同一ノードで
+/// 蓄積され、個々は有限でも和が f32 範囲を超える（Softmax VJP の
+/// 定数シフト不変性で本来は相殺される量）。そこで 3 つの使用ごとに入力から
+/// `softmax` ミラーを別ノードとして立て、各寄与を別々に Softmax VJP へ
+/// 通してから入力側で蓄積する（各項は `max|g|` 以下）。値は 1 階と同一の
+/// ホスト関数が決めるため 1 階の bit 一致は不変。
 fn softmax_cgrad_v3<'c>(
     parent: &Tape,
     child: &'c Tape,
     parent_nodes: &[TapeNode],
-    mirror: &[Option<Var<'c>>],
     id: NodeId,
+    x_m: Var<'c>,
     g: &Var<'c>,
     dim: usize,
 ) -> Result<Var<'c>, AutodiffError> {
@@ -699,19 +710,21 @@ fn softmax_cgrad_v3<'c>(
     if shape.contains(&0) {
         return Ok(child.var_no_grad(&Tensor::zeros(&shape)?));
     }
-    let y_m = get_mirror(mirror, id)?;
+    let y_a = x_m.softmax(dim)?;
+    let y_b = x_m.softmax(dim)?;
+    let y_c = x_m.softmax(dim)?;
     let out_value = materialize_fallible(parent_nodes, parent.ops(), id)?;
     let g_value = child_value(child, g)?;
-    let t1 = y_m.mul(g)?;
-    let dot = reduce_dim_bcast(&g.mul(&y_m)?, dim, &shape)?;
-    let composed = t1.sub(&y_m.mul(&dot)?)?;
+    let t1 = y_a.mul(g)?;
+    let dot = reduce_dim_bcast(&g.mul(&y_c)?, dim, &shape)?;
+    let composed = t1.sub(&y_b.mul(&dot)?)?;
     let host = crate::grad::softmax_vjp_along(out_value, &g_value, dim);
     push_v3(child, &composed, host)
 }
 
 /// レーンごとのスケール `s = max|g|`（`dim` 軸を長さ 1 にした shape）。
 /// `s == 0` と非有限（`g` に `inf`／`NaN`）のレーンは `1`（IEEE 伝播を
-/// 構造側へ任せる。§22）。有限の小さい `max|g|` は下限
+/// 構造側へ任せる。§23）。有限の小さい `max|g|` は下限
 /// [`LANE_SCALE_FLOOR`] で持ち上げる（codex-review 指摘・PR #3344:
 /// `g.div(&s)` の VJP は `1/s`・`-g/s²` を f32 で先に評価するため、
 /// 非正規数級の `s` では二階微分の係数が `inf` になる。構造式は任意の
@@ -777,8 +790,18 @@ fn log_softmax_cgrad_v3<'c>(
         .var_no_grad(&lane_scale(&g_value, dim)?)
         .broadcast_to(&shape)?;
     let gs = g.div(&s_c)?;
-    let sum_gs = reduce_dim_bcast(&gs, dim, &shape)?;
-    let composed = gs.sub(&y_m.exp().mul(&sum_gs)?)?.mul(&s_c)?;
+    // 二階の逆伝播の保護（codex-review 指摘・PR #3344）: `exp(y)·Σgs` の
+    // 係数 `Σgs`（最大 `n`）が `exp` ノードへの寄与 `-s·Σgs` を f32 範囲外へ
+    // 押し出す。`q = exp(y + ln n) = n·p`・`mean_gs = Σgs / n` と分け、
+    // `q` への寄与を `-s·mean_gs`（`≤ s`）に抑える。`y` への寄与は
+    // `q·(-s·mean_gs) = p·(-s·Σgs)` で従来と同値。構造式は数学的に同値で
+    // 値は 1 階のホスト関数が決める。
+    let n_lane = shape[dim] as f32;
+    let ln_n = child.var_no_grad(&Tensor::full(&shape, n_lane.ln())?);
+    let q = y_m.add(&ln_n)?.exp();
+    let inv_n = child.var_no_grad(&Tensor::full(&shape, 1.0 / n_lane)?);
+    let mean_gs = reduce_dim_bcast(&gs, dim, &shape)?.mul(&inv_n)?;
+    let composed = gs.sub(&q.mul(&mean_gs)?)?.mul(&s_c)?;
     let host = crate::grad::log_softmax_vjp_dispatch(child.ops(), out_value, &g_value, dim)?;
     push_v3(child, &composed, host)
 }
@@ -998,7 +1021,15 @@ fn build_cgrads<'c>(
                 }
             }
             Op::Softmax { input, dim } => {
-                let da = softmax_cgrad_v3(parent, child, &parent_nodes, mirror, id, &g, dim)?;
+                let da = softmax_cgrad_v3(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    id,
+                    get_mirror(mirror, input)?,
+                    &g,
+                    dim,
+                )?;
                 accumulate(&parent_nodes, &mut cgrads, input, da)?;
             }
             Op::LogSoftmax { input, dim } => {
@@ -1168,6 +1199,68 @@ fn build_cgrads<'c>(
                                 .mul(&exp_c)?;
                             g.mul(&factor)?
                         }
+                    }
+                    ScalarUnaryOp::Erf => {
+                        // erf'(x) = 2/√π · exp(-x²)（`erf_grad` と同順）。
+                        let c = child.var_no_grad(&Tensor::scalar(
+                            (2.0f64 * 0.564_189_583_547_756_3f64) as f32,
+                        ));
+                        let factor = x_m.mul(&x_m)?.neg()?.exp().mul(&c)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::Gelu => {
+                        // Φ(x) + x·φ(x)（`gelu_erf_grad` と同順）。Φ は子テープへ
+                        // `Erf` として記録する（閉包性。#3081・§22）。
+                        let inv_sqrt2 =
+                            child.var_no_grad(&Tensor::scalar(std::f32::consts::FRAC_1_SQRT_2));
+                        let half = child.var_no_grad(&Tensor::scalar(0.5f32));
+                        let one = child.var_no_grad(&Tensor::scalar(1.0f32));
+                        let neg_half = child.var_no_grad(&Tensor::scalar(-0.5f32));
+                        let inv_sqrt_2pi = child.var_no_grad(&Tensor::scalar(0.398_942_3_f32));
+                        let e = x_m.mul(&inv_sqrt2)?.scalar_unary(ScalarUnaryOp::Erf)?;
+                        let cdf = one.add(&e)?.mul(&half)?;
+                        let pdf = x_m.mul(&x_m)?.mul(&neg_half)?.exp().mul(&inv_sqrt_2pi)?;
+                        let factor = cdf.add(&x_m.mul(&pdf)?)?;
+                        g.mul(&factor)?
+                    }
+                    ScalarUnaryOp::GeluTanh => {
+                        // 飽和域（1 - tanh² == 0）は host マスクで検出し、滑らかな式は
+                        // 飽和要素を 0 に置換した x_safe で組む（double-where）。
+                        // where_cond の死に枝へも 0 の余接が流れ、後続 Mul の VJP が
+                        // `0·相方` を作るため、相方が inf だと 2 階へ NaN が混入する。
+                        let x_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                        const C: f32 = 0.797_884_6;
+                        const K: f32 = 0.044_715;
+                        let t_host = |v: f32| (C * (v + K * v * v * v)).tanh();
+                        let sat = mask_from_pred(x_val, |v| {
+                            let t = t_host(v);
+                            1.0 - t * t == 0.0
+                        })?;
+                        let contiguous = x_val.contiguous();
+                        let limit_data: Vec<f32> = contiguous
+                            .as_slice()
+                            .map(|s| s.iter().map(|&v| 0.5 * (1.0 + t_host(v))).collect())
+                            .unwrap_or_default();
+                        let limit =
+                            child.var_no_grad(&Tensor::new(limit_data, contiguous.shape())?);
+                        let zeros = child.var_no_grad(&Tensor::zeros(&x_m.shape())?);
+                        let x_safe = Var::where_cond(&sat, &zeros, &x_m)?;
+                        let c = child.var_no_grad(&Tensor::scalar(C));
+                        let k = child.var_no_grad(&Tensor::scalar(K));
+                        let k3 = child.var_no_grad(&Tensor::scalar(3.0 * K));
+                        let half = child.var_no_grad(&Tensor::scalar(0.5f32));
+                        let one = child.var_no_grad(&Tensor::scalar(1.0f32));
+                        let x2 = x_safe.mul(&x_safe)?;
+                        let x3 = x2.mul(&x_safe)?;
+                        let u = x_safe.add(&k.mul(&x3)?)?.mul(&c)?;
+                        let t = u.tanh();
+                        let sech2 = one.sub(&t.mul(&t)?)?;
+                        let du = one.add(&k3.mul(&x2)?)?.mul(&c)?;
+                        let first = one.add(&t)?.mul(&half)?;
+                        let second = x_safe.mul(&sech2)?.mul(&du)?.mul(&half)?;
+                        let smooth = first.add(&second)?;
+                        let factor = Var::where_cond(&sat, &limit, &smooth)?;
+                        g.mul(&factor)?
                     }
                     _ => {
                         return Err(AutodiffError::Backward(format!(
@@ -1761,6 +1854,14 @@ mod maximum_minimum_tests {
 #[cfg(test)]
 mod new_2649_tests {
     use super::*;
+
+    #[test]
+    fn gelu_family_kinds_are_replayable() {
+        // #3081: Gelu・GeluTanh と、Gelu の Φ を記録する Erf（閉包性）。
+        assert!(scalar_unary_replayable(ScalarUnaryOp::Gelu));
+        assert!(scalar_unary_replayable(ScalarUnaryOp::GeluTanh));
+        assert!(scalar_unary_replayable(ScalarUnaryOp::Erf));
+    }
 
     #[test]
     fn new_2649_kinds_are_not_replayable() {

@@ -7028,7 +7028,7 @@ pub(crate) fn softmax_vjp_along(
 /// フォールバックし、それ以外のエラーは伝播する（`Op::NllLoss` と同型の
 /// 3 分岐。判定迂回経路を作らない。`.claude/rules/security.md` A08）。
 /// 1 階 `vjp` と、子テープ方式高階微分（`create_graph.rs` の V3。
-/// `docs/autodiff-higher-order-grad-decision.md` §21.3・§22）の値計算が
+/// `docs/autodiff-higher-order-grad-decision.md` §21.3・§23）の値計算が
 /// 共有し、CUDA でも `cg.grad` の値を 1 階と bit 同一に保つ。
 pub(crate) fn log_softmax_vjp_dispatch(
     ops: &dyn BackendOps,
