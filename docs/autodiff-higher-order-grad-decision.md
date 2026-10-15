@@ -116,7 +116,7 @@
 
 | 分類 | Op | 根拠 |
 |---|---|---|
-| **対象（初期スコープ）** | `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・`ScalarUnary`・`ScalarBinary`・`MatMul`・`Sum`（`dim=None` または単一軸）・`Mean`（`dim=None` または単一軸）・`Reshape`・`Transpose`・`Permute`・`BroadcastTo`・`Narrow`・`Concat`・`Contiguous`・`Where`・`MaskedFill`・`Gather`・`Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss`（target は非微分入力として扱う。(c) の非追跡ペイロードは入力側であり出力勾配の合成自体は可能） | (a)(b)(d) を満たす。VJP は §2 の対応表がすでに `Var` 演算への分解を示す。`Mean` は `mean_vjp`（`crates/autodiff/src/grad.rs:5118`）が `Sum` の VJP（`unreduce_broadcast`）を `1/n` でスケールしたものと一致し追加の数値契約を持たないため `Sum` と同じ扱いとする。`Pad` は `pad_vjp`（`:1568`）が `Op::Narrow` の forward と同じ `narrow` 呼び出し連鎖のみで構成され算術を含まないため `Narrow` と同じ扱いとする。`CrossEntropyLoss` は target を非微分入力として扱えば合成可能（PyTorch の `create_graph=True` でも target 自体には勾配は流れない）。`Softmax`／`LogSoftmax` は #1941 是正により本行から除外し「非対象（合成では再現できない数値契約）」へ移した（下表参照） |
+| **対象（初期スコープ）** | `Leaf`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`・`Sigmoid`・`ScalarUnary`・`ScalarBinary`・`MatMul`・`Sum`（`dim=None` または単一軸）・`Mean`（`dim=None` または単一軸）・`Reshape`・`Transpose`・`Permute`・`BroadcastTo`・`Narrow`・`Concat`・`Contiguous`・`Where`・`MaskedFill`・`Gather`・`Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss`（`CrossEntropyLoss` の整数ラベル target は非微分入力として扱う。`MseLoss` の浮動小数 target は追跡可能な入力で、`dTarget=-dPred` の寄与を維持する。(c) の非追跡ペイロードは入力側であり出力勾配の合成自体は可能） | (a)(b)(d) を満たす。VJP は §2 の対応表がすでに `Var` 演算への分解を示す。`Mean` は `mean_vjp`（`crates/autodiff/src/grad.rs:5118`）が `Sum` の VJP（`unreduce_broadcast`）を `1/n` でスケールしたものと一致し追加の数値契約を持たないため `Sum` と同じ扱いとする。`Pad` は `pad_vjp`（`:1568`）が `Op::Narrow` の forward と同じ `narrow` 呼び出し連鎖のみで構成され算術を含まないため `Narrow` と同じ扱いとする。`CrossEntropyLoss` は整数ラベル target が非微分入力のため合成可能（PyTorch の `create_graph=True` でも整数ラベルには勾配は流れない）。浮動小数の target を持つ損失（`MseLoss`・`PoissonNllLoss`・`GaussianNllLoss` 等）は target を追跡可能な入力として扱い、非微分と一律に見なさない（§21.3 #3082）。`Softmax`／`LogSoftmax` は #1941 是正により本行から除外し「非対象（合成では再現できない数値契約）」へ移した（下表参照） |
 | **非対象（resident／fused／CUDA Graph）** | `ResidentLeaf`・`LinearResident`・`LinearAct` | 契約 6（§3）。d_weight がデバイス常駐 staging（`ResidentResolver::fill_resident_weight_grad`）へ直接書き込まれ `Gradients` に現れないため、二階の入力として使えない。CUDA Graph capture（#1349）区間も同様に非対象 |
 | **非対象（非追跡ペイロード）** | `QrQ{r}`・`QrR{q}`・`SvdU{s,vh}`・`SvdS`・`SvdVh` | (c) 抵触。多出力ノードが `Tensor<f32>` を直接ペイロードとして持ち、それ自体をテープ上の追跡演算として再構成する経路が未整備 |
 | **非対象（合成では再現できない数値契約）** | `Softmax`・`LogSoftmax`（`softmax_vjp_along`／`log_softmax_vjp_along` が縮約後の減算・乗算まで `f64` で保持し最後に 1 回だけ `f32` へ downcast する契約。§2）・`Max`（先勝ちタイ規則。`extremum_first_match_vjp`）・`Min`（同上）・`Var`（分散。`f64` アキュムレータ縮約契約）・`Std`・`VectorNorm`・`MatrixNorm`・`RmsNorm`・`LayerNorm`・`BatchNorm`・`Conv2d`（d_weight／d_bias の `f64` 縮約契約）・`ConvTranspose2d`（同上。イシュー #2067）・`AvgPool2d`・`AdaptiveAvgPool2d`（`f64` 相当縮約契約）・`Cumsum`（`cumsum_vjp_along`〈`:4654`〉が lane ごと `f64` アキュムレータで逆順累積和を構築する契約） | (d) 抵触。`.claude/rules/coding-rust.md` の「勾配の長軸縮約は `f64` アキュムレータで統一する」契約・`extremum_first_match_vjp` の先勝ち決定的方式（#1718）は、既存 `Var` 演算（`eq` マスク等）の単純合成では bit 再現できない。子テープで再構成すると縮約順序が変わり 1 階と異なる丸め誤差を生む可能性がある。`Softmax`／`LogSoftmax` も同型: `y=[0.25,0.75]`・上流勾配 `g=[3e38,-3e38]` のような有限入力で `softmax_vjp_along` は有限値を返すが、`Var::mul`／`Var::sum_dims`／`Var::broadcast_to` への素朴な合成（各演算が `f32` で中間値を持つ）では途中の乗算・減算が overflow し `inf`／`NaN` を生む（#1941 是正。codex-review 指摘） |
@@ -670,3 +670,153 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 - 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
 - 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
 - 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
+
+## 21. create_graph の対象 Op 拡張の範囲と族ごとの二階 VJP 方針（#3076・親 #3075）
+
+- 基準コミットは `origin/main` `27e0472d`。本節の `file:line` はこのコミットで確かめた（`tensor-core/src/scalar_op.rs` 以外は `crates/autodiff/src/` 配下）。
+- 本節は設計判断だけを書く。コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文は変えていない。根拠は §20（2026-10-11 の D-A）で、新しい承認ではない。
+
+### 21.1 共通方式
+
+**(1) 不変条件**
+- 1 階の `Tape::backward` と `CreateGraphResult::first_order()` は親テープで加工せずに計算する。bit 同一は構造上保たれる（§3 契約 1・§9 選択肢 (i)）。
+- 子テープ上の `cg.grad(..)` は 1 階勾配と REQ-2 統一複合判定で突き合わせる（§9 (i)）。bit 同一は要求しない。V3 を採る族だけは値が bit 同一になる。
+- 新しい tolerance・baseline は作らない。
+
+**(2) 再生 R**
+- `replay_op` は公開 `Var` メソッドへ薄く委譲する（#2062 と同形）。forward と同じカーネルを通るので写しの値は親と一致する。
+- 再生に必要で payload に無い値は `Op` へ足す。`Op` は `pub(crate)` なので公開 API には影響しない。
+
+**(3) 二階 VJP の構成方式**
+
+| 方式 | 内容 | 前例 |
+|---|---|---|
+| V1 | 1 階 VJP の式を replayable な `Var` 演算の合成で子テープへ書く（f32） | #2062 の `Silu` など |
+| V2 | 選択・区分定数の部分は親の記録値からホストでマスク・索引を作り、`where_cond`／`gather`／`scatter` で選ぶ。マスク規則は 1 階と同じなので先勝ちタイが保たれる。`g.mul(0/1 定数)` は `inf*0=NaN` を生むので使わない | `mask_from_pred`（`create_graph.rs:1353`）、`Maximum`／`Minimum` の 3 分類 |
+| V3 | 値は 1 階 VJP と同じホスト関数（f64 縮約契約を持つもの）で計算し、構造は V1 の合成グラフを入力に、VJP が前方値に依存しない Op タグ（`Contiguous`〈恒等〉・`Sum`）で `Tape::push_eager` する。値は 1 階と bit 同一、二階の微分は合成グラフを流れる。ホスト関数は `pub(crate)` にする（#2062 の `inverse_permutation` と同様）。孫テープで再生すると合成側の f32 が再計算されるが、この差は REQ-2 の範囲で受け入れる | `reduce_bias_grad_var`（`create_graph.rs:1310`） |
+| V4 | 1 階 VJP そのものを専用 Op にし、その VJP を手で書く。§4／§5 が案 B を一般方針として退けているので既定では採らない。採る族は個別に理由を書く | なし |
+
+**(4) 閉包性**
+- `jvp_create_graph`（`functional_ops.rs:742`、`:799` の `child.backward_create_graph(&prod, grandchild)`）は子テープをさらに孫テープへ再生する。#3087 は jacfwd が拡張 Op を通ることを確かめる。
+- したがって `build_cgrads` が子テープへ積むノードは、すべて `supports_create_graph == true` でなければならない。族の節に「積む Op」を書き、他の族・fail-closed に依存する場合は 21.4 の依存順に載せる。
+
+**(5) 数値契約**
+- f64 縮約は原則 V3。overflow 回避は 1 階の回帰ベクトル（§8 の `y=[0.25,0.75]`・`g=[3e38,-3e38]` など）を族のテストで必須にする。先勝ちタイは V2。
+- **中間値の overflow（V3 の値補正では防げない）**: V3 はノードの最終値だけをホスト関数に置き換えるので、構造側の合成グラフが f32 で持つ中間値（例: `x=1e20` の二乗が `inf`、そこから `rstd=0`）は二階微分・孫テープ再生にそのまま使われる。したがって f64 縮約契約を持つ族は、V3 の値補正に加えて次のいずれかで中間統計量を安全に作ることを族の節に明記する。(S1) スケール付き合成: 行ごとの最大絶対値 `s`（ホスト定数。全ゼロ行・全要素が 0 の行では `s=0` となり `x/s` が `NaN` になるため、`s=0` の行は正のスケール `s=1` を使う規則とする。`x` が全ゼロなら二乗和は 0 で、正の `eps` を持つ `LayerNorm`・`RmsNorm` の統計量・入力勾配は 1 階と同じく有限になる）で `x/s` を作ってから二乗和・rstd を合成し、`rstd = rstd_scaled / s` で戻す。孫テープ再生でも同じスケール付き構造が再計算されるので overflow しない。**eps の値域保護（S1 の適用条件）**: スケール後の統計量に載せる `eps` は `eps/s²` に変換する。これを f64 で計算して f32 へ丸めた値が 0 になる（`s` が大きく `eps/s²` が f32 正規最小値 `1.17549435e-38` 未満）場合でも、`s` が「中心化後の偏差の最大絶対値」（`LayerNorm`。`RmsNorm` は `x` の最大絶対値）である限り、スケール後の分散（平均二乗）は少なくとも `1/n`（最大要素の寄与が `1`）なので `eps/s²` は丸めで消えるだけで `rstd_scaled` は変わらず有限である。`LayerNorm` で `s` を中心化前の `x` の最大絶対値から選んではならない（定数行 `x=[1e30,1e30]`・`eps=1e-5` は分散 0 のまま `eps/s²=1e-65` が f32 で 0 になり `rstd_scaled=inf` になる）。`s` は構造側と同一手順の f32 演算で得た中心化後偏差から算出し、全偏差が 0 の行は `s=1`（`eps` を変換せず `rstd=1/√eps` で有限）とする。**eps 側の overflow 保護（小スケール入力）**: `s` が極小だと `eps/s²` が f32 で overflow する（`RmsNorm` の `x=[1e-30,1e-30]`・`eps=1e-5` は `s=1e-30` で `eps/s²≈1e55` が `inf` になり、`rstd_scaled=0`・復元した `rstd=0` と誤る。既存 `row_rms_stats` は約 316.23。`0` は有限なので S2 への切替条件にも当たらない）。このため `s` は「最大絶対値（`LayerNorm` は中心化後偏差の最大絶対値）」と `√eps` の大きい方を 2 のべき乗へ切り上げた値とする（`eps>0` のとき `s≥√eps` なので `eps/s²≤1` で常に有限。`s` が最大絶対値で決まる場合は上記の議論どおり。`√eps` で決まる場合は `eps/s²∈(1/4,1]` かつ `x/s` の絶対値が 1 以下で、`rstd_scaled≤2` となり有限）。`eps=0` の行は従来どおり最大絶対値のみで `s` を決め、`s=0` なら `s=1` とする。この規則は全ゼロ偏差行も包含する（`s=√eps` で `rstd=1/√eps`）。`rstd_scaled` が非有限になる（スケール後分散と `eps/s²` の和が 0）入力は S1 の適用外として S2 へ切り替える（既存 `row_ln_stats` は `eps` を f64 で保持するので S2 の値側と整合する）。(S2) 中間統計量（`rstd` 等）を 1 階と同じ f64 先昇格のホスト関数で計算し、`push_eager` した定数ノードとして保持した上で、二階の微分に必要な項は解析式で別途合成する。(S3) V4（専用 VJP）。既定は S1。いずれの場合も、1 階・`cg.grad`・孫テープ再生（`jvp_create_graph` 経由）の 3 段すべてで有限入力の overflow 回帰ベクトルを必須テストにする（1 階だけの確認では不足）。
+
+### 21.2 `supports_create_graph` の Op 割り当て
+
+`tape.rs:2432` の網羅 match は `true` が 18 variant、payload 判定の `ScalarUnary`・`ScalarBinary` が 2、`false` が 103 で、enum 全体 123 と一致する（18 + 2 + 103）。103 件は次で機械的に抽出した（`ScalarBinary` を除く）。
+
+```bash
+sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | sed 's/Op:://' | sort -u
+```
+
+**A. 恒久対象外（5）**
+
+| Op | 根拠 |
+|---|---|
+| `ResidentLeaf`・`LinearResident`・`LinearAct` | §3 契約 6（resident／fused はテープ外の値を持つ） |
+| `Custom` | §8・`autodiff-custom-function-decision.md` §14（利用者関数の二階は定義できない） |
+| `OneHot` | 非微分 |
+
+**B. 族へ割り当て（74）**
+
+| 族 | Op | 数 | 方式 |
+|---|---|---|---|
+| #3077 | `Softmax`・`LogSoftmax` | 2 | V3 |
+| #3078 | `LayerNorm`・`RmsNorm` | 2 | V3 |
+| #3079 | `BatchNorm` | 1 | V3（推論時は V1） |
+| #3080 | `Conv2d`・`ConvTranspose2d`・`Conv3d`・`ConvTranspose3d`・`Unfold`・`Fold` | 6 | d_input は転置畳み込み合成、d_weight／d_bias は V3。`Unfold`・`Fold` は閉包性のため同梱 |
+| #3082 | `MseLoss`・`L1Loss`・`HuberLoss`・`PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss`・`BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss`・`CrossEntropyLoss`・`CrossEntropyLossWithOptions`・`NllLoss`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 20 | V1。f64 の scale・縮約を持つものは V3 |
+| #3082（fail-closed） | `CtcLoss` | 1 | 族に置いたまま fail-closed。ホストの動的計画法（alpha／beta）を `Var` 演算で再生できない |
+| #3083 | `Gather`・`Scatter`・`IndexedScatterReduce`・`Embedding`・`Cumsum`・`Cumprod`・`Logcumsumexp`・`Cummax`・`Cummin`・`Sort`・`Topk` | 11 | 索引 V1、累積 V3、選択 V2 |
+| #3084 | `Pad`・`PadMode`・`MaskedFill` | 3 | V1／V2 |
+| #3085 | `MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d` | 5 | Max 系 V2、Avg 系 V3 |
+| #3086 対象 | `Inv`・`Solve`・`Det`・`SlogdetLogAbsDet` | 4 | V1（`Det` は V3。下記 `Det` の数値契約） |
+| #3086 条件付き | `Fft`・`Ifft`・`Rfft`・`Irfft` | 4 | 随伴写像を g に作用させる形。随伴が replayable な `Var` 演算（`Var::fft`／`ifft`・スケール・Hermitian 重みマスク）で書けることを #3086 の冒頭で確かめ、書けなければ fail-closed |
+| #3086 fail-closed | `QrQ`・`QrR`・`SvdU`・`SvdS`・`SvdVh`・`EighValues`・`EighVectors`（多出力 payload。§8）、`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`（二階式が複雑）、`SlogdetSign`・`MatrixRank`（1 階 VJP が恒等ゼロ。`grad.rs:2279`／`:2303`）、`Stft`・`Istft`（窓と overlap-add） | 15 | fail-closed |
+
+- #3086 の判定基準は「1 階 VJP を replayable な公開 `Var` メソッドだけで書き直せるか」。`Inv`／`Solve`／`Det` は `Var::inv`／`solve`／`det`（`var.rs:6740`／`:6761`／`:6806`）で再生でき、cgrad は写しの `Inv` 出力・`matmul`・`transpose` の合成（例 `-Yᵀ g Yᵀ`、`g·det·A⁻ᵀ`）で書ける。`Inv` を最初に replayable にする。
+- **`Det` の数値契約（V1 単独では不足。V3 に変更）**: `g·det·A⁻ᵀ` を再生された `Var::det` の f32 出力で組むと、`A=diag(1e20,1e20)`・`g=1` で `det=1e40` が f32 の `inf` に丸まり、本来有限な対角勾配 `1e20` が `inf`、非対角が `NaN` になる。既存の `eval::linalg::det_vjp`（`crates/autodiff/src/eval/linalg.rs:1229`）は forward の丸め済み出力を使わず det と逆行列の積を f64 で保持して 1 回だけ downcast するので、この入力でも有限である。したがって `Det` は V3 とする。値は `det_vjp` と同じホスト関数（`pub(crate)`）で 1 階と bit 同一に計算する。構造は大スケール入力を再生時まで保つ**行別**スケール付き合成: 行 `i` ごとに `r_i`（その行の最大絶対値以上の 2 のべき乗。厳密に割れる。全ゼロ行は `r_i=1`）を取り、`B=D⁻¹A`（`D=diag(r)`）を作る。`det(A)=(∏r_k)·det(B)`、`A⁻ᵀ=D⁻¹B⁻ᵀ` なので `∂det/∂A_ij=(∏_{k≠i}r_k)·det(B)·(B⁻ᵀ)_ij` となる。係数 `∏_{k≠i}r_k` は指数（2 のべき乗の指数の和 `E_i`）をホストで整数として足すが、**係数そのものを 1 個の f32 定数として `push_eager` してはならない**（`A=diag(1e20,1e20,1e20)`・`g=1e-30` では既存 `det_vjp` の対角勾配は約 `1e10` で有限だが、行別係数は約 `1e40` で f32 定数化により `inf` になる。`det(B)`・`B⁻¹` は有限なので S2 への切替条件にも当たらない）。**指数分割と g との適用順**: `g` を行列全体で共通の 2 のべき乗 `s_g` で割った `g̃=g/s_g` を作り（`s_g` は **f32 で表現可能な範囲 `[2^-126, 2^127]` に収める**: `s_g = clamp(max(abs(g)) 以上の最小の 2 のべき乗, 2^-126, 2^127)`。`g=0` は `s_g=1`。2 のべき乗による除算は厳密。`max(abs(g)) > 2^127` の入力〈例 `A=I(2×2)`・`g=3e38` では素朴な選び方だと `s_g=2^128` が f32 で `inf` になり `g/s_g` が `0` になる〉は `s_g=2^127` に固定し、`g̃` は絶対値 2 以下の有限値になる〈`3e38/2^127≈1.76`〉。`g̃` の絶対値が 1 を超えうる点は、後続チャンクの単調性〈実行中の値が最終値を超えて overshoot しない〉の議論に影響しない上限 2 倍の余裕として扱う。`log2(s_g)` は f32 定数ではなくホスト整数として `c_i` に足すので、clamp で `g̃` に残らなかった指数分も `c_i` が保持し最終値は変わらない）、`g̃` を作り、各行の合計指数 `c_i=E_i+log2(s_g)` を ±2^100 以下の 2 のべき乗チャンクの積へ分割して、`g̃·det(B)·(B⁻ᵀ)_ij` へチャンクごとに `Mul` で順に掛ける（各チャンクは f32 で有限な定数。符号は `c_i` の符号に揃え、実行中の値の大きさが最終値へ向かって単調に動き最終値を超えて overshoot しないようにする。最終値が真に f32 を超える場合のみ 1 階と同じく `inf`）。上記の例では `c_i` が最終的に相殺されて途中の値が `1e40` を経由せず `1e10` で有限になる。この構造（`Mul` のチャンク列。`Contiguous`・`Sum` 等の VJP が前方値に依存しない Op タグ）を `push_eager` する。**最終値だけの V3 補正では修復できない理由**: V3 はノードの最終値だけをホスト関数に置き換えるため、`inf` の中間定数ノードが二階微分・孫テープ再生にそのまま使われる。構造側でチャンク分割を保たなければ 1 階が bit 一致でも二階以降が `inf`／`NaN` になる。下記の適用条件を満たす入力では、孫テープ再生でも同じ行別スケール構造が再計算される（孫テープ再生での有限性は #3086 の必須テストで確かめる）。真に f32 を超える勾配は 1 階と同じく `inf`。**一律スケーリング（最大要素 1 つで全体を割る方式）は採らない**: `A=diag(1e30,1e-30)`・`g=1` では既存 `det_vjp` は有限な `[1e-30,1e30]` を返すが、`s≈1e30` で `B` を作ると第 2 対角が約 `1e-60` で f32 の `0` に丸まり `B` が特異になって `B⁻ᵀ` を構築できず、V3 の値補正でも構造側の失敗は直らない。行別スケールなら `B=I`・`r=[1e30,1e-30]` で有限に保たれる。**適用条件と代替経路**: 行別スケール後も `B` が f32 で特異・非有限になる入力（1 行の内部に f32 の表現幅を超える桁差があり行別スケールでも情報が失われる場合。`det_vjp` の f64 では有限）は本方式の適用外とし、構造は S2 に切り替える（`det_vjp` と同じ f64 ホスト関数で勾配値を `push_eager` した定数ノードとして保持し、二階の微分は解析式〈`∂²det` は余因子行列と `A⁻¹` の積〉で別途合成する。それも合成できない場合は V4〈専用 VJP〉）。適用外の判定はホストで `B` の f32 `det`／逆行列が有限かを確認して行い、**行列式のアンダーフローも適用外に含める**: `B` の f32 `det(B)` が `0` または非正規化数になる一方で `B⁻¹` は有限・f64 の `det(B)` は非零という入力（例 `A=1.001·I`〈160×160〉・`g=1` では行別スケール後の `B=0.5005·I` の `det(B)≈8e-49` が f32 で `0` になるが、`B⁻¹` は有限なので有限性判定だけでは S2 へ切り替わらない）を、ホストで `det(B)` を f64 で計算して f32 の最小正規数 `2^-126` 未満の非零値になるか、または f32 `det(B)==0` かつ f64 `det(B)≠0` となることで検出し、S2／V4 へ切り替える（`det(B)` を仮数・指数に分離して保持する構成は、`det(B)` が `Var` の f32 ノードである限り再生側で表現できないため採らない）。真に特異な行列（f64 でも `det(B)==0`）は適用外にせず上記の既存扱いに従う。**総括的な適用判定（個別条件は既知の失敗例であり網羅を主張しない）**: 上記の個別条件に加え、構造を組む時点でホストが、構築する f32 構造の各段（チャンク適用前の積 `g̃·det(B)·(B⁻ᵀ)_ij` と各チャンク適用後の値）を f32 で再計算し、`det_vjp` と同じ f64 計算による参照値と比べて、有限性の食い違い（f64 で有限なのに f32 で `inf`／`NaN`）またはゼロ化の食い違い（f64 で非零なのに f32 で `0`）が 1 要素でもあれば S2／V4 に切り替える。指数復元前の積のアンダーフロー（例: 256 次上三角・対角 1.5・`A[0,1]=2^-100`・`g=2^-100` で積が約 `2^-207` となり f32 で `0` になる）もこの判定で検出する。本項の数値契約が保証するのは、この判定を通った入力で 1 階・`cg.grad` が有限かつ 1 階と REQ-2 判定で一致することまでであり、判定外の入力は S2／V4 の契約に従う。`Inv`／`Solve` も同様に中間積が f32 範囲を超えうるため、族の必須テストに大スケール入力（`diag(1e20,1e20)`・`g=1`。`g` 側の回帰として `A=I(2×2)`・`g=3e38`、行列式アンダーフローの回帰として `A=1.001·I`〈160×160〉・`g=1`〈S2／V4 へ切り替わり有限〉も必須。指数復元前の積アンダーフローの回帰として 256 次上三角〈対角 1.5・`A[0,1]=2^-100`〉・`g=2^-100`〈総括的な適用判定で S2／V4 へ切り替わる〉も必須。係数オーバーフローの回帰として `diag(1e20,1e20,1e20)`・`g=1e-30` も必須。1 階の対角勾配約 `1e10`）と混在スケール入力（`diag(1e30,1e-30)`・`g=1`。既存 `det_vjp` は `[1e-30,1e30]`）を含め、1 階・`cg.grad`・孫テープ再生で有限かつ 1 階と REQ-2 判定で一致することを確かめる。特異行列（`det_vjp` の既存扱い）も同じ契約に従う。上表 #3086 の `Det` の方式欄は V1 ではなく本項（V3）を正とする。
+- 表の数: 族割当 2+2+1+6+20+11+3+5+4+4 = 58、`CtcLoss` 1、#3086 fail-closed 15 で、合計 74。
+
+**C. 本ラウンドで fail-closed に固定（族なし。24）**
+
+| 候補グループ | Op | 補足 |
+|---|---|---|
+| 選択縮約 | `Max`・`Min`・`Amax`・`Amin`・`OrderSelect`・`MedianAll`・`Quantile` | V2 の前例があり技術的には可能 |
+| 統計縮約 | `Var`・`Std`・`VectorNorm`・`PNorm`・`LogSumExp`・`Nansum`・`Nanmean` | V3 |
+| 構造変換 | `Dropout`・`Interpolate`・`MaxUnpool` | `Dropout` は記録済みマスクの `where_cond` で最小 |
+| 正規化・再パラメータ | `LocalResponseNorm`・`WeightNorm`・`SpectralNorm` | |
+| RNN セル | `RnnCell`・`LstmCell`・`LstmHidden`・`GruCell` | 恒久寄り。利用者が replayable な primitive で手組みすれば create_graph は通る |
+
+- 割り当てには新規イシュー起票（ユーザー承認）が要るため、自動運転では fail-closed に固定する。
+- 照合: A 5 + B 74 + C 24 = 103。`ScalarUnaryOp` は `Op` の行を持たないので #3081（21.5）は表の外。
+
+### 21.3 族ごとの方針
+
+- **#3077 Softmax・LogSoftmax**: R は `Var::softmax`／`log_softmax`（`var.rs:2042`／`:2081`）。V3 で、値は `softmax_vjp_along`／`log_softmax_vjp_along`（`grad.rs:6997`／`:7043`。f64 保持・最後に 1 回 downcast）。構造は Softmax が `y⊙g − y⊙Σ(g⊙y)`（§8 のベクトルで中間値が overflow しない並べ替え）、LogSoftmax が `g − exp(y_log)⊙Σg` を縮約前スケーリングで組んだ `s⊙(g/s − exp(y_log)⊙Σ(g/s))`（`s` は行ごとの `max(abs(g))` のホスト定数で、`s=0` の行は `s=1`。`g/s` の各要素は絶対値 1 以下なので `Σ(g/s)` は要素数以下に収まる。素朴な `Σg` は `y_log=[ln0.5,ln0.5]`・`g=[2e38,2e38]` で `inf` になり、最終値だけを V3 で補正しても二階微分・孫テープ再生にこの `inf` が残るため。§21.1 (5) の S1 に準拠し、`log_softmax_vjp_along` の f64 縮約が有限値を返すことと整合させる）。積む Op は `Mul`・`Sub`・`Sum`・`Exp`・`BroadcastTo`・`Contiguous`。必須テスト: §8 のベクトルに加え LogSoftmax は `y_log=[ln0.5,ln0.5]`・`g=[2e38,2e38]` で、1 階・`cg.grad`・孫テープ再生（`jvp_create_graph` 経由）のすべてが有限かつ 1 階と bit 一致。V4 は採らない。
+- **#3078 LayerNorm・RmsNorm**: V3。値は `layer_norm_vjp_rows`／`rmsnorm_vjp_rows`（`grad.rs:6043`／`:5979`）。構造は mean／rstd を `Mean`・`Sub`・`Mul`・`Sqrt`・`Div` で組み直す。**`LayerNorm` の中心化は `Mean` の f32 出力を早期に引かない**（`x=[16777216,16777218]` の正しい平均は 16777217 だが f32 の `Mean` 出力は 16777216 に丸まり、偏差が `[-1,1]` ではなく `[0,2]` になる。既存 `row_ln_stats`／`layer_norm_vjp_rows` は平均と偏差を f64 で保持するため構造側と食い違い、二階微分・孫テープ再生に誤差が残る）。安定な中心化として、行ごとの基準値 `x_ref`（行の先頭要素を `Narrow` で取り `BroadcastTo`。いずれも replayable）を先に引いて `d=x−x_ref` を作り、`m=Mean(d)`、`dev=d−m` とする（上記の入力では `d=[0,2]`・`m=1`・`dev=[-1,1]` で厳密）。さらに `dev2=dev−Mean(dev)` の補正パスを 1 回加えて残差の丸めを除く（§21.1 (5) の S1 の `s` は `dev2` の最大絶対値から取る）。`d=x−x_ref` 自体が f32 で非有限になる入力（`x=[3e38,-3e38]` 等）は S2 へ切り替える。`Rsqrt`／`Reciprocal`・`Op::Var` は replayable でないので使わない（閉包性）。二乗和の「先に f64 へ昇格してから二乗」契約（`coding-rust.md`）は V3 の値側で保つ。中間値の overflow は V3 の値補正では防げない（`x=1e20` の f32 二乗が `inf`、`rstd=0` となりこの誤値が二階微分・再生に使われる）ため、21.1 (5) の S1（スケール付き合成。行ごとの最大絶対値 `s` で `x/s` を作ってから二乗和・rstd を合成し `rstd/s` で戻す）を既定とし、`LayerNorm` の分散項にも同様に適用する。`eps` は `eps/s²` に変換し、`s` は 21.1 (5) の規則（`eps/s²` の overflow 保護のため `max(最大絶対値, √eps)` を 2 のべき乗へ切り上げる。小スケール入力 `x=[1e-30,1e-30]`・`eps=1e-5` で `rstd≈316.23` を保つ）に従い、最大絶対値は `LayerNorm` では中心化後偏差の最大絶対値、`RmsNorm` では `x` の最大絶対値とする（`eps/s²` が f32 で 0 に丸まっても、スケール後分散が `1/n` 以上なので `rstd` は不変。中心化前の `x` から `s` を取ると定数行で `rstd_scaled=inf` になるため禁止）。非有限になる入力は S2 へ切り替える。必須テスト: 中心化の丸め回帰 `x=[16777216,16777218]`（偏差が厳密に `[-1,1]`・`mean` が 16777217 相当、既存 `row_ln_stats` と一致）、有限入力 `x=1e20`、小スケール行 `x=[1e-30,1e-30]`・`eps=1e-5`（`eps/s²` overflow の回帰。`RmsNorm` の `rstd≈316.23` が 1 階と一致）、定数行 `x=[1e30,1e30]`・`eps=1e-5`（`LayerNorm` の `eps/s²` 丸め消失の回帰。`rstd=1/√eps` で有限）と全ゼロ行（`s=0`→`s=1` 規則の回帰。統計量・入力勾配が有限で `NaN` を含まない）で、1 階・`cg.grad`・孫テープ再生のすべてが有限かつ 1 階と REQ-2 判定で一致する。
+- **#3079 BatchNorm**: V3（`batch_norm_vjp_channels`、`grad.rs:6139`）。学習時と推論時で分岐し、推論時は統計量が定数なので V1 で足りる。
+- **#3080 Conv 系**: d_input は転置畳み込みの合成（族内で閉じる）。d_weight／d_bias は V3（f64 縮約契約。`grad.rs:1380` 以降）で、構造は `Var::unfold`（`var.rs:5575`）＋matmul を推奨し、閉包性のため `Unfold`・`Fold` を同梱する。`compute_dtype` が F32 でない `Conv2d` は `TapeNode::low_precision` を立てない（立てるのは `low_precision_ops.rs:93`・`var.rs:3652` の matmul 系だけ）ので、`validate_ancestors` に明示的な拒否を足す。
+- **#3081 Gelu・GeluTanh**: 21.5。
+- **#3082 損失**: 要素ごとの合成は V1、1 階が f64 の scale・縮約を持つものは V3。`CrossEntropyLoss` 系は cgrad に Softmax を積むので #3077 に依存する。target を一律に非微分入力として扱わない。非微分なのは整数ラベル（`CrossEntropyLoss` 系の `Tensor<i32>` ペイロード）だけであり、浮動小数の target は追跡可能な入力として区別する。既存の 1 階 VJP が返す全入力への寄与を子テープでも維持する: `MseLoss` は `dTarget=-dPred`、`PoissonNllLoss` は `dtarget`、`GaussianNllLoss` は `dtarget` と `dvar` を返すため、target（と var）を定数化すると target 自身の勾配に加え pred と target の混合二階微分も失われる。`build_cgrads` は 1 階の `grad.rs` が返す入力数と同数の寄与を子テープに積み、各寄与の依存関係（pred・target・var への経路）を保つ。必須テスト: target に `requires_grad` を持たせ、`d²L/dpred·dtarget` の混合項をループ参照（有限差分または解析式）と一致確認する。
+- **#3083 索引・累積**: 索引系は「Gather の VJP は scatter_add」の双対性を使い、ホストの index を固定して V1 で書く。`Cumsum` は V3（`cumsum_vjp_along`、`grad.rs:7289`。lane ごとの f64）、`Cumprod`・`Logcumsumexp` も V3。`Sort`・`Topk`・`Cummax`・`Cummin` は V2（ホスト index と scatter）。
+- **#3084 Pad・PadMode・MaskedFill**: 21.5。`PadMode`（reflect／replicate／circular）は `value` を持たない別 variant で、cgrad は index ベースの scatter-add なので #3083 の索引系に依存する。
+- **#3085 プーリング**: Max 系は V2（先勝ち argmax をホストで作り scatter で流す）で #3083 の索引系に依存。Avg 系・Adaptive は V3（`avg_pool2d_vjp`／`adaptive_avg_pool2d_vjp`、`grad.rs:7116`／`:7219`）で、構造は `Fold`（col2im）経由なので #3080 に依存する。
+- **#3086 線形代数・FFT**: 21.2 の行ごとの判定に従う。
+
+### 21.4 再分解方針と族間の依存順
+
+2 時間を超える族は次のサブイシューへ分ける。起票は `out-of-scope-tracking.md` に従いユーザー承認後で、本 PR では行わない。
+
+| 族 | 分割 |
+|---|---|
+| #3080 | (a) 2D（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）／(b) 3D（`Conv3d`・`ConvTranspose3d`） |
+| #3082 | (a) 回帰系 6（`Mse`・`L1`・`Huber`・`PoissonNll`・`GaussianNll`・`KlDiv`）／(b) 二値・マージン系 6（`Bce`・`BceWithLogitsPosWeight`・`SoftMargin`・`SigmoidFocal`・`MarginRanking`・`HingeEmbedding`）／(c) クラス軸・距離系 8（`CE`・`CEWithOptions`・`Nll`・`MultiMargin`・`MultiLabelMargin`・`MultiLabelSoftMargin`・`CosineEmbedding`・`TripletMargin`） |
+| #3083 | (a) 索引 4／(b) 累積 3／(c) 選択 4 |
+| #3085 | (a) Max 系 2／(b) Avg 系 3 |
+| #3086 | (a) 線形代数 4／(b) FFT 4（条件付き） |
+
+依存順（積む Op が他族にある場合）:
+- #3083(a) → #3083(c)・#3084 の `PadMode`・#3085(a)
+- #3080(a) → #3085(b)
+- #3077 → #3082(c)
+- #3081 は `Erf` を同時に replayable にする（族内で閉じる）
+
+### 21.5 個別論点の結論
+
+**`Gelu`: 実装する**
+- R は `Var::scalar_unary(Gelu)`。V1 で `g⊙(Φ(x)+x·φ(x))`、Φ は `0.5·(1+erf(x/√2))` を `ScalarUnaryOp::Erf`（`tensor-core/src/scalar_op.rs:228`）に載せ、φ は `Exp` で作る。
+- 閉包性のため `Erf` も `scalar_unary_replayable` に加え、`build_cgrads` に `g⊙(2/√π)·exp(−x²)` の腕を足す（導関数は `erf_grad`〈`scalar_op.rs:756`〉と同じ式）。
+- forward の `erf` は自作近似（Abramowitz–Stegun 7.1.26、最大絶対誤差 1.5e-7）、導関数は解析式という規約を 1 階の `erf_grad`・`gelu_erf_grad`（`scalar_op.rs:719`）が既に採っているので踏襲する。有限差分テストは近似誤差 / h が REQ-2 を超えない刻みを選ぶ。
+- 1 階は f64 で計算し 1 回だけ downcast する。子テープの f32 合成との差は §9 (i) の範囲。`erf` クレートは deps-policy により追加しない。
+- `new_2649_kinds_are_not_replayable`（`create_graph.rs:1610`）は、`Erf` を `true` にしても `Selu` などが `false` のままであることを保つ回帰テストとして残す。
+
+**`GeluTanh`: 実装する**
+- V1 で `0.5(1+tanh u) + 0.5·x·sech²(u)·u'`（`Tanh`・`Mul`・`Add`）。`gelu_tanh_grad`（`scalar_op.rs:731`）の `sech2 == 0.0` ガードはホストの `mask_from_pred` と `where_cond` へ写し（`Hardswish` の前例）、飽和域の第 2 項を定数 0 にする。
+
+**`Pad`・`MaskedFill`: payload に `value: f32` を足す**
+- `value` を使うのは `replay_op` だけで、どちらの VJP も使わない（Pad は narrow の連鎖、MaskedFill は `g⊙(mask==0)`）。
+- 生成側は `Var::pad`（`var.rs:3319`）と `Var::masked_fill`（`var.rs:4404`）が設定する。分解側は `grad.rs:2514`・`:2536` が `..` なしで束縛しているので `..` を足す（`tape.rs:2204`／`:2219` は済み）。
+- cgrad は Pad が narrow の連鎖、MaskedFill が `where_cond(mask, 0, g)`（積は `inf*0` を避けるため使わない）。`Op` は `pub(crate)` で `api_surface.rs` に影響しない。
+
+### 21.6 fail-closed 契約
+
+- `supports_create_graph == false` の Op に `backward_create_graph` が到達したら `Err(AutodiffError::Backward(_))` を返し、子テープは変更しない（`validate_ancestors` が子テープへ書く前に拒否する）。
+- 判定対象は「`requires_grad == true` かつ葉でない祖先」だけで、追跡なしノードは Op の種類によらず `build_mirror` の段 1 で定数葉になる。
+- 入口の判定順は、resident／fused、`low_precision`、`supports_create_graph`、`MatMul` の rank、（追加予定）`Conv2d` の `compute_dtype`。
+- 網羅 match（ワイルドカードなし）と、`ScalarUnaryOp`／`ScalarBinaryOp` の未知 variant を `false` へ倒す規約は弱めない。
+- 基準テストは `create_graph_rejects_unsupported_op_custom`（`crates/autodiff/tests/create_graph.rs:734`。`child.is_empty()` の検査を含む）。族イシューでは、fail-closed のまま残る隣接 Op を 1 つ選び拒否を確かめるテストを推奨する。
+
+### 21.7 所有者へ戻す論点
+
+記録に形が書けない点だけを挙げる。
+1. C 区分 24 variant を将来の族として起票するか（21.2。起票にはユーザー承認が要る）。
+2. 21.4 のサブイシューを起票するか。
+3. V3（値と Op タグを分ける方式）を `reduce_bias_grad_var` 以外へ広げる点は前例があるので推奨形として確定しているが、レビューで争点になった場合に限り戻す。
+
+### 21.8 変更していないもの
+
+コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文。
