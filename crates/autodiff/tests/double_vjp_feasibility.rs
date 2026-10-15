@@ -330,6 +330,9 @@ fn c2_scalar_unary_public() {
         |_, x| x.tan(),
     );
     check(&[6], xv.clone(), true, "silu", |_, x| x.silu());
+    check(&[6], xv.clone(), true, "gelu", |_, x| x.gelu());
+    check(&[6], xv.clone(), true, "gelu_tanh", |_, x| x.gelu_tanh());
+    check(&[6], xv.clone(), true, "erf", |_, x| x.erf());
     check(&[6], xv.clone(), true, "hardswish", |_, x| x.hardswish());
     check(&[6], xv.clone(), true, "leaky_relu", |_, x| {
         x.leaky_relu(0.1)
@@ -444,11 +447,7 @@ fn c4_unsupported_ops_are_rejected_fail_closed() {
     let y = tape.custom(Arc::new(IdentityCustomFn), &[x]).unwrap();
     assert_rejected(&tape, &y, "custom");
 
-    // 対象外の ScalarUnary（Gelu・Selu）
-    let tape = new_tape();
-    let x = tape.var(&t(seq(4, 1.0), &[4]));
-    let y = x.gelu().unwrap();
-    assert_rejected(&tape, &y, "gelu");
+    // 対象外の ScalarUnary（Selu。Gelu 系は #3081 で対象化）
     let tape = new_tape();
     let x = tape.var(&t(seq(4, 1.0), &[4]));
     let y = x.selu().unwrap();

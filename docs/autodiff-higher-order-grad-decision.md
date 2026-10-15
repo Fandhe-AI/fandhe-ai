@@ -820,3 +820,30 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 21.8 変更していないもの
 
 コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文。
+
+## 22. 実装記録（#3081: Gelu・GeluTanh・Erf の create_graph 対応）
+
+§21.5 の決定に従い実装した。コードは `crates/autodiff/src/create_graph.rs`（`scalar_unary_replayable`・`build_cgrads` の `Op::ScalarUnary` 腕）。
+
+### 22.1 実装形
+
+- `scalar_unary_replayable` に `Gelu`・`GeluTanh`・`Erf` を追加した。`Erf` は `Gelu` の `Φ(x)` を子テープへ `ScalarUnary(Erf)` として記録するため、孫テープでの再生（閉包性、§21.1 (4)）に必要で同時に対象化した。`replay_op` は `Var::scalar_unary` への委譲で全 variant に対応済みのため変更していない。
+- `Erf`: `g ⊙ (2/√π)·exp(-x²)`（`erf_grad` と同じ順序）。
+- `Gelu`: `g ⊙ (Φ(x) + x·φ(x))`。`Φ = 0.5(1 + erf(x/√2))`、`φ = exp(-x²/2)/√(2π)`（`gelu_erf_grad` と同順）。子テープに積む Op は `Mul`・`Add`・`Exp`・`ScalarUnary(Erf)` のみ。
+- `GeluTanh`: `0.5(1+tanh u) + 0.5·x·sech²(u)·u'`。飽和判定（`1 - tanh² == 0`）は 1 階 `gelu_tanh_grad` と同じ f32 演算でホスト側マスク化する。さらに `where_cond` の死に枝へも 0 の余接が流れ、後続 `Mul` の VJP が `0·相方` を作る（相方が `inf` だと NaN が 2 階へ混入する）ため、飽和要素を 0 に置換した `x_safe` で滑らかな式を組み（double-where）、飽和要素では `limit`（厳密に 0 または 1）を選ぶ。
+- `Gelu` の裾（`x·x = inf`）は `exp(-inf) = 0` となり、2 階 backward でも `0·inf` が追跡ノードへ流れないことを回帰テストで確認した。追加の安全化は不要だった。
+
+### 22.2 検証
+
+- 有限差分（h=1e-3、点 `[-1.3, -0.4, 0.0, 0.7, 1.2]`）と REQ-2 統一複合判定で一致（tolerance は不変）。f32 の 1 階勾配を差分するためノイズが約 1e-4 あり、|x| が大きいと 2 階導関数が絶対 1e-5 を満たせないので、|x| ≥ 3 は f64 閉形式（Gelu: `φ(x)(2−x²)`）と突合した。
+- 近似 erf（A-S 7.1.26）を含む 1 階と解析式の φ との整合は、上記突合が REQ-2 内で通ることをもって確認した（不整合は出なかったため方式の見直しは不要。最大差の数値は未採取）。
+- 巨大入力（±1e20・±1e30・±3e38）で `cg.grad`・Hessian が有限（Hessian は `abs < 1e-6`）。
+- `first_order` は素の `backward` と bit 同一。孫テープでの再生は `functional_ops_jvp_tests` の `j2`・`double_vjp_feasibility` の `c2` に gelu・gelu_tanh・erf を追加して通した。
+
+### 22.3 fail-closed テストの差し替え
+
+`create_graph_rejects_unsupported_op_gelu` を廃止し、`create_graph_rejects_custom_downstream_of_gelu`（`Custom` 到達で `child.is_empty()`）と `create_graph_rejects_unsupported_scalar_unary_selu`（隣接 Op の拒否）へ置換した。`functional_ops_jvp_tests`・`double_vjp_feasibility` の gelu 拒否行は削除した（`selu` は残存）。
+
+### 22.4 変更していないもの
+
+1 階 `Tape::backward` の経路（`grad.rs`・スカラー評価・`tensor-core`）、`Op` payload、公開 API、依存、`unsafe`、tolerance・baseline、`docs/spec`、既存節の本文。
