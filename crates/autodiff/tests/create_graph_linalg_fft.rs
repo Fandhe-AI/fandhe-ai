@@ -470,9 +470,12 @@ fn det_hessian_matches_finite_difference() {
         );
         check_all(
             &format!("det squared n={n}"),
-            |_tape, x| {
+            // 係数 0.25: 上流勾配 gv に比例する保守的な桁落ち上界が、gv ≈ 2.4（孫テープ再生時の
+            // n=3）で許容 1e-5 を超えて拒否されるため、gv を小さく抑える（判定は緩めない）。
+            |tape, x| {
                 let d = x.det()?;
-                d.mul(&d)
+                let half = tape.var_no_grad(&t(vec![0.25], &[]));
+                d.mul(&d)?.mul(&half)
             },
             &well_conditioned(n),
             &[n, n],
@@ -552,6 +555,22 @@ fn det_second_order_cancellation_is_rejected() {
         "det [[1,2],[3,6.001]]",
         |_tape, x| x.det(),
         &[1.0, 2.0, 3.0, 6.001],
+        &[2, 2],
+    );
+}
+
+/// 回帰（PR #3353 指摘 P1）: Det の二階の相殺誤差は上流勾配に比例する。`g = 1` では許容内の
+/// `[[2,0.5],[-0.3,1.5]]` も `loss = 1e10 * det(A)`（`gv = 1e10`）では厳密に 0 の
+/// `d²loss/dA00²` に約 -512 の残差が出るため、型付きエラーで拒否する。
+#[test]
+fn det_second_order_cancellation_scales_with_upstream_gradient() {
+    assert_rejected_and_child_reusable(
+        "1e10 * det dense",
+        |tape, x| {
+            let c = tape.var_no_grad(&t(vec![1e10], &[]));
+            x.det()?.mul(&c)
+        },
+        &[2.0, 0.5, -0.3, 1.5],
         &[2, 2],
     );
 }
