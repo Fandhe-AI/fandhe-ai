@@ -254,3 +254,40 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 - **テスト**: `crates/facade/tests/compat_sequential_fit_swa_lr.rs`（PyTorch `SWALR` fixture 10 件との相対 1e-6 突合・`SwaLr` 直接使用と bit 一致・`LrSchedule` 連結ケース〈`SequentialLr` と bit 一致・callback 並び順の逆転〉・区間前の lr／loss 不変・分割 fit 継続・失敗後の継続・基準 lr 0 の fail-closed・拒否 7 項目と正のケース）と `callbacks.rs` の内部不変条件単体テスト。tolerance 定数・baseline は不変。
 - **不変**: 公開名・accessor（`base_lr()` 等は追加しない）・`FitConfig`／`Sequential` のシグネチャ・依存・`unsafe`・`docs/spec`・`api_surface.rs`。
 - **スコープ外**: `update_bn`・param group ごとの `swa_lr`・`DeviceParamStore`／resident 経路・カスタム `avg_fn`。基準 lr 非正の救済と Ema・AMP・L-BFGS 併用の緩和は、需要が出たら承認を取って別 issue で扱う。
+
+## 19. #3060 実装記録（fit 結線テスト・正ガード・保留の解消）
+
+SWA 系列（親 #3057）の最後の 1 件。承認根拠は §15 の D-A のみで、新しい承認ではない。公開 API・コード本体（`compat/{callbacks,training}.rs`）は変更していない。
+
+- **追加したテスト**（`crates/facade/tests/compat_sequential_fit_swa_wiring.rs`。bit 完全一致のみ・実機非依存・ファイル I/O なし）: 
+  - T1 アニールと平均化を同時に動かした fit（Cos／Linear、start=2、anneal_epochs=2）が、`LrSchedule` で同じ lr 列を与えた手動ループと `history.lr`・loss・平均化重み・生の重みで bit 一致する。#3058 は `anneal_epochs = 0` で、#3059 は `history.lr` と `n_averaged` だけを見ていたため、アニール込みの重みは未検査だった。
+  - T2 同条件の分割 fit（3+3）と一括 fit（6）が lr 列・loss・平均・raw・最終重みで bit 一致する（2 回目の開始時に生の重みへ書き戻される）。
+  - T3 `EarlyStopping`（restore なし）による途中終了でも、fit 後の重み = 平均化重み、`n_averaged` = 実際に回った epoch 数（§16.3）。打ち切られることもテスト内で assert する。
+  - T4 SWA 区間内でも `ModelCheckpoint::best_state_dict()` は生の重みで、SWA なしの checkpoint と bit 一致し平均化重みとは異なる（§16.2。軌跡を揃えるため `swa_lr` = 基準 lr・`anneal_epochs = 0`）。
+- **追加した正ガード**（`crates/facade/tests/api_surface.rs`）:
+  - `callback_swa_variant_is_constructible_and_destructurable_via_facade_only`（型レベル。`fn(SwaCallback) -> Callback` と let-else による分解）。
+  - `compat_callback_swa_variant_has_exact_approved_shape`（`Swa ( SwaCallback )` の完全一致をちょうど 1 件。純関数 `callback_swa_variant_violations`）と自己テスト（struct 形・`Box`・要素追加・unit 形・別名・欠落・重複を検出、コメント中は無視）。既存の variant 名集合ガードは payload を見ないため、これで payload の形を補う。
+  - `fit_config_declares_no_swa_fields`（`training.rs` の `pub struct FitConfig {` 本体のフィールド名を単語分割し、`swa` に完全一致する単語を含むものを違反とする。`swap_axes` は違反にしない）と自己テスト。
+- **多層防御（最新。§9 の表と古い名前 `facade_does_not_reexport_or_declare_swa_items`・3 型の衝突という記述はこの表で上書きする）**:
+
+| 層 | 対象 | 検出するもの |
+|----|------|--------------|
+| doctest 衝突プローブ（`SwaHoldDoctestGuard`） | `FitConfig`／`Sequential` の `use_swa`／`swa_start`／`swa_lr` | 同名 inherent メソッドの追加（戻り値型の不一致） |
+| glob 集合・固定文言 | `swa_hold_doctest_globs_all_pub_modules`・`swa_hold_doctest_probe_body_matches_fixed_contract` | プローブの弱体化・対象モジュールの取りこぼし |
+| `swa_surface_violations` | facade src 全体 | `use_swa` の全面禁止、`swa_start`／`swa_lr`／`SwaCallback` の許可箇所外の宣言 |
+| `Callback` の variant 集合 | `compat_callback_enum_variants_are_exactly_approved_set` | variant の追加・削除・並べ替え |
+| `Swa` の payload 形 | `compat_callback_swa_variant_has_exact_approved_shape` | payload の型・形の変更（#3060） |
+| `FitConfig` のフィールド名 | `fit_config_declares_no_swa_fields` | `swa` 単語を含むフィールドの追加（#3060） |
+| 型レベル | `callback_swa_variant_is_constructible_and_destructurable_via_facade_only`・`swa_types_are_reachable_via_facade_only` | 構築・分解・accessor シグネチャの変更 |
+
+- **検出範囲**: `FitConfig` のフィールドは `pub(super)` で外から届かないため、フィールド追加だけで落ちるのは `f32` 追加による `Eq` 喪失（`fit_config_keeps_copy_eq_for_0_9_0_compat`）と上記のフィールド名走査に限る。名前走査は `FitConfig` 本体に直接書かれたフィールド名のみで、マクロ生成・別名経由・別型への追加は保証しない。公開 setter／accessor は doctest プローブと `swa_surface_violations` が検出する。
+- **一時改変による有効性確認の実測**（各改変は確認後に元へ戻し `git diff` が空であることを確認）:
+  - (a) `impl FitConfig` に `pub fn use_swa(&self) -> bool` を追加: `SwaHoldDoctestGuard` の doctest が型不一致で失敗し、`facade_exposes_swa_only_in_approved_shape` も失敗した。
+  - (b) `impl Sequential` に `pub fn swa_lr(&self) -> f32` を追加: 同じ 2 つが失敗した。
+  - (c) `FitConfig` に `pub(super) swa_start: usize` を追加: `fit_config_declares_no_swa_fields` が失敗した。
+  - (d) `Callback::Swa(Box<SwaCallback>)` へ変更: lib は通るが `api_surface` テストバイナリが型不一致（G1）でコンパイルできなかった。G2 のソース走査は同じ入力を自己テスト（`Swa(Box<SwaCallback>)` を違反として検出）で確認し、実ソースへの適用は代替した。
+  - (e) `Callback` へ `Swa2(SwaCallback)` を追加: 網羅的な `match` が lib 側でコンパイルエラーになりテストに到達しなかった。variant 集合ガードの失敗確認はコンパイルエラーで代替した（同ガードは実ソースでの正常通過のみ確認）。
+- **`SwaHoldDoctestGuard` からプローブを外さなかった理由**: 残っているのは禁止経路（`FitConfig`／`Sequential`）のプローブだけで、公開した名前（`AveragedModel`／`SwaLr`／`SwaAnneal`）に当たるプローブは #2679 で削除済み。§16.5・§16.8・§17 は「`Callback::Swa` 公開後も維持」と定めているため外すものは無く、doctest 本文もバイト単位で不変とした。変更は説明文のみ（保留の解消と禁止経路専用への位置づけ。`EmaHoldDoctestGuard` と同じ形）。
+- **0.11.0 の対応表**: `docs/perf/framework-compare-feature-matrix-0.11.0.md` はタグ `v0.11.0` 時点の監査スナップショットのため書き換えない。次回監査（0.12.0）への申し送り: 「SWA の fit 結線は `Callback::Swa` として公開済み。`FitConfig`／`Sequential` 経路は禁止経路（対象外の非目標）として扱う」。
+- **不変**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`・`FitConfig` の derive（`Copy + Eq`）・既存の公開シグネチャ・`SWA_HOLD_PROBE_BODY`・`MIN_KNOWN_PROBE_BLOCKS`。
+- **スコープ外**: `update_bn`（§16.6）、param group ごとの `swa_lr`、resident 経路、`SwaCallback` の doctest への `history.lr` 検査の追加。
