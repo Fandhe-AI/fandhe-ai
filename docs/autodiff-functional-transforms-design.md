@@ -466,7 +466,7 @@ impl Tape {
 ## 29. 2026-10-11 所有者判断の反映（#3020）
 
 - §27.5 末尾の保留継続（複数入力の `jvp`・微分可能な `jvp`〈結果を `Var` で返す形〉・論点 5 の対象 Op 拡張）は D-A で実装へ進む（#3062・#3065・#3069〈`vmap(grad)`〉・#3075）。
-- `VarF64`・f16 の `jvp` は #3021 項 3 の確認待ちで対象外のまま。TapeF64 の `jvp` は #3074 で決める。
+- `VarF64`・f16 の `jvp` は #3021 項 3 の確認待ちで対象外のまま。TapeF64 の `jvp` は #3074 で決める。 → #3074 で §33 に記録（推奨 (b)・所有者確認待ち）
 - 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
 - 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
 - 複数入力の `jvp` は #3063 で §30 に記録・実装した。
@@ -798,3 +798,128 @@ where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
 - **テスト**: `crates/autodiff/tests/functional_ops_vmap_grad.rs` 9 件（ループ参照との REQ-2 一致〈sq・tanh・matmul × バッチ 1・複数・`in_dim` 0/1〉、閉形式 `2x`、rank 0 スライスと損失 shape `[]`／`[1]`／`[1,1]`、Phase A 各エラーと順序・子テープ無変更、Phase B の各エラーと失敗後の再利用、途中サンプル失敗後の後片付けと呼び出し回数、葉プレフィックスの復元、ゼロ行、要素数 0 スライス）。
 - **未検証**: `DeviceMismatch`（CPU だけでは作れない）、結果要素数オーバーフロー（実在の `Tensor` では作れない。コード上の `checked_numel`／`checked_mul` 検査のみ）、世代の進み方（`Tape::epoch` が `pub(crate)` のため結合テストから観測していない）。
 - **#3072 への申し送り**: 宣言インベントリには `autodiff/src/functional_ops.rs::vmap_grad` が 1 件数えられる（ヘルパー `vmap_grad_sample` は別名）。
+
+## 33. 決定記録（イシュー #3074。`TapeF64` の `jvp`: 規模見積もりと実装／契約固定の比較）
+
+### 33.0 状態・根拠・基準
+
+- 状態: **記録のみ。推奨は (b)「`jvp` は f32 `Tape` 限定」を契約として固定、所有者確認待ち**。コード・公開 API・tolerance・baseline・依存は変えない。
+- 根拠: 2026-10-11 の所有者判断 D-A（§29）。f16 は #3021 の所有者回答（`issuecomment-6111746880`・2026-10-12・項 3）で対象外が確定済みのため、本節は f64（`TapeF64`／`VarF64`／`GradientsF64`）だけを扱う。本節は承認を代行しない。
+- 基準: `origin/main` `9ea9353f`。以下の行番号・規模はこの sha 上で再現できる。
+
+### 33.1 現状の確認（コード事実）
+
+- double-VJP 法の `jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` は `Tape::backward_create_graph`（子テープ上で微分できる `Var` 勾配）を前提にする（§19・§27・§31）。
+- `crates/autodiff/src/f64_autograd.rs` の `TapeF64` の公開メソッドは `new`／`var`／`var_no_grad`／`backward`（275 行目）の 4 つ。`VarF64` は `value`／`shape` と 8 演算（`add`／`mul`／`div`／`pow`／`matmul`／`sum`／`mean`／`max`）だけ。`GradientsF64::get`（421 行目）は `Option<&Tensor<f64>>` を返し、ホスト値しか持たない。
+- 同ファイルに `create_graph`・子テープ・`rollback_to`／`reset`・`reshape`／`broadcast_to`／`transpose`・`log`／`where` はない（grep で確認）。
+- `TapeF64::backward` は `&self` で、ノード列を読むだけで書き換えない。同じグラフに対して繰り返し呼べる。
+- facade は newtype で公開している（`crates/facade/src/lib.rs` の `TapeF64` 1749 行・`VarF64` 1780 行・`GradientsF64` 1835 行）。
+- f32 側の機構は `crates/autodiff/src/create_graph.rs`（1621 行。祖先収集・検査・ミラー構築・`replay_op`・`build_cgrads`・`CreateGraphResult<'c>`）。f32 でも `Max` は `supports_create_graph()` の対象外（#3075 の領域）。
+- `TypedOps<f64>` は 8 演算で固定。`div`／`pow`／`mean` は既にホスト経路で実装済み。
+
+### 33.2 演算ごとの作業表
+
+判別の軸: double-VJP の `jvp` では `g = Jᵀu` が `u` について線形なので、各 VJP の局所係数（`a`・`b`・`y` だけに依存する項。`binary_partials_f64`〈1101 行〉の係数など）は、子テープ上で `var_no_grad` の定数として扱える。問うのは、追跡対象の `g` に対する VJP を既存 8 演算だけで書けるかである。
+
+| 演算 | 子テープ上の VJP 表現 | 既存 `VarF64` 演算だけで足りるか | 足りない構造演算 | 備考 |
+|---|---|---|---|---|
+| `add`（同 shape） | `g` をそのまま渡す | 足りる | なし | 自明 |
+| `mul`／`div`（同 shape） | `g` に定数係数を `mul` | 足りる | なし | 係数は `binary_partials_f64` 由来のホスト値 |
+| `pow`（同 shape） | `g` に定数係数を `mul` | 足りる | なし | `ln a` も定数係数に入るため `log` 演算は不要。f32 版 `build_cgrads`（`create_graph.rs` 1063 行以降）の a==0 の NaN 安全化は、線形化した定数係数側で扱える見込み（推測） |
+| ブロードキャストを伴う `add`／`mul`／`div`／`pow` | 入力 shape への縮約が要る（`reduce_to_shape_f64` 相当） | 足りない | `reshape`（size-1 軸を残す形）または縮約専用の追跡演算 | `sum(Some(axis))` は軸を落とすだけで size-1 軸を残せない |
+| `matmul` | `g.matmul(bᵀ の定数)`・`aᵀ の定数.matmul(g)` | 足りる | なし（`jvp` のみの場合） | 転置した定数はホスト側 `Tensor::transpose` で作れる（`matmul_vjp_f64` 1268 行に前例）。`hvp` 系の完全な create_graph では追跡演算の `transpose` が要る（推測） |
+| `sum(None)` | `g` に ones 定数を `mul`（ブロードキャスト） | 足りる | なし | スカラー `g` に限る |
+| `mean(None)` | `g` に「`1/n` を要素に持つ定数」（`n` は縮約要素数）を `mul`、または `g` を `n` で `div` してからブロードキャスト（既存 `mean_vjp_f64` と同じ除算後ブロードキャスト。2 要素なら `[g/2, g/2]`） | 足りる（`mul`／`div` は既存 8 演算内） | なし | スカラー `g` に限る。`1/n` 係数を落とすと `sum` と同じ `[g, g]` になり誤り |
+| `sum(Some(axis))`／`mean(Some(axis))` | 縮約した軸を `g` に挿し戻す（`unreduce_broadcast_f64` 1291 行相当）。`mean` は挿し戻しの前後いずれかで縮約軸長 `n` による `1/n` 係数（`div` または `mul`）を掛ける | | 足りない | `reshape` と `broadcast_to`（または `Unreduce`／`ReduceTo` の対） | 右詰めブロードキャストで偶然通るのは先頭軸だけ |
+| `max` | first-match の one-hot マスク（`max_first_match_vjp_f64` 1356 行）を定数にして挿し戻す | 足りない | 上と同じ | f32 側が対象外なので揃えて対象外にするのが妥当（推測） |
+
+結論: `reshape`／`broadcast_to`（または `ReduceTo`／`Unreduce` の対）を新しい `OpF64` variant として足し、その VJP を `TapeF64::backward` に実装しないと、縮約系とブロードキャストを伴う演算は扱えない。同 shape の要素演算・`matmul`・スカラー縮約だけなら既存 8 演算で閉じる。
+
+### 33.3 構造面の作業表
+
+| # | 作業 | 内容 | 備考 |
+|---|---|---|---|
+| 1 | 子テープ相当の f64 構造 | f32 `create_graph.rs` の祖先収集・検査・ミラー・cgrads の f64 版。入口検査（同一・空・デバイス）の追加 | f32 側は 1621 行 |
+| 2 | 結果型 | `CreateGraphResult<'c>` の f64 版 | ライフタイムが `'g, 't` の 2 つになる |
+| 3 | `GradientsF64` の高階化 | 既存型は変えられない（破壊的変更）ため新しい型を足す | |
+| 4 | `TypedOps<f64>` 拡張 | 不要 | ホスト経路で閉じる。`div`／`pow` のホスト前例が根拠。multiplexing 設計 §10 の項 2 は消費しない |
+| 5 | f64 版 `jvp` 層 | 子テープ backward を 2 段呼ぶ | `functional_ops` の f32 版に対応 |
+| 6 | facade 公開 | `TapeF64` の新メソッドと結果型。`compat-api-scope.md` §5 の手続き・保留ガード・`api_surface.rs` | 承認事項が増える |
+| 7 | テスト | 閉形式・`jacobian` 相当の参照・拒否経路。CUDA／Metal の `#[ignore]` テストと `docs/perf/logs` README | Metal は `typed_ops_f64()` が `None` でホスト経路 |
+
+### 33.4 規模の類推（過去実績）
+
+数字は `git show --stat --format= <sha> | tail -1` で再現できる。
+
+| 類推元 | コミット | 変更規模 |
+|---|---|---|
+| f32 create_graph 初版（elementwise／sum 系） | `43f8a8f0`（#1998） | 8 files, +1632 |
+| f32 create_graph の matmul／Linear 拡張 | `f19f54e3`（#2003） | 10 files, +1339 |
+| create_graph の上に載せた jvp／jacfwd 内部実装 | `a18afc40`（#2945） | 11 files, +861 |
+| jvp／jacfwd の facade 公開 | `1c1e76f4`（#2957） | 9 files, +424 |
+| `TapeF64` 初版（葉・elementwise 4 演算） | `de472912`（#2253） | 6 files, +1526 |
+| `TapeF64` の matmul・縮約 4 演算 | `2f17c547`（#2255） | 6 files, +2124 |
+
+推測: f64 版は create_graph 機構の構築、新しい構造演算、jvp 層、facade 公開の合計になり、上の f32 側の同種作業（4 PR 相当）を下回らない。新しい行数・時間の見積もりは、根拠がないため書かない。
+
+### 33.5 検討から外した案
+
+- per-Op の JVP 規則による直接の接ベクトル伝播: spec REQ-9（2026-10-08 追記・#2617・#2880）が「対象 Op への JVP 規則の追加を要するネイティブ forward-mode」を対象外としている。
+- `Var::cast::<f64>` との往復や f32 `Tape::jvp` への委譲: cast は勾配が切れており、f64 精度の意味が失われる。
+- `GradientsF64` 自体を高階化する案: 既存の公開面が変わるため不可。
+
+### 33.6 (a)／(b) の比較
+
+| 観点 | (a) 実装する | (b) f32 `Tape` 限定を契約として固定 |
+|---|---|---|
+| 規模 | 33.4 の推測どおり大きい（新 `OpF64` variant・create_graph の f64 版・facade 公開） | docs の更新のみ |
+| 破壊的変更 | 追加のみで可能 | なし |
+| 新しい依存・`unsafe`・`TypedOps` 拡張 | いずれも不要 | いずれも不要 |
+| 承認事項 | facade の新公開面 2〜3 個・新 `OpF64` variant・`Max` の扱い・実機 parity 未実測での公開可否 | 契約固定の確認のみ |
+| 利用者への影響 | f64 で `J·v` を直接取れる | `TapeF64::backward` のループで代替できる（出力要素数 m 回の backward） |
+| 保守コスト | f32 と f64 で create_graph 機構が二重になる | 増えない |
+
+### 33.7 推奨と所有者確認事項
+
+推奨は (b)。根拠: 縮約系に新しい構造演算が要り、create_graph 機構を丸ごと f64 で作り直す規模になる（33.2〜33.4）。f64 で `J·v` が要るという利用実績も記録にない。D-A の「規模の小さい追加のみ」という条件にも当てはまらないため、(a) へは自動では進まない。
+
+| # | 何を | 選択肢 | 推奨 |
+|---|---|---|---|
+| 1 | `TapeF64` の `jvp` の扱い | (a) 実装する／(b) f32 `Tape` 限定を契約として固定する | (b) |
+| 2 | 契約の範囲 | `jvp` だけ／double-VJP 系全体（`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph`）／それに加えて `vjp`・`hvp`・`vmap`・`vmap_grad` の `VarF64` 対象外も同時に契約化 | double-VJP 系全体（同じ create_graph 前提のため） |
+| 3 | 再開条件 | 再開条件なしで固定／「f64 精度の `J·v` の利用実績で不足が確認された場合」を再開条件とする | 後者 |
+| 4 | 代替手順の掲載先 | 設計記録だけ／それに加えて facade `TapeF64` の rustdoc（後続 issue で doctest 化） | 後者 |
+
+所有者の確認コメントで確定する。それまでは記録のみで、コード・rustdoc・`compat-api-scope.md` は変更しない。
+
+### 33.8 (b) の代替手順（`TapeF64` 利用者向け）
+
+擬似コード・コンパイル未確認（後続作業で doctest 化する）。メソッド名は facade の `TapeF64`／`VarF64`／`GradientsF64` の宣言に合わせた。
+
+```text
+// y: 出力（要素数 m）、x: 入力（tf.var で登録）、v: x と同 shape のホスト値
+for k in 0..m {
+    let e_k = tf.var_no_grad(&one_hot(k, y.shape()));   // y と同 shape の定数
+    let s_k = y.mul(&e_k)?;                              // 非スカラー loss のシードは全要素 1 の総和射影なので sum 不要
+    let grads = tf.backward(&s_k)?;
+    match grads.get(&x)? {
+        Some(row) => jv[k] = dot(row, v),               // row = Jᵀe_k（J の k 行目）
+        None => jv[k] = 0.0,                            // 到達しなかったのでゼロ行
+    }
+}
+```
+
+- 1 回ごとに `TapeF64` へ 2 ノードが増える。backward は m 回。
+- `x` が `var_no_grad` なら `GradientTrackingDisabled`。
+- `backward` は非破壊（33.1）なので、同じグラフに繰り返し呼べる。
+
+### 33.9 後続作業（(b) 採用時。未起票。起票は所有者確認の後）
+
+- facade rustdoc を「対象外」から「契約として対象外（#3074）」へ格上げする。対象は `crates/facade/src/lib.rs` の 903・955・1011・1255 行付近。`TapeF64` の rustdoc に代替手順の doctest を加える。
+- `docs/compat-api-scope.md` §5.1 の F4〜F7 行と適用記録（2484・2664・2669 行付近）の「保留継続: `VarF64`」を「契約として対象外（#3074・所有者確認 URL）」へ更新する。
+- 本記録の §23.3／§27.3 に「→ #3074 で契約化」の前方参照を足す。
+- いずれも本 issue では実施しない（起票はユーザー承認後。`out-of-scope-tracking.md`）。
+
+### 33.10 変更していないもの
+
+`crates/**`・公開 API・`TapeF64` の公開面・tolerance・baseline・依存・`unsafe`・ガードレール閾値・`docs/spec`。
