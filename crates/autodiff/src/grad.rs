@@ -2486,7 +2486,7 @@ pub(crate) fn vjp(
         }
         // `Var::masked_fill` が記録するノード（イシュー #1637）。
         // 本体は [`masked_fill_vjp`]。
-        Op::MaskedFill { input, mask } => {
+        Op::MaskedFill { input, mask, .. } => {
             let d_input = masked_fill_vjp(&mask, upstream);
             vec![(input, d_input)]
         }
@@ -2504,11 +2504,11 @@ pub(crate) fn vjp(
         // （`Op::Concat`⟷`Op::Narrow` の双対性と同型）に基づき、`Op::
         // Narrow` の forward と全く同じ `narrow` 呼び出しを各軸へ
         // 連鎖適用してパディング領域を落とす（zero-copy view チェーン。
-        // `value` は forward 記録値に焼き込まれ VJP には不要なため
-        // `Op::Pad` は保持しない）。`narrow` の失敗は forward 側で
+        // VJP は `value` を使わない。`Op::Pad` の
+        // `value` は子テープの forward 再生〈#3084〉専用）。`narrow` の失敗は forward 側で
         // 検査済みの shape 契約違反を意味するため `Op::Narrow` の VJP
         // と同じ `?` 経由の `AutodiffError` 化で扱う。
-        Op::Pad { input, pads } => {
+        Op::Pad { input, pads, .. } => {
             let input_shape = nodes[input.0].shape.clone();
             let mut d_input = upstream.clone();
             for (axis, &(before, _after)) in pads.iter().enumerate() {

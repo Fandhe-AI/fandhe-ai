@@ -1,6 +1,6 @@
 //! プーリング族（`MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・
 //! `AdaptiveAvgPool2d`）の `create_graph` 対応（イシュー #3085・親 #3076・決定記録
-//! `docs/autodiff-higher-order-grad-decision.md` §21・§29）。
+//! `docs/autodiff-higher-order-grad-decision.md` §21・§30）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `replay_op`（forward 再生）と
 //! `build_cgrads`（1 階 VJP の子テープ記録）から呼ばれる。子テープへ積む Op は
@@ -15,10 +15,11 @@
 //!   一致する。§21.2 の分類は V2 だが実態は **V1**（index 固定の bit 一致合成）。
 //! - Avg 系（`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d`）は **V3**: 値は 1 階と
 //!   同じホスト関数（`f64` アキュムレータ・1 回 downcast）を `push_v3` で登録し、
-//!   構造は [`window_scatter_structure`]（`g` に窓の逆 divisor を掛け、
-//!   `gather` → `scatter_add` で入力位置へ戻す索引の合成）で積む。
+//!   構造は [`window_scatter_structure`]（窓を `(divisor, 窓要素数)` で分類し、
+//!   `gather` → `1/s` → `scatter_add`〈`f64` 集約〉→ `s/d` で入力位置へ戻す索引の合成。
+//!   除算前に集約して精度を保ち、`1/s` で中間和の overflow を避ける）で積む。
 //!   §21.3 は `AvgPool2d` の構造を `Fold` 経由としていたが、Adaptive は窓が可変・
-//!   3D には fold が無いため 3 variant を同一の索引合成へ統一した（逸脱。§29 に理由）。
+//!   3D には fold が無いため 3 variant を同一の索引合成へ統一した（逸脱。§30 に理由）。
 
 use fandhe_ai_tensor_core::pool3d::{Pool3dParams, pool3d_layout};
 use fandhe_ai_tensor_core::{Pool2dParams, ShapeError, Tensor, adaptive_window};
@@ -159,16 +160,24 @@ pub(super) fn max_pool_vjp<'c>(
         .reshape(input_shape)
 }
 
-/// 窓構造の索引表（1 平面ぶん。全 `N·C` 平面で共通）。
-struct WindowPlan {
-    in_spatial: usize,
-    out_spatial: usize,
+/// 窓の分類（divisor・窓要素数が同じ窓は同じ重み定数で扱える）。
+type WindowClass = (usize, usize);
+
+/// 同一分類の窓が持つ（出力位置, 入力位置）の対応表。
+#[derive(Default)]
+struct ClassIndex {
     /// 窓に属する要素ごとの出力位置（`[0, out_spatial)`）。
     src: Vec<i32>,
     /// 同じく入力位置（`[0, in_spatial)`）。
     dst: Vec<i32>,
-    /// 出力位置ごとの `1 / divisor`（長さ `out_spatial`）。
-    inv: Vec<f32>,
+}
+
+/// 窓構造の索引表（1 平面ぶん。全 `N·C` 平面で共通）。窓を `(divisor, 窓要素数)` で
+/// 分類して保持する（精度・overflow 方針は [`window_scatter_structure`] 参照）。
+struct WindowPlan {
+    in_spatial: usize,
+    out_spatial: usize,
+    classes: std::collections::BTreeMap<WindowClass, ClassIndex>,
 }
 
 impl WindowPlan {
@@ -181,13 +190,11 @@ impl WindowPlan {
         Ok(Self {
             in_spatial,
             out_spatial,
-            src: Vec::new(),
-            dst: Vec::new(),
-            inv: Vec::with_capacity(out_spatial),
+            classes: std::collections::BTreeMap::new(),
         })
     }
 
-    /// 出力位置 `o`（昇順に呼ぶ）の窓（入力位置の列）と divisor を登録する。
+    /// 出力位置 `o` の窓（入力位置の列）と divisor を登録する。
     fn push_window(
         &mut self,
         o: usize,
@@ -199,12 +206,17 @@ impl WindowPlan {
                 "create_graph: プーリングの窓要素数または divisor が 0（契約違反）".into(),
             ));
         }
+        let class = self.classes.entry((divisor, members.len())).or_default();
         for &m in members {
-            self.src.push(o as i32);
-            self.dst.push(m as i32);
+            class.src.push(o as i32);
+            class.dst.push(m as i32);
         }
-        self.inv.push((1.0 / divisor as f64) as f32);
         Ok(())
+    }
+
+    /// 全分類の要素数合計。
+    fn element_count(&self) -> usize {
+        self.classes.values().map(|c| c.src.len()).sum()
     }
 }
 
@@ -356,9 +368,26 @@ fn plan_avg3d(
     Ok(plan)
 }
 
-/// 平均系 VJP の構造: `g`（`[N, C, 出力空間…]`）を `[N·C, 出力空間]` へ平坦化し、窓の逆
-/// divisor を掛けて `gather` → `zeros.scatter_add`（窓の重なりは `f64` 決定的集約）→
-/// 入力 shape へ戻す。積む Op はすべて replayable。
+/// 平均系 VJP の構造。`g`（`[N, C, 出力空間…]`）を `[N·C, 出力空間]` へ平坦化し、窓の
+/// 分類 `(divisor d, 窓要素数 m)` ごとに
+/// `zeros.scatter_add(dst, gather(g, src) · (1/s)) · (s/d)`（`s = m` 以上の最小の 2 のべき乗）
+/// を作って足す。積む Op はすべて replayable。
+///
+/// 数値設計（codex-review 指摘・PR #3352。決定記録 §21.1(3)・(5)）:
+/// - **除算の前に窓内を集約する**: `g · (1/d)` を f32 で確定してから集約すると、相殺する上流
+///   （例 `[1e8, 1e8, -199999984]`）で丸め誤差が残り、孫テープで合成が再計算されたとき
+///   1 階のホスト値（`f64` 蓄積）と REQ-2 の範囲で食い違う。分類内は同じ `d` なので、
+///   `scatter_add` の `f64` 決定的集約で窓内の和を 1 回の丸めで作ってから `s/d` を掛ける。
+/// - **集約前に `1/s` を掛ける**: 窓内の和は `m·|g|` まで膨らむため、真の結果が有限でも
+///   f32 の中間和が `inf` になりうる。`1/s`（2 のべき乗で厳密）を集約の前に掛けて和を
+///   `|g|` 以下に保つ。
+/// - **二階の逆伝播（`gather` の VJP が `scatter_add` で窓内の seed を集約する）**: 重み
+///   `s/d`（`d ≥ m·…` ゆえ `s/d < 2`）を集約の外側（出力側）に置くので、逆向きでは seed に
+///   先に `s/d` が掛かり、続く `gather`・`1/s`・`scatter_add` の集約値は `|seed|/d` 程度に
+///   収まる（`seed` に先に窓内和を取らない）。
+/// - 残余: 異なる分類（`count_include_pad = false` の境界窓など）の部分和は f32 で丸めて
+///   から足すため、分類間で桁違いの打ち消しが起きる入力では 1 階値との差が残りうる
+///   （1 階値自体は `push_v3` のホスト値で bit 一致のまま。決定記録 §30）。
 fn window_scatter_structure<'c>(
     child: &'c Tape,
     g: &Var<'c>,
@@ -368,29 +397,44 @@ fn window_scatter_structure<'c>(
     let nc = input_shape[0]
         .checked_mul(input_shape[1])
         .ok_or_else(overflow)?;
-    let e = plan.src.len();
-    // N·C 平面ぶんへ複製する索引テンソルの要素数（確保前に桁あふれ・巨大確保を拒否する）。
-    let total = nc.checked_mul(e).ok_or_else(overflow)?;
-    if total > isize::MAX as usize / (2 * std::mem::size_of::<i32>()) {
+    // N·C 平面ぶんへ複製する索引テンソルの総要素数（確保前に桁あふれ・巨大確保を拒否する）。
+    let total_all = nc.checked_mul(plan.element_count()).ok_or_else(overflow)?;
+    if total_all > isize::MAX as usize / (2 * std::mem::size_of::<i32>()) {
         return Err(overflow());
     }
-    let replicate = |one: &[i32]| -> Result<Tensor<i32>, AutodiffError> {
-        let mut v = Vec::with_capacity(total);
-        for _ in 0..nc {
-            v.extend_from_slice(one);
-        }
-        Ok(Tensor::new(v, &[nc, e])?)
-    };
-    let src_index = replicate(&plan.src)?;
-    let dst_index = replicate(&plan.dst)?;
-    let inv = child.var_no_grad(&Tensor::new(plan.inv.clone(), &[1, plan.out_spatial])?);
     let g_flat = g.contiguous()?.reshape(&[nc, plan.out_spatial])?;
-    let weighted = g_flat.mul(&inv)?;
-    let picked = weighted.gather(1, &src_index)?;
-    let zeros = child.var_no_grad(&Tensor::zeros(&[nc, plan.in_spatial])?);
-    zeros
-        .scatter_add(1, &dst_index, &picked)?
-        .reshape(input_shape)
+    let scalar = |v: f32| -> Result<Var<'c>, AutodiffError> {
+        Ok(child.var_no_grad(&Tensor::new(vec![v], &[1, 1])?))
+    };
+    let mut acc: Option<Var<'c>> = None;
+    for (&(divisor, members), class) in &plan.classes {
+        let e = class.src.len();
+        let replicate = |one: &[i32]| -> Result<Tensor<i32>, AutodiffError> {
+            let mut v = Vec::with_capacity(nc * e);
+            for _ in 0..nc {
+                v.extend_from_slice(one);
+            }
+            Ok(Tensor::new(v, &[nc, e])?)
+        };
+        let src_index = replicate(&class.src)?;
+        let dst_index = replicate(&class.dst)?;
+        let s = members.next_power_of_two();
+        let mut picked = g_flat.gather(1, &src_index)?;
+        if s > 1 {
+            picked = picked.mul(&scalar(1.0 / s as f32)?)?;
+        }
+        let zeros = child.var_no_grad(&Tensor::zeros(&[nc, plan.in_spatial])?);
+        let mut part = zeros.scatter_add(1, &dst_index, &picked)?;
+        let weight = (s as f64 / divisor as f64) as f32;
+        if weight != 1.0 {
+            part = part.mul(&scalar(weight)?)?;
+        }
+        acc = Some(match acc {
+            Some(a) => a.add(&part)?,
+            None => part,
+        });
+    }
+    acc.ok_or_else(overflow)?.reshape(input_shape)
 }
 
 /// 空の上流・入力は 1 階の扱いに揃えゼロ定数を返す。
@@ -507,6 +551,43 @@ mod tests {
             let h = avg_pool3d_vjp(&value_of(&tape, &g).unwrap(), &ishape, &params, cip).unwrap();
             close(&s.to_tensor().host_slice(), &h.host_slice());
         }
+    }
+
+    /// 相殺する上流でも構造側（孫テープ再生で再計算される側）が 1 階のホスト値と一致する
+    /// （codex-review 指摘・PR #3352。除算前に集約するため f32 積の丸めが残らない）。
+    #[test]
+    fn structure_keeps_cancellation_precision() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let params = Pool2dParams::new([3, 3], Some([1, 1]), [0, 0], [1, 1]).unwrap();
+        let ishape = [1usize, 1, 3, 5];
+        let oshape = [1usize, 1, 1, 3];
+        let g = tape.var(&Tensor::new(vec![1.0e8f32, 1.0e8, -199_999_984.0], &oshape).unwrap());
+        let plan = plan_avg2d(&ishape, &oshape, &params, true).unwrap();
+        let s = window_scatter_structure(&tape, &g, &ishape, &plan).unwrap();
+        let h = avg_pool2d_vjp(&value_of(&tape, &g).unwrap(), &ishape, &params, true).unwrap();
+        close(&s.to_tensor().host_slice(), &h.host_slice());
+    }
+
+    /// 窓内の和が f32 上限を超える入力でも構造側が有限で、二階の逆伝播（`gather` の VJP が
+    /// 窓内の seed を集約する側）の中間和も overflow しない。
+    #[test]
+    fn structure_avoids_window_sum_overflow_forward_and_backward() {
+        let tape = Tape::new_with_ops(naive_ops());
+        let params = Pool2dParams::new([2, 2], Some([1, 1]), [0, 0], [1, 1]).unwrap();
+        let ishape = [1usize, 1, 3, 3];
+        let oshape = [1usize, 1, 2, 2];
+        let g = tape.var(&Tensor::new(vec![1.0e38f32; 4], &oshape).unwrap());
+        let plan = plan_avg2d(&ishape, &oshape, &params, true).unwrap();
+        let s = window_scatter_structure(&tape, &g, &ishape, &plan).unwrap();
+        // 中央は 4 窓が重なる: 真値は 4 · 1e38 / 4 = 1e38。
+        assert!(s.to_tensor().host_slice().iter().all(|v| v.is_finite()));
+        assert!((s.to_tensor().host_slice()[4] - 1.0e38).abs() < 1e31);
+        // 逆向き: 各出力窓 4 要素へ seed 1e38 → d g[o] = Σ seed/4 = 1e38。
+        let seed = tape.var_no_grad(&Tensor::new(vec![1.0e38f32; 9], &ishape).unwrap());
+        let loss = s.mul(&seed).unwrap().sum(None).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let dg = grads.get(&g).unwrap().expect("g");
+        assert!(dg.host_slice().iter().all(|v| v.is_finite()));
     }
 
     /// Max の gather 再生が forward 出力と bit 一致する（NaN・タイ・負値を含む窓）。

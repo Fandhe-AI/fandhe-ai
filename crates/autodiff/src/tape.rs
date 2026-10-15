@@ -1078,7 +1078,14 @@ pub(crate) enum Op {
     /// VJP（`grad.rs`）: `d_input = mask_keep(g, mask, |m| m == 0.0)`
     /// （fill 位置の勾配は 0。broadcast なし・shape 不変のため縮約は
     /// 不要）。
-    MaskedFill { input: NodeId, mask: Tensor<f32> },
+    ///
+    /// `value` は子テープの forward 再生（`create_graph`。イシュー #3084・
+    /// 決定記録 §21.5・§29）専用に保持する。VJP は使わない。
+    MaskedFill {
+        input: NodeId,
+        mask: Tensor<f32>,
+        value: f32,
+    },
     /// `Var::dropout`（`torch.nn.functional.dropout(input, p, training)`
     /// 相当。イシュー #1603）。`training == false` または `p == 0.0`
     /// のときは forward 側（`Var::dropout`）が本 variant を記録せず
@@ -1279,7 +1286,7 @@ pub(crate) enum Op {
     /// からのみ積まれ、facade には公開しない。VJP は入力 shape・`pads`・`mode` から
     /// レイアウトを再構築し共有カーネル `tensor_core::pad_modes::pad_modes_vjp_host`
     /// （添字重複を `f64` アキュムレータで蓄積し 1 回 downcast）で求める。非融合・
-    /// 非 checkpoint・高階微分非対応（`Op::Logcumsumexp` と同じ分類）。
+    /// 非 checkpoint。高階微分（`create_graph`）はイシュー #3084（決定記録 §29。V3 方式）で対応済み。
     PadMode {
         input: NodeId,
         pads: Vec<(usize, usize)>,
@@ -1428,8 +1435,8 @@ pub(crate) enum Op {
     },
     /// `Var::pad`（`torch.nn.functional.pad(mode='constant')` 相当。
     /// イシュー #1756）。各軸を `(before, after)` だけ定数値で拡張
-    /// する。`value` は forward 記録値へ焼き込み済みのため保持しない
-    /// （`Op::MaskedFill`／`Op::Sort` と同じ最小保持方針）。
+    /// する。`value` は子テープの forward 再生（`create_graph`。イシュー
+    /// #3084・決定記録 §21.5・§29）専用に保持する。VJP は使わない。
     /// `BackendOps::pad` に対応メソッドがあるため非融合対象
     /// （`push_eager` で常に実体化。`Op::Gather`／`Scatter` と同型）。
     ///
@@ -1441,6 +1448,7 @@ pub(crate) enum Op {
     Pad {
         input: NodeId,
         pads: Vec<(usize, usize)>,
+        value: f32,
     },
     /// `Var::conv2d`（im2col＋GEMM。イシュー #1764・設計 `docs/conv-ops-
     /// design.md`）。`y = conv2d(input, weight, bias, params)`
@@ -2501,9 +2509,8 @@ impl Op {
     /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §26）で `true`
     /// になった（残る 16 variant は fail-closed のまま。§26 の表）。
     ///
-    /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Pad` は引き続き対象外
-    /// とし、以後のイシューへ引き継ぐ（`false` のまま残す。設計 doc
-    /// §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
+    /// `Pad`・`PadMode`・`MaskedFill` はイシュー #3084（決定記録 §29）で `true`
+    /// になった（設計 doc §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
     ///
     /// **網羅 match（ワイルドカードなし）とする理由**: `is_checkpoint_
     /// eligible`／`for_each_input` と同じ——新しい `Op` variant を
@@ -2578,7 +2585,12 @@ impl Op {
             | Op::RmsNorm { .. }
             | Op::LayerNorm { .. }
             // チャネル方向正規化（イシュー #3079・決定記録 §28）。V3 値＋S1 構造。
-            | Op::BatchNorm { .. } => true,
+            | Op::BatchNorm { .. }
+            // Pad・MaskedFill・PadMode（イシュー #3084・決定記録 §29）。Pad／MaskedFill は
+            // V1／V2（narrow の連鎖・where_cond）、PadMode は V3（f64 縮約値＋scatter_add 構造）。
+            | Op::Pad { .. }
+            | Op::MaskedFill { .. }
+            | Op::PadMode { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2636,7 +2648,6 @@ impl Op {
             // イシュー #2631・#2632・#2633 の FFT 6 演算も初期スコープ外（非対応）。
             | Op::Rfft { .. }
             | Op::Logcumsumexp { .. }
-            | Op::PadMode { .. }
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
             | Op::Quantile { .. }
@@ -2647,12 +2658,10 @@ impl Op {
             | Op::Ifft { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
-            | Op::MaskedFill { .. }
             | Op::Dropout { .. }
             | Op::IndexedScatterReduce { .. }
             | Op::Cumprod { .. }
             | Op::Interpolate { .. }
-            | Op::Pad { .. }
             | Op::ConvTranspose3d { .. }
             | Op::MaxUnpool { .. }
             | Op::LocalResponseNorm { .. }
@@ -5345,6 +5354,33 @@ mod conv3d_op_tests {
             }
             .supports_create_graph()
         );
+    }
+
+    /// イシュー #3084: `Pad`・`PadMode`・`MaskedFill` は create_graph 対応（`true`）。
+    #[test]
+    fn pad_mask_family_supports_create_graph() {
+        let a = NodeId(0);
+        let mask = Tensor::<f32>::new(vec![1.0], &[1]).unwrap();
+        let supported = [
+            Op::Pad {
+                input: a,
+                pads: vec![(1, 0)],
+                value: 0.5,
+            },
+            Op::PadMode {
+                input: a,
+                pads: vec![(1, 0)],
+                mode: fandhe_ai_tensor_core::PadMode::Reflect,
+            },
+            Op::MaskedFill {
+                input: a,
+                mask,
+                value: 1.0,
+            },
+        ];
+        for op in supported {
+            assert!(op.supports_create_graph());
+        }
     }
 
     /// イシュー #3083: 索引・累積 8 variant は create_graph 対応（`true`）。

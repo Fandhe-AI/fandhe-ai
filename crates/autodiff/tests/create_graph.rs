@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use fandhe_ai_autodiff::nn::Linear;
 use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Reduction, Tape, Var};
-use fandhe_ai_tensor_core::{Activation, Tensor};
+use fandhe_ai_tensor_core::{Activation, PadMode, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -2032,22 +2032,8 @@ fn hessian_where_matches_finite_difference() {
     assert!(common::req2_close(analytic[1][1], 6.0 * x0[1] as f64));
 }
 
-// --- MaskedFill・Gather・Scatter・Pad は
-//     イシュー #2062 のスコープ外（`Op::supports_create_graph()` は
-//     引き続き `false`）。fail-closed のまま残ることを固定する。
-
-#[test]
-fn create_graph_rejects_unsupported_op_masked_fill() {
-    let tape = Tape::new_with_ops(common::naive_ops());
-    let child = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0, -2.0, 3.0], &[3]));
-    let mask = Tensor::new(vec![true, false, true], &[3]).expect("mask fixture");
-    let loss = x.masked_fill(&mask, 0.0).unwrap().sum(None).unwrap();
-
-    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
-    assert!(matches!(err, AutodiffError::Backward(_)));
-    assert!(child.is_empty());
-}
+// --- MaskedFill・Pad・PadMode は #3084 で対象になった（新セクション「Pad・PadMode・MaskedFill 族」）。
+//     fail-closed の拒否契約はそのセクションの混在テストが固定する。
 
 // `Gather` は #3083 で対象になった。拒否契約は新セクション（索引・累積族）の
 // `create_graph_rejects_custom_downstream_of_gather`／`..._cumprod` が固定する。
@@ -4888,6 +4874,283 @@ fn batch_norm_create_graph_huge_db_reduction_is_rejected_with_empty_child() {
         .unwrap();
     let k = tape.var_no_grad(&t(vec![1e38, 1e38, -1e38], &[3, 1]));
     let loss = y.mul(&y).unwrap().mul(&k).unwrap().sum(None).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+    assert!(child.is_empty());
+}
+// ===========================================================================
+// Pad・PadMode・MaskedFill 族の create_graph 対応（イシュー #3084・決定記録 §29）。
+//
+// Pad・MaskedFill は線形のため単独では Hessian が 0 になる。値（置換定数）が Hessian に効く
+// よう、後段に要素を混ぜる cumsum と非線形の cubic_loss を置く。
+// ===========================================================================
+
+fn pad_value_chain<'t>(tape: &'t Tape, x: &Var<'t>, value: f32) -> Result<Var<'t>, AutodiffError> {
+    let y = x.reshape(&[2, 3])?.pad(&[(1, 0), (0, 2)], value)?;
+    cubic_loss(tape, &y.cumsum(1)?)
+}
+
+fn build_pad_nonzero<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    pad_value_chain(tape, x, 0.75)
+}
+
+fn build_pad_zero<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    pad_value_chain(tape, x, 0.0)
+}
+
+#[test]
+fn hessian_pad_nonzero_value_matches_finite_difference() {
+    let x0 = spaced(6);
+    check_poly_hessian(build_pad_nonzero, &x0, &[6]);
+    // value が replay に反映されている（0 との対照で Hessian が実際に変わる）。
+    let h_nonzero = analytic_hessian(build_pad_nonzero, &x0, &[6]);
+    let h_zero = analytic_hessian(build_pad_zero, &x0, &[6]);
+    let differs = h_nonzero
+        .iter()
+        .flatten()
+        .zip(h_zero.iter().flatten())
+        .any(|(a, b)| (a - b).abs() > 1e-3);
+    assert!(differs, "value が Hessian に反映されていない");
+}
+
+fn build_pad_consecutive<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x
+        .reshape(&[2, 3])?
+        .pad(&[(1, 1), (0, 1)], -1.25)?
+        .pad(&[(0, 1), (2, 0)], 0.5)?;
+    cubic_loss(tape, &y.cumsum(1)?)
+}
+
+#[test]
+fn hessian_consecutive_pads_match_finite_difference() {
+    check_poly_hessian(build_pad_consecutive, &spaced(6), &[6]);
+}
+
+fn build_masked_fill_nonzero<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // `[1, 3]` の mask を `[2, 3]` へ broadcast する。
+    let mask = Tensor::new(vec![true, false, true], &[1, 3]).expect("mask fixture");
+    let y = x.reshape(&[2, 3])?.masked_fill(&mask, 2.0)?;
+    cubic_loss(tape, &y.cumsum(1)?)
+}
+
+#[test]
+fn hessian_masked_fill_nonzero_value_matches_finite_difference() {
+    check_poly_hessian(build_masked_fill_nonzero, &spaced(6), &[6]);
+}
+
+fn attention_mask() -> Tensor<bool> {
+    Tensor::new(vec![false, true, true, false, false, true], &[2, 3]).expect("mask fixture")
+}
+
+fn build_masked_fill_softmax<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let p = x
+        .reshape(&[2, 3])?
+        .masked_fill(&attention_mask(), -1.0e4)?
+        .softmax(1)?;
+    cubic_loss(tape, &p)
+}
+
+#[test]
+fn hessian_masked_fill_large_negative_then_softmax_matches_finite_difference() {
+    let x0 = [0.3f32, -0.4, 0.8, 0.5, -0.2, 0.1];
+    let numeric = finite_diff_hessian(build_masked_fill_softmax, &x0, &[6], 1e-2);
+    let analytic = analytic_hessian(build_masked_fill_softmax, &x0, &[6]);
+    assert_hessian_close(&analytic, &numeric);
+    assert!(analytic.iter().flatten().any(|v| v.abs() > 1e-3));
+}
+
+#[test]
+fn create_graph_masked_fill_neg_infinity_has_finite_grad() {
+    // `where_cond` で選ぶため `inf * 0 = NaN` が生じない（`mul` による実装の回帰検出）。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.3, -0.4, 0.8, 0.5, -0.2, 0.1], &[6]));
+    let p = x
+        .reshape(&[2, 3])
+        .unwrap()
+        .masked_fill(&attention_mask(), f32::NEG_INFINITY)
+        .unwrap()
+        .softmax(1)
+        .unwrap();
+    let loss = cubic_loss(&tape, &p).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    let mask = [false, true, true, false, false, true];
+    for (i, &m) in mask.iter().enumerate() {
+        let v = g.value().get(&[i]).unwrap();
+        assert!(v.is_finite(), "i={i}: {v}");
+        if m {
+            assert_eq!(v, 0.0, "マスク位置の勾配は 0: i={i}");
+        }
+    }
+}
+
+fn build_pad_mode_reflect<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x
+        .reshape(&[2, 3])?
+        .pad_with_mode(&[(1, 1), (2, 2)], PadMode::Reflect)?;
+    cubic_loss(tape, &y.cumsum(1)?)
+}
+
+fn build_pad_mode_replicate<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // pad が軸長を超える形。添字の重複が実際に起きる。
+    let y = x
+        .reshape(&[2, 3])?
+        .pad_with_mode(&[(3, 2), (1, 4)], PadMode::Replicate)?;
+    cubic_loss(tape, &y.cumsum(1)?)
+}
+
+fn build_pad_mode_circular<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x
+        .reshape(&[2, 3])?
+        .pad_with_mode(&[(2, 1), (3, 2)], PadMode::Circular)?;
+    cubic_loss(tape, &y.cumsum(1)?)
+}
+
+#[test]
+fn hessian_pad_mode_matches_finite_difference() {
+    let x0 = spaced(6);
+    check_poly_hessian(build_pad_mode_reflect, &x0, &[6]);
+    check_poly_hessian(build_pad_mode_replicate, &x0, &[6]);
+    check_poly_hessian(build_pad_mode_circular, &x0, &[6]);
+}
+
+linear_builder!(lin_pad, |_tape, x| x
+    .reshape(&[2, 3])?
+    .pad(&[(1, 0), (0, 2)], 0.75)?);
+linear_builder!(lin_masked_fill, |_tape, x| x
+    .reshape(&[2, 3])?
+    .masked_fill(&attention_mask(), 2.0)?);
+linear_builder!(lin_pad_mode_replicate, |_tape, x| x
+    .reshape(&[2, 3])?
+    .pad_with_mode(&[(3, 2), (1, 4)], PadMode::Replicate)?);
+linear_builder!(lin_pad_mode_circular, |_tape, x| x
+    .reshape(&[2, 3])?
+    .pad_with_mode(&[(2, 1), (3, 2)], PadMode::Circular)?);
+
+#[test]
+fn create_graph_pad_family_first_order_is_bit_identical() {
+    let x0 = spaced(6);
+    assert_cg_grad_matches_backward(lin_pad, &x0, &[6], true);
+    assert_cg_grad_matches_backward(lin_masked_fill, &x0, &[6], true);
+    assert_cg_grad_matches_backward(lin_pad_mode_replicate, &x0, &[6], true);
+    assert_cg_grad_matches_backward(lin_pad_mode_circular, &x0, &[6], true);
+    // 連鎖 loss は REQ-2 判定。
+    assert_cg_grad_matches_backward(build_pad_nonzero, &x0, &[6], false);
+    assert_cg_grad_matches_backward(build_masked_fill_nonzero, &x0, &[6], false);
+    assert_cg_grad_matches_backward(build_pad_mode_replicate, &x0, &[6], false);
+}
+
+#[test]
+fn create_graph_pad_mode_cancellation_matches_first_order_bitwise() {
+    // 同じ入力要素へ upstream `[1, 1e8, -1e8, 1]` が重なる。f64 縮約は 2、f32 逐次和は 1。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.5], &[1]));
+    let w = tape.var_no_grad(&t(vec![1.0, 1e8, -1e8, 1.0], &[4]));
+    let y = x.pad_with_mode(&[(0, 3)], PadMode::Replicate).unwrap();
+    let loss = y.mul(&w).unwrap().sum(None).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let p = plain.get(&x).unwrap().unwrap().get(&[0]).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap().value().get(&[0]).unwrap();
+    assert_eq!(p, 2.0, "1 階は f64 縮約");
+    assert_eq!(p.to_bits(), g.to_bits(), "cg.grad は 1 階と bit 一致");
+}
+
+fn jvp_pad_family<'t>(tape: &'t Tape, p: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let mask = Tensor::new((0..15).map(|i| i % 4 == 1).collect::<Vec<bool>>(), &[3, 5])
+        .expect("mask fixture");
+    let y = p
+        .reshape(&[2, 3])?
+        .pad(&[(1, 0), (1, 1)], 0.5)?
+        .masked_fill(&mask, -0.75)?
+        .pad_with_mode(&[(1, 1), (1, 0)], PadMode::Reflect)?;
+    cubic_loss(tape, &y.cumsum(1)?)
+}
+
+#[test]
+fn jvp_create_graph_through_pad_family_matches_directional_derivative() {
+    let p0 = spaced(6);
+    let shape = [6usize];
+    let tangent: Vec<f32> = (0..6)
+        .map(|i| ((i * 3 + 1) % 7) as f32 * 0.1 - 0.3)
+        .collect();
+    let out_at = |pv: &[f32]| -> f64 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let p = tape.var(&t(pv.to_vec(), &shape));
+        jvp_pad_family(&tape, &p).unwrap().value().get(&[]).unwrap() as f64
+    };
+    let dir = |h: f32| -> f64 {
+        let plus: Vec<f32> = p0.iter().zip(&tangent).map(|(a, v)| a + h * v).collect();
+        let minus: Vec<f32> = p0.iter().zip(&tangent).map(|(a, v)| a - h * v).collect();
+        (out_at(&plus) - out_at(&minus)) / (2.0 * h as f64)
+    };
+    let numeric = (4.0 * dir(0.1) - dir(0.2)) / 3.0;
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let p = tape.var(&t(p0.clone(), &shape));
+    let loss = jvp_pad_family(&tape, &p).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &p,
+        &t(tangent, &shape),
+        &child,
+        &grand,
+    )
+    .expect("Pad 族を含む関数でも jvp_create_graph が成立する（閉包性）");
+    let jv = res.output().value().get(&[]).unwrap() as f64;
+    assert!(
+        common::req2_close(jv, numeric),
+        "jvp={jv} numeric={numeric}"
+    );
+}
+
+fn build_empty_pad<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.pad(&[(1, 1), (0, 0)], 1.0)?.sum(None)
+}
+
+fn build_identity_pads<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.pad_with_mode(&[(0, 0)], PadMode::Reflect)?
+        .pad(&[(0, 0)], 0.0)?
+        .sum(None)
+}
+
+#[test]
+fn create_graph_pad_family_degenerate_shapes_succeed() {
+    // 空テンソル（軸長 0 を含む出力）の pad。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![], &[0, 2]));
+    let loss = build_empty_pad(&tape, &x).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    // 空出力でも panic せず型付きに成功し、x へ 0 勾配が届く。
+    let g = cg.grad(&x).unwrap().expect("x は loss に到達する");
+    assert_eq!(g.value().shape(), &[0, 2]);
+
+    // pad 0 の恒等形。
+    assert_cg_grad_matches_backward(build_identity_pads, &[1.0, 2.0, 3.0], &[3], true);
+}
+
+#[test]
+fn create_graph_rejects_pad_mask_mixed_with_unsupported_op_and_keeps_child_empty() {
+    // Pad・MaskedFill 自体は対象だが、同じグラフに fail-closed の Op（cumprod）があれば拒否。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let mask = Tensor::new(vec![true, false, true, false], &[4]).expect("mask fixture");
+    let loss = x
+        .pad(&[(1, 0)], 0.5)
+        .unwrap()
+        .masked_fill(&mask, 0.0)
+        .unwrap()
+        .cumprod(0)
+        .unwrap()
+        .sum(None)
+        .unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());
