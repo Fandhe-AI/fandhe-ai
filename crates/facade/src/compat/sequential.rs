@@ -472,6 +472,21 @@ pub(super) enum LayerSpec {
     PixelUnshuffle {
         downscale_factor: usize,
     },
+    /// イシュー #3041。無パラメータ層（`unfold` kind）。
+    Unfold {
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    },
+    /// イシュー #3041。無パラメータ層（`fold` kind）。
+    Fold {
+        output_size: [usize; 2],
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    },
     /// 保存対象外の層（`add_module` の利用者定義層と、manifest スキーマ未対応の組み込み層。
     /// `kind` はエラー文言で読む）。
     Unsupported {
@@ -1934,8 +1949,8 @@ impl Sequential {
     /// （`docs/autodiff-fold-unfold-decision.md` §12.2）。入力 `[N, C, H, W]` → 出力 `[N, C·kH·kW, L]`
     /// （バッチなし入力は非対応）。無状態層で学習可能パラメータを持たない。
     /// 不正引数（0 次元・`2*padding` オーバーフロー）は `Unfold::new` の検査で `Err` になり panic しない。
-    /// 常駐経路は未実測のため `Unsupported`（fail-closed。決定記録 §5）。`save_model` は後続 issue
-    /// まで `UnsupportedModel`、ONNX export は `UnsupportedLayer`。AMP 低精度は無視して f32 で計算する。
+    /// 常駐経路は未実測のため `Unsupported`（fail-closed。決定記録 §5）。`save_model` は kind `unfold`／`fold`
+    /// として保存・復元できる（イシュー #3041）。ONNX export は `UnsupportedLayer`。AMP 低精度は無視して f32 で計算する。
     ///
     /// ```
     /// use fandhe_ai::compat::Sequential;
@@ -1951,7 +1966,12 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = Unfold::new(kernel_size, stride, padding, dilation)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported { kind: "unfold" });
+        self.specs.push(LayerSpec::Unfold {
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        });
         Ok(self)
     }
 
@@ -1979,7 +1999,13 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = Fold::new(output_size, kernel_size, stride, padding, dilation)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported { kind: "fold" });
+        self.specs.push(LayerSpec::Fold {
+            output_size,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+        });
         Ok(self)
     }
 

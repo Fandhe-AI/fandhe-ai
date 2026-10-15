@@ -497,6 +497,7 @@ docs/
     │   ├── logs/compat-sequential-conv3d-2524/ # `compat::Sequential::add_conv3d`（イシュー #2524）の CUDA／Metal 実機 parity（forward・backward を REQ-2 統一複合判定で CPU と比較）の実行コマンド・結果記入欄のみを記載
     │   ├── logs/compat-sequential-max-unpool-3037/ # `compat::FunctionalBuilder` の MaxPool 索引・MaxUnpool 層（Functional グラフ）経路（イシュー #3037）の CUDA／Metal 実機 parity の実行コマンド・結果記入欄のみを記載（実測は #3171・#3172）
     │   ├── logs/compat-sequential-conv-transpose3d-3033/ # `compat::Sequential` の ConvTranspose3d 層経路（イシュー #3033）の CUDA／Metal 実機 parity の実行コマンド・結果記入欄のみを記載（実測は #3171・#3172）
+    │   ├── logs/compat-sequential-fold-unfold-3041/ # `compat::Sequential` の Unfold／Fold 層経路（イシュー #3041）の CUDA／Metal 実機 parity の実行コマンド・結果記入欄のみを記載（実測は #3171・#3172）
     │   ├── logs/compat-sequential-pool3d-3029/ # `compat::Sequential` の Pool3d 層経路（イシュー #3029）の CUDA／Metal 実機 parity（ホストフォールバック経路）の実行コマンド・結果記入欄のみを記載（実測は #3171・#3172）
     │   ├── logs/compat-sequential-conv-transpose2d-2523/ # `compat::Sequential::add_conv_transpose2d`（イシュー #2523）の CUDA／Metal 実機 parity（forward・backward を REQ-2 統一複合判定で CPU と比較）の実行コマンド・結果記入欄のみを記載する README。実機は未実測のまま GB10／Mac セッションへ申し送り
     │   ├── logs/compat-sequential-spatial-2522/ # `compat::Sequential::add_upsample`／`add_zero_pad2d`／`add_identity`（イシュー #2522）の CUDA／Metal 実機 parity（Nearest・ZeroPad2d・Identity は bit 完全一致契約、Bilinear は REQ-2 統一複合判定）の実行コマンド・結果記入欄のみを記載する README。CPU 側は Linux 実行可能な統合テストで検証済みで、実機は未実測のまま GB10／Mac セッションへ申し送り

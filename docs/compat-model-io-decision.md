@@ -1641,3 +1641,13 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - 復元は `FunctionalBuilder::{max_pool*_with_indices, max_unpool*}` を呼ぶため、0 次元・`2 * padding` オーバーフロー（unpool 側）は構築時に `ModelIoError::Autodiff` となる。pool の 0 次元は構築時検査がなく forward 時に型付きエラーになる（panic しない。テストで固定）。
 - `format_version` は 1 据え置き。旧リーダーは未知 op を `UnsupportedModel` で fail-closed に拒否する。ONNX export は対象外のまま。
 - 層（Functional グラフ）経路の実機 parity テストは `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-max-unpool-3037/README.md`）。tolerance・baseline・依存は不変。
+
+## 追補（イシュー #3041）: unfold／fold の保存・復元
+
+- 対象は `Sequential::add_unfold`／`add_fold`。kind は `unfold`・`fold` の 2 種で、どちらも無パラメータ層（parameter・buffer なし）。
+  - `unfold`: `kernel_size_{h,w}`・`stride_{h,w}`・`padding_{h,w}`・`dilation_{h,w}` の 8 キー。
+  - `fold`: `output_size_{h,w}` と上記 8 キーの計 10 キー。
+- 10 キー ≦ `MAX_OBJECT_KEYS = 16` のため平坦形を採り、`"d,h,w"` 文字列畳み込みは使わない（上限定数は不変）。
+- params は固定スキーマでキー集合の完全一致・非負整数のみ受理する（欠落・余分なキー・負値・小数・型違い・`u64` 超過は `Manifest`）。0 次元・`2*padding` オーバーフロー・`output_size` の 0 は `add_*`（`Unfold::new`／`Fold::new`）に委ね `ModelIoError::Autodiff` になる。
+- kind allowlist は 63 → 65 種になる。`format_version` は 2 のまま。旧リーダーは未知 kind を `UnsupportedModel` で fail-closed に拒否する。
+- ONNX export は `UnsupportedLayer` のまま。層経路の実機 parity は `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-fold-unfold-3041/README.md`）。tolerance・baseline・依存は不変。
