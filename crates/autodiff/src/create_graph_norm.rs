@@ -92,6 +92,16 @@ fn p_upper(g_exp: i32, k: i32) -> i32 {
     (POW2_MAX_EXP - 2 - g_exp - k.max(0)).clamp(0, POW2_BAL)
 }
 
+/// 前置スケール指数の決定。要求値 `want`（`max|x|` 以上の 2 のべき乗の指数）を
+/// `[-POW2_BAL, p_upper]` に収めたうえで、下限 `want - 126` を保証する。
+/// `|x|` が 2^127 級（`3e38` と `-3e38` 等）だと `xs = x/2^p` の差 `xs - x_ref` が
+/// `2·|xs|` に達するため `|xs| <= 2^126`（`p >= want - 126`）が必要で、逆伝播倍率
+/// の上限 `p_upper` が 0 でも中心化の有限性を優先する（累積倍率の余裕は 1 bit
+/// 減るだけで、`rstd` が極小のこの入力域では実効倍率は有限。決定記録 §24）。
+fn clamp_p(want: i32, upper: i32) -> i32 {
+    want.clamp(-POW2_BAL, upper).max(want - (POW2_MAX_EXP - 1))
+}
+
 /// `2^e`（`e` は `[-1022, 1023]`）を f64 で返す。
 fn pow2_f64(e: i32) -> f64 {
     let e = e.clamp(-1022, 1023);
@@ -239,8 +249,10 @@ pub(crate) fn scaled_row_xhat<'c>(
             } else {
                 0
             };
-            (if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) })
-                .clamp(-POW2_BAL, p_upper(g_exp[ch], k))
+            clamp_p(
+                if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) },
+                p_upper(g_exp[ch], k),
+            )
         })
         .collect();
     let inv_p: Vec<f32> = p_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
@@ -316,12 +328,14 @@ fn eval_row_xhat<'c>(
             } else {
                 0
             };
-            if inf || !mu.is_finite() {
-                POW2_MAX_EXP
-            } else {
-                pow2_ceil_exp(mx.max((mu as f64).abs()))
-            }
-            .clamp(-POW2_BAL, p_upper(g_exp[ch], k))
+            clamp_p(
+                if inf || !mu.is_finite() {
+                    POW2_MAX_EXP
+                } else {
+                    pow2_ceil_exp(mx.max((mu as f64).abs()))
+                },
+                p_upper(g_exp[ch], k),
+            )
         })
         .collect();
     let inv_p: Vec<f32> = p_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();

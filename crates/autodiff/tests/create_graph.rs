@@ -3293,6 +3293,24 @@ fn batch_norm_create_graph_overflow_regression_vectors_are_finite() {
         e,
         None,
     );
+    // 前置スケール下限と逆伝播倍率上限の両立（Codex P1）: 上流勾配 1e38 で
+    // p_upper=0 でも x=±3e38 の中心化差（-6e38）が -inf にならない。
+    check_bn_three_stage(
+        "prescale-huge-g",
+        &[2, 1],
+        vec![3e38, -3e38],
+        vec![1e38, 1e38],
+        e,
+        None,
+    );
+    check_bn_three_stage(
+        "prescale-huge-g-eval",
+        &[2, 1],
+        vec![3e38, -3e38],
+        vec![1e38, 1e38],
+        e,
+        Some((vec![-3e38], vec![1e30])),
+    );
     // 上流勾配が巨大。
     check_bn_three_stage(
         "huge-g",
