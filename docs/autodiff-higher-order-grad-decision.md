@@ -821,6 +821,65 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文。
 
+## 23. 実装記録（#3080・Conv 系 2D の create_graph 対応）
+
+- 基準コミットは `origin/main` `6d08419a`。方針の正は §21（21.2 の #3080 族・21.3 の conv 方針・21.4 の 2D／3D 分割・21.6 の fail-closed）で、本節は実装結果だけを書く。
+- 実装範囲は §21.4 (a)＝2D の 4 variant（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）。`Conv3d`・`ConvTranspose3d` は `supports_create_graph() == false` のまま残し、入口検査が拒否する（(b) への申し送り）。
+
+### 23.1 実装した内容
+
+| 項目 | 実装 |
+|---|---|
+| 対象判定 | `Op::supports_create_graph`（`tape.rs`）の `true` 側へ 4 variant を移動した。網羅 match を維持し、ワイルドカードは足していない |
+| 入口検査 | `validate_ancestors`（`create_graph.rs`）に `Conv2d` の `compute_dtype != F32` 拒否を追加した（判定順は `MatMul` の rank の直前）。子テープへ書く前に `Err(Backward)` で拒否し、`child.is_empty()` が保たれる。`replay_op` の `Conv2d` 腕にも同条件を置いた（多層防御） |
+| forward 再生 | `create_graph/conv.rs` の `replay_*`。公開 `Var` メソッドへの委譲 |
+| 二階 VJP | `create_graph/conv.rs` の `conv2d_vjp`・`conv_transpose2d_vjp`・`unfold_vjp`・`fold_vjp` |
+| 共有ホスト関数 | `grad.rs` に `conv2d_dw_from_col`・`conv_transpose2d_dw_from_col` を抽出した（1 階の既存腕は式・評価順・呼び出し回数を変えず、これらを呼ぶだけにした） |
+
+- `output_padding`（`ConvTranspose2d`）と `output_size`（`Fold`）は `Op` に足さず、再生対象ノード自身の shape から導出する。`output_padding = out − ((in−1)·s − 2p + d·(k−1) + 1)` を `checked_*` で計算し、負・桁あふれは型付きエラー。`output_padding < stride` の検査は委譲先の `Var::conv_transpose2d` が行う。
+- 子テープへ積む Op は `Narrow`・`Reshape`・`Permute`・`Contiguous`・`Concat`・`MatMul`（rank 2）・`Unfold`・`Fold`・`Sum` だけで、すべて replayable（閉包性。§21.1(4)）。N 軸は `Permute`＋`Reshape` で列軸へ畳み込み、groups は `Narrow` のループと `Var::cat` で扱う。
+- matmul は `matmul_fp32_strict` を使う（PR #2003 の前例）。`Var::conv2d`／`conv_transpose2d` を VJP 内で呼ばないのは、forward が非 strict の `gemm_batched` を通り、CUDA の TF32 opt-in 下でも backprop を FP32 厳密に保つ契約を破るため。
+- K 軸の並び `(c, kh, kw)` は、groups 付き im2col（`[N, G, K_g, P]`）の平坦化と groups = 1 の `unfold`／`fold` で一致する。このため groups > 1 でも `Var::unfold`／`fold` を使える。
+- 要素数 0 の入力は matmul を呼ばず、子テープ上のゼロ定数を返す。
+
+### 23.2 方式（V1／V3）
+
+- d_input は V1（unfold／fold と groups ごとの rank 2 strict matmul の合成）。
+- d_weight は V3。構造は V1 と同じ合成、値は 1 階と同じホスト関数（`gemm_batched_fp32_strict`＋N 軸 `f64` 縮約）の結果を専用 Op `Op::ConvWeightGradHost { structure, g, x, params, transposed }` で `push_eager` する。VJP は恒等で `structure` のみへ渡し、孫テープでの再生（`replay_op`）は同じホスト関数で値を再計算する。
+- d_bias は V3。`reduce_bias_grad_var`（`eval::reduce_bias_grad_rows`）を再利用する。
+- `Unfold`／`Fold` は V1（1 階と同じ `col2im`／`im2col` を `fold`／`unfold` として書く。値も一致する）。
+
+### 23.3 数値契約と残余（§21.1(5) との関係）
+
+- 1 階と `cg.grad`（d_weight・d_bias）は bit 一致する。N·P 方向の長軸縮約が f32 逐次和では overflow し、`f64` 縮約では有限になる入力（N=3・1×1 カーネル・`x=[1,1,-1]`・`g=[3e38;3]`）の回帰テストで固定した。
+- conv は x と w に対する双線形写像で、構造側の合成（`MatMul`・`Permute`・`Reshape`・`Narrow`・`Concat`・`Unfold`・`Fold`）の VJP は各ノード自身の前方値を読まない（`MatMul` が読むのはオペランドの値だけ）。そのため二階の微分値は V3 の前方値だけで有限かつ正しい。
+- 孫テープ（3 段目以降）で再生しても d_weight の前方値は同じホスト関数で再計算され、上の overflow 入力でも有限のまま 1 階と一致する（`Op::ConvWeightGradHost`。`Op::Contiguous` タグでは再生時に f32 の構造側合成へ落ちて `inf` になっていた〈レビュー指摘 P1〉）。孫テープ上で `h = (gw·1e-38)²` を作って更に微分した x 勾配が通常の `backward` と bit 一致する回帰テストで固定した。
+- `ConvTranspose2d` の `output_padding` は `out + 2p − ((in−1)·s + d·(k−1) + 1)` を符号付き（`i128`）で導出する（出力長から `output_padding` を除いた base は `2p` が大きいと負になりうる）。
+- d_bias は入力・重みがゼロ次元でも上流 `g` が非空なら通常どおり縮約する（`Cin = 0` で 1 階と一致）。
+- 代替の S1（`g/s_g`・`col/s_x` で matmul を取り 2 のべき乗で戻す）は採らない。順方向は有限に保てるが、逆伝播で上流勾配へ `2^(e_g+e_x)` のチャンク積が先に掛かり、真値が有限でも二階の微分値が `inf` になる（overflow を二階側へ移すだけ）。
+- tolerance・baseline・FMA 契約は変更しない。
+
+### 23.4 テスト
+
+`crates/autodiff/tests/create_graph.rs`（追加分）:
+
+- Hessian と有限差分の突合: `Conv2d`・`ConvTranspose2d` の `{bias あり・なし} × {groups 1・2}`、`stride=2・padding=1`、`dilation=2`、`ConvTranspose2d` の `stride=2・output_padding=1` と `dilation=2`、`Unfold`・`Fold` 単体（窓が重なる設定）。x・w・b を 1 本の葉から切り出し、純ブロックと混合ブロックを同時に検証する。loss は多項式 `sum(y⊙y⊙c)`。f32 勾配の丸めノイズが小さい Hessian 成分で絶対許容を超えるため、h を大きく取り Richardson 外挿（多項式 loss では打ち切り誤差が厳密に消える）で補った。tolerance は変更していない。
+- 子テープ上の 1 階勾配（`cg.grad`）と `Tape::backward` の REQ-2 一致、`first_order()` の bit 同一。
+- d_weight・d_bias の overflow 回帰（`Conv2d`・`ConvTranspose2d` それぞれ）と、二階・3 段目の微分値が有限であること。
+- `jvp_create_graph`（親→子→孫）と独立な中央差分の方向微分の一致（`Conv2d`・`ConvTranspose2d`）。
+- fail-closed: `Conv3d` が `Err(Backward)` かつ `child.is_empty()`。低精度 `Conv2d`（F16）は `Var::conv2d_low_precision` と F16 の typed ops が crate 内限定のため、`create_graph.rs` 内の単体テスト `conv_low_precision_tests` で固定した。
+
+既存テストの更新: `tape.rs` の `unfold_and_fold_op_meta_properties`（`supports_create_graph` を `true` へ反転）、`conv2d_family_supports_create_graph`（新規）、`fold_unfold_parity.rs` の `records_exactly_one_node_and_supports_create_graph`（旧: 拒否を確認）。`conv_transpose3d_parity.rs`・`pool3d_parity.rs` の拒否テストは 3D のため変更していない。
+
+### 23.5 所有者へ戻す論点
+
+1. §21.4 (b)（3D: `Conv3d`・`ConvTranspose3d`）のサブイシュー起票（起票にはユーザー承認が要る）。
+2. CUDA・Metal 実機で create_graph と conv を組み合わせた実測は未実施（申し送り）。
+
+### 23.6 変更していないもの
+
+1 階 `Tape::backward` の数値（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
+
 ## 22. 実装記録（#3081: Gelu・GeluTanh・Erf の create_graph 対応）
 
 §21.5 の決定に従い実装した。コードは `crates/autodiff/src/create_graph.rs`（`scalar_unary_replayable`・`build_cgrads` の `Op::ScalarUnary` 腕）。
@@ -848,11 +907,11 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の経路（`grad.rs`・スカラー評価・`tensor-core`）、`Op` payload、公開 API、依存、`unsafe`、tolerance・baseline、`docs/spec`、既存節の本文。
 
-## 23. 実装記録（#3079・`BatchNorm` の create_graph 対応。親 #3075）
+## 24. 実装記録（#3079・`BatchNorm` の create_graph 対応。親 #3075）
 
 - 基準は `origin/main` `6d08419a`。方針は §21.1 (5)・§21.3（#3079 行）に従う。コードは `crates/autodiff/src/create_graph_norm.rs`（新規・非公開）と、`create_graph.rs` の `replay_op`／`build_cgrads` の薄い腕、`tape.rs::supports_create_graph`（`Op::BatchNorm` を `true`）。
 
-### 23.1 方式の割り当て（出力ごと）
+### 24.1 方式の割り当て（出力ごと）
 
 | 出力 | train | eval | 理由 |
 |---|---|---|---|
@@ -863,7 +922,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - V3 の値は `grad.rs::batch_norm_vjp_channels`（`pub(crate)` 化。本体・シグネチャは不変）を 1 回呼んで得る。値は 1 階と bit 同一。構造 `S` の上に `Op::Contiguous`（VJP が恒等で前方値に依存しない）を `push_eager` し、二階の微分は `S` を流れる。
 - `replay_op` は `fixed_stats` payload をそのまま使い、`Var::batch_norm`／`batch_norm_infer` へ委譲する（`Op` の拡張なし）。
 
-### 23.2 構造（S1。スケール付き合成）
+### 24.2 構造（S1。スケール付き合成）
 
 チャネル軸を前に出した行 `[C, M]`（`Reshape`・`Permute`・`Contiguous`）で組む。ホスト定数はすべて 2 のべき乗で、乗除算は（非正規化域を除き）厳密。
 
@@ -874,41 +933,41 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 5. eval の x̂（dw 用）: `q = x/p − mean/p`（`p` は `max(|x|,|mean|)` 以上。`|q|≤2`）と `rstd = 仮数·2^k` の分解。dx は `dx̂·rstd`（V1）。
 - 積む Op は `Mul`・`Sub`・`Add`・`Mean`・`Sum`・`Narrow`・`Reshape`・`Permute`・`Contiguous`・`ScalarUnary(Sqrt)`・`ScalarBinary(Div)` のみで、すべて `supports_create_graph == true`（閉包性。孫テープ再生で閉じる）。
 
-### 23.3 running stats
+### 24.3 running stats
 
 `replay_op`・`build_cgrads` は `Var::` プリミティブとホスト関数だけを呼び、`nn::BatchNorm*` の buffer・`num_batches_tracked` へ触れる経路がない。子テープ構築・二階 backward・孫テープ再生（`jvp_create_graph`）で二重更新されないことを統合テストで固定した。
 
-### 23.4 fail-closed
+### 24.4 fail-closed
 
 - 空テンソル（`n`／`c`／`spatial` のいずれかが 0）の BatchNorm は `validate_ancestors` で子テープへ書く前に拒否する。
 - 対象外のまま残る Op（例: `local_response_norm`）は従来どおり入口で拒否され、子テープは無変更。
 - 1 階が有限でない入力（`eps=0` かつ分散 0 など）は 1 階と同様に非有限になる（特別扱いしない）。S2 は実装していない。
 
-### 23.5 テスト（`crates/autodiff/tests/create_graph.rs`・`create_graph_norm.rs` 単体）
+### 24.5 テスト（`crates/autodiff/tests/create_graph.rs`・`create_graph_norm.rs` 単体）
 
 - Hessian: x（rank 2 の有限差分。rank 2／4 の独立合成〈`mean_dims`・`sub`・`mul`・`sqrt`・`div`〉との突合を train／eval・affine の有無で）・w・b の有限差分・x×w の混合二階。rank 4 の有限差分は f32 勾配の丸め雑音が Hessian 成分に対し無視できないため行わず、独立合成との突合に置き換えた（判定は緩めていない）。
 - 1 階一致（`cg.grad(x|w|b)` が `Tape::backward` と REQ-2 判定で一致・`first_order()` は bit 同一）、running stats 不変、閉包性（孫テープへの再生）、`local_response_norm` の fail-closed、空入力の拒否。
 - 3 段（1 階・`cg.grad`・孫テープ再生）の回帰ベクトル: `x=1e20` 系・中心化の丸め・小スケール・定数・全ゼロ・`[3e38,-3e38]`・巨大な上流勾配（交互符号・同符号）・eval の逆符号大値。
 - 単体: 2 のべき乗の選択規則、`mul_pow2_per_row` の大指数、チャネル行変換の往復。
 
-### 23.5a レビュー指摘の是正（Codex P1 × 2）
+### 24.5a レビュー指摘の是正（Codex P1 × 2）
 
 - 前置スケール指数 `p` を `[-64, 64]` に制限した（`POW2_BAL`。train／eval 共通）。`p=127` のままだと `x=mean=3e38`・`var=0` で逆伝播中に `2^135` 級の倍率が `inv_p` へ届く前に掛かり二階勾配が overflow した。制限後は各段の累積倍率が `rstd·2^64` 以下に収まる。`|p|<=64` の入力は従来と bit 同一。
 - 空入力の判定を形状の積から `shape.contains(&0)` へ変更した（`[usize::MAX, 2, 0]` で積が overflow して panic するため）。
 - テスト: `batch_norm_create_graph_huge_constant_input_second_order_is_finite`・`batch_norm_create_graph_rejects_overflowing_empty_shape`・overflow 回帰ベクトルへ `const-3e38-*` を追加。
 
-### 23.5b レビュー指摘の是正（Codex P1・`s_g` 復元倍率の逆伝播順）
+### 24.5b レビュー指摘の是正（Codex P1・`s_g` 復元倍率の逆伝播順）
 
 - 原因: train の dx は `dx̂` を `2^-s_g` で縮小して縮約し、最後に `2^(s_g - p_s2)` で復元する直列構造のため、逆伝播では復元倍率が縮小より先に単位シードへ掛かる。`x=[0,0]`・`eps=1e-5`・上流 `[1e38,1e38]` は `s_g=127`・`p_s2=-8` で `2^135` が掛かり二階勾配が `inf`→`NaN` になった（本来 Hessian は 0）。±100 の段分割は累積倍率を守らない。
 - 是正: `s_g` を `ceil(log2 m) + 2`（m は行長 `n·spatial`）で打ち切る。縮約の安全は `|t| <= max|dx̂|/(4m)`（`Σ|t·x̂| <= m·max|t|`・`|x̂| <= √m`）で足りるため、逆伝播の累積倍率は `rstd·2^(ceil(log2 m)+2)` 以下に収まる。小さい上流勾配は従来どおり `s_g` が負で拡大側。dx の値は 1 階のホスト値で上書きされるため値は不変。
 - 回帰テスト: `batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero`（上記ケースで二階勾配が有限かつ 0）。
 
-### 23.5c レビュー指摘の是正（Codex P1・上流勾配を含む倍率の overflow）
+### 24.5c レビュー指摘の是正（Codex P1・上流勾配を含む倍率の overflow）
 
 - 固定の `POW2_BAL=64` は単位シードしか保護できず、上流勾配 `g=1e20` を含む `∂dw/∂x`（`x=mean=3e38`・`var=0`・`loss=sum(y·1e20)`）で `g·2^(k+p)` が `inv_p` に届く前に overflow した。
 - 前置スケール指数 `p` の上限を、行ごとの `ceil(log2 max|g|)`（train は `dx̂` との最大）と実効 rstd の指数 `k` から `p_upper = clamp(125 − g_exp − k, 0, 64)` として決める（`create_graph_norm.rs::p_upper`／`upstream_exps`）。eval は `rstd` から、train はホスト f64 統計から `k` を見積もる。`p` を下げても 2 のべき乗スケールなので値は変わらない。
 - 回帰テスト `batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite`（eval は `∂dw/∂x ≈ 3.16e22`、train は有限）を追加した。
 
-### 23.6 変えていないもの
+### 24.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。

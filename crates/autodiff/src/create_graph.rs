@@ -58,7 +58,11 @@
 //! `ScalarUnary`（#3081 で `Gelu`・`GeluTanh`・`Erf` も対象）・`ScalarBinary`（既知 13
 //! variant すべて）・`Transpose`・`Permute`・`Narrow`・`Concat`・
 //! `Contiguous`・`Where` を拡張済み（[`scalar_unary_replayable`]／
-//! [`scalar_binary_replayable`] 参照）。`MaskedFill`・`Gather`・
+//! [`scalar_binary_replayable`] 参照）。さらにイシュー #3080 で 2D 畳み込み族
+//! （`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`。実装は `conv` サブモジュール、
+//! 決定記録 §23）を拡張済み。`F32` 以外の `compute_dtype` を持つ `Conv2d`
+//! （低精度 forward）は [`validate_ancestors`] が明示拒否する。`Conv3d`・
+//! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。`MaskedFill`・`Gather`・
 //! `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss`・`L1Loss`・
 //! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
 //! `CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`・
@@ -69,7 +73,7 @@
 //! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・
 //! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
-//! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §23。それ以外の追跡対象 Op・rank≥3 の
+//! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §24。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -105,6 +109,8 @@ use crate::backward::Gradients;
 use crate::error::AutodiffError;
 use crate::tape::{NodeId, Op, Tape, TapeId, TapeNode, materialize_fallible};
 use crate::var::Var;
+
+mod conv;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -456,7 +462,20 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         {
             return Err(AutodiffError::Backward(format!(
                 "create_graph: 空テンソルの BatchNorm（NodeId({}))は非対応（\
-                 docs/autodiff-higher-order-grad-decision.md §23 参照）",
+                 docs/autodiff-higher-order-grad-decision.md §24 参照）",
+                id.0
+            )));
+        }
+        // 低精度 `Conv2d`（イシュー #2071）は `TapeNode::low_precision` を立てず
+        // `compute_dtype` で記録するため、ここで明示拒否する（イシュー #3080・
+        // 決定記録 §21.3。子テープへ精度情報を持たず静かに f32 再生される
+        // のを防ぐ fail-closed。`child` へ書き込む前の入口検査）。
+        if let Op::Conv2d { compute_dtype, .. } = &node.op
+            && *compute_dtype != fandhe_ai_tensor_core::ScalarDType::F32
+        {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: 低精度 conv2d（{compute_dtype:?}。NodeId({}))は非対応（\
+                 子テープへ精度情報を持たず静かに f32 再生される。イシュー #2071・#3080）",
                 id.0
             )));
         }
@@ -637,6 +656,62 @@ fn replay_op<'c>(
             Var::cat(&mirrored?, dim)
         }
         Op::Contiguous { input } => get_mirror(mirror, input)?.contiguous(),
+        // d_weight のホスト値ノード: 孫テープでも同じホスト関数で値を
+        // 再計算する（f32 の構造側合成へ落とさない。§21.1(3)(5)）。
+        Op::ConvWeightGradHost {
+            structure,
+            g,
+            x,
+            params,
+            transposed,
+        } => {
+            let structure_m = get_mirror(mirror, structure)?;
+            conv::host_weight_grad_node(
+                structure_m.tape(),
+                &structure_m,
+                &get_mirror(mirror, g)?,
+                &get_mirror(mirror, x)?,
+                &params,
+                transposed,
+            )
+        }
+        // 2D 畳み込み族（イシュー #3080）。公開 `Var` メソッドへの委譲で、
+        // forward と同じカーネルを通るため写しの値は親と一致する。
+        Op::Conv2d {
+            input,
+            weight,
+            bias,
+            params,
+            compute_dtype,
+        } => {
+            let bias_m = bias.map(|b| get_mirror(mirror, b)).transpose()?;
+            conv::replay_conv2d(
+                &get_mirror(mirror, input)?,
+                &get_mirror(mirror, weight)?,
+                bias_m.as_ref(),
+                &params,
+                compute_dtype,
+            )
+        }
+        Op::ConvTranspose2d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let bias_m = bias.map(|b| get_mirror(mirror, b)).transpose()?;
+            conv::replay_conv_transpose2d(
+                shape,
+                &get_mirror(mirror, input)?,
+                &get_mirror(mirror, weight)?,
+                bias_m.as_ref(),
+                &params,
+            )
+        }
+        Op::Unfold { input, params } => conv::replay_unfold(&get_mirror(mirror, input)?, &params),
+        Op::Fold { input, params } => {
+            conv::replay_fold(shape, &get_mirror(mirror, input)?, &params)
+        }
         // `cond` は forward 時点（`Var::where_cond`）で `a`／`b` と
         // 同じ `out_shape` へ broadcast 済みの f32 マスク（`c != 0.0`
         // 判定契約。`Op::Where` doc 参照）として `Op` へ焼き込まれて
@@ -891,6 +966,10 @@ fn build_cgrads<'c>(
                 // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, input, g)?;
             }
+            Op::ConvWeightGradHost { structure, .. } => {
+                // 恒等で `structure` のみへ（`grad.rs` の VJP と同型）。
+                accumulate(&parent_nodes, &mut cgrads, structure, g)?;
+            }
             Op::Where { cond, a, b } => {
                 // `grad.rs::where_vjp` と同型: `cond` の真偽で `g` を
                 // 通すか 0 にするかを選択し、`a`／`b` 元 shape へ縮約
@@ -915,7 +994,7 @@ fn build_cgrads<'c>(
                 fixed_stats,
             } => {
                 // 方式（V3＋S1／eval の dx は V1）は `create_graph_norm.rs`
-                // と決定記録 §23 を参照。
+                // と決定記録 §24 を参照。
                 let x_host = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
                 let w_host = match weight {
                     Some(w) => Some(materialize_fallible(&parent_nodes, parent_ops, w)?.clone()),
@@ -1283,6 +1362,79 @@ fn build_cgrads<'c>(
                     accumulate(&parent_nodes, &mut cgrads, b, db)?;
                 }
             }
+            // 2D 畳み込み族（イシュー #3080。方式は `conv` モジュール doc 参照）。
+            Op::Conv2d {
+                input,
+                weight,
+                bias,
+                params,
+                ..
+            } => {
+                let need = conv::ConvNeeds {
+                    input: parent_nodes[input.0].requires_grad,
+                    weight: parent_nodes[weight.0].requires_grad,
+                    bias: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
+                };
+                let bias_shape = bias.map(|b| parent_nodes[b.0].shape.clone());
+                let r = conv::conv2d_vjp(
+                    child,
+                    &g,
+                    &get_mirror(mirror, input)?,
+                    &get_mirror(mirror, weight)?,
+                    bias_shape.as_deref(),
+                    &params,
+                    need,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_weight {
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+                if let (Some(b), Some(d)) = (bias, r.d_bias) {
+                    accumulate(&parent_nodes, &mut cgrads, b, d)?;
+                }
+            }
+            Op::ConvTranspose2d {
+                input,
+                weight,
+                bias,
+                params,
+            } => {
+                let need = conv::ConvNeeds {
+                    input: parent_nodes[input.0].requires_grad,
+                    weight: parent_nodes[weight.0].requires_grad,
+                    bias: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
+                };
+                let bias_shape = bias.map(|b| parent_nodes[b.0].shape.clone());
+                let r = conv::conv_transpose2d_vjp(
+                    child,
+                    &g,
+                    &get_mirror(mirror, input)?,
+                    &get_mirror(mirror, weight)?,
+                    bias_shape.as_deref(),
+                    &params,
+                    need,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_weight {
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+                if let (Some(b), Some(d)) = (bias, r.d_bias) {
+                    accumulate(&parent_nodes, &mut cgrads, b, d)?;
+                }
+            }
+            Op::Unfold { input, params } => {
+                let input_shape = parent_nodes[input.0].shape.clone();
+                let d = conv::unfold_vjp(&g, &input_shape, &params)?;
+                accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
+            Op::Fold { input, params } => {
+                let d = conv::fold_vjp(&g, &params)?;
+                accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
             _ => {
                 return Err(AutodiffError::Backward(
                     "create_graph: build_cgrads: supports_create_graph() が true の未対応 Op\
@@ -1398,6 +1550,13 @@ fn reduce_to<'c>(
         // 同一のため `reshape` で先頭の 1 軸を落とせる。
         cur.contiguous()?.reshape(target_shape)
     }
+}
+
+/// 子テープ上の `v` の実体値を所有値として取り出す（`conv` モジュールの V3
+/// ノード〈1 階と同じホスト関数の前方値〉の入力値取得に使う）。
+fn value_of<'c>(child: &'c Tape, v: &Var<'c>) -> Result<Tensor<f32>, AutodiffError> {
+    let nodes = child.nodes.borrow();
+    Ok(materialize_fallible(&nodes, child.ops(), v.node_id())?.clone())
 }
 
 /// `Op::Add` の bias パターンに限り `grad.rs::reduce_bias_grad`（f64
@@ -1764,5 +1923,31 @@ mod new_2649_tests {
         ] {
             assert!(!scalar_unary_replayable(op), "{op:?}");
         }
+    }
+}
+/// 低精度 `Op::Conv2d` の fail-closed（イシュー #3080・決定記録 §21.3）。
+/// `Var::conv2d_low_precision` は `pub(crate)`、F16 の typed ops を持つ
+/// テスト用バックエンド（`test_support`）も crate 内限定のため、統合テスト
+/// ではなく本クレート内の単体テストで検証する。
+#[cfg(test)]
+mod conv_low_precision_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::ScalarDType;
+
+    #[test]
+    fn low_precision_conv2d_is_rejected_and_child_stays_empty() {
+        let tape = Tape::new_with_ops(crate::test_support::low_precision_test_ops());
+        let child = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let x = tape.var(&Tensor::full(&[1, 1, 3, 3], 0.5f32).unwrap());
+        let w = tape.var(&Tensor::full(&[1, 1, 2, 2], 0.25f32).unwrap());
+        let y = x
+            .conv2d_low_precision(&w, None, [1, 1], [0, 0], [1, 1], 1, ScalarDType::F16)
+            .unwrap();
+        let loss = y.sum(None).unwrap();
+        let err = tape
+            .backward_create_graph(&loss, &child)
+            .expect_err("低精度 conv2d は fail-closed で拒否されるはず");
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        assert!(child.is_empty(), "入口検査は child へ書き込む前に拒否する");
     }
 }

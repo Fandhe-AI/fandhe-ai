@@ -663,6 +663,24 @@ pub(crate) enum Op {
     /// ない演算。VJP（`grad.rs`）は upstream をそのまま入力へ渡す恒等
     /// パススルー（メモリレイアウトのみが変わり値は変わらないため）。
     Contiguous { input: NodeId },
+    /// 2D 畳み込み族の d_weight を子テープへ記録するノード（イシュー #3080・
+    /// 決定記録 §23）。`structure` は d_weight の二階微分経路（unfold／fold と
+    /// rank 2 strict matmul の合成）、`g`・`x` は 1 階 VJP と同じホスト関数
+    /// （`gemm_batched_fp32_strict` と N 軸 `f64` 縮約）へ渡すオペランドで、
+    /// 前方値は `create_graph/conv.rs` がそのホスト関数で求めて `push_eager`
+    /// する。`Op::Contiguous` と異なり孫テープでの再生時にも同じホスト関数で
+    /// 値を再計算するため、f32 の構造側合成へ落ちて overflow する事故が
+    /// 起きない（§21.1(3)(5)）。VJP は `Op::Contiguous` と同じ恒等で
+    /// `structure` のみへ渡す（`g`・`x` への寄与は `structure` 経由で既に
+    /// 含まれる）。`transposed` は `ConvTranspose2d` 用（`x`・`g` の役割が
+    /// 入れ替わる）。
+    ConvWeightGradHost {
+        structure: NodeId,
+        g: NodeId,
+        x: NodeId,
+        params: Conv2dParams,
+        transposed: bool,
+    },
     /// 行方向 RMSNorm（イシュー #1596）。`BackendOps` に対応メソッド
     /// （`rmsnorm`。既存の `run_fused` canonical プラン一致経路とは別の
     /// 独立エントリ）があり非融合対象ではないが、`Add`/`Mul`/`Relu`/
@@ -1419,11 +1437,13 @@ pub(crate) enum Op {
         /// 挙動不変）。`Var::conv2d_low_precision`（`nn::conv::
         /// conv2d_forward_low_precision` の唯一の呼び出し元）のみが
         /// `F16`／`Bf16` を記録する opt-in 経路。`Op::Conv2d` は
-        /// `is_checkpoint_eligible() == false`（常に実体化済み）かつ
-        /// `supports_create_graph() == false`（二階微分 replay 対象外）
-        /// のため、本フィールドは checkpoint 解放判定・create_graph
-        /// replay のいずれにも影響しない——`grad::vjp` の `Op::Conv2d`
-        /// 分岐も本フィールドを見ず常に f32 backward を行う
+        /// `is_checkpoint_eligible() == false`（常に実体化済み）のため、
+        /// 本フィールドは checkpoint 解放判定に影響しない。create_graph
+        /// （イシュー #3080）は `supports_create_graph() == true` だが、
+        /// `F32` 以外の `Conv2d` は子テープへ精度情報を持たず静かに f32 再生
+        /// されるため `create_graph::validate_ancestors` が本フィールドで
+        /// 明示拒否する（fail-closed）。`grad::vjp` の `Op::Conv2d` 分岐は
+        /// 本フィールドを見ず常に f32 backward を行う
         /// （`compute_dtype` は forward 経路の記録専用）。
         compute_dtype: ScalarDType,
     },
@@ -1835,6 +1855,8 @@ impl Op {
             // する。適格化（再導出分岐の追加）は §8 のスコープ外事項
             // として `docs/autodiff-checkpoint-design.md` に記録済み。
             Op::Contiguous { .. } => false,
+            // `Op::ConvWeightGradHost` も実体化演算で再導出分岐が無い。
+            Op::ConvWeightGradHost { .. } => false,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -2093,6 +2115,13 @@ impl Op {
             | Op::Lstsq { a, b, .. } => {
                 f(*a);
                 f(*b);
+            }
+            Op::ConvWeightGradHost {
+                structure, g, x, ..
+            } => {
+                f(*structure);
+                f(*g);
+                f(*x);
             }
             Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
             Op::Sum { input, .. }
@@ -2449,6 +2478,17 @@ impl Op {
             | Op::Narrow { .. }
             | Op::Concat { .. }
             | Op::Contiguous { .. }
+            | Op::ConvWeightGradHost { .. }
+            // 2D 畳み込み族（イシュー #3080・決定記録 §21・§23）。`Conv2d`／
+            // `ConvTranspose2d`／`Unfold`／`Fold` は `replay_op`（公開 `Var`
+            // メソッドへの委譲）と `build_cgrads`（unfold／fold＋rank 2
+            // strict matmul の合成）が対応済み。低精度 `Conv2d` は
+            // `validate_ancestors` が `compute_dtype` で明示拒否する。
+            // `Conv3d`／`ConvTranspose3d` は引き続き `false`（#3080(b)）。
+            | Op::Conv2d { .. }
+            | Op::ConvTranspose2d { .. }
+            | Op::Unfold { .. }
+            | Op::Fold { .. }
             | Op::Where { .. }
             | Op::BatchNorm { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
@@ -2544,12 +2584,8 @@ impl Op {
             | Op::Topk { .. }
             | Op::Interpolate { .. }
             | Op::Pad { .. }
-            | Op::Conv2d { .. }
-            | Op::ConvTranspose2d { .. }
             | Op::ConvTranspose3d { .. }
             | Op::MaxUnpool { .. }
-            | Op::Unfold { .. }
-            | Op::Fold { .. }
             | Op::LocalResponseNorm { .. }
             | Op::WeightNorm { .. }
             | Op::SpectralNorm { .. }
@@ -5154,6 +5190,31 @@ mod conv3d_op_tests {
         assert!(!op.is_checkpoint_eligible());
     }
 
+    /// イシュー #3080: 2D 畳み込み族は create_graph 対応（`true`）。3D 族は #3080(b) まで `false`。
+    #[test]
+    fn conv2d_family_supports_create_graph() {
+        let p = Conv2dParams::new([1, 1], [1, 1], [0, 0], [1, 1], 1).unwrap();
+        assert!(
+            Op::Conv2d {
+                input: NodeId(0),
+                weight: NodeId(1),
+                bias: None,
+                params: p.clone(),
+                compute_dtype: ScalarDType::F32,
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::ConvTranspose2d {
+                input: NodeId(0),
+                weight: NodeId(1),
+                bias: None,
+                params: p,
+            }
+            .supports_create_graph()
+        );
+    }
+
     #[test]
     fn conv3d_op_does_not_support_create_graph() {
         let op = Op::Conv3d {
@@ -5412,7 +5473,7 @@ mod typed_ops_accessor_tests {
 }
 
 /// `Op::Unfold`／`Op::Fold`（イシュー #2645）のメタ性質固定: checkpoint 対象外・create_graph replay
-/// 対象外・`for_each_input` が入力ノードのみを列挙する（`Op::Conv2d` と同じ最小・安全側の判断）。
+/// 対象（#3080）・`for_each_input` が入力ノードのみを列挙する（`Op::Conv2d` と同じ最小・安全側の判断）。
 #[cfg(test)]
 mod fold_unfold_op_tests {
     use super::*;
@@ -5434,7 +5495,8 @@ mod fold_unfold_op_tests {
             },
         ] {
             assert!(!op.is_checkpoint_eligible());
-            assert!(!op.supports_create_graph());
+            // イシュー #3080 で create_graph 対応済み（`Op::supports_create_graph`）。
+            assert!(op.supports_create_graph());
             let mut seen = Vec::new();
             op.for_each_input(|id| seen.push(id.0));
             assert_eq!(seen, vec![4]);

@@ -3498,13 +3498,14 @@ impl<'t> Var<'t> {
     ///
     /// **`weight`／`bias`（f32 master 値）・backward は [`Self::
     /// conv2d`] と完全に同一**: `Op::Conv2d` は
-    /// `is_checkpoint_eligible() == false`（常に実体化済み）かつ
-    /// `supports_create_graph() == false`（二階微分 replay 対象外）
-    /// のため、`TapeNode::low_precision`／`create_graph::
-    /// validate_ancestors` の対象外（[`Self::matmul_low_precision`]
-    /// と異なり `Op::MatMul` の checkpoint／replay 経路を持たない）。
-    /// `grad::vjp` の `Op::Conv2d` 分岐は `compute_dtype` を読まず
-    /// 常に f32 backward を行う。
+    /// `is_checkpoint_eligible() == false`（常に実体化済み）で
+    /// `TapeNode::low_precision` も立てないが、`compute_dtype`
+    /// （`F16`／`Bf16`）を記録する。`supports_create_graph() == true`
+    /// （イシュー #3080）のため、`create_graph::validate_ancestors` が
+    /// `compute_dtype != F32` の `Op::Conv2d` を `Err(Backward)` で
+    /// 明示拒否する（子テープへ精度情報を持たず静かに f32 再生される
+    /// のを防ぐ fail-closed）。`grad::vjp` の `Op::Conv2d` 分岐は
+    /// `compute_dtype` を読まず常に f32 backward を行う。
     #[allow(clippy::too_many_arguments)] // Var::conv2d と同じ理由（PyTorch nn.Conv2d の全引数＋dtype を受理する必要があるため）。
     pub(crate) fn conv2d_low_precision(
         &self,

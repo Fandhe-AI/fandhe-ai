@@ -19,8 +19,8 @@
 //!
 //! **数値契約**: `unfold` は純コピー（bit 一致）。`fold` は重なる窓の加算を `f64` アキュムレータで行い
 //! 1 回だけ `f32` へ downcast する（`col2im` の契約。PyTorch は f32 累積のため、重なる窓では bit 一致
-//! ではなく統一複合判定で検証する）。高階微分（`create_graph`）・activation checkpoint・低精度経路は
-//! 対象外。
+//! ではなく統一複合判定で検証する）。activation checkpoint・低精度経路は対象外。高階微分（`create_graph`）は
+//! イシュー #3080 で対応済み（`create_graph/conv.rs`・決定記録 §23）。
 //!
 //! **PyTorch との意図的な差分**: バッチなし入力（`[C,H,W]`／`[K,L]`）・`torch.Tensor.unfold`（次元方向の
 //! スライディング窓。別演算）は対象外。引数順は crate 内の `conv2d` 系（`stride, padding, dilation`）に
