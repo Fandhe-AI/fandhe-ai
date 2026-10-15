@@ -487,6 +487,13 @@ pub(super) enum LayerSpec {
         padding: [usize; 2],
         dilation: [usize; 2],
     },
+    /// イシュー #3045。無パラメータ層（`local_response_norm` kind）。
+    LocalResponseNorm {
+        size: usize,
+        alpha: f32,
+        beta: f32,
+        k: f32,
+    },
     /// 保存対象外の層（`add_module` の利用者定義層と、manifest スキーマ未対応の組み込み層。
     /// `kind` はエラー文言で読む）。
     Unsupported {
@@ -2015,8 +2022,8 @@ impl Sequential {
     /// （rank 3 以上）で、チャネル軸方向の局所応答正規化を行う。無状態層で学習可能パラメータを持たず、
     /// `size > C` も受理する。不正引数（`size == 0`・非有限な `alpha`／`beta`／`k`）は
     /// `LocalResponseNorm::new` の検査で `Err` になり panic しない。入力 rank が不正な場合は forward 時に `Err`。
-    /// 常駐経路は未実測のため `Unsupported`（fail-closed。決定記録 §5）。`save_model` は後続 issue
-    /// まで `UnsupportedModel`、ONNX export は `UnsupportedLayer`。AMP 低精度は無視して f32 で計算する。
+    /// 常駐経路は未実測のため `Unsupported`（fail-closed。決定記録 §5）。kind `local_response_norm` として
+    /// `save_model` で保存・復元できる（イシュー #3045）。ONNX export は `UnsupportedLayer`。AMP 低精度は無視して f32 で計算する。
     ///
     /// ```
     /// use fandhe_ai::compat::Sequential;
@@ -2034,8 +2041,11 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         let layer = LocalResponseNorm::new(size, alpha, beta, k)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported {
-            kind: "local_response_norm",
+        self.specs.push(LayerSpec::LocalResponseNorm {
+            size,
+            alpha,
+            beta,
+            k,
         });
         Ok(self)
     }

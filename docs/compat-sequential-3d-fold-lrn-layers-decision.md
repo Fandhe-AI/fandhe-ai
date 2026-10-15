@@ -161,3 +161,9 @@ Sequential 保存は `format_version: 2` 据え置き。新 kind を足しても
 - 常駐経路は §5 のとおり拒否する。`contains_resident_unsupported_layer` に `Module::as_local_response_norm`（#3043）を追加し、3 入口（`init_device_param_store`／`forward_resident`／`predict_resident`）が `BackendError::Unsupported` を返す。`LayerSpec::Unsupported` では variant 判定ができないため、#3040 と同じ型付きフック方式を採った。学習経路は無パラメータ層として新規結線不要。
 - 保留ガード `LrnWeightReparamHoldDoctestGuard` は `add_local_response_norm` の 1 名分のみ反転した（トレイト impl と UFCS 呼び出しから削除）。`add_weight_norm`／`add_spectral_norm`・`Tape`／`Tensor<f32>` の同名メソッド・モジュール・型の否定は維持。`api_surface.rs` に承認シグネチャの正ガードと workspace `fn` 宣言位置の固定を追加した。
 - 対象外: 保存対応（`-c`）・`add_weight_norm`／`add_spectral_norm`（#3046・#3047）・`supports_forward_host` 有効化・`nn::LocalResponseNorm` 層型名の facade 公開（#3022）・実機 parity（#3171・#3172。未実測）。依存・tolerance・baseline・`docs/spec` は不変。既存本文は書き換えていない。
+
+## 24. #3045 実施記録（LocalResponseNorm の保存対応と実機 parity テスト）
+
+- `LayerSpec::LocalResponseNorm` の実 variant を追加し、`save_model`／`load_model` で kind `local_response_norm` を往復できるようにした（§3 のスキーマ。`size`・`alpha`・`beta`・`k` の 4 キー）。意味検査は `add_local_response_norm` に委ねる。§23 末尾の保存対応（`-c`）の申し送りは本節で解消済み。
+- `format_version` は 2 のまま（旧リーダーは未知 kind を `UnsupportedModel` で拒否）。allowlist は 65 → 66 種。ONNX export は `UnsupportedLayer`、常駐経路は `Unsupported` のまま。
+- 層経路の CUDA／Metal parity を `#[ignore]` で追加（未実測。#3171・#3172。`docs/perf/logs/compat-sequential-local-response-norm-3045/README.md`）。依存・tolerance・baseline・`docs/spec` は不変。

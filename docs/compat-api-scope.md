@@ -2754,3 +2754,5 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 **適用記録（イシュー #3041・親 #3018。Fold／Unfold の保存対応）**: 5.1 行 14 の保存（`unfold`／`fold` kind）に対応した（公開 API の追加なし・既存シグネチャ不変・`format_version` 2 据え置き）。ONNX export は `UnsupportedLayer` のまま。層経路の実機 parity は `#[ignore]` で追加済み・未実測（#3171・#3172）。
 
 **適用記録（イシュー #3044・親 #3018。LocalResponseNorm の `Sequential::add_local_response_norm` 公開）**: 行 15 の層化として `Sequential::add_local_response_norm(size, alpha, beta, k)` を `compat-sequential-3d-fold-lrn-layers-decision.md` §3 の形で公開した（追加のみ・既存シグネチャ不変。新規承認ではなく 2026-10-11 の所有者判断 D-A に基づく）。保存は `LayerSpec::Unsupported` により `UnsupportedModel` で fail-closed（実 variant 化は後続 `-c`）、常駐経路は `Unsupported`、ONNX export は `UnsupportedLayer`。保留ガード `LrnWeightReparamHoldDoctestGuard` は `add_local_response_norm` の分のみ反転し、`add_weight_norm`／`add_spectral_norm` の保留は維持した。依存・tolerance・baseline・`docs/spec` は不変。実機 parity は未実測。
+
+**適用記録（イシュー #3045・親 #3018。LocalResponseNorm の保存対応）**: 5.1 行 15 の層化のうち保存（`local_response_norm` kind）に対応した（公開 API の追加なし・既存シグネチャ不変・`format_version` 2 据え置き）。ONNX export は `UnsupportedLayer` のまま。層経路の実機 parity は `#[ignore]` で追加済み・未実測（#3171・#3172）。

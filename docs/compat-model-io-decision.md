@@ -1651,3 +1651,11 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - params は固定スキーマでキー集合の完全一致・非負整数のみ受理する（欠落・余分なキー・負値・小数・型違い・`u64` 超過は `Manifest`）。0 次元・`2*padding` オーバーフロー・`output_size` の 0 は `add_*`（`Unfold::new`／`Fold::new`）に委ね `ModelIoError::Autodiff` になる。
 - kind allowlist は 63 → 65 種になる。`format_version` は 2 のまま。旧リーダーは未知 kind を `UnsupportedModel` で fail-closed に拒否する。
 - ONNX export は `UnsupportedLayer` のまま。層経路の実機 parity は `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-fold-unfold-3041/README.md`）。tolerance・baseline・依存は不変。
+
+## 追補（イシュー #3045）: local_response_norm の保存・復元
+
+- 対象は `Sequential::add_local_response_norm`。kind は `local_response_norm` の 1 種で、無パラメータ層（parameter・buffer なし）。
+- params は `size`（非負整数）・`alpha`・`beta`・`k`（f32 の正準形。`Json::Real` のみ受理）の 4 キーの固定スキーマで、キー集合の完全一致を要求する。欠落・余分なキー・負値・小数・型違い・非正準表記・`u64` 超過・f32 範囲外は `Manifest`。`size == 0` は `add_local_response_norm`（`LocalResponseNorm::new`）に委ね `ModelIoError::Autodiff`。保存側は非有限 f32 を `spec_f32_fields_are_finite` で拒否する。
+- `size` は窓のクリップ幅にのみ使われ、確保サイズは入力テンソル形状で決まる（`size` に比例した確保なし。`nn/lrn.rs`・`lrn_ops.rs` で確認）。
+- kind allowlist は 65 → 66 種になる。`format_version` は 2 のまま。旧リーダーは未知 kind を `UnsupportedModel` で fail-closed に拒否する。
+- ONNX export は `UnsupportedLayer` のまま。層経路の実機 parity は `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-local-response-norm-3045/README.md`）。tolerance・baseline・依存は不変。
