@@ -40015,8 +40015,8 @@ fn workspace_declares_parametrize_linear_fn_names_only_in_approved_locations() {
         // #3049: Conv 6 層の実体は `impl_conv_reparam!` マクロ 1 箇所（6 層で同一コードを複製しない）。
         "autodiff/src/nn/conv.rs::parametrize_weight_norm",
         "autodiff/src/nn/conv.rs::parametrize_spectral_norm",
-        "facade/src/compat/sequential.rs::impl Sequential::parametrize_weight_norm",
-        "facade/src/compat/sequential.rs::impl Sequential::parametrize_spectral_norm",
+        "facade/src/compat/sequential.rs::parametrize_weight_norm",
+        "facade/src/compat/sequential.rs::parametrize_spectral_norm",
     ]
     .iter()
     .map(|k| (k.to_string(), 1usize))
