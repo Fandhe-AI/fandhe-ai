@@ -39,6 +39,7 @@ use crate::nn::flatten::Flatten;
 use crate::nn::fold::{Fold, Unfold};
 use crate::nn::identity::Identity;
 use crate::nn::linear::Linear;
+use crate::nn::lrn::LocalResponseNorm;
 use crate::nn::norm::{LayerNorm, RmsNorm};
 use crate::nn::normalization::{GroupNorm, InstanceNorm, group_norm_forward_host};
 use crate::nn::padding::ZeroPad2d;
@@ -348,6 +349,11 @@ pub trait Module {
 
     /// [`Module::as_unfold`] の `Fold` 版（イシュー #3039）。既定 `None`。
     fn as_fold(&self) -> Option<&Fold> {
+        None
+    }
+
+    /// [`Module::as_unfold`] の `LocalResponseNorm` 版（イシュー #3043）。既定 `None`。
+    fn as_local_response_norm(&self) -> Option<&LocalResponseNorm> {
         None
     }
 
@@ -2012,6 +2018,22 @@ impl Module for Fold {
     }
 
     fn as_fold(&self) -> Option<&Fold> {
+        Some(self)
+    }
+}
+
+/// `LocalResponseNorm::forward` への委譲（イシュー #3043。[`Unfold`] と同型）。tape 経路との
+/// bit 一致を未検証の host 経路を作らないため `supports_forward_host` は `false`。
+impl Module for LocalResponseNorm {
+    fn forward<'t>(&self, _tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        LocalResponseNorm::forward(self, input)
+    }
+
+    fn supports_forward_host(&self) -> bool {
+        false
+    }
+
+    fn as_local_response_norm(&self) -> Option<&LocalResponseNorm> {
         Some(self)
     }
 }
