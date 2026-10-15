@@ -290,7 +290,7 @@ impl Tape {
     /// 4〜7 のいずれかで失敗した場合、`child` は空のまま残る（4 の事前検査により
     /// `child` の空性が確認済みであること、6 が `build_mirror`／`build_cgrads` より前に
     /// 走ることに加え、`build_mirror`／`build_cgrads` の途中失敗では積んだノードを
-    /// [`Tape::rollback_to`] で取り除く）。
+    /// `Tape::rollback_to` で取り除く）。
     pub fn backward_create_graph<'c>(
         &self,
         loss: &Var<'_>,
