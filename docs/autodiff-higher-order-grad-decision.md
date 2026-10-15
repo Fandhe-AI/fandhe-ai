@@ -821,11 +821,38 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文。
 
-## 22. 実装記録（#3079・`BatchNorm` の create_graph 対応。親 #3075）
+## 22. 実装記録（#3081: Gelu・GeluTanh・Erf の create_graph 対応）
+
+§21.5 の決定に従い実装した。コードは `crates/autodiff/src/create_graph.rs`（`scalar_unary_replayable`・`build_cgrads` の `Op::ScalarUnary` 腕）。
+
+### 22.1 実装形
+
+- `scalar_unary_replayable` に `Gelu`・`GeluTanh`・`Erf` を追加した。`Erf` は `Gelu` の `Φ(x)` を子テープへ `ScalarUnary(Erf)` として記録するため、孫テープでの再生（閉包性、§21.1 (4)）に必要で同時に対象化した。`replay_op` は `Var::scalar_unary` への委譲で全 variant に対応済みのため変更していない。
+- `Erf`: `g ⊙ (2/√π)·exp(-x²)`（`erf_grad` と同じ順序）。
+- `Gelu`: `g ⊙ (Φ(x) + x·φ(x))`。`Φ = 0.5(1 + erf(x/√2))`、`φ = exp(-x²/2)/√(2π)`（`gelu_erf_grad` と同順）。子テープに積む Op は `Mul`・`Add`・`Exp`・`ScalarUnary(Erf)` のみ。
+- `GeluTanh`: `0.5(1+tanh u) + 0.5·x·sech²(u)·u'`。飽和判定（`1 - tanh² == 0`）は 1 階 `gelu_tanh_grad` と同じ f32 演算でホスト側マスク化する。さらに `where_cond` の死に枝へも 0 の余接が流れ、後続 `Mul` の VJP が `0·相方` を作る（相方が `inf` だと NaN が 2 階へ混入する）ため、飽和要素を 0 に置換した `x_safe` で滑らかな式を組み（double-where）、飽和要素では `limit`（厳密に 0 または 1）を選ぶ。
+- `Gelu` の裾（`x·x = inf`）は `exp(-inf) = 0` となり、2 階 backward でも `0·inf` が追跡ノードへ流れないことを回帰テストで確認した。追加の安全化は不要だった。
+
+### 22.2 検証
+
+- 有限差分（h=1e-3、点 `[-1.3, -0.4, 0.0, 0.7, 1.2]`）と REQ-2 統一複合判定で一致（tolerance は不変）。f32 の 1 階勾配を差分するためノイズが約 1e-4 あり、|x| が大きいと 2 階導関数が絶対 1e-5 を満たせないので、|x| ≥ 3 は f64 閉形式（Gelu: `φ(x)(2−x²)`）と突合した。
+- 近似 erf（A-S 7.1.26）を含む 1 階と解析式の φ との整合は、上記突合が REQ-2 内で通ることをもって確認した（不整合は出なかったため方式の見直しは不要。最大差の数値は未採取）。
+- 巨大入力（±1e20・±1e30・±3e38）で `cg.grad`・Hessian が有限（Hessian は `abs < 1e-6`）。
+- `first_order` は素の `backward` と bit 同一。孫テープでの再生は `functional_ops_jvp_tests` の `j2`・`double_vjp_feasibility` の `c2` に gelu・gelu_tanh・erf を追加して通した。
+
+### 22.3 fail-closed テストの差し替え
+
+`create_graph_rejects_unsupported_op_gelu` を廃止し、`create_graph_rejects_custom_downstream_of_gelu`（`Custom` 到達で `child.is_empty()`）と `create_graph_rejects_unsupported_scalar_unary_selu`（隣接 Op の拒否）へ置換した。`functional_ops_jvp_tests`・`double_vjp_feasibility` の gelu 拒否行は削除した（`selu` は残存）。
+
+### 22.4 変更していないもの
+
+1 階 `Tape::backward` の経路（`grad.rs`・スカラー評価・`tensor-core`）、`Op` payload、公開 API、依存、`unsafe`、tolerance・baseline、`docs/spec`、既存節の本文。
+
+## 23. 実装記録（#3079・`BatchNorm` の create_graph 対応。親 #3075）
 
 - 基準は `origin/main` `6d08419a`。方針は §21.1 (5)・§21.3（#3079 行）に従う。コードは `crates/autodiff/src/create_graph_norm.rs`（新規・非公開）と、`create_graph.rs` の `replay_op`／`build_cgrads` の薄い腕、`tape.rs::supports_create_graph`（`Op::BatchNorm` を `true`）。
 
-### 22.1 方式の割り当て（出力ごと）
+### 23.1 方式の割り当て（出力ごと）
 
 | 出力 | train | eval | 理由 |
 |---|---|---|---|
@@ -836,7 +863,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - V3 の値は `grad.rs::batch_norm_vjp_channels`（`pub(crate)` 化。本体・シグネチャは不変）を 1 回呼んで得る。値は 1 階と bit 同一。構造 `S` の上に `Op::Contiguous`（VJP が恒等で前方値に依存しない）を `push_eager` し、二階の微分は `S` を流れる。
 - `replay_op` は `fixed_stats` payload をそのまま使い、`Var::batch_norm`／`batch_norm_infer` へ委譲する（`Op` の拡張なし）。
 
-### 22.2 構造（S1。スケール付き合成）
+### 23.2 構造（S1。スケール付き合成）
 
 チャネル軸を前に出した行 `[C, M]`（`Reshape`・`Permute`・`Contiguous`）で組む。ホスト定数はすべて 2 のべき乗で、乗除算は（非正規化域を除き）厳密。
 
@@ -847,23 +874,29 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 5. eval の x̂（dw 用）: `q = x/p − mean/p`（`p` は `max(|x|,|mean|)` 以上。`|q|≤2`）と `rstd = 仮数·2^k` の分解。dx は `dx̂·rstd`（V1）。
 - 積む Op は `Mul`・`Sub`・`Add`・`Mean`・`Sum`・`Narrow`・`Reshape`・`Permute`・`Contiguous`・`ScalarUnary(Sqrt)`・`ScalarBinary(Div)` のみで、すべて `supports_create_graph == true`（閉包性。孫テープ再生で閉じる）。
 
-### 22.3 running stats
+### 23.3 running stats
 
 `replay_op`・`build_cgrads` は `Var::` プリミティブとホスト関数だけを呼び、`nn::BatchNorm*` の buffer・`num_batches_tracked` へ触れる経路がない。子テープ構築・二階 backward・孫テープ再生（`jvp_create_graph`）で二重更新されないことを統合テストで固定した。
 
-### 22.4 fail-closed
+### 23.4 fail-closed
 
 - 空テンソル（`n`／`c`／`spatial` のいずれかが 0）の BatchNorm は `validate_ancestors` で子テープへ書く前に拒否する。
 - 対象外のまま残る Op（例: `local_response_norm`）は従来どおり入口で拒否され、子テープは無変更。
 - 1 階が有限でない入力（`eps=0` かつ分散 0 など）は 1 階と同様に非有限になる（特別扱いしない）。S2 は実装していない。
 
-### 22.5 テスト（`crates/autodiff/tests/create_graph.rs`・`create_graph_norm.rs` 単体）
+### 23.5 テスト（`crates/autodiff/tests/create_graph.rs`・`create_graph_norm.rs` 単体）
 
 - Hessian: x（rank 2 の有限差分。rank 2／4 の独立合成〈`mean_dims`・`sub`・`mul`・`sqrt`・`div`〉との突合を train／eval・affine の有無で）・w・b の有限差分・x×w の混合二階。rank 4 の有限差分は f32 勾配の丸め雑音が Hessian 成分に対し無視できないため行わず、独立合成との突合に置き換えた（判定は緩めていない）。
 - 1 階一致（`cg.grad(x|w|b)` が `Tape::backward` と REQ-2 判定で一致・`first_order()` は bit 同一）、running stats 不変、閉包性（孫テープへの再生）、`local_response_norm` の fail-closed、空入力の拒否。
 - 3 段（1 階・`cg.grad`・孫テープ再生）の回帰ベクトル: `x=1e20` 系・中心化の丸め・小スケール・定数・全ゼロ・`[3e38,-3e38]`・巨大な上流勾配（交互符号・同符号）・eval の逆符号大値。
 - 単体: 2 のべき乗の選択規則、`mul_pow2_per_row` の大指数、チャネル行変換の往復。
 
-### 22.6 変えていないもの
+### 23.5a レビュー指摘の是正（Codex P1 × 2）
+
+- 前置スケール指数 `p` を `[-64, 64]` に制限した（`POW2_BAL`。train／eval 共通）。`p=127` のままだと `x=mean=3e38`・`var=0` で逆伝播中に `2^135` 級の倍率が `inv_p` へ届く前に掛かり二階勾配が overflow した。制限後は各段の累積倍率が `rstd·2^64` 以下に収まる。`|p|<=64` の入力は従来と bit 同一。
+- 空入力の判定を形状の積から `shape.contains(&0)` へ変更した（`[usize::MAX, 2, 0]` で積が overflow して panic するため）。
+- テスト: `batch_norm_create_graph_huge_constant_input_second_order_is_finite`・`batch_norm_create_graph_rejects_overflowing_empty_shape`・overflow 回帰ベクトルへ `const-3e38-*` を追加。
+
+### 23.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。

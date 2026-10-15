@@ -1,6 +1,6 @@
 //! `Op::BatchNorm` の create_graph（二階微分）用 VJP 構築
 //! （イシュー #3079・親 #3075。方針は `docs/autodiff-higher-order-grad-decision.md`
-//! §21.1 (5)・§21.3、実装記録は §22）。
+//! §21.1 (5)・§21.3、実装記録は §23）。
 //!
 //! **役割**: `create_graph.rs::build_cgrads` の `Op::BatchNorm` 腕から呼ばれ、
 //! 1 階 VJP（`grad.rs::batch_norm_vjp_channels`）の結果を子テープ上の
@@ -38,6 +38,13 @@ const POW2_MIN_EXP: i32 = -126;
 const POW2_MAX_EXP: i32 = 127;
 /// `mul_pow2_per_row` が 1 段で掛ける指数の絶対値の上限（`2^100` は f32 で有限）。
 const POW2_CHUNK: i32 = 100;
+/// 入力側の前置スケール `p` の指数を `[-BAL, BAL]` に制限する値。`p` をそのまま
+/// （最大 127）使うと、逆伝播で `2^(k+p)` 級の倍率が `inv_p`（forward 先頭）へ
+/// 到達する前に先に掛かり、巨大定数入力（`x=mean=3e38`・`var=0` 等）で二階勾配が
+/// overflow する（forward 値・最終倍率 `rstd` は有限）。制限すると逆伝播の各段の
+/// 累積倍率が `rstd·2^BAL` 以下に収まる（決定記録 §23 の有限性契約）。`|p|<=BAL`
+/// の入力では従来と bit 同一。
+const POW2_BAL: i32 = 64;
 
 /// `max_abs` 以上の最小の 2 のべき乗の指数を `[-126, 127]` に clamp して返す。
 /// 0・NaN は 0（スケール 1）、`inf` は 127。
@@ -193,7 +200,9 @@ pub(crate) fn scaled_row_xhat<'c>(
     let xv = host_values(child, x_rows)?;
     let p_exp: Vec<i32> = row_abs_max(&xv, c, m)
         .iter()
-        .map(|&(mx, inf)| if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) })
+        .map(|&(mx, inf)| {
+            (if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) }).clamp(-POW2_BAL, POW2_BAL)
+        })
         .collect();
     let inv_p: Vec<f32> = p_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
     let xs = x_rows.mul(&const_col(child, &inv_p)?)?;
@@ -265,6 +274,7 @@ fn eval_row_xhat<'c>(
             } else {
                 pow2_ceil_exp(mx.max((mu as f64).abs()))
             }
+            .clamp(-POW2_BAL, POW2_BAL)
         })
         .collect();
     let inv_p: Vec<f32> = p_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
