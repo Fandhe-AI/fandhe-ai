@@ -38,7 +38,7 @@ use crate::grad::{conv_transpose2d_with_fallback, conv2d_with_fallback, conv3d_w
 use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, checked_uniform_init, derive_seed};
 use crate::nn::weight_reparam::{
     WeightReparam, build_spectral_norm_state, build_weight_norm_state, commit_spectral_state,
-    effective_weight_var, reparam_weight_keys, set_reparam_parameter,
+    effective_weight_var, reparam_weight_keys, restore_spectral_vectors, set_reparam_parameter,
 };
 use crate::tape::Tape;
 use crate::var::Var;
@@ -3147,6 +3147,21 @@ macro_rules! impl_conv_reparam {
                     seed,
                 )?);
                 Ok(())
+            }
+
+            /// spectral_norm 適用済みの層の `u`／`v` を保存済みの値へ bit のまま復元する（イシュー
+            /// #3050。`compat::load_model` 専用。再正規化しない）。未適用は `InvalidArgument`、
+            /// 長さ・有限性の違反は型付きエラーで、失敗時は状態不変。
+            pub fn restore_spectral_norm_vectors(
+                &mut self,
+                u: &[f32],
+                v: &[f32],
+            ) -> Result<(), AutodiffError> {
+                let state = match &self.reparam {
+                    Some(WeightReparam::SpectralNorm { state }) => Some(state),
+                    _ => None,
+                };
+                restore_spectral_vectors(state, &self.weight, u, v, stringify!($layer))
             }
 
             /// [`Self::parametrize_weight_norm`] の `self` 消費版（ビルダー用）。
