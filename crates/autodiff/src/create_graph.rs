@@ -226,6 +226,13 @@ impl<'c> CreateGraphResult<'c> {
         Ok(self.mirror.get(parent_var.node_id().0).copied().flatten())
     }
 
+    /// 元テープの `NodeId.0` を添字とする子テープ上の写し一覧（祖先ノードのみ `Some`）。
+    /// `functional_ops::jvp_create_graph` が 2 段の写し（親→子→孫）を合成するために使う
+    /// crate 内部アクセサで、公開面は増えない（#3067・設計記録 §31.2）。
+    pub(crate) fn mirror(&self) -> &[Option<Var<'c>>] {
+        &self.mirror
+    }
+
     fn check(&self, parent_var: &Var<'_>) -> Result<(), AutodiffError> {
         if parent_var.tape_id() != self.parent_id || parent_var.tape_epoch() != self.parent_epoch {
             return Err(AutodiffError::TapeMismatch);

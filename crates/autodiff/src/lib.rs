@@ -380,8 +380,11 @@ pub use backward::Gradients;
 // は `fandhe_ai::CreateGraphResult` として再エクスポート済み（#2545。
 // 同 doc §17.2・§19。承認はルート #2499 の一括承認）。
 pub use create_graph::CreateGraphResult;
+// 微分可能な `jvp`（`jvp_create_graph`）の戻り値型（イシュー #3067・設計記録
+// `docs/autodiff-functional-transforms-design.md` §31.1）。facade への公開は #3068 で扱う。
 pub use custom::CustomFunction;
 pub use error::AutodiffError;
+pub use functional_ops::JvpCreateGraphResult;
 pub use hooks::HookHandle;
 pub use tape::{NodeId, Tape, TapeId};
 // `manual_seed`（イシュー #1724）・`randn`／`rand`／`randint`（イシュー

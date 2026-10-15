@@ -654,3 +654,13 @@ pub fn jvp_create_graph<'g>(&self, output: &Var<'_>, input: &Var<'_>, tangent: &
 - 所有者へ戻す論点: 形は 31.1 で一意に決まっており、承認を要する論点はない。参考として 1 件だけ列挙する。2 枚のテープを明示で渡させる使い勝手について、補助ヘルパー（`tape.child()` 等）を足すかどうかは本記録では足さない（J-b の明示引数と同じ形を保つため）。
 - スコープ外: 複数入力の微分可能版、`VarF64`・f16・`TapeF64` の微分可能な `jvp`（#3074・#3021 項 3）、`supports_create_graph` の対象 Op 拡張（#3075）、実機 parity（#3168・#3169）。
 - 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
+
+### 31.9 実装記録（#3067）
+
+- **追加した API**: `fandhe_ai_autodiff::functional_ops::{JvpCreateGraphResult, jvp_create_graph}`（`functional_ops.rs`）。crate ルートの再エクスポートは `JvpCreateGraphResult` のみ。`create_graph.rs` に `pub(crate) fn CreateGraphResult::mirror()` を足した（公開面は不変）。新しい `Op`・`BackendOps`・VJP・`AutodiffError` variant・依存・`unsafe` はない。facade 委譲は #3068。
+- **処理順**: §31.3 のとおり。入口検査 1〜4 は `jvp` と同じで、5（テープ関係の事前検査）をゼロ返却より先に行う。前段は `double_vjp_front` を直接呼び、`cg1.grad(input)` の判定（`J ≡ 0` なら全ゼロの追跡なし葉を返す）を本関数内に置いた。`jvp`／`jacfwd`／`jvp_multi` の操作列は変えていない。
+- **写しの合成**: `cg1.mirror()` の各 `Some(cv)` のうち `cv.requires_grad()` のものだけ `cg2.child_var(&cv)` で孫テープへ写す。追跡なしの親ノードの子テープ上の写しは `var_no_grad` の葉で、`child_var` が `Err(GradientTrackingDisabled)` を返すため、この確認を省くと正しい呼び出しが失敗する。
+- **テスト**: `functional_ops_jvp_tests.rs` の `c1`〜`c9`。C1 閉形式、C2 `tanh(Wx)`・`tanh(x)⊙x` の f64 中心差分、C3 `hvp` との一致、C4 値が `jvp` と REQ-2 一致・2 段目余接勾配が `jvp` と bit 同一（検査用に `#[cfg(test)]` の `stage2_cotangent_grad_host`。公開面には出さない）、C5 写しの `None`／`Some`・`child_var` の誤用、C6 入口検査の順序とテープ無変更、C7 ゼロ経路・ノード残り（§31.4 の表。`J ≡ 0` 行は別の追跡葉に依存する出力で親 +2・child 非空・grand +1・全ゼロを実測確認）、C8 Op の族ごとの 2 段目、C9 決定性。
+- **2 段目で写せた Op**: bias パターンの add・matmul・`where_cond`・relu・clamp・abs・`log`・`sin`・`exp`・`sigmoid`・`pow_scalar`・sub・div・pow・reshape・transpose・narrow・cat。2 段目だけで拒否される Op は、今回構成した例では見つからなかった（現在の対象 Op では 2 段目の拒否は到達しない）。
+- **未検証**: `DeviceMismatch` は `test_support` に別デバイスを返す `BackendOps` がないため単体テストで検証していない（実装は `backward_create_graph` と同じ検査）。
+- **#3068 への申し送り**: facade `api_surface.rs` の `CreateGraphResult` 再エクスポート検査は `pub use` 行に `"CreateGraphResult"` が部分文字列として含まれるかで判定しており、`pub use fandhe_ai_autodiff::JvpCreateGraphResult;` も引っかかる。完全一致化するか承認形を別に足す必要がある。`jvp_create_graph` を宣言インベントリへ足すと `autodiff/src/functional_ops.rs` の 1 件が数えられる（autodiff 側のテストに同名の `fn` は置いていない）。

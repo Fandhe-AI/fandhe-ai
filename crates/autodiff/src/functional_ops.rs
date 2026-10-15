@@ -31,6 +31,10 @@
 //! 入力ごとの `g_i` を子テープ上でスカラー和へ畳んで `child.backward` を 1 回だけ呼ぶ。facade の
 //! `Tape::jvp_multi` から 1 行委譲で呼ばれる。
 //!
+//! 微分可能な `jvp_create_graph`（イシュー #3067・設計記録 §31）は同じ前段に加え、2 段目の VJP を
+//! `child.backward_create_graph` で孫テープへ `Var` 演算として記録し、結果 `J·v` を追跡された `Var` で返す。
+//! facade への公開は #3068 で扱う（本モジュールは autodiff 内部と crate ルート再エクスポートまで）。
+//!
 //! **共通の契約**: `jvp_multi` 以外は単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。`vjp`／`hvp` の結果は
 //! 非微分のホスト値（`vmap` のみ同じテープ上の微分可能な `Var`）。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
 //! の挙動をそのまま伝播する。
@@ -38,7 +42,7 @@
 use crate::create_graph::CreateGraphResult;
 use crate::error::AutodiffError;
 use crate::jacobian_ops::{FlatElements, check_on_tape, checked_numel, copy_grad_row};
-use crate::tape::Tape;
+use crate::tape::{Tape, TapeId};
 use crate::var::Var;
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
@@ -521,4 +525,173 @@ pub fn jvp_multi(
         }
     }
     Tensor::new(data, &out_shape).map_err(AutodiffError::Shape)
+}
+/// [`jvp_create_graph`] の結果（イシュー #3067・設計記録 §31.1）。孫テープ上の追跡された `J·v` と、
+/// 元テープの `Var` から孫テープ上の写し（親→子→孫の 2 段合成）を引く対応表を持つ。
+/// 公開型に出るライフタイムは孫テープの `'g` だけ（1 段目の子テープは関数内に閉じる）。
+#[derive(Debug)]
+pub struct JvpCreateGraphResult<'g> {
+    output: Var<'g>,
+    parent_id: TapeId,
+    parent_epoch: u64,
+    /// 親 `NodeId.0` を添字とする孫テープ上の写し（`J ≡ 0` 等のゼロ経路では空）。
+    mirror: Vec<Option<Var<'g>>>,
+    /// テスト専用: 2 段目の余接葉 `u` の 1 階勾配（`jvp` との bit 同一性検査用。公開しない）。
+    #[cfg(test)]
+    stage2_cotangent_grad: Option<Tensor<f32>>,
+}
+
+impl<'g> JvpCreateGraphResult<'g> {
+    /// `J·v`（shape は元の `output` と同じ）を孫テープ上の `Var` として返す。
+    /// 写しの入力へ `grandchild.backward` で微分できる。出力が入力に依存しない場合
+    /// （線形・`var_no_grad` の係数のみ等）は追跡なし（`requires_grad() == false`）になりうる。
+    pub fn output(&self) -> Var<'g> {
+        self.output
+    }
+
+    /// 元テープ上の `parent_var` の孫テープ上の写しを返す。`output()` を `grandchild.backward` で
+    /// 微分した勾配はこの写しをキーに読む（元の `x` とは直接つながらない。§31.2）。
+    ///
+    /// - テープ・世代の不一致 → `Err(TapeMismatch)`、追跡なし → `Err(GradientTrackingDisabled)`
+    ///   （[`CreateGraphResult::child_var`] と同じ検査順）。
+    /// - `Ok(None)` は `J·v` がその入力に恒等的に依存しない（勾配ゼロ）ことを意味する。
+    pub fn child_var(&self, parent_var: &Var<'_>) -> Result<Option<Var<'g>>, AutodiffError> {
+        if parent_var.tape_id() != self.parent_id || parent_var.tape_epoch() != self.parent_epoch {
+            return Err(AutodiffError::TapeMismatch);
+        }
+        if !parent_var.requires_grad() {
+            return Err(AutodiffError::GradientTrackingDisabled);
+        }
+        Ok(self.mirror.get(parent_var.node_id().0).copied().flatten())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stage2_cotangent_grad_host(&self) -> Option<&Tensor<f32>> {
+        self.stage2_cotangent_grad.as_ref()
+    }
+}
+
+/// 全ゼロの `J·v` を孫テープの追跡なし葉として返すゼロ経路（写しは空）。
+fn zero_jvp_result<'g>(
+    tape: &Tape,
+    grandchild: &'g Tape,
+    out_shape: &[usize],
+) -> Result<JvpCreateGraphResult<'g>, AutodiffError> {
+    let zeros = Tensor::zeros(out_shape).map_err(AutodiffError::Shape)?;
+    Ok(JvpCreateGraphResult {
+        output: grandchild.var_no_grad(&zeros),
+        parent_id: tape.id,
+        parent_epoch: tape.epoch(),
+        mirror: Vec::new(),
+        #[cfg(test)]
+        stage2_cotangent_grad: None,
+    })
+}
+
+/// 追跡された `Var` を返す微分可能な `jvp`（イシュー #3067・設計記録 §31.2〜§31.4・§31.6）。
+/// 前段は [`jvp`] と同じ double-VJP 法で、2 段目の VJP だけ `child.backward_create_graph` で
+/// 孫テープ `grandchild` に記録する。結果 `J·v` は孫テープ上の `Var` で、元の入力への微分は
+/// [`JvpCreateGraphResult::child_var`] の写し（親→子→孫の 2 段合成）を通して得る。
+/// facade の `Tape::jvp_create_graph`（#3068）から 1 行委譲で呼ばれる予定。
+///
+/// 入口検査（ノードを足す前。順序固定）: 1〜4 は [`jvp`] と同じ（テープ所属・追跡あり入力・
+/// 接ベクトル shape・要素数）。5 は 3 本のテープ関係（`child`・`grandchild` は互いに別で `tape` とも別、
+/// 同デバイス、どちらも空）で、違反は `Err(Backward)`／`Err(DeviceMismatch)`。
+/// 6 は追跡なし `output`・要素数 0 のゼロ返却（親・`child` は無変更、`grandchild` に全ゼロの葉が 1 個）。
+/// [`jvp`] のゼロ経路は `child` を検査しないが、本関数は 5 をゼロ返却より先に行う。
+///
+/// 以降は [`jvp`] と同じ拒否（非対象 Op・rank 3 以上の `matmul`・checkpoint 等）が 1 段目に、
+/// `backward_create_graph` の既存検査が 2 段目に `Err(Backward)` で伝播する。親テープへは前段で
+/// ちょうど 2 ノードが残る。`J ≡ 0` は全ゼロの追跡なし葉を返す。非有限値は検査せず伝播する。
+/// f32 の [`Tape`] のみ（`VarF64`・f16・複数入力は対象外）。
+pub fn jvp_create_graph<'g>(
+    tape: &Tape,
+    output: &Var<'_>,
+    input: &Var<'_>,
+    tangent: &Tensor<f32>,
+    child: &Tape,
+    grandchild: &'g Tape,
+) -> Result<JvpCreateGraphResult<'g>, AutodiffError> {
+    check_on_tape(tape, output)?;
+    check_on_tape(tape, input)?;
+    if !input.requires_grad() {
+        return Err(AutodiffError::GradientTrackingDisabled);
+    }
+    let in_shape = input.shape();
+    if tangent.shape() != in_shape.as_slice() {
+        return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+            lhs: in_shape,
+            rhs: tangent.shape().to_vec(),
+        }));
+    }
+    let out_shape = output.shape();
+    let n = checked_numel(&in_shape)?;
+    let m = checked_numel(&out_shape)?;
+
+    if child.id == tape.id {
+        return Err(AutodiffError::Backward(
+            "jvp_create_graph: 子テープに親と同一の Tape は指定できない".into(),
+        ));
+    }
+    if grandchild.id == tape.id || grandchild.id == child.id {
+        return Err(AutodiffError::Backward(
+            "jvp_create_graph: 孫テープは親・子と異なる Tape である必要がある".into(),
+        ));
+    }
+    for other in [child, grandchild] {
+        if other.device() != tape.device() {
+            return Err(AutodiffError::DeviceMismatch {
+                requested: other.device(),
+                actual: tape.device(),
+            });
+        }
+    }
+    if !child.is_empty() || !grandchild.is_empty() {
+        return Err(AutodiffError::Backward(
+            "jvp_create_graph: 子テープ・孫テープは空である必要がある".into(),
+        ));
+    }
+    if n == 0 || m == 0 || !output.requires_grad() {
+        return zero_jvp_result(tape, grandchild, &out_shape);
+    }
+
+    let (cg1, cu) = double_vjp_front(tape, output, child)?;
+    let g = match cg1.grad(input)? {
+        Some(g) if g.requires_grad() => g,
+        _ => return zero_jvp_result(tape, grandchild, &out_shape),
+    };
+    let prod = g.mul(&child.var_no_grad(tangent))?;
+    let cg2 = child.backward_create_graph(&prod, grandchild)?;
+    let Some(r) = cg2.grad(&cu)? else {
+        return Err(AutodiffError::Backward(
+            "jvp_create_graph: 余接葉の 2 段目の勾配が存在しない（不変条件違反）".to_string(),
+        ));
+    };
+
+    // 追跡なしの親ノードの写しは `var_no_grad` の葉で `child_var` が Err になるため、追跡ありだけ合成する。
+    let mut mirror: Vec<Option<Var<'g>>> = vec![None; cg1.mirror().len()];
+    for (slot, cv) in mirror.iter_mut().zip(cg1.mirror()) {
+        if let Some(cv) = cv
+            && cv.requires_grad()
+        {
+            *slot = cg2.child_var(cv)?;
+        }
+    }
+
+    #[cfg(test)]
+    let stage2 = {
+        let mut data = vec![0.0f32; m];
+        if let Some(h) = cg2.first_order().get(&cu)? {
+            copy_grad_row(h, &mut data)?;
+        }
+        Tensor::new(data, &out_shape).map_err(AutodiffError::Shape)?
+    };
+    Ok(JvpCreateGraphResult {
+        output: r,
+        parent_id: tape.id,
+        parent_epoch: tape.epoch(),
+        mirror,
+        #[cfg(test)]
+        stage2_cotangent_grad: Some(stage2),
+    })
 }

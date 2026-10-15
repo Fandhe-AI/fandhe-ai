@@ -6,6 +6,7 @@
 //! `req2_close` 経由でのみ行い、閾値は直書きしない。
 //!
 //! `jvp`／`jacfwd` は #2956 で facade `Tape::jvp`／`Tape::jacfwd` として公開済みだが、本ファイルは
+//! 末尾の `c1`〜`c9` は微分可能な `jvp_create_graph`（イシュー #3067・設計記録 §31）の受入テスト。
 //! 内部実装の `#[cfg(test)]` 単体テストとして維持する（#2880 の `double_vjp_feasibility_tests` と同じ形）。テスト関数・ヘルパーの名前は
 //! `jvp`／`jacfwd` と完全一致させない（facade `api_surface` の宣言インベントリが
 //! `crates/*/src` 全体を走査するため）。入力はキンク（0・clamp 境界・タイ）から離す。
@@ -17,7 +18,7 @@ use fandhe_ai_tensor_core::{ScalarBinaryOp, ShapeError, Tensor};
 // REQ-2 判定・共通ヘルパーは #2880 の単体テストが `#[path]` で取り込んだ単一の定義元を共用する
 // （同一ファイルの二重取り込みは clippy::duplicate_mod になるため）。
 use crate::double_vjp_feasibility_tests::common;
-use crate::functional_ops::{jacfwd, jvp};
+use crate::functional_ops::{JvpCreateGraphResult, hvp, jacfwd, jvp, jvp_create_graph};
 use crate::jacobian_ops::jacobian;
 use crate::test_support::test_ops;
 use crate::{AutodiffError, CustomFunction, Tape, Var};
@@ -829,4 +830,440 @@ fn m6_multi_is_deterministic_and_does_not_mutate_existing_nodes() {
         a
     };
     assert_eq!(run(), run(), "複数入力 jvp が bit 一致しない");
+}
+// ------------------------------------------------------------ C1〜C9: 微分可能な jvp（#3067・§31）
+
+/// 別名ヘルパー（名前を `jvp_create_graph` と完全一致させない。api_surface のインベントリ対策）。
+/// 親・child・grandchild を呼び出し側が持ち、結果を返す。
+fn cg_jv<'g>(
+    tape: &Tape,
+    y: &Var<'_>,
+    x: &Var<'_>,
+    v: &Tensor<f32>,
+    child: &Tape,
+    grand: &'g Tape,
+) -> Result<JvpCreateGraphResult<'g>, AutodiffError> {
+    jvp_create_graph(tape, y, x, v, child, grand)
+}
+
+/// `build` の出力に対し、`jvp` と `jvp_create_graph` の値を REQ-2 判定で、2 段目の余接勾配を bit 同一で突合する。
+fn check_cg<F>(shape: &[usize], xv: Vec<f32>, ctx: &str, build: F)
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Built<'t>,
+{
+    let n: usize = shape.iter().product();
+    let vv = seq(n, 5.0);
+
+    let ta = new_tape();
+    let xa = ta.var(&t(xv.clone(), shape));
+    let ya = build(&ta, &xa).unwrap();
+    let child = new_tape();
+    let want = jvp(&ta, &ya, &xa, &t(vv.clone(), shape), &child)
+        .unwrap_or_else(|e| panic!("{ctx}: jvp 失敗: {e:?}"));
+
+    let tb = new_tape();
+    let xb = tb.var(&t(xv, shape));
+    let yb = build(&tb, &xb).unwrap();
+    let child = new_tape();
+    let grand = new_tape();
+    let res = cg_jv(&tb, &yb, &xb, &t(vv, shape), &child, &grand)
+        .unwrap_or_else(|e| panic!("{ctx}: jvp_create_graph 失敗: {e:?}"));
+    let out = res.output();
+    assert_eq!(out.shape(), want.shape(), "{ctx}: shape");
+    let want_h = want.host_slice().into_owned();
+    let expected: Vec<f64> = want_h.iter().map(|&w| f64::from(w)).collect();
+    common::assert_all_req2_close(&out.value().host_slice(), &expected, ctx);
+    match res.stage2_cotangent_grad_host() {
+        Some(h) => {
+            let a: Vec<u32> = h.host_slice().iter().map(|f| f.to_bits()).collect();
+            let b: Vec<u32> = want_h.iter().map(|f| f.to_bits()).collect();
+            assert_eq!(a, b, "{ctx}: 2 段目の余接勾配が jvp と bit 同一でない");
+        }
+        None => assert!(want_h.iter().all(|&w| w == 0.0), "{ctx}: ゼロ経路"),
+    }
+}
+
+#[test]
+fn c1_closed_form_value_and_gradient() {
+    let xv = seq(6, 1.0);
+    let vv = seq(6, 5.0);
+    let tape = new_tape();
+    let x = tape.var(&t(xv.clone(), &[2, 3]));
+    let y = x.mul(&x).unwrap();
+    let (child, grand) = (new_tape(), new_tape());
+    let res = cg_jv(&tape, &y, &x, &t(vv.clone(), &[2, 3]), &child, &grand).unwrap();
+    let e: Vec<f64> = (0..6)
+        .map(|i| 2.0 * f64::from(xv[i]) * f64::from(vv[i]))
+        .collect();
+    common::assert_all_req2_close(&res.output().value().host_slice(), &e, "value");
+    let loss = res.output().sum(None).unwrap();
+    let grads = grand.backward(&loss).unwrap();
+    let gx = res.child_var(&x).unwrap().expect("x の写しが存在する");
+    let g = grads.get(&gx).unwrap().expect("勾配が存在する");
+    let e: Vec<f64> = (0..6).map(|i| 2.0 * f64::from(vv[i])).collect();
+    common::assert_all_req2_close(&g.host_slice(), &e, "d/dx sum(J v) = 2v");
+}
+
+/// `F(W, x) = Σ_i (1 - tanh²(W x)_i) (W v)_i` の f64 値（`y = tanh(W x)` の `Σ J v`）。
+fn f_tanh_wx(w: &[f64], x: &[f64], v: &[f64]) -> f64 {
+    (0..2)
+        .map(|i| {
+            let z: f64 = (0..3).map(|j| w[i * 3 + j] * x[j]).sum();
+            let wv: f64 = (0..3).map(|j| w[i * 3 + j] * v[j]).sum();
+            (1.0 - z.tanh().powi(2)) * wv
+        })
+        .sum()
+}
+
+#[test]
+fn c2_gradient_matches_f64_central_difference() {
+    let wv = seq(6, 3.0);
+    let xv = seq(3, 1.0);
+    let vv = seq(3, 5.0);
+    let tape = new_tape();
+    let x = tape.var(&t(xv.clone(), &[3, 1]));
+    let w = tape.var(&t(wv.clone(), &[2, 3]));
+    let y = w.matmul(&x).unwrap().tanh();
+    let (child, grand) = (new_tape(), new_tape());
+    let res = cg_jv(&tape, &y, &x, &t(vv.clone(), &[3, 1]), &child, &grand).unwrap();
+    let loss = res.output().sum(None).unwrap();
+    let grads = grand.backward(&loss).unwrap();
+
+    let to64 = |s: &[f32]| s.iter().map(|&a| f64::from(a)).collect::<Vec<f64>>();
+    let (w64, x64, v64) = (to64(&wv), to64(&xv), to64(&vv));
+    let h = 1e-4;
+    let fd = |base: &[f64], which_w: bool| -> Vec<f64> {
+        (0..base.len())
+            .map(|k| {
+                let eval = |d: f64| {
+                    let mut b = base.to_vec();
+                    b[k] += d;
+                    if which_w {
+                        f_tanh_wx(&b, &x64, &v64)
+                    } else {
+                        f_tanh_wx(&w64, &b, &v64)
+                    }
+                };
+                (eval(h) - eval(-h)) / (2.0 * h)
+            })
+            .collect()
+    };
+    let gx = res.child_var(&x).unwrap().unwrap();
+    let gw = res.child_var(&w).unwrap().unwrap();
+    common::assert_all_req2_close(
+        &grads.get(&gx).unwrap().unwrap().host_slice(),
+        &fd(&x64, false),
+        "tanh(Wx) d/dx",
+    );
+    common::assert_all_req2_close(
+        &grads.get(&gw).unwrap().unwrap().host_slice(),
+        &fd(&w64, true),
+        "tanh(Wx) d/dW",
+    );
+
+    // y = tanh(x) ⊙ x: F(x) = Σ (tanh x + x sech² x) v_i
+    let tape = new_tape();
+    let x = tape.var(&t(xv.clone(), &[3]));
+    let y = x.tanh().mul(&x).unwrap();
+    let (child, grand) = (new_tape(), new_tape());
+    let res = cg_jv(&tape, &y, &x, &t(vv.clone(), &[3]), &child, &grand).unwrap();
+    let loss = res.output().sum(None).unwrap();
+    let grads = grand.backward(&loss).unwrap();
+    let f = |xs: &[f64]| -> f64 {
+        xs.iter()
+            .zip(&v64)
+            .map(|(&a, &b)| (a.tanh() + a * (1.0 - a.tanh().powi(2))) * b)
+            .sum()
+    };
+    let e: Vec<f64> = (0..3)
+        .map(|k| {
+            let eval = |d: f64| {
+                let mut b = x64.clone();
+                b[k] += d;
+                f(&b)
+            };
+            (eval(h) - eval(-h)) / (2.0 * h)
+        })
+        .collect();
+    let gx = res.child_var(&x).unwrap().unwrap();
+    common::assert_all_req2_close(
+        &grads.get(&gx).unwrap().unwrap().host_slice(),
+        &e,
+        "tanh(x)*x d/dx",
+    );
+}
+
+#[test]
+fn c3_scalar_gradient_matches_hvp() {
+    let xv = seq(4, 1.0);
+    let vv = seq(4, 5.0);
+    let tape = new_tape();
+    let x = tape.var(&t(xv.clone(), &[4]));
+    let l = x.tanh().mul(&x).unwrap().sum(None).unwrap();
+    let (child, grand) = (new_tape(), new_tape());
+    let res = cg_jv(&tape, &l, &x, &t(vv.clone(), &[4]), &child, &grand).unwrap();
+    let grads = grand.backward(&res.output()).unwrap();
+    let gx = res.child_var(&x).unwrap().unwrap();
+    let got = grads.get(&gx).unwrap().unwrap().host_slice().into_owned();
+
+    let tb = new_tape();
+    let xb = tb.var(&t(xv, &[4]));
+    let lb = xb.tanh().mul(&xb).unwrap().sum(None).unwrap();
+    let child = new_tape();
+    let hv = hvp(&tb, &lb, &xb, &t(vv, &[4]), &child).unwrap();
+    let e: Vec<f64> = hv.host_slice().iter().map(|&a| f64::from(a)).collect();
+    common::assert_all_req2_close(&got, &e, "H v");
+}
+
+#[test]
+fn c4_value_matches_jvp_and_stage2_is_bit_identical() {
+    let xv = seq(6, 1.0);
+    check_cg(&[6], xv.clone(), "x*x", |_, x| x.mul(x));
+    check_cg(&[2, 3], xv.clone(), "mlp", |tp, x| {
+        let w1 = c(tp, seq(12, 4.0), &[3, 4]);
+        x.matmul(&w1)?.tanh().matmul(&c(tp, seq(8, 6.0), &[4, 2]))
+    });
+    check_cg(&[2, 3], xv.clone(), "broadcast add", |tp, x| {
+        x.add(&c(tp, seq(3, 4.0), &[3]))
+    });
+    check_cg(&[], vec![0.7], "rank0 tanh", |_, x| Ok(x.tanh()));
+    check_cg(&[2, 3], xv, "sum all", |_, x| x.sum(None));
+}
+
+#[test]
+fn c5_mirror_none_some_and_child_var_misuse() {
+    let tape = new_tape();
+    let x = tape.var(&t(seq(4, 1.0), &[4, 1]));
+    let w = tape.var(&t(seq(12, 3.0), &[3, 4]));
+    let y = w.matmul(&x).unwrap();
+    let (child, grand) = (new_tape(), new_tape());
+    let res = cg_jv(&tape, &y, &x, &t(seq(4, 5.0), &[4, 1]), &child, &grand).unwrap();
+    // 線形 y = W x: J·v = W v は x に依存しない（写し x は Ok(None)）、W には依存する。
+    assert!(res.child_var(&x).unwrap().is_none());
+    assert!(res.child_var(&w).unwrap().is_some());
+
+    // 別テープ・追跡なしの Var の誤用。
+    let other = new_tape();
+    let ox = other.var(&t(seq(4, 1.0), &[4, 1]));
+    assert!(matches!(
+        res.child_var(&ox),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    let ng = tape.var_no_grad(&t(seq(4, 1.0), &[4, 1]));
+    assert!(matches!(
+        res.child_var(&ng),
+        Err(AutodiffError::GradientTrackingDisabled)
+    ));
+
+    // 係数が追跡なしの y = A x では出力も追跡なしになる。
+    let tape = new_tape();
+    let x = tape.var(&t(seq(4, 1.0), &[4, 1]));
+    let a = tape.var_no_grad(&t(seq(12, 3.0), &[3, 4]));
+    let y = a.matmul(&x).unwrap();
+    let (child, grand) = (new_tape(), new_tape());
+    let res = cg_jv(&tape, &y, &x, &t(seq(4, 5.0), &[4, 1]), &child, &grand).unwrap();
+    assert!(!res.output().requires_grad());
+    assert!(grand.backward(&res.output()).is_err());
+}
+
+#[test]
+fn c6_entry_checks_order_and_tapes_unchanged() {
+    let tape = new_tape();
+    let x = tape.var(&t(seq(3, 1.0), &[3]));
+    let y = x.tanh();
+    let tg = t(seq(3, 5.0), &[3]);
+    let ng = tape.var_no_grad(&t(seq(3, 1.0), &[3]));
+    let (child, grand) = (new_tape(), new_tape());
+    let lens = |tape: &Tape, child: &Tape, grand: &Tape| (tape.len(), child.len(), grand.len());
+    let before = lens(&tape, &child, &grand);
+    let same = |ctx: &str, tape: &Tape, child: &Tape, grand: &Tape| {
+        assert_eq!(lens(tape, child, grand), before, "{ctx}: テープが変化した");
+    };
+
+    let other = new_tape();
+    let ox = other.var(&t(seq(3, 1.0), &[3]));
+    let e = cg_jv(&tape, &y, &ox, &tg, &child, &grand).unwrap_err();
+    assert!(matches!(e, AutodiffError::TapeMismatch), "{e:?}");
+    same("tape mismatch", &tape, &child, &grand);
+
+    let (child2, grand2) = (new_tape(), new_tape());
+    let len2 = tape.len();
+    // 追跡なし入力と shape 不一致が重なる場合は GradientTrackingDisabled が先。
+    let e = cg_jv(&tape, &y, &ng, &t(seq(2, 5.0), &[2]), &child2, &grand2).unwrap_err();
+    assert!(
+        matches!(e, AutodiffError::GradientTrackingDisabled),
+        "{e:?}"
+    );
+    assert_eq!(tape.len(), len2);
+
+    // shape 不一致と非空 child が重なる場合は Shape が先。
+    let busy = new_tape();
+    let _ = busy.var(&t(vec![1.0], &[1]));
+    let e = cg_jv(&tape, &y, &x, &t(seq(2, 5.0), &[2]), &busy, &grand).unwrap_err();
+    assert!(matches!(e, AutodiffError::Shape(_)), "{e:?}");
+
+    // テープ関係の違反は Backward。
+    let e = cg_jv(&tape, &y, &x, &tg, &tape, &grand).unwrap_err();
+    assert!(
+        matches!(e, AutodiffError::Backward(_)),
+        "child==tape: {e:?}"
+    );
+    let e = cg_jv(&tape, &y, &x, &tg, &child, &tape).unwrap_err();
+    assert!(
+        matches!(e, AutodiffError::Backward(_)),
+        "grand==tape: {e:?}"
+    );
+    let e = cg_jv(&tape, &y, &x, &tg, &child, &child).unwrap_err();
+    assert!(
+        matches!(e, AutodiffError::Backward(_)),
+        "grand==child: {e:?}"
+    );
+    let e = cg_jv(&tape, &y, &x, &tg, &busy, &grand).unwrap_err();
+    assert!(matches!(e, AutodiffError::Backward(_)), "child 非空: {e:?}");
+    let e = cg_jv(&tape, &y, &x, &tg, &child, &busy).unwrap_err();
+    assert!(matches!(e, AutodiffError::Backward(_)), "grand 非空: {e:?}");
+    same("tape relation", &tape, &child, &grand);
+    assert_eq!(busy.len(), 1);
+    // `DeviceMismatch` は別デバイスを返す BackendOps が test_support に無いため未検証
+    // （backward_create_graph 側の同検査は create_graph のテストが担う。§31.9 に記録）。
+}
+
+type RejectedCase = (
+    &'static str,
+    Vec<usize>,
+    Box<dyn for<'t> Fn(&'t Tape, &Var<'t>) -> Built<'t>>,
+);
+
+#[test]
+fn c7_zero_paths_and_node_counts() {
+    // (a) 追跡なし output、(b) 出力要素数 0、(c) 入力要素数 0: 親・child 無変更、grand +1、写しなし。
+    let tape = new_tape();
+    let x = tape.var(&t(seq(3, 1.0), &[3]));
+    let z = tape.var(&t(vec![], &[0]));
+    let ng = tape.var_no_grad(&t(seq(3, 1.0), &[3]));
+    let ez = Tensor::zeros(&[0]).unwrap();
+    let cases: Vec<(&str, Var<'_>, Var<'_>, Tensor<f32>)> = vec![
+        ("untracked out", ng.tanh(), x, t(seq(3, 5.0), &[3])),
+        ("empty out", z.tanh(), x, t(seq(3, 5.0), &[3])),
+        ("empty in", x.tanh(), z, ez),
+    ];
+    for (ctx, y, inp, tg) in &cases {
+        let (child, grand) = (new_tape(), new_tape());
+        let len = tape.len();
+        let res = cg_jv(&tape, y, inp, tg, &child, &grand).unwrap();
+        assert_eq!(tape.len(), len, "{ctx}");
+        assert!(child.is_empty(), "{ctx}");
+        assert_eq!(grand.len(), 1, "{ctx}");
+        assert!(res.child_var(&x).unwrap().is_none(), "{ctx}");
+        assert!(res.output().value().host_slice().iter().all(|&a| a == 0.0));
+    }
+
+    // (d) J ≡ 0: output が別の追跡葉だけに依存する。親 +2、child 非空、grand +1、全ゼロ。
+    let zleaf = tape.var(&t(seq(3, 2.0), &[3]));
+    let y = zleaf.tanh();
+    let (child, grand) = (new_tape(), new_tape());
+    let len = tape.len();
+    let res = cg_jv(&tape, &y, &x, &t(seq(3, 5.0), &[3]), &child, &grand).unwrap();
+    assert_eq!(tape.len(), len + 2);
+    assert!(!child.is_empty());
+    assert_eq!(grand.len(), 1);
+    assert!(res.output().value().host_slice().iter().all(|&a| a == 0.0));
+
+    // (e) 1 段目の拒否: Backward・親 +2・child と grand は空のまま。
+    let rejected: Vec<RejectedCase> = vec![
+        ("max", vec![2, 3], Box::new(|_, x| x.max(None))),
+        (
+            "matmul rank3",
+            vec![2, 2, 2],
+            Box::new(|tp, x| x.matmul(&c(tp, seq(8, 2.0), &[2, 2, 2]))),
+        ),
+        (
+            "custom",
+            vec![3],
+            Box::new(|tp, x| tp.custom(Arc::new(IdentityCustomFn), &[*x])),
+        ),
+        ("gelu", vec![4], Box::new(|_, x| x.gelu())),
+        ("selu", vec![4], Box::new(|_, x| x.selu())),
+    ];
+    for (ctx, shape, build) in &rejected {
+        let n: usize = shape.iter().product();
+        let tape = new_tape();
+        let x = tape.var(&t(seq(n, 1.0), shape));
+        let y = build(&tape, &x).unwrap();
+        let (child, grand) = (new_tape(), new_tape());
+        let len = tape.len();
+        let e = cg_jv(&tape, &y, &x, &t(seq(n, 5.0), shape), &child, &grand).unwrap_err();
+        assert!(matches!(e, AutodiffError::Backward(_)), "{ctx}: {e:?}");
+        assert_eq!(tape.len(), len + 2, "{ctx}");
+        assert!(child.is_empty() && grand.is_empty(), "{ctx}");
+    }
+
+    // (f) 成功時は child・grand ともに非空。
+    let tape = new_tape();
+    let x = tape.var(&t(seq(3, 1.0), &[3]));
+    let y = x.tanh();
+    let (child, grand) = (new_tape(), new_tape());
+    cg_jv(&tape, &y, &x, &t(seq(3, 5.0), &[3]), &child, &grand).unwrap();
+    assert!(!child.is_empty() && !grand.is_empty());
+}
+
+#[test]
+fn c8_second_stage_mirrors_op_families() {
+    let xv = seq(6, 1.0);
+    let pv = pos(6, 1.0);
+    let mask = Tensor::new(vec![true, false, true, true, false, false], &[2, 3]).unwrap();
+    check_cg(&[2, 3], xv.clone(), "bias add", |tp, x| {
+        x.add(&c(tp, seq(3, 4.0), &[3]))
+    });
+    check_cg(&[3], seq(3, 1.0), "bias add (x が [n])", |tp, x| {
+        c(tp, seq(6, 2.0), &[2, 3]).add(x)
+    });
+    check_cg(&[2, 3], xv.clone(), "matmul", |tp, x| {
+        x.matmul(&c(tp, seq(12, 2.0), &[3, 4]))
+    });
+    check_cg(&[3, 3], seq(9, 1.0), "matmul x·x", |_, x| x.matmul(x));
+    check_cg(&[2, 3], xv.clone(), "where", |tp, x| {
+        Var::where_cond(&mask, x, &c(tp, seq(6, 2.0), &[2, 3]))
+    });
+    check_cg(&[6], xv.clone(), "relu", |_, x| Ok(x.relu()));
+    check_cg(&[6], xv.clone(), "clamp", |_, x| x.clamp(-0.8, 0.8));
+    check_cg(&[6], xv.clone(), "abs", |_, x| x.abs());
+    check_cg(&[6], pv.clone(), "log", |_, x| x.log());
+    check_cg(&[6], xv.clone(), "sin", |_, x| x.sin());
+    check_cg(&[6], xv.clone(), "exp", |_, x| Ok(x.exp()));
+    check_cg(&[6], xv.clone(), "sigmoid", |_, x| Ok(x.sigmoid()));
+    check_cg(&[6], pv.clone(), "pow_scalar", |_, x| x.pow_scalar(3.0));
+    check_cg(&[6], xv.clone(), "sub", |tp, x| k(tp).sub(x));
+    check_cg(&[6], xv.clone(), "div", |tp, x| {
+        x.div(&c(tp, pos(6, 2.0), &[6]))
+    });
+    check_cg(&[6], pv, "pow", |tp, x| {
+        x.pow(&c(tp, vec![2.0, 1.5, 3.0, 0.5, 2.5, 1.0], &[6]))
+    });
+    check_cg(&[2, 3], xv.clone(), "reshape", |_, x| x.reshape(&[3, 2]));
+    check_cg(&[2, 3], xv.clone(), "transpose", |_, x| x.transpose(0, 1));
+    check_cg(&[2, 3], xv.clone(), "narrow", |_, x| x.narrow(1, 1, 2));
+    check_cg(&[2, 3], xv, "cat", |tp, x| {
+        Var::cat(&[*x, c(tp, seq(6, 2.0), &[2, 3])], 1)
+    });
+}
+
+#[test]
+fn c9_deterministic_and_does_not_mutate_existing_nodes() {
+    let run = || {
+        let tape = new_tape();
+        let x = tape.var(&t(seq(6, 1.0), &[2, 3]));
+        let y = x.tanh().mul(&x).unwrap();
+        let yv = y.value().host_slice().into_owned();
+        let (child, grand) = (new_tape(), new_tape());
+        let r = cg_jv(&tape, &y, &x, &t(seq(6, 5.0), &[2, 3]), &child, &grand).unwrap();
+        assert_eq!(y.value().host_slice().into_owned(), yv);
+        r.output()
+            .value()
+            .host_slice()
+            .iter()
+            .map(|f| f.to_bits())
+            .collect::<Vec<u32>>()
+    };
+    assert_eq!(run(), run());
 }
