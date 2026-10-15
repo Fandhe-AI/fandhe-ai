@@ -1250,8 +1250,9 @@ impl Tape {
     ///
     /// # 数値・適用範囲
     ///
-    /// バッチなし実行との bit 一致は契約にしない（REQ-2 の統一複合判定）。`vmap(grad)` は契約外で、
-    /// 値だけが要る場合は呼び出し側が明示ループで `backward` を回す。複数入力は無い。f32 の `Tape` のみ
+    /// バッチなし実行との bit 一致は契約にしない（REQ-2 の統一複合判定）。本関数のクロージャ内で
+    /// 勾配を取る合成は契約外。サンプルごとの勾配は子テープで勾配を取る [`Tape::vmap_grad`]
+    /// （イシュー #3072・設計記録 §32）を使う。複数入力は無い。f32 の `Tape` のみ
     /// （`VarF64`・低精度 forward は対象外）。
     ///
     /// ```
@@ -1277,6 +1278,72 @@ impl Tape {
         F: FnMut(&Var<'t>) -> Result<Var<'t>, AutodiffError>,
     {
         fandhe_ai_autodiff::functional_ops::vmap(&self.0, input, in_dim, f)
+    }
+
+    /// サンプルごとの勾配（`torch.func` の `vmap(grad(f))` 相当のループ版。イシュー #3072・設計記録
+    /// `docs/autodiff-functional-transforms-design.md` §32）。内部
+    /// `fandhe_ai_autodiff::functional_ops::vmap_grad` への薄い委譲で、公開面は追加のみ（所有者判断 D-A）。
+    ///
+    /// `input` を `in_dim` 軸で `B` 個のスライスに分け、サンプルごとに `f` が返す 1 要素の損失 `loss_i` の
+    /// `∂loss_i/∂slice_i` を dim 0 に積んだ非微分の `Tensor<f32>`（shape は `[B] ++ slice_shape`、
+    /// `in_dim` 軸を除いた形）を返す。入力 shape と一致するのは `in_dim = 0` のときだけ。
+    /// 同一テープ・微分可能な `Var` を返す [`Tape::vmap`] とは別物で、親テープを持たないため `&self` は取らない。
+    ///
+    /// # 子テープ
+    ///
+    /// 呼び出し側が用意した**空**の `Tape` を `&mut` で渡す（空でなければ拒否）。サンプルごとに内部で
+    /// `reset` し入口の状態へ戻すため、成功時も失敗時も戻り時は空で、続けて再利用できる。ピークメモリは
+    /// サンプル 1 個分のグラフ。クロージャが panic したときの状態は契約外。
+    ///
+    /// # クロージャ
+    ///
+    /// [`TapeRef`] とスライスの `Var` を受け、勾配は取らず 1 要素の損失 `Var` を返す。定数は
+    /// `t.var_no_grad` などでサンプルごとに登録し直す。HRTB のため `Var` はサンプルをまたいで保持できない。
+    ///
+    /// # エラー
+    ///
+    /// Phase A（子テープは無変更）: 軸範囲外 `Shape(AxisOutOfRange)` → 空バッチ `InvalidArgument` →
+    /// 要素数オーバーフロー `Shape(ElementCountOverflow)` → 空でない子テープ `Backward`。
+    /// Phase B: クロージャの `Err` をそのまま伝播 → 別テープ・別世代の損失は `TapeMismatch` → 損失が
+    /// 1 要素でなければ `InvalidArgument`（`[]`・`[1]`・`[1, 1]` は可）→ `backward`・バックエンドの `Err` を伝播。
+    /// 追跡なしの損失、またはスライスに勾配が届かない場合は、その行が全ゼロになる。
+    ///
+    /// # 数値・適用範囲
+    ///
+    /// 明示ループ参照と REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で一致し、
+    /// bit 一致は契約にしない。経路上の Op は 1 階 `backward` が対応する範囲。微分可能な版は含めず
+    /// （§32.5）、共有パラメータについての勾配は返さない（§32.8-1）。f32 の `Tape` のみ。
+    ///
+    /// ```
+    /// use fandhe_ai::{tape, Tape, Tensor};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let x = Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])?;
+    /// let mut child = tape();
+    /// // 行ごとに loss_i = Σ x_i ⊙ x_i、勾配は 2 x_i
+    /// let g = Tape::vmap_grad(&x, 0, &mut child, |_t, s| s.mul(s)?.sum(None))?;
+    /// assert_eq!(g.shape(), &[2, 3]);
+    /// for (a, b) in g.host_slice().iter().zip([2.0_f32, 4.0, 6.0, 8.0, 10.0, 12.0]) {
+    ///     assert!((a - b).abs() < 1e-4);
+    /// }
+    /// // 子テープは空のまま戻るので続けて再利用できる
+    /// let g1 = Tape::vmap_grad(&x, 1, &mut child, |_t, s| s.mul(s)?.sum(None))?;
+    /// assert_eq!(g1.shape(), &[3, 2]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn vmap_grad<F>(
+        input: &Tensor<f32>,
+        in_dim: usize,
+        child: &mut Tape,
+        mut f: F,
+    ) -> Result<Tensor<f32>, AutodiffError>
+    where
+        F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>,
+    {
+        fandhe_ai_autodiff::functional_ops::vmap_grad(input, in_dim, &mut child.0, |t, s| {
+            f(TapeRef::from_autodiff(t), s)
+        })
     }
 
     /// 非有限値（NaN／±inf）を最初に生んだノードを検出する逆伝播（イシュー #2678・
@@ -7918,8 +7985,14 @@ struct GradcheckAnomalyHoldDoctestGuard;
 /// 反転対象はなく、`Tape` 受け手のプローブは足さない（承認形と衝突するため）。一方、裸の自由関数・
 /// `Var<'t>`・`Tensor<f32>` 上の `jvp_create_graph` は未承認の受け手として本 doctest のプローブに新規に加えた。
 ///
+/// **追加の承認公開（イシュー #3072）**: 同じ所有者判断 D-A に基づき `Tape` の関連関数 `vmap_grad`
+/// （サンプルごとの勾配。設計記録 §32。承認形は計 8 名）を追加で公開した。保留ガードに反転対象はなく、
+/// `Tape` 受け手のプローブは足さない（承認形と衝突するため。`&self` を持たない関連関数である点も同じ）。
+/// 一方、裸の自由関数・`Var<'t>`・`Tensor<f32>` 上の `vmap_grad` は未承認の受け手として本 doctest の
+/// プローブに新規に加えた。
+///
 /// 引き続き拒否する未承認経路: モジュール `functional_ops` の公開、クレートルート直下の裸の自由関数
-/// `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph`、および `Var<'t>`・`Tensor<f32>` 上の同名メソッド。下の doctest は全 `pub mod` を glob import
+/// `vjp`・`hvp`・`vmap`・`jvp`・`jacfwd`・`jvp_multi`・`jvp_create_graph`・`vmap_grad`、および `Var<'t>`・`Tensor<f32>` 上の同名メソッド。下の doctest は全 `pub mod` を glob import
 /// したスコープへ、これらに対応するローカル定義とプローブ用トレイトを置き、修飾なしの関数呼び出しと
 /// 修飾付き（UFCS）のメソッド呼び出しの両方を行う。facade が同名のモジュール・関数を glob 可能な位置へ
 /// 公開するか、上の受け手へ同名の inherent メソッドを公開すると、名前解決の曖昧性または呼び出しシグネチャの
@@ -7965,6 +8038,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     pub fn jacfwd() {}
 ///     pub fn jvp_multi() {}
 ///     pub fn jvp_create_graph() {}
+///     pub fn vmap_grad() {}
 /// }
 /// use __fandhe_functional_transforms_hold_probe::*;
 ///
@@ -7978,6 +8052,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;
 ///     fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker;
 ///     fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker;
+///     fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker;
 /// }
 ///
 /// impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {
@@ -8000,6 +8075,9 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
 ///     fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
+///     fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
 /// }
@@ -8026,6 +8104,9 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {
 ///         __FandheFunctionalTransformsHoldMarker
 ///     }
+///     fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {
+///         __FandheFunctionalTransformsHoldMarker
+///     }
 /// }
 ///
 /// fn __probe_free_fns() {
@@ -8040,6 +8121,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     jacfwd();
 ///     jvp_multi();
 ///     jvp_create_graph();
+///     vmap_grad();
 /// }
 ///
 /// fn __probe_methods(
@@ -8054,6 +8136,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp_multi(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp_create_graph(v);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap_grad(v);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);
@@ -8061,6 +8144,7 @@ struct GradcheckAnomalyHoldDoctestGuard;
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jacfwd(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_multi(tf);
 ///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_create_graph(tf);
+///     let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap_grad(tf);
 /// }
 /// ```
 #[cfg(doctest)]
