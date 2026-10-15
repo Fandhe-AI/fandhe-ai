@@ -520,3 +520,137 @@ impl Tape {
 - ミラー `functional_ops_jvp_backend_parity.rs` は維持。親テープに残る 2 ノードの副作用は facade から観測できないため内部 M5 に任せた。
 - 実機は未実測（`docs/perf/logs/functional-transforms-jvp-multi-3064/README.md`。実測は #3171・#3172）。
 - 依存・tolerance・baseline・`unsafe`・`docs/spec` は変更していない。
+
+## 31. 決定記録（イシュー #3066・親 #3065。微分可能な `jvp` の公開形）
+
+### 31.0 状態・根拠
+
+- 状態: **決定記録のみ（コード変更なし。内部実装は #3067、facade 委譲・テスト・`compat-api-scope.md` は #3068）**。基準は `origin/main` `43464810`。承認の根拠は 2026-10-11 の所有者判断 D-A（§29・`compat-api-scope.md` §5 末尾の適用記録。「`jvp` の拡張（複数入力・微分可能な `jvp`）→ #3062・#3065」）。本節は記録の追加であり、これ以上の承認があったとは記さない。
+- 変えないもの: tolerance・baseline・依存・`unsafe`・新規 `Op`／`BackendOps`／VJP／`AutodiffError` variant・既存 `Tape::jvp`／`jacfwd`／`jvp_multi` のシグネチャと挙動・`docs/spec`。既存の節の本文は書き換えない（§27.5・§29 の保留記述は本節で形が決まったことで解消する）。
+
+### 31.1 公開形
+
+```rust
+// autodiff（functional_ops.rs）。crate ルートで JvpCreateGraphResult を再エクスポートする
+pub fn jvp_create_graph<'g>(
+    tape: &Tape, output: &Var<'_>, input: &Var<'_>, tangent: &Tensor<f32>,
+    child: &Tape, grandchild: &'g Tape,
+) -> Result<JvpCreateGraphResult<'g>, AutodiffError>;
+
+pub struct JvpCreateGraphResult<'g> { /* フィールドは非公開 */ }
+impl<'g> JvpCreateGraphResult<'g> {
+    pub fn output(&self) -> Var<'g>;   // J·v（shape = output.shape()）。grandchild 上の Var
+    pub fn child_var(&self, parent_var: &Var<'_>) -> Result<Option<Var<'g>>, AutodiffError>;
+}
+
+// facade（impl Tape）。1 行委譲。crate ルートに pub use fandhe_ai_autodiff::JvpCreateGraphResult; を足す
+//（CreateGraphResult の再エクスポートと同じ先例）
+pub fn jvp_create_graph<'g>(&self, output: &Var<'_>, input: &Var<'_>, tangent: &Tensor<f32>,
+    child: &Tape, grandchild: &'g Tape) -> Result<JvpCreateGraphResult<'g>, AutodiffError>;
+```
+
+- 名前: `backward_create_graph`／`CreateGraphResult` との対応が分かる `jvp_create_graph`／`JvpCreateGraphResult` を採る。Issue が挙げた候補 `jvp_var` は、結果がどのテープ上の `Var` かを名前が示さず、PyTorch の `create_graph=True` に由来する `_create_graph` 接尾辞の慣例とも揃わないため採らない。名前は `origin/main` の `crates/`・`docs/` と `fandhe-ai-0.11.0`・`fandhe-ai-autodiff-0.11.0` のいずれにも出現しない（検索で 0 件を確認済み）。
+- 単一入力のみ（既存 `jvp` と同形）。複数入力版は `double_vjp_front` を共用すれば追加のみで足せる。本ツリーの対象外。
+- 採らなかった案: (i) 戻り値を `Var<'g>` だけにする: 入力側の写しを引けず `∂r/∂x` に届かない。(ii) `(Var<'g>, Option<Var<'g>>)`: 写せるのが `input` だけで、重みなど他の親の葉への微分ができない。(iii) 中間テープを内部で生成: `Tape` は `ops: Box<dyn BackendOps + Send>` を所有し複製する API がなく、作るには `BackendOps` の拡張が要る（本ツリーでは禁止）。(iv) `CreateGraphResult` を返す: `grad()` が 1 階勾配の意味を持つため誤用を招く。(v) `first_order()` 相当の bit 同一なホスト値を公開: 公開面を最小に保つため出さない（bit 同一は内部テストで固定）。
+
+### 31.2 孫テープと微分の繋がり方
+
+- `child.backward(..)` はホスト値の `Gradients` しか返さない。2 段目の VJP を `Var` 演算として記録する手段は既存の `Tape::backward_create_graph` を子テープ自身に適用すること（`child.backward_create_graph(&prod, grandchild)`）だけで、結果は孫テープ上の `Var<'g>` になる。中間の `child` と結果を置く `grandchild` はどちらも呼び出し側が空で渡す（J-b の「明示引数」と同形）。
+- 結果 `r` は孫テープ上の写しに依存する。元の入力 `x` についての微分は、2 段の写し（親→子→孫）を通して得る。この写しを引く手段が `JvpCreateGraphResult::child_var` で、`CreateGraphResult::child_var` と同形の契約を持つ。
+  - 親テープの ID・世代が一致しない → `TapeMismatch`。
+  - `requires_grad == false` → `GradientTrackingDisabled`。
+  - 1 段目・2 段目のどちらかで祖先に入らない → `Ok(None)`。結果がその変数に依存しない（勾配が恒等的にゼロ）ことを意味する（例: 線形 `y = W x` では `x` の写しが `None`）。
+- 親テープの `x` そのものとは微分で繋がらない。境界は `backward_create_graph` の写しであり、`Var::to_tape`（#1614）と同じく非微分。
+- 内部実装（#3067）は、成功時に 1 段目の写し（`CreateGraphResult::child_var`）と 2 段目の写しを合成し、親の `NodeId` を添字にした `Vec<Option<Var<'g>>>` を `JvpCreateGraphResult` に持たせる。そのため `CreateGraphResult` に `pub(crate)` の写し参照アクセサを足す（公開面は増えない）。公開型には `'g` だけを出し、1 段目のライフタイム `'c` は出さない。
+- 3 階微分には当たらない: `create_graph.rs` の `reduce_bias_grad_var` の doc は「設計上 3 階微分は対象外」とするが、本方式はテープが 3 段になるだけで、利用者が孫テープ上で `backward` して得るのは `x` についての 2 階の量（スカラー出力 `L` なら `H·v`）である。facade の公開 API だけで手で組める合成でもある。
+- 2 段目で写せる Op（#3067 のテストで確かめる推測を含む）: `build_cgrads` が子テープに記録する演算は `mul`／`add`／`sub`／`div`／`pow`／`neg`／`log`／`sin`／`cos`／`exp`／`sigmoid`／`PowScalar`／`matmul_fp32_strict`（rank 2）／`transpose`／`permute`／`narrow`／`reshape`／`contiguous`／`broadcast_to`／`Var::cat`／`Var::where_cond`／`sum`／`mean`／定数の `var_no_grad`、および `reduce_bias_grad_var` の `push_eager(Op::Sum { dim: Some(0) })`。いずれも `supports_create_graph()` が真の Op／再生可能な variant に収まる見込みで、漏れがあれば既存の `validate_ancestors` が型付き `Err(Backward)` で fail-closed にする（本記録では新しい拒否ロジックを足さない）。
+
+### 31.3 入口検査・算法・数値
+
+入口検査（ノードを足す前。順序固定）:
+
+1. `output`／`input` が `tape` の現世代に属さない → `TapeMismatch`。
+2. `input` が追跡なし → `GradientTrackingDisabled`。
+3. `tangent.shape() != input.shape()` → `Shape(ShapeMismatch)`（ブロードキャスト不可）。
+4. `checked_numel` → `Shape(ElementCountOverflow)`。
+5. テープの事前検査（既存 `jvp` にはない新設）: `child` が `tape` と同一 → `Backward`／`grandchild` が `tape` または `child` と同一 → `Backward`／`child`・`grandchild` のデバイスが `tape` と異なる → `DeviceMismatch`／`child`・`grandchild` が空でない → `Backward`。誤用で親テープに 2 ノードが残る事態を減らすために置く。`backward_create_graph` 側の同じ検査は多層防御として残る。新しい variant は足さない。
+6. 出力の要素数 0・入力の要素数 0・`output` が追跡なし → `output()` は `grandchild` 上の全ゼロの追跡なし葉（`var_no_grad`）1 個、写しはすべて `None`。親テープと `child` は無変更。
+
+1〜4 は既存 `jvp` と同じ種類・同じ順序。
+
+算法:
+
+1. `double_vjp_front` と同じ前段（親テープへ `u`・`mul` の 2 ノード、1 段目の `backward_create_graph`。`double_vjp_stage` が `J ≡ 0` で `None` を返す扱いも共用）。
+2. `J ≡ 0`（`input` へ勾配が届かない・`g` が定数）なら 6 と同じ全ゼロ葉を返す。
+3. 子テープ上で `prod = g ⊙ child.var_no_grad(tangent)` を作る（既存 `jvp` と同じ手順）。
+4. `child.backward_create_graph(&prod, grandchild)`。
+5. `r = cg2.grad(&cu)` を返す。`None` は構造上の不変条件違反なので、ゼロへ丸めず `Err(Backward)` にする。
+
+- 計算量: 親 backward 1 回・子 backward 1 回（2 段目の `first_order`）・孫テープへの写しと VJP 記録 1 回。
+- 数値: 2 段目の `backward_create_graph` は内部で `child.backward(&prod)` を素のまま呼ぶため、`cg2.first_order()` の `cu` 勾配は、同じ手順で `prod` を作る限り既存 `jvp` の結果と bit 同一になる。一方、結果の `Var` の値は孫テープ上で `Var` 演算として計算し直すので、REQ-2 統一複合判定の範囲でのみ一致を主張する（`reduce_bias_grad_var` の縮約は host の f64 縮約と bit 同一にならない）。
+- 結果 `r` が追跡なしになりうる（追跡ありの変数に依存しないとき。例: `y = A x` で `A` が `var_no_grad`）。このとき `r` を損失にした `backward` は既存どおり `Err` になる。
+
+### 31.4 既存 `jvp`（§27）・`jvp_multi`（§30）との比較
+
+| 観点 | `Tape::jvp` | `Tape::jvp_multi` | `Tape::jvp_create_graph` |
+|---|---|---|---|
+| 戻り値 | 非微分ホスト値 `Tensor<f32>` | 同左 | 孫テープ上の `Var<'g>`（`output()`）＋写し（`child_var`） |
+| 追跡 | なし | なし | あり（孫テープ上で微分可能） |
+| 引数のテープ | `child` 1 枚 | `child` 1 枚 | `child`・`grandchild` 2 枚（呼び出し側が空で用意） |
+| 入口エラー | 1〜4（§27.3） | §30.2 の 1〜7 | 31.3 の 1〜4（`jvp` と同じ）＋ 5（テープの事前検査。新設） |
+| 追跡なし `output`・要素数 0 | テープに触れず全ゼロのホスト値 | 同左 | `grandchild` に全ゼロ葉 1 個（`Var` を返すため避けられない）。親・`child` は無変更 |
+| `J ≡ 0` | 全ゼロのホスト値 | 寄与なしなら全ゼロ | `grandchild` に全ゼロ葉 1 個 |
+| 数値 | `jacobian` 由来と REQ-2 | 同左（k = 1 でも bit 同一は不主張） | 値は REQ-2。2 段目の `first_order` は `jvp` と bit 同一 |
+| 計算量 | 親 1 回＋子 1 回 | 同左（入力数に依らない） | 同左＋孫テープへの記録 1 回 |
+
+テープに残るノード（親／`child`／`grandchild`）:
+
+| 状況 | 親 | `child` | `grandchild` |
+|---|---|---|---|
+| 入口検査 1〜5 で失敗 | 無変更 | 無変更 | 無変更 |
+| 6 のゼロ返却 | 無変更 | 無変更 | +1（全ゼロ葉） |
+| `J ≡ 0` | +2 | 1 段目の写し（非空） | +1（全ゼロ葉） |
+| 1 段目で拒否（非対象 Op・rank 3 以上の matmul・checkpoint 等） | +2 | 空のまま | 空のまま |
+| 2 段目で拒否 | +2 | 非空（写し・1 階勾配・tangent 葉・`prod`） | 空のまま（`validate_ancestors` が書き込みより前に走る） |
+| 成功 | +2 | 非空（再利用不可） | 非空（結果グラフ。再利用不可） |
+
+`J ≡ 0` の行は `double_vjp_stage` の実装（前段の後で `None` を判定）から読み取った値。#3067 のテストで確定させる。
+
+### 31.5 `fandhe-ai =0.11.0` に対する非破壊確認
+
+実測した結果（推測ではない）:
+
+| 確認 | 結果 |
+|---|---|
+| `jvp_create_graph`・`JvpCreateGraphResult`・`jvp_var` の検索（`fandhe-ai-0.11.0/src`・`fandhe-ai-autodiff-0.11.0/src`） | 0 件（新規の名前） |
+| 同検索（`origin/main` の `crates`・`docs`） | 0 件（衝突なし） |
+| `git diff v0.11.0 origin/main` の `crates/autodiff/src/create_graph.rs` | `pub fn` の増減 0 件（`backward_create_graph`・`CreateGraphResult` のシグネチャ不変） |
+| 同 `crates/facade/src/lib.rs` の `pub fn`／`pub use` 差分 | `jvp_multi` の追加 1 件のみ（`jvp`・`jacfwd`・`backward_create_graph` は不変。0.11.0 では `jvp` 1020 行・`jacfwd` 1057 行・`backward_create_graph` 737 行） |
+| 使うエラー variant | `TapeMismatch`・`GradientTrackingDisabled`・`DeviceMismatch`・`Backward`・`Shape` はすべて 0.11.0 に存在。新しい variant なし |
+
+- 追加は新しい型 `JvpCreateGraphResult` 1 つとメソッド 1 つのみ。再エクスポートの追加は minor 扱いで、glob import の衝突は受け入れる（既存の再エクスポート追加と同じ扱い）。`NodeId`／`TapeId`／`BackendOps` は外に出ない。
+- `jvp_multi` は 0.11.0 の公開後に足したもので未リリースのため、非破壊の比較対象外。
+
+### 31.6 #3067（autodiff 内部実装）への手順
+
+1. `functional_ops.rs` に `JvpCreateGraphResult<'g>` と `pub fn jvp_create_graph` を足す。既存 `jvp`・`jvp_multi`・`double_vjp_stage`／`double_vjp_front` の挙動は変えない（前段は共用）。
+2. `create_graph.rs` に `pub(crate)` の写し参照アクセサを足す（公開面は不変）。
+3. `crates/autodiff/src/lib.rs` で `pub use functional_ops::JvpCreateGraphResult;` を足す。
+4. `functional_ops_jvp_tests.rs` に単体テストを足す: `y = x ⊙ x` で `output() = 2x ⊙ v` と `sum(output())` の `x` への勾配が `2v`／`tanh` を含む合成で有限差分と一致（REQ-2）／スカラー出力 `L` で写し `x` への勾配が `hvp(L, x, v)` と一致／値が `jvp` と REQ-2 で一致し 2 段目の `first_order` が `jvp` と bit 同一／線形 `W x` で写し `x` が `None`・写し `W` が `Some`／入口検査の順序（5 を含む）と失敗時の各テープ無変更／ゼロ返却の 3 経路／非対象 Op（`max`・rank 3 matmul）の拒否と 31.4 のノード残り／2 段目で写せることを Op の族ごとに確認（bias パターンの add〈`push_eager` 経路〉・matmul・`Where`・区分線形・`ScalarUnary`／`ScalarBinary`）。
+5. 2 段目で写せない Op が見つかった場合は、`Err(Backward)` の fail-closed をテストで固定し本節へ追記する。新しい拒否ロジックと `supports_create_graph` の拡張は足さない（#3075 の範囲）。
+
+### 31.7 #3068（facade）への手順
+
+1. `impl Tape` に 1 行委譲 `fandhe_ai_autodiff::functional_ops::jvp_create_graph(&self.0, output, input, tangent, &child.0, &grandchild.0)` を足し、crate ルートに `pub use fandhe_ai_autodiff::JvpCreateGraphResult;` を足す。
+2. rustdoc に 31.3 の契約を書く。doctest は facade だけで完結させる（`y = x ⊙ x`、`output()` が `2x ⊙ v`、写し `x` への勾配が `2v`）。
+3. `FunctionalTransformsHoldDoctestGuard` に反転するものはない。§30.3 と同様に、未承認の受け手のプローブ（裸の自由関数・`Var`／`Tensor<f32>` 上のメソッド・UFCS）を `jvp_create_graph` について足す。
+4. `api_surface.rs` を更新する: 名前配列・識別子配列／承認シグネチャと 1 行委譲本体の正ガード `facade_tape_functional_transforms_are_approved_thin_delegations`／宣言インベントリ（内部 1 件・facade 1 件）／再エクスポート型の正ガード（`CreateGraphResult` の先例）／到達性テスト・自己テスト。既存の `jvp`／`jacfwd`／`hvp`／`jvp_multi` のガードは変えない。
+5. `crates/facade/tests/functional_transforms_jvp_facade.rs` に CPU テストを足す（`Tape::hessian`／`Tape::hvp` との整合・有限差分・エラー伝播を含む）。
+6. `docs/compat-api-scope.md` の F ブロックに F7 行（F6 と同形）を足し、本記録に実装記録の節を足す。
+7. 実機 parity は #3168・#3169 の範囲で、本ツリーでは足さない。
+
+### 31.8 所有者へ戻す論点・スコープ外
+
+- 所有者へ戻す論点: 形は 31.1 で一意に決まっており、承認を要する論点はない。参考として 1 件だけ列挙する。2 枚のテープを明示で渡させる使い勝手について、補助ヘルパー（`tape.child()` 等）を足すかどうかは本記録では足さない（J-b の明示引数と同じ形を保つため）。
+- スコープ外: 複数入力の微分可能版、`VarF64`・f16・`TapeF64` の微分可能な `jvp`（#3074・#3021 項 3）、`supports_create_graph` の対象 Op 拡張（#3075）、実機 parity（#3168・#3169）。
+- 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
