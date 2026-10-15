@@ -2486,7 +2486,9 @@ impl Op {
             | Op::ConvTranspose2d { .. }
             | Op::Unfold { .. }
             | Op::Fold { .. }
-            | Op::Where { .. } => true,
+            | Op::Where { .. }
+            | Op::Softmax { .. }
+            | Op::LogSoftmax { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2567,8 +2569,6 @@ impl Op {
             | Op::Ifft { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
-            | Op::Softmax { .. }
-            | Op::LogSoftmax { .. }
             | Op::MaskedFill { .. }
             | Op::Dropout { .. }
             | Op::Gather { .. }
@@ -5207,6 +5207,25 @@ mod conv3d_op_tests {
                 weight: NodeId(1),
                 bias: None,
                 params: p,
+            }
+            .supports_create_graph()
+        );
+    }
+
+    #[test]
+    fn softmax_and_log_softmax_ops_support_create_graph() {
+        // イシュー #3077: V3 方式（`create_graph.rs`）で対象に加えた。
+        assert!(
+            Op::Softmax {
+                input: NodeId(0),
+                dim: 1
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::LogSoftmax {
+                input: NodeId(0),
+                dim: 1
             }
             .supports_create_graph()
         );

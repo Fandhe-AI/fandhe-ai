@@ -906,3 +906,37 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 22.4 変更していないもの
 
 1 階 `Tape::backward` の経路（`grad.rs`・スカラー評価・`tensor-core`）、`Op` payload、公開 API、依存、`unsafe`、tolerance・baseline、`docs/spec`、既存節の本文。
+
+## 24. 実装記録（#3077・Softmax／LogSoftmax の create_graph 対応）
+
+§21.1・§21.3 の V3 方式で `Op::Softmax`・`Op::LogSoftmax` を `supports_create_graph` の対象に加えた（網羅 match のまま）。
+
+### 24.1 構造グラフと値
+
+- 値は 1 階 VJP と同じホスト関数。構造は子テープに積む `Var` 演算で、値付きの `Op::Contiguous` ノードとして登録する。登録前に値と構造の shape が一致することを `Err(Backward)` で検査する。
+- Softmax: `y⊙g − y⊙Σ_dim(g⊙y)`。積む Op は `Mul`・`Sum`・`Contiguous`・`Reshape`・`BroadcastTo`・`ScalarBinary(Sub)`。
+- LogSoftmax: `s ⊙ (g/s − exp(y) ⊙ Σ_dim(g/s))`。`s` はレーンごとの `max|g|` をホストで求めた定数葉。`s == 0` と非有限のレーンは `s = 1` とし、IEEE の伝播は構造側に任せる。
+- §21.3 の「積む Op」一覧に `ScalarBinary(Div)` を補足する。逆数を掛ける形は `s` が f32 最大値付近で非正規数になるため採らない。
+- 空テンソル（shape に 0 を含む）は 1 階の早期 return と揃え、全ゼロの定数葉を寄与として返す。
+
+### 24.1b 二階の逆伝播の overflow 保護
+
+- Softmax: `y` を使用箇所（`y⊙g`・`y⊙dot`・`g⊙y` の縮約）ごとに入力から別の `softmax` ミラーとして立てる。各寄与を別々に Softmax VJP へ通してから入力側で蓄積するため、同一ノードでの寄与の和が f32 範囲を超えない（定数シフト不変性で相殺される量）。
+- LogSoftmax: `exp(y)·Σgs` を `exp(y + ln n)·(Σgs / n)` に分け、`exp` ノードへの寄与を `-s·mean_gs`（`≤ s`）に抑える。さらに `q` の VJP 積 `q⊙寄与`（最大 `n·s`）が LogSoftmax VJP の手前で溢れる（確率偏り＋大スケール。例 `x=[ln9,0]`・`g=[3e38,3e38]`）ため、`q·mean_gs` を入力から別々に立てた `log_softmax` ミラーへ等分し、各寄与を別々に VJP へ通して入力側で蓄積する。分割数はホストで `n·p·s·|mean_gs|` の上界から決める（2e38 超過分のみ増やす・最大 64・通常 1）。`y` への寄与の総和は従来と同値。限界: 分割上限を超える規模は保護できない。分割数 2 以上の状態でさらに jvp_create_graph（三階）へ通す経路は NaN を生む場合を確認しており未保護（二階 Hessian 経路のみ保証）。
+- 上流勾配が入力依存の場合の保護（codex-review 指摘）: `s⊙(gs − q·mean_gs)` を `g − q·mean_g`（`mean_g = Σ g/(n·pieces)`）へ恒等変形し、`s` を掛ける積と `g/s` 除算を作らない。`mean_g` 側へ `-s·q`（最大 `n·s`）が逆伝播しない。回帰: `create_graph_log_softmax_input_dependent_large_upstream_hessian_is_finite`（`x=[ln9,0]`・`loss=Σ y²·5e37`）。
+- 回帰テスト: `create_graph_softmax_large_upstream_second_order_is_finite`・`create_graph_log_softmax_large_upstream_second_order_is_finite`（`cg.grad` の各要素を入力で微分した Hessian を f64 閉形式と比較）。
+- 限界: 真の二階寄与そのものが f32 範囲を超える入力は保護できない。
+
+### 24.2 LogSoftmax の値の dispatch（決定記録の解釈）
+
+§21.3 は値を「ホスト関数」と書くが、1 階は `log_softmax_backward`（backend カーネル）を先に使う。§21.1(1) の bit 同一を CUDA でも満たすため、3 分岐 dispatch を `grad::log_softmax_vjp_dispatch` へ切り出し、1 階と子テープの両方が同じ関数を `ops` に対して呼ぶ。1 階の挙動は変えていない。Softmax には backend backward がないので dispatch は不要。`softmax_vjp_along`・`log_softmax_vjp_along` は `pub(crate)` にした。
+
+### 24.3 テスト
+
+- `crates/autodiff/tests/create_graph.rs`: `hessian_softmax_matches_finite_difference`・`hessian_log_softmax_matches_finite_difference`（軸 0／最終軸／rank 3 中間軸・自乗・`⊙x`・`tanh` 連鎖）、`create_graph_softmax_first_order_is_bit_identical`、`create_graph_softmax_first_order_chain_matches_req2`、`create_graph_softmax_large_upstream_does_not_overflow`・`create_graph_log_softmax_large_upstream_does_not_overflow`（§8・§21.3 のベクトル。1 階・`cg.grad`・`jvp_create_graph` の孫テープ再生がすべて有限）、`create_graph_softmax_empty_tensor_returns_zero_shaped_grad`、`create_graph_rejects_unsupported_op_logsumexp`（拒否契約は `LogSumExp` で維持）、`create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty`。
+- 孫テープ再生の値は REQ-2 判定で比較した（§21.1(3) のとおり合成側の f32 再計算差は範囲内として受け入れる）。bit 一致は主張しない。
+- `crates/facade/tests/create_graph_facade.rs`: 実 CPU バックエンドでの 1 階 bit 一致と Hessian の列和の中央差分突合。
+
+### 24.4 変更していないもの
+
+1 階 `Tape::backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
