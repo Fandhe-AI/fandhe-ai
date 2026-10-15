@@ -675,3 +675,117 @@ pub fn jvp_create_graph<'g>(&self, output: &Var<'_>, input: &Var<'_>, tangent: &
 - **未検証**: `DeviceMismatch`（CPU だけでは作れない。§31.9 と同じ扱い）、facade からの親・子・孫テープのノード残り観測（公開 API がないため内部テスト C6／C7 に任せる）。
 - **申し送り**: 実機（CUDA／Metal）parity は #3168・#3169。`supports_create_graph` の対象 Op 拡張は #3075。
 - **変えていないもの**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`・既存の公開シグネチャ。
+
+## 32. 決定記録（イシュー #3070・親 #3069。`vmap(grad)` の公開形）
+
+### 32.0 状態・根拠
+
+- 状態: **決定記録のみ（コード変更なし。autodiff 内部実装は #3071、facade 委譲は #3072、facade テストと実機 `#[ignore]` は #3073）**。基準は `origin/main` `52861cd3`。承認の根拠は 2026-10-11 の所有者判断 D-A（§29・`compat-api-scope.md` §5 末尾の D-A 表「`vmap(grad)` → #3069」）。本節は記録の追加であり、これ以上の承認があったとは記さない。
+- 経緯: 既存 `Tape::vmap`（facade `crates/facade/src/lib.rs:1270`、内部 `crates/autodiff/src/functional_ops.rs:203`）は入力 `Var` と同じテープ上でスライスをクロージャへ渡し `Var::stack` する。クロージャ内で勾配を取る合成は契約外だった（§5・§11 論点 6・§23.3）。理由は、`backward` の勾配がホスト `Tensor` で微分の接続が切れること、`backward_create_graph` の勾配が子テープ上の `Var` で同一テープを要求する `vmap` の契約と合わないことの 2 点。本節で形が決まったので §11 論点 6 の保留は解消する（§31.0 と同じ扱い）。
+- 変えないもの: tolerance・baseline・依存・`unsafe`・新規 `Op`／`BackendOps`／VJP／`AutodiffError` variant・既存 `Tape::vmap` ほかのシグネチャと挙動・`docs/spec`。既存の節の本文は書き換えない。バッチ規則型 `vmap` は spec 上対象外のままで、本節は広げない。
+
+### 32.1 公開形
+
+```rust
+// autodiff（functional_ops.rs）。兄弟関数と同じ pub fn（モジュールの再エクスポートはしない）
+pub fn vmap_grad<F>(input: &Tensor<f32>, in_dim: usize, child: &mut Tape, f: F)
+    -> Result<Tensor<f32>, AutodiffError>
+where F: for<'c> FnMut(&'c Tape, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
+
+// facade（impl Tape の関連関数。self なし）。1 式の委譲
+pub fn vmap_grad<F>(input: &Tensor<f32>, in_dim: usize, child: &mut Tape, f: F)
+    -> Result<Tensor<f32>, AutodiffError>
+where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
+// 本体: fandhe_ai_autodiff::functional_ops::vmap_grad(input, in_dim, &mut child.0,
+//           |t, s| f(TapeRef::from_autodiff(t), s))
+```
+
+- 戻り値は、サンプルごとの勾配（各スライス葉についての `∂loss_i/∂slice_i`）を dim 0 に積んだ非微分のホスト値 `Tensor<f32>`。shape は `[B, …slice_shape]`。`slice_shape` は入力 shape から `in_dim` を除いたもの（`unbind` と同じ）。入力 shape と一致するのは `in_dim = 0` のときだけ（`vmap` の出力軸 dim 0 固定と同じ扱い）。
+- 名前は `torch.func` の `vmap(grad(f))` に対応させた `vmap_grad`。実測: `origin/main` の `crates`・`docs`・`site`、および `fandhe-ai-0.11.0`・`fandhe-ai-autodiff-0.11.0`（`~/.cargo/registry`）で `vmap_grad`・`per_sample_grad` を検索し、0 件（2026-10-15）。
+- facade は関連関数とする。親テープが無いので `&self` を取らない。裸の自由関数 `fandhe_ai::vmap_grad` は既存の保留方針（裸の自由関数は未承認経路）に合わせて公開しない。
+- クロージャへ tape ハンドルを渡す理由: `Var::tape()` は `pub(crate)`（`var.rs:223`）で、スライス `Var` だけでは子テープ上に重み・ターゲット等の定数を登録できない。`matmul` を含む損失が書けなくなる。facade は `var` 系だけを持つ借用ハンドル `TapeRef<'c>` を渡す。先例は `nn::Module::forward(TapeRef<'t>, &Var<'t>)`（`crates/facade/src/nn/container.rs:396`）と #2397 の `TapeRef::from_autodiff`。`backward`／`reset` は公開面に出ない（REQ-12）。
+- この形の代償: HRTB のため、クロージャはサンプルをまたいで `Var` を保持できない。定数はサンプルごとに登録し直す。これは明示ループ参照と同じで、性能は契約にしない。
+- 採らなかった案:
+  - (a) サンプル数ぶんのテープを受ける: `BackendOps` を B 個作らせ B 個のグラフを保持する。tape ハンドルの問題も解決しない。
+  - (b) 1 枚のテープに `reset` せず全サンプルを記録し、サンプルごとに `backward`: `backward` は `nodes.len()` 全体を走査するため（`backward.rs` の `grads = vec![None; n]`・`(0..n).rev()`）、サンプル i が O(i·G) になり全体で O(B²·G) 時間・O(B·G) メモリ。明示ループより悪い。
+  - (c) 子テープを値で受けて消費する: 学習ステップごとに `tape_for` し直す必要があり、`reset` 再利用の利点を失う。
+  - (d) 戻り値を `Var` にする: 32.5 のとおり含めない。
+- 停止条件（§23.2 と同型）: HRTB クロージャ、または facade のアダプタクロージャが newtype 越しにコンパイルできない場合、#3071／#3072 は実装を止めて本記録へ戻る。
+
+### 32.2 子テープの扱い（葉プレフィックス契約との照合）
+
+- 採用: 1 枚の `&mut Tape` をサンプルごとに `reset` して使い回す。
+- 入口: `child.is_empty()` でなければ `Err(Backward)`（`create_graph.rs:260`・§31.3 の 5 と同じ variant）。空でない子テープへの `reset` は呼び出し側のノードを壊すため fail-closed。入口で `child.rollback_point()`（`tape.rs:3104`・`pub(crate)`）を保存する。
+- サンプル i（0..B）ごとの処理:
+  1. ホストで `input.narrow(in_dim, i, 1)` → `contiguous()` → `reshape(slice_shape)`。
+  2. `child.var(&slice)` で追跡ありの葉 `s` を作る。
+  3. `f(&*child, &s)` を呼び、損失を検査する（32.3）。
+  4. `child.backward(&loss)` → `grads.get(&s)` を結果バッファの i 行目へコピーする。
+  5. `child.reset()`。
+- サンプルごとの本体は所有権のある `Tensor` を返してから `reset` する。`Var<'c>` が `&mut` の借用をまたがない構成にする（#3071 への注意）。
+- 出口: 成功時は手順 5 で最後のサンプルの `reset` が済んでいるため追加の `reset` は呼ばず、`child.rollback_to(start)` だけで入口の状態へ戻す。Phase B の `Err` 時は、失敗したサンプルのグラフが残っているので `reset` を 1 回だけ呼んでから `child.rollback_to(start)` する（手順 5 を通らないサンプルに対する後片付けで、手順 5 と合わせても 1 サンプルあたり `reset` は 1 回）。いずれの場合も入口の状態へ戻す。これが無いと、サンプル 0 のスライス葉（とクロージャが最初の演算より前に登録した葉）が葉プレフィックスに固定され（`tape.rs:3141` の `freeze_leaf_prefix`・`reset`（`tape.rs:3210`）の doc「保持される葉の範囲」）、すべての `reset` を越えて残り、次の呼び出しの空チェックで失敗する。`rollback_to` の doc は「失敗時専用」なので、成功時の使用も含む形に内部 doc だけ広げる（公開面は不変）。
+- 結果の契約: 子テープは空かつ入口の葉プレフィックス状態で戻る。`Tape::reset` は呼ぶたび世代（epoch）を 1 進めるため、`reset` の呼び出し回数は成功時 B 回（サンプルごとに 1 回）で、世代は B だけ進む（処理したサンプル数と一致）。`Err` 時は失敗サンプルの後片付けを含め、開始済みのサンプル数（成功済み＋失敗 1）だけ進む。hook・checkpoint 区間は `reset` が消す。ピークメモリはサンプル 1 個分のグラフ。Phase A の失敗では子テープは無変更。
+
+### 32.3 入口検査・エラー順序（新しい variant なし。`AutodiffError` を再利用）
+
+- Phase A（子テープ無変更）:
+  1. `in_dim >= rank`（rank 0 を含む）→ `Shape(AxisOutOfRange)`
+  2. `shape[in_dim] == 0`（空バッチ）→ `InvalidArgument`（`vmap` と同じ。結果形状を推定しない）
+  3. 結果要素数を `checked_numel` で検査 → `Shape(ElementCountOverflow)`
+  4. `child` が空でない → `Backward`
+- Phase B（サンプル順。最初の違反で止まる）:
+  5. クロージャの `Err` はそのまま伝播する。
+  6. 戻り値が `child` の現世代に属さない → `TapeMismatch`（`check_on_tape`）。HRTB があっても、変性により leak した `'static` テープの `Var` が通りうるため実行時検査として残す。
+  7. 戻り値の要素数が 1 でない → `InvalidArgument`（`hvp` と同じく `[]`・`[1]`・`[1, 1]` は可。素の `backward` は非スカラーを全要素 1 で暗黙に総和するため先に拒否する）。
+  8. 戻り値が追跡なし → その行は全ゼロ（`vjp` の追跡なし `output` の先例・§23.3 に合わせる）。追跡ありでもスライスへ勾配が届かない（`grads.get(&s) == None`）→ 全ゼロ。
+  9. `backward` やバックエンドの `Err`（`DeviceMismatch` 等）は伝播する。
+- 入力は `Tensor` なので追跡なし入力という概念は無い。非有限値は検査せず伝播する。経路上の Op は 1 階の `backward` が対応する範囲で、`create_graph` の対象 Op には限らない。
+
+### 32.4 数値
+
+- 参照は `vmap_grad` を経由しない明示ループ（各スライスで `backward`。§23.3 の「値だけが要る場合」）とし、REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で比較する。同じ Op 列なので bit 一致の見込みは高いが契約にしない。tolerance・baseline は新設も変更もしない。
+
+### 32.5 微分可能な結果は今回含めない
+
+- 理由 1: 微分可能にするには、サンプルごとに `backward_create_graph` で勾配を孫テープ上の `Var` にする必要がある。各サンプルの勾配は別々の（`reset` で消える）テープに置かれ、`Var::stack` はテープをまたげない（`Var::to_tape` は非微分）。
+- 理由 2: 経路上の Op が `supports_create_graph()` の対象に狭まる。
+- 理由 3: 入力が `Tensor` なので、親グラフとの接続がそもそも無い。
+- 将来の追加: §31.1 の命名パターンに従い別名の関数（例 `vmap_grad_create_graph`）として足せば、`vmap_grad` のシグネチャは不変で追加のみの非破壊変更になる（`AutodiffError` は `#[non_exhaustive]`）。
+
+### 32.6 既存 `Tape::vmap` との比較と非破壊確認
+
+| 観点 | `Tape::vmap`（§17・§23） | `Tape::vmap_grad` |
+|---|---|---|
+| 入力 | `Var`（親テープ上） | `Tensor<f32>`（ホスト値） |
+| テープ | 入力と同一 | 空の子テープ `&mut`（サンプルごとに `reset`） |
+| 戻り値 | 微分可能な `Var`（`Var::stack`） | 非微分の `Tensor<f32>` |
+| クロージャ内の勾配 | 契約外 | 損失 `Var` の `backward` を内部で実行（クロージャは勾配を取らない） |
+| Phase B 失敗時 | 記録済みノードが残る | 子テープは入口状態へ戻る |
+| 計算量・メモリ | B 回ぶんのグラフを保持 | 時間は B 回ぶん、ピークメモリはサンプル 1 個分 |
+| 数値判定 | REQ-2 | REQ-2（ループ参照。bit 一致は契約外） |
+
+- 非破壊: `Tape::vmap` のシグネチャと挙動は不変。公開面の変更は facade `Tape` の関連関数 1 つの追加のみ。0.11.0 に同名なし（32.1 の実測）。新しい型・variant・再エクスポートは無い。`Tape::vmap` の rustdoc の「`vmap(grad)` は契約外」は #3072 で `vmap_grad` への案内に更新する（本 issue ではコードに触れない）。
+
+### 32.7 #3071・#3072・#3073 への手順
+
+- **#3071（autodiff）**:
+  - `functional_ops.rs` に `pub fn vmap_grad` を追加する（既存関数の挙動は不変）。最初に HRTB クロージャのコンパイル可否を確かめる（32.1 の停止条件）。
+  - モジュール doc の共通契約「`vmap` のみ同じテープ上の微分可能な `Var`」と `vmap` doc の「契約外」を更新する。`tape.rs` の `rollback_to` doc を成功時の使用も含む形に広げる（`pub(crate)` のまま）。
+  - 単体テスト（`functional_ops_composition.rs` の隣）: `sum(x⊙x)`・`tanh`・`matmul` の損失と明示ループ参照の REQ-2 一致（バッチ 1・複数・`in_dim ≠ 0`）。32.3 の全エラーと順序。途中サンプルの `Err` で子テープが空・入口状態へ戻ること。直後の 2 回目の呼び出しが成功すること。追跡なし損失・未到達のゼロ行。
+  - 新しい依存・`unsafe` は無い。
+- **#3072（facade）**:
+  - 関連関数の 1 式委譲と rustdoc、facade 単独の doctest（例 `|t, s| s.mul(s)?.sum(None)` で勾配 `2x`）。`Tape::vmap` rustdoc の更新。
+  - `FunctionalTransformsHoldDoctestGuard` に、未承認の受け手のプローブ（裸の自由関数・`Var`／`Tensor<f32>` 上の `vmap_grad`）を足す。反転対象は無い見込み。
+  - `api_surface.rs` の承認シグネチャと委譲本体の正ガード（アダプタクロージャを含む本体の形）。名前・識別子配列と宣言インベントリは名前で固定する（§27.4 方針。現行の 7／8／15 件から 8／9／17 件になる見込み）。到達性テスト・自己テスト。
+  - `docs/compat-api-scope.md` §5.1 F ブロックに F8 行を足し、本設計記録に実装記録を足す。
+- **#3073（テスト）**:
+  - `functional_transforms_facade.rs` の CPU テスト（明示ループ参照・`in_dim` 0／1・バッチ 1・エラー経路）。CUDA／Metal の `#[ignore]` テスト。
+  - `docs/perf/logs/functional-transforms-vmap-grad-3073/README.md`（未実測欄）と `docs/README.md` 索引。
+
+### 32.8 所有者へ戻す論点・スコープ外
+
+- 所有者へ戻す論点（形を本記録に書けないもの）:
+  1. 共有パラメータについてのサンプルごとの勾配（一般的な ML の意味での per-sample gradient。`torch.func` の `in_dims=(None, 0)`）は本 API の戻り値に含まれない。返す形（複数出力・パラメータ指定の方法）は本記録では決めない。
+  2. 定数のサンプルごとの再登録コスト（CUDA／Metal ではサンプルごとの転送）を実測で問題視した場合の、事前登録葉を共有する形の要否。
+- スコープ外: バッチ規則型 `vmap`、微分可能版（32.5）、`out_dim`・複数入力、`VarF64`・f16・`TapeF64`、実機実測（#3171・#3172）、`supports_create_graph` の拡張（#3075）、`docs/spec`。
+- 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
