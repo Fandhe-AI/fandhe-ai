@@ -37,6 +37,14 @@ use crate::error::AutodiffError;
 use crate::grad::cast_to_f32_with_fallback;
 use crate::var::matmul_forward;
 
+/// [`Op::BatchNormGradHost`] が表す出力（`batch_norm_vjp_channels` の戻り値の選択）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchNormGradKind {
+    Dx,
+    Dw,
+    Db,
+}
+
 /// テープの識別子。プロセス全体で単調増加するカウンタから発行する。
 ///
 /// ポインタ等値（`ptr::eq`）ではなく専用 ID を用いる理由: スコープ末で
@@ -680,6 +688,24 @@ pub(crate) enum Op {
         x: NodeId,
         params: Conv2dParams,
         transposed: bool,
+    },
+    /// BatchNorm の `dx`／`dw`／`db` を子テープへ記録するホスト値ノード（イシュー
+    /// #3079・決定記録 §28）。`structure` は二階微分経路（チャネル行上の S1 合成
+    /// グラフ。`create_graph_norm::batch_norm_cgrads`）、`g`（上流勾配）・`x`・`weight`
+    /// は 1 階 VJP と同じホスト関数（`grad::batch_norm_vjp_channels`。f64 縮約）へ
+    /// 渡すオペランド。`Op::Contiguous` と異なり孫テープでの再生時にも同じホスト関数で
+    /// 値を再計算するため、構造側の f32 縮約とホストの f64 縮約で丸めが異なる入力でも
+    /// 孫テープの値が 1 階と bit 同一のまま保たれる（§21.1(5)・§28.1）。VJP は恒等で
+    /// `structure` のみへ渡す。
+    BatchNormGradHost {
+        structure: NodeId,
+        g: NodeId,
+        x: NodeId,
+        weight: Option<NodeId>,
+        has_bias: bool,
+        eps: f32,
+        fixed_stats: Option<(Tensor<f32>, Tensor<f32>)>,
+        kind: BatchNormGradKind,
     },
     /// 行方向 RMSNorm（イシュー #1596）。`BackendOps` に対応メソッド
     /// （`rmsnorm`。既存の `run_fused` canonical プラン一致経路とは別の
@@ -1856,7 +1882,7 @@ impl Op {
             // として `docs/autodiff-checkpoint-design.md` に記録済み。
             Op::Contiguous { .. } => false,
             // `Op::ConvWeightGradHost` も実体化演算で再導出分岐が無い。
-            Op::ConvWeightGradHost { .. } => false,
+            Op::ConvWeightGradHost { .. } | Op::BatchNormGradHost { .. } => false,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -2122,6 +2148,20 @@ impl Op {
                 f(*structure);
                 f(*g);
                 f(*x);
+            }
+            Op::BatchNormGradHost {
+                structure,
+                g,
+                x,
+                weight,
+                ..
+            } => {
+                f(*structure);
+                f(*g);
+                f(*x);
+                if let Some(w) = weight {
+                    f(*w);
+                }
             }
             Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
             Op::Sum { input, .. }
@@ -2429,7 +2469,10 @@ impl Op {
     /// `Contiguous`・`Where` は無条件で `true`（#2062）。イシュー #3078 で
     /// `RmsNorm`・`LayerNorm` も `true`（V3 値＋S1 構造。入力が非有限・
     /// overflow 域の場合は `create_graph_norm::validate_norm_s1` が入口で
-    /// 拒否する。決定記録 §27）。
+    /// 拒否する。決定記録 §27）。`BatchNorm`（train／eval。#3079）も `true`——値は
+    /// 1 階と同じ `batch_norm_vjp_channels`（V3）、構造はチャネル行上の `LayerNorm` と
+    /// 同じ S1 合成で、適用判定も同じ `validate_norm_s1`／`check_structure_stages` が担う
+    /// （`create_graph_norm.rs`・決定記録 §28）。
     ///
     /// `Op::ScalarUnary`／`Op::ScalarBinary` は **payload（`op` フィールド
     /// の具体的な variant）まで見て判定する**（[`scalar_unary_
@@ -2486,6 +2529,7 @@ impl Op {
             | Op::Concat { .. }
             | Op::Contiguous { .. }
             | Op::ConvWeightGradHost { .. }
+            | Op::BatchNormGradHost { .. }
             // 2D 畳み込み族（イシュー #3080・決定記録 §21・§23）。`Conv2d`／
             // `ConvTranspose2d`／`Unfold`／`Fold` は `replay_op`（公開 `Var`
             // メソッドへの委譲）と `build_cgrads`（unfold／fold＋rank 2
@@ -2519,7 +2563,9 @@ impl Op {
             | Op::NllLoss { .. }
             // 行方向正規化（イシュー #3078・決定記録 §27）。V3 値＋S1 構造。
             | Op::RmsNorm { .. }
-            | Op::LayerNorm { .. } => true,
+            | Op::LayerNorm { .. }
+            // チャネル方向正規化（イシュー #3079・決定記録 §28）。V3 値＋S1 構造。
+            | Op::BatchNorm { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2550,7 +2596,6 @@ impl Op {
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::BatchNorm { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }

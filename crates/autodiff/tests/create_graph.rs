@@ -12,6 +12,8 @@
 //!   閉形式と突合する。
 //! - 小型 MLP（`Linear`→`tanh`→`Linear`）の HVP（ヘッセ・ベクトル積）を
 //!   `create_graph` を経由しない独立な方向微分の中央差分と突合する。
+//! - `BatchNorm`（train／eval。#3079）の二階微分を有限差分・独立合成・3 段の
+//!   overflow 回帰ベクトルで確認する（running stats が二重更新されないことも含む）。
 //! - `create_graph` を使わない既定経路（`Tape::backward`）が
 //!   `backward_create_graph` 呼び出しの前後で bit 同一のまま不変である
 //!   ことを確認する（受入基準 2）。
@@ -4015,5 +4017,878 @@ fn create_graph_rejects_gather_mixed_with_unsupported_op_and_keeps_child_empty()
         .unwrap();
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+// --- BatchNorm（イシュー #3079。決定記録 §24）-------------------------------
+//
+// train（バッチ統計）・eval（固定統計）の両モードで `Op::BatchNorm` を
+// create_graph の対象にする。train の `sum(bn(x))` は x に対する勾配が恒等的に
+// 0 で Hessian テストにならないため、損失は一様でない係数付きの曲率を持つ
+// 形（`sum(y*y*c) + sum(tanh(y)*c2)`）にする。
+
+use fandhe_ai_autodiff::functional_ops::jvp_create_graph;
+use fandhe_ai_autodiff::nn::{BatchNorm1d, BatchNorm2d, Module};
+
+/// 決定的で散らばった入力（`[3,2]`・`[2,2,2,2]` のどちらでも分散が小さすぎない）。
+fn bn_input(n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| ((i * 37 % 11) as f32 - 5.0) * 0.37 + 0.05 * i as f32)
+        .collect()
+}
+
+fn bn_coeffs(n: usize, salt: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| 0.5 + ((i * 7 + salt) % 5) as f32 * 0.3)
+        .collect()
+}
+
+const BN_EPS: f32 = 1e-3;
+
+#[derive(Clone, Copy)]
+struct BnCfg {
+    shape: &'static [usize],
+    train: bool,
+    affine: bool,
+}
+
+fn bn_fixed_stats(c: usize) -> (Tensor<f32>, Tensor<f32>) {
+    let mean: Vec<f32> = (0..c).map(|i| 0.2 - 0.3 * i as f32).collect();
+    let var: Vec<f32> = (0..c).map(|i| 0.8 + 0.5 * i as f32).collect();
+    (t(mean, &[c]), t(var, &[c]))
+}
+
+fn bn_w(c: usize) -> Tensor<f32> {
+    t((0..c).map(|i| 1.3 - 0.4 * i as f32).collect(), &[c])
+}
+
+fn bn_b(c: usize) -> Tensor<f32> {
+    t((0..c).map(|i| 0.2 + 0.1 * i as f32).collect(), &[c])
+}
+
+/// `y` から曲率を持つスカラー損失を作る。
+fn bn_curvature_loss<'t>(
+    tape: &'t Tape,
+    y: &Var<'t>,
+    shape: &[usize],
+) -> Result<Var<'t>, AutodiffError> {
+    let n = flat_len(shape);
+    let c1 = tape.var_no_grad(&t(bn_coeffs(n, 0), shape));
+    let c2 = tape.var_no_grad(&t(bn_coeffs(n, 3), shape));
+    let a = y.mul(y)?.mul(&c1)?.sum(None)?;
+    let b = y.tanh().mul(&c2)?.sum(None)?;
+    a.add(&b)
+}
+
+/// `cfg` の BatchNorm を `x`（と任意の `w`／`b`）へ適用する。
+fn bn_apply<'t>(
+    cfg: BnCfg,
+    x: &Var<'t>,
+    w: Option<&Var<'t>>,
+    b: Option<&Var<'t>>,
+) -> Result<Var<'t>, AutodiffError> {
+    if cfg.train {
+        x.batch_norm(w, b, BN_EPS)
+    } else {
+        let (mean, var) = bn_fixed_stats(cfg.shape[1]);
+        x.batch_norm_infer(w, b, &mean, &var, BN_EPS)
+    }
+}
+
+fn bn_configs() -> Vec<BnCfg> {
+    let mut v = Vec::new();
+    for shape in [&[3usize, 2][..], &[2, 2, 2, 2][..]] {
+        for train in [true, false] {
+            for affine in [true, false] {
+                v.push(BnCfg {
+                    shape,
+                    train,
+                    affine,
+                });
+            }
+        }
+    }
+    v
+}
+
+/// 有限差分の刻み。f32 勾配の丸め雑音（~1e-7/h）と打ち切り誤差（~h²）の釣り合いで選ぶ。
+const BN_FD_H: f64 = 1e-2;
+
+fn bn_check_hessian<F>(x0: &[f32], shape: &[usize], build: F)
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let numeric = finite_diff_hessian(&build, x0, shape, BN_FD_H);
+    let analytic = analytic_hessian(&build, x0, shape);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+#[test]
+fn hessian_batch_norm_x_matches_finite_difference() {
+    // rank 4 は f32 勾配の丸め雑音が Hessian 成分（~1e-2）に対し無視できないため
+    // 有限差分では rank 2 を、rank 4 は下の独立合成との突合で確認する。
+    for cfg in bn_configs().into_iter().filter(|c| c.shape.len() == 2) {
+        let c = cfg.shape[1];
+        let x0 = bn_input(flat_len(cfg.shape));
+        bn_check_hessian(&x0, cfg.shape, |tape, x| {
+            let w = tape.var_no_grad(&bn_w(c));
+            let b = tape.var_no_grad(&bn_b(c));
+            let y = if cfg.affine {
+                bn_apply(cfg, x, Some(&w), Some(&b))?
+            } else {
+                bn_apply(cfg, x, None, None)?
+            };
+            bn_curvature_loss(tape, &y, cfg.shape)
+        });
+    }
+}
+
+#[test]
+fn hessian_batch_norm_weight_and_bias_match_finite_difference() {
+    for shape in [&[3usize, 2][..], &[2, 2, 2, 2][..]] {
+        for train in [true, false] {
+            let cfg = BnCfg {
+                shape,
+                train,
+                affine: true,
+            };
+            let c = shape[1];
+            let xv = bn_input(flat_len(shape));
+            let w0 = bn_w(c).as_slice().unwrap().to_vec();
+            let b0 = bn_b(c).as_slice().unwrap().to_vec();
+            // w を微分変数にする。
+            bn_check_hessian(&w0, &[c], |tape, w| {
+                let x = tape.var_no_grad(&t(xv.clone(), shape));
+                let b = tape.var_no_grad(&bn_b(c));
+                let y = bn_apply(cfg, &x, Some(w), Some(&b))?;
+                bn_curvature_loss(tape, &y, shape)
+            });
+            // b を微分変数にする。
+            bn_check_hessian(&b0, &[c], |tape, b| {
+                let x = tape.var_no_grad(&t(xv.clone(), shape));
+                let w = tape.var_no_grad(&bn_w(c));
+                let y = bn_apply(cfg, &x, Some(&w), Some(b))?;
+                bn_curvature_loss(tape, &y, shape)
+            });
+        }
+    }
+}
+
+/// 混合二階微分 `∂(∂L/∂w_j)/∂x_i`: 子テープ由来の値と、`Tape::backward` の
+/// `g_w` を x 方向に中央差分した値を突合する。
+#[test]
+fn hessian_batch_norm_mixed_x_w_matches_finite_difference() {
+    for shape in [&[3usize, 2][..], &[2, 2, 2, 2][..]] {
+        for train in [true, false] {
+            let cfg = BnCfg {
+                shape,
+                train,
+                affine: true,
+            };
+            let c = shape[1];
+            let n = flat_len(shape);
+            let x0 = bn_input(n);
+            let grad_w_at = |x: &[f32]| -> Vec<f64> {
+                let tape = Tape::new_with_ops(common::naive_ops());
+                let xv = tape.var(&t(x.to_vec(), shape));
+                let w = tape.var(&bn_w(c));
+                let b = tape.var_no_grad(&bn_b(c));
+                let y = bn_apply(cfg, &xv, Some(&w), Some(&b)).unwrap();
+                let loss = bn_curvature_loss(&tape, &y, shape).unwrap();
+                let g = tape.backward(&loss).unwrap();
+                let gw = g.get(&w).unwrap().unwrap();
+                (0..c).map(|j| gw.get(&[j]).unwrap() as f64).collect()
+            };
+            let h = BN_FD_H;
+            let mut numeric = vec![vec![0.0f64; n]; c];
+            for i in 0..n {
+                let mut xp = x0.clone();
+                let mut xm = x0.clone();
+                xp[i] += h as f32;
+                xm[i] -= h as f32;
+                let (gp, gm) = (grad_w_at(&xp), grad_w_at(&xm));
+                for j in 0..c {
+                    numeric[j][i] = (gp[j] - gm[j]) / (2.0 * h);
+                }
+            }
+
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(x0.clone(), shape));
+            let w = tape.var(&bn_w(c));
+            let b = tape.var_no_grad(&bn_b(c));
+            let y = bn_apply(cfg, &x, Some(&w), Some(&b)).unwrap();
+            let loss = bn_curvature_loss(&tape, &y, shape).unwrap();
+            let cg = tape.backward_create_graph(&loss, &child).unwrap();
+            let gw = cg.grad(&w).unwrap().unwrap();
+            let cx = cg.child_var(&x).unwrap().unwrap();
+            let mut analytic = vec![vec![0.0f64; n]; c];
+            for j in 0..c {
+                let row = child
+                    .backward(&extract_scalar(&gw, &[c], j).unwrap())
+                    .unwrap();
+                let hx = row.get(&cx).unwrap().unwrap();
+                for i in 0..n {
+                    analytic[j][i] = hx.get(&unravel(i, shape)).unwrap() as f64;
+                }
+            }
+            assert_hessian_close(&analytic, &numeric);
+        }
+    }
+}
+
+/// 独立参照: BatchNorm（train／eval・rank 2／4・affine の有無）を `mean_dims`・
+/// `sub`・`mul`・`sqrt`・`div` の合成（既に create_graph 対象）で親テープに組み、
+/// その Hessian と突合する。有限差分の丸め雑音に依存しない確認。
+fn bn_composite<'t>(tape: &'t Tape, cfg: BnCfg, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let c = cfg.shape[1];
+    let mut bshape = vec![1usize; cfg.shape.len()];
+    bshape[1] = c;
+    let dims: Vec<usize> = (0..cfg.shape.len()).filter(|&d| d != 1).collect();
+    let col = |v: Vec<f32>| tape.var_no_grad(&t(v, &bshape));
+    let (mean, rstd) = if cfg.train {
+        let mu = x.mean_dims(&dims, true)?;
+        let d = x.sub(&mu)?;
+        let var = d.mul(&d)?.mean_dims(&dims, true)?;
+        let rstd = col(vec![1.0; c]).div(&var.add(&col(vec![BN_EPS; c]))?.sqrt()?)?;
+        (mu, rstd)
+    } else {
+        let (m, v) = bn_fixed_stats(c);
+        let rstd = col(vec![1.0; c]).div(
+            &col(v.as_slice().unwrap().to_vec())
+                .add(&col(vec![BN_EPS; c]))?
+                .sqrt()?,
+        )?;
+        (col(m.as_slice().unwrap().to_vec()), rstd)
+    };
+    let mut y = x.sub(&mean)?.mul(&rstd)?;
+    if cfg.affine {
+        y = y
+            .mul(&col(bn_w(c).as_slice().unwrap().to_vec()))?
+            .add(&col(bn_b(c).as_slice().unwrap().to_vec()))?;
+    }
+    bn_curvature_loss(tape, &y, cfg.shape)
+}
+
+#[test]
+fn hessian_batch_norm_matches_manual_composition() {
+    for cfg in bn_configs() {
+        let c = cfg.shape[1];
+        let x0 = bn_input(flat_len(cfg.shape));
+        let analytic_bn = analytic_hessian(
+            |tape, x| {
+                let w = tape.var_no_grad(&bn_w(c));
+                let b = tape.var_no_grad(&bn_b(c));
+                let y = if cfg.affine {
+                    bn_apply(cfg, x, Some(&w), Some(&b))?
+                } else {
+                    bn_apply(cfg, x, None, None)?
+                };
+                bn_curvature_loss(tape, &y, cfg.shape)
+            },
+            &x0,
+            cfg.shape,
+        );
+        let analytic_ref = analytic_hessian(|tape, x| bn_composite(tape, cfg, x), &x0, cfg.shape);
+        assert_hessian_close(&analytic_bn, &analytic_ref);
+    }
+}
+
+/// 子テープ上の 1 階勾配（x・w・b）が `Tape::backward` と REQ-2 で一致し、
+/// `first_order()` が素の `backward` と bit 同一であること。
+#[test]
+fn batch_norm_create_graph_first_order_matches_backward() {
+    for cfg in bn_configs() {
+        if !cfg.affine {
+            continue;
+        }
+        let c = cfg.shape[1];
+        let n = flat_len(cfg.shape);
+        let x0 = bn_input(n);
+        let run = |with_cg: bool| {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(x0.clone(), cfg.shape));
+            let w = tape.var(&bn_w(c));
+            let b = tape.var(&bn_b(c));
+            let y = bn_apply(cfg, &x, Some(&w), Some(&b)).unwrap();
+            let loss = bn_curvature_loss(&tape, &y, cfg.shape).unwrap();
+            let plain = tape.backward(&loss).unwrap();
+            let dense = |g: &fandhe_ai_autodiff::Gradients, v: &Var<'_>| -> Vec<f32> {
+                g.get(v)
+                    .unwrap()
+                    .unwrap()
+                    .contiguous()
+                    .as_slice()
+                    .unwrap()
+                    .to_vec()
+            };
+            let plain_x = dense(&plain, &x);
+            if !with_cg {
+                return (plain_x, None);
+            }
+            let cg = tape.backward_create_graph(&loss, &child).unwrap();
+            let first_x = dense(cg.first_order(), &x);
+            assert_eq!(plain_x, first_x, "first_order は backward と bit 同一");
+            for (v, name) in [(&x, "x"), (&w, "w"), (&b, "b")] {
+                let expected = dense(&plain, v);
+                let got = cg.grad(v).unwrap().unwrap().to_tensor();
+                let got = got.contiguous().as_slice().unwrap().to_vec();
+                for (a, e) in got.iter().zip(expected.iter()) {
+                    assert!(
+                        common::req2_close(*a as f64, *e as f64),
+                        "cg.grad({name}) が backward と不一致: {a} vs {e}"
+                    );
+                }
+            }
+            (plain_x, Some(()))
+        };
+        let _ = run(true);
+    }
+}
+
+/// running stats（`nn::BatchNorm*` の buffer・`num_batches_tracked`）が子テープ
+/// 構築・二階 backward・孫テープ再生で二重に更新されないこと。
+#[test]
+fn batch_norm_create_graph_does_not_touch_running_stats() {
+    for train in [true, false] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let grand = Tape::new_with_ops(common::naive_ops());
+        let mut bn = BatchNorm1d::new(2, BN_EPS, 0.1).unwrap();
+        bn.set_training(train);
+        let x = tape.var(&t(bn_input(6), &[3, 2]));
+        let y = bn.bind(&tape).forward(&x).unwrap();
+        let loss = bn_curvature_loss(&tape, &y, &[3, 2]).unwrap();
+        let (rm, rv, nb) = (
+            bn.running_mean(),
+            bn.running_var(),
+            bn.num_batches_tracked(),
+        );
+        assert_eq!(nb, u64::from(train));
+
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+        child
+            .backward(&extract_scalar(&gx, &[3, 2], 0).unwrap())
+            .unwrap()
+            .get(&cx)
+            .unwrap()
+            .unwrap();
+        let s2 = extract_scalar(&gx, &[3, 2], 1).unwrap();
+        let _ = child.backward_create_graph(&s2, &grand).unwrap();
+        assert_eq!(bn.running_mean().as_slice(), rm.as_slice());
+        assert_eq!(bn.running_var().as_slice(), rv.as_slice());
+        assert_eq!(bn.num_batches_tracked(), nb);
+
+        // jvp_create_graph（親→子→孫の再生）でも同様。
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let grand = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(bn_input(6), &[3, 2]));
+        let y = bn.bind(&tape).forward(&x).unwrap();
+        let (rm, rv, nb) = (
+            bn.running_mean(),
+            bn.running_var(),
+            bn.num_batches_tracked(),
+        );
+        let v = t(bn_coeffs(6, 1), &[3, 2]);
+        let _ = jvp_create_graph(&tape, &y, &x, &v, &child, &grand).unwrap();
+        assert_eq!(bn.running_mean().as_slice(), rm.as_slice());
+        assert_eq!(bn.running_var().as_slice(), rv.as_slice());
+        assert_eq!(bn.num_batches_tracked(), nb);
+    }
+    // BatchNorm2d（rank 4）。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let bn = BatchNorm2d::new(2, BN_EPS, 0.1).unwrap();
+    let x = tape.var(&t(bn_input(16), &[2, 2, 2, 2]));
+    let y = bn.bind(&tape).forward(&x).unwrap();
+    let loss = bn_curvature_loss(&tape, &y, &[2, 2, 2, 2]).unwrap();
+    let (rm, nb) = (bn.running_mean(), bn.num_batches_tracked());
+    let _ = tape.backward_create_graph(&loss, &child).unwrap();
+    assert_eq!(bn.running_mean().as_slice(), rm.as_slice());
+    assert_eq!(bn.num_batches_tracked(), nb);
+}
+
+fn all_finite(v: &[f32]) -> bool {
+    v.iter().all(|x| x.is_finite())
+}
+
+/// 3 段（1 階 `Tape::backward`・子テープ `cg.grad`・孫テープ再生）すべてで有限か
+/// つ 1 階と REQ-2 一致を確認する。`fixed` が `Some` なら eval モード。
+fn bn_apply_fixed<'t>(
+    x: &Var<'t>,
+    w: &Var<'t>,
+    b: &Var<'t>,
+    c: usize,
+    eps: f32,
+    fixed: &Option<(Vec<f32>, Vec<f32>)>,
+) -> Result<Var<'t>, AutodiffError> {
+    match fixed {
+        None => x.batch_norm(Some(w), Some(b), eps),
+        Some((m, v)) => x.batch_norm_infer(
+            Some(w),
+            Some(b),
+            &t(m.clone(), &[c]),
+            &t(v.clone(), &[c]),
+            eps,
+        ),
+    }
+}
+
+/// 3 段（1 階 `Tape::backward`・子テープ `cg.grad`・孫テープ再生）すべてで有限か
+/// つ 1 階と REQ-2 一致を確認する（x・w・b の勾配）。`fixed` が `Some` なら eval。
+/// 損失が `y` に線形なので勾配が x に依存しない場合（eval の dx 等）は 2・3 段目を
+/// 省略し、x に依存する勾配（dw 等）で 2・3 段目を確認する。
+///
+/// 総括的な適用判定（`create_graph_norm::check_structure_stages`・決定記録 §28）が
+/// 入力を拒否した場合は `Err(Backward)` かつ `child` が空であることを確かめて
+/// `BnOutcome::Rejected` を返す（受理なら上の 3 段を確かめて `Accepted`）。
+fn check_bn_three_stage(
+    ctx: &str,
+    shape: &[usize],
+    x0: Vec<f32>,
+    coeff: Vec<f32>,
+    eps: f32,
+    fixed: Option<(Vec<f32>, Vec<f32>)>,
+) -> BnOutcome {
+    let c = shape[1];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0, shape));
+    let w = tape.var(&t(vec![1.0; c], &[c]));
+    let b = tape.var(&t(vec![0.0; c], &[c]));
+    let y = bn_apply_fixed(&x, &w, &b, c, eps, &fixed).unwrap();
+    let k = tape.var_no_grad(&t(coeff, shape));
+    let loss = y.mul(&k).unwrap().sum(None).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert!(matches!(e, AutodiffError::Backward(_)), "{ctx}: {e:?}");
+            assert!(child.is_empty(), "{ctx}: 拒否時に child が空へ戻る");
+            return BnOutcome::Rejected;
+        }
+    };
+    let dense = |v: &Tensor<f32>| v.contiguous().as_slice().unwrap().to_vec();
+    for (var, name) in [(&x, "x"), (&w, "w"), (&b, "b")] {
+        let expected = dense(plain.get(var).unwrap().unwrap());
+        if !all_finite(&expected) {
+            // 1 階自体が f32 に収まらない成分（巨大な上流勾配の dw 等）は対象外。
+            continue;
+        }
+        let gv = cg.grad(var).unwrap().unwrap();
+        let gt = gv.to_tensor();
+        let got = dense(&gt);
+        assert!(
+            all_finite(&got),
+            "{ctx}/{name}: cg.grad が有限でない: {got:?}"
+        );
+        for (a, e) in got.iter().zip(expected.iter()) {
+            assert!(
+                common::req2_close(*a as f64, *e as f64),
+                "{ctx}/{name}: cg.grad が 1 階と不一致 {a} vs {e}"
+            );
+        }
+        // 2 段目: 子テープを微分し、さらに孫テープへ再生する。
+        let w2 = child.var_no_grad(&t(vec![1e-3; got.len()], gt.shape()));
+        let s2 = gv.mul(&w2).unwrap().sum(None).unwrap();
+        // x に依存しない勾配（追跡なし）は 2 階以降の対象外。
+        let hv = match child.backward(&s2) {
+            Ok(hv) => hv,
+            Err(AutodiffError::Backward(_)) => continue,
+            Err(e) => panic!("{ctx}/{name}: child.backward が失敗: {e:?}"),
+        };
+        for target in [&x, &w, &b] {
+            let cv = cg.child_var(target).unwrap().unwrap();
+            if let Some(h) = hv.get(&cv).unwrap() {
+                assert!(all_finite(&dense(h)), "{ctx}/{name}: 二階勾配が有限でない");
+            }
+        }
+        let grand = Tape::new_with_ops(common::naive_ops());
+        let cg2 = child.backward_create_graph(&s2, &grand).unwrap();
+        for target in [&x, &w, &b] {
+            let cv = cg.child_var(target).unwrap().unwrap();
+            if let Some(g2) = cg2.grad(&cv).unwrap() {
+                assert!(
+                    all_finite(&dense(&g2.to_tensor())),
+                    "{ctx}/{name}: 孫テープ再生の勾配が有限でない"
+                );
+            }
+        }
+    }
+    BnOutcome::Accepted
+}
+
+/// [`check_bn_three_stage`] の結果。
+#[derive(Debug, PartialEq, Eq)]
+enum BnOutcome {
+    Accepted,
+    Rejected,
+}
+
+/// 構造の中間値が f32 を超えうる入力の回帰ベクトル。受理されるものは 3 段が有限かつ一致し、
+/// 総括的な適用判定（決定記録 §28）が拒否するものは `child` が空のまま型付きエラーになる
+/// （PR #3348 のレビューで、前置スケール方式では各経路で overflow が再発したため、判定へ
+/// 置き換えた。拒否側の `[3e38,-3e38]`・巨大な上流勾配・eval の逆符号大値は以前は受理していた）。
+#[test]
+fn batch_norm_create_graph_overflow_regression_vectors_are_finite_or_rejected() {
+    let e = 1e-5f32;
+    let accepted = |ctx: &str, shape: &[usize], x0, c, fixed| {
+        assert_eq!(
+            check_bn_three_stage(ctx, shape, x0, c, e, fixed),
+            BnOutcome::Accepted,
+            "{ctx}"
+        );
+    };
+    let rejected = |ctx: &str, shape: &[usize], x0, c, fixed| {
+        assert_eq!(
+            check_bn_three_stage(ctx, shape, x0, c, e, fixed),
+            BnOutcome::Rejected,
+            "{ctx}"
+        );
+    };
+    // x=1e20 系（f32 の二乗が overflow する）。
+    accepted(
+        "1e20",
+        &[4, 1],
+        vec![1e20, 2e20, -1e20, 3e20],
+        vec![1.0, 2.0, -1.0, 0.5],
+        None,
+    );
+    // 中心化の丸め。
+    accepted(
+        "centering",
+        &[2, 1],
+        vec![16777216.0, 16777218.0],
+        vec![1.0, 2.0],
+        None,
+    );
+    // 小スケール（rstd ≈ 316.23）。
+    accepted("small", &[2, 1], vec![1e-30, 1e-30], vec![1.0, 2.0], None);
+    // 定数行。
+    accepted("const", &[2, 1], vec![1e30, 1e30], vec![1.0, 2.0], None);
+    // 全ゼロ。
+    accepted("zeros", &[2, 1], vec![0.0, 0.0], vec![1.0, 2.0], None);
+    // 巨大な定数入力（Codex P1）: train／eval とも構造の全段が安全域に収まる。
+    accepted(
+        "const-3e38-train",
+        &[2, 1],
+        vec![3e38, 3e38],
+        vec![1.0, 2.0],
+        None,
+    );
+    accepted(
+        "const-3e38-eval",
+        &[2, 1],
+        vec![3e38, 3e38],
+        vec![1.0, 2.0],
+        Some((vec![3e38], vec![0.0])),
+    );
+    // eval: 通常値。
+    assert_eq!(
+        check_bn_three_stage(
+            "eval-normal",
+            &[3, 2],
+            bn_input(6),
+            bn_coeffs(6, 2),
+            1e-3,
+            Some((vec![0.1, -0.2], vec![0.9, 1.4])),
+        ),
+        BnOutcome::Accepted
+    );
+    // 中心化 x_i − x_0 が f32 で -inf（入口検査）。
+    rejected("prescale", &[2, 1], vec![3e38, -3e38], vec![1.0, 2.0], None);
+    rejected(
+        "prescale-huge-g",
+        &[2, 1],
+        vec![3e38, -3e38],
+        vec![1e38, 1e38],
+        None,
+    );
+    // eval: x − mean が f32 を超える（固定統計分岐の判定）。
+    rejected(
+        "prescale-huge-g-eval",
+        &[2, 1],
+        vec![3e38, -3e38],
+        vec![1e38, 1e38],
+        Some((vec![-3e38], vec![1e30])),
+    );
+    rejected(
+        "eval-opposite",
+        &[2, 1],
+        vec![2e38, 1e38],
+        vec![1.0, 2.0],
+        Some((vec![-2e38], vec![1e30])),
+    );
+    // 上流勾配が巨大（dx 構造の gs 復元・行方向和の cotangent が 2^125 を超える）。
+    rejected(
+        "huge-g",
+        &[4, 1],
+        vec![1.0, 2.0, 3.0, 4.5],
+        vec![1e38, -1e38, 1e38, -1e38],
+        None,
+    );
+    rejected(
+        "huge-g-same-sign",
+        &[4, 1],
+        vec![1.0, 2.0, 3.0, 4.5],
+        vec![1e38; 4],
+        None,
+    );
+    // 同じ入力で上流勾配を 1e30 へ下げると受理され、3 段が有限かつ一致する。
+    accepted(
+        "huge-g-1e30",
+        &[4, 1],
+        vec![1.0, 2.0, 3.0, 4.5],
+        vec![1e30, -1e30, 1e30, -1e30],
+        None,
+    );
+    accepted(
+        "prescale-1e30",
+        &[2, 1],
+        vec![1e30, -1e30],
+        vec![1e30, 1e30],
+        None,
+    );
+}
+
+/// 閉包性: 子テープの 1 階勾配をさらに `backward_create_graph` できる
+/// （子テープが積む Op がすべて `supports_create_graph == true`）。
+#[test]
+fn batch_norm_create_graph_result_is_closed_under_create_graph() {
+    for cfg in bn_configs() {
+        let c = cfg.shape[1];
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let grand = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(bn_input(flat_len(cfg.shape)), cfg.shape));
+        let w = tape.var(&bn_w(c));
+        let b = tape.var(&bn_b(c));
+        let y = if cfg.affine {
+            bn_apply(cfg, &x, Some(&w), Some(&b)).unwrap()
+        } else {
+            bn_apply(cfg, &x, None, None).unwrap()
+        };
+        let loss = bn_curvature_loss(&tape, &y, cfg.shape).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap();
+        let scalar = gx.sum(None).unwrap();
+        child
+            .backward_create_graph(&scalar, &grand)
+            .expect("子テープの BatchNorm 二階 VJP 構造は孫テープへ再生できるはず");
+    }
+}
+
+/// fail-closed の隣接 Op: 対象外のまま残る `local_response_norm` は入口で拒否され、
+/// 子テープは無変更のまま。
+#[test]
+fn batch_norm_neighbor_local_response_norm_stays_rejected() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(bn_input(16), &[1, 4, 2, 2]));
+    let y = x.local_response_norm(3, 1e-4, 0.75, 1.0).unwrap();
+    let bn_y = y.batch_norm(None, None, BN_EPS).unwrap();
+    let loss = bn_y.sum(None).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+/// 空テンソル（`n == 0`）の eval BatchNorm は入口検査で拒否され、子テープは無変更。
+#[test]
+fn batch_norm_create_graph_rejects_empty_input() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![], &[0, 2]));
+    let (mean, var) = bn_fixed_stats(2);
+    let Ok(y) = x.batch_norm_infer(None, None, &mean, &var, BN_EPS) else {
+        // forward 自体が空入力を拒否する実装ならガード不要（到達しない）。
+        return;
+    };
+    let loss = y.sum(None).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+/// ゼロ軸を含む形状の積が overflow する `[usize::MAX, 2, 0]` でも panic せず、
+/// 型付きエラーで拒否される（形状の積ではなく `contains(&0)` で判定。Codex P1）。
+#[test]
+fn batch_norm_create_graph_rejects_overflowing_empty_shape() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let Ok(xt) = Tensor::new(Vec::<f32>::new(), &[usize::MAX, 2, 0]) else {
+        return;
+    };
+    let x = tape.var(&xt);
+    let (mean, var) = bn_fixed_stats(2);
+    let Ok(y) = x.batch_norm_infer(None, None, &mean, &var, BN_EPS) else {
+        return;
+    };
+    let Ok(loss) = y.sum(None) else {
+        return;
+    };
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+/// 巨大な定数入力（`x=mean=3e38`・`var=0`・追跡 weight=1・`loss=sum(y)`）で、
+/// `dw` を重み 1 で逆伝播しても二階勾配が有限（Codex P1。逆伝播の倍率が相殺する
+/// 順序で掛かること）。eval の `∂dw/∂x` は `rstd = 1/√eps ≈ 316.23`。
+#[test]
+fn batch_norm_create_graph_huge_constant_input_second_order_is_finite() {
+    for train in [false, true] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![3e38; 2], &[2, 1]));
+        let w = tape.var(&t(vec![1.0], &[1]));
+        let y = if train {
+            x.batch_norm(Some(&w), None, 1e-5).unwrap()
+        } else {
+            x.batch_norm_infer(
+                Some(&w),
+                None,
+                &t(vec![3e38], &[1]),
+                &t(vec![0.0], &[1]),
+                1e-5,
+            )
+            .unwrap()
+        };
+        let loss = y.sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let dw = cg.grad(&w).unwrap().unwrap();
+        let s2 = dw.sum(None).unwrap();
+        let hv = child.backward(&s2).unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+        let h = hv.get(&cx).unwrap().expect("dw は x に依存する");
+        let hd = h.contiguous().as_slice().unwrap().to_vec();
+        assert!(hd.iter().all(|v| v.is_finite()), "train={train}: {hd:?}");
+        if !train {
+            for v in &hd {
+                assert!((v - 316.227_77).abs() < 0.5, "eval ∂dw/∂x = {v}");
+            }
+        }
+    }
+}
+
+/// `x=[0,0]`・追跡 `w=1`・train・`loss=sum(y·[g,g])` で `cg.grad(wrt)` の和を子テープで逆伝播し、
+/// `x` の写しへの二階勾配を返す（`wrt_w` なら `dw`、そうでなければ `dx`）。この損失の
+/// Hessian（`∂dx/∂x`・`∂dw/∂x`）は 0。`backward_create_graph` が拒否したら `Err` を返し、
+/// そのとき `child` が空であることを確かめる。
+fn bn_zero_input_second_order(g: f32, wrt_w: bool) -> Result<Vec<f32>, AutodiffError> {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0, 0.0], &[2, 1]));
+    let w = tape.var(&t(vec![1.0], &[1]));
+    let y = x.batch_norm(Some(&w), None, 1e-5).unwrap();
+    let k = tape.var_no_grad(&t(vec![g, g], &[2, 1]));
+    let loss = y.mul(&k).unwrap().sum(None).unwrap();
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert!(child.is_empty(), "拒否時に child が空へ戻る");
+            return Err(e);
+        }
+    };
+    let target = if wrt_w { &w } else { &x };
+    let s = cg.grad(target).unwrap().expect("grad").sum(None).unwrap();
+    let hv = child.backward(&s).unwrap();
+    let cx = cg.child_var(&x).unwrap().unwrap();
+    Ok(hv
+        .get(&cx)
+        .unwrap()
+        .map(|h| h.contiguous().as_slice().unwrap().to_vec())
+        .unwrap_or_default())
+}
+
+/// Codex P1 回帰（#3348）: train・`x=[0,0]`・上流 `1e38` の `cg.grad(x)`／`cg.grad(w)` の和を
+/// 子テープで逆伝播すると、前置スケール方式では復元倍率（`2^135`）や `rstd_s`・`inv_s2` が
+/// 中心化より先に掛かり二階勾配が `inf`／`NaN` になった。総括的な適用判定では dx 構造の
+/// `Σdxhat` への cotangent（`k·gs`）・dw 構造の `xhat` への cotangent（`|g|`）が `2^125` を
+/// 超えるため型付きエラーで拒否し、`child` は空へ戻る。上流を `1e30` へ下げると受理され、
+/// 二階勾配は有限かつ真値 0 と REQ-2 判定で一致する。
+#[test]
+fn batch_norm_create_graph_train_huge_upstream_zero_input_is_rejected_or_zero() {
+    for wrt_w in [false, true] {
+        let err = bn_zero_input_second_order(1e38, wrt_w).unwrap_err();
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        let hd = bn_zero_input_second_order(1e30, wrt_w).expect("上流 1e30 は受理");
+        assert!(
+            hd.iter()
+                .all(|v| v.is_finite() && common::req2_close(f64::from(*v), 0.0)),
+            "wrt_w={wrt_w}: {hd:?}"
+        );
+    }
+}
+
+/// Codex P1 回帰: 上流勾配 `1e20` を含む混合二階勾配 `∂dw/∂x` が有限（eval は
+/// `g·rstd ≈ 3.16e22`）。固定の前置スケール上限では単位シードしか保護できず、
+/// 上流勾配に `2^(k+p)` が先に掛かり overflow した。eval と train の両経路を検証する。
+#[test]
+fn batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite() {
+    for train in [false, true] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![3e38; 2], &[2, 1]));
+        let w = tape.var(&t(vec![1.0], &[1]));
+        let y = if train {
+            x.batch_norm(Some(&w), None, 1e-5).unwrap()
+        } else {
+            x.batch_norm_infer(
+                Some(&w),
+                None,
+                &t(vec![3e38], &[1]),
+                &t(vec![0.0], &[1]),
+                1e-5,
+            )
+            .unwrap()
+        };
+        let k = tape.var_no_grad(&t(vec![1e20, 1e20], &[2, 1]));
+        let loss = y.mul(&k).unwrap().sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let dw = cg.grad(&w).unwrap().unwrap();
+        let s2 = dw.sum(None).unwrap();
+        let hv = child.backward(&s2).unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+        if let Some(h) = hv.get(&cx).unwrap() {
+            let hd = h.contiguous().as_slice().unwrap().to_vec();
+            assert!(hd.iter().all(|v| v.is_finite()), "train={train}: {hd:?}");
+            if !train {
+                for v in &hd {
+                    assert!((v / 3.162_277_7e22 - 1.0).abs() < 1e-3, "eval ∂dw/∂x = {v}");
+                }
+            }
+        }
+    }
+}
+/// Codex P1 回帰（#3348）: eval・`x=mean=0`・追跡 `b=1`・`loss=sum(y²·[1e38,1e38,-1e38])` は
+/// `db` の構造（`g` の行方向和 `2e38+2e38`）が f32 を超える。前置スケール方式ではホスト値で
+/// 補正していたが、総括的な適用判定は db 構造の縮約の上界（`Σ|g| = 6e38`）を `2^125` 以上として
+/// 型付きエラーで拒否し、`child` は空へ戻る。判定を通る入力で孫テープ再生がホスト値
+/// （1 階と bit 同一の `db`）を保つことは `tests/create_graph_batch_norm.rs` の
+/// `host_db_value_is_kept_in_grandchild_replay` が確かめる。
+#[test]
+fn batch_norm_create_graph_huge_db_reduction_is_rejected_with_empty_child() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.0; 3], &[3, 1]));
+    let b = tape.var(&t(vec![1.0], &[1]));
+    let y = x
+        .batch_norm_infer(
+            None,
+            Some(&b),
+            &t(vec![0.0], &[1]),
+            &t(vec![1.0], &[1]),
+            1e-5,
+        )
+        .unwrap();
+    let k = tape.var_no_grad(&t(vec![1e38, 1e38, -1e38], &[3, 1]));
+    let loss = y.mul(&y).unwrap().mul(&k).unwrap().sum(None).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());
 }

@@ -78,7 +78,8 @@
 //! `GaussianNllLoss`（イシュー #2652。同型の理由で対象外）・
 //! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・
 //! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
-//! は引き続き対象外（後続イシューへ引き継ぐ）。それ以外の追跡対象 Op・rank≥3 の
+//! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
+//! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -108,7 +109,7 @@
 //! （本ファイル冒頭の既存契約節）を取っており、この整理はその範囲内
 //! に収まる（tolerance／baseline は無変更）。
 
-use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor};
+use fandhe_ai_tensor_core::{ScalarBinaryOp, ScalarUnaryOp, Tensor, batch_norm_layout};
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
@@ -471,6 +472,20 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 id.0
             )));
         }
+        // BatchNorm（イシュー #3079）: 空テンソル（`n`／`c`／`spatial` のいずれかが 0。
+        // eval は `M<=1` も通る）は二階 VJP の統計構造（行 `narrow`・`mean`）が
+        // 成立しないため、子テープへ書く前に fail-closed で拒否する。
+        if let Op::BatchNorm { input, .. } = &node.op
+            // 形状の積は `[usize::MAX, 2, 0]` で overflow して panic するため、
+            // ゼロ軸の有無で判定する（本番経路 panic 禁止）。
+            && parent_nodes[input.0].shape.contains(&0)
+        {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: 空テンソルの BatchNorm（NodeId({}))は非対応（\
+                 docs/autodiff-higher-order-grad-decision.md §28 参照）",
+                id.0
+            )));
+        }
         // 低精度 `Conv2d`（イシュー #2071）は `TapeNode::low_precision` を立てず
         // `compute_dtype` で記録するため、ここで明示拒否する（イシュー #3080・
         // 決定記録 §21.3。子テープへ精度情報を持たず静かに f32 再生される
@@ -527,8 +542,8 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 )));
             }
         }
-        // RmsNorm／LayerNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
-        // `child` へ書く前に拒否する（イシュー #3078。`create_graph_norm` モジュール doc）。
+        // RmsNorm／LayerNorm／BatchNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
+        // `child` へ書く前に拒否する（イシュー #3078・#3079。`create_graph_norm` モジュール doc）。
         crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
     }
     Ok(())
@@ -718,6 +733,32 @@ fn replay_op<'c>(
                 transposed,
             )
         }
+        // BatchNorm の dx／dw／db ホスト値ノード（イシュー #3079）: 孫テープでも
+        // 1 階と同じホスト関数で値を再計算する（f64 縮約の補正を失わない）。
+        Op::BatchNormGradHost {
+            structure,
+            g,
+            x,
+            weight,
+            has_bias,
+            eps,
+            fixed_stats,
+            kind,
+        } => {
+            let structure_m = get_mirror(mirror, structure)?;
+            let w_m = weight.map(|w| get_mirror(mirror, w)).transpose()?;
+            crate::create_graph_norm::host_grad_node(
+                structure_m.tape(),
+                &structure_m,
+                &get_mirror(mirror, g)?,
+                &get_mirror(mirror, x)?,
+                w_m.as_ref(),
+                has_bias,
+                eps,
+                fixed_stats,
+                kind,
+            )
+        }
         // 2D 畳み込み族（イシュー #3080）。公開 `Var` メソッドへの委譲で、
         // forward と同じカーネルを通るため写しの値は親と一致する。
         Op::Conv2d {
@@ -785,6 +826,26 @@ fn replay_op<'c>(
         Op::Where { cond, a, b } => {
             let cond_bool = f32_mask_to_bool(&cond)?;
             Var::where_cond(&cond_bool, &get_mirror(mirror, a)?, &get_mirror(mirror, b)?)
+        }
+        // BatchNorm（イシュー #3079）: `fixed_stats` payload が eval の
+        // 固定統計を保持しているため `Op` の拡張は不要。公開 `Var`
+        // メソッド（forward と同じカーネル）へ委譲する。running stats の
+        // 更新は `nn::BatchNormCore` だけが行い、`Var::` プリミティブは
+        // 触れないため、再生で二重更新されない。
+        Op::BatchNorm {
+            input,
+            weight,
+            bias,
+            eps,
+            fixed_stats,
+        } => {
+            let x = get_mirror(mirror, input)?;
+            let w = weight.map(|id| get_mirror(mirror, id)).transpose()?;
+            let b = bias.map(|id| get_mirror(mirror, id)).transpose()?;
+            match fixed_stats {
+                None => x.batch_norm(w.as_ref(), b.as_ref(), eps),
+                Some((mean, var)) => x.batch_norm_infer(w.as_ref(), b.as_ref(), &mean, &var, eps),
+            }
         }
         Op::RmsNorm { .. } | Op::LayerNorm { .. } => {
             crate::create_graph_norm::replay_norm(&op, mirror)
@@ -1449,7 +1510,7 @@ fn build_cgrads<'c>(
                 // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, input, g)?;
             }
-            Op::ConvWeightGradHost { structure, .. } => {
+            Op::ConvWeightGradHost { structure, .. } | Op::BatchNormGradHost { structure, .. } => {
                 // 恒等で `structure` のみへ（`grad.rs` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, structure, g)?;
             }
@@ -1468,6 +1529,42 @@ fn build_cgrads<'c>(
                 let db = reduce_to(child, &gb, &b_shape)?;
                 accumulate(&parent_nodes, &mut cgrads, a, da)?;
                 accumulate(&parent_nodes, &mut cgrads, b, db)?;
+            }
+            Op::BatchNorm {
+                input,
+                weight,
+                bias,
+                eps,
+                fixed_stats,
+            } => {
+                // 方式（V3 値＋S1 構造・総括的な適用判定）は `create_graph_norm.rs`
+                // と決定記録 §28 を参照。
+                let x_host = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
+                let (n_, c_, spatial_) = batch_norm_layout(x_host.shape())?;
+                let inputs = crate::create_graph_norm::BatchNormCgradInputs {
+                    x_mirror: get_mirror(mirror, input)?,
+                    w_mirror: weight.map(|w| get_mirror(mirror, w)).transpose()?,
+                    has_bias: bias.is_some(),
+                    eps,
+                    fixed_stats: fixed_stats.as_ref(),
+                    x_host: &x_host,
+                    need_dx: parent_nodes[input.0].requires_grad,
+                    need_dw: weight.is_some_and(|w| parent_nodes[w.0].requires_grad),
+                    need_db: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
+                    n: n_,
+                    c: c_,
+                    spatial: spatial_,
+                };
+                let out = crate::create_graph_norm::batch_norm_cgrads(child, &inputs, &g)?;
+                if let Some(dx) = out.dx {
+                    accumulate(&parent_nodes, &mut cgrads, input, dx)?;
+                }
+                if let (Some(w), Some(dw)) = (weight, out.dw) {
+                    accumulate(&parent_nodes, &mut cgrads, w, dw)?;
+                }
+                if let (Some(b), Some(db)) = (bias, out.db) {
+                    accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                }
             }
             Op::ScalarUnary { op: sop, input } => {
                 // `x_val`（materialize のクローン）・`one`（child.var_no_grad
