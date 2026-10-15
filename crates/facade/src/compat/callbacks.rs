@@ -1329,6 +1329,13 @@ impl EmaCallback {
     }
 }
 
+/// 継続 fit 開始時点の（平均, `epochs_seen`, 退避した生の重み）。
+type FitSnapshot = (
+    crate::optim::AveragedModel,
+    usize,
+    HashMap<String, Tensor<f32>>,
+);
+
 /// 確率的重み平均（SWA）を `fit_with_callbacks` へ結線する callback（[`Callback::Swa`]。
 /// イシュー #3058・親 #3057。決定記録 `docs/autodiff-swa-decision.md` §16・§17 が正）。
 ///
@@ -1385,6 +1392,10 @@ pub struct SwaCallback {
     /// `begin_fit` が前 fit の退避を取り出して生の重みへ戻した状態か
     /// （`finish_fit` で解除。`Err` 終了時は `abort_fit` が平均化重みへ戻す）。
     restored_for_fit: bool,
+    /// 継続 fit 開始時点の（平均, `epochs_seen`）。`Err` 終了時に失敗 fit が進めた平均・カウンタを
+    /// 巻き戻すためのスナップショット（`AveragedModel` の更新は新テンソルへの差し替えのため
+    /// shallow clone で独立する。decision §16.3）。
+    fit_snapshot: Option<FitSnapshot>,
 }
 
 /// 2 つの state_dict が全キー・全要素で bit 一致するか（`SwaCallback::begin_fit` の継続判定用）。
@@ -1431,6 +1442,7 @@ impl SwaCallback {
             avg: None,
             raw: None,
             restored_for_fit: false,
+            fit_snapshot: None,
         })
     }
 
@@ -1512,11 +1524,13 @@ impl SwaCallback {
             if state_dicts_bit_equal(&model.state_dict(), &avg.averaged_state_dict()) {
                 if let Some(raw) = self.raw.take() {
                     // 失敗時はモデル不変（`load_state_dict` のアトミック契約）。退避は戻す。
+                    let raw_snapshot = raw.clone();
                     if let Err(e) = model.load_state_dict(raw.clone()) {
                         self.raw = Some(raw);
                         return Err(e);
                     }
                     self.restored_for_fit = true;
+                    self.fit_snapshot = Some((avg.clone(), self.epochs_seen, raw_snapshot));
                 }
             } else {
                 self.raw = None;
@@ -1545,19 +1559,29 @@ impl SwaCallback {
     /// （成功済み fit の平均化結果と `raw_state_dict()` を失わせない）。
     pub(super) fn abort_fit(&mut self, model: &mut Sequential) {
         if !std::mem::take(&mut self.restored_for_fit) {
+            self.fit_snapshot = None;
             return;
+        }
+        // 失敗 fit が進めた平均・epoch カウンタを fit 開始時点へ巻き戻す（§16.3）。
+        let mut snap_raw = None;
+        if let Some((snap_avg, snap_epochs, raw)) = self.fit_snapshot.take() {
+            self.avg = Some(snap_avg);
+            self.epochs_seen = snap_epochs;
+            snap_raw = Some(raw);
         }
         let Some(avg) = self.avg.as_ref() else { return };
         let backup = model.state_dict();
         // 失敗時はモデル不変（アトミック契約）。その場合は退避も作らない。
+        // 退避は fit 開始時点の生の重み（成功済み fit の `raw_state_dict()`）へ戻す。
         if model.load_state_dict(avg.averaged_state_dict()).is_ok() {
-            self.raw = Some(backup);
+            self.raw = Some(snap_raw.unwrap_or(backup));
         }
     }
 
     /// fit 正常終了時の平均化重み適用。`n_averaged() == 0` なら何もしない。
     pub(super) fn finish_fit(&mut self, model: &mut Sequential) -> Result<(), AutodiffError> {
         self.restored_for_fit = false;
+        self.fit_snapshot = None;
         let Some(avg) = self.avg.as_ref() else {
             return Err(Self::invariant("finish"));
         };

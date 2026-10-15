@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use fandhe_ai::compat::{Callback, FitConfig, Loss, Optimizer, Sequential, SwaCallback};
+use fandhe_ai::compat::{
+    Callback, FitConfig, LambdaCallback, Loss, Optimizer, Sequential, SwaCallback,
+};
 use fandhe_ai::optim::{AveragedModel, SgdConfig, SwaAnneal};
 use fandhe_ai::{AutodiffError, Tensor};
 
@@ -207,6 +209,38 @@ fn continuation_err_keeps_averaged_weights_and_raw_backup() {
     assert_eq!(model_bits(&model), averaged);
     let s = swa_of(&cbs[0]);
     assert_eq!(s.n_averaged(), n);
+    assert_eq!(dict_bits(&s.raw_state_dict().expect("退避保持")), raw);
+}
+
+// 4c. 継続 fit の epoch 末 Lambda が Err でも、失敗 fit が進めた平均は適用されず
+// 前回成功時の平均化重み・n_averaged・退避が保たれる（Codex P1・§16.3）。
+#[test]
+fn continuation_lambda_err_does_not_apply_updated_average() {
+    let (x, y) = gen_data();
+    let mut model = build_model();
+    let mut cbs = [swa_cb(0)];
+    model
+        .fit_with_callbacks(&x, &y, FitConfig::new(2, 8), None, &mut cbs)
+        .expect("test fixture");
+    let averaged = model_bits(&model);
+    let avg_dict = dict_bits(&swa_of(&cbs[0]).averaged_state_dict().expect("平均あり"));
+    let raw = dict_bits(&swa_of(&cbs[0]).raw_state_dict().expect("退避あり"));
+    let n = swa_of(&cbs[0]).n_averaged();
+    let mut cbs2 = [
+        cbs.into_iter().next().expect("swa"),
+        Callback::Lambda(LambdaCallback::on_epoch_end(|_, _| {
+            Err(AutodiffError::InvalidArgument("lambda failure".into()))
+        })),
+    ];
+    let r = model.fit_with_callbacks(&x, &y, FitConfig::new(2, 8), None, &mut cbs2);
+    assert!(is_invalid_arg(r));
+    assert_eq!(model_bits(&model), averaged);
+    let s = swa_of(&cbs2[0]);
+    assert_eq!(s.n_averaged(), n);
+    assert_eq!(
+        dict_bits(&s.averaged_state_dict().expect("平均保持")),
+        avg_dict
+    );
     assert_eq!(dict_bits(&s.raw_state_dict().expect("退避保持")), raw);
 }
 

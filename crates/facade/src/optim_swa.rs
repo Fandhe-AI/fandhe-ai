@@ -48,7 +48,7 @@ use crate::{AutodiffError, Tensor};
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AveragedModel {
     inner: fandhe_ai_autodiff::nn::AveragedModel,
 }

@@ -75,7 +75,7 @@ use crate::nn::module::Module;
 
 /// パラメータの等重み平均（shadow copy）を保持する。モジュール doc の
 /// 「役割・呼び出し文脈」「数値契約」「スコープ」節を参照。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AveragedModel {
     /// 登録順（`update`／`averaged_parameters` の位置対応で走査する）。
     /// `avg_vars`（`HashMap`）は走査順を保証しないため、順序が意味を持つ

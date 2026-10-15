@@ -183,6 +183,7 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 - `n_averaged() == 0`（`swa_start` が実 epoch 数以上）は上書きせず `Ok`（エラーにしない。`n_averaged()` で検知できる）。`Err` 終了時は上書きしない。
 - 上書き直前の生の重みの `state_dict()` を callback が保持し `raw_state_dict()` で取り出せる。これが元の重みの復元手段（呼び出し側が `Sequential::load_state_dict` で戻す）。
 - 継続学習（次の fit の開始時）: 退避があり、かつモデルの現在の `state_dict` が前回上書きした平均化重みと bit 一致する場合に限り、`begin_fit` で退避を書き戻して生の重みから継続する。利用者が重みを変更していた場合は退避を破棄し現在の重みから継続する（利用者の意図を上書きしない）。名前集合・shape の不一致は更新前に `InvalidArgument`（名前集合）／`AutodiffError::Shape`（shape）で拒否し、モデルに変更を残さない（EMA の `begin_fit` 事前照合と同型）。
+- 継続 fit が `Err` で終わった場合（epoch 末の Lambda callback・validation の失敗を含む）、`begin_fit` が書き戻した生の重みを平均化重みへ戻すが、その平均・`n_averaged`・通算 epoch 数・`raw_state_dict()` は fit 開始時点のスナップショットへ巻き戻す（失敗 fit が epoch 末に進めた平均を適用しない）。
 - 上書きは `load_state_dict` のアトミック契約に依存する。失敗時は元のエラーより復元失敗を優先して報告する（EMA の規約を踏襲）。
 
 ### 16.4 拒否条件（`InvalidArgument`・fit 開始前。#3059）
