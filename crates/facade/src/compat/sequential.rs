@@ -334,6 +334,24 @@ pub(super) enum LayerSpec {
     LogSigmoid,
     /// イシュー #3053。無引数。
     Tanhshrink,
+    /// イシュー #3054。`alpha` のみ（学習パラメータなし）。
+    Celu {
+        alpha: f32,
+    },
+    /// イシュー #3054。`dim` のみ（範囲は forward 時の遅延検査）。
+    Softmin {
+        dim: usize,
+    },
+    /// イシュー #3054。`threshold`・`value`（構築時検査なし。非有限は保存時に拒否）。
+    Threshold {
+        threshold: f32,
+        value: f32,
+    },
+    /// イシュー #3054。`lower`・`upper`（RNG 状態は保存しない。決定記録 #3052 §3）。
+    RRelu {
+        lower: f32,
+        upper: f32,
+    },
     /// イシュー #2529。
     Hardtanh {
         min_val: f32,
@@ -1039,12 +1057,12 @@ impl Sequential {
 
     /// CELU 層を追加する（`nn::activation::Celu`。PyTorch `nn.CELU(alpha)` 相当。イシュー #2679）。
     /// `alpha == 0` と非有限は構築時に `AutodiffError::InvalidArgument` で拒否する
-    /// （負は PyTorch と同じく受理）。融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。保存は未対応（`save_model` は
-    /// `UnsupportedModel` を返す）。将来のスキーマは `alpha` を持つため無引数 kind ではない（#3053 の対象外）。
+    /// （負は PyTorch と同じく受理）。融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。保存は kind `celu`
+    /// （`params`: `alpha`）で往復できる（イシュー #3054。非有限は保存時に `UnsupportedModel`）。
     pub fn add_celu(mut self, alpha: f32) -> Result<Self, AutodiffError> {
         let layer = Celu::new(alpha)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported { kind: "celu" });
+        self.specs.push(LayerSpec::Celu { alpha });
         Ok(self)
     }
 
@@ -1075,18 +1093,17 @@ impl Sequential {
 
     /// Softmin 層を追加する（`nn::softmin_threshold::Softmin`。PyTorch `nn.Softmin(dim)` 相当。
     /// イシュー #2679）。`dim` の範囲検査は forward 時（[`Sequential::add_softmax`] と同じ遅延検査契約）。
-    /// 融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。保存は未対応（`save_model` は
-    /// `UnsupportedModel` を返す）。将来のスキーマは `dim` を持つため無引数 kind ではない（#3053 の対象外）。
+    /// 融合・常駐経路の扱いは [`Sequential::add_selu`] と同じ。保存は kind `softmin`
+    /// （`params`: `dim`）で往復できる（イシュー #3054）。
     /// `forward_host` は未提供のため `predict` は tape 経路へフォールバックする。
     pub fn add_softmin(mut self, dim: usize) -> Self {
         self.inner.push(Box::new(Softmin::new(dim)));
-        self.specs.push(LayerSpec::Unsupported { kind: "softmin" });
+        self.specs.push(LayerSpec::Softmin { dim });
         self
     }
 
     /// Tanhshrink 層を追加する（`nn::softmin_threshold::Tanhshrink`。`x - tanh(x)`。PyTorch
-    /// `nn.Tanhshrink` 相当。イシュー #2679）。扱いは [`Sequential::add_softmin`] と同じだが、`save_model`／`load_model` は
-    /// 無引数 kind `tanhshrink` で往復できる（イシュー #3053）。
+    /// `nn.Tanhshrink` 相当。イシュー #2679）。`save_model`／`load_model` は無引数 kind `tanhshrink` で往復できる（イシュー #3053）。
     pub fn add_tanhshrink(mut self) -> Self {
         self.inner.push(Box::new(Tanhshrink));
         self.specs.push(LayerSpec::Tanhshrink);
@@ -1095,11 +1112,11 @@ impl Sequential {
 
     /// Threshold 層を追加する（`nn::softmin_threshold::Threshold`。`x > threshold` ならそのまま、
     /// それ以外は `value`。PyTorch `nn.Threshold(threshold, value)` 相当。イシュー #2679）。
-    /// 構築時検査は無い（`NaN` は IEEE のまま扱う）。扱いは [`Sequential::add_softmin`] と同じ。
+    /// 構築時検査は無い（`NaN` は IEEE のまま扱う）。保存は kind `threshold`
+    /// （`params`: `threshold`・`value`）で往復でき、非有限は保存時に `UnsupportedModel`（イシュー #3054）。
     pub fn add_threshold(mut self, threshold: f32, value: f32) -> Self {
         self.inner.push(Box::new(Threshold::new(threshold, value)));
-        self.specs
-            .push(LayerSpec::Unsupported { kind: "threshold" });
+        self.specs.push(LayerSpec::Threshold { threshold, value });
         self
     }
 
@@ -1108,11 +1125,12 @@ impl Sequential {
     /// `AutodiffError::InvalidArgument`）。追加時点の `training` は `true` で、以後は
     /// [`Sequential::set_training`]／[`Sequential::eval`] の伝播で推論時の固定傾き
     /// `(lower + upper) / 2` へ切り替わる（[`Sequential::add_dropout`] と同じ）。学習時の傾きは
-    /// グローバル RNG から引く。扱いは [`Sequential::add_softmin`] と同じ。
+    /// グローバル RNG から引く。保存は kind `rrelu`（`params`: `lower`・`upper`）で往復でき、RNG 状態は
+    /// 保存しない（eval で保存すれば決定的に往復。決定記録 #3052 §3。イシュー #3054）。
     pub fn add_rrelu(mut self, lower: f32, upper: f32) -> Result<Self, AutodiffError> {
         let layer = RRelu::new(lower, upper)?;
         self.inner.push(Box::new(layer));
-        self.specs.push(LayerSpec::Unsupported { kind: "rrelu" });
+        self.specs.push(LayerSpec::RRelu { lower, upper });
         Ok(self)
     }
 

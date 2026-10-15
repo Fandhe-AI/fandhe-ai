@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 66 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 70 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -326,7 +326,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 66 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 70 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -348,6 +348,10 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::Hardsigmoid => Some("hardsigmoid"),
         LayerSpec::LogSigmoid => Some("log_sigmoid"),
         LayerSpec::Tanhshrink => Some("tanhshrink"),
+        LayerSpec::Celu { .. } => Some("celu"),
+        LayerSpec::Softmin { .. } => Some("softmin"),
+        LayerSpec::Threshold { .. } => Some("threshold"),
+        LayerSpec::RRelu { .. } => Some("rrelu"),
         LayerSpec::Hardtanh { .. } => Some("hardtanh"),
         LayerSpec::Relu6 => Some("relu6"),
         LayerSpec::Glu { .. } => Some("glu"),
@@ -482,6 +486,11 @@ fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
             alpha.is_finite() && beta.is_finite() && k.is_finite()
         }
         LayerSpec::Elu { alpha } => alpha.is_finite(),
+        // Threshold は構築時検査が無く ±inf／NaN を受理するため保存側で拒否する（#3054）。
+        // Celu・RRelu は構築時に拒否済みだが多層防御として登録する。
+        LayerSpec::Celu { alpha } => alpha.is_finite(),
+        LayerSpec::Threshold { threshold, value } => threshold.is_finite() && value.is_finite(),
+        LayerSpec::RRelu { lower, upper } => lower.is_finite() && upper.is_finite(),
         LayerSpec::Softplus { beta, threshold } => beta.is_finite() && threshold.is_finite(),
         // `Hardtanh::new` は ±inf を受理するが JSON 数値として書けないため保存は拒否する（#2529）。
         LayerSpec::Hardtanh { min_val, max_val } => min_val.is_finite() && max_val.is_finite(),
@@ -761,6 +770,10 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::Hardsigmoid
         | LayerSpec::LogSigmoid
         | LayerSpec::Tanhshrink
+        | LayerSpec::Celu { .. }
+        | LayerSpec::Softmin { .. }
+        | LayerSpec::Threshold { .. }
+        | LayerSpec::RRelu { .. }
         | LayerSpec::Hardtanh { .. }
         | LayerSpec::Relu6
         | LayerSpec::Glu { .. }
@@ -1125,6 +1138,16 @@ fn param_fields(spec: &LayerSpec) -> ParamFields {
             put_real(&mut f, "negative_slope", *negative_slope)
         }
         LayerSpec::Elu { alpha } => put_real(&mut f, "alpha", *alpha),
+        LayerSpec::Celu { alpha } => put_real(&mut f, "alpha", *alpha),
+        LayerSpec::Softmin { dim } => put_num(&mut f, "dim", *dim),
+        LayerSpec::Threshold { threshold, value } => {
+            put_real(&mut f, "threshold", *threshold);
+            put_real(&mut f, "value", *value);
+        }
+        LayerSpec::RRelu { lower, upper } => {
+            put_real(&mut f, "lower", *lower);
+            put_real(&mut f, "upper", *upper);
+        }
         LayerSpec::Softmax { dim } | LayerSpec::LogSoftmax { dim } => put_num(&mut f, "dim", *dim),
         LayerSpec::Softplus { beta, threshold } => {
             put_real(&mut f, "beta", *beta);
@@ -1830,6 +1853,9 @@ fn check_layer_state(model: &Sequential, i: usize, spec: &LayerSpec) -> Result<(
         LayerSpec::Dropout { .. }
             | LayerSpec::Dropout2d { .. }
             | LayerSpec::AlphaDropout { .. }
+            // RReLU は train／eval で forward が変わる（RNG 傾きと固定傾き）。load は全層を
+            // モデルのモードへ揃えるため食い違いは拒否する（決定記録 #3052 §3。イシュー #3054）。
+            | LayerSpec::RRelu { .. }
             | LayerSpec::BatchNorm1d { .. }
             | LayerSpec::BatchNorm2d { .. }
             // spectral_norm は train の forward でだけ `u`／`v` を進めるため、層のモードが食い違うと
@@ -2315,6 +2341,12 @@ fn build_model(
             LayerSpec::Hardsigmoid => model.add_hardsigmoid(),
             LayerSpec::LogSigmoid => model.add_log_sigmoid(),
             LayerSpec::Tanhshrink => model.add_tanhshrink(),
+            LayerSpec::Celu { alpha } => model.add_celu(*alpha).map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Softmin { dim } => model.add_softmin(*dim),
+            LayerSpec::Threshold { threshold, value } => model.add_threshold(*threshold, *value),
+            LayerSpec::RRelu { lower, upper } => model
+                .add_rrelu(*lower, *upper)
+                .map_err(ModelIoError::Autodiff)?,
             LayerSpec::Hardtanh { min_val, max_val } => model
                 .add_hardtanh(*min_val, *max_val)
                 .map_err(ModelIoError::Autodiff)?,
@@ -3390,6 +3422,32 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
             let p = Params::new(params, &["alpha"])?;
             Ok(LayerSpec::Elu {
                 alpha: p.f32("alpha")?,
+            })
+        }
+        "celu" => {
+            let p = Params::new(params, &["alpha"])?;
+            Ok(LayerSpec::Celu {
+                alpha: p.f32("alpha")?,
+            })
+        }
+        "softmin" => {
+            let p = Params::new(params, &["dim"])?;
+            Ok(LayerSpec::Softmin {
+                dim: p.usize("dim")?,
+            })
+        }
+        "threshold" => {
+            let p = Params::new(params, &["threshold", "value"])?;
+            Ok(LayerSpec::Threshold {
+                threshold: p.f32("threshold")?,
+                value: p.f32("value")?,
+            })
+        }
+        "rrelu" => {
+            let p = Params::new(params, &["lower", "upper"])?;
+            Ok(LayerSpec::RRelu {
+                lower: p.f32("lower")?,
+                upper: p.f32("upper")?,
             })
         }
         "softmax" => {
@@ -4520,7 +4578,7 @@ mod tests {
         ));
     }
 
-    /// 66 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 70 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -4551,6 +4609,16 @@ mod tests {
             LayerSpec::Hardsigmoid,
             LayerSpec::LogSigmoid,
             LayerSpec::Tanhshrink,
+            LayerSpec::Celu { alpha: -0.75 },
+            LayerSpec::Softmin { dim: 1 },
+            LayerSpec::Threshold {
+                threshold: -0.5,
+                value: 2.0,
+            },
+            LayerSpec::RRelu {
+                lower: -0.125,
+                upper: 0.3,
+            },
             LayerSpec::Hardtanh {
                 min_val: -2.0,
                 max_val: 3.0,
@@ -5002,7 +5070,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 66, "kind allowlist は 66 種: {kinds:?}");
+        assert_eq!(kinds.len(), 70, "kind allowlist は 70 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -5020,9 +5088,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 66 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 70 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("66 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("70 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -5030,7 +5098,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("66 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("70 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -5119,6 +5187,21 @@ mod tests {
             ("dropout", r#"{"p":"0.5"}"#),
             ("dropout", r#"{"p":0.50}"#),
             ("dropout", r#"{"p":1e39}"#),
+            ("celu", "{}"),
+            ("threshold", r#"{"threshold":0.5}"#),
+            ("rrelu", r#"{"lower":0.1}"#),
+            ("celu", r#"{"alpha":1.0,"x":1}"#),
+            ("softmin", r#"{"dim":1,"x":1}"#),
+            ("celu", r#"{"alpha":1}"#),
+            ("rrelu", r#"{"lower":0,"upper":1.0}"#),
+            ("threshold", r#"{"threshold":0.50,"value":1.0}"#),
+            ("celu", r#"{"alpha":1E0}"#),
+            ("celu", r#"{"alpha":"NaN"}"#),
+            ("threshold", r#"{"threshold":null,"value":1.0}"#),
+            ("softmin", r#"{"dim":1.5}"#),
+            ("softmin", r#"{"dim":-1}"#),
+            ("softmin", "null"),
+            ("rrelu", "[]"),
             ("softmax", r#"{"dim":1.0}"#),
             ("softmax", r#"{"dim":-1}"#),
             ("relu", r#"{"x":1}"#),
@@ -5559,6 +5642,12 @@ mod tests {
                 min_val: f32::NAN,
                 max_val: 1.0,
             },
+            LayerSpec::Celu { alpha: 0.0 },
+            LayerSpec::Celu { alpha: -0.0 },
+            LayerSpec::RRelu {
+                lower: 0.5,
+                upper: 0.1,
+            },
             LayerSpec::PRelu { num_parameters: 0 },
             LayerSpec::MaxPool1d {
                 kernel_size: 0,
@@ -5645,6 +5734,38 @@ mod tests {
         ok.eval();
         let ok = ok.add_relu();
         assert!(prepare_save(&ok).is_ok());
+        // RReLU は train／eval で forward が変わるため、eval の後に積むと拒否する（#3054）。
+        let mut rr = Sequential::new()
+            .add_linear(2, 2, 1)
+            .expect("構築できるはず");
+        rr.eval();
+        let rr = rr.add_rrelu(0.1, 0.3).expect("構築できるはず");
+        assert!(matches!(
+            prepare_save(&rr),
+            Err(ModelIoError::UnsupportedModel { .. })
+        ));
+        // celu・threshold・softmin はモード非依存で拒否しない。
+        let mut nm = Sequential::new()
+            .add_linear(2, 2, 1)
+            .expect("構築できるはず");
+        nm.eval();
+        let nm = nm
+            .add_celu(1.0)
+            .expect("構築できるはず")
+            .add_threshold(0.5, 1.0)
+            .add_softmin(1);
+        assert!(prepare_save(&nm).is_ok());
+    }
+
+    #[test]
+    fn prepare_save_rejects_non_finite_threshold() {
+        for (t, v) in [(f32::NEG_INFINITY, 0.0), (0.0, f32::NAN)] {
+            let model = Sequential::new().add_threshold(t, v);
+            assert!(matches!(
+                prepare_save(&model),
+                Err(ModelIoError::UnsupportedModel { .. })
+            ));
+        }
     }
 
     fn bn_model() -> Sequential {
@@ -5660,7 +5781,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("66 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("70 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

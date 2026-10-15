@@ -1601,6 +1601,16 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - `save_functional_model` は `spec_kind` 共有により 5 層を往復できる（`tests/compat_functional_model_io.rs` で確認）。
 - テスト: 単体（`model_io.rs` の 60 種往復・拒否表）、統合（`tests/compat_sequential_model_io_layers.rs` の bit 一致往復と改竄拒否、`tests/compat_sequential_activation_scalar_layers.rs`）。実機（CUDA／Metal）は不要（ホスト側の I/O のみ）。
 
+### 適用記録（イシュー #3054。引数つきの活性化 4 層）
+
+- `celu`（`alpha`）・`softmin`（`dim`）・`threshold`（`threshold`・`value`）・`rrelu`（`lower`・`upper`）の 4 kind を `LayerSpec` の variant として実装した（`compat/sequential.rs`・`compat/model_io.rs` の `spec_kind`・`param_fields`・`build_model`・`spec_from_kind`・`spec_f32_fields_are_finite`・`check_layer_state`）。4 層とも学習パラメータを持たず期待キーは 0 本、`seed` は記録しない。
+- load 側の拒否分類: スキーマ違反（キー過不足・整数表記や非正準の f32・非数値・`dim` の小数／負数・非 object）は `Manifest`、意味違反（`celu.alpha == 0`・`rrelu` の `lower > upper`）は `add_*` の構築時検査による `Autodiff`。`softmin.dim` の範囲は forward 時の遅延検査（load は成功し `predict` が型付きエラー）。
+- 保存側: 非有限の f32 は `spec_f32_fields_are_finite` で書き込み前に `UnsupportedModel` にする。特に `Threshold::new` は構築時検査が無いため、この検査が唯一の防壁。
+- rrelu は決定記録 §3 のとおり `lower`・`upper` のみ保存し、train／eval は manifest 最上位の `training` に載せる。`check_layer_state` の `mode_dependent` に `RRelu` を登録し、層のモードがモデルと食い違う保存は `UnsupportedModel` で拒否する。RNG 状態は保存せず、eval では固定傾き `(lower + upper) / 2` で決定的に往復一致する。
+- allowlist は 66 → 70 種。#3052 の「64 種」は #3029・#3033・#3041・#3045 による追加より前の数字である。`format_version` は 2 のまま（旧リーダーは未知 kind を `UnsupportedModel` で拒否）。既存 kind のスキーマ・上限定数・tolerance・依存は不変。
+- `save_functional_model` は `spec_kind` 共有により 4 層を往復できる。ONNX export は 4 層とも `UnsupportedLayer` のまま。
+- テスト: 単体（`model_io.rs` の 70 種往復・拒否表・構築時拒否・モード不一致・非有限拒否）、統合（`tests/compat_sequential_model_io_layers.rs` の往復・改竄拒否〈dir 不変・陽性対照〉・softmin 範囲外 dim・rrelu の train 往復・11 層一括、`tests/compat_sequential_activation_scalar_layers.rs` の 9 層往復、`tests/compat_functional_model_io.rs`）。実機（CUDA／Metal）は不要（ホスト側の I/O のみ）。
+
 ## 追補（イシュー #3055）: conv_transpose1d・unflatten の保存・復元の実装記録
 
 #3052 追補で確定した kind 名・スキーマのうち、`conv_transpose1d`・`unflatten` の 2 層を実装した。「本記録の時点では `Unsupported`」とした #3052 追補の記述は、この 2 層について解消した（活性化 9 層は #3053／#3054 の担当で本追補の対象外）。
@@ -1611,7 +1621,7 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - load 側の拒否分類: キー過不足・整数欄の小数／負数・`size_len` 範囲外・`null` 詰め違反・`groups == 0`／割り切れ違反（期待 shape の除算より前に `check_conv_groups`）は `Manifest`。`output_padding >= stride`・空 sizes は `add_*` が `Autodiff`。`unflatten` の `dim` 範囲・サイズ積の不一致は `Unflatten::new` が構築時に検査せず forward 時の `AutodiffError::Shape` となるため、load は成功する。
 - allowlist は本 PR 単独で 53 → 55 種（#3053／#3054 のマージ後は 64 種）。`format_version` は 2 のまま、既存 kind のスキーマ・上限定数・tolerance・依存は不変。旧リーダーは未知 kind を `UnsupportedModel` で拒否する。
 - `save_functional_model` は `spec_kind` を共有するため functional 側にも allowlist 拡張が及ぶ（網羅確認は #3051）。ONNX export はこの 2 層について引き続き `OnnxError::UnsupportedLayer` で対象外。
-- 11 層一括（活性化 9 層を含む）の「`save_model` で拒否されない」テストは、活性化 9 層が未実装のため未完了。#3053／#3054 のうち後にマージされる側、または #3051 で完成させる。
+- 11 層一括（活性化 9 層を含む）の保存・往復テストは、#3054 で活性化 9 層が揃ったため完了した（`eleven_layer_subset_of_new_kinds_is_savable`）。
 
 ## 追補（イシュー #3029）: max_pool3d・avg_pool3d の保存・復元
 
