@@ -394,23 +394,7 @@ pub(crate) fn vjp(
             // のときのみ既存ホスト参照実装（`log_softmax_vjp_along`）へ
             // フォールバックする（`Op::NllLoss` 分岐と同型の 3 分岐。
             // 判定迂回経路を作らない。`.claude/rules/security.md` A08）。
-            let da = match ops.log_softmax_backward(out_value, upstream, dim) {
-                Ok(da) => {
-                    if da.shape() != out_value.shape() {
-                        return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
-                            fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
-                                lhs: da.shape().to_vec(),
-                                rhs: out_value.shape().to_vec(),
-                            },
-                        )));
-                    }
-                    da
-                }
-                Err(BackendError::Unsupported(_)) => {
-                    log_softmax_vjp_along(out_value, upstream, dim)
-                }
-                Err(other) => return Err(AutodiffError::Backend(other)),
-            };
+            let da = log_softmax_vjp_dispatch(ops, out_value, upstream, dim)?;
             vec![(input, da)]
         }
         Op::Cumsum { input, dim } => {
@@ -7036,7 +7020,11 @@ fn sigmoid_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
 /// 理由で）`f64` のまま保持し、最終書き出しで 1 回だけ `f32` へ
 /// downcast する（縮約値を先に `f32` へ戻すと、有限の `f32` 入力でも
 /// 減算・乗算の結果が overflow しうるため）。
-fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+pub(crate) fn softmax_vjp_along(
+    out_value: &Tensor<f32>,
+    upstream: &Tensor<f32>,
+    axis: usize,
+) -> Tensor<f32> {
     let shape = out_value.shape().to_vec();
     // `log_softmax_vjp_along` 直下と同じ早期 return（部分積オーバー
     // フロー回避。`eval::softmax_along` 冒頭のコメント参照）。
@@ -7075,6 +7063,38 @@ fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usiz
     build_tensor(out, &shape)
 }
 
+/// `Op::LogSoftmax` の VJP 値の 3 分岐 dispatch（イシュー #3077 で
+/// `Op::LogSoftmax` 腕から切り出し。1 階の挙動・値は不変）。
+/// `BackendOps::log_softmax_backward`（イシュー #1949）を優先し、
+/// `Unsupported` のときのみホスト参照実装 [`log_softmax_vjp_along`] へ
+/// フォールバックし、それ以外のエラーは伝播する（`Op::NllLoss` と同型の
+/// 3 分岐。判定迂回経路を作らない。`.claude/rules/security.md` A08）。
+/// 1 階 `vjp` と、子テープ方式高階微分（`create_graph.rs` の V3。
+/// `docs/autodiff-higher-order-grad-decision.md` §21.3・§23）の値計算が
+/// 共有し、CUDA でも `cg.grad` の値を 1 階と bit 同一に保つ。
+pub(crate) fn log_softmax_vjp_dispatch(
+    ops: &dyn BackendOps,
+    out_value: &Tensor<f32>,
+    upstream: &Tensor<f32>,
+    dim: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    match ops.log_softmax_backward(out_value, upstream, dim) {
+        Ok(da) => {
+            if da.shape() != out_value.shape() {
+                return Err(AutodiffError::Backend(BackendError::ShapeMismatch(
+                    fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                        lhs: da.shape().to_vec(),
+                        rhs: out_value.shape().to_vec(),
+                    },
+                )));
+            }
+            Ok(da)
+        }
+        Err(BackendError::Unsupported(_)) => Ok(log_softmax_vjp_along(out_value, upstream, dim)),
+        Err(other) => Err(AutodiffError::Backend(other)),
+    }
+}
+
 /// `Op::LogSoftmax` の VJP 本体: `dx = g − exp(y) ⊙ Σ_dim(g)`。
 /// `softmax_vjp_along` と同じ 3 段走査・f64 縮約方針（本関数の縮約は
 /// 要素積ではなく単純和のため、`g` の各要素をそのまま `f64` へ昇格して
@@ -7082,7 +7102,7 @@ fn softmax_vjp_along(out_value: &Tensor<f32>, upstream: &Tensor<f32>, axis: usiz
 /// 減算も f64 のまま行い、最終書き出しで 1 回だけ `f32` へ downcast
 /// する（縮約値を先に `f32` へ戻すと、有限の `f32` 入力でも乗算結果が
 /// overflow しうるため）。
-fn log_softmax_vjp_along(
+pub(crate) fn log_softmax_vjp_along(
     out_value: &Tensor<f32>,
     upstream: &Tensor<f32>,
     axis: usize,

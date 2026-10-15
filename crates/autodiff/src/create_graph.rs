@@ -15,8 +15,9 @@
 //! **既存契約への影響（設計 doc §3「契約整理」）**: 1 階
 //! `backward_impl`・`grad.rs`・REQ-2 統一複合判定・tolerance／baseline
 //! は一切変更しない——本モジュールは `Tape::backward`（公開 API）を
-//! 素のまま呼ぶのみで、`backward.rs`／`grad.rs` へのコード変更を伴わ
-//! ない。二階側の数値方式（本モジュールが子テープへ記録する `Var`
+//! 素のまま呼ぶのみで、`backward.rs` へのコード変更を伴わない（`grad.rs` は #3077 の
+//! V3 用にホスト関数を `pub(crate)` 化し LogSoftmax の dispatch を共有
+//! ヘルパーへ移しただけで 1 階の挙動は不変）。二階側の数値方式（本モジュールが子テープへ記録する `Var`
 //! 演算列）は既存 VJP ヘルパー（`grad.rs`）とは独立の実装であり、
 //! 一般には bit 同一を主張しない——正しさは有限差分突合
 //! （`tests/create_graph.rs`）で検証する。ただし broadcast 縮約
@@ -645,6 +646,10 @@ fn replay_op<'c>(
             Var::cat(&mirrored?, dim)
         }
         Op::Contiguous { input } => get_mirror(mirror, input)?.contiguous(),
+        // forward と同じ dispatch（backend の行カーネル → `Unsupported`
+        // ならホスト）を公開 `Var` メソッド経由で通す（イシュー #3077）。
+        Op::Softmax { input, dim } => get_mirror(mirror, input)?.softmax(dim),
+        Op::LogSoftmax { input, dim } => get_mirror(mirror, input)?.log_softmax(dim),
         // d_weight のホスト値ノード: 孫テープでも同じホスト関数で値を
         // 再計算する（f32 の構造側合成へ落とさない。§21.1(3)(5)）。
         Op::ConvWeightGradHost {
@@ -718,6 +723,224 @@ fn replay_op<'c>(
                 .into(),
         )),
     }
+}
+
+/// V3 の共通前処理: `v` の子テープ上の実体値を取り出す（借用は
+/// 戻る前に解放する。`reduce_bias_grad_var` と同じ形）。
+fn child_value(child: &Tape, v: &Var<'_>) -> Result<Tensor<f32>, AutodiffError> {
+    let nodes = child.nodes.borrow();
+    Ok(materialize_fallible(&nodes, child.ops(), v.node_id())?.clone())
+}
+
+/// V3（`docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3・§23）の
+/// 値と構造の結合。値 `host_value` は 1 階 VJP と同じホスト関数の結果、
+/// 構造 `composed` は二階微分を流すための `Var` 演算グラフ。値を持つ
+/// `Op::Contiguous`（恒等 VJP）ノードとして子テープへ登録する。
+/// shape 不一致は内部不変条件違反として型付きエラーにする。
+fn push_v3<'c>(
+    child: &'c Tape,
+    composed: &Var<'c>,
+    host_value: Tensor<f32>,
+) -> Result<Var<'c>, AutodiffError> {
+    if host_value.shape() != composed.shape().as_slice() {
+        return Err(AutodiffError::Backward(
+            "create_graph: V3 のホスト値と構造グラフの shape が不一致（内部契約違反）".into(),
+        ));
+    }
+    let nid = child.push_eager(
+        Op::Contiguous {
+            input: composed.node_id(),
+        },
+        host_value,
+    );
+    Ok(Var::from_raw(child, nid))
+}
+
+/// `dim` 軸を縮約して長さ 1 で復元し `shape` へ broadcast する。
+fn reduce_dim_bcast<'c>(
+    v: &Var<'c>,
+    dim: usize,
+    shape: &[usize],
+) -> Result<Var<'c>, AutodiffError> {
+    v.sum(Some(dim))?
+        .contiguous()?
+        .unsqueeze(dim)?
+        .broadcast_to(shape)
+}
+
+/// `Op::Softmax` の create_graph（V3。イシュー #3077）。値は 1 階と同じ
+/// `grad::softmax_vjp_along`（f64 縮約）、構造は `y⊙g − y⊙Σ(g⊙y)`
+/// （`Σy=1`・`y≥0` ゆえ中間値が `max|g|` 以下で overflow しない並べ方）。
+///
+/// 二階の逆伝播（codex-review 指摘・PR #3344）: `y` を 1 つのノードで
+/// 3 箇所に使うと、`y` への寄与（`g`・`dot`・`g·(-y)` の各項）が同一ノードで
+/// 蓄積され、個々は有限でも和が f32 範囲を超える（Softmax VJP の
+/// 定数シフト不変性で本来は相殺される量）。そこで 3 つの使用ごとに入力から
+/// `softmax` ミラーを別ノードとして立て、各寄与を別々に Softmax VJP へ
+/// 通してから入力側で蓄積する（各項は `max|g|` 以下）。値は 1 階と同一の
+/// ホスト関数が決めるため 1 階の bit 一致は不変。
+fn softmax_cgrad_v3<'c>(
+    parent: &Tape,
+    child: &'c Tape,
+    parent_nodes: &[TapeNode],
+    id: NodeId,
+    x_m: Var<'c>,
+    g: &Var<'c>,
+    dim: usize,
+) -> Result<Var<'c>, AutodiffError> {
+    let shape = parent_nodes[id.0].shape.clone();
+    if shape.contains(&0) {
+        return Ok(child.var_no_grad(&Tensor::zeros(&shape)?));
+    }
+    let y_a = x_m.softmax(dim)?;
+    let y_b = x_m.softmax(dim)?;
+    let y_c = x_m.softmax(dim)?;
+    let out_value = materialize_fallible(parent_nodes, parent.ops(), id)?;
+    let g_value = child_value(child, g)?;
+    let t1 = y_a.mul(g)?;
+    let dot = reduce_dim_bcast(&g.mul(&y_c)?, dim, &shape)?;
+    let composed = t1.sub(&y_b.mul(&dot)?)?;
+    let host = crate::grad::softmax_vjp_along(out_value, &g_value, dim);
+    push_v3(child, &composed, host)
+}
+
+/// レーンごとのスケール `s = max|g|`（`dim` 軸を長さ 1 にした shape）。
+/// `s == 0` と非有限（`g` に `inf`／`NaN`）のレーンは `1`（IEEE 伝播を
+/// 構造側へ任せる。§24）。有限の小さい `max|g|` は下限
+/// [`LANE_SCALE_FLOOR`] で持ち上げる（codex-review 指摘・PR #3344:
+/// `g.div(&s)` の VJP は `1/s`・`-g/s²` を f32 で先に評価するため、
+/// 非正規数級の `s` では二階微分の係数が `inf` になる。構造式は任意の
+/// `s > 0` で数学的に同値なので下限を設けても 1 階値・二階の意味は
+/// 不変）。
+/// `lane_scale` の下限（`2^-20`）。`1/s² ≤ 2^40`・`|g|/s² ≤ 2^20/…` が
+/// いずれも f32 で有限に収まる大きさ。
+const LANE_SCALE_FLOOR: f32 = 9.536_743e-7;
+
+fn lane_scale(g: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, AutodiffError> {
+    let shape = g.shape().to_vec();
+    let outer: usize = shape[..dim].iter().product();
+    let axis_len = shape[dim];
+    let inner: usize = shape[dim + 1..].iter().product();
+    let data = crate::eval::dense_vec(g);
+    let mut s = Vec::with_capacity(outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = 0f32;
+            for a in 0..axis_len {
+                let v = data[(o * axis_len + a) * inner + i].abs();
+                // NaN は `>` が偽になるため明示的に非有限扱いへ倒す。
+                if v.is_nan() {
+                    m = f32::NAN;
+                    break;
+                }
+                if v > m {
+                    m = v;
+                }
+            }
+            s.push(if m == 0.0 || !m.is_finite() {
+                1.0
+            } else {
+                m.max(LANE_SCALE_FLOOR)
+            });
+        }
+    }
+    let mut sshape = shape;
+    sshape[dim] = 1;
+    Ok(Tensor::new(s, &sshape)?)
+}
+
+/// LogSoftmax の二階逆伝播で `exp` ミラーへ入る最大寄与
+/// `q·s·|mean_gs| = n·p·s·|mean_gs|` をレーンごとにホストで評価し、
+/// f32 範囲（約 3.4e38）に収まる上限 `SPLIT_LIMIT` を超える分だけ
+/// ミラーの分割数を増やす（`1..=SPLIT_MAX`。通常は 1）。
+const SPLIT_LIMIT: f64 = 2.0e38;
+const SPLIT_MAX: usize = 64;
+
+fn log_softmax_split_count(
+    y: &Tensor<f32>,
+    g: &Tensor<f32>,
+    s_lane: &Tensor<f32>,
+    dim: usize,
+) -> usize {
+    let shape = g.shape().to_vec();
+    let outer: usize = shape[..dim].iter().product();
+    let n = shape[dim];
+    let inner: usize = shape[dim + 1..].iter().product();
+    let yd = crate::eval::dense_vec(y);
+    let gd = crate::eval::dense_vec(g);
+    let sd = crate::eval::dense_vec(s_lane);
+    let mut worst = 0f64;
+    for o in 0..outer {
+        for i in 0..inner {
+            let s = sd[o * inner + i] as f64;
+            let mut sum = 0f64;
+            let mut pmax = 0f64;
+            for a in 0..n {
+                let idx = (o * n + a) * inner + i;
+                sum += gd[idx] as f64 / s;
+                pmax = pmax.max((yd[idx] as f64).exp());
+            }
+            let mean = (sum / n as f64).abs();
+            let m = n as f64 * pmax * s * mean;
+            // 非有限は分割では救えない（IEEE 伝播に任せる）。
+            if m.is_finite() {
+                worst = worst.max(m);
+            }
+        }
+    }
+    ((worst / SPLIT_LIMIT).ceil() as usize).clamp(1, SPLIT_MAX)
+}
+
+/// `Op::LogSoftmax` の create_graph（V3。イシュー #3077）。値は 1 階と
+/// 同じ `grad::log_softmax_vjp_dispatch`、構造は
+/// `s ⊙ (g/s − exp(y) ⊙ Σ(g/s))`（`|g/s| ≤ 1` で縮約が overflow しない）。
+fn log_softmax_cgrad_v3<'c>(
+    parent: &Tape,
+    child: &'c Tape,
+    parent_nodes: &[TapeNode],
+    x_m: Var<'c>,
+    id: NodeId,
+    g: &Var<'c>,
+    dim: usize,
+) -> Result<Var<'c>, AutodiffError> {
+    let shape = parent_nodes[id.0].shape.clone();
+    if shape.contains(&0) {
+        return Ok(child.var_no_grad(&Tensor::zeros(&shape)?));
+    }
+    let out_value = materialize_fallible(parent_nodes, parent.ops(), id)?;
+    let g_value = child_value(child, g)?;
+    let s_lane = lane_scale(&g_value, dim)?;
+    let pieces = log_softmax_split_count(out_value, &g_value, &s_lane, dim);
+    // 二階の逆伝播の保護（codex-review 指摘・PR #3344。決定記録 §24.1b）:
+    // `exp(y)·Σgs` の係数 `Σgs`（最大 `n`）が `exp` ノードへの寄与 `-s·Σgs`
+    // を f32 範囲外へ押し出す。`q = exp(y + ln n) = n·p`・`mean_gs = Σgs / n`
+    // と分け、`q` への寄与を `-s·mean_gs`（`≤ s`）に抑える。さらに `q` 自身
+    // の VJP（`q ⊙ 寄与`、最大 `n·s`）が LogSoftmax VJP へ入る前に溢れる
+    // ため、`q·mean_gs` を `pieces` 個の独立な `log_softmax` ミラー
+    // （入力 `x_m` から別々に立てる）へ等分し、各ミラーへの寄与を別々に
+    // LogSoftmax VJP へ通してから入力側で蓄積する（Softmax の `y` 3 分割と
+    // 同型）。`pieces` はホストで最大寄与の上界から決める（通常は 1）。
+    let n_lane = shape[dim] as f32;
+    let ln_n = child.var_no_grad(&Tensor::full(&shape, n_lane.ln())?);
+    let inv_nk = child.var_no_grad(&Tensor::full(&shape, 1.0 / (n_lane * pieces as f32))?);
+    // `s ⊙ (gs − q·mean_gs) = g − q·mean_g` と恒等変形し、`s` を掛ける積を
+    // 作らない（codex-review 指摘・PR #3344。入力依存の `g` でも `mean_gs_k`
+    // 側へ `-s·q`（最大 `n·s`）が逆伝播しない）。`mean_g_k = Σ(g/(n·pieces))`
+    // は各項 `≤ max|g|/n` で縮約が overflow しない。
+    let mean_g_k = reduce_dim_bcast(&g.mul(&inv_nk)?, dim, &shape)?;
+    let mut sub: Option<Var<'c>> = None;
+    for _ in 0..pieces {
+        let y_k = x_m.log_softmax(dim)?;
+        let term = y_k.add(&ln_n)?.exp().mul(&mean_g_k)?;
+        sub = Some(match sub {
+            Some(acc) => acc.add(&term)?,
+            None => term,
+        });
+    }
+    let sub = sub.ok_or_else(|| AutodiffError::Backward("LogSoftmax 分割数が 0".into()))?;
+    let composed = g.sub(&sub)?;
+    let host = crate::grad::log_softmax_vjp_dispatch(child.ops(), out_value, &g_value, dim)?;
+    push_v3(child, &composed, host)
 }
 
 /// [`Tape::backward_create_graph`] の逆走査（本体その 2。VJP を `Var`
@@ -933,6 +1156,30 @@ fn build_cgrads<'c>(
                     accumulate(&parent_nodes, &mut cgrads, input, da)?;
                     off += len;
                 }
+            }
+            Op::Softmax { input, dim } => {
+                let da = softmax_cgrad_v3(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    id,
+                    get_mirror(mirror, input)?,
+                    &g,
+                    dim,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::LogSoftmax { input, dim } => {
+                let da = log_softmax_cgrad_v3(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    get_mirror(mirror, input)?,
+                    id,
+                    &g,
+                    dim,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
             }
             Op::Contiguous { input } => {
                 // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。

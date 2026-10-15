@@ -162,7 +162,9 @@ fn rejects_unsupported_op_and_keeps_child_empty() {
     let child = fandhe_ai::tape();
     let tape = fandhe_ai::tape();
     let x = tape.var(&t(vec![0.1, 0.2, 0.3], &[1, 3]));
-    let loss = x.softmax(1).unwrap().sum(None).unwrap();
+    // イシュー #3077 で Softmax は対象になったため、未対応のまま残る
+    // `LogSumExp` で fail-closed 契約を維持する。
+    let loss = x.logsumexp(Some(1)).unwrap().sum(None).unwrap();
     assert!(matches!(
         tape.backward_create_graph(&loss, &child),
         Err(AutodiffError::Backward(_))
@@ -293,4 +295,76 @@ fn create_graph_rejects_device_mismatch() {
         parent.backward_create_graph(&cubic_loss(&x), &child),
         Err(AutodiffError::DeviceMismatch { .. })
     ));
+}
+
+/// イシュー #3077: 実 CPU バックエンド（最終軸カーネル経路）での
+/// Softmax／LogSoftmax の create_graph。1 階は `backward` と bit 一致し、
+/// Hessian の行和は `backward` の中央差分と REQ-2 判定で一致する。
+const SW: [f32; 6] = [0.3, -1.2, 0.7, 2.0, -0.5, 1.1];
+const SX: [f32; 6] = [0.2, -0.4, 0.9, 1.3, -0.7, 0.1];
+
+fn softmax_family_loss<'t>(tape: &'t Tape, x: &Var<'t>, log: bool) -> Var<'t> {
+    let w = tape.var_no_grad(&t(SW.to_vec(), &[2, 3]));
+    let y = if log {
+        x.log_softmax(1).unwrap()
+    } else {
+        x.softmax(1).unwrap()
+    };
+    y.mul(&w).unwrap().sum(None).unwrap()
+}
+
+fn first_order_grad(x0: &[f32], log: bool) -> Vec<f32> {
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&t(x0.to_vec(), &[2, 3]));
+    let loss = softmax_family_loss(&tape, &x, log);
+    let grads = tape.backward(&loss).unwrap();
+    vals(grads.get(&x).unwrap().expect("grad"))
+}
+
+fn check_softmax_family(log: bool) {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(SX.to_vec(), &[2, 3]));
+    let loss = softmax_family_loss(&tape, &x, log);
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("Softmax／LogSoftmax は create_graph 対象");
+    let plain = first_order_grad(&SX, log);
+    let g = cg.grad(&x).unwrap().expect("grad");
+    let gv = vals(&g.value());
+    for (a, b) in plain.iter().zip(gv.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits(), "1 階は backward と bit 一致");
+    }
+    // 2 階: sum(g) の x 勾配（= Hessian の列和）を、1 階勾配の総和の
+    // 中央差分と突合する。
+    let grads2 = child
+        .backward(&g.sum(None).unwrap())
+        .expect("child backward");
+    let xc = cg.child_var(&x).unwrap().expect("mirror");
+    let h = vals(grads2.get(&xc).unwrap().expect("second order"));
+    let eps = 1e-2_f32;
+    for i in 0..6 {
+        let mut xp = SX;
+        let mut xm = SX;
+        xp[i] += eps;
+        xm[i] -= eps;
+        let sp: f64 = first_order_grad(&xp, log).iter().map(|&v| v as f64).sum();
+        let sm: f64 = first_order_grad(&xm, log).iter().map(|&v| v as f64).sum();
+        let num = (sp - sm) / (2.0 * eps as f64);
+        assert!(
+            req2_close(h[i] as f64, num),
+            "i={i} analytic={} numeric={num}",
+            h[i]
+        );
+    }
+}
+
+#[test]
+fn softmax_create_graph_matches_first_order_and_finite_difference_via_facade() {
+    check_softmax_family(false);
+}
+
+#[test]
+fn log_softmax_create_graph_matches_first_order_and_finite_difference_via_facade() {
+    check_softmax_family(true);
 }
