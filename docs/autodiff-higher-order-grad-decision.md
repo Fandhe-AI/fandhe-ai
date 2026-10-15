@@ -702,7 +702,7 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 
 **(5) 数値契約**
 - f64 縮約は原則 V3。overflow 回避は 1 階の回帰ベクトル（§8 の `y=[0.25,0.75]`・`g=[3e38,-3e38]` など）を族のテストで必須にする。先勝ちタイは V2。
-- **中間値の overflow（V3 の値補正では防げない）**: V3 はノードの最終値だけをホスト関数に置き換えるので、構造側の合成グラフが f32 で持つ中間値（例: `x=1e20` の二乗が `inf`、そこから `rstd=0`）は二階微分・孫テープ再生にそのまま使われる。したがって f64 縮約契約を持つ族は、V3 の値補正に加えて次のいずれかで中間統計量を安全に作ることを族の節に明記する。(S1) スケール付き合成: 行ごとの最大絶対値 `s`（ホスト定数。全ゼロ行・全要素が 0 の行では `s=0` となり `x/s` が `NaN` になるため、`s=0` の行は正のスケール `s=1` を使う規則とする。`x` が全ゼロなら二乗和は 0 で、正の `eps` を持つ `LayerNorm`・`RmsNorm` の統計量・入力勾配は 1 階と同じく有限になる）で `x/s` を作ってから二乗和・rstd を合成し、`rstd = rstd_scaled / s` で戻す。孫テープ再生でも同じスケール付き構造が再計算されるので overflow しない。**eps の値域保護（S1 の適用条件）**: スケール後の統計量に載せる `eps` は `eps/s²` に変換する。これを f64 で計算して f32 へ丸めた値が 0 になる（`s` が大きく `eps/s²` が f32 正規最小値 `1.17549435e-38` 未満）場合でも、`s` が「中心化後の偏差の最大絶対値」（`LayerNorm`。`RmsNorm` は `x` の最大絶対値）である限り、スケール後の分散（平均二乗）は少なくとも `1/n`（最大要素の寄与が `1`）なので `eps/s²` は丸めで消えるだけで `rstd_scaled` は変わらず有限である。`LayerNorm` で `s` を中心化前の `x` の最大絶対値から選んではならない（定数行 `x=[1e30,1e30]`・`eps=1e-5` は分散 0 のまま `eps/s²=1e-65` が f32 で 0 になり `rstd_scaled=inf` になる）。`s` は構造側と同一手順の f32 演算で得た中心化後偏差から算出し、全偏差が 0 の行は `s=1`（`eps` を変換せず `rstd=1/√eps` で有限）とする。**eps 側の overflow 保護（小スケール入力）**: `s` が極小だと `eps/s²` が f32 で overflow する（`RmsNorm` の `x=[1e-30,1e-30]`・`eps=1e-5` は `s=1e-30` で `eps/s²≈1e55` が `inf` になり、`rstd_scaled=0`・復元した `rstd=0` と誤る。既存 `row_rms_stats` は約 316.23。`0` は有限なので S2 への切替条件にも当たらない）。このため `s` は「最大絶対値（`LayerNorm` は中心化後偏差の最大絶対値）」と `√eps` の大きい方を 2 のべき乗へ切り上げた値とする（`eps>0` のとき `s≥√eps` なので `eps/s²≤1` で常に有限。`s` が最大絶対値で決まる場合は上記の議論どおり。`√eps` で決まる場合は `eps/s²∈(1/4,1]` かつ `x/s` の絶対値が 1 以下で、`rstd_scaled≤2` となり有限）。`eps=0` の行は従来どおり最大絶対値のみで `s` を決め、`s=0` なら `s=1` とする。この規則は全ゼロ偏差行も包含する（`s=√eps` で `rstd=1/√eps`）。`rstd_scaled` が非有限になる（スケール後分散と `eps/s²` の和が 0）入力は S1 の適用外として S2 へ切り替える（既存 `row_ln_stats` は `eps` を f64 で保持するので S2 の値側と整合する）。(S2) 中間統計量（`rstd` 等）を 1 階と同じ f64 先昇格のホスト関数で計算し、`push_eager` した定数ノードとして保持した上で、二階の微分に必要な項は解析式で別途合成する。(S3) V4（専用 VJP）。既定は S1。いずれの場合も、1 階・`cg.grad`・孫テープ再生（`jvp_create_graph` 経由）の 3 段すべてで有限入力の overflow 回帰ベクトルを必須テストにする（1 階だけの確認では不足）。
+- **中間値の overflow（V3 の値補正では防げない）**: V3 はノードの最終値だけをホスト関数に置き換えるので、構造側の合成グラフが f32 で持つ中間値（例: `x=1e20` の二乗が `inf`、そこから `rstd=0`）は二階微分・孫テープ再生にそのまま使われる。したがって f64 縮約契約を持つ族は、V3 の値補正に加えて次のいずれかで中間統計量を安全に作ることを族の節に明記する。(S1) スケール付き合成: 行ごとの最大絶対値 `s`（ホスト定数。全ゼロ行・全要素が 0 の行では `s=0` となり `x/s` が `NaN` になるため、`s=0` の行は正のスケール `s=1` を使う規則とする。`x` が全ゼロなら二乗和は 0 で、正の `eps` を持つ `LayerNorm`・`RmsNorm` の統計量・入力勾配は 1 階と同じく有限になる）で `x/s` を作ってから二乗和・rstd を合成し、`rstd = rstd_scaled / s` で戻す。孫テープ再生でも同じスケール付き構造が再計算される（ただし upstream・weight・`rstd` の組み合わせで構造の中間値が f32 を超えうるので、構造の各段が f32 に収まることは族ごとの総括的な適用判定で確かめ、overflow しないことの保証はその判定を通った入力に限る。#3078 は §27.3）。**eps の値域保護（S1 の適用条件）**: スケール後の統計量に載せる `eps` は `eps/s²` に変換する。これを f64 で計算して f32 へ丸めた値が 0 になる（`s` が大きく `eps/s²` が f32 正規最小値 `1.17549435e-38` 未満）場合でも、`s` が「中心化後の偏差の最大絶対値」（`LayerNorm`。`RmsNorm` は `x` の最大絶対値）である限り、スケール後の分散（平均二乗）は少なくとも `1/n`（最大要素の寄与が `1`）なので `eps/s²` は丸めで消えるだけで `rstd_scaled` は変わらず有限である。`LayerNorm` で `s` を中心化前の `x` の最大絶対値から選んではならない（定数行 `x=[1e30,1e30]`・`eps=1e-5` は分散 0 のまま `eps/s²=1e-65` が f32 で 0 になり `rstd_scaled=inf` になる）。`s` は構造側と同一手順の f32 演算で得た中心化後偏差から算出し、全偏差が 0 の行は `s=1`（`eps` を変換せず `rstd=1/√eps` で有限）とする。**eps 側の overflow 保護（小スケール入力）**: `s` が極小だと `eps/s²` が f32 で overflow する（`RmsNorm` の `x=[1e-30,1e-30]`・`eps=1e-5` は `s=1e-30` で `eps/s²≈1e55` が `inf` になり、`rstd_scaled=0`・復元した `rstd=0` と誤る。既存 `row_rms_stats` は約 316.23。`0` は有限なので S2 への切替条件にも当たらない）。このため `s` は「最大絶対値（`LayerNorm` は中心化後偏差の最大絶対値）」と `√eps` の大きい方を 2 のべき乗へ切り上げた値とする（`eps>0` のとき `s≥√eps` なので `eps/s²≤1` で常に有限。`s` が最大絶対値で決まる場合は上記の議論どおり。`√eps` で決まる場合は `eps/s²∈(1/4,1]` かつ `x/s` の絶対値が 1 以下で、`rstd_scaled≤2` となり有限）。`eps=0` の行は従来どおり最大絶対値のみで `s` を決め、`s=0` なら `s=1` とする。この規則は全ゼロ偏差行も包含する（`s=√eps` で `rstd=1/√eps`）。`rstd_scaled` が非有限になる（スケール後分散と `eps/s²` の和が 0）入力は S1 の適用外として S2 へ切り替える（既存 `row_ln_stats` は `eps` を f64 で保持するので S2 の値側と整合する）。(S2) 中間統計量（`rstd` 等）を 1 階と同じ f64 先昇格のホスト関数で計算し、`push_eager` した定数ノードとして保持した上で、二階の微分に必要な項は解析式で別途合成する。(S3) V4（専用 VJP）。既定は S1。いずれの場合も、1 階・`cg.grad`・孫テープ再生（`jvp_create_graph` 経由）の 3 段すべてで有限入力の overflow 回帰ベクトルを必須テストにする（1 階だけの確認では不足）。
 
 ### 21.2 `supports_create_graph` の Op 割り当て
 
@@ -757,7 +757,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 21.3 族ごとの方針
 
 - **#3077 Softmax・LogSoftmax**: R は `Var::softmax`／`log_softmax`（`var.rs:2042`／`:2081`）。V3 で、値は `softmax_vjp_along`／`log_softmax_vjp_along`（`grad.rs:6997`／`:7043`。f64 保持・最後に 1 回 downcast）。構造は Softmax が `y⊙g − y⊙Σ(g⊙y)`（§8 のベクトルで中間値が overflow しない並べ替え）、LogSoftmax が `g − exp(y_log)⊙Σg` を縮約前スケーリングで組んだ `s⊙(g/s − exp(y_log)⊙Σ(g/s))`（`s` は行ごとの `max(abs(g))` のホスト定数で、`s=0` の行は `s=1`。`g/s` の各要素は絶対値 1 以下なので `Σ(g/s)` は要素数以下に収まる。素朴な `Σg` は `y_log=[ln0.5,ln0.5]`・`g=[2e38,2e38]` で `inf` になり、最終値だけを V3 で補正しても二階微分・孫テープ再生にこの `inf` が残るため。§21.1 (5) の S1 に準拠し、`log_softmax_vjp_along` の f64 縮約が有限値を返すことと整合させる）。積む Op は `Mul`・`Sub`・`Sum`・`Exp`・`BroadcastTo`・`Contiguous`。必須テスト: §8 のベクトルに加え LogSoftmax は `y_log=[ln0.5,ln0.5]`・`g=[2e38,2e38]` で、1 階・`cg.grad`・孫テープ再生（`jvp_create_graph` 経由）のすべてが有限かつ 1 階と bit 一致。V4 は採らない。
-- **#3078 LayerNorm・RmsNorm**: V3。値は `layer_norm_vjp_rows`／`rmsnorm_vjp_rows`（`grad.rs:6043`／`:5979`）。構造は mean／rstd を `Mean`・`Sub`・`Mul`・`Sqrt`・`Div` で組み直す。**`LayerNorm` の中心化は `Mean` の f32 出力を早期に引かない**（`x=[16777216,16777218]` の正しい平均は 16777217 だが f32 の `Mean` 出力は 16777216 に丸まり、偏差が `[-1,1]` ではなく `[0,2]` になる。既存 `row_ln_stats`／`layer_norm_vjp_rows` は平均と偏差を f64 で保持するため構造側と食い違い、二階微分・孫テープ再生に誤差が残る）。安定な中心化として、行ごとの基準値 `x_ref`（行の先頭要素を `Narrow` で取り `BroadcastTo`。いずれも replayable）を先に引いて `d=x−x_ref` を作り、`m=Mean(d)`、`dev=d−m` とする（上記の入力では `d=[0,2]`・`m=1`・`dev=[-1,1]` で厳密）。さらに `dev2=dev−Mean(dev)` の補正パスを 1 回加えて残差の丸めを除く（§21.1 (5) の S1 の `s` は `dev2` の最大絶対値から取る）。`d=x−x_ref` 自体が f32 で非有限になる入力（`x=[3e38,-3e38]` 等）は S2 へ切り替える。`Rsqrt`／`Reciprocal`・`Op::Var` は replayable でないので使わない（閉包性）。二乗和の「先に f64 へ昇格してから二乗」契約（`coding-rust.md`）は V3 の値側で保つ。中間値の overflow は V3 の値補正では防げない（`x=1e20` の f32 二乗が `inf`、`rstd=0` となりこの誤値が二階微分・再生に使われる）ため、21.1 (5) の S1（スケール付き合成。行ごとの最大絶対値 `s` で `x/s` を作ってから二乗和・rstd を合成し `rstd/s` で戻す）を既定とし、`LayerNorm` の分散項にも同様に適用する。`eps` は `eps/s²` に変換し、`s` は 21.1 (5) の規則（`eps/s²` の overflow 保護のため `max(最大絶対値, √eps)` を 2 のべき乗へ切り上げる。小スケール入力 `x=[1e-30,1e-30]`・`eps=1e-5` で `rstd≈316.23` を保つ）に従い、最大絶対値は `LayerNorm` では中心化後偏差の最大絶対値、`RmsNorm` では `x` の最大絶対値とする（`eps/s²` が f32 で 0 に丸まっても、スケール後分散が `1/n` 以上なので `rstd` は不変。中心化前の `x` から `s` を取ると定数行で `rstd_scaled=inf` になるため禁止）。非有限になる入力は S2 へ切り替える。必須テスト: 中心化の丸め回帰 `x=[16777216,16777218]`（偏差が厳密に `[-1,1]`・`mean` が 16777217 相当、既存 `row_ln_stats` と一致）、有限入力 `x=1e20`、小スケール行 `x=[1e-30,1e-30]`・`eps=1e-5`（`eps/s²` overflow の回帰。`RmsNorm` の `rstd≈316.23` が 1 階と一致）、定数行 `x=[1e30,1e30]`・`eps=1e-5`（`LayerNorm` の `eps/s²` 丸め消失の回帰。`rstd=1/√eps` で有限）と全ゼロ行（`s=0`→`s=1` 規則の回帰。統計量・入力勾配が有限で `NaN` を含まない）で、1 階・`cg.grad`・孫テープ再生のすべてが有限かつ 1 階と REQ-2 判定で一致する。
+- **#3078 LayerNorm・RmsNorm**: V3。値は `layer_norm_vjp_rows`／`rmsnorm_vjp_rows`（`grad.rs:6043`／`:5979`）。構造は mean／rstd を `Mean`・`Sub`・`Mul`・`Sqrt`・`Div` で組み直す。**`LayerNorm` の中心化は `Mean` の f32 出力を早期に引かない**（`x=[16777216,16777218]` の正しい平均は 16777217 だが f32 の `Mean` 出力は 16777216 に丸まり、偏差が `[-1,1]` ではなく `[0,2]` になる。既存 `row_ln_stats`／`layer_norm_vjp_rows` は平均と偏差を f64 で保持するため構造側と食い違い、二階微分・孫テープ再生に誤差が残る）。安定な中心化として、行ごとの基準値 `x_ref`（行の先頭要素を `Narrow` で取り `BroadcastTo`。いずれも replayable）を先に引いて `d=x−x_ref` を作り、`m=Mean(d)`、`dev=d−m` とする（上記の入力では `d=[0,2]`・`m=1`・`dev=[-1,1]` で厳密）。さらに `dev2=dev−Mean(dev)` の補正パスを 1 回加えて残差の丸めを除く（§21.1 (5) の S1 の `s` は `dev2` の最大絶対値から取る）。`d=x−x_ref` 自体が f32 で非有限になる入力（`x=[3e38,-3e38]` 等）は S2 へ切り替える。`Rsqrt`／`Reciprocal`・`Op::Var` は replayable でないので使わない（閉包性）。二乗和の「先に f64 へ昇格してから二乗」契約（`coding-rust.md`）は V3 の値側で保つ。中間値の overflow は V3 の値補正では防げない（`x=1e20` の f32 二乗が `inf`、`rstd=0` となりこの誤値が二階微分・再生に使われる）ため、21.1 (5) の S1（スケール付き合成。行ごとの最大絶対値 `s` で `x/s` を作ってから二乗和・rstd を合成し `rstd/s` で戻す）を既定とし、`LayerNorm` の分散項にも同様に適用する。`eps` は `eps/s²` に変換し、`s` は 21.1 (5) の規則（`eps/s²` の overflow 保護のため `max(最大絶対値, √eps)` を 2 のべき乗へ切り上げる。小スケール入力 `x=[1e-30,1e-30]`・`eps=1e-5` で `rstd≈316.23` を保つ）に従い、最大絶対値は `LayerNorm` では中心化後偏差の最大絶対値、`RmsNorm` では `x` の最大絶対値とする（`eps/s²` が f32 で 0 に丸まっても、スケール後分散が `1/n` 以上なので `rstd` は不変。中心化前の `x` から `s` を取ると定数行で `rstd_scaled=inf` になるため禁止）。非有限になる入力は S2 へ切り替える。必須テスト: 中心化の丸め回帰 `x=[16777216,16777218]`（偏差が厳密に `[-1,1]`・`mean` が 16777217 相当、既存 `row_ln_stats` と一致）、有限入力 `x=1e20`、小スケール行 `x=[1e-30,1e-30]`・`eps=1e-5`（`eps/s²` overflow の回帰。`RmsNorm` の `rstd≈316.23` が 1 階と一致）、定数行 `x=[1e30,1e30]`・`eps=1e-5`（`LayerNorm` の `eps/s²` 丸め消失の回帰。`rstd=1/√eps` で有限）と全ゼロ行（`s=0`→`s=1` 規則の回帰。統計量・入力勾配が有限で `NaN` を含まない）で、1 階・`cg.grad`・孫テープ再生のすべてが有限かつ 1 階と REQ-2 判定で一致する。**総括的な適用判定（§27.3。PR #3346 のレビューで追加）**: upstream `g`・`w`・`rstd` の組み合わせによる構造の中間値（`cg.grad`・二階の逆伝播・孫テープ再生）の overflow は、構造を組む前にホストが各段の上界を f64 で求めて判定し、f32 の安全域を外れる入力は型付きエラーで拒否する。本項の数値契約が保証するのはこの判定（と §27.2 の入口検査）を通った入力に限る。
 - **#3079 BatchNorm**: V3（`batch_norm_vjp_channels`、`grad.rs:6139`）。学習時と推論時で分岐し、推論時は統計量が定数なので V1 で足りる。
 - **#3080 Conv 系**: d_input は転置畳み込みの合成（族内で閉じる）。d_weight／d_bias は V3（f64 縮約契約。`grad.rs:1380` 以降）で、構造は `Var::unfold`（`var.rs:5575`）＋matmul を推奨し、閉包性のため `Unfold`・`Fold` を同梱する。`compute_dtype` が F32 でない `Conv2d` は `TapeNode::low_precision` を立てない（立てるのは `low_precision_ops.rs:93`・`var.rs:3652` の matmul 系だけ）ので、`validate_ancestors` に明示的な拒否を足す。
 - **#3081 Gelu・GeluTanh**: 21.5。
@@ -907,11 +907,180 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 1 階 `Tape::backward` の経路（`grad.rs`・スカラー評価・`tensor-core`）、`Op` payload、公開 API、依存、`unsafe`、tolerance・baseline、`docs/spec`、既存節の本文。
 
-## 24. 実装記録（#3079・`BatchNorm` の create_graph 対応。親 #3075）
+## 24. 実装記録（#3077・Softmax／LogSoftmax の create_graph 対応）
+
+§21.1・§21.3 の V3 方式で `Op::Softmax`・`Op::LogSoftmax` を `supports_create_graph` の対象に加えた（網羅 match のまま）。
+
+### 24.1 構造グラフと値
+
+- 値は 1 階 VJP と同じホスト関数。構造は子テープに積む `Var` 演算で、値付きの `Op::Contiguous` ノードとして登録する。登録前に値と構造の shape が一致することを `Err(Backward)` で検査する。
+- Softmax: `y⊙g − y⊙Σ_dim(g⊙y)`。積む Op は `Mul`・`Sum`・`Contiguous`・`Reshape`・`BroadcastTo`・`ScalarBinary(Sub)`。
+- LogSoftmax: `s ⊙ (g/s − exp(y) ⊙ Σ_dim(g/s))`。`s` はレーンごとの `max|g|` をホストで求めた定数葉。`s == 0` と非有限のレーンは `s = 1` とし、IEEE の伝播は構造側に任せる。
+- §21.3 の「積む Op」一覧に `ScalarBinary(Div)` を補足する。逆数を掛ける形は `s` が f32 最大値付近で非正規数になるため採らない。
+- 空テンソル（shape に 0 を含む）は 1 階の早期 return と揃え、全ゼロの定数葉を寄与として返す。
+
+### 24.1b 二階の逆伝播の overflow 保護
+
+- Softmax: `y` を使用箇所（`y⊙g`・`y⊙dot`・`g⊙y` の縮約）ごとに入力から別の `softmax` ミラーとして立てる。各寄与を別々に Softmax VJP へ通してから入力側で蓄積するため、同一ノードでの寄与の和が f32 範囲を超えない（定数シフト不変性で相殺される量）。
+- LogSoftmax: `exp(y)·Σgs` を `exp(y + ln n)·(Σgs / n)` に分け、`exp` ノードへの寄与を `-s·mean_gs`（`≤ s`）に抑える。さらに `q` の VJP 積 `q⊙寄与`（最大 `n·s`）が LogSoftmax VJP の手前で溢れる（確率偏り＋大スケール。例 `x=[ln9,0]`・`g=[3e38,3e38]`）ため、`q·mean_gs` を入力から別々に立てた `log_softmax` ミラーへ等分し、各寄与を別々に VJP へ通して入力側で蓄積する。分割数はホストで `n·p·s·|mean_gs|` の上界から決める（2e38 超過分のみ増やす・最大 64・通常 1）。`y` への寄与の総和は従来と同値。限界: 分割上限を超える規模は保護できない。分割数 2 以上の状態でさらに jvp_create_graph（三階）へ通す経路は NaN を生む場合を確認しており未保護（二階 Hessian 経路のみ保証）。
+- 上流勾配が入力依存の場合の保護（codex-review 指摘）: `s⊙(gs − q·mean_gs)` を `g − q·mean_g`（`mean_g = Σ g/(n·pieces)`）へ恒等変形し、`s` を掛ける積と `g/s` 除算を作らない。`mean_g` 側へ `-s·q`（最大 `n·s`）が逆伝播しない。回帰: `create_graph_log_softmax_input_dependent_large_upstream_hessian_is_finite`（`x=[ln9,0]`・`loss=Σ y²·5e37`）。
+- 回帰テスト: `create_graph_softmax_large_upstream_second_order_is_finite`・`create_graph_log_softmax_large_upstream_second_order_is_finite`（`cg.grad` の各要素を入力で微分した Hessian を f64 閉形式と比較）。
+- 限界: 真の二階寄与そのものが f32 範囲を超える入力は保護できない。
+
+### 24.2 LogSoftmax の値の dispatch（決定記録の解釈）
+
+§21.3 は値を「ホスト関数」と書くが、1 階は `log_softmax_backward`（backend カーネル）を先に使う。§21.1(1) の bit 同一を CUDA でも満たすため、3 分岐 dispatch を `grad::log_softmax_vjp_dispatch` へ切り出し、1 階と子テープの両方が同じ関数を `ops` に対して呼ぶ。1 階の挙動は変えていない。Softmax には backend backward がないので dispatch は不要。`softmax_vjp_along`・`log_softmax_vjp_along` は `pub(crate)` にした。
+
+### 24.3 テスト
+
+- `crates/autodiff/tests/create_graph.rs`: `hessian_softmax_matches_finite_difference`・`hessian_log_softmax_matches_finite_difference`（軸 0／最終軸／rank 3 中間軸・自乗・`⊙x`・`tanh` 連鎖）、`create_graph_softmax_first_order_is_bit_identical`、`create_graph_softmax_first_order_chain_matches_req2`、`create_graph_softmax_large_upstream_does_not_overflow`・`create_graph_log_softmax_large_upstream_does_not_overflow`（§8・§21.3 のベクトル。1 階・`cg.grad`・`jvp_create_graph` の孫テープ再生がすべて有限）、`create_graph_softmax_empty_tensor_returns_zero_shaped_grad`、`create_graph_rejects_unsupported_op_logsumexp`（拒否契約は `LogSumExp` で維持）、`create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty`。
+- 孫テープ再生の値は REQ-2 判定で比較した（§21.1(3) のとおり合成側の f32 再計算差は範囲内として受け入れる）。bit 一致は主張しない。
+- `crates/facade/tests/create_graph_facade.rs`: 実 CPU バックエンドでの 1 階 bit 一致と Hessian の列和の中央差分突合。
+
+### 24.4 変更していないもの
+
+1 階 `Tape::backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
+
+## 26. 実装記録（#3082・損失 Op 第 1 弾の create_graph 対応）
+
+§21.4 の損失族のうち、1 階 VJP が f32 の要素式だけで f64 縮約契約を持たない 5 variant を `supports_create_graph` の対象に加えた（網羅 match のまま）。残りは fail-closed のまま下表に記録する。サブイシューの起票は所有者承認が要るため行っていない。
+
+### 26.1 対象にした 5 variant と方式
+
+| variant | 方式 | 二階の構造 |
+|---|---|---|
+| `MseLoss` | V1 | `dpred = (pred − target) ⊙ s`、`dtarget = −dpred`。`s` は Mean で `(g·2)/n`、Sum で `g·2` |
+| `L1Loss` | V2 | `sign(d)` は区分定数。`pos`／`neg`／`nan` のマスクを親の値から作り `where_cond` で選ぶ。`d == 0` は 0、NaN は `d_m` を通して伝播する |
+| `HuberLoss`（`Huber`／`SmoothL1`） | V1＋V2 | 二次領域（`!(|d| >= delta)`）は `g_b ⊙ d`（`SmoothL1` は `d/delta`）、線形領域は `g_b ⊙ copysign(delta または 1, d)`（非零定数）。`where_cond` で選ぶ |
+| `CrossEntropyLoss` | V1 | `dlogits = (softmax(logits) − onehot) ⊙ s`。子テープに `Softmax` を積む。`onehot` は親の `targets` から作る定数 |
+| `NllLoss` | V2 | `dinput = where(onehot_mask, −s, 0)`。入力について定数なので、二階の寄与は `g` を経由する分だけ |
+
+- 上流勾配 `g` は子テープ上の `Var` のまま扱う（損失が根でない場合や孫テープ再生で、二階の勾配が `g` を通って流れるため）。scale は `g` に定数を掛ける・割る形で作り、演算順は 1 階（`mse_loss_scale`・`nll_loss_scale` 等）に合わせた。
+- float の target は追跡可能な入力として扱い、`dtarget` は子テープの `Var`（`dpred.neg()`）にした。`requires_grad == false` の target は `accumulate` が捨てる。
+- 区分定数の部分は §21.1 V2 に従い `where_cond` で作り、`g.mul(0/1 定数)` は使わない（`inf·0 = NaN` を避ける）。
+- 範囲外の `targets` 添字は 1 階と同じくスキップする（forward が検査済み。panic しない）。空テンソルは 1 階と同じく全ゼロを返す。
+- `replay_op` は公開 `Var` メソッド（`mse_loss_with`・`l1_loss`・`huber_loss_impl`・`cross_entropy_loss`・`nll_loss`）へ委譲し、forward の検証を迂回しない。`huber_loss_impl` は `pub(crate)` にした（公開 API は不変）。未知の `HuberKind` は `Err(Backward)` に倒す。
+
+### 26.2 残した 16 variant（fail-closed のまま）
+
+| 族（§21.4） | variant | 理由・後続 |
+|---|---|---|
+| (a) 回帰 | `PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss` | 未着手。次弾の候補 |
+| (b) 二値・マージン | `BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss` | 未着手 |
+| (c) クラス軸 | `CrossEntropyLossWithOptions`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 未着手 |
+| 恒久 | `CtcLoss` | §21.2 のとおり恒久的に fail-closed |
+
+### 26.3 `reduction` と既知の差
+
+- `crate::var::Reduction` は `Mean`／`Sum` の 2 variant だけで、`None` は存在しない。`None` の追加は公開 API の変更なので本 issue では行わない（所有者承認が必要）。両 variant をすべての対象損失で検証し、「none 相当」は要素ごとの二乗誤差（非スカラー損失）の Hessian テストで代替した。
+- `L1Loss` は `d == 0` かつ `g` が `±inf` のとき、1 階は `inf·0 = NaN` だが子テープは 0 になる。§21.1 V2 の規則を優先した結果。
+
+### 26.4 テスト
+
+- `crates/autodiff/tests/create_graph.rs`: 5 損失 × `Mean`／`Sum` の Hessian と有限差分の REQ-2 一致（恒等入力・`tanh` 連鎖・MSE の閉形式）、CE・NLL のクラス軸バリエーション（軸 0・最終軸・rank 3 中間軸）、`CE ≡ NLL∘LogSoftmax` の Hessian 突合、pred・target 両方を追跡する混合二階微分、`first_order()` と `Tape::backward` の bit 一致、`jvp_create_graph` の孫テープ再生と方向微分の突合、none 相当、大きな logits（`±1e30`）の有限性、空テンソル、残る損失（`KlDivLoss`）の拒否。
+- `crates/autodiff/src/tape.rs`: 5 variant が `true`・隣接する `KlDivLoss` が `false` を固定する単体テスト。
+- `crates/facade/tests/create_graph_facade.rs`: 実 CPU バックエンド（融合 `mse_loss_backward`・`nll_loss_backward` 経路）で、1 階との REQ-2 一致と Hessian 列和の中央差分突合。
+- 5 損失は V3 でないため、`cg.grad` と 1 階の bit 一致は主張せず REQ-2 で比較する。1 階 `first_order()` が `Tape::backward` と bit 同一である点（§21.1(1)）は構造上保たれる。
+
+### 26.5 変更していないもの
+
+1 階 `Tape::backward`・`grad.rs`・`backward.rs` の値、tolerance・baseline、FMA 契約、依存（`Cargo.toml`・`Cargo.lock`）、`unsafe`、公開 API、`docs/spec`、既存節の本文。CUDA／Metal 実機実測は未実施（#3080 と同じく申し送り）。
+
+
+## 25. 実装記録（#3083・索引・累積 Op の create_graph 対応）
+
+§21.2 の「索引 V1・累積 V3・選択 V2」のうち、`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum` の 8 variant を `supports_create_graph` の対象に加えた（網羅 match のまま）。実装は `crates/autodiff/src/create_graph/index_cum.rs`。承認範囲は §20（D-A）の一括承認で、新しい承認は得ていない。
+
+### 25.1 11 variant の扱い
+
+| variant | 本 PR | 方式 | replay（写しの forward） | cgrad（子テープへ積む式） |
+|---|---|---|---|---|
+| `Gather` | 対象 | V1 | `gather(dim, index)` | `zeros.scatter_add(dim, index, g)` |
+| `Scatter`（Add／Overwrite） | 対象 | V1＋V2 | reduce に応じて `scatter_add`／`scatter` | d_src は `gather`（Overwrite は last-writer マスクの `where_cond`）。d_input は Add が恒等、Overwrite が `g.scatter(dim, index, 0)` |
+| `Embedding` | 対象 | V1＋V2 | `weight.gather(0, index)` | `scatter_add`（dim 0）の後に `padding_idx` 行を `where_cond` で 0 |
+| `Sort`・`Topk` | 対象 | V2 | `gather(dim, index)` | Gather と同じ |
+| `Cummax`・`Cummin` | 対象 | V2 | `gather(dim, index)` | Gather と同じ（索引は必ず重複する） |
+| `Cumsum` | 対象 | V3 | `cumsum(dim)` | 構造 `flip → cumsum → flip`、値 `cumsum_vjp_along` |
+| `IndexedScatterReduce` | fail-closed のまま | — | — | 1 階 VJP がモードごとに入力依存のホストカーネル（prod／amax／amin のタイ規則）で、replayable な `Var` 演算だけの構造グラフを組めない |
+| `Cumprod` | fail-closed のまま | — | — | 1 階は `WideFloat` の Horner 型再帰。合成グラフでは §21.1(5) の overflow 契約を保てない |
+| `Logcumsumexp` | fail-closed のまま | — | — | 1 階は lane ごとの f64 prefix 再計算。合成すると `exp` の中間 overflow が出るため S1 スケーリングの設計が要り、2h 枠を超える |
+
+- 残る 3 variant は §21.4 の (a)(b) の残りに当たる。起票には所有者承認が要るため本 PR では起票していない。
+- 閉包性（§21.1(4)）: `Gather` の cgrad は `Scatter{Add}`、`Scatter` の d_src は `Gather` を積むため、両者は同時に対象にした。`Var::flip` は `index_select` 経由で `Op::Gather` になる。ほかに積む Op は `Where`・`Narrow`・`Contiguous`・`Cumsum` で、いずれも対象。
+
+### 25.2 方式の要点
+
+- 索引系は 1 階と同じ `scatter_with_fallback(Add)` を同じ引数で通るため、`cg.grad` は 1 階と bit 一致する（重複索引は `ScatterReduce::Add` の f64 決定的集約）。
+- `Sort`・`Topk`・`Cummax`・`Cummin` の `Op` payload は `descending`／`largest` を持たない。写しは値を選ぶだけの `Var::gather` で再生する（値は親と bit 一致）。§21.1(2) からの逸脱は子テープ上の Op タグが `Gather` になる点だけで、VJP は 1 階と同じ scatter_add(Add) である。
+- `Scatter` の d_src は `src_shape[axis] < input_shape[axis]` の非 dim 軸ごとに `g.narrow(axis, 0, len)` してから `gather` する（1 階と同じ）。Overwrite の d_src は `mul` ではなく `where_cond` で選ぶ（`inf*0` を作らない）。
+- `ScatterReduce` は `#[non_exhaustive]`。未知 variant は `validate_ancestors` が子テープへ書く前に拒否する（`child.is_empty()` を保つ）。`replay_op`・`build_cgrads` の `_ =>` は多層防御として残す。`Embedding` の `padding_idx` の範囲も入口で再確認する。
+- `Cumsum` の値は 1 階と同じホスト関数 `cumsum_vjp_along`（lane ごとの f64 アキュムレータ）。構造 `flip → cumsum → flip` の前方値がホスト値と bit 一致することを単体テストで確認した（`cumsum_structure_value_matches_host_bitwise`。桁落ち列・`[3e38, -3e38, 3e38]` を含む）。そのため孫テープで `Op::Contiguous` が構造を再計算しても §23.3 の P1（f32 へ落ちて inf になる問題）は起きず、`ConvWeightGradHost` 型の専用ホスト値 Op は不要と判断した。空テンソルは 1 階に揃えゼロ定数の葉を返す。
+
+### 25.3 Embedding の padding_idx の二階の意味論（所有者へ戻す論点）
+
+写しを `Gather` として再生するため、二階の逆伝播は forward 経路を通って行 `padding_idx` へ流れる寄与を 0 にしない。これは「1 階勾配関数を有限差分で微分した値」と一致する（forward は行 `p` の値を実際に使い、1 階勾配の行 `p` は常に 0 のため `H[p, *] = 0`、`H[*, p]` は forward 経由で非零）。一方 PyTorch の double backward とは行 `p` の混合二階項で異なりうる。受入条件が有限差分突合のため本方式を採った。PyTorch 準拠へ寄せるかは所有者判断として残す。
+
+### 25.4 テスト
+
+- `crates/autodiff/tests/create_graph.rs`（「索引・累積族」節）:
+  - Hessian の有限差分突合（REQ-2 判定・tolerance 不変）: Gather（重複索引・dim 0／1）・Scatter Add（input と src の混合ブロック・非 dim 軸 narrow・重複索引）・Scatter Overwrite（重複索引・最後の書き手）・Embedding（重複 id・`padding_idx` あり／なし・行 `p` と他行が結合する `(Σy)²` 項）・Sort（昇順／降順）・Topk・Cummax・Cummin（重複索引）・Cumsum（軸 0／最終軸／rank 3 中間軸）。loss は y³⊙c で勾配が 2 次多項式のため中央差分が厳密になる。
+  - `cg.grad` と `Tape::backward` の突合（線形 loss は bit 一致、連鎖 loss は REQ-2）と `first_order()` の bit 同一。
+  - Cumsum の数値回帰: 桁落ち列 `[1, 1e8, -1e8, 1]`（f64 縮約 2 と f32 逐次和 1 が分かれる）と `[3e38, -3e38, 3e38]` で 1 階と `cg.grad` が bit 一致、孫テープ（`jvp_create_graph`）も有限。
+  - 孫テープ: `scatter_add → cumsum → gather` を含む関数の `jvp_create_graph` を独立な方向微分と突合。
+  - fail-closed: `create_graph_rejects_custom_downstream_of_gather`・`create_graph_rejects_unsupported_op_cumprod`・`create_graph_rejects_gather_mixed_with_unsupported_op_and_keeps_child_empty`（いずれも拒否時 `child.is_empty()`）。旧 `create_graph_rejects_unsupported_op_gather` は廃止（Gather が対象になったため）。`Logcumsumexp`・`IndexedScatterReduce` の既存拒否テストは変更なしで green。
+- 内部単体テスト: `tape.rs::index_cumulative_family_supports_create_graph`（8 件が true・3 件が false）、`index_cum.rs` の構造値 bit 一致と `replay_scatter`。
+
+### 25.5 変更していないもの
+
+1 階 `Tape::backward` の値（`grad.rs` の差分は `cumsum_vjp_along`・`scatter_overwrite_last_writer_mask` の可視性を `pub(crate)` にしただけ）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。CUDA／Metal 実機での create_graph×索引系の実測は未実施（#3168・#3169 へ申し送り）。
+
+## 27. 実装記録（#3078・§21.3「#3078 LayerNorm・RmsNorm」の実装）
+
+- 親は #3075、方針の正は §21.1（V3・S1・閉包性）と §21.3。本節は実装した形と、§21.3 から外れた点だけを書く。
+- 変更ファイル: `crates/autodiff/src/create_graph_norm.rs`（新規）・`create_graph.rs`・`tape.rs`・`grad.rs`（`rmsnorm_vjp_rows`／`layer_norm_vjp_rows` を `pub(crate)` にしただけ。本体・数値は不変で 1 階は bit 同一）・`lib.rs`。テストは `crates/autodiff/tests/create_graph_norm.rs`。
+
+### 27.1 実装形
+
+- `supports_create_graph` は `Op::RmsNorm`・`Op::LayerNorm` を `true` にした（網羅 match のまま。ワイルドカードは足していない）。`replay_op` は `Var::rms_norm`／`layer_norm` へ委譲し、`build_cgrads` は `create_graph_norm::{rms_norm_cgrads, layer_norm_cgrads}` の寄与列を `accumulate` する。
+- **値（V3）**: `dx`・`dw`・`db` の値は 1 階と同じ `*_vjp_rows`。`dy` は子テープ上の `g` の実値（`reduce_bias_grad_var` と同じ借用パターン）。CPU・`naive_ops` では 1 階 VJP も同じ関数へフォールバックするので、`g` が親の upstream と bit 一致する範囲では `cg.grad` は 1 階と bit 同一。CUDA は 1 階が専用カーネルを通るため、REQ-2 統一複合判定の範囲の一致のみを主張する。`db` も `reduce_bias_grad_var` ではなく V3 で書く（`rows == 1` の符号付きゼロの扱いを 1 階と揃えるため）。
+- **構造（S1）**: 行ごとの 2 のべき乗 `s`（`max(最大絶対値, √eps)` を切り上げ。`eps=0` は最大絶対値のみ・0 なら `s=1`。指数は `[-126, 127]` にクランプ）で `x/s` を作り、`ms`・`rstd_s=1/√(ms+eps/s²)`・`xhat=xs·rstd_s`・`dx=(rstd_s/s)·(dxhat−…)` を合成する。`1/s` の乗算は `s=2^127` で非正規化数になるため `Div` を使う。`eps/s²` は f64 で計算して f32 へ丸める。出力ごとに `Op::Contiguous`（VJP は恒等）のノードを `push_eager` し、値だけをホスト関数の結果にする。
+- **`LayerNorm` の中心化**: `x_ref=Narrow(x,1,0,1)`・`d=x−x_ref`・`m=Mean(d)`・`dev=d−m`・補正 `dev2=dev−Mean(dev)`。`s` は中心化前の `x` ではなく `dev2` の子テープ上の実値から決める。
+- **積む Op**: `Reshape`・`Contiguous`・`Narrow`・`Mean`・`Sum`・`Mul`・`Add`・`ScalarBinary{Sub, Div}`・`ScalarUnary{Sqrt}`。すべて `supports_create_graph == true` なので孫テープ再生（`backward_create_graph` の再帰・`jvp_create_graph`）が通る。`Rsqrt`／`Reciprocal`／`Op::Var`・`BroadcastTo` は使っていない。
+
+### 27.2 §21.3 より狭い拒否（所有者へ戻す論点）
+
+§21.3 は「`d=x−x_ref` が非有限、または `rstd_scaled` が非有限になる入力は S2 へ切り替える」とした。S2（ホストの統計定数と二階の項の手書き合成）は 1 イシューの粒度を超え、誤ると Hessian が黙って誤値になるため、本実装は S2 を作らず、**子テープへ書く前**の `validate_ancestors`（`create_graph_norm::validate_norm_s1`）で次の入力を `Err(AutodiffError::Backward)` として拒否する。拒否時に `child` は空のまま保たれる。**これは新しい承認ではなく、S2 または代替の採否を所有者へ戻す。**
+
+| Op | 拒否条件（親テープの `x` の値だけで決まる保守的な判定） |
+|---|---|
+| `LayerNorm` | (a) 非有限要素 (b) f32 の `x_i−x_0` が非有限 (c) f64 で `hidden·max｜x_i−x_0｜ ≥ 2^125`（`Mean` の f32 部分和が overflow しうる。例 `[-2e38,1e38,1e38]`）(d) `eps==0` かつ `max｜x_i−x_0｜ < 2^-100`（定数行・極小偏差行で `rstd=inf`） |
+| `RmsNorm` | (a) 非有限要素 (d') `eps==0` かつ全ゼロ行 |
+
+§21.3 の必須ベクトル（`x=1e20`・`[16777216,16777218]`・`[1e-30,1e-30]`/`eps=1e-5`・`[1e30,1e30]`/`eps=1e-5`・全ゼロ行）はいずれもこの判定を通り、1 階・`cg.grad`・孫テープ再生が有限かつ REQ-2 判定で一致する（テストで固定）。将来の代替案として「S0 前スケーリング（中心化の前に `x` を行ごとの 2 のべき乗で割る）」も候補に残すが実装していない。
+
+### 27.3 総括的な適用判定と数値契約の保証範囲
+
+- **upstream のスケーリング（構造の形）**: `dxhat = g·w` を行ごとの 2 のべき乗 `gs`（`g·w` の f64 行最大絶対値から決める）で割ってから `Sum` へ渡し、縮約の**直後**に `gs/hidden`（定数葉）を掛けて `mean_dxhat·gs`・`mean_dot·gs` を作る。`dx` の構造は `rstd/s · (g·w − mean_dxhat·gs − xhat·mean_dot·gs)` で、`gs` を縮約の手前（逆伝播では縮約の後ろ）で復元しない。
+- **個別条件では収束しなかった経緯**: PR #3346 のレビューでは、有限な入力・upstream で構造（`cg.grad`・二階の逆伝播・孫テープ再生）の中間値が f32 を超える指摘が同じ類型で続いた。`g=[3e38,3e38]`（RmsNorm `x=[1,1]`）の縮約、LayerNorm `x=[1,-1,1,-1]`・`g=±1e38` の `gs` 復元と `hidden·g` 規模の cotangent 和（HVP が NaN。真値は約 ±3e33）、低分散行の `rstd` 増幅（Bugbot）、RmsNorm `x=[0.75×4]`・追跡ありの `w=0`・`g=8e37` で `g·w=0` の検査を素通りし、dw 構造の `rstd_s` への cotangent（約 2.4e38）に `Div` の分母側係数（約 −1.78）が掛かって `−inf` になる経路（真の混合二階微分は各約 1.9e33）。経路ごとに条件を足す方式では網羅できないため、次の総括的な判定へ置き換えた。
+- **総括的な適用判定（`create_graph_norm::check_structure_stages`）**: `rms_norm_cgrads`／`layer_norm_cgrads` が構造を積む前に、ホストが構造の各段を f64 で再計算し、各段の絶対値の上界を求める。対象は (i) dx／dw／db 構造の forward の各段（統計量・`dxhat`・行方向和・`inner`・構造の出力・dw／db の行をまたぐ和）、(ii) 二階の逆伝播で各段に現れる「cotangent × 微分係数」と行方向の部分和の上界、(iii) 境界ノード（`x`・`w`・`g` の写しのうち勾配を受け取るもの）へ出る cotangent。(ii) は `cg.grad` の出力へ入る seed の各要素の絶対値が 1 以下という前提で、構造の演算順（`binary_partials` の `Div` 係数 `-(a/b)/b`・`Sqrt` の `0.5/y`・`Mean` の `1/hidden`）を逐語でなぞり、三角不等式で押さえる。LayerNorm の `s`・`xs` は子テープ上の `dev2` の実値から取り、構造と同じ値で判定する。どれか 1 段でも上界が `2^125` 以上（または非有限）、または `g` に非有限要素があれば `Err(AutodiffError::Backward)` で拒否し、`Tape::backward_create_graph` のロールバックが `child` を空へ戻す（同じ `child` で再試行できる）。閾値 `2^125` は入口検査（`MEAN_OVERFLOW_GUARD`）と同値で、f32 最大値との 8 倍の差は f32 丸めの累積への余裕である。上に挙げた経路は既知の失敗例であり、網羅を主張するのはこの判定の方である。
+- **保証範囲**: 本節の数値契約が保証するのは、判定を通った入力で 1 階・`cg.grad`・二階（seed の各要素の絶対値 ≤ 1）・孫テープ再生が有限であり、`cg.grad` が 1 階と REQ-2 判定で一致し、孫テープ再生の二階が子テープの二階と REQ-2 判定で一致することまでである。孫テープ側で子テープ上の正規化の写しが再び微分される場合（例: `g = 2c·norm` のように upstream が入力に依存する損失）は、そこでも同じ判定が走り、通らなければ同じく型付きエラーで孫テープは空へ戻る。上界は符号を見ない最悪値なので拒否は保守的で、拒否は実際の overflow を意味しない。構造の forward 出力も判定するため、1 階の値が有限でも `2^125` 以上の入力は拒否する（孫テープ再生では `Op::Contiguous` が構造の f32 値を再計算するため）。対象外: `g` を作る上流の Op の逆伝播（例: `g = 2c·norm` の `Mul` が cotangent に `2c` を掛ける段。各 Op の契約に従う）、絶対値 1 を超える seed、三階以上の微分、真の値そのものが f32 を超える場合（1 階と同じく `inf`）。
+- 1 階側も要素積 `dy·w`・`dy·xhat` は f32 で計算するので、要素単位の overflow は 1 階と同じ挙動になる。
+- 拒否範囲を狭める（S2 化）かは所有者判断（§27.2 と同じく所有者へ戻す論点）。
+- CUDA／Metal 実機での `cg.grad` の parity は未確認（申し送り）。
+
+### 27.4 テスト
+
+`crates/autodiff/tests/create_graph_norm.rs`: Hessian の有限差分突合（RmsNorm の weight なし／あり・LayerNorm の weight・bias 4 通り・rank 1／2／3・`x`／`w`／`b` 各微分・`x`×`w` の混合項・tanh 合成）、`first_order` の bit 同一と `cg.grad` の REQ-2 一致、§21.3 必須ベクトルの 3 段（1 階・`cg.grad`・孫テープ再生）、`eps=0` の非退化行の受理、§27.2 の拒否と `child.is_empty()`、fail-closed のまま残る隣接 Op（`LocalResponseNorm`）。有限差分は測定側の丸め雑音を抑えるため 5 点中央差分（h=1e-2）を使う（判定式・tolerance は不変）。§27.3 の判定は正のプローブで確かめる: レビューで指摘された入力そのもの（と LayerNorm の dw 同型・`[3,4]` の db 行をまたぐ和）が拒否され `child` が空になること、同じ入力を upstream 1e30 倍へ下げると受理され全段が有限かつ一致すること、kind × weight（なし・0・非ゼロ・定数）× bias × 微分対象 `x`／`w`／`b` × 幅 4／32 × 行数 1／3 × upstream の大きさ（1〜3e38）× 線形／入力依存（`g = 2c·norm`）の損失 × seed の符号パターンの掛け合わせで「受理なら全段が有限で一致・拒否なら `child` が空」が成り立ち、受理と拒否の両方が現れること。
+
+### 27.5 変更していないもの
+
+1 階 `Tape::backward` の数値、tolerance・baseline、FMA 契約、依存、`unsafe`、`docs/spec`、既存節の本文（§21.1 (5) の S1 と §21.3 の #3078 項に、保証を §27.3 の判定を通った入力に限る旨を足した以外）。
+
+## 28. 実装記録（#3079・`BatchNorm` の create_graph 対応。親 #3075）
 
 - 基準は `origin/main` `6d08419a`。方針は §21.1 (5)・§21.3（#3079 行）に従う。コードは `crates/autodiff/src/create_graph_norm.rs`（新規・非公開）と、`create_graph.rs` の `replay_op`／`build_cgrads` の薄い腕、`tape.rs::supports_create_graph`（`Op::BatchNorm` を `true`）。
 
-### 24.1 方式の割り当て（出力ごと）
+### 28.1 方式の割り当て（出力ごと）
 
 | 出力 | train | eval | 理由 |
 |---|---|---|---|
@@ -922,7 +1091,7 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - V3 の値は `grad.rs::batch_norm_vjp_channels`（`pub(crate)` 化。本体・シグネチャは不変）を 1 回呼んで得る。値は 1 階と bit 同一。構造 `S` の上に `Op::Contiguous`（VJP が恒等で前方値に依存しない）を `push_eager` し、二階の微分は `S` を流れる。
 - `replay_op` は `fixed_stats` payload をそのまま使い、`Var::batch_norm`／`batch_norm_infer` へ委譲する（`Op` の拡張なし）。
 
-### 24.2 構造（S1。スケール付き合成）
+### 28.2 構造（S1。スケール付き合成）
 
 チャネル軸を前に出した行 `[C, M]`（`Reshape`・`Permute`・`Contiguous`）で組む。ホスト定数はすべて 2 のべき乗で、乗除算は（非正規化域を除き）厳密。
 
@@ -933,41 +1102,41 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 5. eval の x̂（dw 用）: `q = x/p − mean/p`（`p` は `max(|x|,|mean|)` 以上。`|q|≤2`）と `rstd = 仮数·2^k` の分解。dx は `dx̂·rstd`（V1）。
 - 積む Op は `Mul`・`Sub`・`Add`・`Mean`・`Sum`・`Narrow`・`Reshape`・`Permute`・`Contiguous`・`ScalarUnary(Sqrt)`・`ScalarBinary(Div)` のみで、すべて `supports_create_graph == true`（閉包性。孫テープ再生で閉じる）。
 
-### 24.3 running stats
+### 28.3 running stats
 
 `replay_op`・`build_cgrads` は `Var::` プリミティブとホスト関数だけを呼び、`nn::BatchNorm*` の buffer・`num_batches_tracked` へ触れる経路がない。子テープ構築・二階 backward・孫テープ再生（`jvp_create_graph`）で二重更新されないことを統合テストで固定した。
 
-### 24.4 fail-closed
+### 28.4 fail-closed
 
 - 空テンソル（`n`／`c`／`spatial` のいずれかが 0）の BatchNorm は `validate_ancestors` で子テープへ書く前に拒否する。
 - 対象外のまま残る Op（例: `local_response_norm`）は従来どおり入口で拒否され、子テープは無変更。
 - 1 階が有限でない入力（`eps=0` かつ分散 0 など）は 1 階と同様に非有限になる（特別扱いしない）。S2 は実装していない。
 
-### 24.5 テスト（`crates/autodiff/tests/create_graph.rs`・`create_graph_norm.rs` 単体）
+### 28.5 テスト（`crates/autodiff/tests/create_graph.rs`・`create_graph_norm.rs` 単体）
 
 - Hessian: x（rank 2 の有限差分。rank 2／4 の独立合成〈`mean_dims`・`sub`・`mul`・`sqrt`・`div`〉との突合を train／eval・affine の有無で）・w・b の有限差分・x×w の混合二階。rank 4 の有限差分は f32 勾配の丸め雑音が Hessian 成分に対し無視できないため行わず、独立合成との突合に置き換えた（判定は緩めていない）。
 - 1 階一致（`cg.grad(x|w|b)` が `Tape::backward` と REQ-2 判定で一致・`first_order()` は bit 同一）、running stats 不変、閉包性（孫テープへの再生）、`local_response_norm` の fail-closed、空入力の拒否。
 - 3 段（1 階・`cg.grad`・孫テープ再生）の回帰ベクトル: `x=1e20` 系・中心化の丸め・小スケール・定数・全ゼロ・`[3e38,-3e38]`・巨大な上流勾配（交互符号・同符号）・eval の逆符号大値。
 - 単体: 2 のべき乗の選択規則、`mul_pow2_per_row` の大指数、チャネル行変換の往復。
 
-### 24.5a レビュー指摘の是正（Codex P1 × 2）
+### 28.5a レビュー指摘の是正（Codex P1 × 2）
 
 - 前置スケール指数 `p` を `[-64, 64]` に制限した（`POW2_BAL`。train／eval 共通）。`p=127` のままだと `x=mean=3e38`・`var=0` で逆伝播中に `2^135` 級の倍率が `inv_p` へ届く前に掛かり二階勾配が overflow した。制限後は各段の累積倍率が `rstd·2^64` 以下に収まる。`|p|<=64` の入力は従来と bit 同一。
 - 空入力の判定を形状の積から `shape.contains(&0)` へ変更した（`[usize::MAX, 2, 0]` で積が overflow して panic するため）。
 - テスト: `batch_norm_create_graph_huge_constant_input_second_order_is_finite`・`batch_norm_create_graph_rejects_overflowing_empty_shape`・overflow 回帰ベクトルへ `const-3e38-*` を追加。
 
-### 24.5b レビュー指摘の是正（Codex P1・`s_g` 復元倍率の逆伝播順）
+### 28.5b レビュー指摘の是正（Codex P1・`s_g` 復元倍率の逆伝播順）
 
 - 原因: train の dx は `dx̂` を `2^-s_g` で縮小して縮約し、最後に `2^(s_g - p_s2)` で復元する直列構造のため、逆伝播では復元倍率が縮小より先に単位シードへ掛かる。`x=[0,0]`・`eps=1e-5`・上流 `[1e38,1e38]` は `s_g=127`・`p_s2=-8` で `2^135` が掛かり二階勾配が `inf`→`NaN` になった（本来 Hessian は 0）。±100 の段分割は累積倍率を守らない。
 - 是正: `s_g` を `ceil(log2 m) + 2`（m は行長 `n·spatial`）で打ち切る。縮約の安全は `|t| <= max|dx̂|/(4m)`（`Σ|t·x̂| <= m·max|t|`・`|x̂| <= √m`）で足りるため、逆伝播の累積倍率は `rstd·2^(ceil(log2 m)+2)` 以下に収まる。小さい上流勾配は従来どおり `s_g` が負で拡大側。dx の値は 1 階のホスト値で上書きされるため値は不変。
 - 回帰テスト: `batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero`（上記ケースで二階勾配が有限かつ 0）。
 
-### 24.5c レビュー指摘の是正（Codex P1・上流勾配を含む倍率の overflow）
+### 28.5c レビュー指摘の是正（Codex P1・上流勾配を含む倍率の overflow）
 
 - 固定の `POW2_BAL=64` は単位シードしか保護できず、上流勾配 `g=1e20` を含む `∂dw/∂x`（`x=mean=3e38`・`var=0`・`loss=sum(y·1e20)`）で `g·2^(k+p)` が `inv_p` に届く前に overflow した。
 - 前置スケール指数 `p` の上限を、行ごとの `ceil(log2 max|g|)`（train は `dx̂` との最大）と実効 rstd の指数 `k` から `p_upper = clamp(125 − g_exp − k, 0, 64)` として決める（`create_graph_norm.rs::p_upper`／`upstream_exps`）。eval は `rstd` から、train はホスト f64 統計から `k` を見積もる。`p` を下げても 2 のべき乗スケールなので値は変わらない。
 - 回帰テスト `batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite`（eval は `∂dw/∂x ≈ 3.16e22`、train は有限）を追加した。
 
-### 24.6 変えていないもの
+### 28.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。

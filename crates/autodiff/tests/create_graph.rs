@@ -38,7 +38,7 @@ mod common;
 use std::sync::Arc;
 
 use fandhe_ai_autodiff::nn::Linear;
-use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Tape, Var};
+use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Reduction, Tape, Var};
 use fandhe_ai_tensor_core::{Activation, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -694,11 +694,13 @@ fn create_graph_rejects_custom_downstream_of_gelu() {
 }
 
 #[test]
-fn create_graph_rejects_unsupported_op_softmax() {
+fn create_graph_rejects_unsupported_op_logsumexp() {
+    // イシュー #3077 で Softmax は対象になったため、fail-closed のまま
+    // 残る隣接 Op（`LogSumExp`）で拒否契約を維持する。
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
-    let loss = x.softmax(1).unwrap().sum(None).unwrap();
+    let loss = x.logsumexp(Some(1)).unwrap().sum(None).unwrap();
 
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
@@ -2030,7 +2032,7 @@ fn hessian_where_matches_finite_difference() {
     assert!(common::req2_close(analytic[1][1], 6.0 * x0[1] as f64));
 }
 
-// --- MaskedFill・Gather・Scatter・Pad・MseLoss・CrossEntropyLoss は
+// --- MaskedFill・Gather・Scatter・Pad は
 //     イシュー #2062 のスコープ外（`Op::supports_create_graph()` は
 //     引き続き `false`）。fail-closed のまま残ることを固定する。
 
@@ -2047,18 +2049,8 @@ fn create_graph_rejects_unsupported_op_masked_fill() {
     assert!(child.is_empty());
 }
 
-#[test]
-fn create_graph_rejects_unsupported_op_gather() {
-    let tape = Tape::new_with_ops(common::naive_ops());
-    let child = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
-    let index = fandhe_ai_tensor_core::Tensor::<i32>::new(vec![0, 0, 1], &[3]).expect("index");
-    let loss = x.gather(0, &index).unwrap().sum(None).unwrap();
-
-    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
-    assert!(matches!(err, AutodiffError::Backward(_)));
-    assert!(child.is_empty());
-}
+// `Gather` は #3083 で対象になった。拒否契約は新セクション（索引・累積族）の
+// `create_graph_rejects_custom_downstream_of_gather`／`..._cumprod` が固定する。
 // ===========================================================================
 // 2D 畳み込み族（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）の
 // create_graph 対応（イシュー #3080・決定記録 §23）。
@@ -2614,6 +2606,382 @@ fn create_graph_still_rejects_conv3d() {
     assert!(child.is_empty());
 }
 
+// --- Softmax／LogSoftmax（イシュー #3077・V3 方式。決定記録 §21.3・§24） ---
+
+const W23: [f32; 6] = [0.3, -1.2, 0.7, 2.0, -0.5, 1.1];
+const X23: [f32; 6] = [0.2, -0.4, 0.9, 1.3, -0.7, 0.1];
+
+fn w_const<'t>(tape: &'t Tape, shape: &[usize]) -> Var<'t> {
+    let n = flat_len(shape);
+    let data: Vec<f32> = (0..n).map(|i| W23[i % 6] + 0.05 * i as f32).collect();
+    tape.var_no_grad(&t(data, shape))
+}
+
+fn build_softmax_d1<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(1)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_softmax_d0<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(0)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_softmax_rank3_mid<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(1)?.mul(&w_const(tape, &[2, 3, 2]))?.sum(None)
+}
+fn build_softmax_self_sq<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x.softmax(1)?;
+    y.mul(&y)?.sum(None)
+}
+fn build_softmax_times_x<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.softmax(1)?.mul(x)?.sum(None)
+}
+fn build_softmax_after_tanh<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.tanh().softmax(1)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_log_softmax_d1<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_log_softmax_d0<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(0)?.mul(&w_const(tape, &[2, 3]))?.sum(None)
+}
+fn build_log_softmax_rank3_mid<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?.mul(&w_const(tape, &[2, 3, 2]))?.sum(None)
+}
+fn build_log_softmax_self_sq<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let y = x.log_softmax(1)?;
+    y.mul(&y)?.sum(None)
+}
+fn build_log_softmax_times_x<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?.mul(x)?.sum(None)
+}
+fn build_log_softmax_after_tanh<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.tanh()
+        .log_softmax(1)?
+        .mul(&w_const(tape, &[2, 3]))?
+        .sum(None)
+}
+
+fn check_hessian<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError> + Copy,
+{
+    let numeric = finite_diff_hessian(build, x0, shape, 1e-2);
+    let analytic = analytic_hessian(build, x0, shape);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+fn x12() -> Vec<f32> {
+    (0..12).map(|i| X23[i % 6] + 0.07 * i as f32).collect()
+}
+
+#[test]
+fn hessian_softmax_matches_finite_difference() {
+    check_hessian(build_softmax_d1, &X23, &[2, 3]);
+    check_hessian(build_softmax_d0, &X23, &[2, 3]);
+    check_hessian(build_softmax_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(build_softmax_self_sq, &X23, &[2, 3]);
+    check_hessian(build_softmax_times_x, &X23, &[2, 3]);
+    check_hessian(build_softmax_after_tanh, &X23, &[2, 3]);
+}
+
+#[test]
+fn hessian_log_softmax_matches_finite_difference() {
+    check_hessian(build_log_softmax_d1, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_d0, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(build_log_softmax_self_sq, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_times_x, &X23, &[2, 3]);
+    check_hessian(build_log_softmax_after_tanh, &X23, &[2, 3]);
+}
+
+fn assert_first_order_bit_equal<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let first = cg.first_order().get(&x).unwrap().unwrap();
+    let gx = cg.grad(&x).unwrap().unwrap();
+    for i in 0..flat_len(shape) {
+        let idx = unravel(i, shape);
+        assert_eq!(
+            first.get(&idx).unwrap().to_bits(),
+            gx.value().get(&idx).unwrap().to_bits(),
+            "V3: cg.grad は 1 階と bit 一致のはず (i={i})"
+        );
+    }
+}
+
+#[test]
+fn create_graph_softmax_first_order_is_bit_identical() {
+    assert_first_order_bit_equal(build_softmax_d1, &X23, &[2, 3]);
+    assert_first_order_bit_equal(build_softmax_d0, &X23, &[2, 3]);
+    assert_first_order_bit_equal(build_log_softmax_d1, &X23, &[2, 3]);
+    assert_first_order_bit_equal(build_log_softmax_rank3_mid, &x12(), &[2, 3, 2]);
+}
+
+#[test]
+fn create_graph_softmax_first_order_chain_matches_req2() {
+    for build in [build_softmax_after_tanh, build_log_softmax_after_tanh] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(X23.to_vec(), &[2, 3]));
+        let loss = build(&tape, &x).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let first = cg.first_order().get(&x).unwrap().unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap();
+        for i in 0..6 {
+            let idx = unravel(i, &[2, 3]);
+            assert!(common::req2_close(
+                gx.value().get(&idx).unwrap() as f64,
+                first.get(&idx).unwrap() as f64
+            ));
+        }
+    }
+}
+
+/// overflow 回帰（決定記録 §8・§21.3）。段 1: 1 階が有限、段 2: `cg.grad`
+/// が有限かつ 1 階と bit 一致、段 3: `jvp_create_graph` の出力が有限で
+/// 解析式と REQ-2 判定で一致。
+fn overflow_regression(x0: [f32; 2], w: [f32; 2], log: bool, expected_jvp: f64) {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), &[1, 2]));
+    let wv = tape.var_no_grad(&t(w.to_vec(), &[1, 2]));
+    let y = if log {
+        x.log_softmax(1).unwrap()
+    } else {
+        x.softmax(1).unwrap()
+    };
+    let loss = y.mul(&wv).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let first = cg.first_order().get(&x).unwrap().unwrap();
+    let gx = cg.grad(&x).unwrap().unwrap();
+    for i in 0..2 {
+        let a = first.get(&[0, i]).unwrap();
+        let b = gx.value().get(&[0, i]).unwrap();
+        assert!(a.is_finite(), "段 1: 1 階が有限 (i={i}) {a}");
+        assert!(b.is_finite(), "段 2: cg.grad が有限 (i={i}) {b}");
+        assert_eq!(a.to_bits(), b.to_bits(), "段 2: 1 階と bit 一致 (i={i})");
+    }
+
+    // 段 3: jvp_create_graph（孫テープ再生）。
+    let tape2 = Tape::new_with_ops(common::naive_ops());
+    let child2 = Tape::new_with_ops(common::naive_ops());
+    let grand2 = Tape::new_with_ops(common::naive_ops());
+    let x2 = tape2.var(&t(x0.to_vec(), &[1, 2]));
+    let wv2 = tape2.var_no_grad(&t(w.to_vec(), &[1, 2]));
+    let y2 = if log {
+        x2.log_softmax(1).unwrap()
+    } else {
+        x2.softmax(1).unwrap()
+    };
+    let out = y2.mul(&wv2).unwrap();
+    let tangent = t(vec![1.0, -1.0], &[1, 2]);
+    let r = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape2, &out, &x2, &tangent, &child2, &grand2,
+    )
+    .unwrap();
+    let out_var = r.output();
+    let v = out_var.value();
+    let mut total = 0.0f64;
+    for i in 0..2 {
+        let e = v.get(&[0, i]).unwrap();
+        assert!(e.is_finite(), "段 3: jvp 出力が有限 (i={i}) {e}");
+        total += e as f64;
+    }
+    assert!(
+        common::req2_close(total, expected_jvp),
+        "{total} vs {expected_jvp}"
+    );
+}
+
+/// 小スケール上流勾配の回帰（codex-review 指摘・PR #3344）。
+/// `x=[0,0]`・`loss = Σ log_softmax(x)² · 1e-40` では上流勾配の最大絶対値が
+/// 非正規数級になる。除算の微分係数 `1/s` が overflow して有限の
+/// Hessian が `inf`／`NaN` に汚染されないこと。
+#[test]
+fn create_graph_log_softmax_tiny_upstream_hessian_is_finite() {
+    fn build<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let y = x.log_softmax(1)?;
+        let c = tape.var_no_grad(&t(vec![1e-40f32; 2], &[1, 2]));
+        y.mul(&y)?.mul(&c)?.sum(None)
+    }
+    let h = analytic_hessian(build, &[0.0, 0.0], &[1, 2]);
+    for row in &h {
+        for v in row {
+            assert!(v.is_finite() && v.abs() < 1e-30, "Hessian が汚染: {h:?}");
+        }
+    }
+}
+
+#[test]
+fn create_graph_softmax_large_upstream_does_not_overflow() {
+    // y=[0.25,0.75]、d/dx softmax·w の J·t の総和は
+    // Σ_i w_i (J t)_i。J=diag(y)-yyᵀ、t=[1,-1] → Jt=[0.25+... ] を f64 で算出。
+    let y = [0.25f64, 0.75];
+    let t_ = [1.0f64, -1.0];
+    let yt: f64 = y.iter().zip(t_.iter()).map(|(a, b)| a * b).sum();
+    let jt: Vec<f64> = (0..2).map(|i| y[i] * t_[i] - y[i] * yt).collect();
+    let w = [3e38f32, -3e38];
+    let expected: f64 = (0..2).map(|i| w[i] as f64 * jt[i]).sum();
+    overflow_regression([0.0, 3.0f32.ln()], w, false, expected);
+}
+
+#[test]
+fn create_graph_log_softmax_large_upstream_does_not_overflow() {
+    // log_softmax の J = I - 1·yᵀ（y=[.5,.5]）、t=[1,-1] → Jt = t - 1·(y·t)=t。
+    let w = [2e38f32, 2e38];
+    let expected = w[0] as f64 - w[1] as f64;
+    overflow_regression([0.0, 0.0], w, true, expected);
+}
+
+/// 二階の逆伝播の overflow 回帰（codex-review 指摘・PR #3344）。
+/// `cg.grad` の各要素を入力で微分する経路（`child.backward`）の Hessian が
+/// 有限で、f64 閉形式と相対 1e-3 以内で一致すること。
+fn large_w_softmax<'t>(tape: &'t Tape, x: &Var<'t>, w: [f32; 2]) -> Result<Var<'t>, AutodiffError> {
+    let wv = tape.var_no_grad(&t(w.to_vec(), &[1, 2]));
+    x.softmax(1)?.mul(&wv)?.sum(None)
+}
+fn large_w_log_softmax<'t>(
+    tape: &'t Tape,
+    x: &Var<'t>,
+    w: [f32; 2],
+) -> Result<Var<'t>, AutodiffError> {
+    let wv = tape.var_no_grad(&t(w.to_vec(), &[1, 2]));
+    x.log_softmax(1)?.mul(&wv)?.sum(None)
+}
+
+fn assert_large_scale_hessian(log: bool, x0: [f32; 2], w: [f32; 2]) {
+    let h = if log {
+        analytic_hessian(|tp, x| large_w_log_softmax(tp, x, w), &x0, &[1, 2])
+    } else {
+        analytic_hessian(|tp, x| large_w_softmax(tp, x, w), &x0, &[1, 2])
+    };
+    let m = x0[0].max(x0[1]) as f64;
+    let e = [(x0[0] as f64 - m).exp(), (x0[1] as f64 - m).exp()];
+    let z = e[0] + e[1];
+    let p = [e[0] / z, e[1] / z];
+    let wd = [w[0] as f64, w[1] as f64];
+    let wbar = p[0] * wd[0] + p[1] * wd[1];
+    let wsum = wd[0] + wd[1];
+    for k in 0..2 {
+        for j in 0..2 {
+            let d = if k == j { 1.0 } else { 0.0 };
+            let expected = if log {
+                -wsum * p[k] * (d - p[j])
+            } else {
+                p[k] * (d - p[j]) * (wd[k] - wbar) - p[k] * p[j] * (wd[j] - wbar)
+            };
+            let got = h[k][j];
+            assert!(got.is_finite(), "Hessian[{k}][{j}] が非有限: {h:?}");
+            assert!(
+                (got - expected).abs() <= 1e-3 * expected.abs() + 1e-5,
+                "Hessian[{k}][{j}] {got} vs {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn create_graph_softmax_large_upstream_second_order_is_finite() {
+    assert_large_scale_hessian(false, [0.0, 3.0f32.ln()], [3e38, -3e38]);
+}
+
+#[test]
+fn create_graph_log_softmax_large_upstream_second_order_is_finite() {
+    assert_large_scale_hessian(true, [0.0, 0.0], [2e38, 2e38]);
+}
+
+// codex-review 指摘（PR #3344）: 確率偏り（p = [0.9, 0.1]）＋大スケールで
+// `exp` ミラーの VJP 積 `q·寄与`（≈ 5.4e38）が LogSoftmax VJP の手前で
+// overflow していた。真の Hessian は各要素約 ±5.4e37 で有限。
+#[test]
+fn create_graph_log_softmax_skewed_large_upstream_second_order_is_finite() {
+    assert_large_scale_hessian(true, [9.0f32.ln(), 0.0], [3e38, 3e38]);
+    assert_large_scale_hessian(true, [0.0, 9.0f32.ln()], [3e38, 3e38]);
+}
+
+// codex-review 指摘（PR #3344）: 上流勾配 `g` が入力依存（`loss = Σ y²·5e37`）
+// の場合に `mean_gs` 側へ `-s·q`（≈ 4.14e38）が逆伝播して Hessian が
+// 汚染されていた。真の Hessian は各要素約 ±1.04e38 で有限。
+#[test]
+fn create_graph_log_softmax_input_dependent_large_upstream_hessian_is_finite() {
+    fn build<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        let y = x.log_softmax(1)?;
+        let c = tape.var_no_grad(&t(vec![5e37f32; 2], &[1, 2]));
+        y.mul(&y)?.mul(&c)?.sum(None)
+    }
+    let x0 = [9.0f32.ln(), 0.0];
+    let h = analytic_hessian(build, &x0, &[1, 2]);
+    // f64 閉形式: loss = c Σ y², y = x - lse。H = 2c·Σ_i(J_ik J_ij + y_i ∇²y_i)。
+    let p = [0.9f64, 0.1];
+    let y = [p[0].ln(), p[1].ln()];
+    let c = 5e37f64;
+    for k in 0..2 {
+        for j in 0..2 {
+            let d = |a: usize, b: usize| if a == b { 1.0 } else { 0.0 };
+            // J[i][k] = δ_ik - p_k。∇²y_i[k][j] = -p_k(δ_kj - p_j)。
+            let mut e = 0.0;
+            for i in 0..2 {
+                let jk = d(i, k) - p[k];
+                let jj = d(i, j) - p[j];
+                e += 2.0 * jk * jj + 2.0 * y[i] * (-p[k] * (d(k, j) - p[j]));
+            }
+            let expected = c * e;
+            let got = h[k][j];
+            assert!(got.is_finite(), "Hessian[{k}][{j}] が非有限: {h:?}");
+            assert!(
+                (got - expected).abs() <= 1e-3 * expected.abs() + 1e-5,
+                "Hessian[{k}][{j}] {got} vs {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn create_graph_softmax_skewed_large_upstream_second_order_is_finite() {
+    assert_large_scale_hessian(false, [9.0f32.ln(), 0.0], [3e38, -3e38]);
+}
+
+#[test]
+fn create_graph_softmax_empty_tensor_returns_zero_shaped_grad() {
+    for shape in [[0usize, 3], [2, 0]] {
+        for log in [false, true] {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(vec![], &shape));
+            let y = if log {
+                x.log_softmax(1).unwrap()
+            } else {
+                x.softmax(1).unwrap()
+            };
+            let loss = y.sum(None).unwrap();
+            let cg = tape.backward_create_graph(&loss, &child).unwrap();
+            let gx = cg.grad(&x).unwrap().unwrap();
+            assert_eq!(gx.value().shape(), shape.as_slice());
+        }
+    }
+}
+
+#[test]
+fn create_graph_rejects_softmax_mixed_with_unsupported_op_and_keeps_child_empty() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
+    let loss = x
+        .softmax(1)
+        .unwrap()
+        .logsumexp(Some(1))
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
 // --- Gelu・GeluTanh・Erf（イシュー #3081。決定記録 §22） --------------------
 
 fn build_gelu<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
@@ -2761,6 +3129,897 @@ fn create_graph_gelu_family_first_order_is_bit_identical() {
         }
     }
 }
+// --- 損失 Op 第 1 弾（イシュー #3082・決定記録 §26。V1／V2 方式） -------------
+// MseLoss・L1Loss・HuberLoss（Huber／SmoothL1）・CrossEntropyLoss・NllLoss。
+// `Reduction` は `Mean`／`Sum` の 2 種のみ存在する（`None` は未実装・公開 API
+// 変更のため対象外）。tolerance は REQ-2 統一複合判定のまま（変更なし）。
+
+const LX: [f32; 6] = [0.3, -2.0, 1.9, 0.2, -0.2, 3.0];
+const LT: [f32; 6] = [0.0, 0.5, 0.4, 0.0, 0.0, 1.0];
+
+fn loss_target<'t>(tape: &'t Tape) -> Var<'t> {
+    tape.var_no_grad(&t(LT.to_vec(), &[2, 3]))
+}
+
+fn tgt_i32(v: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
+    Tensor::new(v, shape).expect("i32 targets fixture")
+}
+
+macro_rules! regression_builds {
+    ($ident:ident, $ident_chain:ident, $method:ident, $red:expr) => {
+        fn $ident<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.$method(&loss_target(tape), $red)
+        }
+        fn $ident_chain<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.tanh().$method(&loss_target(tape), $red)
+        }
+    };
+}
+regression_builds!(mse_mean, mse_mean_chain, mse_loss_with, Reduction::Mean);
+regression_builds!(mse_sum, mse_sum_chain, mse_loss_with, Reduction::Sum);
+regression_builds!(l1_mean, l1_mean_chain, l1_loss, Reduction::Mean);
+regression_builds!(l1_sum, l1_sum_chain, l1_loss, Reduction::Sum);
+
+macro_rules! huber_builds {
+    ($ident:ident, $ident_chain:ident, $method:ident, $param:expr, $red:expr) => {
+        fn $ident<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.$method(&loss_target(tape), $param, $red)
+        }
+        fn $ident_chain<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.mul(x)?.$method(&loss_target(tape), $param, $red)
+        }
+    };
+}
+huber_builds!(
+    huber_mean,
+    huber_mean_chain,
+    huber_loss,
+    1.0,
+    Reduction::Mean
+);
+huber_builds!(huber_sum, huber_sum_chain, huber_loss, 1.0, Reduction::Sum);
+huber_builds!(
+    sl1_mean,
+    sl1_mean_chain,
+    smooth_l1_loss,
+    0.5,
+    Reduction::Mean
+);
+huber_builds!(sl1_sum, sl1_sum_chain, smooth_l1_loss, 0.5, Reduction::Sum);
+
+#[test]
+fn hessian_mse_loss_matches_finite_difference_and_closed_form() {
+    check_hessian(mse_mean, &LX, &[2, 3]);
+    check_hessian(mse_sum, &LX, &[2, 3]);
+    check_hessian(mse_mean_chain, &LX, &[2, 3]);
+    check_hessian(mse_sum_chain, &LX, &[2, 3]);
+    // 閉形式: Mean は 2/n·I、Sum は 2·I（n = 6）。
+    let h = analytic_hessian(mse_mean, &LX, &[2, 3]);
+    for (i, row) in h.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            let e = if i == j { 2.0 / 6.0 } else { 0.0 };
+            assert!(common::req2_close(v, e), "mean ({i},{j}) {v} vs {e}");
+        }
+    }
+    let h = analytic_hessian(mse_sum, &LX, &[2, 3]);
+    for (i, row) in h.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            let e = if i == j { 2.0 } else { 0.0 };
+            assert!(common::req2_close(v, e), "sum ({i},{j}) {v} vs {e}");
+        }
+    }
+}
+
+#[test]
+fn hessian_l1_loss_matches_finite_difference() {
+    check_hessian(l1_mean, &LX, &[2, 3]);
+    check_hessian(l1_sum, &LX, &[2, 3]);
+    check_hessian(l1_mean_chain, &LX, &[2, 3]);
+    check_hessian(l1_sum_chain, &LX, &[2, 3]);
+}
+
+#[test]
+fn hessian_huber_and_smooth_l1_match_finite_difference() {
+    // d = x - target = [0.3, -2.5, 1.5, 0.2, -0.2, 2.0]（delta=1・beta=0.5 の
+    // 二次・線形両領域を含み、折れ点から h=1e-2 より十分離れる）。
+    check_hessian(huber_mean, &LX, &[2, 3]);
+    check_hessian(huber_sum, &LX, &[2, 3]);
+    check_hessian(huber_mean_chain, &LX, &[2, 3]);
+    check_hessian(huber_sum_chain, &LX, &[2, 3]);
+    check_hessian(sl1_mean, &LX, &[2, 3]);
+    check_hessian(sl1_sum, &LX, &[2, 3]);
+    check_hessian(sl1_mean_chain, &LX, &[2, 3]);
+    check_hessian(sl1_sum_chain, &LX, &[2, 3]);
+}
+
+// 混合二階微分: x[0] を pred、x[1] を target（どちらも追跡）にする。
+fn split_pt<'t>(x: &Var<'t>) -> Result<(Var<'t>, Var<'t>), AutodiffError> {
+    Ok((x.narrow(0, 0, 1)?, x.narrow(0, 1, 1)?))
+}
+fn mixed_mse<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    p.mse_loss_with(&q, Reduction::Mean)
+}
+fn mixed_l1<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(&x.tanh())?;
+    p.l1_loss(&q, Reduction::Sum)
+}
+fn mixed_huber<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    p.huber_loss(&q, 1.0, Reduction::Mean)
+}
+fn mixed_sl1<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    p.smooth_l1_loss(&q, 0.5, Reduction::Sum)
+}
+
+#[test]
+fn hessian_mixed_pred_target_matches_finite_difference() {
+    // d = x[0] - x[1] = [0.3, -2.5, 1.5]
+    let x0 = [0.3f32, -2.0, 1.9, 0.0, 0.5, 0.4];
+    check_hessian(mixed_mse, &x0, &[2, 3]);
+    check_hessian(mixed_l1, &x0, &[2, 3]);
+    check_hessian(mixed_huber, &x0, &[2, 3]);
+    check_hessian(mixed_sl1, &x0, &[2, 3]);
+    // MSE の d²L/dpred·dtarget ブロックは -2/n·I（n = 3）。
+    let h = analytic_hessian(mixed_mse, &x0, &[2, 3]);
+    for i in 0..3 {
+        assert!(common::req2_close(h[i][3 + i], -2.0 / 3.0), "{h:?}");
+        assert!(common::req2_close(h[i][i], 2.0 / 3.0), "{h:?}");
+    }
+}
+
+fn sl1_tiny_beta_then_tanh<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    Ok(p.smooth_l1_loss(&q, 1e-10, Reduction::Sum)?.tanh())
+}
+fn huber_tiny_delta_then_tanh<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    Ok(p.huber_loss(&q, 1e-10, Reduction::Sum)?.tanh())
+}
+
+/// 回帰（codex P1）: 線形領域の非選択二次分岐 `d / beta` が有限入力
+/// （pred=1e30・beta=1e-10）で inf になり、二階微分が NaN になってはならない。
+/// 本来の二階微分は 0（tanh は飽和・線形領域は区分定数勾配）。
+#[test]
+fn hessian_smooth_l1_tiny_beta_large_pred_is_finite() {
+    let x0 = [1.0e30f32, 0.0];
+    for build in [sl1_tiny_beta_then_tanh, huber_tiny_delta_then_tanh] {
+        let h = analytic_hessian(build, &x0, &[2]);
+        for row in &h {
+            for v in row {
+                assert!(v.is_finite() && *v == 0.0, "二階微分が非有限/非ゼロ: {h:?}");
+            }
+        }
+    }
+}
+
+fn ce_d1_mean<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Mean)
+}
+fn ce_d1_sum<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Sum)
+}
+fn ce_d0_mean<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![1, 0, 1], &[3]), 0, Reduction::Mean)
+}
+fn ce_rank3_mid<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![2, 0, 1, 1], &[2, 2]), 1, Reduction::Mean)
+}
+fn ce_chain<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.tanh()
+        .cross_entropy_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Sum)
+}
+fn nll_d1_mean<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Mean)
+}
+fn nll_d1_sum<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Sum)
+}
+fn nll_d0<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(0)?
+        .nll_loss(&tgt_i32(vec![1, 0, 1], &[3]), 0, Reduction::Mean)
+}
+fn nll_rank3_mid<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0, 1, 1], &[2, 2]), 1, Reduction::Sum)
+}
+fn nll_direct<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // NllLoss 自身の入力についての 2 階は 0（V2）。tanh で非自明にする。
+    x.tanh()
+        .nll_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Mean)
+}
+fn nll_of_log_softmax_rank3<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0, 1, 1], &[2, 2]), 1, Reduction::Mean)
+}
+
+#[test]
+fn hessian_cross_entropy_matches_finite_difference() {
+    check_hessian(ce_d1_mean, &X23, &[2, 3]);
+    check_hessian(ce_d1_sum, &X23, &[2, 3]);
+    check_hessian(ce_d0_mean, &X23, &[2, 3]);
+    check_hessian(ce_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(ce_chain, &X23, &[2, 3]);
+}
+
+#[test]
+fn hessian_nll_matches_finite_difference() {
+    check_hessian(nll_d1_mean, &X23, &[2, 3]);
+    check_hessian(nll_d1_sum, &X23, &[2, 3]);
+    check_hessian(nll_d0, &X23, &[2, 3]);
+    check_hessian(nll_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(nll_direct, &X23, &[2, 3]);
+}
+
+#[test]
+fn hessian_cross_entropy_equals_nll_of_log_softmax() {
+    let a = analytic_hessian(ce_d1_mean, &X23, &[2, 3]);
+    let b = analytic_hessian(nll_d1_mean, &X23, &[2, 3]);
+    assert_hessian_close(&a, &b);
+    let a = analytic_hessian(ce_rank3_mid, &x12(), &[2, 3, 2]);
+    let b = analytic_hessian(nll_of_log_softmax_rank3, &x12(), &[2, 3, 2]);
+    assert_hessian_close(&a, &b);
+}
+
+/// 1 階は `Tape::backward` と bit 同一（`first_order()`）、`cg.grad` は
+/// REQ-2 で一致する（5 損失は V1／V2 のため bit 一致は主張しない）。
+fn check_first_order<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x).unwrap();
+    let plain_grads = tape.backward(&loss).unwrap();
+    let plain = plain_grads.get(&x).unwrap().unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let first = cg.first_order().get(&x).unwrap().unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    for i in 0..x0.len() {
+        let idx = unravel(i, shape);
+        let p = plain.get(&idx).unwrap();
+        assert_eq!(p.to_bits(), first.get(&idx).unwrap().to_bits());
+        assert!(common::req2_close(
+            g.value().get(&idx).unwrap() as f64,
+            p as f64
+        ));
+    }
+}
+
+#[test]
+fn loss_create_graph_first_order_invariants() {
+    check_first_order(mse_mean_chain, &LX, &[2, 3]);
+    check_first_order(l1_sum_chain, &LX, &[2, 3]);
+    check_first_order(huber_mean, &LX, &[2, 3]);
+    check_first_order(sl1_sum, &LX, &[2, 3]);
+    check_first_order(ce_d1_mean, &X23, &[2, 3]);
+    check_first_order(ce_rank3_mid, &x12(), &[2, 3, 2]);
+    check_first_order(nll_d1_sum, &X23, &[2, 3]);
+}
+
+/// 孫テープ再生（閉包性。§21.1(4)）: 損失出力を `jvp_create_graph` に通し、
+/// 方向微分の中央差分と REQ-2 で一致する。
+fn loss_jvp_case<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let tangent: Vec<f32> = (0..x0.len())
+        .map(|i| ((i * 3 + 1) % 7) as f32 * 0.1 - 0.3)
+        .collect();
+    let out_at = |pv: &[f32]| -> f64 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let p = tape.var(&t(pv.to_vec(), shape));
+        build(&tape, &p).unwrap().value().get(&[]).unwrap() as f64
+    };
+    let h = 1e-3f32;
+    let plus: Vec<f32> = x0.iter().zip(&tangent).map(|(a, v)| a + h * v).collect();
+    let minus: Vec<f32> = x0.iter().zip(&tangent).map(|(a, v)| a - h * v).collect();
+    let numeric = (out_at(&plus) - out_at(&minus)) / (2.0 * h as f64);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &x,
+        &t(tangent, shape),
+        &child,
+        &grand,
+    )
+    .expect("損失を含む関数でも jvp_create_graph が成立する（閉包性）");
+    let jv = res.output().value().get(&[]).unwrap() as f64;
+    assert!(
+        common::req2_close(jv, numeric),
+        "jvp={jv} numeric={numeric}"
+    );
+}
+
+#[test]
+fn loss_jvp_create_graph_matches_directional_derivative() {
+    loss_jvp_case(mse_mean_chain, &LX, &[2, 3]);
+    loss_jvp_case(ce_d1_mean, &X23, &[2, 3]);
+    loss_jvp_case(huber_sum, &LX, &[2, 3]);
+    loss_jvp_case(nll_d1_mean, &X23, &[2, 3]);
+    loss_jvp_case(l1_mean_chain, &LX, &[2, 3]);
+}
+
+/// `reduction='none'` 相当（要素ごとの二乗誤差。非スカラー損失）。
+/// `Reduction::None` は未実装（公開 API 変更のため対象外）のため、合成で代替する。
+fn elementwise_sq_err<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let d = x.sub(&loss_target(tape))?;
+    d.mul(&d)
+}
+
+#[test]
+fn hessian_elementwise_squared_error_none_equivalent() {
+    check_hessian(elementwise_sq_err, &LX, &[2, 3]);
+}
+
+#[test]
+fn cross_entropy_large_logits_stay_finite() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e30, -1e30], &[1, 2]));
+    let loss = x
+        .cross_entropy_loss(&tgt_i32(vec![0], &[1]), 1, Reduction::Mean)
+        .unwrap();
+    let plain_grads = tape.backward(&loss).unwrap();
+    let plain = plain_grads.get(&x).unwrap().unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    for i in 0..2 {
+        assert!(plain.get(&[0, i]).unwrap().is_finite());
+        assert!(g.value().get(&[0, i]).unwrap().is_finite());
+    }
+    let xc = cg.child_var(&x).unwrap().unwrap();
+    let g2 = child.backward(&g.sum(None).unwrap()).unwrap();
+    let h = g2.get(&xc).unwrap().unwrap();
+    for i in 0..2 {
+        assert!(h.get(&[0, i]).unwrap().is_finite(), "二階が有限");
+    }
+}
+
+#[test]
+fn empty_loss_inputs_return_empty_grads() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![], &[0]));
+    let y = tape.var_no_grad(&t(vec![], &[0]));
+    let loss = x.mse_loss_with(&y, Reduction::Mean).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    assert_eq!(g.value().shape(), &[0usize]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![], &[0, 3]));
+    let loss = x
+        .cross_entropy_loss(&tgt_i32(vec![], &[0]), 1, Reduction::Mean)
+        .unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    assert_eq!(g.value().shape(), &[0usize, 3]);
+}
+
+#[test]
+fn create_graph_still_rejects_remaining_loss_ops() {
+    // 第 1 弾の対象外（決定記録 §25 の表）。fail-closed のまま子テープは空。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.2, 0.3, 0.5], &[1, 3]));
+    let q = tape.var_no_grad(&t(vec![0.3, 0.3, 0.4], &[1, 3]));
+    let loss = x.kl_div_loss(&q, Reduction::Mean).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+    assert!(child.is_empty());
+}
+// --- 索引・累積族（イシュー #3083。決定記録 §25） -----------------------------
+//
+// 対象: Gather・Scatter（Add／Overwrite）・Embedding・Sort・Topk・Cummax・
+// Cummin・Cumsum。fail-closed のまま: IndexedScatterReduce・Cumprod・Logcumsumexp。
+//
+// - Hessian: loss は y³·c（勾配が 2 次多項式のため中央差分は厳密。h=0.1 で f32
+//   ノイズを抑える。tolerance は変えない）。Sort／Topk／Cummax／Cummin は
+//   値の間隔を h より大きく取り順位が入れ替わらないようにする。
+// - `cg.grad` と `Tape::backward` を突合する（線形 loss では bit 一致）。
+
+fn idx_t(data: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
+    Tensor::<i32>::new(data, shape).expect("index fixture")
+}
+
+/// 位置依存の決定的な係数（符号が混在し 0 から離れる）。
+fn coef_var<'t>(tape: &'t Tape, shape: &[usize]) -> Var<'t> {
+    let n = flat_len(shape);
+    let data: Vec<f32> = (0..n)
+        .map(|i| 0.6 + ((i * 7 + 3) % 5) as f32 * 0.25 - if i % 3 == 0 { 1.4 } else { 0.0 })
+        .collect();
+    tape.var_no_grad(&t(data, shape))
+}
+
+/// loss = Σ y³ ⊙ c。
+fn cubic_loss<'t>(tape: &'t Tape, y: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let shape = y.value().shape().to_vec();
+    y.mul(y)?.mul(y)?.mul(&coef_var(tape, &shape))?.sum(None)
+}
+
+/// loss = Σ y ⊙ c（線形。`cg.grad` が 1 階と bit 一致する形）。
+fn linear_loss<'t>(tape: &'t Tape, y: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let shape = y.value().shape().to_vec();
+    y.mul(&coef_var(tape, &shape))?.sum(None)
+}
+
+fn check_poly_hessian<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError> + Copy,
+{
+    let numeric = finite_diff_hessian(build, x0, shape, 1e-1);
+    let analytic = analytic_hessian(build, x0, shape);
+    assert_hessian_close(&analytic, &numeric);
+    // Hessian が自明にゼロでないこと（突合が空振りしない）。
+    assert!(
+        analytic.iter().flatten().any(|v| v.abs() > 1e-3),
+        "Hessian が全要素ほぼゼロ（テスト構成が無意味）"
+    );
+}
+
+/// 値が相異なり間隔が 0.4 以上の列（h = 0.1 の摂動で順位が入れ替わらない）。
+fn spaced(n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| {
+            let k = (i * 5 + 2) % n; // n と互いに素な 5 を想定した置換
+            0.45 * k as f32 - 0.7
+        })
+        .collect()
+}
+
+fn build_gather_d0<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let x = x.reshape(&[3, 2])?;
+    let idx = idx_t(vec![0, 1, 0, 0, 2, 1, 1, 2], &[4, 2]);
+    cubic_loss(tape, &x.gather(0, &idx)?)
+}
+
+fn build_gather_d1<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let x = x.reshape(&[2, 3])?;
+    let idx = idx_t(vec![0, 0, 2, 1, 2, 2, 1, 0], &[2, 4]);
+    cubic_loss(tape, &x.gather(1, &idx)?)
+}
+
+#[test]
+fn hessian_gather_with_duplicate_index_matches_finite_difference() {
+    check_poly_hessian(build_gather_d0, &spaced(6), &[6]);
+    check_poly_hessian(build_gather_d1, &spaced(6), &[6]);
+}
+
+/// p = [input(3x3) | src(2x2)]。index は dim=1 で重複（行 0 の位置 0 へ 2 回）。
+/// 非 dim 軸 0 は src(2) < input(3) のため d_src は narrow してから gather する。
+fn scatter_parts<'t>(p: &Var<'t>) -> Result<(Var<'t>, Var<'t>, Tensor<i32>), AutodiffError> {
+    let input = p.narrow(0, 0, 9)?.reshape(&[3, 3])?;
+    let src = p.narrow(0, 9, 4)?.reshape(&[2, 2])?;
+    Ok((input, src, idx_t(vec![0, 0, 2, 1], &[2, 2])))
+}
+
+fn build_scatter_add<'t>(tape: &'t Tape, p: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (input, src, idx) = scatter_parts(p)?;
+    cubic_loss(tape, &input.scatter_add(1, &idx, &src)?)
+}
+
+fn build_scatter_overwrite<'t>(tape: &'t Tape, p: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (input, src, idx) = scatter_parts(p)?;
+    cubic_loss(tape, &input.scatter(1, &idx, &src)?)
+}
+
+#[test]
+fn hessian_scatter_add_input_and_src_matches_finite_difference() {
+    // input と src の両方を追跡し、混合ブロック d²L/(dinput·dsrc) も含めて突合する。
+    check_poly_hessian(build_scatter_add, &spaced(13), &[13]);
+}
+
+#[test]
+fn hessian_scatter_overwrite_last_writer_matches_finite_difference() {
+    check_poly_hessian(build_scatter_overwrite, &spaced(13), &[13]);
+}
+
+#[test]
+fn scatter_overwrite_duplicate_index_only_last_writer_gets_gradient() {
+    // input=[0]／index=[0,0]／src=[2,3]: 最後の書き手 src[1] のみが勾配を受ける。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let input = tape.var(&t(vec![0.5], &[1]));
+    let src = tape.var(&t(vec![2.0, 3.0], &[2]));
+    let idx = idx_t(vec![0, 0], &[2]);
+    let loss = input
+        .scatter(0, &idx, &src)
+        .unwrap()
+        .mul(&tape.var_no_grad(&t(vec![4.0], &[1])))
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gs = cg.grad(&src).unwrap().unwrap();
+    assert_eq!(gs.value().get(&[0]).unwrap(), 0.0);
+    assert_eq!(gs.value().get(&[1]).unwrap(), 4.0);
+    let gi = cg.grad(&input).unwrap().unwrap();
+    assert_eq!(gi.value().get(&[0]).unwrap(), 0.0);
+}
+
+fn embedding_loss<'t>(
+    tape: &'t Tape,
+    w: &Var<'t>,
+    padding_idx: Option<usize>,
+) -> Result<Var<'t>, AutodiffError> {
+    let w = w.reshape(&[4, 2])?;
+    let ids = idx_t(vec![1, 1, 3, 0, 2], &[5]);
+    let y = w.embedding(&ids, padding_idx)?;
+    // 行 `padding_idx` と他の行が結合する項 `(Σ y)²` を加える。
+    let s = y.sum(None)?;
+    cubic_loss(tape, &y)?.add(&s.mul(&s)?)
+}
+
+fn build_embedding_plain<'t>(tape: &'t Tape, w: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    embedding_loss(tape, w, None)
+}
+
+fn build_embedding_padding<'t>(tape: &'t Tape, w: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    embedding_loss(tape, w, Some(1))
+}
+
+#[test]
+fn hessian_embedding_matches_finite_difference() {
+    check_poly_hessian(build_embedding_plain, &spaced(8), &[8]);
+}
+
+#[test]
+fn hessian_embedding_padding_idx_matches_finite_difference_of_first_order() {
+    // 1 階勾配関数（行 padding_idx は 0 固定）を有限差分した値と一致する。
+    // PyTorch の double backward とは行 p の混合二階項で異なりうる（決定記録 §25）。
+    check_poly_hessian(build_embedding_padding, &spaced(8), &[8]);
+}
+
+#[test]
+fn embedding_padding_row_first_order_grad_is_zero_in_child() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let w = tape.var(&t(spaced(8), &[4, 2]));
+    let ids = idx_t(vec![1, 1, 3, 0, 2], &[5]);
+    let loss = cubic_loss(&tape, &w.embedding(&ids, Some(1)).unwrap()).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&w).unwrap().unwrap();
+    let p = plain.get(&w).unwrap().unwrap();
+    for r in 0..4 {
+        for c in 0..2 {
+            let a = g.value().get(&[r, c]).unwrap();
+            assert_eq!(a.to_bits(), p.get(&[r, c]).unwrap().to_bits());
+            if r == 1 {
+                assert_eq!(a, 0.0);
+            }
+        }
+    }
+}
+
+fn build_sort_asc<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[2, 4])?.sort(1, false)?.0)
+}
+
+fn build_sort_desc<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[2, 4])?.sort(0, true)?.0)
+}
+
+fn build_topk<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[2, 4])?.topk(2, 1, true)?.0)
+}
+
+#[test]
+fn hessian_sort_and_topk_match_finite_difference() {
+    // 8 要素の値は相異なり、間隔 0.45 > h。
+    let x0: Vec<f32> = [0.9f32, -1.3, 0.2, 1.7, -0.4, 2.3, -2.0, 1.1].to_vec();
+    check_poly_hessian(build_sort_asc, &x0, &[8]);
+    check_poly_hessian(build_sort_desc, &x0, &[8]);
+    check_poly_hessian(build_topk, &x0, &[8]);
+}
+
+fn build_cummax<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[2, 4])?.cummax(1)?.0)
+}
+
+fn build_cummin<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[2, 4])?.cummin(1)?.0)
+}
+
+#[test]
+fn hessian_cummax_cummin_with_duplicate_index_matches_finite_difference() {
+    // 行 0 は索引が [0,0,0,3]（重複）、行 1 は [0,0,2,2] になる並び。
+    let x0: Vec<f32> = [1.5f32, 0.2, -0.6, 2.4, 0.8, -1.1, 1.9, 0.1].to_vec();
+    check_poly_hessian(build_cummax, &x0, &[8]);
+    check_poly_hessian(build_cummin, &x0, &[8]);
+}
+
+fn build_cumsum_d0<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[3, 2])?.cumsum(0)?)
+}
+
+fn build_cumsum_last<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[2, 3])?.cumsum(1)?)
+}
+
+fn build_cumsum_rank3_mid<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    cubic_loss(tape, &x.reshape(&[2, 3, 2])?.cumsum(1)?)
+}
+
+#[test]
+fn hessian_cumsum_matches_finite_difference() {
+    check_poly_hessian(build_cumsum_d0, &spaced(6), &[6]);
+    check_poly_hessian(build_cumsum_last, &spaced(6), &[6]);
+    check_poly_hessian(build_cumsum_rank3_mid, &spaced(12), &[12]);
+}
+
+/// 受入条件 3: `cg.grad` が `Tape::backward` と一致する（線形 loss では bit 一致）。
+fn assert_cg_grad_matches_backward<F>(build: F, x0: &[f32], shape: &[usize], bitwise: bool)
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let p = plain.get(&x).unwrap().unwrap();
+    let f = cg.first_order().get(&x).unwrap().unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    for i in 0..flat_len(shape) {
+        let idx = unravel(i, shape);
+        let (pv, fv, gv) = (
+            p.get(&idx).unwrap(),
+            f.get(&idx).unwrap(),
+            g.value().get(&idx).unwrap(),
+        );
+        assert_eq!(
+            pv.to_bits(),
+            fv.to_bits(),
+            "first_order は素の backward と bit 同一"
+        );
+        if bitwise {
+            assert_eq!(
+                pv.to_bits(),
+                gv.to_bits(),
+                "cg.grad は 1 階と bit 一致 (i={i})"
+            );
+        } else {
+            assert!(
+                common::req2_close(gv as f64, pv as f64),
+                "i={i}: {gv} vs {pv}"
+            );
+        }
+    }
+}
+
+macro_rules! linear_builder {
+    ($name:ident, |$tape:ident, $x:ident| $y:expr) => {
+        fn $name<'t>($tape: &'t Tape, $x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            let y = $y;
+            linear_loss($tape, &y)
+        }
+    };
+}
+
+linear_builder!(lin_gather, |_tape, x| x
+    .reshape(&[3, 2])?
+    .gather(0, &idx_t(vec![0, 1, 0, 0, 2, 1, 1, 2], &[4, 2]))?);
+linear_builder!(lin_scatter_add, |_tape, p| {
+    let (input, src, idx) = scatter_parts(p)?;
+    input.scatter_add(1, &idx, &src)?
+});
+linear_builder!(lin_scatter_overwrite, |_tape, p| {
+    let (input, src, idx) = scatter_parts(p)?;
+    input.scatter(1, &idx, &src)?
+});
+linear_builder!(lin_embedding, |_tape, w| w
+    .reshape(&[4, 2])?
+    .embedding(&idx_t(vec![1, 1, 3, 0, 2], &[5]), Some(1))?);
+linear_builder!(lin_sort, |_tape, x| x.reshape(&[2, 4])?.sort(1, false)?.0);
+linear_builder!(lin_topk, |_tape, x| x.reshape(&[2, 4])?.topk(2, 1, true)?.0);
+linear_builder!(lin_cummax, |_tape, x| x.reshape(&[2, 4])?.cummax(1)?.0);
+linear_builder!(lin_cummin, |_tape, x| x.reshape(&[2, 4])?.cummin(1)?.0);
+linear_builder!(lin_cumsum, |_tape, x| x.reshape(&[2, 3, 2])?.cumsum(1)?);
+
+#[test]
+fn create_graph_index_cumulative_first_order_is_bit_identical() {
+    let x8: Vec<f32> = vec![0.9, -1.3, 0.2, 1.7, -0.4, 2.3, -2.0, 1.1];
+    assert_cg_grad_matches_backward(lin_gather, &spaced(6), &[6], true);
+    assert_cg_grad_matches_backward(lin_scatter_add, &spaced(13), &[13], true);
+    assert_cg_grad_matches_backward(lin_scatter_overwrite, &spaced(13), &[13], true);
+    assert_cg_grad_matches_backward(lin_embedding, &spaced(8), &[8], true);
+    assert_cg_grad_matches_backward(lin_sort, &x8, &[8], true);
+    assert_cg_grad_matches_backward(lin_topk, &x8, &[8], true);
+    assert_cg_grad_matches_backward(lin_cummax, &x8, &[8], true);
+    assert_cg_grad_matches_backward(lin_cummin, &x8, &[8], true);
+    assert_cg_grad_matches_backward(lin_cumsum, &spaced(12), &[12], true);
+}
+
+#[test]
+fn create_graph_index_cumulative_first_order_chain_matches_req2() {
+    let x8: Vec<f32> = vec![0.9, -1.3, 0.2, 1.7, -0.4, 2.3, -2.0, 1.1];
+    assert_cg_grad_matches_backward(build_gather_d1, &spaced(6), &[6], false);
+    assert_cg_grad_matches_backward(build_scatter_add, &spaced(13), &[13], false);
+    assert_cg_grad_matches_backward(build_scatter_overwrite, &spaced(13), &[13], false);
+    assert_cg_grad_matches_backward(build_embedding_padding, &spaced(8), &[8], false);
+    assert_cg_grad_matches_backward(build_sort_asc, &x8, &[8], false);
+    assert_cg_grad_matches_backward(build_topk, &x8, &[8], false);
+    assert_cg_grad_matches_backward(build_cummax, &x8, &[8], false);
+    assert_cg_grad_matches_backward(build_cummin, &x8, &[8], false);
+    assert_cg_grad_matches_backward(build_cumsum_rank3_mid, &spaced(12), &[12], false);
+}
+
+// Cumsum の数値回帰（§21.1(5)）。f64 縮約と f32 逐次和が分かれる桁落ち列で、
+// 1 階・`cg.grad`・孫テープがすべて有限かつ一致する。
+fn cumsum_with_upstream<'t>(
+    tape: &'t Tape,
+    x: &Var<'t>,
+    w: &[f32],
+) -> Result<Var<'t>, AutodiffError> {
+    let n = w.len();
+    x.cumsum(0)?
+        .mul(&tape.var_no_grad(&t(w.to_vec(), &[n])))?
+        .sum(None)
+}
+
+#[test]
+fn create_graph_cumsum_cancellation_matches_first_order_bitwise() {
+    for w in [vec![1.0f32, 1e8, -1e8, 1.0], vec![3e38f32, -3e38, 3e38]] {
+        let n = w.len();
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![0.5; n], &[n]));
+        let loss = cumsum_with_upstream(&tape, &x, &w).unwrap();
+        let plain = tape.backward(&loss).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let p = plain.get(&x).unwrap().unwrap();
+        let g = cg.grad(&x).unwrap().unwrap();
+        for i in 0..n {
+            let (pv, gv) = (p.get(&[i]).unwrap(), g.value().get(&[i]).unwrap());
+            assert!(pv.is_finite() && gv.is_finite(), "w={w:?} i={i}");
+            assert_eq!(pv.to_bits(), gv.to_bits(), "w={w:?} i={i}");
+        }
+    }
+    // 桁落ち列では f64 縮約（2）と f32 逐次和（1）が分かれる。1 階が f64 側であることを固定。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.5; 4], &[4]));
+    let loss = cumsum_with_upstream(&tape, &x, &[1.0, 1e8, -1e8, 1.0]).unwrap();
+    let grads = tape.backward(&loss).unwrap();
+    let p = grads.get(&x).unwrap().unwrap();
+    assert_eq!(p.get(&[0]).unwrap(), 2.0);
+}
+
+// --- 孫テープ: Gather＋Scatter＋Cumsum を含む関数の jvp_create_graph ----------
+
+fn jvp_mixed<'t>(tape: &'t Tape, p: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // p = [input(3x3) | src(2x2)]。scatter_add → cumsum → gather と合成する。
+    let (input, src, idx) = scatter_parts(p)?;
+    let y = input.scatter_add(1, &idx, &src)?.cumsum(1)?;
+    let g = y.gather(0, &idx_t(vec![2, 0, 1, 1, 0, 2], &[2, 3]))?;
+    cubic_loss(tape, &g)
+}
+
+#[test]
+fn jvp_create_graph_through_index_and_cumsum_matches_directional_derivative() {
+    let p0 = spaced(13);
+    let shape = [13usize];
+    let tangent: Vec<f32> = (0..13)
+        .map(|i| ((i * 3 + 1) % 7) as f32 * 0.1 - 0.3)
+        .collect();
+    let out_at = |pv: &[f32]| -> f64 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let p = tape.var(&t(pv.to_vec(), &shape));
+        jvp_mixed(&tape, &p).unwrap().value().get(&[]).unwrap() as f64
+    };
+    // loss は p の 3 次多項式のため、h を大きく取り Richardson 外挿で打ち切り誤差を消す
+    // （f32 の評価ノイズを抑える。tolerance は変えない）。
+    let dir = |h: f32| -> f64 {
+        let plus: Vec<f32> = p0.iter().zip(&tangent).map(|(a, v)| a + h * v).collect();
+        let minus: Vec<f32> = p0.iter().zip(&tangent).map(|(a, v)| a - h * v).collect();
+        (out_at(&plus) - out_at(&minus)) / (2.0 * h as f64)
+    };
+    let numeric = (4.0 * dir(0.1) - dir(0.2)) / 3.0;
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let p = tape.var(&t(p0.clone(), &shape));
+    let loss = jvp_mixed(&tape, &p).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &p,
+        &t(tangent, &shape),
+        &child,
+        &grand,
+    )
+    .expect("索引・累積族を含む関数でも jvp_create_graph が成立する（閉包性）");
+    let jv = res.output().value().get(&[]).unwrap() as f64;
+    assert!(
+        common::req2_close(jv, numeric),
+        "jvp={jv} numeric={numeric}"
+    );
+}
+
+#[test]
+fn jvp_create_graph_through_cumsum_overflow_vector_is_finite() {
+    // V3 ノードを孫テープで再生しても f32 へ落ちて inf にならない（§23.3 の型）。
+    let w = [3e38f32, -3e38, 3e38];
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let p = tape.var(&t(vec![0.5; 3], &[3]));
+    let loss = cumsum_with_upstream(&tape, &p, &w).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &p,
+        &t(vec![1.0, 0.0, 0.0], &[3]),
+        &child,
+        &grand,
+    )
+    .unwrap();
+    // J·v = Σ w_i · cumsum(v)_i = 3e38 − 3e38 + 3e38。
+    let jv = res.output().value().get(&[]).unwrap();
+    assert!(jv.is_finite(), "jvp={jv}");
+    assert!(common::req2_close(jv as f64, 3e38));
+}
+
+// --- fail-closed ----------------------------------------------------------------
+
+#[test]
+fn create_graph_rejects_custom_downstream_of_gather() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let index = idx_t(vec![0, 0, 1], &[3]);
+    let h = x.gather(0, &index).unwrap();
+    let out = tape
+        .custom(Arc::new(IdentityCustomFn), &[h])
+        .expect("Tape::custom 登録成功");
+    let loss = out.sum(None).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+#[test]
+fn create_graph_rejects_unsupported_op_cumprod() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let loss = x.cumsum(0).unwrap().cumprod(0).unwrap().sum(None).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
+#[test]
+fn create_graph_rejects_gather_mixed_with_unsupported_op_and_keeps_child_empty() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let loss = x
+        .gather(0, &idx_t(vec![2, 0], &[2]))
+        .unwrap()
+        .cumprod(0)
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
+}
+
 // --- BatchNorm（イシュー #3079。決定記録 §24）-------------------------------
 //
 // train（バッチ統計）・eval（固定統計）の両モードで `Op::BatchNorm` を
@@ -2855,7 +4114,7 @@ fn bn_configs() -> Vec<BnCfg> {
 /// 有限差分の刻み。f32 勾配の丸め雑音（~1e-7/h）と打ち切り誤差（~h²）の釣り合いで選ぶ。
 const BN_FD_H: f64 = 1e-2;
 
-fn check_hessian<F>(x0: &[f32], shape: &[usize], build: F)
+fn bn_check_hessian<F>(x0: &[f32], shape: &[usize], build: F)
 where
     F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
 {
@@ -2871,7 +4130,7 @@ fn hessian_batch_norm_x_matches_finite_difference() {
     for cfg in bn_configs().into_iter().filter(|c| c.shape.len() == 2) {
         let c = cfg.shape[1];
         let x0 = bn_input(flat_len(cfg.shape));
-        check_hessian(&x0, cfg.shape, |tape, x| {
+        bn_check_hessian(&x0, cfg.shape, |tape, x| {
             let w = tape.var_no_grad(&bn_w(c));
             let b = tape.var_no_grad(&bn_b(c));
             let y = if cfg.affine {
@@ -2898,14 +4157,14 @@ fn hessian_batch_norm_weight_and_bias_match_finite_difference() {
             let w0 = bn_w(c).as_slice().unwrap().to_vec();
             let b0 = bn_b(c).as_slice().unwrap().to_vec();
             // w を微分変数にする。
-            check_hessian(&w0, &[c], |tape, w| {
+            bn_check_hessian(&w0, &[c], |tape, w| {
                 let x = tape.var_no_grad(&t(xv.clone(), shape));
                 let b = tape.var_no_grad(&bn_b(c));
                 let y = bn_apply(cfg, &x, Some(w), Some(&b))?;
                 bn_curvature_loss(tape, &y, shape)
             });
             // b を微分変数にする。
-            check_hessian(&b0, &[c], |tape, b| {
+            bn_check_hessian(&b0, &[c], |tape, b| {
                 let x = tape.var_no_grad(&t(xv.clone(), shape));
                 let w = tape.var_no_grad(&bn_w(c));
                 let y = bn_apply(cfg, &x, Some(&w), Some(b))?;

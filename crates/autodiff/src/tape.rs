@@ -690,7 +690,7 @@ pub(crate) enum Op {
         transposed: bool,
     },
     /// BatchNorm の `dx`／`dw`／`db` を子テープへ記録するホスト値ノード（イシュー
-    /// #3079・決定記録 §24）。`structure` は二階微分経路（2 のべき乗スケール付きの
+    /// #3079・決定記録 §28）。`structure` は二階微分経路（2 のべき乗スケール付きの
     /// 合成グラフ）、`g`（上流勾配）・`x`・`weight` は 1 階 VJP と同じホスト関数
     /// （`grad::batch_norm_vjp_channels`。f64 縮約）へ渡すオペランド。
     /// `Op::Contiguous` と異なり孫テープでの再生時にも同じホスト関数で値を
@@ -1256,7 +1256,7 @@ pub(crate) enum Op {
     /// facade には公開しない。VJP は `scatter_with_fallback`（`Add`）。
     /// **`Op::Sort`／`Op::Topk` と異なり索引は重複する**（例 `[3,1,2]` →
     /// `[0,0,0]`）ため `Add` は必須で `Overwrite` とは同値でない。非融合・非
-    /// checkpoint・高階微分非対応（`Op::Rfft` と同じ分類）。
+    /// checkpoint。create_graph はイシュー #3083 で対応済み（写しは `gather` で再生）。
     Cummax {
         input: NodeId,
         dim: usize,
@@ -1278,7 +1278,7 @@ pub(crate) enum Op {
     /// からのみ積まれ、facade には公開しない。VJP は入力 shape・`pads`・`mode` から
     /// レイアウトを再構築し共有カーネル `tensor_core::pad_modes::pad_modes_vjp_host`
     /// （添字重複を `f64` アキュムレータで蓄積し 1 回 downcast）で求める。非融合・
-    /// 非 checkpoint・高階微分非対応（`Op::Cummax` と同じ分類）。
+    /// 非 checkpoint・高階微分非対応（`Op::Logcumsumexp` と同じ分類）。
     PadMode {
         input: NodeId,
         pads: Vec<(usize, usize)>,
@@ -1290,7 +1290,7 @@ pub(crate) enum Op {
     /// `crate::stat_reduce_ops::{kthvalue, median_with_indices, median}` からのみ
     /// 積まれ、facade には公開しない。VJP は `scatter_with_fallback`（`Add`）で
     /// upstream を選ばれた 1 要素へ流す（lane ごとに出力 1 個のため索引は重複しない）。
-    /// 非融合・非 checkpoint・高階微分非対応（`Op::Cummax` と同じ分類）。
+    /// 非融合・非 checkpoint・高階微分非対応（`Op::Logcumsumexp` と同じ分類）。
     OrderSelect {
         input: NodeId,
         dim: usize,
@@ -2465,10 +2465,12 @@ impl Op {
     /// これを逐語再現しないため対象外とした。#1943・
     /// `docs/autodiff-higher-order-grad-decision.md` §14）の 12
     /// variant に加え、`Transpose`・`Permute`・`Narrow`・`Concat`・
-    /// `Contiguous`・`Where` は無条件で `true`（#2062）。`BatchNorm`（train／eval。
-    /// #3079）も `true`——値は 1 階と同じ `batch_norm_vjp_channels`（V3）、構造は
-    /// 2 のべき乗スケール付きの合成（S1）で、方式は `create_graph_norm.rs` と
-    /// 決定記録 §22 を正とする。
+    /// `Contiguous`・`Where` は無条件で `true`（#2062）。イシュー #3078 で
+    /// `RmsNorm`・`LayerNorm` も `true`（V3 値＋S1 構造。入力が非有限・
+    /// overflow 域の場合は `create_graph_norm::validate_norm_s1` が入口で
+    /// 拒否する。決定記録 §27）。`BatchNorm`（train／eval。#3079）も `true`——値は
+    /// 1 階と同じ `batch_norm_vjp_channels`（V3）、構造は 2 のべき乗スケール付きの
+    /// 合成（S1）で、方式は `create_graph_norm.rs` と決定記録 §28 を正とする。
     ///
     /// `Op::ScalarUnary`／`Op::ScalarBinary` は **payload（`op` フィールド
     /// の具体的な variant）まで見て判定する**（[`scalar_unary_
@@ -2482,8 +2484,15 @@ impl Op {
     /// 同時に対象。依存追加なし）。`ScalarUnaryOp`・
     /// `ScalarBinaryOp` の既知 variant はすべて `true`。
     ///
-    /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Gather`・
-    /// `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss` は引き続き対象外
+    /// 索引・累積 8 variant（`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・
+    /// `Cummax`・`Cummin`・`Cumsum`）はイシュー #3083（決定記録 §25）で `true` になった。
+    /// `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま。
+    ///
+    /// 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・
+    /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §26）で `true`
+    /// になった（残る 16 variant は fail-closed のまま。§26 の表）。
+    ///
+    /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Pad` は引き続き対象外
     /// とし、以後のイシューへ引き継ぐ（`false` のまま残す。設計 doc
     /// §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
     ///
@@ -2530,6 +2539,30 @@ impl Op {
             | Op::Unfold { .. }
             | Op::Fold { .. }
             | Op::Where { .. }
+            | Op::Softmax { .. }
+            | Op::LogSoftmax { .. }
+            // 索引・累積族（イシュー #3083・決定記録 §25）。`Gather` の cgrad が
+            // `Scatter` を、`Scatter` の d_src が `Gather` を積むため同時に対象。
+            // `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま。
+            | Op::Gather { .. }
+            | Op::Scatter { .. }
+            | Op::Embedding { .. }
+            | Op::Cumsum { .. }
+            | Op::Sort { .. }
+            | Op::Topk { .. }
+            | Op::Cummax { .. }
+            | Op::Cummin { .. }
+            // 損失 Op 第 1 弾（イシュー #3082・決定記録 §26）。1 階 VJP が f32 の
+            // 要素式のみで f64 縮約契約を持たない 5 variant（V1／V2 方式）。
+            | Op::MseLoss { .. }
+            | Op::L1Loss { .. }
+            | Op::HuberLoss { .. }
+            | Op::CrossEntropyLoss { .. }
+            | Op::NllLoss { .. }
+            // 行方向正規化（イシュー #3078・決定記録 §27）。V3 値＋S1 構造。
+            | Op::RmsNorm { .. }
+            | Op::LayerNorm { .. }
+            // チャネル方向正規化（イシュー #3079・決定記録 §28）。V3 値＋S1 構造。
             | Op::BatchNorm { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
@@ -2542,11 +2575,7 @@ impl Op {
             | Op::Amax { .. }
             | Op::Amin { .. }
             | Op::Min { .. }
-            | Op::MseLoss { .. }
-            | Op::HuberLoss { .. }
             | Op::BceLoss { .. }
-            | Op::CrossEntropyLoss { .. }
-            | Op::L1Loss { .. }
             | Op::CrossEntropyLossWithOptions { .. }
             | Op::CosineEmbeddingLoss { .. }
             | Op::MarginRankingLoss { .. }
@@ -2561,13 +2590,10 @@ impl Op {
             | Op::MultiLabelSoftMarginLoss { .. }
             | Op::SigmoidFocalLoss { .. }
             | Op::CtcLoss { .. }
-            | Op::NllLoss { .. }
             | Op::KlDivLoss { .. }
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
             | Op::LinearAct { .. }
-            | Op::RmsNorm { .. }
-            | Op::LayerNorm { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }
@@ -2594,8 +2620,6 @@ impl Op {
             | Op::MatrixRank { .. }
             // イシュー #2631・#2632・#2633 の FFT 6 演算も初期スコープ外（非対応）。
             | Op::Rfft { .. }
-            | Op::Cummax { .. }
-            | Op::Cummin { .. }
             | Op::Logcumsumexp { .. }
             | Op::MaxPool3d { .. }
             | Op::AvgPool3d { .. }
@@ -2610,18 +2634,10 @@ impl Op {
             | Op::Ifft { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
-            | Op::Softmax { .. }
-            | Op::LogSoftmax { .. }
             | Op::MaskedFill { .. }
             | Op::Dropout { .. }
-            | Op::Gather { .. }
-            | Op::Scatter { .. }
             | Op::IndexedScatterReduce { .. }
-            | Op::Embedding { .. }
-            | Op::Cumsum { .. }
             | Op::Cumprod { .. }
-            | Op::Sort { .. }
-            | Op::Topk { .. }
             | Op::Interpolate { .. }
             | Op::Pad { .. }
             | Op::ConvTranspose3d { .. }
@@ -5256,6 +5272,91 @@ mod conv3d_op_tests {
     }
 
     #[test]
+    fn softmax_and_log_softmax_ops_support_create_graph() {
+        // イシュー #3077: V3 方式（`create_graph.rs`）で対象に加えた。
+        assert!(
+            Op::Softmax {
+                input: NodeId(0),
+                dim: 1
+            }
+            .supports_create_graph()
+        );
+        assert!(
+            Op::LogSoftmax {
+                input: NodeId(0),
+                dim: 1
+            }
+            .supports_create_graph()
+        );
+    }
+
+    /// イシュー #3083: 索引・累積 8 variant は create_graph 対応（`true`）。
+    /// `IndexedScatterReduce`・`Cumprod`・`Logcumsumexp` は `false` のまま（fail-closed）。
+    #[test]
+    fn index_cumulative_family_supports_create_graph() {
+        let idx = || Tensor::<i32>::new(vec![0], &[1]).unwrap();
+        let (a, b) = (NodeId(0), NodeId(1));
+        let supported = [
+            Op::Gather {
+                input: a,
+                dim: 0,
+                index: idx(),
+            },
+            Op::Scatter {
+                input: a,
+                dim: 0,
+                index: idx(),
+                src: b,
+                reduce: ScatterReduce::Add,
+            },
+            Op::Embedding {
+                weight: a,
+                index: idx(),
+                padding_idx: None,
+            },
+            Op::Cumsum { input: a, dim: 0 },
+            Op::Sort {
+                input: a,
+                dim: 0,
+                index: idx(),
+            },
+            Op::Topk {
+                input: a,
+                dim: 0,
+                index: idx(),
+            },
+            Op::Cummax {
+                input: a,
+                dim: 0,
+                index: idx(),
+            },
+            Op::Cummin {
+                input: a,
+                dim: 0,
+                index: idx(),
+            },
+        ];
+        for op in supported {
+            assert!(op.supports_create_graph());
+        }
+        let rejected = [
+            Op::IndexedScatterReduce {
+                input: a,
+                dim: 0,
+                index: idx(),
+                src: b,
+                mode: fandhe_ai_tensor_core::ScatterReduceMode::Sum,
+                include_self: true,
+            },
+            Op::Cumprod { input: a, dim: 0 },
+            Op::Logcumsumexp { input: a, dim: 0 },
+        ];
+        for op in rejected {
+            assert!(!op.supports_create_graph());
+        }
+    }
+
+    #[test]
     fn conv3d_op_does_not_support_create_graph() {
         let op = Op::Conv3d {
             input: NodeId(0),
@@ -5585,5 +5686,59 @@ mod lrn_weight_reparam_op_tests {
             op.for_each_input(|id| seen.push(id.0));
             assert_eq!(seen, want);
         }
+    }
+}
+#[cfg(test)]
+mod loss_create_graph_support_tests {
+    use super::*;
+    use crate::var::Reduction;
+
+    /// 損失 Op 第 1 弾（イシュー #3082・決定記録 §26）の対象 5 variant が
+    /// `supports_create_graph() == true`、隣接する未対応の損失が `false` の
+    /// ままであること（fail-closed の境界を固定する）。
+    #[test]
+    fn first_wave_losses_are_supported_and_neighbors_stay_closed() {
+        let r = Reduction::Mean;
+        let supported = [
+            Op::MseLoss {
+                pred: NodeId(0),
+                target: NodeId(1),
+                reduction: r,
+            },
+            Op::L1Loss {
+                pred: NodeId(0),
+                target: NodeId(1),
+                reduction: r,
+            },
+            Op::HuberLoss {
+                pred: NodeId(0),
+                target: NodeId(1),
+                kind: fandhe_ai_tensor_core::HuberKind::Huber,
+                delta: 1.0,
+                reduction: r,
+            },
+            Op::CrossEntropyLoss {
+                logits: NodeId(0),
+                targets: Tensor::new(vec![0i32], &[1]).unwrap(),
+                class_dim: 1,
+                reduction: r,
+            },
+            Op::NllLoss {
+                input: NodeId(0),
+                targets: Tensor::new(vec![0i32], &[1]).unwrap(),
+                class_dim: 1,
+                reduction: r,
+            },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?}");
+        }
+        let closed = Op::KlDivLoss {
+            input: NodeId(0),
+            target: NodeId(1),
+            kind: fandhe_ai_tensor_core::KlDivTarget::Probabilities,
+            reduction: r,
+        };
+        assert!(!closed.supports_create_graph());
     }
 }

@@ -15,8 +15,9 @@
 //! **既存契約への影響（設計 doc §3「契約整理」）**: 1 階
 //! `backward_impl`・`grad.rs`・REQ-2 統一複合判定・tolerance／baseline
 //! は一切変更しない——本モジュールは `Tape::backward`（公開 API）を
-//! 素のまま呼ぶのみで、`backward.rs`／`grad.rs` へのコード変更を伴わ
-//! ない。二階側の数値方式（本モジュールが子テープへ記録する `Var`
+//! 素のまま呼ぶのみで、`backward.rs` へのコード変更を伴わない（`grad.rs` は #3077 の
+//! V3 用にホスト関数を `pub(crate)` 化し LogSoftmax の dispatch を共有
+//! ヘルパーへ移しただけで 1 階の挙動は不変）。二階側の数値方式（本モジュールが子テープへ記録する `Var`
 //! 演算列）は既存 VJP ヘルパー（`grad.rs`）とは独立の実装であり、
 //! 一般には bit 同一を主張しない——正しさは有限差分突合
 //! （`tests/create_graph.rs`）で検証する。ただし broadcast 縮約
@@ -57,13 +58,18 @@
 //! 限定。#1943）の 12 variant に加え、イシュー #2062 で
 //! `ScalarUnary`（#3081 で `Gelu`・`GeluTanh`・`Erf` も対象）・`ScalarBinary`（既知 13
 //! variant すべて）・`Transpose`・`Permute`・`Narrow`・`Concat`・
-//! `Contiguous`・`Where` を拡張済み（[`scalar_unary_replayable`]／
+//! `Contiguous`・`Where`・`RmsNorm`・`LayerNorm`（#3078。`create_graph_norm`
+//! モジュール doc 参照）を拡張済み（[`scalar_unary_replayable`]／
 //! [`scalar_binary_replayable`] 参照）。さらにイシュー #3080 で 2D 畳み込み族
 //! （`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`。実装は `conv` サブモジュール、
 //! 決定記録 §23）を拡張済み。`F32` 以外の `compute_dtype` を持つ `Conv2d`
 //! （低精度 forward）は [`validate_ancestors`] が明示拒否する。`Conv3d`・
-//! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。`MaskedFill`・`Gather`・
-//! `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss`・`L1Loss`・
+//! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。イシュー #3083 で索引・累積族
+//! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
+//! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
+//! `Logcumsumexp` は引き続き対象外（fail-closed）。`MaskedFill`・`Pad` は引き続き対象外。
+//! 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・`NllLoss` の 5 variant を
+//! イシュー #3082（決定記録 §26。V1／V2 方式）で対象にした。残る損失は
 //! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
 //! `CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`・
 //! `PoissonNllLoss`（イシュー #2167。同型の理由で対象外）・
@@ -73,7 +79,7 @@
 //! `MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・
 //! `SigmoidFocalLoss`（イシュー #2653。同型の理由で対象外）
 //! は引き続き対象外（後続イシューへ引き継ぐ）。`BatchNorm`（train／eval。
-//! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §24。それ以外の追跡対象 Op・rank≥3 の
+//! イシュー #3079）は対象——方式は `create_graph_norm.rs` と決定記録 §28。それ以外の追跡対象 Op・rank≥3 の
 //! `MatMul` へ到達した場合は `Err(AutodiffError::Backward)`
 //! （fail-closed。後続イシューへ引き継ぐ）。`resident`／`fused` 経路
 //! （`ResidentLeaf`／`LinearResident`／`LinearAct`）・checkpoint 済み
@@ -111,6 +117,7 @@ use crate::tape::{NodeId, Op, Tape, TapeId, TapeNode, materialize_fallible};
 use crate::var::Var;
 
 mod conv;
+mod index_cum;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -286,10 +293,10 @@ impl Tape {
     ///    勾配を得る（`loss.requires_grad() == false` の拒否もここで
     ///    既存どおり発生する）。
     ///
-    /// 4〜7 のいずれかで失敗した場合、`child` へは一切書き込まない
-    /// （4 の事前検査により `child` の空性が確認済みであること、6 が
-    /// `build_mirror`／`build_cgrads` より前に走ることの両方に
-    /// より、途中失敗で `child` へノードが残ることはない）。
+    /// 4〜7 のいずれかで失敗した場合、`child` は空のまま残る（4 の事前検査により
+    /// `child` の空性が確認済みであること、6 が `build_mirror`／`build_cgrads` より前に
+    /// 走ることに加え、`build_mirror`／`build_cgrads` の途中失敗では積んだノードを
+    /// `Tape::rollback_to` で取り除く）。
     pub fn backward_create_graph<'c>(
         &self,
         loss: &Var<'_>,
@@ -342,8 +349,21 @@ impl Tape {
 
         let n = self.nodes.borrow().len();
         let mut mirror: Vec<Option<Var<'c>>> = vec![None; n];
-        build_mirror(self, child, &ancestors, &mut mirror)?;
-        let cgrads = build_cgrads(self, child, &ancestors, &mirror, loss.node_id())?;
+        // `build_mirror`／`build_cgrads` は子テープへノードを積んだ後でも失敗しうる
+        // （例: LayerNorm／RmsNorm の upstream 値は子テープ上で初めて分かり、構築の途中で
+        // 拒否される。PR #3346 レビュー指摘）。失敗時は積んだノードをすべて取り除いて
+        // `child` を空へ戻し、同じ `child` での再試行を可能にする（空性検査を通る）。
+        let point = child.rollback_point();
+        let built = build_mirror(self, child, &ancestors, &mut mirror)
+            .and_then(|()| build_cgrads(self, child, &ancestors, &mirror, loss.node_id()));
+        let cgrads = match built {
+            Ok(c) => c,
+            Err(e) => {
+                mirror.clear();
+                child.rollback_to(point);
+                return Err(e);
+            }
+        };
 
         Ok(CreateGraphResult {
             first_order,
@@ -462,7 +482,7 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
         {
             return Err(AutodiffError::Backward(format!(
                 "create_graph: 空テンソルの BatchNorm（NodeId({}))は非対応（\
-                 docs/autodiff-higher-order-grad-decision.md §24 参照）",
+                 docs/autodiff-higher-order-grad-decision.md §28 参照）",
                 id.0
             )));
         }
@@ -479,6 +499,37 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 id.0
             )));
         }
+        // `ScatterReduce` は `#[non_exhaustive]`。未知 variant は子テープへ
+        // 書き込む前にここで拒否する（イシュー #3083。`child.is_empty()` を保つ）。
+        if let Op::Scatter { reduce, .. } = &node.op
+            && !matches!(
+                reduce,
+                fandhe_ai_tensor_core::ScatterReduce::Add
+                    | fandhe_ai_tensor_core::ScatterReduce::Overwrite
+            )
+        {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: 未知の ScatterReduce variant {reduce:?}（NodeId({}))は非対応",
+                id.0
+            )));
+        }
+        // `Embedding` の `padding_idx` は forward で検査済みだが、cgrad が行マスクを
+        // 構築するため入口で範囲を再確認する（境界検査を省略しない。REQ-8）。
+        if let Op::Embedding {
+            weight,
+            padding_idx: Some(p),
+            ..
+        } = &node.op
+        {
+            let w_shape = &parent_nodes[weight.0].shape;
+            if w_shape.len() != 2 || *p >= w_shape[0] {
+                return Err(AutodiffError::Backward(format!(
+                    "create_graph: Embedding の padding_idx={p} が weight shape {w_shape:?} \
+                     の範囲外（NodeId({}))",
+                    id.0
+                )));
+            }
+        }
         if let Op::MatMul(a, b) = node.op {
             let a_rank = parent_nodes[a.0].shape.len();
             let b_rank = parent_nodes[b.0].shape.len();
@@ -491,6 +542,9 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 )));
             }
         }
+        // RmsNorm／LayerNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
+        // `child` へ書く前に拒否する（イシュー #3078。`create_graph_norm` モジュール doc）。
+        crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
     }
     Ok(())
 }
@@ -656,6 +710,10 @@ fn replay_op<'c>(
             Var::cat(&mirrored?, dim)
         }
         Op::Contiguous { input } => get_mirror(mirror, input)?.contiguous(),
+        // forward と同じ dispatch（backend の行カーネル → `Unsupported`
+        // ならホスト）を公開 `Var` メソッド経由で通す（イシュー #3077）。
+        Op::Softmax { input, dim } => get_mirror(mirror, input)?.softmax(dim),
+        Op::LogSoftmax { input, dim } => get_mirror(mirror, input)?.log_softmax(dim),
         // d_weight のホスト値ノード: 孫テープでも同じホスト関数で値を
         // 再計算する（f32 の構造側合成へ落とさない。§21.1(3)(5)）。
         Op::ConvWeightGradHost {
@@ -738,6 +796,28 @@ fn replay_op<'c>(
         Op::Fold { input, params } => {
             conv::replay_fold(shape, &get_mirror(mirror, input)?, &params)
         }
+        // 索引・累積族（イシュー #3083。方式は `index_cum` モジュール doc 参照）。
+        // `Sort`／`Topk`／`Cummax`／`Cummin` は値の選択のみのため `gather` で再生する。
+        Op::Gather { input, dim, index }
+        | Op::Sort { input, dim, index }
+        | Op::Topk { input, dim, index }
+        | Op::Cummax { input, dim, index }
+        | Op::Cummin { input, dim, index } => get_mirror(mirror, input)?.gather(dim, &index),
+        Op::Embedding { weight, index, .. } => get_mirror(mirror, weight)?.gather(0, &index),
+        Op::Scatter {
+            input,
+            dim,
+            index,
+            src,
+            reduce,
+        } => index_cum::replay_scatter(
+            &get_mirror(mirror, input)?,
+            &get_mirror(mirror, src)?,
+            dim,
+            &index,
+            reduce,
+        ),
+        Op::Cumsum { input, dim } => get_mirror(mirror, input)?.cumsum(dim),
         // `cond` は forward 時点（`Var::where_cond`）で `a`／`b` と
         // 同じ `out_shape` へ broadcast 済みの f32 マスク（`c != 0.0`
         // 判定契約。`Op::Where` doc 参照）として `Op` へ焼き込まれて
@@ -767,11 +847,268 @@ fn replay_op<'c>(
                 Some((mean, var)) => x.batch_norm_infer(w.as_ref(), b.as_ref(), &mean, &var, eps),
             }
         }
+        Op::RmsNorm { .. } | Op::LayerNorm { .. } => {
+            crate::create_graph_norm::replay_norm(&op, mirror)
+        }
+        // 損失 Op 第 1 弾（イシュー #3082・決定記録 §26）。公開 `Var` メソッドへ
+        // 委譲し、forward の検証（shape・delta・targets 範囲）を迂回しない。
+        Op::MseLoss {
+            pred,
+            target,
+            reduction,
+        } => get_mirror(mirror, pred)?.mse_loss_with(&get_mirror(mirror, target)?, reduction),
+        Op::L1Loss {
+            pred,
+            target,
+            reduction,
+        } => get_mirror(mirror, pred)?.l1_loss(&get_mirror(mirror, target)?, reduction),
+        Op::HuberLoss {
+            pred,
+            target,
+            kind,
+            delta,
+            reduction,
+        } => get_mirror(mirror, pred)?.huber_loss_impl(
+            &get_mirror(mirror, target)?,
+            kind,
+            delta,
+            reduction,
+        ),
+        Op::CrossEntropyLoss {
+            logits,
+            targets,
+            class_dim,
+            reduction,
+        } => get_mirror(mirror, logits)?.cross_entropy_loss(&targets, class_dim, reduction),
+        Op::NllLoss {
+            input,
+            targets,
+            class_dim,
+            reduction,
+        } => get_mirror(mirror, input)?.nll_loss(&targets, class_dim, reduction),
         _ => Err(AutodiffError::Backward(
             "create_graph: replay_op: supports_create_graph() が true の未対応 Op（内部契約違反）"
                 .into(),
         )),
     }
+}
+
+/// V3 の共通前処理: `v` の子テープ上の実体値を取り出す（借用は
+/// 戻る前に解放する。`reduce_bias_grad_var` と同じ形）。
+fn child_value(child: &Tape, v: &Var<'_>) -> Result<Tensor<f32>, AutodiffError> {
+    let nodes = child.nodes.borrow();
+    Ok(materialize_fallible(&nodes, child.ops(), v.node_id())?.clone())
+}
+
+/// V3（`docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3・§23）の
+/// 値と構造の結合。値 `host_value` は 1 階 VJP と同じホスト関数の結果、
+/// 構造 `composed` は二階微分を流すための `Var` 演算グラフ。値を持つ
+/// `Op::Contiguous`（恒等 VJP）ノードとして子テープへ登録する。
+/// shape 不一致は内部不変条件違反として型付きエラーにする。
+fn push_v3<'c>(
+    child: &'c Tape,
+    composed: &Var<'c>,
+    host_value: Tensor<f32>,
+) -> Result<Var<'c>, AutodiffError> {
+    if host_value.shape() != composed.shape().as_slice() {
+        return Err(AutodiffError::Backward(
+            "create_graph: V3 のホスト値と構造グラフの shape が不一致（内部契約違反）".into(),
+        ));
+    }
+    let nid = child.push_eager(
+        Op::Contiguous {
+            input: composed.node_id(),
+        },
+        host_value,
+    );
+    Ok(Var::from_raw(child, nid))
+}
+
+/// `dim` 軸を縮約して長さ 1 で復元し `shape` へ broadcast する。
+fn reduce_dim_bcast<'c>(
+    v: &Var<'c>,
+    dim: usize,
+    shape: &[usize],
+) -> Result<Var<'c>, AutodiffError> {
+    v.sum(Some(dim))?
+        .contiguous()?
+        .unsqueeze(dim)?
+        .broadcast_to(shape)
+}
+
+/// `Op::Softmax` の create_graph（V3。イシュー #3077）。値は 1 階と同じ
+/// `grad::softmax_vjp_along`（f64 縮約）、構造は `y⊙g − y⊙Σ(g⊙y)`
+/// （`Σy=1`・`y≥0` ゆえ中間値が `max|g|` 以下で overflow しない並べ方）。
+///
+/// 二階の逆伝播（codex-review 指摘・PR #3344）: `y` を 1 つのノードで
+/// 3 箇所に使うと、`y` への寄与（`g`・`dot`・`g·(-y)` の各項）が同一ノードで
+/// 蓄積され、個々は有限でも和が f32 範囲を超える（Softmax VJP の
+/// 定数シフト不変性で本来は相殺される量）。そこで 3 つの使用ごとに入力から
+/// `softmax` ミラーを別ノードとして立て、各寄与を別々に Softmax VJP へ
+/// 通してから入力側で蓄積する（各項は `max|g|` 以下）。値は 1 階と同一の
+/// ホスト関数が決めるため 1 階の bit 一致は不変。
+fn softmax_cgrad_v3<'c>(
+    parent: &Tape,
+    child: &'c Tape,
+    parent_nodes: &[TapeNode],
+    id: NodeId,
+    x_m: Var<'c>,
+    g: &Var<'c>,
+    dim: usize,
+) -> Result<Var<'c>, AutodiffError> {
+    let shape = parent_nodes[id.0].shape.clone();
+    if shape.contains(&0) {
+        return Ok(child.var_no_grad(&Tensor::zeros(&shape)?));
+    }
+    let y_a = x_m.softmax(dim)?;
+    let y_b = x_m.softmax(dim)?;
+    let y_c = x_m.softmax(dim)?;
+    let out_value = materialize_fallible(parent_nodes, parent.ops(), id)?;
+    let g_value = child_value(child, g)?;
+    let t1 = y_a.mul(g)?;
+    let dot = reduce_dim_bcast(&g.mul(&y_c)?, dim, &shape)?;
+    let composed = t1.sub(&y_b.mul(&dot)?)?;
+    let host = crate::grad::softmax_vjp_along(out_value, &g_value, dim);
+    push_v3(child, &composed, host)
+}
+
+/// レーンごとのスケール `s = max|g|`（`dim` 軸を長さ 1 にした shape）。
+/// `s == 0` と非有限（`g` に `inf`／`NaN`）のレーンは `1`（IEEE 伝播を
+/// 構造側へ任せる。§24）。有限の小さい `max|g|` は下限
+/// [`LANE_SCALE_FLOOR`] で持ち上げる（codex-review 指摘・PR #3344:
+/// `g.div(&s)` の VJP は `1/s`・`-g/s²` を f32 で先に評価するため、
+/// 非正規数級の `s` では二階微分の係数が `inf` になる。構造式は任意の
+/// `s > 0` で数学的に同値なので下限を設けても 1 階値・二階の意味は
+/// 不変）。
+/// `lane_scale` の下限（`2^-20`）。`1/s² ≤ 2^40`・`|g|/s² ≤ 2^20/…` が
+/// いずれも f32 で有限に収まる大きさ。
+const LANE_SCALE_FLOOR: f32 = 9.536_743e-7;
+
+fn lane_scale(g: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, AutodiffError> {
+    let shape = g.shape().to_vec();
+    let outer: usize = shape[..dim].iter().product();
+    let axis_len = shape[dim];
+    let inner: usize = shape[dim + 1..].iter().product();
+    let data = crate::eval::dense_vec(g);
+    let mut s = Vec::with_capacity(outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = 0f32;
+            for a in 0..axis_len {
+                let v = data[(o * axis_len + a) * inner + i].abs();
+                // NaN は `>` が偽になるため明示的に非有限扱いへ倒す。
+                if v.is_nan() {
+                    m = f32::NAN;
+                    break;
+                }
+                if v > m {
+                    m = v;
+                }
+            }
+            s.push(if m == 0.0 || !m.is_finite() {
+                1.0
+            } else {
+                m.max(LANE_SCALE_FLOOR)
+            });
+        }
+    }
+    let mut sshape = shape;
+    sshape[dim] = 1;
+    Ok(Tensor::new(s, &sshape)?)
+}
+
+/// LogSoftmax の二階逆伝播で `exp` ミラーへ入る最大寄与
+/// `q·s·|mean_gs| = n·p·s·|mean_gs|` をレーンごとにホストで評価し、
+/// f32 範囲（約 3.4e38）に収まる上限 `SPLIT_LIMIT` を超える分だけ
+/// ミラーの分割数を増やす（`1..=SPLIT_MAX`。通常は 1）。
+const SPLIT_LIMIT: f64 = 2.0e38;
+const SPLIT_MAX: usize = 64;
+
+fn log_softmax_split_count(
+    y: &Tensor<f32>,
+    g: &Tensor<f32>,
+    s_lane: &Tensor<f32>,
+    dim: usize,
+) -> usize {
+    let shape = g.shape().to_vec();
+    let outer: usize = shape[..dim].iter().product();
+    let n = shape[dim];
+    let inner: usize = shape[dim + 1..].iter().product();
+    let yd = crate::eval::dense_vec(y);
+    let gd = crate::eval::dense_vec(g);
+    let sd = crate::eval::dense_vec(s_lane);
+    let mut worst = 0f64;
+    for o in 0..outer {
+        for i in 0..inner {
+            let s = sd[o * inner + i] as f64;
+            let mut sum = 0f64;
+            let mut pmax = 0f64;
+            for a in 0..n {
+                let idx = (o * n + a) * inner + i;
+                sum += gd[idx] as f64 / s;
+                pmax = pmax.max((yd[idx] as f64).exp());
+            }
+            let mean = (sum / n as f64).abs();
+            let m = n as f64 * pmax * s * mean;
+            // 非有限は分割では救えない（IEEE 伝播に任せる）。
+            if m.is_finite() {
+                worst = worst.max(m);
+            }
+        }
+    }
+    ((worst / SPLIT_LIMIT).ceil() as usize).clamp(1, SPLIT_MAX)
+}
+
+/// `Op::LogSoftmax` の create_graph（V3。イシュー #3077）。値は 1 階と
+/// 同じ `grad::log_softmax_vjp_dispatch`、構造は
+/// `s ⊙ (g/s − exp(y) ⊙ Σ(g/s))`（`|g/s| ≤ 1` で縮約が overflow しない）。
+fn log_softmax_cgrad_v3<'c>(
+    parent: &Tape,
+    child: &'c Tape,
+    parent_nodes: &[TapeNode],
+    x_m: Var<'c>,
+    id: NodeId,
+    g: &Var<'c>,
+    dim: usize,
+) -> Result<Var<'c>, AutodiffError> {
+    let shape = parent_nodes[id.0].shape.clone();
+    if shape.contains(&0) {
+        return Ok(child.var_no_grad(&Tensor::zeros(&shape)?));
+    }
+    let out_value = materialize_fallible(parent_nodes, parent.ops(), id)?;
+    let g_value = child_value(child, g)?;
+    let s_lane = lane_scale(&g_value, dim)?;
+    let pieces = log_softmax_split_count(out_value, &g_value, &s_lane, dim);
+    // 二階の逆伝播の保護（codex-review 指摘・PR #3344。決定記録 §24.1b）:
+    // `exp(y)·Σgs` の係数 `Σgs`（最大 `n`）が `exp` ノードへの寄与 `-s·Σgs`
+    // を f32 範囲外へ押し出す。`q = exp(y + ln n) = n·p`・`mean_gs = Σgs / n`
+    // と分け、`q` への寄与を `-s·mean_gs`（`≤ s`）に抑える。さらに `q` 自身
+    // の VJP（`q ⊙ 寄与`、最大 `n·s`）が LogSoftmax VJP へ入る前に溢れる
+    // ため、`q·mean_gs` を `pieces` 個の独立な `log_softmax` ミラー
+    // （入力 `x_m` から別々に立てる）へ等分し、各ミラーへの寄与を別々に
+    // LogSoftmax VJP へ通してから入力側で蓄積する（Softmax の `y` 3 分割と
+    // 同型）。`pieces` はホストで最大寄与の上界から決める（通常は 1）。
+    let n_lane = shape[dim] as f32;
+    let ln_n = child.var_no_grad(&Tensor::full(&shape, n_lane.ln())?);
+    let inv_nk = child.var_no_grad(&Tensor::full(&shape, 1.0 / (n_lane * pieces as f32))?);
+    // `s ⊙ (gs − q·mean_gs) = g − q·mean_g` と恒等変形し、`s` を掛ける積を
+    // 作らない（codex-review 指摘・PR #3344。入力依存の `g` でも `mean_gs_k`
+    // 側へ `-s·q`（最大 `n·s`）が逆伝播しない）。`mean_g_k = Σ(g/(n·pieces))`
+    // は各項 `≤ max|g|/n` で縮約が overflow しない。
+    let mean_g_k = reduce_dim_bcast(&g.mul(&inv_nk)?, dim, &shape)?;
+    let mut sub: Option<Var<'c>> = None;
+    for _ in 0..pieces {
+        let y_k = x_m.log_softmax(dim)?;
+        let term = y_k.add(&ln_n)?.exp().mul(&mean_g_k)?;
+        sub = Some(match sub {
+            Some(acc) => acc.add(&term)?,
+            None => term,
+        });
+    }
+    let sub = sub.ok_or_else(|| AutodiffError::Backward("LogSoftmax 分割数が 0".into()))?;
+    let composed = g.sub(&sub)?;
+    let host = crate::grad::log_softmax_vjp_dispatch(child.ops(), out_value, &g_value, dim)?;
+    push_v3(child, &composed, host)
 }
 
 /// [`Tape::backward_create_graph`] の逆走査（本体その 2。VJP を `Var`
@@ -988,6 +1325,187 @@ fn build_cgrads<'c>(
                     off += len;
                 }
             }
+            Op::Softmax { input, dim } => {
+                let da = softmax_cgrad_v3(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    id,
+                    get_mirror(mirror, input)?,
+                    &g,
+                    dim,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::LogSoftmax { input, dim } => {
+                let da = log_softmax_cgrad_v3(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    get_mirror(mirror, input)?,
+                    id,
+                    &g,
+                    dim,
+                )?;
+                accumulate(&parent_nodes, &mut cgrads, input, da)?;
+            }
+            Op::MseLoss {
+                pred,
+                target,
+                reduction,
+            } => {
+                let pred_m = get_mirror(mirror, pred)?;
+                let target_m = get_mirror(mirror, target)?;
+                let shape = parent_nodes[pred.0].shape.clone();
+                let dpred = if shape.contains(&0) {
+                    child.var_no_grad(&Tensor::zeros(&shape)?)
+                } else {
+                    let n: usize = shape.iter().product();
+                    let s_b = loss_scale_bcast(child, &g, reduction, true, n, &shape)?;
+                    pred_m.sub(&target_m)?.mul(&s_b)?
+                };
+                let dtarget = dpred.neg()?;
+                accumulate(&parent_nodes, &mut cgrads, pred, dpred)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dtarget)?;
+            }
+            Op::L1Loss {
+                pred,
+                target,
+                reduction,
+            } => {
+                let pred_m = get_mirror(mirror, pred)?;
+                let target_m = get_mirror(mirror, target)?;
+                let shape = parent_nodes[pred.0].shape.clone();
+                let dpred = if shape.contains(&0) {
+                    child.var_no_grad(&Tensor::zeros(&shape)?)
+                } else {
+                    let n: usize = shape.iter().product();
+                    let g_b = loss_scale_bcast(child, &g, reduction, false, n, &shape)?;
+                    let p_val = materialize_fallible(&parent_nodes, parent_ops, pred)?;
+                    let t_val = materialize_fallible(&parent_nodes, parent_ops, target)?;
+                    let pos = pairwise_mask(p_val, t_val, |p, t| p - t > 0.0)?;
+                    let neg = pairwise_mask(p_val, t_val, |p, t| p - t < 0.0)?;
+                    let nan = pairwise_mask(p_val, t_val, |p, t| (p - t).is_nan())?;
+                    let d_m = pred_m.sub(&target_m)?;
+                    let zeros = child.var_no_grad(&Tensor::zeros(&shape)?);
+                    // `d == 0` は区分定数の 0（V2。`g.mul(0/1 定数)` は使わない）。
+                    // NaN は 1 階 `l1_grad_sign` と同じく `d_m` を通して伝播する。
+                    let nan_branch = Var::where_cond(&nan, &d_m, &zeros)?;
+                    let neg_branch = Var::where_cond(&neg, &g_b.neg()?, &nan_branch)?;
+                    Var::where_cond(&pos, &g_b, &neg_branch)?
+                };
+                let dtarget = dpred.neg()?;
+                accumulate(&parent_nodes, &mut cgrads, pred, dpred)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dtarget)?;
+            }
+            Op::HuberLoss {
+                pred,
+                target,
+                kind,
+                delta,
+                reduction,
+            } => {
+                let pred_m = get_mirror(mirror, pred)?;
+                let target_m = get_mirror(mirror, target)?;
+                let shape = parent_nodes[pred.0].shape.clone();
+                let smooth_l1 = match kind {
+                    fandhe_ai_tensor_core::HuberKind::Huber => false,
+                    fandhe_ai_tensor_core::HuberKind::SmoothL1 => true,
+                    _ => {
+                        return Err(AutodiffError::Backward(
+                            "create_graph: HuberLoss: 未知の HuberKind は fail-closed".into(),
+                        ));
+                    }
+                };
+                let dpred = if shape.contains(&0) {
+                    child.var_no_grad(&Tensor::zeros(&shape)?)
+                } else {
+                    let n: usize = shape.iter().product();
+                    let g_b = loss_scale_bcast(child, &g, reduction, false, n, &shape)?;
+                    let p_val = materialize_fallible(&parent_nodes, parent_ops, pred)?;
+                    let t_val = materialize_fallible(&parent_nodes, parent_ops, target)?;
+                    // 二次領域は `!(|d| >= delta)`（NaN の `d` は二次側へ入り、
+                    // `d_m` 経由で NaN を伝播する。`eval::huber_elem_grad` と一致）。
+                    let quad = pairwise_mask(p_val, t_val, |p, t| {
+                        let a = (p - t).abs();
+                        a < delta || a.is_nan()
+                    })?;
+                    let lin_data: Vec<f32> = {
+                        let pc = p_val.contiguous();
+                        let tc = t_val.contiguous();
+                        let ps = pc.as_slice().unwrap_or(&[]);
+                        let ts = tc.as_slice().unwrap_or(&[]);
+                        ps.iter()
+                            .zip(ts.iter())
+                            .map(|(&p, &t)| {
+                                let d = p - t;
+                                if smooth_l1 {
+                                    1.0f32.copysign(d)
+                                } else {
+                                    delta.copysign(d)
+                                }
+                            })
+                            .collect()
+                    };
+                    let lin_const = child.var_no_grad(&Tensor::new(lin_data, &shape)?);
+                    let d_m = pred_m.sub(&target_m)?;
+                    // 線形領域（非選択分岐）の `d_m` は除算・乗算の前に 0 へマスクする。
+                    // マスクせず `d_m / delta` を作ると、有限入力（例: pred=1e30・
+                    // beta=1e-10）でも非選択側が inf になり、`where_cond` が二次側へ
+                    // 流すゼロ余接と Mul／Div の VJP で積算されて NaN が二階微分へ
+                    // 漏れる。NaN の `d` は `quad` に含まれるためマスク後も伝播する。
+                    let zeros_q = child.var_no_grad(&Tensor::zeros(&shape)?);
+                    let d_safe = Var::where_cond(&quad, &d_m, &zeros_q)?;
+                    let quad_grad = if smooth_l1 {
+                        let delta_c = child.var_no_grad(&Tensor::scalar(delta));
+                        g_b.mul(&d_safe.div(&delta_c)?)?
+                    } else {
+                        g_b.mul(&d_safe)?
+                    };
+                    let lin_grad = g_b.mul(&lin_const)?;
+                    Var::where_cond(&quad, &quad_grad, &lin_grad)?
+                };
+                let dtarget = dpred.neg()?;
+                accumulate(&parent_nodes, &mut cgrads, pred, dpred)?;
+                accumulate(&parent_nodes, &mut cgrads, target, dtarget)?;
+            }
+            Op::CrossEntropyLoss {
+                logits,
+                targets,
+                class_dim,
+                reduction,
+            } => {
+                let logits_m = get_mirror(mirror, logits)?;
+                let shape = parent_nodes[logits.0].shape.clone();
+                let dlogits = if shape.contains(&0) {
+                    child.var_no_grad(&Tensor::zeros(&shape)?)
+                } else {
+                    let n = class_sample_count(&shape, class_dim);
+                    let s_b = loss_scale_bcast(child, &g, reduction, false, n, &shape)?;
+                    let onehot = child.var_no_grad(&onehot_f32(&targets, &shape, class_dim)?);
+                    let y = logits_m.softmax(class_dim)?;
+                    y.sub(&onehot)?.mul(&s_b)?
+                };
+                accumulate(&parent_nodes, &mut cgrads, logits, dlogits)?;
+            }
+            Op::NllLoss {
+                input,
+                targets,
+                class_dim,
+                reduction,
+            } => {
+                let shape = parent_nodes[input.0].shape.clone();
+                let dinput = if shape.contains(&0) {
+                    child.var_no_grad(&Tensor::zeros(&shape)?)
+                } else {
+                    let n = class_sample_count(&shape, class_dim);
+                    let s_b = loss_scale_bcast(child, &g, reduction, false, n, &shape)?;
+                    let mask = onehot_mask(&targets, &shape, class_dim)?;
+                    let zeros = child.var_no_grad(&Tensor::zeros(&shape)?);
+                    Var::where_cond(&mask, &s_b.neg()?, &zeros)?
+                };
+                accumulate(&parent_nodes, &mut cgrads, input, dinput)?;
+            }
             Op::Contiguous { input } => {
                 // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, input, g)?;
@@ -1020,7 +1538,7 @@ fn build_cgrads<'c>(
                 fixed_stats,
             } => {
                 // 方式（V3＋S1／eval の dx は V1）は `create_graph_norm.rs`
-                // と決定記録 §24 を参照。
+                // と決定記録 §28 を参照。
                 let x_host = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
                 let (n_, c_, spatial_) = batch_norm_layout(x_host.shape())?;
                 let inputs = crate::create_graph_norm::BatchNormCgradInputs {
@@ -1383,6 +1901,49 @@ fn build_cgrads<'c>(
                     accumulate(&parent_nodes, &mut cgrads, b, db)?;
                 }
             }
+            Op::RmsNorm { input, weight, eps } => {
+                let targets = crate::create_graph_norm::Targets {
+                    input,
+                    weight,
+                    bias: None,
+                };
+                let contributions = crate::create_graph_norm::rms_norm_cgrads(
+                    child,
+                    &parent_nodes,
+                    parent_ops,
+                    mirror,
+                    g,
+                    &targets,
+                    eps,
+                )?;
+                for (target, v) in contributions {
+                    accumulate(&parent_nodes, &mut cgrads, target, v)?;
+                }
+            }
+            Op::LayerNorm {
+                input,
+                weight,
+                bias,
+                eps,
+            } => {
+                let targets = crate::create_graph_norm::Targets {
+                    input,
+                    weight,
+                    bias,
+                };
+                let contributions = crate::create_graph_norm::layer_norm_cgrads(
+                    child,
+                    &parent_nodes,
+                    parent_ops,
+                    mirror,
+                    g,
+                    &targets,
+                    eps,
+                )?;
+                for (target, v) in contributions {
+                    accumulate(&parent_nodes, &mut cgrads, target, v)?;
+                }
+            }
             // 2D 畳み込み族（イシュー #3080。方式は `conv` モジュール doc 参照）。
             Op::Conv2d {
                 input,
@@ -1455,6 +2016,65 @@ fn build_cgrads<'c>(
             Op::Fold { input, params } => {
                 let d = conv::fold_vjp(&g, &params)?;
                 accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
+            // 索引・累積族（イシュー #3083。方式は `index_cum` モジュール doc 参照）。
+            Op::Gather { input, dim, index }
+            | Op::Sort { input, dim, index }
+            | Op::Topk { input, dim, index }
+            | Op::Cummax { input, dim, index }
+            | Op::Cummin { input, dim, index } => {
+                if parent_nodes[input.0].requires_grad {
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = index_cum::gather_like_vjp(child, &g, &input_shape, dim, &index)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Embedding {
+                weight,
+                index,
+                padding_idx,
+            } => {
+                if parent_nodes[weight.0].requires_grad {
+                    let weight_shape = parent_nodes[weight.0].shape.clone();
+                    let d =
+                        index_cum::embedding_vjp(child, &g, &weight_shape, &index, padding_idx)?;
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+            }
+            Op::Scatter {
+                input,
+                dim,
+                index,
+                src,
+                reduce,
+            } => {
+                let input_shape = parent_nodes[input.0].shape.clone();
+                let src_shape = parent_nodes[src.0].shape.clone();
+                let r = index_cum::scatter_vjp(
+                    child,
+                    &g,
+                    &index_cum::ScatterSpec {
+                        input_shape: &input_shape,
+                        src_shape: &src_shape,
+                        dim,
+                        index: &index,
+                        reduce,
+                    },
+                    parent_nodes[input.0].requires_grad,
+                    parent_nodes[src.0].requires_grad,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_src {
+                    accumulate(&parent_nodes, &mut cgrads, src, d)?;
+                }
+            }
+            Op::Cumsum { input, dim } => {
+                if parent_nodes[input.0].requires_grad {
+                    let d = index_cum::cumsum_cgrad(child, &g, dim)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
             }
             _ => {
                 return Err(AutodiffError::Backward(
@@ -1703,6 +2323,87 @@ fn pairwise_mask(
         _ => Vec::new(),
     };
     Tensor::new(data, a_c.shape()).map_err(AutodiffError::from)
+}
+
+/// 損失 Op（イシュー #3082・決定記録 §26）の上流勾配 `g`（出力 shape `[]`）
+/// から、`shape`（入力の要素 shape）へ broadcast した scale を作る。演算順は
+/// 1 階 VJP に合わせる（`mse_loss_scale`: Mean は `(g·2)/n`・Sum は `g·2`。
+/// その他の損失: Mean は `g/n`・Sum は `g`）。`g` は子テープ上の `Var` のまま
+/// 扱い、損失が根でない場合や孫テープ再生でも二階の勾配が `g` を通って流れる。
+fn loss_scale_bcast<'c>(
+    child: &'c Tape,
+    g: &Var<'c>,
+    reduction: crate::var::Reduction,
+    mse: bool,
+    n: usize,
+    shape: &[usize],
+) -> Result<Var<'c>, AutodiffError> {
+    let g2 = if mse {
+        g.mul(&child.var_no_grad(&Tensor::scalar(2.0f32)))?
+    } else {
+        *g
+    };
+    let s = match reduction {
+        crate::var::Reduction::Mean => g2.div(&child.var_no_grad(&Tensor::scalar(n as f32)))?,
+        crate::var::Reduction::Sum => g2,
+    };
+    s.broadcast_to(shape)
+}
+
+/// クラス軸を除いたサンプル数 `outer · inner`（`CrossEntropyLoss`／`NllLoss` の
+/// `Mean` の分母。1 階 `cross_entropy_loss_vjp`／`nll_loss_vjp` と同じ）。
+fn class_sample_count(shape: &[usize], class_dim: usize) -> usize {
+    let outer: usize = shape[..class_dim].iter().product();
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    outer * inner
+}
+
+/// `targets`（クラス添字）の onehot 位置を `(o·C + c)·inner + i` の平坦添字で
+/// 列挙する。範囲外の添字は 1 階 VJP と同じくスキップする（forward が検査済み。
+/// panic・範囲外アクセスを起こさない）。
+fn onehot_positions(targets: &Tensor<i32>, shape: &[usize], class_dim: usize) -> Vec<usize> {
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let data = crate::eval::dense_vec_i32(targets);
+    let mut out = Vec::with_capacity(outer * inner);
+    for o in 0..outer {
+        for i in 0..inner {
+            let Some(&t) = data.get(o * inner + i) else {
+                continue;
+            };
+            if t >= 0 && (t as usize) < axis_len {
+                out.push((o * axis_len + t as usize) * inner + i);
+            }
+        }
+    }
+    out
+}
+
+/// onehot（f32。`CrossEntropyLoss` の `softmax − onehot` 用の定数）。
+fn onehot_f32(
+    targets: &Tensor<i32>,
+    shape: &[usize],
+    class_dim: usize,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let mut data = vec![0f32; shape.iter().product()];
+    for idx in onehot_positions(targets, shape, class_dim) {
+        data[idx] = 1.0;
+    }
+    Tensor::new(data, shape).map_err(AutodiffError::from)
+}
+
+/// onehot マスク（bool。`NllLoss` の target 位置選択用）。
+fn onehot_mask(
+    targets: &Tensor<i32>,
+    shape: &[usize],
+    class_dim: usize,
+) -> Result<Tensor<bool>, AutodiffError> {
+    let mut data = vec![false; shape.iter().product()];
+    for idx in onehot_positions(targets, shape, class_dim) {
+        data[idx] = true;
+    }
+    Tensor::new(data, shape).map_err(AutodiffError::from)
 }
 
 /// [`Op::Where`] が `Op` payload に保持する `cond`（forward 時点で
