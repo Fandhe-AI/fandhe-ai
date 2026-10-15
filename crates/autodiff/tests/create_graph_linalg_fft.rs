@@ -770,3 +770,44 @@ fn rfft_irfft_roundtrip_second_order_matches_direct_composition() {
         );
     }
 }
+
+/// 桁落ちする `Inv`（A=[[1,2],[3,6.0001]]・定数 G=A^T）は f32 構造の丸め誤差が REQ-2 を超えるため拒否する。
+#[test]
+fn inv_cancellation_input_is_rejected() {
+    assert_rejected_and_child_reusable(
+        "inv cancellation",
+        |tape, x| {
+            let g = tape.var_no_grad(&t(vec![1.0, 3.0, 2.0, 6.0001], &[2, 2]));
+            x.inv()?.mul(&g)?.sum(None)
+        },
+        &[1.0, 2.0, 3.0, 6.0001],
+        &[2, 2],
+    );
+}
+
+/// DC 虚部のみ inf の上流勾配: 通常 backward と create_graph の `cg.grad` で同じく NaN が伝播する。
+#[test]
+fn rfft_dc_imag_nonfinite_propagates_like_first_order() {
+    let n = 4usize;
+    let mut w = vec![0.0f32; (n / 2 + 1) * 2];
+    w[1] = f32::INFINITY;
+    let run = |cg: bool| -> Vec<f32> {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![0.5, -1.0, 2.0, 0.25], &[n]));
+        let y = x.rfft(Some(n), Some(0), FftNorm::Backward).expect("rfft");
+        let wv = tape.var_no_grad(&t(w.clone(), &[n / 2 + 1, 2]));
+        let loss = y.mul(&wv).expect("mul").sum(None).expect("sum");
+        if cg {
+            let child = Tape::new_with_ops(common::naive_ops());
+            let grads = tape.backward_create_graph(&loss, &child).expect("cg");
+            dense(&grads.grad(&x).expect("grad").expect("到達").to_tensor())
+        } else {
+            let grads = tape.backward(&loss).expect("backward");
+            dense(grads.get(&x).expect("get").expect("到達"))
+        }
+    };
+    let a = run(false);
+    let b = run(true);
+    assert!(a.iter().all(|v| v.is_nan()), "通常 backward は NaN: {a:?}");
+    assert!(b.iter().all(|v| v.is_nan()), "create_graph も NaN: {b:?}");
+}

@@ -15,7 +15,8 @@
 //! - `Fft`: `ifft(g, n, dim, swap(norm))` の後に実軸を入力長 `L` へ合わせる。
 //! - `Ifft`: `fft(g, n, dim, swap(norm))` の後に `L` へ合わせる。
 //! - `Rfft`: Hermitian の倍加を打ち消す重み `h`（DC と〈`n` 偶数の〉Nyquist は 1、それ以外は
-//!   0.5。0 を含まないので `inf * 0` は生じない）を掛けて `irfft(.., n, dim, swap(norm))`、その後 `L` へ。
+//!   0.5。0 を含まない）を掛けて `irfft(.., n, dim, swap(norm))`、その後 `L` へ。DC・Nyquist の虚部は
+//!   `irfft` が読まないため、1 階 VJP と同じ非有限値の伝播になるよう 0 倍した和を全要素へ加える。
 //! - `Irfft`: `rfft(g, n, dim, swap(norm))` に重み `c`（DC・Nyquist は 1、それ以外は 2）を掛け、
 //!   bin 軸を入力の bin 数 `m` へ合わせる。
 //!
@@ -27,7 +28,8 @@
 //! f32 へ丸めるのは最後の 1 回だけだが、子テープの構造は f32 の `Var` 演算の連鎖である。
 //! そのため構造を積む前に f64 参照で各段の値と上界を求め（[`LinalgGuard`]）、1 段でも
 //! 「有限でない」「`2^125` 以上」「非零なのに f32 正規化最小値未満（ゼロ化・subnormal 化しうる）」
-//! 「二階の逆伝播の上界が `2^125` 以上」「`g` に非有限要素」のいずれかなら
+//! 「二階の逆伝播の上界が `2^125` 以上」「`g` に非有限要素」「`Inv`・`Solve` の f32 積和の丸め誤差上界が
+//! REQ-2 の複合判定を超えうる（桁落ち。`rounding_ok`）」のいずれかなら
 //! `Err(AutodiffError::Backward)` で拒否する（呼び出し側のロールバックで `child` は空へ戻る）。
 //! 判定は保守的で、拒否されても実際に overflow するとは限らない。`Det` は §21.2 の行別スケール＋
 //! 2 のべき乗チャンク構造（V3）を実装せず、同じ判定を付けた V1（`g * det(A) * inv(A)^T`）とし、
@@ -150,7 +152,29 @@ pub(super) fn fft_vjp<'c>(
         FftKind::Rfft => {
             let h = hermitian_weights(child, g.shape().len(), dim, n, 0.5)?;
             let r = g.mul(&h)?.irfft(Some(n), Some(dim), sw)?;
-            resize_axis(child, &r, dim, n, l)
+            let r = resize_axis(child, &r, dim, n, l)?;
+            // `irfft` は DC・Nyquist の虚部を読まないが、1 階 VJP（`rfft_vjp_host`）は
+            // `gi * sin` に含めるため非有限値（inf／NaN）が出力へ伝播する。同じ扱いに揃えるため、
+            // その虚部を 0 倍した和（有限なら厳密に 0、非有限なら NaN）を全要素へ加える。
+            let mut poison: Option<Var<'c>> = None;
+            let mut bins = vec![0usize];
+            if n.is_multiple_of(2) && n / 2 > 0 {
+                bins.push(n / 2);
+            }
+            let zero = child.var_no_grad(&Tensor::zeros(&[1])?);
+            let im_axis = g.shape().len() - 1;
+            for k in bins {
+                let im = g.narrow(dim, k, 1)?.narrow(im_axis, 1, 1)?;
+                let z = im.sum(None)?.mul(&zero.sum(None)?)?;
+                poison = Some(match poison {
+                    Some(p) => p.add(&z)?,
+                    None => z,
+                });
+            }
+            match poison {
+                Some(p) => r.add(&p.broadcast_to(&r.shape())?),
+                None => Ok(r),
+            }
         }
         FftKind::Irfft => {
             let c = hermitian_weights(child, input_shape.len(), dim, n, 2.0)?;
@@ -217,6 +241,23 @@ fn all_stage_ok(v: &[f64]) -> bool {
     v.iter().all(|&x| stage_ok(x))
 }
 
+/// f32 の子テープ構造の丸め誤差が REQ-2 の複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）に
+/// 収まるかの保守的検査。`reference` は f64 の真値、`magnitude` は同じ式の絶対値積（`|X||G||X|` 等）、
+/// `terms` は構造内の積和の総項数（段の長さ）。誤差上界を `(2 * terms + 4) * 2^-23 * magnitude`
+/// （入力 `X` 自体の f32 丸め 2 回分を含む）と見積もり、要素ごとに許容内かを調べる。
+/// 桁落ち（`magnitude` が `|reference|` より桁違いに大きい入力）を f32 構造のまま通さない。
+fn rounding_ok(reference: &[f64], magnitude: &[f64], terms: usize) -> bool {
+    let coeff = (2 * terms + 4) as f64 * (-23f64).exp2();
+    reference.iter().zip(magnitude).all(|(&r, &m)| {
+        let bound = coeff * m;
+        bound < 1e-5 || bound <= 5e-4 * r.abs()
+    })
+}
+
+fn abs_vec(v: &[f64]) -> Vec<f64> {
+    v.iter().map(|x| x.abs()).collect()
+}
+
 /// `A` の f64 逆行列（特異は拒否）。
 fn inverse_of(a: &Tensor<f32>, what: &str) -> Result<(Vec<f64>, f64), AutodiffError> {
     inv_and_det_f64(a).ok_or_else(|| reject(&format!("{what}: 行列が特異")))
@@ -245,6 +286,13 @@ pub(super) fn guard_inv(a: &Tensor<f32>, g: &Tensor<f32>) -> Result<(), Autodiff
     let s2 = mm(&s1, &xt, n, n, n);
     if !(all_stage_ok(&x) && all_stage_ok(&s1) && all_stage_ok(&s2)) {
         return Err(reject("Inv: 構造の段が overflow／ゼロ化域に入る"));
+    }
+    let (ax, ag) = (abs_vec(&xt), abs_vec(&gv));
+    let mag = mm(&mm(&ax, &ag, n, n, n), &ax, n, n, n);
+    if !rounding_ok(&s2, &mag, n) {
+        return Err(reject(
+            "Inv: f32 構造の丸め誤差が REQ-2 の許容を超えうる（桁落ち）",
+        ));
     }
     let bx = n as f64 * max_abs(&x);
     if !second_order_ok(&[bx], 4, max_abs(&gv).max(1.0)) {
@@ -279,6 +327,12 @@ pub(super) fn guard_solve(
     let da = mm(&db, &transpose(&xs, n, k), n, k, n);
     if !(all_stage_ok(&xinv) && all_stage_ok(&xs) && all_stage_ok(&db) && all_stage_ok(&da)) {
         return Err(reject("Solve: 構造の段が overflow／ゼロ化域に入る"));
+    }
+    let mag_da = mm(&abs_vec(&db), &abs_vec(&transpose(&xs, n, k)), n, k, n);
+    if !rounding_ok(&da, &mag_da, k) {
+        return Err(reject(
+            "Solve: f32 構造の丸め誤差が REQ-2 の許容を超えうる（桁落ち）",
+        ));
     }
     let dim = n.max(k) as f64;
     let (bxi, bxs) = (dim * max_abs(&xinv), dim * max_abs(&xs));
