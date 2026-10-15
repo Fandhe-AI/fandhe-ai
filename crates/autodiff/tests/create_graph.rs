@@ -4442,6 +4442,10 @@ fn bn_apply_fixed<'t>(
 /// つ 1 階と REQ-2 一致を確認する（x・w・b の勾配）。`fixed` が `Some` なら eval。
 /// 損失が `y` に線形なので勾配が x に依存しない場合（eval の dx 等）は 2・3 段目を
 /// 省略し、x に依存する勾配（dw 等）で 2・3 段目を確認する。
+///
+/// 総括的な適用判定（`create_graph_norm::check_structure_stages`・決定記録 §28）が
+/// 入力を拒否した場合は `Err(Backward)` かつ `child` が空であることを確かめて
+/// `BnOutcome::Rejected` を返す（受理なら上の 3 段を確かめて `Accepted`）。
 fn check_bn_three_stage(
     ctx: &str,
     shape: &[usize],
@@ -4449,7 +4453,7 @@ fn check_bn_three_stage(
     coeff: Vec<f32>,
     eps: f32,
     fixed: Option<(Vec<f32>, Vec<f32>)>,
-) {
+) -> BnOutcome {
     let c = shape[1];
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
@@ -4460,7 +4464,14 @@ fn check_bn_three_stage(
     let k = tape.var_no_grad(&t(coeff, shape));
     let loss = y.mul(&k).unwrap().sum(None).unwrap();
     let plain = tape.backward(&loss).unwrap();
-    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert!(matches!(e, AutodiffError::Backward(_)), "{ctx}: {e:?}");
+            assert!(child.is_empty(), "{ctx}: 拒否時に child が空へ戻る");
+            return BnOutcome::Rejected;
+        }
+    };
     let dense = |v: &Tensor<f32>| v.contiguous().as_slice().unwrap().to_vec();
     for (var, name) in [(&x, "x"), (&w, "w"), (&b, "b")] {
         let expected = dense(plain.get(var).unwrap().unwrap());
@@ -4508,120 +4519,139 @@ fn check_bn_three_stage(
             }
         }
     }
+    BnOutcome::Accepted
 }
+
+/// [`check_bn_three_stage`] の結果。
+#[derive(Debug, PartialEq, Eq)]
+enum BnOutcome {
+    Accepted,
+    Rejected,
+}
+
+/// 構造の中間値が f32 を超えうる入力の回帰ベクトル。受理されるものは 3 段が有限かつ一致し、
+/// 総括的な適用判定（決定記録 §28）が拒否するものは `child` が空のまま型付きエラーになる
+/// （PR #3348 のレビューで、前置スケール方式では各経路で overflow が再発したため、判定へ
+/// 置き換えた。拒否側の `[3e38,-3e38]`・巨大な上流勾配・eval の逆符号大値は以前は受理していた）。
 #[test]
-fn batch_norm_create_graph_overflow_regression_vectors_are_finite() {
+fn batch_norm_create_graph_overflow_regression_vectors_are_finite_or_rejected() {
     let e = 1e-5f32;
+    let accepted = |ctx: &str, shape: &[usize], x0, c, fixed| {
+        assert_eq!(
+            check_bn_three_stage(ctx, shape, x0, c, e, fixed),
+            BnOutcome::Accepted,
+            "{ctx}"
+        );
+    };
+    let rejected = |ctx: &str, shape: &[usize], x0, c, fixed| {
+        assert_eq!(
+            check_bn_three_stage(ctx, shape, x0, c, e, fixed),
+            BnOutcome::Rejected,
+            "{ctx}"
+        );
+    };
     // x=1e20 系（f32 の二乗が overflow する）。
-    check_bn_three_stage(
+    accepted(
         "1e20",
         &[4, 1],
         vec![1e20, 2e20, -1e20, 3e20],
         vec![1.0, 2.0, -1.0, 0.5],
-        e,
         None,
     );
     // 中心化の丸め。
-    check_bn_three_stage(
+    accepted(
         "centering",
         &[2, 1],
         vec![16777216.0, 16777218.0],
         vec![1.0, 2.0],
-        e,
         None,
     );
     // 小スケール（rstd ≈ 316.23）。
-    check_bn_three_stage(
-        "small",
-        &[2, 1],
-        vec![1e-30, 1e-30],
-        vec![1.0, 2.0],
-        e,
-        None,
-    );
+    accepted("small", &[2, 1], vec![1e-30, 1e-30], vec![1.0, 2.0], None);
     // 定数行。
-    check_bn_three_stage("const", &[2, 1], vec![1e30, 1e30], vec![1.0, 2.0], e, None);
+    accepted("const", &[2, 1], vec![1e30, 1e30], vec![1.0, 2.0], None);
     // 全ゼロ。
-    check_bn_three_stage("zeros", &[2, 1], vec![0.0, 0.0], vec![1.0, 2.0], e, None);
-    // 前置スケール（x 側の中心化が overflow しうる）。
-    check_bn_three_stage(
-        "prescale",
-        &[2, 1],
-        vec![3e38, -3e38],
-        vec![1.0, 2.0],
-        e,
-        None,
-    );
-    // 前置スケール下限と逆伝播倍率上限の両立（Codex P1）: 上流勾配 1e38 で
-    // p_upper=0 でも x=±3e38 の中心化差（-6e38）が -inf にならない。
-    check_bn_three_stage(
-        "prescale-huge-g",
-        &[2, 1],
-        vec![3e38, -3e38],
-        vec![1e38, 1e38],
-        e,
-        None,
-    );
-    check_bn_three_stage(
-        "prescale-huge-g-eval",
-        &[2, 1],
-        vec![3e38, -3e38],
-        vec![1e38, 1e38],
-        e,
-        Some((vec![-3e38], vec![1e30])),
-    );
-    // 上流勾配が巨大。
-    check_bn_three_stage(
-        "huge-g",
-        &[4, 1],
-        vec![1.0, 2.0, 3.0, 4.5],
-        vec![1e38, -1e38, 1e38, -1e38],
-        e,
-        None,
-    );
-    check_bn_three_stage(
-        "huge-g-same-sign",
-        &[4, 1],
-        vec![1.0, 2.0, 3.0, 4.5],
-        vec![1e38; 4],
-        e,
-        None,
-    );
-    // eval: x と mean が逆符号の大値。
-    check_bn_three_stage(
-        "eval-opposite",
-        &[2, 1],
-        vec![2e38, 1e38],
-        vec![1.0, 2.0],
-        e,
-        Some((vec![-2e38], vec![1e30])),
-    );
-    // 巨大な定数入力（Codex P1）: forward は有限だが逆伝播の倍率列が
-    // 先に掛かると二階勾配が overflow する（train／eval 両方）。
-    check_bn_three_stage(
+    accepted("zeros", &[2, 1], vec![0.0, 0.0], vec![1.0, 2.0], None);
+    // 巨大な定数入力（Codex P1）: train／eval とも構造の全段が安全域に収まる。
+    accepted(
         "const-3e38-train",
         &[2, 1],
         vec![3e38, 3e38],
         vec![1.0, 2.0],
-        e,
         None,
     );
-    check_bn_three_stage(
+    accepted(
         "const-3e38-eval",
         &[2, 1],
         vec![3e38, 3e38],
         vec![1.0, 2.0],
-        e,
         Some((vec![3e38], vec![0.0])),
     );
     // eval: 通常値。
-    check_bn_three_stage(
-        "eval-normal",
-        &[3, 2],
-        bn_input(6),
-        bn_coeffs(6, 2),
-        1e-3,
-        Some((vec![0.1, -0.2], vec![0.9, 1.4])),
+    assert_eq!(
+        check_bn_three_stage(
+            "eval-normal",
+            &[3, 2],
+            bn_input(6),
+            bn_coeffs(6, 2),
+            1e-3,
+            Some((vec![0.1, -0.2], vec![0.9, 1.4])),
+        ),
+        BnOutcome::Accepted
+    );
+    // 中心化 x_i − x_0 が f32 で -inf（入口検査）。
+    rejected("prescale", &[2, 1], vec![3e38, -3e38], vec![1.0, 2.0], None);
+    rejected(
+        "prescale-huge-g",
+        &[2, 1],
+        vec![3e38, -3e38],
+        vec![1e38, 1e38],
+        None,
+    );
+    // eval: x − mean が f32 を超える（固定統計分岐の判定）。
+    rejected(
+        "prescale-huge-g-eval",
+        &[2, 1],
+        vec![3e38, -3e38],
+        vec![1e38, 1e38],
+        Some((vec![-3e38], vec![1e30])),
+    );
+    rejected(
+        "eval-opposite",
+        &[2, 1],
+        vec![2e38, 1e38],
+        vec![1.0, 2.0],
+        Some((vec![-2e38], vec![1e30])),
+    );
+    // 上流勾配が巨大（dx 構造の gs 復元・行方向和の cotangent が 2^125 を超える）。
+    rejected(
+        "huge-g",
+        &[4, 1],
+        vec![1.0, 2.0, 3.0, 4.5],
+        vec![1e38, -1e38, 1e38, -1e38],
+        None,
+    );
+    rejected(
+        "huge-g-same-sign",
+        &[4, 1],
+        vec![1.0, 2.0, 3.0, 4.5],
+        vec![1e38; 4],
+        None,
+    );
+    // 同じ入力で上流勾配を 1e30 へ下げると受理され、3 段が有限かつ一致する。
+    accepted(
+        "huge-g-1e30",
+        &[4, 1],
+        vec![1.0, 2.0, 3.0, 4.5],
+        vec![1e30, -1e30, 1e30, -1e30],
+        None,
+    );
+    accepted(
+        "prescale-1e30",
+        &[2, 1],
+        vec![1e30, -1e30],
+        vec![1e30, 1e30],
+        None,
     );
 }
 
@@ -4745,26 +4775,53 @@ fn batch_norm_create_graph_huge_constant_input_second_order_is_finite() {
     }
 }
 
-/// Codex P1 回帰: train で `s_g` の復元倍率が `inv_sg` より先に逆伝播され
-/// 2^135 が単位シードへ掛かり二階勾配が NaN になった（x=[0,0]・上流 1e38）。
-/// この損失の Hessian は 0 で、`child.backward` の結果は有限かつ 0。
-#[test]
-fn batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero() {
+/// `x=[0,0]`・追跡 `w=1`・train・`loss=sum(y·[g,g])` で `cg.grad(wrt)` の和を子テープで逆伝播し、
+/// `x` の写しへの二階勾配を返す（`wrt_w` なら `dw`、そうでなければ `dx`）。この損失の
+/// Hessian（`∂dx/∂x`・`∂dw/∂x`）は 0。`backward_create_graph` が拒否したら `Err` を返し、
+/// そのとき `child` が空であることを確かめる。
+fn bn_zero_input_second_order(g: f32, wrt_w: bool) -> Result<Vec<f32>, AutodiffError> {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![0.0, 0.0], &[2, 1]));
     let w = tape.var(&t(vec![1.0], &[1]));
     let y = x.batch_norm(Some(&w), None, 1e-5).unwrap();
-    let k = tape.var_no_grad(&t(vec![1e38, 1e38], &[2, 1]));
+    let k = tape.var_no_grad(&t(vec![g, g], &[2, 1]));
     let loss = y.mul(&k).unwrap().sum(None).unwrap();
-    let cg = tape.backward_create_graph(&loss, &child).unwrap();
-    let dx = cg.grad(&x).unwrap().expect("dx");
-    let s = dx.sum(None).unwrap();
+    let cg = match tape.backward_create_graph(&loss, &child) {
+        Ok(cg) => cg,
+        Err(e) => {
+            assert!(child.is_empty(), "拒否時に child が空へ戻る");
+            return Err(e);
+        }
+    };
+    let target = if wrt_w { &w } else { &x };
+    let s = cg.grad(target).unwrap().expect("grad").sum(None).unwrap();
     let hv = child.backward(&s).unwrap();
     let cx = cg.child_var(&x).unwrap().unwrap();
-    if let Some(h) = hv.get(&cx).unwrap() {
-        let hd = h.contiguous().as_slice().unwrap().to_vec();
-        assert!(hd.iter().all(|v| v.is_finite() && *v == 0.0), "{hd:?}");
+    Ok(hv
+        .get(&cx)
+        .unwrap()
+        .map(|h| h.contiguous().as_slice().unwrap().to_vec())
+        .unwrap_or_default())
+}
+
+/// Codex P1 回帰（#3348）: train・`x=[0,0]`・上流 `1e38` の `cg.grad(x)`／`cg.grad(w)` の和を
+/// 子テープで逆伝播すると、前置スケール方式では復元倍率（`2^135`）や `rstd_s`・`inv_s2` が
+/// 中心化より先に掛かり二階勾配が `inf`／`NaN` になった。総括的な適用判定では dx 構造の
+/// `Σdxhat` への cotangent（`k·gs`）・dw 構造の `xhat` への cotangent（`|g|`）が `2^125` を
+/// 超えるため型付きエラーで拒否し、`child` は空へ戻る。上流を `1e30` へ下げると受理され、
+/// 二階勾配は有限かつ真値 0 と REQ-2 判定で一致する。
+#[test]
+fn batch_norm_create_graph_train_huge_upstream_zero_input_is_rejected_or_zero() {
+    for wrt_w in [false, true] {
+        let err = bn_zero_input_second_order(1e38, wrt_w).unwrap_err();
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        let hd = bn_zero_input_second_order(1e30, wrt_w).expect("上流 1e30 は受理");
+        assert!(
+            hd.iter()
+                .all(|v| v.is_finite() && common::req2_close(f64::from(*v), 0.0)),
+            "wrt_w={wrt_w}: {hd:?}"
+        );
     }
 }
 
@@ -4808,45 +4865,16 @@ fn batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite() {
         }
     }
 }
-/// Codex P1 回帰（#3348）: train の `dw` を子テープで逆伝播するとき、中心化より先に
-/// 上流勾配 `1e38` へ `rstd_s`・`inv_s2` が掛かり `inf - inf` で NaN になった。
-/// この損失の混合二階勾配 `∂dw/∂x` は 0（一様な上流勾配は中心化で消える）。
+/// Codex P1 回帰（#3348）: eval・`x=mean=0`・追跡 `b=1`・`loss=sum(y²·[1e38,1e38,-1e38])` は
+/// `db` の構造（`g` の行方向和 `2e38+2e38`）が f32 を超える。前置スケール方式ではホスト値で
+/// 補正していたが、総括的な適用判定は db 構造の縮約の上界（`Σ|g| = 6e38`）を `2^125` 以上として
+/// 型付きエラーで拒否し、`child` は空へ戻る。判定を通る入力で孫テープ再生がホスト値
+/// （1 階と bit 同一の `db`）を保つことは `tests/create_graph_batch_norm.rs` の
+/// `host_db_value_is_kept_in_grandchild_replay` が確かめる。
 #[test]
-fn batch_norm_create_graph_train_dw_huge_uniform_upstream_mixed_hessian_is_zero() {
+fn batch_norm_create_graph_huge_db_reduction_is_rejected_with_empty_child() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
-    let x = tape.var(&t(vec![0.0, 0.0], &[2, 1]));
-    let w = tape.var(&t(vec![1.0], &[1]));
-    let y = x.batch_norm(Some(&w), None, 1e-5).unwrap();
-    let k = tape.var_no_grad(&t(vec![1e38, 1e38], &[2, 1]));
-    let loss = y.mul(&k).unwrap().sum(None).unwrap();
-    let cg = tape.backward_create_graph(&loss, &child).unwrap();
-    let dw = cg.grad(&w).unwrap().expect("dw");
-    assert!(
-        dw.value()
-            .contiguous()
-            .as_slice()
-            .unwrap()
-            .iter()
-            .all(|v| v.is_finite())
-    );
-    let s = dw.sum(None).unwrap();
-    let hv = child.backward(&s).unwrap();
-    let cx = cg.child_var(&x).unwrap().unwrap();
-    if let Some(h) = hv.get(&cx).unwrap() {
-        let hd = h.contiguous().as_slice().unwrap().to_vec();
-        assert!(hd.iter().all(|v| v.is_finite() && *v == 0.0), "{hd:?}");
-    }
-}
-
-/// Codex P1 回帰（#3348）: ホスト補正値（f64 縮約の `db`）が孫テープへの再生で
-/// 失われ、構造側の f32 逐次和（`2e38 + 2e38`）の `inf` に置き換わった。
-/// `db` は有限（約 `2e38`）で、`(db·1e-38)²` の孫テープ勾配も有限でなければならない。
-#[test]
-fn batch_norm_create_graph_host_db_survives_grandchild_replay() {
-    let tape = Tape::new_with_ops(common::naive_ops());
-    let child = Tape::new_with_ops(common::naive_ops());
-    let grand = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![0.0; 3], &[3, 1]));
     let b = tape.var(&t(vec![1.0], &[1]));
     let y = x
@@ -4860,16 +4888,7 @@ fn batch_norm_create_graph_host_db_survives_grandchild_replay() {
         .unwrap();
     let k = tape.var_no_grad(&t(vec![1e38, 1e38, -1e38], &[3, 1]));
     let loss = y.mul(&y).unwrap().mul(&k).unwrap().sum(None).unwrap();
-    let cg = tape.backward_create_graph(&loss, &child).unwrap();
-    let db = cg.grad(&b).unwrap().expect("db");
-    let db_v = db.value().contiguous().as_slice().unwrap().to_vec();
-    assert!(db_v.iter().all(|v| v.is_finite() && *v > 1e38), "{db_v:?}");
-    let scale = child.var_no_grad(&t(vec![1e-38], &[1]));
-    let sc = db.mul(&scale).unwrap();
-    let s = sc.mul(&sc).unwrap().sum(None).unwrap();
-    let cg2 = child.backward_create_graph(&s, &grand).unwrap();
-    let cb = cg.child_var(&b).unwrap().unwrap();
-    let g2 = cg2.grad(&cb).unwrap().expect("d s / d b");
-    let gv = g2.value().contiguous().as_slice().unwrap().to_vec();
-    assert!(gv.iter().all(|v| v.is_finite()), "{gv:?}");
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+    assert!(child.is_empty());
 }

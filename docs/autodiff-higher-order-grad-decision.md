@@ -1078,65 +1078,64 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 ## 28. 実装記録（#3079・`BatchNorm` の create_graph 対応。親 #3075）
 
-- 基準は `origin/main` `6d08419a`。方針は §21.1 (5)・§21.3（#3079 行）に従う。コードは `crates/autodiff/src/create_graph_norm.rs`（新規・非公開）と、`create_graph.rs` の `replay_op`／`build_cgrads` の薄い腕、`tape.rs::supports_create_graph`（`Op::BatchNorm` を `true`）。
+- 親は #3075、方針の正は §21.1（V3・S1・閉包性）と §21.3（#3079 行）。数値契約の考え方は §27.3（総括的な適用判定）をそのまま使い、BatchNorm 用に判定を拡張した。本節は実装した形と、§21.3・§27 から外れた点だけを書く。
+- 変更ファイル: `crates/autodiff/src/create_graph_norm.rs`（#3078 のモジュールへ BatchNorm を追加）・`create_graph.rs`（`validate_ancestors` の空入力拒否・`replay_op`・`build_cgrads` の薄い腕）・`tape.rs`（`supports_create_graph` で `Op::BatchNorm` を `true`・`Op::BatchNormGradHost` の追加）・`grad.rs`（`batch_norm_vjp_channels` を `pub(crate)` にしただけ。本体・数値は不変で 1 階は bit 同一）。テストは `crates/autodiff/tests/create_graph.rs`（BatchNorm 節）と `crates/autodiff/tests/create_graph_batch_norm.rs`（判定の正のプローブ・掃引）。
 
 ### 28.1 方式の割り当て（出力ごと）
 
 | 出力 | train | eval | 理由 |
 |---|---|---|---|
-| dx | V3 | V1 | eval は定数統計との要素積だけで縮約がない（§21.3「推論時は V1」）。train は f64 縮約の補正項を持つ |
+| dx | V3 | V3 | 値は 1 階と同じ `batch_norm_vjp_channels`。eval の構造は定数統計との要素積だけ（§21.3「推論時は V1」の構造に相当）だが、値は f64 の `rstd` を使う 1 階と bit で揃えるためホスト関数で与える |
 | dw・db | V3 | V3 | どちらのモードも 1 階は長軸縮約を f64 で蓄積する（§21.1 (5)「f64 縮約は原則 V3」） |
 
-- §21.3 の表の「推論時は V1」を dx に限る**精密化**であり、表からの逸脱ではない（eval でも dw／db の縮約契約は train と同じため）。
-- V3 の値は `grad.rs::batch_norm_vjp_channels`（`pub(crate)` 化。本体・シグネチャは不変）を 1 回呼んで得る。値は 1 階と bit 同一。構造 `S` の上に `Op::Contiguous`（VJP が恒等で前方値に依存しない）を `push_eager` し、二階の微分は `S` を流れる。
-- `replay_op` は `fixed_stats` payload をそのまま使い、`Var::batch_norm`／`batch_norm_infer` へ委譲する（`Op` の拡張なし）。
+- 値は `Op::Contiguous` ではなく **`Op::BatchNormGradHost`**（`structure`・`g`・`x`・`weight` と `fixed_stats` を持ち、VJP は `structure` への恒等）に載せる。`replay_op` は同じホスト関数で値を再計算するため、構造側の f32 縮約とホストの f64 縮約で丸めが異なる入力（例 `g=[2^24,1,1]` の db は f32 逐次和が `2^24`、f64 縮約が `2^24+2`）でも、孫テープ再生の値が 1 階と bit 同一のまま保たれる（PR #3348 の Codex P1「孫テープへの再生でもホスト補正値を保持する」への対応。§27 の `Op::Contiguous` 方式より強い）。
+- `replay_op` は `fixed_stats` payload をそのまま使い、`Var::batch_norm`／`batch_norm_infer` へ委譲する。
 
-### 28.2 構造（S1。スケール付き合成）
+### 28.2 構造（S1。§27.1 と同じ構造をチャネル行へ）
 
-チャネル軸を前に出した行 `[C, M]`（`Reshape`・`Permute`・`Contiguous`）で組む。ホスト定数はすべて 2 のべき乗で、乗除算は（非正規化域を除き）厳密。
+チャネル軸を前に出した行 `[c, m = n·spatial]`（`Reshape`・`Permute`・`Contiguous`）を行として組む。BatchNorm 専用の別方式は持たない。
 
-1. 前置スケール `p`（`max|x|` 以上）で `x` を割る。`xs − xs_ref = fl(x − x_ref)/p` が厳密に成り立つため、`x=[3e38,-3e38]` でも差が有限に収まる（#3078 が S2 送りにした入力を、BatchNorm では前置スケールで S1 に収める）。
-2. 先頭要素基準の中心化＋補正パス（`x=[16777216,16777218]` の桁落ち対策。§21.3 #3078 と同形）。
-3. `s2 = max(max|dev2|, √eps/p)` 以上の 2 のべき乗で `u = dev2/s2`、`eps_eff = eps/(p·s2)²`、`rstd_s = 1/√(mean(u²)+eps_eff)`、`x̂ = u·rstd_s`。`x̂` は正のスケールに依らない量なので、`p`・`s2` を微分上の定数にしても勾配は厳密に正しい。
-4. train の dx: `dx̂` を行ごとの `s_g`（有限な最大絶対値以上の 2 のべき乗）で割ってから `t − mean(t) − x̂·mean(t·x̂)` を作り、`rstd_s` を掛けた後、`mul_pow2_per_row`（±100 ずつの段）で `2^(lg s_g − lg p − lg s2)` を適用する。`dx` は `dx̂` について線形なので `s_g` の定数扱いは厳密。
-5. eval の x̂（dw 用）: `q = x/p − mean/p`（`p` は `max(|x|,|mean|)` 以上。`|q|≤2`）と `rstd = 仮数·2^k` の分解。dx は `dx̂·rstd`（V1）。
-- 積む Op は `Mul`・`Sub`・`Add`・`Mean`・`Sum`・`Narrow`・`Reshape`・`Permute`・`Contiguous`・`ScalarUnary(Sqrt)`・`ScalarBinary(Div)` のみで、すべて `supports_create_graph == true`（閉包性。孫テープ再生で閉じる）。
+- **train**: `LayerNorm` と同じ構造（§27.1）。安定な中心化（`x_ref`・`d`・`dev`・`dev2`）、`dev2` の実値から決める行スケール `s`、`rstd_s = 1/√(mean((dev2/s)²)+eps/s²)`・`xhat`、dx は `gs` で割ってから縮約し縮約の直後に `gs/m` を掛ける `(rstd_s/s)·(g·w − mean_dxhat·gs − xhat·mean_dot·gs)`。違いは `w`・`b` が行ごと（`[c]`。`g·w` は `[c,1]` の broadcast）で、dw＝`Σ_m g·xhat`・db＝`Σ_m g` が行方向の `Sum(1)` であることだけ。構造の組み立ては `LayerNorm`／`RmsNorm` と共通の関数（`stable_centering`・`scaled_stats`・`dx_rows`）を使う。
+- **eval**: 統計量が定数なので `xhat = (x − mean)·rstd`（`mean`・`rstd` は定数葉。`rstd` は f64 で求めて f32 へ丸めた値）、dx の構造は `(g·w)·rstd`、dw・db は train と同じ行方向和。
+- 積む Op は `Reshape`・`Permute`・`Contiguous`・`Narrow`・`Mean`・`Sum`・`Mul`・`Add`・`Sub`・`ScalarBinary{Div}`・`ScalarUnary{Sqrt}`・`BatchNormGradHost` のみで、すべて `supports_create_graph == true`（閉包性。孫テープ再生で閉じる）。
 
-### 28.3 running stats
+### 28.3 総括的な適用判定の拡張（§27.3 の `check_structure_stages` を共用）
 
-`replay_op`・`build_cgrads` は `Var::` プリミティブとホスト関数だけを呼び、`nn::BatchNorm*` の buffer・`num_batches_tracked` へ触れる経路がない。子テープ構築・二階 backward・孫テープ再生（`jvp_create_graph`）で二重更新されないことを統合テストで固定した。
+- PR #3348 のレビューでは、前置スケール方式（`x` を `2^p` で割ってから中心化・`s_g` で割ってから縮約・`±100` 段の 2 のべき乗で復元）に対し、有限な入力・upstream で構造（`cg.grad`・二階の逆伝播・孫テープ再生）の中間値が f32 を超える指摘が同じ類型で続いた（Codex P1 × 8・Cursor Bugbot 1 件。§28.5 の表）。`p`・`s_g` の上限・下限を経路ごとに足す方式では、逆伝播の倍率・中心化の差・平均の縮約のどこかで再発したため、前置スケールを撤去し、#3078 の総括的な適用判定（§27.3）へ載せ替えた。
+- `create_graph_norm::check_structure_stages` に 2 つの区分を足した（判定の段・閾値 `2^125`〈`STAGE_BOUND_GUARD`。値は不変〉・「seed の各要素の絶対値 ≤ 1」の前提は §27.3 と同じ）:
+  - **`ParamAxis`**（`Column`＝`LayerNorm`／`RmsNorm`、`Row`＝`BatchNorm`）: `w` の添字と、dw／db 構造の縮約・`w` への cotangent の蓄積を列ごと（行をまたぐ和）か行ごと（行方向の和）かで切り替える。三角不等式の積み方は同じ。BatchNorm train は `Row` として、`LayerNorm` と同じ forward の各段・二階の逆伝播の各段（中心化の 3 段の `Mean` を含む）を判定する。
+  - **`FixedStats`**（BatchNorm eval）: `rstd`・`x − mean`・`xhat`・`g·w`・dx 構造の出力（`g·w·rstd`）・`g·xhat`・dw／db の縮約と、二階の逆伝播で `g`（`|w|·rstd`・`|xhat|`・1）・`w`（`Σ|g|·rstd`）・`x`（`|g|·rstd`）へ出る cotangent の上界を判定する。
+- 入口検査（`validate_norm_s1`）に BatchNorm の腕を足した: train はチャネル行ごとに `LayerNorm` と同じ (a) 非有限要素 (b) f32 の `x_i − x_0` が非有限 (c) f64 で `m·max|x_i − x_0| ≥ 2^125`（`Mean` の f32 部分和）(d) `eps == 0` かつ `max|x_i − x_0| < 2^-100`。eval は `x`・`mean`・`var` の非有限要素。形状の積は取る前にゼロ軸を判定し（空入力は `validate_ancestors` が拒否）、`n·spatial` は `checked_mul` で型付きエラーにする。
+- **保証範囲**（§27.3 と同じ書き方）: 判定を通った入力で 1 階・`cg.grad`・二階（seed の各要素の絶対値 ≤ 1）・孫テープ再生が有限で、`cg.grad` は 1 階と REQ-2 判定で一致する。拒否は `Err(AutodiffError::Backward)` で、`backward_create_graph` のロールバックにより `child` は空へ戻る。上界は符号を見ない最悪値なので拒否は保守的。対象外は §27.3 と同じ（`g` を作る上流の Op の逆伝播、絶対値 1 を超える seed、三階以上、真の値そのものが f32 を超える場合。eval の `xhat` は固定統計からの距離で有界でないため、`x` が固定平均から遠い入力の入力依存損失では真の二階微分自体が f32 を超えうる）。
+- **f32 精度の限界（overflow とは別）**: train の dw は正規化と同じ行で縮約するため、入力依存の損失（`g = 2c·bn`）では `∂dw/∂x` が `xhat` のスケール不変性（`Σxhat = 0`・`Σxhat² ≈ m`）で打ち消し合う `c` 規模の項の残差になり、真値が `c·eps/var` 程度まで小さくなりうる。この桁落ちでは f32 の丸め誤差が真値を上回りうるので、子テープ（`grad.rs` の VJP）と孫テープ（子テープ上の `Var` 合成）の二階の値は REQ-2 判定で一致しないことがある（両方とも有限）。テストではこの組み合わせの x への二階のみ有限性を確かめ、一致は問わない。
+- 拒否範囲を狭める（S2 化・前置スケールの再導入）かは所有者判断（§27.2 と同じく所有者へ戻す論点）。CUDA／Metal 実機での `cg.grad` の parity は未確認（申し送り。#3168・#3169）。
 
-### 28.4 fail-closed
+### 28.4 running stats・fail-closed
 
-- 空テンソル（`n`／`c`／`spatial` のいずれかが 0）の BatchNorm は `validate_ancestors` で子テープへ書く前に拒否する。
+- `replay_op`・`build_cgrads` は `Var::` プリミティブとホスト関数だけを呼び、`nn::BatchNorm*` の buffer・`num_batches_tracked` へ触れる経路がない。子テープ構築・二階 backward・孫テープ再生（`jvp_create_graph`）で二重更新されないことを統合テストで固定した。
+- 空テンソル（`n`／`c`／`spatial` のいずれかが 0）は `validate_ancestors` で子テープへ書く前に拒否する（形状の積ではなく `shape.contains(&0)` で判定。`[usize::MAX, 2, 0]` で積が overflow して panic するため）。
 - 対象外のまま残る Op（例: `local_response_norm`）は従来どおり入口で拒否され、子テープは無変更。
-- 1 階が有限でない入力（`eps=0` かつ分散 0 など）は 1 階と同様に非有限になる（特別扱いしない）。S2 は実装していない。
 
-### 28.5 テスト（`crates/autodiff/tests/create_graph.rs`・`create_graph_norm.rs` 単体）
+### 28.5 レビュー指摘（PR #3348）と判定後の扱い
 
-- Hessian: x（rank 2 の有限差分。rank 2／4 の独立合成〈`mean_dims`・`sub`・`mul`・`sqrt`・`div`〉との突合を train／eval・affine の有無で）・w・b の有限差分・x×w の混合二階。rank 4 の有限差分は f32 勾配の丸め雑音が Hessian 成分に対し無視できないため行わず、独立合成との突合に置き換えた（判定は緩めていない）。
-- 1 階一致（`cg.grad(x|w|b)` が `Tape::backward` と REQ-2 判定で一致・`first_order()` は bit 同一）、running stats 不変、閉包性（孫テープへの再生）、`local_response_norm` の fail-closed、空入力の拒否。
-- 3 段（1 階・`cg.grad`・孫テープ再生）の回帰ベクトル: `x=1e20` 系・中心化の丸め・小スケール・定数・全ゼロ・`[3e38,-3e38]`・巨大な上流勾配（交互符号・同符号）・eval の逆符号大値。
-- 単体: 2 のべき乗の選択規則、`mul_pow2_per_row` の大指数、チャネル行変換の往復。
+| 指摘 | 入力（要旨） | 判定後 |
+|---|---|---|
+| Codex 1 | eval `x=mean=3e38`・`var=0`・追跡 `w=1`・`loss=sum(y)` の `∂dw/∂x`（train 側の同型も） | 受理。`x − mean = 0` で全段が安全域。`∂dw/∂x ≈ 316.23` を突合 |
+| Codex 2 | 空入力 `[usize::MAX, 2, 0]` の形状積 | `contains(&0)` で拒否（panic しない）。`n·spatial` は `checked_mul` |
+| Codex 3 | train `x=[0,0]`・`g=1e38`・`cg.grad(x)` の二階 | 拒否（dx 構造の `Σdxhat` への cotangent `k·gs` が `2^125` 超）。`g=1e30` は受理で Hessian 0 と一致 |
+| Codex 4 | eval `x=mean=3e38`・`g=1e20` の `∂dw/∂x` | 受理。`∂dw/∂x ≈ 3.16e22` を突合 |
+| Codex 5 | train `x=[3e38,-3e38]`・`g=1e38` | 拒否（入口 (b)：`x_i − x_0 = -inf`） |
+| Codex 6 | train `x=[0,0]`・`g=1e38`・`cg.grad(w)` の二階 | 拒否（`xhat` への cotangent `|g|` が `2^125` 超）。`g=1e30` は受理で 0 と一致 |
+| Codex 7 | eval `[3,1]`・追跡 `b`・`loss=sum(y²·[1e38,1e38,-1e38])`（孫テープでホスト補正値が失われる） | 拒否（db 構造の縮約の上界）。判定を通る入力で孫テープの `db` がホスト値と bit 同一であることは別テストで固定（§28.1） |
+| Codex 8 | train `[3,1]`・`x=[3e38,-3e38,-3e38]`・`g=1e38`（中心化の平均の縮約） | 拒否（入口 (b)） |
+| Cursor Bugbot | 同符号の巨大入力で前置スケールの下限が余計な倍率を足す | 前置スケールを撤去。`x=[3e38,2.9e38]` の `∂dw/∂x` は受理で有限 |
 
-### 28.5a レビュー指摘の是正（Codex P1 × 2）
+### 28.6 テスト
 
-- 前置スケール指数 `p` を `[-64, 64]` に制限した（`POW2_BAL`。train／eval 共通）。`p=127` のままだと `x=mean=3e38`・`var=0` で逆伝播中に `2^135` 級の倍率が `inv_p` へ届く前に掛かり二階勾配が overflow した。制限後は各段の累積倍率が `rstd·2^64` 以下に収まる。`|p|<=64` の入力は従来と bit 同一。
-- 空入力の判定を形状の積から `shape.contains(&0)` へ変更した（`[usize::MAX, 2, 0]` で積が overflow して panic するため）。
-- テスト: `batch_norm_create_graph_huge_constant_input_second_order_is_finite`・`batch_norm_create_graph_rejects_overflowing_empty_shape`・overflow 回帰ベクトルへ `const-3e38-*` を追加。
+- `crates/autodiff/tests/create_graph.rs`（BatchNorm 節）: Hessian の有限差分突合（rank 2・train／eval・affine の有無・`x`／`w`／`b`・`x`×`w` の混合項）と rank 2／4 の独立合成との突合、1 階一致（`first_order()` は bit 同一・`cg.grad` は REQ-2）、running stats 不変、閉包性（孫テープへの再生）、`local_response_norm` の fail-closed、空入力の拒否、回帰ベクトルの 3 段（受理側: `x=1e20` 系・中心化の丸め・小スケール・定数・全ゼロ・`3e38` の定数行・上流 1e30 版。拒否側: `[3e38,-3e38]`・巨大な上流勾配・eval の逆符号大値。拒否側は `child` が空）。
+- `crates/autodiff/tests/create_graph_batch_norm.rs`: §28.5 の全例を正のプローブ（受理なら 1 階・`cg.grad`・二階・孫テープ再生が有限かつ一致、拒否なら `Err(Backward)` で `child` が空）で固定し、拒否例を 1e30 規模へ下げると受理されること、eval の `∂dw/∂x` の値、判定を通る入力で孫テープの `db` がホスト値と bit 同一であること、拒否後の同じ `child` での再試行を確かめる。掃引は train／eval（通常分散・分散 0）× rank 2／3／4 × weight なし／あり（0 と非ゼロ）／定数・bias × チャネル値（定数・交互符号・低分散・小スケール・1e20）× upstream の大きさ（1〜3e38）× 線形／入力依存の損失 × upstream と seed の符号パターンで、受理と拒否の両方が現れることも確かめる。判定（`stage`）を一時的に常に通すと、レビュー例・掃引・再試行の 3 テストが落ちることを確認した（デバッグビルドで約 16 秒）。
+- §28.3 の f32 精度の限界（train・入力依存損失・dw の x への二階）と、eval の入力依存損失で真の二階微分が f32 を超える入力は、掃引で有限性のみ確かめる／除外する（いずれも判定の対象外で、tolerance は変更していない）。
 
-### 28.5b レビュー指摘の是正（Codex P1・`s_g` 復元倍率の逆伝播順）
+### 28.7 変えていないもの
 
-- 原因: train の dx は `dx̂` を `2^-s_g` で縮小して縮約し、最後に `2^(s_g - p_s2)` で復元する直列構造のため、逆伝播では復元倍率が縮小より先に単位シードへ掛かる。`x=[0,0]`・`eps=1e-5`・上流 `[1e38,1e38]` は `s_g=127`・`p_s2=-8` で `2^135` が掛かり二階勾配が `inf`→`NaN` になった（本来 Hessian は 0）。±100 の段分割は累積倍率を守らない。
-- 是正: `s_g` を `ceil(log2 m) + 2`（m は行長 `n·spatial`）で打ち切る。縮約の安全は `|t| <= max|dx̂|/(4m)`（`Σ|t·x̂| <= m·max|t|`・`|x̂| <= √m`）で足りるため、逆伝播の累積倍率は `rstd·2^(ceil(log2 m)+2)` 以下に収まる。小さい上流勾配は従来どおり `s_g` が負で拡大側。dx の値は 1 階のホスト値で上書きされるため値は不変。
-- 回帰テスト: `batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero`（上記ケースで二階勾配が有限かつ 0）。
-
-### 28.5c レビュー指摘の是正（Codex P1・上流勾配を含む倍率の overflow）
-
-- 固定の `POW2_BAL=64` は単位シードしか保護できず、上流勾配 `g=1e20` を含む `∂dw/∂x`（`x=mean=3e38`・`var=0`・`loss=sum(y·1e20)`）で `g·2^(k+p)` が `inv_p` に届く前に overflow した。
-- 前置スケール指数 `p` の上限を、行ごとの `ceil(log2 max|g|)`（train は `dx̂` との最大）と実効 rstd の指数 `k` から `p_upper = clamp(125 − g_exp − k, 0, 64)` として決める（`create_graph_norm.rs::p_upper`／`upstream_exps`）。eval は `rstd` から、train はホスト f64 統計から `k` を見積もる。`p` を下げても 2 のべき乗スケールなので値は変わらない。
-- 回帰テスト `batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite`（eval は `∂dw/∂x ≈ 3.16e22`、train は有限）を追加した。
-
-### 28.6 変えていないもの
-
-1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。
+1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・`STAGE_BOUND_GUARD` 等の閾値・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文（`LayerNorm`／`RmsNorm` の構造は共通関数へ切り出しただけで、組む Op と値は不変。子テープへ積むノードの順序が一部入れ替わるのみ）。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。

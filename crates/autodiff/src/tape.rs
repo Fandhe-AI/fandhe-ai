@@ -690,12 +690,13 @@ pub(crate) enum Op {
         transposed: bool,
     },
     /// BatchNorm の `dx`／`dw`／`db` を子テープへ記録するホスト値ノード（イシュー
-    /// #3079・決定記録 §28）。`structure` は二階微分経路（2 のべき乗スケール付きの
-    /// 合成グラフ）、`g`（上流勾配）・`x`・`weight` は 1 階 VJP と同じホスト関数
-    /// （`grad::batch_norm_vjp_channels`。f64 縮約）へ渡すオペランド。
-    /// `Op::Contiguous` と異なり孫テープでの再生時にも同じホスト関数で値を
-    /// 再計算するため、ホスト側 f64 縮約の補正値が f32 構造側の再計算（overflow）で
-    /// 失われない（§21.1(5)）。VJP は恒等で `structure` のみへ渡す。
+    /// #3079・決定記録 §28）。`structure` は二階微分経路（チャネル行上の S1 合成
+    /// グラフ。`create_graph_norm::batch_norm_cgrads`）、`g`（上流勾配）・`x`・`weight`
+    /// は 1 階 VJP と同じホスト関数（`grad::batch_norm_vjp_channels`。f64 縮約）へ
+    /// 渡すオペランド。`Op::Contiguous` と異なり孫テープでの再生時にも同じホスト関数で
+    /// 値を再計算するため、構造側の f32 縮約とホストの f64 縮約で丸めが異なる入力でも
+    /// 孫テープの値が 1 階と bit 同一のまま保たれる（§21.1(5)・§28.1）。VJP は恒等で
+    /// `structure` のみへ渡す。
     BatchNormGradHost {
         structure: NodeId,
         g: NodeId,
@@ -2469,8 +2470,9 @@ impl Op {
     /// `RmsNorm`・`LayerNorm` も `true`（V3 値＋S1 構造。入力が非有限・
     /// overflow 域の場合は `create_graph_norm::validate_norm_s1` が入口で
     /// 拒否する。決定記録 §27）。`BatchNorm`（train／eval。#3079）も `true`——値は
-    /// 1 階と同じ `batch_norm_vjp_channels`（V3）、構造は 2 のべき乗スケール付きの
-    /// 合成（S1）で、方式は `create_graph_norm.rs` と決定記録 §28 を正とする。
+    /// 1 階と同じ `batch_norm_vjp_channels`（V3）、構造はチャネル行上の `LayerNorm` と
+    /// 同じ S1 合成で、適用判定も同じ `validate_norm_s1`／`check_structure_stages` が担う
+    /// （`create_graph_norm.rs`・決定記録 §28）。
     ///
     /// `Op::ScalarUnary`／`Op::ScalarBinary` は **payload（`op` フィールド
     /// の具体的な variant）まで見て判定する**（[`scalar_unary_

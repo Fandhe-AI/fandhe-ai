@@ -542,8 +542,8 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 )));
             }
         }
-        // RmsNorm／LayerNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
-        // `child` へ書く前に拒否する（イシュー #3078。`create_graph_norm` モジュール doc）。
+        // RmsNorm／LayerNorm／BatchNorm の S1 構造が安全に扱えない入力（非有限・overflow 域）を
+        // `child` へ書く前に拒否する（イシュー #3078・#3079。`create_graph_norm` モジュール doc）。
         crate::create_graph_norm::validate_norm_s1(&parent_nodes, parent.ops(), &node.op)?;
     }
     Ok(())
@@ -1537,7 +1537,7 @@ fn build_cgrads<'c>(
                 eps,
                 fixed_stats,
             } => {
-                // 方式（V3＋S1／eval の dx は V1）は `create_graph_norm.rs`
+                // 方式（V3 値＋S1 構造・総括的な適用判定）は `create_graph_norm.rs`
                 // と決定記録 §28 を参照。
                 let x_host = materialize_fallible(&parent_nodes, parent_ops, input)?.clone();
                 let (n_, c_, spatial_) = batch_norm_layout(x_host.shape())?;
@@ -1549,6 +1549,8 @@ fn build_cgrads<'c>(
                     fixed_stats: fixed_stats.as_ref(),
                     x_host: &x_host,
                     need_dx: parent_nodes[input.0].requires_grad,
+                    need_dw: weight.is_some_and(|w| parent_nodes[w.0].requires_grad),
+                    need_db: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
                     n: n_,
                     c: c_,
                     spatial: spatial_,
