@@ -820,3 +820,41 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 21.8 変更していないもの
 
 コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文。
+
+## 22. 実装記録（#3078・§21.3「#3078 LayerNorm・RmsNorm」の実装）
+
+- 親は #3075、方針の正は §21.1（V3・S1・閉包性）と §21.3。本節は実装した形と、§21.3 から外れた点だけを書く。
+- 変更ファイル: `crates/autodiff/src/create_graph_norm.rs`（新規）・`create_graph.rs`・`tape.rs`・`grad.rs`（`rmsnorm_vjp_rows`／`layer_norm_vjp_rows` を `pub(crate)` にしただけ。本体・数値は不変で 1 階は bit 同一）・`lib.rs`。テストは `crates/autodiff/tests/create_graph_norm.rs`。
+
+### 22.1 実装形
+
+- `supports_create_graph` は `Op::RmsNorm`・`Op::LayerNorm` を `true` にした（網羅 match のまま。ワイルドカードは足していない）。`replay_op` は `Var::rms_norm`／`layer_norm` へ委譲し、`build_cgrads` は `create_graph_norm::{rms_norm_cgrads, layer_norm_cgrads}` の寄与列を `accumulate` する。
+- **値（V3）**: `dx`・`dw`・`db` の値は 1 階と同じ `*_vjp_rows`。`dy` は子テープ上の `g` の実値（`reduce_bias_grad_var` と同じ借用パターン）。CPU・`naive_ops` では 1 階 VJP も同じ関数へフォールバックするので、`g` が親の upstream と bit 一致する範囲では `cg.grad` は 1 階と bit 同一。CUDA は 1 階が専用カーネルを通るため、REQ-2 統一複合判定の範囲の一致のみを主張する。`db` も `reduce_bias_grad_var` ではなく V3 で書く（`rows == 1` の符号付きゼロの扱いを 1 階と揃えるため）。
+- **構造（S1）**: 行ごとの 2 のべき乗 `s`（`max(最大絶対値, √eps)` を切り上げ。`eps=0` は最大絶対値のみ・0 なら `s=1`。指数は `[-126, 127]` にクランプ）で `x/s` を作り、`ms`・`rstd_s=1/√(ms+eps/s²)`・`xhat=xs·rstd_s`・`dx=(rstd_s/s)·(dxhat−…)` を合成する。`1/s` の乗算は `s=2^127` で非正規化数になるため `Div` を使う。`eps/s²` は f64 で計算して f32 へ丸める。出力ごとに `Op::Contiguous`（VJP は恒等）のノードを `push_eager` し、値だけをホスト関数の結果にする。
+- **`LayerNorm` の中心化**: `x_ref=Narrow(x,1,0,1)`・`d=x−x_ref`・`m=Mean(d)`・`dev=d−m`・補正 `dev2=dev−Mean(dev)`。`s` は中心化前の `x` ではなく `dev2` の子テープ上の実値から決める。
+- **積む Op**: `Reshape`・`Contiguous`・`Narrow`・`Mean`・`Sum`・`Mul`・`Add`・`ScalarBinary{Sub, Div}`・`ScalarUnary{Sqrt}`。すべて `supports_create_graph == true` なので孫テープ再生（`backward_create_graph` の再帰・`jvp_create_graph`）が通る。`Rsqrt`／`Reciprocal`／`Op::Var`・`BroadcastTo` は使っていない。
+
+### 22.2 §21.3 より狭い拒否（所有者へ戻す論点）
+
+§21.3 は「`d=x−x_ref` が非有限、または `rstd_scaled` が非有限になる入力は S2 へ切り替える」とした。S2（ホストの統計定数と二階の項の手書き合成）は 1 イシューの粒度を超え、誤ると Hessian が黙って誤値になるため、本実装は S2 を作らず、**子テープへ書く前**の `validate_ancestors`（`create_graph_norm::validate_norm_s1`）で次の入力を `Err(AutodiffError::Backward)` として拒否する。拒否時に `child` は空のまま保たれる。**これは新しい承認ではなく、S2 または代替の採否を所有者へ戻す。**
+
+| Op | 拒否条件（親テープの `x` の値だけで決まる保守的な判定） |
+|---|---|
+| `LayerNorm` | (a) 非有限要素 (b) f32 の `x_i−x_0` が非有限 (c) f64 で `hidden·max｜x_i−x_0｜ ≥ 2^125`（`Mean` の f32 部分和が overflow しうる。例 `[-2e38,1e38,1e38]`）(d) `eps==0` かつ `max｜x_i−x_0｜ < 2^-100`（定数行・極小偏差行で `rstd=inf`） |
+| `RmsNorm` | (a) 非有限要素 (d') `eps==0` かつ全ゼロ行 |
+
+§21.3 の必須ベクトル（`x=1e20`・`[16777216,16777218]`・`[1e-30,1e-30]`/`eps=1e-5`・`[1e30,1e30]`/`eps=1e-5`・全ゼロ行）はいずれもこの判定を通り、1 階・`cg.grad`・孫テープ再生が有限かつ REQ-2 判定で一致する（テストで固定）。将来の代替案として「S0 前スケーリング（中心化の前に `x` を行ごとの 2 のべき乗で割る）」も候補に残すが実装していない。
+
+### 22.3 既知の限界
+
+- upstream `g` が極端に大きい場合（例 `g=[3e38,3e38]`）、構造側の `Mean(dxhat⊙xhat)` の f32 和が overflow しうる。`cg.grad` の値は V3 のため 1 階と一致するが、構造側の `inf` は Hessian・孫テープ再生に入る。`g` は入口検査の時点で未知なので事前判定できない。§21.3 の必須ベクトルには含まれない。`g` のスケーリングは後続の候補として記録する。
+- 1 階側も要素積 `dy·w`・`dy·xhat` は f32 で計算するので、要素単位の overflow は 1 階と同じ挙動になる。
+- CUDA／Metal 実機での `cg.grad` の parity は未確認（申し送り）。
+
+### 22.4 テスト
+
+`crates/autodiff/tests/create_graph_norm.rs`: Hessian の有限差分突合（RmsNorm の weight なし／あり・LayerNorm の weight・bias 4 通り・rank 1／2／3・`x`／`w`／`b` 各微分・`x`×`w` の混合項・tanh 合成）、`first_order` の bit 同一と `cg.grad` の REQ-2 一致、§21.3 必須ベクトルの 3 段（1 階・`cg.grad`・孫テープ再生）、`eps=0` の非退化行の受理、§22.2 の拒否と `child.is_empty()`、fail-closed のまま残る隣接 Op（`LocalResponseNorm`）。有限差分は測定側の丸め雑音を抑えるため 5 点中央差分（h=1e-2）を使う（判定式・tolerance は不変）。
+
+### 22.5 変更していないもの
+
+1 階 `Tape::backward` の数値、tolerance・baseline、FMA 契約、依存、`unsafe`、`docs/spec`、既存節の本文。

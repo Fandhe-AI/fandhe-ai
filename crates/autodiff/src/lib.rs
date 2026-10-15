@@ -254,6 +254,7 @@ pub mod bool_ops;
 pub mod compat;
 pub mod conv3d_ops;
 mod create_graph;
+mod create_graph_norm;
 pub mod cumulative_ops;
 mod custom;
 mod default_ops;
