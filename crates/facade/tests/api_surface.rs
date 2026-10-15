@@ -29288,6 +29288,126 @@ fn facade_declares_pool3d_add_names_only_in_approved_form() {
     );
 }
 
+const ADD_UNFOLD_PARAMS: &str = "mut self, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2], ) -> Result<Self, AutodiffError>";
+const ADD_FOLD_PARAMS: &str = "mut self, output_size: [usize; 2], kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2], ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_unfold`／`add_fold` が承認シグネチャ（決定記録
+/// `compat-sequential-3d-fold-lrn-layers-decision.md` §3）で 1 件ずつ存在する（イシュー #3040）。
+#[test]
+fn add_fold_unfold_signatures_match_approved_contract() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    for (name, params) in [
+        ("add_unfold", ADD_UNFOLD_PARAMS),
+        ("add_fold", ADD_FOLD_PARAMS),
+    ] {
+        assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+        assert!(
+            sequential_spatial_add_signature_ok(&cleaned, name, params),
+            "{name} のシグネチャが承認形と一致しない"
+        );
+    }
+}
+
+/// [`add_fold_unfold_signatures_match_approved_contract`] の自己テスト。
+#[test]
+fn add_fold_unfold_signatures_match_approved_contract_detects_offense() {
+    let ok_unfold = "pub fn add_unfold(mut self, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2],) -> Result<Self, AutodiffError> {";
+    let ok_fold = "pub fn add_fold(mut self, output_size: [usize; 2], kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2],) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok_unfold,
+        "add_unfold",
+        ADD_UNFOLD_PARAMS
+    ));
+    assert!(sequential_spatial_add_signature_ok(
+        ok_fold,
+        "add_fold",
+        ADD_FOLD_PARAMS
+    ));
+    for bad in [
+        // 引数順の入替（PyTorch 順 dilation, padding, stride への取り違え）
+        "pub fn add_unfold(mut self, kernel_size: [usize; 2], dilation: [usize; 2], padding: [usize; 2], stride: [usize; 2],) -> Result<Self, AutodiffError> {",
+        // 3 軸
+        "pub fn add_unfold(mut self, kernel_size: [usize; 3], stride: [usize; 3], padding: [usize; 3], dilation: [usize; 3],) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_unfold(mut self, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2],) -> Self {",
+        // &mut self
+        "pub fn add_unfold(&mut self, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2],) -> Result<Self, AutodiffError> {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_unfold", ADD_UNFOLD_PARAMS),
+            "{bad}"
+        );
+    }
+    for bad in [
+        // output_size の脱落
+        "pub fn add_fold(mut self, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2],) -> Result<Self, AutodiffError> {",
+        // output_size が末尾
+        "pub fn add_fold(mut self, kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2], output_size: [usize; 2],) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_fold(mut self, output_size: [usize; 2], kernel_size: [usize; 2], stride: [usize; 2], padding: [usize; 2], dilation: [usize; 2],) -> Self {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, "add_fold", ADD_FOLD_PARAMS),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_unfold(`／`add_fold(` がそれぞれちょうど 1 件
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード。イシュー #3040）。
+#[test]
+fn compat_sequential_exposes_fold_unfold_add_methods_issue_3040() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let (mut unfold_n, mut fold_n) = (0usize, 0usize);
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        unfold_n += count_pub_fn_declarations(content, "add_unfold");
+        fold_n += count_pub_fn_declarations(content, "add_fold");
+    });
+    assert_eq!(
+        (unfold_n, fold_n),
+        (1, 1),
+        "add_unfold／add_fold の pub fn 宣言数が各 1 件でない"
+    );
+}
+
+/// [`compat_sequential_exposes_fold_unfold_add_methods_issue_3040`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_fold_unfold_add_methods_issue_3040_counts_declarations() {
+    let one = "    pub fn add_fold(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_fold"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_unfold"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(count_pub_fn_declarations(&dup, "add_fold"), 2);
+}
+
+/// facade src 全体で `fn add_unfold`／`add_fold` が `compat/sequential.rs` にちょうど 1 件、
+/// 他ファイルに 0 件であることを固定する（`facade_declares_pool3d_add_names_only_in_approved_form` と同型。#3040）。
+#[test]
+fn facade_declares_fold_unfold_add_names_only_in_approved_form() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let allowed = usize::from(path.ends_with("compat/sequential.rs"));
+        for fn_name in ["add_unfold", "add_fold"] {
+            let count = count_fn_declarations_by_name(&tokens, fn_name);
+            if count != allowed {
+                offending.push(format!(
+                    "{}: `fn {fn_name}` 宣言が {count} 件（許容 {allowed} 件）",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "Fold／Unfold の add_* が承認形から逸脱: {offending:?}"
+    );
+}
 // =====================================================================
 // ConvTranspose3dMaxUnpoolHoldDoctestGuard（イシュー #2644・親 #2625・ルート #2499 Phase 4）:
 // `Pool3dOpsHoldDoctestGuard`（#2643）系のテストを鏡写しにする。実装は内部クレート
@@ -29967,7 +30087,7 @@ fn facade_declares_add_conv_transpose3d_only_in_approved_form() {
 // `Var::unfold` の委譲メソッドだけを公開済み（承認根拠はルート #2499 の issuecomment-6052732061・
 // 公開形は `docs/autodiff-fold-unfold-decision.md` §12.1。公開側の正ガードは
 // `workspace_declares_fold_unfold_fn_names_only_in_allowed_locations` と `PHASE4_VAR_EXPECTED_BODIES`）。
-// モジュール・型・`Tape`／`Tensor` 上の同名メソッド・層化（`compat::Sequential::add_fold`／`add_unfold`）は保留継続。
+// モジュール・型・`Tape`／`Tensor` 上の同名メソッド。層化（`compat::Sequential::add_fold`／`add_unfold`）は #3040 で公開済み。
 // `fold` は `Iterator::fold`・`fold_bits`・`try_fold` など既存コードで頻出する識別子のため、
 // 検出はトークン完全一致のみで行い、部分一致する別トークンは違反としない（自己テストで固定）。
 // 検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）に限り、
@@ -30009,7 +30129,7 @@ fn fold_unfold_hold_doctest_probe_body_matches_fixed_contract() {
         actual, FOLD_UNFOLD_HOLD_PROBE_BODY,
         "FoldUnfoldHoldDoctestGuard の doctest ブロック本文（glob 以外）が固定文言 \
          FOLD_UNFOLD_HOLD_PROBE_BODY からドリフトしている。正のプローブ（__fandhe_fold_unfold_hold_probe \
-         モジュール・__FandheFoldUnfoldHoldProbe／__FandheFoldUnfoldHoldSequentialProbe トレイト・\
+         モジュール・__FandheFoldUnfoldHoldProbe トレイト・\
          __probe_* 関数）の削除・弱体化・隠し行の混入がないか確認すること。"
     );
 }
@@ -30057,20 +30177,6 @@ impl __FandheFoldUnfoldHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20}\n\
 }\n\
 \n\
-trait __FandheFoldUnfoldHoldSequentialProbe {\n\
-\x20\x20\x20\x20fn add_fold(&self) -> __FandheFoldUnfoldHoldMarker;\n\
-\x20\x20\x20\x20fn add_unfold(&self) -> __FandheFoldUnfoldHoldMarker;\n\
-}\n\
-\n\
-impl __FandheFoldUnfoldHoldSequentialProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_fold(&self) -> __FandheFoldUnfoldHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFoldUnfoldHoldMarker\n\
-\x20\x20\x20\x20}\n\
-\x20\x20\x20\x20fn add_unfold(&self) -> __FandheFoldUnfoldHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheFoldUnfoldHoldMarker\n\
-\x20\x20\x20\x20}\n\
-}\n\
-\n\
 fn __probe_free_fns(_: Fold, _: Unfold) {\n\
 \x20\x20\x20\x20// 修飾なし呼び出し（`use fandhe_ai::*;` が同名を glob 公開していれば、名前解決自体が曖昧になり\n\
 \x20\x20\x20\x20// E0659 でコンパイル失敗する）。\n\
@@ -30083,19 +30189,21 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20_v: &fandhe_ai::Var<'_>,\n\
 \x20\x20\x20\x20tape: &fandhe_ai::Tape,\n\
 \x20\x20\x20\x20tf: &fandhe_ai::Tensor<f32>,\n\
-\x20\x20\x20\x20seq: &fandhe_ai::compat::Sequential,\n\
 ) {\n\
 \x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::fold(tape);\n\
 \x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tape::unfold(tape);\n\
 \x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::fold(tf);\n\
 \x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::Tensor::<f32>::unfold(tf);\n\
-\x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::compat::Sequential::add_fold(seq);\n\
-\x20\x20\x20\x20let _: __FandheFoldUnfoldHoldMarker = fandhe_ai::compat::Sequential::add_unfold(seq);\n\
 }";
 
-/// 保留対象 fn 名（イシュー #2645）。`add_*` は #2679 の層結線（`compat::Sequential`）が漏出経路に
-/// なりうるため含める。
-const FOLD_UNFOLD_FN_NAMES: [&str; 4] = ["fold", "unfold", "add_fold", "add_unfold"];
+/// 保留対象 fn 名（イシュー #2645）。`add_fold`／`add_unfold` は #3040 で `compat::Sequential` へ
+/// 承認形で公開したため保留対象から外した（承認形は [`FOLD_UNFOLD_WORKSPACE_FN_NAMES`] の走査と
+/// `add_fold_unfold_signatures_match_approved_contract` 等の正ガードが固定する。pool3d の先例）。
+const FOLD_UNFOLD_FN_NAMES: [&str; 2] = ["fold", "unfold"];
+
+/// workspace インベントリ用の fn 名（保留対象 [`FOLD_UNFOLD_FN_NAMES`] に #3040 で公開した
+/// `add_fold`／`add_unfold` を加えたもの）。
+const FOLD_UNFOLD_WORKSPACE_FN_NAMES: [&str; 4] = ["fold", "unfold", "add_fold", "add_unfold"];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
 const FOLD_UNFOLD_IDENTS: [&str; 5] = ["fold_ops", "fold", "unfold", "Fold", "Unfold"];
@@ -30217,8 +30325,11 @@ fn facade_does_not_reexport_or_declare_fold_unfold_detects_each_category() {
     assert!(offense("impl Var { pub fn fold(&self) {} }"));
     assert!(offense("impl Var { pub fn unfold(&self) {} }"));
     assert!(offense("impl Tensor { pub fn unfold(&self) {} }"));
-    assert!(offense("impl Sequential { pub fn add_fold(&mut self) {} }"));
-    assert!(offense(
+    // #3040: `add_fold`／`add_unfold` は公開済み（承認形は別の正ガードが固定）のため保留対象外。
+    assert!(!offense(
+        "impl Sequential { pub fn add_fold(&mut self) {} }"
+    ));
+    assert!(!offense(
         "impl Sequential { pub fn add_unfold(&mut self) {} }"
     ));
     assert!(offense("trait T { fn fold(&self); }"));
@@ -30247,7 +30358,7 @@ fn facade_does_not_reexport_or_declare_fold_unfold_detects_each_category() {
 ///
 /// 期待値は `autodiff/src/fold_ops.rs::{fold, unfold}` の各 1 件と、#2851 で公開した
 /// `autodiff/src/var.rs::{fold, unfold}`（`Var` の 1 行委譲メソッド）の各 1 件のみ
-/// （`add_fold`／`add_unfold` は 0 件。層化は保留継続）。これら以外への追加は fail-closed に検出する。
+/// と、#3040 で公開した `facade/src/compat/sequential.rs::{add_fold, add_unfold}` の各 1 件のみ。これら以外への追加は fail-closed に検出する。
 /// テスト用ヘルパーにも素の `fn fold`／`fn unfold` という名前を使わないこと（インベントリに数えられる）。
 #[test]
 fn workspace_declares_fold_unfold_fn_names_only_in_allowed_locations() {
@@ -30278,7 +30389,7 @@ fn workspace_declares_fold_unfold_fn_names_only_in_allowed_locations() {
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in FOLD_UNFOLD_FN_NAMES {
+            for fn_name in FOLD_UNFOLD_WORKSPACE_FN_NAMES {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -30297,10 +30408,14 @@ fn workspace_declares_fold_unfold_fn_names_only_in_allowed_locations() {
         // #2851: `Var` の 1 行委譲メソッド（正ガード `PHASE4_VAR_EXPECTED_BODIES` が本体を固定）。
         expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
     }
+    // #3040: `compat::Sequential` の層化メソッド（正ガードが承認シグネチャを固定）。
+    for n in ["add_fold", "add_unfold"] {
+        expected.insert(format!("facade/src/compat/sequential.rs::{n}"), 1);
+    }
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の fold／unfold／add_fold／add_unfold の `fn` 宣言が承認済みの\
-         置き場所（autodiff/src/fold_ops.rs と autodiff/src/var.rs の fold と unfold 各 1 件のみ）と一致しない。迂回経路\
+         置き場所（autodiff/src/fold_ops.rs と autodiff/src/var.rs の fold と unfold 各 1 件、facade/src/compat/sequential.rs の add_fold／add_unfold 各 1 件のみ）と一致しない。迂回経路\
          （facade／Var／Sequential への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
@@ -37513,8 +37628,6 @@ fn phase4_held_items_remain_unexposed() {
         "pub use fandhe_ai_autodiff::fold_ops;",
         "pub struct Fold;",
         "pub struct Unfold;",
-        "impl Sequential { pub fn add_fold(&mut self) {} }",
-        "impl Sequential { pub fn add_unfold(&mut self) {} }",
     ] {
         assert!(
             !scan_fold_unfold_reexports_and_declarations(src).is_empty(),

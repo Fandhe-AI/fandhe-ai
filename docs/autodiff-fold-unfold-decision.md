@@ -278,3 +278,8 @@ impl<'t> Var<'t> {
 - `Module` 実装は `nn/module.rs`。`supports_forward_host()=false`（tape 経路との bit 一致が未検証の host 経路を作らない）、`is_pooling()=false`、無状態。`Module::as_unfold`／`as_fold`（既定 `None`・読み取り専用）を追加した。既存フックの追加のみで非破壊。後続の facade 結線が使わない場合は撤去してよい。
 - facade（`Sequential::add_fold`／`add_unfold`・`LayerSpec`・`save_model` kind・保留ガード反転）は未変更で後続 issue の範囲。CUDA／Metal 実機は未実測。依存・tolerance・`docs/spec` は変更していない。既存本文は書き換えていない。
 - テスト: `crates/autodiff/tests/nn_fold_unfold.rs`（`Var` 直呼びとの forward・入力勾配 bit 一致、往復、非有限値、不正引数拒否、孤児ノード無し、フック）。
+
+## 17. #3040 実施記録（`Sequential::add_fold`／`add_unfold` の公開）
+
+- `compat::Sequential::add_unfold`／`add_fold` を公開した（公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` §3・実施記録は同 §21）。保存は後続 `-c` まで `UnsupportedModel`、常駐経路は `Unsupported`。
+- §9 の保留ガード表のうち `Sequential` 受け手（`add_fold`／`add_unfold`）の行のみ反転済み。`Tape`／`Tensor<f32>`・モジュール・型の否定は維持している。

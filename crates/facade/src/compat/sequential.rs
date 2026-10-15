@@ -121,14 +121,15 @@ use fandhe_ai_autodiff::nn::{
     AvgPool1d, AvgPool2d, AvgPool3d, BatchNorm1d, BatchNorm2d, BatchNormVars, Conv1d, Conv1dVars,
     Conv2d, Conv2dVars, Conv3d, Conv3dVars, ConvTranspose1d, ConvTranspose1dVars, ConvTranspose2d,
     ConvTranspose2dVars, ConvTranspose3d, ConvTranspose3dVars, Dropout, Dropout2d, Embedding,
-    EmbeddingBag, EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, GlobalPool,
-    GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm, LayerNormVars, Linear,
-    MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention, MultiheadAttentionConfig,
-    MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm, RmsNormVars,
-    Sequential as NnSequential, Transformer, TransformerConfig, TransformerDecoderLayer,
-    TransformerDecoderLayerVars, TransformerEncoderLayer, TransformerEncoderLayerVars,
-    TransformerVars, Unflatten, Upsample, ZeroPad2d, conv2d_forward_low_precision,
-    linear_forward_low_precision, multihead_attention_forward_low_precision,
+    EmbeddingBag, EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, Fold,
+    GlobalPool, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm,
+    LayerNormVars, Linear, MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention,
+    MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm,
+    RmsNormVars, Sequential as NnSequential, Transformer, TransformerConfig,
+    TransformerDecoderLayer, TransformerDecoderLayerVars, TransformerEncoderLayer,
+    TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold, Upsample, ZeroPad2d,
+    conv2d_forward_low_precision, linear_forward_low_precision,
+    multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
@@ -1927,6 +1928,61 @@ impl Sequential {
         Ok(self)
     }
 
+    /// 2 次元 Unfold 層を追加する（`nn::Unfold`。PyTorch `nn.Unfold` 相当。イシュー #3040・公開形の正は
+    /// `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3）。
+    /// 引数順は PyTorch（`dilation, padding, stride`）ではなく `kernel_size, stride, padding, dilation`
+    /// （`docs/autodiff-fold-unfold-decision.md` §12.2）。入力 `[N, C, H, W]` → 出力 `[N, C·kH·kW, L]`
+    /// （バッチなし入力は非対応）。無状態層で学習可能パラメータを持たない。
+    /// 不正引数（0 次元・`2*padding` オーバーフロー）は `Unfold::new` の検査で `Err` になり panic しない。
+    /// 常駐経路は未実測のため `Unsupported`（fail-closed。決定記録 §5）。`save_model` は後続 issue
+    /// まで `UnsupportedModel`、ONNX export は `UnsupportedLayer`。AMP 低精度は無視して f32 で計算する。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// let model = Sequential::new().add_unfold([2, 2], [1, 1], [0, 0], [1, 1]);
+    /// assert!(model.is_ok());
+    /// ```
+    pub fn add_unfold(
+        mut self,
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Self, AutodiffError> {
+        let layer = Unfold::new(kernel_size, stride, padding, dilation)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported { kind: "unfold" });
+        Ok(self)
+    }
+
+    /// 2 次元 Fold 層を追加する（`nn::Fold`。PyTorch `nn.Fold` 相当。イシュー #3040）。
+    /// [`Sequential::add_unfold`] の逆演算で、入力 `[N, C·kH·kW, L]` → 出力 `[N, C, oH, oW]`
+    /// （`output_size = [oH, oW]`。重なる窓は加算）。引数順・常駐／保存／ONNX の扱いは
+    /// [`Sequential::add_unfold`] と同じ。`output_size` の 0 も `Err`。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// let model = Sequential::new().add_fold([4, 4], [2, 2], [1, 1], [0, 0], [1, 1]);
+    /// assert!(model.is_ok());
+    /// let round = Sequential::new()
+    ///     .add_unfold([2, 2], [1, 1], [0, 0], [1, 1])
+    ///     .and_then(|m| m.add_fold([4, 4], [2, 2], [1, 1], [0, 0], [1, 1]));
+    /// assert!(round.is_ok());
+    /// ```
+    pub fn add_fold(
+        mut self,
+        output_size: [usize; 2],
+        kernel_size: [usize; 2],
+        stride: [usize; 2],
+        padding: [usize; 2],
+        dilation: [usize; 2],
+    ) -> Result<Self, AutodiffError> {
+        let layer = Fold::new(output_size, kernel_size, stride, padding, dilation)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported { kind: "fold" });
+        Ok(self)
+    }
+
     /// 3 次元 AvgPool 層を追加する（`nn::AvgPool3d`。PyTorch `nn.AvgPool3d` 相当。イシュー #3028）。
     /// `ceil_mode=false`・`dilation=[1,1,1]` 固定。`count_include_pad` は PyTorch の同名引数と同じ意味。
     /// 入力は `NCDHW`（rank 5）。その他の契約（常駐は `Unsupported`・保存は後続 issue まで
@@ -2854,7 +2910,7 @@ impl Sequential {
     /// `Conv2d`／`Conv1d` 向けに新設し、イシュー #1760 で LayerNorm／
     /// RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
     /// MultiheadAttention へ、イシュー #2532 で TransformerDecoderLayer を、イシュー #2533 で Transformer を追加、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d、イシュー #2525 で GroupNorm／InstanceNorm を追加、イシュー #1957 で Pooling（MaxPool／
-    /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名した）。
+    /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名し、イシュー #3040 で Fold／Unfold を追加した）。
     /// これらの層は `forward_from_flat_leaves`（`Linear` 層のみを
     /// 消費する走査）の対象外のため、常駐経路の入口で明示的に拒否する
     /// （黙示フォールバックを作らない。`.claude/rules/security.md` A04）。
@@ -2882,6 +2938,8 @@ impl Sequential {
                 || layer.as_transformer_encoder_layer().is_some()
                 || layer.as_transformer_decoder_layer().is_some()
                 || layer.as_transformer().is_some()
+                || layer.as_unfold().is_some()
+                || layer.as_fold().is_some()
                 || layer.is_pooling()
         })
     }

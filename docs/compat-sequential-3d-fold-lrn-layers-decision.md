@@ -139,3 +139,11 @@ Sequential 保存は `format_version: 2` 据え置き。新 kind を足しても
 - Issue 本文は `Sequential` の kind 追加という旧雛形のままだが、§6 案 A・§12 の読み替えどおり Functional manifest の op 追加として実施した（`Sequential` の `format_version` 2・kind 63 種は不変、Functional 形式の `format_version` は 1 据え置き）。スキーマ・検証規則は `docs/compat-model-io-decision.md` の #3037 追補。
 - 実機 parity テストは `crates/facade/tests/compat_functional_max_unpool_backend_parity.rs`（Issue 本文のファイル名 `compat_sequential_*` は Functional 経路のため改めた）。ログ置き場は `docs/perf/logs/compat-sequential-max-unpool-3037/`。未実測（#3171・#3172）。
 - 依存・tolerance・baseline・`docs/spec` は不変。
+
+## 21. #3040 実施記録（Fold／Unfold の `Sequential::add_*` 公開）
+
+- `add_unfold(kernel_size, stride, padding, dilation)`・`add_fold(output_size, kernel_size, stride, padding, dilation)` を §3 の形で公開した（引数順は `kernel_size, stride, padding, dilation`。`Result<Self, AutodiffError>`）。引数検査は `nn::Unfold::new`／`Fold::new` に委ねる。
+- `LayerSpec::Unsupported { kind: "unfold" | "fold" }` を採用し、`save_model` は `UnsupportedModel` で fail-closed（#3028・#3032 の先例と同型）。実 variant への置換と保存・復元は後続 `-c` の範囲。ONNX export は `UnsupportedLayer` のまま。
+- 常駐経路は §5 のとおり拒否する。`contains_resident_unsupported_layer` に `Module::as_unfold`／`as_fold`（#3039）を追加し、3 入口（`init_device_param_store`／`forward_resident`／`predict_resident`）が `BackendError::Unsupported` を返す。kind 文字列比較より型付きフックのほうが脆くないため、§5 が推奨する variant 判定ではなくフック方式を採った。学習経路（`fit`・`bind`）は無パラメータ層として新規結線不要。
+- 保留ガード `FoldUnfoldHoldDoctestGuard` は `Sequential` 受け手の分（`add_fold`／`add_unfold`）のみ反転した。`Tape`／`Tensor<f32>` の `fold`／`unfold`・モジュール `fold_ops`／`fold`・型 `Fold`／`Unfold` の否定は維持。`api_surface.rs` に承認シグネチャの正ガードを追加した。
+- 対象外: 保存対応（`-c`）・`supports_forward_host` 有効化・`nn::*` 層型名公開（#3022）・実機 parity（#3171・#3172）。依存・tolerance・baseline・`docs/spec` は不変。既存本文は書き換えていない。

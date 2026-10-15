@@ -8,7 +8,8 @@
 //! `dilation, padding, stride` 順とは異なる。
 //!
 //! 呼び出し文脈: `Module` 実装（`nn/module.rs`）経由で `Sequential` 等から呼ばれる。facade の
-//! `Sequential::add_fold`／`add_unfold`・`LayerSpec`・保存 kind は後続 issue の範囲。
+//! `Sequential::add_fold`／`add_unfold` は #3040 で公開済み（`LayerSpec::Unsupported` で保存は fail-closed）。
+//! 保存 kind は後続 issue の範囲。
 //!
 //! 構築時検査: `new` は `Var::unfold`／`fold` と同じ `Conv2dParams::new`（0 の kernel／stride／
 //! dilation と `2*padding` オーバーフローを拒否）を再利用し、検査基準が食い違う別経路を作らない。
