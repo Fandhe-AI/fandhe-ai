@@ -192,6 +192,7 @@ pub mod pool;
 pub mod pool3d;
 pub mod scalar_op;
 pub mod stat_reduce;
+pub mod tolerance;
 // プールの共通コアロジック（サイズクラス・フリーリスト・統計）。`backend-cuda`／
 // `backend-metal` が具体ハンドル型で実装を組み立てるためのクレート横断内部面で
 // あり、サポート対象の公開 API ではない（PR #1063 codex-review P1 対応。公開契約

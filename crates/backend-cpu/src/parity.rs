@@ -22,19 +22,9 @@
 
 use crate::gemm::GemmError;
 
-/// REQ-2 統一複合判定の相対誤差閾値（全ペア共通）。
-///
-/// **閾値の変更はユーザー承認必須**（`.claude/rules/coding-rust.md`
-/// 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」・
-/// `.claude/rules/security.md` A08「ガードレール閾値・テスト許容誤差の
-/// 変更は必ず人間の承認を経る」）。ポリシー除外リストのブラインドスポット
-/// 対象であり、自己修復ループ等による自動緩和を許可しない。
-pub const RELATIVE_TOLERANCE: f64 = 1e-3;
-
-/// REQ-2 統一複合判定の絶対誤差救済閾値（0 近傍の相対誤差跳ね上がり対策。全ペア共通）。
-///
-/// 変更にはユーザー承認が必須（[`RELATIVE_TOLERANCE`] と同じ理由）。
-pub const ABSOLUTE_RESCUE_THRESHOLD: f64 = 1e-5;
+// 閾値の定義は共通層 `tensor-core::tolerance` に一本化（autodiff の create_graph 検査と共有。
+// 値の変更はユーザー承認必須）。既存の公開パス `parity::RELATIVE_TOLERANCE` 等は再エクスポートで維持。
+pub use fandhe_ai_tensor_core::tolerance::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE};
 
 /// [`compare`]・[`assert_parity`] の入力検証エラー。
 ///

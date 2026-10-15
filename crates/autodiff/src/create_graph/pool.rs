@@ -22,6 +22,7 @@
 //!   3D には fold が無いため 3 variant を同一の索引合成へ統一した（逸脱。§30 に理由）。
 
 use fandhe_ai_tensor_core::pool3d::{Pool3dParams, pool3d_layout};
+use fandhe_ai_tensor_core::tolerance::composite_close_f32;
 use fandhe_ai_tensor_core::{Pool2dParams, ShapeError, Tensor, adaptive_window};
 
 use super::{push_v3, value_of};
@@ -436,7 +437,7 @@ fn pow2_floor(d: usize) -> usize {
 }
 
 /// 構造（[`window_scatter_structure`]）をホストで模擬し、1 階のホスト値 `host` との REQ-2
-/// 複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）と、集約前中間和の f32 範囲を検査する。
+/// 複合判定（`tensor-core::tolerance` の REQ-2 統一定義）と、集約前中間和の f32 範囲を検査する。
 /// 範囲外は孫テープ再生で誤値が復活するため構築時に型付きエラーで拒否する（§27.3 と同型の
 /// fail-closed。tolerance は変更しない）。
 fn check_structure_contract(
@@ -471,8 +472,8 @@ fn check_structure_contract(
             if h.is_nan() && sv.is_nan() {
                 continue;
             }
-            let d = (sv - h).abs();
-            if h.is_finite() && !(d < 1e-5 || d / h.abs() < 1e-3) || h.is_finite() != sv.is_finite()
+            if h.is_finite() && !(sv.is_finite() && composite_close_f32(sv, h))
+                || h.is_finite() != sv.is_finite()
             {
                 return Err(reject(
                     "分類間の f32 丸めが 1 階値と REQ-2 の範囲で一致しない",
@@ -561,8 +562,7 @@ mod tests {
     fn close(a: &[f32], b: &[f32]) {
         assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(b) {
-            let d = (x - y).abs();
-            assert!(d < 1e-5 || d / y.abs().max(1e-30) < 1e-3, "{x} vs {y}");
+            assert!(composite_close_f32(*x, *y), "{x} vs {y}");
         }
     }
 
