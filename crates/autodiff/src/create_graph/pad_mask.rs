@@ -132,9 +132,8 @@ mod tests {
                 .host_slice()
                 .into_owned();
             for (a, b) in got.iter().zip(host.iter()) {
-                let diff = (a - b).abs();
                 assert!(
-                    diff < 1e-5 || diff / b.abs().max(1e-30) < 1e-3,
+                    fandhe_ai_tensor_core::tolerance::composite_close_f32(*a, *b),
                     "{shape:?} {mode:?}: {a} vs {b}"
                 );
             }

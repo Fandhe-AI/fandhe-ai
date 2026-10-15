@@ -3674,14 +3674,14 @@ class ToleranceDriftTests(unittest.TestCase):
         # HERE (scripts/bench/framework-compare) からリポジトリルートまでは
         # 3 階層上（framework-compare → bench → scripts → root）。
         backend_cpu_parity_path = os.path.join(
-            HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+            HERE, "..", "..", "..", "crates", "tensor-core", "src", "tolerance.rs"
         )
         try:
             with open(backend_cpu_parity_path, encoding="utf-8") as f:
                 source = f.read()
         except OSError as err:
             self.fail(
-                f"本体 parity.rs を読めない（{backend_cpu_parity_path}）: {err}。"
+                f"本体 tolerance.rs を読めない（{backend_cpu_parity_path}）: {err}。"
                 "パスがずれていないか確認すること"
             )
 
