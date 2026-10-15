@@ -1586,8 +1586,10 @@ impl SwaCallback {
         if self.epochs_seen < self.swa_start {
             return Ok(None);
         }
-        let base = *self.anneal_base_lr.get_or_insert(current_lr);
+        // 検証（`SwaLr::new`）が Ok のときだけ基準 lr を保存する（不正値を残すと修正後の再 fit でも使われ続ける）。
+        let base = self.anneal_base_lr.unwrap_or(current_lr);
         let sched = crate::optim::SwaLr::new(base, self.swa_lr, self.anneal_epochs, self.anneal)?;
+        self.anneal_base_lr = Some(base);
         Ok(Some(sched.lr_at(self.epochs_seen - self.swa_start)))
     }
 
@@ -1737,6 +1739,25 @@ mod tests {
             cb.lr_for_epoch(0.1),
             Err(AutodiffError::InvalidArgument(m)) if m.contains("内部不変条件違反")
         ));
+    }
+
+    // 不正な基準 lr（NaN・0・負値）は Err になり、基準 lr を保存せず、修正後の再呼び出しは新しい基準で成功する（#3059 Bugbot）。
+    #[test]
+    fn swa_invalid_base_lr_is_not_stored() {
+        let mut model = Sequential::new().add_linear(2, 1, 1).expect("test fixture");
+        let mut cb =
+            SwaCallback::new(0, 0.05, 2, crate::optim::SwaAnneal::Cos).expect("test fixture");
+        cb.begin_fit(&mut model).expect("test fixture");
+        for bad in [f32::NAN, 0.0, -0.1] {
+            assert!(matches!(
+                cb.lr_for_epoch(bad),
+                Err(AutodiffError::InvalidArgument(_))
+            ));
+            assert_eq!(cb.anneal_base_lr, None);
+        }
+        let lr = cb.lr_for_epoch(0.2).expect("valid base").expect("in swa");
+        assert!((lr - 0.2).abs() < 1e-6);
+        assert_eq!(cb.anneal_base_lr, Some(0.2));
     }
 
     fn hist(loss: Vec<f32>, val_loss: Vec<f32>) -> History {
