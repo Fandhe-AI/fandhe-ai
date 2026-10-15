@@ -245,6 +245,10 @@ fn j2_scalar_unary_and_binary() {
     check(&[6], pv.clone(), "log", |_, x| x.log());
     check(&[6], xv.clone(), "sin", |_, x| x.sin());
     check(&[6], xv.clone(), "silu", |_, x| x.silu());
+    // #3081: 孫テープでの Erf 再生（閉包性）を通す。
+    check(&[6], xv.clone(), "gelu", |_, x| x.gelu());
+    check(&[6], xv.clone(), "gelu_tanh", |_, x| x.gelu_tanh());
+    check(&[6], xv.clone(), "erf", |_, x| x.erf());
     check(&[6], xv.clone(), "softplus", |_, x| x.softplus(1.0, 20.0));
     check(&[6], pv.clone(), "pow_scalar", |_, x| x.pow_scalar(3.0));
     check(&[6], xv.clone(), "sub x-c", |tp, x| x.sub(&k(tp)));
@@ -419,7 +423,6 @@ fn j5_unsupported_ops_are_rejected_fail_closed() {
     assert_rejected_both(&[3], "custom", |tp, x| {
         tp.custom(Arc::new(IdentityCustomFn), &[*x])
     });
-    assert_rejected_both(&[4], "gelu", |_, x| x.gelu());
     assert_rejected_both(&[4], "selu", |_, x| x.selu());
 }
 
@@ -1182,7 +1185,6 @@ fn c7_zero_paths_and_node_counts() {
             vec![3],
             Box::new(|tp, x| tp.custom(Arc::new(IdentityCustomFn), &[*x])),
         ),
-        ("gelu", vec![4], Box::new(|_, x| x.gelu())),
         ("selu", vec![4], Box::new(|_, x| x.selu())),
     ];
     for (ctx, shape, build) in &rejected {

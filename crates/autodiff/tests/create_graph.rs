@@ -655,29 +655,40 @@ fn create_graph_treats_no_grad_leaf_as_constant() {
 
 // --- fail-closed 契約 ----------------------------------------------------
 
-// `Op::MatMul`（rank 2 × rank 2）は #1943 で対応済み・#1943.5 以下参照。
-// `Var::sub`（`Op::ScalarBinary { op: Sub, .. }`）はイシュー #2062 で
-// 対応済みになったため、本テストは代わりに `Var::gelu`（誤差関数版
-// GELU。`ScalarUnaryOp::Gelu`）を未対応 Op の代表として使う——導関数
-// `Φ(x) + x·φ(x)` が `erf` を要し `Var` 演算の合成だけでは再現できない
-// ため `scalar_unary_replayable` が引き続き `false` を返す
-// （`docs/autodiff-higher-order-grad-decision.md` §16）。入口検査 7
-// （`validate_ancestors`）が `build_mirror`／`build_cgrads` より前に
-// 判定するため、拒否時に `child` が一切書き込まれない（空のまま）こと
-// も併せて固定する。
+// `Gelu`・`GeluTanh`・`Erf` はイシュー #3081（決定記録 §21.5・§22）で
+// 対象になったため、未対応 Op の代表は `Softmax`・`Custom`（恒久対象外）
+// と、fail-closed のまま残る隣接 Op の `Selu`（#2649 系）で固定する。
+// 入口検査（`validate_ancestors`）が `build_mirror`／`build_cgrads` より
+// 前に判定するため、拒否時に `child` が一切書き込まれない（空のまま）
+// ことも併せて固定する。
 #[test]
-fn create_graph_rejects_unsupported_op_gelu() {
+fn create_graph_rejects_unsupported_scalar_unary_selu() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
-    let loss = x.gelu().unwrap().sum(None).unwrap();
+    let loss = x.selu().unwrap().sum(None).unwrap();
 
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
-    assert!(
-        child.is_empty(),
-        "入口検査で拒否された場合、child は無変更（空）のまま保たれるはず"
-    );
+    assert!(child.is_empty());
+}
+
+// 新たに対象になった Gelu を含むグラフでも、恒久対象外の `Custom` に
+// 到達すれば fail-closed で拒否され、child は空のまま保たれる。
+#[test]
+fn create_graph_rejects_custom_downstream_of_gelu() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let h = x.gelu().unwrap();
+    let out = tape
+        .custom(Arc::new(IdentityCustomFn), &[h])
+        .expect("Tape::custom 登録成功");
+    let loss = out.sum(None).unwrap();
+
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
 }
 
 #[test]
@@ -2045,4 +2056,152 @@ fn create_graph_rejects_unsupported_op_gather() {
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
     assert!(child.is_empty());
+}
+
+// --- Gelu・GeluTanh・Erf（イシュー #3081。決定記録 §22） --------------------
+
+fn build_gelu<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.gelu()?.sum(None)
+}
+
+fn build_gelu_tanh<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.gelu_tanh()?.sum(None)
+}
+
+fn build_erf<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.erf()?.sum(None)
+}
+
+// 有限差分は f32 の 1 階勾配を差分するためノイズが約 1e-4 あり、|x| が
+// 大きいと 2 階導関数が REQ-2 の絶対 1e-5 を満たせない。突合点は中程度の
+// |x| に限り、tolerance は変えない（§22）。
+const MID_POINTS: [f32; 5] = [-1.3, -0.4, 0.0, 0.7, 1.2];
+
+#[test]
+fn hessian_gelu_matches_finite_difference() {
+    let numeric = finite_diff_hessian(build_gelu, &MID_POINTS, &[5], 1e-3);
+    let analytic = analytic_hessian(build_gelu, &MID_POINTS, &[5]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+#[test]
+fn hessian_gelu_tanh_matches_finite_difference() {
+    let numeric = finite_diff_hessian(build_gelu_tanh, &MID_POINTS, &[5], 1e-3);
+    let analytic = analytic_hessian(build_gelu_tanh, &MID_POINTS, &[5]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+#[test]
+fn hessian_erf_matches_finite_difference_and_closed_form() {
+    let numeric = finite_diff_hessian(build_erf, &MID_POINTS, &[5], 1e-3);
+    let analytic = analytic_hessian(build_erf, &MID_POINTS, &[5]);
+    assert_hessian_close(&analytic, &numeric);
+    for (i, &x) in MID_POINTS.iter().enumerate() {
+        let x = x as f64;
+        let expected = -2.0 * x * (2.0 / std::f64::consts::PI.sqrt()) * (-x * x).exp();
+        assert!(
+            common::req2_close(analytic[i][i], expected),
+            "erf diag[{i}]: analytic={} expected={expected}",
+            analytic[i][i]
+        );
+    }
+}
+
+#[test]
+fn hessian_gelu_large_magnitude_matches_closed_form() {
+    let x0 = [-4.0f32, -3.0, 3.0, 4.0, 5.0];
+    let analytic = analytic_hessian(build_gelu, &x0, &[5]);
+    for (i, &x) in x0.iter().enumerate() {
+        let x = x as f64;
+        let pdf = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+        let expected = pdf * (2.0 - x * x);
+        assert!(
+            common::req2_close(analytic[i][i], expected),
+            "gelu diag[{i}]: analytic={} expected={expected}",
+            analytic[i][i]
+        );
+    }
+}
+
+#[test]
+fn hessian_gelu_tanh_large_magnitude_matches_closed_form() {
+    const C: f64 = 0.797_884_560_802_865_4;
+    const K: f64 = 0.044_715;
+    let x0 = [-4.0f32, -3.0, 3.0, 4.0, 5.0];
+    let analytic = analytic_hessian(build_gelu_tanh, &x0, &[5]);
+    for (i, &x) in x0.iter().enumerate() {
+        let x = x as f64;
+        let t = (C * (x + K * x * x * x)).tanh();
+        let s = 1.0 - t * t;
+        let du = C * (1.0 + 3.0 * K * x * x);
+        let expected = s * du + 0.5 * x * (-2.0 * t * s * du * du + s * C * 6.0 * K * x);
+        // f32 の ULP 由来の誤差を許す（REQ-2 判定式そのまま）。
+        assert!(
+            common::req2_close(analytic[i][i], expected),
+            "gelu_tanh diag[{i}]: analytic={} expected={expected}",
+            analytic[i][i]
+        );
+    }
+}
+
+// 巨大入力でも NaN を生まない（`gelu_tanh_grad_huge_magnitude_input_does_
+// not_produce_nan` と同じ観点を 2 階・孫テープまで拡張）。
+#[test]
+fn create_graph_gelu_family_huge_magnitude_is_nan_free() {
+    type B = for<'t> fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    let builders: [(&str, B); 3] = [
+        ("gelu", build_gelu),
+        ("gelu_tanh", build_gelu_tanh),
+        ("erf", build_erf),
+    ];
+    for (name, build) in builders {
+        for &v in &[1e20f32, -1e20, 1e30, -1e30, 3e38, -3e38] {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(vec![v], &[1]));
+            let loss = build(&tape, &x).unwrap();
+            let cg = tape.backward_create_graph(&loss, &child).unwrap();
+            let gx = cg.grad(&x).unwrap().unwrap();
+            let g = gx.value().get(&[0]).unwrap() as f64;
+            assert!(g.is_finite(), "{name}({v}): 1 階勾配が非有限 {g}");
+            let fo = cg.first_order().get(&x).unwrap().unwrap();
+            assert!(
+                common::req2_close(g, fo.get(&[0]).unwrap() as f64),
+                "{name}({v}): cg.grad と first_order が不一致"
+            );
+            let cx = cg.child_var(&x).unwrap().unwrap();
+            let s = extract_scalar(&gx, &[1], 0).unwrap();
+            let grads = child.backward(&s).unwrap();
+            let h = grads.get(&cx).unwrap().unwrap().get(&[0]).unwrap();
+            assert!(h.is_finite() && h.abs() < 1e-6, "{name}({v}): Hessian={h}");
+        }
+    }
+}
+
+// 1 階 `first_order` は素の backward と bit 同一（Gelu 系の経路不変）。
+#[test]
+fn create_graph_gelu_family_first_order_is_bit_identical() {
+    type B = for<'t> fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    let builders: [B; 3] = [build_gelu, build_gelu_tanh, build_erf];
+    for build in builders {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(MID_POINTS.to_vec(), &[5]));
+        let loss = build(&tape, &x).unwrap();
+        let before = tape.backward(&loss).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let b = before.get(&x).unwrap().unwrap();
+        let f = cg.first_order().get(&x).unwrap().unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap();
+        for i in 0..5 {
+            assert_eq!(
+                b.get(&[i]).unwrap().to_bits(),
+                f.get(&[i]).unwrap().to_bits()
+            );
+            assert!(common::req2_close(
+                gx.value().get(&[i]).unwrap() as f64,
+                b.get(&[i]).unwrap() as f64
+            ));
+        }
+    }
 }
