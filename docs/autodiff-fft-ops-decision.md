@@ -410,3 +410,7 @@ workspace インベントリ期待値（`autodiff/src/fft_ops.rs` の `stft`／`
 - ガードの反転・縮小: `FftOpsHoldDoctestGuard` から `Var` の impl・UFCS 行と公開した 4 型のローカル定義を外し、`fft_ops`／`fft` モジュール名・裸の自由関数・`Tape` 上の同名メソッドのプローブだけを残した（先例 #2516）。`api_surface.rs` の否定ガードは、承認済みの型名を識別子表から外し、`Tape` の承認済みメソッドを `fn` 宣言走査から除外したうえで、承認形だけを許す正ガードへ反転した。宣言場所インベントリには `autodiff/src/var.rs`（`Tape` 分は `facade/src/lib.rs`）の各 1 件を追加した。
 - テスト: `crates/facade/tests/phase4_ops_facade.rs`（fft_methods_roundtrip。`fandhe_ai::` だけを import し、fn ポインタ型でシグネチャを固定して厳密に決まる値を確認）と、`crates/facade/tests/api_surface.rs` の正ガード（`var_phase4_ops_methods_are_thin_delegations`・`facade_reexports_phase4_ops_types_only_in_approved_shape`・`facade_tape_phase4_methods_are_thin_delegations`・各 `workspace_declares_*`）。
 - 依存・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。`fandhe-ai =0.10.0` の既存公開 API・`pub use` 行・署名は変更せず、追加のみ。CUDA／Metal 実機 parity は未実測で、`docs/perf/logs/phase4-ops-autodiff-exposure-2678/README.md` へ申し送る（新しい数値経路はなく、1 行委譲のため既存の各 `*_backend_parity.rs` の結果がそのまま適用される）。
+
+## 追記（#3086）高階微分（create_graph）の対応範囲
+
+上の各節にある「高階微分非対応」は #3086 時点の記述から更新した。`Rfft`・`Irfft`・`Fft`・`Ifft` の 4 件は `Tape::backward_create_graph` の対象になった（随伴を別の FFT とゼロ詰め／切り詰めで子テープへ積む V1 方式。数値契約は `docs/autodiff-higher-order-grad-decision.md` §29）。`Stft`・`Istft` は反射パディング（`PadMode`）が再生できないため fail-closed のまま。

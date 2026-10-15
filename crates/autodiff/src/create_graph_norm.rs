@@ -101,7 +101,7 @@ const MEAN_OVERFLOW_GUARD: f64 = 4.253_529_586_511_73e37;
 /// 閾値 `2^125`（`MEAN_OVERFLOW_GUARD` と同値）。上界は f64 で符号を見ない最悪値として求めるので
 /// 部分和の順序には依存しない。f32 最大値 `2^128` との 8 倍の差は、f32 丸めの累積と
 /// 「seed の絶対値 1 以下」の前提の外側へのわずかな余裕として置く。
-const STAGE_BOUND_GUARD: f64 = MEAN_OVERFLOW_GUARD;
+pub(crate) const STAGE_BOUND_GUARD: f64 = MEAN_OVERFLOW_GUARD;
 /// `eps == 0` の `LayerNorm` で「偏差が極小で `rstd` を安全に作れない」とみなす閾値 `2^-100`。
 const TINY_DEVIATION_GUARD: f64 = 7.888_609_052_210_118e-31;
 

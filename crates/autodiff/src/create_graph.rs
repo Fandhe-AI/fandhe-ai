@@ -68,6 +68,10 @@
 //! （`Gather`・`Scatter`・`Embedding`・`Sort`・`Topk`・`Cummax`・`Cummin`・`Cumsum`。実装は
 //! `index_cum` サブモジュール、決定記録 §25）を拡張済み。`IndexedScatterReduce`・`Cumprod`・
 //! `Logcumsumexp` は引き続き対象外（fail-closed）。`MaskedFill`・`Pad` は引き続き対象外。
+//! イシュー #3086（決定記録 §29）で FFT 4 件（`Rfft`・`Irfft`・`Fft`・`Ifft`）と線形代数 4 件
+//! （`Inv`・`Solve`・`Det`・`SlogdetLogAbsDet`。実装は `linalg_fft` サブモジュール）を拡張済み。
+//! `Stft`・`Istft`・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`・`Qr*`・`Svd*`・`Eigh*`・
+//! `SlogdetSign`・`MatrixRank` の 15 件は fail-closed に固定した。
 //! 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・`NllLoss` の 5 variant を
 //! イシュー #3082（決定記録 §26。V1／V2 方式）で対象にした。残る損失は
 //! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
@@ -118,6 +122,7 @@ use crate::var::Var;
 
 mod conv;
 mod index_cum;
+mod linalg_fft;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -471,6 +476,15 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                  docs/autodiff-higher-order-grad-decision.md §8 の対象 Op のみ再生可能）",
                 id.0
             )));
+        }
+        // FFT 4 件（イシュー #3086）: 未知の `FftNorm` は随伴の `norm` を決められないため、
+        // 子テープへ書く前に拒否する（`ScatterReduce` の未知 variant と同じ多層防御）。
+        if let Op::Rfft { norm, .. }
+        | Op::Irfft { norm, .. }
+        | Op::Fft { norm, .. }
+        | Op::Ifft { norm, .. } = &node.op
+        {
+            linalg_fft::check_fft_norm(*norm)?;
         }
         // BatchNorm（イシュー #3079）: 空テンソル（`n`／`c`／`spatial` のいずれかが 0。
         // eval は `M<=1` も通る）は二階 VJP の統計構造（行 `narrow`・`mean`）が
@@ -886,6 +900,38 @@ fn replay_op<'c>(
             class_dim,
             reduction,
         } => get_mirror(mirror, input)?.nll_loss(&targets, class_dim, reduction),
+        // FFT 4 件・線形代数 4 件（イシュー #3086。方式は `linalg_fft` モジュール doc 参照）。
+        // forward と同じ dispatch を公開 `Var` メソッド経由で通す。`SlogdetLogAbsDet` の写しは
+        // `slogdet` が積む未使用の `SlogdetSign` ノードを伴うが、どの根からも到達しないため
+        // `collect_ancestors` の対象にならない。
+        Op::Rfft {
+            input,
+            n,
+            dim,
+            norm,
+        } => get_mirror(mirror, input)?.rfft(Some(n), Some(dim), norm),
+        Op::Irfft {
+            input,
+            n,
+            dim,
+            norm,
+        } => get_mirror(mirror, input)?.irfft(Some(n), Some(dim), norm),
+        Op::Fft {
+            input,
+            n,
+            dim,
+            norm,
+        } => get_mirror(mirror, input)?.fft(Some(n), Some(dim), norm),
+        Op::Ifft {
+            input,
+            n,
+            dim,
+            norm,
+        } => get_mirror(mirror, input)?.ifft(Some(n), Some(dim), norm),
+        Op::Inv { input } => get_mirror(mirror, input)?.inv(),
+        Op::Solve { a, b } => get_mirror(mirror, a)?.solve(&get_mirror(mirror, b)?),
+        Op::Det { input } => get_mirror(mirror, input)?.det(),
+        Op::SlogdetLogAbsDet { input } => Ok(get_mirror(mirror, input)?.slogdet()?.logabsdet),
         _ => Err(AutodiffError::Backward(
             "create_graph: replay_op: supports_create_graph() が true の未対応 Op（内部契約違反）"
                 .into(),
@@ -2075,6 +2121,82 @@ fn build_cgrads<'c>(
             Op::Cumsum { input, dim } => {
                 if parent_nodes[input.0].requires_grad {
                     let d = index_cum::cumsum_cgrad(child, &g, dim)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // FFT 4 件（イシュー #3086。随伴は別の FFT＋長さ合わせ）。
+            Op::Rfft {
+                input,
+                n,
+                dim,
+                norm,
+            }
+            | Op::Irfft {
+                input,
+                n,
+                dim,
+                norm,
+            }
+            | Op::Fft {
+                input,
+                n,
+                dim,
+                norm,
+            }
+            | Op::Ifft {
+                input,
+                n,
+                dim,
+                norm,
+            } => {
+                if parent_nodes[input.0].requires_grad {
+                    let kind = match &node.op {
+                        Op::Rfft { .. } => linalg_fft::FftKind::Rfft,
+                        Op::Irfft { .. } => linalg_fft::FftKind::Irfft,
+                        Op::Fft { .. } => linalg_fft::FftKind::Fft,
+                        _ => linalg_fft::FftKind::Ifft,
+                    };
+                    let input_shape = parent_nodes[input.0].shape.clone();
+                    let d = linalg_fft::fft_vjp(child, &g, kind, &input_shape, n, dim, norm)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            // 線形代数 4 件（イシュー #3086）。構造を積む前に f64 参照で総括的な適用判定を行い、
+            // 外れる入力は `Err`（呼び出し側のロールバックで `child` は空へ戻る）。
+            Op::Inv { input } => {
+                if parent_nodes[input.0].requires_grad {
+                    let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                    linalg_fft::guard_inv(a_val, &value_of(child, &g)?)?;
+                    let x = get_mirror(mirror, id)?;
+                    let a_shape = parent_nodes[input.0].shape.clone();
+                    let d = linalg_fft::inv_cgrad(child, &g, &x, &a_shape)?;
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+            }
+            Op::Solve { a, b } => {
+                if parent_nodes[a.0].requires_grad || parent_nodes[b.0].requires_grad {
+                    let a_val = materialize_fallible(&parent_nodes, parent_ops, a)?;
+                    let b_val = materialize_fallible(&parent_nodes, parent_ops, b)?;
+                    linalg_fft::guard_solve(a_val, b_val, &value_of(child, &g)?)?;
+                    let a_m = get_mirror(mirror, a)?;
+                    let x = get_mirror(mirror, id)?;
+                    let (da, db) = linalg_fft::solve_cgrad(child, &g, &a_m, &x)?;
+                    accumulate(&parent_nodes, &mut cgrads, a, da)?;
+                    accumulate(&parent_nodes, &mut cgrads, b, db)?;
+                }
+            }
+            Op::Det { input } | Op::SlogdetLogAbsDet { input } => {
+                if parent_nodes[input.0].requires_grad {
+                    let with_det = matches!(node.op, Op::Det { .. });
+                    let a_val = materialize_fallible(&parent_nodes, parent_ops, input)?;
+                    linalg_fft::guard_det_like(a_val, &value_of(child, &g)?, with_det)?;
+                    let a_m = get_mirror(mirror, input)?;
+                    let scale = if with_det {
+                        g.mul(&get_mirror(mirror, id)?)?
+                    } else {
+                        g
+                    };
+                    let d = linalg_fft::det_like_cgrad(child, &scale, &a_m)?;
                     accumulate(&parent_nodes, &mut cgrads, input, d)?;
                 }
             }
