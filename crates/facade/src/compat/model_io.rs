@@ -9,7 +9,7 @@
 //!
 //! # 本バージョンで対応する範囲
 //!
-//! 層が `add_*` 65 種（`add_linear`・活性化・`add_softmax`
+//! 層が `add_*` 66 種（`add_linear`・活性化・`add_softmax`
 //! 系・`add_flatten`・`add_dropout`・conv・正規化・embedding・MHA・TE・pooling。イシュー #2370）
 //! だけの場合に限る。`kind` は文字列の allowlist、`params` は kind ごとの固定スキーマ
 //! （決定記録 §4）で、`add_*` の引数（`seed` を除く）を記録し load が同じ `add_*` を呼んで再構築する。
@@ -311,7 +311,7 @@ fn save_platform_check() -> Result<(), ModelIoError> {
 // ---------------------------------------------------------------------
 
 /// 保存可能な層の manifest 上の `kind` 名（文字列 allowlist の正）。`add_module` 由来の
-/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 65 種の往復テストで一致を担保する。
+/// 層は `None`（保存不可）。`spec_from_kind` の allowlist とは 66 種の往復テストで一致を担保する。
 fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
     match spec {
         LayerSpec::Linear { .. } => Some("linear"),
@@ -364,6 +364,7 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::MaxPool3d { .. } => Some("max_pool3d"),
         LayerSpec::Unfold { .. } => Some("unfold"),
         LayerSpec::Fold { .. } => Some("fold"),
+        LayerSpec::LocalResponseNorm { .. } => Some("local_response_norm"),
         LayerSpec::AvgPool3d { .. } => Some("avg_pool3d"),
         LayerSpec::AvgPool2d { .. } => Some("avg_pool2d"),
         LayerSpec::AvgPool1d { .. } => Some("avg_pool1d"),
@@ -388,6 +389,9 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
 fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
     match spec {
         LayerSpec::LeakyRelu { negative_slope } => negative_slope.is_finite(),
+        LayerSpec::LocalResponseNorm { alpha, beta, k, .. } => {
+            alpha.is_finite() && beta.is_finite() && k.is_finite()
+        }
         LayerSpec::Elu { alpha } => alpha.is_finite(),
         LayerSpec::Softplus { beta, threshold } => beta.is_finite() && threshold.is_finite(),
         // `Hardtanh::new` は ±inf を受理するが JSON 数値として書けないため保存は拒否する（#2529）。
@@ -650,6 +654,7 @@ fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
         | LayerSpec::MaxPool3d { .. }
         | LayerSpec::Unfold { .. }
         | LayerSpec::Fold { .. }
+        | LayerSpec::LocalResponseNorm { .. }
         | LayerSpec::AvgPool3d { .. }
         | LayerSpec::AvgPool2d { .. }
         | LayerSpec::AvgPool1d { .. }
@@ -1232,6 +1237,17 @@ fn render_params(spec: &LayerSpec) -> String {
             put_pair(&mut f, "stride", *stride);
             put_pair(&mut f, "padding", *padding);
             put_pair(&mut f, "dilation", *dilation);
+        }
+        LayerSpec::LocalResponseNorm {
+            size,
+            alpha,
+            beta,
+            k,
+        } => {
+            put_num(&mut f, "size", *size);
+            put_real(&mut f, "alpha", *alpha);
+            put_real(&mut f, "beta", *beta);
+            put_real(&mut f, "k", *k);
         }
         LayerSpec::MaxPool3d {
             kernel_size,
@@ -2344,6 +2360,14 @@ fn build_model(
                 dilation,
             } => model
                 .add_fold(*output_size, *kernel_size, *stride, *padding, *dilation)
+                .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::LocalResponseNorm {
+                size,
+                alpha,
+                beta,
+                k,
+            } => model
+                .add_local_response_norm(*size, *alpha, *beta, *k)
                 .map_err(ModelIoError::Autodiff)?,
             LayerSpec::MaxPool3d {
                 kernel_size,
@@ -3487,6 +3511,15 @@ fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> 
                 dilation: p.pair("dilation")?,
             })
         }
+        "local_response_norm" => {
+            let p = Params::new(params, &["size", "alpha", "beta", "k"])?;
+            Ok(LayerSpec::LocalResponseNorm {
+                size: p.usize("size")?,
+                alpha: p.f32("alpha")?,
+                beta: p.f32("beta")?,
+                k: p.f32("k")?,
+            })
+        }
         "max_pool3d" => {
             let p = Params::new(
                 params,
@@ -4121,7 +4154,7 @@ mod tests {
         ));
     }
 
-    /// 65 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
+    /// 66 種の `add_*` をすべて 1 回以上含む構成記録（stride の `Some`／`None`・
     /// `padding_idx` の `Some`／`None`・`count_include_pad` の真偽を両方含める）。
     fn all_kind_specs() -> Vec<LayerSpec> {
         vec![
@@ -4448,6 +4481,18 @@ mod tests {
                 padding: [0, 0],
                 dilation: [1, 1],
             },
+            LayerSpec::LocalResponseNorm {
+                size: 5,
+                alpha: 1e-4,
+                beta: 0.75,
+                k: 2.0,
+            },
+            LayerSpec::LocalResponseNorm {
+                size: 1,
+                alpha: 0.0,
+                beta: 0.0,
+                k: 1.0,
+            },
         ]
     }
 
@@ -4591,7 +4636,7 @@ mod tests {
     fn all_thirty_kinds_are_covered_and_round_trip_through_params_schema() {
         let specs = all_kind_specs();
         let kinds: std::collections::BTreeSet<&str> = specs.iter().filter_map(spec_kind).collect();
-        assert_eq!(kinds.len(), 65, "kind allowlist は 65 種: {kinds:?}");
+        assert_eq!(kinds.len(), 66, "kind allowlist は 66 種: {kinds:?}");
         for spec in &specs {
             let kind = spec_kind(spec).expect("保存可能な層");
             let text = render_params(spec);
@@ -4609,9 +4654,9 @@ mod tests {
     #[test]
     fn expected_keys_match_real_state_dict_for_all_kinds() {
         // 期待キー・shape の手書き導出が実モデルの state_dict（層の実装）と一致することを、
-        // 65 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
+        // 66 種すべてで機械的に確認する（推測で書いた shape の誤りをここで検出する）。
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("65 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("66 種を構築できるはず");
         let state = model.state_dict();
         let expected = expected_parameter_keys(&specs);
         assert_eq!(state.len(), expected.len());
@@ -4619,7 +4664,7 @@ mod tests {
             let t = state.get(k).unwrap_or_else(|| panic!("キー {k} がない"));
             assert_eq!(t.shape(), shape.as_slice(), "{k}");
         }
-        let prepared = prepare_save(&model).expect("65 種を含むモデルを検証できるはず");
+        let prepared = prepare_save(&model).expect("66 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
     }
 
@@ -5180,7 +5225,7 @@ mod tests {
     #[test]
     fn expected_buffer_keys_match_real_bn_buffers() {
         let specs = all_kind_specs();
-        let model = build_model_fresh(&specs).expect("65 種を構築できるはず");
+        let model = build_model_fresh(&specs).expect("66 種を構築できるはず");
         let expected = expected_buffer_keys(&specs);
         assert_eq!(expected.len(), 4);
         for (i, spec) in specs.iter().enumerate() {

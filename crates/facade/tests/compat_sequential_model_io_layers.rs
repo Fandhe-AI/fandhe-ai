@@ -1198,3 +1198,110 @@ fn tampered_unfold_fold_manifests_are_rejected() {
         "{err}"
     );
 }
+// ---------------------------------------------------------------------
+// イシュー #3045: local_response_norm の保存・復元
+// ---------------------------------------------------------------------
+// 無パラメータ層。`size`（非負整数）と `alpha`／`beta`／`k`（f32 正準形）の 4 キー（決定記録 §3）。
+
+/// 入力 `[2, 4, 3, 3]`。relu → LRN（size = 3 で窓が前後対称）。
+fn lrn_model(size: usize) -> Sequential {
+    let mut m = Sequential::new()
+        .add_relu()
+        .add_local_response_norm(size, 1e-4, 0.75, 1.0)
+        .expect("構築できるはず");
+    m.eval();
+    m
+}
+
+fn lrn_input() -> Tensor<f32> {
+    let shape = [2, 4, 3, 3];
+    let n: usize = shape.iter().product();
+    Tensor::new((0..n).map(|i| (i as f32) * 0.07 - 1.1).collect(), &shape).unwrap()
+}
+
+#[test]
+fn local_response_norm_round_trips_bit_identically_and_keeps_format_version_2() {
+    let kinds = round_trip("lrn", &lrn_model(3), &lrn_input());
+    assert!(kinds.contains("local_response_norm"), "{kinds:?}");
+    let (_guard, _dir, text) = manifest_of(&lrn_model(3), "lrn-manifest");
+    assert!(
+        text.contains("\"format_version\":2"),
+        "format_version は 2 のまま"
+    );
+    assert!(
+        text.contains("\"kind\":\"local_response_norm\"") && text.contains("\"size\":3"),
+        "{text}"
+    );
+    assert!(text.contains("\"alpha\":0.0001"), "alpha は正準形: {text}");
+}
+
+#[test]
+fn local_response_norm_only_even_and_oversized_windows_round_trip() {
+    // LRN のみ（無パラメータ。state_dict が空でも往復が成立する）。size 偶数・size > C を 1 ケースずつ。
+    for (label, size) in [("lrn-only", 3), ("lrn-even", 2), ("lrn-oversized", 9)] {
+        let mut m = Sequential::new()
+            .add_local_response_norm(size, 1e-4, 0.75, 2.0)
+            .expect("構築できるはず");
+        m.eval();
+        let kinds = round_trip(label, &m, &lrn_input());
+        assert!(kinds.contains("local_response_norm"), "{label}: {kinds:?}");
+    }
+}
+
+fn lrn_tampered(label: &str, from: &str, to: &str) -> ModelIoError {
+    let (_guard, dir, text) = manifest_of(&lrn_model(3), label);
+    assert!(text.contains(from), "{label}: 置換対象 {from} がある");
+    std::fs::write(dir.join("manifest.json"), text.replacen(from, to, 1)).expect("書けるはず");
+    load_err(&dir)
+}
+
+#[test]
+fn tampered_local_response_norm_manifests_are_rejected() {
+    let manifest_cases = [
+        ("missing-k", ",\"k\":1.0}", "}"),
+        (
+            "extra-key",
+            "\"kind\":\"local_response_norm\",\"params\":{",
+            "\"kind\":\"local_response_norm\",\"params\":{\"x\":1,",
+        ),
+        ("size-negative", "\"size\":3", "\"size\":-1"),
+        ("size-fractional", "\"size\":3", "\"size\":1.5"),
+        ("size-string", "\"size\":3", "\"size\":\"3\""),
+        ("size-bool", "\"size\":3", "\"size\":true"),
+        ("size-null", "\"size\":3", "\"size\":null"),
+        (
+            "size-overflow",
+            "\"size\":3",
+            "\"size\":18446744073709551616",
+        ),
+        ("alpha-integer", "\"alpha\":0.0001", "\"alpha\":1"),
+        ("alpha-string", "\"alpha\":0.0001", "\"alpha\":\"0.0001\""),
+        (
+            "alpha-noncanonical",
+            "\"alpha\":0.0001",
+            "\"alpha\":0.00010",
+        ),
+        ("alpha-null", "\"alpha\":0.0001", "\"alpha\":null"),
+        ("beta-out-of-f32", "\"beta\":0.75", "\"beta\":1e39"),
+    ];
+    for (label, from, to) in manifest_cases {
+        let err = lrn_tampered(&format!("lrn-t-{label}"), from, to);
+        assert!(
+            matches!(err, ModelIoError::Manifest { .. }),
+            "{label}: {err}"
+        );
+    }
+    // 意味違反（size == 0）は層コンストラクタの検査（`Autodiff`）。
+    let err = lrn_tampered("lrn-t-size-zero", "\"size\":3", "\"size\":0");
+    assert!(matches!(err, ModelIoError::Autodiff(_)), "{err}");
+    // 未知 kind は `UnsupportedModel`。
+    let err = lrn_tampered(
+        "lrn-t-kind",
+        "\"kind\":\"local_response_norm\"",
+        "\"kind\":\"local_response_norm2\"",
+    );
+    assert!(
+        matches!(err, ModelIoError::UnsupportedModel { .. }),
+        "{err}"
+    );
+}

@@ -6,13 +6,13 @@
 //! - `predict`／`forward` が `Var::local_response_norm` の直接呼び出しと bit 完全一致
 //!   （rank 3／4／5・`size` 奇数／偶数／1／`> C`）。入力 rank 2 以下は `Err`。
 //! - 入力勾配が直接グラフと bit 完全一致。学習 1 step が参照グラフと bit 一致し `compile`／`fit` が動く。
-//! - 常駐経路は `Unsupported`（fail-closed。決定記録 §5）。`save_model` は保存対応（後続 `-c`）まで
-//!   `UnsupportedModel`、ONNX export は `UnsupportedLayer`。
+//! - 常駐経路は `Unsupported`（fail-closed。決定記録 §5）。保存は kind `local_response_norm` として
+//!   保存・復元できる（イシュー #3045）。ONNX export は `UnsupportedLayer`。
 //!
 //! ホストフォールバック経路のため実機（CUDA／Metal）非依存。実機 parity は未実測のまま（#3171・#3172）。
 #![cfg(unix)]
 
-use fandhe_ai::compat::{FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model};
+use fandhe_ai::compat::{FitConfig, Loss, Optimizer, Sequential, load_model, save_model};
 use fandhe_ai::interop::onnx::{OnnxError, OnnxModel};
 use fandhe_ai::optim::{Sgd, SgdConfig};
 use fandhe_ai::{AutodiffError, BackendError, Tensor};
@@ -276,20 +276,21 @@ fn resident_path_rejects_lrn_fail_closed() {
 
 // ---------------------------------------------------------------- 保存・ONNX（fail-closed）
 
-/// 保存対応は後続 `-c`（LayerSpec 実 variant 化と kind `local_response_norm` 追加）の範囲。
-/// `-c` はこのテストを成功系（保存・復元・predict bit 一致）へ書き換えること。
+/// イシュー #3045: 保存・復元（`local_response_norm` kind）。predict が bit 一致で復元される。
 #[test]
-fn save_model_rejects_local_response_norm_as_unsupported_model() {
+fn save_model_round_trips_local_response_norm() {
     let mut model = lrn(3);
     model.eval();
-    let guard = TempDirGuard::new("lrn_save_unsupported");
+    let guard = TempDirGuard::new("lrn_save_round_trip");
     let dir = guard.path().join("m");
-    let err = save_model(&model, &dir).unwrap_err();
-    assert!(
-        matches!(err, ModelIoError::UnsupportedModel { .. }),
-        "{err:?}"
+    save_model(&model, &dir).expect("保存できるはず");
+    assert!(dir.exists());
+    let loaded = load_model(&dir).expect("復元できるはず");
+    let x = input(&[2, 4, 3, 3]);
+    assert_eq!(
+        bits(&model.predict(&x).unwrap()),
+        bits(&loaded.predict(&x).unwrap())
     );
-    assert!(!dir.exists(), "失敗時は保存先 dir を作らない");
 }
 
 #[test]
