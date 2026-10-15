@@ -3105,7 +3105,7 @@ impl Tape {
         (self.nodes.borrow().len(), self.retained_leaf_len.get())
     }
 
-    /// [`Tape::rollback_point`] の状態へ戻す（失敗時のロールバック専用）。
+    /// [`Tape::rollback_point`] の状態へ戻す（失敗時のロールバックと `vmap_grad` の後片付け用）。
     ///
     /// `masked_scatter` のように「view 系ノードを積んだ後に失敗し得る処理」を持つ合成演算が、
     /// `Err` 返却前に自分が積んだノードだけを取り除いて孤児ノードを残さないために使う。
@@ -3114,6 +3114,8 @@ impl Tape {
     /// そのため葉プレフィックス状態も合成開始時点へ復元する。他の演算が積んだノードは開始時点より
     /// 前にしか存在しない前提（同一スレッド・`Tape` は `!Sync` で合成中に割り込みなし）。
     /// checkpoint 区間は view 系合成では登録されないため触らない。
+    /// `functional_ops::vmap_grad`（#3071）は成功時の後片付けにも使う（サンプルごとに `reset` の直後に呼び、
+    /// 葉プレフィックスを入口状態へ戻す。`rollback_to` は世代・hook を触らないので `reset` と必ず併用する）。
     pub(crate) fn rollback_to(&self, point: (usize, Option<usize>)) {
         self.nodes.borrow_mut().truncate(point.0);
         self.retained_leaf_len.set(point.1);

@@ -789,3 +789,12 @@ where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
   2. 定数のサンプルごとの再登録コスト（CUDA／Metal ではサンプルごとの転送）を実測で問題視した場合の、事前登録葉を共有する形の要否。
 - スコープ外: バッチ規則型 `vmap`、微分可能版（32.5）、`out_dim`・複数入力、`VarF64`・f16・`TapeF64`、実機実測（#3171・#3172）、`supports_create_graph` の拡張（#3075）、`docs/spec`。
 - 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec` は変更していない。
+
+### 32.9 実装記録（#3071）
+
+- **追加した API**: `fandhe_ai_autodiff::functional_ops::vmap_grad`（`crates/autodiff/src/functional_ops.rs`。モジュール・crate ルートへの再エクスポートなし）。シグネチャは §32.1 のとおり（HRTB `for<'c> FnMut(&'c Tape, &Var<'c>) -> Result<Var<'c>, AutodiffError>` はコンパイルできた。停止条件には該当しない）。サンプル 1 個分は非公開ヘルパー `vmap_grad_sample` が処理する。
+- **処理順**: §32.3 の Phase A（1 軸範囲 → 2 空バッチ → 3 要素数オーバーフロー → 4 子テープ非空）→ Phase B（クロージャ → `check_on_tape` → 損失の要素数 1 検査 → 追跡なしはゼロ行 → `backward` → `grads.get` の行コピー）。新しい variant・Op・依存・`unsafe` は足していない。
+- **後片付けの選択（§32.2 の契約内での内部の選択）**: サンプルごとに成否に関わらず `reset()` の直後に `rollback_to(start)` を呼ぶ（§32.2 の記述〈サンプルごとに `reset`、出口で `rollback_to`〉より厳しい形）。サンプル 0 の葉が葉プレフィックスに固定されて残ることを防ぎ、演算を記録しないクロージャで葉が積み上がることも防ぐ。`rollback_to` は世代・hook を触らないので必ず `reset` と併用する。戻り時の子テープは空で入口の葉プレフィックス状態と同じ。
+- **テスト**: `crates/autodiff/tests/functional_ops_vmap_grad.rs` 9 件（ループ参照との REQ-2 一致〈sq・tanh・matmul × バッチ 1・複数・`in_dim` 0/1〉、閉形式 `2x`、rank 0 スライスと損失 shape `[]`／`[1]`／`[1,1]`、Phase A 各エラーと順序・子テープ無変更、Phase B の各エラーと失敗後の再利用、途中サンプル失敗後の後片付けと呼び出し回数、葉プレフィックスの復元、ゼロ行、要素数 0 スライス）。
+- **未検証**: `DeviceMismatch`（CPU だけでは作れない）、結果要素数オーバーフロー（実在の `Tensor` では作れない。コード上の `checked_numel`／`checked_mul` 検査のみ）、世代の進み方（`Tape::epoch` が `pub(crate)` のため結合テストから観測していない）。
+- **#3072 への申し送り**: 宣言インベントリには `autodiff/src/functional_ops.rs::vmap_grad` が 1 件数えられる（ヘルパー `vmap_grad_sample` は別名）。

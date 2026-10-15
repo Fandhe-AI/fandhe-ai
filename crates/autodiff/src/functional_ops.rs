@@ -36,7 +36,7 @@
 //! facade への公開は #3068 で扱う（本モジュールは autodiff 内部と crate ルート再エクスポートまで）。
 //!
 //! **共通の契約**: `jvp_multi` 以外は単一入力・f32 の [`Tape`] のみ（`VarF64` は対象外）。`vjp`／`hvp` の結果は
-//! 非微分のホスト値（`vmap` のみ同じテープ上の微分可能な `Var`）。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
+//! 非微分のホスト値（`vmap` のみ同じテープ上の微分可能な `Var`。`vmap_grad`〈#3071〉は子テープで勾配を取る非微分の `Tensor<f32>`）。resident・fused 経路・checkpoint・`DeviceMismatch` は既存 `mul`／`backward`
 //! の挙動をそのまま伝播する。
 
 use crate::create_graph::CreateGraphResult;
@@ -175,8 +175,8 @@ pub fn hvp(
 ///
 /// 前提: `f` は副作用のない関数であること。バッチなしで実行した結果との一致は REQ-2 の
 /// 統一複合判定で見る（bit 一致は契約にしない。設計 §11-2）。`vmap(grad)`
-/// （クロージャ内で `backward` を呼ぶ per-sample gradient）は契約外で、値だけが必要なら
-/// 呼び出し側が明示ループで `backward` を回す（設計 §5・§11-6）。
+/// （クロージャ内で `backward` を呼ぶ per-sample gradient）は本関数の契約外で、子テープで勾配を取る
+/// 別関数 [`vmap_grad`]（#3071・設計 §32）を使う。
 ///
 /// **入口検査（順序固定）**
 ///
@@ -249,6 +249,141 @@ where
         .map(|o| o.contiguous())
         .collect::<Result<_, _>>()?;
     Var::stack(&contiguous, 0)
+}
+
+/// 子テープで勾配を取るクロージャ型の `vmap`（`torch.func` の `vmap(grad(f))` 相当のループ版。
+/// イシュー #3071・設計記録 `docs/autodiff-functional-transforms-design.md` §32）。結果は非微分。
+///
+/// `input` を `in_dim` 軸でサンプルへ分け、サンプルごとに呼び出し側が渡した空の子テープ `child` へ
+/// スライスを追跡ありの葉として登録し、クロージャが返した 1 要素の損失を内部で [`Tape::backward`] して
+/// スライス葉の勾配を dim 0 へ積んだ `Tensor<f32>`（shape は `[B] ++ slice_shape`）を返す。
+/// 新規 `Op`・VJP・variant は足さない。facade への委譲は #3072。
+///
+/// **子テープの契約**: 呼び出し時に空であること。サンプルごとに `reset` のあと入口の葉プレフィックス状態へ
+/// 戻すので、戻り時（成功・失敗とも）の `child` は空で、`reset` はサンプル数（失敗時は開始済みの数）だけ
+/// 世代を進める。ピークメモリはサンプル 1 個分のグラフ。クロージャが panic した場合の状態は契約外
+/// （[`vmap`] と同じ）。HRTB のためクロージャはサンプルをまたいで `Var` を保持できず、定数は
+/// サンプルごとに `t.var_no_grad` 等で登録し直す。
+///
+/// **入口検査（順序固定）**
+///
+/// Phase A（子テープ無変更）:
+/// 1. `in_dim >= rank`（rank 0 を含む）→ `Err(Shape(AxisOutOfRange))`。
+/// 2. `shape[in_dim] == 0` → `Err(InvalidArgument)`。
+/// 3. 結果要素数のオーバーフロー → `Err(Shape(ElementCountOverflow))`。
+/// 4. `child` が空でない → `Err(Backward)`。
+///
+/// Phase B（サンプル順。最初の違反で止める）:
+/// 5. クロージャの `Err` はそのまま伝播。
+/// 6. 損失が `child` の現世代に属さない → `Err(TapeMismatch)`（要素数検査より先）。
+/// 7. 損失の要素数が 1 でない → `Err(InvalidArgument)`（素の `backward` は非スカラーを暗黙に総和するため先に拒否）。
+/// 8. 損失が追跡なし、またはスライスへ勾配が届かない → その行は全ゼロ。
+/// 9. `backward`・バックエンド・hook の `Err` はそのまま伝播。
+///
+/// 数値は明示ループ参照と REQ-2 統一複合判定で一致する（bit 一致は契約にしない）。経路上の Op は 1 階
+/// `backward` が対応する範囲。非有限値は検査せず伝播する。微分可能版は含めない（§32.5）。共有パラメータに
+/// ついてのサンプルごとの勾配は返さない（§32.8-1）。
+pub fn vmap_grad<F>(
+    input: &Tensor<f32>,
+    in_dim: usize,
+    child: &mut Tape,
+    mut f: F,
+) -> Result<Tensor<f32>, AutodiffError>
+where
+    F: for<'c> FnMut(&'c Tape, &Var<'c>) -> Result<Var<'c>, AutodiffError>,
+{
+    // Phase A
+    let in_shape = input.shape();
+    let rank = in_shape.len();
+    if in_dim >= rank {
+        return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
+            axis: in_dim,
+            rank,
+        }));
+    }
+    let batch = in_shape[in_dim];
+    if batch == 0 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "vmap_grad: in_dim={in_dim} の軸長が 0（空バッチは結果形状を推定できないため拒否。shape {in_shape:?}）"
+        )));
+    }
+    let slice_shape: Vec<usize> = in_shape
+        .iter()
+        .enumerate()
+        .filter(|&(a, _)| a != in_dim)
+        .map(|(_, &d)| d)
+        .collect();
+    let slice_numel = checked_numel(&slice_shape)?;
+    let total = slice_numel
+        .checked_mul(batch)
+        .ok_or(AutodiffError::Shape(ShapeError::ElementCountOverflow))?;
+    if !child.is_empty() {
+        return Err(AutodiffError::Backward(format!(
+            "vmap_grad: 子テープは空である必要がある（ノード数 {}）",
+            child.len()
+        )));
+    }
+    let start = child.rollback_point();
+
+    // Phase B
+    let mut data = vec![0.0f32; total];
+    for i in 0..batch {
+        let lo = i * slice_numel;
+        let r = match data.get_mut(lo..lo + slice_numel) {
+            Some(row) => vmap_grad_sample(&*child, input, in_dim, i, &slice_shape, &mut f, row),
+            None => Err(AutodiffError::Backward(
+                "vmap_grad: 結果バッファの行範囲が不正".to_string(),
+            )),
+        };
+        // 成否に関わらず次サンプル・呼び出し元へ空の子テープを渡す（hook・世代・葉の持ち越しを断つ）。
+        child.reset();
+        child.rollback_to(start);
+        r?;
+    }
+    let mut out_shape = Vec::with_capacity(slice_shape.len() + 1);
+    out_shape.push(batch);
+    out_shape.extend_from_slice(&slice_shape);
+    Tensor::new(data, &out_shape).map_err(AutodiffError::Shape)
+}
+
+/// `vmap_grad` のサンプル 1 個分（スライス登録→クロージャ→検査→`backward`→行コピー）。戻り値が寿命を
+/// 持たないので、呼び出し側は直後に `child.reset()`（`&mut`）を呼べる。
+fn vmap_grad_sample<F>(
+    child: &Tape,
+    input: &Tensor<f32>,
+    in_dim: usize,
+    i: usize,
+    slice_shape: &[usize],
+    f: &mut F,
+    row: &mut [f32],
+) -> Result<(), AutodiffError>
+where
+    F: for<'c> FnMut(&'c Tape, &Var<'c>) -> Result<Var<'c>, AutodiffError>,
+{
+    let slice = input
+        .narrow(in_dim, i, 1)
+        .map_err(AutodiffError::Shape)?
+        .contiguous()
+        .reshape(slice_shape)
+        .map_err(AutodiffError::Shape)?;
+    let s = child.var(&slice);
+    let loss = f(child, &s)?;
+    check_on_tape(child, &loss)?;
+    let numel = checked_numel(&loss.shape())?;
+    if numel != 1 {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "vmap_grad: 損失は 1 要素である必要がある（shape {:?}）",
+            loss.shape()
+        )));
+    }
+    if !loss.requires_grad() {
+        return Ok(());
+    }
+    let grads = child.backward(&loss)?;
+    if let Some(g) = grads.get(&s)? {
+        copy_grad_row(g, row)?;
+    }
+    Ok(())
 }
 
 /// double-VJP 法の前段（`jvp`／`jacfwd` 共通。#2940）。親テープへ追跡ありの葉 `u`（全要素 1）と
