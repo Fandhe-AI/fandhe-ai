@@ -513,3 +513,10 @@ impl Tape {
 - 内部: `double_vjp_stage` の前半を `double_vjp_front` に切り出し（単一版の操作列は不変。既存 J1〜J6 が回帰網）、`jvp_multi` はこれを共用する。テストは `functional_ops_jvp_tests.rs` の M1〜M6（mul・matmul→tanh・ブロードキャスト add・3 入力・rank 0、k = 1 等価、`J_i ≡ 0`・空入力、入口検査と順序、ゼロ返却、非対象 Op・不正な子、決定性）。
 - facade: 1 行委譲・rustdoc・doctest（`x1 ⊙ x2`。手計算値と `Tape::jacobian` 由来の参照の両方で照合）。
 - #3064 へ: facade 結合テスト（参照は入力ごとの `jacobian` と接ベクトルの積の f64 合計）、`J_i ≡ 0` のケース、k = 1 と単一 `jvp` の等価性、CUDA／Metal 実機 `#[ignore]` parity は本節の対象外で未実装。
+
+### 30.5 実装記録（#3064）
+
+- 追加: `crates/facade/tests/functional_transforms_jvp_facade.rs` に複数入力の CPU 結合テスト（`multi_input_*`。`jacobian` 由来 `Σ J_i·v_i` を f64 一括合計した参照との REQ-2 判定、`J_i ≡ 0`、k = 1 と単一 `jvp`、入口検査エラーと順序、非対象 Op・空でない子テープ〈`Backward`〉、追跡なし `output` の全ゼロ）。実機は新規 `functional_transforms_jvp_multi_backend_parity.rs`（CUDA／Metal の `#[ignore]`）。
+- ミラー `functional_ops_jvp_backend_parity.rs` は維持。親テープに残る 2 ノードの副作用は facade から観測できないため内部 M5 に任せた。
+- 実機は未実測（`docs/perf/logs/functional-transforms-jvp-multi-3064/README.md`。実測は #3171・#3172）。
+- 依存・tolerance・baseline・`unsafe`・`docs/spec` は変更していない。
