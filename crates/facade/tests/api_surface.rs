@@ -36968,6 +36968,7 @@ mod __fandhe_functional_transforms_hold_probe {\n\
 \x20\x20\x20\x20pub fn jacfwd() {}\n\
 \x20\x20\x20\x20pub fn jvp_multi() {}\n\
 \x20\x20\x20\x20pub fn jvp_create_graph() {}\n\
+\x20\x20\x20\x20pub fn vmap_grad() {}\n\
 }\n\
 use __fandhe_functional_transforms_hold_probe::*;\n\
 \n\
@@ -36981,6 +36982,7 @@ trait __FandheFunctionalTransformsHoldProbe {\n\
 \x20\x20\x20\x20fn jacfwd(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 \x20\x20\x20\x20fn jvp_multi(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 \x20\x20\x20\x20fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
+\x20\x20\x20\x20fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker;\n\
 }\n\
 \n\
 impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
@@ -37003,6 +37005,9 @@ impl<'t> __FandheFunctionalTransformsHoldProbe for fandhe_ai::Var<'t> {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
 }\n\
@@ -37029,6 +37034,9 @@ impl __FandheFunctionalTransformsHoldProbe for fandhe_ai::Tensor<f32> {\n\
 \x20\x20\x20\x20fn jvp_create_graph(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
 \x20\x20\x20\x20}\n\
+\x20\x20\x20\x20fn vmap_grad(&self) -> __FandheFunctionalTransformsHoldMarker {\n\
+\x20\x20\x20\x20\x20\x20\x20\x20__FandheFunctionalTransformsHoldMarker\n\
+\x20\x20\x20\x20}\n\
 }\n\
 \n\
 fn __probe_free_fns() {\n\
@@ -37043,6 +37051,7 @@ fn __probe_free_fns() {\n\
 \x20\x20\x20\x20jacfwd();\n\
 \x20\x20\x20\x20jvp_multi();\n\
 \x20\x20\x20\x20jvp_create_graph();\n\
+\x20\x20\x20\x20vmap_grad();\n\
 }\n\
 \n\
 fn __probe_methods(\n\
@@ -37057,6 +37066,7 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jacfwd(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp_multi(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::jvp_create_graph(v);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Var::vmap_grad(v);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vjp(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::hvp(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap(tf);\n\
@@ -37064,11 +37074,12 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jacfwd(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_multi(tf);\n\
 \x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::jvp_create_graph(tf);\n\
+\x20\x20\x20\x20let _: __FandheFunctionalTransformsHoldMarker = fandhe_ai::Tensor::<f32>::vmap_grad(tf);\n\
 }";
 
-/// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`Tape` 上の承認形 5 名
+/// 保留対象の自由関数名・facade の型へ足してはならない `fn` 名（イシュー #2874。`Tape` 上の承認形 8 名
 /// だけは `src/lib.rs` の例外として許可される）。
-const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 7] = [
+const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 8] = [
     "vjp",
     "hvp",
     "vmap",
@@ -37076,10 +37087,11 @@ const FUNCTIONAL_TRANSFORMS_FN_NAMES: [&str; 7] = [
     "jacfwd",
     "jvp_multi",
     "jvp_create_graph",
+    "vmap_grad",
 ];
 
 /// 保留対象の識別子（`pub use` の経路・宣言に現れてはならない名前）。
-const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 8] = [
+const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 9] = [
     "functional_ops",
     "vjp",
     "hvp",
@@ -37088,6 +37100,7 @@ const FUNCTIONAL_TRANSFORMS_IDENTS: [&str; 8] = [
     "jacfwd",
     "jvp_multi",
     "jvp_create_graph",
+    "vmap_grad",
 ];
 
 /// [`facade_does_not_reexport_or_declare_functional_transforms`]・その自己テストが共用する検出本体。
@@ -37163,7 +37176,7 @@ fn scan_functional_transforms_reexports_and_declarations(
 
 /// #2931（`vjp`／`hvp`／`vmap`）・#2956（`jvp`／`jacfwd`。設計記録 §27.1・§28）の承認形シグネチャ（`pub fn` から本体の `{` の直前まで。決定記録
 /// `docs/autodiff-functional-transforms-design.md` §23.1）。`'static`・`Send`・`Sync` 境界は持たない。
-const FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES: [(&str, &str); 7] = [
+const FUNCTIONAL_TRANSFORMS_APPROVED_SIGNATURES: [(&str, &str); 8] = [
     (
         "vjp",
         "pub fn vjp(
@@ -37234,10 +37247,21 @@ where
     grandchild: &'g Tape,
 ) -> Result<JvpCreateGraphResult<'g>, AutodiffError>",
     ),
+    (
+        "vmap_grad",
+        "pub fn vmap_grad<F>(
+    input: &Tensor<f32>,
+    in_dim: usize,
+    child: &mut Tape,
+    mut f: F,
+) -> Result<Tensor<f32>, AutodiffError>
+where
+    F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>,",
+    ),
 ];
 
-/// #2931・#2956・#3063・#3068 の承認形の 1 行委譲本体（決定記録 §23.2・§27.2。`{ }` の内側）。
-const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 7] = [
+/// #2931・#2956・#3063・#3068・#3072 の承認形の委譲本体（決定記録 §23.2・§27.2。`{ }` の内側）。
+const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 8] = [
     (
         "vjp",
         "fandhe_ai_autodiff::functional_ops::vjp(&self.0, output, input, cotangent)",
@@ -37266,6 +37290,10 @@ const FUNCTIONAL_TRANSFORMS_APPROVED_BODIES: [(&str, &str); 7] = [
         "jvp_create_graph",
         "fandhe_ai_autodiff::functional_ops::jvp_create_graph(&self.0, output, input, tangent, &child.0, &grandchild.0,)",
     ),
+    (
+        "vmap_grad",
+        "fandhe_ai_autodiff::functional_ops::vmap_grad(input, in_dim, &mut child.0, |t, s| { f(TapeRef::from_autodiff(t), s) })",
+    ),
 ];
 
 /// facade src 全体（`crates/facade/src/**`）に関数型 AD ラッパーの保留対象の再エクスポート・同名
@@ -37284,7 +37312,7 @@ fn facade_does_not_reexport_or_declare_functional_transforms() {
     assert!(
         offending.is_empty(),
         "facade の公開面が関数型 AD ラッパーの内部実装（#2874 の `functional_ops`）を再エクスポート、\
-         または承認形（#2931・#2956・`src/lib.rs` の `impl Tape` 直下の `vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` 各 1 件）以外の\
+         または承認形（#2931・#2956・#3063・#3068・#3072・`src/lib.rs` の `impl Tape` 直下の `vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph`／`vmap_grad` 各 1 件）以外の\
          同名の fn／pub mod を宣言している: {offending:?}"
     );
 }
@@ -37341,7 +37369,7 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
         all.push_str(&format!("{sig}\n{{ x }}\n"));
     }
     all.push_str("}\n");
-    assert!(!offense_lib(&all), "承認形 7 件は lib.rs 扱いで無違反");
+    assert!(!offense_lib(&all), "承認形 8 件は lib.rs 扱いで無違反");
     assert!(offense(&all), "lib.rs 以外扱いでは承認形でも違反");
     // 別シグネチャ・`pub` 欠落・`'static` 境界の追加は違反のまま。
     assert!(offense_lib("impl Tape { pub fn vjp(&self) {} }"));
@@ -37384,6 +37412,21 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
     assert!(offense_lib(
         "impl Var { pub fn jvp_create_graph<'g>(&self, output: &Var<'_>, input: &Var<'_>, tangent: &Tensor<f32>, child: &Tape, grandchild: &'g Tape) -> Result<JvpCreateGraphResult<'g>, AutodiffError> { fandhe_ai_autodiff::functional_ops::jvp_create_graph(&self.0, output, input, tangent, &child.0, &grandchild.0,) } }"
     ));
+    // #3072: `vmap_grad` の裸の自由関数・`functional_ops` 経由の再エクスポート（lib.rs 扱い・非 lib.rs 扱いの
+    // 両方）・`impl Var` 内の承認形は違反のまま。
+    assert!(offense_lib("pub fn vmap_grad() {}"));
+    assert!(offense(
+        "pub use fandhe_ai_autodiff::functional_ops::vmap_grad;"
+    ));
+    assert!(offense_lib(
+        "pub use fandhe_ai_autodiff::functional_ops::vmap_grad;"
+    ));
+    assert!(offense_lib(&format!(
+        "{all}\npub use fandhe_ai_autodiff::functional_ops::vmap_grad;"
+    )));
+    assert!(offense_lib(
+        "impl Var { pub fn vmap_grad<F>(input: &Tensor<f32>, in_dim: usize, child: &mut Tape, mut f: F) -> Result<Tensor<f32>, AutodiffError> where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>, { fandhe_ai_autodiff::functional_ops::vmap_grad(input, in_dim, &mut child.0, |t, s| { f(TapeRef::from_autodiff(t), s) }) } }"
+    ));
     // 重複（2 件目）は違反。
     assert!(offense_lib(&format!("{all}\n{all}")));
     // `impl Var`／`impl Tensor` 内の承認シグネチャは違反。
@@ -37410,7 +37453,7 @@ fn facade_does_not_reexport_or_declare_functional_transforms_detects_each_catego
 /// - `facade/src/lib.rs::{vjp, hvp, vmap, jvp, jacfwd}`: #2931・#2956 で公開した `Tape` の承認形の薄い委譲
 ///   （各 1 件。承認形は `facade_tape_functional_transforms_are_approved_thin_delegations` が固定する）。
 ///
-/// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`・`::jvp_multi`・`::jvp_create_graph`（#3063・#3068）: #2940 の double-VJP 内部実装（#2956 で `pub fn` 化。
+/// - `autodiff/src/functional_ops.rs::jvp`・`::jacfwd`・`::jvp_multi`・`::jvp_create_graph`（#3063・#3068）・`::vmap_grad`（#3072・#3071 の子テープ版内部実装）: #2940 の double-VJP 内部実装（#2956 で `pub fn` 化。
 ///   facade 以外へは再エクスポートしない）。
 ///
 /// 以後の実装を足すときは期待集合へ 1 行ずつ追記する。
@@ -37478,19 +37521,24 @@ fn workspace_declares_functional_transforms_fn_names_only_in_allowed_locations()
         ("facade/src/lib.rs::jacfwd".to_string(), 1usize),
         ("facade/src/lib.rs::jvp_multi".to_string(), 1usize),
         ("facade/src/lib.rs::jvp_create_graph".to_string(), 1usize),
+        (
+            "autodiff/src/functional_ops.rs::vmap_grad".to_string(),
+            1usize,
+        ),
+        ("facade/src/lib.rs::vmap_grad".to_string(), 1usize),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         found, expected,
-        "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd／jvp_multi／jvp_create_graph の `fn` 宣言が許可された置き場所\
+        "workspace 全体（crates/*/src/）の vjp／hvp／vmap／jvp／jacfwd／jvp_multi／jvp_create_graph／vmap_grad の `fn` 宣言が許可された置き場所\
          （autodiff/src/functional_ops.rs・autodiff/src/grad.rs・facade/src/lib.rs の各 1 件）と一致しない。\
          迂回経路（facade／Var／Tape への inherent メソッド追加等）の混入か、未承認の実装追加でないか\
          確認すること"
     );
 }
-/// `src/lib.rs` の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` が承認形（シグネチャ・1 行委譲本体・
-/// `impl Tape` 直下）でそれぞれちょうど 1 件であることを検査する（#2931・#2956 の正ガード本体。検出範囲は列挙した 7 名に限り、
+/// `src/lib.rs` の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph`／`vmap_grad` が承認形（シグネチャ・委譲本体・
+/// `impl Tape` 直下）でそれぞれちょうど 1 件であることを検査する（#2931・#2956 の正ガード本体。検出範囲は列挙した 8 名に限り、
 /// マクロ生成までは保証しない）。
 fn check_facade_tape_functional_transforms_shape(lib_src: &str) -> Result<(), String> {
     let cleaned: String = strip_comments_and_literals(lib_src).into_iter().collect();
@@ -37534,7 +37582,7 @@ fn facade_tape_functional_transforms_are_approved_thin_delegations() {
     let content = read_to_string_or_panic(&lib_rs_path());
     if let Err(e) = check_facade_tape_functional_transforms_shape(&content) {
         panic!(
-            "facade の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph` が承認形（#2931・#2956・#3068・決定記録 §23.1〜§23.2・§27.1〜§27.2・§31.1）と一致しない: {e}"
+            "facade の `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd`／`jvp_multi`／`jvp_create_graph`／`vmap_grad` が承認形（#2931・#2956・#3068・#3072・決定記録 §23.1〜§23.2・§27.1〜§27.2・§31.1・§32.1）と一致しない: {e}"
         );
     }
     let src_dir = facade_crate_root().join("src");
@@ -37598,6 +37646,33 @@ fn facade_tape_functional_transforms_are_approved_thin_delegations_detects_each_
     let cg_drop_lifetime = ok.replace("grandchild: &'g Tape", "grandchild: &Tape");
     assert_ne!(cg_drop_lifetime, ok);
     assert!(check_facade_tape_functional_transforms_shape(&cg_drop_lifetime).is_err());
+    // #3072: `vmap_grad` の本体のすり替え（`&mut child.0` → `child`・アダプタの脱落・`input`／`in_dim` の入れ替え）
+    // とシグネチャの改変（`&self` の追加・`TapeRef<'c>` → `&'c Tape` のすり替え・`for<'c>` の脱落）。
+    let vg_child = ok.replace("in_dim, &mut child.0,", "in_dim, child,");
+    assert_ne!(vg_child, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&vg_child).is_err());
+    let vg_no_adapter = ok.replace("{ f(TapeRef::from_autodiff(t), s) }", "f");
+    assert_ne!(vg_no_adapter, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&vg_no_adapter).is_err());
+    let vg_swap = ok.replace(
+        "vmap_grad(input, in_dim, &mut",
+        "vmap_grad(in_dim, input, &mut",
+    );
+    assert_ne!(vg_swap, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&vg_swap).is_err());
+    let vg_self = ok.replacen(
+        "pub fn vmap_grad<F>(\n    input",
+        "pub fn vmap_grad<F>(\n    &self,\n    input",
+        1,
+    );
+    assert_ne!(vg_self, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&vg_self).is_err());
+    let vg_ref = ok.replace("FnMut(TapeRef<'c>, &Var<'c>)", "FnMut(&'c Tape, &Var<'c>)");
+    assert_ne!(vg_ref, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&vg_ref).is_err());
+    let vg_hrtb = ok.replace("F: for<'c> FnMut(", "F: FnMut(");
+    assert_ne!(vg_hrtb, ok);
+    assert!(check_facade_tape_functional_transforms_shape(&vg_hrtb).is_err());
     // 本体のすり替え。
     let bad_body = ok.replace(
         "&self.0, output, input, cotangent)",
@@ -37624,10 +37699,10 @@ fn facade_tape_functional_transforms_are_approved_thin_delegations_detects_each_
 }
 
 /// facade 公開面から `Tape::vjp`／`hvp`／`vmap`／`jvp`／`jacfwd` が型レベルで到達可能であることを固定し、
-/// CPU で 1 回ずつ呼べることを確かめる（#2931・#2956。`vmap` の寿命の結び方もここで型固定する）。
+/// CPU で 1 回ずつ呼べることを確かめる（#2931・#2956・#3072 の `vmap_grad` を含む。`vmap` の寿命の結び方もここで型固定する）。
 #[test]
 fn tape_functional_transforms_are_reachable_via_facade() {
-    use fandhe_ai::{AutodiffError, Tape, Tensor, Var};
+    use fandhe_ai::{AutodiffError, Tape, TapeRef, Tensor, Var};
     type VjpFn = fn(&Tape, &Var<'_>, &Var<'_>, &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError>;
     type HvpFn =
         fn(&Tape, &Var<'_>, &Var<'_>, &Tensor<f32>, &Tape) -> Result<Tensor<f32>, AutodiffError>;
@@ -37688,6 +37763,24 @@ fn tape_functional_transforms_are_reachable_via_facade() {
     let xb = t.var(&Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor"));
     let vm: Result<Var<'_>, AutodiffError> = t.vmap(&xb, 0, square);
     assert!(vm.is_ok());
+    // #3072: サンプルごとの勾配（関連関数・`&self` なし）。型を固定し、CPU で最小呼び出しを 1 回行う
+    // （値の網羅・エラー経路は #3073）。
+    type VmapGradLossFn = for<'c> fn(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
+    type VmapGradFn =
+        fn(&Tensor<f32>, usize, &mut Tape, VmapGradLossFn) -> Result<Tensor<f32>, AutodiffError>;
+    let _vmap_grad: VmapGradFn = Tape::vmap_grad::<VmapGradLossFn>;
+    fn sq_sum<'c>(_t: TapeRef<'c>, s: &Var<'c>) -> Result<Var<'c>, AutodiffError> {
+        s.mul(s)?.sum(None)
+    }
+    let mut vg_child = fandhe_ai::tape();
+    let vg = Tape::vmap_grad(
+        &Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor"),
+        0,
+        &mut vg_child,
+        sq_sum,
+    );
+    assert!(vg.is_ok());
+    assert_eq!(vg.expect("vmap_grad").shape(), &[2, 2]);
 }
 
 // =====================================================================

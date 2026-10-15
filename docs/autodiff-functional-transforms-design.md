@@ -799,6 +799,17 @@ where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>;
 - **未検証**: `DeviceMismatch`（CPU だけでは作れない）、結果要素数オーバーフロー（実在の `Tensor` では作れない。コード上の `checked_numel`／`checked_mul` 検査のみ）、世代の進み方（`Tape::epoch` が `pub(crate)` のため結合テストから観測していない）。
 - **#3072 への申し送り**: 宣言インベントリには `autodiff/src/functional_ops.rs::vmap_grad` が 1 件数えられる（ヘルパー `vmap_grad_sample` は別名）。
 
+### 32.10 実装記録（#3072）
+
+- **公開した形**: §32.1 と一致する。差は実引数 `f` が `mut f: F` になった点だけ（`F: FnMut` をアダプタクロージャ内から呼ぶために必要。公開される型には影響しない）。`Tape::vmap_grad<F>(input: &Tensor<f32>, in_dim: usize, child: &mut Tape, mut f: F) -> Result<Tensor<f32>, AutodiffError> where F: for<'c> FnMut(TapeRef<'c>, &Var<'c>) -> Result<Var<'c>, AutodiffError>` を `impl Tape` に関連関数（`&self` なし）として足し、本体は `fandhe_ai_autodiff::functional_ops::vmap_grad(input, in_dim, &mut child.0, |t, s| { f(TapeRef::from_autodiff(t), s) })` の 1 式の委譲。HRTB クロージャと newtype 越しのアダプタはコンパイルできた（停止条件には該当しない。先例は `Tape::gradcheck`）。承認根拠は 2026-10-11 の所有者判断 D-A（一括承認）で、これを超える承認はない。
+- **rustdoc と doctest**: 子テープの扱い（空を渡す・サンプルごとに内部で `reset`・成功時も失敗時も戻り時は空で再利用できる・panic 時は契約外）、クロージャ、エラー順序（§32.3）、数値と適用範囲（§32.4・§32.5・§32.8-1）を書いた。doctest は facade だけで完結し、`in_dim = 0` で行ごとの勾配 `2x` を、続けて同じ子テープで `in_dim = 1` を呼べること（shape `[3, 2]`）を確かめる。
+- **`Tape::vmap` の rustdoc**: 「`vmap(grad)` は契約外」の文を、クロージャ内で勾配を取る合成は契約外で、サンプルごとの勾配は `Tape::vmap_grad` を使う旨に更新した。シグネチャ・本体・doctest は不変。
+- **保留ガード**: 反転対象はない。`FunctionalTransformsHoldDoctestGuard` に、裸の自由関数・`Var<'t>`・`Tensor<f32>` 上の `vmap_grad`（トレイトメソッド・UFCS）のプローブを足した。`Tape` 受け手のプローブは承認形と衝突するため足さない。方式は正のプローブのまま。
+- **`api_surface.rs`**: 名前配列 8 名・識別子配列 9 件・承認シグネチャ（`mut f: F`・`where` 節を含む）と委譲本体を足し、宣言インベントリに `autodiff/src/functional_ops.rs::vmap_grad` と `facade/src/lib.rs::vmap_grad` の 2 件を足した（件数ではなく名前で固定。§27.4）。自己テストに本体のすり替え（`&mut child.0` の脱落・アダプタの脱落・`input`／`in_dim` の入れ替え）、シグネチャ改変（`&self` の追加・`TapeRef` → `&Tape`・`for<'c>` の脱落）、裸の自由関数・再エクスポート・`impl Var` 内の承認形を足した。到達性テストは関数型を型で固定し、CPU で最小呼び出しを行う。
+- **未検証**: `DeviceMismatch`（CPU だけでは作れない）、facade からの子テープの世代の進み方の観測（公開 API がない）。
+- **申し送り**: facade の CPU 結合テスト（ループ参照・`in_dim` 0／1・バッチ 1・エラー経路）と実機 `#[ignore]` テスト・perf ログは #3073（実機は #3171・#3172）。所有者へ戻す論点は §32.8 のとおり。
+- **変えていないもの**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`・`crates/autodiff`・既存の公開シグネチャ。
+
 ## 33. 決定記録（イシュー #3074。`TapeF64` の `jvp`: 規模見積もりと実装／契約固定の比較）
 
 ### 33.0 状態・根拠・基準
