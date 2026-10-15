@@ -243,3 +243,14 @@ tolerance 定数・baseline は新設・変更していない。実機非依存�
 - **テスト**: `crates/facade/tests/compat_sequential_fit_swa.rs`（手動ループとの bit 一致・退避の復元・`n_averaged == 0`・`Err` で非上書き・分割 fit の bit 一致・重み変更時の退避破棄・別構成モデルの拒否・損失／val_loss 不変・構築検証）と `callbacks.rs` の内部不変条件単体テスト。実機非依存。
 - **不変**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`。
 
+## 18. #3059 実装記録（学習率アニールと併用拒否条件）
+
+§16.2・§16.4 を実装した。承認根拠は §15 の D-A のみ。
+
+- **学習率（`training.rs` の epoch 開始 (1b)）**: `LrSchedule` の同期の後に別パスで `SwaCallback::lr_for_epoch(optimizer.lr())` を呼び、`Some(lr)` を `set_lr` で書いてから `history.lr` へ記録する。callback の並び順に依らず SWA 区間では SWA が優先し、`LrSchedule::advance`（epoch 末）は従来どおり進む。`epochs_seen < swa_start` は何も書かない。基準 lr は区間に入った最初の epoch 開始時の `optimizer.lr()` を一度だけ確定し（`anneal_base_lr: Option<f32>`。`SwaLr` は derive を持たないため epoch ごとに `SwaLr::new` で組み直す）、`lr_at(epochs_seen - swa_start)` を使う。fit 終了後の optimizer の lr は最後にアニールした値のまま残る。
+- **基準 lr が 0 以下・非有限の場合（PyTorch との差分）**: `SwaLr::new` の `InvalidArgument` をそのまま返し fit は `Err` になる（fail-closed。救済しない。`anneal_epochs == 0` でも同じ）。
+- **巻き戻し（§16.3）**: `FitSnapshot` に基準 lr を加え、`abort_fit` で `epochs_seen` と一緒に戻す。継続ではない初回 fit の `Err`（`restored_for_fit == false`）は既存の `epochs_seen` と同じく巻き戻さない（既存挙動に揃えた非対称）。継続 fit は `n_averaged() > 0`（= 既に区間に入っている）が前提のため、基準 lr が失敗 fit で新規確定される場面は実際には起きず、スナップショットは防御的な一貫性確保である。
+- **拒否（fit 開始前。`training.rs` (1.8b)。判定順固定・最初に当たった理由を採用）**: (1) `Callback::Swa` の複数指定 (2) `Optimizer::Lbfgs` (3) カスタム train_step フック (4) `compile_with_amp` (5) `Callback::Ema` 併用 (6) `EarlyStopping::restore_best_weights(true)`（`EarlyStopping::restores_best_weights` を `pub(super)` で追加。`ModelCheckpoint` と restore 無効の `EarlyStopping` は受理）(7) `set_lr` 非対応 optimizer（RmsProp／Adagrad／Lamb）・param groups 設定時。位置は `begin_fit`・モード切替・DataLoader 構築より前で、拒否時はモデル・compile 状態・callback が不変。
+- **テスト**: `crates/facade/tests/compat_sequential_fit_swa_lr.rs`（PyTorch `SWALR` fixture 10 件との相対 1e-6 突合・`SwaLr` 直接使用と bit 一致・`LrSchedule` 連結ケース〈`SequentialLr` と bit 一致・callback 並び順の逆転〉・区間前の lr／loss 不変・分割 fit 継続・失敗後の継続・基準 lr 0 の fail-closed・拒否 7 項目と正のケース）と `callbacks.rs` の内部不変条件単体テスト。tolerance 定数・baseline は不変。
+- **不変**: 公開名・accessor（`base_lr()` 等は追加しない）・`FitConfig`／`Sequential` のシグネチャ・依存・`unsafe`・`docs/spec`・`api_surface.rs`。
+- **スコープ外**: `update_bn`・param group ごとの `swa_lr`・`DeviceParamStore`／resident 経路・カスタム `avg_fn`。基準 lr 非正の救済と Ema・AMP・L-BFGS 併用の緩和は、需要が出たら承認を取って別 issue で扱う。

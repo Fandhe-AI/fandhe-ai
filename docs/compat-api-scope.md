@@ -624,6 +624,7 @@ P1」）を受けた是正である。
 - 行 23（SWA）: 決定記録の推奨は `fandhe_ai::optim` への公開（学習系）で、#2679 で公開した（§5 の適用記録は #2678 と #2679 の両方を挙げていた点は、公開した結果に合わせて #2679 が担当と整理した）。
 - 行 23（SWA の fit 結線。#3057）: 公開形のみを `autodiff-swa-decision.md` §16 で確定した（`Callback::Swa(SwaCallback)`・`FitConfig`／`Sequential` 不変・`update_bn` はスコープ外）。公開 API は未追加で、§1 の対象範囲表と `compat-feature-gap.md` は不変。実装は #3058・#3059。
 - 行 23（#3058 適用記録）: `SwaCallback`・`Callback::Swa` を公開した（epoch 末の平均更新・fit `Ok` 終了時の平均化重み適用と `raw_state_dict()` 退避。`FitConfig`／`Sequential`・既存シグネチャは不変）。学習率アニールと拒否条件は #3059。詳細は `autodiff-swa-decision.md` §17。
+- 行 23（#3059 適用記録）: `SwaCallback` の学習率アニール（`epochs_seen >= swa_start` の epoch 開始時に `SwaLr` の学習率を書く）と fit 開始前の併用拒否 7 項目を実装した。公開名・accessor・`FitConfig`／`Sequential` のシグネチャは不変。詳細は `autodiff-swa-decision.md` §18。
 - 行 7・9・11（#2638・#2641・#2642）: 推奨形は `Var`／`Tape` の委譲メソッドと型の再エクスポート（演算系）だが、§5 の適用記録は #2678 と #2679 の両方を挙げている（層は推奨に含まれない）。#2677 の承認の記録どおり #2678 が公開した。
 - 行 16（可変長系列）は `nn::rnn` へのモジュール再エクスポートで、#2678・#2679 の両方を挙げている。
 
