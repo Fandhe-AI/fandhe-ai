@@ -319,7 +319,7 @@ pub mod conv_transpose3d_ops;
 pub mod fold_ops;
 // LocalResponseNorm（`local_response_norm`。イシュー #2646）。`Var` の 1 行委譲メソッドとして #2851 で
 // facade へ公開済み（モジュール自体は再エクスポートしない。autodiff 側の層 struct
-// `nn::LocalResponseNorm` は #3043 で追加済み・`Sequential::add_*` は保留継続。
+// `nn::LocalResponseNorm` は #3043 で追加済み・`Sequential::add_local_response_norm` は #3044 で公開済み（`add_weight_norm`／`add_spectral_norm` は保留継続）。
 // `docs/autodiff-lrn-weight-reparam-decision.md` §12・§13）。
 pub mod lrn_ops;
 pub mod max_unpool_ops;

@@ -6273,8 +6273,15 @@ struct FoldUnfoldHoldDoctestGuard;
 ///
 /// 引き続き拒否する未承認経路は、ローカルモジュール `lrn_ops`／`weight_reparam_ops`／`lrn`／`weight_reparam`・
 /// 型 `LocalResponseNorm`／`WeightNorm`／`SpectralNorm`・`Var::norm_except_dim` と `Tape`／`Tensor<f32>` 上の
-/// 同名メソッド・`add_local_response_norm`／`add_weight_norm`／`add_spectral_norm`（`compat::Sequential`。
-/// 層化・結線方式は保留継続）である。下の doctest は全 `pub mod` を glob import したスコープへこれらのプローブを置き、
+/// 同名メソッド・`add_weight_norm`／`add_spectral_norm`（`compat::Sequential`。
+/// 層化・結線方式は保留継続）である。
+/// **#3044 での部分反転**: `compat::Sequential::add_local_response_norm` は
+/// `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3 の承認形で公開したため、`Sequential` 向けのトレイト impl と
+/// UFCS 呼び出しから同名だけを外した（inherent メソッドと衝突するため。`add_weight_norm`／`add_spectral_norm` は残す）。
+/// 公開済み側の正ガードは `crates/facade/tests/api_surface.rs::add_local_response_norm_signature_matches_approved_contract`
+/// 等が担う。
+///
+/// 下の doctest は全 `pub mod` を glob import したスコープへこれらのプローブを置き、
 /// facade が同名のモジュール・型・関数を glob 可能な位置へ公開するか、これらの型へ同名の inherent メソッドを公開すると、
 /// 名前解決の曖昧性または呼び出しシグネチャの不一致でエラーコードに依存せずコンパイルが失敗する
 /// （`Tensor` は facade から再エクスポートされるため、`tensor-core` 側への同名メソッド追加も検出する）。
@@ -6383,15 +6390,11 @@ struct FoldUnfoldHoldDoctestGuard;
 /// }
 ///
 /// trait __FandheLrnWeightReparamHoldSequentialProbe {
-///     fn add_local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
 ///     fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
 ///     fn add_spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker;
 /// }
 ///
 /// impl __FandheLrnWeightReparamHoldSequentialProbe for fandhe_ai::compat::Sequential {
-///     fn add_local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
-///         __FandheLrnWeightReparamHoldMarker
-///     }
 ///     fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker {
 ///         __FandheLrnWeightReparamHoldMarker
 ///     }
@@ -6426,7 +6429,6 @@ struct FoldUnfoldHoldDoctestGuard;
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::weight_norm(tf);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::spectral_norm(tf);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::norm_except_dim(tf);
-///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_local_response_norm(seq);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_weight_norm(seq);
 ///     let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_spectral_norm(seq);
 /// }

@@ -30429,7 +30429,8 @@ fn workspace_declares_fold_unfold_fn_names_only_in_allowed_locations() {
 // `SpectralNormState` のルート再エクスポート 1 行だけを公開済み（承認根拠はルート #2499 の
 // issuecomment-6052732061・公開形は `docs/autodiff-lrn-weight-reparam-decision.md` §12。公開側の正ガードは
 // `facade_reexports_spectral_norm_state_only_in_approved_shape`・`PHASE4_VAR_EXPECTED_BODIES`）。
-// `norm_except_dim`・モジュール・型・層化・結線方式は保留継続（`compat::Sequential::add_local_response_norm`／`add_weight_norm`／`add_spectral_norm`）も同じ保留に含める。
+// `norm_except_dim`・モジュール・型・層化・結線方式は保留継続（`compat::Sequential::add_weight_norm`／`add_spectral_norm`）も同じ保留に含める。
+// `compat::Sequential::add_local_response_norm` は #3044 で公開済み（正ガードは `add_local_response_norm_signature_matches_approved_contract` 等）。
 // 検出はトークン完全一致のみで行い、`weight_norm_forward`・`spectral_norm_host`・`lrn_layout` など部分一致する
 // 別トークンは違反としない（自己テストで固定）。
 // 検出範囲は本ソース走査が見るトークン列（`pub use` の経路・型／`pub mod`／`fn` の宣言）と、doctest プローブが
@@ -30557,15 +30558,11 @@ impl __FandheLrnWeightReparamHoldProbe for fandhe_ai::Tensor<f32> {\n\
 }\n\
 \n\
 trait __FandheLrnWeightReparamHoldSequentialProbe {\n\
-\x20\x20\x20\x20fn add_local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker;\n\
 \x20\x20\x20\x20fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker;\n\
 \x20\x20\x20\x20fn add_spectral_norm(&self) -> __FandheLrnWeightReparamHoldMarker;\n\
 }\n\
 \n\
 impl __FandheLrnWeightReparamHoldSequentialProbe for fandhe_ai::compat::Sequential {\n\
-\x20\x20\x20\x20fn add_local_response_norm(&self) -> __FandheLrnWeightReparamHoldMarker {\n\
-\x20\x20\x20\x20\x20\x20\x20\x20__FandheLrnWeightReparamHoldMarker\n\
-\x20\x20\x20\x20}\n\
 \x20\x20\x20\x20fn add_weight_norm(&self) -> __FandheLrnWeightReparamHoldMarker {\n\
 \x20\x20\x20\x20\x20\x20\x20\x20__FandheLrnWeightReparamHoldMarker\n\
 \x20\x20\x20\x20}\n\
@@ -30600,14 +30597,27 @@ fn __probe_methods(\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::weight_norm(tf);\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::spectral_norm(tf);\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::Tensor::<f32>::norm_except_dim(tf);\n\
-\x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_local_response_norm(seq);\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_weight_norm(seq);\n\
 \x20\x20\x20\x20let _: __FandheLrnWeightReparamHoldMarker = fandhe_ai::compat::Sequential::add_spectral_norm(seq);\n\
 }";
 
-/// 保留対象 fn 名（イシュー #2645）。`add_*` は #2679 の層結線（`compat::Sequential`）が漏出経路に
-/// なりうるため含める。
-const LRN_WEIGHT_REPARAM_FN_NAMES: [&str; 7] = [
+/// 保留対象 fn 名（イシュー #2645）。`add_weight_norm`／`add_spectral_norm` は #2679 の層結線
+/// （`compat::Sequential`）が漏出経路になりうるため含める。`add_local_response_norm` は #3044 で
+/// `compat::Sequential` へ承認形で公開したため保留対象から外した（承認形は
+/// [`LRN_WEIGHT_REPARAM_WORKSPACE_FN_NAMES`] の走査と `add_local_response_norm_signature_matches_approved_contract`
+/// 等の正ガードが固定する。Fold／Unfold の先例）。
+const LRN_WEIGHT_REPARAM_FN_NAMES: [&str; 6] = [
+    "local_response_norm",
+    "weight_norm",
+    "spectral_norm",
+    "norm_except_dim",
+    "add_weight_norm",
+    "add_spectral_norm",
+];
+
+/// workspace インベントリ用の fn 名（保留対象 [`LRN_WEIGHT_REPARAM_FN_NAMES`] に #3044 で公開した
+/// `add_local_response_norm` を加えたもの）。
+const LRN_WEIGHT_REPARAM_WORKSPACE_FN_NAMES: [&str; 7] = [
     "local_response_norm",
     "weight_norm",
     "spectral_norm",
@@ -30790,7 +30800,8 @@ fn facade_does_not_reexport_or_declare_lrn_weight_reparam_detects_each_category(
     assert!(offense(
         "impl Sequential { pub fn add_spectral_norm(&mut self) {} }"
     ));
-    assert!(offense(
+    // #3044: `add_local_response_norm` は公開済み（承認形は別の正ガードが固定）のため保留対象外。
+    assert!(!offense(
         "impl Sequential { pub fn add_local_response_norm(&mut self) {} }"
     ));
     assert!(offense("trait T { fn spectral_norm(&self); }"));
@@ -30820,13 +30831,13 @@ fn facade_does_not_reexport_or_declare_lrn_weight_reparam_detects_each_category(
     assert!(!offense("use fandhe_ai_autodiff::lrn_ops;"));
 }
 
-/// workspace 全体（`crates/*/src/`）を再帰走査し、[`LRN_WEIGHT_REPARAM_FN_NAMES`] の `fn` 宣言が承認済みの
+/// workspace 全体（`crates/*/src/`）を再帰走査し、[`LRN_WEIGHT_REPARAM_WORKSPACE_FN_NAMES`] の `fn` 宣言が承認済みの
 /// 置き場所だけに存在することを固定する。
 ///
 /// 期待値は `autodiff/src/lrn_ops.rs::local_response_norm` と
 /// `autodiff/src/weight_reparam_ops.rs::{weight_norm, norm_except_dim, spectral_norm}` の各 1 件、
 /// #2851 で公開した `autodiff/src/var.rs::{local_response_norm, weight_norm, spectral_norm}`
-/// （`Var` の 1 行委譲メソッド）の各 1 件のみ（`add_*` は 0 件。層化は保留継続。`norm_except_dim` は非公開のまま）。これら以外への追加は fail-closed に検出する。
+/// （`Var` の 1 行委譲メソッド）の各 1 件のみと、#3044 で公開した `facade/src/compat/sequential.rs::add_local_response_norm` の 1 件のみ（`add_weight_norm`／`add_spectral_norm` は 0 件。`norm_except_dim` は非公開のまま）。これら以外への追加は fail-closed に検出する。
 /// テスト用ヘルパーにも素の `fn weight_norm`／`fn spectral_norm`／`fn local_response_norm`／
 /// `fn norm_except_dim` という名前を使わないこと（インベントリに数えられる）。
 #[test]
@@ -30858,7 +30869,7 @@ fn workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations() {
         visit_rs_files(&src_dir, &mut |path, content| {
             let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
             let tokens = tokenize_including_punctuation(&cleaned);
-            for fn_name in LRN_WEIGHT_REPARAM_FN_NAMES {
+            for fn_name in LRN_WEIGHT_REPARAM_WORKSPACE_FN_NAMES {
                 let count = count_fn_declarations_by_name(&tokens, fn_name);
                 if count > 0 {
                     let rel = path
@@ -30884,14 +30895,124 @@ fn workspace_declares_lrn_weight_reparam_fn_names_only_in_allowed_locations() {
     for n in ["local_response_norm", "weight_norm", "spectral_norm"] {
         expected.insert(format!("autodiff/src/var.rs::{n}"), 1);
     }
+    // #3044: `compat::Sequential` の層化メソッド（正ガードが承認シグネチャを固定）。
+    expected.insert(
+        "facade/src/compat/sequential.rs::add_local_response_norm".to_string(),
+        1,
+    );
     assert_eq!(
         found, expected,
         "workspace 全体（crates/*/src/）の local_response_norm／weight_norm／norm_except_dim／spectral_norm／\
          add_* の `fn` 宣言が承認済みの置き場所（autodiff/src/lrn_ops.rs の local_response_norm と\
          autodiff/src/weight_reparam_ops.rs の weight_norm・norm_except_dim・spectral_norm 各 1 件、\
-         および autodiff/src/var.rs の local_response_norm・weight_norm・spectral_norm 各 1 件のみ）と\
+         および autodiff/src/var.rs の local_response_norm・weight_norm・spectral_norm 各 1 件、\
+         facade/src/compat/sequential.rs の add_local_response_norm 1 件のみ）と\
          一致しない。迂回経路（facade／Var／Sequential への inherent メソッド追加等）の混入か、未承認の実装追加\
          でないか確認すること"
+    );
+}
+
+const ADD_LOCAL_RESPONSE_NORM_PARAMS: &str =
+    "mut self, size: usize, alpha: f32, beta: f32, k: f32, ) -> Result<Self, AutodiffError>";
+
+/// `compat::Sequential::add_local_response_norm` が承認シグネチャ（決定記録
+/// `compat-sequential-3d-fold-lrn-layers-decision.md` §3）で 1 件だけ存在する（イシュー #3044）。
+#[test]
+fn add_local_response_norm_signature_matches_approved_contract() {
+    let path = facade_crate_root().join("src/compat/sequential.rs");
+    let content = read_to_string_or_panic(&path);
+    let cleaned: String = strip_comments_and_literals(&content).iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    let name = "add_local_response_norm";
+    assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
+    assert!(
+        sequential_spatial_add_signature_ok(&cleaned, name, ADD_LOCAL_RESPONSE_NORM_PARAMS),
+        "{name} のシグネチャが承認形と一致しない"
+    );
+}
+
+/// [`add_local_response_norm_signature_matches_approved_contract`] の自己テスト。
+#[test]
+fn add_local_response_norm_signature_matches_approved_contract_detects_offense() {
+    let name = "add_local_response_norm";
+    let ok = "pub fn add_local_response_norm(mut self, size: usize, alpha: f32, beta: f32, k: f32,) -> Result<Self, AutodiffError> {";
+    assert!(sequential_spatial_add_signature_ok(
+        ok,
+        name,
+        ADD_LOCAL_RESPONSE_NORM_PARAMS
+    ));
+    for bad in [
+        // 引数順の入替（alpha と beta）
+        "pub fn add_local_response_norm(mut self, size: usize, beta: f32, alpha: f32, k: f32,) -> Result<Self, AutodiffError> {",
+        // f64
+        "pub fn add_local_response_norm(mut self, size: usize, alpha: f64, beta: f64, k: f64,) -> Result<Self, AutodiffError> {",
+        // size の型違い
+        "pub fn add_local_response_norm(mut self, size: u32, alpha: f32, beta: f32, k: f32,) -> Result<Self, AutodiffError> {",
+        // 戻り値が Self
+        "pub fn add_local_response_norm(mut self, size: usize, alpha: f32, beta: f32, k: f32,) -> Self {",
+        // &mut self
+        "pub fn add_local_response_norm(&mut self, size: usize, alpha: f32, beta: f32, k: f32,) -> Result<Self, AutodiffError> {",
+        // 引数の脱落（k なし）
+        "pub fn add_local_response_norm(mut self, size: usize, alpha: f32, beta: f32,) -> Result<Self, AutodiffError> {",
+        // 既定値風の省略（alpha・beta・k なし）
+        "pub fn add_local_response_norm(mut self, size: usize,) -> Result<Self, AutodiffError> {",
+    ] {
+        assert!(
+            !sequential_spatial_add_signature_ok(bad, name, ADD_LOCAL_RESPONSE_NORM_PARAMS),
+            "{bad}"
+        );
+    }
+}
+
+/// `src/compat` 配下で `pub fn add_local_response_norm(` がちょうど 1 件
+/// （0 件＝公開の脱落、2 件以上＝重複宣言の混入を拒否する正ガード。イシュー #3044）。
+#[test]
+fn compat_sequential_exposes_local_response_norm_add_method_issue_3044() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut n = 0usize;
+    visit_rs_files(&compat_dir, &mut |_path, content| {
+        n += count_pub_fn_declarations(content, "add_local_response_norm");
+    });
+    assert_eq!(
+        n, 1,
+        "add_local_response_norm の pub fn 宣言数が 1 件でない"
+    );
+}
+
+/// [`compat_sequential_exposes_local_response_norm_add_method_issue_3044`] の自己テスト。
+#[test]
+fn compat_sequential_exposes_local_response_norm_add_method_issue_3044_counts_declarations() {
+    let one = "    pub fn add_local_response_norm(mut self) -> Self {\n        self\n    }\n";
+    assert_eq!(count_pub_fn_declarations(one, "add_local_response_norm"), 1);
+    assert_eq!(count_pub_fn_declarations(one, "add_fold"), 0);
+    let dup = format!("{one}{one}");
+    assert_eq!(
+        count_pub_fn_declarations(&dup, "add_local_response_norm"),
+        2
+    );
+}
+
+/// facade src 全体で `fn add_local_response_norm` が `compat/sequential.rs` にちょうど 1 件、
+/// 他ファイルに 0 件であることを固定する（`facade_declares_fold_unfold_add_names_only_in_approved_form` と同型。#3044）。
+#[test]
+fn facade_declares_local_response_norm_add_name_only_in_approved_form() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending: Vec<String> = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        let allowed = usize::from(path.ends_with("compat/sequential.rs"));
+        let count = count_fn_declarations_by_name(&tokens, "add_local_response_norm");
+        if count != allowed {
+            offending.push(format!(
+                "{}: `fn add_local_response_norm` 宣言が {count} 件（許容 {allowed} 件）",
+                path.display()
+            ));
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "LocalResponseNorm の add_* が承認形から逸脱: {offending:?}"
     );
 }
 

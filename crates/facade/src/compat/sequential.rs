@@ -123,12 +123,12 @@ use fandhe_ai_autodiff::nn::{
     ConvTranspose2dVars, ConvTranspose3d, ConvTranspose3dVars, Dropout, Dropout2d, Embedding,
     EmbeddingBag, EmbeddingBagVars, EmbeddingVars, FeedForwardActivation, Flatten, Fold,
     GlobalPool, GroupNorm, Identity, InstanceNorm, LAYER_NORM_DEFAULT_EPS, LayerNorm,
-    LayerNormVars, Linear, MaxPool1d, MaxPool2d, MaxPool3d, Module, MultiheadAttention,
-    MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle, PixelUnshuffle, RmsNorm,
-    RmsNormVars, Sequential as NnSequential, Transformer, TransformerConfig,
-    TransformerDecoderLayer, TransformerDecoderLayerVars, TransformerEncoderLayer,
-    TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold, Upsample, ZeroPad2d,
-    conv2d_forward_low_precision, linear_forward_low_precision,
+    LayerNormVars, Linear, LocalResponseNorm, MaxPool1d, MaxPool2d, MaxPool3d, Module,
+    MultiheadAttention, MultiheadAttentionConfig, MultiheadAttentionVars, PixelShuffle,
+    PixelUnshuffle, RmsNorm, RmsNormVars, Sequential as NnSequential, Transformer,
+    TransformerConfig, TransformerDecoderLayer, TransformerDecoderLayerVars,
+    TransformerEncoderLayer, TransformerEncoderLayerVars, TransformerVars, Unflatten, Unfold,
+    Upsample, ZeroPad2d, conv2d_forward_low_precision, linear_forward_low_precision,
     multihead_attention_forward_low_precision,
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
@@ -2009,6 +2009,37 @@ impl Sequential {
         Ok(self)
     }
 
+    /// LocalResponseNorm 層を追加する（`nn::LocalResponseNorm`。PyTorch `nn.LocalResponseNorm` 相当。
+    /// イシュー #3044・公開形の正は `docs/compat-sequential-3d-fold-lrn-layers-decision.md` §3）。
+    /// 引数は `size, alpha, beta, k` を全て明示する（PyTorch の既定値は設けない）。入力は `[N, C, *]`
+    /// （rank 3 以上）で、チャネル軸方向の局所応答正規化を行う。無状態層で学習可能パラメータを持たず、
+    /// `size > C` も受理する。不正引数（`size == 0`・非有限な `alpha`／`beta`／`k`）は
+    /// `LocalResponseNorm::new` の検査で `Err` になり panic しない。入力 rank が不正な場合は forward 時に `Err`。
+    /// 常駐経路は未実測のため `Unsupported`（fail-closed。決定記録 §5）。`save_model` は後続 issue
+    /// まで `UnsupportedModel`、ONNX export は `UnsupportedLayer`。AMP 低精度は無視して f32 で計算する。
+    ///
+    /// ```
+    /// use fandhe_ai::compat::Sequential;
+    /// let model = Sequential::new().add_local_response_norm(3, 1e-4, 0.75, 1.0);
+    /// assert!(model.is_ok());
+    /// let zero = Sequential::new().add_local_response_norm(0, 1e-4, 0.75, 1.0);
+    /// assert!(zero.is_err());
+    /// ```
+    pub fn add_local_response_norm(
+        mut self,
+        size: usize,
+        alpha: f32,
+        beta: f32,
+        k: f32,
+    ) -> Result<Self, AutodiffError> {
+        let layer = LocalResponseNorm::new(size, alpha, beta, k)?;
+        self.inner.push(Box::new(layer));
+        self.specs.push(LayerSpec::Unsupported {
+            kind: "local_response_norm",
+        });
+        Ok(self)
+    }
+
     /// 3 次元 AvgPool 層を追加する（`nn::AvgPool3d`。PyTorch `nn.AvgPool3d` 相当。イシュー #3028）。
     /// `ceil_mode=false`・`dilation=[1,1,1]` 固定。`count_include_pad` は PyTorch の同名引数と同じ意味。
     /// 入力は `NCDHW`（rank 5）。その他の契約（常駐は `Unsupported`・保存は後続 issue まで
@@ -2936,7 +2967,7 @@ impl Sequential {
     /// `Conv2d`／`Conv1d` 向けに新設し、イシュー #1760 で LayerNorm／
     /// RmsNorm／BatchNorm1d／BatchNorm2d／Embedding／
     /// MultiheadAttention へ、イシュー #2532 で TransformerDecoderLayer を、イシュー #2533 で Transformer を追加、イシュー #2521 で ConvTranspose1d、イシュー #2523 で ConvTranspose2d、イシュー #2524 で Conv3d、イシュー #2525 で GroupNorm／InstanceNorm を追加、イシュー #1957 で Pooling（MaxPool／
-    /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名し、イシュー #3040 で Fold／Unfold を追加した）。
+    /// AvgPool／AdaptiveAvgPool の 1d／2d）へ対象を拡張・改名し、イシュー #3040 で Fold／Unfold を、イシュー #3044 で LocalResponseNorm を追加した）。
     /// これらの層は `forward_from_flat_leaves`（`Linear` 層のみを
     /// 消費する走査）の対象外のため、常駐経路の入口で明示的に拒否する
     /// （黙示フォールバックを作らない。`.claude/rules/security.md` A04）。
@@ -2966,6 +2997,7 @@ impl Sequential {
                 || layer.as_transformer().is_some()
                 || layer.as_unfold().is_some()
                 || layer.as_fold().is_some()
+                || layer.as_local_response_norm().is_some()
                 || layer.is_pooling()
         })
     }

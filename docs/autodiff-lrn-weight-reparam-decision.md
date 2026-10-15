@@ -319,3 +319,8 @@ impl<'t> Var<'t> {
 - `Module` 実装は `nn/module.rs`。`supports_forward_host()=false`・`is_pooling()=false`・無状態。`Module::as_local_response_norm`（既定 `None`・読み取り専用。後続で未使用なら撤去可）を追加した。
 - facade（`Sequential::add_local_response_norm`・`LayerSpec`・`save_model` kind・常駐経路拒否・保留ガード反転）は未変更で後続 issue の範囲。CUDA／Metal 実機は未実測。依存・tolerance・`docs/spec` は変更していない。既存本文は書き換えていない。
 - テスト: `crates/autodiff/tests/nn_local_response_norm.rs`。
+
+## 17. #3044 実施記録（`Sequential::add_local_response_norm` の公開）
+
+- `compat::Sequential::add_local_response_norm` を公開した（公開形は `compat-sequential-3d-fold-lrn-layers-decision.md` §3・実施記録は同 §23）。保存は後続 `-c` まで `UnsupportedModel`、常駐経路は `Unsupported`。
+- §9 の保留ガード表のうち `Sequential` 受け手の `add_local_response_norm` のみ反転済み。`add_weight_norm`／`add_spectral_norm`・`Tape`／`Tensor<f32>`・モジュール・型の否定は維持している。
