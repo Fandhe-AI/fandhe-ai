@@ -287,13 +287,11 @@ fn all_stage_ok(v: &[f64]) -> bool {
     v.iter().all(|&x| stage_ok(x))
 }
 
-/// REQ-2 統一複合判定の相対許容誤差（`fandhe_ai_backend_cpu::parity::RELATIVE_TOLERANCE` と同値）。
-/// `autodiff` は具体バックエンドクレートへ依存しない不変条件（`tests/architecture_boundaries.rs`）
-/// のため同定数を直接 import できず、本モジュール 1 箇所へ写して値を変えない（緩和はユーザー承認事項）。
-const REQ2_RELATIVE_TOLERANCE: f64 = 1e-3;
-/// REQ-2 統一複合判定の絶対許容誤差（`fandhe_ai_backend_cpu::parity::ABSOLUTE_RESCUE_THRESHOLD` と同値）。
-/// 出典・扱いは [`REQ2_RELATIVE_TOLERANCE`] と同じ。
-const REQ2_ABSOLUTE_RESCUE_THRESHOLD: f64 = 1e-5;
+/// REQ-2 統一複合判定の許容誤差定数（正本は `tensor-core::req2_tolerance`。値は変えない）。
+use fandhe_ai_tensor_core::req2_tolerance::{
+    ABSOLUTE_RESCUE_THRESHOLD as REQ2_ABSOLUTE_RESCUE_THRESHOLD,
+    RELATIVE_TOLERANCE as REQ2_RELATIVE_TOLERANCE,
+};
 /// 保守的な相対判定の閾値。許容の半分を使い、f32 構造の見積り上界に余裕を持たせる（許容自体は不変）。
 const CONSERVATIVE_RELATIVE_TOLERANCE: f64 = REQ2_RELATIVE_TOLERANCE / 2.0;
 
