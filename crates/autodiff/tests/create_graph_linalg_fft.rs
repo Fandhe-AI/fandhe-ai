@@ -811,3 +811,107 @@ fn rfft_dc_imag_nonfinite_propagates_like_first_order() {
     assert!(a.iter().all(|v| v.is_nan()), "通常 backward は NaN: {a:?}");
     assert!(b.iter().all(|v| v.is_nan()), "create_graph も NaN: {b:?}");
 }
+
+/// 通常 backward と create_graph の勾配を、NaN 位置・inf 符号・有限値（REQ-2 判定）で突合する。
+fn assert_same_with_nonfinite(a: &[f32], b: &[f32], ctx: &str) {
+    assert_eq!(a.len(), b.len(), "{ctx}: 長さ");
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        if x.is_nan() || y.is_nan() {
+            assert!(
+                x.is_nan() && y.is_nan(),
+                "{ctx}[{i}]: NaN 不一致 {a:?} vs {b:?}"
+            );
+        } else if x.is_infinite() || y.is_infinite() {
+            assert_eq!(x, y, "{ctx}[{i}]: inf 不一致 {a:?} vs {b:?}");
+        } else {
+            assert!(
+                common::req2_close(f64::from(*x), f64::from(*y)),
+                "{ctx}[{i}]: {x} vs {y}"
+            );
+        }
+    }
+}
+
+/// rfft（`x: [lanes, len]`・`dim = 1`）の上流重み `w: [lanes, n/2+1, 2]` で両経路の勾配を返す。
+fn rfft_grads(lanes: usize, len: usize, n: usize, w: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let run = |cg: bool| -> Vec<f32> {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(pattern(lanes * len, 0.3), &[lanes, len]));
+        let y = x.rfft(Some(n), Some(1), FftNorm::Backward).expect("rfft");
+        let wv = tape.var_no_grad(&t(w.to_vec(), &[lanes, n / 2 + 1, 2]));
+        let loss = y.mul(&wv).expect("mul").sum(None).expect("sum");
+        if cg {
+            let child = Tape::new_with_ops(common::naive_ops());
+            let grads = tape.backward_create_graph(&loss, &child).expect("cg");
+            dense(&grads.grad(&x).expect("grad").expect("到達").to_tensor())
+        } else {
+            let grads = tape.backward(&loss).expect("backward");
+            dense(grads.get(&x).expect("get").expect("到達"))
+        }
+    };
+    (run(false), run(true))
+}
+
+/// 1 レーンだけ DC 虚部が inf: 汚染は当該レーンの有効位置に限り、他レーンは有限（n < L・n = L・n > L）。
+#[test]
+fn rfft_nonfinite_poison_stays_in_lane() {
+    for (len, n) in [(4usize, 4usize), (6, 4), (3, 4)] {
+        let (lanes, bins) = (3usize, n / 2 + 1);
+        let mut w = vec![0.0f32; lanes * bins * 2];
+        w[bins * 2 + 1] = f32::INFINITY;
+        let (a, b) = rfft_grads(lanes, len, n, &w);
+        assert_same_with_nonfinite(&a, &b, "inf 1 レーン");
+        let valid = len.min(n);
+        for lane in 0..lanes {
+            for j in 0..len {
+                let expect_nan = lane == 1 && j < valid;
+                assert_eq!(
+                    b[lane * len + j].is_nan(),
+                    expect_nan,
+                    "lane={lane} j={j} {b:?}"
+                );
+            }
+        }
+    }
+}
+
+/// 有限の 3e38 が複数レーンの DC・Nyquist 虚部にある: 和の overflow による NaN を作らない。
+#[test]
+fn rfft_large_finite_imag_in_many_lanes_is_not_poisoned() {
+    let (lanes, len, n) = (3usize, 4usize, 4usize);
+    let bins = n / 2 + 1;
+    let mut w = vec![0.0f32; lanes * bins * 2];
+    for lane in 0..lanes {
+        w[(lane * bins) * 2 + 1] = 3.0e38;
+        w[(lane * bins + n / 2) * 2 + 1] = 3.0e38;
+    }
+    let (a, b) = rfft_grads(lanes, len, n, &w);
+    assert_same_with_nonfinite(&a, &b, "3e38 複数レーン");
+}
+
+/// irfft に上流 `[inf, 0, 0, 0]`: DC・Nyquist の虚部勾配は両経路とも +0.0（NaN にしない）。
+#[test]
+fn irfft_real_bin_imag_grad_is_zero_with_inf_upstream() {
+    let n = 4usize;
+    let run = |cg: bool| -> Vec<f32> {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(pattern((n / 2 + 1) * 2, 0.7), &[n / 2 + 1, 2]));
+        let y = x.irfft(Some(n), Some(0), FftNorm::Backward).expect("irfft");
+        let wv = tape.var_no_grad(&t(vec![f32::INFINITY, 0.0, 0.0, 0.0], &[n]));
+        let loss = y.mul(&wv).expect("mul").sum(None).expect("sum");
+        if cg {
+            let child = Tape::new_with_ops(common::naive_ops());
+            let grads = tape.backward_create_graph(&loss, &child).expect("cg");
+            dense(&grads.grad(&x).expect("grad").expect("到達").to_tensor())
+        } else {
+            let grads = tape.backward(&loss).expect("backward");
+            dense(grads.get(&x).expect("get").expect("到達"))
+        }
+    };
+    let (a, b) = (run(false), run(true));
+    assert_same_with_nonfinite(&a, &b, "irfft inf 上流");
+    for bin in [0usize, n / 2] {
+        assert_eq!(a[bin * 2 + 1], 0.0, "通常 backward の虚部: {a:?}");
+        assert_eq!(b[bin * 2 + 1], 0.0, "create_graph の虚部: {b:?}");
+    }
+}

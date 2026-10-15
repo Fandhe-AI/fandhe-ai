@@ -16,7 +16,7 @@
 //! - `Ifft`: `fft(g, n, dim, swap(norm))` の後に `L` へ合わせる。
 //! - `Rfft`: Hermitian の倍加を打ち消す重み `h`（DC と〈`n` 偶数の〉Nyquist は 1、それ以外は
 //!   0.5。0 を含まない）を掛けて `irfft(.., n, dim, swap(norm))`、その後 `L` へ。DC・Nyquist の虚部は
-//!   `irfft` が読まないため、1 階 VJP と同じ非有限値の伝播になるよう 0 倍した和を全要素へ加える。
+//!   `irfft` が読まないため、1 階 VJP と同じ非有限値の伝播になるよう レーンごとに 0 倍して当該レーンの有効入力位置へ加える（`Irfft` の DC・Nyquist 虚部は 1 階が +0.0 固定のため定数ゼロへ置換）。
 //! - `Irfft`: `rfft(g, n, dim, swap(norm))` に重み `c`（DC・Nyquist は 1、それ以外は 2）を掛け、
 //!   bin 軸を入力の bin 数 `m` へ合わせる。
 //!
@@ -154,34 +154,80 @@ pub(super) fn fft_vjp<'c>(
             let r = g.mul(&h)?.irfft(Some(n), Some(dim), sw)?;
             let r = resize_axis(child, &r, dim, n, l)?;
             // `irfft` は DC・Nyquist の虚部を読まないが、1 階 VJP（`rfft_vjp_host`）は
-            // `gi * sin` に含めるため非有限値（inf／NaN）が出力へ伝播する。同じ扱いに揃えるため、
-            // その虚部を 0 倍した和（有限なら厳密に 0、非有限なら NaN）を全要素へ加える。
-            let mut poison: Option<Var<'c>> = None;
+            // レーンごとに `gi * sin` を足すため、そのレーンの非有限値（inf／NaN）が当該レーンの
+            // 有効入力位置（`j < min(n, L)`）だけへ伝播する。同じ扱いに揃えるため、各レーンの
+            // その虚部を要素ごとに 0 倍（有限なら厳密に 0、非有限なら NaN）してから `dim` 軸へ
+            // 広げて有効位置へ加える。全レーンのスカラー縮約はしない（無関係なレーンへの汚染と
+            // 有限値の和の overflow を避ける）。
             let mut bins = vec![0usize];
             if n.is_multiple_of(2) && n / 2 > 0 {
                 bins.push(n / 2);
             }
-            let zero = child.var_no_grad(&Tensor::zeros(&[1])?);
             let im_axis = g.shape().len() - 1;
+            let mut poison: Option<Var<'c>> = None;
             for k in bins {
                 let im = g.narrow(dim, k, 1)?.narrow(im_axis, 1, 1)?;
-                let z = im.sum(None)?.mul(&zero.sum(None)?)?;
+                let zero = child.var_no_grad(&Tensor::zeros(&im.shape())?);
+                let z = im.mul(&zero)?;
                 poison = Some(match poison {
                     Some(p) => p.add(&z)?,
                     None => z,
                 });
             }
             match poison {
-                Some(p) => r.add(&p.broadcast_to(&r.shape())?),
+                Some(p) => {
+                    let mut lane_shape = p.shape();
+                    lane_shape.pop();
+                    let p = p.reshape(&lane_shape)?;
+                    let valid = l.min(n);
+                    let mut full = lane_shape.clone();
+                    full[dim] = valid;
+                    let p = p.broadcast_to(&full)?;
+                    let p = resize_axis(child, &p, dim, valid, l)?;
+                    r.add(&p)
+                }
                 None => Ok(r),
             }
         }
         FftKind::Irfft => {
             let c = hermitian_weights(child, input_shape.len(), dim, n, 2.0)?;
-            let r = g.rfft(Some(n), Some(dim), sw)?.mul(&c)?;
+            let r = g.rfft(Some(n), Some(dim), sw)?;
+            // 1 階 VJP（`irfft_vjp_host`）は DC・〈`n` 偶数の〉Nyquist の虚部勾配をリテラル +0.0 に
+            // 固定する。`rfft` の当該虚部は `g * sin(0)` を含み上流 `g` が非有限だと NaN になるため、
+            // 定数ゼロへ置換（`narrow` + `cat`）して揃える。
+            let r = zero_real_bin_imag(child, &r, dim, n)?.mul(&c)?;
             resize_axis(child, &r, dim, n / 2 + 1, l)
         }
     }
+}
+
+/// `r: [.., n/2+1 (dim), .., 2]` の実数 bin（DC と〈`n` 偶数の〉Nyquist）の虚部を定数ゼロへ置換する。
+fn zero_real_bin_imag<'c>(
+    child: &'c Tape,
+    r: &Var<'c>,
+    dim: usize,
+    n: usize,
+) -> Result<Var<'c>, AutodiffError> {
+    let im_axis = r.shape().len() - 1;
+    let m = n / 2 + 1;
+    let re = r.narrow(im_axis, 0, 1)?;
+    let im = r.narrow(im_axis, 1, 1)?;
+    let zero_bin = || -> Result<Var<'c>, AutodiffError> {
+        let mut shape = im.shape();
+        shape[dim] = 1;
+        Ok(child.var_no_grad(&Tensor::zeros(&shape)?))
+    };
+    let nyq = n.is_multiple_of(2) && n / 2 > 0;
+    let mut parts = vec![zero_bin()?];
+    let mid_end = if nyq { m - 1 } else { m };
+    if mid_end > 1 {
+        parts.push(im.narrow(dim, 1, mid_end - 1)?);
+    }
+    if nyq {
+        parts.push(zero_bin()?);
+    }
+    let im_fixed = Var::cat(&parts, dim)?;
+    Var::cat(&[re, im_fixed], im_axis)
 }
 
 // ---------------------------------------------------------------------
