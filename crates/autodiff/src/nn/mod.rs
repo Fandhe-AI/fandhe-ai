@@ -270,6 +270,7 @@ mod transformer_decoder_layer;
 mod transformer_encoder_layer;
 mod unflatten;
 mod upsample;
+mod weight_reparam;
 
 pub mod activation;
 pub mod loss;
