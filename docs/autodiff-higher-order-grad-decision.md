@@ -903,6 +903,12 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - 是正: `s_g` を `ceil(log2 m) + 2`（m は行長 `n·spatial`）で打ち切る。縮約の安全は `|t| <= max|dx̂|/(4m)`（`Σ|t·x̂| <= m·max|t|`・`|x̂| <= √m`）で足りるため、逆伝播の累積倍率は `rstd·2^(ceil(log2 m)+2)` 以下に収まる。小さい上流勾配は従来どおり `s_g` が負で拡大側。dx の値は 1 階のホスト値で上書きされるため値は不変。
 - 回帰テスト: `batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero`（上記ケースで二階勾配が有限かつ 0）。
 
+### 23.5c レビュー指摘の是正（Codex P1・上流勾配を含む倍率の overflow）
+
+- 固定の `POW2_BAL=64` は単位シードしか保護できず、上流勾配 `g=1e20` を含む `∂dw/∂x`（`x=mean=3e38`・`var=0`・`loss=sum(y·1e20)`）で `g·2^(k+p)` が `inv_p` に届く前に overflow した。
+- 前置スケール指数 `p` の上限を、行ごとの `ceil(log2 max|g|)`（train は `dx̂` との最大）と実効 rstd の指数 `k` から `p_upper = clamp(125 − g_exp − k, 0, 64)` として決める（`create_graph_norm.rs::p_upper`／`upstream_exps`）。eval は `rstd` から、train はホスト f64 統計から `k` を見積もる。`p` を下げても 2 のべき乗スケールなので値は変わらない。
+- 回帰テスト `batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite`（eval は `∂dw/∂x ≈ 3.16e22`、train は有限）を追加した。
+
 ### 23.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。facade の `hvp`／`jacfwd` の総合確認は #3087、実機（CUDA／Metal）の parity は #3168・#3169 の範囲。

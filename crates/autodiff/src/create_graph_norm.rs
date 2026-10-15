@@ -67,6 +67,31 @@ pub(crate) fn pow2_ceil_exp(max_abs: f64) -> i32 {
     ceil.clamp(POW2_MIN_EXP, POW2_MAX_EXP)
 }
 
+/// 上流勾配 `g`（`[c, m]`）の行ごとの `ceil(log2 max|g|)`（0 以上。`inf` は 127）。
+/// 逆伝播の累積倍率 `|g|·2^(k+p)` を f32 に収めるための前置スケール上限の入力。
+fn upstream_exps<'c>(child: &'c Tape, g_rows: &Var<'c>) -> Result<Vec<i32>, AutodiffError> {
+    let shape = g_rows.shape();
+    let (c, m) = (shape[0], shape[1]);
+    let gv = host_values(child, g_rows)?;
+    Ok(row_abs_max(&gv, c, m)
+        .iter()
+        .map(|&(mx, inf)| {
+            if inf {
+                POW2_MAX_EXP
+            } else {
+                pow2_ceil_exp(mx).max(0)
+            }
+        })
+        .collect())
+}
+
+/// 前置スケール指数 `p` の上限。累積倍率 `|g|·2^(k+p)`（`g_exp`＝上流勾配の
+/// 指数、`k`＝実効 rstd の指数）が f32 に収まる `125 - g_exp - k`（`[0, POW2_BAL]`）。
+/// 固定上限 `POW2_BAL` だけでは単位シードしか保護できない（決定記録 §21.1 (5)）。
+fn p_upper(g_exp: i32, k: i32) -> i32 {
+    (POW2_MAX_EXP - 2 - g_exp - k.max(0)).clamp(0, POW2_BAL)
+}
+
 /// `2^e`（`e` は `[-1022, 1023]`）を f64 で返す。
 fn pow2_f64(e: i32) -> f64 {
     let e = e.clamp(-1022, 1023);
@@ -194,14 +219,28 @@ pub(crate) fn scaled_row_xhat<'c>(
     child: &'c Tape,
     x_rows: &Var<'c>,
     eps: f32,
+    g_exp: &[i32],
 ) -> Result<(Var<'c>, Var<'c>, Vec<i32>), AutodiffError> {
     let shape = x_rows.shape();
     let (c, m) = (shape[0], shape[1]);
     let xv = host_values(child, x_rows)?;
+    // 実効 rstd の指数 k をホストの f64 統計から見積もり、p の上限を上流勾配の
+    // 指数 `g_exp` と合わせて決める（逆伝播の累積倍率 `|g|·rstd·2^p` の保護）。
     let p_exp: Vec<i32> = row_abs_max(&xv, c, m)
         .iter()
-        .map(|&(mx, inf)| {
-            (if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) }).clamp(-POW2_BAL, POW2_BAL)
+        .enumerate()
+        .map(|(ch, &(mx, inf))| {
+            let row = &xv[ch * m..(ch + 1) * m];
+            let mean = row.iter().map(|&v| v as f64).sum::<f64>() / m as f64;
+            let var = row.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>() / m as f64;
+            let rstd = 1.0 / (var + eps as f64).sqrt();
+            let k = if rstd.is_finite() && rstd > 0.0 {
+                ((rstd.to_bits() >> 52) & 0x7ff) as i32 - 1023
+            } else {
+                0
+            };
+            (if inf { POW2_MAX_EXP } else { pow2_ceil_exp(mx) })
+                .clamp(-POW2_BAL, p_upper(g_exp[ch], k))
         })
         .collect();
     let inv_p: Vec<f32> = p_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
@@ -261,20 +300,28 @@ fn eval_row_xhat<'c>(
     x_rows: &Var<'c>,
     mean: &[f32],
     rstd: &[f64],
+    g_rows: &Var<'c>,
 ) -> Result<Var<'c>, AutodiffError> {
     let shape = x_rows.shape();
     let (c, m) = (shape[0], shape[1]);
     let xv = host_values(child, x_rows)?;
+    let g_exp = upstream_exps(child, g_rows)?;
     let p_exp: Vec<i32> = row_abs_max(&xv, c, m)
         .iter()
-        .zip(mean.iter())
-        .map(|(&(mx, inf), &mu)| {
+        .enumerate()
+        .map(|(ch, &(mx, inf))| {
+            let (mu, r) = (mean[ch], rstd[ch]);
+            let k = if r.is_finite() && r > 0.0 {
+                ((r.to_bits() >> 52) & 0x7ff) as i32 - 1023
+            } else {
+                0
+            };
             if inf || !mu.is_finite() {
                 POW2_MAX_EXP
             } else {
                 pow2_ceil_exp(mx.max((mu as f64).abs()))
             }
-            .clamp(-POW2_BAL, POW2_BAL)
+            .clamp(-POW2_BAL, p_upper(g_exp[ch], k))
         })
         .collect();
     let inv_p: Vec<f32> = p_exp.iter().map(|&e| pow2_f64(-e) as f32).collect();
@@ -393,7 +440,14 @@ pub(crate) fn batch_norm_cgrads<'c>(
     // 正規化値 x̂ と、train の実効 rstd 指数。
     let (xhat, train_ctx) = match inp.fixed_stats {
         None => {
-            let (xhat, rstd_s, exps) = scaled_row_xhat(child, &x_rows, inp.eps)?;
+            let ge_g = upstream_exps(child, &g_rows)?;
+            let ge_dx = upstream_exps(child, &dxhat)?;
+            let g_exp: Vec<i32> = ge_g
+                .iter()
+                .zip(ge_dx.iter())
+                .map(|(a, b)| *a.max(b))
+                .collect();
+            let (xhat, rstd_s, exps) = scaled_row_xhat(child, &x_rows, inp.eps, &g_exp)?;
             (xhat, Some((rstd_s, exps)))
         }
         Some((mu, var)) => {
@@ -402,7 +456,7 @@ pub(crate) fn batch_norm_cgrads<'c>(
                 .iter()
                 .map(|&v| 1.0f64 / (v as f64 + inp.eps as f64).sqrt())
                 .collect();
-            (eval_row_xhat(child, &x_rows, &mean, &rstd)?, None)
+            (eval_row_xhat(child, &x_rows, &mean, &rstd, &g_rows)?, None)
         }
     };
 

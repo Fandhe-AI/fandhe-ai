@@ -2936,3 +2936,44 @@ fn batch_norm_create_graph_train_huge_upstream_zero_input_hessian_is_zero() {
         assert!(hd.iter().all(|v| v.is_finite() && *v == 0.0), "{hd:?}");
     }
 }
+
+/// Codex P1 回帰: 上流勾配 `1e20` を含む混合二階勾配 `∂dw/∂x` が有限（eval は
+/// `g·rstd ≈ 3.16e22`）。固定の前置スケール上限では単位シードしか保護できず、
+/// 上流勾配に `2^(k+p)` が先に掛かり overflow した。eval と train の両経路を検証する。
+#[test]
+fn batch_norm_create_graph_huge_constant_input_with_huge_upstream_is_finite() {
+    for train in [false, true] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(vec![3e38; 2], &[2, 1]));
+        let w = tape.var(&t(vec![1.0], &[1]));
+        let y = if train {
+            x.batch_norm(Some(&w), None, 1e-5).unwrap()
+        } else {
+            x.batch_norm_infer(
+                Some(&w),
+                None,
+                &t(vec![3e38], &[1]),
+                &t(vec![0.0], &[1]),
+                1e-5,
+            )
+            .unwrap()
+        };
+        let k = tape.var_no_grad(&t(vec![1e20, 1e20], &[2, 1]));
+        let loss = y.mul(&k).unwrap().sum(None).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let dw = cg.grad(&w).unwrap().unwrap();
+        let s2 = dw.sum(None).unwrap();
+        let hv = child.backward(&s2).unwrap();
+        let cx = cg.child_var(&x).unwrap().unwrap();
+        if let Some(h) = hv.get(&cx).unwrap() {
+            let hd = h.contiguous().as_slice().unwrap().to_vec();
+            assert!(hd.iter().all(|v| v.is_finite()), "train={train}: {hd:?}");
+            if !train {
+                for v in &hd {
+                    assert!((v / 3.162_277_7e22 - 1.0).abs() < 1e-3, "eval ∂dw/∂x = {v}");
+                }
+            }
+        }
+    }
+}
