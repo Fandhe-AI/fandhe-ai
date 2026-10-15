@@ -2251,8 +2251,17 @@ impl Sequential {
     /// epoch で等重み平均を更新し、fit が `Ok` で終わったとき（学習打ち切りを含む）モデルの重みを
     /// 平均化重みで上書きする。上書き直前の生の重み（`restore_best_weights` の書き戻し後）は
     /// [`super::callbacks::SwaCallback::raw_state_dict`] から取り出せる。`Err` 終了では上書きしない。
-    /// 学習率アニールと併用拒否条件は #3059 で導入予定で、現時点では未ガード
-    /// （決定記録 `docs/autodiff-swa-decision.md` §16・§17）。
+    ///
+    /// ## SWA の学習率と拒否条件（イシュー #3059）
+    ///
+    /// `epochs_seen >= swa_start` の epoch は、epoch 開始時（`LrSchedule` の同期後）に `SwaLr` の
+    /// 学習率を optimizer へ書き `history.lr` に記録する（`LrSchedule` と併用した場合は SWA 区間で
+    /// SWA が優先し、`LrSchedule` の内部カウンタは進む）。次は fit 開始前に
+    /// [`AutodiffError::InvalidArgument`] で拒否し、モデル・compile 状態・callback は変えない:
+    /// `Callback::Swa` の複数指定・`Optimizer::Lbfgs`・`fit_with_train_step`・`compile_with_amp`・
+    /// `Callback::Ema` との併用・`EarlyStopping::restore_best_weights(true)` との併用・
+    /// `set_lr` 非対応 optimizer（RmsProp／Adagrad／Lamb）・param groups 設定時。
+    /// 基準 lr が 0 以下になった場合は fit 中に `InvalidArgument`（決定記録 §16・§17・§18）。
     ///
     /// # エラー
     ///
@@ -2817,6 +2826,52 @@ impl Sequential {
                 )));
             }
         }
+        // (1.8b) SWA（イシュー #3059。決定記録 `docs/autodiff-swa-decision.md` §16.4）の併用検査。
+        // いずれも fit 開始前の fail-closed 拒否（最初に当たった理由を採用）。位置は
+        // `begin_fit`・モード切替・DataLoader 構築より前のため、拒否時はモデル・callback は不変。
+        let swa_count = callbacks
+            .iter()
+            .filter(|cb| matches!(cb, Callback::Swa(_)))
+            .count();
+        if swa_count > 0 {
+            let has_ema = callbacks.iter().any(|cb| matches!(cb, Callback::Ema(_)));
+            let es_restores = callbacks
+                .iter()
+                .any(|cb| matches!(cb, Callback::EarlyStopping(es) if es.restores_best_weights()));
+            let reason = if swa_count > 1 {
+                Some("Callback::Swa は複数指定できない")
+            } else if matches!(compiled.optimizer, OptimizerState::Lbfgs(_)) {
+                Some("Callback::Swa は Optimizer::Lbfgs と併用できない")
+            } else if custom_step.is_some() {
+                Some("Callback::Swa はカスタム学習 step フックと併用できない")
+            } else if compiled.amp.is_some() {
+                Some(
+                    "Callback::Swa は compile_with_amp（AMP）と併用できない（skip step と平均の関係が未決のため）",
+                )
+            } else if has_ema {
+                Some(
+                    "Callback::Swa は Callback::Ema と併用できない（fit 終了時の重みの意味が衝突するため）",
+                )
+            } else if es_restores {
+                Some("Callback::Swa は EarlyStopping::restore_best_weights(true) と併用できない")
+            } else if !compiled.optimizer.supports_lr_schedule() {
+                Some(
+                    "Callback::Swa は set_lr を提供しない optimizer（RmsProp／Adagrad／Lamb）と併用できない",
+                )
+            } else if !compiled.param_groups.is_empty() {
+                Some(
+                    "Callback::Swa は compile_with_param_groups で param groups を設定した状態では併用できない",
+                )
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                self.compiled = Some(compiled);
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::{method}: {reason}（イシュー #3059）"
+                )));
+            }
+        }
         // (1.9) validation_split（イシュー #2564）の解決。実際に検証データを生成する分割
         // のときだけ「validation あり」として扱い（`docs/compat-fit-sample-weighting-
         // decision.md` §11.4）、以降の validation 参照（callbacks／metrics／ロガー／
@@ -3222,6 +3277,21 @@ impl Sequential {
                         && let Err(e) = compiled.optimizer.set_lr(ls.lr_for_epoch_begin())
                     {
                         break 'epochs_block Err(e);
+                    }
+                }
+                // (1b) SWA の学習率（イシュー #3059。決定記録 §16.2）。`LrSchedule` の同期の後に
+                // 別パスで書くため、callback の並び順に依らず SWA 区間では SWA が優先する。
+                for cb in callbacks.iter_mut() {
+                    if let Callback::Swa(s) = cb {
+                        match s.lr_for_epoch(compiled.optimizer.lr()) {
+                            Ok(Some(lr)) => {
+                                if let Err(e) = compiled.optimizer.set_lr(lr) {
+                                    break 'epochs_block Err(e);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => break 'epochs_block Err(e),
+                        }
                     }
                 }
                 history.lr.push(compiled.optimizer.lr());

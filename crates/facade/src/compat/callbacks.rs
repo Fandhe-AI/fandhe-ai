@@ -158,7 +158,11 @@
 //! [`Callback::Swa`]（[`SwaCallback`]）は [`crate::optim::AveragedModel`] を `fit_with_callbacks`
 //! へ結線する opt-in の callback。epoch 末（validation・epoch 末 callbacks より前）に生の重みで
 //! 等重み平均を更新し、fit が `Ok` で終わったとき平均化重みでモデルを上書きする（上書き前の
-//! 重みは [`SwaCallback::raw_state_dict`] に退避）。学習率アニールと併用拒否条件は #3059。
+//! 重みは [`SwaCallback::raw_state_dict`] に退避）。`epochs_seen >= swa_start` の epoch は epoch 開始時に `SwaLr`（#3059）の学習率を書く。
+//! 併用拒否（fit 開始前に `InvalidArgument`）: `Callback::Swa` の複数指定・`Optimizer::Lbfgs`・
+//! カスタム train_step フック・`compile_with_amp`・`Callback::Ema` 併用・
+//! `EarlyStopping::restore_best_weights(true)`・`set_lr` 非対応 optimizer（RmsProp／Adagrad／Lamb）・
+//! param groups 設定時。
 //! 詳細は [`SwaCallback`] の doc を参照。
 //!
 //! 公開面は `api_surface.rs` の正ガード（`facade_exposes_ema_only_in_approved_shape`・
@@ -345,6 +349,11 @@ impl EarlyStopping {
     pub fn restore_best_weights(mut self, on: bool) -> Self {
         self.restore_best_weights = on;
         self
+    }
+
+    /// `restore_best_weights` が有効か（`Callback::Swa` との併用拒否判定用。#3059）。
+    pub(super) fn restores_best_weights(&self) -> bool {
+        self.restore_best_weights
     }
 
     /// 学習を打ち切った fit ローカル epoch 番号（0 始まり）。停止せず
@@ -1330,10 +1339,12 @@ impl EmaCallback {
 }
 
 /// 継続 fit 開始時点の（平均, `epochs_seen`, 退避した生の重み）。
+/// 4 要素目はアニール基準 lr（`anneal_base_lr`。§16.3: `epochs_seen` と一緒に巻き戻す）。
 type FitSnapshot = (
     crate::optim::AveragedModel,
     usize,
     HashMap<String, Tensor<f32>>,
+    Option<f32>,
 );
 
 /// 確率的重み平均（SWA）を `fit_with_callbacks` へ結線する callback（[`Callback::Swa`]。
@@ -1352,8 +1363,19 @@ type FitSnapshot = (
 /// - **継続**: 次の fit の開始時、モデルの重みが前回の平均化重みと bit 一致なら退避から生の重みを
 ///   書き戻して継続し、利用者が重みを変えていれば退避を破棄して現在の重みから継続する。
 /// - **対象外**: `BatchNorm` の running 統計は平均化されない（`update_bn` 相当は未対応）。
-///   学習率アニール（`swa_lr`／`anneal_epochs`／`anneal` の適用）と併用拒否条件は #3059 で導入予定で、
-///   現時点ではこれらの値は保持するだけで学習率へは作用せず、拒否も行わない。
+///
+/// # 学習率アニール・拒否条件（イシュー #3059。決定記録 §16.2・§16.4・§18）
+///
+/// - `epochs_seen >= swa_start` の epoch の開始時（`LrSchedule` の同期後）に、`SwaLr` の閉形式の
+///   学習率を optimizer へ書く。基準 lr は区間に入った最初の epoch 開始時の `optimizer.lr()`。
+///   `LrSchedule` との併用は受け付け、SWA 区間では SWA が優先する（`LrSchedule` の内部カウンタは進む）。
+///   fit 終了後の optimizer の lr は最後にアニールした値のまま残る。
+/// - 基準 lr が非有限・0 以下になった場合（例: 主スケジューラが 0 まで落ちた）は `InvalidArgument`
+///   で fit を `Err` にする（PyTorch との差分。救済しない）。
+/// - 拒否（fit 開始前に `InvalidArgument`。モデル・compile 状態・callback は不変）: `Callback::Swa` の
+///   複数指定・`Optimizer::Lbfgs`・カスタム train_step フック・`compile_with_amp`・`Callback::Ema` 併用・
+///   `EarlyStopping::restore_best_weights(true)`・`set_lr` 非対応 optimizer・param groups 設定時。
+///   `ModelCheckpoint` と restore 無効の `EarlyStopping` は併用できる。
 ///
 /// # Examples
 ///
@@ -1396,6 +1418,10 @@ pub struct SwaCallback {
     /// 巻き戻すためのスナップショット（`AveragedModel` の更新は新テンソルへの差し替えのため
     /// shallow clone で独立する。decision §16.3）。
     fit_snapshot: Option<FitSnapshot>,
+    /// アニール基準 lr。`epochs_seen == swa_start` の epoch 開始時（`LrSchedule` 同期後）の
+    /// `optimizer.lr()` を一度だけ確定して保持する（PyTorch `SWALR` が切替時の lr を基準にするのと同じ。
+    /// fit をまたいで保持し、`Err` 終了時は `epochs_seen` と一緒に巻き戻す。#3059）。
+    anneal_base_lr: Option<f32>,
 }
 
 /// 2 つの state_dict が全キー・全要素で bit 一致するか（`SwaCallback::begin_fit` の継続判定用）。
@@ -1443,6 +1469,7 @@ impl SwaCallback {
             raw: None,
             restored_for_fit: false,
             fit_snapshot: None,
+            anneal_base_lr: None,
         })
     }
 
@@ -1530,13 +1557,38 @@ impl SwaCallback {
                         return Err(e);
                     }
                     self.restored_for_fit = true;
-                    self.fit_snapshot = Some((avg.clone(), self.epochs_seen, raw_snapshot));
+                    self.fit_snapshot = Some((
+                        avg.clone(),
+                        self.epochs_seen,
+                        raw_snapshot,
+                        self.anneal_base_lr,
+                    ));
                 }
             } else {
                 self.raw = None;
             }
         }
         Ok(())
+    }
+
+    /// epoch 開始時の SWA 学習率（イシュー #3059。決定記録 §16.2）。`run_fit` が `LrSchedule` の
+    /// 同期後に呼び、`Some(lr)` なら `optimizer.set_lr` で書く（SWA 区間では SWA が優先）。
+    ///
+    /// `epochs_seen < swa_start` は `None`（学習率に触れない）。区間に入った最初の呼び出しで
+    /// `current_lr` を基準 lr として確定し、以降は `SwaLr` の閉形式 `lr_at(epochs_seen - swa_start)`。
+    /// 基準 lr が非有限・0 以下のときは `SwaLr::new` の `InvalidArgument` をそのまま返す
+    /// （fail-closed。PyTorch と異なり救済しない。§18）。
+    pub(super) fn lr_for_epoch(&mut self, current_lr: f32) -> Result<Option<f32>, AutodiffError> {
+        use crate::optim::LrScheduler;
+        if self.avg.is_none() {
+            return Err(Self::invariant("lr_for_epoch"));
+        }
+        if self.epochs_seen < self.swa_start {
+            return Ok(None);
+        }
+        let base = *self.anneal_base_lr.get_or_insert(current_lr);
+        let sched = crate::optim::SwaLr::new(base, self.swa_lr, self.anneal_epochs, self.anneal)?;
+        Ok(Some(sched.lr_at(self.epochs_seen - self.swa_start)))
     }
 
     /// epoch 末の平均更新（`epochs_seen >= swa_start` のときだけ平均へ加える）。
@@ -1564,9 +1616,10 @@ impl SwaCallback {
         }
         // 失敗 fit が進めた平均・epoch カウンタを fit 開始時点へ巻き戻す（§16.3）。
         let mut snap_raw = None;
-        if let Some((snap_avg, snap_epochs, raw)) = self.fit_snapshot.take() {
+        if let Some((snap_avg, snap_epochs, raw, snap_base)) = self.fit_snapshot.take() {
             self.avg = Some(snap_avg);
             self.epochs_seen = snap_epochs;
+            self.anneal_base_lr = snap_base;
             snap_raw = Some(raw);
         }
         let Some(avg) = self.avg.as_ref() else { return };
@@ -1678,6 +1731,10 @@ mod tests {
         ));
         assert!(matches!(
             cb.finish_fit(&mut model),
+            Err(AutodiffError::InvalidArgument(m)) if m.contains("内部不変条件違反")
+        ));
+        assert!(matches!(
+            cb.lr_for_epoch(0.1),
             Err(AutodiffError::InvalidArgument(m)) if m.contains("内部不変条件違反")
         ));
     }
