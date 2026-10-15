@@ -664,3 +664,14 @@ pub fn jvp_create_graph<'g>(&self, output: &Var<'_>, input: &Var<'_>, tangent: &
 - **2 段目で写せた Op**: bias パターンの add・matmul・`where_cond`・relu・clamp・abs・`log`・`sin`・`exp`・`sigmoid`・`pow_scalar`・sub・div・pow・reshape・transpose・narrow・cat。2 段目だけで拒否される Op は、今回構成した例では見つからなかった（現在の対象 Op では 2 段目の拒否は到達しない）。
 - **未検証**: `DeviceMismatch` は `test_support` に別デバイスを返す `BackendOps` がないため単体テストで検証していない（実装は `backward_create_graph` と同じ検査）。
 - **#3068 への申し送り**: facade `api_surface.rs` の `CreateGraphResult` 再エクスポート検査は `pub use` 行に `"CreateGraphResult"` が部分文字列として含まれるかで判定しており、`pub use fandhe_ai_autodiff::JvpCreateGraphResult;` も引っかかる。完全一致化するか承認形を別に足す必要がある。`jvp_create_graph` を宣言インベントリへ足すと `autodiff/src/functional_ops.rs` の 1 件が数えられる（autodiff 側のテストに同名の `fn` は置いていない）。
+
+### 31.10 実装記録（#3068）
+
+- **公開した形**: §31.1 と一致する（差はない）。`Tape::jvp_create_graph<'g>(&self, output, input, tangent, child: &Tape, grandchild: &'g Tape) -> Result<JvpCreateGraphResult<'g>, AutodiffError>` を `impl Tape` の 1 行委譲（`fandhe_ai_autodiff::functional_ops::jvp_create_graph(&self.0, ..., &child.0, &grandchild.0)`）として足し、crate ルートに `pub use fandhe_ai_autodiff::JvpCreateGraphResult;` を足した。承認根拠は 2026-10-11 の所有者判断 D-A（一括承認）で、これを超える承認はない。
+- **rustdoc と doctest**: §31.3 の契約（テープの役割と再利用不可・微分の繋がり方・入口検査の順序・ゼロ経路・ノードの残り方・数値と適用範囲）を書いた。doctest は facade だけで完結し、`y = x ⊙ x` で `output() = 2x ⊙ v = [2, 2, 12]`、`grandchild.backward` 後に `child_var(&x)` の勾配が `2v = [2, 1, 4]` になることを確かめる。
+- **保留ガード**: 反転対象はない。`FunctionalTransformsHoldDoctestGuard` に、裸の自由関数・`Var<'t>`・`Tensor<f32>` 上の `jvp_create_graph`（トレイトメソッド・UFCS）のプローブを足した。`Tape` 受け手のプローブは承認形と衝突するため足さない。
+- **`api_surface.rs`**: 名前配列 7 名・識別子配列 8 件・承認シグネチャ（`<'g>`・`grandchild: &'g Tape` を含む）と 1 行委譲本体を足し、宣言インベントリを 15 件にした。`CreateGraphResult` の再エクスポート検査は `pub use` 行への部分文字列一致から識別子完全一致（`scan_pub_use_decls_containing_idents`）へ変えた（§31.9 の申し送り。検出力を保ったまま `JvpCreateGraphResult` 等の別名の型への誤一致だけを除く、締める方向の変更）。新設の正ガード `facade_reexports_jvp_create_graph_result_in_approved_shape` は `lib.rs` の承認形 1 行だけを許し、自己テスト `facade_reexports_create_graph_result_guards_detect_each_category` が各違反類型と両ガードの識別子分離を固定する。到達性テストは関数型を型で固定し CPU で最小呼び出しを行う。
+- **結合テスト**（`functional_transforms_jvp_facade.rs`、CPU）: `create_graph_value_matches_jvp_and_closed_form`・`create_graph_second_order_is_two_v_for_square`・`create_graph_matches_hvp_and_hessian_for_scalar_loss`・`create_graph_child_var_semantics`・`create_graph_input_validation_errors_propagate`・`create_graph_zero_paths`・`create_graph_unsupported_op_is_rejected`。数値比較は REQ-2 統一複合判定（`assert_parity`）を使い、tolerance は追加・変更していない。
+- **未検証**: `DeviceMismatch`（CPU だけでは作れない。§31.9 と同じ扱い）、facade からの親・子・孫テープのノード残り観測（公開 API がないため内部テスト C6／C7 に任せる）。
+- **申し送り**: 実機（CUDA／Metal）parity は #3168・#3169。`supports_create_graph` の対象 Op 拡張は #3075。
+- **変えていないもの**: 依存・`unsafe`・tolerance・baseline・ガードレール閾値・`docs/spec`・既存の公開シグネチャ。

@@ -15,6 +15,14 @@
 //! facade からノード数を観測する公開 API がないため内部テスト（`functional_ops_jvp_tests.rs` の M5）に任せる。
 //! 複数入力の実機 parity は `functional_transforms_jvp_multi_backend_parity.rs`（`#[ignore]`）が担当する。
 //!
+//! 微分可能な jvp `Tape::jvp_create_graph`／`JvpCreateGraphResult`（イシュー #3068・決定記録 §31）も同ファイルで
+//! CPU 結合テストする。固定するもの: `y = x ⊙ x` で `output() = 2x ⊙ v` かつ `Tape::jvp` と REQ-2 で一致、孫テープの
+//! `backward` が `child_var` の写しに `2v` を返す、スカラー損失での `Tape::hvp`／`Tape::hessian`（ホスト積）との整合、
+//! `child_var` の意味論（`Ok(None)`・`TapeMismatch`・`GradientTrackingDisabled`）、入口検査 1〜4 のエラー伝播と
+//! テープ事前検査（同一テープ・空でないテープ → `Backward`）、ゼロ経路、非対象 Op（`max`）の拒否。
+//! `DeviceMismatch` は CPU だけでは作れないため未検証（内部 #3067 でも未検証。§31.9）。親テープに残るノード数は
+//! facade から観測できないため内部テスト（C6／C7）に任せる。実機 parity は #3168・#3169 の範囲。
+//!
 //! 実機（CUDA／Metal）の parity は #2942 の既存 `#[ignore]` テスト
 //! （`functional_ops_jvp_backend_parity.rs`）が担当し、本ファイルは facade 層を CPU で担当する。
 //! 本ファイルのテスト関数名は宣言インベントリ（`api_surface.rs`。`crates/*/src` のみ走査）の対象外。
@@ -484,4 +492,277 @@ fn multi_input_untracked_output_is_zero() {
         .unwrap();
     assert_eq!(jv.shape(), &[2]);
     assert_eq!(host(&jv), vec![0.0, 0.0]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// #3068: 微分可能な jvp（`Tape::jvp_create_graph`）。参照用の `jacobian`／`hvp`／`hessian` は毎回新しい子テープで呼ぶ。
+// ---------------------------------------------------------------------------------------------
+
+/// `create_graph` 版の `output()` を `jvp` と `jacobian·v` に突き合わせる（shape も `output.shape()` と一致）。
+fn check_create_graph_value<F>(
+    label: &str,
+    x_data: Vec<f32>,
+    x_shape: &[usize],
+    v: Vec<f32>,
+    build: F,
+) where
+    F: for<'a> Fn(&'a Tape, &Var<'a>) -> Var<'a>,
+{
+    let t0 = tape();
+    let x = t0.var(&t(x_data, x_shape));
+    let y = build(&t0, &x);
+    let jac = host(&t0.jacobian(&y, &x).expect("jacobian"));
+    let tangent = t(v.clone(), x_shape);
+
+    let (child, grand) = (tape(), tape());
+    let res = t0
+        .jvp_create_graph(&y, &x, &tangent, &child, &grand)
+        .expect("jvp_create_graph");
+    let out = res.output().to_tensor();
+    assert_eq!(out.shape(), y.to_tensor().shape(), "{label}: shape");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("{label}: vs jacobian·v"),
+        &host(&out),
+        &reference_jv(&jac, &v),
+    );
+    let jv = t0.jvp(&y, &x, &tangent, &tape()).expect("jvp");
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        &format!("{label}: vs jvp"),
+        &host(&out),
+        &host(&jv),
+    );
+}
+
+#[test]
+fn create_graph_value_matches_jvp_and_closed_form() {
+    // y = x ⊙ x: output() = 2x ⊙ v（閉形式）。
+    let t0 = tape();
+    let x = t0.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let y = x.mul(&x).unwrap();
+    let v = t(vec![1.0, 0.5, 2.0], &[3]);
+    let (child, grand) = (tape(), tape());
+    let res = t0.jvp_create_graph(&y, &x, &v, &child, &grand).unwrap();
+    assert_eq!(res.output().to_tensor().shape(), y.to_tensor().shape());
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "create_graph: closed form",
+        &host(&res.output().to_tensor()),
+        &[2.0, 2.0, 12.0],
+    );
+
+    check_create_graph_value(
+        "mul",
+        vec![1.0, 2.0, 3.0],
+        &[3],
+        vec![1.0, 0.5, 2.0],
+        |_, x| x.mul(x).unwrap(),
+    );
+    let w = (0..12).map(|i| 0.1 * (i as f32) - 0.5).collect::<Vec<_>>();
+    check_create_graph_value(
+        "matmul_tanh",
+        vec![0.3, -0.7, 1.1, 0.5, 0.2, -0.4],
+        &[2, 3],
+        vec![1.0, -0.5, 0.25, 0.0, 2.0, -1.5],
+        move |tp, x| {
+            let w = tp.var_no_grad(&t(w.clone(), &[3, 4]));
+            x.matmul(&w).unwrap().tanh()
+        },
+    );
+    check_create_graph_value("rank0", vec![1.5], &[], vec![2.0], |_, x| x.mul(x).unwrap());
+}
+
+#[test]
+fn create_graph_second_order_is_two_v_for_square() {
+    let t0 = tape();
+    let x = t0.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let y = x.mul(&x).unwrap();
+    let v = t(vec![1.0, 0.5, 2.0], &[3]);
+    let (child, grand) = (tape(), tape());
+    let res = t0.jvp_create_graph(&y, &x, &v, &child, &grand).unwrap();
+    let grads = grand.backward(&res.output().sum(None).unwrap()).unwrap();
+    let xc = res.child_var(&x).unwrap().expect("結果は x に依存する");
+    let g = grads.get(&xc).unwrap().expect("2 階勾配");
+    // d(Σ 2x⊙v)/dx = 2v。
+    fandhe_ai_backend_cpu::parity::assert_parity(
+        "create_graph: backward = 2v",
+        &host(g),
+        &[2.0, 1.0, 4.0],
+    );
+}
+
+#[test]
+fn create_graph_matches_hvp_and_hessian_for_scalar_loss() {
+    let x0 = vec![0.5_f32, -1.0, 2.0];
+    let v0 = vec![1.0_f32, -0.5, 0.25];
+    let n = x0.len();
+    fn build<'a>(t0: &'a Tape, x0: &[f32]) -> (Var<'a>, Var<'a>) {
+        let x = t0.var(&t(x0.to_vec(), &[x0.len()]));
+        let loss = x
+            .mul(&x)
+            .unwrap()
+            .mul(&x)
+            .unwrap()
+            .tanh()
+            .sum(None)
+            .unwrap();
+        (x, loss)
+    }
+    let v = t(v0.clone(), &[n]);
+
+    // create_graph 版: L の jvp（スカラー ∇L·v）を孫テープで x について微分すると H·v。
+    let t0 = tape();
+    let (x, loss) = build(&t0, &x0);
+    let (child, grand) = (tape(), tape());
+    let res = t0.jvp_create_graph(&loss, &x, &v, &child, &grand).unwrap();
+    let grads = grand.backward(&res.output()).unwrap();
+    let xc = res.child_var(&x).unwrap().expect("結果は x に依存する");
+    let hv_cg = host(grads.get(&xc).unwrap().expect("H·v"));
+
+    // Tape::hvp との整合。
+    let tp = tape();
+    let (xp, lossp) = build(&tp, &x0);
+    let hv = tp.hvp(&lossp, &xp, &v, &tape()).expect("hvp");
+    fandhe_ai_backend_cpu::parity::assert_parity("create_graph vs hvp", &hv_cg, &host(&hv));
+
+    // Tape::hessian と v のホスト積（f64 で蓄積し最後に f32）との整合。
+    let th = tape();
+    let (xh, lossh) = build(&th, &x0);
+    let h = host(&th.hessian(&lossh, &xh, &tape()).expect("hessian"));
+    assert_eq!(h.len(), n * n);
+    let hv_host: Vec<f32> = (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|j| f64::from(h[i * n + j]) * f64::from(v0[j]))
+                .sum::<f64>() as f32
+        })
+        .collect();
+    fandhe_ai_backend_cpu::parity::assert_parity("create_graph vs hessian·v", &hv_cg, &hv_host);
+}
+
+#[test]
+fn create_graph_child_var_semantics() {
+    let t0 = tape();
+    let t1 = tape();
+    let x = t0.var(&t(vec![1.0, 2.0], &[2, 1]));
+    let w = t0.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
+    let y = w.matmul(&x).unwrap();
+    let v = t(vec![1.0, 1.0], &[2, 1]);
+    let (child, grand) = (tape(), tape());
+    let res = t0.jvp_create_graph(&y, &x, &v, &child, &grand).unwrap();
+    // 線形 y = W x: J·v = W v は x に依存しない（写しなし）が W には依存する。
+    assert!(res.child_var(&x).unwrap().is_none());
+    assert!(res.child_var(&w).unwrap().is_some());
+    // 別テープ・追跡なし。
+    let foreign = t1.var(&t(vec![1.0, 2.0], &[2]));
+    assert!(matches!(
+        res.child_var(&foreign),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    let ng = t0.var_no_grad(&t(vec![1.0, 2.0], &[2]));
+    assert!(matches!(
+        res.child_var(&ng),
+        Err(AutodiffError::GradientTrackingDisabled)
+    ));
+}
+
+#[test]
+fn create_graph_input_validation_errors_propagate() {
+    let t0 = tape();
+    let t1 = tape();
+    let x = t0.var(&t(vec![1.0, 2.0], &[2]));
+    let y = x.mul(&x).unwrap();
+    let v = t(vec![1.0, 1.0], &[2]);
+    let cg = |t: &Tape, out: &Var<'_>, inp: &Var<'_>, tan: &Tensor<f32>| {
+        let (c, g) = (tape(), tape());
+        t.jvp_create_graph(out, inp, tan, &c, &g).map(|_| ())
+    };
+
+    // 1〜4: `Tape::jvp` と同じ variant。
+    let foreign = t1.var(&t(vec![1.0, 2.0], &[2]));
+    assert!(matches!(
+        cg(&t0, &y, &foreign, &v),
+        Err(AutodiffError::TapeMismatch)
+    ));
+    let ng = t0.var_no_grad(&t(vec![1.0, 2.0], &[2]));
+    assert!(matches!(
+        cg(&t0, &y, &ng, &v),
+        Err(AutodiffError::GradientTrackingDisabled)
+    ));
+    let bad = t(vec![1.0, 1.0, 1.0], &[3]);
+    assert!(matches!(
+        cg(&t0, &y, &x, &bad),
+        Err(AutodiffError::Shape(_))
+    ));
+
+    // 5: テープの事前検査（すべて `Backward`）。
+    let (c, g) = (tape(), tape());
+    assert!(matches!(
+        t0.jvp_create_graph(&y, &x, &v, &t0, &g),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(matches!(
+        t0.jvp_create_graph(&y, &x, &v, &c, &t0),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(matches!(
+        t0.jvp_create_graph(&y, &x, &v, &c, &c),
+        Err(AutodiffError::Backward(_))
+    ));
+    let dirty = tape();
+    let _leaf = dirty.var(&t(vec![0.0], &[1]));
+    assert!(matches!(
+        t0.jvp_create_graph(&y, &x, &v, &dirty, &g),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert!(matches!(
+        t0.jvp_create_graph(&y, &x, &v, &c, &dirty),
+        Err(AutodiffError::Backward(_))
+    ));
+    // 検査順序: 入口検査 1（別テープ）はテープの事前検査（5）より先に返る。
+    assert!(matches!(
+        t0.jvp_create_graph(&y, &foreign, &v, &t0, &t0),
+        Err(AutodiffError::TapeMismatch)
+    ));
+}
+
+#[test]
+fn create_graph_zero_paths() {
+    let t0 = tape();
+    let x = t0.var(&t(vec![1.0, 2.0], &[2]));
+    let c = t0.var_no_grad(&t(vec![3.0, 4.0], &[2]));
+    let v = t(vec![1.0, 1.0], &[2]);
+    // 追跡なし output。
+    let untracked = c.mul(&c).unwrap();
+    let (child, grand) = (tape(), tape());
+    let res = t0
+        .jvp_create_graph(&untracked, &x, &v, &child, &grand)
+        .unwrap();
+    let out = res.output();
+    // 追跡なし（`requires_grad` は非公開のため、孫テープでの backward が Err になることで確認する）。
+    assert!(grand.backward(&out).is_err());
+    assert_eq!(out.to_tensor().shape(), &[2]);
+    assert_eq!(host(&out.to_tensor()), vec![0.0, 0.0]);
+    assert!(res.child_var(&x).unwrap().is_none());
+
+    // 要素数 0。
+    let xe = t0.var(&t(vec![], &[0]));
+    let ye = xe.mul(&xe).unwrap();
+    let ve = t(vec![], &[0]);
+    let (child, grand) = (tape(), tape());
+    let res = t0.jvp_create_graph(&ye, &xe, &ve, &child, &grand).unwrap();
+    assert!(grand.backward(&res.output()).is_err());
+    assert_eq!(res.output().to_tensor().shape(), &[0]);
+    assert!(res.child_var(&xe).unwrap().is_none());
+}
+
+#[test]
+fn create_graph_unsupported_op_is_rejected() {
+    let t0 = tape();
+    let x = t0.var(&t(vec![1.0, 3.0, 2.0], &[3]));
+    let v = t(vec![1.0, 1.0, 1.0], &[3]);
+    let m = x.max(None).unwrap();
+    let (child, grand) = (tape(), tape());
+    assert!(matches!(
+        t0.jvp_create_graph(&m, &x, &v, &child, &grand),
+        Err(AutodiffError::Backward(_))
+    ));
 }
