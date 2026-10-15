@@ -1435,12 +1435,7 @@ pub(crate) fn vjp(
             // d_weight（相関）: dw_full = gemm_batched_fp32_strict(g4, colᵀ)
             //   -> [N, G, Cout_g, K_g] -> N 軸を f64 で縮約
             //   -> [Cout, Cin_g, kH, kW] へ reshape。
-            let col_t = transpose_last2(&col);
-            let dw_full = ops
-                .gemm_batched_fp32_strict(&g4, &col_t)
-                .map_err(AutodiffError::Backend)?;
-            let dw = reduce_batch_axes_f64(&dw_full, &[groups, cout_g, k_g])?;
-            let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+            let d_weight = conv2d_dw_from_col(ops, &g4, &col, groups, cout_g, k_g, &weight_shape)?;
 
             // d_input（転置畳み込み）: d_col = gemm_batched_fp32_strict(w_matᵀ, g4)
             //   -> [N, G, K_g, P] -> col2im。
@@ -1623,12 +1618,8 @@ pub(crate) fn vjp(
                 .contiguous()
                 .reshape(&[n_batch, groups, cin_g, input_shape[2] * input_shape[3]])
                 .map_err(AutodiffError::Shape)?;
-            let col_g_t = transpose_last2(&col_g);
-            let dw_full = ops
-                .gemm_batched_fp32_strict(&x4, &col_g_t)
-                .map_err(AutodiffError::Backend)?;
-            let dw = reduce_batch_axes_f64(&dw_full, &[groups, cin_g, k_g])?;
-            let d_weight = dw.reshape(&weight_shape).map_err(AutodiffError::Shape)?;
+            let d_weight =
+                conv_transpose2d_dw_from_col(ops, &x4, &col_g, groups, cin_g, k_g, &weight_shape)?;
 
             let mut contributions = vec![(input, d_input), (weight, d_weight)];
             if let Some(bias_id) = bias {
@@ -3235,6 +3226,11 @@ pub(crate) fn vjp(
         Op::Contiguous { input } => {
             vec![(input, upstream.clone())]
         }
+        // d_weight のホスト値ノード（`tape::Op::ConvWeightGradHost` doc）。
+        // 微分経路は `structure` のみ（恒等）。
+        Op::ConvWeightGradHost { structure, .. } => {
+            vec![(structure, upstream.clone())]
+        }
         // `Var::one_hot`（**非微分演算**。イシュー #1755）。クラス id
         // から 0/1 行列を作る操作は入力に対し微分不能なため、
         // `upstream` の値を無視して常に入力 shape の**明示ゼロ**
@@ -4244,6 +4240,52 @@ pub(crate) fn col2im_with_fallback(
         Err(BackendError::Unsupported(_)) => Ok(eval::col2im(d_col, input_shape, params)),
         Err(other) => Err(AutodiffError::Backend(other)),
     }
+}
+
+/// [`Op::Conv2d`] の d_weight（相関）を `im2col` 済みの `col` から求める
+/// 共有ホスト関数（イシュー #3080）。1 階 VJP（本ファイル `vjp` の
+/// `Op::Conv2d` 腕）と、`create_graph` の子テープ側（`create_graph.rs` が
+/// d_weight ノードの**前方値**として直接登録する。設計 doc §21.1(3)・
+/// §22）の単一情報源であり、両者は常に同じ `gemm_batched_fp32_strict`＋
+/// N 軸 `f64` 縮約（勾配長軸縮約契約）を通る。
+///
+/// `g4`: `[N, G, Cout_g, P]`、`col`: `[N, G, K_g, P]`。式・評価順は
+/// 抽出前の腕と逐語同一（1 階は bit 同一のまま）。
+pub(crate) fn conv2d_dw_from_col(
+    ops: &dyn BackendOps,
+    g4: &Tensor<f32>,
+    col: &Tensor<f32>,
+    groups: usize,
+    cout_g: usize,
+    k_g: usize,
+    weight_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let col_t = transpose_last2(col);
+    let dw_full = ops
+        .gemm_batched_fp32_strict(g4, &col_t)
+        .map_err(AutodiffError::Backend)?;
+    let dw = reduce_batch_axes_f64(&dw_full, &[groups, cout_g, k_g])?;
+    dw.reshape(weight_shape).map_err(AutodiffError::Shape)
+}
+
+/// [`Op::ConvTranspose2d`] の d_weight を求める共有ホスト関数（イシュー
+/// #3080。[`conv2d_dw_from_col`] と同じ位置づけ）。`x4`:
+/// `[N, G, Cin_g, H·W]`、`col_g`: 上流 `g` の im2col `[N, G, K_g, H·W]`。
+pub(crate) fn conv_transpose2d_dw_from_col(
+    ops: &dyn BackendOps,
+    x4: &Tensor<f32>,
+    col_g: &Tensor<f32>,
+    groups: usize,
+    cin_g: usize,
+    k_g: usize,
+    weight_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let col_g_t = transpose_last2(col_g);
+    let dw_full = ops
+        .gemm_batched_fp32_strict(x4, &col_g_t)
+        .map_err(AutodiffError::Backend)?;
+    let dw = reduce_batch_axes_f64(&dw_full, &[groups, cin_g, k_g])?;
+    dw.reshape(weight_shape).map_err(AutodiffError::Shape)
 }
 
 /// [`Op::ConvTranspose2d`] の forward（`Var::conv_transpose2d`）が使う
