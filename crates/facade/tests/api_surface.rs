@@ -40025,6 +40025,9 @@ fn workspace_declares_parametrize_linear_fn_names_only_in_approved_locations() {
     let expected: std::collections::BTreeMap<String, usize> = [
         "autodiff/src/nn/linear.rs::parametrize_weight_norm",
         "autodiff/src/nn/linear.rs::parametrize_spectral_norm",
+        // #3049: Conv 6 層の実体は `impl_conv_reparam!` マクロ 1 箇所（6 層で同一コードを複製しない）。
+        "autodiff/src/nn/conv.rs::parametrize_weight_norm",
+        "autodiff/src/nn/conv.rs::parametrize_spectral_norm",
         "facade/src/compat/sequential.rs::parametrize_weight_norm",
         "facade/src/compat/sequential.rs::parametrize_spectral_norm",
     ]
@@ -40053,12 +40056,18 @@ fn compat_sequential_parametrize_linear_methods_have_approved_signatures_and_del
         (
             "parametrize_weight_norm",
             PARAMETRIZE_WEIGHT_NORM_PARAMS,
-            "linear . parametrize_weight_norm ( dim ) ?",
+            &[
+                "linear . parametrize_weight_norm ( dim ) ?",
+                "conv . parametrize_weight_norm ( dim ) ?",
+            ][..],
         ),
         (
             "parametrize_spectral_norm",
             PARAMETRIZE_SPECTRAL_NORM_PARAMS,
-            "linear . parametrize_spectral_norm ( n_power_iterations , eps , seed ) ?",
+            &[
+                "linear . parametrize_spectral_norm ( n_power_iterations , eps , seed ) ?",
+                "conv . parametrize_spectral_norm ( n_power_iterations , eps , seed ) ?",
+            ][..],
         ),
     ] {
         assert_eq!(count_fn_declarations_by_name(&tokens, name), 1, "{name}");
@@ -40067,10 +40076,26 @@ fn compat_sequential_parametrize_linear_methods_have_approved_signatures_and_del
             "{name} のシグネチャが承認形と一致しない"
         );
         let body = determinism_fn_body(&tokens, name).expect("本体が取得できる");
-        assert!(
-            body.contains(delegation),
-            "{name} の本体が autodiff Linear への委譲（{delegation}）を含まない: {body}"
-        );
+        for delegation in delegation {
+            assert!(
+                body.contains(delegation),
+                "{name} の本体が autodiff Linear／Conv への委譲（{delegation}）を含まない: {body}"
+            );
+        }
+        // #3049: Conv 6 種すべてへ委譲する分岐が存在する（`as_conv*_mut` の取りこぼし防止）。
+        for accessor in [
+            "as_conv2d_mut",
+            "as_conv1d_mut",
+            "as_conv3d_mut",
+            "as_conv_transpose1d_mut",
+            "as_conv_transpose2d_mut",
+            "as_conv_transpose3d_mut",
+        ] {
+            assert!(
+                body.contains(&format!("layer . {accessor} ( )")),
+                "{name} の本体が {accessor} 分岐を含まない: {body}"
+            );
+        }
     }
 }
 

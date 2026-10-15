@@ -536,7 +536,8 @@ impl Sequential {
         Ok(self)
     }
 
-    /// 作成済みの `Linear` 層（`layer_index` 番目。活性化層を含む全層の位置）の重みを
+    /// 作成済みの `Linear`／`Conv1d`／`Conv2d`／`Conv3d`／`ConvTranspose1d`／`ConvTranspose2d`／
+    /// `ConvTranspose3d` 層（`layer_index` 番目。活性化層を含む全層の位置）の重みを
     /// weight_norm（`w = g · v / ‖v‖`。PyTorch `torch.nn.utils.weight_norm` 相当）へ再パラメータ化する
     /// （イシュー #3048。決定記録 `docs/facade-weight-reparam-wiring-decision.md` §5 D-A (a)）。
     ///
@@ -575,6 +576,34 @@ impl Sequential {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Conv 系 6 層（イシュー #3049）も同じ呼び出しで対象になる。`dim` は層種に依らず利用者指定
+    /// （`None`／`Some(d)`、`d < weight の rank`。範囲外は型付きエラー）。ConvTranspose の weight は
+    /// `[in, out/groups, k...]` のため、出力チャネル単位にしたい場合は `Some(1)`（PyTorch 既定の `dim=0`
+    /// は入力チャネル軸）。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new()
+    ///     .add_conv2d(2, 3, [3, 3], [1, 1], [1, 1], [1, 1], 1, /* seed = */ 7)?
+    ///     .parametrize_weight_norm(0, Some(0))?;
+    /// let names: Vec<String> = model.named_parameters().into_iter().map(|(n, _)| n).collect();
+    /// assert_eq!(
+    ///     names,
+    ///     [
+    ///         "0.parametrizations.weight.original0",
+    ///         "0.parametrizations.weight.original1",
+    ///         "0.bias",
+    ///     ]
+    /// );
+    /// let x = Tensor::new(vec![0.1_f32; 2 * 4 * 4], &[1, 2, 4, 4])?;
+    /// assert_eq!(model.predict(&x)?.shape(), [1, 3, 4, 4]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn parametrize_weight_norm(
         mut self,
         layer_index: usize,
@@ -582,16 +611,37 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         self.check_parametrize_target("Sequential::parametrize_weight_norm", layer_index)?;
         let training = self.inner.training();
-        let linear = self.parametrize_target_mut(layer_index)?;
-        linear.parametrize_weight_norm(dim)?;
-        Module::set_training(linear, training);
-        self.specs[layer_index] = LayerSpec::Unsupported {
-            kind: "linear_weight_norm",
+        let layer = self.parametrize_layer_mut(layer_index)?;
+        let kind = if let Some(linear) = layer.as_linear_mut() {
+            linear.parametrize_weight_norm(dim)?;
+            "linear_weight_norm"
+        } else if let Some(conv) = layer.as_conv2d_mut() {
+            conv.parametrize_weight_norm(dim)?;
+            "conv2d_weight_norm"
+        } else if let Some(conv) = layer.as_conv1d_mut() {
+            conv.parametrize_weight_norm(dim)?;
+            "conv1d_weight_norm"
+        } else if let Some(conv) = layer.as_conv3d_mut() {
+            conv.parametrize_weight_norm(dim)?;
+            "conv3d_weight_norm"
+        } else if let Some(conv) = layer.as_conv_transpose1d_mut() {
+            conv.parametrize_weight_norm(dim)?;
+            "conv_transpose1d_weight_norm"
+        } else if let Some(conv) = layer.as_conv_transpose2d_mut() {
+            conv.parametrize_weight_norm(dim)?;
+            "conv_transpose2d_weight_norm"
+        } else if let Some(conv) = layer.as_conv_transpose3d_mut() {
+            conv.parametrize_weight_norm(dim)?;
+            "conv_transpose3d_weight_norm"
+        } else {
+            return Err(parametrize_unsupported_layer_error(layer_index));
         };
+        layer.set_training(training);
+        self.specs[layer_index] = LayerSpec::Unsupported { kind };
         Ok(self)
     }
 
-    /// 作成済みの `Linear` 層（`layer_index` 番目）の重みを spectral_norm（`w = W / σ`。PyTorch
+    /// 作成済みの対象層（`layer_index` 番目。対象は [`Sequential::parametrize_weight_norm`] と同じ）の重みを spectral_norm（`w = W / σ`。PyTorch
     /// `torch.nn.utils.spectral_norm` 相当）へ再パラメータ化する（イシュー #3048。決定記録 §5 D-A (a)）。
     ///
     /// 本体は `fandhe_ai_autodiff::nn::Linear::parametrize_spectral_norm` への薄い委譲。`u0`／`v0` は
@@ -600,6 +650,25 @@ impl Sequential {
     /// （同一 step で forward を複数回呼ぶとその回数だけ進む。PyTorch と同じ契約）。
     /// 並びは `parametrizations.weight.original` → `bias`。拒否条件・非対応経路は
     /// [`Sequential::parametrize_weight_norm`] と同じ。
+    ///
+    /// Conv 系 6 層（イシュー #3049）では行軸を層から導出する（Conv1d／2d／3d は 0、ConvTranspose1d／2d／3d は
+    /// 1。PyTorch と一致）。`dim` の利用者指定はスコープ外。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::compat::Sequential;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = Sequential::new()
+    ///     .add_conv_transpose2d(2, 3, [2, 2], [1, 1], [0, 0], [0, 0], [1, 1], 1, /* seed = */ 7)?
+    ///     .parametrize_spectral_norm(0, 1, 1e-12, /* seed = */ 7)?;
+    /// let names: Vec<String> = model.named_parameters().into_iter().map(|(n, _)| n).collect();
+    /// assert_eq!(names, ["0.parametrizations.weight.original", "0.bias"]);
+    /// let x = Tensor::new(vec![0.1_f32; 2 * 3 * 3], &[1, 2, 3, 3])?;
+    /// assert_eq!(model.predict(&x)?.shape(), [1, 3, 4, 4]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn parametrize_spectral_norm(
         mut self,
         layer_index: usize,
@@ -609,12 +678,33 @@ impl Sequential {
     ) -> Result<Self, AutodiffError> {
         self.check_parametrize_target("Sequential::parametrize_spectral_norm", layer_index)?;
         let training = self.inner.training();
-        let linear = self.parametrize_target_mut(layer_index)?;
-        linear.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
-        Module::set_training(linear, training);
-        self.specs[layer_index] = LayerSpec::Unsupported {
-            kind: "linear_spectral_norm",
+        let layer = self.parametrize_layer_mut(layer_index)?;
+        let kind = if let Some(linear) = layer.as_linear_mut() {
+            linear.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+            "linear_spectral_norm"
+        } else if let Some(conv) = layer.as_conv2d_mut() {
+            conv.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+            "conv2d_spectral_norm"
+        } else if let Some(conv) = layer.as_conv1d_mut() {
+            conv.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+            "conv1d_spectral_norm"
+        } else if let Some(conv) = layer.as_conv3d_mut() {
+            conv.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+            "conv3d_spectral_norm"
+        } else if let Some(conv) = layer.as_conv_transpose1d_mut() {
+            conv.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+            "conv_transpose1d_spectral_norm"
+        } else if let Some(conv) = layer.as_conv_transpose2d_mut() {
+            conv.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+            "conv_transpose2d_spectral_norm"
+        } else if let Some(conv) = layer.as_conv_transpose3d_mut() {
+            conv.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+            "conv_transpose3d_spectral_norm"
+        } else {
+            return Err(parametrize_unsupported_layer_error(layer_index));
         };
+        layer.set_training(training);
+        self.specs[layer_index] = LayerSpec::Unsupported { kind };
         Ok(self)
     }
 
@@ -634,28 +724,27 @@ impl Sequential {
                 layers.len()
             )));
         };
-        match layer.as_linear() {
+        match parametrize_state(layer.as_ref()) {
             None => Err(AutodiffError::InvalidArgument(format!(
-                "{ctx}: 層 {layer_index} は Linear ではない"
+                "{ctx}: 層 {layer_index} は Linear／Conv1d／Conv2d／Conv3d／ConvTranspose1d／\
+                 ConvTranspose2d／ConvTranspose3d のいずれでもない"
             ))),
-            Some(linear) if linear.is_parametrized() => Err(AutodiffError::InvalidArgument(
-                format!("{ctx}: 層 {layer_index} はすでに再パラメータ化済み"),
-            )),
-            Some(_) => Ok(()),
+            Some(true) => Err(AutodiffError::InvalidArgument(format!(
+                "{ctx}: 層 {layer_index} はすでに再パラメータ化済み"
+            ))),
+            Some(false) => Ok(()),
         }
     }
 
-    /// `check_parametrize_target` 通過後の対象 `Linear` の可変参照（到達しない `None` は型付きエラー）。
-    fn parametrize_target_mut(&mut self, layer_index: usize) -> Result<&mut Linear, AutodiffError> {
+    /// `check_parametrize_target` 通過後の対象層の可変参照（到達しない範囲外は型付きエラー）。
+    fn parametrize_layer_mut(
+        &mut self,
+        layer_index: usize,
+    ) -> Result<&mut Box<dyn Module>, AutodiffError> {
         self.inner
             .layers_mut()
             .get_mut(layer_index)
-            .and_then(|layer| layer.as_linear_mut())
-            .ok_or_else(|| {
-                AutodiffError::InvalidArgument(format!(
-                    "Sequential::parametrize: 層 {layer_index} が Linear ではない"
-                ))
-            })
+            .ok_or_else(|| parametrize_unsupported_layer_error(layer_index))
     }
 
     /// ReLU 層を追加する（`nn::activation::Relu`。shape 不変の演算のため
@@ -2742,6 +2831,14 @@ impl Sequential {
             .filter_map(|layer| layer.as_conv_transpose3d())
             .map(|conv| conv.bind(&tape.0))
             .collect();
+        // イシュー #3049: Conv 6 種共通の weight_norm 補助葉 g（Conv 層ごと 1 件・層順。
+        // 型別ベクタの増殖を避けるため 1 本にまとめ、各 Conv 分岐が順に消費する）。
+        let conv_gs = self
+            .inner
+            .layers()
+            .iter()
+            .filter_map(|layer| bind_conv_weight_norm_g(layer.as_ref(), &tape.0))
+            .collect();
         // イシュー #1760: LayerNorm／RmsNorm／BatchNorm1d／BatchNorm2d／
         // Embedding／MultiheadAttention も同じ層順フィルタ方式で収集
         // する。`BatchNorm1d::bind`／`BatchNorm2d::bind` はいずれも同一
@@ -2829,6 +2926,7 @@ impl Sequential {
             model: self,
             linears,
             linear_gs,
+            conv_gs,
             conv2ds,
             conv1ds,
             conv_transpose1ds,
@@ -2867,12 +2965,13 @@ impl Sequential {
                 if let Some(bias) = linear.bias() {
                     out.push(bias);
                 }
-            } else if let Some(conv) = layer.as_conv2d() {
+            } else if let Some(conv) = layer.as_conv2d().filter(|c| !c.is_parametrized()) {
+                // イシュー #3049: 再パラメータ化済み Conv は汎用の `named_parameters` 分岐へ落とす。
                 out.push(conv.weight());
                 if let Some(bias) = conv.bias() {
                     out.push(bias);
                 }
-            } else if let Some(conv) = layer.as_conv1d() {
+            } else if let Some(conv) = layer.as_conv1d().filter(|c| !c.is_parametrized()) {
                 out.push(conv.weight());
                 if let Some(bias) = conv.bias() {
                     out.push(bias);
@@ -3268,7 +3367,9 @@ impl Sequential {
                 rebuilt.push(Rebuilt::Linear(Linear::from_parameters(
                     new_weight, new_bias,
                 )?));
-            } else if let Some(conv) = layer.as_conv2d() {
+            } else if let Some(conv) = layer.as_conv2d().filter(|c| !c.is_parametrized()) {
+                // イシュー #3049: 再パラメータ化済み Conv は `from_parameters` で作り直すと再パラメータ化が
+                // 黙って消えるため汎用側へ回す（2b の条件と厳密に揃える）。
                 let (new_weight, new_bias) = take_weight_bias(
                     &mut updated,
                     layer_index,
@@ -3283,7 +3384,7 @@ impl Sequential {
                     conv.dilation(),
                     conv.groups(),
                 )?));
-            } else if let Some(conv) = layer.as_conv1d() {
+            } else if let Some(conv) = layer.as_conv1d().filter(|c| !c.is_parametrized()) {
                 let (new_weight, new_bias) = take_weight_bias(
                     &mut updated,
                     layer_index,
@@ -3402,11 +3503,11 @@ impl Sequential {
                 if let Some(Rebuilt::Linear(new_linear)) = rebuilt.next() {
                     *linear = new_linear;
                 }
-            } else if let Some(conv) = layer.as_conv2d_mut() {
+            } else if let Some(conv) = layer.as_conv2d_mut().filter(|c| !c.is_parametrized()) {
                 if let Some(Rebuilt::Conv2d(new_conv)) = rebuilt.next() {
                     *conv = new_conv;
                 }
-            } else if let Some(conv) = layer.as_conv1d_mut()
+            } else if let Some(conv) = layer.as_conv1d_mut().filter(|c| !c.is_parametrized())
                 && let Some(Rebuilt::Conv1d(new_conv)) = rebuilt.next()
             {
                 *conv = new_conv;
@@ -3763,6 +3864,9 @@ pub struct SequentialVars<'m, 't> {
     /// イシュー #3048。`linears` と平行（Linear 層ごと 1 件）の weight_norm 補助葉 `g`。
     /// weight_norm 済みでない層は `None`。
     linear_gs: Vec<Option<Var<'t>>>,
+    /// イシュー #3049。Conv 6 種共通（Conv 層ごと 1 件・層順）の weight_norm 補助葉 `g`。
+    /// weight_norm 済みでない層は `None`。
+    conv_gs: Vec<Option<Var<'t>>>,
     conv2ds: Vec<Conv2dVars<'t>>,
     conv1ds: Vec<Conv1dVars<'t>>,
     /// イシュー #2521。`ConvTranspose1d` 層の bind 結果（層順）。
@@ -3885,6 +3989,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut conv3ds = self.conv3ds.iter();
         let mut conv_transpose2ds = self.conv_transpose2ds.iter();
         let mut conv_transpose3ds = self.conv_transpose3ds.iter();
+        let mut conv_gs = self.conv_gs.iter();
         let mut layer_norms = self.layer_norms.iter();
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
@@ -3929,7 +4034,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
                     None => linear.forward_bound(vars, g, &current, fuse_relu)?,
                 };
                 i += if fuse_relu { 2 } else { 1 };
-            } else if layer.as_conv2d().is_some() {
+            } else if let Some(conv) = layer.as_conv2d() {
                 // イシュー #1770: Conv2d 層は Linear→ReLU のような
                 // epilogue 融合を行わない（`nn::Conv2dVars::forward` は
                 // `Var::conv2d` への薄い委譲のみ）。
@@ -3940,12 +4045,21 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
+                let g = conv_gs.next().and_then(|g| g.as_ref());
                 current = match low_precision {
+                    Some(_) if conv.is_parametrized() => {
+                        // イシュー #3049: 低精度経路は生の weight で計算して黙って誤るため拒否する。
+                        return Err(AutodiffError::InvalidArgument(
+                            "SequentialVars::forward: 再パラメータ化済み Conv2d（weight_norm／\
+                             spectral_norm）は低精度（AMP）forward 非対応（イシュー #3049）"
+                                .to_string(),
+                        ));
+                    }
                     Some(dtype) => conv2d_forward_low_precision(vars, &current, dtype)?,
-                    None => vars.forward(&current)?,
+                    None => conv.forward_bound(vars, g, &current)?,
                 };
                 i += 1;
-            } else if layer.as_conv1d().is_some() {
+            } else if let Some(conv) = layer.as_conv1d() {
                 let vars = conv1ds.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
                         "SequentialVars::forward: bind 済み Conv1dVars が model.layers の \
@@ -3953,9 +4067,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current)?;
+                let g = conv_gs.next().and_then(|g| g.as_ref());
+                current = conv.forward_bound(vars, g, &current)?;
                 i += 1;
-            } else if layer.as_conv_transpose1d().is_some() {
+            } else if let Some(conv) = layer.as_conv_transpose1d() {
                 // イシュー #2521: AMP 低精度は Conv1d と同じく無視して f32 で forward する。
                 let vars = conv_transpose1ds.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -3964,9 +4079,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current)?;
+                let g = conv_gs.next().and_then(|g| g.as_ref());
+                current = conv.forward_bound(vars, g, &current)?;
                 i += 1;
-            } else if layer.as_conv3d().is_some() {
+            } else if let Some(conv) = layer.as_conv3d() {
                 // イシュー #2524: AMP 低精度 conv3d は存在しないため dtype を無視して f32 で forward する。
                 let vars = conv3ds.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -3975,9 +4091,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current)?;
+                let g = conv_gs.next().and_then(|g| g.as_ref());
+                current = conv.forward_bound(vars, g, &current)?;
                 i += 1;
-            } else if layer.as_conv_transpose2d().is_some() {
+            } else if let Some(conv) = layer.as_conv_transpose2d() {
                 // イシュー #2523: AMP 低精度は ConvTranspose1d と同じく無視して f32 で forward する。
                 let vars = conv_transpose2ds.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -3986,9 +4103,10 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current)?;
+                let g = conv_gs.next().and_then(|g| g.as_ref());
+                current = conv.forward_bound(vars, g, &current)?;
                 i += 1;
-            } else if layer.as_conv_transpose3d().is_some() {
+            } else if let Some(conv) = layer.as_conv_transpose3d() {
                 // イシュー #3032: AMP 低精度は無視して f32 で forward する。
                 let vars = conv_transpose3ds.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -3997,7 +4115,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
                             .to_string(),
                     )
                 })?;
-                current = vars.forward(&current)?;
+                let g = conv_gs.next().and_then(|g| g.as_ref());
+                current = conv.forward_bound(vars, g, &current)?;
                 i += 1;
             } else if layer.as_layer_norm().is_some() {
                 // イシュー #1760: LayerNorm も Conv2d／Conv1d と同様
@@ -4169,6 +4288,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut conv3ds = self.conv3ds.iter();
         let mut conv_transpose2ds = self.conv_transpose2ds.iter();
         let mut conv_transpose3ds = self.conv_transpose3ds.iter();
+        let mut conv_gs = self.conv_gs.iter();
         let mut layer_norms = self.layer_norms.iter();
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
@@ -4194,6 +4314,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 }
             } else if layer.as_conv2d().is_some() {
                 if let Some(vars) = conv2ds.next() {
+                    if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                        out.push(g);
+                    }
                     out.push(&vars.weight);
                     if let Some(bias) = &vars.bias {
                         out.push(bias);
@@ -4202,6 +4325,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
             } else if layer.as_conv1d().is_some()
                 && let Some(vars) = conv1ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    out.push(g);
+                }
                 out.push(&vars.weight);
                 if let Some(bias) = &vars.bias {
                     out.push(bias);
@@ -4209,6 +4335,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
             } else if layer.as_conv_transpose1d().is_some()
                 && let Some(vars) = conv_transpose1ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    out.push(g);
+                }
                 out.push(&vars.weight);
                 if let Some(bias) = &vars.bias {
                     out.push(bias);
@@ -4216,6 +4345,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
             } else if layer.as_conv3d().is_some()
                 && let Some(vars) = conv3ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    out.push(g);
+                }
                 out.push(&vars.weight);
                 if let Some(bias) = &vars.bias {
                     out.push(bias);
@@ -4223,6 +4355,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
             } else if layer.as_conv_transpose2d().is_some()
                 && let Some(vars) = conv_transpose2ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    out.push(g);
+                }
                 out.push(&vars.weight);
                 if let Some(bias) = &vars.bias {
                     out.push(bias);
@@ -4230,6 +4365,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
             } else if layer.as_conv_transpose3d().is_some()
                 && let Some(vars) = conv_transpose3ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    out.push(g);
+                }
                 out.push(&vars.weight);
                 if let Some(bias) = &vars.bias {
                     out.push(bias);
@@ -4333,6 +4471,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
         let mut conv3ds = self.conv3ds.iter();
         let mut conv_transpose2ds = self.conv_transpose2ds.iter();
         let mut conv_transpose3ds = self.conv_transpose3ds.iter();
+        let mut conv_gs = self.conv_gs.iter();
         let mut layer_norms = self.layer_norms.iter();
         let mut rms_norms = self.rms_norms.iter();
         let mut batch_norms = self.batch_norms.iter();
@@ -4355,27 +4494,45 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 }
             } else if layer.as_conv2d().is_some() {
                 if let Some(vars) = conv2ds.next() {
+                    if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                        push_weight_bias(&mut out, grads, g, None)?;
+                    }
                     push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
                 }
             } else if layer.as_conv1d().is_some()
                 && let Some(vars) = conv1ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    push_weight_bias(&mut out, grads, g, None)?;
+                }
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             } else if layer.as_conv_transpose1d().is_some()
                 && let Some(vars) = conv_transpose1ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    push_weight_bias(&mut out, grads, g, None)?;
+                }
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             } else if layer.as_conv3d().is_some()
                 && let Some(vars) = conv3ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    push_weight_bias(&mut out, grads, g, None)?;
+                }
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             } else if layer.as_conv_transpose2d().is_some()
                 && let Some(vars) = conv_transpose2ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    push_weight_bias(&mut out, grads, g, None)?;
+                }
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             } else if layer.as_conv_transpose3d().is_some()
                 && let Some(vars) = conv_transpose3ds.next()
             {
+                if let Some(g) = conv_gs.next().and_then(|g| g.as_ref()) {
+                    push_weight_bias(&mut out, grads, g, None)?;
+                }
                 push_weight_bias(&mut out, grads, &vars.weight, vars.bias.as_ref())?;
             } else if layer.as_layer_norm().is_some()
                 && let Some(vars) = layer_norms.next()
@@ -4635,6 +4792,57 @@ fn push_transformer_grads<'g>(
     Ok(())
 }
 
+/// `parametrize_*` の対象層（`Linear`／Conv 6 種）なら、すでに再パラメータ化済みかを返す
+/// （対象外の層は `None`。イシュー #3048・#3049）。`check_parametrize_target` から呼ばれる。
+fn parametrize_state(layer: &dyn Module) -> Option<bool> {
+    if let Some(l) = layer.as_linear() {
+        Some(l.is_parametrized())
+    } else if let Some(c) = layer.as_conv2d() {
+        Some(c.is_parametrized())
+    } else if let Some(c) = layer.as_conv1d() {
+        Some(c.is_parametrized())
+    } else if let Some(c) = layer.as_conv3d() {
+        Some(c.is_parametrized())
+    } else if let Some(c) = layer.as_conv_transpose1d() {
+        Some(c.is_parametrized())
+    } else if let Some(c) = layer.as_conv_transpose2d() {
+        Some(c.is_parametrized())
+    } else {
+        layer.as_conv_transpose3d().map(|c| c.is_parametrized())
+    }
+}
+
+/// `check_parametrize_target` 通過後に対象層を取り出せなかった場合（到達しない内部不変条件違反）の
+/// 型付きエラー。
+fn parametrize_unsupported_layer_error(layer_index: usize) -> AutodiffError {
+    AutodiffError::InvalidArgument(format!(
+        "Sequential::parametrize: 層 {layer_index} は再パラメータ化の対象層ではない"
+    ))
+}
+
+/// Conv 6 種のいずれかなら、その層の weight_norm 補助葉 `g`（未適用は `None`）を `Some(..)` で返す。
+/// Conv 以外の層は `None`（`SequentialVars` の `conv_gs` が Conv 層ごと 1 件・層順で持つための
+/// 収集関数。イシュー #3049）。
+fn bind_conv_weight_norm_g<'t>(
+    layer: &dyn Module,
+    tape: &'t fandhe_ai_autodiff::Tape,
+) -> Option<Option<Var<'t>>> {
+    if let Some(c) = layer.as_conv2d() {
+        Some(c.bind_weight_norm_g(tape))
+    } else if let Some(c) = layer.as_conv1d() {
+        Some(c.bind_weight_norm_g(tape))
+    } else if let Some(c) = layer.as_conv3d() {
+        Some(c.bind_weight_norm_g(tape))
+    } else if let Some(c) = layer.as_conv_transpose1d() {
+        Some(c.bind_weight_norm_g(tape))
+    } else if let Some(c) = layer.as_conv_transpose2d() {
+        Some(c.bind_weight_norm_g(tape))
+    } else {
+        layer
+            .as_conv_transpose3d()
+            .map(|c| c.bind_weight_norm_g(tape))
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

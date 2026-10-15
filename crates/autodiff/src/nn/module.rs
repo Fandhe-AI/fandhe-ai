@@ -1327,7 +1327,11 @@ impl Module for Linear {
 /// #1770）。
 impl Module for Conv2d {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        self.bind(tape).forward(input)
+        // 再パラメータ化済み（イシュー #3049）は補助葉 `g` も登録し、有効重みを `forward_bound` が
+        // 再構成する（非再パラメータ化は従来と bit 同一）。
+        let vars = self.bind(tape);
+        let g = self.bind_weight_norm_g(tape);
+        self.forward_bound(&vars, g.as_ref(), input)
     }
 
     fn as_conv2d(&self) -> Option<&Conv2d> {
@@ -1342,7 +1346,7 @@ impl Module for Conv2d {
     /// `weight`（常に）→ `bias`（`Some` の場合のみ）の順（`Linear` と
     /// 同型）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = vec![("weight".to_string(), self.weight())];
+        let mut out = self.named_weight_params();
         if let Some(bias) = self.bias() {
             out.push(("bias".to_string(), bias));
         }
@@ -1364,6 +1368,21 @@ impl Module for Conv2d {
         Conv2d::requires_grad(self)
     }
 
+    /// spectral_norm の更新可否に効く（イシュー #3049）。非再パラメータ化の層では挙動に影響しない。
+    fn set_training(&mut self, training: bool) {
+        Conv2d::set_training(self, training);
+    }
+
+    fn training(&self) -> bool {
+        Conv2d::training(self)
+    }
+
+    /// 再パラメータ化済みは `false`（イシュー #3049）。有効重みの再構成は tape 経路のみで、
+    /// `predict` は事前判定で tape 経路へ落ちる。
+    fn supports_forward_host(&self) -> bool {
+        !self.is_parametrized()
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1377,7 +1396,11 @@ impl Module for Conv2d {
 /// イシュー #2067）。
 impl Module for ConvTranspose2d {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        self.bind(tape).forward(input)
+        // 再パラメータ化済み（イシュー #3049）は補助葉 `g` も登録し、有効重みを `forward_bound` が
+        // 再構成する（非再パラメータ化は従来と bit 同一）。
+        let vars = self.bind(tape);
+        let g = self.bind_weight_norm_g(tape);
+        self.forward_bound(&vars, g.as_ref(), input)
     }
 
     fn as_conv_transpose2d(&self) -> Option<&ConvTranspose2d> {
@@ -1390,7 +1413,7 @@ impl Module for ConvTranspose2d {
 
     /// 命名契約は `Conv2d` と同型（`weight` → `bias`）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = vec![("weight".to_string(), self.weight())];
+        let mut out = self.named_weight_params();
         if let Some(bias) = self.bias() {
             out.push(("bias".to_string(), bias));
         }
@@ -1412,6 +1435,21 @@ impl Module for ConvTranspose2d {
         ConvTranspose2d::requires_grad(self)
     }
 
+    /// spectral_norm の更新可否に効く（イシュー #3049）。非再パラメータ化の層では挙動に影響しない。
+    fn set_training(&mut self, training: bool) {
+        ConvTranspose2d::set_training(self, training);
+    }
+
+    fn training(&self) -> bool {
+        ConvTranspose2d::training(self)
+    }
+
+    /// 再パラメータ化済みは `false`（イシュー #3049）。有効重みの再構成は tape 経路のみで、
+    /// `predict` は事前判定で tape 経路へ落ちる。
+    fn supports_forward_host(&self) -> bool {
+        !self.is_parametrized()
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1425,7 +1463,11 @@ impl Module for ConvTranspose2d {
 /// #2158）。
 impl Module for Conv3d {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        self.bind(tape).forward(input)
+        // 再パラメータ化済み（イシュー #3049）は補助葉 `g` も登録し、有効重みを `forward_bound` が
+        // 再構成する（非再パラメータ化は従来と bit 同一）。
+        let vars = self.bind(tape);
+        let g = self.bind_weight_norm_g(tape);
+        self.forward_bound(&vars, g.as_ref(), input)
     }
 
     fn as_conv3d(&self) -> Option<&Conv3d> {
@@ -1438,7 +1480,7 @@ impl Module for Conv3d {
 
     /// 命名契約は `Conv2d` と同型（`weight` → `bias`）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = vec![("weight".to_string(), self.weight())];
+        let mut out = self.named_weight_params();
         if let Some(bias) = self.bias() {
             out.push(("bias".to_string(), bias));
         }
@@ -1460,6 +1502,21 @@ impl Module for Conv3d {
         Conv3d::requires_grad(self)
     }
 
+    /// spectral_norm の更新可否に効く（イシュー #3049）。非再パラメータ化の層では挙動に影響しない。
+    fn set_training(&mut self, training: bool) {
+        Conv3d::set_training(self, training);
+    }
+
+    fn training(&self) -> bool {
+        Conv3d::training(self)
+    }
+
+    /// 再パラメータ化済みは `false`（イシュー #3049）。有効重みの再構成は tape 経路のみで、
+    /// `predict` は事前判定で tape 経路へ落ちる。
+    fn supports_forward_host(&self) -> bool {
+        !self.is_parametrized()
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1472,7 +1529,11 @@ impl Module for Conv3d {
 /// `ConvTranspose3d::bind(tape).forward(input)`（`nn/conv.rs` 参照。イシュー #3031）。
 impl Module for ConvTranspose3d {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        self.bind(tape).forward(input)
+        // 再パラメータ化済み（イシュー #3049）は補助葉 `g` も登録し、有効重みを `forward_bound` が
+        // 再構成する（非再パラメータ化は従来と bit 同一）。
+        let vars = self.bind(tape);
+        let g = self.bind_weight_norm_g(tape);
+        self.forward_bound(&vars, g.as_ref(), input)
     }
 
     fn as_conv_transpose3d(&self) -> Option<&ConvTranspose3d> {
@@ -1485,7 +1546,7 @@ impl Module for ConvTranspose3d {
 
     /// 命名契約は `Conv3d` と同型（`weight` → `bias`）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = vec![("weight".to_string(), self.weight())];
+        let mut out = self.named_weight_params();
         if let Some(bias) = self.bias() {
             out.push(("bias".to_string(), bias));
         }
@@ -1505,6 +1566,21 @@ impl Module for ConvTranspose3d {
         ConvTranspose3d::requires_grad(self)
     }
 
+    /// spectral_norm の更新可否に効く（イシュー #3049）。非再パラメータ化の層では挙動に影響しない。
+    fn set_training(&mut self, training: bool) {
+        ConvTranspose3d::set_training(self, training);
+    }
+
+    fn training(&self) -> bool {
+        ConvTranspose3d::training(self)
+    }
+
+    /// 再パラメータ化済みは `false`（イシュー #3049）。有効重みの再構成は tape 経路のみで、
+    /// `predict` は事前判定で tape 経路へ落ちる。
+    fn supports_forward_host(&self) -> bool {
+        !self.is_parametrized()
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1518,7 +1594,11 @@ impl Module for ConvTranspose3d {
 /// #1770）。
 impl Module for Conv1d {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        self.bind(tape).forward(input)
+        // 再パラメータ化済み（イシュー #3049）は補助葉 `g` も登録し、有効重みを `forward_bound` が
+        // 再構成する（非再パラメータ化は従来と bit 同一）。
+        let vars = self.bind(tape);
+        let g = self.bind_weight_norm_g(tape);
+        self.forward_bound(&vars, g.as_ref(), input)
     }
 
     fn as_conv1d(&self) -> Option<&Conv1d> {
@@ -1531,7 +1611,7 @@ impl Module for Conv1d {
 
     /// 命名契約は `Conv2d` と同型（`weight` → `bias`）。
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = vec![("weight".to_string(), self.weight())];
+        let mut out = self.named_weight_params();
         if let Some(bias) = self.bias() {
             out.push(("bias".to_string(), bias));
         }
@@ -1553,6 +1633,21 @@ impl Module for Conv1d {
         Conv1d::requires_grad(self)
     }
 
+    /// spectral_norm の更新可否に効く（イシュー #3049）。非再パラメータ化の層では挙動に影響しない。
+    fn set_training(&mut self, training: bool) {
+        Conv1d::set_training(self, training);
+    }
+
+    fn training(&self) -> bool {
+        Conv1d::training(self)
+    }
+
+    /// 再パラメータ化済みは `false`（イシュー #3049）。有効重みの再構成は tape 経路のみで、
+    /// `predict` は事前判定で tape 経路へ落ちる。
+    fn supports_forward_host(&self) -> bool {
+        !self.is_parametrized()
+    }
+
     fn forward_host(
         &self,
         ops: &dyn BackendOps,
@@ -1568,7 +1663,11 @@ impl Module for Conv1d {
 /// と同型（`weight` → `bias`）。
 impl Module for ConvTranspose1d {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
-        self.bind(tape).forward(input)
+        // 再パラメータ化済み（イシュー #3049）は補助葉 `g` も登録し、有効重みを `forward_bound` が
+        // 再構成する（非再パラメータ化は従来と bit 同一）。
+        let vars = self.bind(tape);
+        let g = self.bind_weight_norm_g(tape);
+        self.forward_bound(&vars, g.as_ref(), input)
     }
 
     fn as_conv_transpose1d(&self) -> Option<&ConvTranspose1d> {
@@ -1580,7 +1679,7 @@ impl Module for ConvTranspose1d {
     }
 
     fn named_parameters(&self) -> Vec<(String, &Tensor<f32>)> {
-        let mut out = vec![("weight".to_string(), self.weight())];
+        let mut out = self.named_weight_params();
         if let Some(bias) = self.bias() {
             out.push(("bias".to_string(), bias));
         }
@@ -1598,6 +1697,21 @@ impl Module for ConvTranspose1d {
 
     fn requires_grad(&self) -> bool {
         ConvTranspose1d::requires_grad(self)
+    }
+
+    /// spectral_norm の更新可否に効く（イシュー #3049）。非再パラメータ化の層では挙動に影響しない。
+    fn set_training(&mut self, training: bool) {
+        ConvTranspose1d::set_training(self, training);
+    }
+
+    fn training(&self) -> bool {
+        ConvTranspose1d::training(self)
+    }
+
+    /// 再パラメータ化済みは `false`（イシュー #3049）。有効重みの再構成は tape 経路のみで、
+    /// `predict` は事前判定で tape 経路へ落ちる。
+    fn supports_forward_host(&self) -> bool {
+        !self.is_parametrized()
     }
 
     fn forward_host(

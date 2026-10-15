@@ -36,8 +36,13 @@ use crate::conv3d_ops;
 use crate::error::AutodiffError;
 use crate::grad::{conv_transpose2d_with_fallback, conv2d_with_fallback, conv3d_with_fallback};
 use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, checked_uniform_init, derive_seed};
+use crate::nn::weight_reparam::{
+    WeightReparam, build_spectral_norm_state, build_weight_norm_state, commit_spectral_state,
+    effective_weight_var, reparam_weight_keys, set_reparam_parameter,
+};
 use crate::tape::Tape;
 use crate::var::Var;
+use crate::weight_reparam_ops::SpectralNormState;
 
 /// Conv2d 層のパラメータ本体。`weight` は `[out_channels, in_channels /
 /// groups, kH, kW]`（PyTorch `nn.Conv2d.weight` と同じレイアウト。
@@ -56,6 +61,13 @@ pub struct Conv2d {
     /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
     /// と同型。`nn/module.rs` の doc 参照）。既定 `true`。
     requires_grad: bool,
+    /// `weight` スロットの再パラメータ化状態（イシュー #3049。`nn::Linear` と同型。`None` が従来の
+    /// 素の重み。`Some` のとき `weight` は生の一次テンソル〈weight_norm の `v`・spectral_norm の
+    /// `original`〉を指す）。全コンストラクタで `None` 初期化。
+    reparam: Option<WeightReparam>,
+    /// train／eval モード（イシュー #3049。spectral_norm が train の forward でだけ状態を更新する
+    /// ために保持。`Module::set_training` の実体）。既定 `true`。
+    training: bool,
 }
 
 impl Conv2d {
@@ -158,6 +170,8 @@ impl Conv2d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -248,6 +262,8 @@ impl Conv2d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -272,6 +288,10 @@ impl Conv2d {
 
     /// 重み `[out_channels, in_channels / groups, kH, kW]`
     /// （PyTorch `nn.Conv2d.weight` と同じレイアウト）。
+    ///
+    /// **再パラメータ化済み（[`Self::is_parametrized`]）の層では有効重みではなく生の一次テンソル**
+    /// （weight_norm の `v`・spectral_norm の `original`）を返す（イシュー #3049。有効重みを使う計算は
+    /// `forward_bound` 経由に限る）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
@@ -326,6 +346,16 @@ impl Conv2d {
         name: &str,
         value: Tensor<f32>,
     ) -> Result<(), AutodiffError> {
+        // 再パラメータ化済みは分解パラメータのキーだけ受理し `weight` を拒否する（イシュー #3049）。
+        let value = match &mut self.reparam {
+            Some(reparam) => {
+                match set_reparam_parameter(reparam, &mut self.weight, name, value, "Conv2d")? {
+                    None => return Ok(()),
+                    Some(value) => value,
+                }
+            }
+            None => value,
+        };
         match name {
             "weight" => {
                 if value.shape() != self.weight.shape() {
@@ -371,6 +401,13 @@ impl Conv2d {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Conv2d::forward_host: weight が再パラメータ化済み（有効重みを host 経路で再構成しない。\
+                 イシュー #3049）"
+                    .to_string(),
+            )));
+        }
         let in_shape = input.shape();
         if in_shape.len() != 4 {
             return Err(AutodiffError::Shape(ShapeError::RankMismatch {
@@ -451,8 +488,19 @@ impl<'t> Conv2dVars<'t> {
     /// groups)`（`Var::conv2d` への薄い委譲。追加の shape 検査は
     /// `Var::conv2d` 自身に任せる）。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.forward_with_weight(&self.weight, input)
+    }
+
+    /// `forward` の本体。`weight` を引数化したもの（イシュー #3049。再パラメータ化層の
+    /// `forward_bound` が tape 上で再構成した有効重みを渡す。`forward` は自身の `weight` を
+    /// 渡すだけで従来と bit 同一）。
+    pub(crate) fn forward_with_weight(
+        &self,
+        weight: &Var<'t>,
+        input: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
         input.conv2d(
-            &self.weight,
+            weight,
             self.bias.as_ref(),
             self.stride,
             self.padding,
@@ -500,6 +548,13 @@ pub struct ConvTranspose2d {
     /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
     /// と同型）。既定 `true`。
     requires_grad: bool,
+    /// `weight` スロットの再パラメータ化状態（イシュー #3049。`nn::Linear` と同型。`None` が従来の
+    /// 素の重み。`Some` のとき `weight` は生の一次テンソル〈weight_norm の `v`・spectral_norm の
+    /// `original`〉を指す）。全コンストラクタで `None` 初期化。
+    reparam: Option<WeightReparam>,
+    /// train／eval モード（イシュー #3049。spectral_norm が train の forward でだけ状態を更新する
+    /// ために保持。`Module::set_training` の実体）。既定 `true`。
+    training: bool,
 }
 
 impl ConvTranspose2d {
@@ -618,6 +673,8 @@ impl ConvTranspose2d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -719,6 +776,8 @@ impl ConvTranspose2d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -744,6 +803,10 @@ impl ConvTranspose2d {
 
     /// 重み `[in_channels, out_channels / groups, kH, kW]`
     /// （PyTorch `nn.ConvTranspose2d.weight` と同じレイアウト）。
+    ///
+    /// **再パラメータ化済み（[`Self::is_parametrized`]）の層では有効重みではなく生の一次テンソル**
+    /// （weight_norm の `v`・spectral_norm の `original`）を返す（イシュー #3049。有効重みを使う計算は
+    /// `forward_bound` 経由に限る）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
@@ -798,6 +861,22 @@ impl ConvTranspose2d {
         name: &str,
         value: Tensor<f32>,
     ) -> Result<(), AutodiffError> {
+        // 再パラメータ化済みは分解パラメータのキーだけ受理し `weight` を拒否する（イシュー #3049）。
+        let value = match &mut self.reparam {
+            Some(reparam) => {
+                match set_reparam_parameter(
+                    reparam,
+                    &mut self.weight,
+                    name,
+                    value,
+                    "ConvTranspose2d",
+                )? {
+                    None => return Ok(()),
+                    Some(value) => value,
+                }
+            }
+            None => value,
+        };
         match name {
             "weight" => {
                 if value.shape() != self.weight.shape() {
@@ -841,6 +920,13 @@ impl ConvTranspose2d {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "ConvTranspose2d::forward_host: weight が再パラメータ化済み（有効重みを host 経路で再構成しない。\
+                 イシュー #3049）"
+                    .to_string(),
+            )));
+        }
         let in_shape = input.shape();
         if in_shape.len() != 4 {
             return Err(AutodiffError::Shape(ShapeError::RankMismatch {
@@ -938,8 +1024,19 @@ impl<'t> ConvTranspose2dVars<'t> {
     /// への薄い委譲。追加の shape 検査は `Var::conv_transpose2d`
     /// 自身に任せる）。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.forward_with_weight(&self.weight, input)
+    }
+
+    /// `forward` の本体。`weight` を引数化したもの（イシュー #3049。再パラメータ化層の
+    /// `forward_bound` が tape 上で再構成した有効重みを渡す。`forward` は自身の `weight` を
+    /// 渡すだけで従来と bit 同一）。
+    pub(crate) fn forward_with_weight(
+        &self,
+        weight: &Var<'t>,
+        input: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
         input.conv_transpose2d(
-            &self.weight,
+            weight,
             self.bias.as_ref(),
             self.stride,
             self.padding,
@@ -974,6 +1071,13 @@ pub struct Conv1d {
     /// 層別 `requires_grad` 凍結フラグ（イシュー #2137。`nn::Linear`
     /// と同型）。既定 `true`。
     requires_grad: bool,
+    /// `weight` スロットの再パラメータ化状態（イシュー #3049。`nn::Linear` と同型。`None` が従来の
+    /// 素の重み。`Some` のとき `weight` は生の一次テンソル〈weight_norm の `v`・spectral_norm の
+    /// `original`〉を指す）。全コンストラクタで `None` 初期化。
+    reparam: Option<WeightReparam>,
+    /// train／eval モード（イシュー #3049。spectral_norm が train の forward でだけ状態を更新する
+    /// ために保持。`Module::set_training` の実体）。既定 `true`。
+    training: bool,
 }
 
 impl Conv1d {
@@ -1064,6 +1168,8 @@ impl Conv1d {
             dilation: params.dilation()[1],
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -1145,6 +1251,8 @@ impl Conv1d {
             dilation: params.dilation()[1],
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -1169,6 +1277,10 @@ impl Conv1d {
 
     /// 重み `[out_channels, in_channels / groups, k]`（PyTorch
     /// `nn.Conv1d.weight` と同じレイアウト）。
+    ///
+    /// **再パラメータ化済み（[`Self::is_parametrized`]）の層では有効重みではなく生の一次テンソル**
+    /// （weight_norm の `v`・spectral_norm の `original`）を返す（イシュー #3049。有効重みを使う計算は
+    /// `forward_bound` 経由に限る）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
@@ -1220,6 +1332,16 @@ impl Conv1d {
         name: &str,
         value: Tensor<f32>,
     ) -> Result<(), AutodiffError> {
+        // 再パラメータ化済みは分解パラメータのキーだけ受理し `weight` を拒否する（イシュー #3049）。
+        let value = match &mut self.reparam {
+            Some(reparam) => {
+                match set_reparam_parameter(reparam, &mut self.weight, name, value, "Conv1d")? {
+                    None => return Ok(()),
+                    Some(value) => value,
+                }
+            }
+            None => value,
+        };
         match name {
             "weight" => {
                 if value.shape() != self.weight.shape() {
@@ -1264,6 +1386,13 @@ impl Conv1d {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Conv1d::forward_host: weight が再パラメータ化済み（有効重みを host 経路で再構成しない。\
+                 イシュー #3049）"
+                    .to_string(),
+            )));
+        }
         let in_shape = input.shape();
         if in_shape.len() != 3 {
             return Err(AutodiffError::Shape(ShapeError::RankMismatch {
@@ -1357,8 +1486,19 @@ impl<'t> Conv1dVars<'t> {
 
     /// `Var::conv1d` への薄い委譲。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.forward_with_weight(&self.weight, input)
+    }
+
+    /// `forward` の本体。`weight` を引数化したもの（イシュー #3049。再パラメータ化層の
+    /// `forward_bound` が tape 上で再構成した有効重みを渡す。`forward` は自身の `weight` を
+    /// 渡すだけで従来と bit 同一）。
+    pub(crate) fn forward_with_weight(
+        &self,
+        weight: &Var<'t>,
+        input: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
         input.conv1d(
-            &self.weight,
+            weight,
             self.bias.as_ref(),
             self.stride,
             self.padding,
@@ -1382,6 +1522,13 @@ pub struct Conv3d {
     /// 層別 `requires_grad` 凍結フラグ（[`Conv2d`] と同型）。既定
     /// `true`。
     requires_grad: bool,
+    /// `weight` スロットの再パラメータ化状態（イシュー #3049。`nn::Linear` と同型。`None` が従来の
+    /// 素の重み。`Some` のとき `weight` は生の一次テンソル〈weight_norm の `v`・spectral_norm の
+    /// `original`〉を指す）。全コンストラクタで `None` 初期化。
+    reparam: Option<WeightReparam>,
+    /// train／eval モード（イシュー #3049。spectral_norm が train の forward でだけ状態を更新する
+    /// ために保持。`Module::set_training` の実体）。既定 `true`。
+    training: bool,
 }
 
 impl Conv3d {
@@ -1473,6 +1620,8 @@ impl Conv3d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -1549,6 +1698,8 @@ impl Conv3d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -1572,6 +1723,10 @@ impl Conv3d {
     }
 
     /// 重み `[out_channels, in_channels / groups, kD, kH, kW]`。
+    ///
+    /// **再パラメータ化済み（[`Self::is_parametrized`]）の層では有効重みではなく生の一次テンソル**
+    /// （weight_norm の `v`・spectral_norm の `original`）を返す（イシュー #3049。有効重みを使う計算は
+    /// `forward_bound` 経由に限る）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
@@ -1622,6 +1777,16 @@ impl Conv3d {
         name: &str,
         value: Tensor<f32>,
     ) -> Result<(), AutodiffError> {
+        // 再パラメータ化済みは分解パラメータのキーだけ受理し `weight` を拒否する（イシュー #3049）。
+        let value = match &mut self.reparam {
+            Some(reparam) => {
+                match set_reparam_parameter(reparam, &mut self.weight, name, value, "Conv3d")? {
+                    None => return Ok(()),
+                    Some(value) => value,
+                }
+            }
+            None => value,
+        };
         match name {
             "weight" => {
                 if value.shape() != self.weight.shape() {
@@ -1665,6 +1830,13 @@ impl Conv3d {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Conv3d::forward_host: weight が再パラメータ化済み（有効重みを host 経路で再構成しない。\
+                 イシュー #3049）"
+                    .to_string(),
+            )));
+        }
         let in_shape = input.shape();
         if in_shape.len() != 5 {
             return Err(AutodiffError::Shape(ShapeError::RankMismatch {
@@ -1748,9 +1920,20 @@ impl<'t> Conv3dVars<'t> {
     /// が `Var::conv2d` を呼ぶのと対応する。`Var::conv3d` も同じ自由関数へ
     /// 委譲するため、どちらから呼んでも結果は bit 一致する。イシュー #2524）。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.forward_with_weight(&self.weight, input)
+    }
+
+    /// `forward` の本体。`weight` を引数化したもの（イシュー #3049。再パラメータ化層の
+    /// `forward_bound` が tape 上で再構成した有効重みを渡す。`forward` は自身の `weight` を
+    /// 渡すだけで従来と bit 同一）。
+    pub(crate) fn forward_with_weight(
+        &self,
+        weight: &Var<'t>,
+        input: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
         conv3d_ops::conv3d(
             input,
-            &self.weight,
+            weight,
             self.bias.as_ref(),
             self.stride,
             self.padding,
@@ -1779,6 +1962,13 @@ pub struct ConvTranspose3d {
     groups: usize,
     /// 層別 `requires_grad` 凍結フラグ（[`ConvTranspose2d`] と同型）。既定 `true`。
     requires_grad: bool,
+    /// `weight` スロットの再パラメータ化状態（イシュー #3049。`nn::Linear` と同型。`None` が従来の
+    /// 素の重み。`Some` のとき `weight` は生の一次テンソル〈weight_norm の `v`・spectral_norm の
+    /// `original`〉を指す）。全コンストラクタで `None` 初期化。
+    reparam: Option<WeightReparam>,
+    /// train／eval モード（イシュー #3049。spectral_norm が train の forward でだけ状態を更新する
+    /// ために保持。`Module::set_training` の実体）。既定 `true`。
+    training: bool,
 }
 
 impl ConvTranspose3d {
@@ -1885,6 +2075,8 @@ impl ConvTranspose3d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -1978,6 +2170,8 @@ impl ConvTranspose3d {
             dilation: params.dilation(),
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -2001,6 +2195,10 @@ impl ConvTranspose3d {
     }
 
     /// 重み `[in_channels, out_channels / groups, kD, kH, kW]`。
+    ///
+    /// **再パラメータ化済み（[`Self::is_parametrized`]）の層では有効重みではなく生の一次テンソル**
+    /// （weight_norm の `v`・spectral_norm の `original`）を返す（イシュー #3049。有効重みを使う計算は
+    /// `forward_bound` 経由に限る）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
@@ -2052,6 +2250,22 @@ impl ConvTranspose3d {
         name: &str,
         value: Tensor<f32>,
     ) -> Result<(), AutodiffError> {
+        // 再パラメータ化済みは分解パラメータのキーだけ受理し `weight` を拒否する（イシュー #3049）。
+        let value = match &mut self.reparam {
+            Some(reparam) => {
+                match set_reparam_parameter(
+                    reparam,
+                    &mut self.weight,
+                    name,
+                    value,
+                    "ConvTranspose3d",
+                )? {
+                    None => return Ok(()),
+                    Some(value) => value,
+                }
+            }
+            None => value,
+        };
         match name {
             "weight" => {
                 if value.shape() != self.weight.shape() {
@@ -2094,6 +2308,13 @@ impl ConvTranspose3d {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "ConvTranspose3d::forward_host: weight が再パラメータ化済み（有効重みを host 経路で再構成しない。\
+                 イシュー #3049）"
+                    .to_string(),
+            )));
+        }
         let in_shape = input.shape();
         if in_shape.len() != 5 {
             return Err(AutodiffError::Shape(ShapeError::RankMismatch {
@@ -2198,9 +2419,20 @@ impl<'t> ConvTranspose3dVars<'t> {
     /// `y = conv_transpose3d_ops::conv_transpose3d(input, weight, bias, ...)`（自由関数への薄い
     /// 委譲。`Var::conv_transpose3d` も同じ自由関数へ委譲するため結果は bit 一致する）。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.forward_with_weight(&self.weight, input)
+    }
+
+    /// `forward` の本体。`weight` を引数化したもの（イシュー #3049。再パラメータ化層の
+    /// `forward_bound` が tape 上で再構成した有効重みを渡す。`forward` は自身の `weight` を
+    /// 渡すだけで従来と bit 同一）。
+    pub(crate) fn forward_with_weight(
+        &self,
+        weight: &Var<'t>,
+        input: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
         conv_transpose3d_ops::conv_transpose3d(
             input,
-            &self.weight,
+            weight,
             self.bias.as_ref(),
             self.stride,
             self.padding,
@@ -2230,6 +2462,13 @@ pub struct ConvTranspose1d {
     /// 層別 `requires_grad` 凍結フラグ（`nn::Conv1d`／`ConvTranspose2d`
     /// と同型）。既定 `true`。
     requires_grad: bool,
+    /// `weight` スロットの再パラメータ化状態（イシュー #3049。`nn::Linear` と同型。`None` が従来の
+    /// 素の重み。`Some` のとき `weight` は生の一次テンソル〈weight_norm の `v`・spectral_norm の
+    /// `original`〉を指す）。全コンストラクタで `None` 初期化。
+    reparam: Option<WeightReparam>,
+    /// train／eval モード（イシュー #3049。spectral_norm が train の forward でだけ状態を更新する
+    /// ために保持。`Module::set_training` の実体）。既定 `true`。
+    training: bool,
 }
 
 impl ConvTranspose1d {
@@ -2336,6 +2575,8 @@ impl ConvTranspose1d {
             dilation: params.dilation()[1],
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -2434,6 +2675,8 @@ impl ConvTranspose1d {
             dilation: params.dilation()[1],
             groups: params.groups(),
             requires_grad: true,
+            reparam: None,
+            training: true,
         })
     }
 
@@ -2460,6 +2703,10 @@ impl ConvTranspose1d {
 
     /// 重み `[in_channels, out_channels / groups, k]`（PyTorch
     /// `nn.ConvTranspose1d.weight` と同じレイアウト）。
+    ///
+    /// **再パラメータ化済み（[`Self::is_parametrized`]）の層では有効重みではなく生の一次テンソル**
+    /// （weight_norm の `v`・spectral_norm の `original`）を返す（イシュー #3049。有効重みを使う計算は
+    /// `forward_bound` 経由に限る）。
     pub fn weight(&self) -> &Tensor<f32> {
         &self.weight
     }
@@ -2514,6 +2761,22 @@ impl ConvTranspose1d {
         name: &str,
         value: Tensor<f32>,
     ) -> Result<(), AutodiffError> {
+        // 再パラメータ化済みは分解パラメータのキーだけ受理し `weight` を拒否する（イシュー #3049）。
+        let value = match &mut self.reparam {
+            Some(reparam) => {
+                match set_reparam_parameter(
+                    reparam,
+                    &mut self.weight,
+                    name,
+                    value,
+                    "ConvTranspose1d",
+                )? {
+                    None => return Ok(()),
+                    Some(value) => value,
+                }
+            }
+            None => value,
+        };
         match name {
             "weight" => {
                 if value.shape() != self.weight.shape() {
@@ -2560,6 +2823,13 @@ impl ConvTranspose1d {
         ops: &dyn BackendOps,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.is_parametrized() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "ConvTranspose1d::forward_host: weight が再パラメータ化済み（有効重みを host 経路で再構成しない。\
+                 イシュー #3049）"
+                    .to_string(),
+            )));
+        }
         let in_shape = input.shape();
         if in_shape.len() != 3 {
             return Err(AutodiffError::Shape(ShapeError::RankMismatch {
@@ -2686,9 +2956,20 @@ impl<'t> ConvTranspose1dVars<'t> {
     /// それは reshape 後の 2 回目の検査であり本関数のここでの検査を
     /// 代替しない。
     pub fn forward(&self, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.forward_with_weight(&self.weight, input)
+    }
+
+    /// `forward` の本体。`weight` を引数化したもの（イシュー #3049。再パラメータ化層の
+    /// `forward_bound` が tape 上で再構成した有効重みを渡す。`forward` は自身の `weight` を
+    /// 渡すだけで従来と bit 同一）。
+    pub(crate) fn forward_with_weight(
+        &self,
+        weight: &Var<'t>,
+        input: &Var<'t>,
+    ) -> Result<Var<'t>, AutodiffError> {
         conv_transpose1d_forward(
             input,
-            &self.weight,
+            weight,
             self.bias.as_ref(),
             self.stride,
             self.padding,
@@ -2777,3 +3058,184 @@ pub(crate) fn conv_transpose1d_forward<'t>(
     )?;
     out4.reshape(&[n, cout, lout])
 }
+/// Conv 6 層に weight_norm／spectral_norm の再パラメータ化 API を生やすマクロ（イシュー #3049。
+/// `nn::Linear`〈#3048〉の同名メソッド群と同型。決定記録 `docs/facade-weight-reparam-wiring-decision.md`
+/// §5・§6・§13。`facade::Sequential::parametrize_*` が `as_conv*_mut` 経由で呼ぶ）。
+///
+/// 6 層で同一コードを複製しないためのマクロで、状態機械の実体は `nn/weight_reparam.rs`。
+/// `$spectral_dim` は spectral_norm の行軸（層から導出。Conv 系 0・ConvTranspose 系 1 = PyTorch と
+/// 一致。ConvTranspose の weight は `[in, out/g, k...]` のため `W_mat` の行軸は出力チャネル側）。
+/// `weight_norm` の `dim` は層種に依らず利用者指定（決定記録 §13）。
+macro_rules! impl_conv_reparam {
+    ($layer:ident, $vars:ident, $spectral_dim:expr) => {
+        impl $layer {
+            /// `weight` が再パラメータ化（weight_norm／spectral_norm）済みか。生の `weight()` を有効重みと
+            /// 誤読しないための判定（消費箇所は `Sequential` の bind・学習・常駐・host・ONNX・保存）。
+            pub fn is_parametrized(&self) -> bool {
+                self.reparam.is_some()
+            }
+
+            /// weight_norm 適用済みなら `g`（`dim` 以外が 1 の keepdim 形、`dim = None` は rank 0）。
+            pub fn weight_norm_g(&self) -> Option<&Tensor<f32>> {
+                match &self.reparam {
+                    Some(WeightReparam::WeightNorm { g, .. }) => Some(g),
+                    _ => None,
+                }
+            }
+
+            /// weight_norm 適用済みなら適用時の `dim`（`Some(None)` は `dim = None`）。
+            pub fn weight_norm_dim(&self) -> Option<Option<usize>> {
+                match &self.reparam {
+                    Some(WeightReparam::WeightNorm { dim, .. }) => Some(*dim),
+                    _ => None,
+                }
+            }
+
+            /// spectral_norm 適用済みなら現在の状態の複製（取得後に層の状態は進まない）。
+            pub fn spectral_norm_state(&self) -> Option<SpectralNormState> {
+                match &self.reparam {
+                    Some(WeightReparam::SpectralNorm { state }) => {
+                        state.try_borrow().ok().map(|st| st.clone())
+                    }
+                    _ => None,
+                }
+            }
+
+            /// `weight` を weight_norm（`w = g · v / ‖v‖`）へ再パラメータ化する。`weight` スロットは `v`
+            /// になり、適用直後の有効重みは元の重みと一致する。`dim` は `None` または
+            /// `Some(d)`（`d < weight rank`。範囲外は型付きエラー）。検証・計算を先に済ませて代入するため
+            /// 失敗時は層不変。二重適用は `InvalidArgument`。
+            pub fn parametrize_weight_norm(
+                &mut self,
+                dim: Option<usize>,
+            ) -> Result<(), AutodiffError> {
+                if self.reparam.is_some() {
+                    return Err(AutodiffError::InvalidArgument(
+                        concat!(
+                            stringify!($layer),
+                            "::parametrize_weight_norm: already parametrized"
+                        )
+                        .to_string(),
+                    ));
+                }
+                self.reparam = Some(build_weight_norm_state(&self.weight, dim)?);
+                Ok(())
+            }
+
+            /// `weight` を spectral_norm（`w = W / σ`）へ再パラメータ化する。`weight` スロットは
+            /// `original` になる。行軸は層から導出（Conv 系 0・ConvTranspose 系 1）。失敗時は層不変。
+            pub fn parametrize_spectral_norm(
+                &mut self,
+                n_power_iterations: usize,
+                eps: f32,
+                seed: u64,
+            ) -> Result<(), AutodiffError> {
+                if self.reparam.is_some() {
+                    return Err(AutodiffError::InvalidArgument(
+                        concat!(
+                            stringify!($layer),
+                            "::parametrize_spectral_norm: already parametrized"
+                        )
+                        .to_string(),
+                    ));
+                }
+                self.reparam = Some(build_spectral_norm_state(
+                    &self.weight,
+                    $spectral_dim,
+                    n_power_iterations,
+                    eps,
+                    seed,
+                )?);
+                Ok(())
+            }
+
+            /// [`Self::parametrize_weight_norm`] の `self` 消費版（ビルダー用）。
+            pub fn with_weight_norm(mut self, dim: Option<usize>) -> Result<$layer, AutodiffError> {
+                self.parametrize_weight_norm(dim)?;
+                Ok(self)
+            }
+
+            /// [`Self::parametrize_spectral_norm`] の `self` 消費版（ビルダー用）。
+            pub fn with_spectral_norm(
+                mut self,
+                n_power_iterations: usize,
+                eps: f32,
+                seed: u64,
+            ) -> Result<$layer, AutodiffError> {
+                self.parametrize_spectral_norm(n_power_iterations, eps, seed)?;
+                Ok(self)
+            }
+
+            /// weight_norm 適用済みの層の `g` を `tape` の葉として登録する（それ以外は `None`）。
+            /// `bind`／`*Vars` の pub フィールドは不変のまま補助葉だけ別名で登録する（破壊的変更の回避。
+            /// `Linear::bind_weight_norm_g` と同じ）。`requires_grad` は `weight` と同じフラグ。
+            pub fn bind_weight_norm_g<'t>(&self, tape: &'t Tape) -> Option<Var<'t>> {
+                self.weight_norm_g()
+                    .map(|g| tape.var_with_requires_grad(g, self.requires_grad))
+            }
+
+            /// 再パラメータ化を含む 1 ステップ分の forward。`vars` は `bind`、`g` は
+            /// `bind_weight_norm_g` の結果。非再パラメータ化層は従来の `forward` と bit 同一。
+            /// spectral_norm の状態は forward 全体が成功した場合のみコミットし、train モードの forward
+            /// 1 回につき 1 回進む（PyTorch と同じ契約）。
+            pub fn forward_bound<'t>(
+                &self,
+                vars: &$vars<'t>,
+                g: Option<&Var<'t>>,
+                input: &Var<'t>,
+            ) -> Result<Var<'t>, AutodiffError> {
+                let Some(reparam) = &self.reparam else {
+                    return vars.forward(input);
+                };
+                let label = stringify!($layer);
+                let (w_eff, pending) =
+                    effective_weight_var(reparam, &vars.weight, g, self.training, label)?;
+                let out = vars.forward_with_weight(&w_eff, input)?;
+                commit_spectral_state(reparam, pending, label)?;
+                Ok(out)
+            }
+
+            /// `Module::set_training` の実体。再パラメータ化済みの層だけがモードを保持する
+            /// （非再パラメータ化は従来どおり `training()` が常に `true`）。
+            pub(crate) fn set_training(&mut self, training: bool) {
+                if self.reparam.is_some() {
+                    self.training = training;
+                }
+            }
+
+            /// `Module::training` の実体。
+            pub(crate) fn training(&self) -> bool {
+                self.training
+            }
+
+            /// `Module::named_parameters` の `weight` スロット分（`bias` は呼び出し側が続ける）。
+            /// 非再パラメータ化は `weight`、再パラメータ化済み（PyTorch `parametrize` の命名）は
+            /// weight_norm が `parametrizations.weight.original0`（g）→`original1`（v）、
+            /// spectral_norm が `parametrizations.weight.original`。
+            pub(crate) fn named_weight_params(&self) -> Vec<(String, &Tensor<f32>)> {
+                match &self.reparam {
+                    None => vec![("weight".to_string(), &self.weight)],
+                    Some(reparam) => {
+                        let keys = reparam_weight_keys(reparam);
+                        match reparam {
+                            WeightReparam::WeightNorm { g, .. } => vec![
+                                (keys[0].to_string(), g),
+                                (keys[1].to_string(), &self.weight),
+                            ],
+                            WeightReparam::SpectralNorm { .. } => {
+                                vec![(keys[0].to_string(), &self.weight)]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+}
+
+impl_conv_reparam!(Conv2d, Conv2dVars, 0);
+impl_conv_reparam!(ConvTranspose2d, ConvTranspose2dVars, 1);
+impl_conv_reparam!(Conv1d, Conv1dVars, 0);
+impl_conv_reparam!(Conv3d, Conv3dVars, 0);
+impl_conv_reparam!(ConvTranspose3d, ConvTranspose3dVars, 1);
+impl_conv_reparam!(ConvTranspose1d, ConvTranspose1dVars, 1);
