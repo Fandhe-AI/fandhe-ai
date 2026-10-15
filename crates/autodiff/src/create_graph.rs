@@ -59,7 +59,11 @@
 //! `ScalarUnary`（#3081 で `Gelu`・`GeluTanh`・`Erf` も対象）・`ScalarBinary`（既知 13
 //! variant すべて）・`Transpose`・`Permute`・`Narrow`・`Concat`・
 //! `Contiguous`・`Where` を拡張済み（[`scalar_unary_replayable`]／
-//! [`scalar_binary_replayable`] 参照）。`MaskedFill`・`Gather`・
+//! [`scalar_binary_replayable`] 参照）。さらにイシュー #3080 で 2D 畳み込み族
+//! （`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`。実装は `conv` サブモジュール、
+//! 決定記録 §23）を拡張済み。`F32` 以外の `compute_dtype` を持つ `Conv2d`
+//! （低精度 forward）は [`validate_ancestors`] が明示拒否する。`Conv3d`・
+//! `ConvTranspose3d` は引き続き対象外（#3080(b)。fail-closed）。`MaskedFill`・`Gather`・
 //! `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss`・`L1Loss`・
 //! `CrossEntropyLossWithOptions`（イシュー #2166。同型の理由で対象外）・
 //! `CosineEmbeddingLoss`・`MarginRankingLoss`・`TripletMarginLoss`・
@@ -105,6 +109,8 @@ use crate::backward::Gradients;
 use crate::error::AutodiffError;
 use crate::tape::{NodeId, Op, Tape, TapeId, TapeNode, materialize_fallible};
 use crate::var::Var;
+
+mod conv;
 
 /// [`Op::supports_create_graph`] が `Op::ScalarUnary` へ委譲する判定
 /// （イシュー #2062）。`replay_op`（forward 再生。`Var::scalar_unary`
@@ -446,6 +452,19 @@ fn validate_ancestors(parent: &Tape, ancestors: &[NodeId]) -> Result<(), Autodif
                 id.0
             )));
         }
+        // 低精度 `Conv2d`（イシュー #2071）は `TapeNode::low_precision` を立てず
+        // `compute_dtype` で記録するため、ここで明示拒否する（イシュー #3080・
+        // 決定記録 §21.3。子テープへ精度情報を持たず静かに f32 再生される
+        // のを防ぐ fail-closed。`child` へ書き込む前の入口検査）。
+        if let Op::Conv2d { compute_dtype, .. } = &node.op
+            && *compute_dtype != fandhe_ai_tensor_core::ScalarDType::F32
+        {
+            return Err(AutodiffError::Backward(format!(
+                "create_graph: 低精度 conv2d（{compute_dtype:?}。NodeId({}))は非対応（\
+                 子テープへ精度情報を持たず静かに f32 再生される。イシュー #2071・#3080）",
+                id.0
+            )));
+        }
         if let Op::MatMul(a, b) = node.op {
             let a_rank = parent_nodes[a.0].shape.len();
             let b_rank = parent_nodes[b.0].shape.len();
@@ -627,6 +646,62 @@ fn replay_op<'c>(
         // ならホスト）を公開 `Var` メソッド経由で通す（イシュー #3077）。
         Op::Softmax { input, dim } => get_mirror(mirror, input)?.softmax(dim),
         Op::LogSoftmax { input, dim } => get_mirror(mirror, input)?.log_softmax(dim),
+        // d_weight のホスト値ノード: 孫テープでも同じホスト関数で値を
+        // 再計算する（f32 の構造側合成へ落とさない。§21.1(3)(5)）。
+        Op::ConvWeightGradHost {
+            structure,
+            g,
+            x,
+            params,
+            transposed,
+        } => {
+            let structure_m = get_mirror(mirror, structure)?;
+            conv::host_weight_grad_node(
+                structure_m.tape(),
+                &structure_m,
+                &get_mirror(mirror, g)?,
+                &get_mirror(mirror, x)?,
+                &params,
+                transposed,
+            )
+        }
+        // 2D 畳み込み族（イシュー #3080）。公開 `Var` メソッドへの委譲で、
+        // forward と同じカーネルを通るため写しの値は親と一致する。
+        Op::Conv2d {
+            input,
+            weight,
+            bias,
+            params,
+            compute_dtype,
+        } => {
+            let bias_m = bias.map(|b| get_mirror(mirror, b)).transpose()?;
+            conv::replay_conv2d(
+                &get_mirror(mirror, input)?,
+                &get_mirror(mirror, weight)?,
+                bias_m.as_ref(),
+                &params,
+                compute_dtype,
+            )
+        }
+        Op::ConvTranspose2d {
+            input,
+            weight,
+            bias,
+            params,
+        } => {
+            let bias_m = bias.map(|b| get_mirror(mirror, b)).transpose()?;
+            conv::replay_conv_transpose2d(
+                shape,
+                &get_mirror(mirror, input)?,
+                &get_mirror(mirror, weight)?,
+                bias_m.as_ref(),
+                &params,
+            )
+        }
+        Op::Unfold { input, params } => conv::replay_unfold(&get_mirror(mirror, input)?, &params),
+        Op::Fold { input, params } => {
+            conv::replay_fold(shape, &get_mirror(mirror, input)?, &params)
+        }
         // `cond` は forward 時点（`Var::where_cond`）で `a`／`b` と
         // 同じ `out_shape` へ broadcast 済みの f32 マスク（`c != 0.0`
         // 判定契約。`Op::Where` doc 参照）として `Op` へ焼き込まれて
@@ -724,7 +799,7 @@ fn softmax_cgrad_v3<'c>(
 
 /// レーンごとのスケール `s = max|g|`（`dim` 軸を長さ 1 にした shape）。
 /// `s == 0` と非有限（`g` に `inf`／`NaN`）のレーンは `1`（IEEE 伝播を
-/// 構造側へ任せる。§23）。有限の小さい `max|g|` は下限
+/// 構造側へ任せる。§24）。有限の小さい `max|g|` は下限
 /// [`LANE_SCALE_FLOOR`] で持ち上げる（codex-review 指摘・PR #3344:
 /// `g.div(&s)` の VJP は `1/s`・`-g/s²` を f32 で先に評価するため、
 /// 非正規数級の `s` では二階微分の係数が `inf` になる。構造式は任意の
@@ -767,6 +842,48 @@ fn lane_scale(g: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, AutodiffError>
     Ok(Tensor::new(s, &sshape)?)
 }
 
+/// LogSoftmax の二階逆伝播で `exp` ミラーへ入る最大寄与
+/// `q·s·|mean_gs| = n·p·s·|mean_gs|` をレーンごとにホストで評価し、
+/// f32 範囲（約 3.4e38）に収まる上限 `SPLIT_LIMIT` を超える分だけ
+/// ミラーの分割数を増やす（`1..=SPLIT_MAX`。通常は 1）。
+const SPLIT_LIMIT: f64 = 2.0e38;
+const SPLIT_MAX: usize = 64;
+
+fn log_softmax_split_count(
+    y: &Tensor<f32>,
+    g: &Tensor<f32>,
+    s_lane: &Tensor<f32>,
+    dim: usize,
+) -> usize {
+    let shape = g.shape().to_vec();
+    let outer: usize = shape[..dim].iter().product();
+    let n = shape[dim];
+    let inner: usize = shape[dim + 1..].iter().product();
+    let yd = crate::eval::dense_vec(y);
+    let gd = crate::eval::dense_vec(g);
+    let sd = crate::eval::dense_vec(s_lane);
+    let mut worst = 0f64;
+    for o in 0..outer {
+        for i in 0..inner {
+            let s = sd[o * inner + i] as f64;
+            let mut sum = 0f64;
+            let mut pmax = 0f64;
+            for a in 0..n {
+                let idx = (o * n + a) * inner + i;
+                sum += gd[idx] as f64 / s;
+                pmax = pmax.max((yd[idx] as f64).exp());
+            }
+            let mean = (sum / n as f64).abs();
+            let m = n as f64 * pmax * s * mean;
+            // 非有限は分割では救えない（IEEE 伝播に任せる）。
+            if m.is_finite() {
+                worst = worst.max(m);
+            }
+        }
+    }
+    ((worst / SPLIT_LIMIT).ceil() as usize).clamp(1, SPLIT_MAX)
+}
+
 /// `Op::LogSoftmax` の create_graph（V3。イシュー #3077）。値は 1 階と
 /// 同じ `grad::log_softmax_vjp_dispatch`、構造は
 /// `s ⊙ (g/s − exp(y) ⊙ Σ(g/s))`（`|g/s| ≤ 1` で縮約が overflow しない）。
@@ -774,7 +891,7 @@ fn log_softmax_cgrad_v3<'c>(
     parent: &Tape,
     child: &'c Tape,
     parent_nodes: &[TapeNode],
-    mirror: &[Option<Var<'c>>],
+    x_m: Var<'c>,
     id: NodeId,
     g: &Var<'c>,
     dim: usize,
@@ -783,25 +900,36 @@ fn log_softmax_cgrad_v3<'c>(
     if shape.contains(&0) {
         return Ok(child.var_no_grad(&Tensor::zeros(&shape)?));
     }
-    let y_m = get_mirror(mirror, id)?;
     let out_value = materialize_fallible(parent_nodes, parent.ops(), id)?;
     let g_value = child_value(child, g)?;
-    let s_c = child
-        .var_no_grad(&lane_scale(&g_value, dim)?)
-        .broadcast_to(&shape)?;
+    let s_lane = lane_scale(&g_value, dim)?;
+    let pieces = log_softmax_split_count(out_value, &g_value, &s_lane, dim);
+    let s_c = child.var_no_grad(&s_lane).broadcast_to(&shape)?;
     let gs = g.div(&s_c)?;
-    // 二階の逆伝播の保護（codex-review 指摘・PR #3344）: `exp(y)·Σgs` の
-    // 係数 `Σgs`（最大 `n`）が `exp` ノードへの寄与 `-s·Σgs` を f32 範囲外へ
-    // 押し出す。`q = exp(y + ln n) = n·p`・`mean_gs = Σgs / n` と分け、
-    // `q` への寄与を `-s·mean_gs`（`≤ s`）に抑える。`y` への寄与は
-    // `q·(-s·mean_gs) = p·(-s·Σgs)` で従来と同値。構造式は数学的に同値で
-    // 値は 1 階のホスト関数が決める。
+    // 二階の逆伝播の保護（codex-review 指摘・PR #3344。決定記録 §24.1b）:
+    // `exp(y)·Σgs` の係数 `Σgs`（最大 `n`）が `exp` ノードへの寄与 `-s·Σgs`
+    // を f32 範囲外へ押し出す。`q = exp(y + ln n) = n·p`・`mean_gs = Σgs / n`
+    // と分け、`q` への寄与を `-s·mean_gs`（`≤ s`）に抑える。さらに `q` 自身
+    // の VJP（`q ⊙ 寄与`、最大 `n·s`）が LogSoftmax VJP へ入る前に溢れる
+    // ため、`q·mean_gs` を `pieces` 個の独立な `log_softmax` ミラー
+    // （入力 `x_m` から別々に立てる）へ等分し、各ミラーへの寄与を別々に
+    // LogSoftmax VJP へ通してから入力側で蓄積する（Softmax の `y` 3 分割と
+    // 同型）。`pieces` はホストで最大寄与の上界から決める（通常は 1）。
     let n_lane = shape[dim] as f32;
     let ln_n = child.var_no_grad(&Tensor::full(&shape, n_lane.ln())?);
-    let q = y_m.add(&ln_n)?.exp();
-    let inv_n = child.var_no_grad(&Tensor::full(&shape, 1.0 / n_lane)?);
-    let mean_gs = reduce_dim_bcast(&gs, dim, &shape)?.mul(&inv_n)?;
-    let composed = gs.sub(&q.mul(&mean_gs)?)?.mul(&s_c)?;
+    let inv_nk = child.var_no_grad(&Tensor::full(&shape, 1.0 / (n_lane * pieces as f32))?);
+    let mean_gs_k = reduce_dim_bcast(&gs, dim, &shape)?.mul(&inv_nk)?;
+    let mut sub: Option<Var<'c>> = None;
+    for _ in 0..pieces {
+        let y_k = x_m.log_softmax(dim)?;
+        let term = y_k.add(&ln_n)?.exp().mul(&mean_gs_k)?;
+        sub = Some(match sub {
+            Some(acc) => acc.add(&term)?,
+            None => term,
+        });
+    }
+    let sub = sub.ok_or_else(|| AutodiffError::Backward("LogSoftmax 分割数が 0".into()))?;
+    let composed = gs.sub(&sub)?.mul(&s_c)?;
     let host = crate::grad::log_softmax_vjp_dispatch(child.ops(), out_value, &g_value, dim)?;
     push_v3(child, &composed, host)
 }
@@ -1033,12 +1161,24 @@ fn build_cgrads<'c>(
                 accumulate(&parent_nodes, &mut cgrads, input, da)?;
             }
             Op::LogSoftmax { input, dim } => {
-                let da = log_softmax_cgrad_v3(parent, child, &parent_nodes, mirror, id, &g, dim)?;
+                let da = log_softmax_cgrad_v3(
+                    parent,
+                    child,
+                    &parent_nodes,
+                    get_mirror(mirror, input)?,
+                    id,
+                    &g,
+                    dim,
+                )?;
                 accumulate(&parent_nodes, &mut cgrads, input, da)?;
             }
             Op::Contiguous { input } => {
                 // 恒等（`grad.rs::Op::Contiguous` の VJP と同型）。
                 accumulate(&parent_nodes, &mut cgrads, input, g)?;
+            }
+            Op::ConvWeightGradHost { structure, .. } => {
+                // 恒等で `structure` のみへ（`grad.rs` の VJP と同型）。
+                accumulate(&parent_nodes, &mut cgrads, structure, g)?;
             }
             Op::Where { cond, a, b } => {
                 // `grad.rs::where_vjp` と同型: `cond` の真偽で `g` を
@@ -1393,6 +1533,79 @@ fn build_cgrads<'c>(
                     accumulate(&parent_nodes, &mut cgrads, b, db)?;
                 }
             }
+            // 2D 畳み込み族（イシュー #3080。方式は `conv` モジュール doc 参照）。
+            Op::Conv2d {
+                input,
+                weight,
+                bias,
+                params,
+                ..
+            } => {
+                let need = conv::ConvNeeds {
+                    input: parent_nodes[input.0].requires_grad,
+                    weight: parent_nodes[weight.0].requires_grad,
+                    bias: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
+                };
+                let bias_shape = bias.map(|b| parent_nodes[b.0].shape.clone());
+                let r = conv::conv2d_vjp(
+                    child,
+                    &g,
+                    &get_mirror(mirror, input)?,
+                    &get_mirror(mirror, weight)?,
+                    bias_shape.as_deref(),
+                    &params,
+                    need,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_weight {
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+                if let (Some(b), Some(d)) = (bias, r.d_bias) {
+                    accumulate(&parent_nodes, &mut cgrads, b, d)?;
+                }
+            }
+            Op::ConvTranspose2d {
+                input,
+                weight,
+                bias,
+                params,
+            } => {
+                let need = conv::ConvNeeds {
+                    input: parent_nodes[input.0].requires_grad,
+                    weight: parent_nodes[weight.0].requires_grad,
+                    bias: bias.is_some_and(|b| parent_nodes[b.0].requires_grad),
+                };
+                let bias_shape = bias.map(|b| parent_nodes[b.0].shape.clone());
+                let r = conv::conv_transpose2d_vjp(
+                    child,
+                    &g,
+                    &get_mirror(mirror, input)?,
+                    &get_mirror(mirror, weight)?,
+                    bias_shape.as_deref(),
+                    &params,
+                    need,
+                )?;
+                if let Some(d) = r.d_input {
+                    accumulate(&parent_nodes, &mut cgrads, input, d)?;
+                }
+                if let Some(d) = r.d_weight {
+                    accumulate(&parent_nodes, &mut cgrads, weight, d)?;
+                }
+                if let (Some(b), Some(d)) = (bias, r.d_bias) {
+                    accumulate(&parent_nodes, &mut cgrads, b, d)?;
+                }
+            }
+            Op::Unfold { input, params } => {
+                let input_shape = parent_nodes[input.0].shape.clone();
+                let d = conv::unfold_vjp(&g, &input_shape, &params)?;
+                accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
+            Op::Fold { input, params } => {
+                let d = conv::fold_vjp(&g, &params)?;
+                accumulate(&parent_nodes, &mut cgrads, input, d)?;
+            }
             _ => {
                 return Err(AutodiffError::Backward(
                     "create_graph: build_cgrads: supports_create_graph() が true の未対応 Op\
@@ -1508,6 +1721,13 @@ fn reduce_to<'c>(
         // 同一のため `reshape` で先頭の 1 軸を落とせる。
         cur.contiguous()?.reshape(target_shape)
     }
+}
+
+/// 子テープ上の `v` の実体値を所有値として取り出す（`conv` モジュールの V3
+/// ノード〈1 階と同じホスト関数の前方値〉の入力値取得に使う）。
+fn value_of<'c>(child: &'c Tape, v: &Var<'c>) -> Result<Tensor<f32>, AutodiffError> {
+    let nodes = child.nodes.borrow();
+    Ok(materialize_fallible(&nodes, child.ops(), v.node_id())?.clone())
 }
 
 /// `Op::Add` の bias パターンに限り `grad.rs::reduce_bias_grad`（f64
@@ -1874,5 +2094,31 @@ mod new_2649_tests {
         ] {
             assert!(!scalar_unary_replayable(op), "{op:?}");
         }
+    }
+}
+/// 低精度 `Op::Conv2d` の fail-closed（イシュー #3080・決定記録 §21.3）。
+/// `Var::conv2d_low_precision` は `pub(crate)`、F16 の typed ops を持つ
+/// テスト用バックエンド（`test_support`）も crate 内限定のため、統合テスト
+/// ではなく本クレート内の単体テストで検証する。
+#[cfg(test)]
+mod conv_low_precision_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::ScalarDType;
+
+    #[test]
+    fn low_precision_conv2d_is_rejected_and_child_stays_empty() {
+        let tape = Tape::new_with_ops(crate::test_support::low_precision_test_ops());
+        let child = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let x = tape.var(&Tensor::full(&[1, 1, 3, 3], 0.5f32).unwrap());
+        let w = tape.var(&Tensor::full(&[1, 1, 2, 2], 0.25f32).unwrap());
+        let y = x
+            .conv2d_low_precision(&w, None, [1, 1], [0, 0], [1, 1], 1, ScalarDType::F16)
+            .unwrap();
+        let loss = y.sum(None).unwrap();
+        let err = tape
+            .backward_create_graph(&loss, &child)
+            .expect_err("低精度 conv2d は fail-closed で拒否されるはず");
+        assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+        assert!(child.is_empty(), "入口検査は child へ書き込む前に拒否する");
     }
 }

@@ -748,7 +748,7 @@ fn huge_output_size_is_rejected_before_allocation() {
 }
 
 #[test]
-fn records_exactly_one_node_and_rejects_create_graph() {
+fn records_exactly_one_node_and_supports_create_graph() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(wave(9, 0.3, 1.0), &[1, 1, 3, 3]));
@@ -758,7 +758,9 @@ fn records_exactly_one_node_and_rejects_create_graph() {
     let f = fold(&u, [3, 3], [2, 2], [1, 1], [0, 0], [1, 1]).unwrap();
     assert_eq!(tape.len(), before + 2);
     let loss = f.sum(None).unwrap();
-    assert!(tape.backward_create_graph(&loss, &child).is_err());
+    // イシュー #3080 で create_graph 対応済み（旧: fail-closed で拒否）。
+    // 詳細な Hessian 突合は `tests/create_graph.rs`。
+    assert!(tape.backward_create_graph(&loss, &child).is_ok());
 }
 
 #[test]
