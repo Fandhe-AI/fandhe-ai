@@ -2440,8 +2440,12 @@ impl Op {
     /// 同時に対象。依存追加なし）。`ScalarUnaryOp`・
     /// `ScalarBinaryOp` の既知 variant はすべて `true`。
     ///
+    /// 損失 Op は `MseLoss`・`L1Loss`・`HuberLoss`・`CrossEntropyLoss`・
+    /// `NllLoss` の 5 variant がイシュー #3082（決定記録 §25）で `true`
+    /// になった（残る 16 variant は fail-closed のまま。§25 の表）。
+    ///
     /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Gather`・
-    /// `Scatter`・`Pad`・`MseLoss`・`CrossEntropyLoss` は引き続き対象外
+    /// `Scatter`・`Pad` は引き続き対象外
     /// とし、以後のイシューへ引き継ぐ（`false` のまま残す。設計 doc
     /// §8「非対象」「保留」区分の Op はすべて構造的に非対象）。
     ///
@@ -2488,7 +2492,14 @@ impl Op {
             | Op::Fold { .. }
             | Op::Where { .. }
             | Op::Softmax { .. }
-            | Op::LogSoftmax { .. } => true,
+            | Op::LogSoftmax { .. }
+            // 損失 Op 第 1 弾（イシュー #3082・決定記録 §25）。1 階 VJP が f32 の
+            // 要素式のみで f64 縮約契約を持たない 5 variant（V1／V2 方式）。
+            | Op::MseLoss { .. }
+            | Op::L1Loss { .. }
+            | Op::HuberLoss { .. }
+            | Op::CrossEntropyLoss { .. }
+            | Op::NllLoss { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2500,11 +2511,7 @@ impl Op {
             | Op::Amax { .. }
             | Op::Amin { .. }
             | Op::Min { .. }
-            | Op::MseLoss { .. }
-            | Op::HuberLoss { .. }
             | Op::BceLoss { .. }
-            | Op::CrossEntropyLoss { .. }
-            | Op::L1Loss { .. }
             | Op::CrossEntropyLossWithOptions { .. }
             | Op::CosineEmbeddingLoss { .. }
             | Op::MarginRankingLoss { .. }
@@ -2519,7 +2526,6 @@ impl Op {
             | Op::MultiLabelSoftMarginLoss { .. }
             | Op::SigmoidFocalLoss { .. }
             | Op::CtcLoss { .. }
-            | Op::NllLoss { .. }
             | Op::KlDivLoss { .. }
             | Op::ResidentLeaf { .. }
             | Op::LinearResident { .. }
@@ -5561,5 +5567,59 @@ mod lrn_weight_reparam_op_tests {
             op.for_each_input(|id| seen.push(id.0));
             assert_eq!(seen, want);
         }
+    }
+}
+#[cfg(test)]
+mod loss_create_graph_support_tests {
+    use super::*;
+    use crate::var::Reduction;
+
+    /// 損失 Op 第 1 弾（イシュー #3082・決定記録 §25）の対象 5 variant が
+    /// `supports_create_graph() == true`、隣接する未対応の損失が `false` の
+    /// ままであること（fail-closed の境界を固定する）。
+    #[test]
+    fn first_wave_losses_are_supported_and_neighbors_stay_closed() {
+        let r = Reduction::Mean;
+        let supported = [
+            Op::MseLoss {
+                pred: NodeId(0),
+                target: NodeId(1),
+                reduction: r,
+            },
+            Op::L1Loss {
+                pred: NodeId(0),
+                target: NodeId(1),
+                reduction: r,
+            },
+            Op::HuberLoss {
+                pred: NodeId(0),
+                target: NodeId(1),
+                kind: fandhe_ai_tensor_core::HuberKind::Huber,
+                delta: 1.0,
+                reduction: r,
+            },
+            Op::CrossEntropyLoss {
+                logits: NodeId(0),
+                targets: Tensor::new(vec![0i32], &[1]).unwrap(),
+                class_dim: 1,
+                reduction: r,
+            },
+            Op::NllLoss {
+                input: NodeId(0),
+                targets: Tensor::new(vec![0i32], &[1]).unwrap(),
+                class_dim: 1,
+                reduction: r,
+            },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?}");
+        }
+        let closed = Op::KlDivLoss {
+            input: NodeId(0),
+            target: NodeId(1),
+            kind: fandhe_ai_tensor_core::KlDivTarget::Probabilities,
+            reduction: r,
+        };
+        assert!(!closed.supports_create_graph());
     }
 }

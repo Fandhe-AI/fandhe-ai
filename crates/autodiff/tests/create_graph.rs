@@ -36,7 +36,7 @@ mod common;
 use std::sync::Arc;
 
 use fandhe_ai_autodiff::nn::Linear;
-use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Tape, Var};
+use fandhe_ai_autodiff::{AutodiffError, CustomFunction, Reduction, Tape, Var};
 use fandhe_ai_tensor_core::{Activation, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
@@ -2030,7 +2030,7 @@ fn hessian_where_matches_finite_difference() {
     assert!(common::req2_close(analytic[1][1], 6.0 * x0[1] as f64));
 }
 
-// --- MaskedFill・Gather・Scatter・Pad・MseLoss・CrossEntropyLoss は
+// --- MaskedFill・Gather・Scatter・Pad は
 //     イシュー #2062 のスコープ外（`Op::supports_create_graph()` は
 //     引き続き `false`）。fail-closed のまま残ることを固定する。
 
@@ -3136,4 +3136,370 @@ fn create_graph_gelu_family_first_order_is_bit_identical() {
             ));
         }
     }
+}
+// --- 損失 Op 第 1 弾（イシュー #3082・決定記録 §25。V1／V2 方式） -------------
+// MseLoss・L1Loss・HuberLoss（Huber／SmoothL1）・CrossEntropyLoss・NllLoss。
+// `Reduction` は `Mean`／`Sum` の 2 種のみ存在する（`None` は未実装・公開 API
+// 変更のため対象外）。tolerance は REQ-2 統一複合判定のまま（変更なし）。
+
+const LX: [f32; 6] = [0.3, -2.0, 1.9, 0.2, -0.2, 3.0];
+const LT: [f32; 6] = [0.0, 0.5, 0.4, 0.0, 0.0, 1.0];
+
+fn loss_target<'t>(tape: &'t Tape) -> Var<'t> {
+    tape.var_no_grad(&t(LT.to_vec(), &[2, 3]))
+}
+
+fn tgt_i32(v: Vec<i32>, shape: &[usize]) -> Tensor<i32> {
+    Tensor::new(v, shape).expect("i32 targets fixture")
+}
+
+macro_rules! regression_builds {
+    ($ident:ident, $ident_chain:ident, $method:ident, $red:expr) => {
+        fn $ident<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.$method(&loss_target(tape), $red)
+        }
+        fn $ident_chain<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.tanh().$method(&loss_target(tape), $red)
+        }
+    };
+}
+regression_builds!(mse_mean, mse_mean_chain, mse_loss_with, Reduction::Mean);
+regression_builds!(mse_sum, mse_sum_chain, mse_loss_with, Reduction::Sum);
+regression_builds!(l1_mean, l1_mean_chain, l1_loss, Reduction::Mean);
+regression_builds!(l1_sum, l1_sum_chain, l1_loss, Reduction::Sum);
+
+macro_rules! huber_builds {
+    ($ident:ident, $ident_chain:ident, $method:ident, $param:expr, $red:expr) => {
+        fn $ident<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.$method(&loss_target(tape), $param, $red)
+        }
+        fn $ident_chain<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+            x.mul(x)?.$method(&loss_target(tape), $param, $red)
+        }
+    };
+}
+huber_builds!(
+    huber_mean,
+    huber_mean_chain,
+    huber_loss,
+    1.0,
+    Reduction::Mean
+);
+huber_builds!(huber_sum, huber_sum_chain, huber_loss, 1.0, Reduction::Sum);
+huber_builds!(
+    sl1_mean,
+    sl1_mean_chain,
+    smooth_l1_loss,
+    0.5,
+    Reduction::Mean
+);
+huber_builds!(sl1_sum, sl1_sum_chain, smooth_l1_loss, 0.5, Reduction::Sum);
+
+#[test]
+fn hessian_mse_loss_matches_finite_difference_and_closed_form() {
+    check_hessian(mse_mean, &LX, &[2, 3]);
+    check_hessian(mse_sum, &LX, &[2, 3]);
+    check_hessian(mse_mean_chain, &LX, &[2, 3]);
+    check_hessian(mse_sum_chain, &LX, &[2, 3]);
+    // 閉形式: Mean は 2/n·I、Sum は 2·I（n = 6）。
+    let h = analytic_hessian(mse_mean, &LX, &[2, 3]);
+    for (i, row) in h.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            let e = if i == j { 2.0 / 6.0 } else { 0.0 };
+            assert!(common::req2_close(v, e), "mean ({i},{j}) {v} vs {e}");
+        }
+    }
+    let h = analytic_hessian(mse_sum, &LX, &[2, 3]);
+    for (i, row) in h.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            let e = if i == j { 2.0 } else { 0.0 };
+            assert!(common::req2_close(v, e), "sum ({i},{j}) {v} vs {e}");
+        }
+    }
+}
+
+#[test]
+fn hessian_l1_loss_matches_finite_difference() {
+    check_hessian(l1_mean, &LX, &[2, 3]);
+    check_hessian(l1_sum, &LX, &[2, 3]);
+    check_hessian(l1_mean_chain, &LX, &[2, 3]);
+    check_hessian(l1_sum_chain, &LX, &[2, 3]);
+}
+
+#[test]
+fn hessian_huber_and_smooth_l1_match_finite_difference() {
+    // d = x - target = [0.3, -2.5, 1.5, 0.2, -0.2, 2.0]（delta=1・beta=0.5 の
+    // 二次・線形両領域を含み、折れ点から h=1e-2 より十分離れる）。
+    check_hessian(huber_mean, &LX, &[2, 3]);
+    check_hessian(huber_sum, &LX, &[2, 3]);
+    check_hessian(huber_mean_chain, &LX, &[2, 3]);
+    check_hessian(huber_sum_chain, &LX, &[2, 3]);
+    check_hessian(sl1_mean, &LX, &[2, 3]);
+    check_hessian(sl1_sum, &LX, &[2, 3]);
+    check_hessian(sl1_mean_chain, &LX, &[2, 3]);
+    check_hessian(sl1_sum_chain, &LX, &[2, 3]);
+}
+
+// 混合二階微分: x[0] を pred、x[1] を target（どちらも追跡）にする。
+fn split_pt<'t>(x: &Var<'t>) -> Result<(Var<'t>, Var<'t>), AutodiffError> {
+    Ok((x.narrow(0, 0, 1)?, x.narrow(0, 1, 1)?))
+}
+fn mixed_mse<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    p.mse_loss_with(&q, Reduction::Mean)
+}
+fn mixed_l1<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(&x.tanh())?;
+    p.l1_loss(&q, Reduction::Sum)
+}
+fn mixed_huber<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    p.huber_loss(&q, 1.0, Reduction::Mean)
+}
+fn mixed_sl1<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    p.smooth_l1_loss(&q, 0.5, Reduction::Sum)
+}
+
+#[test]
+fn hessian_mixed_pred_target_matches_finite_difference() {
+    // d = x[0] - x[1] = [0.3, -2.5, 1.5]
+    let x0 = [0.3f32, -2.0, 1.9, 0.0, 0.5, 0.4];
+    check_hessian(mixed_mse, &x0, &[2, 3]);
+    check_hessian(mixed_l1, &x0, &[2, 3]);
+    check_hessian(mixed_huber, &x0, &[2, 3]);
+    check_hessian(mixed_sl1, &x0, &[2, 3]);
+    // MSE の d²L/dpred·dtarget ブロックは -2/n·I（n = 3）。
+    let h = analytic_hessian(mixed_mse, &x0, &[2, 3]);
+    for i in 0..3 {
+        assert!(common::req2_close(h[i][3 + i], -2.0 / 3.0), "{h:?}");
+        assert!(common::req2_close(h[i][i], 2.0 / 3.0), "{h:?}");
+    }
+}
+
+fn ce_d1_mean<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Mean)
+}
+fn ce_d1_sum<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Sum)
+}
+fn ce_d0_mean<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![1, 0, 1], &[3]), 0, Reduction::Mean)
+}
+fn ce_rank3_mid<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.cross_entropy_loss(&tgt_i32(vec![2, 0, 1, 1], &[2, 2]), 1, Reduction::Mean)
+}
+fn ce_chain<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.tanh()
+        .cross_entropy_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Sum)
+}
+fn nll_d1_mean<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Mean)
+}
+fn nll_d1_sum<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Sum)
+}
+fn nll_d0<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(0)?
+        .nll_loss(&tgt_i32(vec![1, 0, 1], &[3]), 0, Reduction::Mean)
+}
+fn nll_rank3_mid<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0, 1, 1], &[2, 2]), 1, Reduction::Sum)
+}
+fn nll_direct<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    // NllLoss 自身の入力についての 2 階は 0（V2）。tanh で非自明にする。
+    x.tanh()
+        .nll_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Mean)
+}
+fn nll_of_log_softmax_rank3<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.log_softmax(1)?
+        .nll_loss(&tgt_i32(vec![2, 0, 1, 1], &[2, 2]), 1, Reduction::Mean)
+}
+
+#[test]
+fn hessian_cross_entropy_matches_finite_difference() {
+    check_hessian(ce_d1_mean, &X23, &[2, 3]);
+    check_hessian(ce_d1_sum, &X23, &[2, 3]);
+    check_hessian(ce_d0_mean, &X23, &[2, 3]);
+    check_hessian(ce_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(ce_chain, &X23, &[2, 3]);
+}
+
+#[test]
+fn hessian_nll_matches_finite_difference() {
+    check_hessian(nll_d1_mean, &X23, &[2, 3]);
+    check_hessian(nll_d1_sum, &X23, &[2, 3]);
+    check_hessian(nll_d0, &X23, &[2, 3]);
+    check_hessian(nll_rank3_mid, &x12(), &[2, 3, 2]);
+    check_hessian(nll_direct, &X23, &[2, 3]);
+}
+
+#[test]
+fn hessian_cross_entropy_equals_nll_of_log_softmax() {
+    let a = analytic_hessian(ce_d1_mean, &X23, &[2, 3]);
+    let b = analytic_hessian(nll_d1_mean, &X23, &[2, 3]);
+    assert_hessian_close(&a, &b);
+    let a = analytic_hessian(ce_rank3_mid, &x12(), &[2, 3, 2]);
+    let b = analytic_hessian(nll_of_log_softmax_rank3, &x12(), &[2, 3, 2]);
+    assert_hessian_close(&a, &b);
+}
+
+/// 1 階は `Tape::backward` と bit 同一（`first_order()`）、`cg.grad` は
+/// REQ-2 で一致する（5 損失は V1／V2 のため bit 一致は主張しない）。
+fn check_first_order<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x).unwrap();
+    let plain_grads = tape.backward(&loss).unwrap();
+    let plain = plain_grads.get(&x).unwrap().unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let first = cg.first_order().get(&x).unwrap().unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    for i in 0..x0.len() {
+        let idx = unravel(i, shape);
+        let p = plain.get(&idx).unwrap();
+        assert_eq!(p.to_bits(), first.get(&idx).unwrap().to_bits());
+        assert!(common::req2_close(
+            g.value().get(&idx).unwrap() as f64,
+            p as f64
+        ));
+    }
+}
+
+#[test]
+fn loss_create_graph_first_order_invariants() {
+    check_first_order(mse_mean_chain, &LX, &[2, 3]);
+    check_first_order(l1_sum_chain, &LX, &[2, 3]);
+    check_first_order(huber_mean, &LX, &[2, 3]);
+    check_first_order(sl1_sum, &LX, &[2, 3]);
+    check_first_order(ce_d1_mean, &X23, &[2, 3]);
+    check_first_order(ce_rank3_mid, &x12(), &[2, 3, 2]);
+    check_first_order(nll_d1_sum, &X23, &[2, 3]);
+}
+
+/// 孫テープ再生（閉包性。§21.1(4)）: 損失出力を `jvp_create_graph` に通し、
+/// 方向微分の中央差分と REQ-2 で一致する。
+fn loss_jvp_case<F>(build: F, x0: &[f32], shape: &[usize])
+where
+    F: for<'t> Fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>,
+{
+    let tangent: Vec<f32> = (0..x0.len())
+        .map(|i| ((i * 3 + 1) % 7) as f32 * 0.1 - 0.3)
+        .collect();
+    let out_at = |pv: &[f32]| -> f64 {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let p = tape.var(&t(pv.to_vec(), shape));
+        build(&tape, &p).unwrap().value().get(&[]).unwrap() as f64
+    };
+    let h = 1e-3f32;
+    let plus: Vec<f32> = x0.iter().zip(&tangent).map(|(a, v)| a + h * v).collect();
+    let minus: Vec<f32> = x0.iter().zip(&tangent).map(|(a, v)| a - h * v).collect();
+    let numeric = (out_at(&plus) - out_at(&minus)) / (2.0 * h as f64);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x).unwrap();
+    let res = fandhe_ai_autodiff::functional_ops::jvp_create_graph(
+        &tape,
+        &loss,
+        &x,
+        &t(tangent, shape),
+        &child,
+        &grand,
+    )
+    .expect("損失を含む関数でも jvp_create_graph が成立する（閉包性）");
+    let jv = res.output().value().get(&[]).unwrap() as f64;
+    assert!(
+        common::req2_close(jv, numeric),
+        "jvp={jv} numeric={numeric}"
+    );
+}
+
+#[test]
+fn loss_jvp_create_graph_matches_directional_derivative() {
+    loss_jvp_case(mse_mean_chain, &LX, &[2, 3]);
+    loss_jvp_case(ce_d1_mean, &X23, &[2, 3]);
+    loss_jvp_case(huber_sum, &LX, &[2, 3]);
+    loss_jvp_case(nll_d1_mean, &X23, &[2, 3]);
+    loss_jvp_case(l1_mean_chain, &LX, &[2, 3]);
+}
+
+/// `reduction='none'` 相当（要素ごとの二乗誤差。非スカラー損失）。
+/// `Reduction::None` は未実装（公開 API 変更のため対象外）のため、合成で代替する。
+fn elementwise_sq_err<'t>(tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let d = x.sub(&loss_target(tape))?;
+    d.mul(&d)
+}
+
+#[test]
+fn hessian_elementwise_squared_error_none_equivalent() {
+    check_hessian(elementwise_sq_err, &LX, &[2, 3]);
+}
+
+#[test]
+fn cross_entropy_large_logits_stay_finite() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1e30, -1e30], &[1, 2]));
+    let loss = x
+        .cross_entropy_loss(&tgt_i32(vec![0], &[1]), 1, Reduction::Mean)
+        .unwrap();
+    let plain_grads = tape.backward(&loss).unwrap();
+    let plain = plain_grads.get(&x).unwrap().unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    for i in 0..2 {
+        assert!(plain.get(&[0, i]).unwrap().is_finite());
+        assert!(g.value().get(&[0, i]).unwrap().is_finite());
+    }
+    let xc = cg.child_var(&x).unwrap().unwrap();
+    let g2 = child.backward(&g.sum(None).unwrap()).unwrap();
+    let h = g2.get(&xc).unwrap().unwrap();
+    for i in 0..2 {
+        assert!(h.get(&[0, i]).unwrap().is_finite(), "二階が有限");
+    }
+}
+
+#[test]
+fn empty_loss_inputs_return_empty_grads() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![], &[0]));
+    let y = tape.var_no_grad(&t(vec![], &[0]));
+    let loss = x.mse_loss_with(&y, Reduction::Mean).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    assert_eq!(g.value().shape(), &[0usize]);
+
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![], &[0, 3]));
+    let loss = x
+        .cross_entropy_loss(&tgt_i32(vec![], &[0]), 1, Reduction::Mean)
+        .unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let g = cg.grad(&x).unwrap().unwrap();
+    assert_eq!(g.value().shape(), &[0usize, 3]);
+}
+
+#[test]
+fn create_graph_still_rejects_remaining_loss_ops() {
+    // 第 1 弾の対象外（決定記録 §25 の表）。fail-closed のまま子テープは空。
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.2, 0.3, 0.5], &[1, 3]));
+    let q = tape.var_no_grad(&t(vec![0.3, 0.3, 0.4], &[1, 3]));
+    let loss = x.kl_div_loss(&q, Reduction::Mean).unwrap();
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
+    assert!(child.is_empty());
 }

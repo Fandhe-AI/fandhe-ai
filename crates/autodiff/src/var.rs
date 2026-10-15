@@ -1509,7 +1509,7 @@ impl<'t> Var<'t> {
     /// `AutodiffError::InvalidArgument`。`rms_norm` の `eps` 検査と同型）
     /// → ④実体化（層 1）→ ⑤`BackendOps::huber_loss` 試行 →
     /// ⑥バックエンド契約検証（戻り値 shape `[]`）→ ⑦ノード記録。
-    fn huber_loss_impl(
+    pub(crate) fn huber_loss_impl(
         &self,
         target: &Var<'t>,
         kind: HuberKind,
