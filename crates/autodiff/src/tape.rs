@@ -2397,7 +2397,10 @@ impl Op {
     /// これを逐語再現しないため対象外とした。#1943・
     /// `docs/autodiff-higher-order-grad-decision.md` §14）の 12
     /// variant に加え、`Transpose`・`Permute`・`Narrow`・`Concat`・
-    /// `Contiguous`・`Where` は無条件で `true`（#2062）。
+    /// `Contiguous`・`Where` は無条件で `true`（#2062）。`BatchNorm`（train／eval。
+    /// #3079）も `true`——値は 1 階と同じ `batch_norm_vjp_channels`（V3）、構造は
+    /// 2 のべき乗スケール付きの合成（S1）で、方式は `create_graph_norm.rs` と
+    /// 決定記録 §22 を正とする。
     ///
     /// `Op::ScalarUnary`／`Op::ScalarBinary` は **payload（`op` フィールド
     /// の具体的な variant）まで見て判定する**（[`scalar_unary_
@@ -2448,7 +2451,8 @@ impl Op {
             | Op::Narrow { .. }
             | Op::Concat { .. }
             | Op::Contiguous { .. }
-            | Op::Where { .. } => true,
+            | Op::Where { .. }
+            | Op::BatchNorm { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2486,7 +2490,6 @@ impl Op {
             | Op::LinearAct { .. }
             | Op::RmsNorm { .. }
             | Op::LayerNorm { .. }
-            | Op::BatchNorm { .. }
             | Op::RnnCell { .. }
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }

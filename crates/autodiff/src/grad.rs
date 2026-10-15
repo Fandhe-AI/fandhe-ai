@@ -6135,8 +6135,12 @@ fn layer_norm_vjp_rows(
 /// `x`／`dy` は `[n, c, spatial]` 相当の行優先平坦化データ。
 /// `fixed_stats` は `Some((mean, var))`（それぞれ長さ `c`）で eval
 /// モードを表す。
+///
+/// `pub(crate)`（イシュー #3079）: `create_graph_norm.rs` の BatchNorm
+/// 二階 VJP（V3。値を 1 階と bit 同一にするためホスト関数を共有する）
+/// からも呼ばれる。シグネチャ・本体は 1 階と共通のまま不変。
 #[allow(clippy::too_many_arguments)]
-fn batch_norm_vjp_channels(
+pub(crate) fn batch_norm_vjp_channels(
     x: &[f32],
     w: Option<&[f32]>,
     has_bias: bool,
