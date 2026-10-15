@@ -1312,11 +1312,18 @@ fn build_cgrads<'c>(
                     };
                     let lin_const = child.var_no_grad(&Tensor::new(lin_data, &shape)?);
                     let d_m = pred_m.sub(&target_m)?;
+                    // 線形領域（非選択分岐）の `d_m` は除算・乗算の前に 0 へマスクする。
+                    // マスクせず `d_m / delta` を作ると、有限入力（例: pred=1e30・
+                    // beta=1e-10）でも非選択側が inf になり、`where_cond` が二次側へ
+                    // 流すゼロ余接と Mul／Div の VJP で積算されて NaN が二階微分へ
+                    // 漏れる。NaN の `d` は `quad` に含まれるためマスク後も伝播する。
+                    let zeros_q = child.var_no_grad(&Tensor::zeros(&shape)?);
+                    let d_safe = Var::where_cond(&quad, &d_m, &zeros_q)?;
                     let quad_grad = if smooth_l1 {
                         let delta_c = child.var_no_grad(&Tensor::scalar(delta));
-                        g_b.mul(&d_m.div(&delta_c)?)?
+                        g_b.mul(&d_safe.div(&delta_c)?)?
                     } else {
-                        g_b.mul(&d_m)?
+                        g_b.mul(&d_safe)?
                     };
                     let lin_grad = g_b.mul(&lin_const)?;
                     Var::where_cond(&quad, &quad_grad, &lin_grad)?

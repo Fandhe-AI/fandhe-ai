@@ -3277,6 +3277,31 @@ fn hessian_mixed_pred_target_matches_finite_difference() {
     }
 }
 
+fn sl1_tiny_beta_then_tanh<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    Ok(p.smooth_l1_loss(&q, 1e-10, Reduction::Sum)?.tanh())
+}
+fn huber_tiny_delta_then_tanh<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    let (p, q) = split_pt(x)?;
+    Ok(p.huber_loss(&q, 1e-10, Reduction::Sum)?.tanh())
+}
+
+/// 回帰（codex P1）: 線形領域の非選択二次分岐 `d / beta` が有限入力
+/// （pred=1e30・beta=1e-10）で inf になり、二階微分が NaN になってはならない。
+/// 本来の二階微分は 0（tanh は飽和・線形領域は区分定数勾配）。
+#[test]
+fn hessian_smooth_l1_tiny_beta_large_pred_is_finite() {
+    let x0 = [1.0e30f32, 0.0];
+    for build in [sl1_tiny_beta_then_tanh, huber_tiny_delta_then_tanh] {
+        let h = analytic_hessian(build, &x0, &[2]);
+        for row in &h {
+            for v in row {
+                assert!(v.is_finite() && *v == 0.0, "二階微分が非有限/非ゼロ: {h:?}");
+            }
+        }
+    }
+}
+
 fn ce_d1_mean<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
     x.cross_entropy_loss(&tgt_i32(vec![2, 0], &[2]), 1, Reduction::Mean)
 }
