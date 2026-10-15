@@ -153,3 +153,11 @@ Sequential 保存は `format_version: 2` 据え置き。新 kind を足しても
 - `LayerSpec::Unfold`／`Fold` の実 variant を追加し、`save_model`／`load_model` で kind `unfold`／`fold` を往復できるようにした（§3 の平坦スキーマ。unfold 8 キー・fold 10 キー）。意味検査は `add_*` に委ねる。
 - `format_version` は 2 のまま（旧リーダーは未知 kind を `UnsupportedModel` で拒否）。allowlist は 63 → 65 種。ONNX export は `UnsupportedLayer` のまま。
 - 層経路の CUDA／Metal parity を `#[ignore]` で追加（未実測。#3171・#3172。`docs/perf/logs/compat-sequential-fold-unfold-3041/README.md`）。依存・tolerance・baseline・`docs/spec` は不変。
+
+## 23. #3044 実施記録（LocalResponseNorm の `Sequential::add_local_response_norm` 公開）
+
+- `add_local_response_norm(size, alpha, beta, k)` を §3 の形で公開した（`size: usize`・`alpha`／`beta`／`k: f32`・PyTorch の既定値は設けず全引数明示・`Result<Self, AutodiffError>`）。引数検査（`size == 0`・非有限パラメータ）は `nn::LocalResponseNorm::new` に委ねる。`size > C` は受理し、入力 rank 3 未満は forward 時に `Err`。
+- `LayerSpec::Unsupported { kind: "local_response_norm" }` を採用し、`save_model` は `UnsupportedModel` で fail-closed（#3040 の先例と同型）。実 variant への置換と保存・復元（kind `local_response_norm`・キー 4 個）は後続 `-c` の範囲。ONNX export は `UnsupportedLayer` のまま。
+- 常駐経路は §5 のとおり拒否する。`contains_resident_unsupported_layer` に `Module::as_local_response_norm`（#3043）を追加し、3 入口（`init_device_param_store`／`forward_resident`／`predict_resident`）が `BackendError::Unsupported` を返す。`LayerSpec::Unsupported` では variant 判定ができないため、#3040 と同じ型付きフック方式を採った。学習経路は無パラメータ層として新規結線不要。
+- 保留ガード `LrnWeightReparamHoldDoctestGuard` は `add_local_response_norm` の 1 名分のみ反転した（トレイト impl と UFCS 呼び出しから削除）。`add_weight_norm`／`add_spectral_norm`・`Tape`／`Tensor<f32>` の同名メソッド・モジュール・型の否定は維持。`api_surface.rs` に承認シグネチャの正ガードと workspace `fn` 宣言位置の固定を追加した。
+- 対象外: 保存対応（`-c`）・`add_weight_norm`／`add_spectral_norm`（#3046・#3047）・`supports_forward_host` 有効化・`nn::LocalResponseNorm` 層型名の facade 公開（#3022）・実機 parity（#3171・#3172。未実測）。依存・tolerance・baseline・`docs/spec` は不変。既存本文は書き換えていない。

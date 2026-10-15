@@ -6,7 +6,7 @@
 //! 従い、引数順は `size, alpha, beta, k`。PyTorch の既定値は設けず全引数を明示する。
 //!
 //! 呼び出し文脈: `Module` 実装（`nn/module.rs`）経由で `Sequential` 等から呼ばれる。facade の
-//! `Sequential::add_local_response_norm`・保存 kind・常駐経路の拒否は後続 issue の範囲。
+//! `Sequential::add_local_response_norm` は #3044 で公開済み（常駐経路は拒否・`LayerSpec::Unsupported` で保存は fail-closed）。保存 kind は後続 issue の範囲。
 //!
 //! 構築時検査: `new` は `Var` 経路と同じ `LrnParams::new` と同一のエラー写像で `size == 0`・
 //! 非有限 `alpha`／`beta`／`k` を前倒し拒否し、判定基準が食い違う別経路を作らない。rank・確保サイズは
