@@ -1,6 +1,6 @@
 //! `Op::LayerNorm`・`Op::RmsNorm` の `create_graph`（子テープ方式の二階微分）対応
 //! （イシュー #3078・親 #3075。方針の正は
-//! `docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3「#3078」、実装記録は §22）。
+//! `docs/autodiff-higher-order-grad-decision.md` §21.1・§21.3「#3078」、実装記録は §23）。
 //!
 //! [`crate::create_graph`] の `validate_ancestors`／`replay_op`／`build_cgrads` から呼ばれる
 //! 行方向正規化専用の補助モジュール。`create_graph.rs` 本体を肥大させず、並行する
@@ -47,7 +47,7 @@
 //! upstream `g` が極端に大きい（例: `g=[3e38,3e38]`）と、構造側の `Mean(dxhat⊙xhat)` の
 //! f32 和が overflow しうる。`cg.grad` の値は V3 なので 1 階と一致するが、構造側の `inf` は
 //! Hessian・孫テープ再生に入る。`g` は入口検査の時点で未知のため事前判定できない
-//! （g スケーリングは後続候補。決定記録 §22 に記録）。
+//! （g スケーリングは後続候補。決定記録 §23 に記録）。
 
 use fandhe_ai_tensor_core::{BackendOps, Tensor, row_norm_layout};
 
@@ -65,7 +65,7 @@ const TINY_DEVIATION_GUARD: f64 = 7.888_609_052_210_118e-31;
 fn reject(what: &str) -> AutodiffError {
     AutodiffError::Backward(format!(
         "create_graph: {what}（LayerNorm／RmsNorm の S1 構造が安全に扱えない入力。\
-         docs/autodiff-higher-order-grad-decision.md §22 参照）"
+         docs/autodiff-higher-order-grad-decision.md §23 参照）"
     ))
 }
 

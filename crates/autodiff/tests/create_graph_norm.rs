@@ -1,5 +1,5 @@
 //! `Op::LayerNorm`・`Op::RmsNorm` の `create_graph`（`Tape::backward_create_graph`）対応
-//! （イシュー #3078・親 #3075・決定記録 `docs/autodiff-higher-order-grad-decision.md` §21.3・§22）
+//! （イシュー #3078・親 #3075・決定記録 `docs/autodiff-higher-order-grad-decision.md` §21.3・§23）
 //! の受け入れ条件を直接検証する統合テスト。
 //!
 //! - Hessian を `Tape::backward` の中央差分（`create_graph` を経由しない独立経路）と REQ-2 統一
