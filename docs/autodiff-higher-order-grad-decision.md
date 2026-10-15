@@ -821,12 +821,12 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文。
 
-## 22. 実装記録（#3080・Conv 系 2D の create_graph 対応）
+## 23. 実装記録（#3080・Conv 系 2D の create_graph 対応）
 
 - 基準コミットは `origin/main` `6d08419a`。方針の正は §21（21.2 の #3080 族・21.3 の conv 方針・21.4 の 2D／3D 分割・21.6 の fail-closed）で、本節は実装結果だけを書く。
 - 実装範囲は §21.4 (a)＝2D の 4 variant（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）。`Conv3d`・`ConvTranspose3d` は `supports_create_graph() == false` のまま残し、入口検査が拒否する（(b) への申し送り）。
 
-### 22.1 実装した内容
+### 23.1 実装した内容
 
 | 項目 | 実装 |
 |---|---|
@@ -842,22 +842,24 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 - K 軸の並び `(c, kh, kw)` は、groups 付き im2col（`[N, G, K_g, P]`）の平坦化と groups = 1 の `unfold`／`fold` で一致する。このため groups > 1 でも `Var::unfold`／`fold` を使える。
 - 要素数 0 の入力は matmul を呼ばず、子テープ上のゼロ定数を返す。
 
-### 22.2 方式（V1／V3）
+### 23.2 方式（V1／V3）
 
 - d_input は V1（unfold／fold と groups ごとの rank 2 strict matmul の合成）。
-- d_weight は V3。構造は V1 と同じ合成、値は 1 階と同じホスト関数（`gemm_batched_fp32_strict`＋N 軸 `f64` 縮約）の結果を `Op::Contiguous`（VJP は恒等で前方値を読まない）のタグで `push_eager` する。
+- d_weight は V3。構造は V1 と同じ合成、値は 1 階と同じホスト関数（`gemm_batched_fp32_strict`＋N 軸 `f64` 縮約）の結果を専用 Op `Op::ConvWeightGradHost { structure, g, x, params, transposed }` で `push_eager` する。VJP は恒等で `structure` のみへ渡し、孫テープでの再生（`replay_op`）は同じホスト関数で値を再計算する。
 - d_bias は V3。`reduce_bias_grad_var`（`eval::reduce_bias_grad_rows`）を再利用する。
 - `Unfold`／`Fold` は V1（1 階と同じ `col2im`／`im2col` を `fold`／`unfold` として書く。値も一致する）。
 
-### 22.3 数値契約と残余（§21.1(5) との関係）
+### 23.3 数値契約と残余（§21.1(5) との関係）
 
 - 1 階と `cg.grad`（d_weight・d_bias）は bit 一致する。N·P 方向の長軸縮約が f32 逐次和では overflow し、`f64` 縮約では有限になる入力（N=3・1×1 カーネル・`x=[1,1,-1]`・`g=[3e38;3]`）の回帰テストで固定した。
 - conv は x と w に対する双線形写像で、構造側の合成（`MatMul`・`Permute`・`Reshape`・`Narrow`・`Concat`・`Unfold`・`Fold`）の VJP は各ノード自身の前方値を読まない（`MatMul` が読むのはオペランドの値だけ）。そのため二階の微分値は V3 の前方値だけで有限かつ正しい。
-- **残余（所有者判断事項）**: 孫テープ（3 段目）で再生すると V3 ノードの前方値は構造側の f32 合成で計算し直され、上の overflow 入力では前方値が `inf` になりうる。§21.1(5) が要求する 3 段のうち、孫テープ上の前方値の一致は満たさない。3 段目の微分値は上の理由で有限のままで、テストで固定した。利用者が孫テープ上の勾配へ非線形演算を掛けて更に微分する場合（勾配ペナルティの三階など）に限り影響しうる。
+- 孫テープ（3 段目以降）で再生しても d_weight の前方値は同じホスト関数で再計算され、上の overflow 入力でも有限のまま 1 階と一致する（`Op::ConvWeightGradHost`。`Op::Contiguous` タグでは再生時に f32 の構造側合成へ落ちて `inf` になっていた〈レビュー指摘 P1〉）。孫テープ上で `h = (gw·1e-38)²` を作って更に微分した x 勾配が通常の `backward` と bit 一致する回帰テストで固定した。
+- `ConvTranspose2d` の `output_padding` は `out + 2p − ((in−1)·s + d·(k−1) + 1)` を符号付き（`i128`）で導出する（出力長から `output_padding` を除いた base は `2p` が大きいと負になりうる）。
+- d_bias は入力・重みがゼロ次元でも上流 `g` が非空なら通常どおり縮約する（`Cin = 0` で 1 階と一致）。
 - 代替の S1（`g/s_g`・`col/s_x` で matmul を取り 2 のべき乗で戻す）は採らない。順方向は有限に保てるが、逆伝播で上流勾配へ `2^(e_g+e_x)` のチャンク積が先に掛かり、真値が有限でも二階の微分値が `inf` になる（overflow を二階側へ移すだけ）。
 - tolerance・baseline・FMA 契約は変更しない。
 
-### 22.4 テスト
+### 23.4 テスト
 
 `crates/autodiff/tests/create_graph.rs`（追加分）:
 
@@ -869,12 +871,38 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 
 既存テストの更新: `tape.rs` の `unfold_and_fold_op_meta_properties`（`supports_create_graph` を `true` へ反転）、`conv2d_family_supports_create_graph`（新規）、`fold_unfold_parity.rs` の `records_exactly_one_node_and_supports_create_graph`（旧: 拒否を確認）。`conv_transpose3d_parity.rs`・`pool3d_parity.rs` の拒否テストは 3D のため変更していない。
 
-### 22.5 所有者へ戻す論点
+### 23.5 所有者へ戻す論点
 
-1. §22.3 の残余（孫テープ上の V3 前方値）を許容するか。
-2. §21.4 (b)（3D: `Conv3d`・`ConvTranspose3d`）のサブイシュー起票（起票にはユーザー承認が要る）。
-3. CUDA・Metal 実機で create_graph と conv を組み合わせた実測は未実施（申し送り）。
+1. §21.4 (b)（3D: `Conv3d`・`ConvTranspose3d`）のサブイシュー起票（起票にはユーザー承認が要る）。
+2. CUDA・Metal 実機で create_graph と conv を組み合わせた実測は未実施（申し送り）。
 
-### 22.6 変更していないもの
+### 23.6 変更していないもの
 
 1 階 `Tape::backward` の数値（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・既存節の本文。
+
+## 22. 実装記録（#3081: Gelu・GeluTanh・Erf の create_graph 対応）
+
+§21.5 の決定に従い実装した。コードは `crates/autodiff/src/create_graph.rs`（`scalar_unary_replayable`・`build_cgrads` の `Op::ScalarUnary` 腕）。
+
+### 22.1 実装形
+
+- `scalar_unary_replayable` に `Gelu`・`GeluTanh`・`Erf` を追加した。`Erf` は `Gelu` の `Φ(x)` を子テープへ `ScalarUnary(Erf)` として記録するため、孫テープでの再生（閉包性、§21.1 (4)）に必要で同時に対象化した。`replay_op` は `Var::scalar_unary` への委譲で全 variant に対応済みのため変更していない。
+- `Erf`: `g ⊙ (2/√π)·exp(-x²)`（`erf_grad` と同じ順序）。
+- `Gelu`: `g ⊙ (Φ(x) + x·φ(x))`。`Φ = 0.5(1 + erf(x/√2))`、`φ = exp(-x²/2)/√(2π)`（`gelu_erf_grad` と同順）。子テープに積む Op は `Mul`・`Add`・`Exp`・`ScalarUnary(Erf)` のみ。
+- `GeluTanh`: `0.5(1+tanh u) + 0.5·x·sech²(u)·u'`。飽和判定（`1 - tanh² == 0`）は 1 階 `gelu_tanh_grad` と同じ f32 演算でホスト側マスク化する。さらに `where_cond` の死に枝へも 0 の余接が流れ、後続 `Mul` の VJP が `0·相方` を作る（相方が `inf` だと NaN が 2 階へ混入する）ため、飽和要素を 0 に置換した `x_safe` で滑らかな式を組み（double-where）、飽和要素では `limit`（厳密に 0 または 1）を選ぶ。
+- `Gelu` の裾（`x·x = inf`）は `exp(-inf) = 0` となり、2 階 backward でも `0·inf` が追跡ノードへ流れないことを回帰テストで確認した。追加の安全化は不要だった。
+
+### 22.2 検証
+
+- 有限差分（h=1e-3、点 `[-1.3, -0.4, 0.0, 0.7, 1.2]`）と REQ-2 統一複合判定で一致（tolerance は不変）。f32 の 1 階勾配を差分するためノイズが約 1e-4 あり、|x| が大きいと 2 階導関数が絶対 1e-5 を満たせないので、|x| ≥ 3 は f64 閉形式（Gelu: `φ(x)(2−x²)`）と突合した。
+- 近似 erf（A-S 7.1.26）を含む 1 階と解析式の φ との整合は、上記突合が REQ-2 内で通ることをもって確認した（不整合は出なかったため方式の見直しは不要。最大差の数値は未採取）。
+- 巨大入力（±1e20・±1e30・±3e38）で `cg.grad`・Hessian が有限（Hessian は `abs < 1e-6`）。
+- `first_order` は素の `backward` と bit 同一。孫テープでの再生は `functional_ops_jvp_tests` の `j2`・`double_vjp_feasibility` の `c2` に gelu・gelu_tanh・erf を追加して通した。
+
+### 22.3 fail-closed テストの差し替え
+
+`create_graph_rejects_unsupported_op_gelu` を廃止し、`create_graph_rejects_custom_downstream_of_gelu`（`Custom` 到達で `child.is_empty()`）と `create_graph_rejects_unsupported_scalar_unary_selu`（隣接 Op の拒否）へ置換した。`functional_ops_jvp_tests`・`double_vjp_feasibility` の gelu 拒否行は削除した（`selu` は残存）。
+
+### 22.4 変更していないもの
+
+1 階 `Tape::backward` の経路（`grad.rs`・スカラー評価・`tensor-core`）、`Op` payload、公開 API、依存、`unsafe`、tolerance・baseline、`docs/spec`、既存節の本文。

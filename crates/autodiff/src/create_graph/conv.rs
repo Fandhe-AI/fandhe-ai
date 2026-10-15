@@ -1,6 +1,6 @@
 //! 2D 畳み込み族（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）の
 //! `create_graph` 対応（イシュー #3080・決定記録
-//! `docs/autodiff-higher-order-grad-decision.md` §21・§22）。
+//! `docs/autodiff-higher-order-grad-decision.md` §21・§23）。
 //!
 //! 親モジュール [`super`]（`create_graph.rs`）の `replay_op`（forward 再生）と
 //! `build_cgrads`（1 階 VJP の子テープ記録）から呼ばれる。本モジュールは
@@ -16,13 +16,14 @@
 //!   `Var::conv2d` を使わないのは forward が非 strict の `gemm_batched`
 //!   を通り、backprop の FP32 厳密契約（CUDA TF32 opt-in 下でも不変）を
 //!   破るため。
-//! - d_weight／d_bias は **V3**: 構造（二階微分の経路）は上記合成で積み、
-//!   ノードの**前方値**は 1 階 VJP と同じホスト関数
-//!   （`grad::conv2d_dw_from_col`／`conv_transpose2d_dw_from_col`・
-//!   `eval::reduce_bias_grad_rows`）が返す値を `Op::Contiguous`（VJP は
-//!   恒等で前方値を読まない）のタグで `push_eager` する。これにより N·P 方向
-//!   の長軸縮約が 1 階と同じ `f64` アキュムレータ契約（`.claude/rules/
-//!   coding-rust.md`）のまま 1 階と `cg.grad` が bit 一致する。
+//! - d_weight は **V3**: 構造（二階微分経路）は上記合成で積み、ノードの**前方値**は
+//!   1 階 VJP と同じホスト関数（`grad::conv2d_dw_from_col`／
+//!   `conv_transpose2d_dw_from_col`）が返す値を専用 Op `Op::ConvWeightGradHost`
+//!   として `push_eager` する。孫テープへの再生でも同じホスト関数で値を再計算する
+//!   ため、N·P 方向の長軸縮約の `f64` アキュムレータ契約（`.claude/rules/
+//!   coding-rust.md`）が何段目でも維持される。VJP は恒等で構造側のみへ渡す。
+//! - d_bias は **V3**: `eval::reduce_bias_grad_rows`（[`reduce_bias_grad_var`] が
+//!   `Op::Sum` タグで登録）。入力・重みが空でも上流 `g` が非空なら計算する。
 //! - `output_padding`／`output_size` は `Op` に保持せず、再生対象ノード自身の
 //!   shape から導出する（`Op::ConvTranspose2d` doc の方針を踏襲）。
 
@@ -84,7 +85,7 @@ pub(super) fn replay_conv2d<'c>(
 }
 
 /// `Op::ConvTranspose2d` の再生。`output_padding` は出力 shape から導出する:
-/// `op = out − ((in−1)·s − 2p + d·(k−1) + 1)`（各軸。`checked_*`）。
+/// `op = out + 2p − ((in−1)·s + d·(k−1) + 1)`（各軸。符号付き `checked_*`）。
 pub(super) fn replay_conv_transpose2d<'c>(
     out_shape: &[usize],
     input: &Var<'c>,
@@ -107,16 +108,25 @@ pub(super) fn replay_conv_transpose2d<'c>(
             params.padding()[i],
             params.dilation()[i],
         );
-        let base = h_in
-            .checked_sub(1)
-            .and_then(|v| v.checked_mul(s))
-            .and_then(|v| v.checked_add(d.checked_mul(k.checked_sub(1)?)?))
-            .and_then(|v| v.checked_add(1))
-            .and_then(|v| v.checked_sub(p.checked_mul(2)?))
-            .ok_or_else(|| invalid("conv_transpose2d の再生: 出力長の導出が桁あふれ／負".into()))?;
-        *slot = out_shape[2 + i]
-            .checked_sub(base)
-            .ok_or_else(|| invalid("conv_transpose2d の再生: output_padding が負".into()))?;
+        // `op = out + 2p − ((in−1)·s + d·(k−1) + 1)` を符号付きで評価する
+        // （`base`〈op を除いた出力長〉は `2p` が大きいと負になりうるが、
+        // `conv_transpose_out_len` が受理する有効な入力のため符号なしの
+        // `checked_sub` で拒否しない）。
+        let to_i = |v: usize| i128::try_from(v).ok();
+        let derived = (|| {
+            let pos = to_i(h_in)?
+                .checked_sub(1)?
+                .checked_mul(to_i(s)?)?
+                .checked_add(to_i(d)?.checked_mul(to_i(k)?.checked_sub(1)?)?)?
+                .checked_add(1)?;
+            let op = to_i(out_shape[2 + i])?
+                .checked_add(to_i(p)?.checked_mul(2)?)?
+                .checked_sub(pos)?;
+            usize::try_from(op).ok()
+        })();
+        *slot = derived.ok_or_else(|| {
+            invalid("conv_transpose2d の再生: output_padding の導出が桁あふれ／負".into())
+        })?;
     }
     input.conv_transpose2d(
         weight,
@@ -250,10 +260,13 @@ fn zeros_var<'c>(child: &'c Tape, shape: &[usize]) -> Result<Var<'c>, AutodiffEr
     Ok(child.var_no_grad(&Tensor::zeros(shape)?))
 }
 
-/// 要素数 0 の入力（`N = 0` 等）: 寄与は恒等的に 0（二階も 0 で整合）。
-/// matmul を呼ばずゼロ定数で短絡する。
+/// 要素数 0 の入力・重み・上流（`N = 0`・`Cin = 0` 等）: d_input・d_weight は
+/// 恒等的に 0（二階も 0 で整合）。matmul を呼ばずゼロ定数で短絡する。
+/// d_bias は入力・重みの空とは独立で、上流 `g` が非空なら通常どおり縮約する
+/// （例: `Cin = 0` でも `loss = sum(y)` の d_bias は 1 階と同じく非零）。
 fn zero_grads<'c>(
     child: &'c Tape,
+    g: &Var<'c>,
     x_shape: &[usize],
     w_shape: &[usize],
     bias_shape: Option<&[usize]>,
@@ -271,7 +284,8 @@ fn zero_grads<'c>(
             None
         },
         d_bias: match (need.bias, bias_shape) {
-            (true, Some(b)) => Some(zeros_var(child, b)?),
+            (true, Some(b)) if g.shape().contains(&0) => Some(zeros_var(child, b)?),
+            (true, Some(b)) => Some(bias_grad(child, g, b)?),
             _ => None,
         },
     })
@@ -295,22 +309,72 @@ fn bias_grad<'c>(
     reduce_bias_grad_var(child, &rows, bias_shape)
 }
 
-/// V3: 構造ノード `structure`（d_weight の二階微分経路）の前方値を、1 階と同じ
-/// ホスト関数の値 `value` で置き換えたノードを返す。`Op::Contiguous` の VJP は
-/// 恒等で前方値を読まないため微分値は構造側と一致する（`reduce_bias_grad_var` と同型）。
-fn v3_node<'c>(
+/// 1 階 VJP と同じホスト関数で d_weight の値を求める。`g`・`x` は子テープ上の
+/// 写し（`transposed == false` は `Conv2d`、`true` は `ConvTranspose2d`）。
+fn weight_grad_value(
+    child: &Tape,
+    g: &Var<'_>,
+    x: &Var<'_>,
+    params: &Conv2dParams,
+    transposed: bool,
+    w_shape: &[usize],
+) -> Result<Tensor<f32>, AutodiffError> {
+    let (x_shape, g_shape) = (x.shape(), g.shape());
+    if x_shape.len() != 4 || g_shape.len() != 4 || w_shape.len() != 4 {
+        return Err(invalid("d_weight の値計算: rank 4 でない shape".into()));
+    }
+    let groups = params.groups().max(1);
+    let k_g = w_shape[1] * w_shape[2] * w_shape[3];
+    let (g_val, x_val) = (value_of(child, g)?, value_of(child, x)?);
+    if transposed {
+        let n = x_shape[0];
+        let p_x = x_shape[2]
+            .checked_mul(x_shape[3])
+            .ok_or_else(|| invalid("conv_transpose2d の VJP: 空間要素数の桁あふれ".into()))?;
+        let cin_g = x_shape[1] / groups;
+        let im2col_shape = im2col_out_shape(&g_shape, params)?;
+        let col_g_val =
+            im2col_with_fallback(child.ops(), &g_val.contiguous(), params, &im2col_shape)?;
+        let x4 = x_val.contiguous().reshape(&[n, groups, cin_g, p_x])?;
+        conv_transpose2d_dw_from_col(child.ops(), &x4, &col_g_val, groups, cin_g, k_g, w_shape)
+    } else {
+        let n = g_shape[0];
+        let p = g_shape[2]
+            .checked_mul(g_shape[3])
+            .ok_or_else(|| invalid("conv2d の VJP: 空間要素数の桁あふれ".into()))?;
+        let cout_g = w_shape[0] / groups;
+        let im2col_shape = im2col_out_shape(&x_shape, params)?;
+        let col_val = im2col_with_fallback(child.ops(), &x_val, params, &im2col_shape)?;
+        let g4 = g_val.contiguous().reshape(&[n, groups, cout_g, p])?;
+        conv2d_dw_from_col(child.ops(), &g4, &col_val, groups, cout_g, k_g, w_shape)
+    }
+}
+
+/// d_weight ノード（`Op::ConvWeightGradHost`）を子テープへ登録する。`structure`
+/// は二階微分経路、前方値は [`weight_grad_value`]。孫テープでの再生
+/// （`replay_op`）からも同じ関数で呼ばれ、値は常にホスト関数で再計算される。
+pub(super) fn host_weight_grad_node<'c>(
     child: &'c Tape,
     structure: &Var<'c>,
-    value: Tensor<f32>,
+    g: &Var<'c>,
+    x: &Var<'c>,
+    params: &Conv2dParams,
+    transposed: bool,
 ) -> Result<Var<'c>, AutodiffError> {
-    if value.shape() != structure.shape().as_slice() {
+    let w_shape = structure.shape();
+    let value = weight_grad_value(child, g, x, params, transposed, &w_shape)?;
+    if value.shape() != w_shape.as_slice() {
         return Err(invalid(
-            "V3 ノードの値 shape が構造と不一致（内部契約違反）".into(),
+            "d_weight ノードの値 shape が構造と不一致（内部契約違反）".into(),
         ));
     }
     let id = child.push_eager(
-        Op::Contiguous {
-            input: structure.node_id(),
+        Op::ConvWeightGradHost {
+            structure: structure.node_id(),
+            g: g.node_id(),
+            x: x.node_id(),
+            params: params.clone(),
+            transposed,
         },
         value,
     );
@@ -337,7 +401,7 @@ pub(super) fn conv2d_vjp<'c>(
         .iter()
         .any(|s| s.contains(&0))
     {
-        return zero_grads(child, &x_shape, &w_shape, bias_shape, need);
+        return zero_grads(child, g, &x_shape, &w_shape, bias_shape, need);
     }
     let groups = params.groups();
     let cout_g = w_shape[0] / groups.max(1);
@@ -391,13 +455,9 @@ pub(super) fn conv2d_vjp<'c>(
             parts.push(g_g.matmul_fp32_strict(&col_g)?);
         }
         let structure = cat_or_single(parts, 0)?.contiguous()?.reshape(&w_shape)?;
-        // 値: 1 階 VJP と同じホスト関数（f64 縮約）。
-        let (g_val, x_val) = (value_of(child, g)?, value_of(child, x)?);
-        let im2col_shape = im2col_out_shape(&x_shape, params)?;
-        let col_val = im2col_with_fallback(child.ops(), &x_val, params, &im2col_shape)?;
-        let g4 = g_val.contiguous().reshape(&[n, groups, cout_g, p])?;
-        let value = conv2d_dw_from_col(child.ops(), &g4, &col_val, groups, cout_g, k_g, &w_shape)?;
-        out.d_weight = Some(v3_node(child, &structure, value)?);
+        out.d_weight = Some(host_weight_grad_node(
+            child, &structure, g, x, params, false,
+        )?);
     }
 
     if need.bias
@@ -429,7 +489,7 @@ pub(super) fn conv_transpose2d_vjp<'c>(
         .iter()
         .any(|s| s.contains(&0))
     {
-        return zero_grads(child, &x_shape, &w_shape, bias_shape, need);
+        return zero_grads(child, g, &x_shape, &w_shape, bias_shape, need);
     }
     let groups = params.groups();
     let cin_g = x_shape[1] / groups.max(1);
@@ -479,21 +539,9 @@ pub(super) fn conv_transpose2d_vjp<'c>(
                 parts.push(x_g.matmul_fp32_strict(&c_g)?);
             }
             let structure = cat_or_single(parts, 0)?.contiguous()?.reshape(&w_shape)?;
-            let (g_val, x_val) = (value_of(child, g)?, value_of(child, x)?);
-            let im2col_shape = im2col_out_shape(&g_shape, params)?;
-            let col_g_val =
-                im2col_with_fallback(child.ops(), &g_val.contiguous(), params, &im2col_shape)?;
-            let x4 = x_val.contiguous().reshape(&[n, groups, cin_g, p_x])?;
-            let value = conv_transpose2d_dw_from_col(
-                child.ops(),
-                &x4,
-                &col_g_val,
-                groups,
-                cin_g,
-                k_g,
-                &w_shape,
-            )?;
-            out.d_weight = Some(v3_node(child, &structure, value)?);
+            out.d_weight = Some(host_weight_grad_node(
+                child, &structure, g, x, params, true,
+            )?);
         }
     }
 

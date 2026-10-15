@@ -3226,6 +3226,11 @@ pub(crate) fn vjp(
         Op::Contiguous { input } => {
             vec![(input, upstream.clone())]
         }
+        // d_weight のホスト値ノード（`tape::Op::ConvWeightGradHost` doc）。
+        // 微分経路は `structure` のみ（恒等）。
+        Op::ConvWeightGradHost { structure, .. } => {
+            vec![(structure, upstream.clone())]
+        }
         // `Var::one_hot`（**非微分演算**。イシュー #1755）。クラス id
         // から 0/1 行列を作る操作は入力に対し微分不能なため、
         // `upstream` の値を無視して常に入力 shape の**明示ゼロ**

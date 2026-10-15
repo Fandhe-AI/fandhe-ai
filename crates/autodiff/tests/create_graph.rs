@@ -655,29 +655,40 @@ fn create_graph_treats_no_grad_leaf_as_constant() {
 
 // --- fail-closed 契約 ----------------------------------------------------
 
-// `Op::MatMul`（rank 2 × rank 2）は #1943 で対応済み・#1943.5 以下参照。
-// `Var::sub`（`Op::ScalarBinary { op: Sub, .. }`）はイシュー #2062 で
-// 対応済みになったため、本テストは代わりに `Var::gelu`（誤差関数版
-// GELU。`ScalarUnaryOp::Gelu`）を未対応 Op の代表として使う——導関数
-// `Φ(x) + x·φ(x)` が `erf` を要し `Var` 演算の合成だけでは再現できない
-// ため `scalar_unary_replayable` が引き続き `false` を返す
-// （`docs/autodiff-higher-order-grad-decision.md` §16）。入口検査 7
-// （`validate_ancestors`）が `build_mirror`／`build_cgrads` より前に
-// 判定するため、拒否時に `child` が一切書き込まれない（空のまま）こと
-// も併せて固定する。
+// `Gelu`・`GeluTanh`・`Erf` はイシュー #3081（決定記録 §21.5・§22）で
+// 対象になったため、未対応 Op の代表は `Softmax`・`Custom`（恒久対象外）
+// と、fail-closed のまま残る隣接 Op の `Selu`（#2649 系）で固定する。
+// 入口検査（`validate_ancestors`）が `build_mirror`／`build_cgrads` より
+// 前に判定するため、拒否時に `child` が一切書き込まれない（空のまま）
+// ことも併せて固定する。
 #[test]
-fn create_graph_rejects_unsupported_op_gelu() {
+fn create_graph_rejects_unsupported_scalar_unary_selu() {
     let tape = Tape::new_with_ops(common::naive_ops());
     let child = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
-    let loss = x.gelu().unwrap().sum(None).unwrap();
+    let loss = x.selu().unwrap().sum(None).unwrap();
 
     let err = tape.backward_create_graph(&loss, &child).unwrap_err();
     assert!(matches!(err, AutodiffError::Backward(_)));
-    assert!(
-        child.is_empty(),
-        "入口検査で拒否された場合、child は無変更（空）のまま保たれるはず"
-    );
+    assert!(child.is_empty());
+}
+
+// 新たに対象になった Gelu を含むグラフでも、恒久対象外の `Custom` に
+// 到達すれば fail-closed で拒否され、child は空のまま保たれる。
+#[test]
+fn create_graph_rejects_custom_downstream_of_gelu() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
+    let h = x.gelu().unwrap();
+    let out = tape
+        .custom(Arc::new(IdentityCustomFn), &[h])
+        .expect("Tape::custom 登録成功");
+    let loss = out.sum(None).unwrap();
+
+    let err = tape.backward_create_graph(&loss, &child).unwrap_err();
+    assert!(matches!(err, AutodiffError::Backward(_)));
+    assert!(child.is_empty());
 }
 
 #[test]
@@ -2048,7 +2059,7 @@ fn create_graph_rejects_unsupported_op_gather() {
 }
 // ===========================================================================
 // 2D 畳み込み族（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）の
-// create_graph 対応（イシュー #3080・決定記録 §22）。
+// create_graph 対応（イシュー #3080・決定記録 §23）。
 //
 // - Hessian: 1 本の葉 `p` から `narrow`＋`reshape` で x・w・(b) を切り出し、
 //   純ブロックと混合ブロックをまとめて有限差分と突合する。
@@ -2365,8 +2376,8 @@ fn conv_overflow_case(kind: ConvKind) {
     }
 
     // 3 段目（孫テープ）: gw を更に create_graph で微分できる（閉包性）。
-    // 孫テープでの再生前方値は構造側の f32 合成で計算し直されるため inf になりうる
-    // （決定記録 §22 の残余）。ここでは Ok と 微分値が有限であることのみを固定する。
+    // 孫テープでの再生値も 1 階と同じホスト関数（f64 縮約）で再計算されるため
+    // overflow しない（`Op::ConvWeightGradHost`。決定記録 §23.3）。
     let grand = Tape::new_with_ops(common::naive_ops());
     let cg2 = child
         .backward_create_graph(&gw, &grand)
@@ -2375,6 +2386,28 @@ fn conv_overflow_case(kind: ConvKind) {
     for i in 0..3 {
         let v = g_cx.value().get(&[i, 0, 0, 0]).unwrap();
         assert!(v.is_finite(), "3 段目の勾配 [{i}] は有限のはず: {v}");
+    }
+
+    // 孫テープ上で gw の非線形関数 h = (gw·1e-38)² を作って更に微分する。
+    // 通常の backward で有限な x 勾配は孫テープ側でも有限・一致すること
+    // （補正値 gw=3e38 が孫テープ再生で inf に化けないこと）。
+    let child2 = Tape::new_with_ops(common::naive_ops());
+    let cg_b = tape.backward_create_graph(&loss, &child2).unwrap();
+    let gw_b = cg_b.grad(&w).unwrap().unwrap();
+    let s = child2.var_no_grad(&t(vec![1.0e-38], &[1, 1, 1, 1]));
+    let scaled = gw_b.mul(&s).unwrap();
+    let h = scaled.mul(&scaled).unwrap().sum(None).unwrap();
+    let cx_b = cg_b.child_var(&x).unwrap().unwrap();
+    let plain_h = child2.backward(&h).unwrap();
+    let dx_plain = plain_h.get(&cx_b).unwrap().unwrap();
+    let grand2 = Tape::new_with_ops(common::naive_ops());
+    let cg3 = child2.backward_create_graph(&h, &grand2).unwrap();
+    let dx_grand = cg3.grad(&cx_b).unwrap().unwrap();
+    for i in 0..3 {
+        let p = dx_plain.get(&[i, 0, 0, 0]).unwrap();
+        let q = dx_grand.value().get(&[i, 0, 0, 0]).unwrap();
+        assert!(p.is_finite() && q.is_finite(), "[{i}] plain={p} grand={q}");
+        assert_eq!(p.to_bits(), q.to_bits(), "[{i}] 孫テープ再生値の維持");
     }
 }
 
@@ -2418,6 +2451,93 @@ fn conv2d_bias_grad_overflow_matches_first_order_bitwise() {
 #[test]
 fn conv_transpose2d_bias_grad_overflow_matches_first_order_bitwise() {
     conv_bias_overflow_case(ConvKind::ConvTranspose2d);
+}
+
+// --- 境界: 負の base の転置畳み込み・ゼロ次元チャネルの bias 勾配 ---------------
+
+/// `in=1, k=1, stride=3, padding=1, dilation=1, output_padding=2`（各軸）:
+/// `(in−1)·s + d(k−1) + 1 − 2p = −1` で base が負になるが forward は有効。
+/// create_graph が拒否せず、1 階と一致すること（Bugbot・codex P2）。
+#[test]
+fn conv_transpose2d_negative_base_output_padding_is_replayable() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![1.5], &[1, 1, 1, 1]));
+    let w = tape.var(&t(vec![2.0], &[1, 1, 1, 1]));
+    let y = x
+        .conv_transpose2d(&w, None, [3, 3], [1, 1], [2, 2], [1, 1], 1)
+        .unwrap();
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let plain = tape.backward(&loss).unwrap();
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .expect("負の base でも有効な転置畳み込みは再生できる");
+    let dx_plain = plain.get(&x).unwrap().unwrap().get(&[0, 0, 0, 0]).unwrap();
+    let dx_child = cg
+        .grad(&x)
+        .unwrap()
+        .unwrap()
+        .value()
+        .get(&[0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(dx_plain.to_bits(), dx_child.to_bits());
+    // 孫テープ側（再生）でも `output_padding` が導出できること。
+    let grand = Tape::new_with_ops(common::naive_ops());
+    let gx = cg.grad(&x).unwrap().unwrap();
+    child
+        .backward_create_graph(&gx.sum(None).unwrap(), &grand)
+        .expect("子テープ上の転置畳み込みも再生できる");
+}
+
+/// 1×1 入力・3×3 カーネル・stride 3・padding 2・output_padding 2（Bugbot の例。
+/// `(in−1)s + d(k−1) + 1 < 2p`）。
+#[test]
+fn conv_transpose2d_small_input_large_padding_is_replayable() {
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let child = Tape::new_with_ops(common::naive_ops());
+    let x = tape.var(&t(vec![0.5], &[1, 1, 1, 1]));
+    let w = tape.var(&t((0..9).map(|i| i as f32 * 0.1).collect(), &[1, 1, 3, 3]));
+    let y = x
+        .conv_transpose2d(&w, None, [3, 3], [2, 2], [2, 2], [1, 1], 1)
+        .unwrap();
+    let loss = y.mul(&y).unwrap().sum(None).unwrap();
+    let cg = tape.backward_create_graph(&loss, &child).unwrap();
+    let gw = cg.grad(&w).unwrap().unwrap();
+    let grand = Tape::new_with_ops(common::naive_ops());
+    child
+        .backward_create_graph(&gw.sum(None).unwrap(), &grand)
+        .expect("再生で output_padding を導出できる");
+}
+
+/// 入力チャネル 0 でも bias 勾配は出力が非空なら通常の backward と一致する。
+#[test]
+fn conv_bias_grad_with_zero_in_channels_matches_first_order() {
+    for kind in [ConvKind::Conv2d, ConvKind::ConvTranspose2d] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&Tensor::<f32>::zeros(&[1, 0, 1, 1]).unwrap());
+        let (w, y);
+        let b = tape.var(&t(vec![1.0], &[1]));
+        match kind {
+            ConvKind::Conv2d => {
+                w = tape.var(&Tensor::<f32>::zeros(&[1, 0, 1, 1]).unwrap());
+                y = x.conv2d(&w, Some(&b), [1, 1], [0, 0], [1, 1], 1).unwrap();
+            }
+            ConvKind::ConvTranspose2d => {
+                w = tape.var(&Tensor::<f32>::zeros(&[0, 1, 1, 1]).unwrap());
+                y = x
+                    .conv_transpose2d(&w, Some(&b), [1, 1], [0, 0], [0, 0], [1, 1], 1)
+                    .unwrap();
+            }
+        }
+        let loss = y.sum(None).unwrap();
+        let plain = tape.backward(&loss).unwrap();
+        let db_plain = plain.get(&b).unwrap().unwrap().get(&[0]).unwrap();
+        assert_eq!(db_plain, 1.0);
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let db = cg.grad(&b).unwrap().unwrap().value().get(&[0]).unwrap();
+        assert_eq!(db.to_bits(), db_plain.to_bits());
+    }
 }
 
 // --- 孫テープ: jvp_create_graph（親→子→孫） -----------------------------------
@@ -2490,4 +2610,152 @@ fn create_graph_still_rejects_conv3d() {
         .expect_err("Conv3d は fail-closed で拒否されるはず");
     assert!(matches!(err, AutodiffError::Backward(_)), "{err:?}");
     assert!(child.is_empty());
+}
+
+// --- Gelu・GeluTanh・Erf（イシュー #3081。決定記録 §22） --------------------
+
+fn build_gelu<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.gelu()?.sum(None)
+}
+
+fn build_gelu_tanh<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.gelu_tanh()?.sum(None)
+}
+
+fn build_erf<'t>(_tape: &'t Tape, x: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+    x.erf()?.sum(None)
+}
+
+// 有限差分は f32 の 1 階勾配を差分するためノイズが約 1e-4 あり、|x| が
+// 大きいと 2 階導関数が REQ-2 の絶対 1e-5 を満たせない。突合点は中程度の
+// |x| に限り、tolerance は変えない（§22）。
+const MID_POINTS: [f32; 5] = [-1.3, -0.4, 0.0, 0.7, 1.2];
+
+#[test]
+fn hessian_gelu_matches_finite_difference() {
+    let numeric = finite_diff_hessian(build_gelu, &MID_POINTS, &[5], 1e-3);
+    let analytic = analytic_hessian(build_gelu, &MID_POINTS, &[5]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+#[test]
+fn hessian_gelu_tanh_matches_finite_difference() {
+    let numeric = finite_diff_hessian(build_gelu_tanh, &MID_POINTS, &[5], 1e-3);
+    let analytic = analytic_hessian(build_gelu_tanh, &MID_POINTS, &[5]);
+    assert_hessian_close(&analytic, &numeric);
+}
+
+#[test]
+fn hessian_erf_matches_finite_difference_and_closed_form() {
+    let numeric = finite_diff_hessian(build_erf, &MID_POINTS, &[5], 1e-3);
+    let analytic = analytic_hessian(build_erf, &MID_POINTS, &[5]);
+    assert_hessian_close(&analytic, &numeric);
+    for (i, &x) in MID_POINTS.iter().enumerate() {
+        let x = x as f64;
+        let expected = -2.0 * x * (2.0 / std::f64::consts::PI.sqrt()) * (-x * x).exp();
+        assert!(
+            common::req2_close(analytic[i][i], expected),
+            "erf diag[{i}]: analytic={} expected={expected}",
+            analytic[i][i]
+        );
+    }
+}
+
+#[test]
+fn hessian_gelu_large_magnitude_matches_closed_form() {
+    let x0 = [-4.0f32, -3.0, 3.0, 4.0, 5.0];
+    let analytic = analytic_hessian(build_gelu, &x0, &[5]);
+    for (i, &x) in x0.iter().enumerate() {
+        let x = x as f64;
+        let pdf = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+        let expected = pdf * (2.0 - x * x);
+        assert!(
+            common::req2_close(analytic[i][i], expected),
+            "gelu diag[{i}]: analytic={} expected={expected}",
+            analytic[i][i]
+        );
+    }
+}
+
+#[test]
+fn hessian_gelu_tanh_large_magnitude_matches_closed_form() {
+    const C: f64 = 0.797_884_560_802_865_4;
+    const K: f64 = 0.044_715;
+    let x0 = [-4.0f32, -3.0, 3.0, 4.0, 5.0];
+    let analytic = analytic_hessian(build_gelu_tanh, &x0, &[5]);
+    for (i, &x) in x0.iter().enumerate() {
+        let x = x as f64;
+        let t = (C * (x + K * x * x * x)).tanh();
+        let s = 1.0 - t * t;
+        let du = C * (1.0 + 3.0 * K * x * x);
+        let expected = s * du + 0.5 * x * (-2.0 * t * s * du * du + s * C * 6.0 * K * x);
+        // f32 の ULP 由来の誤差を許す（REQ-2 判定式そのまま）。
+        assert!(
+            common::req2_close(analytic[i][i], expected),
+            "gelu_tanh diag[{i}]: analytic={} expected={expected}",
+            analytic[i][i]
+        );
+    }
+}
+
+// 巨大入力でも NaN を生まない（`gelu_tanh_grad_huge_magnitude_input_does_
+// not_produce_nan` と同じ観点を 2 階・孫テープまで拡張）。
+#[test]
+fn create_graph_gelu_family_huge_magnitude_is_nan_free() {
+    type B = for<'t> fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    let builders: [(&str, B); 3] = [
+        ("gelu", build_gelu),
+        ("gelu_tanh", build_gelu_tanh),
+        ("erf", build_erf),
+    ];
+    for (name, build) in builders {
+        for &v in &[1e20f32, -1e20, 1e30, -1e30, 3e38, -3e38] {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let child = Tape::new_with_ops(common::naive_ops());
+            let x = tape.var(&t(vec![v], &[1]));
+            let loss = build(&tape, &x).unwrap();
+            let cg = tape.backward_create_graph(&loss, &child).unwrap();
+            let gx = cg.grad(&x).unwrap().unwrap();
+            let g = gx.value().get(&[0]).unwrap() as f64;
+            assert!(g.is_finite(), "{name}({v}): 1 階勾配が非有限 {g}");
+            let fo = cg.first_order().get(&x).unwrap().unwrap();
+            assert!(
+                common::req2_close(g, fo.get(&[0]).unwrap() as f64),
+                "{name}({v}): cg.grad と first_order が不一致"
+            );
+            let cx = cg.child_var(&x).unwrap().unwrap();
+            let s = extract_scalar(&gx, &[1], 0).unwrap();
+            let grads = child.backward(&s).unwrap();
+            let h = grads.get(&cx).unwrap().unwrap().get(&[0]).unwrap();
+            assert!(h.is_finite() && h.abs() < 1e-6, "{name}({v}): Hessian={h}");
+        }
+    }
+}
+
+// 1 階 `first_order` は素の backward と bit 同一（Gelu 系の経路不変）。
+#[test]
+fn create_graph_gelu_family_first_order_is_bit_identical() {
+    type B = for<'t> fn(&'t Tape, &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    let builders: [B; 3] = [build_gelu, build_gelu_tanh, build_erf];
+    for build in builders {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let child = Tape::new_with_ops(common::naive_ops());
+        let x = tape.var(&t(MID_POINTS.to_vec(), &[5]));
+        let loss = build(&tape, &x).unwrap();
+        let before = tape.backward(&loss).unwrap();
+        let cg = tape.backward_create_graph(&loss, &child).unwrap();
+        let b = before.get(&x).unwrap().unwrap();
+        let f = cg.first_order().get(&x).unwrap().unwrap();
+        let gx = cg.grad(&x).unwrap().unwrap();
+        for i in 0..5 {
+            assert_eq!(
+                b.get(&[i]).unwrap().to_bits(),
+                f.get(&[i]).unwrap().to_bits()
+            );
+            assert!(common::req2_close(
+                gx.value().get(&[i]).unwrap() as f64,
+                b.get(&[i]).unwrap() as f64
+            ));
+        }
+    }
 }

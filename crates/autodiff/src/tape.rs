@@ -663,6 +663,24 @@ pub(crate) enum Op {
     /// ない演算。VJP（`grad.rs`）は upstream をそのまま入力へ渡す恒等
     /// パススルー（メモリレイアウトのみが変わり値は変わらないため）。
     Contiguous { input: NodeId },
+    /// 2D 畳み込み族の d_weight を子テープへ記録するノード（イシュー #3080・
+    /// 決定記録 §23）。`structure` は d_weight の二階微分経路（unfold／fold と
+    /// rank 2 strict matmul の合成）、`g`・`x` は 1 階 VJP と同じホスト関数
+    /// （`gemm_batched_fp32_strict` と N 軸 `f64` 縮約）へ渡すオペランドで、
+    /// 前方値は `create_graph/conv.rs` がそのホスト関数で求めて `push_eager`
+    /// する。`Op::Contiguous` と異なり孫テープでの再生時にも同じホスト関数で
+    /// 値を再計算するため、f32 の構造側合成へ落ちて overflow する事故が
+    /// 起きない（§21.1(3)(5)）。VJP は `Op::Contiguous` と同じ恒等で
+    /// `structure` のみへ渡す（`g`・`x` への寄与は `structure` 経由で既に
+    /// 含まれる）。`transposed` は `ConvTranspose2d` 用（`x`・`g` の役割が
+    /// 入れ替わる）。
+    ConvWeightGradHost {
+        structure: NodeId,
+        g: NodeId,
+        x: NodeId,
+        params: Conv2dParams,
+        transposed: bool,
+    },
     /// 行方向 RMSNorm（イシュー #1596）。`BackendOps` に対応メソッド
     /// （`rmsnorm`。既存の `run_fused` canonical プラン一致経路とは別の
     /// 独立エントリ）があり非融合対象ではないが、`Add`/`Mul`/`Relu`/
@@ -1837,6 +1855,8 @@ impl Op {
             // する。適格化（再導出分岐の追加）は §8 のスコープ外事項
             // として `docs/autodiff-checkpoint-design.md` に記録済み。
             Op::Contiguous { .. } => false,
+            // `Op::ConvWeightGradHost` も実体化演算で再導出分岐が無い。
+            Op::ConvWeightGradHost { .. } => false,
             // 遅延 elementwise: 値を持つ場合は `pre_materialize_for_
             // binary_merge`／`push_lazy` の `at_limit` による
             // `MAX_FUSED_CHAIN_LEN` 上限維持のための自己実体化であり、
@@ -2095,6 +2115,13 @@ impl Op {
             | Op::Lstsq { a, b, .. } => {
                 f(*a);
                 f(*b);
+            }
+            Op::ConvWeightGradHost {
+                structure, g, x, ..
+            } => {
+                f(*structure);
+                f(*g);
+                f(*x);
             }
             Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) | Op::Sigmoid(a) => f(*a),
             Op::Sum { input, .. }
@@ -2407,12 +2434,10 @@ impl Op {
     /// 定義）——`ScalarUnaryOp`／`ScalarBinaryOp` は `tensor-core` 側で
     /// `#[non_exhaustive]` のため、判定を 1 か所に集約することで
     /// `validate_ancestors`／`build_mirror`／`replay_op`／`build_cgrads`
-    /// の判断が食い違わないようにする。`ScalarUnaryOp::Gelu`（誤差関数
-    /// 版 GELU）・`ScalarUnaryOp::GeluTanh` は、導関数を `Var` 演算の
-    /// 合成だけでは再現できない（`Gelu` は `erf` を要し依存追加禁止
-    /// 〈`.claude/rules/deps-policy.md`〉、`GeluTanh` は本イシューの
-    /// スコープでは見送り。`docs/autodiff-higher-order-grad-decision.md`
-    /// §16 参照）ため `false` のまま残る。それ以外の `ScalarUnaryOp`・
+    /// の判断が食い違わないようにする。`ScalarUnaryOp::Gelu`・`GeluTanh`・
+    /// `Erf` はイシュー #3081（決定記録 §21.5・§22）で `true` になった
+    /// （`Gelu` の `Φ(x)` は子テープへ `Erf` として記録するため `Erf` も
+    /// 同時に対象。依存追加なし）。`ScalarUnaryOp`・
     /// `ScalarBinaryOp` の既知 variant はすべて `true`。
     ///
     /// 設計 doc §8 の「対象」区分に残る `MaskedFill`・`Gather`・
@@ -2450,7 +2475,8 @@ impl Op {
             | Op::Narrow { .. }
             | Op::Concat { .. }
             | Op::Contiguous { .. }
-            // 2D 畳み込み族（イシュー #3080・決定記録 §21・§22）。`Conv2d`／
+            | Op::ConvWeightGradHost { .. }
+            // 2D 畳み込み族（イシュー #3080・決定記録 §21・§23）。`Conv2d`／
             // `ConvTranspose2d`／`Unfold`／`Fold` は `replay_op`（公開 `Var`
             // メソッドへの委譲）と `build_cgrads`（unfold／fold＋rank 2
             // strict matmul の合成）が対応済み。低精度 `Conv2d` は
