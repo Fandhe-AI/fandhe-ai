@@ -670,3 +670,151 @@ replayable`／`scalar_binary_replayable`・`replay_op`／`build_cgrads`
 - 基づく判断: 2026-10-11 の所有者判断 D-A（推奨形で一括承認。#3018 ツリー起票の根拠。`compat-api-scope.md` §5 末尾の適用記録を参照）。本節は記録の反映であり新規承認ではない。
 - 各 issue で本記録に公開形を書き、その形のまま実装まで進む。記録に形が無い点だけ承認依頼へ戻す。
 - 依存・`unsafe`・tolerance・baseline・`docs/spec` は変更していない。既存本文は書き換えていない。
+
+## 21. create_graph の対象 Op 拡張の範囲と族ごとの二階 VJP 方針（#3076・親 #3075）
+
+- 基準コミットは `origin/main` `27e0472d`。本節の `file:line` はこのコミットで確かめた（`tensor-core/src/scalar_op.rs` 以外は `crates/autodiff/src/` 配下）。
+- 本節は設計判断だけを書く。コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文は変えていない。根拠は §20（2026-10-11 の D-A）で、新しい承認ではない。
+
+### 21.1 共通方式
+
+**(1) 不変条件**
+- 1 階の `Tape::backward` と `CreateGraphResult::first_order()` は親テープで加工せずに計算する。bit 同一は構造上保たれる（§3 契約 1・§9 選択肢 (i)）。
+- 子テープ上の `cg.grad(..)` は 1 階勾配と REQ-2 統一複合判定で突き合わせる（§9 (i)）。bit 同一は要求しない。V3 を採る族だけは値が bit 同一になる。
+- 新しい tolerance・baseline は作らない。
+
+**(2) 再生 R**
+- `replay_op` は公開 `Var` メソッドへ薄く委譲する（#2062 と同形）。forward と同じカーネルを通るので写しの値は親と一致する。
+- 再生に必要で payload に無い値は `Op` へ足す。`Op` は `pub(crate)` なので公開 API には影響しない。
+
+**(3) 二階 VJP の構成方式**
+
+| 方式 | 内容 | 前例 |
+|---|---|---|
+| V1 | 1 階 VJP の式を replayable な `Var` 演算の合成で子テープへ書く（f32） | #2062 の `Silu` など |
+| V2 | 選択・区分定数の部分は親の記録値からホストでマスク・索引を作り、`where_cond`／`gather`／`scatter` で選ぶ。マスク規則は 1 階と同じなので先勝ちタイが保たれる。`g.mul(0/1 定数)` は `inf*0=NaN` を生むので使わない | `mask_from_pred`（`create_graph.rs:1353`）、`Maximum`／`Minimum` の 3 分類 |
+| V3 | 値は 1 階 VJP と同じホスト関数（f64 縮約契約を持つもの）で計算し、構造は V1 の合成グラフを入力に、VJP が前方値に依存しない Op タグ（`Contiguous`〈恒等〉・`Sum`）で `Tape::push_eager` する。値は 1 階と bit 同一、二階の微分は合成グラフを流れる。ホスト関数は `pub(crate)` にする（#2062 の `inverse_permutation` と同様）。孫テープで再生すると合成側の f32 が再計算されるが、この差は REQ-2 の範囲で受け入れる | `reduce_bias_grad_var`（`create_graph.rs:1310`） |
+| V4 | 1 階 VJP そのものを専用 Op にし、その VJP を手で書く。§4／§5 が案 B を一般方針として退けているので既定では採らない。採る族は個別に理由を書く | なし |
+
+**(4) 閉包性**
+- `jvp_create_graph`（`functional_ops.rs:742`、`:799` の `child.backward_create_graph(&prod, grandchild)`）は子テープをさらに孫テープへ再生する。#3087 は jacfwd が拡張 Op を通ることを確かめる。
+- したがって `build_cgrads` が子テープへ積むノードは、すべて `supports_create_graph == true` でなければならない。族の節に「積む Op」を書き、他の族・fail-closed に依存する場合は 21.4 の依存順に載せる。
+
+**(5) 数値契約**
+- f64 縮約は原則 V3。overflow 回避は 1 階の回帰ベクトル（§8 の `y=[0.25,0.75]`・`g=[3e38,-3e38]` など）を族のテストで必須にする。先勝ちタイは V2。
+
+### 21.2 `supports_create_graph` の Op 割り当て
+
+`tape.rs:2432` の網羅 match は `true` が 18 variant、payload 判定の `ScalarUnary`・`ScalarBinary` が 2、`false` が 103 で、enum 全体 123 と一致する（18 + 2 + 103）。103 件は次で機械的に抽出した（`ScalarBinary` を除く）。
+
+```bash
+sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | sed 's/Op:://' | sort -u
+```
+
+**A. 恒久対象外（5）**
+
+| Op | 根拠 |
+|---|---|
+| `ResidentLeaf`・`LinearResident`・`LinearAct` | §3 契約 6（resident／fused はテープ外の値を持つ） |
+| `Custom` | §8・`autodiff-custom-function-decision.md` §14（利用者関数の二階は定義できない） |
+| `OneHot` | 非微分 |
+
+**B. 族へ割り当て（74）**
+
+| 族 | Op | 数 | 方式 |
+|---|---|---|---|
+| #3077 | `Softmax`・`LogSoftmax` | 2 | V3 |
+| #3078 | `LayerNorm`・`RmsNorm` | 2 | V3 |
+| #3079 | `BatchNorm` | 1 | V3（推論時は V1） |
+| #3080 | `Conv2d`・`ConvTranspose2d`・`Conv3d`・`ConvTranspose3d`・`Unfold`・`Fold` | 6 | d_input は転置畳み込み合成、d_weight／d_bias は V3。`Unfold`・`Fold` は閉包性のため同梱 |
+| #3082 | `MseLoss`・`L1Loss`・`HuberLoss`・`PoissonNllLoss`・`GaussianNllLoss`・`KlDivLoss`・`BceLoss`・`BceWithLogitsPosWeightLoss`・`SoftMarginLoss`・`SigmoidFocalLoss`・`MarginRankingLoss`・`HingeEmbeddingLoss`・`CrossEntropyLoss`・`CrossEntropyLossWithOptions`・`NllLoss`・`MultiMarginLoss`・`MultiLabelMarginLoss`・`MultiLabelSoftMarginLoss`・`CosineEmbeddingLoss`・`TripletMarginLoss` | 20 | V1。f64 の scale・縮約を持つものは V3 |
+| #3082（fail-closed） | `CtcLoss` | 1 | 族に置いたまま fail-closed。ホストの動的計画法（alpha／beta）を `Var` 演算で再生できない |
+| #3083 | `Gather`・`Scatter`・`IndexedScatterReduce`・`Embedding`・`Cumsum`・`Cumprod`・`Logcumsumexp`・`Cummax`・`Cummin`・`Sort`・`Topk` | 11 | 索引 V1、累積 V3、選択 V2 |
+| #3084 | `Pad`・`PadMode`・`MaskedFill` | 3 | V1／V2 |
+| #3085 | `MaxPool2d`・`MaxPool3d`・`AvgPool2d`・`AvgPool3d`・`AdaptiveAvgPool2d` | 5 | Max 系 V2、Avg 系 V3 |
+| #3086 対象 | `Inv`・`Solve`・`Det`・`SlogdetLogAbsDet` | 4 | V1 |
+| #3086 条件付き | `Fft`・`Ifft`・`Rfft`・`Irfft` | 4 | 随伴写像を g に作用させる形。随伴が replayable な `Var` 演算（`Var::fft`／`ifft`・スケール・Hermitian 重みマスク）で書けることを #3086 の冒頭で確かめ、書けなければ fail-closed |
+| #3086 fail-closed | `QrQ`・`QrR`・`SvdU`・`SvdS`・`SvdVh`・`EighValues`・`EighVectors`（多出力 payload。§8）、`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm`（二階式が複雑）、`SlogdetSign`・`MatrixRank`（1 階 VJP が恒等ゼロ。`grad.rs:2279`／`:2303`）、`Stft`・`Istft`（窓と overlap-add） | 15 | fail-closed |
+
+- #3086 の判定基準は「1 階 VJP を replayable な公開 `Var` メソッドだけで書き直せるか」。`Inv`／`Solve`／`Det` は `Var::inv`／`solve`／`det`（`var.rs:6740`／`:6761`／`:6806`）で再生でき、cgrad は写しの `Inv` 出力・`matmul`・`transpose` の合成（例 `-Yᵀ g Yᵀ`、`g·det·A⁻ᵀ`）で書ける。`Inv` を最初に replayable にする。
+- 表の数: 族割当 2+2+1+6+20+11+3+5+4+4 = 58、`CtcLoss` 1、#3086 fail-closed 15 で、合計 74。
+
+**C. 本ラウンドで fail-closed に固定（族なし。24）**
+
+| 候補グループ | Op | 補足 |
+|---|---|---|
+| 選択縮約 | `Max`・`Min`・`Amax`・`Amin`・`OrderSelect`・`MedianAll`・`Quantile` | V2 の前例があり技術的には可能 |
+| 統計縮約 | `Var`・`Std`・`VectorNorm`・`PNorm`・`LogSumExp`・`Nansum`・`Nanmean` | V3 |
+| 構造変換 | `Dropout`・`Interpolate`・`MaxUnpool` | `Dropout` は記録済みマスクの `where_cond` で最小 |
+| 正規化・再パラメータ | `LocalResponseNorm`・`WeightNorm`・`SpectralNorm` | |
+| RNN セル | `RnnCell`・`LstmCell`・`LstmHidden`・`GruCell` | 恒久寄り。利用者が replayable な primitive で手組みすれば create_graph は通る |
+
+- 割り当てには新規イシュー起票（ユーザー承認）が要るため、自動運転では fail-closed に固定する。
+- 照合: A 5 + B 74 + C 24 = 103。`ScalarUnaryOp` は `Op` の行を持たないので #3081（21.5）は表の外。
+
+### 21.3 族ごとの方針
+
+- **#3077 Softmax・LogSoftmax**: R は `Var::softmax`／`log_softmax`（`var.rs:2042`／`:2081`）。V3 で、値は `softmax_vjp_along`／`log_softmax_vjp_along`（`grad.rs:6997`／`:7043`。f64 保持・最後に 1 回 downcast）。構造は Softmax が `y⊙g − y⊙Σ(g⊙y)`（§8 のベクトルで中間値が overflow しない並べ替え）、LogSoftmax が `g − exp(y_log)⊙Σg`。積む Op は `Mul`・`Sub`・`Sum`・`Exp`・`BroadcastTo`・`Contiguous`。必須テスト: §8 のベクトルで `cg.grad` が有限かつ 1 階と bit 一致。V4 は採らない。
+- **#3078 LayerNorm・RmsNorm**: V3。値は `layer_norm_vjp_rows`／`rmsnorm_vjp_rows`（`grad.rs:6043`／`:5979`）。構造は mean／rstd を `Mean`・`Sub`・`Mul`・`Sqrt`・`Div` で組み直す。`Rsqrt`／`Reciprocal`・`Op::Var` は replayable でないので使わない（閉包性）。二乗和の「先に f64 へ昇格してから二乗」契約（`coding-rust.md`）は V3 の値側で保つ。
+- **#3079 BatchNorm**: V3（`batch_norm_vjp_channels`、`grad.rs:6139`）。学習時と推論時で分岐し、推論時は統計量が定数なので V1 で足りる。
+- **#3080 Conv 系**: d_input は転置畳み込みの合成（族内で閉じる）。d_weight／d_bias は V3（f64 縮約契約。`grad.rs:1380` 以降）で、構造は `Var::unfold`（`var.rs:5575`）＋matmul を推奨し、閉包性のため `Unfold`・`Fold` を同梱する。`compute_dtype` が F32 でない `Conv2d` は `TapeNode::low_precision` を立てない（立てるのは `low_precision_ops.rs:93`・`var.rs:3652` の matmul 系だけ）ので、`validate_ancestors` に明示的な拒否を足す。
+- **#3081 Gelu・GeluTanh**: 21.5。
+- **#3082 損失**: 要素ごとの合成は V1、1 階が f64 の scale・縮約を持つものは V3。`CrossEntropyLoss` 系は cgrad に Softmax を積むので #3077 に依存する。target は非微分入力（§8）。
+- **#3083 索引・累積**: 索引系は「Gather の VJP は scatter_add」の双対性を使い、ホストの index を固定して V1 で書く。`Cumsum` は V3（`cumsum_vjp_along`、`grad.rs:7289`。lane ごとの f64）、`Cumprod`・`Logcumsumexp` も V3。`Sort`・`Topk`・`Cummax`・`Cummin` は V2（ホスト index と scatter）。
+- **#3084 Pad・PadMode・MaskedFill**: 21.5。`PadMode`（reflect／replicate／circular）は `value` を持たない別 variant で、cgrad は index ベースの scatter-add なので #3083 の索引系に依存する。
+- **#3085 プーリング**: Max 系は V2（先勝ち argmax をホストで作り scatter で流す）で #3083 の索引系に依存。Avg 系・Adaptive は V3（`avg_pool2d_vjp`／`adaptive_avg_pool2d_vjp`、`grad.rs:7116`／`:7219`）で、構造は `Fold`（col2im）経由なので #3080 に依存する。
+- **#3086 線形代数・FFT**: 21.2 の行ごとの判定に従う。
+
+### 21.4 再分解方針と族間の依存順
+
+2 時間を超える族は次のサブイシューへ分ける。起票は `out-of-scope-tracking.md` に従いユーザー承認後で、本 PR では行わない。
+
+| 族 | 分割 |
+|---|---|
+| #3080 | (a) 2D（`Conv2d`・`ConvTranspose2d`・`Unfold`・`Fold`）／(b) 3D（`Conv3d`・`ConvTranspose3d`） |
+| #3082 | (a) 回帰系 6（`Mse`・`L1`・`Huber`・`PoissonNll`・`GaussianNll`・`KlDiv`）／(b) 二値・マージン系 6（`Bce`・`BceWithLogitsPosWeight`・`SoftMargin`・`SigmoidFocal`・`MarginRanking`・`HingeEmbedding`）／(c) クラス軸・距離系 8（`CE`・`CEWithOptions`・`Nll`・`MultiMargin`・`MultiLabelMargin`・`MultiLabelSoftMargin`・`CosineEmbedding`・`TripletMargin`） |
+| #3083 | (a) 索引 4／(b) 累積 3／(c) 選択 4 |
+| #3085 | (a) Max 系 2／(b) Avg 系 3 |
+| #3086 | (a) 線形代数 4／(b) FFT 4（条件付き） |
+
+依存順（積む Op が他族にある場合）:
+- #3083(a) → #3083(c)・#3084 の `PadMode`・#3085(a)
+- #3080(a) → #3085(b)
+- #3077 → #3082(c)
+- #3081 は `Erf` を同時に replayable にする（族内で閉じる）
+
+### 21.5 個別論点の結論
+
+**`Gelu`: 実装する**
+- R は `Var::scalar_unary(Gelu)`。V1 で `g⊙(Φ(x)+x·φ(x))`、Φ は `0.5·(1+erf(x/√2))` を `ScalarUnaryOp::Erf`（`tensor-core/src/scalar_op.rs:228`）に載せ、φ は `Exp` で作る。
+- 閉包性のため `Erf` も `scalar_unary_replayable` に加え、`build_cgrads` に `g⊙(2/√π)·exp(−x²)` の腕を足す（導関数は `erf_grad`〈`scalar_op.rs:756`〉と同じ式）。
+- forward の `erf` は自作近似（Abramowitz–Stegun 7.1.26、最大絶対誤差 1.5e-7）、導関数は解析式という規約を 1 階の `erf_grad`・`gelu_erf_grad`（`scalar_op.rs:719`）が既に採っているので踏襲する。有限差分テストは近似誤差 / h が REQ-2 を超えない刻みを選ぶ。
+- 1 階は f64 で計算し 1 回だけ downcast する。子テープの f32 合成との差は §9 (i) の範囲。`erf` クレートは deps-policy により追加しない。
+- `new_2649_kinds_are_not_replayable`（`create_graph.rs:1610`）は、`Erf` を `true` にしても `Selu` などが `false` のままであることを保つ回帰テストとして残す。
+
+**`GeluTanh`: 実装する**
+- V1 で `0.5(1+tanh u) + 0.5·x·sech²(u)·u'`（`Tanh`・`Mul`・`Add`）。`gelu_tanh_grad`（`scalar_op.rs:731`）の `sech2 == 0.0` ガードはホストの `mask_from_pred` と `where_cond` へ写し（`Hardswish` の前例）、飽和域の第 2 項を定数 0 にする。
+
+**`Pad`・`MaskedFill`: payload に `value: f32` を足す**
+- `value` を使うのは `replay_op` だけで、どちらの VJP も使わない（Pad は narrow の連鎖、MaskedFill は `g⊙(mask==0)`）。
+- 生成側は `Var::pad`（`var.rs:3319`）と `Var::masked_fill`（`var.rs:4404`）が設定する。分解側は `grad.rs:2514`・`:2536` が `..` なしで束縛しているので `..` を足す（`tape.rs:2204`／`:2219` は済み）。
+- cgrad は Pad が narrow の連鎖、MaskedFill が `where_cond(mask, 0, g)`（積は `inf*0` を避けるため使わない）。`Op` は `pub(crate)` で `api_surface.rs` に影響しない。
+
+### 21.6 fail-closed 契約
+
+- `supports_create_graph == false` の Op に `backward_create_graph` が到達したら `Err(AutodiffError::Backward(_))` を返し、子テープは変更しない（`validate_ancestors` が子テープへ書く前に拒否する）。
+- 判定対象は「`requires_grad == true` かつ葉でない祖先」だけで、追跡なしノードは Op の種類によらず `build_mirror` の段 1 で定数葉になる。
+- 入口の判定順は、resident／fused、`low_precision`、`supports_create_graph`、`MatMul` の rank、（追加予定）`Conv2d` の `compute_dtype`。
+- 網羅 match（ワイルドカードなし）と、`ScalarUnaryOp`／`ScalarBinaryOp` の未知 variant を `false` へ倒す規約は弱めない。
+- 基準テストは `create_graph_rejects_unsupported_op_custom`（`crates/autodiff/tests/create_graph.rs:734`。`child.is_empty()` の検査を含む）。族イシューでは、fail-closed のまま残る隣接 Op を 1 つ選び拒否を確かめるテストを推奨する。
+
+### 21.7 所有者へ戻す論点
+
+記録に形が書けない点だけを挙げる。
+1. C 区分 24 variant を将来の族として起票するか（21.2。起票にはユーザー承認が要る）。
+2. 21.4 のサブイシューを起票するか。
+3. V3（値と Op タグを分ける方式）を `reduce_bias_grad_var` 以外へ広げる点は前例があるので推奨形として確定しているが、レビューで争点になった場合に限り戻す。
+
+### 21.8 変更していないもの
+
+コード・依存・`unsafe`・tolerance・baseline・`docs/spec`・既存節の本文。
