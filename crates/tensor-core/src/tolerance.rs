@@ -20,11 +20,69 @@ pub const RELATIVE_TOLERANCE: f64 = 1e-3;
 pub const ABSOLUTE_RESCUE_THRESHOLD: f64 = 1e-5;
 
 /// 有限な f32 の 2 値が複合判定（相対 [`RELATIVE_TOLERANCE`] 未満 または
-/// 絶対 [`ABSOLUTE_RESCUE_THRESHOLD`] 未満）を満たすか。`reference` が 0 のときは相対誤差を
-/// 無限大として扱い、絶対誤差側のみで判定する。非有限値の扱いは呼び出し側が決める。
+/// 絶対 [`ABSOLUTE_RESCUE_THRESHOLD`] 未満）を満たすか。
+///
+/// 相対誤差の分母は `backend-cpu::parity::compare_pairs` と同一の
+/// `max(|actual|, |reference|, 1e-12)`（定数は不変。判定の緩和ではなく既存判定との一致）。
+/// 非有限値は diff/rel が NaN となり `<` が false のため不合格（compare_pairs と同じ）。
 #[must_use]
 pub fn composite_close_f32(actual: f32, reference: f32) -> bool {
     let diff = (f64::from(actual) - f64::from(reference)).abs();
-    let rel = diff / f64::from(reference).abs();
+    let scale = f64::from(actual)
+        .abs()
+        .max(f64::from(reference).abs())
+        .max(1e-12);
+    let rel = diff / scale;
     rel < RELATIVE_TOLERANCE || diff < ABSOLUTE_RESCUE_THRESHOLD
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn denominator_uses_max_of_actual_and_reference() {
+        // 分母が reference のみだと rel=1.0005e-3 で不合格になる入力（既存判定では合格）。
+        assert!(composite_close_f32(1.001_000_5, 1.0));
+        assert!(composite_close_f32(1.0, 1.001_000_5));
+    }
+
+    #[test]
+    fn boundary_and_non_finite_cases() {
+        assert!(!composite_close_f32(1.01, 1.0));
+        assert!(composite_close_f32(0.0, 0.0));
+        assert!(composite_close_f32(5e-6, 0.0));
+        assert!(!composite_close_f32(2e-5, 0.0));
+        assert!(!composite_close_f32(f32::NAN, 1.0));
+        assert!(!composite_close_f32(f32::INFINITY, 1.0));
+        assert!(!composite_close_f32(f32::INFINITY, f32::INFINITY));
+    }
+
+    #[test]
+    fn matches_reference_formula_of_compare_pairs() {
+        let vals = [
+            0.0f32,
+            1e-12,
+            5e-6,
+            2e-5,
+            0.5,
+            1.0,
+            1.0005,
+            1.001_000_5,
+            1.002,
+            -1.0,
+            -1.001_000_5,
+            1e20,
+            1.0011e20,
+        ];
+        for &a in &vals {
+            for &b in &vals {
+                let (x, y) = (f64::from(a), f64::from(b));
+                let diff = (x - y).abs();
+                let rel = diff / x.abs().max(y.abs()).max(1e-12);
+                let expect = rel < RELATIVE_TOLERANCE || diff < ABSOLUTE_RESCUE_THRESHOLD;
+                assert_eq!(composite_close_f32(a, b), expect, "{a} vs {b}");
+            }
+        }
+    }
 }
