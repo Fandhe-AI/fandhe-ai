@@ -917,7 +917,7 @@ pub(crate) enum Op {
     /// 時点で解決済みの値（`fandhe_ai_tensor_core::fft::rfft_layout`）。
     /// `crate::fft_ops::rfft` からのみ積まれ、facade には公開しない。VJP は
     /// 入力値を必要としない線形演算（`grad.rs`）。非融合・非 checkpoint・
-    /// 高階微分非対応（`Op::Pinv` と同じ分類）。
+    /// 高階微分は #3086 で対応（`create_graph/linalg_fft.rs`。決定記録 §30）。
     Rfft {
         input: NodeId,
         n: usize,
@@ -937,7 +937,7 @@ pub(crate) enum Op {
     /// #2632）。`n`／`dim` は解決済み（`fandhe_ai_tensor_core::fft::fft_layout`）。
     /// `crate::fft_ops::fft` からのみ積まれ、facade には公開しない。VJP は
     /// 入力値を必要としない線形演算（共役転置。`grad.rs`）。分類は
-    /// [`Op::Rfft`] と同じ（非融合・非 checkpoint・高階微分非対応）。
+    /// [`Op::Rfft`] と同じ（非融合・非 checkpoint。高階微分は #3086 で対応）。
     Fft {
         input: NodeId,
         n: usize,
@@ -2590,7 +2590,17 @@ impl Op {
             // V1／V2（narrow の連鎖・where_cond）、PadMode は V3（f64 縮約値＋scatter_add 構造）。
             | Op::Pad { .. }
             | Op::MaskedFill { .. }
-            | Op::PadMode { .. } => true,
+            | Op::PadMode { .. }
+            // FFT 4 件・線形代数 4 件（イシュー #3086・決定記録 §30）。`Stft`／`Istft`・
+            // 分解系・`Cholesky`・`Pinv`・`Lstsq`・`MatrixNorm` などは `false` のまま。
+            | Op::Rfft { .. }
+            | Op::Irfft { .. }
+            | Op::Fft { .. }
+            | Op::Ifft { .. }
+            | Op::Inv { .. }
+            | Op::Solve { .. }
+            | Op::Det { .. }
+            | Op::SlogdetLogAbsDet { .. } => true,
             Op::ScalarUnary { op, .. } => crate::create_graph::scalar_unary_replayable(*op),
             Op::ScalarBinary { op, .. } => crate::create_graph::scalar_binary_replayable(*op),
             Op::Max { .. }
@@ -2625,9 +2635,6 @@ impl Op {
             | Op::LstmCell { .. }
             | Op::LstmHidden { .. }
             | Op::GruCell { .. }
-            | Op::Inv { .. }
-            | Op::Solve { .. }
-            | Op::Det { .. }
             | Op::Cholesky { .. }
             | Op::QrQ { .. }
             | Op::QrR { .. }
@@ -2635,27 +2642,20 @@ impl Op {
             | Op::SvdS { .. }
             | Op::SvdVh { .. }
             | Op::MatrixNorm { .. }
-            // イシュー #2150 の 5 演算は子テープ方式の高階微分の初期
-            // スコープ（doc 上部「対象スコープ」）に含まれないため
-            // `Inv`／`Det`／`Svd*` と同じく非対応のまま保持する。
+            // イシュー #2150 の 5 演算のうち `SlogdetLogAbsDet` 以外は非対応のまま保持する。
             | Op::EighValues { .. }
             | Op::EighVectors { .. }
             | Op::SlogdetSign { .. }
-            | Op::SlogdetLogAbsDet { .. }
             | Op::Pinv { .. }
             | Op::Lstsq { .. }
             | Op::MatrixRank { .. }
-            // イシュー #2631・#2632・#2633 の FFT 6 演算も初期スコープ外（非対応）。
-            | Op::Rfft { .. }
+            // `Stft`／`Istft`（イシュー #2633）は非対応のまま（`PadMode` 再生不可。§29）。
             | Op::Logcumsumexp { .. }
             | Op::OrderSelect { .. }
             | Op::MedianAll { .. }
             | Op::Quantile { .. }
             | Op::Nansum { .. }
             | Op::Nanmean { .. }
-            | Op::Irfft { .. }
-            | Op::Fft { .. }
-            | Op::Ifft { .. }
             | Op::Stft { .. }
             | Op::Istft { .. }
             | Op::Dropout { .. }
@@ -5354,6 +5354,68 @@ mod conv3d_op_tests {
             }
             .supports_create_graph()
         );
+    }
+
+    /// イシュー #3086: FFT 4 件・線形代数 4 件は create_graph 対応（`true`）。隣接する
+    /// `Cholesky`・`Pinv`・`MatrixNorm`・`SlogdetSign`・`MatrixRank` などは `false`（fail-closed。
+    /// 型付きエラーでの拒否は `tests/create_graph_linalg_fft.rs` が全 15 件で固定する）。
+    #[test]
+    fn linalg_fft_family_supports_create_graph() {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let norm = FftNorm::Backward;
+        let supported = [
+            Op::Rfft {
+                input: a,
+                n: 4,
+                dim: 0,
+                norm,
+            },
+            Op::Irfft {
+                input: a,
+                n: 4,
+                dim: 0,
+                norm,
+            },
+            Op::Fft {
+                input: a,
+                n: 4,
+                dim: 0,
+                norm,
+            },
+            Op::Ifft {
+                input: a,
+                n: 4,
+                dim: 0,
+                norm,
+            },
+            Op::Inv { input: a },
+            Op::Solve { a, b },
+            Op::Det { input: a },
+            Op::SlogdetLogAbsDet { input: a },
+        ];
+        for op in &supported {
+            assert!(op.supports_create_graph(), "{op:?} は対応済みのはず");
+        }
+        let unsupported = [
+            Op::Cholesky { input: a },
+            Op::SlogdetSign { input: a },
+            Op::MatrixRank {
+                input: a,
+                rcond: 1e-6,
+            },
+            Op::Pinv {
+                input: a,
+                rcond: 1e-6,
+            },
+            Op::MatrixNorm {
+                input: a,
+                ord: fandhe_ai_tensor_core::MatrixNormOrd::Fro,
+            },
+        ];
+        for op in &unsupported {
+            assert!(!op.supports_create_graph(), "{op:?} は fail-closed のはず");
+        }
     }
 
     /// イシュー #3084: `Pad`・`PadMode`・`MaskedFill` は create_graph 対応（`true`）。

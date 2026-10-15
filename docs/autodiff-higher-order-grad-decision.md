@@ -171,6 +171,7 @@ func: CustomFn }` も「非対象」に分類する。`CustomFunction::backward`
 ## 11. スコープ外（不変）
 
 - reuse／resident 経路（`LinearResident`／`ResidentLeaf`）・CUDA Graph capture（#1349）・線形代数 Op の高階微分
+  （#3086 で `Inv`・`Solve`・`Det`・`SlogdetLogAbsDet` は対象へ。残る線形代数 Op の扱いは §30）
 - 混合精度（#1625。実装済み〈#1721/#1722〉だが高階微分との相互作用は未検討）・activation checkpointing（#1624。再計算との併用は §8 で言及に留める）
 - custom autograd Function（#1623。`Op` enum 拡張の論点は重なるが、本 doc では参照に留め決定しない）
 
@@ -1216,3 +1217,61 @@ sed -n 2453,2570p crates/autodiff/src/tape.rs | grep -oE "Op::[A-Za-z0-9]+" | se
 ### 30.6 変えていないもの
 
 1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・公開 API（`api_surface`）。
+
+## 31. 実装記録（#3086・線形代数 Op と FFT の create_graph 対応の可否と対応分。親 #3076）
+
+### 31.1 23 件の判断
+
+§21.2 を正とした（#3086 の issue は `Stft`・`Istft` を実装側に置く案だったが、§21.2 の理由が成立するため fail-closed にした）。
+
+| Op | 判断 | 方式 | 理由・子テープへ積む Op |
+|---|---|---|---|
+| `Fft`・`Ifft` | 実装 | V1 | 随伴は逆向きの FFT（`norm` は `Backward <-> Forward` を入れ替え、`Ortho` は不変）に、実軸の `narrow`／ゼロ定数との `concat` を足すだけで書ける。積む Op: `Ifft`／`Fft`・`Narrow`・`Concat` |
+| `Rfft` | 実装 | V1 | `irfft(g * h, n, dim, swap(norm))`。`h` は DC と（`n` 偶数の）Nyquist で 1、それ以外で 0.5 のホスト定数（0 を含まないので `inf * 0` は起きない）。積む Op: `Irfft`・`Mul`・`Narrow`・`Concat` |
+| `Irfft` | 実装 | V1 | `rfft(g, n, dim, swap(norm)) * c`。`c` は DC と Nyquist で 1、それ以外で 2。bin 軸を入力の bin 数 `m` へ合わせる。積む Op: `Rfft`・`Mul`・`Narrow`・`Concat` |
+| `Stft`・`Istft` | fail-closed | — | 窓とフレームの overlap-add を再生可能な `Var` 演算で組むには O(T) 個のノードが要る（§21.2）。`center=true` の反射パディングは #3084 で `PadMode` が再生可能になったため保留理由ではない |
+| `Inv` | 実装 | V1 | `dA = -(X^T g X^T)`（`X` は `Inv` ノードの写し）。積む Op: `Transpose`・`MatMul`（`matmul_fp32_strict`）・`ScalarUnary{Neg}` |
+| `Solve` | 実装 | V1 | `dB = solve(A^T, g)`、`dA = -dB X^T`。積む Op: `Solve`・`Transpose`・`Contiguous`・`MatMul`・`Neg` |
+| `SlogdetLogAbsDet` | 実装 | V1 | `dA = broadcast(g) * inv(A)^T`。積む Op: `BroadcastTo`・`Inv`・`Transpose`・`Mul` |
+| `Det` | 実装（判定付き V1） | V1 | `dA = broadcast(g * det) * inv(A)^T`。§21.2 の行別スケール＋2 のべき乗チャンク構造（V3）は実装していない。V3 が必要になる入力は 29.3 の判定で拒否する |
+| `Cholesky` | fail-closed | — | 二階の式が複雑（§21.2） |
+| `Pinv`・`Lstsq` | fail-closed | — | 二階の式が複雑で、`rcond` による打ち切りが区分定数になる（§21.2） |
+| `MatrixNorm` | fail-closed | — | 二階の式が複雑で、`Nuc`／`Spectral` は SVD の縮退を含む（§21.2） |
+| `QrQ`・`QrR`・`SvdU`・`SvdS`・`SvdVh`・`EighValues`・`EighVectors` | fail-closed | — | 多出力ノードが兄弟の値を非追跡ペイロードとして持つ（§8 (c)）。固有値・特異値が縮退すると二階微分が不安定になる |
+| `SlogdetSign`・`MatrixRank` | fail-closed | — | 1 階 VJP が恒等的にゼロ（`grad.rs` の明示ゼロ）で二階の対象がない |
+
+件数: 実装 8（FFT 4・線形代数 4）、fail-closed 15、合計 23。
+
+### 31.2 FFT の数値契約
+
+- 値は 1 階 VJP（`fandhe_ai_tensor_core::fft::*_vjp_host`）と REQ-2 統一複合判定で一致する。bit 同一は主張しない（子テープは `Var` の FFT 呼び出し、1 階はホスト関数で、どちらも f64 内部だが定数 2 のべき乗の掛け順が異なる）。
+- 掛ける定数（0.5・2・ゼロ詰め）は 2 のべき乗で丸めに影響しない。FFT は有限和で段をまたぐ増幅がないため overflow の上界判定は付けない。真の値が f32 を超える場合だけ 1 階と同じく `inf` になる。
+- `FftNorm` は `#[non_exhaustive]`。未知 variant は `validate_ancestors` が子テープへ書く前に `Err(Backward)` で拒否する（`check_fft_norm`）。
+
+### 31.3 線形代数の数値契約と総括的な適用判定
+
+1 階 VJP は f64 の LU で計算し f32 へ丸めるのは最後の 1 回だけだが、子テープの構造は f32 の `Var` 演算の連鎖である。そのため構造を積む前に f64 参照（`eval::linalg::inv_and_det_f64`。読み取り専用の補助関数で既存関数の数値は不変）で各段の値と上界を求め、次のいずれかなら `Err(Backward)` で拒否する（呼び出し側のロールバックで `child` は空へ戻る。§27.3・§28.3 と同じ形）。
+
+- 上流 `g`（`Solve` は `b` も）に非有限要素がある。行列が特異で逆行列を作れない。
+- 構造の段（`X`、`X^T g`、`X^T g X^T`／`solve(A^T, g)`・`dB X^T`／`g * X`、`Det` は `det` と `g * det`）のどれかが、非有限・`2^125` 以上（`STAGE_BOUND_GUARD`。値は変えていない）・「非零なのに f32 の正規化最小値未満」（ゼロ化・subnormal 化しうる）。
+- 二階の逆伝播の上界（seed の各要素の絶対値 1 以下を仮定し、`Inv`・`Solve` は `(n * max|X|)^4 * max(1,|g|)`、`Det` 系は `^3` に `max(1,|det|)` を掛けた保守的な見積もり）が `2^125` 以上。
+
+保証範囲: 判定を通った入力では、`cg.grad` が 1 階と REQ-2 で一致し、seed が 1 以下の二階・孫テープへの再生が有限になる。対象外は §27.3 と同じ（上流 Op・|seed|>1・三階以上・真の値が f32 を超える場合）。判定は保守的で、拒否されても実際に overflow するとは限らない。`Det` は V3 を作らなかったため、`A = diag(1e20, 1e20)`（`det = 1e40`）のような「V3 なら受理できる」入力は拒否する。
+
+### 31.4 テスト
+
+- `crates/autodiff/tests/create_graph_linalg_fft.rs`: 8 件の Hessian を 5 点中央差分と REQ-2 判定で突合（FFT は norm 3 種 × 長さ縮小・同長・拡大 × rank 1〜3・dim 先頭／中央、`Solve` は `A`・`B` の混合項を含む）。1 階の bit 同一・`cg.grad` の REQ-2 一致・孫テープ再生の一致。拒否例（`A=[[1e-39]]` の `Inv`、`A=[[1e-10]]`・`B=[[1e30]]` の `Solve`、`diag(1e20)` の `Det`）が `Err(Backward)` で `child` が空・同じ `child` で再試行できること。ほどほどの入力が受理されること。fail-closed の 15 件が型付きエラーで拒否されること、`requires_grad == false` の部分木の fail-closed Op は定数として扱われること。
+- `tape.rs` の `linalg_fft_family_supports_create_graph`: 8 件が `true`、隣接 5 件が `false`。
+- 二次形式の FFT 損失は勾配が入力に対し厳密に線形なので、f32 の勾配丸め雑音を抑えるため刻み 0.5 の中央差分を使った（判定式・tolerance は変えていない）。
+
+### 31.5 所有者へ戻す論点
+
+1. `Det`・`Inv`・`Solve`・`SlogdetLogAbsDet` で判定に引っかかる入力を、拒否ではなく §21.2 の S2／V4（行別スケール＋チャンク）で受理する方向へ広げるか。
+2. `SlogdetSign` を損失に使う経路は fail-closed のため create_graph 全体が拒否される（使い勝手上の制約）。
+3. `Stft`・`Istft` は overlap-add の構造（O(T) 個のノードが要る）を解く設計が決まったら再検討する（`PadMode` は #3084 で再生可能になり、保留理由ではなくなった）。
+4. 分解系（`Svd*`・`Eigh*`・`Qr*`）の縮退の扱いを決めたうえでの起票（起票にはユーザーの承認が要るため本 issue では行っていない）。
+5. CUDA／Metal 実機での `cg.grad` の parity は未確認（線形代数の forward は GPU からホスト f64 へフォールバックする。#3168・#3169 と同じ申し送り）。
+
+### 31.6 変えていないもの
+
+1 階 `Tape::backward` の結果（bit 同一）・tolerance・baseline・`STAGE_BOUND_GUARD` の値・FMA 契約・依存・`unsafe`・`docs/spec`・facade の公開面。

@@ -499,6 +499,22 @@ pub(crate) fn det(a: &Tensor<f32>) -> Tensor<f32> {
     build_tensor(vec![value as f32], &[])
 }
 
+/// `create_graph` の総括的な適用判定（`create_graph/linalg_fft.rs`。イシュー #3086）専用の
+/// f64 参照: `A` の逆行列（行優先 `n*n`）と行列式を、1 階 VJP（[`inv_vjp`]・[`det_vjp`]）と同じ
+/// f64 の `LuDecomp` から返す。`f32` へ downcast しない。特異は `None`（呼び出し側が拒否する）。
+/// 数値は一切変えない読み取り専用の補助で、既存関数の挙動は不変。
+pub(crate) fn inv_and_det_f64(a: &Tensor<f32>) -> Option<(Vec<f64>, f64)> {
+    let mat = Mat::from_tensor(a);
+    let n = mat.rows;
+    if n == 0 {
+        return Some((Vec::new(), 1.0));
+    }
+    let lu = lu_decompose(&mat)?;
+    let det = lu_diag_product(&lu);
+    let inv = lu_solve_mat(&lu, &Mat::identity(n));
+    Some((inv.data, det))
+}
+
 /// `A^{-T} b`（`f64` の [`Mat`] のまま返す）。`Op::Solve` の VJP
 /// （`dB = A^{-T} g`）専用の内部実装。forward の `lu_decompose(a)` を
 /// 再利用せず、`aᵀ` を明示的に分解する（転置行列の LU を都度計算する

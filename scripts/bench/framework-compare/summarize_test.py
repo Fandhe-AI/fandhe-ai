@@ -3657,8 +3657,8 @@ class MainTargetExitCodeTests(unittest.TestCase):
 
 
 class ToleranceDriftTests(unittest.TestCase):
-    """`CHECKSUM_*`/`PARITY_*`（summarize.py）が本体 `backend-cpu::parity`
-    の契約値から乖離していないことを機械照合する。
+    """`CHECKSUM_*`/`PARITY_*`（summarize.py）が本体の正本
+    （`tensor-core::tolerance`。`backend-cpu::parity` は再エクスポート）の契約値から乖離していないことを機械照合する。
 
     このハーネスは本体 workspace 外の独立 workspace（`.claude/rules/
     deps-policy.md` 第 9 区分）のため本体クレートを import できず、
@@ -3703,11 +3703,34 @@ class ToleranceDriftTests(unittest.TestCase):
             "ユーザー承認必須（.claude/rules/coding-rust.md）",
         )
 
+    def test_backend_cpu_reexports_canonical_constants(self):
+        # backend-cpu が正本の同名定数を再エクスポートしていること（外れると
+        # backend-cpu の実判定が正本とずれても上の照合では検出できない）。
+        path = os.path.join(
+            HERE, "..", "..", "..", "crates", "backend-cpu", "src", "parity.rs"
+        )
+        try:
+            with open(path, encoding="utf-8") as f:
+                source = f.read()
+        except OSError as err:
+            self.fail(f"本体 backend-cpu parity.rs を読めない（{path}）: {err}")
+        match = re.search(
+            r"^pub use fandhe_ai_tensor_core::tolerance::\{([^}]*)\};",
+            source,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(
+            match, "backend-cpu parity.rs に tensor-core::tolerance の `pub use` が無い"
+        )
+        exported = {n.strip() for n in match.group(1).split(",") if n.strip()}
+        for name in ("RELATIVE_TOLERANCE", "ABSOLUTE_RESCUE_THRESHOLD"):
+            self.assertIn(name, exported, f"{name} が再エクスポートされていない")
+
 
 def _extract_f64_const(source, name):
     """`pub const <name>: f64 = <value>;` 形式の宣言から数値を取り出す。
 
-    本体 `crates/backend-cpu/src/parity.rs` の宣言スタイル固定を前提に
+    本体 `crates/tensor-core/src/tolerance.rs` の宣言スタイル固定を前提に
     した簡易パーサー（正規表現クレート追加を避けるため stdlib `re` の
     みで十分）。宣言が見つからない・数値化できない場合は fail-closed に
     例外を送出する（呼び出し側の `TestCase` が失敗として報告する）。
@@ -3717,7 +3740,7 @@ def _extract_f64_const(source, name):
     )
     if match is None:
         raise AssertionError(
-            f"本体 parity.rs に `pub const {name}: f64 = ...;` の宣言が"
+            f"本体 tolerance.rs に `pub const {name}: f64 = ...;` の宣言が"
             "見つからない（宣言スタイルが変わった可能性）"
         )
     return float(match.group(1).strip())

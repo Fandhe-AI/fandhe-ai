@@ -43,7 +43,8 @@
 //! downcast（`fandhe_ai_tensor_core::fft` のモジュール doc が正。直接 DFT
 //! のため 1 レーンあたり O(n²)）。非有限入力は拒否せず伝播する
 //! （PyTorch と同じ。linalg 系の「非有限は `InvalidArgument`」とは異なる）。
-//! 高階微分（`create_graph`）・activation checkpoint・f64 自動微分経路は
+//! 高階微分（`create_graph`）は `rfft`／`irfft`／`fft`／`ifft` が対象（イシュー #3086・
+//! 決定記録 §30。`stft`／`istft` は対象外）。activation checkpoint・f64 自動微分経路は
 //! 対象外。
 //!
 //! **公開状況（イシュー #2678）**: 承認形どおり公開済み: `Var::{rfft,irfft,fft,ifft,stft,istft}` と `FftNorm`・`StftPadMode`・`StftOptions`・`IstftOptions`（クレートルート）。本モジュール自体は facade から再エクスポートしない。

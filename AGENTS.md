@@ -169,7 +169,8 @@ prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先�
     悪化し平均で相殺される回帰を検出するための必須項目〈spec 同追記の規定〉。
     baseline の新規追加・更新は必ず実機実測値を伴う（推定値の記入は禁止）
   - **tolerance 定数**（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`。
-    `crates/backend-cpu/src/parity.rs`）**の変更は本規約の対象外であり、引き続き
+    正本は `crates/tensor-core/src/tolerance.rs`。`crates/backend-cpu/src/parity.rs` は
+    再エクスポート）**の変更は本規約の対象外であり、引き続き
     ユーザー承認必須**（本規約は判定方式〈テスト個別の合否基準〉の使い分けを
     定めるものであり、統一複合判定の閾値自体を変更するものではない）
   - **単一連続ループで縮約する経路**（f32 FMA の通常経路等）は従前どおり統一
