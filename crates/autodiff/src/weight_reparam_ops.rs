@@ -4,9 +4,12 @@
 //! **facade 公開状況**: 入口の `Var::weight_norm`／`Var::spectral_norm`（本モジュールの関数への 1 行委譲
 //! メソッド）と `SpectralNormState`（クレートルートの別名なし再エクスポート 1 行）は #2851 で facade へ公開済み
 //! （モジュール自体は再エクスポートしない。公開形は `docs/autodiff-lrn-weight-reparam-decision.md` §12）。
-//! `norm_except_dim`・層化（`Linear`／`Conv` の重みへの parametrization 結線・`Sequential::add_*`・保存復元）は
-//! 保留継続。残る保留は `crates/facade/src/lib.rs` の `LrnWeightReparamHoldDoctestGuard` と
-//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定し、公開済み側は同ファイルの正ガードが固定する。
+//! `norm_except_dim` は保留継続（非公開）。層化（`Linear`／`Conv` の重みへの parametrization 結線）と保存復元は
+//! `compat::Sequential::parametrize_weight_norm`／`parametrize_spectral_norm`（#3048・#3049）と
+//! `save_model`／`load_model`（#3050。`SpectralNormState` の `u`／`v` は `pub(crate)` の bit 厳密復元経路で戻す）で
+//! 公開済み。残る保留は `crates/facade/src/lib.rs` の `LrnWeightReparamHoldDoctestGuard` と
+//! `crates/facade/tests/api_surface.rs` の否定ガードが機械的に固定し、公開済み側は同ファイルの正ガードと
+//! ダウンキャスト消費箇所のインベントリ（`parametrize_downcast_sites_are_gated_or_exempt`）が固定する。
 //!
 //! **PyTorch 相当**:
 //!
@@ -171,6 +174,50 @@ impl SpectralNormState {
             weight_shape: weight_shape.to_vec(),
             u: wr::normalize_vector_host(u0, eps),
             v: wr::normalize_vector_host(v0, eps),
+            dim,
+            eps,
+            n_power_iterations,
+        })
+    }
+
+    /// 保存済みの `u`／`v` を**再正規化せず** bit のまま状態へ復元する（イシュー #3050。
+    /// `compat::model_io` の load 専用。決定記録 `docs/facade-weight-reparam-wiring-decision.md` §7）。
+    ///
+    /// [`Self::from_vectors`] は `x / max(‖x‖, eps)` で再正規化するため、正規化済みの保存値でも
+    /// 1 ulp ずれて保存往復が bit 一致しない。本経路は検査（shape・`n_power_iterations >= 1`・
+    /// `eps` が有限かつ非負・`u`／`v` の長さと有限性）だけを行い値を加工しない。公開面を広げない
+    /// ため `pub(crate)`（層の `restore_spectral_norm_vectors` 経由でのみ facade から到達する）。
+    pub(crate) fn from_exact_parts(
+        weight_shape: &[usize],
+        dim: usize,
+        u: &[f32],
+        v: &[f32],
+        n_power_iterations: usize,
+        eps: f32,
+    ) -> Result<Self, AutodiffError> {
+        let layout = wr::spectral_norm_layout(weight_shape, dim).map_err(AutodiffError::Shape)?;
+        if n_power_iterations == 0 || !eps.is_finite() || eps < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SpectralNormState::from_exact_parts: n_power_iterations は 1 以上・eps は有限かつ非負である必要がある（n={n_power_iterations}, eps={eps}）"
+            )));
+        }
+        for (name, vec, want) in [("u", u, layout.rows()), ("v", v, layout.cols())] {
+            if vec.len() != want {
+                return Err(AutodiffError::Shape(ShapeError::ElementCountMismatch {
+                    expected: want,
+                    actual: vec.len(),
+                }));
+            }
+            if vec.iter().any(|x| !x.is_finite()) {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "SpectralNormState::from_exact_parts: {name} は有限である必要がある"
+                )));
+            }
+        }
+        Ok(Self {
+            weight_shape: weight_shape.to_vec(),
+            u: u.to_vec(),
+            v: v.to_vec(),
             dim,
             eps,
             n_power_iterations,
@@ -392,5 +439,25 @@ mod tests {
         assert!(spectral_norm(&wrong, &mut st, true).is_err());
         assert_eq!(st, before);
         assert_eq!(tape.len(), n);
+    }
+
+    #[test]
+    fn from_exact_parts_keeps_bits_and_validates() {
+        let (u, v) = (vec![0.6_f32, 0.8_f32], vec![0.3_f32, 0.4_f32, 0.5_f32]);
+        let exact = SpectralNormState::from_exact_parts(&[2, 3], 0, &u, &v, 2, 1e-12).unwrap();
+        assert_eq!(exact.u(), u.as_slice(), "再正規化せず bit のまま保持する");
+        assert_eq!(exact.v(), v.as_slice());
+        assert_eq!((exact.n_power_iterations(), exact.dim()), (2, 0));
+        let renorm = SpectralNormState::from_vectors(&[2, 3], 0, &u, &v, 2, 1e-12).unwrap();
+        assert_ne!(
+            renorm.v(),
+            v.as_slice(),
+            "from_vectors は再正規化する（対照）"
+        );
+        assert!(SpectralNormState::from_exact_parts(&[2, 3], 0, &u[..1], &v, 2, 1e-12).is_err());
+        assert!(SpectralNormState::from_exact_parts(&[2, 3], 0, &u, &v, 0, 1e-12).is_err());
+        assert!(SpectralNormState::from_exact_parts(&[2, 3], 0, &u, &v, 2, f32::NAN).is_err());
+        let bad = [f32::INFINITY, 0.0, 0.0];
+        assert!(SpectralNormState::from_exact_parts(&[2, 3], 0, &u, &bad, 2, 1e-12).is_err());
     }
 }

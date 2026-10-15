@@ -39,6 +39,14 @@
 //! どこからも参照されないカウンタで、eval／train の数値には影響しない
 //! （決定記録 §5・§11。復元には autodiff への setter 追加が要るためスコープ外）。
 //!
+//! `parametrize_weight_norm`／`parametrize_spectral_norm` で再パラメータ化した Linear・Conv 6 種は、14 種の
+//! kind（`{linear,conv1d,conv2d,conv3d,conv_transpose1d,conv_transpose2d,conv_transpose3d}_{weight_norm,spectral_norm}`。
+//! イシュー #3050。決定記録 `docs/facade-weight-reparam-wiring-decision.md` §7・§18）で保存・復元する。
+//! `params` は基底層の固定キーに weight_norm は `dim`、spectral_norm は `spectral`（`"<n>:<eps>"`。
+//! `n` は 1〜4096）を足した集合で、load は基底を `add_*` で組み直して同じ `parametrize_*` を再適用する。
+//! spectral_norm の `u`／`v` は buffer（`{i}.parametrizations.weight.0._u`／`._v`）として保存し、再正規化せず
+//! bit のまま復元する。旧形式（`format_version` 1）の manifest に再パラメータ化層が含まれていれば拒否する。
+//!
 //! manifest v1 のキー集合は先に確定済みで、拡張しても形式バージョンは上げない。
 //!
 //! # 書き込みの契約（世代コミット）
@@ -88,10 +96,17 @@ use self::compiled::{
     CompiledMeta, OPTIMIZER_PREFIX, check_lbfgs_history, check_slot_shapes, parse_compiled,
     render_compiled, split_optimizer_tensors,
 };
-use super::sequential::{LayerSpec, Sequential};
+use super::sequential::{LayerSpec, ReparamSpec, Sequential, spectral_state_of};
 use crate::fs_guard::{LeafError, MAX_MODEL_FILE_BYTES, OpenedLeaf, open_leaf_checked};
 use crate::interop::safetensors::{load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes};
 use crate::{EmbeddingBagMode, GlobalPoolMode, InterpolateMode, Tensor};
+
+/// spectral_norm の `n_power_iterations`（train の forward 1 回あたりの power iteration 回数）の
+/// 保存・復元両側の上限（イシュー #3050。決定記録 `docs/facade-weight-reparam-wiring-decision.md` §18）。
+/// 非信頼な manifest が巨大な回数を指定すると forward が事実上停止する（CPU 消費による DoS）ため、
+/// 固定上限を挟む。tolerance・ガードレール閾値ではなく、型付きエラーで拒否する構造上限
+/// （既定は PyTorch 同様 1）。
+const MAX_SPECTRAL_POWER_ITERATIONS: usize = 4096;
 
 /// manifest のファイル名（`dir` 直下の固定名）。
 const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -380,8 +395,75 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
         LayerSpec::InstanceNorm { .. } => Some("instance_norm"),
         LayerSpec::PixelShuffle { .. } => Some("pixel_shuffle"),
         LayerSpec::PixelUnshuffle { .. } => Some("pixel_unshuffle"),
+        LayerSpec::Reparam { base, reparam } => reparam_kind(base, reparam),
         LayerSpec::Unsupported { .. } => None,
     }
+}
+
+/// 再パラメータ化 kind の全集合（`(kind, 基底 kind, spectral_norm か)`。イシュー #3050。決定記録 §7。
+/// 基底は `parametrize_*` の対象 7 種〈Linear・Conv1d／2d／3d・ConvTranspose1d／2d／3d〉× 2 = 14 種）。
+/// manifest の `kind` は静的文字列 allowlist のため、組み立てず表引きする。
+const REPARAM_KINDS: [(&str, &str, bool); 14] = [
+    ("linear_weight_norm", "linear", false),
+    ("linear_spectral_norm", "linear", true),
+    ("conv1d_weight_norm", "conv1d", false),
+    ("conv1d_spectral_norm", "conv1d", true),
+    ("conv2d_weight_norm", "conv2d", false),
+    ("conv2d_spectral_norm", "conv2d", true),
+    ("conv3d_weight_norm", "conv3d", false),
+    ("conv3d_spectral_norm", "conv3d", true),
+    ("conv_transpose1d_weight_norm", "conv_transpose1d", false),
+    ("conv_transpose1d_spectral_norm", "conv_transpose1d", true),
+    ("conv_transpose2d_weight_norm", "conv_transpose2d", false),
+    ("conv_transpose2d_spectral_norm", "conv_transpose2d", true),
+    ("conv_transpose3d_weight_norm", "conv_transpose3d", false),
+    ("conv_transpose3d_spectral_norm", "conv_transpose3d", true),
+];
+
+/// `Reparam` 層の manifest `kind`（基底 kind × 再パラメータ化種別の表引き。表にない基底は `None`）。
+fn reparam_kind(base: &LayerSpec, reparam: &ReparamSpec) -> Option<&'static str> {
+    let base_kind = spec_kind(base)?;
+    let spectral = matches!(reparam, ReparamSpec::SpectralNorm { .. });
+    REPARAM_KINDS
+        .iter()
+        .find(|(_, b, sp)| *b == base_kind && *sp == spectral)
+        .map(|(k, _, _)| *k)
+}
+
+/// `kind` が再パラメータ化 kind なら `(基底 kind, spectral_norm か)`。
+fn reparam_kind_parts(kind: &str) -> Option<(&'static str, bool)> {
+    REPARAM_KINDS
+        .iter()
+        .find(|(k, _, _)| *k == kind)
+        .map(|(_, b, sp)| (*b, *sp))
+}
+
+/// spectral_norm の行軸（`W_mat` の行にあたる weight の軸）。層から導出する（Linear は `[in, out]`
+/// の out 軸 1・Conv 系 0・ConvTranspose 系 1。PyTorch と一致。決定記録 §6）。基底が対象外なら `None`。
+fn spectral_row_axis(base: &LayerSpec) -> Option<usize> {
+    match base {
+        LayerSpec::Linear { .. }
+        | LayerSpec::ConvTranspose1d { .. }
+        | LayerSpec::ConvTranspose2d { .. }
+        | LayerSpec::ConvTranspose3d { .. } => Some(1),
+        LayerSpec::Conv1d { .. } | LayerSpec::Conv2d { .. } | LayerSpec::Conv3d { .. } => Some(0),
+        _ => None,
+    }
+}
+
+/// spectral_norm の `u`（長さ `h = shape[行軸]`）・`v`（長さ `w = numel / h`）の長さ。非信頼な整数から
+/// checked 算術で導き、オーバーフロー・行数 0・要素数 0 は `None`（確保前に拒否するため）。
+fn spectral_uv_lens(base: &LayerSpec) -> Option<(usize, usize)> {
+    let axis = spectral_row_axis(base)?;
+    let weight = layer_parameters(base).into_iter().next()?.1;
+    let rows = *weight.get(axis)?;
+    let numel = weight
+        .iter()
+        .try_fold(1usize, |acc, d| acc.checked_mul(*d))?;
+    if rows == 0 || numel == 0 {
+        return None;
+    }
+    Some((rows, numel / rows))
 }
 
 /// 層の f32 引数がすべて有限か（NaN／inf は JSON 数値として書けず、復元の
@@ -389,6 +471,13 @@ fn spec_kind(spec: &LayerSpec) -> Option<&'static str> {
 fn spec_f32_fields_are_finite(spec: &LayerSpec) -> bool {
     match spec {
         LayerSpec::LeakyRelu { negative_slope } => negative_slope.is_finite(),
+        LayerSpec::Reparam { base, reparam } => {
+            spec_f32_fields_are_finite(base)
+                && match reparam {
+                    ReparamSpec::SpectralNorm { eps, .. } => eps.is_finite(),
+                    ReparamSpec::WeightNorm { .. } => true,
+                }
+        }
         LayerSpec::LocalResponseNorm { alpha, beta, k, .. } => {
             alpha.is_finite() && beta.is_finite() && k.is_finite()
         }
@@ -460,6 +549,36 @@ fn mha_parameters(embed: usize, with_prefix: bool, bias: bool) -> Vec<(&'static 
 /// （防御的に `checked_div` で 0 へ落とし、期待キーの不一致として現れる）。
 fn layer_parameters(spec: &LayerSpec) -> Vec<(&'static str, Vec<usize>)> {
     match spec {
+        // イシュー #3050。基底の `[weight, bias]` から導く。`weight` スロットの代わりに weight_norm は
+        // `original0`（g。`dim` 以外が 1 の keepdim 形、`dim = None` は rank 0）→`original1`（v。元の
+        // weight shape）、spectral_norm は `original`（`Module::named_parameters` の列挙順と一致）。
+        LayerSpec::Reparam { base, reparam } => {
+            let mut rest = layer_parameters(base).into_iter();
+            let Some((_, weight)) = rest.next() else {
+                return Vec::new();
+            };
+            let mut out: Vec<(&'static str, Vec<usize>)> = match reparam {
+                ReparamSpec::WeightNorm { dim } => {
+                    let g: Vec<usize> = match dim {
+                        None => Vec::new(),
+                        Some(d) => weight
+                            .iter()
+                            .enumerate()
+                            .map(|(axis, n)| if axis == *d { *n } else { 1 })
+                            .collect(),
+                    };
+                    vec![
+                        ("parametrizations.weight.original0", g),
+                        ("parametrizations.weight.original1", weight),
+                    ]
+                }
+                ReparamSpec::SpectralNorm { .. } => {
+                    vec![("parametrizations.weight.original", weight)]
+                }
+            };
+            out.extend(rest);
+            out
+        }
         LayerSpec::Linear {
             in_features,
             out_features,
@@ -795,6 +914,10 @@ fn expected_parameter_keys(specs: &[LayerSpec]) -> Vec<(String, Vec<usize>)> {
     keys
 }
 
+/// spectral_norm の `u`／`v` の buffer 名（`{index}.` を前置して使う。イシュー #3050）。
+const SPECTRAL_U_NAME: &str = "parametrizations.weight.0._u";
+const SPECTRAL_V_NAME: &str = "parametrizations.weight.0._v";
+
 /// 層構成から導く期待 buffer キー列（BatchNorm の `{index}.running_mean`／
 /// `{index}.running_var`。shape は `[num_features]`。層順・各層内は mean → var）。
 /// manifest の記載値は一致確認にだけ使い、確保量の根拠にしない（決定記録 §13.5）。
@@ -806,6 +929,16 @@ fn expected_buffer_keys(specs: &[LayerSpec]) -> Vec<(String, Vec<usize>)> {
         {
             keys.push((format!("{i}.running_mean"), vec![*num_features]));
             keys.push((format!("{i}.running_var"), vec![*num_features]));
+        }
+        // イシュー #3050。spectral_norm の `u`／`v`（PyTorch の buffer 名 `parametrizations.weight.0._u`／`._v`）。
+        if let LayerSpec::Reparam {
+            base,
+            reparam: ReparamSpec::SpectralNorm { .. },
+        } = spec
+            && let Some((rows, cols)) = spectral_uv_lens(base)
+        {
+            keys.push((format!("{i}.{SPECTRAL_U_NAME}"), vec![rows]));
+            keys.push((format!("{i}.{SPECTRAL_V_NAME}"), vec![cols]));
         }
     }
     keys
@@ -958,6 +1091,27 @@ fn upsample_is_savable(size: &[usize], mode: InterpolateMode) -> bool {
 /// `None` は `null`）。`spec_from_kind` が読む固定スキーマの書き手側で、保存側の
 /// 自己検証（[`verify_round_trip`]）はこの文字列の完全一致（f32 は bit 一致）で比較する。
 fn render_params(spec: &LayerSpec) -> String {
+    render_fields(&param_fields(spec))
+}
+
+/// `params` の描画済みフィールド列。`Reparam`（イシュー #3050）は基底の固定キー群へ 1 キーだけ足す
+/// （weight_norm は `dim`〈整数または `null`〉、spectral_norm は `spectral`〈`"<n>:<eps>"` の正準文字列〉）。
+/// spectral を 1 キーへ畳むのは、`conv3d` が基底だけで 15 キーあり `MAX_OBJECT_KEYS`（16）に収めるため。
+fn param_fields(spec: &LayerSpec) -> ParamFields {
+    if let LayerSpec::Reparam { base, reparam } = spec {
+        let mut f = param_fields(base);
+        match reparam {
+            ReparamSpec::WeightNorm { dim } => put_opt(&mut f, "dim", *dim),
+            ReparamSpec::SpectralNorm {
+                n_power_iterations,
+                eps,
+            } => f.push((
+                "spectral".to_string(),
+                format!("\"{n_power_iterations}:{eps:?}\""),
+            )),
+        }
+        return f;
+    }
     let mut f: ParamFields = Vec::new();
     match spec {
         LayerSpec::Linear {
@@ -1364,9 +1518,10 @@ fn render_params(spec: &LayerSpec) -> String {
         | LayerSpec::Tanhshrink
         | LayerSpec::Relu6
         | LayerSpec::Identity
+        | LayerSpec::Reparam { .. }
         | LayerSpec::Unsupported { .. } => {}
     }
-    render_fields(&f)
+    f
 }
 
 /// `ParamFields` を `params` の JSON object 文字列にする（`render_params` と Functional 形式の
@@ -1509,6 +1664,29 @@ fn collect_checked_state(model: &Sequential) -> Result<CheckedState, ModelIoErro
                 reason: format!("層 {i} の f32 引数が有限ではないため保存できません"),
             });
         }
+        if let LayerSpec::Reparam {
+            base,
+            reparam:
+                ReparamSpec::SpectralNorm {
+                    n_power_iterations, ..
+                },
+        } = spec
+        {
+            if !(1..=MAX_SPECTRAL_POWER_ITERATIONS).contains(n_power_iterations) {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: format!(
+                        "層 {i}（spectral_norm）の n_power_iterations（{n_power_iterations}）が 1..={MAX_SPECTRAL_POWER_ITERATIONS} の範囲外のため保存できません"
+                    ),
+                });
+            }
+            if spectral_uv_lens(base).is_none() {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: format!(
+                        "層 {i}（spectral_norm）の weight 形状から u／v の長さを導けません"
+                    ),
+                });
+            }
+        }
         if let LayerSpec::Upsample { size, mode } = spec
             && !upsample_is_savable(size, *mode)
         {
@@ -1585,12 +1763,50 @@ fn collect_checked_state(model: &Sequential) -> Result<CheckedState, ModelIoErro
             }
         }
     }
+    // spectral_norm の `u`／`v` も buffer として合流させる（イシュー #3050）。非有限値の状態は復元しても
+    // 意味を持たないため保存を拒否する。期待キー・shape との一致は下の buffers 検査に乗せる。
+    for (i, spec) in specs.iter().enumerate() {
+        let LayerSpec::Reparam {
+            reparam: ReparamSpec::SpectralNorm { .. },
+            ..
+        } = spec
+        else {
+            continue;
+        };
+        let st = spectral_state_of(model.layers()[i].as_ref()).ok_or_else(|| {
+            ModelIoError::UnsupportedModel {
+                reason: format!(
+                    "層 {i} を spectral_norm 適用済みの層として取り出せないため u／v を保存できません"
+                ),
+            }
+        })?;
+        for (name, vec) in [(SPECTRAL_U_NAME, st.u()), (SPECTRAL_V_NAME, st.v())] {
+            if vec.iter().any(|x| !x.is_finite()) {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: format!(
+                        "層 {i} の spectral_norm の {name} に非有限値が含まれるため保存できません"
+                    ),
+                });
+            }
+            let t = Tensor::new(vec.to_vec(), &[vec.len()]).map_err(|e| {
+                ModelIoError::UnsupportedModel {
+                    reason: format!("層 {i} の spectral_norm の {name} を構築できません（{e}）"),
+                }
+            })?;
+            let key = format!("{i}.{name}");
+            if state.insert(key.clone(), t).is_some() {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: format!("buffer キー {key} が既存のキーと衝突します"),
+                });
+            }
+        }
+    }
     let buffers_consistent = expected_buffers
         .iter()
         .all(|(k, shape)| state.get(k).is_some_and(|t| t.shape() == shape.as_slice()));
     if !buffers_consistent || state.len() != expected.len() + expected_buffers.len() {
         return Err(ModelIoError::UnsupportedModel {
-            reason: "BatchNorm の running stats の shape が層構成と一致しません".into(),
+            reason: "buffer（BatchNorm の running stats・spectral_norm の u／v）の shape が層構成と一致しません".into(),
         });
     }
     Ok(CheckedState {
@@ -1616,6 +1832,12 @@ fn check_layer_state(model: &Sequential, i: usize, spec: &LayerSpec) -> Result<(
             | LayerSpec::AlphaDropout { .. }
             | LayerSpec::BatchNorm1d { .. }
             | LayerSpec::BatchNorm2d { .. }
+            // spectral_norm は train の forward でだけ `u`／`v` を進めるため、層のモードが食い違うと
+            // 復元後の forward がずれる（イシュー #3050）。weight_norm はモードに依存しない。
+            | LayerSpec::Reparam {
+                reparam: ReparamSpec::SpectralNorm { .. },
+                ..
+            }
     );
     if mode_dependent && layer.training() != model.training() {
         return Err(ModelIoError::UnsupportedModel {
@@ -2061,7 +2283,12 @@ fn build_model(
 ) -> Result<Sequential, ModelIoError> {
     let mut model = Sequential::new();
     for (i, spec) in specs.iter().enumerate() {
-        model = match spec {
+        // `Reparam` は基底を `add_*` で組み直してから同じ `parametrize_*` を再適用する（#3050）。
+        let (base_spec, reparam) = match spec {
+            LayerSpec::Reparam { base, reparam } => (base.as_ref(), Some(*reparam)),
+            other => (other, None),
+        };
+        model = match base_spec {
             LayerSpec::Linear {
                 in_features,
                 out_features,
@@ -2439,14 +2666,60 @@ fn build_model(
             LayerSpec::PixelUnshuffle { downscale_factor } => model
                 .add_pixel_unshuffle(*downscale_factor)
                 .map_err(ModelIoError::Autodiff)?,
+            LayerSpec::Reparam { .. } => {
+                return Err(ModelIoError::UnsupportedModel {
+                    reason: format!("層 {i} の再パラメータ化がネストしており復元できません"),
+                });
+            }
             LayerSpec::Unsupported { kind } => {
                 return Err(ModelIoError::UnsupportedModel {
                     reason: format!("層 {kind} は復元に未対応です"),
                 });
             }
         };
+        match reparam {
+            None => {}
+            Some(ReparamSpec::WeightNorm { dim }) => {
+                // g／v／bias は直後の strict な `load_state_dict` が bit のまま上書きする。
+                model = model
+                    .parametrize_weight_norm(i, dim)
+                    .map_err(ModelIoError::Autodiff)?;
+            }
+            Some(ReparamSpec::SpectralNorm {
+                n_power_iterations,
+                eps,
+            }) => {
+                // `seed` は初期 u／v にしか効かず、直後に保存済みの値で上書きするため 0 固定。
+                model = model
+                    .parametrize_spectral_norm(i, n_power_iterations, eps, 0)
+                    .map_err(ModelIoError::Autodiff)?;
+                let (u, v) = take_spectral_vectors(i, buffers)?;
+                model
+                    .restore_spectral_norm_vectors(i, &u, &v)
+                    .map_err(ModelIoError::Autodiff)?;
+            }
+        }
     }
     Ok(model)
+}
+
+/// 層 `i` の spectral_norm の `u`／`v` を buffer 集合から取り出す。キー・shape は照合済みで通常は
+/// 欠落しないが、`unwrap` せず `Mismatch` にする（`take_bn_tensors` と同型。イシュー #3050）。
+fn take_spectral_vectors(
+    i: usize,
+    buffers: &mut std::collections::HashMap<String, Tensor<f32>>,
+) -> Result<(Vec<f32>, Vec<f32>), ModelIoError> {
+    let mut take = |name: &str| -> Result<Vec<f32>, ModelIoError> {
+        let key = format!("{i}.{name}");
+        let t = buffers.remove(&key).ok_or_else(|| ModelIoError::Mismatch {
+            message: format!("spectral_norm の復元に必要なキー {key} が見つかりません"),
+        })?;
+        let t = t.contiguous();
+        Ok(t.host_slice().to_vec())
+    };
+    let u = take(SPECTRAL_U_NAME)?;
+    let v = take(SPECTRAL_V_NAME)?;
+    Ok((u, v))
 }
 
 type BnTensors = (Tensor<f32>, Tensor<f32>, Tensor<f32>, Tensor<f32>);
@@ -2517,7 +2790,7 @@ struct ParsedManifest {
 }
 
 /// 本形式が受理する JSON 値（非負整数・小数の生字句・エスケープなし文字列・bool・null・配列・object）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Json {
     Null,
     Bool(bool),
@@ -3003,11 +3276,95 @@ fn check_conv_groups(
 /// `UnsupportedModel`）で、`params` は kind ごとの固定スキーマ（未知キー・欠落・型違いは
 /// `Manifest`）。意味上の範囲（`p` の範囲・kernel=0 等）は load 時の `add_*` が既存の検査で
 /// `Autodiff` として拒否するため、ここでは重複して検査しない（構造上の整合だけを見る）。
+/// 再パラメータ化 kind の `params` を検証して [`LayerSpec::Reparam`] にする（イシュー #3050）。
+/// 追加キー（weight_norm は `dim`、spectral_norm は `spectral`）を取り除いた残りを基底 kind の固定
+/// スキーマ（キー集合の完全一致）で読むため、未知・欠落キーは基底側の検査が `Manifest` で拒否する。
+/// `dim` は基底 weight の rank 未満、`spectral` は `"<n>:<eps>"` の正準表記
+/// （`1 <= n <= MAX_SPECTRAL_POWER_ITERATIONS`・`eps` は有限かつ非負で `{:?}` 往復一致）に限る。
+fn reparam_spec_from_params(
+    base_kind: &str,
+    spectral: bool,
+    params: &Json,
+) -> Result<LayerSpec, ModelIoError> {
+    let extra_key = if spectral { "spectral" } else { "dim" };
+    let Json::Obj(entries) = params else {
+        return Err(manifest_error(
+            "layers[].params は object である必要があります",
+        ));
+    };
+    let extra = entries
+        .iter()
+        .find(|(k, _)| k == extra_key)
+        .map(|(_, v)| v)
+        .ok_or_else(|| manifest_error(format!("params にキー {extra_key} がありません")))?;
+    let base_json = Json::Obj(
+        entries
+            .iter()
+            .filter(|(k, _)| k != extra_key)
+            .cloned()
+            .collect(),
+    );
+    let base = spec_from_kind(base_kind, &base_json)?;
+    let reparam = if spectral {
+        let raw = as_str(extra, extra_key)?;
+        let canon_err = || manifest_error("spectral が正準な \"<n>:<eps>\" 表記ではありません");
+        let (n_raw, eps_raw) = raw.split_once(':').ok_or_else(canon_err)?;
+        if n_raw.is_empty() || !n_raw.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(canon_err());
+        }
+        let n: usize = n_raw.parse().map_err(|_| canon_err())?;
+        let eps: f32 = eps_raw.parse().map_err(|_| canon_err())?;
+        if n.to_string() != n_raw || format!("{eps:?}") != eps_raw {
+            return Err(canon_err());
+        }
+        if !(1..=MAX_SPECTRAL_POWER_ITERATIONS).contains(&n) {
+            return Err(manifest_error(format!(
+                "spectral の n_power_iterations は 1..={MAX_SPECTRAL_POWER_ITERATIONS} の範囲である必要があります"
+            )));
+        }
+        if !eps.is_finite() || eps < 0.0 {
+            return Err(manifest_error(
+                "spectral の eps は有限かつ非負である必要があります",
+            ));
+        }
+        if spectral_uv_lens(&base).is_none() {
+            return Err(manifest_error(
+                "spectral_norm の weight 形状から u／v の長さを導けません",
+            ));
+        }
+        ReparamSpec::SpectralNorm {
+            n_power_iterations: n,
+            eps,
+        }
+    } else {
+        let dim = as_opt_usize(extra, extra_key)?;
+        let rank = layer_parameters(&base)
+            .into_iter()
+            .next()
+            .map_or(0, |(_, shape)| shape.len());
+        if let Some(d) = dim
+            && d >= rank
+        {
+            return Err(manifest_error(format!(
+                "weight_norm の dim（{d}）が weight の rank（{rank}）以上です"
+            )));
+        }
+        ReparamSpec::WeightNorm { dim }
+    };
+    Ok(LayerSpec::Reparam {
+        base: Box::new(base),
+        reparam,
+    })
+}
+
 fn spec_from_kind(kind: &str, params: &Json) -> Result<LayerSpec, ModelIoError> {
     let none = |spec: LayerSpec| -> Result<LayerSpec, ModelIoError> {
         Params::new(params, &[])?;
         Ok(spec)
     };
+    if let Some((base_kind, spectral)) = reparam_kind_parts(kind) {
+        return reparam_spec_from_params(base_kind, spectral, params);
+    }
     match kind {
         "linear" => {
             let p = Params::new(params, &["in_features", "out_features"])?;
@@ -3784,6 +4141,15 @@ fn parse_layers_and_keys(
     // 現行版（2）は期待 buffer の欠落を旧形式と区別できないため完全一致のみ受理する。
     let expected_buffers = expected_buffer_keys(&specs);
     let legacy_empty = allow_legacy_empty_buffers && buffer_keys.is_empty();
+    // 旧形式（v1）に再パラメータ化層（weight_norm／spectral_norm）は存在し得ない。許すと v1 の
+    // `buffer_keys: []`（spectral の u／v が初期状態に化ける）や v2 相当の buffer を持つ改竄 manifest が
+    // 旧形式として無言で受理されるため、版を問わず拒否する（イシュー #3050。A08）。
+    if allow_legacy_empty_buffers && specs.iter().any(|s| matches!(s, LayerSpec::Reparam { .. })) {
+        return Err(ModelIoError::Mismatch {
+            message: "旧形式（format_version 1）の manifest に再パラメータ化層は含められません"
+                .into(),
+        });
+    }
     if !legacy_empty && buffer_keys != expected_buffers {
         return Err(ModelIoError::Mismatch {
             message: "buffer_keys が層構成から導いた期待キー・shape と一致しません".into(),
@@ -4666,6 +5032,75 @@ mod tests {
         }
         let prepared = prepare_save(&model).expect("66 種を含むモデルを検証できるはず");
         assert_eq!(prepared.parameter_keys, expected);
+    }
+
+    /// イシュー #3050。再パラメータ化 14 kind の `params` 往復・キー数上限・期待キー／shape が実層と一致すること。
+    #[test]
+    fn reparam_specs_round_trip_and_match_real_layers() {
+        let mut bases: Vec<LayerSpec> = Vec::new();
+        for spec in all_kind_specs() {
+            let kind = spec_kind(&spec).expect("保存可能な層");
+            let is_base = REPARAM_KINDS.iter().any(|(_, b, _)| *b == kind);
+            if is_base && !bases.iter().any(|b| spec_kind(b) == Some(kind)) {
+                bases.push(spec);
+            }
+        }
+        assert_eq!(bases.len(), 7, "基底は 7 種");
+        let mut seen = std::collections::BTreeSet::new();
+        for base in &bases {
+            for reparam in [
+                ReparamSpec::WeightNorm { dim: None },
+                ReparamSpec::WeightNorm { dim: Some(0) },
+                ReparamSpec::WeightNorm { dim: Some(1) },
+                ReparamSpec::SpectralNorm {
+                    n_power_iterations: 3,
+                    eps: 1e-12,
+                },
+            ] {
+                let spec = LayerSpec::Reparam {
+                    base: Box::new(base.clone()),
+                    reparam,
+                };
+                let kind = spec_kind(&spec).expect("14 kind の表にある");
+                seen.insert(kind);
+                let text = render_params(&spec);
+                let json = parse_json(&text).expect("自分が書いた params は読めるはず");
+                if let Json::Obj(entries) = &json {
+                    assert!(entries.len() <= MAX_OBJECT_KEYS, "{kind}: キー数上限");
+                }
+                let back = spec_from_kind(kind, &json).expect("往復できるはず");
+                assert_eq!(back, spec, "{kind}");
+                assert_eq!(render_params(&back), text, "{kind}");
+
+                // 期待キー・shape が実層（build_model 後の state_dict・buffer）と一致する。
+                let specs = [spec.clone()];
+                let mut buffers = std::collections::HashMap::new();
+                for (key, shape) in expected_buffer_keys(&specs) {
+                    let n: usize = shape.iter().product();
+                    buffers.insert(key, Tensor::new(vec![0.5; n], &shape).expect("buffer"));
+                }
+                let model = build_model(&specs, &mut buffers, &Default::default())
+                    .unwrap_or_else(|e| panic!("{kind}: 構築できるはず: {e}"));
+                assert_eq!(model.specs(), specs.as_slice(), "{kind}: 記録した構成");
+                let state = model.state_dict();
+                let expected = expected_parameter_keys(&specs);
+                assert_eq!(state.len(), expected.len(), "{kind}");
+                for (k, shape) in &expected {
+                    let t = state
+                        .get(k)
+                        .unwrap_or_else(|| panic!("{kind}: キー {k} がない"));
+                    assert_eq!(t.shape(), shape.as_slice(), "{kind}: {k}");
+                }
+                let checked = collect_checked_state(&model)
+                    .unwrap_or_else(|e| panic!("{kind}: 保存検査を通るはず: {e}"));
+                assert_eq!(
+                    checked.expected_buffers,
+                    expected_buffer_keys(&specs),
+                    "{kind}"
+                );
+            }
+        }
+        assert_eq!(seen.len(), 14, "{seen:?}");
     }
 
     #[test]

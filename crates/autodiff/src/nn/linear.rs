@@ -24,6 +24,7 @@ use crate::nn::init::{
     BIAS_SEED_SALT, SPECTRAL_U_SEED_SALT, SPECTRAL_V_SEED_SALT, WEIGHT_SEED_SALT, derive_seed,
     uniform_init,
 };
+use crate::nn::weight_reparam::restore_spectral_vectors;
 use crate::tape::Tape;
 use crate::var::Var;
 use crate::weight_reparam_ops::{
@@ -292,6 +293,21 @@ impl Linear {
             state: RefCell::new(state),
         });
         Ok(())
+    }
+
+    /// spectral_norm 適用済みの層の `u`／`v` を保存済みの値へ bit のまま復元する（イシュー #3050。
+    /// `compat::load_model` 専用。再正規化しないため保存往復が bit 一致する）。未適用は
+    /// `InvalidArgument`、長さ・有限性の違反は型付きエラーで、失敗時は状態不変。
+    pub fn restore_spectral_norm_vectors(
+        &mut self,
+        u: &[f32],
+        v: &[f32],
+    ) -> Result<(), AutodiffError> {
+        let state = match &self.reparam {
+            Some(WeightReparam::SpectralNorm { state }) => Some(state),
+            _ => None,
+        };
+        restore_spectral_vectors(state, &self.weight, u, v, "Linear")
     }
 
     /// [`Self::parametrize_weight_norm`] の `self` 消費版（ビルダー用）。

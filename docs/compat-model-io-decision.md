@@ -1659,3 +1659,11 @@ GradScaler・Lbfgs の状態復元値（§2 item 2・3・§11）も非信頼な 
 - `size` は窓のクリップ幅にのみ使われ、確保サイズは入力テンソル形状で決まる（`size` に比例した確保なし。`nn/lrn.rs`・`lrn_ops.rs` で確認）。
 - kind allowlist は 65 → 66 種になる。`format_version` は 2 のまま。旧リーダーは未知 kind を `UnsupportedModel` で fail-closed に拒否する。
 - ONNX export は `UnsupportedLayer` のまま。層経路の実機 parity は `#[ignore]` で追加済み・未実測（#3171・#3172。`docs/perf/logs/compat-sequential-local-response-norm-3045/README.md`）。tolerance・baseline・依存は不変。
+
+## 追補（イシュー #3050）: weight_norm・spectral_norm 結線層の保存・復元
+
+- 対象は `Sequential::parametrize_weight_norm`／`parametrize_spectral_norm` で再パラメータ化した Linear・Conv 6 種。kind は 14 種（`{linear,conv1d,conv2d,conv3d,conv_transpose1d,conv_transpose2d,conv_transpose3d}_{weight_norm,spectral_norm}`）で、kind allowlist は 66 → 80 種になる。`format_version` は 2 のまま。旧リーダーは未知 kind を `UnsupportedModel` で fail-closed に拒否する。
+- `params` は基底層の固定キーに、weight_norm は `dim`（整数または `null`）、spectral_norm は `spectral`（`"<n>:<eps>"` の正準文字列。`n` は 1〜4096）を足した集合（`MAX_OBJECT_KEYS` に収めるため 1 キーに畳む）。キー集合の完全一致と各値の正準形を要求する。
+- parameter キーは weight_norm が `{i}.parametrizations.weight.original0`／`original1`／`bias`、spectral_norm が `{i}.parametrizations.weight.original`／`bias`。spectral_norm の `u`／`v` は buffer `{i}.parametrizations.weight.0._u`／`._v`（`buffer_keys` に記録し、再正規化せず bit のまま復元する）。
+- 旧形式（`format_version` 1）の manifest に再パラメータ化層があれば `Mismatch` で拒否する。非有限の `u`／`v`・上限超過の `n` は保存を `UnsupportedModel` で拒否する。
+- 設計判断・実測（rank 0 の `g` の往復を含む）は `facade-weight-reparam-wiring-decision.md` §18。ONNX export は従来どおり拒否。tolerance・baseline・依存は不変。

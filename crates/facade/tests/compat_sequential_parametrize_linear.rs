@@ -9,13 +9,13 @@
 //!   参照側の状態進行とも一致）
 //! - 適用直後の有効重みが元の重みと一致する（REQ-2 の統一複合判定。定数は変更しない）
 //! - `named_parameters` の並び・optimizer 往復・`fit` で再パラメータ化が保たれる
-//! - 常駐経路・低精度（AMP）・`save_model`・ONNX export が型付きエラーで拒否される
+//! - 常駐経路・低精度（AMP）・ONNX export が型付きエラーで拒否される（`save_model` は #3050 で対応済み）
 //! - 拒否系（範囲外添字・非 Linear・二重適用・compile 後）
 //!
-//! 保存往復（新 kind）・保留ガード反転・ソース走査インベントリは #3050 の担当（本テストの対象外）。
+//! 保存往復（新 kind）は `compat_sequential_model_io_reparam.rs`（#3050）が固定する。
 
 use fandhe_ai::compat::{
-    AmpConfig, AmpDType, FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model,
+    AmpConfig, AmpDType, FitConfig, Loss, Optimizer, Sequential, load_model, save_model,
 };
 use fandhe_ai::interop::onnx::OnnxModel;
 use fandhe_ai::optim::{Sgd, SgdConfig};
@@ -510,7 +510,8 @@ fn amp_forward_is_rejected_for_parametrized_linear() {
 }
 
 #[test]
-fn save_model_is_rejected_and_leaves_nothing() {
+fn save_model_round_trips_state_bit_identically() {
+    // #3050: 保存・復元に対応した（新 kind の網羅・改竄拒否は `compat_sequential_model_io_reparam.rs`）。
     for model in [
         base_model().parametrize_weight_norm(0, Some(1)).unwrap(),
         base_model()
@@ -519,12 +520,16 @@ fn save_model_is_rejected_and_leaves_nothing() {
     ] {
         let guard = TempDirGuard::new("parametrize_linear_save");
         let dir = guard.path().join("m");
-        let err = save_model(&model, &dir).unwrap_err();
-        assert!(
-            matches!(err, ModelIoError::UnsupportedModel { .. }),
-            "{err:?}"
-        );
-        assert!(!dir.exists(), "拒否時は dir を作らない");
+        save_model(&model, &dir).expect("保存できるはず");
+        let loaded = load_model(&dir).expect("復元できるはず");
+        assert_eq!(param_names(&model), param_names(&loaded));
+        for ((_, a), (_, b)) in model
+            .named_parameters()
+            .into_iter()
+            .zip(loaded.named_parameters())
+        {
+            assert_eq!(bits(a), bits(b));
+        }
     }
 }
 

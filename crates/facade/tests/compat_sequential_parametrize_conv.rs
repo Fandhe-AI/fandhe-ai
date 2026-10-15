@@ -10,16 +10,16 @@
 //!   （groups>1・stride／padding 非自明・bias あり。spectral_norm は複数 step で参照側の状態進行とも一致）
 //! - 適用直後の有効重みが元の重みと一致する（REQ-2 の統一複合判定。定数は変更しない）
 //! - `named_parameters` の並び・optimizer 往復（`apply_parameters` で再パラメータ化が消えない）・`fit`
-//! - 常駐経路・`save_model` が型付きエラーで拒否される（Conv2d は AMP・ONNX export も）
+//! - 常駐経路が型付きエラーで拒否される（Conv2d は AMP・ONNX export も。`save_model` は #3050 で対応済み）
 //! - 拒否系（範囲外添字・非対象層・二重適用・`dim` 範囲外・compile 後）
 //!
 //! 軸の方針: `weight_norm` の `dim` は層種に依らず利用者指定、spectral_norm の行軸は層から導出
 //! （Conv 系 0・ConvTranspose 系 1。層単体テスト `crates/autodiff/tests/nn_conv_reparam.rs` が固定）。
 //!
-//! 保存往復（新 kind）・保留ガード反転・ソース走査インベントリは #3050 の担当（本テストの対象外）。
+//! 保存往復（新 kind）は `compat_sequential_model_io_reparam.rs`（#3050）が固定する。
 
 use fandhe_ai::compat::{
-    AmpConfig, AmpDType, FitConfig, Loss, ModelIoError, Optimizer, Sequential, save_model,
+    AmpConfig, AmpDType, FitConfig, Loss, Optimizer, Sequential, load_model, save_model,
 };
 use fandhe_ai::interop::onnx::OnnxModel;
 use fandhe_ai::optim::{Sgd, SgdConfig};
@@ -349,7 +349,9 @@ macro_rules! conv_parametrize_tests {
             }
 
             #[test]
-            fn save_model_is_rejected_and_leaves_nothing() {
+            fn save_model_round_trips_state_bit_identically() {
+                // #3050: 保存・復元に対応した（新 kind の網羅・改竄拒否は
+                // `compat_sequential_model_io_reparam.rs`）。
                 for model in [
                     base_model().parametrize_weight_norm(0, $wn_dim).unwrap(),
                     base_model()
@@ -359,12 +361,14 @@ macro_rules! conv_parametrize_tests {
                     let guard =
                         TempDirGuard::new(concat!("parametrize_conv_save_", stringify!($modname)));
                     let dir = guard.path().join("m");
-                    let err = save_model(&model, &dir).unwrap_err();
-                    assert!(
-                        matches!(err, ModelIoError::UnsupportedModel { .. }),
-                        "{err:?}"
-                    );
-                    assert!(!dir.exists(), "拒否時は dir を作らない");
+                    save_model(&model, &dir).expect("保存できるはず");
+                    let loaded = load_model(&dir).expect("復元できるはず");
+                    let (a, b) = (model.named_parameters(), loaded.named_parameters());
+                    assert_eq!(a.len(), b.len());
+                    for ((na, ta), (nb, tb)) in a.into_iter().zip(b) {
+                        assert_eq!(na, nb);
+                        assert_eq!(bits(ta), bits(tb), "{na}");
+                    }
                 }
             }
 

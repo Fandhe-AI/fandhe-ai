@@ -119,6 +119,37 @@ pub(crate) fn commit_spectral_state(
     Ok(())
 }
 
+/// 保存済みの spectral_norm `u`／`v` を bit のまま復元する（イシュー #3050。層の
+/// `restore_spectral_norm_vectors` から呼ばれ、`facade::compat::model_io` の load が使う）。
+///
+/// 層の現在の `n_power_iterations`／`eps`／`dim` を保持し、`u`／`v` だけを差し替える。新状態を
+/// 先に構築してから代入する（construct-before-assign）ため、検査失敗時は状態不変。spectral_norm
+/// 未適用の層は `InvalidArgument`。
+pub(crate) fn restore_spectral_vectors(
+    state: Option<&RefCell<SpectralNormState>>,
+    weight: &Tensor<f32>,
+    u: &[f32],
+    v: &[f32],
+    label: &str,
+) -> Result<(), AutodiffError> {
+    let Some(state) = state else {
+        return Err(AutodiffError::InvalidArgument(format!(
+            "{label}::restore_spectral_norm_vectors: spectral_norm が適用されていない"
+        )));
+    };
+    let mut st = state.try_borrow_mut().map_err(|_| reentrant_error(label))?;
+    let next = SpectralNormState::from_exact_parts(
+        weight.shape(),
+        st.dim(),
+        u,
+        v,
+        st.n_power_iterations(),
+        st.eps(),
+    )?;
+    *st = next;
+    Ok(())
+}
+
 fn reentrant_error(label: &str) -> AutodiffError {
     AutodiffError::InvalidArgument(format!(
         "{label}::forward_bound: spectral_norm 状態が使用中（再入）"
