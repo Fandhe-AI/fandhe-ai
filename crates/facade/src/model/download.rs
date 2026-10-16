@@ -50,6 +50,12 @@ impl Drop for TmpGuard<'_> {
     }
 }
 
+fn tmp_swapped() -> ModelError {
+    ModelError::Io(std::io::Error::other(
+        "一時ファイルが取得中に差し替えられたため公開しません",
+    ))
+}
+
 fn invalid_url(reason: &'static str) -> ModelError {
     ModelError::InvalidUrl { reason }
 }
@@ -159,7 +165,17 @@ pub(super) fn run(
     }
     guard.file.sync_all().map_err(ModelError::Io)?;
     verify_before_commit(&guard.file)?;
+    // 検証済みなのは保持 fd の実体のみ。公開は名前基準の `renameat` のため、受信中・検証後に
+    // 一時名を別実体へ差し替えられていないかを公開前に照合し（A08）、さらに公開後にも公開名が
+    // 保持 fd と同一実体かを再照合して、照合〜公開の隙間の差し替えは撤去して Err にする。
+    if !dirfd::names_same_entity(&dir, &guard.name, &guard.file) {
+        return Err(tmp_swapped());
+    }
     dirfd::rename_in(&dir, &guard.name, MODEL_FILE_NAME).map_err(ModelError::Io)?;
+    if !dirfd::names_same_entity(&dir, MODEL_FILE_NAME, &guard.file) {
+        dirfd::unlink_name(&dir, MODEL_FILE_NAME);
+        return Err(tmp_swapped());
+    }
     guard.armed = false;
     Ok(())
 }
@@ -563,5 +579,38 @@ mod tests {
         assert!(!env.leaf().exists());
         assert!(env.leftovers().is_empty());
         let _ = Path::new("");
+    }
+
+    #[test]
+    fn tmp_swapped_after_verification_is_not_published() {
+        let env = Env::new("swap");
+        let mut mock = Mock::new(vec![ok_body(b"abc")]);
+        let root = env.root.clone();
+        let mut open = {
+            let root = root.clone();
+            move || -> std::io::Result<OwnedFd> {
+                let r = dirfd::open_root(&root)?;
+                let n = dirfd::open_or_create_dir(&r, "m")?;
+                dirfd::open_or_create_dir(&n, "v")
+            }
+        };
+        let mut next = || ".t".to_string();
+        let tmp = root.join("m/v/.t");
+        let e = run(
+            &mut mock,
+            job(1 << 20, 5, None),
+            None,
+            &mut open,
+            &mut next,
+            &mut |_: &File| {
+                // 検証フック通過後に、別プロセス相当として一時名を未検証の実体へ差し替える。
+                std::fs::remove_file(&tmp).unwrap();
+                std::fs::write(&tmp, b"evil").unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(e, ModelError::Io(_)));
+        assert!(!env.leaf().exists());
     }
 }

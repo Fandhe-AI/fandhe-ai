@@ -13,6 +13,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::fs_write::{MAX_TMP_NAME_ATTEMPTS, name_entropy};
@@ -44,14 +45,26 @@ fn openat_owned(
 /// でも許容する（利用者が選んだ配置。`save`／`load` と同じ扱い）。
 pub(super) fn open_root(root: &Path) -> io::Result<OwnedFd> {
     std::fs::create_dir_all(root)?;
-    let f = File::open(root)?;
-    if !f.metadata()?.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "キャッシュルートがディレクトリではありません",
-        ));
+    // `O_DIRECTORY | O_NONBLOCK`: 作成後に FIFO 等へ差し替えられても writer 待ちで open が
+    // ブロックしない（DoS 回避。`save` は `O_DIRECTORY`、`load` は `O_NONBLOCK` で同趣旨）。
+    // `O_NOFOLLOW` は付けない（ルート自体のシンボリックリンクは許容する）。
+    let c = CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "パスに NUL が含まれています"))?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: `c` は NUL 終端の `CString` で呼び出し中生存する。`O_CREAT` なしのため mode 不要。
+    let fd = unsafe { libc::open(c.as_ptr(), flags) };
+    if fd < 0 {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ENOTDIR) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "キャッシュルートがディレクトリではありません",
+            ));
+        }
+        return Err(e);
     }
-    Ok(OwnedFd::from(f))
+    // SAFETY: `open` が成功して返した fd はこのプロセスだけが所有する。
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// `parent` 直下の `component` を `O_NOFOLLOW | O_DIRECTORY` で開く。無ければ `mkdirat` で
@@ -125,12 +138,11 @@ pub(super) fn rename_in(dir: &OwnedFd, from: &str, to: &str) -> io::Result<()> {
     }
 }
 
-/// 自分が作って fd を保持している一時ファイルの削除（best-effort）。`fstatat`
-/// （`AT_SYMLINK_NOFOLLOW`）の `(dev, ino)` が保持 fd の `fstat` と一致し通常ファイルの
-/// ときだけ `unlinkat` する（差し替え検出時は削除しない）。
-pub(super) fn unlink_own(dir: &OwnedFd, name: &str, held: &File) {
+/// `dir` 直下の `name`（`AT_SYMLINK_NOFOLLOW`）が保持 fd `held` と同一の通常ファイル
+/// （`(dev, ino)` 一致）かを返す。名前が存在しない・stat 失敗は `false`。
+pub(super) fn names_same_entity(dir: &OwnedFd, name: &str, held: &File) -> bool {
     let Ok(c) = cstr(name) else {
-        return;
+        return false;
     };
     // SAFETY: `libc::stat` は全ビット 0 が有効な POD。以後 libc が書き込む。
     let mut on_disk: libc::stat = unsafe { std::mem::zeroed() };
@@ -144,18 +156,33 @@ pub(super) fn unlink_own(dir: &OwnedFd, name: &str, held: &File) {
         )
     };
     if rc != 0 {
-        return;
+        return false;
     }
     // SAFETY: 同上（POD のゼロ初期化）。
     let mut held_st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: `held` は有効な fd、`held_st` は書き込み可能な有効領域。
     if unsafe { libc::fstat(held.as_raw_fd(), &mut held_st) } != 0 {
-        return;
+        return false;
     }
-    let is_reg = (on_disk.st_mode & libc::S_IFMT) == libc::S_IFREG;
-    if is_reg && on_disk.st_dev == held_st.st_dev && on_disk.st_ino == held_st.st_ino {
+    (on_disk.st_mode & libc::S_IFMT) == libc::S_IFREG
+        && on_disk.st_dev == held_st.st_dev
+        && on_disk.st_ino == held_st.st_ino
+}
+
+/// `dir` 直下の `name` を無条件に `unlinkat` する（best-effort）。公開後の再照合で未検証の
+/// 実体が公開名に居ると分かった場合の撤去用。
+pub(super) fn unlink_name(dir: &OwnedFd, name: &str) {
+    if let Ok(c) = cstr(name) {
         // SAFETY: `dir` は有効な fd、`c` は NUL 終端で呼び出し中生存する。
         let _ = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) };
+    }
+}
+
+/// 自分が作って fd を保持している一時ファイルの削除（best-effort）。保持 fd と同一実体
+/// （`names_same_entity`）のときだけ `unlinkat` する（差し替え検出時は削除しない）。
+pub(super) fn unlink_own(dir: &OwnedFd, name: &str, held: &File) {
+    if names_same_entity(dir, name, held) {
+        unlink_name(dir, name);
     }
 }
 
@@ -239,6 +266,20 @@ mod tests {
         assert_eq!(std::fs::read(root.join("taken")).unwrap(), b"x");
         let err = create_tmp(&r, || "taken".into()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_root_does_not_block_on_fifo() {
+        let root = tmpdir("fifo");
+        let fifo = root.join("f");
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` は NUL 終端で呼び出し中生存する。
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        // writer 不在でもブロックせずエラーで返る（ハングすればテストがタイムアウトする）。
+        assert!(open_root(&fifo).is_err());
+        // create_dir_all 通過後に FIFO へ差し替わる競合は、fd 取得を直接 O_NONBLOCK で再現できない
+        // ため、ディレクトリ以外が open_root に渡らないことを上記で担保する。
         let _ = std::fs::remove_dir_all(&root);
     }
 
