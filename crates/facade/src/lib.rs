@@ -2541,6 +2541,53 @@ pub fn cuda_graph_infer_enabled() -> bool {
     fandhe_ai_backend_cuda::graph::infer_graph_enabled()
 }
 
+/// GPU `run_fused` の elementwise allowlist 融合（区分 B-1）を CUDA で
+/// opt-in 有効／無効にする（イシュー #2085 が機構・#3115 が公開形・#3385 が
+/// 公開。公開形の正は `docs/facade-graph-tier-b-optin-exposure-decision.md`
+/// §3・§13）。
+///
+/// - **既定は無効**。有効化しない限り挙動は変わない。プロセスワイドの切替で
+///   `Device` 単位ではない。CUDA と Metal を一括で切り替える setter は設けない
+/// - **無効のとき**: `run_fused` はデバイスに触れず `BackendError::Unsupported`
+///   を返し、呼び出し元は per-op 経路へフォールバックする（導入前と bit 同一）
+/// - **有効のとき**: 同一バックエンドの per-op 合成と bit 一致し、CPU とは
+///   REQ-2 統一複合判定で一致する。tolerance は変更しない
+/// - **設定タイミング**: 制約なし。ゲートは `run_fused` の呼び出しごとに判定される
+/// - **非対応環境**: CUDA 非搭載・CPU のみ・Metal の環境でも呼べる
+///   （フラグを立てるだけで driver に触れない）。効果はなく、パニックもしない
+/// - **利用者が融合を直接制御する API ではない**: TF32 の setter 等と同型の、
+///   プロセスワイドな実行戦略トグルであり、融合する op や境界を指定する手段
+///   でも汎用 `compile` の入口でもない（REQ-12。決定記録 §5）
+///
+/// ```
+/// fandhe_ai::set_cuda_elementwise_fusion_enabled(false);
+/// assert!(!fandhe_ai::cuda_elementwise_fusion_enabled());
+/// ```
+pub fn set_cuda_elementwise_fusion_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::fused_elementwise::set_gpu_elementwise_fusion_enabled(enabled);
+}
+
+/// CUDA の elementwise 融合 opt-in の現在状態を返す
+/// （[`set_cuda_elementwise_fusion_enabled`] 参照。イシュー #3385）。
+pub fn cuda_elementwise_fusion_enabled() -> bool {
+    fandhe_ai_backend_cuda::fused_elementwise::gpu_elementwise_fusion_enabled()
+}
+
+/// Metal 版の elementwise 融合 opt-in（macOS 限定。契約・既定・制約は
+/// [`set_cuda_elementwise_fusion_enabled`] と同じ。非 macOS ビルドには
+/// 存在しない。イシュー #3385）。
+#[cfg(target_os = "macos")]
+pub fn set_metal_elementwise_fusion_enabled(enabled: bool) {
+    fandhe_ai_backend_metal::fused_elementwise::set_gpu_elementwise_fusion_enabled(enabled);
+}
+
+/// Metal の elementwise 融合 opt-in の現在状態を返す
+/// （[`set_metal_elementwise_fusion_enabled`] 参照。macOS 限定。イシュー #3385）。
+#[cfg(target_os = "macos")]
+pub fn metal_elementwise_fusion_enabled() -> bool {
+    fandhe_ai_backend_metal::fused_elementwise::gpu_elementwise_fusion_enabled()
+}
+
 /// CUDA GEMM 精度モード（既定 `Fp32Strict`・単発 `Tf32`・3×TF32
 /// `Tf32x3`。イシュー #1355。親ツリー #1354・承認元 #1338）の再公開。
 /// `set_cuda_gemm_precision`／`cuda_gemm_precision` の戻り値・引数型
