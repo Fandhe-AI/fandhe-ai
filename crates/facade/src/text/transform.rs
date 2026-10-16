@@ -131,6 +131,15 @@ pub(crate) fn transform<S: AsRef<str>>(
         for (i, (row, s)) in data.chunks_exact_mut(len).zip(inputs.iter()).enumerate() {
             fill_row(i, s.as_ref(), vocab, opts, limits, row)?;
         }
+    } else {
+        // 出力長 0 でも標準化後バイト数・n-gram 数の上限検査は出力長 None と
+        // 同じ契約で実行する（設計記録 §18。検査漏れで成功を返さない）。
+        for (i, s) in inputs.iter().enumerate() {
+            let t = token_count(s.as_ref(), opts, limits, i)?;
+            if let Some(n) = opts.ngrams {
+                ngram_count(t, n, limits)?;
+            }
+        }
     }
     crate::Tensor::new(data, &[batch, len]).map_err(TextError::Shape)
 }
@@ -327,6 +336,29 @@ mod tests {
             run(&base(), &o, &l, &["a", "abcd"]),
             Err(TextError::InputTooLong { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn standardized_length_checked_for_every_output_length() {
+        // 「İ」(2 バイト) は UnicodeLower で 3 バイトへ伸びる。出力長 None / Some(2) / Some(0)
+        // のいずれでも標準化後の上限超過で InputTooLong になる（Some(0) の検査漏れ回帰）。
+        let Ok(l) = TextLimits::default().with_max_input_bytes(2) else {
+            panic!("limit");
+        };
+        for out in [None, Some(2), Some(0)] {
+            let o = TransformOptions {
+                standardize: Standardize::UnicodeLower,
+                output_sequence_length: out,
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    run(&base(), &o, &l, &["İ"]),
+                    Err(TextError::InputTooLong { index: 0, .. })
+                ),
+                "output_sequence_length = {out:?}"
+            );
+        }
     }
 
     #[test]
