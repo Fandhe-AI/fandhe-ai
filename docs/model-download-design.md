@@ -929,7 +929,7 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 ### 19.5 #3126 との境界
 
-`download.rs::run` の `verify_before_commit` が safetensors ヘッダ検証（§5 方式 (ii)）の差し込み位置（本 PR は空）。`download.json`・`If-None-Match`／304 は未実装（304 は異常として `Http`）。pin 無しの保証範囲は破損・部分改変の検出に限られる（rustdoc に明記）。
+`download.rs::run` の `verify_before_commit` へ、本 PR は §5 の方式 (i)「F32 ロード可能性」を実装した（`model.rs::verify_safetensors_before_commit` が一時ファイルを読み戻して `load_safetensors_f32_from_bytes` を呼ぶ）。方式 (ii)（dtype 非依存のヘッダのみ検証。推奨だった）は `onnx-interop::st_load` への新規関数追加を要するため採らなかった。帰結: (a) REQ-7 の F32 限定契約により F16／BF16 の妥当な safetensors も公開前検証で拒否される、(b) 検証のためファイル全量（上限 `MAX_MODEL_FILE_BYTES`）をメモリへ読み込み、さらに F32 テンソルを確保するため `load` と同等のメモリを一時的に使う。dtype 非依存化（方式 (ii)）は #3126 以降の課題とする。`download.json`・`If-None-Match`／304 は未実装（304 は異常として `Http`）。pin 無しの保証範囲は破損・部分改変の検出に限られる（rustdoc に明記）。
 
 ### 19.6 `save` について
 
