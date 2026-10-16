@@ -9,7 +9,8 @@
 //! ```
 //!
 //! Stage B（#3137）でカーネル起動を結線済み。ゲート ON の非空入力はデバイスに触れる
-//! （`gate_on_non_empty_does_not_return_unsupported`。デバイス不在は型付きエラーで許容）。
+//! （`gate_on_non_empty_does_not_return_unsupported` は実機テストとして `#[ignore]` 分離。
+//! デバイス不在は型付きエラーで許容）。属性なしテストはデバイス非接触のゲート・入力検証のみ。
 //! parity テストはゲート ON で `Unsupported` を受けたら「起動が結線されていない」として
 //! fail させる（green と取り違えない）。実機の数値一致実測は #3139。
 
@@ -167,6 +168,7 @@ fn gate_on_empty_inputs_match_cpu_shapes() {
 /// Ok、またはデバイス不在時の型付きエラーを許容し、デバイスのない macOS でも誤 fail しない。
 /// 非正方の QR は形状エラーにならず起動まで進む。
 #[test]
+#[ignore = "Apple Silicon 実機が必要"]
 fn gate_on_non_empty_does_not_return_unsupported() {
     let _g = GateOn::new(true);
     let metal = ops();

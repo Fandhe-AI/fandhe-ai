@@ -84,6 +84,8 @@ impl MetalLinalg {
         b: &[f32],
         k: usize,
     ) -> Result<LuSolveRaw, MetalError> {
+        // pub API を直接呼ぶ経路でも要素積の u32 上限（MSL の uint 添字ラップ）を確保前に拒否する。
+        check_lu_dims(n, k)?;
         let nn = checked_len("lu_solve", "n*n", n, n)?;
         let nk = checked_len("lu_solve", "n*k", n, k)?;
         require_len("lu_solve", "a", a.len(), nn)?;
@@ -141,6 +143,7 @@ impl MetalLinalg {
         a: &[f32],
         n: usize,
     ) -> Result<FactorWithStatus, MetalError> {
+        check_lu_dims(n, 0)?;
         let nn = checked_len("lu_det", "n*n", n, n)?;
         require_len("lu_det", "a", a.len(), nn)?;
         if n == 0 {
@@ -167,6 +170,7 @@ impl MetalLinalg {
         a: &[f32],
         n: usize,
     ) -> Result<FactorWithStatus, MetalError> {
+        check_lu_dims(n, 0)?;
         let nn = checked_len("cholesky", "n*n", n, n)?;
         require_len("cholesky", "a", a.len(), nn)?;
         if n == 0 {
@@ -200,6 +204,7 @@ impl MetalLinalg {
         m: usize,
         n: usize,
     ) -> Result<(Vec<f32>, Vec<f32>), MetalError> {
+        check_qr_dims(m, n)?;
         let k = m.min(n);
         let mn = checked_len("qr", "m*n", m, n)?;
         let mk = checked_len("qr", "m*k", m, k)?;
@@ -259,6 +264,16 @@ fn size(width: usize) -> MTLSize {
     }
 }
 
+/// LU 系・cholesky の次元検査（`validate_lu_dims`）を `MetalError` へ写す。デバイス非接触。
+fn check_lu_dims(n: usize, k: usize) -> Result<(), MetalError> {
+    crate::linalg::validate_lu_dims(n, k).map_err(|e| invalid(&e.to_string()))
+}
+
+/// QR の次元検査（`validate_qr_dims`）を `MetalError` へ写す。デバイス非接触。
+fn check_qr_dims(m: usize, n: usize) -> Result<(), MetalError> {
+    crate::linalg::validate_qr_dims(m, n).map_err(|e| invalid(&e.to_string()))
+}
+
 fn invalid(detail: &str) -> MetalError {
     MetalError::InvalidLinalgShape {
         detail: detail.to_string(),
@@ -282,4 +297,20 @@ fn require_len(op: &str, name: &str, actual: usize, expected: usize) -> Result<(
 /// スカラー引数を切り詰めずに `u32` へ変換する（失敗は型付きエラー）。
 fn to_u32(op: &str, name: &str, v: usize) -> Result<u32, MetalError> {
     u32::try_from(v).map_err(|_| invalid(&format!("{op}: {name}={v} が u32 を超える")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_dim_checks_reject_uint_overflow_before_allocation() {
+        // m=n=65536: m*n = 2^32 > u32::MAX（従来の usize/u32 変換検査だけでは通っていた）。
+        assert!(check_qr_dims(65_536, 65_536).is_err());
+        assert!(check_lu_dims(65_536, 1).is_err());
+        assert!(check_lu_dims(8, 65_536 * 65_536).is_err());
+        assert!(check_qr_dims(usize::MAX, 2).is_err());
+        assert!(check_qr_dims(8, 3).is_ok());
+        assert!(check_lu_dims(8, 3).is_ok());
+    }
 }
