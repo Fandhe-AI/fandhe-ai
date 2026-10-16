@@ -204,6 +204,10 @@ pub mod inference;
 /// サイズ上限（`fs_guard` モジュール doc 参照）。
 mod fs_guard;
 
+/// 非公開。`model`（`ModelRegistry::save`）と `compat::model_io` が共有する書き込み側
+/// ヘルパー（一時ファイル確保・自己所有一時ファイルの後始末。unix 限定。`fs_write` モジュール doc 参照）。
+mod fs_write;
+
 /// 非公開。`optim::ExponentialMovingAverage`（イシュー #2560）の実体。公開パスは
 /// `optim.rs` の `pub use` のみ（`optim_ema` モジュール自体は公開しない）。
 mod optim_ema;

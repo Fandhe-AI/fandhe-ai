@@ -17,7 +17,7 @@
 //! 出典: `docs/compat-model-io-decision.md` §13.2・§13.4、
 //! `docs/facade-model-registry-decision.md`、イシュー #2364。
 //! 対象外: Windows 向け no-follow 実装（別件。facade のビルド可否は #2390・#2391 で解消済み）。書き込み側（`create_new`・一時ファイルの
-//! 所有権確認削除）は `compat::model_io` が std のみで持つ（このモジュールには置かない）。
+//! 所有権確認削除）は `crate::fs_write` が std のみで持ち、`compat::model_io` と `model` が共有する（このモジュールには置かない）。
 
 use std::fs::File;
 use std::path::Path;
@@ -84,6 +84,14 @@ pub(crate) mod open_flags {
     pub(crate) const O_NOFOLLOW: i32 = 0o400_000;
     #[cfg(target_arch = "aarch64")]
     pub(crate) const O_NOFOLLOW: i32 = 0o100_000;
+    /// `O_DIRECTORY` も `O_NOFOLLOW` 同様アーキ間で値が異なる
+    /// （x86_64 は asm-generic の 0o200000、aarch64 は 0o40000。
+    /// `libc` crate の `b64/x86_64`・`b64/aarch64` 定義と一致）。
+    /// `ModelRegistry::save` のディレクトリ fd 固定（`/proc/self/fd` 経由）が使う。
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) const O_DIRECTORY: i32 = 0o200_000;
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) const O_DIRECTORY: i32 = 0o40_000;
     /// `include/uapi/asm-generic/errno.h`。`O_NOFOLLOW` がシンボリック
     /// リンクを検出した際に `open(2)` が返す errno（ELOOP）。値自体は
     /// x86_64・aarch64 Linux で共通（asm-generic errno はアーキ別

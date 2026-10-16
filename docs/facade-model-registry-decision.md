@@ -231,7 +231,7 @@ pub fn save(
 ### 16.6 dirfd 経路との範囲分離
 
 - **本 issue 系（std のみ）で担保する範囲**: 書き込み前の allowlist 検証、各段の no-follow 型検査（symlink・非ディレクトリの拒否。#3120 の「`<name>` が symlink なら拒否」テストの根拠）、canonicalize によるルート配下確認、最終要素で symlink に追従しない `create_new`、エントリ自体を置換する `rename`、`(dev, ino)` で所有を確かめてからの一時ファイル削除、確定直前と保存後の `(dev, ino)` 再確認
-- **残るリスク**: 手順 4 の検査から手順 6 の作成・手順 8 の `rename` までの間に、キャッシュルートや `<name>` へ書き込める攻撃者（共有キャッシュディレクトリ・別のローカルユーザー）が `<name>`／`<version>` を symlink へ差し替える TOCTOU は、std では構造的に閉じられない。手順 7・9 は検出して `Err` を返せるが、ルート外へ書いた後になりうる。中間ディレクトリの作成も文字列パス解決に依存する。既定の `$HOME` 配下を単一ユーザーで使う限り該当する攻撃者は限られる。ルート自体の symlink は許容のまま
+- **残るリスク（実装前の想定。§16.9 で解消済み）**: 手順 4 の検査から手順 6 の作成・手順 8 の `rename` までの間に、キャッシュルートや `<name>` へ書き込める攻撃者（共有キャッシュディレクトリ・別のローカルユーザー）が `<name>`／`<version>` を symlink へ差し替える TOCTOU は、std では構造的に閉じられない。手順 7・9 は検出して `Err` を返せるが、ルート外へ書いた後になりうる。中間ディレクトリの作成も文字列パス解決に依存する。既定の `$HOME` 配下を単一ユーザーで使う限り該当する攻撃者は限られる。ルート自体の symlink は許容のまま
 - **#3123（dirfd 経路の依存承認）の後に強化する範囲**: `docs/model-download-design.md` §6 (a)・(b) の dirfd 連鎖へ置き換える（`openat2`〈`RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`〉または `openat(O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)`、`ENOENT` 時の `mkdirat`、`openat(O_CREAT | O_EXCL | O_NOFOLLOW)`、`renameat`）。配置は `docs/model-download-design.md` §14.5 案 B-1（第 10 区分 `libc` の用途を facade へ拡張）を推奨とし、承認されるまで実施しない。強化後も公開シグネチャは変えない（内部置換のみ）
 - ダウンロード（#3121）は §6 (c) により dirfd 経路が使えない環境では fail-closed にする必要がある。std のみの `save` は #3121 の安全な土台の代わりにならない
 
@@ -244,3 +244,13 @@ pub fn save(
 
 - 承認: `docs/compat-api-scope.md` §5 の D-A（`https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437`。条件は「記録に形を書き、その形のまま実装へ進む。形を書けない点だけ所有者へ戻す」）。本節はすべての論点に形を与えており、**所有者へ戻す論点はない**。依存追加・`docs/spec/` 編集・tolerance／上限値の変更はない
 - 出典: `crates/facade/src/model.rs`（`validate_component`・`resolve_model_file`）、`crates/facade/src/fs_guard.rs`（`MAX_MODEL_FILE_BYTES`・`open_leaf_no_follow`）、`crates/facade/src/compat/model_io.rs`（`create_new_with_retry`・`remove_own_tmp`・`MAX_TMP_NAME_ATTEMPTS`）、`docs/compat-model-io-decision.md` §12.3・§13.6、`docs/model-download-design.md` §5・§6・§14.5（案 B-1）
+
+### 16.9 実装時の是正: ディレクトリ fd 固定（2026-10-16・PR #3377 codex-review P0。§16.4 手順 4〜7・§16.5・§16.6 を置き換える）
+
+§16.6 の「残るリスク」（検査〜`create_dir`／`rename` 間のシンボリックリンク差し替えでルート外へ書ける）は、レビュー基準にシンボリックリンク脱出の許容例外がないため、実装（#3119）で次のとおり閉じた。依存の追加はない（std のみ）。
+
+- **方式**: キャッシュルートをディレクトリとして開き、`<name>`・`<version>` を 1 段ずつ `/proc/self/fd/<親 fd>/<段>` 経由で `create_dir`（`AlreadyExists` 許容）→ `O_NOFOLLOW|O_DIRECTORY` で開いて fd を保持する。以後の一時ファイル作成（`create_new`）と `rename` は `/proc/self/fd/<version の fd>/` 配下だけで行い、パス文字列を再解決しない。検査ではなく「開いた fd」が基準なので、後からパスがリンクへ差し替えられても書き込み先は開いた実体に留まる（差し替えは確定後の `resolve_model_file` 検証が `Err` にする。ルート外への書き込みは起きない）。手順 5（canonicalize）と手順 7 のディレクトリ `(dev, ino)` 再確認は不要となり削除した（一時ファイルの `(dev, ino)` 再確認は残す）
+- **プラットフォーム**: `/proc/self/fd` 方式は Linux 限定のため、`save` の対応範囲は **Linux x86_64／aarch64 のみ**へ狭めた（§16.5 の「macOS を含む」を置き換え）。macOS・Windows・他アーキは書き込み前に `Io(Unsupported)`。`/proc` が使えない Linux も書き込み前に `Err`。`load`／`available_models` の対応範囲は不変。macOS の `save` は `libc` による `openat`／`renameat`（§16.6 の #3123・案 B-1。第 10 区分の用途拡張はユーザー承認事項）の承認後に復帰させる
+- **O_DIRECTORY の生値**: `fs_guard::open_flags::O_DIRECTORY`（x86_64 = 0o200000・aarch64 = 0o40000）を追加した（`O_NOFOLLOW` と同方針。libc は使わない）
+- **テスト**: `<version>` 段・`<name>` 段を確定直前フックでシンボリックリンクへ差し替えても外部ディレクトリに何も書かれず `Err` になることを単体テストで検証する
+- **残るリスク**: ルート自体のシンボリックリンクは許容のまま（利用者の選択）。`save` 後の読み戻し検証は差し替え検出用で、書き込みを取り消すものではない（書き込み先は fd 固定のため外部には出ない）
