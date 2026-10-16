@@ -25,14 +25,14 @@
 //! （`crates/facade/tests/api_surface.rs` の保留ガードで機械固定。公開形の
 //! 推奨は設計記録 §7、公開は別 issue でユーザー承認後）。
 //!
-//! # カーネル起動の承認状況
+//! # カーネル起動（Stage B。イシュー #3137）
 //!
-//! objc2-metal の `setBuffer_offset_atIndex`／`setBytes_length_atIndex` は
-//! `unsafe fn` であり、カーネル起動には新規 `unsafe` が必要になる。新規
-//! `unsafe` はユーザー承認事項であり、承認が確認できていないため本実装は
-//! 起動を含まない（MSL ソース・パイプライン構築・ホスト逐語モデルまで。
-//! Stage A）。ゲート ON 時は fail-closed の `Unsupported` を返す（`ops.rs`）。
-//! 起動仕様と承認依頼は `docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md`。
+//! 起動は `linalg_kernel.rs` が `encoder_args`（`setBuffer`／`setBytes` の `unsafe` を
+//! 集約した共有ヘルパー。監査記録 `docs/gpu-linalg-kernel-launch-unsafe-audit.md`
+//! §3 案 A）経由で行い、`ops.rs` がゲート ON の非空入力で実起動する。本モジュールの
+//! 純関数（`decode_*_status`・[`det_from_lu`]・[`clamp_tg_width`]・
+//! [`validate_launch_stride_headroom`]）はデバイス読み戻し後の `status` 写像と起動前
+//! 検証の判定ロジックを持ち、Linux でも単体テストが回る（判定を `ops.rs` に重複させない）。
 
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
@@ -149,6 +149,82 @@ pub fn validate_qr_dims(m: usize, n: usize) -> Result<(), LinalgDimError> {
     check_numel("linalg QR", "m*n", m, n)?;
     check_numel("linalg QR", "m*k", m, k)?;
     Ok(())
+}
+
+/// LU カーネルの `status`（`[0]`=特異フラグ・`[1]`=行入替回数）の解釈結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LuFlags {
+    /// ピボットが厳密 0（特異）。未知の非 0 値も特異とみなす（fail-closed）。
+    pub singular: bool,
+    /// 行入替回数（置換符号の算出に使う）。
+    pub swap_count: u32,
+}
+
+/// LU の `status`（長さ 2 の i32）を解釈する。長さ不正・負の入替回数は内部契約違反。
+pub fn decode_lu_status(status: &[i32]) -> Result<LuFlags, LinalgDimError> {
+    let [flag, swaps] = status else {
+        return Err(invalid(format!(
+            "linalg LU: status の長さが 2 でない（{}）",
+            status.len()
+        )));
+    };
+    let swap_count = u32::try_from(*swaps)
+        .map_err(|_| invalid(format!("linalg LU: status[1]（行入替回数）が負: {swaps}")))?;
+    Ok(LuFlags {
+        singular: *flag != 0,
+        swap_count,
+    })
+}
+
+/// cholesky の `status`（長さ 1）から「非正定値」か否かを返す（非 0 は非正定値）。
+pub fn decode_cholesky_status(status: &[i32]) -> Result<bool, LinalgDimError> {
+    match status {
+        [flag] => Ok(*flag != 0),
+        _ => Err(invalid(format!(
+            "linalg cholesky: status の長さが 1 でない（{}）",
+            status.len()
+        ))),
+    }
+}
+
+/// LU 結果（`n*n`・行優先）から det を求める。特異なら即 `0.0`（LU はピボット 0 で
+/// 早期 return するため残りの対角は未処理値であり、積に通してはならない）。
+/// 非特異なら対角を f64 化して [`lu_diag_product`]×[`permutation_sign`] を `as f32` する。
+pub fn det_from_lu(lu: &[f32], n: usize, flags: &LuFlags) -> Result<f32, LinalgDimError> {
+    if flags.singular {
+        return Ok(0.0);
+    }
+    let nn = n
+        .checked_mul(n)
+        .ok_or_else(|| invalid("linalg det: n*n が usize を超える".to_string()))?;
+    if lu.len() < nn {
+        return Err(invalid(format!(
+            "linalg det: lu の長さ {} が n*n={nn} に満たない",
+            lu.len()
+        )));
+    }
+    let diag: Vec<f64> = (0..n).map(|i| f64::from(lu[i * n + i])).collect();
+    Ok(lu_diag_product(&diag, permutation_sign(flags.swap_count)) as f32)
+}
+
+/// threadgroup 幅を `maxTotalThreadsPerThreadgroup` で clamp する（最小 1）。
+pub fn clamp_tg_width(max_total: usize) -> usize {
+    LINALG_TG_WIDTH.min(max_total).max(1)
+}
+
+/// ストライドループ `for (uint i = tid; i < B; i += tg_size)` の最終 `i + tg_size` が
+/// uint でラップして終了しなくなる（DoS）のを、MSL を変えずホスト側で塞ぐ
+/// （監査記録 §6-3）。幅は [`LINALG_TG_WIDTH`] 以下へ clamp されるため保守的な検査になる。
+/// LU・cholesky は `n*n <= u32::MAX`（n<=65535）で実質影響しない（65535²+256 < 2^32）が、
+/// QR は `n=1` で `m` が `u32::MAX` 近傍になり得るため実際に効く。
+pub fn validate_launch_stride_headroom(op: &str, bound: usize) -> Result<(), LinalgDimError> {
+    let limit = u32::MAX as usize + 1;
+    match bound.checked_add(LINALG_TG_WIDTH) {
+        Some(v) if v <= limit => Ok(()),
+        _ => Err(invalid(format!(
+            "{op}: ストライド上限 {bound} が uint ラップ余裕（+{LINALG_TG_WIDTH}）を超える"
+        ))),
+    }
 }
 
 /// `x = m · 2^e`（`0.5 <= |m| < 1`）へ分解する。`0` と非有限は素通し。
@@ -357,5 +433,51 @@ mod tests {
         assert!(scale_ssq_norm_f32(&[1.0, f32::NAN]).is_nan());
         assert_eq!(scale_ssq_norm_f32(&[1.0, f32::INFINITY]), f32::INFINITY);
         assert!(scale_ssq_norm_f32(&[f32::INFINITY, f32::NAN]).is_nan());
+    }
+
+    #[test]
+    fn status_decoding_is_fail_closed() {
+        assert_eq!(
+            decode_lu_status(&[0, 0]).unwrap(),
+            LuFlags {
+                singular: false,
+                swap_count: 0
+            }
+        );
+        assert!(decode_lu_status(&[1, 3]).unwrap().singular);
+        assert!(decode_lu_status(&[7, 0]).unwrap().singular);
+        assert!(decode_lu_status(&[0, -1]).is_err());
+        assert!(decode_lu_status(&[0]).is_err());
+        assert!(!decode_cholesky_status(&[0]).unwrap());
+        assert!(decode_cholesky_status(&[1]).unwrap());
+        assert!(decode_cholesky_status(&[]).is_err());
+    }
+
+    #[test]
+    fn det_from_lu_singular_is_exact_zero() {
+        let flags = decode_lu_status(&[1, 1]).unwrap();
+        let d = det_from_lu(&[5.0, 1.0, 9.0, 9.0], 2, &flags).unwrap();
+        assert_eq!(d.to_bits(), 0.0f32.to_bits());
+        let ok = LuFlags {
+            singular: false,
+            swap_count: 0,
+        };
+        assert_eq!(det_from_lu(&[2.0, 7.0, 0.0, 3.0], 2, &ok).unwrap(), 6.0);
+        let odd = LuFlags {
+            singular: false,
+            swap_count: 1,
+        };
+        assert_eq!(det_from_lu(&[2.0, 7.0, 0.0, 3.0], 2, &odd).unwrap(), -6.0);
+        assert!(det_from_lu(&[1.0], 2, &ok).is_err());
+    }
+
+    #[test]
+    fn width_clamp_and_stride_headroom() {
+        assert_eq!(clamp_tg_width(1024), 256);
+        assert_eq!(clamp_tg_width(64), 64);
+        assert_eq!(clamp_tg_width(0), 1);
+        assert!(validate_launch_stride_headroom("x", u32::MAX as usize).is_err());
+        assert!(validate_launch_stride_headroom("x", 65_535 * 65_535).is_ok());
+        assert!(validate_launch_stride_headroom("x", usize::MAX).is_err());
     }
 }

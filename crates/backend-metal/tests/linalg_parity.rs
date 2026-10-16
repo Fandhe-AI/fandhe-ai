@@ -8,8 +8,10 @@
 //! cargo test -p fandhe-ai-backend-metal --release --test linalg_parity -- --ignored --nocapture
 //! ```
 //!
-//! カーネル起動（新規 unsafe）はユーザー承認待ちのため、parity テストはゲート ON で
-//! `Unsupported`（承認待ち）を受けたら承認待ちを明示して fail させる（green と取り違えない）。
+//! Stage B（#3137）でカーネル起動を結線済み。ゲート ON の非空入力はデバイスに触れる
+//! （`gate_on_non_empty_does_not_return_unsupported`。デバイス不在は型付きエラーで許容）。
+//! parity テストはゲート ON で `Unsupported` を受けたら「起動が結線されていない」として
+//! fail させる（green と取り違えない）。実機の数値一致実測は #3139。
 
 #![cfg(target_os = "macos")]
 
@@ -126,11 +128,6 @@ fn gate_on_validates_shapes_without_touching_device() {
     ] {
         assert!(matches!(r, Err(BackendError::InvalidArgument(_))));
     }
-    // 非正方の QR は形状エラーにならない（承認待ちの Unsupported まで進む）。
-    assert!(matches!(
-        metal.linalg_qr(&rect),
-        Err(BackendError::Unsupported(_))
-    ));
 }
 
 #[test]
@@ -166,19 +163,30 @@ fn gate_on_empty_inputs_match_cpu_shapes() {
     }
 }
 
+/// ゲート ON の非空入力は `Unsupported`（ゲート OFF・未実装の意味）を返さない。
+/// Ok、またはデバイス不在時の型付きエラーを許容し、デバイスのない macOS でも誤 fail しない。
+/// 非正方の QR は形状エラーにならず起動まで進む。
 #[test]
-fn gate_on_non_empty_is_fail_closed_unsupported() {
+fn gate_on_non_empty_does_not_return_unsupported() {
     let _g = GateOn::new(true);
     let metal = ops();
     let a = t(vec![4.0, 1.0, 1.0, 3.0], &[2, 2]);
-    assert!(matches!(
-        metal.linalg_inv(&a),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(
-        metal.linalg_cholesky(&a),
-        Err(BackendError::Unsupported(_))
-    ));
+    let b = t(vec![1.0, 2.0], &[2, 1]);
+    let rect = t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+    let results = [
+        ("inv", metal.linalg_inv(&a).map(|_| ())),
+        ("solve", metal.linalg_solve(&a, &b).map(|_| ())),
+        ("det", metal.linalg_det(&a).map(|_| ())),
+        ("cholesky", metal.linalg_cholesky(&a).map(|_| ())),
+        ("qr square", metal.linalg_qr(&a).map(|_| ())),
+        ("qr rect", metal.linalg_qr(&rect).map(|_| ())),
+    ];
+    for (what, r) in results {
+        assert!(
+            !matches!(r, Err(BackendError::Unsupported(_))),
+            "{what}: ゲート ON の非空入力は Unsupported を返さない: {r:?}"
+        );
+    }
 }
 
 /// 実機: 4 カーネルの MSL がコンパイルされパイプラインが構築できること
@@ -193,53 +201,131 @@ fn pipeline_compiles_on_device() {
 fn expect_launch_or_fail<T>(r: Result<T, BackendError>, what: &str) -> T {
     match r {
         Ok(v) => v,
-        Err(BackendError::Unsupported(msg)) => panic!(
-            "{what}: カーネル起動は新規 unsafe の承認待ち（Stage B 未実施）のため parity 未実測: {msg}"
-        ),
+        Err(BackendError::Unsupported(msg)) => {
+            panic!("{what}: Stage B（#3137）の起動が結線されていない: {msg}")
+        }
         Err(e) => panic!("{what}: {e}"),
     }
 }
 
+/// 決定記録 §5 の入力集合: 対角優位行列（LU 系）・SPD 行列（cholesky）を等倍・1e20 倍・
+/// 1e-20 倍した行列。スケール倍した入力は det が f32 範囲を超えうるため det だけ別扱い。
+fn scaled(a: &Tensor<f32>, factor: f32) -> Tensor<f32> {
+    let n = a.shape()[0];
+    t(s(a).iter().map(|v| v * factor).collect(), &[n, n])
+}
+
+fn diag_dominant(n: usize) -> Tensor<f32> {
+    let mut d = vec![0.0f32; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            d[i * n + j] = if i == j {
+                2.0 * n as f32
+            } else {
+                (((i * 7 + j * 3) % 5) as f32 - 2.0) / 2.0
+            };
+        }
+    }
+    t(d, &[n, n])
+}
+
 #[test]
-#[ignore = "Apple Silicon 実機が必要。カーネル起動は承認待ち（Stage B）"]
+#[ignore = "Apple Silicon 実機が必要"]
 fn cholesky_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cpu = CpuBackendOps::new();
-    for n in [1usize, 8, 64] {
-        let a = spd(n);
-        let got = expect_launch_or_fail(ops().linalg_cholesky(&a), "cholesky");
-        assert_parity(
-            &format!("cholesky n={n}"),
-            &s(&got),
-            &s(&cpu.linalg_cholesky(&a).expect("cpu")),
-        );
+    for n in [1usize, 2, 8, 17, 64] {
+        for factor in [1.0f32, 1e20, 1e-20] {
+            let a = scaled(&spd(n), factor);
+            let got = expect_launch_or_fail(ops().linalg_cholesky(&a), "cholesky");
+            assert_parity(
+                &format!("cholesky n={n} scale={factor:e}"),
+                &s(&got),
+                &s(&cpu.linalg_cholesky(&a).expect("cpu")),
+            );
+        }
     }
 }
 
 #[test]
-#[ignore = "Apple Silicon 実機が必要。カーネル起動は承認待ち（Stage B）"]
+#[ignore = "Apple Silicon 実機が必要"]
 fn lu_family_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cpu = CpuBackendOps::new();
-    for n in [2usize, 8, 17] {
-        let a = spd(n);
-        let got = expect_launch_or_fail(ops().linalg_inv(&a), "inv");
-        assert_parity(
-            &format!("inv n={n}"),
-            &s(&got),
-            &s(&cpu.linalg_inv(&a).expect("cpu")),
-        );
-        let det = expect_launch_or_fail(ops().linalg_det(&a), "det");
-        assert_parity(
-            &format!("det n={n}"),
-            &s(&det),
-            &s(&cpu.linalg_det(&a).expect("cpu")),
-        );
+    for n in [1usize, 2, 8, 17, 64] {
+        for factor in [1.0f32, 1e20, 1e-20] {
+            let a = scaled(&diag_dominant(n), factor);
+            let got = expect_launch_or_fail(ops().linalg_inv(&a), "inv");
+            assert_parity(
+                &format!("inv n={n} scale={factor:e}"),
+                &s(&got),
+                &s(&cpu.linalg_inv(&a).expect("cpu")),
+            );
+            for k in [1usize, 3] {
+                let b = t((0..n * k).map(|i| (i % 7) as f32 - 3.0).collect(), &[n, k]);
+                let got = expect_launch_or_fail(ops().linalg_solve(&a, &b), "solve");
+                assert_parity(
+                    &format!("solve n={n} k={k} scale={factor:e}"),
+                    &s(&got),
+                    &s(&cpu.linalg_solve(&a, &b).expect("cpu")),
+                );
+            }
+        }
+        // det は等倍のみ（スケール倍は結果が f32 範囲を超えうるため対象外）。
+        for a in [spd(n), diag_dominant(n)] {
+            let det = expect_launch_or_fail(ops().linalg_det(&a), "det");
+            assert_parity(
+                &format!("det n={n}"),
+                &s(&det),
+                &s(&cpu.linalg_det(&a).expect("cpu")),
+            );
+        }
     }
 }
 
+/// 特異・非正定値の status 写像（solve／inv／cholesky は `InvalidArgument`、det は厳密 0.0）。
 #[test]
-#[ignore = "Apple Silicon 実機が必要。カーネル起動は承認待ち（Stage B）"]
+#[ignore = "Apple Silicon 実機が必要"]
+fn status_mapping_end_to_end_on_device() {
+    let _g = GateOn::new(true);
+    let metal = ops();
+    let singular = t(vec![1.0, 2.0, 2.0, 4.0], &[2, 2]);
+    let b = t(vec![1.0, 2.0], &[2, 1]);
+    assert!(matches!(
+        metal.linalg_inv(&singular),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        metal.linalg_solve(&singular, &b),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    let det = expect_launch_or_fail(metal.linalg_det(&singular), "det singular");
+    assert_eq!(s(&det)[0].to_bits(), 0.0f32.to_bits());
+
+    // k == 0: 特異なら InvalidArgument、非特異なら形状 [n, 0]。
+    let b0 = t(vec![], &[2, 0]);
+    assert!(matches!(
+        metal.linalg_solve(&singular, &b0),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    let ok = t(vec![4.0, 1.0, 1.0, 3.0], &[2, 2]);
+    let x0 = expect_launch_or_fail(metal.linalg_solve(&ok, &b0), "solve k=0");
+    assert_eq!(x0.shape(), &[2, 0]);
+
+    let not_spd = t(vec![1.0, 2.0, 2.0, 1.0], &[2, 2]);
+    assert!(matches!(
+        metal.linalg_cholesky(&not_spd),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    let nan_diag = t(vec![f32::NAN, 0.0, 0.0, 1.0], &[2, 2]);
+    assert!(matches!(
+        metal.linalg_cholesky(&nan_diag),
+        Err(BackendError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+#[ignore = "Apple Silicon 実機が必要"]
 fn qr_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cpu = CpuBackendOps::new();

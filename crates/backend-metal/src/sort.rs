@@ -23,6 +23,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBarrierScope, MTLComputeCommandEncoder, MTLDevice, MTLSize};
 
 use crate::context::MetalContext;
+use crate::encoder_args::set_u32_args;
 use crate::error::MetalError;
 use crate::index_buffer::MetalIndexBuffer;
 use crate::pipeline::{self, MtlPipeline};
@@ -266,7 +267,7 @@ fn encode_build_keys(
         encoder.setBuffer_offset_atIndex(Some(input_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(keys_buf.raw()), 0, 1);
     }
-    set_scalar_args(
+    set_u32_args(
         encoder,
         &[lines, dim_size, inner, padded, descending, numel_in],
         2,
@@ -287,7 +288,7 @@ fn encode_bitonic_step(
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(keys_buf.raw()), 0, 0);
     }
-    set_scalar_args(encoder, &[j, k, padded, lines], 1);
+    set_u32_args(encoder, &[j, k, padded, lines], 1);
     let total = (lines as usize) * (padded as usize);
     dispatch_1d(encoder, total);
 }
@@ -316,37 +317,13 @@ fn encode_finalize(
         encoder.setBuffer_offset_atIndex(Some(values_buf.raw()), 0, 2);
         encoder.setBuffer_offset_atIndex(Some(index_buf.raw()), 0, 3);
     }
-    set_scalar_args(
+    set_u32_args(
         encoder,
         &[lines, dim_size, inner, padded, out_len, numel_in, numel_out],
         4,
     );
     let total = (lines as usize) * (out_len as usize);
     dispatch_1d(encoder, total);
-}
-
-/// `values`（`constant uint&` 系スカラー引数）を `start_index` から
-/// 連番のバッファインデックスへ順に `setBytes_length_atIndex` で
-/// エンコードする（`unique.rs::encode_bitonic_step` の繰り返しパターン
-/// を可変長引数向けに一般化）。
-fn set_scalar_args(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    values: &[u32],
-    start_index: usize,
-) {
-    for (offset, v) in values.iter().enumerate() {
-        // SAFETY: `unique.rs::encode_bitonic_step` と同一の契約。
-        // `setBytes_length_atIndex` は指定ポインタから指定バイト数を
-        // 即座に複製する。`v` はこの呼び出し中生存し、バイト数は
-        // `shaders/sort.metal` 側の `constant uint&` 宣言と一致する。
-        unsafe {
-            encoder.setBytes_length_atIndex(
-                std::ptr::NonNull::from(v).cast(),
-                std::mem::size_of::<u32>(),
-                start_index + offset,
-            );
-        }
-    }
 }
 
 fn dispatch_1d(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, total: usize) {
