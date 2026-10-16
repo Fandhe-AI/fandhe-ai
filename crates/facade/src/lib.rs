@@ -51,7 +51,9 @@
 //!    さらに KV キャッシュ付き attention（`KvCache`・`StatefulAttention`・
 //!    `MultiheadAttentionConfig`）を [`nn::kv_cache`] へ純再エクスポートし、
 //!    入口として `Tape::stateful_attention_forward`（薄い委譲）を追加した
-//!    （イシュー #2579。`docs/kv-cache-design.md` §11.4）。
+//!    （イシュー #2579。`docs/kv-cache-design.md` §11.4）。#3096 で外部キャッシュ版
+//!    `Tape::stateful_attention_forward_with_cache` も追加した
+//!    （`docs/facade-speculative-decoding-batching-design.md` §19）。
 //!    損失構造体 14 種と引数型 10 種（`Reduction`・各オプション型 9 種。うち 5 種は #2854）は
 //!    [`nn::loss`] へ純再エクスポートする（イシュー #2602・#2854。`docs/facade-nn-loss-structs-exposure-decision.md`）。
 //!
@@ -1704,6 +1706,30 @@ impl Tape {
         x_new: &Var<'t>,
     ) -> Result<Var<'t>, AutodiffError> {
         sa.forward(&self.0, x_new)
+    }
+
+    /// [`Self::stateful_attention_forward`] の外部キャッシュ版（イシュー
+    /// #3096・親 #3094。`docs/facade-speculative-decoding-batching-design.md`
+    /// §19.4・§19.6）。`sa` の内部キャッシュは変えず、渡された `cache` を進める。
+    ///
+    /// `AutoregressiveModel::forward_step` の中で `caches[i]` を進める入口で、
+    /// 要求ごとの `Vec<KvCache>` を持つ `generate_speculative`・`BatchScheduler`
+    /// と組み合わせられる。facade だけで KV 付きモデルを組むときは
+    /// `RefCell<StatefulAttention>` 形より本入口を推奨する。`Tape` に置く理由
+    /// （REQ-12。生の autodiff `Tape` を取り出せない）・mask 規則・原子性
+    /// （`Err` のとき `cache` は不変）は `stateful_attention_forward` と同じ。
+    ///
+    /// # Errors
+    ///
+    /// rank・`E`・`B` の不一致、別 `Tape` の `Var`（`TapeMismatch`）等で
+    /// `AutodiffError` を返す。
+    pub fn stateful_attention_forward_with_cache<'t>(
+        &'t self,
+        sa: &nn::kv_cache::StatefulAttention,
+        x_new: &Var<'t>,
+        cache: &mut nn::kv_cache::KvCache,
+    ) -> Result<Var<'t>, AutodiffError> {
+        sa.forward_with_external_cache(&self.0, x_new, cache)
     }
 
     /// この `Tape` が結線されているバックエンドの `f64` 演算本体

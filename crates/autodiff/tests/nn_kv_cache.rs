@@ -439,3 +439,177 @@ fn backward_on_decode_step_flows_to_current_projection_params() {
         .expect("現ステップの q_proj.weight は loss に寄与しているため勾配が存在するはず");
     assert_eq!(q_weight_grad.shape(), &[E, E]);
 }
+// --- 外部キャッシュ入口 `forward_with_external_cache`（イシュー #3096・親 #3094。
+//     `docs/facade-speculative-decoding-batching-design.md` §19.4） ---
+
+fn kv_bits(cache: &KvCache) -> (Vec<f32>, Vec<f32>) {
+    let flat = |t: Option<&Tensor<f32>>| {
+        t.map(|t| t.contiguous().as_slice().unwrap().to_vec())
+            .unwrap_or_default()
+    };
+    (flat(cache.k()), flat(cache.v()))
+}
+
+/// 外部キャッシュ版は内部キャッシュ版と同じ `forward_with_cache` へ帰着するため、
+/// 各ステップの出力・キャッシュ内容が bit 一致する。`sa` の内部キャッシュは進まない。
+#[test]
+fn external_cache_bit_matches_internal_cache_and_leaves_sa_untouched() {
+    let x = fixture_sequence(B, 6, E);
+    let mut internal = StatefulAttention::new(MultiheadAttention::new(E, H, true, SEED).unwrap());
+    let external = StatefulAttention::new(MultiheadAttention::new(E, H, true, SEED).unwrap());
+    let mut cache = KvCache::new();
+    for (start, len) in [(0usize, 3usize), (3, 1), (4, 2)] {
+        let tape = Tape::new_with_ops(common::naive_ops());
+        let xv = tape.var(&x);
+        let x_t = xv.narrow(1, start, len).unwrap();
+        let a = internal.forward(&tape, &x_t).unwrap().to_tensor();
+        let b = external
+            .forward_with_external_cache(&tape, &x_t, &mut cache)
+            .unwrap()
+            .to_tensor();
+        assert_eq!(
+            a.contiguous().as_slice().unwrap(),
+            b.contiguous().as_slice().unwrap(),
+            "start={start}"
+        );
+        assert_eq!(cache.seq_len(), internal.seq_len());
+        assert_eq!(kv_bits(&cache), kv_bits(internal.cache()));
+    }
+    assert_eq!(cache.seq_len(), 6);
+    assert_eq!(external.seq_len(), 0);
+    assert!(external.cache().is_empty());
+}
+
+/// 異常系は `Err` で、外部キャッシュは呼び出し前のまま。
+#[test]
+fn external_cache_rejects_invalid_inputs_and_leaves_cache_unchanged() {
+    let sa = StatefulAttention::new(MultiheadAttention::new(E, H, true, SEED).unwrap());
+    let mut cache = KvCache::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let x1 = tape.var(&fixture_sequence(1, 2, E));
+    sa.forward_with_external_cache(&tape, &x1, &mut cache)
+        .unwrap();
+    let before = snapshot(&cache);
+
+    // B 不一致。
+    let bad_b = tape.var(&fixture_sequence(2, 1, E));
+    let err = sa
+        .forward_with_external_cache(&tape, &bad_b, &mut cache)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)), "{err:?}");
+    assert_eq!(snapshot(&cache), before);
+
+    // E 不一致。
+    let bad_e = tape.var(&fixture_sequence(1, 1, E + 2));
+    assert!(
+        sa.forward_with_external_cache(&tape, &bad_e, &mut cache)
+            .is_err()
+    );
+    assert_eq!(snapshot(&cache), before);
+
+    // rank 不一致。
+    let bad_rank = tape.var(&t(vec![0.0; E], &[E]));
+    let err = sa
+        .forward_with_external_cache(&tape, &bad_rank, &mut cache)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::Shape(_)), "{err:?}");
+    assert_eq!(snapshot(&cache), before);
+
+    // 別 Tape の Var。
+    let other = Tape::new_with_ops(common::naive_ops());
+    let foreign = other.var(&fixture_sequence(1, 1, E));
+    let err = sa
+        .forward_with_external_cache(&tape, &foreign, &mut cache)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::TapeMismatch), "{err:?}");
+    assert_eq!(snapshot(&cache), before);
+
+    // 空キャッシュへの rank 不一致でも空のまま。
+    let mut empty = KvCache::new();
+    assert!(
+        sa.forward_with_external_cache(&tape, &bad_rank, &mut empty)
+            .is_err()
+    );
+    assert!(empty.is_empty());
+}
+
+/// 非既定 config の `mha` は外部キャッシュ版でも `InvalidArgument` で拒否され、キャッシュは不変。
+#[test]
+fn external_cache_rejects_non_default_config() {
+    use fandhe_ai_autodiff::nn::MultiheadAttentionConfig;
+    let cfg = MultiheadAttentionConfig::new(E, H).with_batch_first(false);
+    let sa = StatefulAttention::new(MultiheadAttention::from_config(&cfg, SEED).unwrap());
+    let mut cache = KvCache::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&fixture_sequence(1, 2, E));
+    let err = sa
+        .forward_with_external_cache(&tape, &xv, &mut cache)
+        .unwrap_err();
+    assert!(matches!(err, AutodiffError::InvalidArgument(_)), "{err:?}");
+    assert!(cache.is_empty());
+}
+
+/// 1 つの `sa` を 2 つの外部キャッシュで交互に進めても状態が混ざらない。
+#[test]
+fn external_caches_interleaved_do_not_mix() {
+    let sa = StatefulAttention::new(MultiheadAttention::new(E, H, true, SEED).unwrap());
+    let xa = fixture_sequence(B, 4, E);
+    let xb = t(
+        fixture_sequence(B, 4, E)
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v * -0.5 + 0.1)
+            .collect(),
+        &[B, 4, E],
+    );
+    let run =
+        |x: &Tensor<f32>, cache: &mut KvCache, outs: &mut Vec<Vec<f32>>, s: usize, l: usize| {
+            let tape = Tape::new_with_ops(common::naive_ops());
+            let xv = tape.var(x);
+            let step = xv.narrow(1, s, l).unwrap();
+            let y = sa
+                .forward_with_external_cache(&tape, &step, cache)
+                .unwrap()
+                .to_tensor();
+            outs.push(y.contiguous().as_slice().unwrap().to_vec());
+        };
+    let (mut ca, mut cb) = (KvCache::new(), KvCache::new());
+    let (mut oa, mut ob) = (Vec::new(), Vec::new());
+    for (s, l) in [(0, 3), (3, 1)] {
+        run(&xa, &mut ca, &mut oa, s, l);
+        run(&xb, &mut cb, &mut ob, s, l);
+    }
+    let (mut sa_only, mut sb_only) = (KvCache::new(), KvCache::new());
+    let (mut ra, mut rb) = (Vec::new(), Vec::new());
+    for (s, l) in [(0, 3), (3, 1)] {
+        run(&xa, &mut sa_only, &mut ra, s, l);
+    }
+    for (s, l) in [(0, 3), (3, 1)] {
+        run(&xb, &mut sb_only, &mut rb, s, l);
+    }
+    assert_eq!(oa, ra);
+    assert_eq!(ob, rb);
+    assert_eq!(kv_bits(&ca), kv_bits(&sa_only));
+    assert_eq!(kv_bits(&cb), kv_bits(&sb_only));
+    assert_eq!(sa.seq_len(), 0);
+}
+
+/// `clone()` したキャッシュは、元を進めても影響を受けない。
+#[test]
+fn cloned_external_cache_is_independent_of_original() {
+    let sa = StatefulAttention::new(MultiheadAttention::new(E, H, true, SEED).unwrap());
+    let x = fixture_sequence(B, 4, E);
+    let tape = Tape::new_with_ops(common::naive_ops());
+    let xv = tape.var(&x);
+    let mut cache = KvCache::new();
+    sa.forward_with_external_cache(&tape, &xv.narrow(1, 0, 3).unwrap(), &mut cache)
+        .unwrap();
+    let copy = cache.clone();
+    let before = (copy.seq_len(), kv_bits(&copy));
+    sa.forward_with_external_cache(&tape, &xv.narrow(1, 3, 1).unwrap(), &mut cache)
+        .unwrap();
+    assert_eq!(cache.seq_len(), 4);
+    assert_eq!((copy.seq_len(), kv_bits(&copy)), before);
+}
