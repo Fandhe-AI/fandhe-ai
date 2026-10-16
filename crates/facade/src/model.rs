@@ -25,8 +25,11 @@
 //! ```
 //!
 //! 配置は利用者（または将来のダウンロード側。#2088 リモート取得。本
-//! イシューのスコープ外）が行う。`ModelRegistry` はディレクトリの
-//! 作成・削除を一切行わない**読み取り専用**のレジストリである。
+//! イシューのスコープ外）が行うか、[`crate::model::ModelRegistry::save`]（#3119。
+//! `docs/facade-model-registry-decision.md` §16）で書き込む。`save` 以外の
+//! メソッド（`new`・`load`・`available_models` 等）はディレクトリの
+//! 作成・削除を一切行わない読み取り専用で、`save` も削除は自分の一時
+//! ファイルに限り、作成するのはルートと `<name>`・`<version>` だけである。
 //!
 //! # `load` の戻り値型（受入条件からの逸脱・承認事項）
 //!
@@ -165,7 +168,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Tensor;
 use crate::fs_guard::{MAX_MODEL_FILE_BYTES, open_leaf_no_follow};
-use crate::interop::safetensors::{LoadError, load_safetensors_f32_from_bytes};
+use crate::interop::safetensors::{LoadError, SaveError, load_safetensors_f32_from_bytes};
 
 /// レイアウト規定上のファイル名（モジュール doc 参照）。
 const MODEL_FILE_NAME: &str = "model.safetensors";
@@ -196,6 +199,13 @@ pub enum ModelError {
         len: u64,
         max: u64,
     },
+    /// 保存対象のテンソル集合が空（[`ModelRegistry::save`]。空の
+    /// safetensors は `load` で何も復元できないため書き込み前に拒否する。
+    /// `name`・`version` は許可文字集合検証済みの値で、パスは含まない）。
+    EmptyModel { name: String, version: String },
+    /// safetensors エンコード失敗（[`ModelRegistry::save`]。
+    /// `crate::interop::safetensors::SaveError` を連鎖）。
+    Save(SaveError),
     /// safetensors デコード失敗（`crate::interop::safetensors::LoadError`
     /// を連鎖。ヘッダ不整合・未対応 dtype・shape 不整合等）。
     Load(LoadError),
@@ -232,6 +242,11 @@ impl fmt::Display for ModelError {
                 f,
                 "モデルファイルが上限を超えています（name={name}・version={version}・{len} バイト > 上限 {max} バイト）"
             ),
+            ModelError::EmptyModel { name, version } => write!(
+                f,
+                "保存するテンソルが空です（name={name}・version={version}）"
+            ),
+            ModelError::Save(e) => write!(f, "モデルの保存に失敗しました: {e}"),
             ModelError::Load(e) => write!(f, "モデルのロードに失敗しました: {e}"),
             ModelError::Io(e) => write!(f, "モデルレジストリの I/O に失敗しました: {e}"),
         }
@@ -241,6 +256,7 @@ impl fmt::Display for ModelError {
 impl std::error::Error for ModelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            ModelError::Save(e) => Some(e),
             ModelError::Load(e) => Some(e),
             ModelError::Io(e) => Some(e),
             _ => None,
@@ -265,6 +281,55 @@ fn validate_component(kind: &'static str, value: &str) -> Result<(), ModelError>
             value: value.to_string(),
         })
     }
+}
+
+/// 本番の一時ファイル名（`compat::model_io::tmp_manifest_name` と同型。先頭 `.` のため
+/// `validate_component` を通らず、`load`／`available_models` からは見えない）。
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
+fn production_tmp_name() -> String {
+    let (pid, nanos, counter) = crate::fs_write::name_entropy();
+    format!(".{MODEL_FILE_NAME}.tmp-{pid}-{counter}-{nanos}")
+}
+
+/// `save` が `<name>`・`<version>` の 1 段を用意する。存在しなければ `create_dir` で 1 段だけ
+/// 作り（`create_dir_all` は使わない）、リンク・非ディレクトリは拒否して `(dev, ino)` を返す。
+/// エラーメッセージにパスを含めない。
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
+fn prepare_dir_level(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::io::{Error as IoError, ErrorKind};
+    use std::os::unix::fs::MetadataExt;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            match std::fs::create_dir(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            std::fs::symlink_metadata(path)?
+        }
+        Err(e) => return Err(e),
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() || !ft.is_dir() {
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            "保存先の中間パスがシンボリックリンクまたはディレクトリではありません",
+        ));
+    }
+    Ok((meta.dev(), meta.ino()))
 }
 
 /// `len` が `max` を超えていないか検査する純関数（環境非依存の単体
@@ -363,8 +428,8 @@ fn select_home_var(
 
 /// ホームディレクトリ配下のキャッシュディレクトリを基盤とする
 /// **ローカル限定**のモデルレジストリ。ディレクトリレイアウトは
-/// モジュール doc の規定を参照。本レジストリはディレクトリの作成・
-/// 削除を一切行わない読み取り専用の入口である。
+/// モジュール doc の規定を参照。読み取り系（`load`・`available_models`）は
+/// ディレクトリの作成・削除を行わず、書き込みは [`ModelRegistry::save`] だけが行う。
 pub struct ModelRegistry {
     root: PathBuf,
 }
@@ -373,7 +438,7 @@ impl ModelRegistry {
     /// 既定のキャッシュルート（Unix: `$HOME/.fandhe-ai/models`、
     /// Windows: `$USERPROFILE/.fandhe-ai/models`）で
     /// [`ModelRegistry`] を構築する。ディレクトリは作成しない
-    /// （読み取り専用のレジストリ）。`HOME`／`USERPROFILE` のいずれも
+    /// （構築は副作用なし。作成は [`save`](Self::save) のみ）。`HOME`／`USERPROFILE` のいずれも
     /// 未設定な場合は [`ModelError::CacheDirUnavailable`] を返す。
     ///
     /// **Windows での対応状況**: 本関数によるキャッシュルート解決
@@ -595,6 +660,256 @@ impl ModelRegistry {
             .map_err(ModelError::Io)?;
         enforce_size_limit(name, version, bytes.len() as u64, max)?;
         load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)
+    }
+
+    /// `tensors`（state dict）を `<cache_dir>/<name>/<version>/model.safetensors`
+    /// へ保存する（[`load`](Self::load) の書き込み側の対。イシュー #3119・
+    /// `docs/facade-model-registry-decision.md` §16）。既存ファイルは原子的に
+    /// 置き換える（上書きフラグは持たない）。
+    ///
+    /// # 手順（順序固定）
+    ///
+    /// 1. 対応プラットフォーム判定（範囲外は副作用の前に `Unsupported`）
+    /// 2. `name`・`version` の許可文字集合検証、空集合・サイズ上限の検査、
+    ///    safetensors へのエンコードと読み戻しによる整合確認（ここまで
+    ///    ファイルシステムには触れない）
+    /// 3. `<name>`・`<version>` ディレクトリを 1 段ずつ用意（シンボリック
+    ///    リンク・非ディレクトリは拒否。`create_dir_all` は使わない）
+    /// 4. 同じディレクトリの一時ファイル（`.model.safetensors.tmp-*`・
+    ///    `create_new`）へ書き込み、実体識別子を再確認してから `rename`
+    ///    （唯一のコミット点）
+    /// 5. `load` と同じ経路で開き直し、確定したファイルが書き込んだ実体で
+    ///    あることを確認する
+    ///
+    /// 失敗時は自分が作った一時ファイルだけを（`(dev, ino)` で所有を確かめて）
+    /// 削除し、既存の `model.safetensors` には触れない。作成済みの
+    /// ディレクトリは削除しない。
+    ///
+    /// # `load` との往復契約
+    ///
+    /// `Ok(())` なら同じ `name`・`version` の [`load`](Self::load) が同じキーと
+    /// 値（F32 の bit 一致）を返す。F32 限定は型 `Tensor<f32>` で保証される。
+    ///
+    /// # プラットフォーム
+    ///
+    /// `load` と同じ対応範囲（Linux の x86_64／aarch64 と macOS）のみ。それ
+    /// 以外（Windows 等）は最初に `Io(Unsupported)` を返し何も作らない
+    /// （範囲外では不正な `name`・`version` も `InvalidComponent` ではなく
+    /// `Unsupported` になるが、いずれも書き込み前の拒否である）。
+    ///
+    /// # 残るリスク・並行性・耐久性
+    ///
+    /// - std だけでは検査と `create_dir`／`rename` の間の差し替え（TOCTOU）を
+    ///   閉じられない。共有キャッシュへ書き込める攻撃者が `<name>`・
+    ///   `<version>` をシンボリックリンクへ差し替えた場合は、確定直前の再確認で
+    ///   検出して失敗にするが、ルート外へ書き込んだ後になりうる
+    ///   （`docs/facade-model-registry-decision.md` §16.6。ディレクトリ fd
+    ///   ベースへの強化は依存承認後に別イシューで扱う）
+    /// - 並行する `save` は「最後に `rename` した側が勝つ」。調停は
+    ///   サポート対象外
+    /// - `fsync` はしない（電源断に対する耐久性は保証しない。原子性は
+    ///   `rename` による）
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::InvalidComponent`] — `name`・`version` が許可文字集合外
+    /// - [`ModelError::EmptyModel`] — `tensors` が空
+    /// - [`ModelError::TooLarge`] — 概算またはエンコード後のサイズが上限（1 GiB）超過
+    /// - [`ModelError::Save`] — safetensors エンコード失敗
+    /// - [`ModelError::Load`] — 読み戻し時のデコード失敗
+    /// - [`ModelError::Io`] — 上記以外。読み戻しの不一致・確定後の実体不一致は
+    ///   `InvalidData`、中間段がシンボリックリンクまたは非ディレクトリなら
+    ///   `InvalidInput`、非対応プラットフォームは `Unsupported`。メッセージに
+    ///   パスは含めない
+    pub fn save(
+        &self,
+        name: &str,
+        version: &str,
+        tensors: &HashMap<String, Tensor<f32>>,
+    ) -> Result<(), ModelError> {
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            target_os = "macos"
+        ))]
+        {
+            self.save_with(
+                name,
+                version,
+                tensors,
+                MAX_MODEL_FILE_BYTES,
+                production_tmp_name,
+                |_: &Path| Ok(()),
+            )
+        }
+        #[cfg(not(any(
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            target_os = "macos"
+        )))]
+        {
+            let _ = (name, version, tensors);
+            Err(ModelError::Io(std::io::Error::from(
+                std::io::ErrorKind::Unsupported,
+            )))
+        }
+    }
+
+    /// [`Self::save`] の本体。サイズ上限・一時名生成器・確定直前フックを
+    /// 引数化し、単体テストが 1 GiB 級のデータなしに上限超過・名前衝突・
+    /// 途中失敗を再現できるようにする（`compat::model_io` の
+    /// `write_prepared_with` と同じ差し込み方）。本番は `save` から
+    /// `MAX_MODEL_FILE_BYTES`・`production_tmp_name`・何もしないフックで呼ぶ。
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    fn save_with(
+        &self,
+        name: &str,
+        version: &str,
+        tensors: &HashMap<String, Tensor<f32>>,
+        max: u64,
+        mut next_tmp: impl FnMut() -> String,
+        before_commit: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), ModelError> {
+        use crate::fs_write::{MAX_TMP_NAME_ATTEMPTS, create_new_with_retry, remove_own_tmp};
+        use crate::interop::safetensors::save_safetensors_f32_to_bytes;
+        use std::io::{Error as IoError, ErrorKind, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        validate_component("name", name)?;
+        validate_component("version", version)?;
+        if tensors.is_empty() {
+            return Err(ModelError::EmptyModel {
+                name: name.to_string(),
+                version: version.to_string(),
+            });
+        }
+
+        // エンコード前の概算（F32 データ部のみ）。巨大入力のエンコードで
+        // メモリを確保する前に拒否する。overflow は上限超過として扱う。
+        let mut estimate: u64 = 0;
+        for t in tensors.values() {
+            match (t.numel() as u64)
+                .checked_mul(4)
+                .and_then(|b| estimate.checked_add(b))
+            {
+                Some(v) => estimate = v,
+                None => {
+                    return Err(ModelError::TooLarge {
+                        name: name.to_string(),
+                        version: version.to_string(),
+                        len: u64::MAX,
+                        max,
+                    });
+                }
+            }
+        }
+        enforce_size_limit(name, version, estimate, max)?;
+
+        let bytes = save_safetensors_f32_to_bytes(tensors, None).map_err(ModelError::Save)?;
+        enforce_size_limit(name, version, bytes.len() as u64, max)?;
+
+        // 読み戻し検証: 保存できたのに `load` で読めないファイルを作らない。
+        {
+            let back = load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)?;
+            let consistent = back.len() == tensors.len()
+                && tensors
+                    .iter()
+                    .all(|(k, t)| back.get(k).is_some_and(|b| b.shape() == t.shape()));
+            if !consistent {
+                return Err(ModelError::Io(IoError::new(
+                    ErrorKind::InvalidData,
+                    "エンコード結果の読み戻しがキー集合または shape と一致しません",
+                )));
+            }
+        }
+
+        // ここからファイルシステムに触れる。ルート自体がシンボリックリンク
+        // でも許容する（利用者が選んだ配置。`load` 側と同じ扱い）。
+        std::fs::create_dir_all(&self.root).map_err(ModelError::Io)?;
+        let name_dir = self.root.join(name);
+        let version_dir = name_dir.join(version);
+        let name_id = prepare_dir_level(&name_dir).map_err(ModelError::Io)?;
+        let version_id = prepare_dir_level(&version_dir).map_err(ModelError::Io)?;
+
+        // 多層防御: canonicalize 後もルート配下であること。
+        let canonical_root = self.root.canonicalize().map_err(ModelError::Io)?;
+        let canonical_version = version_dir.canonicalize().map_err(ModelError::Io)?;
+        if !canonical_version.starts_with(&canonical_root) {
+            return Err(ModelError::Io(IoError::new(
+                ErrorKind::InvalidInput,
+                "保存先がキャッシュルートの外を指しています",
+            )));
+        }
+
+        let (mut tmp_file, tmp_name) =
+            create_new_with_retry(&version_dir, &mut next_tmp, MAX_TMP_NAME_ATTEMPTS)
+                .map_err(ModelError::Io)?;
+        let tmp_path = version_dir.join(&tmp_name);
+        let leaf = version_dir.join(MODEL_FILE_NAME);
+
+        let committed: std::io::Result<()> = (|| {
+            tmp_file.write_all(&bytes)?;
+            // 確定直前の再確認: 一時ファイルと中間ディレクトリが検査時点と
+            // 同一の実体であること。
+            let held = tmp_file.metadata()?;
+            let on_disk = std::fs::symlink_metadata(&tmp_path)?;
+            if !on_disk.file_type().is_file()
+                || on_disk.dev() != held.dev()
+                || on_disk.ino() != held.ino()
+            {
+                return Err(IoError::new(
+                    ErrorKind::InvalidData,
+                    "一時ファイルが書き込み中に差し替えられました",
+                ));
+            }
+            for (dir, id) in [(&name_dir, name_id), (&version_dir, version_id)] {
+                let m = std::fs::symlink_metadata(dir)?;
+                if !m.file_type().is_dir() || (m.dev(), m.ino()) != id {
+                    return Err(IoError::new(
+                        ErrorKind::InvalidData,
+                        "保存先ディレクトリが書き込み中に差し替えられました",
+                    ));
+                }
+            }
+            before_commit(&tmp_path)?;
+            std::fs::rename(&tmp_path, &leaf)
+        })();
+        if let Err(e) = committed {
+            // 削除してよいのはこの呼び出しが作って保持している一時ファイルだけ。
+            remove_own_tmp(&tmp_file, &tmp_path);
+            return Err(ModelError::Io(e));
+        }
+
+        // 確定後の検証（`rename` 後なので `model.safetensors` は消さない）。
+        let held = tmp_file.metadata().map_err(ModelError::Io)?;
+        let committed_file = match self.resolve_model_file_with_limit(name, version, max) {
+            Ok(f) => f,
+            Err(ModelError::NotFound { .. }) => {
+                return Err(ModelError::Io(IoError::new(
+                    ErrorKind::InvalidData,
+                    "保存直後のモデルファイルを解決できません",
+                )));
+            }
+            Err(e) => return Err(e),
+        };
+        let now = committed_file.metadata().map_err(ModelError::Io)?;
+        if now.dev() != held.dev() || now.ino() != held.ino() {
+            return Err(ModelError::Io(IoError::new(
+                ErrorKind::InvalidData,
+                "確定したファイルが書き込んだ実体と一致しません",
+            )));
+        }
+        Ok(())
     }
 
     /// キャッシュルート配下に存在するモデルを列挙する。ルートが
@@ -1034,5 +1349,317 @@ mod tests {
             matches!(&err, ModelError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported),
             "Io(Unsupported) を期待したが {err:?} だった"
         );
+    }
+
+    // ---- `save`（イシュー #3119）の単体テスト。結合テストは #3120。----
+
+    fn sample_state() -> HashMap<String, Tensor<f32>> {
+        let mut m = HashMap::new();
+        m.insert(
+            "fc.weight".to_string(),
+            Tensor::new(
+                vec![0.1_f32, -0.2, 0.3, -0.4, f32::MIN_POSITIVE, 1e30],
+                &[2, 3],
+            )
+            .unwrap(),
+        );
+        m.insert(
+            "fc.bias".to_string(),
+            Tensor::new(vec![-0.0_f32, 7.5], &[2]).unwrap(),
+        );
+        m
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    fn bits(t: &Tensor<f32>) -> Vec<u32> {
+        t.contiguous()
+            .as_slice()
+            .expect("contiguous は連続")
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    fn tmp_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".model.safetensors.tmp-"))
+            .collect()
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_then_load_roundtrips_bit_exact() {
+        let dir = TempDirGuard::new("save-roundtrip");
+        let registry = ModelRegistry::with_cache_dir(dir.path().join("root"));
+        let state = sample_state();
+        registry.save("mlp", "v1", &state).unwrap();
+        let back = registry.load("mlp", "v1").unwrap();
+        assert_eq!(back.len(), state.len());
+        for (k, t) in &state {
+            let b = back.get(k).expect("キーが往復するはず");
+            assert_eq!(b.shape(), t.shape());
+            assert_eq!(bits(b), bits(t), "{k}");
+        }
+        assert!(tmp_leftovers(&dir.path().join("root/mlp/v1")).is_empty());
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_rejects_invalid_components_before_fs_access() {
+        let dir = TempDirGuard::new("save-invalid");
+        let root = dir.path().join("root");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let state = sample_state();
+        for bad in ["", ".", "..", ".hidden", "a/b", "a\\b", "a\0b", "a\nb"] {
+            assert!(
+                matches!(
+                    registry.save(bad, "v1", &state),
+                    Err(ModelError::InvalidComponent { kind: "name", .. })
+                ),
+                "name={bad:?}"
+            );
+            assert!(
+                matches!(
+                    registry.save("mlp", bad, &state),
+                    Err(ModelError::InvalidComponent {
+                        kind: "version",
+                        ..
+                    })
+                ),
+                "version={bad:?}"
+            );
+        }
+        assert!(!root.exists(), "検証失敗でルートを作ってはならない");
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_rejects_empty_model_without_creating_root() {
+        let dir = TempDirGuard::new("save-empty");
+        let root = dir.path().join("root");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let err = registry.save("mlp", "v1", &HashMap::new()).unwrap_err();
+        assert!(matches!(err, ModelError::EmptyModel { .. }), "{err:?}");
+        assert!(!root.exists());
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_with_limit_rejects_over_bound_without_creating_root() {
+        let dir = TempDirGuard::new("save-limit");
+        let root = dir.path().join("root");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let err = registry
+            .save_with("mlp", "v1", &sample_state(), 8, production_tmp_name, |_| {
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, ModelError::TooLarge { max: 8, .. }),
+            "{err:?}"
+        );
+        assert!(!root.exists());
+        // エンコード後サイズだけが超える境界: 概算（F32 データ部）は通る上限。
+        let data_bytes = 8 * 4;
+        let err = registry
+            .save_with(
+                "mlp",
+                "v1",
+                &sample_state(),
+                data_bytes,
+                production_tmp_name,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ModelError::TooLarge { .. }), "{err:?}");
+        assert!(!root.exists());
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_failure_before_commit_keeps_existing_and_leaves_no_tmp() {
+        let dir = TempDirGuard::new("save-fail");
+        let registry = ModelRegistry::with_cache_dir(dir.path().join("root"));
+        let state = sample_state();
+        registry.save("mlp", "v1", &state).unwrap();
+        let mut other = HashMap::new();
+        other.insert("x".to_string(), Tensor::new(vec![1.0_f32], &[1]).unwrap());
+        let err = registry
+            .save_with(
+                "mlp",
+                "v1",
+                &other,
+                MAX_MODEL_FILE_BYTES,
+                production_tmp_name,
+                |_| Err(std::io::Error::other("注入した失敗")),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ModelError::Io(_)), "{err:?}");
+        let back = registry.load("mlp", "v1").unwrap();
+        assert_eq!(back.len(), state.len());
+        for (k, t) in &state {
+            assert_eq!(bits(&back[k]), bits(t));
+        }
+        assert!(tmp_leftovers(&dir.path().join("root/mlp/v1")).is_empty());
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_gives_up_after_tmp_name_collisions() {
+        let dir = TempDirGuard::new("save-collide");
+        let registry = ModelRegistry::with_cache_dir(dir.path().join("root"));
+        let state = sample_state();
+        registry.save("mlp", "v1", &state).unwrap();
+        let vdir = dir.path().join("root/mlp/v1");
+        std::fs::write(vdir.join(".collide"), b"keep").unwrap();
+        let err = registry
+            .save_with(
+                "mlp",
+                "v1",
+                &state,
+                MAX_MODEL_FILE_BYTES,
+                || ".collide".to_string(),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, ModelError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read(vdir.join(".collide")).unwrap(), b"keep");
+        assert_eq!(registry.load("mlp", "v1").unwrap().len(), state.len());
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_overwrites_existing_atomically() {
+        let dir = TempDirGuard::new("save-overwrite");
+        let registry = ModelRegistry::with_cache_dir(dir.path().join("root"));
+        registry.save("mlp", "v1", &sample_state()).unwrap();
+        let mut next = HashMap::new();
+        next.insert(
+            "w".to_string(),
+            Tensor::new(vec![3.0_f32, 4.0], &[2]).unwrap(),
+        );
+        registry.save("mlp", "v1", &next).unwrap();
+        let back = registry.load("mlp", "v1").unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(bits(&back["w"]), bits(&next["w"]));
+        assert_eq!(
+            registry.available_models(),
+            vec![("mlp".to_string(), vec!["v1".to_string()])]
+        );
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn save_rejects_symlinked_name_dir_without_writing_outside() {
+        let dir = TempDirGuard::new("save-symlink");
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("mlp")).unwrap();
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let err = registry.save("mlp", "v1", &sample_state()).unwrap_err();
+        assert!(
+            matches!(&err, ModelError::Io(e) if e.kind() == std::io::ErrorKind::InvalidInput),
+            "{err:?}"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[cfg(not(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    )))]
+    #[test]
+    fn save_is_unsupported_on_non_supported_platform() {
+        let registry = ModelRegistry::with_cache_dir("unused-root-for-unsupported-save");
+        let err = registry.save("mlp", "v1", &sample_state()).unwrap_err();
+        assert!(
+            matches!(&err, ModelError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn new_error_variants_display_without_path() {
+        let e = ModelError::EmptyModel {
+            name: "mlp".into(),
+            version: "v1".into(),
+        };
+        let text = format!("{e} {e:?}");
+        assert!(text.contains("mlp") && text.contains("v1"));
+        assert!(!text.contains('/'));
+        use std::error::Error as _;
+        assert!(e.source().is_none());
     }
 }

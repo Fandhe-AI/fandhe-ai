@@ -5811,12 +5811,14 @@ fn contains_pub_fn_declaration_detects_variants() {
 /// `src/model.rs` に承認範囲外の公開アイテムが存在しないかを走査する。
 /// 承認範囲は `model::{ModelRegistry, ModelError}` と
 /// `ModelRegistry::{new, with_cache_dir, cache_dir, load,
-/// available_models}` の 7 件のみ（PR 本文「承認事項」節。
+/// available_models, save}` の 8 件のみ（PR 本文「承認事項」節。`save` は
+/// #3119・`docs/facade-model-registry-decision.md` §16。公開面ちょうどを
+/// 要求する正ガードは #3120）。
 /// `scan_unapproved_onnx_pub_items` と同型の独自許可リストを持つ
 /// 兄弟関数として実装する。既存 onnx 用関数は並列 PR の競合面拡大を
 /// 避けるため byte 単位で不変のまま触らない）。
 fn scan_unapproved_model_pub_items(original: &str) -> Vec<String> {
-    const ALLOWED_PUB_ITEMS: [(&str, &str); 7] = [
+    const ALLOWED_PUB_ITEMS: [(&str, &str); 8] = [
         ("struct", "ModelRegistry"),
         ("enum", "ModelError"),
         ("fn", "new"),
@@ -5824,6 +5826,7 @@ fn scan_unapproved_model_pub_items(original: &str) -> Vec<String> {
         ("fn", "cache_dir"),
         ("fn", "load"),
         ("fn", "available_models"),
+        ("fn", "save"),
     ];
     const SCANNED_KINDS: [&str; 9] = [
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",

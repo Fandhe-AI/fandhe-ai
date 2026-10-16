@@ -98,6 +98,8 @@ use self::compiled::{
 };
 use super::sequential::{LayerSpec, ReparamSpec, Sequential, spectral_state_of};
 use crate::fs_guard::{LeafError, MAX_MODEL_FILE_BYTES, OpenedLeaf, open_leaf_checked};
+#[cfg(unix)]
+use crate::fs_write::{self, MAX_TMP_NAME_ATTEMPTS, name_entropy, remove_own_tmp};
 use crate::interop::safetensors::{load_safetensors_f32_from_bytes, save_safetensors_f32_to_bytes};
 use crate::{EmbeddingBagMode, GlobalPoolMode, InterpolateMode, Tensor};
 
@@ -160,11 +162,6 @@ const MAX_NUMBER_LEXEME_LEN: usize = 64;
 /// 1 つの JSON object のキー数上限。v1 の最上位 object のキー数（10）に余裕を持たせた
 /// 値で、重複キー検査の線形走査を有界にする。
 const MAX_OBJECT_KEYS: usize = 16;
-/// `create_new` が `AlreadyExists` を返したときの名前再生成の試行上限。
-/// `crates/docs-site/src/build.rs` の同名定数と同値（決定記録 §12.3 手順 1）。
-#[cfg(unix)]
-const MAX_TMP_NAME_ATTEMPTS: usize = 8;
-
 /// `save_model`／`load_model` のエラー。
 ///
 /// `#[non_exhaustive]`（将来の variant 追加は非破壊）。
@@ -2052,62 +2049,15 @@ fn write_generation_with(
     Ok(())
 }
 
-/// `dir` 直下に `next_name()` の名前で `create_new` する。`AlreadyExists`（既存エントリの
-/// 種類は問わない）は既存に一切触れずに名前を作り直し、`max_attempts` 回で諦める
-/// （`Io(AlreadyExists)`。決定記録 §12.3 手順 1・2）。衝突を注入できるよう名前生成を引数にする。
+/// [`fs_write::create_new_with_retry`] の薄いラッパー（失敗を `ModelIoError::Io` へ包む）。
+/// 共有ヘルパーを `io::Result` で持たせ、本モジュールの型付きエラーへ写す責務だけを持つ。
 #[cfg(unix)]
 fn create_new_with_retry(
     dir: &Path,
-    mut next_name: impl FnMut() -> String,
+    next_name: impl FnMut() -> String,
     max_attempts: usize,
 ) -> Result<(std::fs::File, String), ModelIoError> {
-    for _ in 0..max_attempts {
-        let name = next_name();
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dir.join(&name))
-        {
-            Ok(file) => return Ok((file, name)),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(ModelIoError::Io(e)),
-        }
-    }
-    Err(ModelIoError::Io(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("{max_attempts} 回試行しても一意なファイル名を確保できませんでした"),
-    )))
-}
-
-/// 自分が作って fd を保持している一時ファイルの削除（決定記録 §13.6。best-effort）。
-/// 保持ハンドルの `fstat` と削除直前の `symlink_metadata` の `(dev, ino)` が一致し、
-/// かつ通常ファイルのときだけ `remove_file` する（差し替え検出時は削除しない）。
-#[cfg(unix)]
-fn remove_own_tmp(file: &std::fs::File, path: &Path) {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(held) = file.metadata() else {
-        return;
-    };
-    let Ok(on_disk) = std::fs::symlink_metadata(path) else {
-        return;
-    };
-    if on_disk.file_type().is_file() && on_disk.dev() == held.dev() && on_disk.ino() == held.ino() {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
-#[cfg(unix)]
-static NAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// pid・ナノ秒・プロセス内カウンタの組（一時名・世代 ID の素材）。
-#[cfg(unix)]
-fn name_entropy() -> (u32, u128, u64) {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let counter = NAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    (std::process::id(), nanos, counter)
+    fs_write::create_new_with_retry(dir, next_name, max_attempts).map_err(ModelIoError::Io)
 }
 
 /// 32 桁の 16 進世代 ID（pid・ナノ秒・カウンタを `RandomState` でハッシュ化した u64 を 2 つ
