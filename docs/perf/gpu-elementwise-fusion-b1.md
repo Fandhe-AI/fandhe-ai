@@ -108,3 +108,7 @@ ADOPT／REJECT を判定し、本節を更新する。
   か所・`backend-metal/src/elementwise.rs::encode_nary_dispatch` 3 か所。
   既存 FFI 境界パターン〈`run_binary`／`encode_binary_dispatch`〉の踏襲
   で SAFETY コメント付き）。
+
+## #3385 追補
+
+「facade への opt-in ゲート再公開（未実施）」は #3385 で実施した（CUDA／Metal 各 1 対。既定は OFF のまま）。実機での ON 時 parity・効果の実測は Phase 8 で未実行。詳細は `docs/facade-graph-tier-b-optin-exposure-decision.md` §13。

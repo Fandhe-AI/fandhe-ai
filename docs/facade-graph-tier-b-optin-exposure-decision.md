@@ -112,3 +112,30 @@
 ## 12. #3116 実装記録
 
 `set_cuda_graph_infer_enabled`／`cuda_graph_infer_enabled`（facade）と `fandhe_ai_backend_cuda::graph::set_infer_graph_enabled`（新規。優先順位は API 明示 > 環境変数 > 既定 OFF）を公開した。テストは CPU で常に実行される受入テスト（`cuda_graph_infer_optin.rs`）・`api_surface.rs` の正ガードと、`#[ignore]` の CUDA 実機 parity テスト（`cuda_graph_infer_parity_real_device.rs`。実測は Phase 8・未実行）。**B-1 の CUDA／Metal の対は未公開**（新規 `unsafe` 4 か所の承認が記録上不明のため、R1 への所有者の回答待ち。決定記録 §6）。既定 OFF・tolerance・baseline・依存・`docs/spec` は不変で、新規 `unsafe` はない。既定 ON 化は #3227 の担当。 本文 §0〜§11 は書き換えていない。
+
+## 13. #3385: R1・R2 の状況更新と B-1 実装記録
+
+### 13.1 R1（承認）
+
+所有者が #3114 のコメント（id 6213949713・2026-10-16）で R1（B-1 新規 `unsafe` 4 か所の承認）を承認した。条件は「4 か所を監査し、結果を決定記録に残すこと（R2）」。承認の範囲外: 依存追加、tolerance・baseline・ガードレール閾値の変更、既定 ON 化（#3227）、4 か所以外の新規 `unsafe`。
+
+### 13.2 R2（監査）
+
+- 実施日: 2026-10-16。対象: `backend-cuda/src/elementwise.rs` `launch_nary`（`unsafe` 1 か所）と `backend-metal/src/elementwise.rs` `encode_nary_dispatch`（3 か所）。
+- **実施者の限界**: 本実装セッションにはサブエージェントを起動する手段がなく、静的な読解監査を実装担当が行った。独立した security-auditor による再確認はレビュー段階の要対応事項として残す（outOfScope に記載）。
+- 確認できた点（P0/P1 指摘なし。ファイルはいずれも `origin/main` cdf66c29 時点）:
+  1. CUDA: `unsafe` 直前に全 leaf の長さ一致検証・`validate_elementwise_len`（i32::MAX 以下）・`numel == 0` の早期 return を行い、各 leaf を同長のデバイスバッファへ `clone_htod`、出力も `alloc_uninit_f32(numel)`。グリッドは `div_ceil` で切り上げ、生成カーネルは `if (idx < numel)` で余剰スレッドを弾く（REQ-8）。SAFETY コメントの主張と一致。
+  2. Metal: leaf は index 0..n、out は n、numel は n+1 に結線し、生成 MSL の `[[buffer(i)]]` 宣言（`fused_elementwise_source.rs`）と一致。`numel` は `validate_elementwise_len`（u32::MAX 以下）済みで `setBytes` 長は `size_of::<u32>()`。バッファは `dispatch_sync` 完了まで生存。MSL も `if (idx < numel)`。
+  3. 引数数の整合: `run_fused_elementwise_allowlist`（CUDA／Metal）が dtype F32 限定・`leaves.len() == program.leaf_count`・各 leaf の shape が `output_shape` と一致・`checked_bytes_for::<f32>`・`contiguous()` を起動前に検証。`FusionPlan::from_ops` が `leaf_index` を `0..leaf_count` に重複なく要求する。
+  4. Metal のバッファスロット上限 31: `match_elementwise_plan` が `leaf_count <= MAX_FUSED_SEGMENT_NODES + 1`（= 13）を課すため最大 index は 14 で上限内。この強制はディスパッチ前（ゲート判定後・パイプライン生成前）で行われる。
+  5. facade からの到達経路: カーネルソースは allowlist 済みの `FusedOpKind` 列と `leaf_count` のみから生成され、利用者の文字列は NVRTC／MSL に届かない。setter は `AtomicBool` を書くだけで `unsafe` の前提はゲート値に依存しない。ゲートは `run_fused` 呼び出しごとに 1 回読む。CUDA は `with_driver_call` で Graph capture と排他。
+  6. 新しい setter は新規 `unsafe`・依存・環境変数読み取りを増やさない。
+- P3（記録のみ・本 PR では修正しない）: Metal 側 `encode_nary_dispatch` の SAFETY コメントには、バッファスロット上限（31）が `match_elementwise_plan` で強制されている旨が書かれていない。コメント補強は backend 変更になるため別途。
+
+### 13.3 実装記録
+
+- 公開: `set_cuda_elementwise_fusion_enabled`／`cuda_elementwise_fusion_enabled`、macOS 限定の `set_metal_elementwise_fusion_enabled`／`metal_elementwise_fusion_enabled`（いずれも §3 の名前・1 行委譲・既定 OFF）。
+- テスト: CPU で常に実行する `crates/facade/tests/gpu_elementwise_fusion_optin.rs`、`#[ignore]` の実機 parity `gpu_elementwise_fusion_parity_real_device.rs`（実測は Phase 8・未実行）、`api_surface.rs` の正ガード・否定ガード・正のプローブ。
+- 着手時に確認した事実: `api_surface.rs` に B-1 の保留ガード・否定プローブは存在せず、反転対象はなかった（正ガードと否定ガードを新規追加）。B-1 には経路カウンタがなく、融合出力は per-op と bit 一致するため ON/OFF の出力比較では経路を区別できない。代替として `run_fused` を直接呼んだ返り値の分類（OFF は `Unsupported`）で facade setter が backend ゲートに効くことを確認した。カウンタは backend 変更を伴うため追加していない。
+- `gpu_elementwise_fusion_bench.rs` は facade の公開 setter を使うよう置き換えた（環境変数の解釈・計測は不変）。
+- 不変: 既定 OFF・tolerance・baseline・依存・`docs/spec`・新規 `unsafe` なし。既定 ON 化は #3227、実測は Phase 8。本文 §0〜§12 は書き換えていない。

@@ -165,3 +165,7 @@ Keras 風 `Sequential::compile(optimizer, loss)`（学習設定 API）は別物�
 ## #3116 実装記録
 
 `set_cuda_graph_infer_enabled`／`cuda_graph_infer_enabled`（facade）と `fandhe_ai_backend_cuda::graph::set_infer_graph_enabled`（新規。優先順位は API 明示 > 環境変数 > 既定 OFF）を公開した。テストは CPU で常に実行される受入テスト（`cuda_graph_infer_optin.rs`）・`api_surface.rs` の正ガードと、`#[ignore]` の CUDA 実機 parity テスト（`cuda_graph_infer_parity_real_device.rs`。実測は Phase 8・未実行）。**B-1 の CUDA／Metal の対は未公開**（新規 `unsafe` 4 か所の承認が記録上不明のため、R1 への所有者の回答待ち。決定記録 §6）。既定 OFF・tolerance・baseline・依存・`docs/spec` は不変で、新規 `unsafe` はない。既定 ON 化は #3227 の担当。
+
+## #3385 追補
+
+B-1 の CUDA／Metal の opt-in setter 2 対を facade に公開した（R1 は #3114 コメントで承認済み・R2 の監査結果は `docs/facade-graph-tier-b-optin-exposure-decision.md` §13）。このため H2 の「facade 再公開 0 件」とその確認コマンドの結果は #3385 以降は古くなる（本文は書き換えない）。既定は OFF のまま。
