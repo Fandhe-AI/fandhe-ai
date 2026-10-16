@@ -1,6 +1,6 @@
 //! facade `fandhe_ai::inference::BatchScheduler::step_batched`（テンソル単位バッチ。#3106）が、各要求の
 //! 出力を単独 `generate`（B = 1）と一致させることの結合テスト（イシュー #3107・親 #3103。設計記録
-//! `docs/facade-speculative-decoding-batching-design.md` §6.3・§21.8・§27）。
+//! `docs/facade-speculative-decoding-batching-design.md` §6.3・§21.8・§28）。
 //!
 //! 承認の根拠は D-A の範囲（§21.1）に限り、本ファイルは新しい承認を主張しない。tolerance
 //! （`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・baseline・判定規則は変えず、
@@ -36,7 +36,9 @@ use fandhe_ai::inference::{
 };
 use fandhe_ai::nn::kv_cache::{KvCache, MultiheadAttentionConfig, StatefulAttention};
 use fandhe_ai::{AutodiffError, LinearVars, Tensor};
-use fandhe_ai_backend_cpu::parity::{ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE, assert_parity};
+use fandhe_ai_backend_cpu::parity::{
+    ABSOLUTE_RESCUE_THRESHOLD, RELATIVE_TOLERANCE, assert_parity, compare,
+};
 use std::cell::RefCell;
 
 const V: usize = 7;
@@ -548,7 +550,10 @@ fn mid_plan(variant: usize) -> Plan {
 }
 
 /// 作業 2: 途中参加・退出・長さの混在があっても他の要求の出力が変わらない。
-/// 位置ごとの logits の対応づけは受け入れの再現が壊れやすいため、出力水準の比較に留める。
+/// 計画ごとのスケジュール順に依らず、decode 行（`l == 1`）を `(位置 = valid_len, 入力 id)` で要求へ
+/// 対応づけ、位置ごとの logits を単独 `generate` の行と REQ-2 統一複合判定で比べる（§21.8）。
+/// 他要求の KV を取り違えると attention 由来の logits が変わり、argmax が `SKIP_C` で固定されていても
+/// 検出できる。
 #[test]
 fn step_batched_mid_join_and_leave_do_not_change_other_outputs() {
     let layers = 2;
@@ -560,12 +565,12 @@ fn step_batched_mid_join_and_leave_do_not_change_other_outputs() {
             .map(|(_, p, r1, c)| {
                 let (out, rows) = alone(layers, p, *r1, c);
                 assert_margin("mid", &rows, p.len(), c.max_length);
-                out
+                (out, rows)
             })
             .collect();
         let m = BatchedRecording::new(BatchedAttnLm::new(layers, 100));
         let out = run_plan(&m, &plan, 3);
-        for (i, want) in refs.iter().enumerate() {
+        for (i, (want, _)) in refs.iter().enumerate() {
             assert_eq!(
                 out.outputs[i].shape(),
                 want.shape(),
@@ -578,6 +583,50 @@ fn step_batched_mid_join_and_leave_do_not_change_other_outputs() {
             );
         }
         let log = m.log.borrow();
+        // 要求 i の全列（prompt + 生成）。位置 pos の decode 入力 id は seq[pos]。
+        let seqs: Vec<Vec<i32>> = out.outputs.iter().map(toks).collect();
+        let mut covered: Vec<Vec<bool>> = plan
+            .iter()
+            .map(|(_, _, _, c)| vec![false; c.max_length])
+            .collect();
+        for (ci, call) in log.iter().enumerate().filter(|(_, c)| c.l == 1) {
+            for r in 0..call.b {
+                let (pos, tok) = (call.valid[r], call.ids[r]);
+                // 空キャッシュからの 1 token prefill（valid_len 0）は decode 行ではない。
+                if pos == 0 {
+                    continue;
+                }
+                let row = &call.logits[r * V..(r + 1) * V];
+                let mut any = false;
+                for (i, (_, p, _, c)) in plan.iter().enumerate() {
+                    if pos < p.len() || pos + 2 > c.max_length || seqs[i][pos] != tok {
+                        continue;
+                    }
+                    let ok = compare(row, &refs[i].1[pos]).expect("compare").passes();
+                    if ok {
+                        covered[i][pos] = true;
+                        any = true;
+                    }
+                }
+                assert!(
+                    any,
+                    "variant {variant}: 呼び出し {ci} 行 {r}（位置 {pos}）がどの要求の単独 logits とも一致しない"
+                );
+            }
+        }
+        for (i, (_, p, _, c)) in plan.iter().enumerate() {
+            for (pos, &hit) in covered[i]
+                .iter()
+                .enumerate()
+                .take(c.max_length - 1)
+                .skip(p.len())
+            {
+                assert!(
+                    hit,
+                    "variant {variant} 要求 {i} 位置 {pos} の logits が単独と突合されていない"
+                );
+            }
+        }
         if variant > 0 {
             assert_batched_calls(&format!("variant {variant}"), &log);
             let mut bs: Vec<usize> = log
