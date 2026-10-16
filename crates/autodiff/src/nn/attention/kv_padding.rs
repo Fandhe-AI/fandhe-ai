@@ -2,22 +2,19 @@
 //! ヘルパー（イシュー #3105・親 #3103。`docs/facade-speculative-decoding-
 //! batching-design.md` §21.4・§21.5・§21.9）。
 //!
-//! 本イシュー時点で非テストの呼び出し元がない（#3106 の `step_batched` が使う
-//! 予定）ため `attention` の `#[cfg(test)]` 子モジュールとし、`#[allow]` を
-//! 避ける。**#3106 で `cfg(test)` を外し、§21.9 の `max_active`／
-//! `max_length` 検査を加える**。`lens` は親モジュールの非公開フィールドで、
-//! 子モジュールからのみ直接読み書きする（公開面を増やさない）。
+//! 呼び出し元は `generate::scheduler::BatchScheduler::step_batched`（#3106）。
+//! §21.9 の `max_active`／`max_length` 検査はスケジューラ側が本ヘルパーの呼び出し前に行い、
+//! 本ヘルパーは `B x S_max x E x 4` の `checked_mul`／`isize::MAX` バイト検査だけを持つ
+//! （attention 側へスケジューラの上限を持ち込まない）。`lens` は親モジュールの非公開
+//! フィールドで、子モジュールからのみ直接読み書きする（公開面を増やさない）。
+//! `#[cfg(test)]` の属性は api_surface の `without_test_mod` の都合でファイル末尾の
+//! テスト専用 impl にだけ置く。
 
 use super::KvCache;
 use crate::error::AutodiffError;
 use fandhe_ai_tensor_core::Tensor;
 
 impl KvCache {
-    /// テスト専用: 非公開 `lens` の参照（公開メソッド集合に入れない）。
-    pub(crate) fn lens_for_test(&self) -> Option<&[usize]> {
-        self.lens.as_deref()
-    }
-
     /// バッチ 1 のキャッシュ列を左詰め padding で `[B, S_max, E]` へ束ねる。
     /// 入力検査・上限検査（§21.9）は確保の前に行い、算術はしない。
     /// 全行が同じ長さなら `lens = None`（正規化）。
@@ -107,5 +104,13 @@ impl KvCache {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl KvCache {
+    /// テスト専用: 非公開 `lens` の参照（公開メソッド集合に入れない）。
+    pub(crate) fn lens_for_test(&self) -> Option<&[usize]> {
+        self.lens.as_deref()
     }
 }

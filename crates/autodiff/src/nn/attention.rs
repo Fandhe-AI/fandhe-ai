@@ -2187,9 +2187,9 @@ impl Module for MultiheadAttention {
     }
 }
 
-// #3105: 束ね・分割ヘルパー（#3106 で cfg を外して本体へ移す）。api_surface の
-// `without_test_mod` が最初の cfg 属性以降を切り落とすため、本体の途中ではなくここへ置く。
-#[cfg(test)]
+// #3105・#3106: 束ね・分割ヘルパー（`BatchScheduler::step_batched` が使う crate 内部実装）。
+// api_surface の `without_test_mod` が最初の cfg 属性以降を切り落とすため、本体の途中ではなく
+// ここへ置く（テスト専用 impl は kv_padding.rs の末尾に分ける）。
 mod kv_padding;
 
 #[cfg(test)]
