@@ -157,3 +157,7 @@ Keras 風 `Sequential::compile(optimizer, loss)`（学習設定 API）は別物�
 - `docs/perf/logs/gpu-elementwise-fusion-2085/README.md`・`docs/backend-metal-command-batching-design.md`
 - `docs/perf/logs/framework-compare-0.10.0-remeasure/scoreboard/body_0100.html`
 - `docs/spec/04-requirements.md` REQ-9・REQ-12（メイン checkout で参照。編集しない）
+
+## #3115 追補
+
+区分 B の opt-in setter（B-1 の CUDA／Metal 各 1 対・推論 capture の 1 対）の公開形と、B-1 新規 `unsafe` 4 か所の承認状況（記録上不明・所有者へ戻す点 R1／R2）の正は `docs/facade-graph-tier-b-optin-exposure-decision.md`。H2・H3・H7 と §3 の表本文は書き換えない。facade 公開は未実施（#3116 で実施）。
