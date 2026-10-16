@@ -620,8 +620,8 @@ impl CudaElementwise {
 /// カーネル専用。区分 B-1・イシュー #2085）。`run_binary`／`run_unary`
 /// と同型の手続き（H2D → 起動 → 同期 → D2H）だが、葉入力の本数
 /// （`leaves.len()`）が呼び出しごとに可変なため `CudaElementwise` の
-/// メソッドではなく独立した自由関数として提供する（呼び出し元
-/// `fused_elementwise.rs::CudaFusedElementwise::run_f32` は融合プラン
+/// メソッドではなく独立した自由関数として提供する（直接の呼び出し元
+/// `fused_elementwise.rs::launch_program_f32` は融合プラン
 /// ごとに動的コンパイルされる [`CudaFunction`] を
 /// `context_cache::cached_fused_elementwise_kernel` から都度受け取る
 /// ため、`CudaElementwise::new` のような固定カーネル保持構造を持たない）。
@@ -681,9 +681,13 @@ pub(crate) fn launch_nary(
         // 前提（本関数では検査できない）: `func` は「`leaves.len()` 個の葉
         // ポインタ + out ポインタ + `numel`（i32）」のシグネチャでコンパイル
         // されている。引数個数・型の不一致は FFI 境界で UB となるが、
-        // 唯一の呼び出し元 `fused_elementwise.rs::CudaFusedElementwise::
-        // run_f32` が `leaf_count` と一致するプログラムからカーネルを生成し
-        // `leaves.len() == leaf_count` を起動前に検証する契約で担保する
+        // 現行経路では次の 2 段で担保する: カーネルは
+        // `fused_elementwise.rs::compile_program` が `program.leaf_count`
+        // 個の葉を持つシグネチャで生成し（キャッシュキーにも `leaf_count`
+        // を含む）、`leaves.len() == program.leaf_count` は
+        // `ops.rs::CudaBackendOps::run_fused_elementwise_allowlist` が
+        // 起動前に検証する。本関数の直接の呼び出し元は
+        // `fused_elementwise.rs::launch_program_f32` のみ
         // （独立監査 P2。`docs/facade-graph-tier-b-optin-exposure-decision.md`
         // §13.4）。
         unsafe {
