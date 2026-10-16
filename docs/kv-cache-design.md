@@ -241,7 +241,7 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 | A | 利用者が既存 `Var` 演算を自前で合成（ライブラリ側 API なし・段階 0 維持） | なし | 問題なし | 利用者負担大（`is_causal` 落とし穴を利用者が踏みうる） | 制約なし |
 | **B（本 doc 推奨）** | `KvCache`（ホスト `Tensor<f32>` 保持）+ `forward_with_cache` | なし | 問題なし | 中（§3 の合成） | `Tape` 外で保持するため `reset`／再作成の影響を受けない |
 | B' | `detach` した `Var` を同一 `Tape` 上で保持し続ける | なし | 問題なし | 中 | `Tape::reset`／再作成で葉が消えるため decode ループの運用制約が強い |
-| C（K-3・段階 0） | デバイス常駐バッファとして KV を保持 | 要検討 | 要検討 | 高（`TapeNode::value` がホスト前提の現行構造を変更する規模） | 本 doc の対象外。K-3 として別途評価 |
+| C（K-3・段階 0） | デバイス常駐バッファとして KV を保持 | 要検討 | 要検討 | 高（`TapeNode::value` がホスト前提の現行構造を変更する規模） | 本 doc の対象外。K-3 として別途評価（設計の推奨形は `docs/device-resident-kv-paged-attention-design.md`。承認は未取得） |
 
 案 B' は `Tape` のステップごとの再作成・切り詰め運用と相性が悪い
 ため、案 B（本 doc の推奨）を採る。
@@ -258,7 +258,7 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 2. facade 公開面拡張（#2084 の `add_stateful_attention`／
    `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）: ~~未取得~~ →
    **2026-10-07 にリポジトリ所有者本人が承認済み**（§11.6 の P1〜P4 を推奨どおり。§14 参照）
-3. K-3（デバイス常駐 KV。段階 0）: **未取得**
+3. K-3（デバイス常駐 KV。段階 0）: **未取得**（設計の推奨形は `docs/device-resident-kv-paged-attention-design.md`。承認の確認事項は同 doc §9）
 4. `sdpa_compose` 置換の別 issue 起票: **未取得**
 
 これまでの類似イシュー（#2065／#2068）が「ツリーを `autoMerge=true`
@@ -681,3 +681,9 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 ### 15.6 変更していないもの
 
 依存（`Cargo.toml`／`Cargo.lock`／`deny.toml`）・tolerance・baseline・ガードレール閾値・`docs/spec`・公開 API・`unsafe`。
+
+## 16. #3109 の記録
+
+K-3（デバイス常駐 KV）と paged attention の設計は `docs/device-resident-kv-paged-attention-design.md` に推奨形として記録した。
+§6 項 3 の承認状態は「未取得」のまま変更していない。K-3 が D-A の一括承認に含まれるかは同 doc §9 の確認事項 1 として所有者へ戻す。
+コード・依存・`docs/spec` の変更はない。
