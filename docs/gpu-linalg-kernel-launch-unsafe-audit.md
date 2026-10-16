@@ -63,7 +63,7 @@
 
 ### 3.2 移設対象と一般化後の契約
 
-新しい `pub(crate)` モジュール（名前の例: `encoder_args.rs`。確定は #3137）へ移す。
+新しい `pub(crate)` モジュール `crates/backend-metal/src/encoder_args.rs`（#3137 で確定）へ移した。
 
 | ID | 対象 | API | 一般化後の契約 |
 |----|------|-----|----------------|
@@ -111,10 +111,10 @@ eigh の回転更新（`s_skip == 0` 内）の `sym` 書き込みと `v` 書き�
 | # | 内容 | 担当 |
 |---|------|------|
 | 1 | CUDA solve の `perm[i]` に範囲検査がない（Metal は `src < n`）。REQ-8 の多層防御として `perm[i] < n` 検査の追加を検討する。カーネルソースの変更は本 PR では行わない | #3135 |
-| 2 | `n > 0` かつ `k == 0` では solve の grid 0 起動を作らない | #3135・#3137 |
-| 3 | Metal QR は `m*n <= u32::MAX` により `m` が u32::MAX 近傍（n=1）になりうる。`for (uint i = tid; i < len; i += tg_size)` が最終要素付近でラップして終了しない（ハング）可能性を #3137 で確認する。MSL の符号なしラップは UB ではないが DoS になりうる | #3137 |
+| 2 | `n > 0` かつ `k == 0` では solve の grid 0 起動を作らない | #3135・#3137（Metal は #3137 で解消: `k == 0` は LU のみ encode し solve を encode しない） |
+| 3 | Metal QR は `m*n <= u32::MAX` により `m` が u32::MAX 近傍（n=1）になりうる。`for (uint i = tid; i < len; i += tg_size)` が最終要素付近でラップして終了しない（ハング）可能性を #3137 で確認する。MSL の符号なしラップは UB ではないが DoS になりうる | #3137（解消: `linalg::validate_launch_stride_headroom` で `bound + 256 <= 2^32` をホスト検証。QR は `max(m, n)`、LU・cholesky は `n*n`〈n<=65535 で 65535²+256 < 2^32 のため実質影響なし〉、solve は `max(n*n, k)`。MSL は変更していない） |
 | 4 | NVRTC コンパイル・GB10 実機・Mac 実機での一致は未検証 | #3138・#3139 |
-| 5 | Metal のバッファ生存契約は dispatch 方式に依存する | #3137 |
+| 5 | Metal のバッファ生存契約は dispatch 方式に依存する | #3137（解消: `ctx.dispatch_sync` に固定。バッファは関数スコープで生存し、`synchronize` 後に読み戻す） |
 | 6 | D-C 承認コメントの URL を確認し、本 doc §1 へ追記する | 本 issue のレビュー時 |
 
 ## 7. OWASP 対応
@@ -138,6 +138,18 @@ grep -n "unsafe" crates/backend-cuda/src/linalg.rs crates/backend-metal/src/lina
 ```
 
 （`encoder_args.rs` は #3137 で確定するモジュール名の例。移設元の `rnn_cell.rs`・`sort.rs` も併せて確認する。）
+
+### 8.1 Metal（#3137）
+
+**security-auditor によるサブエージェント監査は未実施**（実行環境でサブエージェントを起動できなかった）。「指摘なし」を意味しない。以下は実装担当の自己点検で、PR レビューで security-auditor の監査を受け、指摘と対応を本節へ追記する。
+
+- `unsafe` の差分（案 A）: 移設元の 3 ブロック（`rnn_cell.rs` の `set_u32_arg`・`set_buffer_arg`、`sort.rs` の `set_scalar_args`）を削除し、`encoder_args.rs` に 2 ブロック（MT-1: `setBuffer_offset_atIndex`、MT-2: `setBytes_length_atIndex`）を置いた。`set_u32_arg` は `set_u32_args` へ委譲するため、正味の新規 `unsafe` は 0（総数は 1 減る）。`linalg_kernel.rs` は `unsafe` を含まない。`sort.rs` の `encode_*` 内に inline で残る `setBuffer` の `unsafe` は本記録の列挙（MT-1・MT-2）の外のため触っていない。
+- 生存契約: すべて `ctx.dispatch_sync` 内で呼び、バッファは関数スコープで生存する。
+- `status`／`applied` は `new_zeroed_i32` で 0 初期化して起動し、`status` は必ず読み戻して判定する。特異時は det を即 `0.0` とし、未処理の対角を積に通さない。未知の非 0 status は特異（失敗側）として扱う。
+- 因数分解 3 カーネルは単一 threadgroup `(1,1,1)`、幅は `maxTotalThreadsPerThreadgroup` で clamp する。solve は `ceil(k / width)` threadgroups で、`k == 0` では encode しない。
+- スカラーは `u32::try_from` で切り詰めずに変換する。`run_*` の入口で長さと次元を再検証する（二重検査）。
+- REQ-8: MSL のコード部分は変更しておらず、カーネル側の手動境界チェックは維持している。
+- 実機（M4 Max）での数値一致・移設の非後退（`rnn_cell_parity`・`sort_topk_parity` の `--ignored`）は未検証（#3139）。
 
 ### #3136（CU-3・CU-4・CU-5 の実装）
 

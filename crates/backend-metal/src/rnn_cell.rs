@@ -14,11 +14,11 @@
 //! 合成で閉じるため。設計 `docs/autodiff-rnn-cell-tape-design.md`
 //! 決定 1）。
 
-use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLDevice, MTLSize};
 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
+use crate::encoder_args::{set_buffer_arg, set_u32_arg};
 use crate::error::MetalError;
 use crate::pipeline::{self, MtlPipeline};
 
@@ -109,40 +109,6 @@ fn dispatch_sizes(numel: usize) -> (MTLSize, MTLSize) {
     (threadgroups, threads_per_tg)
 }
 
-/// `u32` 値 1 個を `index` バッファへ即時複製する共通ヘルパー
-/// （`mse.rs::encode_partial_dispatch` と同じ `setBytes_length_atIndex`
-/// パターン）。
-///
-/// SAFETY: `setBytes_length_atIndex` は指定ポインタから指定バイト数を
-/// 即座に複製する。`value` はローカル変数でありポインタは本呼び出し中
-/// 生存し、長さは MSL 側 `constant uint&` 宣言の型と揃えている
-/// （`shaders/rnn_cell.metal` 参照）。
-fn set_u32_arg(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, value: u32, index: usize) {
-    unsafe {
-        encoder.setBytes_length_atIndex(
-            std::ptr::NonNull::from(&value).cast(),
-            std::mem::size_of::<u32>(),
-            index,
-        );
-    }
-}
-
-/// `MetalBuffer` を `index` バッファスロットへ結線する共通ヘルパー。
-///
-/// SAFETY: `setBuffer_offset_atIndex` は生存中の `MTLBuffer` への参照を
-/// 保持するのみで即座に読み書きしない（`mse.rs::encode_partial_dispatch`
-/// と同種のコメント参照）。各バッファは呼び出し元 `ctx.dispatch_sync` が
-/// 完了するまで生存する。
-fn set_buffer_arg(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    buf: &MetalBuffer,
-    index: usize,
-) {
-    unsafe {
-        encoder.setBuffer_offset_atIndex(Some(buf.raw()), 0, index);
-    }
-}
-
 /// RNN／LSTM／GRU セル演算 5 カーネル（いずれも f32）のコンパイル済み
 /// パイプラインを保持する。
 pub struct MetalRnnCell {
@@ -214,11 +180,11 @@ impl MetalRnnCell {
 
         ctx.dispatch_sync(|encoder| {
             encoder.setComputePipelineState(&self.lstm_pointwise_f32);
-            set_buffer_arg(encoder, &pre_buf, 0);
-            set_buffer_arg(encoder, &c_prev_buf, 1);
-            set_buffer_arg(encoder, &gates_buf, 2);
-            set_buffer_arg(encoder, &c_buf, 3);
-            set_buffer_arg(encoder, &h_buf, 4);
+            set_buffer_arg(encoder, pre_buf.raw(), 0);
+            set_buffer_arg(encoder, c_prev_buf.raw(), 1);
+            set_buffer_arg(encoder, gates_buf.raw(), 2);
+            set_buffer_arg(encoder, c_buf.raw(), 3);
+            set_buffer_arg(encoder, h_buf.raw(), 4);
             set_u32_arg(encoder, hidden as u32, 5);
             set_u32_arg(encoder, numel as u32, 6);
             let (threadgroups, threads_per_tg) = dispatch_sizes(numel);
@@ -261,11 +227,11 @@ impl MetalRnnCell {
 
         ctx.dispatch_sync(|encoder| {
             encoder.setComputePipelineState(&self.lstm_hidden_backward_f32);
-            set_buffer_arg(encoder, &c_buf, 0);
-            set_buffer_arg(encoder, &gate_o_buf, 1);
-            set_buffer_arg(encoder, &dh_buf, 2);
-            set_buffer_arg(encoder, &d_pre_o_buf, 3);
-            set_buffer_arg(encoder, &dc_buf, 4);
+            set_buffer_arg(encoder, c_buf.raw(), 0);
+            set_buffer_arg(encoder, gate_o_buf.raw(), 1);
+            set_buffer_arg(encoder, dh_buf.raw(), 2);
+            set_buffer_arg(encoder, d_pre_o_buf.raw(), 3);
+            set_buffer_arg(encoder, dc_buf.raw(), 4);
             set_u32_arg(encoder, numel as u32, 5);
             let (threadgroups, threads_per_tg) = dispatch_sizes(numel);
             encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
@@ -301,11 +267,11 @@ impl MetalRnnCell {
 
         ctx.dispatch_sync(|encoder| {
             encoder.setComputePipelineState(&self.lstm_cell_backward_f32);
-            set_buffer_arg(encoder, &gates_buf, 0);
-            set_buffer_arg(encoder, &c_prev_buf, 1);
-            set_buffer_arg(encoder, &dc_buf, 2);
-            set_buffer_arg(encoder, &d_pre_ifg_buf, 3);
-            set_buffer_arg(encoder, &dc_prev_buf, 4);
+            set_buffer_arg(encoder, gates_buf.raw(), 0);
+            set_buffer_arg(encoder, c_prev_buf.raw(), 1);
+            set_buffer_arg(encoder, dc_buf.raw(), 2);
+            set_buffer_arg(encoder, d_pre_ifg_buf.raw(), 3);
+            set_buffer_arg(encoder, dc_prev_buf.raw(), 4);
             set_u32_arg(encoder, hidden as u32, 5);
             set_u32_arg(encoder, numel as u32, 6);
             let (threadgroups, threads_per_tg) = dispatch_sizes(numel);
@@ -343,12 +309,12 @@ impl MetalRnnCell {
 
         ctx.dispatch_sync(|encoder| {
             encoder.setComputePipelineState(&self.gru_pointwise_f32);
-            set_buffer_arg(encoder, &pre_i_buf, 0);
-            set_buffer_arg(encoder, &pre_h_buf, 1);
-            set_buffer_arg(encoder, &h_prev_buf, 2);
-            set_buffer_arg(encoder, &gates_buf, 3);
-            set_buffer_arg(encoder, &q_buf, 4);
-            set_buffer_arg(encoder, &h_buf, 5);
+            set_buffer_arg(encoder, pre_i_buf.raw(), 0);
+            set_buffer_arg(encoder, pre_h_buf.raw(), 1);
+            set_buffer_arg(encoder, h_prev_buf.raw(), 2);
+            set_buffer_arg(encoder, gates_buf.raw(), 3);
+            set_buffer_arg(encoder, q_buf.raw(), 4);
+            set_buffer_arg(encoder, h_buf.raw(), 5);
             set_u32_arg(encoder, hidden as u32, 6);
             set_u32_arg(encoder, numel as u32, 7);
             let (threadgroups, threads_per_tg) = dispatch_sizes(numel);
@@ -394,13 +360,13 @@ impl MetalRnnCell {
 
         ctx.dispatch_sync(|encoder| {
             encoder.setComputePipelineState(&self.gru_backward_f32);
-            set_buffer_arg(encoder, &gates_buf, 0);
-            set_buffer_arg(encoder, &q_buf, 1);
-            set_buffer_arg(encoder, &h_prev_buf, 2);
-            set_buffer_arg(encoder, &dh_buf, 3);
-            set_buffer_arg(encoder, &d_pre_i_buf, 4);
-            set_buffer_arg(encoder, &d_pre_h_buf, 5);
-            set_buffer_arg(encoder, &dh_prev_direct_buf, 6);
+            set_buffer_arg(encoder, gates_buf.raw(), 0);
+            set_buffer_arg(encoder, q_buf.raw(), 1);
+            set_buffer_arg(encoder, h_prev_buf.raw(), 2);
+            set_buffer_arg(encoder, dh_buf.raw(), 3);
+            set_buffer_arg(encoder, d_pre_i_buf.raw(), 4);
+            set_buffer_arg(encoder, d_pre_h_buf.raw(), 5);
+            set_buffer_arg(encoder, dh_prev_direct_buf.raw(), 6);
             set_u32_arg(encoder, hidden as u32, 7);
             set_u32_arg(encoder, numel as u32, 8);
             let (threadgroups, threads_per_tg) = dispatch_sizes(numel);

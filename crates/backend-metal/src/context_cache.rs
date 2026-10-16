@@ -421,6 +421,20 @@ pub(crate) fn cached_scan(
     get_or_build(cache, on_poison, || crate::scan::MetalScan::new(ctx))
 }
 
+/// 線形代数 4 カーネル（`linalg_kernel.rs::MetalLinalg`）のコンパイル済み
+/// パイプラインをプロセス内キャッシュから取得する（イシュー #3137。
+/// `cached_scan` と同型）。`ops::MetalBackendOps::linalg_*` の唯一の呼び出し先で、
+/// 内部 opt-in ゲート ON かつ非空入力の経路でのみ初期化される。
+pub(crate) fn cached_linalg(
+    ctx: &Arc<MetalContext>,
+) -> Result<Arc<crate::linalg_kernel::MetalLinalg>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<crate::linalg_kernel::MetalLinalg>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || {
+        crate::linalg_kernel::MetalLinalg::new(ctx)
+    })
+}
+
 /// `sort`／`topk` カーネル（`sort.rs::MetalSort`）のコンパイル済み
 /// パイプラインをプロセス内キャッシュから取得する（イシュー #1741。
 /// `cached_unique` と同型）。
