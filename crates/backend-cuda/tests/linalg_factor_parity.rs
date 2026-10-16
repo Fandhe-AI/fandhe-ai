@@ -8,8 +8,8 @@
 //! cargo test -p fandhe-ai-backend-cuda --release --test linalg_factor_parity -- --ignored --nocapture
 //! ```
 //!
-//! カーネル起動（新規 unsafe）はユーザー承認待ちのため、parity テストはゲート ON で
-//! `Unsupported`（承認待ち）を受けたら承認待ちを明示して fail させる（green と取り違えない）。
+//! カーネル起動はイシュー #3136 で実装済み（実機での一致確認は #3138）。ゲート ON の
+//! 非空入力は `Unsupported` を返さない（CUDA 不在なら `CudaUnavailable`）。
 
 use std::sync::Mutex;
 
@@ -115,10 +115,10 @@ fn gate_on_validates_shapes_without_touching_device() {
         cuda.linalg_eigh(&rect),
         Err(BackendError::InvalidArgument(_))
     ));
-    // 非正方の QR は形状エラーにならない（承認待ちまたは CUDA 不在まで進む）。
+    // 非正方の QR は形状エラーにならない（CUDA 不在まで進む。`Unsupported` は不合格）。
     assert!(matches!(
         cuda.linalg_qr(&rect),
-        Err(BackendError::Unsupported(_) | BackendError::CudaUnavailable(_)) | Ok(_)
+        Err(BackendError::CudaUnavailable(_)) | Ok(_)
     ));
 }
 
@@ -145,7 +145,8 @@ fn gate_on_empty_inputs_match_cpu_shapes() {
     }
 }
 
-/// CUDA 非搭載環境でも panic せず型付きエラーまたは承認待ち `Unsupported` を返す。
+/// CUDA 非搭載環境でも panic せず型付きエラー（`CudaUnavailable`）を返す。
+/// ゲート ON の非空入力が `Unsupported` に落ちない（実起動へ結線済み）ことも固定する。
 #[test]
 fn gate_on_non_empty_does_not_panic() {
     let _g = GateOn::new(true);
@@ -153,48 +154,80 @@ fn gate_on_non_empty_does_not_panic() {
     let a = t(vec![4.0, 1.0, 1.0, 3.0], &[2, 2]);
     assert!(matches!(
         cuda.linalg_cholesky(&a),
-        Err(BackendError::Unsupported(_) | BackendError::CudaUnavailable(_)) | Ok(_)
+        Err(BackendError::CudaUnavailable(_)) | Ok(_)
     ));
     assert!(matches!(
         cuda.linalg_qr(&a),
-        Err(BackendError::Unsupported(_) | BackendError::CudaUnavailable(_)) | Ok(_)
+        Err(BackendError::CudaUnavailable(_)) | Ok(_)
     ));
     assert!(matches!(
         cuda.linalg_eigh(&a),
-        Err(BackendError::Unsupported(_) | BackendError::CudaUnavailable(_)) | Ok(_)
+        Err(BackendError::CudaUnavailable(_)) | Ok(_)
     ));
 }
 
 /// 実機: 3 カーネルが GB10 で NVRTC コンパイル・ロードできる（Stage A で検証可能な項目）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10）が必要"]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要（実測は #3138）"]
 fn nvrtc_compiles_and_loads_factor_kernels_on_device() {
     let device = CudaDevice::new(0).expect("CUDA device 0");
     let lin = CudaLinalgFactor::new(&device).expect("NVRTC compile/load");
     assert_eq!(lin.ordinal(), 0);
 }
 
-fn unwrap_pending<T>(r: Result<T, BackendError>, op: &str) -> T {
-    match r {
-        Ok(v) => v,
-        Err(BackendError::Unsupported(m)) => {
-            panic!("カーネル起動の unsafe 承認待ち（#2675）のため未実装: {op}: {m}")
-        }
-        Err(e) => panic!("{op} failed: {e:?}"),
+fn ok<T>(r: Result<T, BackendError>, op: &str) -> T {
+    r.unwrap_or_else(|e| panic!("{op} failed: {e:?}"))
+}
+
+/// 既知の条件数（約 1e3）を持つ SPD。対角 `d_i = 1e3^(i/(n-1))` に決定的な Givens 回転を
+/// f64 で施し、対称化してから f32 化する（設計記録 §5）。
+fn spd_known_kappa(n: usize) -> Tensor<f32> {
+    let mut a = vec![0.0f64; n * n];
+    for i in 0..n {
+        let e = if n > 1 {
+            i as f64 / (n - 1) as f64
+        } else {
+            0.0
+        };
+        a[i * n + i] = 1e3f64.powf(e);
     }
+    for p in 0..n {
+        for q in (p + 1)..n {
+            let th = 0.3 + 0.01 * (p * n + q) as f64;
+            let (c, sn) = (th.cos(), th.sin());
+            // A <- G A Gᵀ（G は (p,q) 平面の回転）。
+            for k in 0..n {
+                let (x, y) = (a[p * n + k], a[q * n + k]);
+                a[p * n + k] = c * x - sn * y;
+                a[q * n + k] = sn * x + c * y;
+            }
+            for k in 0..n {
+                let (x, y) = (a[k * n + p], a[k * n + q]);
+                a[k * n + p] = c * x - sn * y;
+                a[k * n + q] = sn * x + c * y;
+            }
+        }
+    }
+    let mut d = vec![0.0f32; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            d[i * n + j] = (0.5 * (a[i * n + j] + a[j * n + i])) as f32;
+        }
+    }
+    t(d, &[n, n])
 }
 
 /// 実機: cholesky を CPU と統一複合判定で比較する（SPD・大小スケール）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10）が必要。カーネル起動は新規 unsafe の承認待ち（#2675）"]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要（実測は #3138）"]
 fn cholesky_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cuda = CudaBackendOps::new(0);
     let cpu = CpuBackendOps::new();
     for &n in &[1usize, 2, 3, 8, 33, 64] {
-        for &scale in &[1.0f32, 1e-3, 1e3] {
+        for &scale in &[1.0f32, 1e-3, 1e3, 1e20, 1e-20] {
             let a = spd(n, scale);
-            let got = unwrap_pending(cuda.linalg_cholesky(&a), "cholesky");
+            let got = ok(cuda.linalg_cholesky(&a), "cholesky");
             let want = cpu.linalg_cholesky(&a).expect("cpu cholesky");
             fandhe_ai_backend_cpu::assert_parity(
                 &format!("cholesky n={n} scale={scale}"),
@@ -202,12 +235,20 @@ fn cholesky_matches_cpu_on_device() {
                 &s(&want),
             );
         }
+        let a = spd_known_kappa(n);
+        let got = ok(cuda.linalg_cholesky(&a), "cholesky kappa");
+        let want = cpu.linalg_cholesky(&a).expect("cpu cholesky kappa");
+        fandhe_ai_backend_cpu::assert_parity(
+            &format!("cholesky known-kappa n={n}"),
+            &s(&got),
+            &s(&want),
+        );
     }
 }
 
 /// 実機: QR（縦長・横長・rank 落ち・大小スケール）を符号規約込みで比較する。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10）が必要。カーネル起動は新規 unsafe の承認待ち（#2675）"]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要（実測は #3138）"]
 fn qr_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cuda = CudaBackendOps::new(0);
@@ -228,7 +269,7 @@ fn qr_matches_cpu_on_device() {
     cases.push(("zero column".into(), zc));
     cases.push(("1e20 * I2".into(), t(vec![1e20, 0.0, 0.0, 1e20], &[2, 2])));
     for (name, a) in cases {
-        let got = unwrap_pending(cuda.linalg_qr(&a), "qr");
+        let got = ok(cuda.linalg_qr(&a), "qr");
         let want = cpu.linalg_qr(&a).expect("cpu qr");
         fandhe_ai_backend_cpu::assert_parity(&format!("qr.q {name}"), &s(&got.q), &s(&want.q));
         fandhe_ai_backend_cpu::assert_parity(&format!("qr.r {name}"), &s(&got.r), &s(&want.r));
@@ -237,7 +278,7 @@ fn qr_matches_cpu_on_device() {
 
 /// 実機: eigh（重複固有値を含む）を固有値の並び・固有ベクトルの符号込みで比較する。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10）が必要。カーネル起動は新規 unsafe の承認待ち（#2675）"]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要（実測は #3138）"]
 fn eigh_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cuda = CudaBackendOps::new(0);
@@ -251,8 +292,14 @@ fn eigh_matches_cpu_on_device() {
         t(vec![2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 5.0], &[3, 3]),
     ));
     cases.push(("1e20 * I2".into(), t(vec![1e20, 0.0, 0.0, 1e20], &[2, 2])));
+    for &scale in &[1e20f32, 1e-20] {
+        cases.push((format!("spd n=8 scale={scale}"), spd(8, scale)));
+    }
+    for &n in &[2usize, 8, 33] {
+        cases.push((format!("known-kappa n={n}"), spd_known_kappa(n)));
+    }
     for (name, a) in cases {
-        let got = unwrap_pending(cuda.linalg_eigh(&a), "eigh");
+        let got = ok(cuda.linalg_eigh(&a), "eigh");
         let want = cpu.linalg_eigh(&a).expect("cpu eigh");
         fandhe_ai_backend_cpu::assert_parity(
             &format!("eigh.values {name}"),
@@ -265,4 +312,42 @@ fn eigh_matches_cpu_on_device() {
             &s(&want.eigenvectors),
         );
     }
+}
+
+/// 実機: 非正定値の cholesky は CUDA・CPU ともに `InvalidArgument`（A08・不変条件 (f)）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要（実測は #3138）"]
+fn cholesky_non_spd_is_invalid_argument_on_device() {
+    let _g = GateOn::new(true);
+    let cuda = CudaBackendOps::new(0);
+    let cpu = CpuBackendOps::new();
+    for a in [t(vec![1.0, 2.0, 2.0, 1.0], &[2, 2]), t(vec![0.0], &[1, 1])] {
+        assert!(matches!(
+            cuda.linalg_cholesky(&a),
+            Err(BackendError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            cpu.linalg_cholesky(&a),
+            Err(BackendError::InvalidArgument(_))
+        ));
+    }
+}
+
+/// 実機: NaN を含む対称行列の eigh は巡回 Jacobi が収束せず CUDA・CPU ともに
+/// `InvalidArgument`。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要（実測は #3138）"]
+fn eigh_non_convergence_is_invalid_argument_on_device() {
+    let _g = GateOn::new(true);
+    let cuda = CudaBackendOps::new(0);
+    let cpu = CpuBackendOps::new();
+    let a = t(vec![1.0, f32::NAN, f32::NAN, 1.0], &[2, 2]);
+    assert!(matches!(
+        cuda.linalg_eigh(&a),
+        Err(BackendError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        cpu.linalg_eigh(&a),
+        Err(BackendError::InvalidArgument(_))
+    ));
 }

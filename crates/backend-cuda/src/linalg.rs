@@ -31,16 +31,22 @@
 //! # カーネル起動の承認状況
 //!
 //! cudarc の `launch` は `unsafe fn` であり、カーネル起動には新規 `unsafe`
-//! が必要になる。新規 `unsafe` はユーザー承認事項（イシュー #2674 契約）で
-//! あり、承認が確認できていないため本実装は起動を含まない。ゲート ON 時は
-//! fail-closed の `Unsupported` を返す（`ops.rs`）。起動仕様は
-//! `docs/perf/logs/cuda-linalg-lu-2674/README.md` に承認依頼として記載する。
+//! が必要になる。LU 系（`solve`・`inv`・`det`）は承認が確認できていないため
+//! 起動を含まず、ゲート ON 時は fail-closed の `Unsupported` を返す（`ops.rs`。
+//! 起動仕様は `docs/perf/logs/cuda-linalg-lu-2674/README.md`、#3135 で実装）。
+//!
+//! 分解系 3 演算（cholesky・QR・eigh）は D-C 承認（親 #3133）と監査記録
+//! `docs/gpu-linalg-kernel-launch-unsafe-audit.md`（CU-3・CU-4・CU-5）に基づき
+//! イシュー #3136 で起動を実装済みで、[`CudaLinalgFactor::run_cholesky_f32`]・
+//! [`CudaLinalgFactor::run_qr_f32`]・[`CudaLinalgFactor::run_eigh_f32`] の
+//! 3 か所だけが `unsafe`（`launch`）を持つ。ゲート OFF（既定）の挙動は不変。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cudarc::driver::{CudaFunction, CudaStream};
+use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_linalg::{
@@ -49,6 +55,7 @@ use crate::kernels_linalg::{
 use crate::kernels_linalg_factor::{
     LINALG_CHOLESKY_F64, LINALG_EIGH_F64, LINALG_FACTOR_BLOCK_DIM, LINALG_QR_F64,
 };
+use crate::memory::readback;
 use crate::nvrtc::compile_ptx;
 
 /// GPU 線形代数 opt-in ゲート本体。既定 `false`（`fused_elementwise.rs` の
@@ -403,6 +410,97 @@ pub fn qr_finalize(
     Ok((r, q))
 }
 
+/// `status`／`refl_valid` をホストが書き込む「未実行」sentinel（カーネルは
+/// `{0,1}` しか書かないため、読み戻して本値のままなら起動が走っていない。
+/// 監査記録 不変条件 (f)・A08 fail-closed）。
+const FACTOR_STATUS_SENTINEL: i32 = -1;
+
+/// 分解系カーネルの演算種別（`status == 1` の意味を分ける）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FactorOp {
+    Cholesky,
+    Eigh,
+}
+
+/// `status[0]` を判定する純関数。`0` は成功、`1` は入力起因の失敗
+/// （[`CudaError::LinalgInvalidArgument`]。CPU 参照実装と同じ `InvalidArgument`
+/// 分類）、それ以外（sentinel のまま・想定外の値）は
+/// [`CudaError::LinalgKernelStatusInvalid`]（成功扱いにしない）。
+///
+/// 入力起因の失敗はドライバ障害ではないため `context_cache::observe_cuda_result`
+/// は ordinal を poison しない（`CudaError::Driver` のときだけ poison する）。
+fn factor_status_to_result(op: FactorOp, status: i32) -> Result<(), CudaError> {
+    match status {
+        0 => Ok(()),
+        1 => Err(CudaError::LinalgInvalidArgument {
+            detail: match op {
+                FactorOp::Cholesky => {
+                    "linalg_cholesky: 行列が対称正定値でない（対角が非有限または非正）".to_string()
+                }
+                FactorOp::Eigh => {
+                    "linalg_eigh: 巡回 Jacobi 法が反復上限（60 スイープ）内に収束しなかった"
+                        .to_string()
+                }
+            },
+        }),
+        other => Err(CudaError::LinalgKernelStatusInvalid {
+            detail: format!("{op:?}: status={other} は契約外（sentinel のまま、または想定外）"),
+        }),
+    }
+}
+
+/// QR の `refl_valid` が全要素 `{0,1}` であることを確認する（sentinel のまま
+/// 残った要素は起動が走っていない証拠。`qr_finalize` は値を使わないが、
+/// 読み戻して判定する不変条件 (f) を意味あるものにする）。
+fn check_refl_valid(refl_valid: &[i32], k: usize) -> Result<(), CudaError> {
+    if refl_valid.len() != k || refl_valid.iter().any(|&v| v != 0 && v != 1) {
+        return Err(CudaError::LinalgKernelStatusInvalid {
+            detail: format!(
+                "linalg_qr: refl_valid が契約外（len={} / 期待 {k}、全要素 0/1 が必要）",
+                refl_valid.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `usize` の次元を `i32` へ切り詰めなしで変換する（不変条件 (c)）。
+fn to_i32(op: &str, name: &str, v: usize) -> Result<i32, CudaError> {
+    i32::try_from(v).map_err(|_| CudaError::InvalidElementwiseShape {
+        detail: format!("{op}: {name}={v} が i32 に収まらない（カーネル引数型）"),
+    })
+}
+
+/// 入力長が期待要素数と一致することを検証する。
+fn check_len(op: &str, name: &str, got: usize, want: usize) -> Result<(), CudaError> {
+    if got != want {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!("{op}: {name} の長さ {got} が期待 {want} と一致しない"),
+        });
+    }
+    Ok(())
+}
+
+/// H2D 前の f32→f64 変換（1e±20 の二乗が f32 では overflow／underflow するため）。
+fn widen(a: &[f32]) -> Vec<f64> {
+    a.iter().map(|&x| f64::from(x)).collect()
+}
+
+/// D2H・ホスト後処理後の `as f32`（出力ごとに 1 回だけ）。
+fn narrow(a: &[f64]) -> Vec<f32> {
+    a.iter().map(|&x| x as f32).collect()
+}
+
+/// 分解系 3 カーネル共通の起動形状（grid は 1 block・block は
+/// `FACTOR_BLOCK_DIM`＝カーネルの `*_BLOCK` と厳密一致）。
+fn factor_launch_config() -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (FACTOR_BLOCK_DIM, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
 /// cholesky・QR・eigh の 3 カーネル（`double`）のコンパイル済みハンドル。
 /// LU 側の [`CudaLinalg`] とは別型にして、LU の経路で余分なカーネルを
 /// コンパイルしない。
@@ -440,6 +538,184 @@ impl CudaLinalgFactor {
     /// 構築元デバイスのストリーム。
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
+    }
+
+    /// Cholesky 分解 `A = L Lᵀ`（`a`: 行優先 `n*n` の `f32`）を GPU で実行し
+    /// `L`（`n*n`・`f32`）を返す（イシュー #3136・監査記録 CU-3）。
+    ///
+    /// `ops.rs::linalg_cholesky` から `with_driver_call` 内で呼ばれる。`pub` で
+    /// 直接呼べるため入口で検証し直す（多層防御）。f32→f64 変換は H2D の前、
+    /// `as f32` は D2H とホスト後処理の後に 1 回だけ。
+    pub fn run_cholesky_f32(&self, a: &[f32], n: usize) -> Result<Vec<f32>, CudaError> {
+        const OP: &str = "linalg_cholesky";
+        validate_square_factor_dims(OP, n)?;
+        if n == 0 {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!("{OP}: n=0 はカーネルを起動しない（呼び出し側で短絡する）"),
+            });
+        }
+        check_len(OP, "a", a.len(), n * n)?;
+        let n_i = to_i32(OP, "n", n)?;
+        let a64 = widen(a);
+        context_cache::with_driver_call(self.ordinal, || {
+            let a_dev = self.stream.clone_htod(&a64)?;
+            let mut l_dev = self.stream.alloc_zeros::<f64>(n * n)?;
+            let mut status_dev = self.stream.clone_htod(&[FACTOR_STATUS_SENTINEL])?;
+            let cfg = factor_launch_config();
+            // SAFETY: CU-3（docs/gpu-linalg-kernel-launch-unsafe-audit.md §2）。
+            // (a) ゲート・形状・サイズ検証は `ops.rs` と本関数入口の
+            // `validate_square_factor_dims`・長さ検査で済み、デバイス確保より前。
+            // (b) `a_dev`・`l_dev` は検証済みの `n*n` 要素の f64 バッファ、
+            // `status_dev` は 1 要素（いずれも `n*n <= i32::MAX`）。f32→f64 変換は
+            // H2D 前に完了。(c) `n_i` は `i32::try_from` で切り詰めなし。
+            // (d) 本クロージャは `context_cache::with_driver_call` の内側で、
+            // 構築側も `ops.rs` の `with_driver_call` 内。(e) 引数順・型は
+            // `linalg_cholesky_f64(const double* a, double* l, int* status, int n)`
+            // と一致。(f) `status_dev` は下で必ず読み戻して判定する。
+            // (g) 3 バッファは下の readback（同期点）の完了まで本スコープで生存。
+            // block 次元は `FACTOR_BLOCK_DIM`（カーネルの CHOL_BLOCK=256 と厳密
+            // 一致）・grid は 1 block で block 間同期は不要。カーネル内は
+            // `idx < total`・`i < n` の手動境界チェックを維持（REQ-8）。
+            // int 添字は `n*n <= i32::MAX` で overflow しない。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.cholesky)
+                    .arg(&a_dev)
+                    .arg(&mut l_dev)
+                    .arg(&mut status_dev)
+                    .arg(&n_i)
+                    .launch(cfg)?;
+            }
+            let status: Vec<i32> = readback(&self.stream, &status_dev)?;
+            let status0 = status.first().copied().unwrap_or(FACTOR_STATUS_SENTINEL);
+            factor_status_to_result(FactorOp::Cholesky, status0)?;
+            let l64: Vec<f64> = readback(&self.stream, &l_dev)?;
+            check_len(OP, "l(readback)", l64.len(), n * n)?;
+            Ok(narrow(&l64))
+        })
+    }
+
+    /// reduced Householder QR（`a`: 行優先 `m*n`）を GPU で実行し
+    /// `(R: k*n, Q: m*k)`（`k = min(m,n)`・`f32`）を返す（イシュー #3136・
+    /// 監査記録 CU-4）。呼び出し文脈・変換規約は [`Self::run_cholesky_f32`] と同じ。
+    pub fn run_qr_f32(
+        &self,
+        a: &[f32],
+        m: usize,
+        n: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>), CudaError> {
+        const OP: &str = "linalg_qr";
+        validate_qr_dims(m, n)?;
+        if m == 0 || n == 0 {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!("{OP}: 空入力はカーネルを起動しない（呼び出し側で短絡する）"),
+            });
+        }
+        let k = m.min(n);
+        check_len(OP, "a", a.len(), m * n)?;
+        let m_i = to_i32(OP, "m", m)?;
+        let n_i = to_i32(OP, "n", n)?;
+        let a64 = widen(a);
+        context_cache::with_driver_call(self.ordinal, || {
+            let mut r_dev = self.stream.clone_htod(&a64)?;
+            let mut q_dev = self.stream.alloc_zeros::<f64>(m * k)?;
+            let mut refl_dev = self.stream.alloc_zeros::<f64>(k * m)?;
+            let mut valid_dev = self.stream.clone_htod(&vec![FACTOR_STATUS_SENTINEL; k])?;
+            let cfg = factor_launch_config();
+            // SAFETY: CU-4（docs/gpu-linalg-kernel-launch-unsafe-audit.md §2）。
+            // (a) 検証は `ops.rs` と入口の `validate_qr_dims`・長さ検査で済み、
+            // デバイス確保より前。(b) `r_dev` は `m*n`（入力の f64 コピーを H2D）、
+            // `q_dev` は `m*k`、`refl_dev` は `k*m`、`valid_dev` は `k` 要素で、
+            // いずれも `validate_qr_dims` が `i32::MAX`・確保上限以内を保証。
+            // (c) `m_i`・`n_i` は `i32::try_from` で切り詰めなし。
+            // (d) `context_cache::with_driver_call` の内側（構築側も `ops.rs` の
+            // `with_driver_call` 内）。(e) 引数順・型は
+            // `linalg_qr_f64(double* r, double* q, double* refl, int* refl_valid,
+            // int m, int n)` と一致。(f) `valid_dev` は下で必ず読み戻し全要素が
+            // {0,1} であることを確認する。(g) 4 バッファは readback の完了まで
+            // 本スコープで生存。block 次元は `FACTOR_BLOCK_DIM`（QR_BLOCK=256 と
+            // 厳密一致）・grid は 1 block で block 間同期は不要。カーネル内は
+            // `i < m - col`・`c < n`・`c < k` の手動境界チェックを維持（REQ-8）。
+            // ストライド変数は `long long`（`idx += 256` の int overflow を回避）。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.qr)
+                    .arg(&mut r_dev)
+                    .arg(&mut q_dev)
+                    .arg(&mut refl_dev)
+                    .arg(&mut valid_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .launch(cfg)?;
+            }
+            let valid: Vec<i32> = readback(&self.stream, &valid_dev)?;
+            check_refl_valid(&valid, k)?;
+            let r_work: Vec<f64> = readback(&self.stream, &r_dev)?;
+            let q_work: Vec<f64> = readback(&self.stream, &q_dev)?;
+            let (r, q) = qr_finalize(&r_work, &q_work, m, n)?;
+            Ok((narrow(&r), narrow(&q)))
+        })
+    }
+
+    /// 対称固有値分解（巡回 Jacobi・下三角を読む。`a`: 行優先 `n*n`）を GPU で
+    /// 実行し `(固有値昇順 n, 固有ベクトル n*n・列が固有ベクトル)` を `f32` で
+    /// 返す（イシュー #3136・監査記録 CU-5）。呼び出し文脈・変換規約は
+    /// [`Self::run_cholesky_f32`] と同じ。
+    pub fn run_eigh_f32(&self, a: &[f32], n: usize) -> Result<(Vec<f32>, Vec<f32>), CudaError> {
+        const OP: &str = "linalg_eigh";
+        validate_square_factor_dims(OP, n)?;
+        if n == 0 {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!("{OP}: n=0 はカーネルを起動しない（呼び出し側で短絡する）"),
+            });
+        }
+        check_len(OP, "a", a.len(), n * n)?;
+        let n_i = to_i32(OP, "n", n)?;
+        let a64 = widen(a);
+        context_cache::with_driver_call(self.ordinal, || {
+            let a_dev = self.stream.clone_htod(&a64)?;
+            let mut sym_dev = self.stream.alloc_zeros::<f64>(n * n)?;
+            let mut v_dev = self.stream.alloc_zeros::<f64>(n * n)?;
+            let mut evals_dev = self.stream.alloc_zeros::<f64>(n)?;
+            let mut status_dev = self.stream.clone_htod(&[FACTOR_STATUS_SENTINEL])?;
+            let cfg = factor_launch_config();
+            // SAFETY: CU-5（docs/gpu-linalg-kernel-launch-unsafe-audit.md §2・§5）。
+            // (a) 検証は `ops.rs` と入口の `validate_square_factor_dims`・長さ検査
+            // で済み、デバイス確保より前。(b) `a_dev`・`sym_dev`・`v_dev` は
+            // `n*n`、`evals_dev` は `n`、`status_dev` は 1 要素（`n*n <= i32::MAX`）。
+            // (c) `n_i` は `i32::try_from` で切り詰めなし。(d) `context_cache::
+            // with_driver_call` の内側（構築側も `ops.rs` の `with_driver_call` 内）。
+            // (e) 引数順・型は `linalg_eigh_f64(const double* a, double* sym,
+            // double* v, double* evals, int* status, int n)` と一致。
+            // (f) `status_dev` は下で必ず読み戻して判定する。(g) 5 バッファは
+            // readback の完了まで本スコープで生存。block 次元は `FACTOR_BLOCK_DIM`
+            // （EIGH_BLOCK=256 と厳密一致）・grid は 1 block で block 間同期は不要。
+            // カーネル内は `idx < total`・`k < n && k != p && k != q` 等の手動
+            // 境界チェックを維持（REQ-8）。回転更新の `sym`／`v` 書き込みはバリアが
+            // ないが、書き込み先配列が別で、スレッド k が書く `sym[k*n+p|q]`・
+            // `sym[p|q*n+k]`（k≠p,q）・`v[k*n+p|q]` は他スレッドと重ならず、
+            // tid 0 の対角書き込みは直前の `__syncthreads()` の後（§5。最終判定は
+            // 監査記録 §8 の #3136 節）。早期 return は同期後の共有値 `s_conv` で
+            // 一様。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.eigh)
+                    .arg(&a_dev)
+                    .arg(&mut sym_dev)
+                    .arg(&mut v_dev)
+                    .arg(&mut evals_dev)
+                    .arg(&mut status_dev)
+                    .arg(&n_i)
+                    .launch(cfg)?;
+            }
+            let status: Vec<i32> = readback(&self.stream, &status_dev)?;
+            let status0 = status.first().copied().unwrap_or(FACTOR_STATUS_SENTINEL);
+            factor_status_to_result(FactorOp::Eigh, status0)?;
+            let evals: Vec<f64> = readback(&self.stream, &evals_dev)?;
+            let vecs: Vec<f64> = readback(&self.stream, &v_dev)?;
+            let (ev, vv) = eigh_sort_and_normalize(&evals, &vecs, n)?;
+            Ok((narrow(&ev), narrow(&vv)))
+        })
     }
 
     /// Cholesky カーネル（`linalg_cholesky_f64`）。
@@ -589,6 +865,51 @@ mod tests {
         assert_eq!(lu_diag_product(&[1e308, 10.0], -1.0), f64::NEG_INFINITY);
         assert_eq!(lu_diag_product(&[1e-300, 1e-300], 1.0), 0.0);
         assert!(lu_diag_product(&[f64::NAN, 2.0], 1.0).is_nan());
+    }
+
+    #[test]
+    fn factor_status_mapping() {
+        assert!(factor_status_to_result(FactorOp::Cholesky, 0).is_ok());
+        assert!(factor_status_to_result(FactorOp::Eigh, 0).is_ok());
+        for op in [FactorOp::Cholesky, FactorOp::Eigh] {
+            assert!(matches!(
+                factor_status_to_result(op, 1),
+                Err(CudaError::LinalgInvalidArgument { .. })
+            ));
+            for bad in [FACTOR_STATUS_SENTINEL, 2, i32::MIN] {
+                assert!(matches!(
+                    factor_status_to_result(op, bad),
+                    Err(CudaError::LinalgKernelStatusInvalid { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn refl_valid_check() {
+        assert!(check_refl_valid(&[0, 1, 1], 3).is_ok());
+        assert!(check_refl_valid(&[0, FACTOR_STATUS_SENTINEL], 2).is_err());
+        assert!(check_refl_valid(&[2], 1).is_err());
+        assert!(check_refl_valid(&[1], 2).is_err());
+    }
+
+    /// 1e±20 の f32 を f64 へ昇格してから二乗しても有限・非ゼロ（f32 のままなら
+    /// overflow／underflow する。H2D 前の変換が必要な根拠）。
+    #[test]
+    fn widen_keeps_extreme_squares_finite() {
+        for x in widen(&[1e20f32, 1e-20f32]) {
+            let sq = x * x;
+            assert!(sq.is_finite() && sq != 0.0, "x={x}");
+        }
+        assert!((1e20f32 * 1e20f32).is_infinite());
+    }
+
+    #[test]
+    fn run_input_helpers_reject_bad_values() {
+        assert!(check_len("t", "a", 3, 4).is_err());
+        assert!(check_len("t", "a", 4, 4).is_ok());
+        assert!(to_i32("t", "n", i32::MAX as usize).is_ok());
+        assert!(to_i32("t", "n", i32::MAX as usize + 1).is_err());
     }
 
     #[test]

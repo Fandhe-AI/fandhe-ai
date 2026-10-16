@@ -104,6 +104,8 @@
 
 eigh の回転更新（`s_skip == 0` 内）の `sym` 書き込みと `v` 書き込みの間にバリアはないが、配列が別でスレッドごとの添字が分離している。この点は実装 PR（#3136）で security-auditor が再確認する（本記録では「競合なし」と断定しない）。
 
+#3136 実装時の実装担当による自己点検（security-auditor の最終判定ではない）: eigh の回転更新で、スレッド k（k≠p,q）が書くのは `sym[k*n+p|q]`・`sym[p|q*n+k]` と `v[k*n+p|q]` だけで、`k` ごとに添字が分離し、`sym` と `v` は別配列。tid 0 の対角書き込み（`sym[p*n+p]` 等）は直前の `__syncthreads()` の後で、同時に走る他スレッドの `v` ループとは別配列のため競合しない。回転後の `__syncthreads()` で次の (p,q) へ進む。よって競合は見つからなかった。
+
 ## 6. 申し送り（残リスク）
 
 | # | 内容 | 担当 |
@@ -148,3 +150,21 @@ grep -n "unsafe" crates/backend-cuda/src/linalg.rs crates/backend-metal/src/lina
 - スカラーは `u32::try_from` で切り詰めずに変換する。`run_*` の入口で長さと次元を再検証する（二重検査）。
 - REQ-8: MSL のコード部分は変更しておらず、カーネル側の手動境界チェックは維持している。
 - 実機（M4 Max）での数値一致・移設の非後退（`rnn_cell_parity`・`sort_topk_parity` の `--ignored`）は未検証（#3139）。
+
+### #3136（CU-3・CU-4・CU-5 の実装）
+
+**security-auditor による監査は未実施**（本タスクの実行環境ではサブエージェントを起動できなかった。「指摘なし」を意味しない）。PR レビューで監査を受け、指摘と対応を本節へ追記する。
+
+実装担当による自己点検の結果（`crates/backend-cuda/src/linalg.rs` の `run_cholesky_f32`・`run_qr_f32`・`run_eigh_f32`）:
+
+| 項目 | 結果 |
+|------|------|
+| `unsafe` ブロック数 | 3 つのみ（`launch` の各 1 文）。各 `// SAFETY:` に行 ID（CU-3／CU-4／CU-5）と不変条件 (a)〜(g)・block 次元・REQ-8・int 添字上限を記載 |
+| (a) 順序 | `ops.rs` は「ゲート → 形状 → サイズ検証 → 空入力の短絡 → デバイス」。`run_*` も入口で検証し直す |
+| (b)(c) | f32→f64 は H2D の前。長さは検証済み次元から確保。`i32::try_from` で切り詰めなし |
+| (d) | ハンドル構築（`ops.rs::linalg_factor_handle`）と実行（`context_cache::with_driver_call`・`ops.rs::with_driver_call`）はいずれも包まれている |
+| (e) | 引数順・型はカーネルのシグネチャと一致 |
+| (f) | `status`（QR は `refl_valid`）は sentinel（-1）で初期化し必ず読み戻す。0 は成功、1 は `InvalidArgument`、それ以外は `KernelLaunchFailed` |
+| (g) | バッファは readback（同期点）の完了まで関数スコープで生存 |
+| 残余リスク | `validate_square_factor_dims` は n ≤ 46340 まで受け付けるが、eigh は単一 block・O(60·n³) のため大きな n で GPU を長時間占有しうる（DoS）。ゲートは内部 opt-in で facade 非公開。上限の新設は本イシューの範囲外（別 issue 候補） |
+| 未検証 | NVRTC コンパイルと GB10 実機の parity は #3138 |
