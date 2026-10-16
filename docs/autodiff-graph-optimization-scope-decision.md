@@ -283,3 +283,7 @@ fused_elementwise.rs`・`fused_elementwise_source.rs`）とも、CPU
 ## #3115 追補
 
 10 節 (3)（facade への opt-in setter 追加）の公開形は `docs/facade-graph-tier-b-optin-exposure-decision.md` §3・§4 を正とする。#2085 追補の承認事項 (3)（新規 `unsafe` 4 か所）は記録上不明のままで、所有者へ戻す点 R1 として同 doc §6 に整理した。取得済みとは記さない。
+
+## #3116 実装記録
+
+`set_cuda_graph_infer_enabled`／`cuda_graph_infer_enabled`（facade）と `fandhe_ai_backend_cuda::graph::set_infer_graph_enabled`（新規。優先順位は API 明示 > 環境変数 > 既定 OFF）を公開した。テストは CPU で常に実行される受入テスト（`cuda_graph_infer_optin.rs`）・`api_surface.rs` の正ガードと、`#[ignore]` の CUDA 実機 parity テスト（`cuda_graph_infer_parity_real_device.rs`。実測は Phase 8・未実行）。**B-1 の CUDA／Metal の対は未公開**（新規 `unsafe` 4 か所の承認が記録上不明のため、R1 への所有者の回答待ち。決定記録 §6）。既定 OFF・tolerance・baseline・依存・`docs/spec` は不変で、新規 `unsafe` はない。既定 ON 化は #3227 の担当。

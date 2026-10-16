@@ -67,6 +67,6 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 
 - GB10 での R0〜R2 と 5 run A/B の実測
 - ADOPT 時の既定反転 PR
-- facade 公開 API（`set_cuda_graph_infer_enabled` 相当）の要否判断
+- facade 公開 API（`set_cuda_graph_infer_enabled` 相当）の要否判断（#3115 で公開を決定し、#3116 で公開済み。効果の実測は Phase 8）
 - `cuGraphExecUpdate`（`unsafe`・承認要）による batch 可変対応
 - Metal への同等機構
