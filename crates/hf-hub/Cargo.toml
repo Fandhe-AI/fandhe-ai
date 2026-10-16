@@ -11,9 +11,10 @@
 # 別の承認で扱う。path 依存に `version` を書かないのは非公開クレートのため deny.toml の
 # `allow-wildcard-paths = true` の範囲に収まるからで、2 段目では `version = "=x.y.z"` の併記が必要。
 #
-# HTTP／TLS（第 11 区分 `ureq`）はここでは宣言しない。第 11 区分を HF クレートで使う承認は
-# 別単位で未取得であり（deps-policy.md の ureq 行は facade 限定）、#3131 では HTTP 転送層を結線していない
-# （docs/hf-hub-integration-design.md §9.12）。承認後に宣言する。
+# HTTP／TLS（第 11 区分 `ureq`）は `cfg(unix)` 限定で workspace 継承により宣言する（#3393。
+# 承認根拠: #3128 コメント 6220036919）。用途は HF Hub API の JSON 取得に限り、版・feature・固定設定は
+# facade と同じ（deps-policy.md 第 11 区分）。ureq の型は `src/transport/ureq_json.rs` の外へ出さない
+# （`tests/api_surface.rs` で担保）。ファイル本体の取得は facade の `download_with` に任せる。
 # serde／serde_json は #3131 の JSON 解析用に、既存の許容区分を workspace の固定版で先に宣言する。
 [package]
 name = "fandhe-ai-hf-hub"
@@ -27,3 +28,6 @@ publish.workspace = true
 fandhe-ai = { path = "../facade" }
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+ureq.workspace = true

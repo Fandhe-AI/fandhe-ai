@@ -17,8 +17,8 @@
 //!   `download_with` で取得する。sha256 pin（[`fandhe_ai::model::Sha256Pin`]）は必須引数で、キャッシュ書き込み・
 //!   pin 検証は facade が担う。`name` = `hf--<namespace>--<repo>`・`version` = commit sha。
 //! - revision 解決（`resolve_revision`）とファイル一覧（`list_files`）は crate 内に実装済みだが、
-//!   HTTP／TLS（第 11 区分 `ureq`）を HF クレートで使う承認が未取得のため転送層を結線しておらず
-//!   公開していない（`docs/hf-hub-integration-design.md` §9.12）。
+//!   本番の転送層 `UreqJsonTransport`（第 11 区分 `ureq`・`cfg(unix)`）は #3393 で結線済みだが、
+//!   `pub(crate)` のままで公開していない（公開化は #3394。`docs/hf-hub-integration-design.md` §9.14）。
 //!
 //! # 残留リスク
 //!
@@ -51,6 +51,8 @@ mod url;
 
 #[cfg(test)]
 mod live_tests;
+#[cfg(all(test, unix))]
+mod test_http_server;
 
 pub use api::RepoFile;
 
@@ -101,6 +103,8 @@ pub enum HfError {
         /// ステータスコード。
         status: u16,
     },
+    /// HTTP 転送の失敗（接続・タイムアウト・TLS・I/O）。メッセージは静的で URL を含まない。
+    Network(std::io::Error),
     /// facade の `ModelRegistry` 側のエラー。
     Model(ModelError),
 }
@@ -117,6 +121,7 @@ impl fmt::Display for HfError {
             HfError::Unauthorized => write!(f, "認証が必要です（非対応）"),
             HfError::Gated => write!(f, "アクセスが拒否されました（gated／private は非対応）"),
             HfError::Http { status } => write!(f, "HTTP ステータス {status}"),
+            HfError::Network(e) => write!(f, "HTTP 転送に失敗しました: {e}"),
             HfError::Model(e) => write!(f, "モデルレジストリのエラー: {e}"),
         }
     }
@@ -126,6 +131,7 @@ impl std::error::Error for HfError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             HfError::Model(e) => Some(e),
+            HfError::Network(e) => Some(e),
             _ => None,
         }
     }
@@ -684,6 +690,10 @@ mod tests {
             HfError::Gated,
             HfError::Http { status: 302 },
             HfError::InvalidFilename { reason: "x" },
+            HfError::Network(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "HTTP 転送がタイムアウトしました",
+            )),
         ];
         for e in errs {
             let shown = format!("{e} {e:?}");

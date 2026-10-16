@@ -631,7 +631,7 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 #### 9.12.3 見送り事項（要対応）
 
-- **第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する
+- **〔#3393 で解消。§9.14 参照。公開化は #3394〕第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する
 - facade `download_with` のリダイレクト先ホスト allowlist（§4.2 (b-1)／(b-2)）は facade 公開面の拡張であり別承認
 
 ### 9.13 #3132 実装記録（テスト）
@@ -640,4 +640,34 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 - **filename 違いによるキャッシュキー衝突**は是正案 A（`model.safetensors` のみ許可）により構造的に起きない。それ以外はすべて接続前に拒否され、キャッシュディレクトリが作られないことをテストで確認した。
 - **`HfHub::download` の取得成功・pin 一致／不一致・リダイレクト**は facade 転送差し替え口が内部限定のためモック化していない（facade 公開面を変えない）。担保は facade 側の既存テスト（`success_publishes_file_and_verifies_pin`・`hash_mismatch_publishes_nothing_and_keeps_existing`・`non_200_statuses_are_http_errors`・`bad_redirects_are_invalid_url` ほか）と、`#[ignore]` 実通信テスト（`crates/hf-hub/src/live_tests.rs`。手順は `crates/hf-hub/README.md`）による。
 - **実通信テストの実行結果**: 未検証（実通信環境と公開 repo の pin 未用意。#3173 と同様に実機・実通信環境で確認する）。トークンは扱わない。
-- **申し送り（別承認）**: (1) `UreqJsonTransport` 結線（hf-hub での第 11 区分利用承認が前提）後に `TcpListener` ベースの転送層テスト、`resolve_revision`／`list_files` の実通信確認、§9.12.1 の未確認項目の実測を追加する。(2) リダイレクト先ホスト allowlist とそのテストは allowlist 実装時（facade 公開面拡張・別承認）。本イシューでは「追従せず拒否」の固定のみ。(3) 観察事項: `HfRepoId` は大文字を許すため、大文字小文字非区別 FS（macOS 既定 APFS）では `hf--Org--model` と `hf--org--model` が同一ディレクトリになりうる。version が commit sha で真正性は sha256 pin が担うため実害は限定的だが、所有者判断に回す。
+- **申し送り（別承認）**: (1)〔#3393 で `UreqJsonTransport` の結線と `TcpListener` ベースの転送層テストを追加済み。§9.14〕`UreqJsonTransport` 結線（hf-hub での第 11 区分利用承認が前提）後に `TcpListener` ベースの転送層テスト、`resolve_revision`／`list_files` の実通信確認、§9.12.1 の未確認項目の実測を追加する。(2) リダイレクト先ホスト allowlist とそのテストは allowlist 実装時（facade 公開面拡張・別承認）。本イシューでは「追従せず拒否」の固定のみ。(3) 観察事項: `HfRepoId` は大文字を許すため、大文字小文字非区別 FS（macOS 既定 APFS）では `hf--Org--model` と `hf--org--model` が同一ディレクトリになりうる。version が commit sha で真正性は sha256 pin が担うため実害は限定的だが、所有者判断に回す。
+
+### 9.14 #3393 実装記録（本番 HTTP 転送層 `UreqJsonTransport`）
+
+承認根拠: #3128 コメント 6220036919（2026-10-16）。範囲は `crates/hf-hub` での `ureq` 利用（HF Hub API の JSON 取得に限る）。リダイレクト先ホスト allowlist・2 段目の公開・ほかの依存・CI／ruleset・閾値・`unsafe` は対象外（別承認）。
+
+#### 9.14.1 実装
+
+- `crates/hf-hub/src/transport/ureq_json.rs`（`cfg(unix)`・`pub(crate)`）。`ureq` のトークンはこのファイルに閉じる。公開化は #3394 のため本番コードからはまだ呼ばれない（dead_code は既存の慣例で抑止）。
+- 固定設定: `NativeTls`＋`PlatformVerifier`・`https_only(true)`・`proxy(None)`・`max_redirects(0)`・`http_status_as_error(false)`・`accept_encoding("identity")`・全タイムアウト明示（phase 30s・recv_response 30s・recv_body 60s・global 120s）。`build_agent` が読み戻して照合する（`check_invariants`）。
+- 前段 `checked_api_uri`: 送信前に scheme が https・userinfo なし・host が `huggingface.co` に完全一致・port 指定なしを再照合する（A10 の多層防御）。
+- 共有後段 `perform`: 200 以外は本体も `Location` も読まずにステータスだけ返す。3xx は `api.rs` が `Http { status }` で拒否するため非追従が保たれる。200 は `Content-Encoding` が `identity` 以外（全ヘッダ行を検査）なら拒否、`Content-Length` が上限超なら読まずに拒否、本体は `take(max + 1)` で自前に上限判定する。ureq の `limit(n)` はちょうど n バイトの本体まで失敗させることを ureq 3.4.2 のソースで確認したため使わない。
+- エラー: `HfError::Network(io::Error)` を追加（`#[non_exhaustive]` のため非破壊・std 型のみで公開面に ureq は出ない）。メッセージは静的で URL を含まない。`ModelError::Network` に包まないのは facade 起因のエラーと誤認させないため。
+- 認証トークンは読まず送らない（`Authorization` が付かないことをテストで固定）。
+
+#### 9.14.2 テスト
+
+- CI で実行（外部通信なし）: `src/transport/ureq_json.rs` の `#[cfg(test)] mod loopback`。`127.0.0.1` の `TcpListener`（`src/test_http_server.rs`）に対し、平文は `#[cfg(test)]` の `PlaintextLoopbackJsonTransport` だけが話す（agent の `https_only` とタイムアウトだけが本番と異なり、前段・後段は共有）。200（リクエスト形・ヘッダ）、401／403／404／503 の写像、301／302／303／307／308 × Location の非追従（接続 1 回・Location 非露出）、1 MiB ちょうど受理・Content-Length 超過・chunked 超過、途中切断、gzip（複数行ヘッダ含む）拒否、無応答のタイムアウト、ヘッダ後停止でハングしない、本番 agent の不変条件、平文 http の接続前拒否、閉ポートと非 TLS リスナで panic しない（NativeTls の feature 整合）、host 不正（別ホスト・`@`・http・ポート付き・suffix 偽装）の接続前拒否。
+- `crates/hf-hub/tests/api_surface.rs`: `ureq` トークンの閉じ込め、`lib.rs` の公開項目に HTTP 型がないこと、転送層に制限なし `pub` がないこと、TLS 構成の固定、`Cargo.toml` の `ureq` 宣言形状。各検査に合成入力の正のプローブと inventory を併設した。
+- 実通信（`#[ignore]`・CI 対象外）: `live_tests.rs` の `live_resolve_main_and_list_files`。**実行結果は未検証**（実通信環境と公開 repo が未用意）。手順は `crates/hf-hub/README.md`。
+
+#### 9.14.3 セキュリティ監査
+
+- 独立した security-auditor サブエージェントによる監査は、本実装を担当したエージェントの実行環境にサブエージェント起動手段がなく未実施。実施するまでマージ前の要対応事項とする（PR 本文にも記載）。
+- 実装者による OWASP 観点の自己点検: A01 トークン非送信・401／403 fail-closed／A02 NativeTls 明示・検証無効化手段なし・平文は `cfg(test)` のみ／A03 送信前の host 完全一致再照合／A04・A05 全タイムアウトと 1 MiB 上限の二重防御・環境 proxy 無効・identity 限定／A06 外部クレート・版の追加なし（`Cargo.lock` は依存辺 1 本）／A08 ファイル本体は facade の `download_with`＋sha256 pin に委ねる／A09 静的エラー・Location 非参照・センチネル非露出／A10 接続先固定・非追従。`unsafe` は使わず、本番経路に `unwrap`／`expect` はない。
+
+#### 9.14.4 残留リスク
+
+- リダイレクト先ホストの allowlist は未実装（別承認）。本転送層は追従せず拒否するため JSON 取得には影響しないが、ファイル本体の取得（facade `download_with`）は https 限定の追従のままである。
+- OpenSSL 静的同梱（`vendored`）の脆弱性対応が `openssl-src` の版更新（人間承認）に依存する点は第 11 区分の受容事項のまま。
+- Windows ビルドの CI 検査（`scripts/check-cross.sh windows-interop` への hf-hub 追加）は CI 検査範囲の変更にあたるため本変更では行っていない（要否は所有者判断）。
