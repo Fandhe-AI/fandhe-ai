@@ -2,4 +2,5 @@
 //! ファイルから `mod common;` で本モジュール群を共有する
 //! （`crates/backend-cuda/tests/common/mod.rs` と同型のパターン）。
 
+pub mod paged_attention_judgement;
 pub mod splitk_parity_baseline;

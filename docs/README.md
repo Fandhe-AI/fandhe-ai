@@ -95,6 +95,7 @@ docs/
     │   ├── logs/functional-transforms-jvp-2942/ # jvp・jacfwd（#2942）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（`pub(crate)` のため公開 API で double-VJP 手順をミラーしたテスト。測定コマンド・期待結果・記入欄）。#2931 で §26 に facade 公開の実装記録（`Tape::vjp`／`hvp`／`vmap` を公開済み・保留ガードを 3 名分だけ部分反転・正ガード新設）を追記
     │   ├── logs/functional-transforms-jvp-multi-3064/ # 複数入力 `jvp`（`Tape::jvp_multi`。#3064）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄。実測は #3171・#3172）
     │   ├── logs/functional-transforms-vmap-grad-3073/ # サンプルごとの勾配 `Tape::vmap_grad`（#3073）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄。実測は #3171・#3172）
+    │   ├── logs/paged-attention-parity-3113/ # paged attention（K-3）の CPU 参照一致と CUDA／Metal 実機 `#[ignore]` parity テスト（#3113）の未実測の申し送り（事前登録規則 `RULE.txt`・測定コマンド・ログ書式・fail 時の手順・記入欄。実測は #3171・#3172）
     │   ├── logs/create-graph-extended-ops-3087/ # facade の `backward_create_graph`・`hvp` で拡張 Op を通す CUDA／Metal 実機 `#[ignore]` テスト（LayerNorm・Conv2d・MaxPool2d）の未実測の申し送り（測定コマンド・記入欄。実測は #3168・#3169）
     │   ├── logs/functional-transforms-facade-2931/ # facade `Tape::vjp`／`hvp`／`vmap`（#2931）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄。内部 API 層は #2881 の README が担当）
     │   ├── logs/speculative-batching-2890/ # speculative decoding・連続バッチング（#2890）の CUDA／Metal 実機 `#[ignore]` parity テスト未実測の申し送り（測定コマンド・期待結果・記入欄）
