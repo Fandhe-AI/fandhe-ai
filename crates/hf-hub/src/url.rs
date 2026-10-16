@@ -13,15 +13,16 @@ const BASE: &str = "https://huggingface.co";
 pub(crate) struct ApiUrl(String);
 
 impl ApiUrl {
-    /// 転送層が接続に使う文字列。本番の転送層 `UreqJsonTransport`（#3393）から使われるが、
-    /// 呼び出し元の公開化は #3394 のため非 test ビルドでは未使用になりうる。
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// 転送層が接続に使う文字列。本番の転送層 `UreqJsonTransport`（`cfg(unix)`）だけが使うため、
+    /// 非 unix の非 test ビルドでは未使用になる。
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// host 検査の拒否テスト用に任意文字列から作る。本番ビルドには存在しない。
-    #[cfg(test)]
+    /// host 検査の拒否テスト用に任意文字列から作る。本番ビルドには存在しない（使うのは unix の
+    /// ループバックテストだけのため `cfg(unix)` も付ける）。
+    #[cfg(all(test, unix))]
     pub(crate) fn for_test(s: &str) -> Self {
         Self(s.to_owned())
     }
@@ -60,7 +61,7 @@ pub(crate) fn resolve_url(repo: &HfRepoId, sha: &CommitSha, filename: &str) -> S
 
 /// revision 情報 API URL。ref 名は `/` を含みうるため path 要素としてエンコードする。
 /// エンドポイント形式は一次資料で未確認（設計 §9.12）。
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn revision_api_url(repo: &HfRepoId, rev: &Revision) -> ApiUrl {
     ApiUrl(format!(
         "{BASE}/api/models/{}/{}/revision/{}",

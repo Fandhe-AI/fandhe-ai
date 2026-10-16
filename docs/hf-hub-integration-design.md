@@ -631,7 +631,7 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 #### 9.12.3 見送り事項（要対応）
 
-- **〔#3393 で解消。§9.14 参照。公開化は #3394〕第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する
+- **〔#3393 で解消。§9.14 参照。公開化は #3394 で解消。§9.15〕第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する
 - facade `download_with` のリダイレクト先ホスト allowlist（§4.2 (b-1)／(b-2)）は facade 公開面の拡張であり別承認
 
 ### 9.13 #3132 実装記録（テスト）
@@ -648,7 +648,7 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 #### 9.14.1 実装
 
-- `crates/hf-hub/src/transport/ureq_json.rs`（`cfg(unix)`・`pub(crate)`）。`ureq` のトークンはこのファイルに閉じる。公開化は #3394 のため本番コードからはまだ呼ばれない（dead_code は既存の慣例で抑止）。
+- `crates/hf-hub/src/transport/ureq_json.rs`（`cfg(unix)`・`pub(crate)`）。`ureq` のトークンはこのファイルに閉じる。公開化は #3394 のため本番コードからはまだ呼ばれない（dead_code は既存の慣例で抑止）。〔#3394 で解消。§9.15〕
 - 固定設定: `NativeTls`＋`PlatformVerifier`・`https_only(true)`・`proxy(None)`・`max_redirects(0)`・`http_status_as_error(false)`・`accept_encoding("identity")`・全タイムアウト明示（phase 30s・recv_response 30s・recv_body 60s・global 120s）。`build_agent` が読み戻して照合する（`check_invariants`）。
 - 前段 `checked_api_uri`: 送信前に scheme が https・userinfo なし・host が `huggingface.co` に完全一致・port 指定なしを再照合する（A10 の多層防御）。
 - 共有後段 `perform`: 200 以外は本体も `Location` も読まずにステータスだけ返す。3xx は `api.rs` が `Http { status }` で拒否するため非追従が保たれる。200 は `Content-Encoding` が `identity` 以外（全ヘッダ行を検査）なら拒否、`Content-Length` が上限超なら読まずに拒否、本体は `take(max + 1)` で自前に上限判定する。ureq の `limit(n)` はちょうど n バイトの本体まで失敗させることを ureq 3.4.2 のソースで確認したため使わない。
@@ -671,3 +671,42 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 - リダイレクト先ホストの allowlist は未実装（別承認）。本転送層は追従せず拒否するため JSON 取得には影響しないが、ファイル本体の取得（facade `download_with`）は https 限定の追従のままである。
 - OpenSSL 静的同梱（`vendored`）の脆弱性対応が `openssl-src` の版更新（人間承認）に依存する点は第 11 区分の受容事項のまま。
 - Windows ビルドの CI 検査（`scripts/check-cross.sh windows-interop` への hf-hub 追加）は CI 検査範囲の変更にあたるため本変更では行っていない（要否は所有者判断）。
+
+### 9.15 #3394 実装記録（`resolve_revision`／`list_files` の公開化）
+
+承認根拠: #3128 コメント 6220036919（2026-10-16）。範囲は `resolve_revision`／`list_files` の公開化（`pub(crate)` → `pub`）とそのテスト・公開面ガード。条件は PR ごとの security-auditor 監査と結果の記録。リダイレクト先ホスト allowlist・2 段目の公開・依存の追加更新・CI／ruleset・閾値・`unsafe` は別承認のまま変えない。
+
+#### 9.15.1 実装
+
+- `HfHub::resolve_revision(&self, &HfRepoId, &Revision) -> Result<CommitSha, HfError>`／`HfHub::list_files(&self, &HfRepoId, &CommitSha) -> Result<Vec<RepoFile>, HfError>` を公開（§3.1 の API 案どおり）。引数は検証済み newtype のみで、不正な repo_id・revision は `parse` の段階（接続前）で拒否される。戻り値・エラー型に `ureq`・`serde_json` の型は出ない。
+- 公開メソッドは「sha 指定の短絡＋呼び出しごとの `UreqJsonTransport::new()`＋`api::*_via`」だけの薄い結線。`HfHub` の構造体（`registry` のみ）は変えない。`get_json` が `&mut self` で、`build_agent` は接続しないため、保持せず呼び出しごとに作る。
+- `resolve_revision` は sha 指定なら転送層を作る前に `Ok` を返す（ネットワーク不要の性質を全プラットフォームで保ち、doctest をオフラインで通す）。
+- 非 unix は `HfError::Network(Unsupported)`（静的メッセージ）を返す。variant を足さないため公開面は増えない。facade の非 unix 挙動（`Unsupported`）と揃えた。
+- `HfHub::download` は `pub(crate)` のまま（allowlist が別承認。§9.14.4）。
+- dead_code の抑止を整理した。unix では本番から使われるため `cfg_attr(not(test), ...)` を外し、非 unix で到達しない項目だけ `cfg_attr(not(unix), allow(dead_code))` にした。
+
+#### 9.15.2 設計判断
+
+| 論点 | 決定 | 理由 |
+|---|---|---|
+| 転送層の寿命 | 呼び出しごとに生成 | `Mutex` を持たず公開構造体のレイアウトを変えない |
+| 結合テストの継ぎ目 | 公開メソッドへ転送差し替え口を作らず、`_via`＋`PlaintextLoopbackJsonTransport` で検証 | 本番構造体・公開面を増やさない |
+| 公開面の固定 | `tests/api_surface.rs` に「ちょうど」の正ガード（`lib.rs`・`api.rs` の制限なし `pub` シグネチャの完全一致）を追加 | 否定ガードだけでは公開項目の意図しない追加・欠落を検出できない。正のプローブ（追加・削除・`pub(crate)`・テスト内 `pub`・折り返し）と inventory を併設 |
+
+#### 9.15.3 テスト
+
+- CI で実行（外部通信なし）: 公開面の正ガード（`tests/api_surface.rs`）、公開メソッドのオフラインテスト（sha 指定の短絡でキャッシュに何も作らない・本番転送層の組み立て・非 unix の `Unsupported`）、rustdoc の例（`resolve_revision` は実行・`list_files` は `no_run`）、ループバック結合マトリクス（`list_files_via` の 401／403／404／503・3xx 非追従・形状不正・サイズ超過〈Content-Length・chunked〉・複数件／空一覧。resolve 側の形状不正・chunked 超過）。
+- 実通信（`#[ignore]`・CI 対象外）: `live_resolve_main_and_list_files` を公開 API 経由に変更し、`live_resolve_and_list_nonexistent_repo_fail_closed` を追加した。**実行結果は未検証**（実通信環境が未用意）。
+- ギャップ: 公開メソッド内の結線部分（転送層の生成と `_via` の呼び出し）はループバックを直接通らない。オフラインテスト・`new()` 成功テスト・`#[ignore]` 実通信テストで担保する。
+
+#### 9.15.4 セキュリティ監査
+
+- 独立した security-auditor サブエージェントによる監査は、本実装を担当したエージェントの実行環境にサブエージェント起動手段がなく**未実施**。承認条件（PR ごとの監査と結果の記録）を満たすため、実施して本節へ結果を追記するまでマージ前の要対応事項とする（PR 本文にも記載）。
+- 実装者による OWASP 観点の自己点検: A01 トークンを読まず送らない・401／403 は fail-closed／A02 TLS 構成は不変（`api_surface.rs` の機械検査を維持）・検証無効化手段を公開しない／A03 検証済み newtype のみを受け、URL は `url.rs` でのみ生成・送信前に host を完全一致で再照合／A04・A05 タイムアウト・1 MiB 上限・件数／パス長上限は不変・エンドポイント上書き口なし／A06 依存差分ゼロ（`Cargo.toml`／`Cargo.lock` 不変）／A08 `list_files` は応答 sha と要求 commit の一致を検査・本体取得は公開しない／A09 エラーは静的メッセージで URL・入力値を含まない（非 unix の `Unsupported` も静的）／A10 接続先固定・リダイレクト非追従。`unsafe` なし・本番経路に `unwrap`／`expect` なし。
+
+#### 9.15.5 残留リスク・スコープ外
+
+- リダイレクト先ホストの allowlist（facade `download_with`・hf-hub の JSON 転送の追従）は別承認。`HfHub::download` の公開も同じ理由で見送り。
+- 2 段目の公開（crates.io・`release-all.yml`）は別承認。
+- `scripts/check-cross.sh windows-interop` への hf-hub 追加は CI 検査範囲の変更のため本変更では行わない（要否は所有者判断。手元では `x86_64-pc-windows-msvc` の clippy を実行して非 unix 分岐のコンパイルと警告なしを確認した）。
+- §9.12.1 の未確認の外部仕様（revision API の形・401／403 の実挙動）の実測は実通信環境が必要で、CI では確認しない。

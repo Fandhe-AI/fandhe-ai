@@ -3,7 +3,8 @@
 //! `resolve_revision_via`（branch／tag → commit sha）と `list_files_via` を [`JsonTransport`]
 //! 越しに実装する。応答は解析前にサイズを検査し、型付き構造体で解析し、sha は 40 桁小文字
 //! 16 進で再検証する。etag／LFS oid は信頼根にしない（真正性は呼び出し側の sha256 pin）。
-//! 本番の転送層が未結線のため crate 内限定（`pub(crate)`）。公開化は非破壊で後から行える。
+//! 本クレートの公開入口は `HfHub::resolve_revision`／`list_files`（#3394）で、本モジュールの関数は
+//! `pub(crate)` のまま本番転送層 `UreqJsonTransport`（#3393）またはテスト用転送を注入して呼ばれる。
 //! 3xx は追従せず `HfError::Http` として拒否する（リダイレクト先ホストの検証経路を持たないため）。
 
 use serde::Deserialize;
@@ -69,7 +70,7 @@ fn fetch_info(
 }
 
 /// revision を commit sha へ固定する。既に sha ならネットワークを使わない。
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn resolve_revision_via(
     t: &mut dyn JsonTransport,
     repo: &HfRepoId,
@@ -85,7 +86,7 @@ pub(crate) fn resolve_revision_via(
 }
 
 /// 指定 commit のファイル一覧を返す。
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn list_files_via(
     t: &mut dyn JsonTransport,
     repo: &HfRepoId,

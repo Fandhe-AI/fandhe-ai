@@ -11,14 +11,15 @@
 //!   facade の安定性保証の外にある補助クレートである。
 //! - 1 段目は `publish = false`。private／gated repo は初期状態で非対応とする（§4.1）。
 //!
-//! # 実装範囲（イシュー #3131）
+//! # 実装範囲（イシュー #3131・#3394）
 //!
+//! - [`HfHub::resolve_revision`]・[`HfHub::list_files`]（公開。#3394）: branch／tag の commit sha への
+//!   固定とファイル一覧を、本番の転送層 `UreqJsonTransport`（第 11 区分 `ureq`・`cfg(unix)`。#3393）
+//!   経由で行う。接続先は `https://huggingface.co` 固定・リダイレクト非追従・認証トークンなし。
+//!   `docs/hf-hub-integration-design.md` §9.14・§9.15。
 //! - `HfHub::download`（crate 内限定）: commit sha 固定の `model.safetensors` を facade の
 //!   `download_with` で取得する。sha256 pin（[`fandhe_ai::model::Sha256Pin`]）は必須引数で、キャッシュ書き込み・
 //!   pin 検証は facade が担う。`name` = `hf--<namespace>--<repo>`・`version` = commit sha。
-//! - revision 解決（`resolve_revision`）とファイル一覧（`list_files`）は crate 内に実装済みだが、
-//!   本番の転送層 `UreqJsonTransport`（第 11 区分 `ureq`・`cfg(unix)`）は #3393 で結線済みだが、
-//!   `pub(crate)` のままで公開していない（公開化は #3394。`docs/hf-hub-integration-design.md` §9.14）。
 //!
 //! # 残留リスク
 //!
@@ -26,6 +27,7 @@
 //! （設計 §4.2 (b-1)／(b-2)・§9.10 A10）。sha256 pin は内容の真正性しか保証せず接続先を制限しない
 //! ため、承認済みの facade allowlist 機構が入るまで取得経路（`HfHub::download`）は公開せず
 //! crate 内限定（`pub(crate)`）とする（fail-closed）。facade 公開面の拡張は別承認。
+//! JSON 取得（revision 解決・一覧）は追従せず拒否するため、この残留リスクの対象外である。
 //!
 //! # dtype
 //!
@@ -292,7 +294,7 @@ impl Revision {
     }
 
     /// 検証済み [`CommitSha`] から作る（`api` の一覧取得用）。
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn from_commit_sha(sha: &CommitSha) -> Self {
         Self(RevisionKind::CommitSha(sha.0.clone()))
     }
@@ -329,7 +331,8 @@ impl Default for Revision {
 
 /// HF Hub 連携の入口。キャッシュは facade の [`ModelRegistry`] に委ねる。
 ///
-/// 取得（`download`）・revision 解決・一覧はいずれも承認待ちのため crate 内限定（クレート doc 参照）。
+/// revision 解決（[`HfHub::resolve_revision`]）とファイル一覧（[`HfHub::list_files`]）は公開。
+/// 取得（`download`）は facade のリダイレクト先 allowlist が別承認のため crate 内限定（クレート doc 参照）。
 pub struct HfHub {
     registry: ModelRegistry,
 }
@@ -343,6 +346,89 @@ impl HfHub {
     /// 内部の `ModelRegistry`。
     pub fn registry(&self) -> &ModelRegistry {
         &self.registry
+    }
+
+    /// revision（branch／tag／commit sha）を commit sha へ固定する。
+    ///
+    /// - 引数は検証済みの [`HfRepoId`]・[`Revision`] のみで、不正な repo_id・revision は
+    ///   それぞれの `parse` の段階で接続前に拒否される。
+    /// - `rev` が既に commit sha ならネットワークを使わずそのまま返す（全プラットフォームで成功）。
+    /// - ref 名のときは `https://huggingface.co/api/models/<ns>/<repo>/revision/<ref>` を 1 回 GET する。
+    ///   リダイレクトは追従せず [`HfError::Http`] で拒否し、応答は 1 MiB で打ち切る。
+    ///   認証トークンは読まず送らないため private／gated repo は fail-closed で非対応
+    ///   （401 → [`HfError::Unauthorized`]・403 → [`HfError::Gated`]・404 → [`HfError::NotFound`]。
+    ///   private repo も 404 になりうる）。応答の sha が 40 桁小文字 16 進でなければ
+    ///   [`HfError::InvalidResponse`]。
+    /// - 転送層は `cfg(unix)` のみ。非 unix の ref 指定は [`HfError::Network`]（`Unsupported`）を返す。
+    ///
+    /// # 例（commit sha 指定はオフラインで動く）
+    ///
+    /// ```
+    /// use fandhe_ai::model::ModelRegistry;
+    /// use fandhe_ai_hf_hub::{HfHub, HfRepoId, Revision};
+    ///
+    /// let hub = HfHub::new(ModelRegistry::with_cache_dir(
+    ///     std::env::temp_dir().join("fandhe-ai-hf-hub-doc-resolve"),
+    /// ));
+    /// let repo = HfRepoId::parse("org/model")?;
+    /// let sha = "0123456789abcdef0123456789abcdef01234567";
+    /// let pinned = hub.resolve_revision(&repo, &Revision::parse(sha)?)?;
+    /// assert_eq!(pinned.as_str(), sha);
+    /// # Ok::<(), fandhe_ai_hf_hub::HfError>(())
+    /// ```
+    pub fn resolve_revision(&self, repo: &HfRepoId, rev: &Revision) -> Result<CommitSha, HfError> {
+        // sha 指定はネットワーク不要。転送層を作る前に返し、全プラットフォームで同じ結果にする。
+        if let Some(sha) = rev.to_commit_sha() {
+            return Ok(sha);
+        }
+        #[cfg(unix)]
+        {
+            let mut t = transport::UreqJsonTransport::new()?;
+            api::resolve_revision_via(&mut t, repo, rev)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = repo;
+            Err(unsupported_transport())
+        }
+    }
+
+    /// 指定 commit のファイル一覧を返す。
+    ///
+    /// - 引数は検証済みの [`HfRepoId`]・[`CommitSha`] のみ（[`HfHub::resolve_revision`] で固定した値を渡す）。
+    /// - 応答の sha が要求した commit と一致しなければ [`HfError::InvalidResponse`]
+    ///   （別 commit の一覧を混入させない）。件数は 10,000・各パスは 1,024 バイトまで。
+    /// - 接続先・リダイレクト・認証・失敗時の写像・サイズ上限は [`HfHub::resolve_revision`] と同じ
+    ///   （private／gated repo は fail-closed で非対応）。
+    /// - 転送層は `cfg(unix)` のみ。非 unix は [`HfError::Network`]（`Unsupported`）を返す。
+    ///
+    /// # 例（接続するためコンパイルのみ確認する）
+    ///
+    /// ```no_run
+    /// use fandhe_ai::model::ModelRegistry;
+    /// use fandhe_ai_hf_hub::{HfHub, HfRepoId, Revision};
+    ///
+    /// let hub = HfHub::new(ModelRegistry::with_cache_dir(
+    ///     std::env::temp_dir().join("fandhe-ai-hf-hub-doc-list"),
+    /// ));
+    /// let repo = HfRepoId::parse("org/model")?;
+    /// let sha = hub.resolve_revision(&repo, &Revision::main())?;
+    /// for f in hub.list_files(&repo, &sha)? {
+    ///     println!("{}", f.path());
+    /// }
+    /// # Ok::<(), fandhe_ai_hf_hub::HfError>(())
+    /// ```
+    pub fn list_files(&self, repo: &HfRepoId, sha: &CommitSha) -> Result<Vec<RepoFile>, HfError> {
+        #[cfg(unix)]
+        {
+            let mut t = transport::UreqJsonTransport::new()?;
+            api::list_files_via(&mut t, repo, sha)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (repo, sha);
+            Err(unsupported_transport())
+        }
     }
 
     /// commit sha 固定の `model.safetensors` を取得し facade のキャッシュへ配置する。
@@ -368,6 +454,16 @@ impl HfHub {
             .download_with(&url, &name, &version, options.expected_sha256(pin))?;
         Ok(CachedModel { name, version })
     }
+}
+
+/// 非 unix で転送層が無いことを示すエラー（静的メッセージ。URL・入力値を含めない）。
+/// facade の非 unix 挙動（`Unsupported`）と揃える。
+#[cfg(not(unix))]
+fn unsupported_transport() -> HfError {
+    HfError::Network(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "この環境では HTTP 転送に対応していません",
+    ))
 }
 
 /// 取得済みモデルの識別子。`ModelRegistry::load(name(), version())` で読める。
@@ -702,6 +798,47 @@ mod tests {
         for bad in [secret.to_owned(), format!("{secret}/a b")] {
             let e = HfRepoId::parse(&bad).unwrap_err();
             assert!(!format!("{e} {e:?}").contains(secret));
+        }
+    }
+
+    // ---- #3394: 公開メソッドのオフラインテスト ----
+
+    #[test]
+    fn resolve_revision_with_sha_is_offline_and_touches_nothing() {
+        let (hub, dir) = scratch_hub("resolve-sha");
+        let repo = HfRepoId::parse("org/model").unwrap();
+        let got = hub
+            .resolve_revision(&repo, &Revision::parse(SHA).unwrap())
+            .unwrap();
+        assert_eq!(got.as_str(), SHA);
+        assert!(!dir.exists(), "キャッシュに何も作られないこと");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_transport_builds() {
+        assert!(transport::UreqJsonTransport::new().is_ok());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_ref_and_list_return_unsupported() {
+        let (hub, _d) = scratch_hub("nonunix");
+        let repo = HfRepoId::parse("org/model").unwrap();
+        let sha = CommitSha::parse(SHA).unwrap();
+        for e in [
+            hub.resolve_revision(&repo, &Revision::main()).unwrap_err(),
+            hub.list_files(&repo, &sha).unwrap_err(),
+        ] {
+            match &e {
+                HfError::Network(io) => assert_eq!(io.kind(), std::io::ErrorKind::Unsupported),
+                other => panic!("{other:?}"),
+            }
+            let shown = format!("{e} {e:?}");
+            assert!(
+                !shown.contains("://") && !shown.contains("org/model"),
+                "{shown}"
+            );
         }
     }
 }
