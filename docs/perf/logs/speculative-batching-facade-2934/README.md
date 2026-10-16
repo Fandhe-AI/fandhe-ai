@@ -27,3 +27,9 @@ facade パス経由の結合テスト `crates/facade/tests/speculative_batching_
 |---|---|---|---|---|
 | 2026-10-09 | DGX Spark GB10 | `cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored --nocapture cuda` | pass 2 / fail 0（`cuda_scheduler_greedy_matches_cpu` ok・`cuda_speculative_greedy_matches_cpu` ok。running 2 tests） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・`rustc 1.97.0 (2d8144b78 2026-07-07)`。`speculative-batching-2890` と同一の実行結果 |
 | 2026-10-09 | Apple Silicon（M4 Max） | `cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored --nocapture metal` | pass 2 / fail 0（`metal_scheduler_greedy_matches_cpu` ok・`metal_speculative_greedy_matches_cpu` ok。running 2 tests） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・Apple M4 Max・macOS 27.0（26A428）・`rustc 1.98.1 (48a229cea 2026-09-01)`。`speculative-batching-2890` と同一の実行結果 |
+
+## #3098 追記
+
+- 追加分（`inference/mod.rs` の成功例 doctest、`speculative_batching_facade.rs` の公開面だけの掃引、`api_surface.rs` の実在検査）は CPU のみで、デバイス挙動は変えていない。
+- 新しい `#[ignore]` テストは足していない。実機（CUDA／Metal）の再計測は Phase 8 で扱う。実機 parity は上記の既存の測定コマンドで確認できる。
+- 上記の 2026-10-09 の実測行は変更していない。

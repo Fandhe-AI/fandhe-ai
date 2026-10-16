@@ -352,6 +352,8 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 `BatchScheduler` は状態なしモデルで成功する例（単独 `generate` との一致まで確認）を付けた。`generate_speculative` は **facade の公開面だけでは成功する実行を示せない**（`num_kv_layers() == 0` は `Err` で拒否され、`caches` を進めるモデルを組む経路が facade に無い。論点 3 は保留）ため、fail-closed 契約（`num_kv_layers() == 0` と TopK の拒否）を示す例とした。成功経路は `crates/facade/tests/speculative_batching_facade.rs` の結合テストが担う。doctest のために `KvCache` のセッターや `truncate`、`forward_with_cache` の公開は足していない。
 
+→ #3098 追記: #3096 の入口（`Tape::stateful_attention_forward_with_cache`）で `caches[0]` を進める、facade の公開面だけの表引き KV モデルによる成功例 doctest を `inference/mod.rs` に追加した（出力は target 単独 `generate` と token 列一致。fail-closed 例は維持）。`api_surface.rs` の doctest 実在検査へ成功例の必須語と、成功例が内部クレート（`fandhe_ai_autodiff`）を使わないことの否定検査（自己テスト付き）を足した。結合テストには、k・draft（全受理／全棄却／部分受理）・prompt 長・`max_length`・入力 rank（1／2）・target 層数の掃引（`speculative_matches_greedy_generate_on_public_surface_table_model_sweep`）を足した。変えないもの: `pub use`・承認形の定数・tolerance・baseline・依存・`unsafe`・`docs/spec`。承認根拠は D-A の範囲に限り、追加の承認は得ていない。
+
 ### 18.5 対象モデルの契約の doc 化
 
 「内部状態保持型」を「生成状態を、渡された `caches` の外に持つ型」と定義し、`num_kv_layers()` の値では決まらない・型でも実行時でも検出できない・対象外で出力を保証しない・利用者が保証する、と facade の `inference` モジュール doc と autodiff の `BatchScheduler`／`generate_speculative` の rustdoc に書いた（従来の「内部状態保持型は `num_kv_layers() == 0` を返す」は §17.5 と食い違うため改めた）。
