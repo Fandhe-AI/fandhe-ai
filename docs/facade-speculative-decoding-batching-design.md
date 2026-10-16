@@ -385,14 +385,14 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 - `p`（target）と `q`（draft）は、同じ `GenerateConfig`（strategy・temperature・top_k）をそれぞれの logits に同じ手順で適用した後の最終的なサンプリング分布と定義する。計算は `generate` の `sample_step` と同じ `softmax_weights_f64`・`top_k_indices` を使う。分布の保存はこの組み合わせについてだけ成り立つ。
 - 計算は `f64` で行い、`Generator` へ渡す時点で `f32` に落とす。受理確率 `min(1, p(x)/q(x))` は `[0,1]` に収めてから `f32` として `bernoulli` へ渡す。残差は `max(0, p - q)` を正規化し、`f32` の重みとして `multinomial` へ渡す（`sample_step` の「`f64` の softmax から `f32` の重み」と同形）。
-- `q(x)` は draft のサンプリングで `multinomial` に渡したのと同じ `f32` の重みベクトルから読み、計算し直さない。`q(x) <= 0` または非有限は内部不整合として `Err` を返す。
+- `q(x)` は draft のサンプリングで `multinomial` に渡したのと同じ `f32` の重みベクトルから読み、計算し直さない。ただし `softmax_weights_f64` が返す `f32` の重みは丸めにより総和が厳密に 1 とは限らず、`Generator::multinomial` は重みを `f64` で累積し総和を掛けた乱数で抽選する。実際の draft 確率は `q(x) = q_weight[x] / sum(q_weight)` であるため、保存した `f32` 重みを `f64` の総和で正規化した値を `q(x)` とする（生の重みを `q(x)` としない）。target 側の `p(x)` も同じ定義（`f32` 重みを `f64` の総和で正規化）で構成し、`p` と `q` の正規化規則を揃える。`q(x) <= 0` または非有限は内部不整合として `Err` を返す。
 - 残差の和が 0 になるのは `p == q` のときだけで、そのとき受理確率は常に 1 となり残差には到達しない。それでも残差の和が 0 または NaN の場合は fail-closed で `Err` にする。
 
 ### 19.4 RNG の消費順（決定性の前提）
 
 - `Generator::new(config.seed)` を呼び出しごとに 1 個だけ作り、グローバル RNG は消費しない。
 - 1 ラウンドの消費順の案: draft が k 回 `multinomial` → 検証位置ごとに `bernoulli` 1 回 → 棄却時は残差を `multinomial` 1 回、全受理時は bonus を `multinomial` 1 回。最終順序は #3101 の実装で確定し、rustdoc と本節へ反映する。消費回数の契約は `docs/rng-distributions-generator-decision.md` §1.1（`multinomial` は `m * num_samples` 回固定）に従う。
-- 同一シード・同一入力・同一モデルなら出力は bit 単位で一意に決まる。`bernoulli`／`multinomial` は整数演算と比較で動くため、ホスト側計算はプラットフォームをまたいでも同一になる。`Generator`（`crates/tensor-core/src/rng.rs:676`）は非暗号の xorshift64* であり、生成 token をセキュリティ用途に使わない。
+- 同一シード・同一入力・同一モデルなら、**同一実行環境（同一バイナリ・同一プラットフォーム・同一 toolchain）での再現性**として出力は bit 単位で一意に決まる。プラットフォーム間の bit 一致は保証しない。`bernoulli` は `next_unit_f64` と浮動小数点確率を比較し、`multinomial` は `f64` の累積和・乗算を使い、`softmax_weights_f64` は `f64::exp` を使うため、数学関数の実装差や浮動小数点演算の差で確率境界付近の token 選択が分岐し token 列が変わりうる。プラットフォーム間一致が必要になった場合は、数学関数・logits・浮動小数点演算の条件を別途定義して決定記録へ追記する。`Generator`（`crates/tensor-core/src/rng.rs:676`）は非暗号の xorshift64* であり、生成 token をセキュリティ用途に使わない。
 
 ### 19.5 検査項目（#3101・#3102 が参照する契約）
 
