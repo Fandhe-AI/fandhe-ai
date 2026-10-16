@@ -287,3 +287,8 @@ D-A の範囲内（§16.8）。新たな承認は得ていない。依存追加�
 ## 18. `download` の対応範囲と `save` の dirfd 移行（#3125）
 
 `ModelRegistry::download`／`download_with` は libc の dirfd 相対操作（`cfg(unix)`＝Linux／macOS）で実装した（`docs/model-download-design.md` §19）。`save` は `/proc/self/fd` 方式のまま Linux x86_64／aarch64 限定で、dirfd への移行（macOS 対応を戻す）は §16.6／§16.9 が内部置換を許しているが本イシューの範囲外とした。別イシューでの扱いはユーザー判断（未起票）。
+
+## 19. #3127: download テスト・公開面ガードの仕上げ
+
+公開面の追加・変更はなく、承認事項もない。`download`／`download_with` の公開形（§18）は `api_surface.rs` の正ガード（`DownloadOptions`／`DownloadProgress` のフィールド・`#[non_exhaustive]`・HTTP／TLS 型の非漏洩・TLS 無効化手段の不在・private サブモジュール）で固定した。テスト経路（ループバックモック・実通信 opt-in）の設計と観測は `docs/model-download-design.md` §21 を正とする。
+
