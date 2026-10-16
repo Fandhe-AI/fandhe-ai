@@ -132,3 +132,25 @@
 - テスト: tensor-core（検証関数・既定 `Unsupported`・`_tracked` 委譲）、autodiff（Mock の `BackendOps` による owner の状態遷移）、backend-cpu（参照との一致・検証エラー）、backend-cuda（ソース不変条件・launch 引数・poison／世代検査・検証拒否）、backend-metal（`paged_kv_model`。Linux でも実行）。実機の `#[ignore]` テストは CUDA・Metal とも用意した
 - **未検証**: CUDA カーネルの NVRTC コンパイルと GB10 実機の一致（#3171）、MSL のコンパイルと Mac 実機の一致（#3172）。Metal の macOS 限定コードは `make check-cross-metal-tests`（aarch64-apple-darwin の型検査と clippy）までで、実行していない。`#[ignore]` テストの実機判定が fail した場合も tolerance は緩めず、baseline は実測値に基づき人間の承認を得てから #3113 で扱う
 - 後続への引き継ぎ: #3112（`StatefulAttention::forward_paged` 等の Tape 入口・facade 公開・`compat-api-scope.md` §5 の適用記録）、#3113（形状マトリクスの網羅・判定方式の構成・`RULE.txt`・README の実行手順）。Metal の per-call 作業バッファ確保と attention の性能最適化は結合順序を変えうるので別判断
+
+## 13. #3112 実装記録（paged attention の Tape 入口と facade 公開）
+
+承認は #3018 の所有者コメント（https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6207013704。§9 の 1〜4）。実装は #3112（親 #3108）。依存の追加・新規 `unsafe`・tolerance／baseline の変更はない。
+
+| # | 論点 | 決定 |
+|---|---|---|
+| D1 | autodiff 入口名 | `StatefulAttention::forward_paged`（§6 の例示名を採用） |
+| D2 | レシーバ | `&self`。キャッシュは外部の `PagedKvCache` で、`sa` の内部 `KvCache` には触れない（#3096 の `forward_with_external_cache` と同型） |
+| D3 | 入出力の型 | `Tensor<f32>`（`[B, L_new, E]`）。推論専用で `Var` にしない（§2。部分的な黙った勾配切断を型で防ぐ） |
+| D4 | facade の attention 入口 | `Tape::paged_attention_forward(&self, sa, x_new, cache)`。本体は `sa.forward_paged(&self.0, x_new, cache)` の 1 行 |
+| D5 | **facade の構築入口** | `Tape::new_paged_kv_cache(&self, config)`。本体は `PagedKvCache::new(&self.0, config)` の 1 行。**§6 に形が無かった点**。`PagedKvCache::new` は生の `Tape` を取り facade から呼べず、これが無いと受け入れ条件 1 を満たせない。承認 4（facade 公開面の追加）の範囲内と判断したが、**所有者確認を依頼する** |
+| D6 | 再エクスポート | `nn/kv_cache.rs` の 1 文を 5 名形（`KvCache`・`MultiheadAttentionConfig`・`PagedKvCache`・`PagedKvCacheConfig`・`StatefulAttention`）へ拡張。`PagedKvCacheReference`・`paged_attention_reference`・`DEFAULT_BLOCK_SIZE`・tensor-core の `PagedKvLayout` 等は公開しない |
+| D7 | 原子性 | `Err` のとき `cache` の論理状態は呼び出し前と同じ。追記後に attention／`out_proj` が失敗したら `rewind_to(s_prev)` で戻す（poison は戻さない。回復は再構築） |
+| D8 | mask | 分岐なし。カーネルの単一規則 `j <= s_prev + i` は K-1 の prefill causal・decode mask なし・offset causal と同値 |
+| D9 | scale | `1 / sqrt(Dh)`（K-1 と同じ） |
+| D10 | 公開メソッド | `PagedKvCache` の既存 12 メソッドのまま（`Clone` は足さない）。`new`／`append`／`attention` は生の `Tape` を取るので facade から名指しできない（P2 型の残課題）。`rewind_to` は型のメソッドとして到達可能になる（K-1 の `kv_rewind` 非公開とは扱いが異なる） |
+
+- 同期 1 回の不変条件はキャッシュ操作（`append`＋`attention`）に限る。q/k/v と `out_proj` の射影は `Tape` 上の通常の演算で、CUDA／Metal では演算ごとの実行・転送を伴う
+- `api_surface.rs` に追加・更新したガード: `KV_CACHE_APPROVED_REEXPORT` の 5 名形化（rustfmt の trailing comma を含む）、`stateful_attention_public_methods_are_pinned`（9 件）、`kv_cache_usage_doctests_are_present_and_compiled`（paged 利用例）、`tape_paged_attention_forward_is_thin_delegation`、`tape_new_paged_kv_cache_is_thin_delegation`、`workspace_declares_paged_attention_entries_only_in_approved_locations`、`paged_kv_cache_public_methods_are_pinned`、`paged_attention_facade_signatures_are_pinned`、`paged_attention_is_reachable_via_facade_only`、`facade_does_not_reexport_paged_kv_internals`
+- テスト: `crates/facade/tests/paged_attention_facade.rs`（K-1 との統一複合判定一致・原子性・容量超過・`L_new == 0`）、autodiff の Mock 単体（入力拒否時の `cache` 不変）。追記後の失敗の巻き戻し経路は Mock の gemm が非対応のため単体では通らない（未検証。実バックエンドでの失敗注入は後続）
+- 未実施の後続: 形状マトリクス・実機判定（#3113・#3171・#3172）、可変長（#3105）、`generate`／`BatchScheduler` への結線、射影のデバイス常駐化

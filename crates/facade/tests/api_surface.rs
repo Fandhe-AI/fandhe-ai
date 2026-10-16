@@ -8335,9 +8335,11 @@ fn compat_sequential_has_no_introspection_methods() {
 // 完全一致で限定する。根拠は `docs/kv-cache-design.md` §11.4（P1〜P4）と §14（承認記録）。
 // =====================================================================
 
-/// `nn/kv_cache.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの。3 名形）。
-const KV_CACHE_APPROVED_REEXPORT: &str =
-    "fandhe_ai_autodiff::nn::{KvCache,MultiheadAttentionConfig,StatefulAttention}";
+/// `nn/kv_cache.rs` の承認形（`pub use` 文のトークンを空白なしで連結したもの。5 名形。
+/// #3112 で `PagedKvCache`・`PagedKvCacheConfig` を追加。承認は #3018 の
+/// issuecomment-6207013704 の項 4）。
+// 末尾の `,` は rustfmt が 5 名を複数行へ整形する際に付ける trailing comma（承認形に含む）。
+const KV_CACHE_APPROVED_REEXPORT: &str = "fandhe_ai_autodiff::nn::{KvCache,MultiheadAttentionConfig,PagedKvCache,PagedKvCacheConfig,StatefulAttention,}";
 
 /// `KvCache`／`StatefulAttention` を識別子として含む `pub use` 文を
 /// `(ファイル相対パス, 空白なしトークン連結)` で、facade 独自の `struct`／`enum`／`type`／
@@ -8346,7 +8348,12 @@ const KV_CACHE_APPROVED_REEXPORT: &str =
 /// で全件返す。コメント・文字列リテラルは無視する。
 /// （`MultiheadAttentionConfig` 側の公開は [`mha_config_exposures`] が別途固定する。）
 fn kv_cache_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
-    const NAMES: [&str; 2] = ["KvCache", "StatefulAttention"];
+    const NAMES: [&str; 4] = [
+        "KvCache",
+        "StatefulAttention",
+        "PagedKvCache",
+        "PagedKvCacheConfig",
+    ];
     let mut out = Vec::new();
     for (rel, content) in files {
         let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
@@ -8412,8 +8419,7 @@ fn facade_reexports_kv_cache_items_only_in_approved_shape() {
 #[test]
 fn facade_reexports_kv_cache_items_only_in_approved_shape_detects_each_category() {
     let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
-    let ok =
-        "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, StatefulAttention};";
+    let ok = "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, PagedKvCache, PagedKvCacheConfig, StatefulAttention,};";
     assert_eq!(
         kv_cache_exposures(&f("nn/kv_cache.rs", ok)),
         vec![(
@@ -8430,6 +8436,9 @@ fn facade_reexports_kv_cache_items_only_in_approved_shape_detects_each_category(
         "pub use fandhe_ai_autodiff::nn::{KvCache, StatefulAttention};",
         "pub use fandhe_ai_autodiff::nn::{attention::{StatefulAttention}};",
         "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttention, MultiheadAttentionConfig, StatefulAttention};",
+        "pub use fandhe_ai_autodiff::nn::PagedKvCache;",
+        "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, StatefulAttention};",
+        "pub struct PagedKvCache;",
         "pub struct KvCache;",
         "pub type StatefulAttention = u8;",
         "pub trait KvCache {}",
@@ -8602,7 +8611,7 @@ fn workspace_declares_external_cache_entries_only_in_approved_locations() {
     );
 }
 
-/// `StatefulAttention` の公開メソッド集合が 8 件ちょうど（#3096。`new`／`mha` は P2 の残課題のまま）。
+/// `StatefulAttention` の公開メソッド集合が 9 件ちょうど（#3096・#3112 で `forward_paged` 追加。`new`／`mha` は P2 の残課題のまま）。
 #[test]
 fn stateful_attention_public_methods_are_pinned() {
     let mut found: Vec<String> = Vec::new();
@@ -8630,6 +8639,7 @@ fn stateful_attention_public_methods_are_pinned() {
         [
             "cache",
             "forward",
+            "forward_paged",
             "forward_with_external_cache",
             "from_config",
             "mha",
@@ -8639,6 +8649,231 @@ fn stateful_attention_public_methods_are_pinned() {
         ],
         "StatefulAttention の公開メソッドが承認形と不一致"
     );
+}
+// ---------------------------------------------------------------------
+// イシュー #3112（親 #3108。承認は #3018 の issuecomment-6207013704 の項 4）: paged attention
+// （K-3）の facade 公開を固定する正ガード・否定ガード。設計記録
+// `docs/device-resident-kv-paged-attention-design.md` §6・§13。
+// 検出範囲の限界: `StatefulAttention::forward_paged`・`PagedKvCache::{new, append, attention}` は
+// 第 1 引数が生の autodiff `Tape` で facade から名指しできないため、関数ポインタでの署名固定は
+// facade 側（`Tape::paged_attention_forward`・`Tape::new_paged_kv_cache`・
+// `PagedKvCacheConfig::new`）のみ。autodiff 側は宣言インベントリ・薄い委譲・pub fn 集合・
+// 実行プローブで補う。
+// ---------------------------------------------------------------------
+
+/// `Tape::paged_attention_forward` の本体が 1 行委譲であることを固定する。
+#[test]
+fn tape_paged_attention_forward_is_thin_delegation() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "paged_attention_forward").as_deref(),
+        Some("sa . forward_paged ( & self . 0 , x_new , cache )"),
+        "Tape::paged_attention_forward の本体が承認形（1 行委譲）と一致しない"
+    );
+}
+
+/// `Tape::new_paged_kv_cache` の本体が 1 行委譲であることを固定する。
+#[test]
+fn tape_new_paged_kv_cache_is_thin_delegation() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "new_paged_kv_cache").as_deref(),
+        Some("nn : : kv_cache : : PagedKvCache : : new ( & self . 0 , config )"),
+        "Tape::new_paged_kv_cache の本体が承認形（1 行委譲）と一致しない"
+    );
+}
+
+/// paged attention 入口の `fn` 宣言の完全一致（`paged_attention_forward` は #3111 の
+/// `BackendOps` メソッドと同名のため既存 4 件を含めて固定する）。
+#[test]
+fn workspace_declares_paged_attention_entries_only_in_approved_locations() {
+    let found = scan_workspace_fn_declarations(&[
+        "forward_paged",
+        "new_paged_kv_cache",
+        "paged_attention_forward",
+    ]);
+    let expected: std::collections::BTreeMap<String, usize> = [
+        "autodiff/src/nn/attention.rs::forward_paged",
+        "facade/src/lib.rs::new_paged_kv_cache",
+        "facade/src/lib.rs::paged_attention_forward",
+        "tensor-core/src/backend_ops.rs::paged_attention_forward",
+        "backend-cpu/src/ops.rs::paged_attention_forward",
+        "backend-cuda/src/ops.rs::paged_attention_forward",
+        "backend-metal/src/ops.rs::paged_attention_forward",
+    ]
+    .into_iter()
+    .map(|k| (k.to_string(), 1usize))
+    .collect();
+    assert_eq!(
+        found, expected,
+        "paged attention 入口の宣言集合が承認形と一致しない: {found:?}"
+    );
+}
+
+/// `PagedKvCache`（12 件）・`PagedKvCacheConfig`（4 件）の公開メソッド集合を固定する。
+#[test]
+fn paged_kv_cache_public_methods_are_pinned() {
+    let mut cache: Vec<String> = Vec::new();
+    let mut config: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(workspace_crates_dir()) else {
+        panic!("workspace crates ディレクトリが読めない");
+    };
+    for e in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        visit_rs_files(&e.join("src"), &mut |_p, content| {
+            let tokens = tokens_of(without_test_mod(content));
+            cache.extend(pb_pub_fn_names_in_inherent_impls(&tokens, "PagedKvCache"));
+            config.extend(pb_pub_fn_names_in_inherent_impls(
+                &tokens,
+                "PagedKvCacheConfig",
+            ));
+        });
+    }
+    cache.sort();
+    config.sort();
+    assert_eq!(
+        cache,
+        [
+            "append",
+            "attention",
+            "batch",
+            "clear",
+            "config",
+            "device",
+            "is_poisoned",
+            "new",
+            "num_free_blocks",
+            "num_used_blocks",
+            "rewind_to",
+            "seq_len"
+        ],
+        "PagedKvCache の公開メソッドが承認形と不一致"
+    );
+    assert_eq!(
+        config,
+        ["block_size", "embed_dim", "max_blocks", "new"],
+        "PagedKvCacheConfig の公開メソッドが承認形と不一致"
+    );
+}
+
+/// facade 側の署名を関数ポインタ型注釈で固定する。
+#[test]
+fn paged_attention_facade_signatures_are_pinned() {
+    use fandhe_ai::nn::kv_cache::{PagedKvCache, PagedKvCacheConfig, StatefulAttention};
+    use fandhe_ai::{AutodiffError, Tape, Tensor};
+    let _a: fn(&Tape, PagedKvCacheConfig) -> Result<PagedKvCache, AutodiffError> =
+        Tape::new_paged_kv_cache;
+    type PagedForward = fn(
+        &Tape,
+        &StatefulAttention,
+        &Tensor<f32>,
+        &mut PagedKvCache,
+    ) -> Result<Tensor<f32>, AutodiffError>;
+    let _b: PagedForward = Tape::paged_attention_forward;
+    let _c: fn(usize, usize, usize) -> Result<PagedKvCacheConfig, AutodiffError> =
+        PagedKvCacheConfig::new;
+}
+
+/// 公開面だけで（`fandhe_ai::nn::kv_cache` のみ import）構築 → prefill → decode が通る
+/// 実行プローブ。
+#[test]
+fn paged_attention_is_reachable_via_facade_only() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::nn::kv_cache::{
+        MultiheadAttentionConfig, PagedKvCache, PagedKvCacheConfig, StatefulAttention,
+    };
+    let tape = fandhe_ai::tape();
+    let sa = StatefulAttention::from_config(&MultiheadAttentionConfig::new(4, 2), 0)
+        .expect("from_config");
+    let mut cache: PagedKvCache = tape
+        .new_paged_kv_cache(PagedKvCacheConfig::new(2, 8, 4).expect("cfg"))
+        .expect("new");
+    let x = Tensor::new(vec![0.1f32; 12], &[1, 3, 4]).expect("x");
+    let y = tape
+        .paged_attention_forward(&sa, &x, &mut cache)
+        .expect("prefill");
+    assert_eq!(y.shape(), &[1usize, 3, 4]);
+    assert_eq!(cache.seq_len(), 3);
+    assert_eq!(cache.num_used_blocks(), 2);
+    let t = Tensor::new(vec![0.2f32; 4], &[1, 1, 4]).expect("t");
+    tape.paged_attention_forward(&sa, &t, &mut cache)
+        .expect("decode");
+    assert_eq!(cache.seq_len(), 4);
+}
+
+/// 承認形に無い paged 内部型・関数を facade が公開しないことを検出する
+/// （`pub use` に名前を含む・同名の独自型／`fn` 宣言）。
+fn paged_internal_exposures(files: &[(String, String)]) -> Vec<(String, String)> {
+    const NAMES: [&str; 8] = [
+        "PagedKvCacheReference",
+        "paged_attention_reference",
+        "DEFAULT_BLOCK_SIZE",
+        "PagedKvLayout",
+        "PagedAttentionArgs",
+        "PagedAttentionPlan",
+        "validate_paged_kv_append",
+        "validate_paged_attention",
+    ];
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for (i, t) in tokens.iter().enumerate() {
+            if matches!(
+                t.as_str(),
+                "struct" | "enum" | "type" | "union" | "trait" | "fn" | "const" | "static"
+            ) && tokens
+                .get(i + 1)
+                .is_some_and(|n| NAMES.contains(&n.as_str()))
+            {
+                out.push((rel.clone(), "<decl>".to_string()));
+            }
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                if tokens[i + 2..end]
+                    .iter()
+                    .any(|x| NAMES.contains(&x.as_str()))
+                {
+                    out.push((rel.clone(), tokens[i + 2..end].concat()));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn facade_does_not_reexport_paged_kv_internals() {
+    assert_eq!(
+        paged_internal_exposures(&facade_src_files()),
+        Vec::<(String, String)>::new(),
+        "paged attention の内部型・参照実装は facade 非公開（設計 §6）"
+    );
+    // 自己テスト
+    let f = |src: &str| vec![("a.rs".to_string(), src.to_string())];
+    for bad in [
+        "pub use fandhe_ai_autodiff::nn::PagedKvCacheReference;",
+        "pub use fandhe_ai_autodiff::nn::{paged_attention_reference};",
+        "pub use fandhe_ai_tensor_core::PagedKvLayout;",
+        "pub struct PagedAttentionArgs;",
+        "pub fn paged_attention_reference() {}",
+        "pub const DEFAULT_BLOCK_SIZE: usize = 1;",
+    ] {
+        assert!(!paged_internal_exposures(&f(bad)).is_empty(), "{bad}");
+    }
+    for ok in [
+        "// pub use x::PagedKvLayout;",
+        "let s = \"pub use x::PagedKvLayout;\";",
+        "pub use fandhe_ai_autodiff::nn::PagedKvCache;",
+    ] {
+        assert!(paged_internal_exposures(&f(ok)).is_empty(), "{ok}");
+    }
 }
 // ---------------------------------------------------------------------
 // イシュー #2580: #2579 で導入した KV キャッシュ正ガードの補強（追加のみ。既存ガードの期待集合・
@@ -8693,7 +8928,7 @@ fn nn_kv_cache_module_reexports_exactly_expected_surface() {
     let extra = format!("{ok}\npub use fandhe_ai_autodiff::nn::MultiheadAttentionVars;");
     assert_ne!(pub_use_stmts(&extra), vec![expected.clone()]);
     assert_ne!(pub_use_stmts("// 空"), vec![expected.clone()]);
-    let alias = "pub use fandhe_ai_autodiff::nn::{KvCache as K, MultiheadAttentionConfig, StatefulAttention};";
+    let alias = "pub use fandhe_ai_autodiff::nn::{KvCache as K, MultiheadAttentionConfig, PagedKvCache, PagedKvCacheConfig, StatefulAttention,};";
     assert_ne!(pub_use_stmts(alias), vec![expected]);
 }
 
@@ -8723,6 +8958,20 @@ fn kv_cache_usage_doctests_are_present_and_compiled() {
             "use fandhe_ai::nn::kv_cache::",
             "KvCache::new",
             "stateful_attention_forward_with_cache",
+            "seq_len",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+
+    // イシュー #3112: paged attention（K-3）の利用例も実在・有効であること。
+    let v = doctest_probe_violations(
+        "nn/kv_cache.rs モジュール doc（paged）",
+        &inner_doc_lines(&content),
+        &[
+            "use fandhe_ai::nn::kv_cache::",
+            "PagedKvCacheConfig::new",
+            "new_paged_kv_cache",
+            "paged_attention_forward",
             "seq_len",
         ],
     );
@@ -15295,7 +15544,7 @@ fn facade_reexports_multihead_attention_config_detects_offense() {
     assert_eq!(
         mha_config_exposures(&f(
             "nn/kv_cache.rs",
-            "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, StatefulAttention};"
+            "pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, PagedKvCache, PagedKvCacheConfig, StatefulAttention,};"
         )),
         vec![(
             "nn/kv_cache.rs".to_string(),

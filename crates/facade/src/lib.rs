@@ -54,6 +54,9 @@
 //!    （イシュー #2579。`docs/kv-cache-design.md` §11.4）。#3096 で外部キャッシュ版
 //!    `Tape::stateful_attention_forward_with_cache` も追加した
 //!    （`docs/facade-speculative-decoding-batching-design.md` §19）。
+//!    #3112 でデバイス常駐ページ化キャッシュ（K-3。`PagedKvCache`・`PagedKvCacheConfig`）と
+//!    入口 `Tape::new_paged_kv_cache`／`Tape::paged_attention_forward` も追加した
+//!    （`docs/device-resident-kv-paged-attention-design.md` §6・§13）。
 //!    損失構造体 14 種と引数型 10 種（`Reduction`・各オプション型 9 種。うち 5 種は #2854）は
 //!    [`nn::loss`] へ純再エクスポートする（イシュー #2602・#2854。`docs/facade-nn-loss-structs-exposure-decision.md`）。
 //!
@@ -1730,6 +1733,46 @@ impl Tape {
         cache: &mut nn::kv_cache::KvCache,
     ) -> Result<Var<'t>, AutodiffError> {
         sa.forward_with_external_cache(&self.0, x_new, cache)
+    }
+
+    /// デバイス常駐ページ化 KV キャッシュ（K-3）をこの `Tape` のバックエンドへ構築する
+    /// （イシュー #3112・親 #3108。`docs/device-resident-kv-paged-attention-design.md` §6・§13）。
+    ///
+    /// `PagedKvCache::new` は生の autodiff `Tape` を取り facade から呼べない（REQ-12）ため、
+    /// `&self.0` を渡すだけの薄い委譲を `Tape` に置く。プールは `config` の
+    /// `max_blocks · block_size · embed_dim` ぶん K／V 各 1 本を確保する。
+    ///
+    /// # Errors
+    ///
+    /// バックエンドが `MemoryOps` を持たない場合は `Unsupported`、`max_blocks · block_size` が
+    /// `u32::MAX` 超・確保失敗で `AutodiffError` を返す。
+    pub fn new_paged_kv_cache(
+        &self,
+        config: nn::kv_cache::PagedKvCacheConfig,
+    ) -> Result<nn::kv_cache::PagedKvCache, AutodiffError> {
+        nn::kv_cache::PagedKvCache::new(&self.0, config)
+    }
+
+    /// ページ化 KV キャッシュを使う self-attention の入口（K-3。イシュー #3112）。
+    ///
+    /// `x_new`（`[B, L_new, E]`）を q/k/v へ射影して `cache` へ追記し、キャッシュ全体に対する
+    /// attention と `out_proj` を適用した `[B, L_new, E]` を返す。**推論専用**（入出力は
+    /// 非追跡の `Tensor`。勾配が要る用途は K-1 の `stateful_attention_forward*`）。`sa` の
+    /// 内部キャッシュは変えない。`Err` のとき `cache` の論理状態は不変（poison は戻らない）。
+    /// バックエンドが `Unsupported` でも K-1 へ暗黙フォールバックしない。`Tape` に置く理由は
+    /// `stateful_attention_forward` と同じ（REQ-12）。
+    ///
+    /// # Errors
+    ///
+    /// 非既定 config・rank／`E`／`B` の不一致・ブロック枯渇・バックエンド失敗で
+    /// `AutodiffError` を返す。
+    pub fn paged_attention_forward(
+        &self,
+        sa: &nn::kv_cache::StatefulAttention,
+        x_new: &Tensor<f32>,
+        cache: &mut nn::kv_cache::PagedKvCache,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        sa.forward_paged(&self.0, x_new, cache)
     }
 
     /// この `Tape` が結線されているバックエンドの `f64` 演算本体
