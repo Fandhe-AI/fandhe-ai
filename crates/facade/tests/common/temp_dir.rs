@@ -1,6 +1,6 @@
 //! テスト用一時ディレクトリ RAII ガード（イシュー #2378・親 #2363）。
 //!
-//! `tests/model_registry.rs`・`api_surface.rs`・`interop_safetensors_roundtrip.rs`・
+//! `tests/model_registry.rs`・`model_registry_save.rs`（#3120）・`api_surface.rs`・`interop_safetensors_roundtrip.rs`・
 //! `interop_safetensors_optimizer_state.rs`・`compat_sequential_checkpoint_file.rs`・
 //! `interop_onnx_export.rs`・`interop_onnx_internal_parity.rs` から使われる（#2379）。
 //! pid・ナノ秒時刻・プロセス内カウンタ・ラベルによる一意名を `create_dir` で排他作成し、

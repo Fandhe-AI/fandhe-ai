@@ -5808,26 +5808,42 @@ fn contains_pub_fn_declaration_detects_variants() {
 // model 公開面の機械検査（イシュー #2087・親 #2082）
 // ============================================================================
 
+/// `src/model.rs` の承認済み公開アイテム 8 件（`(種別, 名前)`。#3120）。
+/// 否定走査 [`scan_unapproved_model_pub_items`] と正ガード
+/// [`model_registry_surface_violations`] が共有する単一の承認形。
+const MODEL_APPROVED_PUB_ITEMS: [(&str, &str); 8] = [
+    ("struct", "ModelRegistry"),
+    ("enum", "ModelError"),
+    ("fn", "new"),
+    ("fn", "with_cache_dir"),
+    ("fn", "cache_dir"),
+    ("fn", "load"),
+    ("fn", "available_models"),
+    ("fn", "save"),
+];
+
+/// `impl ModelRegistry` の承認済み公開メソッド 6 件（昇順。
+/// `pb_pub_fn_names_in_inherent_impls` の返す昇順と直接比較する）。
+const MODEL_REGISTRY_APPROVED_PUB_METHODS: [&str; 6] = [
+    "available_models",
+    "cache_dir",
+    "load",
+    "new",
+    "save",
+    "with_cache_dir",
+];
+
 /// `src/model.rs` に承認範囲外の公開アイテムが存在しないかを走査する。
 /// 承認範囲は `model::{ModelRegistry, ModelError}` と
 /// `ModelRegistry::{new, with_cache_dir, cache_dir, load,
 /// available_models, save}` の 8 件のみ（PR 本文「承認事項」節。`save` は
-/// #3119・`docs/facade-model-registry-decision.md` §16。公開面ちょうどを
-/// 要求する正ガードは #3120）。
+/// #3119・`docs/facade-model-registry-decision.md` §16）。本関数は否定方向
+/// （承認外の追加）だけを見る。公開面ちょうど（欠落・重複も違反）を要求する
+/// 正ガードは [`model_registry_surface_violations`]（#3120）。
 /// `scan_unapproved_onnx_pub_items` と同型の独自許可リストを持つ
 /// 兄弟関数として実装する。既存 onnx 用関数は並列 PR の競合面拡大を
 /// 避けるため byte 単位で不変のまま触らない）。
 fn scan_unapproved_model_pub_items(original: &str) -> Vec<String> {
-    const ALLOWED_PUB_ITEMS: [(&str, &str); 8] = [
-        ("struct", "ModelRegistry"),
-        ("enum", "ModelError"),
-        ("fn", "new"),
-        ("fn", "with_cache_dir"),
-        ("fn", "cache_dir"),
-        ("fn", "load"),
-        ("fn", "available_models"),
-        ("fn", "save"),
-    ];
     const SCANNED_KINDS: [&str; 9] = [
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
@@ -5923,7 +5939,7 @@ fn scan_unapproved_model_pub_items(original: &str) -> Vec<String> {
                 ne += 1;
             }
             let name: String = cleaned[ns..ne].iter().collect();
-            let approved = ALLOWED_PUB_ITEMS
+            let approved = MODEL_APPROVED_PUB_ITEMS
                 .iter()
                 .any(|(k2, n2)| *k2 == kind.as_str() && *n2 == name.as_str());
             if !approved {
@@ -5980,6 +5996,92 @@ fn model_module_exposes_only_approved_surface() {
         offenses.is_empty(),
         "src/model.rs に承認範囲外の公開アイテムが見つかった: {offenses:?}"
     );
+    // 正ガード（#3120）: 承認形がちょうど 1 回ずつ存在する（欠落・重複も違反）。
+    let violations = model_registry_surface_violations(&content);
+    assert!(
+        violations.is_empty(),
+        "src/model.rs の公開面が承認形（8 件ちょうど）とずれている: {violations:?}"
+    );
+    // `model.rs` 以外のファイルに `impl ModelRegistry { pub fn .. }` を足す経路を塞ぐ。
+    let mut total: Vec<String> = Vec::new();
+    visit_rs_files(&facade_crate_root().join("src"), &mut |_, c| {
+        total.extend(pb_pub_fn_names_in_inherent_impls(
+            &tokens_of(c),
+            "ModelRegistry",
+        ));
+    });
+    total.sort();
+    assert_eq!(
+        total,
+        MODEL_REGISTRY_APPROVED_PUB_METHODS
+            .map(String::from)
+            .to_vec(),
+        "facade src 全体の `impl ModelRegistry` の pub fn 集合が承認 6 件と不一致"
+    );
+}
+
+/// `src/model.rs` の公開面が承認形ちょうどであることの正ガード（#3120）。
+///
+/// - [`MODEL_APPROVED_PUB_ITEMS`] の各 `pub <種別> <名前>`（`pub(crate)` 等は数えない）が
+///   トークン列にちょうど 1 回出現する（0 回は空振り・欠落、2 回以上は重複）
+/// - `impl ModelRegistry {` が 1 件以上あり、その直下の `pub fn` 集合が
+///   [`MODEL_REGISTRY_APPROVED_PUB_METHODS`] と完全一致する
+///
+/// `without_test_mod` は使わない: `model.rs` の `///` コメントに `#[cfg(test)]` の文字列があり、
+/// 切り出し位置がそこへずれて `save`／`available_models` が範囲から落ちるため。`tokens_of` は
+/// コメント・リテラルを除き、`mod tests` 内には `impl ModelRegistry` が無いのでファイル全体を走査する。
+fn model_registry_surface_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    for (kind, name) in MODEL_APPROVED_PUB_ITEMS {
+        let n = tokens
+            .windows(3)
+            .filter(|w| w[0] == "pub" && w[1] == kind && w[2] == name)
+            .count();
+        if n != 1 {
+            v.push(format!(
+                "`pub {kind} {name}` が {n} 件（ちょうど 1 件が必要）"
+            ));
+        }
+    }
+    if pb_find_seq(&tokens, &["impl", "ModelRegistry", "{"]).is_empty() {
+        v.push("`impl ModelRegistry {` が無い".to_string());
+    }
+    let got = pb_pub_fn_names_in_inherent_impls(&tokens, "ModelRegistry");
+    if got != MODEL_REGISTRY_APPROVED_PUB_METHODS {
+        v.push(format!(
+            "ModelRegistry の pub fn 集合が承認 6 件と不一致: {got:?}"
+        ));
+    }
+    v
+}
+
+/// [`model_registry_surface_violations`] の自己テスト。承認形は違反 0、欠落・追加・重複・
+/// 空入力は違反、`pub(crate)` は違反にしない。
+#[test]
+fn model_registry_surface_violations_detects_drift() {
+    let approved = "pub struct ModelRegistry { x: u8 }\n\
+        pub enum ModelError { A }\n\
+        impl ModelRegistry {\n\
+        pub fn new() {}\n\
+        pub fn with_cache_dir() {}\n\
+        pub fn cache_dir() {}\n\
+        pub fn load() {}\n\
+        pub fn available_models() {}\n\
+        pub fn save() {}\n\
+        pub(crate) fn save_with() {}\n\
+        }\n";
+    assert!(model_registry_surface_violations(approved).is_empty());
+    let missing = approved.replace("pub fn save() {}\n", "");
+    assert!(!model_registry_surface_violations(&missing).is_empty());
+    let extra = approved.replace(
+        "pub fn save() {}\n",
+        "pub fn save() {}\npub fn delete() {}\n",
+    );
+    assert!(!model_registry_surface_violations(&extra).is_empty());
+    let dup = format!("{approved}impl ModelRegistry {{ pub fn save() {{}} }}\n");
+    assert!(!model_registry_surface_violations(&dup).is_empty());
+    assert!(!model_registry_surface_violations("").is_empty());
 }
 
 /// `scan_unapproved_model_pub_items` が合成入力で承認範囲外の
@@ -6006,10 +6108,77 @@ fn model_types_are_reachable_via_facade() {
             fandhe_ai::model::ModelError::InvalidComponent { .. } => "invalid_component",
             fandhe_ai::model::ModelError::NotFound { .. } => "not_found",
             fandhe_ai::model::ModelError::TooLarge { .. } => "too_large",
+            fandhe_ai::model::ModelError::EmptyModel { .. } => "empty_model",
+            fandhe_ai::model::ModelError::Save(_) => "save",
             fandhe_ai::model::ModelError::Load(_) => "load",
             fandhe_ai::model::ModelError::Io(_) => "io",
             _ => "unknown",
         }
+    }
+}
+
+/// `ModelRegistry` の公開シグネチャを関数ポインタ型で固定する到達プローブ（#3120）。
+/// 引数・戻り値の型が変わるとコンパイルが落ちる。検出範囲の限界: `with_cache_dir` は引数が
+/// `impl Into<PathBuf>` で関数ポインタ化できないため呼び出し型のプローブに留まる。
+/// 非 F32 入力は `save` の引数型 `HashMap<String, Tensor<f32>>` で型として拒否される
+/// （実行時検査ではなく、ここで型を固定することで担保する）。
+#[test]
+fn model_registry_signatures_are_pinned() {
+    use fandhe_ai::Tensor;
+    use fandhe_ai::model::{ModelError, ModelRegistry};
+    use std::collections::HashMap;
+
+    type StateDict = HashMap<String, Tensor<f32>>;
+    type Listing = Vec<(String, Vec<String>)>;
+    type LoadFn = fn(&ModelRegistry, &str, &str) -> Result<StateDict, ModelError>;
+    type SaveFn = fn(&ModelRegistry, &str, &str, &StateDict) -> Result<(), ModelError>;
+
+    let _: fn() -> Result<ModelRegistry, ModelError> = ModelRegistry::new;
+    let _: fn(&ModelRegistry) -> &std::path::Path = ModelRegistry::cache_dir;
+    let _: LoadFn = ModelRegistry::load;
+    let _: fn(&ModelRegistry) -> Listing = ModelRegistry::available_models;
+    let _: SaveFn = ModelRegistry::save;
+    // 構築は副作用なし（パスを保持するだけ）。`&str`・`PathBuf` の両方を受ける。
+    let _: ModelRegistry = ModelRegistry::with_cache_dir(std::path::PathBuf::new());
+    let _: ModelRegistry = ModelRegistry::with_cache_dir("x");
+
+    fn _wrap(e: fandhe_ai::interop::safetensors::SaveError) -> ModelError {
+        ModelError::Save(e)
+    }
+    fn _assert_error_trait<E: std::error::Error + 'static>() {}
+    _assert_error_trait::<ModelError>();
+}
+
+/// 正の doctest プローブ（#3120。kv_cache の #2580 と同型）: `ModelRegistry::save` の利用例が
+/// doc に実在し、実際にコンパイル・実行される形であることを固定する。実体の実行は
+/// `cargo test --doc`。
+#[test]
+fn model_registry_save_usage_doctest_is_present_and_compiled() {
+    let content = read_to_string_or_panic(&model_rs_path());
+    let v = doctest_probe_violations(
+        "ModelRegistry::save の doc",
+        &doc_lines_above_fn(&content, "pub fn save("),
+        &[
+            "use fandhe_ai::model::",
+            "ModelRegistry::with_cache_dir",
+            ".save(",
+            ".load(",
+            "available_models",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+
+    // 自己テスト: 空入力・隠し行・ignore／no_run 指定は検出される。
+    assert!(!doctest_probe_violations("t", &[], &[".save("]).is_empty());
+    let hidden = ["```", "# registry.save(..)", "```"].map(String::from);
+    assert!(!doctest_probe_violations("t", &hidden, &[".save("]).is_empty());
+    for info in ["ignore", "no_run"] {
+        let bad = [
+            format!("```{info}"),
+            "registry.save(..)".into(),
+            "```".into(),
+        ];
+        assert!(!doctest_probe_violations("t", &bad, &[".save("]).is_empty());
     }
 }
 
