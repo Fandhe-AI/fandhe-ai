@@ -232,7 +232,7 @@ pub fn save(
 
 - **本 issue 系（std のみ）で担保する範囲**: 書き込み前の allowlist 検証、各段の no-follow 型検査（symlink・非ディレクトリの拒否。#3120 の「`<name>` が symlink なら拒否」テストの根拠）、canonicalize によるルート配下確認、最終要素で symlink に追従しない `create_new`、エントリ自体を置換する `rename`、`(dev, ino)` で所有を確かめてからの一時ファイル削除、確定直前と保存後の `(dev, ino)` 再確認
 - **残るリスク**: 手順 4 の検査から手順 6 の作成・手順 8 の `rename` までの間に、キャッシュルートや `<name>` へ書き込める攻撃者（共有キャッシュディレクトリ・別のローカルユーザー）が `<name>`／`<version>` を symlink へ差し替える TOCTOU は、std では構造的に閉じられない。手順 7・9 は検出して `Err` を返せるが、ルート外へ書いた後になりうる。中間ディレクトリの作成も文字列パス解決に依存する。既定の `$HOME` 配下を単一ユーザーで使う限り該当する攻撃者は限られる。ルート自体の symlink は許容のまま
-- **#3123（dirfd 経路の依存承認）の後に強化する範囲**: `docs/model-download-design.md` §6 (a)・(b) の dirfd 連鎖へ置き換える（`openat2`〈`RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`〉または `openat(O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)`、`ENOENT` 時の `mkdirat`、`openat(O_CREAT | O_EXCL | O_NOFOLLOW)`、`renameat`）。配置は §14.5 案 B-1（第 10 区分 `libc` の用途を facade へ拡張）を推奨とし、承認されるまで実施しない。強化後も公開シグネチャは変えない（内部置換のみ）
+- **#3123（dirfd 経路の依存承認）の後に強化する範囲**: `docs/model-download-design.md` §6 (a)・(b) の dirfd 連鎖へ置き換える（`openat2`〈`RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`〉または `openat(O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)`、`ENOENT` 時の `mkdirat`、`openat(O_CREAT | O_EXCL | O_NOFOLLOW)`、`renameat`）。配置は `docs/model-download-design.md` §14.5 案 B-1（第 10 区分 `libc` の用途を facade へ拡張）を推奨とし、承認されるまで実施しない。強化後も公開シグネチャは変えない（内部置換のみ）
 - ダウンロード（#3121）は §6 (c) により dirfd 経路が使えない環境では fail-closed にする必要がある。std のみの `save` は #3121 の安全な土台の代わりにならない
 
 ### 16.7 後続で更新する箇所（本 issue では実施しない）
@@ -243,4 +243,4 @@ pub fn save(
 ### 16.8 承認・出典
 
 - 承認: `docs/compat-api-scope.md` §5 の D-A（`https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437`。条件は「記録に形を書き、その形のまま実装へ進む。形を書けない点だけ所有者へ戻す」）。本節はすべての論点に形を与えており、**所有者へ戻す論点はない**。依存追加・`docs/spec/` 編集・tolerance／上限値の変更はない
-- 出典: `crates/facade/src/model.rs`（`validate_component`・`resolve_model_file`）、`crates/facade/src/fs_guard.rs`（`MAX_MODEL_FILE_BYTES`・`open_leaf_no_follow`）、`crates/facade/src/compat/model_io.rs`（`create_new_with_retry`・`remove_own_tmp`・`MAX_TMP_NAME_ATTEMPTS`）、`docs/compat-model-io-decision.md` §12.3・§13.6、`docs/model-download-design.md` §5・§6・§14.5
+- 出典: `crates/facade/src/model.rs`（`validate_component`・`resolve_model_file`）、`crates/facade/src/fs_guard.rs`（`MAX_MODEL_FILE_BYTES`・`open_leaf_no_follow`）、`crates/facade/src/compat/model_io.rs`（`create_new_with_retry`・`remove_own_tmp`・`MAX_TMP_NAME_ATTEMPTS`）、`docs/compat-model-io-decision.md` §12.3・§13.6、`docs/model-download-design.md` §5・§6・§14.5（案 B-1）
