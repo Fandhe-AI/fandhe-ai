@@ -60,13 +60,13 @@
 //! - 乱数は独立した `Generator`（xorshift64*）のみを使い、グローバル RNG は消費しない。
 //!   暗号学的に安全ではないため、生成 token をセキュリティ用途に使わないこと。
 //!
-//! **既知の制限（未決事項）**: `forward_step` へ渡される `caches: &mut [KvCache]` へ
-//! facade のみで書き込む手段はない（`KvCache` に外部からテンソルを入れるセッターは無く、
-//! `MultiheadAttention::forward_with_cache` は `docs/kv-cache-design.md` §11.4 のとおり
-//! 非公開）。KV キャッシュを使うモデルは `RefCell<nn::kv_cache::StatefulAttention>` を
-//! 内部に持ち、[`crate::tape`] で作った `Tape` の `stateful_attention_forward` を
-//! 呼ぶ形になり（渡された `caches` は使わず `num_kv_layers()` は 0 を返す）、
-//! prefill 前のキャッシュ reset は利用者の責務となる。
+//! **KV 付きモデルの組み方**: `forward_step` の `caches[i]` は、[`crate::tape`] で作った `Tape` の
+//! `stateful_attention_forward_with_cache`（#3096・設計記録 §19）で進める。`nn::kv_cache::StatefulAttention`
+//! を層ごとに持ち（`num_kv_layers()` は層数を返す）、`forward_step` では `tape.stateful_attention_forward_with_cache(&sa, &x, &mut caches[i])`
+//! を呼ぶ。この形ならキャッシュの reset・巻き戻しを `generate` 系が担い、1 つのモデルを複数要求で
+//! 共有しても状態は混ざらない。`RefCell<StatefulAttention>` を内部に持つ旧来の形
+//! （`stateful_attention_forward`。渡された `caches` を使わず `num_kv_layers()` は 0）も動作するが
+//! 推奨しない（prefill 前の reset が利用者の責務になる）。
 //!
 //! ```
 //! use fandhe_ai::Tensor;
@@ -120,16 +120,16 @@
 //! - [`BatchScheduler`]: [`SchedulerLimits`] の 3 上限（同時実行数・待ち行列長・`max_length`）は
 //!   必須で 0 は拒否する。要求単位の失敗は他の要求から切り離して `take_failed` に積む。完了条件は
 //!   `max_length` 到達のみ（EOS 停止なし）。呼び出しスレッド上で同期実行し、スレッドも I/O も持たない。
-//! - **対象モデルの契約**: 対象は、生成状態を渡された `caches` だけに持つモデルと、状態を持たない
-//!   モデル。「内部状態保持型」（生成状態を、渡された `caches` の外に持つ型。`RefCell<StatefulAttention>`
+//! - **対象モデルの契約**: 対象は、生成状態を渡された `caches` だけに持つモデル（`stateful_attention_forward_with_cache`
+//!   で `caches[i]` を進める形を含む）と、状態を持たないモデル。「内部状態保持型」（生成状態を、渡された `caches` の外に持つ型。`RefCell<StatefulAttention>`
 //!   等）は `num_kv_layers()` の値によらず**対象外**で、出力を保証しない。型でも実行時でも検出できない
-//!   ため、利用者が保証する（設計記録 §17.5）。
+//!   ため、利用者が保証する（設計記録 §17.5・§19.6）。
 //! - 乱数は独立した `Generator`（xorshift64*）のみで非暗号。生成 token をセキュリティ用途に使わないこと。
 //!
-//! **既知の制限（保留論点 3）**: facade だけの利用者は `forward_with_cache` を使えず、[`crate::nn::kv_cache::KvCache`]
-//! にもセッターが無い。そのため [`generate_speculative`] に渡せる「`caches` を正しく進めるモデル」を
-//! facade の公開面だけで組む経路はなく、下の doctest は fail-closed 契約のみを示す（成功経路は
-//! `crates/facade/tests/speculative_batching_facade.rs` の結合テストが担う）。この経路は本イシューでは足さない。
+//! **KV 付きモデルの渡し方**: [`generate_speculative`] には、`stateful_attention_forward_with_cache` で
+//! `caches[i]` を進める形のモデルを渡す（`num_kv_layers() > 0`。棄却時の巻き戻しは内部で行う。設計記録 §19.6）。
+//! 下の doctest は fail-closed 契約のみを示し、成功経路は結合テスト
+//! `crates/facade/tests/speculative_batching_facade.rs` が担う（成功例 doctest は #3098）。
 //!
 //! ```
 //! use fandhe_ai::inference::{
