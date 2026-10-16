@@ -133,6 +133,27 @@ impl UreqTransport {
     }
 }
 
+/// `Content-Encoding` の全ヘッダ行を `,` 連結で 1 本の文字列にする。`HeaderMap::get` は最初の
+/// 値しか返さず `to_str` 失敗を不存在扱いにすると、別行の `gzip` を見落として圧縮ボディを
+/// 受理しうるため、`get_all` で全値を集め、非 ASCII 等の変換失敗は明示エラーにする（設計 §19.2）。
+/// 値の許否判定（`identity` 以外を拒否）は `download.rs` が行う。
+fn collect_content_encoding(headers: &ureq::http::HeaderMap) -> Result<Option<String>, ModelError> {
+    let mut parts: Vec<&str> = Vec::new();
+    for v in headers.get_all("content-encoding") {
+        parts.push(v.to_str().map_err(|_| {
+            net(
+                io::ErrorKind::InvalidData,
+                "Content-Encoding ヘッダを解釈できません",
+            )
+        })?);
+    }
+    Ok(if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    })
+}
+
 impl Transport for UreqTransport {
     fn get(&mut self, url: &ValidatedUrl, deadline: Instant) -> Result<RawResponse, ModelError> {
         // 多層防御: 検証済み URL を `Uri` として再解析し、https・資格情報なしを照合する。
@@ -165,7 +186,7 @@ impl Transport for UreqTransport {
                 .map(str::to_owned)
         };
         let location = header("location");
-        let content_encoding = header("content-encoding");
+        let content_encoding = collect_content_encoding(resp.headers())?;
         let (_, body) = resp.into_parts();
         let content_length = body.content_length();
         let reader = body.into_with_config().limit(u64::MAX).reader();
@@ -183,6 +204,29 @@ impl Transport for UreqTransport {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn content_encoding_collects_all_header_lines() {
+        let mut h = ureq::http::HeaderMap::new();
+        assert!(matches!(collect_content_encoding(&h), Ok(None)));
+        h.append("content-encoding", "identity".parse().unwrap());
+        h.append("content-encoding", "gzip".parse().unwrap());
+        let joined = collect_content_encoding(&h).unwrap().unwrap();
+        assert_eq!(joined, "identity,gzip");
+    }
+
+    #[test]
+    fn content_encoding_non_ascii_value_is_explicit_error() {
+        let mut h = ureq::http::HeaderMap::new();
+        h.append(
+            "content-encoding",
+            ureq::http::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        assert!(matches!(
+            collect_content_encoding(&h),
+            Err(ModelError::Network(_))
+        ));
+    }
 
     #[test]
     fn build_agent_satisfies_invariants() {

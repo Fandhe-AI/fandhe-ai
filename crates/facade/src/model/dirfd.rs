@@ -103,7 +103,7 @@ pub(super) fn create_tmp(
     dir: &OwnedFd,
     mut next_name: impl FnMut() -> String,
 ) -> io::Result<(File, String)> {
-    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     for _ in 0..MAX_TMP_NAME_ATTEMPTS {
         let name = next_name();
         match openat_owned(dir, &name, flags, 0o600) {

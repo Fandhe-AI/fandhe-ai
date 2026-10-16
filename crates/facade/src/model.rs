@@ -560,6 +560,25 @@ fn reserve_read_buffer(capacity_hint: usize) -> Result<Vec<u8>, ModelError> {
     Ok(bytes)
 }
 
+/// 公開前検証: 取得済み一時ファイルが妥当な safetensors（ヘッダ長・JSON・オフセット整合・
+/// dtype/shape）であることを `load` と同じデコーダで確認する。HTML エラーページや破損
+/// 内容が既存の正常なモデルを置き換えるのを防ぐ（A08）。ファイルサイズは取得時に
+/// 上限（`MAX_MODEL_FILE_BYTES`）で制限済みで、`load` と同量のメモリのみ使う。
+#[cfg(unix)]
+fn verify_safetensors_before_commit(file: &File) -> Result<(), ModelError> {
+    use std::io::{Seek, SeekFrom};
+    let len = file.metadata().map_err(ModelError::Io)?.len();
+    let mut reader = file;
+    reader.seek(SeekFrom::Start(0)).map_err(ModelError::Io)?;
+    let mut bytes = reserve_read_buffer(usize::try_from(len).unwrap_or(usize::MAX))?;
+    reader
+        .take(MAX_MODEL_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(ModelError::Io)?;
+    load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)?;
+    Ok(())
+}
+
 /// 既定キャッシュディレクトリを `home` から純粋に導出する（環境変数の
 /// 読み取りは [`ModelRegistry::new`] 側で行い、本関数は環境非依存の
 /// 単体テストを可能にするために切り出した private 純関数）。
@@ -1120,7 +1139,9 @@ impl ModelRegistry {
     ///
     /// pin（[`DownloadOptions::expected_sha256`]）を指定しない場合の保証は破損・部分改変の
     /// 検出（サイズ上限・`Content-Length` 一致）に限られ、意図的な改竄に対する真正性は保証
-    /// しない（保存値との照合は #3126）。真正性が必要なら pin を指定すること。
+    /// しない（保存値との照合は #3126）。真正性が必要なら pin を指定すること。公開前に
+    /// safetensors の構造（ヘッダ長・JSON・オフセット整合）を検証し、不正な内容は
+    /// [`ModelError::Load`] で拒否して既存ファイルを変更しない。
     /// SSRF（内部ネットワーク宛先）の遮断は呼び出し側の責務で、本関数が担保するのは
     /// `https` 限定・資格情報付き URL の拒否・各リダイレクトでの再検証までである。
     ///
@@ -1166,6 +1187,7 @@ impl ModelRegistry {
     /// - [`ModelError::Http`]・[`ModelError::TooManyRedirects`]・[`ModelError::Network`]
     /// - [`ModelError::TooLarge`] — `Content-Length` または受信量が上限（1 GiB）超過
     /// - [`ModelError::ContentLengthMismatch`]・[`ModelError::HashMismatch`]
+    /// - [`ModelError::Load`] — 取得内容が妥当な safetensors でない
     /// - [`ModelError::Io`] — 書き込み失敗。中間ディレクトリがシンボリックリンクなら
     ///   `InvalidInput`、非対応プラットフォーム（unix 以外）は `Unsupported`
     ///
@@ -1234,7 +1256,8 @@ impl ModelRegistry {
             deadline: std::time::Instant::now() + transport::OVERALL_DEADLINE,
             expected: expected_sha256,
         };
-        // 公開直前の検証フック。#3126 が safetensors ヘッダ検証をここへ差し込む。
+        // 公開直前の検証フック: safetensors のヘッダ長・JSON・オフセット整合を検証する
+        // （設計 §6 A08）。不正なら rename 前に失敗し既存ファイルは置き換わらない。
         download::run(
             transport,
             job,
@@ -1242,7 +1265,7 @@ impl ModelRegistry {
             &mut open_dir,
             &mut next_staging,
             &mut next_tmp,
-            &mut |_: &File| Ok(()),
+            &mut verify_safetensors_before_commit,
         )
     }
 
@@ -2177,6 +2200,68 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec![MODEL_FILE_NAME.to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_via_rejects_invalid_safetensors_and_keeps_existing_model() {
+        use std::io::Cursor;
+        struct One(Option<Vec<u8>>);
+        impl transport::Transport for One {
+            fn get(
+                &mut self,
+                _u: &url::ValidatedUrl,
+                _d: std::time::Instant,
+            ) -> Result<transport::RawResponse, ModelError> {
+                let body = self.0.take().expect("once");
+                Ok(transport::RawResponse {
+                    status: 200,
+                    location: None,
+                    content_length: Some(body.len() as u64),
+                    content_encoding: None,
+                    body: Box::new(Cursor::new(body)),
+                })
+            }
+        }
+        let root = tmp_root("via-invalid");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let good =
+            crate::interop::safetensors::save_safetensors_f32_to_bytes(&sample_state(), None)
+                .unwrap();
+        let run = |body: Vec<u8>| {
+            let u = url::validate_https_url("https://example.com/m").unwrap();
+            registry.download_via(
+                &mut One(Some(body)),
+                u,
+                "m",
+                "v1",
+                DownloadOptions::default(),
+                MAX_MODEL_FILE_BYTES,
+            )
+        };
+        run(good.clone()).unwrap();
+        let mut bad_offsets = good.clone();
+        bad_offsets.truncate(bad_offsets.len() - 4);
+        for body in [
+            b"<html>404 not found</html>".to_vec(),
+            vec![0xff; 64],
+            bad_offsets,
+        ] {
+            let e = run(body).unwrap_err();
+            assert!(matches!(e, ModelError::Load(_)), "got {e:?}");
+            assert_eq!(
+                std::fs::read(root.join("m/v1").join(MODEL_FILE_NAME)).unwrap(),
+                good,
+                "既存の正常なモデルが残る"
+            );
+            let names: Vec<String> = std::fs::read_dir(root.join("m/v1"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, vec![MODEL_FILE_NAME.to_string()], "一時ファイルなし");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

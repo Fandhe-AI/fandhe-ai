@@ -95,8 +95,12 @@ pub(super) fn run(
 
     // 伸長を行わないため、圧縮されたボディではハッシュ・長さ検証が意味を失う。
     if let Some(enc) = resp.content_encoding.as_deref() {
-        let enc = enc.trim();
-        if !enc.is_empty() && !enc.eq_ignore_ascii_case("identity") {
+        // 複数ヘッダ行は転送層が `,` 連結済み。全トークンが空または identity でなければ拒否する。
+        if enc
+            .split(',')
+            .map(str::trim)
+            .any(|t| !t.is_empty() && !t.eq_ignore_ascii_case("identity"))
+        {
             return Err(ModelError::Network(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "圧縮されたボディは受け付けません",
@@ -524,6 +528,16 @@ mod tests {
             body: b"abc".to_vec(),
         }]);
         exec(&env, &mut mock, job(1 << 20, 5, None), None).unwrap();
+        // 別行で届いた gzip（転送層が連結した値）も拒否する。
+        let mut mock = Mock::new(vec![Step::Resp {
+            status: 200,
+            location: None,
+            content_length: Some(3),
+            encoding: Some("identity,gzip"),
+            body: b"abc".to_vec(),
+        }]);
+        let e = exec(&env, &mut mock, job(1 << 20, 5, None), None).unwrap_err();
+        assert!(matches!(e, ModelError::Network(_)));
     }
 
     #[test]
