@@ -40039,7 +40039,9 @@ fn speculative_scheduler_public_shape_violations(sched_src: &str, spec_src: &str
         v.push("RequestId が非公開フィールドの tuple struct 1 件ではない".to_string());
     }
     // speculative.rs の自由関数（深さ 0 の `pub fn`）は `generate_speculative` 1 件のみ
-    // （サンプリング版・B > 1 版の入口が無いことの否定プローブを兼ねる）。
+    // サンプリング版は `generate_speculative` の strategy 分岐で受け、別入口は作らない
+    // （`generate_speculative_sampling` 等の新設は承認外。#3101）。B > 1 版の入口が無い
+    // ことの否定プローブを兼ねる。
     let mut depth = 0usize;
     let mut free_pub_fns = Vec::new();
     for (i, t) in spec.iter().enumerate() {

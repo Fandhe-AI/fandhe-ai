@@ -519,7 +519,7 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 ### 20.4 RNG の消費順（決定性の前提）
 
 - `Generator::new(config.seed)` を呼び出しごとに 1 個だけ作り、グローバル RNG は消費しない。
-- 1 ラウンドの消費順の案: draft が k 回 `multinomial` → 検証位置ごとに `bernoulli` 1 回 → 棄却時は残差を `multinomial` 1 回、全受理時は bonus を `multinomial` 1 回。最終順序は #3101 の実装で確定し、rustdoc と本節へ反映する。消費回数の契約は `docs/rng-distributions-generator-decision.md` §1.1（`multinomial` は `m * num_samples` 回固定）に従う。
+- 1 ラウンドの消費順の案: draft が k 回 `multinomial` → 検証位置ごとに `bernoulli` 1 回 → 棄却時は残差を `multinomial` 1 回、全受理時は bonus を `multinomial` 1 回。最終順序は #3101 で確定した（§25.2。prefill 末尾の multinomial 1 回で最初のトークン → 各ラウンド → 最終 1 step の multinomial 1 回）。消費回数の契約は `docs/rng-distributions-generator-decision.md` §1.1（`multinomial` は `m * num_samples` 回固定）に従う。
 - 同一シード・同一入力・同一モデルなら、**同一実行環境（同一バイナリ・同一プラットフォーム・同一 toolchain）での再現性**として出力は bit 単位で一意に決まる。プラットフォーム間の bit 一致は保証しない。`bernoulli` は `next_unit_f64` と浮動小数点確率を比較し、`multinomial` は `f64` の累積和・乗算を使い、`softmax_weights_f64` は `f64::exp` を使うため、数学関数の実装差や浮動小数点演算の差で確率境界付近の token 選択が分岐し token 列が変わりうる。プラットフォーム間一致が必要になった場合は、数学関数・logits・浮動小数点演算の条件を別途定義して決定記録へ追記する。`Generator`（`crates/tensor-core/src/rng.rs:676`）は非暗号の xorshift64* であり、生成 token をセキュリティ用途に使わない。
 
 ### 20.5 検査項目（#3101・#3102 が参照する契約）
@@ -732,3 +732,29 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 - ガード: `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler` の期待集合を 9 件（`valid_len` 追加）へ更新。`kv_cache_is_reachable_via_facade_only` に署名固定と実行プローブを追加
 - テスト: 可変長の B=1 一致（L_new=1・2。統一複合判定）・padding 内容の非影響（bit 一致）・全行同長の bit 一致往復・拒否時の状態不変・`valid_len`・mask 単体
 - 依存・tolerance・baseline・`unsafe`・`docs/spec` は変更なし
+
+## 25. 実装記録（#3101・親 #3099）
+
+サンプリング版 `generate_speculative`（§20 の選択肢 B の契約に従う実装）。公開シグネチャ・`SpeculativeConfig`・`pub use` は不変で、`config.strategy` が `TopK`／`Temperature` のとき speculative sampling で進む。Greedy は従前のコードパスのまま（RNG を作らない）。
+
+### 25.1 実装形
+
+- `generate/mod.rs`: 非公開 `sampling_weights_f32`（TopK は上位 k 外を 0.0、Temperature は全語彙の `softmax_weights_f64`）を新設し、`sample_step` と共有（演算順は不変で `generate` は bit 同一）
+- `generate/speculative.rs`: 検査 2（Greedy 以外の拒否）を削除し Errors を 1〜8 へ繰り上げ（順序は不変）。`row_at`（行の取り出しと有限性検査）・`normalize_f64`・`acceptance_prob_f32`・`residual_weights_f32`・`sample_from`・`accept_draw`・`verify_sampling` を非公開で追加
+- `q(x)` は draft が引いたときの f32 重みを保存し、`p`・`q` とも `normalize_f64`（index 順 `f64` 総和）で正規化して読み直す。受理確率は `[0,1]` に clamp して `f32` 化（`p == q` で厳密 1.0）。`q(x) <= 0`・残差和 0／非有限・正規化総和 0 は RNG を引く前に `Err`
+
+### 25.2 RNG 消費順（§20.4 の確定）
+
+prefill 末尾 multinomial × 1 → ラウンドごとに draft multinomial × `k_eff` → 検証位置ごとに bernoulli × 1（最初の棄却まで）→ 棄却時は残差 multinomial × 1、全受理時は bonus multinomial × 1 → 最終 1 step で multinomial × 1。`Generator::new(config.seed)` は呼び出しごとに 1 個で、`max_length == prompt_len` の早期 return では作らない。
+
+### 25.3 検査項目 C1〜C6 の置き場所
+
+C1・C3・C4・C5・C6 は `speculative.rs` のユニットテスト、C2 は `crates/autodiff/tests/nn_generate_speculative.rs`。分布検定は契約外（§20.6）で追加していない。
+
+### 25.4 既存テストの扱い（Issue 文言との差分）
+
+Greedy に関するアサーションは無変更。外した検査の否定表明だけを反転した: `speculative_batching_facade.rs` の `TopK(3)`／`Temperature(0.8)` は `Ok`（shape `[6]`）に、代わりに `TopK(V + 1)` が `InvalidArgument` になることを追加。`speculative.rs` 内では `rejects_invalid_inputs_before_any_forward` から topk／temp の 2 行を削除し、`validation_order_is_fixed` の期待 needle を `SpeculativeConfig.k` へ変更。`api_surface.rs` は別入口を作らない旨のコメント更新のみ。
+
+### 25.5 変えないもの
+
+tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec`・`generate()` の挙動。facade レベルの拡充と実機 `#[ignore]` テストは #3102。

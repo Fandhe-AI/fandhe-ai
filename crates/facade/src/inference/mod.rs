@@ -113,8 +113,9 @@
 //! `docs/facade-speculative-decoding-batching-design.md` §17（リポジトリ所有者本人の承認コメント
 //! issuecomment-6067263650 の項 1。実装記録は §18）。
 //!
-//! - [`generate_speculative`]: **Greedy・B = 1 に限る**（Greedy 以外は `Err`。サンプリング版は
-//!   公開しない）。入力は `[T]`／`[1, T]`。受理統計は返さない。先読み長 `k` は残り長 `R` に応じて
+//! - [`generate_speculative`]: **B = 1 に限る**。Greedy は token 列一致、TopK／Temperature は
+//!   speculative sampling（#3101。同一シードでも `generate` と token 列は一致しない。保証は
+//!   構成上の分布保存で、統計検定は契約外。設計記録 §20）。入力は `[T]`／`[1, T]`。受理統計は返さない。先読み長 `k` は残り長 `R` に応じて
 //!   丸められる（`R >= 2` は `min(k, R - 1)`、`R == 1` は 1 step decode）。`num_kv_layers() == 0` の
 //!   モデルは `Err` で拒否する（fail-closed）。
 //! - [`BatchScheduler`]: [`SchedulerLimits`] の 3 上限（同時実行数・待ち行列長・`max_length`）は
@@ -280,7 +281,7 @@
 //! let r = generate_speculative(&Table, &Table, &prompt, &greedy, &spec);
 //! assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));
 //!
-//! // サンプリング版は公開しない（Greedy 以外は `Err`）。
+//! // サンプリング戦略でも `num_kv_layers() == 0` は拒否される。
 //! let topk = GenerateConfig::new(5, SamplingStrategy::TopK(2));
 //! let r = generate_speculative(&Table, &Table, &prompt, &topk, &spec);
 //! assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));

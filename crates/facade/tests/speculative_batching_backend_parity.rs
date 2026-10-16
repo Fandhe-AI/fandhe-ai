@@ -33,7 +33,7 @@
 //! # 対象外
 //!
 //! バックエンドをまたぐ TopK／Temperature の比較（ホスト `f64` のサンプリングは CDF 境界で
-//! logits の微差により反転しうる。設計 §6.2）、サンプリング版 speculative（論点 1）、
+//! logits の微差により反転しうる。設計 §6.2）、サンプリング版 speculative（実機テストは #3102 へ申し送り。#3101 で実装済み）、
 //! B > 1、`num_kv_layers() == 0` の speculative（論点 3）、内部状態保持型モデル（論点 8）、
 //! facade 公開。`Generator` は非暗号の xorshift64* で、本テストは Greedy のみのため乱数を
 //! 使わない（OWASP A02 の注記）。

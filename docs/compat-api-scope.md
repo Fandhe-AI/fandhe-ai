@@ -2546,7 +2546,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 | # | 公開名 | 確定シグネチャ（main の内部実装） | 公開パス | 保留ガード | 公開状態 |
 |---|---|---|---|---|---|
-| S1 | `generate_speculative` | `<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError>`（`T`・`D` は `AutoregressiveModel + ?Sized`。Greedy 以外と `num_kv_layers() == 0` は `Err`） | `fandhe_ai::inference` | S 専用は未設置。#2934 で正ガード `facade_exposes_speculative_scheduler_items_only_in_approved_shape` を新設 | 公開済み（#2934） |
+| S1 | `generate_speculative` | `<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError>`（`T`・`D` は `AutoregressiveModel + ?Sized`。`num_kv_layers() == 0` は `Err`。サンプリング戦略は #3101 で対応済み） | `fandhe_ai::inference` | S 専用は未設置。#2934 で正ガード `facade_exposes_speculative_scheduler_items_only_in_approved_shape` を新設 | 公開済み（#2934） |
 | S2 | `SpeculativeConfig` | `#[non_exhaustive]`・`Debug, Clone, PartialEq`・`pub k: usize`・`new(k: usize) -> SpeculativeConfig` | 同上 | 同上 | 同上 |
 | S3 | `BatchScheduler`（署名に現れる `RequestId`・`SchedulerLimits` を含む） | `new(SchedulerLimits)`・`queued_len`・`active_len`・`submit(&mut self, &Tensor<i32>, &GenerateConfig) -> Result<RequestId, AutodiffError>`・`step<M: AutoregressiveModel + ?Sized>(&mut self, &M) -> Result<usize, AutodiffError>`・`take_finished() -> Vec<(RequestId, Tensor<i32>)>`・`take_failed() -> Vec<(RequestId, AutodiffError)>`。`RequestId` は不透明 `u64` newtype、`SchedulerLimits::new(max_active, max_queued, max_length) -> Result<SchedulerLimits, AutodiffError>`（`#[non_exhaustive]`・0 は拒否） | 同上 | 同上 | 同上 |
 
