@@ -13,8 +13,8 @@
 //!
 //! # 実装範囲（イシュー #3131）
 //!
-//! - [`HfHub::download`]: commit sha 固定の `model.safetensors` を facade の `download_with` で
-//!   取得する。sha256 pin（[`fandhe_ai::model::Sha256Pin`]）は必須引数で、キャッシュ書き込み・
+//! - `HfHub::download`（crate 内限定）: commit sha 固定の `model.safetensors` を facade の
+//!   `download_with` で取得する。sha256 pin（[`fandhe_ai::model::Sha256Pin`]）は必須引数で、キャッシュ書き込み・
 //!   pin 検証は facade が担う。`name` = `hf--<namespace>--<repo>`・`version` = commit sha。
 //! - revision 解決（`resolve_revision`）とファイル一覧（`list_files`）は crate 内に実装済みだが、
 //!   HTTP／TLS（第 11 区分 `ureq`）を HF クレートで使う承認が未取得のため転送層を結線しておらず
@@ -23,7 +23,9 @@
 //! # 残留リスク
 //!
 //! facade の `download_with` はリダイレクトを `https` 限定で追従するがホスト allowlist は持たない
-//! （設計 §4.2 (b-1)／(b-2)。facade 公開面の拡張は別承認）。真正性は必須の sha256 pin で担保する。
+//! （設計 §4.2 (b-1)／(b-2)・§9.10 A10）。sha256 pin は内容の真正性しか保証せず接続先を制限しない
+//! ため、承認済みの facade allowlist 機構が入るまで取得経路（`HfHub::download`）は公開せず
+//! crate 内限定（`pub(crate)`）とする（fail-closed）。facade 公開面の拡張は別承認。
 //!
 //! # dtype
 //!
@@ -318,7 +320,7 @@ impl Default for Revision {
 
 /// HF Hub 連携の入口。キャッシュは facade の [`ModelRegistry`] に委ねる。
 ///
-/// 取得は [`HfHub::download`]。revision 解決・一覧は転送層の承認待ちで未公開（クレート doc 参照）。
+/// 取得（`download`）・revision 解決・一覧はいずれも承認待ちのため crate 内限定（クレート doc 参照）。
 pub struct HfHub {
     registry: ModelRegistry,
 }
@@ -340,7 +342,8 @@ impl HfHub {
     /// - `pin` は必須。`options` に別の pin があっても本引数の pin が優先される。
     /// - 保存先は `<cache_dir>/<name>/<version>/model.safetensors`（[`CachedModel`] 参照）。
     ///   本クレートは自らファイルを書かず、書き込み・検証はすべて facade が行う。
-    pub fn download(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn download(
         &self,
         repo: &HfRepoId,
         rev: &CommitSha,

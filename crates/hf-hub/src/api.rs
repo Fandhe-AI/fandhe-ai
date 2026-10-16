@@ -22,8 +22,8 @@ const MAX_PATH_BYTES: usize = 1024;
 #[derive(Deserialize)]
 struct RevisionInfo {
     sha: String,
-    #[serde(default)]
-    siblings: Vec<Sibling>,
+    /// 欠落は「空一覧の成功」と区別するため `Option`（一覧取得時のみ必須）。
+    siblings: Option<Vec<Sibling>>,
 }
 
 #[derive(Deserialize)]
@@ -93,13 +93,25 @@ pub(crate) fn list_files_via(
 ) -> Result<Vec<RepoFile>, HfError> {
     let rev = Revision::from_commit_sha(sha);
     let info = fetch_info(t, repo, &rev)?;
-    if info.siblings.len() > MAX_FILES {
+    // 応答の sha は要求した commit と一致しなければならない（別 commit の一覧を混入させない）。
+    let got = CommitSha::parse(&info.sha).map_err(|_| HfError::InvalidResponse {
+        reason: "sha が 40 桁小文字 16 進ではない",
+    })?;
+    if got.as_str() != sha.as_str() {
+        return Err(HfError::InvalidResponse {
+            reason: "応答の sha が要求した commit と一致しない",
+        });
+    }
+    let siblings = info.siblings.ok_or(HfError::InvalidResponse {
+        reason: "siblings が欠落している",
+    })?;
+    if siblings.len() > MAX_FILES {
         return Err(HfError::InvalidResponse {
             reason: "ファイル数が上限を超える",
         });
     }
-    let mut out = Vec::with_capacity(info.siblings.len());
-    for s in info.siblings {
+    let mut out = Vec::with_capacity(siblings.len());
+    for s in siblings {
         let p = s.rfilename;
         if p.is_empty() || p.len() > MAX_PATH_BYTES || p.chars().any(char::is_control) {
             return Err(HfError::InvalidResponse {
@@ -232,6 +244,18 @@ mod tests {
             let body = format!(r#"{{"sha":"{SHA}","siblings":[{{"rfilename":{bad}}}]}}"#);
             let mut m = Mock::new(200, &body);
             assert!(list_files_via(&mut m, &repo(), &sha).is_err(), "{bad}");
+        }
+        // siblings 欠落・sha 不一致・sha 不正は fail-closed。
+        let other = "f".repeat(40);
+        for body in [
+            format!(r#"{{"sha":"{SHA}"}}"#),
+            format!(r#"{{"sha":"{other}","siblings":[]}}"#),
+            r#"{"sha":"abc","siblings":[]}"#.to_owned(),
+            r#"{"siblings":[]}"#.to_owned(),
+        ] {
+            let mut m = Mock::new(200, &body);
+            let r = list_files_via(&mut m, &repo(), &sha);
+            assert!(matches!(r, Err(HfError::InvalidResponse { .. })), "{body}");
         }
         let many = vec![r#"{"rfilename":"a"}"#; MAX_FILES + 1].join(",");
         let mut m = Mock::new(200, &format!(r#"{{"sha":"{SHA}","siblings":[{many}]}}"#));
