@@ -153,8 +153,8 @@
 //!
 //! # 対象外
 //!
-//! リモート取得・HF hub 連携（#2088）、`docs/model-distribution-
-//! design.md` の作成（親 #2082 の成果物）、version 記法の解釈
+//! HF hub 固有の解決（汎用 HTTPS 取得は [`crate::model::ModelRegistry::download`]。#3125）、
+//! `docs/model-distribution-design.md` の作成（親 #2082 の成果物）、version 記法の解釈
 //! （semver・hash 等）・最新版解決、`compat::Sequential` への直結
 //! ラッパー（`Sequential::from_registry` 等）、非 F32 dtype、改竄検知、
 //! Windows 向け安全な no-follow オープン実装。
@@ -169,6 +169,19 @@ use std::path::{Path, PathBuf};
 use crate::Tensor;
 use crate::fs_guard::{MAX_MODEL_FILE_BYTES, open_leaf_no_follow};
 use crate::interop::safetensors::{LoadError, SaveError, load_safetensors_f32_from_bytes};
+
+// `download`（#3125）の private 実装モジュール。公開面は本ファイルの型・メソッドに閉じる
+// （api_surface が `pub mod`／`pub use` の不在と `ureq`／`libc` トークンの不在を検査する）。
+#[cfg(unix)]
+mod dirfd;
+#[cfg(unix)]
+mod download;
+#[cfg(unix)]
+mod sha256;
+#[cfg(unix)]
+mod transport;
+#[cfg(unix)]
+mod url;
 
 /// レイアウト規定上のファイル名（モジュール doc 参照）。
 const MODEL_FILE_NAME: &str = "model.safetensors";
@@ -209,6 +222,26 @@ pub enum ModelError {
     /// safetensors デコード失敗（`crate::interop::safetensors::LoadError`
     /// を連鎖。ヘッダ不整合・未対応 dtype・shape 不整合等）。
     Load(LoadError),
+    /// ダウンロード URL が不正（[`ModelRegistry::download`]）。`https` 以外・資格情報付き・
+    /// ホスト／ポート不正・制御文字・長さ超過・解決不能なリダイレクト先など。入力 URL は
+    /// クエリ・資格情報を含みうるため、値は持たず静的な理由だけを返す（A09）。
+    InvalidUrl { reason: &'static str },
+    /// 期待 SHA-256（[`Sha256Pin`]）の形式が不正（64 桁の 16 進以外）。
+    InvalidPin,
+    /// HTTP 応答が 200 以外（リダイレクト以外の 3xx・4xx・5xx・206 を含む）。URL は持たない。
+    Http { status: u16 },
+    /// リダイレクト回数が上限（`max`）を超えた。
+    TooManyRedirects { max: u32 },
+    /// 受信バイト数が `Content-Length` と一致しない（切断・過剰送信）。
+    ContentLengthMismatch { expected: u64, received: u64 },
+    /// 受信内容の SHA-256 が期待値（pin）と一致しない。ハッシュは秘密情報ではない。
+    HashMismatch {
+        expected: Sha256Pin,
+        actual: Sha256Pin,
+    },
+    /// ネットワーク・TLS 失敗。ureq のエラーは URL を含みうるため `Display` を通さず、静的
+    /// メッセージの `io::Error`（種別のみ保持）へ変換している。
+    Network(std::io::Error),
     /// 上記以外の I/O 失敗（存在確認時の権限エラー等）。読み込み
     /// バッファの確保失敗（[`std::io::ErrorKind::OutOfMemory`]。
     /// `reserve_read_buffer`）はその一例。
@@ -248,6 +281,28 @@ impl fmt::Display for ModelError {
             ),
             ModelError::Save(e) => write!(f, "モデルの保存に失敗しました: {e}"),
             ModelError::Load(e) => write!(f, "モデルのロードに失敗しました: {e}"),
+            ModelError::InvalidUrl { reason } => write!(f, "不正なダウンロード URL: {reason}"),
+            ModelError::InvalidPin => write!(
+                f,
+                "期待 SHA-256 の形式が不正です（64 桁の 16 進文字列が必要です）"
+            ),
+            ModelError::Http { status } => {
+                write!(f, "HTTP 応答が成功ではありません（ステータス {status}）")
+            }
+            ModelError::TooManyRedirects { max } => {
+                write!(f, "リダイレクト回数が上限（{max}）を超えました")
+            }
+            ModelError::ContentLengthMismatch { expected, received } => write!(
+                f,
+                "受信サイズが Content-Length と一致しません（期待 {expected} バイト・受信 {received} バイト）"
+            ),
+            ModelError::HashMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "SHA-256 が一致しません（期待 {expected}・実際 {actual}）"
+                )
+            }
+            ModelError::Network(e) => write!(f, "ネットワーク取得に失敗しました: {e}"),
             ModelError::Io(e) => write!(f, "モデルレジストリの I/O に失敗しました: {e}"),
         }
     }
@@ -259,10 +314,101 @@ impl std::error::Error for ModelError {
             ModelError::Save(e) => Some(e),
             ModelError::Load(e) => Some(e),
             ModelError::Io(e) => Some(e),
+            ModelError::Network(e) => Some(e),
             _ => None,
         }
     }
 }
+
+/// 期待する SHA-256（pin）。`download` の完全性検証に渡す（[`DownloadOptions::expected_sha256`]）。
+/// 形式検証は構築で完結する（[`Sha256Pin::from_hex`]）ため、接続前の拒否が構造的に保証される。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Sha256Pin([u8; 32]);
+
+impl Sha256Pin {
+    /// 64 桁の 16 進文字列（大文字・小文字可）から作る。長さ違い・非 16 進・空白・`0x`
+    /// 接頭辞は [`ModelError::InvalidPin`]。
+    pub fn from_hex(s: &str) -> Result<Sha256Pin, ModelError> {
+        let b = s.as_bytes();
+        if b.len() != 64 {
+            return Err(ModelError::InvalidPin);
+        }
+        let nibble = |c: u8| -> Result<u8, ModelError> {
+            match c {
+                b'0'..=b'9' => Ok(c - b'0'),
+                b'a'..=b'f' => Ok(c - b'a' + 10),
+                b'A'..=b'F' => Ok(c - b'A' + 10),
+                _ => Err(ModelError::InvalidPin),
+            }
+        };
+        let mut out = [0u8; 32];
+        for (i, pair) in b.as_chunks::<2>().0.iter().enumerate() {
+            out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+        }
+        Ok(Sha256Pin(out))
+    }
+}
+
+impl fmt::Display for Sha256Pin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Sha256Pin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Sha256Pin({self})")
+    }
+}
+
+/// `download` の受信進捗。URL 由来の情報は持たない（A09）。利用者は読めるが構築できない。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub struct DownloadProgress {
+    /// これまでに受信したバイト数。
+    pub received: u64,
+    /// `Content-Length`（チャンク転送などで不明なら `None`）。
+    pub total: Option<u64>,
+}
+
+/// [`ModelRegistry::download_with`] のオプション。タイムアウト・サイズ上限の上書き口は
+/// 持たない（固定の安全側既定。`#[non_exhaustive]` なので将来の追加は非破壊）。
+#[non_exhaustive]
+#[derive(Default)]
+pub struct DownloadOptions<'a> {
+    expected_sha256: Option<Sha256Pin>,
+    progress: Option<&'a mut dyn FnMut(DownloadProgress)>,
+}
+
+impl<'a> DownloadOptions<'a> {
+    /// 期待 SHA-256 を指定する。不一致なら [`ModelError::HashMismatch`] で何も公開しない。
+    pub fn expected_sha256(mut self, pin: Sha256Pin) -> Self {
+        self.expected_sha256 = Some(pin);
+        self
+    }
+
+    /// 受信チャンクごとに呼ばれる進捗コールバックを指定する。
+    pub fn progress(mut self, f: &'a mut dyn FnMut(DownloadProgress)) -> Self {
+        self.progress = Some(f);
+        self
+    }
+}
+
+impl fmt::Debug for DownloadOptions<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DownloadOptions")
+            .field("expected_sha256", &self.expected_sha256)
+            .field("progress", &self.progress.as_ref().map(|_| ".."))
+            .finish()
+    }
+}
+
+/// リダイレクト上限（典型的な配布元・CDN は 1〜2 ホップ。ureq 既定 10 より保守的）。
+#[cfg(unix)]
+const DOWNLOAD_MAX_REDIRECTS: u32 = 5;
 
 /// `name`・`version` の許可文字集合検証（OWASP A03 パストラバーサル
 /// 対策）。`load`・[`ModelRegistry::available_models`] の両方が同一の
@@ -412,6 +558,25 @@ fn reserve_read_buffer(capacity_hint: usize) -> Result<Vec<u8>, ModelError> {
         .try_reserve(capacity_hint)
         .map_err(|_| ModelError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory)))?;
     Ok(bytes)
+}
+
+/// 公開前検証: 取得済み一時ファイルが妥当な safetensors（ヘッダ長・JSON・オフセット整合・
+/// dtype/shape）であることを `load` と同じデコーダで確認する。HTML エラーページや破損
+/// 内容が既存の正常なモデルを置き換えるのを防ぐ（A08）。ファイルサイズは取得時に
+/// 上限（`MAX_MODEL_FILE_BYTES`）で制限済みで、`load` と同量のメモリのみ使う。
+#[cfg(unix)]
+fn verify_safetensors_before_commit(file: &File) -> Result<(), ModelError> {
+    use std::io::{Seek, SeekFrom};
+    let len = file.metadata().map_err(ModelError::Io)?.len();
+    let mut reader = file;
+    reader.seek(SeekFrom::Start(0)).map_err(ModelError::Io)?;
+    let mut bytes = reserve_read_buffer(usize::try_from(len).unwrap_or(usize::MAX))?;
+    reader
+        .take(MAX_MODEL_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(ModelError::Io)?;
+    load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)?;
+    Ok(())
 }
 
 /// 既定キャッシュディレクトリを `home` から純粋に導出する（環境変数の
@@ -964,6 +1129,144 @@ impl ModelRegistry {
             )));
         }
         Ok(())
+    }
+
+    /// HTTPS URL から safetensors を取得し、`<cache_dir>/<name>/<version>/model.safetensors`
+    /// へ原子的に置く（`torch.hub.load_state_dict_from_url`／Keras `get_file` 相当。#3125）。
+    /// pin 無しの [`Self::download_with`] への委譲。
+    ///
+    /// # 保証範囲
+    ///
+    /// pin（[`DownloadOptions::expected_sha256`]）を指定しない場合の保証は破損・部分改変の
+    /// 検出（サイズ上限・`Content-Length` 一致）に限られ、意図的な改竄に対する真正性は保証
+    /// しない（保存値との照合は #3126）。真正性が必要なら pin を指定すること。公開前に
+    /// safetensors の構造（ヘッダ長・JSON・オフセット整合）を検証し、不正な内容は
+    /// [`ModelError::Load`] で拒否して既存ファイルを変更しない。
+    /// SSRF（内部ネットワーク宛先）の遮断は呼び出し側の責務で、本関数が担保するのは
+    /// `https` 限定・資格情報付き URL の拒否・各リダイレクトでの再検証までである。
+    ///
+    /// ```no_run
+    /// use fandhe_ai::model::{ModelError, ModelRegistry};
+    /// # fn main() -> Result<(), ModelError> {
+    /// let registry = ModelRegistry::with_cache_dir("/tmp/fandhe-models");
+    /// registry.download("https://example.com/mlp.safetensors", "mlp", "v1")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Self::download_with`] を参照。
+    pub fn download(&self, url: &str, name: &str, version: &str) -> Result<(), ModelError> {
+        self.download_with(url, name, version, DownloadOptions::default())
+    }
+
+    /// [`Self::download`] のオプション付き版。取得は 1 GiB 上限・リダイレクト 5 ホップ・全体
+    /// 1 時間の固定既定で行い、TLS は OS のルート証明書で検証する（無効化する口はない）。
+    ///
+    /// ```no_run
+    /// use fandhe_ai::model::{DownloadOptions, ModelError, ModelRegistry, Sha256Pin};
+    /// # fn main() -> Result<(), ModelError> {
+    /// let registry = ModelRegistry::with_cache_dir("/tmp/fandhe-models");
+    /// let pin = Sha256Pin::from_hex(&"0".repeat(64))?;
+    /// let mut on_progress = |p: fandhe_ai::model::DownloadProgress| {
+    ///     let _ = (p.received, p.total);
+    /// };
+    /// let opts = DownloadOptions::default()
+    ///     .expected_sha256(pin)
+    ///     .progress(&mut on_progress);
+    /// registry.download_with("https://example.com/mlp.safetensors", "mlp", "v1", opts)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - [`ModelError::InvalidComponent`] — `name`・`version` が許可文字集合外
+    /// - [`ModelError::InvalidUrl`] — URL が `https` 絶対形でない・資格情報付き等
+    /// - [`ModelError::Http`]・[`ModelError::TooManyRedirects`]・[`ModelError::Network`]
+    /// - [`ModelError::TooLarge`] — `Content-Length` または受信量が上限（1 GiB）超過
+    /// - [`ModelError::ContentLengthMismatch`]・[`ModelError::HashMismatch`]
+    /// - [`ModelError::Load`] — 取得内容が妥当な safetensors でない
+    /// - [`ModelError::Io`] — 書き込み失敗。中間ディレクトリがシンボリックリンクなら
+    ///   `InvalidInput`、非対応プラットフォーム（unix 以外）は `Unsupported`
+    ///
+    /// 失敗時は既存の `model.safetensors` を変更せず、自分が作った一時ファイルだけを削除する。
+    pub fn download_with(
+        &self,
+        url: &str,
+        name: &str,
+        version: &str,
+        options: DownloadOptions<'_>,
+    ) -> Result<(), ModelError> {
+        validate_component("name", name)?;
+        validate_component("version", version)?;
+        #[cfg(unix)]
+        {
+            let url = url::validate_https_url(url)?;
+            let mut transport = transport::UreqTransport::new()?;
+            self.download_via(
+                &mut transport,
+                url,
+                name,
+                version,
+                options,
+                MAX_MODEL_FILE_BYTES,
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (url, options);
+            Err(ModelError::Io(std::io::Error::from(
+                std::io::ErrorKind::Unsupported,
+            )))
+        }
+    }
+
+    /// [`Self::download_with`] の本体。転送・サイズ上限を引数化し、単体テストがソケットも
+    /// 1 GiB のデータも使わずに結線（ディレクトリ作成・公開）を検証できるようにする。
+    #[cfg(unix)]
+    fn download_via(
+        &self,
+        transport: &mut dyn transport::Transport,
+        url: url::ValidatedUrl,
+        name: &str,
+        version: &str,
+        options: DownloadOptions<'_>,
+        max_bytes: u64,
+    ) -> Result<(), ModelError> {
+        let DownloadOptions {
+            expected_sha256,
+            progress,
+        } = options;
+        let root = self.root.clone();
+        let mut open_dir = || -> std::io::Result<std::os::fd::OwnedFd> {
+            let root_fd = dirfd::open_root(&root)?;
+            let name_fd = dirfd::open_or_create_dir(&root_fd, name)?;
+            dirfd::open_or_create_dir(&name_fd, version)
+        };
+        let mut next_staging = || dirfd::production_staging_name(MODEL_FILE_NAME);
+        let mut next_tmp = || dirfd::production_tmp_name(MODEL_FILE_NAME);
+        let job = download::Job {
+            url,
+            name,
+            version,
+            max_bytes,
+            max_redirects: DOWNLOAD_MAX_REDIRECTS,
+            deadline: std::time::Instant::now() + transport::OVERALL_DEADLINE,
+            expected: expected_sha256,
+        };
+        // 公開直前の検証フック: safetensors のヘッダ長・JSON・オフセット整合を検証する
+        // （設計 §6 A08）。不正なら rename 前に失敗し既存ファイルは置き換わらない。
+        download::run(
+            transport,
+            job,
+            progress,
+            &mut open_dir,
+            &mut next_staging,
+            &mut next_tmp,
+            &mut verify_safetensors_before_commit,
+        )
     }
 
     /// キャッシュルート配下に存在するモデルを列挙する。ルートが
@@ -1763,5 +2066,202 @@ mod tests {
         assert!(!text.contains('/'));
         use std::error::Error as _;
         assert!(e.source().is_none());
+    }
+    #[test]
+    fn sha256_pin_from_hex_accepts_64_hex_either_case() {
+        let lower = "0123456789abcdef".repeat(4);
+        let upper = lower.to_uppercase();
+        let a = Sha256Pin::from_hex(&lower).unwrap();
+        assert_eq!(a, Sha256Pin::from_hex(&upper).unwrap());
+        assert_eq!(a.to_string(), lower);
+        assert!(format!("{a:?}").contains(&lower));
+    }
+
+    #[test]
+    fn sha256_pin_from_hex_rejects_malformed() {
+        let ok = "a".repeat(64);
+        for bad in [
+            "a".repeat(63),
+            "a".repeat(65),
+            String::new(),
+            format!("0x{}", "a".repeat(62)),
+            format!(" {}", "a".repeat(63)),
+            format!("{}g", "a".repeat(63)),
+            format!("{}\n", "a".repeat(63)),
+        ] {
+            assert!(
+                matches!(Sha256Pin::from_hex(&bad), Err(ModelError::InvalidPin)),
+                "{bad:?}"
+            );
+        }
+        assert!(Sha256Pin::from_hex(&ok).is_ok());
+    }
+
+    #[test]
+    fn download_error_displays_never_contain_url_material() {
+        let secret = "secret-token-xyz";
+        let errs = [
+            ModelError::InvalidUrl { reason: "r" },
+            ModelError::InvalidPin,
+            ModelError::Http { status: 404 },
+            ModelError::TooManyRedirects { max: 5 },
+            ModelError::ContentLengthMismatch {
+                expected: 1,
+                received: 2,
+            },
+            ModelError::HashMismatch {
+                expected: Sha256Pin([1; 32]),
+                actual: Sha256Pin([2; 32]),
+            },
+            ModelError::Network(std::io::Error::other("net")),
+        ];
+        for e in errs {
+            let text = format!("{e} {e:?}");
+            assert!(
+                !text.contains(secret) && !text.contains("https://"),
+                "{text}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn tmp_root(tag: &str) -> PathBuf {
+        let (pid, nanos, counter) = crate::fs_write::name_entropy();
+        std::env::temp_dir().join(format!("fandhe-dlreg-{tag}-{pid}-{counter}-{nanos}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_rejects_bad_input_before_touching_fs() {
+        let root = tmp_root("reject");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        for url in [
+            "http://example.com/m",
+            "https://user:pw@example.com/m",
+            "file:///etc/passwd",
+            "https://example.com/\n",
+        ] {
+            let err = registry.download(url, "m", "v1").unwrap_err();
+            assert!(matches!(err, ModelError::InvalidUrl { .. }), "{err:?}");
+            let text = err.to_string();
+            assert!(!text.contains("pw@") && !text.contains("etc/passwd"));
+        }
+        let err = registry
+            .download("https://example.com/m", "../x", "v1")
+            .unwrap_err();
+        assert!(matches!(err, ModelError::InvalidComponent { .. }));
+        assert!(!root.exists(), "拒否時にキャッシュルートを作らない");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_via_publishes_and_load_dir_is_listed() {
+        use std::io::Cursor;
+        struct One(Option<Vec<u8>>);
+        impl transport::Transport for One {
+            fn get(
+                &mut self,
+                _u: &url::ValidatedUrl,
+                _d: std::time::Instant,
+            ) -> Result<transport::RawResponse, ModelError> {
+                let body = self.0.take().expect("once");
+                Ok(transport::RawResponse {
+                    status: 200,
+                    location: None,
+                    content_length: Some(body.len() as u64),
+                    content_encoding: None,
+                    body: Box::new(Cursor::new(body)),
+                })
+            }
+        }
+        let root = tmp_root("via");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let bytes =
+            crate::interop::safetensors::save_safetensors_f32_to_bytes(&sample_state(), None)
+                .unwrap();
+        let u = url::validate_https_url("https://example.com/m").unwrap();
+        registry
+            .download_via(
+                &mut One(Some(bytes.clone())),
+                u,
+                "m",
+                "v1",
+                DownloadOptions::default(),
+                MAX_MODEL_FILE_BYTES,
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("m/v1").join(MODEL_FILE_NAME)).unwrap(),
+            bytes
+        );
+        let names: Vec<String> = std::fs::read_dir(root.join("m/v1"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![MODEL_FILE_NAME.to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_via_rejects_invalid_safetensors_and_keeps_existing_model() {
+        use std::io::Cursor;
+        struct One(Option<Vec<u8>>);
+        impl transport::Transport for One {
+            fn get(
+                &mut self,
+                _u: &url::ValidatedUrl,
+                _d: std::time::Instant,
+            ) -> Result<transport::RawResponse, ModelError> {
+                let body = self.0.take().expect("once");
+                Ok(transport::RawResponse {
+                    status: 200,
+                    location: None,
+                    content_length: Some(body.len() as u64),
+                    content_encoding: None,
+                    body: Box::new(Cursor::new(body)),
+                })
+            }
+        }
+        let root = tmp_root("via-invalid");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let good =
+            crate::interop::safetensors::save_safetensors_f32_to_bytes(&sample_state(), None)
+                .unwrap();
+        let run = |body: Vec<u8>| {
+            let u = url::validate_https_url("https://example.com/m").unwrap();
+            registry.download_via(
+                &mut One(Some(body)),
+                u,
+                "m",
+                "v1",
+                DownloadOptions::default(),
+                MAX_MODEL_FILE_BYTES,
+            )
+        };
+        run(good.clone()).unwrap();
+        let mut bad_offsets = good.clone();
+        bad_offsets.truncate(bad_offsets.len() - 4);
+        for body in [
+            b"<html>404 not found</html>".to_vec(),
+            vec![0xff; 64],
+            bad_offsets,
+        ] {
+            let e = run(body).unwrap_err();
+            assert!(matches!(e, ModelError::Load(_)), "got {e:?}");
+            assert_eq!(
+                std::fs::read(root.join("m/v1").join(MODEL_FILE_NAME)).unwrap(),
+                good,
+                "既存の正常なモデルが残る"
+            );
+            let names: Vec<String> = std::fs::read_dir(root.join("m/v1"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, vec![MODEL_FILE_NAME.to_string()], "一時ファイルなし");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

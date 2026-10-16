@@ -883,3 +883,58 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 ### 18.4 Dockerfile
 
 変更なし。開発コンテナは `build-essential`・`make` を導入済みで、perl はベースイメージに含まれる（§16.5 の開発コンテナ実測で N′+V が成功済み）。
+
+## 19. #3125 実装記録（HTTPS 取得とハッシュ検証）
+
+`ModelRegistry::download`／`download_with` の実装記録。承認根拠は §17.2（#3123 所有者コメント 6111756315 の委任条項に基づく推奨形。それ以上の承認は得ていない）。§1〜§18 は書き換えない。依存・`Cargo.lock`・`deny.toml` は変更なし（#3124 で反映済みの `ureq =3.4.2`・`libc =0.2.189` を使う）。
+
+### 19.1 モジュール構成（`crates/facade/src/model/`。すべて private）
+
+| ファイル | 役割 | cfg |
+|---|---|---|
+| `url.rs` | `ValidatedUrl`（検証関数からしか作れない newtype）・`validate_https_url`・`resolve_location` | `unix` |
+| `sha256.rs` | FIPS 180-4 のストリーミング実装。`K`／`H0`／`compress` は `crates/self-repair/src/sha256.rs` から逐語移植（新規依存なし）。検証は NIST ベクタ・pad 方式の参照実装との境界（55/56/63/64/65 等）一致・分割投入の等価性 | `unix` |
+| `transport.rs` | 内部 trait `Transport` と ureq 実装。ureq の型はこのファイルの外へ出ない | `unix` |
+| `dirfd.rs` | libc による dirfd 連鎖（`openat`／`mkdirat`／`renameat`／`unlinkat`／`fstatat`）。新規 `unsafe` はここに限る | `unix` |
+| `download.rs` | 取得手順（リダイレクト追従・ヘッダ検査・ストリーミング受信・検証・公開） | `unix` |
+
+非 unix（Windows）は名前検証の後、ネットワーク・FS に触れる前に `Io(Unsupported)` を返す。
+
+### 19.2 既定値（利用者が上書きする口はない）
+
+| 項目 | 既定値 | 根拠 |
+|---|---|---|
+| 最大サイズ | 1 GiB（`MAX_MODEL_FILE_BYTES`） | `load` の上限と同じ。`Content-Length` の事前検査と受信中の計数の両方で守る。超過は既存の `TooLarge` |
+| リダイレクト | 5 ホップ・手動追従（`max_redirects(0)`） | 各ホップで `Location` を再検証する。受理は絶対 `https://`・`//host`・`/path` のみ（`../x` 等の相対参照と `http://` は `InvalidUrl`） |
+| 名前解決／接続（TLS 含む）／送信 | 各 30 秒 | 無期限の既定を潰す（§15.5） |
+| 応答ヘッダ受信 | 60 秒 | 同上 |
+| 全体期限 | 1 時間（全ホップ合算） | 呼び出し開始時に締め切りを決め、ホップごとに残りを `timeout_global` へ渡す |
+| アイドル（無通信）検知 | 実装しない | §16.6: ureq の受信タイムアウトは全体期限でありアイドル期限ではない。停止は全体期限でのみ検知。上書き口は将来 `DownloadOptions` へ足す |
+| `Content-Length` 無し | 受理し最大サイズで打ち切る | チャンク応答では `content_length() == None`（§15.5） |
+| `Content-Encoding` | `identity` 以外は拒否 | 伸長しないためハッシュ・長さ検証が壊れる |
+| proxy | `None`（環境変数を参照しない） | 暗黙の出口を作らない（A05／A10）。proxy 対応は範囲外（制約） |
+| TLS | `NativeTls`＋`RootCerts::PlatformVerifier` | OS ストア。`disable_verification` は公開しない。実在チェーンでの確認は #3173 |
+
+構築直後に `agent.config()` を読み戻して不変条件（provider・検証有効・https_only・リダイレクト 0・proxy なし・各タイムアウト）を照合する。ureq は provider と feature の不整合をリクエスト時に panic で報告しうるため、閉じたポート・TLS を話さないサーバへの要求が panic せず `Err` になる単体テストで feature 整合を CI 固定している。
+
+### 19.3 §5 案との差分
+
+- `ModelError::Http` は §5 案の `url` を持たない（A09。URL にクエリ・資格情報が含まれうる）。ureq のエラーは `Display` を通さず静的メッセージの `io::Error`（種別のみ保持）へ変換する
+- `SizeLimitExceeded` は新設せず既存 `TooLarge` を再利用
+- `DownloadOptions::new` は設けず `Default` のみ（api_surface の `pub fn new` 件数 1 の正ガードを保つ）
+
+### 19.4 `openat2` を使わない理由
+
+`openat` + `O_NOFOLLOW | O_DIRECTORY` の 1 段ずつの経路は §6 (a) が同格と認める経路で、Linux／macOS 共通・unsafe が最小で済む。一時ファイルは `O_CREAT | O_EXCL | O_NOFOLLOW`、公開は `renameat` 1 回（`RENAME_NOREPLACE` なし）。失敗時は自分の一時ファイルだけを `(dev, ino)` 照合の上 `unlinkat` する（`Drop` ガードで panic の unwind も覆う）。
+
+### 19.5 #3126 との境界
+
+`download.rs::run` の `verify_before_commit` へ、本 PR は §5 の方式 (i)「F32 ロード可能性」を実装した（`model.rs::verify_safetensors_before_commit` が一時ファイルを読み戻して `load_safetensors_f32_from_bytes` を呼ぶ）。方式 (ii)（dtype 非依存のヘッダのみ検証。推奨だった）は `onnx-interop::st_load` への新規関数追加を要するため採らなかった。帰結: (a) REQ-7 の F32 限定契約により F16／BF16 の妥当な safetensors も公開前検証で拒否される、(b) 検証のためファイル全量（上限 `MAX_MODEL_FILE_BYTES`）をメモリへ読み込み、さらに F32 テンソルを確保するため `load` と同等のメモリを一時的に使う。dtype 非依存化（方式 (ii)）は #3126 以降の課題とする。`download.json`・`If-None-Match`／304 は未実装（304 は異常として `Http`）。pin 無しの保証範囲は破損・部分改変の検出に限られる（rustdoc に明記）。
+
+### 19.6 `save` について
+
+`save` は `/proc/self/fd` 方式のまま（Linux x86_64／aarch64 限定。`docs/facade-model-registry-decision.md` §16.9）。dirfd への移行は本 PR の範囲外で、別イシューでの起票をユーザーに提案する（自動運転中は起票していない）。
+
+### 19.7 新規 `unsafe`
+
+`dirfd.rs` の libc 呼び出し（`openat`・`mkdirat`・`renameat`・`fstatat`・`fstat`・`unlinkat`）と `OwnedFd::from_raw_fd`・`mem::zeroed::<libc::stat>` のみ。各ブロックに SAFETY コメント（fd の生存期間・`CString` の寿命・戻り値検査）を付けた。
