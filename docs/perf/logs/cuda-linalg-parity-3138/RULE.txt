@@ -1,0 +1,14 @@
+# 事前宣言（実測前に固定。2026-10-16 UTC。イシュー #3138。結果が出た後に緩めない）
+- 公式の実機: DGX Spark GB10（sm_121）のみ。他の GPU（RTX 3060 等）の結果は判定に使わない。
+- 対象（CUDA GPU 線形代数カーネルの CPU 参照との実機 parity。Stage C）:
+  1. backend 層（カーネルを通る）: crates/backend-cuda/tests/linalg_lu_parity.rs と linalg_factor_parity.rs の #[ignore] テスト全件（各ファイル 6 件・計 12 件。ファイル単位で --ignored 実行）
+  2. facade 層（ゲート ON・カーネルを通る）: crates/facade/tests/linalg_gpu_optin_cuda_parity.rs の #[ignore] テスト全件（inv・solve・det・cholesky・qr・eigh の 6 件。デバイス経路プローブ付き）
+  3. 参考（ゲート OFF のホストフォールバック経路。カーネルは通らない）: crates/facade/tests/linalg_ops_backend_parity.rs の cuda_eigh_forward_matches_cpu_reference・cuda_pinv_forward_matches_cpu_reference。合否には数えるが、カーネル parity の根拠にはしない。
+- 判定: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。fandhe_ai_backend_cpu::assert_parity）を厳密ゼロ fail で適用する（docs/backend-gpu-linalg-decision.md §5。baseline 方式は使わない）。エラー写像テスト（特異・非 SPD・eigh 非収束）は期待どおりの BackendError を返すこと。全体 1e20 倍・1e-20 倍と 1e20 × I₂ で NaN／inf が出ないこと（det の f32 範囲外の期待値は CPU と bit 一致）も判定に含める。
+- 入力集合: 各テストコード中の既存集合（対角優位行列・既知 κ の SPD 行列〈n ≤ 64・κ ≤ 1e3〉・全体 1e±20 倍・1e20 × I₂）。広げない。
+- fail の扱い: tolerance 定数（RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD）・判定式・入力集合・κ 上限・カーネルは変えない。fail は事実としてログに記録し、カーネルの是正は #3135／#3136 の追加作業として報告する。別の決定記録とユーザー承認がない限り baseline 方式へ移らない。事後の緩和・ケース除外・再実行での選別はしない。
+- 実行: README.md の測定コマンドを使う。独立プロセスで 5 回実行し、5 回すべて pass で pass とする。既存の run ファイルは上書きしない。性能は測らない。
+- 対象コミット: 実測時の .rev-stamp（2 行形式。1 行目 sha・2 行目 dirty=0 必須）。dirty=1 の実測は無効とする。
+- 同梱: .rev-stamp・各 run のログ・環境情報（ドライバ・NVRTC 版）。ホスト名・ユーザー名・絶対パスは <cuda-node>・<home> 等へマスクしてから収録する。
+- 計測中にビルドや別の GPU 負荷を並走させない。
+- 本ディレクトリには実測値をまだ 1 件も入れていない（未実測）。

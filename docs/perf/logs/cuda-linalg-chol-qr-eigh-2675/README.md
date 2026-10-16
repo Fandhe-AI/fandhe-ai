@@ -2,6 +2,8 @@
 
 > **更新（#3136）**: Stage B（起動の実装）は実装済み。D-C 承認（親 #3133）と `docs/gpu-linalg-kernel-launch-unsafe-audit.md`（CU-3〜CU-5）に基づく。実機（GB10）での parity 実測は **#3138 へ申し送り・未実施**（本実行環境は GPU なし）。以下は Stage A 時点の記録で、「承認待ち」の記述は履歴として残す。
 
+> **#3138**: 実機 parity の事前登録規則・手順を `../cuda-linalg-parity-3138/` に用意した（未実測。GB10 での実施待ち）。
+
 `docs/backend-gpu-linalg-decision.md` §3〜§6・§10 参照。本実装エージェント実行環境は CUDA 実機（DGX Spark GB10）に
 到達できず、また **カーネル起動に必要な新規 `unsafe` のユーザー承認がイシュー #2675 に確認できなかった**ため、
 実装は #2674（LU 系）と同じ「Stage A」（`unsafe` なし）までで止めている。
@@ -44,3 +46,4 @@ cargo test -p fandhe-ai-backend-cuda --release --test linalg_factor_parity -- --
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 | 未実測 | NVRTC コンパイル確認のみ。parity は Stage B（unsafe 承認）後 |
+| 未実測 | DGX Spark GB10 | `../cuda-linalg-parity-3138/README.md` のコマンド | 未実測（#3138 スキャフォールド PR） | 規則は `../cuda-linalg-parity-3138/RULE.txt` |

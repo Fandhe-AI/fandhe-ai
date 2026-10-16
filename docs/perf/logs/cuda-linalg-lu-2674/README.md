@@ -4,6 +4,8 @@
 > 実機 `#[ignore]` テストを追加済み。GB10 での NVRTC・parity・特異写像の実測は #3138 で行う（下の実測記入欄は未記入のまま）。
 > 以下の「実装済み（Stage A）」「承認依頼」は #2674 時点の記録（履歴）。
 
+> **#3138**: 実機 parity の事前登録規則・手順を `../cuda-linalg-parity-3138/` に用意した（未実測。GB10 での実施待ち）。
+
 `docs/backend-gpu-linalg-decision.md` §3〜§6・§10 参照。本実装エージェント実行環境は CUDA 実機（DGX Spark GB10）に
 到達できず、また **カーネル起動に必要な新規 `unsafe` のユーザー承認がイシュー #2674 に確認できなかった**ため、
 実装は「Stage A」（`unsafe` なし）までで止めている。
@@ -46,3 +48,4 @@ cargo test -p fandhe-ai-backend-cuda --release --test linalg_lu_parity -- --igno
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 | 未実測 | NVRTC コンパイル確認のみ。parity は Stage B（unsafe 承認）後 |
+| 未実測 | DGX Spark GB10 | `../cuda-linalg-parity-3138/README.md` のコマンド | 未実測（#3138 スキャフォールド PR） | 規則は `../cuda-linalg-parity-3138/RULE.txt` |
