@@ -677,6 +677,7 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 - K-3（デバイス常駐）、`sdpa_compose` 置換、padding mask
 - CUDA／Metal 実機 parity は未実測（申し送り先 `docs/perf/logs/kv-cache-2084/README.md`）
 - `generate()` の公開は #2575／#2576 → #2575 で公開・#2576 で正ガード仕上げ済み（`facade-generate-decision.md` §17・§18）
+- 外部 `KvCache` を進める入口（`StatefulAttention::forward_with_external_cache`・facade `Tape::stateful_attention_forward_with_cache`）は #3095 で公開形を決定（P3 への追加。`KvCache` の公開メソッドは増やさない。`StatefulAttention` の `pub fn` 集合の固定は #3096。`docs/facade-speculative-decoding-batching-design.md` §19）
 
 ### 15.6 変更していないもの
 
