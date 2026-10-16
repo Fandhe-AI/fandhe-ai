@@ -2610,6 +2610,8 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 **適用記録（イシュー #2937・親 #2935。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650` の項 1）**: 語彙 lookup 型のテキスト変換を設計記録 §16 の確定形どおり `fandhe_ai::text::{TextVectorization, TextVectorizationConfig, TextLimits, Standardize, Split, TextError}` として公開した（`lib.rs` の `pub mod text;`、`text/mod.rs` の `pub use` 5 文。サブモジュールは非公開・クレートルートへ再エクスポートしない）。小文字化と空白分割は ASCII に限ることを公開 doc に明記し、利用例 doctest（`adapt` → `transform` → `Var::embedding(.., Some(0))`）を付けた。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路（Unicode 系 variant・callable・出力モード・`StringLookup` 相当・`Sequential` への層化・内部項目・クレートルート再エクスポート）の否定プローブは残した。論点 3 の Unicode 部分と論点 6 は保留のまま。本書 1 節の対象範囲表には、#2934 の先例に倣って行を足さない（公開面は新しい互換 API の行ではなく追加の公開モジュールのため）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec`・`unsafe` は不変。CUDA／Metal の実機 parity はホスト側処理のみのため対象なし。詳細は設計記録 §17。
 
+**適用記録（イシュー #3092・親 #3090）**: `TextVectorization` に出力モード `transform_multi_hot`・`transform_count`・`transform_tf_idf`・`from_vocabulary_with_idf`・`adapt_tf_idf`・`idf_weights` と、設定の `pad_to_max_tokens` を、`docs/facade-text-output-modes-string-lookup-decision.md` §3・§7 の形のまま追加した（根拠は 2026-10-11 の D-A。新しい承認は得ていない）。公開済みの `fandhe-ai =0.11.0` に対しては追加のみ。`StringLookup` 相当は #3093、Unicode は #3089 で、本 issue では変えていない。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec`・`unsafe` は不変。詳細は設計記録の #3092 実装記録節。
+
 **Phase 8 公開形（関数型 AD 変換。承認依頼 #2879・親 #2873・Phase 8 #2872）**: `vjp`・`hvp`・ループ版 `vmap` の facade 公開形と論点の承認依頼。上の Phase 4 表（行 1〜30）・`S1`〜`S3`・`T1`〜`T5` とは別系統のため、行ラベルは `F1`〜`F3` とし他の番号空間と混ぜない。保留ガードの対応は Phase 4 表の「行と 1 対 1」でも S／T ブロックの「未設置」でもなく、**`FunctionalTransformsHoldDoctestGuard` 1 個が `F1`〜`F3` の 3 行すべてを覆う**。以下は設計記録 `docs/autodiff-functional-transforms-design.md` §5・§6・§9・§11 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。承認根拠は範囲の異なる 2 つを別々に引く。ルート #2499 の 2026-10-07 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`）は案 C の境界だけを承認しており、公開面の追加・数値判定方式・`Op`／`BackendOps` の拡張は承認していない。2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計と issue 分解の記録、および実装 issue の起票までである。公開（`pub fn` の追加・保留ガードの反転）は承認後に設計記録 §10 の 7（`vjp`／`hvp`）・8（`vmap`）として別 issue で行う（どちらも未起票）。
 
 | # | 機能（由来） | 公開形（設計記録 §5 の転記・未承認） | 非破壊性 | 保留ガード | 公開先 | 決定記録・承認事項の所在 |
@@ -2690,7 +2692,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 | `jvp` の拡張（複数入力・微分可能な `jvp`） | `autodiff-functional-transforms-design.md` §27.5 | 同 issue の決定記録 | #3062・#3065 |
 | 二階微分の対象 Op 拡張 | `autodiff-higher-order-grad-decision.md` §16・§19.4 | 同 issue の決定記録 | #3075 |
 | Unicode（`TextVectorization`） | 各決定記録 | 同 issue の決定記録 | #3089 |
-| 出力モード（`TextVectorization`・`StringLookup` 相当） | 各決定記録 | 同 issue の決定記録 | #3090 |
+| 出力モード（`TextVectorization`・`StringLookup` 相当） | `docs/facade-text-output-modes-string-lookup-decision.md`（出力モード 3 種は #3092 で実装済み。`StringLookup` 相当は #3093） | 同 issue の決定記録 | #3090 |
 | generate 系 | 各決定記録 | 同 issue の決定記録 | #3094〜#3108（D-A に含まれる範囲と #3114〈グラフコンパイル区分 B〉は Phase 4 親 #3088 配下の各 issue の決定記録を正とする） |
 | `ModelRegistry` 書き込み | 各決定記録 | 同 issue の決定記録 | #3117 |
 

@@ -328,3 +328,36 @@ main が「実装上の選択・公開承認の際に確認」と注記してい
 ### 17.5 変えなかったもの
 
 依存（`Cargo.toml`／`Cargo.lock`）・新規 `unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・ガードレール閾値・`docs/spec/`・`fandhe-ai =0.10.0` の既存シグネチャ（追加のみ）・`FitConfig`。CUDA／Metal の実機 parity はホスト側処理のみのため対象なし（§16.8）で、`#[ignore]` テストも `docs/perf/logs/` への申し送りも作っていない。論点 3 の Unicode 部分と論点 6 は保留のまま。
+
+## 18. 実装記録（#3092・親 #3090。出力モード `multi_hot`・`count`・`tf_idf`）
+
+公開形の正は `docs/facade-text-output-modes-string-lookup-decision.md` §3・§5・§7（#3091）。本節は実装時の選択とガードの更新を記す。承認の根拠は決定記録 §1 の 2026-10-11 D-A のみで、新しい承認は得ていない。
+
+### 18.1 公開した名前
+
+- `TextVectorizationConfig`: `pub pad_to_max_tokens: bool`（既定 `false`）・`with_pad_to_max_tokens`。`Eq` は保つ（idf は設定に入れない）
+- `TextVectorization`: `transform_multi_hot`・`transform_count`・`transform_tf_idf`（`Result<Tensor<f32>, TextError>`）・`from_vocabulary_with_idf`・`adapt_tf_idf`・`idf_weights`
+- `TextError`: `MissingIdfWeights`・`IdfWeightsLengthMismatch { len, expected }`・`InvalidIdfWeight { index }`・`PadToMaxTokensWithoutMaxTokens`・`TokenCountNotExact { index, count, max }`（`FrequencyOverflow` の後・`Shape` の前。`usize` だけを持つ）
+- `text/mod.rs` の `pub use` は 6 名のまま（`StringLookup` 相当は #3093）
+
+### 18.2 実装の構成
+
+- `text/bag.rs`（内部）: 入力検査 → 事前走査（行ごとのトークン数だけを数える。中間 `Vec`・n-gram 文字列を作らない。2^24 超は `TokenCountNotExact`）→ `B × W` の検査（`limits.check_output_elements`）→ 一括確保 → 行ごとの in-place 加算。n-gram は行内で使い回す 1 本の `String` で組み立てる（`ngram.rs` と同じ半角空白連結）。事前走査で 1 行 2^24 以下と確定するため f32 の加算は厳密
+- `text/adapt.rs`: 集計を `Entry { freq, df, last_doc }` に変え、`last_doc != 現在の文書` のときだけ df を `checked_add` する。`adapt` の挙動・並び・検査順は不変で、`adapt_with_df` が語彙と同じ並びの df を返す
+- `text/limits.rs`: `f32` と `i32` が同サイズであることを `const` アサートで固定し、`check_output_elements`・絶対上限を f32 出力でも共用する。`MAX_EXACT_F32_COUNT`（2^24）と純関数 `check_exact_count`
+- 検査順（`from_vocabulary_with_idf`。確保より先がすべて）: `pad_to_max_tokens` と `max_tokens` → 既存の `max_tokens`・語彙数・設定値 → idf の個数 → idf の各値（有限かつ 0 以上。`-0.0` は可）→ 語彙 → idf の確保。`transform_tf_idf` の `MissingIdfWeights` は入力検査より前
+
+### 18.3 決定記録の曖昧な点への選択
+
+- `adapt_tf_idf` の OOV の idf: f32 へ丸めた後の語彙 idf を f64 に戻して合計し、件数で割って 1 回だけ f32 へ丸める（語彙が空なら 0.0）。`from_vocabulary_with_idf` の「与えた重みの平均」と同じ計算のため、`adapt_tf_idf` の `idf_weights()[2..]` を `from_vocabulary_with_idf` へ渡すと idf[1] まで bit 一致して往復できる
+- 重みの検査（有限かつ 0 以上）は決定記録の idf 計算式（`ln(1 + N / (1 + df))` は常に 0 以上）と整合させた安全側の選択
+
+### 18.4 ガードの更新
+
+- `api_surface.rs`: `facade_exposes_text_items_only_in_approved_shape` に公開メソッド 7 本を足した（`text/bag.rs` に完全公開項目がないこともここで固定）・`text_public_shape_is_pinned` を `TextError` 22 variant へ・`text_items_are_reachable_via_facade_text_path` に新メソッドの署名・`pad_to_max_tokens` フィールド・設定の `Clone + Eq + Default + Debug` を追加・`text_output_mode_doctest_is_present_and_compiled` を新設
+- 残した否定プローブ: `OutputMode`・`output_mode`・単独の `multi_hot`／`multihot`／`tf_idf`／`tfidf`・`stringlookup`／`string_lookup`（`stringlookup` の反転は #3093）。メソッド名は複合識別子のため通る
+- 結合テスト（追加のみ）: 手計算の count・multi_hot、`transform` の id ヒストグラムとの突合、pad、idf の bit 一致と往復、巨大 `B × W` の確保前拒否、`TokenCountNotExact`（`Split::Character` + 8-gram で 2^24 超）、`Debug`・エラーの非漏えい
+
+### 18.5 変えなかったもの・対象外
+
+依存（`Cargo.toml`／`Cargo.lock`）・新規 `unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・ガードレール閾値・`docs/spec/`・既存 `transform` のシグネチャと挙動・`TextVectorizationConfig` の既定値。`StringLookup` 相当は #3093、Unicode の標準化・分割は #3089。実機（CUDA／Metal）はホスト側処理のみのため対象なしで、`#[ignore]` テストも `docs/perf/logs/` への申し送りも作っていない。
