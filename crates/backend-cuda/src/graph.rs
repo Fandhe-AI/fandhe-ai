@@ -57,7 +57,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use cudarc::driver::CudaGraph;
@@ -670,17 +670,51 @@ fn resolve_infer_enabled(env: Option<&str>, default: bool) -> bool {
 
 static INFER_ENV_ENABLED: OnceLock<bool> = OnceLock::new();
 
-/// override を含まない opt-in 判定（環境変数 > 既定 const。プロセス生存
-/// 期間中 1 回だけ読む）。`device.rs::CudaDevice::new` が created stream を
-/// 選ぶ判断に使う（stream 種別は ordinal ごとに sticky なため、スレッド
-/// ローカルの test override をここへ混ぜない）。
+/// API 明示設定（[`set_infer_graph_enabled`]）の値。`INFER_EXPLICIT` が
+/// true のときだけ意味を持つ。
+static INFER_API_ENABLED: AtomicBool = AtomicBool::new(false);
+/// API で明示設定済みか（学習側 `EXPLICIT` と同型）。
+static INFER_EXPLICIT: AtomicBool = AtomicBool::new(false);
+
+/// 推論チェーン capture の opt-in を API から明示設定する（イシュー #3116。
+/// 公開形は `docs/facade-graph-tier-b-optin-exposure-decision.md` §3・§4。
+/// 呼び出し元は `facade::set_cuda_graph_infer_enabled`）。
+///
+/// 優先順位は API 明示 > 環境変数 `FANDHE_AI_CUDA_GRAPH_INFER` > 既定 OFF。
+/// プロセスワイドで `Device` 単位ではない。**最初の CUDA デバイス初期化より
+/// 前に呼ぶこと**: stream 種別は ordinal ごとに sticky なため、遅れた場合は
+/// その ordinal の stream が capture 不可のまま残り、
+/// `linear_chain_forward_captured` は既存契約どおり `Ok(None)` で非 capture
+/// 経路へ戻る（出力は同一。学習 step の fail-closed 拒否とは異なる）。
+/// CUDA 非搭載環境でも呼べる（フラグを立てるだけで driver には触れない）。
+pub fn set_infer_graph_enabled(enabled: bool) {
+    // 値 → explicit の順に書き、explicit=true を観測した読み手が必ず
+    // 書き込み済みの値を見るようにする。
+    INFER_API_ENABLED.store(enabled, Ordering::SeqCst);
+    INFER_EXPLICIT.store(true, Ordering::SeqCst);
+}
+
+/// API 明示 > 環境変数 > 既定の優先順位を解く純粋関数（`std::env` を読まない
+/// ため並列テストで安全）。環境変数の解釈は [`resolve_infer_enabled`]。
+fn resolve_infer_requested(explicit: Option<bool>, env: Option<&str>, default: bool) -> bool {
+    explicit.unwrap_or_else(|| resolve_infer_enabled(env, default))
+}
+
+/// override を含まない opt-in 判定（API 明示 > 環境変数 > 既定 const。
+/// 環境変数はプロセス生存期間中 1 回だけ読む）。`device.rs::CudaDevice::new`
+/// が created stream を選ぶ判断に使う（stream 種別は ordinal ごとに sticky
+/// なため、スレッドローカルの test override をここへ混ぜない）。
 ///
 /// `internal-diagnostics` feature 下では `device.rs` 側の分岐が cfg で
 /// 除外され呼ばれなくなる（`GraphMode::requires_created_stream` と同じ）。
 #[cfg_attr(feature = "internal-diagnostics", allow(dead_code))]
 pub(crate) fn infer_graph_stream_requested() -> bool {
+    if INFER_EXPLICIT.load(Ordering::SeqCst) {
+        return INFER_API_ENABLED.load(Ordering::SeqCst);
+    }
     *INFER_ENV_ENABLED.get_or_init(|| {
-        resolve_infer_enabled(
+        resolve_infer_requested(
+            None,
             std::env::var("FANDHE_AI_CUDA_GRAPH_INFER").ok().as_deref(),
             INFER_GRAPH_DEFAULT_ENABLED,
         )
@@ -692,7 +726,7 @@ thread_local! {
     static INFER_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
-/// 推論チェーン capture が有効か（override > 環境変数 > 既定 const）。
+/// 推論チェーン capture が有効か（override > API 明示 > 環境変数 > 既定 const）。
 /// `CudaBackendOps::linear_chain_forward_captured` の最初の判定。
 pub fn infer_graph_enabled() -> bool {
     INFER_OVERRIDE
@@ -1246,6 +1280,67 @@ mod tests {
         assert!(resolve_infer_enabled(None, true));
     }
 
+    /// `set_infer_graph_enabled` の往復検証用ガード（`FlagGuard` と同型。
+    /// プロセスグローバルな API 明示状態を直列化・原状復帰する）。
+    struct InferFlagGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original_value: bool,
+        original_explicit: bool,
+    }
+
+    impl InferFlagGuard {
+        fn acquire() -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            Self {
+                _lock: lock,
+                original_value: INFER_API_ENABLED.load(Ordering::SeqCst),
+                original_explicit: INFER_EXPLICIT.load(Ordering::SeqCst),
+            }
+        }
+    }
+
+    impl Drop for InferFlagGuard {
+        fn drop(&mut self) {
+            INFER_API_ENABLED.store(self.original_value, Ordering::SeqCst);
+            INFER_EXPLICIT.store(self.original_explicit, Ordering::SeqCst);
+        }
+    }
+
+    /// イシュー #3116: API 明示設定の往復（stream 要求と有効判定の両方に反映）。
+    #[test]
+    fn set_infer_graph_enabled_round_trips() {
+        let _guard = InferFlagGuard::acquire();
+        set_infer_graph_enabled(true);
+        assert!(infer_graph_stream_requested());
+        assert!(infer_graph_enabled());
+        set_infer_graph_enabled(false);
+        assert!(!infer_graph_stream_requested());
+        assert!(!infer_graph_enabled());
+    }
+
+    /// イシュー #3116: API 明示は環境変数・既定より優先される（純粋関数）。
+    #[test]
+    fn explicit_api_value_beats_env_and_default() {
+        assert!(!resolve_infer_requested(Some(false), Some("1"), true));
+        assert!(resolve_infer_requested(Some(true), Some("0"), false));
+        assert!(resolve_infer_requested(Some(true), None, false));
+        assert!(resolve_infer_requested(None, Some("1"), false));
+        assert!(!resolve_infer_requested(None, Some("bad"), true));
+        assert!(!resolve_infer_requested(None, None, false));
+    }
+
+    /// イシュー #3116: thread-local override は API 明示より優先されるが、
+    /// stream 要求（sticky）は API 明示値のまま。
+    #[test]
+    fn thread_local_override_beats_api_explicit() {
+        let _guard = InferFlagGuard::acquire();
+        set_infer_graph_enabled(true);
+        let _o = override_infer_graph_for_scope(false);
+        assert!(!infer_graph_enabled());
+        assert!(infer_graph_stream_requested());
+    }
+
     /// 既定は OFF（受け入れ基準 1。反転は ADOPT 判定後の別 PR）。
     #[test]
     fn infer_graph_default_is_off() {
@@ -1255,6 +1350,8 @@ mod tests {
     /// override は現スレッド限定で、ガード drop で直前の値へ戻る。
     #[test]
     fn override_infer_graph_round_trips_and_nests() {
+        // API 明示状態を変更する他テストとの競合を避ける（#3116）。
+        let _guard = InferFlagGuard::acquire();
         let base = infer_graph_enabled();
         {
             let _g1 = override_infer_graph_for_scope(true);
