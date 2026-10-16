@@ -17,6 +17,10 @@
 //! （tolerance は足さず変えない）。実機は `docs/perf/logs/functional-transforms-vmap-grad-3073/README.md`
 //! へ申し送る。`DeviceMismatch`・結果要素数オーバーフロー・子テープの世代は facade から観測できず未検証
 //! （§32.9・§32.10 と同じ）。
+//!
+//! 拡張 Op を通す `Tape::hvp`（#3087・`docs/autodiff-higher-order-grad-decision.md` §32）の結合テストも
+//! 本ファイル末尾が担当する。参照は `hvp` を経由しない素の `backward` の方向中央差分（REQ-2 判定）、
+//! 拒否の基準は恒久対象外の `Tape::custom`。実機は #3168・#3169 へ申し送る。
 
 use fandhe_ai::{AutodiffError, Device, ShapeError, Tape, TapeRef, Tensor, Var, tape, tape_for};
 use fandhe_ai_autodiff::Tape as InnerTape;
@@ -530,4 +534,189 @@ fn metal_vmap_grad_matches_cpu_reference() {
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/functional-transforms-vmap-grad-3073/README.md 参照"]
 fn cuda_vmap_grad_matches_cpu_reference() {
     assert_vmap_grad_device_matches_cpu(Device::Cuda(0), "cuda");
+}
+
+// --- 拡張 Op を通す `Tape::hvp`（イシュー #3087・決定記録 `autodiff-higher-order-grad-decision.md` §32）。
+//     参照は `hvp` を経由しない独立経路（素の `Tape::backward` の 1 階勾配の方向中央差分）。
+//     x について線形な Op は `sum(op(x))` だと二階がゼロで検証にならないため、必ず非線形な包みを入れ、
+//     `Hv` がゼロでないことも確認する。
+
+use std::sync::Arc;
+
+use fandhe_ai::CustomFunction;
+
+type HvpBuild = for<'a> fn(&'a Tape, &Var<'a>) -> Var<'a>;
+
+/// REQ-2 統一複合判定。閾値は共通定数（`tensor-core::tolerance`。backend-cpu 再エクスポート）を
+/// 参照し、ここでは複製しない（いずれも f64）。
+fn req2_close(a: f64, b: f64) -> bool {
+    let abs = (a - b).abs();
+    abs < fandhe_ai_backend_cpu::ABSOLUTE_RESCUE_THRESHOLD
+        || abs / a.abs().max(b.abs()).max(f64::MIN_POSITIVE)
+            < fandhe_ai_backend_cpu::RELATIVE_TOLERANCE
+}
+
+fn fixed_weights<'a>(tape: &'a Tape, shape: &[usize]) -> Var<'a> {
+    let n: usize = shape.iter().product();
+    let w = (0..n)
+        .map(|i| 0.4 + 0.37 * i as f32 - 0.05 * (i * i) as f32)
+        .collect();
+    tape.var_no_grad(&t(w, shape))
+}
+
+fn plain_grad_of(x0: &[f32], shape: &[usize], build: HvpBuild) -> Vec<f32> {
+    let tp = tape();
+    let x = tp.var(&t(x0.to_vec(), shape));
+    let loss = build(&tp, &x);
+    let grads = tp.backward(&loss).expect("backward");
+    grads
+        .get(&x)
+        .unwrap()
+        .expect("grad")
+        .host_slice()
+        .into_owned()
+}
+
+fn check_hvp_against_fd(label: &str, x0: &[f32], shape: &[usize], v: &[f32], build: HvpBuild) {
+    let tp = tape();
+    let child = tape();
+    let x = tp.var(&t(x0.to_vec(), shape));
+    let loss = build(&tp, &x);
+    let hv = tp
+        .hvp(&loss, &x, &t(v.to_vec(), shape), &child)
+        .unwrap_or_else(|e| panic!("{label}: hvp 対象のはず: {e:?}"));
+    let hv = hv.host_slice().into_owned();
+    assert!(
+        hv.iter().any(|a| a.abs() > 1e-4),
+        "{label}: Hv がゼロでは二階の検証にならない: {hv:?}"
+    );
+    let eps = 1.0e-2_f32;
+    let shifted = |sign: f32| -> Vec<f32> {
+        x0.iter()
+            .zip(v)
+            .map(|(&a, &d)| a + sign * eps * d)
+            .collect()
+    };
+    let gp = plain_grad_of(&shifted(1.0), shape, build);
+    let gm = plain_grad_of(&shifted(-1.0), shape, build);
+    for i in 0..x0.len() {
+        let fd = (gp[i] as f64 - gm[i] as f64) / (2.0 * eps as f64);
+        assert!(
+            req2_close(hv[i] as f64, fd),
+            "{label}: Hv[{i}] {} vs fd {fd}",
+            hv[i]
+        );
+    }
+}
+
+fn hvp_layer_norm<'a>(tp: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tp.var_no_grad(&t(vec![1.2, 0.7, -0.4], &[3]));
+    let b = tp.var_no_grad(&t(vec![0.1, -0.2, 0.3], &[3]));
+    let y = x.layer_norm(Some(&w), Some(&b), 1e-5).unwrap();
+    y.mul(&fixed_weights(tp, &[2, 3]))
+        .unwrap()
+        .sum(None)
+        .unwrap()
+}
+
+fn hvp_conv2d<'a>(tp: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tp.var_no_grad(&t(vec![0.5, -0.3, 0.2, 0.8], &[1, 1, 2, 2]));
+    x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 1)
+        .unwrap()
+        .tanh()
+        .sum(None)
+        .unwrap()
+}
+
+fn hvp_gelu<'a>(tp: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.gelu().unwrap();
+    y.mul(&fixed_weights(tp, &[2, 3]))
+        .unwrap()
+        .sum(None)
+        .unwrap()
+}
+
+fn hvp_gather<'a>(_tp: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let index = Tensor::new(vec![0i32, 2, 1, 1], &[2, 2]).expect("index");
+    x.gather(1, &index).unwrap().tanh().sum(None).unwrap()
+}
+
+fn hvp_max_pool2d<'a>(_tp: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let (y, _idx) = x
+        .max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1], false)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn hvp_inv<'a>(tp: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.inv().unwrap();
+    y.mul(&fixed_weights(tp, &[2, 2]))
+        .unwrap()
+        .sum(None)
+        .unwrap()
+}
+
+#[test]
+fn hvp_matches_finite_difference_on_extended_ops_via_facade() {
+    let x6 = [0.5_f32, 1.1, -0.6, 0.2, -1.3, 0.8];
+    let v6 = [0.6_f32, -0.2, 0.3, 0.9, -0.5, 0.4];
+    check_hvp_against_fd("layer_norm", &x6, &[2, 3], &v6, hvp_layer_norm);
+    let x9 = [0.3_f32, -0.8, 1.2, 0.1, -0.4, 0.9, 0.5, -0.2, 0.7];
+    let v9 = [0.6_f32, -0.2, 0.3, 0.9, -0.5, 0.4, 0.1, -0.7, 0.2];
+    check_hvp_against_fd("conv2d", &x9, &[1, 1, 3, 3], &v9, hvp_conv2d);
+    check_hvp_against_fd("gelu", &x6, &[2, 3], &v6, hvp_gelu);
+    check_hvp_against_fd("gather", &x6, &[2, 3], &v6, hvp_gather);
+    // 値がすべて異なり差が中央差分の刻みより十分大きい入力（argmax が入れ替わらない）。
+    let pool = [0.1_f32, 0.9, 0.3, 0.5, 0.2, 0.8, 0.7, 0.4, 0.6];
+    check_hvp_against_fd("max_pool2d", &pool, &[1, 1, 3, 3], &v9, hvp_max_pool2d);
+    check_hvp_against_fd(
+        "inv",
+        &[2.0, 0.5, 0.3, 1.5],
+        &[2, 2],
+        &[0.6, -0.2, 0.3, 0.9],
+        hvp_inv,
+    );
+}
+
+/// 恒久対象外の `Tape::custom` 用の恒等関数（拒否の基準 Op。`Op::Custom` は §21.2 A 区分。
+/// `LogSumExp`・`Max` は C 区分で将来の拡張で対象になりうるため基準にしない）。
+struct IdentityFn;
+
+impl CustomFunction for IdentityFn {
+    fn name(&self) -> &str {
+        "identity"
+    }
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].clone())
+    }
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        _requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        Ok(vec![Some(upstream.clone())])
+    }
+}
+
+#[test]
+fn hvp_rejects_permanently_unsupported_custom_op() {
+    let tp = tape();
+    let child = tape();
+    let x = tp.var(&t(vec![0.1, 0.2, 0.3], &[3]));
+    let loss = tp
+        .custom(Arc::new(IdentityFn), &[x])
+        .unwrap()
+        .sum(None)
+        .unwrap();
+    let v = t(vec![1.0, 1.0, 1.0], &[3]);
+    assert!(matches!(
+        tp.hvp(&loss, &x, &v, &child),
+        Err(AutodiffError::Backward(_))
+    ));
+    assert_eq!(child.leaf_count(), 0, "拒否後も child は空");
 }

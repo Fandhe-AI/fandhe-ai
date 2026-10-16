@@ -305,7 +305,7 @@ impl Tape {
 - 副作用: `vjp` が親テープへ足す補助ノードはちょうど 2 ノード（余接の葉と `mul`）だが、これは入口検査とゼロ返却分岐を通過した本体経路に限る。入口検査の失敗時、および要素数 0 または `output` が追跡なしでゼロを返す場合は、ノードを足さない。`hvp` は親テープへノードを足さず、子テープにはノードが残るので呼び出し後の子テープは作り直す。`vmap` は Phase B で失敗すると、それまでのノードが残る。
 - `child` は `tape()`／`tape_for()` で作った空の別 `Tape`（`hessian` と同じ契約）。
 - 数値: REQ-2 の統一複合判定。`vmap` とバッチなし実行の bit 一致、`hvp` と 1 階 VJP の bit 同一は契約にしない。
-- 適用範囲: `hvp` の経路上の Op は `supports_create_graph()` が真のものに限る（論点 5 は保留なので拡張しない）。低精度 forward は対象外で、f32 の `Tape` のみ（`VarF64` は対象外）。`vmap(grad)` は契約外（論点 6 は保留）で、値だけが要る場合は呼び出し側が明示ループで `backward` を回す。
+- 適用範囲: `hvp` の経路上の Op は `supports_create_graph()` が真のものに限る（論点 5 は保留なので拡張しない）。低精度 forward は対象外で、f32 の `Tape` のみ（`VarF64` は対象外）。`vmap(grad)` は契約外（論点 6 は保留）で、値だけが要る場合は呼び出し側が明示ループで `backward` を回す。 → #3087 追記: 論点 5 は D-A（§29・#3020）で実装へ進み、#3077〜#3086 で対象 Op を拡張した。現在の対象は `supports_create_graph` の網羅 match と `autodiff-higher-order-grad-decision.md` §21.2 を正とする。facade での確認は §34。
 - 利用例の doctest は facade 単独で完結する形にする（例: `vmap` は `|s| s.mul(s)`、`vjp` は `x⊙x` から `2x⊙u`、`hvp` は `x³` から `6x⊙v`）。書けなければ #2931 は止まる。
 
 ### 23.4 保留ガードの反転範囲
@@ -418,7 +418,7 @@ impl Tape {
 - `tangent` は **input** の shape と完全一致（ブロードキャスト不可）。`vjp` が output 側と照合するのとは逆向き。
 - 追跡なし `output` は全ゼロ（`jacobian`／`vjp` と同じ。追跡なし loss を `Err` にする `hvp` とは非対称）。追跡なし `input` は `GradientTrackingDisabled`。
 - 副作用: 入口検査通過後は、`backward_create_graph` 側の拒否（非対象 Op・rank 3 以上の `MatMul`・非空／同一の子テープ・デバイス不一致・checkpoint）でも親テープに 2 ノード（`u` と `mul`）が残る。`vjp` の「入口失敗時・ゼロ返却時はノードなし」とは異なる。拒否時の子テープは、空の別テープなら前段の事前検査による拒否では空のまま。非空の子テープは消去されず既存ノードが維持され、同一テープ（親自身）を渡した場合は `double_vjp_stage` が追加した 2 ノードも残り、親への追加が子にも見える。成功時の子テープにはノードが残るため再利用せず作り直す。`child` は `tape()`／`tape_for()` で作った空の別 `Tape`。
-- 適用範囲: 経路上の Op は `supports_create_graph()` が真のものに限る（非対象は既存 `validate_ancestors` の型付き `Err(Backward)`）。f32 `Tape` のみ（`VarF64`・f16 は対象外）、単一入力、結果は非微分のホスト値。
+- 適用範囲: 経路上の Op は `supports_create_graph()` が真のものに限る（非対象は既存 `validate_ancestors` の型付き `Err(Backward)`）。f32 `Tape` のみ（`VarF64`・f16 は対象外）、単一入力、結果は非微分のホスト値。 → #3087 追記: 論点 5 は D-A（§29・#3020）で実装へ進み、#3077〜#3086 で対象 Op を拡張した。現在の対象は `supports_create_graph` の網羅 match と `autodiff-higher-order-grad-decision.md` §21.2 を正とする。facade での確認は §34。
 - 数値: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。`jacobian` や 1 階 VJP との bit 同一は主張しない。計算量は `jvp` が親 backward 1 回＋子 backward 1 回、`jacfwd` が子 backward を入力要素数 `n` 回（`jacobian` は出力要素数 `m` 回）。
 - 実機 parity（CUDA／Metal）は #2942 の担当で未実測。値は書かない。
 - 利用例 doctest 案（公開 issue で facade 単独で完結するか確認）: `y = x⊙x` に対し `jvp` が `2x⊙v`、`jacfwd` が `diag(2x)`。書けなければ公開 issue は実装せず承認依頼へ戻る。
@@ -934,3 +934,40 @@ for k in 0..m {
 ### 33.10 変更していないもの
 
 `crates/**`・公開 API・`TapeF64` の公開面・tolerance・baseline・依存・`unsafe`・ガードレール閾値・`docs/spec`。
+
+
+## 34. 実装記録（イシュー #3087・親 #3075。facade の高階変換で拡張 Op を確認）
+
+#3077〜#3086 で `create_graph` 対象へ広げた Op 族の代表が、facade の公開入口 `Tape::backward_create_graph`・`hvp`・`jvp`・`jacfwd`・`jvp_multi` でも通ることをテストで固定した。公開 API・1 階 `backward` の値・tolerance・baseline・依存・`unsafe`・`docs/spec`・`crates/autodiff/src` は変えていない（承認範囲は #3020 の D-A の一括承認の中）。
+
+### 34.1 追加したテスト
+
+| ファイル | 内容 |
+|---|---|
+| `crates/facade/tests/create_graph_facade.rs` | `backward_create_graph` を 17 Op で確認: layer_norm・rms_norm・batch_norm・conv2d・gelu・gelu_tanh・huber_loss・cross_entropy_loss・gather・cumsum・pad・masked_fill・max_pool2d・avg_pool2d・inv・det・rfft。GPU `#[ignore]` は LayerNorm・Conv2d・MaxPool2d（CUDA／Metal）。Softmax・LogSoftmax・MseLoss・NllLoss は既存 |
+| `crates/facade/tests/functional_transforms_facade.rs` | `hvp` の有限差分突合 6 Op（layer_norm・conv2d・gelu・gather・max_pool2d・inv）と、`Tape::custom` による拒否 1 件 |
+| `crates/facade/tests/functional_transforms_jvp_facade.rs` | `jvp`／`jacfwd` を `Tape::jacobian` と突合 9 Op（softmax・layer_norm・conv2d・gelu_tanh・cumsum・pad・avg_pool2d・rfft・solve）と、`jvp_multi` の conv2d（入力と重みの両方を追跡）1 件 |
+
+### 34.2 拒否の基準を `Tape::custom` に替えた理由
+
+従来の拒否テストは `LogSumExp`・`Max` を基準にしていた。この 2 つは決定記録 §21.2 の C 区分（今回のラウンドで fail-closed に固定したが、将来の拡張で対象になりうる）で、恒久対象外ではない。恒久対象外（A 区分）の `Op::Custom` に替え、将来の拡張で拒否テストが黙って意味を失うのを防ぐ。`.is_err()` は `Err(AutodiffError::Backward(_))` の一致に強めた。
+
+### 34.3 意味のないテストを防ぐ方針
+
+- x について線形な Op は `sum(op(x))` だと Hessian が恒等的にゼロになり、二階の再生が壊れても通る。すべてのケースに非線形な包み（`tanh`・要素積・固定重み）を入れた
+- LayerNorm・BatchNorm・CrossEntropy は 1 階勾配の総和が恒等的に一定になる（Hessian 列和がゼロ）ため、一様でない固定方向 `v` の `H v` で検証し、`H v` がゼロでないことも assert する
+- `max_pool2d` は値がすべて異なり差が刻み（`eps = 1e-2`）より十分大きい入力、Huber は `|tanh(x) - target|` が `delta` の折れ目をまたがない入力にした
+
+### 34.4 数値の比較方法
+
+- `first_order()` は素の `Tape::backward` と bit 一致（全 Op で成立）
+- 子テープ上の `cg.grad` は §9 (i) のとおり REQ-2 が契約。実測で bit 一致した Op は bit 一致で固定し、1 ulp 差が出た gelu・gelu_tanh・inv・det（および損失の huber・cross_entropy）は REQ-2 で比べる
+- 二階は `backward_create_graph` を通らない独立経路（素の `backward` の 1 階勾配の中央差分）と REQ-2 で比べる。tolerance は新設・緩和していない
+
+### 34.5 GPU `#[ignore]` と申し送り
+
+CUDA は `create_graph_extended_ops_cuda_matches_cpu`、Metal は `create_graph_extended_ops_metal_matches_cpu`。実行手順と記入欄は `docs/perf/logs/create-graph-extended-ops-3087/README.md`。実測は #3168・#3169 へ申し送る。線形代数は forward が GPU からホスト f64 にフォールバックするため代表にしていない（`autodiff-higher-order-grad-decision.md` §31.6 の申し送り 5）。
+
+### 34.6 変えていないもの
+
+公開 API・1 階 `backward` の値・tolerance・baseline・FMA 契約・依存・`unsafe`・`docs/spec`・`crates/autodiff/src`。C 区分・`Conv3d` 系・損失の残り variant を対象に加えていない。rustdoc は対象 Op の正本（`supports_create_graph` の網羅 match と決定記録 §21.2・§22〜§31）を示す一文だけを足した。

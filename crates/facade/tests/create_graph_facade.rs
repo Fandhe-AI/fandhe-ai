@@ -15,8 +15,23 @@
 //!
 //! GPU 実機テストは `#[ignore]`（CI 非実行）。手順は
 //! `docs/perf/logs/create-graph-facade-2545/README.md`。
+//!
+//! イシュー #3087（親 #3075。決定記録 `docs/autodiff-higher-order-grad-decision.md` §32）:
+//! #3077〜#3086 で `create_graph` 対象へ広げた Op 族の代表（正規化・Conv2d・Gelu・損失・索引累積・
+//! Pad／MaskedFill・プーリング・線形代数／FFT）が facade の公開経路でも二階まで通ることを固定する。
+//! x について線形な Op は `sum(op(x))` だと Hessian が恒等的にゼロで二階の再生が壊れても通るため、
+//! 必ず非線形な包み（tanh／要素積）を入れ、固定方向の `H v` がゼロでないことも assert する。
+//! 拒否の基準 Op は恒久対象外の `Tape::custom`（§21.2 A 区分）。`LogSumExp`・`Max` は C 区分で、
+//! 将来の拡張で対象になりうるため基準にしない。GPU 実機（LayerNorm・Conv2d・MaxPool2d）は
+//! `#[ignore]` で、実測は #3168・#3169 へ申し送る
+//! （`docs/perf/logs/create-graph-extended-ops-3087/README.md`）。
 
-use fandhe_ai::{AutodiffError, CreateGraphResult, Device, Tape, Tensor, Var};
+use std::sync::Arc;
+
+use fandhe_ai::nn::loss::Reduction;
+use fandhe_ai::{
+    AutodiffError, CreateGraphResult, CustomFunction, Device, FftNorm, Tape, Tensor, Var,
+};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::<f32>::new(data, shape).expect("test fixture: tensor")
@@ -29,7 +44,7 @@ fn req2_close(a: f64, b: f64) -> bool {
 }
 
 fn vals(t: &Tensor<f32>) -> Vec<f32> {
-    t.as_slice().expect("CPU contiguous").to_vec()
+    t.host_slice().into_owned()
 }
 
 /// `loss = sum(x^3)` を親テープ上に組む。
@@ -157,14 +172,43 @@ fn rejects_non_empty_child_and_leaves_it_untouched() {
     assert_eq!(child.leaf_count(), 1, "拒否時に child を変更しない");
 }
 
+/// 恒久対象外の `Tape::custom` 用の恒等関数（拒否テストの基準 Op。`Op::Custom` は
+/// `supports_create_graph()` が恒久的に偽。決定記録 §21.2 A 区分）。
+struct IdentityFn;
+
+impl CustomFunction for IdentityFn {
+    fn name(&self) -> &str {
+        "identity"
+    }
+    fn output_shape(&self, input_shapes: &[&[usize]]) -> Result<Vec<usize>, AutodiffError> {
+        Ok(input_shapes[0].to_vec())
+    }
+    fn forward(&self, inputs: &[&Tensor<f32>]) -> Result<Tensor<f32>, AutodiffError> {
+        Ok(inputs[0].clone())
+    }
+    fn backward(
+        &self,
+        _inputs: &[&Tensor<f32>],
+        _out_value: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        _requires_grad: &[bool],
+    ) -> Result<Vec<Option<Tensor<f32>>>, AutodiffError> {
+        Ok(vec![Some(upstream.clone())])
+    }
+}
+
 #[test]
 fn rejects_unsupported_op_and_keeps_child_empty() {
     let child = fandhe_ai::tape();
     let tape = fandhe_ai::tape();
     let x = tape.var(&t(vec![0.1, 0.2, 0.3], &[1, 3]));
-    // イシュー #3077 で Softmax は対象になったため、未対応のまま残る
-    // `LogSumExp` で fail-closed 契約を維持する。
-    let loss = x.logsumexp(Some(1)).unwrap().sum(None).unwrap();
+    // `Op::Custom` は §21.2 A 区分（恒久対象外）。LogSumExp・Max は C 区分で
+    // 将来の拡張で対象になりうるため、拒否の基準にしない（イシュー #3087）。
+    let loss = tape
+        .custom(Arc::new(IdentityFn), &[x])
+        .unwrap()
+        .sum(None)
+        .unwrap();
     assert!(matches!(
         tape.backward_create_graph(&loss, &child),
         Err(AutodiffError::Backward(_))
@@ -380,7 +424,7 @@ fn mse_target(tape: &Tape) -> Var<'_> {
 
 fn mse_loss_at<'t>(tape: &'t Tape, x: &Var<'t>) -> Var<'t> {
     x.tanh()
-        .mse_loss_with(&mse_target(tape), fandhe_ai_autodiff::Reduction::Mean)
+        .mse_loss_with(&mse_target(tape), Reduction::Mean)
         .expect("mse_loss")
 }
 
@@ -388,7 +432,7 @@ fn nll_loss_at<'t>(x: &Var<'t>) -> Var<'t> {
     let targets = Tensor::new(vec![2i32, 0], &[2]).expect("targets");
     x.log_softmax(1)
         .expect("log_softmax")
-        .nll_loss(&targets, 1, fandhe_ai_autodiff::Reduction::Mean)
+        .nll_loss(&targets, 1, Reduction::Mean)
         .expect("nll_loss")
 }
 
@@ -455,4 +499,373 @@ fn mse_loss_create_graph_matches_first_order_and_finite_difference_via_facade() 
 #[test]
 fn nll_loss_create_graph_matches_first_order_and_finite_difference_via_facade() {
     check_loss(true);
+}
+// --- 拡張 Op 族の facade 経由確認（イシュー #3087。決定記録 §32）。
+
+type Build = for<'a> fn(&'a Tape, &Var<'a>) -> Var<'a>;
+
+/// 要素ごとに異なる固定重み（対称性による打ち消しを避ける）。
+fn weights<'a>(tape: &'a Tape, shape: &[usize]) -> Var<'a> {
+    let n: usize = shape.iter().product();
+    let w = (0..n)
+        .map(|i| 0.4 + 0.37 * i as f32 - 0.05 * (i * i) as f32)
+        .collect();
+    tape.var_no_grad(&t(w, shape))
+}
+
+fn plain_grad(x0: &[f32], shape: &[usize], build: Build) -> Vec<f32> {
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x);
+    let grads = tape.backward(&loss).expect("backward");
+    vals(grads.get(&x).unwrap().expect("grad"))
+}
+
+/// 二階の検証に使う固定方向 `v`（要素ごとに異なる。一様な方向だと LayerNorm・BatchNorm・
+/// CrossEntropy のように 1 階勾配の総和が恒等的に一定になる Op で二階がゼロに潰れる）。
+fn probe_dir(n: usize) -> Vec<f32> {
+    (0..n)
+        .map(|i| 0.6 - 0.23 * i as f32 + 0.04 * (i * i) as f32)
+        .collect()
+}
+
+/// 方向微分 `d/dx (g(x)·v)`（= `H v`、Hessian は対称）を `backward_create_graph` で求める。
+fn hessian_dir(parent: &Tape, child: &Tape, x0: &[f32], shape: &[usize], build: Build) -> Vec<f32> {
+    let x = parent.var(&t(x0.to_vec(), shape));
+    let loss = build(parent, &x);
+    let cg = parent
+        .backward_create_graph(&loss, child)
+        .expect("create_graph");
+    let g = cg.grad(&x).unwrap().expect("grad");
+    let v = child.var_no_grad(&t(probe_dir(x0.len()), shape));
+    let s = g.mul(&v).unwrap().sum(None).unwrap();
+    let grads2 = child.backward(&s).expect("child backward");
+    let xc = cg.child_var(&x).unwrap().expect("mirror");
+    vals(grads2.get(&xc).unwrap().expect("second order"))
+}
+
+/// `build` が作るスカラー損失について検証する。
+/// - `first_order()` は素の `backward` と bit 一致（決定記録 §21.1(1)・§9 (i)）。
+/// - 子テープ上の `cg.grad` は REQ-2（§9 (i)。bit 一致は V3 の族だけで、`grad_exact` が真のものは bit 一致）。
+/// - `H v` を素の `backward` の方向中央差分（create_graph を通らない独立経路）と REQ-2 で比べ、
+///   `H v` がゼロでないことを確認する。
+fn check_create_graph_family(
+    label: &str,
+    x0: &[f32],
+    shape: &[usize],
+    build: Build,
+    grad_exact: bool,
+    eps: f32,
+) {
+    let tape = fandhe_ai::tape();
+    let child = fandhe_ai::tape();
+    let x = tape.var(&t(x0.to_vec(), shape));
+    let loss = build(&tape, &x);
+    let cg = tape
+        .backward_create_graph(&loss, &child)
+        .unwrap_or_else(|e| panic!("{label}: create_graph 対象のはず: {e:?}"));
+    let plain = plain_grad(x0, shape, build);
+    let first = vals(cg.first_order().get(&x).unwrap().expect("first_order"));
+    for (a, b) in plain.iter().zip(first.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits(), "{label}: first_order は bit 一致");
+    }
+    let g = cg.grad(&x).unwrap().expect("grad");
+    for (a, b) in plain.iter().zip(vals(&g.value()).iter()) {
+        if grad_exact {
+            assert_eq!(a.to_bits(), b.to_bits(), "{label}: cg.grad は bit 一致");
+        } else {
+            assert!(
+                req2_close(*a as f64, *b as f64),
+                "{label}: cg.grad {a} vs {b}"
+            );
+        }
+    }
+    drop(cg);
+    let child2 = fandhe_ai::tape();
+    let hv = hessian_dir(&fandhe_ai::tape(), &child2, x0, shape, build);
+    assert!(
+        hv.iter().any(|v| v.abs() > 1e-4),
+        "{label}: Hv がゼロでは二階の検証にならない: {hv:?}"
+    );
+    // 成分 i の `H v` = ∂(g·v)/∂x_i を、`g(x ± eps e_i)·v` の中央差分で突合する。
+    let v = probe_dir(x0.len());
+    let dot = |x: &[f32]| -> f64 {
+        plain_grad(x, shape, build)
+            .iter()
+            .zip(&v)
+            .map(|(&a, &d)| a as f64 * d as f64)
+            .sum()
+    };
+    for i in 0..x0.len() {
+        let mut xp = x0.to_vec();
+        let mut xm = x0.to_vec();
+        xp[i] += eps;
+        xm[i] -= eps;
+        let num = (dot(&xp) - dot(&xm)) / (2.0 * eps as f64);
+        assert!(
+            req2_close(hv[i] as f64, num),
+            "{label}: i={i} analytic={} numeric={num}",
+            hv[i]
+        );
+    }
+}
+
+fn layer_norm_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(vec![1.2, 0.7, -0.4], &[3]));
+    let b = tape.var_no_grad(&t(vec![0.1, -0.2, 0.3], &[3]));
+    let y = x.layer_norm(Some(&w), Some(&b), 1e-5).unwrap();
+    y.mul(&weights(tape, &[2, 3])).unwrap().sum(None).unwrap()
+}
+
+fn rms_norm_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(vec![1.2, 0.7, -0.4], &[3]));
+    let y = x.rms_norm(Some(&w), 1e-5).unwrap();
+    y.mul(&weights(tape, &[2, 3])).unwrap().sum(None).unwrap()
+}
+
+fn batch_norm_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(vec![1.2, 0.7], &[2]));
+    let b = tape.var_no_grad(&t(vec![0.1, -0.2], &[2]));
+    let y = x.batch_norm(Some(&w), Some(&b), 1e-5).unwrap();
+    y.mul(&weights(tape, &[4, 2])).unwrap().sum(None).unwrap()
+}
+
+fn conv2d_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let w = tape.var_no_grad(&t(vec![0.5, -0.3, 0.2, 0.8], &[1, 1, 2, 2]));
+    let y = x.conv2d(&w, None, [1, 1], [0, 0], [1, 1], 1).unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn gelu_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.gelu().unwrap();
+    y.mul(&weights(tape, &[2, 3])).unwrap().sum(None).unwrap()
+}
+
+fn gelu_tanh_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.gelu_tanh().unwrap();
+    y.mul(&weights(tape, &[2, 3])).unwrap().sum(None).unwrap()
+}
+
+fn huber_loss_at<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    // |tanh(x) - target| が delta = 0.5 の折れ目 ± eps をまたがない値にする。
+    let target = tape.var_no_grad(&t(vec![0.0, 0.0, 0.1, 0.5, 0.2, -0.2], &[2, 3]));
+    x.tanh().huber_loss(&target, 0.5, Reduction::Mean).unwrap()
+}
+
+fn cross_entropy_loss_at<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let targets = Tensor::new(vec![2i32, 0], &[2]).expect("targets");
+    x.cross_entropy_loss(&targets, 1, Reduction::Mean).unwrap()
+}
+
+fn gather_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let index = Tensor::new(vec![0i32, 2, 1, 1], &[2, 2]).expect("index");
+    x.gather(1, &index).unwrap().tanh().sum(None).unwrap()
+}
+
+fn cumsum_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.cumsum(1).unwrap().tanh().sum(None).unwrap()
+}
+
+fn pad_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let p = x.pad(&[(1, 0), (0, 1)], 0.0).unwrap();
+    p.mul(&p).unwrap().sum(None).unwrap()
+}
+
+fn masked_fill_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let mask =
+        Tensor::<bool>::new(vec![true, false, false, false, true, false], &[2, 3]).expect("mask");
+    let m = x.masked_fill(&mask, 2.0).unwrap();
+    m.mul(&m).unwrap().sum(None).unwrap()
+}
+
+fn max_pool2d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let (y, _idx) = x
+        .max_pool2d([2, 2], Some([1, 1]), [0, 0], [1, 1], false)
+        .unwrap();
+    y.tanh().sum(None).unwrap()
+}
+
+fn avg_pool2d_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.avg_pool2d([2, 2], Some([1, 1]), [0, 0], false, true)
+        .unwrap()
+        .tanh()
+        .sum(None)
+        .unwrap()
+}
+
+fn inv_loss<'a>(tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let y = x.inv().unwrap();
+    y.mul(&weights(tape, &[2, 2])).unwrap().sum(None).unwrap()
+}
+
+fn det_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    x.det().unwrap()
+}
+
+fn rfft_loss<'a>(_tape: &'a Tape, x: &Var<'a>) -> Var<'a> {
+    let r = x.rfft(None, None, FftNorm::Backward).unwrap();
+    r.mul(&r).unwrap().sum(None).unwrap()
+}
+
+const NX: [f32; 6] = [0.3, -0.8, 1.2, 0.1, -0.4, 0.9];
+const NX2: [f32; 6] = [0.5, 1.1, -0.6, 0.2, -1.3, 0.8];
+const CONV_X: [f32; 9] = [0.3, -0.8, 1.2, 0.1, -0.4, 0.9, 0.5, -0.2, 0.7];
+/// 値がすべて異なり差が中央差分の刻みより十分大きい入力（argmax が入れ替わらない）。
+const POOL_X: [f32; 9] = [0.1, 0.9, 0.3, 0.5, 0.2, 0.8, 0.7, 0.4, 0.6];
+const INV_X: [f32; 4] = [2.0, 0.5, 0.3, 1.5];
+
+#[test]
+fn layer_norm_create_graph_via_facade() {
+    check_create_graph_family("layer_norm", &NX2, &[2, 3], layer_norm_loss, true, 1e-2);
+}
+
+#[test]
+fn rms_norm_create_graph_via_facade() {
+    check_create_graph_family("rms_norm", &NX2, &[2, 3], rms_norm_loss, true, 1e-2);
+}
+
+#[test]
+fn batch_norm_create_graph_via_facade() {
+    let x0 = [0.5_f32, 1.1, -0.6, 0.2, -1.3, 0.8, 0.9, -0.4];
+    check_create_graph_family("batch_norm", &x0, &[4, 2], batch_norm_loss, true, 1e-2);
+}
+
+#[test]
+fn conv2d_create_graph_via_facade() {
+    check_create_graph_family("conv2d", &CONV_X, &[1, 1, 3, 3], conv2d_loss, true, 1e-2);
+}
+
+#[test]
+fn gelu_create_graph_via_facade() {
+    check_create_graph_family("gelu", &NX, &[2, 3], gelu_loss, false, 2e-2);
+}
+
+#[test]
+fn gelu_tanh_create_graph_via_facade() {
+    check_create_graph_family("gelu_tanh", &NX, &[2, 3], gelu_tanh_loss, false, 2e-2);
+}
+
+#[test]
+fn huber_loss_create_graph_via_facade() {
+    check_create_graph_family("huber_loss", &NX, &[2, 3], huber_loss_at, false, 1e-2);
+}
+
+#[test]
+fn cross_entropy_loss_create_graph_via_facade() {
+    check_create_graph_family(
+        "cross_entropy",
+        &LOSS_X,
+        &[2, 3],
+        cross_entropy_loss_at,
+        false,
+        1e-2,
+    );
+}
+
+#[test]
+fn gather_create_graph_via_facade() {
+    check_create_graph_family("gather", &NX, &[2, 3], gather_loss, true, 1e-2);
+}
+
+#[test]
+fn cumsum_create_graph_via_facade() {
+    check_create_graph_family("cumsum", &NX, &[2, 3], cumsum_loss, true, 1e-2);
+}
+
+#[test]
+fn pad_create_graph_via_facade() {
+    check_create_graph_family("pad", &NX, &[2, 3], pad_loss, true, 1e-2);
+}
+
+#[test]
+fn masked_fill_create_graph_via_facade() {
+    check_create_graph_family("masked_fill", &NX, &[2, 3], masked_fill_loss, true, 1e-2);
+}
+
+#[test]
+fn max_pool2d_create_graph_via_facade() {
+    check_create_graph_family(
+        "max_pool2d",
+        &POOL_X,
+        &[1, 1, 3, 3],
+        max_pool2d_loss,
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn avg_pool2d_create_graph_via_facade() {
+    check_create_graph_family(
+        "avg_pool2d",
+        &POOL_X,
+        &[1, 1, 3, 3],
+        avg_pool2d_loss,
+        true,
+        1e-2,
+    );
+}
+
+#[test]
+fn inv_create_graph_via_facade() {
+    check_create_graph_family("inv", &INV_X, &[2, 2], inv_loss, false, 1e-2);
+}
+
+#[test]
+fn det_create_graph_via_facade() {
+    check_create_graph_family("det", &INV_X, &[2, 2], det_loss, false, 1e-2);
+}
+
+#[test]
+fn rfft_create_graph_via_facade() {
+    check_create_graph_family("rfft", &[0.5, -1.0, 0.25, 2.0], &[4], rfft_loss, true, 1e-2);
+}
+
+/// GPU 実機: LayerNorm・Conv2d・MaxPool2d（線形代数は forward がホスト f64 フォールバックのため
+/// 代表にしない。§31.6 申し送り 5）について、CPU と device で `H v`・HVP を REQ-2 で比べる。
+fn gpu_extended_ops_match_cpu(device: Device) {
+    type Case = (&'static str, &'static [f32], &'static [usize], Build);
+    let cases: [Case; 3] = [
+        ("layer_norm", &NX2, &[2, 3], layer_norm_loss),
+        ("conv2d", &CONV_X, &[1, 1, 3, 3], conv2d_loss),
+        ("max_pool2d", &POOL_X, &[1, 1, 3, 3], max_pool2d_loss),
+    ];
+    let dev = || fandhe_ai::tape_for(device).expect("実機が利用可能な前提のテスト");
+    let hvp_ones = |parent: &Tape, child: &Tape, x0: &[f32], shape: &[usize], build: Build| {
+        let x = parent.var(&t(x0.to_vec(), shape));
+        let loss = build(parent, &x);
+        let v = t(vec![1.0; x0.len()], shape);
+        vals(&parent.hvp(&loss, &x, &v, child).expect("hvp"))
+    };
+    for (label, x0, shape, build) in cases {
+        let h_cpu = hessian_dir(&fandhe_ai::tape(), &fandhe_ai::tape(), x0, shape, build);
+        let h_gpu = hessian_dir(&dev(), &dev(), x0, shape, build);
+        for (a, b) in h_cpu.iter().zip(h_gpu.iter()) {
+            assert!(
+                req2_close(*a as f64, *b as f64),
+                "{label}: cpu {a} vs gpu {b}"
+            );
+        }
+        let v_cpu = hvp_ones(&fandhe_ai::tape(), &fandhe_ai::tape(), x0, shape, build);
+        let v_gpu = hvp_ones(&dev(), &dev(), x0, shape, build);
+        for (a, b) in v_cpu.iter().zip(v_gpu.iter()) {
+            assert!(
+                req2_close(*a as f64, *b as f64),
+                "{label}: hvp cpu {a} vs gpu {b}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/create-graph-extended-ops-3087/README.md 参照"]
+fn create_graph_extended_ops_cuda_matches_cpu() {
+    gpu_extended_ops_match_cpu(Device::Cuda(0));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/create-graph-extended-ops-3087/README.md 参照"]
+fn create_graph_extended_ops_metal_matches_cpu() {
+    gpu_extended_ops_match_cpu(Device::Metal);
 }
