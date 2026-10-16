@@ -51,6 +51,15 @@ pub(crate) const ABSOLUTE_MAX_NGRAMS: usize = 8;
 pub(crate) const ABSOLUTE_MAX_OUTPUT_ELEMENTS: usize =
     isize::MAX as usize / std::mem::size_of::<i32>();
 
+// bag 系出力（`Tensor<f32>`）は `check_output_elements` と絶対上限を i32 出力と共用する。
+// 要素サイズが違うと「isize::MAX バイト」換算がずれるため、同サイズであることを固定する
+// （決定記録 `docs/facade-text-output-modes-string-lookup-decision.md` §5）。
+const _: () = assert!(std::mem::size_of::<f32>() == std::mem::size_of::<i32>());
+
+/// f32 で整数を正確に表せる上限（2^24）。bag 系出力で 1 行・1 列に数えるトークン数の
+/// 上限で、超えると加算が丸められうるため `TokenCountNotExact` で確保前に拒否する。
+pub(crate) const MAX_EXACT_F32_COUNT: usize = 1 << 24;
+
 /// 非信頼入力（文字列バッチ・コーパス・語彙・設定値）の上限集合。
 ///
 /// `TextVectorizationConfig::limits` に載せる。検査は標準化・分割・メモリ確保より
@@ -351,9 +360,37 @@ impl TextLimits {
     }
 }
 
+/// 1 行ぶんのトークン数 `count` が f32 で正確に数えられるか検査する（`== 上限` は `Ok`）。
+/// bag 系の事前走査（確保前）から呼ばれる純関数。
+pub(crate) fn check_exact_count(index: usize, count: usize) -> Result<(), TextError> {
+    if count > MAX_EXACT_F32_COUNT {
+        return Err(TextError::TokenCountNotExact {
+            index,
+            count,
+            max: MAX_EXACT_F32_COUNT,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_count_boundary() {
+        assert!(check_exact_count(0, MAX_EXACT_F32_COUNT).is_ok());
+        assert!(matches!(
+            check_exact_count(3, MAX_EXACT_F32_COUNT + 1),
+            Err(TextError::TokenCountNotExact {
+                index: 3,
+                count: 16_777_217,
+                max: 16_777_216
+            })
+        ));
+        // 境界の f32 表現が正確であること（2^24 + 1 は f32 で表せない）。
+        assert_eq!(MAX_EXACT_F32_COUNT as f32 + 1.0, MAX_EXACT_F32_COUNT as f32);
+    }
 
     const I: usize = ABSOLUTE_MAX_BYTES;
 

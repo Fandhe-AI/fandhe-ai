@@ -38,25 +38,39 @@ use super::split::{Split, split};
 use super::standardize::{Standardize, standardize};
 use super::vocab::{OOV_TOKEN, PADDING_TOKEN, RESERVED_COUNT, Vocabulary};
 
-/// 頻度を 1 増やす。overflow は `FrequencyOverflow`（語の文字列は持たない）。
-fn increment(count: &mut u64) -> Result<(), TextError> {
-    *count = count.checked_add(1).ok_or(TextError::FrequencyOverflow)?;
+/// 1 語の集計値。`df` は「その語を含む文書数」で、`last_doc` が現在の文書 index と
+/// 同じ間は加算しない（文書ごとの重複除去用の集合を持たずに済ませる）。
+struct Entry {
+    freq: u64,
+    df: u64,
+    last_doc: usize,
+}
+
+/// `value` を 1 増やす。overflow は `FrequencyOverflow`（語の文字列は持たない）。
+fn increment(value: &mut u64) -> Result<(), TextError> {
+    *value = value.checked_add(1).ok_or(TextError::FrequencyOverflow)?;
     Ok(())
 }
 
 /// 1 トークンを頻度表へ数える。予約トークンは飛ばす。新しい語は `HashMap` へ
-/// 入れる**前**に異なり語数を検査する（設計記録 §8）。
+/// 入れる**前**に異なり語数を検査する（設計記録 §8）。`doc` は文書 index（df 用）。
 fn count_token(
-    map: &mut HashMap<String, u64>,
+    map: &mut HashMap<String, Entry>,
     tok: Cow<'_, str>,
+    doc: usize,
     limits: &TextLimits,
 ) -> Result<(), TextError> {
     if tok == PADDING_TOKEN || tok == OOV_TOKEN {
         return Ok(());
     }
     // `String: Borrow<str>` により、既存の語は出現ごとの確保なしで引ける。
-    if let Some(c) = map.get_mut(tok.as_ref()) {
-        return increment(c);
+    if let Some(e) = map.get_mut(tok.as_ref()) {
+        increment(&mut e.freq)?;
+        if e.last_doc != doc {
+            e.last_doc = doc;
+            increment(&mut e.df)?;
+        }
+        return Ok(());
     }
     let next = map
         .len()
@@ -65,7 +79,14 @@ fn count_token(
             max: limits.max_distinct_tokens(),
         })?;
     limits.check_distinct_tokens(next)?;
-    map.insert(tok.into_owned(), 1);
+    map.insert(
+        tok.into_owned(),
+        Entry {
+            freq: 1,
+            df: 1,
+            last_doc: doc,
+        },
+    );
     Ok(())
 }
 
@@ -86,6 +107,28 @@ pub(crate) fn adapt<S: AsRef<str>>(
     max_tokens: Option<usize>,
     limits: &TextLimits,
 ) -> Result<Vocabulary, TextError> {
+    adapt_with_df(
+        corpus,
+        standardize_mode,
+        split_mode,
+        ngrams_n,
+        max_tokens,
+        limits,
+    )
+    .map(|(vocab, _)| vocab)
+}
+
+/// `adapt` と同じ語彙に加え、語彙 id 2.. に揃えた文書頻度 df（その語を含む文書数。
+/// 文書内の重複は 1 と数える）を返す。`adapt_tf_idf`（idf の元データ）から呼ばれる。
+/// 検査順・並び・エラーは `adapt` と同一で、df の加算も `checked_add`（`FrequencyOverflow`）。
+pub(crate) fn adapt_with_df<S: AsRef<str>>(
+    corpus: &[S],
+    standardize_mode: Standardize,
+    split_mode: Split,
+    ngrams_n: Option<usize>,
+    max_tokens: Option<usize>,
+    limits: &TextLimits,
+) -> Result<(Vocabulary, Vec<u64>), TextError> {
     // 設定値の検査はコーパスを読む前。空コーパスでも不正な設定を見逃さない。
     let keep = match max_tokens {
         Some(m) => Some(
@@ -100,19 +143,19 @@ pub(crate) fn adapt<S: AsRef<str>>(
     }
     limits.check_corpus(corpus)?;
 
-    let mut map: HashMap<String, u64> = HashMap::new();
-    for (index, s) in corpus.iter().enumerate() {
-        let std = standardize(s.as_ref(), standardize_mode, limits, index)?;
+    let mut map: HashMap<String, Entry> = HashMap::new();
+    for (doc, s) in corpus.iter().enumerate() {
+        let std = standardize(s.as_ref(), standardize_mode, limits, doc)?;
         match ngrams_n {
             None => {
                 for t in split(&std, split_mode) {
-                    count_token(&mut map, Cow::Borrowed(t), limits)?;
+                    count_token(&mut map, Cow::Borrowed(t), doc, limits)?;
                 }
             }
             Some(n) => {
                 let toks: Vec<&str> = split(&std, split_mode).collect();
                 for g in ngrams(&toks, n, limits)? {
-                    count_token(&mut map, g, limits)?;
+                    count_token(&mut map, g, doc, limits)?;
                 }
             }
         }
@@ -123,13 +166,14 @@ pub(crate) fn adapt<S: AsRef<str>>(
     let selected = keep.map_or(distinct, |k| distinct.min(k));
     limits.check_vocabulary_size(selected.saturating_add(RESERVED_COUNT))?;
 
-    let mut entries: Vec<(String, u64)> = map.into_iter().collect();
-    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut entries: Vec<(String, Entry)> = map.into_iter().collect();
+    entries.sort_unstable_by(|a, b| b.1.freq.cmp(&a.1.freq).then_with(|| a.0.cmp(&b.0)));
     entries.truncate(selected);
+    let df: Vec<u64> = entries.iter().map(|(_, e)| e.df).collect();
     let tokens: Vec<String> = entries.into_iter().map(|(t, _)| t).collect();
 
     let relaxed = limits.with_max_vocabulary_token_bytes(ABSOLUTE_MAX_BYTES)?;
-    Vocabulary::from_tokens(&relaxed, &tokens)
+    Ok((Vocabulary::from_tokens(&relaxed, &tokens)?, df))
 }
 
 #[cfg(test)]
@@ -440,5 +484,55 @@ mod tests {
             }
             Ok(_) => panic!("上限超過が Err にならない"),
         }
+    }
+
+    #[test]
+    fn df_counts_documents_not_occurrences() {
+        let (v, df) = adapt_with_df(
+            &["a a a b", "a c", "b b"],
+            Standardize::None,
+            Split::Whitespace,
+            None,
+            None,
+            &TextLimits::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        // freq: a=4, b=3, c=1 なので並びは a, b, c。df: a=2, b=2, c=1。
+        assert_eq!(v.tokens().to_vec(), strs(&["", "[UNK]", "a", "b", "c"]));
+        assert_eq!(df, vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn df_stays_aligned_after_max_tokens_truncation() {
+        let (v, df) = adapt_with_df(
+            &["a a a b", "a c", "b b"],
+            Standardize::None,
+            Split::Whitespace,
+            None,
+            Some(4),
+            &TextLimits::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(v.tokens().to_vec(), strs(&["", "[UNK]", "a", "b"]));
+        assert_eq!(df, vec![2, 2]);
+    }
+
+    #[test]
+    fn df_ignores_reserved_tokens_and_counts_ngrams_per_document() {
+        let (v, df) = adapt_with_df(
+            &["[UNK] x x", "x"],
+            Standardize::None,
+            Split::Whitespace,
+            Some(2),
+            None,
+            &TextLimits::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e:?}"));
+        // 予約トークン単体は数えないが、n-gram "[UNK] x" は通常の語として数える。
+        assert_eq!(
+            v.tokens().to_vec(),
+            strs(&["", "[UNK]", "x", "[UNK] x", "x x"])
+        );
+        assert_eq!(df, vec![2, 1, 1]);
     }
 }

@@ -58,7 +58,7 @@ pub enum TextError {
     OutputSequenceLengthTooLarge { len: usize, max: usize },
     /// `adapt` 中の異なり語数が上限超過。
     TooManyDistinctTokens { max: usize },
-    /// 出力要素数 `B × L`（またはそのバイト数）が上限超過・overflow
+    /// 出力要素数 `B × L`（bag 系出力は `B × W`。またはそのバイト数）が上限超過・overflow
     /// （overflow 時は `elements = usize::MAX`）。
     OutputTooLarge { elements: usize, max: usize },
     /// 上限の設定値が絶対上限を超えた（`TextLimits::with_*`）。`limit` は
@@ -76,6 +76,23 @@ pub enum TextError {
     /// 設計記録 §6 の variant 案にない追加分（§8 の `checked_add` 検査を満たすため。
     /// 公開時の承認対象）。
     FrequencyOverflow,
+    /// `transform_tf_idf` を、idf 重みを持たないインスタンス（`from_vocabulary`／`adapt`
+    /// で作ったもの）で呼んだ。`from_vocabulary_with_idf`／`adapt_tf_idf` で作る必要がある。
+    MissingIdfWeights,
+    /// `from_vocabulary_with_idf` の idf 重みの個数が語彙の個数と一致しない。
+    /// `expected` は語彙の個数（予約 2 件を含まない）。
+    IdfWeightsLengthMismatch { len: usize, expected: usize },
+    /// `index` 番目の idf 重みが有限でない、または負。値は持たない。
+    InvalidIdfWeight { index: usize },
+    /// `pad_to_max_tokens` が true なのに `max_tokens` が `None`（出力幅が決まらない）。
+    PadToMaxTokensWithoutMaxTokens,
+    /// `index` 番目の入力の（n-gram 込みの）トークン数 `count` が、f32 で整数を正確に
+    /// 数えられる上限 `max`（2^24）を超えた。件数の丸めを黙って許さないための fail-closed。
+    TokenCountNotExact {
+        index: usize,
+        count: usize,
+        max: usize,
+    },
     /// テンソル形状の不整合。
     Shape(ShapeError),
 }
@@ -139,6 +156,24 @@ impl fmt::Display for TextError {
             TextError::FrequencyOverflow => {
                 write!(f, "語の出現頻度が数えられる範囲を超えています")
             }
+            TextError::MissingIdfWeights => write!(
+                f,
+                "idf 重みがありません（from_vocabulary_with_idf または adapt_tf_idf で作る必要があります）"
+            ),
+            TextError::IdfWeightsLengthMismatch { len, expected } => write!(
+                f,
+                "idf 重みの個数が語彙の個数と一致しません（{len} 個 != 語彙 {expected} 個）"
+            ),
+            TextError::InvalidIdfWeight { index } => {
+                write!(f, "idf 重みが有限の非負値ではありません（index={index}）")
+            }
+            TextError::PadToMaxTokensWithoutMaxTokens => {
+                write!(f, "pad_to_max_tokens には max_tokens の指定が必要です")
+            }
+            TextError::TokenCountNotExact { index, count, max } => write!(
+                f,
+                "トークン数が f32 で正確に数えられる上限を超えています（index={index}・{count} 個 > 上限 {max} 個）"
+            ),
             TextError::Shape(e) => write!(f, "テンソル形状が不正です: {e}"),
         }
     }
@@ -200,6 +235,18 @@ mod tests {
                 n: 2,
             },
             TextError::FrequencyOverflow,
+            TextError::MissingIdfWeights,
+            TextError::IdfWeightsLengthMismatch {
+                len: 3,
+                expected: 4,
+            },
+            TextError::InvalidIdfWeight { index: 2 },
+            TextError::PadToMaxTokensWithoutMaxTokens,
+            TextError::TokenCountNotExact {
+                index: 1,
+                count: 9,
+                max: 8,
+            },
             TextError::Shape(ShapeError::RankMismatch {
                 expected: 2,
                 actual: 3,
