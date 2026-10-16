@@ -196,11 +196,31 @@ mod tests {
             "simd_shuffle",
             "simd_max",
             "simdgroup_",
-            "atomic_",
             "fast::",
             "reduce_add",
         ] {
             assert!(!s.contains(banned), "{banned} must not appear");
+        }
+        // atomic は境界違反通知フラグ s_bad の store / load（relaxed）に限る。
+        // 縮約に使う RMW 系（fetch_*・exchange・compare_exchange）や s_bad 以外への適用は禁止。
+        for banned in [
+            "atomic_fetch_",
+            "atomic_exchange_",
+            "atomic_compare_exchange_",
+            "atomic_float",
+        ] {
+            assert!(!s.contains(banned), "{banned} must not appear");
+        }
+        for line in s.lines().filter(|l| l.contains("atomic_")) {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            let ok = t.starts_with("threadgroup atomic_int s_bad;")
+                || ((t.starts_with("atomic_store_explicit(&s_bad,")
+                    || t.contains("atomic_load_explicit(&s_bad,"))
+                    && t.contains("memory_order_relaxed"));
+            assert!(ok, "atomic is allowed only for s_bad store/load: {line}");
         }
     }
 

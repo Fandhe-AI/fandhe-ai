@@ -44,7 +44,7 @@
 
 ### 3.3 データ競合
 
-- CUDA・MSL とも、attention の `s_bad`（共有メモリのフラグ）は複数スレッドが同じ値 `1` を書く。値が一致するので結果は決定的だが、厳密にはデータ競合である。違反時の多層防御にだけ使い、バリアの後で読む。アトミック化は縮約順序の主張（アトミック・warp 集約を使わない）と矛盾するので採らず、残リスクとして記録する
+- attention の違反フラグは CUDA と MSL で実装が異なり、いずれもデータ競合を残さない。CUDA はループ内の違反をスレッドローカルに持ち、`__syncthreads_or` でブロック内に集約して判定する。MSL は共有フラグ `s_bad` を `atomic_int`（`atomic_store_explicit`／`atomic_load_explicit`・`memory_order_relaxed`）で書き読みする。違反通知は値 `1` の store と 0/非 0 の load だけに使い、数値の縮約には使わない。「アトミックを使わない」という縮約順序の主張は数値縮約（max・和・加重和）に限る（ソース不変条件テスト `shader_fixes_reduction_order` が、縮約に使う atomic 演算〈`atomic_fetch_*`・`atomic_exchange_*` 等〉と `s_bad` 以外の atomic の使用を禁止する）
 - score 作業バッファは各ブロックが自分の行だけを書き、同ブロック内ではバリアを挟んで読む（CUDA `__syncthreads`・MSL `threadgroup_barrier(mem_device | mem_threadgroup)`）
 
 ### 3.4 失敗時の状態（OWASP A08）
@@ -69,6 +69,6 @@
 |---|------|------|
 | 1 | NVRTC コンパイル・GB10 実機での CPU 参照との一致（統一複合判定）が未確認 | #3113（網羅）・#3171（実測） |
 | 2 | MSL のコンパイルと Mac 実機での一致が未確認 | #3113・#3172 |
-| 3 | `s_bad` の同値書き込みの競合（§3.3） | 実機での挙動確認と、必要ならカーネル構造の見直し（security-auditor の判断） |
+| 3 | Metal の `s_bad` は relaxed atomic、CUDA は `__syncthreads_or` 集約でデータ競合は残らない（§3.3）。実機でのバリア順序の挙動確認が未了 | 実機での挙動確認（security-auditor の判断） |
 | 4 | security-auditor による独立監査 | PR レビュー |
 | 5 | per-call の作業バッファ確保（Metal は非プール確保）。性能の最適化は縮約順序を変えうるので別判断（baseline 方式の対象になる） | Phase 8 以降 |
