@@ -20,6 +20,12 @@
 //! - `max_output_sequence_length` は設定値 `Some(L)` にだけ適用し、`None` で導いた
 //!   `L` は出力要素数の検査で抑える
 //!
+//! `Standardize::UnicodeLower` は標準化後のバイト数にも入力上限を適用する（#3089）。
+//! `None` 経路は pass 1 の `token_count` で出力確保より前に `Err` になる。`Some(L)`
+//! 経路は出力バッファ（`check_output_elements` で上限済み）を確保した後の `fill_row`
+//! で標準化が走るが、標準化文字列の確保は上限合格後のみで、`Err` 時のバッファは
+//! 捨てるため外部から観測できる副作用はない。
+//!
 //! 数値一致は整数の完全一致で判定する（浮動小数点向けの統一複合判定は適用しない）。
 //! エラーは入力文字列を保持しない（OWASP A09）。内部型で `fandhe_ai::text` へは公開しない。
 
@@ -44,20 +50,26 @@ pub(crate) struct TransformOptions {
 }
 
 /// 1 行ぶんの標準化済みトークン数を数える（確保しない）。
-fn token_count(input: &str, opts: &TransformOptions) -> usize {
-    let std = standardize(input, opts.standardize);
-    split(&std, opts.split).count()
+fn token_count(
+    input: &str,
+    opts: &TransformOptions,
+    limits: &TextLimits,
+    index: usize,
+) -> Result<usize, TextError> {
+    let std = standardize(input, opts.standardize, limits, index)?;
+    Ok(split(&std, opts.split).count())
 }
 
 /// 1 行を id 列へ変換して `dst`（長さ `L`、0 初期化済み）の先頭から書く。
 fn fill_row(
+    index: usize,
     input: &str,
     vocab: &Vocabulary,
     opts: &TransformOptions,
     limits: &TextLimits,
     dst: &mut [i32],
 ) -> Result<(), TextError> {
-    let std = standardize(input, opts.standardize);
+    let std = standardize(input, opts.standardize, limits, index)?;
     let toks: Vec<&str> = split(&std, opts.split).collect();
     match opts.ngrams {
         Some(n) => {
@@ -97,8 +109,8 @@ pub(crate) fn transform<S: AsRef<str>>(
         Some(l) => l,
         None => {
             let mut max = 0usize;
-            for s in inputs {
-                let t = token_count(s.as_ref(), opts);
+            for (i, s) in inputs.iter().enumerate() {
+                let t = token_count(s.as_ref(), opts, limits, i)?;
                 let row = match opts.ngrams {
                     Some(n) => ngram_count(t, n, limits)?,
                     None => t,
@@ -116,8 +128,8 @@ pub(crate) fn transform<S: AsRef<str>>(
 
     // 6. pass 2。`chunks_exact_mut(0)` は panic するため `len == 0` は飛ばす。
     if len > 0 {
-        for (row, s) in data.chunks_exact_mut(len).zip(inputs.iter()) {
-            fill_row(s.as_ref(), vocab, opts, limits, row)?;
+        for (i, (row, s)) in data.chunks_exact_mut(len).zip(inputs.iter()).enumerate() {
+            fill_row(i, s.as_ref(), vocab, opts, limits, row)?;
         }
     }
     crate::Tensor::new(data, &[batch, len]).map_err(TextError::Shape)

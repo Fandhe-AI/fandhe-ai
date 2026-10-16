@@ -101,8 +101,8 @@ pub(crate) fn adapt<S: AsRef<str>>(
     limits.check_corpus(corpus)?;
 
     let mut map: HashMap<String, u64> = HashMap::new();
-    for s in corpus {
-        let std = standardize(s.as_ref(), standardize_mode);
+    for (index, s) in corpus.iter().enumerate() {
+        let std = standardize(s.as_ref(), standardize_mode, limits, index)?;
         match ngrams_n {
             None => {
                 for t in split(&std, split_mode) {

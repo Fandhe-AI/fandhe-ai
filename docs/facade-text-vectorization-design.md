@@ -280,14 +280,14 @@ main が「実装上の選択・公開承認の際に確認」と注記してい
 - 内部項目（`Vocabulary`・`TransformOptions`・予約定数・上限定数・自由関数）に facade から到達できない
 - `Sequential::add_text_vectorization` 等の層化がない（論点 7）
 - callable の標準化・分割の入口がない（論点 8）
-- Unicode の小文字化・Unicode 空白分割の variant がない（論点 3 の Unicode 部分）
+- Unicode の小文字化・Unicode 空白分割の variant がない（論点 3 の Unicode 部分）→ #3089 で opt-in variant として追加済み・本否定プローブ行は解消（§18）
 - `multi_hot`／`count`／`tf_idf` 出力モード・`StringLookup` 相当がない（論点 6）
 - 否定ガードは stable rustdoc の `compile_fail` コード照合に頼らず、正のプローブとインベントリで組む
 
 ### 16.7 論点の決着と保留を続ける論点
 
 - 確定: 論点 1（公開面・名前 `text`・`TextVectorization`・`transform`）・2（facade 内 `fandhe_ai::text`）・4（bit 互換は契約にしない）・5（`TextLimits` の既定値・絶対上限は §8 の表）・7（独立 struct・層化しない）・8（callable は入れない）は §10 の推奨どおり
-- 論点 3: ASCII 部分（`to_ascii_lowercase`・`split_ascii_whitespace`）のみ確定。**Unicode の大小文字変換・Unicode White_Space 分割は保留のまま**
+- 論点 3: ASCII 部分（`to_ascii_lowercase`・`split_ascii_whitespace`）のみ確定。**Unicode の大小文字変換・Unicode White_Space 分割は保留のまま** → #3089 で解消（§18）
 - **論点 6（出力モード `multi_hot`／`count`／`tf_idf`・`StringLookup` 相当）は保留のまま**
 - 対象外のまま: サブワードトークナイザ・Unicode 正規化・書記素クラスタ・語彙のファイル保存／読み込み・ragged 出力
 
@@ -328,3 +328,16 @@ main が「実装上の選択・公開承認の際に確認」と注記してい
 ### 17.5 変えなかったもの
 
 依存（`Cargo.toml`／`Cargo.lock`）・新規 `unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・ガードレール閾値・`docs/spec/`・`fandhe-ai =0.10.0` の既存シグネチャ（追加のみ）・`FitConfig`。CUDA／Metal の実機 parity はホスト側処理のみのため対象なし（§16.8）で、`#[ignore]` テストも `docs/perf/logs/` への申し送りも作っていない。論点 3 の Unicode 部分と論点 6 は保留のまま。
+
+## 18. Unicode 小文字化・空白分割（#3089・親 #3088）
+
+§16.7 で保留だった論点 3 の Unicode 部分を、std の表（`char::to_lowercase`・`str::split_whitespace`）だけを使う variant 追加で閉じた。出典: Issue #3089 本文（Unicode も親 #3088 の一括承認の対象という記述。本記録は承認の有無を Issue 本文の記述以上には主張しない）。
+
+- 追加 variant（いずれも enum 末尾・非破壊）: `Standardize::UnicodeLower`・`Split::UnicodeWhitespace`。**既定値（`LowerAndStripPunctuation`／`Whitespace`）と既存 variant の挙動は不変**
+- `UnicodeLower` は文字ごとの `char::to_lowercase` で、文脈に依存しない。`str::to_lowercase` は語末シグマを `ς` にし、事前に数えた出力長と実出力がずれうるため使わない。`Σ` は常に `σ`。`ß` は不変・`ẞ` は `ß`・`İ` は `i` + U+0307（1 文字 2 byte → 2 文字 3 byte）
+- `UnicodeWhitespace` は `str::split_whitespace`（Unicode White_Space）。全角空白・NBSP・VT・NEL・U+2028 で区切り、ZWSP（U+200B）では区切らない。分割は自作しない
+- 合成 variant（Unicode 小文字化 + ASCII 句読点除去）は足さない。保留。`#[non_exhaustive]` のため後から足しても非破壊。句読点除去は ASCII のまま
+- 上限検査の位置: 小文字化でバイト長が伸びうる（実測: 全 `char` 走査で最大 3/2、U+0130 が最大。単体テストで固定）。`UnicodeLower` は標準化後のバイト数を数える pass（`saturating_add`）で `max_input_bytes` と比べ、合格後にだけ `String::with_capacity(exact)` を確保する。超過は既存の `TextError::InputTooLong`（`len` は標準化後のバイト数）を再利用し、`TextError` は 17 variant のまま増やさない（新 variant は §16.3 の承認対象を増やすため避けた）
+- 「確保前」の範囲は標準化文字列のバッファ。`transform` の `output_sequence_length: None` は pass 1 で出力確保より前に `Err`。`Some(L)` は出力バッファ（`check_output_elements` で上限済み）の確保後に `fill_row` で標準化が走るが、`Err` 時のバッファは捨てるため外部から観測できる副作用はない
+- コーパスの総バイト数は生の入力のまま数える（検査位置は不変）。標準化後は入力 1 件ごとの上限で抑え、膨張率 3/2 を上記テストで固定する
+- 対象外のまま: Unicode 正規化（NFC／NFKC）・書記素クラスタ・Unicode 句読点除去・語末シグマの文脈処理・Keras／TF との挙動差の一次資料確認。依存・`unsafe`・`docs/spec` は不変
