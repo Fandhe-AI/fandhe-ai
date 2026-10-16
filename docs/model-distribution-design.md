@@ -36,6 +36,8 @@
 
 `fandhe_ai::model::ModelRegistry::load(name, version)` で同期ロード（`HashMap<String, Tensor<f32>>` を返す。受入条件字面〈単一 `Tensor`〉からの変更理由は同 doc §5）・`available_models()` で一覧取得する読み取り専用レジストリであり、ディレクトリの作成・削除は一切行わない。配置（ダウンロード・手動コピー）は利用者側または §2.2 のリモート取得機構が担う。
 
+**追記（#3119・#3120）**: 上記の「読み取り専用」は読み取り系（`load`・`available_models`）の契約であり変わらない（作成も削除もしない）。保存系 `save` が追加され、`save` だけが `<root>`・`<name>`・`<version>` を作り `model.safetensors` を原子的に置き換える。`save` の対応範囲は Linux x86_64／aarch64 のみ（macOS・Windows は書き込み前に `Io(Unsupported)`）。契約の正は `docs/facade-model-registry-decision.md` §16・§17。
+
 **Windows 対応状況（重要）**: `ModelRegistry::new()` によるキャッシュルート解決（`$USERPROFILE/.fandhe-ai/models`）自体は Windows でも動作するが、`load`・`available_models` は **Windows では fail-closed で非対応**である。シンボリックリンク経由のキャッシュルート脱出を安全に防ぐ no-follow オープン実装（`dev`／`ino` 識別子照合）が Linux／macOS 限定で、Windows 向けの安全な実装（`file_index`／`volume_serial_number` 照合）が未確立なため。`load` は Windows では常に `Err(ModelError::Io)` を返し、`available_models` は常に空の一覧を返す（エラーにはならない）。出典: `docs/facade-model-registry-decision.md` §13・§14、`crates/facade/src/model.rs` モジュール doc「Windows 対応状況」節。
 
 ### 2.2 リモート取得・manifest
@@ -90,6 +92,7 @@
 - **REQ-1 完全自作コア・許容依存 9 区分**: ローカルレジストリ（#2087）は既存 `interop::safetensors` への委譲のみで新規依存なし。リモート取得（#2088）は新規依存を要するため未承認のまま非実施。HF hub 連携（§5）は #2082 のスコープ外で、別クレート（#2243）側で依存追加の承認申請を行う。
 - **security A03（パストラバーサル）**: `name`／`version` の allowlist 検証（`docs/facade-model-registry-decision.md` §7）・シンボリックリンク経由のキャッシュルート脱出対策（同 doc §12・§13、`docs/model-download-design.md` §6）はいずれもレジストリ・ダウンロード双方の共通契約として確立済み（後者は設計のみで未実装）。
 - **`docs/compat-api-scope.md` §0 サポート境界**: `facade` が唯一のサポートされる公開 API 面。`ModelRegistry` の新規公開面はいずれも `crates/facade/tests/api_surface.rs` の機械固定・ユーザー承認の対象。
+- **`save` の追加（#3119・#3120）**: 保存系 `save` も上記の既存契約（REQ-7・`api_surface` による公開面ちょうど 8 件の機械固定）に従う。
 - **プラットフォーム差（Windows）**: `ModelRegistry::new()`（キャッシュルート解決）は Windows でも動作するが、`load`・`available_models` は Windows では fail-closed 非対応（§2.1 注記・`docs/facade-model-registry-decision.md` §13・§14）。リモート取得（#2088）の dirfd 相対書き込み契約も同じ理由で Windows 非対応として設計されている（`docs/model-download-design.md` §6 (c)）。
 - **A02／A08（取得元スキーム・整合性）**: リモート取得（#2088）の取得元は **HTTPS URL 限定**（`http`・`file`・`ftp` 等は fail-closed で拒否。リダイレクト先も同じ検証を通す）。manifest（`download.json`）の `sha256` 保存値は破損・部分改変の検出用に限られ、意図的改竄の検知根拠にはならない（同一の書き込み可能領域に置かれるため）。真正性は呼び出し側が与える信頼済み `sha256` pin に基づく（§2.2・`docs/model-download-design.md` §6）。
 

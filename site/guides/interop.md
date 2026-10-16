@@ -188,8 +188,9 @@ two-pass アトミック契約。既存 `Sequential` の shape が保存前と�
 `fandhe_ai::model::ModelRegistry` は `$HOME/.fandhe-ai/models/<name>/<version>/model.safetensors`
 （Windows は `$USERPROFILE`）というレイアウトを規定し、名前・バージョン
 指定での同期ロードを提供します。配置は利用者が手動で行い、
-`ModelRegistry` はディレクトリの作成・削除を一切行わない読み取り専用
-のレジストリです。
+`ModelRegistry` の読み取り系（`load`／`available_models`）はディレクトリの
+作成・削除を行いません。保存系の `save`（Linux x86_64／aarch64 限定）だけが
+書き込みます。
 
 > **Windows・非対応アーキテクチャでの対応状況**: キャッシュルートの
 > 解決（`$USERPROFILE` 配下）自体は Windows でも動作しますが、
