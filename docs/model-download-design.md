@@ -231,6 +231,8 @@ HTTP クライアント候補 4 種を feature 組合せ×ターゲット別に�
 | `attohttpc` | 0.31.0 | MPL-2.0（直接） | feature によらず allow 外（TLS なし③でも fail） |
 | `minreq` | 3.0.0 | ISC（直接） | allow 内 |
 
+**2026-10-16 是正（#3124）**: 上の §13.2 系の表にある「`aws-lc-sys` は `cmake` 必須」は、`aws-lc-sys 0.46.0` のビルドでは観測されなかった（§16.5。`cmake` なしでビルドが成功した）。本節の旧記述は当時の記録として書き換えない。
+
 ### 13.4 システムライブラリ・ビルド要件・MSRV
 
 ライセンスとは別の運用上の制約。`cargo build` は実行していないため依存関係と manifest からの判断であり、実ビルドでの確認は承認後の実装手順（§8）で行う。（**2026-10-07 追記**: `ureq` の `native-tls` 系・`rustls`〈`ring`〉の実ビルド結果は §15.3・§15.6。`aws-lc-sys`・`minreq`・`attohttpc`・`reqwest` は未ビルドのまま）
@@ -858,3 +860,26 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 ### 17.8 第 11 区分の deps-policy 起案行
 
 §14.6 の起案行（`ureq`・`default-features = false`・`features = ["native-tls", "vendored"]`・`=3.4.2` 完全固定・`cfg(unix)` 限定・`TlsProvider::NativeTls` 明示・`disable_verification` を出さない・`https_only(true)`・タイムアウトとサイズ上限の明示・allow は `CDLA-Permissive-2.0` のみ・HF Hub は承認単位を別とする）を、本節の確定値でそのまま転記する。`cfg` 範囲の文言「§14.4 の承認結果に従う」は「`cfg(unix)` 限定」へ置き換える。転記は #3124 で行う。
+
+## 18. #3124 での正式反映記録（2026-10-16）
+
+### 18.1 反映した内容
+
+- 承認根拠: #3123 所有者コメント 6111756315（2026-10-12）の委任条項（dirfd = B-1・`cfg(unix)` 限定・第 11 区分の新設を確定し、クレート・版・feature・配置は #3122 の実測推奨〈§16.8〉で進めてよい）。コメントは特定クレート名を挙げておらず、§16.8 の推奨形（`ureq =3.4.2`・`native-tls`＋`vendored`）はこの委任に基づく確定である（§17.1・§17.7）
+- `Cargo.toml`（`[workspace.dependencies]` に `ureq`）・`crates/facade/Cargo.toml`（`[target.'cfg(unix)'.dependencies]` に `ureq`・`libc`）・`Cargo.lock`・`deny.toml`（allow に `CDLA-Permissive-2.0`）・`.claude/rules/deps-policy.md`（第 11 区分の行・第 10 区分 `libc` の用途拡張）・`docs/license-matrix.md`（追加実測）を更新した
+- 取得ロジック・公開 API・dirfd への移行・SHA-256 の移植は追加していない（#3125）。`ureq`／`libc` はまだコードから参照されない（`unused_crate_dependencies` lint は有効でないため `clippy -D warnings` は通る）
+
+### 18.2 再実測の結果
+
+- 実解決版は §16 と同一（`ureq 3.4.2`・`openssl-src 300.6.1+3.6.3`・`webpki-root-certs 1.0.9` ほか）。数値と環境は `docs/license-matrix.md` の追加実測（#3124）を正とし、ここでは転記しない
+- `cargo build --workspace --locked`（Linux・warm な依存キャッシュの環境）は成功。macOS クロス（`--lib`）・Windows クロス（clippy）も成功。Windows の依存ツリーには `ureq`・`libc`（facade 経由）が現れない
+
+### 18.3 差し戻し 3 条件の再判定（§17.4）
+
+1. allow に `CDLA-Permissive-2.0` 以外の識別子が要るか: 要らない。`cargo deny` の licenses は追加 1 識別子のみで ok
+2. 禁止リストのクレート・コピーレフトの推移的混入: なし（`r-efi` は OR 式で MIT を選べる既存の判断）。`make deps-forbidden` は混入なし
+3. 別の新規依存が必要か: 不要
+
+### 18.4 Dockerfile
+
+変更なし。開発コンテナは `build-essential`・`make` を導入済みで、perl はベースイメージに含まれる（§16.5 の開発コンテナ実測で N′+V が成功済み）。

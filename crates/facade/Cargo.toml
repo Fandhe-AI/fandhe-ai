@@ -67,6 +67,16 @@ fandhe-ai-onnx-interop = { path = "../onnx-interop", version = "=0.11.0" }
 [target.'cfg(target_os = "macos")'.dependencies]
 fandhe-ai-backend-metal = { path = "../backend-metal", version = "=0.11.0" }
 
+# イシュー #3124: モデル取得（`ModelRegistry::download`。#3125 で実装）用の第 11 区分
+# `ureq`（HTTPS。native-tls + vendored）と、第 10 区分 `libc` のキャッシュ書き込み
+# （dirfd 系 `openat`／`openat2`／`mkdirat`／`renameat`。B-1）への用途拡張。
+# `cfg(unix)` 限定で Windows の依存ツリーには入らない。承認根拠は #3123 所有者コメント
+# 6111756315 の委任条項（`docs/model-download-design.md` §16.8・§17）。本 PR は宣言のみで
+# 参照コードは #3125 で追加する。
+[target.'cfg(unix)'.dependencies]
+ureq.workspace = true
+libc.workspace = true
+
 # TASK-9.4（#411）: compat 層の移設に伴い追加。学習系統合テスト
 # （`tests/compat_sequential_train.rs`）が決定的シード駆動のデータ生成に
 # `bench_harness::rng::Xorshift64Star` を使う（`.claude/rules/

@@ -10,9 +10,9 @@
 //! cfg の前提: Linux の x86_64／aarch64 と macOS だけが実オープンを行い、
 //! それ以外（Windows・他の Linux アーキ等）は `ErrorKind::Unsupported` で
 //! fail-closed にする。Linux では `O_NOFOLLOW` の値がアーキ間で異なる。
-//! `libc` は許容依存第 10 区分で `onnx-interop` の external data 用途限定の
-//! ため facade は直接依存に持たず、生 flag 値を `mod open_flags` に埋め込む
-//! （`.claude/rules/deps-policy.md`）。
+//! `libc` は #3124 で facade の `cfg(unix)` 直接依存として宣言済み（第 10 区分の
+//! 用途拡張・B-1。`.claude/rules/deps-policy.md`）だが、本モジュールは現状参照せず
+//! 生 flag 値を `mod open_flags` に埋め込んだまま。libc 定数への移行は #3125 で行う。
 //!
 //! 出典: `docs/compat-model-io-decision.md` §13.2・§13.4、
 //! `docs/facade-model-registry-decision.md`、イシュー #2364。
@@ -53,9 +53,8 @@ pub(crate) const MAX_MODEL_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// `open_leaf_no_follow` が付与する生の `open(2)` flag 値（Linux
 /// （x86_64／aarch64 限定。下記 `O_NOFOLLOW` 節参照）／macOS のみ。
-/// `facade` は `libc` を直接依存に持たない（許容依存第 10 区分の `libc` は
-/// `onnx-interop` の external data 用途限定。`.claude/rules/deps-policy.md`）
-/// ため、カーネル UAPI ヘッダ由来の固定値を直接埋め込む。`std::os::unix::fs::OpenOptionsExt::
+/// `libc` は #3124 で `cfg(unix)` 直接依存として宣言済み（第 10 区分の用途拡張・
+/// B-1）だが、libc 定数への移行は #3125 のため、現状はカーネル UAPI ヘッダ由来の固定値を直接埋め込む。`std::os::unix::fs::OpenOptionsExt::
 /// custom_flags` はこの生値をそのまま `open` システムコールへ渡す）。
 #[cfg(all(
     target_os = "linux",
@@ -118,8 +117,8 @@ pub(crate) mod open_flags {
 /// 付与する。
 ///
 /// それ以外の OS（Windows 等）向けの安全な no-follow 実装は未導入
-/// （codex-review 指摘・PR #2226。`facade` は `libc`（許容依存第 10 区分は
-/// `onnx-interop` の external data 用途限定）／`windows-sys` を直接依存に
+/// （codex-review 指摘・PR #2226。`facade` は `libc`（`cfg(unix)` 限定で
+/// Windows には入らない）／`windows-sys` を Windows 向けには直接依存に
 /// 持たないため、`FILE_FLAG_OPEN_REPARSE_POINT`
 /// 相当の生 flag 値を安全に組み立てる手段が確立していない）。
 /// フォールバックとして無防備な `File::open` を使うと、呼び出し元の
