@@ -227,3 +227,76 @@ fn backward_from_current_step_output_succeeds() {
     let loss = y.sum(None).expect("sum");
     tape.backward(&loss).expect("backward");
 }
+// --- 外部キャッシュ入口（イシュー #3096・親 #3094。設計記録 §19.4） ---
+
+use fandhe_ai::nn::kv_cache::KvCache;
+
+#[test]
+fn external_cache_matches_internal_cache_and_leaves_sa_untouched() {
+    let x = full_input();
+    let (_, internal) = run_facade(&x, &[3, 1, 1]);
+    let tape = fandhe_ai::tape();
+    let sa = StatefulAttention::from_config(&cfg(), SEED).expect("from_config");
+    let mut cache = KvCache::new();
+    let mut at = 0;
+    for (i, len) in [3usize, 1, 1].into_iter().enumerate() {
+        let y = tape
+            .stateful_attention_forward_with_cache(
+                &sa,
+                &tape.var(&slice_time(&x, at, at + len)),
+                &mut cache,
+            )
+            .expect("forward");
+        assert_eq!(data_of(&y.to_tensor()), internal[i], "step {i}");
+        at += len;
+    }
+    assert_eq!(cache.seq_len(), TOTAL);
+    assert_eq!(sa.seq_len(), 0);
+    assert!(sa.cache().is_empty());
+}
+
+#[test]
+fn external_cache_error_paths_leave_cache_unchanged() {
+    let x = full_input();
+    let tape = fandhe_ai::tape();
+    let sa = StatefulAttention::from_config(&cfg(), SEED).expect("from_config");
+    let mut cache = KvCache::new();
+    tape.stateful_attention_forward_with_cache(&sa, &tape.var(&slice_time(&x, 0, 2)), &mut cache)
+        .expect("prefill");
+    let before = cache.seq_len();
+    for bad in [
+        t(vec![0.1; B * E], &[B, E]),
+        t(vec![0.1; B * 3], &[B, 1, 3]),
+        t(vec![0.1; E], &[1, 1, E]),
+    ] {
+        assert!(
+            tape.stateful_attention_forward_with_cache(&sa, &tape.var(&bad), &mut cache)
+                .is_err()
+        );
+        assert_eq!(cache.seq_len(), before);
+    }
+    let other = fandhe_ai::tape();
+    let foreign = other.var(&slice_time(&x, 2, 3));
+    let err = tape
+        .stateful_attention_forward_with_cache(&sa, &foreign, &mut cache)
+        .expect_err("別 Tape の Var は拒否される");
+    assert!(matches!(err, AutodiffError::TapeMismatch), "{err:?}");
+    assert_eq!(cache.seq_len(), before);
+}
+
+#[test]
+fn one_sa_with_two_external_caches_does_not_mix_state() {
+    let x = full_input();
+    let tape = fandhe_ai::tape();
+    let sa = StatefulAttention::from_config(&cfg(), SEED).expect("from_config");
+    let (mut a, mut b) = (KvCache::new(), KvCache::new());
+    tape.stateful_attention_forward_with_cache(&sa, &tape.var(&slice_time(&x, 0, 3)), &mut a)
+        .expect("a");
+    tape.stateful_attention_forward_with_cache(&sa, &tape.var(&slice_time(&x, 0, 1)), &mut b)
+        .expect("b");
+    tape.stateful_attention_forward_with_cache(&sa, &tape.var(&slice_time(&x, 3, 4)), &mut a)
+        .expect("a2");
+    assert_eq!(a.seq_len(), 4);
+    assert_eq!(b.seq_len(), 1);
+    assert_eq!(sa.seq_len(), 0);
+}
