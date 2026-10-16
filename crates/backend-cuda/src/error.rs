@@ -419,6 +419,20 @@ pub enum CudaError {
     /// `unwrap()`/`expect()` を使わない」に従い panic させない。
     ContextCacheUnavailable { detail: String },
 
+    /// 分解系線形代数カーネル（cholesky・eigh）が `status` で入力起因の失敗を
+    /// 報告した（cholesky: 対称正定値でない、eigh: 巡回 Jacobi が反復上限内に
+    /// 収束しない。イシュー #3136・監査記録 `docs/gpu-linalg-kernel-launch-unsafe-audit.md`
+    /// 不変条件 (f)）。`ops.rs::map_linalg_factor_error` が
+    /// `BackendError::InvalidArgument` へ写像し、CPU 参照実装と同じエラー分類で
+    /// 利用者へ届く。ドライバ障害ではないため ordinal の poison 対象にならない。
+    LinalgInvalidArgument { detail: String },
+
+    /// 分解系線形代数カーネルの `status`／`refl_valid` が契約外の値だった
+    /// （初期 sentinel のまま＝カーネルが書かなかった、または想定外の値。
+    /// イシュー #3136・A08 fail-closed）。成功扱いにせず `ops.rs` 側で
+    /// `KernelLaunchFailed` へ落とす。
+    LinalgKernelStatusInvalid { detail: String },
+
     /// `crate::gemm_mma::CudaMmaGemm::launch_f16_pooled`／
     /// `crate::gemm_mma::CudaMmaGemm::download_f16_pooled`（イシュー
     /// #1153。`internal-diagnostics` feature 限定の診断専用入口。
@@ -631,6 +645,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidElementwiseShape { detail } => {
                 write!(f, "invalid elementwise/bias shape: {detail}")
+            }
+            CudaError::LinalgInvalidArgument { detail } => {
+                write!(f, "linalg invalid argument: {detail}")
+            }
+            CudaError::LinalgKernelStatusInvalid { detail } => {
+                write!(f, "linalg kernel status invalid: {detail}")
             }
             CudaError::UnsupportedElementwiseOp { detail } => {
                 write!(f, "unsupported elementwise op: {detail}")

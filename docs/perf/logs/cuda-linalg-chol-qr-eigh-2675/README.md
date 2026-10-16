@@ -1,5 +1,7 @@
 # CUDA 分解系線形代数（cholesky・QR・eigh。#2675）実機未実測・新規 unsafe 承認依頼の申し送り
 
+> **更新（#3136）**: Stage B（起動の実装）は実装済み。D-C 承認（親 #3133）と `docs/gpu-linalg-kernel-launch-unsafe-audit.md`（CU-3〜CU-5）に基づく。実機（GB10）での parity 実測は **#3138 へ申し送り・未実施**（本実行環境は GPU なし）。以下は Stage A 時点の記録で、「承認待ち」の記述は履歴として残す。
+
 `docs/backend-gpu-linalg-decision.md` §3〜§6・§10 参照。本実装エージェント実行環境は CUDA 実機（DGX Spark GB10）に
 到達できず、また **カーネル起動に必要な新規 `unsafe` のユーザー承認がイシュー #2675 に確認できなかった**ため、
 実装は #2674（LU 系）と同じ「Stage A」（`unsafe` なし）までで止めている。

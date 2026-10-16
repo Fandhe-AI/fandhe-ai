@@ -784,6 +784,24 @@ pub(crate) fn cached_scan(device: &CudaDevice) -> Result<Arc<crate::scan::CudaSc
     })
 }
 
+/// `device` の `CudaContext` に対応する分解系線形代数 3 カーネル
+/// （`linalg.rs::CudaLinalgFactor`: cholesky・QR・eigh）のコンパイル済み
+/// ハンドルをプロセス内キャッシュから取得する（イシュー #3136。
+/// `cached_scan` と同型）。`ops::CudaBackendOps::linalg_cholesky`／
+/// `linalg_qr`／`linalg_eigh` の唯一の呼び出し先。NVRTC コンパイルを伴う
+/// ため、呼び出し側は `with_driver_call` の内側で呼ぶ（監査記録
+/// `docs/gpu-linalg-kernel-launch-unsafe-audit.md` 不変条件 (d)）。
+pub(crate) fn cached_linalg_factor(
+    device: &CudaDevice,
+) -> Result<Arc<crate::linalg::CudaLinalgFactor>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::linalg::CudaLinalgFactor>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::linalg::CudaLinalgFactor::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する `sort`／`topk` カーネル
 /// （`sort.rs::CudaSort`）のコンパイル済みハンドルをプロセス内
 /// キャッシュから取得する（イシュー #1741。`cached_unique` と同型）。

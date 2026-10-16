@@ -227,14 +227,23 @@ fn linalg_gate_prepare(
     Ok(())
 }
 
-/// 分解系のカーネル起動が未実装（新規 `unsafe` のユーザー承認待ち）であることを
-/// 示す fail-closed の `Unsupported`（LU 系は #3135 で実起動済みのため分解系のみ残る。
-/// `Var` 側はホスト `f64` へフォールバックする）。
-fn factor_launch_pending(op: &str) -> BackendError {
-    BackendError::Unsupported(format!(
-        "CudaBackendOps::{op}: CUDA 線形代数カーネルの起動（新規 unsafe）は\
-         ユーザー承認待ち（イシュー #2675）"
-    ))
+/// 分解系 3 演算（`linalg_cholesky`／`linalg_qr`／`linalg_eigh`。イシュー
+/// #3136）の `CudaError` を `BackendError` へ写像する。
+///
+/// - [`CudaError::LinalgInvalidArgument`]（非正定値・eigh 非収束）と
+///   [`CudaError::InvalidElementwiseShape`]（内部契約違反の防御経路）は
+///   `InvalidArgument`（CPU 参照実装と同じエラー分類。`Var` はホストへ
+///   フォールバックせず利用者へ返す）。
+/// - [`CudaError::LinalgKernelStatusInvalid`] を含むその他は `map_cuda_error`
+///   へ委ね、`KernelLaunchFailed`／`CudaUnavailable` 等になる（成功扱いにしない）。
+fn map_linalg_factor_error(op: &'static str, err: CudaError) -> BackendError {
+    match err {
+        CudaError::LinalgInvalidArgument { detail }
+        | CudaError::InvalidElementwiseShape { detail } => {
+            BackendError::InvalidArgument(format!("{op}: {detail}"))
+        }
+        other => map_cuda_error(other),
+    }
 }
 
 /// RNN／LSTM／GRU セル演算（イシュー #1647）の入口検査: `shape` が
@@ -834,6 +843,21 @@ impl CudaBackendOps {
             || {
                 let device = self.device_handle_raw()?;
                 context_cache::cached_linalg(&device)
+            },
+        )
+    }
+
+    /// 分解系線形代数 3 カーネルのハンドルを取得する（イシュー #3136）。
+    /// 初回は NVRTC コンパイル・モジュールロードという driver 呼び出しを伴う
+    /// ため、構築も `with_driver_call` の内側に置く（監査記録 不変条件 (d)。
+    /// `run_scan` と同じ構築・実行の 2 段構成）。
+    fn linalg_factor_handle(&self) -> Result<Arc<crate::linalg::CudaLinalgFactor>, BackendError> {
+        self.with_driver_call(
+            &[],
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_linalg_factor(&device)
             },
         )
     }
@@ -4814,8 +4838,10 @@ impl BackendOps for CudaBackendOps {
     /// Cholesky 分解（イシュー #2675）。LU 系と同じ内部 opt-in ゲートの背後に
     /// あり、ゲート OFF ならデバイスに触れず `Unsupported`（`Var` がホスト
     /// `f64` へフォールバック）。ゲート ON では `linalg_gate_prepare`→サイズ
-    /// 検証→`n == 0` はホストで `[0,0]`→それ以外は起動保留の `Unsupported`
-    /// （新規 unsafe の承認待ち。`factor_launch_pending`）。
+    /// 検証→`n == 0` はホストで `[0,0]`→それ以外は `CudaLinalgFactor::
+    /// run_cholesky_f32` で GPU 実行（イシュー #3136。非正定値は
+    /// `InvalidArgument`）。順序は「ゲート→形状→サイズ検証→空入力の短絡→
+    /// デバイス」で固定（監査記録 不変条件 (a)）。
     fn linalg_cholesky(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         linalg_gate_prepare("linalg_cholesky", a.shape(), true)?;
         let n = a.shape()[0];
@@ -4824,7 +4850,17 @@ impl BackendOps for CudaBackendOps {
         if n == 0 {
             return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
         }
-        Err(factor_launch_pending("linalg_cholesky"))
+        let a_c = a.contiguous();
+        let a_slice = a_c.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("linalg_cholesky: input not contiguous".into())
+        })?;
+        let lin = self.linalg_factor_handle()?;
+        let out = self.with_driver_call(
+            &[],
+            |e| map_linalg_factor_error("linalg_cholesky", e),
+            || lin.run_cholesky_f32(a_slice, n),
+        )?;
+        Tensor::new(out, &[n, n]).map_err(BackendError::ShapeMismatch)
     }
 
     /// reduced QR（イシュー #2675）。入口の流れは [`Self::linalg_cholesky`] と
@@ -4842,7 +4878,21 @@ impl BackendOps for CudaBackendOps {
                 r: Tensor::new(Vec::new(), &[k, n]).map_err(BackendError::ShapeMismatch)?,
             });
         }
-        Err(factor_launch_pending("linalg_qr"))
+        let k = m.min(n);
+        let a_c = a.contiguous();
+        let a_slice = a_c.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("linalg_qr: input not contiguous".into())
+        })?;
+        let lin = self.linalg_factor_handle()?;
+        let (r, q) = self.with_driver_call(
+            &[],
+            |e| map_linalg_factor_error("linalg_qr", e),
+            || lin.run_qr_f32(a_slice, m, n),
+        )?;
+        Ok(QrFactors {
+            q: Tensor::new(q, &[m, k]).map_err(BackendError::ShapeMismatch)?,
+            r: Tensor::new(r, &[k, n]).map_err(BackendError::ShapeMismatch)?,
+        })
     }
 
     /// 対称固有値分解（イシュー #2675。これまで CUDA ではオーバーライドが
@@ -4861,7 +4911,20 @@ impl BackendOps for CudaBackendOps {
                     .map_err(BackendError::ShapeMismatch)?,
             });
         }
-        Err(factor_launch_pending("linalg_eigh"))
+        let a_c = a.contiguous();
+        let a_slice = a_c.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("linalg_eigh: input not contiguous".into())
+        })?;
+        let lin = self.linalg_factor_handle()?;
+        let (evals, vecs) = self.with_driver_call(
+            &[],
+            |e| map_linalg_factor_error("linalg_eigh", e),
+            || lin.run_eigh_f32(a_slice, n),
+        )?;
+        Ok(EighFactors {
+            eigenvalues: Tensor::new(evals, &[n]).map_err(BackendError::ShapeMismatch)?,
+            eigenvectors: Tensor::new(vecs, &[n, n]).map_err(BackendError::ShapeMismatch)?,
+        })
     }
 
     fn linalg_svd(&self, _a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {
@@ -6594,6 +6657,27 @@ mod tests {
         let out = ops.cumsum(&x, 0).expect("empty cumsum must succeed");
         assert_eq!(out.shape(), &[3, 0, 2]);
         assert_eq!(out.numel(), 0);
+    }
+
+    /// 分解系エラー写像（イシュー #3136）: 入力起因は `InvalidArgument`、
+    /// status 契約外は成功扱いにせず `KernelLaunchFailed`。
+    #[test]
+    fn map_linalg_factor_error_classifies_status_failures() {
+        let e = map_linalg_factor_error(
+            "linalg_cholesky",
+            CudaError::LinalgInvalidArgument { detail: "x".into() },
+        );
+        assert!(matches!(e, BackendError::InvalidArgument(ref m) if m.contains("linalg_cholesky")));
+        let e = map_linalg_factor_error(
+            "linalg_eigh",
+            CudaError::InvalidElementwiseShape { detail: "x".into() },
+        );
+        assert!(matches!(e, BackendError::InvalidArgument(_)));
+        let e = map_linalg_factor_error(
+            "linalg_qr",
+            CudaError::LinalgKernelStatusInvalid { detail: "x".into() },
+        );
+        assert!(matches!(e, BackendError::KernelLaunchFailed(_)));
     }
 
     #[test]
