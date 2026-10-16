@@ -10,6 +10,7 @@
 - spec の位置づけ: `docs/spec/04-requirements.md` の REQ-9「2026-10-08 追記」（#2624）は paged attention を「条件付き」とし、移行条件を K-3 と CPU 参照の成立とする。同追記は公開面の追加・数値判定方式・`Op`／`BackendOps` の拡張を承認していない
 - **停止条項**: #3110〜#3113 は、§9 の確認事項 1 に所有者の回答（コメント URL）が付くまで着手しない。回答が「含まれる」なら本書の推奨形で進める。「含まれない」なら本書へ追記し、承認依頼に切り替える
 - 他の承認は代行しない。§9 の 2〜4 も別に戻す
+- 所有者の回答（コメント）: <https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6207013704>（#3110 着手時に参照。承認内容の詳細は当該コメントを正とし本書へは書き写さない）
 
 ## 1. 背景とコード事実（基準 `ab14678b` で確認）
 
@@ -106,3 +107,14 @@
 
 - 変えないもの: 依存・tolerance 定数・baseline・ガードレール閾値・`docs/spec/`・既存の公開シグネチャ・REQ-8 の境界検査・FMA 契約
 - 出典: `docs/kv-cache-design.md`、`docs/facade-speculative-decoding-batching-design.md`（§10 論点 7・§17.7）、`docs/inference-chain-single-sync-design.md`、`docs/device-resident-update-design.md`、`docs/device-memory-pool-design.md`、`docs/backend-metal-command-batching-design.md`、`docs/compat-api-scope.md`、§1 の各コード
+
+## 11. #3110 実装記録（K-3 の CPU 参照）
+
+- 配置: `crates/autodiff/src/nn/paged_kv.rs`（`#![forbid(unsafe_code)]`）・統合テスト `crates/autodiff/tests/nn_paged_kv.rs`。`nn` から `PagedKvCacheConfig`・`PagedKvCacheReference`・`paged_attention_reference`・`DEFAULT_BLOCK_SIZE` を `pub use`
+- 型名: ホスト参照は `PagedKvCacheReference`。デバイス版 `PagedKvCache` の名前は #3111／#3112 に残す。ブロック管理（`BlockTable`）はバックエンド非依存で、デバイス版が再利用できる形（非公開。#3111 で可視性を調整する）
+- 検査: `block_size` は 2 のべき乗で 1〜256、`max_blocks` は 1〜`u32::MAX`、K／V 合計バイト数は `checked_mul` と `isize::MAX` で検査。プールは `try_reserve_exact`、追記は先に全検証してから書き込み（失敗時は状態不変）
+- 空きブロックは「返却済みスタック＋未使用連番（0 から）」で決定的。空キャッシュの `gather` は `Err`、`L_new == 0` の attention は `[B, 0, E]`
+- `rewind_to` は `pub`（dead_code 回避）。facade への公開形は #3112、`KvCache` の巻き戻しは非公開 `kv_rewind` のまま
+- 縮約順序: 論理順の単一連続ループ（query へ先に scale、score・加重和は `mul_add`）。統一複合判定をそのまま適用（flash-decoding 型 split は baseline 方式の対象）
+- 期待値ユーティリティ: `paged_attention_reference` は autodiff の `nn` から到達できる。backend-cuda には autodiff の dev-dependency が未設定で、足すかは #3111／#3113 の判断（workspace の path 依存）
+- 未実施（後続）: デバイス版・`BackendOps`／`MemoryOps` 追加・新規 `unsafe`（#3111）、Tape 入口・facade 公開（#3112）、実機 parity（#3113）、可変長（#3104）
