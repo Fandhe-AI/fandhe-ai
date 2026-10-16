@@ -300,6 +300,7 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 ### 17.7 保留を続ける論点
 
+- （#3109 追記）論点 7 の設計は `docs/device-resident-kv-paged-attention-design.md` に推奨形として記録済み。承認の確認は同 doc §9 の所有者確認表による。以下の保留状態は変えない。
 - 論点 1（サンプリング版の判定契約）・2（greedy の token 列一致の仮説が破れた場合）・3（内部状態保持型への到達経路）・5（padding mask・可変長キャッシュ・テンソル単位のバッチ化）・7（paged attention）・8（スケジューラでの内部状態保持型の扱い）は保留のまま。
 - 論点 4 は案 (i) で確定し `KvCache` は不変。論点 6 は第 1 段階の 3 名（と署名に現れる `RequestId`・`SchedulerLimits`）に限って解消した。
 - 対象外のまま: B > 1、EOS 停止・top-p、受理統計、HTTP サーバ、量子化 KV、facade の `caches` 到達経路。
