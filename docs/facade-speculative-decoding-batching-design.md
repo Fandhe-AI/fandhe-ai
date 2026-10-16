@@ -727,7 +727,7 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 - 実装: §21.4 の表現。`KvCache` に非公開フィールド `lens: Option<Vec<usize>>` を追加（`None` = padding なし。`Some` は左詰め padding で、`max(lens) == S`・少なくとも 1 行が `lens[r] < S`。全行が `S` なら必ず `None` へ正規化し、全行同長なら従来経路と bit 一致を構造的に保つ）。padding 位置の K／V は 0.0
 - 公開追加は `KvCache::valid_len(row) -> Option<usize>` の 1 件のみ（§21.5）。空・範囲外は `None`。`seq_len()` の意味は物理長 `S` のまま
 - mask: 非公開関数 `padded_offset_allowed_mask(lens, s_prev, l_new, s_total)`（`[B,1,L_new,S_total]`・`true` = attend・`pad_r <= j && j <= s_prev + i`）。`forward_with_cache` は `lens` が `Some` のとき (b)／(c) とも本関数を使い、`None` のときは従来コードをそのまま使う。`lens + l_new_kv` は射影の前に `checked_add` で計算し、書き戻しは全段成功後
-- 束ね・分割: `KvCache::stack_left_padded`／`split_rows` は `pub(crate)` で、`#[cfg(test)]` の子モジュール `nn/attention/kv_padding.rs` に置く（本イシュー時点で非テスト呼び出し元がなく、`#[allow]` を避けるため。api_surface の `without_test_mod` が最初の `#[cfg(test)]` 以降を切り落とすので、本体 impl の途中には cfg 属性を置かない）。**#3106 で `cfg(test)` を外し、§21.9 の `max_active`／`max_length` 検査を加える**
+- 束ね・分割: `KvCache::stack_left_padded`／`split_rows` は `pub(crate)` で、`#[cfg(test)]` の子モジュール `nn/attention/kv_padding.rs` に置く（本イシュー時点で非テスト呼び出し元がなく、`#[allow]` を避けるため。api_surface の `without_test_mod` が最初の `#[cfg(test)]` 以降を切り落とすので、本体 impl の途中には cfg 属性を置かない）。**#3106 で `cfg(test)` を外した（§26）**
 - kv_rewind（§21.7）: `common_state`（`capture`・`rewind_and_replay` が経由）が `valid_len(r) != Some(seq_len())` の行を持つキャッシュを `InvalidArgument` で拒否する。新しい内部 API は足していない
 - ガード: `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler` の期待集合を 9 件（`valid_len` 追加）へ更新。`kv_cache_is_reachable_via_facade_only` に署名固定と実行プローブを追加
 - テスト: 可変長の B=1 一致（L_new=1・2。統一複合判定）・padding 内容の非影響（bit 一致）・全行同長の bit 一致往復・拒否時の状態不変・`valid_len`・mask 単体
@@ -758,3 +758,17 @@ Greedy に関するアサーションは無変更。外した検査の否定表�
 ### 25.5 変えないもの
 
 tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec`・`generate()` の挙動。facade レベルの拡充と実機 `#[ignore]` テストは #3102。
+
+## 26. 実装記録（#3106・親 #3103）
+
+承認の根拠は D-A（§21.1）の範囲に限る。§21.5・§21.6 の形で `BatchScheduler::step_batched` を追加した（追加のみ）。
+
+- 公開形: `pub fn step_batched<M: AutoregressiveModel + ?Sized>(&mut self, model: &M) -> Result<usize, AutodiffError>`。新しい trait・型・`AutodiffError` の variant・`pub use` は足していない（`inference` の既存 `pub use` で facade へ出る）
+- 実装形: 受け入れ（`admit`）と token 追加後の完了判定（`Active::push_and_maybe_finish`）を非公開ヘルパーへ切り出し、`step`／`advance` の挙動は変えずに共有した。束ねは副作用のない試行 `try_batched_decode` と、全段成功後の commit に分けた。decode 中の要求が 2 件未満なら B = 1 の `advance` と同一
+- 上限検査の置き場所（§21.9）: `B <= max_active`・層ごとの `seq_len() <= max_length` は `scheduler.rs` 側で `stack_left_padded` の呼び出し前に検査する。`stack_left_padded` のシグネチャは不変で、`B x S_max x E x 4` の `checked_mul`／`isize::MAX` バイト検査は同関数内にある。`kv_padding` の `cfg(test)` を外し、`lens_for_test` はファイル末尾の `#[cfg(test)] impl` へ移した
+- 失敗契約の採否: §21.6 のとおり、束ねた forward・連結・戻り shape／語彙・サンプリング・分割のいずれかが `Err` なら試行全体を捨て、その step だけ B = 1 でやり直して失敗要求だけを `take_failed` に積む（「全要求を失敗させる」案は採らない）。サンプリングは行ごとに複製した RNG で行い、commit 前なので副作用はない
+- ガード更新: `speculative_scheduler_public_shape_violations` の `impl BatchScheduler` を 8 件へ、署名固定・`?Sized` プローブ・束ねる経路の doctest プローブを追加し、変異テストを足した。`kv_cache_public_methods_stay_unchanged_for_speculative_scheduler`（9 件）等は不変
+- §17.6 の否定プローブ「B > 1 と padding mask の経路がないこと」: 実体は (a) `speculative.rs` の自由な `pub fn` が `generate_speculative` 1 件のみというインベントリと、(b) `submit` の B > 1 拒否である。どちらも残した（speculative の B > 1 否定と `submit` の B > 1 拒否は不変）。scheduler 側の反転は上の正プローブで表し、削除したガードはない
+- テスト（`scheduler.rs`）: 束ねが実際に起きること（decode が `[B, 1]` の 1 回だけ）・状態なしモデルの完全一致・KV 全行同長の完全一致・KV 長さ混在の logits を単独 `generate` と統一複合判定で比較（Greedy は margin を fail-closed で確認し、padding を伴う呼び出しが 1 回以上あることも確認）・束ね失敗時のフォールバック・要求単位の切り離し・層数変更・空／prompt のみ・`step` との交互呼び出し。網羅テスト（margin 掃引・TopK／Temperature の再生比較）と実機 parity は #3107 の担当
+- 対象モデルの契約は型でも実行時でも検出できず、利用者が保証する（§17.5 と同じ扱い）
+- `scheduler.rs` に対する `std::thread|std::sync::mpsc|tokio|async |std::net|std::fs|rayon` の grep は 0 件。依存・tolerance・baseline・`unsafe`・`docs/spec` は変更なし

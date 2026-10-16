@@ -39794,6 +39794,9 @@ fn speculative_scheduler_items_are_reachable_via_facade_inference_path() {
     let _: SubmitFn = BatchScheduler::submit;
     let _: fn(&mut BatchScheduler, &Probe) -> Result<usize, AutodiffError> =
         BatchScheduler::step::<Probe>;
+    // #3106: 束ねる経路（設計記録 §21.5。戻り値の意味は `step` と同じ）。
+    let _: fn(&mut BatchScheduler, &Probe) -> Result<usize, AutodiffError> =
+        BatchScheduler::step_batched::<Probe>;
     type FinishedFn = fn(&mut BatchScheduler) -> Vec<(RequestId, Tensor<i32>)>;
     let _: FinishedFn = BatchScheduler::take_finished;
     type FailedFn = fn(&mut BatchScheduler) -> Vec<(RequestId, AutodiffError)>;
@@ -39815,6 +39818,7 @@ fn speculative_scheduler_items_are_reachable_via_facade_inference_path() {
         spec: &SpeculativeConfig,
     ) -> Result<(), AutodiffError> {
         s.step(m)?;
+        s.step_batched(m)?;
         generate_speculative(m, m, ids, cfg, spec)?;
         Ok(())
     }
@@ -39857,6 +39861,17 @@ fn speculative_scheduler_usage_doctests_are_present_and_compiled() {
                 "BatchScheduler::new",
                 ".submit(",
                 ".step(&",
+                ".take_finished()",
+            ][..],
+        ),
+        (
+            "スケジューラ（束ねる経路）",
+            &[
+                "use fandhe_ai::inference::{",
+                "SchedulerLimits::new",
+                "BatchScheduler::new",
+                ".submit(",
+                ".step_batched(&",
                 ".take_finished()",
             ][..],
         ),
@@ -39953,7 +39968,8 @@ fn without_test_mod(src: &str) -> &str {
     src.find("#[cfg(test)]").map_or(src, |i| &src[..i])
 }
 
-/// `autodiff/src/generate/{scheduler.rs, speculative.rs}` の公開形が承認形（設計記録 §17.3）の
+/// `autodiff/src/generate/{scheduler.rs, speculative.rs}` の公開形が承認形（設計記録 §17.3。#3106 で §21.5 の
+/// `step_batched` を 1 件追加）の
 /// 全数インベントリと一致しない箇所を返す。将来 pub メソッド・フィールドを足すと公開面が広がるため、
 /// 承認とセットで本インベントリを更新させる（厳密一致。§17.4 末行の帰結）。
 fn speculative_scheduler_public_shape_violations(sched_src: &str, spec_src: &str) -> Vec<String> {
@@ -39976,6 +39992,7 @@ fn speculative_scheduler_public_shape_violations(sched_src: &str, spec_src: &str
             "active_len",
             "submit",
             "step",
+            "step_batched",
             "take_finished",
             "take_failed",
         ],
@@ -40096,6 +40113,15 @@ fn speculative_scheduler_public_shape_is_pinned() {
         .is_empty()
     );
     assert!(!mutate_s("    max_active: usize,", "    pub max_active: usize,").is_empty());
+    // #3106: `step_batched` の公開（承認形 §21.5）が外れる／増える変異を検出する。
+    assert!(!mutate_s("pub fn step_batched<", "fn step_batched<").is_empty());
+    assert!(
+        !mutate_s(
+            "    pub fn queued_len(",
+            "    pub fn step_batched_extra(&self) {}\n    pub fn queued_len("
+        )
+        .is_empty()
+    );
     assert!(
         !mutate_s(
             "pub struct RequestId(u64);",
