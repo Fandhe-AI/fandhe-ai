@@ -41,7 +41,8 @@
 //!   別インスタンスのため構造的に変わらない。`forward_step` 内の panic は捕捉しない
 //! - 完了条件は `max_length` 到達のみ（EOS 停止は扱わない）
 //! - B > 1 の要求は対象外（要求ごとに B = 1。拒否する）
-//! - テンソル単位のバッチ化（設計 §8.2）・性能保証は持たない
+//! - `step` はテンソル単位で束ねない。束ねる経路は opt-in の [`BatchScheduler::step_batched`]
+//!   （#3106。設計記録 §21。対象モデルの契約・失敗契約・判定方式は同メソッドの doc）。性能保証は持たない
 //! - 呼び出しスレッド上の同期実行のみ（設計 §8.3 の制約に従い、標準ライブラリの
 //!   コレクションのみを使う）
 //!
@@ -199,6 +200,13 @@ impl Active {
         let tok = next.first().copied().ok_or_else(|| {
             AutodiffError::InvalidArgument("scheduler: サンプリング結果が空である".to_string())
         })?;
+        self.push_and_maybe_finish(tok)
+    }
+
+    /// 生成 token を積み、`max_length` 到達なら出力を組んで返す。`advance`（B = 1）と
+    /// `step_batched` の確定段（束ねた forward の成功後）が共有する末尾処理で、
+    /// 両経路の完了条件・出力形を同一にする。
+    fn push_and_maybe_finish(&mut self, tok: i32) -> Result<Option<Tensor<i32>>, AutodiffError> {
         self.tokens.push(tok);
         if self.tokens.len() >= self.config.max_length {
             let tokens = std::mem::take(&mut self.tokens);
@@ -207,6 +215,109 @@ impl Active {
         }
         Ok(None)
     }
+}
+
+/// 束ねた decode forward が成功したとき、要求 1 件へ書き戻す値（commit 前は保持するだけ）。
+struct BatchedRow {
+    caches: Vec<KvCache>,
+    rng: Generator,
+    tok: i32,
+}
+
+/// decode 中の要求群を 1 回の `forward_step`（`[B, 1]`）で進める「試行」。副作用を持たない
+/// （要求の正のキャッシュ・RNG・token 列は読み取りのみ）。`Err` なら呼び出し側は何も
+/// commit せず B = 1 へフォールバックする（設計記録 §21.6）。
+///
+/// 上限（§21.9）は `stack_left_padded` の呼び出し前にここで検査する: `B <= max_active`、
+/// 層ごとの `S_max <= max_length`。サンプリングは行ごとに複製した RNG で行い、RNG の消費順を
+/// 単独 `generate` と同一にする。
+fn try_batched_decode<M: AutoregressiveModel + ?Sized>(
+    limits: &SchedulerLimits,
+    model: &M,
+    rows: &[&Active],
+) -> Result<Vec<BatchedRow>, AutodiffError> {
+    let bad = |m: String| AutodiffError::InvalidArgument(format!("scheduler(batched): {m}"));
+    let b = rows.len();
+    let layers = model.num_kv_layers();
+    if b == 0 || b > limits.max_active {
+        return Err(bad(format!(
+            "行数 ({b}) が 1 以上 max_active ({}) 以下でない",
+            limits.max_active
+        )));
+    }
+    let mut last = Vec::with_capacity(b);
+    for a in rows {
+        if a.caches.len() != layers {
+            return Err(bad(
+                "キャッシュ数が model.num_kv_layers() と一致しない".to_string()
+            ));
+        }
+        for c in &a.caches {
+            if c.seq_len() > limits.max_length {
+                return Err(bad(format!(
+                    "キャッシュ長 ({}) が max_length 上限 ({}) を超える",
+                    c.seq_len(),
+                    limits.max_length
+                )));
+            }
+        }
+        last.push(
+            a.tokens
+                .last()
+                .copied()
+                .ok_or_else(|| bad("token 列が空である".to_string()))?,
+        );
+    }
+    // 層ごとに [B, S_max, E] へ連結する（一時キャッシュ。正のキャッシュは変えない）。
+    let mut temp: Vec<KvCache> = Vec::with_capacity(layers);
+    for i in 0..layers {
+        let col: Vec<KvCache> = rows.iter().map(|a| a.caches[i].clone()).collect();
+        temp.push(KvCache::stack_left_padded(&col)?);
+    }
+    let ids = Tensor::new(last, &[b, 1]).map_err(AutodiffError::Shape)?;
+    let logits = model.forward_step(&ids, &mut temp)?;
+    let vocab = validate_forward_step_output(&logits, b, 1)?;
+    for a in rows {
+        if a.vocab != Some(vocab) {
+            return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![1, 1, vocab],
+                rhs: vec![1, 1, a.vocab.unwrap_or(0)],
+            }));
+        }
+    }
+    // 全層を分割してから要求ごとに並べ替える（全層そろうまで書き戻さない）。
+    let mut per_layer: Vec<std::vec::IntoIter<KvCache>> = Vec::with_capacity(layers);
+    for c in &temp {
+        let split = c.split_rows()?;
+        if split.len() != b {
+            return Err(bad("split_rows の行数が B と一致しない".to_string()));
+        }
+        per_layer.push(split.into_iter());
+    }
+    let contiguous = logits.contiguous();
+    let data = contiguous.host_slice();
+    let mut out = Vec::with_capacity(b);
+    for (r, a) in rows.iter().enumerate() {
+        let mut caches = Vec::with_capacity(layers);
+        for it in per_layer.iter_mut() {
+            caches.push(
+                it.next()
+                    .ok_or_else(|| bad("split 結果が不足".to_string()))?,
+            );
+        }
+        let row = data
+            .get(r * vocab..(r + 1) * vocab)
+            .ok_or_else(|| bad("logits の行が範囲外".to_string()))?;
+        let row_t = Tensor::new(row.to_vec(), &[1, 1, vocab]).map_err(AutodiffError::Shape)?;
+        let mut rng = a.rng.clone();
+        let next = sample_step(&row_t, 1, 1, vocab, &a.config, &mut rng)?;
+        let tok = next
+            .first()
+            .copied()
+            .ok_or_else(|| bad("サンプリング結果が空である".to_string()))?;
+        out.push(BatchedRow { caches, rng, tok });
+    }
+    Ok(out)
 }
 
 /// 連続バッチングのスケジューラ（第 1 段階）。モジュール doc の契約に従う。
@@ -326,18 +437,10 @@ impl BatchScheduler {
         Ok(id)
     }
 
-    /// 1 イテレーション進める: 待ち行列から空きの分だけ参加させ、進行中の各要求を
-    /// 1 トークン進める。戻り値はこの呼び出しで成功完了した要求数（失敗は含めない）。
-    ///
-    /// 要求単位の失敗は `Err` にせず [`Self::take_failed`] に積む。`Err` はスケジューラ
-    /// 全体の不変条件破れに予約する（第 1 段階では返す経路はない）。`model` は保持せず
-    /// 呼び出しごとに借用する。内部状態保持型モデルは対象外（モジュール doc）。
-    pub fn step<M: AutoregressiveModel + ?Sized>(
-        &mut self,
-        model: &M,
-    ) -> Result<usize, AutodiffError> {
+    /// 待ち行列から空きの分だけ参加させる。`max_length == prompt_len` の要求は forward を
+    /// 呼ばずに完了させ、その件数を返す。`step`／`step_batched` が共有する受け入れ段。
+    fn admit<M: AutoregressiveModel + ?Sized>(&mut self, model: &M) -> usize {
         let mut completed = 0usize;
-
         while self.active.len() < self.limits.max_active {
             let Some(p) = self.queue.pop_front() else {
                 break;
@@ -366,10 +469,103 @@ impl BatchScheduler {
                 want_rank1: p.want_rank1,
             });
         }
+        completed
+    }
+
+    /// 1 イテレーション進める: 待ち行列から空きの分だけ参加させ、進行中の各要求を
+    /// 1 トークン進める。戻り値はこの呼び出しで成功完了した要求数（失敗は含めない）。
+    ///
+    /// 要求単位の失敗は `Err` にせず [`Self::take_failed`] に積む。`Err` はスケジューラ
+    /// 全体の不変条件破れに予約する（第 1 段階では返す経路はない）。`model` は保持せず
+    /// 呼び出しごとに借用する。内部状態保持型モデルは対象外（モジュール doc）。
+    pub fn step<M: AutoregressiveModel + ?Sized>(
+        &mut self,
+        model: &M,
+    ) -> Result<usize, AutodiffError> {
+        let mut completed = self.admit(model);
 
         let current = std::mem::take(&mut self.active);
         for mut a in current {
             match a.advance(model) {
+                Ok(None) => self.active.push(a),
+                Ok(Some(out)) => {
+                    self.finished.push((a.id, out));
+                    completed += 1;
+                }
+                Err(e) => self.failed.push((a.id, e)),
+            }
+        }
+        Ok(completed)
+    }
+
+    /// [`Self::step`] のテンソル単位バッチ版（opt-in。設計記録 §21.5・§21.6）。decode 中の
+    /// 要求が 2 件以上あるとき、それらを 1 回の `forward_step`（`[B, 1]`・左詰め padding の
+    /// `KvCache`）で進める。戻り値は `step` と同じく、この呼び出しで成功完了した要求数。
+    ///
+    /// # 処理
+    ///
+    /// 受け入れは `step` と同一。prefill 前の要求は B = 1 で進める。decode 中の要求は
+    /// `RequestId` 昇順の行に並べ、層ごとに一時キャッシュへ連結して束ねた forward を 1 回
+    /// 呼び、行ごとに複製した RNG でサンプリングし、全段成功後に正のキャッシュ（要求ごとの
+    /// B = 1・padding なし）・RNG・token 列へ原子的に書き戻す。束ねは毎回やり直し、持続的な
+    /// バッチキャッシュは持たない。`step` と交互に呼んでよい。
+    ///
+    /// # 失敗
+    ///
+    /// 上限超過（行数 > `max_active`、キャッシュ長 > `max_length`）・連結・束ねた forward・
+    /// 戻り shape／語彙の検査・サンプリング・分割のいずれかが `Err` なら、一時キャッシュと
+    /// 複製 RNG を捨て、その step に限り各 decode 要求を B = 1 でやり直す。失敗した要求だけを
+    /// [`Self::take_failed`] に積み、残りは継続する（forward が 1 回余分にかかる）。
+    /// 一時キャッシュを空のままにするモデルは常にフォールバックする（出力の契約は守られ、
+    /// 束ねないだけ）。`Err` はスケジューラ全体の不変条件破れに予約する。
+    ///
+    /// # 対象モデルの契約（型でも実行時でも検出できないため利用者が保証する）
+    ///
+    /// - attention はすべて `forward_with_cache` 系の入口を通す
+    /// - 行ごとの位置は `KvCache::valid_len(r)` から決め、`seq_len()`（物理長）は使わない
+    /// - attention 以外は行ごとに独立した演算に限る（バッチ方向の統計を取る層を持たない）
+    /// - 内部状態保持型は対象外（モジュール doc）
+    ///
+    /// # 判定
+    ///
+    /// 出力は単独 `generate` と統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）の
+    /// 範囲で一致する。token 列の一致は、Greedy でも margin が十分な入力に限る。
+    /// TopK／Temperature では token 列の一致を契約にしない（§21.8）。性能保証はない。
+    /// 乱数は非暗号（xorshift64*）で、生成 token をセキュリティ用途に使わないこと。
+    pub fn step_batched<M: AutoregressiveModel + ?Sized>(
+        &mut self,
+        model: &M,
+    ) -> Result<usize, AutodiffError> {
+        let mut completed = self.admit(model);
+
+        let current = std::mem::take(&mut self.active);
+        let decode: Vec<usize> = current
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.vocab.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        let mut results: Vec<Option<BatchedRow>> = (0..current.len()).map(|_| None).collect();
+        if decode.len() >= 2 {
+            let rows: Vec<&Active> = decode.iter().map(|&i| &current[i]).collect();
+            // `Err` は何も commit せず B = 1 へフォールバックする（試行は副作用なし）。
+            if let Ok(done) = try_batched_decode(&self.limits, model, &rows) {
+                for (&i, row) in decode.iter().zip(done) {
+                    results[i] = Some(row);
+                }
+            }
+        }
+
+        for (mut a, row) in current.into_iter().zip(results) {
+            let res = match row {
+                Some(r) => {
+                    a.caches = r.caches;
+                    a.rng = r.rng;
+                    a.push_and_maybe_finish(r.tok)
+                }
+                None => a.advance(model),
+            };
+            match res {
                 Ok(None) => self.active.push(a),
                 Ok(Some(out)) => {
                     self.finished.push((a.id, out));
@@ -703,5 +899,370 @@ mod tests {
         s.step(&TableModel::new()).expect("step");
         assert_eq!(s.take_failed().len(), 1);
         assert_eq!(s.active_len(), 0);
+    }
+
+    // --- step_batched（#3106） ---
+
+    /// `TableModel` に forward の `new_ids` shape の記録と「束ねた forward だけ失敗」を足した
+    /// フィクスチャ（既存の `TableModel` は変えない）。
+    struct RecTable {
+        inner: TableModel,
+        shapes: std::cell::RefCell<Vec<Vec<usize>>>,
+        fail_batched: bool,
+    }
+
+    impl RecTable {
+        fn new() -> RecTable {
+            RecTable {
+                inner: TableModel::new(),
+                shapes: std::cell::RefCell::new(Vec::new()),
+                fail_batched: false,
+            }
+        }
+    }
+
+    impl AutoregressiveModel for RecTable {
+        fn num_kv_layers(&self) -> usize {
+            0
+        }
+
+        fn forward_step(
+            &self,
+            new_ids: &Tensor<i32>,
+            caches: &mut [KvCache],
+        ) -> Result<Tensor<f32>, AutodiffError> {
+            self.shapes.borrow_mut().push(new_ids.shape().to_vec());
+            if self.fail_batched && new_ids.shape()[0] > 1 {
+                return Err(AutodiffError::InvalidArgument("fixture: 束ね失敗".into()));
+            }
+            self.inner.forward_step(new_ids, caches)
+        }
+    }
+
+    fn run_batched_to_end<M: AutoregressiveModel>(
+        s: &mut BatchScheduler,
+        m: &M,
+    ) -> Vec<(RequestId, Tensor<i32>)> {
+        let mut out = Vec::new();
+        for _ in 0..64 {
+            if s.queued_len() == 0 && s.active_len() == 0 {
+                break;
+            }
+            s.step_batched(m).expect("step_batched");
+            out.extend(s.take_finished());
+        }
+        out
+    }
+
+    #[test]
+    fn batched_stateless_matches_single_generate() {
+        let m = TableModel::new();
+        let reqs = [
+            (ids1(vec![1, 2]), cfg(6, SamplingStrategy::Greedy, 0)),
+            (ids2(vec![3]), cfg(5, SamplingStrategy::TopK(3), 7)),
+            (
+                ids1(vec![5, 6, 7]),
+                cfg(7, SamplingStrategy::Temperature(0.8), 11),
+            ),
+            (ids1(vec![4]), cfg(8, SamplingStrategy::Greedy, 0)),
+        ];
+        let mut s = BatchScheduler::new(limits(2, 4, 8));
+        let idv: Vec<_> = reqs
+            .iter()
+            .map(|(i, c)| s.submit(i, c).expect("submit"))
+            .collect();
+        let done = run_batched_to_end(&mut s, &m);
+        assert_eq!(done.len(), reqs.len());
+        assert!(s.take_failed().is_empty());
+        for (id, (i, c)) in idv.iter().zip(reqs.iter()) {
+            let got = &done.iter().find(|(d, _)| d == id).expect("done").1;
+            let want = generate(&m, i, c).expect("generate");
+            assert_eq!(got.shape(), want.shape());
+            assert_eq!(data(got), data(&want));
+        }
+    }
+
+    #[test]
+    fn batched_actually_batches_decode_calls() {
+        let m = RecTable::new();
+        let mut s = BatchScheduler::new(limits(3, 3, 8));
+        for p in [1, 2, 3] {
+            s.submit(&ids1(vec![p]), &cfg(4, SamplingStrategy::Greedy, 0))
+                .expect("submit");
+        }
+        s.step_batched(&m).expect("prefill step");
+        assert_eq!(*m.shapes.borrow(), vec![vec![1, 1]; 3]);
+        m.shapes.borrow_mut().clear();
+        s.step_batched(&m).expect("decode step");
+        // decode は [3, 1] の 1 回だけで、B = 1 の呼び出しは起きない。
+        assert_eq!(*m.shapes.borrow(), vec![vec![3, 1]]);
+    }
+
+    #[test]
+    fn batched_kv_equal_lengths_matches_single_generate() {
+        let reqs = [
+            (ids1(vec![1, 2]), cfg(6, SamplingStrategy::Greedy, 0)),
+            (ids1(vec![3, 4]), cfg(6, SamplingStrategy::TopK(3), 5)),
+            (
+                ids1(vec![5, 6]),
+                cfg(6, SamplingStrategy::Temperature(0.8), 9),
+            ),
+        ];
+        let mut s = BatchScheduler::new(limits(3, 3, 8));
+        let idv: Vec<_> = reqs
+            .iter()
+            .map(|(i, c)| s.submit(i, c).expect("submit"))
+            .collect();
+        let done = run_batched_to_end(&mut s, &KvModel);
+        assert_eq!(done.len(), 3);
+        for (id, (i, c)) in idv.iter().zip(reqs.iter()) {
+            let got = &done.iter().find(|(d, _)| d == id).expect("done").1;
+            let want = generate(&KvModel, i, c).expect("generate");
+            assert_eq!(data(got), data(&want));
+        }
+    }
+
+    /// `KvModel` の forward ごとに `(B, L, logits)` を記録するラッパー。
+    struct RecKv {
+        log: std::cell::RefCell<Vec<(usize, usize, Vec<f32>)>>,
+    }
+
+    impl RecKv {
+        fn new() -> RecKv {
+            RecKv {
+                log: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AutoregressiveModel for RecKv {
+        fn num_kv_layers(&self) -> usize {
+            2
+        }
+
+        fn forward_step(
+            &self,
+            new_ids: &Tensor<i32>,
+            caches: &mut [KvCache],
+        ) -> Result<Tensor<f32>, AutodiffError> {
+            let out = KvModel.forward_step(new_ids, caches)?;
+            self.log.borrow_mut().push((
+                new_ids.shape()[0],
+                new_ids.shape()[1],
+                out.contiguous().host_slice().into_owned(),
+            ));
+            Ok(out)
+        }
+    }
+
+    #[test]
+    fn batched_kv_mixed_lengths_logits_match_single_within_composite_tolerance() {
+        use fandhe_ai_tensor_core::tolerance::composite_close_f32;
+        // 全要求を同じ step で受け入れ lockstep に進める（行順 = RequestId 昇順）。
+        let reqs = [
+            (ids1(vec![1]), cfg(6, SamplingStrategy::Greedy, 0)),
+            (ids1(vec![2, 3, 4]), cfg(7, SamplingStrategy::Greedy, 0)),
+            (ids1(vec![5, 6]), cfg(6, SamplingStrategy::Greedy, 0)),
+        ];
+        // 単独 generate の decode logits（L == 1 の forward）と最終出力。
+        let mut single_logits: Vec<Vec<Vec<f32>>> = Vec::new();
+        let mut single_out = Vec::new();
+        for (i, c) in &reqs {
+            let rec = RecKv::new();
+            single_out.push(data(&generate(&rec, i, c).expect("generate")));
+            let dec: Vec<Vec<f32>> = rec
+                .log
+                .borrow()
+                .iter()
+                .skip(1) // 先頭は prefill（prompt 長 1 だと L == 1 になるため L では区別しない）
+                .map(|(_, _, d)| d.clone())
+                .collect();
+            single_logits.push(dec);
+        }
+        // Greedy の token 列一致を主張してよい入力か: 上位 2 候補の margin を fail-closed で確認。
+        const MARGIN: f32 = 1e-3;
+        for dec in &single_logits {
+            for row in dec {
+                let mut v = row.clone();
+                v.sort_by(|a, b| b.partial_cmp(a).expect("finite"));
+                assert!(v[0] - v[1] >= MARGIN, "margin 不足: {} vs {}", v[0], v[1]);
+            }
+        }
+
+        let rec = RecKv::new();
+        let mut s = BatchScheduler::new(limits(3, 3, 8));
+        let idv: Vec<_> = reqs
+            .iter()
+            .map(|(i, c)| s.submit(i, c).expect("submit"))
+            .collect();
+        let done = run_batched_to_end(&mut s, &rec);
+        assert_eq!(done.len(), 3);
+        assert!(s.take_failed().is_empty());
+
+        // 要求 i の decode 回数は max_length - prompt_len - 1（prefill が 1 トークン目を出す）。
+        let remaining = |i: usize, k: usize| k < reqs[i].1.max_length - reqs[i].0.shape()[0] - 1;
+        let decode_calls: Vec<_> = rec
+            .log
+            .borrow()
+            .iter()
+            .filter(|(b, l, _)| *l == 1 && *b > 1)
+            .cloned()
+            .collect();
+        let mut mixed_calls = 0usize;
+        for (k, (b, _, logits)) in decode_calls.iter().enumerate() {
+            let alive: Vec<usize> = (0..reqs.len()).filter(|&i| remaining(i, k)).collect();
+            assert_eq!(alive.len(), *b);
+            let lens: Vec<usize> = alive
+                .iter()
+                .map(|&i| reqs[i].0.shape()[0] + 1 + k)
+                .collect();
+            if lens.iter().any(|&l| l != lens[0]) {
+                mixed_calls += 1;
+            }
+            for (r, &i) in alive.iter().enumerate() {
+                let got = &logits[r * V..(r + 1) * V];
+                let want = &single_logits[i][k];
+                assert!(
+                    got.iter()
+                        .zip(want)
+                        .all(|(a, b)| composite_close_f32(*a, *b)),
+                    "request {i} decode {k}: 統一複合判定を外れた"
+                );
+            }
+        }
+        assert!(mixed_calls >= 1, "padding を伴う decode 呼び出しがなかった");
+        for (id, want) in idv.iter().zip(single_out.iter()) {
+            let got = &done.iter().find(|(d, _)| d == id).expect("done").1;
+            assert_eq!(&data(got), want);
+        }
+    }
+
+    #[test]
+    fn batched_forward_failure_falls_back_to_single_rows() {
+        let mut m = RecTable::new();
+        m.fail_batched = true;
+        let reqs = [
+            (ids1(vec![1]), cfg(6, SamplingStrategy::Greedy, 0)),
+            (ids1(vec![2]), cfg(6, SamplingStrategy::TopK(2), 4)),
+        ];
+        let mut s = BatchScheduler::new(limits(2, 2, 8));
+        let idv: Vec<_> = reqs
+            .iter()
+            .map(|(i, c)| s.submit(i, c).expect("submit"))
+            .collect();
+        let done = run_batched_to_end(&mut s, &m);
+        assert_eq!(done.len(), 2);
+        assert!(s.take_failed().is_empty());
+        for (id, (i, c)) in idv.iter().zip(reqs.iter()) {
+            let got = &done.iter().find(|(d, _)| d == id).expect("done").1;
+            let want = generate(&TableModel::new(), i, c).expect("generate");
+            assert_eq!(data(got), data(&want));
+        }
+        // 束ね試行（[2, 1]）が実際に走り、その後 B = 1 でやり直されている。
+        assert!(m.shapes.borrow().iter().any(|s| s == &[2, 1]));
+    }
+
+    #[test]
+    fn batched_failure_is_isolated_to_one_request() {
+        let mut m = RecTable::new();
+        m.inner.fail_decode_on = Some(6);
+        let a = (ids1(vec![1]), cfg(8, SamplingStrategy::TopK(1), 3));
+        let c = (ids1(vec![2]), cfg(8, SamplingStrategy::Greedy, 0));
+        let mut s = BatchScheduler::new(limits(2, 2, 8));
+        let ia = s.submit(&a.0, &a.1).expect("a");
+        let ic = s.submit(&c.0, &c.1).expect("c");
+        let done = run_batched_to_end(&mut s, &m);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, ia);
+        let want = generate(&TableModel::new(), &a.0, &a.1).expect("generate");
+        assert_eq!(data(&done[0].1), data(&want));
+        let failed = s.take_failed();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, ic);
+    }
+
+    #[test]
+    fn batched_vocab_mismatch_fails_only_that_request() {
+        let mut m = RecTable::new();
+        m.inner.bad_vocab_on = Some(7);
+        let mut s = BatchScheduler::new(limits(2, 2, 8));
+        s.submit(&ids1(vec![1]), &cfg(5, SamplingStrategy::Greedy, 0))
+            .expect("a");
+        let ic = s
+            .submit(&ids1(vec![2]), &cfg(5, SamplingStrategy::Greedy, 0))
+            .expect("c");
+        let done = run_batched_to_end(&mut s, &m);
+        assert_eq!(done.len(), 1);
+        let failed = s.take_failed();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, ic);
+        assert!(matches!(failed[0].1, AutodiffError::Shape(_)));
+    }
+
+    #[test]
+    fn batched_layer_count_change_fails_requests() {
+        let mut s = BatchScheduler::new(limits(2, 2, 6));
+        for p in [1, 2] {
+            s.submit(&ids1(vec![p]), &cfg(4, SamplingStrategy::Greedy, 0))
+                .expect("a");
+        }
+        s.step_batched(&KvModel).expect("prefill");
+        s.step_batched(&KvModel).expect("decode");
+        s.step_batched(&TableModel::new()).expect("changed");
+        assert_eq!(s.take_failed().len(), 2);
+        assert_eq!(s.active_len(), 0);
+    }
+
+    #[test]
+    fn batched_empty_and_prompt_only_do_not_call_forward() {
+        let m = RecTable::new();
+        let mut s = BatchScheduler::new(limits(2, 2, 6));
+        assert_eq!(s.step_batched(&m).expect("empty"), 0);
+        s.submit(&ids2(vec![3, 4]), &cfg(2, SamplingStrategy::Greedy, 0))
+            .expect("a");
+        assert_eq!(s.step_batched(&m).expect("step"), 1);
+        assert!(m.shapes.borrow().is_empty());
+        assert_eq!(data(&s.take_finished()[0].1), vec![3, 4]);
+    }
+
+    #[test]
+    fn step_and_step_batched_can_alternate() {
+        let reqs = [
+            (ids1(vec![1, 2]), cfg(7, SamplingStrategy::Greedy, 0)),
+            (ids1(vec![3, 4]), cfg(7, SamplingStrategy::TopK(3), 6)),
+            (ids1(vec![5, 6]), cfg(7, SamplingStrategy::Greedy, 0)),
+        ];
+        for model_kv in [false, true] {
+            let mut s = BatchScheduler::new(limits(3, 3, 8));
+            let idv: Vec<_> = reqs
+                .iter()
+                .map(|(i, c)| s.submit(i, c).expect("submit"))
+                .collect();
+            let mut done = Vec::new();
+            for n in 0..32 {
+                if s.queued_len() == 0 && s.active_len() == 0 {
+                    break;
+                }
+                let r = match (model_kv, n % 2 == 0) {
+                    (false, true) => s.step(&TableModel::new()),
+                    (false, false) => s.step_batched(&TableModel::new()),
+                    (true, true) => s.step(&KvModel),
+                    (true, false) => s.step_batched(&KvModel),
+                };
+                r.expect("step");
+                done.extend(s.take_finished());
+            }
+            assert_eq!(done.len(), 3);
+            for (id, (i, c)) in idv.iter().zip(reqs.iter()) {
+                let got = &done.iter().find(|(d, _)| d == id).expect("done").1;
+                let want = if model_kv {
+                    generate(&KvModel, i, c)
+                } else {
+                    generate(&TableModel::new(), i, c)
+                }
+                .expect("generate");
+                assert_eq!(data(got), data(&want));
+            }
+        }
     }
 }
