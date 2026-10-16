@@ -1218,10 +1218,14 @@ impl ModelRegistry {
     /// }
     /// let _ = fetch;
     /// let registry = ModelRegistry::with_cache_dir("/nonexistent/fandhe-models-doctest");
-    /// let err = registry
-    ///     .download("http://example.com/mlp.safetensors", "mlp", "v1")
-    ///     .unwrap_err();
-    /// assert!(matches!(err, ModelError::InvalidUrl { .. }));
+    /// // 非 unix は fail-closed で非対応（URL 検証前に `Io(Unsupported)`）のため unix のみ検証する。
+    /// #[cfg(unix)]
+    /// {
+    ///     let err = registry
+    ///         .download("http://example.com/mlp.safetensors", "mlp", "v1")
+    ///         .unwrap_err();
+    ///     assert!(matches!(err, ModelError::InvalidUrl { .. }));
+    /// }
     /// ```
     ///
     /// # Errors
@@ -1254,10 +1258,14 @@ impl ModelRegistry {
     /// let opts = DownloadOptions::default()
     ///     .expected_sha256(pin)
     ///     .progress(&mut on_progress);
-    /// let err = registry
-    ///     .download_with("http://example.com/mlp.safetensors", "mlp", "v1", opts)
-    ///     .unwrap_err();
-    /// assert!(matches!(err, ModelError::InvalidUrl { .. }));
+    /// // 非 unix は fail-closed で非対応（`Io(Unsupported)`）のため unix のみ検証する。
+    /// #[cfg(unix)]
+    /// {
+    ///     let err = registry
+    ///         .download_with("http://example.com/mlp.safetensors", "mlp", "v1", opts)
+    ///         .unwrap_err();
+    ///     assert!(matches!(err, ModelError::InvalidUrl { .. }));
+    /// }
     /// ```
     ///
     /// # Errors

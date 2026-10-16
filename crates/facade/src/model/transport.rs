@@ -277,7 +277,7 @@ pub(super) mod loopback {
         ) -> Result<RawResponse, ModelError> {
             let uri = checked_https_uri(url)?;
             let host = uri.host().unwrap_or("");
-            if host != "127.0.0.1" && host != "[::1]" {
+            if !matches!(host, "127.0.0.1" | "[::1]" | "::1") {
                 return Err(ModelError::InvalidUrl {
                     reason: "ループバック以外のホストは許可されません",
                 });
@@ -455,5 +455,15 @@ mod tests {
         let mut t = loopback::PlaintextLoopbackTransport::new();
         let r = t.get(&url, Instant::now() + Duration::from_secs(5), None);
         assert!(matches!(r, Err(ModelError::InvalidUrl { .. })));
+    }
+
+    #[test]
+    fn loopback_transport_accepts_ipv6_loopback_host() {
+        // `Uri::host()` の IPv6 表記（角括弧付き／なし）の両方を許可する。許可リスト通過後は接続段階へ進むため、
+        // 閉じたポートでも `InvalidUrl` ではなく別種のエラー（接続失敗）になる。
+        let url = super::super::url::validate_https_url("https://[::1]:1/m").expect("url");
+        let mut t = loopback::PlaintextLoopbackTransport::new();
+        let r = t.get(&url, Instant::now() + Duration::from_secs(5), None);
+        assert!(!matches!(r, Err(ModelError::InvalidUrl { .. })));
     }
 }
