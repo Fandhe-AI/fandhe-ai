@@ -1552,10 +1552,26 @@ fn sdpa_compose<'t>(
 /// `storage: Arc<Storage<T>>` を `Arc` 共有する値型
 /// （[`Var::to_tensor`] doc 参照）のため、`clone()` は `Arc` の
 /// ポインタ複製のみで済む。
+///
+/// **可変長（左詰め padding。イシュー #3105・親 #3103・
+/// `docs/facade-speculative-decoding-batching-design.md` §21.4）**:
+/// 非公開フィールド `lens` が `Some` のとき、行 `r` の有効区間は
+/// `[S - lens[r], S)`（左側が padding）。`lens` の不変条件は次のとおり。
+/// - `k` が `Some`・`lens.len() == B`・全行で `1 <= lens[r] <= S`・
+///   `max(lens) == S`・**少なくとも 1 行が `lens[r] < S`**
+///   （全行が `S` なら必ず `None` に正規化する。これにより「全行同長なら
+///   従来経路と bit 一致」を構造的に保つ）
+/// - padding 位置の K／V は `0.0`
+/// - 空キャッシュと [`KvCache::clear`] 後は `None`
+///
+/// padding 付きキャッシュは crate 内部（#3106 の束ねる経路）だけが作り、
+/// 公開面は [`KvCache::valid_len`] の参照のみ（任意の mask・`Tensor` を
+/// 入れる経路はない）。
 #[derive(Debug, Clone, Default)]
 pub struct KvCache {
     k: Option<Tensor<f32>>,
     v: Option<Tensor<f32>>,
+    lens: Option<Vec<usize>>,
 }
 
 impl KvCache {
@@ -1588,6 +1604,21 @@ impl KvCache {
     pub fn clear(&mut self) {
         self.k = None;
         self.v = None;
+        self.lens = None;
+    }
+
+    /// 行 `row` の有効長（padding を除いた系列長）。空キャッシュ・
+    /// `row >= B` なら `None`。padding なしなら全行 [`KvCache::seq_len`]
+    /// と等しい（#3105・§21.5）。
+    pub fn valid_len(&self, row: usize) -> Option<usize> {
+        let b = self.batch()?;
+        if row >= b {
+            return None;
+        }
+        match &self.lens {
+            Some(lens) => lens.get(row).copied(),
+            None => Some(self.seq_len()),
+        }
     }
 
     /// キャッシュ済み K（`[B, S_cached, E]`）への参照。空なら `None`。
@@ -1627,6 +1658,41 @@ fn offset_allowed_mask(
         }
     }
     Tensor::new(data, &[l_new, s_total]).map_err(AutodiffError::Shape)
+}
+
+/// padding 付きキャッシュ向けの offset mask `[B, 1, l_new, s_total]`
+/// （`true` = attend。[`offset_allowed_mask`] と同極性）。行 `r` について
+/// `pad_r = s_prev - lens[r]` とし `allowed = pad_r <= j && j <= s_prev + i`。
+/// `l_new == 1` の (b) も同式で表せる。#3105・§21.4。
+fn padded_offset_allowed_mask(
+    lens: &[usize],
+    s_prev: usize,
+    l_new: usize,
+    s_total: usize,
+) -> Result<Tensor<bool>, AutodiffError> {
+    let b = lens.len();
+    let capacity = checked_ls(l_new, s_total)?.checked_mul(b).ok_or_else(|| {
+        AutodiffError::InvalidArgument(
+            "MultiheadAttention: B * l * s overflowed usize while building the padded mask"
+                .to_string(),
+        )
+    })?;
+    let mut data = Vec::with_capacity(capacity);
+    for &len in lens {
+        if len > s_prev {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "MultiheadAttention: lens({len}) が s_prev({s_prev}) を超える"
+            )));
+        }
+        let pad = s_prev - len;
+        for i in 0..l_new {
+            let boundary = s_prev + i;
+            for j in 0..s_total {
+                data.push(pad <= j && j <= boundary);
+            }
+        }
+    }
+    Tensor::new(data, &[b, 1, l_new, s_total]).map_err(AutodiffError::Shape)
 }
 
 impl<'t> MultiheadAttentionVars<'t> {
@@ -1678,7 +1744,10 @@ impl<'t> MultiheadAttentionVars<'t> {
     /// `key_new`/`value_new` の shape が食い違う、`cache` が非空で
     /// `batch`／`embed_dim` が不一致、`L_new != L_new_kv`、`S_prev +
     /// L_new_kv` が `usize` をオーバーフローする、のいずれかで
-    /// `AutodiffError::Shape`／`InvalidArgument` を返す。テープ不一致は
+    /// `AutodiffError::Shape`／`InvalidArgument` を返す。`cache` が padding
+    /// 付き（[`KvCache::valid_len`]・§21.4）のときは (b)／(c) とも
+    /// `padded_offset_allowed_mask` で padding 位置を mask し、有効長の
+    /// 更新も成功後にのみ書き戻す。テープ不一致は
     /// `check_same_tape`（`AutodiffError::TapeMismatch`）。
     pub fn forward_with_cache(
         &self,
@@ -1780,6 +1849,24 @@ impl<'t> MultiheadAttentionVars<'t> {
             ))
         })?;
 
+        // padding 付きなら新しい有効長を射影の前に計算する（原子性）。
+        let new_lens = match &cache.lens {
+            Some(lens) => Some(
+                lens.iter()
+                    .map(|&l| {
+                        l.checked_add(l_new_kv).ok_or_else(|| {
+                            AutodiffError::InvalidArgument(
+                                "MultiheadAttentionVars::forward_with_cache: lens + l_new_kv が \
+                                 usize をオーバーフローした"
+                                    .to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<usize>, _>>()?,
+            ),
+            None => None,
+        };
+
         let q_proj = project(query_new, &self.q, b, l_new, e, e, None)?;
         let k_new_proj = project(key_new, &self.k, b, l_new_kv, e, e, None)?;
         let v_new_proj = project(value_new, &self.v, b, l_new_kv, e, e, None)?;
@@ -1810,7 +1897,20 @@ impl<'t> MultiheadAttentionVars<'t> {
         let v_heads = split_heads(&v_cat, b, s_total, h, dh)?;
 
         let scale = 1.0f32 / (dh as f32).sqrt();
-        let attn_out = if s_prev == 0 {
+        let attn_out = if let Some(lens) = &cache.lens {
+            // padding 付き: (b)／(c) とも行ごとの mask（空キャッシュは
+            // lens を持たないため (a) と同時には起こらない）。
+            let mask = padded_offset_allowed_mask(lens, s_prev, l_new, s_total)?;
+            sdpa_compose(
+                &q_heads,
+                &k_heads,
+                &v_heads,
+                Some(&mask),
+                false,
+                scale,
+                None,
+            )?
+        } else if s_prev == 0 {
             // (a) prefill: 全系列が新規のため causal。
             sdpa_compose(&q_heads, &k_heads, &v_heads, None, true, scale, None)?
         } else if l_new == 1 {
@@ -1842,6 +1942,7 @@ impl<'t> MultiheadAttentionVars<'t> {
         // コピー——`docs/kv-cache-design.md` §2 手順⑧）。
         cache.k = Some(k_cat.to_tensor());
         cache.v = Some(v_cat.to_tensor());
+        cache.lens = new_lens;
 
         Ok(out)
     }
@@ -2066,6 +2167,11 @@ impl Module for MultiheadAttention {
         ]
     }
 }
+
+// #3105: 束ね・分割ヘルパー（#3106 で cfg を外して本体へ移す）。api_surface の
+// `without_test_mod` が最初の cfg 属性以降を切り落とすため、本体の途中ではなくここへ置く。
+#[cfg(test)]
+mod kv_padding;
 
 #[cfg(test)]
 mod tests {
@@ -3066,5 +3172,253 @@ mod tests {
             StatefulAttention::from_config(&cfg, 0),
             Err(AutodiffError::InvalidArgument(_))
         ));
+    }
+
+    // --- 可変長・padding mask（イシュー #3105・§21） ---
+
+    const PE: usize = 4;
+
+    fn pt(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
+        Tensor::new(data, shape).expect("fixture")
+    }
+
+    fn pseq(seed: i64, len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|i| ((seed + i as i64 * 7) % 13 - 6) as f32 * 0.07)
+            .collect()
+    }
+
+    fn pmha(tape: &Tape) -> MultiheadAttentionVars<'_> {
+        let lin = |s: i64| LinearVars {
+            weight: tape.var(&pt(pseq(s, PE * PE), &[PE, PE])),
+            bias: Some(tape.var(&pt(pseq(s + 1, PE), &[PE]))),
+        };
+        MultiheadAttentionVars::new(2, lin(2), lin(4), lin(6), lin(8)).unwrap()
+    }
+
+    /// B=1・長さ `len` の入力で prefill したキャッシュを作る。
+    fn prefill_row(seed: i64, len: usize) -> KvCache {
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let mha = pmha(&tape);
+        let x = tape.var(&pt(pseq(seed, len * PE), &[1, len, PE]));
+        let mut c = KvCache::new();
+        mha.forward_with_cache(&x, &x, &x, &mut c).unwrap();
+        c
+    }
+
+    /// 与えた cache へ `[b, l, E]` を追記し出力を返す。
+    fn step(cache: &mut KvCache, data: Vec<f32>, b: usize, l: usize) -> Vec<f32> {
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let mha = pmha(&tape);
+        let x = tape.var(&pt(data, &[b, l, PE]));
+        mha.forward_with_cache(&x, &x, &x, cache)
+            .unwrap()
+            .to_tensor()
+            .contiguous()
+            .as_slice()
+            .unwrap()
+            .to_vec()
+    }
+
+    fn close(a: &[f32], b: &[f32]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert!(
+                fandhe_ai_tensor_core::tolerance::composite_close_f32(*x, *y),
+                "{x} vs {y}"
+            );
+        }
+    }
+
+    fn bits_of(t: &Tensor<f32>) -> Vec<u32> {
+        t.contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    fn fbits(v: &[f32]) -> Vec<u32> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    fn assert_padded_matches_single(l_new: usize) {
+        let lens = [2usize, 5, 3];
+        let rows: Vec<KvCache> = lens
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| prefill_row(i as i64 + 1, l))
+            .collect();
+        let mut padded = KvCache::stack_left_padded(&rows).unwrap();
+        assert_eq!(padded.lens_for_test(), Some(&lens[..]));
+        let b = lens.len();
+        let new_rows: Vec<Vec<f32>> = (0..b).map(|r| pseq(50 + r as i64, l_new * PE)).collect();
+        let flat: Vec<f32> = new_rows.iter().flatten().copied().collect();
+        let y = step(&mut padded, flat, b, l_new);
+        let mut singles = Vec::new();
+        for r in 0..b {
+            let mut c = rows[r].clone();
+            let yr = step(&mut c, new_rows[r].clone(), 1, l_new);
+            close(&y[r * l_new * PE..(r + 1) * l_new * PE], &yr);
+            singles.push(c);
+        }
+        // decode 後の状態
+        assert_eq!(padded.seq_len(), 5 + l_new);
+        let split = padded.split_rows().unwrap();
+        for r in 0..b {
+            assert_eq!(padded.valid_len(r), Some(lens[r] + l_new));
+            assert_eq!(split[r].seq_len(), lens[r] + l_new);
+            let (sk, rk) = (split[r].k().unwrap(), singles[r].k().unwrap());
+            assert_eq!(sk.shape(), rk.shape());
+            let old = lens[r] * PE;
+            assert_eq!(bits_of(sk)[..old], bits_of(rk)[..old]);
+            close(
+                &sk.contiguous().as_slice().unwrap()[old..],
+                &rk.contiguous().as_slice().unwrap()[old..],
+            );
+        }
+    }
+
+    #[test]
+    fn padded_decode_matches_single_row_runs() {
+        assert_padded_matches_single(1);
+    }
+
+    #[test]
+    fn padded_multi_token_append_matches_single_row_runs() {
+        assert_padded_matches_single(2);
+    }
+
+    #[test]
+    fn padding_content_does_not_affect_output() {
+        let rows = [prefill_row(1, 2), prefill_row(2, 4)];
+        let clean = KvCache::stack_left_padded(&rows).unwrap();
+        let mut dirty = clean.clone();
+        // 行 0 の padding 区間（先頭 2 トークン）を有限の大きな値で汚す。
+        let corrupt = |t: &Tensor<f32>| {
+            let mut d = t.contiguous().as_slice().unwrap().to_vec();
+            for v in &mut d[..2 * PE] {
+                *v = 100.0;
+            }
+            pt(d, t.shape())
+        };
+        dirty.k = Some(corrupt(dirty.k().unwrap()));
+        dirty.v = Some(corrupt(dirty.v().unwrap()));
+        for l_new in [1usize, 2] {
+            let data = pseq(9, 2 * l_new * PE);
+            let (mut a, mut b) = (clean.clone(), dirty.clone());
+            let ya = step(&mut a, data.clone(), 2, l_new);
+            let yb = step(&mut b, data, 2, l_new);
+            assert_eq!(fbits(&ya), fbits(&yb));
+        }
+    }
+
+    #[test]
+    fn equal_length_rows_round_trip_bit_exact_and_normalize_to_none() {
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let mha = pmha(&tape);
+        let x = tape.var(&pt(pseq(3, 2 * 3 * PE), &[2, 3, PE]));
+        let mut direct = KvCache::new();
+        mha.forward_with_cache(&x, &x, &x, &mut direct).unwrap();
+        assert!(direct.lens_for_test().is_none());
+        let rows = direct.split_rows().unwrap();
+        let mut back = KvCache::stack_left_padded(&rows).unwrap();
+        assert!(back.lens_for_test().is_none());
+        assert_eq!(bits_of(direct.k().unwrap()), bits_of(back.k().unwrap()));
+        assert_eq!(bits_of(direct.v().unwrap()), bits_of(back.v().unwrap()));
+        let data = pseq(11, 2 * PE);
+        let ya = step(&mut direct, data.clone(), 2, 1);
+        let yb = step(&mut back, data, 2, 1);
+        assert_eq!(fbits(&ya), fbits(&yb));
+    }
+
+    #[test]
+    fn stack_and_split_reject_invalid_inputs() {
+        let ok = prefill_row(1, 2);
+        assert!(KvCache::stack_left_padded(&[]).is_err());
+        assert!(KvCache::stack_left_padded(&[ok.clone(), KvCache::new()]).is_err());
+        assert!(KvCache::split_rows(&KvCache::new()).is_err());
+        // B != 1
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let mha = pmha(&tape);
+        let x = tape.var(&pt(pseq(3, 2 * 2 * PE), &[2, 2, PE]));
+        let mut b2 = KvCache::new();
+        mha.forward_with_cache(&x, &x, &x, &mut b2).unwrap();
+        assert!(KvCache::stack_left_padded(&[ok.clone(), b2]).is_err());
+        // E 不一致
+        let mut e8 = ok.clone();
+        e8.k = Some(pt(vec![0.0; 16], &[1, 2, 8]));
+        e8.v = e8.k.clone();
+        assert!(KvCache::stack_left_padded(&[ok.clone(), e8]).is_err());
+        // padding 付きは入力に使えない
+        let padded = KvCache::stack_left_padded(&[prefill_row(1, 2), prefill_row(2, 3)]).unwrap();
+        assert!(KvCache::stack_left_padded(&[padded, ok]).is_err());
+    }
+
+    #[test]
+    fn padded_forward_failure_leaves_cache_unchanged() {
+        let mut padded =
+            KvCache::stack_left_padded(&[prefill_row(1, 2), prefill_row(2, 4)]).unwrap();
+        let (kb, vb) = (bits_of(padded.k().unwrap()), bits_of(padded.v().unwrap()));
+        let lens_before = padded.lens_for_test().map(<[usize]>::to_vec);
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+        let mha = pmha(&tape);
+        // B 不一致
+        let x = tape.var(&pt(pseq(3, 3 * PE), &[3, 1, PE]));
+        assert!(mha.forward_with_cache(&x, &x, &x, &mut padded).is_err());
+        // E 不一致
+        let x = tape.var(&pt(pseq(3, 2 * 8), &[2, 1, 8]));
+        assert!(mha.forward_with_cache(&x, &x, &x, &mut padded).is_err());
+        assert_eq!(bits_of(padded.k().unwrap()), kb);
+        assert_eq!(bits_of(padded.v().unwrap()), vb);
+        assert_eq!(padded.lens_for_test().map(<[usize]>::to_vec), lens_before);
+        // lens の checked_add オーバーフロー（テスト専用の直接構築）
+        padded.lens = Some(vec![usize::MAX, 4]);
+        let x = tape.var(&pt(pseq(3, 2 * PE), &[2, 1, PE]));
+        assert!(matches!(
+            mha.forward_with_cache(&x, &x, &x, &mut padded),
+            Err(AutodiffError::InvalidArgument(_))
+        ));
+        assert_eq!(bits_of(padded.k().unwrap()), kb);
+        assert_eq!(padded.lens_for_test(), Some(&[usize::MAX, 4][..]));
+    }
+
+    #[test]
+    fn valid_len_reports_rows() {
+        let empty = KvCache::new();
+        assert_eq!(empty.valid_len(0), None);
+        let one = prefill_row(1, 3);
+        assert_eq!(one.valid_len(0), Some(one.seq_len()));
+        assert_eq!(one.valid_len(1), None);
+        let padded = KvCache::stack_left_padded(&[prefill_row(1, 2), prefill_row(2, 4)]).unwrap();
+        assert_eq!(padded.valid_len(0), Some(2));
+        assert_eq!(padded.valid_len(1), Some(4));
+        assert_eq!(padded.valid_len(2), None);
+        let mut cleared = padded;
+        cleared.clear();
+        assert!(cleared.lens_for_test().is_none());
+        assert_eq!(cleared.valid_len(0), None);
+    }
+
+    #[test]
+    fn padded_offset_allowed_mask_cases() {
+        // pad なしは offset_allowed_mask と一致
+        let m = padded_offset_allowed_mask(&[3, 3], 3, 2, 5).unwrap();
+        assert_eq!(m.shape(), &[2, 1, 2, 5]);
+        let base = offset_allowed_mask(2, 3, 5).unwrap();
+        let d = m.as_slice().unwrap();
+        assert_eq!(&d[..10], base.as_slice().unwrap());
+        assert_eq!(&d[10..], base.as_slice().unwrap());
+        // 全 mask 行は生じない
+        let m = padded_offset_allowed_mask(&[1, 2, 3], 3, 2, 5).unwrap();
+        let blocked: Vec<bool> = m.as_slice().unwrap().iter().map(|&a| !a).collect();
+        let blocked = Tensor::new(blocked, &[3, 1, 2, 5]).unwrap();
+        assert!(reject_fully_masked_rows(&blocked).is_ok());
+        // 行 0（pad=2）は j<2 を遮断
+        let d = m.as_slice().unwrap();
+        assert!(!d[0] && !d[1] && d[2]);
+        assert!(padded_offset_allowed_mask(&[4], 3, 1, 4).is_err());
+        assert!(padded_offset_allowed_mask(&[1], 1, usize::MAX, usize::MAX).is_err());
     }
 }

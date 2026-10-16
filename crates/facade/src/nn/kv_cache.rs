@@ -26,7 +26,8 @@
 //! 内部キャッシュ版は `sa` 自身のキャッシュを進め（`&mut sa`）、外部キャッシュ版は
 //! `&sa` と `&mut KvCache` を受けて `sa` の内部キャッシュに触れない。
 //! `AutoregressiveModel::forward_step` の中で `caches[i]` を進める用途は後者を使う。
-//! `KvCache` の公開メソッドは増やさず、巻き戻しフックも公開しない（同 §19.9）。
+//! `KvCache` の公開メソッド追加は `valid_len` の 1 件だけ（#3105・同 §21.5）で、
+//! 巻き戻しフックは公開しない（同 §19.9）。
 //!
 //! 公開しないもの: `MultiheadAttention`・`MultiheadAttentionVars`・`forward_with_cache`。
 //!
@@ -36,7 +37,8 @@
 //!   メソッドとして残る（`docs/kv-cache-design.md` §11.4 P2 の残課題）
 //! - self-attention 限定で、`batch_first=true`・`kdim = vdim = embed_dim` のみ対応する
 //!   （それ以外の config は `from_config` が `InvalidArgument` で拒否する）
-//! - padding 用の追加 mask は非対応
+//! - padding 付き（可変長）キャッシュは crate 内部（#3106 の束ねる経路）だけが作る。公開面で
+//!   使えるのは `valid_len` の参照だけで、任意の mask・`Tensor` を入れる経路はない（§21.4）
 //! - 過去ステップへ勾配は流れない（キャッシュは勾配なしの葉。現ステップの射影
 //!   パラメータへは流れる）。decode ループでは `Tape` の再作成か reset を推奨する
 //! - デバイス常駐キャッシュ（K-3）は対象外

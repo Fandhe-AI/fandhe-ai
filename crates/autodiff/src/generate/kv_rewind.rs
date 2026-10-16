@@ -19,7 +19,13 @@
 //! ため、「k／v は両方 Some か両方 None」「書き手は `forward_with_cache`
 //! のみ」の不変条件（`nn/attention.rs` の `KvCache` doc）は緩めない。`KvCache`
 //! への公開メソッド追加（案 (ii)）や `pub(crate)` 切り詰め（案 (iii)）は
-//! 設計 §10 論点 4 の承認事項であり本モジュールでは採らない。
+//! 本モジュールでは採らない（公開追加は #3105／設計 §21.1・§21.5 の
+//! `valid_len` 1 件のみで、本モジュールはそれを読むだけ）。
+//!
+//! padding 付き（可変長）キャッシュは巻き戻し位置が行ごとに異なり取り違え
+//! を生むため、`common_state`（`capture`・`rewind_and_replay` が経由）が
+//! `valid_len(r) != Some(seq_len())` の行を持つキャッシュを
+//! `InvalidArgument` で拒否する（#3105・§21.7。fail-closed）。
 //!
 //! # 可視性
 //!
@@ -113,6 +119,12 @@ fn common_state(caches: &[KvCache]) -> Result<CommonState, AutodiffError> {
     };
     let state = (first.seq_len(), first.batch(), first.embed_dim());
     for (i, c) in caches.iter().enumerate() {
+        let padded = (0..c.batch().unwrap_or(0)).any(|r| c.valid_len(r) != Some(c.seq_len()));
+        if padded {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "kv_rewind: 層 {i} の KV キャッシュは padding 付き（可変長）で巻き戻せない"
+            )));
+        }
         if (c.seq_len(), c.batch(), c.embed_dim()) != state {
             return Err(AutodiffError::InvalidArgument(format!(
                 "kv_rewind: 層 {i} の KV キャッシュ状態が層 0 と揃っていない"
@@ -531,5 +543,35 @@ mod tests {
         only0.forward_step(&ids(vec![3], 1), &mut caches).unwrap();
         assert_ne!(caches[0].seq_len(), caches[1].seq_len());
         assert!(KvSnapshot::capture(&model, &caches).is_err());
+    }
+
+    // #3105: padding 付きキャッシュは capture／rewind で拒否
+    #[test]
+    fn padded_cache_is_rejected_at_capture() {
+        let model = TestModel::new(1, Fault::None);
+        let mut long = vec![KvCache::new()];
+        let mut short = vec![KvCache::new()];
+        model
+            .forward_step(&ids(vec![0, 1, 2], 1), &mut long)
+            .unwrap();
+        model.forward_step(&ids(vec![0, 1], 1), &mut short).unwrap();
+        let padded = KvCache::stack_left_padded(&[long[0].clone(), short[0].clone()]).unwrap();
+        assert_eq!(padded.valid_len(1), Some(2));
+        assert_eq!(padded.seq_len(), 3);
+        let mut caches = vec![padded];
+        let before = caches.clone();
+        assert!(KvSnapshot::capture(&model, &caches).is_err());
+        // rewind 側（common_state 経由）も拒否し、状態を変えない
+        let snap_src = KvSnapshot {
+            caches: before.clone(),
+            seq_len: 3,
+            batch: Some(2),
+            embed_dim: Some(E),
+        };
+        assert!(rewind_and_replay(&model, &mut caches, snap_src, &ids(vec![0, 1], 2), V).is_err());
+        assert_kv_bit_eq(&caches, &before);
+        // 全行同長（lens = None）に正規化されたものは従来どおり通る
+        let same = KvCache::stack_left_padded(&[long[0].clone(), long[0].clone()]).unwrap();
+        assert!(KvSnapshot::capture(&model, &[same]).is_ok());
     }
 }
