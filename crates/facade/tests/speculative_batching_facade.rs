@@ -706,3 +706,101 @@ fn speculative_matches_generate_on_attention_caches_model() {
     assert!(verify_rows > 0, "検証 forward の行が比較されていない");
     assert!(replays > 0, "再 forward（rewind-replay）が起きていない");
 }
+/// 公開面だけで組んだ表引き KV モデル（`inference/mod.rs` の成功例 doctest と同じ形）。層数・次トークン規則
+/// （`NextFn`）を差し替えられる。位置は `caches[0].seq_len()` から取り、全層の `caches[i]` を進める（#3098）。
+struct RuleTableLm {
+    sas: Vec<StatefulAttention>,
+    next: NextFn,
+}
+
+impl RuleTableLm {
+    fn new(layers: usize, seed_base: u64, next: NextFn) -> Self {
+        Self {
+            sas: attention_layers(layers, seed_base),
+            next,
+        }
+    }
+}
+
+impl AutoregressiveModel for RuleTableLm {
+    fn num_kv_layers(&self) -> usize {
+        self.sas.len()
+    }
+
+    fn forward_step(
+        &self,
+        new_ids: &Tensor<i32>,
+        caches: &mut [KvCache],
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let pos0 = caches[0].seq_len();
+        let tape = fandhe_ai::tape();
+        let emb = tape.var(&t(seq(1, V * E), &[V, E]));
+        let mut x = emb.embedding(new_ids, None)?;
+        for (sa, cache) in self.sas.iter().zip(caches.iter_mut()) {
+            x = tape.stateful_attention_forward_with_cache(sa, &x, cache)?;
+        }
+        let l = new_ids.shape()[new_ids.shape().len() - 1];
+        let mut data = vec![0.0f32; l * V];
+        for (i, &tok) in toks(new_ids).iter().enumerate() {
+            data[i * V + (self.next)(tok, pos0 + i) as usize] = 1.0;
+        }
+        Ok(t(data, &[1, l, V]))
+    }
+}
+
+/// 公開面だけのモデルでの Greedy 一致の掃引（#3098）。軸: k・draft（全受理／全棄却／部分受理）・
+/// prompt 長・`max_length`（R=0・1・k 超過を含む）・入力 rank（1／2）・target 層数。
+/// tolerance は使わず完全一致を要求する。
+#[test]
+fn speculative_matches_greedy_generate_on_public_surface_table_model_sweep() {
+    let (mut runs, mut replays) = (0usize, 0usize);
+    for layers in [1usize, 2] {
+        let target = Recording::new(RuleTableLm::new(layers, 1, Box::new(target_next)));
+        for rank1 in [true, false] {
+            for prompt_len in [1usize, 2, 5] {
+                let prompt: Vec<i32> = (0..prompt_len).map(|i| ((i * 2) % V) as i32).collect();
+                for k in [1usize, 2, 3, 5, 8] {
+                    let mut maxes = vec![
+                        prompt_len,
+                        prompt_len + 1,
+                        prompt_len + 2,
+                        prompt_len + k + 1,
+                        12,
+                    ];
+                    maxes.sort_unstable();
+                    maxes.dedup();
+                    for max in maxes {
+                        let alone =
+                            generate(&target, &ids(&prompt, rank1), &greedy(max)).expect("alone");
+                        let drafts: Vec<(&str, NextFn)> = vec![
+                            ("全受理", Box::new(target_next)),
+                            ("全棄却", Box::new(wrong_next)),
+                            ("部分受理", periodic_next(3)),
+                        ];
+                        for (name, next) in drafts {
+                            let label = format!(
+                                "layers={layers} rank1={rank1} T={prompt_len} k={k} max={max} draft={name}"
+                            );
+                            let draft = RuleTableLm::new(3 - layers, 77, next);
+                            target.log.borrow_mut().clear();
+                            let out = generate_speculative(
+                                &target,
+                                &draft,
+                                &ids(&prompt, rank1),
+                                &greedy(max),
+                                &SpeculativeConfig::new(k),
+                            )
+                            .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                            assert_eq!(out.shape(), alone.shape(), "{label}: shape");
+                            assert_eq!(toks(&out), toks(&alone), "{label}");
+                            replays += replay_count(&target.log.borrow());
+                            runs += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(runs > 300, "掃引が縮退している（runs={runs}）");
+    assert!(replays > 0, "棄却後の再 forward が起きていない");
+}
