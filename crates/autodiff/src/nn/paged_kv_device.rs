@@ -350,6 +350,18 @@ impl PagedKvCache {
         Ok(())
     }
 
+    /// 論理状態（ブロックテーブル・系列長・空きブロック管理）の退避。`forward_paged` が
+    /// 追記前に取り、後段失敗時に [`PagedKvCache::restore_table`] で割り当てなしに戻す
+    /// （`rewind_to` は返却スタックの `try_reserve` が失敗しうるため復元に使わない）。
+    pub(crate) fn snapshot_table(&self) -> BlockTable {
+        self.table.clone()
+    }
+
+    /// [`PagedKvCache::snapshot_table`] で退避した論理状態へ戻す。代入のみで失敗しない。
+    pub(crate) fn restore_table(&mut self, saved: BlockTable) {
+        self.table = saved;
+    }
+
     /// すべてのブロックを空きへ戻し、`B` を未確定に戻す。
     pub fn clear(&mut self) {
         self.table.reset();
@@ -363,8 +375,9 @@ impl PagedKvCache {
 /// （推論専用。`requires_grad` な `Var` は構造的に受けない。設計 §2・§6）。
 ///
 /// 原子性（設計 §13 D7）: `Err` のとき `cache` の論理状態は呼び出し前と同じ。追記成功後に
-/// 後段が失敗したら `rewind_to(s_prev)` で戻す（`rewind_to` 自体の失敗は元のエラーを
-/// 優先して返す）。poison は戻さない（回復は再構築）。
+/// 後段が失敗したら、追記前に退避したテーブルを割り当てなしの代入で復元する
+/// （巻き戻し自体は失敗しない。メモリ不足でも論理状態は不変）。poison は戻さない
+/// （回復は再構築）。
 /// mask はカーネルの単一規則 `j <= s_prev + i`（K-1 の各経路と同値）。
 pub(crate) fn paged_self_attention_forward(
     mha: &MultiheadAttention,
@@ -397,7 +410,8 @@ pub(crate) fn paged_self_attention_forward(
     let q = project(&x, &vars.q, b, l, e, e, None)?.to_tensor();
     let k = project(&x, &vars.k, b, l, e, e, None)?.to_tensor();
     let v = project(&x, &vars.v, b, l, e, e, None)?.to_tensor();
-    let s_prev = cache.seq_len();
+    // 追記前の論理状態を退避する（`append` 自身も同じ複製を作る。復元は代入のみ）。
+    let saved = cache.snapshot_table();
     cache.append(tape, &k, &v)?;
     let scale = 1.0 / (mha.head_dim() as f32).sqrt();
     let result = cache
@@ -407,8 +421,7 @@ pub(crate) fn paged_self_attention_forward(
             project(&a, &vars.out, b, l, e, e, None).map(|o| o.to_tensor())
         });
     if result.is_err() {
-        // 元のエラーを優先する（巻き戻しの失敗は握りつぶす。論理状態は append 直後のまま）。
-        let _ = cache.rewind_to(s_prev);
+        cache.restore_table(saved);
     }
     result
 }
@@ -784,5 +797,24 @@ mod tests {
         assert_eq!(c.batch(), None);
         assert!(!c.is_poisoned());
         assert!(log.lock().unwrap().appends.is_empty());
+    }
+
+    /// 後段失敗時の復元: ブロック境界を越える追記後に `restore_table` すると、系列長・
+    /// 使用／空きブロック数が追記前と一致する（割り当てなし。レビュー指摘 P1）。
+    #[test]
+    fn snapshot_restore_undoes_boundary_crossing_append() {
+        let (t, _log) = tape(Mode::Ok);
+        let mut c = PagedKvCache::new(&t, cfg()).unwrap();
+        let bs = c.config().block_size();
+        c.append(&t, &x(1, 1), &x(1, 1)).unwrap();
+        let (len, used, free) = (c.seq_len(), c.num_used_blocks(), c.num_free_blocks());
+        let saved = c.snapshot_table();
+        c.append(&t, &x(1, bs + 1), &x(1, bs + 1)).unwrap();
+        assert!(c.num_used_blocks() > used);
+        c.restore_table(saved);
+        assert_eq!(c.seq_len(), len);
+        assert_eq!(c.num_used_blocks(), used);
+        assert_eq!(c.num_free_blocks(), free);
+        assert!(!c.is_poisoned());
     }
 }
