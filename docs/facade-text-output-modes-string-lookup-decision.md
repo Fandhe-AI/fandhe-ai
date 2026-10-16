@@ -167,14 +167,14 @@ bag 系 3 本の検査順:
 
 1. 入力件数 `B ≤ max_batch`
 2. 各要素のバイト数
-3. 出力要素数 `B × W` を `checked_mul` で計算し、`≤ max_output_elements`、かつ `size_of::<f32>()` を掛けた値が `isize::MAX` 以下。f32 と i32 は同じ 4 バイトで `ABSOLUTE_MAX_OUTPUT_ELEMENTS`（`crates/facade/src/text/limits.rs:51`）は共通。#3092 は `check_output_elements`（同 `:332`）を要素サイズを引数に取る形へ一般化するか、`size_of::<f32>() == size_of::<i32>()` を const assert で固定する
-4. 出力を一括で確保する
-5. 行ごとに in-place で加算する（行ごとの `Vec` を作らない）
-6. 行のトークン数が 2^24 を超えたら `TokenCountNotExact`
+3. 事前走査: 各行を標準化・分割し、トークン数（n-gram 込み）を中間 `Vec` を作らずに数えるだけで検査する。1 行でも 2^24 を超えたら出力を確保する前に `TokenCountNotExact`（§3.4 と同じ順序。加算後に検査する手順は採らない）
+4. 出力要素数 `B × W` を `checked_mul` で計算し（overflow は `Err`）、`≤ max_output_elements`、かつ `size_of::<f32>()` を掛けた値が `isize::MAX` 以下。f32 と i32 は同じ 4 バイトで `ABSOLUTE_MAX_OUTPUT_ELEMENTS`（`crates/facade/src/text/limits.rs:51`）は共通。#3092 は `check_output_elements`（同 `:332`）を要素サイズを引数に取る形へ一般化するか、`size_of::<f32>() == size_of::<i32>()` を const assert で固定する
+5. 出力を一括で確保する
+6. 行ごとに in-place で加算する（行ごとの `Vec` を作らない。事前走査で 2^24 以下と確定済みなので加算は厳密）
 
 - `W` は構築時に決まるので `B` が来た時点で入口検査できる。`max_output_sequence_length` は bag 系に適用しない。`B = 0` は `[0, W]`
 - `from_vocabulary_with_idf`: 既存の語彙検査 → idf の長さ → 各値の有限性と非負 → 確保。`max_tokens` と `pad_to_max_tokens` の構築時検査は既存順序の先頭に足す
-- `StringLookup::lookup`: `N ≤ max_batch`、各トークンのバイト数、`N ≤ max_output_elements`。`invert` は id を全部検査してから `String` を確保する
+- `StringLookup::lookup`: `N ≤ max_batch`、各トークンのバイト数、`N ≤ max_output_elements`。`invert` は確保前に次をすべて検査する: (1) id の範囲（負・語彙数以上は `IdOutOfRange`）、(2) 出力件数 `ids.len() ≤ max_output_elements`（`Vec<String>` の要素サイズ `size_of::<String>()` を掛けた値が `isize::MAX` 以下）、(3) 各 id が指す文字列のバイト長の総和を `checked_add` で積み、`max_output_bytes`（`TextLimits` の既存上限から導出する。新設が要る場合は #3093 が `TextLimits` へ追加し、既定値は既存の入力上限と同水準）以下であること。いずれの算術も `checked_add`／`checked_mul` で行い overflow は `Err`。全検査を通ってから `String` を確保する
 - エラーと `Debug` に入力文字列・語彙・idf の値の全文を入れない（A09）
 
 ## 6. 数値一致・テスト方針（#3092・#3093 が従う）
