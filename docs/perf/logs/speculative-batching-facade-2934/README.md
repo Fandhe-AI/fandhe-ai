@@ -53,7 +53,7 @@ cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored 
 cargo test -p fandhe-ai --test speculative_batching_backend_parity -- --ignored --nocapture metal_scheduler_batched
 ```
 
-絞り込みなしの `... -- --ignored --nocapture cuda`（metal も同様）は既存の 2 件に本テストを加えた 3 件を実行する。
+絞り込みなしの `... -- --ignored --nocapture cuda`（metal も同様）は既存の 3 件（`*_speculative_greedy_matches_cpu`・`*_scheduler_greedy_matches_cpu`・`*_speculative_sampling_matches_cpu`）に本テストを加えた 4 件を実行する。
 
 期待結果と判定:
 
