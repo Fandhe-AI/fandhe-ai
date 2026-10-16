@@ -37,6 +37,14 @@
 //! B > 1、`num_kv_layers() == 0` の speculative（論点 3）、内部状態保持型モデル（論点 8）、
 //! facade 公開。`Generator` は非暗号の xorshift64* で、本テストは Greedy のみのため乱数を
 //! 使わない（OWASP A02 の注記）。
+//!
+//! # #3107 追記（`step_batched` のバッチ経路）
+//!
+//! `BatchedAttnLm`（B 対応: `[b, l, V]`・位置は `valid_len(r)`）で `step_batched` を同じ `schedule()`
+//! により回し、device 側と参照側の記録を呼び出し数・b・行ごとの `valid_len`・ids・shape まで構造ごと
+//! 突き合わせ、logits は REQ-2 統一複合判定で比べる（`check_scheduler_batched`）。同じバックエンドの
+//! 単独 `generate` との Greedy 一致（§6.3）も確かめる。対象外: TopK／Temperature のバックエンド横断、
+//! B > 1 の speculative。facade 側の CPU 結合テストは `speculative_batching_step_batched_facade.rs`。
 
 use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, SchedulerLimits};
 use fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig, generate_speculative};
@@ -483,6 +491,248 @@ fn check_scheduler(make: TapeBackend, reference: TapeBackend, label: &str) {
 }
 
 // ---------------------------------------------------------------------
+// イシュー #3107: `step_batched`（テンソル単位バッチ。#3106）のバッチ経路
+// ---------------------------------------------------------------------
+
+/// `AttnLm` の B 対応版。入力 `[b, l]` に対し `[b, l, V]` を返し、行 `r` の位置は forward 前の
+/// `valid_len(r)` から取る（`seq_len()` は padding を含む物理長のため使わない。対象モデル契約
+/// §21.6）。B 非対応のモデルでは `step_batched` が黙って B = 1 へ戻るため、こちらを使う。
+struct BatchedAttnLm {
+    backend: TapeBackend,
+    layers: usize,
+    seed_base: i64,
+}
+
+impl AutoregressiveModel for BatchedAttnLm {
+    fn num_kv_layers(&self) -> usize {
+        self.layers
+    }
+
+    fn forward_step(
+        &self,
+        new_ids: &Tensor<i32>,
+        caches: &mut [KvCache],
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let shape = new_ids.shape();
+        let l = shape[shape.len() - 1];
+        let b = shape.iter().product::<usize>() / l;
+        let pos0: Vec<usize> = match caches.first() {
+            Some(c) => (0..b).map(|r| c.valid_len(r).unwrap_or(0)).collect(),
+            None => vec![0; b],
+        };
+        let s = self.seed_base;
+        let tape = self.backend.new_tape();
+        let emb = tape.var(&t(seq(s + 1, V * E), &[V, E]));
+        let mut x = emb.embedding(new_ids, None)?;
+        for (li, cache) in caches.iter_mut().enumerate() {
+            let o = s + 20 * li as i64;
+            let lin = |d: i64| LinearVars {
+                weight: tape.var(&t(seq(o + d, E * E), &[E, E])),
+                bias: Some(tape.var(&t(seq(o + d + 1, E), &[E]))),
+            };
+            let mha = MultiheadAttentionVars::new(HEADS, lin(2), lin(4), lin(6), lin(8))?;
+            x = mha.forward_with_cache(&x, &x, &x, cache)?;
+        }
+        let flat = x.reshape(&[b * l, E])?;
+        let lm = LinearVars {
+            weight: tape.var(&t(seq(s + 10, E * V), &[E, V])),
+            bias: Some(tape.var(&t(seq(s + 9, V), &[V]))),
+        };
+        let logits = lm.forward(&flat)?.reshape(&[b, l, V])?.to_tensor();
+        let mut data = logits.contiguous().host_slice().into_owned();
+        let flat_ids = vals(new_ids);
+        for r in 0..b {
+            for i in 0..l {
+                let tok = flat_ids[r * l + i];
+                data[(r * l + i) * V + target_next(tok, pos0[r] + i) as usize] += SKIP_C;
+            }
+        }
+        Ok(t(data, &[b, l, V]))
+    }
+}
+
+/// `step_batched` 用の 1 回の `forward_step` の記録。
+struct BatchedCall {
+    b: usize,
+    l: usize,
+    /// 呼び出し前の行ごとの有効長（状態なしモデルは空）。
+    valid: Vec<usize>,
+    ids: Vec<i32>,
+    shape: Vec<usize>,
+    logits: Vec<f32>,
+}
+
+struct BatchedRecording<M> {
+    inner: M,
+    log: RefCell<Vec<BatchedCall>>,
+}
+
+impl<M: AutoregressiveModel> AutoregressiveModel for BatchedRecording<M> {
+    fn num_kv_layers(&self) -> usize {
+        self.inner.num_kv_layers()
+    }
+
+    fn forward_step(
+        &self,
+        new_ids: &Tensor<i32>,
+        caches: &mut [KvCache],
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let shape = new_ids.shape();
+        let l = shape[shape.len() - 1];
+        let b = shape.iter().product::<usize>() / l;
+        let valid = match caches.first() {
+            Some(c) => (0..b).map(|r| c.valid_len(r).unwrap_or(0)).collect(),
+            None => Vec::new(),
+        };
+        let logits = self.inner.forward_step(new_ids, caches)?;
+        self.log.borrow_mut().push(BatchedCall {
+            b,
+            l,
+            valid,
+            ids: vals(new_ids),
+            shape: logits.shape().to_vec(),
+            logits: logits.contiguous().host_slice().into_owned(),
+        });
+        Ok(logits)
+    }
+}
+
+fn batched_attn(
+    backend: TapeBackend,
+    layers: usize,
+    seed_base: i64,
+) -> BatchedRecording<BatchedAttnLm> {
+    BatchedRecording {
+        inner: BatchedAttnLm {
+            backend,
+            layers,
+            seed_base,
+        },
+        log: RefCell::new(Vec::new()),
+    }
+}
+
+/// `drive` の `step_batched` 版（同じ計画・同じ上限）。
+fn drive_batched<M: AutoregressiveModel>(m: &M, reqs: &[Req]) -> Vec<(Vec<usize>, Vec<i32>)> {
+    let limits = SchedulerLimits::new(2, 4, 16).expect("fixture");
+    let mut s = BatchScheduler::new(limits);
+    let mut ids = Vec::new();
+    let mut finished = Vec::new();
+    for tick in 0..TICK_CAP {
+        for (at, input, c) in reqs {
+            if *at == tick {
+                ids.push(s.submit(input, c).expect("submit"));
+            }
+        }
+        if ids.len() == reqs.len() && s.queued_len() == 0 && s.active_len() == 0 {
+            assert!(s.take_failed().is_empty(), "失敗した要求がある");
+            return ids
+                .iter()
+                .map(|id| {
+                    let (_, out) = finished
+                        .iter()
+                        .find(|(fid, _): &&(_, Tensor<i32>)| fid == id)
+                        .expect("要求が finished にない");
+                    (out.shape().to_vec(), vals(out))
+                })
+                .collect();
+        }
+        s.step_batched(m).expect("step_batched は Ok を返し続ける");
+        finished.extend(s.take_finished());
+        assert!(s.take_failed().is_empty(), "失敗した要求がある");
+    }
+    panic!("TICK_CAP に到達した（スケジューラが掃けない）");
+}
+
+/// 空振り防止: 束ねた呼び出し（`b > 1 && l == 1`）の件数。0 件なら B = 1 へ戻っている。
+fn batched_call_count(log: &[BatchedCall]) -> usize {
+    log.iter().filter(|c| c.b > 1 && c.l == 1).count()
+}
+
+/// 行ごとの有効長が揃わない（padding を伴う）呼び出しの件数。
+fn padded_call_count(log: &[BatchedCall]) -> usize {
+    log.iter()
+        .filter(|c| c.valid.iter().any(|&v| v != c.valid[0]))
+        .count()
+}
+
+/// 記録全行の margin 検査（`assert_margin` と同じ導出。新しい tolerance ではない）。
+fn assert_batched_margin(label: &str, log: &[BatchedCall]) {
+    for (ci, call) in log.iter().enumerate() {
+        for (ri, row) in call.logits.chunks(V).enumerate() {
+            let mut sorted = row.to_vec();
+            sorted.sort_by(|a, b| b.partial_cmp(a).expect("fixture: logits は有限"));
+            let m = row.iter().fold(0.0f32, |acc, v| acc.max(v.abs())) as f64;
+            let bound = (RELATIVE_TOLERANCE * m / (1.0 - RELATIVE_TOLERANCE))
+                .max(ABSOLUTE_RESCUE_THRESHOLD);
+            let margin = (sorted[0] - sorted[1]) as f64;
+            assert!(
+                margin > 2.0 * bound,
+                "{label}: フィクスチャ不正（margin 前提を満たさない）呼び出し {ci} 行 {ri}: margin={margin}"
+            );
+        }
+    }
+}
+
+/// `step_batched`（Greedy）を `make` と `reference` で突合する。`layers` = 2（padding を伴う束ね）と
+/// 0（状態なし）を通す。呼び出し数・b・行ごとの `valid_len`・ids・shape の構造一致が、片側だけ
+/// B = 1 へ戻った場合の検出器を兼ねる。
+fn check_scheduler_batched(make: TapeBackend, reference: TapeBackend, label: &str) {
+    for layers in [2usize, 0] {
+        let case = format!("{label} step_batched layers={layers}");
+        let reqs = schedule();
+        let r_model = batched_attn(reference, layers, 100);
+        let d_model = batched_attn(make, layers, 100);
+        let r_out = drive_batched(&r_model, &reqs);
+        assert_batched_margin(&case, &r_model.log.borrow());
+        let d_out = drive_batched(&d_model, &reqs);
+
+        // H1（バックエンド横断版。破れても判定は緩めず設計 §10 論点 2 として承認依頼に戻す）。
+        assert_eq!(
+            d_out, r_out,
+            "{case}: 出力の shape／token 列（事前登録の仮説 H1 の破れ。判定を緩めず設計 §10 論点 2 として承認依頼に戻すこと）"
+        );
+        let (dl, rl) = (d_model.log.borrow(), r_model.log.borrow());
+        assert_eq!(dl.len(), rl.len(), "{case}: forward_step の呼び出し数");
+        for (i, (d, r)) in dl.iter().zip(rl.iter()).enumerate() {
+            assert_eq!((d.b, d.l), (r.b, r.l), "{case}: 呼び出し {i} の (b, l)");
+            assert_eq!(d.valid, r.valid, "{case}: 呼び出し {i} の valid_len");
+            assert_eq!(d.ids, r.ids, "{case}: 呼び出し {i} の ids");
+            assert_eq!(d.shape, r.shape, "{case}: 呼び出し {i} の logits shape");
+            assert_parity(&format!("{case} 呼び出し {i}"), &d.logits, &r.logits);
+        }
+        assert!(
+            batched_call_count(&dl) >= 1,
+            "{case}: device 側が束ねていない"
+        );
+        assert!(batched_call_count(&rl) >= 1, "{case}: 参照側が束ねていない");
+        if layers > 0 {
+            assert!(
+                padded_call_count(&dl) >= 1,
+                "{case}: padding を伴う呼び出しがない"
+            );
+        }
+
+        // §6.3: 各要求の出力は同一バックエンドの単独 generate と token 列一致する
+        // （Greedy＋margin。デバイスのカーネル決定性に依存するため、失敗は所見として記録する）。
+        for (i, (_, input, c)) in reqs.iter().enumerate() {
+            let single = batched_attn(make, layers, 100);
+            let want = generate(&single, input, c).expect("単独 generate");
+            assert_eq!(
+                d_out[i].0,
+                want.shape().to_vec(),
+                "{case}: 要求 {i} shape（単独実行）"
+            );
+            assert_eq!(
+                d_out[i].1,
+                vals(&want),
+                "{case}: 要求 {i} token 列（単独実行）"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // 属性なし（CI で実行。ハーネスの腐敗と dead_code を防ぐ）
 // ---------------------------------------------------------------------
 
@@ -494,6 +744,11 @@ fn cpu_backend_ops_matches_naive_ops_for_speculative_greedy() {
 #[test]
 fn cpu_backend_ops_matches_naive_ops_for_scheduler_greedy() {
     check_scheduler(TapeBackend::Cpu, TapeBackend::Naive, "cpu-vs-naive");
+}
+
+#[test]
+fn cpu_backend_ops_matches_naive_ops_for_scheduler_batched_greedy() {
+    check_scheduler_batched(TapeBackend::Cpu, TapeBackend::Naive, "cpu-vs-naive");
 }
 
 /// 突合が実際に効くこと: 重みの異なるモデルの logits は REQ-2 判定で不合格になる。
@@ -542,4 +797,17 @@ fn metal_speculative_greedy_matches_cpu() {
 #[ignore = "Metal 実機が必要。docs/perf/logs/speculative-batching-2890/README.md 参照"]
 fn metal_scheduler_greedy_matches_cpu() {
     check_scheduler(TapeBackend::Metal, TapeBackend::Cpu, "metal");
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/speculative-batching-facade-2934/README.md 参照"]
+fn cuda_scheduler_batched_greedy_matches_cpu() {
+    check_scheduler_batched(TapeBackend::Cuda, TapeBackend::Cpu, "cuda");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/speculative-batching-facade-2934/README.md 参照"]
+fn metal_scheduler_batched_greedy_matches_cpu() {
+    check_scheduler_batched(TapeBackend::Metal, TapeBackend::Cpu, "metal");
 }
