@@ -108,3 +108,7 @@
 ## 11. 出典
 
 `docs/graph-compile-scope-spec-proposal.md`・`docs/autodiff-graph-optimization-scope-decision.md`・`docs/compat-api-scope.md` §5・`docs/perf/gpu-elementwise-fusion-b1.md`・`docs/perf/infer-chain-graphcapture-cuda-ab.md`・`docs/facade-inference-serving-scope-decision.md`
+
+## 12. #3116 実装記録
+
+`set_cuda_graph_infer_enabled`／`cuda_graph_infer_enabled`（facade）と `fandhe_ai_backend_cuda::graph::set_infer_graph_enabled`（新規。優先順位は API 明示 > 環境変数 > 既定 OFF）を公開した。テストは CPU で常に実行される受入テスト（`cuda_graph_infer_optin.rs`）・`api_surface.rs` の正ガードと、`#[ignore]` の CUDA 実機 parity テスト（`cuda_graph_infer_parity_real_device.rs`。実測は Phase 8・未実行）。**B-1 の CUDA／Metal の対は未公開**（新規 `unsafe` 4 か所の承認が記録上不明のため、R1 への所有者の回答待ち。決定記録 §6）。既定 OFF・tolerance・baseline・依存・`docs/spec` は不変で、新規 `unsafe` はない。既定 ON 化は #3227 の担当。 本文 §0〜§11 は書き換えていない。

@@ -2506,6 +2506,37 @@ pub fn cuda_graph_step_stats() -> CudaGraphStepStats {
     fandhe_ai_backend_cuda::graph::step_graph_stats()
 }
 
+/// 推論 forward チェーンの CUDA Graph capture を opt-in で有効／無効にする
+/// （イシュー #2115 が機構・#3115 が公開形・#3116 が公開。公開形の正は
+/// `docs/facade-graph-tier-b-optin-exposure-decision.md` §3・§4）。
+///
+/// - **既定は無効**。有効化しない限り挙動は変わない。プロセスワイドの切替で
+///   `Device` 単位ではない。優先順位は API 明示 > 環境変数
+///   `FANDHE_AI_CUDA_GRAPH_INFER` > 既定 OFF
+/// - **設定タイミング**: 最初の CUDA デバイス初期化より前に呼ぶ。間に合わ
+///   なかった場合は拒否されず、非 capture 経路へ黙ってフォールバックする
+///   （出力は同一）。遅れた場合に `BackendError::Unsupported` で拒否する
+///   [`set_cuda_graph_step_enabled`] とは異なる
+/// - **非対応環境**: CUDA 非搭載・CPU のみ・Metal の環境でも呼べる
+///   （フラグを立てるだけで driver に触れない）。効果はなく、パニックもしない
+/// - **利用者が融合を直接制御する API ではない**: TF32 の setter 等と同型の、
+///   プロセスワイドな実行戦略トグルであり、融合する op や境界を指定する手段
+///   でも汎用 `compile` の入口でもない（REQ-12。決定記録 §5）
+///
+/// ```
+/// fandhe_ai::set_cuda_graph_infer_enabled(false);
+/// assert!(!fandhe_ai::cuda_graph_infer_enabled());
+/// ```
+pub fn set_cuda_graph_infer_enabled(enabled: bool) {
+    fandhe_ai_backend_cuda::graph::set_infer_graph_enabled(enabled);
+}
+
+/// 推論チェーン capture の現在の opt-in 状態を返す
+/// （[`set_cuda_graph_infer_enabled`] 参照。イシュー #3116）。
+pub fn cuda_graph_infer_enabled() -> bool {
+    fandhe_ai_backend_cuda::graph::infer_graph_enabled()
+}
+
 /// CUDA GEMM 精度モード（既定 `Fp32Strict`・単発 `Tf32`・3×TF32
 /// `Tf32x3`。イシュー #1355。親ツリー #1354・承認元 #1338）の再公開。
 /// `set_cuda_gemm_precision`／`cuda_gemm_precision` の戻り値・引数型
