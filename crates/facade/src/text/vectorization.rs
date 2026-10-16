@@ -26,7 +26,9 @@ use super::limits::TextLimits;
 use super::split::Split;
 use super::standardize::Standardize;
 use super::transform::{TransformOptions, transform};
-use super::vocab::{RESERVED_COUNT, Vocabulary};
+use super::vocab::{
+    RESERVED_COUNT, Vocabulary, check_max_tokens, check_vocabulary_within_max_tokens,
+};
 use crate::Tensor;
 
 /// `TextVectorization` の設定。`Default` と `with_*` ビルダで組み立てる。
@@ -141,14 +143,6 @@ fn assemble_idf(vocab_weights: &[f32]) -> Vec<f32> {
     idf
 }
 
-/// `max_tokens` の検査（`Some(m)` で m が 2 以下は `InvalidMaxTokens`）。
-fn check_max_tokens(max_tokens: Option<usize>) -> Result<(), TextError> {
-    match max_tokens {
-        Some(m) if m <= RESERVED_COUNT => Err(TextError::InvalidMaxTokens { max_tokens: m }),
-        _ => Ok(()),
-    }
-}
-
 /// `ngrams`・`output_sequence_length` の構築時検査（確保より先）。
 fn check_config_numbers(config: &TextVectorizationConfig) -> Result<(), TextError> {
     if let Some(n) = config.ngrams {
@@ -174,12 +168,7 @@ impl TextVectorization {
     ) -> Result<Self, TextError> {
         check_pad(&config)?;
         check_max_tokens(config.max_tokens)?;
-        if let Some(m) = config.max_tokens {
-            let total = vocabulary.len().saturating_add(RESERVED_COUNT);
-            if total > m {
-                return Err(TextError::VocabularyTooLarge { len: total, max: m });
-            }
-        }
+        check_vocabulary_within_max_tokens(config.max_tokens, vocabulary.len())?;
         check_config_numbers(&config)?;
         let vocabulary = Vocabulary::from_tokens(&config.limits, vocabulary)?;
         Ok(Self {
@@ -203,12 +192,7 @@ impl TextVectorization {
     ) -> Result<Self, TextError> {
         check_pad(&config)?;
         check_max_tokens(config.max_tokens)?;
-        if let Some(m) = config.max_tokens {
-            let total = vocabulary.len().saturating_add(RESERVED_COUNT);
-            if total > m {
-                return Err(TextError::VocabularyTooLarge { len: total, max: m });
-            }
-        }
+        check_vocabulary_within_max_tokens(config.max_tokens, vocabulary.len())?;
         check_config_numbers(&config)?;
         if idf_weights.len() != vocabulary.len() {
             return Err(TextError::IdfWeightsLengthMismatch {
