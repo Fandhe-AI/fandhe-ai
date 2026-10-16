@@ -167,16 +167,16 @@ impl StringLookup {
         }
         let host = ids.host_slice();
         let tokens = self.vocabulary.tokens();
-        let mut picked: Vec<&String> = Vec::with_capacity(numel);
-        for (index, &id) in host.iter().enumerate() {
-            let t = usize::try_from(id)
-                .ok()
-                .and_then(|i| tokens.get(i))
-                .ok_or(TextError::IdOutOfRange { index })?;
-            picked.push(t);
+        // 走査 1: 範囲検査のみ（中間 Vec を確保しない）。最初の範囲外の位置を返す。
+        let lookup = |id: i32| usize::try_from(id).ok().and_then(|i| tokens.get(i));
+        if let Some(index) = host.iter().position(|&id| lookup(id).is_none()) {
+            return Err(TextError::IdOutOfRange { index });
         }
-        limits.check_corpus_total_bytes(picked.iter().map(|t| t.len()))?;
-        Ok(picked.into_iter().cloned().collect())
+        // 走査 2: 総バイト数の検査（範囲は検証済みなので `unwrap_or` は到達しない）。
+        limits
+            .check_corpus_total_bytes(host.iter().map(|&id| lookup(id).map_or(0, |t| t.len())))?;
+        // 走査 3: 全検査後にだけ結果を確保して構築する。
+        Ok(host.iter().filter_map(|&id| lookup(id).cloned()).collect())
     }
 
     /// id 順の語彙（予約 2 件を先頭に含む）。
