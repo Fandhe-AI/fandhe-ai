@@ -600,7 +600,8 @@ fn step_batched_mid_join_and_leave_do_not_change_other_outputs() {
     );
 }
 
-/// §21.8 の TopK／Temperature: token 列は主張せず、分岐する前の文脈の logits だけ比べる。
+/// §21.8 の TopK／Temperature: token 列は主張しない。分岐前は単独 run の logits と、全 decode 位置は
+/// 束ねた run の入力 id 列を単独モデルへ再生した同一文脈の logits と比べる。
 #[test]
 fn step_batched_sampling_requests_match_before_divergence() {
     let plan: Plan = vec![
@@ -629,6 +630,7 @@ fn step_batched_sampling_requests_match_before_divergence() {
         let log = m.log.borrow();
         assert_batched_calls(&label, &log);
         let mut compared_first = [false; 3];
+        let mut replayed = [0usize; 3];
         map_lockstep(&plan, &log, |i, pos, row, _| {
             let t0 = plan[i].1.len();
             // 位置 pos の文脈 = prompt + 生成 token（pos まで）。束ねた run と単独で一致する間だけ比べる。
@@ -643,7 +645,29 @@ fn step_batched_sampling_requests_match_before_divergence() {
                     compared_first[i] = true;
                 }
             }
+            // 分岐後も検査を残すため、束ねた run の実際の入力 id 列（prompt + 生成 token の
+            // `..=pos`）を単独モデルへ再生し、同じ文脈の位置 pos の logits と比べる（§21.8）。
+            // 先頭呼び出し（prefill）の最終行が位置 pos の logits になる。
+            let replay = BatchedRecording::new(BatchedAttnLm::new(layers, 100));
+            let cfg = greedy(pos + 2);
+            generate(&replay, &ids(&b_out[..=pos], true), &cfg).expect("再生 generate");
+            let rl = replay.log.borrow();
+            let last = rl[0].logits.chunks(V).last().expect("再生の logits");
+            assert_parity(
+                &format!("{label} 要求 {i} 位置 {pos}（入力 id 列の再生）"),
+                row,
+                last,
+            );
+            replayed[i] += 1;
         });
+        // 全 decode 位置（分岐後を含む）が再生比較された。
+        for (i, (_, p, _, c)) in plan.iter().enumerate() {
+            assert_eq!(
+                replayed[i],
+                c.max_length - 1 - p.len(),
+                "{label} 要求 {i} 再生"
+            );
+        }
         // prefill は B = 1 で単独と同じ形状なので、最初の decode 位置は必ず比較される。
         assert_eq!(compared_first, [true; 3], "{label}");
     }
