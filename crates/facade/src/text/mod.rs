@@ -18,14 +18,16 @@
 //! `TextVectorization` のメソッド（`transform_multi_hot`・`transform_count`・
 //! `transform_tf_idf`）として足した（#3092）。
 //!
-//! # ASCII 限定
+//! # 小文字化と空白分割の範囲
 //!
-//! **小文字化と空白分割は ASCII に限る**。`Standardize::Lower` は `A`〜`Z` だけを変換し、
+//! **既定と既存 variant の小文字化と空白分割は ASCII に限る**。`Standardize::Lower` は `A`〜`Z` だけを変換し、
 //! `Standardize::StripPunctuation` は ASCII 句読点 32 文字だけを削除する。
 //! `Split::Whitespace` は ASCII 空白（SP・TAB・LF・FF・CR）だけで分割し、全角空白や
 //! NBSP では分割しない。非 ASCII の文字は変更されずにそのまま語彙の lookup に渡る。
-//! Unicode 対応は保留中で、`Standardize`／`Split` が `#[non_exhaustive]` のため
-//! 後から variant を足しても非破壊になる。
+//! Unicode 版は opt-in の `Standardize::UnicodeLower`（`char::to_lowercase`。文脈非依存で
+//! 語末の `Σ` も `σ`・`İ` は `i` + U+0307 に伸びる。標準化後のバイト数にも入力上限を適用）と
+//! `Split::UnicodeWhitespace`（Unicode White_Space で分割）を選ぶ（#3089。設計記録 §18）。
+//! 既定値は変わらない。Unicode 正規化・書記素クラスタは対象外のまま。
 //!
 //! # id の割り当てと契約
 //!

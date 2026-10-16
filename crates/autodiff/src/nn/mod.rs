@@ -239,6 +239,9 @@
 //! イシュー #3043（親 #3018）で `lrn` モジュールの [`LocalResponseNorm`]（`Var::local_response_norm` への
 //! 1 行委譲の無状態層）を追加した。新規 `Op`／`BackendOps`／VJP／カーネルは無い。facade の
 //! `Sequential::add_*` は後続 issue の範囲。
+//! イシュー #3110（親 #3108）で [`PagedKvCacheReference`]／[`paged_attention_reference`]（`paged_kv`
+//! モジュール。デバイス常駐 KV K-3 の CPU 参照。設計 `docs/device-resident-kv-paged-attention-design.md`）
+//! を追加した。新規 `Op`／`BackendOps`／`unsafe` は無く、facade 公開は #3112。
 
 mod attention;
 mod batch_norm;
@@ -260,6 +263,7 @@ mod module;
 mod norm;
 mod normalization;
 mod padding;
+mod paged_kv;
 mod pixel_shuffle;
 mod pooling;
 mod rnn;
@@ -313,6 +317,9 @@ pub use normalization::{
     GROUP_NORM_DEFAULT_EPS, GroupNorm, INSTANCE_NORM_DEFAULT_EPS, InstanceNorm,
 };
 pub use padding::ZeroPad2d;
+pub use paged_kv::{
+    DEFAULT_BLOCK_SIZE, PagedKvCacheConfig, PagedKvCacheReference, paged_attention_reference,
+};
 pub use pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 pub(crate) use pixel_shuffle::{pixel_shuffle_forward, pixel_unshuffle_forward};
 pub use pooling::{

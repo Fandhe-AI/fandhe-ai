@@ -39979,8 +39979,9 @@ fn facade_exposes_text_items_only_in_approved_shape_detects_each_category() {
     );
 }
 
-/// 公開形の固定: `Standardize` 4・`Split` 3・`TextError` 22 variant のインベントリ（#3092 で 5 つ追加）。
-/// callable を受ける variant と Unicode 系 variant を足すと、ここで落ちる（論点 3 の Unicode 部分・論点 8）。
+/// 公開形の固定: `Standardize` 5・`Split` 4・`TextError` 22 variant のインベントリ（#3092 で 5 つ追加）。
+/// 承認済み Unicode 2 variant（`UnicodeLower`・`UnicodeWhitespace`。#3089）以外の variant と、
+/// callable を受ける variant を足すと、ここで落ちる（論点 8）。
 #[test]
 fn text_public_shape_is_pinned() {
     let files = facade_src_files();
@@ -39990,12 +39991,13 @@ fn text_public_shape_is_pinned() {
             "None",
             "Lower",
             "StripPunctuation",
-            "LowerAndStripPunctuation"
+            "LowerAndStripPunctuation",
+            "UnicodeLower"
         ]
     );
     assert_eq!(
         text_enum_variants(&files, "Split"),
-        vec!["None", "Whitespace", "Character"]
+        vec!["None", "Whitespace", "Character", "UnicodeWhitespace"]
     );
     assert_eq!(
         text_enum_variants(&files, "TextError"),

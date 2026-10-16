@@ -2565,7 +2565,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 - CUDA／Metal の実機 parity は対象がない（ホスト側のみの処理）。`#[ignore]` テストも `docs/perf/logs/` への申し送りも作らない。
 - `Var::embedding(.., Some(0))` との結線テストでは、形状が `[B, L, D]` になることとパディング位置の勾配が 0 であることを確かめる。
 
-拡張要否（設計記録 §9。推奨・未承認）: 依存追加・新規 `unsafe`・新規 `Op`／`BackendOps`／VJP はいずれも不要。別承認で必要になりうるもの: Unicode の大小文字変換、Unicode White_Space 分割、書記素クラスタ、callable、`multi_hot` 系の出力モード、`Sequential` の層化。入力上限（バッチ要素数・文字列バイト数・語彙数・n-gram 数・出力要素数等）の既定値・絶対上限は設計記録 §8 の表を正とし、本節では数値を二重管理しない。
+拡張要否（設計記録 §9。推奨・未承認）: 依存追加・新規 `unsafe`・新規 `Op`／`BackendOps`／VJP はいずれも不要。別承認で必要になりうるもの（Unicode の大小文字変換・Unicode White_Space 分割は #3089 で opt-in variant として実装済み・設計記録 §18）: Unicode の大小文字変換、Unicode White_Space 分割、書記素クラスタ、callable、`multi_hot` 系の出力モード、`Sequential` の層化。入力上限（バッチ要素数・文字列バイト数・語彙数・n-gram 数・出力要素数等）の既定値・絶対上限は設計記録 §8 の表を正とし、本節では数値を二重管理しない。
 
 承認依頼する論点（設計記録 §10 の転記。推奨は設計記録にあるものだけ）:
 
@@ -2608,7 +2608,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 論点の決着: 1・2・4・5・7・8 は推奨どおり確定。3 は ASCII 部分のみ確定で **Unicode の大小文字変換・Unicode White_Space 分割は保留のまま**。**6（出力モード・`StringLookup` 相当）は保留のまま**。数値（既定値・絶対上限）は設計記録 §8 を正とし二重管理しない。本書 1 節の対象範囲表・`docs/compat-feature-gap.md` の判定列は #2937 の適用記録で扱い、本記録では変えない。
 
-**適用記録（イシュー #2937・親 #2935。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650` の項 1）**: 語彙 lookup 型のテキスト変換を設計記録 §16 の確定形どおり `fandhe_ai::text::{TextVectorization, TextVectorizationConfig, TextLimits, Standardize, Split, TextError}` として公開した（`lib.rs` の `pub mod text;`、`text/mod.rs` の `pub use` 5 文。サブモジュールは非公開・クレートルートへ再エクスポートしない）。小文字化と空白分割は ASCII に限ることを公開 doc に明記し、利用例 doctest（`adapt` → `transform` → `Var::embedding(.., Some(0))`）を付けた。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路（Unicode 系 variant・callable・出力モード・`StringLookup` 相当・`Sequential` への層化・内部項目・クレートルート再エクスポート）の否定プローブは残した。論点 3 の Unicode 部分と論点 6 は保留のまま。本書 1 節の対象範囲表には、#2934 の先例に倣って行を足さない（公開面は新しい互換 API の行ではなく追加の公開モジュールのため）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec`・`unsafe` は不変。CUDA／Metal の実機 parity はホスト側処理のみのため対象なし。詳細は設計記録 §17。
+**適用記録（イシュー #2937・親 #2935。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650` の項 1）**: 語彙 lookup 型のテキスト変換を設計記録 §16 の確定形どおり `fandhe_ai::text::{TextVectorization, TextVectorizationConfig, TextLimits, Standardize, Split, TextError}` として公開した（`lib.rs` の `pub mod text;`、`text/mod.rs` の `pub use` 5 文。サブモジュールは非公開・クレートルートへ再エクスポートしない）。小文字化と空白分割は ASCII に限ることを公開 doc に明記し、利用例 doctest（`adapt` → `transform` → `Var::embedding(.., Some(0))`）を付けた。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路（Unicode 系 variant・callable・出力モード・`StringLookup` 相当・`Sequential` への層化・内部項目・クレートルート再エクスポート）の否定プローブは残した。論点 3 の Unicode 部分と論点 6 は保留のまま（→ 論点 3 の Unicode 部分は #3089 で opt-in variant として実装済み・設計記録 §18）。本書 1 節の対象範囲表には、#2934 の先例に倣って行を足さない（公開面は新しい互換 API の行ではなく追加の公開モジュールのため）。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec`・`unsafe` は不変。CUDA／Metal の実機 parity はホスト側処理のみのため対象なし。詳細は設計記録 §17。
 
 **適用記録（イシュー #3092・親 #3090）**: `TextVectorization` に出力モード `transform_multi_hot`・`transform_count`・`transform_tf_idf`・`from_vocabulary_with_idf`・`adapt_tf_idf`・`idf_weights` と、設定の `pad_to_max_tokens` を、`docs/facade-text-output-modes-string-lookup-decision.md` §3・§7 の形のまま追加した（根拠は 2026-10-11 の D-A。新しい承認は得ていない）。公開済みの `fandhe-ai =0.11.0` に対しては追加のみ。`StringLookup` 相当は #3093、Unicode は #3089 で、本 issue では変えていない。`Cargo.toml`／`Cargo.lock`・tolerance／baseline・ガードレール閾値・`docs/spec`・`unsafe` は不変。詳細は設計記録の #3092 実装記録節。
 

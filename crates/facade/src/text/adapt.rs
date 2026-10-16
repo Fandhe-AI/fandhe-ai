@@ -145,7 +145,7 @@ pub(crate) fn adapt_with_df<S: AsRef<str>>(
 
     let mut map: HashMap<String, Entry> = HashMap::new();
     for (doc, s) in corpus.iter().enumerate() {
-        let std = standardize(s.as_ref(), standardize_mode);
+        let std = standardize(s.as_ref(), standardize_mode, limits, doc)?;
         match ngrams_n {
             None => {
                 for t in split(&std, split_mode) {

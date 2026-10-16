@@ -54,8 +54,9 @@ fn row_token_count(
     input: &str,
     opts: &BagOptions,
     limits: &TextLimits,
+    index: usize,
 ) -> Result<usize, TextError> {
-    let std = standardize(input, opts.standardize);
+    let std = standardize(input, opts.standardize, limits, index)?;
     let tokens = split(&std, opts.split).count();
     match opts.ngrams {
         Some(n) => ngram_count(tokens, n, limits),
@@ -80,9 +81,11 @@ fn count_row(
     input: &str,
     vocab: &Vocabulary,
     opts: &BagOptions,
+    limits: &TextLimits,
+    index: usize,
     row: &mut [f32],
 ) -> Result<(), TextError> {
-    let std = standardize(input, opts.standardize);
+    let std = standardize(input, opts.standardize, limits, index)?;
     match opts.ngrams {
         None => {
             for t in split(&std, opts.split) {
@@ -127,7 +130,7 @@ pub(crate) fn bag<S: AsRef<str>>(
     limits.check_inputs(inputs)?;
     // 3. 事前走査（確保なし）。f32 で正確に数えられない行は確保前に拒否する。
     for (index, s) in inputs.iter().enumerate() {
-        check_exact_count(index, row_token_count(s.as_ref(), opts, limits)?)?;
+        check_exact_count(index, row_token_count(s.as_ref(), opts, limits, index)?)?;
     }
     // 4. 出力要素数の検査（確保より先）→ 5. 一括確保。
     let batch = inputs.len();
@@ -138,8 +141,8 @@ pub(crate) fn bag<S: AsRef<str>>(
     // 6. 行ごとに in-place で数え、モード別の後処理を同じ行バッファの上で行う。
     //    `chunks_exact_mut(0)` は panic するため `width == 0` は飛ばす。
     if width > 0 {
-        for (row, s) in data.chunks_exact_mut(width).zip(inputs.iter()) {
-            count_row(s.as_ref(), vocab, opts, row)?;
+        for (index, (row, s)) in data.chunks_exact_mut(width).zip(inputs.iter()).enumerate() {
+            count_row(s.as_ref(), vocab, opts, limits, index, row)?;
             match kind {
                 BagKind::Presence => {
                     for v in row.iter_mut().filter(|v| **v > 0.0) {

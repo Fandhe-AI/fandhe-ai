@@ -176,6 +176,65 @@ fn lowercasing_and_whitespace_are_ascii_only() {
 }
 
 #[test]
+fn unicode_lower_and_unicode_whitespace_are_opt_in() {
+    let uc = || {
+        cfg()
+            .with_standardize(Standardize::UnicodeLower)
+            .with_split(Split::None)
+    };
+    let tv =
+        TextVectorization::from_vocabulary(uc(), &["i\u{307}stanbul", "straße", "οδοσ"]).unwrap();
+    assert_eq!(
+        ids(&tv.transform(&["İSTANBUL", "STRAßE", "ΟΔΟΣ"]).unwrap()),
+        [2, 3, 4]
+    );
+    // 文脈非依存: 語末の Σ も σ になるので ς の語彙とは一致しない。
+    let tv = TextVectorization::from_vocabulary(uc(), &["οδος"]).unwrap();
+    assert_eq!(ids(&tv.transform(&["ΟΔΟΣ"]).unwrap()), [1]);
+
+    let ws = cfg()
+        .with_split(Split::UnicodeWhitespace)
+        .with_output_sequence_length(3);
+    let tv = TextVectorization::from_vocabulary(ws, &["a", "b", "c"]).unwrap();
+    let out = tv
+        .transform(&["a\u{3000}b\u{00A0}c", "a\u{0B}b", "", "\u{3000}"])
+        .unwrap();
+    assert_eq!(ids(&out), [2, 3, 4, 2, 3, 0, 0, 0, 0, 0, 0, 0]);
+
+    let both = cfg()
+        .with_standardize(Standardize::UnicodeLower)
+        .with_split(Split::UnicodeWhitespace);
+    let tv = TextVectorization::adapt(both, &["Σ\u{3000}σ"]).unwrap();
+    assert_eq!(tv.vocabulary(), ["", "[UNK]", "σ"]);
+}
+
+#[test]
+fn unicode_lower_rejects_expanded_input_over_limit() {
+    let limits = TextLimits::default().with_max_input_bytes(2).unwrap();
+    let c = cfg()
+        .with_standardize(Standardize::UnicodeLower)
+        .with_split(Split::None)
+        .with_limits(limits);
+    let is_want = |e: TextError| {
+        matches!(
+            e,
+            TextError::InputTooLong {
+                index: 0,
+                len: 3,
+                max: 2
+            }
+        )
+    };
+    let tv = TextVectorization::from_vocabulary(c.clone(), &["a"]).unwrap();
+    assert!(is_want(tv.transform(&["İ"]).unwrap_err()));
+    let fixed =
+        TextVectorization::from_vocabulary(c.clone().with_output_sequence_length(2), &["a"])
+            .unwrap();
+    assert!(is_want(fixed.transform(&["İ"]).unwrap_err()));
+    assert!(is_want(TextVectorization::adapt(c, &["İ"]).unwrap_err()));
+}
+
+#[test]
 fn character_split_and_ngrams() {
     let ch = TextVectorization::adapt(cfg().with_split(Split::Character), &["ab"]).unwrap();
     assert_eq!(ch.vocabulary(), ["", "[UNK]", "a", "b"]);
