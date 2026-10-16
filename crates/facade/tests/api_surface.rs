@@ -1116,6 +1116,115 @@ fn cuda_graph_infer_optin_is_reachable_via_facade() {
     assert_eq!(count("override_infer_graph_for_scope"), 0);
 }
 
+/// `lib.rs` ソースに対する B-1（elementwise 融合）の公開面検査。違反の
+/// 一覧を返す（空なら適合）。否定ガードが本当に効くことは下の自己テスト
+/// （正のプローブ）で示す（stable rustdoc は compile_fail のコードを照合
+/// しないため、ソース走査＋プローブで組む）。
+fn elementwise_fusion_surface_violations(src: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    // 内部機構（決定記録 §5）は facade の識別子として現れてはならない。
+    for ident in [
+        "match_elementwise_plan",
+        "ElementwiseProgram",
+        "MAX_FUSED_SEGMENT_NODES",
+    ] {
+        if src.contains(ident) {
+            v.push(format!("非公開物 {ident} が lib.rs に現れる"));
+        }
+    }
+    // backend の setter を `pub use` で再公開しない（委譲本体の呼び出しのみ許可）。
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.starts_with("pub use") && t.contains("set_gpu_elementwise_fusion_enabled") {
+            v.push(format!("backend setter の再エクスポート: {t}"));
+        }
+    }
+    v
+}
+
+/// `fandhe_ai::set_cuda_elementwise_fusion_enabled` 等（イシュー #3115 が公開形・
+/// #3385 が公開）が facade root から到達可能で、承認形のシグネチャが 1 回ずつ
+/// 現れ、内部機構が漏れていないことの固定。往復後は元の値へ戻す。
+#[test]
+fn cuda_elementwise_fusion_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::cuda_elementwise_fusion_enabled();
+    fandhe_ai::set_cuda_elementwise_fusion_enabled(true);
+    assert!(fandhe_ai::cuda_elementwise_fusion_enabled());
+    fandhe_ai::set_cuda_elementwise_fusion_enabled(original);
+
+    let src = include_str!("../src/lib.rs");
+    let count = |needle: &str| src.matches(needle).count();
+    assert_eq!(
+        count("pub fn set_cuda_elementwise_fusion_enabled(enabled: bool) {"),
+        1
+    );
+    assert_eq!(
+        count("pub fn cuda_elementwise_fusion_enabled() -> bool {"),
+        1
+    );
+    // Metal の対は macOS cfg 付きで 1 回ずつ（ソース走査のため Linux でも検査できる）。
+    let lines: Vec<&str> = src.lines().collect();
+    for sig in [
+        "pub fn set_metal_elementwise_fusion_enabled(enabled: bool) {",
+        "pub fn metal_elementwise_fusion_enabled() -> bool {",
+    ] {
+        assert_eq!(count(sig), 1, "{sig}");
+        let idx = lines.iter().position(|l| l.trim() == sig).expect(sig);
+        assert_eq!(
+            lines[idx - 1].trim(),
+            "#[cfg(target_os = \"macos\")]",
+            "{sig}"
+        );
+    }
+    assert_eq!(
+        elementwise_fusion_surface_violations(src),
+        Vec::<String>::new()
+    );
+}
+
+/// 否定ガードの正のプローブ: 違反を含む合成文字列は検出され、空・正規形は
+/// 検出されない。
+#[test]
+fn elementwise_fusion_surface_guard_detects_violations() {
+    assert!(elementwise_fusion_surface_violations("").is_empty());
+    assert!(
+        elementwise_fusion_surface_violations(
+            "pub fn set_cuda_elementwise_fusion_enabled(enabled: bool) {\n    \
+             fandhe_ai_backend_cuda::fused_elementwise::set_gpu_elementwise_fusion_enabled(enabled);\n}\n"
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        elementwise_fusion_surface_violations("pub use x::match_elementwise_plan;").len(),
+        1
+    );
+    assert_eq!(
+        elementwise_fusion_surface_violations(
+            "pub use fandhe_ai_backend_cuda::fused_elementwise::set_gpu_elementwise_fusion_enabled;"
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        elementwise_fusion_surface_violations("const N: usize = MAX_FUSED_SEGMENT_NODES;").len(),
+        1
+    );
+}
+
+/// Metal 版（macOS 限定）の往復固定（イシュー #3385）。
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_elementwise_fusion_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::metal_elementwise_fusion_enabled();
+    fandhe_ai::set_metal_elementwise_fusion_enabled(true);
+    assert!(fandhe_ai::metal_elementwise_fusion_enabled());
+    fandhe_ai::set_metal_elementwise_fusion_enabled(original);
+}
+
 /// Metal 版（macOS 限定）の同型固定。
 #[cfg(target_os = "macos")]
 #[test]
