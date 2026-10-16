@@ -792,3 +792,32 @@ tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec`・`generat
 - 厳密入力の選定理由: logits を集合上 `0.0`・外 `-1e4`、集合の大きさを 2 のべき乗に限ると、`Generator` へ渡る `f32` 値（サンプリング重み・受理確率 0／0.5／1・残差重み）が libm・計算順序・プラットフォームによらず bit 単位で一意に決まる。再生オラクル `reference_speculative` は同じ `Generator` を §25.2 の消費順で引く独立実装で、`generate_speculative` と token 列の完全一致を固定掃引（5120 通り）で要求する。draft 規則 5 種で受理確率 0／0.5／1・残差・bonus の全経路を通ることを統計で確認する
 - 実機: `speculative_batching_backend_parity.rs` に §20.7 の再生方式（参照側で記録した id 列を比較側へ再生し logits だけを `assert_parity` で比べる。token 列は比べない）を追加した。属性なしの CPU 対 Naive（`cpu_backend_ops_matches_naive_ops_for_speculative_sampling`）と再生ハーネスの検出力テストは CI 実行、`cuda_speculative_sampling_matches_cpu`・`metal_speculative_sampling_matches_cpu` は `#[ignore]`（未実測。`docs/perf/logs/speculative-sampling-3102/README.md`）
 - 実機テストを #3171（CUDA）・#3172（Metal）の実測対象に加えるかは所有者の判断事項
+
+## 28. 実装記録（#3107・親 #3103）
+
+承認の根拠は D-A（§21.1）の範囲に限り、新しい承認は主張しない。テストと docs の追加だけで、`crates/*/src`・依存・`unsafe`・`docs/spec` は変更していない。
+
+### 28.1 追加したテストと §21.8 必須検査の対応
+
+| 検査（§21.8） | テスト |
+|---|---|
+| prompt 長・`max_length` が違う要求の出力が単独 `generate` と一致（logits は統一複合判定、token 列は margin 付き Greedy） | `step_batched_lockstep_mixed_lengths_matches_standalone_generate`（`speculative_batching_step_batched_facade.rs`） |
+| padding の量だけを変えても出力が変わらない | `step_batched_padding_amount_does_not_change_output` |
+| 途中参加・途中退出・長さ混在で他の要求の出力が変わらない | `step_batched_mid_join_and_leave_do_not_change_other_outputs` |
+| TopK／Temperature は分岐前の logits だけ比べる | `step_batched_sampling_requests_match_before_divergence` |
+| 形状に依らない表引きモデルは全戦略で token 列完全一致 | `step_batched_table_model_matches_exactly_for_all_strategies` |
+| テストが決定的（同形状どうし bit 一致） | `step_batched_is_deterministic` |
+| 実機は `#[ignore]` で分離 | `cuda_scheduler_batched_greedy_matches_cpu`・`metal_scheduler_batched_greedy_matches_cpu`（`speculative_batching_backend_parity.rs`。属性なしの CPU 対 Naive 版は CI で実行） |
+
+### 28.2 設計上の判断
+
+- フィクスチャの契約: 位置は `valid_len(r)`（`seq_len()` は使わない）、戻りは `[b, l, V]`。B 非対応モデルは `step_batched` が黙って B = 1 へ戻るため、束ねを検証するテストはすべて `b > 1 && l == 1` の呼び出しが実在することを検査する（空振り防止）。lockstep では decode の k 回目の行を `valid_len == T + k` で要求へ対応づけ、対応づけを fail-closed にした
+- TopK／Temperature は token 列を主張せず、単独 `generate` と出力が一致している間の位置の logits だけ統一複合判定で比べる。最初の decode 位置は prefill が B = 1 で同形状のため必ず比較される
+- 途中参加・退出の計画では、スケジュール順に依らず decode 行を（位置 = `valid_len`・入力 id）で要求へ対応づけ、位置ごとの logits を単独 `generate` の行と統一複合判定で比べる（全 decode 位置の被覆と、全行がいずれかの要求へ対応することを fail-closed に検査）。加えて出力水準の比較（単独との一致と、他要求の構成を変えても同じ R の出力）も残す
+- bit 一致は主張しない（§21.4。GEMM のブロッキングは形状に依存する）。決定性テストは同形状・同入力の再実行だけを bit 比較する
+- margin 前提（`assert_margin`）は REQ-2 定数から導いたフィクスチャの妥当性検査で、新しい tolerance ではない。`SKIP_C` は変更していない
+- H1（バックエンドをまたぐ token 列一致）が破れた場合は判定を緩めず §10 論点 2 として承認依頼に戻す
+
+### 28.3 変えないもの・申し送り
+
+tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec` は不変。実機（CUDA／Metal）のバッチ経路は未実測で、`docs/perf/logs/speculative-batching-facade-2934/README.md` の「#3107 追記」に測定コマンドと空の記入欄を置き、Phase 8（#3171・#3172）へ申し送る。対象外: B > 1 の speculative、padding 付き prefill、持続的なバッチキャッシュ、paged attention との結線、EOS 停止。
