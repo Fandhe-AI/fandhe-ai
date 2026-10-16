@@ -262,4 +262,152 @@ mod tests {
         assert!(m.body.len() < MAX_RESPONSE_BYTES);
         assert!(list_files_via(&mut m, &repo(), &sha).is_err());
     }
+
+    // ---- #3132: 追加のモックテスト（外部通信なし。転送層は trait 注入のみ） ----
+
+    fn mock_bytes(status: u16, body: Vec<u8>) -> Mock {
+        let mut m = Mock::new(status, "");
+        m.body = body;
+        m
+    }
+
+    #[test]
+    fn tag_and_dotted_ref_urls() {
+        for (rev, tail) in [
+            ("v1.0", "/revision/v1.0"),
+            ("feat_x-1.2", "/revision/feat_x-1.2"),
+        ] {
+            let mut m = Mock::new(200, &format!(r#"{{"sha":"{SHA}"}}"#));
+            let r = Revision::parse(rev).unwrap();
+            assert_eq!(
+                resolve_revision_via(&mut m, &repo(), &r).unwrap().as_str(),
+                SHA
+            );
+            assert!(m.last_url.ends_with(tail), "{}", m.last_url);
+            assert_eq!(m.calls, 1);
+        }
+    }
+
+    #[test]
+    fn status_mapping_is_same_for_list_files() {
+        let sha = CommitSha::parse(SHA).unwrap();
+        for (status, expect) in [
+            (401, "Unauthorized"),
+            (403, "Gated"),
+            (404, "NotFound"),
+            (503, "Http { status: 503 }"),
+        ] {
+            let mut m = Mock::new(status, "{}");
+            let e = list_files_via(&mut m, &repo(), &sha).unwrap_err();
+            assert_eq!(format!("{e:?}"), expect, "{status}");
+            let shown = e.to_string();
+            assert!(!shown.contains("huggingface.co") && !shown.contains("org/model"));
+        }
+    }
+
+    #[test]
+    fn redirects_are_never_followed_for_any_location() {
+        let sha = CommitSha::parse(SHA).unwrap();
+        // 許可想定ホスト・許可外ホスト・平文 http のいずれでも追従せず 1 回で拒否する。
+        let locations = [
+            "https://huggingface.co/api/models/org/model/revision/main",
+            "https://evil.example/x",
+            "http://huggingface.co/x",
+        ];
+        for status in [301u16, 302, 303, 307, 308] {
+            for loc in locations {
+                let body = format!(r#"{{"location":"{loc}"}}"#);
+                let mut m = Mock::new(status, &body);
+                let e = resolve_revision_via(&mut m, &repo(), &Revision::main()).unwrap_err();
+                assert!(matches!(e, HfError::Http { status: s } if s == status));
+                assert_eq!(m.calls, 1, "{status} {loc}");
+                let shown = format!("{e} {e:?}");
+                assert!(!shown.contains("evil.example") && !shown.contains("huggingface"));
+
+                let mut m = Mock::new(status, &body);
+                let e = list_files_via(&mut m, &repo(), &sha).unwrap_err();
+                assert!(matches!(e, HfError::Http { status: s } if s == status));
+                assert_eq!(m.calls, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn non_utf8_bodies_are_invalid_response() {
+        for body in [b"\xff\xfe{}".to_vec(), b"{\"sha\":\"\xff\"}".to_vec()] {
+            let mut m = mock_bytes(200, body);
+            let r = resolve_revision_via(&mut m, &repo(), &Revision::main());
+            assert!(matches!(r, Err(HfError::InvalidResponse { .. })));
+        }
+    }
+
+    #[test]
+    fn response_size_boundary() {
+        let head = format!(r#"{{"sha":"{SHA}"}}"#);
+        let mut body = head.into_bytes();
+        body.resize(MAX_RESPONSE_BYTES, b' ');
+        let mut m = mock_bytes(200, body.clone());
+        assert!(resolve_revision_via(&mut m, &repo(), &Revision::main()).is_ok());
+        body.push(b' ');
+        let mut m = mock_bytes(200, body);
+        let r = resolve_revision_via(&mut m, &repo(), &Revision::main());
+        assert!(matches!(r, Err(HfError::ResponseTooLarge { .. })));
+    }
+
+    #[test]
+    fn deeply_nested_json_does_not_panic() {
+        let mut m = mock_bytes(200, "[".repeat(10_000).into_bytes());
+        let r = resolve_revision_via(&mut m, &repo(), &Revision::main());
+        assert!(matches!(r, Err(HfError::InvalidResponse { .. })));
+        let nested = format!(r#"{{"sha":"{SHA}","siblings":{}}}"#, "[".repeat(10_000));
+        let sha = CommitSha::parse(SHA).unwrap();
+        let mut m = mock_bytes(200, nested.into_bytes());
+        assert!(list_files_via(&mut m, &repo(), &sha).is_err());
+    }
+
+    #[test]
+    fn list_files_shape_and_boundaries() {
+        let sha = CommitSha::parse(SHA).unwrap();
+        // 空 siblings は空一覧の成功。
+        let mut m = Mock::new(200, &format!(r#"{{"sha":"{SHA}","siblings":[]}}"#));
+        assert!(list_files_via(&mut m, &repo(), &sha).unwrap().is_empty());
+        // 型不正・rfilename 欠落。
+        for sib in [
+            r#"{}"#,
+            "1",
+            r#"[{}]"#,
+            r#"[{"name":"a"}]"#,
+            r#"[{"rfilename":1}]"#,
+        ] {
+            let mut m = Mock::new(200, &format!(r#"{{"sha":"{SHA}","siblings":{sib}}}"#));
+            let r = list_files_via(&mut m, &repo(), &sha);
+            assert!(matches!(r, Err(HfError::InvalidResponse { .. })), "{sib}");
+        }
+        // パス長 ±1。
+        for (len, ok) in [(MAX_PATH_BYTES, true), (MAX_PATH_BYTES + 1, false)] {
+            let p = "a".repeat(len);
+            let body = format!(r#"{{"sha":"{SHA}","siblings":[{{"rfilename":"{p}"}}]}}"#);
+            let mut m = Mock::new(200, &body);
+            assert_eq!(list_files_via(&mut m, &repo(), &sha).is_ok(), ok, "{len}");
+        }
+        // 件数ちょうど（上限 +1 拒否は既存テスト）。
+        let many = vec![r#"{"rfilename":"a"}"#; MAX_FILES].join(",");
+        let mut m = Mock::new(200, &format!(r#"{{"sha":"{SHA}","siblings":[{many}]}}"#));
+        assert_eq!(
+            list_files_via(&mut m, &repo(), &sha).unwrap().len(),
+            MAX_FILES
+        );
+    }
+
+    #[test]
+    fn list_files_pin_mismatch_is_rejected() {
+        // 要求 commit と応答 sha の不一致（リビジョン固定違反）は 1 文字違いでも拒否する。
+        let sha = CommitSha::parse(SHA).unwrap();
+        let mut other = SHA.to_owned();
+        other.replace_range(39.., "8");
+        let mut m = Mock::new(200, &format!(r#"{{"sha":"{other}","siblings":[]}}"#));
+        let r = list_files_via(&mut m, &repo(), &sha);
+        assert!(matches!(r, Err(HfError::InvalidResponse { .. })));
+        assert!(m.last_url.ends_with(&format!("/revision/{SHA}")));
+    }
 }

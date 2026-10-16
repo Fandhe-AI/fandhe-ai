@@ -49,6 +49,9 @@ mod filename;
 mod transport;
 mod url;
 
+#[cfg(test)]
+mod live_tests;
+
 pub use api::RepoFile;
 
 /// repo_id の各 segment の暫定上限バイト数（外部仕様・要確認）。
@@ -588,5 +591,107 @@ mod tests {
                 .to_string()
                 .contains(secret)
         );
+    }
+
+    // ---- #3132: 追加の入力検証・キャッシュキーのテスト ----
+
+    #[test]
+    fn accepts_exact_upper_bounds() {
+        let seg = "a".repeat(MAX_SEGMENT_BYTES);
+        assert!(HfRepoId::parse(&format!("{seg}/{seg}")).is_ok());
+        let bad = "a".repeat(MAX_SEGMENT_BYTES + 1);
+        assert!(HfRepoId::parse(&format!("{bad}/a")).is_err());
+        assert!(HfRepoId::parse(&format!("a/{bad}")).is_err());
+        let rev = "a".repeat(MAX_REVISION_BYTES);
+        assert!(Revision::parse(&rev).is_ok());
+        let slashed = format!("{}/{}", "a".repeat(127), "b".repeat(127));
+        assert_eq!(slashed.len(), MAX_REVISION_BYTES);
+        assert!(Revision::parse(&slashed).is_ok());
+        assert!(Revision::parse(&format!("{rev}a")).is_err());
+    }
+
+    #[test]
+    fn revision_hex_classification_matrix() {
+        let lower40 = "a".repeat(40);
+        let mixed40 = format!("{}A", "a".repeat(39));
+        assert_eq!(
+            Revision::parse(&lower40).unwrap().commit_sha(),
+            Some(lower40.as_str())
+        );
+        assert!(Revision::parse(&mixed40).is_err());
+        for n in [39usize, 41] {
+            let r = Revision::parse(&"a".repeat(n)).unwrap();
+            assert!(r.commit_sha().is_none() && r.ref_name().is_some(), "{n}");
+        }
+    }
+
+    #[test]
+    fn cache_key_is_deterministic_and_collision_free() {
+        let sha_a = CommitSha::parse(SHA).unwrap();
+        let sha_b = CommitSha::parse(&"f".repeat(40)).unwrap();
+        let ids = [
+            "a.b/c", "a/b.c", "a-b/c", "a/b-c", "a_b/c", "a/b_c", "ab/c", "a/bc",
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            let repo = HfRepoId::parse(id).unwrap();
+            for sha in [&sha_a, &sha_b] {
+                let m1 = (cache_key::encode(&repo), sha.as_str().to_owned());
+                let m2 = (cache_key::encode(&repo), sha.as_str().to_owned());
+                assert_eq!(m1, m2);
+                assert!(seen.insert(m1), "{id}");
+                let u = url::resolve_url(&repo, sha, filename::MODEL_FILENAME);
+                assert!(seen.insert((u, String::new())), "{id}");
+            }
+        }
+        let cm = CachedModel {
+            name: "hf--a--b".to_owned(),
+            version: SHA.to_owned(),
+        };
+        assert_eq!(cm.version(), sha_a.as_str());
+        assert_eq!(cm.filename(), "model.safetensors");
+    }
+
+    #[test]
+    fn more_bad_filenames_rejected_without_touching_cache() {
+        let (hub, dir) = scratch_hub("fname2");
+        let repo = HfRepoId::parse("org/model").unwrap();
+        let sha = CommitSha::parse(SHA).unwrap();
+        for f in [
+            "model.safetensors ",
+            " model.safetensors",
+            "MODEL.SAFETENSORS",
+            "%2e%2e/model.safetensors",
+            "model.safetensors/",
+            "./model.safetensors",
+            "model.safetensors?download=true",
+            "model.safetensors#x",
+        ] {
+            let r = hub.download(&repo, &sha, f, pin(), DownloadOptions::default());
+            assert!(matches!(r, Err(HfError::InvalidFilename { .. })), "{f:?}");
+        }
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn all_error_variants_hide_sentinels() {
+        let secret = "s3cr3tTOKEN";
+        let errs = [
+            HfError::InvalidResponse { reason: "x" },
+            HfError::ResponseTooLarge { max: 1 },
+            HfError::NotFound,
+            HfError::Unauthorized,
+            HfError::Gated,
+            HfError::Http { status: 302 },
+            HfError::InvalidFilename { reason: "x" },
+        ];
+        for e in errs {
+            let shown = format!("{e} {e:?}");
+            assert!(!shown.contains(secret) && !shown.contains("://"), "{shown}");
+        }
+        for bad in [secret.to_owned(), format!("{secret}/a b")] {
+            let e = HfRepoId::parse(&bad).unwrap_err();
+            assert!(!format!("{e} {e:?}").contains(secret));
+        }
     }
 }
