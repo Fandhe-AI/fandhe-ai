@@ -483,6 +483,21 @@ pub(crate) fn cached_kl_div(
     })
 }
 
+/// `device` の `CudaContext` に対応する [`crate::paged_kv::CudaPagedKv`]
+/// スイートをプロセス内キャッシュから取得する（イシュー #3111。キーは
+/// [`ContextKey`]。`cached_kl_div` と同型）。`ops::CudaBackendOps::
+/// paged_kv_append`／`paged_attention_forward` の唯一の呼び出し先。
+pub(crate) fn cached_paged_kv(
+    device: &CudaDevice,
+) -> Result<Arc<crate::paged_kv::CudaPagedKv>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::paged_kv::CudaPagedKv>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::paged_kv::CudaPagedKv::new(device)
+    })
+}
+
 /// `device` の `CudaContext` に対応する [`crate::huber::CudaHuber`]
 /// スイートをプロセス内キャッシュから取得する（イシュー #1739。キーは
 /// [`ContextKey`]。`cached_mse` と同型）。

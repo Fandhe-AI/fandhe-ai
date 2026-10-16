@@ -690,6 +690,12 @@ pub(crate) mod adam;
 pub mod adam_model;
 #[cfg(target_os = "macos")]
 pub(crate) mod sgd;
+// デバイス常駐 KV（K-3。イシュー #3111）の起動 API（`sgd` と同じ構成。`objc2` 系 FFI に
+// 触れるため macOS 限定）。dispatch サイズ・`u32` 収容検査・シェーダソース不変条件は
+// 下の cfg なしの `paged_kv_model`（Linux でも単体テストが回る）。
+#[cfg(target_os = "macos")]
+pub(crate) mod paged_kv;
+pub mod paged_kv_model;
 // `pad`／`tile` と同じ設計判断: `objc2` 系 FFI に触れないため
 // `cfg(target_os = "macos")` を付けず Linux でも単体テストが回る。
 // ただし `pad`／`tile` と異なり `row_kernel` は経路選択・occupancy 定数・

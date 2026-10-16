@@ -42,11 +42,12 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
     DType, DispatchFailureCell, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
     InterpolateMode, KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput, MatrixNormOrd,
-    MseReduction, Pool2dParams, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce,
-    ShapeError, SvdFactors, Tensor, UnaryElementwiseOp, adaptive_pool2d_out_shape,
-    batch_norm_layout, gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode,
-    one_hot_out_shape, pad_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    MseReduction, PagedAttentionArgs, PagedKvLayout, Pool2dParams, QrFactors, ScalarBinaryOp,
+    ScalarUnaryOp, ScatterReduce, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
+    adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape, im2col_out_shape,
+    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, pool2d_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
+    sort_out_shape, topk_out_shape, validate_paged_attention, validate_paged_kv_append,
 };
 
 use crate::context::MetalContext;
@@ -1114,6 +1115,133 @@ fn static_metal_memory() -> Result<&'static MetalMemory, BackendError> {
     let mem: &'static MetalMemory = Box::leak(Box::new(MetalMemory::from_shared(ctx)));
     *guard = Some(mem);
     Ok(mem)
+}
+
+/// `DeviceBuffer` から Metal の確保実体（[`crate::buffer::MetalBuffer`]）を取り出す
+/// （`downcast` 失敗は `DeviceMismatch`、未確保は型付きエラー。`linear_forward_device_impl` の
+/// 取り出しと同じ検査を paged KV 用にまとめたもの）。
+fn metal_buffer_ref<'a>(
+    buf: &'a fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    what: &str,
+) -> Result<&'a crate::buffer::MetalBuffer, BackendError> {
+    let handle = buf
+        .downcast_handle::<MetalBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    handle.buffer.as_ref().ok_or_else(|| {
+        BackendError::DeviceAllocationFailed(format!(
+            "{what}: buffer has numel > 0 but no device allocation"
+        ))
+    })
+}
+
+impl MetalBackendOps {
+    /// [`BackendOps::paged_kv_append`]／[`BackendOps::paged_kv_append_tracked`] の共有本体
+    /// （イシュー #3111。`sgd_step_device_impl` と同じ二重化回避パターン）。デバイス一致検査 →
+    /// 共通検証（`tensor-core::validate_paged_kv_append`。FFI より前）→ encode。
+    #[allow(clippy::too_many_arguments)]
+    fn paged_kv_append_impl(
+        &self,
+        k_new: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_new: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        k_pool: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_pool: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<(), BackendError> {
+        if [
+            k_new.device(),
+            v_new.device(),
+            k_pool.device(),
+            v_pool.device(),
+        ]
+        .iter()
+        .any(|d| *d != Device::Metal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let rows = validate_paged_kv_append(
+            k_new.numel(),
+            v_new.numel(),
+            k_pool.numel(),
+            v_pool.numel(),
+            slot_mapping,
+            layout,
+        )?;
+        if rows == 0 {
+            return Ok(());
+        }
+        let kn = metal_buffer_ref(k_new, "paged_kv_append: k_new")?;
+        let vn = metal_buffer_ref(v_new, "paged_kv_append: v_new")?;
+        let kp = metal_buffer_ref(&*k_pool, "paged_kv_append: k_pool")?;
+        let vp = metal_buffer_ref(&*v_pool, "paged_kv_append: v_pool")?;
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let paged = context_cache::cached_paged_kv(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        paged
+            .run_append(&ctx, kn, vn, kp, vp, slot_mapping, layout, token)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))
+    }
+
+    /// [`BackendOps::paged_attention_forward`]／[`BackendOps::paged_attention_forward_tracked`]
+    /// の共有本体（イシュー #3111）。出力は呼び出し元へ escape するため
+    /// `static_metal_memory()`（`memory_ops()` と同一インスタンス）で確保する
+    /// （`linear_forward_device_impl` と同じ判断）。
+    #[allow(clippy::too_many_arguments)]
+    fn paged_attention_forward_impl(
+        &self,
+        q: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        k_pool: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_pool: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if [q.device(), k_pool.device(), v_pool.device()]
+            .iter()
+            .any(|d| *d != Device::Metal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = validate_paged_attention(
+            q.numel(),
+            k_pool.numel(),
+            v_pool.numel(),
+            block_tables,
+            seq_lens,
+            args,
+        )?;
+        let out_shape = [args.batch, args.l_new, args.layout.embed_dim];
+        let mem = static_metal_memory()?;
+        if plan.query_rows == 0 || plan.out_numel == 0 {
+            return mem.alloc_zeroed(&out_shape);
+        }
+        let qb = metal_buffer_ref(q, "paged_attention_forward: q")?;
+        let kp = metal_buffer_ref(k_pool, "paged_attention_forward: k_pool")?;
+        let vp = metal_buffer_ref(v_pool, "paged_attention_forward: v_pool")?;
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let out_dev = mem.alloc_zeroed(&out_shape)?;
+        let out_buf = metal_buffer_ref(&out_dev, "paged_attention_forward: out")?;
+        let paged = context_cache::cached_paged_kv(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        paged
+            .run_attention(
+                &ctx,
+                qb,
+                kp,
+                vp,
+                block_tables,
+                seq_lens,
+                out_buf,
+                args,
+                &plan,
+                token,
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        // `download`／`synchronize` しない（tracked 版）。同期点は呼び出し元の `download`。
+        Ok(out_dev)
+    }
 }
 
 /// [`MetalBackendOps::run_scan`] が `cumsum`／`cumprod` のいずれを
@@ -2883,6 +3011,83 @@ impl BackendOps for MetalBackendOps {
         token: &DispatchFailureCell,
     ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
         self.linear_forward_device_impl(a, w, bias, act, Some(token))
+    }
+
+    /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
+    /// `token: None` の同期版で、復帰時点で GPU 実行の完了・成否を返す
+    /// （`sgd_step_device` と同じ契約）。実体は `paged_kv_append_impl`。
+    fn paged_kv_append(
+        &self,
+        k_new: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_new: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        k_pool: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_pool: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+    ) -> Result<(), BackendError> {
+        self.paged_kv_append_impl(k_new, v_new, k_pool, v_pool, slot_mapping, layout, None)
+    }
+
+    /// [`BackendOps::paged_kv_append_tracked`] の Metal オーバーライド。`token` を
+    /// `paged_kv::MetalPagedKv::run_append` → `context.rs::MetalContext::encode` へ渡し、
+    /// encode と同一ロック区間でバッチへ登録する（`sgd_step_device_tracked` と同型）。
+    /// 待たずに返す非同期契約で、遅延失敗は呼び出し元が `download` 後に `token` を再検査する。
+    fn paged_kv_append_tracked(
+        &self,
+        k_new: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_new: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        k_pool: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_pool: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+        token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.paged_kv_append_impl(
+            k_new,
+            v_new,
+            k_pool,
+            v_pool,
+            slot_mapping,
+            layout,
+            Some(token),
+        )
+    }
+
+    /// ページ化 KV プールに対する attention（K-3。イシュー #3111）。`token: None` の
+    /// 同期版。縮約順序は `shaders/paged_kv.metal` 冒頭コメント。
+    fn paged_attention_forward(
+        &self,
+        q: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        k_pool: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_pool: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.paged_attention_forward_impl(q, k_pool, v_pool, block_tables, seq_lens, args, None)
+    }
+
+    /// [`BackendOps::paged_attention_forward_tracked`] の Metal オーバーライド
+    /// （[`Self::paged_kv_append_tracked`] と同じ設計）。
+    fn paged_attention_forward_tracked(
+        &self,
+        q: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        k_pool: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        v_pool: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.paged_attention_forward_impl(
+            q,
+            k_pool,
+            v_pool,
+            block_tables,
+            seq_lens,
+            args,
+            Some(token),
+        )
     }
 
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `MetalBuffer`

@@ -84,6 +84,7 @@ use crate::im2col::MetalIm2col;
 use crate::interpolate::MetalInterpolate;
 use crate::layer_norm::MetalLayerNorm;
 use crate::norm_backward::MetalNormBackward;
+use crate::paged_kv::MetalPagedKv;
 use crate::pipeline::{self, MtlPipeline};
 use crate::pool::MetalAllocator;
 use crate::rmsnorm::MetalRmsNorm;
@@ -227,6 +228,15 @@ pub(crate) fn cached_sgd(ctx: &Arc<MetalContext>) -> Result<Arc<MetalSgd>, Metal
     static CACHE: OnceLock<Mutex<Option<Arc<MetalSgd>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalSgd::new(ctx))
+}
+
+/// [`MetalPagedKv`] スイートをプロセス内キャッシュから取得する（イシュー #3111）。
+/// `ops::MetalBackendOps::paged_kv_append*`／`paged_attention_forward*` の唯一の
+/// 呼び出し先。MSL 再コンパイルを避ける（`cached_sgd` と同型）。
+pub(crate) fn cached_paged_kv(ctx: &Arc<MetalContext>) -> Result<Arc<MetalPagedKv>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalPagedKv>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalPagedKv::new(ctx))
 }
 
 /// [`MetalAdam`] スイートをプロセス内キャッシュから取得する（イシュー

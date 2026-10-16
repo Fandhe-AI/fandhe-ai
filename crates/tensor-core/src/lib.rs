@@ -188,6 +188,7 @@ pub mod max_unpool;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pad_modes;
+pub mod paged_kv;
 pub mod pool;
 pub mod pool3d;
 pub mod scalar_op;
@@ -232,6 +233,10 @@ pub use error::ShapeError;
 pub use fft::{FftError, FftNorm, StftPadMode};
 pub use indexed_update::ScatterReduceMode;
 pub use pad_modes::{PadMode, PadModeError};
+pub use paged_kv::{
+    PAGED_ATTENTION_MAX_WORKSPACE_ELEMS, PAGED_KV_MAX_BLOCK_SIZE, PagedAttentionArgs,
+    PagedAttentionPlan, PagedKvLayout, validate_paged_attention, validate_paged_kv_append,
+};
 pub use stat_reduce::{QuantileInterpolation, StatReduceError};
 // `half::f16`／`half::bf16` の再エクスポート（イシュー #1960 codex-review
 // 対応）。`Scalar`（`element.rs`）は sealed trait で実装対象を

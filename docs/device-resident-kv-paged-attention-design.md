@@ -118,3 +118,17 @@
 - 縮約順序: 論理順の単一連続ループ（query へ先に scale、score・加重和は `mul_add`）。統一複合判定をそのまま適用（flash-decoding 型 split は baseline 方式の対象）
 - 期待値ユーティリティ: `paged_attention_reference` は autodiff の `nn` から到達できる。backend-cuda には autodiff の dev-dependency が未設定で、足すかは #3111／#3113 の判断（workspace の path 依存）
 - 未実施（後続）: デバイス版・`BackendOps`／`MemoryOps` 追加・新規 `unsafe`（#3111）、Tape 入口・facade 公開（#3112）、実機 parity（#3113）、可変長（#3104）
+
+## 12. #3111 実装記録（K-3 のデバイス版を CUDA・Metal・CPU に実装）
+
+- 承認: 所有者が #3018 のコメント（<https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6207013704>・2026-10-16）で §9 の 1〜4 を承認済み。§0・§9 は承認前の記録として残す。**依存追加・tolerance・ガードレール閾値の変更は承認に含まれず、行っていない**。新規 `unsafe` の security-auditor 個別監査は未実施（`docs/device-resident-kv-unsafe-audit.md`）
+- `BackendOps` への追加（既定は `Unsupported`。K-1 へ暗黙フォールバックしない）: `paged_kv_append`／`paged_kv_append_tracked`／`paged_attention_forward`／`paged_attention_forward_tracked`。`MemoryOps` には追加しない（確保は `alloc_zeroed`、解放は `DeviceBuffer` の RAII）。追記はスロット写像方式（`block_id · block_size + pos % block_size` の列）、attention は平坦化ブロックテーブル `[B, max_blocks_per_seq]`（未使用枠は番兵 `u32::MAX`）と `seq_lens`
+- 型・検証: `tensor-core::paged_kv`（`PagedKvLayout`・`PagedAttentionArgs`・`PagedAttentionPlan`・`validate_paged_kv_append`・`validate_paged_attention`）。3 バックエンドが FFI より前に同じ関数を通す。作業バッファの上限は `1 << 30` 要素
+- 配置: CPU `crates/backend-cpu/src/paged_kv.rs`、CUDA `kernels_paged_kv.rs`／`paged_kv.rs`（`context_cache::cached_paged_kv`）、Metal `shaders/paged_kv.metal`／`paged_kv.rs`／`paged_kv_model.rs`（cfg なし）、autodiff `nn/paged_kv_device.rs`（`PagedKvCache`。`BlockTable` を `pub(crate)` 化して再利用）
+- 縮約順序: CUDA・Metal とも `j` 軸（系列方向）は単一の連続ループ（max・和は thread 0 が論理順に逐次）、`Dh` 軸は `fma` の逐次累積。`q · scale` を先に作る。したがって REQ-2 の baseline 方式の対象ではなく、統一複合判定をそのまま適用する。flash-decoding 型の split・warp／SIMD-group 集約・アトミックは入れていない（ソース不変条件テストで固定）
+- `PagedKvCache`（1 層）: 追記は `BlockTable` を複製して確保し、書き込み成功後にだけ確定する。バックエンドの実行時エラーは poison（`Unsupported` は poison しない）。`attention` は `upload`（同期しない）→ `paged_attention_forward_tracked` → `download`（唯一の同期点）→ `failure_token` の再検査。`rewind_to`／`clear` はホストのテーブルだけを操作する
+- 設計判断: backend-cuda に autodiff の dev-dependency は**足さない**（§11 が保留していた点）。CUDA・Metal の実機テストは `CpuBackendOps` を直接の参照にし、autodiff の参照との一致は `crates/backend-cpu/tests/paged_kv_backend_parity.rs`（CI）が `PagedKvCache` 経由で確認する
+- 可変長: カーネル入力は行ごとの `seq_lens` を受けるが、owner は全行同長の不変条件を引き継ぐ（#3104 の結論待ち）
+- テスト: tensor-core（検証関数・既定 `Unsupported`・`_tracked` 委譲）、autodiff（Mock の `BackendOps` による owner の状態遷移）、backend-cpu（参照との一致・検証エラー）、backend-cuda（ソース不変条件・launch 引数・poison／世代検査・検証拒否）、backend-metal（`paged_kv_model`。Linux でも実行）。実機の `#[ignore]` テストは CUDA・Metal とも用意した
+- **未検証**: CUDA カーネルの NVRTC コンパイルと GB10 実機の一致（#3171）、MSL のコンパイルと Mac 実機の一致（#3172）。Metal の macOS 限定コードは `make check-cross-metal-tests`（aarch64-apple-darwin の型検査と clippy）までで、実行していない。`#[ignore]` テストの実機判定が fail した場合も tolerance は緩めず、baseline は実測値に基づき人間の承認を得てから #3113 で扱う
+- 後続への引き継ぎ: #3112（`StatefulAttention::forward_paged` 等の Tape 入口・facade 公開・`compat-api-scope.md` §5 の適用記録）、#3113（形状マトリクスの網羅・判定方式の構成・`RULE.txt`・README の実行手順）。Metal の per-call 作業バッファ確保と attention の性能最適化は結合順序を変えうるので別判断

@@ -415,6 +415,7 @@ mod kernels_huber;
 mod kernels_kl_div;
 mod kernels_layer_norm;
 mod kernels_linalg;
+mod kernels_paged_kv;
 // 分解系 3 カーネル（cholesky・QR・eigh。イシュー #2675・docs/backend-gpu-linalg-decision.md）
 mod kernels_linalg_factor;
 mod kernels_log_softmax_backward;
@@ -471,6 +472,7 @@ mod module_cache;
 mod mse;
 mod nll;
 mod norm_backward;
+mod paged_kv;
 mod readback_policy;
 mod rnn_cell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）起動 API・カーネル

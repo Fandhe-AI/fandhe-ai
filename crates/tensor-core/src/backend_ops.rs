@@ -53,6 +53,7 @@ use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
 use crate::error::ShapeError;
 use crate::fusion::FusionPlan;
+use crate::paged_kv::{PagedAttentionArgs, PagedKvLayout};
 use crate::pool_core::PoolStats;
 use crate::scalar_op::{ScalarBinaryOp, ScalarUnaryOp};
 use crate::tensor::{checked_numel, checked_numel_for};
@@ -3864,6 +3865,100 @@ pub trait BackendOps {
         self.linear_forward_device(a, w, bias, act)
     }
 
+    /// 新トークンの K／V 行を、デバイス常駐のページ化 KV プールへスロット写像どおりに
+    /// 書き込む（K-3。イシュー #3111・設計 `docs/device-resident-kv-paged-attention-
+    /// design.md` §2・§4）。
+    ///
+    /// `k_new`／`v_new` は `[B, L_new, E]` を行優先で平坦化した `slot_mapping.len()` 行、
+    /// `k_pool`／`v_pool` は `[num_blocks, block_size, E]`。行 `r` は
+    /// `slot_mapping[r]`（= `block_id · block_size + pos % block_size`）番目の
+    /// トークン行へ書かれる。写像はホストのブロックテーブルが作り、検証は
+    /// [`crate::paged_kv::validate_paged_kv_append`] を FFI の前に通す。ホストとの
+    /// 同期は行わない（同期点は呼び出し元の `download`）。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`BackendError::Unsupported`] を返す fail-safe（[`Self::linear_forward_device`] と
+    /// 同じ非破壊拡張）。呼び出し元は K-1 経路へ暗黙にフォールバックしない（設計 §4）。
+    fn paged_kv_append(
+        &self,
+        _k_new: &DeviceBuffer<f32>,
+        _v_new: &DeviceBuffer<f32>,
+        _k_pool: &mut DeviceBuffer<f32>,
+        _v_pool: &mut DeviceBuffer<f32>,
+        _slot_mapping: &[u32],
+        _layout: &PagedKvLayout,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "paged_kv_append: default fail-safe (no device-resident paged KV kernel available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::paged_kv_append`] の `token` つき版（Metal のコマンドバッファ共有。
+    /// [`Self::linear_forward_device_tracked`] と同型）。既定は `token` を無視して委譲する。
+    /// CUDA はストリーム順序契約と ordinal 単位 poison で表すため上書きしない。
+    // `_tracked` は既存メソッドの引数に `token` を足す非破壊拡張のため引数数が上限を超える。
+    #[allow(clippy::too_many_arguments)]
+    fn paged_kv_append_tracked(
+        &self,
+        k_new: &DeviceBuffer<f32>,
+        v_new: &DeviceBuffer<f32>,
+        k_pool: &mut DeviceBuffer<f32>,
+        v_pool: &mut DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.paged_kv_append(k_new, v_new, k_pool, v_pool, slot_mapping, layout)
+    }
+
+    /// ページ化 KV プールに対する attention（head 結合後・`out_proj` 適用前）を
+    /// デバイスで計算する（K-3。イシュー #3111）。
+    ///
+    /// `q` は `[B, L_new, E]`、戻り値も `[B, L_new, E]`。`block_tables` は
+    /// `[B, max_blocks_per_seq]` の `u32`（未使用枠は番兵 `u32::MAX`）、`seq_lens` は
+    /// `[B]`。mask は「位置 `j` に attend できるのは `j <= seq_len − L_new + i`」の
+    /// 1 規則。縮約順序は系列方向（j）・`Dh` 方向とも論理順の単一ループ
+    /// （CPU 参照 `paged_attention_reference` と同じ。REQ-2 の統一複合判定を適用）。
+    /// 検証は [`crate::paged_kv::validate_paged_attention`]。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`BackendError::Unsupported`]（fail-safe。K-1 へ暗黙フォールバックしない）。
+    fn paged_attention_forward(
+        &self,
+        _q: &DeviceBuffer<f32>,
+        _k_pool: &DeviceBuffer<f32>,
+        _v_pool: &DeviceBuffer<f32>,
+        _block_tables: &[u32],
+        _seq_lens: &[u32],
+        _args: &PagedAttentionArgs,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "paged_attention_forward: default fail-safe (no device-resident paged attention \
+             kernel available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::paged_attention_forward`] の `token` つき版（既定は委譲。
+    /// [`Self::paged_kv_append_tracked`] と同じ方針）。
+    // `_tracked` は既存メソッドの引数に `token` を足す非破壊拡張のため引数数が上限を超える。
+    #[allow(clippy::too_many_arguments)]
+    fn paged_attention_forward_tracked(
+        &self,
+        q: &DeviceBuffer<f32>,
+        k_pool: &DeviceBuffer<f32>,
+        v_pool: &DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.paged_attention_forward(q, k_pool, v_pool, block_tables, seq_lens, args)
+    }
+
     /// 推論 forward チェーン（`Linear`〈＋`ReLU`〉の連なり）全体を、
     /// バックエンド固有の「一括再生機構」（CUDA では CUDA Graph の
     /// stream capture → graph launch。イシュー #2115）で 1 回の起動へ
@@ -5697,6 +5792,85 @@ mod tests {
             other => panic!("expected both to return the same Unsupported error: {other:?}"),
         }
         // デフォルト委譲は token に一切触れない。
+        assert!(!token.is_set());
+    }
+
+    /// 既定の `paged_kv_append`／`paged_attention_forward` は fail-safe の
+    /// `Unsupported` を返す（K-1 へ暗黙フォールバックしない。イシュー #3111）。
+    #[test]
+    fn paged_kv_append_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let (k, v) = (
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+        );
+        let (mut kp, mut vp) = (
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+        );
+        let layout = PagedKvLayout::new(2, 2, 2).unwrap();
+        let r = ops.paged_kv_append(&k, &v, &mut kp, &mut vp, &[], &layout);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))));
+    }
+
+    #[test]
+    fn paged_attention_forward_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let (q, kp, vp) = (
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+        );
+        let layout = PagedKvLayout::new(2, 2, 2).unwrap();
+        let args = PagedAttentionArgs::new(layout, 1, 1, 1, 1, 1.0).unwrap();
+        let r = ops.paged_attention_forward(&q, &kp, &vp, &[0], &[1], &args);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))));
+    }
+
+    /// `_tracked` 既定は `token` に触れず非 tracked 版へ委譲する。
+    #[test]
+    fn paged_kv_append_tracked_default_delegates_to_paged_kv_append() {
+        let ops = MockOps(Device::Cpu);
+        let (k, v) = (
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+        );
+        let (mut kp, mut vp) = (
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+        );
+        let layout = PagedKvLayout::new(2, 2, 2).unwrap();
+        let token = DispatchFailureCell::new();
+        let direct = ops.paged_kv_append(&k, &v, &mut kp, &mut vp, &[], &layout);
+        let tracked = ops.paged_kv_append_tracked(&k, &v, &mut kp, &mut vp, &[], &layout, &token);
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
+                assert_eq!(a, b)
+            }
+            other => panic!("expected the same Unsupported error: {other:?}"),
+        }
+        assert!(!token.is_set());
+    }
+
+    #[test]
+    fn paged_attention_forward_tracked_default_delegates_to_paged_attention_forward() {
+        let ops = MockOps(Device::Cpu);
+        let (q, kp, vp) = (
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+            empty_device_buffer(Device::Cpu),
+        );
+        let layout = PagedKvLayout::new(2, 2, 2).unwrap();
+        let args = PagedAttentionArgs::new(layout, 1, 1, 1, 1, 1.0).unwrap();
+        let token = DispatchFailureCell::new();
+        let direct = ops.paged_attention_forward(&q, &kp, &vp, &[0], &[1], &args);
+        let tracked = ops.paged_attention_forward_tracked(&q, &kp, &vp, &[0], &[1], &args, &token);
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
+                assert_eq!(a, b)
+            }
+            other => panic!("expected the same Unsupported error: {other:?}"),
+        }
         assert!(!token.is_set());
     }
 
