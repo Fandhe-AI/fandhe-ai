@@ -761,11 +761,19 @@ pub(crate) fn encode_nary_dispatch(
     out_buf: &MetalBuffer,
     numel: u32,
 ) {
+    // Metal の buffer 引数スロットは index 0..=30（31 個）。最大 index は
+    // numel の `leaf_bufs.len() + 1` なので `leaf_bufs.len() + 1 < 31` が
+    // 必要。上流 `match_elementwise_plan` が葉数を 13 以下に制限しており
+    // 通常到達しない前提を debug ビルドで検査する（独立監査 P2。
+    // `docs/facade-graph-tier-b-optin-exposure-decision.md` §13.4）。
+    debug_assert!(leaf_bufs.len() + 1 < 31);
     encoder.setComputePipelineState(pipeline);
 
     // SAFETY: `encode_binary_dispatch` と同一の根拠（該当コメント参照）。
     // `leaf_bufs` の各要素・`out_buf` は呼び出し元 `ctx.dispatch_sync` が
-    // 完了するまで生存する。
+    // 完了するまで生存する。buffer index は 0..=`leaf_bufs.len() + 1` で、
+    // 上記のとおり Metal のスロット上限 31 未満に収まる前提
+    // （release ではこの前提を上流の葉数上限 13 が担保する）。
     for (i, buf) in leaf_bufs.iter().enumerate() {
         unsafe {
             encoder.setBuffer_offset_atIndex(Some(buf.raw()), 0, i);

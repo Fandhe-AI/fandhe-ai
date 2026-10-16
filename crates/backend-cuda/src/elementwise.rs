@@ -678,6 +678,14 @@ pub(crate) fn launch_nary(
         // グリッド次元は `elementwise_launch_config` が `div_ceil` で
         // numel を包含するよう構築するため、末尾ブロックの余剰スレッドは
         // カーネル内境界チェックで弾かれる。
+        // 前提（本関数では検査できない）: `func` は「`leaves.len()` 個の葉
+        // ポインタ + out ポインタ + `numel`（i32）」のシグネチャでコンパイル
+        // されている。引数個数・型の不一致は FFI 境界で UB となるが、
+        // 唯一の呼び出し元 `fused_elementwise.rs::CudaFusedElementwise::
+        // run_f32` が `leaf_count` と一致するプログラムからカーネルを生成し
+        // `leaves.len() == leaf_count` を起動前に検証する契約で担保する
+        // （独立監査 P2。`docs/facade-graph-tier-b-optin-exposure-decision.md`
+        // §13.4）。
         unsafe {
             let mut builder = stream.launch_builder(func);
             for d in &dev_bufs {
