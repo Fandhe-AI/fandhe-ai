@@ -606,3 +606,30 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 - 内部 docs: 本 doc §2〜§6、`docs/model-download-design.md`（§14.4・§16.5・§16.8・§16.9）、`docs/compat-api-scope.md`（§0・§5 の D-B 適用記録）、`docs/crates-io-naming-decision.md`、`docs/crates-io-publishing-order.md`、`docs/facade-model-registry-decision.md`（§7）
 - 設定: ルート `Cargo.toml`、`deny.toml`（`allow-wildcard-paths`）、`.github/workflows/ci.yml`、`.github/workflows/release-all.yml`、`scripts/check-forbidden-deps.sh`
 - イシュー: #3128・#3129・#3130・#3131・#3132・#3121・#3122・#3123・#3124・#3088
+
+### 9.12 #3131 実装記録と §9.6 外部仕様の確認結果
+
+#### 9.12.1 §9.6 の確認結果（取得日 2026-10-16。一次資料のページ上で確認できた範囲のみ）
+
+| # | 項目 | 結果 | 出典 |
+|---|---|---|---|
+| 1 | resolve URL 形式 | 確認: `https://huggingface.co/<repo_id>/resolve/<revision>/<filename>`（revision は branch・tag・commit hash） | https://huggingface.co/docs/huggingface_hub/package_reference/file_download （`hf_hub_url`） |
+| 2 | revision 解決・ファイル一覧 API | 一覧は `GET /api/models/{namespace}/{repo}/tree/{rev}/{path}`（`expand`／`recursive`／`limit`／`cursor`）が OpenAPI に存在。応答 JSON の形はページ上で未確認。revision 解決用の `GET /api/models/{ns}/{repo}/revision/{rev}`（`sha`・`siblings[].rfilename`）は OpenAPI の Models 節で未確認のため、実装は暫定でこの形を仮定し、形状不一致は `InvalidResponse` で fail-closed とする | https://huggingface.co/.well-known/openapi.md （先頭 100000 文字のみ確認） |
+| 3 | commit sha 応答ヘッダ名 | 未確認（`HfFileMetadata.commit_hash` の存在のみ確認。ヘッダ名は記載なし）。本実装はヘッダを使わない | 同上 |
+| 4 | LFS／etag 系 | 確認: ETag は git-sha1（git 保存）または sha256（LFS）。信頼根にしない方針（§3.6）は変更しない | 同上 |
+| 5 | CDN リダイレクト先ドメイン | 未確認（Cloudfront 経由と記載されるがドメイン名の記載なし）。download 経路は facade の https 限定のみで、ホスト allowlist は未適用（残留リスク） | 同上 |
+| 6 | repo_id 命名規則 | 未確認。暫定の厳しめ規則（`[A-Za-z0-9._-]`・`--`／`..` 拒否・segment 96 バイト）を維持 | 未取得（https://huggingface.co/docs/hub/repositories は未確認） |
+| 7 | 401／403／404 | 一次資料で未確認。`RepositoryNotFoundError` が「存在しない、または private でアクセス権なし」を同一視する旨のみ確認。実装は 401→`Unauthorized`・403→`Gated`・404→`NotFound`・他→`Http` で fail-closed | file_download ページ |
+
+未確認項目は厳しめに倒してある。緩和は非破壊のため、実測または一次資料で確認できてから行う（実通信の確認は #3132）。
+
+#### 9.12.2 実装範囲（Part 1）
+
+- `HfRepoId`／`Revision` に加え `CommitSha`（小文字 16 進 40 文字）・`CachedModel`・`HfHub::download` を公開。`download` は是正案 A（`filename` = `model.safetensors` 完全一致）と sha256 pin の型レベル必須化（案 1）を採用し、facade の `download_with` へ委ねる（hf-hub は自らファイルを書かない）
+- キャッシュキーは `name = hf--<ns>--<repo>`・`version = commit sha`。`--` を segment で拒否しているため単射
+- revision 解決・ファイル一覧は `pub(crate)`（`api.rs`）で、`JsonTransport` 越しにモックでテスト。サイズ上限 1 MiB・件数 10,000・パス長 1,024 バイト。リダイレクトは追従せず拒否
+
+#### 9.12.3 見送り事項（要対応）
+
+- **第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する
+- facade `download_with` のリダイレクト先ホスト allowlist（§4.2 (b-1)／(b-2)）は facade 公開面の拡張であり別承認
