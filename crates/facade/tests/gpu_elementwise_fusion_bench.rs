@@ -14,10 +14,10 @@
 //! ゲートは `FANDHE_BENCH_GPU_EW_FUSION`（`0`〈既定〉／`1`）で切り替える。
 //! ライブラリ本体は環境変数を読まないため（`fused_elementwise.rs`
 //! モジュール冒頭コメント参照）、本ベンチ自身が起動時に 1 回だけ読み、
-//! 対象デバイスに対応するバックエンドクレートの `pub` setter
-//! （`backend-cuda::fused_elementwise::set_gpu_elementwise_fusion_enabled`／
-//! `backend-metal::fused_elementwise::set_gpu_elementwise_fusion_enabled`。
-//! `facade` からは再公開されていないため直接呼ぶ）を呼ぶ。
+//! 対象デバイスに対応する facade の公開 setter
+//! （`fandhe_ai::set_cuda_elementwise_fusion_enabled`／
+//! `fandhe_ai::set_metal_elementwise_fusion_enabled`。イシュー #3385 で公開）
+//! を呼ぶ。
 
 use bench_harness::median_q1_q3;
 use bench_harness::rng::Xorshift64Star;
@@ -57,11 +57,11 @@ fn apply_gate_from_env(device: Device) {
     match device {
         Device::Cpu => {}
         Device::Cuda(_) => {
-            fandhe_ai_backend_cuda::fused_elementwise::set_gpu_elementwise_fusion_enabled(enabled);
+            fandhe_ai::set_cuda_elementwise_fusion_enabled(enabled);
         }
         #[cfg(target_os = "macos")]
         Device::Metal => {
-            fandhe_ai_backend_metal::fused_elementwise::set_gpu_elementwise_fusion_enabled(enabled);
+            fandhe_ai::set_metal_elementwise_fusion_enabled(enabled);
         } // `Device`（`tensor-core::device::Device`）は `Cpu`／`Cuda(_)`／
           // （macOS 限定の）`Metal` の variant のみを持つ。非 macOS では
           // `Cpu`／`Cuda(_)` の 2 アームで、macOS では上記 3 アームで既に
