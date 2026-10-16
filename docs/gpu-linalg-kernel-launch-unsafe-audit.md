@@ -18,8 +18,8 @@
 
 | ID | 予定の場所 | カーネル | 起動形状 | 検証方法（テスト） |
 |----|-----------|----------|----------|--------------------|
-| CU-1 | `CudaLinalg::run_lu_solve_f32`・`run_lu_det_f32` 内 | `linalg_lu_f64` | grid `(1,1,1)`・block は `LU_BLOCK_DIM`（256。`kernels_linalg.rs:36`）と**厳密一致** | `lu_det_matches_cpu_on_device`（`#[ignore]`・既存）。solve／inv の実機テストは未作成（#3135 で追加予定） |
-| CU-2 | `run_lu_solve_f32` 内 | `linalg_lu_solve_f64` | grid `ceil(k / LU_SOLVE_BLOCK_DIM)`・block 128（`kernels_linalg.rs:151`）。`k == 0` では起動しない。CU-1 と同一ストリームで後に起動 | 同上（未作成・#3135 で追加予定） |
+| CU-1 | `CudaLinalg::launch_lu`（private。`run_lu_solve_f32`・`run_lu_det_f32` が共有。#3135 で実装済み） | `linalg_lu_f64` | grid `(1,1,1)`・block は `LU_BLOCK_DIM`（256。`kernels_linalg.rs:36`）と**厳密一致** | `lu_det_matches_cpu_on_device`・`lu_det_matches_cpu_on_device_set`・`lu_solve_matches_cpu_on_device`・`lu_inv_matches_cpu_on_device`・`lu_singular_maps_like_cpu_on_device`（いずれも `#[ignore]`。#3135 で追加。実機実測は #3138） |
+| CU-2 | `run_lu_solve_f32` 内（#3135 で実装済み） | `linalg_lu_solve_f64` | grid `ceil(k / LU_SOLVE_BLOCK_DIM)`・block 128（`kernels_linalg.rs:151`）。`k == 0` では起動しない。CU-1 と同一ストリームで後に起動 | 同上 |
 | CU-3 | `CudaLinalgFactor` の cholesky 実行関数内 | `linalg_cholesky_f64` | grid `(1,1,1)`・block は `FACTOR_BLOCK_DIM`（256。`kernels_linalg_factor.rs:38`）と厳密一致 | `cholesky_matches_cpu_on_device`（`#[ignore]`・既存） |
 | CU-4 | 同 QR 実行関数内 | `linalg_qr_f64` | 同上 | `qr_matches_cpu_on_device`（`#[ignore]`・既存） |
 | CU-5 | 同 eigh 実行関数内 | `linalg_eigh_f64` | 同上 | `eigh_matches_cpu_on_device`（`#[ignore]`・既存） |
@@ -108,8 +108,8 @@ eigh の回転更新（`s_skip == 0` 内）の `sym` 書き込みと `v` 書き�
 
 | # | 内容 | 担当 |
 |---|------|------|
-| 1 | CUDA solve の `perm[i]` に範囲検査がない（Metal は `src < n`）。REQ-8 の多層防御として `perm[i] < n` 検査の追加を検討する。カーネルソースの変更は本 PR では行わない | #3135 |
-| 2 | `n > 0` かつ `k == 0` では solve の grid 0 起動を作らない | #3135・#3137 |
+| 1 | CUDA solve の `perm[i]` に範囲検査がない（Metal は `src < n`）。**#3135 の決定: カーネルソースは変更しない**。LU カーネルはどの barrier より前に全 `i < n` で `perm[i] = i` を書き、入替は `p < n`（`s_idx[0] < n` 検査済み）の間でしか起きないため、`perm` の値域は構造上 `[0, n)` に閉じる。solve カーネルの `status` は `const` で異常を報告できず、スレッドごとに黙って return するとゼロ列を成功として返す（A08 の観点で検査しないより悪い）。`perm` を外部から渡す経路を足す場合は、status を書ける形の検査を別 issue で入れる | #3135（決定済み） |
+| 2 | `n > 0` かつ `k == 0` では solve の grid 0 起動を作らない。**#3135 の決定（CUDA）**: LU だけを起動して特異判定を行い、特異なら `Singular`、そうでなければ空の解を返す（`solve_launch_config(0) == None`。CPU の `solve` と同じ判定）。Metal 側は #3137 | #3135（CUDA 済み）・#3137 |
 | 3 | Metal QR は `m*n <= u32::MAX` により `m` が u32::MAX 近傍（n=1）になりうる。`for (uint i = tid; i < len; i += tg_size)` が最終要素付近でラップして終了しない（ハング）可能性を #3137 で確認する。MSL の符号なしラップは UB ではないが DoS になりうる | #3137 |
 | 4 | NVRTC コンパイル・GB10 実機・Mac 実機での一致は未検証 | #3138・#3139 |
 | 5 | Metal のバッファ生存契約は dispatch 方式に依存する | #3137 |
@@ -127,7 +127,9 @@ eigh の回転更新（`s_skip == 0` 内）の `sym` 書き込みと `v` 書き�
 
 ## 8. security-auditor の監査結果
 
-**未実施**。本タスクの実行環境ではサブエージェントを起動できなかったため、security-auditor による監査は行っていない。「指摘なし」を意味しない。
+**未実施**（CUDA CU-1／CU-2 の #3135 実装時点）。本タスクの実行環境ではサブエージェントを起動できなかったため、security-auditor による監査は行っていない。「指摘なし」「監査済み」を意味しない。PR レビューで security-auditor の監査を受け、指摘と対応を本節へ追記する。
+
+実装担当の自己点検（CU-1／CU-2。#3135）: `grep -n "unsafe {" crates/backend-cuda/src/linalg.rs` が 2 行（`launch_lu`＝CU-1、`run_lu_solve_f32`＝CU-2）。各 SAFETY コメントに行 ID と不変条件を記載。引数の順・型はカーネルのシグネチャと一致、`n`・`k` は `validate_lu_dims`＋`i32::try_from`、入力長は `check_lu_lens`、`status` は必ず読み戻し、`with_driver_call` で包む。
 
 実装担当による自己点検の結果は §5・§6 のとおり。PR レビューで security-auditor の監査を受け、指摘と対応をこの節へ追記する。個々の実装 PR（#3135・#3136・#3137）でも各ブロックを再監査する。実装後の再現コマンド:
 

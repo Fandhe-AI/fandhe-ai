@@ -122,3 +122,14 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
   パイプライン構築が通ることを確認した（`docs/perf/logs/metal-linalg-lu-chol-qr-2676/README.md`）。
 - **カーネル起動（新規 `unsafe`）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の `Unsupported`。
   承認依頼と残作業は同 perf log。実機 parity は未実測。
+
+### #3135（CUDA LU 系 Stage B）の実施内容
+
+- `CudaLinalg::launch_lu`（CU-1）・`run_lu_solve_f32`（CU-2 を含む）・`run_lu_inv_f32`・`run_lu_det_f32` を追加し、
+  `ops.rs` の `lu_launch_pending`（fail-closed の `Unsupported`）を実起動へ置換した。新規 `unsafe` は 2 ブロックのみ
+  （監査記録 `docs/gpu-linalg-kernel-launch-unsafe-audit.md`。承認状態は同記録 §1 のとおり親 #3133 本文の記載に基づく。
+  security-auditor の監査は同 §8 のとおり未実施）。
+- 数値契約: H2D の前にホストで `f32`→`f64`、D2H の後に 1 回 `as f32`。`status` を必ず読み戻す。特異は solve／inv が
+  `InvalidArgument`、det が `0.0`（CPU と同じ）。`CudaError` に variant は追加せず `LuSolveOutcome` で表す。
+- 既定（ゲート OFF）の挙動は不変（`Unsupported` → `Var` がホスト f64 へフォールバック）。実機（GB10）での NVRTC・parity・
+  特異写像の実測は #3138（本 PR では未検証）。

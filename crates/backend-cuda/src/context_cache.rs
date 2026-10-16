@@ -155,6 +155,7 @@ const _: fn() = || {
     assert_send_sync::<CudaRmsNorm>();
     assert_send_sync::<CudaSoftmax>();
     assert_send_sync::<CudaAllocator>();
+    assert_send_sync::<crate::linalg::CudaLinalg>();
     assert_send_sync::<crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm>();
     // イシュー #1700: `cached_scalar_unary_kernel`／`cached_scalar_binary_kernel`
     // が `Arc<Mutex<Option<Arc<CudaFunction>>>>` として直接キャッシュする値の
@@ -453,6 +454,21 @@ pub(crate) fn cached_mse(device: &CudaDevice) -> Result<Arc<crate::mse::CudaMse>
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ContextKey::from_device(device), || {
         crate::mse::CudaMse::new(device)
+    })
+}
+
+/// `device` の `CudaContext` に対応する [`crate::linalg::CudaLinalg`]（LU 系
+/// 2 カーネル）をプロセス内キャッシュから取得する（イシュー #3135。キーは
+/// [`ContextKey`]。`cached_mse` と同型）。`ops::CudaBackendOps::{linalg_inv,
+/// linalg_solve, linalg_det}` の唯一の呼び出し先（ゲート ON・`n > 0` のみ）。
+pub(crate) fn cached_linalg(
+    device: &CudaDevice,
+) -> Result<Arc<crate::linalg::CudaLinalg>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::linalg::CudaLinalg>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ContextKey::from_device(device), || {
+        crate::linalg::CudaLinalg::new(device)
     })
 }
 
