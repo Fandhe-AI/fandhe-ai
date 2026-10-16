@@ -120,6 +120,14 @@
 //! - [`BatchScheduler`]: [`SchedulerLimits`] の 3 上限（同時実行数・待ち行列長・`max_length`）は
 //!   必須で 0 は拒否する。要求単位の失敗は他の要求から切り離して `take_failed` に積む。完了条件は
 //!   `max_length` 到達のみ（EOS 停止なし）。呼び出しスレッド上で同期実行し、スレッドも I/O も持たない。
+//! - [`BatchScheduler::step_batched`]（#3106。設計記録 §21）: `step` の opt-in 版で、decode 中の要求が
+//!   2 件以上のとき 1 回の `forward_step`（`[B, 1]`・左詰め padding の `KvCache`）で束ねる。`step` は
+//!   束ねず token 列の完全一致のまま。判定は単独 `generate` と統一複合判定（相対誤差 1e-3 未満 または
+//!   絶対誤差 1e-5 未満）で、token 列の一致は Greedy かつ margin が十分な入力に限る（TopK／Temperature
+//!   では契約にしない）。束ねの失敗はその step に限り B = 1 へフォールバックして要求単位で切り離す
+//!   （forward が 1 回余分にかかる）。`step` と交互に呼べる。性能保証はない。対象モデルは、attention を
+//!   すべて `forward_with_cache` 系の入口で通し、行ごとの位置を `KvCache::valid_len` から決め、
+//!   attention 以外を行ごとに独立な演算に限る形（型でも実行時でも検出できないため利用者が保証する）。
 //! - **対象モデルの契約**: 対象は、生成状態を渡された `caches` だけに持つモデル（`stateful_attention_forward_with_cache`
 //!   で `caches[i]` を進める形を含む）と、状態を持たないモデル。「内部状態保持型」（生成状態を、渡された `caches` の外に持つ型。`RefCell<StatefulAttention>`
 //!   等）は `num_kv_layers()` の値によらず**対象外**で、出力を保証しない。型でも実行時でも検出できない
@@ -181,6 +189,63 @@
 //! assert!(scheduler.take_failed().is_empty());
 //! assert_eq!(finished.len(), 2);
 //! // 各要求の出力は単独の `generate` と token 列が一致する。
+//! for (id, out) in &finished {
+//!     let prompt = if *id == id0 { &p0 } else { &p1 };
+//!     let alone = generate(&Table, prompt, &cfg).unwrap();
+//!     assert_eq!(out.as_slice().unwrap(), alone.as_slice().unwrap());
+//! }
+//! ```
+//!
+//! 束ねる経路（`step_batched`）の利用例。状態なしのモデルでは単独 `generate` と token 列が一致する。
+//!
+//! ```
+//! use fandhe_ai::inference::{
+//!     AutoregressiveModel, BatchScheduler, GenerateConfig, SamplingStrategy, SchedulerLimits,
+//!     generate,
+//! };
+//! use fandhe_ai::nn::kv_cache::KvCache;
+//! use fandhe_ai::{AutodiffError, Tensor};
+//!
+//! /// 直前トークンだけで logits が決まる表引きモデル（状態なし）。
+//! struct Table;
+//!
+//! impl AutoregressiveModel for Table {
+//!     fn num_kv_layers(&self) -> usize {
+//!         0
+//!     }
+//!     fn forward_step(
+//!         &self,
+//!         new_ids: &Tensor<i32>,
+//!         _caches: &mut [KvCache],
+//!     ) -> Result<Tensor<f32>, AutodiffError> {
+//!         let (b, l) = (new_ids.shape()[0], new_ids.shape()[1]);
+//!         let ids = new_ids.as_slice().unwrap();
+//!         let mut out = vec![0.0f32; b * l * 4];
+//!         for (i, &id) in ids.iter().enumerate() {
+//!             out[i * 4 + ((id as usize + 1) % 4)] = 1.0;
+//!         }
+//!         Ok(Tensor::new(out, &[b, l, 4]).unwrap())
+//!     }
+//! }
+//!
+//! let limits = SchedulerLimits::new(2, 4, 8).unwrap();
+//! let mut scheduler = BatchScheduler::new(limits);
+//! let cfg = GenerateConfig::new(5, SamplingStrategy::Greedy);
+//! let p0 = Tensor::<i32>::new(vec![0], &[1]).unwrap();
+//! let p1 = Tensor::<i32>::new(vec![2], &[1]).unwrap();
+//! let id0 = scheduler.submit(&p0, &cfg).unwrap();
+//! let _id1 = scheduler.submit(&p1, &cfg).unwrap();
+//!
+//! let mut finished = Vec::new();
+//! for _ in 0..16 {
+//!     scheduler.step_batched(&Table).unwrap();
+//!     finished.extend(scheduler.take_finished());
+//!     if scheduler.queued_len() + scheduler.active_len() == 0 {
+//!         break;
+//!     }
+//! }
+//! assert!(scheduler.take_failed().is_empty());
+//! assert_eq!(finished.len(), 2);
 //! for (id, out) in &finished {
 //!     let prompt = if *id == id0 { &p0 } else { &p1 };
 //!     let alone = generate(&Table, prompt, &cfg).unwrap();
