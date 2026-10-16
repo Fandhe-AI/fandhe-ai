@@ -90,7 +90,7 @@ kernel void paged_attention_f32(
     uint tid [[thread_position_in_threadgroup]],
     uint tg_size [[threads_per_threadgroup]]
 ) {
-    threadgroup int s_bad;
+    threadgroup atomic_int s_bad;
     threadgroup float s_max;
     threadgroup float s_sum;
 
@@ -112,31 +112,34 @@ kernel void paged_attention_f32(
     device float* score_row = scores + qrow * (ulong)s_stride;
 
     if (tid == 0) {
-        s_bad = 0;
+        atomic_store_explicit(&s_bad, 0, memory_order_relaxed);
         s_max = PAGED_NEG_INF;
         s_sum = 0.0f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // seq_len の範囲違反は全スレッドが同じ値で判定する（グループ内で一様）。
-    if (s_prev < 0 || limit_i < 1 || (uint)limit_i > seq_len || (uint)limit_i > s_stride) {
-        s_bad = 1;
+    // seq_len の範囲違反は thread 0 だけが共有フラグへ書き、バリアで全スレッドへ公開する
+    // （並行書き込みなし）。
+    if (tid == 0 && (s_prev < 0 || limit_i < 1 || (uint)limit_i > seq_len || (uint)limit_i > s_stride)) {
+        atomic_store_explicit(&s_bad, 1, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     uint limit = (uint)max(limit_i, 0);
 
     // 1. score（j を論理順に、Dh 方向は fma で逐次累積）。
-    if (!s_bad) {
+    // ループ内の違反はスレッドローカルに持ち、共有フラグへはループ後に atomic で畳む。
+    bool bad_local = false;
+    if (atomic_load_explicit(&s_bad, memory_order_relaxed) == 0) {
         for (uint j = tid; j < limit; j += tg_size) {
             uint slot_idx = j / block_size;
             if (slot_idx >= max_blocks_per_seq) {
-                s_bad = 1;
+                bad_local = true;
                 continue;
             }
             uint id = block_tables[(ulong)b * (ulong)max_blocks_per_seq + (ulong)slot_idx];
             if (id >= num_blocks) {
-                s_bad = 1;
+                bad_local = true;
                 continue;
             }
             ulong k_off = (((ulong)id * (ulong)block_size + (ulong)(j % block_size)) * (ulong)embed_dim)
@@ -148,9 +151,12 @@ kernel void paged_attention_f32(
             score_row[j] = acc;
         }
     }
+    if (bad_local) {
+        atomic_store_explicit(&s_bad, 1, memory_order_relaxed);
+    }
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 
-    if (s_bad) {
+    if (atomic_load_explicit(&s_bad, memory_order_relaxed) != 0) {
         for (uint d = tid; d < head_dim; d += tg_size) {
             out[q_off + d] = PAGED_QNAN;
         }

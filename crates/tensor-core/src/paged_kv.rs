@@ -61,6 +61,24 @@ impl PagedKvLayout {
         block_size: usize,
         embed_dim: usize,
     ) -> Result<PagedKvLayout, BackendError> {
+        let layout = PagedKvLayout {
+            num_blocks,
+            block_size,
+            embed_dim,
+        };
+        layout.recheck()?;
+        Ok(layout)
+    }
+
+    /// 全不変条件の（再）検査。`new` が使うほか、フィールドが `pub` で構築後に書き換え
+    /// られうる（`#[non_exhaustive]` はフィールド代入を防がない）ため、共通検証関数が
+    /// 入口で必ず呼ぶ（block_size=0 等がカーネル・CPU 参照へ届かない。イシュー #3111 指摘）。
+    pub fn recheck(&self) -> Result<(), BackendError> {
+        let PagedKvLayout {
+            num_blocks,
+            block_size,
+            embed_dim,
+        } = *self;
         if block_size == 0 || block_size > PAGED_KV_MAX_BLOCK_SIZE || !block_size.is_power_of_two()
         {
             return Err(invalid(format!(
@@ -77,12 +95,7 @@ impl PagedKvLayout {
                 "embed_dim は 1 以上 i32::MAX 以下（実際: {embed_dim}）"
             )));
         }
-        let layout = PagedKvLayout {
-            num_blocks,
-            block_size,
-            embed_dim,
-        };
-        let elems = layout.pool_elems()?;
+        let elems = self.pool_elems()?;
         let bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|n| n.checked_mul(2))
@@ -90,7 +103,7 @@ impl PagedKvLayout {
         if bytes > isize::MAX as usize {
             return Err(invalid("プールのバイト数が isize::MAX を超える"));
         }
-        Ok(layout)
+        Ok(())
     }
 
     /// 片側（K または V）のプールの要素数。
@@ -140,36 +153,49 @@ impl PagedAttentionArgs {
         max_blocks_per_seq: usize,
         scale: f32,
     ) -> Result<PagedAttentionArgs, BackendError> {
-        for (name, v) in [
-            ("batch", batch),
-            ("l_new", l_new),
-            ("max_blocks_per_seq", max_blocks_per_seq),
-        ] {
-            if i32::try_from(v).is_err() {
-                return Err(invalid(format!("{name} が i32::MAX を超える（{v}）")));
-            }
-        }
-        if num_heads == 0 || !layout.embed_dim.is_multiple_of(num_heads) {
-            return Err(invalid(
-                "num_heads は 1 以上で embed_dim を割り切る必要がある",
-            ));
-        }
-        if !scale.is_finite() {
-            return Err(invalid("scale は有限値でなければならない"));
-        }
-        Ok(PagedAttentionArgs {
+        let args = PagedAttentionArgs {
             layout,
             batch,
             l_new,
             num_heads,
             max_blocks_per_seq,
             scale,
-        })
+        };
+        args.recheck()?;
+        Ok(args)
+    }
+
+    /// 全不変条件の（再）検査（フィールドが `pub` のため構築後の書き換えに備え、
+    /// [`validate_paged_attention`] が入口で呼ぶ）。
+    pub fn recheck(&self) -> Result<(), BackendError> {
+        self.layout.recheck()?;
+        for (name, v) in [
+            ("batch", self.batch),
+            ("l_new", self.l_new),
+            ("max_blocks_per_seq", self.max_blocks_per_seq),
+        ] {
+            if i32::try_from(v).is_err() {
+                return Err(invalid(format!("{name} が i32::MAX を超える（{v}）")));
+            }
+        }
+        if self.num_heads == 0 || !self.layout.embed_dim.is_multiple_of(self.num_heads) {
+            return Err(invalid(
+                "num_heads は 1 以上で embed_dim を割り切る必要がある",
+            ));
+        }
+        if !self.scale.is_finite() {
+            return Err(invalid("scale は有限値でなければならない"));
+        }
+        Ok(())
     }
 
     /// head あたりの次元 `Dh`。
     pub fn head_dim(&self) -> usize {
-        self.layout.embed_dim / self.num_heads
+        // num_heads=0 へ書き換えられた値でも panic しない（検証関数が拒否する）。
+        self.layout
+            .embed_dim
+            .checked_div(self.num_heads)
+            .unwrap_or(0)
     }
 }
 
@@ -199,6 +225,7 @@ pub fn validate_paged_kv_append(
     slot_mapping: &[u32],
     layout: &PagedKvLayout,
 ) -> Result<usize, BackendError> {
+    layout.recheck()?;
     let rows = slot_mapping.len();
     let expect = rows
         .checked_mul(layout.embed_dim)
@@ -254,6 +281,7 @@ pub fn validate_paged_attention(
     seq_lens: &[u32],
     args: &PagedAttentionArgs,
 ) -> Result<PagedAttentionPlan, BackendError> {
+    args.recheck()?;
     let layout = &args.layout;
     let e = layout.embed_dim;
     let out_numel = args
@@ -460,6 +488,24 @@ mod tests {
             &big,
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn validators_recheck_mutated_public_fields() {
+        let pool = 32;
+        let mut a = args(1, 1, 2);
+        a.num_heads = 0;
+        assert_eq!(a.head_dim(), 0);
+        assert!(validate_paged_attention(4, pool, pool, &[0, 1], &[2], &a).is_err());
+        let mut a = args(1, 1, 2);
+        a.layout.block_size = 0;
+        assert!(validate_paged_attention(4, pool, pool, &[0, 1], &[2], &a).is_err());
+        let mut l = layout();
+        l.block_size = 0;
+        assert!(validate_paged_kv_append(0, 0, pool, pool, &[], &l).is_err());
+        let mut a = args(1, 0, 2);
+        a.scale = f32::NAN;
+        assert!(validate_paged_attention(0, pool, pool, &[0, 1], &[2], &a).is_err());
     }
 
     #[test]

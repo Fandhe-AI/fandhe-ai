@@ -282,6 +282,8 @@ impl PagedKvCache {
             )));
         }
         if l_new == 0 || b == 0 {
+            // 空入力でも引数契約（num_heads の割り切り・scale の有限性）は非空と同じに検査する。
+            PagedAttentionArgs::new(self.layout, b, l_new, num_heads, 1, scale).map_err(backend)?;
             return Tensor::new(Vec::new(), &[b, l_new, e]).map_err(AutodiffError::Shape);
         }
         let max_blocks_per_seq = self
@@ -645,6 +647,10 @@ mod tests {
         // L_new == 0 はデバイスを呼ばず空。
         let empty = Tensor::new(Vec::new(), &[1, 0, 4]).unwrap();
         assert_eq!(c.attention(&t, &empty, 2, 1.0).unwrap().shape(), &[1, 0, 4]);
+        // 空入力でも引数契約は非空と同じ（num_heads・scale を検査する）。
+        assert!(c.attention(&t, &empty, 0, 1.0).is_err());
+        assert!(c.attention(&t, &empty, 3, 1.0).is_err());
+        assert!(c.attention(&t, &empty, 2, f32::NAN).is_err());
     }
 
     #[test]

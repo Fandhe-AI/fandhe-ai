@@ -136,22 +136,25 @@ extern "C" __global__ void paged_attention_f32(
     __syncthreads();
 
     // seq_len range violations are judged from the same values by all threads (uniform in the block).
-    if (s_prev < 0 || limit > seq_len || limit > s_stride) {
+    // Thread 0 alone writes the shared flag; the barrier publishes it (no concurrent writers).
+    if (threadIdx.x == 0 && (s_prev < 0 || limit > seq_len || limit > s_stride)) {
         s_bad = 1;
     }
     __syncthreads();
 
     // 1. score: j in logical order, Dh axis accumulated sequentially with fmaf.
+    // Per-thread violation flag (no shared write inside the loop); reduced block-wide below.
+    int bad_local = 0;
     if (!s_bad) {
         for (int j = threadIdx.x; j < limit; j += blockDim.x) {
             int slot_idx = j / block_size;
             if (slot_idx >= max_blocks_per_seq) {
-                s_bad = 1;
+                bad_local = 1;
                 continue;
             }
             unsigned int id = block_tables[(long long)b * max_blocks_per_seq + slot_idx];
             if (id >= num_blocks) {
-                s_bad = 1;
+                bad_local = 1;
                 continue;
             }
             long long k_off = (((long long)id * block_size + (j % block_size)) * (long long)embed_dim)
@@ -163,9 +166,8 @@ extern "C" __global__ void paged_attention_f32(
             score_row[j] = acc;
         }
     }
-    __syncthreads();
-
-    if (s_bad) {
+    // Block-wide OR of the per-thread flags (also acts as the barrier after the score writes).
+    if (__syncthreads_or(bad_local | s_bad)) {
         for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
             out[q_off + d] = PAGED_QNAN;
         }
