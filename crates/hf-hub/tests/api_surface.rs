@@ -8,7 +8,8 @@
 //! 検査: (1) `ureq` の語は `src/transport/ureq_json.rs` だけに現れる (2) `lib.rs` の公開項目に
 //! HTTP 系の型が出ない (3) 転送層モジュールに制限なしの `pub` がない (4) TLS 構成の固定設定が
 //! 本番部分に揃い、無効化手段がない (5) `Cargo.toml` の `ureq` 宣言が `cfg(unix)` 限定・workspace
-//! 継承のみ。
+//! 継承のみ (6) 公開面が「ちょうど」期待どおり（正ガード。`resolve_revision`／`list_files` の公開〈#3394〉
+//! を含み、`download` と内部モジュールは公開されない）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -396,4 +397,210 @@ fn probe_cargo_toml_shapes() {
     ] {
         assert!(!cargo_ureq_violations(bad).is_empty(), "{bad}");
     }
+}
+
+// ---- (6) 公開面ちょうどの正ガード（#3394）----
+
+/// `#[cfg(test)] mod name { ... }`（波括弧つき）のブロックをすべて取り除いた本番コードを返す。
+/// 入力は [`strip`] 済みのコード（括弧の数え上げが文字列・コメントに惑わされない）。
+///
+/// 「最後の `#[cfg(test)]` 以降を捨てる」方式は、`mod tests` の後ろに足された制限なし `pub` を
+/// 見逃す（監査 B-2）ため採らない。ブロック単位で取り除くので、テストモジュールの後ろの項目は
+/// 本番コードとして残り、公開面の検査対象になる。`#[cfg(test)] mod live_tests;`（本体なし）は
+/// 取り除く対象がないためそのまま残る。
+fn without_test_modules(code: &str) -> String {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(p) = rest.find(ATTR) {
+        out.push_str(&rest[..p]);
+        let after_attr = &rest[p + ATTR.len()..];
+        let item = after_attr.trim_start();
+        let is_block_mod = item.starts_with("mod ")
+            && item
+                .find(['{', ';'])
+                .is_some_and(|i| item.as_bytes()[i] == b'{');
+        if !is_block_mod {
+            // `mod x;` や `#[cfg(test)] fn` などはそのまま残す（属性だけ落とす）。
+            rest = after_attr;
+            continue;
+        }
+        let open = item.find('{').unwrap_or(0);
+        let mut depth = 0usize;
+        let mut end = item.len();
+        for (i, ch) in item[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &item[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 空白を畳んだシグネチャの括弧まわりを正規化する（rustfmt の折り返し差を吸収する）。
+fn normalize_sig(s: &str) -> String {
+    s.replace("( ", "(").replace(", )", ")").replace(" )", ")")
+}
+
+/// 制限なし `pub` シグネチャを正規化してソートして返す。
+fn public_signatures_of(code: &str) -> Vec<String> {
+    let stripped = strip(code);
+    let mut v: Vec<String> = unrestricted_pub_signatures(&without_test_modules(&stripped))
+        .iter()
+        .map(|s| normalize_sig(s))
+        .collect();
+    v.sort();
+    v
+}
+
+fn sorted(items: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = items.iter().map(|s| (*s).to_owned()).collect();
+    v.sort();
+    v
+}
+
+const EXPECTED_LIB_PUBLIC: &[&str] = &[
+    "pub use api::RepoFile",
+    "pub enum HfError",
+    "pub struct HfRepoId",
+    "pub fn parse(s: &str) -> Result<Self, HfError>",
+    "pub fn namespace(&self) -> &str",
+    "pub fn name(&self) -> &str",
+    "pub struct CommitSha(String)",
+    "pub fn parse(s: &str) -> Result<Self, HfError>",
+    "pub fn as_str(&self) -> &str",
+    "pub struct Revision(RevisionKind)",
+    "pub fn main() -> Self",
+    "pub fn parse(s: &str) -> Result<Self, HfError>",
+    "pub fn to_commit_sha(&self) -> Option<CommitSha>",
+    "pub fn commit_sha(&self) -> Option<&str>",
+    "pub fn ref_name(&self) -> Option<&str>",
+    "pub fn as_str(&self) -> &str",
+    "pub struct HfHub",
+    "pub fn new(registry: ModelRegistry) -> Self",
+    "pub fn registry(&self) -> &ModelRegistry",
+    "pub fn resolve_revision(&self, repo: &HfRepoId, rev: &Revision) -> Result<CommitSha, HfError>",
+    "pub fn list_files(&self, repo: &HfRepoId, sha: &CommitSha) -> Result<Vec<RepoFile>, HfError>",
+    "pub struct CachedModel",
+    "pub fn name(&self) -> &str",
+    "pub fn version(&self) -> &str",
+    "pub fn filename(&self) -> &'static str",
+];
+
+const EXPECTED_API_PUBLIC: &[&str] = &["pub struct RepoFile", "pub fn path(&self) -> &str"];
+
+#[test]
+fn lib_public_surface_is_exactly_the_expected_items() {
+    let got = public_signatures_of(&read("src/lib.rs"));
+    // inventory: 空振り（走査 0 件・期待との偶然一致）を防ぐ。
+    assert!(got.len() >= 20, "scanned only {} items", got.len());
+    assert_eq!(
+        got,
+        sorted(EXPECTED_LIB_PUBLIC),
+        "lib.rs の公開面が変わった"
+    );
+}
+
+#[test]
+fn api_public_surface_is_exactly_the_expected_items() {
+    let got = public_signatures_of(&read("src/api.rs"));
+    assert_eq!(
+        got,
+        sorted(EXPECTED_API_PUBLIC),
+        "api.rs の公開面が変わった"
+    );
+}
+
+#[test]
+fn new_public_methods_are_present_and_download_stays_internal() {
+    let code = strip(&read("src/lib.rs"));
+    let prod = without_test_modules(&code);
+    let sigs = public_signatures_of(&read("src/lib.rs"));
+    for name in ["resolve_revision", "list_files"] {
+        let key = format!("pub fn {name}(");
+        assert_eq!(
+            sigs.iter().filter(|s| s.starts_with(&key)).count(),
+            1,
+            "{name}"
+        );
+    }
+    // `download` は facade のリダイレクト先 allowlist が別承認のため crate 内限定のまま。
+    assert!(!sigs.iter().any(|s| has_word(s, "download")));
+    assert!(
+        prod.contains("pub(crate) fn download("),
+        "download は pub(crate) のままであること"
+    );
+}
+
+#[test]
+fn internal_modules_have_no_unrestricted_pub() {
+    for f in [
+        "src/cache_key.rs",
+        "src/filename.rs",
+        "src/url.rs",
+        "src/transport.rs",
+        UREQ_FILE,
+    ] {
+        let stripped = strip(&read(f));
+        let sigs = unrestricted_pub_signatures(&without_test_modules(&stripped));
+        assert!(sigs.is_empty(), "{f}: {sigs:?}");
+    }
+    let lib = strip(&read("src/lib.rs"));
+    assert_eq!(
+        lib.matches("pub use ").count(),
+        1,
+        "pub use は RepoFile のみ"
+    );
+}
+
+#[test]
+fn probe_item_after_test_module_is_detected() {
+    let base = "pub struct A;\n#[cfg(test)]\nmod tests {\n fn t() { if true {} }\n}\n";
+    let expected = sorted(&["pub struct A"]);
+    assert_eq!(public_signatures_of(base), expected);
+    // mod tests の後ろに足された制限なし pub は公開面として数える（旧実装は見逃した）。
+    let late = format!("{base}pub fn late() {{}}\n");
+    assert_ne!(public_signatures_of(&late), expected);
+    assert!(public_signatures_of(&late).contains(&"pub fn late()".to_owned()));
+    // 本体なしの `#[cfg(test)] mod live_tests;` は切らず、後続の項目も数える。
+    let early = "#[cfg(test)]\nmod live_tests;\npub struct A;\n#[cfg(test)]\nmod tests {}\n";
+    assert_eq!(public_signatures_of(early), expected);
+    // 複数のテストモジュール・入れ子の波括弧でも、モジュール内の pub は数えず外は数える。
+    let multi = "#[cfg(test)]\nmod a { pub fn x() { { } } }\npub struct A;\n\
+        #[cfg(test)]\nmod tests { pub fn y() {} }\npub fn z() {}\n";
+    assert_eq!(
+        public_signatures_of(multi),
+        sorted(&["pub struct A", "pub fn z()"])
+    );
+    // テストモジュールがなければ全体が本番部分。
+    assert_eq!(public_signatures_of("pub struct A;"), expected);
+}
+
+#[test]
+fn probe_exact_surface_detects_added_and_removed_items() {
+    let base = "pub struct A;\nimpl A { pub fn x(&self) -> u8 { 0 } }\n";
+    let expected = sorted(&["pub struct A", "pub fn x(&self) -> u8"]);
+    assert_eq!(public_signatures_of(base), expected);
+    let added = format!("{base}pub fn extra() {{}}\n");
+    assert_ne!(public_signatures_of(&added), expected);
+    let removed = "pub struct A;\n";
+    assert_ne!(public_signatures_of(removed), expected);
+    let restricted = format!("{base}pub(crate) fn y() {{}}\n");
+    assert_eq!(public_signatures_of(&restricted), expected);
+    // 末尾のテストモジュール内の pub は数えない。
+    let in_tests = format!("{base}#[cfg(test)]\nmod t {{ pub fn z() {{}} }}\n");
+    assert_eq!(public_signatures_of(&in_tests), expected);
+    // rustfmt の折り返しは正規化で吸収する。
+    let wrapped = "pub struct A;\nimpl A { pub fn x(\n &self,\n ) -> u8 { 0 } }\n";
+    assert_eq!(public_signatures_of(wrapped), expected);
 }

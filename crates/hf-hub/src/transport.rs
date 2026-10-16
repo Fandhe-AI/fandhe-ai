@@ -12,9 +12,8 @@ use crate::url::ApiUrl;
 #[cfg(unix)]
 mod ureq_json;
 
-/// 公開化（#3394）まで本番コードからは呼ばれないため非 test では dead_code を許す。
+/// `HfHub::resolve_revision`／`list_files`（#3394）が呼ぶ本番転送層。
 #[cfg(unix)]
-#[allow(dead_code, unused_imports)]
 pub(crate) use ureq_json::UreqJsonTransport;
 
 /// 転送層の応答（ステータスと上限付きで読んだボディ）。

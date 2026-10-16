@@ -3,7 +3,8 @@
 //! `resolve_revision_via`（branch／tag → commit sha）と `list_files_via` を [`JsonTransport`]
 //! 越しに実装する。応答は解析前にサイズを検査し、型付き構造体で解析し、sha は 40 桁小文字
 //! 16 進で再検証する。etag／LFS oid は信頼根にしない（真正性は呼び出し側の sha256 pin）。
-//! 本番の転送層が未結線のため crate 内限定（`pub(crate)`）。公開化は非破壊で後から行える。
+//! 本クレートの公開入口は `HfHub::resolve_revision`／`list_files`（#3394）で、本モジュールの関数は
+//! `pub(crate)` のまま本番転送層 `UreqJsonTransport`（#3393）またはテスト用転送を注入して呼ばれる。
 //! 3xx は追従せず `HfError::Http` として拒否する（リダイレクト先ホストの検証経路を持たないため）。
 
 use serde::Deserialize;
@@ -31,6 +32,42 @@ struct Sibling {
     rfilename: String,
 }
 
+/// 見えない書式文字（Unicode Cf）と行・段落区切り。表示偽装（bidi 制御〈U+202E 等〉・ゼロ幅文字）に
+/// 使われうるため、パスに含まれていれば拒否する。`char::is_control` は Cc のみで Cf を含まない。
+fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// サーバ由来の `rfilename` を、ファイルシステムの相対パスとして安全な形に限って受理する。
+/// 拒否: 空・長さ超過・制御文字・不可視の書式文字・`\`・先頭 `/`（絶対パス）・空セグメント
+/// （`//`・末尾 `/`）・`.`／`..` セグメント。`onnx/model.onnx` のような通常の相対パスは受理する。
+fn is_safe_repo_path(p: &str) -> bool {
+    if p.is_empty()
+        || p.len() > MAX_PATH_BYTES
+        || p.chars()
+            .any(|c| c.is_control() || is_invisible_format_char(c) || c == '\\')
+    {
+        return false;
+    }
+    p.split('/')
+        .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 /// リポジトリ内のファイル 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoFile {
@@ -38,7 +75,11 @@ pub struct RepoFile {
 }
 
 impl RepoFile {
-    /// リポジトリ内パス。
+    /// リポジトリ内パス（`/` 区切りの相対パス）。
+    ///
+    /// サーバ由来の文字列である。本クレートは絶対パス・`..`・`.`・空セグメント・`\`・制御文字・
+    /// 不可視の書式文字を拒否済みだが、ファイルシステムのパスへ直結（`cache_dir.join(path)` 等）する
+    /// 前に、呼び出し側でも扱い（保存先の固定・正規化・衝突確認）を決めること。
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -69,7 +110,8 @@ fn fetch_info(
 }
 
 /// revision を commit sha へ固定する。既に sha ならネットワークを使わない。
-#[cfg_attr(not(test), allow(dead_code))]
+// 非 unix では本番転送層（`cfg(unix)`）が無く呼び出し元が存在しないため dead_code を許す。
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn resolve_revision_via(
     t: &mut dyn JsonTransport,
     repo: &HfRepoId,
@@ -85,7 +127,8 @@ pub(crate) fn resolve_revision_via(
 }
 
 /// 指定 commit のファイル一覧を返す。
-#[cfg_attr(not(test), allow(dead_code))]
+// 非 unix では本番転送層（`cfg(unix)`）が無く呼び出し元が存在しないため dead_code を許す。
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn list_files_via(
     t: &mut dyn JsonTransport,
     repo: &HfRepoId,
@@ -113,7 +156,7 @@ pub(crate) fn list_files_via(
     let mut out = Vec::with_capacity(siblings.len());
     for s in siblings {
         let p = s.rfilename;
-        if p.is_empty() || p.len() > MAX_PATH_BYTES || p.chars().any(char::is_control) {
+        if !is_safe_repo_path(&p) {
             return Err(HfError::InvalidResponse {
                 reason: "パスが不正",
             });
@@ -261,6 +304,61 @@ mod tests {
         let mut m = Mock::new(200, &format!(r#"{{"sha":"{SHA}","siblings":[{many}]}}"#));
         assert!(m.body.len() < MAX_RESPONSE_BYTES);
         assert!(list_files_via(&mut m, &repo(), &sha).is_err());
+    }
+
+    fn list_one(path_json: &str) -> Result<Vec<RepoFile>, HfError> {
+        let sha = CommitSha::parse(SHA).unwrap();
+        let body = format!(r#"{{"sha":"{SHA}","siblings":[{{"rfilename":{path_json}}}]}}"#);
+        list_files_via(&mut Mock::new(200, &body), &repo(), &sha)
+    }
+
+    #[test]
+    fn unsafe_paths_are_rejected() {
+        let bad = [
+            r#""../x""#,
+            r#""a/../x""#,
+            r#""a/..""#,
+            r#"".""#,
+            r#""a/./b""#,
+            r#""/etc/passwd""#,
+            r#""a//b""#,
+            r#""a/""#,
+            r#""a\\b""#,
+            r#""..\\x""#,
+            r#""a\u0085b""#,
+            r#""a\u007fb""#,
+            r#""a\u200bb""#,
+            r#""a\u200eb""#,
+            r#""a\u202eb""#,
+            r#""a\u202ab""#,
+            r#""a\u2066b""#,
+            r#""a\u2069b""#,
+            r#""a\ufeffb""#,
+            r#""a\u2028b""#,
+        ];
+        for b in bad {
+            assert!(
+                matches!(list_one(b), Err(HfError::InvalidResponse { .. })),
+                "{b}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_relative_paths_are_accepted() {
+        for p in [
+            "model.safetensors",
+            "onnx/model.onnx",
+            "a/b/c.json",
+            ".gitattributes",
+            "a..b",
+            "...",
+            "日本語/ファイル.txt",
+            "dir/.hidden",
+        ] {
+            let files = list_one(&format!("{p:?}")).unwrap_or_else(|e| panic!("{p}: {e:?}"));
+            assert_eq!(files[0].path(), p);
+        }
     }
 
     // ---- #3132: 追加のモックテスト（外部通信なし。転送層は trait 注入のみ） ----

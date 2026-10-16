@@ -183,8 +183,8 @@ pub(crate) struct UreqJsonTransport {
 }
 
 impl UreqJsonTransport {
-    /// 固定構成の転送層を作る。公開化（#3394）まで本番コードからは呼ばれない。
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// 固定構成の転送層を作る。`HfHub::resolve_revision`／`list_files`（#3394）が呼び出しごとに作る
+    /// （`build_agent` は接続しないため生成コストは小さい）。
     pub(crate) fn new() -> Result<Self, HfError> {
         Ok(Self {
             agent: build_agent()?,
@@ -509,6 +509,122 @@ mod loopback {
                 "{shown}"
             );
         }
+    }
+
+    // ---- #3394: list_files_via / resolve_revision_via の結合マトリクス ----
+
+    fn list_with(reply: MockReply) -> (Result<Vec<crate::RepoFile>, HfError>, MockServer) {
+        let srv = MockServer::start(vec![reply]);
+        let mut t = PlaintextLoopbackJsonTransport::new(srv.port());
+        let sha = CommitSha::parse(SHA).unwrap();
+        (list_files_via(&mut t, &repo(), &sha), srv)
+    }
+
+    fn resolve_with(reply: MockReply) -> Result<CommitSha, HfError> {
+        let srv = MockServer::start(vec![reply]);
+        let mut t = PlaintextLoopbackJsonTransport::new(srv.port());
+        resolve_revision_via(&mut t, &repo(), &Revision::main())
+    }
+
+    #[test]
+    fn list_status_codes_map_through_api() {
+        for status in [401u16, 403, 404, 503] {
+            let (r, _srv) = list_with(MockReply::Full {
+                status,
+                headers: vec![],
+                body: b"{}".to_vec(),
+            });
+            match (status, r.unwrap_err()) {
+                (401, HfError::Unauthorized)
+                | (403, HfError::Gated)
+                | (404, HfError::NotFound)
+                | (503, HfError::Http { status: 503 }) => {}
+                (s, e) => panic!("status {s}: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn list_redirects_are_not_followed() {
+        for status in [301u16, 302, 303, 307, 308] {
+            let (r, srv) = list_with(MockReply::Full {
+                status,
+                headers: vec![("Location".into(), "https://evil.example/x".into())],
+                body: Vec::new(),
+            });
+            let e = r.unwrap_err();
+            assert!(
+                matches!(e, HfError::Http { status: s } if s == status),
+                "{e:?}"
+            );
+            assert_eq!(srv.connection_count(), 1);
+            assert!(!format!("{e} {e:?}").contains("evil"));
+        }
+    }
+
+    #[test]
+    fn malformed_200_bodies_are_invalid_response() {
+        let bad_sha = format!("{}A", "a".repeat(39));
+        let other_sha = "f".repeat(40);
+        let bodies = [
+            "not json".to_owned(),
+            "{}".to_owned(),
+            r#"{"sha":"zz"}"#.to_owned(),
+            format!(r#"{{"sha":"{bad_sha}","siblings":[]}}"#),
+            format!(r#"{{"sha":"{SHA}"}}"#),
+            format!(r#"{{"sha":"{other_sha}","siblings":[]}}"#),
+            format!(r#"{{"sha":"{SHA}","siblings":[{{"rfilename":"a\u0000b"}}]}}"#),
+            format!(r#"{{"sha":"{SHA}","siblings":[{{"rfilename":""}}]}}"#),
+        ];
+        for b in &bodies {
+            let (r, _srv) = list_with(json_ok(b));
+            assert!(
+                matches!(r, Err(HfError::InvalidResponse { .. })),
+                "{b}: {:?}",
+                r.err()
+            );
+        }
+        for b in ["not json", "{}", r#"{"sha":"zz"}"#, r#"{"sha":""}"#] {
+            let r = resolve_with(json_ok(b));
+            assert!(matches!(r, Err(HfError::InvalidResponse { .. })), "{b}");
+        }
+    }
+
+    #[test]
+    fn list_over_max_is_rejected() {
+        let (r, _srv) = list_with(MockReply::Full {
+            status: 200,
+            headers: vec![],
+            body: vec![b' '; MAX_RESPONSE_BYTES + 1],
+        });
+        assert!(matches!(r, Err(HfError::ResponseTooLarge { .. })));
+        let (r, _srv) = list_with(MockReply::Chunked {
+            body: vec![b' '; MAX_RESPONSE_BYTES + 1],
+        });
+        assert!(matches!(r, Err(HfError::ResponseTooLarge { .. })));
+        let r = resolve_with(MockReply::Chunked {
+            body: vec![b' '; MAX_RESPONSE_BYTES + 1],
+        });
+        assert!(matches!(r, Err(HfError::ResponseTooLarge { .. })));
+    }
+
+    #[test]
+    fn list_returns_multiple_files_and_empty() {
+        let (r, srv) = list_with(json_ok(&format!(
+            r#"{{"sha":"{SHA}","siblings":[{{"rfilename":"config.json"}},{{"rfilename":"model.safetensors"}},{{"rfilename":"sub/a.txt"}}]}}"#
+        )));
+        let paths: Vec<_> = r.unwrap().iter().map(|f| f.path().to_owned()).collect();
+        assert_eq!(paths, ["config.json", "model.safetensors", "sub/a.txt"]);
+        let rec = srv.recorded();
+        assert!(
+            rec[0]
+                .request_line
+                .starts_with(&format!("GET /api/models/org/model/revision/{SHA} ")),
+            "{}",
+            rec[0].request_line
+        );
+        let (r, _srv) = list_with(json_ok(&format!(r#"{{"sha":"{SHA}","siblings":[]}}"#)));
+        assert!(r.unwrap().is_empty());
     }
 
     #[test]
