@@ -43,8 +43,8 @@
 | 語彙の直接指定 | 対象内 | `&[S] where S: AsRef<str>` で渡す。ファイル・パスは受け取らない |
 | `adapt()` 型の語彙構築 | 対象内 | メモリ上のコーパス `&[S]` から、標準化→分割→n-gram の後に頻度を数える。並びは頻度の降順、同頻度はバイト列の辞書順（昇順）。`HashMap` の反復順に依存しない。`max_tokens` はパディングと OOV を含めた件数（Keras と同じ。要出典確認） |
 | 出力モード `int` | 対象内 | `Tensor<i32>`、形状 `[B, L]` |
-| 出力モード `multi_hot`／`count`／`tf_idf`、`pad_to_max_tokens`、`idf_weights` | 対象外（条件付き） | #2618 §9.5 で A-1 に含めず「一次資料の確認後に別途範囲を決める」とした項目 |
-| `StringLookup`／`tf.strings.*`／`tf.lookup.*` 相当 | 対象外（条件付き） | 同上 |
+| 出力モード `multi_hot`／`count`／`tf_idf`、`pad_to_max_tokens`、`idf_weights` | 対象外（条件付き） | #2618 §9.5 で A-1 に含めず「一次資料の確認後に別途範囲を決める」とした項目 (→ 公開形は #3091 の決定記録 `facade-text-output-modes-string-lookup-decision.md` を正とする) |
+| `StringLookup`／`tf.strings.*`／`tf.lookup.*` 相当 | 対象外（条件付き） | 同上 (→ 公開形は #3091 の決定記録 `facade-text-output-modes-string-lookup-decision.md` を正とする) |
 | 語彙の保存・読み込み（ファイル形式） | 対象外 | spec `:238` の「ファイル形式をパースしない」。語彙は `vocabulary()` で `&[String]` として取り出せ、保存は利用者が行う |
 | id → 文字列の復号 | 対象内（専用 API なし） | `vocabulary()[id]` で引けるため専用 API は作らない |
 | ragged／sparse 出力、`encoding` 指定、`vocabulary_dtype` | 対象外 | `&str` 入力・`i32` 出力に固定 |
@@ -145,7 +145,7 @@ impl TextVectorization {
 3. 小文字化を ASCII に限るか。空白の定義（ASCII か Unicode か）
 4. Keras との bit 互換を契約にするか（§7）
 5. `TextLimits` の既定値・絶対上限
-6. 出力モード `multi_hot`／`count`／`tf_idf`、`StringLookup` 相当を後で入れるか（一次資料の確認を含む）
+6. 出力モード `multi_hot`／`count`／`tf_idf`、`StringLookup` 相当を後で入れるか（一次資料の確認を含む）（→ 公開形は #3091 の決定記録 `facade-text-output-modes-string-lookup-decision.md` を正とする）
 7. `Sequential` の層化（`Tensor<f32>` 前提とのずれ）
 8. callable の標準化・分割
 
