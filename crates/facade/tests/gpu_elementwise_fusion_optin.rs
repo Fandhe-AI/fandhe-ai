@@ -183,8 +183,13 @@ mod metal {
         );
 
         fandhe_ai::set_metal_elementwise_fusion_enabled(true);
-        if let Ok(out) = metal.run_fused(&plan, &[&a, &b]) {
-            assert_eq!(out.shape(), &[8]);
+        // 成功と「Metal デバイス不在」だけを許容する。`Unsupported`（ゲートが
+        // 常に OFF の回帰）や `KernelLaunchFailed`（シェーダコンパイル失敗等）は
+        // 失敗にする（CUDA 側と同型。PR #3386 Codex 指摘）。
+        match metal.run_fused(&plan, &[&a, &b]) {
+            Ok(out) => assert_eq!(out.shape(), &[8]),
+            Err(BackendError::DeviceUnavailable(_)) => {}
+            Err(other) => panic!("unexpected error on Metal-equipped runner: {other}"),
         }
     }
 }
