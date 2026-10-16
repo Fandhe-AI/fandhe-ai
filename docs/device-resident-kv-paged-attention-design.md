@@ -47,7 +47,7 @@
 - **ブロックテーブル**: `[B, max_blocks_per_seq]` の `u32` と行ごとの有効長 `seq_lens: [B]`。ホストで持ちステップごとにデバイスへ渡す。カーネルは添字が `num_blocks` 未満・位置が有効長未満であることを手動で検査する（REQ-8）
 - **カーネルの入力と出力**: q `[B, L_new, E]`、K／V ページ、ブロックテーブル、`seq_lens`、`scale`、head 数、因果オフセット（K-1 の mask 規則 (a)〜(c) と同じ意味）。出力は `[B, L_new, E]`
 - **縮約の順序**: 第 1 段階はトークンを論理順に走査し、max → exp の和 → 加重和の 2 パスで、ブロックをまたぐ並列分割（flash-decoding 型 split）はしない。split 版を入れる場合は「結合順序が単一の連続 K ループと異なるカーネル」にあたり、§5 の baseline 方針の対象になる
-- **padding・可変長（#3104）**: 第 1 段階は現行 `KvCache` の不変条件（バッチ内の全行が同じ `S_cached`）を継ぐ。カーネルの入力は行ごとの `seq_lens` を受ける形にしておく。#3104 が「行ごとの長さ配列」を選べばカーネルを変えずに広げられ、「padding + mask」を選べば mask の入力を足す。#3104 は未マージなので確定せず、依存として §9 に載せる
+- **padding・可変長（#3104）**: 第 1 段階は現行 `KvCache` の不変条件（バッチ内の全行が同じ `S_cached`）を継ぐ。カーネルの入力は行ごとの `seq_lens` を受ける形にしておく。#3104 は左詰め padding と `KvCache` 内の行ごとの有効長を決定した（`docs/facade-speculative-decoding-batching-design.md` §21）。有効長はカーネル入力の `seq_lens` と同じ意味なので、カーネルを変えずに広げられ、mask の入力は足さない。実装は #3105
 - **既存経路**: K-1 の `KvCache`・`forward_with_cache`・`generate`・`BatchScheduler` は変えない
 
 ## 4. バックエンドごとの方針と `unsafe`
@@ -100,7 +100,7 @@
 | 2 | `BackendOps`／`MemoryOps` へのメソッド追加（追記・paged attention・`_tracked`） | 未承認 | spec REQ-9 2026-10-08 追記は `Op`／`BackendOps` の拡張を承認しない。speculative 記録 §10 も別承認としている |
 | 3 | backend-cuda／backend-metal への新規 `unsafe` | 未承認 | D-C の 4 件に K-3 が含まれない。security-auditor の個別監査は承認とは別に必須 |
 | 4 | paged attention の facade 公開面の追加（`compat-api-scope.md` §5 経路 2） | 未承認 | D-A の列挙に明記がない |
-| 5 | 可変長への拡張（#3104 の結論待ち） | 順序の依存 | #3104 の記録が未マージ。所有者確認ではなく依存 |
+| 5 | 可変長への拡張 | 決定済み | #3104 で決定（同 `facade-speculative-decoding-batching-design.md` §21）。所有者確認ではなく依存で、実装は #3105 |
 
 ## 10. 変えないもの・出典
 
