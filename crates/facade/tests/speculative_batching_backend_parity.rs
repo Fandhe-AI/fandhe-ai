@@ -32,11 +32,19 @@
 //!
 //! # 対象外
 //!
-//! バックエンドをまたぐ TopK／Temperature の比較（ホスト `f64` のサンプリングは CDF 境界で
-//! logits の微差により反転しうる。設計 §6.2）、サンプリング版 speculative（実機テストは #3102 へ申し送り。#3101 で実装済み）、
-//! B > 1、`num_kv_layers() == 0` の speculative（論点 3）、内部状態保持型モデル（論点 8）、
-//! facade 公開。`Generator` は非暗号の xorshift64* で、本テストは Greedy のみのため乱数を
-//! 使わない（OWASP A02 の注記）。
+//! バックエンドをまたぐ TopK／Temperature の token 列比較（ホスト `f64` のサンプリングは
+//! CDF 境界で logits の微差により反転しうる。設計 §6.2）、B > 1、`num_kv_layers() == 0` の
+//! speculative（論点 3）、内部状態保持型モデル（論点 8）、facade 公開。
+//!
+//! # サンプリング版 speculative（#3102。設計 §20.7）
+//!
+//! サンプリング版は token 列の一致を契約にも仮説（H1）にもしない。推奨方式に従い、参照側で
+//! `generate_speculative` を実行して `forward_step` ごとの入力 id 列を記録し、比較側バックエンドの
+//! モデルへ**同じ id 列を再生**して、呼び出しごとの logits だけを REQ-2 統一複合判定で比べる
+//! （`replay_logs`・`check_speculative_sampling`。巻き戻しは `seq_before` ごとに保存した
+//! `KvCache` の複製へ戻して再現する）。tolerance・baseline は新設しない。実測は
+//! `docs/perf/logs/speculative-sampling-3102/README.md`。
+//! `Generator` は非暗号の xorshift64* で、生成 token をセキュリティ用途に使わない（OWASP A02 の注記）。
 
 use fandhe_ai_autodiff::generate::scheduler::{BatchScheduler, SchedulerLimits};
 use fandhe_ai_autodiff::generate::speculative::{SpeculativeConfig, generate_speculative};
@@ -50,6 +58,7 @@ use fandhe_ai_backend_cpu::parity::{
 };
 use fandhe_ai_tensor_core::Tensor;
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 const V: usize = 7;
 const E: usize = 4;
@@ -390,6 +399,115 @@ fn check_speculative(make: TapeBackend, reference: TapeBackend, label: &str) -> 
     st
 }
 
+/// サンプリング版の掃引設定（`(名前, 戦略)`。seed は呼び出し側が与える）。
+fn sampling_cfgs() -> [(&'static str, SamplingStrategy); 2] {
+    [
+        ("Temperature(0.8)", SamplingStrategy::Temperature(0.8)),
+        ("TopK(3)", SamplingStrategy::TopK(3)),
+    ]
+}
+
+/// `log`（参照側で記録した `forward_step` 呼び出し列）の入力 id 列を、`make` 側モデルへ順に再生して
+/// 呼び出しごとの記録を返す（設計 §20.7）。巻き戻しは、呼び出し前のキャッシュ長が `seq_before` と
+/// 違うとき、長さごとに保存した最新の `KvCache` 複製へ戻して再現する（巻き戻し後の長さ以下の履歴は
+/// 不変なので最新の複製が正しい状態になる）。検証 forward（`L = k + 1`）と再 forward はそのまま通す。
+fn replay_logs(
+    make: TapeBackend,
+    layers: usize,
+    seed_base: i64,
+    next: NextFn,
+    log: &[Call],
+) -> Vec<Call> {
+    let model = attn(make, layers, seed_base, next);
+    let mut states: HashMap<usize, Vec<KvCache>> = HashMap::new();
+    let mut caches: Vec<KvCache> = (0..layers).map(|_| KvCache::new()).collect();
+    states.insert(0, caches.clone());
+    for (i, call) in log.iter().enumerate() {
+        let before = call.seq_before.expect("speculative は KV 付きモデルのみ");
+        if caches[0].seq_len() != before {
+            caches = states
+                .get(&before)
+                .unwrap_or_else(|| panic!("呼び出し {i}: 長さ {before} の状態が記録にない"))
+                .clone();
+        }
+        let input = Tensor::new(call.ids.clone(), &[1, call.ids.len()]).expect("fixture");
+        model.forward_step(&input, &mut caches).expect("再生");
+        states.insert(caches[0].seq_len(), caches.clone());
+    }
+    model.log.into_inner()
+}
+
+/// サンプリング版 speculative の掃引。reference で `generate_speculative` を実行して target・draft の
+/// 呼び出し列を記録し、`make` 側へ id 列を再生して logits を呼び出しごとに突合する（token 列は比べない）。
+fn check_speculative_sampling(make: TapeBackend, reference: TapeBackend, label: &str) -> SpecStats {
+    let mut st = SpecStats {
+        runs: 0,
+        verify_calls: 0,
+        replays: 0,
+    };
+    for layers in [1usize, 2] {
+        for k in [1usize, 3] {
+            for prompt_len in [1usize, 3] {
+                for max in [prompt_len + k + 1, 12] {
+                    for (sname, strategy) in sampling_cfgs() {
+                        for seed in [1u64, 2] {
+                            for di in 0..4 {
+                                let (dname, dseed, dnext) = draft_spec(di);
+                                let case = format!(
+                                    "{label} {sname} seed={seed} layers={layers} k={k} T={prompt_len} max={max} draft={dname}"
+                                );
+                                let target = attn(reference, layers, 100, Box::new(target_next));
+                                let draft = attn(reference, layers, dseed, dnext);
+                                let config = GenerateConfig::new(max, strategy).with_seed(seed);
+                                generate_speculative(
+                                    &target,
+                                    &draft,
+                                    &prompt(prompt_len, false),
+                                    &config,
+                                    &SpeculativeConfig::new(k),
+                                )
+                                .expect("generate_speculative");
+                                let (r_t, r_d) = (target.log.borrow(), draft.log.borrow());
+
+                                let d_t =
+                                    replay_logs(make, layers, 100, Box::new(target_next), &r_t);
+                                let (_, _, dnext) = draft_spec(di);
+                                let d_d = replay_logs(make, layers, dseed, dnext, &r_d);
+                                assert_logs_parity(&format!("{case} target"), &d_t, &r_t);
+                                assert_logs_parity(&format!("{case} draft"), &d_d, &r_d);
+
+                                st.verify_calls += r_t
+                                    .iter()
+                                    .filter(|c| c.ids.len() > 1 && c.seq_before != Some(0))
+                                    .count();
+                                st.replays += r_t
+                                    .windows(2)
+                                    .filter(|w| w[1].seq_before == w[0].seq_before)
+                                    .count();
+                                st.runs += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        st.runs >= 256,
+        "{label}: 掃引が縮退している（runs={})",
+        st.runs
+    );
+    assert!(
+        st.verify_calls > 0,
+        "{label}: 検証 forward（L_new > 1）が比較されていない"
+    );
+    assert!(
+        st.replays > 0,
+        "{label}: 再 forward（rewind-replay）が 1 度も起きていない"
+    );
+    st
+}
+
 type Req = (usize, Tensor<i32>, GenerateConfig);
 
 fn ids1(v: &[i32]) -> Tensor<i32> {
@@ -496,6 +614,59 @@ fn cpu_backend_ops_matches_naive_ops_for_scheduler_greedy() {
     check_scheduler(TapeBackend::Cpu, TapeBackend::Naive, "cpu-vs-naive");
 }
 
+#[test]
+fn cpu_backend_ops_matches_naive_ops_for_speculative_sampling() {
+    check_speculative_sampling(TapeBackend::Cpu, TapeBackend::Naive, "cpu-vs-naive");
+}
+
+/// 再生ハーネスの検出力: 記録の id を 1 つ書き換える、または logits を摂動すると判定が落ちる。
+#[test]
+fn replay_comparison_detects_tampering() {
+    let target = attn(TapeBackend::Naive, 1, 100, Box::new(target_next));
+    let draft = attn(TapeBackend::Naive, 1, 300, periodic_next(3));
+    let config = GenerateConfig::new(10, SamplingStrategy::Temperature(0.8)).with_seed(1);
+    generate_speculative(
+        &target,
+        &draft,
+        &prompt(2, false),
+        &config,
+        &SpeculativeConfig::new(3),
+    )
+    .expect("generate_speculative");
+    let log = target.log.borrow();
+    let flat =
+        |calls: &[Call]| -> Vec<f32> { calls.iter().flat_map(|c| c.logits.clone()).collect() };
+
+    // 無改変の再生は合格する（基準）。
+    let ok = replay_logs(TapeBackend::Naive, 1, 100, Box::new(target_next), &log);
+    assert!(compare(&flat(&ok), &flat(&log)).expect("compare").passes());
+
+    // id の書き換え（最後の呼び出しの末尾 id を別トークンへ）。
+    let mut tampered: Vec<Call> = log
+        .iter()
+        .map(|c| Call {
+            seq_before: c.seq_before,
+            ids: c.ids.clone(),
+            shape: c.shape.clone(),
+            logits: c.logits.clone(),
+        })
+        .collect();
+    let last = tampered.last_mut().expect("非空");
+    let n = last.ids.len();
+    last.ids[n - 1] = (last.ids[n - 1] + 1) % V as i32;
+    let replayed = replay_logs(TapeBackend::Naive, 1, 100, Box::new(target_next), &tampered);
+    assert!(
+        !compare(&flat(&replayed), &flat(&log))
+            .expect("compare")
+            .passes()
+    );
+
+    // 参照 logits の摂動。
+    let mut perturbed = flat(&log);
+    perturbed[0] += 1.0e-2;
+    assert!(!compare(&flat(&ok), &perturbed).expect("compare").passes());
+}
+
 /// 突合が実際に効くこと: 重みの異なるモデルの logits は REQ-2 判定で不合格になる。
 #[test]
 fn comparison_detects_logits_divergence() {
@@ -528,6 +699,19 @@ fn cuda_speculative_greedy_matches_cpu() {
 #[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/speculative-batching-2890/README.md 参照"]
 fn cuda_scheduler_greedy_matches_cpu() {
     check_scheduler(TapeBackend::Cuda, TapeBackend::Cpu, "cuda");
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10）が必要。docs/perf/logs/speculative-sampling-3102/README.md 参照"]
+fn cuda_speculative_sampling_matches_cpu() {
+    check_speculative_sampling(TapeBackend::Cuda, TapeBackend::Cpu, "cuda");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機が必要。docs/perf/logs/speculative-sampling-3102/README.md 参照"]
+fn metal_speculative_sampling_matches_cpu() {
+    check_speculative_sampling(TapeBackend::Metal, TapeBackend::Cpu, "metal");
 }
 
 #[cfg(target_os = "macos")]

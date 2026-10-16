@@ -100,6 +100,7 @@ docs/
     │   ├── logs/functional-transforms-facade-2931/ # facade `Tape::vjp`／`hvp`／`vmap`（#2931）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄。内部 API 層は #2881 の README が担当）
     │   ├── logs/speculative-batching-2890/ # speculative decoding・連続バッチング（#2890）の CUDA／Metal 実機 `#[ignore]` parity テスト未実測の申し送り（測定コマンド・期待結果・記入欄）
     │   ├── logs/speculative-batching-facade-2934/ # speculative decoding・連続バッチングの facade 公開（#2934）の実機未実測の申し送り（測定コマンドは #2890 を参照・記入欄。#3098 で CPU のみの追加分と実機再計測は Phase 8 の旨を追記）
+    │   ├── logs/speculative-sampling-3102/ # サンプリング版 speculative decoding（#3102）の CUDA／Metal 実機 `#[ignore]` parity テスト（logits 再生方式）未実測の申し送り（測定コマンド・期待結果・記入欄）
     │   ├── logs/gradcheck-anomaly-2671/ # gradcheck・anomaly detection（#2671）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果〈新規カーネルではなく既存カーネルの新しい呼び出し形の確認〉・記入欄）（CUDA #2992・Metal #2993 の実測を同期済み）
     │   ├── logs/tape-gradcheck-facade-2847/ # facade `Tape::gradcheck`（#2847）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果・記入欄）
     │   ├── logs/functional-graph-2665/ # Functional API 多入力グラフの構築と forward（#2665）の CUDA／Metal 実機 `#[ignore]` テスト未実測の申し送り（測定コマンド・期待結果〈新規カーネルではなく既存 `Var` 演算の新しい呼び出し形の確認〉・記入欄）
