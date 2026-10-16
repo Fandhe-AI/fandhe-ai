@@ -772,3 +772,89 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 - 使い捨てのディレクトリ（CA の秘密鍵・サーバ証明書・各構成のビルド成果物を含む）、Docker イメージ（`Dockerfile` から作ったイメージ・`ubuntu:24.04`）、Python サーバのプロセスは、実測後に削除・終了した。
 - 本体の `Cargo.toml`・`Cargo.lock`・`deny.toml`・`crates/**`・`.github/**`・`Dockerfile`・`.claude/**`・`docs/spec/` は変更していない。変更したファイルは `docs/model-download-design.md`（追記のみ）・`docs/license-matrix.md`（§10 末尾にポインタ 1 行）・`docs/README.md`（索引の追記）の 3 つである。
+
+## 17. 第 11 区分の確定記録（2026-10-16・#3123）
+
+### 17.1 位置づけ
+
+- 本節は #3123（所有者の承認取得）の記録である。**§1〜§16 は書き換えない**。§14.4・§14.5-1・§14.6・§16.9 の「未承認」「推奨」の記述は当時の状態であり、確定内容は本節が後続の正になる。
+- **確定の性質**: 所有者コメント（#3123 コメント id `6111756315`・2026-10-12・「全て推奨で」の回答として記録されたもの）は次の 2 層からなる。
+  - 推奨が本文に示されていた項目の確定: dirfd = B-1、`cfg` = `cfg(unix)` 限定、第 11 区分の新設。
+  - 本文に推奨が無かった項目（クレート・版・feature・配置 A／B／C）への委任条項: 「#3122 の実測に基づく推奨を提示し、その推奨形で #3124 へ進めてよい」。差し戻し条件は 3 つ（§17.4）。
+- 同コメントは §16（2026-10-16）より前に書かれており、**特定のクレート名を名指していない**。したがって構成と配置は「所有者が特定クレートを承認した」ものではなく、「委任条項に基づき §16.8 の推奨形で確定した」ものである。所有者が後から否認した場合の扱いは §17.5 に従う。
+- 本イシューでコード・`Cargo.toml`・`Cargo.lock`・`deny.toml`・`deps-policy.md`・`CLAUDE.md` は変更していない。正式反映は #3124 の担当である。
+
+### 17.2 確定内容
+
+| 項目 | 確定値 | 根拠 |
+|---|---|---|
+| 区分 | 第 11 区分「HTTP クライアント／TLS」を新設 | 所有者コメントで確定 |
+| クレート・版 | `ureq =3.4.2`（`=x.y.z` 完全固定） | 委任条項・§16.8 の推奨（構成 N′+V） |
+| feature | `default-features = false`・`features = ["native-tls", "vendored"]` | 同上 |
+| `cfg` 範囲 | `cfg(unix)` 限定（`[target.'cfg(unix)'.dependencies]`）。Windows は依存ツリーに入らず、download は fail-closed の非対応（§6 (c)） | 所有者コメントで確定。macOS のクロスジョブとの両立は §16.5 で実測済み |
+| 配置 | **案 A（`facade` の無条件依存。ただし `cfg(unix)`）** | 委任条項。B（cargo feature での opt-in）は「feature フラグなし cfg ベース」方針と optional 依存の前例が無いことに反し、選ぶこと自体が新しい方針判断になる。C（非公開の別クレート）は公開クレートから非公開クレートへ依存できず不成立（§4・§14.4） |
+| dirfd | B-1。第 10 区分 `libc =0.2.189` の用途を `crates/facade/src/model.rs` のキャッシュ書き込み（`openat`／`openat2`／`mkdirat`／`renameat`）へ広げる。facade は `[target.'cfg(unix)'.dependencies]` で `libc.workspace = true` を直接依存にする。新規 `unsafe` は FFI 境界に限り、理由コメントと security-auditor のレビューを必須とする | 所有者コメントで確定 |
+| allow 追加 | `CDLA-Permissive-2.0` のみ（`webpki-root-certs 1.0.9`） | §16.4 |
+| SHA-256 | 新規依存なし。`crates/self-repair/src/sha256.rs`（FIPS 180-4 自作）を facade へ移植する（`self-repair` は非公開で facade から依存できない）。`sha2` 等は使わない。実装は #3125 | 差し戻し条件 (3) の回避 |
+
+利用者への影響:
+
+- Linux ビルドに perl・make・C ツールチェーンが要る（debug で +21〜42 秒）。`libssl-dev` は不要で、実行時の `libssl.so.3` 依存も無い。
+- macOS は `vendored` が効かず `security-framework` 系になるため、ビルドは軽い（§16.5）。
+- perl・make が無い環境でのビルドは未検証（§16.7。#3173 で確認する）。
+- facade の公開 API に HTTP crate の型を出さない（`api_surface.rs` で担保。§8-5）。
+
+### 17.3 推奨形に付随する受容事項（§16.8 の (a)〜(e)）
+
+- (a) allow に `CDLA-Permissive-2.0` を追加する。
+- (b) Linux ビルドに perl・make が要り、ビルド時間が増える。
+- (c) OpenSSL 本体（Apache-2.0）が成果物に静的に入る。
+- (d) OpenSSL の脆弱性対応は `openssl-src` の版更新（人間承認）に頼る。検知は CI の `cargo deny check advisories` で行い、`=x.y.z` 完全固定と `Cargo.lock` のコミットで再現性を保つ。
+- (e) `TlsProvider::NativeTls` の明示が必須（既定の Rustls は panic する）。
+
+### 17.4 差し戻し 3 条件の判定
+
+| 条件 | 判定 | 根拠 |
+|---|---|---|
+| (1) §14 に無い allow 識別子 | 該当しない | 追加は `CDLA-Permissive-2.0` のみで、§14.3・§14.5-1・§14.6 に同じ識別子が挙がっている。ただし §14 で挙がっていたのは `webpki-roots` で、N′+V の `webpki-root-certs 1.0.9` とはクレートが異なる（識別子は一致、クレートは別）。識別子は同一の範囲内と判断した |
+| (2) 禁止リスト・コピーレフト | 該当しない | §16.4 で全構成 × 3 ターゲットのコピーレフト 0 件。本イシューで禁止リストを追加実測した（下記） |
+| (3) 別の新規依存 | 該当しない | SHA-256 は自作実装の移植で足りる（§17.2） |
+
+禁止リストの追加実測（2026-10-16・cargo 1.98.1・本体 workspace 外の使い捨てプロジェクト・空の `[workspace]`・`ureq = { version = "=3.4.2", default-features = false, features = ["native-tls", "vendored"] }`・`cargo generate-lockfile` で解決。51 パッケージ。`ureq 3.4.2`・`native-tls 0.2.18`・`openssl-src 300.6.1+3.6.3`・`webpki-root-certs 1.0.9`）:
+
+- `scripts/check-forbidden-deps.sh lock <Cargo.lock>` は終了コード 0（「依存禁止リストの混入なし」）。`burn`・`cubecl`・`candle`・`tch`・`ndarray` で始まる名前の `[[package]]` は 0 件。
+- `cargo metadata --locked` の宣言ライセンスのうち、`MPL`・`GPL`・`EPL`・`CDDL` を含むものは `r-efi 6.0.0`（`MIT OR Apache-2.0 OR LGPL-2.1-or-later`）の 1 件だけだった。これは OR 式で MIT を選べ、UEFI 専用のため §16.4 のターゲット別集計（unix 系 3 ターゲット）では出ない。LGPL を採用する依存ではなく、コピーレフトの混入には当たらない。#3124 の再実測では `--filter-platform` 付きで同じ結果になることを確認する。
+- 使い捨てプロジェクトは測定後に削除した。
+
+### 17.5 承認されなかった場合の扱い
+
+差し戻し条件のいずれかに当たった場合、または所有者が推奨形を後から否認した場合:
+
+- #3124 へ進まず、#3123 に差し戻しの理由を書いて所有者へ戻す。
+- 第一の代替は次点 M1（`minreq =3.0.0`・`https-native-tls`）で再評価する。allow 追加は不要だが、代償が 3 つある。ISC の直接ライセンスの例外記録、`Dockerfile` への `libssl-dev` 追加、API の不足（`https_only`・サイズ上限・接続タイムアウト・CA 指定が無い。§16.8）。
+- いずれの構成も承認されない場合は、HTTPS ダウンロード（#3124・#3125）を保留へ戻し、D-B の実装着手を止める。
+- 再評価は新しい実測 issue として起票する。起票は所有者の判断による。
+
+### 17.6 本イシューで決めない事項
+
+- 受信タイムアウトが全体期限でありアイドル期限ではない点（§16.6）の設計判断は #3125 の設計事項とする。依存の承認には影響しない。
+- 実機・実通信・perl／make が無い環境・`ubuntu-latest` の実ランナーでの確認は #3173 が担当する。
+- facade 公開面の拡張（§7-2）と HTTPS 取得の実装は #3125 が担当する。
+- HF Hub 連携の別クレート（#3129）が第 11 区分を再利用する場合は、承認単位を別とする（§14.5-1 を引き継ぐ）。
+
+### 17.7 #3124 の作業項目
+
+1. ルート `Cargo.toml` の `[workspace.dependencies]` に `ureq = { version = "=3.4.2", default-features = false, features = ["native-tls", "vendored"] }` を feature の理由コメント付きで追加する。
+2. `crates/facade/Cargo.toml` に `[target.'cfg(unix)'.dependencies]` を新設し、`ureq.workspace = true`・`libc.workspace = true`（第 10 区分の用途拡張。B-1）を置く。`Cargo.lock` を更新してコミットする。
+3. `deny.toml` の `[licenses].allow` に `CDLA-Permissive-2.0` を追加する（理由コメントは `webpki-root-certs`）。`[sources]` は crates.io 限定のまま。`cargo deny check advisories bans licenses sources` を通す。
+4. `.claude/rules/deps-policy.md` の表に第 11 区分の行を追加し、第 10 区分 `libc` の行へ facade のキャッシュ書き込み用途を追記する。区分数の記述（`deps-policy.md` 冒頭・`CLAUDE.md`・`.claude/rules/coding-rust.md`・ルート `Cargo.toml` と `deny.toml` のコメント）の整合を取る。
+5. `docs/license-matrix.md` の 8 節系に行を、6 節に個別判断（`webpki-root-certs`・`openssl-src` の静的同梱と脆弱性対応）を追加する（§16.10 の案を、その時点の解決版で再実測した値で書く）。§13.2 の「`aws-lc-sys` は `cmake` 必須」は §16.5 の実測で更新する。
+6. 有効な feature の組合せごとに 3 ターゲットで `cargo tree` を再実測し、`scripts/check-forbidden-deps.sh lock-all`・`tree` が通ることを確認する。
+7. facade の README とルート README に Linux のビルド要件（perl・make・C ツールチェーン）を書く。`Dockerfile` は perl・make が既にあるため変更不要の見込みだが、再確認する。
+8. 公開 API・取得ロジックは追加しない（#3125）。未使用依存の警告は公開面を増やさない形で扱う。
+9. security-auditor の監査を受ける（依存追加と `deny.toml` の変更）。
+10. PR 本文と規約には「#3123 の所有者コメント 6111756315 の委任条項に基づく推奨形」と書く。「所有者が `ureq` を承認」とは書かない。
+
+### 17.8 第 11 区分の deps-policy 起案行
+
+§14.6 の起案行（`ureq`・`default-features = false`・`features = ["native-tls", "vendored"]`・`=3.4.2` 完全固定・`cfg(unix)` 限定・`TlsProvider::NativeTls` 明示・`disable_verification` を出さない・`https_only(true)`・タイムアウトとサイズ上限の明示・allow は `CDLA-Permissive-2.0` のみ・HF Hub は承認単位を別とする）を、本節の確定値でそのまま転記する。`cfg` 範囲の文言「§14.4 の承認結果に従う」は「`cfg(unix)` 限定」へ置き換える。転記は #3124 で行う。

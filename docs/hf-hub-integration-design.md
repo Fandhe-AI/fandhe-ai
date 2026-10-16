@@ -1,6 +1,7 @@
 # HF hub 連携クレートの境界と取得 API 案の設計判断記録（#2244）
 
 - イシュー #2244（親 #2243「HF hub 連携クレートの設計判断記録と依存追加の承認申請」・Phase 親 #2131）。**§6 は #2622（Phase 5 親 #2606）で最新化**
+- **§9 は #3129（D-B）で追記した決定記録**。§2.3・§2.4・§3.3・§6.3 の推奨を確定形として記録（所有者確認は 9.9 の 3 項目。依存は未承認）
 - **コード変更なし・依存追加なし**。本 doc は設計案の記録であり、確定はユーザー承認後
 - 基準コミット: 作業ブランチ作成時点の `origin/main`（`9fe4b523`。2026-09-27）。§6 の最新化（#2622）の基準は `ab2db9d2`（2026-10-04）
 - 結論の要約: 本 doc は §1〜§3 に境界と API 案を記す設計案であり、正式決定ではない。**§4（認証トークン・セキュリティ）は #2245 で追記済み・§5・§6（他ライブラリ対応表・承認事項一覧）は #2246 で追記済み・§6 は #2622 で最新化済み**（依存区分の番号を現行 `.claude/rules/deps-policy.md` に揃えた・別クレートの位置づけ〈§6.3〉と承認順序〈§6.4〉を追記）。承認はいずれも未取得
@@ -476,3 +477,129 @@ huggingface_hub（Python）の `hf_hub_download(repo_id, filename, revision)` [^
 - イシュー: #2243・#2244・#2245・#2246・#2622・#2619・#2620・#2621・#2088・#2087・#2194
 - 規約（§6.3）: `.claude/rules/deps-policy.md`（第 10 区分 `libc`）・`docs/functorch-serving-hub-non-target-spec-proposal.md`（§3-D・§5）
 - 外部 URL: https://docs.pytorch.org/docs/2.14/hub.html （PyTorch Hub）・https://huggingface.co/docs/huggingface_hub/guides/integrations （huggingface_hub integrations）・https://huggingface.co/docs/hub/keras （Keras at HF）・https://huggingface.co/docs/hub/api （HF Hub API ドキュメント）・https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables （huggingface_hub 環境変数リファレンス。トークン供給経路の案の出典。§4.1）・https://www.tensorflow.org/api_docs/python/tf/keras/utils/get_file （`tf.keras.utils.get_file`。§5.1）・https://blog.tensorflow.org/2023/03/tensorflow-hub-kaggle.html （tfhub.dev の Kaggle Models 移行。§5.1）・https://huggingface.co/docs/huggingface_hub/package_reference/mixins （`PyTorchModelHubMixin`。§5.1）・https://huggingface.co/docs/huggingface_hub/guides/download （`hf_hub_download`。§5.1・§5.2）・https://keras.io/keras_hub/ （KerasHub `from_preset`。§5.1・§5.3。preset 内訳の詳細は外部仕様・要確認）
+
+## 9. クレート境界・公開形の決定記録（#3129・D-B）
+
+イシュー #3129（親 #3128「HF Hub 連携を別クレートで実装」・Phase 親 #3088）。**コード変更なし・依存追加なし**。基準コミットは `origin/main` の `12750a0e`（2026-10-16）。§2.3・§2.4・§3.3・§6.3 で「推奨」止まりだった点を、実装へ進める形に確定させて記録する。
+
+### 9.1 位置づけ
+
+- 根拠は D-B（2026-10-11 所有者判断。`docs/compat-api-scope.md` §5 末尾の適用記録）。D-A の流儀に倣い、形は推奨 1 案で確定させ、所有者へ戻すのは 9.9 の表の点だけとする
+- **承認の有無（事実どおり）**: 依存の追加は未承認（#3123 のゲート）。クレート名・公開区分・§0 との整合は所有者未確認。本節は承認を意味しない
+- 前提チェーン: #3123（依存承認）→ #3124（依存追加）→ #3121 配下（facade の `download_with`。`crates/facade/src` には未実装）→ #3130（雛形）→ #3131（解決・取得の実装）・#3132（テスト）
+- #3122（TLS 構成の再実測）は完了済みで、推奨は 1 案（`ureq`・`native-tls`＋`vendored`。構成 N′+V。未承認。`docs/model-download-design.md` §16.8）
+
+### 9.2 クレート境界と公開名（推奨 1 案）
+
+- ディレクトリは `crates/hf-hub`、`[package] name` は `fandhe-ai-hf-hub`（`docs/crates-io-naming-decision.md` の `fandhe-ai-` prefix 方針）。**名前は所有者確認の項目**（9.9 項 1）
+- 依存方向は別クレート → `fandhe-ai`（facade）の一方向。facade から別クレートへの依存は作らない。別クレートは `tensor-core`／`autodiff`／`backend-*`／`onnx-interop` に直接依存しない（§2.2 を確定形とする）
+- 責務は §2.1 の分担表を確定とする。別クレートは `repo_id` の検証、revision の解決、ファイル一覧の取得、`resolve` URL の組み立て、キャッシュキーへの写像を担う。書き込み・pin 検証・safetensors の読込は facade に任せる
+- crates.io 上の名前の空き（第三者の `hf-hub` との区別を含む）は**未実測**。2 段目（9.3）に入る前に `docs/crates-io-naming-decision.md`「確認方法」節の手順で実測する
+- コアに HF 固有 API を組み込まない方針は変えない
+
+### 9.3 公開区分（推奨 1 案: 2 段）
+
+- **1 段目**: workspace のメンバーとして `publish = false` で置き、実装と CI 検証を行う。前例は `docs-site` だが、これは開発ツールであり利用者向けクレートの前例にはならない（§6.3 の注記を引き継ぐ）
+- **2 段目**: crates.io 公開（8 件目）。入る条件は (1) 所有者の公開承認、(2) `download_with` を含む `fandhe-ai` の crates.io 公開版があること、(3) 名前の空きの実測、(4) §0 との整合の再承認。2 段目は別の issue と承認で扱う
+- 選ばない案: workspace 外の独立パッケージ。独自の `Cargo.lock`・`deny.toml`・契約検査が要り運用コストが高い（§6.3）
+- **公開区分は所有者確認の項目**（9.9 項 2）
+
+### 9.4 HTTP 経路・API 形・`filename` の扱い（確定推奨）
+
+**HTTP 経路は案 A で確定**する。
+
+- 別クレートが HTTP クライアントを自分の直接依存として持つ。用途は HF の JSON API（revision 解決とファイル一覧）だけ
+- ファイル本体の取得は facade の `download_with` に任せ、pin 検証と dirfd 書き込みの契約を迂回しない
+- 案 B（facade に汎用 GET を公開）は HF 固有の要求がコアへ滲むので採らない。案 C は revision 解決とファイル一覧を満たせないので採らない
+- HTTP／TLS の crate・版・feature は #3122 の推奨と #3123 の承認結果に従い、`[workspace.dependencies]` の同じ固定版を共有する。別クレートでも `docs/model-download-design.md` §16.9 の条件を同じく満たす（`TlsProvider::NativeTls` を明示、`https_only(true)`、接続と受信のタイムアウト、JSON 応答のサイズ上限、証明書検証を無効化する設定を出さない、panic 経路を固定設定とテストで閉じる）
+- `cfg` 範囲: #3123 の第一案（facade の無条件依存＋`cfg(unix)`）に合わせ、別クレートも `cfg(unix)` で HTTP 依存を持ち、それ以外では型付きの `Unsupported` を返す。cargo feature による配置案が選ばれた場合は、本リポの「feature フラグなしの cfg ベース」方針との関係を見直す必要がある
+
+**API 形**は §3.1 のスケッチを確定形とする: `HfRepoId::parse`、`Revision::parse`（`CommitSha`／`Ref`）、`HfHub::new(ModelRegistry)`、`resolve_revision`、`list_files`、`download`、`#[non_exhaustive] HfError`。HTTP crate の型を公開面に出さない。
+
+**`filename` は §3.3 の是正案 A で確定**する。
+
+- `download` が受け付ける `filename` を、リポジトリ直下の `model.safetensors` 1 つとの完全一致に限り、それ以外は接続前に fail-closed の `HfError` で拒否する
+- 単一ファイル制約（`<cache_dir>/<name>/<version>/model.safetensors`）と合い、キャッシュキーの衝突が構造的に起きない
+- 引数そのものは残す。将来、是正案 B の方向へ広げるときに非破壊で済むため
+- キャッシュキーは `name` = repo_id の符号化、`version` = 解決済みの commit sha。区切りの一意性は 9.6 項 6 の外部仕様確認に依存する
+
+認証は初期状態で private／gated repo を fail-closed で非対応とする（§4.1 (γ)）。これは変えない。
+
+### 9.5 依存の整理
+
+| 依存 | 扱い | 承認 |
+|---|---|---|
+| `fandhe-ai`（facade） | workspace 内の path 依存。1 段目は `publish = false` なので `deny.toml` の `allow-wildcard-paths = true` の範囲。2 段目では `version = "=x.y.z"` を併記する | 区分の対象外 |
+| `serde`／`serde_json` | 既存の区分を workspace の固定版で使う | 不要 |
+| HTTP／TLS | #3123 で新設を承認依頼中の第 11 区分の用途を HF 別クレートへ広げる。承認単位は facade 用とは別 | 要（#3123 のゲート） |
+| `libc` | 使わない（第 10 区分の用途は拡張しない。トークンファイルを読む機能は初期状態で持たない） | 該当なし |
+| `zeroize` | 追加しない（残留リスクとして据え置く） | 該当なし |
+| 第三者の `hf-hub` | 使わない（独自のキャッシュと HTTP を持ち、pin と dirfd の契約を迂回する。§2.5） | 該当なし |
+| URL のパーセントエンコード・SHA-256 | 新規依存にせず自作する。依存が要ると分かった場合は別承認 | — |
+
+### 9.6 HF 固有の外部仕様の確認（#3131 の作業項目）
+
+reference-researcher に一次資料の確認を委譲する。値は断定せず、すべて**外部仕様・要確認**として扱い、確認できなかった項目は「未確認」と書く。結果は本 doc へ追記する。
+
+1. `resolve` URL の形式（https://huggingface.co/docs/huggingface_hub/package_reference/file_download ・ https://huggingface.co/docs/hub/api ）
+2. revision 解決 API とファイル一覧 API のエンドポイントと応答 JSON の形（https://huggingface.co/docs/hub/api ・ https://huggingface.co/docs/huggingface_hub/package_reference/hf_api ）
+3. commit sha を返す応答ヘッダの名前
+4. LFS／etag 系ヘッダの扱い（信頼根にしない前提は §3.6 のまま）
+5. CDN リダイレクト先のドメイン（§4.2 の allowlist の確定に使う）
+6. repo_id の命名規則（許容文字・長さ・`--` の出現可否。キャッシュキー符号化の一意性に直結。https://huggingface.co/docs/hub/repositories ）
+7. 401／403／404 の返り方（private／gated を fail-closed で拒否する判定に使う）
+
+### 9.7 影響一覧（実際の更新は #3130。公開段階の分は 2 段目の issue）
+
+| 対象 | 1 段目（`publish = false`）の影響 | 2 段目（crates.io 公開）の追加影響 |
+|---|---|---|
+| ルート `Cargo.toml` の `members` と冒頭コメント | `crates/hf-hub` を追加し、クレート数の記述を更新（#3130） | — |
+| `Cargo.lock` | HTTP／TLS 依存の追加で変わる（#3124 の後） | — |
+| `CLAUDE.md`（Overview の想定クレート数・Repository Structure の `crates/` 行） | 非公開の内部クレートとして記述を更新（#3130） | 公開済みクレート数（7 → 8）・release の記述 |
+| `.claude/rules/delegation-impl.md`・`.claude/agents/implement/*`・`.claude/agents/research/explorer.md` | 担当を追加する。推奨は interop-builder（外部フォーマット・相互運用の担当で safetensors に近い）。#3130 で反映 | — |
+| `README.md`（クレート一覧）・`site/index.md`（「10 個のクレート」） | README は非公開の内部クレートとして追記。site は利用者が触れるのは `fandhe-ai` だけという記述のため変更不要 | 公開クレートとして両方に追記 |
+| `.claude/rules/deps-policy.md`・`docs/license-matrix.md` | 第 11 区分の用途条件に HF 別クレートを足す（#3123 承認後） | — |
+| `deny.toml` | クレート追加だけなら変更不要（`allow-wildcard-paths` が非公開クレートの path 依存を許す）。allow の追加は #3124 側 | facade への path 依存に `version` を併記しないと `wildcards = "deny"` で落ちる |
+| `scripts/check-forbidden-deps.sh` | 変更不要（ルート `Cargo.lock` と `cargo tree` の検査が workspace 全体を対象にする）。#3130 で実行して確認 | — |
+| `.github/workflows/ci.yml` | 新しいジョブは不要。`rust-ci`（`--workspace`）・`cargo build --workspace`（`aarch64-apple-darwin` のクロスを含む）・CUDA toolkit 非搭載ビルド・検証ゲートが自動で含む。注意: macOS クロスは N′+V で成功が実測済み（`docs/model-download-design.md` §16.5）／Windows clippy は `-p` 指定のため対象外／`Cargo.lock` の変化で target キャッシュが 1 回外れる／テストは外部通信をしない（実通信は `#[ignore]`） | — |
+| `runner-policy` | 変更不要（ワークフローを足さない） | — |
+| ruleset `main-protection`（required contexts） | 変更不要（ジョブを足さない限り）。足す場合は `ci-complete` の `needs` 更新と人間承認が要る ruleset 更新を PR に明記する。実装 Agent は変更しない | 同左 |
+| `.github/workflows/release-all.yml`・`release.yml` | 変更不要 | 公開リストの `fandhe-ai` の後ろに追加し、`release.yml` の選択肢にも追加 |
+| `docs/crates-io-publishing-order.md`・`docs/crates-io-naming-decision.md` | 変更不要 | 公開順序・版数の運用・名前の空きの実測記録 |
+| `docs/compat-api-scope.md` §0 | 変更不要（9.8 の (b) に沿う） | (a)／(b) をあらためて承認 |
+| `crates/facade/tests/api_surface.rs` | 変更不要（facade は別クレートに依存しない）。#3130 で確認 | — |
+
+### 9.8 `docs/compat-api-scope.md` §0 との整合
+
+- 選択肢は §6.3 のとおり (a) §0 に例外を加える／(b) 別クレートを facade の安定性保証の外にある補助クレートと位置づける
+- **推奨**: 1 段目の間は (b)。利用者に配布しないため 2 つ目の公開面は生じず、§0 の文言は変えない。2 段目に入るときに (a)／(b) をあらためて所有者に確認する
+- **§0 との整合は所有者確認の項目**（9.9 項 3）
+
+### 9.9 所有者へ戻す点（D-A の流儀）
+
+| # | 項目 | 推奨 | 確認がないときの扱い |
+|---|---|---|---|
+| 1 | クレート名（ディレクトリ名と `[package] name`） | `crates/hf-hub`・`fandhe-ai-hf-hub` | #3130 は着手しない |
+| 2 | 公開区分 | `publish = false` から始める 2 段 | 同上 |
+| 3 | §0 との整合 | 1 段目は (b)、2 段目で再確認 | (b) のまま。公開段階に入らない |
+| 参考 | 依存の最終承認 | 第 11 区分の用途を HF 別クレートへ拡張（承認単位は別） | #3123 のゲート。本 issue では扱わない |
+| 参考 | ruleset の更新 | 不要（ジョブを足さないため） | ジョブを足す場合だけ人間承認 |
+
+ほかの点（HTTP 経路は案 A、API 形、`filename` は是正案 A、担当 builder、依存の整理）は推奨形で記録し、所有者へ戻さない。
+
+### 9.10 セキュリティ上の確定事項（OWASP Top 10 観点）
+
+- A01: private／gated repo は初期状態で fail-closed の非対応。認証経路を緩める推奨は書かない
+- A02: 証明書検証を無効化する設定を出さず、`https_only(true)` でリダイレクトの各ホップを `https` に限る
+- A03: `repo_id`・`revision`・`filename` は接続前に allowlist で検証する。`filename` は完全一致のみでパストラバーサルとキャッシュキー衝突を構造的に防ぐ。URL エンコードは自作し、規則は 9.6 の確認後に確定する
+- A05: タイムアウトとサイズ上限を明示する（既定は無期限のため）
+- A06: 第三者の `hf-hub` を使わない。HTTP／TLS は `=x.y.z` 完全固定で、#3123 の承認・`cargo deny`・`check-forbidden-deps.sh` を経てから追加する
+- A08: ファイル本体は `download_with` を通し、呼び出し側の sha256 pin を真正性の根拠にする。サーバーの etag を信頼根にしない。別クレートが独自にキャッシュへ書き込む経路を作らない
+- A09: `HfError` やログに URL の資格情報・トークンを含めない（§4.1 の秘匿契約）
+- A10: リダイレクト先は `https` と allowlist のドメイン（9.6 項 5 の確認後に確定）に限る
+
+### 9.11 出典
+
+- 内部 docs: 本 doc §2〜§6、`docs/model-download-design.md`（§14.4・§16.5・§16.8・§16.9）、`docs/compat-api-scope.md`（§0・§5 の D-B 適用記録）、`docs/crates-io-naming-decision.md`、`docs/crates-io-publishing-order.md`、`docs/facade-model-registry-decision.md`（§7）
+- 設定: ルート `Cargo.toml`、`deny.toml`（`allow-wildcard-paths`）、`.github/workflows/ci.yml`、`.github/workflows/release-all.yml`、`scripts/check-forbidden-deps.sh`
+- イシュー: #3128・#3129・#3130・#3131・#3132・#3121・#3122・#3123・#3124・#3088
