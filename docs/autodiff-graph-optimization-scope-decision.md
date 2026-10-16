@@ -279,3 +279,7 @@ fused_elementwise.rs`・`fused_elementwise_source.rs`）とも、CPU
 | B-6 | #1690・#1912 が REJECT の最新記録 |
 
 10 節の承認事項は、#2085 追補の新規 `unsafe` 4 か所を含め、承認を得たかが記録上確認できない。本 doc は取得済みとは記さない。区分 B と「spec 改定が要る汎用 JIT」の分離、spec 改定案（対象外として確定／範囲を限って対象内化）、ユーザー承認依頼は `docs/graph-compile-scope-spec-proposal.md` を正とする（#2615）。
+
+## #3115 追補
+
+10 節 (3)（facade への opt-in setter 追加）の公開形は `docs/facade-graph-tier-b-optin-exposure-decision.md` §3・§4 を正とする。#2085 追補の承認事項 (3)（新規 `unsafe` 4 か所）は記録上不明のままで、所有者へ戻す点 R1 として同 doc §6 に整理した。取得済みとは記さない。
