@@ -28,13 +28,22 @@ pub(super) struct RawResponse {
     pub(super) location: Option<String>,
     pub(super) content_length: Option<u64>,
     pub(super) content_encoding: Option<String>,
+    /// `ETag` ヘッダ。解釈できない・`valid_etag` を満たさない値は `None`（保存しない。#3126）。
+    pub(super) etag: Option<String>,
     pub(super) body: Box<dyn Read>,
 }
 
 /// GET を 1 ホップ分実行する抽象。`download.rs` の単体テストはこれをプロセス内モックで差し替える。
 /// 受け取るのは検証済み URL のみ（未検証文字列が転送層へ渡る経路を型で閉じる）。
 pub(super) trait Transport {
-    fn get(&mut self, url: &ValidatedUrl, deadline: Instant) -> Result<RawResponse, ModelError>;
+    /// `if_none_match` が `Some` のときだけ `If-None-Match` を付ける（#3126。呼び出し側が
+    /// `cache::valid_etag` で検証済みの値のみ渡す）。
+    fn get(
+        &mut self,
+        url: &ValidatedUrl,
+        deadline: Instant,
+        if_none_match: Option<&str>,
+    ) -> Result<RawResponse, ModelError>;
 }
 
 fn net(kind: io::ErrorKind, msg: &'static str) -> ModelError {
@@ -155,7 +164,12 @@ fn collect_content_encoding(headers: &ureq::http::HeaderMap) -> Result<Option<St
 }
 
 impl Transport for UreqTransport {
-    fn get(&mut self, url: &ValidatedUrl, deadline: Instant) -> Result<RawResponse, ModelError> {
+    fn get(
+        &mut self,
+        url: &ValidatedUrl,
+        deadline: Instant,
+        if_none_match: Option<&str>,
+    ) -> Result<RawResponse, ModelError> {
         // 多層防御: 検証済み URL を `Uri` として再解析し、https・資格情報なしを照合する。
         let uri = ureq::http::Uri::try_from(url.as_str()).map_err(|_| ModelError::InvalidUrl {
             reason: "URL を解析できません",
@@ -170,9 +184,13 @@ impl Transport for UreqTransport {
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
             .ok_or_else(|| net(io::ErrorKind::TimedOut, "HTTP 転送がタイムアウトしました"))?;
-        let resp = self
-            .agent
-            .get(uri)
+        let mut req = self.agent.get(uri);
+        // 多層防御: 送信直前にも etag を再確認する（ヘッダインジェクション対策）。違反値は
+        // 条件なし GET に倒す（呼び出し側 `cache.rs` で検証済みのため通常は到達しない）。
+        if let Some(v) = if_none_match.filter(|v| super::cache::valid_etag(v)) {
+            req = req.header("If-None-Match", v);
+        }
+        let resp = req
             .config()
             .timeout_global(Some(remaining))
             .build()
@@ -187,6 +205,7 @@ impl Transport for UreqTransport {
         };
         let location = header("location");
         let content_encoding = collect_content_encoding(resp.headers())?;
+        let etag = header("etag").filter(|v| super::cache::valid_etag(v));
         let (_, body) = resp.into_parts();
         let content_length = body.content_length();
         let reader = body.into_with_config().limit(u64::MAX).reader();
@@ -195,6 +214,7 @@ impl Transport for UreqTransport {
             location,
             content_length,
             content_encoding,
+            etag,
             body: Box::new(SanitizedReader(reader)),
         })
     }
@@ -245,7 +265,7 @@ mod tests {
         let url = super::super::url::validate_https_url(&format!("https://127.0.0.1:{port}/m"))
             .expect("url");
         let mut t = UreqTransport::new().expect("transport");
-        let r = t.get(&url, Instant::now() + Duration::from_secs(20));
+        let r = t.get(&url, Instant::now() + Duration::from_secs(20), None);
         assert!(
             matches!(r, Err(ModelError::Network(_))),
             "got Err? {}",
@@ -264,7 +284,7 @@ mod tests {
         let url = super::super::url::validate_https_url(&format!("https://127.0.0.1:{port}/m"))
             .expect("url");
         let mut t = UreqTransport::new().expect("transport");
-        let r = t.get(&url, Instant::now() + Duration::from_secs(20));
+        let r = t.get(&url, Instant::now() + Duration::from_secs(20), None);
         assert!(r.is_err());
         let _ = h.join();
     }
@@ -273,7 +293,7 @@ mod tests {
     fn expired_deadline_is_timed_out_without_connecting() {
         let url = super::super::url::validate_https_url("https://127.0.0.1:1/m").expect("url");
         let mut t = UreqTransport::new().expect("transport");
-        let r = t.get(&url, Instant::now() - Duration::from_secs(1));
+        let r = t.get(&url, Instant::now() - Duration::from_secs(1), None);
         match r {
             Err(ModelError::Network(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
             _ => panic!("expected TimedOut"),

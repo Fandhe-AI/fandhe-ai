@@ -12,3 +12,7 @@
 pub mod npy;
 pub mod onnx;
 pub mod safetensors;
+
+// イシュー #3126: `model.rs` 専用の crate 内ラッパー（公開面ではない）。
+#[cfg(unix)]
+pub(crate) mod layout;

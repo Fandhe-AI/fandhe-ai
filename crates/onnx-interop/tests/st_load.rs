@@ -12,6 +12,7 @@ use std::path::Path;
 
 use fandhe_ai_onnx_interop::st_load::{
     LoadError, load_safetensors_f32, load_safetensors_f32_from_bytes, require_keys,
+    validate_safetensors_layout_from_bytes,
 };
 use fandhe_ai_tensor_core::Tensor;
 use safetensors::Dtype;
@@ -227,4 +228,46 @@ fn truncated_data_is_rejected_before_conversion() {
         matches!(err, LoadError::SafetensorsFormat(_)),
         "unexpected error variant: {err:?}"
     );
+}
+
+// イシュー #3126: 方式 (ii)（dtype 非依存のレイアウト検証）。
+#[test]
+fn layout_validation_accepts_f32_and_f16_but_load_rejects_f16() {
+    let f32d: Vec<u8> = vec![0u8; 8];
+    let v = TensorView::new(Dtype::F32, vec![2], &f32d).unwrap();
+    let b32 = serialize([("w".to_string(), v)], None).unwrap();
+    assert!(validate_safetensors_layout_from_bytes(&b32).is_ok());
+
+    let f16d: Vec<u8> = vec![0u8; 2];
+    let v = TensorView::new(Dtype::F16, vec![1], &f16d).unwrap();
+    let b16 = serialize([("w".to_string(), v)], None).unwrap();
+    assert!(validate_safetensors_layout_from_bytes(&b16).is_ok());
+    assert!(matches!(
+        load_safetensors_f32_from_bytes(&b16),
+        Err(LoadError::UnsupportedDtype { .. })
+    ));
+}
+
+#[test]
+fn layout_validation_rejects_garbage_truncation_and_trailing_bytes() {
+    let d: Vec<u8> = vec![0u8; 8];
+    let v = TensorView::new(Dtype::F32, vec![2], &d).unwrap();
+    let ok = serialize([("w".to_string(), v)], None).unwrap();
+    let is_fmt = |r: Result<(), LoadError>| matches!(r, Err(LoadError::SafetensorsFormat(_)));
+    assert!(is_fmt(validate_safetensors_layout_from_bytes(
+        b"<html>404</html>"
+    )));
+    assert!(is_fmt(validate_safetensors_layout_from_bytes(&[])));
+    // ヘッダ長が実長を超える。
+    assert!(is_fmt(validate_safetensors_layout_from_bytes(
+        &u64::MAX.to_le_bytes()
+    )));
+    // 末尾 4 バイト欠損。
+    assert!(is_fmt(validate_safetensors_layout_from_bytes(
+        &ok[..ok.len() - 4]
+    )));
+    // 末尾に余剰バイト（全体長不一致）。
+    let mut extra = ok.clone();
+    extra.extend_from_slice(&[0u8; 4]);
+    assert!(is_fmt(validate_safetensors_layout_from_bytes(&extra)));
 }

@@ -22,6 +22,12 @@
 //!                                    不透明な文字列として扱う
 //!       model.safetensors           F32 テンソルのみ・キー = state_dict
 //!                                    キー（転置・リネームなし。REQ-7）
+//!       download.json               `download` が置く取得メタデータ（`url`・
+//!                                    `etag`・`content_length`・`sha256`・
+//!                                    `fetched_at`。#3126）。条件付き GET と
+//!                                    `304` 再検証の根拠で、破損・部分改変の
+//!                                    検出用にすぎず真正性の根拠ではない。
+//!                                    `load`／`available_models` は参照しない
 //! ```
 //!
 //! 配置は利用者（または将来のダウンロード側。#2088 リモート取得。本
@@ -173,6 +179,8 @@ use crate::interop::safetensors::{LoadError, SaveError, load_safetensors_f32_fro
 // `download`（#3125）の private 実装モジュール。公開面は本ファイルの型・メソッドに閉じる
 // （api_surface が `pub mod`／`pub use` の不在と `ureq`／`libc` トークンの不在を検査する）。
 #[cfg(unix)]
+mod cache;
+#[cfg(unix)]
 mod dirfd;
 #[cfg(unix)]
 mod download;
@@ -246,6 +254,16 @@ pub enum ModelError {
     /// バッファの確保失敗（[`std::io::ErrorKind::OutOfMemory`]。
     /// `reserve_read_buffer`）はその一例。
     Io(std::io::Error),
+    /// `download.json`（取得メタデータ）が不正（破損・未知キー・型違い・不正な etag 等。
+    /// #3126）。読み出し側は再取得へフォールバックするため通常は呼び出し側へ届かず、
+    /// 書き込もうとしたメタデータが不正な場合に返る。URL・パスは持たない（A09）。
+    CacheMetadata { reason: &'static str },
+    /// ディスク満杯（`io::ErrorKind::StorageFull`／`QuotaExceeded`。ダウンロード経路のみ。
+    /// #3126）。`Display` にパスは含めない。
+    StorageFull(std::io::Error),
+    /// 権限エラー（`io::ErrorKind::PermissionDenied`。ダウンロード経路のみ。#3126）。
+    /// `Display` にパスは含めない。
+    PermissionDenied(std::io::Error),
 }
 
 impl fmt::Display for ModelError {
@@ -304,6 +322,15 @@ impl fmt::Display for ModelError {
             }
             ModelError::Network(e) => write!(f, "ネットワーク取得に失敗しました: {e}"),
             ModelError::Io(e) => write!(f, "モデルレジストリの I/O に失敗しました: {e}"),
+            ModelError::CacheMetadata { reason } => {
+                write!(f, "ダウンロードのキャッシュメタデータが不正です: {reason}")
+            }
+            ModelError::StorageFull(_) => {
+                write!(f, "ディスク容量が不足しているため書き込めません")
+            }
+            ModelError::PermissionDenied(_) => {
+                write!(f, "権限がないため書き込めません")
+            }
         }
     }
 }
@@ -315,6 +342,8 @@ impl std::error::Error for ModelError {
             ModelError::Load(e) => Some(e),
             ModelError::Io(e) => Some(e),
             ModelError::Network(e) => Some(e),
+            ModelError::StorageFull(e) => Some(e),
+            ModelError::PermissionDenied(e) => Some(e),
             _ => None,
         }
     }
@@ -560,10 +589,12 @@ fn reserve_read_buffer(capacity_hint: usize) -> Result<Vec<u8>, ModelError> {
     Ok(bytes)
 }
 
-/// 公開前検証: 取得済み一時ファイルが妥当な safetensors（ヘッダ長・JSON・オフセット整合・
-/// dtype/shape）であることを `load` と同じデコーダで確認する。HTML エラーページや破損
-/// 内容が既存の正常なモデルを置き換えるのを防ぐ（A08）。ファイルサイズは取得時に
-/// 上限（`MAX_MODEL_FILE_BYTES`）で制限済みで、`load` と同量のメモリのみ使う。
+/// 公開前検証（設計 §5 方式 (ii)。#3126）: 取得済み一時ファイルが妥当な safetensors
+/// （ヘッダ長・ヘッダ JSON・オフセット連続性・shape×dtype 長・全体長の一致）であることを
+/// 確認する。dtype は限定しない（F16／BF16 の正当なファイルを拒否しない。`load` は従来どおり
+/// F32 のみ）。HTML エラーページや破損内容が既存の正常なモデルを置き換えるのを防ぐ（A08）。
+/// ファイルサイズは取得時に上限（`MAX_MODEL_FILE_BYTES`）で制限済みで、メモリはファイル全量
+/// 1 回分のみ（F32 テンソルの確保は行わない）。
 #[cfg(unix)]
 fn verify_safetensors_before_commit(file: &File) -> Result<(), ModelError> {
     use std::io::{Seek, SeekFrom};
@@ -575,8 +606,22 @@ fn verify_safetensors_before_commit(file: &File) -> Result<(), ModelError> {
         .take(MAX_MODEL_FILE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(ModelError::Io)?;
-    load_safetensors_f32_from_bytes(&bytes).map_err(ModelError::Load)?;
+    crate::interop::layout::validate_from_bytes(&bytes).map_err(ModelError::Load)?;
     Ok(())
+}
+
+/// ダウンロード経路の FS エラーを型付きエラーへ割り当てる（#3126）。`StorageFull`／
+/// `QuotaExceeded` は [`ModelError::StorageFull`]、`PermissionDenied` は
+/// [`ModelError::PermissionDenied`]、それ以外は従来どおり [`ModelError::Io`]。適用範囲は
+/// ダウンロード経路のみで、`save`／`load` の挙動は変えない。
+#[cfg(unix)]
+fn map_fs_error(e: std::io::Error) -> ModelError {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded => ModelError::StorageFull(e),
+        ErrorKind::PermissionDenied => ModelError::PermissionDenied(e),
+        _ => ModelError::Io(e),
+    }
 }
 
 /// 既定キャッシュディレクトリを `home` から純粋に導出する（環境変数の
@@ -1139,9 +1184,23 @@ impl ModelRegistry {
     ///
     /// pin（[`DownloadOptions::expected_sha256`]）を指定しない場合の保証は破損・部分改変の
     /// 検出（サイズ上限・`Content-Length` 一致）に限られ、意図的な改竄に対する真正性は保証
-    /// しない（保存値との照合は #3126）。真正性が必要なら pin を指定すること。公開前に
+    /// しない。真正性が必要なら pin を指定すること。公開前に
     /// safetensors の構造（ヘッダ長・JSON・オフセット整合）を検証し、不正な内容は
-    /// [`ModelError::Load`] で拒否して既存ファイルを変更しない。
+    /// [`ModelError::Load`] で拒否して既存ファイルを変更しない（検証は dtype に依存しない
+    /// レイアウト検証で、F16／BF16 の正当なファイルも公開できる。`load` は従来どおり F32 のみ）。
+    ///
+    /// # キャッシュ（#3126）
+    ///
+    /// 取得に成功すると `<name>/<version>/download.json`（`url`・`etag`・`content_length`・
+    /// `sha256`・`fetched_at`）を `model.safetensors` の後に置く。同じ URL の再取得で
+    /// `ETag` が保存されていれば `If-None-Match` を付けた条件付き GET を送り、`304` を受けたら
+    /// 既存 `model.safetensors` の SHA-256 を計算し直して pin（なければ保存値）と照合し、一致
+    /// したときだけ再利用して `fetched_at` のみを更新する。一致しない・ファイルが無い・
+    /// `download.json` が壊れている場合は無条件 GET で全量を取り直す。保存値は破損・部分改変の
+    /// 検出用で、意図的な改竄に対する真正性は pin でしか保証できない。`ETag` を返さない
+    /// サーバからは常に取り直す。`download.json` の書き込みだけが失敗した場合もエラーを返す
+    /// （モデル本体は検証済みで公開済み。古い `download.json` は次回の再検証で不一致となり
+    /// 取り直しになる）。
     /// SSRF（内部ネットワーク宛先）の遮断は呼び出し側の責務で、本関数が担保するのは
     /// `https` 限定・資格情報付き URL の拒否・各リダイレクトでの再検証までである。
     ///
@@ -1188,7 +1247,11 @@ impl ModelRegistry {
     /// - [`ModelError::TooLarge`] — `Content-Length` または受信量が上限（1 GiB）超過
     /// - [`ModelError::ContentLengthMismatch`]・[`ModelError::HashMismatch`]
     /// - [`ModelError::Load`] — 取得内容が妥当な safetensors でない
-    /// - [`ModelError::Io`] — 書き込み失敗。中間ディレクトリがシンボリックリンクなら
+    /// - [`ModelError::StorageFull`]・[`ModelError::PermissionDenied`] — ダウンロード経路の
+    ///   書き込みでディスク満杯・権限エラー
+    /// - [`ModelError::CacheMetadata`] — 書き込もうとした `download.json` が不正（読み出し側の
+    ///   破損は再取得にフォールバックするため返らない）
+    /// - [`ModelError::Io`] — 上記以外の書き込み失敗。中間ディレクトリがシンボリックリンクなら
     ///   `InvalidInput`、非対応プラットフォーム（unix 以外）は `Unsupported`
     ///
     /// 失敗時は既存の `model.safetensors` を変更せず、自分が作った一時ファイルだけを削除する。
@@ -1245,8 +1308,35 @@ impl ModelRegistry {
             let name_fd = dirfd::open_or_create_dir(&root_fd, name)?;
             dirfd::open_or_create_dir(&name_fd, version)
         };
+        // 作成しない参照（キャッシュ参照・`304` 再検証用）。不在は `None`。
+        let mut lookup_dir = || -> std::io::Result<Option<std::os::fd::OwnedFd>> {
+            let Some(root_fd) = dirfd::open_root_existing(&root)? else {
+                return Ok(None);
+            };
+            let Some(name_fd) = dirfd::open_existing_dir(&root_fd, name)? else {
+                return Ok(None);
+            };
+            dirfd::open_existing_dir(&name_fd, version)
+        };
+        // キャッシュ参照段: `download.json` が読めて、URL 一致・etag あり・pin 整合のときだけ
+        // 条件付き GET の根拠にする（pin があれば保存値が pin と食い違うキャッシュは使わない。
+        // A08）。読めない・不正なら `None`（無条件 GET へフォールバック）。
+        let cache_meta = lookup_dir()
+            .ok()
+            .flatten()
+            .and_then(|d| cache::read(&d))
+            .filter(|m| {
+                m.url == url.as_str()
+                    && m.etag.is_some()
+                    && expected_sha256.is_none_or(|pin| m.sha256 == pin)
+            });
         let mut next_staging = || dirfd::production_staging_name(MODEL_FILE_NAME);
         let mut next_tmp = || dirfd::production_tmp_name(MODEL_FILE_NAME);
+        let mut now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+        };
         let job = download::Job {
             url,
             name,
@@ -1255,17 +1345,22 @@ impl ModelRegistry {
             max_redirects: DOWNLOAD_MAX_REDIRECTS,
             deadline: std::time::Instant::now() + transport::OVERALL_DEADLINE,
             expected: expected_sha256,
+            cache: cache_meta,
         };
         // 公開直前の検証フック: safetensors のヘッダ長・JSON・オフセット整合を検証する
-        // （設計 §6 A08）。不正なら rename 前に失敗し既存ファイルは置き換わらない。
+        // （方式 (ii)・設計 §5／§6 A08）。不正なら rename 前に失敗し既存ファイルは置き換わらない。
         download::run(
             transport,
             job,
             progress,
-            &mut open_dir,
-            &mut next_staging,
-            &mut next_tmp,
-            &mut verify_safetensors_before_commit,
+            download::Hooks {
+                lookup_dir: &mut lookup_dir,
+                open_dir: &mut open_dir,
+                next_staging: &mut next_staging,
+                next_tmp: &mut next_tmp,
+                verify_before_commit: &mut verify_safetensors_before_commit,
+                now: &mut now,
+            },
         )
     }
 
@@ -2114,6 +2209,9 @@ mod tests {
                 actual: Sha256Pin([2; 32]),
             },
             ModelError::Network(std::io::Error::other("net")),
+            ModelError::CacheMetadata { reason: "r" },
+            ModelError::StorageFull(std::io::Error::other("full")),
+            ModelError::PermissionDenied(std::io::Error::other("perm")),
         ];
         for e in errs {
             let text = format!("{e} {e:?}");
@@ -2153,91 +2251,119 @@ mod tests {
         assert!(!root.exists(), "拒否時にキャッシュルートを作らない");
     }
 
+    /// 応答を順に返し、各リクエストの `If-None-Match` を記録するモック転送。
     #[cfg(unix)]
-    #[test]
-    fn download_via_publishes_and_load_dir_is_listed() {
-        use std::io::Cursor;
-        struct One(Option<Vec<u8>>);
-        impl transport::Transport for One {
-            fn get(
-                &mut self,
-                _u: &url::ValidatedUrl,
-                _d: std::time::Instant,
-            ) -> Result<transport::RawResponse, ModelError> {
-                let body = self.0.take().expect("once");
-                Ok(transport::RawResponse {
-                    status: 200,
-                    location: None,
-                    content_length: Some(body.len() as u64),
-                    content_encoding: None,
-                    body: Box::new(Cursor::new(body)),
-                })
+    struct Scripted {
+        steps: std::collections::VecDeque<(u16, Option<&'static str>, Vec<u8>)>,
+        conditional: Vec<Option<String>>,
+    }
+
+    #[cfg(unix)]
+    impl Scripted {
+        fn new(steps: Vec<(u16, Option<&'static str>, Vec<u8>)>) -> Self {
+            Self {
+                steps: steps.into(),
+                conditional: Vec::new(),
             }
         }
-        let root = tmp_root("via");
-        let registry = ModelRegistry::with_cache_dir(&root);
-        let bytes =
-            crate::interop::safetensors::save_safetensors_f32_to_bytes(&sample_state(), None)
-                .unwrap();
-        let u = url::validate_https_url("https://example.com/m").unwrap();
-        registry
-            .download_via(
-                &mut One(Some(bytes.clone())),
-                u,
-                "m",
-                "v1",
-                DownloadOptions::default(),
-                MAX_MODEL_FILE_BYTES,
-            )
-            .unwrap();
-        assert_eq!(
-            std::fs::read(root.join("m/v1").join(MODEL_FILE_NAME)).unwrap(),
-            bytes
-        );
-        let names: Vec<String> = std::fs::read_dir(root.join("m/v1"))
+        fn one(body: Vec<u8>) -> Self {
+            Self::new(vec![(200, None, body)])
+        }
+    }
+
+    #[cfg(unix)]
+    impl transport::Transport for Scripted {
+        fn get(
+            &mut self,
+            _u: &url::ValidatedUrl,
+            _d: std::time::Instant,
+            if_none_match: Option<&str>,
+        ) -> Result<transport::RawResponse, ModelError> {
+            self.conditional.push(if_none_match.map(String::from));
+            let (status, etag, body) = self.steps.pop_front().expect("scripted step");
+            Ok(transport::RawResponse {
+                status,
+                location: None,
+                content_length: Some(body.len() as u64),
+                content_encoding: None,
+                etag: etag.map(String::from),
+                body: Box::new(std::io::Cursor::new(body)),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn dir_names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec![MODEL_FILE_NAME.to_string()]);
+        v.sort();
+        v
+    }
+
+    #[cfg(unix)]
+    fn dl(
+        registry: &ModelRegistry,
+        t: &mut Scripted,
+        opts: DownloadOptions<'_>,
+    ) -> Result<(), ModelError> {
+        let u = url::validate_https_url("https://example.com/m").unwrap();
+        registry.download_via(t, u, "m", "v1", opts, MAX_MODEL_FILE_BYTES)
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn download_via_publishes_and_load_reads_back() {
+        let root = tmp_root("via");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let state = sample_state();
+        let bytes =
+            crate::interop::safetensors::save_safetensors_f32_to_bytes(&state, None).unwrap();
+        dl(
+            &registry,
+            &mut Scripted::one(bytes.clone()),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("m/v1").join(MODEL_FILE_NAME)).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            dir_names(&root.join("m/v1")),
+            vec!["download.json".to_string(), MODEL_FILE_NAME.to_string()]
+        );
+        // ダウンロード直後に `load` で読み戻せる（受け入れ条件。F32 の safetensors）。
+        let loaded = registry.load("m", "v1").unwrap();
+        assert_eq!(loaded.len(), state.len());
+        for (k, v) in &state {
+            assert_eq!(bits(&loaded[k]), bits(v), "{k}");
+        }
+        assert_eq!(registry.available_models().len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
     #[test]
     fn download_via_rejects_invalid_safetensors_and_keeps_existing_model() {
-        use std::io::Cursor;
-        struct One(Option<Vec<u8>>);
-        impl transport::Transport for One {
-            fn get(
-                &mut self,
-                _u: &url::ValidatedUrl,
-                _d: std::time::Instant,
-            ) -> Result<transport::RawResponse, ModelError> {
-                let body = self.0.take().expect("once");
-                Ok(transport::RawResponse {
-                    status: 200,
-                    location: None,
-                    content_length: Some(body.len() as u64),
-                    content_encoding: None,
-                    body: Box::new(Cursor::new(body)),
-                })
-            }
-        }
         let root = tmp_root("via-invalid");
         let registry = ModelRegistry::with_cache_dir(&root);
         let good =
             crate::interop::safetensors::save_safetensors_f32_to_bytes(&sample_state(), None)
                 .unwrap();
         let run = |body: Vec<u8>| {
-            let u = url::validate_https_url("https://example.com/m").unwrap();
-            registry.download_via(
-                &mut One(Some(body)),
-                u,
-                "m",
-                "v1",
+            dl(
+                &registry,
+                &mut Scripted::one(body),
                 DownloadOptions::default(),
-                MAX_MODEL_FILE_BYTES,
             )
         };
         run(good.clone()).unwrap();
@@ -2255,13 +2381,143 @@ mod tests {
                 good,
                 "既存の正常なモデルが残る"
             );
-            let names: Vec<String> = std::fs::read_dir(root.join("m/v1"))
-                .unwrap()
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            assert_eq!(names, vec![MODEL_FILE_NAME.to_string()], "一時ファイルなし");
+            assert_eq!(
+                dir_names(&root.join("m/v1")),
+                vec!["download.json".to_string(), MODEL_FILE_NAME.to_string()],
+                "一時ファイルなし"
+            );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_via_accepts_f16_safetensors_but_load_stays_f32_only() {
+        let root = tmp_root("via-f16");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        // facade は `safetensors` に直接依存できないため、F16 の最小ファイルを手組みする
+        // （8 バイト LE のヘッダ長 + ヘッダ JSON + データ 4 バイト）。
+        let header = br#"{"w":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&[0u8; 4]);
+        // 方式 (ii): dtype に依存しないレイアウト検証のため F16 でも公開できる。
+        dl(
+            &registry,
+            &mut Scripted::one(bytes),
+            DownloadOptions::default(),
+        )
+        .unwrap();
+        assert!(root.join("m/v1").join(MODEL_FILE_NAME).is_file());
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            target_os = "macos"
+        ))]
+        assert!(matches!(
+            registry.load("m", "v1"),
+            Err(ModelError::Load(LoadError::UnsupportedDtype { .. }))
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_via_second_fetch_uses_conditional_get_and_reuses_on_304() {
+        let root = tmp_root("via-304");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let bytes =
+            crate::interop::safetensors::save_safetensors_f32_to_bytes(&sample_state(), None)
+                .unwrap();
+        let mut t = Scripted::new(vec![
+            (200, Some("\"v1\""), bytes.clone()),
+            (304, None, Vec::new()),
+        ]);
+        dl(&registry, &mut t, DownloadOptions::default()).unwrap();
+        dl(&registry, &mut t, DownloadOptions::default()).unwrap();
+        assert_eq!(t.conditional, vec![None, Some("\"v1\"".to_string())]);
+        assert_eq!(
+            std::fs::read(root.join("m/v1").join(MODEL_FILE_NAME)).unwrap(),
+            bytes
+        );
+        // 保存値が pin と食い違う場合は最初から条件なしで取り直す。
+        let other = Sha256Pin::from_hex(&"1".repeat(64)).unwrap();
+        let mut t2 = Scripted::new(vec![(200, Some("\"v1\""), bytes.clone())]);
+        let e = dl(
+            &registry,
+            &mut t2,
+            DownloadOptions::default().expected_sha256(other),
+        )
+        .unwrap_err();
+        assert!(matches!(e, ModelError::HashMismatch { .. }));
+        assert_eq!(t2.conditional, vec![None]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_permission_denied_is_typed() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tmp_root("perm");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let dir = root.join("m/v1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // root（作成したディレクトリの所有者が uid 0）はモードを無視するため検証できない。
+        // `model.rs` は libc を名指ししない契約のため euid ではなく所有者で判定する。
+        if std::fs::metadata(&dir).unwrap().uid() == 0 {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let bytes =
+            crate::interop::safetensors::save_safetensors_f32_to_bytes(&sample_state(), None)
+                .unwrap();
+        let r = dl(
+            &registry,
+            &mut Scripted::one(bytes),
+            DownloadOptions::default(),
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let e = r.unwrap_err();
+        assert!(matches!(e, ModelError::PermissionDenied(_)), "got {e:?}");
+        assert!(!e.to_string().contains(root.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn map_fs_error_assigns_typed_variants() {
+        use std::io::{Error, ErrorKind};
+        assert!(matches!(
+            map_fs_error(Error::from(ErrorKind::StorageFull)),
+            ModelError::StorageFull(_)
+        ));
+        assert!(matches!(
+            map_fs_error(Error::from(ErrorKind::QuotaExceeded)),
+            ModelError::StorageFull(_)
+        ));
+        assert!(matches!(
+            map_fs_error(Error::from(ErrorKind::PermissionDenied)),
+            ModelError::PermissionDenied(_)
+        ));
+        assert!(matches!(
+            map_fs_error(Error::from(ErrorKind::NotFound)),
+            ModelError::Io(_)
+        ));
+    }
+
+    #[test]
+    fn new_error_variants_display_without_path_and_chain_source() {
+        use std::error::Error as _;
+        let full = ModelError::StorageFull(std::io::Error::other("/secret/path"));
+        let perm = ModelError::PermissionDenied(std::io::Error::other("/secret/path"));
+        let meta = ModelError::CacheMetadata { reason: "r" };
+        for e in [&full, &perm, &meta] {
+            assert!(!e.to_string().contains("/secret"));
+        }
+        assert!(full.source().is_some() && perm.source().is_some());
+        assert!(meta.source().is_none());
     }
 }

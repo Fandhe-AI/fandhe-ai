@@ -97,6 +97,85 @@ pub(super) fn open_or_create_dir(parent: &OwnedFd, component: &str) -> io::Resul
     try_open().map_err(reject)
 }
 
+/// ルートを作成せずにディレクトリ fd として開く（キャッシュ参照段用。#3126）。存在しなければ
+/// `None`。ルート自体のシンボリックリンクは [`open_root`] と同じく許容する。
+pub(super) fn open_root_existing(root: &Path) -> io::Result<Option<OwnedFd>> {
+    let c = CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "パスに NUL が含まれています"))?;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: `c` は NUL 終端の `CString` で呼び出し中生存する。`O_CREAT` なしのため mode 不要。
+    let fd = unsafe { libc::open(c.as_ptr(), flags) };
+    if fd < 0 {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(code) if code == libc::ENOENT => Ok(None),
+            Some(code) if code == libc::ENOTDIR => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "キャッシュルートがディレクトリではありません",
+            )),
+            _ => Err(e),
+        };
+    }
+    // SAFETY: `open` が成功して返した fd はこのプロセスだけが所有する。
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
+/// `parent` 直下の `component` を作成せずに `O_NOFOLLOW | O_DIRECTORY` で開く（#3126）。
+/// 存在しなければ `None`。シンボリックリンク・非ディレクトリは [`open_or_create_dir`] と同じく
+/// `InvalidInput`。
+pub(super) fn open_existing_dir(parent: &OwnedFd, component: &str) -> io::Result<Option<OwnedFd>> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    match openat_owned(parent, component, flags, 0) {
+        Ok(fd) => Ok(Some(fd)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(match e.raw_os_error() {
+            Some(code) if code == libc::ELOOP || code == libc::ENOTDIR => io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "中間ディレクトリがシンボリックリンクまたは非ディレクトリです",
+            ),
+            _ => e,
+        }),
+    }
+}
+
+/// `dir` 直下の通常ファイル `name` を読み取り専用で開く（#3126。`download.json` と既存
+/// `model.safetensors` の再検証用）。`O_NOFOLLOW`（リンクは拒否）かつ `O_NONBLOCK`（FIFO で
+/// open がブロックしない）で開き、`fstat` で通常ファイルであることと `st_size <= max` を確認する。
+/// 不在は `None`、非通常ファイル・リンクは `InvalidInput`、上限超過は `InvalidData`。
+pub(super) fn open_file_no_follow(dir: &OwnedFd, name: &str, max: u64) -> io::Result<Option<File>> {
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+    let fd = match openat_owned(dir, name, flags, 0) {
+        Ok(fd) => fd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "シンボリックリンクは受け付けません",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+    // SAFETY: `libc::stat` は全ビット 0 が有効な POD。
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` は有効な fd、`st` は書き込み可能な有効領域。
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "通常ファイルではありません",
+        ));
+    }
+    if u64::try_from(st.st_size).map_or(true, |len| len > max) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ファイルサイズが上限を超えています",
+        ));
+    }
+    Ok(Some(File::from(fd)))
+}
+
 /// `dir` 直下に `next_name()` の名前で `O_CREAT | O_EXCL | O_NOFOLLOW`（0600）作成する。
 /// `AlreadyExists` は既存に触れず名前を作り直し、`MAX_TMP_NAME_ATTEMPTS` 回で諦める。
 pub(super) fn create_tmp(
@@ -339,6 +418,56 @@ mod tests {
         assert!(root.join("model.safetensors").is_file());
         remove_staging(&r, &sname);
         assert!(!root.join(".s1").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn existing_dir_helpers_do_not_create_and_reject_links() {
+        let root = tmpdir("existing");
+        let missing = root.join("nope");
+        assert!(open_root_existing(&missing).unwrap().is_none());
+        assert!(!missing.exists());
+        let r = open_root_existing(&root).unwrap().unwrap();
+        assert!(open_existing_dir(&r, "a").unwrap().is_none());
+        assert!(!root.join("a").exists());
+        std::fs::create_dir(root.join("a")).unwrap();
+        assert!(open_existing_dir(&r, "a").unwrap().is_some());
+        let outside = tmpdir("existing-out");
+        symlink(&outside, root.join("l")).unwrap();
+        assert_eq!(
+            open_existing_dir(&r, "l").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn open_file_no_follow_checks_kind_and_size() {
+        let root = tmpdir("nofollow");
+        let r = open_root(&root).unwrap();
+        assert!(open_file_no_follow(&r, "f", 10).unwrap().is_none());
+        std::fs::write(root.join("f"), b"12345").unwrap();
+        assert!(open_file_no_follow(&r, "f", 5).unwrap().is_some());
+        assert_eq!(
+            open_file_no_follow(&r, "f", 4).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        symlink(root.join("f"), root.join("l")).unwrap();
+        assert_eq!(
+            open_file_no_follow(&r, "l", 10).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        std::fs::create_dir(root.join("d")).unwrap();
+        assert!(open_file_no_follow(&r, "d", 10).is_err());
+        let fifo = CString::new(root.join("p").as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo` は NUL 終端で呼び出し中生存する。
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // writer 不在でもブロックせず、通常ファイルでないため拒否される。
+        assert_eq!(
+            open_file_no_follow(&r, "p", 10).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

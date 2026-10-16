@@ -103,6 +103,21 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// safetensors バイト列のレイアウト（ヘッダ長・ヘッダ JSON・オフセット連続性・
+/// shape×dtype のバイト長・全体長の一致）だけを検証する。dtype は限定せず、テンソルも確保しない。
+///
+/// facade `model.rs` の公開前検証（`ModelRegistry::download`。#3126・
+/// `docs/model-download-design.md` §5 方式 (ii)）から呼ばれる。F32 以外（F16／BF16 等）の
+/// 正当なファイルを `load` 側の dtype 制約で拒否しないために、F32 ロード
+/// （[`load_safetensors_f32_from_bytes`]）とは別関数として切り出した。facade は
+/// `safetensors` に直接依存できない（許容依存の区分上、相互運用ラッパー経由に限る）ため、
+/// 公開面への追加（追加のみ・既存関数は不変）とした。
+pub fn validate_safetensors_layout_from_bytes(bytes: &[u8]) -> Result<(), LoadError> {
+    SafeTensors::read_metadata(bytes)
+        .map(|_| ())
+        .map_err(|e| LoadError::SafetensorsFormat(format!("{e:?}")))
+}
+
 /// safetensors バイト列を `name -> Tensor<f32>` のマップへ変換する。
 ///
 /// [`load_safetensors_f32`] から呼ばれる本体実装。バイト列を直接受け取る

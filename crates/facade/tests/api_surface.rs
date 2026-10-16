@@ -2408,11 +2408,14 @@ fn interop_module_exposes_only_approved_onnx_surface() {
     // `pub` アイテムを検出するため、`pub mod` 宣言も検出対象になる。
     // したがってここでは「丁度 3 件・いずれも `pub mod`」であることを
     // 検査する）。
+    // 加えて `pub(crate) mod layout;`（#3126。`model.rs` 専用の crate 内ラッパー。公開面では
+    // ない）が可視性修飾子読み飛ばしにより同じく検出されるため、合計 4 件になる。
     assert_eq!(
         mod_offending.len(),
-        3,
+        4,
         "src/interop/mod.rs の公開アイテムが想定外（`pub mod onnx;`／\
-         `pub mod safetensors;`／`pub mod npy;` の丁度 3 件のはず）: {mod_offending:?}"
+         `pub mod safetensors;`／`pub mod npy;`／`pub(crate) mod layout;` の丁度 4 件のはず）: \
+         {mod_offending:?}"
     );
     assert!(
         mod_offending.iter().all(|item| item.contains("mod")),
@@ -6274,6 +6277,9 @@ fn model_types_are_reachable_via_facade() {
             fandhe_ai::model::ModelError::HashMismatch { .. } => "hash_mismatch",
             fandhe_ai::model::ModelError::Network(_) => "network",
             fandhe_ai::model::ModelError::Io(_) => "io",
+            fandhe_ai::model::ModelError::CacheMetadata { .. } => "cache_metadata",
+            fandhe_ai::model::ModelError::StorageFull(_) => "storage_full",
+            fandhe_ai::model::ModelError::PermissionDenied(_) => "permission_denied",
             _ => "unknown",
         }
     }

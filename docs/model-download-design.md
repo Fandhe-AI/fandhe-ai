@@ -938,3 +938,46 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 ### 19.7 新規 `unsafe`
 
 `dirfd.rs` の libc 呼び出し（`openat`・`mkdirat`・`renameat`・`fstatat`・`fstat`・`unlinkat`）と `OwnedFd::from_raw_fd`・`mem::zeroed::<libc::stat>` のみ。各ブロックに SAFETY コメント（fd の生存期間・`CString` の寿命・戻り値検査）を付けた。
+
+## 20. #3126 実装記録（ダウンロードのローカルキャッシュ・条件付き GET・304 再検証）
+
+§19.5 で #3126 へ送った課題を実装した。§1〜§19 は書き換えず、本節で差分を記録する。
+
+### 20.1 `download.json`
+
+- 場所は `<cache_dir>/<name>/<version>/download.json`。固定スキーマ専用の最小 JSON パーサー／シリアライザを手書きして検証する（`serde_json` は facade の通常依存にしない）。実装は `crates/facade/src/model/cache.rs`
+- 6 キーちょうど（未知キー・不足は拒否）: `url`（検証済み https URL・フラグメント除去済み）・`final_url`（リダイレクト追従後に `200` を返した最終取得 URL。`etag` はこの URL のリソースの検証子。検証済み https URL）・`etag`（文字列または `null`）・`content_length`（u64）・`sha256`（64 桁 16 進）・`fetched_at`（UNIX エポック秒 u64）
+- 読み取り上限 64 KiB。不在・I/O エラー・スキーマ違反・シンボリックリンク・非通常ファイルはすべて「キャッシュなし」として無条件 GET へフォールバックする（要件 1。`ModelError::CacheMetadata` は読み出し側では呼び出し側へ届かず、書き込もうとしたメタデータが不正な場合にだけ返る）
+- `etag` は印字可能 ASCII（0x20〜0x7E）・長さ 1〜1024 のみ。CR／LF／NUL・制御文字・非 ASCII は拒否する。保存時・読み出し時・送信直前（`transport.rs`）の 3 か所で同じ `valid_etag` を使う（ヘッダインジェクション対策）。応答の `ETag` が不正なら保存せず `null` を書く（古い etag を残さない）
+- 保存値は破損・部分改変の検出用であり、真正性の根拠ではない（§6 A08・`model-distribution-design.md` §6）。`url` はクエリに署名トークンを含みうるため、0600 のファイルにだけ保存し、進捗・エラーには流さない（A09）
+
+### 20.2 条件付き GET と 304 再検証
+
+- 条件付き GET を送るのは、`download.json` が読めて、`url` が要求 URL と一致し、`etag` があり、pin 指定時は保存 `sha256` が pin と一致するときだけ（`model.rs::download_via` の参照段）。`If-None-Match` は**保存済み `final_url` と一致するホップにだけ**付け、そのホップの `304` だけを受理する（途中ホップや、リダイレクト先が A→B から A→C へ変わった場合は検証子を送らず無条件取得。別リソースが同じ ETag〈例 `"v1"`〉を返しても `304` で古いモデルを再利用しない。ローカル SHA の再計算ではこの取り違えを検出できないため。PR #3388 コードレビュー指摘）
+- `304` は条件付きで送ったときだけ受理する。無条件 GET や、再検証失敗後にやり直した GET への `304` は `Http{304}`（サーバの異常応答を再利用のシグナルにしない）
+- 再検証は既存 `model.safetensors` を `O_NOFOLLOW`・通常ファイル確認・サイズ上限付きで開き、SHA-256 をストリーミングで計算し直す。比較対象は pin があれば pin、なければ保存値。一致したときだけ `fetched_at` のみを更新して `download.json` を atomic に置き換える。一致しない・ファイルが無い・リンクなら、無条件 GET で全量を取り直す
+- 参照段は `<name>/<version>` を作成しない（`open_root_existing`／`open_existing_dir`）。ヘッダ検査で失敗する取得は従来どおりディレクトリを作らない
+
+### 20.3 公開順序と自然回復
+
+`model.safetensors` を先に `renameat` し、次に `download.json` を `renameat` する。途中で止まって JSON が古いまま残っても、次回の `304` 再検証で SHA が合わず全量を取り直す。`download.json` の書き込みだけが失敗した場合もエラーを返す（モデル本体は検証済みで公開済み）。いずれも `RENAME_NOREPLACE` は付けず atomic replace で上書きする。`TmpGuard`（private staging 0700）は両方の公開で共用する。
+
+### 20.4 検証方式 (ii) の採用
+
+公開前検証を `onnx-interop::st_load::validate_safetensors_layout_from_bytes`（`SafeTensors::read_metadata` を呼ぶだけ。ヘッダ長・UTF-8・JSON・オフセット連続性・shape×dtype 長・全体長の一致を見て、dtype は限定しない）へ切り替えた。F16／BF16 の正当なファイルも公開できる（`load` は従来どおり F32 のみで `UnsupportedDtype`）。F32 テンソルを確保しないため、メモリはファイル全量 1 回分（上限 1 GiB）に減る。
+
+- 公開クレート `onnx-interop` への変更は関数 1 つの追加のみ（既存関数・公開型は不変、依存は増えない）。facade は `safetensors` に直接依存できないため、この形にした
+- facade 側は onnx-interop の参照を `src/interop/` に閉じ込める既存ガード（#2017）に合わせ、`src/interop/layout.rs` の `pub(crate)` ラッパー経由で呼ぶ（`safetensors.rs` は純再エクスポート契約のため触らない）。`api_surface.rs` の `mod.rs` 件数ガードを 3 から 4 に更新した。承認済み公開アイテム 16 件・公開メソッド 8 件は増やしていない
+
+### 20.5 `serde_json` を通常依存にしない
+
+`download.json` の読み書きは `cache.rs` の手書き最小 JSON（文字列・`null`・非負整数のみ。重複キー・末尾余剰・先頭ゼロ・小数・指数を拒否）で行う。`serde_json` の facade 通常依存への昇格は所有者承認が未取得のため行わず、`Cargo.toml`・`license-matrix.md` の依存記述は変更しない（PR #3388 レビュー指摘）。
+
+### 20.6 エラー型
+
+`ModelError` に `CacheMetadata { reason }`・`StorageFull(io::Error)`・`PermissionDenied(io::Error)` を追加した（`#[non_exhaustive]` のため非破壊。`Display` に URL・パスを含めない）。`map_fs_error` による割り当て（`StorageFull`／`QuotaExceeded` → `StorageFull`、`PermissionDenied` → `PermissionDenied`、他は `Io`）は**ダウンロード経路のみ**で、`save`／`load` は変えていない。
+
+### 20.7 検証範囲と後続候補
+
+- 単体テストは転送をモックし、実ファイルシステムで 304 再利用・改変後の取り直し・pin 優先・リンク拒否・破損 JSON のフォールバックを検証した。権限エラーは 0500 ディレクトリで実際に検証する（root 実行時はスキップ）。実際の ENOSPC は CI で再現できないため、`open_dir` への `io::Error` 注入による単体の水準にとどめた。実ネットワーク・TLS の実接続は #3173 で追跡済み
+- 後続候補（起票はユーザー承認待ちのため未起票）: (a) ヘッダだけを読むストリーミング検証（`onnx-interop` の `serde_json` を通常依存へ格上げする判断が要る。所有者承認が前提）、(b) `save`／`load` の FS エラーの型付き化と `save` の dirfd 化（§19.6）
