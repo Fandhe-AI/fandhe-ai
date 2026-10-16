@@ -39,9 +39,9 @@ use crate::Tensor;
 pub struct TextVectorizationConfig {
     /// 予約 2 件を含む語彙数の上限。`None` は無制限（`limits` の上限は適用される）。
     pub max_tokens: Option<usize>,
-    /// 標準化の方式（ASCII 限定）。
+    /// 標準化の方式（既定は ASCII。Unicode 小文字化は `UnicodeLower` で opt-in）。
     pub standardize: Standardize,
-    /// 分割の方式（ASCII 空白限定）。
+    /// 分割の方式（既定は ASCII 空白。Unicode White_Space は `UnicodeWhitespace` で opt-in）。
     pub split: Split,
     /// `Some(n)` なら 1〜n-gram を作る。
     pub ngrams: Option<usize>,

@@ -6,6 +6,8 @@
 //!
 //! - `Whitespace`: ASCII 空白（SP・TAB・LF・FF・CR）で区切る。VT・NBSP・全角空白は
 //!   区切りにならない。連続空白で空トークンは出ない
+//! - `UnicodeWhitespace`: `str::split_whitespace`（Unicode White_Space）で区切る。
+//!   全角空白・NBSP・VT・NEL・U+2028 で区切り、ZWSP（U+200B）では区切らない
 //! - `Character`: Unicode スカラー値（`char`）単位。書記素クラスタ単位ではなく、
 //!   結合文字・ZWJ 絵文字は複数トークンに分かれる
 //! - `None`: 入力全体を常に 1 トークンにする。空入力でも空文字列の 1 トークンを
@@ -14,16 +16,17 @@
 //!
 //! 戻り値は入力を借用するイテレータでトークンごとの確保をしない。上限検査
 //! （`TextLimits`）は呼び出し側が入口で先に行う前提（設計記録 §8）。論点 3 の
-//! ASCII 部分は承認済みで、Unicode White_Space 分割は保留（設計記録 §16.7）。
+//! ASCII 部分は承認済みで、Unicode White_Space 分割は #3089 で opt-in の
+//! `UnicodeWhitespace` として追加した（設計記録 §18。既定は不変）。
 //! 失敗しない純関数。公開型 `Split` は `fandhe_ai::text` へ再エクスポートされる
 //! （§16.2）。自由関数 `split` と `SplitIter` は非公開のまま。
 
-use std::str::{CharIndices, SplitAsciiWhitespace};
+use std::str::{CharIndices, SplitAsciiWhitespace, SplitWhitespace};
 
-/// 分割の方式。空白の判定は ASCII に限る。
+/// 分割の方式。既定の `Whitespace` の空白判定は ASCII に限る。
 ///
-/// Unicode White_Space（全角空白・NBSP 等）での分割は保留中で、
-/// `#[non_exhaustive]` のため後から追加しても非破壊。
+/// Unicode White_Space（全角空白・NBSP 等）での分割は `UnicodeWhitespace` を
+/// opt-in で選ぶ。`#[non_exhaustive]` のため variant の追加は非破壊。
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Split {
@@ -36,6 +39,10 @@ pub enum Split {
     /// `char`（Unicode スカラー値）単位で分割する。書記素クラスタ単位ではなく、
     /// 結合文字や ZWJ 絵文字は複数トークンに分かれる。
     Character,
+    /// Unicode White_Space（`char::is_whitespace`）で分割する。全角空白・NBSP・VT・
+    /// NEL・U+2028 で区切る。ZWSP（U+200B）は White_Space ではないので区切らない。
+    /// 連続空白で空トークンは出ない。
+    UnicodeWhitespace,
 }
 
 /// `split` が返すトークンのイテレータ（入力の部分スライスを返す）。
@@ -44,6 +51,8 @@ pub(crate) enum SplitIter<'a> {
     Whole(Option<&'a str>),
     /// `Split::Whitespace`。
     Whitespace(SplitAsciiWhitespace<'a>),
+    /// `Split::UnicodeWhitespace`。
+    UnicodeWhitespace(SplitWhitespace<'a>),
     /// `Split::Character`: 元文字列とバイト位置付きの文字列走査。
     Character(&'a str, CharIndices<'a>),
 }
@@ -55,6 +64,7 @@ impl<'a> Iterator for SplitIter<'a> {
         match self {
             SplitIter::Whole(rest) => rest.take(),
             SplitIter::Whitespace(it) => it.next(),
+            SplitIter::UnicodeWhitespace(it) => it.next(),
             SplitIter::Character(src, it) => {
                 let (i, c) = it.next()?;
                 // `char_indices` の境界は常に文字境界で、`get` は失敗しない。
@@ -69,6 +79,7 @@ pub(crate) fn split(input: &str, mode: Split) -> SplitIter<'_> {
     match mode {
         Split::None => SplitIter::Whole(Some(input)),
         Split::Whitespace => SplitIter::Whitespace(input.split_ascii_whitespace()),
+        Split::UnicodeWhitespace => SplitIter::UnicodeWhitespace(input.split_whitespace()),
         Split::Character => SplitIter::Character(input, input.char_indices()),
     }
 }
@@ -147,6 +158,30 @@ mod tests {
             assert!(ws.iter().map(|t| t.len()).sum::<usize>() <= s.len());
 
             assert_eq!(toks(&s, Split::None), [s.as_str()]);
+        }
+    }
+
+    #[test]
+    fn unicode_空白分割() {
+        let u = |s| toks(s, Split::UnicodeWhitespace);
+        assert_eq!(u("a\u{3000}b"), ["a", "b"]);
+        assert_eq!(u("a\u{00A0}b"), ["a", "b"]);
+        assert_eq!(u("a\u{0B}b"), ["a", "b"]);
+        assert!(u("").is_empty());
+        assert!(u("\u{3000} \u{A0}").is_empty());
+        assert_eq!(u("a\u{200B}b"), ["a\u{200B}b"]);
+    }
+
+    #[test]
+    fn unicode_空白分割の不変条件() {
+        for s in all_strings() {
+            let ws = toks(&s, Split::UnicodeWhitespace);
+            assert!(
+                ws.iter()
+                    .all(|t| !t.is_empty() && !t.contains(char::is_whitespace))
+            );
+            let stripped: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            assert_eq!(ws.concat(), stripped);
         }
     }
 
