@@ -294,6 +294,7 @@ impl Revision {
     }
 
     /// 検証済み [`CommitSha`] から作る（`api` の一覧取得用）。
+    // 非 unix では呼び出し元の `api::list_files_via` が dead_code になるため同じく許す。
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn from_commit_sha(sha: &CommitSha) -> Self {
         Self(RevisionKind::CommitSha(sha.0.clone()))
@@ -398,6 +399,9 @@ impl HfHub {
     /// - 引数は検証済みの [`HfRepoId`]・[`CommitSha`] のみ（[`HfHub::resolve_revision`] で固定した値を渡す）。
     /// - 応答の sha が要求した commit と一致しなければ [`HfError::InvalidResponse`]
     ///   （別 commit の一覧を混入させない）。件数は 10,000・各パスは 1,024 バイトまで。
+    /// - 各パス（[`RepoFile::path`]）はサーバ由来の文字列で、空・制御文字・不可視の書式文字・`\`・
+    ///   絶対パス・空／`.`／`..` セグメントを含むものは [`HfError::InvalidResponse`] で拒否済み。
+    ///   ただしファイルシステムのパスへ直結させる前に、呼び出し側でも扱い（保存先の固定・衝突確認）を決めること。
     /// - 接続先・リダイレクト・認証・失敗時の写像・サイズ上限は [`HfHub::resolve_revision`] と同じ
     ///   （private／gated repo は fail-closed で非対応）。
     /// - 転送層は `cfg(unix)` のみ。非 unix は [`HfError::Network`]（`Unsupported`）を返す。
@@ -437,6 +441,8 @@ impl HfHub {
     /// - `pin` は必須。`options` に別の pin があっても本引数の pin が優先される。
     /// - 保存先は `<cache_dir>/<name>/<version>/model.safetensors`（[`CachedModel`] 参照）。
     ///   本クレートは自らファイルを書かず、書き込み・検証はすべて facade が行う。
+    // 呼び出し元がテストのみで、公開は別承認（リダイレクト先 allowlist 待ち。設計書 §9.12.3）の
+    // ため、非 test ビルドでは dead_code を許す。公開時に外す。
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn download(
         &self,

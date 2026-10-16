@@ -631,7 +631,7 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 #### 9.12.3 見送り事項（要対応）
 
-- **〔#3393 で解消。§9.14 参照。公開化は #3394 で解消。§9.15〕第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する
+- **〔#3393 で解消。§9.14 参照。公開化は #3394 で解消。§9.15〕第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する〔注記（#3394 監査 B-3）: 上記の「リダイレクト手動追従＋ホスト allowlist」は当初案の履歴。現行実装は追従せず 3xx を拒否する（`max_redirects(0)`。§9.14）で、ホスト allowlist は別承認のため未実装である〕
 - facade `download_with` のリダイレクト先ホスト allowlist（§4.2 (b-1)／(b-2)）は facade 公開面の拡張であり別承認
 
 ### 9.13 #3132 実装記録（テスト）
@@ -663,7 +663,7 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 #### 9.14.3 セキュリティ監査
 
-- 独立した security-auditor サブエージェントによる監査は、本実装を担当したエージェントの実行環境にサブエージェント起動手段がなく未実施。実施するまでマージ前の要対応事項とする（PR 本文にも記載）。
+- 独立監査は事後に実施した。結果は §9.15.4 の監査 A（対象 `0e30138e`・事後監査）に記録した。
 - 実装者による OWASP 観点の自己点検: A01 トークン非送信・401／403 fail-closed／A02 NativeTls 明示・検証無効化手段なし・平文は `cfg(test)` のみ／A03 送信前の host 完全一致再照合／A04・A05 全タイムアウトと 1 MiB 上限の二重防御・環境 proxy 無効・identity 限定／A06 外部クレート・版の追加なし（`Cargo.lock` は依存辺 1 本）／A08 ファイル本体は facade の `download_with`＋sha256 pin に委ねる／A09 静的エラー・Location 非参照・センチネル非露出／A10 接続先固定・非追従。`unsafe` は使わず、本番経路に `unwrap`／`expect` はない。
 
 #### 9.14.4 残留リスク
@@ -701,12 +701,41 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 #### 9.15.4 セキュリティ監査
 
-- 独立した security-auditor サブエージェントによる監査は、本実装を担当したエージェントの実行環境にサブエージェント起動手段がなく**未実施**。承認条件（PR ごとの監査と結果の記録）を満たすため、実施して本節へ結果を追記するまでマージ前の要対応事項とする（PR 本文にも記載）。
-- 実装者による OWASP 観点の自己点検: A01 トークンを読まず送らない・401／403 は fail-closed／A02 TLS 構成は不変（`api_surface.rs` の機械検査を維持）・検証無効化手段を公開しない／A03 検証済み newtype のみを受け、URL は `url.rs` でのみ生成・送信前に host を完全一致で再照合／A04・A05 タイムアウト・1 MiB 上限・件数／パス長上限は不変・エンドポイント上書き口なし／A06 依存差分ゼロ（`Cargo.toml`／`Cargo.lock` 不変）／A08 `list_files` は応答 sha と要求 commit の一致を検査・本体取得は公開しない／A09 エラーは静的メッセージで URL・入力値を含まない（非 unix の `Unsupported` も静的）／A10 接続先固定・リダイレクト非追従。`unsafe` なし・本番経路に `unwrap`／`expect` なし。
+承認条件（#3128 コメント 6220036919: PR ごとに security-auditor の監査を通し、結果を決定記録に残す）に対し、独立した security-auditor を 2 回実施した。実装者の自己点検（下記）は監査の代替ではなく、監査結果は次のとおり。
+
+**監査 A（#3393〈PR #3396〉の事後監査。対象 squash `0e30138e`）**
+
+- 位置づけ: #3393 の §9.14.3 は「監査未実施」としてマージされたため、**マージ後の事後監査**である（監査がマージ前に間に合わなかったことを記録する）。
+- 結果: P0／P1 なし。承認範囲（同一版・同 feature の `ureq` を hf-hub の `cfg(unix)` へ workspace 継承・`Cargo.lock` 差分は hf-hub の依存辺 1 行のみ・用途は JSON 取得のみ・`NativeTls`／検証無効化なし・`https_only`・`proxy(None)`・全タイムアウト・1 MiB 上限・identity 限定・`max_redirects(0)` で 3xx 拒否かつ `Location` 非露出・`ureq` 型の非公開・除外事項の混入なし）に適合。`cargo test -p fandhe-ai-hf-hub --locked` 48 pass・5 ignored、`api_surface` 10 pass。
+- P2 と対応:
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| 1 | `deps-policy.md` 第 11 区分の行頭（facade でのみ参照・用途は facade の HTTPS 取得に限る）が末尾の「用途の拡張（#3393）」と矛盾 | 本 PR（#3394）で行頭を「facade と hf-hub の各 `[target.'cfg(unix)'.dependencies]` でのみ参照」に揃えた。版・feature・他の条件は不変 |
+| 2 | `#[allow(dead_code, unused_imports)]` 等の暫定 allow | #3394 で呼び出し元が付いたため外した。残す allow は下記「残した allow」のとおり |
+| 3 | 監査がマージ後だった | 本節に事後監査として記録（上記） |
+| 4 | hf-hub が `scripts/check-cross.sh windows-interop` に入っていない | CI 検査範囲の変更のため**所有者判断**として残す（§9.15.5） |
+| 5 | `ALLOWED_HOST = "huggingface.co"` の固定は承認より厳しい方向の多層防御 | 逸脱ではない。ミラー対応は**別承認**（§9.15.5） |
+| 6 | `PlatformVerifier` を facade と未突合（低リスク） | 突合済み: facade `crates/facade/src/model/transport.rs` も `TlsProvider::NativeTls`＋`RootCerts::PlatformVerifier`（同 88〜89 行）で、hf-hub の `transport/ureq_json.rs`（68〜69 行）と同方針。差異なし |
+
+**監査 B（本 PR #3397〈#3394〉。対象 HEAD `3048869e`・基準 `origin/main` `0e30138e`・静的読解）**
+
+- 結果: P0／P1 なし。承認範囲（公開は `HfHub::resolve_revision`／`list_files` の 2 メソッドのみ・`download` と `api::*_via` は `pub(crate)`・戻り値とエラーに `ureq`／`serde_json` の型なし・転送層の本番部分は無変更・接続前の入力拒否の維持・除外事項の混入なし・`Cargo.toml`／`Cargo.lock` 差分なし）に適合。
+- P2 と本コミットでの対応:
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| 1 | `list_files_via` の `rfilename` 検証が弱い（`../x`・先頭 `/`・`\`・`..` セグメント・空セグメント・Unicode Cf〈bidi 制御 U+202E 等。`char::is_control` は Cc のみ〉を拒否しない。利用者が `cache_dir.join(f.path())` すると traversal になりうる） | `crates/hf-hub/src/api.rs` の `is_safe_repo_path` で、先頭 `/`・`\`・空／`.`／`..` セグメント・制御文字・不可視の書式文字（U+00AD・U+200B〜U+200F・U+2028〜U+202E・U+2060〜U+206F・U+FEFF ほか）を `InvalidResponse` で拒否。`onnx/model.onnx` 等の通常の相対パスは受理。拒否・受理の両テストを追加し、`list_files`／`RepoFile::path` の rustdoc に「サーバ由来の文字列。検証済みでもファイルシステムへ直結させる前に呼び出し側で扱いを決めること」を明記 |
+| 2 | `api_surface.rs` の `before_test_module` が最後の `#[cfg(test)]` 以降を見ず、`mod tests` の後ろに足された制限なし `pub` を検出できない | `without_test_modules`（`#[cfg(test)] mod x { ... }` のブロック単位で除去し、後続の項目は本番コードとして残す）へ置換。合成入力の自己テスト `probe_item_after_test_module_is_detected` を追加 |
+| 3 | 設計書に旧「リダイレクト手動追従＋ホスト allowlist」記述が残り現行（非追従）と食い違う。§9.15.4 が「監査未実施」のまま | §9.12.3 に履歴を消さず注記を追加（現行は非追従・allowlist は別承認）。本節を監査結果の記録に更新 |
+
+**残した allow**: 次の 5 件は `cfg_attr(not(unix), allow(dead_code))`（`api.rs` の `resolve_revision_via`・`list_files_via`、`lib.rs` の `Revision::from_commit_sha`、`url.rs` の `ApiUrl::as_str`・`revision_api_url`）で、本番転送層が `cfg(unix)` のため非 unix では呼び出し元が存在しない箇所に限る（unix では警告が出る形で外してある）。もう 1 件 `lib.rs` の `HfHub::download` の `cfg_attr(not(test), allow(dead_code))` は、公開がリダイレクト先 allowlist の別承認待ちで呼び出し元がテストのみのため残す（公開時に外す）。各所に理由コメントを付けた。
+
+**実装者による OWASP 観点の自己点検**（監査の代替ではない）: A01 トークンを読まず送らない・401／403 は fail-closed／A02 TLS 構成は不変（`api_surface.rs` の機械検査を維持）・検証無効化手段を公開しない／A03 検証済み newtype のみを受け、URL は `url.rs` でのみ生成・送信前に host を完全一致で再照合・応答のパスは `is_safe_repo_path` で検証／A04・A05 タイムアウト・1 MiB 上限・件数／パス長上限は不変・エンドポイント上書き口なし／A06 依存差分ゼロ（`Cargo.toml`／`Cargo.lock` 不変）／A08 `list_files` は応答 sha と要求 commit の一致を検査・本体取得は公開しない／A09 エラーは静的メッセージで URL・入力値を含まない／A10 接続先固定・リダイレクト非追従。`unsafe` なし・本番経路に `unwrap`／`expect` なし。
 
 #### 9.15.5 残留リスク・スコープ外
 
-- リダイレクト先ホストの allowlist（facade `download_with`・hf-hub の JSON 転送の追従）は別承認。`HfHub::download` の公開も同じ理由で見送り。
+- リダイレクト先ホストの allowlist（facade `download_with`・hf-hub の JSON 転送の追従）は別承認。`HfHub::download` の公開も同じ理由で見送り。接続先ホストを `huggingface.co` に固定する多層防御（監査 A-5）の緩和（ミラー対応）も別承認。
 - 2 段目の公開（crates.io・`release-all.yml`）は別承認。
-- `scripts/check-cross.sh windows-interop` への hf-hub 追加は CI 検査範囲の変更のため本変更では行わない（要否は所有者判断。手元では `x86_64-pc-windows-msvc` の clippy を実行して非 unix 分岐のコンパイルと警告なしを確認した）。
+- `scripts/check-cross.sh windows-interop` への hf-hub 追加は CI 検査範囲の変更のため本変更では行わない（監査 A-4。要否は**所有者判断**。手元では `x86_64-pc-windows-msvc` の clippy を実行して非 unix 分岐のコンパイルと警告なしを確認した）。
 - §9.12.1 の未確認の外部仕様（revision API の形・401／403 の実挙動）の実測は実通信環境が必要で、CI では確認しない。

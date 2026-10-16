@@ -401,10 +401,50 @@ fn probe_cargo_toml_shapes() {
 
 // ---- (6) 公開面ちょうどの正ガード（#3394）----
 
-/// 末尾のテストモジュール（最後の `#[cfg(test)]`）より前を返す。`lib.rs` は先頭近くにも
-/// `#[cfg(test)] mod live_tests;` があるため、`production_part`（最初の出現で切る）は使えない。
-fn before_test_module(code: &str) -> &str {
-    code.rfind("#[cfg(test)]").map_or(code, |p| &code[..p])
+/// `#[cfg(test)] mod name { ... }`（波括弧つき）のブロックをすべて取り除いた本番コードを返す。
+/// 入力は [`strip`] 済みのコード（括弧の数え上げが文字列・コメントに惑わされない）。
+///
+/// 「最後の `#[cfg(test)]` 以降を捨てる」方式は、`mod tests` の後ろに足された制限なし `pub` を
+/// 見逃す（監査 B-2）ため採らない。ブロック単位で取り除くので、テストモジュールの後ろの項目は
+/// 本番コードとして残り、公開面の検査対象になる。`#[cfg(test)] mod live_tests;`（本体なし）は
+/// 取り除く対象がないためそのまま残る。
+fn without_test_modules(code: &str) -> String {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(p) = rest.find(ATTR) {
+        out.push_str(&rest[..p]);
+        let after_attr = &rest[p + ATTR.len()..];
+        let item = after_attr.trim_start();
+        let is_block_mod = item.starts_with("mod ")
+            && item
+                .find(['{', ';'])
+                .is_some_and(|i| item.as_bytes()[i] == b'{');
+        if !is_block_mod {
+            // `mod x;` や `#[cfg(test)] fn` などはそのまま残す（属性だけ落とす）。
+            rest = after_attr;
+            continue;
+        }
+        let open = item.find('{').unwrap_or(0);
+        let mut depth = 0usize;
+        let mut end = item.len();
+        for (i, ch) in item[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &item[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// 空白を畳んだシグネチャの括弧まわりを正規化する（rustfmt の折り返し差を吸収する）。
@@ -415,7 +455,7 @@ fn normalize_sig(s: &str) -> String {
 /// 制限なし `pub` シグネチャを正規化してソートして返す。
 fn public_signatures_of(code: &str) -> Vec<String> {
     let stripped = strip(code);
-    let mut v: Vec<String> = unrestricted_pub_signatures(before_test_module(&stripped))
+    let mut v: Vec<String> = unrestricted_pub_signatures(&without_test_modules(&stripped))
         .iter()
         .map(|s| normalize_sig(s))
         .collect();
@@ -484,7 +524,7 @@ fn api_public_surface_is_exactly_the_expected_items() {
 #[test]
 fn new_public_methods_are_present_and_download_stays_internal() {
     let code = strip(&read("src/lib.rs"));
-    let prod = before_test_module(&code);
+    let prod = without_test_modules(&code);
     let sigs = public_signatures_of(&read("src/lib.rs"));
     for name in ["resolve_revision", "list_files"] {
         let key = format!("pub fn {name}(");
@@ -512,7 +552,7 @@ fn internal_modules_have_no_unrestricted_pub() {
         UREQ_FILE,
     ] {
         let stripped = strip(&read(f));
-        let sigs = unrestricted_pub_signatures(before_test_module(&stripped));
+        let sigs = unrestricted_pub_signatures(&without_test_modules(&stripped));
         assert!(sigs.is_empty(), "{f}: {sigs:?}");
     }
     let lib = strip(&read("src/lib.rs"));
@@ -521,6 +561,29 @@ fn internal_modules_have_no_unrestricted_pub() {
         1,
         "pub use は RepoFile のみ"
     );
+}
+
+#[test]
+fn probe_item_after_test_module_is_detected() {
+    let base = "pub struct A;\n#[cfg(test)]\nmod tests {\n fn t() { if true {} }\n}\n";
+    let expected = sorted(&["pub struct A"]);
+    assert_eq!(public_signatures_of(base), expected);
+    // mod tests の後ろに足された制限なし pub は公開面として数える（旧実装は見逃した）。
+    let late = format!("{base}pub fn late() {{}}\n");
+    assert_ne!(public_signatures_of(&late), expected);
+    assert!(public_signatures_of(&late).contains(&"pub fn late()".to_owned()));
+    // 本体なしの `#[cfg(test)] mod live_tests;` は切らず、後続の項目も数える。
+    let early = "#[cfg(test)]\nmod live_tests;\npub struct A;\n#[cfg(test)]\nmod tests {}\n";
+    assert_eq!(public_signatures_of(early), expected);
+    // 複数のテストモジュール・入れ子の波括弧でも、モジュール内の pub は数えず外は数える。
+    let multi = "#[cfg(test)]\nmod a { pub fn x() { { } } }\npub struct A;\n\
+        #[cfg(test)]\nmod tests { pub fn y() {} }\npub fn z() {}\n";
+    assert_eq!(
+        public_signatures_of(multi),
+        sorted(&["pub struct A", "pub fn z()"])
+    );
+    // テストモジュールがなければ全体が本番部分。
+    assert_eq!(public_signatures_of("pub struct A;"), expected);
 }
 
 #[test]

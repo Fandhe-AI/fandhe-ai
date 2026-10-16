@@ -61,6 +61,7 @@ pub(crate) fn resolve_url(repo: &HfRepoId, sha: &CommitSha, filename: &str) -> S
 
 /// revision 情報 API URL。ref 名は `/` を含みうるため path 要素としてエンコードする。
 /// エンドポイント形式は一次資料で未確認（設計 §9.12）。
+// 非 unix では呼び出し元の `api::fetch_info` が dead_code になるため許す。
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn revision_api_url(repo: &HfRepoId, rev: &Revision) -> ApiUrl {
     ApiUrl(format!(
