@@ -8549,6 +8549,12 @@ fn kv_cache_is_reachable_via_facade_only() {
     assert_eq!(ext.seq_len(), 3);
     assert_eq!(sa2.seq_len(), 0);
     assert!(sa2.cache().is_empty());
+
+    // イシュー #3105: `valid_len` の署名固定と実行プローブ（§21.5）。
+    let _sig3: fn(&KvCache, usize) -> Option<usize> = KvCache::valid_len;
+    assert_eq!(ext.valid_len(0), Some(3));
+    assert_eq!(ext.valid_len(1), None);
+    assert_eq!(KvCache::new().valid_len(0), None);
 }
 
 // ---------------------------------------------------------------------
@@ -39788,7 +39794,8 @@ fn speculative_scheduler_public_shape_is_pinned() {
     assert!(!speculative_scheduler_public_shape_violations("", "").is_empty());
 }
 
-/// 否定プローブ: `KvCache` の公開メソッド集合が承認形（8 件）ちょうどで、`truncate`／`set_*` 等の
+/// 否定プローブ: `KvCache` の公開メソッド集合が承認形（9 件。#3105 で `valid_len` を 1 件追加。
+/// 設計記録 §21.5・D-A 承認の範囲）ちょうどで、`truncate`／`set_*` 等の
 /// 書き換え経路が増えていないこと（論点 4 は維持〈§17.1・facade-speculative-decoding-batching-design §19.4〉。
 /// 論点 3 は §19 で解消済みで、到達経路は外部キャッシュ入口、巻き戻しは非公開の `kv_rewind`。`KvCache` は不変）。
 /// workspace の `crates/*/src` 全体の `impl KvCache` ブロックを走査する。
@@ -39821,7 +39828,8 @@ fn kv_cache_public_methods_stay_unchanged_for_speculative_scheduler() {
             "k",
             "new",
             "seq_len",
-            "v"
+            "v",
+            "valid_len"
         ],
         "KvCache の公開メソッドが承認形と不一致（truncate 等の追加は論点 4（維持）。承認事項）"
     );

@@ -718,3 +718,14 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 - `scheduler.rs` の `std::thread|std::sync::mpsc|tokio|async |std::net|std::fs|rayon` の grep は 0 件。
 - 変えないもの: tolerance・baseline・依存・`unsafe`・`docs/spec/`・公開シグネチャ（新しい `pub` 項目・`pub use`・trait メソッド・`AutodiffError` variant なし）・`SchedulerLimits` の 3 上限必須・要求単位の失敗の切り離し。
 - 申し送り（#3098）: 成功例 doctest（`inference/mod.rs`）、`api_surface.rs` の doctest 実在検査の更新、`k`・draft・prompt 長・`max_length` の掃引拡張、§18.4 追記。`caches` で表せない内部状態（RNN 隠れ状態等）を持つモデルは §19.10 のとおり案 B を起点に別 issue（起票はユーザー承認後）。
+
+## 24. 実装記録（#3105・親 #3103）
+
+- 実装: §21.4 の表現。`KvCache` に非公開フィールド `lens: Option<Vec<usize>>` を追加（`None` = padding なし。`Some` は左詰め padding で、`max(lens) == S`・少なくとも 1 行が `lens[r] < S`。全行が `S` なら必ず `None` へ正規化し、全行同長なら従来経路と bit 一致を構造的に保つ）。padding 位置の K／V は 0.0
+- 公開追加は `KvCache::valid_len(row) -> Option<usize>` の 1 件のみ（§21.5）。空・範囲外は `None`。`seq_len()` の意味は物理長 `S` のまま
+- mask: 非公開関数 `padded_offset_allowed_mask(lens, s_prev, l_new, s_total)`（`[B,1,L_new,S_total]`・`true` = attend・`pad_r <= j && j <= s_prev + i`）。`forward_with_cache` は `lens` が `Some` のとき (b)／(c) とも本関数を使い、`None` のときは従来コードをそのまま使う。`lens + l_new_kv` は射影の前に `checked_add` で計算し、書き戻しは全段成功後
+- 束ね・分割: `KvCache::stack_left_padded`／`split_rows` は `pub(crate)` で、`#[cfg(test)]` の子モジュール `nn/attention/kv_padding.rs` に置く（本イシュー時点で非テスト呼び出し元がなく、`#[allow]` を避けるため。api_surface の `without_test_mod` が最初の `#[cfg(test)]` 以降を切り落とすので、本体 impl の途中には cfg 属性を置かない）。**#3106 で `cfg(test)` を外し、§21.9 の `max_active`／`max_length` 検査を加える**
+- kv_rewind（§21.7）: `common_state`（`capture`・`rewind_and_replay` が経由）が `valid_len(r) != Some(seq_len())` の行を持つキャッシュを `InvalidArgument` で拒否する。新しい内部 API は足していない
+- ガード: `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler` の期待集合を 9 件（`valid_len` 追加）へ更新。`kv_cache_is_reachable_via_facade_only` に署名固定と実行プローブを追加
+- テスト: 可変長の B=1 一致（L_new=1・2。統一複合判定）・padding 内容の非影響（bit 一致）・全行同長の bit 一致往復・拒否時の状態不変・`valid_len`・mask 単体
+- 依存・tolerance・baseline・`unsafe`・`docs/spec` は変更なし
