@@ -285,51 +285,76 @@ fn validate_component(kind: &'static str, value: &str) -> Result<(), ModelError>
 
 /// 本番の一時ファイル名（`compat::model_io::tmp_manifest_name` と同型。先頭 `.` のため
 /// `validate_component` を通らず、`load`／`available_models` からは見えない）。
-#[cfg(any(
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ),
-    target_os = "macos"
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 fn production_tmp_name() -> String {
     let (pid, nanos, counter) = crate::fs_write::name_entropy();
     format!(".{MODEL_FILE_NAME}.tmp-{pid}-{counter}-{nanos}")
 }
 
-/// `save` が `<name>`・`<version>` の 1 段を用意する。存在しなければ `create_dir` で 1 段だけ
-/// 作り（`create_dir_all` は使わない）、リンク・非ディレクトリは拒否して `(dev, ino)` を返す。
-/// エラーメッセージにパスを含めない。
-#[cfg(any(
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ),
-    target_os = "macos"
+/// `/proc/self/fd/<fd>` 形式のパス（保持中のディレクトリ fd を基準にした相対解決用）。
+/// `save` はこのパスの下にだけ作成・`rename` する。`<fd>` が指す inode は
+/// 開いた時点で固定されるため、以後 `<name>`・`<version>` のパス文字列を
+/// シンボリックリンクへ差し替えられても書き込み先は動かない。
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn prepare_dir_level(path: &Path) -> std::io::Result<(u64, u64)> {
+fn proc_fd_path(dir: &File) -> PathBuf {
+    use std::os::unix::io::AsRawFd;
+    PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+}
+
+/// `save` のキャッシュルートをディレクトリ fd として開く（ルート自体が
+/// シンボリックリンクでも許容する。利用者が選んだ配置で、`load` 側と同じ扱い）。
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn open_root_dir(root: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(crate::fs_guard::open_flags::O_DIRECTORY)
+        .open(root)
+}
+
+/// `parent`（保持中のディレクトリ fd）の直下に `component`（検証済みの 1 段）を
+/// ディレクトリとして用意し、その fd を返す。存在しなければ `create_dir` で 1 段だけ
+/// 作る（`create_dir_all` は使わない）。開く際は `O_NOFOLLOW|O_DIRECTORY` を付け、
+/// 最終コンポーネントがシンボリックリンク・非ディレクトリなら拒否する
+/// （`InvalidInput`）。パス検査と使用の間の差し替え窓を作らないよう、検査ではなく
+/// 「開いた fd」を以後の基準にする。エラーメッセージにパスを含めない。
+/// `/proc` が使えない環境では開けず `Err`（書き込み前の fail-closed）。
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn open_dir_component(parent: &File, component: &str) -> std::io::Result<File> {
+    use crate::fs_guard::open_flags::{ELOOP, O_DIRECTORY, O_NOFOLLOW};
     use std::io::{Error as IoError, ErrorKind};
-    use std::os::unix::fs::MetadataExt;
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            match std::fs::create_dir(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e),
-            }
-            std::fs::symlink_metadata(path)?
-        }
+    use std::os::unix::fs::OpenOptionsExt;
+    // ENOTDIR（asm-generic errno。x86_64・aarch64 共通）
+    const ENOTDIR: i32 = 20;
+    let path = proc_fd_path(parent).join(component);
+    match std::fs::create_dir(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
-    };
-    let ft = meta.file_type();
-    if ft.is_symlink() || !ft.is_dir() {
-        return Err(IoError::new(
-            ErrorKind::InvalidInput,
-            "保存先の中間パスがシンボリックリンクまたはディレクトリではありません",
-        ));
     }
-    Ok((meta.dev(), meta.ino()))
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+        .open(&path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(code) if code == ELOOP || code == ENOTDIR => IoError::new(
+                ErrorKind::InvalidInput,
+                "保存先の中間パスがシンボリックリンクまたはディレクトリではありません",
+            ),
+            _ => e,
+        })
 }
 
 /// `len` が `max` を超えていないか検査する純関数（環境非依存の単体
@@ -673,11 +698,12 @@ impl ModelRegistry {
     /// 2. `name`・`version` の許可文字集合検証、空集合・サイズ上限の検査、
     ///    safetensors へのエンコードと読み戻しによる整合確認（ここまで
     ///    ファイルシステムには触れない）
-    /// 3. `<name>`・`<version>` ディレクトリを 1 段ずつ用意（シンボリック
-    ///    リンク・非ディレクトリは拒否。`create_dir_all` は使わない）
-    /// 4. 同じディレクトリの一時ファイル（`.model.safetensors.tmp-*`・
-    ///    `create_new`）へ書き込み、実体識別子を再確認してから `rename`
-    ///    （唯一のコミット点）
+    /// 3. ルートを開き、`<name>`・`<version>` ディレクトリを 1 段ずつ用意して
+    ///    ディレクトリ fd を保持する（シンボリックリンク・非ディレクトリは拒否。
+    ///    `create_dir_all` は使わない）
+    /// 4. 保持した `<version>` の fd 配下の一時ファイル（`.model.safetensors.tmp-*`・
+    ///    `create_new`）へ書き込み、実体識別子を再確認してから同じ fd 配下で
+    ///    `rename`（唯一のコミット点）
     /// 5. `load` と同じ経路で開き直し、確定したファイルが書き込んだ実体で
     ///    あることを確認する
     ///
@@ -692,19 +718,22 @@ impl ModelRegistry {
     ///
     /// # プラットフォーム
     ///
-    /// `load` と同じ対応範囲（Linux の x86_64／aarch64 と macOS）のみ。それ
-    /// 以外（Windows 等）は最初に `Io(Unsupported)` を返し何も作らない
-    /// （範囲外では不正な `name`・`version` も `InvalidComponent` ではなく
-    /// `Unsupported` になるが、いずれも書き込み前の拒否である）。
+    /// Linux の x86_64／aarch64 のみ。保存先はディレクトリ fd で固定する
+    /// （`/proc/self/fd/<fd>` 経由。std だけで `openat` 相当を得る手段）ため、
+    /// `load` の対応範囲のうち macOS は対象外で、それ以外（Windows 等）と併せて
+    /// 最初に `Io(Unsupported)` を返し何も作らない（範囲外では不正な `name`・
+    /// `version` も `InvalidComponent` ではなく `Unsupported` になるが、いずれも
+    /// 書き込み前の拒否である）。`/proc` が使えない Linux でも書き込み前に `Err`
     ///
-    /// # 残るリスク・並行性・耐久性
+    /// # 保存先の固定・並行性・耐久性
     ///
-    /// - std だけでは検査と `create_dir`／`rename` の間の差し替え（TOCTOU）を
-    ///   閉じられない。共有キャッシュへ書き込める攻撃者が `<name>`・
-    ///   `<version>` をシンボリックリンクへ差し替えた場合は、確定直前の再確認で
-    ///   検出して失敗にするが、ルート外へ書き込んだ後になりうる
-    ///   （`docs/facade-model-registry-decision.md` §16.6。ディレクトリ fd
-    ///   ベースへの強化は依存承認後に別イシューで扱う）
+    /// - キャッシュルートを開いて得たディレクトリ fd を基準に `<name>`・`<version>` を
+    ///   1 段ずつ `O_NOFOLLOW|O_DIRECTORY` で開き、一時ファイルの作成と `rename` は
+    ///   その fd 配下だけで行う。検査後に `<name>`・`<version>` のパス文字列が
+    ///   シンボリックリンクへ差し替えられても、書き込みは開いた時点の実体に
+    ///   留まりルート外へ出ない（差し替えを検出した場合は確定後の検証が `Err` を返す。
+    ///   `docs/facade-model-registry-decision.md` §16.6・§16.9）。ルート自体の
+    ///   シンボリックリンクは利用者の選択として許容する
     /// - 並行する `save` は「最後に `rename` した側が勝つ」。調停は
     ///   サポート対象外
     /// - `fsync` はしない（電源断に対する耐久性は保証しない。原子性は
@@ -727,12 +756,9 @@ impl ModelRegistry {
         version: &str,
         tensors: &HashMap<String, Tensor<f32>>,
     ) -> Result<(), ModelError> {
-        #[cfg(any(
-            all(
-                target_os = "linux",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            ),
-            target_os = "macos"
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
         ))]
         {
             self.save_with(
@@ -744,12 +770,9 @@ impl ModelRegistry {
                 |_: &Path| Ok(()),
             )
         }
-        #[cfg(not(any(
-            all(
-                target_os = "linux",
-                any(target_arch = "x86_64", target_arch = "aarch64")
-            ),
-            target_os = "macos"
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
         )))]
         {
             let _ = (name, version, tensors);
@@ -764,12 +787,9 @@ impl ModelRegistry {
     /// 途中失敗を再現できるようにする（`compat::model_io` の
     /// `write_prepared_with` と同じ差し込み方）。本番は `save` から
     /// `MAX_MODEL_FILE_BYTES`・`production_tmp_name`・何もしないフックで呼ぶ。
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     fn save_with(
         &self,
@@ -836,20 +856,13 @@ impl ModelRegistry {
         // ここからファイルシステムに触れる。ルート自体がシンボリックリンク
         // でも許容する（利用者が選んだ配置。`load` 側と同じ扱い）。
         std::fs::create_dir_all(&self.root).map_err(ModelError::Io)?;
-        let name_dir = self.root.join(name);
-        let version_dir = name_dir.join(version);
-        let name_id = prepare_dir_level(&name_dir).map_err(ModelError::Io)?;
-        let version_id = prepare_dir_level(&version_dir).map_err(ModelError::Io)?;
-
-        // 多層防御: canonicalize 後もルート配下であること。
-        let canonical_root = self.root.canonicalize().map_err(ModelError::Io)?;
-        let canonical_version = version_dir.canonicalize().map_err(ModelError::Io)?;
-        if !canonical_version.starts_with(&canonical_root) {
-            return Err(ModelError::Io(IoError::new(
-                ErrorKind::InvalidInput,
-                "保存先がキャッシュルートの外を指しています",
-            )));
-        }
+        // ディレクトリ fd を 1 段ずつ固定し、以後の一時ファイル作成・`rename` は
+        // `/proc/self/fd/<fd>` 配下だけで行う（パス文字列の再解決をしない。
+        // codex-review 指摘・PR #3377 P0。差し替えられても書き込みはルート外へ出ない）。
+        let root_dir = open_root_dir(&self.root).map_err(ModelError::Io)?;
+        let name_fd = open_dir_component(&root_dir, name).map_err(ModelError::Io)?;
+        let version_fd = open_dir_component(&name_fd, version).map_err(ModelError::Io)?;
+        let version_dir = proc_fd_path(&version_fd);
 
         let (mut tmp_file, tmp_name) =
             create_new_with_retry(&version_dir, &mut next_tmp, MAX_TMP_NAME_ATTEMPTS)
@@ -859,8 +872,7 @@ impl ModelRegistry {
 
         let committed: std::io::Result<()> = (|| {
             tmp_file.write_all(&bytes)?;
-            // 確定直前の再確認: 一時ファイルと中間ディレクトリが検査時点と
-            // 同一の実体であること。
+            // 確定直前の再確認: 一時ファイルが保持ハンドルと同一の実体であること。
             let held = tmp_file.metadata()?;
             let on_disk = std::fs::symlink_metadata(&tmp_path)?;
             if !on_disk.file_type().is_file()
@@ -871,15 +883,6 @@ impl ModelRegistry {
                     ErrorKind::InvalidData,
                     "一時ファイルが書き込み中に差し替えられました",
                 ));
-            }
-            for (dir, id) in [(&name_dir, name_id), (&version_dir, version_id)] {
-                let m = std::fs::symlink_metadata(dir)?;
-                if !m.file_type().is_dir() || (m.dev(), m.ino()) != id {
-                    return Err(IoError::new(
-                        ErrorKind::InvalidData,
-                        "保存先ディレクトリが書き込み中に差し替えられました",
-                    ));
-                }
             }
             before_commit(&tmp_path)?;
             std::fs::rename(&tmp_path, &leaf)
@@ -1386,12 +1389,9 @@ mod tests {
             .collect()
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     fn tmp_leftovers(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir)
@@ -1402,12 +1402,9 @@ mod tests {
             .collect()
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_then_load_roundtrips_bit_exact() {
@@ -1425,12 +1422,9 @@ mod tests {
         assert!(tmp_leftovers(&dir.path().join("root/mlp/v1")).is_empty());
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_rejects_invalid_components_before_fs_access() {
@@ -1460,12 +1454,9 @@ mod tests {
         assert!(!root.exists(), "検証失敗でルートを作ってはならない");
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_rejects_empty_model_without_creating_root() {
@@ -1477,12 +1468,9 @@ mod tests {
         assert!(!root.exists());
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_with_limit_rejects_over_bound_without_creating_root() {
@@ -1515,12 +1503,9 @@ mod tests {
         assert!(!root.exists());
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_failure_before_commit_keeps_existing_and_leaves_no_tmp() {
@@ -1549,12 +1534,9 @@ mod tests {
         assert!(tmp_leftovers(&dir.path().join("root/mlp/v1")).is_empty());
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_gives_up_after_tmp_name_collisions() {
@@ -1582,12 +1564,9 @@ mod tests {
         assert_eq!(registry.load("mlp", "v1").unwrap().len(), state.len());
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_overwrites_existing_atomically() {
@@ -1609,12 +1588,9 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     #[test]
     fn save_rejects_symlinked_name_dir_without_writing_outside() {
@@ -1633,12 +1609,76 @@ mod tests {
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 
-    #[cfg(not(any(
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-        target_os = "macos"
+    /// 検査後（一時ファイル書き込み後・`rename` 前）に `<version>` を退避して
+    /// シンボリックリンクへ差し替えても、ルート外へ書かれないこと（codex-review
+    /// 指摘・PR #3377 P0。ディレクトリ fd 固定の回帰テスト）。
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn save_does_not_write_outside_when_version_dir_swapped_to_symlink() {
+        let dir = TempDirGuard::new("save-swap");
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let vdir = root.join("mlp").join("v1");
+        let moved = root.join("mlp").join("v1-moved");
+        let outside_c = outside.clone();
+        let (vdir_c, moved_c) = (vdir.clone(), moved.clone());
+        let result = registry.save_with(
+            "mlp",
+            "v1",
+            &sample_state(),
+            MAX_MODEL_FILE_BYTES,
+            production_tmp_name,
+            move |_| {
+                std::fs::rename(&vdir_c, &moved_c)?;
+                std::os::unix::fs::symlink(&outside_c, &vdir_c)
+            },
+        );
+        assert!(result.is_err(), "差し替えを検出して Err のはず");
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "ルート外へ書き込んではならない"
+        );
+    }
+
+    /// 同上。`<name>` 段を差し替えるケース。
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn save_does_not_write_outside_when_name_dir_swapped_to_symlink() {
+        let dir = TempDirGuard::new("save-swap-name");
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(outside.join("v1")).unwrap();
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let ndir = root.join("mlp");
+        let moved = root.join("mlp-moved");
+        let (outside_c, ndir_c, moved_c) = (outside.clone(), ndir.clone(), moved.clone());
+        let result = registry.save_with(
+            "mlp",
+            "v1",
+            &sample_state(),
+            MAX_MODEL_FILE_BYTES,
+            production_tmp_name,
+            move |_| {
+                std::fs::rename(&ndir_c, &moved_c)?;
+                std::os::unix::fs::symlink(&outside_c, &ndir_c)
+            },
+        );
+        assert!(result.is_err(), "差し替えを検出して Err のはず");
+        assert_eq!(std::fs::read_dir(outside.join("v1")).unwrap().count(), 0);
+    }
+
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
     )))]
     #[test]
     fn save_is_unsupported_on_non_supported_platform() {
