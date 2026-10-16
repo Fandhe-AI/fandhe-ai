@@ -261,3 +261,4 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - rustls 系の allow 外は BSD-3-Clause・CDLA-Permissive-2.0 という許容的ライセンスだが、allow 追加はユーザー承認事項（1 節・`.claude/rules/deps-policy.md`）。
 - `docs/model-download-design.md` §3 の旧記載のうち `minreq`（Apache-2.0 → 実測 ISC）・`attohttpc`（MIT OR Apache-2.0 → 実測 MPL-2.0）は誤りだったため、同 doc 側で日付付きで是正した。
 - `advisories` は未実施（承認後に実施）。
+- **2026-10-16 追記（#3122）**: 候補の再実測（feature 組合せ×3 ターゲット・`advisories` 実施済み・コピーレフト混入なし）と、8 節系・6 節相当の追記案は `docs/model-download-design.md` §16（§16.4・§16.10）。正式反映は #3124。本節の下書きと allow は変更していない。
