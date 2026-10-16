@@ -18,6 +18,8 @@
 //! 使い回す 1 本のバッファで組み立て、確保を増やさない（A04）。エラーは入力文字列を
 //! 保持しない（A09）。`output_sequence_length` は参照しない。
 
+use std::collections::VecDeque;
+
 use super::error::TextError;
 use super::limits::{TextLimits, check_exact_count};
 use super::ngram::ngram_count;
@@ -93,18 +95,25 @@ fn count_row(
             }
         }
         Some(n) => {
-            let toks: Vec<&str> = split(&std, opts.split).collect();
-            // `ngram::ngrams` と同じ順序・同じ連結（半角空白 1 つ）。行内で 1 本のバッファを
-            // 使い回し、n-gram ごとの `String` を作らない。
+            // 直近 n トークンだけを持つ窓で逐次処理し、行全体に比例する中間 `Vec` を作らない
+            // （A04。決定記録 §5・§10）。窓の長さは高々 n（`check_ngrams` で上限検査済み）。
+            // 各トークンを末尾とする 1〜n-gram を数える。出現回数は加算の可換性により
+            // `ngram::ngrams` の生成順と無関係に一致する。連結は半角空白 1 つで、行内で 1 本の
+            // バッファを使い回し n-gram ごとの `String` を作らない。
+            let mut window: VecDeque<&str> = VecDeque::with_capacity(n);
             let mut buf = String::new();
-            for k in 1..=n {
-                for w in toks.windows(k) {
+            for t in split(&std, opts.split) {
+                if window.len() == n {
+                    window.pop_front();
+                }
+                window.push_back(t);
+                for k in 1..=window.len() {
                     buf.clear();
-                    for (i, t) in w.iter().enumerate() {
+                    for (i, w) in window.range(window.len() - k..).enumerate() {
                         if i > 0 {
                             buf.push(' ');
                         }
-                        buf.push_str(t);
+                        buf.push_str(w);
                     }
                     bump(row, vocab, &buf);
                 }
@@ -224,6 +233,17 @@ mod tests {
         let (_, d) = run(&v, &o, &["a b a b"], BagKind::Count).unwrap();
         // 1-gram: a, b(OOV), a, b(OOV)。2-gram: "a b", "b a"(OOV), "a b"。
         assert_eq!(d, vec![0.0, 3.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn ngrams_window_handles_short_rows_and_n_above_length() {
+        let v = vocab(&["a", "a b", "a b c", "b c"]); // 2 a, 3 "a b", 4 "a b c", 5 "b c"
+        let mut o = opts(&v);
+        o.ngrams = Some(3);
+        let (_, d) = run(&v, &o, &["a b c", "a", ""], BagKind::Count).unwrap();
+        assert_eq!(&d[0..6], &[0.0, 2.0, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(&d[6..12], &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&d[12..18], &[0.0; 6]);
     }
 
     #[test]

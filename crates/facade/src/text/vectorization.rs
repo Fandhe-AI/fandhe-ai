@@ -111,7 +111,7 @@ impl TextVectorizationConfig {
 pub struct TextVectorization {
     config: TextVectorizationConfig,
     vocabulary: Vocabulary,
-    /// id 順の idf 重み（長さ = 語彙数。idf[0] = 0.0、idf[1] = OOV、idf[2..] = 語彙）。
+    /// id 順の idf 重み（長さ = 語彙数。`idf[0]` = 0.0、`idf[1]` = OOV、`idf[2..]` = 語彙）。
     /// `from_vocabulary_with_idf`／`adapt_tf_idf` で作ったときだけ `Some`。
     idf: Option<Vec<f32>>,
 }
@@ -125,8 +125,8 @@ fn check_pad(config: &TextVectorizationConfig) -> Result<(), TextError> {
 }
 
 /// 語彙の idf 重み（長さ = 語彙の個数）から id 順の重みを組む。
-/// idf[0] = 0.0、idf[1]（OOV）= 語彙の重みの平均（f64 で合計し 1 回だけ f32 へ。空なら 0.0）、
-/// idf[2..] = 語彙の重み。`adapt_tf_idf`・`from_vocabulary_with_idf` が共通で使う。
+/// `idf[0]` = 0.0、`idf[1]`（OOV）= 語彙の重みの平均（f64 で合計し 1 回だけ f32 へ。空なら 0.0）、
+/// `idf[2..]` = 語彙の重み。`adapt_tf_idf`・`from_vocabulary_with_idf` が共通で使う。
 fn assemble_idf(vocab_weights: &[f32]) -> Vec<f32> {
     let oov = if vocab_weights.is_empty() {
         0.0f32
@@ -192,8 +192,8 @@ impl TextVectorization {
     /// 語彙と idf 重みを直接指定して作る（`transform_tf_idf` 用）。
     ///
     /// `idf_weights` は語彙と同じ順・同じ個数（予約 2 件を含まない）。各値は有限かつ 0 以上
-    /// （`-0.0` は可）。id 順の重みは idf[0] = 0.0、idf[1]（OOV）= 与えた重みの平均
-    /// （f64 で合計し 1 回だけ f32 へ。語彙が空なら 0.0）、idf[2..] = 与えた重み。
+    /// （`-0.0` は可）。id 順の重みは `idf[0]` = 0.0、`idf[1]`（OOV）= 与えた重みの平均
+    /// （f64 で合計し 1 回だけ f32 へ。語彙が空なら 0.0）、`idf[2..]` = 与えた重み。
     /// 検査順（確保より先）: `pad_to_max_tokens` → `max_tokens`・語彙数・設定値 →
     /// 個数の一致（`IdfWeightsLengthMismatch`）→ 各値（`InvalidIdfWeight`）→ 語彙。
     pub fn from_vocabulary_with_idf<S: AsRef<str>>(
@@ -264,7 +264,7 @@ impl TextVectorization {
     ///
     /// 語彙は `adapt` と同一。idf は語 t について `ln(1 + N / (1 + df))` を f64 で計算して
     /// 1 回だけ f32 へ丸める（`N` = コーパスの文書数、`df` = t を含む文書数で、文書内の
-    /// 重複は 1 と数える。自然対数）。idf[0] = 0.0、idf[1]（OOV）は丸めた後の語彙の idf の
+    /// 重複は 1 と数える。自然対数）。`idf[0]` = 0.0、`idf[1]`（OOV）は丸めた後の語彙の idf の
     /// 平均（f64 で合計し 1 回だけ f32 へ。語彙が空なら 0.0）で、`idf_weights()` の `[2..]`
     /// を `from_vocabulary_with_idf` へ渡すと同じ重みへ往復できる。
     pub fn adapt_tf_idf<S: AsRef<str>>(
