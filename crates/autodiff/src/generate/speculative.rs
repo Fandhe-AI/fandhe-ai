@@ -154,7 +154,13 @@ fn rewind_to<M: AutoregressiveModel + ?Sized>(
 /// 対象は `num_kv_layers() > 0` で、生成状態を渡された `caches` だけに持つモデル。
 /// 生成状態を `caches` の外（内部状態保持型。`RefCell<StatefulAttention>` 等）に持つ型は
 /// `num_kv_layers()` の値によらず対象外で、出力を保証しない（`> 0` を返しつつ内部にも
-/// 状態を持つ型は型でも実行時でも検出できないため、利用者が保証する。設計記録 §17.5）。
+/// 状態を持つ型は型でも実行時でも検出できないため、利用者が保証する。設計記録 §17.5・§19.6）。
+///
+/// KV 付きモデルは `StatefulAttention::forward_with_external_cache`（facade では
+/// `Tape::stateful_attention_forward_with_cache`）で `caches[i]` を進める形に組む
+/// （`num_kv_layers()` は層数を返す）。この形なら棄却時の巻き戻し（clone 保存・復元・受理分の再 forward）
+/// は内部で行われ、利用者は巻き戻しを意識しない。`RefCell<StatefulAttention>` 形は
+/// `num_kv_layers() == 0` となり入口で拒否される（検査順は不変）。
 ///
 /// # Errors
 ///
