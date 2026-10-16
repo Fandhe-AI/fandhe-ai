@@ -54,11 +54,11 @@ pub const DEFAULT_BLOCK_SIZE: usize = 16;
 /// `block_size` の上限（設計 §6。2 のべき乗で 1〜256）。
 const MAX_BLOCK_SIZE: usize = 256;
 
-fn invalid(msg: impl Into<String>) -> AutodiffError {
+pub(crate) fn invalid(msg: impl Into<String>) -> AutodiffError {
     AutodiffError::InvalidArgument(format!("paged_kv: {}", msg.into()))
 }
 
-fn reserve_err(what: &str) -> AutodiffError {
+pub(crate) fn reserve_err(what: &str) -> AutodiffError {
     invalid(format!("{what} の確保に失敗した（メモリ不足）"))
 }
 
@@ -123,7 +123,7 @@ impl PagedKvCacheConfig {
     }
 
     /// 片側（K または V）のプールの要素数。
-    fn pool_elems(&self) -> Result<usize, AutodiffError> {
+    pub(crate) fn pool_elems(&self) -> Result<usize, AutodiffError> {
         self.max_blocks
             .checked_mul(self.block_size)
             .and_then(|n| n.checked_mul(self.embed_dim))
@@ -149,22 +149,27 @@ impl PagedKvCacheConfig {
 /// 空きブロックは「返却済みスタック」と「未使用の連番」の 2 つで表し、
 /// 確保は返却済みを優先して後入れ先出し、なければ連番（0 から）を使う。
 /// 順序は決定的で、`max_blocks` が大きくても空きリストを eager に作らない。
+///
+/// デバイス版 `PagedKvCache`（`paged_kv_device.rs`。#3111）も同じ型を再利用する
+/// （`pub(crate)`）。デバイス版は追記のたびに本型を複製して
+/// [`BlockTable::extend_for_append`] を適用し、バックエンドの書き込みが成功した
+/// 後にだけ複製を確定する（失敗時の論理状態不変。設計 §4・OWASP A08）。
 #[derive(Debug, Clone, Default)]
-struct BlockTable {
-    returned: Vec<u32>,
-    next_unused: usize,
-    tables: Vec<Vec<u32>>,
-    seq_lens: Vec<usize>,
-    batch: Option<usize>,
+pub(crate) struct BlockTable {
+    pub(crate) returned: Vec<u32>,
+    pub(crate) next_unused: usize,
+    pub(crate) tables: Vec<Vec<u32>>,
+    pub(crate) seq_lens: Vec<usize>,
+    pub(crate) batch: Option<usize>,
 }
 
 impl BlockTable {
-    fn free_blocks(&self, max_blocks: usize) -> usize {
+    pub(crate) fn free_blocks(&self, max_blocks: usize) -> usize {
         self.returned.len() + max_blocks.saturating_sub(self.next_unused)
     }
 
     /// 空きブロックを 1 つ確保する。空きがなければ `None`（呼び出し元が事前に検査済み）。
-    fn alloc(&mut self, max_blocks: usize) -> Option<u32> {
+    pub(crate) fn alloc(&mut self, max_blocks: usize) -> Option<u32> {
         if let Some(b) = self.returned.pop() {
             return Some(b);
         }
@@ -176,12 +181,185 @@ impl BlockTable {
         None
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.returned.clear();
         self.next_unused = 0;
         self.tables = Vec::new();
         self.seq_lens = Vec::new();
         self.batch = None;
+    }
+}
+
+impl BlockTable {
+    /// 現在の有効系列長（空なら 0。全行同長の不変条件）。
+    pub(crate) fn seq_len(&self) -> usize {
+        self.seq_lens.first().copied().unwrap_or(0)
+    }
+
+    /// `B` 行・各 `l_new` トークンの追記ぶんのブロックを確保し、行優先
+    /// （行 `b`・トークン `i` の順）のスロット写像
+    /// （`block_id · block_size + pos % block_size`）を返す。`self` を直接変えるので、
+    /// 呼び出し元は**複製に対して**呼び、書き込み成功後に確定すること。
+    ///
+    /// 検査: `B` の一貫性・系列長／必要ブロック数のオーバーフロー・空きブロック数・
+    /// スロットが `u32` に収まること。`l_new == 0` は何もせず空の写像を返す。
+    pub(crate) fn extend_for_append(
+        &mut self,
+        max_blocks: usize,
+        block_size: usize,
+        b: usize,
+        l_new: usize,
+    ) -> Result<Vec<u32>, AutodiffError> {
+        if b == 0 {
+            return Err(invalid("バッチサイズ 0 は追記できない"));
+        }
+        if let Some(cb) = self.batch
+            && cb != b
+        {
+            return Err(invalid(format!(
+                "バッチ {b} がキャッシュの {cb} と一致しない"
+            )));
+        }
+        if l_new == 0 {
+            return Ok(Vec::new());
+        }
+        let s_prev = self.seq_len();
+        let s_total = s_prev
+            .checked_add(l_new)
+            .ok_or_else(|| invalid("系列長がオーバーフローした"))?;
+        let held = s_prev.div_ceil(block_size);
+        let extra_per_row = s_total.div_ceil(block_size) - held;
+        let extra_total = extra_per_row
+            .checked_mul(b)
+            .ok_or_else(|| invalid("必要ブロック数がオーバーフローした"))?;
+        if extra_total > self.free_blocks(max_blocks) {
+            return Err(invalid(format!(
+                "空きブロック不足（必要 {extra_total}・空き {}）",
+                self.free_blocks(max_blocks)
+            )));
+        }
+        let rows = b
+            .checked_mul(l_new)
+            .ok_or_else(|| invalid("追記行数がオーバーフローした"))?;
+        let mut slots: Vec<u32> = Vec::new();
+        slots
+            .try_reserve_exact(rows)
+            .map_err(|_| reserve_err("スロット写像"))?;
+        if self.batch.is_none() {
+            self.tables = Vec::new();
+            self.seq_lens = Vec::new();
+            self.tables
+                .try_reserve_exact(b)
+                .map_err(|_| reserve_err("行テーブル"))?;
+            self.seq_lens
+                .try_reserve_exact(b)
+                .map_err(|_| reserve_err("行長テーブル"))?;
+            for _ in 0..b {
+                self.tables.push(Vec::new());
+                self.seq_lens.push(0);
+            }
+            self.batch = Some(b);
+        }
+        for row in self.tables.iter_mut() {
+            row.try_reserve(extra_per_row)
+                .map_err(|_| reserve_err("行ブロックテーブル"))?;
+        }
+        for row in 0..b {
+            for i in 0..l_new {
+                let pos = s_prev + i;
+                if pos.is_multiple_of(block_size) {
+                    let id = self
+                        .alloc(max_blocks)
+                        .ok_or_else(|| invalid("内部不整合: 検査済みなのに空きがない"))?;
+                    self.tables
+                        .get_mut(row)
+                        .ok_or_else(|| invalid("内部不整合: 行がない"))?
+                        .push(id);
+                }
+                let blk = *self
+                    .tables
+                    .get(row)
+                    .and_then(|t| t.get(pos / block_size))
+                    .ok_or_else(|| invalid("ブロックテーブルの添字が範囲外"))?;
+                let slot = usize::try_from(blk)
+                    .ok()
+                    .and_then(|n| n.checked_mul(block_size))
+                    .and_then(|n| n.checked_add(pos % block_size))
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| invalid("スロット番号が u32 に収まらない"))?;
+                slots.push(slot);
+            }
+        }
+        for len in self.seq_lens.iter_mut() {
+            *len = s_total;
+        }
+        Ok(slots)
+    }
+
+    /// `[B, max_blocks_per_seq]` に平坦化したブロックテーブル（未使用枠は番兵
+    /// `u32::MAX`）。`B` 未確定なら空。サイズは `checked_mul` と `try_reserve`。
+    pub(crate) fn flatten_tables(
+        &self,
+        max_blocks_per_seq: usize,
+    ) -> Result<Vec<u32>, AutodiffError> {
+        let n = self
+            .tables
+            .len()
+            .checked_mul(max_blocks_per_seq)
+            .ok_or_else(|| invalid("ブロックテーブルの要素数がオーバーフローした"))?;
+        let mut out: Vec<u32> = Vec::new();
+        out.try_reserve_exact(n)
+            .map_err(|_| reserve_err("平坦化ブロックテーブル"))?;
+        for row in &self.tables {
+            if row.len() > max_blocks_per_seq {
+                return Err(invalid("行のブロック数が max_blocks_per_seq を超える"));
+            }
+            out.extend_from_slice(row);
+            out.resize(out.len() + (max_blocks_per_seq - row.len()), u32::MAX);
+        }
+        Ok(out)
+    }
+
+    /// 有効長を `new_len` へ縮め、余る末尾ブロックを空きへ返す
+    /// （[`PagedKvCacheReference::rewind_to`] と同じ意味。失敗時は状態不変）。
+    pub(crate) fn rewind_to(
+        &mut self,
+        new_len: usize,
+        block_size: usize,
+    ) -> Result<(), AutodiffError> {
+        let cur = self.seq_len();
+        if new_len > cur {
+            return Err(invalid(format!(
+                "巻き戻し先 {new_len} が有効長 {cur} を超える"
+            )));
+        }
+        if self.batch.is_none() || new_len == cur {
+            return Ok(());
+        }
+        if new_len == 0 {
+            self.reset();
+            return Ok(());
+        }
+        let keep = new_len.div_ceil(block_size);
+        let release: usize = self
+            .tables
+            .iter()
+            .map(|t| t.len().saturating_sub(keep))
+            .sum();
+        self.returned
+            .try_reserve(release)
+            .map_err(|_| reserve_err("空きブロック返却用スタック"))?;
+        for row in self.tables.iter_mut() {
+            while row.len() > keep {
+                if let Some(id) = row.pop() {
+                    self.returned.push(id);
+                }
+            }
+        }
+        for len in self.seq_lens.iter_mut() {
+            *len = new_len;
+        }
+        Ok(())
     }
 }
 

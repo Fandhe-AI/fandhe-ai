@@ -20,12 +20,13 @@ use fandhe_ai_tensor_core::{
     BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, Conv3dParams, DType, EighFactors,
     FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
     KlDivTarget, LambMoments, LambStepConfig, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    Pool2dParams, QrFactors, RmsPropOptionalBuffers, RmsPropStepConfig, ScatterReduce,
-    SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors, Tensor, UnaryElementwiseOp,
-    VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape,
-    im2col_out_shape, im2col3d_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape,
-    pad_out_shape, pool2d_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape,
+    PagedAttentionArgs, PagedKvLayout, Pool2dParams, QrFactors, RmsPropOptionalBuffers,
+    RmsPropStepConfig, ScatterReduce, SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors,
+    Tensor, UnaryElementwiseOp, VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout,
+    gather_out_shape, im2col_out_shape, im2col3d_out_shape, interpolate_out_shape_for_mode,
+    one_hot_out_shape, pad_out_shape, pool2d_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    validate_paged_attention, validate_paged_kv_append,
 };
 
 use crate::batch_norm;
@@ -37,6 +38,7 @@ use crate::layer_norm;
 use crate::linalg::{self, LinalgError};
 use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::nll::{self, NllLayout};
+use crate::paged_kv;
 use crate::pooling;
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::scan;
@@ -1607,6 +1609,105 @@ impl BackendOps for CpuBackendOps {
         }
 
         shared_cpu_memory().wrap_vec(out, vec![m, n])
+    }
+
+    /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
+    /// CPU は「デバイス」がホストメモリそのもので、`paged_kv::append_rows` が
+    /// スロット行を `copy_from_slice` する。検証は `tensor-core` の共通関数。
+    fn paged_kv_append(
+        &self,
+        k_new: &DeviceBuffer<f32>,
+        v_new: &DeviceBuffer<f32>,
+        k_pool: &mut DeviceBuffer<f32>,
+        v_pool: &mut DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+    ) -> Result<(), BackendError> {
+        if [
+            k_new.device(),
+            v_new.device(),
+            k_pool.device(),
+            v_pool.device(),
+        ]
+        .iter()
+        .any(|d| *d != Device::Cpu)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        validate_paged_kv_append(
+            k_new.numel(),
+            v_new.numel(),
+            k_pool.numel(),
+            v_pool.numel(),
+            slot_mapping,
+            layout,
+        )?;
+        let kn = k_new
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let vn = v_new
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let kp = k_pool
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let vp = v_pool
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        paged_kv::append_rows(
+            &kn.data[..],
+            &vn.data[..],
+            &mut kp.data[..],
+            &mut vp.data[..],
+            slot_mapping,
+            layout,
+        )
+    }
+
+    /// ページ化 KV プールに対する attention（K-3。イシュー #3111）。縮約順序は
+    /// `paged_kv::attention` のモジュール doc を参照。
+    fn paged_attention_forward(
+        &self,
+        q: &DeviceBuffer<f32>,
+        k_pool: &DeviceBuffer<f32>,
+        v_pool: &DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if [q.device(), k_pool.device(), v_pool.device()]
+            .iter()
+            .any(|d| *d != Device::Cpu)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = validate_paged_attention(
+            q.numel(),
+            k_pool.numel(),
+            v_pool.numel(),
+            block_tables,
+            seq_lens,
+            args,
+        )?;
+        let qh = q
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let kh = k_pool
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let vh = v_pool
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let out = paged_kv::attention(
+            &qh.data[..],
+            &kh.data[..],
+            &vh.data[..],
+            block_tables,
+            seq_lens,
+            args,
+            &plan,
+        )?;
+        shared_cpu_memory().wrap_vec(out, vec![args.batch, args.l_new, args.layout.embed_dim])
     }
 
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を [`DeviceBuffer`]

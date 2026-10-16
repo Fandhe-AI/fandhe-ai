@@ -36,12 +36,13 @@ use fandhe_ai_tensor_core::{
     Activation, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
     DType, DispatchFailureCell, EighFactors, FusionPlan, GruBackwardOutput, GruPointwiseOutput,
     HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    Pool2dParams, QrFactors, ScalarBinaryOp, ScalarUnaryOp, ScatterReduce, SegmentKey,
-    SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor, UnaryElementwiseOp,
-    adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape, im2col_out_shape,
-    interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape, pool2d_out_shape,
-    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout, scatter_out_shape,
-    sort_out_shape, topk_out_shape,
+    PagedAttentionArgs, PagedKvLayout, Pool2dParams, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
+    ScatterReduce, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
+    UnaryElementwiseOp, adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape,
+    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
+    pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    scatter_out_shape, sort_out_shape, topk_out_shape, validate_paged_attention,
+    validate_paged_kv_append,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -1591,6 +1592,59 @@ pub(crate) fn static_cuda_memory(
     let mem: &'static CudaMemory = Box::leak(Box::new(CudaMemory::new(device)));
     guard.insert(ordinal, mem);
     Ok(mem)
+}
+
+/// `DeviceBuffer` から CUDA 確保実体（[`crate::memory::CudaStorage`]）を取り出し、
+/// 要素数がバッファの `numel` と一致することを検査する（`downcast` 失敗は
+/// `DeviceMismatch`、未確保・長さのずれは型付きエラー。REQ-8・OWASP A03。
+/// `linear_forward_device` の取り出し手順と同じ検査を paged KV 用にまとめたもの）。
+fn cuda_storage_ref<'a>(
+    buf: &'a DeviceBuffer<f32>,
+    expected_len: usize,
+    what: &str,
+) -> Result<&'a crate::memory::CudaStorage, BackendError> {
+    let handle = buf
+        .downcast_handle::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let Some(storage) = handle.storage.as_ref() else {
+        return Err(BackendError::DeviceAllocationFailed(format!(
+            "{what}: buffer has numel > 0 but no device allocation"
+        )));
+    };
+    if storage.len() != expected_len {
+        return Err(BackendError::ShapeMismatch(
+            ShapeError::ElementCountMismatch {
+                expected: expected_len,
+                actual: storage.len(),
+            },
+        ));
+    }
+    Ok(storage)
+}
+
+/// [`cuda_storage_ref`] の可変版（K／V プール・出力バッファ用）。
+fn cuda_storage_mut<'a>(
+    buf: &'a mut DeviceBuffer<f32>,
+    expected_len: usize,
+    what: &str,
+) -> Result<&'a mut crate::memory::CudaStorage, BackendError> {
+    let handle = buf
+        .downcast_handle_mut::<CudaBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let Some(storage) = handle.storage.as_mut() else {
+        return Err(BackendError::DeviceAllocationFailed(format!(
+            "{what}: buffer has numel > 0 but no device allocation"
+        )));
+    };
+    if storage.len() != expected_len {
+        return Err(BackendError::ShapeMismatch(
+            ShapeError::ElementCountMismatch {
+                expected: expected_len,
+                actual: storage.len(),
+            },
+        ));
+    }
+    Ok(storage)
 }
 
 /// [`CudaBackendOps::reduce_dispatch`] が `sum`／`max` のどちらを実行
@@ -3388,6 +3442,186 @@ impl BackendOps for CudaBackendOps {
         // execution-design.md` の契約どおり。同一ストリーム FIFO により
         // 次層カーネルは前層の出力完了後に実行される）。
         Ok(c_dev_buf)
+    }
+
+    /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
+    ///
+    /// 手順は [`Self::linear_forward_device`] に揃える: デバイス一致検査 → 共通検証
+    /// （`tensor-core::validate_paged_kv_append`。FFI より前）→ 世代検査対象
+    /// （`k_new`・`v_new`・`k_pool`・`v_pool`）の収集 → **自明な早期 return（0 行）でも
+    /// `begin_driver_call` で poison と世代を検査**（PR #1064 の先例）→ ハンドル取り出しと
+    /// 長さ検査 → `with_driver_call` 内で起動。同期しない（同期点は呼び出し元の `download`）。
+    /// `_tracked` 版は上書きしない（既定の委譲。同一ストリームの FIFO と ordinal 単位 poison で
+    /// 表す。`docs/inference-chain-single-sync-design.md` 決定 5 と同型）。
+    fn paged_kv_append(
+        &self,
+        k_new: &DeviceBuffer<f32>,
+        v_new: &DeviceBuffer<f32>,
+        k_pool: &mut DeviceBuffer<f32>,
+        v_pool: &mut DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+    ) -> Result<(), BackendError> {
+        let here = Device::Cuda(self.ordinal);
+        if [
+            k_new.device(),
+            v_new.device(),
+            k_pool.device(),
+            v_pool.device(),
+        ]
+        .iter()
+        .any(|d| *d != here)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let rows = validate_paged_kv_append(
+            k_new.numel(),
+            v_new.numel(),
+            k_pool.numel(),
+            v_pool.numel(),
+            slot_mapping,
+            layout,
+        )?;
+        let resident_generations = [
+            k_new.generation(),
+            v_new.generation(),
+            k_pool.generation(),
+            v_pool.generation(),
+        ];
+        if rows == 0 {
+            // 早期 return でも poison 状態・世代は fail-closed に検査する。
+            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            return Ok(());
+        }
+
+        let kn_len = k_new.numel();
+        let vn_len = v_new.numel();
+        let kp_len = k_pool.numel();
+        let vp_len = v_pool.numel();
+        let kn_storage = cuda_storage_ref(k_new, kn_len, "paged_kv_append: k_new")?;
+        let vn_storage = cuda_storage_ref(v_new, vn_len, "paged_kv_append: v_new")?;
+        let kp_storage = cuda_storage_mut(k_pool, kp_len, "paged_kv_append: k_pool")?;
+        let vp_storage = cuda_storage_mut(v_pool, vp_len, "paged_kv_append: v_pool")?;
+        let kn_arg = kn_storage.as_arg();
+        let vn_arg = vn_storage.as_arg();
+        let mut kp_arg = kp_storage.as_arg_mut();
+        let mut vp_arg = vp_storage.as_arg_mut();
+
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        // キャッシュ構築（NVRTC コンパイル・モジュールロード）も観測対象にする。
+        let paged = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_paged_kv(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                paged.launch_append(
+                    &kn_arg,
+                    &vn_arg,
+                    &mut kp_arg,
+                    &mut vp_arg,
+                    slot_mapping,
+                    layout,
+                )
+            },
+        )
+    }
+
+    /// ページ化 KV プールに対する attention（K-3。イシュー #3111）。
+    ///
+    /// 手順・出力の確保元（`static_cuda_memory`）・poison／世代検査への参加は
+    /// [`Self::paged_kv_append`]・[`Self::linear_forward_device`] と同じ。縮約順序は
+    /// `kernels_paged_kv.rs` のモジュール doc（`j` 軸・`Dh` 軸とも単一の連続ループ）。
+    fn paged_attention_forward(
+        &self,
+        q: &DeviceBuffer<f32>,
+        k_pool: &DeviceBuffer<f32>,
+        v_pool: &DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let here = Device::Cuda(self.ordinal);
+        if [q.device(), k_pool.device(), v_pool.device()]
+            .iter()
+            .any(|d| *d != here)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = validate_paged_attention(
+            q.numel(),
+            k_pool.numel(),
+            v_pool.numel(),
+            block_tables,
+            seq_lens,
+            args,
+        )?;
+        let resident_generations = [q.generation(), k_pool.generation(), v_pool.generation()];
+        let out_shape = [args.batch, args.l_new, args.layout.embed_dim];
+
+        if plan.query_rows == 0 || plan.out_numel == 0 {
+            // 早期 return でも poison 状態・世代は fail-closed に検査する。
+            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            let device = self.with_driver_call(
+                &resident_generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || self.device_handle_raw(),
+            )?;
+            let mem = static_cuda_memory(self.ordinal, &device)?;
+            return mem.alloc_zeroed(&out_shape);
+        }
+
+        let q_storage = cuda_storage_ref(q, q.numel(), "paged_attention_forward: q")?;
+        let kp_storage =
+            cuda_storage_ref(k_pool, k_pool.numel(), "paged_attention_forward: k_pool")?;
+        let vp_storage =
+            cuda_storage_ref(v_pool, v_pool.numel(), "paged_attention_forward: v_pool")?;
+        let q_arg = q_storage.as_arg();
+        let kp_arg = kp_storage.as_arg();
+        let vp_arg = vp_storage.as_arg();
+
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        // 出力は呼び出し元へ escape するため `static_cuda_memory` で確保する。
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        let mut out_buf = mem.alloc_zeroed(&out_shape)?;
+        let out_len = out_buf.numel();
+        let out_storage = cuda_storage_mut(&mut out_buf, out_len, "paged_attention_forward: out")?;
+        let mut out_arg = out_storage.as_arg_mut();
+
+        let paged = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_paged_kv(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                paged.launch_attention(
+                    &q_arg,
+                    &kp_arg,
+                    &vp_arg,
+                    block_tables,
+                    seq_lens,
+                    &mut out_arg,
+                    args,
+                    &plan,
+                )
+            },
+        )?;
+        // `download` しない: 同期点は呼び出し元の `download` へ集約される。
+        Ok(out_buf)
     }
 
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
@@ -7797,6 +8031,144 @@ mod tests {
             "poison 済み ordinal では release_cached_device_memory は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
         );
     }
+    // ---------------------------------------------------------------
+    // `CudaBackendOps::paged_kv_append`／`paged_attention_forward`（イシュー
+    // #3111）の CI 実行可能な回帰テスト（実機不要）。`linear_forward_device` の
+    // 同種テスト（poison／stale generation／DeviceMismatch）と同じ手法・同じ
+    // 専用 ordinal 払い出し方針。自明な早期 return（0 行・batch 0）でも poison・
+    // 世代検査に参加すること（PR #1064 の先例）と、FFI より前の検証拒否を確認する。
+    // ---------------------------------------------------------------
+
+    fn paged_layout() -> PagedKvLayout {
+        PagedKvLayout::new(1, 1, 1).expect("layout")
+    }
+
+    fn empty_buf(ordinal: usize, shape: Vec<usize>, generation: u64) -> DeviceBuffer<f32> {
+        DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            shape,
+            Box::new(EmptyHandle),
+            generation,
+        )
+    }
+
+    #[test]
+    fn paged_kv_append_rejects_on_poisoned_ordinal_even_via_zero_row_early_return() {
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+        let cuda = CudaBackendOps::new(ordinal);
+        let k = empty_buf(ordinal, vec![0], 0);
+        let v = empty_buf(ordinal, vec![0], 0);
+        let mut kp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let mut vp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let result = cuda.paged_kv_append(&k, &v, &mut kp, &mut vp, &[], &paged_layout());
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では 0 行の早期 return も fail-closed に拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn paged_kv_append_rejects_stale_generation_of_pool_even_via_zero_row_early_return() {
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let k = empty_buf(ordinal, vec![0], 0);
+        let v = empty_buf(ordinal, vec![0], 0);
+        let mut kp = empty_buf(ordinal, vec![1, 1, 1], 1);
+        let mut vp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let result = cuda.paged_kv_append(&k, &v, &mut kp, &mut vp, &[], &paged_layout());
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代のプールは 0 行の早期 return でも StaleDeviceGeneration で拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn paged_kv_append_rejects_device_mismatch_and_invalid_arguments_before_ffi() {
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let k = empty_buf(ordinal, vec![1], 0);
+        let v = empty_buf(ordinal, vec![1], 0);
+        let mut kp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let mut vp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        // デバイス不一致（CPU）。
+        let cpu_k = DeviceBuffer::new(Device::Cpu, vec![1], Box::new(EmptyHandle));
+        let r = cuda.paged_kv_append(&cpu_k, &v, &mut kp, &mut vp, &[0], &paged_layout());
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)), "{r:?}");
+        // 範囲外スロット・重複スロットは検証関数が FFI より前に拒否する。
+        let r = cuda.paged_kv_append(&k, &v, &mut kp, &mut vp, &[1], &paged_layout());
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+        let r = cuda.paged_kv_append(&k, &v, &mut kp, &mut vp, &[u32::MAX], &paged_layout());
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+    }
+
+    fn paged_args(batch: usize) -> PagedAttentionArgs {
+        PagedAttentionArgs::new(paged_layout(), batch, 1, 1, 1, 1.0).expect("args")
+    }
+
+    #[test]
+    fn paged_attention_forward_rejects_on_poisoned_ordinal_even_via_empty_batch_early_return() {
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+        let cuda = CudaBackendOps::new(ordinal);
+        let q = empty_buf(ordinal, vec![0, 1, 1], 0);
+        let kp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let vp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let result = cuda.paged_attention_forward(&q, &kp, &vp, &[], &[], &paged_args(0));
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では batch 0 の早期 return も fail-closed に拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn paged_attention_forward_rejects_stale_generation_of_q_even_via_empty_batch_early_return() {
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let q = empty_buf(ordinal, vec![0, 1, 1], 1);
+        let kp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let vp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let result = cuda.paged_attention_forward(&q, &kp, &vp, &[], &[], &paged_args(0));
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代の q は batch 0 の早期 return でも StaleDeviceGeneration で拒否されるはず: {result:?}"
+        );
+    }
+
+    #[test]
+    fn paged_attention_forward_rejects_device_mismatch_and_invalid_arguments_before_ffi() {
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let q = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let kp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let vp = empty_buf(ordinal, vec![1, 1, 1], 0);
+        let cpu_q = DeviceBuffer::new(Device::Cpu, vec![1, 1, 1], Box::new(EmptyHandle));
+        let r = cuda.paged_attention_forward(&cpu_q, &kp, &vp, &[0], &[1], &paged_args(1));
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)), "{r:?}");
+        // 番兵・範囲外ブロック ID・範囲外 seq_len は検証関数が FFI より前に拒否する。
+        for (tables, lens) in [([u32::MAX], [1u32]), ([1], [1]), ([0], [2])] {
+            let r = cuda.paged_attention_forward(&q, &kp, &vp, &tables, &lens, &paged_args(1));
+            assert!(
+                matches!(r, Err(BackendError::InvalidArgument(_))),
+                "{tables:?} {lens:?}: {r:?}"
+            );
+        }
+    }
+
     // ---------------------------------------------------------------
     // `CudaBackendOps::linear_forward_device`（イシュー #1216）の CI 実行
     // 可能な回帰テスト（実機不要）。`gemm_resident_rhs` の同種テスト

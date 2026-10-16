@@ -265,6 +265,7 @@ mod norm;
 mod normalization;
 mod padding;
 mod paged_kv;
+mod paged_kv_device;
 mod pixel_shuffle;
 mod pooling;
 mod rnn;
@@ -321,6 +322,7 @@ pub use padding::ZeroPad2d;
 pub use paged_kv::{
     DEFAULT_BLOCK_SIZE, PagedKvCacheConfig, PagedKvCacheReference, paged_attention_reference,
 };
+pub use paged_kv_device::PagedKvCache;
 pub use pixel_shuffle::{PixelShuffle, PixelUnshuffle};
 pub(crate) use pixel_shuffle::{pixel_shuffle_forward, pixel_unshuffle_forward};
 pub use pooling::{

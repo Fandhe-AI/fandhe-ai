@@ -198,6 +198,7 @@ pub mod memory;
 mod mse;
 mod nll;
 mod ops;
+mod paged_kv;
 pub mod parity;
 pub mod reduction;
 pub mod rmsnorm;
