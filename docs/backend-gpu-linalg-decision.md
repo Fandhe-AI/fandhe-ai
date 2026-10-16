@@ -109,6 +109,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 - **カーネル起動（新規 `unsafe` 3 ブロック）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の
   `Unsupported`。承認依頼と残作業は `docs/perf/logs/cuda-linalg-chol-qr-eigh-2675/README.md`。実機は未実測。
 - 公開形は §7 の推奨を参照（本 issue では facade 公開しない）。
+- **Stage B（#3136）**: D-C 承認（親 #3133）と `docs/gpu-linalg-kernel-launch-unsafe-audit.md` の CU-3〜CU-5 に基づき、3 カーネルの起動（新規 `unsafe` 3 ブロック。`CudaLinalgFactor::run_{cholesky,qr,eigh}_f32`）と `ops.rs` の結線を実装した。`status`／`refl_valid` は sentinel 初期化のうえ必ず読み戻し、非正定値と eigh 非収束は `InvalidArgument` へ写像する。ゲート OFF 既定の挙動は不変。実機での一致確認は #3138（未実施）。
 
 ### #2676（Metal LU 系・cholesky・QR）の実施内容
 
