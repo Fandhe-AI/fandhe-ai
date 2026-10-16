@@ -57,6 +57,7 @@ use fandhe_ai_tensor_core::{
     Tensor,
 };
 
+use super::attention::{MultiheadAttention, project};
 use super::paged_kv::{BlockTable, PagedKvCacheConfig, invalid};
 use crate::error::AutodiffError;
 use crate::tape::Tape;
@@ -353,6 +354,63 @@ impl PagedKvCache {
     pub fn clear(&mut self) {
         self.table.reset();
     }
+}
+
+/// `StatefulAttention::forward_paged`（K-3 の Tape 入口。イシュー #3112）の実体。
+///
+/// 呼び出し元は `attention.rs` の 1 行委譲のみ。q／k／v 射影 → `PagedKvCache::append`
+/// → `PagedKvCache::attention` → `out_proj` の順で、入出力は非追跡の `Tensor`
+/// （推論専用。`requires_grad` な `Var` は構造的に受けない。設計 §2・§6）。
+///
+/// 原子性（設計 §13 D7）: `Err` のとき `cache` の論理状態は呼び出し前と同じ。追記成功後に
+/// 後段が失敗したら `rewind_to(s_prev)` で戻す（`rewind_to` 自体の失敗は元のエラーを
+/// 優先して返す）。poison は戻さない（回復は再構築）。
+/// mask はカーネルの単一規則 `j <= s_prev + i`（K-1 の各経路と同値）。
+pub(crate) fn paged_self_attention_forward(
+    mha: &MultiheadAttention,
+    tape: &Tape,
+    x_new: &Tensor<f32>,
+    cache: &mut PagedKvCache,
+) -> Result<Tensor<f32>, AutodiffError> {
+    let e = mha.embed_dim();
+    if !mha.batch_first() || mha.kdim() != e || mha.vdim() != e {
+        return Err(invalid(
+            "forward_paged: batch_first=false・kdim/vdim != embed_dim は対象外（self-attention 限定）",
+        ));
+    }
+    let shape = x_new.shape().to_vec();
+    if shape.len() != 3 {
+        return Err(invalid(format!(
+            "forward_paged: x_new は rank 3 が必要（実際: {}）",
+            shape.len()
+        )));
+    }
+    let (b, l) = (shape[0], shape[1]);
+    if shape[2] != e {
+        return Err(invalid(format!(
+            "forward_paged: x_new の最終軸 {} が embed_dim {e} と一致しない",
+            shape[2]
+        )));
+    }
+    let vars = mha.bind(tape);
+    let x = tape.var_no_grad(x_new);
+    let q = project(&x, &vars.q, b, l, e, e, None)?.to_tensor();
+    let k = project(&x, &vars.k, b, l, e, e, None)?.to_tensor();
+    let v = project(&x, &vars.v, b, l, e, e, None)?.to_tensor();
+    let s_prev = cache.seq_len();
+    cache.append(tape, &k, &v)?;
+    let scale = 1.0 / (mha.head_dim() as f32).sqrt();
+    let result = cache
+        .attention(tape, &q, mha.num_heads(), scale)
+        .and_then(|attn| {
+            let a = tape.var_no_grad(&attn);
+            project(&a, &vars.out, b, l, e, e, None).map(|o| o.to_tensor())
+        });
+    if result.is_err() {
+        // 元のエラーを優先する（巻き戻しの失敗は握りつぶす。論理状態は append 直後のまま）。
+        let _ = cache.rewind_to(s_prev);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -700,5 +758,31 @@ mod tests {
         if let Ok(cfg) = cfg {
             assert!(PagedKvCache::new(&t, cfg).is_err());
         }
+    }
+
+    /// `forward_paged` の入力検証は `cache` に触れる前に行われ、拒否時に論理状態は不変。
+    /// 射影（Mock は gemm 非対応）の失敗も追記前なので `cache` は変わらない。
+    #[test]
+    fn forward_paged_rejections_leave_cache_unchanged() {
+        use crate::nn::attention::{MultiheadAttention, MultiheadAttentionConfig};
+        let (t, log) = tape(Mode::Ok);
+        let mut c = PagedKvCache::new(&t, cfg()).unwrap();
+        let mha = MultiheadAttention::from_config(&MultiheadAttentionConfig::new(4, 2), 0).unwrap();
+        // rank 不一致・E 不一致
+        let rank2 = Tensor::new(vec![0.0f32; 4], &[1, 4]).unwrap();
+        assert!(paged_self_attention_forward(&mha, &t, &rank2, &mut c).is_err());
+        let bad_e = Tensor::new(vec![0.0f32; 6], &[1, 1, 6]).unwrap();
+        assert!(paged_self_attention_forward(&mha, &t, &bad_e, &mut c).is_err());
+        // 非既定 config（kdim != E）は `StatefulAttention::new` 経由でも拒否される。
+        let odd =
+            MultiheadAttention::from_config(&MultiheadAttentionConfig::new(4, 2).with_kdim(6), 0)
+                .unwrap();
+        assert!(paged_self_attention_forward(&odd, &t, &x(1, 1), &mut c).is_err());
+        // 射影が Unsupported（Mock の gemm）でも追記前なので不変・poison しない。
+        assert!(paged_self_attention_forward(&mha, &t, &x(1, 1), &mut c).is_err());
+        assert_eq!(c.seq_len(), 0);
+        assert_eq!(c.batch(), None);
+        assert!(!c.is_poisoned());
+        assert!(log.lock().unwrap().appends.is_empty());
     }
 }

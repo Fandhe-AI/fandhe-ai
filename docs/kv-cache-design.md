@@ -259,6 +259,7 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
    `StatefulAttention` 相当の 2 `pub fn`・`api_surface.rs`）: ~~未取得~~ →
    **2026-10-07 にリポジトリ所有者本人が承認済み**（§11.6 の P1〜P4 を推奨どおり。§14 参照）
 3. K-3（デバイス常駐 KV。段階 0）: **未取得**（設計の推奨形は `docs/device-resident-kv-paged-attention-design.md`。承認の確認事項は同 doc §9）
+   → **承認済み（2026-10-16。https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6207013704）。#3110〜#3112 で実装・公開**（同 doc §11〜§13）
 4. `sdpa_compose` 置換の別 issue 起票: **未取得**
 
 これまでの類似イシュー（#2065／#2068）が「ツリーを `autoMerge=true`

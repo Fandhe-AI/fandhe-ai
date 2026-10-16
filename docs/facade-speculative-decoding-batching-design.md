@@ -305,6 +305,7 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 ### 17.7 保留を続ける論点
 
 - （#3109 追記）論点 7 の設計は `docs/device-resident-kv-paged-attention-design.md` に推奨形として記録済み。承認の確認は同 doc §9 の所有者確認表による。以下の保留状態は変えない。
+- （#3112 追記）論点 7 は #3018 の承認（https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6207013704）を受け、#3112 で paged attention の入口（`Tape::new_paged_kv_cache`・`Tape::paged_attention_forward`・`PagedKvCache`・`PagedKvCacheConfig`）を facade へ公開した。`generate`／`BatchScheduler` への結線は未実施（`docs/device-resident-kv-paged-attention-design.md` §13）。
 - 追記（#3100）: 論点 1 は選択肢 B で確定（§20）。以下の列挙のうち 1 は解消済み。
 - → #3104 追記: 論点 5 は案 A で確定（§21）。以下の列挙のうち 5 も解消済み。
 - 論点 1（サンプリング版の判定契約）・2（greedy の token 列一致の仮説が破れた場合）・3（内部状態保持型への到達経路）・5（padding mask・可変長キャッシュ・テンソル単位のバッチ化）・7（paged attention）・8（スケジューラでの内部状態保持型の扱い）は保留のまま。

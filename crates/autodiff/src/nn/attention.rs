@@ -1947,6 +1947,25 @@ impl StatefulAttention {
             .forward_with_cache(x_new, x_new, x_new, cache)
     }
 
+    /// デバイス常駐ページ化キャッシュ（K-3。[`super::PagedKvCache`]）を使う self-attention
+    /// 入口（イシュー #3112）。入力 `x_new`（`[B, L_new, E]`）と出力（`out_proj` 適用後
+    /// `[B, L_new, E]`）はともに非追跡の `Tensor`（**推論専用**。勾配が要る用途は K-1）。
+    ///
+    /// 内部キャッシュ（`self.cache`）には触れない（`&self`）。mask は `j <= s_prev + i`
+    /// （K-1 の prefill causal・decode mask なし・offset causal と同値）。`Err` のとき
+    /// `cache` の論理状態は呼び出し前と同じ（追記後の失敗は巻き戻す。poison は戻さない）。
+    /// ホストとの同期 1 回はキャッシュ操作（append＋attention）に限る。q/k/v・`out_proj`
+    /// 射影は `tape` 上の通常の演算。バックエンドが `Unsupported` を返しても K-1 へ暗黙
+    /// フォールバックしない。非既定 config・rank／`E` 不一致は `InvalidArgument`。
+    pub fn forward_paged(
+        &self,
+        tape: &Tape,
+        x_new: &Tensor<f32>,
+        cache: &mut super::PagedKvCache,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        super::paged_kv_device::paged_self_attention_forward(&self.mha, tape, x_new, cache)
+    }
+
     /// キャッシュを空に戻す（[`KvCache::clear`] への委譲）。
     pub fn reset_cache(&mut self) {
         self.cache.clear();
