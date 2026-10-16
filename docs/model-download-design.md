@@ -946,14 +946,14 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 ### 20.1 `download.json`
 
 - 場所は `<cache_dir>/<name>/<version>/download.json`。`serde_json::Value` から手で組み立て・検証する（`serde` の derive は使わない）。実装は `crates/facade/src/model/cache.rs`
-- 5 キーちょうど（未知キー・不足は拒否）: `url`（検証済み https URL・フラグメント除去済み）・`etag`（文字列または `null`）・`content_length`（u64）・`sha256`（64 桁 16 進）・`fetched_at`（UNIX エポック秒 u64）
+- 6 キーちょうど（未知キー・不足は拒否）: `url`（検証済み https URL・フラグメント除去済み）・`final_url`（リダイレクト追従後に `200` を返した最終取得 URL。`etag` はこの URL のリソースの検証子。検証済み https URL）・`etag`（文字列または `null`）・`content_length`（u64）・`sha256`（64 桁 16 進）・`fetched_at`（UNIX エポック秒 u64）
 - 読み取り上限 64 KiB。不在・I/O エラー・スキーマ違反・シンボリックリンク・非通常ファイルはすべて「キャッシュなし」として無条件 GET へフォールバックする（要件 1。`ModelError::CacheMetadata` は読み出し側では呼び出し側へ届かず、書き込もうとしたメタデータが不正な場合にだけ返る）
 - `etag` は印字可能 ASCII（0x20〜0x7E）・長さ 1〜1024 のみ。CR／LF／NUL・制御文字・非 ASCII は拒否する。保存時・読み出し時・送信直前（`transport.rs`）の 3 か所で同じ `valid_etag` を使う（ヘッダインジェクション対策）。応答の `ETag` が不正なら保存せず `null` を書く（古い etag を残さない）
 - 保存値は破損・部分改変の検出用であり、真正性の根拠ではない（§6 A08・`model-distribution-design.md` §6）。`url` はクエリに署名トークンを含みうるため、0600 のファイルにだけ保存し、進捗・エラーには流さない（A09）
 
 ### 20.2 条件付き GET と 304 再検証
 
-- 条件付き GET を送るのは、`download.json` が読めて、`url` が要求 URL と一致し、`etag` があり、pin 指定時は保存 `sha256` が pin と一致するときだけ（`model.rs::download_via` の参照段）。`If-None-Match` は全リダイレクトホップに付ける
+- 条件付き GET を送るのは、`download.json` が読めて、`url` が要求 URL と一致し、`etag` があり、pin 指定時は保存 `sha256` が pin と一致するときだけ（`model.rs::download_via` の参照段）。`If-None-Match` は**保存済み `final_url` と一致するホップにだけ**付け、そのホップの `304` だけを受理する（途中ホップや、リダイレクト先が A→B から A→C へ変わった場合は検証子を送らず無条件取得。別リソースが同じ ETag〈例 `"v1"`〉を返しても `304` で古いモデルを再利用しない。ローカル SHA の再計算ではこの取り違えを検出できないため。PR #3388 コードレビュー指摘）
 - `304` は条件付きで送ったときだけ受理する。無条件 GET や、再検証失敗後にやり直した GET への `304` は `Http{304}`（サーバの異常応答を再利用のシグナルにしない）
 - 再検証は既存 `model.safetensors` を `O_NOFOLLOW`・通常ファイル確認・サイズ上限付きで開き、SHA-256 をストリーミングで計算し直す。比較対象は pin があれば pin、なければ保存値。一致したときだけ `fetched_at` のみを更新して `download.json` を atomic に置き換える。一致しない・ファイルが無い・リンクなら、無条件 GET で全量を取り直す
 - 参照段は `<name>/<version>` を作成しない（`open_root_existing`／`open_existing_dir`）。ヘッダ検査で失敗する取得は従来どおりディレクトリを作らない

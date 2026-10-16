@@ -112,25 +112,33 @@ fn invalid_url(reason: &'static str) -> ModelError {
 
 /// 1 回のリダイレクト追従の結果。
 enum Fetched {
-    /// `200`。ボディを受信する。
-    Full(RawResponse),
+    /// `200`。ボディを受信する。第 2 要素は `200` を返した最終取得 URL。
+    Full(RawResponse, String),
     /// 条件付き GET への `304`。
     NotModified,
 }
 
-/// リダイレクトを追従して最終応答を得る。`etag` が `Some` のときは全ホップに `If-None-Match` を
-/// 送り、`304` を受理する（条件付きで送っていない `304` は異常として `Http{304}`）。
+/// リダイレクトを追従して最終応答を得る。`cond = (etag, final_url)` のときは、リクエスト先が
+/// 保存済みの最終 URL と一致するホップにだけ `If-None-Match` を送り、そのホップの `304` だけを
+/// 受理する（条件付きで送っていない `304` は異常として `Http{304}`）。リダイレクト先が保存時と
+/// 変わっていれば検証子は送らず無条件取得になる（別リソースの同一 ETag の取り違え防止）。
 fn fetch(
     transport: &mut dyn Transport,
     job: &Job<'_>,
-    etag: Option<&str>,
+    cond: Option<(&str, &str)>,
 ) -> Result<Fetched, ModelError> {
     let mut current = job.url.clone();
     let mut hops: u32 = 0;
     loop {
+        let etag = cond
+            .filter(|(_, fin)| *fin == current.as_str())
+            .map(|(e, _)| e);
         let r = transport.get(&current, job.deadline, etag)?;
         match r.status {
-            200 => return Ok(Fetched::Full(r)),
+            200 => {
+                let fin = current.as_str().to_string();
+                return Ok(Fetched::Full(r, fin));
+            }
             304 if etag.is_some() => return Ok(Fetched::NotModified),
             301 | 302 | 303 | 307 | 308 => {
                 if hops >= job.max_redirects {
@@ -184,8 +192,9 @@ pub(super) fn run(
         .cache
         .as_ref()
         .filter(|c| c.etag.as_deref().is_some_and(cache::valid_etag));
-    let resp = match fetch(transport, &job, cached.and_then(|c| c.etag.as_deref()))? {
-        Fetched::Full(r) => r,
+    let cond = cached.and_then(|c| c.etag.as_deref().map(|e| (e, c.final_url.as_str())));
+    let (resp, final_url) = match fetch(transport, &job, cond)? {
+        Fetched::Full(r, f) => (r, f),
         Fetched::NotModified => {
             // `NotModified` は `cached` が `Some` のときだけ返る。
             if let Some(c) = cached
@@ -194,7 +203,7 @@ pub(super) fn run(
                 return Ok(());
             }
             match fetch(transport, &job, None)? {
-                Fetched::Full(r) => r,
+                Fetched::Full(r, f) => (r, f),
                 Fetched::NotModified => return Err(ModelError::Http { status: 304 }),
             }
         }
@@ -283,6 +292,7 @@ pub(super) fn run(
     // 公開されており、古い JSON は次回の `304` 再検証で SHA 不一致となり全量取り直しになる。
     let meta = CacheMeta {
         url: job.url.as_str().to_string(),
+        final_url,
         etag: resp.etag.filter(|e| cache::valid_etag(e)),
         content_length: received,
         sha256: actual,
@@ -450,6 +460,7 @@ mod tests {
     fn meta_for(data: &[u8], etag: &str, fetched_at: u64) -> CacheMeta {
         CacheMeta {
             url: "https://a.example/m".into(),
+            final_url: "https://a.example/m".into(),
             etag: Some(etag.into()),
             content_length: data.len() as u64,
             sha256: sha(data),
@@ -985,20 +996,47 @@ mod tests {
     }
 
     #[test]
-    fn redirect_hops_carry_if_none_match() {
+    fn if_none_match_is_sent_only_to_the_stored_final_url() {
         let env = Env::new("redir304");
         let data = b"abc";
-        let m = first_fetch(&env, data, "\"e1\"", 1);
+        // A -> B で取得し、最終 URL（B）と ETag を保存する。
         let mut mock = Mock::new(vec![
-            redirect(302, Some("https://cdn.example/x")),
+            redirect(302, Some("https://cdn.example/b")),
+            etag_ok(data, "\"e1\""),
+        ]);
+        exec_at(&env, &mut mock, job(1 << 20, 5, None), None, 1).unwrap();
+        let m = env.meta().unwrap();
+        assert_eq!(m.final_url, "https://cdn.example/b");
+        // 次回も A -> B: A（最終 URL ではない）には検証子を付けず、B にだけ付けて 304 を受理する。
+        let mut mock = Mock::new(vec![
+            redirect(302, Some("https://cdn.example/b")),
             not_modified(),
         ]);
         exec_at(&env, &mut mock, job_cached(None, m), None, 9).unwrap();
-        assert_eq!(
-            mock.conditional,
-            vec![Some("\"e1\"".to_string()), Some("\"e1\"".to_string())]
-        );
+        assert_eq!(mock.conditional, vec![None, Some("\"e1\"".to_string())]);
         assert_eq!(env.meta().unwrap().fetched_at, 9);
+    }
+
+    #[test]
+    fn redirect_target_change_with_same_etag_is_not_reused() {
+        let env = Env::new("redirchg");
+        let old = b"old model";
+        let mut mock = Mock::new(vec![
+            redirect(302, Some("https://cdn.example/b")),
+            etag_ok(old, "\"v1\""),
+        ]);
+        exec_at(&env, &mut mock, job(1 << 20, 5, None), None, 1).unwrap();
+        let m = env.meta().unwrap();
+        // A -> C に変わり、C は別内容に同じ ETag を返す。検証子は送られず全量を取り直す。
+        let new = b"new model!";
+        let mut mock = Mock::new(vec![
+            redirect(302, Some("https://cdn.example/c")),
+            etag_ok(new, "\"v1\""),
+        ]);
+        exec_at(&env, &mut mock, job_cached(None, m), None, 5).unwrap();
+        assert_eq!(mock.conditional, vec![None, None]);
+        assert_eq!(std::fs::read(env.leaf()).unwrap(), new);
+        assert_eq!(env.meta().unwrap().final_url, "https://cdn.example/c");
     }
 
     #[test]

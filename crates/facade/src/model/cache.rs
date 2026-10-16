@@ -2,7 +2,7 @@
 //!
 //! 呼び出し元は `model.rs` の `download_via`（キャッシュ参照段）と `download.rs` の `run`
 //! （`304` 再検証・取得後のメタデータ公開）。`<cache_dir>/<name>/<version>/download.json` に
-//! 取得メタデータ（`url`・`etag`・`content_length`・`sha256`・`fetched_at`）を置き、次回の
+//! 取得メタデータ（`url`・`final_url`・`etag`・`content_length`・`sha256`・`fetched_at`）を置き、次回の
 //! 条件付き GET（`If-None-Match`）と `304` 受信時の再検証に使う（設計 §5）。
 //!
 //! 保存値は**破損・部分改変の検出用**にすぎず真正性の根拠ではない（真正性は利用者が指定する
@@ -37,6 +37,10 @@ const CHUNK: usize = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CacheMeta {
     pub(super) url: String,
+    /// リダイレクト追従後に `200` を返した最終取得 URL。`etag` はこの URL のリソースの検証子で
+    /// あり、条件付き GET はこの URL へのリクエストにだけ付ける（リダイレクト先が変わったとき
+    /// 別リソースの同一 ETag による `304` で古いモデルを再利用しないため）。
+    pub(super) final_url: String,
     pub(super) etag: Option<String>,
     pub(super) content_length: u64,
     pub(super) sha256: Sha256Pin,
@@ -59,6 +63,9 @@ fn check(meta: &CacheMeta) -> Result<(), ModelError> {
     if meta.url.len() > MAX_URL_LEN || validate_https_url(&meta.url).is_err() {
         return Err(bad("url が不正です"));
     }
+    if meta.final_url.len() > MAX_URL_LEN || validate_https_url(&meta.final_url).is_err() {
+        return Err(bad("final_url が不正です"));
+    }
     if let Some(e) = &meta.etag
         && !valid_etag(e)
     {
@@ -68,13 +75,20 @@ fn check(meta: &CacheMeta) -> Result<(), ModelError> {
 }
 
 /// `download.json` のバイト列をスキーマ検証してパースする。最上位はオブジェクトで、キーは
-/// ちょうど 5 つ（未知キー・不足は拒否）。値の型・桁・`url`・`etag` も検証する。
+/// ちょうど 6 つ（未知キー・不足は拒否）。値の型・桁・`url`・`final_url`・`etag` も検証する。
 pub(super) fn parse(bytes: &[u8]) -> Result<CacheMeta, ModelError> {
     let v: Value = serde_json::from_slice(bytes).map_err(|_| bad("JSON として解釈できません"))?;
     let Value::Object(obj) = v else {
         return Err(bad("最上位がオブジェクトではありません"));
     };
-    let known = ["url", "etag", "content_length", "sha256", "fetched_at"];
+    let known = [
+        "url",
+        "final_url",
+        "etag",
+        "content_length",
+        "sha256",
+        "fetched_at",
+    ];
     if obj.len() != known.len() || obj.keys().any(|k| !known.contains(&k.as_str())) {
         return Err(bad("キー集合が不正です"));
     }
@@ -82,6 +96,10 @@ pub(super) fn parse(bytes: &[u8]) -> Result<CacheMeta, ModelError> {
     let url = get("url")?
         .as_str()
         .ok_or_else(|| bad("url の型が不正です"))?
+        .to_string();
+    let final_url = get("final_url")?
+        .as_str()
+        .ok_or_else(|| bad("final_url の型が不正です"))?
         .to_string();
     let etag = match get("etag")? {
         Value::Null => None,
@@ -102,6 +120,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<CacheMeta, ModelError> {
         .ok_or_else(|| bad("fetched_at の型が不正です"))?;
     let meta = CacheMeta {
         url,
+        final_url,
         etag,
         content_length,
         sha256,
@@ -111,10 +130,11 @@ pub(super) fn parse(bytes: &[u8]) -> Result<CacheMeta, ModelError> {
     Ok(meta)
 }
 
-/// `download.json` のバイト列を作る（5 キー固定順・`sha256` は小文字 16 進）。
+/// `download.json` のバイト列を作る（6 キー固定順・`sha256` は小文字 16 進）。
 pub(super) fn serialize(meta: &CacheMeta) -> Vec<u8> {
     let mut m = Map::new();
     m.insert("url".into(), json!(meta.url));
+    m.insert("final_url".into(), json!(meta.final_url));
     m.insert("etag".into(), json!(meta.etag));
     m.insert("content_length".into(), json!(meta.content_length));
     m.insert("sha256".into(), json!(meta.sha256.to_string()));
@@ -200,6 +220,7 @@ mod tests {
     fn meta() -> CacheMeta {
         CacheMeta {
             url: "https://a.example/m?x=1".into(),
+            final_url: "https://cdn.example/m?x=1".into(),
             etag: Some("\"abc\"".into()),
             content_length: 12,
             sha256: Sha256Pin([7; 32]),
@@ -231,6 +252,8 @@ mod tests {
             good.replace("\"content_length\":12", "\"content_length\":\"12\""),
             good.replace("\"content_length\":12", "\"content_length\":-1"),
             good.replace("https://a.example", "http://a.example"),
+            good.replace("https://cdn.example", "http://cdn.example"),
+            good.replace("\"final_url\"", "\"final_urk\""),
             good.replace("https://a.example", "https://u:p@a.example"),
             good.replace("\"fetched_at\":1700000000", "\"fetched_at\":1.5"),
         ];

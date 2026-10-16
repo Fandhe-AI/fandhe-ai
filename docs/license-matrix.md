@@ -23,7 +23,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | 相互運用 | `safetensors` | `=0.7.0` | Apache-2.0 | 可 | c, e（`docs/spec/01-brainstorm.md:183`）。ワイヤフォーマット処理のみに使用（テンソルへのマッピングは自作）。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | 相互運用 | `prost` | `=0.14.4` | Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:184`）。protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | シリアライズ | `serde` | `=1.0.229`（`derive`） | MIT OR Apache-2.0 | 可 | a。構造化データのシリアライズ |
-| シリアライズ | `serde_json` | `=1.0.151` | MIT OR Apache-2.0 | 可 | a |
+| シリアライズ | `serde_json` | `=1.0.151` | MIT OR Apache-2.0 | 可 | a。`facade` では通常依存（`[dependencies]`。ダウンロードキャッシュ `download.json` の読み書き。イシュー #3126・`crates/facade/src/model/cache.rs`）としても使用する（従来は `facade` の `dev-dependencies` と `onnx-interop` 等）。バージョン・ライセンス・`Cargo.lock` は不変で、既承認の第 5 区分内の使用箇所追加にとどまる（通常依存への昇格に対する所有者承認の記録は未取得。PR #3388 で確認事項として明示） |
 | CPU 並列 | `rayon` | `=1.12.0` | MIT OR Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:185`）。PoC-v2-1 で naive/blocked 比 約 6〜8.5 倍改善を実測 |
 | 数値型 | `half` | `=2.7.1` | MIT OR Apache-2.0 | 可 | a |
 | ベンチ | `criterion` | `=0.8.2` | Apache-2.0 OR MIT | 可 | c。`dev-dependencies` 限定（deps-policy.md） |
