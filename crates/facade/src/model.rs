@@ -307,6 +307,18 @@ fn proc_fd_path(dir: &File) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
 }
 
+/// `/proc/self/fd` が使えるか（ディレクトリとして開けるか）を確認する。
+/// `save` がルートを作る前に呼び、`/proc` 未マウントの環境では副作用（ルート・
+/// 親ディレクトリの作成）なしで `Err` を返すための fail-closed 前提検査
+/// （設計記録 §16.9。codex-review 指摘・PR #3377 P2）。
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn ensure_proc_fd_usable(proc_fd_dir: &Path) -> std::io::Result<()> {
+    std::fs::read_dir(proc_fd_dir).map(|_| ())
+}
+
 /// `save` のキャッシュルートをディレクトリ fd として開く（ルート自体が
 /// シンボリックリンクでも許容する。利用者が選んだ配置で、`load` 側と同じ扱い）。
 #[cfg(all(
@@ -855,6 +867,7 @@ impl ModelRegistry {
 
         // ここからファイルシステムに触れる。ルート自体がシンボリックリンク
         // でも許容する（利用者が選んだ配置。`load` 側と同じ扱い）。
+        ensure_proc_fd_usable(Path::new("/proc/self/fd")).map_err(ModelError::Io)?;
         std::fs::create_dir_all(&self.root).map_err(ModelError::Io)?;
         // ディレクトリ fd を 1 段ずつ固定し、以後の一時ファイル作成・`rename` は
         // `/proc/self/fd/<fd>` 配下だけで行う（パス文字列の再解決をしない。
@@ -1586,6 +1599,17 @@ mod tests {
             registry.available_models(),
             vec![("mlp".to_string(), vec!["v1".to_string()])]
         );
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn proc_fd_precheck_rejects_missing_proc_and_accepts_real_proc() {
+        let dir = TempDirGuard::new("save-noproc");
+        assert!(ensure_proc_fd_usable(&dir.path().join("no-such-proc")).is_err());
+        assert!(ensure_proc_fd_usable(Path::new("/proc/self/fd")).is_ok());
     }
 
     #[cfg(all(
