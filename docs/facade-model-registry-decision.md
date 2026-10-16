@@ -283,3 +283,7 @@ pub fn save(
 ### 17.4 承認
 
 D-A の範囲内（§16.8）。新たな承認は得ていない。依存追加・tolerance／上限値・`validate_component` の許可文字集合の変更はない。
+
+## 18. `download` の対応範囲と `save` の dirfd 移行（#3125）
+
+`ModelRegistry::download`／`download_with` は libc の dirfd 相対操作（`cfg(unix)`＝Linux／macOS）で実装した（`docs/model-download-design.md` §19）。`save` は `/proc/self/fd` 方式のまま Linux x86_64／aarch64 限定で、dirfd への移行（macOS 対応を戻す）は §16.6／§16.9 が内部置換を許しているが本イシューの範囲外とした。別イシューでの扱いはユーザー判断（未起票）。

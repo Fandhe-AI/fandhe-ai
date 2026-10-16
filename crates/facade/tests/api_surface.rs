@@ -5808,10 +5808,10 @@ fn contains_pub_fn_declaration_detects_variants() {
 // model 公開面の機械検査（イシュー #2087・親 #2082）
 // ============================================================================
 
-/// `src/model.rs` の承認済み公開アイテム 8 件（`(種別, 名前)`。#3120）。
+/// `src/model.rs` の承認済み公開アイテム 16 件（`(種別, 名前)`。#3120・#3125）。
 /// 否定走査 [`scan_unapproved_model_pub_items`] と正ガード
 /// [`model_registry_surface_violations`] が共有する単一の承認形。
-const MODEL_APPROVED_PUB_ITEMS: [(&str, &str); 8] = [
+const MODEL_APPROVED_PUB_ITEMS: [(&str, &str); 16] = [
     ("struct", "ModelRegistry"),
     ("enum", "ModelError"),
     ("fn", "new"),
@@ -5820,13 +5820,24 @@ const MODEL_APPROVED_PUB_ITEMS: [(&str, &str); 8] = [
     ("fn", "load"),
     ("fn", "available_models"),
     ("fn", "save"),
+    // #3125: HTTPS 取得（`DownloadOptions::new` は設けず `Default` のみ。`new` の件数を 1 に保つ）。
+    ("struct", "DownloadOptions"),
+    ("struct", "Sha256Pin"),
+    ("struct", "DownloadProgress"),
+    ("fn", "download"),
+    ("fn", "download_with"),
+    ("fn", "from_hex"),
+    ("fn", "expected_sha256"),
+    ("fn", "progress"),
 ];
 
-/// `impl ModelRegistry` の承認済み公開メソッド 6 件（昇順。
+/// `impl ModelRegistry` の承認済み公開メソッド 8 件（昇順。
 /// `pb_pub_fn_names_in_inherent_impls` の返す昇順と直接比較する）。
-const MODEL_REGISTRY_APPROVED_PUB_METHODS: [&str; 6] = [
+const MODEL_REGISTRY_APPROVED_PUB_METHODS: [&str; 8] = [
     "available_models",
     "cache_dir",
+    "download",
+    "download_with",
     "load",
     "new",
     "save",
@@ -5848,7 +5859,17 @@ fn scan_unapproved_model_pub_items(original: &str) -> Vec<String> {
         "struct", "enum", "fn", "trait", "type", "const", "static", "mod", "use",
     ];
     const QUALIFIER_KEYWORDS: [&str; 3] = ["async", "unsafe", "extern"];
-    const FORBIDDEN_SIGNATURE_SUBSTRINGS: [&str; 3] = ["BackendOps", "Tape", "onnx_interop"];
+    // #3125: HTTP／TLS クレートの型・TLS 検証の無効化手段が公開シグネチャへ漏れないこと。
+    const FORBIDDEN_SIGNATURE_SUBSTRINGS: [&str; 8] = [
+        "BackendOps",
+        "Tape",
+        "onnx_interop",
+        "ureq",
+        "http::",
+        "libc",
+        "TlsConfig",
+        "disable_verification",
+    ];
 
     let cleaned = strip_comments_and_literals(original);
     let len = cleaned.len();
@@ -6000,7 +6021,7 @@ fn model_module_exposes_only_approved_surface() {
     let violations = model_registry_surface_violations(&content);
     assert!(
         violations.is_empty(),
-        "src/model.rs の公開面が承認形（8 件ちょうど）とずれている: {violations:?}"
+        "src/model.rs の公開面が承認形（16 件ちょうど）とずれている: {violations:?}"
     );
     // `model.rs` 以外のファイルに `impl ModelRegistry { pub fn .. }` を足す経路を塞ぐ。
     let mut total: Vec<String> = Vec::new();
@@ -6016,7 +6037,7 @@ fn model_module_exposes_only_approved_surface() {
         MODEL_REGISTRY_APPROVED_PUB_METHODS
             .map(String::from)
             .to_vec(),
-        "facade src 全体の `impl ModelRegistry` の pub fn 集合が承認 6 件と不一致"
+        "facade src 全体の `impl ModelRegistry` の pub fn 集合が承認 8 件と不一致"
     );
 }
 
@@ -6050,7 +6071,7 @@ fn model_registry_surface_violations(src: &str) -> Vec<String> {
     let got = pb_pub_fn_names_in_inherent_impls(&tokens, "ModelRegistry");
     if got != MODEL_REGISTRY_APPROVED_PUB_METHODS {
         v.push(format!(
-            "ModelRegistry の pub fn 集合が承認 6 件と不一致: {got:?}"
+            "ModelRegistry の pub fn 集合が承認 8 件と不一致: {got:?}"
         ));
     }
     v
@@ -6069,7 +6090,19 @@ fn model_registry_surface_violations_detects_drift() {
         pub fn load() {}\n\
         pub fn available_models() {}\n\
         pub fn save() {}\n\
+        pub fn download() {}\n\
+        pub fn download_with() {}\n\
         pub(crate) fn save_with() {}\n\
+        }\n\
+        pub struct DownloadOptions;\n\
+        pub struct Sha256Pin;\n\
+        pub struct DownloadProgress;\n\
+        impl DownloadOptions {\n\
+        pub fn expected_sha256() {}\n\
+        pub fn progress() {}\n\
+        }\n\
+        impl Sha256Pin {\n\
+        pub fn from_hex() {}\n\
         }\n";
     assert!(model_registry_surface_violations(approved).is_empty());
     let missing = approved.replace("pub fn save() {}\n", "");
@@ -6082,6 +6115,19 @@ fn model_registry_surface_violations_detects_drift() {
     let dup = format!("{approved}impl ModelRegistry {{ pub fn save() {{}} }}\n");
     assert!(!model_registry_surface_violations(&dup).is_empty());
     assert!(!model_registry_surface_violations("").is_empty());
+}
+
+/// #3125: `model.rs` 本体に HTTP／TLS／libc の実体が現れないこと（実装は private
+/// サブモジュールに閉じる）。トークン列で見るためコメント・文字列リテラルは対象外。
+#[test]
+fn model_rs_does_not_name_http_or_libc_crates() {
+    let tokens = tokens_of(&read_to_string_or_panic(&model_rs_path()));
+    for forbidden in ["ureq", "libc", "TlsConfig", "disable_verification"] {
+        assert!(
+            !tokens.iter().any(|t| t == forbidden),
+            "src/model.rs に `{forbidden}` が現れた（private サブモジュールへ閉じること）"
+        );
+    }
 }
 
 /// `scan_unapproved_model_pub_items` が合成入力で承認範囲外の
@@ -6111,6 +6157,13 @@ fn model_types_are_reachable_via_facade() {
             fandhe_ai::model::ModelError::EmptyModel { .. } => "empty_model",
             fandhe_ai::model::ModelError::Save(_) => "save",
             fandhe_ai::model::ModelError::Load(_) => "load",
+            fandhe_ai::model::ModelError::InvalidUrl { .. } => "invalid_url",
+            fandhe_ai::model::ModelError::InvalidPin => "invalid_pin",
+            fandhe_ai::model::ModelError::Http { .. } => "http",
+            fandhe_ai::model::ModelError::TooManyRedirects { .. } => "too_many_redirects",
+            fandhe_ai::model::ModelError::ContentLengthMismatch { .. } => "content_length_mismatch",
+            fandhe_ai::model::ModelError::HashMismatch { .. } => "hash_mismatch",
+            fandhe_ai::model::ModelError::Network(_) => "network",
             fandhe_ai::model::ModelError::Io(_) => "io",
             _ => "unknown",
         }
@@ -6125,7 +6178,9 @@ fn model_types_are_reachable_via_facade() {
 #[test]
 fn model_registry_signatures_are_pinned() {
     use fandhe_ai::Tensor;
-    use fandhe_ai::model::{ModelError, ModelRegistry};
+    use fandhe_ai::model::{
+        DownloadOptions, DownloadProgress, ModelError, ModelRegistry, Sha256Pin,
+    };
     use std::collections::HashMap;
 
     type StateDict = HashMap<String, Tensor<f32>>;
@@ -6138,6 +6193,21 @@ fn model_registry_signatures_are_pinned() {
     let _: LoadFn = ModelRegistry::load;
     let _: fn(&ModelRegistry) -> Listing = ModelRegistry::available_models;
     let _: SaveFn = ModelRegistry::save;
+    // #3125: HTTPS 取得。HTTP／TLS クレートの型は署名に現れない（`&str`・自前型のみ）。
+    type DownloadFn = fn(&ModelRegistry, &str, &str, &str) -> Result<(), ModelError>;
+    type DownloadWithFn =
+        for<'a> fn(&ModelRegistry, &str, &str, &str, DownloadOptions<'a>) -> Result<(), ModelError>;
+    let _: DownloadFn = ModelRegistry::download;
+    let _: DownloadWithFn = ModelRegistry::download_with;
+    let _: fn(&str) -> Result<Sha256Pin, ModelError> = Sha256Pin::from_hex;
+    fn _builder_probe<'a>(
+        o: DownloadOptions<'a>,
+        p: Sha256Pin,
+        f: &'a mut dyn FnMut(DownloadProgress),
+    ) -> DownloadOptions<'a> {
+        o.expected_sha256(p).progress(f)
+    }
+    let _: DownloadOptions<'static> = DownloadOptions::default();
     // 構築は副作用なし（パスを保持するだけ）。`&str`・`PathBuf` の両方を受ける。
     let _: ModelRegistry = ModelRegistry::with_cache_dir(std::path::PathBuf::new());
     let _: ModelRegistry = ModelRegistry::with_cache_dir("x");
