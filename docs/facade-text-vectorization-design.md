@@ -44,7 +44,7 @@
 | `adapt()` 型の語彙構築 | 対象内 | メモリ上のコーパス `&[S]` から、標準化→分割→n-gram の後に頻度を数える。並びは頻度の降順、同頻度はバイト列の辞書順（昇順）。`HashMap` の反復順に依存しない。`max_tokens` はパディングと OOV を含めた件数（Keras と同じ。要出典確認） |
 | 出力モード `int` | 対象内 | `Tensor<i32>`、形状 `[B, L]` |
 | 出力モード `multi_hot`／`count`／`tf_idf`、`pad_to_max_tokens`、`idf_weights` | 対象外（条件付き） | #2618 §9.5 で A-1 に含めず「一次資料の確認後に別途範囲を決める」とした項目 (→ 公開形は #3091 の決定記録 `facade-text-output-modes-string-lookup-decision.md` を正とする) |
-| `StringLookup`／`tf.strings.*`／`tf.lookup.*` 相当 | 対象外（条件付き） | 同上 (→ 公開形は #3091 の決定記録 `facade-text-output-modes-string-lookup-decision.md` を正とする) |
+| `StringLookup`／`tf.strings.*`／`tf.lookup.*` 相当 | 対象外（条件付き） | 同上 (→ 公開形は #3091 の決定記録 `facade-text-output-modes-string-lookup-decision.md` を正とする)。`StringLookup` 相当は #3093 で実装済み、§20) |
 | 語彙の保存・読み込み（ファイル形式） | 対象外 | spec `:238` の「ファイル形式をパースしない」。語彙は `vocabulary()` で `&[String]` として取り出せ、保存は利用者が行う |
 | id → 文字列の復号 | 対象内（専用 API なし） | `vocabulary()[id]` で引けるため専用 API は作らない |
 | ragged／sparse 出力、`encoding` 指定、`vocabulary_dtype` | 対象外 | `&str` 入力・`i32` 出力に固定 |
@@ -374,3 +374,34 @@ main が「実装上の選択・公開承認の際に確認」と注記してい
 ### 19.5 変えなかったもの・対象外
 
 依存（`Cargo.toml`／`Cargo.lock`）・新規 `unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・ガードレール閾値・`docs/spec/`・既存 `transform` のシグネチャと挙動・`TextVectorizationConfig` の既定値。`StringLookup` 相当は #3093、Unicode の標準化・分割は #3089。実機（CUDA／Metal）はホスト側処理のみのため対象なしで、`#[ignore]` テストも `docs/perf/logs/` への申し送りも作っていない。
+
+## 20. 実装記録（#3093・親 #3090。`StringLookup` 相当）
+
+公開形の正は `docs/facade-text-output-modes-string-lookup-decision.md` §4・§5・§7（#3091）。承認の根拠は決定記録 §1 の 2026-10-11 D-A のみで、新しい承認は得ていない。
+
+### 20.1 公開した名前
+
+- `fandhe_ai::text::StringLookup`・`StringLookupConfig`（`max_tokens: Option<usize>`・`limits: TextLimits`。`with_max_tokens`・`with_limits`。`#[non_exhaustive]`・`Clone + Eq + Default + Debug`）
+- `StringLookup`: `from_vocabulary`・`adapt`・`lookup`（形状 `[N]`）・`token`・`invert`・`vocabulary`・`vocabulary_size`・`config`。`Debug` は手書きで設定と語彙の件数だけを出す
+- `TextError::IdOutOfRange { index }`（`TokenCountNotExact` の後・`Shape` の前。`usize` だけを持つ）
+- `text/mod.rs` の `pub use` は 8 名（クレートルートへは再エクスポートしない）
+
+### 20.2 構成と選択
+
+- `text/lookup.rs` に実装。ファイル名・モジュール名を `lookup` にしたのは、`string_lookup` が `text_unapproved_paths_are_absent` の否定プローブの識別子として残るため
+- 共通の構築時検査（`check_max_tokens`・`check_vocabulary_within_max_tokens`）を `vocab.rs` へ切り出し、`TextVectorization` の `from_vocabulary`／`from_vocabulary_with_idf` から呼ぶ形にした（挙動・検査順・エラー値は不変のリファクタ）
+- `invert` の出力総バイト数の上限は `TextLimits` に新フィールドを足さず `max_corpus_bytes` を流用し、超過は既存の `CorpusTooLarge` で返す（`InputTooLong` を再利用した #3089 と同じ扱い）
+- `token(id)` の `IdOutOfRange.index` は常に 0。`invert` は行優先で平坦化した最初の範囲外の位置
+- `invert` の検査順は、決定記録 §5 の列挙から並べ替えた: 件数（`OutputTooLarge`。O(1) で readback より前）→ 各 id の範囲 → 総バイト数 → 確保。巨大入力でデバイスからの readback を起こさないため。確保より先に全検査を行う点は同じ
+- `adapt` の `max_tokens` は `TextVectorization::adapt` と同じく上位 `m - 2` 件で切り詰める。「黙って切り詰めず `Err`」は `from_vocabulary` の契約
+- OOV = 1 は Keras の既定（OOV = 0）と意図して違える（`Var::embedding(.., Some(0))` との整合。契約外）
+
+### 20.3 ガードの更新
+
+- `api_surface.rs`: `facade_exposes_text_items_only_in_approved_shape`（`pub use` 6 文・`text/lookup.rs` の公開項目を追加）・`text_public_shape_is_pinned`（`TextError` 23 variant）・`text_unapproved_paths_are_absent`（`stringlookup` の否定を反転。`string_lookup`・`OutputMode` 等は残し、`text/` の外に `StringLookup` を含むトークンがないことを検査）・`text_items_are_reachable_via_facade_text_path`（署名固定）・`text_string_lookup_doctest_is_present_and_compiled`（新設）
+- `text_module_hygiene.rs`: 公開名を 8 件へ
+- 結合テスト `tests/text_string_lookup_facade.rs`（公開パスのみ。`TextVectorization` との id 一致・adapt 一致・往復・不正入力・非漏えい・`Var::embedding` 接続）
+
+### 20.4 変えなかったもの・対象外
+
+依存（`Cargo.toml`／`Cargo.lock`）・`unsafe`・`Op`／`BackendOps`／VJP・tolerance・baseline・ガードレール閾値・`docs/spec/`・既存 `TextVectorization` の挙動。`num_oov_indices`・`mask_token`・`oov_token`・語彙ファイル・`StringLookup` 自体の出力モードは対象外（決定記録 §4）。実機（CUDA／Metal）はホスト側処理のみのため対象なしで、`#[ignore]` テストも `docs/perf/logs/` への申し送りも作っていない。

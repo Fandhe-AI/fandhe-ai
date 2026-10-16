@@ -4,7 +4,7 @@
 //! `docs/facade-text-vectorization-design.md` §8 の機械検査契約
 //! （`crates/facade/src/text/` にファイル・ネットワーク・スレッド・並列・
 //! 危険なブロックが現れない）と、`text` の公開が承認形（`lib.rs` の `pub mod text;`
-//! 1 件と `text/mod.rs` の 6 名の `pub use` のみ。イシュー #2937・設計記録 §16.2）に
+//! 1 件と `text/mod.rs` の 8 名の `pub use` のみ。イシュー #2937・設計記録 §16.2）に
 //! 限られることを、コメントを含む生テキストの照合で固定する。走査対象は固定パスのみで外部入力を取らない。
 
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ fn text_module_is_exposed_only_in_approved_shape() {
     assert_eq!(lib.matches("\nmod text;").count(), 0);
     assert!(!lib.contains("pub(crate) mod text"));
 
-    // text/mod.rs の行頭 `pub use` は承認済みの 6 名だけ（別名・glob・pub mod を拒否）。
+    // text/mod.rs の行頭 `pub use` は承認済みの 8 名だけ（別名・glob・pub mod を拒否）。
     let text_mod =
         std::fs::read_to_string(src_dir().join("text").join("mod.rs")).unwrap_or_default();
     let mut names: Vec<String> = Vec::new();
@@ -97,6 +97,8 @@ fn text_module_is_exposed_only_in_approved_shape() {
         [
             "Split",
             "Standardize",
+            "StringLookup",
+            "StringLookupConfig",
             "TextError",
             "TextLimits",
             "TextVectorization",

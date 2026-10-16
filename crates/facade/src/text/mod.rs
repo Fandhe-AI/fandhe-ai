@@ -7,16 +7,18 @@
 //! # 公開する型
 //!
 //! [`TextVectorization`]・[`TextVectorizationConfig`]・[`TextLimits`]・[`Standardize`]・
-//! [`Split`]・[`TextError`] の 6 名だけをこのモジュールから公開する（クレートルートへは
+//! [`Split`]・[`TextError`]・[`StringLookup`]・[`StringLookupConfig`] の 8 名だけをこのモジュールから公開する（クレートルートへは
 //! 再エクスポートしない）。
 //!
 //! # 範囲
 //!
 //! 語彙 lookup 型の単語／文字レベルの変換だけを扱う。サブワードトークナイザ・Unicode
 //! 正規化・書記素クラスタ分割・語彙のファイル保存／読み込み・ragged 出力・
-//! `StringLookup` 相当は対象外。出力モード（`multi_hot`／`count`／`tf_idf`）は
+//! `StringLookup` 自体の出力モードは対象外。出力モード（`multi_hot`／`count`／`tf_idf`）は
 //! `TextVectorization` のメソッド（`transform_multi_hot`・`transform_count`・
-//! `transform_tf_idf`）として足した（#3092）。
+//! `transform_tf_idf`）として足した（#3092）。分割済みトークンの lookup 専用型
+//! [`StringLookup`]（順引き `lookup`・逆引き `token`/`invert`）を足した（#3093）。
+//! `num_oov_indices`・`mask_token`・`oov_token`・語彙ファイルは対象外。
 //!
 //! # 小文字化と空白分割の範囲
 //!
@@ -127,12 +129,13 @@
 //! ```
 //!
 //! 設計・承認の正は `docs/facade-text-vectorization-design.md` §16・§17。出力モードの公開形は
-//! `docs/facade-text-output-modes-string-lookup-decision.md`。
+//! `docs/facade-text-output-modes-string-lookup-decision.md` §4（StringLookup）。
 
 pub(crate) mod adapt;
 pub(crate) mod bag;
 pub(crate) mod error;
 pub(crate) mod limits;
+pub(crate) mod lookup;
 pub(crate) mod ngram;
 pub(crate) mod split;
 pub(crate) mod standardize;
@@ -145,6 +148,7 @@ mod integration_tests;
 
 pub use error::TextError;
 pub use limits::TextLimits;
+pub use lookup::{StringLookup, StringLookupConfig};
 pub use split::Split;
 pub use standardize::Standardize;
 pub use vectorization::{TextVectorization, TextVectorizationConfig};

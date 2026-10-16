@@ -224,3 +224,7 @@ bag 系 3 本の検査順:
 ## 11. 実装記録への参照（#3092）
 
 出力モード 3 種の実装（#3092）の選択（`adapt_tf_idf` の OOV の idf は丸めた後の語彙 idf の f64 平均を 1 回だけ f32 へ、`from_vocabulary_with_idf` の検査順、往復の bit 一致）とガードの更新は `docs/facade-text-vectorization-design.md` の #3092 実装記録節に書いた。本書の公開形（§3・§7）は変えていない。
+
+## 12. 実装記録への参照（#3093）
+
+`StringLookup` 相当の実装（#3093）の選択（`lookup.rs` の命名、`invert` のバイト上限を `max_corpus_bytes` から導く扱い、`invert` の検査順、`token` の `index`）とガードの更新は `docs/facade-text-vectorization-design.md` §20 に書いた。本書の公開形（§4・§7）は変えていない。

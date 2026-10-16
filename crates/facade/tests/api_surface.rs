@@ -39996,12 +39996,12 @@ fn text_is_public_and_submodules_stay_private() {
         .collect();
     assert!(
         nested.is_empty(),
-        "`text` 配下に pub mod が公開されている（フラットな 6 名のみ）: {nested:?}"
+        "`text` 配下に pub mod が公開されている（フラットな 8 名のみ）: {nested:?}"
     );
 }
 
-/// 正のガード: 公開は `text/mod.rs` の承認形 5 文（6 名）だけで、完全公開の項目は承認済みの
-/// 6 型と公開メソッドだけ。サブモジュールの公開・別名・glob・内部項目の公開はすべて拒否する。
+/// 正のガード: 公開は `text/mod.rs` の承認形 6 文（8 名）だけで、完全公開の項目は承認済みの
+/// 8 型と公開メソッドだけ。サブモジュールの公開・別名・glob・内部項目の公開はすべて拒否する。
 #[test]
 fn facade_exposes_text_items_only_in_approved_shape() {
     let files = facade_src_files();
@@ -40010,11 +40010,12 @@ fn facade_exposes_text_items_only_in_approved_shape() {
         vec![
             "error::TextError".to_string(),
             "limits::TextLimits".to_string(),
+            "lookup::{StringLookup,StringLookupConfig}".to_string(),
             "split::Split".to_string(),
             "standardize::Standardize".to_string(),
             "vectorization::{TextVectorization,TextVectorizationConfig}".to_string(),
         ],
-        "text の公開は text/mod.rs の承認形 5 文（6 名）のみ（設計記録 §16.2）"
+        "text の公開は text/mod.rs の承認形 6 文（8 名）のみ（設計記録 §16.2・#3093 で StringLookup を追加）"
     );
 
     let mut expected: Vec<(String, String)> = Vec::new();
@@ -40064,10 +40065,28 @@ fn facade_exposes_text_items_only_in_approved_shape() {
             ],
         ),
         (
+            "text/lookup.rs",
+            vec![
+                "struct:StringLookup",
+                "struct:StringLookupConfig",
+                "fn:with_max_tokens",
+                "fn:with_limits",
+                "fn:from_vocabulary",
+                "fn:adapt",
+                "fn:lookup",
+                "fn:token",
+                "fn:invert",
+                "fn:vocabulary",
+                "fn:vocabulary_size",
+                "fn:config",
+            ],
+        ),
+        (
             "text/mod.rs",
             vec![
                 "use:error",
                 "use:limits",
+                "use:lookup",
                 "use:split",
                 "use:standardize",
                 "use:vectorization",
@@ -40082,7 +40101,7 @@ fn facade_exposes_text_items_only_in_approved_shape() {
     assert_eq!(
         text_pub_items(&files),
         expected,
-        "text/ の完全公開項目は承認済みの 6 型・公開メソッド（#3092 で出力モードを追加）・`pub use` 5 文のみ（設計記録 §16.2・§16.3・出力モード決定記録 §7）"
+        "text/ の完全公開項目は承認済みの 8 型・公開メソッド（#3092 で出力モード、#3093 で StringLookup を追加）・`pub use` 6 文のみ（設計記録 §16.2・§16.3・出力モード決定記録 §7）"
     );
 }
 
@@ -40126,7 +40145,7 @@ fn facade_exposes_text_items_only_in_approved_shape_detects_each_category() {
     );
 }
 
-/// 公開形の固定: `Standardize` 5・`Split` 4・`TextError` 22 variant のインベントリ（#3092 で 5 つ追加）。
+/// 公開形の固定: `Standardize` 5・`Split` 4・`TextError` 23 variant のインベントリ（#3092 で 5 つ、#3093 で `IdOutOfRange` を追加）。
 /// 承認済み Unicode 2 variant（`UnicodeLower`・`UnicodeWhitespace`。#3089）以外の variant と、
 /// callable を受ける variant を足すと、ここで落ちる（論点 8）。
 #[test]
@@ -40170,6 +40189,7 @@ fn text_public_shape_is_pinned() {
             "InvalidIdfWeight",
             "PadToMaxTokensWithoutMaxTokens",
             "TokenCountNotExact",
+            "IdOutOfRange",
             "Shape",
         ]
     );
@@ -40180,7 +40200,7 @@ fn text_public_shape_is_pinned() {
 ///   （クレートルート再エクスポート・`Sequential` への層化がない。論点 7）
 /// - 出力モードは複合名のメソッド（`transform_multi_hot` 等）で公開済み（#3092）。enum 方式の
 ///   識別子（`OutputMode`／`output_mode`）と単独トークン（`multi_hot`／`tf_idf` 等）は使わない。
-///   `StringLookup` 相当の識別子はまだない（#3093 で反転）（論点 6）
+///   `StringLookup` は #3093 で反転済み（承認済みの公開形のみ。`string_lookup` 単独トークンは禁止のまま）（論点 6）
 /// - 標準化・分割・本体に callable（`Fn`／`FnMut`／`FnOnce`／`dyn`）がない（論点 8）
 #[test]
 fn text_unapproved_paths_are_absent() {
@@ -40196,15 +40216,22 @@ fn text_unapproved_paths_are_absent() {
             }
             if matches!(
                 lower.as_str(),
-                "multi_hot" | "multihot" | "tf_idf" | "tfidf" | "stringlookup" | "string_lookup"
+                "multi_hot" | "multihot" | "tf_idf" | "tfidf" | "string_lookup"
             ) || t == "OutputMode"
                 || t == "output_mode"
             {
-                violations.push(format!("{rel}: 出力モード／StringLookup 相当 {t}"));
+                violations.push(format!("{rel}: 出力モード／未承認の識別子 {t}"));
+            }
+            // StringLookup は `text/` の中だけ（クレートルート再エクスポート・層化の禁止）。
+            if !rel.starts_with("text/") && t.contains("StringLookup") {
+                violations.push(format!("{rel}: text 外に {t}"));
             }
             if matches!(
                 rel.as_str(),
-                "text/standardize.rs" | "text/split.rs" | "text/vectorization.rs"
+                "text/standardize.rs"
+                    | "text/split.rs"
+                    | "text/vectorization.rs"
+                    | "text/lookup.rs"
             ) && matches!(t.as_str(), "Fn" | "FnMut" | "FnOnce" | "dyn")
             {
                 violations.push(format!("{rel}: callable の入口 {t}"));
@@ -40227,13 +40254,14 @@ fn text_unapproved_paths_are_absent() {
     assert!(violations.is_empty(), "{violations:?}");
 }
 
-/// 正のプローブ: 公開 6 名が `fandhe_ai::text` パスだけで到達でき、メソッド・ビルダ・`with_*` の署名が
+/// 正のプローブ: 公開 8 名が `fandhe_ai::text` パスだけで到達でき、メソッド・ビルダ・`with_*` の署名が
 /// 確定形（設計記録 §16.3）に一致すること（コンパイルが通ること自体が検査）。
 #[test]
 fn text_items_are_reachable_via_facade_text_path() {
     use fandhe_ai::Tensor;
     use fandhe_ai::text::{
-        Split, Standardize, TextError, TextLimits, TextVectorization, TextVectorizationConfig,
+        Split, Standardize, StringLookup, StringLookupConfig, TextError, TextLimits,
+        TextVectorization, TextVectorizationConfig,
     };
 
     type C = TextVectorizationConfig;
@@ -40313,6 +40341,25 @@ fn text_items_are_reachable_via_facade_text_path() {
     // idf は設定ではなくインスタンスが持つ（設定の `Eq` を保つ。決定記録 §3）。
     fn assert_clone_eq_default_debug<T: Clone + Eq + Default + std::fmt::Debug>() {}
     assert_clone_eq_default_debug::<TextVectorizationConfig>();
+
+    // StringLookup（#3093）。
+    type SC = StringLookupConfig;
+    let _: fn(SC, &[&'static str]) -> Result<StringLookup, TextError> =
+        StringLookup::from_vocabulary::<&str>;
+    let _: fn(SC, &[String]) -> Result<StringLookup, TextError> = StringLookup::adapt::<String>;
+    let _: fn(&StringLookup, &[&'static str]) -> Result<Tensor<i32>, TextError> =
+        StringLookup::lookup::<&str>;
+    let _: fn(&StringLookup, i32) -> Result<&str, TextError> = StringLookup::token;
+    let _: fn(&StringLookup, &Tensor<i32>) -> Result<Vec<String>, TextError> = StringLookup::invert;
+    let _: fn(&StringLookup) -> &[String] = StringLookup::vocabulary;
+    let _: fn(&StringLookup) -> usize = StringLookup::vocabulary_size;
+    let _: fn(&StringLookup) -> &SC = StringLookup::config;
+    let _: fn(SC, usize) -> SC = SC::with_max_tokens;
+    let _: fn(SC, TextLimits) -> SC = SC::with_limits;
+    let sc = SC::default();
+    let _: (Option<usize>, TextLimits) = (sc.max_tokens, sc.limits);
+    assert_clone_eq_default_debug::<StringLookupConfig>();
+    assert_clone_debug::<StringLookup>();
 }
 
 /// 正の doctest プローブ（#3092）: 出力モードの利用例が `text/mod.rs` に実在し、コンパイル・実行される形で
@@ -40329,6 +40376,29 @@ fn text_output_mode_doctest_is_present_and_compiled() {
             ".transform_multi_hot(",
             ".transform_tf_idf(",
             "from_vocabulary_with_idf",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// 正の doctest プローブ（#3093）: `StringLookup` の利用例が `text/lookup.rs` の型 doc に実在し、
+/// コンパイル・実行される形で書かれていること。
+#[test]
+fn text_string_lookup_doctest_is_present_and_compiled() {
+    let src = read_to_string_or_panic(&facade_crate_root().join("src/text/lookup.rs"));
+    let doc: Vec<String> = src
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("///"))
+        .map(|l| l.strip_prefix(' ').unwrap_or(l).to_string())
+        .collect();
+    let v = doctest_probe_violations(
+        "text/lookup.rs の StringLookup doc",
+        &doc,
+        &[
+            "StringLookup::from_vocabulary",
+            ".lookup(",
+            ".token(",
+            ".invert(",
         ],
     );
     assert!(v.is_empty(), "{v:?}");

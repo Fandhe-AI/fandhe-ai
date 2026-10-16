@@ -40,6 +40,30 @@ pub(crate) const OOV_ID: i32 = 1;
 /// 予約トークンの件数（利用者の語彙の id はこの値から始まる）。
 pub(crate) const RESERVED_COUNT: usize = 2;
 
+/// `max_tokens` の検査（`Some(m)` で m が 2 以下は `InvalidMaxTokens`）。
+/// `TextVectorization` と `StringLookup` の構築から共用される。
+pub(crate) fn check_max_tokens(max_tokens: Option<usize>) -> Result<(), TextError> {
+    match max_tokens {
+        Some(m) if m <= RESERVED_COUNT => Err(TextError::InvalidMaxTokens { max_tokens: m }),
+        _ => Ok(()),
+    }
+}
+
+/// 予約 2 件を含む語彙数が `max_tokens` を超えたら `VocabularyTooLarge`
+/// （黙って切り詰めない。確保より先に呼ぶ。加算は飽和させる）。
+pub(crate) fn check_vocabulary_within_max_tokens(
+    max_tokens: Option<usize>,
+    vocabulary_len: usize,
+) -> Result<(), TextError> {
+    if let Some(m) = max_tokens {
+        let total = vocabulary_len.saturating_add(RESERVED_COUNT);
+        if total > m {
+            return Err(TextError::VocabularyTooLarge { len: total, max: m });
+        }
+    }
+    Ok(())
+}
+
 /// 予約 2 件と利用者の語彙を持つ lookup 表。
 #[derive(Clone)]
 pub(crate) struct Vocabulary {

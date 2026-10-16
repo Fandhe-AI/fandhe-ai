@@ -93,6 +93,9 @@ pub enum TextError {
         count: usize,
         max: usize,
     },
+    /// `StringLookup` の逆引きで id が負または語彙数以上。`index` は入力 id の位置
+    /// （`token` は常に 0、`invert` は行優先で平坦化した最初の範囲外の位置）。id の値は持たない。
+    IdOutOfRange { index: usize },
     /// テンソル形状の不整合。
     Shape(ShapeError),
 }
@@ -174,6 +177,9 @@ impl fmt::Display for TextError {
                 f,
                 "トークン数が f32 で正確に数えられる上限を超えています（index={index}・{count} 個 > 上限 {max} 個）"
             ),
+            TextError::IdOutOfRange { index } => {
+                write!(f, "id が語彙の範囲外です（index={index}）")
+            }
             TextError::Shape(e) => write!(f, "テンソル形状が不正です: {e}"),
         }
     }
@@ -247,6 +253,7 @@ mod tests {
                 count: 9,
                 max: 8,
             },
+            TextError::IdOutOfRange { index: 3 },
             TextError::Shape(ShapeError::RankMismatch {
                 expected: 2,
                 actual: 3,
