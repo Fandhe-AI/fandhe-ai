@@ -24,6 +24,10 @@ fandhe-ai = "0.4.0"
 fandhe-ai = { git = "https://github.com/Fandhe-AI/fandhe-ai" }
 ```
 
+## ビルド要件
+
+Linux では、HTTPS によるモデル取得に使う TLS 依存（`ureq`。`cfg(unix)` 限定・OpenSSL を静的に同梱）のため `perl`・`make`・C ツールチェーンが必要です（`libssl-dev` は不要）。
+
 ## 最小コード例
 
 ```rust

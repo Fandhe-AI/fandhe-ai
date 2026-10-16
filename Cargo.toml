@@ -12,11 +12,11 @@
 # 外部依存ゼロの自作 SSG（nav.toml パーサー + CLI）であり [workspace.dependencies] へは
 # 一切影響しない。
 #
-# 本体 workspace の直接依存として許容する 9 区分（第 1〜8・第 10 区分。
+# 本体 workspace の直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分。
 # .claude/rules/deps-policy.md。第 9 区分はベンチ比較対象の独立ハーネス限定で本体
 # workspace には入らない）は下記 [workspace.dependencies] で =x.y.z 完全固定として
 # 一元導入済み（TASK-1.1b・イシュー #5。第 10 区分の libc はイシュー #2347・PR #2348 で
-# 追加）。これら以外の新規追加・既存依存のバージョン更新は本ファイルで行わず、
+# 追加、第 11 区分の ureq はイシュー #3124 で追加）。これら以外の新規追加・既存依存のバージョン更新は本ファイルで行わず、
 # ユーザー承認を経た別イシューで対応する。
 #
 # バックエンド切替は feature フラグなしの cfg ベース構成（PoC-v2-5 実証構成。REQ-2）を
@@ -123,7 +123,7 @@ publish = false
 # keywords / categories / description のみ）。
 repository = "https://github.com/Fandhe-AI/fandhe-ai"
 
-# 本体 workspace の直接依存として許容する 9 区分（第 1〜8・第 10 区分。
+# 本体 workspace の直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分。
 # .claude/rules/deps-policy.md）を =x.y.z 完全固定で一元定義する。
 # 各クレートは `<name>.workspace = true` で参照し、バージョン更新はこのテーブルのみを
 # 変更すれば全クレートに反映される（TASK-1.1b。イシュー #5）。
@@ -191,7 +191,20 @@ criterion = "=0.8.2"
 # 生んでいたため、libc の定数・`syscall` 経由の `openat2` を使う（2026-09-28
 # ユーザー承認）。`Cargo.lock` に既存の推移的依存として存在するバージョンに合わせて
 # 固定する。
+# イシュー #3124（B-1。#3123 所有者コメント 6111756315 の委任条項）: 用途を `facade` の
+# キャッシュ書き込み（`openat`／`openat2`／`mkdirat`／`renameat`）へ広げる。`crates/facade/
+# Cargo.toml` の `[target.'cfg(unix)'.dependencies]` でも参照する（新規クレートではない）。
 libc = "=0.2.189"
+# HTTP クライアント／TLS（第 11 区分。イシュー #3124・#3123 所有者コメント 6111756315 の
+# 委任条項に基づき `docs/model-download-design.md` §16.8 の推奨形で確定）。用途は
+# `ModelRegistry::download` 系の HTTPS 取得に限り、`crates/facade/Cargo.toml` の
+# `[target.'cfg(unix)'.dependencies]` でのみ参照する（Windows の依存ツリーには入らない）。
+# - `default-features = false`: 既定の rustls／gzip 等を外す
+# - `native-tls`: HTTPS を成立させ TLS プロバイダを明示するため
+# - `vendored`: OpenSSL をソースから静的同梱する。`libssl-dev` 不要で CI・開発コンテナ・
+#   macOS クロスの全環境で成功した唯一の構成（§16.5）。OpenSSL の脆弱性は `openssl-src`
+#   の版更新（人間承認）でしか直らない（受容済み）
+ureq = { version = "=3.4.2", default-features = false, features = ["native-tls", "vendored"] }
 
 # 依存クレート（workspace メンバー以外）のデバッグ情報を行番号のみにする。
 # ローカルの `target/` は 20GB を超えることがあり、依存グラフ全体の full debuginfo

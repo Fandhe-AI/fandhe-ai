@@ -38,7 +38,7 @@ prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先�
 - **シークレットの混入（P0）**: API キー・トークン・パスワード・秘密鍵・`.env` を
   コード・ログ・hooks・CI 設定・コミットメッセージへ含めない
 - **依存監査（P0/P1）**: 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・
-  `ndarray`。直接・推移を問わない）の混入は P0。許容依存 10 区分以外の追加、
+  `ndarray`。直接・推移を問わない）の混入は P0。許容依存 11 区分（第 11 区分は `ureq`〈`cfg(unix)` 限定・HTTPS 取得用途限定〉を含む）以外の追加、
   `=x.y.z` 完全固定でないバージョン指定、`docs/license-matrix.md` 更新・ユーザー承認
   記録を伴わない依存追加・更新は P1（A06。`deny.toml` の licenses / sources /
   advisories / bans 検査と `scripts/check-forbidden-deps.sh` が機械検査する）。
@@ -49,7 +49,7 @@ prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先�
   限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体 workspace〈ルート
   `Cargo.toml`／`Cargo.lock`〉への非混入・各ディレクトリ専用 `deny.toml` による
   CI 監査〈advisories / bans / licenses / sources〉。
-  `.claude/rules/deps-policy.md`「許容依存 10 区分」表を参照）の違反は
+  `.claude/rules/deps-policy.md`「許容依存 11 区分」表を参照）の違反は
   従来どおり P1（oss-gemm-compare: 2026-08-20 ユーザー承認・イシュー #755。
   framework-compare: 2026-08-28 ユーザー承認・PR #915。承認記録は
   `docs/framework-compare-harness-decision.md`）。framework-compare 配下の

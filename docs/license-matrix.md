@@ -1,7 +1,7 @@
 # ライセンス可否表（TASK-1.3）
 
 REQ-1（`docs/spec/04-requirements.md:61` のライセンス要件）・`.claude/rules/deps-policy.md`
-に基づき、許容依存区分のうち本体 workspace の直接依存として許容する 9 区分（第 1〜8 区分・第 10 区分。第 10 区分 `libc` の直接依存としての実追加は PR #2348 で、それまでは推移的依存として `Cargo.lock` にのみ存在）とその推移的依存の可否を記録する（第 9 区分〈ベンチ比較対象〉は 8a・8b・9 節で扱う）。
+に基づき、許容依存区分のうち本体 workspace の直接依存として許容する 10 区分（第 1〜8 区分・第 10 区分・第 11 区分。第 10 区分 `libc` の直接依存としての実追加は PR #2348、第 11 区分 `ureq` の追加はイシュー #3124）とその推移的依存の可否を記録する（第 9 区分〈ベンチ比較対象〉は 8a・8b・9 節で扱う）。
 `docs/spec/01-brainstorm.md:149-163` の判断軸 a〜e に基づく境界判断も参照する。
 
 ## 1. 目的・適合基準
@@ -10,7 +10,7 @@ REQ-1（`docs/spec/04-requirements.md:61` のライセンス要件）・`.claude
 - 旧 issue #2 の教訓により、**feature 除外による回避を推定で記述しない**。有効化しうる feature 組合せごとに `cargo tree` を実測し、個別に適合確認する（本ファイル 3〜4 節）
 - MPL-2.0 等コピーレフトの推移的混入は実測で監視する（6 節）
 
-## 2. 直接依存として許容する 9 区分（第 1〜8・第 10 区分）の可否表
+## 2. 直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分）の可否表
 
 crates.io の `license` フィールドを `cargo metadata --locked` 経由で実確認した（実測方法は 7 節）。
 
@@ -19,7 +19,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | CUDA | `cudarc` | `=0.19.8`（`driver`/`nvrtc`/`dynamic-loading`/`cuda-13000`/`f16`） | MIT OR Apache-2.0 | 可 | a, d, e（`docs/spec/01-brainstorm.md:181`）。ドライバ FFI の自作は unsafe 面積増のみで差別化にならない |
 | Metal | `objc2` | `=0.6.4` | MIT | 可 | a, d, e |
 | Metal | `objc2-foundation` | `=0.3.2` | MIT | 可 | a, d, e |
-| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存として許容する 9 区分（第 1〜8・第 10 区分）の適合基準（MIT OR Apache-2.0 系）と両立する |
+| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分）の適合基準（MIT OR Apache-2.0 系）と両立する |
 | 相互運用 | `safetensors` | `=0.7.0` | Apache-2.0 | 可 | c, e（`docs/spec/01-brainstorm.md:183`）。ワイヤフォーマット処理のみに使用（テンソルへのマッピングは自作）。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | 相互運用 | `prost` | `=0.14.4` | Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:184`）。protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | シリアライズ | `serde` | `=1.0.229`（`derive`） | MIT OR Apache-2.0 | 可 | a。構造化データのシリアライズ |
@@ -28,6 +28,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | 数値型 | `half` | `=2.7.1` | MIT OR Apache-2.0 | 可 | a |
 | ベンチ | `criterion` | `=0.8.2` | Apache-2.0 OR MIT | 可 | c。`dev-dependencies` 限定（deps-policy.md） |
 | OS FFI（第 10 区分） | `libc` | `=0.2.189` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（`crates.io` `license` フィールド）。`onnx-interop` の external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）用途に限定し `[target.'cfg(unix)'.dependencies]` で `cfg(unix)` 限定（依存の実追加は PR #2348。`libc 0.2.189` は追加前から `Cargo.lock` に推移的依存として存在し、ライセンスは本体 workspace の既存監査対象）。手書きの `openat` フラグ定数は Linux で CPU アーキテクチャごとに値が異なり、x86 専用の値のまま aarch64 Linux でビルドするとシンボリックリンク拒否が機能しない実装バグを生んでいたため、自作せず libc の定数・`syscall` を使う（ドライバ FFI 同様、この領域の自作は unsafe 面積増のみで安全性の向上にならない） |
+| HTTP／TLS（第 11 区分） | `ureq`（`default-features = false`・`native-tls`＋`vendored`） | `=3.4.2` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（イシュー #3124）。`facade` の `[target.'cfg(unix)'.dependencies]` 限定・HTTPS 取得用途限定。allow 追加は `CDLA-Permissive-2.0`（`webpki-root-certs`）のみ。OpenSSL（`openssl-src`）の静的同梱と脆弱性対応は 6 節・末尾の追加実測を参照。承認根拠は #3123 所有者コメント 6111756315 の委任条項（`docs/model-download-design.md` §16.8・§17） |
 
 すべて MIT OR Apache-2.0 系（`objc2-metal` のみ三重ライセンス）であり、商用配布・改変・再頒布に適合する。
 
@@ -47,6 +48,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
   1. **ターゲット triple 差**: `objc2`・`objc2-foundation`・`objc2-metal` は `cfg(target_os = "macos")` 限定（deps-policy.md）。Linux 系ターゲットでは依存グラフに現れないことを実測する
   2. **dev エッジ有無**: `criterion` は `bench-harness` の `dev-dependencies` 限定。通常ビルドの依存グラフに含まれないことを実測する
   3. **Cargo.lock 全域**: `cargo deny check`・依存禁止検査（deps-forbidden）は Cargo.lock 全体を対象とするため、上記 1・2 の和集合を上限とする全パッケージ集合をライセンス集計の対象とする（5 節）
+  4. **`cfg(unix)` の target 依存（イシュー #3124）**: `facade` の `ureq`・`libc` は `[target.'cfg(unix)'.dependencies]` のため、ターゲット triple 差の軸に「Windows（`x86_64-pc-windows-msvc`）では依存ツリーに現れない」ことが加わる（実測は末尾の追加実測）
 
 ## 4. 推移的依存の `cargo tree` 実測記録
 
@@ -101,6 +103,9 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - **`objc2-metal`/`objc2-core-foundation`/`dispatch2`**（Zlib OR Apache-2.0 OR MIT）: 2 節の `objc2-metal` と同様、MIT を選択すれば適合する
 - **`memchr`等**（Unlicense OR MIT）: MIT を選択すれば適合する
 - **`zerocopy v0.8.56`**（BSD-2-Clause OR Apache-2.0 OR MIT）: MIT を選択すれば適合する
+- **`webpki-root-certs v1.0.9`**（`CDLA-Permissive-2.0`。イシュー #3124）: Mozilla のルート証明書一覧を収めたデータクレートで、許諾的なデータライセンス（コピーレフトではない）。`native-tls` feature が必ず含める。`deny.toml` の allow へ `CDLA-Permissive-2.0` を追加した（今回の allow 追加はこの 1 識別子のみ）
+- **`openssl-src v300.6.1+3.6.3`**（宣言は `MIT/Apache-2.0`。イシュー #3124）: 宣言ライセンスで `cargo deny` が通っても、成果物には OpenSSL 本体（同梱ソースは Apache License 2.0）が静的にリンクされる。Apache-2.0 は allow にあり適合する。OpenSSL の脆弱性対応は `openssl-src` の版更新（依存の更新は人間承認。deps-policy.md）に依存し、システム OpenSSL のように OS の更新では直らない（受容済み）
+- **`security-framework v3.7.0`／`core-foundation v0.10.1` 系**（macOS 向け `native-tls` 経路。イシュー #3124）: 実測では `MIT OR Apache-2.0` の式で allow 内（5 節追加実測の分布参照）
 - **`wasip2`等**（Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT）: MIT を選択すれば適合する（LLVM 例外条項の受諾は不要）
 
 ## 7. 実測環境の記録
@@ -221,7 +226,7 @@ fail-closed で適用される。
 第 9 区分（ベンチ比較対象）として正式に許容された依存であり、監査対象外の例外
 ではなく、`scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立
 Cargo プロジェクト）限定で正式に統制される依存として扱う。本表 2 節「直接依存
-として許容する 9 区分（第 1〜8・第 10 区分）」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
+として許容する 10 区分（第 1〜8・第 10・第 11 区分）」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
 指し、第 9 区分は別枠として本節で扱う。
 
 本表 4〜5 節（`cargo tree`／`cargo metadata` 実測）はルート `Cargo.lock` を対象と
@@ -242,7 +247,7 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 （本節では転記しない）。allow リストの実体は本表と二重管理しない
 （`scripts/bench/oss-gemm-compare/deny.toml` 冒頭コメント参照）。
 
-## 10. 下書き（未承認・依存未追加）: HTTP／TLS 候補 crate の実測（第 11 区分相当・イシュー #2620）
+## 10. 下書き（未承認・依存未追加）: HTTP／TLS 候補 crate の実測（第 11 区分相当・イシュー #2620）〔正式反映済み（#3124。2 節・末尾の追加実測を参照）。本節は当時の記録として残す〕
 
 モデルの汎用 HTTPS ダウンロード（`docs/model-download-design.md`・イシュー #2088）に必要な HTTP クライアント＋TLS 依存の候補を、承認依頼（#2619／#2621）の材料として実測した下書きである。
 
@@ -262,3 +267,46 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - `docs/model-download-design.md` §3 の旧記載のうち `minreq`（Apache-2.0 → 実測 ISC）・`attohttpc`（MIT OR Apache-2.0 → 実測 MPL-2.0）は誤りだったため、同 doc 側で日付付きで是正した。
 - `advisories` は未実施（承認後に実施）。
 - **2026-10-16 追記（#3122）**: 候補の再実測（feature 組合せ×3 ターゲット・`advisories` 実施済み・コピーレフト混入なし）と、8 節系・6 節相当の追記案は `docs/model-download-design.md` §16（§16.4・§16.10）。正式反映は #3124。本節の下書きと allow は変更していない。
+
+### 追加実測（イシュー #3124・第 11 区分 `ureq` の正式反映）
+
+承認根拠は #3123 所有者コメント 6111756315（2026-10-12）の委任条項（クレート・版・feature・配置は #3122 の実測推奨で進めてよい）。`ureq =3.4.2`（`default-features = false`・`native-tls`＋`vendored`）を `facade` の `[target.'cfg(unix)'.dependencies]` へ追加した後の実測。
+
+- 実測日: 2026-10-16
+- `rustc 1.98.1 (48a229cea 2026-09-01)` / `cargo 1.98.1 (797e8a9bc 2026-08-05)` / `cargo-deny 0.19.8`（advisory-db のローカル更新日 2026-10-15）
+- 対象 `Cargo.lock` の SHA-1（`sha1sum`）: `3a2009e5dd3e04fe1c4b4633231afe174d324b39`（`origin/main` fe7832f5 からの差分は新しい `[[package]]` と依存リストの行の追加のみ。既存パッケージの `version`／`checksum` の変更なし）
+- 実解決版: `ureq 3.4.2`・`ureq-proto 0.6.4`・`native-tls 0.2.18`・`openssl 0.10.81`・`openssl-sys 0.9.117`・`openssl-src 300.6.1+3.6.3`・`webpki-root-certs 1.0.9`・`security-framework 3.7.0`・`core-foundation 0.10.1`・`schannel 0.1.29`（§16 の実測値と同一）
+
+`cargo tree --locked --workspace -e normal,build --target <triple>` の結果:
+
+| ターゲット | 行数 | `ureq` の出現 | `facade` グラフの `libc` |
+|---|---|---|---|
+| x86_64-unknown-linux-gnu | 164 | あり（`facade` 経由 1 件） | あり |
+| aarch64-unknown-linux-gnu | 164 | あり | あり |
+| aarch64-apple-darwin | 187 | あり（`security-framework` 系。`vendored` は効かない） | あり |
+| x86_64-pc-windows-msvc | 117 | **なし**（`cfg(unix)` 限定のため） | なし |
+
+`cargo metadata --locked --format-version 1`（Cargo.lock 全域）: 全 149 パッケージ（外部 138・自作 11）。外部のライセンス式の分布（件数。5 節〈2026-08-06 時点〉からの増減はこの表を正とする）:
+
+| ライセンス式 | 件数 |
+|---|---|
+| MIT OR Apache-2.0 | 76 |
+| MIT | 16 |
+| Apache-2.0 OR MIT | 11 |
+| MIT/Apache-2.0 | 9 |
+| Apache-2.0 | 7 |
+| Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 4 |
+| Unlicense OR MIT | 3 |
+| Zlib OR Apache-2.0 OR MIT | 3 |
+| Unlicense/MIT | 2 |
+| BSD-2-Clause OR Apache-2.0 OR MIT | 2 |
+| Zlib | 1 |
+| ISC | 1 |
+| MIT OR Apache-2.0 OR LGPL-2.1-or-later（`r-efi`。6 節の個別判断どおり MIT を選択） | 1 |
+| (MIT OR Apache-2.0) AND Unicode-3.0 | 1 |
+| CDLA-Permissive-2.0（`webpki-root-certs`。今回の allow 追加の唯一の識別子） | 1 |
+
+- コピーレフトの部分一致検索（`MPL|GPL|LGPL|AGPL|EPL|CDDL`）: Cargo.lock 全域で `r-efi` の OR 式 1 件のみ。`--filter-platform` 付き（x86_64-linux・aarch64-linux・aarch64-darwin・x86_64-windows-msvc）はいずれも 0 件。ライセンス未記載の外部パッケージは 0 件。
+- `--filter-platform` 付きのパッケージ数（全／外部）: x86_64-linux 108／97、aarch64-linux 108／97、aarch64-darwin 115／104、x86_64-windows-msvc 86／75。
+- 重複バージョン（`cargo tree --workspace -d`）: `itertools`（0.13.0／0.14.0。`criterion` 由来で既存）・`syn`（2.0.119／3.0.3）。`multiple-versions = "warn"` のため失敗しない。
+- `cargo deny --locked check advisories bans licenses sources`: 全項目 ok。`scripts/check-forbidden-deps.sh`（`make deps-forbidden`）: 混入なし。
