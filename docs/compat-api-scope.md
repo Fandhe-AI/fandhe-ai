@@ -551,6 +551,8 @@ P1」）を受けた是正である。
 
 **適用記録（イシュー #2934・親 #2932。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6067263650` の項 1）**: 第 1 段階の 3 名（`generate_speculative`〈greedy・B = 1〉・`SpeculativeConfig`・`BatchScheduler`）と署名に現れる `RequestId`・`SchedulerLimits` を、`fandhe_ai::inference` へ別の `pub use` 2 文で純再エクスポートした（facade 独自の型・メソッド・別名なし。`fandhe-ai =0.10.0` に対しては追加のみ）。`KvCache` の公開メソッド・`forward_with_cache` の可視性・依存・tolerance・baseline は不変。内部状態保持型が対象外であることを rustdoc の契約に明記した。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路（サンプリング版・`KvCache` の書き換え経路・`kv_rewind`・モジュール自体の再エクスポート）の否定プローブを追加した。論点 1・2・3・5・7・8 は保留のまま。詳細は設計記録 `docs/facade-speculative-decoding-batching-design.md` §18。
 
+**公開形の記録（イシュー #3095・親 #3094。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437`〈D-A。推奨形で実装へ進める範囲〉）**: facade だけで KV キャッシュを進めるモデルを組む到達経路として、`StatefulAttention::forward_with_external_cache` と facade `Tape::stateful_attention_forward_with_cache` の 2 メソッドの追加を決定した（追加のみ・`pub use` 文と `KvCache` の公開メソッドは不変）。本文書は転記であり、公開形・不変条件は `docs/facade-speculative-decoding-batching-design.md` §19 を正とする。公開状態は未公開で、実装は #3096。
+
 ### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本・オプション型を取る 5 本と 5 型〈#2854 で公開済み〉・行 30 の gradcheck〈#2847 で公開済み〉は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。公開形は `compat-sequential-3d-fold-lrn-layers-decision.md`〈#3025〉を正とする〉）
 
 **本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
@@ -2514,7 +2516,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 | 論点 | 内容 | 選択肢（設計記録にあるもの） | 推奨 |
 |---|---|---|---|
-| 1 | サンプリング版の分布一致の判定契約（統計検定の標本数・有意水準） | 設計記録に列挙なし（§6.2 は tolerance・標本数を提案しないと明記） | 推奨なし。承認までサンプリング版（§11 の 6）はブロック（追記（#3100）: 選択肢 B で確定。分布検定は契約にせず決定性・RNG 非消費・`f64` 突合・退化ケースを契約とする。設計記録 §19） |
+| 1 | サンプリング版の分布一致の判定契約（統計検定の標本数・有意水準） | 設計記録に列挙なし（§6.2 は tolerance・標本数を提案しないと明記） | 推奨なし。承認までサンプリング版（§11 の 6）はブロック（追記（#3100）: 選択肢 B で確定。分布検定は契約にせず決定性・RNG 非消費・`f64` 突合・退化ケースを契約とする。設計記録 §20） |
 | 2 | greedy の token 列一致の仮説が実モデルで破れた場合の扱い | 設計記録に列挙なし（§6.1 は margin 付き入力で避け、破れたら承認依頼に戻すとする） | 推奨なし |
 | 3 | 内部状態保持型モデル（`facade-generate-decision.md` §17.4）への到達経路 | `caches` を使う形の公開／`AutoregressiveModel` の既定メソッドとしての巻き戻しフック（既存実装は壊れないが trait 拡張で公開面が変わる）／別 trait（既存に影響しないが型パラメータが増える） | 推奨なし（設計記録上「いずれも未決」） |
 | 4 | `KvCache` の公開メソッド追加（`truncate` 等）と「単一の書き手」不変条件の緩和 | §4.1 の (i) clone 保存・復元（公開面は増えない）／(ii) `pub(crate)` の切り詰め／(iii) `KvCache::truncate` の `pub` 追加 | 設計記録 §4.1 の推奨は (i)、次点は (ii)。(iii) は公開面の追加で承認事項 |
@@ -2544,7 +2546,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 「承認時に決めてほしい事項」の決着: 保留ガードの名前と設置担当は #2934（正ガードの新設。承認形の定数は `GENERATE_APPROVED_REEXPORT` と別の `pub use` 文）／`RequestId` は不透明 `u64` newtype／`limits` は `SchedulerLimits`（3 上限必須）／`step` の `model` は `&M`（`M: AutoregressiveModel + ?Sized`）／失敗の表現型は `take_failed() -> Vec<(RequestId, AutodiffError)>`／`generate_speculative` の型パラメータ境界は `T`・`D` とも `AutoregressiveModel + ?Sized`。
 
-論点表の決着（追記（#3100）: 論点 1 はその後選択肢 B で決着。設計記録 §19。以下の「保留継続」から 1 は外れる）: 論点 4 は案 (i) で確定（`KvCache` の公開メソッドは増やさない）／論点 6 は第 1 段階の 3 名に限って承認／論点 1・2・3・5・7・8 は保留継続（サンプリング版・内部状態保持型・padding mask・paged attention 等は公開しない）。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路のプローブは残す。本書 1 節の対象範囲表と `docs/compat-feature-gap.md` の判定列は #2934 の適用記録で扱い、本記録では変更していない。
+論点表の決着（追記（#3100）: 論点 1 はその後選択肢 B で決着。設計記録 §20。以下の「保留継続」から 1 は外れる）: 論点 4 は案 (i) で確定（`KvCache` の公開メソッドは増やさない）／論点 6 は第 1 段階の 3 名に限って承認／論点 1・2・3・5・7・8 は保留継続（サンプリング版・内部状態保持型・padding mask・paged attention 等は公開しない）。保留ガードは公開した名前の分だけ正ガードへ反転し、未承認経路のプローブは残す。本書 1 節の対象範囲表と `docs/compat-feature-gap.md` の判定列は #2934 の適用記録で扱い、本記録では変更していない。
 
 **Phase 8 公開形（テキスト変換。承認依頼 #2896・親 #2895・Phase 8 #2872）**: 語彙 lookup 型テキスト変換（Keras `TextVectorization` 相当）の配置・公開形・判定方式の承認依頼。上の Phase 4 表（行 1〜30）・直前の `S1`〜`S3` とは別系統のため、行ラベルは `T1`〜`T5` とし他の番号空間と混ぜない（Phase 4 表の「行と保留ガードは `*HoldDoctestGuard` と 1 対 1」という前提も、保留ガード未設置のこの 5 行には当てはまらない）。以下は設計記録 `docs/facade-text-vectorization-design.md` §5・§6・§7・§8・§9・§10 の**転記**であり、本節で新しい推奨・tolerance・baseline は作っていない。すべて**未承認**で、承認は実装 Agent が代行しない。承認根拠は範囲の異なる 2 つを別々に引く。ルート #2499 の 2026-10-07 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6033824965`）は #2618 折衷案の**範囲**（語彙 lookup 型の単語／文字レベル変換を対象内、サブワードトークナイザと Unicode 正規化表の自作を対象外）だけを承認しており、spec 変更履歴（`docs/spec/04-requirements.md:459`）は「配置・公開 API の追加は承認しない」と明記している。2026-10-08 コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/2499#issuecomment-6052732061`）の承認範囲は設計と issue 分解の記録までである。公開（コード・`pub use`・保留ガードの反転）は承認後に別 issue（設計記録 §11 の仮番号 9）で行う。 → 承認（`issuecomment-6067263650` 項 1）と確定した公開形は本ブロック末尾の「承認と公開形の記録（#2936）」と設計記録 §16。
 

@@ -87,7 +87,7 @@ REQ-2（統一複合判定）・REQ-8・REQ-12 は不変。新しい判定契約
 
 ### 6.2 サンプリング版
 
-追記（#3100）: 論点 1 は選択肢 B で確定（§19）。
+追記（#3100）: 論点 1 は選択肢 B で確定（§20）。
 
 - speculative sampling は target の出力分布を保つが、RNG の消費順が `generate` と変わるため、**同一シードで `generate` と token 列が一致することは構成上ない**。保証できるのは分布の一致で、検定には統計的な判定契約（標本数・有意水準）が要る。これは統一複合判定の範囲外であり新しい判定契約になる。
 - **tolerance・標本数は提案しない**。承認依頼に戻す論点として列挙し（§10 論点 1）、サンプリング版の実装 issue は承認待ちでブロックとする。
@@ -156,14 +156,14 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 
 ## 10. 承認依頼に戻す論点（実装せず止める）
 
-1. サンプリング版 speculative decoding の分布一致の判定契約（統計検定の標本数・有意水準）。（追記（#3100）: 論点 1 は選択肢 B で確定。§19 参照）
+1. サンプリング版 speculative decoding の分布一致の判定契約（統計検定の標本数・有意水準）。（追記（#3100）: 論点 1 は選択肢 B で確定。§20 参照）
 2. greedy の token 列一致の仮説が実モデルで破れた場合の扱い（既存判定に収まらない場合）。
-3. §17.4 の到達経路: `caches` を使う形の公開、またはモデル側の巻き戻しフック。フックを `AutoregressiveModel` の既定メソッドとして足す案は既存実装を壊さないが trait の拡張で公開面の変更になる。別 trait にする案は既存実装に影響しない代わりに型パラメータが増える。いずれも未決。
+3. §17.4 の到達経路: `caches` を使う形の公開、またはモデル側の巻き戻しフック。フックを `AutoregressiveModel` の既定メソッドとして足す案は既存実装を壊さないが trait の拡張で公開面の変更になる。別 trait にする案は既存実装に影響しない代わりに型パラメータが増える。いずれも未決。 → #3095 追記: §19 で決定（案 C）。
 4. `KvCache` の公開メソッド追加（`truncate` 等）と「単一の書き手」不変条件の緩和。
 5. テンソル単位バッチ化に要る padding mask・可変長キャッシュ。
 6. facade 公開面の追加そのもの（`docs/compat-api-scope.md` §5）。（#2933 追記: 第 1 段階の 3 名に限り承認済み。§17 参照）
 7. paged attention（条件付きのまま。K-3 が未着手）。
-8. 連続バッチングで内部状態保持型のモデル（§8.1 の表）を扱うための、要求ごとのモデル状態の分離方式。論点 3 と同じく trait の拡張か別 trait かが未決。決まるまで第 1 段階は内部状態保持型を対象外とする。
+8. 連続バッチングで内部状態保持型のモデル（§8.1 の表）を扱うための、要求ごとのモデル状態の分離方式。論点 3 と同じく trait の拡張か別 trait かが未決。決まるまで第 1 段階は内部状態保持型を対象外とする。 → #3095 追記: §19 で決定（案 C）。
 
 ## 11. 2 時間粒度の実装 issue 分解案
 
@@ -278,7 +278,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 - `generate_speculative` が対象とするのは `num_kv_layers() > 0` で、生成状態を渡された `caches` だけに持つモデル。`num_kv_layers() == 0` は拒否する（fail-closed）。
 - `BatchScheduler` が対象とするのは「`caches` だけに状態を持つ型」と「状態なしの型」（§8.1 の表）。**内部状態保持型**は対象外で、出力を保証しない。
 - 内部状態保持型は「生成状態を渡された `caches` の外に持つ型」と定義し、`num_kv_layers()` の値では決めない。`num_kv_layers() > 0` を返しつつ内部に状態を持つ型も作れ、両関数とも型でも実行時でも検出できない。この点を利用者の保証事項として rustdoc に書く。
-- 既知の制限（論点 3 が保留中の帰結）: facade だけの利用者は `forward_with_cache` を使えず、`KvCache` にもセッターがない（`docs/facade-generate-decision.md` §17.4）。`caches` を正しく進めるモデルを facade の公開面だけで組む経路は現状では限られる。到達経路は本 issue でも #2934 でも追加しない。
+- 既知の制限（論点 3 が保留中の帰結）: facade だけの利用者は `forward_with_cache` を使えず、`KvCache` にもセッターがない（`docs/facade-generate-decision.md` §17.4）。`caches` を正しく進めるモデルを facade の公開面だけで組む経路は現状では限られる。到達経路は本 issue でも #2934 でも追加しない。 → #3095 追記: §19.6 で解消方針を決定。
 
 ### 17.6 保留ガードの反転範囲（#2934 への申し送り。本 issue では触らない）
 
@@ -302,7 +302,8 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 ### 17.7 保留を続ける論点
 
-- 追記（#3100）: 論点 1 は選択肢 B で確定（§19）。以下の列挙のうち 1 は解消済み。
+- （#3109 追記）論点 7 の設計は `docs/device-resident-kv-paged-attention-design.md` に推奨形として記録済み。承認の確認は同 doc §9 の所有者確認表による。以下の保留状態は変えない。
+- 追記（#3100）: 論点 1 は選択肢 B で確定（§20）。以下の列挙のうち 1 は解消済み。
 - 論点 1（サンプリング版の判定契約）・2（greedy の token 列一致の仮説が破れた場合）・3（内部状態保持型への到達経路）・5（padding mask・可変長キャッシュ・テンソル単位のバッチ化）・7（paged attention）・8（スケジューラでの内部状態保持型の扱い）は保留のまま。
 - 論点 4 は案 (i) で確定し `KvCache` は不変。論点 6 は第 1 段階の 3 名（と署名に現れる `RequestId`・`SchedulerLimits`）に限って解消した。
 - 対象外のまま: B > 1、EOS 停止・top-p、受理統計、HTTP サーバ、量子化 KV、facade の `caches` 到達経路。
@@ -359,19 +360,138 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 ### 18.7 保留・スコープ外
 
-追記（#3100）: 論点 1 は選択肢 B で確定（§19）。
+追記（#3100）: 論点 1 は選択肢 B で確定（§20）。
 
 論点 1・2・3・5・7・8 は保留のまま。B > 1、EOS 停止・top-p、受理統計、HTTP サーバ、量子化 KV、facade の `caches` 到達経路、実機測定は本 issue の対象外。
 
-## 19. サンプリング版の判定契約（#3100・親 #3099。§10 論点 1 の決着）
+→ #3095 追記: 論点 3・8 の公開形は §19 で決定（`caches` の到達経路を開ける案 C。実装は #3096）。
 
-### 19.1 確定の根拠と範囲
+## 19. caches の到達経路と内部状態保持型の公開形（#3095・親 #3094）
+
+§10 の論点 3（`caches` の到達経路・巻き戻しフック）と論点 8（要求ごとのモデル状態の分離）は「trait の拡張か別 trait か」で保留だった。本節はその公開形を 1 つに決める。**docs のみの変更**で、`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変えない。実装は #3096 以降。
+
+### 19.1 承認根拠と範囲
+
+- 根拠: D-A（`https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437`、2026-10-11、リポジトリ所有者 aLiz-Nancy）。generate 系を含む「保留のまま実装できる項目」を推奨形で一括承認するもので、記録に形が書けた点はそのまま実装へ進めてよく、形が書けない点だけを所有者へ戻す、という範囲である。本節はこの範囲を超える承認を主張しない。
+- §17.1 の決定（`KvCache` の公開メソッドは増やさない。論点 4）は維持する。
+
+### 19.2 調査事実（基準 `origin/main` `ab14678b`）
+
+| 事実 | 出典 |
+|---|---|
+| `AutoregressiveModel` は `num_kv_layers`・`forward_step(&self, &Tensor<i32>, &mut [KvCache])` の 2 メソッド。「モデルは不変で、KV キャッシュだけを外から借りる」設計 | `crates/autodiff/src/generate/mod.rs` |
+| `KvCache` の書き手は `forward_with_cache` だけ。公開メソッドは 8 件。セッターは置かない | `crates/autodiff/src/nn/attention.rs`（`forward_with_cache` は 1682 行） |
+| `forward_with_cache` は失敗時にキャッシュを変えない（原子的）。rank・B・E・`L_new != L_new_kv` を先に拒否する | 同上 |
+| `StatefulAttention::forward(&mut self, tape, x_new)` は `mha.bind(tape).forward_with_cache(x_new, x_new, x_new, &mut self.cache)` への 1 行委譲 | `attention.rs:1911` |
+| facade は `KvCache`・`StatefulAttention`・`MultiheadAttentionConfig` だけを再エクスポートし、`MultiheadAttention`・`forward_with_cache` は出さない（P2／P3） | `docs/kv-cache-design.md` §11.4 |
+| facade の入口 `Tape::stateful_attention_forward` は `sa.forward(&self.0, x_new)` への薄い委譲 | `crates/facade/src/lib.rs:1701` |
+| `generate_speculative` は内部の非公開 `kv_rewind`（退避 → 復元 → 受理分の再 forward）で渡された `caches` を自分で巻き戻す。検査順 9 は `num_kv_layers() == 0` を拒否する | `crates/autodiff/src/generate/speculative.rs`・`generate/kv_rewind.rs` |
+
+帰結: facade の利用者が `forward_step` の中で渡された `&mut KvCache` を `forward_with_cache` 相当で進められさえすれば、`generate`・`generate_speculative`（巻き戻し込み）・`BatchScheduler`（要求ごとの `Vec<KvCache>`）はシグネチャを変えずに動く。巻き戻しは `generate_speculative` が内部で済ませるため、利用者向けの巻き戻しメソッドも trait のフックも要らない。
+
+### 19.3 選択肢の比較（論点 3・8 共通）
+
+| 案 | 内容 | 既存 trait 実装への影響 | 既存 2 関数・`BatchScheduler::step` のシグネチャ | 型パラメータ | fail-closed | 利用者の書きやすさ | `BatchScheduler` への影響 | 評価 |
+|---|---|---|---|---|---|---|---|---|
+| A | `AutoregressiveModel` に既定メソッド（状態の退避・復元。既定は「非対応」）を足す | 壊れない。ただし利用者の別 trait と名前が衝突しうる | 変えない | 増えない | **できない**。既定が「非対応」だと、状態なしモデル（`num_kv_layers() == 0`）と override 忘れの内部状態保持型を区別できない。拒否すれば既存の状態なしモデルを壊し、受け入れれば黙って誤出力する | override 忘れに気づけない | 退避・復元を `step` に入れ、状態型を `Box<dyn Any>` 等に型消去する必要がある | 不採用 |
+| B | 別 trait（関連型 `State` と `save`／`restore`）＋専用の入口 | 影響しない | 既存 2 関数は変えられないため `generate_speculative_stateful`・`step_stateful` 等を新設する | 増える | できる | 入口が 2 系統になり、状態型も利用者が設計する | `BatchScheduler` は非ジェネリックで、要求ごとの状態を型消去して持つしかない | 次点（公開面が最大） |
+| **C** | **`caches` の到達経路を開ける**（`StatefulAttention` に外部 `&mut KvCache` を受ける `&self` の forward を足し、facade `Tape` に薄い委譲を 1 件足す。trait は変えない） | 影響しない | 変えない | 増えない | できる（`forward_with_cache` の検査と原子性を受け継ぐ。`KvCache` の書き手は `forward_with_cache` のみのまま） | `RefCell` 不要。trait doc の「モデルは不変・キャッシュは外から借りる」に沿う | 波及しない（要求ごとの `Vec<KvCache>` で状態が分かれ、`&self` のモデルを共有できる） | **推奨** |
+
+簡約点: 案 C で到達経路を開くと、facade の KV 付きモデル（これまで `RefCell<StatefulAttention>` を内部に持ち `num_kv_layers()` が 0 だった形）は「`caches` だけに状態を持つ形」に書き直せる。そうなれば論点 3 の巻き戻しは既存の `kv_rewind` が、論点 8 の状態分離は既存の要求ごとの `Vec<KvCache>` が受け持つ。新しいフックは 0 個で足りる。
+
+### 19.4 推奨形の公開名・シグネチャ
+
+| 追加物 | シグネチャ | 置き場所 | 公開の経路 |
+|---|---|---|---|
+| autodiff の inherent メソッド | `pub fn forward_with_external_cache<'t>(&self, tape: &'t Tape, x_new: &Var<'t>, cache: &mut KvCache) -> Result<Var<'t>, AutodiffError>`（本体は `self.mha.bind(tape).forward_with_cache(x_new, x_new, x_new, cache)` の 1 行委譲） | `impl StatefulAttention`（`crates/autodiff/src/nn/attention.rs`） | `StatefulAttention` は公開済みのためメソッドは自動的に facade へ出る。`pub use` 文は増やさない |
+| facade `Tape` の inherent メソッド | `pub fn stateful_attention_forward_with_cache<'t>(&'t self, sa: &nn::kv_cache::StatefulAttention, x_new: &Var<'t>, cache: &mut nn::kv_cache::KvCache) -> Result<Var<'t>, AutodiffError>`（本体は `sa.forward_with_external_cache(&self.0, x_new, cache)` の 1 行委譲） | `crates/facade/src/lib.rs` の `impl Tape`（既存 `stateful_attention_forward` の隣） | `Tape` に置く理由は P3 と同じ（REQ-12 により生の autodiff `Tape` を取り出せない） |
+
+名前は本節で確定し、後続 issue で変えない。
+
+- **`KvCache` に足す公開メソッド: なし。** `truncate` は、巻き戻しを `generate_speculative` が内部の `kv_rewind` で行うため不要。セッター（任意の `Tensor` を入れる経路）は、書き込みを `forward_with_cache` が担うため不要で、注入経路を作らないので「両方 `Some` か両方 `None`」「`[B, S, E]` contiguous」「B・E の一致」を外部入力から守る検査も新たに要らない。よって **論点 4 は見直さない**（Issue が想定した「公開メソッドを追加して論点 4 を見直す」流れは採らない）。
+- **巻き戻しフックの置き場所: 公開しない。** 非公開の `generate::kv_rewind` のまま。trait の既定メソッドも別 trait も作らない。
+- `AutoregressiveModel` は 2 メソッドのまま。関連型・関連定数も足さない。
+
+### 19.5 不変条件と fail-closed 条件（新しい入口）
+
+- `forward_with_cache` の検査をそのまま受け継ぐ。rank が 3 でない・B／E が `cache` と合わない・`L_new != L_new_kv`・別 `Tape` の `Var`（`TapeMismatch`）・`S_prev + L_new` の overflow はいずれも `Err` を返し、`cache` は呼び出し前のまま変わらない（原子的）。非既定 config は `from_config` が構築時に拒否済み。
+- `sa` の内部キャッシュは読みも書きもしない（`&self` なので型でも保証される。rustdoc と単体テストで固定する。#3096 へ申し送り）。
+- `KvCache` の書き手は引き続き `forward_with_cache` だけで、不変条件は緩めない。
+- 1 つの `sa` を複数の要求・複数の `caches` で共有しても状態は混ざらない。
+- 本番経路で `unwrap`／`expect` を使わない。`AutodiffError` の新 variant は足さない。
+
+### 19.6 各関数に渡す条件と §17.5 の置き換え
+
+| 関数 | 受け付けるモデル | 変更 |
+|---|---|---|
+| `generate` | `caches` だけに状態を持つ形（新しい入口で facade だけで組める）／状態なしの形 | シグネチャ・挙動とも変えない |
+| `generate_speculative` | `num_kv_layers() > 0` で `caches` だけに状態を持つ形 | 検査順 1〜9 は変えない（9 の `num_kv_layers() == 0` 拒否も維持）。facade だけで組める形が `> 0` を返すようになるため拒否を緩める必要がない |
+| `BatchScheduler::step` | `caches` だけに状態を持つ形／状態なしの形 | 変えない。内部状態保持型は引き続き対象外 |
+
+§17.5 の置き換え（#3097 が rustdoc に反映する）: 「内部状態保持型」の定義（生成状態を渡された `caches` の外に持つ型。`num_kv_layers()` の値では決まらない）と「対象外で出力を保証しない・型でも実行時でも検出できず利用者が保証する」はそのまま残す。そのうえで「facade だけで KV 付きモデルを組むときは `Tape::stateful_attention_forward_with_cache` で `caches[i]` を進める形にする（`RefCell<StatefulAttention>` 形は推奨しない）」という移行経路を加える。§17.5 の「既知の制限（論点 3 が保留中の帰結）」と `docs/facade-generate-decision.md` §17.4 の「facade だけの KV 付きモデルは `RefCell<StatefulAttention>` 形で `num_kv_layers()` は 0」は、この経路ができたことで解消する（実装は #3096）。
+
+### 19.7 既存公開シグネチャの非破壊確認（追加のみ）
+
+| 項目 | 確認結果 |
+|---|---|
+| `AutoregressiveModel`・`generate`・`generate_speculative`・`BatchScheduler`／`SchedulerLimits`／`RequestId`／`SpeculativeConfig` | 変更なし |
+| `KvCache` | 変更なし（8 メソッドのまま） |
+| `StatefulAttention` | inherent メソッドを 1 つ追加するだけ |
+| facade `Tape` | inherent メソッドを 1 つ追加するだけ。利用者 trait に同名メソッドがある場合の解決順の変化は Rust の minor 変更の通常範囲として受け入れる（`docs/kv-cache-design.md` §11.5 の P3 と同じ扱い） |
+| `pub use` 文 | 増やさない・変えない（`KV_CACHE_APPROVED_REEXPORT`・`inference` の 4 文・`GENERATE_APPROVED_REEXPORT` は不変） |
+| `forward_with_cache`・`MultiheadAttention`・`MultiheadAttentionVars` | 非公開のまま。新しい入口は公開済みの `StatefulAttention` に機能を足す形で、P3 に対する追加になる |
+| `fandhe-ai =0.11.0` の既存シグネチャ・依存・tolerance・baseline・`unsafe` | 変更なし |
+
+### 19.8 反転・更新する api_surface ガード（`crates/facade/tests/api_surface.rs`）
+
+| ガード | 推奨形での扱い | 担当 |
+|---|---|---|
+| `generate_public_shape_violations`（`AutoregressiveModel` を 2 メソッドに固定し関連型・定数を禁止）と呼び出しテスト | 不変（案 A を採らないため反転しない） | — |
+| `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler` | 不変（8 件）。doc コメントの「論点 3・4 は保留」を「論点 4 は維持、論点 3 は §19 で解消」へ書き換える | #3096 |
+| `kv_rewind_stays_private_and_absent_from_facade`・`speculative_scheduler_public_shape_is_pinned` | 不変 | — |
+| `facade_exposes_speculative_scheduler_items_only_in_approved_shape`・`inference_module_reexports_exactly_expected_surface`・`facade_exposes_generate_items_only_in_approved_shape` | 不変 | — |
+| `nn_kv_cache_module_reexports_exactly_expected_surface`・`facade_reexports_kv_cache_items_only_in_approved_shape`・`KV_CACHE_APPROVED_REEXPORT` | 不変（再エクスポートは増やさない） | — |
+| `tape_stateful_attention_forward_is_thin_delegation`・`workspace_declares_stateful_attention_forward_only_in_facade_lib` | 既存は不変。新メソッド用に同型の正ガードを新設（本体が `sa.forward_with_external_cache(&self.0, x_new, cache)` の 1 行委譲であること、宣言が `facade/src/lib.rs` の 1 件だけであること） | #3096 |
+| `kv_cache_is_reachable_via_facade_only` | 新 `Tape` メソッドと `StatefulAttention::forward_with_external_cache` のシグネチャを関数ポインタ型注釈で固定するプローブを追加 | #3096 |
+| `StatefulAttention` の pub fn インベントリ（現状なし。`docs/kv-cache-design.md` §15.5 の残課題） | 新設。`new`・`from_config`・`forward`・`forward_with_external_cache`・`reset_cache`・`cache`・`seq_len`・`mha` のちょうど 8 件 | #3096 |
+| `kv_cache_usage_doctests_are_present_and_compiled` | 外部キャッシュを使う利用例の doctest 実在検査を追加（既存例は残す） | #3096 |
+| `speculative_scheduler_usage_doctests_are_present_and_compiled`・`speculative_scheduler_items_are_reachable_via_facade_inference_path` | 成功例を必須トークンとして追加（fail-closed 例は残す） | #3098 |
+| 結合テストのフィクスチャ（`crates/facade/tests/speculative_batching_facade.rs` の内部クレート利用） | 新入口へ移せる部分を移す | #3097／#3098 |
+
+否定ガードは stable rustdoc の `compile_fail` コード照合に頼らず、正のプローブとインベントリで組む（§18.3 の方針を引き継ぐ）。
+
+### 19.9 後続 issue への読み替え
+
+- #3096: 「`KvCache` の公開メソッド追加」は**追加なし**、「巻き戻しフック」は**非公開の `kv_rewind` のまま**と読み替える。実装は 19.4 の 2 メソッドと 19.8 のガードに絞る。
+- #3097: 受入基準「内部状態保持型で要求 A・B を交互に進めても単独 `generate` と一致する」は、従来 `RefCell<StatefulAttention>` で書いていたモデルを新入口で `caches` 形に書き直したものに対する検査として満たす。`caches` の外に状態を持つ型は引き続き対象外で、型でも実行時でも検出できない点は利用者が保証する。
+- #3098: doctest は新入口を使った表引き KV モデルで成功例を書ける。
+
+### 19.10 所有者へ戻す点
+
+| 点 | 扱い |
+|---|---|
+| 所有者へ戻す点 | **なし**（形がすべて記録に書けた。D-A に従う） |
+| `caches` で表せない内部状態（KV 以外。RNN の隠れ状態等）を持つモデル | 保留・スコープ外。需要が現時点で記録になく、必要になったら案 B を出発点に別 issue で扱う。所有者への承認依頼ではない |
+
+スコープ外: コード実装（#3096〜#3098）、B > 1、padding mask、paged attention、サンプリング版 speculative（論点 1）、論点 2・5・7。
+
+### 19.11 セキュリティ観点
+
+- A03: `KvCache` に任意の `Tensor` を入れる経路を作らない。新入口は `forward_with_cache` の形状・B・E・Tape 検査と原子的更新を受け継ぐ。
+- A04: 案 A は既定実装で黙って誤動作しうる（fail-open）ため採らない。`SchedulerLimits` の 3 上限必須・要求単位の失敗の切り離し・`generate_speculative` の検査順 1〜9 は変えない。
+- A06: 依存・`unsafe` の追加なし。ネットワーク公開面なし（スケジューラは同期実行）。
+- A08: 承認を代行しない（19.1）。ruleset・branch protection・リポジトリ設定は変更しない。
+- A02: `Generator` は非暗号（xorshift64*）で、生成 token をセキュリティ用途に使わない既存の注記を引き継ぐ。
+
+## 20. サンプリング版の判定契約（#3100・親 #3099。§10 論点 1 の決着）
+
+### 20.1 確定の根拠と範囲
 
 - 根拠: イシュー #3100 のリポジトリ所有者コメント（`https://github.com/Fandhe-AI/fandhe-ai/issues/3100#issuecomment-6111753082`、2026-10-11。内容は「全て推奨で」）。推奨は選択肢 B。補助の回帰テストを足すかどうかは本記録の判断に任された。tolerance 定数・baseline・判定規則は変えず、spec の改訂も要らないとされた。
 - 本記録はこれ以上の承認を主張しない。実装（#3101）とテスト（#3102）は本節を正として参照する。
 - spec REQ-2 は「新しい判定契約が必要になれば別途承認」とする。選択肢 B は既存の判定（統一複合判定・決定性）の範囲で完結するため、新しい数値契約は導入しない。
 
-### 19.2 選択肢の比較と結論
+### 20.2 選択肢の比較と結論
 
 | 案 | 内容 | 評価 |
 |---|---|---|
@@ -381,20 +501,20 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 結論は B。本契約は target 分布の保存を統計的には保証しない。理論上の保存はアルゴリズムの構成（受理棄却と残差再サンプリング）に依拠する。
 
-### 19.3 用語と計算の定義（#3101 が推測で埋めないための固定事項）
+### 20.3 用語と計算の定義（#3101 が推測で埋めないための固定事項）
 
 - `p`（target）と `q`（draft）は、同じ `GenerateConfig`（strategy・temperature・top_k）をそれぞれの logits に同じ手順で適用した後の最終的なサンプリング分布と定義する。計算は `generate` の `sample_step` と同じ `softmax_weights_f64`・`top_k_indices` を使う。分布の保存はこの組み合わせについてだけ成り立つ。
 - 計算は `f64` で行い、`Generator` へ渡す時点で `f32` に落とす。受理確率 `min(1, p(x)/q(x))` は `[0,1]` に収めてから `f32` として `bernoulli` へ渡す。残差は `max(0, p - q)` を正規化し、`f32` の重みとして `multinomial` へ渡す（`sample_step` の「`f64` の softmax から `f32` の重み」と同形）。
 - `q(x)` は draft のサンプリングで `multinomial` に渡したのと同じ `f32` の重みベクトルから読み、計算し直さない。ただし `softmax_weights_f64` が返す `f32` の重みは丸めにより総和が厳密に 1 とは限らず、`Generator::multinomial` は重みを `f64` で累積し総和を掛けた乱数で抽選する。実際の draft 確率は `q(x) = q_weight[x] / sum(q_weight)` であるため、保存した `f32` 重みを `f64` の総和で正規化した値を `q(x)` とする（生の重みを `q(x)` としない）。target 側の `p(x)` も同じ定義（`f32` 重みを `f64` の総和で正規化）で構成し、`p` と `q` の正規化規則を揃える。`q(x) <= 0` または非有限は内部不整合として `Err` を返す。
 - 残差の和が 0 になるのは `p == q` のときだけで、そのとき受理確率は常に 1 となり残差には到達しない。それでも残差の和が 0 または NaN の場合は fail-closed で `Err` にする。
 
-### 19.4 RNG の消費順（決定性の前提）
+### 20.4 RNG の消費順（決定性の前提）
 
 - `Generator::new(config.seed)` を呼び出しごとに 1 個だけ作り、グローバル RNG は消費しない。
 - 1 ラウンドの消費順の案: draft が k 回 `multinomial` → 検証位置ごとに `bernoulli` 1 回 → 棄却時は残差を `multinomial` 1 回、全受理時は bonus を `multinomial` 1 回。最終順序は #3101 の実装で確定し、rustdoc と本節へ反映する。消費回数の契約は `docs/rng-distributions-generator-decision.md` §1.1（`multinomial` は `m * num_samples` 回固定）に従う。
 - 同一シード・同一入力・同一モデルなら、**同一実行環境（同一バイナリ・同一プラットフォーム・同一 toolchain）での再現性**として出力は bit 単位で一意に決まる。プラットフォーム間の bit 一致は保証しない。`bernoulli` は `next_unit_f64` と浮動小数点確率を比較し、`multinomial` は `f64` の累積和・乗算を使い、`softmax_weights_f64` は `f64::exp` を使うため、数学関数の実装差や浮動小数点演算の差で確率境界付近の token 選択が分岐し token 列が変わりうる。プラットフォーム間一致が必要になった場合は、数学関数・logits・浮動小数点演算の条件を別途定義して決定記録へ追記する。`Generator`（`crates/tensor-core/src/rng.rs:676`）は非暗号の xorshift64* であり、生成 token をセキュリティ用途に使わない。
 
-### 19.5 検査項目（#3101・#3102 が参照する契約）
+### 20.5 検査項目（#3101・#3102 が参照する契約）
 
 | # | 項目 | 判定 | 置き場所の推奨 |
 |---|---|---|---|
@@ -407,20 +527,20 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits が bit 一致する保証がない（§6.1）。全受理の契約は形状に依存しない logits を返すモデルに限る。
 
-### 19.6 分布検定（契約外）と補助テストの判断
+### 20.6 分布検定（契約外）と補助テストの判断
 
 - 分布検定は契約にしない。標本数・有意水準は設定しない。
 - 補助の回帰テストとしても閾値つきの統計量（χ² 等）は足さない（記録に任された範囲での判断）。固定シードでも閾値が新しい数値判定になるため。理論分布を構成する要素は C3・C5 で決定的に検査できる。
 - #3102 で分布検定の作業は「契約にしないので該当しない」。何かを足すなら固定シードでの完全一致（スナップショット）に限る。
 - 参考（契約外）: 将来 A を再開する場合の統計量は、有限語彙上の経験分布と理論分布の Pearson χ²（固定シード・標本数 N・有意水準 α。値は空欄）。再開には所有者の承認と spec の別途承認が要る。
 
-### 19.7 実機（CUDA／Metal）の扱い
+### 20.7 実機（CUDA／Metal）の扱い
 
 - サンプリングは `generate` と同じくホスト側 `f64` で行うため、実機 parity の対象は logits だけになる。
 - 統一複合判定に収まる logits 差でも `bernoulli`／`multinomial` の結果が反転して列が分岐しうる。実機で比べる場合は、CPU 側で記録した入力 id 列を実機モデルへ再生して logits を `assert_parity` で比べる（推奨）。または呼び出し列の最初の分岐点までに限って比べる。token 列の一致は契約でも事前登録の仮説でもない。
 - `#[ignore]` で分離し、実測は #3102 が挙げる Phase 8 の #3171・#3172 に委ねる。本 issue では `docs/perf/logs/` を作らない。
 
-### 19.8 変えないもの・申し送り
+### 20.8 変えないもの・申し送り
 
 - 変えないもの: `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・baseline・判定規則・`docs/spec/`・依存・`unsafe`・`Op`／`BackendOps`・`generate_speculative` の既存シグネチャ。本 issue は docs のみで `crates/**` に触れない。
 - 申し送り: `speculative.rs` のモジュール doc の「未承認でブロック中」の記述と検査 2（`Greedy` 以外の拒否）の解除は #3101 で行う。
