@@ -184,8 +184,12 @@ mod cache;
 mod dirfd;
 #[cfg(unix)]
 mod download;
+#[cfg(all(test, unix))]
+mod loopback_tests;
 #[cfg(unix)]
 mod sha256;
+#[cfg(all(test, unix))]
+mod test_http_server;
 #[cfg(unix)]
 mod transport;
 #[cfg(unix)]
@@ -1204,13 +1208,24 @@ impl ModelRegistry {
     /// SSRF（内部ネットワーク宛先）の遮断は呼び出し側の責務で、本関数が担保するのは
     /// `https` 限定・資格情報付き URL の拒否・各リダイレクトでの再検証までである。
     ///
-    /// ```no_run
+    /// 通常の呼び出し（`fetch` は実行しない。コンパイルのみ検証する）と、ネットワーク・FS を
+    /// 使わずに実行される拒否例（`http://` は接続前に `InvalidUrl`）:
+    ///
+    /// ```
     /// use fandhe_ai::model::{ModelError, ModelRegistry};
-    /// # fn main() -> Result<(), ModelError> {
-    /// let registry = ModelRegistry::with_cache_dir("/tmp/fandhe-models");
-    /// registry.download("https://example.com/mlp.safetensors", "mlp", "v1")?;
-    /// # Ok(())
-    /// # }
+    /// fn fetch(registry: &ModelRegistry) -> Result<(), ModelError> {
+    ///     registry.download("https://example.com/mlp.safetensors", "mlp", "v1")
+    /// }
+    /// let _ = fetch;
+    /// let registry = ModelRegistry::with_cache_dir("/nonexistent/fandhe-models-doctest");
+    /// // 非 unix は fail-closed で非対応（URL 検証前に `Io(Unsupported)`）のため unix のみ検証する。
+    /// #[cfg(unix)]
+    /// {
+    ///     let err = registry
+    ///         .download("http://example.com/mlp.safetensors", "mlp", "v1")
+    ///         .unwrap_err();
+    ///     assert!(matches!(err, ModelError::InvalidUrl { .. }));
+    /// }
     /// ```
     ///
     /// # Errors
@@ -1223,20 +1238,34 @@ impl ModelRegistry {
     /// [`Self::download`] のオプション付き版。取得は 1 GiB 上限・リダイレクト 5 ホップ・全体
     /// 1 時間の固定既定で行い、TLS は OS のルート証明書で検証する（無効化する口はない）。
     ///
-    /// ```no_run
-    /// use fandhe_ai::model::{DownloadOptions, ModelError, ModelRegistry, Sha256Pin};
-    /// # fn main() -> Result<(), ModelError> {
-    /// let registry = ModelRegistry::with_cache_dir("/tmp/fandhe-models");
-    /// let pin = Sha256Pin::from_hex(&"0".repeat(64))?;
-    /// let mut on_progress = |p: fandhe_ai::model::DownloadProgress| {
+    /// 通常の呼び出しは `fetch`（実行しない。コンパイルのみ検証）。実行部分は pin・進捗付きの
+    /// オプションを組み立て、`http://` が接続前に `InvalidUrl` となることを示す
+    /// （ネットワーク・FS は使わない）:
+    ///
+    /// ```
+    /// use fandhe_ai::model::{
+    ///     DownloadOptions, DownloadProgress, ModelError, ModelRegistry, Sha256Pin,
+    /// };
+    /// fn fetch(registry: &ModelRegistry, opts: DownloadOptions<'_>) -> Result<(), ModelError> {
+    ///     registry.download_with("https://example.com/mlp.safetensors", "mlp", "v1", opts)
+    /// }
+    /// let _ = fetch;
+    /// let registry = ModelRegistry::with_cache_dir("/nonexistent/fandhe-models-doctest");
+    /// let pin = Sha256Pin::from_hex(&"0".repeat(64)).unwrap();
+    /// let mut on_progress = |p: DownloadProgress| {
     ///     let _ = (p.received, p.total);
     /// };
     /// let opts = DownloadOptions::default()
     ///     .expected_sha256(pin)
     ///     .progress(&mut on_progress);
-    /// registry.download_with("https://example.com/mlp.safetensors", "mlp", "v1", opts)?;
-    /// # Ok(())
-    /// # }
+    /// // 非 unix は fail-closed で非対応（`Io(Unsupported)`）のため unix のみ検証する。
+    /// #[cfg(unix)]
+    /// {
+    ///     let err = registry
+    ///         .download_with("http://example.com/mlp.safetensors", "mlp", "v1", opts)
+    ///         .unwrap_err();
+    ///     assert!(matches!(err, ModelError::InvalidUrl { .. }));
+    /// }
     /// ```
     ///
     /// # Errors
@@ -2238,6 +2267,8 @@ mod tests {
             "https://user:pw@example.com/m",
             "file:///etc/passwd",
             "https://example.com/\n",
+            "ftp://example.com/m",
+            "https://user@example.com/m",
         ] {
             let err = registry.download(url, "m", "v1").unwrap_err();
             assert!(matches!(err, ModelError::InvalidUrl { .. }), "{err:?}");
@@ -2248,6 +2279,38 @@ mod tests {
             .download("https://example.com/m", "../x", "v1")
             .unwrap_err();
         assert!(matches!(err, ModelError::InvalidComponent { .. }));
+        assert!(!root.exists(), "拒否時にキャッシュルートを作らない");
+    }
+
+    /// 接続前に拒否される入力（スキーム・資格情報・pin 形式）ではモックサーバへ一切接続せず、
+    /// キャッシュルートも作らない。エラーの `Display` に URL・資格情報を含めない（#3127・A09）。
+    #[cfg(unix)]
+    #[test]
+    fn bad_url_and_malformed_pin_never_connect() {
+        use super::test_http_server::{MockReply, MockServer};
+        let root = tmp_root("noconnect");
+        let registry = ModelRegistry::with_cache_dir(&root);
+        let srv = MockServer::start(vec![MockReply::Stall]);
+        let p = srv.port();
+        for url in [
+            format!("http://127.0.0.1:{p}/m"),
+            "file:///etc/passwd".to_string(),
+            format!("ftp://127.0.0.1:{p}/m"),
+            format!("https://u:secretpw@127.0.0.1:{p}/m"),
+        ] {
+            let err = registry.download(&url, "m", "v1").unwrap_err();
+            assert!(matches!(err, ModelError::InvalidUrl { .. }), "{err:?}");
+            let text = err.to_string();
+            assert!(!text.contains("secretpw") && !text.contains("127.0.0.1"));
+        }
+        // 不正な pin は `download_with` に到達する前に失敗する。
+        for bad in ["", "zz", &"g".repeat(64), &"0".repeat(63)] {
+            assert!(matches!(
+                Sha256Pin::from_hex(bad),
+                Err(ModelError::InvalidPin)
+            ));
+        }
+        assert_eq!(srv.connection_count(), 0, "接続前に拒否される");
         assert!(!root.exists(), "拒否時にキャッシュルートを作らない");
     }
 

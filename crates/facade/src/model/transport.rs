@@ -163,6 +163,70 @@ fn collect_content_encoding(headers: &ureq::http::HeaderMap) -> Result<Option<St
     })
 }
 
+/// 本番専用の前段。検証済み URL を `Uri` として再解析し、https・資格情報なしを照合する
+/// （多層防御）。テスト専用の平文ループバック転送も同じ照合を通してから `perform` へ進む。
+fn checked_https_uri(url: &ValidatedUrl) -> Result<ureq::http::Uri, ModelError> {
+    let uri = ureq::http::Uri::try_from(url.as_str()).map_err(|_| ModelError::InvalidUrl {
+        reason: "URL を解析できません",
+    })?;
+    let authority_ok = uri.authority().is_some_and(|a| !a.as_str().contains('@'));
+    if uri.scheme_str() != Some("https") || !authority_ok {
+        return Err(ModelError::InvalidUrl {
+            reason: "https 以外または資格情報付きの URL です",
+        });
+    }
+    Ok(uri)
+}
+
+/// 共有の後段。agent で 1 ホップ GET し、応答を `RawResponse` へ変換する。残り時間の算出・
+/// `If-None-Match` 付与・`timeout_global(remaining)`・ヘッダ解釈・ボディのサニタイズを受け持つ。
+/// 本番 `UreqTransport` とテスト専用の `loopback::PlaintextLoopbackTransport`（#3127）が共用し、
+/// スキーム・TLS の判断は呼び出し側（前段）に残す。
+fn perform(
+    agent: &ureq::Agent,
+    uri: ureq::http::Uri,
+    deadline: Instant,
+    if_none_match: Option<&str>,
+) -> Result<RawResponse, ModelError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| net(io::ErrorKind::TimedOut, "HTTP 転送がタイムアウトしました"))?;
+    let mut req = agent.get(uri);
+    // 多層防御: 送信直前にも etag を再確認する（ヘッダインジェクション対策）。違反値は
+    // 条件なし GET に倒す（呼び出し側 `cache.rs` で検証済みのため通常は到達しない）。
+    if let Some(v) = if_none_match.filter(|v| super::cache::valid_etag(v)) {
+        req = req.header("If-None-Match", v);
+    }
+    let resp = req
+        .config()
+        .timeout_global(Some(remaining))
+        .build()
+        .call()
+        .map_err(map_ureq_error)?;
+    let status = resp.status().as_u16();
+    let header = |name: &str| -> Option<String> {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    let location = header("location");
+    let content_encoding = collect_content_encoding(resp.headers())?;
+    let etag = header("etag").filter(|v| super::cache::valid_etag(v));
+    let (_, body) = resp.into_parts();
+    let content_length = body.content_length();
+    let reader = body.into_with_config().limit(u64::MAX).reader();
+    Ok(RawResponse {
+        status,
+        location,
+        content_length,
+        content_encoding,
+        etag,
+        body: Box::new(SanitizedReader(reader)),
+    })
+}
+
 impl Transport for UreqTransport {
     fn get(
         &mut self,
@@ -170,56 +234,69 @@ impl Transport for UreqTransport {
         deadline: Instant,
         if_none_match: Option<&str>,
     ) -> Result<RawResponse, ModelError> {
-        // 多層防御: 検証済み URL を `Uri` として再解析し、https・資格情報なしを照合する。
-        let uri = ureq::http::Uri::try_from(url.as_str()).map_err(|_| ModelError::InvalidUrl {
-            reason: "URL を解析できません",
-        })?;
-        let authority_ok = uri.authority().is_some_and(|a| !a.as_str().contains('@'));
-        if uri.scheme_str() != Some("https") || !authority_ok {
-            return Err(ModelError::InvalidUrl {
-                reason: "https 以外または資格情報付きの URL です",
-            });
-        }
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|d| !d.is_zero())
-            .ok_or_else(|| net(io::ErrorKind::TimedOut, "HTTP 転送がタイムアウトしました"))?;
-        let mut req = self.agent.get(uri);
-        // 多層防御: 送信直前にも etag を再確認する（ヘッダインジェクション対策）。違反値は
-        // 条件なし GET に倒す（呼び出し側 `cache.rs` で検証済みのため通常は到達しない）。
-        if let Some(v) = if_none_match.filter(|v| super::cache::valid_etag(v)) {
-            req = req.header("If-None-Match", v);
-        }
-        let resp = req
-            .config()
-            .timeout_global(Some(remaining))
-            .build()
-            .call()
-            .map_err(map_ureq_error)?;
-        let status = resp.status().as_u16();
-        let header = |name: &str| -> Option<String> {
-            resp.headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        };
-        let location = header("location");
-        let content_encoding = collect_content_encoding(resp.headers())?;
-        let etag = header("etag").filter(|v| super::cache::valid_etag(v));
-        let (_, body) = resp.into_parts();
-        let content_length = body.content_length();
-        let reader = body.into_with_config().limit(u64::MAX).reader();
-        Ok(RawResponse {
-            status,
-            location,
-            content_length,
-            content_encoding,
-            etag,
-            body: Box::new(SanitizedReader(reader)),
-        })
+        let uri = checked_https_uri(url)?;
+        perform(&self.agent, uri, deadline, if_none_match)
     }
 }
 
+/// テスト専用の平文ループバック転送（#3127。`docs/model-download-design.md` §6「テスト経路の
+/// 分離」）。`download_via` へ差し込み、ローカルの平文 HTTP モックへ実ソケットで接続する。
+/// 本番 `get` と同じ前段（https・資格情報の再照合）を通し、ホストがループバックの場合に限り
+/// スキームだけ `http://` へ置き換えて共有後段 `perform` を呼ぶ。`https_only(false)` はこの
+/// モジュールの agent にだけ存在し、本番 `build_agent` には現れない（api_surface が固定）。
+#[cfg(test)]
+pub(super) mod loopback {
+    use super::*;
+
+    pub(in crate::model) struct PlaintextLoopbackTransport {
+        agent: ureq::Agent,
+    }
+
+    impl PlaintextLoopbackTransport {
+        pub(in crate::model) fn new() -> Self {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .https_only(false)
+                .max_redirects(0)
+                .http_status_as_error(false)
+                .proxy(None)
+                .accept_encoding("identity")
+                .timeout_connect(Some(Duration::from_secs(2)))
+                .timeout_recv_response(Some(Duration::from_secs(2)))
+                .build()
+                .into();
+            Self { agent }
+        }
+    }
+
+    impl Transport for PlaintextLoopbackTransport {
+        fn get(
+            &mut self,
+            url: &ValidatedUrl,
+            deadline: Instant,
+            if_none_match: Option<&str>,
+        ) -> Result<RawResponse, ModelError> {
+            let uri = checked_https_uri(url)?;
+            let host = uri.host().unwrap_or("");
+            if !matches!(host, "127.0.0.1" | "[::1]" | "::1") {
+                return Err(ModelError::InvalidUrl {
+                    reason: "ループバック以外のホストは許可されません",
+                });
+            }
+            let pq = uri.path_and_query().map_or("/", |p| p.as_str());
+            let authority = uri.authority().map_or("", |a| a.as_str());
+            let plain =
+                ureq::http::Uri::try_from(format!("http://{authority}{pq}")).map_err(|_| {
+                    ModelError::InvalidUrl {
+                        reason: "URL を解析できません",
+                    }
+                })?;
+            perform(&self.agent, plain, deadline, if_none_match)
+        }
+    }
+}
+
+// 本ファイルでは `#[cfg(test)]` のモジュールを末尾にまとめる。api_surface.rs の
+// `model_tls_posture_violations` は最初の `#[cfg(test)]` より前を本番部分として検査するため。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +386,84 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(matches!(map_ureq_error(e), ModelError::InvalidUrl { .. }));
+    }
+
+    /// 無応答の相手に対し、全体期限（`timeout_global(remaining)`）が 30 秒のフェーズ上限より
+    /// 先に効いて `TimedOut` になる（本番 `UreqTransport`。TLS ハンドシェイク待ちで停止）。
+    /// SYN 段階の純粋な接続タイムアウトはループバックで決定的に再現できないため、接続失敗
+    /// （既存テスト）と deadline による打ち切りで代替する（#3127・設計 §21）。
+    #[test]
+    fn production_transport_times_out_on_unresponsive_peer_by_deadline() {
+        use super::super::test_http_server::{MockReply, MockServer};
+        let srv = MockServer::start(vec![MockReply::Stall]);
+        let url =
+            super::super::url::validate_https_url(&format!("https://127.0.0.1:{}/m", srv.port()))
+                .expect("url");
+        let mut t = UreqTransport::new().expect("transport");
+        let started = Instant::now();
+        let r = t.get(&url, Instant::now() + Duration::from_millis(1500), None);
+        match r {
+            Err(ModelError::Network(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
+            _ => panic!("expected TimedOut"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn loopback_transport_times_out_waiting_for_response_headers() {
+        use super::super::test_http_server::{MockReply, MockServer};
+        let srv = MockServer::start(vec![MockReply::Stall]);
+        let url =
+            super::super::url::validate_https_url(&format!("https://127.0.0.1:{}/m", srv.port()))
+                .expect("url");
+        let mut t = loopback::PlaintextLoopbackTransport::new();
+        let started = Instant::now();
+        let r = t.get(&url, Instant::now() + Duration::from_secs(5), None);
+        match r {
+            Err(ModelError::Network(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
+            _ => panic!("expected TimedOut"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn loopback_transport_times_out_while_receiving_body() {
+        use super::super::test_http_server::{MockReply, MockServer};
+        let srv = MockServer::start(vec![MockReply::HeadersThenStall {
+            declared_len: 4096,
+            body: vec![1u8; 16],
+        }]);
+        let url =
+            super::super::url::validate_https_url(&format!("https://127.0.0.1:{}/m", srv.port()))
+                .expect("url");
+        let mut t = loopback::PlaintextLoopbackTransport::new();
+        let resp = t
+            .get(&url, Instant::now() + Duration::from_millis(1500), None)
+            .unwrap_or_else(|_| panic!("headers should arrive"));
+        let mut body = resp.body;
+        let mut buf = Vec::new();
+        // 本文受信中の期限切れは ureq が `io::Error` へ包んで返し、種別は `Other`（実測）。
+        // 種別には依存せず「ハングせず Err になる」ことだけを固定する。
+        let started = Instant::now();
+        assert!(body.read_to_end(&mut buf).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn loopback_transport_refuses_non_loopback_hosts_without_connecting() {
+        let url = super::super::url::validate_https_url("https://example.com/m").expect("url");
+        let mut t = loopback::PlaintextLoopbackTransport::new();
+        let r = t.get(&url, Instant::now() + Duration::from_secs(5), None);
+        assert!(matches!(r, Err(ModelError::InvalidUrl { .. })));
+    }
+
+    #[test]
+    fn loopback_transport_accepts_ipv6_loopback_host() {
+        // `Uri::host()` の IPv6 表記（角括弧付き／なし）の両方を許可する。許可リスト通過後は接続段階へ進むため、
+        // 閉じたポートでも `InvalidUrl` ではなく別種のエラー（接続失敗）になる。
+        let url = super::super::url::validate_https_url("https://[::1]:1/m").expect("url");
+        let mut t = loopback::PlaintextLoopbackTransport::new();
+        let r = t.get(&url, Instant::now() + Duration::from_secs(5), None);
+        assert!(!matches!(r, Err(ModelError::InvalidUrl { .. })));
     }
 }

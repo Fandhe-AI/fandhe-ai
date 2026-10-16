@@ -6367,6 +6367,335 @@ fn model_registry_save_usage_doctest_is_present_and_compiled() {
     }
 }
 
+// ----------------------------------------------------------------------------
+// download 公開面の正ガード・HTTP／TLS 非漏洩ガード（イシュー #3127）
+// ----------------------------------------------------------------------------
+
+/// `DownloadProgress` の承認済み pub フィールド（宣言順）。
+const MODEL_DOWNLOAD_PROGRESS_APPROVED_FIELDS: [&str; 2] = ["received", "total"];
+
+/// `{` を伴う構造体宣言 `pub struct <name>`（ジェネリクス可）の本体トークンと宣言先頭 index。
+/// ちょうど 1 件でなければ `Err`（検査対象の見失い・重複定義）。
+fn model_struct_block<'a>(
+    tokens: &'a [String],
+    name: &str,
+) -> Result<(usize, &'a [String]), String> {
+    let starts = pb_find_seq(tokens, &["pub", "struct", name]);
+    if starts.len() != 1 {
+        return Err(format!(
+            "`pub struct {name}` が {} 件（1 件が必要）",
+            starts.len()
+        ));
+    }
+    let Some(open) = tokens[starts[0]..]
+        .iter()
+        .position(|t| t == "{")
+        .map(|p| starts[0] + p)
+    else {
+        return Err(format!("`{name}` の本体が見つからない"));
+    };
+    match matching_close(tokens, open, "{", "}") {
+        Some(close) => Ok((starts[0], &tokens[open + 1..close])),
+        None => Err(format!("`{name}` の閉じ括弧が見つからない")),
+    }
+}
+
+/// download 公開面の承認形（#3127。`model.rs` のソース文字列を受け取り違反を返す）。
+///
+/// - `DownloadOptions`: pub フィールドなし・`#[non_exhaustive]`・`pub fn new` なし
+/// - `DownloadProgress`: pub フィールドがちょうど `received`・`total`・`#[non_exhaustive]`
+///
+/// pub fn 集合（`expected_sha256`・`progress`・`from_hex`・`download`・`download_with`）は
+/// [`model_registry_surface_violations`] が 1 件ずつ固定済みで、本関数はフィールド・属性を補う。
+fn model_download_surface_violations(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    let mut v = Vec::new();
+    match model_struct_block(&tokens, "DownloadOptions") {
+        Ok((start, body)) => {
+            if body.iter().any(|t| t == "pub") {
+                v.push("DownloadOptions に pub フィールドがある".to_string());
+            }
+            if !pb_has_non_exhaustive_before(&tokens, start) {
+                v.push("DownloadOptions に #[non_exhaustive] が無い".to_string());
+            }
+        }
+        Err(e) => v.push(e),
+    }
+    // `impl DownloadOptions`（`impl<'a> DownloadOptions<'a>` 含む）ブロック内の `pub fn new` を
+    // 直接検査する。ModelRegistry::new 等の別型の new が増えても誤検知しない。
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "impl" {
+            continue;
+        }
+        let Some(rel) = tokens[i..].iter().position(|t| t == "{") else {
+            continue;
+        };
+        let open = i + rel;
+        if !tokens[i..open].iter().any(|t| t == "DownloadOptions") {
+            continue;
+        }
+        if let Some(close) = matching_close(&tokens, open, "{", "}")
+            && !pb_find_seq(&tokens[open + 1..close], &["pub", "fn", "new"]).is_empty()
+        {
+            v.push("`impl DownloadOptions` に `pub fn new` がある（追加疑い）".to_string());
+        }
+    }
+    match model_struct_block(&tokens, "DownloadProgress") {
+        Ok((start, body)) => {
+            let fields: Vec<&str> = body
+                .windows(2)
+                .filter(|w| w[0] == "pub")
+                .map(|w| w[1].as_str())
+                .collect();
+            if fields != MODEL_DOWNLOAD_PROGRESS_APPROVED_FIELDS {
+                v.push(format!(
+                    "DownloadProgress の pub フィールドが承認形と不一致: {fields:?}"
+                ));
+            }
+            if !pb_has_non_exhaustive_before(&tokens, start) {
+                v.push("DownloadProgress に #[non_exhaustive] が無い".to_string());
+            }
+        }
+        Err(e) => v.push(e),
+    }
+    v
+}
+
+#[test]
+fn model_download_surface_is_approved_shape() {
+    let src = read_to_string_or_panic(&model_rs_path());
+    let v = model_download_surface_violations(&src);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// [`model_download_surface_violations`] の自己テスト（正例 0 件・欠落・追加・空入力）。
+#[test]
+fn model_download_surface_violations_detects_drift() {
+    let approved = "#[non_exhaustive]\n\
+        pub struct DownloadProgress { pub received: u64, pub total: Option<u64> }\n\
+        #[non_exhaustive]\n\
+        pub struct DownloadOptions<'a> { x: Option<&'a u8> }\n";
+    assert!(model_download_surface_violations(approved).is_empty());
+    let no_attr = approved.replace("#[non_exhaustive]\n", "");
+    assert_eq!(model_download_surface_violations(&no_attr).len(), 2);
+    let pub_field = approved.replace("{ x:", "{ pub x:");
+    assert!(!model_download_surface_violations(&pub_field).is_empty());
+    let extra = approved.replace("pub total", "pub extra: u8, pub total");
+    assert!(!model_download_surface_violations(&extra).is_empty());
+    let missing = approved.replace("pub received: u64, ", "");
+    assert!(!model_download_surface_violations(&missing).is_empty());
+    assert!(!model_download_surface_violations("").is_empty());
+    let with_new = format!(
+        "{approved}impl<'a> DownloadOptions<'a> {{ pub fn new() -> Self {{ todo!() }} }}\n"
+    );
+    assert!(!model_download_surface_violations(&with_new).is_empty());
+    let other_new =
+        format!("{approved}impl ModelRegistry {{ pub fn new() -> Self {{ todo!() }} }}\n");
+    assert!(model_download_surface_violations(&other_new).is_empty());
+}
+
+/// `FORBIDDEN_SIGNATURE_SUBSTRINGS` が実際に効くことの自己テスト（既存の自己テストは
+/// 名前違反しか見ない）。HTTP／TLS クレートの型・TLS 検証無効化が公開シグネチャに出ると検出する。
+#[test]
+fn model_pub_signature_forbidden_substrings_are_effective() {
+    for sig in [
+        "pub fn x(a: ureq::Agent) {}",
+        "pub fn x(a: TlsConfig) {}",
+        "pub fn x() { disable_verification(); }",
+        "pub fn x(a: http::Uri) {}",
+    ] {
+        let offenses = scan_unapproved_model_pub_items(sig);
+        assert!(!offenses.is_empty(), "検出されない: {sig}");
+    }
+}
+
+/// `src/model.rs` と `src/model/*.rs` のパスと内容（`(ファイル名, 内容)`）。
+fn model_source_files() -> Vec<(String, String)> {
+    let mut out = vec![(
+        "model.rs".to_string(),
+        read_to_string_or_panic(&model_rs_path()),
+    )];
+    let dir = facade_crate_root().join("src/model");
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("src/model の read_dir に失敗: {e}"))
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    names.sort();
+    for p in names {
+        let n = p.file_name().unwrap().to_string_lossy().into_owned();
+        out.push((format!("model/{n}"), read_to_string_or_panic(&p)));
+    }
+    out
+}
+
+/// 制限なしの `pub`（直後が `(` でない `pub`）を持つトークン位置の先頭 2 語（診断用）。
+fn unrestricted_pub_items(src: &str) -> Vec<String> {
+    let tokens = tokens_of(src);
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| *t == "pub" && tokens.get(i + 1).map(String::as_str) != Some("("))
+        .map(|(i, _)| {
+            tokens[i..]
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// サブモジュール（`src/model/*.rs`）は制限なしの `pub` を持たず、`model.rs` のサブモジュール
+/// 宣言は `mod` のみ（`pub mod` なし）。実装は private に閉じ、公開面は `model.rs` の承認形だけ。
+#[test]
+fn model_submodules_have_no_unrestricted_pub_and_are_private() {
+    let files = model_source_files();
+    assert!(files.len() >= 7, "src/model/*.rs の見失い: {}", files.len());
+    for (name, src) in &files {
+        if name == "model.rs" {
+            let tokens = tokens_of(src);
+            assert!(
+                pb_find_seq(&tokens, &["pub", "mod"]).is_empty(),
+                "model.rs に `pub mod` がある"
+            );
+            continue;
+        }
+        let offs = unrestricted_pub_items(src);
+        assert!(offs.is_empty(), "{name} に制限なしの pub がある: {offs:?}");
+    }
+    // 自己テスト。
+    assert!(!unrestricted_pub_items("pub fn a() {}").is_empty());
+    assert!(unrestricted_pub_items("pub(super) fn a() {} pub(crate) struct B;").is_empty());
+}
+
+/// TLS 検証を無効化する手段が無いこと、およびテスト専用設定が本番に紛れ込まないこと。
+/// - `disable_verification` は getter 形 `disable_verification()` のみ（setter 形 `(true)` 等は違反）
+/// - `danger`・`insecure`・`accept_invalid` を含む識別子が `src/model*` に無い
+/// - `transport.rs` の本番部分（最初の `#[cfg(test)]` より前）に `https_only(false)` が無く、
+///   固定構成（`https_only(true)`・`max_redirects(0)`・`proxy(None)`・`PlatformVerifier`・
+///   `NativeTls`）が揃う
+fn model_tls_posture_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut v = Vec::new();
+    for (name, src) in files {
+        let tokens = tokens_of(src);
+        for i in pb_find_seq(&tokens, &["disable_verification"]) {
+            if tokens.get(i + 1).map(String::as_str) != Some("(")
+                || tokens.get(i + 2).map(String::as_str) != Some(")")
+            {
+                v.push(format!("{name}: disable_verification が getter 形でない"));
+            }
+        }
+        for t in &tokens {
+            if ["danger", "insecure", "accept_invalid"]
+                .iter()
+                .any(|w| t.to_ascii_lowercase().contains(w))
+            {
+                v.push(format!("{name}: 識別子 `{t}` は TLS 無効化手段の疑い"));
+            }
+        }
+    }
+    let Some((_, transport)) = files.iter().find(|(n, _)| n == "model/transport.rs") else {
+        v.push("model/transport.rs が無い".to_string());
+        return v;
+    };
+    let prod = tokens_of(without_test_mod(transport));
+    if !pb_find_seq(&prod, &["https_only", "(", "false", ")"]).is_empty() {
+        v.push("transport.rs 本番部分に https_only(false) がある".to_string());
+    }
+    for (label, pat) in [
+        ("https_only(true)", &["https_only", "(", "true", ")"][..]),
+        ("max_redirects(0)", &["max_redirects", "(", "0", ")"][..]),
+        ("proxy(None)", &["proxy", "(", "None", ")"][..]),
+        ("RootCerts::PlatformVerifier", &["PlatformVerifier"][..]),
+        ("TlsProvider::NativeTls", &["NativeTls"][..]),
+    ] {
+        if pb_find_seq(&prod, pat).is_empty() {
+            v.push(format!("transport.rs 本番部分に {label} が無い"));
+        }
+    }
+    v
+}
+
+#[test]
+fn model_download_tls_posture_is_fixed() {
+    let v = model_tls_posture_violations(&model_source_files());
+    assert!(v.is_empty(), "{v:?}");
+    // 自己テスト: setter 形・テスト用設定の混入・固定構成の欠落を検出する。
+    let good = "fn b() { c.https_only(true).max_redirects(0).proxy(None)\
+        .root_certs(RootCerts::PlatformVerifier).provider(TlsProvider::NativeTls); }\n";
+    let mk = |t: &str| vec![("model/transport.rs".to_string(), t.to_string())];
+    assert!(model_tls_posture_violations(&mk(good)).is_empty());
+    assert!(
+        !model_tls_posture_violations(&mk(&good.replace("https_only(true)", "https_only(false)")))
+            .is_empty()
+    );
+    assert!(!model_tls_posture_violations(&mk(&good.replace("proxy(None)", "x()"))).is_empty());
+    assert!(
+        !model_tls_posture_violations(&mk(&format!(
+            "{good}fn d() {{ t.disable_verification(true); }}"
+        )))
+        .is_empty()
+    );
+    assert!(
+        !model_tls_posture_violations(&mk(&format!("{good}fn d() {{ accept_invalid_certs(); }}")))
+            .is_empty()
+    );
+    // getter 形と、最初の `#[cfg(test)]` 以降のテスト用 `https_only(false)` は許容する。
+    let allowed = format!(
+        "{good}fn g() {{ t.disable_verification(); }}\n#[cfg(test)]\nmod l {{ fn x() {{ c.https_only(false); }} }}\n"
+    );
+    assert!(model_tls_posture_violations(&mk(&allowed)).is_empty());
+}
+
+/// `ureq` は `src/model/transport.rs` のトークンにだけ現れ（他の src ファイルには出ない）、
+/// 結合テスト（`tests/*.rs`。`[dependencies]` を参照できる）にも出ない。漏洩経路を塞ぐ。
+#[test]
+fn ureq_is_named_only_in_transport_rs() {
+    let mut offenders: Vec<String> = Vec::new();
+    visit_rs_files(&facade_crate_root().join("src"), &mut |p, c| {
+        let is_transport = p.ends_with("model/transport.rs");
+        if !is_transport && tokens_of(c).iter().any(|t| t == "ureq") {
+            offenders.push(p.display().to_string());
+        }
+    });
+    visit_rs_files(&facade_crate_root().join("tests"), &mut |p, c| {
+        if tokens_of(c).iter().any(|t| t == "ureq") {
+            offenders.push(p.display().to_string());
+        }
+    });
+    assert!(
+        offenders.is_empty(),
+        "ureq が transport.rs 以外に現れた: {offenders:?}"
+    );
+}
+
+/// 正の doctest プローブ（#3127）: `download_with` の利用例が実在し、コンパイル・実行される
+/// 形（`no_run`／`ignore` でない）で、ネットワーク不要の拒否例（`InvalidUrl`）を含む。
+#[test]
+fn model_registry_download_usage_doctest_is_present_and_compiled() {
+    let content = read_to_string_or_panic(&model_rs_path());
+    let v = doctest_probe_violations(
+        "ModelRegistry::download_with の doc",
+        &doc_lines_above_fn(&content, "pub fn download_with("),
+        &[
+            "use fandhe_ai::model::",
+            "Sha256Pin::from_hex",
+            "DownloadOptions::default()",
+            ".download_with(",
+            "InvalidUrl",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    let v2 = doctest_probe_violations(
+        "ModelRegistry::download の doc",
+        &doc_lines_above_fn(&content, "pub fn download("),
+        &["use fandhe_ai::model::", ".download(", "InvalidUrl"],
+    );
+    assert!(v2.is_empty(), "{v2:?}");
+}
 // ============================================================================
 // compat::model_io 公開面の機械検査（イシュー #2369・親 #2362）
 // ============================================================================

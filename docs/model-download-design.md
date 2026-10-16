@@ -921,7 +921,7 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 - `ModelError::Http` は §5 案の `url` を持たない（A09。URL にクエリ・資格情報が含まれうる）。ureq のエラーは `Display` を通さず静的メッセージの `io::Error`（種別のみ保持）へ変換する
 - `SizeLimitExceeded` は新設せず既存 `TooLarge` を再利用
-- `DownloadOptions::new` は設けず `Default` のみ（api_surface の `pub fn new` 件数 1 の正ガードを保つ）
+- `DownloadOptions::new` は設けず `Default` のみ（api_surface が `impl DownloadOptions` ブロック内に `pub fn new` が無いことを直接検査する正ガードを保つ）
 
 ### 19.4 `openat2` を使わない理由
 
@@ -981,3 +981,36 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 - 単体テストは転送をモックし、実ファイルシステムで 304 再利用・改変後の取り直し・pin 優先・リンク拒否・破損 JSON のフォールバックを検証した。権限エラーは 0500 ディレクトリで実際に検証する（root 実行時はスキップ）。実際の ENOSPC は CI で再現できないため、`open_dir` への `io::Error` 注入による単体の水準にとどめた。実ネットワーク・TLS の実接続は #3173 で追跡済み
 - 後続候補（起票はユーザー承認待ちのため未起票）: (a) ヘッダだけを読むストリーミング検証（`onnx-interop` の `serde_json` を通常依存へ格上げする判断が要る。所有者承認が前提）、(b) `save`／`load` の FS エラーの型付き化と `save` の dirfd 化（§19.6）
+
+## 21. #3127 実装記録（ループバック HTTP モックのテスト・実通信 opt-in テスト・公開面ガード）
+
+公開面（アイテム・メソッド・シグネチャ）・依存・`Cargo.toml`・`Cargo.lock` は変更していない。変えたのは `download`／`download_with` の rustdoc 利用例（ネットワーク・FS を使わず実行される形）とテスト基盤のみ。
+
+### 21.1 §6「テスト経路の分離」の実装
+
+- `transport.rs` の `UreqTransport::get` を、本番専用の前段 `checked_https_uri`（https・資格情報の再照合）と共有の後段 `perform`（残り時間・`If-None-Match`・`timeout_global(remaining)`・応答から `RawResponse` への変換）に分けた。本番 `get` は両者の合成で挙動は不変。`build_agent`／`check_invariants` は変更していない
+- テスト専用の `#[cfg(test)] mod loopback`（`PlaintextLoopbackTransport`）は同じ前段を通した後、ホストが `127.0.0.1`／`[::1]` の場合に限りスキームだけを `http://` に置き換えて `perform` を呼ぶ。`https_only(false)` はこのモジュールの agent にだけあり、本番部分には現れない（`api_surface.rs` が固定）。呼び出し側（`download_via`／`fetch`／`resolve_location`）に渡る URL は常に https 検証済みで、`Location: http://...` は本番と同じ経路で拒否される
+- モックサーバ（`src/model/test_http_server.rs`。std のみ・1 接続 1 リクエスト・`Connection: close`・受信リクエストの記録）と結合テスト（`src/model/loopback_tests.rs`）は `model` の private 子モジュール（`cfg(all(test, unix))`）。`model.rs` 本体に `ureq` は現れない
+
+### 21.2 ループバックで新たに確認できる経路
+
+プロセス内モックでは通らない実コード経路: 実ソケット上の `If-None-Match` 付与（受信リクエストで検証）、`Location`／`ETag` の実ヘッダ値、複数行 `Content-Encoding` の `collect_content_encoding`、チャンク応答での `content_length() == None`、本文途中切断時の `SanitizedReader`、応答待ち・本文受信中のタイムアウト。シナリオ: 200・304 再利用・304 でキャッシュ改変時の無条件再取得・404・https リダイレクト追従・`http://` への遷移拒否（別サーバへ接続しない）・6 ホップ連鎖・途中切断・サイズ超過（宣言長／チャンク）・pin 一致不一致（新規取得と 304 の両経路）・`Content-Encoding`・進捗。
+
+### 21.3 実測した観測
+
+- 宣言長より短い本文で切断された場合、観測したエラーは `ModelError::Network`（`io::ErrorKind::UnexpectedEof`）。ureq が自前の `Content-Length` 照合（`ContentLengthMismatch`）より先に切断を報告するため、`ContentLengthMismatch` は転送層が切断を報告しないモック経路でのみ到達する。いずれの場合も何も公開されず、既存モデル・一時ファイルは不変
+- 本文受信中の全体期限切れは `io::Error` の種別 `Other`（`TimedOut` ではない）で `Err` になる。ハングしないこと（数秒内に `Err`）だけを固定した。応答ヘッダ待ちの期限切れは `TimedOut`
+- 本番 `UreqTransport` を無応答のリスナーへ向けると、TLS ハンドシェイク待ちで `timeout_global(remaining)` が 30 秒のフェーズ上限より先に効き `TimedOut` になる
+
+### 21.4 再現できない範囲
+
+SYN 段階の純粋な接続タイムアウトはループバックで決定的に再現できない。接続拒否（既存テスト）と deadline による打ち切りで代替しており、実ネットワークでの接続タイムアウトは確認していない。
+
+### 21.5 実通信 opt-in テストと #3173 の分担
+
+`crates/facade/tests/model_download_real_network.rs`（`#[ignore]`・`cfg(unix)`）。`FANDHE_AI_DOWNLOAD_TEST_URL`／`FANDHE_AI_DOWNLOAD_TEST_SHA256` の対（片方だけは panic・両方未設定は skip 表示で成功。`make test-ignored` を落とさない）と、任意の `FANDHE_AI_DOWNLOAD_TEST_BAD_TLS_URL`（`Err(Network)`）を使う。手順はルート README。環境変数の値・URL・pin は出力しない。GB10・macOS 実機での実行と確認は #3173 で行い、本イシューでは実通信を実行していない（環境変数なしの skip 経路のみ確認）。
+
+### 21.6 `api_surface.rs` に追加したガードと限界
+
+`DownloadOptions`／`DownloadProgress` のフィールド・`#[non_exhaustive]`・`pub fn new` 非追加の正ガード（自己テスト付き）、`FORBIDDEN_SIGNATURE_SUBSTRINGS` の実効性テスト、`src/model/*.rs` に制限なし `pub` が無く `pub mod` も無いこと、TLS 検証無効化手段が無いこと（`disable_verification` は getter 形のみ・`danger`／`insecure`／`accept_invalid` 識別子なし・`transport.rs` 本番部分の `https_only(false)` 不在と固定構成の存在）、`ureq` トークンが `transport.rs` 以外の `src/`・`tests/*.rs` に無いこと、`download`／`download_with` の利用例 doctest の正プローブ。限界: トークン列走査のため、別名の再エクスポートや文字列経由の構成は検出しない。`libc` は他テストが正当に参照するため `tests/` 側の走査対象にしていない。
+

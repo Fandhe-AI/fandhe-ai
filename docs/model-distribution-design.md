@@ -42,7 +42,7 @@
 
 ### 2.2 リモート取得・manifest
 
-`docs/model-download-design.md`（#2088・設計記録のみ・コード未実装）が整理した要点:
+`docs/model-download-design.md`（#2088・設計記録。実装は #3125〜#3127 で完了し、#3127 のテスト範囲〈ループバックモック・実通信 opt-in〉は同 doc §21）が整理した要点:
 
 - 公開 API 案: `ModelRegistry::download(&self, url: &str, name: &str, version: &str) -> Result<(), ModelError>`（簡易形。pin を持たないため保証は破損・部分改変の検出まで）と、呼び出し側が信頼済み `sha256` pin・進捗コールバックを渡す本体 `ModelRegistry::download_with(&self, url, name, version, options: DownloadOptions<'_>)` の対（`DownloadOptions::expected_sha256(Sha256Pin)`・`progress(...)`。`Sha256Pin::from_hex` は 64 桁 16 進以外を接続前に拒否。PyTorch `download_url_to_file(..., hash_prefix)`・Keras `get_file(..., file_hash)` と同型。同 doc §5）。`url` は **HTTPS URL 限定**（`http`・`file`・`ftp` 等は fail-closed で拒否。リダイレクト先にも同じ検証を通す。同 doc §6）。
 - **manifest（キャッシュ有効判定）**: `<name>/<version>/download.json`（`serde_json`。許容依存区分内）に `url`・`etag`・`content_length`・`sha256`・`fetched_at` を保存し、条件付き GET（`If-None-Match`）で再取得の要否を判定する。304 応答時も保存済み `sha256` によるローカル再検証を必須とし、無条件の再利用シグナルとしては扱わない。**この保存値は破損・部分改変（片側のみの改変）の検出用に限られる**: `download.json` は `model.safetensors` と同じ書き込み可能なキャッシュ領域に置かれるため、両ファイルをともに書き換えられる攻撃者に対する意図的な改竄検知の信頼根にはならない。真正性（意図的改竄の検知）が必要な場合は、呼び出し側が明示的に与える信頼済み `sha256` pin を根拠とする（pin 指定時は保存値ではなく pin に対して検証する。`docs/model-download-design.md` §5「304 応答時のローカルキャッシュ再検証」・§6 (A08)）。

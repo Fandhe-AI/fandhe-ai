@@ -559,6 +559,8 @@ P1」）を受けた是正である。
 
 **適用記録（イシュー #3119・#3120。承認: 同 #3118 の D-A）**: `ModelRegistry::save`・`ModelError::{EmptyModel, Save}` を公開済み（追加のみ）。対応範囲は `docs/facade-model-registry-decision.md` §16.9 で **Linux x86_64／aarch64 のみ**へ狭めた（上の #3118 記録の「macOS を含む」を置き換える。同記録の本文は書き換えない）。`api_surface.rs` が公開面ちょうど 8 件・`impl ModelRegistry` の pub fn 6 件を正ガードで固定し、`save` の関数ポインタ型到達プローブと利用例 doctest の実在検査を持つ。実装記録は同 doc §17。
 
+**テスト記録（イシュー #3127）**: `ModelRegistry::download`／`download_with` の公開面の追加なし。ループバック HTTP モック・実通信 opt-in テスト・`api_surface.rs` の正ガードで公開形を固定した（`docs/model-download-design.md` §21）。
+
 **適用記録（イシュー #3112・親 #3108。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6207013704` の項 4）**: paged attention（K-3）を facade へ公開した。追加した名前は `fandhe_ai::nn::kv_cache::{PagedKvCache, PagedKvCacheConfig}`（既存の純再エクスポート 1 文を 5 名形へ拡張）、`Tape::new_paged_kv_cache`、`Tape::paged_attention_forward`（いずれも `&self.0` を渡す 1 行委譲）。autodiff 側は `StatefulAttention::forward_paged` を追加。推論専用（`Tensor` 入出力）。公開しないもの: `PagedKvCacheReference`・`paged_attention_reference`・`DEFAULT_BLOCK_SIZE`・tensor-core の `PagedKvLayout` 等。`Tape::new_paged_kv_cache` は設計記録 §6 に形が無く、所有者確認を依頼している（設計記録 §13 D5）。`fandhe-ai =0.11.0` に対して追加のみ。反転・追加したガードは設計記録 §13 に列挙。
 
 ### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本・オプション型を取る 5 本と 5 型〈#2854 で公開済み〉・行 30 の gradcheck〈#2847 で公開済み〉は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。公開形は `compat-sequential-3d-fold-lrn-layers-decision.md`〈#3025〉を正とする〉）

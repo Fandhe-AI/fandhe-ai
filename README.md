@@ -269,6 +269,19 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 [`docs/backend-metal-real-device-testing.md`](docs/backend-metal-real-device-testing.md)・
 [`docs/performance-targets.md`](docs/performance-targets.md) を参照。
 
+### 実通信でのモデル取得確認（opt-in）
+
+`ModelRegistry::download_with` の実ネットワーク・実 TLS での確認は `#[ignore]` テスト（`crates/facade/tests/model_download_real_network.rs`、unix 限定）で行います。通常 CI（外部へ通信しない）では実行されず、ループバック HTTP モックのテストが代わりに CI で動きます。URL と SHA-256 は環境変数だけで渡してください（値をリポジトリ・CI へ書かない）。
+
+```bash
+FANDHE_AI_DOWNLOAD_TEST_URL=<https の safetensors URL> \
+FANDHE_AI_DOWNLOAD_TEST_SHA256=<64 桁 16 進> \
+FANDHE_AI_DOWNLOAD_TEST_BAD_TLS_URL=<証明書不正のホスト URL。任意> \
+cargo test -p fandhe-ai --test model_download_real_network -- --ignored --nocapture
+```
+
+URL と SHA-256 は両方設定するか両方未設定にします（両方未設定なら skip 表示で成功し、`make test-ignored` を落としません。片方だけは設定ミスで失敗します）。GB10・macOS 実機での実行と確認は #3173 で行います。
+
 ## CI
 
 - CI ランナー方針は GitHub ホステッド（`ubuntu-latest`）既定へ移行済み（public 区分。例外は ai-review の codex 実行ジョブのみ。#457 Phase 1〜3 完了。逆戻り防止は `runner-policy` ジョブ〈#472〉が fail-closed で検知。詳細 → [`.claude/rules/ci.md`](.claude/rules/ci.md)）
