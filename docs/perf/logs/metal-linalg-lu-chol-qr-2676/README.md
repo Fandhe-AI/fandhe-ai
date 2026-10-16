@@ -26,7 +26,8 @@ Metal の eigh は決定記録 §2 のとおり対象外（trait 既定のまま
 - `linalg.rs`: `decode_lu_status`・`decode_cholesky_status`・`det_from_lu`・`clamp_tg_width`・`validate_launch_stride_headroom`（Linux で単体テスト）。
 - `context_cache::cached_linalg`、`ops.rs` の 5 演算を実起動へ置換。エラー写像: solve／inv のピボット 0 は `InvalidArgument`、
   det のピボット 0 は `0.0`、非正定値は `InvalidArgument`、デバイス失敗は `map_metal_error`。
-- 実機の数値一致（`--ignored` 全件）は **未実測**（#3139）。
+- 実機の数値一致（`--ignored` 全件）は **未実測**。計測の事前登録・入力集合・記録は `docs/perf/logs/metal-linalg-parity-3139/`（#3139）。
+  #3139 で入力集合を是正した（QR 17×17 を κ₂ ≤ 1e3 の入力へ差し替え・det は n ≤ 17・QR に 1e±20 倍と `1e20 × I₂` を追加。tolerance は不変）。
 
 ## 測定コマンド（実機）
 
@@ -42,4 +43,5 @@ cargo test -p fandhe-ai-backend-metal --release --test linalg_parity -- --ignore
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 2026-10-11 | Apple M4 Max | `pipeline_compiles_on_device` | pass | MSL 4 カーネルのコンパイルとパイプライン構築のみ（起動なし） |
-| 未実測 | Apple M4 Max | parity（`--ignored` 全件） | 未実測 | #3139 で実測 |
+| 未実測 | Apple M4 Max | parity（`--ignored` 全件） | 未実測 | #3139 で Mac mini に置き換え |
+| 未実測（2026-10-16 時点） | Mac mini（Apple M4） | parity（`--ignored` 全件） | 未実測 | 実機に到達できず未実行。事前登録 `metal-linalg-parity-3139/RULE.txt`。Mac 側での実行を申し送り |

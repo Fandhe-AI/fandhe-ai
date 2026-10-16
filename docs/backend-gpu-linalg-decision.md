@@ -124,6 +124,14 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 - **カーネル起動（新規 `unsafe`）はユーザー承認が確認できず未実装**。ゲート ON でも fail-closed の `Unsupported`。
   承認依頼と残作業は同 perf log。実機 parity は未実測。
 
+### #3139（Metal 実機 parity・Stage C）の実施内容
+
+- 実機テストの入力集合を §5 に揃えた（正本 `crates/backend-metal/tests/linalg_parity_inputs.rs`・κ₂ ≤ 1e3 ガード
+  `linalg_parity_inputs_guard.rs`）。QR 17×17 の旧入力は κ₂ ≈ 3.5e16 で §5 に反するため是正、det は n ≤ 17 に限定
+  （n=64 は f32 範囲外で `inf - inf = NaN`）、QR に 1e±20 倍と `1e20 × I₂`（finite・R 対角非 0・正規化 R parity 付き）を追加。
+  tolerance・判定方式（§5）は不変。
+- Mac mini 実機の結果は **未実測**（実機に到達できなかった）。事前登録と記録は `docs/perf/logs/metal-linalg-parity-3139/`。
+
 ### #3135（CUDA LU 系 Stage B）の実施内容
 
 - `CudaLinalg::launch_lu`（CU-1）・`run_lu_solve_f32`（CU-2 を含む）・`run_lu_inv_f32`・`run_lu_det_f32` を追加し、

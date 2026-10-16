@@ -1,0 +1,49 @@
+事前登録規則（イシュー #3139 Stage C: Metal GPU 線形代数の実機 parity）
+宣言日時（UTC）: 2026-10-16T21:01Z（実機実行より前。実機結果を見た後に入力・判定を変えない）
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  d7d8d503ed3085783cb5bb11dc504ea23af9a194
+  以降のコミットは docs のみ。実機へ転送する展開ツリーの .rev-stamp は、このコミット以降で
+  crates/ 配下がこのコミットと同一内容であることを条件とし、実行時の HEAD フル SHA を .rev-stamp に書き、
+  README に記録する。
+
+コマンド:
+  CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai-backend-metal --release --test linalg_parity -- --ignored --nocapture
+  （計測中は他のビルドを並走させない。性能は測らず pass／fail のみ見る）
+
+判定:
+  次の 4 件がすべて pass すること。
+    pipeline_compiles_on_device
+    cholesky_matches_cpu_on_device
+    lu_family_matches_cpu_on_device
+    qr_matches_cpu_on_device
+  すなわち、すべての assert_parity の fail が 0 件（RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD は不変。
+  baseline 方式へは移らない。docs/backend-gpu-linalg-decision.md §5）で、QR の
+  「R と Q が有限」「R の対角が CPU 参照・実測とも 0 でない」「倍率で正規化した R の parity」も成立すること。
+  他の 2 件（status_mapping_end_to_end_on_device・gate_on_non_empty_does_not_return_unsupported）は
+  実行・記録するが parity 判定には含めない。
+
+入力集合（正本: crates/backend-metal/tests/linalg_parity_inputs.rs。κ₂ ≤ 1e3 は
+tests/linalg_parity_inputs_guard.rs が fail-closed に検査）:
+  - サイズ n = 1, 2, 8, 17, 64
+  - 倍率 1.0, 1e20, 1e-20（行列全体）
+  - cholesky: spd(n) × 倍率、および 1e20 × I2
+  - inv・solve（k = 1, 3）: diag_dominant(n) × 倍率、および 1e20 × I2
+  - det: spd(n)・diag_dominant(n) の等倍のみ、n <= 17
+  - QR: 形状 (8,3)・(3,8)・(17,17) × 倍率、および 1e20 × I2
+
+計測前の是正（実機結果を見る前の決定）:
+  1. QR の 17x17 入力は旧式 (((i*37+11)%23)-11)/7 のみだと数値的に特異（κ₂ ≈ 3.5e16。
+     ガードの上界でも 4.4e4 > 1e3 で fail）で §5 の κ ≤ 1e3 に反する。対角へ 2n を加えて是正した。
+  2. det の判定は n <= 17 に限る。det(spd(64)) ≈ 1e116 等は f32 範囲外で CPU・Metal とも inf となり、
+     compare_pairs の inf - inf = NaN が fail に倒れ、カーネルと無関係に fail するため
+     （linalg_model_parity.rs と同じ根拠）。
+  3. QR に 1e±20 倍と 1e20 × I2 を追加した（旧テストは倍率 1.0 のみ）。
+
+fail 時の扱い:
+  tolerance・κ 上限・判定方式・入力は変えない。fail_count・max_abs_diff 等を引用し、原因の仮説と
+  カーネル側の是正方針を README と PR に「要対応」として記録する。Issue の起票・コメント、
+  baseline 化はユーザー承認なしでは行わない。
