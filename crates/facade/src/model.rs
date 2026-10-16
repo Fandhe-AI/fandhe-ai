@@ -751,6 +751,44 @@ impl ModelRegistry {
     /// - `fsync` はしない（電源断に対する耐久性は保証しない。原子性は
     ///   `rename` による）
     ///
+    /// # 例
+    ///
+    /// 一時ディレクトリをキャッシュルートにして保存・再読込する（`$HOME` には
+    /// 触れない）。対応外プラットフォーム（macOS・Windows 等）では `Unsupported`
+    /// になるため何もしない。
+    ///
+    /// ```
+    /// use fandhe_ai::Tensor;
+    /// use fandhe_ai::model::{ModelError, ModelRegistry};
+    /// use std::collections::HashMap;
+    ///
+    /// let nanos = std::time::SystemTime::now()
+    ///     .duration_since(std::time::UNIX_EPOCH)
+    ///     .map(|d| d.as_nanos())
+    ///     .unwrap_or(0);
+    /// let root = std::env::temp_dir().join(format!(
+    ///     "fandhe-ai-model-save-doc-{}-{nanos}",
+    ///     std::process::id()
+    /// ));
+    /// let registry = ModelRegistry::with_cache_dir(root.clone());
+    /// let mut state = HashMap::new();
+    /// state.insert("w".to_string(), Tensor::new(vec![1.0_f32, 2.0], &[2])?);
+    /// match registry.save("mlp", "v1", &state) {
+    ///     Ok(()) => {
+    ///         let loaded = registry.load("mlp", "v1")?;
+    ///         assert_eq!(loaded.len(), 1);
+    ///         assert_eq!(
+    ///             registry.available_models(),
+    ///             vec![("mlp".to_string(), vec!["v1".to_string()])]
+    ///         );
+    ///     }
+    ///     Err(ModelError::Io(e)) if e.kind() == std::io::ErrorKind::Unsupported => {}
+    ///     Err(e) => return Err(e.into()),
+    /// }
+    /// let _ = std::fs::remove_dir_all(&root);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// - [`ModelError::InvalidComponent`] — `name`・`version` が許可文字集合外
