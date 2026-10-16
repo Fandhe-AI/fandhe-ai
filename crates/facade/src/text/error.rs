@@ -26,7 +26,8 @@ use crate::ShapeError;
 pub enum TextError {
     /// バッチ要素数（`transform`）またはコーパス件数（`adapt`）が上限超過。
     BatchTooLarge { len: usize, max: usize },
-    /// `index` 番目の入力文字列のバイト数が上限超過。
+    /// `index` 番目の入力文字列のバイト数が上限超過。`Standardize::UnicodeLower` では
+    /// `len` は標準化後のバイト数（標準化で伸びた結果が上限を超えた場合）。
     InputTooLong {
         index: usize,
         len: usize,

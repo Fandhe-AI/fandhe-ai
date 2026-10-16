@@ -8507,6 +8507,107 @@ fn kv_cache_is_reachable_via_facade_only() {
         .expect("decode");
     assert_eq!(y.to_tensor().shape(), &[1usize, 1, 4]);
     assert_eq!(sa.seq_len(), 3);
+
+    // イシュー #3096: 外部キャッシュ版の署名固定と実行プローブ。
+    let _sig2: for<'t> fn(
+        &'t Tape,
+        &StatefulAttention,
+        &Var<'t>,
+        &mut KvCache,
+    ) -> Result<Var<'t>, AutodiffError> = Tape::stateful_attention_forward_with_cache;
+    let sa2 = StatefulAttention::from_config(&cfg, 0).expect("構築");
+    let mut ext = KvCache::new();
+    tape.stateful_attention_forward_with_cache(&sa2, &tape.var(&x), &mut ext)
+        .expect("external prefill");
+    tape.stateful_attention_forward_with_cache(&sa2, &tape.var(&t), &mut ext)
+        .expect("external decode");
+    assert_eq!(ext.seq_len(), 3);
+    assert_eq!(sa2.seq_len(), 0);
+    assert!(sa2.cache().is_empty());
+}
+
+// ---------------------------------------------------------------------
+// イシュー #3096（親 #3094）: 外部 KvCache 入口の正ガード。設計記録 §19.8。
+// 検出範囲の限界: `StatefulAttention::forward_with_external_cache` の第 1 引数は生の autodiff
+// `Tape` で facade から名指しできないため、署名の関数ポインタ固定は Tape 側のみ。autodiff 側は
+// 宣言インベントリ・薄い委譲ガード・pub fn 集合の固定・実行プローブで補う。
+// ---------------------------------------------------------------------
+
+/// `Tape::stateful_attention_forward_with_cache` の本体が 1 行委譲であることを固定する。
+#[test]
+fn tape_stateful_attention_forward_with_cache_is_thin_delegation() {
+    let content = read_to_string_or_panic(&lib_rs_path());
+    let cleaned: String = strip_comments_and_literals(&content).into_iter().collect();
+    let tokens = tokenize_including_punctuation(&cleaned);
+    assert_eq!(
+        determinism_fn_body(&tokens, "stateful_attention_forward_with_cache").as_deref(),
+        Some("sa . forward_with_external_cache ( & self . 0 , x_new , cache )"),
+        "Tape::stateful_attention_forward_with_cache の本体が承認形（1 行委譲）と一致しない"
+    );
+}
+
+/// 外部キャッシュ入口の `fn` 宣言が承認 2 件ちょうど（過不足とも fail-closed）。
+#[test]
+fn workspace_declares_external_cache_entries_only_in_approved_locations() {
+    let found = scan_workspace_fn_declarations(&[
+        "stateful_attention_forward_with_cache",
+        "forward_with_external_cache",
+    ]);
+    let expected: std::collections::BTreeMap<String, usize> = [
+        (
+            "facade/src/lib.rs::stateful_attention_forward_with_cache".to_string(),
+            1usize,
+        ),
+        (
+            "autodiff/src/nn/attention.rs::forward_with_external_cache".to_string(),
+            1usize,
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        found, expected,
+        "外部キャッシュ入口の宣言集合が承認形と一致しない: {found:?}"
+    );
+}
+
+/// `StatefulAttention` の公開メソッド集合が 8 件ちょうど（#3096。`new`／`mha` は P2 の残課題のまま）。
+#[test]
+fn stateful_attention_public_methods_are_pinned() {
+    let mut found: Vec<String> = Vec::new();
+    let mut blocks = 0usize;
+    let Ok(entries) = std::fs::read_dir(workspace_crates_dir()) else {
+        panic!("workspace crates ディレクトリが読めない");
+    };
+    for e in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        visit_rs_files(&e.join("src"), &mut |_p, content| {
+            let tokens = tokens_of(without_test_mod(content));
+            blocks += pb_find_seq(&tokens, &["impl", "StatefulAttention", "{"]).len();
+            found.extend(pb_pub_fn_names_in_inherent_impls(
+                &tokens,
+                "StatefulAttention",
+            ));
+        });
+    }
+    found.sort();
+    assert!(
+        blocks >= 1,
+        "impl StatefulAttention が見つからない（検査対象の見失い）"
+    );
+    assert_eq!(
+        found,
+        [
+            "cache",
+            "forward",
+            "forward_with_external_cache",
+            "from_config",
+            "mha",
+            "new",
+            "reset_cache",
+            "seq_len"
+        ],
+        "StatefulAttention の公開メソッドが承認形と不一致"
+    );
 }
 // ---------------------------------------------------------------------
 // イシュー #2580: #2579 で導入した KV キャッシュ正ガードの補強（追加のみ。既存ガードの期待集合・
@@ -8579,6 +8680,18 @@ fn kv_cache_usage_doctests_are_present_and_compiled() {
             "use fandhe_ai::nn::kv_cache::",
             "StatefulAttention::from_config",
             "stateful_attention_forward",
+            "seq_len",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    // イシュー #3096: 外部キャッシュ版の利用例も実在・有効であること。
+    let v = doctest_probe_violations(
+        "nn/kv_cache.rs モジュール doc（外部キャッシュ）",
+        &inner_doc_lines(&content),
+        &[
+            "use fandhe_ai::nn::kv_cache::",
+            "KvCache::new",
+            "stateful_attention_forward_with_cache",
             "seq_len",
         ],
     );
@@ -39651,7 +39764,8 @@ fn speculative_scheduler_public_shape_is_pinned() {
 }
 
 /// 否定プローブ: `KvCache` の公開メソッド集合が承認形（8 件）ちょうどで、`truncate`／`set_*` 等の
-/// 書き換え経路が増えていないこと（設計記録 §17.1 論点 3・4 は保留。`KvCache` は不変）。
+/// 書き換え経路が増えていないこと（論点 4 は維持〈§17.1・facade-speculative-decoding-batching-design §19.4〉。
+/// 論点 3 は §19 で解消済みで、到達経路は外部キャッシュ入口、巻き戻しは非公開の `kv_rewind`。`KvCache` は不変）。
 /// workspace の `crates/*/src` 全体の `impl KvCache` ブロックを走査する。
 #[test]
 fn kv_cache_public_methods_stay_unchanged_for_speculative_scheduler() {
@@ -39684,7 +39798,7 @@ fn kv_cache_public_methods_stay_unchanged_for_speculative_scheduler() {
             "seq_len",
             "v"
         ],
-        "KvCache の公開メソッドが承認形と不一致（truncate 等の追加は論点 4。承認事項）"
+        "KvCache の公開メソッドが承認形と不一致（truncate 等の追加は論点 4（維持）。承認事項）"
     );
 }
 
@@ -39972,8 +40086,9 @@ fn facade_exposes_text_items_only_in_approved_shape_detects_each_category() {
     );
 }
 
-/// 公開形の固定: `Standardize` 4・`Split` 3・`TextError` 17 variant のインベントリ。
-/// callable を受ける variant と Unicode 系 variant を足すと、ここで落ちる（論点 3 の Unicode 部分・論点 8）。
+/// 公開形の固定: `Standardize` 5・`Split` 4・`TextError` 17 variant のインベントリ。
+/// 承認済み Unicode 2 variant（`UnicodeLower`・`UnicodeWhitespace`。#3089）以外の variant と、
+/// callable を受ける variant を足すと、ここで落ちる（論点 8）。
 #[test]
 fn text_public_shape_is_pinned() {
     let files = facade_src_files();
@@ -39983,12 +40098,13 @@ fn text_public_shape_is_pinned() {
             "None",
             "Lower",
             "StripPunctuation",
-            "LowerAndStripPunctuation"
+            "LowerAndStripPunctuation",
+            "UnicodeLower"
         ]
     );
     assert_eq!(
         text_enum_variants(&files, "Split"),
-        vec!["None", "Whitespace", "Character"]
+        vec!["None", "Whitespace", "Character", "UnicodeWhitespace"]
     );
     assert_eq!(
         text_enum_variants(&files, "TextError"),

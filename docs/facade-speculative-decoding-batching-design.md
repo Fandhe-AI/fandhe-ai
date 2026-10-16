@@ -696,3 +696,11 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 - A08: 承認を代行しない（21.1）。ruleset・branch protection・リポジトリ設定は変更しない。
 - A02: `Generator` は非暗号（xorshift64*）で、生成 token をセキュリティ用途に使わない既存の注記を引き継ぐ。
 - 論点 2・3・5・7・8 は保留のまま（§17.7）。
+
+## 22. 実装記録（#3096・親 #3094）
+
+- 実装: §19.4 の 2 メソッド（`StatefulAttention::forward_with_external_cache`・`Tape::stateful_attention_forward_with_cache`。いずれも 1 行委譲）。承認根拠は §19.1 の D-A の範囲に限る
+- §19.9 による読み替え: `KvCache` の公開メソッドは追加なし（8 件のまま）、巻き戻しフックは非公開の `kv_rewind` のまま
+- §19.8 のうち担当が #3096 の行: `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler` はアサーション無変更（doc のみ更新）。薄い委譲ガード・宣言インベントリ・`StatefulAttention` の `pub fn` 集合固定・`kv_cache_is_reachable_via_facade_only` への署名と実行プローブ・`kv_cache_usage_doctests_are_present_and_compiled` への必須トークンを追加した。autodiff 側メソッドの署名は第 1 引数が生の `Tape` で facade から名指しできないため、委譲ガード・インベントリ・実行プローブで補う
+- 申し送り: §17.5 の rustdoc 置き換えとフィクスチャ移行は #3097、facade だけで書く成功例 doctest は #3098
+- 依存・tolerance・baseline・`unsafe`・`docs/spec` は変更なし

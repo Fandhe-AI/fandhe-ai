@@ -21,6 +21,13 @@
 //! `forward_with_cache` は公開しない。構築は `StatefulAttention::from_config`
 //! （`MultiheadAttention` 型を facade が公開しないための入口）を使う。
 //!
+//! 外部の `KvCache` を進める版として [`crate::Tape::stateful_attention_forward_with_cache`]
+//! も提供する（イシュー #3096。`docs/facade-speculative-decoding-batching-design.md` §19.4）。
+//! 内部キャッシュ版は `sa` 自身のキャッシュを進め（`&mut sa`）、外部キャッシュ版は
+//! `&sa` と `&mut KvCache` を受けて `sa` の内部キャッシュに触れない。
+//! `AutoregressiveModel::forward_step` の中で `caches[i]` を進める用途は後者を使う。
+//! `KvCache` の公開メソッドは増やさず、巻き戻しフックも公開しない（同 §19.9）。
+//!
 //! 公開しないもの: `MultiheadAttention`・`MultiheadAttentionVars`・`forward_with_cache`。
 //!
 //! # 既知の制限
@@ -54,6 +61,32 @@
 //! let y = tape.stateful_attention_forward(&mut sa, &tape.var(&t)).unwrap();
 //! assert_eq!(y.to_tensor().shape(), &[1usize, 1, 4]);
 //! assert_eq!(sa.seq_len(), 4);
+//! ```
+//!
+//! # 利用例（外部キャッシュ）
+//!
+//! ```
+//! use fandhe_ai::nn::kv_cache::{KvCache, MultiheadAttentionConfig, StatefulAttention};
+//! use fandhe_ai::Tensor;
+//!
+//! let tape = fandhe_ai::tape();
+//! let sa = StatefulAttention::from_config(&MultiheadAttentionConfig::new(4, 2), 0).unwrap();
+//! let mut cache = KvCache::new();
+//! let other = KvCache::new();
+//!
+//! // prefill: x は [B=1, L=3, E=4]
+//! let x = Tensor::new((0..12).map(|i| i as f32 * 0.1).collect::<Vec<f32>>(), &[1, 3, 4]).unwrap();
+//! tape.stateful_attention_forward_with_cache(&sa, &tape.var(&x), &mut cache).unwrap();
+//! assert_eq!(cache.seq_len(), 3);
+//!
+//! // decode: 1 トークン
+//! let t = Tensor::new(vec![0.1f32, 0.2, 0.3, 0.4], &[1, 1, 4]).unwrap();
+//! tape.stateful_attention_forward_with_cache(&sa, &tape.var(&t), &mut cache).unwrap();
+//! assert_eq!(cache.seq_len(), 4);
+//!
+//! // sa 自身と別のキャッシュは進まない
+//! assert_eq!(sa.seq_len(), 0);
+//! assert_eq!(other.seq_len(), 0);
 //! ```
 
 pub use fandhe_ai_autodiff::nn::{KvCache, MultiheadAttentionConfig, StatefulAttention};
