@@ -186,6 +186,13 @@ required by package `fandhe-ai-autodiff v0.3.0 (crates/autodiff)`
 経路は存在しない。公開 6 クレートの `[dependencies]`（通常依存）に非公開
 クレートが現れないことも合わせて確認済み。
 
+追記（#3130）: `hf-hub`（`fandhe-ai-hf-hub`・HF Hub 連携の補助クレート）は
+`publish = false` で、facade への通常の path 依存だけを持つ。facade を含む公開
+7 クレートは hf-hub に依存しない（`crates/facade/tests/api_surface.rs` で担保）ため、
+公開順序・`release-all.yml`／`release.yml` への影響はない。公開（2 段目）に入る場合は、
+名前の空きの実測・公開順序への追加・path 依存への `version` 併記が必要
+（`docs/hf-hub-integration-design.md` §9.3・§9.7）。
+
 ## 7. 公開 6 クレートの `publish = true` 明示（非公開既定の上書き）
 
 ルート `Cargo.toml` の `[workspace.package]` は `publish = false`

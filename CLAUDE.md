@@ -4,8 +4,8 @@
 
 Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/fandhe-ai-spec](https://github.com/Fandhe-AI/fandhe-ai-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。本リポジトリ自体は **public** で、CI は GitHub ホステッド `ubuntu-latest` が既定（self-hosted の再導入は `runner-policy` ジョブが fail-closed で検知する。詳細 → `.claude/rules/ci.md`）。仕様 submodule（`docs/spec`）と旧実装（v1）は private を維持する（README「位置づけ」節）。
 
-- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root。compat 公開面〈`compat::array`・`compat::Sequential`〉を持つ）に加え、GitHub Pages 公開ツリー向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`）。**`facade` が唯一のサポートされる公開 API 面**であり `tensor-core`・`autodiff`・`backend-*` は内部クレート（範囲の正は `docs/compat-api-scope.md` §0）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない
-- crates.io 公開済みは 7 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`）で、`[package] name` は `fandhe-ai` prefix 付きの公開名（`docs/crates-io-naming-decision.md`）。`onnx-interop` は 7 クレート目として v0.10.0（2026-10-03）で初回公開済み。`guardrail`・`self-repair`・`bench-harness`・`docs-site` は非公開。facade からの ONNX import／export・safetensors save／load の公開範囲は `docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-safetensors-exposure-decision.md` を正とする
+- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root。compat 公開面〈`compat::array`・`compat::Sequential`〉を持つ）に加え、GitHub Pages 公開ツリー向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`）・`hf-hub`（12 個目・`publish = false`。HF Hub 連携の補助クレートで、facade の公開 API だけを使い facade の安定性保証の外にある。`docs/hf-hub-integration-design.md` §9）。**`facade` が唯一のサポートされる公開 API 面**であり `tensor-core`・`autodiff`・`backend-*` は内部クレート（範囲の正は `docs/compat-api-scope.md` §0）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない
+- crates.io 公開済みは 7 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`）で、`[package] name` は `fandhe-ai` prefix 付きの公開名（`docs/crates-io-naming-decision.md`）。`onnx-interop` は 7 クレート目として v0.10.0（2026-10-03）で初回公開済み。`guardrail`・`self-repair`・`bench-harness`・`docs-site`・`hf-hub` は非公開。facade からの ONNX import／export・safetensors save／load の公開範囲は `docs/facade-onnx-import-exposure-decision.md`・`docs/facade-onnx-export-exposure-decision.md`・`docs/facade-safetensors-exposure-decision.md` を正とする
 - crates.io への公開は一括リリース `.github/workflows/release-all.yml`（workflow_dispatch 1 回・environment `crates-io-release` 承認 1 回で公開クレートを依存順に publish）を基本とし、単一クレートの再実行・障害復旧には `.github/workflows/release.yml` を使う（いずれも `CARGO_REGISTRY_TOKEN`〈org secret〉・fail-closed ガード群）。手順・版数運用・公開履歴（v0.3.0〜v0.11.0）の正は `docs/crates-io-publishing-order.md` §9〜11・`.claude/rules/ci.md`
 - 依存は許容 11 区分のみ（本体 workspace の直接依存は第 1〜8・第 10・第 11 区分の 10 区分、第 9 区分はベンチ比較対象の独立ハーネス限定）・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
@@ -24,14 +24,15 @@ fandhe-ai/
 ├── .editorconfig            # インデント・改行規約
 ├── Dockerfile / compose.yaml # 環境非依存の開発コンテナ（CPU バックエンドのみ）
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）
-├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉・本体 workspace の許容直接依存〈第 1〜8・第 10・第 11 区分〉を =x.y.z 固定）
+├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉+ hf-hub〈非公開の補助クレート〉・本体 workspace の許容直接依存〈第 1〜8・第 10・第 11 区分〉を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
 ├── rust-toolchain.toml       # toolchain 単一真実源（stable + rustfmt/clippy。rust-base-ci 前提）
 ├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans）
 ├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c。default プリセット）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
 │                             # onnx-interop・guardrail・self-repair・bench-harness・facade（composition root・compat 公開面）・
-│                             # docs-site（GitHub Pages 公開ツリー向け SSG。開発者・CI 専用）
+│                             # docs-site（GitHub Pages 公開ツリー向け SSG。開発者・CI 専用）・
+│                             # hf-hub（HF Hub 連携の補助クレート。非公開）
 ├── scripts/
 │   ├── lib.sh / help.sh / setup.sh / rustup.sh / hooks.sh / lint.sh / deny.sh / doc-warnings.sh # Makefile の入口が呼ぶ共通ヘルパーと環境構築・品質チェック
 │   ├── build-cross.sh / build-no-cuda.sh / check-cross.sh / test-ignored.sh / bench-harness.sh / ci-checks.sh # 同上（クロスビルド・実機テスト・計測・CI 共用検査の一括実行）
@@ -97,7 +98,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | research | reference-researcher | cudarc/CUDA・objc2/Metal・safetensors/ONNX 等の外部仕様調査 | sonnet |
 | implement | core-builder | `tensor-core`・`autodiff`・workspace 骨格・`facade`（composition root・compat API 層） | sonnet |
 | implement | backend-builder | `backend-cpu`・`backend-cuda`・`backend-metal`・数値一致回帰テスト | sonnet |
-| implement | interop-builder | `onnx-interop`（safetensors / prost 自前取り込み） | sonnet |
+| implement | interop-builder | `onnx-interop`（safetensors / prost 自前取り込み）・`hf-hub`（HF Hub 連携） | sonnet |
 | implement | runtime-builder | `guardrail`・`self-repair`・`bench-harness` | sonnet |
 | testing | test-runner | テスト実行・追加・失敗解析（実機依存は `#[ignore]` 分離） | sonnet |
 | testing | bench-runner | ベンチ計測・性能回帰検出（5 回計測中央値・読み取り専用） | sonnet |

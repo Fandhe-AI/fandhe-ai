@@ -17,7 +17,7 @@ fandhe-ai リポジトリの横断調査を行う読み取り専用エージェ�
 
 ## 前提知識
 
-- 本リポは**完全自作コア**（Burn 等の既存 ML フレームワーク不使用）の Rust workspace。想定クレートは `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（唯一のサポートされる公開 API 面・composition root）の 10 個と、開発者・CI 専用の `docs-site`
+- 本リポは**完全自作コア**（Burn 等の既存 ML フレームワーク不使用）の Rust workspace。想定クレートは `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（唯一のサポートされる公開 API 面・composition root）の 10 個と、開発者・CI 専用の `docs-site`、HF Hub 連携の補助クレート `hf-hub`（非公開）
 - 要件は `docs/spec/04-requirements.md`、タスクは `docs/spec/05-tasks.md`、ロードマップは `docs/spec/06-roadmap.md` に定義されている
 - PoC 実施結果（実測値・確定判断）は `docs/spec/03-poc/` 配下にある（v2 系は `poc-v2-*`）
 - バックエンド切替は feature フラグなしの cfg ベース（`cudarc` 無条件依存＋動的ロード、`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5）

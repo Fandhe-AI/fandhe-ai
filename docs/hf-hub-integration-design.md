@@ -569,6 +569,9 @@ reference-researcher に一次資料の確認を委譲する。値は断定せ�
 | `docs/compat-api-scope.md` §0 | 変更不要（9.8 の (b) に沿う） | (a)／(b) をあらためて承認 |
 | `crates/facade/tests/api_surface.rs` | 変更不要（facade は別クレートに依存しない）。#3130 で確認 | — |
 
+反映記録（#3130）: 1 段目の雛形 `crates/hf-hub`（`fandhe-ai-hf-hub`・`publish = false`）を追加した。
+HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未取得のため未宣言で、#3131 の前提承認待ち。
+
 ### 9.8 `docs/compat-api-scope.md` §0 との整合
 
 - 選択肢は §6.3 のとおり (a) §0 に例外を加える／(b) 別クレートを facade の安定性保証の外にある補助クレートと位置づける
