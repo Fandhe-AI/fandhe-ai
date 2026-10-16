@@ -69,12 +69,10 @@ fn norm_inf(a: &[f64], n: usize) -> f64 {
 /// 正方行列 κ₂ の上界 √(κ₁κ∞)。
 fn kappa2_upper_square(a: &[f64], n: usize) -> f64 {
     let inv = invert(a, n).expect("特異な入力は入力集合に含めない");
-    (norm1(a, n) * norm1(&inv, n) * norm_inf(a, n) * norm_inf(&inv, n))
-        .sqrt()
-        .sqrt()
+    (norm1(a, n) * norm1(&inv, n) * norm_inf(a, n) * norm_inf(&inv, n)).sqrt()
 }
 
-/// 長方形（または正方）行列 κ₂ の上界。長方形は短辺側 Gram の (κ₁κ∞)^{1/4}。
+/// 長方形（または正方）行列 κ₂ の上界。長方形は κ₂(A)=√κ₂(G) と Gram G の √(κ₁κ∞) 上界から (κ₁κ∞)^{1/4}。
 fn kappa2_upper(t: &Tensor<f32>) -> f64 {
     let (a, m, n) = to_f64(t);
     if m == n {
@@ -114,6 +112,16 @@ fn input_set_condition_numbers_are_bounded() {
         check(&format!("qr_input({m},{n})"), kappa2_upper(&qr_input(m, n)));
     }
     check("1e20*I2 (正規化後)", kappa2_upper(&eye2_scaled(1.0)));
+}
+
+/// 既知の条件数で上界計算を固定する（平方根を 2 回取る退行の検出）。diag(1,1e-4) は κ₂=1e4。
+#[test]
+fn kappa_upper_bound_detects_known_ill_conditioned() {
+    let k = kappa2_upper_square(&[1.0, 0.0, 0.0, 1e-4], 2);
+    assert!(k >= 1e4 * 0.999, "上界 {k:e}");
+    // 長方形 diag(1,1e-4)（3x2）: κ₂=1e4 を下回らない
+    let t = Tensor::<f32>::new(vec![1.0, 0.0, 0.0, 1e-4, 0.0, 0.0], &[3, 2]).unwrap();
+    assert!(kappa2_upper(&t) >= 1e4 * 0.999);
 }
 
 #[test]
