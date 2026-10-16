@@ -14,8 +14,6 @@
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 
-use serde_json::{Map, Value, json};
-
 use super::dirfd;
 use super::download::TmpGuard;
 use super::sha256::Sha256;
@@ -74,13 +72,163 @@ fn check(meta: &CacheMeta) -> Result<(), ModelError> {
     Ok(())
 }
 
+/// 手書きパーサーが扱う JSON 値（`download.json` のスキーマで現れる型だけ）。
+enum Val {
+    Str(String),
+    Null,
+    Num(u64),
+}
+
+/// 固定スキーマ専用の最小 JSON パーサー（`serde_json` は facade の通常依存にしないため手書き。
+/// deps-policy.md）。最上位は 1 段のオブジェクトで、値は文字列・`null`・非負整数（符号・小数・
+/// 指数・先頭ゼロ不可）のみ。重複キー・末尾の余剰バイトは拒否する。
+struct Scanner<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl Scanner<'_> {
+    fn ws(&mut self) {
+        while matches!(self.b.get(self.i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.i += 1;
+        }
+    }
+
+    fn eat(&mut self, c: u8) -> bool {
+        self.ws();
+        if self.b.get(self.i) == Some(&c) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn lit(&mut self, word: &[u8]) -> bool {
+        if self.b[self.i..].starts_with(word) {
+            self.i += word.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn hex4(&mut self) -> Option<u32> {
+        let h = self.b.get(self.i..self.i + 4)?;
+        self.i += 4;
+        let mut v = 0u32;
+        for &c in h {
+            v = v * 16 + (c as char).to_digit(16)?;
+        }
+        Some(v)
+    }
+
+    fn string(&mut self) -> Option<String> {
+        if !self.eat(b'"') {
+            return None;
+        }
+        let mut out: Vec<u8> = Vec::new();
+        loop {
+            let c = *self.b.get(self.i)?;
+            self.i += 1;
+            match c {
+                b'"' => break,
+                0x00..=0x1f => return None,
+                b'\\' => {
+                    let e = *self.b.get(self.i)?;
+                    self.i += 1;
+                    let ch = match e {
+                        b'"' => '"',
+                        b'\\' => '\\',
+                        b'/' => '/',
+                        b'b' => '\u{8}',
+                        b'f' => '\u{c}',
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        b'u' => {
+                            let hi = self.hex4()?;
+                            let cp = if (0xD800..0xDC00).contains(&hi) {
+                                if !self.lit(b"\\u") {
+                                    return None;
+                                }
+                                let lo = self.hex4()?;
+                                if !(0xDC00..0xE000).contains(&lo) {
+                                    return None;
+                                }
+                                0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                            } else {
+                                hi
+                            };
+                            char::from_u32(cp)?
+                        }
+                        _ => return None,
+                    };
+                    let mut tmp = [0u8; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
+                }
+                _ => out.push(c),
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
+    fn number(&mut self) -> Option<u64> {
+        let start = self.i;
+        while matches!(self.b.get(self.i), Some(b'0'..=b'9')) {
+            self.i += 1;
+        }
+        let d = &self.b[start..self.i];
+        if d.is_empty() || (d.len() > 1 && d[0] == b'0') {
+            return None;
+        }
+        // 小数・指数は直後の文字が `,`／`}` でないため後続の検査で拒否される。
+        std::str::from_utf8(d).ok()?.parse().ok()
+    }
+
+    fn value(&mut self) -> Option<Val> {
+        self.ws();
+        match self.b.get(self.i)? {
+            b'"' => self.string().map(Val::Str),
+            b'n' => self.lit(b"null").then_some(Val::Null),
+            b'0'..=b'9' => self.number().map(Val::Num),
+            _ => None,
+        }
+    }
+
+    fn object(&mut self) -> Option<Vec<(String, Val)>> {
+        if !self.eat(b'{') {
+            return None;
+        }
+        let mut out: Vec<(String, Val)> = Vec::new();
+        if !self.eat(b'}') {
+            loop {
+                let k = self.string()?;
+                if out.iter().any(|(e, _)| *e == k) || !self.eat(b':') {
+                    return None;
+                }
+                let v = self.value()?;
+                out.push((k, v));
+                if self.eat(b',') {
+                    continue;
+                }
+                if self.eat(b'}') {
+                    break;
+                }
+                return None;
+            }
+        }
+        self.ws();
+        (self.i == self.b.len()).then_some(out)
+    }
+}
+
 /// `download.json` のバイト列をスキーマ検証してパースする。最上位はオブジェクトで、キーは
 /// ちょうど 6 つ（未知キー・不足は拒否）。値の型・桁・`url`・`final_url`・`etag` も検証する。
 pub(super) fn parse(bytes: &[u8]) -> Result<CacheMeta, ModelError> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|_| bad("JSON として解釈できません"))?;
-    let Value::Object(obj) = v else {
-        return Err(bad("最上位がオブジェクトではありません"));
-    };
+    let obj = Scanner { b: bytes, i: 0 }
+        .object()
+        .ok_or_else(|| bad("JSON として解釈できません"))?;
     let known = [
         "url",
         "final_url",
@@ -89,35 +237,34 @@ pub(super) fn parse(bytes: &[u8]) -> Result<CacheMeta, ModelError> {
         "sha256",
         "fetched_at",
     ];
-    if obj.len() != known.len() || obj.keys().any(|k| !known.contains(&k.as_str())) {
+    if obj.len() != known.len() || obj.iter().any(|(k, _)| !known.contains(&k.as_str())) {
         return Err(bad("キー集合が不正です"));
     }
-    let get = |k: &str| obj.get(k).ok_or_else(|| bad("キーが不足しています"));
-    let url = get("url")?
-        .as_str()
-        .ok_or_else(|| bad("url の型が不正です"))?
-        .to_string();
-    let final_url = get("final_url")?
-        .as_str()
-        .ok_or_else(|| bad("final_url の型が不正です"))?
-        .to_string();
-    let etag = match get("etag")? {
-        Value::Null => None,
-        Value::String(s) => Some(s.clone()),
-        _ => return Err(bad("etag の型が不正です")),
+    let get = |k: &str| {
+        obj.iter()
+            .find(|(e, _)| e == k)
+            .map(|(_, v)| v)
+            .ok_or_else(|| bad("キーが不足しています"))
     };
-    let content_length = get("content_length")?
-        .as_u64()
-        .ok_or_else(|| bad("content_length の型が不正です"))?;
-    let sha256 = Sha256Pin::from_hex(
-        get("sha256")?
-            .as_str()
-            .ok_or_else(|| bad("sha256 の型が不正です"))?,
-    )
-    .map_err(|_| bad("sha256 が 64 桁の 16 進ではありません"))?;
-    let fetched_at = get("fetched_at")?
-        .as_u64()
-        .ok_or_else(|| bad("fetched_at の型が不正です"))?;
+    let text = |k: &str, msg: &'static str| match get(k)? {
+        Val::Str(s) => Ok(s.clone()),
+        _ => Err(bad(msg)),
+    };
+    let num = |k: &str, msg: &'static str| match get(k)? {
+        Val::Num(n) => Ok(*n),
+        _ => Err(bad(msg)),
+    };
+    let url = text("url", "url の型が不正です")?;
+    let final_url = text("final_url", "final_url の型が不正です")?;
+    let etag = match get("etag")? {
+        Val::Null => None,
+        Val::Str(s) => Some(s.clone()),
+        Val::Num(_) => return Err(bad("etag の型が不正です")),
+    };
+    let content_length = num("content_length", "content_length の型が不正です")?;
+    let sha256 = Sha256Pin::from_hex(&text("sha256", "sha256 の型が不正です")?)
+        .map_err(|_| bad("sha256 が 64 桁の 16 進ではありません"))?;
+    let fetched_at = num("fetched_at", "fetched_at の型が不正です")?;
     let meta = CacheMeta {
         url,
         final_url,
@@ -130,17 +277,36 @@ pub(super) fn parse(bytes: &[u8]) -> Result<CacheMeta, ModelError> {
     Ok(meta)
 }
 
+/// JSON 文字列リテラル（引用符込み）へエスケープして追記する。
+fn json_str(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 /// `download.json` のバイト列を作る（6 キー固定順・`sha256` は小文字 16 進）。
 pub(super) fn serialize(meta: &CacheMeta) -> Vec<u8> {
-    let mut m = Map::new();
-    m.insert("url".into(), json!(meta.url));
-    m.insert("final_url".into(), json!(meta.final_url));
-    m.insert("etag".into(), json!(meta.etag));
-    m.insert("content_length".into(), json!(meta.content_length));
-    m.insert("sha256".into(), json!(meta.sha256.to_string()));
-    m.insert("fetched_at".into(), json!(meta.fetched_at));
-    // `Value` のシリアライズは失敗しない（文字列キー・有限値のみ）。
-    serde_json::to_vec(&Value::Object(m)).unwrap_or_default()
+    let mut s = String::from("{\"url\":");
+    json_str(&meta.url, &mut s);
+    s.push_str(",\"final_url\":");
+    json_str(&meta.final_url, &mut s);
+    s.push_str(",\"etag\":");
+    match &meta.etag {
+        Some(e) => json_str(e, &mut s),
+        None => s.push_str("null"),
+    }
+    s.push_str(&format!(
+        ",\"content_length\":{},\"sha256\":\"{}\",\"fetched_at\":{}}}",
+        meta.content_length, meta.sha256, meta.fetched_at
+    ));
+    s.into_bytes()
 }
 
 /// `version_dir` 直下の `download.json` を読む。不在・I/O エラー・不正な内容はすべて `None`
@@ -256,6 +422,11 @@ mod tests {
             good.replace("\"final_url\"", "\"final_urk\""),
             good.replace("https://a.example", "https://u:p@a.example"),
             good.replace("\"fetched_at\":1700000000", "\"fetched_at\":1.5"),
+            good.replace("\"fetched_at\":1700000000", "\"fetched_at\":01700000000"),
+            good.replace("\"fetched_at\":1700000000", "\"fetched_at\":1e9"),
+            good.replace("\"fetched_at\"", "\"content_length\""),
+            format!("{good} x"),
+            good.replace("\"abc\\\"", "\"\\ud800\\\""),
         ];
         for c in cases {
             assert!(
@@ -263,6 +434,13 @@ mod tests {
                 "accepted: {c}"
             );
         }
+    }
+
+    #[test]
+    fn parse_decodes_unicode_escapes() {
+        let good = String::from_utf8(serialize(&meta())).unwrap();
+        let escaped = good.replace("abc", "\\u0061bc");
+        assert_eq!(parse(escaped.as_bytes()).unwrap(), meta());
     }
 
     #[test]

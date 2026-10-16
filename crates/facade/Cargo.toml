@@ -76,13 +76,6 @@ fandhe-ai-backend-metal = { path = "../backend-metal", version = "=0.11.0" }
 [target.'cfg(unix)'.dependencies]
 ureq.workspace = true
 libc.workspace = true
-# イシュー #3126: ダウンロードのローカルキャッシュ `download.json`（`model/cache.rs`）の
-# 読み書き用。`serde_json` は第 5 区分（シリアライズ）の承認済み依存で workspace 固定
-# （`=1.0.151`）のまま変えない。`Cargo.lock` は不変。通常依存への昇格は `docs/license-matrix.md`
-# の第 5 区分の行へ使用箇所を追記して記録した（昇格自体の所有者承認は未取得で、PR 本文で
-# 確認事項として明示している）。`serde` の derive は
-# 使わず `Value` から手で検証する（未知キー・型・桁を明示的に拒否するため）。
-serde_json.workspace = true
 
 # TASK-9.4（#411）: compat 層の移設に伴い追加。学習系統合テスト
 # （`tests/compat_sequential_train.rs`）が決定的シード駆動のデータ生成に

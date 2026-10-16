@@ -945,7 +945,7 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 ### 20.1 `download.json`
 
-- 場所は `<cache_dir>/<name>/<version>/download.json`。`serde_json::Value` から手で組み立て・検証する（`serde` の derive は使わない）。実装は `crates/facade/src/model/cache.rs`
+- 場所は `<cache_dir>/<name>/<version>/download.json`。固定スキーマ専用の最小 JSON パーサー／シリアライザを手書きして検証する（`serde_json` は facade の通常依存にしない）。実装は `crates/facade/src/model/cache.rs`
 - 6 キーちょうど（未知キー・不足は拒否）: `url`（検証済み https URL・フラグメント除去済み）・`final_url`（リダイレクト追従後に `200` を返した最終取得 URL。`etag` はこの URL のリソースの検証子。検証済み https URL）・`etag`（文字列または `null`）・`content_length`（u64）・`sha256`（64 桁 16 進）・`fetched_at`（UNIX エポック秒 u64）
 - 読み取り上限 64 KiB。不在・I/O エラー・スキーマ違反・シンボリックリンク・非通常ファイルはすべて「キャッシュなし」として無条件 GET へフォールバックする（要件 1。`ModelError::CacheMetadata` は読み出し側では呼び出し側へ届かず、書き込もうとしたメタデータが不正な場合にだけ返る）
 - `etag` は印字可能 ASCII（0x20〜0x7E）・長さ 1〜1024 のみ。CR／LF／NUL・制御文字・非 ASCII は拒否する。保存時・読み出し時・送信直前（`transport.rs`）の 3 か所で同じ `valid_etag` を使う（ヘッダインジェクション対策）。応答の `ETag` が不正なら保存せず `null` を書く（古い etag を残さない）
@@ -969,9 +969,9 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 - 公開クレート `onnx-interop` への変更は関数 1 つの追加のみ（既存関数・公開型は不変、依存は増えない）。facade は `safetensors` に直接依存できないため、この形にした
 - facade 側は onnx-interop の参照を `src/interop/` に閉じ込める既存ガード（#2017）に合わせ、`src/interop/layout.rs` の `pub(crate)` ラッパー経由で呼ぶ（`safetensors.rs` は純再エクスポート契約のため触らない）。`api_surface.rs` の `mod.rs` 件数ガードを 3 から 4 に更新した。承認済み公開アイテム 16 件・公開メソッド 8 件は増やしていない
 
-### 20.5 `serde_json` の結線
+### 20.5 `serde_json` を通常依存にしない
 
-`crates/facade/Cargo.toml` の `[target.'cfg(unix)'.dependencies]` に `serde_json.workspace = true` を追加した。第 5 区分の承認済み依存で workspace 固定（`=1.0.151`）は変えず、`Cargo.lock` の解決結果も変わらない（dev-dependencies に既にあるため）。
+`download.json` の読み書きは `cache.rs` の手書き最小 JSON（文字列・`null`・非負整数のみ。重複キー・末尾余剰・先頭ゼロ・小数・指数を拒否）で行う。`serde_json` の facade 通常依存への昇格は所有者承認が未取得のため行わず、`Cargo.toml`・`license-matrix.md` の依存記述は変更しない（PR #3388 レビュー指摘）。
 
 ### 20.6 エラー型
 
@@ -980,4 +980,4 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 ### 20.7 検証範囲と後続候補
 
 - 単体テストは転送をモックし、実ファイルシステムで 304 再利用・改変後の取り直し・pin 優先・リンク拒否・破損 JSON のフォールバックを検証した。権限エラーは 0500 ディレクトリで実際に検証する（root 実行時はスキップ）。実際の ENOSPC は CI で再現できないため、`open_dir` への `io::Error` 注入による単体の水準にとどめた。実ネットワーク・TLS の実接続は #3173 で追跡済み
-- 後続候補（起票はユーザー承認待ちのため未起票）: (a) ヘッダだけを読むストリーミング検証（`onnx-interop` の `serde_json` を通常依存へ格上げする判断が要る）、(b) `save`／`load` の FS エラーの型付き化と `save` の dirfd 化（§19.6）
+- 後続候補（起票はユーザー承認待ちのため未起票）: (a) ヘッダだけを読むストリーミング検証（`onnx-interop` の `serde_json` を通常依存へ格上げする判断が要る。所有者承認が前提）、(b) `save`／`load` の FS エラーの型付き化と `save` の dirfd 化（§19.6）
