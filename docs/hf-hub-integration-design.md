@@ -633,3 +633,11 @@ HTTP／TLS 依存（第 11 区分）は HF クレートでの利用承認が未�
 
 - **第 11 区分（`ureq`）を `fandhe-ai-hf-hub` で使う所有者の明示承認は未取得**（#3123 の確定記録も facade 用の確定で、HF クレート用の承認は別単位）。このため本番の転送層・`resolve_revision`／`list_files` の公開化は見送った。承認後に `[target.'cfg(unix)'.dependencies] ureq.workspace = true`・`UreqJsonTransport`（`NativeTls`・`https_only`・リダイレクト手動追従＋ホスト allowlist・全タイムアウト明示）を追加する
 - facade `download_with` のリダイレクト先ホスト allowlist（§4.2 (b-1)／(b-2)）は facade 公開面の拡張であり別承認
+
+### 9.13 #3132 実装記録（テスト）
+
+- **モックテスト**（外部通信なし）: `crates/hf-hub/src/api.rs`・`lib.rs` に追加。tag／`.`・`_`・`-` を含む ref の URL、`list_files_via` 側の 401／403／404／503 写像、301／302／303／307／308 × Location（許可想定 https・許可外 https・http）の非追従（転送 1 回で `Http { status }`・エラーに Location を出さない）、非 UTF-8・1 MiB ちょうど受理／+1 拒否・深いネスト（10,000 段）で panic しない、siblings 型不正・空一覧・パス長／件数の境界、要求 commit と応答 sha の 1 文字不一致拒否、repo_id／revision の上限ちょうど受理（96／255 バイト）、40 桁 16 進の分類、キャッシュキー（決定性・区切り紛らわしい組の非衝突・`version` = commit sha）、全エラー種別でセンチネル非露出。
+- **filename 違いによるキャッシュキー衝突**は是正案 A（`model.safetensors` のみ許可）により構造的に起きない。それ以外はすべて接続前に拒否され、キャッシュディレクトリが作られないことをテストで確認した。
+- **`HfHub::download` の取得成功・pin 一致／不一致・リダイレクト**は facade 転送差し替え口が内部限定のためモック化していない（facade 公開面を変えない）。担保は facade 側の既存テスト（`success_publishes_file_and_verifies_pin`・`hash_mismatch_publishes_nothing_and_keeps_existing`・`non_200_statuses_are_http_errors`・`bad_redirects_are_invalid_url` ほか）と、`#[ignore]` 実通信テスト（`crates/hf-hub/src/live_tests.rs`。手順は `crates/hf-hub/README.md`）による。
+- **実通信テストの実行結果**: 未検証（実通信環境と公開 repo の pin 未用意。#3173 と同様に実機・実通信環境で確認する）。トークンは扱わない。
+- **申し送り（別承認）**: (1) `UreqJsonTransport` 結線（hf-hub での第 11 区分利用承認が前提）後に `TcpListener` ベースの転送層テスト、`resolve_revision`／`list_files` の実通信確認、§9.12.1 の未確認項目の実測を追加する。(2) リダイレクト先ホスト allowlist とそのテストは allowlist 実装時（facade 公開面拡張・別承認）。本イシューでは「追従せず拒否」の固定のみ。(3) 観察事項: `HfRepoId` は大文字を許すため、大文字小文字非区別 FS（macOS 既定 APFS）では `hf--Org--model` と `hf--org--model` が同一ディレクトリになりうる。version が commit sha で真正性は sha256 pin が担うため実害は限定的だが、所有者判断に回す。
