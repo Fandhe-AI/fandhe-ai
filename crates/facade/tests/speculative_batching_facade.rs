@@ -349,26 +349,28 @@ fn speculative_fails_closed_on_unsupported_or_invalid_inputs() {
             "{what}: {r:?}"
         );
     };
-    // サンプリング版は存在しない（Greedy 以外は Err）。
+    // サンプリング版は #3101 で対応済み（Greedy 以外も受理し shape [6]）。外した検査の
+    // 否定表明だけを反転し、fail-closed は `top_k > vocab`（V = 7）で維持する。
+    for (config, what) in [
+        (GenerateConfig::new(6, SamplingStrategy::TopK(3)), "TopK"),
+        (
+            GenerateConfig::new(6, SamplingStrategy::Temperature(0.8)),
+            "Temperature",
+        ),
+    ] {
+        let out = generate_speculative(&kv, &kv, &p, &config, &spec)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(out.shape(), &[6], "{what}");
+    }
     invalid(
         generate_speculative(
             &kv,
             &kv,
             &p,
-            &GenerateConfig::new(6, SamplingStrategy::TopK(3)),
+            &GenerateConfig::new(6, SamplingStrategy::TopK(8)),
             &spec,
         ),
-        "TopK",
-    );
-    invalid(
-        generate_speculative(
-            &kv,
-            &kv,
-            &p,
-            &GenerateConfig::new(6, SamplingStrategy::Temperature(0.8)),
-            &spec,
-        ),
-        "Temperature",
+        "TopK(V + 1)",
     );
     invalid(
         generate_speculative(&kv, &kv, &p, &greedy(6), &SpeculativeConfig::new(0)),
