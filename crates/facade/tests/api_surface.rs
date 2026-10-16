@@ -1091,6 +1091,31 @@ fn cuda_onnx_gpu_execution_optin_is_reachable_via_facade() {
     fandhe_ai::set_cuda_onnx_gpu_execution_enabled(original);
 }
 
+/// `fandhe_ai::set_cuda_graph_infer_enabled`／`fandhe_ai::cuda_graph_infer_enabled`
+/// （イシュー #3115 が公開形・#3116 が公開）が facade クレート root から
+/// 到達可能であることの固定。往復後は必ず元の値へ戻す。承認形のシグネチャは
+/// ソース走査で 1 回ずつ現れることも固定する（`pub fn` が増減・変形したら落ちる）。
+#[test]
+fn cuda_graph_infer_optin_is_reachable_via_facade() {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original = fandhe_ai::cuda_graph_infer_enabled();
+    fandhe_ai::set_cuda_graph_infer_enabled(true);
+    assert!(fandhe_ai::cuda_graph_infer_enabled());
+    fandhe_ai::set_cuda_graph_infer_enabled(original);
+
+    let src = include_str!("../src/lib.rs");
+    let count = |needle: &str| src.matches(needle).count();
+    assert_eq!(
+        count("pub fn set_cuda_graph_infer_enabled(enabled: bool) {"),
+        1
+    );
+    assert_eq!(count("pub fn cuda_graph_infer_enabled() -> bool {"), 1);
+    // 診断カウンタ・テスト専用 override は facade へ再公開しない（決定記録 §5）。
+    assert_eq!(count("InferGraphStats"), 0);
+    assert_eq!(count("override_infer_graph_for_scope"), 0);
+}
+
 /// Metal 版（macOS 限定）の同型固定。
 #[cfg(target_os = "macos")]
 #[test]

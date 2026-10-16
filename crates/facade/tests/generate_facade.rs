@@ -287,9 +287,10 @@ fn project_all(y: &Tensor<f32>) -> Tensor<f32> {
     Tensor::new(data, &[b, l, V]).unwrap()
 }
 
-/// `Tape::stateful_attention_forward`（KV キャッシュ）を使うモデル。facade からは
-/// `forward_step` の `caches` へ書き込めないため、`StatefulAttention` を自前で持つ
-/// （`num_kv_layers() == 0`。`inference` モジュール doc の既知の制限）。
+/// `Tape::stateful_attention_forward`（KV キャッシュ）を使うモデル。`StatefulAttention` を自前で持つ
+/// 旧来の形（`num_kv_layers() == 0`）で、後方互換の検査として残す。新しく組むなら
+/// `Tape::stateful_attention_forward_with_cache` で `caches` を進める形を使う
+/// （#3096・#3097。`speculative_batching_facade.rs` の `TableLm`・`AttnCachesLm`）。
 /// `generate` 1 回につき新しいインスタンスを作ること（キャッシュ reset は利用者責務）。
 struct CachedLm {
     sa: RefCell<StatefulAttention>,

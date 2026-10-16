@@ -165,7 +165,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 5. テンソル単位バッチ化に要る padding mask・可変長キャッシュ。 → #3104 追記: §21 で決定（案 A）。
 6. facade 公開面の追加そのもの（`docs/compat-api-scope.md` §5）。（#2933 追記: 第 1 段階の 3 名に限り承認済み。§17 参照）
 7. paged attention（条件付きのまま。K-3 が未着手）。
-8. 連続バッチングで内部状態保持型のモデル（§8.1 の表）を扱うための、要求ごとのモデル状態の分離方式。論点 3 と同じく trait の拡張か別 trait かが未決。決まるまで第 1 段階は内部状態保持型を対象外とする。 → #3095 追記: §19 で決定（案 C）。
+8. 連続バッチングで内部状態保持型のモデル（§8.1 の表）を扱うための、要求ごとのモデル状態の分離方式。論点 3 と同じく trait の拡張か別 trait かが未決。決まるまで第 1 段階は内部状態保持型を対象外とする。 → #3095 追記: §19 で決定（案 C）。 → #3097 追記: rustdoc・フィクスチャ・一致テストへ反映済み（§23）。
 
 ## 11. 2 時間粒度の実装 issue 分解案
 
@@ -280,7 +280,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 - `generate_speculative` が対象とするのは `num_kv_layers() > 0` で、生成状態を渡された `caches` だけに持つモデル。`num_kv_layers() == 0` は拒否する（fail-closed）。
 - `BatchScheduler` が対象とするのは「`caches` だけに状態を持つ型」と「状態なしの型」（§8.1 の表）。**内部状態保持型**は対象外で、出力を保証しない。
 - 内部状態保持型は「生成状態を渡された `caches` の外に持つ型」と定義し、`num_kv_layers()` の値では決めない。`num_kv_layers() > 0` を返しつつ内部に状態を持つ型も作れ、両関数とも型でも実行時でも検出できない。この点を利用者の保証事項として rustdoc に書く。
-- 既知の制限（論点 3 が保留中の帰結）: facade だけの利用者は `forward_with_cache` を使えず、`KvCache` にもセッターがない（`docs/facade-generate-decision.md` §17.4）。`caches` を正しく進めるモデルを facade の公開面だけで組む経路は現状では限られる。到達経路は本 issue でも #2934 でも追加しない。 → #3095 追記: §19.6 で解消方針を決定。
+- 既知の制限（論点 3 が保留中の帰結）: facade だけの利用者は `forward_with_cache` を使えず、`KvCache` にもセッターがない（`docs/facade-generate-decision.md` §17.4）。`caches` を正しく進めるモデルを facade の公開面だけで組む経路は現状では限られる。到達経路は本 issue でも #2934 でも追加しない。 → #3095 追記: §19.6 で解消方針を決定。 → #3097 追記: rustdoc の記述を §19.6 の契約へ更新済み（§23）。
 
 ### 17.6 保留ガードの反転範囲（#2934 への申し送り。本 issue では触らない）
 
@@ -367,7 +367,7 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 論点 1・2・3・5・7・8 は保留のまま。B > 1、EOS 停止・top-p、受理統計、HTTP サーバ、量子化 KV、facade の `caches` 到達経路、実機測定は本 issue の対象外。
 
-→ #3095 追記: 論点 3・8 の公開形は §19 で決定（`caches` の到達経路を開ける案 C。実装は #3096）。
+→ #3095 追記: 論点 3・8 の公開形は §19 で決定（`caches` の到達経路を開ける案 C。実装は #3096）。 → #3097 追記: 論点 8 の「状態分離」は新機構を作らず、要求ごとの `Vec<KvCache>` と非公開 `kv_rewind` が担う（§23）。
 
 ## 19. caches の到達経路と内部状態保持型の公開形（#3095・親 #3094）
 
@@ -704,3 +704,17 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 - §19.8 のうち担当が #3096 の行: `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler` はアサーション無変更（doc のみ更新）。薄い委譲ガード・宣言インベントリ・`StatefulAttention` の `pub fn` 集合固定・`kv_cache_is_reachable_via_facade_only` への署名と実行プローブ・`kv_cache_usage_doctests_are_present_and_compiled` への必須トークンを追加した。autodiff 側メソッドの署名は第 1 引数が生の `Tape` で facade から名指しできないため、委譲ガード・インベントリ・実行プローブで補う
 - 申し送り: §17.5 の rustdoc 置き換えとフィクスチャ移行は #3097、facade だけで書く成功例 doctest は #3098
 - 依存・tolerance・baseline・`unsafe`・`docs/spec` は変更なし
+
+## 23. 実装記録（#3097・親 #3094）
+
+§19.6・§19.9 の読み替えに従い、内部状態保持型を generate 系へつなぐ経路を「rustdoc の契約更新・facade だけで組むフィクスチャ・一致テスト」として実装した。承認根拠は §19.1 の D-A の範囲に限り、それ以上の承認は主張しない。
+
+- 状態分離: 新しい仕組みは作らない。従来 `RefCell<StatefulAttention>` で書いていた KV 付きモデルを、#3096 の入口 `Tape::stateful_attention_forward_with_cache` で `caches[i]` を進める形（`num_kv_layers() > 0`）に書き直せば、要求ごとの `Vec<KvCache>`（`BatchScheduler`）と非公開 `kv_rewind`（`generate_speculative`。案 (i)）がそのまま状態分離・巻き戻しを担う。
+- 作業 2「`num_kv_layers() == 0` 拒否の見直し」は §19.6 により行わなかった（検査順 1〜9 は不変。facade だけで組める形が `> 0` を返すため緩める必要がない）。
+- rustdoc 更新: `crates/autodiff/src/generate/scheduler.rs`（モジュール doc・`BatchScheduler` doc）、`crates/autodiff/src/generate/speculative.rs`（`generate_speculative` の契約節）、`crates/facade/src/inference/mod.rs`（generate 節の「既知の制限」を「KV 付きモデルの組み方」へ、speculative 節の契約・「既知の制限（保留論点 3）」を新契約へ）。内部状態保持型の定義と「対象外・利用者が保証」は維持。doctest のコードブロックは変更していない。
+- フィクスチャ移行: `crates/facade/tests/speculative_batching_facade.rs` の `TableLm` を facade 公開面だけ（`StatefulAttention` を層ごとに持ち `stateful_attention_forward_with_cache` で `caches` を進める形）で組み直し、`fandhe_ai_autodiff` の import を 0 にした。既存 6 テストのアサーションは不変。`generate_facade.rs` の `CachedLm`（RefCell 形）は後方互換の検査として残し、コメントだけを更新した。
+- 追加テスト: (1) `scheduler_interleaves_caches_models_like_standalone_generate`: `caches` 形の表引きモデル（1・2 層）と attention 依存 logits モデルで、1 つのモデルを共有し `max_active` 未満の枠で 3 要求を交互に進め、単独 `generate` と token 列が完全一致（スケジューラ経路は単独と同じ forward 形状のため）。完了後に `StatefulAttention` の内部キャッシュ長が 0 のままであることも確認。(2) `speculative_matches_generate_on_attention_caches_model`: attention 依存 KV モデルで、トークン選択位置の logits を REQ-2 統一複合判定（`assert_parity`。tolerance・baseline 不変）で単独 `generate` と突き合わせ、事前登録の仮説 H1（margin 前提下の token 列一致）も確認。検証 forward（`L_new > 1`）と rewind 後の再 forward が 1 回以上起きたことを fail-closed で確認。`SKIP_C = 3.0` は事前固定。
+- H1 の結果: 掃引（layers 1・2、k 1・3、T 1・3、draft 3 種）で token 列は全件一致し、破れは観測されなかった。
+- `scheduler.rs` の `std::thread|std::sync::mpsc|tokio|async |std::net|std::fs|rayon` の grep は 0 件。
+- 変えないもの: tolerance・baseline・依存・`unsafe`・`docs/spec/`・公開シグネチャ（新しい `pub` 項目・`pub use`・trait メソッド・`AutodiffError` variant なし）・`SchedulerLimits` の 3 上限必須・要求単位の失敗の切り離し。
+- 申し送り（#3098）: 成功例 doctest（`inference/mod.rs`）、`api_surface.rs` の doctest 実在検査の更新、`k`・draft・prompt 長・`max_length` の掃引拡張、§18.4 追記。`caches` で表せない内部状態（RNN 隠れ状態等）を持つモデルは §19.10 のとおり案 B を起点に別 issue（起票はユーザー承認後）。
