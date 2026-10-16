@@ -13,8 +13,10 @@
 //! # 範囲
 //!
 //! 語彙 lookup 型の単語／文字レベルの変換だけを扱う。サブワードトークナイザ・Unicode
-//! 正規化・書記素クラスタ分割・語彙のファイル保存／読み込み・ragged 出力・出力モード
-//! （`multi_hot`／`count`／`tf_idf`）・`StringLookup` 相当は対象外。
+//! 正規化・書記素クラスタ分割・語彙のファイル保存／読み込み・ragged 出力・
+//! `StringLookup` 相当は対象外。出力モード（`multi_hot`／`count`／`tf_idf`）は
+//! `TextVectorization` のメソッド（`transform_multi_hot`・`transform_count`・
+//! `transform_tf_idf`）として足した（#3092）。
 //!
 //! # 小文字化と空白分割の範囲
 //!
@@ -43,6 +45,18 @@
 //! - `max_tokens` が `Some(m)` で `m` が 2 以下は `InvalidMaxTokens`。`from_vocabulary` で
 //!   語彙数（予約 2 件を含む）が `m` を超えると `VocabularyTooLarge`（黙って切り詰めない）
 //! - `ngrams`・`output_sequence_length` は構築時（`from_vocabulary`／`adapt`）に検査する
+//! - 出力モード（`[B, W]` の `Tensor<f32>`）: 列 i が id i（列 0 = パディングは常に 0、
+//!   列 1 = OOV の件数）。`W` は `pad_to_max_tokens` が false なら `vocabulary_size()`、
+//!   true なら `max_tokens`（`vocabulary_size()` 以上の列は常に 0。`max_tokens` が `None`
+//!   だと構築時に `PadToMaxTokensWithoutMaxTokens`）。Keras と違い `W` は予約 2 件ぶん大きい
+//!   （意図した差）。`ngrams` は適用し、`output_sequence_length` は無視する。id 0 になる
+//!   トークン（`Split::None` と `""`）は数えない。`B = 0` は `[0, W]`。
+//!   multi_hot は出現すれば 1.0、count は出現回数、tf_idf は `count as f32 * idf[id]`
+//!   （f32 の積 1 回）。idf は `ln(1 + N / (1 + df))`（自然対数。f64 で計算し 1 回だけ f32 へ。
+//!   df は文書内の重複を 1 と数える）で、`adapt_tf_idf`／`from_vocabulary_with_idf` で作った
+//!   インスタンスだけが持つ（持たないと `MissingIdfWeights`）。1 行のトークン数が 2^24 を
+//!   超えると f32 で正確に数えられないため確保前に `TokenCountNotExact`。判定は count・
+//!   multi_hot が完全一致、tf_idf が同じ式から作った値との bit 一致
 //! - 判定方式は整数の完全一致。Keras との bit 互換は契約にしない
 //! - 入力の件数・バイト数の上限は標準化・分割・確保より先に検査する（[`TextLimits`]）。
 //!   エラーと `Debug` は入力文字列・語彙の全文を含まない
@@ -91,9 +105,32 @@
 //! assert!(matches!(err, TextError::ReservedVocabularyToken { index: 0 }));
 //! ```
 //!
-//! 設計・承認の正は `docs/facade-text-vectorization-design.md` §16・§17。
+//! 出力モード（bag-of-words 系の特徴量。`Linear` へそのまま渡せる `f32`）。
+//!
+//! ```
+//! use fandhe_ai::text::{Standardize, TextVectorization, TextVectorizationConfig};
+//!
+//! let config = TextVectorizationConfig::default().with_standardize(Standardize::None);
+//! let tv = TextVectorization::from_vocabulary(config.clone(), &["cat", "dog"]).unwrap();
+//! // 列 i = id i（0 = パディング・1 = OOV・2 = cat・3 = dog）。
+//! let counts = tv.transform_count(&["cat cat dog bird", "dog"]).unwrap();
+//! assert_eq!(counts.shape(), &[2, 4]);
+//! assert_eq!(counts.host_slice().to_vec(), [0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+//! let hot = tv.transform_multi_hot(&["cat cat dog bird", "dog"]).unwrap();
+//! assert_eq!(hot.host_slice().to_vec(), [0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+//!
+//! // idf 重みを直接与える（OOV の重みは与えた重みの平均 1.5）。
+//! let tv = TextVectorization::from_vocabulary_with_idf(config, &["cat", "dog"], &[1.0, 2.0])
+//!     .unwrap();
+//! let weighted = tv.transform_tf_idf(&["cat cat dog bird"]).unwrap();
+//! assert_eq!(weighted.host_slice().to_vec(), [0.0, 1.5, 2.0, 2.0]);
+//! ```
+//!
+//! 設計・承認の正は `docs/facade-text-vectorization-design.md` §16・§17。出力モードの公開形は
+//! `docs/facade-text-output-modes-string-lookup-decision.md`。
 
 pub(crate) mod adapt;
+pub(crate) mod bag;
 pub(crate) mod error;
 pub(crate) mod limits;
 pub(crate) mod ngram;

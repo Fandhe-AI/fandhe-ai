@@ -315,3 +315,248 @@ fn transform_output_feeds_embedding_and_zeroes_padding_gradient() {
         assert!(dw[id * dim..(id + 1) * dim].iter().all(|&g| g == 1.0));
     }
 }
+// ---------------------------------------------------------------------
+// イシュー #3092: 出力モード（`transform_multi_hot`／`transform_count`／`transform_tf_idf`）。
+// 公開形の正は `docs/facade-text-output-modes-string-lookup-decision.md`。判定は count・
+// multi_hot が `==`、tf_idf が同じ式から作った値との bit 一致（新しい tolerance は作らない）。
+
+fn f32s(t: &Tensor<f32>) -> Vec<f32> {
+    t.host_slice().to_vec()
+}
+
+fn bits(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|w| w.to_bits()).collect()
+}
+
+fn idf_of(n: usize, df: usize) -> f32 {
+    (1.0f64 + n as f64 / (1.0 + df as f64)).ln() as f32
+}
+
+#[test]
+fn bag_modes_match_hand_computed_values() {
+    let c = cfg().with_standardize(Standardize::None);
+    let tv = TextVectorization::from_vocabulary(c, &["cat", "dog"]).unwrap();
+    let ins = ["cat cat dog bird", "bird", ""];
+    let count = tv.transform_count(&ins).unwrap();
+    assert_eq!(count.shape(), &[3, 4]);
+    assert_eq!(
+        f32s(&count),
+        [0., 1., 2., 1., 0., 1., 0., 0., 0., 0., 0., 0.]
+    );
+    let hot = tv.transform_multi_hot(&ins).unwrap();
+    assert_eq!(f32s(&hot), [0., 1., 1., 1., 0., 1., 0., 0., 0., 0., 0., 0.]);
+}
+
+#[test]
+fn bag_ngrams_apply_and_output_sequence_length_is_ignored() {
+    let c = cfg()
+        .with_standardize(Standardize::None)
+        .with_ngrams(2)
+        .with_output_sequence_length(1);
+    let tv = TextVectorization::from_vocabulary(c, &["a", "a b"]).unwrap();
+    let out = tv.transform_count(&["a b a b"]).unwrap();
+    assert_eq!(f32s(&out), [0., 3., 2., 2.]);
+}
+
+#[test]
+fn bag_zero_column_ignores_id_zero_tokens() {
+    let c = cfg().with_split(Split::None);
+    let tv = TextVectorization::from_vocabulary(c, &["x"]).unwrap();
+    let out = tv.transform_count(&["", "x"]).unwrap();
+    assert_eq!(f32s(&out), [0., 0., 0., 0., 0., 1.]);
+}
+
+#[test]
+fn bag_count_agrees_with_id_histogram_of_transform() {
+    let corpus = ["the cat sat on the mat", "a dog and a cat", "zebra the end"];
+    for (split, ngrams) in [
+        (Split::Whitespace, None),
+        (Split::Whitespace, Some(2)),
+        (Split::Character, Some(3)),
+        (Split::None, None),
+    ] {
+        let mut c = cfg().with_split(split);
+        if let Some(n) = ngrams {
+            c = c.with_ngrams(n);
+        }
+        let tv = TextVectorization::adapt(c, &corpus).unwrap();
+        let ins = ["the cat the dog", "unseen words here", "a a a"];
+        let ids = tv.transform(&ins).unwrap();
+        let len = ids.shape()[1];
+        let counts = tv.transform_count(&ins).unwrap();
+        let w = tv.vocabulary_size();
+        assert_eq!(counts.shape(), &[ins.len(), w]);
+        for (r, row) in counts.host_slice().chunks(w).enumerate() {
+            let mut hist = vec![0.0f32; w];
+            for &id in &ids.host_slice()[r * len..(r + 1) * len] {
+                if id != 0 {
+                    hist[id as usize] += 1.0;
+                }
+            }
+            assert_eq!(
+                row,
+                hist.as_slice(),
+                "split={split:?} ngrams={ngrams:?} row={r}"
+            );
+        }
+    }
+}
+
+#[test]
+fn bag_pad_to_max_tokens_fixes_width() {
+    let c = cfg().with_max_tokens(7).with_pad_to_max_tokens(true);
+    let tv = TextVectorization::from_vocabulary(c, &["a", "b"]).unwrap();
+    let out = tv.transform_count(&["a b b c"]).unwrap();
+    assert_eq!(out.shape(), &[1, 7]);
+    assert_eq!(f32s(&out), [0., 1., 1., 2., 0., 0., 0.]);
+    assert_eq!(tv.transform_count::<&str>(&[]).unwrap().shape(), &[0, 7]);
+
+    let no_pad = cfg().with_max_tokens(7);
+    let tv = TextVectorization::adapt(no_pad, &["a b"]).unwrap();
+    assert_eq!(tv.transform_count(&["a"]).unwrap().shape(), &[1, 4]);
+}
+
+#[test]
+fn bag_pad_without_max_tokens_is_rejected_everywhere() {
+    let c = cfg().with_pad_to_max_tokens(true);
+    assert!(matches!(
+        TextVectorization::from_vocabulary(c.clone(), &["a"]),
+        Err(TextError::PadToMaxTokensWithoutMaxTokens)
+    ));
+    assert!(matches!(
+        TextVectorization::adapt(c.clone(), &["a"]),
+        Err(TextError::PadToMaxTokensWithoutMaxTokens)
+    ));
+    assert!(matches!(
+        TextVectorization::from_vocabulary_with_idf(c.clone(), &["a"], &[1.0]),
+        Err(TextError::PadToMaxTokensWithoutMaxTokens)
+    ));
+    assert!(matches!(
+        TextVectorization::adapt_tf_idf(c, &["a"]),
+        Err(TextError::PadToMaxTokensWithoutMaxTokens)
+    ));
+}
+
+#[test]
+fn weighted_adapt_matches_formula_and_round_trips() {
+    let corpus = ["a a b", "a c", "b b b d"];
+    let tv = TextVectorization::adapt_tf_idf(cfg(), &corpus).unwrap();
+    assert_eq!(tv.vocabulary(), ["", "[UNK]", "b", "a", "c", "d"]);
+    let idf = tv.idf_weights().unwrap().to_vec();
+    let ws: Vec<f32> = [2usize, 2, 1, 1].iter().map(|&d| idf_of(3, d)).collect();
+    let oov = (ws.iter().map(|&w| f64::from(w)).sum::<f64>() / ws.len() as f64) as f32;
+    assert_eq!(idf[0].to_bits(), 0.0f32.to_bits());
+    assert_eq!(idf[1].to_bits(), oov.to_bits());
+    assert_eq!(bits(&idf[2..]), bits(&ws));
+    let out = tv.transform_tf_idf(&["b b a q"]).unwrap();
+    let o = f32s(&out);
+    assert_eq!(o[1].to_bits(), oov.to_bits());
+    assert_eq!(o[2].to_bits(), (2.0f32 * ws[0]).to_bits());
+    assert_eq!(o[3].to_bits(), ws[1].to_bits());
+
+    let words: Vec<String> = tv.vocabulary()[2..].to_vec();
+    let back = TextVectorization::from_vocabulary_with_idf(cfg(), &words, &idf[2..]).unwrap();
+    assert_eq!(bits(back.idf_weights().unwrap()), bits(&idf));
+    let again = f32s(&back.transform_tf_idf(&["b b a q"]).unwrap());
+    assert_eq!(bits(&again), bits(&o));
+}
+
+#[test]
+fn weighted_requires_weights_and_validates_them() {
+    let tv = TextVectorization::from_vocabulary(cfg(), &["a"]).unwrap();
+    assert!(tv.idf_weights().is_none());
+    assert!(matches!(
+        tv.transform_tf_idf(&["a"]),
+        Err(TextError::MissingIdfWeights)
+    ));
+    assert!(matches!(
+        TextVectorization::from_vocabulary_with_idf(cfg(), &["a", "b"], &[1.0]),
+        Err(TextError::IdfWeightsLengthMismatch {
+            len: 1,
+            expected: 2
+        })
+    ));
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5] {
+        assert!(matches!(
+            TextVectorization::from_vocabulary_with_idf(cfg(), &["a", "b"], &[1.0, bad]),
+            Err(TextError::InvalidIdfWeight { index: 1 })
+        ));
+    }
+    assert!(TextVectorization::from_vocabulary_with_idf(cfg(), &["a", "b"], &[-0.0, 0.0]).is_ok());
+}
+
+#[test]
+fn bag_rejects_oversized_output_before_allocating() {
+    // 語彙を実際には作らず、`B × W` の超過だけを確かめる。
+    let c = cfg().with_max_tokens(1 << 30).with_pad_to_max_tokens(true);
+    let tv = TextVectorization::from_vocabulary(c, &["a"]).unwrap();
+    assert!(matches!(
+        tv.transform_count(&["a", "a", "a"]),
+        Err(TextError::OutputTooLarge { .. })
+    ));
+    let limits = TextLimits::default().with_max_output_elements(6).unwrap();
+    let tv = TextVectorization::from_vocabulary(cfg().with_limits(limits), &["a"]).unwrap();
+    assert!(tv.transform_count(&["a", "a"]).is_ok()); // 2 × 3 = 6
+    assert!(matches!(
+        tv.transform_count(&["a", "a", "a"]),
+        Err(TextError::OutputTooLarge {
+            elements: 9,
+            max: 6
+        })
+    ));
+}
+
+#[test]
+fn bag_rejects_inputs_over_limits_before_allocating() {
+    let limits = TextLimits::default()
+        .with_max_batch(2)
+        .unwrap()
+        .with_max_input_bytes(3)
+        .unwrap();
+    let tv = TextVectorization::from_vocabulary(cfg().with_limits(limits), &["a"]).unwrap();
+    assert!(matches!(
+        tv.transform_count(&["a", "a", "a"]),
+        Err(TextError::BatchTooLarge { len: 3, max: 2 })
+    ));
+    assert!(matches!(
+        tv.transform_count(&["a", "abcd"]),
+        Err(TextError::InputTooLong { index: 1, .. })
+    ));
+}
+
+#[test]
+fn bag_rejects_token_counts_f32_cannot_count_exactly() {
+    // Split::Character + 8-gram: t 文字から 8t - 28 個。t = 2^21 + 4 で 2^24 を超える。
+    let limits = TextLimits::default().with_max_input_bytes(4 << 20).unwrap();
+    let c = cfg()
+        .with_standardize(Standardize::None)
+        .with_split(Split::Character)
+        .with_ngrams(8)
+        .with_limits(limits);
+    let tv = TextVectorization::from_vocabulary(c, &["a"]).unwrap();
+    let big = "a".repeat((1 << 21) + 4);
+    match tv.transform_count(&["a", big.as_str()]) {
+        Err(TextError::TokenCountNotExact { index, count, max }) => {
+            assert_eq!((index, max), (1, 1 << 24));
+            assert!(count > max);
+        }
+        other => panic!("TokenCountNotExact を期待: {other:?}"),
+    }
+}
+
+#[test]
+fn bag_errors_and_debug_do_not_leak_values() {
+    let tv = TextVectorization::from_vocabulary_with_idf(
+        cfg(),
+        &["SECRET_MARKER_TOKEN"],
+        &[0.314_159_27],
+    )
+    .unwrap();
+    let dbg = format!("{tv:?}");
+    assert!(!dbg.contains("SECRET_MARKER_TOKEN") && !dbg.contains("0.3141"));
+    let err =
+        TextVectorization::from_vocabulary_with_idf(cfg(), &["SECRET_MARKER_TOKEN"], &[f32::NAN])
+            .unwrap_err();
+    let shown = format!("{err} {err:?}");
+    assert!(!shown.contains("SECRET_MARKER_TOKEN") && !shown.contains("NaN"));
+}

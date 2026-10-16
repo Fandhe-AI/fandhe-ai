@@ -40000,9 +40000,16 @@ fn facade_exposes_text_items_only_in_approved_shape() {
                 "fn:with_ngrams",
                 "fn:with_output_sequence_length",
                 "fn:with_limits",
+                "fn:with_pad_to_max_tokens",
                 "fn:from_vocabulary",
+                "fn:from_vocabulary_with_idf",
                 "fn:adapt",
+                "fn:adapt_tf_idf",
                 "fn:transform",
+                "fn:transform_multi_hot",
+                "fn:transform_count",
+                "fn:transform_tf_idf",
+                "fn:idf_weights",
                 "fn:vocabulary",
                 "fn:vocabulary_size",
                 "fn:config",
@@ -40042,7 +40049,7 @@ fn facade_exposes_text_items_only_in_approved_shape() {
     assert_eq!(
         text_pub_items(&files),
         expected,
-        "text/ の完全公開項目は承認済みの 6 型・公開メソッド・`pub use` 5 文のみ（設計記録 §16.2・§16.3）"
+        "text/ の完全公開項目は承認済みの 6 型・公開メソッド（#3092 で出力モードを追加）・`pub use` 5 文のみ（設計記録 §16.2・§16.3・出力モード決定記録 §7）"
     );
 }
 
@@ -40086,7 +40093,7 @@ fn facade_exposes_text_items_only_in_approved_shape_detects_each_category() {
     );
 }
 
-/// 公開形の固定: `Standardize` 5・`Split` 4・`TextError` 17 variant のインベントリ。
+/// 公開形の固定: `Standardize` 5・`Split` 4・`TextError` 22 variant のインベントリ（#3092 で 5 つ追加）。
 /// 承認済み Unicode 2 variant（`UnicodeLower`・`UnicodeWhitespace`。#3089）以外の variant と、
 /// callable を受ける variant を足すと、ここで落ちる（論点 8）。
 #[test]
@@ -40125,6 +40132,11 @@ fn text_public_shape_is_pinned() {
             "LimitAboveAbsoluteMaximum",
             "NgramCountOverflow",
             "FrequencyOverflow",
+            "MissingIdfWeights",
+            "IdfWeightsLengthMismatch",
+            "InvalidIdfWeight",
+            "PadToMaxTokensWithoutMaxTokens",
+            "TokenCountNotExact",
             "Shape",
         ]
     );
@@ -40133,7 +40145,9 @@ fn text_public_shape_is_pinned() {
 /// 未承認経路の否定ガード（トークン単位。コメント・文字列は無視）:
 /// - `text/` の外に `TextVectorization`／`text_vectorization` を含むトークンがない
 ///   （クレートルート再エクスポート・`Sequential` への層化がない。論点 7）
-/// - 出力モード（`multi_hot`／`count`／`tf_idf`）と `StringLookup` 相当の識別子がない（論点 6）
+/// - 出力モードは複合名のメソッド（`transform_multi_hot` 等）で公開済み（#3092）。enum 方式の
+///   識別子（`OutputMode`／`output_mode`）と単独トークン（`multi_hot`／`tf_idf` 等）は使わない。
+///   `StringLookup` 相当の識別子はまだない（#3093 で反転）（論点 6）
 /// - 標準化・分割・本体に callable（`Fn`／`FnMut`／`FnOnce`／`dyn`）がない（論点 8）
 #[test]
 fn text_unapproved_paths_are_absent() {
@@ -40199,6 +40213,19 @@ fn text_items_are_reachable_via_facade_text_path() {
     let _: fn(&TextVectorization) -> &[String] = TextVectorization::vocabulary;
     let _: fn(&TextVectorization) -> usize = TextVectorization::vocabulary_size;
     let _: fn(&TextVectorization) -> &C = TextVectorization::config;
+    // 出力モード（#3092）。
+    type BagFn = fn(&TextVectorization, &[&'static str]) -> Result<Tensor<f32>, TextError>;
+    let _: [BagFn; 3] = [
+        TextVectorization::transform_multi_hot::<&str>,
+        TextVectorization::transform_count::<&str>,
+        TextVectorization::transform_tf_idf::<&str>,
+    ];
+    type WithIdfFn = fn(C, &[&'static str], &[f32]) -> Result<TextVectorization, TextError>;
+    let _: WithIdfFn = TextVectorization::from_vocabulary_with_idf::<&str>;
+    let _: fn(C, &[String]) -> Result<TextVectorization, TextError> =
+        TextVectorization::adapt_tf_idf::<String>;
+    let _: fn(&TextVectorization) -> Option<&[f32]> = TextVectorization::idf_weights;
+    let _: fn(C, bool) -> C = C::with_pad_to_max_tokens;
 
     let _: fn(C, usize) -> C = C::with_max_tokens;
     let _: fn(C, Standardize) -> C = C::with_standardize;
@@ -40229,6 +40256,7 @@ fn text_items_are_reachable_via_facade_text_path() {
         Split,
         Option<usize>,
         Option<usize>,
+        bool,
         TextLimits,
     ) = (
         c.max_tokens,
@@ -40236,6 +40264,7 @@ fn text_items_are_reachable_via_facade_text_path() {
         c.split,
         c.ngrams,
         c.output_sequence_length,
+        c.pad_to_max_tokens,
         c.limits,
     );
     // derive の約束。
@@ -40248,6 +40277,28 @@ fn text_items_are_reachable_via_facade_text_path() {
     assert_error::<TextError>();
     fn assert_clone_debug<T: Clone + std::fmt::Debug>() {}
     assert_clone_debug::<TextVectorization>();
+    // idf は設定ではなくインスタンスが持つ（設定の `Eq` を保つ。決定記録 §3）。
+    fn assert_clone_eq_default_debug<T: Clone + Eq + Default + std::fmt::Debug>() {}
+    assert_clone_eq_default_debug::<TextVectorizationConfig>();
+}
+
+/// 正の doctest プローブ（#3092）: 出力モードの利用例が `text/mod.rs` に実在し、コンパイル・実行される形で
+/// 書かれていること。
+#[test]
+fn text_output_mode_doctest_is_present_and_compiled() {
+    let text_mod = read_to_string_or_panic(&facade_crate_root().join("src/text/mod.rs"));
+    let doc = inner_doc_lines(&text_mod);
+    let v = doctest_probe_violations(
+        "text/mod.rs モジュール doc（出力モード）",
+        &doc,
+        &[
+            ".transform_count(",
+            ".transform_multi_hot(",
+            ".transform_tf_idf(",
+            "from_vocabulary_with_idf",
+        ],
+    );
+    assert!(v.is_empty(), "{v:?}");
 }
 
 /// 正の doctest プローブ: `text/mod.rs` の利用例が `adapt` → `transform` → `embedding` を通す形で実在し、
