@@ -142,3 +142,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
   `InvalidArgument`、det が `0.0`（CPU と同じ）。`CudaError` に variant は追加せず `LuSolveOutcome` で表す。
 - 既定（ゲート OFF）の挙動は不変（`Unsupported` → `Var` がホスト f64 へフォールバック）。実機（GB10）での NVRTC・parity・
   特異写像の実測は #3138（本 PR では未検証）。
+
+### #3138（CUDA 実機 parity Stage C）の実施内容
+
+事前登録規則・測定手順・記入欄と facade 経由ゲート ON の `#[ignore]` テスト（`crates/facade/tests/linalg_gpu_optin_cuda_parity.rs`）を用意した（`docs/perf/logs/cuda-linalg-parity-3138/`）。GB10 での実測は未実施（申し送り）。判定方式（§5）・tolerance・入力集合は不変。
