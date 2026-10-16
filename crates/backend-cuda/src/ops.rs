@@ -121,6 +121,26 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
     Some(view)
 }
 
+/// 線形代数ハンドル（`cached_linalg_handle`／`linalg_factor_handle`）の構築失敗を
+/// `BackendError` へ写す（`with_driver_call` の `map`。構築フェーズ専用）。
+///
+/// `CudaError::Driver` は `Display`（`{e:?}`）が `cuGetErrorString` を呼び、`culib()` の
+/// 遅延ロードによりドライバ未ロード環境で panic しうる（cudarc-0.19.8
+/// `src/driver/result.rs`。`with_driver_call` 回帰テストの注記と同じ教訓）ため整形せず
+/// 静的メッセージにする。環境不在 variant は `detail` をそのまま使い、それ以外は
+/// 従来どおり `Display` を通す（driver の遅延ロードを要求しない variant のみ）。
+fn linalg_handle_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::DriverUnavailable { detail } | CudaError::NvrtcUnavailable { detail } => {
+            BackendError::CudaUnavailable(detail)
+        }
+        CudaError::Driver(_) => BackendError::CudaUnavailable(
+            "GPU 線形代数ハンドルの構築中に CUDA driver エラー（詳細は整形しない）".to_string(),
+        ),
+        other => BackendError::CudaUnavailable(other.to_string()),
+    }
+}
+
 /// LU 系 3 演算（`linalg_inv`／`linalg_solve`／`linalg_det`）の共通前段
 /// （イシュー #2674・設計記録 §4.4 の結線順序）。
 ///
@@ -174,14 +194,22 @@ fn lu_gate_prepare(
     Ok(n == 0)
 }
 
-/// カーネル起動が未実装（新規 `unsafe` のユーザー承認待ち）であることを
-/// 示す fail-closed の `Unsupported`。`Var` 側は `Unsupported` のみホスト
-/// `f64` へフォールバックするため、ゲート OFF と挙動が変わらない。
-fn lu_launch_pending(op: &str) -> BackendError {
-    BackendError::Unsupported(format!(
-        "CudaBackendOps::{op}: CUDA 線形代数カーネルの起動（新規 unsafe）は\
-         ユーザー承認待ち（イシュー #2674）"
-    ))
+/// LU 系 3 演算の入力を連続化したホストスライスとして取り出す。
+fn lu_input_slice<'a>(op: &str, owned: &'a Tensor<f32>) -> Result<&'a [f32], BackendError> {
+    owned
+        .as_slice()
+        .ok_or_else(|| BackendError::KernelLaunchFailed(format!("{op}: a not contiguous")))
+}
+
+/// 特異（ピボットが厳密 0）を CPU と同じ文言の `InvalidArgument` へ写す
+/// （solve／inv。det は `0.0` を返すためここを通らない）。
+fn lu_singular_error(op: &str) -> BackendError {
+    let what = if op == "linalg_inv" {
+        "行列"
+    } else {
+        "係数行列"
+    };
+    BackendError::InvalidArgument(format!("{op}: {what}が特異（ピボットが厳密 0）"))
 }
 
 /// 分解系 3 演算（`linalg_cholesky`／`linalg_qr`／`linalg_eigh`）の共通前段
@@ -824,19 +852,26 @@ impl CudaBackendOps {
         context_cache::cached_device(self.ordinal)
     }
 
+    /// LU 系 3 演算（`linalg_inv`／`linalg_solve`／`linalg_det`。イシュー
+    /// #3135）が使う [`crate::linalg::CudaLinalg`] を取得する。デバイス初期化
+    /// ・NVRTC 構築も driver 呼び出し境界（`with_driver_call`）の内側に置き、
+    /// sticky エラーの観測と Graph capture 排他に参加させる（`mse_loss` と同型）。
+    fn cached_linalg_handle(&self) -> Result<Arc<crate::linalg::CudaLinalg>, BackendError> {
+        self.with_driver_call(&[], linalg_handle_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_linalg(&device)
+        })
+    }
+
     /// 分解系線形代数 3 カーネルのハンドルを取得する（イシュー #3136）。
     /// 初回は NVRTC コンパイル・モジュールロードという driver 呼び出しを伴う
     /// ため、構築も `with_driver_call` の内側に置く（監査記録 不変条件 (d)。
     /// `run_scan` と同じ構築・実行の 2 段構成）。
     fn linalg_factor_handle(&self) -> Result<Arc<crate::linalg::CudaLinalgFactor>, BackendError> {
-        self.with_driver_call(
-            &[],
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || {
-                let device = self.device_handle_raw()?;
-                context_cache::cached_linalg_factor(&device)
-            },
-        )
+        self.with_driver_call(&[], linalg_handle_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_linalg_factor(&device)
+        })
     }
 
     /// `Self::cumsum`／`cumprod`（イシュー #1740）の共通骨格。`dim` を
@@ -4747,18 +4782,31 @@ impl BackendOps for CudaBackendOps {
         self.arg_reduce_dispatch(a, dim, ArgKind::Min)
     }
 
-    /// 線形代数 LU 系（`inv`／`solve`／`det`。イシュー #2674・設計記録
+    /// 線形代数 LU 系（`inv`／`solve`／`det`。イシュー #2674・#3135・設計記録
     /// `docs/backend-gpu-linalg-decision.md` §3〜§6）は内部 opt-in ゲート
     /// （`crate::linalg::set_gpu_linalg_enabled`。既定 OFF・facade 非公開）
     /// の背後にある。ゲート OFF なら従来どおり `device_handle()`（driver
     /// 初期化）を経由せず `Unsupported` を返し、`Var` 側がホスト `f64` 参照
-    /// 実装へフォールバックする（既存契約不変）。ゲート ON 時の流れは
-    /// `lu_gate_prepare` 参照。
+    /// 実装へフォールバックする（既存契約不変）。ゲート ON では
+    /// `lu_gate_prepare`（検証・`n == 0` のホスト返却）→ デバイス初期化 →
+    /// `CudaLinalg` の実起動（`linalg.rs` の CU-1／CU-2）の順で進む。特異は
+    /// solve／inv が `InvalidArgument`、det が `0.0`（CPU と同じ）。
     fn linalg_inv(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         if lu_gate_prepare("linalg_inv", a.shape(), None)? {
             return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
         }
-        Err(lu_launch_pending("linalg_inv"))
+        let n = a.shape()[0];
+        let a_owned = a.contiguous();
+        let a_slice = lu_input_slice("linalg_inv", &a_owned)?;
+        let lin = self.cached_linalg_handle()?;
+        let outcome =
+            self.with_driver_call(&[], map_cuda_error, || lin.run_lu_inv_f32(a_slice, n))?;
+        match outcome {
+            crate::linalg::LuSolveOutcome::Solved(x) => {
+                Tensor::new(x, &[n, n]).map_err(BackendError::ShapeMismatch)
+            }
+            crate::linalg::LuSolveOutcome::Singular => Err(lu_singular_error("linalg_inv")),
+        }
     }
 
     fn linalg_solve(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -4766,7 +4814,23 @@ impl BackendOps for CudaBackendOps {
             return Tensor::new(Vec::new(), &[0, b.shape()[1]])
                 .map_err(BackendError::ShapeMismatch);
         }
-        Err(lu_launch_pending("linalg_solve"))
+        let (n, k) = (a.shape()[0], b.shape()[1]);
+        let a_owned = a.contiguous();
+        let b_owned = b.contiguous();
+        let a_slice = lu_input_slice("linalg_solve", &a_owned)?;
+        let b_slice = b_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("linalg_solve: b not contiguous".into())
+        })?;
+        let lin = self.cached_linalg_handle()?;
+        let outcome = self.with_driver_call(&[], map_cuda_error, || {
+            lin.run_lu_solve_f32(a_slice, b_slice, n, k)
+        })?;
+        match outcome {
+            crate::linalg::LuSolveOutcome::Solved(x) => {
+                Tensor::new(x, &[n, k]).map_err(BackendError::ShapeMismatch)
+            }
+            crate::linalg::LuSolveOutcome::Singular => Err(lu_singular_error("linalg_solve")),
+        }
     }
 
     fn linalg_det(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -4774,7 +4838,13 @@ impl BackendOps for CudaBackendOps {
             // 空行列の行列式は空積 1.0（CPU と同じ）。
             return Tensor::new(vec![1.0], &[]).map_err(BackendError::ShapeMismatch);
         }
-        Err(lu_launch_pending("linalg_det"))
+        let n = a.shape()[0];
+        let a_owned = a.contiguous();
+        let a_slice = lu_input_slice("linalg_det", &a_owned)?;
+        let lin = self.cached_linalg_handle()?;
+        let value =
+            self.with_driver_call(&[], map_cuda_error, || lin.run_lu_det_f32(a_slice, n))?;
+        Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
     }
 
     /// Cholesky 分解（イシュー #2675）。LU 系と同じ内部 opt-in ゲートの背後に
@@ -4871,7 +4941,8 @@ impl BackendOps for CudaBackendOps {
 
     fn linalg_svd(&self, _a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {
         Err(BackendError::Unsupported(
-            "CudaBackendOps::linalg_svd: 線形代数カーネル未実装（イシュー #1621 スコープ外）"
+            "CudaBackendOps::linalg_svd: CUDA の SVD カーネルは未実装（`Var` はホスト f64 へ\
+             フォールバックする。設計記録 `docs/backend-gpu-linalg-decision.md` §8）"
                 .into(),
         ))
     }
@@ -4882,8 +4953,9 @@ impl BackendOps for CudaBackendOps {
         _ord: MatrixNormOrd,
     ) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
-            "CudaBackendOps::linalg_matrix_norm: 線形代数カーネル未実装（イシュー #1621 \
-             スコープ外）"
+            "CudaBackendOps::linalg_matrix_norm: CUDA の行列ノルムカーネルは未実装（`Var` は\
+             ホスト f64 へフォールバックする。設計記録 \
+             `docs/backend-gpu-linalg-decision.md` §8）"
                 .into(),
         ))
     }
@@ -7517,6 +7589,18 @@ mod tests {
             fandhe_ai_tensor_core::FusedOpKind::Mul { lhs: 4, rhs: 0 },
         ];
         FusionPlan::from_ops(ops, vec![hidden], dtype, 1).unwrap()
+    }
+
+    /// `linalg_handle_error` は `CudaError::Driver` を整形せず（`cuGetErrorString` の
+    /// 遅延ロードによる panic を避け、ドライバ未搭載環境でも）型付きエラーへ写す。
+    #[test]
+    fn linalg_handle_error_does_not_format_driver_error() {
+        let err = linalg_handle_error(CudaError::Driver(sticky_driver_error()));
+        assert!(matches!(err, BackendError::CudaUnavailable(_)), "{err:?}");
+        let err = linalg_handle_error(CudaError::DriverUnavailable {
+            detail: "no libcuda".to_string(),
+        });
+        assert!(matches!(err, BackendError::CudaUnavailable(m) if m == "no libcuda"));
     }
 
     /// `run_fused` はカーネル起動（デバイスアクセス）前に `plan.dtype()

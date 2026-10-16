@@ -4540,7 +4540,8 @@ pub trait BackendOps {
     /// # デフォルト実装
     /// `gemm_checksum` と同じ非破壊拡張パターン。既定は
     /// [`BackendError::Unsupported`]（GPU バックエンドは本イシュー時点で
-    /// 未実装。CUDA の LU 系は #2674・Metal の LU 系は #2676 で内部 opt-in ゲート〈既定 OFF〉の
+    /// 未実装。CUDA の LU 系は #2674 で内部 opt-in ゲート〈既定 OFF〉の背後に追加され #3135 で
+    /// ゲート ON 時に実カーネルを起動する（ゲート OFF の既定では `Unsupported`）。Metal の LU 系は #2676 で内部 opt-in ゲート〈既定 OFF〉の
     /// 背後に追加され、既定では `Unsupported` のまま。`fandhe_ai_autodiff::var::Var::inv` がこの `Unsupported`
     /// のみをホスト参照実装 `eval::linalg::inv` へフォールバックし、
     /// それ以外のエラー〈特異行列の `InvalidArgument` 等〉は伝播する）。

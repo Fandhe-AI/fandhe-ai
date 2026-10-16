@@ -6,7 +6,7 @@
 
 | 項目 | 内容 |
 |------|------|
-| 承認状態 | 「GPU 線形代数の `unsafe`」を実装まで進めてよいとする D-C の承認が、親 #3133 本文に「D-C の承認済み」と記載されている（本記録はその記載に基づく）。承認コメントの URL は調査時点では確認できていない。**個々の `unsafe` ブロックの security-auditor 監査は承認とは別に必須**（`.claude/rules/security.md`） |
+| 承認状態 | 「GPU 線形代数の `unsafe`」を実装まで進めてよいとする D-C の承認が、親 #3133 本文に「D-C の承認済み」と記載されている（本記録はその記載に基づく）。承認コメントは [#3018 の所有者判断の記録（2026-10-11）](https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437) の D-C 表（「GPU 線形代数の unsafe」を含む 4 件）で、#3135 の監査時に `gh api` で特定した。**個々の `unsafe` ブロックの security-auditor 監査は承認とは別に必須**（`.claude/rules/security.md`） |
 | 監査の種類 | **実装前の監査記録**。対象の `unsafe` ブロックは本 doc 時点（`origin/main` 266f5df5）で 1 つも存在しない（Stage A は `unsafe` なしで完了済み）。本 doc は予定ブロックの不変条件を確定する。カーネルソース・ホスト側検証は実コードを読んで突合した |
 | 変更範囲 | docs のみ。コード・`Cargo.toml`／`Cargo.lock`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変更しない |
 | 未検証 | NVRTC コンパイルと GB10 実機実行（#3138）、MSL の Mac 実機実行（#3139）。いずれも実装前のため未実行 |
@@ -18,8 +18,8 @@
 
 | ID | 予定の場所 | カーネル | 起動形状 | 検証方法（テスト） |
 |----|-----------|----------|----------|--------------------|
-| CU-1 | `CudaLinalg::run_lu_solve_f32`・`run_lu_det_f32` 内 | `linalg_lu_f64` | grid `(1,1,1)`・block は `LU_BLOCK_DIM`（256。`kernels_linalg.rs:36`）と**厳密一致** | `lu_det_matches_cpu_on_device`（`#[ignore]`・既存）。solve／inv の実機テストは未作成（#3135 で追加予定） |
-| CU-2 | `run_lu_solve_f32` 内 | `linalg_lu_solve_f64` | grid `ceil(k / LU_SOLVE_BLOCK_DIM)`・block 128（`kernels_linalg.rs:151`）。`k == 0` では起動しない。CU-1 と同一ストリームで後に起動 | 同上（未作成・#3135 で追加予定） |
+| CU-1 | `CudaLinalg::launch_lu`（private。`run_lu_solve_f32`・`run_lu_det_f32` が共有。#3135 で実装済み） | `linalg_lu_f64` | grid `(1,1,1)`・block は `LU_BLOCK_DIM`（256。`kernels_linalg.rs:36`）と**厳密一致** | `lu_det_matches_cpu_on_device`・`lu_det_matches_cpu_on_device_set`・`lu_solve_matches_cpu_on_device`・`lu_inv_matches_cpu_on_device`・`lu_singular_maps_like_cpu_on_device`（いずれも `#[ignore]`。#3135 で追加。実機実測は #3138） |
+| CU-2 | `run_lu_solve_f32` 内（#3135 で実装済み） | `linalg_lu_solve_f64` | grid `ceil(k / LU_SOLVE_BLOCK_DIM)`・block 128（`kernels_linalg.rs:151`）。`k == 0` では起動しない。CU-1 と同一ストリームで後に起動 | 同上 |
 | CU-3 | `CudaLinalgFactor` の cholesky 実行関数内 | `linalg_cholesky_f64` | grid `(1,1,1)`・block は `FACTOR_BLOCK_DIM`（256。`kernels_linalg_factor.rs:38`）と厳密一致 | `cholesky_matches_cpu_on_device`（`#[ignore]`・既存） |
 | CU-4 | 同 QR 実行関数内 | `linalg_qr_f64` | 同上 | `qr_matches_cpu_on_device`（`#[ignore]`・既存） |
 | CU-5 | 同 eigh 実行関数内 | `linalg_eigh_f64` | 同上 | `eigh_matches_cpu_on_device`（`#[ignore]`・既存） |
@@ -87,7 +87,7 @@
 ## 4. REQ-8 とゲート順序
 
 - カーネル側の手動境界チェックは**維持する**。ホスト検証だけでは、将来の呼び出し経路の追加やカーネル流用に対する多層防御にならない。`.claude/rules/coding-rust.md` は最適化を理由とした省略を禁じる。設計記録 `docs/backend-gpu-linalg-decision.md` §4 も参照
-- カーネル側の検査: ストライドループの `i < n`（`idx < total` 等）、CUDA solve の `col >= k`、Metal solve の `gid >= k` と `src < n`
+- カーネル側の検査: ストライドループの `i < n`（`idx < total` 等）、CUDA solve の `col >= k` と `perm[i]` の値域（`0 <= perm[i] < n`。違反は `solve_err` でホストへ通知）、Metal solve の `gid >= k` と `src < n`
 - 添字型: CUDA は int（`n <= 46340`・`k <= i32::MAX`・QR は `long long` ストライド）、Metal は uint（`m*n <= u32::MAX`）。Metal QR の uint ストライド（§6 の 3）は未確認
 - ゲート判定はデバイス初期化より前に置き、確保前にバイト数上限と shape を検査する（`backend-gpu-linalg-decision.md` §4）。順序は「検証 → デバイス初期化 → 確保 → 起動」で固定する
 
@@ -110,7 +110,7 @@ eigh の回転更新（`s_skip == 0` 内）の `sym` 書き込みと `v` 書き�
 
 | # | 内容 | 担当 |
 |---|------|------|
-| 1 | CUDA solve の `perm[i]` に範囲検査がない（Metal は `src < n`）。REQ-8 の多層防御として `perm[i] < n` 検査の追加を検討する。カーネルソースの変更は本 PR では行わない | #3135 |
+| 1 | CUDA solve の `perm[i]` の値域検査。**解消（#3135・PR #3401 レビュー P0 対応）**: `linalg_lu_solve_f64` は `b[perm[i]*k+col]` を読む前に全 `i < n` で `0 <= perm[i] < n` を検査し、違反なら書き込み可能な `solve_err`（`int*`・1 要素・ホストが 0 初期化）へ 1 を書いて `x` に何も書かず return する。ホストは `run_lu_solve_f32` で `solve_err` を必ず読み戻し、非 0 を `solve_err_to_result` で `CudaError::LinalgKernelStatusInvalid` に写す（黙って成功扱いにしない）。当初の「LU が値域を保証するため検査しない」判断は REQ-8 に反するため撤回した。検証: `kernels_linalg.rs` のソース検査テスト（検査が `b` の読み出しより前）・`linalg.rs::solve_err_mapping`（ホスト純関数）。カーネル挙動の実機異常系（perm 破損の注入）は NVRTC・GB10 実機が要るため #3138 | #3135（解消）・#3138（実機） |
 | 2 | `n > 0` かつ `k == 0` では solve の grid 0 起動を作らない | #3135・#3137（Metal は #3137 で解消: `k == 0` は LU のみ encode し solve を encode しない） |
 | 3 | Metal QR は `m*n <= u32::MAX` により `m` が u32::MAX 近傍（n=1）になりうる。`for (uint i = tid; i < len; i += tg_size)` が最終要素付近でラップして終了しない（ハング）可能性を #3137 で確認する。MSL の符号なしラップは UB ではないが DoS になりうる | #3137（解消: `linalg::validate_launch_stride_headroom` で `bound + 256 <= 2^32` をホスト検証。QR は `max(m, n)`、LU・cholesky は `n*n`〈n<=65535 で 65535²+256 < 2^32 のため実質影響なし〉、solve は `max(n*n, k)`。MSL は変更していない） |
 | 4 | NVRTC コンパイル・GB10 実機・Mac 実機での一致は未検証 | #3138・#3139 |
@@ -129,7 +129,39 @@ eigh の回転更新（`s_skip == 0` 内）の `sym` 書き込みと `v` 書き�
 
 ## 8. security-auditor の監査結果
 
-**未実施**。本タスクの実行環境ではサブエージェントを起動できなかったため、security-auditor による監査は行っていない。「指摘なし」を意味しない。
+### 8.0 CU-1／CU-2（#3135・PR #3401）の独立監査
+
+| 項目 | 内容 |
+|------|------|
+| 対象 | コミット `eaf7141e`（PR #3401 の HEAD）。新規 `unsafe` は CU-1（`linalg.rs` の `launch_lu`）と CU-2（同 `run_lu_solve_f32`）の 2 ブロックのみ（`linalg.rs` 内のほかの `unsafe` は #3136 でマージ済みの CU-3〜5） |
+| 方法 | **静的突合のみ**（ソースとカーネルの読み合わせ）。**実機実行と NVRTC コンパイルは未確認**（#3138 で検証） |
+| 結果 | **P0・P1 なし**。P2 が 4 件（下記） |
+
+確認した内容:
+
+- SAFETY コメントは不変条件 (b)(c)(e)(f)(g)(h) と一致する。起動引数の型・個数・順序はカーネルのシグネチャと一致する。
+- バッファ長 `n*n`・`n`・2（`status`）・`n*k`・1（`solve_err`）は起動前に検証済み。`n`・`k`・`n*n`・`n*k` は `checked_mul` と `i32::MAX` で検査し `checked_i32` で変換する。
+- 起動形状は LU が単一 block（256）、solve が `div_ceil` の grid で、`k == 0` では起動しない。
+- カーネル側の手動境界チェック（`i < n`・`c < n`・`col >= k`・`perm` 値域）は維持している（REQ-8）。
+- 特異は solve／inv が `InvalidArgument`、det が `0.0`。`solve_err` は必ず読み戻し、非 0 は型付きエラーにする。全処理は `with_driver_call` の内側で、ゲート OFF 既定は不変。
+- 依存・`Cargo.lock`・tolerance の変更なし。本番経路に `unwrap`／`expect` なし。§6 の 1（`perm` 値域検査）と 2（`k == 0` の grid 0 起動回避）は解消済み。
+
+P2 と対応:
+
+| ID | 指摘 | 対応 |
+|----|------|------|
+| P2-1 | 本節が「未実施」のまま、§1 の D-C 承認 URL が未確認 | 本節を監査結果に更新し、§1 に承認コメントの URL を記入した |
+| P2-2 | `validate_lu_dims` は `n = 46340` まで通す。単一 block の O(n³) で watchdog・GPU 占有、メモリは約 17 GB を複数。ゲートは opt-in かつ内部限定で重大度は低い | **コード変更なし。上限値は実測なしに決めない**。#3138（実機実測）への申し送り: GB10 で `n` を段階的に上げて LU 1 回の所要時間と使用メモリを実測し、実測に基づく `n` 上限（超過は `InvalidArgument`）を決める。上限の追加は別途人間承認 |
+| P2-3 | `cached_linalg_handle` の `map` が `e.to_string()` を使う。`CudaError::Driver` の整形は `cuGetErrorString` の遅延ロードでドライバ未ロード環境の panic 要因になりうる | `linalg_handle_error`（`ops.rs`）へ置換し、`CudaError::Driver` は整形せず静的メッセージの `CudaUnavailable` にした。同型の `linalg_factor_handle`（#3136）にも同じ関数を適用した。実際の panic 経路かの判断: ドライバ未搭載では構築失敗が `DriverUnavailable`（`detail` 文字列）になり `Driver` 変種は出ないため通常は踏まない。`Driver` 変種はドライバのロード後にのみ生じるため、予防的な是正である。単体テスト `linalg_handle_error_does_not_format_driver_error` を追加（既存の `gate_on_non_empty_does_not_panic` はゲート ON・非空入力が panic せず型付きエラーになることを確認する） |
+| P2-4 | 実機テストと NVRTC コンパイルが未確認 | #3138 で検証する（`#[ignore]` テストが入口。§1 の「未検証」と同じ） |
+
+### 8.1 PR #3401 のレビュー対応履歴（独立監査の前）
+
+- (P0) CU-2 の solve カーネルに `perm` 値域検査と `solve_err` 通知を追加した（§6 の 1）。引数は `(const double* lu, const int* perm, const int* status, const double* b, double* x, int* solve_err, int n, int k)`。`solve_err_dev` は 1 要素・`alloc_zeros` で確保し readback で判定する。
+- (P2) 値域違反通知を `atomicExch(solve_err, 1)` にした（`k >= 2` の同一要素への競合書き込みの解消）。
+- いずれも `unsafe` ブロック数は不変（2）。この時点の実装担当の再点検は security-auditor の判定ではなく、上記 §8.0 の独立監査が最終判定である。
+
+実装担当の自己点検（CU-1／CU-2。#3135）: `grep -n "unsafe {" crates/backend-cuda/src/linalg.rs` が 2 行（`launch_lu`＝CU-1、`run_lu_solve_f32`＝CU-2）。各 SAFETY コメントに行 ID と不変条件を記載。引数の順・型はカーネルのシグネチャと一致、`n`・`k` は `validate_lu_dims`＋`i32::try_from`、入力長は `check_lu_lens`、`status` は必ず読み戻し、`with_driver_call` で包む。
 
 実装担当による自己点検の結果は §5・§6 のとおり。PR レビューで security-auditor の監査を受け、指摘と対応をこの節へ追記する。個々の実装 PR（#3135・#3136・#3137）でも各ブロックを再監査する。実装後の再現コマンド:
 

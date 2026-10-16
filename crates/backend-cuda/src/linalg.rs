@@ -28,23 +28,32 @@
 //! （`crates/facade/tests/api_surface.rs` の保留ガードで機械固定。公開形の
 //! 推奨は設計記録 §7、公開は別 issue でユーザー承認後）。
 //!
-//! # カーネル起動の承認状況
+//! # カーネル起動（Stage B。イシュー #3135・親イシュー #3133）
 //!
-//! cudarc の `launch` は `unsafe fn` であり、カーネル起動には新規 `unsafe`
-//! が必要になる。LU 系（`solve`・`inv`・`det`）は承認が確認できていないため
-//! 起動を含まず、ゲート ON 時は fail-closed の `Unsupported` を返す（`ops.rs`。
-//! 起動仕様は `docs/perf/logs/cuda-linalg-lu-2674/README.md`、#3135 で実装）。
+//! cudarc の `launch` は `unsafe fn` のため、起動 2 箇所だけが本モジュールの
+//! 起動ブロックになる（`docs/gpu-linalg-kernel-launch-unsafe-audit.md` の
+//! 行 ID CU-1＝`launch_lu`・CU-2＝`run_lu_solve_f32`。共通不変条件 (a)〜(h)
+//! は同記録 §3）。承認状態は同記録 §1 のとおり「親 #3133 本文に承認済みの
+//! 記載あり（承認コメントの URL は未確認）」であり、security-auditor の
+//! 監査結果は同記録 §8 に記す。
 //!
-//! 分解系 3 演算（cholesky・QR・eigh）は D-C 承認（親 #3133）と監査記録
-//! `docs/gpu-linalg-kernel-launch-unsafe-audit.md`（CU-3・CU-4・CU-5）に基づき
+//! - 実行 API: `CudaLinalg::run_lu_solve_f32`・`CudaLinalg::run_lu_inv_f32`・
+//!   `CudaLinalg::run_lu_det_f32`（`ops.rs` の LU 系 3 演算が
+//!   `context_cache::cached_linalg` 経由で呼ぶ）。H2D の前にホストで
+//!   `f32`→`f64` へ変換し、D2H の後に 1 回だけ `as f32` する（設計記録 §4）。
+//!   `status` は必ず読み戻し、特異は `LuSolveOutcome`（solve／inv）・`0.0`
+//!   （det）へ写す。
+//! - 実機（GB10）での NVRTC コンパイル・parity・特異写像の実測は #3138。
+//!   `docs/perf/logs/cuda-linalg-lu-2674/README.md` に状態を記す。
+//!
+//! 分解系 3 演算（cholesky・QR・eigh）は D-C 承認（親 #3133）と監査記録（CU-3・CU-4・CU-5）に基づき
 //! イシュー #3136 で起動を実装済みで、[`CudaLinalgFactor::run_cholesky_f32`]・
-//! [`CudaLinalgFactor::run_qr_f32`]・[`CudaLinalgFactor::run_eigh_f32`] の
-//! 3 か所だけが `unsafe`（`launch`）を持つ。ゲート OFF（既定）の挙動は不変。
+//! [`CudaLinalgFactor::run_qr_f32`]・[`CudaLinalgFactor::run_eigh_f32`] が `unsafe`（`launch`）を持つ。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 
 use crate::context_cache;
 use crate::device::CudaDevice;
@@ -241,6 +250,281 @@ impl CudaLinalg {
     pub fn lu_solve_function(&self) -> &CudaFunction {
         &self.lu_solve
     }
+
+    /// H2D・確保・起動・readback を CUDA Graph capture 排他へ参加させる
+    /// 共通ヘルパー（`mse.rs::CudaMse::with_driver_call` と同型）。
+    fn with_driver_call<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, CudaError> {
+        context_cache::with_driver_call(self.ordinal, f)
+    }
+
+    /// LU 分解カーネル（`linalg_lu_f64`）を単一 block で起動する。監査記録の
+    /// 行 ID CU-1（本モジュールで LU 分解を起動する唯一の箇所）。
+    ///
+    /// 呼び出し元（`run_lu_solve_f32`・`run_lu_det_f32`）が `a_dev`＝`n*n`・
+    /// `perm_dev`＝`n`・`status_dev`＝2 要素を確保済みで、`n_i` は検証済みの
+    /// `n` の `i32` 表現であることを前提とする。
+    fn launch_lu(
+        &self,
+        a_dev: &mut CudaSlice<f64>,
+        perm_dev: &mut CudaSlice<i32>,
+        status_dev: &mut CudaSlice<i32>,
+        n_i: i32,
+    ) -> Result<(), CudaError> {
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (LU_BLOCK_DIM, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: CU-1（`docs/gpu-linalg-kernel-launch-unsafe-audit.md`・共通
+        // 不変条件 (b)(c)(e)(f)(g)(h)）。引数は `(double* a, int* perm, int*
+        // status, int n)` の順・型でカーネルのシグネチャと一致する。`a_dev`
+        // は呼び出し元が `n*n` 要素で確保・H2D 済み、`perm_dev` は `n` 要素、
+        // `status_dev` は 2 要素（`validate_lu_dims` と `i32::try_from` で
+        // `n`・`n*n` の範囲を検証済み）。grid は `(1,1,1)` の単一 block で
+        // block 次元はソースの `LU_BLOCK` と同値（`LU_BLOCK_DIM`）。カーネル
+        // 内の全ループは `i < n`・`c < n` の手動境界チェックを維持する
+        // （REQ-8）ため OOB 読み書きは起きない。バッファは呼び出し元の
+        // クロージャ内で readback 完了まで生存する。
+        unsafe {
+            self.stream
+                .launch_builder(&self.lu)
+                .arg(a_dev)
+                .arg(perm_dev)
+                .arg(status_dev)
+                .arg(&n_i)
+                .launch(cfg)?;
+        }
+        Ok(())
+    }
+
+    /// `A X = B`（`a`: `n*n`・`b`: `n*k`、いずれも行優先 `f32`）を GPU で解く。
+    /// `n == 0` はデバイスに触れず `Solved(vec![])`。ピボットが厳密 `0` の
+    /// 特異行列は [`LuSolveOutcome::Singular`]（`ops.rs` が `InvalidArgument`
+    /// へ写す）。`n > 0` かつ `k == 0` は LU だけを起動して特異判定のみ行い、
+    /// 代入は起動しない（CPU の `solve` と同じ判定。監査記録 §6 の #2）。
+    pub(crate) fn run_lu_solve_f32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        n: usize,
+        k: usize,
+    ) -> Result<LuSolveOutcome, CudaError> {
+        validate_lu_dims(n, k)?;
+        check_lu_lens(a.len(), b.len(), n, k)?;
+        if n == 0 {
+            return Ok(LuSolveOutcome::Solved(Vec::new()));
+        }
+        let n_i = checked_i32("n", n)?;
+        let k_i = checked_i32("k", k)?;
+        // `k` は `i32` に収まる検証済みのため `u32` へも収まる。
+        let k_u = u32::try_from(k).map_err(|_| CudaError::InvalidElementwiseShape {
+            detail: format!("linalg LU: k={k} が u32 に収まらない"),
+        })?;
+
+        self.with_driver_call(|| {
+            let a64: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
+            let mut a_dev = self.stream.clone_htod(&a64)?;
+            let mut perm_dev = self.stream.alloc_zeros::<i32>(n)?;
+            let mut status_dev = self.stream.alloc_zeros::<i32>(2)?;
+            self.launch_lu(&mut a_dev, &mut perm_dev, &mut status_dev, n_i)?;
+
+            // status の読み戻しが同期点。特異なら代入を起動せず返す。
+            let status: Vec<i32> = readback(&self.stream, &status_dev)?;
+            if interpret_lu_status(&status)?.singular {
+                return Ok(LuSolveOutcome::Singular);
+            }
+            let Some(cfg) = solve_launch_config(k_u) else {
+                return Ok(LuSolveOutcome::Solved(Vec::new()));
+            };
+
+            let b64: Vec<f64> = b.iter().map(|&v| f64::from(v)).collect();
+            let b_dev = self.stream.clone_htod(&b64)?;
+            let mut x_dev = self.stream.alloc_zeros::<f64>(n * k)?;
+            // perm 値域違反の通知先（カーネルは 1 を書くのみ。0 初期化）。
+            let mut solve_err_dev = self.stream.alloc_zeros::<i32>(1)?;
+            // SAFETY: CU-2（`docs/gpu-linalg-kernel-launch-unsafe-audit.md`・
+            // 共通不変条件 (b)(c)(e)(f)(g)(h)）。引数は `(const double* lu,
+            // const int* perm, const int* status, const double* b, double* x,
+            // int* solve_err, int n, int k)` の順・型でカーネルと一致する。`a_dev`（LU 済み・
+            // `n*n`）・`perm_dev`（`n`）・`status_dev`（2）は CU-1 と同一 stream
+            // 上で先に実行済みで、`b_dev`・`x_dev` は `n*k` 要素
+            // （`check_lu_lens` と `validate_lu_dims` で検証済み）。`solve_err_dev` は
+            // 1 要素。`perm` の値域（`[0, n)`）はカーネル側が `b` を読む前に検査し、
+            // 違反なら `solve_err` へ 1 を書いて何も書かず return する（REQ-8）。
+            // ホストは下で必ず読み戻して型付きエラーにする。grid は
+            // `k.div_ceil(block)`、カーネル内の `col >= k` 手動境界チェック
+            // （REQ-8）で余剰スレッドは何も書かない。バッファは readback 完了
+            // まで本クロージャ内で生存する。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.lu_solve)
+                    .arg(&a_dev)
+                    .arg(&perm_dev)
+                    .arg(&status_dev)
+                    .arg(&b_dev)
+                    .arg(&mut x_dev)
+                    .arg(&mut solve_err_dev)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+            // 読み戻しが同期点。perm 値域違反は成功扱いにせず型付きエラーで返す。
+            let solve_err: Vec<i32> = readback(&self.stream, &solve_err_dev)?;
+            solve_err_to_result(solve_err.first().copied().unwrap_or(-1))?;
+            let x: Vec<f64> = readback(&self.stream, &x_dev)?;
+            Ok(LuSolveOutcome::Solved(
+                x.into_iter().map(|v| v as f32).collect(),
+            ))
+        })
+    }
+
+    /// `inv(A)`（`A X = I` の `X`）。`B` はホストで作る単位行列（`f32` の
+    /// `1.0`／`0.0` は `f64` へ厳密に変換される）で、[`Self::run_lu_solve_f32`]
+    /// へ委譲する。
+    pub(crate) fn run_lu_inv_f32(&self, a: &[f32], n: usize) -> Result<LuSolveOutcome, CudaError> {
+        validate_lu_dims(n, n)?;
+        let mut ident = vec![0.0f32; n * n];
+        for i in 0..n {
+            ident[i * n + i] = 1.0;
+        }
+        self.run_lu_solve_f32(a, &ident, n, n)
+    }
+
+    /// `det(A)`（LU 対角積 × 置換符号。CPU と同じ [`lu_diag_product`]）。
+    /// `n == 0` は空積 `1.0`、特異は `0.0`（エラーにしない。CPU 契約）。
+    pub(crate) fn run_lu_det_f32(&self, a: &[f32], n: usize) -> Result<f32, CudaError> {
+        validate_lu_dims(n, 0)?;
+        check_lu_lens(a.len(), 0, n, 0)?;
+        if n == 0 {
+            return Ok(1.0);
+        }
+        let n_i = checked_i32("n", n)?;
+
+        self.with_driver_call(|| {
+            let a64: Vec<f64> = a.iter().map(|&v| f64::from(v)).collect();
+            let mut a_dev = self.stream.clone_htod(&a64)?;
+            let mut perm_dev = self.stream.alloc_zeros::<i32>(n)?;
+            let mut status_dev = self.stream.alloc_zeros::<i32>(2)?;
+            self.launch_lu(&mut a_dev, &mut perm_dev, &mut status_dev, n_i)?;
+
+            let status: Vec<i32> = readback(&self.stream, &status_dev)?;
+            if interpret_lu_status(&status)?.singular {
+                // 特異ならカーネルが途中で return し `a` は分解途中のため読まない。
+                return Ok(0.0f32);
+            }
+            let lu: Vec<f64> = readback(&self.stream, &a_dev)?;
+            Ok(det_from_lu(&status, &lu, n)? as f32)
+        })
+    }
+}
+
+/// LU 系（solve／inv）の GPU 実行結果。特異（ピボットが厳密 `0`）は
+/// `CudaError` を増やさず専用 variant で表す（`map_cuda_error` の汎用腕で
+/// `KernelLaunchFailed` に化けるのと sticky エラー観測へ乗るのを避ける。
+/// 設計記録 §4）。`ops.rs` が `BackendError::InvalidArgument` へ写す。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LuSolveOutcome {
+    /// 行優先 `n*k` の解（`f32`。`k == 0` のときは空）。
+    Solved(Vec<f32>),
+    /// 係数行列が特異。
+    Singular,
+}
+
+/// LU カーネルの `status`（`[singular_flag, swap_count]`）の解釈結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LuStatus {
+    pub(crate) singular: bool,
+    pub(crate) swap_count: u32,
+}
+
+/// `status` を解釈する。長さ不足・負の `swap_count` は型付きエラー
+/// （カーネルが書く値の整合性検査。OWASP A08）。
+pub(crate) fn interpret_lu_status(status: &[i32]) -> Result<LuStatus, CudaError> {
+    let invalid = |detail: String| CudaError::InvalidElementwiseShape { detail };
+    let (flag, swaps) = match status {
+        [flag, swaps, ..] => (*flag, *swaps),
+        _ => {
+            return Err(invalid(format!(
+                "linalg LU: status の長さが不足（{} < 2）",
+                status.len()
+            )));
+        }
+    };
+    let swap_count = u32::try_from(swaps)
+        .map_err(|_| invalid(format!("linalg LU: swap_count が負: {swaps}")))?;
+    Ok(LuStatus {
+        singular: flag != 0,
+        swap_count,
+    })
+}
+
+/// LU 済み行列（行優先 `n*n`）と `status` から行列式を組み立てる。特異は
+/// `lu` を参照せず `0.0`。それ以外は対角と置換符号を [`lu_diag_product`] へ渡す。
+pub(crate) fn det_from_lu(
+    status: &[i32],
+    lu_row_major: &[f64],
+    n: usize,
+) -> Result<f64, CudaError> {
+    let st = interpret_lu_status(status)?;
+    if st.singular {
+        return Ok(0.0);
+    }
+    let nn = n
+        .checked_mul(n)
+        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+            detail: "linalg LU 後処理: n*n が usize を超える".to_string(),
+        })?;
+    if lu_row_major.len() < nn {
+        return Err(CudaError::InvalidElementwiseShape {
+            detail: format!(
+                "linalg LU 後処理: LU の長さが不足（{} < n*n={nn}）",
+                lu_row_major.len()
+            ),
+        });
+    }
+    let diag: Vec<f64> = (0..n).map(|i| lu_row_major[i * n + i]).collect();
+    Ok(lu_diag_product(&diag, permutation_sign(st.swap_count)))
+}
+
+/// 代入カーネルの起動形状（grid は `ceil(k / block)`）。`k == 0` は `None`
+/// （grid 0 の起動をしない）。`div_ceil` なので `u32` で overflow しない。
+pub(crate) fn solve_launch_config(k: u32) -> Option<LaunchConfig> {
+    if k == 0 {
+        return None;
+    }
+    Some(LaunchConfig {
+        grid_dim: (k.div_ceil(LU_SOLVE_BLOCK_DIM), 1, 1),
+        block_dim: (LU_SOLVE_BLOCK_DIM, 1, 1),
+        shared_mem_bytes: 0,
+    })
+}
+
+/// `usize` を `i32`（カーネル引数型）へ検証つきで変換する（`as` は使わない）。
+fn checked_i32(name: &str, v: usize) -> Result<i32, CudaError> {
+    i32::try_from(v).map_err(|_| CudaError::InvalidElementwiseShape {
+        detail: format!("linalg LU: {name}={v} が i32 に収まらない（カーネル引数型）"),
+    })
+}
+
+/// 入力スライス長が `a == n*n`・`b == n*k` と一致することを検査する
+/// （H2D バッファ長とカーネルの添字範囲の一致を保証する。不変条件 (b)）。
+fn check_lu_lens(a_len: usize, b_len: usize, n: usize, k: usize) -> Result<(), CudaError> {
+    let invalid = |detail: String| CudaError::InvalidElementwiseShape { detail };
+    let nn = n
+        .checked_mul(n)
+        .ok_or_else(|| invalid("linalg LU: n*n が usize を超える".to_string()))?;
+    let nk = n
+        .checked_mul(k)
+        .ok_or_else(|| invalid("linalg LU: n*k が usize を超える".to_string()))?;
+    if a_len != nn || b_len != nk {
+        return Err(invalid(format!(
+            "linalg LU: 入力長が不一致（a={a_len} != n*n={nn} または b={b_len} != n*k={nk}）"
+        )));
+    }
+    Ok(())
 }
 
 /// 分解系 3 カーネルの block 次元（grid は `(1,1,1)`）。
@@ -445,6 +729,18 @@ fn factor_status_to_result(op: FactorOp, status: i32) -> Result<(), CudaError> {
         }),
         other => Err(CudaError::LinalgKernelStatusInvalid {
             detail: format!("{op:?}: status={other} は契約外（sentinel のまま、または想定外）"),
+        }),
+    }
+}
+
+/// solve カーネルの `solve_err` を判定する純関数。`0` のみ成功で、`1`
+/// （`perm` の値域違反）・その他は [`CudaError::LinalgKernelStatusInvalid`]
+/// （黙って成功扱いにしない。REQ-8・A08）。
+fn solve_err_to_result(v: i32) -> Result<(), CudaError> {
+    match v {
+        0 => Ok(()),
+        other => Err(CudaError::LinalgKernelStatusInvalid {
+            detail: format!("linalg_lu_solve: perm の値域違反を検出（solve_err={other}）"),
         }),
     }
 }
@@ -886,6 +1182,17 @@ mod tests {
     }
 
     #[test]
+    fn solve_err_mapping() {
+        assert!(solve_err_to_result(0).is_ok());
+        for bad in [1, -1, i32::MIN] {
+            assert!(matches!(
+                solve_err_to_result(bad),
+                Err(CudaError::LinalgKernelStatusInvalid { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn refl_valid_check() {
         assert!(check_refl_valid(&[0, 1, 1], 3).is_ok());
         assert!(check_refl_valid(&[0, FACTOR_STATUS_SENTINEL], 2).is_err());
@@ -917,5 +1224,65 @@ mod tests {
         assert_eq!(permutation_sign(0), 1.0);
         assert_eq!(permutation_sign(1), -1.0);
         assert_eq!(permutation_sign(4), 1.0);
+    }
+
+    #[test]
+    fn solve_launch_config_grid_and_zero() {
+        assert!(solve_launch_config(0).is_none());
+        let g = |k| solve_launch_config(k).expect("cfg").grid_dim.0;
+        assert_eq!(g(1), 1);
+        assert_eq!(g(LU_SOLVE_BLOCK_DIM), 1);
+        assert_eq!(g(LU_SOLVE_BLOCK_DIM + 1), 2);
+        assert_eq!(
+            g(i32::MAX as u32),
+            (i32::MAX as u32).div_ceil(LU_SOLVE_BLOCK_DIM)
+        );
+        assert_eq!(g(u32::MAX), u32::MAX.div_ceil(LU_SOLVE_BLOCK_DIM));
+        let cfg = solve_launch_config(5).expect("cfg");
+        assert_eq!(cfg.block_dim, (LU_SOLVE_BLOCK_DIM, 1, 1));
+        assert_eq!(cfg.shared_mem_bytes, 0);
+    }
+
+    #[test]
+    fn interpret_status_cases() {
+        assert_eq!(
+            interpret_lu_status(&[0, 3]).unwrap(),
+            LuStatus {
+                singular: false,
+                swap_count: 3
+            }
+        );
+        assert!(interpret_lu_status(&[1, 0]).unwrap().singular);
+        assert!(interpret_lu_status(&[0]).is_err());
+        assert!(interpret_lu_status(&[]).is_err());
+        assert!(interpret_lu_status(&[0, -1]).is_err());
+    }
+
+    #[test]
+    fn det_from_lu_sign_and_singular() {
+        let lu = [2.0, 9.0, 9.0, 3.0]; // 対角 2・3（非対角は無関係）
+        assert_eq!(det_from_lu(&[0, 0], &lu, 2).unwrap(), 6.0);
+        assert_eq!(det_from_lu(&[0, 1], &lu, 2).unwrap(), -6.0);
+        assert_eq!(det_from_lu(&[0, 2], &lu, 2).unwrap(), 6.0);
+        // 特異は LU を参照せず 0.0（途中状態でも長さ検査に落ちない）。
+        assert_eq!(det_from_lu(&[1, 0], &[], 2).unwrap(), 0.0);
+        assert!(det_from_lu(&[0, 0], &[1.0], 2).is_err());
+        assert!(det_from_lu(&[0], &lu, 2).is_err());
+        // CPU と同じ演算列（lu_diag_product 直接）と一致。
+        assert_eq!(
+            det_from_lu(&[0, 1], &lu, 2).unwrap(),
+            lu_diag_product(&[2.0, 3.0], -1.0)
+        );
+    }
+
+    #[test]
+    fn lens_and_i32_checks() {
+        assert!(check_lu_lens(4, 2, 2, 1).is_ok());
+        assert!(check_lu_lens(4, 0, 2, 0).is_ok());
+        assert!(check_lu_lens(3, 2, 2, 1).is_err());
+        assert!(check_lu_lens(4, 3, 2, 1).is_err());
+        assert!(check_lu_lens(0, 0, usize::MAX, 2).is_err());
+        assert_eq!(checked_i32("n", 5).unwrap(), 5);
+        assert!(checked_i32("n", i32::MAX as usize + 1).is_err());
     }
 }
