@@ -1,0 +1,28 @@
+# hf-hub（fandhe-ai-hf-hub）: Hugging Face Hub 連携の補助クレート（イシュー #3130・設計 #3128）。
+#
+# 役割: HF Hub の repo_id 検証・revision 解決・ファイル一覧・resolve URL 組み立て・
+# キャッシュキー写像を担う。キャッシュへの書き込み・sha256 pin 検証・safetensors 読込は
+# facade の公開 API（`fandhe_ai::model`）に任せる（docs/hf-hub-integration-design.md §2.1・§9.2）。
+#
+# 依存方向: hf-hub → facade の一方向のみ。内部クレート（tensor-core・autodiff・backend-*・
+# onnx-interop）へは直接依存しない。facade は本クレートに依存しない（api_surface.rs で担保）。
+#
+# 公開区分: 2 段構成の 1 段目として `publish = false`（workspace 既定を継承）。2 段目の公開は
+# 別の承認で扱う。path 依存に `version` を書かないのは非公開クレートのため deny.toml の
+# `allow-wildcard-paths = true` の範囲に収まるからで、2 段目では `version = "=x.y.z"` の併記が必要。
+#
+# HTTP／TLS（第 11 区分 `ureq`）はここでは宣言しない。第 11 区分を HF クレートで使う承認は
+# 別単位で未取得であり（deps-policy.md の ureq 行は facade 限定）、#3131 の前提条件とする。
+# serde／serde_json は #3131 の JSON 解析用に、既存の許容区分を workspace の固定版で先に宣言する。
+[package]
+name = "fandhe-ai-hf-hub"
+description = "Hugging Face Hub 連携の補助クレート（facade の公開 API だけを使う。1 段目は非公開）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fandhe-ai = { path = "../facade" }
+serde.workspace = true
+serde_json.workspace = true

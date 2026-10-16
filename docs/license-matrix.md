@@ -310,3 +310,9 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - `--filter-platform` 付きのパッケージ数（全／外部）: x86_64-linux 108／97、aarch64-linux 108／97、aarch64-darwin 115／104、x86_64-windows-msvc 86／75。
 - 重複バージョン（`cargo tree --workspace -d`）: `itertools`（0.13.0／0.14.0。`criterion` 由来で既存）・`syn`（2.0.119／3.0.3）。`multiple-versions = "warn"` のため失敗しない。
 - `cargo deny --locked check advisories bans licenses sources`: 全項目 ok。`scripts/check-forbidden-deps.sh`（`make deps-forbidden`）: 混入なし。
+
+## 追加実測（イシュー #3130）
+
+- 新しい workspace メンバー `fandhe-ai-hf-hub`（`crates/hf-hub`・`publish = false`）は外部 crate を新規導入しない。直接依存は facade の path 依存と、既存区分（serde／serde_json）の workspace 固定版だけ。
+- `Cargo.lock` の差分は `fandhe-ai-hf-hub` の `[[package]]` 1 件の追加のみで、外部パッケージ集合・版に変化はない（2 節の表の数値は変えない）。
+- 第 11 区分（`ureq`）の利用クレートは facade だけのまま（HF クレートでの利用は未承認で、#3131 の前提条件）。
