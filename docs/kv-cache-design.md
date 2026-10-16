@@ -273,7 +273,9 @@ head 数 `H`・`Dh = E/H`）の MAC 数を式で示す（実測値は #2084 の
 - paged attention／連続バッチング／speculative decoding／量子化
   KV（#1962 §6 非目標）
 - padding 用の追加 `attn_mask` との合成（§2 の (c) offset mask との
-  AND 合成が必要になるため #2084 以降）
+  AND 合成が必要になるため #2084 以降。→ #3104 で形を決定: 左詰め padding と
+  `KvCache` 内の行ごとの有効長。`docs/facade-speculative-decoding-batching-design.md`
+  §21 参照。実装は #3105）
 - `Module::forward_host`（tape 不要経路）対応
 - `compat::Sequential::predict_resident` の MultiheadAttention 対応
 
@@ -688,3 +690,19 @@ K-3 と `sdpa_compose` の置換は §6 承認事項 3・4 のまま。
 K-3（デバイス常駐 KV）と paged attention の設計は `docs/device-resident-kv-paged-attention-design.md` に推奨形として記録した。
 §6 項 3 の承認状態は「未取得」のまま変更していない。K-3 が D-A の一括承認に含まれるかは同 doc §9 の確認事項 1 として所有者へ戻す。
 コード・依存・`docs/spec` の変更はない。
+
+## 17. #3096 の実装記録（外部 KvCache 入口）
+
+`docs/facade-speculative-decoding-batching-design.md` §19.4 の 2 メソッドを実装した（同 §22）。
+
+- `StatefulAttention::forward_with_external_cache(&self, &Tape, &Var, &mut KvCache)`: `self.mha.bind(tape).forward_with_cache(x_new, x_new, x_new, cache)` の 1 行委譲。`&self` のため内部キャッシュに触れない
+- facade `Tape::stateful_attention_forward_with_cache(&self, &StatefulAttention, &Var, &mut KvCache)`: 上記への薄い委譲
+- `KvCache` の公開メソッドは 8 件のまま（論点 4 は維持）。`StatefulAttention` の `pub fn` 集合を 8 件で固定した（`new`／`mha` の扱い〈§11.4 P2 の残課題〉は変えない）
+- 追加したガード・テスト: `api_surface.rs` に委譲ガード・宣言インベントリ・`StatefulAttention` の `pub fn` 集合固定・外部キャッシュ版 doctest プローブ。`nn_kv_cache.rs`・`kv_cache_facade.rs` に bit 一致・異常系の原子性・複数キャッシュの分離・`clone()` の独立性
+- 変えていないもの: 依存・tolerance・baseline・`unsafe`・`pub use`・`forward_with_cache` の可視性・`docs/spec`
+
+§15.5 の残課題のうち「`StatefulAttention` の `pub fn` 集合の固定」と「外部 `KvCache` を進める入口」は本節（#3096）で実施した。§11.4 P3 には外部キャッシュ版を #3096 で追加した。
+
+## 18. #3104 の記録
+
+テンソル単位バッチ化に要る可変長キャッシュは、左詰め padding と `KvCache` 内の非公開の行ごとの有効長（公開は `valid_len` の 1 件追加のみ。`seq_len()` は物理長のまま）で扱うと決定した。mask は有効長から `forward_with_cache` が導き、任意の `Tensor`・mask を入れる経路は作らない。正本は `docs/facade-speculative-decoding-batching-design.md` §21（承認根拠は D-A）。実装は #3105 以降で、本 doc の §1〜§15 の本文は書き換えていない。コード・依存・`docs/spec` の変更はない。

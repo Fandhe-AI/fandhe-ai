@@ -108,7 +108,8 @@
 //!   （`docs/kv-cache-design.md` §7 スコープ外・§6 承認事項）。
 //! - **facade 公開（K-2）は #2579 で公開済み**: `fandhe_ai::nn::kv_cache`
 //!   （`KvCache`・`StatefulAttention`・`MultiheadAttentionConfig` の
-//!   再エクスポート）と `Tape::stateful_attention_forward` で到達する
+//!   再エクスポート）と `Tape::stateful_attention_forward`（外部キャッシュ版は
+//!   `Tape::stateful_attention_forward_with_cache`）で到達する
 //!   （`docs/kv-cache-design.md` §11.4）。構築入口は
 //!   [`StatefulAttention::from_config`]。
 
@@ -1916,6 +1917,34 @@ impl StatefulAttention {
         self.mha
             .bind(tape)
             .forward_with_cache(x_new, x_new, x_new, &mut self.cache)
+    }
+
+    /// [`Self::forward`] と同じ self-attention を、内部キャッシュの代わりに
+    /// 外部の `cache` で進める（1 行委譲。イシュー #3096・親 #3094。
+    /// `docs/facade-speculative-decoding-batching-design.md` §19.4・§19.5）。
+    ///
+    /// `AutoregressiveModel::forward_step` から渡される `caches[i]` を進める
+    /// 用途の入口。`&self` のため `self` の内部キャッシュは読みも書きもしない
+    /// （型で保証される）ので、1 つの `StatefulAttention` を複数の要求・
+    /// 複数のキャッシュで共有しても状態は混ざらない。mask 規則 (a)〜(c) は
+    /// [`Self::forward`] と同じ。検査と原子性は
+    /// [`MultiheadAttentionVars::forward_with_cache`] を引き継ぐ
+    /// （`Err` のとき `cache` は呼び出し前のまま）。
+    ///
+    /// # Errors
+    ///
+    /// rank が 3 でない・`B`／`E` の不一致・`L_new != L_new_kv`・別 `Tape` の
+    /// `Var`（`TapeMismatch`）・`S_prev + L_new` のオーバーフロー・
+    /// 非既定 config の `mha`（`InvalidArgument`）で `AutodiffError` を返す。
+    pub fn forward_with_external_cache<'t>(
+        &self,
+        tape: &'t Tape,
+        x_new: &Var<'t>,
+        cache: &mut KvCache,
+    ) -> Result<Var<'t>, AutodiffError> {
+        self.mha
+            .bind(tape)
+            .forward_with_cache(x_new, x_new, x_new, cache)
     }
 
     /// キャッシュを空に戻す（[`KvCache::clear`] への委譲）。
