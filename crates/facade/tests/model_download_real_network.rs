@@ -31,11 +31,26 @@ impl Drop for TempRoot {
     }
 }
 
+/// `create_dir`（排他的作成。既存なら失敗）で作る。予測可能な名前への symlink 先回りがあっても
+/// 成功せず、Drop の `remove_dir_all` が別の場所を消さない。
 fn temp_root() -> TempRoot {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    TempRoot(std::env::temp_dir().join(format!("fandhe-dl-real-{}-{nanos}", std::process::id())))
+    let path = std::env::temp_dir().join(format!("fandhe-dl-real-{}-{nanos}", std::process::id()));
+    if let Err(e) = std::fs::create_dir(&path) {
+        panic!("一時ディレクトリの排他的作成に失敗しました: {:?}", e.kind());
+    }
+    TempRoot(path)
+}
+
+/// `ModelError` の種別名だけを返す（Display は URL を含みうるため使わない）。
+fn error_kind(e: &ModelError) -> String {
+    let dbg = format!("{e:?}");
+    dbg.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("Unknown")
+        .to_string()
 }
 
 /// 必須の対を読む。両方未設定は `None`（skip）、片方だけは設定ミスとして panic（値は出さない）。
@@ -64,7 +79,7 @@ fn real_network_download_verifies_pin_and_reuses_cache() {
             "v1",
             DownloadOptions::default().expected_sha256(pin),
         )
-        .unwrap_or_else(|e| panic!("download_with が失敗しました: {}", e));
+        .unwrap_or_else(|e| panic!("download_with が失敗しました: {}", error_kind(&e)));
     let leaf = root.0.join("live/v1");
     assert!(leaf.join("model.safetensors").is_file());
     assert!(leaf.join("download.json").is_file());
@@ -76,7 +91,7 @@ fn real_network_download_verifies_pin_and_reuses_cache() {
             "v1",
             DownloadOptions::default().expected_sha256(pin),
         )
-        .unwrap_or_else(|e| panic!("2 回目の download_with が失敗しました: {}", e));
+        .unwrap_or_else(|e| panic!("2 回目の download_with が失敗しました: {}", error_kind(&e)));
 }
 
 #[test]

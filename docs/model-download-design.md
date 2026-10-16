@@ -921,7 +921,7 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 
 - `ModelError::Http` は §5 案の `url` を持たない（A09。URL にクエリ・資格情報が含まれうる）。ureq のエラーは `Display` を通さず静的メッセージの `io::Error`（種別のみ保持）へ変換する
 - `SizeLimitExceeded` は新設せず既存 `TooLarge` を再利用
-- `DownloadOptions::new` は設けず `Default` のみ（api_surface の `pub fn new` 件数 1 の正ガードを保つ）
+- `DownloadOptions::new` は設けず `Default` のみ（api_surface が `impl DownloadOptions` ブロック内に `pub fn new` が無いことを直接検査する正ガードを保つ）
 
 ### 19.4 `openat2` を使わない理由
 

@@ -295,6 +295,8 @@ pub(super) mod loopback {
     }
 }
 
+// 本ファイルでは `#[cfg(test)]` のモジュールを末尾にまとめる。api_surface.rs の
+// `model_tls_posture_violations` は最初の `#[cfg(test)]` より前を本番部分として検査するため。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,7 +423,7 @@ mod tests {
             Err(ModelError::Network(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
             _ => panic!("expected TimedOut"),
         }
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

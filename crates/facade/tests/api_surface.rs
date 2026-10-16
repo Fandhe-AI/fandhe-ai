@@ -6421,10 +6421,24 @@ fn model_download_surface_violations(src: &str) -> Vec<String> {
         }
         Err(e) => v.push(e),
     }
-    if !pb_find_seq(&tokens, &["pub", "fn", "new"]).is_empty()
-        && pb_find_seq(&tokens, &["pub", "fn", "new"]).len() != 1
-    {
-        v.push("`pub fn new` が 2 件以上（DownloadOptions::new の追加疑い）".to_string());
+    // `impl DownloadOptions`（`impl<'a> DownloadOptions<'a>` 含む）ブロック内の `pub fn new` を
+    // 直接検査する。ModelRegistry::new 等の別型の new が増えても誤検知しない。
+    for (i, t) in tokens.iter().enumerate() {
+        if t != "impl" {
+            continue;
+        }
+        let Some(rel) = tokens[i..].iter().position(|t| t == "{") else {
+            continue;
+        };
+        let open = i + rel;
+        if !tokens[i..open].iter().any(|t| t == "DownloadOptions") {
+            continue;
+        }
+        if let Some(close) = matching_close(&tokens, open, "{", "}")
+            && !pb_find_seq(&tokens[open + 1..close], &["pub", "fn", "new"]).is_empty()
+        {
+            v.push("`impl DownloadOptions` に `pub fn new` がある（追加疑い）".to_string());
+        }
     }
     match model_struct_block(&tokens, "DownloadProgress") {
         Ok((start, body)) => {
@@ -6471,6 +6485,13 @@ fn model_download_surface_violations_detects_drift() {
     let missing = approved.replace("pub received: u64, ", "");
     assert!(!model_download_surface_violations(&missing).is_empty());
     assert!(!model_download_surface_violations("").is_empty());
+    let with_new = format!(
+        "{approved}impl<'a> DownloadOptions<'a> {{ pub fn new() -> Self {{ todo!() }} }}\n"
+    );
+    assert!(!model_download_surface_violations(&with_new).is_empty());
+    let other_new =
+        format!("{approved}impl ModelRegistry {{ pub fn new() -> Self {{ todo!() }} }}\n");
+    assert!(model_download_surface_violations(&other_new).is_empty());
 }
 
 /// `FORBIDDEN_SIGNATURE_SUBSTRINGS` が実際に効くことの自己テスト（既存の自己テストは
