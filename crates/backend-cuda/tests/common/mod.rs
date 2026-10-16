@@ -8,4 +8,5 @@
 //! サブモジュール分割する（`parity_baseline` は fixture・検査ユーティリティ
 //! の役割に閉じる）。
 
+pub mod paged_attention_judgement;
 pub mod parity_baseline;
