@@ -129,7 +129,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 - `CudaLinalg::launch_lu`（CU-1）・`run_lu_solve_f32`（CU-2 を含む）・`run_lu_inv_f32`・`run_lu_det_f32` を追加し、
   `ops.rs` の `lu_launch_pending`（fail-closed の `Unsupported`）を実起動へ置換した。新規 `unsafe` は 2 ブロックのみ
   （監査記録 `docs/gpu-linalg-kernel-launch-unsafe-audit.md`。承認状態は同記録 §1 のとおり親 #3133 本文の記載に基づく。
-  security-auditor の監査は同 §8 のとおり未実施）。
+  security-auditor の独立監査（eaf7141e・静的突合）は P0・P1 なし。P2 の対応と実機・NVRTC 未確認は同 §8.0 を参照）。
 - 数値契約: H2D の前にホストで `f32`→`f64`、D2H の後に 1 回 `as f32`。`status` を必ず読み戻す。特異は solve／inv が
   `InvalidArgument`、det が `0.0`（CPU と同じ）。`CudaError` に variant は追加せず `LuSolveOutcome` で表す。
 - 既定（ゲート OFF）の挙動は不変（`Unsupported` → `Var` がホスト f64 へフォールバック）。実機（GB10）での NVRTC・parity・

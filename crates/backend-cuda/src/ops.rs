@@ -121,6 +121,26 @@ fn dense_transposed_view(t: &Tensor<f32>) -> Option<&[f32]> {
     Some(view)
 }
 
+/// 線形代数ハンドル（`cached_linalg_handle`／`linalg_factor_handle`）の構築失敗を
+/// `BackendError` へ写す（`with_driver_call` の `map`。構築フェーズ専用）。
+///
+/// `CudaError::Driver` は `Display`（`{e:?}`）が `cuGetErrorString` を呼び、`culib()` の
+/// 遅延ロードによりドライバ未ロード環境で panic しうる（cudarc-0.19.8
+/// `src/driver/result.rs`。`with_driver_call` 回帰テストの注記と同じ教訓）ため整形せず
+/// 静的メッセージにする。環境不在 variant は `detail` をそのまま使い、それ以外は
+/// 従来どおり `Display` を通す（driver の遅延ロードを要求しない variant のみ）。
+fn linalg_handle_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::DriverUnavailable { detail } | CudaError::NvrtcUnavailable { detail } => {
+            BackendError::CudaUnavailable(detail)
+        }
+        CudaError::Driver(_) => BackendError::CudaUnavailable(
+            "GPU 線形代数ハンドルの構築中に CUDA driver エラー（詳細は整形しない）".to_string(),
+        ),
+        other => BackendError::CudaUnavailable(other.to_string()),
+    }
+}
+
 /// LU 系 3 演算（`linalg_inv`／`linalg_solve`／`linalg_det`）の共通前段
 /// （イシュー #2674・設計記録 §4.4 の結線順序）。
 ///
@@ -837,14 +857,10 @@ impl CudaBackendOps {
     /// ・NVRTC 構築も driver 呼び出し境界（`with_driver_call`）の内側に置き、
     /// sticky エラーの観測と Graph capture 排他に参加させる（`mse_loss` と同型）。
     fn cached_linalg_handle(&self) -> Result<Arc<crate::linalg::CudaLinalg>, BackendError> {
-        self.with_driver_call(
-            &[],
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || {
-                let device = self.device_handle_raw()?;
-                context_cache::cached_linalg(&device)
-            },
-        )
+        self.with_driver_call(&[], linalg_handle_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_linalg(&device)
+        })
     }
 
     /// 分解系線形代数 3 カーネルのハンドルを取得する（イシュー #3136）。
@@ -852,14 +868,10 @@ impl CudaBackendOps {
     /// ため、構築も `with_driver_call` の内側に置く（監査記録 不変条件 (d)。
     /// `run_scan` と同じ構築・実行の 2 段構成）。
     fn linalg_factor_handle(&self) -> Result<Arc<crate::linalg::CudaLinalgFactor>, BackendError> {
-        self.with_driver_call(
-            &[],
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || {
-                let device = self.device_handle_raw()?;
-                context_cache::cached_linalg_factor(&device)
-            },
-        )
+        self.with_driver_call(&[], linalg_handle_error, || {
+            let device = self.device_handle_raw()?;
+            context_cache::cached_linalg_factor(&device)
+        })
     }
 
     /// `Self::cumsum`／`cumprod`（イシュー #1740）の共通骨格。`dim` を
@@ -7577,6 +7589,18 @@ mod tests {
             fandhe_ai_tensor_core::FusedOpKind::Mul { lhs: 4, rhs: 0 },
         ];
         FusionPlan::from_ops(ops, vec![hidden], dtype, 1).unwrap()
+    }
+
+    /// `linalg_handle_error` は `CudaError::Driver` を整形せず（`cuGetErrorString` の
+    /// 遅延ロードによる panic を避け、ドライバ未搭載環境でも）型付きエラーへ写す。
+    #[test]
+    fn linalg_handle_error_does_not_format_driver_error() {
+        let err = linalg_handle_error(CudaError::Driver(sticky_driver_error()));
+        assert!(matches!(err, BackendError::CudaUnavailable(_)), "{err:?}");
+        let err = linalg_handle_error(CudaError::DriverUnavailable {
+            detail: "no libcuda".to_string(),
+        });
+        assert!(matches!(err, BackendError::CudaUnavailable(m) if m == "no libcuda"));
     }
 
     /// `run_fused` はカーネル起動（デバイスアクセス）前に `plan.dtype()
