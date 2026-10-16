@@ -34,10 +34,14 @@ pub(super) struct Job<'a> {
     pub(super) expected: Option<Sha256Pin>,
 }
 
-/// 自分が作った一時ファイルの `Drop` ガード。`commit` 済みでなければ削除する。
+/// 自分が作った private staging ディレクトリと一時ファイルの `Drop` ガード。`commit` 済みで
+/// なければ staging 内の一時ファイルを削除し、staging ディレクトリは常に除去を試みる。staging は
+/// 0700 で作成者しか入れないため、名前による削除が他者の成果物を消すことはない。
 struct TmpGuard<'a> {
-    dir: &'a OwnedFd,
-    name: String,
+    parent: &'a OwnedFd,
+    staging: OwnedFd,
+    staging_name: String,
+    tmp_name: String,
     file: File,
     armed: bool,
 }
@@ -45,15 +49,10 @@ struct TmpGuard<'a> {
 impl Drop for TmpGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            dirfd::unlink_own(self.dir, &self.name, &self.file);
+            dirfd::unlink_in(&self.staging, &self.tmp_name);
         }
+        dirfd::remove_staging(self.parent, &self.staging_name);
     }
-}
-
-fn tmp_swapped() -> ModelError {
-    ModelError::Io(std::io::Error::other(
-        "一時ファイルが取得中に差し替えられたため公開しません",
-    ))
 }
 
 fn invalid_url(reason: &'static str) -> ModelError {
@@ -68,6 +67,7 @@ pub(super) fn run(
     job: Job<'_>,
     mut progress: Option<&mut dyn FnMut(DownloadProgress)>,
     open_dir: &mut dyn FnMut() -> std::io::Result<OwnedFd>,
+    next_staging: &mut dyn FnMut() -> String,
     next_tmp: &mut dyn FnMut() -> String,
     verify_before_commit: &mut dyn FnMut(&File) -> Result<(), ModelError>,
 ) -> Result<(), ModelError> {
@@ -115,10 +115,20 @@ pub(super) fn run(
     }
 
     let dir = open_dir().map_err(ModelError::Io)?;
-    let (file, tmp_name) = dirfd::create_tmp(&dir, next_tmp).map_err(ModelError::Io)?;
+    let (staging, staging_name) =
+        dirfd::create_staging(&dir, next_staging).map_err(ModelError::Io)?;
+    let (file, tmp_name) = match dirfd::create_tmp(&staging, next_tmp) {
+        Ok(v) => v,
+        Err(e) => {
+            dirfd::remove_staging(&dir, &staging_name);
+            return Err(ModelError::Io(e));
+        }
+    };
     let mut guard = TmpGuard {
-        dir: &dir,
-        name: tmp_name,
+        parent: &dir,
+        staging,
+        staging_name,
+        tmp_name,
         file,
         armed: true,
     };
@@ -165,17 +175,11 @@ pub(super) fn run(
     }
     guard.file.sync_all().map_err(ModelError::Io)?;
     verify_before_commit(&guard.file)?;
-    // 検証済みなのは保持 fd の実体のみ。公開は名前基準の `renameat` のため、受信中・検証後に
-    // 一時名を別実体へ差し替えられていないかを公開前に照合し（A08）、さらに公開後にも公開名が
-    // 保持 fd と同一実体かを再照合して、照合〜公開の隙間の差し替えは撤去して Err にする。
-    if !dirfd::names_same_entity(&dir, &guard.name, &guard.file) {
-        return Err(tmp_swapped());
-    }
-    dirfd::rename_in(&dir, &guard.name, MODEL_FILE_NAME).map_err(ModelError::Io)?;
-    if !dirfd::names_same_entity(&dir, MODEL_FILE_NAME, &guard.file) {
-        dirfd::unlink_name(&dir, MODEL_FILE_NAME);
-        return Err(tmp_swapped());
-    }
+    // 一時ファイルは 0700 の private staging 内にあり、作成者以外は名前を差し替えられない。
+    // 検証した実体と公開する実体の一致は構造的に保証されるため、名前の再照合や公開後の
+    // 撤去（別処理の成果物を消しうる）は行わない（A08）。公開は `renameat` 1 回のみ。
+    dirfd::rename_across(&guard.staging, &guard.tmp_name, &dir, MODEL_FILE_NAME)
+        .map_err(ModelError::Io)?;
     guard.armed = false;
     Ok(())
 }
@@ -321,6 +325,7 @@ mod tests {
             let n = dirfd::open_or_create_dir(&r, "m")?;
             dirfd::open_or_create_dir(&n, "v")
         };
+        let mut stg = || ".s".to_string();
         let mut n = 0u32;
         let mut next = move || {
             n += 1;
@@ -331,6 +336,7 @@ mod tests {
             job,
             progress,
             &mut open,
+            &mut stg,
             &mut next,
             &mut |_: &File| Ok(()),
         )
@@ -566,11 +572,13 @@ mod tests {
             dirfd::open_or_create_dir(&n, "v")
         };
         let mut next = || ".t".to_string();
+        let mut stg = || ".s".to_string();
         let e = run(
             &mut mock,
             job(1 << 20, 5, None),
             None,
             &mut open,
+            &mut stg,
             &mut next,
             &mut |_: &File| Err(ModelError::Io(std::io::Error::other("verify"))),
         )
@@ -582,8 +590,11 @@ mod tests {
     }
 
     #[test]
-    fn tmp_swapped_after_verification_is_not_published() {
-        let env = Env::new("swap");
+    fn staged_tmp_is_in_private_dir_and_failure_keeps_published_model() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = Env::new("stage");
+        std::fs::create_dir_all(env.root.join("m/v")).unwrap();
+        std::fs::write(env.leaf(), b"old").unwrap();
         let mut mock = Mock::new(vec![ok_body(b"abc")]);
         let root = env.root.clone();
         let mut open = {
@@ -594,23 +605,32 @@ mod tests {
                 dirfd::open_or_create_dir(&n, "v")
             }
         };
+        let mut stg = || ".s".to_string();
         let mut next = || ".t".to_string();
-        let tmp = root.join("m/v/.t");
         let e = run(
             &mut mock,
             job(1 << 20, 5, None),
             None,
             &mut open,
+            &mut stg,
             &mut next,
             &mut |_: &File| {
-                // 検証フック通過後に、別プロセス相当として一時名を未検証の実体へ差し替える。
-                std::fs::remove_file(&tmp).unwrap();
-                std::fs::write(&tmp, b"evil").unwrap();
-                Ok(())
+                // 一時ファイルは共有ディレクトリ直下ではなく 0700 の staging 内にだけ存在する。
+                let v = root.join("m/v");
+                assert!(!v.join(".t").exists());
+                assert!(v.join(".s/.t").is_file());
+                let mode = std::fs::metadata(v.join(".s"))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o077, 0);
+                Err(ModelError::Io(std::io::Error::other("verify")))
             },
         )
         .unwrap_err();
         assert!(matches!(e, ModelError::Io(_)));
-        assert!(!env.leaf().exists());
+        // 失敗時は既存の公開済みモデルに触れず、staging も残さない。
+        assert_eq!(std::fs::read(env.leaf()).unwrap(), b"old");
+        assert!(env.leftovers().is_empty());
     }
 }

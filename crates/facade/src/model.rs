@@ -1223,6 +1223,7 @@ impl ModelRegistry {
             let name_fd = dirfd::open_or_create_dir(&root_fd, name)?;
             dirfd::open_or_create_dir(&name_fd, version)
         };
+        let mut next_staging = || dirfd::production_staging_name(MODEL_FILE_NAME);
         let mut next_tmp = || dirfd::production_tmp_name(MODEL_FILE_NAME);
         let job = download::Job {
             url,
@@ -1239,6 +1240,7 @@ impl ModelRegistry {
             job,
             progress,
             &mut open_dir,
+            &mut next_staging,
             &mut next_tmp,
             &mut |_: &File| Ok(()),
         )

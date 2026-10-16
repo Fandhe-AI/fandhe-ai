@@ -125,12 +125,74 @@ pub(super) fn production_tmp_name(leaf: &str) -> String {
     format!(".{leaf}.dl-{pid}-{counter}-{nanos}")
 }
 
-/// `renameat`（同一ディレクトリ fd 内の atomic replace）。
-pub(super) fn rename_in(dir: &OwnedFd, from: &str, to: &str) -> io::Result<()> {
+/// 公開前の検証済みファイルを置く private staging ディレクトリ名（先頭 `.` のため
+/// `validate_component` を通らず `load`／`available_models` からは見えない）。
+pub(super) fn production_staging_name(leaf: &str) -> String {
+    let (pid, nanos, counter) = name_entropy();
+    format!(".{leaf}.stg-{pid}-{counter}-{nanos}")
+}
+
+/// `parent` 直下に `next_name()` の名前で 0700 の private staging ディレクトリを新規作成して
+/// 開く。共有キャッシュを書き換えられる第三者が一時ファイルを差し替えられないよう、検証済み
+/// 実体は常にこのディレクトリ内に置く（A08。作成者のみが入れるため、検証した実体と公開する
+/// 実体の一致が名前の再照合なしで構造的に保証される）。`EEXIST` は名前を作り直す。開いた
+/// 実体が自分の所有・group/other アクセス不可であることを `fstat` で確認し、作成〜open の
+/// 隙間に他者のディレクトリへ差し替えられた場合は fail-closed にする。
+pub(super) fn create_staging(
+    parent: &OwnedFd,
+    mut next_name: impl FnMut() -> String,
+) -> io::Result<(OwnedFd, String)> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    for _ in 0..MAX_TMP_NAME_ATTEMPTS {
+        let name = next_name();
+        let c = cstr(&name)?;
+        // SAFETY: `parent` は有効な fd、`c` は NUL 終端で呼び出し中生存する。
+        let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), c.as_ptr(), 0o700) };
+        if rc != 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                continue;
+            }
+            return Err(e);
+        }
+        let fd = openat_owned(parent, &name, flags, 0)?;
+        // SAFETY: `libc::stat` は全ビット 0 が有効な POD。
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `fd` は有効な fd、`st` は書き込み可能な有効領域。
+        let stat_ok = unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0;
+        // SAFETY: 引数なし・副作用なしの libc 呼び出し。
+        let euid = unsafe { libc::geteuid() };
+        if !stat_ok || st.st_uid != euid || (st.st_mode & 0o077) != 0 {
+            return Err(io::Error::other(
+                "staging ディレクトリが他者のものに差し替えられたため使用しません",
+            ));
+        }
+        return Ok((fd, name));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "一意な staging ディレクトリ名を確保できませんでした",
+    ))
+}
+
+/// `renameat`（`from_dir` の `from` を `to_dir` の `to` へ atomic replace。fd 基準）。
+pub(super) fn rename_across(
+    from_dir: &OwnedFd,
+    from: &str,
+    to_dir: &OwnedFd,
+    to: &str,
+) -> io::Result<()> {
     let f = cstr(from)?;
     let t = cstr(to)?;
-    // SAFETY: `dir` は有効な fd で新旧とも同一 fd 基準。`f`／`t` は NUL 終端で呼び出し中生存する。
-    let rc = unsafe { libc::renameat(dir.as_raw_fd(), f.as_ptr(), dir.as_raw_fd(), t.as_ptr()) };
+    // SAFETY: 両 dir は有効な fd。`f`／`t` は NUL 終端で呼び出し中生存する。
+    let rc = unsafe {
+        libc::renameat(
+            from_dir.as_raw_fd(),
+            f.as_ptr(),
+            to_dir.as_raw_fd(),
+            t.as_ptr(),
+        )
+    };
     if rc == 0 {
         Ok(())
     } else {
@@ -138,51 +200,20 @@ pub(super) fn rename_in(dir: &OwnedFd, from: &str, to: &str) -> io::Result<()> {
     }
 }
 
-/// `dir` 直下の `name`（`AT_SYMLINK_NOFOLLOW`）が保持 fd `held` と同一の通常ファイル
-/// （`(dev, ino)` 一致）かを返す。名前が存在しない・stat 失敗は `false`。
-pub(super) fn names_same_entity(dir: &OwnedFd, name: &str, held: &File) -> bool {
-    let Ok(c) = cstr(name) else {
-        return false;
-    };
-    // SAFETY: `libc::stat` は全ビット 0 が有効な POD。以後 libc が書き込む。
-    let mut on_disk: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: `dir` は有効な fd、`c` は NUL 終端、`on_disk` は書き込み可能な有効領域。
-    let rc = unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            c.as_ptr(),
-            &mut on_disk,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if rc != 0 {
-        return false;
-    }
-    // SAFETY: 同上（POD のゼロ初期化）。
-    let mut held_st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: `held` は有効な fd、`held_st` は書き込み可能な有効領域。
-    if unsafe { libc::fstat(held.as_raw_fd(), &mut held_st) } != 0 {
-        return false;
-    }
-    (on_disk.st_mode & libc::S_IFMT) == libc::S_IFREG
-        && on_disk.st_dev == held_st.st_dev
-        && on_disk.st_ino == held_st.st_ino
-}
-
-/// `dir` 直下の `name` を無条件に `unlinkat` する（best-effort）。公開後の再照合で未検証の
-/// 実体が公開名に居ると分かった場合の撤去用。
-pub(super) fn unlink_name(dir: &OwnedFd, name: &str) {
+/// `dir` 直下の `name` を `unlinkat` する（best-effort）。`dir` は private staging のみで使い、
+/// 共有ディレクトリの公開名には使わない（別処理の成果物を消さないため）。
+pub(super) fn unlink_in(dir: &OwnedFd, name: &str) {
     if let Ok(c) = cstr(name) {
         // SAFETY: `dir` は有効な fd、`c` は NUL 終端で呼び出し中生存する。
         let _ = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), 0) };
     }
 }
 
-/// 自分が作って fd を保持している一時ファイルの削除（best-effort）。保持 fd と同一実体
-/// （`names_same_entity`）のときだけ `unlinkat` する（差し替え検出時は削除しない）。
-pub(super) fn unlink_own(dir: &OwnedFd, name: &str, held: &File) {
-    if names_same_entity(dir, name, held) {
-        unlink_name(dir, name);
+/// private staging ディレクトリ自体の削除（best-effort。空でなければ `rmdir` が失敗して残す）。
+pub(super) fn remove_staging(parent: &OwnedFd, name: &str) {
+    if let Ok(c) = cstr(name) {
+        // SAFETY: `parent` は有効な fd、`c` は NUL 終端で呼び出し中生存する。
+        let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
     }
 }
 
@@ -240,7 +271,7 @@ mod tests {
         symlink(&outside, root.join("v")).unwrap();
         let (mut f, name) = create_tmp(&v, || production_tmp_name("m")).unwrap();
         f.write_all(b"data").unwrap();
-        rename_in(&v, &name, "model.safetensors").unwrap();
+        rename_across(&v, &name, &v, "model.safetensors").unwrap();
         assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
         assert!(root.join("v.moved/model.safetensors").is_file());
         let _ = std::fs::remove_dir_all(&root);
@@ -284,18 +315,30 @@ mod tests {
     }
 
     #[test]
-    fn unlink_own_removes_only_matching_entity() {
-        let root = tmpdir("unlink");
+    fn staging_is_private_and_removable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmpdir("staging");
         let r = open_root(&root).unwrap();
-        let (f, name) = create_tmp(&r, || "t1".into()).unwrap();
-        unlink_own(&r, &name, &f);
-        assert!(!root.join("t1").exists());
-        // 別の実体に差し替えられた場合は消さない。
-        let (f2, name2) = create_tmp(&r, || "t2".into()).unwrap();
-        std::fs::remove_file(root.join("t2")).unwrap();
-        std::fs::write(root.join("t2"), b"other").unwrap();
-        unlink_own(&r, &name2, &f2);
-        assert_eq!(std::fs::read(root.join("t2")).unwrap(), b"other");
+        let (sfd, sname) = create_staging(&r, || ".s1".into()).unwrap();
+        let mode = std::fs::metadata(root.join(".s1"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
+        // 名前衝突は既存に触れず作り直す。
+        let mut c = 0;
+        let (_s2, n2) = create_staging(&r, || {
+            c += 1;
+            if c == 1 { ".s1".into() } else { ".s2".into() }
+        })
+        .unwrap();
+        assert_eq!(n2, ".s2");
+        let (mut f, tname) = create_tmp(&sfd, || "t".into()).unwrap();
+        f.write_all(b"x").unwrap();
+        rename_across(&sfd, &tname, &r, "model.safetensors").unwrap();
+        assert!(root.join("model.safetensors").is_file());
+        remove_staging(&r, &sname);
+        assert!(!root.join(".s1").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
