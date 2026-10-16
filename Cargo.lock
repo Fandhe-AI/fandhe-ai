@@ -391,6 +391,7 @@ dependencies = [
  "fandhe-ai",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

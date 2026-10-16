@@ -28,7 +28,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | 数値型 | `half` | `=2.7.1` | MIT OR Apache-2.0 | 可 | a |
 | ベンチ | `criterion` | `=0.8.2` | Apache-2.0 OR MIT | 可 | c。`dev-dependencies` 限定（deps-policy.md） |
 | OS FFI（第 10 区分） | `libc` | `=0.2.189` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（`crates.io` `license` フィールド）。`onnx-interop` の external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）用途に限定し `[target.'cfg(unix)'.dependencies]` で `cfg(unix)` 限定（依存の実追加は PR #2348。`libc 0.2.189` は追加前から `Cargo.lock` に推移的依存として存在し、ライセンスは本体 workspace の既存監査対象）。手書きの `openat` フラグ定数は Linux で CPU アーキテクチャごとに値が異なり、x86 専用の値のまま aarch64 Linux でビルドするとシンボリックリンク拒否が機能しない実装バグを生んでいたため、自作せず libc の定数・`syscall` を使う（ドライバ FFI 同様、この領域の自作は unsafe 面積増のみで安全性の向上にならない） |
-| HTTP／TLS（第 11 区分） | `ureq`（`default-features = false`・`native-tls`＋`vendored`） | `=3.4.2` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（イシュー #3124）。`facade` の `[target.'cfg(unix)'.dependencies]` 限定・HTTPS 取得用途限定。allow 追加は `CDLA-Permissive-2.0`（`webpki-root-certs`）のみ。OpenSSL（`openssl-src`）の静的同梱と脆弱性対応は 6 節・末尾の追加実測を参照。承認根拠は #3123 所有者コメント 6111756315 の委任条項（`docs/model-download-design.md` §16.8・§17） |
+| HTTP／TLS（第 11 区分） | `ureq`（`default-features = false`・`native-tls`＋`vendored`） | `=3.4.2` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（イシュー #3124）。`facade` の `[target.'cfg(unix)'.dependencies]` 限定・HTTPS 取得用途限定（＋`crates/hf-hub` の HF Hub API の JSON 取得。#3393）。allow 追加は `CDLA-Permissive-2.0`（`webpki-root-certs`）のみ。OpenSSL（`openssl-src`）の静的同梱と脆弱性対応は 6 節・末尾の追加実測を参照。承認根拠は #3123 所有者コメント 6111756315 の委任条項（`docs/model-download-design.md` §16.8・§17） |
 
 すべて MIT OR Apache-2.0 系（`objc2-metal` のみ三重ライセンス）であり、商用配布・改変・再頒布に適合する。
 
@@ -316,3 +316,14 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - 新しい workspace メンバー `fandhe-ai-hf-hub`（`crates/hf-hub`・`publish = false`）は外部 crate を新規導入しない。直接依存は facade の path 依存と、既存区分（serde／serde_json）の workspace 固定版だけ。
 - `Cargo.lock` の差分は `fandhe-ai-hf-hub` の `[[package]]` 1 件の追加のみで、外部パッケージ集合・版に変化はない（2 節の表の数値は変えない）。
 - 第 11 区分（`ureq`）の利用クレートは facade だけのまま（HF クレートでの利用は未承認で、#3131 の前提条件）。
+
+## 追加実測（イシュー #3393）
+
+第 11 区分 `ureq` の利用クレートに `fandhe-ai-hf-hub`（`crates/hf-hub`）を加える。承認根拠は #3128 コメント 6220036919（2026-10-16）。上記「追加実測（イシュー #3130）」の「利用クレートは facade だけ」は当時の記録であり、本節で更新する。
+
+- 宣言: `crates/hf-hub/Cargo.toml` の `[target.'cfg(unix)'.dependencies]` に `ureq.workspace = true` だけを置く。版（`=3.4.2`）・feature（`native-tls`・`vendored`）は workspace 継承で不変。
+- `Cargo.lock` の差分: `fandhe-ai-hf-hub` の dependencies に `"ureq"` が 1 行増えるだけ。`[[package]]` の追加・版・checksum の変化はない（外部パッケージ集合は不変。2 節の表の数値は変わらない）。
+- `cargo tree --locked -p fandhe-ai-hf-hub -e normal --depth 1 --target <T>`: `x86_64-unknown-linux-gnu`・`aarch64-unknown-linux-gnu`・`aarch64-apple-darwin` では hf-hub の直下に `ureq v3.4.2` が出る。`x86_64-pc-windows-msvc` では出ない（`cfg(unix)` で閉じている）。
+- `cargo check -p fandhe-ai-hf-hub --locked --target x86_64-pc-windows-msvc`・`--tests --target aarch64-apple-darwin` が通る。
+- `make deny`（advisories bans licenses sources）: ok。`make deps-forbidden`: ok。`deny.toml` の変更はない。
+- 用途は HF Hub API の JSON 取得に限る。固定設定（`NativeTls` 明示・`https_only(true)`・`proxy(None)`・`max_redirects(0)`・全タイムアウト明示）は `crates/hf-hub/tests/api_surface.rs` が機械検査する。

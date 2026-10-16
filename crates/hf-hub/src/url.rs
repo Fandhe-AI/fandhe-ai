@@ -13,10 +13,17 @@ const BASE: &str = "https://huggingface.co";
 pub(crate) struct ApiUrl(String);
 
 impl ApiUrl {
-    /// 転送層が接続に使う文字列。本番の転送層（ureq 結線）は承認待ちのためテストからのみ使われる。
+    /// 転送層が接続に使う文字列。本番の転送層 `UreqJsonTransport`（#3393）から使われるが、
+    /// 呼び出し元の公開化は #3394 のため非 test ビルドでは未使用になりうる。
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// host 検査の拒否テスト用に任意文字列から作る。本番ビルドには存在しない。
+    #[cfg(test)]
+    pub(crate) fn for_test(s: &str) -> Self {
+        Self(s.to_owned())
     }
 }
 
