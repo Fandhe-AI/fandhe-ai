@@ -547,10 +547,13 @@ use fandhe_ai::CustomFunction;
 
 type HvpBuild = for<'a> fn(&'a Tape, &Var<'a>) -> Var<'a>;
 
-/// REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+/// REQ-2 統一複合判定。閾値は共通定数（`tensor-core::tolerance`。backend-cpu 再エクスポート）を
+/// 参照し、ここでは複製しない（いずれも f64）。
 fn req2_close(a: f64, b: f64) -> bool {
     let abs = (a - b).abs();
-    abs < 1e-5 || abs / a.abs().max(b.abs()).max(f64::MIN_POSITIVE) < 1e-3
+    abs < fandhe_ai_backend_cpu::ABSOLUTE_RESCUE_THRESHOLD
+        || abs / a.abs().max(b.abs()).max(f64::MIN_POSITIVE)
+            < fandhe_ai_backend_cpu::RELATIVE_TOLERANCE
 }
 
 fn fixed_weights<'a>(tape: &'a Tape, shape: &[usize]) -> Var<'a> {
