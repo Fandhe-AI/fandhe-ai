@@ -70,10 +70,11 @@ static GPU_ELEMENTWISE_FUSION_ENABLED: AtomicBool = AtomicBool::new(false);
 ///
 /// **`backend-cuda` クレート内 `pub`（`crate::precision::
 /// set_tf32_gemm_enabled`／`crate::graph::set_step_graph_enabled` と同じ
-/// 可視性）だが、`facade` への再公開は本 PR の対象外**（実装計画 §9
-/// 承認事項 (1)。公開面拡張〈`docs/compat-api-scope.md` §0〉は別途
-/// ユーザー承認が必要）。現在の呼び出し元は本クレートの `#[ignore]`
-/// 実機統合テスト（`tests/fused_elementwise_parity.rs`）のみ。
+/// 可視性）。`facade` へは #3386（#3385）で
+/// `set_cuda_elementwise_fusion_enabled` として公開済み**（公開形の正は
+/// `docs/facade-graph-tier-b-optin-exposure-decision.md` §3）。本クレートの
+/// `#[ignore]` 実機統合テスト（`tests/fused_elementwise_parity.rs`）からも
+/// 直接呼ばれる。
 pub fn set_gpu_elementwise_fusion_enabled(enabled: bool) {
     GPU_ELEMENTWISE_FUSION_ENABLED.store(enabled, Ordering::SeqCst);
 }

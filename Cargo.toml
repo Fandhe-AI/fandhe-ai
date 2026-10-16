@@ -12,6 +12,10 @@
 # 外部依存ゼロの自作 SSG（nav.toml パーサー + CLI）であり [workspace.dependencies] へは
 # 一切影響しない。
 #
+# hf-hub（12 個目・イシュー #3130）は HF Hub 連携の補助クレート（`publish = false`・1 段目）。
+# facade の公開 API だけに依存し、facade の安定性保証の外にある。外部依存の新規追加はなく
+# [workspace.dependencies] へは影響しない（docs/hf-hub-integration-design.md §9）。
+#
 # 本体 workspace の直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分。
 # .claude/rules/deps-policy.md。第 9 区分はベンチ比較対象の独立ハーネス限定で本体
 # workspace には入らない）は下記 [workspace.dependencies] で =x.y.z 完全固定として
@@ -40,6 +44,7 @@ members = [
     "crates/bench-harness",
     "crates/facade",
     "crates/docs-site",
+    "crates/hf-hub",
 ]
 
 [workspace.package]

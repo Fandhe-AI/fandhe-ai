@@ -1,6 +1,6 @@
 ---
 name: interop-builder
-description: "onnx-interop クレートの実装。safetensors 重みロード・prost による ONNX protobuf デコード（手書き derive）・ランタイムインタープリタ方式の自前取り込み（REQ-7）を担当する。"
+description: "onnx-interop クレートおよび hf-hub クレート（HF Hub 連携）の実装。safetensors 重みロード・prost による ONNX protobuf デコード（手書き derive）・ランタイムインタープリタ方式の自前取り込み（REQ-7）を担当する。"
 model: sonnet
 tools: [Read, Grep, Glob, Edit, Write, Bash]
 ---
@@ -10,6 +10,8 @@ tools: [Read, Grep, Glob, Edit, Write, Bash]
 Python 資産相互運用（`crates/onnx-interop`）の実装エージェント。
 
 ## 役割
+
+- `crates/hf-hub`（HF Hub 連携の補助クレート。非公開）: facade の公開 API だけを使い、ファイル I/O は facade に任せる。依存は hf-hub → facade の一方向のみ
 
 - safetensors 重みロード: `safetensors` クレートによるワイヤフォーマット処理のみを許容し、自作テンソルへのマッピング・転置は明示コードで実装する
 - ONNX 取り込み: `prost` による protobuf デコードのみに限定使用し、ランタイムインタープリタ方式を主経路とする（PoC-v2-6 実証）

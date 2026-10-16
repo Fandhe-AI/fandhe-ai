@@ -60,10 +60,11 @@ static GPU_ELEMENTWISE_FUSION_ENABLED: AtomicBool = AtomicBool::new(false);
 /// であり、以降の全スレッド・全 `MetalBackendOps` インスタンスの
 /// `run_fused` 呼び出しに反映される。
 ///
-/// **`backend-metal` クレート内 `pub`（`facade` への再公開は本 PR の
-/// 対象外。CUDA 側 `set_gpu_elementwise_fusion_enabled` と同じ可視性
-/// 方針）**。現在の呼び出し元は本クレートの `#[ignore]` 実機統合
-/// テスト（`tests/fused_elementwise_parity.rs`）のみ。
+/// **`backend-metal` クレート内 `pub`。`facade` へは #3386（#3385）で
+/// macOS 限定の `set_metal_elementwise_fusion_enabled` として公開済み**
+/// （公開形の正は `docs/facade-graph-tier-b-optin-exposure-decision.md`
+/// §3）。本クレートの `#[ignore]` 実機統合テスト
+/// （`tests/fused_elementwise_parity.rs`）からも直接呼ばれる。
 pub fn set_gpu_elementwise_fusion_enabled(enabled: bool) {
     GPU_ELEMENTWISE_FUSION_ENABLED.store(enabled, Ordering::SeqCst);
 }

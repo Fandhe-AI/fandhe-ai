@@ -139,3 +139,18 @@
 - 着手時に確認した事実: `api_surface.rs` に B-1 の保留ガード・否定プローブは存在せず、反転対象はなかった（正ガードと否定ガードを新規追加）。B-1 には経路カウンタがなく、融合出力は per-op と bit 一致するため ON/OFF の出力比較では経路を区別できない。代替として `run_fused` を直接呼んだ返り値の分類（OFF は `Unsupported`）で facade setter が backend ゲートに効くことを確認した。カウンタは backend 変更を伴うため追加していない。
 - `gpu_elementwise_fusion_bench.rs` は facade の公開 setter を使うよう置き換えた（環境変数の解釈・計測は不変）。
 - 不変: 既定 OFF・tolerance・baseline・依存・`docs/spec`・新規 `unsafe` なし。既定 ON 化は #3227、実測は Phase 8。本文 §0〜§12 は書き換えていない。
+
+### 13.4 独立監査（security-auditor、2026-10-16）
+
+§13.2 が「残る」とした独立 security-auditor による再確認を実施した（読み取り専用・静的監査。なお、本節は §13.3 実装記録の後に追記したため番号は 13.4 とした）。所有者の条件（監査を通し結果を決定記録に残す。#3114 コメント 6213949713）は本監査で満たされた。
+
+- 対象: CUDA `launch_nary`（`crates/backend-cuda/src/elementwise.rs`）、Metal `encode_nary_dispatch`（`crates/backend-metal/src/elementwise.rs`、`unsafe` 3 か所）、facade の `set_{cuda,metal}_elementwise_fusion_enabled` から `run_fused` への到達経路。
+- 判定: **P0・P1 なし**。`unsafe` の前に葉長一致・numel 上限（CUDA `i32::MAX`／Metal `u32::MAX`）・葉数上限 13・dtype F32・葉 shape 一致・`checked_bytes_for` が揃う。生成カーネルは `if (idx < numel)` の手動境界検査（REQ-8）を維持する。空テンソル・非連続・ブロードキャスト（allowlist 外）・入力数超過は `unsafe` に到達せず per-op フォールバックか Err になる。
+- P2 4 件:
+  1. `launch_nary` の SAFETY コメントに「`func` は `leaves.len()` 個の葉 + out + numel のシグネチャでコンパイルされている」前提がなく、関数自体にも検査がない（呼び出し元は `fused_elementwise.rs` の 1 か所で、現状到達不能）。
+  2. `encode_nary_dispatch` に葉バッファ数の上限検査がない（上流で 13 に制限。Metal の buffer index 上限は 31）。
+  3. Metal は numel が `u32::MAX - 255` 以上で grid が 2^32 を超え idx が回り込む（重複書き込みのみ・範囲外アクセスなし・既存 elementwise カーネルと共通・実機未確認）。
+  4. CUDA `fused_elementwise.rs` の「facade への再公開は本 PR の対象外」コメントが古い。
+- 是正（本 PR・挙動不変）: (1) は SAFETY コメントに前提を明記（関数に葉数とプログラムの対応情報がないため `debug_assert` は足せない）。(2) は SAFETY コメントに前提を明記し `debug_assert!(leaf_bufs.len() + 1 < 31)` を追加（release 不変）。(4) は CUDA・Metal 両 `fused_elementwise.rs` のコメントを #3386 で公開済みの記述へ修正。§13.2 の P3（Metal SAFETY コメント補強）も (2) で解消。
+- 残置: (3) は既存 elementwise カーネル共通の挙動のため別扱い（本 PR では修正しない）。
+- 未確認: Metal 実機動作、`alloc_uninit_pooled` の容量検査が `debug_assert` のみであること、カーネル／パイプラインキャッシュ内部（精読していない）。
