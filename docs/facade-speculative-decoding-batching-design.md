@@ -772,3 +772,23 @@ tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec`・`generat
 - テスト（`scheduler.rs`）: 束ねが実際に起きること（decode が `[B, 1]` の 1 回だけ）・状態なしモデルの完全一致・KV 全行同長の完全一致・KV 長さ混在の logits を単独 `generate` と統一複合判定で比較（Greedy は margin を fail-closed で確認し、padding を伴う呼び出しが 1 回以上あることも確認）・束ね失敗時のフォールバック・要求単位の切り離し・層数変更・空／prompt のみ・`step` との交互呼び出し。網羅テスト（margin 掃引・TopK／Temperature の再生比較）と実機 parity は #3107 の担当
 - 対象モデルの契約は型でも実行時でも検出できず、利用者が保証する（§17.5 と同じ扱い）
 - `scheduler.rs` に対する `std::thread|std::sync::mpsc|tokio|async |std::net|std::fs|rayon` の grep は 0 件。依存・tolerance・baseline・`unsafe`・`docs/spec` は変更なし
+
+## 27. 実装記録（#3102・親 #3099）
+
+テストと docs のみの変更。`crates/**/src`・依存・tolerance・baseline・判定規則・`docs/spec` は変更しない。
+
+- 追加したテスト（`crates/facade/tests/speculative_sampling_facade.rs`。facade の公開面だけを使い、内部クレートは import しない。別バイナリに分け、全テストが `GLOBAL_RNG_LOCK` を取る）:
+
+  | テスト | 契約 |
+  |---|---|
+  | `sampling_matches_exact_f64_reference_replay` | C3（受理確率・残差分布・消費順の統合） |
+  | `sampling_is_deterministic_for_same_seed`・`different_seeds_can_change_output` | C1 とシード差 |
+  | `sampling_does_not_consume_global_rng` | C2 |
+  | `identical_draft_accepts_everything` | C4 |
+  | `top_k_one_and_one_hot_logits_match_greedy` | C5 |
+  | `sampling_fails_closed` | C6 |
+
+- 分布検定は §20.6 により契約外のため追加しない（閾値つき統計量は足していない）
+- 厳密入力の選定理由: logits を集合上 `0.0`・外 `-1e4`、集合の大きさを 2 のべき乗に限ると、`Generator` へ渡る `f32` 値（サンプリング重み・受理確率 0／0.5／1・残差重み）が libm・計算順序・プラットフォームによらず bit 単位で一意に決まる。再生オラクル `reference_speculative` は同じ `Generator` を §25.2 の消費順で引く独立実装で、`generate_speculative` と token 列の完全一致を固定掃引（5120 通り）で要求する。draft 規則 5 種で受理確率 0／0.5／1・残差・bonus の全経路を通ることを統計で確認する
+- 実機: `speculative_batching_backend_parity.rs` に §20.7 の再生方式（参照側で記録した id 列を比較側へ再生し logits だけを `assert_parity` で比べる。token 列は比べない）を追加した。属性なしの CPU 対 Naive（`cpu_backend_ops_matches_naive_ops_for_speculative_sampling`）と再生ハーネスの検出力テストは CI 実行、`cuda_speculative_sampling_matches_cpu`・`metal_speculative_sampling_matches_cpu` は `#[ignore]`（未実測。`docs/perf/logs/speculative-sampling-3102/README.md`）
+- 実機テストを #3171（CUDA）・#3172（Metal）の実測対象に加えるかは所有者の判断事項
