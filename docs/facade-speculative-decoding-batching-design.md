@@ -140,6 +140,8 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 
 同じ `S_cached` の要求のグルーピング、または padding mask・行単位 gather が要る。`KvCache` のバッチ軸連結・分割や padding mask は、公開面と「単一の書き手」不変条件に触れるため分離して承認を取る（§10 論点 5）。
 
+→ #3104 追記: 公開形・不変条件・判定方式・上限は §21 で決定（案 A。第 1 段階の `step` は残し、束ねる経路は別メソッド `step_batched` の opt-in。実装は #3105〜#3107）。
+
 ### 8.3 外部依存・スレッド・ネットワークを要さない形
 
 - `std` のみ。`std::thread`・チャネル・async ランタイム・スケジューラ層での `rayon` の直接使用・ファイル／ソケット I/O を持たず、呼び出しスレッド上で同期実行する。
@@ -160,7 +162,7 @@ CUDA／Metal 対 CPU の parity は実装 issue で `#[ignore]` 分離する。�
 2. greedy の token 列一致の仮説が実モデルで破れた場合の扱い（既存判定に収まらない場合）。
 3. §17.4 の到達経路: `caches` を使う形の公開、またはモデル側の巻き戻しフック。フックを `AutoregressiveModel` の既定メソッドとして足す案は既存実装を壊さないが trait の拡張で公開面の変更になる。別 trait にする案は既存実装に影響しない代わりに型パラメータが増える。いずれも未決。 → #3095 追記: §19 で決定（案 C）。
 4. `KvCache` の公開メソッド追加（`truncate` 等）と「単一の書き手」不変条件の緩和。
-5. テンソル単位バッチ化に要る padding mask・可変長キャッシュ。
+5. テンソル単位バッチ化に要る padding mask・可変長キャッシュ。 → #3104 追記: §21 で決定（案 A）。
 6. facade 公開面の追加そのもの（`docs/compat-api-scope.md` §5）。（#2933 追記: 第 1 段階の 3 名に限り承認済み。§17 参照）
 7. paged attention（条件付きのまま。K-3 が未着手）。
 8. 連続バッチングで内部状態保持型のモデル（§8.1 の表）を扱うための、要求ごとのモデル状態の分離方式。論点 3 と同じく trait の拡張か別 trait かが未決。決まるまで第 1 段階は内部状態保持型を対象外とする。 → #3095 追記: §19 で決定（案 C）。
@@ -304,6 +306,7 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 - （#3109 追記）論点 7 の設計は `docs/device-resident-kv-paged-attention-design.md` に推奨形として記録済み。承認の確認は同 doc §9 の所有者確認表による。以下の保留状態は変えない。
 - 追記（#3100）: 論点 1 は選択肢 B で確定（§20）。以下の列挙のうち 1 は解消済み。
+- → #3104 追記: 論点 5 は案 A で確定（§21）。以下の列挙のうち 5 も解消済み。
 - 論点 1（サンプリング版の判定契約）・2（greedy の token 列一致の仮説が破れた場合）・3（内部状態保持型への到達経路）・5（padding mask・可変長キャッシュ・テンソル単位のバッチ化）・7（paged attention）・8（スケジューラでの内部状態保持型の扱い）は保留のまま。
 - 論点 4 は案 (i) で確定し `KvCache` は不変。論点 6 は第 1 段階の 3 名（と署名に現れる `RequestId`・`SchedulerLimits`）に限って解消した。
 - 対象外のまま: B > 1、EOS 停止・top-p、受理統計、HTTP サーバ、量子化 KV、facade の `caches` 到達経路。
@@ -475,6 +478,8 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 スコープ外: コード実装（#3096〜#3098）、B > 1、padding mask、paged attention、サンプリング版 speculative（論点 1）、論点 2・5・7。
 
+→ #3104 追記: 本行の padding mask・論点 5 は §21 で決定。
+
 ### 19.11 セキュリティ観点
 
 - A03: `KvCache` に任意の `Tensor` を入れる経路を作らない。新入口は `forward_with_cache` の形状・B・E・Tape 検査と原子的更新を受け継ぐ。
@@ -544,9 +549,155 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 
 - 変えないもの: `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・baseline・判定規則・`docs/spec/`・依存・`unsafe`・`Op`／`BackendOps`・`generate_speculative` の既存シグネチャ。本 issue は docs のみで `crates/**` に触れない。
 - 申し送り: `speculative.rs` のモジュール doc の「未承認でブロック中」の記述と検査 2（`Greedy` 以外の拒否）の解除は #3101 で行う。
+
+## 21. テンソル単位バッチ化の公開形と `KvCache` 不変条件の変更（#3104・親 #3103。§10 論点 5 の決着）
+
+§8.2・§10 論点 5 は「padding mask・可変長キャッシュ・テンソル単位のバッチ化」を保留にしていた。本節は公開形・不変条件・`BatchScheduler` への波及・判定方式・上限を 1 つの推奨形に決める。**docs のみの変更**で、`crates/**`・`Cargo.toml`／`Cargo.lock`・`deny.toml`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変えない。実装は #3105（`KvCache` の可変長対応）→ #3106（`BatchScheduler` の束ねる経路）→ #3107（一致テスト）。
+
+### 21.1 承認根拠と範囲
+
+- 根拠: D-A（`https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437`、§19.1 と同じ）。記録に形が書けた点はそのまま実装へ進めてよく、形が書けない点だけを所有者へ戻す、という範囲である。本節はこの範囲を超える承認を主張しない。
+- §17.1・§19.1・§19.4 の「`KvCache` の公開メソッドは増やさない」は #2933／#3095 の範囲での決定だった。不変条件を変える場所としてツリー上で #3104 が指定されているため、本節で「公開メソッドを 1 件（`valid_len`）足し、非公開の内部状態を足す」と決める。矛盾ではなく範囲の違いである。論点 4 のうち `truncate` と任意 `Tensor` を入れるセッターは引き続き採らない。
+
+### 21.2 調査事実（基準 `origin/main` `a2983333`。行番号は実装時に grep で確かめ直す）
+
+| 事実 | 出典 |
+|---|---|
+| `KvCache` は `k`／`v: Option<Tensor<f32>>` で形は `[B, S_cached, E]`。公開メソッドは 8 件（`new/is_empty/seq_len/batch/embed_dim/clear/k/v`）、セッターはない | `crates/autodiff/src/nn/attention.rs:1555` |
+| `forward_with_cache` は `Var::cat(axis 1)` で末尾へ追記する。mask 規則は (a) prefill は causal、(b) `L_new == 1` は mask なし、(c) それ以外は `offset_allowed_mask`（`allowed[i][j] = j <= s_prev + i`）。書き戻しは原子的で B・E の一致を検査する | 同 `:1682`・`:1612` |
+| `sdpa_compose` の `attn_mask` は `negate_broadcast_mask` で検査され `[B, 1, L, S]` を broadcast できる。行がすべて mask されると `reject_fully_masked_rows` が `Err` にする。非公開の `combine_masks_with_key_padding` と `forward_with_key_padding_mask` がすでにある | 同 `:1435`・`:1314`・`:1283`・`:1357`・`:901` |
+| `KvSnapshot::capture` は各層を `(seq_len, batch, embed_dim)` で同一視する。複数層にわたる `forward_step` は層をまたいで原子的でない | `crates/autodiff/src/generate/kv_rewind.rs:66` |
+| `Active` は要求ごとに `Vec<KvCache>`・`Generator`・語彙サイズを持ち、`advance` は B = 1 で prefill と decode を行う。要求単位の失敗は `take_failed` に積む | `crates/autodiff/src/generate/scheduler.rs:138`・`:153`・`:384` |
+| facade のテスト用フィクスチャと `speculative.rs` は `caches[0].seq_len()` を位置として使う | `crates/facade/tests/speculative_batching_facade.rs:91`・`crates/autodiff/src/generate/speculative.rs:437` |
+| K-3 のカーネル入力は行ごとの `seq_lens: [B]` を既に持つ | `docs/device-resident-kv-paged-attention-design.md` §3 |
+
+### 21.3 選択肢の比較（論点 5）
+
+可変長の 3 案（(1) padding + mask、(2) 行ごとの長さ配列、(3) 同じ長さのグルーピング）のうち (1) と (2) は対立しない。`[B, S_max, E]` の物理テンソルに行ごとの有効長を持たせれば、それが padding であり mask は長さから導ける。実際の比較軸は次の 4 案とする。
+
+| 案 | 内容 | 公開面・不変条件 | 新 `Op` | 既存モデルとの互換（位置の計算） | K-3 との整合 | fail-closed | `BatchScheduler` への影響 | 評価 |
+|---|---|---|---|---|---|---|---|---|
+| **A** | 長さを `KvCache` の内部に持ち、mask は `forward_with_cache` が長さから導く（左詰め padding） | 公開は `valid_len` 1 件だけ。内部に有効長を足す（不変条件は 21.4） | 不要 | padding なしでは `seq_len()` が従来と同じ値。既存モデルは無変更 | `seq_lens` と同じ意味で合う | できる（長さと mask は内部で一致を保つ） | 一時的に束ねる形が作れる | **推奨** |
+| B | 呼び出し側が自由形式の mask テンソルを渡す | mask の注入経路ができる | 不要 | 呼び出し側の責任 | 合わない | できない（長さと mask の食い違いを検出できない） | 利用者が mask を組む | §19.4 の「任意の `Tensor` を入れる経路を作らない」に反するため不採用 |
+| C | padding を持たない ragged 表現（行ごとの別テンソル・packed） | 公開形が大きく変わる | varlen カーネル（新 `Op`）が要る | 1 つのテンソルとして forward できない | 別カーネル | 別途 | 作り直し | 不採用 |
+| D | 同じ `S_cached` の要求だけを束ねる | 不変 | 不要 | 不変 | 不変 | できる | prompt 長が違う行は二度と揃わず、表現として不十分 | 単独では不採用。A の上では「全行が同じ長さなら padding なしの既存経路」として自然に含まれる |
+
+### 21.4 推奨形の不変条件と mask 規則
+
+- **padding は左詰め**とする（全行が物理位置 `S` で終わり、有効区間 `[S - len_r, S)` が連続したまま `cat(axis 1)` で追記できる。右詰めは行ごとの書き込み位置が要り `cat` が使えないので採らない）。
+- `KvCache` に非公開フィールド `lens: Option<Vec<usize>>`（名前は #3105 で確定。`None` は padding なしで全行の長さが `S`）を足す。
+- 新しい不変条件（維持するものを含む）:
+  - `k`／`v` は両方 `Some` か両方 `None`（維持）。`[B, S, E]` は contiguous で `S` は物理長（維持）
+  - `lens` が `Some` なら `k` も `Some`、`lens.len() == B`、全行で `1 <= lens[r] <= S`、`max(lens) == S`（全行が padding の先頭列を持たない）
+  - padding 位置の K／V は `0.0`（有限値。重み 0 × 有限値 = 0 を保証する）
+  - 空のキャッシュと `clear()` 後は `lens == None`
+- 書き手: `forward_with_cache`（追記で全行の `lens[r] += L_new`）と、crate 内部の行の連結・分割（`pub(crate)`。算術なしのデータ並べ替えで、入力は既存の `KvCache` に限る）。公開のセッター・`truncate` は作らない。
+- `seq_len()` は**物理長 `S`** の意味のまま変えない。padding がなければ従来と同じ値なので、既存テストとフィクスチャは無変更で通る。
+- mask 規則（`pad_r = S_prev - lens[r]`。padding なしのときは従来の経路をそのまま使い bit 同一）:
+  - (a) prefill: 空のキャッシュは `lens` を持たないので、padding 付きの prefill は構造上起こらない。従来どおり
+  - (b) `L_new == 1`: `allowed[r][0][j] = j >= pad_r`。自分の token は常に有効なので、すべて mask される行は生じない
+  - (c) `L_new > 1`: `allowed[r][i][j] = pad_r <= j <= S_prev + i`
+  - いずれも `[B, 1, L, S_total]` を `sdpa_compose` の `attn_mask` へ渡す。`combine_masks_with_key_padding` を再利用するかは #3105 の裁量とし、意味だけをここで固定する
+- 数値: -inf fill は非 mask 要素の値を変えない（`docs/kv-cache-design.md` §3.5）。ただし GEMM のブロッキングは形状に依存するため、padding あり対なしの bit 一致は保証せず、21.8 の判定へ帰着させる。
+
+### 21.5 公開名・シグネチャ（追加のみ。名前は本節で確定する）
+
+| 追加物 | シグネチャ | 公開の経路 |
+|---|---|---|
+| `KvCache` の inherent メソッド | `pub fn valid_len(&self, row: usize) -> Option<usize>`。空、または `row >= B` なら `None`。padding がなければ `seq_len()` と同じ | `nn::kv_cache` の既存 `pub use` で facade へ出る。`pub use` 文は増やさない |
+| `BatchScheduler` の inherent メソッド | `pub fn step_batched<M: AutoregressiveModel + ?Sized>(&mut self, model: &M) -> Result<usize, AutodiffError>`。戻り値の意味は `step` と同じ（完了した要求数） | `inference` の既存 `pub use` で facade へ出る |
+| crate 内部（非公開） | `pub(crate)` の行連結（B = 1 のキャッシュ列を左詰めで `[B, S_max, E]` にする）と行分割（各行を有効長へ切り詰め padding なしの B = 1 に戻す）。名前案は `stack_left_padded`／`split_rows` | 公開しない |
+
+`AutoregressiveModel`（2 メソッド）・`SchedulerLimits::new`（3 引数）・`step`・`generate`・`generate_speculative` は変えない。新しい trait・型・`AutodiffError` の variant は足さない。
+
+### 21.6 `BatchScheduler` への波及
+
+- 第 1 段階の `step` はそのまま残す（token 列の完全一致の契約を維持する）。束ねる経路は別メソッド `step_batched` の opt-in とし、`step` の内部では束ねない。
+- **正のキャッシュは要求ごとの B = 1**（`Active::caches` は padding を持たない）。`step_batched` 1 回の中で次の順に処理する。
+  1. 待ち行列からの受け入れは `step` と同じ
+  2. prefill 前の要求は B = 1 の `advance` で進める（第 1 段階と同一）
+  3. decode 中の要求は、層ごとに一時的な `[B, S_max, E]` キャッシュを連結し、`[B, 1]` で `forward_step` を 1 回呼ぶ。戻り値 `[B, 1, V]` を検査し、行ごとに各要求の `GenerateConfig`・`Generator` で `sample_step` する
+  4. 一時キャッシュを分割して各要求の B = 1 キャッシュへ戻す
+- 持続的なバッチキャッシュ（参加・退出のたびに再編する形）は採らない。複数層にわたる `forward_step` が層をまたいで原子的でないため、失敗時に全行の状態が壊れ原因の行を切り分けられない。正を要求ごとに持てば、**完了した要求が抜けるときのキャッシュ再編は不要**（従来どおり外すだけ）で、参加も次回の連結に自然に含まれる。
+- 失敗の契約（#3106 の作業へ先に渡す）: 束ねた forward・連結・戻り shape の検査が `Err` になったら一時キャッシュを捨てる。各要求の正のキャッシュは変わっていない。その step に限り対象の要求を 1 件ずつ B = 1 の `advance` でやり直し、失敗した要求だけを `take_failed` に積んで残りは継続する（forward が 1 回余分にかかる）。`step_batched` の `Err` は `step` と同じく、スケジューラ全体の不変条件が破れた場合のために取っておく。
+- 対象モデルの契約（型でも実行時でも検出できないため利用者が保証する。§17.5 と同じ扱い）。`step_batched` を呼ぶのは次を満たすモデルに限る。
+  - attention はすべて `forward_with_cache` 系の入口（#3096 の `Tape::stateful_attention_forward_with_cache` 等）を通す
+  - 行ごとの位置は `caches[i].valid_len(r)` から決め、`seq_len()` は使わない
+  - attention 以外は行ごとに独立した演算に限る（バッチ方向の統計を取る層を持たない）
+  - 内部状態保持型は従来どおり対象外
+- §8.3 の制約（同期実行・スレッド／I/O／`rayon` なし。grep で 0 件）は維持する。
+
+### 21.7 `kv_rewind`・speculative への波及
+
+- speculative は B = 1 限定のまま（B > 1 の speculative はスコープ外）。正のキャッシュは常に padding なしなので、`kv_rewind` の clone による退避・復元と `KvSnapshot::capture` の `(seq_len, batch, embed_dim)` による同一視は変えない。
+- fail-closed を補うため、`capture` は padding 付きのキャッシュ（`valid_len(r) != seq_len()` の行がある）を `InvalidArgument` で拒否する。#3105 の「巻き戻しで行ごとの有効長を扱う」作業はこの拒否の追加と読み替える。層をまたいで原子的でないという既存の注記はそのまま当てはまる。
+
+### 21.8 判定方式（§6.3 を具体化する。新しい数値は作らない）
+
+- `step_batched` の各要求の出力を、同じ要求を単独で `generate`（B = 1）した結果と比べる。位置ごとの logits は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。既存の `assert_parity`）で判定し、token 列の一致は `Greedy` の要求に限り、上位 2 候補の margin を十分に取った入力でだけ確かめる（margin を取っても一致しなければ論点 2 へ戻す。所有者への承認依頼）。`TopK`／`Temperature` の要求では margin は token 列の一致を保証しない（padding による許容誤差内の微小な logits 差でも、同じ RNG 値が累積確率の境界をまたいで別 token を選びうる）。このため token 列の一致を契約にも事前登録の仮説にもせず、論点 2 へも戻さない。§20.7 と同様に、単独 `generate` が選んだ入力 id 列を `step_batched` へ再生して位置ごとの logits を `assert_parity` で比べる。分岐後の異なる文脈同士は比べない。
+- 必須の検査: 全行が同じ長さのとき padding なしの経路と bit 一致する（#3105）／padding の量だけを変えた同じ要求の出力が一致する（#3107）／途中参加・途中退出・長さの混在で他の要求の出力が変わらない（#3107）／第 1 段階の既存テストが無変更で通る／実機は `#[ignore]` で分離する。
+- tolerance・baseline は変えない。
+
+### 21.9 上限（OWASP A04）
+
+すべて確保の前に検査し、失敗したら原子的に何も変えない。
+
+- 行数 `B <= max_active`（新しい上限フィールドは足さない。`SchedulerLimits::new` は変えない）。物理長 `S_max <= max_length`。
+- `B × S_max × E × size_of::<f32>()` を K と V それぞれについて `checked_mul` で計算し、`isize::MAX` バイト以下であることを層ごとに確かめる。mask の `B × L × S_total` は既存の `checked_ls` 相当で検査する。logits `[B, 1, V]` は既存の `validate_forward_step_output`／`validate_vocab_le_i32_max` で検査する。
+- 連結は、`B != 1` の入力・E の不一致・層数の不一致・`lens` の不変条件違反を `Err` にする。超過は 21.6 の B = 1 フォールバックへ回す。
+
+### 21.10 既存公開シグネチャの非破壊確認（追加のみ）
+
+| 項目 | 確認結果 |
+|---|---|
+| `KvCache` の 8 メソッド | 意味も不変。`seq_len` は物理長のままで padding なしでは従来と同じ値。追加は `valid_len` の 1 件 |
+| `forward_with_cache`・`StatefulAttention`・`AutoregressiveModel`・`generate`・`generate_speculative` | 変更なし（`forward_with_cache` は非公開のまま） |
+| `BatchScheduler` の既存メソッド・`SchedulerLimits::new`・`RequestId`・`SpeculativeConfig` | 変更なし。追加は `step_batched` の 1 件 |
+| `pub use` 文 | 増やさない・変えない（`KV_CACHE_APPROVED_REEXPORT`・`inference` の 4 文・`GENERATE_APPROVED_REEXPORT` は不変） |
+| `fandhe-ai =0.11.0` の既存シグネチャ・依存・tolerance・baseline・`unsafe` | 変更なし |
+
+`KvCache` に非公開フィールドを足すと `Debug` の出力が変わる。安定 API ではないため受け入れる。
+
+### 21.11 反転・更新する api_surface ガード（`crates/facade/tests/api_surface.rs`。名前と行は実装時に grep で確かめる）
+
+| ガード | 扱い | 担当 |
+|---|---|---|
+| `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler`（`:39657`） | 8 件 → 9 件（`valid_len`）。doc コメントに #3104 の決定を書く | #3105 |
+| `kv_cache_is_reachable_via_facade_only`（`:8476`） | `valid_len` のシグネチャ・プローブを足す | #3105 |
+| `speculative_scheduler_public_shape_violations`（`:39496`）／`speculative_scheduler_public_shape_is_pinned`（`:39606`） | `step_batched` を固定形へ足す | #3106 |
+| `speculative_scheduler_items_are_reachable_via_facade_inference_path`（`:39363`）・`speculative_scheduler_usage_doctests_are_present_and_compiled`（`:39454`） | `step_batched` の到達プローブと利用例を足す | #3106／#3107 |
+| §17.6 の否定プローブ「B > 1 と padding mask の経路がないこと」 | 実装箇所を grep で特定して記録する。scheduler 側は反転し、speculative の B > 1 の否定は残す | #3106／#3107 |
+| `kv_rewind_stays_private_and_absent_from_facade`・`nn_kv_cache_module_reexports_exactly_expected_surface`・`facade_reexports_kv_cache_items_only_in_approved_shape`・`KV_CACHE_APPROVED_REEXPORT`・`inference_module_reexports_exactly_expected_surface` | 変えない（新しい型・`pub use` を足さないため） | — |
+
+否定ガードは stable rustdoc の `compile_fail` コード照合に頼らず、正のプローブとインベントリで組む（§18.3 の方針を引き継ぐ）。
+
+### 21.12 後続 issue への読み替え
+
+- #3105: 表現は 21.4（左詰め＋非公開の `lens`）、公開追加は `valid_len` だけ。巻き戻しは「padding 付きキャッシュの拒否」と読み替える。
+- #3106: `step_batched` と 21.6 の失敗の契約・対象モデルの契約。上限は 21.9。
+- #3107: 21.8 の必須検査。フィクスチャのモデルは `valid_len` を位置に使う。
+
+### 21.13 所有者へ戻す点
+
+| 点 | 扱い |
+|---|---|
+| 所有者へ戻す点 | **なし**（6 つの論点すべてに名前付きで形を書けた。D-A に従う） |
+| 残るリスク | `step_batched` の対象モデルの契約は型でも実行時でも検出できず、利用者が保証する（§17.5 と同じ扱い）。承認の依頼ではない |
+
+実装中に 21.4 の mask 規則または 21.6 の失敗の契約をコードの事実から決められないと分かった場合は、「なし」とせずその点を本表へ載せて所有者へ戻す。
+
+スコープ外: コード実装（#3105〜#3107）、B > 1 の speculative、padding 付きの prefill、paged attention／K-3（`docs/device-resident-kv-paged-attention-design.md`）、EOS 停止、論点 2・7。
+
+### 21.14 セキュリティ観点
+
+- A03: `KvCache` に任意の `Tensor` や mask を入れる経路を作らない。mask は内部の `lens` から導き、行の連結・分割は `pub(crate)` で入力は既存の `KvCache` に限る。形状・B・E・`lens` の不変条件を確保の前に検査する。
+- A04: 21.9 の上限を確保の前に原子的に検査する。失敗した step は一時キャッシュを捨てて B = 1 でやり直し、黙って誤った出力を出さない。opt-in の別メソッドにすることで既存の `step` の契約を変えない。対象モデルの契約を守れない場合の誤出力は残るリスクとして明記した。
+- A06: 依存・`unsafe` の追加なし。ネットワーク公開面なし（スケジューラは同期実行）。
+- A08: 承認を代行しない（21.1）。ruleset・branch protection・リポジトリ設定は変更しない。
+- A02: `Generator` は非暗号（xorshift64*）で、生成 token をセキュリティ用途に使わない既存の注記を引き継ぐ。
 - 論点 2・3・5・7・8 は保留のまま（§17.7）。
 
-## 21. 実装記録（#3096・親 #3094）
+## 22. 実装記録（#3096・親 #3094）
 
 - 実装: §19.4 の 2 メソッド（`StatefulAttention::forward_with_external_cache`・`Tape::stateful_attention_forward_with_cache`。いずれも 1 行委譲）。承認根拠は §19.1 の D-A の範囲に限る
 - §19.9 による読み替え: `KvCache` の公開メソッドは追加なし（8 件のまま）、巻き戻しフックは非公開の `kv_rewind` のまま

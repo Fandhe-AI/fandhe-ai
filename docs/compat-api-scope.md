@@ -553,6 +553,8 @@ P1」）を受けた是正である。
 
 **公開形の記録（イシュー #3095・親 #3094。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437`〈D-A。推奨形で実装へ進める範囲〉）**: facade だけで KV キャッシュを進めるモデルを組む到達経路として、`StatefulAttention::forward_with_external_cache` と facade `Tape::stateful_attention_forward_with_cache` の 2 メソッドの追加を決定した（追加のみ・`pub use` 文と `KvCache` の公開メソッドは不変）。本文書は転記であり、公開形・不変条件は `docs/facade-speculative-decoding-batching-design.md` §19 を正とする。公開状態は未公開で、実装は #3096。
 
+**公開形の記録（イシュー #3104・親 #3103。承認: 同 D-A の URL）**: テンソル単位バッチ化のため、`KvCache::valid_len`（行ごとの有効長。`seq_len()` は物理長のまま）と `BatchScheduler::step_batched`（第 1 段階の `step` は残す opt-in 経路）の 2 メソッドの追加を決定した（追加のみ・`pub use` 文は不変。`KvCache` の内部に非公開の有効長を足し、padding は左詰め）。本文書は転記であり、公開形・不変条件・上限・判定方式は `docs/facade-speculative-decoding-batching-design.md` §21 を正とする。公開状態は未公開で、実装は #3105（`KvCache`）・#3106（`BatchScheduler`）。
+
 ### 5.1 Phase 4 公開形一覧（承認依頼 #2677。#2678・#2679 担当の行と行 19・20 の損失 3 本・オプション型を取る 5 本と 5 型〈#2854 で公開済み〉・行 30 の gradcheck〈#2847 で公開済み〉は承認・公開済み。行 12〜15 の `Var` 委譲は #2850・#2851 で公開済み〈層化は ~~保留継続~~ → 2026-10-11 D-A により推奨形で実装へ進む。公開形は `compat-sequential-3d-fold-lrn-layers-decision.md`〈#3025〉を正とする〉）
 
 **本節は、承認依頼（#2677）として集約した公開形一覧である。** 親 #2625・ルート #2499 の Phase 4
