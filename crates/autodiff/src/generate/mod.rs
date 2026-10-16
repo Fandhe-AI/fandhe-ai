@@ -62,6 +62,8 @@
 //! - `pub(super)` は使わない。`generate` はクレート直下にあるため
 //!   `pub(super)` は `pub(crate)` と同じ範囲になり、クレート内の他経路から
 //!   検証を迂回した組み立てが可能になる
+//! - `speculative` はサンプリング版（#3101）でも `sampling_weights_f32` を再利用し、
+//!   TopK／Temperature の分布定義を `generate` と共有する
 //! - `kv_rewind`（KV キャッシュ巻き戻し。#2885）は非公開子モジュールで、項目は
 //!   `pub(super)`（`generate` 配下限定。1 段深いため `pub(crate)` より厳密に狭い）
 //! - `validate*` は非公開を保つ（A03。facade の `api_surface.rs` の
@@ -396,32 +398,50 @@ fn sample_step(
 
     match config.strategy {
         SamplingStrategy::Greedy => Ok(rows.iter().map(|row| greedy_argmax(row) as i32).collect()),
-        SamplingStrategy::Temperature(_) => {
+        SamplingStrategy::Temperature(_) | SamplingStrategy::TopK(_) => {
             let mut weights = Vec::with_capacity(b * vocab);
             for row in &rows {
-                weights.extend(softmax_weights_f64(row, config.temperature));
+                weights.extend(sampling_weights_f32(row, config));
             }
             let weights_tensor = Tensor::new(weights, &[b, vocab]).map_err(AutodiffError::Shape)?;
+            let context = if matches!(config.strategy, SamplingStrategy::TopK(_)) {
+                "TopK サンプリング"
+            } else {
+                "Temperature サンプリング"
+            };
             let sampled = rng
                 .multinomial(&weights_tensor, 1, true)
-                .map_err(|e| rng_error_to_autodiff("Temperature サンプリング", e))?;
+                .map_err(|e| rng_error_to_autodiff(context, e))?;
             Ok(sampled.contiguous().host_slice().into_owned())
         }
-        SamplingStrategy::TopK(k) => {
-            let mut weights = vec![0.0f32; b * vocab];
-            for (bi, row) in rows.iter().enumerate() {
-                let top = top_k_indices(row, k);
-                let top_vals: Vec<f32> = top.iter().map(|&idx| row[idx]).collect();
-                let top_weights = softmax_weights_f64(&top_vals, config.temperature);
-                for (pos, &orig_idx) in top.iter().enumerate() {
-                    weights[bi * vocab + orig_idx] = top_weights[pos];
-                }
+    }
+}
+
+/// 1 行の logits（有限は呼び出し元が検証済み）から `multinomial` へ渡す f32 重み
+/// （長さ `row.len()`）を作る。[`sample_step`] と speculative 版
+/// （`speculative::generate_speculative` のサンプリング分岐。#3101）が共有し、
+/// 受理確率の `p`・`q` を `generate` と同じ分布定義から導く。
+/// `TopK` は上位 k 外を 0.0、`Temperature` は全語彙。`Greedy` は one-hot
+/// （呼ばれない前提だが panic せず argmax の one-hot を返す）。
+fn sampling_weights_f32(row: &[f32], config: &GenerateConfig) -> Vec<f32> {
+    match config.strategy {
+        SamplingStrategy::Greedy => {
+            let mut w = vec![0.0f32; row.len()];
+            if let Some(slot) = w.get_mut(greedy_argmax(row)) {
+                *slot = 1.0;
             }
-            let weights_tensor = Tensor::new(weights, &[b, vocab]).map_err(AutodiffError::Shape)?;
-            let sampled = rng
-                .multinomial(&weights_tensor, 1, true)
-                .map_err(|e| rng_error_to_autodiff("TopK サンプリング", e))?;
-            Ok(sampled.contiguous().host_slice().into_owned())
+            w
+        }
+        SamplingStrategy::Temperature(_) => softmax_weights_f64(row, config.temperature),
+        SamplingStrategy::TopK(k) => {
+            let mut weights = vec![0.0f32; row.len()];
+            let top = top_k_indices(row, k);
+            let top_vals: Vec<f32> = top.iter().map(|&idx| row[idx]).collect();
+            let top_weights = softmax_weights_f64(&top_vals, config.temperature);
+            for (pos, &orig_idx) in top.iter().enumerate() {
+                weights[orig_idx] = top_weights[pos];
+            }
+            weights
         }
     }
 }
@@ -620,6 +640,8 @@ mod tests {
                 let _: fn(&[f32], f32) -> Vec<f32> = super::super::softmax_weights_f64;
                 let _: fn(&[f32], usize) -> Vec<usize> = super::super::top_k_indices;
                 let _: SampleStepFn = super::super::sample_step;
+                let _: fn(&[f32], &super::super::GenerateConfig) -> Vec<f32> =
+                    super::super::sampling_weights_f32;
                 let _: BuildOutputFn = super::super::build_output;
                 let _: fn(&super::super::GenerateConfig) -> Result<(), AutodiffError> =
                     super::super::GenerateConfig::validate;

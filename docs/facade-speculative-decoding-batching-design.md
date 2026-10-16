@@ -352,6 +352,8 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 
 `BatchScheduler` は状態なしモデルで成功する例（単独 `generate` との一致まで確認）を付けた。`generate_speculative` は **facade の公開面だけでは成功する実行を示せない**（`num_kv_layers() == 0` は `Err` で拒否され、`caches` を進めるモデルを組む経路が facade に無い。論点 3 は保留）ため、fail-closed 契約（`num_kv_layers() == 0` と TopK の拒否）を示す例とした。成功経路は `crates/facade/tests/speculative_batching_facade.rs` の結合テストが担う。doctest のために `KvCache` のセッターや `truncate`、`forward_with_cache` の公開は足していない。
 
+→ #3098 追記: #3096 の入口（`Tape::stateful_attention_forward_with_cache`）で `caches[0]` を進める、facade の公開面だけの表引き KV モデルによる成功例 doctest を `inference/mod.rs` に追加した（出力は target 単独 `generate` と token 列一致。fail-closed 例は維持）。`api_surface.rs` の doctest 実在検査へ成功例の必須語と、成功例が内部クレート（`fandhe_ai_autodiff`）を使わないことの否定検査（自己テスト付き）を足した。結合テストには、k・draft（全受理／全棄却／部分受理）・prompt 長・`max_length`・入力 rank（1／2）・target 層数の掃引（`speculative_matches_greedy_generate_on_public_surface_table_model_sweep`）を足した。変えないもの: `pub use`・承認形の定数・tolerance・baseline・依存・`unsafe`・`docs/spec`。承認根拠は D-A の範囲に限り、追加の承認は得ていない。
+
 ### 18.5 対象モデルの契約の doc 化
 
 「内部状態保持型」を「生成状態を、渡された `caches` の外に持つ型」と定義し、`num_kv_layers()` の値では決まらない・型でも実行時でも検出できない・対象外で出力を保証しない・利用者が保証する、と facade の `inference` モジュール doc と autodiff の `BatchScheduler`／`generate_speculative` の rustdoc に書いた（従来の「内部状態保持型は `num_kv_layers() == 0` を返す」は §17.5 と食い違うため改めた）。
@@ -517,7 +519,7 @@ S1〜S3 専用の `*HoldDoctestGuard` は存在しない（`docs/compat-api-scop
 ### 20.4 RNG の消費順（決定性の前提）
 
 - `Generator::new(config.seed)` を呼び出しごとに 1 個だけ作り、グローバル RNG は消費しない。
-- 1 ラウンドの消費順の案: draft が k 回 `multinomial` → 検証位置ごとに `bernoulli` 1 回 → 棄却時は残差を `multinomial` 1 回、全受理時は bonus を `multinomial` 1 回。最終順序は #3101 の実装で確定し、rustdoc と本節へ反映する。消費回数の契約は `docs/rng-distributions-generator-decision.md` §1.1（`multinomial` は `m * num_samples` 回固定）に従う。
+- 1 ラウンドの消費順の案: draft が k 回 `multinomial` → 検証位置ごとに `bernoulli` 1 回 → 棄却時は残差を `multinomial` 1 回、全受理時は bonus を `multinomial` 1 回。最終順序は #3101 で確定した（§25.2。prefill 末尾の multinomial 1 回で最初のトークン → 各ラウンド → 最終 1 step の multinomial 1 回）。消費回数の契約は `docs/rng-distributions-generator-decision.md` §1.1（`multinomial` は `m * num_samples` 回固定）に従う。
 - 同一シード・同一入力・同一モデルなら、**同一実行環境（同一バイナリ・同一プラットフォーム・同一 toolchain）での再現性**として出力は bit 単位で一意に決まる。プラットフォーム間の bit 一致は保証しない。`bernoulli` は `next_unit_f64` と浮動小数点確率を比較し、`multinomial` は `f64` の累積和・乗算を使い、`softmax_weights_f64` は `f64::exp` を使うため、数学関数の実装差や浮動小数点演算の差で確率境界付近の token 選択が分岐し token 列が変わりうる。プラットフォーム間一致が必要になった場合は、数学関数・logits・浮動小数点演算の条件を別途定義して決定記録へ追記する。`Generator`（`crates/tensor-core/src/rng.rs:676`）は非暗号の xorshift64* であり、生成 token をセキュリティ用途に使わない。
 
 ### 20.5 検査項目（#3101・#3102 が参照する契約）
@@ -725,13 +727,39 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 - 実装: §21.4 の表現。`KvCache` に非公開フィールド `lens: Option<Vec<usize>>` を追加（`None` = padding なし。`Some` は左詰め padding で、`max(lens) == S`・少なくとも 1 行が `lens[r] < S`。全行が `S` なら必ず `None` へ正規化し、全行同長なら従来経路と bit 一致を構造的に保つ）。padding 位置の K／V は 0.0
 - 公開追加は `KvCache::valid_len(row) -> Option<usize>` の 1 件のみ（§21.5）。空・範囲外は `None`。`seq_len()` の意味は物理長 `S` のまま
 - mask: 非公開関数 `padded_offset_allowed_mask(lens, s_prev, l_new, s_total)`（`[B,1,L_new,S_total]`・`true` = attend・`pad_r <= j && j <= s_prev + i`）。`forward_with_cache` は `lens` が `Some` のとき (b)／(c) とも本関数を使い、`None` のときは従来コードをそのまま使う。`lens + l_new_kv` は射影の前に `checked_add` で計算し、書き戻しは全段成功後
-- 束ね・分割: `KvCache::stack_left_padded`／`split_rows` は `pub(crate)` で、`#[cfg(test)]` の子モジュール `nn/attention/kv_padding.rs` に置く（本イシュー時点で非テスト呼び出し元がなく、`#[allow]` を避けるため。api_surface の `without_test_mod` が最初の `#[cfg(test)]` 以降を切り落とすので、本体 impl の途中には cfg 属性を置かない）。**#3106 で `cfg(test)` を外した（§25）**
+- 束ね・分割: `KvCache::stack_left_padded`／`split_rows` は `pub(crate)` で、`#[cfg(test)]` の子モジュール `nn/attention/kv_padding.rs` に置く（本イシュー時点で非テスト呼び出し元がなく、`#[allow]` を避けるため。api_surface の `without_test_mod` が最初の `#[cfg(test)]` 以降を切り落とすので、本体 impl の途中には cfg 属性を置かない）。**#3106 で `cfg(test)` を外した（§26）**
 - kv_rewind（§21.7）: `common_state`（`capture`・`rewind_and_replay` が経由）が `valid_len(r) != Some(seq_len())` の行を持つキャッシュを `InvalidArgument` で拒否する。新しい内部 API は足していない
 - ガード: `kv_cache_public_methods_stay_unchanged_for_speculative_scheduler` の期待集合を 9 件（`valid_len` 追加）へ更新。`kv_cache_is_reachable_via_facade_only` に署名固定と実行プローブを追加
 - テスト: 可変長の B=1 一致（L_new=1・2。統一複合判定）・padding 内容の非影響（bit 一致）・全行同長の bit 一致往復・拒否時の状態不変・`valid_len`・mask 単体
 - 依存・tolerance・baseline・`unsafe`・`docs/spec` は変更なし
 
-## 25. 実装記録（#3106・親 #3103）
+## 25. 実装記録（#3101・親 #3099）
+
+サンプリング版 `generate_speculative`（§20 の選択肢 B の契約に従う実装）。公開シグネチャ・`SpeculativeConfig`・`pub use` は不変で、`config.strategy` が `TopK`／`Temperature` のとき speculative sampling で進む。Greedy は従前のコードパスのまま（RNG を作らない）。
+
+### 25.1 実装形
+
+- `generate/mod.rs`: 非公開 `sampling_weights_f32`（TopK は上位 k 外を 0.0、Temperature は全語彙の `softmax_weights_f64`）を新設し、`sample_step` と共有（演算順は不変で `generate` は bit 同一）
+- `generate/speculative.rs`: 検査 2（Greedy 以外の拒否）を削除し Errors を 1〜8 へ繰り上げ（順序は不変）。`row_at`（行の取り出しと有限性検査）・`normalize_f64`・`acceptance_prob_f32`・`residual_weights_f32`・`sample_from`・`accept_draw`・`verify_sampling` を非公開で追加
+- `q(x)` は draft が引いたときの f32 重みを保存し、`p`・`q` とも `normalize_f64`（index 順 `f64` 総和）で正規化して読み直す。受理確率は `[0,1]` に clamp して `f32` 化（`p == q` で厳密 1.0）。`q(x) <= 0`・残差和 0／非有限・正規化総和 0 は RNG を引く前に `Err`
+
+### 25.2 RNG 消費順（§20.4 の確定）
+
+prefill 末尾 multinomial × 1 → ラウンドごとに draft multinomial × `k_eff` → 検証位置ごとに bernoulli × 1（最初の棄却まで）→ 棄却時は残差 multinomial × 1、全受理時は bonus multinomial × 1 → 最終 1 step で multinomial × 1。`Generator::new(config.seed)` は呼び出しごとに 1 個で、`max_length == prompt_len` の早期 return では作らない。
+
+### 25.3 検査項目 C1〜C6 の置き場所
+
+C1・C3・C4・C5・C6 は `speculative.rs` のユニットテスト、C2 は `crates/autodiff/tests/nn_generate_speculative.rs`。分布検定は契約外（§20.6）で追加していない。
+
+### 25.4 既存テストの扱い（Issue 文言との差分）
+
+Greedy に関するアサーションは無変更。外した検査の否定表明だけを反転した: `speculative_batching_facade.rs` の `TopK(3)`／`Temperature(0.8)` は `Ok`（shape `[6]`）に、代わりに `TopK(V + 1)` が `InvalidArgument` になることを追加。`speculative.rs` 内では `rejects_invalid_inputs_before_any_forward` から topk／temp の 2 行を削除し、`validation_order_is_fixed` の期待 needle を `SpeculativeConfig.k` へ変更。`api_surface.rs` は別入口を作らない旨のコメント更新のみ。
+
+### 25.5 変えないもの
+
+tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec`・`generate()` の挙動。facade レベルの拡充と実機 `#[ignore]` テストは #3102。
+
+## 26. 実装記録（#3106・親 #3103）
 
 承認の根拠は D-A（§21.1）の範囲に限る。§21.5・§21.6 の形で `BatchScheduler::step_batched` を追加した（追加のみ）。
 

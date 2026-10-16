@@ -154,3 +154,13 @@
 - `api_surface.rs` に追加・更新したガード: `KV_CACHE_APPROVED_REEXPORT` の 5 名形化（rustfmt の trailing comma を含む）、`stateful_attention_public_methods_are_pinned`（9 件）、`kv_cache_usage_doctests_are_present_and_compiled`（paged 利用例）、`tape_paged_attention_forward_is_thin_delegation`、`tape_new_paged_kv_cache_is_thin_delegation`、`workspace_declares_paged_attention_entries_only_in_approved_locations`、`paged_kv_cache_public_methods_are_pinned`、`paged_attention_facade_signatures_are_pinned`、`paged_attention_is_reachable_via_facade_only`、`facade_does_not_reexport_paged_kv_internals`
 - テスト: `crates/facade/tests/paged_attention_facade.rs`（K-1 との統一複合判定一致・原子性・容量超過・`L_new == 0`）、autodiff の Mock 単体（入力拒否時の `cache` 不変）。追記後の失敗の巻き戻し経路は Mock の gemm が非対応のため単体では通らない（未検証。実バックエンドでの失敗注入は後続）
 - 未実施の後続: 形状マトリクス・実機判定（#3113・#3171・#3172）、可変長（#3105）、`generate`／`BatchScheduler` への結線、射影のデバイス常駐化
+
+## 14. #3113 実装記録（CPU 参照一致テストと実機 parity テストの形状マトリクス・判定構成）
+
+- 形状マトリクス: `crates/backend-{cuda,metal}/tests/common/paged_attention_judgement.rs` の `CASES`（23 件）。#3111 の既存 4 形状に加え、bs ∈ {1, 2, 16, 256} の bs-1／bs／bs+1 prefill → decode 2 回、s_max>128（j 軸のスレッドストライド。T=128）、Dh>128・Dh=1、L_new>1 の複数回追記、巻き戻し後の再追記（ブロック途中・ブロック境界ちょうど）、大振幅入力（`input_scale = 4.0`）。プールは 512 ブロック以下に収め、作業バッファは `PAGED_ATTENTION_MAX_WORKSPACE_ELEMS` を大きく下回る。
+- 判定構成: 既定は統一複合判定のゼロ fail（`Judgement::Strict`）。実機で fail した（case, step）だけを `BASELINES` へ登録すると baseline 非後退判定（fail_count・total 一致・mean_abs／max_abs／max_rel の ceiling。すべて必須）へ切り替わる。`BASELINES` は**空**で、追加は実機実測値＋人間承認の別 PR（§5）。契約テスト `paged_attention_judgement_contract.rs` が空であること・未登録は Strict・5 種 falsification・ログ書式・tolerance 定数の bit 等値を固定する。
+- テストの配置: backend 層は各 `paged_kv_real_device.rs`（`cuda_`／`metal_` 接頭辞の `#[ignore]`。既存 3 テストは無変更）。facade 層は `paged_attention_facade.rs`（CPU マトリクス・空キャッシュ・`clear`・巻き戻し・範囲外 `Err`、実機端から端まで `cuda_`／`metal_`）。実機なしで駆動部を確かめる `matrix_harness_runs_on_cpu_against_cpu` を CUDA 側に置いた。
+- 実行手順・事前登録規則: `docs/perf/logs/paged-attention-parity-3113/`（`README.md`・`RULE.txt`）。
+- 未実測: 実機の判定は未実行（#3171・#3172）。Metal の macOS 限定コードは `make check-cross-metal-tests` と facade の `cargo check --target aarch64-apple-darwin` までで、実行していない。
+- 変えていないもの: tolerance 定数、既存 baseline（`parity_baseline.rs`・`splitk_parity_baseline.rs`）、`crates/*/src`、依存、CI。`backend-cuda` に `autodiff` の dev-dependency は足していない（§12）。
+

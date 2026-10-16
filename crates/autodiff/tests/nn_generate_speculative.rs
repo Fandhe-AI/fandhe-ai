@@ -29,7 +29,10 @@
 //! 承認依頼に戻す。tolerance・baseline は新設しない。margin 前提は既存 REQ-2
 //! 定数から導いた入力の妥当性検査であり、新しい判定閾値ではない。
 //!
-//! 対象外: CUDA／Metal 実機 parity（#2890）、サンプリング版（設計 §10 論点 1）、
+//! サンプリング版（#3101）はグローバル RNG 非消費の 1 件だけを本ファイルに置く
+//! （分布・決定性・退化ケースは lib 側のユニットテスト）。
+//!
+//! 対象外: CUDA／Metal 実機 parity（#2890）、サンプリング版の分布検定（設計 §20.6。契約外）、
 //! `num_kv_layers() == 0` のモデル（論点 3）、入口の fail-closed 検査（#2886 の
 //! 単体テストの担当）。
 
@@ -40,9 +43,10 @@ use fandhe_ai_autodiff::generate::{
     AutoregressiveModel, GenerateConfig, SamplingStrategy, generate,
 };
 use fandhe_ai_autodiff::nn::{KvCache, LinearVars, MultiheadAttentionVars};
-use fandhe_ai_autodiff::{AutodiffError, Tape};
+use fandhe_ai_autodiff::{AutodiffError, Tape, manual_seed, rand};
 use fandhe_ai_tensor_core::Tensor;
 use std::cell::RefCell;
+use std::sync::Mutex;
 
 const V: usize = 7;
 const E: usize = 4;
@@ -541,4 +545,37 @@ fn attention_model_logits_req2_and_tokens_match() {
         "attention model: 比較 {compared_rows} 行中 bit 不一致 {bit_mismatch_rows} 行 \
          （参考情報。契約は REQ-2 判定）"
     );
+}
+
+/// グローバル RNG（`manual_seed`／`rand`）を触るテストを直列化する（将来の追加に備える）。
+static GLOBAL_RNG_LOCK: Mutex<()> = Mutex::new(());
+
+/// C2（設計記録 §20）: サンプリング版 speculative は独立 `Generator` だけを使い、
+/// グローバル RNG を消費しない（`nn_generate.rs` の `generate` 版と同型）。
+#[test]
+fn speculative_sampling_does_not_consume_global_rng() {
+    let _guard = GLOBAL_RNG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = table(1, Box::new(target_next));
+    let draft = table(1, Box::new(wrong_next));
+    let ids = prompt(3, true);
+    for strategy in [
+        SamplingStrategy::TopK(3),
+        SamplingStrategy::Temperature(0.8),
+    ] {
+        let config = GenerateConfig::new(12, strategy).with_seed(21);
+
+        manual_seed(1234);
+        let baseline = rand(&[4]).unwrap();
+
+        manual_seed(1234);
+        let _ = generate_speculative(&target, &draft, &ids, &config, &SpeculativeConfig::new(3))
+            .unwrap();
+        let after = rand(&[4]).unwrap();
+
+        assert_eq!(
+            baseline.contiguous().host_slice().into_owned(),
+            after.contiguous().host_slice().into_owned(),
+            "サンプリング版 generate_speculative はグローバル RNG を消費してはならない"
+        );
+    }
 }

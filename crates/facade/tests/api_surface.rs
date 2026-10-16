@@ -39876,13 +39876,16 @@ fn speculative_scheduler_usage_doctests_are_present_and_compiled() {
             ][..],
         ),
         (
-            "speculative",
+            "speculative（fail-closed 例）",
             &[
                 "use fandhe_ai::inference::{",
                 "SpeculativeConfig::new",
                 "generate_speculative(&",
+                "Err(AutodiffError::InvalidArgument",
             ][..],
         ),
+        // 公開面だけで組んだ表引き KV モデルの成功例（#3098）。
+        ("speculative（成功例）", &SPECULATIVE_SUCCESS_NEEDLES[..]),
     ] {
         let v = doctest_probe_violations(
             &format!("inference/mod.rs モジュール doc（{label}）"),
@@ -39891,6 +39894,73 @@ fn speculative_scheduler_usage_doctests_are_present_and_compiled() {
         );
         assert!(v.is_empty(), "{v:?}");
     }
+    // 成功例が内部クレートを使わず公開パスだけで書かれていること。
+    let v = doctest_internal_crate_violations(
+        "inference/mod.rs モジュール doc",
+        &lines,
+        &SPECULATIVE_SUCCESS_NEEDLES,
+    );
+    assert!(v.is_empty(), "{v:?}");
+
+    // 自己テスト: 内部クレート検査の正例・負例。
+    let l = |s: &str| s.lines().map(|x| x.to_string()).collect::<Vec<_>>();
+    let needles = ["generate_speculative(&"];
+    let ok =
+        l("```\nuse fandhe_ai::inference::generate_speculative;\ngenerate_speculative(&a);\n```");
+    assert!(doctest_internal_crate_violations("t", &ok, &needles).is_empty());
+    let internal = l("```\nuse fandhe_ai_autodiff::generate::x;\ngenerate_speculative(&a);\n```");
+    assert!(!doctest_internal_crate_violations("t", &internal, &needles).is_empty());
+    let hidden = l("```\n# use fandhe_ai_autodiff::generate::x;\ngenerate_speculative(&a);\n```");
+    assert!(!doctest_internal_crate_violations("t", &hidden, &needles).is_empty());
+    let ignored = l("```ignore\ngenerate_speculative(&a);\n```");
+    assert!(!doctest_internal_crate_violations("t", &ignored, &needles).is_empty());
+    assert!(!doctest_internal_crate_violations("t", &[], &needles).is_empty());
+}
+
+/// speculative 成功例 doctest ブロックを識別する必須語（ブロック固有の語。fail-closed 例とは別ブロック）。
+const SPECULATIVE_SUCCESS_NEEDLES: [&str; 7] = [
+    "use fandhe_ai::inference::{",
+    "use fandhe_ai::nn::kv_cache::{",
+    "StatefulAttention::from_config",
+    "stateful_attention_forward_with_cache(",
+    "SpeculativeConfig::new",
+    "generate_speculative(&",
+    "generate(&",
+];
+
+/// 成功例ブロック（コンパイル対象で `needles` をすべて含む）の隠し行を含む全行に内部クレート
+/// `fandhe_ai_autodiff` が現れる場合と、該当ブロックが 0 件（空振り）の場合を違反として返す。
+fn doctest_internal_crate_violations(
+    label: &str,
+    doc_lines: &[String],
+    needles: &[&str],
+) -> Vec<String> {
+    let mut raw_blocks: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+    for line in doc_lines {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("```") {
+            match current.take() {
+                Some(done) => raw_blocks.push(done),
+                None => current = Some((rest.trim().to_string(), Vec::new())),
+            }
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push(t.to_string());
+        }
+    }
+    let targets: Vec<&(String, Vec<String>)> = raw_blocks
+        .iter()
+        .filter(|(info, _)| info.is_empty() || info == "rust")
+        .filter(|(_, body)| needles.iter().all(|n| body.iter().any(|l| l.contains(n))))
+        .collect();
+    if targets.is_empty() {
+        return vec![format!("{label}: 検査対象の成功例ブロックが無い")];
+    }
+    targets
+        .iter()
+        .filter(|(_, body)| body.iter().any(|l| l.contains("fandhe_ai_autodiff")))
+        .map(|_| format!("{label}: 成功例が内部クレート fandhe_ai_autodiff を使っている"))
+        .collect()
 }
 
 /// 実ファイルの `#[cfg(test)]` 以降を除いたソースを返す（テスト mod 内の `fn` を数えない）。
@@ -39986,7 +40056,9 @@ fn speculative_scheduler_public_shape_violations(sched_src: &str, spec_src: &str
         v.push("RequestId が非公開フィールドの tuple struct 1 件ではない".to_string());
     }
     // speculative.rs の自由関数（深さ 0 の `pub fn`）は `generate_speculative` 1 件のみ
-    // （サンプリング版・B > 1 版の入口が無いことの否定プローブを兼ねる）。
+    // サンプリング版は `generate_speculative` の strategy 分岐で受け、別入口は作らない
+    // （`generate_speculative_sampling` 等の新設は承認外。#3101）。B > 1 版の入口が無い
+    // ことの否定プローブを兼ねる。
     let mut depth = 0usize;
     let mut free_pub_fns = Vec::new();
     for (i, t) in spec.iter().enumerate() {

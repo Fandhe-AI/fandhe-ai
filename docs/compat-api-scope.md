@@ -553,7 +553,9 @@ P1」）を受けた是正である。
 
 **公開形の記録（イシュー #3095・親 #3094。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6111643437`〈D-A。推奨形で実装へ進める範囲〉）**: facade だけで KV キャッシュを進めるモデルを組む到達経路として、`StatefulAttention::forward_with_external_cache` と facade `Tape::stateful_attention_forward_with_cache` の 2 メソッドの追加を決定した（追加のみ・`pub use` 文と `KvCache` の公開メソッドは不変）。本文書は転記であり、公開形・不変条件は `docs/facade-speculative-decoding-batching-design.md` §19 を正とする。公開状態は未公開で、実装は #3096。
 
-**公開形の記録（イシュー #3104・親 #3103。承認: 同 D-A の URL）**: テンソル単位バッチ化のため、`KvCache::valid_len`（行ごとの有効長。`seq_len()` は物理長のまま）と `BatchScheduler::step_batched`（第 1 段階の `step` は残す opt-in 経路）の 2 メソッドの追加を決定した（追加のみ・`pub use` 文は不変。`KvCache` の内部に非公開の有効長を足し、padding は左詰め）。本文書は転記であり、公開形・不変条件・上限・判定方式は `docs/facade-speculative-decoding-batching-design.md` §21 を正とする。公開状態は未公開で、実装は #3105（`KvCache`）・#3106（`BatchScheduler`）。→ #3106 追記: `BatchScheduler::step_batched` を実装し facade の `inference` から到達できる（`KvCache::valid_len` は #3105）。実装記録は同設計記録 §25。
+**公開形の記録（イシュー #3104・親 #3103。承認: 同 D-A の URL）**: テンソル単位バッチ化のため、`KvCache::valid_len`（行ごとの有効長。`seq_len()` は物理長のまま）と `BatchScheduler::step_batched`（第 1 段階の `step` は残す opt-in 経路）の 2 メソッドの追加を決定した（追加のみ・`pub use` 文は不変。`KvCache` の内部に非公開の有効長を足し、padding は左詰め）。本文書は転記であり、公開形・不変条件・上限・判定方式は `docs/facade-speculative-decoding-batching-design.md` §21 を正とする。公開状態は未公開で、実装は #3105（`KvCache`）・#3106（`BatchScheduler`）。→ #3106 追記: `BatchScheduler::step_batched` を実装し facade の `inference` から到達できる（`KvCache::valid_len` は #3105）。実装記録は同設計記録 §26。
+
+**公開形の記録（イシュー #3118・親 #3117。承認: 同 D-A の URL）**: `ModelRegistry` に `save(&self, name: &str, version: &str, tensors: &HashMap<String, Tensor<f32>>) -> Result<(), ModelError>` の 1 メソッドを追加し、`ModelError` に `EmptyModel`・`Save(SaveError)` の 2 variant を追加する形を決定した（追加のみ。std のみの原子的書き込み〈一時ファイル → `rename`〉・Linux x86_64／aarch64 と macOS 限定で他は `Unsupported`・dirfd 経路への強化は #3123 の承認後）。本文書は転記であり、公開形・エラー型・安全契約・Windows の扱いは `docs/facade-model-registry-decision.md` §16 を正とする。公開状態は未公開で、実装は #3119。
 
 **適用記録（イシュー #3112・親 #3108。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3018#issuecomment-6207013704` の項 4）**: paged attention（K-3）を facade へ公開した。追加した名前は `fandhe_ai::nn::kv_cache::{PagedKvCache, PagedKvCacheConfig}`（既存の純再エクスポート 1 文を 5 名形へ拡張）、`Tape::new_paged_kv_cache`、`Tape::paged_attention_forward`（いずれも `&self.0` を渡す 1 行委譲）。autodiff 側は `StatefulAttention::forward_paged` を追加。推論専用（`Tensor` 入出力）。公開しないもの: `PagedKvCacheReference`・`paged_attention_reference`・`DEFAULT_BLOCK_SIZE`・tensor-core の `PagedKvLayout` 等。`Tape::new_paged_kv_cache` は設計記録 §6 に形が無く、所有者確認を依頼している（設計記録 §13 D5）。`fandhe-ai =0.11.0` に対して追加のみ。反転・追加したガードは設計記録 §13 に列挙。
 
@@ -2544,7 +2546,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 
 | # | 公開名 | 確定シグネチャ（main の内部実装） | 公開パス | 保留ガード | 公開状態 |
 |---|---|---|---|---|---|
-| S1 | `generate_speculative` | `<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError>`（`T`・`D` は `AutoregressiveModel + ?Sized`。Greedy 以外と `num_kv_layers() == 0` は `Err`） | `fandhe_ai::inference` | S 専用は未設置。#2934 で正ガード `facade_exposes_speculative_scheduler_items_only_in_approved_shape` を新設 | 公開済み（#2934） |
+| S1 | `generate_speculative` | `<T, D>(target: &T, draft: &D, input_ids: &Tensor<i32>, config: &GenerateConfig, spec: &SpeculativeConfig) -> Result<Tensor<i32>, AutodiffError>`（`T`・`D` は `AutoregressiveModel + ?Sized`。`num_kv_layers() == 0` は `Err`。サンプリング戦略は #3101 で対応済み） | `fandhe_ai::inference` | S 専用は未設置。#2934 で正ガード `facade_exposes_speculative_scheduler_items_only_in_approved_shape` を新設 | 公開済み（#2934） |
 | S2 | `SpeculativeConfig` | `#[non_exhaustive]`・`Debug, Clone, PartialEq`・`pub k: usize`・`new(k: usize) -> SpeculativeConfig` | 同上 | 同上 | 同上 |
 | S3 | `BatchScheduler`（署名に現れる `RequestId`・`SchedulerLimits` を含む） | `new(SchedulerLimits)`・`queued_len`・`active_len`・`submit(&mut self, &Tensor<i32>, &GenerateConfig) -> Result<RequestId, AutodiffError>`・`step<M: AutoregressiveModel + ?Sized>(&mut self, &M) -> Result<usize, AutodiffError>`・`take_finished() -> Vec<(RequestId, Tensor<i32>)>`・`take_failed() -> Vec<(RequestId, AutodiffError)>`。`RequestId` は不透明 `u64` newtype、`SchedulerLimits::new(max_active, max_queued, max_length) -> Result<SchedulerLimits, AutodiffError>`（`#[non_exhaustive]`・0 は拒否） | 同上 | 同上 | 同上 |
 
@@ -2700,7 +2702,7 @@ facade 公開面は追加していない（保留ガード `FunctionalTransforms
 | Unicode（`TextVectorization`） | 各決定記録 | 同 issue の決定記録 | #3089 |
 | 出力モード（`TextVectorization`・`StringLookup` 相当） | `docs/facade-text-output-modes-string-lookup-decision.md`（出力モード 3 種は #3092、`StringLookup` 相当は #3093 で実装済み） | 同 issue の決定記録 | #3090 |
 | generate 系 | 各決定記録 | 同 issue の決定記録 | #3094〜#3108（D-A に含まれる範囲と #3114〈グラフコンパイル区分 B〉は Phase 4 親 #3088 配下の各 issue の決定記録を正とする） |
-| `ModelRegistry` 書き込み | 各決定記録 | 同 issue の決定記録 | #3117 |
+| `ModelRegistry` 書き込み | 各決定記録 | 同 issue の決定記録（`facade-model-registry-decision.md` §16。#3118 で確定） | #3117 |
 
 条件: 各 issue で決定記録に公開形を書き、その形のまま実装まで進む。**記録に形が無い点だけ承認依頼へ戻す**。
 

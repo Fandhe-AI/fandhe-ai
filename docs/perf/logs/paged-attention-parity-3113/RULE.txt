@@ -1,0 +1,11 @@
+# 事前宣言（実測前に固定。2026-10-16。イシュー #3113。結果が出た後に緩めない）
+- 対象（paged attention・K-3 の CPU 参照との実機 parity。実測は #3171〔GB10〕・#3172〔Mac mini〕）:
+  - backend 層（形状マトリクス全件）: backend-cuda の cuda_paged_attention_matrix_matches_cpu_reference・cuda_paged_attention_tolerance_constants_pinned、backend-metal の metal_paged_attention_matrix_matches_cpu_reference・metal_paged_attention_tracked_matrix_matches_cpu_reference・metal_paged_attention_tolerance_constants_pinned（いずれも crates/backend-*/tests/paged_kv_real_device.rs）
+  - facade 層（端から端まで）: crates/facade/tests/paged_attention_facade.rs の cuda_paged_attention_forward_matches_cpu_tape・metal_paged_attention_forward_matches_cpu_tape
+  - 形状マトリクスの正本: crates/backend-*/tests/common/paged_attention_judgement.rs の CASES
+- 判定: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。fandhe_ai_backend_cpu::parity::compare の CompareReport）。既定は厳密（全ステップ fail_count == 0）。baseline 非後退判定に切り替わるのは、同モジュールの BASELINES に登録済みの（case_id, step）だけで、本コミット時点の登録は 0 件。facade 層は厳密のみ（baseline に切り替えない）。
+- fail の扱い: tolerance 定数（RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD）・判定式・既存 baseline・カーネルは変えない。fail は事実（PAGED_PARITY 行）をそのまま記録して申し送る。BASELINES への追加は実機実測値だけを使い、人間承認を得た別 PR で行う（契約テスト baselines_are_empty_until_measured_and_approved の assert を同 PR で変える）。事後の緩和・ケース除外・再実行での選別はしない。
+- 実行: README.md の測定コマンドを使う。独立プロセスで 5 回実行する。合否は「5 回すべて pass で pass」。数値指標（PAGED_PARITY 行）は 5 回の中央値を記録する。カーネルは逐次縮約で決定的なので 5 回とも一致する見込みで、不一致はそれ自体を事実として記録する。
+- 同梱: .rev-stamp（実測したコミット）。ホスト名・ユーザー名・絶対パスは <cuda-node>・<metal-node>・<home> 等へマスクしてから収録する。
+- 計測中にビルドや別の GPU 負荷を並走させない。
+- 本ディレクトリには実測値をまだ 1 件も入れていない（未実測）。

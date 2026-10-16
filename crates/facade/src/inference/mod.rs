@@ -113,8 +113,9 @@
 //! `docs/facade-speculative-decoding-batching-design.md` §17（リポジトリ所有者本人の承認コメント
 //! issuecomment-6067263650 の項 1。実装記録は §18）。
 //!
-//! - [`generate_speculative`]: **Greedy・B = 1 に限る**（Greedy 以外は `Err`。サンプリング版は
-//!   公開しない）。入力は `[T]`／`[1, T]`。受理統計は返さない。先読み長 `k` は残り長 `R` に応じて
+//! - [`generate_speculative`]: **B = 1 に限る**。Greedy は token 列一致、TopK／Temperature は
+//!   speculative sampling（#3101。同一シードでも `generate` と token 列は一致しない。保証は
+//!   構成上の分布保存で、統計検定は契約外。設計記録 §20）。入力は `[T]`／`[1, T]`。受理統計は返さない。先読み長 `k` は残り長 `R` に応じて
 //!   丸められる（`R >= 2` は `min(k, R - 1)`、`R == 1` は 1 step decode）。`num_kv_layers() == 0` の
 //!   モデルは `Err` で拒否する（fail-closed）。
 //! - [`BatchScheduler`]: [`SchedulerLimits`] の 3 上限（同時実行数・待ち行列長・`max_length`）は
@@ -136,8 +137,67 @@
 //!
 //! **KV 付きモデルの渡し方**: [`generate_speculative`] には、`stateful_attention_forward_with_cache` で
 //! `caches[i]` を進める形のモデルを渡す（`num_kv_layers() > 0`。棄却時の巻き戻しは内部で行う。設計記録 §19.6）。
-//! 下の doctest は fail-closed 契約のみを示し、成功経路は結合テスト
-//! `crates/facade/tests/speculative_batching_facade.rs` が担う（成功例 doctest は #3098）。
+//! 下の doctest は、公開面だけで組んだ表引き KV モデルによる成功例（1 つ目の speculative 例。
+//! 出力は単独 `generate` と token 列が一致する）と、fail-closed 契約の例（2 つ目）を示す。
+//! 広い掃引は結合テスト `crates/facade/tests/speculative_batching_facade.rs` が担う（#3098）。
+//!
+//! ```
+//! use fandhe_ai::inference::{
+//!     AutoregressiveModel, GenerateConfig, SamplingStrategy, SpeculativeConfig, generate,
+//!     generate_speculative,
+//! };
+//! use fandhe_ai::nn::kv_cache::{KvCache, MultiheadAttentionConfig, StatefulAttention};
+//! use fandhe_ai::{AutodiffError, Tensor};
+//!
+//! const V: usize = 7;
+//!
+//! /// `caches[0]` だけを進める表引き KV モデル。logits は (直前 token, 位置) だけで決まる one-hot。
+//! /// 位置は `caches[0].seq_len()` から取るため、棄却後の巻き戻しが誤れば出力がずれる。
+//! struct Lm {
+//!     sa: StatefulAttention,
+//!     mul: usize,
+//! }
+//!
+//! impl AutoregressiveModel for Lm {
+//!     fn num_kv_layers(&self) -> usize {
+//!         1
+//!     }
+//!     fn forward_step(
+//!         &self,
+//!         new_ids: &Tensor<i32>,
+//!         caches: &mut [KvCache],
+//!     ) -> Result<Tensor<f32>, AutodiffError> {
+//!         let pos0 = caches[0].seq_len();
+//!         let tape = fandhe_ai::tape();
+//!         let table: Vec<f32> = (0..V * 4).map(|i| (i % 5) as f32 * 0.1).collect();
+//!         let emb = tape.var(&Tensor::new(table, &[V, 4]).unwrap());
+//!         let x = emb.embedding(new_ids, None)?;
+//!         tape.stateful_attention_forward_with_cache(&self.sa, &x, &mut caches[0])?;
+//!         let l = new_ids.shape()[new_ids.shape().len() - 1];
+//!         let mut out = vec![0.0f32; l * V];
+//!         for (i, &tok) in new_ids.as_slice().unwrap().iter().enumerate() {
+//!             out[i * V + (self.mul * tok as usize + pos0 + i + 1) % V] = 1.0;
+//!         }
+//!         Ok(Tensor::new(out, &[1, l, V]).unwrap())
+//!     }
+//! }
+//!
+//! let make = |mul, seed| Lm {
+//!     sa: StatefulAttention::from_config(&MultiheadAttentionConfig::new(4, 2), seed).unwrap(),
+//!     mul,
+//! };
+//! let target = make(3, 1);
+//! // 規則の違う draft（棄却が起きる）。
+//! let draft = make(2, 2);
+//!
+//! let prompt = Tensor::<i32>::new(vec![0], &[1]).unwrap();
+//! let cfg = GenerateConfig::new(6, SamplingStrategy::Greedy);
+//! let out = generate_speculative(&target, &draft, &prompt, &cfg, &SpeculativeConfig::new(2)).unwrap();
+//! // 出力は target 単独の `generate` と token 列が一致する。
+//! let alone = generate(&target, &prompt, &cfg).unwrap();
+//! assert_eq!(out.as_slice().unwrap(), alone.as_slice().unwrap());
+//! assert_eq!(out.as_slice().unwrap().len(), 6);
+//! ```
 //!
 //! ```
 //! use fandhe_ai::inference::{
@@ -286,7 +346,7 @@
 //! let r = generate_speculative(&Table, &Table, &prompt, &greedy, &spec);
 //! assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));
 //!
-//! // サンプリング版は公開しない（Greedy 以外は `Err`）。
+//! // サンプリング戦略でも `num_kv_layers() == 0` は拒否される。
 //! let topk = GenerateConfig::new(5, SamplingStrategy::TopK(2));
 //! let r = generate_speculative(&Table, &Table, &prompt, &topk, &spec);
 //! assert!(matches!(r, Err(AutodiffError::InvalidArgument(_))));

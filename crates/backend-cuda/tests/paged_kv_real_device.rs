@@ -13,6 +13,11 @@
 //! cargo test -p fandhe-ai-backend-cuda --release --test paged_kv_real_device -- --ignored --nocapture
 //! ```
 
+mod common;
+
+use common::paged_attention_judgement::{
+    CASES, PagedAttentionCase, judge, judgement_for, metric_line,
+};
 use fandhe_ai_backend_cuda::{CudaBackendOps, CudaDevice};
 use fandhe_ai_tensor_core::{BackendOps, DeviceBuffer, PagedAttentionArgs, PagedKvLayout, Tensor};
 
@@ -28,8 +33,12 @@ fn data(n: usize, seed: u64) -> Vec<f32> {
         .collect()
 }
 
-fn tensor(b: usize, l: usize, e: usize, seed: u64) -> Tensor<f32> {
-    Tensor::new(data(b * l * e, seed), &[b, l, e]).unwrap()
+fn scaled_tensor(b: usize, l: usize, e: usize, seed: u64, scale: f32) -> Tensor<f32> {
+    let d: Vec<f32> = data(b * l * e, seed)
+        .into_iter()
+        .map(|x| x * scale)
+        .collect();
+    Tensor::new(d, &[b, l, e]).unwrap()
 }
 
 /// 1 バックエンドぶんの試行（プール・ページテーブルをホストで管理する最小の owner）。
@@ -40,7 +49,9 @@ struct Run<'a> {
     k_pool: DeviceBuffer<f32>,
     v_pool: DeviceBuffer<f32>,
     tables: Vec<Vec<u32>>,
-    next: u32,
+    /// 空きブロック ID（末尾から払い出す。初期は num_blocks-1 から降順＝物理配置が論理順と逆）。
+    free: Vec<u32>,
+    input_scale: f32,
     seq_len: usize,
     batch: usize,
     heads: usize,
@@ -56,11 +67,25 @@ impl<'a> Run<'a> {
             k_pool: mem.alloc_zeroed(&shape).unwrap(),
             v_pool: mem.alloc_zeroed(&shape).unwrap(),
             tables: vec![Vec::new(); batch],
-            next: 0,
+            free: (0..layout.num_blocks as u32).collect(),
+            input_scale: 1.0,
             seq_len: 0,
             batch,
             heads,
         }
+    }
+
+    /// 長さ `new_len` へ巻き戻す（不要になったブロックは空きへ返す。プール内容は消さず
+    /// `lens` のマスクで無効化する。facade の `PagedKvCache::rewind_to` と同じ意味）。
+    fn rewind_to(&mut self, new_len: usize) {
+        assert!(new_len <= self.seq_len);
+        let keep = new_len.div_ceil(self.layout.block_size);
+        for row in &mut self.tables {
+            while row.len() > keep {
+                self.free.push(row.pop().unwrap());
+            }
+        }
+        self.seq_len = new_len;
     }
 
     /// 追記して attention を返す（ホストへ戻す）。
@@ -69,17 +94,16 @@ impl<'a> Run<'a> {
         let bs = self.layout.block_size;
         let mem = self.ops.memory_ops().unwrap();
         let (k, v, q) = (
-            tensor(self.batch, l_new, e, seed),
-            tensor(self.batch, l_new, e, seed + 1000),
-            tensor(self.batch, l_new, e, seed + 2000),
+            scaled_tensor(self.batch, l_new, e, seed, self.input_scale),
+            scaled_tensor(self.batch, l_new, e, seed + 1000, self.input_scale),
+            scaled_tensor(self.batch, l_new, e, seed + 2000, self.input_scale),
         );
         let mut slots = Vec::new();
         for b in 0..self.batch {
             for i in 0..l_new {
                 let pos = self.seq_len + i;
                 if pos.is_multiple_of(bs) {
-                    let id = (self.layout.num_blocks as u32 - 1) - self.next;
-                    self.next += 1;
+                    let id = self.free.pop().expect("pool exhausted");
                     self.tables[b].push(id);
                 }
                 slots.push(self.tables[b][pos / bs] * bs as u32 + (pos % bs) as u32);
@@ -162,4 +186,81 @@ fn single_token_attention_returns_v_row_on_real_device() {
     let got = run.step(1, 3);
     let want = data(8, 3 + 1000);
     fandhe_ai_backend_cpu::assert_parity("single token", &got, &want);
+}
+
+/// 1 ケースを実機と CPU 参照で同じ手順（追記・巻き戻し）で走らせ、ステップごとに判定する。
+/// fail は `failures` へ集め、呼び出し側が最後に 1 回 panic する
+/// （1 回の実行で全ケースの `PAGED_PARITY` 行をログに残すため）。
+fn run_case(
+    backend: &str,
+    ops: &dyn BackendOps,
+    cpu: &dyn BackendOps,
+    c: &PagedAttentionCase,
+    failures: &mut Vec<String>,
+) {
+    let layout = PagedKvLayout::new(
+        common::paged_attention_judgement::pool_blocks(c),
+        c.block_size,
+        c.embed,
+    )
+    .unwrap();
+    let mut dev = Run::new(ops, layout, c.batch, c.heads);
+    let mut r = Run::new(cpu, layout, c.batch, c.heads);
+    dev.input_scale = c.input_scale;
+    r.input_scale = c.input_scale;
+    for (si, &l) in c.steps.iter().enumerate() {
+        let got = dev.step(l, 7 + si as u64);
+        let want = r.step(l, 7 + si as u64);
+        let report = fandhe_ai_backend_cpu::compare(&got, &want).expect("length");
+        let j = judgement_for(c.id, si);
+        println!("{}", metric_line(backend, c.id, si, &report, j));
+        if let Err(e) = judge(&format!("{backend} {} step={si}", c.id), &report, j) {
+            failures.push(e);
+        }
+        if let Some((_, new_len)) = c.rewind.filter(|&(a, _)| a == si) {
+            dev.rewind_to(new_len);
+            r.rewind_to(new_len);
+        }
+    }
+}
+
+/// 形状マトリクス全件の CPU 参照一致（既定は統一複合判定のゼロ fail。tolerance は不変）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。docs/perf/logs/paged-attention-parity-3113/README.md 参照"]
+fn cuda_paged_attention_matrix_matches_cpu_reference() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let ops = CudaBackendOps::new(device.ordinal());
+    let cpu = fandhe_ai_backend_cpu::CpuBackendOps::new();
+    let mut failures = Vec::new();
+    for c in CASES {
+        run_case("cuda", &ops, &cpu, c, &mut failures);
+    }
+    assert!(
+        failures.is_empty(),
+        "{} 件のケースが判定を満たさない:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// 実機ログ側にも tolerance 定数の固定の証跡を残す（契約テストと重複するが実機回の記録用）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。docs/perf/logs/paged-attention-parity-3113/README.md 参照"]
+fn cuda_paged_attention_tolerance_constants_pinned() {
+    assert_eq!(fandhe_ai_backend_cpu::RELATIVE_TOLERANCE, 1e-3);
+    assert_eq!(fandhe_ai_backend_cpu::ABSOLUTE_RESCUE_THRESHOLD, 1e-5);
+}
+
+/// 実機なしで動く自己検査: マトリクス駆動部（`Run`・巻き戻し・ブロック払い出し・各ケースの
+/// 引数検証）が CPU 同士で破綻せず、判定が Strict で通ること。実機テストの配線ミスを CI で拾う。
+#[test]
+fn matrix_harness_runs_on_cpu_against_cpu() {
+    let cpu_a = fandhe_ai_backend_cpu::CpuBackendOps::new();
+    let cpu_b = fandhe_ai_backend_cpu::CpuBackendOps::new();
+    let mut failures = Vec::new();
+    for c in CASES {
+        run_case("cpu-selfcheck", &cpu_a, &cpu_b, c, &mut failures);
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }

@@ -1,5 +1,5 @@
-//! greedy 版 speculative decoding の内部実装（イシュー #2886。設計の正は
-//! `docs/facade-speculative-decoding-batching-design.md` §3・§4・§4.1・§6.1・§7・§10）。
+//! speculative decoding の内部実装（greedy 版はイシュー #2886、サンプリング版は #3101。
+//! 設計の正は `docs/facade-speculative-decoding-batching-design.md` §3・§4・§4.1・§6.1・§7・§10・§20）。
 //!
 //! # 役割
 //!
@@ -13,8 +13,10 @@
 //! - **facade 公開済み**: イシュー #2934 で `fandhe_ai::inference` へ純再エクスポート
 //!   （承認根拠・公開形は設計記録 §17。`docs/compat-api-scope.md` §5.1 S1）
 //! - **B = 1 限定**: 全系列の `S_cached` が共通である前提（`docs/kv-cache-design.md` §7）
-//! - **Greedy のみ**: サンプリング版は設計 §10 論点 1（未承認）でブロック中。
-//!   黙って greedy へ落とさず `InvalidArgument` で拒否する
+//! - **サンプリング版（#3101。設計記録 §20）**: `TopK`／`Temperature` は標準の
+//!   speculative sampling（受理確率 `min(1, p/q)`・棄却時は残差 `max(0, p-q)` から再抽出・
+//!   全受理時は bonus）。確率計算はホスト `f64`、乱数は `Generator::new(config.seed)` の
+//!   独立インスタンスだけで、グローバル RNG は消費しない
 //! - **`num_kv_layers() == 0` のモデルは対象外**: 設計 §10 論点 3 が決まるまで拒否する
 //!   （`kv_rewind` と同じ扱い）
 //! - **token 列は `generate` と bit 一致するとは限らない**: 検証 forward（長さ
@@ -30,8 +32,10 @@
 //! 丁度 `max_length` に収まり、切り捨てが起きない）。追加トークンは必ず検証
 //! forward の logits から決め、巻き戻し後の再 forward の logits は捨てる。
 //!
-//! 乱数は使わない（グローバル RNG も消費しない）。
+//! Greedy は乱数を使わない。サンプリング版も独立 `Generator`（xorshift64*。非暗号。
+//! 生成 token をセキュリティ用途に使わない。OWASP A02）だけを使う。
 
+use fandhe_ai_tensor_core::rng::Generator;
 use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
@@ -40,7 +44,7 @@ use crate::nn::KvCache;
 use super::kv_rewind::KvSnapshot;
 use super::{
     AutoregressiveModel, GenerateConfig, SamplingStrategy, build_output, greedy_argmax, kv_rewind,
-    validate_forward_step_output,
+    rng_error_to_autodiff, sampling_weights_f32, validate_forward_step_output,
 };
 
 /// [`generate_speculative`] の設定（先読み長 `k`）。`#[non_exhaustive]` と derive は
@@ -61,13 +65,14 @@ impl SpeculativeConfig {
 }
 
 /// `logits`（`[1, l_new, vocab]`。形状は `validate_forward_step_output` で検証済み）の
-/// 位置 `pos` から greedy にトークンを選ぶ。非有限値を含む行は拒否する。
-fn greedy_token_at(
+/// 位置 `pos` の行を取り出す。非有限値を含む行は拒否する。greedy／サンプリング両版が
+/// 「トークン選択に使う位置だけ」検査するための共通入口。
+fn row_at(
     logits: &Tensor<f32>,
     pos: usize,
     l_new: usize,
     vocab: usize,
-) -> Result<i32, AutodiffError> {
+) -> Result<Vec<f32>, AutodiffError> {
     let contiguous = logits.contiguous();
     let data = contiguous.host_slice();
     // pos < l_new かつ data.len() == l_new * vocab は呼び出し元の shape 検証と
@@ -87,9 +92,101 @@ fn greedy_token_at(
             "generate_speculative: logits に非有限値が含まれる".to_string(),
         ));
     }
+    Ok(row.to_vec())
+}
+
+/// 位置 `pos` から greedy にトークンを選ぶ。
+fn greedy_token_at(
+    logits: &Tensor<f32>,
+    pos: usize,
+    l_new: usize,
+    vocab: usize,
+) -> Result<i32, AutodiffError> {
+    let row = row_at(logits, pos, l_new, vocab)?;
     // vocab <= i32::MAX は validate_forward_step_output が検証済みなので、
     // 添字の `as i32` は折り返さない。
-    Ok(greedy_argmax(row) as i32)
+    Ok(greedy_argmax(&row) as i32)
+}
+
+/// f32 重みを index 順の `f64` 総和で確率へ正規化する（`Generator::multinomial` の
+/// 累積と同じ規則。設計記録 §20.3。`p`・`q` を同じ規則で正規化し生の重みを確率として
+/// 扱わない）。総和が 0 以下・非有限、または要素が負・非有限なら `Err`。
+fn normalize_f64(weights: &[f32]) -> Result<Vec<f64>, AutodiffError> {
+    let mut sum = 0.0f64;
+    for &w in weights {
+        if !w.is_finite() || w < 0.0 {
+            return Err(AutodiffError::InvalidArgument(
+                "generate_speculative: 確率重みが負または非有限".to_string(),
+            ));
+        }
+        sum += w as f64;
+    }
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(AutodiffError::InvalidArgument(
+            "generate_speculative: 確率重みの総和が 0 以下または非有限".to_string(),
+        ));
+    }
+    Ok(weights.iter().map(|&w| w as f64 / sum).collect())
+}
+
+/// 受理確率 `min(1, p(x)/q(x))` を `[0, 1]` に収めて `f32` で返す。`q(x) <= 0`
+/// （draft が引いたトークンの確率が 0 = 内部不整合）や非有限は `Err`
+/// （RNG を引く前に fail-closed）。`p == q` なら厳密に `1.0`。
+fn acceptance_prob_f32(p_x: f64, q_x: f64) -> Result<f32, AutodiffError> {
+    if !q_x.is_finite() || q_x <= 0.0 || !p_x.is_finite() || p_x < 0.0 {
+        return Err(AutodiffError::InvalidArgument(
+            "generate_speculative: 受理確率の計算に使う q(x) が 0 以下、または確率が非有限"
+                .to_string(),
+        ));
+    }
+    Ok((p_x / q_x).clamp(0.0, 1.0) as f32)
+}
+
+/// 残差分布 `max(0, p - q) / Z` を `multinomial` へ渡す f32 重みで返す。`Z <= 0`
+/// または非有限（`p == q` 等）は `Err`。非支持位置（`p_i <= q_i`）は厳密に `0.0`。
+fn residual_weights_f32(p: &[f64], q: &[f64]) -> Result<Vec<f32>, AutodiffError> {
+    if p.len() != q.len() {
+        return Err(AutodiffError::InvalidArgument(
+            "generate_speculative: p と q の語彙長が不一致（内部不整合）".to_string(),
+        ));
+    }
+    let r: Vec<f64> = p.iter().zip(q).map(|(&a, &b)| (a - b).max(0.0)).collect();
+    let sum: f64 = r.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(AutodiffError::InvalidArgument(
+            "generate_speculative: 残差分布の総和が 0 以下または非有限".to_string(),
+        ));
+    }
+    Ok(r.iter().map(|&v| (v / sum) as f32).collect())
+}
+
+/// `weights`（長さ `vocab`）から `multinomial` で 1 トークン抽出する（RNG を 1 回消費）。
+fn sample_from(
+    rng: &mut Generator,
+    weights: Vec<f32>,
+    context: &str,
+) -> Result<i32, AutodiffError> {
+    let n = weights.len();
+    let t = Tensor::new(weights, &[1, n]).map_err(AutodiffError::Shape)?;
+    let out = rng
+        .multinomial(&t, 1, true)
+        .map_err(|e| rng_error_to_autodiff(context, e))?;
+    out.contiguous()
+        .host_slice()
+        .first()
+        .copied()
+        .ok_or_else(|| {
+            AutodiffError::InvalidArgument("generate_speculative: multinomial が空を返した".into())
+        })
+}
+
+/// 受理確率 `a` で Bernoulli 判定する（RNG を 1 回消費）。`true` なら受理。
+fn accept_draw(rng: &mut Generator, a: f32) -> Result<bool, AutodiffError> {
+    let t = Tensor::new(vec![a], &[1]).map_err(AutodiffError::Shape)?;
+    let out = rng
+        .bernoulli(&t)
+        .map_err(|e| rng_error_to_autodiff("受理判定", e))?;
+    Ok(out.contiguous().host_slice().first().copied() == Some(1.0))
 }
 
 /// `ids`（長さ `L`）を `[1, L]` で forward し、shape と語彙サイズを検証する。
@@ -143,11 +240,61 @@ fn rewind_to<M: AutoregressiveModel + ?Sized>(
     }
 }
 
-/// greedy 版 speculative decoding。`target` を正とする生成を、`draft` の先読みと
+/// サンプリング版の検証（設計記録 §20.4）。位置 `i = 0..k_eff` で `a = min(1, p/q)` を求め
+/// （RNG を引く前に検査）、bernoulli が 0 なら棄却して残差から補正トークンを抽出する。
+/// 全受理なら位置 `k_eff` の重みから bonus を抽出する。`(n_acc, 追加トークン)` を返す。
+fn verify_sampling(
+    rng: &mut Generator,
+    logits: &Tensor<f32>,
+    drafts: &[i32],
+    q_ws: &[Vec<f32>],
+    config: &GenerateConfig,
+    vocab: usize,
+) -> Result<(usize, i32), AutodiffError> {
+    let k_eff = drafts.len();
+    let internal =
+        || AutodiffError::InvalidArgument("generate_speculative: draft 記録の不整合".to_string());
+    for (i, &d) in drafts.iter().enumerate() {
+        let p_w = sampling_weights_f32(&row_at(logits, i, k_eff + 1, vocab)?, config);
+        let q_w = q_ws.get(i).ok_or_else(internal)?;
+        let p = normalize_f64(&p_w)?;
+        let q = normalize_f64(q_w)?;
+        let d_idx = usize::try_from(d).map_err(|_| internal())?;
+        let a = acceptance_prob_f32(
+            *p.get(d_idx).ok_or_else(internal)?,
+            *q.get(d_idx).ok_or_else(internal)?,
+        )?;
+        if accept_draw(rng, a)? {
+            continue;
+        }
+        let residual = residual_weights_f32(&p, &q)?;
+        let tok = sample_from(rng, residual, "残差サンプリング")?;
+        return Ok((i, tok));
+    }
+    let bonus_w = sampling_weights_f32(&row_at(logits, k_eff, k_eff + 1, vocab)?, config);
+    let tok = sample_from(rng, bonus_w, "bonus サンプリング")?;
+    Ok((k_eff, tok))
+}
+
+/// speculative decoding（Greedy／TopK／Temperature）。`target` を正とする生成を、`draft` の先読みと
 /// target の一括検証で進める。`input_ids` は `[T]` または `[1, T]`（rank 1 なら出力も
 /// rank 1）。出力は `[max_length]` または `[1, max_length]`。
 ///
 /// 受理統計は返さない。`draft == target`（同一インスタンス可）でも動作する。
+///
+/// # サンプリング版（#3101。設計記録 §20）
+///
+/// - `TopK`／`Temperature` は標準の speculative sampling（受理確率 `min(1, p/q)`・棄却時は
+///   残差 `max(0, p-q)` から再抽出・全受理時は bonus）。確率は `f64`、乱数は
+///   `Generator::new(config.seed)` の独立インスタンスのみで、グローバル RNG は消費しない
+/// - **同一シードでも `generate` と token 列は一致しない**（RNG の消費順が構成上異なる）。
+///   保証するのは受理棄却と残差再抽出による target 分布の保存（理論上の構成）で、
+///   統計検定は契約外。Greedy は従前どおり、形状非依存の logits を返すモデルで token 列一致
+/// - 再現性は同一実行環境に限る（プラットフォーム間の bit 一致は保証しない）
+/// - RNG 消費順: prefill 末尾で multinomial 1 → ラウンドごとに draft multinomial × `k_eff`
+///   → 検証位置ごとに bernoulli 1（最初の棄却まで）→ 棄却時は残差 multinomial 1、
+///   全受理時は bonus multinomial 1 → 最終 1 step で multinomial 1
+/// - 生成 token をセキュリティ用途に使わない（xorshift64*。非暗号）
 ///
 /// # 対象モデルの契約
 ///
@@ -168,21 +315,22 @@ fn rewind_to<M: AutoregressiveModel + ?Sized>(
 /// `forward_step` は呼ばれない）。
 ///
 /// 1. `config` が矛盾している
-/// 2. `config.strategy` が `Greedy` 以外
-/// 3. `spec.k == 0`
-/// 4. `input_ids` の rank が 1／2 以外
-/// 5. `T == 0`
-/// 6. `B != 1`（`B == 0` を含む）
-/// 7. `config.max_length < T`
-/// 8. `B * max_length` の `usize` オーバーフロー、または出力バッファが
+/// 2. `spec.k == 0`
+/// 3. `input_ids` の rank が 1／2 以外
+/// 4. `T == 0`
+/// 5. `B != 1`（`B == 0` を含む）
+/// 6. `config.max_length < T`
+/// 7. `B * max_length` の `usize` オーバーフロー、または出力バッファが
 ///    `isize::MAX` バイトを超える
-/// 9. `target` または `draft` の `num_kv_layers() == 0`
+/// 8. `target` または `draft` の `num_kv_layers() == 0`
 ///
 /// 以降は forward の戻り shape の不整合、語彙サイズの target／draft 間・ステップ間
 /// 不一致、KV キャッシュ長の不整合、トークン選択に使う位置（prefill 末尾・draft の
 /// 各 decode・検証 forward の受理判定に使う位置・最終 1 step）の logits の非有限値、
 /// およびモデルが返すエラー（そのまま伝播）で `Err` を返す。再 forward・補正 decode の
-/// logits と、使わない検証位置の logits は検査しない。
+/// logits と、使わない検証位置の logits は検査しない。サンプリング時は加えて、
+/// `q(x) <= 0`・確率重みの総和 0／非有限・残差和 0／非有限・`RngError` を
+/// `InvalidArgument` で返す（RNG を引く前、または引いた直後に fail-closed）。
 pub fn generate_speculative<T, D>(
     target: &T,
     draft: &D,
@@ -195,12 +343,6 @@ where
     D: AutoregressiveModel + ?Sized,
 {
     config.validate()?;
-    if !matches!(config.strategy, SamplingStrategy::Greedy) {
-        return Err(AutodiffError::InvalidArgument(
-            "generate_speculative: SamplingStrategy::Greedy のみ対応（サンプリング版は未承認）"
-                .to_string(),
-        ));
-    }
     if spec.k == 0 {
         return Err(AutodiffError::InvalidArgument(
             "generate_speculative: SpeculativeConfig.k は 1 以上である必要がある".to_string(),
@@ -280,12 +422,18 @@ where
         }));
     }
 
-    row.push(greedy_token_at(
-        &t_logits,
-        prompt_len - 1,
-        prompt_len,
-        vocab,
-    )?);
+    // Greedy は RNG を作らない（消費ゼロを構造で明確にする）。サンプリングは呼び出しごとに
+    // 独立インスタンス 1 個（グローバル RNG 非消費。早期 return より後で作る）。
+    let mut rng: Option<Generator> =
+        (!matches!(config.strategy, SamplingStrategy::Greedy)).then(|| Generator::new(config.seed));
+    let first = match rng.as_mut() {
+        None => greedy_token_at(&t_logits, prompt_len - 1, prompt_len, vocab)?,
+        Some(g) => {
+            let r = row_at(&t_logits, prompt_len - 1, prompt_len, vocab)?;
+            sample_from(g, sampling_weights_f32(&r, config), "prefill サンプリング")?
+        }
+    };
+    row.push(first);
     let mut cur_len = prompt_len + 1;
 
     while cur_len < max_length {
@@ -294,7 +442,18 @@ where
 
         if remaining == 1 {
             let logits = forward_checked(target, &[last], &mut target_caches, vocab)?;
-            row.push(greedy_token_at(&logits, 0, 1, vocab)?);
+            let tok = match rng.as_mut() {
+                None => greedy_token_at(&logits, 0, 1, vocab)?,
+                Some(g) => {
+                    let r = row_at(&logits, 0, 1, vocab)?;
+                    sample_from(
+                        g,
+                        sampling_weights_f32(&r, config),
+                        "最終 step サンプリング",
+                    )?
+                }
+            };
+            row.push(tok);
             break;
         }
 
@@ -305,10 +464,20 @@ where
         let snap_d = KvSnapshot::capture(draft, &draft_caches)?;
         check_snapshot_len(&snap_d, cur_len)?;
         let mut drafts: Vec<i32> = Vec::with_capacity(k_eff);
+        // サンプリング時は draft が引いたときの f32 重み `q_w` を保存する（§20.3）。
+        let mut q_ws: Vec<Vec<f32>> = Vec::with_capacity(k_eff);
         let mut x = last;
         for _ in 0..k_eff {
             let logits = forward_checked(draft, &[x], &mut draft_caches, vocab)?;
-            x = greedy_token_at(&logits, 0, 1, vocab)?;
+            match rng.as_mut() {
+                None => x = greedy_token_at(&logits, 0, 1, vocab)?,
+                Some(g) => {
+                    let r = row_at(&logits, 0, 1, vocab)?;
+                    let w = sampling_weights_f32(&r, config);
+                    x = sample_from(g, w.clone(), "draft サンプリング")?;
+                    q_ws.push(w);
+                }
+            }
             drafts.push(x);
         }
 
@@ -320,13 +489,19 @@ where
         verify_ids.extend_from_slice(&drafts);
         let logits = forward_checked(target, &verify_ids, &mut target_caches, vocab)?;
 
-        let mut n_acc = 0usize;
-        let correction = loop {
-            let g = greedy_token_at(&logits, n_acc, k_eff + 1, vocab)?;
-            match drafts.get(n_acc) {
-                Some(&d) if d == g => n_acc += 1,
-                _ => break g,
+        let (n_acc, correction) = match rng.as_mut() {
+            None => {
+                let mut n_acc = 0usize;
+                let correction = loop {
+                    let g = greedy_token_at(&logits, n_acc, k_eff + 1, vocab)?;
+                    match drafts.get(n_acc) {
+                        Some(&d) if d == g => n_acc += 1,
+                        _ => break g,
+                    }
+                };
+                (n_acc, correction)
             }
+            Some(g) => verify_sampling(g, &logits, &drafts, &q_ws, config, vocab)?,
         };
 
         row.extend_from_slice(&drafts[..n_acc]);
@@ -627,10 +802,6 @@ mod tests {
     fn rejects_invalid_inputs_before_any_forward() {
         let (t, d) = pair();
         let ids = prompt(1, 3, false);
-        let topk = GenerateConfig::new(8, SamplingStrategy::TopK(2));
-        assert_rejected_without_forward(&t, &d, &ids, &topk, 2, "Greedy");
-        let temp = GenerateConfig::new(8, SamplingStrategy::Temperature(0.5));
-        assert_rejected_without_forward(&t, &d, &ids, &temp, 2, "Greedy");
         assert_rejected_without_forward(&t, &d, &ids, &cfg(8), 0, "SpeculativeConfig.k");
         let bad = cfg(8).with_temperature(0.5);
         assert_rejected_without_forward(&t, &d, &ids, &bad, 2, "GenerateConfig");
@@ -672,7 +843,7 @@ mod tests {
         let bad = cfg(8).with_temperature(0.5);
         assert_rejected_without_forward(&t, &d, &b2, &bad, 2, "GenerateConfig");
         let topk = GenerateConfig::new(8, SamplingStrategy::TopK(2));
-        assert_rejected_without_forward(&t, &d, &b2, &topk, 0, "Greedy");
+        assert_rejected_without_forward(&t, &d, &b2, &topk, 0, "SpeculativeConfig.k");
         let rank3 = Tensor::new(vec![0i32; 3], &[1, 1, 3]).unwrap();
         let e =
             generate_speculative(&t, &d, &rank3, &cfg(8), &SpeculativeConfig::new(0)).unwrap_err();
@@ -788,5 +959,197 @@ mod tests {
         let e =
             generate_speculative(&t, &d, &ids, &cfg(10), &SpeculativeConfig::new(3)).unwrap_err();
         assert!(err_text(e).contains("不変条件"));
+    }
+
+    // --- サンプリング版（#3101。設計記録 §20 の C1・C3〜C6） ----------------------
+
+    fn topk_cfg(max_length: usize, k: usize) -> GenerateConfig {
+        GenerateConfig::new(max_length, SamplingStrategy::TopK(k)).with_seed(7)
+    }
+    fn temp_cfg(max_length: usize) -> GenerateConfig {
+        GenerateConfig::new(max_length, SamplingStrategy::Temperature(0.8)).with_seed(11)
+    }
+
+    /// 独立した f64 参照実装で正規化する（本体の `normalize_f64` と別に書く）。
+    fn ref_normalize(w: &[f32]) -> Vec<f64> {
+        let sum: f64 = w.iter().map(|&x| x as f64).sum();
+        w.iter().map(|&x| x as f64 / sum).collect()
+    }
+
+    #[test]
+    fn c3_pure_functions_match_f64_reference() {
+        use fandhe_ai_tensor_core::tolerance::composite_close_f32;
+        let row_p = [0.5f32, 1.5, -0.3, 2.0, 0.1];
+        let row_q = [1.0f32, 0.2, 0.7, -1.0, 0.4];
+        for temperature in [0.5f32, 1.0, 2.0] {
+            for strategy in [
+                SamplingStrategy::Temperature(temperature),
+                SamplingStrategy::TopK(2),
+                SamplingStrategy::TopK(3),
+            ] {
+                let c = GenerateConfig::new(8, strategy).with_temperature(temperature);
+                let pw = sampling_weights_f32(&row_p, &c);
+                let qw = sampling_weights_f32(&row_q, &c);
+                let p = normalize_f64(&pw).unwrap();
+                let q = normalize_f64(&qw).unwrap();
+                assert_eq!(p, ref_normalize(&pw));
+                for x in 0..row_p.len() {
+                    if q[x] <= 0.0 {
+                        assert!(acceptance_prob_f32(p[x], q[x]).is_err());
+                        continue;
+                    }
+                    let a = acceptance_prob_f32(p[x], q[x]).unwrap();
+                    let want = (p[x] / q[x]).min(1.0) as f32;
+                    assert!(composite_close_f32(a, want));
+                }
+                if let Ok(res) = residual_weights_f32(&p, &q) {
+                    let raw: Vec<f64> = p.iter().zip(&q).map(|(a, b)| (a - b).max(0.0)).collect();
+                    let z: f64 = raw.iter().sum();
+                    for (i, &r) in res.iter().enumerate() {
+                        assert!(composite_close_f32(r, (raw[i] / z) as f32));
+                        if p[i] <= q[i] {
+                            assert_eq!(r, 0.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn c3_identical_weights_accept_exactly_and_degenerate_inputs_err() {
+        let w = [0.1f32, 0.2, 0.3, 0.4];
+        let p = normalize_f64(&w).unwrap();
+        for &px in &p {
+            assert_eq!(acceptance_prob_f32(px, px).unwrap(), 1.0);
+        }
+        // p == q では残差和が 0
+        assert!(residual_weights_f32(&p, &p).is_err());
+        assert!(residual_weights_f32(&p, &p[..2]).is_err());
+        assert!(acceptance_prob_f32(0.3, 0.0).is_err());
+        assert!(acceptance_prob_f32(0.3, f64::NAN).is_err());
+        assert!(acceptance_prob_f32(f64::NAN, 0.3).is_err());
+        assert!(acceptance_prob_f32(-0.1, 0.3).is_err());
+        assert!(normalize_f64(&[0.0, 0.0]).is_err());
+        assert!(normalize_f64(&[f32::NAN, 1.0]).is_err());
+        assert!(normalize_f64(&[-1.0, 2.0]).is_err());
+        // p が q の一部だけ上回る: 非支持位置は厳密 0
+        let r = residual_weights_f32(&[0.7, 0.3, 0.0], &[0.2, 0.3, 0.5]).unwrap();
+        assert_eq!(r, vec![1.0f32, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn c1_sampling_is_deterministic_for_same_seed() {
+        for config in [temp_cfg(14), topk_cfg(14, 3)] {
+            for draft_next in [target_next as NextFn, wrong_next, mixed_next] {
+                let run = || {
+                    let t = TableModel::new(1, target_next, Fault::None);
+                    let d = TableModel::new(1, draft_next, Fault::None);
+                    generate_speculative(
+                        &t,
+                        &d,
+                        &prompt(1, 3, true),
+                        &config,
+                        &SpeculativeConfig::new(3),
+                    )
+                    .unwrap()
+                };
+                let (a, b) = (run(), run());
+                assert_eq!(a.shape(), &[14]);
+                assert_eq!(vals(&a), vals(&b));
+            }
+        }
+    }
+
+    #[test]
+    fn c4_identical_draft_accepts_everything() {
+        for config in [temp_cfg(12), topk_cfg(12, 3)] {
+            for layers in [1, 2] {
+                for rank1 in [true, false] {
+                    let target = TableModel::new(layers, target_next, Fault::None);
+                    let draft = TableModel::new(layers, target_next, Fault::None);
+                    let ids = prompt(1, 2, rank1);
+                    generate_speculative(
+                        &target,
+                        &draft,
+                        &ids,
+                        &config,
+                        &SpeculativeConfig::new(3),
+                    )
+                    .unwrap();
+                    // prefill 1 + 検証 2 ラウンド + 最終 1 step（再 forward 0 回）
+                    assert_eq!(target.calls(), 4);
+                }
+            }
+        }
+        // 同一インスタンスでも動く
+        let m = TableModel::new(1, target_next, Fault::None);
+        generate_speculative(
+            &m,
+            &m,
+            &prompt(1, 2, true),
+            &temp_cfg(10),
+            &SpeculativeConfig::new(2),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn c5_top_k_one_matches_greedy() {
+        for layers in [1, 2] {
+            for draft_next in [target_next as NextFn, wrong_next, mixed_next] {
+                for (t, max, k) in [(3, 12, 1), (2, 12, 3), (3, 6, 8), (3, 4, 8), (3, 5, 8)] {
+                    let ids = prompt(1, t, true);
+                    let run = |config: &GenerateConfig| {
+                        let tg = TableModel::new(layers, target_next, Fault::None);
+                        let dr = TableModel::new(layers, draft_next, Fault::None);
+                        generate_speculative(&tg, &dr, &ids, config, &SpeculativeConfig::new(k))
+                            .unwrap()
+                    };
+                    let sampled = run(&topk_cfg(max, 1));
+                    assert_eq!(vals(&sampled), vals(&run(&cfg(max))));
+                    assert_eq!(vals(&sampled), expected(&vals(&ids), max));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn c6_sampling_fails_closed() {
+        let ids = prompt(1, 3, false);
+        // top_k > vocab は target prefill の後・draft prefill の前
+        let (t, d) = pair();
+        let e = generate_speculative(
+            &t,
+            &d,
+            &ids,
+            &topk_cfg(8, V + 1),
+            &SpeculativeConfig::new(2),
+        )
+        .unwrap_err();
+        assert!(matches!(e, AutodiffError::InvalidArgument(_)));
+        assert_eq!((t.calls(), d.calls()), (1, 0));
+        // 語彙不一致
+        let t = TableModel::new(1, target_next, Fault::None);
+        let d = TableModel::new(1, target_next, Fault::BadVocab);
+        let e = generate_speculative(&t, &d, &ids, &temp_cfg(8), &SpeculativeConfig::new(2))
+            .unwrap_err();
+        assert!(matches!(
+            e,
+            AutodiffError::Shape(ShapeError::ShapeMismatch { .. })
+        ));
+        // k == 0 は forward 前
+        let (t, d) = pair();
+        assert_rejected_without_forward(&t, &d, &ids, &temp_cfg(8), 0, "SpeculativeConfig.k");
+        // 使う位置の NaN は Err
+        let ids1 = prompt(1, 2, true);
+        let run = |t: TableModel, d: TableModel| {
+            generate_speculative(&t, &d, &ids1, &temp_cfg(10), &SpeculativeConfig::new(3))
+        };
+        let ok = || TableModel::new(1, target_next, Fault::None);
+        let nan = |call, idx| TableModel::new(1, target_next, Fault::NanAt { call, idx });
+        assert!(run(nan(1, 1), ok()).is_err());
+        assert!(run(ok(), nan(2, 0)).is_err());
+        assert!(run(nan(2, 0), ok()).is_err());
     }
 }
