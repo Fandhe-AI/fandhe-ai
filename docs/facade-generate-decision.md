@@ -532,6 +532,8 @@ facade のみで KV キャッシュを使うモデルは `RefCell<StatefulAttent
 
 → #3095 追記: 到達経路は `Tape::stateful_attention_forward_with_cache`（`StatefulAttention::forward_with_external_cache` への薄い委譲）で決定した。`KvCache` の公開メソッドは増やさない。公開形・不変条件は `docs/facade-speculative-decoding-batching-design.md` §19 を正とし、実装は #3096。
 
+→ #3097 追記: 上記の「facade だけの KV 付きモデルは `RefCell<StatefulAttention>` 形」という rustdoc の既知の制限は解消した（`inference` モジュール doc を `stateful_attention_forward_with_cache` で `caches` を進める形へ更新。`docs/facade-speculative-decoding-batching-design.md` §23）。
+
 ### 17.5 #2576 への申し送り
 
 正ガードの全数インベントリ化・doctest 存在検査、`docs/compat-api-scope.md` §5 の適用記録、
