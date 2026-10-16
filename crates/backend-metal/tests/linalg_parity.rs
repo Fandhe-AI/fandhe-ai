@@ -13,6 +13,11 @@
 //! デバイス不在は型付きエラーで許容）。属性なしテストはデバイス非接触のゲート・入力検証のみ。
 //! parity テストはゲート ON で `Unsupported` を受けたら「起動が結線されていない」として
 //! fail させる（green と取り違えない）。実機の数値一致実測は #3139。
+//!
+//! #3139 の判定: 入力集合の正本は `linalg_parity_inputs.rs`（κ₂ ≤ 1e3 は `linalg_parity_inputs_guard.rs` が
+//! 検査）。`assert_parity` を fail 0 件で厳密に適用し、tolerance・baseline 方式は使わない（決定記録 §5）。
+//! 1e±20 倍の QR は絶対誤差の救済（1e-5）で自明 pass しうるため、finite・R 対角が 0 でないこと・
+//! 倍率で正規化した R の parity も追加で assert する（判定は厳しくなる方向のみ）。
 
 #![cfg(target_os = "macos")]
 
@@ -22,8 +27,13 @@ use fandhe_ai_backend_cpu::{CpuBackendOps, assert_parity};
 use fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled;
 use fandhe_ai_backend_metal::linalg_kernel::MetalLinalg;
 use fandhe_ai_backend_metal::{MetalBackendOps, MetalContext};
+use fandhe_ai_tensor_core::BackendOps;
 use fandhe_ai_tensor_core::device::BackendError;
-use fandhe_ai_tensor_core::{BackendOps, Tensor};
+
+#[path = "linalg_parity_inputs.rs"]
+mod inputs;
+
+use inputs::*;
 
 static GATE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -44,28 +54,6 @@ impl Drop for GateOn<'_> {
     fn drop(&mut self) {
         set_gpu_linalg_enabled(false);
     }
-}
-
-fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    Tensor::new(data, shape).expect("valid tensor")
-}
-
-fn s(x: &Tensor<f32>) -> Vec<f32> {
-    x.contiguous().as_slice().expect("slice").to_vec()
-}
-
-fn spd(n: usize) -> Tensor<f32> {
-    let mut d = vec![0.0f32; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            d[i * n + j] = if i == j {
-                n as f32 + 1.0
-            } else {
-                1.0 / (1.0 + (i as f32 - j as f32).abs())
-            };
-        }
-    }
-    t(d, &[n, n])
 }
 
 fn ops() -> MetalBackendOps {
@@ -210,42 +198,25 @@ fn expect_launch_or_fail<T>(r: Result<T, BackendError>, what: &str) -> T {
     }
 }
 
-/// 決定記録 §5 の入力集合: 対角優位行列（LU 系）・SPD 行列（cholesky）を等倍・1e20 倍・
-/// 1e-20 倍した行列。スケール倍した入力は det が f32 範囲を超えうるため det だけ別扱い。
-fn scaled(a: &Tensor<f32>, factor: f32) -> Tensor<f32> {
-    let n = a.shape()[0];
-    t(s(a).iter().map(|v| v * factor).collect(), &[n, n])
-}
-
-fn diag_dominant(n: usize) -> Tensor<f32> {
-    let mut d = vec![0.0f32; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            d[i * n + j] = if i == j {
-                2.0 * n as f32
-            } else {
-                (((i * 7 + j * 3) % 5) as f32 - 2.0) / 2.0
-            };
-        }
-    }
-    t(d, &[n, n])
-}
-
 #[test]
 #[ignore = "Apple Silicon 実機が必要"]
 fn cholesky_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cpu = CpuBackendOps::new();
-    for n in [1usize, 2, 8, 17, 64] {
-        for factor in [1.0f32, 1e20, 1e-20] {
-            let a = scaled(&spd(n), factor);
-            let got = expect_launch_or_fail(ops().linalg_cholesky(&a), "cholesky");
-            assert_parity(
-                &format!("cholesky n={n} scale={factor:e}"),
-                &s(&got),
-                &s(&cpu.linalg_cholesky(&a).expect("cpu")),
-            );
+    let mut cases: Vec<(String, _)> = Vec::new();
+    for n in SIZES {
+        for factor in SCALES {
+            cases.push((format!("n={n} scale={factor:e}"), scaled(&spd(n), factor)));
         }
+    }
+    cases.push(("eye2 1e20".into(), eye2_scaled(EYE2_SCALE)));
+    for (label, a) in cases {
+        let got = expect_launch_or_fail(ops().linalg_cholesky(&a), "cholesky");
+        assert_parity(
+            &format!("cholesky {label}"),
+            &s(&got),
+            &s(&cpu.linalg_cholesky(&a).expect("cpu")),
+        );
     }
 }
 
@@ -254,26 +225,37 @@ fn cholesky_matches_cpu_on_device() {
 fn lu_family_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cpu = CpuBackendOps::new();
-    for n in [1usize, 2, 8, 17, 64] {
-        for factor in [1.0f32, 1e20, 1e-20] {
-            let a = scaled(&diag_dominant(n), factor);
-            let got = expect_launch_or_fail(ops().linalg_inv(&a), "inv");
-            assert_parity(
-                &format!("inv n={n} scale={factor:e}"),
-                &s(&got),
-                &s(&cpu.linalg_inv(&a).expect("cpu")),
-            );
-            for k in [1usize, 3] {
-                let b = t((0..n * k).map(|i| (i % 7) as f32 - 3.0).collect(), &[n, k]);
-                let got = expect_launch_or_fail(ops().linalg_solve(&a, &b), "solve");
-                assert_parity(
-                    &format!("solve n={n} k={k} scale={factor:e}"),
-                    &s(&got),
-                    &s(&cpu.linalg_solve(&a, &b).expect("cpu")),
-                );
-            }
+    let mut cases: Vec<(String, usize, _)> = Vec::new();
+    for n in SIZES {
+        for factor in SCALES {
+            cases.push((
+                format!("n={n} scale={factor:e}"),
+                n,
+                scaled(&diag_dominant(n), factor),
+            ));
         }
-        // det は等倍のみ（スケール倍は結果が f32 範囲を超えうるため対象外）。
+    }
+    cases.push(("eye2 1e20".into(), 2, eye2_scaled(EYE2_SCALE)));
+    for (label, n, a) in cases {
+        let got = expect_launch_or_fail(ops().linalg_inv(&a), "inv");
+        assert_parity(
+            &format!("inv {label}"),
+            &s(&got),
+            &s(&cpu.linalg_inv(&a).expect("cpu")),
+        );
+        for k in [1usize, 3] {
+            let b = t((0..n * k).map(|i| (i % 7) as f32 - 3.0).collect(), &[n, k]);
+            let got = expect_launch_or_fail(ops().linalg_solve(&a, &b), "solve");
+            assert_parity(
+                &format!("solve k={k} {label}"),
+                &s(&got),
+                &s(&cpu.linalg_solve(&a, &b).expect("cpu")),
+            );
+        }
+    }
+    // det は等倍かつ n <= DET_MAX_N のみ。スケール倍は結果が f32 範囲を超えうる。n=64 も
+    // det(spd(64)) ~ 1e116 で両側 inf となり `inf - inf = NaN` で fail するため対象外（linalg_model_parity と同根拠）。
+    for n in SIZES.into_iter().filter(|&n| n <= DET_MAX_N) {
         for a in [spd(n), diag_dominant(n)] {
             let det = expect_launch_or_fail(ops().linalg_det(&a), "det");
             assert_parity(
@@ -331,14 +313,46 @@ fn status_mapping_end_to_end_on_device() {
 fn qr_matches_cpu_on_device() {
     let _g = GateOn::new(true);
     let cpu = CpuBackendOps::new();
-    for (m, n) in [(8usize, 3usize), (3, 8), (17, 17)] {
-        let d: Vec<f32> = (0..m * n)
-            .map(|i| (((i * 37 + 11) % 23) as f32 - 11.0) / 7.0)
-            .collect();
-        let a = t(d, &[m, n]);
+    let mut cases: Vec<(String, f32, _)> = Vec::new();
+    for (m, n) in QR_SHAPES {
+        for factor in SCALES {
+            cases.push((
+                format!("{m}x{n} scale={factor:e}"),
+                factor,
+                scaled(&qr_input(m, n), factor),
+            ));
+        }
+    }
+    cases.push(("eye2 1e20".into(), EYE2_SCALE, eye2_scaled(EYE2_SCALE)));
+    for (label, factor, a) in cases {
+        let sh = a.shape().to_vec();
+        let (m, n) = (sh[0], sh[1]);
         let got = expect_launch_or_fail(ops().linalg_qr(&a), "qr");
         let reference = cpu.linalg_qr(&a).expect("cpu");
-        assert_parity(&format!("qr R {m}x{n}"), &s(&got.r), &s(&reference.r));
-        assert_parity(&format!("qr Q {m}x{n}"), &s(&got.q), &s(&reference.q));
+        let (gr, gq) = (s(&got.r), s(&got.q));
+        let (rr, rq) = (s(&reference.r), s(&reference.q));
+        assert_parity(&format!("qr R {label}"), &gr, &rr);
+        assert_parity(&format!("qr Q {label}"), &gq, &rq);
+        // 1e-20 倍は絶対誤差の救済で自明 pass しうるため NaN・0 を明示的に弾く。
+        assert!(
+            gr.iter().chain(gq.iter()).all(|v| v.is_finite()),
+            "qr {label}: R/Q に非有限値"
+        );
+        for i in 0..m.min(n) {
+            assert!(
+                gr[i * n + i] != 0.0 && rr[i * n + i] != 0.0,
+                "qr {label}: R の対角 [{i}] が 0（got={}, cpu={}）",
+                gr[i * n + i],
+                rr[i * n + i]
+            );
+        }
+        if factor != 1.0 {
+            let norm = |v: &[f32]| -> Vec<f32> {
+                v.iter()
+                    .map(|&x| (x as f64 / factor as f64) as f32)
+                    .collect()
+            };
+            assert_parity(&format!("qr R/scale {label}"), &norm(&gr), &norm(&rr));
+        }
     }
 }
