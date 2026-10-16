@@ -254,3 +254,32 @@ pub fn save(
 - **O_DIRECTORY の生値**: `fs_guard::open_flags::O_DIRECTORY`（x86_64 = 0o200000・aarch64 = 0o40000）を追加した（`O_NOFOLLOW` と同方針。libc は使わない）
 - **テスト**: `<version>` 段・`<name>` 段を確定直前フックでシンボリックリンクへ差し替えても外部ディレクトリに何も書かれず `Err` になることを単体テストで検証する
 - **残るリスク**: ルート自体のシンボリックリンクは許容のまま（利用者の選択）。`save` 後の読み戻し検証は差し替え検出用で、書き込みを取り消すものではない（書き込み先は fd 固定のため外部には出ない）
+
+## 17. 実装記録（イシュー #3120）
+
+§16.7 の #3120 項目の消化状況。公開面（公開アイテム）は 1 件も増やしていない。§3「ディレクトリを作らない」・§4「公開面 7 件」は `save` について §16・§17 が優先する（§3・§4 の本文は書き換えない。読み取り系の契約としては有効）。
+
+### 17.1 追加したテスト
+
+| ファイル | 内容（受入項目） |
+|---|---|
+| `crates/facade/tests/model_registry_save.rs`（新規・公開 API と std のみ） | R1 往復（複数テンソル・非連続 view・複数 name／version・上書き・`Sequential` の state dict）／R2 パス検証（`..`・絶対パス・区切り・NUL・制御文字・先頭 `.`・非 ASCII・空白、極端に長い名前、`<name>`／`<version>` のシンボリックリンク〈dangling 含む〉、葉のシンボリックリンクを辿らない置き換え、ルートのシンボリックリンク許容）／R3 障害（rename 失敗・上限超過〈stride 0 view で確保なし〉・空モデル・F16 ファイルの load 拒否と置き換え、いずれも既存が無傷で `.model.safetensors.tmp-*` が残らない）／エラー表示にパスが出ない |
+| `crates/facade/tests/api_surface.rs` | `MODEL_APPROVED_PUB_ITEMS`（8 件）・`MODEL_REGISTRY_APPROVED_PUB_METHODS`（6 件）の定数化、正ガード `model_registry_surface_violations`（公開面ちょうど・欠落／重複も違反）と自己テスト、`src/` 全体の `impl ModelRegistry` の pub fn 集合の検査、関数ポインタ型の到達プローブ `model_registry_signatures_are_pinned`、`save` の doctest 実在検査 |
+| `crates/facade/src/model.rs` | `save` の doc に実行される doctest（一時ディレクトリ使用・`Unsupported` では何もしない）を追加。挙動は不変 |
+
+失敗注入・途中差し替え・一時名衝突は単体テスト（`model.rs` の `mod tests`）が担当し、結合テストは重複させない。
+
+### 17.2 検出範囲と限界
+
+- 非 F32 入力は `save` の引数型 `HashMap<String, Tensor<f32>>` で型として拒否される。実行時に再現できる検出は「F16 ファイルの `load` 拒否と `save` による置き換え」に限る
+- `with_cache_dir` は `impl Into<PathBuf>` のため関数ポインタ化できず、呼び出し型のプローブに留まる
+- 正ガードは `without_test_mod` を使わない。`model.rs` の `///` コメント内の `#[cfg(test)]` 文字列で切り出し位置がずれ、`save`／`available_models` が範囲から落ちるため。`tokens_of` はコメントを除き、`mod tests` 内に `impl ModelRegistry` は無い
+- 結合テストの cfg は `save` の対応述語（Linux x86_64／aarch64）と同一。対応外には `Unsupported` を確認する対のテストを置く
+
+### 17.3 長い名前の観測挙動
+
+`validate_component` は長さを見ない。許可文字だけの 300 文字の `name`／`version` は OS の `ENAMETOOLONG` 等で `Io` になり、ルート直下に残骸は残らない（テストは `Err` と無残骸のみ固定し、`ErrorKind` は環境依存のため固定しない）。長さ上限の新設は公開挙動の変更であり本イシューでは行わない（別途扱い）。
+
+### 17.4 承認
+
+D-A の範囲内（§16.8）。新たな承認は得ていない。依存追加・tolerance／上限値・`validate_component` の許可文字集合の変更はない。
