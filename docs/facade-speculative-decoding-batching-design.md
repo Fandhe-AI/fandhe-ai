@@ -634,7 +634,7 @@ C4 の注意: 実 MHA モデルでは検証 forward と逐次 forward の logits
 
 ### 21.8 判定方式（§6.3 を具体化する。新しい数値は作らない）
 
-- `step_batched` の各要求の出力を、同じ要求を単独で `generate`（B = 1）した結果と比べる。位置ごとの logits は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。既存の `assert_parity`）で判定し、上位 2 候補の margin を十分に取った入力でだけ token 列の一致も確かめる。margin を取っても token 列が一致しなければ論点 2 へ戻す（所有者への承認依頼）。
+- `step_batched` の各要求の出力を、同じ要求を単独で `generate`（B = 1）した結果と比べる。位置ごとの logits は REQ-2 の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。既存の `assert_parity`）で判定し、token 列の一致は `Greedy` の要求に限り、上位 2 候補の margin を十分に取った入力でだけ確かめる（margin を取っても一致しなければ論点 2 へ戻す。所有者への承認依頼）。`TopK`／`Temperature` の要求では margin は token 列の一致を保証しない（padding による許容誤差内の微小な logits 差でも、同じ RNG 値が累積確率の境界をまたいで別 token を選びうる）。このため token 列の一致を契約にも事前登録の仮説にもせず、論点 2 へも戻さない。§20.7 と同様に、単独 `generate` が選んだ入力 id 列を `step_batched` へ再生して位置ごとの logits を `assert_parity` で比べる。分岐後の異なる文脈同士は比べない。
 - 必須の検査: 全行が同じ長さのとき padding なしの経路と bit 一致する（#3105）／padding の量だけを変えた同じ要求の出力が一致する（#3107）／途中参加・途中退出・長さの混在で他の要求の出力が変わらない（#3107）／第 1 段階の既存テストが無変更で通る／実機は `#[ignore]` で分離する。
 - tolerance・baseline は変えない。
 
