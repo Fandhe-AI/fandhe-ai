@@ -133,6 +133,8 @@ eigh の回転更新（`s_skip == 0` 内）の `sym` 書き込みと `v` 書き�
 
 **PR #3401 レビュー対応（P0・P1）**: (P0) CU-2 の solve カーネルに `perm` 値域検査と `solve_err` 通知を追加した（§6 の 1）。CU-2 の引数は `(const double* lu, const int* perm, const int* status, const double* b, double* x, int* solve_err, int n, int k)` になり、`solve_err_dev` は 1 要素・`alloc_zeros` で確保、readback で判定する。unsafe ブロック数は不変（2）。(P1) security-auditor サブエージェントはこの修正ラウンドの実行環境にも起動手段がなく、**監査は引き続き未実施**。代替として P0 修正後の差分（CU-2 の引数追加・`solve_err_dev` の確保と readback・カーネルの検査）について実装担当が (b)(c)(e)(f)(g)(h) を再点検した（引数順・型一致、`solve_err_dev` は 1 要素で kernel の書き込みは `*solve_err` のみ、readback は同期点、バッファは closure 内で生存）。これは security-auditor の最終判定ではなく、レビュー・マージ前に security-auditor 監査（CU-1／CU-2 と上記差分）を人間側が起動する必要がある。
 
+**PR #3401 レビュー対応（P2）**: CU-2 の `perm` 値域違反通知を `*solve_err = 1` から `atomicExch(solve_err, 1)` に変更した（`k >= 2` で複数の列担当スレッドが同一要素へ書くデータ競合の解消）。書き込み先・unsafe ブロック数は不変。security-auditor 監査は依然として未実施（本ラウンドの実行環境にもサブエージェント起動手段がない）。
+
 実装担当の自己点検（CU-1／CU-2。#3135）: `grep -n "unsafe {" crates/backend-cuda/src/linalg.rs` が 2 行（`launch_lu`＝CU-1、`run_lu_solve_f32`＝CU-2）。各 SAFETY コメントに行 ID と不変条件を記載。引数の順・型はカーネルのシグネチャと一致、`n`・`k` は `validate_lu_dims`＋`i32::try_from`、入力長は `check_lu_lens`、`status` は必ず読み戻し、`with_driver_call` で包む。
 
 実装担当による自己点検の結果は §5・§6 のとおり。PR レビューで security-auditor の監査を受け、指摘と対応をこの節へ追記する。個々の実装 PR（#3135・#3136・#3137）でも各ブロックを再監査する。実装後の再現コマンド:

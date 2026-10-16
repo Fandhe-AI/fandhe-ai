@@ -153,7 +153,7 @@ pub(crate) const LINALG_SOLVE_BLOCK_DIM: u32 = 128;
 /// LU 済み `lu` と `perm` で `A X = B` を解く。`b`: `n*k`（行優先）、
 /// `x`: `n*k`（出力・前進代入の中間値 y も保持）。`status[0] != 0`
 /// （特異）なら何も書かない。`perm[i]` が `[0, n)` の外なら（REQ-8: 値域を
-/// カーネル側でも検査する）`b` を読む前に `*solve_err = 1` を書いて何も書かず
+/// カーネル側でも検査する）`b` を読む前に `atomicExch(solve_err, 1)`（複数列スレッドが同一要素へ書くため atomic。#3401 P2）で通知して何も書かず
 /// return し、ホストが読み戻して型付きエラーにする（黙って成功扱いにしない）。
 pub(crate) const LINALG_LU_SOLVE_F64: &str = r#"
 extern "C" __global__ void linalg_lu_solve_f64(
@@ -170,7 +170,7 @@ extern "C" __global__ void linalg_lu_solve_f64(
     for (int i = 0; i < n; ++i) {
         int pi = perm[i];
         if (pi < 0 || pi >= n) {
-            *solve_err = 1;
+            atomicExch(solve_err, 1);
             return;
         }
     }
@@ -211,7 +211,7 @@ mod tests {
         assert!(LINALG_LU_F64.contains("if (c < n)"));
         assert!(LINALG_LU_SOLVE_F64.contains("if (col >= k)"));
         assert!(LINALG_LU_SOLVE_F64.contains("if (pi < 0 || pi >= n)"));
-        assert!(LINALG_LU_SOLVE_F64.contains("*solve_err = 1;"));
+        assert!(LINALG_LU_SOLVE_F64.contains("atomicExch(solve_err, 1);"));
         // perm の値域検査は b の読み出し（b[perm[i] * k）より前にある。
         let chk = LINALG_LU_SOLVE_F64.find("pi >= n").unwrap();
         let rd = LINALG_LU_SOLVE_F64.find("b[perm[i] * k").unwrap();
