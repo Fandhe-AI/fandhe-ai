@@ -6,7 +6,7 @@
 // `crate::linalg_kernel::MetalLinalg`（`linalg_kernel.rs`）から実行時コンパイル
 // され、`ops.rs::MetalBackendOps::{linalg_inv, linalg_solve, linalg_det,
 // linalg_cholesky, linalg_qr}` の内部 opt-in ゲート（既定 OFF）の背後から
-// 呼ばれる想定（カーネル起動の新規 unsafe は承認待ち。`linalg.rs` 冒頭参照）。
+// 呼ばれる（Stage B・イシュー #3137 で起動を結線済み。`linalg_kernel.rs` 冒頭参照）。
 // ホスト逐語モデルは `crate::linalg_model`（演算順序を 1 対 1 で対応させる）。
 //
 // ---- 数値方式 ----

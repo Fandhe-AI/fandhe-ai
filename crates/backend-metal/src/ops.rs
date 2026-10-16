@@ -515,14 +515,64 @@ fn linalg_gate_prepare(
     Ok(())
 }
 
-/// カーネル起動が未実装（新規 `unsafe` のユーザー承認待ち）であることを示す
-/// fail-closed の `Unsupported`。`Var` 側は `Unsupported` のみホスト `f64` へ
-/// フォールバックするため、ゲート OFF と挙動が変わらない。
-fn linalg_launch_pending(op: &str) -> BackendError {
-    BackendError::Unsupported(format!(
-        "MetalBackendOps::{op}: Metal 線形代数カーネルの起動（新規 unsafe）は\
-         ユーザー承認待ち（イシュー #2676）"
-    ))
+/// 線形代数の起動前検証（`crate::linalg` の純関数）の失敗を `InvalidArgument` へ写す。
+fn linalg_dim_err(op: &str, e: crate::linalg::LinalgDimError) -> BackendError {
+    BackendError::InvalidArgument(format!("{op}: {e}"))
+}
+
+/// 連続メモリのテンソルを得る（非連続なら contiguous 化して所有する）。
+fn linalg_contiguous(op: &str, t: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+    let owned = t.contiguous();
+    if owned.as_slice().is_none() {
+        return Err(BackendError::KernelLaunchFailed(format!(
+            "{op}: input not contiguous"
+        )));
+    }
+    Ok(owned)
+}
+
+/// 線形代数カーネルの起動口（イシュー #3137）。ゲート判定・サイズ検証・空入力の短絡の
+/// **後**にのみ呼ぶ（デバイス初期化より前に入力検証を済ませる。設計記録 §4）。
+/// デバイス・確保の失敗は `map_metal_error`（`Unsupported` には写さない。`Unsupported` は
+/// ゲート OFF・未実装に限る）。
+fn linalg_kernel_handle() -> Result<
+    (
+        std::sync::Arc<MetalContext>,
+        std::sync::Arc<crate::linalg_kernel::MetalLinalg>,
+    ),
+    BackendError,
+> {
+    let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+    let kernel = context_cache::cached_linalg(&ctx).map_err(map_metal_error)?;
+    Ok((ctx, kernel))
+}
+
+/// LU 代入の共通本体（`inv`／`solve`）。特異（ピボット厳密 0）は `InvalidArgument`。
+/// 戻り値は `n*k` 要素の解（`k == 0` なら空）。
+fn linalg_lu_solve_host(
+    op: &str,
+    a: &[f32],
+    n: usize,
+    b: &[f32],
+    k: usize,
+) -> Result<Vec<f32>, BackendError> {
+    let (ctx, kernel) = linalg_kernel_handle()?;
+    let raw = kernel
+        .run_lu_solve_f32(&ctx, a, n, b, k)
+        .map_err(map_metal_error)?;
+    let flags = crate::linalg::decode_lu_status(&raw.status)
+        .map_err(|e| BackendError::KernelLaunchFailed(format!("{op}: {e}")))?;
+    if flags.singular {
+        return Err(BackendError::InvalidArgument(format!(
+            "{op}: 行列が特異（ピボットが厳密 0）"
+        )));
+    }
+    if k == 0 {
+        return Ok(Vec::new());
+    }
+    raw.x.ok_or_else(|| {
+        BackendError::KernelLaunchFailed(format!("{op}: 非特異なのに解が読み戻されなかった"))
+    })
 }
 
 /// `shape` の要素積を `checked_mul` の連鎖で求め、`usize` オーバー
@@ -3705,17 +3755,17 @@ impl BackendOps for MetalBackendOps {
     }
 
     /// 線形代数 5 演算（`linalg_inv`／`solve`／`det`／`cholesky`／`qr`）の入口
-    /// （イシュー #2676・`docs/backend-gpu-linalg-decision.md` §4・§6）。
+    /// （イシュー #2676・#3137・`docs/backend-gpu-linalg-decision.md` §4・§6）。
     ///
     /// 既定（内部 opt-in ゲート OFF）は従来どおり `Unsupported` で、`Var` 側が
     /// ホスト `f64` 参照実装へフォールバックする（`device_handle()` を経由しない）。
-    /// ゲート ON 時も、カーネル起動（新規 `unsafe`）がユーザー承認待ちのため
-    /// 非空入力は fail-closed の `Unsupported` を返す（Stage A。`crate::linalg`
-    /// 冒頭）。Stage B で守るエラー写像: solve／inv のピボット 0 は
-    /// `InvalidArgument`、**det のピボット 0 は `0.0`**、非正定値は
-    /// `InvalidArgument`、`Unsupported` は未実装またはゲート OFF に限る、
-    /// デバイス失敗は `map_metal_error`。det はホストで `lu_diag_product`
-    /// （diag を f64 化）× `permutation_sign` を計算して `as f32` する。
+    /// ゲート ON の非空入力は `crate::linalg_kernel::MetalLinalg` を起動する
+    /// （Stage B。順序: ゲート → rank・正方 → `validate_*` → 空入力の短絡 →
+    /// ストライド余裕検証 → デバイス）。エラー写像: solve／inv のピボット 0 は
+    /// `InvalidArgument`、**det のピボット 0 は `0.0`**、非正定値は `InvalidArgument`、
+    /// `Unsupported` は未実装またはゲート OFF に限る、デバイス失敗は
+    /// `map_metal_error`。det はホストで `lu_diag_product`（diag を f64 化）×
+    /// `permutation_sign` を計算して `as f32` する（`crate::linalg::det_from_lu`）。
     fn linalg_inv(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         linalg_gate_prepare("linalg_inv", a.shape(), true)?;
         let n = a.shape()[0];
@@ -3724,7 +3774,17 @@ impl BackendOps for MetalBackendOps {
         if n == 0 {
             return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
         }
-        Err(linalg_launch_pending("linalg_inv"))
+        crate::linalg::validate_launch_stride_headroom("linalg_inv", n * n)
+            .map_err(|e| linalg_dim_err("linalg_inv", e))?;
+        let a_owned = linalg_contiguous("linalg_inv", a)?;
+        let a_slice = a_owned.as_slice().unwrap_or(&[]);
+        // inv は単位行列を右辺として LU 代入へ渡す。
+        let mut eye = vec![0.0f32; n * n];
+        for i in 0..n {
+            eye[i * n + i] = 1.0;
+        }
+        let x = linalg_lu_solve_host("linalg_inv", a_slice, n, &eye, n)?;
+        Tensor::new(x, &[n, n]).map_err(BackendError::ShapeMismatch)
     }
 
     fn linalg_solve(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -3746,12 +3806,23 @@ impl BackendOps for MetalBackendOps {
         crate::linalg::validate_lu_dims(n, k)
             .map_err(|e| BackendError::InvalidArgument(format!("linalg_solve: {e}")))?;
         // n == 0 のみ空結果を直接返す。n > 0 で k == 0 の場合も A の特異性検査が
-        // 必要（CPU／CUDA 経路は特異なら InvalidArgument）なため、空結果へ短絡せず
-        // 非空と同じ経路（起動保留→ホスト参照へフォールバック）に通す。
+        // 必要（CPU／CUDA 経路は特異なら InvalidArgument）なため、LU のみ起動して
+        // 特異性を判定する（solve カーネルは encode しない）。
         if n == 0 {
             return Tensor::new(Vec::new(), &[n, k]).map_err(BackendError::ShapeMismatch);
         }
-        Err(linalg_launch_pending("linalg_solve"))
+        crate::linalg::validate_launch_stride_headroom("linalg_solve", (n * n).max(k))
+            .map_err(|e| linalg_dim_err("linalg_solve", e))?;
+        let a_owned = linalg_contiguous("linalg_solve", a)?;
+        let b_owned = linalg_contiguous("linalg_solve", b)?;
+        let x = linalg_lu_solve_host(
+            "linalg_solve",
+            a_owned.as_slice().unwrap_or(&[]),
+            n,
+            b_owned.as_slice().unwrap_or(&[]),
+            k,
+        )?;
+        Tensor::new(x, &[n, k]).map_err(BackendError::ShapeMismatch)
     }
 
     fn linalg_det(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -3763,7 +3834,19 @@ impl BackendOps for MetalBackendOps {
             // 空積は 1（CPU 参照実装と同じ）。
             return Tensor::new(vec![1.0f32], &[]).map_err(BackendError::ShapeMismatch);
         }
-        Err(linalg_launch_pending("linalg_det"))
+        crate::linalg::validate_launch_stride_headroom("linalg_det", n * n)
+            .map_err(|e| linalg_dim_err("linalg_det", e))?;
+        let a_owned = linalg_contiguous("linalg_det", a)?;
+        let (ctx, kernel) = linalg_kernel_handle()?;
+        let (lu, status) = kernel
+            .run_lu_det_f32(&ctx, a_owned.as_slice().unwrap_or(&[]), n)
+            .map_err(map_metal_error)?;
+        let flags = crate::linalg::decode_lu_status(&status)
+            .map_err(|e| BackendError::KernelLaunchFailed(format!("linalg_det: {e}")))?;
+        // 特異（ピボット 0）は det = 0.0（エラーにしない）。
+        let det = crate::linalg::det_from_lu(&lu, n, &flags)
+            .map_err(|e| BackendError::KernelLaunchFailed(format!("linalg_det: {e}")))?;
+        Tensor::new(vec![det], &[]).map_err(BackendError::ShapeMismatch)
     }
 
     fn linalg_cholesky(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -3774,7 +3857,21 @@ impl BackendOps for MetalBackendOps {
         if n == 0 {
             return Tensor::new(Vec::new(), &[0, 0]).map_err(BackendError::ShapeMismatch);
         }
-        Err(linalg_launch_pending("linalg_cholesky"))
+        crate::linalg::validate_launch_stride_headroom("linalg_cholesky", n * n)
+            .map_err(|e| linalg_dim_err("linalg_cholesky", e))?;
+        let a_owned = linalg_contiguous("linalg_cholesky", a)?;
+        let (ctx, kernel) = linalg_kernel_handle()?;
+        let (l, status) = kernel
+            .run_cholesky_f32(&ctx, a_owned.as_slice().unwrap_or(&[]), n)
+            .map_err(map_metal_error)?;
+        let not_pd = crate::linalg::decode_cholesky_status(&status)
+            .map_err(|e| BackendError::KernelLaunchFailed(format!("linalg_cholesky: {e}")))?;
+        if not_pd {
+            return Err(BackendError::InvalidArgument(
+                "linalg_cholesky: 行列が対称正定値でない（対角が非有限または非正）".into(),
+            ));
+        }
+        Tensor::new(l, &[n, n]).map_err(BackendError::ShapeMismatch)
     }
 
     fn linalg_qr(&self, a: &Tensor<f32>) -> Result<QrFactors, BackendError> {
@@ -3782,14 +3879,27 @@ impl BackendOps for MetalBackendOps {
         let (m, n) = (a.shape()[0], a.shape()[1]);
         crate::linalg::validate_qr_dims(m, n)
             .map_err(|e| BackendError::InvalidArgument(format!("linalg_qr: {e}")))?;
+        let k = m.min(n);
         if m == 0 || n == 0 {
-            let k = m.min(n);
             return Ok(QrFactors {
                 q: Tensor::new(Vec::new(), &[m, k]).map_err(BackendError::ShapeMismatch)?,
                 r: Tensor::new(Vec::new(), &[k, n]).map_err(BackendError::ShapeMismatch)?,
             });
         }
-        Err(linalg_launch_pending("linalg_qr"))
+        // QR のストライドは max(m, n)（n=1 で m が u32::MAX 近傍になり得る。監査 §6-3）。
+        crate::linalg::validate_launch_stride_headroom("linalg_qr", m.max(n))
+            .map_err(|e| linalg_dim_err("linalg_qr", e))?;
+        let a_owned = linalg_contiguous("linalg_qr", a)?;
+        let (ctx, kernel) = linalg_kernel_handle()?;
+        let (r_work, q_work) = kernel
+            .run_qr_f32(&ctx, a_owned.as_slice().unwrap_or(&[]), m, n)
+            .map_err(map_metal_error)?;
+        let (r, q) = crate::linalg::qr_finalize(&r_work, &q_work, m, n)
+            .map_err(|e| BackendError::KernelLaunchFailed(format!("linalg_qr: {e}")))?;
+        Ok(QrFactors {
+            q: Tensor::new(q, &[m, k]).map_err(BackendError::ShapeMismatch)?,
+            r: Tensor::new(r, &[k, n]).map_err(BackendError::ShapeMismatch)?,
+        })
     }
 
     fn linalg_svd(&self, _a: &Tensor<f32>) -> Result<SvdFactors, BackendError> {

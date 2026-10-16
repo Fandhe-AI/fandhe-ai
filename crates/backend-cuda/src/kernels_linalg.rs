@@ -152,17 +152,27 @@ pub(crate) const LINALG_SOLVE_BLOCK_DIM: u32 = 128;
 
 /// LU 済み `lu` と `perm` で `A X = B` を解く。`b`: `n*k`（行優先）、
 /// `x`: `n*k`（出力・前進代入の中間値 y も保持）。`status[0] != 0`
-/// （特異）なら何も書かない。
+/// （特異）なら何も書かない。`perm[i]` が `[0, n)` の外なら（REQ-8: 値域を
+/// カーネル側でも検査する）`b` を読む前に `*solve_err = 1` を書いて何も書かず
+/// return し、ホストが読み戻して型付きエラーにする（黙って成功扱いにしない）。
 pub(crate) const LINALG_LU_SOLVE_F64: &str = r#"
 extern "C" __global__ void linalg_lu_solve_f64(
     const double* lu, const int* perm, const int* status,
-    const double* b, double* x, int n, int k) {
+    const double* b, double* x, int* solve_err, int n, int k) {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= k) {
         return;
     }
     if (status[0] != 0) {
         return;
+    }
+    // 置換添字の値域検査（x・b への書き込み・読み出しより前に全 i を検査する）。
+    for (int i = 0; i < n; ++i) {
+        int pi = perm[i];
+        if (pi < 0 || pi >= n) {
+            *solve_err = 1;
+            return;
+        }
     }
     // 前進代入（単位下三角）: y[i] = b[perm[i]] - sum_{j<i} L[i][j] * y[j]
     for (int i = 0; i < n; ++i) {
@@ -200,6 +210,12 @@ mod tests {
         assert!(LINALG_LU_F64.contains("if (i < n && c < n)"));
         assert!(LINALG_LU_F64.contains("if (c < n)"));
         assert!(LINALG_LU_SOLVE_F64.contains("if (col >= k)"));
+        assert!(LINALG_LU_SOLVE_F64.contains("if (pi < 0 || pi >= n)"));
+        assert!(LINALG_LU_SOLVE_F64.contains("*solve_err = 1;"));
+        // perm の値域検査は b の読み出し（b[perm[i] * k）より前にある。
+        let chk = LINALG_LU_SOLVE_F64.find("pi >= n").unwrap();
+        let rd = LINALG_LU_SOLVE_F64.find("b[perm[i] * k").unwrap();
+        assert!(chk < rd);
     }
 
     #[test]

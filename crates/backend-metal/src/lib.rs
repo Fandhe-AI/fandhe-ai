@@ -607,6 +607,10 @@ pub mod pooling_model;
 // （`pooling_model.rs` は上記の cfg なしブロックで宣言）。
 #[cfg(target_os = "macos")]
 pub mod pooling;
+// compute encoder への引数結線ヘルパー（`unsafe` の集約先。イシュー #3137・
+// 監査記録 `docs/gpu-linalg-kernel-launch-unsafe-audit.md` §3 案 A）。
+#[cfg(target_os = "macos")]
+pub(crate) mod encoder_args;
 #[cfg(target_os = "macos")]
 pub mod rnn_cell;
 // 累積和／累積積（`torch.cumsum`／`torch.cumprod` 相当。イシュー
@@ -764,7 +768,8 @@ pub mod split_k_runtime;
 pub mod linalg;
 pub mod linalg_model;
 // MSL ソース保持とパイプライン構築（safe API のみ。`MetalContext` を使うため
-// macOS 限定）。カーネル起動の新規 unsafe は承認待ち（`linalg` 冒頭参照）。
+// macOS 限定）。カーネル起動は `encoder_args`（案 A の共有ヘルパー）経由で
+// 結線済み（イシュー #3137。Stage B）。
 #[cfg(target_os = "macos")]
 pub mod linalg_kernel;
 pub mod tile;

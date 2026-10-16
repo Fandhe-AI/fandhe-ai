@@ -127,6 +127,10 @@ pub enum MetalError {
     /// `CudaError::InvalidElementwiseShape` と同じ役割）。`detail` に
     /// 具体的な不整合内容（長さ不一致等）を保持する。
     InvalidElementwiseShape { detail: String },
+    /// `crate::linalg_kernel::MetalLinalg::run_*` の起動前検証（長さ・`u32` 範囲・
+    /// ストライド余裕。呼び出し元 `ops.rs` の検証を信頼しない二重検査。イシュー
+    /// #3137）が拒否した。`detail` に具体的な不整合内容を保持する。
+    InvalidLinalgShape { detail: String },
     /// `crate::elementwise::pipeline_for_binary`／`pipeline_for_unary` が
     /// `BinaryElementwiseOp`／`UnaryElementwiseOp`（いずれも
     /// `#[non_exhaustive]`）の未知 variant を受け取った場合に返す
@@ -346,6 +350,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::InvalidElementwiseShape { detail } => {
                 write!(f, "invalid elementwise/gemm_bias_act shape: {detail}")
+            }
+            MetalError::InvalidLinalgShape { detail } => {
+                write!(f, "invalid linalg launch shape: {detail}")
             }
             MetalError::UnsupportedElementwiseOp { detail } => {
                 write!(f, "unsupported elementwise op: {detail}")

@@ -343,14 +343,18 @@ impl CudaLinalg {
             let b64: Vec<f64> = b.iter().map(|&v| f64::from(v)).collect();
             let b_dev = self.stream.clone_htod(&b64)?;
             let mut x_dev = self.stream.alloc_zeros::<f64>(n * k)?;
+            // perm 値域違反の通知先（カーネルは 1 を書くのみ。0 初期化）。
+            let mut solve_err_dev = self.stream.alloc_zeros::<i32>(1)?;
             // SAFETY: CU-2（`docs/gpu-linalg-kernel-launch-unsafe-audit.md`・
             // 共通不変条件 (b)(c)(e)(f)(g)(h)）。引数は `(const double* lu,
             // const int* perm, const int* status, const double* b, double* x,
-            // int n, int k)` の順・型でカーネルと一致する。`a_dev`（LU 済み・
+            // int* solve_err, int n, int k)` の順・型でカーネルと一致する。`a_dev`（LU 済み・
             // `n*n`）・`perm_dev`（`n`）・`status_dev`（2）は CU-1 と同一 stream
             // 上で先に実行済みで、`b_dev`・`x_dev` は `n*k` 要素
-            // （`check_lu_lens` と `validate_lu_dims` で検証済み）。`perm` の値は
-            // CU-1 が `[0, n)` に閉じて書く（監査記録 §6 の #1）。grid は
+            // （`check_lu_lens` と `validate_lu_dims` で検証済み）。`solve_err_dev` は
+            // 1 要素。`perm` の値域（`[0, n)`）はカーネル側が `b` を読む前に検査し、
+            // 違反なら `solve_err` へ 1 を書いて何も書かず return する（REQ-8）。
+            // ホストは下で必ず読み戻して型付きエラーにする。grid は
             // `k.div_ceil(block)`、カーネル内の `col >= k` 手動境界チェック
             // （REQ-8）で余剰スレッドは何も書かない。バッファは readback 完了
             // まで本クロージャ内で生存する。
@@ -362,10 +366,14 @@ impl CudaLinalg {
                     .arg(&status_dev)
                     .arg(&b_dev)
                     .arg(&mut x_dev)
+                    .arg(&mut solve_err_dev)
                     .arg(&n_i)
                     .arg(&k_i)
                     .launch(cfg)?;
             }
+            // 読み戻しが同期点。perm 値域違反は成功扱いにせず型付きエラーで返す。
+            let solve_err: Vec<i32> = readback(&self.stream, &solve_err_dev)?;
+            solve_err_to_result(solve_err.first().copied().unwrap_or(-1))?;
             let x: Vec<f64> = readback(&self.stream, &x_dev)?;
             Ok(LuSolveOutcome::Solved(
                 x.into_iter().map(|v| v as f32).collect(),
@@ -721,6 +729,18 @@ fn factor_status_to_result(op: FactorOp, status: i32) -> Result<(), CudaError> {
         }),
         other => Err(CudaError::LinalgKernelStatusInvalid {
             detail: format!("{op:?}: status={other} は契約外（sentinel のまま、または想定外）"),
+        }),
+    }
+}
+
+/// solve カーネルの `solve_err` を判定する純関数。`0` のみ成功で、`1`
+/// （`perm` の値域違反）・その他は [`CudaError::LinalgKernelStatusInvalid`]
+/// （黙って成功扱いにしない。REQ-8・A08）。
+fn solve_err_to_result(v: i32) -> Result<(), CudaError> {
+    match v {
+        0 => Ok(()),
+        other => Err(CudaError::LinalgKernelStatusInvalid {
+            detail: format!("linalg_lu_solve: perm の値域違反を検出（solve_err={other}）"),
         }),
     }
 }
@@ -1158,6 +1178,17 @@ mod tests {
                     Err(CudaError::LinalgKernelStatusInvalid { .. })
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn solve_err_mapping() {
+        assert!(solve_err_to_result(0).is_ok());
+        for bad in [1, -1, i32::MIN] {
+            assert!(matches!(
+                solve_err_to_result(bad),
+                Err(CudaError::LinalgKernelStatusInvalid { .. })
+            ));
         }
     }
 

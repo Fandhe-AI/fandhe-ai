@@ -3,7 +3,7 @@
 //!
 //! # 目的
 //!
-//! カーネル起動（新規 `unsafe`）がユーザー承認待ちの間（Stage A）も、
+//! カーネル起動（Stage B。#3137）の有無に依らず、
 //! 「カーネルに写像した演算列が CPU 参照実装（f64）と統一複合判定で一致する」
 //! ことを実機なし（Linux CI）で検証できるようにする。MSL は
 //! `#pragma clang fp contract(off)`・`precise::sqrt`・`precise::divide` で FMA
