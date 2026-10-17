@@ -2,13 +2,13 @@
 
 基準コミット: `4be494be`（origin/main。v0.10.0 リリースサイクル後。#2614 で最新化。初版は `e083e609`＝#2125〜#2127 マージ後）。`docs/spec` submodule ポインタは `2e998dd77117814f4af8ed160394ad1d6a8f888a`（`git ls-tree HEAD docs/spec` で確認。初版時点から不変）。除外事項の ROCm bullet は `docs/spec/04-requirements.md:367`（`grep -n "ROCm バックエンドの正式対応" docs/spec/04-requirements.md` で再確認すること。初版の `:365-369` は格上げ条件表を含む範囲の記録で、bullet 本体は `:367`。`docs/chip-optimization-roadmap.md` §7 の食い違い記録と同じ）。submodule 更新で行番号はずれうるため、参照時は再確認すること。
 
-更新履歴: #2128 で初版 → #2614 で v0.10.0 時点へ最新化（§3b 状況節・§3c 依存方式の推奨・§3d #2129／#2499 との関係を追加し、§5 を 2 段構成化、§6・§8 を整合）。**本 doc の推奨はすべて未承認**であり、承認済みの記述はない。
+更新履歴: #2128 で初版 → #2614 で v0.10.0 時点へ最新化（§3b 状況節・§3c 依存方式の推奨・§3d #2129／#2499 との関係を追加し、§5 を 2 段構成化、§6・§8 を整合）。**本 doc の推奨はすべて未承認**であり、承認済みの記述はない（ただし HIP FFI の依存方式のみ、#3153 で案 B に確定。正は `docs/backend-rocm-hip-ffi-decision.md`）。
 
 ## §0 結論（最初に読む。#2129 が引用する安定した結論表）
 
 - **コード変更なし**（`crates/**`・`Cargo.toml`／`Cargo.lock`・`docs/spec/`〈正本 submodule〉・tolerance／baseline・ガードレール閾値・依存は一切変更しない）。
 - §5 の (b) 形式 spec 提案文案は**未起票**（承認事項は §6）。#2614 で **2 段構成**へ改めた: **段 1（Won't→Could の (a)'(b)(c)）は (d)' の閾値と独立に起票できる**（ユーザー承認後）。**段 2（Could→Should の (d)'(e)'(f)'）は軸のみを示し数値閾値は提案しない**（Could 到達後の別提案で確定）。
-- **Could 昇格条件の確定案（未承認）**: 段 1 の (a)'(b)(c)（§5）。HIP FFI 依存方式は **B（`libloading` を新区分の直接依存にし、実行時解決する関数ポインタ型宣言を使う）を推奨**（§3c。未承認）。
+- **Could 昇格条件の確定案（未承認）**: 段 1 の (a)'(b)(c)（§5）。HIP FFI 依存方式は **B（`libloading` を新区分の直接依存にし、実行時解決する関数ポインタ型宣言を使う）を推奨**（§3c。#3153 で案 B に確定。区分番号は第 12 区分。正は `docs/backend-rocm-hip-ffi-decision.md`）。
 - #2129 の「ROCm は Non-Goal 確定」推奨との関係は §3d。選ぶのはユーザーであり、本 doc は #2129 の推奨を覆さない。
 - 格上げ判定の現状は **Won't（条件付き）のまま据え置く**。v2 の Could 条件のうち (b) は PoC-10 §2 の費用試算に基づく「達成見込み」であり、機材の利用可能性と実施時単価を確認するまで達成済みとは扱わない（要再確認）。
 - 条件ごとの v1 → v2 の扱い:
@@ -118,7 +118,9 @@ v1 の「CUDA 実測比 70%」は、v2 の実機構成（GB10 と AMD 機材）�
 | 実機 | — | 実機拠点は DGX Spark GB10 と M4 Max のみで AMD GPU はない。クラウドスパイクは未実施。(b) の価格は本 doc で再調査せず、要再確認のまま残す |
 | Windows | v0.10.0（#2489〜#2496） | CUDA NVRTC の `CUDA_PATH` 探索と onnx-interop の Windows 経路が入った。ROCm のスパイクは引き続き Linux のみを対象とする。Windows の HIP SDK の扱いは**要出典確認**（断定しない） |
 
-## §3c HIP FFI 依存方式の比較と推奨（#2614 で追加。未承認）
+## §3c HIP FFI 依存方式の比較と推奨（#2614 で追加）
+
+**#3153 で案 B に確定（所有者回答 2026-10-12）。区分番号は「第 11 区分案」ではなく第 12 区分（`ureq` が先に第 11 区分へ入ったため）。以降の表記は #2614 時点のもので、正は `docs/backend-rocm-hip-ffi-decision.md`。**
 
 現行の許容依存 10 区分に HIP FFI の担い手はない（`.claude/rules/deps-policy.md`。第 10 区分 `libc` は onnx-interop の external data 用途限定）。`Cargo.lock` の `libloading` は `0.9.0`（`grep -n -A2 'name = "libloading"' Cargo.lock`）で、cudarc の推移的依存にすぎず直接依存ではない（`docs/license-matrix.md` §6 で ISC・適合と判断済み）。
 
@@ -205,7 +207,7 @@ v1 の `burn-rocm`／「CUDA 実測比 70%」／rocWMMA の文言は前提を失
 ## §6 ユーザー承認事項（未実施。いずれも未承認）
 
 1. 段 1（§5）を spec リポジトリへ起票するか（(d)' の閾値とは独立に判断できる）。
-2. HIP FFI の依存方式: 推奨 B（`libloading` を新区分〈第 11 区分案〉の直接依存にする。§3c）を採るか、代案（A／C）か。
+2. HIP FFI の依存方式（#3153 で案 B に確定済み。区分は第 12 区分）: 推奨 B（`libloading` を新区分〈第 11 区分案〉の直接依存にする。§3c）を採るか、代案（A／C）か。
 3. `backend-rocm` クレートの新設。
 4. ROCm 実機を得るためのクラウドスパイクの実施と予算。
 5. 実機 CI ジョブを追加する場合の runner-policy 例外。
