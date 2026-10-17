@@ -77,6 +77,9 @@ RUSTSEC ignore（`RUSTSEC-2025-0141` bincode unmaintained・`RUSTSEC-2024-0436`
 paste unmaintained）はいずれも情報提供型（脆弱性ではない）で、比較対象の固定
 バージョンの推移的依存にアップグレード先がないため受容する（理由コメントは
 `deny.toml` に記載。比較対象バージョンを更新する再計測キャンペーン時に再評価）。
+2026-10-17 に追加した `RUSTSEC-2026-0367`〜`0369`（`zip` の展開時の脆弱性）は
+脆弱性型だが、ハーネスが ZIP を展開する経路を持たないため同じく受容する（§4 の
+2026-10-17 の記録）。
 
 ルート `deny.toml`・`docs/license-matrix.md` 2 節の本体 workspace 向け適合基準は
 一切変更しない。
@@ -170,6 +173,15 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   追加・削除や他の依存の更新はない。承認済みピン（burn 0.21.0・candle-core 0.11.0・
   fandhe-ai 0.11.0）・`deny.toml`・契約検査は変更しない。ライセンス・監査は
   `docs/license-matrix.md` 8b（2026-10-14 再実測）。
+- 2026-10-17: 所有者の明示承認（2026-10-17。「ハーネス限定で ignore（推奨）」）に基づき、
+  `deny.toml` の `[advisories] ignore` に `RUSTSEC-2026-0367`・`RUSTSEC-2026-0368`・
+  `RUSTSEC-2026-0369`（`zip` 9.0.0 未満の `ZipArchive::extract`／`ZipStreamReader::extract`
+  の脆弱性）を追加した。該当するのは比較対象 `candle-core =0.11.0` の推移的依存
+  `zip 8.6.0` で、修正版（>=9.0.0）へは承認済みピンを変えない限り更新できない。
+  ハーネスのコード（bench-*／bench-common）は `zip` を直接使わず、ZIP の展開経路も
+  持たない（入力は自前生成のテンソルと safetensors のみ）。ベンチ専用・非配布の
+  ツリーのため受容する。承認済みピン・`Cargo.lock`・契約検査・ルート `deny.toml` は
+  変更しない。比較対象バージョンを更新する再計測キャンペーン時に要否を再評価する。
 
 ## 5. tch-rs を計測対象に含めない判断
 
