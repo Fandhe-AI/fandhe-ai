@@ -13,7 +13,7 @@
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-use super::config::{RendezvousConfig, check_peer_allowed};
+use super::config::{RendezvousConfig, canonical_loopback, check_peer_allowed};
 use super::error::{DistributedError, Result};
 use super::frame::{
     Hello, RankTable, read_header, read_hello, read_rank_table, write_hello, write_rank_table,
@@ -162,7 +162,13 @@ fn collect_as_rank0(
         if rank == 0 || peers[rank].is_some() {
             return Err(DistributedError::DuplicateRank { rank });
         }
-        peers[rank] = Some((s, SocketAddr::new(peer.ip(), hello.ring_port)));
+        // ループバック集合点では接続元 IP が集合点と同じとは限らない（OS 依存）ため正規 loopback へ。
+        let ip = if cfg.rendezvous_addr().ip().is_loopback() && peer.ip().is_loopback() {
+            canonical_loopback(peer.ip())
+        } else {
+            peer.ip()
+        };
+        peers[rank] = Some((s, SocketAddr::new(ip, hello.ring_port)));
         got += 1;
     }
     // 自分のエントリは集合点 listener の IP（ring_bind_ip が unspecified のとき）か ring の IP。

@@ -12,6 +12,14 @@ use std::time::{Duration, Instant};
 use super::error::{DistributedError, Result};
 use super::frame::MAX_WORLD_SIZE;
 
+/// 同一アドレス族の正規 loopback（`127.0.0.1`／`::1`）。ランク 0 の接続元 IP 正規化にも使う。
+pub(crate) fn canonical_loopback(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => IpAddr::from([127, 0, 0, 1]),
+        IpAddr::V6(_) => IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
+    }
+}
+
 /// IPv4-mapped IPv6（`::ffff:127.0.0.0/8`）も含めた loopback 判定。
 pub fn is_loopback_ip(ip: IpAddr) -> bool {
     if ip.is_loopback() {
@@ -196,15 +204,16 @@ impl RendezvousConfig {
                 reason: "ring_bind_ip must be the same address family as the rendezvous address",
             });
         }
-        // 非ゼロランクの表エントリは集合点が観測した接続元 IP になる（connect の送信元は固定しない）。
-        // ループバック集合点への接続元は常に集合点と同じ IP になるため、ring_bind_ip が
-        // それと異なる具体 IP だとリング待受に届かず集合がタイムアウトする。早期に拒否する。
+        // ループバック集合点では全ランクが同一ホストにいるため、ランク 0 が観測した接続元 IP
+        // （127.0.0.1 か集合点と同じ IP かは OS 依存）を正規 loopback（127.0.0.1／::1）へ
+        // 正規化して配布する。よって ring_bind_ip は正規 loopback か unspecified に限る
+        // （127.0.0.2 のような別 loopback IP はリング待受に届かないため早期に拒否する）。
         if self.rendezvous_addr.ip().is_loopback()
             && !self.ring_bind_ip.is_unspecified()
-            && self.ring_bind_ip != self.rendezvous_addr.ip()
+            && self.ring_bind_ip != canonical_loopback(self.rendezvous_addr.ip())
         {
             return Err(DistributedError::InvalidConfig {
-                reason: "ring_bind_ip must equal the loopback rendezvous address (or be unspecified)",
+                reason: "ring_bind_ip must be the canonical loopback address (127.0.0.1 or ::1) or unspecified for a loopback rendezvous",
             });
         }
         if self.rendezvous_addr.ip().is_unspecified() {
@@ -310,5 +319,11 @@ mod tests {
             c.validate(),
             Err(DistributedError::InvalidConfig { .. })
         ));
+    }
+
+    #[test]
+    fn non_canonical_loopback_rendezvous_accepts_default_ring_bind_ip() {
+        let c = RendezvousConfig::new(2, 1, addr("127.0.0.2:1234")).unwrap();
+        assert!(c.validate().is_ok());
     }
 }
