@@ -39,7 +39,12 @@ ignore = [
     # の保持）。本 workspace では比較対象 `candle-core =0.11.0` の推移的依存
     # （`zip 8.6.0`）として入る。ハーネスのコード（bench-*／bench-common）は `zip`
     # を直接使わず、ZIP の展開（extract）経路も持たない（入力は自前生成のテンソルと
-    # safetensors のみ）。修正版（>=9.0.0）へは比較対象の完全固定版を変えない限り
+    # safetensors のみ）。candle-core 0.11.0 側の zip 利用も `ZipArchive::new`／
+    # `ZipWriter::new`（pickle.rs・npy.rs の読み込みと書き出し）だけで、勧告対象の
+    # extract 系 API は呼ばれない。Cargo.lock に残る zip 0.6.6（burn-tch 由来）・
+    # 7.2.0（burn-candle 由来）は有効化していない feature の側で解決グラフ外のため
+    # 対象外（将来それらの feature を有効にして deny が別の版で落ちたら、ignore を
+    # 足さず承認を取り直す）。修正版（>=9.0.0）へは比較対象の完全固定版を変えない限り
     # 更新できない。ベンチ専用・非配布のツリーのため受容する（2026-10-17 ユーザー
     # 承認。本体のルート `deny.toml` には追加しない）。解消予定: 比較対象バージョン
     # を更新する再計測キャンペーン時に要否を再評価する。

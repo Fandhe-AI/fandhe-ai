@@ -179,7 +179,13 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   の脆弱性）を追加した。該当するのは比較対象 `candle-core =0.11.0` の推移的依存
   `zip 8.6.0` で、修正版（>=9.0.0）へは承認済みピンを変えない限り更新できない。
   ハーネスのコード（bench-*／bench-common）は `zip` を直接使わず、ZIP の展開経路も
-  持たない（入力は自前生成のテンソルと safetensors のみ）。ベンチ専用・非配布の
+  持たない（入力は自前生成のテンソルと safetensors のみ）。candle-core 0.11.0 側の
+  zip 利用も `ZipArchive::new`／`ZipWriter::new`（pickle.rs・npy.rs の読み込みと
+  書き出し）だけで、勧告対象の extract 系 API は呼ばれない（security-auditor 確認）。
+  `Cargo.lock` に残る `zip 0.6.6`（burn-tch 由来）・`7.2.0`（burn-candle 由来）は
+  有効化していない feature の側で解決グラフ外のため ignore の対象外であり、将来
+  それらの feature を有効にして別の版で deny が落ちた場合は ignore を足さず承認を
+  取り直す。ベンチ専用・非配布の
   ツリーのため受容する。承認済みピン・`Cargo.lock`・契約検査・ルート `deny.toml` は
   変更しない。比較対象バージョンを更新する再計測キャンペーン時に要否を再評価する。
 
