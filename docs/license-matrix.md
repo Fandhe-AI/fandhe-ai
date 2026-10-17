@@ -331,7 +331,7 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 
 ## 追加実測（イシュー #3154）
 
-第 12 区分 `libloading =0.9.0`（default feature）を `crates/backend-rocm` の無条件依存として実追加した。承認根拠は #3153 所有者コメント 6111762873（2026-10-12）と `docs/backend-rocm-hip-ffi-decision.md` §5。同 doc §9 の版・feature・`deny.toml` 影響の明示確認は記録されていない。実測日: 2026-10-17。
+第 12 区分 `libloading =0.9.0`（default feature）を `crates/backend-rocm` の無条件依存として実追加した。承認根拠は #3153 所有者コメント 6111762873（2026-10-12）と `docs/backend-rocm-hip-ffi-decision.md` §5。同コメントの委任条項（版は実装時点の `Cargo.lock` の版・戻し条件 3 点に該当しなければ #3154 へ進める）の範囲内で反映した。同 doc §9 の個別値への明示確認コメントは存在せず、承認を得たとは記述しない（PR レビューで人間が最終判断する）。実測日: 2026-10-17。
 
 - `Cargo.lock` の差分: `fandhe-ai-backend-rocm` の `[[package]]`（dependencies = `libloading`）の追加だけ。他の crate の追加・版変更はない。
 - 版の重複: `cargo tree --locked -d --target all` の `libloading` は 0 件。`cargo tree --locked -i libloading -e normal,build --target all` は `cudarc v0.19.8`（backend-cuda・bench-harness 経由）と `fandhe-ai-backend-rocm` の 2 経路で、どちらも `libloading v0.9.0`。
