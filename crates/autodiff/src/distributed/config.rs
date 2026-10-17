@@ -2,6 +2,9 @@
 //!
 //! 役割: world_size・rank・集合点アドレス・opt-in・タイムアウトを受け、ソケットを開く前に
 //! 検証を一か所に集める。`rendezvous.rs` の `Rendezvous::bind` が冒頭で `validate` を呼ぶ。
+//! リング待受の bind IP は設定値として持たない。ランク 0 は集合点の待受 IP、それ以外は集合点への
+//! 接続ソケットの `local_addr` から導く（`rendezvous.rs` 冒頭・記録 §13。配布アドレスと待受の
+//! 不整合という類型を構造的に消すため）。
 //! 環境変数の読み取りは初期形では持たない（記録 §3）。アドレスは `SocketAddr` のみ受け、
 //! 文字列解釈と DNS 解決の経路を作らない（OWASP A03）。
 //! 根拠: `docs/facade-distributed-host-collective-decision.md` §3・§5・§7。
@@ -11,14 +14,6 @@ use std::time::{Duration, Instant};
 
 use super::error::{DistributedError, Result};
 use super::frame::MAX_WORLD_SIZE;
-
-/// 同一アドレス族の正規 loopback（`127.0.0.1`／`::1`）。ランク 0 の接続元 IP 正規化にも使う。
-pub(crate) fn canonical_loopback(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => IpAddr::from([127, 0, 0, 1]),
-        IpAddr::V6(_) => IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
-    }
-}
 
 /// IPv4-mapped IPv6（`::ffff:127.0.0.0/8`）も含めた loopback 判定。
 pub fn is_loopback_ip(ip: IpAddr) -> bool {
@@ -48,7 +43,6 @@ pub struct RendezvousConfig {
     rank: usize,
     rendezvous_addr: SocketAddr,
     allow_non_loopback: bool,
-    ring_bind_ip: IpAddr,
     session_id: u64,
     connect_timeout: Duration,
     establish_timeout: Duration,
@@ -59,9 +53,8 @@ impl RendezvousConfig {
     /// 既定値（loopback・接続 10 秒・確立 60 秒・読み書き 30 秒）で構築する。
     /// world_size と rank の範囲だけをここで検証し、残りは `validate`（`bind` 冒頭）で検証する。
     pub fn new(world_size: usize, rank: usize, rendezvous_addr: SocketAddr) -> Result<Self> {
-        // IPv4-mapped IPv6（`[::ffff:127.0.0.1]:p`）は IPv4 へ正規化する。正規化しないと
-        // `IpAddr::is_loopback` が mapped を loopback と判定せず、ランク表に観測 IP がそのまま載り
-        // 既定のリング待受（集合点と同じアドレス族の loopback）へ届かなくなる。
+        // IPv4-mapped IPv6（`[::ffff:127.0.0.1]:p`）は IPv4 へ正規化する。集合点・リングとも
+        // IPv4 ソケットで扱い、`IpAddr::is_loopback` が mapped を loopback と判定しない問題も避ける。
         let rendezvous_addr =
             SocketAddr::new(rendezvous_addr.ip().to_canonical(), rendezvous_addr.port());
         let cfg = Self {
@@ -69,12 +62,6 @@ impl RendezvousConfig {
             rank,
             rendezvous_addr,
             allow_non_loopback: false,
-            // 既定は集合点と同じアドレス族の loopback（::1 の集合点で IPv4 リングにならない）。
-            ring_bind_ip: if rendezvous_addr.is_ipv6() {
-                IpAddr::from(std::net::Ipv6Addr::LOCALHOST)
-            } else {
-                IpAddr::from([127, 0, 0, 1])
-            },
             session_id: 0,
             connect_timeout: Duration::from_secs(10),
             establish_timeout: Duration::from_secs(60),
@@ -87,17 +74,6 @@ impl RendezvousConfig {
     /// 非 loopback の bind・接続を許可する（なりすまし・盗聴のリスクを利用者が受け入れる）。
     pub fn allow_non_loopback(mut self, allow: bool) -> Self {
         self.allow_non_loopback = allow;
-        self
-    }
-
-    /// リング用待受の bind IP（既定は集合点と同族の loopback）。
-    ///
-    /// 非 loopback 集合点（`allow_non_loopback(true)`）では、既定の loopback のままだと
-    /// `validate` が拒否する。自ホストの到達可能な IP か unspecified を明示すること。
-    /// 例: `RendezvousConfig::new(2, 0, "192.0.2.1:7000".parse()?)?
-    ///     .allow_non_loopback(true).ring_bind_ip("192.0.2.1".parse()?)`
-    pub fn ring_bind_ip(mut self, ip: IpAddr) -> Self {
-        self.ring_bind_ip = ip;
         self
     }
 
@@ -165,11 +141,6 @@ impl RendezvousConfig {
         self.io_timeout
     }
 
-    /// リング用待受の bind IP。
-    pub fn ring_bind_ip_value(&self) -> IpAddr {
-        self.ring_bind_ip
-    }
-
     fn validate_size_and_rank(&self) -> Result<()> {
         if self.world_size == 0 || self.world_size > MAX_WORLD_SIZE {
             return Err(DistributedError::WorldSizeOutOfRange {
@@ -208,24 +179,6 @@ impl RendezvousConfig {
                 reason: "timeout is too large",
             });
         }
-        // リングは集合点で観測したピア IP を使うため、アドレス族が異なると接続できない。
-        if self.rendezvous_addr.is_ipv4() != self.ring_bind_ip.is_ipv4() {
-            return Err(DistributedError::InvalidConfig {
-                reason: "ring_bind_ip must be the same address family as the rendezvous address",
-            });
-        }
-        // ループバック集合点では全ランクが同一ホストにいるため、ランク 0 が観測した接続元 IP
-        // （127.0.0.1 か集合点と同じ IP かは OS 依存）を正規 loopback（127.0.0.1／::1）へ
-        // 正規化して配布する。よって ring_bind_ip は正規 loopback か unspecified に限る
-        // （127.0.0.2 のような別 loopback IP はリング待受に届かないため早期に拒否する）。
-        if self.rendezvous_addr.ip().is_loopback()
-            && !self.ring_bind_ip.is_unspecified()
-            && self.ring_bind_ip != canonical_loopback(self.rendezvous_addr.ip())
-        {
-            return Err(DistributedError::InvalidConfig {
-                reason: "ring_bind_ip must be the canonical loopback address (127.0.0.1 or ::1) or unspecified for a loopback rendezvous",
-            });
-        }
         if self.rendezvous_addr.ip().is_unspecified() {
             return Err(DistributedError::InvalidConfig {
                 reason: "rendezvous address must not be unspecified",
@@ -236,19 +189,19 @@ impl RendezvousConfig {
                 reason: "non-zero rank needs a concrete rendezvous port",
             });
         }
-        check_peer_allowed(self.rendezvous_addr, self.allow_non_loopback)?;
-        check_peer_allowed(
-            SocketAddr::new(self.ring_bind_ip, 0),
-            self.allow_non_loopback,
-        )?;
-        // 非 loopback 集合点ではランク 0 が観測した LAN IP を配布するため、リング待受が既定の
-        // loopback のままだと配布先に待受が無くタイムアウトする。到達可能な ring_bind_ip
-        // （自ホストの LAN IP または unspecified）の明示指定を要求し、ソケット作成前に拒否する。
-        if !is_loopback_ip(self.rendezvous_addr.ip()) && is_loopback_ip(self.ring_bind_ip) {
+        // リング待受は集合点（またはそこへの接続）の IP に bind し、その IP をランク表で配布する。
+        // マルチキャスト・ブロードキャストは TCP の待受にならない。IPv6 リンクローカルは
+        // ランク表がスコープ ID を運べず配布先へ届かないため、いずれもソケット作成前に拒否する。
+        let bad_kind = match self.rendezvous_addr.ip() {
+            IpAddr::V4(v4) => v4.is_multicast() || v4.is_broadcast(),
+            IpAddr::V6(v6) => v6.is_multicast() || v6.is_unicast_link_local(),
+        };
+        if bad_kind {
             return Err(DistributedError::InvalidConfig {
-                reason: "ring_bind_ip must be set explicitly to a reachable non-loopback address (or unspecified) for a non-loopback rendezvous",
+                reason: "rendezvous address must be a unicast address without an IPv6 scope (no multicast, broadcast or link-local)",
             });
         }
+        check_peer_allowed(self.rendezvous_addr, self.allow_non_loopback)?;
         Ok(())
     }
 }
@@ -317,58 +270,37 @@ mod tests {
             c.clone().validate(),
             Err(DistributedError::NonLoopbackNotAllowed { .. })
         ));
-        // 非 loopback 集合点は ring_bind_ip の明示指定が要る（既定 loopback は拒否される）。
-        assert!(
-            c.allow_non_loopback(true)
-                .ring_bind_ip("192.0.2.1".parse().unwrap())
-                .validate()
-                .is_ok()
-        );
-        let c = RendezvousConfig::new(2, 0, addr("127.0.0.1:1234"))
-            .unwrap()
-            .ring_bind_ip("0.0.0.0".parse().unwrap());
+        // opt-in だけで通る（リング待受は集合点の IP から導くため、別の設定は要らない）。
+        assert!(c.allow_non_loopback(true).validate().is_ok());
+        // mapped の非 loopback も正規化後に同じ判定を受ける。
+        let m = RendezvousConfig::new(2, 1, addr("[::ffff:192.0.2.1]:1234")).unwrap();
         assert!(matches!(
-            c.clone().validate(),
+            m.validate(),
             Err(DistributedError::NonLoopbackNotAllowed { .. })
         ));
-        assert!(c.allow_non_loopback(true).validate().is_ok());
     }
 
     #[test]
-    fn non_loopback_rendezvous_requires_explicit_ring_bind_ip() {
-        let c = RendezvousConfig::new(2, 0, addr("192.0.2.1:1234"))
-            .unwrap()
-            .allow_non_loopback(true);
-        assert!(matches!(
-            c.clone().validate(),
-            Err(DistributedError::InvalidConfig { .. })
-        ));
-        assert!(
-            c.clone()
-                .ring_bind_ip("0.0.0.0".parse().unwrap())
-                .validate()
-                .is_ok()
-        );
-        assert!(
-            c.ring_bind_ip("192.0.2.1".parse().unwrap())
-                .validate()
-                .is_ok()
-        );
+    fn unroutable_rendezvous_kinds_are_rejected() {
+        // opt-in があってもリング待受を配布できないアドレス種別は設定誤りとして拒否する。
+        for s in [
+            "224.0.0.1:1234",
+            "255.255.255.255:1234",
+            "[ff02::1]:1234",
+            "[fe80::1]:1234",
+        ] {
+            let c = RendezvousConfig::new(2, 0, addr(s))
+                .unwrap()
+                .allow_non_loopback(true);
+            assert!(
+                matches!(c.validate(), Err(DistributedError::InvalidConfig { .. })),
+                "{s}"
+            );
+        }
     }
 
     #[test]
-    fn loopback_rendezvous_rejects_mismatched_ring_bind_ip() {
-        let c = RendezvousConfig::new(2, 1, addr("127.0.0.1:1234"))
-            .unwrap()
-            .ring_bind_ip("127.0.0.2".parse().unwrap());
-        assert!(matches!(
-            c.validate(),
-            Err(DistributedError::InvalidConfig { .. })
-        ));
-    }
-
-    #[test]
-    fn non_canonical_loopback_rendezvous_accepts_default_ring_bind_ip() {
+    fn non_canonical_loopback_rendezvous_is_valid() {
         let c = RendezvousConfig::new(2, 1, addr("127.0.0.2:1234")).unwrap();
         assert!(c.validate().is_ok());
     }

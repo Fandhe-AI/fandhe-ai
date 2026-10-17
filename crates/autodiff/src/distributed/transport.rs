@@ -103,6 +103,10 @@ pub fn bind_nonblocking(addr: SocketAddr) -> Result<TcpListener> {
 
 /// 期限つき accept。`listener` は非ブロッキングであること。受理したソケットは必ずブロッキングへ
 /// 戻す（macOS／BSD では listener の非ブロッキング属性が継承されるため）。
+///
+/// 1 本の不正な接続で集合全体を失敗させない: accept 前に RST した接続（BSD／macOS は
+/// `ConnectionAborted` を返す）や、受理直後にソケット設定が失敗した接続は捨てて受付を続ける。
+/// どの分岐でもループ先頭で絶対期限を先に検査するため、期限は延びない。
 pub fn accept_by(
     listener: &TcpListener,
     deadline: Instant,
@@ -115,8 +119,9 @@ pub fn accept_by(
         }
         match listener.accept() {
             Ok((s, peer)) => {
-                s.set_nonblocking(false)?;
-                s.set_nodelay(true)?;
+                if s.set_nonblocking(false).is_err() || s.set_nodelay(true).is_err() {
+                    continue;
+                }
                 return Ok((s, peer));
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -126,7 +131,13 @@ pub fn accept_by(
                 }
                 std::thread::sleep(ACCEPT_POLL.min(rem));
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::ConnectionReset
+                ) => {}
             Err(e) => return Err(DistributedError::Io(e)),
         }
     }
@@ -201,6 +212,41 @@ mod tests {
         let mut b = [0u8; 4];
         let e: DistributedError = ds.read_exact(&mut b).unwrap_err().into();
         assert!(matches!(e, DistributedError::PeerDisconnected), "{e}");
+    }
+
+    #[test]
+    fn accept_flood_does_not_extend_the_deadline() {
+        // 接続が途切れず届き続けても accept_by は絶対期限で終わる（指摘 1 の類型）。
+        let l = bind_nonblocking("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = l.local_addr().unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let t = Instant::now();
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                let mut keep = Vec::new();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    match TcpStream::connect(addr) {
+                        Ok(c) => keep.push(c),
+                        Err(_) => std::thread::sleep(Duration::from_millis(1)),
+                    }
+                    if keep.len() > 256 {
+                        keep.clear();
+                    }
+                }
+            });
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let mut accepted = 0usize;
+            let r = loop {
+                match accept_by(&l, deadline, "test accept") {
+                    Ok(_) => accepted += 1,
+                    Err(e) => break e,
+                }
+            };
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(matches!(r, DistributedError::Timeout { .. }), "{r}");
+            assert!(accepted > 0, "the flood must actually reach accept");
+        });
+        assert!(t.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

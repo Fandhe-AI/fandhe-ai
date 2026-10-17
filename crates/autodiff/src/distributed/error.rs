@@ -53,6 +53,13 @@ pub enum ProtocolViolation {
     OffsetMismatch,
     /// ランク表の形式が不正。
     MalformedRankTable,
+    /// ランク表のエントリが、受信側が自分で確かめられる待受アドレスと一致しない。
+    /// 自ランクのエントリ（自分のリング待受）とランク 0 のエントリ（集合点の IP）を検査する。
+    /// 配布アドレスに待受が無いまま後の connect がタイムアウトするのを、確立前に止めるため。
+    RankTableAddressMismatch {
+        /// 不一致だったエントリのランク。
+        rank: usize,
+    },
 }
 
 /// ホスト側 collective が返す型付きエラー。
@@ -133,6 +140,10 @@ impl fmt::Display for ProtocolViolation {
             Self::ChunkMismatch => write!(f, "chunk index mismatch"),
             Self::OffsetMismatch => write!(f, "segment offset mismatch"),
             Self::MalformedRankTable => write!(f, "malformed rank table"),
+            Self::RankTableAddressMismatch { rank } => write!(
+                f,
+                "rank table entry for rank {rank} does not match its listening address"
+            ),
         }
     }
 }
