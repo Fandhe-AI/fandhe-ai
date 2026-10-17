@@ -205,7 +205,8 @@ fn exchange(
     // 二次エラーより根本原因を返すため。
     let first = AtomicU8::new(0);
     thread::scope(|sc| {
-        let h = sc.spawn(|| {
+        // OS のスレッド数制限等で生成に失敗しても panic させず型付きエラーで返す（記録 §5）。
+        let spawned = thread::Builder::new().spawn_scoped(sc, || {
             let mut w = DeadlineStream::new(ctx.to_next, ctx.deadline, ctx.io_timeout);
             let r = (|| -> Result<()> {
                 for (off, len) in segments(send.1.len(), ctx.max_seg) {
@@ -225,6 +226,15 @@ fn exchange(
             }
             r
         });
+        let h = match spawned {
+            Ok(h) => h,
+            Err(e) => {
+                // 受信側へ進まず両ソケットを閉じ、相手ランクを待たせず呼び出し元の poisoned 遷移へ流す。
+                shutdown_both(ctx.to_next);
+                shutdown_both(ctx.from_prev);
+                return Err(DistributedError::Io(e));
+            }
+        };
         let (rc, dst) = recv;
         let mut rd = DeadlineStream::new(ctx.from_prev, ctx.deadline, ctx.io_timeout);
         let rr = (|| -> Result<()> {
