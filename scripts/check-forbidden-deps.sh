@@ -718,12 +718,22 @@ name = \"zip\"
 version = \"8.6.0\"
 ${zip_src}"
   local zip_changed_text="${zip_ok_text//8.6.0/8.7.0}"
-  local zip_git_text="${zip_ok_text}
+  # git ケースは版集合を承認集合と一致させたまま 7.2.0 の 1 件だけを git source にする
+  # （版の重複・不一致ではなく取得元の検出だけで fail することを確かめる）。
+  local zip_git_text="[[package]]
+name = \"zip\"
+version = \"0.6.6\"
+${zip_src}
 
 [[package]]
 name = \"zip\"
 version = \"7.2.0\"
-source = \"git+https://example.com/zip#deadbeef\""
+source = \"git+https://example.com/zip#deadbeef\"
+
+[[package]]
+name = \"zip\"
+version = \"8.6.0\"
+${zip_src}"
   local zip_path_text="[[package]]
 name = \"zip\"
 version = \"0.6.6\"

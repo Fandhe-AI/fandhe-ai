@@ -175,31 +175,41 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   `docs/license-matrix.md` 8b（2026-10-14 再実測）。
 - 2026-10-17: 所有者の明示承認（2026-10-17。「ハーネス限定で ignore（推奨）」）に基づき、
   `deny.toml` の `[advisories] ignore` に `zip` 9.0.0 未満の展開（extract）API に関する
-  3 勧告を追加した（修正版は >= 9.0.0）。ID ごとの内容は次のとおり。
+  3 勧告を追加した（修正版は >= 9.0.0。勧告 ID は版を問わず効く）。ID ごとの内容は次の
+  とおりで、各 ID の理由・到達性の根拠・失効条件はいずれも下記の共通節に従う。
   - `RUSTSEC-2026-0367`: ZIP 展開時に SUID/SGID/sticky ビットを安全な権限へマスクせず
-    保持する。
+    保持する。理由・到達性の根拠・失効条件は共通節を参照。
   - `RUSTSEC-2026-0368`: `ZipArchive::extract` が展開先ディレクトリの外を指す symlink を
-    作成する。
+    作成する。理由・到達性の根拠・失効条件は共通節を参照。
   - `RUSTSEC-2026-0369`: `ZipStreamReader::extract`／`ZipArchive::extract` が symlink 越しに
-    Unix 権限を適用する。
+    Unix 権限を適用する。理由・到達性の根拠・失効条件は共通節を参照。
 
-  **理由（共通）**: 該当するのは比較対象 `candle-core =0.11.0` の推移的依存 `zip 8.6.0`
-  で、修正版へは承認済みピンを変えない限り更新できない。ベンチ専用・非配布のツリーのため
-  受容する。承認済みピン・`Cargo.lock`・ルート `deny.toml` は変更しない。
+  **理由（共通）**: 解決グラフに入る zip は `zip 8.6.0` だけで、比較対象
+  `candle-core =0.11.0` の推移的依存。修正版へは承認済みピンを変えない限り更新できない。
+  ベンチ専用・非配布のツリーのため受容する。承認済みピン・`Cargo.lock`・ルート
+  `deny.toml` は変更しない。
 
-  **到達性の根拠（共通）**: ハーネスと比較対象は勧告対象の展開 API を呼ばない。次の
-  grep（A〜C は期待結果が「該当なし」＝終了コード 1。2026-10-17 に実行して確認）で再現できる。
-  - A（リポジトリルート）: `grep -rnE '\bzip::|use zip|ZipArchive|ZipStreamReader|\.extract\(|::extract\b|^zip\b' scripts/bench/framework-compare/bench-*/ --include='*.rs' --include=Cargo.toml`
-    → ハーネス（bench-*／bench-common）は zip を直接依存にも使用にも持たない。
-  - B: `grep -rnE '\.extract\(|::extract\b|ZipStreamReader' "$CARGO_HOME"/registry/src/*/candle-core-0.11.0/src`
-    → candle-core 0.11.0 に展開 API の呼び出しはない。
-  - C: `grep -rnE 'zip::|ZipArchive|ZipWriter' "$CARGO_HOME"/registry/src/*/candle-core-0.11.0/src | grep -vE 'ZipArchive::new|ZipWriter::new|zip::(write::FileOptions|CompressionMethod|result::ZipError)'`
-    → candle-core の zip 利用は error.rs・npy.rs・pickle.rs の `ZipArchive::new`／
-    `ZipWriter::new` と関連型だけ。
+  **到達性の根拠（共通）**: ハーネスと比較対象は勧告対象の展開 API を呼ばない。リポジトリ
+  ルート基準の次の手順で再現できる。事前に
+  `cargo fetch --manifest-path scripts/bench/framework-compare/Cargo.toml --locked`
+  （またはビルド）で依存ソースを取得しておく。2026-10-17 に A〜E を実行して確認した。
+  - 0: `C="$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/candle-core-0.11.0/src)"`
+    → 1 件のパスが出ること（出なければ B・C は偽陰性になるため先に失敗させる）。
+  - A: `grep -rnE '\bzip::|use zip|ZipArchive|ZipStreamReader|\.extract[_(]|::extract[_(]|^zip\b' scripts/bench/framework-compare/bench-*/ --include='*.rs' --include=Cargo.toml`
+    → 出力なし（終了コード 1）。ハーネスは zip を直接依存にも使用にも持たない。
+  - B: `grep -rnE '\.extract[_(]|::extract[_(]|ZipStreamReader' "$C"`
+    → 出力なし（終了コード 1）。`extract_unwrapped_root_dir(` 等も含め展開 API の呼び出しはない。
+  - C: `grep -rnE 'zip::|ZipArchive|ZipWriter' "$C" | grep -vE 'ZipArchive::new|ZipWriter::new|zip::(write::FileOptions|CompressionMethod|result::ZipError)'`
+    → 出力なし（パイプ末尾の `grep -v` の終了コード 1 が期待値。0 が成功していることが
+    前提）。除外せずに実行すると zip の利用は error.rs・npy.rs・pickle.rs の
+    `ZipArchive::new`／`ZipWriter::new` と関連型だけ。
+  - D: `cargo tree --manifest-path scripts/bench/framework-compare/Cargo.toml --offline --locked -i zip@7.2.0`
+    → `nothing to print`（解決グラフに入らない。burn-candle 由来は無効 feature 側）。
+  - E: `cargo tree --manifest-path scripts/bench/framework-compare/Cargo.toml --offline --locked -i zip@0.6.6`
+    → `nothing to print`（同。burn-tch 由来は無効 feature 側）。`-i zip@8.6.0` は
+    candle-core 0.11.0（bench-candle 経由）だけを示す。
 
-  入力は自前生成のテンソルと safetensors のみで外部の ZIP を展開しない。`Cargo.lock` に残る
-  `zip 0.6.6`（burn-tch 由来）・`7.2.0`（burn-candle 由来）は有効化していない feature の側で
-  解決グラフ外のため ignore の対象外である。
+  入力は自前生成のテンソルと safetensors のみで外部の ZIP を展開しない。
 
   **失効条件**: zip の修正版（>= 9.0.0）が candle-core の要求範囲に入った時点、または
   比較対象（candle-core・burn）のピン更新時に、この 3 件の ignore を削除する。
