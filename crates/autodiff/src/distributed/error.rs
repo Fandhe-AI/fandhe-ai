@@ -120,7 +120,7 @@ pub enum DistributedError {
     PeerDisconnected,
     /// その他の I/O エラー。
     Io(io::Error),
-    /// communicator が poisoned（状態遷移は #3145 が結線する）。
+    /// communicator が poisoned（`ring::RingCommunicator` が all-reduce の失敗時に遷移し、以後の呼び出しを拒否する。復旧は範囲外）。
     Poisoned,
 }
 

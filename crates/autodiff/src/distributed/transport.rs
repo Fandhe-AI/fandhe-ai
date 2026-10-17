@@ -143,8 +143,8 @@ pub fn accept_by(
     }
 }
 
-/// 双方向 shutdown（エラーを隣のランクへ早く伝える。失敗は無視する）。後続 #3145 が
-/// poisoned 遷移時に保持する全ソケットへ使う。
+/// 双方向 shutdown（エラーを隣のランクへ早く伝える。失敗は無視する）。`ring::RingCommunicator` が
+/// 失敗時（poisoned 遷移）に保持する全ソケットへ使う。
 pub fn shutdown_both(stream: &TcpStream) {
     let _ = stream.shutdown(Shutdown::Both);
 }
