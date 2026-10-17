@@ -32,7 +32,7 @@ export SIZE
 
 .PHONY: help setup rustup submodule hooks \
 	fmt fmt-check lint test test-ignored test-ignored-cuda test-ignored-metal test-ignored-metal-facade \
-	build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests check-cross-windows-interop \
+	build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests check-cross-rocm-tests check-cross-windows-interop \
 	doc-warnings deny deps-forbidden runner-policy guardrail-regression verification-gates verification-gate-bench \
 	startup-bench peak-memory-bench ci docker-build docker-shell docker-ci
 
@@ -89,7 +89,7 @@ test-ignored-metal-facade: ## Metal 実機専用: facade の DeviceParamStore �
 build-cross: ## macOS／Linux 両ターゲットの cargo build 検証（TASK-2.1b）。直接: scripts/build-cross.sh
 	@scripts/build-cross.sh
 
-build-no-cuda: ## CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・TASK-2.3。搭載環境ではスキップ）。直接: scripts/build-no-cuda.sh
+build-no-cuda: ## CUDA toolkit／ROCm 非搭載環境でのビルド・実行成立検証（TASK-1.7d・TASK-2.3・#3154。搭載環境ではスキップ）。直接: scripts/build-no-cuda.sh
 	@scripts/build-no-cuda.sh
 
 check-cross-metal-tests: ## backend-metal の #[ignore] テストを aarch64-apple-darwin で型検査する。直接: scripts/check-cross.sh metal-tests
@@ -97,6 +97,9 @@ check-cross-metal-tests: ## backend-metal の #[ignore] テストを aarch64-app
 
 check-cross-cpu-tests: ## backend-cpu の cfg(test) 限定コード（sysctl_ffi 等）を aarch64-apple-darwin で型検査する。直接: scripts/check-cross.sh cpu-tests
 	@scripts/check-cross.sh cpu-tests
+
+check-cross-rocm-tests: ## backend-rocm の cfg 分岐（非 Linux の HIP 候補空）を tests 込みで aarch64-apple-darwin 型検査する。直接: scripts/check-cross.sh rocm-tests
+	@scripts/check-cross.sh rocm-tests
 
 check-cross-windows-interop: ## onnx-interop・facade（Windows ビルド可能性）を x86_64-pc-windows-msvc で clippy 検査する。直接: scripts/check-cross.sh windows-interop
 	@scripts/check-cross.sh windows-interop
@@ -128,7 +131,7 @@ startup-bench: ## プロセス起動コスト計測を実行する（既定 CPU�
 peak-memory-bench: ## GEMM ピークメモリ計測を実行する（既定 CPU・4096³。BACKEND=cuda|metal・SIZE=N で切替）。直接: scripts/bench-harness.sh peak-memory
 	@scripts/bench-harness.sh peak-memory
 
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests check-cross-windows-interop doc-warnings test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests check-cross-rocm-tests check-cross-windows-interop doc-warnings test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）

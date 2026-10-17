@@ -16,11 +16,15 @@
 # facade の公開 API だけに依存し、facade の安定性保証の外にある。外部依存の新規追加はなく
 # [workspace.dependencies] へは影響しない（docs/hf-hub-integration-design.md §9）。
 #
-# 本体 workspace の直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分。
+# backend-rocm（13 個目・イシュー #3154）は ROCm（AMD GPU）バックエンドの雛形（`publish = false`）。
+# HIP は `libloading`（第 12 区分）で実行時に動的ロードし、ビルド時にはリンクしない
+# （ROCm 非搭載環境でもビルドが通る。docs/backend-rocm-hip-ffi-decision.md）。
+#
+# 本体 workspace の直接依存として許容する 11 区分（第 1〜8・第 10〜12 区分。
 # .claude/rules/deps-policy.md。第 9 区分はベンチ比較対象の独立ハーネス限定で本体
 # workspace には入らない）は下記 [workspace.dependencies] で =x.y.z 完全固定として
 # 一元導入済み（TASK-1.1b・イシュー #5。第 10 区分の libc はイシュー #2347・PR #2348 で
-# 追加、第 11 区分の ureq はイシュー #3124 で追加）。これら以外の新規追加・既存依存のバージョン更新は本ファイルで行わず、
+# 追加、第 11 区分の ureq はイシュー #3124、第 12 区分の libloading はイシュー #3154 で追加）。これら以外の新規追加・既存依存のバージョン更新は本ファイルで行わず、
 # ユーザー承認を経た別イシューで対応する。
 #
 # バックエンド切替は feature フラグなしの cfg ベース構成（PoC-v2-5 実証構成。REQ-2）を
@@ -45,6 +49,7 @@ members = [
     "crates/facade",
     "crates/docs-site",
     "crates/hf-hub",
+    "crates/backend-rocm",
 ]
 
 [workspace.package]
@@ -128,7 +133,7 @@ publish = false
 # keywords / categories / description のみ）。
 repository = "https://github.com/Fandhe-AI/fandhe-ai"
 
-# 本体 workspace の直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分。
+# 本体 workspace の直接依存として許容する 11 区分（第 1〜8・第 10〜12 区分。
 # .claude/rules/deps-policy.md）を =x.y.z 完全固定で一元定義する。
 # 各クレートは `<name>.workspace = true` で参照し、バージョン更新はこのテーブルのみを
 # 変更すれば全クレートに反映される（TASK-1.1b。イシュー #5）。
@@ -210,6 +215,11 @@ libc = "=0.2.189"
 #   macOS クロスの全環境で成功した唯一の構成（§16.5）。OpenSSL の脆弱性は `openssl-src`
 #   の版更新（人間承認）でしか直らない（受容済み）
 ureq = { version = "=3.4.2", default-features = false, features = ["native-tls", "vendored"] }
+# 動的ロード（第 12 区分。イシュー #3154・#3153 所有者コメント 6111762873・
+# `docs/backend-rocm-hip-ffi-decision.md` §5）。用途は HIP／HIPRTC の実行時ロードに限り、
+# 参照するのは `crates/backend-rocm` だけ。cudarc 0.19.8 の推移的依存と同じ版（lock 上で
+# 重複しない）。default feature（`std`）は依存を増やさない。版の更新は人間承認。
+libloading = "=0.9.0"
 
 # 依存クレート（workspace メンバー以外）のデバッグ情報を行番号のみにする。
 # ローカルの `target/` は 20GB を超えることがあり、依存グラフ全体の full debuginfo

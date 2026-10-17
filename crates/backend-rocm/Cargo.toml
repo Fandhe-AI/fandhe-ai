@@ -1,0 +1,23 @@
+# backend-rocm（fandhe-ai-backend-rocm）: ROCm（AMD GPU）バックエンドの雛形（イシュー #3154・親 #3150）。
+#
+# 役割: HIP ランタイムを `libloading`（第 12 区分）で実行時に動的ロードし、ROCm の有無を
+# probe できるようにする。この段階では HIP のカーネルを実行しない（HIPRTC・カーネルは #3155）。
+#
+# 依存方向: 現時点で内部クレートへは依存しない（BackendOps の実装は #3155 以降）。
+# facade からも参照しない（Device への ROCm 追加は #3157）。
+#
+# 公開区分: `publish = false`（workspace 既定を継承）。
+#
+# `libloading` は無条件依存（cfg なし。cudarc の dynamic-loading と同じ構成）。ビルド時に
+# `libamdhip64` へリンクしないため ROCm 非搭載でもビルドが成立する。承認根拠は
+# deps-policy.md 第 12 区分・docs/backend-rocm-hip-ffi-decision.md §5。
+[package]
+name = "fandhe-ai-backend-rocm"
+description = "ROCm（AMD GPU）バックエンドの雛形（HIP を実行時に動的ロードする。非公開）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libloading.workspace = true
