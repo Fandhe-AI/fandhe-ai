@@ -307,4 +307,15 @@ W = 4 でランク 2（ランク 0 の隣ではない）が 1 ステップ後に
 
 ### 17.5 不変・範囲外
 
-tolerance 定数・parity baseline・FMA 契約・依存・公開面は変更しない。GB10 実機での実測は #3149。RmsProp／Adagrad／LAMB の分散ステップ・abort API・復旧・再接続は §15・§16.4 の範囲外のまま。
+tolerance 定数・parity baseline・FMA 契約・依存・公開面は変更しない。GB10 実機での実測は #3149（§18）。RmsProp／Adagrad／LAMB の分散ステップ・abort API・復旧・再接続は §15・§16.4 の範囲外のまま。
+
+## 18. #3149 実装時の追補（GB10 同一 GPU 2 プロセス）
+
+実装は `crates/facade/tests/distributed_cuda_multiprocess_real_device.rs` と `docs/perf/logs/ddp-host-collective-gb10-3149/`（`RULE.txt`・`README.md`）。テスト・ドキュメントのみで、本体・公開面・依存・tolerance・baseline・FMA 契約・`docs/spec/`・ワイヤ形式は不変。§17.5 が #3149 へ委ねた CUDA 実機確認の枠を閉じる。承認は §11 の D-A・D-B だけで、それ以外の承認は得ていない。
+
+- 構成: #3148 と同形（親 = ランク 0、子 = ランク 1、W = 2 固定）。両プロセスが `Device::Cuda(0)` を共有する。デバイスを引数にしたハーネスで、同じハーネスを CPU で回す自己検査が CI で配線を確かめる。
+- 比較対象: 1 プロセス CUDA（`single_dev`・resident 経路）と 1 プロセス CPU（`single_cpu`）。判定は REQ-2 統一複合判定の厳密判定で、全 optimizer で `fail_count == 0`。
+- bit 一致（ランク間・run 間）は記録にとどめ合否に使わない。§6 のとおり GPU 経路の backward 決定性は未検証のため。
+- タイムアウト: NVRTC の JIT による偽 `Timeout` を避けるため、establish 120 秒・io 60 秒・op 180 秒・全体 600 秒とし、establish 後に JIT を前払いする。
+- 分散ステップは非 resident の step 経路（§15）を通り、`single_dev` は resident 経路を通る。fail の切り分けのため `single_dev` 対 `single_cpu` を参考行として出す。
+- 状態: GB10 での実測は未実施。実測記入欄は未記入で、issue は実測まで open のまま。
