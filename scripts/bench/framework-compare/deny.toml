@@ -48,6 +48,8 @@ ignore = [
     # 更新できない。ベンチ専用・非配布のツリーのため受容する（2026-10-17 ユーザー
     # 承認。本体のルート `deny.toml` には追加しない）。解消予定: 比較対象バージョン
     # を更新する再計測キャンペーン時に要否を再評価する。
+    # zip の版集合（0.6.6／7.2.0／8.6.0）は `scripts/check-forbidden-deps.sh lock-all` が
+    # Cargo.lock に対し fail-closed で固定する（版の追加・変更・非 registry 化は CI で失敗）。
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",

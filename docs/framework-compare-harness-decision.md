@@ -185,8 +185,12 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   `Cargo.lock` に残る `zip 0.6.6`（burn-tch 由来）・`7.2.0`（burn-candle 由来）は
   有効化していない feature の側で解決グラフ外のため ignore の対象外であり、将来
   それらの feature を有効にして別の版で deny が落ちた場合は ignore を足さず承認を
-  取り直す。ベンチ専用・非配布の
-  ツリーのため受容する。承認済みピン・`Cargo.lock`・契約検査・ルート `deny.toml` は
+  取り直す。この前提は `scripts/check-forbidden-deps.sh lock-all`
+  （`check_framework_compare`）が `Cargo.lock` 上の `zip` の版集合
+  {0.6.6, 7.2.0, 8.6.0} の完全一致と全エントリの crates.io registry 取得元を
+  fail-closed で固定する（追加・削除・変更のいずれも失敗。Codex 指摘への対応として
+  2026-10-17 に所有者承認のうえ追加。self-test に正負ケースあり）。ベンチ専用・
+  非配布のツリーのため受容する。承認済みピン・`Cargo.lock`・ルート `deny.toml` は
   変更しない。比較対象バージョンを更新する再計測キャンペーン時に要否を再評価する。
 
 ## 5. tch-rs を計測対象に含めない判断
