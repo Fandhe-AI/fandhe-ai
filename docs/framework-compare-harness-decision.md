@@ -173,7 +173,8 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   追加・削除や他の依存の更新はない。承認済みピン（burn 0.21.0・candle-core 0.11.0・
   fandhe-ai 0.11.0）・`deny.toml`・契約検査は変更しない。ライセンス・監査は
   `docs/license-matrix.md` 8b（2026-10-14 再実測）。
-- 2026-10-17: 所有者の明示承認（2026-10-17。「ハーネス限定で ignore（推奨）」）に基づき、
+- 2026-10-17: 所有者の明示承認（2026-10-17。「ハーネス限定で ignore（推奨）」。出典:
+  https://github.com/Fandhe-AI/fandhe-ai/pull/3410#issuecomment-6232331383）に基づき、
   `deny.toml` の `[advisories] ignore` に `zip` 9.0.0 未満の展開（extract）API に関する
   3 勧告を追加した（修正版は >= 9.0.0。勧告 ID は版を問わず効く）。ID ごとの内容は次の
   とおりで、各 ID の理由・到達性の根拠・失効条件はいずれも下記の共通節に従う。
