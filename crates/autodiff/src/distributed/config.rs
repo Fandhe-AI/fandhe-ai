@@ -7,7 +7,7 @@
 //! 根拠: `docs/facade-distributed-host-collective-decision.md` §3・§5・§7。
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::error::{DistributedError, Result};
 use super::frame::MAX_WORLD_SIZE;
@@ -56,7 +56,12 @@ impl RendezvousConfig {
             rank,
             rendezvous_addr,
             allow_non_loopback: false,
-            ring_bind_ip: IpAddr::from([127, 0, 0, 1]),
+            // 既定は集合点と同じアドレス族の loopback（::1 の集合点で IPv4 リングにならない）。
+            ring_bind_ip: if rendezvous_addr.is_ipv6() {
+                IpAddr::from(std::net::Ipv6Addr::LOCALHOST)
+            } else {
+                IpAddr::from([127, 0, 0, 1])
+            },
             session_id: 0,
             connect_timeout: Duration::from_secs(10),
             establish_timeout: Duration::from_secs(60),
@@ -173,6 +178,22 @@ impl RendezvousConfig {
         {
             return Err(DistributedError::InvalidConfig {
                 reason: "timeouts must be non-zero",
+            });
+        }
+        // Instant に加算できない巨大 timeout は panic ではなく設定誤りとして拒否する。
+        let now = Instant::now();
+        if now.checked_add(self.connect_timeout).is_none()
+            || now.checked_add(self.establish_timeout).is_none()
+            || now.checked_add(self.io_timeout).is_none()
+        {
+            return Err(DistributedError::InvalidConfig {
+                reason: "timeout is too large",
+            });
+        }
+        // リングは集合点で観測したピア IP を使うため、アドレス族が異なると接続できない。
+        if self.rendezvous_addr.is_ipv4() != self.ring_bind_ip.is_ipv4() {
+            return Err(DistributedError::InvalidConfig {
+                reason: "ring_bind_ip must be the same address family as the rendezvous address",
             });
         }
         if self.rendezvous_addr.ip().is_unspecified() {

@@ -85,7 +85,12 @@ impl Rendezvous {
                 from_prev: None,
             });
         };
-        let deadline = Instant::now() + cfg.establish_timeout_value();
+        // Duration::MAX 等で Instant を表現できない設定は panic させず型付きエラーにする。
+        let deadline = Instant::now()
+            .checked_add(cfg.establish_timeout_value())
+            .ok_or(DistributedError::InvalidConfig {
+                reason: "establish_timeout is too large",
+            })?;
         let ring_port = ring.local_addr()?.port();
         let table = match self.rendezvous.as_ref() {
             Some(l) => collect_as_rank0(cfg, l, ring, ring_port, deadline)?,
@@ -106,7 +111,10 @@ fn my_hello(cfg: &RendezvousConfig, ring_port: u16) -> Hello {
 
 /// Hello を 1 通読む。期限は `min(io_timeout, 全体期限)`（何も送らない接続に足止めされない）。
 fn read_hello_by(s: &TcpStream, deadline: Instant, io_timeout: Duration) -> Result<Hello> {
-    let own = deadline.min(Instant::now() + io_timeout);
+    // io_timeout が Instant に加算できない巨大値なら全体期限だけで打ち切る（panic しない）。
+    let own = Instant::now()
+        .checked_add(io_timeout)
+        .map_or(deadline, |t| deadline.min(t));
     let mut ds = DeadlineStream::new(s, own, io_timeout);
     let h = read_header(&mut ds)?;
     read_hello(&mut ds, &h)
@@ -374,6 +382,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn huge_timeouts_are_invalid_config_not_panic() {
+        let c = cfg(2, 0, lo0()).establish_timeout(Duration::MAX);
+        assert!(matches!(
+            Rendezvous::bind(c),
+            Err(DistributedError::InvalidConfig { .. })
+        ));
+        let c = cfg(2, 0, lo0()).io_timeout(Duration::MAX);
+        assert!(matches!(
+            Rendezvous::bind(c),
+            Err(DistributedError::InvalidConfig { .. })
+        ));
+        let c = cfg(2, 0, lo0()).connect_timeout(Duration::MAX);
+        assert!(matches!(
+            Rendezvous::bind(c),
+            Err(DistributedError::InvalidConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn ring_bind_family_mismatch_is_rejected() {
+        let c = cfg(2, 0, "[::1]:0".parse().unwrap()).ring_bind_ip("127.0.0.1".parse().unwrap());
+        assert!(matches!(
+            Rendezvous::bind(c),
+            Err(DistributedError::InvalidConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn ipv6_rendezvous_works_with_default_ring_bind() {
+        if TcpListener::bind("[::1]:0").is_err() {
+            return; // IPv6 loopback が無い環境では検証できない。
+        }
+        thread::scope(|s| {
+            let c0 = cfg(2, 0, "[::1]:0".parse().unwrap());
+            let (addr, h0) = spawn_rank0(s, c0);
+            let h1 = s.spawn(move || Rendezvous::bind(cfg(2, 1, addr))?.establish());
+            assert!(h0.join().unwrap().unwrap().to_next.is_some());
+            assert!(h1.join().unwrap().unwrap().from_prev.is_some());
+        });
     }
 
     #[test]

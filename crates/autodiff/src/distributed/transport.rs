@@ -109,6 +109,10 @@ pub fn accept_by(
     phase: &'static str,
 ) -> Result<(TcpStream, SocketAddr)> {
     loop {
+        // accept が成功し続けても絶対期限を超えない（接続を送り続けるピアが期限を延ばせない）。
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return Err(DistributedError::Timeout { phase });
+        }
         match listener.accept() {
             Ok((s, peer)) => {
                 s.set_nonblocking(false)?;
