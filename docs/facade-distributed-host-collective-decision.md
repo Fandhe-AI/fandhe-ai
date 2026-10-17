@@ -228,3 +228,55 @@
 - **対象 optimizer**: SGD／Adam／AdamW（AMP と同じ）。RmsProp／Adagrad／LAMB は範囲外。SGD は通信前に `SgdConfig::validate()` を呼ぶ。Adam／AdamW の検証は `step_adam_impl` から抽出しない（全ランク対称に失敗するため）
 - **f64 アキュムレータは使わない**（§6 の再確認）: ランク方向は W ≤ 64 の短い軸で「長軸縮約」に当たらない。tolerance・baseline・FMA 契約は不変
 - **テスト**: `MockDeviceOps`（autodiff は backend-cpu に依存できない）で、W = 1 の bit 一致（resident あり・なし）、2 ランク半バッチと全バッチの統一複合判定での一致とランク間 bit 一致、ピア切断時の非更新・poisoned・ハングなし、平坦化順序を検証する。モックは `adam_step_device` を持たないため Adam／AdamW は `Unsupported` の素通しのみ確認し、数値検証は #3148 に委ねる
+
+## 16. #3147 実装時の追補（facade 公開面 `fandhe_ai::distributed`）
+
+実装は `crates/facade/src/distributed/`（`mod.rs`・`config.rs`・`error.rs`・`communicator.rs`・`step.rs`）。§0〜§15 の判断は変えない。**承認は §11 の D-A・D-B のみ**で、それ以外の承認は得ていない。依存・tolerance・baseline・`docs/spec/`・ワイヤ形式・既存の公開シグネチャは不変（追加のみ）。
+
+### 16.1 確定した公開名（5 型 + 3 関数）
+
+公開パスは `fandhe_ai::distributed` のみ（クレートルートへは再エクスポートしない。サブモジュールは非公開）。`mod.rs` の `pub use` は承認形 4 文（1 文 1 行）。
+
+| 公開名 | 役割・要点 | 内部型との対応 |
+|---|---|---|
+| `DistributedConfig`（`builder`・`world_size`・`rank`・`rendezvous_addr`・`is_non_loopback_allowed`） | 検証済みの設定 | `RendezvousConfig` + `CollectiveOptions`（`pub(crate)` で保持） |
+| `DistributedConfigBuilder`（`allow_non_loopback`・`session_id`・`connect_timeout`・`establish_timeout`・`io_timeout`・`op_timeout`・`build`） | `build()` が world_size・rank・アドレス種別・ポート・タイムアウトを**ソケットを開く前に**検証する。`io_timeout` は確立時と all-reduce の両方に適用。未指定のタイムアウトは内部既定（接続 10 秒・確立 60 秒・io 30 秒・op 120 秒）をそのまま使う | `RendezvousConfig::new`／`validate`・`CollectiveOptions::validate` |
+| `Rendezvous`（`bind`・`local_addr`・`establish`） | §3 手順 1 の 2 段構成（ポート 0 の実アドレスを先に取得して TOCTOU を避ける） | `Rendezvous` |
+| `Communicator`（`init`・`rank`・`world_size`・`is_poisoned`） | 確立済みの ring ハンドル。`Send` | `RingCommunicator` |
+| `DistributedError` | 自己完結の型付きエラー（`#[non_exhaustive]`） | 下表 |
+| `step_sgd`／`step_adam`／`step_adamw`（`(&Tape, &mut DeviceParamStore, &Gradients, &Config, &mut Communicator)`） | §15 と同型のフリー関数。委譲とエラー写像だけ | `distributed::step::step_*` |
+
+公開シグネチャに `fandhe_ai_autodiff::Tape`・`RingCommunicator`・`RingLinks`・内部の `Rendezvous`／`RendezvousConfig`／`CollectiveOptions`／`ReduceOp`／`ProtocolViolation`／`DistributedError`／`DistributedStepError` を出さない。`From` impl は公開せず、写像は `pub(crate)` の `from_inner`／`from_step` に置く。
+
+### 16.2 エラー写像
+
+| facade の variant | 内部 |
+|---|---|
+| `InvalidConfig`・`WorldSizeOutOfRange`・`RankOutOfRange`・`NonLoopbackNotAllowed`・`DuplicateRank`・`WorldSizeMismatch`・`UnexpectedRank`・`Timeout`・`PeerDisconnected`・`Io`・`Poisoned` | 同名の `DistributedError` variant |
+| `Protocol { message }` | `Protocol(ProtocolViolation)` の `Display`（固定文と数値だけ。ピアのバイト列は含まない） |
+| `Backend(BackendError)` | `DistributedStepError::Backend`（`BackendError` は facade の既存公開型） |
+| `GradientLengthMismatch` | `DistributedStepError::GradientLengthMismatch` |
+| `Other { message }` | 内部 enum が `#[non_exhaustive]` のため必須になる wildcard 腕の受け皿。現行の全 variant は上記へ写り、単体テストで `Other` に落ちる variant が 0 件であることを保証する |
+
+`DistributedStepError::Collective(e)` は `e` に上の写像を再帰適用する。`Display` は固定文・数値・内側エラーの `Display` だけで、`Io` は `ErrorKind` のみを出す（OWASP A09）。
+
+### 16.3 `Communicator::init` のポート 0 拒否
+
+`world_size >= 2` でランク 0 の集合点ポートが 0 の構成は、ピアが実ポートを知る手段が無く必ずタイムアウトするため、`init` は `InvalidConfig` で拒否する（構築段で止める。OWASP A04）。ポート 0 を使うときは `Rendezvous::bind` → `local_addr` → ピアへ伝達 → `establish` を使う。`world_size == 1` は無通信なので拒否しない。
+
+### 16.4 不採用（所有者へ戻す論点。後から追加しても非破壊）
+
+決定記録に形が無いため本イシューでは公開しない。汎用の `all_reduce` と `ReduceOp`（損失・メトリクスの平均等）・`MAX_WORLD_SIZE` の公開・`from_env`・RmsProp／Adagrad／LAMB／AMP の分散ステップ・abort API・`Tape` の inherent method としての入口。
+
+### 16.5 セキュリティ前提（公開 doc に明記）
+
+認証も暗号化も無い（信頼できるネットワーク内に限る）。`session_id` は誤接続の検出用で認証ではない。既定は loopback で、非 loopback は `allow_non_loopback(true)` の明示 opt-in だけ。アドレスは `SocketAddr` のみ（DNS 解決を持ち込まない）。all-reduce が失敗したらパラメータを更新しない（fail-closed。公開契約として doc とテストで固定）。
+
+### 16.6 ガードとテスト
+
+- `crates/facade/tests/api_surface.rs`: `distributed_is_public_and_submodules_stay_private`・`facade_exposes_distributed_items_only_in_approved_shape`（`pub use` 4 文の完全一致・`distributed/` の完全公開項目インベントリ・型ごとの `pub fn` 集合）とその自己テスト `..._detects_each_category`・`distributed_unapproved_paths_are_absent`（ルート再エクスポート・内部 `distributed` の再エクスポート・シグネチャ内の内部型・`unsafe` の不在）・`distributed_items_are_reachable_via_facade_distributed_path`（関数ポインタ型での署名固定・`Communicator: Send`・wildcard 付き網羅 `match`）・`distributed_usage_doctest_is_present_and_compiled`（world_size 1 の実行例と world_size 2 以上の `no_run` 例）。`GRAD_SCALER_PROBE_MODULES` を 17 件にし、`facade_pub_use_leaves_are_not_modules` の小文字葉 allowlist に `step_*` を追加。`distributed` の保留ガードは存在しなかったため正ガードの新設である。43 個の `*HoldDoctestGuard` doctest に `use fandhe_ai::distributed::*;` を追加した（`models` 追加時と同じ手当て）
+- `crates/facade/tests/distributed_facade.rs`: 設定拒否の各ケース（world_size 0／65・rank 範囲外・unspecified・マルチキャスト・タイムアウト 0／`Duration::MAX`・ランク 1 のポート 0・opt-in なしの非 loopback）・`init` のポート 0 拒否・world_size 1 の既存ステップとの bit 一致（SGD／Adam／AdamW）・2 ランク（同一プロセス 2 スレッド・`127.0.0.1:0` 限定）の全バッチ単一更新との統一複合判定での一致とランク間 bit 一致・ピア切断時の非更新・`is_poisoned`・再利用拒否
+- `crates/facade/src/distributed/error.rs` の単体テスト: 内部の全 variant が専用 variant へ写ること
+- doc テストは外部通信をしない（world_size 1 は実行、world_size 2 以上は `no_run`）
+
+実機（CUDA／Metal）依存は無く `#[ignore]` は不要。CPU 複数プロセスでの検証は #3148、GB10 実測は #3149。
