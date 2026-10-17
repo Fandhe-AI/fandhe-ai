@@ -225,6 +225,40 @@ fn train_all(dev: Dev, rank: usize, comm: &mut Communicator) -> BTreeMap<String,
     out
 }
 
+/// シナリオ全体の期限を**実行中に**強制する番犬。開始から `SCENARIO_DEADLINE` 経過しても
+/// `Drop`（正常完了・panic）されなければプロセスごと終了する。親の CUDA 呼び出しが停止しても
+/// 期限で止まり、子は自身の番犬（同じ期限）で終了する。
+struct DeadlineWatchdog {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl DeadlineWatchdog {
+    fn start(label: &'static str) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                if started.elapsed() > SCENARIO_DEADLINE {
+                    eprintln!(
+                        "DDP_GB10 {label}: シナリオ期限 {SCENARIO_DEADLINE:?} 超過。強制終了"
+                    );
+                    std::process::exit(124);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        Self { done }
+    }
+}
+
+impl Drop for DeadlineWatchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // ---------------------------------------------------------------- 子プロセス側
 
 struct ChildEnv {
@@ -285,6 +319,7 @@ fn child_rank_entry_device() {
     let Some(env) = ChildEnv::from_env() else {
         return;
     };
+    let _watchdog = DeadlineWatchdog::start("child");
     let cfg = config(env.rank, env.addr, env.session);
     let mut comm = Rendezvous::bind(&cfg).unwrap().establish().unwrap();
     assert_eq!((comm.rank(), comm.world_size()), (env.rank, WORLD));
@@ -315,7 +350,14 @@ impl Drop for ChildGuard {
 fn spawn_child(dev: Dev, addr: SocketAddr, session: u64, out: &Path) -> ChildGuard {
     let exe = std::env::current_exe().expect("current_exe");
     let mut child = Command::new(exe)
-        .args(["child_rank_entry_device", "--exact", "--test-threads=1"])
+        // --nocapture: panic メッセージ（CUDA 初期化・step の unwrap 失敗等）を stdout の失敗レポートでなく
+        // stderr へ出させ、下の回収スレッドで保持する（stdout は捨てるため必須）。
+        .args([
+            "child_rank_entry_device",
+            "--exact",
+            "--test-threads=1",
+            "--nocapture",
+        ])
         .env(ENV_CHILD, "1")
         .env(ENV_WORLD, WORLD.to_string())
         .env(ENV_RANK, "1")
@@ -381,7 +423,7 @@ type RankResult = BTreeMap<String, Vec<f32>>;
 
 /// 1 回の分散 run。ランク 0（親）と子（ランク 1）の optimizer 名 → 最終パラメータを返す。
 /// 待受が loopback であることの証跡行もここで出す。
-fn run_dist(dev: Dev, session: u64) -> (RankResult, RankResult) {
+fn run_dist(dev: Dev, session: u64, scenario_start: Instant) -> (RankResult, RankResult) {
     let dir = TempDirGuard::new("ddp-dev");
     let cfg = config(0, "127.0.0.1:0".parse().unwrap(), session);
     let non_loopback_allowed = cfg.is_non_loopback_allowed();
@@ -397,7 +439,10 @@ fn run_dist(dev: Dev, session: u64) -> (RankResult, RankResult) {
     prewarm(dev, 0);
     let rank0 = train_all(dev, 0, &mut comm);
     drop(comm);
-    let (st, tail) = wait_child(&mut child, SCENARIO_DEADLINE);
+    let (st, tail) = wait_child(
+        &mut child,
+        SCENARIO_DEADLINE.saturating_sub(scenario_start.elapsed()),
+    );
     assert!(st.success(), "rank 1 が異常終了 {st:?}\n{tail}");
     (rank0, parse_train_result(&out))
 }
@@ -419,8 +464,9 @@ fn report_line(dev: Dev, opt: &str, vs: &str, a: &[f32], b: &[f32]) -> usize {
 /// ハーネス本体。fail があっても全行を出力してから最後に 1 回だけ panic する。
 fn run_harness(dev: Dev) {
     let started = Instant::now();
-    let (run_a0, run_a1) = run_dist(dev, 0xD157_3149_0000);
-    let (run_b0, _) = run_dist(dev, 0xD157_3149_1000);
+    let _watchdog = DeadlineWatchdog::start("parent");
+    let (run_a0, run_a1) = run_dist(dev, 0xD157_3149_0000, started);
+    let (run_b0, _) = run_dist(dev, 0xD157_3149_1000, started);
     let (x, y) = full_data();
     let mut failures = 0usize;
     for (opt, name) in OPTS {
