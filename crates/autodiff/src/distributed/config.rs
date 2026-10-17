@@ -59,6 +59,11 @@ impl RendezvousConfig {
     /// 既定値（loopback・接続 10 秒・確立 60 秒・読み書き 30 秒）で構築する。
     /// world_size と rank の範囲だけをここで検証し、残りは `validate`（`bind` 冒頭）で検証する。
     pub fn new(world_size: usize, rank: usize, rendezvous_addr: SocketAddr) -> Result<Self> {
+        // IPv4-mapped IPv6（`[::ffff:127.0.0.1]:p`）は IPv4 へ正規化する。正規化しないと
+        // `IpAddr::is_loopback` が mapped を loopback と判定せず、ランク表に観測 IP がそのまま載り
+        // 既定のリング待受（集合点と同じアドレス族の loopback）へ届かなくなる。
+        let rendezvous_addr =
+            SocketAddr::new(rendezvous_addr.ip().to_canonical(), rendezvous_addr.port());
         let cfg = Self {
             world_size,
             rank,
@@ -324,6 +329,13 @@ mod tests {
     #[test]
     fn non_canonical_loopback_rendezvous_accepts_default_ring_bind_ip() {
         let c = RendezvousConfig::new(2, 1, addr("127.0.0.2:1234")).unwrap();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn ipv4_mapped_rendezvous_is_canonicalized_to_ipv4() {
+        let c = RendezvousConfig::new(2, 1, addr("[::ffff:127.0.0.1]:1234")).unwrap();
+        assert_eq!(c.rendezvous_addr(), addr("127.0.0.1:1234"));
         assert!(c.validate().is_ok());
     }
 }

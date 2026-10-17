@@ -433,6 +433,27 @@ mod tests {
     }
 
     #[test]
+    fn ipv4_mapped_rendezvous_establishes_ring() {
+        thread::scope(|s| {
+            let c0 = cfg(2, 0, "[::ffff:127.0.0.1]:0".parse().unwrap());
+            let (addr, h0) = spawn_rank0(s, c0);
+            let mapped = SocketAddr::new(addr.ip().to_canonical(), addr.port());
+            let h1 = s.spawn(move || {
+                let a = SocketAddr::new(
+                    std::net::IpAddr::V6(match mapped.ip() {
+                        std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped(),
+                        std::net::IpAddr::V6(v6) => v6,
+                    }),
+                    mapped.port(),
+                );
+                Rendezvous::bind(cfg(2, 1, a))?.establish()
+            });
+            assert!(h0.join().unwrap().unwrap().to_next.is_some());
+            assert!(h1.join().unwrap().unwrap().from_prev.is_some());
+        });
+    }
+
+    #[test]
     fn world_size_one_opens_no_sockets() {
         let r = Rendezvous::bind(cfg(1, 0, lo0())).unwrap();
         assert!(r.rendezvous_local_addr().is_none());
