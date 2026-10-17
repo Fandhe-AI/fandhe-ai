@@ -57,7 +57,22 @@ prompt に埋め込まれた P0/P1 基準に**加えて**適用する（優先�
   推移的依存ツリーとしての意図的保持に限り P0 の混入には当たらない。同 workspace は
   禁止リスト grep の代わりに `scripts/check-forbidden-deps.sh lock-all` の専用
   fail-closed 契約検査（`[workspace]` 隔離・承認済みピンのドリフト検出・直接依存 allowlist）で統制され、
-  この検査・専用 deny.toml・適用範囲を緩める変更は P0
+  この検査・専用 deny.toml・適用範囲を緩める変更は P0。
+  例外: `scripts/bench/framework-compare/deny.toml` の `[advisories] ignore` へ
+  勧告 ID（完全一致の個別 ID）を追加する変更のうち、次の (a)〜(d) をすべて満たすものは
+  この P0 に当たらない（1 つでも欠ければ従来どおり P0）。(a) 対象 crate が承認済み
+  比較対象（burn 0.21.0・candle-core 0.11.0）の推移的依存で、比較対象の完全固定版を
+  変えずには修正版へ更新できない。(b) `docs/framework-compare-harness-decision.md` に
+  勧告 ID ごとのユーザー承認記録（日付と、PR の外で確認できる承認の出典 URL〈Issue・PR
+  コメント〉）がある。(c) ignore に勧告 ID ごとに、理由・到達性の根拠（ハーネスと比較
+  対象が勧告対象の API を呼ばないことを grep 等で確かめられる形で示す）・失効条件
+  （修正版が比較対象の要求範囲に入った時点、または比較対象のピン更新時に削除する）を書く。
+  (d) 対象 crate の同 workspace `Cargo.lock` 上の版集合を
+  `scripts/check-forbidden-deps.sh lock-all` の専用契約検査が fail-closed で固定する
+  （版の追加・変更で検査が落ちる）。この例外は本体のルート `deny.toml`・
+  `scripts/bench/oss-gemm-compare/deny.toml` には適用しない。advisories の他のキー
+  （`unmaintained`・`yanked` 等）・licenses・bans・sources の緩和、勧告 ID のワイルドカード化
+  や範囲指定、crate 単位の ignore は従来どおり P0
 - **外部フォーマットのパース検証（P0）**: safetensors / ONNX（prost）・TOML 設定・
   guardrail CLI 入力のパース時は長さ・形状の事前検証を行う。検証の欠落・後退、
   シェル呼び出しへの外部入力の非クォート展開等のインジェクション経路は P0（A03）
