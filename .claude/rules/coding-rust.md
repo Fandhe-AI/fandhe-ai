@@ -3,12 +3,12 @@
 ## 基盤方針（REQ-1 v2、変更禁止）
 
 - **完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）とする。Burn 等の既存 ML フレームワークへの統合は行わない
-- 依存は許容依存 11 区分のみ（本体 workspace の直接依存は第 1〜8・第 10・第 11 区分の 10 区分、第 9 区分はベンチ比較対象の独立ハーネス限定。詳細は [deps-policy.md](./deps-policy.md)）。禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査する（TASK-1.2）
+- 依存は許容依存 12 区分のみ（本体 workspace の直接依存は 第 1〜8・第 10〜12 区分の 11 区分、第 9 区分はベンチ比較対象の独立ハーネス限定。詳細は [deps-policy.md](./deps-policy.md)）。禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査する（TASK-1.2）
 - 互換 API 層（`compat::array`／`compat::Sequential` 相当）は自作コアの上の薄いラッパーに徹する（REQ-9）
 
 ## バックエンド構成（REQ-2）
 
-- バックエンド切替は **feature フラグなしの cfg ベース**を基本とする（PoC-v2-5 実証構成）。`cudarc` は無条件依存＋動的ロード（CUDA toolkit 非搭載環境でもビルド成立）、`objc2`・`objc2-foundation`・`objc2-metal` は `cfg(target_os = "macos")` 分離
+- バックエンド切替は **feature フラグなしの cfg ベース**を基本とする（PoC-v2-5 実証構成）。`cudarc` は無条件依存＋動的ロード（CUDA toolkit 非搭載環境でもビルド成立）、`objc2`・`objc2-foundation`・`objc2-metal` は `cfg(target_os = "macos")` 分離、ROCm は `libloading` の無条件依存＋実行時ロード（ビルド時リンクなし。`crates/backend-rocm`・第 12 区分）
 - バックエンド間数値一致は統一複合判定「**相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満**」（全ペア共通。REQ-2 は TF32 前提の複合指標に改定済み）
 - 丸め方針（FMA 契約）をバックエンド間で統一する: CPU 参照実装は `f32::mul_add` を用い、GPU 側（CUDA NVRTC・Metal `simdgroup_multiply_accumulate`）の既定 FMA 契約と揃える（PoC-v2-5 の K=4096 ストレスケースで実測確認済み）。matmul 系の FMA 契約はこの方針のまま不変とする。**例外**: CUDA GEMM の 3×TF32 opt-in モード（`fandhe_ai_backend_cuda::precision::CudaGemmPrecision::Tf32x3`。既定 OFF・facade `fandhe_ai::set_cuda_gemm_precision` 経由の明示 opt-in 限定）は、hi/lo 分割・3 回の `mma.sync` 累積（split-single 法）という構造上 f32 SIMT 参照実装と bit 一致しない。数値一致の複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）自体は変更しない（ユーザー承認 2026-09-06・イシュー #1338 コメント。詳細は `docs/cuda-tf32x3-split-single-decision.md`）
 - **正規化統計・勾配の長軸縮約（rmsnorm の `rstd` 二乗和・dw の行方向蓄積等）は `f64` アキュムレータで統一する**。この一般原則は 2 系統で扱いが異なる（精密化。イシュー #1102・codex-review 指摘・PR #1120。`docs/perf/cuda-parity-baseline.md` §9.10）:

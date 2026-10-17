@@ -1,7 +1,7 @@
 # HIP FFI の依存方式（`libloading` による動的ロード）の決定記録と承認依頼（#3153）
 
-状態: 方式 B は所有者回答（2026-10-12・イシュー #3153 コメント 6111762873）で確定済み。版（`=0.9.0`）・feature（default）・`deny.toml` への影響は本 doc §5 の実測値であり、所有者の確認待ち（§9）。
-更新履歴: #3153 で初版（`docs/rocm-grade-up-conditions-v2-spec-proposal.md` §3c の比較を本 doc へ移して確定）。
+状態: 方式 B は所有者回答（2026-10-12・イシュー #3153 コメント 6111762873）で確定済み。依存の実追加は #3154 で反映済み（§12）。版（`=0.9.0`）・feature（default）・`deny.toml` への影響は本 doc §5 の実測値で、所有者コメント 6111762873 の委任条項（版は実装時点の `Cargo.lock` の版を `=x.y.z` で固定・実測で戻し条件に該当しなければ #3154 へ進める）の範囲内として反映した。この具体構成への個別の明示確認コメントは存在しない（§9・§12 参照）。
+更新履歴: #3154 で §12（反映記録）を追加。#3153 で初版（`docs/rocm-grade-up-conditions-v2-spec-proposal.md` §3c の比較を本 doc へ移して確定）。
 実測日: 2026-10-17。toolchain: `rustc 1.98.1`・`cargo 1.98.1`・`cargo-deny 0.19.8`。
 
 ## §0 結論
@@ -10,7 +10,7 @@
 - **区分は第 12 区分**。所有者回答の採番規則（HTTPS 側 #3123 と比べ、先に `deps-policy.md` へ入った側に続けて採番する）に従う。`ureq` が 2026-10-16 に第 11 区分として先に入ったため、HIP の動的ロードは第 12 区分になる。`docs/rocm-grade-up-conditions-v2-spec-proposal.md` に残る「第 11 区分案」は #2614 時点の古い表記である。
 - **ピン**: `libloading =0.9.0`（default feature。`Cargo.lock` の現行版。cudarc 0.19.8 の推移的依存と同一）。
 - **戻し条件 3 点**（新しい allow 識別子が要る／cudarc 側と版が重複する／推移的依存が増える）は、§5 の実測ではいずれも該当しない。#3154 へ進める。
-- 本 doc は依存ファイルを変えない（`Cargo.toml`・`Cargo.lock`・`deps-policy.md`・`deny.toml`・`docs/license-matrix.md` は不変。反映は #3154）。
+- 本 doc（#3153 時点）は依存ファイルを変えない。反映は #3154 で行った（§12）。
 - 現状の許容依存の数え方: 区分は第 1〜12 の 12 区分（第 9 区分はベンチ比較対象で本体 workspace 外）。第 12 区分が入ると本体直接依存は第 1〜8・第 10〜12 区分の 11 区分になる。
 
 ## §1 位置づけ・前提
@@ -112,7 +112,7 @@ cudarc が libloading を上げて 2 つの版が並んだ場合は、`=0.9.0` �
 | ライセンス | ISC（推移的依存の `cfg-if`・`windows-link` は MIT OR Apache-2.0） |
 | `deny.toml` への影響 | なし（新しい allow 不要・新規 crate なし。`bans`／`licenses`／`sources` ok） |
 
-方式 B は 2026-10-12 の回答で確定済み。上記の版・feature・影響は本 doc の実測値であり、確認をお願いする。
+方式 B は 2026-10-12 の回答（コメント 6111762873）で確定済み。同コメントは版を「実装時点の `Cargo.lock` の版」とし、実測が戻し条件 3 点に該当しない限り #3154 へ進めてよいと委任している。上記の版・feature・影響は §5 の実測値で、戻し条件に該当しない（§0）ため委任範囲内と判断した。上表の個別値への明示確認コメントは記録されていない（承認を得たとは記述しない）。この判断に異議があれば #3154 の PR で依存追加を外す。
 
 ## §10 セキュリティ観点（OWASP）
 
@@ -129,3 +129,12 @@ cudarc が libloading を上げて 2 つの版が並んだ場合は、`=0.9.0` �
 - ライセンス: `docs/license-matrix.md` §6（`libloading` ISC 適合判断）・`deny.toml` の `[licenses] allow`
 - 禁止リスト: `scripts/check-forbidden-deps.sh`（`FORBIDDEN_CRATES_ALT`）
 - 実測: §5 のコマンド
+
+## §12 反映記録（#3154）
+
+- 反映内容: `crates/backend-rocm`（`publish = false`）の新設、ルート `[workspace.dependencies]` への `libloading = "=0.9.0"` 追加、`deps-policy.md` 第 12 区分・`docs/license-matrix.md`（2 節と末尾の追加実測）の更新、`deny.toml` はコメントの区分数のみ（allow は不変）。
+- 承認根拠: #3153 所有者コメント 6111762873（2026-10-12）の「`libloading` を新区分の直接依存にする」「版は `Cargo.lock` の版を `=x.y.z` で完全固定する」と §5 の実測。**委任範囲の根拠**: 同コメントは版を「実装時点の `Cargo.lock` の版」（`=0.9.0`・cudarc と同一）、feature を実測記録の対象（default は依存を増やさない）とし、戻し条件 3 点（新しい allow 識別子・cudarc との版重複・推移的依存の増加）に該当しなければ #3154 へ進めると定めている。本実装は該当しないため委任範囲内である。**§9 の表の個別値（版・feature・`deny.toml` 影響）への所有者の明示確認コメントは存在しない**。承認を推定で記述せず、PR レビューで人間が最終判断する（異議があれば依存追加を外し足場を依存なしにする）。
+- 戻し条件 3 点: 実装時に §6 の確認を再実行し、いずれも該当しなかった（`Cargo.lock` の差分は `fandhe-ai-backend-rocm` の `[[package]]` 追加のみ、`-d` で `libloading` 0 件、`cargo deny` の 4 検査 ok・新しい allow なし）。
+- soname 候補（§4-4）: Linux は `libamdhip64.so` のみ採用した。出典は ROCm 公式文書のリンク例 `-lamdhip64`（<https://rocm.docs.amd.com/projects/HIP/en/latest/faq.html>）。版付き soname（`libamdhip64.so.6`／`.so.7` 等）は一次資料で確認できなかったため採用していない。開発用シンボリックリンクを持たないランタイムのみの環境では probe が false になりうる（安全側）。版付き名の追加は出典確認後に別途行う。
+- Windows の DLL 名と対応範囲: 一次資料で確定できなかったため候補は空配列で、Windows と macOS の probe は常に false。追跡は別 Issue（起票はユーザー承認後）。
+- `hipGetDeviceCount`: シグネチャは `hipError_t hipGetDeviceCount(int* count)`（<https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api/modules/device_management.html>）。`hipError_t` の基底型は同文書に明記がないため、雛形ではシンボル解決の成否だけで probe し、呼び出しは #3155 へ送った。

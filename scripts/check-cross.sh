@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # クロスターゲットの型検査・lint（make check-cross-*）。cargo check / clippy はリンクを
 # 行わないため、対象 OS の SDK が無い Linux 上でも成立する。
-# usage: check-cross.sh <metal-tests|cpu-tests|windows-interop>
+# usage: check-cross.sh <metal-tests|cpu-tests|rocm-tests|windows-interop>
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
@@ -28,6 +28,12 @@ case "${1:-}" in
     # aarch64-apple-darwin へクロス型検査する（criterion → alloca 回避は metal-tests と同じ）。
     ensure_rust_target aarch64-apple-darwin
     cargo check -p fandhe-ai-backend-cpu --tests --target aarch64-apple-darwin
+    ;;
+  rocm-tests)
+    # イシュー #3154: backend-rocm は非 Linux で HIP 候補が空になる cfg 分岐を持つため、
+    # tests 込みで aarch64-apple-darwin へクロス型検査する（ci.yml の build ジョブと同一）。
+    ensure_rust_target aarch64-apple-darwin
+    cargo check -p fandhe-ai-backend-rocm --tests --locked --target aarch64-apple-darwin
     ;;
   windows-interop)
     # onnx-interop の external data Windows 対応（#2349）と facade の Windows

@@ -115,8 +115,8 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   `scripts/bench/oss-gemm-compare/deny.toml` には適用しない。advisories の他のキー
   （`unmaintained`・`yanked` 等）・licenses・bans・sources の緩和、勧告 ID のワイルドカード化
   や範囲指定、crate 単位の ignore は従来どおり P0
-- **許容依存 11 区分（cudarc / objc2 系 / safetensors / prost / serde・serde_json /
-  rayon / half / criterion〈dev 限定〉/ libc〈cfg(unix) 限定〉/ ureq〈第 11 区分・cfg(unix) 限定・HTTPS 取得用途限定。native-tls＋vendored〉/ ベンチ比較対象〈matrixmultiply・gemm〉）
+- **許容依存 12 区分（cudarc / objc2 系 / safetensors / prost / serde・serde_json /
+  rayon / half / criterion〈dev 限定〉/ libc〈cfg(unix) 限定〉/ ureq〈第 11 区分・cfg(unix) 限定・HTTPS 取得用途限定。native-tls＋vendored〉/ libloading〈第 12 区分・HIP／HIPRTC の動的ロード用途限定・`backend-rocm` のみ・無条件依存〉/ ベンチ比較対象〈matrixmultiply・gemm〉）
   以外の依存追加**、または許容依存でも `=x.y.z` 完全固定でないバージョン指定・
   `docs/license-matrix.md` 更新やユーザー承認の記録を伴わない依存追加・更新: **P1**。
   第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`、および
@@ -126,7 +126,7 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   独立 Cargo workspace）限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体
   workspace〈ルート `Cargo.toml`／`Cargo.lock`〉への非混入・各ディレクトリ専用
   `deny.toml` による CI 監査〈advisories / bans / licenses / sources〉。
-  deps-policy.md「許容依存 11 区分」表を参照）の違反は従来どおり **P1**
+  deps-policy.md「許容依存 12 区分」表を参照）の違反は従来どおり **P1**
   （oss-gemm-compare: 2026-08-20 ユーザー承認・イシュー #755。framework-compare:
   2026-08-28 ユーザー承認・PR #915。承認記録は
   `docs/framework-compare-harness-decision.md`）

@@ -13,10 +13,13 @@ source "${DIR}/lib.sh"
 reject_args "$(basename "$0")" "$@"
 
 bash scripts/check-cuda-toolkit-absent.sh self-test
-if bash scripts/check-cuda-toolkit-absent.sh probe; then
+# ROCm 非搭載の検証（イシュー #3154）も同じ流れで行う。
+bash scripts/check-rocm-absent.sh self-test
+if bash scripts/check-cuda-toolkit-absent.sh probe && bash scripts/check-rocm-absent.sh probe; then
   bash scripts/check-cuda-toolkit-absent.sh assert
+  bash scripts/check-rocm-absent.sh assert
   cargo build --workspace --locked
   cargo test --workspace --locked
 else
-  echo "skip: CUDA toolkit 搭載環境のため非搭載検証をスキップ（make docker-ci で検証可能）"
+  echo "skip: CUDA toolkit または ROCm 搭載環境のため非搭載検証をスキップ（make docker-ci で検証可能）"
 fi
