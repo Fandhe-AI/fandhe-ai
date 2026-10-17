@@ -174,24 +174,41 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   fandhe-ai 0.11.0）・`deny.toml`・契約検査は変更しない。ライセンス・監査は
   `docs/license-matrix.md` 8b（2026-10-14 再実測）。
 - 2026-10-17: 所有者の明示承認（2026-10-17。「ハーネス限定で ignore（推奨）」）に基づき、
-  `deny.toml` の `[advisories] ignore` に `RUSTSEC-2026-0367`・`RUSTSEC-2026-0368`・
-  `RUSTSEC-2026-0369`（`zip` 9.0.0 未満の `ZipArchive::extract`／`ZipStreamReader::extract`
-  の脆弱性）を追加した。該当するのは比較対象 `candle-core =0.11.0` の推移的依存
-  `zip 8.6.0` で、修正版（>=9.0.0）へは承認済みピンを変えない限り更新できない。
-  ハーネスのコード（bench-*／bench-common）は `zip` を直接使わず、ZIP の展開経路も
-  持たない（入力は自前生成のテンソルと safetensors のみ）。candle-core 0.11.0 側の
-  zip 利用も `ZipArchive::new`／`ZipWriter::new`（pickle.rs・npy.rs の読み込みと
-  書き出し）だけで、勧告対象の extract 系 API は呼ばれない（security-auditor 確認）。
-  `Cargo.lock` に残る `zip 0.6.6`（burn-tch 由来）・`7.2.0`（burn-candle 由来）は
-  有効化していない feature の側で解決グラフ外のため ignore の対象外であり、将来
-  それらの feature を有効にして別の版で deny が落ちた場合は ignore を足さず承認を
-  取り直す。この前提は `scripts/check-forbidden-deps.sh lock-all`
-  （`check_framework_compare`）が `Cargo.lock` 上の `zip` の版集合
-  {0.6.6, 7.2.0, 8.6.0} の完全一致と全エントリの crates.io registry 取得元を
-  fail-closed で固定する（追加・削除・変更のいずれも失敗。Codex 指摘への対応として
-  2026-10-17 に所有者承認のうえ追加。self-test に正負ケースあり）。ベンチ専用・
-  非配布のツリーのため受容する。承認済みピン・`Cargo.lock`・ルート `deny.toml` は
-  変更しない。比較対象バージョンを更新する再計測キャンペーン時に要否を再評価する。
+  `deny.toml` の `[advisories] ignore` に `zip` 9.0.0 未満の展開（extract）API に関する
+  3 勧告を追加した（修正版は >= 9.0.0）。ID ごとの内容は次のとおり。
+  - `RUSTSEC-2026-0367`: ZIP 展開時に SUID/SGID/sticky ビットを安全な権限へマスクせず
+    保持する。
+  - `RUSTSEC-2026-0368`: `ZipArchive::extract` が展開先ディレクトリの外を指す symlink を
+    作成する。
+  - `RUSTSEC-2026-0369`: `ZipStreamReader::extract`／`ZipArchive::extract` が symlink 越しに
+    Unix 権限を適用する。
+
+  **理由（共通）**: 該当するのは比較対象 `candle-core =0.11.0` の推移的依存 `zip 8.6.0`
+  で、修正版へは承認済みピンを変えない限り更新できない。ベンチ専用・非配布のツリーのため
+  受容する。承認済みピン・`Cargo.lock`・ルート `deny.toml` は変更しない。
+
+  **到達性の根拠（共通）**: ハーネスと比較対象は勧告対象の展開 API を呼ばない。次の
+  grep（A〜C は期待結果が「該当なし」＝終了コード 1。2026-10-17 に実行して確認）で再現できる。
+  - A（リポジトリルート）: `grep -rnE '\bzip::|use zip|ZipArchive|ZipStreamReader|\.extract\(|::extract\b|^zip\b' scripts/bench/framework-compare/bench-*/ --include='*.rs' --include=Cargo.toml`
+    → ハーネス（bench-*／bench-common）は zip を直接依存にも使用にも持たない。
+  - B: `grep -rnE '\.extract\(|::extract\b|ZipStreamReader' "$CARGO_HOME"/registry/src/*/candle-core-0.11.0/src`
+    → candle-core 0.11.0 に展開 API の呼び出しはない。
+  - C: `grep -rnE 'zip::|ZipArchive|ZipWriter' "$CARGO_HOME"/registry/src/*/candle-core-0.11.0/src | grep -vE 'ZipArchive::new|ZipWriter::new|zip::(write::FileOptions|CompressionMethod|result::ZipError)'`
+    → candle-core の zip 利用は error.rs・npy.rs・pickle.rs の `ZipArchive::new`／
+    `ZipWriter::new` と関連型だけ。
+
+  入力は自前生成のテンソルと safetensors のみで外部の ZIP を展開しない。`Cargo.lock` に残る
+  `zip 0.6.6`（burn-tch 由来）・`7.2.0`（burn-candle 由来）は有効化していない feature の側で
+  解決グラフ外のため ignore の対象外である。
+
+  **失効条件**: zip の修正版（>= 9.0.0）が candle-core の要求範囲に入った時点、または
+  比較対象（candle-core・burn）のピン更新時に、この 3 件の ignore を削除する。
+
+  **版集合の固定**: `scripts/check-forbidden-deps.sh lock-all`（`check_framework_compare`）が
+  `Cargo.lock` 上の `zip` の版集合 {0.6.6, 7.2.0, 8.6.0} の完全一致と全エントリの
+  crates.io registry 取得元を fail-closed で固定する（追加・削除・変更のいずれも失敗。
+  Codex 指摘への対応として 2026-10-17 に所有者承認のうえ追加。self-test に正負ケースあり）。
+  別の版が入った場合は ignore を足さず承認を取り直す。
 
 ## 5. tch-rs を計測対象に含めない判断
 
