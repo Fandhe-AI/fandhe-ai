@@ -279,4 +279,32 @@
 - `crates/facade/src/distributed/error.rs` の単体テスト: 内部の全 variant が専用 variant へ写ること
 - doc テストは外部通信をしない（world_size 1 は実行、world_size 2 以上は `no_run`）
 
-実機（CUDA／Metal）依存は無く `#[ignore]` は不要。CPU 複数プロセスでの検証は #3148、GB10 実測は #3149。
+実機（CUDA／Metal）依存は無く `#[ignore]` は不要。CPU 複数プロセスでの検証は #3148、GB10 実測は #3149。（#3148 の実装記録は §17。）
+
+## 17. #3148 実装時の追補（CPU 複数プロセス検証）
+
+実装は `crates/facade/tests/distributed_cpu_multiprocess.rs`（テストのみ。本体・公開面・依存・tolerance・baseline・FMA 契約・`docs/spec/`・ワイヤ形式は不変）。§15 が本イシューへ委ねた Adam／AdamW の数値検証と、§6 の f32 固定順加算の妥当性検証をここで閉じる。承認は §11 の D-A・D-B のみで、それ以外の承認は得ていない。
+
+### 17.1 プロセス構成
+
+親テストプロセスがランク 0、子プロセスがランク 1..W-1。親が `127.0.0.1:0` へ `Rendezvous::bind` し、`local_addr()` の実ポートを環境変数で子へ渡してから `establish()` する。ポートの TOCTOU が無く、子からのアドレス逆送りも要らない。全 collective はランク 0 と他ランクの間で実プロセス境界をまたぐ。全ランク子プロセス構成は不採用（実ポートの受け渡しに 2 段 spawn が要り可動部が増える。受入条件も要求しない）。
+
+子は同じテストバイナリの `child_rank_entry` を `current_exe()` で `--exact` 再実行する（前例: `backend-cuda` の `mp_store_child`）。制御用の環境変数が無ければ no-op のため通常の `cargo test` でも pass し、`#[ignore]` は不要。シェルは経由しない。結果は stdout ではなくランクごとのファイル（tmp へ書いて rename）で返し、子の stderr は親が別スレッドで回収して失敗時に末尾 4 KiB を添える。`ChildGuard`（Drop で kill・wait）で孤児を残さない。
+
+### 17.2 環境変数プロトコル（接頭辞 `FANDHE_DDP_TEST_`）
+
+`CHILD`（`1` のときだけ子モード）・`WORLD_SIZE`（2..=4）・`RANK`（1..world_size）・`RDV_ADDR`（loopback かつ port ≠ 0 の `SocketAddr`）・`SESSION`（u64）・`MODE`（`train`／`crash`／`survive`）・`OUT`（`std::env::temp_dir()` 配下）。子は使用前に型付きで parse し範囲を検査する（OWASP A03）。
+
+### 17.3 検証項目
+
+- W ∈ {2, 4}（全バッチ 8 行を等分）× SGD・Adam・AdamW × 5 ステップ。ランク 0 の最終パラメータが、同じ初期値・全 8 行の単一プロセス学習と `composite_close_f32`（REQ-2 統一複合判定）で一致する。
+- 同じ run 内の全ランクのパラメータが bit 一致する。別ポート・別 session の 2 run のランク 0 のパラメータが bit 一致する（決定論性）。W が違う run どうしの bit 比較はしない（§6）。
+- 待受・配布アドレスが loopback であること（`allow_non_loopback` は呼ばない）。外部通信なし。
+
+### 17.4 障害テスト
+
+W = 4 でランク 2（ランク 0 の隣ではない）が 1 ステップ後に `std::process::exit(42)` で落ちる（panic の 101 と区別）。生存ランク 0・1・3 は 2 ステップ目の `Err` が `PeerDisconnected`／`Timeout`／`Io` のいずれかであること、`is_poisoned()` が true であること、`abandon_pending_forward()` 後のパラメータが失敗直前と bit 一致すること（fail-closed）、経過時間が `op_timeout`（20 秒）+ 10 秒以内であることを確認する。親は落ちたランクの終了コードが 42 と完全一致し、他の子が正常終了し、全体期限 120 秒内に全プロセスが終わること（ハングしないこと）も確認する。
+
+### 17.5 不変・範囲外
+
+tolerance 定数・parity baseline・FMA 契約・依存・公開面は変更しない。GB10 実機での実測は #3149。RmsProp／Adagrad／LAMB の分散ステップ・abort API・復旧・再接続は §15・§16.4 の範囲外のまま。
