@@ -146,3 +146,37 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 ### #3138（CUDA 実機 parity Stage C）の実施内容
 
 事前登録規則・測定手順・記入欄と facade 経由ゲート ON の `#[ignore]` テスト（`crates/facade/tests/linalg_gpu_optin_cuda_parity.rs`）を用意した（`docs/perf/logs/cuda-linalg-parity-3138/`）。GB10 での実測は未実施（申し送り）。判定方式（§5）・tolerance・入力集合は不変。
+
+## 11. #3140（Stage D）: facade 公開形の承認依頼と公開保留の記録
+
+#3140 は GPU 線形代数の opt-in 関数を facade へ公開し、`api_surface.rs` の否定ガード（`facade_does_not_expose_gpu_linalg_optin*`）を正ガードへ反転する。
+着手時点（2026-10-16・origin/main a20d036f）で公開の前提 2 条件がどちらも満たされていないため、**コード公開は行わず本節に公開形の承認依頼だけを記録した**（前例: #3115→#3116・#3095→#3096・#3118→#3119 の二段構成）。
+
+### 11.1 ゲート状況
+
+| ゲート | 状況 | 根拠 |
+|---|---|---|
+| G1: 公開形の所有者承認 | **取得済み（2026-10-17）** | §11.2 の推奨形 9 項目を所有者が承認した（#3140 コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3140#issuecomment-6227907703）。既定 ON（Stage E）・tolerance／baseline・新しい `unsafe`・依存は承認範囲外。着手時点（a20d036f）では未取得で、D-C の承認対象は GPU 線形代数の `unsafe` のみだった |
+| G2: #3138・#3139 の実機 parity | **未実測** | `docs/perf/logs/cuda-linalg-parity-3138/README.md`・`docs/perf/logs/metal-linalg-parity-3139/README.md` がともに未実測 |
+
+「D-C の延長」と解釈して G1 を迂回しない（着手時点の判断。G1 はその後に個別承認で取得した）。
+
+**所有者の判断（2026-10-17）**: G2 が未充足のため、#3140 は「公開形の記録（第 1 段）」として閉じる。公開の実装（第 2 段・§11.3）は #3018 ツリー外の #3405 に切り出し、#3138・#3139 の実機 parity 実測が pass してから着手する（#3133 コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3133#issuecomment-6227908086）。
+
+### 11.2 推奨する公開形（承認依頼）
+
+1. CUDA: `pub fn set_cuda_gpu_linalg_enabled(enabled: bool)`／`pub fn cuda_gpu_linalg_enabled() -> bool`
+2. Metal: `pub fn set_metal_gpu_linalg_enabled(enabled: bool)`／`pub fn metal_gpu_linalg_enabled() -> bool`。どちらも `#[cfg(target_os = "macos")]`（facade の `fandhe-ai-backend-metal` 依存が macOS 限定のため）
+3. getter を付ける（先例 `cuda_graph_infer_enabled`・`metal_split_k_gemm_enabled` 等と同形）
+4. 本体は backend のゲート関数への 1 行委譲のみ。`pub use` による再エクスポート・新しい演算名・モジュール公開は足さない
+5. 既定 OFF・プロセスワイド（`Device` 単位ではない）・環境変数は足さない
+6. 数値契約: ゲート OFF は変更前（ホスト f64）と bit 同一。CUDA は f64 内部計算で精度クラス不変。**Metal は f32 のため精度クラスが変わる**（判定は §5: 統一複合判定・厳密ゼロ fail・入力集合 κ ≤ 1e3）
+7. 範囲外の Op（Metal の eigh・SVD・slogdet／pinv／lstsq 等）は従来どおり `Unsupported` でホスト f64 へフォールバック
+8. CUDA 非搭載でも setter は呼べる（フラグのみ。driver に触れず panic しない）
+9. `fandhe-ai =0.11.0` に対して追加のみ
+
+### 11.3 承認後の作業（Phase 2。#3405 で追跡）
+
+G1 の承認コメント URL を特定し、G2 の実測 pass を確認したうえで、(a) `lib.rs` に上記関数を追加、(b) `api_surface.rs` の否定ガード 2 件を「シグネチャ・委譲本体の固定＋allowlist 方式の違反スキャナ＋正のプローブ自己テスト＋到達性テスト」へ置換、(c) 常時実行の受入テスト `gpu_linalg_optin.rs` と実機 parity テスト（CUDA は `GateOn` を facade 経由へ、Metal は新規）、(d) backend 側 doc の「facade へ再公開しない」更新、(e) 本節への実装記録と `compat-api-scope.md` の適用記録を行う。既定 ON（Stage E）は別承認で本件の範囲外。
+
+§9 の「facade 公開の実施」は #3405 で扱う（公開形は承認済み・実機 parity 実測待ち）。
