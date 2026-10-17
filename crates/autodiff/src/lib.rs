@@ -272,6 +272,9 @@ pub mod indexed_update_ops;
 // `topk_unique_ops` と同型）。facade（`fandhe_ai::inference`）へはイシュー
 // #2575 で純再エクスポートとして公開済み（`docs/facade-generate-decision.md`）。
 pub mod generate;
+// DDP 初期形のホスト側 collective のトランスポート・ランク発見（イシュー #3144。std::net のみ）。
+// facade 公開は #3147。`docs/facade-distributed-host-collective-decision.md`。
+pub mod distributed;
 mod grad;
 mod hooks;
 pub mod indexing_ops;
