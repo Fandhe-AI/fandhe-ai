@@ -196,6 +196,17 @@ impl RendezvousConfig {
                 reason: "ring_bind_ip must be the same address family as the rendezvous address",
             });
         }
+        // 非ゼロランクの表エントリは集合点が観測した接続元 IP になる（connect の送信元は固定しない）。
+        // ループバック集合点への接続元は常に集合点と同じ IP になるため、ring_bind_ip が
+        // それと異なる具体 IP だとリング待受に届かず集合がタイムアウトする。早期に拒否する。
+        if self.rendezvous_addr.ip().is_loopback()
+            && !self.ring_bind_ip.is_unspecified()
+            && self.ring_bind_ip != self.rendezvous_addr.ip()
+        {
+            return Err(DistributedError::InvalidConfig {
+                reason: "ring_bind_ip must equal the loopback rendezvous address (or be unspecified)",
+            });
+        }
         if self.rendezvous_addr.ip().is_unspecified() {
             return Err(DistributedError::InvalidConfig {
                 reason: "rendezvous address must not be unspecified",
@@ -288,5 +299,16 @@ mod tests {
             Err(DistributedError::NonLoopbackNotAllowed { .. })
         ));
         assert!(c.allow_non_loopback(true).validate().is_ok());
+    }
+
+    #[test]
+    fn loopback_rendezvous_rejects_mismatched_ring_bind_ip() {
+        let c = RendezvousConfig::new(2, 1, addr("127.0.0.1:1234"))
+            .unwrap()
+            .ring_bind_ip("127.0.0.2".parse().unwrap());
+        assert!(matches!(
+            c.validate(),
+            Err(DistributedError::InvalidConfig { .. })
+        ));
     }
 }
