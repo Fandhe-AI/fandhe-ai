@@ -8729,6 +8729,11 @@ const LOWERCASE_PUB_USE_LEAF_ALLOWLIST: &[&str] = &[
     // `inference/mod.rs`（イシュー #2934。greedy 版 speculative decoding。承認形は設計記録
     // `facade-speculative-decoding-batching-design.md` §17.2。承認コメント issuecomment-6067263650 項 1）。
     "generate_speculative",
+    // `distributed/step.rs`（イシュー #3147。分散ステップのフリー関数 3 本。承認形は決定記録
+    // `facade-distributed-host-collective-decision.md` §16。承認は §11 の D-A・D-B）。
+    "step_sgd",
+    "step_adam",
+    "step_adamw",
 ];
 
 /// facade src の全 `pub use` 文（`pub(..) use` はスコープ付き可視性の
@@ -28868,9 +28873,10 @@ mod grad_scaler_from_state_type_path_probe {
 }
 
 /// facade の全公開モジュールパス（`src/lib.rs` から到達可能な `pub mod`）。下の glob probe が網羅する。
-const GRAD_SCALER_PROBE_MODULES: [&str; 16] = [
+const GRAD_SCALER_PROBE_MODULES: [&str; 17] = [
     "compat",
     "data",
+    "distributed",
     "inference",
     "interop",
     "interop::npy",
@@ -28903,6 +28909,7 @@ mod grad_scaler_from_state_glob_probe {
     pub use self::local::*;
     pub use fandhe_ai::compat::*;
     pub use fandhe_ai::data::*;
+    pub use fandhe_ai::distributed::*;
     pub use fandhe_ai::inference::*;
     pub use fandhe_ai::interop::npy::*;
     pub use fandhe_ai::interop::onnx::*;
@@ -42534,4 +42541,465 @@ fn parametrize_downcast_scan_detects_ungated_gated_and_ignores_comments_and_defi
             );
         }
     }
+}
+// =====================================================================
+// イシュー #3147（親 #3143）: `fandhe_ai::distributed`（分散学習の公開面）の正ガード。
+// 承認形は `docs/facade-distributed-host-collective-decision.md` §16（承認は §11 の D-A・D-B のみ）:
+// 5 型（`DistributedConfig`・`DistributedConfigBuilder`・`Rendezvous`・`Communicator`・
+// `DistributedError`）と 3 関数（`step_sgd`・`step_adam`・`step_adamw`）。サブモジュールは非公開・
+// クレートルートへの再エクスポートなし・内部型（autodiff の `Tape`・`RingCommunicator` 等）を
+// 公開シグネチャに出さない。`distributed` に保留ガードは無かったため新設の正ガードである。
+//
+// 検出範囲の限界（過剰に保証しない）: いずれもトークン走査で、マクロ生成・`use … as` 別名経由の
+// 到達は範囲外（別名・glob・分割は承認形の完全一致が拒否する。型レベルの到達性・署名は到達
+// プローブが担う）。否定ガードは正のプローブとインベントリで組む。
+// =====================================================================
+
+/// `distributed/mod.rs` の `pub use` 文を、空白なしトークン連結で全件返す（昇順）。
+fn distributed_pub_uses(files: &[(String, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        if rel != "distributed/mod.rs" {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                out.push(tokens[i + 2..end].concat().replace(",}", "}"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `distributed/` 配下の全 `.rs` から、完全公開（`pub(…)` でない）の項目を `(ファイル, 種別:名前)` で
+/// 全件返す（昇順）。種別語でないトークンは `other:<トークン>` として返し、すり抜けを検出する。
+fn distributed_pub_items(files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (rel, content) in files {
+        if !rel.starts_with("distributed/") {
+            continue;
+        }
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t != "pub" {
+                continue;
+            }
+            let Some(kind) = tokens.get(i + 1) else {
+                continue;
+            };
+            if kind == "(" {
+                continue;
+            }
+            if matches!(
+                kind.as_str(),
+                "struct"
+                    | "enum"
+                    | "fn"
+                    | "const"
+                    | "static"
+                    | "type"
+                    | "trait"
+                    | "union"
+                    | "mod"
+                    | "use"
+            ) {
+                let name = tokens.get(i + 2).cloned().unwrap_or_default();
+                out.push((rel.clone(), format!("{kind}:{name}")));
+            } else {
+                out.push((rel.clone(), format!("other:{kind}")));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 公開 `impl <Type> {` の `pub fn` 名（facade src 全体・昇順）。
+fn distributed_inherent_pub_fns(files: &[(String, String)], type_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (_rel, content) in files {
+        out.extend(pb_pub_fn_names_in_inherent_impls(
+            &tokens_of(content),
+            type_name,
+        ));
+    }
+    out.sort();
+    out
+}
+
+/// `distributed` が公開モジュールで、配下のサブモジュールは公開されないこと。
+#[test]
+fn distributed_is_public_and_submodules_stay_private() {
+    let declared = collect_public_module_paths(&facade_crate_root().join("src"));
+    assert!(
+        declared.contains("distributed"),
+        "`pub mod distributed` が公開モジュールとして検出されない: {declared:?}"
+    );
+    let nested: Vec<&String> = declared
+        .iter()
+        .filter(|m| m.starts_with("distributed::"))
+        .collect();
+    assert!(
+        nested.is_empty(),
+        "`distributed` 配下に pub mod が公開されている（フラットな 8 名のみ）: {nested:?}"
+    );
+}
+
+/// 正のガード: 公開は `distributed/mod.rs` の承認形 4 文（5 型 + 3 関数）だけで、完全公開の項目と
+/// 各型の公開メソッド集合は承認済みのものだけ。
+#[test]
+fn facade_exposes_distributed_items_only_in_approved_shape() {
+    let files = facade_src_files();
+    assert_eq!(
+        distributed_pub_uses(&files),
+        vec![
+            "communicator::{Communicator,Rendezvous}".to_string(),
+            "config::{DistributedConfig,DistributedConfigBuilder}".to_string(),
+            "error::DistributedError".to_string(),
+            "step::{step_adam,step_adamw,step_sgd}".to_string(),
+        ],
+        "distributed の公開は distributed/mod.rs の承認形 4 文のみ（決定記録 §16）"
+    );
+
+    let mut expected: Vec<(String, String)> = Vec::new();
+    for (file, kinds) in [
+        (
+            "distributed/config.rs",
+            vec![
+                "struct:DistributedConfig",
+                "fn:builder",
+                "fn:world_size",
+                "fn:rank",
+                "fn:rendezvous_addr",
+                "fn:is_non_loopback_allowed",
+                "struct:DistributedConfigBuilder",
+                "fn:allow_non_loopback",
+                "fn:session_id",
+                "fn:connect_timeout",
+                "fn:establish_timeout",
+                "fn:io_timeout",
+                "fn:op_timeout",
+                "fn:build",
+            ],
+        ),
+        (
+            "distributed/communicator.rs",
+            vec![
+                "struct:Rendezvous",
+                "fn:bind",
+                "fn:local_addr",
+                "fn:establish",
+                "struct:Communicator",
+                "fn:init",
+                "fn:rank",
+                "fn:world_size",
+                "fn:is_poisoned",
+            ],
+        ),
+        ("distributed/error.rs", vec!["enum:DistributedError"]),
+        (
+            "distributed/step.rs",
+            vec!["fn:step_sgd", "fn:step_adam", "fn:step_adamw"],
+        ),
+        (
+            "distributed/mod.rs",
+            vec!["use:communicator", "use:config", "use:error", "use:step"],
+        ),
+    ] {
+        for k in kinds {
+            expected.push((file.to_string(), k.to_string()));
+        }
+    }
+    expected.sort();
+    assert_eq!(
+        distributed_pub_items(&files),
+        expected,
+        "distributed/ の完全公開項目は承認済みの 5 型・3 関数・公開メソッド・`pub use` 4 文のみ（決定記録 §16）"
+    );
+
+    for (ty, want) in [
+        (
+            "DistributedConfig",
+            vec![
+                "builder",
+                "is_non_loopback_allowed",
+                "rank",
+                "rendezvous_addr",
+                "world_size",
+            ],
+        ),
+        (
+            "DistributedConfigBuilder",
+            vec![
+                "allow_non_loopback",
+                "build",
+                "connect_timeout",
+                "establish_timeout",
+                "io_timeout",
+                "op_timeout",
+                "session_id",
+            ],
+        ),
+        ("Rendezvous", vec!["bind", "establish", "local_addr"]),
+        (
+            "Communicator",
+            vec!["init", "is_poisoned", "rank", "world_size"],
+        ),
+    ] {
+        let want: Vec<String> = want.into_iter().map(String::from).collect();
+        assert_eq!(
+            distributed_inherent_pub_fns(&files, ty),
+            want,
+            "`impl {ty}` の pub fn 集合が承認形と一致しない（決定記録 §16）"
+        );
+    }
+}
+
+/// 検出器が各カテゴリ（欠落・追加・重複・`pub(crate)` は数えない）を拾えることの自己テスト。
+#[test]
+fn facade_exposes_distributed_items_only_in_approved_shape_detects_each_category() {
+    let f = |rel: &str, src: &str| vec![(rel.to_string(), src.to_string())];
+    for (src, want) in [
+        ("pub use step::*;", "step::*"),
+        (
+            "pub use error::DistributedError as E;",
+            "error::DistributedErrorasE",
+        ),
+        ("pub use step::step_sgd;", "step::step_sgd"),
+    ] {
+        assert_eq!(
+            distributed_pub_uses(&f("distributed/mod.rs", src)),
+            vec![want.to_string()]
+        );
+    }
+    // 重複は 2 件として数える。
+    assert_eq!(
+        distributed_pub_uses(&f("distributed/mod.rs", "pub use a::B;\npub use a::B;")).len(),
+        2
+    );
+    assert!(distributed_pub_uses(&f("lib.rs", "pub use distributed::X;")).is_empty());
+    assert!(distributed_pub_uses(&f("distributed/mod.rs", "pub(crate) use a::B;")).is_empty());
+    for (src, want) in [
+        ("pub fn all_reduce() {}", "fn:all_reduce"),
+        ("pub struct ReduceOp;", "struct:ReduceOp"),
+        ("pub mod x;", "mod:x"),
+        ("struct S { pub rank: u8 }", "other:rank"),
+        ("pub async fn f() {}", "other:async"),
+    ] {
+        assert_eq!(
+            distributed_pub_items(&f("distributed/config.rs", src)),
+            vec![("distributed/config.rs".to_string(), want.to_string())]
+        );
+    }
+    assert!(distributed_pub_items(&f("distributed/config.rs", "pub(crate) struct A;")).is_empty());
+    assert!(distributed_pub_items(&f("other.rs", "pub struct A;")).is_empty());
+    assert_eq!(
+        distributed_inherent_pub_fns(
+            &f(
+                "a.rs",
+                "impl Communicator { pub fn a() {} pub(crate) fn b() {} fn c() {} }"
+            ),
+            "Communicator"
+        ),
+        vec!["a".to_string()]
+    );
+}
+
+/// 未承認経路の否定ガード:
+/// - `distributed/` の外に `distributed` を含む `pub use`（クレートルートへの再エクスポート）がない
+/// - facade src のどこにも `pub use fandhe_ai_autodiff::distributed` がない
+/// - `distributed/` の `pub fn` シグネチャに内部型（`RingCommunicator`・`RingLinks`・
+///   `RendezvousConfig`・`CollectiveOptions`・`ReduceOp`・`ProtocolViolation`・
+///   `DistributedStepError`・`BackendOps`）が現れない
+/// - `distributed/` に `unsafe` がない
+#[test]
+fn distributed_unapproved_paths_are_absent() {
+    let mut violations: Vec<String> = Vec::new();
+    for (rel, content) in &facade_src_files() {
+        let tokens = tokens_of(content);
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "pub" && tokens.get(i + 1).map(String::as_str) == Some("use") {
+                let end = tokens[i..]
+                    .iter()
+                    .position(|x| x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                let stmt = &tokens[i + 2..end];
+                if !rel.starts_with("distributed/")
+                    && stmt
+                        .iter()
+                        .any(|x| x == "distributed" || x == "DistributedConfig")
+                {
+                    violations.push(format!(
+                        "{rel}: distributed の再エクスポート {}",
+                        stmt.concat()
+                    ));
+                }
+                let joined = stmt.concat();
+                if joined.starts_with("fandhe_ai_autodiff::distributed") {
+                    violations.push(format!("{rel}: 内部 distributed の再エクスポート {joined}"));
+                }
+            }
+        }
+        if !rel.starts_with("distributed/") {
+            continue;
+        }
+        for (i, t) in tokens.iter().enumerate() {
+            if t == "unsafe" {
+                violations.push(format!("{rel}: unsafe が存在する"));
+            }
+            if t == "pub"
+                && tokens
+                    .get(i + 1)
+                    .is_some_and(|k| k == "fn" || k == "async" || k == "const")
+            {
+                let sig_end = tokens[i..]
+                    .iter()
+                    .position(|x| x == "{" || x == ";")
+                    .map_or(tokens.len(), |p| i + p);
+                for x in &tokens[i..sig_end] {
+                    if matches!(
+                        x.as_str(),
+                        "RingCommunicator"
+                            | "RingLinks"
+                            | "RendezvousConfig"
+                            | "CollectiveOptions"
+                            | "ReduceOp"
+                            | "ProtocolViolation"
+                            | "DistributedStepError"
+                            | "BackendOps"
+                    ) {
+                        violations.push(format!("{rel}: pub fn シグネチャに内部型 {x}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// 正のプローブ: 公開 5 型・3 関数が `fandhe_ai::distributed` パスだけで到達でき、署名が承認形に
+/// 一致すること（コンパイルが通ること自体が検査）。
+#[test]
+fn distributed_items_are_reachable_via_facade_distributed_path() {
+    use fandhe_ai::distributed::{
+        Communicator, DistributedConfig, DistributedConfigBuilder, DistributedError, Rendezvous,
+        step_adam, step_adamw, step_sgd,
+    };
+    use fandhe_ai::optim::{AdamConfig, AdamWConfig};
+    use fandhe_ai::{DeviceParamStore, Gradients, SgdConfig, Tape};
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    let _: fn(usize, usize, SocketAddr) -> DistributedConfigBuilder = DistributedConfig::builder;
+    let _: fn(DistributedConfigBuilder) -> Result<DistributedConfig, DistributedError> =
+        DistributedConfigBuilder::build;
+    let _: fn(DistributedConfigBuilder, bool) -> DistributedConfigBuilder =
+        DistributedConfigBuilder::allow_non_loopback;
+    let _: fn(DistributedConfigBuilder, u64) -> DistributedConfigBuilder =
+        DistributedConfigBuilder::session_id;
+    let _: fn(DistributedConfigBuilder, Duration) -> DistributedConfigBuilder =
+        DistributedConfigBuilder::connect_timeout;
+    let _: fn(DistributedConfigBuilder, Duration) -> DistributedConfigBuilder =
+        DistributedConfigBuilder::establish_timeout;
+    let _: fn(DistributedConfigBuilder, Duration) -> DistributedConfigBuilder =
+        DistributedConfigBuilder::io_timeout;
+    let _: fn(DistributedConfigBuilder, Duration) -> DistributedConfigBuilder =
+        DistributedConfigBuilder::op_timeout;
+    let _: fn(&DistributedConfig) -> usize = DistributedConfig::world_size;
+    let _: fn(&DistributedConfig) -> usize = DistributedConfig::rank;
+    let _: fn(&DistributedConfig) -> SocketAddr = DistributedConfig::rendezvous_addr;
+    let _: fn(&DistributedConfig) -> bool = DistributedConfig::is_non_loopback_allowed;
+    let _: fn(&DistributedConfig) -> Result<Rendezvous, DistributedError> = Rendezvous::bind;
+    let _: fn(&Rendezvous) -> Option<SocketAddr> = Rendezvous::local_addr;
+    let _: fn(Rendezvous) -> Result<Communicator, DistributedError> = Rendezvous::establish;
+    let _: fn(&DistributedConfig) -> Result<Communicator, DistributedError> = Communicator::init;
+    let _: fn(&Communicator) -> usize = Communicator::rank;
+    let _: fn(&Communicator) -> usize = Communicator::world_size;
+    let _: fn(&Communicator) -> bool = Communicator::is_poisoned;
+    let _: fn(
+        &Tape,
+        &mut DeviceParamStore,
+        &Gradients,
+        &SgdConfig,
+        &mut Communicator,
+    ) -> Result<(), DistributedError> = step_sgd;
+    let _: fn(
+        &Tape,
+        &mut DeviceParamStore,
+        &Gradients,
+        &AdamConfig,
+        &mut Communicator,
+    ) -> Result<(), DistributedError> = step_adam;
+    let _: fn(
+        &Tape,
+        &mut DeviceParamStore,
+        &Gradients,
+        &AdamWConfig,
+        &mut Communicator,
+    ) -> Result<(), DistributedError> = step_adamw;
+
+    fn assert_send<T: Send>() {}
+    assert_send::<Communicator>();
+    assert_send::<Rendezvous>();
+    assert_send::<DistributedConfig>();
+    assert_send::<DistributedError>();
+
+    // wildcard 腕付きで全 variant を網羅できる（`#[non_exhaustive]`）。
+    fn classify(e: &DistributedError) -> &'static str {
+        match e {
+            DistributedError::InvalidConfig { .. } => "invalid_config",
+            DistributedError::WorldSizeOutOfRange { .. } => "world_size",
+            DistributedError::RankOutOfRange { .. } => "rank",
+            DistributedError::NonLoopbackNotAllowed { .. } => "non_loopback",
+            DistributedError::DuplicateRank { .. } => "duplicate_rank",
+            DistributedError::WorldSizeMismatch { .. } => "world_size_mismatch",
+            DistributedError::UnexpectedRank { .. } => "unexpected_rank",
+            DistributedError::Protocol { .. } => "protocol",
+            DistributedError::Timeout { .. } => "timeout",
+            DistributedError::PeerDisconnected => "peer_disconnected",
+            DistributedError::Io(_) => "io",
+            DistributedError::Poisoned => "poisoned",
+            DistributedError::Backend(_) => "backend",
+            DistributedError::GradientLengthMismatch { .. } => "gradient_length",
+            DistributedError::Other { .. } => "other",
+            _ => "future",
+        }
+    }
+    let _ = classify;
+    fn assert_error<E: std::error::Error>() {}
+    assert_error::<DistributedError>();
+}
+
+/// 正の doctest プローブ: `distributed/mod.rs` に world_size 1 の実行例（`ignore`／`no_run` なし。
+/// 外部通信なし）と、world_size 2 以上の `no_run` 例が実在すること。
+#[test]
+fn distributed_usage_doctest_is_present_and_compiled() {
+    let module = read_to_string_or_panic(&facade_crate_root().join("src/distributed/mod.rs"));
+    let doc = inner_doc_lines(&module);
+    let v = doctest_probe_violations(
+        "distributed/mod.rs モジュール doc（world_size 1）",
+        &doc,
+        &["DistributedConfig::builder(1, 0", "Communicator::init"],
+    );
+    assert!(v.is_empty(), "{v:?}");
+    let blocks = doc_fenced_blocks(&doc);
+    assert!(
+        blocks.iter().any(|(info, body)| info == "no_run"
+            && body
+                .iter()
+                .any(|l| l.contains("DistributedConfig::builder(2"))
+            && body.iter().any(|l| l.contains("Rendezvous::bind"))),
+        "world_size 2 以上の例は `no_run`（外部通信しない）で書くこと"
+    );
+    assert!(
+        !blocks.iter().any(|(info, body)| info != "no_run"
+            && body.iter().any(|l| l.contains("builder(2, 0"))),
+        "world_size 2 以上の例が実行される形になっている"
+    );
 }
