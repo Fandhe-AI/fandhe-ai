@@ -2,7 +2,7 @@
 //!
 //! 役割: `std::net` のみ（依存追加なし）で、ランク 0 を集合点にしたランク発見と、リング上の
 //! 隣接ランクとの TCP 接続確立・長さ前置きフレームの送受信・受信検証・タイムアウトを提供する。
-//! all-reduce 本体と communicator の poisoned 状態機械は #3145、optimizer への結線は #3146、
+//! all-reduce 本体（`ring`）と communicator の poisoned 状態機械は #3145 で実装済み、optimizer への結線は #3146、
 //! facade 公開は #3147（本モジュールは autodiff の内部 API で、サポートする公開面は facade のみ）。
 //!
 //! 設計の正本: `docs/facade-distributed-host-collective-decision.md`（§2〜§7・§13）。
@@ -22,8 +22,10 @@ pub mod config;
 pub mod error;
 pub mod frame;
 pub mod rendezvous;
+pub mod ring;
 pub mod transport;
 
 pub use config::{RendezvousConfig, check_peer_allowed, is_loopback_ip};
 pub use error::{DistributedError, ProtocolViolation};
 pub use rendezvous::{Rendezvous, RingLinks};
+pub use ring::{CollectiveOptions, ReduceOp, RingCommunicator, chunk_ranges, reference_all_reduce};
