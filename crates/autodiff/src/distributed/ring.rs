@@ -1,8 +1,9 @@
 //! ring all-reduce（reduce-scatter → all-gather）。ホスト上の `f32` スライスが対象（イシュー #3145）。
 //!
 //! 役割: `rendezvous` が確立した [`RingLinks`] の上で、全ランクの勾配（平坦化バッファ）を合計または
-//! 平均し、全ランクに bit 単位で同じ結果を返す。呼び出し元は後続の #3146（`DeviceParamStore` への
-//! 結線）と #3147（facade 公開）。本モジュールは autodiff の内部 API で、サポートする公開面は facade のみ。
+//! 平均し、全ランクに bit 単位で同じ結果を返す。呼び出し元は `step` モジュール（#3146。
+//! `DeviceParamStore` への結線）と後続の #3147（facade 公開）。本モジュールは autodiff の内部 API で、
+//! サポートする公開面は facade のみ。
 //! 根拠: `docs/facade-distributed-host-collective-decision.md` §4（加算順序）・§5（失敗時の poisoned）・
 //! §6（数値契約）・§7（受信検証）・§14（本イシューでの追補）。spec: `docs/spec/04-requirements.md` `:386-393`。
 //!
@@ -441,46 +442,9 @@ impl RingCommunicator {
 
 #[cfg(test)]
 mod tests {
-    use super::super::config::RendezvousConfig;
     use super::super::error::ProtocolViolation;
-    use super::super::rendezvous::Rendezvous;
+    use super::super::test_util::establish_group;
     use super::*;
-
-    fn lo0() -> std::net::SocketAddr {
-        "127.0.0.1:0".parse().unwrap()
-    }
-
-    fn cfg(w: usize, rank: usize, addr: std::net::SocketAddr) -> RendezvousConfig {
-        RendezvousConfig::new(w, rank, addr)
-            .unwrap()
-            .session_id(7)
-            .establish_timeout(Duration::from_secs(20))
-            .io_timeout(Duration::from_secs(5))
-    }
-
-    fn establish_group(w: usize) -> Vec<RingLinks> {
-        if w == 1 {
-            return vec![
-                Rendezvous::bind(cfg(1, 0, lo0()))
-                    .unwrap()
-                    .establish()
-                    .unwrap(),
-            ];
-        }
-        thread::scope(|s| {
-            let r0 = Rendezvous::bind(cfg(w, 0, lo0())).unwrap();
-            let addr = r0.rendezvous_local_addr().unwrap();
-            let h0 = s.spawn(move || r0.establish());
-            let hs: Vec<_> = (1..w)
-                .map(|r| s.spawn(move || Rendezvous::bind(cfg(w, r, addr))?.establish()))
-                .collect();
-            let mut v = vec![h0.join().unwrap().unwrap()];
-            for h in hs {
-                v.push(h.join().unwrap().unwrap());
-            }
-            v
-        })
-    }
 
     fn comms(w: usize, opts: CollectiveOptions, max_seg: Option<usize>) -> Vec<RingCommunicator> {
         establish_group(w)

@@ -11,6 +11,8 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 
+use fandhe_ai_tensor_core::device::BackendError;
+
 /// ワイヤ上のプロトコル違反の種別（`DistributedError::Protocol` のペイロード）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -210,3 +212,59 @@ impl From<io::Error> for DistributedError {
 
 /// 本モジュールの `Result` 別名。
 pub type Result<T> = std::result::Result<T, DistributedError>;
+
+/// 勾配平均を optimizer ステップへ結線した分散ステップ（`distributed::step`。#3146）の型付きエラー。
+///
+/// `AutodiffError` とは別の型にする（記録 §5。`AutodiffError` は facade から再エクスポートされるため、
+/// `DistributedError` を載せると内部 enum が公開面へ漏れる）。facade 向けの自己完結型は #3147。
+/// `Display` は固定文・数値・内側エラーの `Display` だけで、ピアのバイト列は出さない（OWASP A09）。
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DistributedStepError {
+    /// all-reduce の失敗。このときどのパラメータも optimizer 状態も更新されていない。
+    Collective(DistributedError),
+    /// 勾配の読み出し、または既存 `step*` が返したバックエンドエラー。
+    Backend(BackendError),
+    /// 平坦化した勾配の長さが `total_numel` と一致しない（通信前のローカル検証）。
+    GradientLengthMismatch {
+        /// ストアの総要素数。
+        expected: usize,
+        /// 平坦化後の長さ。
+        got: usize,
+    },
+}
+
+impl fmt::Display for DistributedStepError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Collective(e) => write!(f, "gradient all-reduce failed: {e}"),
+            Self::Backend(e) => write!(f, "backend error during distributed step: {e}"),
+            Self::GradientLengthMismatch { expected, got } => write!(
+                f,
+                "flattened gradient length mismatch (expected {expected}, got {got})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DistributedStepError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Collective(e) => Some(e),
+            Self::Backend(e) => Some(e),
+            Self::GradientLengthMismatch { .. } => None,
+        }
+    }
+}
+
+impl From<DistributedError> for DistributedStepError {
+    fn from(e: DistributedError) -> Self {
+        Self::Collective(e)
+    }
+}
+
+impl From<BackendError> for DistributedStepError {
+    fn from(e: BackendError) -> Self {
+        Self::Backend(e)
+    }
+}

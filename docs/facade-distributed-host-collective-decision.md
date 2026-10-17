@@ -216,3 +216,15 @@
 - **W = 1**: 通信せず入力を変えない。`Mean` でも割らない（`x / 1.0` は signaling NaN を quiet 化して bit が変わりうるため。#3146 の「W = 1 で既存ステップと bit 一致」を守る）。平均は `W ≥ 2` で所有チャンクを `W as f32` で 1 回だけ割る
 - **Err 時の `buf`**: 不定で、communicator は `Poisoned`（両ソケットを shutdown）。#3146 は `Ok` のときだけ勾配を書き戻して「失敗したらどのパラメータも更新しない」（§6）を満たす
 - **`op` はワイヤに載らない**: 全ランクが同じ `op` で呼ぶのは呼び出し側の契約（ワイヤ形式を変えないため検出しない）。要素数の不一致は検出する
+
+## 15. #3146 実装時の追補（勾配平均の optimizer ステップへの結線）
+
+- **構造**: AMP 結線（`device_store/amp.rs`）と同じ形にした。`param_grads_to_host` → 平坦化（登録順＝`layout[i].offset` 順）→ `all_reduce(Mean)` → 分割 → `Gradients::synthetic` → 既存 `step*`。更新フェーズ（CUDA Graph capture・`pending_backup` 復元・`poisoned` 遷移・optimizer 状態の確定）は変更も複製もしない。合成 `Gradients` は `resident_fingerprint = None` で `any_resident == false` 経路になる
+- **公開入口はフリー関数**: `distributed::step::{step_sgd, step_adam, step_adamw}`。facade は `DeviceParamStore` を再エクスポートしているため、inherent method に `&mut RingCommunicator` を取らせると内部型が facade の公開面へ漏れる（§5 の「facade には自己完結型を出す」に反する）。facade への公開は #3147。内部ヘルパは `DeviceParamStore::mean_reduce_grads`（`pub(crate)`。`optim/device_store/distributed.rs`）
+- **エラー型**: `DistributedStepError { Collective(DistributedError), Backend(BackendError), GradientLengthMismatch }`。`AutodiffError` は facade から再エクスポートされるため variant を足さない
+- **W = 1**: ヘルパは `Ok(None)` を返し、元の `grads` で既存 `step*` を呼ぶ（読み出しも通信もしない。resident 経路を含め bit 一致）
+- **失敗時の状態**: all-reduce が `Err` なら `step*` を呼ばないので、パラメータも optimizer 状態も不変。store は poisoned にしない（デバイス側は未変更）。`pending` は消費しない（呼び出し側が `abandon_pending_forward` でクリアする）。communicator は §5 の契約どおり `Poisoned`。通信前に平坦化長を `total_numel` と照合し、不一致は `GradientLengthMismatch`（ピア検出に頼らないローカルの fail-closed）
+- **ローカルの事前失敗の非対称性**: 勾配欠落などで通信に入る前に失敗したランクがあると、他ランクは all-reduce の中で `op_timeout` により `Timeout`／`PeerDisconnected` を受け、更新せずに戻る。ハングはしない既知の挙動で、早期通知（abort API）は範囲外。all-reduce 成功後に既存 `step*` が失敗するケース（一方のランクだけのバックエンド障害による発散）も範囲外
+- **対象 optimizer**: SGD／Adam／AdamW（AMP と同じ）。RmsProp／Adagrad／LAMB は範囲外。SGD は通信前に `SgdConfig::validate()` を呼ぶ。Adam／AdamW の検証は `step_adam_impl` から抽出しない（全ランク対称に失敗するため）
+- **f64 アキュムレータは使わない**（§6 の再確認）: ランク方向は W ≤ 64 の短い軸で「長軸縮約」に当たらない。tolerance・baseline・FMA 契約は不変
+- **テスト**: `MockDeviceOps`（autodiff は backend-cpu に依存できない）で、W = 1 の bit 一致（resident あり・なし）、2 ランク半バッチと全バッチの統一複合判定での一致とランク間 bit 一致、ピア切断時の非更新・poisoned・ハングなし、平坦化順序を検証する。モックは `adam_step_device` を持たないため Adam／AdamW は `Unsupported` の素通しのみ確認し、数値検証は #3148 に委ねる

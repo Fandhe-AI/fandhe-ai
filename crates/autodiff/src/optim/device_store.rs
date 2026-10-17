@@ -119,6 +119,7 @@
 // できる——Rust の可視性は「定義モジュールとその子孫モジュール」単位の
 // ため（`amp.rs` モジュール冒頭コメント参照）。
 mod amp;
+mod distributed;
 
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
@@ -7721,5 +7722,292 @@ mod tests {
         store.step(&tape, &grads2, &config).unwrap();
         let after = store.sync_to_host(&tape).unwrap();
         assert_ne!(after[0].host_slice(), w_init.host_slice());
+    }
+
+    // --- DDP 勾配平均の結線（イシュー #3146・`device_store/distributed.rs`・
+    // `crate::distributed::step`）単体テスト ---
+    //
+    // `autodiff` は `backend-cpu` に依存できないため `MockDeviceOps`（naive な CPU モック）で
+    // 検証する。`new()` は resident 非対応、`resident_capable()` は resident 混在の経路。
+    // 実 CPU バックエンドでの複数プロセス検証は #3148、facade 公開は #3147。
+    // `MockDeviceOps` は `adam_step_device` を持たないため、Adam／AdamW は all-reduce 後に
+    // 既存 `step_adam*` が返す `Unsupported` が素通しされることだけを確認する（数値は #3148）。
+    mod ddp {
+        use super::*;
+        use crate::distributed::step::{step_adam, step_adamw, step_sgd};
+        use crate::distributed::test_util::establish_group;
+        use crate::distributed::{
+            CollectiveOptions, DistributedError, DistributedStepError, RingCommunicator,
+        };
+        use fandhe_ai_tensor_core::tolerance::composite_close_f32;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        fn opts() -> CollectiveOptions {
+            CollectiveOptions::default()
+                .io_timeout(Duration::from_secs(2))
+                .op_timeout(Duration::from_secs(8))
+        }
+
+        fn comm(links: crate::distributed::RingLinks) -> RingCommunicator {
+            RingCommunicator::new(links, opts()).unwrap()
+        }
+
+        fn mk_tape(resident: bool) -> Tape {
+            let ops: Box<dyn BackendOps + Send> = if resident {
+                Box::new(MockDeviceOps::resident_capable())
+            } else {
+                Box::new(MockDeviceOps::new())
+            };
+            Tape::new_with_ops(ops)
+        }
+
+        fn init_params() -> (Tensor<f32>, Tensor<f32>) {
+            (
+                tensor(vec![0.5, -0.25, 0.75, 1.0], &[2, 2]),
+                tensor(vec![0.1, -0.2], &[2]),
+            )
+        }
+
+        /// 1 回の forward + backward（`mse_loss` の平均縮約）。`x`／`t` は `[rows, 2]`。
+        fn fwd_bwd(tape: &Tape, store: &mut DeviceParamStore, x: &[f32], t: &[f32]) -> Gradients {
+            let rows = x.len() / 2;
+            let leaves = store.register_resident_params(tape).unwrap();
+            let xv = tape.var(&tensor(x.to_vec(), &[rows, 2]));
+            let tv = tape.var(&tensor(t.to_vec(), &[rows, 2]));
+            let pred = store
+                .linear_forward(tape, &xv, &leaves[0], Some(&leaves[1]))
+                .unwrap();
+            let loss = pred.mse_loss(&tv).unwrap();
+            store.backward(tape, &loss).unwrap()
+        }
+
+        fn flat(store: &DeviceParamStore, tape: &Tape) -> Vec<f32> {
+            store
+                .sync_to_host(tape)
+                .unwrap()
+                .iter()
+                .flat_map(|t| t.host_slice().to_vec())
+                .collect()
+        }
+
+        fn bits(v: &[f32]) -> Vec<u32> {
+            v.iter().map(|x| x.to_bits()).collect()
+        }
+
+        const X: [f32; 8] = [1.0, 2.0, -1.0, 0.5, 0.25, -2.0, 1.5, 1.0];
+        const T: [f32; 8] = [0.0, 1.0, 2.0, -1.0, 0.5, 0.5, -0.5, 1.0];
+
+        fn sgd_cfg() -> SgdConfig {
+            let mut c = SgdConfig::new(0.05);
+            c.momentum = 0.9;
+            c
+        }
+
+        #[test]
+        fn distributed_world_size_one_is_bit_identical_to_step() {
+            for resident in [false, true] {
+                let (w, b) = init_params();
+                let tape_a = mk_tape(resident);
+                let mut a = DeviceParamStore::new(&tape_a, &[&w, &b]).unwrap();
+                let tape_b = mk_tape(resident);
+                let mut s = DeviceParamStore::new(&tape_b, &[&w, &b]).unwrap();
+                let mut c = comm(establish_group(1).pop().unwrap());
+                for _ in 0..3 {
+                    let ga = fwd_bwd(&tape_a, &mut a, &X, &T);
+                    a.step(&tape_a, &ga, &sgd_cfg()).unwrap();
+                    let gb = fwd_bwd(&tape_b, &mut s, &X, &T);
+                    step_sgd(&mut s, &tape_b, &gb, &sgd_cfg(), &mut c).unwrap();
+                    assert_eq!(
+                        bits(&flat(&a, &tape_a)),
+                        bits(&flat(&s, &tape_b)),
+                        "resident={resident}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn distributed_world_size_one_adam_passes_through_to_existing_step() {
+            let (w, b) = init_params();
+            let tape = mk_tape(false);
+            let mut s = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+            let mut c = comm(establish_group(1).pop().unwrap());
+            let g = fwd_bwd(&tape, &mut s, &X, &T);
+            let e1 = step_adam(&mut s, &tape, &g, &AdamConfig::default(), &mut c).unwrap_err();
+            assert!(matches!(
+                e1,
+                DistributedStepError::Backend(BackendError::Unsupported(_))
+            ));
+            let e2 = step_adamw(&mut s, &tape, &g, &AdamWConfig::default(), &mut c).unwrap_err();
+            assert!(matches!(
+                e2,
+                DistributedStepError::Backend(BackendError::Unsupported(_))
+            ));
+        }
+
+        /// 2 ランク（半分ずつ）の k ステップ後のパラメータ。rank0／rank1 の順。
+        fn run_two_ranks(resident: bool, steps: usize) -> Vec<Vec<f32>> {
+            let links = establish_group(2);
+            thread::scope(|sc| {
+                let hs: Vec<_> = links
+                    .into_iter()
+                    .enumerate()
+                    .map(|(r, l)| {
+                        sc.spawn(move || {
+                            let (w, b) = init_params();
+                            let tape = mk_tape(resident);
+                            let mut st = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+                            let mut c = comm(l);
+                            let (x, t) = (&X[r * 4..r * 4 + 4], &T[r * 4..r * 4 + 4]);
+                            for _ in 0..steps {
+                                let g = fwd_bwd(&tape, &mut st, x, t);
+                                step_sgd(&mut st, &tape, &g, &sgd_cfg(), &mut c).unwrap();
+                            }
+                            flat(&st, &tape)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            })
+        }
+
+        #[test]
+        fn distributed_two_ranks_half_batch_matches_full_batch() {
+            for resident in [false, true] {
+                let (w, b) = init_params();
+                let tape = mk_tape(resident);
+                let mut full = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+                for _ in 0..3 {
+                    let g = fwd_bwd(&tape, &mut full, &X, &T);
+                    full.step(&tape, &g, &sgd_cfg()).unwrap();
+                }
+                let want = flat(&full, &tape);
+                let got = run_two_ranks(resident, 3);
+                assert_eq!(bits(&got[0]), bits(&got[1]), "ランク間で bit 一致しない");
+                for (g, w) in got[0].iter().zip(&want) {
+                    assert!(
+                        composite_close_f32(*g, *w),
+                        "resident={resident} got={g} want={w}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn distributed_two_ranks_adam_surfaces_unsupported_after_all_reduce() {
+            let links = establish_group(2);
+            let errs: Vec<_> = thread::scope(|sc| {
+                let hs: Vec<_> = links
+                    .into_iter()
+                    .enumerate()
+                    .map(|(r, l)| {
+                        sc.spawn(move || {
+                            let (w, b) = init_params();
+                            let tape = mk_tape(false);
+                            let mut st = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+                            let mut c = comm(l);
+                            let g =
+                                fwd_bwd(&tape, &mut st, &X[r * 4..r * 4 + 4], &T[r * 4..r * 4 + 4]);
+                            step_adam(&mut st, &tape, &g, &AdamConfig::default(), &mut c)
+                                .unwrap_err()
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for e in errs {
+                assert!(matches!(
+                    e,
+                    DistributedStepError::Backend(BackendError::Unsupported(_))
+                ));
+            }
+        }
+
+        #[test]
+        fn distributed_peer_failure_leaves_params_untouched() {
+            let mut links = establish_group(2);
+            drop(links.pop());
+            let mut c = comm(links.pop().unwrap());
+            let (w, b) = init_params();
+            let tape = mk_tape(false);
+            let mut st = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+            let before = flat(&st, &tape);
+            let g = fwd_bwd(&tape, &mut st, &X, &T);
+            let t0 = Instant::now();
+            let err = step_sgd(&mut st, &tape, &g, &sgd_cfg(), &mut c).unwrap_err();
+            assert!(
+                t0.elapsed() < Duration::from_secs(20),
+                "ハングしてはならない"
+            );
+            assert!(
+                matches!(
+                    err,
+                    DistributedStepError::Collective(
+                        DistributedError::PeerDisconnected
+                            | DistributedError::Timeout { .. }
+                            | DistributedError::Io(_)
+                    )
+                ),
+                "{err:?}"
+            );
+            assert_eq!(bits(&before), bits(&flat(&st, &tape)));
+            assert!(c.is_poisoned());
+            assert!(st.abandon_pending_forward(), "pending は消費されない");
+
+            // poisoned な communicator は次のステップも更新せずに拒否する。
+            let g2 = fwd_bwd(&tape, &mut st, &X, &T);
+            let err2 = step_sgd(&mut st, &tape, &g2, &sgd_cfg(), &mut c).unwrap_err();
+            assert!(matches!(
+                err2,
+                DistributedStepError::Collective(DistributedError::Poisoned)
+            ));
+            assert_eq!(bits(&before), bits(&flat(&st, &tape)));
+        }
+
+        /// 長さの異なる 3 パラメータで 1 ステップ。`comm` が `None` なら通常 `step`。
+        #[allow(deprecated)]
+        fn three_param_step(comm: Option<RingCommunicator>) -> Vec<f32> {
+            let p0 = tensor(vec![1.0, 2.0, 3.0], &[3]);
+            let p1 = tensor(vec![0.5, -0.5, 0.25, 4.0], &[2, 2]);
+            let p2 = tensor(vec![-1.0, 0.0, 1.0, 2.0, 3.0], &[5]);
+            let tape = mk_tape(false);
+            let mut st = DeviceParamStore::new(&tape, &[&p0, &p1, &p2]).unwrap();
+            let v = st.register_resident_leaves(&tape).unwrap();
+            let t0 = tape.var(&tensor(vec![0.0; 3], &[3]));
+            let t1 = tape.var(&tensor(vec![1.0; 4], &[2, 2]));
+            let t2 = tape.var(&tensor(vec![-2.0; 5], &[5]));
+            let loss = v[0]
+                .mse_loss(&t0)
+                .unwrap()
+                .add(&v[1].mse_loss(&t1).unwrap())
+                .unwrap()
+                .add(&v[2].mse_loss(&t2).unwrap())
+                .unwrap();
+            let g = tape.backward(&loss).unwrap();
+            let cfg = SgdConfig::new(0.1);
+            match comm {
+                Some(mut c) => step_sgd(&mut st, &tape, &g, &cfg, &mut c).unwrap(),
+                None => st.step(&tape, &g, &cfg).unwrap(),
+            }
+            flat(&st, &tape)
+        }
+
+        #[test]
+        fn distributed_flatten_order_matches_layout() {
+            // 全ランク同じ入力なら平均 `(x+x)/2` は厳密に元の勾配と一致するため、通常 `step` と
+            // bit 一致するはず（平坦化・分割の順序と shape を固定する）。
+            let want = three_param_step(None);
+            let links = establish_group(2);
+            let got: Vec<Vec<f32>> = thread::scope(|sc| {
+                let hs: Vec<_> = links
+                    .into_iter()
+                    .map(|l| sc.spawn(move || three_param_step(Some(comm(l)))))
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert_eq!(bits(&got[0]), bits(&want));
+            assert_eq!(bits(&got[1]), bits(&want));
+        }
     }
 }
