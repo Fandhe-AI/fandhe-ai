@@ -11,7 +11,8 @@
 //! # セキュリティ上の前提
 //!
 //! - 既定は loopback のみ。非 loopback は `RendezvousConfig::allow_non_loopback(true)` の明示
-//!   opt-in でだけ有効になる。
+//!   opt-in でだけ有効になる。非 loopback 集合点では到達可能な `ring_bind_ip` の明示指定も
+//!   必須（既定 loopback のままだとリング確立が失敗するため `validate` が拒否する）。
 //! - 受信長・ランク・world_size・連番は確保や処理の前に検証する（OWASP A03）。
 //! - **認証も暗号化も無い**。信頼できるネットワークの中でだけ使うこと。セッション識別子は
 //!   別ジョブとの混線防止用で、認証ではない。

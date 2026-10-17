@@ -90,7 +90,12 @@ impl RendezvousConfig {
         self
     }
 
-    /// リング用待受の bind IP（既定 `127.0.0.1`）。
+    /// リング用待受の bind IP（既定は集合点と同族の loopback）。
+    ///
+    /// 非 loopback 集合点（`allow_non_loopback(true)`）では、既定の loopback のままだと
+    /// `validate` が拒否する。自ホストの到達可能な IP か unspecified を明示すること。
+    /// 例: `RendezvousConfig::new(2, 0, "192.0.2.1:7000".parse()?)?
+    ///     .allow_non_loopback(true).ring_bind_ip("192.0.2.1".parse()?)`
     pub fn ring_bind_ip(mut self, ip: IpAddr) -> Self {
         self.ring_bind_ip = ip;
         self
@@ -236,6 +241,14 @@ impl RendezvousConfig {
             SocketAddr::new(self.ring_bind_ip, 0),
             self.allow_non_loopback,
         )?;
+        // 非 loopback 集合点ではランク 0 が観測した LAN IP を配布するため、リング待受が既定の
+        // loopback のままだと配布先に待受が無くタイムアウトする。到達可能な ring_bind_ip
+        // （自ホストの LAN IP または unspecified）の明示指定を要求し、ソケット作成前に拒否する。
+        if !is_loopback_ip(self.rendezvous_addr.ip()) && is_loopback_ip(self.ring_bind_ip) {
+            return Err(DistributedError::InvalidConfig {
+                reason: "ring_bind_ip must be set explicitly to a reachable non-loopback address (or unspecified) for a non-loopback rendezvous",
+            });
+        }
         Ok(())
     }
 }
@@ -304,7 +317,13 @@ mod tests {
             c.clone().validate(),
             Err(DistributedError::NonLoopbackNotAllowed { .. })
         ));
-        assert!(c.allow_non_loopback(true).validate().is_ok());
+        // 非 loopback 集合点は ring_bind_ip の明示指定が要る（既定 loopback は拒否される）。
+        assert!(
+            c.allow_non_loopback(true)
+                .ring_bind_ip("192.0.2.1".parse().unwrap())
+                .validate()
+                .is_ok()
+        );
         let c = RendezvousConfig::new(2, 0, addr("127.0.0.1:1234"))
             .unwrap()
             .ring_bind_ip("0.0.0.0".parse().unwrap());
@@ -313,6 +332,28 @@ mod tests {
             Err(DistributedError::NonLoopbackNotAllowed { .. })
         ));
         assert!(c.allow_non_loopback(true).validate().is_ok());
+    }
+
+    #[test]
+    fn non_loopback_rendezvous_requires_explicit_ring_bind_ip() {
+        let c = RendezvousConfig::new(2, 0, addr("192.0.2.1:1234"))
+            .unwrap()
+            .allow_non_loopback(true);
+        assert!(matches!(
+            c.clone().validate(),
+            Err(DistributedError::InvalidConfig { .. })
+        ));
+        assert!(
+            c.clone()
+                .ring_bind_ip("0.0.0.0".parse().unwrap())
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            c.ring_bind_ip("192.0.2.1".parse().unwrap())
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
