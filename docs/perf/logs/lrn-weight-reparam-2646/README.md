@@ -19,6 +19,8 @@ cargo test -p fandhe-ai --test lrn_weight_reparam_backend_parity -- --ignored --
 CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト（`cpu_matches_naive_reference`）で既に検証済み（green。
 NaiveOps tape のホストフォールバックと bit 一致）。
 
+CUDA 実測（#3161）の事前登録規則は `cuda/RULE.txt`、GB10 での実行形式は `docs/real-hardware-verification-env.md` §3・§4.1 を参照。
+
 ## 期待結果
 
 本実装は新規 GPU カーネルを持たず、CUDA／Metal は新規 3 フック（`lrn_forward`・`weight_norm_forward`・
@@ -40,6 +42,6 @@ NaiveOps tape のホストフォールバックと bit 一致）。
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+| 未実測 | Mac mini（Apple M4） | 上記 Metal | 未実測 | |
 
 #2851 以降、本テストは `Var` のメソッド経由（`Var::local_response_norm`／`Var::weight_norm`／`Var::spectral_norm`）で同じ経路を測る（テスト名・`#[ignore]`・判定は不変。上表の記入欄は未実測のまま）。

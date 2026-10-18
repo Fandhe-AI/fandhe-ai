@@ -19,6 +19,8 @@ cargo test -p fandhe-ai --test pool3d_ops_backend_parity -- --ignored --nocaptur
 
 CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト（`cpu_matches_naive_reference`）で既に検証済み（green）。
 
+CUDA 実測（#3161）の事前登録規則は `cuda/RULE.txt`、GB10 での実行形式は `docs/real-hardware-verification-env.md` §3・§4.1 を参照。
+
 ## 期待結果
 
 - CUDA／Metal は `BackendOps::pool3d_max`／`pool3d_avg` を持たず既定の `Unsupported` を返すため、実機テストは
@@ -36,4 +38,4 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+| 未実測 | Mac mini（Apple M4） | 上記 Metal | 未実測 | |

@@ -19,6 +19,8 @@ cargo test -p fandhe-ai --test margin_focal_loss_ops_backend_parity -- --ignored
 
 CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト（`cpu_*`）で既に検証済み（green）。
 
+CUDA 実測（#3161）の事前登録規則は `cuda/RULE.txt`、GB10 での実行形式は `docs/real-hardware-verification-env.md` §3・§4.1 を参照。
+
 ## 期待結果
 
 - 本実装は新規 GPU カーネルを持たない。新規 Op 4 種は常にホスト参照実装（`eval::margin_focal_loss`）で計算されるため、
@@ -33,4 +35,4 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+| 未実測 | Mac mini（Apple M4） | 上記 Metal | 未実測 | |
