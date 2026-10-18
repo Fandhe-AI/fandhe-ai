@@ -66,6 +66,9 @@ fn forward_host(
   （`LinearVars::forward` が `input.matmul(&weight)` → `.add(&bias)` と
   非融合合成するのと同一。融合カーネル `gemm_bias_act` は使わない
   — 融合 epilogue はカーネル内 tiling 次第で加算順序が変わりうるため）。
+  **イシュー #3196 追記**: 上記の「加算順序が変わりうる」は実態と異なり、融合版は非融合合成と
+  bit 完全一致する（bit 一致テストで確認）。CPU `linear_forward_device` は #3196 で
+  融合カーネル（`gemm_blis_bias_act_parallel`）経由へ切り替えた（`docs/perf/cpu-linear-forward-device-fusion.md`）。
   **イシュー #1137 追記**: CUDA バックエンドの `ops.gemm` は内部で
   `CudaGemm::run_tiled_f32` を経由し、#1137 以降これは cp.async
   パイプラインへ形状条件付きに分岐しうるが、新旧経路（`forward_host`／
