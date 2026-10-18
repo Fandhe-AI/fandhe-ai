@@ -19,6 +19,7 @@
 # backend-rocm（13 個目・イシュー #3154）は ROCm（AMD GPU）バックエンドの雛形（`publish = false`）。
 # HIP は `libloading`（第 12 区分）で実行時に動的ロードし、ビルド時にはリンクしない
 # （ROCm 非搭載環境でもビルドが通る。docs/backend-rocm-hip-ffi-decision.md）。
+# `BackendOps` の骨格（#3431）として tensor-core・backend-cpu へ path 依存する。facade からは参照しない。
 #
 # 本体 workspace の直接依存として許容する 11 区分（第 1〜8・第 10〜12 区分。
 # .claude/rules/deps-policy.md。第 9 区分はベンチ比較対象の独立ハーネス限定で本体
