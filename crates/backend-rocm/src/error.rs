@@ -1,6 +1,6 @@
 //! backend-rocm の型付きエラー。
 //!
-//! `hip` モジュール（HIP ランタイムの動的ロード）が返し、`lib.rs` の probe が false へ
+//! `hip`・`hiprtc`・`gemm` 等のモジュールが返し、`lib.rs` の probe が false へ
 //! 畳み込む。本番経路で panic せずエラー値で返す契約
 //! （docs/backend-rocm-hip-ffi-decision.md §4-6）。
 
@@ -31,6 +31,44 @@ pub enum RocmError {
         /// `hipError_t` の値。
         code: i32,
     },
+    /// HIPRTC API がエラーコードを返した（コンパイル失敗以外）。
+    Hiprtc {
+        /// 呼び出した HIPRTC 関数名。
+        call: &'static str,
+        /// `hiprtcResult` の値。
+        code: i32,
+    },
+    /// HIPRTC のコンパイルが失敗した。
+    CompileFailed {
+        /// `hiprtcResult` の値。
+        code: i32,
+        /// コンパイラログ（上限で切り詰め済み）。
+        log: String,
+    },
+    /// コードオブジェクトのサイズが 0 だった。
+    CodeObjectEmpty,
+    /// カーネルのタイルパラメータが不正（fail-closed）。
+    InvalidKernelConfig {
+        /// 理由。
+        detail: String,
+    },
+    /// GEMM の形状・スライス長が不正。
+    InvalidGemmDims {
+        /// 理由。
+        detail: String,
+    },
+    /// 許可リストにない gfx target。
+    UnsupportedTarget {
+        /// 理由。
+        detail: String,
+    },
+    /// HIP デバイスが 1 つもない。
+    NoDevice,
+    /// 文字列に NUL を含むなど、C 文字列へ変換できない。
+    InvalidCString {
+        /// 対象の説明。
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for RocmError {
@@ -44,6 +82,24 @@ impl fmt::Display for RocmError {
                 write!(f, "HIP シンボル {symbol} を解決できません: {detail}")
             }
             Self::Hip { call, code } => write!(f, "HIP API {call} がエラー {code} を返しました"),
+            Self::Hiprtc { call, code } => {
+                write!(f, "HIPRTC API {call} がエラー {code} を返しました")
+            }
+            Self::CompileFailed { code, log } => {
+                write!(f, "HIPRTC のコンパイルに失敗しました（{code}）: {log}")
+            }
+            Self::CodeObjectEmpty => write!(f, "HIPRTC が空のコードオブジェクトを返しました"),
+            Self::InvalidKernelConfig { detail } => {
+                write!(f, "カーネルのタイル設定が不正です: {detail}")
+            }
+            Self::InvalidGemmDims { detail } => write!(f, "GEMM の形状が不正です: {detail}"),
+            Self::UnsupportedTarget { detail } => {
+                write!(f, "未対応の gfx target です: {detail}")
+            }
+            Self::NoDevice => write!(f, "HIP デバイスが見つかりません"),
+            Self::InvalidCString { what } => {
+                write!(f, "{what} に NUL 文字が含まれています")
+            }
         }
     }
 }
