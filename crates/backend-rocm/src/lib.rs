@@ -14,11 +14,22 @@
 //! （[`RocmSort`]）・unique（[`RocmUnique`]）の HIPRTC カーネルを移植した。いずれもホストのスライスを
 //! 受けて `Vec` を返す実行型で、`BackendOps` への結線は `RocmBackendOps`（#3431・R0）で行う。
 //!
+//! elementwise 一式（分解案 R2・#3433）として `add`・`mul`・`relu`・`exp`・`tanh`・`where_cond`・
+//! `masked_fill`（[`RocmElementwise`]）、`scalar_unary`／`scalar_binary`（[`RocmScalarOp`]）、融合
+//! （[`RocmFusedElementwise`]。静的インタプリタカーネルで A03 を守る）の HIPRTC カーネルを移植し、
+//! `RocmBackendOps` へ結線した。いずれも `#pragma clang fp contract(off)` で FMA への暗黙縮約を止める。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
 
+mod buffer_handle;
+mod elementwise;
+#[cfg(test)]
+mod elementwise_model;
 mod error;
+#[cfg(test)]
+mod fused_elementwise_model;
 mod gather_scatter;
 #[cfg(test)]
 mod gather_scatter_model;
@@ -31,11 +42,14 @@ mod interpolate;
 #[cfg(test)]
 mod interpolate_model;
 mod kernel_source;
+mod kernels_elementwise;
+mod kernels_fused_elementwise;
 mod kernels_gather_scatter;
 mod kernels_gemm;
 mod kernels_interpolate;
 mod kernels_linalg;
 mod kernels_linalg_factor;
+mod kernels_scalar_op;
 mod kernels_scan;
 mod kernels_sort;
 mod kernels_unique;
@@ -61,6 +75,7 @@ mod warp_geometry;
 #[cfg(test)]
 mod warp_model;
 
+pub use elementwise::{RocmElementwise, RocmFusedElementwise, RocmScalarOp};
 pub use error::RocmError;
 pub use gather_scatter::{RocmGatherScatter, ScatterMode};
 pub use gemm::RocmGemmF32;

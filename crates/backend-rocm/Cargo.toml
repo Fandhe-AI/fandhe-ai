@@ -26,5 +26,5 @@ libloading.workspace = true
 # 許容依存区分（外部クレート）の追加には当たらない。`publish = false` のため `version` は付けない
 # （crates.io 公開する場合は version の併記が必要。公開可否は所有者判断・被覆計画 §8 の Q2）。
 fandhe-ai-tensor-core = { path = "../tensor-core" }
-# ホスト経路 7 メソッドの委譲先（R2・R3 でカーネル化するまで）と、テストの CPU 参照。
+# sum/max のホスト経路（R3 でカーネル化するまで）の委譲先と、テストの CPU 参照。
 fandhe-ai-backend-cpu = { path = "../backend-cpu" }
