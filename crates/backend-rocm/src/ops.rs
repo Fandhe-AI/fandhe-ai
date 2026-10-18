@@ -30,6 +30,11 @@
 //!   と各 backward）を [`RocmLoss`](crate::RocmLoss) へ結線した。shape 検査・`factor` 決定・enum
 //!   から `i32` への写像（未知 variant は `Unsupported`）・空入力の早期リターンはデバイス取得より
 //!   前に行うので、ROCm 非搭載でも型付きエラーを検査できる。
+//! - R7（#3438）で `pad`・`im2col`・`col2im`・`max_pool2d`・`avg_pool2d`・`adaptive_avg_pool2d` を
+//!   HIPRTC カーネル（`RocmConstantPad`・`RocmIm2col`・`RocmPooling`）へ結線した。結線の本体
+//!   （shape 再検査・空出力の早期リターン・HIP に触れる前の `Unsupported` 確定・engine 分岐）は子モジュール
+//!   `conv_pool`（`ops/conv_pool.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。avg の dilation ≠ 1 と
+//!   サイズ上限超過は `Unsupported`（ホスト参照実装へのフォールバック合図）。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
 
 use std::cell::RefCell;
@@ -38,10 +43,10 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, BceKind, BinaryElementwiseOp, Device, DeviceBuffer, Element,
-    FusionPlan, HuberKind, KlDivTarget, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError,
-    Tensor, UnaryElementwiseOp, gemm_out_shape, reduce_out_shape, require_same_shape,
-    row_softmax_layout,
+    BackendError, BackendOps, BceKind, BinaryElementwiseOp, Conv2dParams, Device, DeviceBuffer,
+    Element, FusionPlan, HuberKind, KlDivTarget, MseReduction, Pool2dParams, ScalarBinaryOp,
+    ScalarUnaryOp, ShapeError, Tensor, UnaryElementwiseOp, gemm_out_shape, reduce_out_shape,
+    require_same_shape, row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
@@ -431,6 +436,7 @@ fn check_nll_targets(
     Ok(n)
 }
 
+mod conv_pool;
 mod ew;
 
 /// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
@@ -999,6 +1005,63 @@ impl BackendOps for RocmBackendOps {
                 }
             },
         )
+    }
+
+    /// HIPRTC の定数 pad（R7・#3438）。
+    fn pad(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_pad(input, pads, value)
+    }
+
+    /// HIPRTC の Conv2d im2col（R7・#3438）。
+    fn im2col(
+        &self,
+        input: &Tensor<f32>,
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_im2col(input, params)
+    }
+
+    /// HIPRTC の Conv2d col2im（im2col の随伴。R7・#3438）。
+    fn col2im(
+        &self,
+        d_col: &Tensor<f32>,
+        input_shape: &[usize],
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_col2im(d_col, input_shape, params)
+    }
+
+    /// HIPRTC の MaxPool2d（値と平面内索引。R7・#3438）。
+    fn max_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        self.conv_pool_max_pool2d(input, params)
+    }
+
+    /// HIPRTC の AvgPool2d（dilation ≠ 1 は `Unsupported`。R7・#3438）。
+    fn avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+        count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_avg_pool2d(input, params, count_include_pad)
+    }
+
+    /// HIPRTC の AdaptiveAvgPool2d（R7・#3438）。
+    fn adaptive_avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 2],
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_adaptive_avg_pool2d(input, output_size)
     }
 }
 

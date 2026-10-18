@@ -273,6 +273,18 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - **デバイス常駐 API の到達性**: `binary_elementwise_device`／`unary_elementwise_device` は実装したが、`memory_ops()` は `None`（§4 の既定継承）のままなので crate の外から ROCm の `DeviceBuffer` を作れない。判別は `downcast_handle::<RocmBufferHandle>()` の型のみ（`device()` は #3157 まで `Device::Cpu` の仮置きで CPU 由来と区別できない）。被覆表内の不整合（#106・#107 は「移植」、#2 は `None`）として所有者の判断待ち。
 - relu は CUDA と同じ `x > 0 ? x : 0`（NaN は 0。CPU の `f32::max` と `-0.0` の符号だけ異なりうる）。新しい `unsafe` はない（`KernelHost::run`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
 
+### R7（#3438）の実装記録
+
+- **CUDA 再確認**: `backend-cuda` の `kernels_{im2col,constant_pad,pooling}.rs`・`{im2col,constant_pad,pooling}.rs`・`ops.rs` の 6 メソッドを移植元とした。ファイルは 1 対 1 で `backend-rocm/src/` に対応させ、結線の本体は子モジュール `ops/conv_pool.rs` に置き `ops.rs` からは 1 行で委譲する。
+- **対象**: `pad`・`im2col`・`col2im`・`max_pool2d`・`avg_pool2d`・`adaptive_avg_pool2d`。いずれも wave 幅に依存しないため `WarpGeometry` は使わず、ブロック幅は `INDEX_OPS_BLOCK_DIM`（256。64 の倍数）。
+- **FMA**: 6 カーネルとも float の積和を持たない（im2col・pad はコピー、max はコピーと比較、col2im・avg 系は `double` の加算と除算 1 回）ので `__builtin_fmaf` を使う箇所はなく、FMA 契約は該当なし。全ソースの先頭に `#pragma clang fp contract(off)` を置くのは、将来の編集で暗黙の FMA が入るのを止める予防策（R2 と同じ）。
+- **f64 契約の適用先**: `col2im`・`avg_pool2d`・`adaptive_avg_pool2d` は `double` アキュムレータへ row-major 固定順（`kh` 外側・`kw` 内側）に逐次加算し、最後に 1 回だけ `float` へ落とす（avg 系は `(float)(acc / (double)divisor)`）。CPU 参照の `f64` 逐次和と演算順まで同じなので bit 完全一致を目標とする。HIP は `double` をネイティブに扱うので Metal の soft-f64 は不要。
+- **追加した手動境界チェック（REQ-8）**: adaptive の窓端に `if (h_end > h_in) h_end = h_in;`・`if (w_end > w_in) w_end = w_in;` を入れた。CUDA は窓の式の性質に頼っていた箇所で、有効な入力では値は変わらない。
+- **`Unsupported` の事前確定**: avg の `dilation != [1, 1]`（カーネルが dilation を持たない。CUDA PR #1888 と同じ）と、`i32` 上限超過（`SizeLimitExceeded` を `Unsupported` へ写す。CUDA の `map_im2col_error`／`map_pooling_error` と同じ）は、HIP に触れる前に確定させる。共有の `to_backend_error` は変えず、本族専用の写像 `map_conv_pool_error` を使う。内部契約違反（`InvalidOpArgs`）は `ShapeMismatch(ElementCountOverflow)` に写し、ホストフォールバックで覆い隠さない。
+- **R8 の実行型は未結線のまま**: `gather`・`cumsum`・`interpolate` 等の実行型（#3439）は `RocmBackendOps` に結線されておらず、`device()` も `Device::Cpu` の仮置きのまま。R7 の範囲外の事実として記録するだけで、起票はユーザー承認後に行う。
+- **実機確認の申し送り（#3159）**: HIPRTC の暗黙ヘッダで `isnan(float)` が使えるか（監査 doc §6 で確認済みなのは linalg の `fabs`・`isfinite` のみ）、gfx942 での `double` 加算のスループット、wave64 での block 256 の動作。parity はホストモデル（`conv_pool_model.rs`）と `CpuBackendOps` の `to_bits` 一致で検証しており、HIPRTC のコンパイル結果そのものの検証ではない。
+- `pool3d_*`・`adaptive_max_pool2d`・`im2col3d`・`col2im3d`・`pad_modes_forward` は CUDA も未実装なので `Unsupported` のまま（§5）。新しい `unsafe` はない（`KernelHost::run`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
+
 ## 10. 起票手順（未実施）
 
 所有者の承認後に `update-issue-tree` で親 #3150 配下へ R0〜R13 を追加する。各 issue に `phase:7`・依存（`dependsOn`）・実機要否を書く。承認前は起票しない。本 doc の追加だけでは #3156 の受け入れ条件（起票）は未達のまま残る。
