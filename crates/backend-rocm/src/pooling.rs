@@ -179,9 +179,22 @@ pub(crate) fn validate_max_pool(
         })?;
     fit_i32_limit(OP, hw)?;
     let plan = plan_from(in_shape, out_shape)?;
-    fit_i32_limit(OP, kernel[0])?;
-    fit_i32_limit(OP, kernel[1])?;
+    fit_i32_limit_all(&[kernel, stride, padding, dilation])?;
     Ok(plan)
+}
+
+/// 実行時にカーネルへ渡すスカラー引数が全て `i32` に収まることを HIP 取得前に検査する。
+///
+/// `run_*` 内の変換は HIP ロード後のため、ここで弾かないと ROCm 非搭載時に
+/// `Unsupported` ではなく `DeviceUnavailable` となり、ホストフォールバックの契約
+/// （`ops/conv_pool.rs`）を満たさない。
+fn fit_i32_limit_all(groups: &[[usize; 2]]) -> Result<(), RocmError> {
+    for g in groups {
+        for &v in g {
+            fit_i32_limit(OP, v)?;
+        }
+    }
+    Ok(())
 }
 
 /// avg の検証（dilation は 1 固定）。
@@ -192,7 +205,9 @@ pub(crate) fn validate_avg_pool(
     padding: [usize; 2],
 ) -> Result<PoolPlan, RocmError> {
     let out_shape = validate_window(in_shape, kernel, stride, padding, [1, 1])?;
-    plan_from(in_shape, out_shape)
+    let plan = plan_from(in_shape, out_shape)?;
+    fit_i32_limit_all(&[kernel, stride, padding])?;
+    Ok(plan)
 }
 
 /// adaptive の検証。
@@ -489,6 +504,32 @@ mod tests {
         assert!(
             validate_max_pool([1, 1, 1, i32::MAX as usize], [1, 1], [1, 1], [0, 0], [1, 1]).is_ok()
         );
+    }
+
+    /// 起動スカラー（kernel/stride/dilation。padding は kernel/2 以下に縛られ kernel 側で捕捉）の i32 超過は HIP 取得前の検証で
+    /// `SizeLimitExceeded`（= ops 層で Unsupported → ホストフォールバック）になる。
+    #[test]
+    fn launch_scalars_beyond_i32_rejected_before_hip() {
+        let big = i32::MAX as usize + 1;
+        let one = [1usize, 1];
+        let in_shape = [1, 1, 1, 1];
+        let is_limit =
+            |r: Result<PoolPlan, RocmError>| matches!(r, Err(RocmError::SizeLimitExceeded { .. }));
+        assert!(is_limit(validate_avg_pool(in_shape, one, [big, 1], [0, 0])));
+        assert!(is_limit(validate_max_pool(
+            in_shape,
+            one,
+            [big, 1],
+            [0, 0],
+            one
+        )));
+        assert!(is_limit(validate_max_pool(
+            in_shape,
+            one,
+            one,
+            [0, 0],
+            [big, 1]
+        )));
     }
 
     #[test]
