@@ -94,15 +94,6 @@ bench-harness = { path = "../bench-harness" }
 # のと同種の判断（外部依存の新規追加ではない。ユーザー承認不要）。
 serde_json.workspace = true
 
-# イシュー #1919: `crates/backend-cpu`／`crates/backend-metal` にも同名
-# `examples/gemm_bench.rs` があり、`cargo build --workspace --examples`
-# が出力先（`target/debug/examples/gemm_bench`）の衝突警告を出していた
-# （cargo#6313 で将来ハードエラー化予告）。ファイル名は変更せず（`site/`
-# 原稿の一次ソース参照・`docs/perf/**` の言及を保つため）、出力ターゲット
-# 名のみ `facade_gemm_bench` へ分離する。本クレートは crates.io 公開対象
-# のため本 example も `cargo package` に同梱される（`path` は package 内
-# 相対パスとして解決される）。公開後の実行コマンドは
-# `cargo run --release -p fandhe-ai --example facade_gemm_bench`。
 # イシュー #3194: resident 分岐で `flat_grad` を確保しないことを
 # `TrackingAllocator`（`#[global_allocator]`）の確保ピークで実測する。静的
 # カウンタをプロセスで共有するため libtest の並列実行を避け、
@@ -113,6 +104,16 @@ serde_json.workspace = true
 name = "device_param_store_resident_no_flat_grad_alloc"
 path = "tests/device_param_store_resident_no_flat_grad_alloc.rs"
 harness = false
+
+# イシュー #1919: `crates/backend-cpu`／`crates/backend-metal` にも同名
+# `examples/gemm_bench.rs` があり、`cargo build --workspace --examples`
+# が出力先（`target/debug/examples/gemm_bench`）の衝突警告を出していた
+# （cargo#6313 で将来ハードエラー化予告）。ファイル名は変更せず（`site/`
+# 原稿の一次ソース参照・`docs/perf/**` の言及を保つため）、出力ターゲット
+# 名のみ `facade_gemm_bench` へ分離する。本クレートは crates.io 公開対象
+# のため本 example も `cargo package` に同梱される（`path` は package 内
+# 相対パスとして解決される）。公開後の実行コマンドは
+# `cargo run --release -p fandhe-ai --example facade_gemm_bench`。
 
 [[example]]
 name = "facade_gemm_bench"
