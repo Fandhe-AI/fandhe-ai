@@ -5,7 +5,8 @@
 //! (2) HIP/HIPRTC のロード→コンパイル→module 保持→起動までを持つ [`KernelHost`]、
 //! (3) 型タグ付きカーネル引数 [`Arg`]／[`ArgKind`]／[`KernelSpec`] を提供する。
 //!
-//! 起動の `unsafe` は [`KernelHost::run`] の 1 箇所に集約する。`kernelParams` の個数・種別
+//! 起動の `unsafe` は [`KernelHost::run_geometry`] の 1 箇所に集約する（[`KernelHost::run`]（1 次元）と
+//! [`KernelHost::run_wave_blocks`]（1 block = 1 wave の行・チャネル単位。R6・#3437）の両方がここを通る）。`kernelParams` の個数・種別
 //! （ポインタ／i32／i64／f32）は呼び出し側が渡す [`KernelSpec`] と実行時に突き合わせ、
 //! spec とカーネルソース署名の一致は各 `kernels_*.rs` のテスト（`kernel_param_kinds`）で固定する。
 //! 起動は null stream で行い、完了を待ってから戻る（同期 API。引数の生存期間問題を作らない）。
@@ -56,6 +57,38 @@ pub(crate) fn grid_1d(
         });
     }
     Ok(((gx as u32, 1, 1), (block, 1, 1)))
+}
+
+/// 1 block = 1 wave で `blocks` 個を起動するときの `(grid, block)`（R6 正規化・#3437）。
+///
+/// `blocks` は 1..=`i32::MAX`（カーネル側の `row`／`ch` は `int` で、CUDA 版の
+/// `rows <= i32::MAX` と同じ上限）、`block_dim` は wave 幅（32 か 64）に限る。0 や範囲外は
+/// 型付きエラー（fail-closed）。
+pub(crate) fn wave_block_grid(
+    op: &'static str,
+    blocks: usize,
+    block_dim: u32,
+) -> Result<(Dim3, Dim3), RocmError> {
+    if block_dim != 32 && block_dim != 64 {
+        return Err(RocmError::InvalidOpArgs {
+            op,
+            detail: format!("block_dim は wave 幅（32 か 64）のみ: {block_dim}"),
+        });
+    }
+    if blocks == 0 {
+        return Err(RocmError::InvalidOpArgs {
+            op,
+            detail: "blocks は非 0 が必要です".into(),
+        });
+    }
+    if blocks > i32::MAX as usize {
+        return Err(RocmError::SizeLimitExceeded {
+            op,
+            n: blocks,
+            limit: i32::MAX as usize,
+        });
+    }
+    Ok(((blocks as u32, 1, 1), (block_dim, 1, 1)))
 }
 
 /// ブロックあたりスレッド数の HIP 上限。
@@ -205,6 +238,21 @@ impl KernelHost {
         self.run_geometry(op, spec, grid, block, args)
     }
 
+    /// `spec` のカーネルを「`blocks` 個の block × 1 wave（`block_dim` = 32 か 64）」で起動し、
+    /// 完了まで待つ（行・チャネル単位の正規化カーネル用。R6・#3437）。寸法は
+    /// [`wave_block_grid`] が検証する。
+    pub(crate) fn run_wave_blocks(
+        &self,
+        op: &'static str,
+        spec: &KernelSpec,
+        blocks: usize,
+        block_dim: u32,
+        args: &[Arg],
+    ) -> Result<(), RocmError> {
+        let (grid, block) = wave_block_grid(op, blocks, block_dim)?;
+        self.run_geometry(op, spec, grid, block, args)
+    }
+
     /// `spec` のカーネルを呼び出し側が導出した `(grid, block)` で起動し、完了まで待つ。
     ///
     /// 「1 block = 1 wave = 1 行」の softmax 系のように 1 次元・block 256 固定に合わない起動形
@@ -303,6 +351,29 @@ mod tests {
         let limit = (u32::MAX / 256) as usize * 256;
         assert!(grid_1d("t", limit + 1, 256).is_err());
         assert!(grid_1d("t", usize::MAX, 256).is_err());
+    }
+
+    #[test]
+    fn wave_block_grid_validates_blocks_and_block_dim() {
+        assert_eq!(
+            wave_block_grid("t", 3, 64).unwrap(),
+            ((3, 1, 1), (64, 1, 1))
+        );
+        assert_eq!(
+            wave_block_grid("t", i32::MAX as usize, 32).unwrap().0,
+            (i32::MAX as u32, 1, 1)
+        );
+        assert!(matches!(
+            wave_block_grid("t", 0, 64),
+            Err(RocmError::InvalidOpArgs { .. })
+        ));
+        assert!(matches!(
+            wave_block_grid("t", i32::MAX as usize + 1, 64),
+            Err(RocmError::SizeLimitExceeded { .. })
+        ));
+        for bad in [0, 1, 16, 48, 128, 256, 1024] {
+            assert!(wave_block_grid("t", 1, bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
