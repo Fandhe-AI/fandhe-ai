@@ -297,6 +297,20 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - **実機確認の申し送り（#3159）**: HIPRTC の暗黙ヘッダで `isnan(float)` が使えるか（監査 doc §6 で確認済みなのは linalg の `fabs`・`isfinite` のみ）、gfx942 での `double` 加算のスループット、wave64 での block 256 の動作。parity はホストモデル（`conv_pool_model.rs`）と `CpuBackendOps` の `to_bits` 一致で検証しており、HIPRTC のコンパイル結果そのものの検証ではない。
 - `pool3d_*`・`adaptive_max_pool2d`・`im2col3d`・`col2im3d`・`pad_modes_forward` は CUDA も未実装なので `Unsupported` のまま（§5）。新しい `unsafe` はない（`KernelHost::run`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
 
+### R11（#3442）の実装記録
+
+- **CUDA 再確認**: `backend-cuda/src/ops.rs` の `gemm_fp32_strict_into_impl`・`gemm_bias_act`・`gemm_resident_rhs`・`linear_forward_device`・`gemm_resident_lhs` と `kernels.rs` の `TILED_BIAS_ACT_F32`、CPU の同名メソッド（`backend-cpu/src/ops.rs`）を移植元・契約の基準とした。検査順序（ハンドル判別 → rank → shape → 退化形状）とエラー種別（`DeviceMismatch`／`ShapeMismatch`／`InvalidArgument`／`Unsupported`）は CUDA と揃えた。
+- **カーネルは 1 本（`kernels_gemm_bias_act.rs`）**: 4 メソッドを `has_bias`／`act`／オフセット引数の違いだけで共用する。オペランドは「base ポインタ + `long long` の要素オフセット」で渡す。`TypedDeviceBuffer` は base ポインタしか持たず、ホスト側で生ポインタを足さないことで、起動の `Arg::Ptr` が `as_device_ptr` の値だけという K1 監査の前提を崩さない。主ループは R0 の GEMM と**バイト単位で同一**（テスト `main_loop_is_byte_identical_to_r0_gemm` で固定）。FMA は `__builtin_fmaf` で明示、CUDA の `acc += a*b` は持ち込まない。
+- **REQ-8**: カーネル側は guarded load・`row < m`／`col < n` の書き込みガード・ガード内でのみ `bias[col]` を読む。ホスト側は `validate_gemm_dims`（i32 収容）・`operand_range`（4 オペランドすべての `offset + len <= バッファ長`。checked）・`launch_geometry` の grid 上限・`out_offset + m*n <= out.numel()` を起動前に確かめる（二重化）。
+- **退化形状**: `k == 0` は `gemm_resident_rhs`／`linear_forward_device` で `InvalidArgument`（CUDA と同じ）、`gemm_fp32_strict_into` では範囲を 0 で上書き。`gemm_resident_lhs` の `q == 0` は 0 埋めの `[p, r]`（HIP を使わない）、空出力は HIP に触れない。
+- **継承**: `gemm_resident_rhs_act`（`gemm_resident_rhs` → `relu`）・`*_tracked`・`gemm_fp32_strict_into_with_bias_reduce_tracked` は既定のまま。ROCm は呼び出しごとに同期するため遅延失敗トークンを要さない。
+- **`gemm_bias_act` の専用化は見送り**: 任意項目で、既定の合成（`gemm` → `add` → `relu`）が正しく動く。融合は性能だけの差。follow-up 候補。
+- **NT/TN 転置ビューの高速経路は移植しない**: CUDA の `memory.rs`・`transpose.rs` 相当は持たず、host の `contiguous()` で再配置する（数値は同じで性能だけの差）。follow-up 候補。
+- **数値契約**: bias は 1 回の加算、ReLU は `x > 0 ? x : 0`（R2 と同じ）。よって `gemm` → `add` → `relu` の合成と bit 一致する。長軸縮約はなく `f64` アキュムレータ契約は対象外。tolerance・baseline は変えていない。
+- **到達性**: `memory_ops()` は `None` のままなので crate の外から ROCm の `DeviceBuffer` を作れず、`DeviceParamStore` からはまだ到達しない（R2 と同じ制約。#3157 の所有者判断待ち）。
+- **実機確認の申し送り（#3159）**: HIPRTC のコンパイル、`long long` オフセット引数の ABI、別実行型（`EW_CACHE` 等）が確保したバッファの相互利用（同一プロセス・デバイス 0 で有効な想定）、wave64 での block 256。parity はホストモデル（`gemm_model::simulate_with_epilogue`）で検証しており、HIPRTC の出力そのものの検証ではない。
+- 新しい `unsafe` はない（`KernelHost::run_geometry`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
+
 ### R12（#3443）の実装記録
 
 - **対象**: `paged_kv_append`・`paged_attention_forward` の 2 メソッド（`*_tracked` は trait 既定の委譲のまま）。HIPRTC の静的ソース 1 本・2 カーネル（`kernels_paged_kv.rs`。`#define` はブロック寸法 2 つだけ）、実行型 `RocmPagedKv`（`paged_kv.rs`。resident 版は `pub(crate)`、スライス版 `append`／`attention` を公開）、結線は子モジュール `ops/paged_kv.rs`（`ops.rs` には 1 行ずつの委譲と `mod` 宣言のみ。thread_local キャッシュも子モジュールに置き、兄弟 PR #3455・#3457 との衝突面を最小にした）。

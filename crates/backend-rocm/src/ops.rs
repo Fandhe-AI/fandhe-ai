@@ -49,6 +49,11 @@
 //!   `paged_kv`（`ops/paged_kv.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。被覆計画の「shfl を使う 1 か所」は
 //!   現行 CUDA ソースと一致せず（カーネル本体に shuffle なし）、`WarpGeometry` は使わない。`f64` アキュムレータ契約は
 //!   該当しない（f32 の逐次和）。`_tracked` 版は trait 既定の委譲のまま。ROCm 非搭載は `DeviceUnavailable`。
+//! - R11（#3442）で GEMM 派生 4 メソッド（`gemm_resident_rhs`・`gemm_resident_lhs`・
+//!   `gemm_fp32_strict_into`・`linear_forward_device`）を融合 GEMM カーネル（`RocmGemmBiasAct`）へ結線した。
+//!   結線の本体（ハンドル判別・形状検査・退化形状・engine 分岐）は子モジュール `gemm_derived`
+//!   （`ops/gemm_derived.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。`gemm_resident_rhs_act` と
+//!   `*_tracked` は既定のまま継承する（`gemm_bias_act` の専用化は性能だけの差のため見送り）。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
 
 use std::cell::RefCell;
@@ -57,12 +62,12 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
-    Device, DeviceBuffer, Element, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
-    KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput, MseReduction, PagedAttentionArgs,
-    PagedKvLayout, Pool2dParams, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor,
-    UnaryElementwiseOp, batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout,
+    Activation, BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp,
+    Conv2dParams, Device, DeviceBuffer, DeviceBufferView, Element, FusionPlan, GruBackwardOutput,
+    GruPointwiseOutput, HuberKind, KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput,
+    MseReduction, PagedAttentionArgs, PagedKvLayout, Pool2dParams, ScalarBinaryOp, ScalarUnaryOp,
+    ShapeError, Tensor, UnaryElementwiseOp, batch_norm_layout, gemm_out_shape, reduce_out_shape,
+    require_same_shape, row_norm_layout, row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
@@ -678,6 +683,7 @@ fn check_nll_targets(
 
 mod conv_pool;
 mod ew;
+mod gemm_derived;
 mod paged_kv;
 mod rnn_cell;
 
@@ -891,6 +897,48 @@ impl BackendOps for RocmBackendOps {
         a: &DeviceBuffer<f32>,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
         self.ew_unary_device(op, a)
+    }
+
+    /// 常駐 `w`（・`bias`）のまま `a @ w (+ bias)`（R11・#3442）。`w`／`bias` を download しない。
+    fn gemm_resident_rhs(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_derived_rhs(a, w, bias)
+    }
+
+    /// 常駐 `w` が左辺の `w @ b`（R11・#3442）。
+    fn gemm_resident_lhs(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_derived_lhs(w, b)
+    }
+
+    /// `out[out_offset ..]` への GEMM 直書き（上書き。R11・#3442）。`*_tracked` は既定の委譲のまま
+    /// （ROCm は呼び出しごとに同期するので遅延失敗トークンを要さない）。
+    fn gemm_fp32_strict_into(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+    ) -> Result<(), BackendError> {
+        self.gemm_derived_into(a, b, out, out_offset)
+    }
+
+    /// 入出力とも常駐のまま `act(a @ w (+ bias))`（R11・#3442）。
+    fn linear_forward_device(
+        &self,
+        a: &DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.gemm_derived_linear_forward(a, w, bias, act)
     }
 
     /// HIPRTC の縮約（R3・#3434）。`f64` アキュムレータで逐次／2 段に加算し最後に 1 回 `f32` へ
