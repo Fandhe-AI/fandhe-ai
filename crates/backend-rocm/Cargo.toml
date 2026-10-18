@@ -1,7 +1,7 @@
 # backend-rocm（fandhe-ai-backend-rocm）: ROCm（AMD GPU）バックエンドの雛形（イシュー #3154・親 #3150）。
 #
 # 役割: HIP ランタイムを `libloading`（第 12 区分）で実行時に動的ロードし、ROCm の有無を
-# probe できるようにする。この段階では HIP のカーネルを実行しない（HIPRTC・カーネルは #3155）。
+# probe でき、HIPRTC でコンパイルした f32 GEMM カーネルを起動できる（#3155）。
 #
 # 依存方向: 現時点で内部クレートへは依存しない（BackendOps の実装は #3155 以降）。
 # facade からも参照しない（Device への ROCm 追加は #3157）。
@@ -21,3 +21,10 @@ publish.workspace = true
 
 [dependencies]
 libloading.workspace = true
+
+[dev-dependencies]
+# CPU 参照実装（`gemm_naive`・`assert_parity`）を GEMM のホスト側モデル照合・実機 parity の比較対象に使う
+# （src/gemm_model.rs・tests/gemm_real_device.rs）。workspace 内クレート同士の path 依存で、
+# 許容依存区分（外部クレート）の新規追加には当たらない。`version` を付けない理由は
+# backend-cuda の同名 dev-dependency と同じ（イシュー #881。公開物へ残らない・非公開クレート）。
+fandhe-ai-backend-cpu = { path = "../backend-cpu" }

@@ -388,6 +388,7 @@ dependencies = [
 name = "fandhe-ai-backend-rocm"
 version = "0.11.0"
 dependencies = [
+ "fandhe-ai-backend-cpu",
  "libloading",
 ]
 
