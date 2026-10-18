@@ -79,6 +79,11 @@ impl<T: DeviceElem> TypedDeviceBuffer<T> {
         Ok(buf)
     }
 
+    /// 確保した要素数。
+    pub(crate) fn len(&self) -> usize {
+        self.elems
+    }
+
     /// カーネル引数に渡すデバイスポインタ。
     pub(crate) fn as_device_ptr(&self) -> *mut c_void {
         self.ptr

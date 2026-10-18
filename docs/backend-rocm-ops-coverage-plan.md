@@ -266,6 +266,14 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - CUDA 列のファイル対応は `ops.rs` の呼び出しを基に付けた。R 案着手時に各 issue で再確認する
 - R4（#3435）着手時の再確認: #71 `log_softmax_backward` は現行 CUDA で shfl を使わない（PR #1994 で butterfly を撤回済み。lane 0 が `i` 昇順に `double` 逐次和を取り `__shared__` ＋ `__syncthreads()` で公開）。wave 幅依存は列ループの `i += 32` のみで、ROCm 版は `i += WARP_SIZE` へ置換した（§6 の「shfl のみ」分類は実態と異なる）。softmax／log_softmax は 2 パス経路のみ移植した（onepass は動的 SMEM が要るが `launch.rs` は `sharedMemBytes = 0` 固定で口がない。数値契約は同じで性能のみの差）
 
+### R2（#3433）の実装記録
+
+- **融合はインタプリタ方式**: CUDA の `run_fused` はプランごとに CUDA C を `format!` で生成するが、HIPRTC ソースは静的テンプレートのみ（A03）なので移植しない。静的カーネル `fused_ew_f32` を 1 本だけ用意し、プランは `[kind, a, b]` の `i32` 3 つ組をデバイスバッファとして渡す（`kernels_fused_elementwise.rs`）。allowlist（`Input`・`Add`・`Mul`・`Relu`・`Exp`・`Tanh`）の検証は HIP に触れる前にホストで行い、外れたら `Unsupported`。性能（レジスタ配列の動的添字）は未測定で #3159 で扱う。
+- **opt-in ゲートは設けない**: CUDA の融合は `AtomicBool` ゲート（facade の Tier B 公開判断に結びつく）の背後にある。ROCm はどの候補リストにも登録していないため CPU 版と同じくゲートなしにした。facade へ露出する #3157 で揃えるかを所有者が判断する。
+- **FMA**: 新設する 3 本の静的ソースすべての先頭に `#pragma clang fp contract(off)` を置く（HIP/clang 既定の暗黙 FMA 縮約を止め、縮約しない CPU 参照と丸めを揃える。`GeluTanh`・`Hardswish`・融合の「mul の後に add」が対象）。意図した FMA はなく `__builtin_fmaf` は使わない。`f64` アキュムレータ契約は縮約がないため該当しない。
+- **デバイス常駐 API の到達性**: `binary_elementwise_device`／`unary_elementwise_device` は実装したが、`memory_ops()` は `None`（§4 の既定継承）のままなので crate の外から ROCm の `DeviceBuffer` を作れない。判別は `downcast_handle::<RocmBufferHandle>()` の型のみ（`device()` は #3157 まで `Device::Cpu` の仮置きで CPU 由来と区別できない）。被覆表内の不整合（#106・#107 は「移植」、#2 は `None`）として所有者の判断待ち。
+- relu は CUDA と同じ `x > 0 ? x : 0`（NaN は 0。CPU の `f32::max` と `-0.0` の符号だけ異なりうる）。新しい `unsafe` はない（`KernelHost::run`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
+
 ## 10. 起票手順（未実施）
 
 所有者の承認後に `update-issue-tree` で親 #3150 配下へ R0〜R13 を追加する。各 issue に `phase:7`・依存（`dependsOn`）・実機要否を書く。承認前は起票しない。本 doc の追加だけでは #3156 の受け入れ条件（起票）は未達のまま残る。
