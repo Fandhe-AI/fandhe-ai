@@ -14,6 +14,7 @@
 | 追従（R1・#3432） | `WarpGeometry` は `unsafe` を追加しない（監査表の件数は不変） |
 | 追従（R3・#3434） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。(1) 封印 trait `DeviceElem` に `f64`（`SIZE = 8`）を追加した。sum の `double` partial バッファ用で、`f64` はビット列として memcpy してよい POD のため T1・T2 の「封印 POD」前提が 1 型ぶん広がるだけで、検査（`checked_mul`・長さ一致）は不変。(2) K1（`KernelHost::run`）の呼び出し元が `RocmReduce`・`RocmArgReduce` の分だけ増えた。全軸縮約 1 段目の `KernelHost::run_blocks` は `run` を経由する薄いラッパーで、起動点は 1 か所のまま。(3) 引数の照合は従来どおり `kernels_reduce.rs`・`kernels_arg_reduce.rs` の `spec_matches_source_signature` と `run` の実行時照合で行う。(4) `unsafe impl Send/Sync` は足さない（`RocmReduce`・`RocmArgReduce` は `!Send`。`RocmBackendOps` からは thread_local キャッシュ経由）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R10・#3441） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変。`unsafe impl Send/Sync` もなし）。LSTM／GRU の `rnn_cell.rs::RocmRnnCell` は K1（`KernelHost::run`）と T1〜T3（`TypedDeviceBuffer<f32>`）だけを使い、K1 の呼び出し元が 5 か所増えるだけ。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
+| 追従（R12・#3443） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変。`unsafe impl Send/Sync` もなし）。`paged_kv.rs::RocmPagedKv` は K1（`KernelHost::run_geometry`／`run_blocks` 経由）と T1〜T3（`TypedDeviceBuffer<f32>`・`TypedDeviceBuffer<u32>`）だけを使い、K1 の呼び出し元が 2 か所増えるだけ。`DeviceElem` の型追加はない（`u32`・`f32` は既存）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R7・#3438） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。K1（`KernelHost::run`）の呼び出し元が `RocmIm2col`・`RocmConstantPad`・`RocmPooling` の分だけ増えた（起動点は 1 か所のまま）。引数の照合は `kernels_im2col.rs`・`kernels_constant_pad.rs`・`kernels_pooling.rs` の `spec_matches_source_signature` と `run` の実行時照合で行う。`DeviceElem` への型追加はなし（`i32`・`f32` は既存）。`unsafe impl Send/Sync` は足さない（3 実行型は `!Send`。`RocmBackendOps` からは thread_local キャッシュ経由）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R11・#3442） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。K1（`KernelHost::run_geometry`）の呼び出し元が `RocmGemmBiasAct` の分だけ増えた（起動点は 1 か所のまま）。オフセットは `Arg::I64` の数値で渡し、`Arg::Ptr` は `as_device_ptr` の値だけ（§3.10）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する。R0（#3431）は新しい `unsafe` を足さない（インベントリは 33／10／17／0 のまま。`unsafe impl Send/Sync` もなし） |
@@ -166,6 +167,15 @@ GEMM 派生 4 メソッドの実行型（`gemm_bias_act.rs::RocmGemmBiasAct`・`
 - `unsafe impl Send/Sync` は足さない（`RocmGemmBiasAct` は `!Send`。thread_local キャッシュに置く）。
 - 確認方法: `grep -n unsafe crates/backend-rocm/src/{kernels_gemm_bias_act.rs,gemm_bias_act.rs,ops/gemm_derived.rs} crates/backend-rocm/tests/gemm_derived_absent.rs` が doc 内の言及を除いて 0 件。
 - 実機（MI300X・gfx942）で HIPRTC のコンパイルと `long long` 引数の ABI を確認していない（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
+
+### 3.11 R12（#3443）: 新しい `unsafe` ブロックなし（実装担当の自己点検。未監査）
+
+デバイス常駐 KV の 2 演算（`paged_kv.rs::RocmPagedKv`・`kernels_paged_kv.rs`・`paged_kv_model.rs`〈`cfg(test)`〉・`ops/paged_kv.rs`）は **`unsafe` を一切追加しない**。起動は既存の K1 だけを通る。
+
+- デバイスバッファは `TypedDeviceBuffer<f32>`（K／V プール・q・出力・score 作業バッファ）と `TypedDeviceBuffer<u32>`（スロット写像・ブロックテーブル・`seq_lens`）で、封印型は広げない。引数の型・個数・順序は `kernels_paged_kv.rs` の `spec_matches_source_signature` と K1 の実行時照合で守る（`num_blocks` は `long long`＝`Arg::I64`）。
+- 起動前に tensor-core の `validate_paged_*`（結線側）→ `append_launch_params`／`attention_launch_params`／`check_attention_lens`（バッファ長の一致・`i32`／`i64`／`u32` への収容）をホストで検査する。カーネル側にも手動境界チェックがあり二重化している（REQ-8。違反時は NaN）。
+- 確認方法: §2 の再現コマンドで `paged_kv*.rs`・`kernels_paged_kv.rs`・`ops/paged_kv.rs`・`tests/paged_kv_*.rs` に `unsafe {` が 0 件であること、`launch.rs` の `unsafe {` が増えていないことを確認する。§2 の件数表は R12 で増減しないが、兄弟 PR が §2 を更新している場合はマージ順で再集計が必要。節番号は 3.8（#3455）・3.9（R10）・3.10（#3457）が使用済みのため 3.11 とした。
+- 実機（MI300X・gfx942）での HIPRTC コンパイルと `expf` の CPU との parity は未確認（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
 
 ## 4. U1 の担保方法
 

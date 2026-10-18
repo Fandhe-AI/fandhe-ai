@@ -120,6 +120,27 @@ unsafe 監査 §6（`docs/backend-rocm-unsafe-audit.md`）のうちテストの�
 |---|---|---|---|---|---|
 | | | | | | |
 
+## paged KV（#3443）
+
+**状態: 未実測**。`paged_kv_append`・`paged_attention_forward`（`RocmPagedKv`）の実機 parity。`tests/paged_kv_real_device.rs`（`#[ignore]`）が `run_rocm_parity.sh` の `--ignored` 全件実行に自動で含まれる（スクリプトは変更しない）。**本テストの失敗は run の終了コードに影響する。**
+
+- 判定は REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）。append は純コピーなので K／V pool 全体の bit 一致を assert する。attention は GPU の `expf` の丸めが CPU と異なりうるため複合判定のみで、`bit_mismatch` は観測値。tolerance・baseline・FMA 契約は変えない。
+- 入力集合: block_size 1/4/16、batch 1/2、`(E, H)` = (8,4)・(16,4)・(64,4)・(128,2)（head_dim 2〜64）、prefill → decode の複数ステップ（L_new = 3/5/15/200 から 1 への遷移を含む）、非連続ブロック ID と番兵の未使用枠。
+- ログ行は `ROCM_PARITY_PAGED_KV\t<名前>\ttotal=…\tfail=…\tmax_abs=…\tmax_rel=…\tmean_abs=…\tp99_abs=…\tbit_mismatch=…`。
+- 補助確認（記録のみ）: 実 HIPRTC で `__builtin_fmaf`・`expf`・`__uint_as_float`・`#pragma clang fp contract(off)`・`__launch_bounds__(128)` がコンパイルできること、wave64 で 1 block = 128 スレッド（2 wave）の起動と `__syncthreads()` 越しの共有フラグ・作業バッファの可視性が通ること。
+
+| 項目 | 値 |
+|---|---|
+| 実施日 | |
+| 判定（pass／fail） | |
+| HIPRTC コンパイル（paged KV） | |
+
+ケースごと（`ROCM_PARITY_PAGED_KV` 行の転記）:
+
+| 名前 | total | fail | max_abs | max_rel | bit_mismatch |
+|---|---|---|---|---|---|
+| | | | | | |
+
 ## 秘密情報
 
 インスタンス識別子・認証情報・内部ホスト名・個人のパス・GPU の UUID／BDF は収録しない。マスク検査を通ったログだけを置く。

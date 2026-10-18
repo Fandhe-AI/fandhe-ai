@@ -45,6 +45,11 @@
 //! 足した 1 本の HIPRTC カーネル（[`RocmGemmBiasAct`]）へ結線した。主ループは R0 とバイト同一で、
 //! 常駐オペランドを download せずに計算する。
 //!
+//! デバイス常駐 KV（分解案 R12・#3443）として `paged_kv_append`・`paged_attention_forward` の HIPRTC カーネル
+//! （[`RocmPagedKv`]）を移植し、`RocmBackendOps` へ結線した。縮約順序は CPU 参照と同じ単一の連続ループ（thread 0 の
+//! 逐次 max／和）で wave 幅に依存せず（block 寸法 128・256 は 64 の倍数）、FMA は score・加重和の 2 か所だけ
+//! `__builtin_fmaf` で明示する。実機での HIPRTC コンパイル・wave64 parity は #3159。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
@@ -90,6 +95,7 @@ mod kernels_linalg_factor;
 mod kernels_log_softmax_backward;
 mod kernels_loss;
 mod kernels_norm;
+mod kernels_paged_kv;
 mod kernels_pooling;
 mod kernels_reduce;
 mod kernels_rnn_cell;
@@ -110,6 +116,9 @@ mod norm;
 #[cfg(test)]
 mod norm_model;
 mod ops;
+mod paged_kv;
+#[cfg(test)]
+mod paged_kv_model;
 mod pooling;
 mod reduce;
 #[cfg(test)]
@@ -150,6 +159,7 @@ pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
 pub use loss::RocmLoss;
 pub use norm::{BatchNormTrainHost, LayerNormBackwardHost, RmsNormBackwardHost, RocmNorm};
 pub use ops::RocmBackendOps;
+pub use paged_kv::RocmPagedKv;
 pub use pooling::RocmPooling;
 pub use reduce::RocmReduce;
 pub use rnn_cell::RocmRnnCell;

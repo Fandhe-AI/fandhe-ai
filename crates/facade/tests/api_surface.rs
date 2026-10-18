@@ -9395,6 +9395,9 @@ fn workspace_declares_paged_attention_entries_only_in_approved_locations() {
         "backend-cpu/src/ops.rs::paged_attention_forward",
         "backend-cuda/src/ops.rs::paged_attention_forward",
         "backend-metal/src/ops.rs::paged_attention_forward",
+        // #3443: backend-rocm の `BackendOps::paged_attention_forward` 実装（#3111 で承認済みの
+        // trait メソッドの ROCm 側実装であり、新規の公開入口ではない。別途の承認は得ていない）。
+        "backend-rocm/src/ops.rs::paged_attention_forward",
     ]
     .into_iter()
     .map(|k| (k.to_string(), 1usize))

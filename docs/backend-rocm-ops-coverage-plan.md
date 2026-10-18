@@ -265,6 +265,7 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - wave64 実機（MI300X 想定。`rocm-cloud-amd-procurement-decision.md`）での縮約順序の差と parity の実測は #3159 まで未検証
 - CUDA 列のファイル対応は `ops.rs` の呼び出しを基に付けた。R 案着手時に各 issue で再確認する
 - R4（#3435）着手時の再確認: #71 `log_softmax_backward` は現行 CUDA で shfl を使わない（PR #1994 で butterfly を撤回済み。lane 0 が `i` 昇順に `double` 逐次和を取り `__shared__` ＋ `__syncthreads()` で公開）。wave 幅依存は列ループの `i += 32` のみで、ROCm 版は `i += WARP_SIZE` へ置換した（§6 の「shfl のみ」分類は実態と異なる）。softmax／log_softmax は 2 パス経路のみ移植した（onepass は動的 SMEM が要るが `launch.rs` は `sharedMemBytes = 0` 固定で口がない。数値契約は同じで性能のみの差）
+- R12（#3443）着手時の再確認: #101 `paged_kv_append`・#103 `paged_attention_forward` の「shfl のみ(1 か所)」は現行 CUDA ソース（`kernels_paged_kv.rs`）と一致しない。カーネル本体は `__shfl` を使わず（`j` 軸は単一の連続ループ、max と和は thread 0 の逐次計算）、`__shfl` は CUDA 側テストの禁止リスト文字列にだけ現れる（§6 の grep がそれを拾ったと判断）。wave 幅への依存は block 寸法（attention 128・append 256。ともに 64 の倍数）だけで、`WarpGeometry` は不要。§4 の表自体は書き換えず本項に訂正を記す（表の改訂は所有者判断）
 
 ### R2（#3433）の実装記録
 
@@ -309,6 +310,22 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - **到達性**: `memory_ops()` は `None` のままなので crate の外から ROCm の `DeviceBuffer` を作れず、`DeviceParamStore` からはまだ到達しない（R2 と同じ制約。#3157 の所有者判断待ち）。
 - **実機確認の申し送り（#3159）**: HIPRTC のコンパイル、`long long` オフセット引数の ABI、別実行型（`EW_CACHE` 等）が確保したバッファの相互利用（同一プロセス・デバイス 0 で有効な想定）、wave64 での block 256。parity はホストモデル（`gemm_model::simulate_with_epilogue`）で検証しており、HIPRTC の出力そのものの検証ではない。
 - 新しい `unsafe` はない（`KernelHost::run_geometry`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
+
+### R12（#3443）の実装記録
+
+- **対象**: `paged_kv_append`・`paged_attention_forward` の 2 メソッド（`*_tracked` は trait 既定の委譲のまま）。HIPRTC の静的ソース 1 本・2 カーネル（`kernels_paged_kv.rs`。`#define` はブロック寸法 2 つだけ）、実行型 `RocmPagedKv`（`paged_kv.rs`。resident 版は `pub(crate)`、スライス版 `append`／`attention` を公開）、結線は子モジュール `ops/paged_kv.rs`（`ops.rs` には 1 行ずつの委譲と `mod` 宣言のみ。thread_local キャッシュも子モジュールに置き、兄弟 PR #3455・#3457 との衝突面を最小にした）。
+- **shfl・`WarpGeometry`**: 上の §9 訂正のとおり不要。ブロック内の違反フラグ集約は CUDA の `__syncthreads_or` ではなく、スレッド別の共有フラグ `s_bad_flags[threadIdx.x]` への書き込み＋ `__syncthreads()` のあと、thread 0 が単一書き手として `s_bad` へ OR 集約し、再度の `__syncthreads()` で公開する組にした（複数スレッドが同じ共有変数へ書くデータ競合を作らない）。`__syncthreads_or` は同梱の amd-rocm スキルの HIP 資料に記載がなく HIPRTC での可用性を確認できないため、確認済みのプリミティブだけで書ける等価形を採った（挙動は同じ。違反時は出力へ NaN）。
+- **FMA**: ソース先頭に `#pragma clang fp contract(off)`。意図した FMA は CPU の `f32::mul_add` と同じ 2 か所（score の `(q * scale)` と `k` の積和、加重和の `p * v`）だけ `__builtin_fmaf` で明示。CUDA の `__fmul_rn` は contract(off) 下で不要。
+- **`f64` アキュムレータ契約は該当しない**: 正規化統計でも勾配の長軸縮約でもなく、CUDA・CPU 参照とも f32 の逐次和（max と和は thread 0 が `j` の論理順）。REQ-2 の統一複合判定をそのまま適用する（結合順序が単一の連続ループと異ならない）。
+- **引数型**: `launch::ArgKind` に符号なし 32bit がなく、`PagedKvLayout::recheck` は `num_blocks < u32::MAX` しか保証しないため `int` にも収まらない。CUDA の `unsigned int num_blocks` を `long long num_blocks`（`Arg::I64`）に変え、カーネル内は `(long long)id >= num_blocks`（番兵 `0xFFFFFFFF` も拒否）で比較する。`launch.rs` は変更しない。
+- **REQ-8**: append は `idx < total`・`r >= rows || e >= embed_dim`・`slot >= pool_rows`。attention は `b_ll >= batch`・`s_prev < 0 || limit > seq_len || limit > s_stride`・`slot_idx >= max_blocks_per_seq`・`id >= num_blocks`（score 段・加重和段の両方）。違反時は出力へ NaN。添字は `long long`、ベクトル化ロードなし。ホスト側は tensor-core の `validate_paged_*` → 結線のハンドル長検査 → `paged_kv.rs` の launch 直前の再検証 → カーネル内の三層。
+- **作業バッファ**: score の作業バッファと出力は `TypedDeviceBuffer::new` による未初期化確保（CUDA 側と同じ。最大 1<<30 要素の workspace を host の Vec 経由でゼロ初期化すると host abort・数 GiB の H2D 転送になるため避けた）。カーネルは各行で `j < limit` の要素を書いてから読み（違反時は読まずに return）、出力は grid の全ブロックが各自の `head_dim` 要素を全経路で書くので、未初期化領域は読まれない。
+- **空入力**: 追記 0 行は HIP に触れず `Ok(())`、`out_numel == 0`（`query_rows == 0` と同値）は `RocmBufferHandle::Empty` の `[B, L_new, E]` を返す。検証違反では pool を書き換えない。
+- **ROCm 非搭載**: `DeviceUnavailable`（`Unsupported` ではない。A08）。engine とハンドル種別の取り違えは `DeviceMismatch`。
+- **到達性**: `memory_ops()` は `None` のままなので crate の外から ROCm の `DeviceBuffer` を作れない（R2 と同じ。#3157 待ち）。`device()` も仮置きの `Device::Cpu` のまま。
+- **新しい `unsafe` はない**（`KernelHost::run_geometry`〈監査行 K1〉・`TypedDeviceBuffer`〈T1〜T3。`u32`・`f32` は既存〉の再利用。`docs/backend-rocm-unsafe-audit.md` §3.11）。
+- **検証**: ホストモデル（`paged_kv_model.rs`）と `CpuBackendOps` の pool 全体・出力の `to_bits` 一致（block_size 1/4/16、batch 1/2、複数ステップ、非連続ブロック ID、番兵の未使用枠）、モデル単体の違反時 NaN、`tests/paged_kv_absent.rs`。
+- **未確認（#3159）**: HIPRTC での実コンパイル（`__builtin_fmaf`・`expf`・`__uint_as_float`）、GPU `expf` と CPU の parity（`tests/paged_kv_real_device.rs`、ログ行 `ROCM_PARITY_PAGED_KV`）、wave64 での block 128 の動作。
 
 ## 10. 起票手順（未実施）
 
