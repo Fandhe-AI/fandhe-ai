@@ -98,6 +98,28 @@ unsafe 監査 §6（`docs/backend-rocm-unsafe-audit.md`）のうちテストの�
 4. 原因候補を書き、`.claude/rules/out-of-scope-tracking.md` に従い後続 Issue として提案する（起票はユーザー承認後）。
 - tolerance の緩和・baseline の追加・`-ffp-contract` の追加は行わない。
 
+## reduce（#3434）
+
+**状態: 未実測（#3159）**。`sum`・`max`・`min`（`RocmReduce`。wave 幅は `WarpGeometry` で注入）と `argmax`・`argmin`（`RocmArgReduce`）の実機 parity。`tests/reduce_real_device.rs`（`#[ignore]`）が `run_rocm_parity.sh` の `--ignored` 全件実行に自動で含まれる（スクリプトは変更しない）。**本テストの失敗は run の終了コードに影響する。**
+
+- 判定は REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）。tolerance・baseline・FMA 契約は変えない。`max`・`min`・`argmax`・`argmin` と軸指定 `sum` は CPU と**完全一致**を assert する。全軸 `sum` は block/lane の結合順序が CPU（4096 要素チャンクの `f64` partial）と異なるため複合判定のみ assert し、bit 不一致数は観測値（`bit_mismatch`）として出力する。
+- 入力集合: 全軸 numel = 1・255・256・257・5000・`256*1024+1`（ブロック上限 1024 を超え grid-stride が複数周する）、軸指定の形状 `[3,4]`・`[2,3,5]`・`[1,300]`・`[300,1]`・`[257,3]`・`[64,784]` の全軸、NaN・±inf 混在（`max`・`min`）、タイ・NaN・全 NaN・チャンク境界（argmax・argmin。numel 4095・4096・4097・12295・`256*1024+1`）、`[1e8, 1, -1e8]` の総和が 1（`f64` アキュムレータ）。
+- ログ行は `ROCM_PARITY_REDUCE\t<名前>\ttotal=…\tfail=…\tmax_abs=…\tmax_rel=…\tmean_abs=…\tp99_abs=…\tbit_mismatch=…`（argmax・argmin は `exact=true`）。
+- 補助診断（記録のみ）: HIPRTC で wave64（gfx942）の `__shfl_xor`（`double` オーバーロードを含む。マクロ `WARP_SHFL_XOR`）・`__uint_as_float`・`__float_as_uint`・`fmaxf`／`fminf`・`#pragma clang fp contract(off)` がコンパイルできること。`WARPS_PER_BLOCK = 4`（256 / 64）で `warp_sums` が未初期化読みにならないこと（ホスト側モデルは `src/reduce_model.rs` が wave32・wave64 の両方で確認済みで、実機の結果ではない）。
+
+| 項目 | 値 |
+|---|---|
+| 実施日 | |
+| 判定（pass／fail） | |
+| HIPRTC コンパイル（reduce・arg_reduce） | |
+| 全軸 `sum` の `bit_mismatch` 合計（観測値） | |
+
+演算ごと（`ROCM_PARITY_REDUCE` 行の転記）:
+
+| 名前 | total | fail | max_abs | max_rel | bit_mismatch |
+|---|---|---|---|---|---|
+| | | | | | |
+
 ## 秘密情報
 
 インスタンス識別子・認証情報・内部ホスト名・個人のパス・GPU の UUID／BDF は収録しない。マスク検査を通ったログだけを置く。

@@ -200,6 +200,46 @@ mod tests {
     }
 
     #[test]
+    fn render_with_warp_orders_warp_lines_then_numeric_defines() {
+        use crate::warp_geometry::WarpGeometry;
+        let w = WarpGeometry::new(64)
+            .unwrap()
+            .render_hip_defines(Some(256))
+            .unwrap();
+        let a = KernelSource::render_with_warp(&w, &[("BLOCK_DIM", 256)], "body").unwrap();
+        assert_eq!(
+            a,
+            KernelSource::render_with_warp(&w, &[("BLOCK_DIM", 256)], "body").unwrap()
+        );
+        let lines: Vec<&str> = a.as_str().lines().collect();
+        // WarpDefines 由来の 7 行 → 追加の数値 #define → 本体。
+        assert_eq!(lines.len(), 9);
+        let warp_lines: Vec<&str> = w.as_str().lines().collect();
+        assert_eq!(&lines[..7], warp_lines.as_slice());
+        assert_eq!(lines[7], "#define BLOCK_DIM 256");
+        assert_eq!(lines[8], "body");
+        for name in [
+            "WARP_SIZE",
+            "WARP_HALF",
+            "WARP_FULL_MASK",
+            "WARP_LANE",
+            "WARP_ID",
+            "WARP_SHFL_XOR",
+            "WARPS_PER_BLOCK",
+        ] {
+            assert!(
+                lines[..7]
+                    .iter()
+                    .any(|l| l.starts_with(&format!("#define {name}"))),
+                "{name}"
+            );
+        }
+        // 追加 #define の検証は render と同じ（不正名・NUL は拒否）。
+        assert!(KernelSource::render_with_warp(&w, &[("bad", 1)], "x").is_err());
+        assert!(KernelSource::render_with_warp(&w, &[], "a\0b").is_err());
+    }
+
+    #[test]
     fn rendered_source_has_no_nul() {
         let s = KernelSource::render(&[("BLOCK_DIM", u32::MAX)], "extern \"C\" {}").unwrap();
         assert!(!s.as_str().contains('\0'));

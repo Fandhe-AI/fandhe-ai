@@ -54,6 +54,27 @@ pub(crate) fn validate_softmax_dims(
     rows: usize,
     cols: usize,
 ) -> Result<SoftmaxDims, RocmError> {
+    validate_dims(op, len, rows, cols, true)
+}
+
+/// backward 用。カーネルは添字を `long long` で計算するため `rows`・`cols` が各々 `i32` に収まれば
+/// 足り、`numel` の `i32` 上限は課さない（大きな最終軸バッチを `KernelLaunchFailed` にしない）。
+pub(crate) fn validate_softmax_backward_dims(
+    op: &'static str,
+    len: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<SoftmaxDims, RocmError> {
+    validate_dims(op, len, rows, cols, false)
+}
+
+fn validate_dims(
+    op: &'static str,
+    len: usize,
+    rows: usize,
+    cols: usize,
+    limit_numel: bool,
+) -> Result<SoftmaxDims, RocmError> {
     let numel = rows
         .checked_mul(cols)
         .ok_or_else(|| RocmError::InvalidOpArgs {
@@ -68,7 +89,9 @@ pub(crate) fn validate_softmax_dims(
     }
     // カーネルは `long long` で添字を計算するが、引数は `int`。numel も i32 内に限る
     // （CUDA 版・scan.rs と同じ上限）。
-    fit_i32(op, numel, "numel")?;
+    if limit_numel {
+        fit_i32(op, numel, "numel")?;
+    }
     Ok(SoftmaxDims {
         rows,
         numel,
@@ -179,8 +202,8 @@ impl RocmLogSoftmaxBackward {
         rows: usize,
         cols: usize,
     ) -> Result<Vec<f32>, RocmError> {
-        let d = validate_softmax_dims(OP_BACKWARD, y.len(), rows, cols)?;
-        validate_softmax_dims(OP_BACKWARD, g.len(), rows, cols)?;
+        let d = validate_softmax_backward_dims(OP_BACKWARD, y.len(), rows, cols)?;
+        validate_softmax_backward_dims(OP_BACKWARD, g.len(), rows, cols)?;
         if d.numel == 0 {
             return Ok(Vec::new());
         }
@@ -287,6 +310,18 @@ mod tests {
             validate_softmax_dims("t", big, 1, big),
             Err(RocmError::InvalidOpArgs { .. })
         ));
+    }
+
+    #[test]
+    fn backward_allows_numel_over_i32_but_not_rows_or_cols() {
+        let big = i32::MAX as usize + 1;
+        let (r, c) = (65_536usize, 32_769usize); // rows*cols > i32::MAX、各々は i32 内
+        assert!(validate_softmax_dims("t", r * c, r, c).is_err());
+        let d = validate_softmax_backward_dims("t", r * c, r, c).unwrap();
+        assert_eq!((d.numel, d.rows_i, d.cols_i), (r * c, 65_536, 32_769));
+        assert!(validate_softmax_backward_dims("t", big, big, 1).is_err());
+        assert!(validate_softmax_backward_dims("t", big, 1, big).is_err());
+        assert!(validate_softmax_backward_dims("t", r * c - 1, r, c).is_err());
     }
 
     #[test]
