@@ -35,7 +35,7 @@ MLP 784→256→10・batch 64、total_numel = 200704+256+2560+10 = 203,530 要�
 | prologue | poison・device・config 検査、pending／tape_id／epoch 照合、`Vec<Var>`・`Vec<bool>` 構築、host 経由 slot の `grads.get` と shape 検査 | in-situ の残差（H4） |
 | alloc | `flat_grad = Vec::with_capacity(total_numel)`（約 814 KB）を毎 step 無条件に確保。CPU の resident 分岐では未使用 | `alloc` |
 | stage | CPU は `gemm_fp32_strict_into_with_bias_reduce_tracked` を override せず bias 勾配が host 経由。bias（256+10 要素）を `upload_into` で staging へコピー | `stage` |
-| sgd_kernel | `sgd_step_device` を total_numel 要素に 1 回。添字アクセスの逐次スカラーループ（境界検査付き）で compute と apply（in-place 書き戻し）は融合 | `sgd_kernel` |
+| sgd_kernel | `sgd_step_device` を total_numel 要素に 1 回。添字アクセスの逐次スカラーループ（境界検査付き。**#3193 以前の形**。以後は zip 反復）で compute と apply（in-place 書き戻し）は融合 | `sgd_kernel` |
 
 momentum 0 のため velocity は確保されず、momentum 系の腕は作らない。
 
@@ -101,7 +101,7 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
 保てるか、後続で確認してから判断する。
 
 1. `flat_grad` の `with_capacity` を `!any_resident` 分岐の中へ移す（H3）
-2. `sgd_step_device` を zip／chunk 化して境界検査を除き自動ベクトル化させる。または
+2. `sgd_step_device` を zip／chunk 化して境界検査を除き自動ベクトル化させる（**#3193 で zip 化を実装。rayon 案は未採用**。§9）。または
    rayon 化してしきい値付きの逐次フォールバックにする（H1。#2446 の縮約側機構と同型）
 3. CPU で `gemm_fp32_strict_into_with_bias_reduce_tracked` を override し、bias 勾配の
    host 経由をなくす（stage 区間の削除）
@@ -118,3 +118,22 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
   経路の in-place 書き戻しより余分なコピーを含む参考値である
 - 既存の REJECT／undetermined 実験（#1575・#1576・RAYON_NUM_THREADS スイープ・#2446・
   #2104）は再実行しない
+
+## 9. #3193 zip 化（`sgd_step_device`）
+
+- 変更: `crates/backend-cpu/src/ops.rs` の `sgd_step_device` を「検証 → スライス確定 → `sgd_step_slices`（zip 反復）」へ再構成。ハンドル実体の長さ（param・grad・velocity）を書き込み前にすべて検証する（REQ-8 の手動境界検査は維持。不一致は `ElementCountMismatch` で、更新前の状態を保つ）。評価順・FMA 契約（`mul_add` は weight_decay／momentum／nesterov の項のみ、`p - lr*g` は 2 演算）は不変
+- 回帰: `crates/backend-cpu/tests/sgd_device_bit_identity.rs` が #3193 以前の添字ループの逐語の写しと bit 一致（NaN はクラス一致）を、momentum・dampening・weight_decay（-0.0 含む）・nesterov・is_first_step・長さ 0〜203,530・特殊値入りで検証する
+
+### 前後比較（device_update。MLP 784→256→10・203,530 要素）
+
+| 機体 | 版 | insitu_direct device_update 中央値 | sgd_kernel 中央値 | 状態 |
+|---|---|---|---|---|
+| x86_64 Linux（Core i7-13700K・共有環境・record_only） | before = `1a7eb9a2`（origin/main） | 269.1 µs（範囲 192.6-278.8） | 197.3 µs | 参考値（判定外・5 run 独立プロセス） |
+| 同上 | after = 本変更 | 42.7 µs（範囲 41.5-43.7） | 34.2 µs | 同上 |
+| GB10 | - | 未計測 | 未計測 | 実機セッションへ申し送り |
+| M4 Max | - | 未計測 | 未計測 | 実機セッションへ申し送り |
+| Mac mini | - | 未計測 | 未計測 | 実機セッションへ申し送り |
+
+- ログ: `logs/cpu-reuse-device-update-2106/smoke-x86-3193/{before,after}/`。before は共有環境のため run 間ばらつきが大きい（§6 と同じく RULE.txt のゲートを通していない）。後退は観測されなかった
+- 受け入れ条件「前後の device_update（機体・版つき）」のうち実機分は未達。GB10・Mac mini・M4 Max では、各版で `orchestrate.sh` を回して `aggregate.py` で集計する。`bench-fandhe --task train --device cpu --mode reuse --phases` の前後比較は `[patch.crates-io.fandhe-ai]` の path patch で行う（既存 `run_ab_*_cpu.sh` は定数反転専用でコード差分の A/B には流用できず、派生スクリプトが要る。本変更の範囲外）
+- x86 baseline（FMA の target feature なし）では `mul_add` が `fmaf` 呼び出しになるため weight_decay・momentum 経路は自動ベクトル化されない（bit は同一）。計測経路（momentum 0・wd 0）は `p - lr*g` のみでベクトル化が効く
