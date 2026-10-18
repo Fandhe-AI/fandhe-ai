@@ -11,6 +11,7 @@
 use crate::error::RocmError;
 use crate::kernels_gemm::GemmSource;
 use crate::kernels_linalg::LinalgSource;
+use crate::warp_geometry::WarpDefines;
 use std::fmt::Write as _;
 
 /// `compile_code_object` が受け付けるソース。実装は本クレート内の検証済み型だけ。
@@ -51,12 +52,33 @@ impl KernelSource {
         defines: &[(&'static str, u32)],
         body: &'static str,
     ) -> Result<Self, RocmError> {
+        Self::build("", defines, body)
+    }
+
+    /// [`Self::render`] の前に [`WarpDefines`]（wave 幅マクロ群。`WarpGeometry::render_hip_defines`
+    /// だけが作れる newtype）を前置する。縮約系カーネル（R3 以降）が wave 幅依存の定数
+    /// （`WARP_SIZE`・`WARPS_PER_BLOCK` 等）を受け取る入口で、`&str` では受け取らない
+    /// （任意文字列の混入を型で防ぐ。A03）。出力は「`WarpDefines` → 数値 `#define` → 本体」の順。
+    pub(crate) fn render_with_warp(
+        warp: &WarpDefines,
+        defines: &[(&'static str, u32)],
+        body: &'static str,
+    ) -> Result<Self, RocmError> {
+        Self::build(warp.as_str(), defines, body)
+    }
+
+    fn build(
+        prefix: &str,
+        defines: &[(&'static str, u32)],
+        body: &'static str,
+    ) -> Result<Self, RocmError> {
         if body.contains('\0') {
             return Err(RocmError::InvalidKernelConfig {
                 detail: "カーネル本体に NUL を含みます".into(),
             });
         }
-        let mut s = String::with_capacity(body.len() + defines.len() * 32);
+        let mut s = String::with_capacity(prefix.len() + body.len() + defines.len() * 32);
+        s.push_str(prefix);
         for (name, value) in defines {
             if !is_valid_define_name(name) {
                 return Err(RocmError::InvalidKernelConfig {
@@ -147,6 +169,46 @@ mod tests {
             let value = line.rsplit(' ').next().unwrap();
             assert!(value.chars().all(|c| c.is_ascii_digit()), "{line}");
         }
+    }
+
+    #[test]
+    fn render_with_warp_orders_warp_lines_then_numeric_defines() {
+        use crate::warp_geometry::WarpGeometry;
+        let w = WarpGeometry::new(64)
+            .unwrap()
+            .render_hip_defines(Some(256))
+            .unwrap();
+        let a = KernelSource::render_with_warp(&w, &[("BLOCK_DIM", 256)], "body").unwrap();
+        assert_eq!(
+            a,
+            KernelSource::render_with_warp(&w, &[("BLOCK_DIM", 256)], "body").unwrap()
+        );
+        let lines: Vec<&str> = a.as_str().lines().collect();
+        // WarpDefines 由来の 7 行 → 追加の数値 #define → 本体。
+        assert_eq!(lines.len(), 9);
+        let warp_lines: Vec<&str> = w.as_str().lines().collect();
+        assert_eq!(&lines[..7], warp_lines.as_slice());
+        assert_eq!(lines[7], "#define BLOCK_DIM 256");
+        assert_eq!(lines[8], "body");
+        for name in [
+            "WARP_SIZE",
+            "WARP_HALF",
+            "WARP_FULL_MASK",
+            "WARP_LANE",
+            "WARP_ID",
+            "WARP_SHFL_XOR",
+            "WARPS_PER_BLOCK",
+        ] {
+            assert!(
+                lines[..7]
+                    .iter()
+                    .any(|l| l.starts_with(&format!("#define {name}"))),
+                "{name}"
+            );
+        }
+        // 追加 #define の検証は render と同じ（不正名・NUL は拒否）。
+        assert!(KernelSource::render_with_warp(&w, &[("bad", 1)], "x").is_err());
+        assert!(KernelSource::render_with_warp(&w, &[], "a\0b").is_err());
     }
 
     #[test]
