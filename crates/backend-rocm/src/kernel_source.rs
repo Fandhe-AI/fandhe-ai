@@ -11,6 +11,7 @@
 use crate::error::RocmError;
 use crate::kernels_gemm::GemmSource;
 use crate::kernels_linalg::LinalgSource;
+use crate::warp_geometry::WarpGeometry;
 use std::fmt::Write as _;
 
 /// `compile_code_object` が受け付けるソース。実装は本クレート内の検証済み型だけ。
@@ -67,6 +68,24 @@ impl KernelSource {
             let _ = writeln!(s, "#define {name} {value}");
         }
         s.push_str(body);
+        Ok(Self(s))
+    }
+
+    /// [`Self::render`] に加え、wave 幅の `#define` 群（`WARP_SIZE`・`WARP_HALF`・
+    /// `WARP_SHFL_XOR` 等。[`WarpGeometry::render_hip_defines`] が検証済みの数値と固定テンプレートだけで
+    /// 作る）を先頭へ前置する。縮約系（R6 正規化・R4 softmax 等）の render 関数が使う入口で、
+    /// 任意の文字列を前置する口は作らない（A03）。`WARPS_PER_BLOCK` は出さない
+    /// （block を 1 wave に固定する系は不要。必要な系は別途 `defines` で渡す）。
+    pub(crate) fn render_with_warp(
+        geom: WarpGeometry,
+        defines: &[(&'static str, u32)],
+        body: &'static str,
+    ) -> Result<Self, RocmError> {
+        let warp = geom.render_hip_defines(None)?;
+        let rest = Self::render(defines, body)?;
+        let mut s = String::with_capacity(warp.as_str().len() + rest.0.len());
+        s.push_str(warp.as_str());
+        s.push_str(&rest.0);
         Ok(Self(s))
     }
 }
@@ -147,6 +166,32 @@ mod tests {
             let value = line.rsplit(' ').next().unwrap();
             assert!(value.chars().all(|c| c.is_ascii_digit()), "{line}");
         }
+    }
+
+    #[test]
+    fn render_with_warp_prepends_only_validated_defines() {
+        let g = WarpGeometry::new(64).unwrap();
+        let s = KernelSource::render_with_warp(g, &[("BLOCK_DIM", 256)], "body").unwrap();
+        let want = format!(
+            "{}#define BLOCK_DIM 256\nbody",
+            g.render_hip_defines(None).unwrap().as_str()
+        );
+        assert_eq!(s.as_str(), want);
+        assert!(!s.as_str().contains("WARPS_PER_BLOCK"));
+        // `#define` の値は数字（または固定テンプレートのマクロ定義）だけ。
+        for line in s
+            .as_str()
+            .lines()
+            .filter(|l| l.starts_with("#define") && !l.contains('('))
+        {
+            let value = line.rsplit(' ').next().unwrap();
+            assert!(value.chars().all(|c| c.is_ascii_alphanumeric()), "{line}");
+        }
+        assert!(KernelSource::render_with_warp(g, &[("bad", 1)], "x").is_err());
+        assert_eq!(
+            s,
+            KernelSource::render_with_warp(g, &[("BLOCK_DIM", 256)], "body").unwrap()
+        );
     }
 
     #[test]

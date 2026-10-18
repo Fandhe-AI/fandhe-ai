@@ -116,12 +116,22 @@ gather/scatter・interpolate・sort・topk・unique・scan の 6 実行型は、
 | T1 | `TypedDeviceBuffer::upload` | `memcpy_htod` | `ptr` は `new` が `elems*SIZE` 以上確保済み（`checked_mul`）。`src.len() == elems` を事前検証。`T` は封印 POD | OOB | U3 |
 | T2 | `TypedDeviceBuffer::download` | `memcpy_dtoh` | T1 と対称（`dst.len() == elems` を検証。呼び出し側は起動後に `synchronize` 済み） | OOB | U3 |
 | T3 | `TypedDeviceBuffer::drop` | `free` | `ptr` は `malloc` 由来で未解放。所有権で二重解放なし | 二重解放 | U7 |
-| K1 | `KernelHost::run` | `Function::launch` | `params` の個数・種別を `KernelSpec`（ソース署名と同一であることを各 `kernels_*.rs` の `spec_matches_source_signature` テストで固定）と**実行時にも照合**してから構築。指す `owned` は直後の `synchronize` まで生存。グリッドは `grid_1d` が `div_ceil` で覆う（`grid.x` と `grid.x*block` の `u32` 収容を checked で検証）。範囲外はカーネル内の手動境界チェック（REQ-8）が防ぐ。ポインタの指す要素型（`f32`／`i32`／`u64` 等）までは型で検査できないため、呼び出し側の各 `run_*` が引数順どおりにバッファを渡す（テストは非搭載環境のため起動を伴わない。実機確認は #3159） | 引数不一致・OOB・ハング | U5 |
+| K1 | `KernelHost::launch_dims`（`run`・`run_blocks` 共通。R6〈#3437〉で `run` から切り出した） | `Function::launch` | `params` の個数・種別を `KernelSpec`（ソース署名と同一であることを各 `kernels_*.rs` の `spec_matches_source_signature` テストで固定）と**実行時にも照合**してから構築。指す `owned` は直後の `synchronize` まで生存。グリッドは呼び出し元の `grid_1d`（`div_ceil` で覆う。`grid.x` と `grid.x*block` の `u32` 収容を checked で検証）か `wave_block_grid`（blocks は 1..=`i32::MAX`・block は wave 幅 32／64。R6〈#3437〉）が検証した値のみ。範囲外はカーネル内の手動境界チェック（REQ-8）が防ぐ。ポインタの指す要素型（`f32`／`i32`／`u64` 等）までは型で検査できないため、呼び出し側の各 `run_*` が引数順どおりにバッファを渡す（テストは非搭載環境のため起動を伴わない。実機確認は #3159） | 引数不一致・OOB・ハング | U5 |
 
 - 起動は null stream・同期 API（`run` が `synchronize` まで待つ）。sort の `j`・`k` ループは各ステップを同期起動する（性能より単純さを優先。ステップごとの引数配列は都度構築する）。
 - ホスト側の fail-closed 検証（A04／A08）: shape・スライス長・`i32`／`i64` 収容を `checked_*`／`try_from` で検査し、gather/scatter/one_hot は index の値域を全要素走査して範囲外を拒否する。interpolate は空間軸の入力サイズ 0（カーネルのクランプが `-1` 添字になる）を拒否する。
 - 本節の件数は §2 の表（基準コミット時点の 33 ブロック）に含めていない。#3157 など兄弟 PR が §2 を更新している場合は、マージ順で再集計が必要。
 - 実機（MI300X・gfx942）で HIPRTC のコンパイルと起動結果を確認していない（#3159）。ホスト側モデル（`*_model.rs`）は CPU 参照実装との bit 一致を検証するが、HIPRTC の出力そのものの検証ではない。
+
+### 3.6 R6（#3437）: 新しい `unsafe` ブロックなし（実装担当の自己点検。未監査）
+
+正規化 6 演算（`norm.rs::RocmNorm`・`kernels_norm.rs`・`norm_model.rs`〈`cfg(test)`〉）は **`unsafe` を一切追加しない**。起動は既存の K1 だけを通る。
+
+- `launch.rs` の変更は、`KernelHost::run` の起動部分を private な `launch_dims` へ切り出し、1 block = 1 wave の `run_blocks`（検証は純関数 `wave_block_grid`）から同じ `launch_dims` を呼ぶ形にしたこと。`unsafe { func.launch(..) }` は引き続き 1 か所で、SAFETY コメントの「グリッド」の根拠だけを更新した（K1 行）。
+- デバイスバッファは既存の `TypedDeviceBuffer<f32>`（T1〜T3）と `module::DeviceBuffer<f64>`（M5〜M7。`rstd`／`mean` の double スクラッチ）だけを使う。`TypedDeviceBuffer` の封印型に `f64` を足す案は T1〜T3 の前提を変えるため採らなかった。double スクラッチは起動前に `from_slice(&vec![0.0; rows])` で 0 初期化する（`hipMalloc` は 0 初期化しない。A04）。
+- 省略された weight／bias／統計にも `hidden`（または `c`）要素のダミーバッファを渡す（predicated load 対策）。
+- 確認方法: §2 の再現コマンドで `launch.rs` の `unsafe {` が 1 件のままであること、`norm*.rs`・`kernels_norm.rs`・`tests/norm_*.rs` に `unsafe` ブロックがないこと（doc 内の言及を除く）を確認した。§2 の件数表は R6 で増減しないが、兄弟 PR が §2 を更新している場合はマージ順で再集計が必要。
+- 実機（MI300X・gfx942）で HIPRTC のコンパイル（`__shfl_xor` の double オーバーロード・`__builtin_fma` の f64 命令化）と wave64 parity を確認していない（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
 
 ## 4. U1 の担保方法
 

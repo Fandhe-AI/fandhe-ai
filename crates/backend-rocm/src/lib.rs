@@ -14,6 +14,10 @@
 //! （[`RocmSort`]）・unique（[`RocmUnique`]）の HIPRTC カーネルを移植した。いずれもホストのスライスを
 //! 受けて `Vec` を返す実行型で、`BackendOps` への結線は `RocmBackendOps`（#3431・R0）で行う。
 //!
+//! 正規化（分解案 R6・#3437）として rmsnorm・layer_norm・両 backward・batch_norm の train/infer の
+//! HIPRTC カーネル（[`RocmNorm`]。wave 幅は `WarpGeometry` で注入）を移植し、`RocmBackendOps` の
+//! 6 メソッドへ結線した。実機での HIPRTC コンパイル・wave64 parity は #3159。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
@@ -36,6 +40,7 @@ mod kernels_gemm;
 mod kernels_interpolate;
 mod kernels_linalg;
 mod kernels_linalg_factor;
+mod kernels_norm;
 mod kernels_scan;
 mod kernels_sort;
 mod kernels_unique;
@@ -44,6 +49,9 @@ pub mod linalg;
 #[cfg(test)]
 mod linalg_model;
 mod module;
+mod norm;
+#[cfg(test)]
+mod norm_model;
 mod ops;
 mod scan;
 #[cfg(test)]
@@ -67,6 +75,7 @@ pub use gemm::RocmGemmF32;
 pub use interpolate::RocmInterpolate;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
 pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
+pub use norm::{BatchNormTrainHost, LayerNormBackwardHost, RmsNormBackwardHost, RocmNorm};
 pub use ops::RocmBackendOps;
 pub use scan::RocmScan;
 pub use sort::RocmSort;
