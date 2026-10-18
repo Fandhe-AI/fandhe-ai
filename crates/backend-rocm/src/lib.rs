@@ -7,6 +7,7 @@
 //! 線形代数 6 演算（`inv`・`solve`・`det`・`cholesky`・`qr`・`eigh`。#3444）は内部 opt-in ゲート
 //! （[`linalg`]。既定 OFF）の背後にある `f64` カーネルで、`RocmLinalgLu`・`RocmLinalgFactor` が実行する
 //! （`BackendOps` への結線は #3431 の `RocmBackendOps` 後）。
+//! 縮約系カーネル向けの wave 幅注入部品は `WarpGeometry`（#3432）。
 //! BackendOps への統合・facade の Device 追加は #3157、unsafe 監査記録は #3158、
 //! 実機 parity は #3159。
 //!
@@ -28,12 +29,16 @@ pub mod linalg;
 mod linalg_model;
 mod module;
 mod target;
+mod warp_geometry;
+#[cfg(test)]
+mod warp_model;
 
 pub use error::RocmError;
 pub use gemm::RocmGemmF32;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
 pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
 pub use target::{GfxTarget, parse_gcn_arch_name};
+pub use warp_geometry::{WarpDefines, WarpGeometry};
 
 /// HIP ランタイムをロードでき、デバイスが 1 つ以上あるとき true。
 ///

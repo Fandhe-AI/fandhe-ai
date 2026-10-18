@@ -22,6 +22,13 @@ impl GfxTarget {
             Self::Gfx942 => "gfx942",
         }
     }
+
+    /// wave 幅（固定値。CDNA3 は wave64 固定）。`WarpGeometry::for_target` が使う。
+    pub fn wave_size(self) -> u32 {
+        match self {
+            Self::Gfx942 => 64,
+        }
+    }
 }
 
 /// `gcnArchName`（例 `gfx942:sramecc+:xnack-`）を allowlist で照合する純関数。
@@ -63,6 +70,11 @@ mod tests {
         ] {
             assert!(parse_gcn_arch_name(s).is_err(), "{s:?}");
         }
+    }
+
+    #[test]
+    fn wave_size_is_fixed() {
+        assert_eq!(GfxTarget::Gfx942.wave_size(), 64);
     }
 
     #[test]
