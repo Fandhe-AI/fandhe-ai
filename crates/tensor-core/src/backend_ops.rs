@@ -1845,9 +1845,13 @@ pub trait BackendOps {
     ///
     /// `bias` を無視して [`Self::gemm_fp32_strict_into_tracked`]
     /// （weight のみ）へ委譲し `Ok(false)` を返す（`CpuBackendOps`
-    /// （#1212）・`CudaBackendOps`（既定 `Unsupported` のまま）は本メソッド
-    /// を一切オーバーライドしない＝挙動変更ゼロ）。`backend-metal::ops::
-    /// MetalBackendOps`（#1566）のみオーバーライドし、NT/TN
+    /// （#1212）は本メソッドをオーバーライドしない＝挙動変更ゼロ）。
+    /// `backend-cuda::ops::CudaBackendOps`（#3204）は NT/TN で GEMM が読む
+    /// `g` の device バッファから既存の `reduce_sum_axis_f32`（`double`
+    /// 逐次加算・最後に 1 回 `float`）を同一ストリームへ積んでデバイス上で
+    /// 縮約し、それ以外はホスト `f64` 縮約＋`upload_into` で書く（`bias` が
+    /// `Some` なら常に `Ok(true)`）。`backend-metal::ops::
+    /// MetalBackendOps`（#1566）もオーバーライドし、NT/TN
     /// （encode-only）経路では同一 `ctx.encode` 呼び出し内で bias 縮約
     /// も追加ディスパッチし、それ以外（NN/TT・分類不能形状）は
     /// ホスト経路フォールバック（`gemm_fp32_strict` → `upload_into` に

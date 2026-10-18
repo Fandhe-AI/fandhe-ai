@@ -188,15 +188,17 @@ fn device_resident_matches_host_sgd_on_cuda_across_100_steps() {
 /// フォールバック（ホスト縮約 → `upload_into`）のいずれの経路でも
 /// bias 縮約を resident staging へ書く（イシュー #1566・PR #1659。
 /// `crates/backend-metal/src/ops.rs::MetalBackendOps::gemm_fp32_
-/// strict_into_with_bias_reduce_tracked` doc 参照）。CPU・CUDA は
-/// この trait メソッドをオーバーライドしないため、bias 縮約は常に
+/// strict_into_with_bias_reduce_tracked` doc 参照）。CUDA も #3204 以降は
+/// オーバーライドし、NT/TN ではデバイス上で縮約する（それ以外はホスト縮約
+/// ＋ `upload_into`）。CPU はオーバーライドしないため、bias 縮約は常に
 /// 通常の `Gradients` 経由（`DeviceParamStore::fill_resident_weight_
 /// grad` の `!outcome.bias_filled` 分岐）に留まる。
 #[derive(Clone, Copy)]
 enum StrictBiasExpectation {
-    /// CPU・CUDA: bias slot は resident 経由で充填されないため `None`。
+    /// CPU: bias slot は resident 経由で充填されないため `None`。
     HostRouted,
-    /// Metal（#1566 以降）: bias slot も resident 経由で充填されるため
+    /// Metal（#1566 以降）・CUDA（#3204 以降）: bias slot も resident
+    /// 経由で充填されるため
     /// `Some`。`grad_readout_contract_on_metal`
     /// （`#[cfg(target_os = "macos")]`）のみが構築するため、非 macOS
     /// ビルドでは未構築（`dead_code` lint 抑制。他バックエンド用の
@@ -253,7 +255,7 @@ fn assert_grad_readout_contract(device: Device, bias_expectation: StrictBiasExpe
     // strict 版: `build_model`（2 層 Linear。層順に weight → bias）の
     // weight slot（index 0・2）は resident 経由で新鮮に充填され常に
     // `Some`。bias slot（index 1・3）は `bias_expectation` に応じて
-    // `Some`（Metal）／`None`（CPU・CUDA）となる
+    // `Some`（Metal・CUDA）／`None`（CPU）となる
     // （`StrictBiasExpectation` doc 参照）。
     let strict = tape.resident_grads_to_host(&store, &grads).unwrap();
     assert_eq!(
@@ -400,14 +402,14 @@ fn grad_readout_contract_on_metal() {
 /// resident 経由で `Some` を返す側へ移行した（`crates/backend-cuda/src/
 /// ops.rs::CudaBackendOps::gemm_fp32_strict_into` doc 参照）。
 ///
-/// **CUDA は bias slot は `None` のまま（イシュー #1898 で確認・不変）**:
-/// CUDA は `gemm_fp32_strict_into_with_bias_reduce_tracked` を
-/// オーバーライドしない（trait 既定実装のまま）ため、bias 縮約は
-/// resident staging へ書かれず常に通常の `Gradients` 経由。Metal
-/// （イシュー #1566 以降）とは異なりこの契約は変わっていない
-/// （`StrictBiasExpectation::HostRouted`）。本エージェント実行環境には
-/// CUDA 実機がないため、この契約下での実機再実測は未実施のまま
-/// 引き継ぐ（`docs/perf/logs/grad-readout-contract-1898/` 参照）。
+/// **CUDA は bias slot も resident 経由で `Some`（イシュー #3204 で変更）**:
+/// イシュー #1898 の時点では CUDA は
+/// `gemm_fp32_strict_into_with_bias_reduce_tracked` をオーバーライドせず
+/// bias slot は `None`（`HostRouted`）だった。#3204 で CUDA もオーバーライド
+/// したため、期待を Metal と同じ `Resident` へ是正した（NT/TN はデバイス上で
+/// 縮約、それ以外はホスト縮約＋`upload_into`。いずれも `Ok(true)`）。本
+/// エージェント実行環境には CUDA 実機がないため、この契約下での実機再実測は
+/// 未実施のまま引き継ぐ（GB10 での実行は未検証）。
 ///
 /// ```sh
 /// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
@@ -415,5 +417,14 @@ fn grad_readout_contract_on_metal() {
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn grad_readout_contract_on_cuda() {
-    assert_grad_readout_contract(Device::Cuda(0), StrictBiasExpectation::HostRouted);
+    assert_grad_readout_contract(Device::Cuda(0), StrictBiasExpectation::Resident);
+}
+
+/// CPU（実機不要）: strict 版の bias slot は resident 経由で充填されず `None`
+/// （`gemm_fp32_strict_into_with_bias_reduce_tracked` を CPU は
+/// オーバーライドしない。`StrictBiasExpectation::HostRouted`）。CUDA が #3204 で
+/// `Resident` へ移ったあと `HostRouted` を構築する唯一のテストで、CI で回る。
+#[test]
+fn grad_readout_contract_on_cpu() {
+    assert_grad_readout_contract(Device::Cpu, StrictBiasExpectation::HostRouted);
 }

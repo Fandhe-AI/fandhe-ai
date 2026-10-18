@@ -3882,8 +3882,8 @@ impl DeviceParamStore {
     /// がって resident 経由の重み勾配は、#1479 以前はホストから一切
     /// 観測できなかった（PR #1390 codex-review P2「対象外」・
     /// `crates/facade/tests/cuda_graph_step_common/mod.rs` doc 参照）。
-    /// **bias 勾配は Metal（#1566 以降）のみ同様に resident 経由で
-    /// `GradStaging` へ直接書き込まれる**（CPU・CUDA は bias 縮約が
+    /// **bias 勾配は Metal（#1566 以降）・CUDA（#3204 以降）が同様に
+    /// resident 経由で `GradStaging` へ直接書き込む**（CPU は bias 縮約が
     /// `gemm_fp32_strict_into_with_bias_reduce_tracked` の trait 既定
     /// 実装〈bias を無視〉のまま残るため引き続き `Gradients` 経由。
     /// イシュー #1898 参照）。
@@ -3902,8 +3902,8 @@ impl DeviceParamStore {
     /// **戻り値**: `pending` の登録順（`sync_to_host` と同じ並び）で
     /// slot ごとに `Some(Tensor<f32>)`（今回の backward で resident 経由
     /// により新鮮に充填された slot）または `None`（resident 未充填の
-    /// slot。CPU・CUDA の bias slot は常にこちら。Metal〈#1566 以降〉の
-    /// bias slot は resident 経由のため `Some`。呼び出し元は
+    /// slot。CPU の bias slot は常にこちら。Metal〈#1566 以降〉・CUDA
+    /// 〈#3204 以降〉の bias slot は resident 経由のため `Some`。呼び出し元は
     /// `grads.get(...)` へフォールバックする。[`Self::
     /// param_grads_to_host`] がその統合版）。
     ///
@@ -3956,11 +3956,11 @@ impl DeviceParamStore {
     /// `pending` の登録順（`sync_to_host` と同じ並び）で全パラメータ
     /// 勾配を返す。
     ///
-    /// **strict 版と分ける理由**: bias 縮約は CPU・CUDA では常に
+    /// **strict 版と分ける理由**: bias 縮約は CPU では常に
     /// `Gradients` 側（通常の `ResidentLeaf` ではなく、backward が
     /// `Op::LinearResident` の VJP から生成した寄与）に載り、strict 版
     /// （`GradStaging` 限定）は bias slot を `None` のまま返す
-    /// （Metal〈#1566 以降〉のみ bias も resident 経由で `Some`）。
+    /// （Metal〈#1566 以降〉・CUDA〈#3204 以降〉は bias も resident 経由で `Some`）。
     /// また resident 対応可否がバックエンド構成によって非対応
     /// （`gemm_fp32_strict_into` 未実装）でありうるため、strict 版
     /// 単独では「各 step の全パラメータ勾配を読む」ことがバックエンド

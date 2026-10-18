@@ -684,8 +684,8 @@ impl Tape {
     /// （イシュー #1479）。resident 経路（`GradStaging`）で新鮮に充填
     /// 済みの勾配のみをホストへ読み出す。weight slot は CPU・CUDA
     /// 〈#1559〉・Metal〈#1555〉のいずれも resident 経由で `Some`。bias
-    /// slot は Metal〈#1566 以降〉のみ resident 経由で `Some` を返し、
-    /// CPU・CUDA は引き続き `None`（bias 縮約はホスト経由の
+    /// slot は Metal〈#1566 以降〉・CUDA〈#3204 以降〉が resident 経由で
+    /// `Some` を返し、CPU は引き続き `None`（bias 縮約はホスト経由の
     /// `Gradients` へ回る。イシュー #1898・`crates/backend-metal/src/
     /// ops.rs::MetalBackendOps::gemm_fp32_strict_into_with_bias_reduce_
     /// tracked` doc 参照）。resident 未対応バックエンド（`gemm_fp32_

@@ -350,6 +350,48 @@ impl CudaStorage {
             CudaStorage::Managed(s) => CudaArgMut::UnifiedView(s.slice_mut(bounds)),
         }
     }
+
+    /// 同一ストレージの互いに重ならない 2 範囲 `first`／`second` を、同時に
+    /// 生存できる 2 つの書き込みビューとして `f` へ渡す（イシュー #3204。
+    /// `gemm_fp32_strict_into_with_bias_reduce_tracked` が weight 勾配と
+    /// bias 勾配を同じ連結バッファの別範囲へ書くために使う）。
+    /// `split_at_mut`（cudarc の safe API）で分割するため `unsafe` を
+    /// 要しない。ビューは本関数のローカルに借用するためクロージャ経由で
+    /// 渡す。前提は `first.end <= second.start <= second.end <= self.len()`
+    /// （呼び出し元の範囲検査済み。破れた場合は panic せず `None`）。
+    pub(crate) fn with_view_mut_pair<R>(
+        &mut self,
+        first: std::ops::Range<usize>,
+        second: std::ops::Range<usize>,
+        f: impl FnOnce(CudaArgMut<'_>, CudaArgMut<'_>) -> R,
+    ) -> Option<R> {
+        if first.start > first.end
+            || second.start > second.end
+            || first.end > second.start
+            || second.end > self.len()
+        {
+            return None;
+        }
+        let mid = first.end;
+        let (s0, s1) = (first.start, second.start - mid);
+        let (l1, l2) = (first.len(), second.len());
+        match self {
+            CudaStorage::Device(s) => {
+                let (mut head, mut rest) = s.split_at_mut(mid);
+                Some(f(
+                    CudaArgMut::View(head.slice_mut(s0..s0 + l1)),
+                    CudaArgMut::View(rest.slice_mut(s1..s1 + l2)),
+                ))
+            }
+            CudaStorage::Managed(s) => {
+                let (mut head, mut rest) = s.split_at_mut(mid);
+                Some(f(
+                    CudaArgMut::UnifiedView(head.slice_mut(s0..s0 + l1)),
+                    CudaArgMut::UnifiedView(rest.slice_mut(s1..s1 + l2)),
+                ))
+            }
+        }
+    }
 }
 
 /// 配置非依存の読み取り専用カーネル引数（イシュー #1352）。
@@ -465,15 +507,52 @@ impl<'d> CudaArgMut<'d> {
         }
     }
 
+    /// `src`（同一長の device バッファ）を本書き込み先へ D2D コピーする
+    /// （イシュー #3204。bias 勾配の縮約軸長が 1 のとき、カーネルの
+    /// `0.0 + (-0.0) = +0.0` を避けて `-0.0` を保つホスト参照〈直接コピー〉
+    /// と bit 一致させるために使う）。非同期投入で、完了保証は次の同期点。
+    pub(crate) fn copy_from_dtod(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        src: &CudaArg<'_>,
+    ) -> Result<(), CudaError> {
+        // `memcpy_dtod` は `dst.len() >= src.len()` を assert するため、
+        // panic を避けて長さ一致を型付きエラーで先に検査する。
+        if self.len() != src.len() {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "copy_from_dtod: dst.len() ({}) != src.len() ({})",
+                    self.len(),
+                    src.len()
+                ),
+            });
+        }
+        macro_rules! go {
+            ($dst:expr) => {
+                match src {
+                    CudaArg::Slice(s) => stream.memcpy_dtod(*s, $dst)?,
+                    CudaArg::View(v) => stream.memcpy_dtod(v, $dst)?,
+                    CudaArg::Unified(s) => stream.memcpy_dtod(*s, $dst)?,
+                    CudaArg::UnifiedView(v) => stream.memcpy_dtod(v, $dst)?,
+                }
+            };
+        }
+        match self {
+            CudaArgMut::SliceMut(d) => go!(&mut **d),
+            CudaArgMut::UnifiedMut(d) => go!(&mut **d),
+            CudaArgMut::View(d) => go!(d),
+            CudaArgMut::UnifiedView(d) => go!(d),
+        }
+        Ok(())
+    }
+
     /// 全要素をゼロで埋める（イシュー #1559。`gemm.rs::CudaGemm::
     /// launch_tiled_f32_nt_into`／`_tn_into` の `k == 0` 分岐——数学的に
     /// 結果が全 0 になる契約——が、カーネル起動を経由せず `c_dev` へ
     /// 直接ゼロを書き込むために使う。`cudarc::CudaStream::memset_zeros`
-    /// は `DevicePtrMut<T>` を実装する型（`CudaSlice`／`CudaViewMut`／
-    /// `UnifiedSlice`／`UnifiedViewMut`。いずれも実装済み）を汎用に扱う
-    /// ため、本列挙体の 4 variant すべてに委譲できる。非同期投入契約
-    /// （#1013）は他のカーネル起動と同じで、完了保証は呼び出し元の次の
-    /// 同期点へ委ねる。
+    /// は `DevicePtrMut<T>` を実装する型を汎用に扱うため、本列挙体の
+    /// 4 variant すべてに委譲できる。非同期投入契約（#1013）は他の
+    /// カーネル起動と同じで、完了保証は次の同期点へ委ねる。
     pub(crate) fn zero_fill(&mut self, stream: &Arc<CudaStream>) -> Result<(), CudaError> {
         match self {
             CudaArgMut::SliceMut(s) => stream.memset_zeros(&mut **s)?,

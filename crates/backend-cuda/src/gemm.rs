@@ -51,6 +51,17 @@ use crate::memory::{CudaArg, CudaArgMut, GuardedSlice};
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
 use crate::pool::CudaAllocator;
+use crate::reduce::CudaReduce;
+
+/// `launch_tiled_f32_{tn,nt}_into` が GEMM と同じ起動内で bias 勾配を
+/// 縮約するための書き込み先（イシュー #3204。呼び出し元は
+/// `ops.rs::CudaBackendOps::gemm_fp32_strict_into_with_bias_reduce_tracked`）。
+/// `reduce` は `CudaGemm` と同一デバイスストリームを共有するもの、`out` は
+/// weight 範囲と重ならない `n` 要素の書き込みビュー。
+pub(crate) struct BiasReduceTarget<'r, 'o> {
+    pub(crate) reduce: &'r CudaReduce,
+    pub(crate) out: &'r mut CudaArgMut<'o>,
+}
 // イシュー #1214: VJP 専用 NT/TN 転置入口（`transpose_to_pooled`）が
 // 転置中間バッファをプールから確保するために本番経路でも使う
 // （従来は `#[cfg(test)]` 限定のテストヘルパー専用だった）。
@@ -5381,6 +5392,7 @@ impl CudaGemm {
     /// 16 バイト整列制約は存在せず、`a_offset` 用の cp.async 整列ゲート
     /// （`select_tiled_f32_kernel` の第 1 引数）とは無関係。追加の
     /// フェイルクローズゲートは不要。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn launch_tiled_f32_nt_into(
         &self,
         a: &[f32],
@@ -5389,10 +5401,14 @@ impl CudaGemm {
         m: u32,
         n: u32,
         k: u32,
+        mut bias: Option<BiasReduceTarget<'_, '_>>,
     ) -> Result<(), CudaError> {
         validate_gemm_dims(a.len(), bt.len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
+        if let Some(t) = bias.as_ref() {
+            self.validate_bias_target(t, n)?;
+        }
 
         if m == 0 || n == 0 {
             // 呼び出し元（`ops.rs::gemm_fp32_strict_into_impl`）は
@@ -5412,6 +5428,10 @@ impl CudaGemm {
             // への委譲。ドキュメンテーションコメント参照）で明示的に
             // ゼロを書き込む。
             c_dev.zero_fill(&self.stream)?;
+            if let Some(t) = bias.as_mut() {
+                // 空和（k == 0）は 0。ホスト参照も `acc = 0.0` のまま。
+                t.out.zero_fill(&self.stream)?;
+            }
             self.stream.synchronize()?;
             return Ok(());
         }
@@ -5436,6 +5456,11 @@ impl CudaGemm {
             c_dev.push(&mut builder);
             builder.arg(&m_i).arg(&n_i).arg(&k_i).launch(cfg)?;
         }
+        if let Some(t) = bias.as_mut() {
+            // NT: `bt_dev` は `[n, k]` の密配置で、bias 勾配は各行（`k` 要素）
+            // の和（`outer = n, axis_len = k, inner = 1`）。
+            self.launch_bias_reduce(t, &bt_dev, n as usize, k as usize, 1)?;
+        }
         // 設計判断 A: `b_std` がまだ GPU 上で読まれている間にプールへ
         // 返却・別処理に再利用される race を防ぐため、drop（関数末尾の
         // スコープ終了）より前に完了を待つ。
@@ -5448,6 +5473,7 @@ impl CudaGemm {
     /// device-resident 直書き込みにする。設計判断 A・B は
     /// [`Self::launch_tiled_f32_nt_into`] のドキュメンテーションコメント
     /// と同一。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn launch_tiled_f32_tn_into(
         &self,
         at: &[f32],
@@ -5456,10 +5482,14 @@ impl CudaGemm {
         m: u32,
         n: u32,
         k: u32,
+        mut bias: Option<BiasReduceTarget<'_, '_>>,
     ) -> Result<(), CudaError> {
         validate_gemm_dims(at.len(), b.len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
+        if let Some(t) = bias.as_ref() {
+            self.validate_bias_target(t, n)?;
+        }
 
         if m == 0 || n == 0 {
             return Ok(());
@@ -5467,6 +5497,9 @@ impl CudaGemm {
         if k == 0 {
             // `launch_tiled_f32_nt_into` の同名分岐と同一の根拠。
             c_dev.zero_fill(&self.stream)?;
+            if let Some(t) = bias.as_mut() {
+                t.out.zero_fill(&self.stream)?;
+            }
             self.stream.synchronize()?;
             return Ok(());
         }
@@ -5489,8 +5522,59 @@ impl CudaGemm {
             c_dev.push(&mut builder);
             builder.arg(&m_i).arg(&n_i).arg(&k_i).launch(cfg)?;
         }
+        if let Some(t) = bias.as_mut() {
+            // TN: `b_dev` は `[k, n]` の密配置で、bias 勾配は列方向の和
+            // （`outer = 1, axis_len = k, inner = n`）。GEMM と同じ
+            // `b_dev` を再利用し g の再アップロードをしない。
+            self.launch_bias_reduce(t, &b_dev, 1, k as usize, n as usize)?;
+        }
         self.stream.synchronize()?;
         Ok(())
+    }
+
+    /// bias 縮約先がこの `CudaGemm` と同一ストリームで、出力長が `n` で
+    /// あることを GEMM 起動前に確かめる（イシュー #3204。同一ストリームで
+    /// なければ GEMM と縮約の実行順が保証されず、`Err` 時に weight・bias
+    /// いずれも書かないという全体失敗契約も守れないため fail-closed）。
+    fn validate_bias_target(&self, t: &BiasReduceTarget<'_, '_>, n: u32) -> Result<(), CudaError> {
+        if !Arc::ptr_eq(t.reduce.stream(), &self.stream) {
+            return Err(CudaError::InvalidKernelConfig {
+                detail: "bias reduce: CudaReduce and CudaGemm must share one stream".to_string(),
+            });
+        }
+        if t.out.len() != n as usize {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "bias reduce: out.len() ({}) must equal n ({n})",
+                    t.out.len()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// GEMM 起動直後（同期前）に、GEMM が読んだ device バッファ `src` から
+    /// bias 勾配を縮約して `t.out` へ書く（イシュー #3204）。同一ストリーム
+    /// 上の起動なので GEMM との順序は保証される。縮約軸長 1 は和を取らず
+    /// 直接コピーする（ホスト参照が `-0.0` を保つため。カーネルでは
+    /// `0.0 + (-0.0) = +0.0` になる）。
+    fn launch_bias_reduce(
+        &self,
+        t: &mut BiasReduceTarget<'_, '_>,
+        src: &CudaSlice<f32>,
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<(), CudaError> {
+        if axis_len == 1 {
+            // `outer * inner == n`。k == 1 では先頭 n 要素が bias そのもの。
+            let n = t.out.len();
+            return t
+                .out
+                .copy_from_dtod(&self.stream, &CudaArg::View(src.slice(0..n)));
+        }
+        t.reduce
+            .launch_sum_axis_generic_into(&CudaArg::Slice(src), t.out, outer, axis_len, inner)
     }
 
     /// f16 カーネル共通の起動手続き。[`Self::run_f32_kernel`] と同一構造
