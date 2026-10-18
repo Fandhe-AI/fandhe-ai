@@ -9,9 +9,10 @@
 //! 生存し、オプション配列の個数と `numOptions` が一致する。U3: コード取得は `GetCodeSize` の
 //! サイズどおりにバッファを確保し、サイズ 0 を拒否する。U7: プログラムは RAII で 1 回だけ破棄する。
 //!
-//! A03: ソースは [`GemmSource`] 型のみ受け付け、オプションは [`GfxTarget`] allowlist 由来の
+//! A03: ソースは封印 trait [`RtcSource`] を実装する [`GemmSource`]・[`LinalgSource`] のみ受け付け、オプションは [`GfxTarget`] allowlist 由来の
 //! `--gpu-architecture=gfxNNN` 1 本のみ。include パス・環境変数・`-ffp-contract` は渡さない
-//! （FMA は明示 `__builtin_fmaf` で決まるため不要。docs/backend-rocm-hiprtc-gemm-decision.md §2）。
+//! （GEMM の FMA は明示 `__builtin_fmaf`、線形代数は各ソース先頭の `#pragma clang fp contract(off)` で
+//! 決まるため不要。docs/backend-rocm-hiprtc-gemm-decision.md §2・docs/backend-gpu-linalg-decision.md §10）。
 //!
 //! 出典: soname は HIP 公式文書「HIPRTC is available as a separate library `libhiprtc.so`」
 //! （<https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_rtc.html>。版付き soname
@@ -20,6 +21,7 @@
 
 use crate::error::RocmError;
 use crate::kernels_gemm::GemmSource;
+use crate::kernels_linalg::LinalgSource;
 use crate::target::GfxTarget;
 use std::ffi::{CString, c_char, c_void};
 use std::os::raw::c_int;
@@ -32,8 +34,35 @@ const SYM_CODE_SIZE: &str = "hiprtcGetCodeSize";
 const SYM_CODE: &str = "hiprtcGetCode";
 const SYM_DESTROY: &str = "hiprtcDestroyProgram";
 
-/// プログラム名（固定）。
-const PROGRAM_NAME: &str = "fandhe_gemm_f32.hip";
+/// HIPRTC へ渡せるソースの種類（crate 内限定の封印 trait）。
+///
+/// 実装は検証済みの newtype（[`GemmSource`]・[`LinalgSource`]）だけで、いずれも private な
+/// 構築経路（render 関数）からしか作れない。任意の `&str` はコンパイルできない（A03）。
+/// プログラム名は種類ごとの固定の `&'static str` で、外部入力から組み立てない。
+pub(crate) trait RtcSource {
+    /// ソース本文。
+    fn source_text(&self) -> &str;
+    /// `hiprtcCreateProgram` へ渡す固定のプログラム名。
+    fn program_name(&self) -> &'static str;
+}
+
+impl RtcSource for GemmSource {
+    fn source_text(&self) -> &str {
+        self.as_str()
+    }
+    fn program_name(&self) -> &'static str {
+        "fandhe_gemm_f32.hip"
+    }
+}
+
+impl RtcSource for LinalgSource {
+    fn source_text(&self) -> &str {
+        self.as_str()
+    }
+    fn program_name(&self) -> &'static str {
+        LinalgSource::program_name(self)
+    }
+}
 
 /// 取得するコンパイラログの上限（これを超えるログは取得せずサイズのみ記録する）。
 const MAX_LOG_BYTES: usize = 1 << 20;
@@ -182,13 +211,13 @@ fn log_from_buffer(buf: &[u8]) -> String {
 
 /// ソースをコンパイルしてコードオブジェクトを返す。ログは成功時も取得する（警告確認用。
 /// 失敗時のみエラーへ含める）。
-pub(crate) fn compile_code_object(
+pub(crate) fn compile_code_object<S: RtcSource>(
     rt: &HiprtcRuntime,
-    src: &GemmSource,
+    src: &S,
     target: GfxTarget,
 ) -> Result<CodeObject, RocmError> {
-    let c_src = cstring(src.as_str(), "ソース")?;
-    let c_name = cstring(PROGRAM_NAME, "プログラム名")?;
+    let c_src = cstring(src.source_text(), "ソース")?;
+    let c_name = cstring(src.program_name(), "プログラム名")?;
     let c_opt = cstring(&arch_option(target), "オプション")?;
     let opts: [*const c_char; 1] = [c_opt.as_ptr()];
 
@@ -307,6 +336,18 @@ mod tests {
         assert_eq!(log_from_buffer(b"warn\0\0"), "warn");
         assert_eq!(log_from_buffer(b"abc"), "abc");
         assert_eq!(log_from_buffer(b""), "");
+    }
+
+    #[test]
+    fn linalg_sources_have_fixed_program_names_and_no_nul() {
+        use crate::kernels_linalg::render_linalg_lu_source;
+        use crate::kernels_linalg_factor::render_linalg_factor_source;
+        let lu = render_linalg_lu_source();
+        let fa = render_linalg_factor_source();
+        assert_eq!(RtcSource::program_name(&lu), "fandhe_linalg_lu_f64.hip");
+        assert_eq!(RtcSource::program_name(&fa), "fandhe_linalg_factor_f64.hip");
+        assert!(cstring(lu.source_text(), "ソース").is_ok());
+        assert!(cstring(fa.source_text(), "ソース").is_ok());
     }
 
     #[test]

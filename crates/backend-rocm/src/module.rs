@@ -94,24 +94,49 @@ impl Function<'_> {
     }
 }
 
-/// f32 のデバイスバッファ。Drop で 1 回だけ `hipFree`。
-pub(crate) struct DeviceBuffer {
+/// デバイスバッファの要素型（crate 内限定の封印 trait。`f32`・`f64`・`i32` のみ）。
+///
+/// 実装はいずれも任意のビット列が有効な値になる POD 型で、`upload`／`download` の
+/// バイト列コピー（`elems * size_of::<T>()`）が安全であることの前提になる（M5〜M7）。
+pub(crate) trait DeviceElem: Copy {}
+impl DeviceElem for f32 {}
+impl DeviceElem for f64 {}
+impl DeviceElem for i32 {}
+
+/// 型付きのデバイスバッファ。Drop で 1 回だけ `hipFree`。
+///
+/// `hipMalloc` はメモリを 0 初期化しない。状態・出力を表すバッファは
+/// [`DeviceBuffer::from_slice`] で起動前に必ず内容を書き込む（線形代数。A04/A08）。
+pub(crate) struct DeviceBuffer<T: DeviceElem> {
     ptr: *mut c_void,
     elems: usize,
     rt: Arc<HipRuntime>,
+    _elem: PhantomData<T>,
 }
 
-impl DeviceBuffer {
+impl<T: DeviceElem> DeviceBuffer<T> {
     /// `elems` 要素分を確保する（0 要素でも有効なポインタを得るため最小 4 バイト確保）。
     pub(crate) fn new(rt: Arc<HipRuntime>, elems: usize) -> Result<Self, RocmError> {
         let bytes = elems
-            .checked_mul(4)
+            .checked_mul(std::mem::size_of::<T>())
             .ok_or_else(|| RocmError::InvalidGemmDims {
                 detail: "バッファのバイト数がオーバーフローします".into(),
             })?
             .max(4);
         let ptr = rt.malloc(bytes)?;
-        Ok(Self { ptr, elems, rt })
+        Ok(Self {
+            ptr,
+            elems,
+            rt,
+            _elem: PhantomData,
+        })
+    }
+
+    /// 確保して `src` の内容で初期化する（未初期化メモリを起動に渡さないための入口）。
+    pub(crate) fn from_slice(rt: Arc<HipRuntime>, src: &[T]) -> Result<Self, RocmError> {
+        let buf = Self::new(rt, src.len())?;
+        buf.upload(src)?;
+        Ok(buf)
     }
 
     /// カーネル引数に渡すデバイスポインタ。
@@ -120,7 +145,7 @@ impl DeviceBuffer {
     }
 
     /// ホスト → デバイス。長さは確保した要素数と一致している必要がある。
-    pub(crate) fn upload(&self, src: &[f32]) -> Result<(), RocmError> {
+    pub(crate) fn upload(&self, src: &[T]) -> Result<(), RocmError> {
         if src.len() != self.elems {
             return Err(RocmError::InvalidGemmDims {
                 detail: "upload の長さがバッファと一致しません".into(),
@@ -129,16 +154,16 @@ impl DeviceBuffer {
         if src.is_empty() {
             return Ok(());
         }
-        // SAFETY: `ptr` は `elems*4` バイト以上確保済み、`src` は `elems*4` バイト読める。
-        // バイト数は `new` で checked_mul 済み。
+        // SAFETY: (M5) `ptr` は `elems*size_of::<T>()` バイト以上確保済み、`src` は同バイト数
+        // 読める。バイト数は `new` で checked_mul 済みで、`T: DeviceElem` は POD。
         unsafe {
             self.rt
-                .memcpy_htod(self.ptr, src.as_ptr().cast(), src.len() * 4)
+                .memcpy_htod(self.ptr, src.as_ptr().cast(), std::mem::size_of_val(src))
         }
     }
 
     /// デバイス → ホスト。長さは確保した要素数と一致している必要がある。
-    pub(crate) fn download(&self, dst: &mut [f32]) -> Result<(), RocmError> {
+    pub(crate) fn download(&self, dst: &mut [T]) -> Result<(), RocmError> {
         if dst.len() != self.elems {
             return Err(RocmError::InvalidGemmDims {
                 detail: "download の長さがバッファと一致しません".into(),
@@ -147,15 +172,18 @@ impl DeviceBuffer {
         if dst.is_empty() {
             return Ok(());
         }
-        // SAFETY: `dst` は `elems*4` バイト書ける、`ptr` は `elems*4` バイト以上確保済み。
+        // SAFETY: (M6) `dst` は `elems*size_of::<T>()` バイト書ける、`ptr` は同バイト数以上確保済み。
         unsafe {
-            self.rt
-                .memcpy_dtoh(dst.as_mut_ptr().cast(), self.ptr, dst.len() * 4)
+            self.rt.memcpy_dtoh(
+                dst.as_mut_ptr().cast(),
+                self.ptr,
+                std::mem::size_of_val(&*dst),
+            )
         }
     }
 }
 
-impl Drop for DeviceBuffer {
+impl<T: DeviceElem> Drop for DeviceBuffer<T> {
     fn drop(&mut self) {
         // SAFETY: `ptr` は `malloc` が返した未解放のポインタで、所有権により二重解放しない。
         unsafe {

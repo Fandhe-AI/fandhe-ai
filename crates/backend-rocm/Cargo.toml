@@ -1,9 +1,10 @@
 # backend-rocm（fandhe-ai-backend-rocm）: ROCm（AMD GPU）バックエンドの雛形（イシュー #3154・親 #3150）。
 #
 # 役割: HIP ランタイムを `libloading`（第 12 区分）で実行時に動的ロードし、ROCm の有無を
-# probe でき、HIPRTC でコンパイルした f32 GEMM カーネルを起動できる（#3155）。
+# probe でき、HIPRTC でコンパイルした f32 GEMM カーネル（#3155）と、内部 opt-in ゲート配下の
+# 線形代数 f64 カーネル（#3444）を起動できる。
 #
-# 依存方向: 現時点で内部クレートへは依存しない（BackendOps の実装は #3155 以降）。
+# 依存方向: 通常依存は libloading のみ（BackendOps の実装は R0 #3431 以降）。
 # facade からも参照しない（Device への ROCm 追加は #3157）。
 #
 # 公開区分: `publish = false`（workspace 既定を継承）。
@@ -28,3 +29,8 @@ libloading.workspace = true
 # 許容依存区分（外部クレート）の新規追加には当たらない。`version` を付けない理由は
 # backend-cuda の同名 dev-dependency と同じ（イシュー #881。公開物へ残らない・非公開クレート）。
 fandhe-ai-backend-cpu = { path = "../backend-cpu" }
+# 線形代数（#3444）のホスト側モデル・実機 parity が CPU 参照（`CpuBackendOps::linalg_*`）を
+# `BackendOps` trait 経由で呼ぶために `Tensor`・`BackendOps` が要る。workspace 内クレート同士の
+# path 依存で外部クレートの新規追加には当たらず、`Cargo.lock` の変化は本クレートの依存一覧への
+# 1 行追加のみ（R0 #3431 が通常依存へ昇格する予定）。
+fandhe-ai-tensor-core = { path = "../tensor-core" }

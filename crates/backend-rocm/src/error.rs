@@ -57,6 +57,23 @@ pub enum RocmError {
         /// 理由。
         detail: String,
     },
+    /// 線形代数（LU 系・分解系）の形状・スライス長・サイズが不正（デバイスに触れる前に返す）。
+    InvalidLinalgDims {
+        /// 理由。
+        detail: String,
+    },
+    /// 線形代数の入力起因の失敗（非正定値・eigh の未収束）。CPU 参照実装の
+    /// `InvalidArgument` 分類に対応する。
+    LinalgInvalidArgument {
+        /// 理由。
+        detail: String,
+    },
+    /// 線形代数カーネルが書く status・補助フラグが契約外（未起動の sentinel のまま・想定外の値）。
+    /// 成功扱いにしない（fail-closed。A08）。
+    LinalgKernelStatusInvalid {
+        /// 理由。
+        detail: String,
+    },
     /// 許可リストにない gfx target。
     UnsupportedTarget {
         /// 理由。
@@ -93,6 +110,15 @@ impl fmt::Display for RocmError {
                 write!(f, "カーネルのタイル設定が不正です: {detail}")
             }
             Self::InvalidGemmDims { detail } => write!(f, "GEMM の形状が不正です: {detail}"),
+            Self::InvalidLinalgDims { detail } => {
+                write!(f, "線形代数の形状・サイズが不正です: {detail}")
+            }
+            Self::LinalgInvalidArgument { detail } => {
+                write!(f, "線形代数の入力が不正です: {detail}")
+            }
+            Self::LinalgKernelStatusInvalid { detail } => {
+                write!(f, "線形代数カーネルの status が契約外です: {detail}")
+            }
             Self::UnsupportedTarget { detail } => {
                 write!(f, "未対応の gfx target です: {detail}")
             }

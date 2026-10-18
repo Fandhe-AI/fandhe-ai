@@ -10,6 +10,7 @@
 | 監査の種類 | 実装担当による**自己点検**（機械的インベントリ・全ブロックの手読み・clippy の臨時実行・Linux 上の検証）。**独立した security-auditor の監査ではない**。実装環境にサブエージェントの起動手段がなかったため未実施で、PR レビューで security-auditor の監査を受け、その結果を §8 へ追記する。所有者の承認を得たとは記載しない |
 | 変更範囲 | 本 doc の新設、`hiprtc.rs` の `HiprtcRuntime::_lib` の `ManuallyDrop` 化（F1）、SAFETY コメントの表記揃え。依存（`libloading =0.9.0`）・tolerance・FMA 契約・REQ-8 の境界チェック・`docs/spec/`・CI は変更しない |
 | 未検証 | §6 の実機項目すべて（MI300X・gfx942。#3159）。実機テスト（`#[ignore]`）は実行していない |
+| #3444 追記 | `linalg.rs` の起動 5 件（L1〜L5。§3.5）を追加し、`DeviceBuffer` を型付き（`DeviceBuffer<T>`。`f32`・`f64`・`i32`）にして M5〜M7 の前提を `elems*size_of::<T>()` へ改めた。ブロック総数は 33 → 38。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する |
 
 ## 2. 機械的インベントリ
@@ -21,19 +22,19 @@ grep -n 'unsafe' crates/backend-rocm/src/*.rs crates/backend-rocm/tests/*.rs
 cargo clippy -p fandhe-ai-backend-rocm --all-targets -- -D warnings -W clippy::undocumented_unsafe_blocks
 ```
 
-| 種別 | hip.rs | hiprtc.rs | module.rs | gemm.rs | 計 |
-|------|--------|-----------|-----------|---------|----|
-| `unsafe { }` ブロック | 15 | 10 | 7 | 1 | **33** |
-| `unsafe fn`（`# Safety` 節つき） | 8 | 1 | 1 | 0 | **10** |
-| `unsafe extern "C" fn` 型エイリアス（宣言のみ） | 12 | 5 | 0 | 0 | **17** |
-| `unsafe impl`（`Send`／`Sync`） | 0 | 0 | 0 | 0 | **0** |
+| 種別 | hip.rs | hiprtc.rs | module.rs | gemm.rs | linalg.rs | 計 |
+|------|--------|-----------|-----------|---------|-----------|----|
+| `unsafe { }` ブロック | 15 | 10 | 7 | 1 | 5 | **38** |
+| `unsafe fn`（`# Safety` 節つき） | 8 | 1 | 1 | 0 | 0 | **10** |
+| `unsafe extern "C" fn` 型エイリアス（宣言のみ） | 12 | 5 | 0 | 0 | 0 | **17** |
+| `unsafe impl`（`Send`／`Sync`） | 0 | 0 | 0 | 0 | 0 | **0** |
 
 - `tests/` 配下に `unsafe` はない。`lib.rs` の `unsafe` はモジュール doc 内の言及で件数に含めない。
 - edition 2024 の `unsafe_op_in_unsafe_fn` により、`unsafe fn` 本体の呼び出しも独立したブロックで書いており、33 に含む。
-- `unsafe impl Send/Sync` が 0 件のため、生ポインタを持つ `Module`・`Function`・`DeviceBuffer`・`Program` と、それを持つ `RocmGemmF32` は自動的に `!Send`・`!Sync`（安全側の既定）。`HipRuntime`・`HiprtcRuntime` は `Library` と関数ポインタのみで自動的に `Send + Sync` となり `Arc` で共有される。HIP ランタイム API 自体のスレッド安全性は §6 の実機項目。
+- `unsafe impl Send/Sync` が 0 件のため、生ポインタを持つ `Module`・`Function`・`DeviceBuffer<T>`・`Program` と、それを持つ `RocmGemmF32`・`RocmLinalgLu`・`RocmLinalgFactor` は自動的に `!Send`・`!Sync`（安全側の既定）。`HipRuntime`・`HiprtcRuntime` は `Library` と関数ポインタのみで自動的に `Send + Sync` となり `Arc` で共有される。HIP ランタイム API 自体のスレッド安全性は §6 の実機項目。
 - `clippy::undocumented_unsafe_blocks` の臨時実行は、修正前は 5 件（`// SAFETY (Ux):` の表記が判定を満たさなかった）。`// SAFETY: (Ux)` へ揃えた後は **0 件**。`clippy::multiple_unsafe_ops_per_block` は 2 件（§3 の H3・R3。関数ポインタ解決を並べた構造体リテラル）で、構造を変えず受容する（理由は各行）。lint の恒久導入は §9 の申し送り。
 
-## 3. 全件の表（ブロック 33）
+## 3. 全件の表（ブロック 38）
 
 凡例: U1 = ハンドル寿命内でのみ関数ポインタを呼ぶ／U2 = C 文字列・オプション配列の生存と個数／U3 = バッファサイズの一致／U4 = コードオブジェクトは module より長生き／U5 = `kernelParams` の個数・型・順序と生存／U7 = RAII で 1 回だけ解放。U6（cooperative 起動）は未実装で対象外。場所は関数名で示す（行番号はコミットで動くため付けない）。
 
@@ -80,16 +81,30 @@ cargo clippy -p fandhe-ai-backend-rocm --all-targets -- -D warnings -W clippy::u
 | M2 | `Module::function` | `module_get_function` | `self.handle` は未解放、`c` は NUL 終端で生存 | 解放後 module の参照 | U2・U4 |
 | M3 | `Module::drop` | `module_unload` | `handle` は未解放。事前に作成デバイスを選択して同期 | 二重解放・実行中のアンロード | U7 |
 | M4 | `Function::launch`（unsafe fn 内） | `HipRuntime::launch` | `self.ptr` は生存中の module の関数（`Function<'m>`）。`params` は呼び出し元の契約 | 解放後の関数ポインタ起動 | U5 |
-| M5 | `DeviceBuffer::upload` | `memcpy_htod` | `ptr` は `elems*4` 以上確保済み、`src` 長は `elems` と一致を事前検証、`checked_mul` 済み | OOB | U3 |
-| M6 | `DeviceBuffer::download` | `memcpy_dtoh` | M5 と対称 | OOB | U3 |
-| M7 | `DeviceBuffer::drop` | `free` | `ptr` は `malloc` 由来で未解放。所有権で二重解放なし | 二重解放 | U7 |
+| M5 | `DeviceBuffer<T>::upload` | `memcpy_htod` | `ptr` は `elems*size_of::<T>()` 以上確保済み、`src` 長は `elems` と一致を事前検証、`checked_mul` 済み。`T` は封印 trait `DeviceElem`（`f32`・`f64`・`i32` の POD のみ） | OOB | U3 |
+| M6 | `DeviceBuffer<T>::download` | `memcpy_dtoh` | M5 と対称 | OOB | U3 |
+| M7 | `DeviceBuffer<T>::drop` | `free` | `ptr` は `malloc` 由来で未解放。所有権で二重解放なし | 二重解放 | U7 |
 | G1 | `RocmGemmF32::run` | `Function::launch` | `params` はカーネル署名と一致（`GEMM_F32_ARG_COUNT` とソース署名をテストで固定）。指す変数は `synchronize` まで生存。グリッドは出力全体を覆い、範囲外はカーネル内の手動境界チェック（REQ-8）が防ぐ | 引数不一致で OOB・ハング | U5 |
 
 ### 3.4 `unsafe fn`（10）と型エイリアス（17）
 
-`unsafe fn` は全件が `# Safety` 節を持つ。`hip.rs`: `resolve`・`free`・`memcpy_htod`・`memcpy_dtoh`・`module_load_data`・`module_get_function`・`module_unload`・`launch`。`hiprtc.rs`: `resolve`。`module.rs`: `Function::launch`。契約は上表の「前提条件」と同一で、呼び出し元ブロック（H9〜H15・M1〜M7・G1）が満たすことを確認した。`pub(crate)` で crate 外へは公開しない。
+`unsafe fn` は全件が `# Safety` 節を持つ。`hip.rs`: `resolve`・`free`・`memcpy_htod`・`memcpy_dtoh`・`module_load_data`・`module_get_function`・`module_unload`・`launch`。`hiprtc.rs`: `resolve`。`module.rs`: `Function::launch`。契約は上表の「前提条件」と同一で、呼び出し元ブロック（H9〜H15・M1〜M7・G1・L1〜L5）が満たすことを確認した。`pub(crate)` で crate 外へは公開しない。
 
 型エイリアス 17 件（`hip.rs` 12・`hiprtc.rs` 5）は宣言のみで呼び出しは上の各行。シグネチャは HIP／HIPRTC の C 宣言との一致を実機で確認する（§6）。
+
+### 3.5 linalg.rs（5。#3444）
+
+いずれも `Function::launch`（M4）の呼び出しで、1 block 起動（LU・cholesky・QR・eigh）または `k.div_ceil(128)` block 起動（代入）。ソースは `LinalgSource`（静的テンプレート＋`const u32` の `#define` のみ）で、pragma は `#pragma clang fp contract(off)`。バッファは**全て起動前に `DeviceBuffer::from_slice` で内容を書き込み**（`hipMalloc` は 0 初期化しない）、`status`・`refl_valid` は `{0,1}` 以外の sentinel（-1）を書いて読み戻し、契約外は `LinalgKernelStatusInvalid`（未起動を成功扱いにしない）。
+
+| # | 場所 | 操作 | 前提条件 | 破れた場合の影響 | 守る不変条件 |
+|---|------|------|----------|------------------|--------------|
+| L1 | `RocmLinalgLu::launch_lu` | `Function::launch`（`linalg_lu_f64`） | 署名 `(double* a, int* perm, int* status, int n)` と `params` が一致（`LINALG_LU_ARG_COUNT` とソース署名をテストで固定）。`a`＝`n*n`・`perm`＝`n`・`status`＝2 要素で初期化済み（`validate_lu_dims`）。block＝`LU_BLOCK`＝256。変数は同期まで生存 | 引数不一致で OOB・ハング | U3・U5 |
+| L2 | `RocmLinalgLu::run_lu_solve_f32` | `Function::launch`（`linalg_lu_solve_f64`） | 署名 8 引数と一致（`LINALG_SOLVE_ARG_COUNT`）。`b`・`x`＝`n*k`、`solve_err`＝1 要素で初期化済み。`perm` の値域はカーネルが `b` を読む前に検査（違反は `solve_err=1`・ホストが必ず読み戻して型付きエラー）。余剰スレッドは `col >= k` で何も書かない | `perm` 破損時の OOB（二重防御で遮断）・引数不一致 | U3・U5 |
+| L3 | `RocmLinalgFactor::run_cholesky_f32` | `Function::launch`（`linalg_cholesky_f64`） | 署名 `(const double* a, double* l, int* status, int n)`（`LINALG_CHOLESKY_ARG_COUNT`）。`a`・`l`＝`n*n`、`status`＝1 要素。ストライド変数は `long long` | 引数不一致・符号付きオーバーフロー（UB） | U3・U5 |
+| L4 | `RocmLinalgFactor::run_qr_f32` | `Function::launch`（`linalg_qr_f64`） | 署名 6 引数（`LINALG_QR_ARG_COUNT`）。`r`＝`m*n`、`q`＝`m*k`、`refl`＝`k*m`、`refl_valid`＝`k`（`validate_qr_dims`）。カーネルは `refl` の書き込み済み範囲だけを読む（ホスト側モデルで未書き込み要素を NaN にして確認） | 同上 | U3・U5 |
+| L5 | `RocmLinalgFactor::run_eigh_f32` | `Function::launch`（`linalg_eigh_f64`） | 署名 6 引数（`LINALG_EIGH_ARG_COUNT`）。`a`・`sym`・`v`＝`n*n`、`evals`＝`n`、`status`＝1 要素。回転更新の書き込み先はスレッド間で重ならず、tid 0 の対角書き込みは `__syncthreads()` の後。早期 return は共有値で一様 | データ競合・同期の不一致（ハング） | U3・U5 |
+
+`unsafe impl Send/Sync` は足さない（0 件のまま）。このため `RocmLinalg*` は `!Send`・`!Sync`で、`Tape`（`Box<dyn BackendOps + Send>`）へ載せる結線（R0 #3431 以降）は呼び出しごとに生成するか、`Send` 化を別承認にする。
 
 ## 4. U1 の担保方法
 
@@ -107,6 +122,7 @@ cargo clippy -p fandhe-ai-backend-rocm --all-targets -- -D warnings -W clippy::u
 | 同上 | `create` の後（compile 失敗・ログ取得失敗・`GetCodeSize` 失敗・サイズ 0・上限超過・`GetCode` 失敗） | `Program` の RAII が 1 回だけ destroy（U7） |
 | `Module::load` | `module_load_data` 失敗 | module なし。`code` は drop される |
 | `run` | upload・launch・synchronize・download | `dc`・`db`・`da` の `hipFree` → `func` → `_guard` の順で drop。hipFree は作成デバイスを選択した状態で行い、その後に呼び出し元の選択を復元 |
+| `RocmLinalg*::run_*`（#3444） | `from_slice`（確保＋upload）の途中失敗・launch・synchronize・download・status 解釈の失敗 | 確保済みの `DeviceBuffer<T>` が宣言の逆順で `hipFree`（全て `_guard` の後に宣言）。sentinel を upload してから読み戻す経路でも解放は同じ。status が契約外なら成功扱いにせず型付きエラー |
 | `RocmGemmF32::new` | `select_device`・compile・load | `rt`（HIP）は意図的にリーク。HIPRTC も F1 修正後はリーク。`select_device` 失敗はコンパイル前に返る |
 | `DeviceBuffer::new` | `malloc` 失敗 | ポインタなし。解放不要 |
 | Drop 内の失敗 | `hipFree`・`hipModuleUnload`・destroy | panic せず無視（best effort） |
@@ -127,7 +143,8 @@ cargo clippy -p fandhe-ai-backend-rocm --all-targets -- -D warnings -W clippy::u
 - Drop 順（`Module` は handle → code → rt）と RAII によるエラー経路の解放
 - 形状と grid の検証（`validate_gemm_dims`・`launch_geometry` のテスト）
 - `kernelParams` の個数・順序とカーネル署名の一致（`GEMM_F32_ARG_COUNT` のテスト）
-- REQ-8 の境界チェック記述がカーネルソースにあること（`kernels_gemm.rs` のテスト）
+- REQ-8 の境界チェック記述がカーネルソースにあること（`kernels_gemm.rs`・`kernels_linalg*.rs` のテスト）
+- 線形代数 5 カーネルの添字・同期区切り・status／補助フラグの書き込みと CPU 参照との bit 一致（`linalg_model.rs`。HIPRTC のコンパイル結果そのものの検証ではない）
 - ROCm 非搭載で probe が false を返し、型付きエラーになること（`probe_absent`・`hiprtc_absent`）
 
 **実機（MI300X・gfx942）が要る。#3159 へ申し送る**
@@ -136,6 +153,7 @@ cargo clippy -p fandhe-ai-backend-rocm --all-targets -- -D warnings -W clippy::u
 - libhiprtc の `ManuallyDrop` 化（F1）が実機で問題を起こさないこと
 - `hipFree` がデバイスに依らず動くこと（F5）、kernel fault 後（sticky error）の解放挙動
 - コードオブジェクトの `Vec<u8>` のアラインメント要件、HIP の引数コピーの時機、grid の実際の上限
+- 線形代数（#3444）: HIPRTC の暗黙ヘッダで `fabs`・`copysign`・`isfinite`・`sqrt`（double）・`atomicExch(int*, int)` が使えること、`#pragma clang fp contract(off)` がファイルスコープで効き `v_fma_f64` が出ないこと（オフラインの `clang -x hip -S` で命令数を数える補助診断）、`hipMalloc` が未初期化のため全バッファを upload している前提、wave64 での block 256／128 の正しさ
 - HIP ランタイムのスレッド安全性、contraction の挙動（FMA。`docs/backend-rocm-hiprtc-gemm-decision.md` §2 の申し送りの再掲）
 
 parity の許容誤差は `tests/gemm_real_device.rs` と REQ-2 を参照し、本 doc には書き写さない。
