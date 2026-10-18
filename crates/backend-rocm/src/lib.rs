@@ -7,24 +7,58 @@
 //! BackendOps への統合・facade の Device 追加は #3157、unsafe 監査記録は #3158、
 //! 実機 parity は #3159。
 //!
+//! 添字系演算（分解案 R8・#3439）として cumsum/cumprod（[`RocmScan`]）・gather/scatter/one_hot
+//! （[`RocmGatherScatter`]）・interpolate の nearest/bilinear（[`RocmInterpolate`]）・sort/topk
+//! （[`RocmSort`]）・unique（[`RocmUnique`]）の HIPRTC カーネルを移植した。いずれもホストのスライスを
+//! 受けて `Vec` を返す実行型で、`BackendOps` への結線は `RocmBackendOps`（#3431・R0）で行う。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
 
 mod error;
+mod gather_scatter;
+#[cfg(test)]
+mod gather_scatter_model;
 mod gemm;
 #[cfg(test)]
 mod gemm_model;
 mod hip;
 mod hiprtc;
+mod interpolate;
+#[cfg(test)]
+mod interpolate_model;
+mod kernel_source;
+mod kernels_gather_scatter;
 mod kernels_gemm;
+mod kernels_interpolate;
+mod kernels_scan;
+mod kernels_sort;
+mod kernels_unique;
+mod launch;
 mod module;
+mod scan;
+#[cfg(test)]
+mod scan_model;
+mod shape_util;
+mod sort;
+#[cfg(test)]
+mod sort_model;
 mod target;
+mod typed_buffer;
+mod unique;
+#[cfg(test)]
+mod unique_model;
 
 pub use error::RocmError;
+pub use gather_scatter::{RocmGatherScatter, ScatterMode};
 pub use gemm::RocmGemmF32;
+pub use interpolate::RocmInterpolate;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
+pub use scan::RocmScan;
+pub use sort::RocmSort;
 pub use target::{GfxTarget, parse_gcn_arch_name};
+pub use unique::RocmUnique;
 
 /// HIP ランタイムをロードでき、デバイスが 1 つ以上あるとき true。
 ///

@@ -1,7 +1,7 @@
 //! HIPRTC（実行時コンパイラ）の動的ロードとコンパイル経路。
 //!
 //! 役割: `backend-cuda::nvrtc::compile_ptx` の ROCm 側対応物。`gemm.rs` が
-//! [`GemmSource`]（検証済みソース）を渡し、メモリ上のコードオブジェクト [`CodeObject`] を受け取る。
+//! [`CompileSource`]（`GemmSource`・`KernelSource` 等の検証済みソース）を渡し、メモリ上のコードオブジェクト [`CodeObject`] を受け取る。
 //! ディスクキャッシュは作らない（改竄面を持たない。キャッシュ導入は別 Issue）。
 //!
 //! 不変条件 U1（hip.rs と同形）: `libhiprtc` のハンドルと解決済み関数ポインタを
@@ -9,7 +9,7 @@
 //! 生存し、オプション配列の個数と `numOptions` が一致する。U3: コード取得は `GetCodeSize` の
 //! サイズどおりにバッファを確保し、サイズ 0 を拒否する。U7: プログラムは RAII で 1 回だけ破棄する。
 //!
-//! A03: ソースは [`GemmSource`] 型のみ受け付け、オプションは [`GfxTarget`] allowlist 由来の
+//! A03: ソースは [`CompileSource`] を実装する検証済みソース型のみ受け付け、オプションは [`GfxTarget`] allowlist 由来の
 //! `--gpu-architecture=gfxNNN` 1 本のみ。include パス・環境変数・`-ffp-contract` は渡さない
 //! （FMA は明示 `__builtin_fmaf` で決まるため不要。docs/backend-rocm-hiprtc-gemm-decision.md §2）。
 //!
@@ -19,7 +19,7 @@
 //! `hiprtcResult` は 4 バイト enum として `c_int` で受け 0 を成功とする（実機確認は #3159）。
 
 use crate::error::RocmError;
-use crate::kernels_gemm::GemmSource;
+use crate::kernel_source::CompileSource;
 use crate::target::GfxTarget;
 use std::ffi::{CString, c_char, c_void};
 use std::os::raw::c_int;
@@ -184,7 +184,7 @@ fn log_from_buffer(buf: &[u8]) -> String {
 /// 失敗時のみエラーへ含める）。
 pub(crate) fn compile_code_object(
     rt: &HiprtcRuntime,
-    src: &GemmSource,
+    src: &impl CompileSource,
     target: GfxTarget,
 ) -> Result<CodeObject, RocmError> {
     let c_src = cstring(src.as_str(), "ソース")?;

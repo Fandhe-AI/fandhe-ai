@@ -28,3 +28,7 @@ libloading.workspace = true
 # 許容依存区分（外部クレート）の新規追加には当たらない。`version` を付けない理由は
 # backend-cuda の同名 dev-dependency と同じ（イシュー #881。公開物へ残らない・非公開クレート）。
 fandhe-ai-backend-cpu = { path = "../backend-cpu" }
+# `Tensor`・`BackendOps` を使い CPU 参照実装（`CpuBackendOps`）の出力とホスト側モデルを bit 比較する
+# （src/*_model.rs。イシュー #3439）。backend-cpu が既に依存する workspace 内クレートの path 依存で、
+# 許容依存区分（外部クレート）の新規追加には当たらない。公開物へ残らない（非公開クレート）。
+fandhe-ai-tensor-core = { path = "../tensor-core" }
