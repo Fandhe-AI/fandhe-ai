@@ -151,3 +151,246 @@ fn linear_forward_device_rejects_bias_shape_mismatch() {
 
     assert!(matches!(err, BackendError::ShapeMismatch(_)));
 }
+// ---------------------------------------------------------------------
+// イシュー #3196: 融合 epilogue 経路への切替に伴う bit 一致テスト。
+// 比較はすべて `f32::to_bits()` の完全一致（NaN != NaN と -0.0 == +0.0 の
+// 見落としを避けるため `assert_eq!` で `&[f32]` を直接比べない）。
+// ---------------------------------------------------------------------
+
+use fandhe_ai_backend_cpu::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
+
+fn bits(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// 非融合 3 段合成（`gemm_blis_parallel` → 行方向 bias 加算 → `max(x, 0.0)`）。
+/// 切替前の `linear_forward_device` と同一の参照実装。
+fn unfused(
+    a: &[f32],
+    w: &[f32],
+    bias: Option<&[f32]>,
+    (m, k, n): (usize, usize, usize),
+    act: Activation,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    gemm_blis_parallel(a, w, &mut out, m, n, k).unwrap();
+    if let Some(b) = bias {
+        for row in out.chunks_mut(n.max(1)).take(m) {
+            for (c, bv) in row.iter_mut().zip(b.iter()) {
+                *c += bv;
+            }
+        }
+    }
+    if act == Activation::Relu {
+        for v in out.iter_mut() {
+            *v = v.max(0.0);
+        }
+    }
+    out
+}
+
+fn fused(
+    a: &[f32],
+    w: &[f32],
+    bias: Option<&[f32]>,
+    (m, k, n): (usize, usize, usize),
+    act: Activation,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    gemm_blis_bias_act_parallel(a, w, &mut out, m, n, k, bias, act).unwrap();
+    out
+}
+
+fn centered(seed: u64, len: usize) -> Vec<f32> {
+    random_matrix(seed, len).iter().map(|v| v - 0.5).collect()
+}
+
+fn shapes() -> Vec<(usize, usize, usize)> {
+    let mut s = vec![
+        (64, 784, 256),
+        (64, 256, 10),
+        (1, 17, 19),
+        (0, 4, 3),
+        (3, 4, 0),
+        (4, 1, 5),
+    ];
+    for m in [5, 15, 17] {
+        for n in [1, 10, 17, 19] {
+            s.push((m, 9, n));
+        }
+    }
+    for k in [255, 256, 257] {
+        s.push((7, k, 11));
+    }
+    s.push((9, 33, 600));
+    s
+}
+
+fn assert_kernel_parity_all_shapes() {
+    for shape in shapes() {
+        let (m, k, n) = shape;
+        let a = centered(0x11 + m as u64, m * k);
+        let w = centered(0x22 + n as u64, k * n);
+        let b = centered(0x33 + n as u64, n);
+        for bias in [None, Some(&b[..])] {
+            for act in [Activation::None, Activation::Relu] {
+                assert_eq!(
+                    bits(&fused(&a, &w, bias, shape, act)),
+                    bits(&unfused(&a, &w, bias, shape, act)),
+                    "融合と非融合が bit 一致するはず（shape={shape:?} bias={} act={act:?}）",
+                    bias.is_some()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fused_epilogue_matches_unfused_composition_bit_exact() {
+    assert_kernel_parity_all_shapes();
+}
+
+#[test]
+fn fused_epilogue_matches_unfused_across_thread_pools() {
+    for threads in [1usize, 2, 0] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(assert_kernel_parity_all_shapes);
+    }
+}
+
+#[test]
+fn fused_epilogue_matches_unfused_with_nan_inf_and_negative_zero() {
+    let shape = (6, 5, 7);
+    let (m, k, n) = shape;
+    let mut a = centered(0x41, m * k);
+    let mut w = centered(0x42, k * n);
+    let mut b = centered(0x43, n);
+    a[0] = f32::NAN;
+    a[7] = f32::INFINITY;
+    w[3] = f32::NEG_INFINITY;
+    w[11] = f32::INFINITY;
+    b[1] = f32::INFINITY;
+    b[2] = f32::NEG_INFINITY;
+    b[4] = -0.0;
+    for bias in [None, Some(&b[..])] {
+        for act in [Activation::None, Activation::Relu] {
+            assert_eq!(
+                bits(&fused(&a, &w, bias, shape, act)),
+                bits(&unfused(&a, &w, bias, shape, act)),
+                "NaN/inf 入力でも bit 一致するはず（bias={} act={act:?}）",
+                bias.is_some()
+            );
+        }
+    }
+    // GEMM 出力が 0 になる行と bias = -0.0 の組（ReLU を通る -0.0）。
+    let (m, k, n) = (2, 3, 2);
+    let a = vec![0.0f32; m * k];
+    let w = vec![1.0f32; k * n];
+    let b = vec![-0.0f32, 0.0];
+    for act in [Activation::None, Activation::Relu] {
+        assert_eq!(
+            bits(&fused(&a, &w, Some(&b), (m, k, n), act)),
+            bits(&unfused(&a, &w, Some(&b), (m, k, n), act)),
+            "-0.0 の符号まで一致するはず（act={act:?}）"
+        );
+    }
+}
+
+fn run_linear_forward_device(
+    a: &[f32],
+    w: &[f32],
+    bias: Option<&[f32]>,
+    (m, k, n): (usize, usize, usize),
+    act: Activation,
+) -> Vec<f32> {
+    let ops = CpuBackendOps::new();
+    let mem = CpuMemory::new();
+    let a_dev = mem.upload(&tensor(a.to_vec(), &[m, k])).unwrap();
+    let w_dev = mem.upload(&tensor(w.to_vec(), &[k, n])).unwrap();
+    let w_shape = [k, n];
+    let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+    let bias_dev = bias.map(|b| mem.upload(&tensor(b.to_vec(), &[n])).unwrap());
+    let bias_shape = [n];
+    let bias_view = bias_dev
+        .as_ref()
+        .map(|buf| DeviceBufferView::new(buf, 0, &bias_shape).unwrap());
+    let out = ops
+        .linear_forward_device(&a_dev, w_view, bias_view, act)
+        .unwrap();
+    mem.download(&out)
+        .unwrap()
+        .contiguous()
+        .as_slice()
+        .unwrap()
+        .to_vec()
+}
+
+/// `linear_forward_device` が非融合合成と bit 一致する（MLP 形状・NaN/inf 含む）。
+#[test]
+fn linear_forward_device_matches_unfused_bit_exact_mlp_and_nonfinite() {
+    for shape in [(64, 784, 256), (64, 256, 10)] {
+        let (m, k, n) = shape;
+        let a = centered(0x51, m * k);
+        let w = centered(0x52, k * n);
+        let b = centered(0x53, n);
+        for bias in [None, Some(&b[..])] {
+            for act in [Activation::None, Activation::Relu] {
+                assert_eq!(
+                    bits(&run_linear_forward_device(&a, &w, bias, shape, act)),
+                    bits(&unfused(&a, &w, bias, shape, act)),
+                    "shape={shape:?} bias={} act={act:?}",
+                    bias.is_some()
+                );
+            }
+        }
+    }
+    let shape = (4, 6, 5);
+    let (m, k, n) = shape;
+    let mut a = centered(0x61, m * k);
+    let w = centered(0x62, k * n);
+    let mut b = centered(0x63, n);
+    a[2] = f32::NAN;
+    a[9] = f32::INFINITY;
+    b[0] = f32::NEG_INFINITY;
+    b[3] = -0.0;
+    for act in [Activation::None, Activation::Relu] {
+        assert_eq!(
+            bits(&run_linear_forward_device(&a, &w, Some(&b), shape, act)),
+            bits(&unfused(&a, &w, Some(&b), shape, act)),
+            "non-finite act={act:?}"
+        );
+    }
+}
+
+/// `linear_forward_device` と `gemm_resident_rhs_act`（学習・fresh 側の融合経路）
+/// が同一入力で bit 一致する。
+#[test]
+fn linear_forward_device_matches_gemm_resident_rhs_act_bit_exact() {
+    let ops = CpuBackendOps::new();
+    let mem = CpuMemory::new();
+    let shape = (64, 256, 10);
+    let (m, k, n) = shape;
+    let a = centered(0x71, m * k);
+    let w = centered(0x72, k * n);
+    let b = centered(0x73, n);
+    let w_dev = mem.upload(&tensor(w.clone(), &[k, n])).unwrap();
+    let b_dev = mem.upload(&tensor(b.clone(), &[n])).unwrap();
+    for act in [Activation::None, Activation::Relu] {
+        let w_shape = [k, n];
+        let b_shape = [n];
+        let w_view = DeviceBufferView::new(&w_dev, 0, &w_shape).unwrap();
+        let b_view = DeviceBufferView::new(&b_dev, 0, &b_shape).unwrap();
+        let expected = ops
+            .gemm_resident_rhs_act(&tensor(a.clone(), &[m, k]), w_view, Some(b_view), act)
+            .unwrap();
+        let actual = run_linear_forward_device(&a, &w, Some(&b), shape, act);
+        assert_eq!(
+            bits(&actual),
+            bits(expected.contiguous().as_slice().unwrap()),
+            "act={act:?}"
+        );
+    }
+}
