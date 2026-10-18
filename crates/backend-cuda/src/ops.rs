@@ -78,6 +78,136 @@ thread_local! {
     pub(crate) static GEMM_HOST_REPACK_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
+/// `gemm_fp32_strict_into_with_bias_reduce_tracked` が weight（GEMM 出力
+/// `[m, n]`）と bias（縮約結果 `[n]`）を同一 `out` へ書く前の範囲検証
+/// （イシュー #3204。`backend-metal::layout::validate_gemm_bias_write_
+/// ranges` と同一契約。CUDA 非搭載の Linux CI でも単体テストできる純関数）。
+/// `m * n`・`out_offset + m*n`・`bias_offset + n` の `checked_*` 検査、
+/// `out_numel` 超過、`bn != n`、weight と bias の範囲重複を、driver 呼び出し
+/// より前に拒否する（REQ-8・OWASP A03。`Err` なら weight・bias とも不書込）。
+pub(crate) fn validate_gemm_bias_write_ranges(
+    m: usize,
+    n: usize,
+    out_offset: usize,
+    out_numel: usize,
+    bias: Option<(usize, usize)>,
+) -> Result<(), BackendError> {
+    let mn = m.checked_mul(n).ok_or_else(|| {
+        BackendError::InvalidArgument("gemm_fp32_strict_into: m * n overflowed usize".into())
+    })?;
+    let end = out_offset.checked_add(mn).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "gemm_fp32_strict_into: out_offset + m * n overflowed usize".into(),
+        )
+    })?;
+    if end > out_numel {
+        return Err(BackendError::InvalidArgument(format!(
+            "gemm_fp32_strict_into: write range [{out_offset}, {end}) exceeds out buffer \
+             length {out_numel}"
+        )));
+    }
+    let Some((bias_offset, bn)) = bias else {
+        return Ok(());
+    };
+    if bn != n {
+        return Err(BackendError::InvalidArgument(format!(
+            "gemm_fp32_strict_into: bias n ({bn}) does not match GEMM n ({n})"
+        )));
+    }
+    let bias_end = bias_offset.checked_add(bn).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "gemm_fp32_strict_into: bias_offset + n overflowed usize".into(),
+        )
+    })?;
+    if bias_end > out_numel {
+        return Err(BackendError::InvalidArgument(format!(
+            "gemm_fp32_strict_into: bias write range [{bias_offset}, {bias_end}) exceeds out \
+             buffer length {out_numel}"
+        )));
+    }
+    if mn > 0 && bn > 0 && out_offset < bias_end && bias_offset < end {
+        return Err(BackendError::InvalidArgument(format!(
+            "gemm_fp32_strict_into: weight write range [{out_offset}, {end}) overlaps bias \
+             write range [{bias_offset}, {bias_end})"
+        )));
+    }
+    Ok(())
+}
+
+/// bias 勾配（`g: [rows, cols]` 行優先密の列方向和）のホスト参照実装
+/// （イシュー #3204。非 NT/TN フォールバック用。`autodiff::eval::
+/// reduce_bias_grad_rows` と同一: `f64` アキュムレータで行昇順に加算し最後に
+/// 1 回 `f32` へ downcast。`rows == 1` は加算せず直接コピーして `-0.0` を
+/// 保つ）。`data.len() == rows * cols` は呼び出し元（`contiguous()` 済みの
+/// `g`）の前提。
+fn reduce_bias_grad_rows_dense(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    if rows == 1 {
+        return data[..cols].to_vec();
+    }
+    let mut acc = vec![0f64; cols];
+    for row in 0..rows {
+        for (col, a) in acc.iter_mut().enumerate() {
+            *a += f64::from(data[row * cols + col]);
+        }
+    }
+    acc.into_iter().map(|v| v as f32).collect()
+}
+
+/// `bias`（`(offset, n)`）と `reduce` から GEMM 起動へ渡す縮約先ビューの
+/// 範囲を組み立てる（`reduce` は `bias` が `Some` のときだけ取得される）。
+fn bias_target(
+    bias: Option<(usize, usize)>,
+    reduce: Option<&crate::reduce::CudaReduce>,
+    n: usize,
+) -> Option<(&crate::reduce::CudaReduce, std::ops::Range<usize>)> {
+    match (bias, reduce) {
+        (Some((offset, _)), Some(r)) => Some((r, offset..offset + n)),
+        _ => None,
+    }
+}
+
+/// `out` の weight 範囲（と、あれば bias 範囲）を書き込みビューにして `f`
+/// へ渡す（イシュー #3204）。bias があるときは同一ストレージの互いに
+/// 重ならない 2 範囲を `split_at_mut`（safe）で同時に借りる。範囲の重複は
+/// 呼び出し前の `validate_gemm_bias_write_ranges` で拒否済みだが、念のため
+/// 分割不能なら型付きエラーにする。
+fn with_weight_and_bias_views(
+    storage: &mut CudaStorage,
+    weight: std::ops::Range<usize>,
+    bias: Option<(&crate::reduce::CudaReduce, std::ops::Range<usize>)>,
+    f: impl FnOnce(
+        &mut crate::memory::CudaArgMut<'_>,
+        Option<crate::gemm::BiasReduceTarget<'_, '_>>,
+    ) -> Result<(), CudaError>,
+) -> Result<(), CudaError> {
+    let Some((reduce, bias_range)) = bias else {
+        let mut c_arg = storage.view_mut(weight);
+        return f(&mut c_arg, None);
+    };
+    let weight_first = weight.end <= bias_range.start;
+    let (first, second) = if weight_first {
+        (weight, bias_range)
+    } else {
+        (bias_range, weight)
+    };
+    storage
+        .with_view_mut_pair(first, second, |x, y| {
+            let (mut c_arg, mut bias_arg) = if weight_first { (x, y) } else { (y, x) };
+            f(
+                &mut c_arg,
+                Some(crate::gemm::BiasReduceTarget {
+                    reduce,
+                    out: &mut bias_arg,
+                }),
+            )
+        })
+        .unwrap_or_else(|| {
+            Err(CudaError::InvalidShape {
+                detail: "gemm bias reduce: weight and bias ranges must not overlap".to_string(),
+            })
+        })
+}
+
 /// `t` が「dense な転置格納」（`Tensor::transpose_2d()` を経た zero-copy
 /// view のうち、元テンソルが行優先連続だったもの）であれば、その
 /// storage をそのまま借用したフラットスライスを返す（イシュー #1214。
@@ -759,13 +889,25 @@ impl CudaBackendOps {
     /// を `Some(false)` にキャッシュするため、形状単位で `Unsupported`
     /// を返すと同一 backward 内で先に成功済みの resident slot が読めなく
     /// なる〈`MissingGradient`〉）。
+    ///
+    /// # bias 勾配縮約（イシュー #3204）
+    ///
+    /// `bias = Some((bias_offset, n))` のとき、NT/TN 経路は GEMM が読む
+    /// `g` の device バッファを再利用して `reduce_sum_axis_f32`（汎用軸版。
+    /// 1 スレッド = 1 出力・`double` 逐次加算・最後に 1 回 `float`）を同じ
+    /// ストリームへ積み、同期 1 回で weight・bias を `out` へ書く（ホスト
+    /// 縮約と `upload_into` が不要になる）。NN/TT・分類不能・退化形状は
+    /// weight を従来のフォールバックで書いたうえで、bias もホスト `f64` 逐次
+    /// 和で計算して `upload_into` する（常に `Ok(true)`。`Unsupported` を
+    /// 返さない契約は不変）。戻り値は bias を書いたか。
     fn gemm_fp32_strict_into_impl(
         &self,
         a: &Tensor<f32>,
         b: &Tensor<f32>,
         out: &mut DeviceBuffer<f32>,
         out_offset: usize,
-    ) -> Result<(), BackendError> {
+        bias: Option<(usize, usize)>,
+    ) -> Result<bool, BackendError> {
         // codex-review 指摘（PR #1569）対応: capture 中の拒否は
         // NT/TN 経路の `with_sync_point_call`（後続）だけでなく、本関数
         // 全体の共通入口でも行う。NN/TT・分類不能・退化形状はフォール
@@ -809,21 +951,8 @@ impl CudaBackendOps {
         // `out_offset + m*n` を `checked_mul`/`checked_add` で検査し、
         // `out.numel()` を超える書き込みを driver 呼び出し（NT/TN 判定・
         // カーネル起動）より前に拒否する。
-        let mn = m.checked_mul(n).ok_or_else(|| {
-            BackendError::InvalidArgument("gemm_fp32_strict_into: m * n overflowed usize".into())
-        })?;
-        let end = out_offset.checked_add(mn).ok_or_else(|| {
-            BackendError::InvalidArgument(
-                "gemm_fp32_strict_into: out_offset + m * n overflowed usize".into(),
-            )
-        })?;
-        if end > out.numel() {
-            return Err(BackendError::InvalidArgument(format!(
-                "gemm_fp32_strict_into: write range [{out_offset}, {end}) exceeds out buffer \
-                 length {}",
-                out.numel()
-            )));
-        }
+        validate_gemm_bias_write_ranges(m, n, out_offset, out.numel(), bias)?;
+        let end = out_offset + m * n; // 上の検証で overflow しないことを確認済み。
 
         // 退化形状ガード（`m == 0 || n == 0 || k == 0`）は分類（NT/TN
         // 判定）を行わず直接フォールバックへ進む。理由: `dense_
@@ -851,6 +980,18 @@ impl CudaBackendOps {
                 },
             )?;
 
+            let reduce = match bias {
+                Some(_) => Some(self.with_driver_call(
+                    &[],
+                    |e| BackendError::CudaUnavailable(e.to_string()),
+                    || {
+                        let device = self.device_handle_raw()?;
+                        context_cache::cached_reduce(&device)
+                    },
+                )?),
+                None => None,
+            };
+
             if gemm.transpose_smem_f32_available() {
                 let (m32, n32, k32) = (m as u32, n as u32, k as u32);
                 match (dense_transposed_view(a), dense_transposed_view(b)) {
@@ -875,17 +1016,25 @@ impl CudaBackendOps {
                                     .into(),
                             )
                         })?;
-                        return self.with_sync_point_call(
-                            &[out_gen],
-                            "gemm_fp32_strict_into",
-                            |e| BackendError::KernelLaunchFailed(e.to_string()),
-                            || {
-                                let mut c_arg = storage.view_mut(out_offset..end);
-                                gemm.launch_tiled_f32_tn_into(
-                                    at, b_slice, &mut c_arg, m32, n32, k32,
-                                )
-                            },
-                        );
+                        return self
+                            .with_sync_point_call(
+                                &[out_gen],
+                                "gemm_fp32_strict_into",
+                                |e| BackendError::KernelLaunchFailed(e.to_string()),
+                                || {
+                                    with_weight_and_bias_views(
+                                        storage,
+                                        out_offset..end,
+                                        bias_target(bias, reduce.as_deref(), n),
+                                        |c_arg, bias_t| {
+                                            gemm.launch_tiled_f32_tn_into(
+                                                at, b_slice, c_arg, m32, n32, k32, bias_t,
+                                            )
+                                        },
+                                    )
+                                },
+                            )
+                            .map(|()| bias.is_some());
                     }
                     (None, Some(bt)) if crate::transpose::transpose_rows_fit_grid_y_limit(n32) => {
                         if !a.is_contiguous() {
@@ -908,17 +1057,25 @@ impl CudaBackendOps {
                                     .into(),
                             )
                         })?;
-                        return self.with_sync_point_call(
-                            &[out_gen],
-                            "gemm_fp32_strict_into",
-                            |e| BackendError::KernelLaunchFailed(e.to_string()),
-                            || {
-                                let mut c_arg = storage.view_mut(out_offset..end);
-                                gemm.launch_tiled_f32_nt_into(
-                                    a_slice, bt, &mut c_arg, m32, n32, k32,
-                                )
-                            },
-                        );
+                        return self
+                            .with_sync_point_call(
+                                &[out_gen],
+                                "gemm_fp32_strict_into",
+                                |e| BackendError::KernelLaunchFailed(e.to_string()),
+                                || {
+                                    with_weight_and_bias_views(
+                                        storage,
+                                        out_offset..end,
+                                        bias_target(bias, reduce.as_deref(), n),
+                                        |c_arg, bias_t| {
+                                            gemm.launch_tiled_f32_nt_into(
+                                                a_slice, bt, c_arg, m32, n32, k32, bias_t,
+                                            )
+                                        },
+                                    )
+                                },
+                            )
+                            .map(|()| bias.is_some());
                     }
                     _ => {}
                 }
@@ -931,6 +1088,41 @@ impl CudaBackendOps {
         // repack 計上を完結する〉→ `CudaMemory::upload_into`〈H2D。
         // `gemm_resident_lhs` のフォールバックと同型で新規 `DeviceBuffer`
         // を escape させない〉）。
+        // all-or-nothing（トレイト契約: エラー時は weight・bias 両レンジとも
+        // 未変更）: 失敗しうる計算・検査（GEMM、bias のホスト縮約、書き込み
+        // レンジ検査）を **いずれの書き込みよりも前に** すべて済ませ、書き込み
+        // 段階には H2D のデバイス障害以外の失敗要因を残さない（PR #3464
+        // レビュー指摘）。bias（イシュー #3204）は非 NT/TN 経路でも
+        // `Ok(true)` を保つためホスト `f64` 逐次和
+        // （`autodiff::eval::reduce_bias_grad_rows` と同一契約。`k == 1` は
+        // 直接コピーで `-0.0` を保つ）で縮約する。
+        let bias_contribution = match bias {
+            Some((bias_offset, _)) => {
+                let b_owned = b.contiguous();
+                let b_slice = b_owned.as_slice().ok_or_else(|| {
+                    BackendError::KernelLaunchFailed(
+                        "gemm_fp32_strict_into: bias reduce source not contiguous".into(),
+                    )
+                })?;
+                let contribution = reduce_bias_grad_rows_dense(b_slice, k, n);
+                let contribution =
+                    Tensor::new(contribution, &[n]).map_err(BackendError::ShapeMismatch)?;
+                let bias_end = bias_offset.checked_add(n).ok_or_else(|| {
+                    BackendError::InvalidArgument(
+                        "gemm_fp32_strict_into: bias_offset + n overflowed usize".into(),
+                    )
+                })?;
+                if bias_end > out.numel() {
+                    return Err(BackendError::InvalidArgument(format!(
+                        "gemm_fp32_strict_into: bias range [{bias_offset}, {bias_end}) exceeds \
+                         out buffer length {}",
+                        out.numel()
+                    )));
+                }
+                Some((bias_offset, contribution))
+            }
+            None => None,
+        };
         let result = self.gemm_fp32_strict(a, b)?;
         let device = self.with_driver_call(
             &[out.generation()],
@@ -938,7 +1130,12 @@ impl CudaBackendOps {
             || self.device_handle_raw(),
         )?;
         let mem = CudaMemory::new(&device);
-        mem.upload_into(&result, out, out_offset)
+        mem.upload_into(&result, out, out_offset)?;
+        let Some((bias_offset, contribution)) = bias_contribution else {
+            return Ok(false);
+        };
+        mem.upload_into(&contribution, out, bias_offset)?;
+        Ok(true)
     }
 
     /// 指定した `ordinal` に対応する `CudaBackendOps` を構築する。
@@ -3122,7 +3319,26 @@ impl BackendOps for CudaBackendOps {
         out: &mut DeviceBuffer<f32>,
         out_offset: usize,
     ) -> Result<(), BackendError> {
-        self.gemm_fp32_strict_into_impl(a, b, out, out_offset)
+        self.gemm_fp32_strict_into_impl(a, b, out, out_offset, None)
+            .map(|_| ())
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::
+    /// gemm_fp32_strict_into_with_bias_reduce_tracked`] の CUDA
+    /// オーバーライド（イシュー #3204）。NT/TN は GEMM と同じ起動内で bias
+    /// 勾配をデバイス上で縮約し、それ以外はホスト縮約＋`upload_into` で
+    /// 書く。いずれも `bias` が `Some` なら `Ok(true)`。`token` は
+    /// [`Self::gemm_fp32_strict_into_tracked`] と同じ理由で使わない。
+    fn gemm_fp32_strict_into_with_bias_reduce_tracked(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+        _token: &DispatchFailureCell,
+    ) -> Result<bool, BackendError> {
+        self.gemm_fp32_strict_into_impl(a, b, out, out_offset, bias)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_fp32_strict_into_tracked`]
@@ -8689,6 +8905,161 @@ mod tests {
             matches!(result, Err(BackendError::InvalidArgument(_))),
             "out_offset + m*n が usize でオーバーフローする場合は InvalidArgument で             拒否されるはず: {result:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // bias 勾配縮約の範囲検証・ホスト参照（イシュー #3204。driver 不要）
+    // -----------------------------------------------------------------
+
+    fn is_invalid_arg<T: std::fmt::Debug>(r: Result<T, BackendError>) -> bool {
+        matches!(r, Err(BackendError::InvalidArgument(_)))
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_accepts_disjoint_before_and_after() {
+        // weight [2, 6) と bias [6, 10)（後ろ）／ [0, 4)（前）。
+        assert!(validate_gemm_bias_write_ranges(2, 2, 2, 12, Some((6, 2))).is_ok());
+        assert!(validate_gemm_bias_write_ranges(2, 2, 4, 12, Some((0, 2))).is_ok());
+        assert!(validate_gemm_bias_write_ranges(2, 2, 0, 4, None).is_ok());
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_rejects_overflow_and_out_of_range() {
+        assert!(is_invalid_arg(validate_gemm_bias_write_ranges(
+            usize::MAX,
+            2,
+            0,
+            10,
+            None
+        )));
+        assert!(is_invalid_arg(validate_gemm_bias_write_ranges(
+            2,
+            2,
+            usize::MAX,
+            10,
+            None
+        )));
+        // bias_offset + n のオーバーフロー・バッファ超過。
+        assert!(is_invalid_arg(validate_gemm_bias_write_ranges(
+            1,
+            2,
+            0,
+            10,
+            Some((usize::MAX, 2))
+        )));
+        assert!(is_invalid_arg(validate_gemm_bias_write_ranges(
+            1,
+            2,
+            0,
+            10,
+            Some((9, 2))
+        )));
+        // bias の n が GEMM の n と異なる。
+        assert!(is_invalid_arg(validate_gemm_bias_write_ranges(
+            1,
+            2,
+            0,
+            10,
+            Some((4, 3))
+        )));
+    }
+
+    #[test]
+    fn validate_gemm_bias_write_ranges_rejects_overlap() {
+        // weight [2, 6)。bias が前方一部重なり・後方一部重なり・包含・同一。
+        for bias_offset in [1usize, 5, 3, 2] {
+            assert!(
+                is_invalid_arg(validate_gemm_bias_write_ranges(
+                    2,
+                    2,
+                    2,
+                    16,
+                    Some((bias_offset, 2))
+                )),
+                "bias_offset={bias_offset} は weight と重なるため拒否されるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_bias_grad_rows_dense_matches_f64_sequential_sum() {
+        // 相殺列: f32 逐次和なら 1.0 が失われるが f64 蓄積では保たれる。
+        let data = [1e8f32, 1.0, -1e8];
+        assert_eq!(reduce_bias_grad_rows_dense(&data, 3, 1), vec![1.0f32]);
+        // 2 列・3 行（行優先）。
+        let data = [1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0];
+        assert_eq!(reduce_bias_grad_rows_dense(&data, 3, 2), vec![6.0, 60.0]);
+    }
+
+    #[test]
+    fn reduce_bias_grad_rows_dense_single_row_preserves_negative_zero() {
+        let out = reduce_bias_grad_rows_dense(&[-0.0f32, 0.0], 1, 2);
+        assert_eq!(out[0].to_bits(), (-0.0f32).to_bits());
+        assert_eq!(out[1].to_bits(), 0.0f32.to_bits());
+    }
+
+    #[test]
+    fn reduce_bias_grad_rows_dense_zero_rows_is_zero() {
+        assert_eq!(reduce_bias_grad_rows_dense(&[], 0, 3), vec![0.0f32; 3]);
+    }
+
+    /// bias 付き入口も、別 ordinal の `out` は driver に触れず
+    /// `DeviceMismatch` で拒否する。
+    #[test]
+    fn gemm_fp32_strict_into_with_bias_rejects_wrong_device_out() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let other_ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let mut out =
+            DeviceBuffer::new(Device::Cuda(other_ordinal), vec![8], Box::new(EmptyHandle));
+        let token = DispatchFailureCell::default();
+        let result = cuda.gemm_fp32_strict_into_with_bias_reduce_tracked(
+            &a,
+            &b,
+            &mut out,
+            0,
+            Some((4, 2)),
+            &token,
+        );
+        assert!(matches!(result, Err(BackendError::DeviceMismatch)));
+    }
+
+    /// bias 範囲が `out` を超える・weight と重なる場合は driver に触れず
+    /// `InvalidArgument`（weight も書かない）。
+    #[test]
+    fn gemm_fp32_strict_into_with_bias_rejects_invalid_bias_range() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("valid tensor");
+        let mut out = DeviceBuffer::new(Device::Cuda(ordinal), vec![5], Box::new(EmptyHandle));
+        let token = DispatchFailureCell::default();
+        // 範囲外（4 + 2 > 5）。
+        let r = cuda.gemm_fp32_strict_into_with_bias_reduce_tracked(
+            &a,
+            &b,
+            &mut out,
+            0,
+            Some((4, 2)),
+            &token,
+        );
+        assert!(is_invalid_arg(r));
+        // weight [0, 4) と重なる。
+        let r = cuda.gemm_fp32_strict_into_with_bias_reduce_tracked(
+            &a,
+            &b,
+            &mut out,
+            0,
+            Some((3, 2)),
+            &token,
+        );
+        assert!(is_invalid_arg(r));
     }
 
     /// poison 済み ordinal では、退化形状（`m == 0`）によりフォールバック

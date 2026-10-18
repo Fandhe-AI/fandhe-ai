@@ -16,7 +16,8 @@
 //! # 継承するメソッド
 //! `gemm_resident_rhs_act` は既定（`gemm_resident_rhs` → `relu`）のまま継承する。`*_tracked` と
 //! `gemm_fp32_strict_into_with_bias_reduce_tracked` も既定のまま: ROCm は呼び出しごとに同期するので
-//! 遅延失敗トークンを要さない（CPU／CUDA と同じ判断）。`gemm_bias_act` の専用化は行わない
+//! 遅延失敗トークンを要さない（CPU／CUDA と同じ判断。なお CUDA は #3204 で
+//! `gemm_fp32_strict_into_with_bias_reduce_tracked` を専用化したが、ROCm は bias 縮約の専用化を行わない）。`gemm_bias_act` の専用化は行わない
 //! （既定の合成で正しい。融合は性能だけの差で、被覆計画 §9 の R11 記録に申し送る）。
 //!
 //! # 到達性
