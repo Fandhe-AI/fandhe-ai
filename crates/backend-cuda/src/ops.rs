@@ -323,6 +323,187 @@ pub struct CudaBackendOps {
 }
 
 impl CudaBackendOps {
+    /// `gemm_resident_rhs`／`gemm_resident_rhs_act` の共通本体（#3202）。
+    /// `act_relu` を GEMM epilogue へ渡す以外は #1022・#1023 の実装そのまま
+    /// （検査順序・poison／generation 検査・エラー文言を変えない）。
+    fn gemm_resident_rhs_impl(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act_relu: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if w.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Cuda(self.ordinal) {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        if k == 0 {
+            // `fandhe_ai_autodiff::nn::linear::Linear::new` が
+            // `in_features == 0` を構築時に拒否するため、この分岐は
+            // `Sequential` 経由の forward では到達しない
+            // （`tensor-core::backend_ops::BackendOps::gemm_resident_rhs`
+            // doc 参照）。CPU 参照実装のようにホスト側 epilogue のみで
+            // 済ませるには resident `bias` を download する必要があり、
+            // それは本メソッドが排除する対象の D2H そのものになるため、
+            // フォールバックを設けず型付きエラーで拒否する。
+            return Err(BackendError::InvalidArgument(
+                "gemm_resident_rhs: k == 0 is unreachable via Linear::new (in_features == 0 is \
+                 rejected at construction); a host epilogue fallback would require downloading \
+                 the resident bias, defeating the zero-D2H contract this method exists for"
+                    .to_string(),
+            ));
+        }
+        if m == 0 || n == 0 {
+            // 早期 return でも poison 状態は fail-closed に検査する
+            // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
+            // driver へ触れないため、begin_driver_call の poison 検査を明示的に
+            // 経由しないと poison 済み ordinal でも「空 step」相当が黙って
+            // 成功してしまう）。世代も通常経路（`resident_generations`。
+            // 本関数下部参照）と同じ `w`／`bias` の generation を渡す
+            // （codex-review P1 指摘・PR #1064 追補: 空スライスのままだと
+            // `invalidate` 後の旧世代 `w`／`bias` ビューがこの分岐だけ
+            // `StaleDeviceGeneration` を経由せず成功してしまい、「旧世代は
+            // 全て拒否する」という公開エラー契約を経路依存に破る）。
+            let empty_shape_generations = [
+                Some(w.buffer().generation()),
+                bias.map(|b| b.buffer().generation()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            context_cache::begin_driver_call(self.ordinal, &empty_shape_generations)?;
+            return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
+        }
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_full) = w_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
+        let bias_handle = bias
+            .map(|b| {
+                b.buffer()
+                    .downcast_handle::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset(), b.numel()))
+            })
+            .transpose()?;
+        let bias_view = match &bias_handle {
+            Some((h, offset, numel)) => {
+                let Some(full) = h.storage.as_ref() else {
+                    return Err(BackendError::DeviceAllocationFailed(
+                        "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation"
+                            .into(),
+                    ));
+                };
+                Some(full.view(*offset..*offset + *numel))
+            }
+            None => None,
+        };
+
+        // `w`（・`bias`）はデバイス常駐のまま渡す唯一の入力（`a` はこの
+        // 呼び出し内で毎回アップロードし直すため世代を跨がない。イシュー
+        // #1013 設計文書 §9 item 7）。
+        let resident_generations = [
+            Some(w.buffer().generation()),
+            bias.map(|b| b.buffer().generation()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        // `device_handle_raw`（キャッシュミス時の `CudaDevice::new`）自体も
+        // poison 検査・観測の対象に含める（codex-review P0 指摘・PR #1064
+        // 追補・`ops.rs:147` 相当: `device_handle()` を `with_driver_call`
+        // より前に呼ぶと、poison 済み ordinal でも拒否前に driver 初期化が
+        // 走ってしまう）。
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = CudaMemory::new(&device);
+        let a_dev_buf = mem.upload(a)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_storage) = a_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let a_arg = a_storage.as_arg();
+
+        let mut c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_storage) = c_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let mut c_arg = c_storage.as_arg_mut();
+
+        // キャッシュ構築（`cached_gemm`）自体の driver 呼び出し（NVRTC
+        // コンパイル・モジュールロード）も同じ観測対象とする（Cursor
+        // Bugbot 指摘・PR #1064 追補: cold-cache 構築中の sticky エラーが
+        // 観測なしで消費され fail-open になっていた）。
+        let gemm = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                gemm.launch_tiled_bias_act_f32_resident(
+                    &a_arg,
+                    &w_view,
+                    bias_view.as_ref(),
+                    act_relu,
+                    &mut c_arg,
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                )
+            },
+        )?;
+
+        mem.download(&c_dev_buf)
+    }
+
     /// GEMM 本体（f32）の FP32 厳密経路（`run_tiled_f32`）のみを実行する
     /// 内部ヘルパー。`crate::precision::gemm_precision()` の状態に
     /// 関わらず常に FP32 厳密で計算する（`Tf32`／`Tf32x3` いずれの
@@ -3099,181 +3280,49 @@ impl BackendOps for CudaBackendOps {
     /// カーネルへ渡す）へそのまま渡すことで、これらの download を
     /// 発生させない（`sgd_step_device` と同じ「転送コストを最小化する」
     /// 方針）。
+    ///
+    /// ReLU を伴わない経路。本体は `gemm_resident_rhs_impl`
+    /// （`act_relu = false`）を共有する（#3202）。
     fn gemm_resident_rhs(
         &self,
         a: &Tensor<f32>,
         w: DeviceBufferView<'_>,
         bias: Option<DeviceBufferView<'_>>,
     ) -> Result<Tensor<f32>, BackendError> {
-        if w.device() != Device::Cuda(self.ordinal) {
-            return Err(BackendError::DeviceMismatch);
-        }
-        let a_shape = a.shape();
-        if a_shape.len() != 2 {
-            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
-                expected: 2,
-                actual: a_shape.len(),
-            }));
-        }
-        let (m, k) = (a_shape[0], a_shape[1]);
-        let w_shape = w.shape();
-        if w_shape.len() != 2 || w_shape[0] != k {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: a_shape.to_vec(),
-                rhs: w_shape.to_vec(),
-            }));
-        }
-        let n = w_shape[1];
-        if let Some(b) = bias {
-            if b.device() != Device::Cuda(self.ordinal) {
-                return Err(BackendError::DeviceMismatch);
+        self.gemm_resident_rhs_impl(a, w, bias, false)
+    }
+
+    /// `gemm_resident_rhs` の ReLU 融合版（イシュー #3202）。
+    ///
+    /// trait 既定合成（`gemm_resident_rhs` → `relu`）は ReLU 層ごとに
+    /// `run_unary` 内で H2D・起動・同期 D2H の往復を 1 回余分に起こす。
+    /// 本 override は ReLU を GEMM の epilogue（`act_relu = true`）に
+    /// 畳み込み 1 起動にまとめる。呼び出し元は
+    /// `DeviceParamStore::linear_forward_with_activation`。
+    ///
+    /// bit 同一の根拠: GEMM epilogue（`kernels.rs`）は
+    /// `v = v > 0.0f ? v : 0.0f`、elementwise relu
+    /// （`kernels_elementwise.rs`）は `x > 0.0f ? x : 0.0f` で式が同一
+    /// （NaN→0・-0.0→+0.0 も一致）。`act` は実行時引数で累積・bias 加算
+    /// の命令列は変わらない。tolerance・FMA 契約は不変。
+    /// 未知の `Activation`（`#[non_exhaustive]`）は恒等扱いせず拒否する。
+    fn gemm_resident_rhs_act(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let act_relu = match act {
+            Activation::None => false,
+            Activation::Relu => true,
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "gemm_resident_rhs_act: unsupported activation {act:?}"
+                )));
             }
-            if b.shape() != [n] {
-                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                    lhs: b.shape().to_vec(),
-                    rhs: vec![n],
-                }));
-            }
-        }
-        if k == 0 {
-            // `fandhe_ai_autodiff::nn::linear::Linear::new` が
-            // `in_features == 0` を構築時に拒否するため、この分岐は
-            // `Sequential` 経由の forward では到達しない
-            // （`tensor-core::backend_ops::BackendOps::gemm_resident_rhs`
-            // doc 参照）。CPU 参照実装のようにホスト側 epilogue のみで
-            // 済ませるには resident `bias` を download する必要があり、
-            // それは本メソッドが排除する対象の D2H そのものになるため、
-            // フォールバックを設けず型付きエラーで拒否する。
-            return Err(BackendError::InvalidArgument(
-                "gemm_resident_rhs: k == 0 is unreachable via Linear::new (in_features == 0 is \
-                 rejected at construction); a host epilogue fallback would require downloading \
-                 the resident bias, defeating the zero-D2H contract this method exists for"
-                    .to_string(),
-            ));
-        }
-        if m == 0 || n == 0 {
-            // 早期 return でも poison 状態は fail-closed に検査する
-            // （Cursor Bugbot 指摘・PR #1064 追補: 空入力の早期 return は
-            // driver へ触れないため、begin_driver_call の poison 検査を明示的に
-            // 経由しないと poison 済み ordinal でも「空 step」相当が黙って
-            // 成功してしまう）。世代も通常経路（`resident_generations`。
-            // 本関数下部参照）と同じ `w`／`bias` の generation を渡す
-            // （codex-review P1 指摘・PR #1064 追補: 空スライスのままだと
-            // `invalidate` 後の旧世代 `w`／`bias` ビューがこの分岐だけ
-            // `StaleDeviceGeneration` を経由せず成功してしまい、「旧世代は
-            // 全て拒否する」という公開エラー契約を経路依存に破る）。
-            let empty_shape_generations = [
-                Some(w.buffer().generation()),
-                bias.map(|b| b.buffer().generation()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-            context_cache::begin_driver_call(self.ordinal, &empty_shape_generations)?;
-            return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
-        }
-
-        let w_handle = w
-            .buffer()
-            .downcast_handle::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(w_full) = w_handle.storage.as_ref() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "gemm_resident_rhs: w buffer has numel > 0 but no device allocation".into(),
-            ));
         };
-        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
-        let bias_handle = bias
-            .map(|b| {
-                b.buffer()
-                    .downcast_handle::<CudaBufferHandle>()
-                    .ok_or(BackendError::DeviceMismatch)
-                    .map(|h| (h, b.offset(), b.numel()))
-            })
-            .transpose()?;
-        let bias_view = match &bias_handle {
-            Some((h, offset, numel)) => {
-                let Some(full) = h.storage.as_ref() else {
-                    return Err(BackendError::DeviceAllocationFailed(
-                        "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation"
-                            .into(),
-                    ));
-                };
-                Some(full.view(*offset..*offset + *numel))
-            }
-            None => None,
-        };
-
-        // `w`（・`bias`）はデバイス常駐のまま渡す唯一の入力（`a` はこの
-        // 呼び出し内で毎回アップロードし直すため世代を跨がない。イシュー
-        // #1013 設計文書 §9 item 7）。
-        let resident_generations = [
-            Some(w.buffer().generation()),
-            bias.map(|b| b.buffer().generation()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-        // `device_handle_raw`（キャッシュミス時の `CudaDevice::new`）自体も
-        // poison 検査・観測の対象に含める（codex-review P0 指摘・PR #1064
-        // 追補・`ops.rs:147` 相当: `device_handle()` を `with_driver_call`
-        // より前に呼ぶと、poison 済み ordinal でも拒否前に driver 初期化が
-        // 走ってしまう）。
-        let device = self.with_driver_call(
-            &resident_generations,
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || self.device_handle_raw(),
-        )?;
-        let mem = CudaMemory::new(&device);
-        let a_dev_buf = mem.upload(a)?;
-        let a_handle = a_dev_buf
-            .downcast_handle::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(a_storage) = a_handle.storage.as_ref() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "gemm_resident_rhs: a buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let a_arg = a_storage.as_arg();
-
-        let mut c_dev_buf = mem.alloc_zeroed(&[m, n])?;
-        let c_handle = c_dev_buf
-            .downcast_handle_mut::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(c_storage) = c_handle.storage.as_mut() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "gemm_resident_rhs: output buffer has numel > 0 but no device allocation".into(),
-            ));
-        };
-        let mut c_arg = c_storage.as_arg_mut();
-
-        // キャッシュ構築（`cached_gemm`）自体の driver 呼び出し（NVRTC
-        // コンパイル・モジュールロード）も同じ観測対象とする（Cursor
-        // Bugbot 指摘・PR #1064 追補: cold-cache 構築中の sticky エラーが
-        // 観測なしで消費され fail-open になっていた）。
-        let gemm = self.with_driver_call(
-            &resident_generations,
-            |e| BackendError::CudaUnavailable(e.to_string()),
-            || context_cache::cached_gemm(&device),
-        )?;
-        self.with_driver_call(
-            &resident_generations,
-            |e| BackendError::KernelLaunchFailed(e.to_string()),
-            || {
-                gemm.launch_tiled_bias_act_f32_resident(
-                    &a_arg,
-                    &w_view,
-                    bias_view.as_ref(),
-                    false,
-                    &mut c_arg,
-                    m as u32,
-                    n as u32,
-                    k as u32,
-                )
-            },
-        )?;
-
-        mem.download(&c_dev_buf)
+        self.gemm_resident_rhs_impl(a, w, bias, act_relu)
     }
 
     /// `a`（デバイス常駐）・`w`（デバイス常駐）・`bias`（デバイス常駐・
@@ -7819,6 +7868,66 @@ mod tests {
                 })
             ),
             "旧世代 w ビューは空 shape の早期 return でも StaleDeviceGeneration で              拒否されるはず: {result:?}"
+        );
+    }
+
+    /// [`CudaBackendOps::gemm_resident_rhs_act`]（ReLU 融合 override。
+    /// #3202）の poison 回帰テスト。`gemm_resident_rhs` と同じ
+    /// `gemm_resident_rhs_impl` を通るため、空形状の早期 return でも
+    /// fail-closed に拒否される（A08: 融合 override が検査を迂回しない）。
+    #[test]
+    fn gemm_resident_rhs_act_rejects_on_poisoned_ordinal_even_via_trivial_empty_shape_early_return()
+    {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let token = context_cache::begin_driver_call(ordinal, &[]).expect("begin succeeds");
+        let _ = context_cache::observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(sticky_driver_error())),
+        );
+        drop(token);
+
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0f32], &[1, 1]).expect("valid tensor");
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.gemm_resident_rhs_act(&a, w, None, Activation::Relu);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では融合 override も fail-closed に拒否されるはず: {result:?}"
+        );
+    }
+
+    /// 同 override の旧世代 `w` 拒否回帰テスト（#3202）。
+    #[test]
+    fn gemm_resident_rhs_act_rejects_stale_generation_even_via_trivial_empty_shape_early_return() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = Tensor::new(vec![1.0f32], &[1, 1]).expect("valid tensor");
+        let w_buffer = DeviceBuffer::new_with_generation(
+            Device::Cuda(ordinal),
+            vec![1],
+            Box::new(EmptyHandle),
+            1,
+        );
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 0]).expect("view construction succeeds");
+
+        let result = cuda.gemm_resident_rhs_act(&a, w, None, Activation::Relu);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代 w ビューは融合 override でも拒否されるはず: {result:?}"
         );
     }
 

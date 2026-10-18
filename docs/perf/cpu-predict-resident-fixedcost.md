@@ -47,7 +47,7 @@ fresh の `predict` は tape を使わない経路で `&Tensor` を直接渡す�
 L1 は融合 `Linear::forward_host_with_activation`（`gemm_bias_act`→
 `gemm_blis_bias_act_parallel`）、L2 は `gemm`→`add`（`cpu-infer-predict-profile.md` §4.2）。
 
-補足（記述の食い違い。是正は本 PR の対象外）: `cpu-infer-predict-profile.md` §2・§3 と
+補足（記述の食い違い。是正は本 PR の対象外。**#3196 で解消済み**: bit 一致テストで確認し融合経路へ切替、`cpu-linear-forward-device-fusion.md` 参照）: `cpu-infer-predict-profile.md` §2・§3 と
 `gemm_blis_bias_act_parallel` の doc は epilogue が K 全体の蓄積後に適用されるため融合版が
 非融合合成と bit 一致すると述べる。一方 `linear_forward_device` の doc は「融合カーネルは
 加算順序が変わりうる」と述べる。両者の整合は後続の対処 issue で確認する材料である。
@@ -110,7 +110,7 @@ minflt の採取は `/proc` 読み出しが計測区間を歪めるため既定 
 
 実測で支持された仮説に応じた候補。いずれも本イシューでは実装しない。
 
-- `linear_forward_device` の CPU 実装を融合 epilogue へ切り替える案と、§3 の doc の
+- （#3196 で実装済み）`linear_forward_device` の CPU 実装を融合 epilogue へ切り替える案と、§3 の doc の
   食い違いの是正（H1 支持時）
 - `predict_device_chain` の入力 `upload` のコピー削減（`&Tensor` を借用する CPU 専用
   ゼロコピー経路など。H2 支持時）

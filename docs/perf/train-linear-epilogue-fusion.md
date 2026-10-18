@@ -102,6 +102,23 @@ GEMM 等）経由へ切り替わり、backward が大幅に高速化した（CPU
 
 ## 4. Metal / DGX Spark GB10 実機
 
+### 4.1 CUDA override（#3202）
+
+- 以下の「オーバーライドしていない」は #1044 時点の記述。#3202 で CUDA は
+  `gemm_resident_rhs_act` を override し、ReLU 層の起動を 2 → 1
+  （`gemm_resident_rhs` + `relu` → epilogue 融合）に減らした。ReLU の
+  `run_unary` が持っていた同期 D2H の往復が 1 回消えるため、784→256→ReLU→10
+  の forward のホスト往復はコード読解で 4 → 3 回（実測は未取得）。
+- 新しい `unsafe` なし（既存の `launch_tiled_bias_act_f32_resident` に
+  `act_relu = true` を渡すだけ）。tolerance・FMA 契約は不変。
+- bit 一致テスト: `crates/backend-cuda/tests/gemm_resident_rhs_act_fused_real_device.rs`
+  （融合 vs 手動合成。`#[ignore]`）。再現:
+  `cargo test -p fandhe-ai-backend-cuda --release --test gemm_resident_rhs_act_fused_real_device -- --ignored --nocapture`
+- **未実測（申し送り）**: 本作業環境は CUDA toolkit 非搭載のため実機テスト・
+  往復回数の実測・GB10 A/B（5 回中央値・`.rev-stamp`）は未実施。
+  GB10 セッションで実施し本節へ追記する。
+
+
 **未実施**（本リポの開発環境が Linux コンテナのため）。CUDA／Metal は
 `gemm_resident_rhs_act`（デバイス常駐 forward の融合入口）を
 オーバーライドしておらず、`tensor-core::BackendOps` のデフォルト実装
