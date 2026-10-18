@@ -155,6 +155,8 @@ const _: fn() = || {
     assert_send_sync::<CudaRmsNorm>();
     assert_send_sync::<CudaSoftmax>();
     assert_send_sync::<CudaAllocator>();
+    // イシュー #3203: `CudaMse` は target キャッシュ（`Mutex`）を持つ。
+    assert_send_sync::<crate::mse::CudaMse>();
     assert_send_sync::<crate::linalg::CudaLinalg>();
     assert_send_sync::<crate::gemm_mma_tf32x3::CudaMmaTf32x3Gemm>();
     // イシュー #1700: `cached_scalar_unary_kernel`／`cached_scalar_binary_kernel`
@@ -448,7 +450,8 @@ pub(crate) fn cached_adam(device: &CudaDevice) -> Result<Arc<crate::adam::CudaAd
 /// プロセス内キャッシュから取得する（イシュー #1045。キーは
 /// [`ContextKey`]。`cached_gemm` 冒頭コメント参照）。
 /// `ops::CudaBackendOps::mse_loss`／`mse_loss_backward` の唯一の呼び出し
-/// 先。
+/// 先。`CudaMse` は context ごとに 1 つなので、内部の target デバイス再利用
+/// キャッシュ（#3203）も context 単位で共有され、別 context とは混ざらない。
 pub(crate) fn cached_mse(device: &CudaDevice) -> Result<Arc<crate::mse::CudaMse>, CudaError> {
     static CACHE: OnceLock<SingleFlightCache<ContextKey, crate::mse::CudaMse>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
