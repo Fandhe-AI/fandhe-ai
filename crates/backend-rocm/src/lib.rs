@@ -40,6 +40,11 @@
 //! （[`RocmIm2col`]）、`max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`（[`RocmPooling`]）の HIPRTC カーネルを
 //! 移植し、`RocmBackendOps` へ結線した（いずれも wave 幅非依存。col2im・avg 系は `double` アキュムレータ）。
 //!
+//! GEMM 派生（分解案 R11・#3442）として `gemm_resident_rhs`・`gemm_resident_lhs`・`gemm_fp32_strict_into`・
+//! `linear_forward_device` を、R0 の f32 タイル GEMM に bias／ReLU の epilogue とオペランドのオフセット引数を
+//! 足した 1 本の HIPRTC カーネル（[`RocmGemmBiasAct`]）へ結線した。主ループは R0 とバイト同一で、
+//! 常駐オペランドを download せずに計算する。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
@@ -61,6 +66,7 @@ mod gather_scatter;
 #[cfg(test)]
 mod gather_scatter_model;
 mod gemm;
+mod gemm_bias_act;
 #[cfg(test)]
 mod gemm_model;
 mod hip;
@@ -76,6 +82,7 @@ mod kernels_elementwise;
 mod kernels_fused_elementwise;
 mod kernels_gather_scatter;
 mod kernels_gemm;
+mod kernels_gemm_bias_act;
 mod kernels_im2col;
 mod kernels_interpolate;
 mod kernels_linalg;
@@ -135,6 +142,7 @@ pub use elementwise::{RocmElementwise, RocmFusedElementwise, RocmScalarOp};
 pub use error::RocmError;
 pub use gather_scatter::{RocmGatherScatter, ScatterMode};
 pub use gemm::RocmGemmF32;
+pub use gemm_bias_act::RocmGemmBiasAct;
 pub use im2col::RocmIm2col;
 pub use interpolate::RocmInterpolate;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};

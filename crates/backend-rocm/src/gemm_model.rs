@@ -16,6 +16,23 @@ pub(crate) fn simulate(
     n: usize,
     k: usize,
 ) -> Vec<f32> {
+    simulate_with_epilogue(t, a, b, m, n, k, |_, _, acc| acc)
+}
+
+/// [`simulate`] の epilogue 付き版（`kernels_gemm_bias_act` のモデル。イシュー #3442・R11）。
+///
+/// `epilogue(row, col, acc)` は書き込みガード（`row < m && col < n`）の内側でスレッドごとに 1 回
+/// 呼ばれ、戻り値がそのまま C へ書かれる（後処理ではなくカーネルそのもののモデル）。
+/// `bias[col]` の読み出しも epilogue の中だけで起きるので、ガード外では読まれない。
+pub(crate) fn simulate_with_epilogue(
+    t: &GemmF32Tile,
+    a: &[f32],
+    b: &[f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    epilogue: impl Fn(usize, usize, f32) -> f32,
+) -> Vec<f32> {
     let (bm, bn, bk) = (t.bm() as usize, t.bn() as usize, t.bk() as usize);
     let (tm, tn) = (t.tm() as usize, t.tn() as usize);
     let (tx_n, ty_n) = (t.threads_x() as usize, t.threads_y() as usize);
@@ -84,7 +101,7 @@ pub(crate) fn simulate(
                             for (j, &v) in acc_row.iter().enumerate() {
                                 let col = block_col + tx * tn + j;
                                 if col < n {
-                                    c[row * n + col] = v;
+                                    c[row * n + col] = epilogue(row, col, v);
                                     writes[row * n + col] += 1;
                                 }
                             }
