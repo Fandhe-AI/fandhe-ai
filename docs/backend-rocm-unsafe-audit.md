@@ -13,6 +13,7 @@
 | #3444 追記 | `linalg.rs` の起動 5 件（L1〜L5。§3.5）を追加し、`DeviceBuffer` を型付き（`DeviceBuffer<T>`。`f32`・`f64`・`i32`）にして M5〜M7 の前提を `elems*size_of::<T>()` へ改めた。ブロック総数は 33 → 38。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R1・#3432） | `WarpGeometry` は `unsafe` を追加しない（監査表の件数は不変） |
 | 追従（R3・#3434） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。(1) 封印 trait `DeviceElem` に `f64`（`SIZE = 8`）を追加した。sum の `double` partial バッファ用で、`f64` はビット列として memcpy してよい POD のため T1・T2 の「封印 POD」前提が 1 型ぶん広がるだけで、検査（`checked_mul`・長さ一致）は不変。(2) K1（`KernelHost::run`）の呼び出し元が `RocmReduce`・`RocmArgReduce` の分だけ増えた。全軸縮約 1 段目の `KernelHost::run_blocks` は `run` を経由する薄いラッパーで、起動点は 1 か所のまま。(3) 引数の照合は従来どおり `kernels_reduce.rs`・`kernels_arg_reduce.rs` の `spec_matches_source_signature` と `run` の実行時照合で行う。(4) `unsafe impl Send/Sync` は足さない（`RocmReduce`・`RocmArgReduce` は `!Send`。`RocmBackendOps` からは thread_local キャッシュ経由）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
+| 追従（R10・#3441） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変。`unsafe impl Send/Sync` もなし）。LSTM／GRU の `rnn_cell.rs::RocmRnnCell` は K1（`KernelHost::run`）と T1〜T3（`TypedDeviceBuffer<f32>`）だけを使い、K1 の呼び出し元が 5 か所増えるだけ。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R7・#3438） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。K1（`KernelHost::run`）の呼び出し元が `RocmIm2col`・`RocmConstantPad`・`RocmPooling` の分だけ増えた（起動点は 1 か所のまま）。引数の照合は `kernels_im2col.rs`・`kernels_constant_pad.rs`・`kernels_pooling.rs` の `spec_matches_source_signature` と `run` の実行時照合で行う。`DeviceElem` への型追加はなし（`i32`・`f32` は既存）。`unsafe impl Send/Sync` は足さない（3 実行型は `!Send`。`RocmBackendOps` からは thread_local キャッシュ経由）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する。R0（#3431）は新しい `unsafe` を足さない（インベントリは 33／10／17／0 のまま。`unsafe impl Send/Sync` もなし） |
 
@@ -144,6 +145,15 @@ softmax・log_softmax・log_softmax_backward の 2 実行型（`softmax.rs`）�
 - 省略された weight／bias／統計にも `hidden`（または `c`）要素のダミーバッファを渡す（predicated load 対策）。
 - 確認方法: §2 の再現コマンドで `launch.rs` の `unsafe {` が 1 件のままであること、`norm*.rs`・`kernels_norm.rs`・`tests/norm_*.rs` に `unsafe` ブロックがないこと（doc 内の言及を除く）を確認した。§2 の件数表は R6 で増減しないが、兄弟 PR が §2 を更新している場合はマージ順で再集計が必要。
 - 実機（MI300X・gfx942）で HIPRTC のコンパイル（`__shfl_xor` の double オーバーロード・`__builtin_fma` の f64 命令化）と wave64 parity を確認していない（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
+
+### 3.9 R10（#3441）: 新しい `unsafe` ブロックなし（実装担当の自己点検。未監査）
+
+LSTM／GRU の 5 演算（`rnn_cell.rs::RocmRnnCell`・`kernels_rnn_cell.rs`・`rnn_cell_model.rs`〈`cfg(test)`〉・`ops/rnn_cell.rs`）は **`unsafe` を一切追加しない**。起動は既存の K1 だけを通る。
+
+- デバイスバッファは `TypedDeviceBuffer<f32>`（T1〜T3）だけで、封印型は広げない。引数の型・個数・順序は `kernels_rnn_cell.rs` の `spec_matches_source_signature` と K1 の実行時照合で守る。
+- 起動前に `validate_rnn_dims`（`hidden > 0`・`numel % hidden == 0`・`numel`／`hidden` の `i32` 収容・`numel * gates` の checked 乗算が `i32` 内）とスライス長の一致をホストで検査する。カーネル側にも `gid >= numel` ガードがあり二重化している（REQ-8）。
+- 確認方法: §2 の再現コマンドで `rnn_cell*.rs`・`kernels_rnn_cell.rs`・`ops/rnn_cell.rs`・`tests/rnn_cell_absent.rs` に `unsafe {` が 0 件であること、`launch.rs` の `unsafe {` が増えていないことを確認した。§2 の件数表は R10 で増減しないが、兄弟 PR が §2 を更新している場合はマージ順で再集計が必要。節番号 3.8 は兄弟 PR（#3455）が使うため 3.9 とした。
+- 実機（MI300X・gfx942）での HIPRTC コンパイルと `expf`／`tanhf` の CPU との libm parity は未確認（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
 
 ## 4. U1 の担保方法
 

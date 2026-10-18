@@ -31,6 +31,11 @@
 //! `log_softmax_backward`（[`RocmLogSoftmaxBackward`]）の HIPRTC カーネルを移植し、`RocmBackendOps`
 //! へ結線した（wave 幅は `WarpGeometry` 注入。onepass〈動的 SMEM〉経路は移植せず 2 パスのみ）。
 //!
+//! LSTM／GRU セル（分解案 R10・#3441）として pointwise 段と backward 3 本（`lstm_pointwise`・
+//! `lstm_hidden_backward`・`lstm_cell_backward`・`gru_pointwise`・`gru_backward`）の HIPRTC カーネル
+//! （[`RocmRnnCell`]）を移植し、`RocmBackendOps` へ結線した。縮約を持たず wave 幅に依存しない。FMA は
+//! CPU の `mul_add` と同じ 3 か所だけ `__builtin_fmaf` で明示する。実機 parity は #3159。
+//!
 //! 畳み込み・pooling 系（分解案 R7・#3438）として `pad`（[`RocmConstantPad`]）、Conv2d の `im2col`／`col2im`
 //! （[`RocmIm2col`]）、`max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`（[`RocmPooling`]）の HIPRTC カーネルを
 //! 移植し、`RocmBackendOps` へ結線した（いずれも wave 幅非依存。col2im・avg 系は `double` アキュムレータ）。
@@ -80,6 +85,7 @@ mod kernels_loss;
 mod kernels_norm;
 mod kernels_pooling;
 mod kernels_reduce;
+mod kernels_rnn_cell;
 mod kernels_scalar_op;
 mod kernels_scan;
 mod kernels_softmax;
@@ -101,6 +107,9 @@ mod pooling;
 mod reduce;
 #[cfg(test)]
 mod reduce_model;
+mod rnn_cell;
+#[cfg(test)]
+mod rnn_cell_model;
 mod scan;
 #[cfg(test)]
 mod scan_model;
@@ -135,6 +144,7 @@ pub use norm::{BatchNormTrainHost, LayerNormBackwardHost, RmsNormBackwardHost, R
 pub use ops::RocmBackendOps;
 pub use pooling::RocmPooling;
 pub use reduce::RocmReduce;
+pub use rnn_cell::RocmRnnCell;
 pub use scan::RocmScan;
 pub use softmax::{RocmLogSoftmaxBackward, RocmSoftmax};
 pub use sort::RocmSort;
