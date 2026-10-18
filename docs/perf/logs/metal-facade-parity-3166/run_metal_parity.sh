@@ -48,6 +48,33 @@ if { [ "$STAMP_SIZE" -ne 40 ] && [ "$STAMP_SIZE" -ne 41 ]; } || ! [[ $STAMP_BODY
   exit 2
 fi
 
+# マスクしてから収録し、残っていれば fail-closed で止める（残ったファイルは raw ごと削除する）。
+# 異常終了（set -e・exit 2 を含む）でも未処理の .raw が出力先に残らないよう、EXIT trap でも mask_all を呼ぶ。
+HN=$(hostname)
+LEAK=0
+mask() { # mask <raw> <final>
+  sed -e "s|$HN|<metal-node>|g" -e "s|$HOME|~|g" -e "s|${USER:-__nouser__}|<user>|g" "$1" >"$2"
+  rm -f "$1"
+  for s in "$HN" "$HOME"; do
+    if [ -n "$s" ] && grep -Fq -- "$s" "$2"; then
+      echo "マスク漏れ: $2" >&2
+      rm -f "$2"
+      LEAK=1
+      break
+    fi
+  done
+}
+mask_all() {
+  if [ -e "$OUT/env_info.raw" ]; then
+    mask "$OUT/env_info.raw" "$OUT/env_info.txt"
+  fi
+  for raw in "$OUT"/logs/*/*.raw; do
+    [ -e "$raw" ] || continue
+    mask "$raw" "${raw%.raw}.log"
+  done
+}
+trap mask_all EXIT
+
 mkdir -p "$OUT/logs"
 cp "$TREE/.rev-stamp" "$OUT/.rev-stamp"
 
@@ -125,25 +152,7 @@ EOF
 
 env_info after >>"$OUT/env_info.raw"
 
-# マスクしてから収録し、残っていれば fail-closed で止める（残ったファイルは raw ごと削除する）。
-HN=$(hostname)
-LEAK=0
-mask() { # mask <raw> <final>
-  sed -e "s|$HN|<metal-node>|g" -e "s|$HOME|~|g" -e "s|${USER:-__nouser__}|<user>|g" "$1" >"$2"
-  rm -f "$1"
-  for s in "$HN" "$HOME"; do
-    if [ -n "$s" ] && grep -Fq -- "$s" "$2"; then
-      echo "マスク漏れ: $2" >&2
-      rm -f "$2"
-      LEAK=1
-      break
-    fi
-  done
-}
-mask "$OUT/env_info.raw" "$OUT/env_info.txt"
-for raw in "$OUT"/logs/*/*.raw; do
-  mask "$raw" "${raw%.raw}.log"
-done
+mask_all
 
 echo "done: any_fail=$ANY_FAIL leak=$LEAK"
 if [ "$LEAK" -ne 0 ] || [ "$ANY_FAIL" -ne 0 ]; then
