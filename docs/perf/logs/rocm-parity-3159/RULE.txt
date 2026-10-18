@@ -1,0 +1,19 @@
+# RULE.txt — イシュー #3159 ROCm 実機 parity（事前登録。実測前に固定。段 A のコミットで固定し、段 B はこの版より後のコミットで実行する）
+fixed_at_utc: 2026-10-18T00:00:00Z
+base: 段 B では所有者が展開したツリーの .rev-stamp（git rev-parse HEAD）を収録する。本ファイルのコミットより後であること
+machine: MI300X（gfx942・CDNA3・wave64）。他の機材の結果は参考扱い
+scope: f32 GEMM（RocmGemmF32::run・GfxTarget::Gfx942）と is_available() の probe のみ。R0 以降の Op は対象外（各 R イシューで追加）
+judgment: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。fandhe_ai_backend_cpu::compare を使い定数は変更しない。fail が 1 形状でもあれば全体 fail
+shapes（m,n,k。crates/backend-rocm/tests/gemm_real_device.rs の SHAPES と同一の並び）:
+  (1,1,1) (1,1,0) (64,64,16) (63,65,17) (130,70,33) (5,129,200) (128,128,64) (257,255,513)
+  (128,128,32) (65,64,16) (64,63,16) (64,64,15) (64,64,17) (1,257,33) (257,1,33) (193,129,48)
+  (64,64,4096) (33,17,4097) (128,96,8192) (0,5,3) (5,0,3)
+recorded_not_judged: CPU との bit 不一致数、同一プロセス内 2 回実行の GPU 決定性（ROCM_DETERMINISM）
+build_then_run: 先に cargo test -p fandhe-ai-backend-rocm --release --no-run でビルドを終え、
+  その後 cargo test -p fandhe-ai-backend-rocm --release -- --ignored --nocapture --test-threads=1 を実行する。計測中は他の cargo・ビルドを走らせない
+runs: 2（別プロセス。run1・run2）。合格のための追加実行・差し替えはしない
+fail_handling: fail が出ても tolerance・baseline は変えない。形状ごとの fail 要素数・最大絶対誤差・最大相対誤差を記録する。
+  FP contraction が原因かの切り分けは README の手順で行い、推測では結論を書かない。baseline の追加・変更は人間の承認が要る。
+  -ffp-contract は渡さない（docs/backend-rocm-hiprtc-gemm-decision.md §2・§3）
+abort: 実施時の単価が約 1 万円を超えそうなら着手せず所有者へ戻す（docs/rocm-cloud-amd-procurement-decision.md §2・§7）
+masking: ホスト名・ユーザー名・ホームのパス・インスタンス識別子・GPU の UUID・PCI バス ID は収録しない。収録する場合は <rocm-node>・<user>・<home> へ置換
