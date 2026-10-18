@@ -2,6 +2,7 @@
 # イシュー #3159: ROCm 実機（MI300X・gfx942）parity の実行スクリプト。手動実行専用（CI からは呼ばない）。
 # 規則は同ディレクトリの RULE.txt（事前登録）が正。判定は cargo test の終了コード（run*/exit_code）のみ。
 #
+# 終了コード: 0=両実行 exit 0／1=どちらかの実行が非 0 またはマスク漏れ（記録は残る）／2=引数・前提不正。
 # 使い方（ROCm ノード上）:
 #   bash run_rocm_parity.sh <tree-abs-path> <out-abs-path>
 #   tree: 展開済みリポジトリ（直下に .rev-stamp が必要）／out: 未存在の出力先
@@ -15,7 +16,8 @@ TREE=$1
 OUT=$2
 # 引数は絶対パス + 文字種 allowlist で検査する（A03）。以降の展開は常にクォートする。
 for p in "$TREE" "$OUT"; do
-  if ! printf '%s' "$p" | grep -Eq '^/[A-Za-z0-9._/-]+$'; then
+  # grep は行単位で部分一致するため、改行を含む値が通らないよう bash の全体一致（=~）で検査する。
+  if ! [[ $p =~ ^/[A-Za-z0-9._/-]+$ ]]; then
     echo "絶対パスかつ許可文字のみが必要" >&2
     exit 2
   fi
@@ -23,8 +25,18 @@ done
 [ -d "$TREE" ] || { echo "tree が存在しない" >&2; exit 2; }
 [ ! -e "$OUT" ] || { echo "出力先が既に存在する（上書きしない）" >&2; exit 2; }
 [ -f "$TREE/.rev-stamp" ] || { echo ".rev-stamp が無い" >&2; exit 2; }
-if ! grep -Eq '^[0-9a-f]{40}$' "$TREE/.rev-stamp"; then
-  echo ".rev-stamp が 40 桁の 16 進数でない" >&2
+# ファイル全体が「40 桁の小文字 16 進数 + 任意の末尾改行 1 つ」だけであることを検証する。
+# 末尾に番兵 x を付けて $(...) の改行除去を避け、CR・空白・余計な行・NUL を全て拒否する。
+export LC_ALL=C
+STAMP_SIZE=$(wc -c <"$TREE/.rev-stamp")
+STAMP=$(
+  cat "$TREE/.rev-stamp"
+  printf x
+)
+STAMP=${STAMP%x}
+STAMP_BODY=${STAMP%$'\n'}
+if { [ "$STAMP_SIZE" -ne 40 ] && [ "$STAMP_SIZE" -ne 41 ]; } || ! [[ $STAMP_BODY =~ ^[0-9a-f]{40}$ ]]; then
+  echo ".rev-stamp が 40 桁の小文字 16 進数 1 行だけでない" >&2
   exit 2
 fi
 mkdir -p "$OUT/run1" "$OUT/run2"
@@ -73,4 +85,15 @@ mask() { # mask <raw> <final>
 mask "$OUT/env_info.raw" "$OUT/env_info.txt"
 mask "$OUT/run1/ignored.raw" "$OUT/run1/ignored.log"
 mask "$OUT/run2/ignored.raw" "$OUT/run2/ignored.log"
-echo "done: run1=$(cat "$OUT/run1/exit_code") run2=$(cat "$OUT/run2/exit_code")"
+# 記録とマスクを終えた後で、どちらかの実行が非 0 なら非 0 で終了する（成功扱いで握りつぶさない）。
+# exit_code が数値でない場合も fail-closed で非 0 とする。
+RC1=$(cat "$OUT/run1/exit_code")
+RC2=$(cat "$OUT/run2/exit_code")
+echo "done: run1=$RC1 run2=$RC2"
+if ! [[ $RC1 =~ ^[0-9]+$ && $RC2 =~ ^[0-9]+$ ]]; then
+  echo "exit_code が数値でない" >&2
+  exit 1
+fi
+if [ "$RC1" -ne 0 ] || [ "$RC2" -ne 0 ]; then
+  exit 1
+fi
