@@ -43003,3 +43003,51 @@ fn distributed_usage_doctest_is_present_and_compiled() {
         "world_size 2 以上の例が実行される形になっている"
     );
 }
+
+/// 保留ガード G1（イシュー #3157）: `Device` の variant 集合を、ワイルド
+/// カード腕なしの網羅的 `match` で固定する正のプローブ。variant を足すと
+/// コンパイルが落ち、`docs/backend-rocm-device-exposure-decision.md` の
+/// 所有者判断（Q1）なしに公開 enum が変わる経路を塞ぐ。承認後（Phase B）に
+/// `Rocm(_)` 腕を足す形で反転する。
+#[test]
+fn device_variant_set_is_fixed_while_3157_on_hold() {
+    fn classify(d: fandhe_ai::Device) -> &'static str {
+        match d {
+            fandhe_ai::Device::Cpu => "cpu",
+            fandhe_ai::Device::Cuda(_) => "cuda",
+            #[cfg(target_os = "macos")]
+            fandhe_ai::Device::Metal => "metal",
+        }
+    }
+    assert_eq!(classify(fandhe_ai::Device::Cpu), "cpu");
+    assert_eq!(classify(fandhe_ai::Device::Cuda(0)), "cuda");
+}
+
+/// 保留ガード G2（イシュー #3157）: 公開クレート facade が非公開の
+/// `backend-rocm` を `[dev-dependencies]` 以外で参照しないこと
+/// （`cargo publish` を壊さない。決定記録 Q2 の承認まで保留）。
+#[test]
+fn facade_does_not_depend_on_backend_rocm_outside_dev_dependencies_while_3157_on_hold() {
+    let manifest = read_to_string_or_panic(&facade_crate_root().join("Cargo.toml"));
+    let mut section = String::new();
+    for raw in manifest.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            section = line.to_string();
+            continue;
+        }
+        if !is_relevant_dependency_section(&section) {
+            continue;
+        }
+        let mentions = line.contains("backend-rocm")
+            || line.contains("backend_rocm")
+            || value_has_package_rename_to(line, &["fandhe-ai-backend-rocm", "backend-rocm"]);
+        assert!(
+            !mentions,
+            "facade が `{section}` で backend-rocm を参照している（Q2 承認前は禁止）: {line}"
+        );
+    }
+}

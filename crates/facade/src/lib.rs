@@ -2058,7 +2058,23 @@ pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
 /// **順序契約**: `Device::Cpu`（常に含まれる）→ `Device::Cuda(0..n)`
 /// （ordinal 昇順。CUDA driver 不在なら 0 件）→ `Device::Metal`
 /// （`cfg(target_os = "macos")` 限定。デバイス検出 0 件なら含まれない）
-/// の順で、同一プロセス内の複数回呼び出しでも決定的。
+/// の順で、同一プロセス内の複数回呼び出しでも決定的。ROCm は未公開
+/// （`docs/backend-rocm-device-exposure-decision.md`。所有者判断待ち）。
+///
+/// ```
+/// // ROCm 非搭載の CI でも通る。`Device` に ROCm variant が無いことを
+/// // 網羅的 `match` で示し、`Cpu` が必ず含まれることを確認する。
+/// let devices = fandhe_ai::available_devices();
+/// for d in &devices {
+///     match d {
+///         fandhe_ai::Device::Cpu => {}
+///         fandhe_ai::Device::Cuda(_) => {}
+///         #[cfg(target_os = "macos")]
+///         fandhe_ai::Device::Metal => {}
+///     }
+/// }
+/// assert!(devices.contains(&fandhe_ai::Device::Cpu));
+/// ```
 ///
 /// **副作用**: `CudaDeviceProvider::enumerate` は検出した CUDA
 /// ordinal ごとに `context_cache` のコンテキストを初期化する
