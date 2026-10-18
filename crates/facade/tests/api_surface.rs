@@ -43003,3 +43003,79 @@ fn distributed_usage_doctest_is_present_and_compiled() {
         "world_size 2 以上の例が実行される形になっている"
     );
 }
+
+/// 保留ガード G1（イシュー #3157）: `Device` の variant 集合を、ワイルド
+/// カード腕なしの網羅的 `match` で固定する正のプローブ。variant を足すと
+/// コンパイルが落ち、`docs/backend-rocm-device-exposure-decision.md` の
+/// 所有者判断（Q1）なしに公開 enum が変わる経路を塞ぐ。承認後（Phase B）に
+/// `Rocm(_)` 腕を足す形で反転する。
+#[test]
+fn device_variant_set_is_fixed_while_3157_on_hold() {
+    fn classify(d: fandhe_ai::Device) -> &'static str {
+        match d {
+            fandhe_ai::Device::Cpu => "cpu",
+            fandhe_ai::Device::Cuda(_) => "cuda",
+            #[cfg(target_os = "macos")]
+            fandhe_ai::Device::Metal => "metal",
+        }
+    }
+    assert_eq!(classify(fandhe_ai::Device::Cpu), "cpu");
+    assert_eq!(classify(fandhe_ai::Device::Cuda(0)), "cuda");
+}
+
+/// 保留ガード G2（イシュー #3157）: 公開クレート facade が非公開の
+/// `backend-rocm` を `[dev-dependencies]` 以外で参照しないこと
+/// （`cargo publish` を壊さない。決定記録 Q2 の承認まで保留）。
+/// G2 の検査本体。`manifest` 中の dev 以外の依存節で backend-rocm の参照
+/// （キー行・値・`[dependencies.backend-rocm]` 形のヘッダ行自体）を探し、
+/// 最初の違反行を返す。
+fn find_backend_rocm_reference_outside_dev(manifest: &str) -> Option<String> {
+    let names = ["backend-rocm", "backend_rocm", "fandhe-ai-backend-rocm"];
+    let mut section = String::new();
+    for raw in manifest.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            section = line.to_string();
+            // テーブルヘッダ形式（`[dependencies.backend-rocm]`）は
+            // ヘッダ自体が依存名を含むため、ヘッダ行も検査する。
+            if is_relevant_dependency_section(&section) && names.iter().any(|n| line.contains(n)) {
+                return Some(line.to_string());
+            }
+            continue;
+        }
+        if !is_relevant_dependency_section(&section) {
+            continue;
+        }
+        if names.iter().any(|n| line.contains(n))
+            || value_has_package_rename_to(line, &["fandhe-ai-backend-rocm", "backend-rocm"])
+        {
+            return Some(format!("{section}: {line}"));
+        }
+    }
+    None
+}
+
+#[test]
+fn facade_does_not_depend_on_backend_rocm_outside_dev_dependencies_while_3157_on_hold() {
+    let manifest = read_to_string_or_panic(&facade_crate_root().join("Cargo.toml"));
+    if let Some(hit) = find_backend_rocm_reference_outside_dev(&manifest) {
+        panic!("facade が backend-rocm を参照している（Q2 承認前は禁止）: {hit}");
+    }
+}
+
+/// G2 の負のプローブ: テーブルヘッダ形式・通常形式は検出し、
+/// `[dev-dependencies]` は許容する。
+#[test]
+fn backend_rocm_guard_detects_header_style_dependency() {
+    let header = "[dependencies.backend-rocm]\npath = \"../backend-rocm\"\n";
+    assert!(find_backend_rocm_reference_outside_dev(header).is_some());
+    let target = "[target.'cfg(unix)'.dependencies.backend-rocm]\npath = \"../x\"\n";
+    assert!(find_backend_rocm_reference_outside_dev(target).is_some());
+    let inline = "[dependencies]\nbackend-rocm = { path = \"../backend-rocm\" }\n";
+    assert!(find_backend_rocm_reference_outside_dev(inline).is_some());
+    let dev = "[dev-dependencies]\nbackend-rocm = { path = \"../backend-rocm\" }\n[dev-dependencies.backend-rocm]\npath = \"x\"\n";
+    assert!(find_backend_rocm_reference_outside_dev(dev).is_none());
+}
