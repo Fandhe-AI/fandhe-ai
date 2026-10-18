@@ -1,0 +1,19 @@
+# 事前宣言（実測前に固定。2026-10-18。イシュー #3163。結果が出た後に緩めない）
+- 対象（compat::Sequential 層 9 群の CUDA 実機 parity。9 ファイル・10 テスト。Metal 側は #3164 で別途）:
+  - activation_layers_backend_parity.rs: cuda_activation_layers_parity（一部 bit 一致＋REQ-2）
+  - activation_scalar_layers_backend_parity.rs: cuda_activation_scalar_layers_parity（REQ-2）
+  - adaptive_max_global_pool_backend_parity.rs: cuda_adaptive_max_global_pool_bit_exact（bit 一致）
+  - conv_transpose2d_backend_parity.rs: cuda_conv_transpose2d_forward_backward_matches_cpu（REQ-2）
+  - conv3d_backend_parity.rs: cuda_conv3d_forward_backward_matches_cpu（REQ-2）
+  - dropout_embedding_bag_backend_parity.rs: cuda_dropout_embedding_bag_bit_exact（bit 一致）
+  - group_instance_norm_backend_parity.rs: cuda_group_instance_norm_matches_cpu（REQ-2）
+  - pixel_shuffle_backend_parity.rs: cuda_pixel_shuffle_layers_bit_exact（bit 一致）
+  - spatial_layers_backend_parity.rs: cuda_spatial_layers_nearest_bit_exact（bit 一致）・cuda_spatial_layers_bilinear_matches_cpu（REQ-2）
+  - いずれも crates/facade/tests/compat_sequential_ 配下
+- 判定: pass は各ファイルが exit 0 で、N passed; 0 failed の N が期待値（spatial は 2、ほかは 1）と一致すること。fail はテストが 1 件以上失敗すること（Device::Cuda(0) のテープ生成失敗・Unsupported・panic を含む）。CPU との不一致は判定不能にせず通常の parity fail として扱う。undetermined はノードに届かない・ビルド不能・timeout（exit 124）・filter 後の件数が期待値と違う（0 passed 等）場合で、pass にしない。
+- 判定式: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。fandhe_ai_backend_cpu::parity::assert_parity）。bit_exact は bit 完全一致。テスト側の実装をそのまま使う。
+- fail の扱い: tolerance 定数（RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD）・判定式・baseline・テスト・カーネルは変えない。fail は件数と panic メッセージの fail_count・max_abs_diff・max_rel_err（bit 一致は assert の左右値）をそのまま記録し、原因の切り分けは別 issue 候補として申し送る。結果を見てからの再実行による選別・テスト除外はしない。ノード側の一時障害で再実行する場合は旧ログを残し別名で保存して理由を README に書く。
+- 実行（ファイルごとに表の順で直列。判定テストなので 1 回ずつ）: cargo test -p fandhe-ai --test compat_sequential_<名前>_backend_parity -- --ignored --nocapture --test-threads=1 cuda_（debug プロファイル。timeout 1800 で包む。docs/real-hardware-verification-env.md §4.1 の形式）
+- 手順: 本実行の前に同じプロファイルで --no-run ビルドを済ませる。計測中にビルドや別の GPU 負荷を並走させない。§6.1 の GPU 占有を before／after で記録する。常駐サービスは停止しない。
+- 同梱: .rev-stamp（実行した展開ツリーのもの）・env_info.txt・生ログ。ホスト名・ユーザー名・ホーム配下の絶対パスは <cuda-node>・<user>・~・<resident-process> へマスクしてから収録する。
+- 本ディレクトリには実測値をまだ 1 件も入れていない（未実測）。
