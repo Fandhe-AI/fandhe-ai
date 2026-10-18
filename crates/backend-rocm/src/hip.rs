@@ -26,6 +26,7 @@ use std::ffi::{c_char, c_uint, c_void};
 use std::os::raw::c_int;
 
 const SYM_GET_DEVICE_COUNT: &str = "hipGetDeviceCount";
+const SYM_GET_DEVICE: &str = "hipGetDevice";
 const SYM_SET_DEVICE: &str = "hipSetDevice";
 const SYM_MODULE_LOAD_DATA: &str = "hipModuleLoadData";
 const SYM_MODULE_GET_FUNCTION: &str = "hipModuleGetFunction";
@@ -45,6 +46,7 @@ pub(crate) const HIP_RUNTIME_CANDIDATES: &[&str] = &["libamdhip64.so"];
 pub(crate) const HIP_RUNTIME_CANDIDATES: &[&str] = &[];
 
 type HipGetDeviceCountFn = unsafe extern "C" fn(*mut c_int) -> c_int;
+type HipGetDeviceFn = unsafe extern "C" fn(*mut c_int) -> c_int;
 type HipSetDeviceFn = unsafe extern "C" fn(c_int) -> c_int;
 type HipModuleLoadDataFn = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> c_int;
 type HipModuleGetFunctionFn =
@@ -72,8 +74,13 @@ type HipDeviceSynchronizeFn = unsafe extern "C" fn() -> c_int;
 /// ロード済み HIP ランタイム。ハンドルと関数ポインタの一体所有（U1）。
 pub(crate) struct HipRuntime {
     // `_lib` を落とすとポインタが無効になるため、ポインタと同じ構造に保持する。
-    _lib: libloading::Library,
+    // `ManuallyDrop` により Drop しても `dlclose` しない（意図的なリーク）。HIP は初期化後に
+    // atexit フック・ワーカースレッドを残しうるため、アンマップすると後続の `new` や
+    // プロセス終了時にクラッシュしうる（no-panic 契約）。同一ライブラリの再 `dlopen` は
+    // 参照カウントが増えるだけで同じ実体を返すため、probe を繰り返しても実質リークは一定。
+    _lib: std::mem::ManuallyDrop<libloading::Library>,
     get_device_count: HipGetDeviceCountFn,
+    get_device: HipGetDeviceFn,
     set_device: HipSetDeviceFn,
     module_load_data: HipModuleLoadDataFn,
     module_get_function: HipModuleGetFunctionFn,
@@ -84,6 +91,20 @@ pub(crate) struct HipRuntime {
     memcpy_htod: HipMemcpyHtoDFn,
     memcpy_dtoh: HipMemcpyDtoHFn,
     device_synchronize: HipDeviceSynchronizeFn,
+}
+
+/// カレントデバイスの一時切替ガード。Drop で呼び出し元の選択を復元する（失敗は無視）。
+pub(crate) struct DeviceGuard<'a> {
+    rt: &'a HipRuntime,
+    prev: Option<i32>,
+}
+
+impl Drop for DeviceGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev {
+            let _ = self.rt.set_device(prev);
+        }
+    }
 }
 
 /// `hipError_t`（0 = hipSuccess）を型付きエラーへ変換する。
@@ -129,6 +150,7 @@ pub(crate) fn load_from(candidates: &[&'static str]) -> Result<HipRuntime, RocmE
         let rt = unsafe {
             HipRuntime {
                 get_device_count: resolve(&lib, SYM_GET_DEVICE_COUNT)?,
+                get_device: resolve(&lib, SYM_GET_DEVICE)?,
                 set_device: resolve(&lib, SYM_SET_DEVICE)?,
                 module_load_data: resolve(&lib, SYM_MODULE_LOAD_DATA)?,
                 module_get_function: resolve(&lib, SYM_MODULE_GET_FUNCTION)?,
@@ -139,7 +161,7 @@ pub(crate) fn load_from(candidates: &[&'static str]) -> Result<HipRuntime, RocmE
                 memcpy_htod: resolve(&lib, SYM_MEMCPY_HTOD)?,
                 memcpy_dtoh: resolve(&lib, SYM_MEMCPY_DTOH)?,
                 device_synchronize: resolve(&lib, SYM_DEVICE_SYNCHRONIZE)?,
-                _lib: lib,
+                _lib: std::mem::ManuallyDrop::new(lib),
             }
         };
         return Ok(rt);
@@ -164,6 +186,24 @@ impl HipRuntime {
         let code = unsafe { (self.get_device_count)(&mut n) };
         check(SYM_GET_DEVICE_COUNT, code)?;
         Ok(n)
+    }
+
+    /// 現スレッドのカレントデバイス ID を返す。
+    pub(crate) fn current_device(&self) -> Result<i32, RocmError> {
+        let mut id: c_int = 0;
+        // SAFETY: `hipError_t hipGetDevice(int*)`。`id` は呼び出し中有効な書き込み先。
+        check(SYM_GET_DEVICE, unsafe { (self.get_device)(&mut id) })?;
+        Ok(id)
+    }
+
+    /// 現スレッドのカレントデバイスを `id` にし、Drop で元のデバイスへ戻すガードを返す。
+    ///
+    /// module は作成デバイスに属するため、`run`・Drop などデバイス依存の操作の先頭で使う。
+    pub(crate) fn select_device(&self, id: i32) -> Result<DeviceGuard<'_>, RocmError> {
+        // 取得に失敗したら復元はできない（None）が、選択自体は続行する。
+        let prev = self.current_device().ok();
+        self.set_device(id)?;
+        Ok(DeviceGuard { rt: self, prev })
     }
 
     /// 現スレッドのカレントデバイスを設定する。

@@ -92,6 +92,8 @@ pub struct RocmGemmF32 {
     // Drop 順: module（アンロード）→ rt。module が `Arc` を持つため順序に依らず安全。
     module: Module,
     rt: Arc<HipRuntime>,
+    /// module・バッファ・同期の対象デバイス ID（`new` が選択したもの）。
+    device: i32,
 }
 
 impl RocmGemmF32 {
@@ -104,12 +106,22 @@ impl RocmGemmF32 {
         if rt.device_count()? < 1 {
             return Err(RocmError::NoDevice);
         }
-        rt.set_device(0)?;
-        let tile = GemmF32Tile::DEFAULT;
-        let src = render_gemm_f32_source(&tile);
-        let code = compile_code_object(&hiprtc, &src, target)?;
-        let module = Module::load(Arc::clone(&rt), code)?;
-        Ok(Self { tile, module, rt })
+        let device = 0;
+        let (tile, module) = {
+            // `new` 中も呼び出し元の選択を壊さないようガードで復元する。
+            let _guard = rt.select_device(device)?;
+            let tile = GemmF32Tile::DEFAULT;
+            let src = render_gemm_f32_source(&tile);
+            let code = compile_code_object(&hiprtc, &src, target)?;
+            let module = Module::load(Arc::clone(&rt), code, device)?;
+            (tile, module)
+        };
+        Ok(Self {
+            tile,
+            module,
+            rt,
+            device,
+        })
     }
 
     /// `C[m×n] = A[m×k]·B[k×n]`（行優先）を計算して返す。
@@ -126,6 +138,9 @@ impl RocmGemmF32 {
             return Ok(Vec::new());
         }
         let (grid, block) = launch_geometry(&self.tile, m, n)?;
+        // module の所有デバイスを選び、バッファ確保・起動・同期を同一デバイスで行う。
+        // 先に宣言するためバッファの Drop（hipFree）後に呼び出し元の選択へ復元される。
+        let _guard = self.rt.select_device(self.device)?;
         let func = self.module.function(GEMM_F32_KERNEL_NAME)?;
         let da = DeviceBuffer::new(Arc::clone(&self.rt), a.len())?;
         let db = DeviceBuffer::new(Arc::clone(&self.rt), b.len())?;

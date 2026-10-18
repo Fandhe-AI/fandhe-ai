@@ -15,6 +15,8 @@ use std::sync::Arc;
 /// ロード済み module。Drop で同期のうえ `hipModuleUnload` する（U7）。
 pub(crate) struct Module {
     handle: *mut c_void,
+    /// module を作成したデバイス ID。Drop 時にこのデバイスを選んでから解放する。
+    device: i32,
     // module 解放後にバイト列・ライブラリが解放されるよう、フィールド順は handle → code → rt
     // （`Drop::drop` 本体の後に宣言順で破棄される）。
     _code: CodeObject,
@@ -23,12 +25,17 @@ pub(crate) struct Module {
 
 impl Module {
     /// コードオブジェクトから module を作る。
-    pub(crate) fn load(rt: Arc<HipRuntime>, code: CodeObject) -> Result<Self, RocmError> {
+    pub(crate) fn load(
+        rt: Arc<HipRuntime>,
+        code: CodeObject,
+        device: i32,
+    ) -> Result<Self, RocmError> {
         // SAFETY (U4): `code` は有効なコードオブジェクトで、`Module` が `_code` として保持し
         // module 解放まで生存する。
         let handle = unsafe { rt.module_load_data(code.as_ptr())? };
         Ok(Self {
             handle,
+            device,
             _code: code,
             rt,
         })
@@ -50,6 +57,9 @@ impl Module {
 
 impl Drop for Module {
     fn drop(&mut self) {
+        // module は作成デバイスに属するため、呼び出し元が別デバイスを選んでいても作成デバイスで
+        // 同期・解放する。ガードは Drop で元の選択へ戻す。選択失敗時も解放は試みる。
+        let _guard = self.rt.select_device(self.device).ok();
         // 実行中カーネルがない状態でアンロードするため先に同期する（失敗は無視）。
         let _ = self.rt.synchronize();
         // SAFETY: `handle` は `module_load_data` が返した未解放の module で、所有権により
