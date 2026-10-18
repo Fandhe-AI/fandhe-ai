@@ -1,0 +1,54 @@
+事前登録規則（イシュー #3166: Transformer・Functional・可変長系列 7 群の Metal 実機 parity）
+宣言日時（UTC）: 2026-10-18T00:00Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。M4 Max 開発機では測らない・記録しない
+（docs/real-hardware-verification-env.md §1・§7）。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  75afa05fbba95249a09b9ef5b9dd7f4aca159f06
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること（後続のコミットは docs のみ）。
+    git diff --quiet 75afa05fbba95249a09b9ef5b9dd7f4aca159f06 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、本ファイルを新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 1 行形式（git rev-parse HEAD の 40 桁小文字 16 進数 + 改行）。実行時の HEAD フル SHA を
+  展開ツリー直下の .rev-stamp に書き、README に記録する。
+
+実行環境: zsh -lc で包み、CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する
+  （docs/real-hardware-verification-env.md §7.1）。計測中は他のビルドを並走させない。
+  計測前に他の cargo／rustc プロセスが無いことを pgrep で確かめ、記録する。
+
+ビルドを先に済ませる（計測中にコンパイルを並走させない）:
+  cargo test -p fandhe-ai --lib --no-run
+  cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity --no-run
+  cargo test -p fandhe-ai --test merge_ops_backend_parity --no-run
+  cargo test -p fandhe-ai --test packed_sequence_backend_parity --no-run
+
+コマンド（8 本。上から順に 1 本ずつ。共通オプション: -- --ignored --exact --nocapture --test-threads=1 <フルパス>）:
+  1. --test compat_sequential_layers_backend_parity  metal_multihead_attention_config_matches_cpu
+  2. --test compat_sequential_layers_backend_parity  metal_transformer_decoder_layer_matches_cpu
+  3. --test compat_sequential_layers_backend_parity  metal_transformer_matches_cpu
+  4. --lib  compat::functional::tests::metal_functional_graph_matches_cpu_reference
+  5. --lib  compat::functional::fit_parity_tests::metal_parameter_gradients_match_cpu_reference
+  6. --test merge_ops_backend_parity  metal_merge_ops_match_cpu_reference
+  7. --lib  compat::functional::merge_tests::metal_merge_graph_matches_cpu_reference
+  8. --test packed_sequence_backend_parity  metal_packed_sequence_matches_cpu_reference
+  各行の頭に「cargo test -p fandhe-ai」を付ける。--release は付けない（各 README のコマンド形を正とする）。
+  --exact・--nocapture・--test-threads=1 はテストの選び方と出力だけに効き判定には影響しない。
+  compat_sequential_layers_backend_parity.rs には #3164 担当の Metal テストが同居するため、
+  他の #[ignore] を巻き込まないよう --exact を必ず付ける。
+
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行
+  （対象のフルパス）であることを確かめる。0 行または 2 行以上なら実行せず undetermined とする。
+
+判定（REQ-2 統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。tolerance 定数・baseline は不変）:
+  pass: exit 0 かつ "running 1 test" かつ "test result: ok. 1 passed; 0 failed"。
+  fail: 1 件以上のテスト失敗。tape_for(Device::Metal) の失敗や Unsupported を含む。
+    Metal と CPU は自前バックエンド同士の比較なので判定不能にせず通常の parity 失敗として扱う。
+  undetermined: ノード到達不能、ビルド不能、--list で選ばれた件数が 1 でない。
+  時間計測ではないので中央値は取らない。群ごと・テストごとの pass／fail の件数で記録する。
+
+fail 時の扱い:
+  tolerance・baseline・判定方式・入力は変えない。パニックメッセージの fail_count・max_abs_diff・
+  max_rel_err 等を引用して事実を記録し、README と PR に「要対応」と書く。Issue の起票・コメント、
+  baseline 化はユーザー承認なしでは行わない。
+
+記録規則: ホスト名・ユーザー名・個人のパス（$HOME）はマスクする。マスク漏れがあれば記録を捨てる（fail-closed）。
