@@ -99,6 +99,15 @@ pub(crate) fn validate_gather(
 ) -> Result<GatherPlan, RocmError> {
     const OP: &str = "gather";
     validate_axes(OP, in_shape, index_shape, dim)?;
+    // 出力（= index_shape）が空なら入力 shape の積を取る前に短絡する（CUDA 原型と同順。
+    // 末尾 0 軸 + 巨大な先頭軸で積が overflow しても空 Vec を返す）。
+    if index_shape.contains(&0) {
+        return Ok(GatherPlan {
+            numel_out: 0,
+            numel_i: 0,
+            in_dim_size_i: 0,
+        });
+    }
     let numel_in = checked_numel(OP, in_shape)?;
     let numel_out = checked_numel(OP, index_shape)?;
     if input_len != numel_in {
@@ -142,6 +151,14 @@ pub(crate) fn validate_scatter(
 ) -> Result<ScatterPlan, RocmError> {
     const OP: &str = "scatter";
     validate_axes(OP, in_shape, index_shape, dim)?;
+    // 出力（= in_shape）が空なら積を取る前に短絡する（CUDA 原型と同順。overflow 回避）。
+    if in_shape.contains(&0) {
+        return Ok(ScatterPlan {
+            numel_out: 0,
+            numel_index: 0,
+            numel_i: 0,
+        });
+    }
     let numel_out = checked_numel(OP, in_shape)?;
     let numel_index = checked_numel(OP, index_shape)?;
     if input_len != numel_out {
@@ -344,6 +361,15 @@ impl RocmGatherScatter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_output_short_circuits_before_overflowing_input_numel() {
+        let big = usize::MAX / 2 + 1;
+        let g = validate_gather(0, &[], &[big, 4, 0], &[big, 4, 0], 2).unwrap();
+        assert_eq!(g.numel_out, 0);
+        let s = validate_scatter(0, &[], 0, &[big, 4, 0], &[big, 4, 0], 2).unwrap();
+        assert_eq!(s.numel_out, 0);
+    }
+
     use super::*;
 
     #[test]

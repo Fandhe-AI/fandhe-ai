@@ -74,6 +74,14 @@ fn validate_common(
     if in_shape[..spatial_start] != out_shape[..spatial_start] {
         return Err(bad("非空間軸の in/out サイズが一致しません".into()));
     }
+    // 出力が空なら入力 shape の積を取る前に短絡する（CUDA 原型と同順。overflow 回避）。
+    if out_shape.contains(&0) {
+        return Ok(InterpPlan {
+            numel_out: 0,
+            numel_i: 0,
+            rank_i: fit_numel_i32(OP, rank, "rank")?,
+        });
+    }
     let numel_in = checked_numel(OP, in_shape)?;
     let numel_out = checked_numel(OP, out_shape)?;
     if input_len != numel_in {
@@ -229,6 +237,13 @@ impl RocmInterpolate {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_output_short_circuits_before_overflowing_input_numel() {
+        let big = usize::MAX / 2 + 1;
+        let p = validate_nearest(0, &[big, 4, 0], &[big, 4, 0], 1);
+        assert_eq!(p.unwrap().numel_out, 0);
+    }
+
     use super::*;
 
     #[test]
