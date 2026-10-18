@@ -10,7 +10,7 @@
 - 実行回数: 独立プロセスで 1 回。例外はテスト開始前の環境起因の失敗（SSH 切断・ドライバロード失敗等）のみで、
   その場合も失敗ログを残し理由を記録する
 - 実行コマンド（docs/real-hardware-verification-env.md §3・§4.1 の形式）:
-  ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai timeout 1800 cargo test -p fandhe-ai --test lrn_weight_reparam_backend_parity -- --ignored --nocapture cuda'
+  ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai timeout 1800 cargo test -p fandhe-ai --test lrn_weight_reparam_backend_parity -- --ignored --nocapture --test-threads=1 cuda'
 - 対象コミット: .rev-stamp（1 行目 sha・2 行目 dirty=<件数>）。dirty=0 以外の実測は無効
 - 同梱物: .rev-stamp・実行ログ・env_info.txt（ドライバ・CUDA／NVRTC・rustc・uname -m）・実行前後の GPU 占有ログ。
   ホスト名・ユーザー名・絶対パスは <cuda-node>・<home> へ置換してから収録する
