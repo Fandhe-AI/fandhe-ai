@@ -83,7 +83,7 @@ impl CpuMemory {
     /// コピーなしで [`DeviceBuffer`] としてラップする（イシュー #1028）。
     ///
     /// `ops.rs::CpuBackendOps::linear_forward_device` が推論チェーンの
-    /// 中間出力（`gemm_blis_parallel` の出力バッファ）を、`upload`
+    /// 中間出力（`gemm_blis_bias_act_parallel` の出力バッファ）を、`upload`
     /// （`Tensor` 経由の複製）を経由せずそのまま次層の入力
     /// `DeviceBuffer` へ仕立てるために使う（CPU は「デバイス」が
     /// ホストメモリそのものであるため、`data` の所有権移動だけで

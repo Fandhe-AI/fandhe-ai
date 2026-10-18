@@ -1488,19 +1488,22 @@ impl BackendOps for CpuBackendOps {
     /// ものであるため `downcast_handle` の直読みだけでゼロコピーに
     /// なる（`gemm_resident_rhs`／`sgd_step_device` と同じモデル）。
     ///
-    /// **bit-exactness 契約**（`docs/inference-forward-fixed-cost-
-    /// design.md` §3.3 (b)）: 旧経路（`Sequential::predict` 等が
-    /// `tape.ops()` 経由で呼ぶ非融合 `gemm` → `add`（bias 行方向複製）
-    /// → `relu` の 3 段合成）と**同一の累積順序**を保つため、本メソッドは
-    /// `gemm_bias_act`／`gemm_resident_rhs` が使う融合カーネル
-    /// （[`gemm_blis_bias_act_parallel`]。bias／act をカーネル内
-    /// epilogue で適用するため tiling 次第で加算順序が変わりうる）を
-    /// 使わず、`gemm`（[`gemm_blis_parallel`]）→ bias 行方向複製加算
-    /// （単一の `a + b` はグルーピングに依らず IEEE 754 で一意に定まる
-    /// ため、ループ構造が異なっても `elementwise::add` と bit-exact）→
-    /// `relu`（`max(x, 0.0)`。`elementwise::relu_slice` と同一定義）の
-    /// 3 段を明示的に合成する。将来 CPU 側に融合カーネル版を追加する
-    /// 場合は、本 doc の bit-exactness 契約ごと見直すこと。
+    /// **実装経路と bit-exactness 契約**（イシュー #3196）: `gemm_bias_act`／
+    /// `gemm_resident_rhs_act` と同一の融合カーネル
+    /// （[`gemm_blis_bias_act_parallel`]）で bias／act を epilogue 適用する。
+    /// epilogue は GEMM 本体が K 全域を累積し終えた後に要素独立で 1 回だけ
+    /// 適用され、GEMM 本体の p 昇順 FMA 連鎖・累積順序は [`gemm_blis_parallel`]
+    /// と同一のため、旧経路（`Sequential::predict` 等が `tape.ops()` 経由で
+    /// 呼ぶ非融合 `gemm` → `add`（bias 行方向複製）→ `relu`）と bit 完全一致
+    /// する（`tests/linear_forward_device_parity.rs` の `fused_epilogue_*`・
+    /// `linear_forward_device_matches_*` が `to_bits` 比較で検証。設計は
+    /// `docs/inference-forward-fixed-cost-design.md` §3.3 (b)）。
+    ///
+    /// **エラー契約**: 未対応の `act` は GEMM 実行前に `BackendError::
+    /// Unsupported` で拒否する（`predict_device_chain` がチェーン全体の
+    /// フォールバック判定に使う。`docs/inference-chain-single-sync-design.md`
+    /// 決定 7）。融合カーネルの `GemmError` を `KernelLaunchFailed` へ写す
+    /// ため、この検査は融合カーネル呼び出しの前に置く必要がある。
     fn linear_forward_device(
         &self,
         a: &DeviceBuffer<f32>,
@@ -1570,7 +1573,18 @@ impl BackendOps for CpuBackendOps {
             None => None,
         };
 
-        // 1 段目: 非融合 `gemm`（`self.gemm` と同一カーネル）。
+        // 未対応 act は GEMM の前に `Unsupported` で拒否する（fail-closed。
+        // 融合カーネルの `UnsupportedActivation` が `KernelLaunchFailed` へ
+        // 変わるとチェーン全体のフォールバック判定が壊れるため）。
+        match act {
+            Activation::None | Activation::Relu => {}
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "linear_forward_device: unsupported activation {act:?}"
+                )));
+            }
+        }
+
         // `m * n` はホスト入力由来の shape 積であり、アロケーション前に
         // オーバーフロー検査を行う（REQ-8・OWASP A03。`reduction.rs` の
         // `ElementCountOverflow` 使用箇所と同一方針）。
@@ -1578,35 +1592,8 @@ impl BackendOps for CpuBackendOps {
             ShapeError::ElementCountOverflow,
         ))?;
         let mut out = vec![0.0f32; out_len];
-        gemm_blis_parallel(a_slice, w_slice, &mut out, m, n, k)
+        gemm_blis_bias_act_parallel(a_slice, w_slice, &mut out, m, n, k, bias_handle_slice, act)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-
-        // 2 段目: bias の行方向複製加算（`elementwise::add` の broadcast
-        // と同じ結果を単一ループで生成。単一の浮動小数点加算はグルー
-        // ピングに依らず一意に定まるため bit-exact）。
-        if let Some(bias_slice) = bias_handle_slice {
-            for i in 0..m {
-                let row = &mut out[i * n..(i + 1) * n];
-                for (c, b) in row.iter_mut().zip(bias_slice.iter()) {
-                    *c += b;
-                }
-            }
-        }
-
-        // 3 段目: activation（`elementwise::relu_slice` と同一定義）。
-        match act {
-            Activation::None => {}
-            Activation::Relu => {
-                for v in out.iter_mut() {
-                    *v = v.max(0.0);
-                }
-            }
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "linear_forward_device: unsupported activation {act:?}"
-                )));
-            }
-        }
 
         shared_cpu_memory().wrap_vec(out, vec![m, n])
     }
