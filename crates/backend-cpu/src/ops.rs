@@ -511,7 +511,7 @@ impl BackendOps for CpuBackendOps {
     /// イシュー #3193: 添字ループは境界検査・分岐・早期 return を内包し
     /// 自動ベクトル化が効かなかったため、ハンドル実体の長さ（param・
     /// grad・velocity）を書き込み前にすべて検証してから、確定したスライス
-    /// の zip 反復（[`sgd_step_slices`]）へ委ねる。長さ検証が手動境界検査
+    /// の zip 反復（`sgd_step_slices`）へ委ねる。長さ検証が手動境界検査
     /// そのもの（REQ-8）で、エラー時はどの要素も更新前のまま。評価順・
     /// FMA 契約は従前どおり。
     fn sgd_step_device(
