@@ -221,8 +221,8 @@ impl RocmPagedKv {
     /// ブロックを論理順に走査する attention（デバイス常駐版）。出力 `[B, L_new, E]` を新規に確保して返す。
     ///
     /// 引数検証と `plan` の算出（`validate_paged_attention`）は呼び出し元が済ませている前提で、ここでは
-    /// launch 前にバッファ長・引数型を再検証する。score の作業バッファは 0 初期化する（未初期化読みを
-    /// 作らない多層防御。数値契約には影響しない）。呼び出し元は `plan.out_numel == 0` を先に処理する。
+    /// launch 前にバッファ長・引数型を再検証する。score の作業バッファと出力は未初期化確保だが、
+    /// カーネルが書いた要素のみを読むため未初期化読みは起きない（根拠は関数内コメント）。呼び出し元は `plan.out_numel == 0` を先に処理する。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn attention_resident(
         &self,

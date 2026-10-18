@@ -314,12 +314,12 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 ### R12（#3443）の実装記録
 
 - **対象**: `paged_kv_append`・`paged_attention_forward` の 2 メソッド（`*_tracked` は trait 既定の委譲のまま）。HIPRTC の静的ソース 1 本・2 カーネル（`kernels_paged_kv.rs`。`#define` はブロック寸法 2 つだけ）、実行型 `RocmPagedKv`（`paged_kv.rs`。resident 版は `pub(crate)`、スライス版 `append`／`attention` を公開）、結線は子モジュール `ops/paged_kv.rs`（`ops.rs` には 1 行ずつの委譲と `mod` 宣言のみ。thread_local キャッシュも子モジュールに置き、兄弟 PR #3455・#3457 との衝突面を最小にした）。
-- **shfl・`WarpGeometry`**: 上の §9 訂正のとおり不要。ブロック内の違反フラグ集約は CUDA の `__syncthreads_or` ではなく、共有フラグ `s_bad` への書き込み（全書き手が同じ値 1）＋ `__syncthreads()` の組にした。`__syncthreads_or` は同梱の amd-rocm スキルの HIP 資料に記載がなく HIPRTC での可用性を確認できないため、確認済みのプリミティブだけで書ける等価形を採った（挙動は同じ。違反時は出力へ NaN）。
+- **shfl・`WarpGeometry`**: 上の §9 訂正のとおり不要。ブロック内の違反フラグ集約は CUDA の `__syncthreads_or` ではなく、スレッド別の共有フラグ `s_bad_flags[threadIdx.x]` への書き込み＋ `__syncthreads()` のあと、thread 0 が単一書き手として `s_bad` へ OR 集約し、再度の `__syncthreads()` で公開する組にした（複数スレッドが同じ共有変数へ書くデータ競合を作らない）。`__syncthreads_or` は同梱の amd-rocm スキルの HIP 資料に記載がなく HIPRTC での可用性を確認できないため、確認済みのプリミティブだけで書ける等価形を採った（挙動は同じ。違反時は出力へ NaN）。
 - **FMA**: ソース先頭に `#pragma clang fp contract(off)`。意図した FMA は CPU の `f32::mul_add` と同じ 2 か所（score の `(q * scale)` と `k` の積和、加重和の `p * v`）だけ `__builtin_fmaf` で明示。CUDA の `__fmul_rn` は contract(off) 下で不要。
 - **`f64` アキュムレータ契約は該当しない**: 正規化統計でも勾配の長軸縮約でもなく、CUDA・CPU 参照とも f32 の逐次和（max と和は thread 0 が `j` の論理順）。REQ-2 の統一複合判定をそのまま適用する（結合順序が単一の連続ループと異ならない）。
 - **引数型**: `launch::ArgKind` に符号なし 32bit がなく、`PagedKvLayout::recheck` は `num_blocks < u32::MAX` しか保証しないため `int` にも収まらない。CUDA の `unsigned int num_blocks` を `long long num_blocks`（`Arg::I64`）に変え、カーネル内は `(long long)id >= num_blocks`（番兵 `0xFFFFFFFF` も拒否）で比較する。`launch.rs` は変更しない。
 - **REQ-8**: append は `idx < total`・`r >= rows || e >= embed_dim`・`slot >= pool_rows`。attention は `b_ll >= batch`・`s_prev < 0 || limit > seq_len || limit > s_stride`・`slot_idx >= max_blocks_per_seq`・`id >= num_blocks`（score 段・加重和段の両方）。違反時は出力へ NaN。添字は `long long`、ベクトル化ロードなし。ホスト側は tensor-core の `validate_paged_*` → 結線のハンドル長検査 → `paged_kv.rs` の launch 直前の再検証 → カーネル内の三層。
-- **作業バッファ**: score の作業バッファと出力は `new_zeroed`（未初期化読みを作らない多層防御。数値契約には影響しない）。
+- **作業バッファ**: score の作業バッファと出力は `TypedDeviceBuffer::new` による未初期化確保（CUDA 側と同じ。最大 1<<30 要素の workspace を host の Vec 経由でゼロ初期化すると host abort・数 GiB の H2D 転送になるため避けた）。カーネルは各行で `j < limit` の要素を書いてから読み（違反時は読まずに return）、出力は grid の全ブロックが各自の `head_dim` 要素を全経路で書くので、未初期化領域は読まれない。
 - **空入力**: 追記 0 行は HIP に触れず `Ok(())`、`out_numel == 0`（`query_rows == 0` と同値）は `RocmBufferHandle::Empty` の `[B, L_new, E]` を返す。検証違反では pool を書き換えない。
 - **ROCm 非搭載**: `DeviceUnavailable`（`Unsupported` ではない。A08）。engine とハンドル種別の取り違えは `DeviceMismatch`。
 - **到達性**: `memory_ops()` は `None` のままなので crate の外から ROCm の `DeviceBuffer` を作れない（R2 と同じ。#3157 待ち）。`device()` も仮置きの `Device::Cpu` のまま。
