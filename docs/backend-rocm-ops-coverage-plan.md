@@ -31,7 +31,7 @@ awk '/^pub trait BackendOps/{f=1;next} f&&/^}/{exit} f&&/^    fn /{n++} END{prin
 
 - `docs/rocm-grade-up-conditions-v2-spec-proposal.md` §3b の 195 は、`exit` を持たない awk（`f&&/^    fn /` で trait 終端後も数え続ける）の値で、trait 後続の impl・テストの `fn` を含む粗い数え上げである（同じコマンドは `2e38c37c` では 238 を返す。195 は当時のファイル規模の値）。**正しい値は 144**。§3b 自体の訂正は本変更の範囲外（所有者判断）
 - 再計測: 基準コミット以降は同じコマンドを実行し、表の行数と突き合わせる
-- CUDA（`crates/backend-cuda/src/ops.rs` の `impl BackendOps for CudaBackendOps`）は 89 件、Metal（`crates/backend-metal/src/ops.rs`）は 90 件をオーバーライドする（CUDA のうち `linalg_svd`・`linalg_matrix_norm` は `Unsupported` を明示返却するだけ。`typed_ops_f64` の 8 演算も CUDA では driver 非接触の `Unsupported`）
+- CUDA（`crates/backend-cuda/src/ops.rs` の `impl BackendOps for CudaBackendOps`）は 89 件、Metal（`crates/backend-metal/src/ops.rs`）は 90 件をオーバーライドする（CUDA のうち `linalg_svd`・`linalg_matrix_norm` は `Unsupported` を明示返却するだけ。`typed_ops_f64` の 8 演算は CUDA ではネイティブ実装済み〈`crates/backend-cuda/src/typed_f64.rs` の `impl TypedOps<f64> for CudaBackendOps`、#2060〉で、`Unsupported` ではない）
 
 ## 3. 方針の定義
 
@@ -202,7 +202,7 @@ CUDA 列は `crates/backend-cuda/src/` 配下。`*_tracked` の CUDA 列は「�
 |---|---|
 | Tensor Core 相当（CUDA の `kernels_mma*`・`kernels_wmma*`・TF32×3） | ROCm の MFMA は命令体系が別物。f32 SIMT を初期スコープとする（MFMA は別 issue 候補。`backend-rocm-hiprtc-gemm-decision.md` §7）。ROCm には Tensor Core 経路を持ち込まず、`gemm` は f32 SIMT のみ |
 | graph capture 系（`run_captured_sgd_step_segment`・`captured_segment_key`・`linear_chain_forward_captured`） | CUDA Graph 相当（HIP Graph）は初期スコープ外。既定の `Ok(None)` で呼び出し側が通常経路へ戻る |
-| 型付き経路（`typed_ops_f64/f16/bf16`・`cast_ops`・`memory_ops`） | f32 SIMT 初期スコープ外。既定の `None`。CUDA の `typed_ops_f64` も 8 演算すべて `Unsupported` |
+| 型付き経路（`typed_ops_f64/f16/bf16`・`cast_ops`・`memory_ops`） | f32 SIMT 初期スコープ外。既定の `None`。CUDA の `typed_ops_f64` は #2060 でネイティブ実装済み（`typed_f64.rs`）だが、ROCm の型付き経路は初期スコープ外とする方針は不変 |
 | CUDA も未実装のもの（fft 6 件・`linalg_slogdet/pinv/lstsq/matrix_rank/svd/matrix_norm`・stat 6 件・binning 4 件・`scan_cummax/cummin/logcumsumexp`・`pool3d_*`・`lrn`・`weight_norm`・`spectral_norm`・`pad_modes`・`concat`・`conv2d/3d`・`im2col3d`・`col2im3d`・`adaptive_max_pool2d`・`indexed_scatter_reduce`・`unique_ext`・`var`・`vector_norm*`・`logsumexp`・`rmsprop/adagrad/lamb`） | 突き合わせ先（CUDA 実装）がなく、REQ-2 の数値一致を評価できない。CUDA 側の実装が先 |
 | `gemm_checksum` | CUDA も既定。検査用途で初期スコープ外 |
 
