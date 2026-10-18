@@ -31,6 +31,10 @@
 //! `log_softmax_backward`（[`RocmLogSoftmaxBackward`]）の HIPRTC カーネルを移植し、`RocmBackendOps`
 //! へ結線した（wave 幅は `WarpGeometry` 注入。onepass〈動的 SMEM〉経路は移植せず 2 パスのみ）。
 //!
+//! 畳み込み・pooling 系（分解案 R7・#3438）として `pad`（[`RocmConstantPad`]）、Conv2d の `im2col`／`col2im`
+//! （[`RocmIm2col`]）、`max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`（[`RocmPooling`]）の HIPRTC カーネルを
+//! 移植し、`RocmBackendOps` へ結線した（いずれも wave 幅非依存。col2im・avg 系は `double` アキュムレータ）。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
@@ -39,6 +43,9 @@ mod arg_reduce;
 #[cfg(test)]
 mod arg_reduce_model;
 mod buffer_handle;
+mod constant_pad;
+#[cfg(test)]
+mod conv_pool_model;
 mod elementwise;
 #[cfg(test)]
 mod elementwise_model;
@@ -53,21 +60,25 @@ mod gemm;
 mod gemm_model;
 mod hip;
 mod hiprtc;
+mod im2col;
 mod interpolate;
 #[cfg(test)]
 mod interpolate_model;
 mod kernel_source;
 mod kernels_arg_reduce;
+mod kernels_constant_pad;
 mod kernels_elementwise;
 mod kernels_fused_elementwise;
 mod kernels_gather_scatter;
 mod kernels_gemm;
+mod kernels_im2col;
 mod kernels_interpolate;
 mod kernels_linalg;
 mod kernels_linalg_factor;
 mod kernels_log_softmax_backward;
 mod kernels_loss;
 mod kernels_norm;
+mod kernels_pooling;
 mod kernels_reduce;
 mod kernels_scalar_op;
 mod kernels_scan;
@@ -86,6 +97,7 @@ mod norm;
 #[cfg(test)]
 mod norm_model;
 mod ops;
+mod pooling;
 mod reduce;
 #[cfg(test)]
 mod reduce_model;
@@ -109,16 +121,19 @@ mod warp_geometry;
 mod warp_model;
 
 pub use arg_reduce::RocmArgReduce;
+pub use constant_pad::RocmConstantPad;
 pub use elementwise::{RocmElementwise, RocmFusedElementwise, RocmScalarOp};
 pub use error::RocmError;
 pub use gather_scatter::{RocmGatherScatter, ScatterMode};
 pub use gemm::RocmGemmF32;
+pub use im2col::RocmIm2col;
 pub use interpolate::RocmInterpolate;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
 pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
 pub use loss::RocmLoss;
 pub use norm::{BatchNormTrainHost, LayerNormBackwardHost, RmsNormBackwardHost, RocmNorm};
 pub use ops::RocmBackendOps;
+pub use pooling::RocmPooling;
 pub use reduce::RocmReduce;
 pub use scan::RocmScan;
 pub use softmax::{RocmLogSoftmaxBackward, RocmSoftmax};
