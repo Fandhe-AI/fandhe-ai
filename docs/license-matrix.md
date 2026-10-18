@@ -29,7 +29,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | ベンチ | `criterion` | `=0.8.2` | Apache-2.0 OR MIT | 可 | c。`dev-dependencies` 限定（deps-policy.md） |
 | OS FFI（第 10 区分） | `libc` | `=0.2.189` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（`crates.io` `license` フィールド）。`onnx-interop` の external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）用途に限定し `[target.'cfg(unix)'.dependencies]` で `cfg(unix)` 限定（依存の実追加は PR #2348。`libc 0.2.189` は追加前から `Cargo.lock` に推移的依存として存在し、ライセンスは本体 workspace の既存監査対象）。手書きの `openat` フラグ定数は Linux で CPU アーキテクチャごとに値が異なり、x86 専用の値のまま aarch64 Linux でビルドするとシンボリックリンク拒否が機能しない実装バグを生んでいたため、自作せず libc の定数・`syscall` を使う（ドライバ FFI 同様、この領域の自作は unsafe 面積増のみで安全性の向上にならない） |
 | HTTP／TLS（第 11 区分） | `ureq`（`default-features = false`・`native-tls`＋`vendored`） | `=3.4.2` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（イシュー #3124）。`facade` の `[target.'cfg(unix)'.dependencies]` 限定・HTTPS 取得用途限定（＋`crates/hf-hub` の HF Hub API の JSON 取得。#3393）。allow 追加は `CDLA-Permissive-2.0`（`webpki-root-certs`）のみ。OpenSSL（`openssl-src`）の静的同梱と脆弱性対応は 6 節・末尾の追加実測を参照。承認根拠は #3123 所有者コメント 6111756315 の委任条項（`docs/model-download-design.md` §16.8・§17） |
-| 動的ロード（第 12 区分） | `libloading`（default feature） | `=0.9.0` | ISC | 可 | a, d, e（判断軸は「ビルド時リンクなし・新規 crate なし・cudarc と同じ版」）。`crates/backend-rocm` の無条件依存・HIP／HIPRTC の動的ロード用途限定。ISC は `deny.toml` の allow に既存で、`cfg-if`・`windows-link`（MIT OR Apache-2.0）は既に lock にある。承認根拠は #3153 所有者コメント 6111762873 と `docs/backend-rocm-hip-ffi-decision.md` §5（同 doc §9 の明示確認は未記録）。実測は末尾の追加実測（#3154）を参照 |
+| 動的ロード（第 12 区分） | `libloading`（default feature） | `=0.9.0` | ISC | 可 | a, d, e（判断軸は「ビルド時リンクなし・新規 crate なし・cudarc と同じ版」）。`crates/backend-rocm` の無条件依存・HIP／HIPRTC の動的ロード用途限定。ISC は `deny.toml` の allow に既存で、`cfg-if`・`windows-link`（MIT OR Apache-2.0）は既に lock にある。承認根拠は、方式・区分が 2026-10-12 の #3153 所有者コメント 6111762873、具体構成が 2026-10-18 の #3154 所有者コメント 6243795398（<https://github.com/Fandhe-AI/fandhe-ai/issues/3154#issuecomment-6243795398>）。実測は `docs/backend-rocm-hip-ffi-decision.md` §5 と末尾の追加実測（#3154）を参照 |
 
 すべて MIT OR Apache-2.0 系（`objc2-metal` のみ三重ライセンス）であり、商用配布・改変・再頒布に適合する。
 
@@ -331,7 +331,7 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 
 ## 追加実測（イシュー #3154）
 
-第 12 区分 `libloading =0.9.0`（default feature）を `crates/backend-rocm` の無条件依存として実追加した。承認根拠は #3153 所有者コメント 6111762873（2026-10-12）と `docs/backend-rocm-hip-ffi-decision.md` §5。同コメントの委任条項（版は実装時点の `Cargo.lock` の版・戻し条件 3 点に該当しなければ #3154 へ進める）の範囲内で反映した。同 doc §9 の個別値への明示確認コメントは存在せず、承認を得たとは記述しない（PR レビューで人間が最終判断する）。実測日: 2026-10-17。
+第 12 区分 `libloading =0.9.0`（default feature）を `crates/backend-rocm` の無条件依存として実追加した。承認根拠は 2 段: 方式・区分は 2026-10-12 の #3153 所有者コメント 6111762873、具体構成（版・feature・配置・用途条件）は 2026-10-18 の #3154 所有者コメント 6243795398（<https://github.com/Fandhe-AI/fandhe-ai/issues/3154#issuecomment-6243795398>）。実測の詳細は `docs/backend-rocm-hip-ffi-decision.md` §5。実測日: 2026-10-17。
 
 - `Cargo.lock` の差分: `fandhe-ai-backend-rocm` の `[[package]]`（dependencies = `libloading`）の追加だけ。他の crate の追加・版変更はない。
 - 版の重複: `cargo tree --locked -d --target all` の `libloading` は 0 件。`cargo tree --locked -i libloading -e normal,build --target all` は `cudarc v0.19.8`（backend-cuda・bench-harness 経由）と `fandhe-ai-backend-rocm` の 2 経路で、どちらも `libloading v0.9.0`。
