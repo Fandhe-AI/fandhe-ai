@@ -237,6 +237,8 @@ sequential::Sequential::forward`／`SequentialVars::forward`）からは
   と `crates/autodiff/src/optim/device_store.rs` の
   `linear_forward_with_activation_relu_grad_matches_manual_relu_composition`。
   CPU 実測は `docs/perf/train-linear-epilogue-fusion.md` を参照。
+- **CUDA は #3202 で結線済み**（`CudaBackendOps::gemm_resident_rhs_act` を
+  override し ReLU を GEMM epilogue へ融合。以下は #1044 時点の記録）。
 - **スコープ外（#1044 時点）**: CUDA／Metal は `gemm_resident_rhs_act`
   をオーバーライドせず、`tensor-core` のデフォルト（`gemm_resident_rhs`
   ＋ `relu` の 2 起動）にフォールバックする（値は正しいが 1 起動には
