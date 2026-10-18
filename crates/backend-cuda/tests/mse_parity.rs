@@ -143,3 +143,122 @@ fn mse_matches_cpu_across_shapes() {
         assert_mse_backward_parity(&mse, 9101 + numel as u64, numel);
     }
 }
+
+/// target キャッシュ（イシュー #3203）の遷移列。1 つの `CudaMse` に
+/// target A, A, B, A, 長さ違い C, A を流し、毎回 CPU 参照と一致する
+/// ことを確かめる（古い target の値を使わないことの検証）。
+fn assert_target_cache_sequence(mse: &CudaMse) {
+    let n = 640usize;
+    let pred = Xorshift64Star::new(31).fill_vec(n);
+    let a = Xorshift64Star::new(32).fill_vec(n);
+    let b = Xorshift64Star::new(33).fill_vec(n);
+    let pred_c = Xorshift64Star::new(34).fill_vec(257);
+    let c = Xorshift64Star::new(35).fill_vec(257);
+    let seq: [(&[f32], &[f32]); 6] = [
+        (&pred, &a),
+        (&pred, &a),
+        (&pred, &b),
+        (&pred, &a),
+        (&pred_c, &c),
+        (&pred, &a),
+    ];
+    for (p, t) in seq {
+        let g = mse.run_mse_loss_f32(p, t, 1.0).expect("forward");
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            "mse target cache forward",
+            &[g],
+            &[cpu_mse_forward_reference(p, t, false)],
+        );
+        let d = mse.run_mse_backward_f32(p, t, 1.7).expect("backward");
+        fandhe_ai_backend_cpu::parity::assert_parity(
+            "mse target cache backward",
+            &d,
+            &cpu_mse_backward_reference(p, t, 1.7),
+        );
+    }
+}
+
+#[test]
+fn mse_target_cache_sequence_smoke_env_adaptive() {
+    let Ok(device) = CudaDevice::new(0) else {
+        return;
+    };
+    match CudaMse::new(&device) {
+        Ok(mse) => assert_target_cache_sequence(&mse),
+        Err(CudaError::NvrtcUnavailable { .. }) => {}
+        Err(other) => panic!("unexpected error variant for CudaMse::new: {other}"),
+    }
+}
+
+/// キャッシュを使い続ける `CudaMse` の出力が、毎回新規構築（キャッシュ空 =
+/// 従来経路）の出力とビット一致することを確かめる（`-0.0` を含む組を含む）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn mse_target_cache_is_bit_identical_to_fresh() {
+    let device = CudaDevice::new(0).expect("CUDA device");
+    let reused = CudaMse::new(&device).expect("mse compile");
+    for &numel in &[1usize, 256, 257, 640, 10_000] {
+        let pred = Xorshift64Star::new(41 + numel as u64).fill_vec(numel);
+        let mut t1 = Xorshift64Star::new(43 + numel as u64).fill_vec(numel);
+        let mut t2 = t1.clone();
+        t2[0] += 1.0;
+        let mut pz = pred.clone();
+        pz[0] = -0.0;
+        t1[0] = 0.0;
+        let mut t3 = t1.clone();
+        t3[0] = -0.0;
+        for (p, t) in [
+            (&pred, &t1),
+            (&pred, &t1),
+            (&pred, &t2),
+            (&pz, &t1),
+            (&pz, &t3),
+            (&pz, &t3),
+        ] {
+            let fresh = CudaMse::new(&device).expect("mse compile");
+            let a = reused.run_mse_loss_f32(p, t, 0.5).unwrap();
+            let b = fresh.run_mse_loss_f32(p, t, 0.5).unwrap();
+            assert_eq!(a.to_bits(), b.to_bits(), "forward numel={numel}");
+            let a = reused.run_mse_backward_f32(p, t, 1.7).unwrap();
+            let b = fresh.run_mse_backward_f32(p, t, 1.7).unwrap();
+            let ab: Vec<u32> = a.iter().map(|x| x.to_bits()).collect();
+            let bb: Vec<u32> = b.iter().map(|x| x.to_bits()).collect();
+            assert_eq!(ab, bb, "backward numel={numel}");
+        }
+    }
+}
+
+/// 別 context（`CudaDevice::new` 2 回）・別 ordinal の `CudaMse` が互いの
+/// target を使い回さないことを確かめる。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn mse_target_cache_is_not_shared_across_contexts() {
+    let d0 = CudaDevice::new(0).expect("CUDA device");
+    let d0b = CudaDevice::new(0).expect("CUDA device");
+    let m0 = CudaMse::new(&d0).expect("mse compile");
+    let m0b = CudaMse::new(&d0b).expect("mse compile");
+    assert_target_cache_sequence(&m0);
+    assert_target_cache_sequence(&m0b);
+    let pred = Xorshift64Star::new(51).fill_vec(300);
+    let ta = Xorshift64Star::new(52).fill_vec(300);
+    let tb = Xorshift64Star::new(53).fill_vec(300);
+    for _ in 0..2 {
+        for (m, t) in [(&m0, &ta), (&m0b, &tb)] {
+            let g = m.run_mse_loss_f32(&pred, t, 1.0).unwrap();
+            fandhe_ai_backend_cpu::parity::assert_parity(
+                "mse cross-context",
+                &[g],
+                &[cpu_mse_forward_reference(&pred, t, false)],
+            );
+        }
+    }
+    match CudaDevice::device_count() {
+        Ok(n) if n >= 2 => {
+            let d1 = CudaDevice::new(1).expect("ordinal 1");
+            let m1 = CudaMse::new(&d1).expect("mse compile");
+            assert_target_cache_sequence(&m1);
+            assert_target_cache_sequence(&m0);
+        }
+        _ => eprintln!("ordinal 1 なし: 複数 ordinal の確認をスキップ"),
+    }
+}
