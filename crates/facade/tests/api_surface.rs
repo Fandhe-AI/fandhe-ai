@@ -43026,9 +43026,11 @@ fn device_variant_set_is_fixed_while_3157_on_hold() {
 /// 保留ガード G2（イシュー #3157）: 公開クレート facade が非公開の
 /// `backend-rocm` を `[dev-dependencies]` 以外で参照しないこと
 /// （`cargo publish` を壊さない。決定記録 Q2 の承認まで保留）。
-#[test]
-fn facade_does_not_depend_on_backend_rocm_outside_dev_dependencies_while_3157_on_hold() {
-    let manifest = read_to_string_or_panic(&facade_crate_root().join("Cargo.toml"));
+/// G2 の検査本体。`manifest` 中の dev 以外の依存節で backend-rocm の参照
+/// （キー行・値・`[dependencies.backend-rocm]` 形のヘッダ行自体）を探し、
+/// 最初の違反行を返す。
+fn find_backend_rocm_reference_outside_dev(manifest: &str) -> Option<String> {
+    let names = ["backend-rocm", "backend_rocm", "fandhe-ai-backend-rocm"];
     let mut section = String::new();
     for raw in manifest.lines() {
         let line = raw.trim();
@@ -43037,17 +43039,43 @@ fn facade_does_not_depend_on_backend_rocm_outside_dev_dependencies_while_3157_on
         }
         if line.starts_with('[') {
             section = line.to_string();
+            // テーブルヘッダ形式（`[dependencies.backend-rocm]`）は
+            // ヘッダ自体が依存名を含むため、ヘッダ行も検査する。
+            if is_relevant_dependency_section(&section) && names.iter().any(|n| line.contains(n)) {
+                return Some(line.to_string());
+            }
             continue;
         }
         if !is_relevant_dependency_section(&section) {
             continue;
         }
-        let mentions = line.contains("backend-rocm")
-            || line.contains("backend_rocm")
-            || value_has_package_rename_to(line, &["fandhe-ai-backend-rocm", "backend-rocm"]);
-        assert!(
-            !mentions,
-            "facade が `{section}` で backend-rocm を参照している（Q2 承認前は禁止）: {line}"
-        );
+        if names.iter().any(|n| line.contains(n))
+            || value_has_package_rename_to(line, &["fandhe-ai-backend-rocm", "backend-rocm"])
+        {
+            return Some(format!("{section}: {line}"));
+        }
     }
+    None
+}
+
+#[test]
+fn facade_does_not_depend_on_backend_rocm_outside_dev_dependencies_while_3157_on_hold() {
+    let manifest = read_to_string_or_panic(&facade_crate_root().join("Cargo.toml"));
+    if let Some(hit) = find_backend_rocm_reference_outside_dev(&manifest) {
+        panic!("facade が backend-rocm を参照している（Q2 承認前は禁止）: {hit}");
+    }
+}
+
+/// G2 の負のプローブ: テーブルヘッダ形式・通常形式は検出し、
+/// `[dev-dependencies]` は許容する。
+#[test]
+fn backend_rocm_guard_detects_header_style_dependency() {
+    let header = "[dependencies.backend-rocm]\npath = \"../backend-rocm\"\n";
+    assert!(find_backend_rocm_reference_outside_dev(header).is_some());
+    let target = "[target.'cfg(unix)'.dependencies.backend-rocm]\npath = \"../x\"\n";
+    assert!(find_backend_rocm_reference_outside_dev(target).is_some());
+    let inline = "[dependencies]\nbackend-rocm = { path = \"../backend-rocm\" }\n";
+    assert!(find_backend_rocm_reference_outside_dev(inline).is_some());
+    let dev = "[dev-dependencies]\nbackend-rocm = { path = \"../backend-rocm\" }\n[dev-dependencies.backend-rocm]\npath = \"x\"\n";
+    assert!(find_backend_rocm_reference_outside_dev(dev).is_none());
 }
