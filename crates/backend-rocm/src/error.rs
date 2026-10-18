@@ -76,6 +76,22 @@ pub enum RocmError {
         /// 理由。
         detail: String,
     },
+    /// GEMM 以外の演算（gather/scatter/sort 等）の引数・形状・スライス長が不正。
+    InvalidOpArgs {
+        /// 演算名（固定文字列）。
+        op: &'static str,
+        /// 理由。
+        detail: String,
+    },
+    /// 演算のサイズがカーネル引数型（i32 等）・バッファ上限を超えた。
+    SizeLimitExceeded {
+        /// 演算名（固定文字列）。
+        op: &'static str,
+        /// 超過した値。
+        n: usize,
+        /// 上限。
+        limit: usize,
+    },
     /// 許可リストにない gfx target。
     UnsupportedTarget {
         /// 理由。
@@ -121,6 +137,10 @@ impl fmt::Display for RocmError {
             Self::LinalgKernelStatusInvalid { detail } => {
                 write!(f, "線形代数カーネルの status が契約外です: {detail}")
             }
+            Self::InvalidOpArgs { op, detail } => write!(f, "{op} の引数が不正です: {detail}"),
+            Self::SizeLimitExceeded { op, n, limit } => {
+                write!(f, "{op} のサイズ {n} が上限 {limit} を超えます")
+            }
             Self::UnsupportedTarget { detail } => {
                 write!(f, "未対応の gfx target です: {detail}")
             }
@@ -159,6 +179,8 @@ pub(crate) fn to_backend_error(e: RocmError) -> BackendError {
         | RocmError::InvalidLinalgDims { .. }
         | RocmError::LinalgInvalidArgument { .. }
         | RocmError::LinalgKernelStatusInvalid { .. }
+        | RocmError::InvalidOpArgs { .. }
+        | RocmError::SizeLimitExceeded { .. }
         | RocmError::InvalidCString { .. } => BackendError::KernelLaunchFailed(msg),
     }
 }
@@ -213,6 +235,15 @@ mod tests {
                 detail: String::new(),
             },
             RocmError::InvalidCString { what: "w" },
+            RocmError::InvalidOpArgs {
+                op: "o",
+                detail: String::new(),
+            },
+            RocmError::SizeLimitExceeded {
+                op: "o",
+                n: 2,
+                limit: 1,
+            },
         ];
         for e in launch {
             assert!(matches!(
