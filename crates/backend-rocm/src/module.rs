@@ -3,7 +3,7 @@
 //! 役割: `gemm.rs` が使う GPU リソースの寿命を型で管理する。各型は `Arc<HipRuntime>` を持ち、
 //! ライブラリがハンドルより先に解放されない（U1）。`CodeObject` は module が生きている間
 //! 保持する（U4）。Drop 内の失敗は panic にせず無視する（解放の best effort。呼び出し側は
-//! 実行後に同期済みである契約）。unsafe の正式な監査記録は #3158。
+//! 実行後に同期済みである契約）。unsafe の監査記録は `docs/backend-rocm-unsafe-audit.md`（#3158）。
 
 use crate::error::RocmError;
 use crate::hip::HipRuntime;
@@ -30,7 +30,7 @@ impl Module {
         code: CodeObject,
         device: i32,
     ) -> Result<Self, RocmError> {
-        // SAFETY (U4): `code` は有効なコードオブジェクトで、`Module` が `_code` として保持し
+        // SAFETY: (U4) `code` は有効なコードオブジェクトで、`Module` が `_code` として保持し
         // module 解放まで生存する。
         let handle = unsafe { rt.module_load_data(code.as_ptr())? };
         Ok(Self {

@@ -55,7 +55,7 @@
 - エラー文字列 API（`*GetErrorString`）は返却ポインタの寿命の扱いが増えるため使わず、コード値のみを持つ。
 - HIPRTC ログは上限 1 MiB（超過時は取得せずサイズのみ記録）、コードオブジェクトは 256 MiB 上限。
 
-## 6. unsafe 一覧（正式な監査記録は #3158）
+## 6. unsafe 一覧（監査記録は `docs/backend-rocm-unsafe-audit.md`）
 
 | 箇所 | 不変条件 |
 |---|---|
@@ -70,6 +70,6 @@
 ## 7. 申し送り
 
 - #3157: BackendOps・facade 統合、デバイスからの target 取得。
-- #3158: unsafe 監査記録。
+- #3158: unsafe 監査記録（`docs/backend-rocm-unsafe-audit.md`）。
 - #3159: 実機実行（`tests/gemm_real_device.rs`）、contraction・ABI・soname 確認、grid 上限の照会。
 - 別 Issue（起票は承認後）: ディスクキャッシュ、MFMA 経路、f16・bias_act・split-K、版付き soname・Windows。
