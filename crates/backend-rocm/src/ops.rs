@@ -38,6 +38,25 @@
 //! - R9（#3440）で `sgd_step_device`・`adam_step_device` を [`RocmOptim`](crate::optim::RocmOptim)
 //!   （in-place・同期実行）へ結線した。検証と engine 分岐は子モジュール `optim`（`ops/optim.rs`）。
 //!   `*_tracked` は trait 既定（非 tracked 版へ委譲）のまま。
+//! - R10（#3441）で LSTM／GRU の `lstm_pointwise`・`lstm_hidden_backward`・`lstm_cell_backward`・
+//!   `gru_pointwise`・`gru_backward` を [`RocmRnnCell`](crate::RocmRnnCell) へ結線した。結線の本体
+//!   （rank・形状検査、空入力の CPU 委譲、起動前検証）は子モジュール `rnn_cell`（`ops/rnn_cell.rs`）に
+//!   置き、本ファイルのメソッドは 1 行で委譲する。ROCm 非搭載は `DeviceUnavailable`（`Unsupported` ではない）。
+//! - R7（#3438）で `pad`・`im2col`・`col2im`・`max_pool2d`・`avg_pool2d`・`adaptive_avg_pool2d` を
+//!   HIPRTC カーネル（`RocmConstantPad`・`RocmIm2col`・`RocmPooling`）へ結線した。結線の本体
+//!   （shape 再検査・空出力の早期リターン・HIP に触れる前の `Unsupported` 確定・engine 分岐）は子モジュール
+//!   `conv_pool`（`ops/conv_pool.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。avg の dilation ≠ 1 と
+//!   サイズ上限超過は `Unsupported`（ホスト参照実装へのフォールバック合図）。
+//! - R12（#3443）でデバイス常駐 KV の `paged_kv_append`・`paged_attention_forward` を [`RocmPagedKv`](crate::RocmPagedKv)
+//!   へ結線した。結線の本体（ハンドル downcast・tensor-core 共通検証・空入力・engine 分岐）は子モジュール
+//!   `paged_kv`（`ops/paged_kv.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。被覆計画の「shfl を使う 1 か所」は
+//!   現行 CUDA ソースと一致せず（カーネル本体に shuffle なし）、`WarpGeometry` は使わない。`f64` アキュムレータ契約は
+//!   該当しない（f32 の逐次和）。`_tracked` 版は trait 既定の委譲のまま。ROCm 非搭載は `DeviceUnavailable`。
+//! - R11（#3442）で GEMM 派生 4 メソッド（`gemm_resident_rhs`・`gemm_resident_lhs`・
+//!   `gemm_fp32_strict_into`・`linear_forward_device`）を融合 GEMM カーネル（`RocmGemmBiasAct`）へ結線した。
+//!   結線の本体（ハンドル判別・形状検査・退化形状・engine 分岐）は子モジュール `gemm_derived`
+//!   （`ops/gemm_derived.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。`gemm_resident_rhs_act` と
+//!   `*_tracked` は既定のまま継承する（`gemm_bias_act` の専用化は性能だけの差のため見送り）。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
 
 use std::cell::RefCell;
@@ -46,11 +65,13 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    AdamStepConfig, BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp,
-    Device, DeviceBuffer, Element, FusionPlan, HuberKind, KlDivTarget, LayerNormBackwardOutput,
-    MseReduction, ScalarBinaryOp, ScalarUnaryOp, SgdStepConfig, ShapeError, Tensor,
-    UnaryElementwiseOp, batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape,
-    row_norm_layout, row_softmax_layout,
+    Activation, AdamStepConfig, BackendError, BackendOps, BatchNormTrainOutput, BceKind,
+    BinaryElementwiseOp, Conv2dParams, Device, DeviceBuffer, DeviceBufferView, Element, FusionPlan,
+    GruBackwardOutput, GruPointwiseOutput, HuberKind, KlDivTarget, LayerNormBackwardOutput,
+    LstmPointwiseOutput, MseReduction, PagedAttentionArgs, PagedKvLayout, Pool2dParams,
+    ScalarBinaryOp, ScalarUnaryOp, SgdStepConfig, ShapeError, Tensor, UnaryElementwiseOp,
+    batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
@@ -667,8 +688,12 @@ fn check_nll_targets(
     Ok(n)
 }
 
+mod conv_pool;
 mod ew;
+mod gemm_derived;
 mod optim;
+mod paged_kv;
+mod rnn_cell;
 
 /// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
 ///
@@ -777,6 +802,83 @@ impl BackendOps for RocmBackendOps {
         self.ew_masked_fill(x, mask, value)
     }
 
+    /// 新トークンの K／V 行をデバイス常駐のページ化 KV プールへスロット写像どおりに書く（R12・#3443）。
+    /// 同期実行。結線は `ops/paged_kv.rs`。`_tracked` 版は trait 既定の委譲。到達性は #3157 待ち。
+    fn paged_kv_append(
+        &self,
+        k_new: &DeviceBuffer<f32>,
+        v_new: &DeviceBuffer<f32>,
+        k_pool: &mut DeviceBuffer<f32>,
+        v_pool: &mut DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+    ) -> Result<(), BackendError> {
+        self.paged_kv_append_impl(k_new, v_new, k_pool, v_pool, slot_mapping, layout)
+    }
+
+    /// ページ化 KV プールに対する attention（R12・#3443）。出力 `[B, L_new, E]`。結線は `ops/paged_kv.rs`。
+    fn paged_attention_forward(
+        &self,
+        q: &DeviceBuffer<f32>,
+        k_pool: &DeviceBuffer<f32>,
+        v_pool: &DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.paged_attention_impl(q, k_pool, v_pool, block_tables, seq_lens, args)
+    }
+
+    /// LSTM の pointwise 段（R10・#3441）。結線は `ops/rnn_cell.rs`。
+    fn lstm_pointwise(
+        &self,
+        pre: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+    ) -> Result<LstmPointwiseOutput, BackendError> {
+        self.rnn_lstm_pointwise(pre, c_prev)
+    }
+
+    /// `Op::LstmHidden` の VJP 補助（R10・#3441）。
+    fn lstm_hidden_backward(
+        &self,
+        c: &Tensor<f32>,
+        gate_o: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        self.rnn_lstm_hidden_backward(c, gate_o, dh)
+    }
+
+    /// `Op::LstmCell` の VJP 補助（R10・#3441）。
+    fn lstm_cell_backward(
+        &self,
+        gates_ifg: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+        dc: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        self.rnn_lstm_cell_backward(gates_ifg, c_prev, dc)
+    }
+
+    /// GRU の pointwise 段（R10・#3441）。
+    fn gru_pointwise(
+        &self,
+        pre_i: &Tensor<f32>,
+        pre_h: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+    ) -> Result<GruPointwiseOutput, BackendError> {
+        self.rnn_gru_pointwise(pre_i, pre_h, h_prev)
+    }
+
+    /// `Op::GruCell` の VJP 補助（R10・#3441）。
+    fn gru_backward(
+        &self,
+        gates_rzn: &Tensor<f32>,
+        q: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<GruBackwardOutput, BackendError> {
+        self.rnn_gru_backward(gates_rzn, q, h_prev, dh)
+    }
+
     /// elementwise 融合（静的インタプリタカーネル）。allowlist 外のプランは `Unsupported`。
     fn run_fused(
         &self,
@@ -826,6 +928,48 @@ impl BackendOps for RocmBackendOps {
         a: &DeviceBuffer<f32>,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
         self.ew_unary_device(op, a)
+    }
+
+    /// 常駐 `w`（・`bias`）のまま `a @ w (+ bias)`（R11・#3442）。`w`／`bias` を download しない。
+    fn gemm_resident_rhs(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_derived_rhs(a, w, bias)
+    }
+
+    /// 常駐 `w` が左辺の `w @ b`（R11・#3442）。
+    fn gemm_resident_lhs(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.gemm_derived_lhs(w, b)
+    }
+
+    /// `out[out_offset ..]` への GEMM 直書き（上書き。R11・#3442）。`*_tracked` は既定の委譲のまま
+    /// （ROCm は呼び出しごとに同期するので遅延失敗トークンを要さない）。
+    fn gemm_fp32_strict_into(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+    ) -> Result<(), BackendError> {
+        self.gemm_derived_into(a, b, out, out_offset)
+    }
+
+    /// 入出力とも常駐のまま `act(a @ w (+ bias))`（R11・#3442）。
+    fn linear_forward_device(
+        &self,
+        a: &DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.gemm_derived_linear_forward(a, w, bias, act)
     }
 
     /// HIPRTC の縮約（R3・#3434）。`f64` アキュムレータで逐次／2 段に加算し最後に 1 回 `f32` へ
@@ -1440,6 +1584,63 @@ impl BackendOps for RocmBackendOps {
                 }
             },
         )
+    }
+
+    /// HIPRTC の定数 pad（R7・#3438）。
+    fn pad(
+        &self,
+        input: &Tensor<f32>,
+        pads: &[(usize, usize)],
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_pad(input, pads, value)
+    }
+
+    /// HIPRTC の Conv2d im2col（R7・#3438）。
+    fn im2col(
+        &self,
+        input: &Tensor<f32>,
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_im2col(input, params)
+    }
+
+    /// HIPRTC の Conv2d col2im（im2col の随伴。R7・#3438）。
+    fn col2im(
+        &self,
+        d_col: &Tensor<f32>,
+        input_shape: &[usize],
+        params: &Conv2dParams,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_col2im(d_col, input_shape, params)
+    }
+
+    /// HIPRTC の MaxPool2d（値と平面内索引。R7・#3438）。
+    fn max_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+    ) -> Result<(Tensor<f32>, Tensor<i32>), BackendError> {
+        self.conv_pool_max_pool2d(input, params)
+    }
+
+    /// HIPRTC の AvgPool2d（dilation ≠ 1 は `Unsupported`。R7・#3438）。
+    fn avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        params: &Pool2dParams,
+        count_include_pad: bool,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_avg_pool2d(input, params, count_include_pad)
+    }
+
+    /// HIPRTC の AdaptiveAvgPool2d（R7・#3438）。
+    fn adaptive_avg_pool2d(
+        &self,
+        input: &Tensor<f32>,
+        output_size: [usize; 2],
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.conv_pool_adaptive_avg_pool2d(input, output_size)
     }
 }
 
