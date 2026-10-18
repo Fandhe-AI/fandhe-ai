@@ -3737,10 +3737,10 @@ pub trait BackendOps {
     /// デフォルトも同じ `Unsupported` を透過的に伝播する。CPU
     /// バックエンド（`backend-cpu::ops::CpuBackendOps`）はこのデフォルトを
     /// カーネル内融合実装（`gemm_blis_bias_act_parallel` へ `act` を
-    /// 直接渡す）でオーバーライドする。CUDA／Metal は本イシューの
-    /// スコープ外（実機検証環境が必要。`launch_tiled_bias_act_f32_
-    /// resident`／`dispatch_strided_bias_act_prepared` は既に `act_relu`
-    /// を受け取れるため、後続イシューでの結線は型検査のみで済む）。
+    /// 直接渡す）でオーバーライドする。CUDA は #3202 で epilogue 融合
+    /// （`launch_tiled_bias_act_f32_resident` へ `act_relu` を渡す 1 起動）の
+    /// override 済み。Metal は #2113 の encode-only（opt-in）、ROCm は
+    /// このデフォルト合成を継承する。
     fn gemm_resident_rhs_act(
         &self,
         a: &Tensor<f32>,
