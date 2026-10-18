@@ -44,6 +44,15 @@
   `GemmF32Tile::new` はスレッド数が 1024 以下かつ 64 の倍数であることを fail-closed で検査する。
 - warp 幅依存のカーネル（rmsnorm・softmax 等）の移植時は #2126 の `WarpGeometry` 同様に幅を検査するか、
   wave64 用の 64 bit マスク設計を別 Issue で行う。
+- **R1 実装記録（#3432）**: `crates/backend-rocm/src/warp_geometry.rs` の `WarpGeometry` が wave 幅 32/64 だけを
+  受け付け（それ以外・取得不能は fail-closed）、`WARP_SIZE`・`WARP_HALF`・`WARP_FULL_MASK`（64 bit `ull`）・
+  `WARP_LANE`・`WARP_ID`・`WARP_SHFL_XOR`・`WARPS_PER_BLOCK`（= block_dim / 幅）を固定テンプレートと数値だけで出す。
+  - シャッフルはマスク引数を取らない非 sync の `__shfl_xor(var, laneMask, width)` を採用。`_sync` 版（64 bit マスク）は
+    ROCm 7.0 で既定有効だが、マスク値をソースへ入れず HIPRTC オプションを固定に保つため使わない。
+  - `__syncwarp` は HIP ドキュメントに記載がなく確認できないため `WARP_SYNC` は出さない。wave 内の受け渡しは
+    全スレッドが到達する `__syncthreads()` で組む（R3〜R6 の前提）。
+  - wave 幅の実行時照会（`hipDeviceGetAttribute`）は未実装（#3157・#3159）。現状は `GfxTarget::wave_size()` の固定値。
+  - 縮約モデル（`warp_model.rs`、`cfg(test)`）で、8 warp 固定が wave64 で未初期化読みになることを固定済み。
 
 ## 5. 出典と未確認事項
 
