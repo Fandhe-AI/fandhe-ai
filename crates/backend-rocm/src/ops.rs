@@ -35,6 +35,10 @@
 //!   と各 backward）を [`RocmLoss`](crate::RocmLoss) へ結線した。shape 検査・`factor` 決定・enum
 //!   から `i32` への写像（未知 variant は `Unsupported`）・空入力の早期リターンはデバイス取得より
 //!   前に行うので、ROCm 非搭載でも型付きエラーを検査できる。
+//! - R10（#3441）で LSTM／GRU の `lstm_pointwise`・`lstm_hidden_backward`・`lstm_cell_backward`・
+//!   `gru_pointwise`・`gru_backward` を [`RocmRnnCell`](crate::RocmRnnCell) へ結線した。結線の本体
+//!   （rank・形状検査、空入力の CPU 委譲、起動前検証）は子モジュール `rnn_cell`（`ops/rnn_cell.rs`）に
+//!   置き、本ファイルのメソッドは 1 行で委譲する。ROCm 非搭載は `DeviceUnavailable`（`Unsupported` ではない）。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
 
 use std::cell::RefCell;
@@ -44,10 +48,10 @@ use std::thread::LocalKey;
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Device,
-    DeviceBuffer, Element, FusionPlan, HuberKind, KlDivTarget, LayerNormBackwardOutput,
-    MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor, UnaryElementwiseOp,
-    batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout,
+    DeviceBuffer, Element, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
+    KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput, MseReduction, ScalarBinaryOp,
+    ScalarUnaryOp, ShapeError, Tensor, UnaryElementwiseOp, batch_norm_layout, gemm_out_shape,
+    reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
@@ -662,6 +666,7 @@ fn check_nll_targets(
 }
 
 mod ew;
+mod rnn_cell;
 
 /// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
 ///
@@ -768,6 +773,56 @@ impl BackendOps for RocmBackendOps {
         value: f32,
     ) -> Result<Tensor<f32>, BackendError> {
         self.ew_masked_fill(x, mask, value)
+    }
+
+    /// LSTM の pointwise 段（R10・#3441）。結線は `ops/rnn_cell.rs`。
+    fn lstm_pointwise(
+        &self,
+        pre: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+    ) -> Result<LstmPointwiseOutput, BackendError> {
+        self.rnn_lstm_pointwise(pre, c_prev)
+    }
+
+    /// `Op::LstmHidden` の VJP 補助（R10・#3441）。
+    fn lstm_hidden_backward(
+        &self,
+        c: &Tensor<f32>,
+        gate_o: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        self.rnn_lstm_hidden_backward(c, gate_o, dh)
+    }
+
+    /// `Op::LstmCell` の VJP 補助（R10・#3441）。
+    fn lstm_cell_backward(
+        &self,
+        gates_ifg: &Tensor<f32>,
+        c_prev: &Tensor<f32>,
+        dc: &Tensor<f32>,
+    ) -> Result<(Tensor<f32>, Tensor<f32>), BackendError> {
+        self.rnn_lstm_cell_backward(gates_ifg, c_prev, dc)
+    }
+
+    /// GRU の pointwise 段（R10・#3441）。
+    fn gru_pointwise(
+        &self,
+        pre_i: &Tensor<f32>,
+        pre_h: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+    ) -> Result<GruPointwiseOutput, BackendError> {
+        self.rnn_gru_pointwise(pre_i, pre_h, h_prev)
+    }
+
+    /// `Op::GruCell` の VJP 補助（R10・#3441）。
+    fn gru_backward(
+        &self,
+        gates_rzn: &Tensor<f32>,
+        q: &Tensor<f32>,
+        h_prev: &Tensor<f32>,
+        dh: &Tensor<f32>,
+    ) -> Result<GruBackwardOutput, BackendError> {
+        self.rnn_gru_backward(gates_rzn, q, h_prev, dh)
     }
 
     /// elementwise 融合（静的インタプリタカーネル）。allowlist 外のプランは `Unsupported`。

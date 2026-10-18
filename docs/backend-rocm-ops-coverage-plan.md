@@ -274,6 +274,16 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - **デバイス常駐 API の到達性**: `binary_elementwise_device`／`unary_elementwise_device` は実装したが、`memory_ops()` は `None`（§4 の既定継承）のままなので crate の外から ROCm の `DeviceBuffer` を作れない。判別は `downcast_handle::<RocmBufferHandle>()` の型のみ（`device()` は #3157 まで `Device::Cpu` の仮置きで CPU 由来と区別できない）。被覆表内の不整合（#106・#107 は「移植」、#2 は `None`）として所有者の判断待ち。
 - relu は CUDA と同じ `x > 0 ? x : 0`（NaN は 0。CPU の `f32::max` と `-0.0` の符号だけ異なりうる）。新しい `unsafe` はない（`KernelHost::run`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
 
+### R10（#3441）の実装記録
+
+- **対象**: `lstm_pointwise`・`lstm_hidden_backward`・`lstm_cell_backward`・`gru_pointwise`・`gru_backward` の 5 メソッド。HIPRTC の静的ソース 1 本・5 カーネル（`kernels_rnn_cell.rs`）、実行型 `RocmRnnCell`（`rnn_cell.rs`）、結線は子モジュール `ops/rnn_cell.rs`（`ops.rs` には 1 行の委譲だけ。兄弟 PR #3454・#3455 との衝突回避）。
+- **FMA**: ソース先頭に `#pragma clang fp contract(off)` を置き、意図した FMA は CPU の `f32::mul_add` と同じ 3 か所（LSTM の `c`、GRU の `n` と `h`）だけ `__builtin_fmaf` で明示した。backward 3 本に FMA はなく字面どおりの順で評価する。シグモイドは CPU と同じ 2 分岐形（`__expf` 等の高速近似は不使用）。
+- **`f64` アキュムレータ契約は該当しない**: 縮約（長軸の和）を持たない pointwise 演算のため。wave 幅にも依存せず（§6 の分類どおり）、実機は不要。
+- **空入力**: `B == 0` または `hidden == 0` は HIP に触れず `CpuBackendOps` へ委譲し、CPU と同じ結果・エラーにする（R3 の空縮約と同じ前例）。
+- **ROCm 非搭載**: 形状・引数の検査後に `DeviceUnavailable` を返し、`Unsupported` へは落とさない（A08）。
+- **新しい `unsafe` はない**（`KernelHost::run`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用。`docs/backend-rocm-unsafe-audit.md` §3.9）。
+- **未確認**: HIPRTC での実コンパイルと `expf`／`tanhf` の CPU との libm parity は #3159。ホストモデル（`rnn_cell_model.rs`）の超越関数はホスト libm で、GPU libm の模擬ではない。
+
 ## 10. 起票手順（未実施）
 
 所有者の承認後に `update-issue-tree` で親 #3150 配下へ R0〜R13 を追加する。各 issue に `phase:7`・依存（`dependsOn`）・実機要否を書く。承認前は起票しない。本 doc の追加だけでは #3156 の受け入れ条件（起票）は未達のまま残る。
