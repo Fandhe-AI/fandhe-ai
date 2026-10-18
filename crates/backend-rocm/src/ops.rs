@@ -26,6 +26,11 @@
 //!   Tape（`Box<dyn BackendOps + Send>`）に載せるため、コンパイル済みカーネルは thread_local の
 //!   遅延キャッシュに置き、構造体は `Copy` の値だけを持つ（CUDA の `context_cache` と同じ考え方）。
 //!   残るリスク: スレッド終了時に `hipModuleUnload` が走る。プロセス終了時の TLS 破棄順は保証されない。
+//! - 正規化 6 メソッド（`rmsnorm`・`layer_norm`・`rmsnorm_backward`・`layer_norm_backward`・
+//!   `batch_norm_train`・`batch_norm_infer`。R6・#3437）は [`RocmNorm`] へ結線する。形状導出
+//!   （`row_norm_layout`／`batch_norm_layout`）・contiguous 化・`Tensor` 化は本ファイル、カーネル起動と
+//!   起動前検証は `norm.rs` の責務。ROCm 非搭載では `DeviceUnavailable` を返す（`Unsupported` では
+//!   ないため autodiff のホスト参照実装へは黙ってフォールバックしない。A08）。
 //! - R5（#3436）で loss 10 メソッド（`mse_loss`・`huber_loss`・`bce_loss`・`nll_loss`・`kl_div_loss`
 //!   と各 backward）を [`RocmLoss`](crate::RocmLoss) へ結線した。shape 検査・`factor` 決定・enum
 //!   から `i32` への写像（未知 variant は `Unsupported`）・空入力の早期リターンはデバイス取得より
@@ -38,9 +43,10 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, BceKind, BinaryElementwiseOp, Device, DeviceBuffer, Element,
-    FusionPlan, HuberKind, KlDivTarget, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError,
-    Tensor, UnaryElementwiseOp, gemm_out_shape, reduce_out_shape, require_same_shape,
+    BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Device,
+    DeviceBuffer, Element, FusionPlan, HuberKind, KlDivTarget, LayerNormBackwardOutput,
+    MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor, UnaryElementwiseOp,
+    batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
     row_softmax_layout,
 };
 
@@ -51,11 +57,18 @@ use crate::elementwise::{
 use crate::error::{RocmError, to_backend_error};
 use crate::gemm::RocmGemmF32;
 use crate::loss::{cached_loss, first_bad_target};
+use crate::norm::{
+    BatchNormTrainHost, LayerNormBackwardHost, OptLens, RmsNormBackwardHost, RocmNorm,
+    batch_norm_train_empty, layer_norm_backward_empty, rmsnorm_backward_empty, validate_batch_norm,
+    validate_row_norm,
+};
 use crate::reduce::{ReduceKind, RocmReduce, reduce_axis_layout};
 use crate::target::GfxTarget;
+#[cfg(test)]
+use crate::warp_geometry::WarpGeometry;
 
 /// 実行経路。`HostModel` はテスト専用（実機なしで組み立て経路を検証する。GEMM は `gemm_model`、
-/// loss 10 メソッドは `loss_model` の逐語モデルを使う）。
+/// 縮約は `reduce_model`、正規化は `norm_model`、loss 10 メソッドは `loss_model` の逐語モデルを使う）。
 #[derive(Debug, Clone, Copy)]
 enum Engine {
     Hip,
@@ -69,6 +82,8 @@ type Cache<T> = RefCell<Vec<(GfxTarget, Rc<T>)>>;
 thread_local! {
     /// target ごとにコンパイル済みの GEMM を遅延保持する。失敗はキャッシュしない。
     static GEMM_CACHE: Cache<RocmGemmF32> = const { RefCell::new(Vec::new()) };
+    /// 正規化（R6・#3437）。
+    static NORM_CACHE: Cache<RocmNorm> = const { RefCell::new(Vec::new()) };
     /// elementwise 基本カーネル（R2）。
     static EW_CACHE: Cache<RocmElementwise> = const { RefCell::new(Vec::new()) };
     /// scalar-op カーネル群（R2）。
@@ -109,7 +124,7 @@ fn cached<T>(
     Ok(g)
 }
 
-/// ROCm（AMD GPU）向け `BackendOps`。必須 9 メソッドに R2 の elementwise 一式・R3 の縮約 5 メソッドを足した実装。
+/// ROCm（AMD GPU）向け `BackendOps`。必須 9 メソッド・R2 の elementwise 一式・縮約 5 メソッド（R3）・正規化 6 メソッド（R6）を実装する。
 ///
 /// HIP のデバイス ID は `RocmGemmF32::new` と同じく 0 固定。gfx target の照会は #3157・#3159。
 #[derive(Debug, Clone, Copy)]
@@ -325,6 +340,221 @@ fn gemm_with(
     Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
 }
 
+/// 正規化メソッドの `dy`／`x` の shape 不一致を `ShapeMismatch` に写す。
+fn shape_mismatch(lhs: &Tensor<f32>, rhs: &Tensor<f32>) -> BackendError {
+    BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+        lhs: lhs.shape().to_vec(),
+        rhs: rhs.shape().to_vec(),
+    })
+}
+
+/// contiguous 化済みテンソルのスライスを取り出す（取り出せなければ `KernelLaunchFailed`）。
+fn slice_of<'a>(t: &'a Tensor<f32>, op: &str, what: &str) -> Result<&'a [f32], BackendError> {
+    t.as_slice()
+        .ok_or_else(|| BackendError::KernelLaunchFailed(format!("{op}: {what} not contiguous")))
+}
+
+/// 正規化 6 メソッドの実行経路（Hip は `RocmNorm`、HostModel はテスト専用に `norm_model`）。
+/// どちらも先に `norm.rs` の起動前検証と 0 要素契約を通す（0 要素は `cached(&NORM_CACHE, ..)` を呼ばず、
+/// HIP のロードにも触れない）。Hip 側の `RocmNorm::run_*` は同じ検証を再度行う（多層防御）。
+impl RocmBackendOps {
+    fn run_rmsnorm(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        eps: f32,
+        rows: usize,
+        hidden: usize,
+    ) -> Result<Vec<f32>, RocmError> {
+        let lens = OptLens {
+            w: w.map(<[f32]>::len),
+            ..OptLens::default()
+        };
+        let d = validate_row_norm("rmsnorm", x.len(), rows, hidden, lens, eps)?;
+        if d.numel == 0 {
+            return Ok(Vec::new());
+        }
+        match self.engine {
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_rmsnorm_f32(x, w, eps, rows, hidden),
+            #[cfg(test)]
+            Engine::HostModel => {
+                let geom = WarpGeometry::for_target(self.target);
+                Ok(crate::norm_model::rmsnorm(geom, x, w, eps, rows, hidden))
+            }
+        }
+    }
+
+    fn run_layer_norm(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        b: Option<&[f32]>,
+        eps: f32,
+        rows: usize,
+        hidden: usize,
+    ) -> Result<Vec<f32>, RocmError> {
+        let lens = OptLens {
+            w: w.map(<[f32]>::len),
+            b: b.map(<[f32]>::len),
+            ..OptLens::default()
+        };
+        let d = validate_row_norm("layer_norm", x.len(), rows, hidden, lens, eps)?;
+        if d.numel == 0 {
+            return Ok(Vec::new());
+        }
+        match self.engine {
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_layer_norm_f32(x, w, b, eps, rows, hidden),
+            #[cfg(test)]
+            Engine::HostModel => {
+                let geom = WarpGeometry::for_target(self.target);
+                Ok(crate::norm_model::layer_norm(
+                    geom, x, w, b, eps, rows, hidden,
+                ))
+            }
+        }
+    }
+
+    fn run_rmsnorm_backward(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        dy: &[f32],
+        eps: f32,
+        rows: usize,
+        hidden: usize,
+    ) -> Result<RmsNormBackwardHost, RocmError> {
+        let lens = OptLens {
+            w: w.map(<[f32]>::len),
+            dy: Some(dy.len()),
+            ..OptLens::default()
+        };
+        let d = validate_row_norm("rmsnorm_backward", x.len(), rows, hidden, lens, eps)?;
+        if d.numel == 0 {
+            return rmsnorm_backward_empty(w.is_some(), hidden);
+        }
+        match self.engine {
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_rmsnorm_backward_f32(x, w, dy, eps, rows, hidden),
+            #[cfg(test)]
+            Engine::HostModel => {
+                let geom = WarpGeometry::for_target(self.target);
+                Ok(crate::norm_model::rmsnorm_backward(
+                    geom, x, w, dy, eps, rows, hidden,
+                ))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // `RocmNorm::run_layer_norm_backward_f32` と同じ引数構成
+    fn run_layer_norm_backward(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        has_bias: bool,
+        dy: &[f32],
+        eps: f32,
+        rows: usize,
+        hidden: usize,
+    ) -> Result<LayerNormBackwardHost, RocmError> {
+        let lens = OptLens {
+            w: w.map(<[f32]>::len),
+            dy: Some(dy.len()),
+            ..OptLens::default()
+        };
+        let d = validate_row_norm("layer_norm_backward", x.len(), rows, hidden, lens, eps)?;
+        if d.numel == 0 {
+            return layer_norm_backward_empty(w.is_some(), has_bias, hidden);
+        }
+        match self.engine {
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_layer_norm_backward_f32(x, w, has_bias, dy, eps, rows, hidden),
+            #[cfg(test)]
+            Engine::HostModel => {
+                let geom = WarpGeometry::for_target(self.target);
+                Ok(crate::norm_model::layer_norm_backward(
+                    geom, x, w, has_bias, dy, eps, rows, hidden,
+                ))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // `RocmNorm::run_batch_norm_train_f32` と同じ引数構成
+    fn run_batch_norm_train(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        b: Option<&[f32]>,
+        eps: f32,
+        n: usize,
+        c: usize,
+        spatial: usize,
+    ) -> Result<BatchNormTrainHost, RocmError> {
+        let lens = OptLens {
+            w: w.map(<[f32]>::len),
+            b: b.map(<[f32]>::len),
+            ..OptLens::default()
+        };
+        let d = validate_batch_norm("batch_norm_train", x.len(), (n, c, spatial), lens, eps)?;
+        if d.numel == 0 {
+            return batch_norm_train_empty(c);
+        }
+        match self.engine {
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_batch_norm_train_f32(x, w, b, eps, n, c, spatial),
+            #[cfg(test)]
+            Engine::HostModel => {
+                let geom = WarpGeometry::for_target(self.target);
+                Ok(crate::norm_model::batch_norm_train(
+                    geom, x, w, b, eps, n, c, spatial,
+                ))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // `RocmNorm::run_batch_norm_infer_f32` と同じ引数構成
+    fn run_batch_norm_infer(
+        &self,
+        x: &[f32],
+        mean: &[f32],
+        var: &[f32],
+        w: Option<&[f32]>,
+        b: Option<&[f32]>,
+        eps: f32,
+        n: usize,
+        c: usize,
+        spatial: usize,
+    ) -> Result<Vec<f32>, RocmError> {
+        let lens = OptLens {
+            w: w.map(<[f32]>::len),
+            b: b.map(<[f32]>::len),
+            mean: Some(mean.len()),
+            var: Some(var.len()),
+            ..OptLens::default()
+        };
+        let d = validate_batch_norm("batch_norm_infer", x.len(), (n, c, spatial), lens, eps)?;
+        if d.numel == 0 {
+            return Ok(Vec::new());
+        }
+        match self.engine {
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_batch_norm_infer_f32(x, mean, var, w, b, eps, n, c, spatial),
+            #[cfg(test)]
+            Engine::HostModel => Ok(crate::norm_model::batch_norm_infer(
+                x,
+                mean,
+                var,
+                w,
+                b,
+                eps,
+                c,
+                spatial,
+                x.len(),
+            )),
+        }
+    }
+}
 /// contiguous 化済みテンソルのホストスライス（`contiguous()` の戻りは常に `Some`。契約違反は型付きエラー）。
 fn host_slice<'a, T: Element>(t: &'a Tensor<T>, op: &'static str) -> Result<&'a [T], BackendError> {
     t.as_slice()
@@ -595,6 +825,187 @@ impl BackendOps for RocmBackendOps {
     /// HIPRTC の添字縮約（R3・#3434）。契約は [`Self::argmax`] と対称（`v < best` で更新）。
     fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
         self.arg_reduce_dispatch(a, dim, ArgReduceKind::Min)
+    }
+
+    /// 行ごとの RMSNorm。`row_norm_layout` で `(rows, hidden)` を導出し `RocmNorm` へ委譲する（R6）。
+    fn rmsnorm(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_s = slice_of(&x_owned, "rmsnorm", "input")?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_s = match &w_owned {
+            Some(w) => Some(slice_of(w, "rmsnorm", "weight")?),
+            None => None,
+        };
+        let out = self
+            .run_rmsnorm(x_s, w_s, eps, rows, hidden)
+            .map_err(to_backend_error)?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// 行ごとの LayerNorm（biased ÷N）。形状導出は [`Self::rmsnorm`] と同じ（R6）。
+    fn layer_norm(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_s = slice_of(&x_owned, "layer_norm", "input")?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_s = match &w_owned {
+            Some(w) => Some(slice_of(w, "layer_norm", "weight")?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_s = match &b_owned {
+            Some(b) => Some(slice_of(b, "layer_norm", "bias")?),
+            None => None,
+        };
+        let out = self
+            .run_layer_norm(x_s, w_s, b_s, eps, rows, hidden)
+            .map_err(to_backend_error)?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// RMSNorm の逆伝播 `(dx, dw)`。`dy.shape() != x.shape()` は `ShapeMismatch`（R6）。
+    fn rmsnorm_backward(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        dy: &Tensor<f32>,
+        eps: f32,
+    ) -> Result<(Tensor<f32>, Option<Tensor<f32>>), BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        if dy.shape() != x.shape() {
+            return Err(shape_mismatch(dy, x));
+        }
+        let x_owned = x.contiguous();
+        let x_s = slice_of(&x_owned, "rmsnorm_backward", "input")?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_s = match &w_owned {
+            Some(w) => Some(slice_of(w, "rmsnorm_backward", "weight")?),
+            None => None,
+        };
+        let dy_owned = dy.contiguous();
+        let dy_s = slice_of(&dy_owned, "rmsnorm_backward", "dy")?;
+        let (dx, dw) = self
+            .run_rmsnorm_backward(x_s, w_s, dy_s, eps, rows, hidden)
+            .map_err(to_backend_error)?;
+        let dx_t = Tensor::new(dx, x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let dw_t = match dw {
+            Some(dw) => Some(Tensor::new(dw, &[hidden]).map_err(BackendError::ShapeMismatch)?),
+            None => None,
+        };
+        Ok((dx_t, dw_t))
+    }
+
+    /// LayerNorm の逆伝播 `(dx, dw, db)`。`db` は `has_bias` のときだけ `Some`（R6）。
+    fn layer_norm_backward(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        has_bias: bool,
+        dy: &Tensor<f32>,
+        eps: f32,
+    ) -> Result<LayerNormBackwardOutput, BackendError> {
+        let (rows, hidden) = row_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        if dy.shape() != x.shape() {
+            return Err(shape_mismatch(dy, x));
+        }
+        let x_owned = x.contiguous();
+        let x_s = slice_of(&x_owned, "layer_norm_backward", "input")?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_s = match &w_owned {
+            Some(w) => Some(slice_of(w, "layer_norm_backward", "weight")?),
+            None => None,
+        };
+        let dy_owned = dy.contiguous();
+        let dy_s = slice_of(&dy_owned, "layer_norm_backward", "dy")?;
+        let (dx, dw, db) = self
+            .run_layer_norm_backward(x_s, w_s, has_bias, dy_s, eps, rows, hidden)
+            .map_err(to_backend_error)?;
+        let dx_t = Tensor::new(dx, x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let dw_t = match dw {
+            Some(dw) => Some(Tensor::new(dw, &[hidden]).map_err(BackendError::ShapeMismatch)?),
+            None => None,
+        };
+        let db_t = match db {
+            Some(db) => Some(Tensor::new(db, &[hidden]).map_err(BackendError::ShapeMismatch)?),
+            None => None,
+        };
+        Ok((dx_t, dw_t, db_t))
+    }
+
+    /// BatchNorm の train（バッチ統計）。チャネル軸は dim 1（`batch_norm_layout`。R6）。
+    fn batch_norm_train(
+        &self,
+        x: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<BatchNormTrainOutput, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_s = slice_of(&x_owned, "batch_norm_train", "input")?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_s = match &w_owned {
+            Some(w) => Some(slice_of(w, "batch_norm_train", "weight")?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_s = match &b_owned {
+            Some(b) => Some(slice_of(b, "batch_norm_train", "bias")?),
+            None => None,
+        };
+        let (out, mean, var) = self
+            .run_batch_norm_train(x_s, w_s, b_s, eps, n, c, spatial)
+            .map_err(to_backend_error)?;
+        Ok(BatchNormTrainOutput {
+            output: Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)?,
+            batch_mean: Tensor::new(mean, &[c]).map_err(BackendError::ShapeMismatch)?,
+            batch_var: Tensor::new(var, &[c]).map_err(BackendError::ShapeMismatch)?,
+        })
+    }
+
+    /// BatchNorm の infer（呼び出し元の running stats をそのまま使う。R6）。
+    fn batch_norm_infer(
+        &self,
+        x: &Tensor<f32>,
+        mean: &Tensor<f32>,
+        var: &Tensor<f32>,
+        weight: Option<&Tensor<f32>>,
+        bias: Option<&Tensor<f32>>,
+        eps: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let (n, c, spatial) = batch_norm_layout(x.shape()).map_err(BackendError::ShapeMismatch)?;
+        let x_owned = x.contiguous();
+        let x_s = slice_of(&x_owned, "batch_norm_infer", "input")?;
+        let mean_owned = mean.contiguous();
+        let mean_s = slice_of(&mean_owned, "batch_norm_infer", "mean")?;
+        let var_owned = var.contiguous();
+        let var_s = slice_of(&var_owned, "batch_norm_infer", "var")?;
+        let w_owned = weight.map(|w| w.contiguous());
+        let w_s = match &w_owned {
+            Some(w) => Some(slice_of(w, "batch_norm_infer", "weight")?),
+            None => None,
+        };
+        let b_owned = bias.map(|b| b.contiguous());
+        let b_s = match &b_owned {
+            Some(b) => Some(slice_of(b, "batch_norm_infer", "bias")?),
+            None => None,
+        };
+        let out = self
+            .run_batch_norm_infer(x_s, mean_s, var_s, w_s, b_s, eps, n, c, spatial)
+            .map_err(to_backend_error)?;
+        Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     // ---- R5（#3436）: loss 5 種と backward。検証はすべてデバイス取得より前に行う ----
@@ -1445,6 +1856,276 @@ mod tests {
             same(&got, &c.sum(&y, dim).unwrap());
         }
         assert_eq!(o.max(&y, None).unwrap().shape(), &[] as &[usize]);
+    }
+
+    /// R6（#3437）の正規化 6 メソッドのテスト（HostModel = gfx942 = wave64）。
+    mod norm {
+        use super::*;
+        use crate::norm_model::tests::{ref_layer_norm_backward, ref_rmsnorm_backward};
+
+        const EPS: f32 = 1e-5;
+
+        fn opt(t: &Option<Tensor<f32>>) -> Option<&Tensor<f32>> {
+            t.as_ref()
+        }
+
+        fn flat(t: &Tensor<f32>) -> Vec<f32> {
+            t.contiguous().as_slice().unwrap().to_vec()
+        }
+
+        #[test]
+        fn forward_matches_cpu_for_ranks_and_affine() {
+            let c = CpuBackendOps;
+            for shape in [vec![33usize], vec![5, 70], vec![2, 3, 65], vec![4, 1]] {
+                let n: usize = shape.iter().product();
+                let hidden = *shape.last().unwrap();
+                let x = t(n, &shape, 1);
+                let w = t(hidden, &[hidden], 2);
+                let b = t(hidden, &[hidden], 3);
+                for wo in [None, Some(w.clone())] {
+                    let got = ops().rmsnorm(&x, opt(&wo), EPS).unwrap();
+                    let want = c.rmsnorm(&x, opt(&wo), EPS).unwrap();
+                    assert_eq!(got.shape(), x.shape());
+                    assert_parity("rmsnorm", &flat(&got), &flat(&want));
+                    for bo in [None, Some(b.clone())] {
+                        let got = ops().layer_norm(&x, opt(&wo), opt(&bo), EPS).unwrap();
+                        let want = c.layer_norm(&x, opt(&wo), opt(&bo), EPS).unwrap();
+                        assert_eq!(got.shape(), x.shape());
+                        assert_parity("layer_norm", &flat(&got), &flat(&want));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn non_contiguous_inputs() {
+            let c = CpuBackendOps;
+            let x = t(7 * 9, &[9, 7], 4).transpose_2d().unwrap();
+            let w = t(9, &[9], 5);
+            let got = ops().layer_norm(&x, Some(&w), None, EPS).unwrap();
+            let want = c.layer_norm(&x, Some(&w), None, EPS).unwrap();
+            assert_parity("ln non-contig", &flat(&got), &flat(&want));
+            let dy = t(7 * 9, &[9, 7], 6).transpose_2d().unwrap();
+            let (dx, dw) = ops().rmsnorm_backward(&x, Some(&w), &dy, EPS).unwrap();
+            let (rdx, rdw) =
+                ref_rmsnorm_backward(&flat(&x), Some(&flat(&w)), &flat(&dy), EPS, 7, 9);
+            assert_parity("rms_bwd non-contig dx", &flat(&dx), &rdx);
+            assert_parity("rms_bwd non-contig dw", &flat(&dw.unwrap()), &rdw.unwrap());
+        }
+
+        #[test]
+        fn backward_matches_reference() {
+            for shape in [vec![70usize], vec![5, 70], vec![2, 3, 33]] {
+                let n: usize = shape.iter().product();
+                let hidden = *shape.last().unwrap();
+                let rows = n / hidden;
+                let x = t(n, &shape, 11);
+                let dy = t(n, &shape, 12);
+                let w = t(hidden, &[hidden], 13);
+                for wo in [None, Some(w.clone())] {
+                    let wf = wo.as_ref().map(flat);
+                    let (dx, dw) = ops().rmsnorm_backward(&x, opt(&wo), &dy, EPS).unwrap();
+                    let (rdx, rdw) = ref_rmsnorm_backward(
+                        &flat(&x),
+                        wf.as_deref(),
+                        &flat(&dy),
+                        EPS,
+                        rows,
+                        hidden,
+                    );
+                    assert_eq!(dx.shape(), x.shape());
+                    assert_parity("rmsnorm_backward dx", &flat(&dx), &rdx);
+                    assert_eq!(dw.is_some(), wo.is_some());
+                    if let Some(dw) = dw {
+                        assert_eq!(dw.shape(), &[hidden]);
+                        assert_parity("rmsnorm_backward dw", &flat(&dw), &rdw.unwrap());
+                    }
+                    for has_bias in [false, true] {
+                        let (dx, dw, db) = ops()
+                            .layer_norm_backward(&x, opt(&wo), has_bias, &dy, EPS)
+                            .unwrap();
+                        let (rdx, rdw, rdb) = ref_layer_norm_backward(
+                            &flat(&x),
+                            wf.as_deref(),
+                            has_bias,
+                            &flat(&dy),
+                            EPS,
+                            rows,
+                            hidden,
+                        );
+                        assert_parity("layer_norm_backward dx", &flat(&dx), &rdx);
+                        assert_eq!((dw.is_some(), db.is_some()), (wo.is_some(), has_bias));
+                        if let Some(dw) = dw {
+                            assert_parity("layer_norm_backward dw", &flat(&dw), &rdw.unwrap());
+                        }
+                        if let Some(db) = db {
+                            assert_eq!(db.shape(), &[hidden]);
+                            assert_parity("layer_norm_backward db", &flat(&db), &rdb.unwrap());
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn batch_norm_matches_cpu_for_ncl_and_nchw() {
+            let c = CpuBackendOps;
+            for shape in [vec![4usize, 3], vec![2, 3, 17], vec![2, 3, 4, 5]] {
+                let n: usize = shape.iter().product();
+                let ch = shape[1];
+                let x = t(n, &shape, 21);
+                let w = t(ch, &[ch], 22);
+                let b = t(ch, &[ch], 23);
+                for wo in [None, Some(w.clone())] {
+                    for bo in [None, Some(b.clone())] {
+                        let got = ops().batch_norm_train(&x, opt(&wo), opt(&bo), EPS).unwrap();
+                        let want = c.batch_norm_train(&x, opt(&wo), opt(&bo), EPS).unwrap();
+                        assert_eq!(got.output.shape(), x.shape());
+                        assert_eq!(got.batch_mean.shape(), &[ch]);
+                        assert_eq!(got.batch_var.shape(), &[ch]);
+                        assert_parity("bn out", &flat(&got.output), &flat(&want.output));
+                        assert_parity("bn mean", &flat(&got.batch_mean), &flat(&want.batch_mean));
+                        assert_parity("bn var", &flat(&got.batch_var), &flat(&want.batch_var));
+
+                        let mean = t(ch, &[ch], 24);
+                        let var = Tensor::new(
+                            data(ch, 25).iter().map(|v| v.abs() + 0.1).collect(),
+                            &[ch],
+                        )
+                        .unwrap();
+                        let got = ops()
+                            .batch_norm_infer(&x, &mean, &var, opt(&wo), opt(&bo), EPS)
+                            .unwrap();
+                        let want = c
+                            .batch_norm_infer(&x, &mean, &var, opt(&wo), opt(&bo), EPS)
+                            .unwrap();
+                        same(&got, &want);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn zero_element_contracts() {
+            let o = ops();
+            let x = t(0, &[0, 4], 1);
+            let w = t(4, &[4], 2);
+            assert_eq!(o.rmsnorm(&x, Some(&w), EPS).unwrap().shape(), &[0, 4]);
+            assert_eq!(o.layer_norm(&x, None, None, EPS).unwrap().shape(), &[0, 4]);
+            let (dx, dw) = o.rmsnorm_backward(&x, Some(&w), &x, EPS).unwrap();
+            assert_eq!(dx.shape(), &[0, 4]);
+            assert_eq!(flat(&dw.unwrap()), vec![0.0; 4]);
+            let (dx, dw, db) = o.layer_norm_backward(&x, Some(&w), true, &x, EPS).unwrap();
+            assert_eq!(dx.shape(), &[0, 4]);
+            assert_eq!(flat(&dw.unwrap()), vec![0.0; 4]);
+            assert_eq!(flat(&db.unwrap()), vec![0.0; 4]);
+            let (dx, dw, db) = o.layer_norm_backward(&x, None, false, &x, EPS).unwrap();
+            assert_eq!(dx.shape(), &[0, 4]);
+            assert!(dw.is_none() && db.is_none());
+            // hidden = 0。
+            let z = t(0, &[3, 0], 1);
+            let (dx, dw) = o.rmsnorm_backward(&z, None, &z, EPS).unwrap();
+            assert_eq!(dx.shape(), &[3, 0]);
+            assert!(dw.is_none());
+            // batch_norm（n = 0）。
+            let bx = t(0, &[0, 3, 2], 1);
+            let tr = o.batch_norm_train(&bx, None, None, EPS).unwrap();
+            assert_eq!(tr.output.shape(), &[0, 3, 2]);
+            assert_eq!(flat(&tr.batch_mean), vec![0.0; 3]);
+            assert_eq!(flat(&tr.batch_var), vec![0.0; 3]);
+            let m = t(3, &[3], 1);
+            assert_eq!(
+                o.batch_norm_infer(&bx, &m, &m, None, None, EPS)
+                    .unwrap()
+                    .shape(),
+                &[0, 3, 2]
+            );
+        }
+
+        #[test]
+        fn shape_and_argument_errors() {
+            let o = ops();
+            let x = t(12, &[3, 4], 1);
+            let dy_bad = t(12, &[4, 3], 1);
+            assert!(matches!(
+                o.rmsnorm_backward(&x, None, &dy_bad, EPS),
+                Err(BackendError::ShapeMismatch(_))
+            ));
+            assert!(matches!(
+                o.layer_norm_backward(&x, None, false, &dy_bad, EPS),
+                Err(BackendError::ShapeMismatch(_))
+            ));
+            // rank 0 は row_norm_layout が拒否、rank 1 は batch_norm_layout が拒否する。
+            let scalar = Tensor::new(vec![1.0f32], &[]).unwrap();
+            assert!(matches!(
+                o.rmsnorm(&scalar, None, EPS),
+                Err(BackendError::ShapeMismatch(_))
+            ));
+            let v = t(4, &[4], 1);
+            assert!(matches!(
+                o.batch_norm_train(&v, None, None, EPS),
+                Err(BackendError::ShapeMismatch(_))
+            ));
+            // eps と長さ不一致は起動前に KernelLaunchFailed（InvalidOpArgs の写像）。
+            for eps in [f32::NAN, -1.0, f32::INFINITY] {
+                assert!(matches!(
+                    o.rmsnorm(&x, None, eps),
+                    Err(BackendError::KernelLaunchFailed(_))
+                ));
+                assert!(matches!(
+                    o.layer_norm(&x, None, None, eps),
+                    Err(BackendError::KernelLaunchFailed(_))
+                ));
+            }
+            let w_bad = t(5, &[5], 1);
+            assert!(matches!(
+                o.rmsnorm(&x, Some(&w_bad), EPS),
+                Err(BackendError::KernelLaunchFailed(_))
+            ));
+            assert!(matches!(
+                o.layer_norm(&x, None, Some(&w_bad), EPS),
+                Err(BackendError::KernelLaunchFailed(_))
+            ));
+            let bx = t(12, &[2, 3, 2], 1);
+            assert!(matches!(
+                o.batch_norm_train(&bx, Some(&w_bad), None, EPS),
+                Err(BackendError::KernelLaunchFailed(_))
+            ));
+            let st = t(3, &[3], 1);
+            assert!(matches!(
+                o.batch_norm_infer(&bx, &st, &w_bad, None, None, EPS),
+                Err(BackendError::KernelLaunchFailed(_))
+            ));
+        }
+
+        #[test]
+        fn hip_engine_without_rocm_is_unavailable() {
+            if crate::is_available() {
+                return;
+            }
+            let o = RocmBackendOps::new(GfxTarget::Gfx942);
+            let x = t(12, &[3, 4], 1);
+            let st = t(3, &[3], 1);
+            let bx = t(12, &[2, 3, 2], 1);
+            let unavailable = |r: Result<(), BackendError>| {
+                assert!(matches!(r, Err(BackendError::DeviceUnavailable(_))));
+            };
+            unavailable(o.rmsnorm(&x, None, EPS).map(|_| ()));
+            unavailable(o.layer_norm(&x, None, None, EPS).map(|_| ()));
+            unavailable(o.rmsnorm_backward(&x, None, &x, EPS).map(|_| ()));
+            unavailable(o.layer_norm_backward(&x, None, false, &x, EPS).map(|_| ()));
+            unavailable(o.batch_norm_train(&bx, None, None, EPS).map(|_| ()));
+            unavailable(
+                o.batch_norm_infer(&bx, &st, &st, None, None, EPS)
+                    .map(|_| ()),
+            );
+            // 0 要素は HIP に触らず Ok。
+            let e = t(0, &[0, 4], 1);
+            assert!(o.rmsnorm(&e, None, EPS).is_ok());
+            assert!(o.layer_norm_backward(&e, None, true, &e, EPS).is_ok());
+            let be = t(0, &[0, 3, 2], 1);
+            assert!(o.batch_norm_train(&be, None, None, EPS).is_ok());
+        }
     }
 
     // ---- R5（#3436）: loss 10 メソッドの結線（HostModel 経路。CPU と照合） ----

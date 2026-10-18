@@ -18,6 +18,10 @@
 //! （[`RocmSort`]）・unique（[`RocmUnique`]）の HIPRTC カーネルを移植した。いずれもホストのスライスを
 //! 受けて `Vec` を返す実行型で、`BackendOps` への結線は `RocmBackendOps`（#3431・R0）で行う。
 //!
+//! 正規化（分解案 R6・#3437）として rmsnorm・layer_norm・両 backward・batch_norm の train/infer の
+//! HIPRTC カーネル（[`RocmNorm`]。wave 幅は `WarpGeometry` で注入）を移植し、`RocmBackendOps` の
+//! 6 メソッドへ結線した。実機での HIPRTC コンパイル・wave64 parity は #3159。
+//!
 //! elementwise 一式（分解案 R2・#3433）として `add`・`mul`・`relu`・`exp`・`tanh`・`where_cond`・
 //! `masked_fill`（[`RocmElementwise`]）、`scalar_unary`／`scalar_binary`（[`RocmScalarOp`]）、融合
 //! （[`RocmFusedElementwise`]。静的インタプリタカーネルで A03 を守る）の HIPRTC カーネルを移植し、
@@ -63,6 +67,7 @@ mod kernels_linalg;
 mod kernels_linalg_factor;
 mod kernels_log_softmax_backward;
 mod kernels_loss;
+mod kernels_norm;
 mod kernels_reduce;
 mod kernels_scalar_op;
 mod kernels_scan;
@@ -77,6 +82,9 @@ mod loss;
 #[cfg(test)]
 mod loss_model;
 mod module;
+mod norm;
+#[cfg(test)]
+mod norm_model;
 mod ops;
 mod reduce;
 #[cfg(test)]
@@ -109,6 +117,7 @@ pub use interpolate::RocmInterpolate;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
 pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
 pub use loss::RocmLoss;
+pub use norm::{BatchNormTrainHost, LayerNormBackwardHost, RmsNormBackwardHost, RocmNorm};
 pub use ops::RocmBackendOps;
 pub use reduce::RocmReduce;
 pub use scan::RocmScan;

@@ -260,6 +260,7 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 ## 9. 未確認事項
 
 - HIP のシャッフル組み込み関数（64 bit マスク版）の仕様: R1（#3432）で確認済み。`__shfl_xor(var, laneMask, width)` はマスクなし、`__shfl_xor_sync(unsigned long long mask, ...)` は 64 bit マスク（出典: HIP C++ 言語拡張 Warp cross-lane functions、2026-10-18）。`__syncwarp` は記載なし。HIPRTC での実コンパイル・wave64 実機確認は #3159
+- R6（#3437）の正規化カーネルで未確認: `__shfl_xor` の double オーバーロードの HIPRTC 実コンパイル、`#pragma clang fp contract(off)` 下での `__builtin_fma`（f64）の命令化、wave64 での正規化 parity の実測（いずれも #3159。`tests/norm_real_device.rs` の `#[ignore]` テストで確認する）
 - デバイスからの gfx target 取得方法（#3157・#3159）
 - wave64 実機（MI300X 想定。`rocm-cloud-amd-procurement-decision.md`）での縮約順序の差と parity の実測は #3159 まで未検証
 - CUDA 列のファイル対応は `ops.rs` の呼び出しを基に付けた。R 案着手時に各 issue で再確認する
