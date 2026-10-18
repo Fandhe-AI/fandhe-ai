@@ -8,8 +8,12 @@
 //! - `gemm` は [`RocmGemmF32`]（HIPRTC の f32 GEMM。#3155）へ結線する。HIPRTC ソースと
 //!   コンパイルオプションは既存の `GemmSource`・`GfxTarget` 許可リストの経路のままで、
 //!   本モジュールは新しいカーネルソースを足さない（A03）。
-//! - `add`〜`tanh` の 5 メソッドは入出力がホスト常駐 `Tensor<f32>` なので `CpuBackendOps` へ
-//!   委譲する（CPU と bit 一致）。R2（elementwise）でカーネル化する。
+//! - elementwise 一式（R2・#3433）: `add`・`mul`・`relu`・`exp`・`tanh`・`scalar_unary`・
+//!   `scalar_binary`・`where_cond`・`masked_fill`・`run_fused`（elementwise の範囲）・
+//!   `binary_elementwise_device`・`unary_elementwise_device` は HIPRTC カーネル
+//!   （`kernels_elementwise`・`kernels_scalar_op`・`kernels_fused_elementwise`）で実行する。
+//!   結線の本体（ブロードキャスト・形状再検査・`Unsupported` の事前確定）は子モジュール `ew`
+//!   （`ops/ew.rs`）に置き、本ファイルのメソッドは 1 行で委譲する（兄弟 issue との衝突回避）。
 //! - `sum`・`max`・`min`・`argmax`・`argmin`（R3・#3434）は [`RocmReduce`]／[`RocmArgReduce`]
 //!   （HIPRTC。wave 幅は `WarpGeometry` で注入）へ結線する。CUDA 版との対応: sum は `f64`
 //!   アキュムレータ（最後に 1 回 `f32`）、max／min は `fmaxf`／`fminf` の厳密選択、argmax／argmin は
@@ -34,11 +38,16 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, BceKind, Device, Element, HuberKind, KlDivTarget, MseReduction,
-    ShapeError, Tensor, gemm_out_shape, reduce_out_shape, require_same_shape, row_softmax_layout,
+    BackendError, BackendOps, BceKind, BinaryElementwiseOp, Device, DeviceBuffer, Element,
+    FusionPlan, HuberKind, KlDivTarget, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError,
+    Tensor, UnaryElementwiseOp, gemm_out_shape, reduce_out_shape, require_same_shape,
+    row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
+use crate::elementwise::{
+    BinaryKind, RocmElementwise, RocmFusedElementwise, RocmScalarOp, UnaryKind,
+};
 use crate::error::{RocmError, to_backend_error};
 use crate::gemm::RocmGemmF32;
 use crate::loss::{cached_loss, first_bad_target};
@@ -54,22 +63,32 @@ enum Engine {
     HostModel,
 }
 
+/// target ごとにコンパイル済みの実行型を遅延保持する thread_local キャッシュの型。
 type Cache<T> = RefCell<Vec<(GfxTarget, Rc<T>)>>;
 
 thread_local! {
     /// target ごとにコンパイル済みの GEMM を遅延保持する。失敗はキャッシュしない。
     static GEMM_CACHE: Cache<RocmGemmF32> = const { RefCell::new(Vec::new()) };
+    /// elementwise 基本カーネル（R2）。
+    static EW_CACHE: Cache<RocmElementwise> = const { RefCell::new(Vec::new()) };
+    /// scalar-op カーネル群（R2）。
+    static SCALAR_CACHE: Cache<RocmScalarOp> = const { RefCell::new(Vec::new()) };
+    /// 融合インタプリタカーネル（R2）。
+    static FUSED_CACHE: Cache<RocmFusedElementwise> = const { RefCell::new(Vec::new()) };
     /// 縮約（sum/max/min。#3434）。
     static REDUCE_CACHE: Cache<RocmReduce> = const { RefCell::new(Vec::new()) };
     /// 添字縮約（argmax/argmin。#3434）。
     static ARG_REDUCE_CACHE: Cache<RocmArgReduce> = const { RefCell::new(Vec::new()) };
 }
 
-/// thread_local キャッシュ `key` から `target` 用の実行型を取得する（無ければ `ctor` で構築して入れる）。
+/// thread_local キャッシュ `key` から `target` 用の実行型を取得する（無ければ `make` で構築して入れる）。
+///
+/// 構築は HIPRTC コンパイルを伴い高価なので族ごとに遅延し、失敗はキャッシュしない
+/// （ROCm 非搭載のまま後から有効になる環境でも再試行できる）。
 fn cached<T>(
     key: &'static LocalKey<Cache<T>>,
     target: GfxTarget,
-    ctor: impl FnOnce(GfxTarget) -> Result<T, RocmError>,
+    make: fn(GfxTarget) -> Result<T, RocmError>,
 ) -> Result<Rc<T>, RocmError> {
     let hit = key
         .try_with(|c| {
@@ -85,12 +104,12 @@ fn cached<T>(
         return Ok(g);
     }
     // 借用を解いてから構築する（構築中に再入しても二重借用にならない）。
-    let g = Rc::new(ctor(target)?);
+    let g = Rc::new(make(target)?);
     let _ = key.try_with(|c| c.borrow_mut().push((target, Rc::clone(&g))));
     Ok(g)
 }
 
-/// ROCm（AMD GPU）向け `BackendOps`。必須 9 メソッドと縮約 5 メソッド（R3）を実装する。
+/// ROCm（AMD GPU）向け `BackendOps`。必須 9 メソッドに R2 の elementwise 一式・R3 の縮約 5 メソッドを足した実装。
 ///
 /// HIP のデバイス ID は `RocmGemmF32::new` と同じく 0 固定。gfx target の照会は #3157・#3159。
 #[derive(Debug, Clone, Copy)]
@@ -412,6 +431,8 @@ fn check_nll_targets(
     Ok(n)
 }
 
+mod ew;
+
 /// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
 ///
 /// 非最終軸は `Unsupported`（autodiff がホスト参照実装へフォールバックする合図。迂回経路を作らない。
@@ -455,29 +476,96 @@ impl BackendOps for RocmBackendOps {
         gemm_with(a, b, |a, b, m, n, k| self.run_gemm(a, b, m, n, k))
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R2 でカーネル化する。性能は保証しない。
+    /// ブロードキャスト対応の `a + b`（HIPRTC カーネル。R2）。ROCm 非搭載では `DeviceUnavailable`。
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.add(a, b)
+        self.ew_binary(BinaryKind::Add, a, b)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R2 でカーネル化する。性能は保証しない。
+    /// ブロードキャスト対応の `a * b`（HIPRTC カーネル。R2）。
     fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.mul(a, b)
+        self.ew_binary(BinaryKind::Mul, a, b)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R2 でカーネル化する。性能は保証しない。
+    /// `x > 0 ? x : 0`（HIPRTC カーネル。R2。NaN は 0）。
     fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.relu(a)
+        self.ew_unary(UnaryKind::Relu, a)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R2 でカーネル化する。性能は保証しない。
+    /// `expf`（HIPRTC カーネル。R2）。
     fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.exp(a)
+        self.ew_unary(UnaryKind::Exp, a)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R2 でカーネル化する。性能は保証しない。
+    /// `tanhf`（HIPRTC カーネル。R2）。
     fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.tanh(a)
+        self.ew_unary(UnaryKind::Tanh, a)
+    }
+
+    /// `ScalarUnaryOp` 17 kind（対象外 kind は HIP に触れず `Unsupported`）。
+    fn scalar_unary(
+        &self,
+        op: ScalarUnaryOp,
+        a: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.ew_scalar_unary(op, a)
+    }
+
+    /// `ScalarBinaryOp` 9 kind（ブロードキャスト対応。対象外 kind は `Unsupported`）。
+    fn scalar_binary(
+        &self,
+        op: ScalarBinaryOp,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.ew_scalar_binary(op, a, b)
+    }
+
+    /// `cond != 0 ? a : b`。3 本の shape 一致を再検査し、不一致は `ShapeMismatch`。
+    fn where_cond(
+        &self,
+        cond: &Tensor<f32>,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.ew_where(cond, a, b)
+    }
+
+    /// `mask != 0 ? value : x`。shape 不一致は `ShapeMismatch`。
+    fn masked_fill(
+        &self,
+        x: &Tensor<f32>,
+        mask: &Tensor<f32>,
+        value: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.ew_masked_fill(x, mask, value)
+    }
+
+    /// elementwise 融合（静的インタプリタカーネル）。allowlist 外のプランは `Unsupported`。
+    fn run_fused(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.ew_run_fused(plan, leaves)
+    }
+
+    /// デバイス常駐の `add`／`mul`。呼び出しごとに同期する（Metal と同じ。CUDA の非同期ストリームとは異なる）。
+    fn binary_elementwise_device(
+        &self,
+        op: BinaryElementwiseOp,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.ew_binary_device(op, a, b)
+    }
+
+    /// デバイス常駐の `relu`／`exp`／`tanh`。呼び出しごとに同期する。
+    fn unary_elementwise_device(
+        &self,
+        op: UnaryElementwiseOp,
+        a: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.ew_unary_device(op, a)
     }
 
     /// HIPRTC の縮約（R3・#3434）。`f64` アキュムレータで逐次／2 段に加算し最後に 1 回 `f32` へ
@@ -1255,6 +1343,7 @@ mod tests {
         assert_eq!(o.softmax(&e, 1).unwrap().shape(), &[0, 3]);
     }
 
+    /// sum/max は R3 までホスト経路（CPU 委譲）。add〜tanh は R2 でカーネル化済み（`ops/ew.rs` のテスト）。
     #[test]
     fn host_paths_match_cpu_bitwise() {
         let o = ops();
