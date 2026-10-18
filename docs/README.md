@@ -485,6 +485,7 @@ docs/
     │   ├── logs/metal-conv1d-1769/ # Metal Conv1d を Conv2d の特化として実装する（#1769）の実行コマンド・保存すべきログ一覧・事前登録判定規則のみを記載する README（#1768 分の実測も兼ねる）。本エージェント実行環境に Apple Silicon 実機への到達手段がなく実測は未実施のまま記入欄を残す（内部ホスト名は含めない。イシュー #1769）
     │   ├── logs/cuda-batch-norm-1735/ # CUDA BatchNorm1d／2d（train／eval・running stats。#1735）の実行コマンド・保存すべきログ一覧・事前登録判定規則。**2026-09-16 実測済み（#1903）**: BatchNorm parity 14 pass（内部ホスト名は含めない。イシュー #1735）
     │   ├── logs/cuda-pooling-1729/ # CUDA MaxPool／AvgPool／AdaptiveAvgPool（forward カーネル。#1729）の実行コマンド・保存すべきログ一覧・事前登録判定規則。**2026-09-16 実測済み（#1903）**: Pooling parity 14 pass（内部ホスト名は含めない。イシュー #1729）
+    │   ├── logs/rocm-parity-3159/ # ROCm（MI300X・gfx942）対 CPU の f32 GEMM parity の事前登録 `RULE.txt`・実行スクリプト `run_rocm_parity.sh`・記入欄つき `README.md`。**未実測**（所有者のインスタンス起動待ち。測れる Op は GEMM と probe のみ。イシュー #3159）
     │   ├── logs/metal-batch-norm-1736/ # BatchNorm1d／2d の Metal train／infer 融合カーネル（#1736）の実行コマンド・保存すべきログ一覧・事前登録判定規則。**2026-09-16 実測済み（#1902）**: BatchNorm 10 pass（内部ホスト名は含めない。イシュー #1736）
     │   ├── logs/conv-realdevice-1771/ # Conv1d／Conv2d の CUDA／Metal 実機 parity・実測ランブック（#1766〜#1770 の実行手順・判定規則を統合。`README.md`・`run_ignored_tests_{cuda,metal}.sh`・`env_info.txt`）。**2026-09-16 実測済み（#1903）**: CUDA〈#1903〉／Metal〈#1902〉とも forward parity は pass・backward と bit 一致契約は `Var::sum` 未実装により判定不能（内部ホスト名は含めない。イシュー #1771）
     │   ├── logs/metal-pooling-1730/ # MaxPool／AvgPool／AdaptiveAvgPool（1d／2d。#1730）の Metal 実機 `pooling_parity.rs` 実行コマンド・保存すべきログ一覧・判定規則。**2026-09-16 実測済み（#1902）**: Pooling parity 9 pass（内部ホスト名は含めない。イシュー #1730）
