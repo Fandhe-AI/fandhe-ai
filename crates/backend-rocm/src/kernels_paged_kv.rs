@@ -144,6 +144,8 @@ extern "C" __global__ __launch_bounds__(PAGED_ATTENTION_BLOCK_DIM) void paged_at
     float scale)
 {
     __shared__ int s_bad;
+    // Per-thread violation flags (written only by the owning thread; aggregated by thread 0 after a barrier).
+    __shared__ int s_bad_flags[PAGED_ATTENTION_BLOCK_DIM];
     __shared__ float s_max;
     __shared__ float s_sum;
 
@@ -179,8 +181,8 @@ extern "C" __global__ __launch_bounds__(PAGED_ATTENTION_BLOCK_DIM) void paged_at
     __syncthreads();
 
     // 1. score: j in logical order, Dh axis accumulated sequentially with an explicit FMA.
-    // A per-thread violation flag is folded into the shared flag after the loop (every writer stores
-    // the same value 1, so the stores do not race in effect); the barrier below publishes it.
+    // Each thread keeps its violation flag in its own shared slot; after a barrier thread 0 folds them
+    // into s_bad (single writer, no data race). The barrier after that publishes it.
     int bad_local = 0;
     if (!s_bad) {
         for (int j = threadIdx.x; j < limit; j += blockDim.x) {
@@ -197,19 +199,25 @@ extern "C" __global__ __launch_bounds__(PAGED_ATTENTION_BLOCK_DIM) void paged_at
             long long k_off = (((long long)id * block_size + (j % block_size)) * (long long)embed_dim)
                 + (long long)h * head_dim;
             float acc = 0.0f;
-            for (int d = 0; d < head_dim; ++d) {
+            for (long long d = 0; d < head_dim; ++d) {
                 acc = __builtin_fmaf(q[q_off + d] * scale, k_pool[k_off + d], acc);
             }
             score_row[j] = acc;
         }
-        if (bad_local) {
-            s_bad = 1;
-        }
     }
+    s_bad_flags[threadIdx.x] = bad_local;
     // Also the barrier after the score writes (they are read by other threads below).
     __syncthreads();
+    if (threadIdx.x == 0) {
+        int any_bad = s_bad;
+        for (int t = 0; t < (int)blockDim.x; ++t) {
+            any_bad |= s_bad_flags[t];
+        }
+        s_bad = any_bad;
+    }
+    __syncthreads();
     if (s_bad) {
-        for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        for (long long d = threadIdx.x; d < head_dim; d += blockDim.x) {
             out[q_off + d] = PAGED_QNAN;
         }
         return;
@@ -244,7 +252,7 @@ extern "C" __global__ __launch_bounds__(PAGED_ATTENTION_BLOCK_DIM) void paged_at
 
     // 4. weighted sum: for each component d, j sequentially in logical order. The block table was
     //    checked in the score stage, but the manual bound checks are kept.
-    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+    for (long long d = threadIdx.x; d < head_dim; d += blockDim.x) {
         float o = 0.0f;
         bool bad = false;
         for (int j = 0; j < limit; ++j) {
