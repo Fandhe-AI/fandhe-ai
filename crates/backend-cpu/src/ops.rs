@@ -4609,11 +4609,6 @@ mod device_resident_elementwise_tests {
     }
 }
 
-/// `BackendOps::col2im` の入力形状検査（PR #1862 codex-review P1 是正）の
-/// 回帰テスト。`crate::im2col::col2im` へ委譲する前に
-/// `im2col_out_shape(input_shape, params)` で期待形状を求め
-/// `d_col.shape()` との完全一致を検査することを確認する
-/// （rank 不正・`d_col` 形状不一致・空要素形状の 3 系統）。
 /// `sgd_step_device` 用: ハンドル実体の長さが shape 要素数と一致するかを
 /// 書き込み前に検証する（REQ-8・OWASP A03。zip は短い側へ黙って切り詰め
 /// るため、この検証が部分更新を構造的に防ぐ）。
@@ -4770,6 +4765,11 @@ mod sgd_step_device_length_tests {
     }
 }
 
+/// `BackendOps::col2im` の入力形状検査（PR #1862 codex-review P1 是正）の
+/// 回帰テスト。`crate::im2col::col2im` へ委譲する前に
+/// `im2col_out_shape(input_shape, params)` で期待形状を求め
+/// `d_col.shape()` との完全一致を検査することを確認する
+/// （rank 不正・`d_col` 形状不一致・空要素形状の 3 系統）。
 #[cfg(test)]
 mod col2im_shape_validation_tests {
     use super::*;
