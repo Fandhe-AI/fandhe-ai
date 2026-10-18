@@ -8,16 +8,22 @@
 //! - `gemm` は [`RocmGemmF32`]（HIPRTC の f32 GEMM。#3155）へ結線する。HIPRTC ソースと
 //!   コンパイルオプションは既存の `GemmSource`・`GfxTarget` 許可リストの経路のままで、
 //!   本モジュールは新しいカーネルソースを足さない（A03）。
-//! - `sum`・`max` の 2 メソッドは入出力がホスト常駐 `Tensor<f32>` なので `CpuBackendOps` へ
-//!   委譲する（CPU と bit 一致）。R3（縮約）でカーネル化する。
 //! - elementwise 一式（R2・#3433）: `add`・`mul`・`relu`・`exp`・`tanh`・`scalar_unary`・
 //!   `scalar_binary`・`where_cond`・`masked_fill`・`run_fused`（elementwise の範囲）・
 //!   `binary_elementwise_device`・`unary_elementwise_device` は HIPRTC カーネル
 //!   （`kernels_elementwise`・`kernels_scalar_op`・`kernels_fused_elementwise`）で実行する。
 //!   結線の本体（ブロードキャスト・形状再検査・`Unsupported` の事前確定）は子モジュール `ew`
 //!   （`ops/ew.rs`）に置き、本ファイルのメソッドは 1 行で委譲する（兄弟 issue との衝突回避）。
-//! - `RocmGemmF32` は生ポインタを持つため `!Send`・`!Sync` で、`unsafe impl` は足さない。
-//!   Tape（`Box<dyn BackendOps + Send>`）に載せるため、コンパイル済み GEMM は thread_local の
+//! - `sum`・`max`・`min`・`argmax`・`argmin`（R3・#3434）は [`RocmReduce`]／[`RocmArgReduce`]
+//!   （HIPRTC。wave 幅は `WarpGeometry` で注入）へ結線する。CUDA 版との対応: sum は `f64`
+//!   アキュムレータ（最後に 1 回 `f32`）、max／min は `fmaxf`／`fminf` の厳密選択、argmax／argmin は
+//!   チャンク分割 2 段。空縮約（`numel == 0`。sum の 0 埋め・max 等の `EmptyReduction` 文言）は
+//!   カーネルを起動せず `CpuBackendOps` へ委譲し、CPU と完全に同じ結果・エラーにする（二重実装を
+//!   避ける）。CUDA の `*_lastaxis_f32`（1 warp = 1 行の coalesced 版）は移植せず、`inner == 1` も
+//!   汎用の軸縮約で処理する（性能面の follow-up）。
+//! - `RocmGemmF32`・`RocmReduce`・`RocmArgReduce` は生ポインタを持つため `!Send`・`!Sync` で、
+//!   `unsafe impl` は足さない。
+//!   Tape（`Box<dyn BackendOps + Send>`）に載せるため、コンパイル済みカーネルは thread_local の
 //!   遅延キャッシュに置き、構造体は `Copy` の値だけを持つ（CUDA の `context_cache` と同じ考え方）。
 //!   残るリスク: スレッド終了時に `hipModuleUnload` が走る。プロセス終了時の TLS 破棄順は保証されない。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
@@ -29,14 +35,16 @@ use std::thread::LocalKey;
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, BinaryElementwiseOp, Device, DeviceBuffer, FusionPlan,
-    ScalarBinaryOp, ScalarUnaryOp, Tensor, UnaryElementwiseOp, gemm_out_shape,
+    ScalarBinaryOp, ScalarUnaryOp, Tensor, UnaryElementwiseOp, gemm_out_shape, reduce_out_shape,
 };
 
+use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
 use crate::elementwise::{
     BinaryKind, RocmElementwise, RocmFusedElementwise, RocmScalarOp, UnaryKind,
 };
 use crate::error::{RocmError, to_backend_error};
 use crate::gemm::RocmGemmF32;
+use crate::reduce::{ReduceKind, RocmReduce, reduce_axis_layout};
 use crate::target::GfxTarget;
 
 /// 実行経路。`HostModel` はテスト専用（実機なしで組み立て経路を検証する）。
@@ -59,6 +67,10 @@ thread_local! {
     static SCALAR_CACHE: Cache<RocmScalarOp> = const { RefCell::new(Vec::new()) };
     /// 融合インタプリタカーネル（R2）。
     static FUSED_CACHE: Cache<RocmFusedElementwise> = const { RefCell::new(Vec::new()) };
+    /// 縮約（sum/max/min。#3434）。
+    static REDUCE_CACHE: Cache<RocmReduce> = const { RefCell::new(Vec::new()) };
+    /// 添字縮約（argmax/argmin。#3434）。
+    static ARG_REDUCE_CACHE: Cache<RocmArgReduce> = const { RefCell::new(Vec::new()) };
 }
 
 /// thread_local キャッシュ `key` から `target` 用の実行型を取得する（無ければ `make` で構築して入れる）。
@@ -89,7 +101,7 @@ fn cached<T>(
     Ok(g)
 }
 
-/// ROCm（AMD GPU）向け `BackendOps`。R0 の必須 9 メソッドに R2 の elementwise 一式を足した実装。
+/// ROCm（AMD GPU）向け `BackendOps`。必須 9 メソッドに R2 の elementwise 一式・R3 の縮約 5 メソッドを足した実装。
 ///
 /// HIP のデバイス ID は `RocmGemmF32::new` と同じく 0 固定。gfx target の照会は #3157・#3159。
 #[derive(Debug, Clone, Copy)]
@@ -100,7 +112,7 @@ pub struct RocmBackendOps {
 }
 
 impl RocmBackendOps {
-    /// `target` 向けの ops を作る。失敗せず、ROCm には触れない（GEMM 初回実行時に遅延コンパイルする）。
+    /// `target` 向けの ops を作る。失敗せず、ROCm には触れない（初回実行時に遅延コンパイルする）。
     pub fn new(target: GfxTarget) -> Self {
         Self {
             target,
@@ -114,12 +126,147 @@ impl RocmBackendOps {
         self.target
     }
 
-    /// テスト専用: GEMM を CPU 上の添字モデル（`gemm_model::simulate`）で計算する。
+    /// テスト専用: GEMM・縮約を CPU 上の添字モデル（`gemm_model`・`reduce_model`・
+    /// `arg_reduce_model`）で計算する。
     #[cfg(test)]
     pub(crate) fn with_host_model(target: GfxTarget) -> Self {
         Self {
             engine: Engine::HostModel,
             ..Self::new(target)
+        }
+    }
+
+    /// sum／max／min の dispatch（形状検査 → 空縮約の CPU 委譲 → contiguous 化 → カーネル）。
+    fn reduce_dispatch(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+        kind: ReduceKind,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        if a.numel() == 0 {
+            // 空縮約（sum の 0 埋め・max/min の EmptyReduction・空出力）は HIP に触れず CPU と
+            // 同じ結果・エラー文言にする。
+            return match kind {
+                ReduceKind::Sum => self.cpu.sum(a, dim),
+                ReduceKind::Max => self.cpu.max(a, dim),
+                ReduceKind::Min => self.cpu.min(a, dim),
+            };
+        }
+        let c = a.contiguous();
+        let x = c.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("reduce: input not contiguous".into())
+        })?;
+        let data = match dim {
+            None => vec![self.run_reduce_all(kind, x).map_err(to_backend_error)?],
+            Some(axis) => {
+                let (outer, axis_len, inner) =
+                    reduce_axis_layout(a.shape(), axis).map_err(to_backend_error)?;
+                self.run_reduce_axis(kind, x, outer, axis_len, inner)
+                    .map_err(to_backend_error)?
+            }
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// argmax／argmin の dispatch（[`Self::reduce_dispatch`] と同じ形。出力は `Tensor<i32>`）。
+    fn arg_reduce_dispatch(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+        kind: ArgReduceKind,
+    ) -> Result<Tensor<i32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        if a.numel() == 0 {
+            return match kind {
+                ArgReduceKind::Max => self.cpu.argmax(a, dim),
+                ArgReduceKind::Min => self.cpu.argmin(a, dim),
+            };
+        }
+        let c = a.contiguous();
+        let x = c.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("arg_reduce: input not contiguous".into())
+        })?;
+        let data = match dim {
+            None => vec![self.run_arg_all(kind, x).map_err(to_backend_error)?],
+            Some(axis) => {
+                let (outer, axis_len, inner) =
+                    reduce_axis_layout(a.shape(), axis).map_err(to_backend_error)?;
+                self.run_arg_axis(kind, x, outer, axis_len, inner)
+                    .map_err(to_backend_error)?
+            }
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    fn run_reduce_all(&self, kind: ReduceKind, x: &[f32]) -> Result<f32, RocmError> {
+        match self.engine {
+            Engine::Hip => cached(&REDUCE_CACHE, self.target, RocmReduce::new)?.run_all(kind, x),
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_all(x.len())?;
+                crate::reduce_model::simulate_all(
+                    crate::warp_geometry::WarpGeometry::for_target(self.target),
+                    kind,
+                    x,
+                )
+                .map_err(model_err)
+            }
+        }
+    }
+
+    fn run_reduce_axis(
+        &self,
+        kind: ReduceKind,
+        x: &[f32],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<Vec<f32>, RocmError> {
+        match self.engine {
+            Engine::Hip => cached(&REDUCE_CACHE, self.target, RocmReduce::new)?
+                .run_axis(kind, x, outer, axis_len, inner),
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_axis(x.len(), outer, axis_len, inner)?;
+                Ok(crate::reduce_model::simulate_axis(
+                    kind, x, outer, axis_len, inner,
+                ))
+            }
+        }
+    }
+
+    fn run_arg_all(&self, kind: ArgReduceKind, x: &[f32]) -> Result<i32, RocmError> {
+        match self.engine {
+            Engine::Hip => {
+                cached(&ARG_REDUCE_CACHE, self.target, RocmArgReduce::new)?.run_all(kind, x)
+            }
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_all(x.len())?;
+                Ok(crate::arg_reduce_model::simulate_all(kind, x))
+            }
+        }
+    }
+
+    fn run_arg_axis(
+        &self,
+        kind: ArgReduceKind,
+        x: &[f32],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<Vec<i32>, RocmError> {
+        match self.engine {
+            Engine::Hip => cached(&ARG_REDUCE_CACHE, self.target, RocmArgReduce::new)?
+                .run_axis(kind, x, outer, axis_len, inner),
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_axis(x.len(), outer, axis_len, inner)?;
+                Ok(crate::arg_reduce_model::simulate_axis(
+                    kind, x, outer, axis_len, inner,
+                ))
+            }
         }
     }
 
@@ -278,14 +425,41 @@ impl BackendOps for RocmBackendOps {
         self.ew_unary_device(op, a)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R3 でカーネル化する。性能は保証しない。
+    /// HIPRTC の縮約（R3・#3434）。`f64` アキュムレータで逐次／2 段に加算し最後に 1 回 `f32` へ
+    /// downcast する（CUDA 版と同じ契約）。全軸は block/lane の結合順序が CPU と異なるため統一複合判定、
+    /// 軸指定は CPU と bit 一致。空縮約は CPU へ委譲。ROCm 非搭載では `DeviceUnavailable`。
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.sum(a, dim)
+        self.reduce_dispatch(a, dim, ReduceKind::Sum)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R3 でカーネル化する。性能は保証しない。
+    /// HIPRTC の縮約（R3・#3434）。`fmaxf` の厳密選択（NaN を伝播しない。`f32::max` と同じ）。
+    /// 空縮約は CPU の `EmptyReduction` と同じ結果にするため CPU へ委譲する。
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.max(a, dim)
+        self.reduce_dispatch(a, dim, ReduceKind::Max)
+    }
+
+    /// HIPRTC の縮約（R3・#3434）。`fminf` の厳密選択。契約は [`Self::max`] と対称。
+    fn min(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        self.reduce_dispatch(a, dim, ReduceKind::Min)
+    }
+
+    /// HIPRTC の添字縮約（R3・#3434）。タイは最初の添字・NaN は無視・全 NaN は 0
+    /// （`backend-cpu::reduction::argmax` と同じ走査契約）。空縮約は CPU へ委譲する。
+    fn argmax(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        self.arg_reduce_dispatch(a, dim, ArgReduceKind::Max)
+    }
+
+    /// HIPRTC の添字縮約（R3・#3434）。契約は [`Self::argmax`] と対称（`v < best` で更新）。
+    fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        self.arg_reduce_dispatch(a, dim, ArgReduceKind::Min)
+    }
+}
+
+/// テスト専用: ホストモデルが検出した未定義動作相当の読み書きを `RocmError` へ写す。
+#[cfg(test)]
+fn model_err(e: crate::reduce_model::ModelError) -> RocmError {
+    RocmError::InvalidKernelConfig {
+        detail: format!("ホストモデルが不正アクセスを検出: {e:?}"),
     }
 }
 
@@ -433,7 +607,6 @@ mod tests {
             );
         }
         let x = t(6, &[2, 3], 1);
-        assert!(matches!(o.min(&x, None), Err(BackendError::Unsupported(_))));
         assert!(matches!(
             o.softmax(&x, 1),
             Err(BackendError::Unsupported(_))
@@ -460,6 +633,61 @@ mod tests {
         // 空の形状は HIP を触らず Ok。
         let (e, f) = (t(0, &[0, 2], 1), t(4, &[2, 2], 2));
         assert_eq!(o.gemm(&e, &f).unwrap().shape(), &[0, 2]);
+
+        // 縮約 5 メソッドも非搭載では DeviceUnavailable（panic しない）。
+        for dim in [None, Some(0), Some(1)] {
+            assert!(matches!(
+                o.sum(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.max(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.min(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.argmax(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.argmin(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+        }
+        // 空縮約は HIP に触れず CPU と同じ結果・エラー（Debug 文字列まで一致）。
+        let c = CpuBackendOps;
+        let empty = Tensor::<f32>::zeros(&[0]).unwrap();
+        let empty2 = Tensor::<f32>::zeros(&[2, 0]).unwrap();
+        for (x, dim) in [
+            (&empty, None),
+            (&empty2, None),
+            (&empty2, Some(0)),
+            (&empty2, Some(1)),
+        ] {
+            assert_eq!(
+                format!("{:?}", o.sum(x, dim)),
+                format!("{:?}", c.sum(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.max(x, dim)),
+                format!("{:?}", c.max(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.min(x, dim)),
+                format!("{:?}", c.min(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmax(x, dim)),
+                format!("{:?}", c.argmax(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmin(x, dim)),
+                format!("{:?}", c.argmin(x, dim))
+            );
+        }
     }
 
     /// sum/max は R3 までホスト経路（CPU 委譲）。add〜tanh は R2 でカーネル化済み（`ops/ew.rs` のテスト）。
@@ -468,14 +696,101 @@ mod tests {
         let o = ops();
         let c = CpuBackendOps;
         let a = t(12, &[3, 4], 1);
-        for dim in [None, Some(0), Some(1)] {
+        let b = t(4, &[1, 4], 2);
+        same(&o.add(&a, &b).unwrap(), &c.add(&a, &b).unwrap());
+        same(&o.mul(&a, &b).unwrap(), &c.mul(&a, &b).unwrap());
+        same(&o.relu(&a).unwrap(), &c.relu(&a).unwrap());
+        same(&o.exp(&a).unwrap(), &c.exp(&a).unwrap());
+        same(&o.tanh(&a).unwrap(), &c.tanh(&a).unwrap());
+        // R3 の縮約は HostModel（reduce_model／arg_reduce_model の逐語モデル）経由で CPU と照合する。
+        // 軸指定の sum と max/min は bit 一致、全軸 sum は結合順序が異なるため統一複合判定。
+        for dim in [Some(0), Some(1)] {
             same(&o.sum(&a, dim).unwrap(), &c.sum(&a, dim).unwrap());
+        }
+        assert_parity(
+            "sum all",
+            o.sum(&a, None).unwrap().as_slice().unwrap(),
+            c.sum(&a, None).unwrap().as_slice().unwrap(),
+        );
+        for dim in [None, Some(0), Some(1)] {
             same(&o.max(&a, dim).unwrap(), &c.max(&a, dim).unwrap());
+            same(&o.min(&a, dim).unwrap(), &c.min(&a, dim).unwrap());
+            assert_eq!(
+                o.argmax(&a, dim).unwrap().as_slice(),
+                c.argmax(&a, dim).unwrap().as_slice()
+            );
+            assert_eq!(
+                o.argmin(&a, dim).unwrap().as_slice(),
+                c.argmin(&a, dim).unwrap().as_slice()
+            );
         }
         let empty = Tensor::<f32>::zeros(&[0]).unwrap();
-        assert_eq!(
-            format!("{:?}", o.max(&empty, None)),
-            format!("{:?}", c.max(&empty, None))
-        );
+        let empty2 = Tensor::<f32>::zeros(&[2, 0]).unwrap();
+        for (x, dim) in [
+            (&empty, None),
+            (&empty2, None),
+            (&empty2, Some(0)),
+            (&empty2, Some(1)),
+        ] {
+            assert_eq!(
+                format!("{:?}", o.sum(x, dim)),
+                format!("{:?}", c.sum(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.max(x, dim)),
+                format!("{:?}", c.max(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.min(x, dim)),
+                format!("{:?}", c.min(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmax(x, dim)),
+                format!("{:?}", c.argmax(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmin(x, dim)),
+                format!("{:?}", c.argmin(x, dim))
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_ops_non_contiguous_and_bad_dim() {
+        let o = ops();
+        let c = CpuBackendOps;
+        // 非連続（転置 view）入力。
+        let a = t(5 * 7, &[5, 7], 8).transpose_2d().unwrap();
+        for dim in [Some(0), Some(1)] {
+            same(&o.sum(&a, dim).unwrap(), &c.sum(&a, dim).unwrap());
+            same(&o.max(&a, dim).unwrap(), &c.max(&a, dim).unwrap());
+            same(&o.min(&a, dim).unwrap(), &c.min(&a, dim).unwrap());
+            assert_eq!(
+                o.argmax(&a, dim).unwrap().as_slice(),
+                c.argmax(&a, dim).unwrap().as_slice()
+            );
+        }
+        // 範囲外の dim は ShapeMismatch（CPU と同じ）。
+        let x = t(6, &[2, 3], 1);
+        assert!(matches!(
+            o.sum(&x, Some(2)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            o.max(&x, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            o.argmin(&x, Some(2)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        // 出力 shape と 3 次元の全軸・各軸。
+        let y = t(2 * 3 * 5, &[2, 3, 5], 4);
+        for dim in [Some(0), Some(1), Some(2)] {
+            let got = o.sum(&y, dim).unwrap();
+            assert_eq!(got.shape(), c.sum(&y, dim).unwrap().shape());
+            same(&got, &c.sum(&y, dim).unwrap());
+        }
+        assert_eq!(o.max(&y, None).unwrap().shape(), &[] as &[usize]);
     }
 }
