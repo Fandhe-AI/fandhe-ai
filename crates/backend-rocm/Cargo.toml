@@ -4,8 +4,8 @@
 # probe でき、HIPRTC でコンパイルした f32 GEMM カーネル（#3155）と、内部 opt-in ゲート配下の
 # 線形代数 f64 カーネル（#3444）を起動できる。
 #
-# 依存方向: 通常依存は libloading のみ（BackendOps の実装は R0 #3431 以降）。
-# facade からも参照しない（Device への ROCm 追加は #3157）。
+# 依存方向: `tensor-core`（`BackendOps` 等）と `backend-cpu`（ホスト経路の委譲先・parity 参照）へ
+# 依存する（R0・イシュー #3431）。facade からは参照しない（Device への ROCm 追加は #3157）。
 #
 # 公開区分: `publish = false`（workspace 既定を継承）。
 #
@@ -22,15 +22,9 @@ publish.workspace = true
 
 [dependencies]
 libloading.workspace = true
-
-[dev-dependencies]
-# CPU 参照実装（`gemm_naive`・`assert_parity`）を GEMM のホスト側モデル照合・実機 parity の比較対象に使う
-# （src/gemm_model.rs・tests/gemm_real_device.rs）。workspace 内クレート同士の path 依存で、
-# 許容依存区分（外部クレート）の新規追加には当たらない。`version` を付けない理由は
-# backend-cuda の同名 dev-dependency と同じ（イシュー #881。公開物へ残らない・非公開クレート）。
-fandhe-ai-backend-cpu = { path = "../backend-cpu" }
-# 線形代数（#3444）のホスト側モデル・実機 parity が CPU 参照（`CpuBackendOps::linalg_*`）を
-# `BackendOps` trait 経由で呼ぶために `Tensor`・`BackendOps` が要る。workspace 内クレート同士の
-# path 依存で外部クレートの新規追加には当たらず、`Cargo.lock` の変化は本クレートの依存一覧への
-# 1 行追加のみ（R0 #3431 が通常依存へ昇格する予定）。
+# `impl BackendOps for RocmBackendOps`（src/ops.rs）の trait・Tensor・エラー型。workspace 内の path 依存で
+# 許容依存区分（外部クレート）の追加には当たらない。`publish = false` のため `version` は付けない
+# （crates.io 公開する場合は version の併記が必要。公開可否は所有者判断・被覆計画 §8 の Q2）。
 fandhe-ai-tensor-core = { path = "../tensor-core" }
+# ホスト経路 7 メソッドの委譲先（R2・R3 でカーネル化するまで）と、テストの CPU 参照。
+fandhe-ai-backend-cpu = { path = "../backend-cpu" }

@@ -12,7 +12,7 @@
 | 未検証 | §6 の実機項目すべて（MI300X・gfx942。#3159）。実機テスト（`#[ignore]`）は実行していない |
 | #3444 追記 | `linalg.rs` の起動 5 件（L1〜L5。§3.5）を追加し、`DeviceBuffer` を型付き（`DeviceBuffer<T>`。`f32`・`f64`・`i32`）にして M5〜M7 の前提を `elems*size_of::<T>()` へ改めた。ブロック総数は 33 → 38。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R1・#3432） | `WarpGeometry` は `unsafe` を追加しない（監査表の件数は不変） |
-| 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する |
+| 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する。R0（#3431）は新しい `unsafe` を足さない（インベントリは 33／10／17／0 のまま。`unsafe impl Send/Sync` もなし） |
 
 ## 2. 機械的インベントリ
 

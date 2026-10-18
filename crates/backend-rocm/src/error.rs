@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use fandhe_ai_tensor_core::BackendError;
+
 /// ROCm バックエンドのエラー。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -131,3 +133,92 @@ impl fmt::Display for RocmError {
 }
 
 impl std::error::Error for RocmError {}
+
+/// [`RocmError`] を `tensor-core` の `BackendError` へ写す（`ops.rs` の `BackendOps` 実装が使う）。
+///
+/// 公開の `From` 実装にはしない（公開面を増やさない）。同一クレート内で網羅 `match` とし、
+/// variant の追加をコンパイルで検出する。
+///
+/// | `RocmError` | `BackendError` |
+/// |---|---|
+/// | `LibraryUnavailable`・`SymbolMissing`・`NoDevice`・`UnsupportedTarget` | `DeviceUnavailable` |
+/// | 上記以外（HIP/HIPRTC 失敗・不正な設定・形状） | `KernelLaunchFailed` |
+pub(crate) fn to_backend_error(e: RocmError) -> BackendError {
+    let msg = e.to_string();
+    match e {
+        RocmError::LibraryUnavailable { .. }
+        | RocmError::SymbolMissing { .. }
+        | RocmError::NoDevice
+        | RocmError::UnsupportedTarget { .. } => BackendError::DeviceUnavailable(msg),
+        RocmError::Hip { .. }
+        | RocmError::Hiprtc { .. }
+        | RocmError::CompileFailed { .. }
+        | RocmError::CodeObjectEmpty
+        | RocmError::InvalidKernelConfig { .. }
+        | RocmError::InvalidGemmDims { .. }
+        | RocmError::InvalidLinalgDims { .. }
+        | RocmError::LinalgInvalidArgument { .. }
+        | RocmError::LinalgKernelStatusInvalid { .. }
+        | RocmError::InvalidCString { .. } => BackendError::KernelLaunchFailed(msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_backend_error_maps_every_variant() {
+        let unavailable = [
+            RocmError::LibraryUnavailable {
+                tried: vec![],
+                detail: String::new(),
+            },
+            RocmError::SymbolMissing {
+                symbol: "s",
+                detail: String::new(),
+            },
+            RocmError::NoDevice,
+            RocmError::UnsupportedTarget {
+                detail: String::new(),
+            },
+        ];
+        for e in unavailable {
+            assert!(matches!(
+                to_backend_error(e),
+                BackendError::DeviceUnavailable(_)
+            ));
+        }
+        let launch = [
+            RocmError::Hip { call: "c", code: 1 },
+            RocmError::Hiprtc { call: "c", code: 1 },
+            RocmError::CompileFailed {
+                code: 1,
+                log: String::new(),
+            },
+            RocmError::CodeObjectEmpty,
+            RocmError::InvalidKernelConfig {
+                detail: String::new(),
+            },
+            RocmError::InvalidGemmDims {
+                detail: String::new(),
+            },
+            RocmError::InvalidLinalgDims {
+                detail: String::new(),
+            },
+            RocmError::LinalgInvalidArgument {
+                detail: String::new(),
+            },
+            RocmError::LinalgKernelStatusInvalid {
+                detail: String::new(),
+            },
+            RocmError::InvalidCString { what: "w" },
+        ];
+        for e in launch {
+            assert!(matches!(
+                to_backend_error(e),
+                BackendError::KernelLaunchFailed(_)
+            ));
+        }
+    }
+}
