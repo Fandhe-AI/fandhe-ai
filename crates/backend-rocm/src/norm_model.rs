@@ -14,21 +14,30 @@
 use crate::launch::for_each_thread_gid;
 use crate::warp_geometry::WarpGeometry;
 
-/// 1 wave 分の lane ストライド蓄積と xor butterfly（`wave_sum_f64` ＋ 呼び出し側の蓄積ループ）。
-/// 全 lane が同じ値になるので lane 0 を返す。
-fn wave_reduce(geom: WarpGeometry, n: usize, mut contribute: impl FnMut(usize, f64) -> f64) -> f64 {
-    let w = geom.width() as usize;
-    let mut lanes = vec![0.0f64; w];
+/// 論理 32 lane の stride 蓄積と xor butterfly（`wave_sum_f64` ＋ 呼び出し側の蓄積ループの逐語再現）。
+///
+/// 縮約 lane は物理 wave 幅（32／64）によらず常に 32（`kernels_norm.rs` の `LOGICAL_LANES`）。
+/// lane `l` が `i = l, l + 32, …` を逐次蓄積し、offset 16 → 1 の butterfly で足す。
+/// これは CPU／autodiff 参照（`layer_norm.rs`・`eval::warp_reduce_f64`）と同じ結合順序で、
+/// wave64 の上位 32 lane は部分和 0 のまま下位 lane の結果を受け取る（全 lane 同値）。
+/// `geom` はカーネルとの対応を示す引数として残す（結果は幅に依存しない）。
+fn wave_reduce(
+    _geom: WarpGeometry,
+    n: usize,
+    mut contribute: impl FnMut(usize, f64) -> f64,
+) -> f64 {
+    const LOGICAL_LANES: usize = 32;
+    let mut lanes = [0.0f64; LOGICAL_LANES];
     for (lane, slot) in lanes.iter_mut().enumerate() {
         let mut i = lane;
         while i < n {
             *slot = contribute(i, *slot);
-            i += w;
+            i += LOGICAL_LANES;
         }
     }
-    let mut offset = geom.half_width() as usize;
+    let mut offset = LOGICAL_LANES / 2;
     while offset > 0 {
-        let snap = lanes.clone();
+        let snap = lanes;
         for (lane, slot) in lanes.iter_mut().enumerate() {
             *slot = snap[lane] + snap[lane ^ offset];
         }
@@ -617,22 +626,26 @@ pub(crate) mod tests {
 
     #[test]
     fn backward_cancellation_inputs_stay_within_parity() {
-        // 相殺を含む符号付き入力（結合順序で dx が O(1) 乖離しうる系）。参照も同じ 32 lane 順。
+        // 相殺を含む符号付き入力。論理 32 lane 順で縮約するので wave32／wave64 とも参照と
+        // 統一複合判定（許容誤差は緩和しない）で一致する。lane 0／32／64 は同じ lane 0 の stripe。
         for geom in [G32(), G64()] {
-            let hidden = 64usize;
-            let x = lcg(hidden, 41);
+            let hidden = 128usize;
+            let x = vec![1.0f32; hidden];
             let mut dy = vec![0.0f32; hidden];
             dy[0] = 1e20;
-            dy[1] = 1.0;
-            dy[2] = -1e20;
+            dy[32] = -1e20;
+            dy[64] = 1.0;
             let (dx, _) = rmsnorm_backward(geom, &x, None, &dy, 1e-5, 1, hidden);
             let (rdx, _) = ref_rmsnorm_backward(&x, None, &dy, 1e-5, 1, hidden);
-            if geom.width() == 32 {
-                assert_parity("cancel W32", &dx, &rdx);
-            } else {
-                // 幅 64 は縮約順序が異なるため相殺入力での乖離は結果が有限であることだけを確認する。
-                assert!(dx.iter().all(|v| v.is_finite()));
-            }
+            assert_parity("rms cancel", &dx, &rdx);
+            // 修正前の wave64 経路は dx[1] が -0.0 になり参照（約 -0.00781238）と乖離した。
+            assert!(dx[1] != 0.0, "{}", dx[1]);
+
+            // 相殺が起きる x（定数でない）でも照合する。
+            let xv = lcg(hidden, 43);
+            let (dx, _, _) = layer_norm_backward(geom, &xv, None, true, &dy, 1e-5, 1, hidden);
+            let (rdx, _, _) = ref_layer_norm_backward(&xv, None, true, &dy, 1e-5, 1, hidden);
+            assert_parity("ln cancel", &dx, &rdx);
         }
     }
 
@@ -700,8 +713,10 @@ pub(crate) mod tests {
     #[test]
     fn wave_reduce_matches_32_lane_reference_and_is_lane_uniform() {
         let v = lcg(257, 71);
-        let a = wave_reduce(G32(), v.len(), |i, acc| acc + v[i] as f64);
         let b = warp_reduce32(v.len(), |i, acc| acc + v[i] as f64);
-        assert_eq!(a.to_bits(), b.to_bits());
+        for geom in [G32(), G64()] {
+            let a = wave_reduce(geom, v.len(), |i, acc| acc + v[i] as f64);
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
     }
 }

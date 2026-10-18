@@ -9,7 +9,10 @@
 //!
 //! # 構成（CUDA 版との差分。性能最適化は #3159 以降へ送る）
 //! - 行・チャネル単位のカーネルは「1 block = 1 wave（`WARP_SIZE` スレッド）= 1 行（1 チャネル）」の
-//!   1 対 1 マッピング（grid = `rows`／`c`）で、縮約は wave 内 butterfly だけ。共有メモリ・
+//!   1 対 1 マッピング（grid = `rows`／`c`）で、縮約は wave 内 butterfly だけ。縮約 lane は物理幅に
+//!   よらず論理 32 lane（`LOGICAL_LANES`。lane `l` が `i = l, l+32, …` を逐次蓄積し offset 16 → 1 の
+//!   butterfly。wave64 の上位 32 lane は部分和 0 で、最後に下位 lane の結果を受け取る）。CPU／autodiff
+//!   参照と結合順序を揃え、符号付き（相殺）縮約でも REQ-2 の統一複合判定を保つ。共有メモリ・
 //!   `__syncthreads()` は使わない。CUDA の persistent grid・`float4` ベクトル化・SMEM 常駐
 //!   （`RMSNORM_F32_TWOPASS` の最適化）は持ち込まない（正しさを優先。性能は保証しない）。
 //! - wave 幅依存の定数（`i += 32`・`offset = 16`・`0xffffffffu`・`__shfl_xor_sync`・`__syncwarp`）は
@@ -109,12 +112,29 @@ pub(crate) const BATCH_NORM_INFER_SPEC: KernelSpec = KernelSpec {
 /// `#define` で与える。
 pub(crate) const NORM_BODY: &str = r#"#pragma clang fp contract(off)
 
-// Sum over one wave with an xor butterfly (offset WARP_HALF .. 1). Every lane ends with the same value.
+// Reduction lanes are LOGICAL: always 32, independent of the physical wave width (WARP_SIZE 32 or 64).
+// This reproduces the CPU/autodiff reference order (lane l accumulates i = l, l+32, ... sequentially,
+// then an xor butterfly with offsets 16..1), so signed (cancelling) sums match across wave widths.
+#define LOGICAL_LANES 32
+
+// First element index of this lane's reduction stripe. Physical lanes >= LOGICAL_LANES (wave64 only)
+// start past the end, so their partial sum stays exactly 0.0 and they only receive the result below.
+__device__ __forceinline__ long long red_start(int lane, long long n)
+{
+    return (lane < LOGICAL_LANES) ? (long long)lane : n;
+}
+
+// Sum of the 32 logical lanes' partials (xor butterfly offsets 16..1 inside lanes 0..31).
+// Every physical lane ends with the same value: on wave64 the upper half takes lane (l - 32)'s result.
 __device__ __forceinline__ double wave_sum_f64(double v)
 {
-    for (int offset = WARP_HALF; offset > 0; offset >>= 1) {
+    for (int offset = LOGICAL_LANES / 2; offset > 0; offset >>= 1) {
         v += WARP_SHFL_XOR(v, offset);
     }
+#if WARP_SIZE > LOGICAL_LANES
+    double other = WARP_SHFL_XOR(v, LOGICAL_LANES);
+    v = (threadIdx.x >= LOGICAL_LANES) ? other : v;
+#endif
     return v;
 }
 
@@ -159,7 +179,7 @@ extern "C" __global__ __launch_bounds__(WARP_SIZE) void rmsnorm_f32(
     float* out_row = out + row_base;
 
     double acc = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         double v = (double)x_row[i];
         acc = __builtin_fma(v, v, acc);
     }
@@ -193,14 +213,14 @@ extern "C" __global__ __launch_bounds__(WARP_SIZE) void layer_norm_f32(
     float* out_row = out + row_base;
 
     double sum = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         sum += (double)x_row[i];
     }
     sum = wave_sum_f64(sum);
     double mean = sum / (double)hidden;
 
     double sq_acc = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         double d = (double)x_row[i] - mean;
         sq_acc = __builtin_fma(d, d, sq_acc);
     }
@@ -238,7 +258,7 @@ extern "C" __global__ __launch_bounds__(WARP_SIZE) void rmsnorm_bwd_dx_f32(
     float* dx_row = dx + row_base;
 
     double acc = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         double v = (double)x_row[i];
         acc = __builtin_fma(v, v, acc);
     }
@@ -250,7 +270,7 @@ extern "C" __global__ __launch_bounds__(WARP_SIZE) void rmsnorm_bwd_dx_f32(
     }
 
     double dot = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         float xhat = x_row[i] * rstd;
         float dyv = dy_row[i];
         float dxhat = (has_weight != 0) ? dyv * w[i] : dyv;
@@ -316,14 +336,14 @@ extern "C" __global__ __launch_bounds__(WARP_SIZE) void layer_norm_bwd_dx_f32(
     float* dx_row = dx + row_base;
 
     double sum = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         sum += (double)x_row[i];
     }
     sum = wave_sum_f64(sum);
     double mean = sum / (double)hidden;
 
     double sq_acc = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         double d = (double)x_row[i] - mean;
         sq_acc = __builtin_fma(d, d, sq_acc);
     }
@@ -337,7 +357,7 @@ extern "C" __global__ __launch_bounds__(WARP_SIZE) void layer_norm_bwd_dx_f32(
 
     double sum_dxhat = 0.0;
     double dot = 0.0;
-    for (long long i = lane; i < hidden; i += WARP_SIZE) {
+    for (long long i = red_start(lane, hidden); i < hidden; i += LOGICAL_LANES) {
         float xhat = (float)(((double)x_row[i] - mean) * rstd);
         float dyv = dy_row[i];
         float dxhat = (has_weight != 0) ? dyv * w[i] : dyv;
@@ -420,14 +440,14 @@ extern "C" __global__ __launch_bounds__(WARP_SIZE) void batch_norm_train_f32(
     }
 
     double sum = 0.0;
-    for (long long i = lane; i < (long long)m; i += WARP_SIZE) {
+    for (long long i = red_start(lane, (long long)m); i < (long long)m; i += LOGICAL_LANES) {
         sum += (double)x[bn_index(i, ch, c, spatial)];
     }
     sum = wave_sum_f64(sum);
     double mean = sum / (double)m;
 
     double sq_acc = 0.0;
-    for (long long i = lane; i < (long long)m; i += WARP_SIZE) {
+    for (long long i = red_start(lane, (long long)m); i < (long long)m; i += LOGICAL_LANES) {
         double d = (double)x[bn_index(i, ch, c, spatial)] - mean;
         sq_acc = __builtin_fma(d, d, sq_acc);
     }
@@ -627,9 +647,14 @@ mod tests {
 
     #[test]
     fn butterfly_uses_injected_geometry_macros() {
-        assert!(NORM_BODY.contains("for (int offset = WARP_HALF; offset > 0; offset >>= 1)"));
+        assert!(
+            NORM_BODY.contains("for (int offset = LOGICAL_LANES / 2; offset > 0; offset >>= 1)")
+        );
+        assert!(NORM_BODY.contains("#define LOGICAL_LANES 32"));
+        assert!(NORM_BODY.contains("WARP_SHFL_XOR(v, LOGICAL_LANES)"));
+        assert_eq!(NORM_BODY.matches("i += LOGICAL_LANES").count(), 10);
         assert!(NORM_BODY.contains("WARP_SHFL_XOR(v, offset)"));
-        assert_eq!(NORM_BODY.matches("i += WARP_SIZE").count(), 15);
+        assert_eq!(NORM_BODY.matches("i += WARP_SIZE").count(), 5);
         assert_eq!(NORM_BODY.matches("__launch_bounds__(WARP_SIZE)").count(), 5);
         assert_eq!(NORM_BODY.matches("__launch_bounds__(BLOCK_DIM)").count(), 3);
     }
