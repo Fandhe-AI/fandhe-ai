@@ -5,7 +5,8 @@
 //! (2) HIP/HIPRTC のロード→コンパイル→module 保持→起動までを持つ [`KernelHost`]、
 //! (3) 型タグ付きカーネル引数 [`Arg`]／[`ArgKind`]／[`KernelSpec`] を提供する。
 //!
-//! 起動の `unsafe` は [`KernelHost::run`] の 1 箇所に集約する。`kernelParams` の個数・種別
+//! 起動の `unsafe` は [`KernelHost::run_grid`] の 1 箇所に集約する（`run` は 1 次元グリッドを
+//! 計算して委譲するだけ）。`kernelParams` の個数・種別
 //! （ポインタ／i32／i64／f32）は呼び出し側が渡す [`KernelSpec`] と実行時に突き合わせ、
 //! spec とカーネルソース署名の一致は各 `kernels_*.rs` のテスト（`kernel_param_kinds`）で固定する。
 //! 起動は null stream で行い、完了を待ってから戻る（同期 API。引数の生存期間問題を作らない）。
@@ -146,7 +147,8 @@ impl KernelHost {
     /// `spec` のカーネルを `total` スレッド（1 次元）で起動し、完了まで待つ。
     ///
     /// `args` の個数・種別が `spec` と一致しなければ `InvalidOpArgs`。`total == 0` は拒否
-    /// （呼び出し側が 0 要素を早期リターンする契約）。
+    /// （呼び出し側が 0 要素を早期リターンする契約）。グリッド計算だけを担い、起動は
+    /// [`Self::run_grid`] へ委譲する（`unsafe` の起動点を 1 か所に保つ）。
     pub(crate) fn run(
         &self,
         op: &'static str,
@@ -154,6 +156,25 @@ impl KernelHost {
         total: usize,
         args: &[Arg],
     ) -> Result<(), RocmError> {
+        let (grid, block) = grid_1d(op, total, INDEX_OPS_BLOCK_DIM)?;
+        self.run_grid(op, spec, grid, block, args)
+    }
+
+    /// `spec` のカーネルを明示した `grid`／`block` で起動し、完了まで待つ（イシュー #3436・R5）。
+    ///
+    /// 2 段縮約（loss 5 種の partial → finalize）のように、起動ブロック数を呼び出し側が
+    /// 決めて `partial` バッファ長と一致させる必要がある演算が使う。`grid`／`block` の各成分は
+    /// 非 0、`block` の総スレッド数は 64 の倍数かつ 1024 以下を検査する（fail-closed）。
+    /// `args` の個数・種別が `spec` と一致しなければ `InvalidOpArgs`。
+    pub(crate) fn run_grid(
+        &self,
+        op: &'static str,
+        spec: &KernelSpec,
+        grid: Dim3,
+        block: Dim3,
+        args: &[Arg],
+    ) -> Result<(), RocmError> {
+        validate_launch_dims(op, grid, block)?;
         if args.len() != spec.args.len() || args.iter().zip(spec.args).any(|(a, k)| a.kind() != *k)
         {
             return Err(RocmError::InvalidOpArgs {
@@ -161,7 +182,6 @@ impl KernelHost {
                 detail: format!("{} の引数が署名と一致しません", spec.name),
             });
         }
-        let (grid, block) = grid_1d(op, total, INDEX_OPS_BLOCK_DIM)?;
         let func = self.module.function(spec.name)?;
         // 値をローカルへコピーし、その各要素へのポインタを `kernelParams` として渡す。
         let mut owned: Vec<Arg> = args.to_vec();
@@ -176,11 +196,31 @@ impl KernelHost {
             .collect();
         // SAFETY: (U5) `params` の個数・種別は `spec`（ソース署名と同一であることを各
         // `kernels_*.rs` のテストで固定）と上で照合済みで、指す `owned` は下の `synchronize`
-        // 完了まで本スコープで生存する。グリッドは `grid_1d` が `div_ceil` で `total` を覆い、
-        // 範囲外アクセスは各カーネル内の手動境界チェック（REQ-8）が防ぐ。
+        // 完了まで本スコープで生存する。`grid`／`block` は `validate_launch_dims` で非 0・
+        // 64 の倍数・1024 以下を確認済み。`run` 経由では `grid_1d` が `div_ceil` で `total` を
+        // 覆い、`run_grid` 直呼びの側は自カーネルの被覆と `partial` 長の一致を保証する。範囲外
+        // アクセスは各カーネル内の手動境界チェック（REQ-8）が防ぐ。
         unsafe { func.launch(&self.rt, grid, block, &mut params)? };
         self.rt.synchronize()
     }
+}
+
+/// 明示起動の `grid`／`block` を検証する（0 次元・不正なブロックサイズを起動前に拒否する）。
+fn validate_launch_dims(op: &'static str, grid: Dim3, block: Dim3) -> Result<(), RocmError> {
+    let bad = |detail: String| RocmError::InvalidOpArgs { op, detail };
+    if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
+        return Err(bad(format!("grid の各成分は 1 以上が必要です: {grid:?}")));
+    }
+    if block.0 == 0 || block.1 == 0 || block.2 == 0 {
+        return Err(bad(format!("block の各成分は 1 以上が必要です: {block:?}")));
+    }
+    let threads = u64::from(block.0) * u64::from(block.1) * u64::from(block.2);
+    if threads > 1024 || !threads.is_multiple_of(64) {
+        return Err(bad(format!(
+            "block の総スレッド数は 64 の倍数かつ 1024 以下が必要です: {block:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// テスト専用: 1 次元グリッドの全スレッドの `gid`（`blockIdx.x * blockDim.x + threadIdx.x`）を
@@ -226,6 +266,19 @@ mod tests {
         let limit = (u32::MAX / 256) as usize * 256;
         assert!(grid_1d("t", limit + 1, 256).is_err());
         assert!(grid_1d("t", usize::MAX, 256).is_err());
+    }
+
+    #[test]
+    fn launch_dims_accept_valid_and_reject_invalid() {
+        assert!(validate_launch_dims("t", (1, 1, 1), (256, 1, 1)).is_ok());
+        assert!(validate_launch_dims("t", (1024, 1, 1), (64, 1, 1)).is_ok());
+        assert!(validate_launch_dims("t", (1, 1, 1), (32, 2, 1)).is_ok());
+        assert!(validate_launch_dims("t", (0, 1, 1), (256, 1, 1)).is_err());
+        assert!(validate_launch_dims("t", (1, 0, 1), (256, 1, 1)).is_err());
+        assert!(validate_launch_dims("t", (1, 1, 1), (0, 1, 1)).is_err());
+        assert!(validate_launch_dims("t", (1, 1, 1), (100, 1, 1)).is_err());
+        assert!(validate_launch_dims("t", (1, 1, 1), (1088, 1, 1)).is_err());
+        assert!(validate_launch_dims("t", (1, 1, 1), (u32::MAX, 2, 1)).is_err());
     }
 
     #[test]

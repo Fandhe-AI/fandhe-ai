@@ -5,6 +5,8 @@
 //! 実行時にロードし、`#[link]` を使わないため ROCm 非搭載環境でもビルド・テストが通る
 //! （cudarc の dynamic-loading と同じ cfg ベース方針。REQ-2・coding-rust.md）。
 //! 線形代数 6 演算（`inv`・`solve`・`det`・`cholesky`・`qr`・`eigh`。#3444）は内部 opt-in ゲート（[`linalg`]。既定 OFF）の背後にある `f64` カーネルで、`RocmLinalgLu`・`RocmLinalgFactor` が実行する。
+//! loss 5 種（mse・huber/smooth_l1・bce・nll・kl_div）と backward（#3436・R5）は `RocmLoss` の
+//! 1 ソース 11 カーネルで、wave 幅（32／64）を `WarpGeometry` から注入した 2 段縮約を使う。
 //! `BackendOps` の骨格（必須 9 メソッド。[`RocmBackendOps`]）は R0（#3431）、縮約系カーネル向けの
 //! wave 幅注入部品は `WarpGeometry`（#3432）、facade の
 //! Device 追加は #3157（所有者判断待ち）、unsafe 監査記録は #3158、実機 parity は #3159。
@@ -36,6 +38,7 @@ mod kernels_gemm;
 mod kernels_interpolate;
 mod kernels_linalg;
 mod kernels_linalg_factor;
+mod kernels_loss;
 mod kernels_scan;
 mod kernels_sort;
 mod kernels_unique;
@@ -43,6 +46,9 @@ mod launch;
 pub mod linalg;
 #[cfg(test)]
 mod linalg_model;
+mod loss;
+#[cfg(test)]
+mod loss_model;
 mod module;
 mod ops;
 mod scan;
@@ -67,6 +73,7 @@ pub use gemm::RocmGemmF32;
 pub use interpolate::RocmInterpolate;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
 pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
+pub use loss::RocmLoss;
 pub use ops::RocmBackendOps;
 pub use scan::RocmScan;
 pub use sort::RocmSort;

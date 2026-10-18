@@ -11,6 +11,7 @@
 use crate::error::RocmError;
 use crate::kernels_gemm::GemmSource;
 use crate::kernels_linalg::LinalgSource;
+use crate::warp_geometry::WarpDefines;
 use std::fmt::Write as _;
 
 /// `compile_code_object` が受け付けるソース。実装は本クレート内の検証済み型だけ。
@@ -51,12 +52,35 @@ impl KernelSource {
         defines: &[(&'static str, u32)],
         body: &'static str,
     ) -> Result<Self, RocmError> {
-        if body.contains('\0') {
+        Self::render_inner("", defines, body)
+    }
+
+    /// [`WarpDefines`]（wave 幅の `#define` 群とシャッフルマクロ）を最前に置いてから
+    /// [`Self::render`] と同じ規則で `defines` と本体を連結する（イシュー #3436・R5。縮約系
+    /// カーネルが wave 幅を注入する入口）。
+    ///
+    /// `WarpDefines` を作れるのは `WarpGeometry::render_hip_defines` だけで、検証済みの幅から
+    /// 固定テンプレートと数値だけで作られるため、任意の文字列は入らない（A03）。
+    pub(crate) fn render_with_warp(
+        warp: &WarpDefines,
+        defines: &[(&'static str, u32)],
+        body: &'static str,
+    ) -> Result<Self, RocmError> {
+        Self::render_inner(warp.as_str(), defines, body)
+    }
+
+    fn render_inner(
+        prefix: &str,
+        defines: &[(&'static str, u32)],
+        body: &'static str,
+    ) -> Result<Self, RocmError> {
+        if body.contains('\0') || prefix.contains('\0') {
             return Err(RocmError::InvalidKernelConfig {
                 detail: "カーネル本体に NUL を含みます".into(),
             });
         }
-        let mut s = String::with_capacity(body.len() + defines.len() * 32);
+        let mut s = String::with_capacity(prefix.len() + body.len() + defines.len() * 32);
+        s.push_str(prefix);
         for (name, value) in defines {
             if !is_valid_define_name(name) {
                 return Err(RocmError::InvalidKernelConfig {
@@ -147,6 +171,33 @@ mod tests {
             let value = line.rsplit(' ').next().unwrap();
             assert!(value.chars().all(|c| c.is_ascii_digit()), "{line}");
         }
+    }
+
+    #[test]
+    fn render_with_warp_puts_warp_defines_first_and_is_deterministic() {
+        use crate::warp_geometry::WarpGeometry;
+        for w in [32, 64] {
+            let g = WarpGeometry::new(w).unwrap();
+            let warp = g.render_hip_defines(Some(256)).unwrap();
+            let a = KernelSource::render_with_warp(&warp, &[("BLOCK_DIM", 256)], "body").unwrap();
+            let b = KernelSource::render_with_warp(&warp, &[("BLOCK_DIM", 256)], "body").unwrap();
+            assert_eq!(a, b);
+            let text = a.as_str();
+            assert!(text.starts_with(&format!("#define WARP_SIZE {w}\n")));
+            assert!(text.ends_with("#define BLOCK_DIM 256\nbody"));
+            assert!(text.contains(&format!("#define WARPS_PER_BLOCK {}\n", 256 / w)));
+        }
+    }
+
+    #[test]
+    fn render_with_warp_rejects_bad_names() {
+        use crate::warp_geometry::WarpGeometry;
+        let warp = WarpGeometry::new(64)
+            .unwrap()
+            .render_hip_defines(None)
+            .unwrap();
+        assert!(KernelSource::render_with_warp(&warp, &[("bad", 1)], "x").is_err());
+        assert!(KernelSource::render_with_warp(&warp, &[], "x\0y").is_err());
     }
 
     #[test]
