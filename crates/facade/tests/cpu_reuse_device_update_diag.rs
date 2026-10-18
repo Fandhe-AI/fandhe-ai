@@ -14,7 +14,7 @@
 //! → `DeviceParamStore::step`（`crates/autodiff/src/optim/device_store.rs`）
 //! → `CpuBackendOps::sgd_step_device`（`crates/backend-cpu/src/ops.rs`）
 //! であり、ホスト `Sgd::step` は通らない。`step` の内容は prologue（検査・
-//! `Vec` 構築）／alloc（`flat_grad` の `with_capacity`）／stage（CPU は bias
+//! `Vec` 構築）／alloc（`flat_grad` の `with_capacity`。#3194 以降 resident 分岐では確保しない。standalone の `alloc` 腕は生の `with_capacity` を測る写しで本番経路ではないため残す）／stage（CPU は bias
 //! 勾配が host 経由のため `upload_into`）／`sgd_step_device`（添字ループ 1 回。
 //! compute と apply は融合）。
 //!

@@ -33,7 +33,7 @@ MLP 784→256→10・batch 64、total_numel = 200704+256+2560+10 = 203,530 要�
 | 段 | 内容 | 本診断の区間名 |
 |---|---|---|
 | prologue | poison・device・config 検査、pending／tape_id／epoch 照合、`Vec<Var>`・`Vec<bool>` 構築、host 経由 slot の `grads.get` と shape 検査 | in-situ の残差（H4） |
-| alloc | `flat_grad = Vec::with_capacity(total_numel)`（約 814 KB）を毎 step 無条件に確保。CPU の resident 分岐では未使用 | `alloc` |
+| alloc | `flat_grad = Vec::with_capacity(total_numel)`（約 814 KB）を確保。CPU の resident 分岐では未使用のため、#3194 以降は `any_resident` のとき確保しない（`!any_resident` のときだけ `with_capacity`）。standalone の `alloc` 腕は生の `with_capacity` を測る写しで本番経路ではない | `alloc` |
 | stage | CPU は `gemm_fp32_strict_into_with_bias_reduce_tracked` を override せず bias 勾配が host 経由。bias（256+10 要素）を `upload_into` で staging へコピー | `stage` |
 | sgd_kernel | `sgd_step_device` を total_numel 要素に 1 回。添字アクセスの逐次スカラーループ（境界検査付き）で compute と apply（in-place 書き戻し）は融合 | `sgd_kernel` |
 
@@ -100,7 +100,7 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
 いずれも bit 一致契約・FMA 契約（`mul_add` は weight_decay／momentum の項だけ）を
 保てるか、後続で確認してから判断する。
 
-1. `flat_grad` の `with_capacity` を `!any_resident` 分岐の中へ移す（H3）
+1. `flat_grad` の `with_capacity` を `!any_resident` 分岐の中へ移す（H3）。**実施（#3194、§9）**
 2. `sgd_step_device` を zip／chunk 化して境界検査を除き自動ベクトル化させる。または
    rayon 化してしきい値付きの逐次フォールバックにする（H1。#2446 の縮約側機構と同型）
 3. CPU で `gemm_fp32_strict_into_with_bias_reduce_tracked` を override し、bias 勾配の
@@ -118,3 +118,21 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
   経路の in-place 書き戻しより余分なコピーを含む参考値である
 - 既存の REJECT／undetermined 実験（#1575・#1576・RAYON_NUM_THREADS スイープ・#2446・
   #2104）は再実行しない
+
+## 9. #3194: resident 分岐の `flat_grad` 確保をやめた結果
+
+`DeviceParamStore::step`／`step_adam_impl`／`step_rmsprop`／`step_adagrad`／`step_lamb` の
+5 か所で、`flat_grad` を `any_resident` のときは `Vec::new()`（確保なし）にした。後段で
+消費するのは `!any_resident` 分岐だけで、その側の容量・積む順序は不変（数値・公開 API 不変）。
+
+- 確保量テスト `crates/facade/tests/device_param_store_resident_no_flat_grad_alloc.rs`
+  （`TrackingAllocator`・MLP 784→256→10・2 step 後の 3 step 目。時間計測ではなく確保の証明）
+  - 修正前（main）: SGD の step 確保ピーク 814,532 B（`flat_grad` = 814,120 B）で失敗
+  - 修正後: SGD・Adam とも 412 B で成功
+- bit 一致: 混在は既存の facade `device_param_store_*_train`・autodiff の
+  `resident_weight_grad_merge_matches_host_only_grad_path`、resident のみは新規
+  `resident_only_weight_grad_matches_host_only_grad_path`（SGD・mock）、なしは確保式が
+  不変のため構造上不変
+- 未実施（実機セッションへ申し送り）: GB10 と Mac mini の device_update 前後の記録
+  （機体・版つき。#3193 とは別 run）。測定手段は `cpu_reuse_device_update_diag.rs` の
+  テスト 2（`#[ignore]`）と `logs/cpu-reuse-device-update-2106/orchestrate.sh`

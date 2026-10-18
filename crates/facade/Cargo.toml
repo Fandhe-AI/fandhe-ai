@@ -103,6 +103,17 @@ serde_json.workspace = true
 # のため本 example も `cargo package` に同梱される（`path` は package 内
 # 相対パスとして解決される）。公開後の実行コマンドは
 # `cargo run --release -p fandhe-ai --example facade_gemm_bench`。
+# イシュー #3194: resident 分岐で `flat_grad` を確保しないことを
+# `TrackingAllocator`（`#[global_allocator]`）の確保ピークで実測する。静的
+# カウンタをプロセスで共有するため libtest の並列実行を避け、
+# `crates/autodiff/Cargo.toml` の `view_zero_alloc` と同じく
+# `harness = false` の単一スレッドバイナリにする。`bench-harness` は既存の
+# dev-dependency で、依存の追加ではない。
+[[test]]
+name = "device_param_store_resident_no_flat_grad_alloc"
+path = "tests/device_param_store_resident_no_flat_grad_alloc.rs"
+harness = false
+
 [[example]]
 name = "facade_gemm_bench"
 path = "examples/gemm_bench.rs"
