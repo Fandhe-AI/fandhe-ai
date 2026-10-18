@@ -114,7 +114,6 @@ harness = false
 # のため本 example も `cargo package` に同梱される（`path` は package 内
 # 相対パスとして解決される）。公開後の実行コマンドは
 # `cargo run --release -p fandhe-ai --example facade_gemm_bench`。
-
 [[example]]
 name = "facade_gemm_bench"
 path = "examples/gemm_bench.rs"
