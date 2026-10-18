@@ -28,3 +28,9 @@ cargo test -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_p
 |---|---|---|---|
 | GB10 | cuda_dropout_embedding_bag_bit_exact | 未実測 | |
 | M4 Max | metal_dropout_embedding_bag_bit_exact | 未実測 | |
+
+## CUDA 実測手順（#3163・GB10 未到達のため未実測）
+
+- 判定規則は事前登録の `cuda/RULE.txt` を正とする（実測前に固定）。GB10 行は未実測のまま。
+- 実行: `cargo test -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_parity -- --ignored --nocapture --test-threads=1 cuda_`
+- 回収: ログ・`env_info.txt`・`.rev-stamp` をマスク（RULE.txt 記載）して `cuda/` に置き、上の結果記入欄の GB10 行と本節を実測値で更新する。
