@@ -52,22 +52,21 @@ impl KernelSource {
         defines: &[(&'static str, u32)],
         body: &'static str,
     ) -> Result<Self, RocmError> {
-        Self::build("", defines, body)
+        Self::render_inner("", defines, body)
     }
 
-    /// [`Self::render`] の前に [`WarpDefines`]（wave 幅マクロ群。`WarpGeometry::render_hip_defines`
-    /// だけが作れる newtype）を前置する。縮約系カーネル（R3 以降）が wave 幅依存の定数
-    /// （`WARP_SIZE`・`WARPS_PER_BLOCK` 等）を受け取る入口で、`&str` では受け取らない
-    /// （任意文字列の混入を型で防ぐ。A03）。出力は「`WarpDefines` → 数値 `#define` → 本体」の順。
+    /// wave 幅の `#define` 群（[`WarpDefines`]。`WarpGeometry::render_hip_defines` だけが作れる
+    /// 封印型で、任意文字列の注入経路にならない）→ 数値 `#define` → 本体の順に連結する
+    /// （R4 softmax 系・R3/R5/R6 の縮約系が使う。イシュー #3435）。検証は [`Self::render`] と共通。
     pub(crate) fn render_with_warp(
         warp: &WarpDefines,
         defines: &[(&'static str, u32)],
         body: &'static str,
     ) -> Result<Self, RocmError> {
-        Self::build(warp.as_str(), defines, body)
+        Self::render_inner(warp.as_str(), defines, body)
     }
 
-    fn build(
+    fn render_inner(
         prefix: &str,
         defines: &[(&'static str, u32)],
         body: &'static str,
@@ -169,6 +168,35 @@ mod tests {
             let value = line.rsplit(' ').next().unwrap();
             assert!(value.chars().all(|c| c.is_ascii_digit()), "{line}");
         }
+    }
+
+    #[test]
+    fn render_with_warp_orders_warp_then_numeric_then_body() {
+        use crate::warp_geometry::WarpGeometry;
+        for w in [32, 64] {
+            let wd = WarpGeometry::new(w)
+                .unwrap()
+                .render_hip_defines(None)
+                .unwrap();
+            let a = KernelSource::render_with_warp(&wd, &[("MAX_GRID", 65535)], "body").unwrap();
+            let b = KernelSource::render_with_warp(&wd, &[("MAX_GRID", 65535)], "body").unwrap();
+            assert_eq!(a, b);
+            assert_eq!(
+                a.as_str(),
+                format!("{}#define MAX_GRID 65535\nbody", wd.as_str())
+            );
+            assert!(a.as_str().starts_with(&format!("#define WARP_SIZE {w}\n")));
+        }
+    }
+
+    #[test]
+    fn render_with_warp_rejects_bad_define_name() {
+        use crate::warp_geometry::WarpGeometry;
+        let wd = WarpGeometry::new(32)
+            .unwrap()
+            .render_hip_defines(None)
+            .unwrap();
+        assert!(KernelSource::render_with_warp(&wd, &[("bad", 1)], "x").is_err());
     }
 
     #[test]

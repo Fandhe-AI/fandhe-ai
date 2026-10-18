@@ -21,6 +21,10 @@
 //! （[`RocmFusedElementwise`]。静的インタプリタカーネルで A03 を守る）の HIPRTC カーネルを移植し、
 //! `RocmBackendOps` へ結線した。いずれも `#pragma clang fp contract(off)` で FMA への暗黙縮約を止める。
 //!
+//! softmax 系（分解案 R4・#3435）として `softmax`・`log_softmax`（[`RocmSoftmax`]）と
+//! `log_softmax_backward`（[`RocmLogSoftmaxBackward`]）の HIPRTC カーネルを移植し、`RocmBackendOps`
+//! へ結線した（wave 幅は `WarpGeometry` 注入。onepass〈動的 SMEM〉経路は移植せず 2 パスのみ）。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
@@ -55,9 +59,11 @@ mod kernels_gemm;
 mod kernels_interpolate;
 mod kernels_linalg;
 mod kernels_linalg_factor;
+mod kernels_log_softmax_backward;
 mod kernels_reduce;
 mod kernels_scalar_op;
 mod kernels_scan;
+mod kernels_softmax;
 mod kernels_sort;
 mod kernels_unique;
 mod launch;
@@ -73,6 +79,9 @@ mod scan;
 #[cfg(test)]
 mod scan_model;
 mod shape_util;
+mod softmax;
+#[cfg(test)]
+mod softmax_model;
 mod sort;
 #[cfg(test)]
 mod sort_model;
@@ -96,6 +105,7 @@ pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
 pub use ops::RocmBackendOps;
 pub use reduce::RocmReduce;
 pub use scan::RocmScan;
+pub use softmax::{RocmLogSoftmaxBackward, RocmSoftmax};
 pub use sort::RocmSort;
 pub use target::{GfxTarget, parse_gcn_arch_name};
 pub use unique::RocmUnique;

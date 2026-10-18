@@ -58,6 +58,31 @@ pub(crate) fn grid_1d(
     Ok(((gx as u32, 1, 1), (block, 1, 1)))
 }
 
+/// ブロックあたりスレッド数の HIP 上限。
+const MAX_THREADS_PER_BLOCK: u128 = 1024;
+
+/// 起動前の geometry 検査（純関数。HIP 非搭載でも単体で検査できる）。
+///
+/// 各次元が非 0、`block` の総スレッド数が 1024 以下であること。範囲外は `InvalidOpArgs`。
+pub(crate) fn validate_geometry(
+    op: &'static str,
+    grid: Dim3,
+    block: Dim3,
+) -> Result<(), RocmError> {
+    let bad = |detail: &str| RocmError::InvalidOpArgs {
+        op,
+        detail: detail.into(),
+    };
+    if [grid.0, grid.1, grid.2, block.0, block.1, block.2].contains(&0) {
+        return Err(bad("grid・block の各次元は非 0 が必要です"));
+    }
+    let threads = u128::from(block.0) * u128::from(block.1) * u128::from(block.2);
+    if threads > MAX_THREADS_PER_BLOCK {
+        return Err(bad("block の総スレッド数が 1024 を超えます"));
+    }
+    Ok(())
+}
+
 /// カーネル引数の種別（ソース署名との照合用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArgKind {
@@ -164,7 +189,8 @@ impl KernelHost {
         self.run(op, spec, total, args)
     }
 
-    /// `spec` のカーネルを `total` スレッド（1 次元）で起動し、完了まで待つ。
+    /// `spec` のカーネルを `total` スレッド（1 次元・block = [`INDEX_OPS_BLOCK_DIM`]）で起動し、
+    /// 完了まで待つ。
     ///
     /// `args` の個数・種別が `spec` と一致しなければ `InvalidOpArgs`。`total == 0` は拒否
     /// （呼び出し側が 0 要素を早期リターンする契約）。
@@ -175,6 +201,23 @@ impl KernelHost {
         total: usize,
         args: &[Arg],
     ) -> Result<(), RocmError> {
+        let (grid, block) = grid_1d(op, total, INDEX_OPS_BLOCK_DIM)?;
+        self.run_geometry(op, spec, grid, block, args)
+    }
+
+    /// `spec` のカーネルを呼び出し側が導出した `(grid, block)` で起動し、完了まで待つ。
+    ///
+    /// 「1 block = 1 wave = 1 行」の softmax 系のように 1 次元・block 256 固定に合わない起動形
+    /// 向け（イシュー #3435・R4）。`unsafe` の起動箇所は [`Self::run`] と共通のここ 1 か所
+    /// （監査行 K1）。geometry は [`validate_geometry`] が起動前に検証する。
+    pub(crate) fn run_geometry(
+        &self,
+        op: &'static str,
+        spec: &KernelSpec,
+        grid: Dim3,
+        block: Dim3,
+        args: &[Arg],
+    ) -> Result<(), RocmError> {
         if args.len() != spec.args.len() || args.iter().zip(spec.args).any(|(a, k)| a.kind() != *k)
         {
             return Err(RocmError::InvalidOpArgs {
@@ -182,7 +225,7 @@ impl KernelHost {
                 detail: format!("{} の引数が署名と一致しません", spec.name),
             });
         }
-        let (grid, block) = grid_1d(op, total, INDEX_OPS_BLOCK_DIM)?;
+        validate_geometry(op, grid, block)?;
         let func = self.module.function(spec.name)?;
         // 値をローカルへコピーし、その各要素へのポインタを `kernelParams` として渡す。
         let mut owned: Vec<Arg> = args.to_vec();
@@ -197,8 +240,9 @@ impl KernelHost {
             .collect();
         // SAFETY: (U5) `params` の個数・種別は `spec`（ソース署名と同一であることを各
         // `kernels_*.rs` のテストで固定）と上で照合済みで、指す `owned` は下の `synchronize`
-        // 完了まで本スコープで生存する。グリッドは `grid_1d` が `div_ceil` で `total` を覆い、
-        // 範囲外アクセスは各カーネル内の手動境界チェック（REQ-8）が防ぐ。
+        // 完了まで本スコープで生存する。grid／block は呼び出し側が導出し、上の
+        // `validate_geometry` が各次元の非 0 と block 総スレッド数の上限を検証済み。範囲外
+        // アクセスは各カーネル内の手動境界チェック（REQ-8）が防ぐ。
         unsafe { func.launch(&self.rt, grid, block, &mut params)? };
         self.rt.synchronize()
     }
@@ -259,6 +303,24 @@ mod tests {
         let limit = (u32::MAX / 256) as usize * 256;
         assert!(grid_1d("t", limit + 1, 256).is_err());
         assert!(grid_1d("t", usize::MAX, 256).is_err());
+    }
+
+    #[test]
+    fn geometry_validation() {
+        assert!(validate_geometry("t", (1, 1, 1), (64, 1, 1)).is_ok());
+        assert!(validate_geometry("t", (65535, 1, 1), (1024, 1, 1)).is_ok());
+        assert!(validate_geometry("t", (8, 8, 8), (16, 8, 8)).is_ok());
+        for (g, b) in [
+            ((0, 1, 1), (64, 1, 1)),
+            ((1, 0, 1), (64, 1, 1)),
+            ((1, 1, 1), (0, 1, 1)),
+            ((1, 1, 1), (64, 0, 1)),
+            ((1, 1, 1), (1025, 1, 1)),
+            ((1, 1, 1), (32, 32, 2)),
+            ((1, 1, 1), (u32::MAX, u32::MAX, u32::MAX)),
+        ] {
+            assert!(validate_geometry("t", g, b).is_err(), "{g:?} {b:?}");
+        }
     }
 
     #[test]
