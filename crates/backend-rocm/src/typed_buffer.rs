@@ -1,7 +1,7 @@
 //! 要素型付きデバイスバッファ（イシュー #3439・分解案 R8）。
 //!
 //! 役割: `module::DeviceBuffer`（f32 専用・GEMM 経路。変更しない）に対し、gather/scatter・sort・
-//! unique が必要とする `i32`・`u32`・`u64` も扱えるようにした RAII バッファ。各演算族の実行型
+//! unique が必要とする `i32`・`u32`・`u64`、縮約 sum の partial 用 `f64` も扱えるようにした RAII バッファ。各演算族の実行型
 //! （`scan.rs` 等）が入力・出力・補助配列（shape/stride）に使う。確保・コピーのバイト数は
 //! `checked_mul` で求め、upload/download は長さが一致するときだけ通す。Drop で 1 回だけ
 //! `hipFree`（失敗は無視。呼び出し側は実行後に同期済みの契約）。unsafe の監査記録は
@@ -19,6 +19,7 @@ mod sealed {
     impl Sealed for i32 {}
     impl Sealed for u32 {}
     impl Sealed for u64 {}
+    impl Sealed for f64 {}
 }
 
 /// デバイスバッファの要素型（封印。ビット列として memcpy してよい POD のみ）。
@@ -36,6 +37,10 @@ impl DeviceElem for u32 {
     const SIZE: usize = 4;
 }
 impl DeviceElem for u64 {
+    const SIZE: usize = 8;
+}
+/// 縮約 sum の `double` partial バッファ用（R3・#3434）。`f64` はビット列として memcpy してよい POD。
+impl DeviceElem for f64 {
     const SIZE: usize = 8;
 }
 
@@ -163,11 +168,14 @@ mod tests {
         assert_eq!(<i32 as DeviceElem>::SIZE, std::mem::size_of::<i32>());
         assert_eq!(<u32 as DeviceElem>::SIZE, std::mem::size_of::<u32>());
         assert_eq!(<u64 as DeviceElem>::SIZE, std::mem::size_of::<u64>());
+        assert_eq!(<f64 as DeviceElem>::SIZE, std::mem::size_of::<f64>());
     }
 
     #[test]
     fn checked_bytes_rejects_overflow() {
         assert_eq!(checked_bytes::<u64>(3).unwrap(), 24);
+        assert_eq!(checked_bytes::<f64>(5).unwrap(), 40);
+        assert!(checked_bytes::<f64>(usize::MAX / 8 + 1).is_err());
         assert!(matches!(
             checked_bytes::<u64>(usize::MAX / 8 + 1),
             Err(RocmError::SizeLimitExceeded { .. })

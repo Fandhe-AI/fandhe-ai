@@ -8,10 +8,18 @@
 //! - `gemm` は [`RocmGemmF32`]（HIPRTC の f32 GEMM。#3155）へ結線する。HIPRTC ソースと
 //!   コンパイルオプションは既存の `GemmSource`・`GfxTarget` 許可リストの経路のままで、
 //!   本モジュールは新しいカーネルソースを足さない（A03）。
-//! - `add`〜`max` の 7 メソッドは入出力がホスト常駐 `Tensor<f32>` なので `CpuBackendOps` へ
-//!   委譲する（CPU と bit 一致）。R2（elementwise）・R3（縮約）でカーネル化する。
-//! - `RocmGemmF32` は生ポインタを持つため `!Send`・`!Sync` で、`unsafe impl` は足さない。
-//!   Tape（`Box<dyn BackendOps + Send>`）に載せるため、コンパイル済み GEMM は thread_local の
+//! - `add`〜`tanh` の 5 メソッドは入出力がホスト常駐 `Tensor<f32>` なので `CpuBackendOps` へ
+//!   委譲する（CPU と bit 一致）。R2（elementwise）でカーネル化する。
+//! - `sum`・`max`・`min`・`argmax`・`argmin`（R3・#3434）は [`RocmReduce`]／[`RocmArgReduce`]
+//!   （HIPRTC。wave 幅は `WarpGeometry` で注入）へ結線する。CUDA 版との対応: sum は `f64`
+//!   アキュムレータ（最後に 1 回 `f32`）、max／min は `fmaxf`／`fminf` の厳密選択、argmax／argmin は
+//!   チャンク分割 2 段。空縮約（`numel == 0`。sum の 0 埋め・max 等の `EmptyReduction` 文言）は
+//!   カーネルを起動せず `CpuBackendOps` へ委譲し、CPU と完全に同じ結果・エラーにする（二重実装を
+//!   避ける）。CUDA の `*_lastaxis_f32`（1 warp = 1 行の coalesced 版）は移植せず、`inner == 1` も
+//!   汎用の軸縮約で処理する（性能面の follow-up）。
+//! - `RocmGemmF32`・`RocmReduce`・`RocmArgReduce` は生ポインタを持つため `!Send`・`!Sync` で、
+//!   `unsafe impl` は足さない。
+//!   Tape（`Box<dyn BackendOps + Send>`）に載せるため、コンパイル済みカーネルは thread_local の
 //!   遅延キャッシュに置き、構造体は `Copy` の値だけを持つ（CUDA の `context_cache` と同じ考え方）。
 //!   残るリスク: スレッド終了時に `hipModuleUnload` が走る。プロセス終了時の TLS 破棄順は保証されない。
 //! - 正規化 6 メソッド（`rmsnorm`・`layer_norm`・`rmsnorm_backward`・`layer_norm_backward`・
@@ -23,13 +31,15 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, BatchNormTrainOutput, Device, LayerNormBackwardOutput, ShapeError,
-    Tensor, batch_norm_layout, gemm_out_shape, row_norm_layout,
+    Tensor, batch_norm_layout, gemm_out_shape, reduce_out_shape, row_norm_layout,
 };
 
+use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
 use crate::error::{RocmError, to_backend_error};
 use crate::gemm::RocmGemmF32;
 use crate::norm::{
@@ -37,29 +47,40 @@ use crate::norm::{
     batch_norm_train_empty, layer_norm_backward_empty, rmsnorm_backward_empty, validate_batch_norm,
     validate_row_norm,
 };
+use crate::reduce::{ReduceKind, RocmReduce, reduce_axis_layout};
 use crate::target::GfxTarget;
 #[cfg(test)]
 use crate::warp_geometry::WarpGeometry;
 
-/// GEMM・正規化の実行経路。`HostModel` はテスト専用（実機なしで組み立て経路を検証する。
-/// GEMM は `gemm_model`、正規化は `norm_model` で計算する）。
+/// 実行経路。`HostModel` はテスト専用（実機なしで組み立て経路を検証する。
+/// GEMM は `gemm_model`、縮約は `reduce_model`、正規化は `norm_model` で計算する）。
 #[derive(Debug, Clone, Copy)]
-enum GemmEngine {
+enum Engine {
     Hip,
     #[cfg(test)]
     HostModel,
 }
 
-type GemmCache = RefCell<Vec<(GfxTarget, Rc<RocmGemmF32>)>>;
+type Cache<T> = RefCell<Vec<(GfxTarget, Rc<T>)>>;
 
 thread_local! {
     /// target ごとにコンパイル済みの GEMM を遅延保持する。失敗はキャッシュしない。
-    static GEMM_CACHE: GemmCache = const { RefCell::new(Vec::new()) };
+    static GEMM_CACHE: Cache<RocmGemmF32> = const { RefCell::new(Vec::new()) };
+    /// 正規化（R6・#3437）。
+    static NORM_CACHE: Cache<RocmNorm> = const { RefCell::new(Vec::new()) };
+    /// 縮約（sum/max/min。#3434）。
+    static REDUCE_CACHE: Cache<RocmReduce> = const { RefCell::new(Vec::new()) };
+    /// 添字縮約（argmax/argmin。#3434）。
+    static ARG_REDUCE_CACHE: Cache<RocmArgReduce> = const { RefCell::new(Vec::new()) };
 }
 
-/// thread_local キャッシュから `target` 用の GEMM を取得する（無ければ構築して入れる）。
-fn cached_gemm(target: GfxTarget) -> Result<Rc<RocmGemmF32>, RocmError> {
-    let hit = GEMM_CACHE
+/// thread_local キャッシュ `key` から `target` 用の実行型を取得する（無ければ `ctor` で構築して入れる）。
+fn cached<T>(
+    key: &'static LocalKey<Cache<T>>,
+    target: GfxTarget,
+    ctor: impl FnOnce(GfxTarget) -> Result<T, RocmError>,
+) -> Result<Rc<T>, RocmError> {
+    let hit = key
         .try_with(|c| {
             c.borrow()
                 .iter()
@@ -67,61 +88,33 @@ fn cached_gemm(target: GfxTarget) -> Result<Rc<RocmGemmF32>, RocmError> {
                 .map(|(_, g)| Rc::clone(g))
         })
         .map_err(|_| RocmError::InvalidKernelConfig {
-            detail: "GEMM キャッシュ（thread_local）が破棄済みです".into(),
+            detail: "カーネルキャッシュ（thread_local）が破棄済みです".into(),
         })?;
     if let Some(g) = hit {
         return Ok(g);
     }
     // 借用を解いてから構築する（構築中に再入しても二重借用にならない）。
-    let g = Rc::new(RocmGemmF32::new(target)?);
-    let _ = GEMM_CACHE.try_with(|c| c.borrow_mut().push((target, Rc::clone(&g))));
+    let g = Rc::new(ctor(target)?);
+    let _ = key.try_with(|c| c.borrow_mut().push((target, Rc::clone(&g))));
     Ok(g)
 }
 
-type NormCache = RefCell<Vec<(GfxTarget, Rc<RocmNorm>)>>;
-
-thread_local! {
-    /// target ごとにコンパイル済みの正規化カーネルを遅延保持する。失敗はキャッシュしない。
-    static NORM_CACHE: NormCache = const { RefCell::new(Vec::new()) };
-}
-
-/// thread_local キャッシュから `target` 用の正規化カーネルを取得する（無ければ構築して入れる）。
-fn cached_norm(target: GfxTarget) -> Result<Rc<RocmNorm>, RocmError> {
-    let hit = NORM_CACHE
-        .try_with(|c| {
-            c.borrow()
-                .iter()
-                .find(|(t, _)| *t == target)
-                .map(|(_, g)| Rc::clone(g))
-        })
-        .map_err(|_| RocmError::InvalidKernelConfig {
-            detail: "正規化キャッシュ（thread_local）が破棄済みです".into(),
-        })?;
-    if let Some(g) = hit {
-        return Ok(g);
-    }
-    // 借用を解いてから構築する（構築中に再入しても二重借用にならない）。
-    let g = Rc::new(RocmNorm::new(target)?);
-    let _ = NORM_CACHE.try_with(|c| c.borrow_mut().push((target, Rc::clone(&g))));
-    Ok(g)
-}
-
-/// ROCm（AMD GPU）向け `BackendOps`。R0 では必須 9 メソッドのみ実装する。
+/// ROCm（AMD GPU）向け `BackendOps`。必須 9 メソッド・縮約 5 メソッド（R3）・正規化 6 メソッド（R6）を実装する。
 ///
 /// HIP のデバイス ID は `RocmGemmF32::new` と同じく 0 固定。gfx target の照会は #3157・#3159。
 #[derive(Debug, Clone, Copy)]
 pub struct RocmBackendOps {
     target: GfxTarget,
-    engine: GemmEngine,
+    engine: Engine,
     cpu: CpuBackendOps,
 }
 
 impl RocmBackendOps {
-    /// `target` 向けの ops を作る。失敗せず、ROCm には触れない（GEMM 初回実行時に遅延コンパイルする）。
+    /// `target` 向けの ops を作る。失敗せず、ROCm には触れない（初回実行時に遅延コンパイルする）。
     pub fn new(target: GfxTarget) -> Self {
         Self {
             target,
-            engine: GemmEngine::Hip,
+            engine: Engine::Hip,
             cpu: CpuBackendOps,
         }
     }
@@ -131,12 +124,147 @@ impl RocmBackendOps {
         self.target
     }
 
-    /// テスト専用: GEMM を CPU 上の添字モデル（`gemm_model::simulate`）で計算する。
+    /// テスト専用: GEMM・縮約を CPU 上の添字モデル（`gemm_model`・`reduce_model`・
+    /// `arg_reduce_model`）で計算する。
     #[cfg(test)]
     pub(crate) fn with_host_model(target: GfxTarget) -> Self {
         Self {
-            engine: GemmEngine::HostModel,
+            engine: Engine::HostModel,
             ..Self::new(target)
+        }
+    }
+
+    /// sum／max／min の dispatch（形状検査 → 空縮約の CPU 委譲 → contiguous 化 → カーネル）。
+    fn reduce_dispatch(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+        kind: ReduceKind,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        if a.numel() == 0 {
+            // 空縮約（sum の 0 埋め・max/min の EmptyReduction・空出力）は HIP に触れず CPU と
+            // 同じ結果・エラー文言にする。
+            return match kind {
+                ReduceKind::Sum => self.cpu.sum(a, dim),
+                ReduceKind::Max => self.cpu.max(a, dim),
+                ReduceKind::Min => self.cpu.min(a, dim),
+            };
+        }
+        let c = a.contiguous();
+        let x = c.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("reduce: input not contiguous".into())
+        })?;
+        let data = match dim {
+            None => vec![self.run_reduce_all(kind, x).map_err(to_backend_error)?],
+            Some(axis) => {
+                let (outer, axis_len, inner) =
+                    reduce_axis_layout(a.shape(), axis).map_err(to_backend_error)?;
+                self.run_reduce_axis(kind, x, outer, axis_len, inner)
+                    .map_err(to_backend_error)?
+            }
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// argmax／argmin の dispatch（[`Self::reduce_dispatch`] と同じ形。出力は `Tensor<i32>`）。
+    fn arg_reduce_dispatch(
+        &self,
+        a: &Tensor<f32>,
+        dim: Option<usize>,
+        kind: ArgReduceKind,
+    ) -> Result<Tensor<i32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        if a.numel() == 0 {
+            return match kind {
+                ArgReduceKind::Max => self.cpu.argmax(a, dim),
+                ArgReduceKind::Min => self.cpu.argmin(a, dim),
+            };
+        }
+        let c = a.contiguous();
+        let x = c.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("arg_reduce: input not contiguous".into())
+        })?;
+        let data = match dim {
+            None => vec![self.run_arg_all(kind, x).map_err(to_backend_error)?],
+            Some(axis) => {
+                let (outer, axis_len, inner) =
+                    reduce_axis_layout(a.shape(), axis).map_err(to_backend_error)?;
+                self.run_arg_axis(kind, x, outer, axis_len, inner)
+                    .map_err(to_backend_error)?
+            }
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    fn run_reduce_all(&self, kind: ReduceKind, x: &[f32]) -> Result<f32, RocmError> {
+        match self.engine {
+            Engine::Hip => cached(&REDUCE_CACHE, self.target, RocmReduce::new)?.run_all(kind, x),
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_all(x.len())?;
+                crate::reduce_model::simulate_all(
+                    crate::warp_geometry::WarpGeometry::for_target(self.target),
+                    kind,
+                    x,
+                )
+                .map_err(model_err)
+            }
+        }
+    }
+
+    fn run_reduce_axis(
+        &self,
+        kind: ReduceKind,
+        x: &[f32],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<Vec<f32>, RocmError> {
+        match self.engine {
+            Engine::Hip => cached(&REDUCE_CACHE, self.target, RocmReduce::new)?
+                .run_axis(kind, x, outer, axis_len, inner),
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_axis(x.len(), outer, axis_len, inner)?;
+                Ok(crate::reduce_model::simulate_axis(
+                    kind, x, outer, axis_len, inner,
+                ))
+            }
+        }
+    }
+
+    fn run_arg_all(&self, kind: ArgReduceKind, x: &[f32]) -> Result<i32, RocmError> {
+        match self.engine {
+            Engine::Hip => {
+                cached(&ARG_REDUCE_CACHE, self.target, RocmArgReduce::new)?.run_all(kind, x)
+            }
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_all(x.len())?;
+                Ok(crate::arg_reduce_model::simulate_all(kind, x))
+            }
+        }
+    }
+
+    fn run_arg_axis(
+        &self,
+        kind: ArgReduceKind,
+        x: &[f32],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<Vec<i32>, RocmError> {
+        match self.engine {
+            Engine::Hip => cached(&ARG_REDUCE_CACHE, self.target, RocmArgReduce::new)?
+                .run_axis(kind, x, outer, axis_len, inner),
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::reduce::validate_reduce_axis(x.len(), outer, axis_len, inner)?;
+                Ok(crate::arg_reduce_model::simulate_axis(
+                    kind, x, outer, axis_len, inner,
+                ))
+            }
         }
     }
 
@@ -149,9 +277,9 @@ impl RocmBackendOps {
         k: usize,
     ) -> Result<Vec<f32>, RocmError> {
         match self.engine {
-            GemmEngine::Hip => cached_gemm(self.target)?.run(a, b, m, n, k),
+            Engine::Hip => cached(&GEMM_CACHE, self.target, RocmGemmF32::new)?.run(a, b, m, n, k),
             #[cfg(test)]
-            GemmEngine::HostModel => {
+            Engine::HostModel => {
                 use crate::kernels_gemm::GemmF32Tile;
                 let tile = GemmF32Tile::DEFAULT;
                 crate::gemm::validate_gemm_dims(&tile, a.len(), b.len(), m, n, k)?;
@@ -202,7 +330,7 @@ fn slice_of<'a>(t: &'a Tensor<f32>, op: &str, what: &str) -> Result<&'a [f32], B
 }
 
 /// 正規化 6 メソッドの実行経路（Hip は `RocmNorm`、HostModel はテスト専用に `norm_model`）。
-/// どちらも先に `norm.rs` の起動前検証と 0 要素契約を通す（0 要素は `cached_norm` を呼ばず、
+/// どちらも先に `norm.rs` の起動前検証と 0 要素契約を通す（0 要素は `cached(&NORM_CACHE, ..)` を呼ばず、
 /// HIP のロードにも触れない）。Hip 側の `RocmNorm::run_*` は同じ検証を再度行う（多層防御）。
 impl RocmBackendOps {
     fn run_rmsnorm(
@@ -222,9 +350,10 @@ impl RocmBackendOps {
             return Ok(Vec::new());
         }
         match self.engine {
-            GemmEngine::Hip => cached_norm(self.target)?.run_rmsnorm_f32(x, w, eps, rows, hidden),
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_rmsnorm_f32(x, w, eps, rows, hidden),
             #[cfg(test)]
-            GemmEngine::HostModel => {
+            Engine::HostModel => {
                 let geom = WarpGeometry::for_target(self.target);
                 Ok(crate::norm_model::rmsnorm(geom, x, w, eps, rows, hidden))
             }
@@ -250,11 +379,10 @@ impl RocmBackendOps {
             return Ok(Vec::new());
         }
         match self.engine {
-            GemmEngine::Hip => {
-                cached_norm(self.target)?.run_layer_norm_f32(x, w, b, eps, rows, hidden)
-            }
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_layer_norm_f32(x, w, b, eps, rows, hidden),
             #[cfg(test)]
-            GemmEngine::HostModel => {
+            Engine::HostModel => {
                 let geom = WarpGeometry::for_target(self.target);
                 Ok(crate::norm_model::layer_norm(
                     geom, x, w, b, eps, rows, hidden,
@@ -282,11 +410,10 @@ impl RocmBackendOps {
             return rmsnorm_backward_empty(w.is_some(), hidden);
         }
         match self.engine {
-            GemmEngine::Hip => {
-                cached_norm(self.target)?.run_rmsnorm_backward_f32(x, w, dy, eps, rows, hidden)
-            }
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_rmsnorm_backward_f32(x, w, dy, eps, rows, hidden),
             #[cfg(test)]
-            GemmEngine::HostModel => {
+            Engine::HostModel => {
                 let geom = WarpGeometry::for_target(self.target);
                 Ok(crate::norm_model::rmsnorm_backward(
                     geom, x, w, dy, eps, rows, hidden,
@@ -316,10 +443,10 @@ impl RocmBackendOps {
             return layer_norm_backward_empty(w.is_some(), has_bias, hidden);
         }
         match self.engine {
-            GemmEngine::Hip => cached_norm(self.target)?
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
                 .run_layer_norm_backward_f32(x, w, has_bias, dy, eps, rows, hidden),
             #[cfg(test)]
-            GemmEngine::HostModel => {
+            Engine::HostModel => {
                 let geom = WarpGeometry::for_target(self.target);
                 Ok(crate::norm_model::layer_norm_backward(
                     geom, x, w, has_bias, dy, eps, rows, hidden,
@@ -349,11 +476,10 @@ impl RocmBackendOps {
             return batch_norm_train_empty(c);
         }
         match self.engine {
-            GemmEngine::Hip => {
-                cached_norm(self.target)?.run_batch_norm_train_f32(x, w, b, eps, n, c, spatial)
-            }
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
+                .run_batch_norm_train_f32(x, w, b, eps, n, c, spatial),
             #[cfg(test)]
-            GemmEngine::HostModel => {
+            Engine::HostModel => {
                 let geom = WarpGeometry::for_target(self.target);
                 Ok(crate::norm_model::batch_norm_train(
                     geom, x, w, b, eps, n, c, spatial,
@@ -387,10 +513,10 @@ impl RocmBackendOps {
             return Ok(Vec::new());
         }
         match self.engine {
-            GemmEngine::Hip => cached_norm(self.target)?
+            Engine::Hip => cached(&NORM_CACHE, self.target, RocmNorm::new)?
                 .run_batch_norm_infer_f32(x, mean, var, w, b, eps, n, c, spatial),
             #[cfg(test)]
-            GemmEngine::HostModel => Ok(crate::norm_model::batch_norm_infer(
+            Engine::HostModel => Ok(crate::norm_model::batch_norm_infer(
                 x,
                 mean,
                 var,
@@ -443,14 +569,33 @@ impl BackendOps for RocmBackendOps {
         self.cpu.tanh(a)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R3 でカーネル化する。性能は保証しない。
+    /// HIPRTC の縮約（R3・#3434）。`f64` アキュムレータで逐次／2 段に加算し最後に 1 回 `f32` へ
+    /// downcast する（CUDA 版と同じ契約）。全軸は block/lane の結合順序が CPU と異なるため統一複合判定、
+    /// 軸指定は CPU と bit 一致。空縮約は CPU へ委譲。ROCm 非搭載では `DeviceUnavailable`。
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.sum(a, dim)
+        self.reduce_dispatch(a, dim, ReduceKind::Sum)
     }
 
-    /// R0 のホスト経路（CPU 委譲）。R3 でカーネル化する。性能は保証しない。
+    /// HIPRTC の縮約（R3・#3434）。`fmaxf` の厳密選択（NaN を伝播しない。`f32::max` と同じ）。
+    /// 空縮約は CPU の `EmptyReduction` と同じ結果にするため CPU へ委譲する。
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        self.cpu.max(a, dim)
+        self.reduce_dispatch(a, dim, ReduceKind::Max)
+    }
+
+    /// HIPRTC の縮約（R3・#3434）。`fminf` の厳密選択。契約は [`Self::max`] と対称。
+    fn min(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        self.reduce_dispatch(a, dim, ReduceKind::Min)
+    }
+
+    /// HIPRTC の添字縮約（R3・#3434）。タイは最初の添字・NaN は無視・全 NaN は 0
+    /// （`backend-cpu::reduction::argmax` と同じ走査契約）。空縮約は CPU へ委譲する。
+    fn argmax(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        self.arg_reduce_dispatch(a, dim, ArgReduceKind::Max)
+    }
+
+    /// HIPRTC の添字縮約（R3・#3434）。契約は [`Self::argmax`] と対称（`v < best` で更新）。
+    fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
+        self.arg_reduce_dispatch(a, dim, ArgReduceKind::Min)
     }
 
     /// 行ごとの RMSNorm。`row_norm_layout` で `(rows, hidden)` を導出し `RocmNorm` へ委譲する（R6）。
@@ -635,6 +780,14 @@ impl BackendOps for RocmBackendOps {
     }
 }
 
+/// テスト専用: ホストモデルが検出した未定義動作相当の読み書きを `RocmError` へ写す。
+#[cfg(test)]
+fn model_err(e: crate::reduce_model::ModelError) -> RocmError {
+    RocmError::InvalidKernelConfig {
+        detail: format!("ホストモデルが不正アクセスを検出: {e:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,7 +932,6 @@ mod tests {
             );
         }
         let x = t(6, &[2, 3], 1);
-        assert!(matches!(o.min(&x, None), Err(BackendError::Unsupported(_))));
         assert!(matches!(
             o.softmax(&x, 1),
             Err(BackendError::Unsupported(_))
@@ -806,6 +958,61 @@ mod tests {
         // 空の形状は HIP を触らず Ok。
         let (e, f) = (t(0, &[0, 2], 1), t(4, &[2, 2], 2));
         assert_eq!(o.gemm(&e, &f).unwrap().shape(), &[0, 2]);
+
+        // 縮約 5 メソッドも非搭載では DeviceUnavailable（panic しない）。
+        for dim in [None, Some(0), Some(1)] {
+            assert!(matches!(
+                o.sum(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.max(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.min(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.argmax(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+            assert!(matches!(
+                o.argmin(&a, dim),
+                Err(BackendError::DeviceUnavailable(_))
+            ));
+        }
+        // 空縮約は HIP に触れず CPU と同じ結果・エラー（Debug 文字列まで一致）。
+        let c = CpuBackendOps;
+        let empty = Tensor::<f32>::zeros(&[0]).unwrap();
+        let empty2 = Tensor::<f32>::zeros(&[2, 0]).unwrap();
+        for (x, dim) in [
+            (&empty, None),
+            (&empty2, None),
+            (&empty2, Some(0)),
+            (&empty2, Some(1)),
+        ] {
+            assert_eq!(
+                format!("{:?}", o.sum(x, dim)),
+                format!("{:?}", c.sum(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.max(x, dim)),
+                format!("{:?}", c.max(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.min(x, dim)),
+                format!("{:?}", c.min(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmax(x, dim)),
+                format!("{:?}", c.argmax(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmin(x, dim)),
+                format!("{:?}", c.argmin(x, dim))
+            );
+        }
     }
 
     #[test]
@@ -819,15 +1026,96 @@ mod tests {
         same(&o.relu(&a).unwrap(), &c.relu(&a).unwrap());
         same(&o.exp(&a).unwrap(), &c.exp(&a).unwrap());
         same(&o.tanh(&a).unwrap(), &c.tanh(&a).unwrap());
-        for dim in [None, Some(0), Some(1)] {
+        // R3 の縮約は HostModel（reduce_model／arg_reduce_model の逐語モデル）経由で CPU と照合する。
+        // 軸指定の sum と max/min は bit 一致、全軸 sum は結合順序が異なるため統一複合判定。
+        for dim in [Some(0), Some(1)] {
             same(&o.sum(&a, dim).unwrap(), &c.sum(&a, dim).unwrap());
+        }
+        assert_parity(
+            "sum all",
+            o.sum(&a, None).unwrap().as_slice().unwrap(),
+            c.sum(&a, None).unwrap().as_slice().unwrap(),
+        );
+        for dim in [None, Some(0), Some(1)] {
             same(&o.max(&a, dim).unwrap(), &c.max(&a, dim).unwrap());
+            same(&o.min(&a, dim).unwrap(), &c.min(&a, dim).unwrap());
+            assert_eq!(
+                o.argmax(&a, dim).unwrap().as_slice(),
+                c.argmax(&a, dim).unwrap().as_slice()
+            );
+            assert_eq!(
+                o.argmin(&a, dim).unwrap().as_slice(),
+                c.argmin(&a, dim).unwrap().as_slice()
+            );
         }
         let empty = Tensor::<f32>::zeros(&[0]).unwrap();
-        assert_eq!(
-            format!("{:?}", o.max(&empty, None)),
-            format!("{:?}", c.max(&empty, None))
-        );
+        let empty2 = Tensor::<f32>::zeros(&[2, 0]).unwrap();
+        for (x, dim) in [
+            (&empty, None),
+            (&empty2, None),
+            (&empty2, Some(0)),
+            (&empty2, Some(1)),
+        ] {
+            assert_eq!(
+                format!("{:?}", o.sum(x, dim)),
+                format!("{:?}", c.sum(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.max(x, dim)),
+                format!("{:?}", c.max(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.min(x, dim)),
+                format!("{:?}", c.min(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmax(x, dim)),
+                format!("{:?}", c.argmax(x, dim))
+            );
+            assert_eq!(
+                format!("{:?}", o.argmin(x, dim)),
+                format!("{:?}", c.argmin(x, dim))
+            );
+        }
+    }
+
+    #[test]
+    fn reduce_ops_non_contiguous_and_bad_dim() {
+        let o = ops();
+        let c = CpuBackendOps;
+        // 非連続（転置 view）入力。
+        let a = t(5 * 7, &[5, 7], 8).transpose_2d().unwrap();
+        for dim in [Some(0), Some(1)] {
+            same(&o.sum(&a, dim).unwrap(), &c.sum(&a, dim).unwrap());
+            same(&o.max(&a, dim).unwrap(), &c.max(&a, dim).unwrap());
+            same(&o.min(&a, dim).unwrap(), &c.min(&a, dim).unwrap());
+            assert_eq!(
+                o.argmax(&a, dim).unwrap().as_slice(),
+                c.argmax(&a, dim).unwrap().as_slice()
+            );
+        }
+        // 範囲外の dim は ShapeMismatch（CPU と同じ）。
+        let x = t(6, &[2, 3], 1);
+        assert!(matches!(
+            o.sum(&x, Some(2)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            o.max(&x, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            o.argmin(&x, Some(2)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        // 出力 shape と 3 次元の全軸・各軸。
+        let y = t(2 * 3 * 5, &[2, 3, 5], 4);
+        for dim in [Some(0), Some(1), Some(2)] {
+            let got = o.sum(&y, dim).unwrap();
+            assert_eq!(got.shape(), c.sum(&y, dim).unwrap().shape());
+            same(&got, &c.sum(&y, dim).unwrap());
+        }
+        assert_eq!(o.max(&y, None).unwrap().shape(), &[] as &[usize]);
     }
 
     /// R6（#3437）の正規化 6 メソッドのテスト（HostModel = gfx942 = wave64）。

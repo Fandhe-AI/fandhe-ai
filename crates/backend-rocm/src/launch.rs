@@ -176,6 +176,27 @@ impl KernelHost {
         self.rt.select_device(self.device)
     }
 
+    /// `spec` のカーネルをちょうど `num_blocks` ブロック（各 [`INDEX_OPS_BLOCK_DIM`] スレッド）で
+    /// 起動する。全軸縮約の 1 段目（grid-stride ループでブロック数がデータ量より小さい）用の薄い
+    /// ラッパーで、起動の `unsafe` は [`Self::run`] の 1 か所のまま増やさない。
+    /// `num_blocks == 0` は拒否する。
+    pub(crate) fn run_blocks(
+        &self,
+        op: &'static str,
+        spec: &KernelSpec,
+        num_blocks: u32,
+        args: &[Arg],
+    ) -> Result<(), RocmError> {
+        let total = (num_blocks as usize)
+            .checked_mul(INDEX_OPS_BLOCK_DIM as usize)
+            .filter(|_| num_blocks > 0)
+            .ok_or_else(|| RocmError::InvalidOpArgs {
+                op,
+                detail: format!("ブロック数 {num_blocks} は 1 以上である必要があります"),
+            })?;
+        self.run(op, spec, total, args)
+    }
+
     /// `spec` のカーネルを `total` スレッド（1 次元）で起動し、完了まで待つ。
     ///
     /// `args` の個数・種別が `spec` と一致しなければ `InvalidOpArgs`。`total == 0` は拒否
@@ -194,7 +215,7 @@ impl KernelHost {
     /// `spec` のカーネルを「`blocks` 個の block × 1 wave（`block_dim` = 32 か 64）」で起動し、
     /// 完了まで待つ（行・チャネル単位の正規化カーネル用。R6・#3437）。寸法は
     /// [`wave_block_grid`] が検証する。
-    pub(crate) fn run_blocks(
+    pub(crate) fn run_wave_blocks(
         &self,
         op: &'static str,
         spec: &KernelSpec,
@@ -207,7 +228,7 @@ impl KernelHost {
     }
 
     /// 検証済みの `(grid, block)` で起動する唯一の `unsafe` 集約点（K1）。
-    /// 呼び出し元は [`Self::run`]（`grid_1d`）と [`Self::run_blocks`]（`wave_block_grid`）だけで、
+    /// 呼び出し元は [`Self::run`]（`grid_1d`）と [`Self::run_wave_blocks`]（`wave_block_grid`）だけで、
     /// どちらも寸法を検証してから渡す。
     fn launch_dims(
         &self,
@@ -280,6 +301,18 @@ mod tests {
         // u32 を超える total でも切り捨てずに覆う（超過は拒否）。
         let big = (u32::MAX as usize / 256) * 256;
         assert_eq!(grid_1d("t", big, 256).unwrap().0.0 as usize * 256, big);
+    }
+
+    #[test]
+    fn run_blocks_total_maps_to_exact_grid() {
+        // run_blocks(n) が run へ渡す total（n * BLOCK_DIM）から grid_1d がちょうど n ブロックを返す。
+        for n in [1u32, 2, 4, 1024] {
+            let total = n as usize * INDEX_OPS_BLOCK_DIM as usize;
+            assert_eq!(
+                grid_1d("t", total, INDEX_OPS_BLOCK_DIM).unwrap().0,
+                (n, 1, 1)
+            );
+        }
     }
 
     #[test]

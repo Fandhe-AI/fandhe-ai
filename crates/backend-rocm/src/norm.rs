@@ -10,7 +10,7 @@
 //! ホスト側で eps・長さ・checked 乗算・`i32` 収容を起動前に検証する（カーネル側の手動境界チェック
 //! REQ-8 と二重化。CPU の `validate_*_launch`・CUDA の `validate_*_launch` に揃える）。検証関数は
 //! `pub(crate)` で、テスト専用のホスト側モデル経路（`norm_model.rs`）も同じ検証を通る。
-//! 起動は `launch::KernelHost::run_blocks`（行・チャネル単位。1 block = 1 wave）または `run`
+//! 起動は `launch::KernelHost::run_wave_blocks`（行・チャネル単位。1 block = 1 wave）または `run`
 //! （dw・dwdb・infer の 1 次元）で、`unsafe` はこのファイルに持たない（K1 に集約済み）。
 //!
 //! 省略された weight／bias／統計にも必ず `hidden`（または `c`）要素のダミーバッファを渡す
@@ -317,7 +317,7 @@ impl RocmNorm {
             Arg::I32(i32::from(w.is_some())),
         ];
         self.host
-            .run_blocks(OP_RMSNORM, &RMSNORM_SPEC, d.rows, self.geom.width(), &args)?;
+            .run_wave_blocks(OP_RMSNORM, &RMSNORM_SPEC, d.rows, self.geom.width(), &args)?;
         dout.to_vec()
     }
 
@@ -357,7 +357,7 @@ impl RocmNorm {
             Arg::I32(i32::from(w.is_some())),
             Arg::I32(i32::from(b.is_some())),
         ];
-        self.host.run_blocks(
+        self.host.run_wave_blocks(
             OP_LAYER_NORM,
             &LAYER_NORM_SPEC,
             d.rows,
@@ -405,7 +405,7 @@ impl RocmNorm {
             Arg::F32(eps),
             Arg::I32(i32::from(w.is_some())),
         ];
-        self.host.run_blocks(
+        self.host.run_wave_blocks(
             OP_RMSNORM_BWD,
             &RMSNORM_BWD_DX_SPEC,
             d.rows,
@@ -473,7 +473,7 @@ impl RocmNorm {
             Arg::F32(eps),
             Arg::I32(i32::from(w.is_some())),
         ];
-        self.host.run_blocks(
+        self.host.run_wave_blocks(
             OP_LAYER_NORM_BWD,
             &LAYER_NORM_BWD_DX_SPEC,
             d.rows,
@@ -554,7 +554,7 @@ impl RocmNorm {
             Arg::I32(i32::from(w.is_some())),
             Arg::I32(i32::from(b.is_some())),
         ];
-        self.host.run_blocks(
+        self.host.run_wave_blocks(
             OP_BATCH_NORM_TRAIN,
             &BATCH_NORM_TRAIN_SPEC,
             c,

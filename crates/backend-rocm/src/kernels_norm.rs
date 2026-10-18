@@ -478,7 +478,9 @@ extern "C" __global__ __launch_bounds__(BLOCK_DIM) void batch_norm_infer_f32(
 
 /// 正規化用ソースを生成する（`WarpGeometry` の `#define` と `BLOCK_DIM` のみ前置。A03）。
 pub(crate) fn render_norm_source(geom: WarpGeometry) -> Result<KernelSource, RocmError> {
-    KernelSource::render_with_warp(geom, &[("BLOCK_DIM", INDEX_OPS_BLOCK_DIM)], NORM_BODY)
+    // `WARPS_PER_BLOCK` は出さない（block を 1 wave に固定する系は不要）。
+    let warp = geom.render_hip_defines(None)?;
+    KernelSource::render_with_warp(&warp, &[("BLOCK_DIM", INDEX_OPS_BLOCK_DIM)], NORM_BODY)
 }
 
 #[cfg(test)]
