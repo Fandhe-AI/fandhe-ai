@@ -163,7 +163,7 @@ impl RocmGemmF32 {
             (&mut in_ as *mut i32).cast(),
             (&mut ik as *mut i32).cast(),
         ];
-        // SAFETY (U5): `params` の個数・型・順序はカーネル宣言 `(const float* a, const float* b,
+        // SAFETY: (U5) `params` の個数・型・順序はカーネル宣言 `(const float* a, const float* b,
         // float* c, int m, int n, int k)` と一致し（`GEMM_F32_ARG_COUNT` とソース署名をテストで
         // 固定）、指す変数は下の `synchronize` 完了まで本スコープで生存する。グリッドは
         // `div_ceil` で出力全体を覆い、範囲外アクセスはカーネル内の手動境界チェック（REQ-8）が防ぐ。

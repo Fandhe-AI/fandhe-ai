@@ -70,7 +70,10 @@ impl CodeObject {
 
 /// ロード済み HIPRTC。ハンドルと関数ポインタの一体所有（U1）。
 pub(crate) struct HiprtcRuntime {
-    _lib: libloading::Library,
+    // hip.rs と同じく Drop しても `dlclose` しない（意図的なリーク。F1・監査記録 §5）。
+    // `RocmGemmF32::new` はコンパイルのたびにローカルへロードするため、素の `Library` だと
+    // 毎回 dlclose する。comgr がスレッド・atexit フックを残す場合のクラッシュを避ける。
+    _lib: std::mem::ManuallyDrop<libloading::Library>,
     create: CreateFn,
     compile: CompileFn,
     log_size: SizeFn,
@@ -120,7 +123,7 @@ impl HiprtcRuntime {
                     code_size: resolve(&lib, SYM_CODE_SIZE)?,
                     code: resolve(&lib, SYM_CODE)?,
                     destroy: resolve(&lib, SYM_DESTROY)?,
-                    _lib: lib,
+                    _lib: std::mem::ManuallyDrop::new(lib),
                 }
             };
             return Ok(rt);
@@ -190,7 +193,7 @@ pub(crate) fn compile_code_object(
     let opts: [*const c_char; 1] = [c_opt.as_ptr()];
 
     let mut handle: *mut c_void = std::ptr::null_mut();
-    // SAFETY (U2): `c_src`・`c_name` は NUL 終端で本関数の終わりまで生存する。ヘッダは 0 件
+    // SAFETY: (U2) `c_src`・`c_name` は NUL 終端で本関数の終わりまで生存する。ヘッダは 0 件
     // （numHeaders=0・配列は null）。`handle` は有効な書き込み先。
     let code = unsafe {
         (rt.create)(
@@ -211,7 +214,7 @@ pub(crate) fn compile_code_object(
     }
     let prog = Program { rt, handle };
 
-    // SAFETY (U2): `prog.handle` は有効。`opts` の要素数 1 と numOptions=1 が一致し、指す C 文字列
+    // SAFETY: (U2) `prog.handle` は有効。`opts` の要素数 1 と numOptions=1 が一致し、指す C 文字列
     // （`c_opt`）は呼び出し中生存する。
     let compile_code = unsafe { (rt.compile)(prog.handle, opts.len() as c_int, opts.as_ptr()) };
 
@@ -238,7 +241,7 @@ pub(crate) fn compile_code_object(
         });
     }
     let mut buf = vec![0u8; size];
-    // SAFETY (U3): `buf` は `GetCodeSize` が返したサイズちょうどで、`GetCode` はそのサイズまで
+    // SAFETY: (U3) `buf` は `GetCodeSize` が返したサイズちょうどで、`GetCode` はそのサイズまで
     // 書く。`prog.handle` は有効。
     check(SYM_CODE, unsafe {
         (rt.code)(prog.handle, buf.as_mut_ptr().cast())
