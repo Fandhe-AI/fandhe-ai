@@ -14,6 +14,7 @@
 | 追従（R1・#3432） | `WarpGeometry` は `unsafe` を追加しない（監査表の件数は不変） |
 | 追従（R3・#3434） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。(1) 封印 trait `DeviceElem` に `f64`（`SIZE = 8`）を追加した。sum の `double` partial バッファ用で、`f64` はビット列として memcpy してよい POD のため T1・T2 の「封印 POD」前提が 1 型ぶん広がるだけで、検査（`checked_mul`・長さ一致）は不変。(2) K1（`KernelHost::run`）の呼び出し元が `RocmReduce`・`RocmArgReduce` の分だけ増えた。全軸縮約 1 段目の `KernelHost::run_blocks` は `run` を経由する薄いラッパーで、起動点は 1 か所のまま。(3) 引数の照合は従来どおり `kernels_reduce.rs`・`kernels_arg_reduce.rs` の `spec_matches_source_signature` と `run` の実行時照合で行う。(4) `unsafe impl Send/Sync` は足さない（`RocmReduce`・`RocmArgReduce` は `!Send`。`RocmBackendOps` からは thread_local キャッシュ経由）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R7・#3438） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。K1（`KernelHost::run`）の呼び出し元が `RocmIm2col`・`RocmConstantPad`・`RocmPooling` の分だけ増えた（起動点は 1 か所のまま）。引数の照合は `kernels_im2col.rs`・`kernels_constant_pad.rs`・`kernels_pooling.rs` の `spec_matches_source_signature` と `run` の実行時照合で行う。`DeviceElem` への型追加はなし（`i32`・`f32` は既存）。`unsafe impl Send/Sync` は足さない（3 実行型は `!Send`。`RocmBackendOps` からは thread_local キャッシュ経由）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
+| 追従（R11・#3442） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。K1（`KernelHost::run_geometry`）の呼び出し元が `RocmGemmBiasAct` の分だけ増えた（起動点は 1 か所のまま）。オフセットは `Arg::I64` の数値で渡し、`Arg::Ptr` は `as_device_ptr` の値だけ（§3.10）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する。R0（#3431）は新しい `unsafe` を足さない（インベントリは 33／10／17／0 のまま。`unsafe impl Send/Sync` もなし） |
 
 ## 2. 機械的インベントリ
@@ -144,6 +145,17 @@ softmax・log_softmax・log_softmax_backward の 2 実行型（`softmax.rs`）�
 - 省略された weight／bias／統計にも `hidden`（または `c`）要素のダミーバッファを渡す（predicated load 対策）。
 - 確認方法: §2 の再現コマンドで `launch.rs` の `unsafe {` が 1 件のままであること、`norm*.rs`・`kernels_norm.rs`・`tests/norm_*.rs` に `unsafe` ブロックがないこと（doc 内の言及を除く）を確認した。§2 の件数表は R6 で増減しないが、兄弟 PR が §2 を更新している場合はマージ順で再集計が必要。
 - 実機（MI300X・gfx942）で HIPRTC のコンパイル（`__shfl_xor` の double オーバーロード・`__builtin_fma` の f64 命令化）と wave64 parity を確認していない（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
+
+### 3.10 R11（#3442）: 新しい `unsafe` ブロックなし（実装担当の自己点検。未監査）
+
+GEMM 派生 4 メソッドの実行型（`gemm_bias_act.rs::RocmGemmBiasAct`・`kernels_gemm_bias_act.rs`・`ops/gemm_derived.rs`）は **`unsafe` を一切追加しない**。起動は既存の K1 だけを通り、デバイスメモリは `TypedDeviceBuffer<f32>`（T1〜T3）だけを使う。
+
+- `Arg::Ptr` は `TypedDeviceBuffer::as_device_ptr` の値のみ。要素オフセットは `Arg::I64` の数値で渡し、カーネルが `base + off` を計算する（ホストで生ポインタを足さない。U5 の前提を保つ）。
+- 4 オペランド（a・b・bias・c）の `offset + len <= バッファ長` を `operand_range`（checked。純関数でテスト済み）で起動前に確かめる。カーネル側の guarded load・書き込みガード（REQ-8）と二重化。
+- bias なしのときは 1 要素のダミーバッファを渡す（null を渡さない。c や a を流用しない）。`__restrict__` の妥当性: w と bias は同じ連結バッファを指しうるがどちらも読み取り専用で、書き込み先 c は新規確保か `out` で a・b と重ならない。
+- `unsafe impl Send/Sync` は足さない（`RocmGemmBiasAct` は `!Send`。thread_local キャッシュに置く）。
+- 確認方法: `grep -n unsafe crates/backend-rocm/src/{kernels_gemm_bias_act.rs,gemm_bias_act.rs,ops/gemm_derived.rs} crates/backend-rocm/tests/gemm_derived_absent.rs` が doc 内の言及を除いて 0 件。
+- 実機（MI300X・gfx942）で HIPRTC のコンパイルと `long long` 引数の ABI を確認していない（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
 
 ## 4. U1 の担保方法
 
