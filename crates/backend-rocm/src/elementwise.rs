@@ -249,7 +249,8 @@ impl RocmElementwise {
         let n = a.len();
         let n_i = fit_i32(OP, n, "numel")?;
         let _guard = self.host.select()?;
-        let dout = TypedDeviceBuffer::<f32>::new_zeroed(self.host.runtime(), n)?;
+        // 出力は kernel が全有効要素を上書きするため、ゼロ初期化の H2D 転送は行わない（常駐 API 契約）。
+        let dout = TypedDeviceBuffer::<f32>::new(self.host.runtime(), n)?;
         let args = [
             Arg::Ptr(a.as_device_ptr()),
             Arg::Ptr(b.as_device_ptr()),
@@ -269,7 +270,8 @@ impl RocmElementwise {
         let n = a.len();
         let n_i = fit_i32(OP, n, "numel")?;
         let _guard = self.host.select()?;
-        let dout = TypedDeviceBuffer::<f32>::new_zeroed(self.host.runtime(), n)?;
+        // 出力は kernel が全有効要素を上書きするため、ゼロ初期化の H2D 転送は行わない（常駐 API 契約）。
+        let dout = TypedDeviceBuffer::<f32>::new(self.host.runtime(), n)?;
         let args = [
             Arg::Ptr(a.as_device_ptr()),
             Arg::Ptr(dout.as_device_ptr()),
