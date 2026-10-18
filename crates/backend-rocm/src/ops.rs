@@ -30,7 +30,7 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, Device, Tensor, gemm_out_shape, reduce_out_shape,
+    BackendError, BackendOps, Device, Tensor, gemm_out_shape, reduce_out_shape, row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
@@ -299,6 +299,35 @@ fn gemm_with(
     Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
 }
 
+/// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
+///
+/// 非最終軸は `Unsupported`（autodiff がホスト参照実装へフォールバックする合図。迂回経路を作らない。
+/// security.md A08）。`run` は検証済みの `(rows, cols)` とスライスを受けて `Vec` を返す。
+fn softmax_rows_with(
+    op: &'static str,
+    x: &Tensor<f32>,
+    dim: usize,
+    run: impl FnOnce(&[f32], usize, usize) -> Result<Vec<f32>, RocmError>,
+) -> Result<Tensor<f32>, BackendError> {
+    let Some((rows, cols)) =
+        row_softmax_layout(x.shape(), dim).map_err(BackendError::ShapeMismatch)?
+    else {
+        return Err(BackendError::Unsupported(format!(
+            "{op}: ROCm 行カーネルは最終軸限定（非最終軸はホスト参照実装へ委ねる）"
+        )));
+    };
+    let x_owned = x.contiguous();
+    let x_slice = x_owned
+        .as_slice()
+        .ok_or_else(|| BackendError::KernelLaunchFailed(format!("{op}: input not contiguous")))?;
+    let out = if rows == 0 || cols == 0 {
+        Vec::new()
+    } else {
+        run(x_slice, rows, cols).map_err(to_backend_error)?
+    };
+    Tensor::new(out, x.shape()).map_err(BackendError::ShapeMismatch)
+}
+
 impl BackendOps for RocmBackendOps {
     /// 仮置き: `Device::Cpu` を返す。`tensor-core::Device` に ROCm の variant がなく、追加は
     /// 破壊的変更で所有者判断待ちのため。承認後に #3157 Phase B で `Device::Rocm(usize)` へ
@@ -365,6 +394,93 @@ impl BackendOps for RocmBackendOps {
     /// HIPRTC の添字縮約（R3・#3434）。契約は [`Self::argmax`] と対称（`v < best` で更新）。
     fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
         self.arg_reduce_dispatch(a, dim, ArgReduceKind::Min)
+    }
+
+    /// HIPRTC の行 softmax（最終軸限定。R4・#3435）。非最終軸は `Unsupported`。
+    fn softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        softmax_rows_with("softmax", x, dim, |x, rows, cols| match self.engine {
+            Engine::Hip => {
+                crate::softmax::cached_softmax(self.target)?.run_softmax_f32(x, rows, cols)
+            }
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::softmax::validate_softmax_dims("softmax", x.len(), rows, cols)?;
+                Ok(crate::softmax_model::simulate_softmax(
+                    self.target.wave_size() as usize,
+                    x,
+                    rows,
+                    cols,
+                    false,
+                ))
+            }
+        })
+    }
+
+    /// HIPRTC の行 log_softmax（最終軸限定。R4・#3435）。非最終軸は `Unsupported`。
+    fn log_softmax(&self, x: &Tensor<f32>, dim: usize) -> Result<Tensor<f32>, BackendError> {
+        softmax_rows_with("log_softmax", x, dim, |x, rows, cols| match self.engine {
+            Engine::Hip => {
+                crate::softmax::cached_softmax(self.target)?.run_log_softmax_f32(x, rows, cols)
+            }
+            #[cfg(test)]
+            Engine::HostModel => {
+                crate::softmax::validate_softmax_dims("log_softmax", x.len(), rows, cols)?;
+                Ok(crate::softmax_model::simulate_softmax(
+                    self.target.wave_size() as usize,
+                    x,
+                    rows,
+                    cols,
+                    true,
+                ))
+            }
+        })
+    }
+
+    /// HIPRTC の `log_softmax` backward（最終軸限定。R4・#3435）。`out`・`upstream` の shape 不一致は
+    /// `ShapeMismatch`、非最終軸は `Unsupported`。
+    fn log_softmax_backward(
+        &self,
+        out: &Tensor<f32>,
+        upstream: &Tensor<f32>,
+        dim: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if out.shape() != upstream.shape() {
+            return Err(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: out.shape().to_vec(),
+                    rhs: upstream.shape().to_vec(),
+                },
+            ));
+        }
+        let up = upstream.contiguous();
+        let up_slice = up.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("log_softmax_backward: upstream not contiguous".into())
+        })?;
+        softmax_rows_with(
+            "log_softmax_backward",
+            out,
+            dim,
+            |y, rows, cols| match self.engine {
+                Engine::Hip => crate::softmax::cached_log_softmax_backward(self.target)?
+                    .run_log_softmax_backward_f32(y, up_slice, rows, cols),
+                #[cfg(test)]
+                Engine::HostModel => {
+                    crate::softmax::validate_softmax_backward_dims(
+                        "log_softmax_backward",
+                        y.len(),
+                        rows,
+                        cols,
+                    )?;
+                    Ok(crate::softmax_model::simulate_log_softmax_backward(
+                        self.target.wave_size() as usize,
+                        y,
+                        up_slice,
+                        rows,
+                        cols,
+                    ))
+                }
+            },
+        )
     }
 }
 
@@ -520,10 +636,8 @@ mod tests {
             );
         }
         let x = t(6, &[2, 3], 1);
-        assert!(matches!(
-            o.softmax(&x, 1),
-            Err(BackendError::Unsupported(_))
-        ));
+        // softmax 系は R4（#3435）で実装済み。未実装の代表として gather 系の既定を確かめる。
+        assert!(matches!(o.cumsum(&x, 1), Err(BackendError::Unsupported(_))));
         assert!(o.memory_ops().is_none());
         assert!(o.typed_ops_f64().is_none());
     }
@@ -601,6 +715,114 @@ mod tests {
                 format!("{:?}", c.argmin(x, dim))
             );
         }
+    }
+
+    fn tt(rows: usize, cols: usize, seed: u32) -> Tensor<f32> {
+        t(rows * cols, &[rows, cols], seed)
+    }
+
+    #[test]
+    fn softmax_family_host_model_matches_cpu() {
+        for target in [GfxTarget::Gfx942] {
+            let o = RocmBackendOps::with_host_model(target);
+            for (rows, cols) in [(1, 1), (3, 4), (5, 63), (2, 65), (4, 1000), (0, 4), (4, 0)] {
+                let x = tt(rows, cols, 7);
+                let c = CpuBackendOps;
+                let s = o.softmax(&x, 1).unwrap();
+                assert_eq!(s.shape(), x.shape());
+                assert_parity(
+                    "softmax",
+                    s.as_slice().unwrap_or(&[]),
+                    c.softmax(&x, 1).unwrap().as_slice().unwrap_or(&[]),
+                );
+                let l = o.log_softmax(&x, 1).unwrap();
+                assert_parity(
+                    "log_softmax",
+                    l.as_slice().unwrap_or(&[]),
+                    c.log_softmax(&x, 1).unwrap().as_slice().unwrap_or(&[]),
+                );
+                let g = tt(rows, cols, 9);
+                let b = o.log_softmax_backward(&l, &g, 1).unwrap();
+                assert_eq!(b.shape(), x.shape());
+                if rows * cols > 0 {
+                    // 参照: f64 逐次和（grad::log_softmax_vjp_along と同式）。
+                    let (ys, gs) = (l.as_slice().unwrap(), g.as_slice().unwrap());
+                    let mut want = vec![0.0f32; rows * cols];
+                    for r in 0..rows {
+                        let sum: f64 = (0..cols).map(|i| f64::from(gs[r * cols + i])).sum();
+                        for i in 0..cols {
+                            let e = f64::from(ys[r * cols + i].exp());
+                            want[r * cols + i] = (f64::from(gs[r * cols + i]) - e * sum) as f32;
+                        }
+                    }
+                    assert_parity("log_softmax_backward", b.as_slice().unwrap(), &want);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn softmax_family_rejects_non_last_axis_and_bad_shapes() {
+        let o = ops();
+        let x = tt(4, 6, 1);
+        assert!(matches!(
+            o.softmax(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            o.log_softmax(&x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            o.log_softmax_backward(&x, &x, 0),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            o.softmax(&x, 2),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        let y = tt(4, 5, 2);
+        assert!(matches!(
+            o.log_softmax_backward(&x, &y, 1),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn softmax_family_handles_non_contiguous_input() {
+        let o = ops();
+        let x = t(6 * 4, &[6, 4], 3).transpose_2d().unwrap();
+        let got = o.softmax(&x, 1).unwrap();
+        let want = CpuBackendOps.softmax(&x, 1).unwrap();
+        assert_parity(
+            "non-contiguous",
+            got.as_slice().unwrap(),
+            want.as_slice().unwrap(),
+        );
+    }
+
+    #[test]
+    fn softmax_family_hip_engine_without_rocm_is_unavailable() {
+        if crate::is_available() {
+            return;
+        }
+        let o = RocmBackendOps::new(GfxTarget::Gfx942);
+        let x = tt(2, 3, 1);
+        assert!(matches!(
+            o.softmax(&x, 1),
+            Err(BackendError::DeviceUnavailable(_))
+        ));
+        assert!(matches!(
+            o.log_softmax(&x, 1),
+            Err(BackendError::DeviceUnavailable(_))
+        ));
+        assert!(matches!(
+            o.log_softmax_backward(&x, &x, 1),
+            Err(BackendError::DeviceUnavailable(_))
+        ));
+        // 空は HIP を触らず Ok。
+        let e = tt(0, 3, 1);
+        assert_eq!(o.softmax(&e, 1).unwrap().shape(), &[0, 3]);
     }
 
     #[test]
