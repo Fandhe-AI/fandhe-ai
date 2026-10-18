@@ -512,6 +512,13 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo check -p fandhe-ai-backend-cpu --tests --target aarch64-apple-darwin
 
+      # イシュー #3154: backend-rocm は macOS で HIP 候補が空（probe は常に false）になる cfg
+      # 分岐を持つため、tests 込みで aarch64-apple-darwin へクロス型検査する
+      # （scripts/check-cross.sh rocm-tests と同一コマンド）。
+      - name: cargo check（backend-rocm・macOS ターゲット）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo check -p fandhe-ai-backend-rocm --tests --locked --target aarch64-apple-darwin
+
       # イシュー #2349: onnx-interop の ONNX external data（Windows 向け封じ込め
       # オープン `win_contained_open`・字句検査）を x86_64-pc-windows-msvc で
       # 継続的に clippy 検査する（Makefile の check-cross-windows-interop と
@@ -581,6 +588,7 @@ jobs:
           key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
 
   # --------------------------------------------------
+  # ROCm 非搭載の検証も兼ねる（イシュー #3154。ジョブを新設しない理由は下記ステップのコメント参照）。
   # CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・イシュー #35／
   # TASK-2.3・イシュー #56）。
   # scripts/check-cuda-toolkit-absent.sh（Makefile の build-no-cuda ターゲットと共用する
@@ -624,6 +632,10 @@ jobs:
       - name: 検査ロジックの self-test
         run: bash scripts/check-cuda-toolkit-absent.sh self-test
 
+      # イシュー #3154: ROCm 非搭載の検証も本ジョブが兼ねる（検査ロジックの self-test）。
+      - name: ROCm 検査ロジックの self-test
+        run: bash scripts/check-rocm-absent.sh self-test
+
       - name: Cargo.toml の有無を判定
         id: detect
         # Cargo.toml の有無に加え、pull_request で docs 系ファイルのみの変更なら false を出して
@@ -636,6 +648,11 @@ jobs:
       # 本ジョブの前提が成立しないため、cargo build の前に明示的に失敗させる。
       - name: CUDA toolkit 非搭載の検証
         run: bash scripts/check-cuda-toolkit-absent.sh assert
+
+      # イシュー #3154: backend-rocm（libloading による HIP 動的ロード）は ROCm 非搭載でも
+      # ビルド・テストが成立する契約のため、assert 済みの前提で cargo build / test を回す。
+      - name: ROCm 非搭載の検証
+        run: bash scripts/check-rocm-absent.sh assert
 
       # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
       # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
@@ -718,6 +735,13 @@ jobs:
       - name: cargo clippy（backend-cuda・internal-diagnostics 無効）
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo clippy -p fandhe-ai-backend-cuda --all-targets --locked -- -D warnings
+
+      # イシュー #3154: ROCm 非搭載構成での backend-rocm の lint。ジョブを新設せず既存ジョブへ
+      # ステップを足す（ruleset `main-protection` の required contexts 更新に人間承認が要るため。
+      # 上記 #2299 と同方針）。
+      - name: cargo clippy（backend-rocm・ROCm 非搭載）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo clippy -p fandhe-ai-backend-rocm --all-targets --locked -- -D warnings
 
       # 保存前 prune と main 限定保存（本ファイル冒頭コメントのキャッシュ設計参照）。
       - name: target の prune（キャッシュ保存前）

@@ -1,7 +1,7 @@
 # ライセンス可否表（TASK-1.3）
 
 REQ-1（`docs/spec/04-requirements.md:61` のライセンス要件）・`.claude/rules/deps-policy.md`
-に基づき、許容依存区分のうち本体 workspace の直接依存として許容する 10 区分（第 1〜8 区分・第 10 区分・第 11 区分。第 10 区分 `libc` の直接依存としての実追加は PR #2348、第 11 区分 `ureq` の追加はイシュー #3124）とその推移的依存の可否を記録する（第 9 区分〈ベンチ比較対象〉は 8a・8b・9 節で扱う）。
+に基づき、許容依存区分のうち本体 workspace の直接依存として許容する 11 区分（第 1〜8 区分・第 10〜12 区分。第 10 区分 `libc` の直接依存としての実追加は PR #2348、第 11 区分 `ureq` の追加はイシュー #3124、第 12 区分 `libloading` の直接依存化はイシュー #3154）とその推移的依存の可否を記録する（第 9 区分〈ベンチ比較対象〉は 8a・8b・9 節で扱う）。
 `docs/spec/01-brainstorm.md:149-163` の判断軸 a〜e に基づく境界判断も参照する。
 
 ## 1. 目的・適合基準
@@ -10,7 +10,7 @@ REQ-1（`docs/spec/04-requirements.md:61` のライセンス要件）・`.claude
 - 旧 issue #2 の教訓により、**feature 除外による回避を推定で記述しない**。有効化しうる feature 組合せごとに `cargo tree` を実測し、個別に適合確認する（本ファイル 3〜4 節）
 - MPL-2.0 等コピーレフトの推移的混入は実測で監視する（6 節）
 
-## 2. 直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分）の可否表
+## 2. 直接依存として許容する 11 区分（第 1〜8・第 10〜12 区分）の可否表
 
 crates.io の `license` フィールドを `cargo metadata --locked` 経由で実確認した（実測方法は 7 節）。
 
@@ -19,7 +19,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | CUDA | `cudarc` | `=0.19.8`（`driver`/`nvrtc`/`dynamic-loading`/`cuda-13000`/`f16`） | MIT OR Apache-2.0 | 可 | a, d, e（`docs/spec/01-brainstorm.md:181`）。ドライバ FFI の自作は unsafe 面積増のみで差別化にならない |
 | Metal | `objc2` | `=0.6.4` | MIT | 可 | a, d, e |
 | Metal | `objc2-foundation` | `=0.3.2` | MIT | 可 | a, d, e |
-| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存として許容する 10 区分（第 1〜8・第 10・第 11 区分）の適合基準（MIT OR Apache-2.0 系）と両立する |
+| Metal | `objc2-metal` | `=0.3.2` | Zlib OR Apache-2.0 OR MIT | 可 | a, d, e。三重ライセンスのうち MIT を選択すれば直接依存として許容する 11 区分（第 1〜8・第 10〜12 区分）の適合基準（MIT OR Apache-2.0 系）と両立する |
 | 相互運用 | `safetensors` | `=0.7.0` | Apache-2.0 | 可 | c, e（`docs/spec/01-brainstorm.md:183`）。ワイヤフォーマット処理のみに使用（テンソルへのマッピングは自作）。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | 相互運用 | `prost` | `=0.14.4` | Apache-2.0 | 可 | c（`docs/spec/01-brainstorm.md:184`）。protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない。`crates/onnx-interop`（公開名 `fandhe-ai-onnx-interop`。#1963）内で使用 |
 | シリアライズ | `serde` | `=1.0.229`（`derive`） | MIT OR Apache-2.0 | 可 | a。構造化データのシリアライズ |
@@ -29,6 +29,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | ベンチ | `criterion` | `=0.8.2` | Apache-2.0 OR MIT | 可 | c。`dev-dependencies` 限定（deps-policy.md） |
 | OS FFI（第 10 区分） | `libc` | `=0.2.189` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（`crates.io` `license` フィールド）。`onnx-interop` の external data（イシュー #2347）の安全なファイルオープン（`openat`／`openat2`）用途に限定し `[target.'cfg(unix)'.dependencies]` で `cfg(unix)` 限定（依存の実追加は PR #2348。`libc 0.2.189` は追加前から `Cargo.lock` に推移的依存として存在し、ライセンスは本体 workspace の既存監査対象）。手書きの `openat` フラグ定数は Linux で CPU アーキテクチャごとに値が異なり、x86 専用の値のまま aarch64 Linux でビルドするとシンボリックリンク拒否が機能しない実装バグを生んでいたため、自作せず libc の定数・`syscall` を使う（ドライバ FFI 同様、この領域の自作は unsafe 面積増のみで安全性の向上にならない） |
 | HTTP／TLS（第 11 区分） | `ureq`（`default-features = false`・`native-tls`＋`vendored`） | `=3.4.2` | MIT OR Apache-2.0 | 可 | a, d, e。`cargo metadata --locked` 実測（イシュー #3124）。`facade` の `[target.'cfg(unix)'.dependencies]` 限定・HTTPS 取得用途限定（＋`crates/hf-hub` の HF Hub API の JSON 取得。#3393）。allow 追加は `CDLA-Permissive-2.0`（`webpki-root-certs`）のみ。OpenSSL（`openssl-src`）の静的同梱と脆弱性対応は 6 節・末尾の追加実測を参照。承認根拠は #3123 所有者コメント 6111756315 の委任条項（`docs/model-download-design.md` §16.8・§17） |
+| 動的ロード（第 12 区分） | `libloading`（default feature） | `=0.9.0` | ISC | 可 | a, d, e（判断軸は「ビルド時リンクなし・新規 crate なし・cudarc と同じ版」）。`crates/backend-rocm` の無条件依存・HIP／HIPRTC の動的ロード用途限定。ISC は `deny.toml` の allow に既存で、`cfg-if`・`windows-link`（MIT OR Apache-2.0）は既に lock にある。承認根拠は、方式・区分が 2026-10-12 の #3153 所有者コメント 6111762873、具体構成が 2026-10-18 の #3154 所有者コメント 6243795398（<https://github.com/Fandhe-AI/fandhe-ai/issues/3154#issuecomment-6243795398>）。実測は `docs/backend-rocm-hip-ffi-decision.md` §5 と末尾の追加実測（#3154）を参照 |
 
 すべて MIT OR Apache-2.0 系（`objc2-metal` のみ三重ライセンス）であり、商用配布・改変・再頒布に適合する。
 
@@ -226,7 +227,7 @@ fail-closed で適用される。
 第 9 区分（ベンチ比較対象）として正式に許容された依存であり、監査対象外の例外
 ではなく、`scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立
 Cargo プロジェクト）限定で正式に統制される依存として扱う。本表 2 節「直接依存
-として許容する 10 区分（第 1〜8・第 10・第 11 区分）」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
+として許容する 11 区分（第 1〜8・第 10〜12 区分）」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
 指し、第 9 区分は別枠として本節で扱う。
 
 本表 4〜5 節（`cargo tree`／`cargo metadata` 実測）はルート `Cargo.lock` を対象と
@@ -327,3 +328,21 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - `cargo check -p fandhe-ai-hf-hub --locked --target x86_64-pc-windows-msvc`・`--tests --target aarch64-apple-darwin` が通る。
 - `make deny`（advisories bans licenses sources）: ok。`make deps-forbidden`: ok。`deny.toml` の変更はない。
 - 用途は HF Hub API の JSON 取得に限る。固定設定（`NativeTls` 明示・`https_only(true)`・`proxy(None)`・`max_redirects(0)`・全タイムアウト明示）は `crates/hf-hub/tests/api_surface.rs` が機械検査する。
+
+## 追加実測（イシュー #3154）
+
+第 12 区分 `libloading =0.9.0`（default feature）を `crates/backend-rocm` の無条件依存として実追加した。承認根拠は 2 段: 方式・区分は 2026-10-12 の #3153 所有者コメント 6111762873、具体構成（版・feature・配置・用途条件）は 2026-10-18 の #3154 所有者コメント 6243795398（<https://github.com/Fandhe-AI/fandhe-ai/issues/3154#issuecomment-6243795398>）。実測の詳細は `docs/backend-rocm-hip-ffi-decision.md` §5。実測日: 2026-10-17。
+
+- `Cargo.lock` の差分: `fandhe-ai-backend-rocm` の `[[package]]`（dependencies = `libloading`）の追加だけ。他の crate の追加・版変更はない。
+- 版の重複: `cargo tree --locked -d --target all` の `libloading` は 0 件。`cargo tree --locked -i libloading -e normal,build --target all` は `cudarc v0.19.8`（backend-cuda・bench-harness 経由）と `fandhe-ai-backend-rocm` の 2 経路で、どちらも `libloading v0.9.0`。
+- `cargo tree --locked -p fandhe-ai-backend-rocm -e normal,build --target <T>`（default feature）:
+
+| ターゲット | 依存ツリー |
+|---|---|
+| x86_64-unknown-linux-gnu | libloading 0.9.0 → cfg-if 1.0.4 |
+| aarch64-apple-darwin | libloading 0.9.0 → cfg-if 1.0.4 |
+| x86_64-pc-windows-msvc | libloading 0.9.0 → windows-link 0.2.1 |
+
+- `default-features = false` の組合せは決定記録 §5.2 の擬似実測で 3 ターゲットとも default と同一（`std` は依存を追加しない）。本実装は default feature のみで確認した。
+- `cargo deny --locked check advisories bans licenses sources`: `advisories ok, bans ok, licenses ok, sources ok`。`deny.toml` の設定値（allow）は変更していない。
+- `scripts/check-forbidden-deps.sh lock-all`・`tree`: ok。

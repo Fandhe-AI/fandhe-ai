@@ -27,9 +27,10 @@ cat <<'EOT'
   test-ignored-metal          cargo test -p fandhe-ai-backend-metal --release --all-features -- --ignored --nocapture
   test-ignored-metal-facade   scripts/test-ignored.sh metal-facade      Metal 実機専用: facade 契約テスト（release）
   build-cross                 scripts/build-cross.sh                    Linux / aarch64-apple-darwin の cargo build
-  build-no-cuda               scripts/build-no-cuda.sh                  CUDA toolkit 非搭載でのビルド・実行成立検証
+  build-no-cuda               scripts/build-no-cuda.sh                  CUDA toolkit／ROCm 非搭載でのビルド・実行成立検証
   check-cross-metal-tests     scripts/check-cross.sh metal-tests        backend-metal の #[ignore] テスト型検査
   check-cross-cpu-tests       scripts/check-cross.sh cpu-tests          backend-cpu の cfg(test) 限定コード型検査
+  check-cross-rocm-tests      scripts/check-cross.sh rocm-tests         backend-rocm の cfg 分岐を macOS ターゲットで型検査
   check-cross-windows-interop scripts/check-cross.sh windows-interop    Windows ターゲット clippy
   doc-warnings                scripts/doc-warnings.sh                   rustdoc 警告ゲート
   deny                        scripts/deny.sh                           cargo-deny 依存監査
