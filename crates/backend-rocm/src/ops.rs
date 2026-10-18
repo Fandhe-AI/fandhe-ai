@@ -26,6 +26,10 @@
 //!   Tape（`Box<dyn BackendOps + Send>`）に載せるため、コンパイル済みカーネルは thread_local の
 //!   遅延キャッシュに置き、構造体は `Copy` の値だけを持つ（CUDA の `context_cache` と同じ考え方）。
 //!   残るリスク: スレッド終了時に `hipModuleUnload` が走る。プロセス終了時の TLS 破棄順は保証されない。
+//! - R5（#3436）で loss 10 メソッド（`mse_loss`・`huber_loss`・`bce_loss`・`nll_loss`・`kl_div_loss`
+//!   と各 backward）を [`RocmLoss`](crate::RocmLoss) へ結線した。shape 検査・`factor` 決定・enum
+//!   から `i32` への写像（未知 variant は `Unsupported`）・空入力の早期リターンはデバイス取得より
+//!   前に行うので、ROCm 非搭載でも型付きエラーを検査できる。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
 
 use std::cell::RefCell;
@@ -34,8 +38,9 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, BinaryElementwiseOp, Device, DeviceBuffer, FusionPlan,
-    ScalarBinaryOp, ScalarUnaryOp, Tensor, UnaryElementwiseOp, gemm_out_shape, reduce_out_shape,
+    BackendError, BackendOps, BceKind, BinaryElementwiseOp, Device, DeviceBuffer, Element,
+    FusionPlan, HuberKind, KlDivTarget, MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError,
+    Tensor, UnaryElementwiseOp, gemm_out_shape, reduce_out_shape, require_same_shape,
     row_softmax_layout,
 };
 
@@ -45,10 +50,12 @@ use crate::elementwise::{
 };
 use crate::error::{RocmError, to_backend_error};
 use crate::gemm::RocmGemmF32;
+use crate::loss::{cached_loss, first_bad_target};
 use crate::reduce::{ReduceKind, RocmReduce, reduce_axis_layout};
 use crate::target::GfxTarget;
 
-/// 実行経路。`HostModel` はテスト専用（実機なしで組み立て経路を検証する）。
+/// 実行経路。`HostModel` はテスト専用（実機なしで組み立て経路を検証する。GEMM は `gemm_model`、
+/// loss 10 メソッドは `loss_model` の逐語モデルを使う）。
 #[derive(Debug, Clone, Copy)]
 enum Engine {
     Hip,
@@ -318,6 +325,112 @@ fn gemm_with(
     Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
 }
 
+/// contiguous 化済みテンソルのホストスライス（`contiguous()` の戻りは常に `Some`。契約違反は型付きエラー）。
+fn host_slice<'a, T: Element>(t: &'a Tensor<T>, op: &'static str) -> Result<&'a [T], BackendError> {
+    t.as_slice()
+        .ok_or_else(|| BackendError::KernelLaunchFailed(format!("{op}: tensor not contiguous")))
+}
+
+/// スカラー損失 `Tensor`（shape `[]`）。
+fn scalar(v: f32) -> Result<Tensor<f32>, BackendError> {
+    Tensor::new(vec![v], &[]).map_err(BackendError::ShapeMismatch)
+}
+
+/// `Mean` は `1/n`（空は `1.0`）、`Sum` は `1.0`。未知の variant（`#[non_exhaustive]`）は `Unsupported`。
+fn reduction_factor(
+    op: &'static str,
+    reduction: MseReduction,
+    n: usize,
+) -> Result<f32, BackendError> {
+    match reduction {
+        MseReduction::Mean => Ok(if n == 0 { 1.0 } else { 1.0 / n as f32 }),
+        MseReduction::Sum => Ok(1.0),
+        _ => Err(BackendError::Unsupported(format!(
+            "{op}: unsupported MseReduction variant {reduction:?}"
+        ))),
+    }
+}
+
+/// enum からカーネルの `kind`（`int`）への allowlist 写像。未知の variant は fail-closed。
+fn huber_kind_i32(kind: HuberKind) -> Result<i32, BackendError> {
+    match kind {
+        HuberKind::Huber => Ok(0),
+        HuberKind::SmoothL1 => Ok(1),
+        _ => Err(BackendError::Unsupported(
+            "huber_loss: unsupported HuberKind variant".into(),
+        )),
+    }
+}
+
+fn bce_kind_i32(kind: BceKind) -> Result<i32, BackendError> {
+    match kind {
+        BceKind::Probabilities => Ok(0),
+        BceKind::Logits => Ok(1),
+        _ => Err(BackendError::Unsupported(
+            "bce_loss: unsupported BceKind variant".into(),
+        )),
+    }
+}
+
+fn kl_div_kind_i32(kind: KlDivTarget) -> Result<i32, BackendError> {
+    match kind {
+        KlDivTarget::Probabilities => Ok(0),
+        KlDivTarget::LogProbabilities => Ok(1),
+        _ => Err(BackendError::Unsupported(
+            "kl_div_loss: unsupported KlDivTarget variant".into(),
+        )),
+    }
+}
+
+/// `(outer, num_classes, inner)`。`class_dim` が rank 以上なら `AxisOutOfRange`、積の overflow は
+/// `ElementCountOverflow`（CPU の `nll_loss` と同じ種別）。
+fn nll_layout(shape: &[usize], class_dim: usize) -> Result<(usize, usize, usize), BackendError> {
+    if class_dim >= shape.len() {
+        return Err(BackendError::ShapeMismatch(ShapeError::AxisOutOfRange {
+            axis: class_dim,
+            rank: shape.len(),
+        }));
+    }
+    let prod = |s: &[usize]| {
+        s.iter()
+            .try_fold(1usize, |a, &d| a.checked_mul(d))
+            .ok_or(BackendError::ShapeMismatch(
+                ShapeError::ElementCountOverflow,
+            ))
+    };
+    Ok((
+        prod(&shape[..class_dim])?,
+        shape[class_dim],
+        prod(&shape[class_dim + 1..])?,
+    ))
+}
+
+/// nll の `targets` 長（`outer*inner`）と添字値域を CPU の `nll_loss` と同じエラー種別で検査する。
+fn check_nll_targets(
+    targets: &[i32],
+    outer: usize,
+    num_classes: usize,
+    inner: usize,
+) -> Result<usize, BackendError> {
+    let n = outer.checked_mul(inner).ok_or(BackendError::ShapeMismatch(
+        ShapeError::ElementCountOverflow,
+    ))?;
+    if targets.len() != n {
+        return Err(BackendError::ShapeMismatch(
+            ShapeError::ElementCountMismatch {
+                expected: n,
+                actual: targets.len(),
+            },
+        ));
+    }
+    if let Some(bad) = first_bad_target(targets, num_classes) {
+        return Err(BackendError::InvalidArgument(format!(
+            "nll_loss: target index {bad} out of range [0, {num_classes})"
+        )));
+    }
+    Ok(n)
+}
+
 mod ew;
 
 /// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
@@ -482,6 +595,323 @@ impl BackendOps for RocmBackendOps {
     /// HIPRTC の添字縮約（R3・#3434）。契約は [`Self::argmax`] と対称（`v < best` で更新）。
     fn argmin(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<i32>, BackendError> {
         self.arg_reduce_dispatch(a, dim, ArgReduceKind::Min)
+    }
+
+    // ---- R5（#3436）: loss 5 種と backward。検証はすべてデバイス取得より前に行う ----
+
+    /// mse forward（`RocmLoss` の 2 段縮約）。
+    fn mse_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "mse_loss";
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (pc, tc) = (pred.contiguous(), target.contiguous());
+        let (p, t) = (host_slice(&pc, OP)?, host_slice(&tc, OP)?);
+        let factor = reduction_factor(OP, reduction, p.len())?;
+        crate::loss::validate_pair(OP, p.len(), t.len()).map_err(to_backend_error)?;
+        if p.is_empty() {
+            return scalar(0.0);
+        }
+        let v = match self.engine {
+            Engine::Hip => cached_loss(self.target)
+                .and_then(|l| l.run_mse_loss_f32(p, t, factor))
+                .map_err(to_backend_error)?,
+            #[cfg(test)]
+            Engine::HostModel => crate::loss_model::mse(
+                crate::warp_geometry::WarpGeometry::for_target(self.target),
+                p,
+                t,
+                factor,
+            ),
+        };
+        scalar(v)
+    }
+
+    /// mse backward（`dpred` のみ）。
+    fn mse_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "mse_loss";
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (pc, tc) = (pred.contiguous(), target.contiguous());
+        let (p, t) = (host_slice(&pc, OP)?, host_slice(&tc, OP)?);
+        crate::loss::validate_pair(OP, p.len(), t.len()).map_err(to_backend_error)?;
+        let out = if p.is_empty() {
+            Vec::new()
+        } else {
+            match self.engine {
+                Engine::Hip => cached_loss(self.target)
+                    .and_then(|l| l.run_mse_backward_f32(p, t, scale))
+                    .map_err(to_backend_error)?,
+                #[cfg(test)]
+                Engine::HostModel => crate::loss_model::mse_backward(p, t, scale),
+            }
+        };
+        Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// huber／smooth_l1 forward。
+    fn huber_loss(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "huber_loss";
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (pc, tc) = (pred.contiguous(), target.contiguous());
+        let (p, t) = (host_slice(&pc, OP)?, host_slice(&tc, OP)?);
+        let kind_i = huber_kind_i32(kind)?;
+        let factor = reduction_factor(OP, reduction, p.len())?;
+        crate::loss::validate_pair(OP, p.len(), t.len()).map_err(to_backend_error)?;
+        if p.is_empty() {
+            return scalar(0.0);
+        }
+        let v = match self.engine {
+            Engine::Hip => cached_loss(self.target)
+                .and_then(|l| l.run_huber_loss_f32(p, t, kind_i, delta, factor))
+                .map_err(to_backend_error)?,
+            #[cfg(test)]
+            Engine::HostModel => crate::loss_model::huber(
+                crate::warp_geometry::WarpGeometry::for_target(self.target),
+                p,
+                t,
+                kind_i,
+                delta,
+                factor,
+            ),
+        };
+        scalar(v)
+    }
+
+    /// huber／smooth_l1 backward（`dpred` のみ）。
+    fn huber_loss_backward(
+        &self,
+        pred: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: HuberKind,
+        delta: f32,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "huber_loss";
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (pc, tc) = (pred.contiguous(), target.contiguous());
+        let (p, t) = (host_slice(&pc, OP)?, host_slice(&tc, OP)?);
+        let kind_i = huber_kind_i32(kind)?;
+        crate::loss::validate_pair(OP, p.len(), t.len()).map_err(to_backend_error)?;
+        let out = if p.is_empty() {
+            Vec::new()
+        } else {
+            match self.engine {
+                Engine::Hip => cached_loss(self.target)
+                    .and_then(|l| l.run_huber_backward_f32(p, t, kind_i, delta, scale))
+                    .map_err(to_backend_error)?,
+                #[cfg(test)]
+                Engine::HostModel => crate::loss_model::huber_backward(p, t, kind_i, delta, scale),
+            }
+        };
+        Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// bce forward。
+    fn bce_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "bce_loss";
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (ic, tc) = (input.contiguous(), target.contiguous());
+        let (x, t) = (host_slice(&ic, OP)?, host_slice(&tc, OP)?);
+        let kind_i = bce_kind_i32(kind)?;
+        let factor = reduction_factor(OP, reduction, x.len())?;
+        crate::loss::validate_pair(OP, x.len(), t.len()).map_err(to_backend_error)?;
+        if x.is_empty() {
+            return scalar(0.0);
+        }
+        let v = match self.engine {
+            Engine::Hip => cached_loss(self.target)
+                .and_then(|l| l.run_bce_loss_f32(x, t, kind_i, factor))
+                .map_err(to_backend_error)?,
+            #[cfg(test)]
+            Engine::HostModel => crate::loss_model::bce(
+                crate::warp_geometry::WarpGeometry::for_target(self.target),
+                x,
+                t,
+                kind_i,
+                factor,
+            ),
+        };
+        scalar(v)
+    }
+
+    /// bce backward（`dinput` のみ）。
+    fn bce_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: BceKind,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "bce_loss";
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (ic, tc) = (input.contiguous(), target.contiguous());
+        let (x, t) = (host_slice(&ic, OP)?, host_slice(&tc, OP)?);
+        let kind_i = bce_kind_i32(kind)?;
+        crate::loss::validate_pair(OP, x.len(), t.len()).map_err(to_backend_error)?;
+        let out = if x.is_empty() {
+            Vec::new()
+        } else {
+            match self.engine {
+                Engine::Hip => cached_loss(self.target)
+                    .and_then(|l| l.run_bce_backward_f32(x, t, kind_i, scale))
+                    .map_err(to_backend_error)?,
+                #[cfg(test)]
+                Engine::HostModel => crate::loss_model::bce_backward(x, t, kind_i, scale),
+            }
+        };
+        Tensor::new(out, input.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// nll forward（`input` は `[.., C, ..]`、`targets` は class 軸を除いた shape の `i32`）。
+    fn nll_loss(
+        &self,
+        input: &Tensor<f32>,
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "nll_loss";
+        let (outer, classes, inner) = nll_layout(input.shape(), class_dim)?;
+        let (ic, tc) = (input.contiguous(), targets.contiguous());
+        let (x, t) = (host_slice(&ic, OP)?, host_slice(&tc, OP)?);
+        let n = check_nll_targets(t, outer, classes, inner)?;
+        let factor = reduction_factor(OP, reduction, n)?;
+        crate::loss::validate_nll(OP, Some(x.len()), t, outer, classes, inner)
+            .map_err(to_backend_error)?;
+        if n == 0 {
+            return scalar(0.0);
+        }
+        let v = match self.engine {
+            Engine::Hip => cached_loss(self.target)
+                .and_then(|l| l.run_nll_loss_f32(x, t, outer, classes, inner, factor))
+                .map_err(to_backend_error)?,
+            #[cfg(test)]
+            Engine::HostModel => crate::loss_model::nll(
+                crate::warp_geometry::WarpGeometry::for_target(self.target),
+                x,
+                t,
+                outer,
+                classes,
+                inner,
+                factor,
+            ),
+        };
+        scalar(v)
+    }
+
+    /// nll backward（`dinput` のみ。ターゲット位置が `-scale`、ほかは 0）。
+    fn nll_loss_backward(
+        &self,
+        input_shape: &[usize],
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "nll_loss";
+        let (outer, classes, inner) = nll_layout(input_shape, class_dim)?;
+        let tc = targets.contiguous();
+        let t = host_slice(&tc, OP)?;
+        let n = check_nll_targets(t, outer, classes, inner)?;
+        // `input_shape` は利用者が任意に渡すため、確保の前に `i32` 収容まで検証する。
+        let dims = crate::loss::validate_nll(OP, None, t, outer, classes, inner)
+            .map_err(to_backend_error)?;
+        let out = if n == 0 {
+            vec![0.0f32; dims.numel]
+        } else {
+            match self.engine {
+                Engine::Hip => cached_loss(self.target)
+                    .and_then(|l| l.run_nll_backward_f32(t, outer, classes, inner, scale))
+                    .map_err(to_backend_error)?,
+                #[cfg(test)]
+                Engine::HostModel => {
+                    crate::loss_model::nll_backward(t, outer, classes, inner, scale)
+                }
+            }
+        };
+        Tensor::new(out, input_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// kl_div forward。
+    fn kl_div_loss(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: KlDivTarget,
+        reduction: MseReduction,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "kl_div_loss";
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (ic, tc) = (input.contiguous(), target.contiguous());
+        let (x, t) = (host_slice(&ic, OP)?, host_slice(&tc, OP)?);
+        let kind_i = kl_div_kind_i32(kind)?;
+        let factor = reduction_factor(OP, reduction, x.len())?;
+        crate::loss::validate_pair(OP, x.len(), t.len()).map_err(to_backend_error)?;
+        if x.is_empty() {
+            return scalar(0.0);
+        }
+        let v = match self.engine {
+            Engine::Hip => cached_loss(self.target)
+                .and_then(|l| l.run_kl_div_loss_f32(x, t, kind_i, factor))
+                .map_err(to_backend_error)?,
+            #[cfg(test)]
+            Engine::HostModel => crate::loss_model::kl_div(
+                crate::warp_geometry::WarpGeometry::for_target(self.target),
+                x,
+                t,
+                kind_i,
+                factor,
+            ),
+        };
+        scalar(v)
+    }
+
+    /// kl_div backward（`dinput` のみ）。
+    fn kl_div_loss_backward(
+        &self,
+        input: &Tensor<f32>,
+        target: &Tensor<f32>,
+        kind: KlDivTarget,
+        scale: f32,
+    ) -> Result<Tensor<f32>, BackendError> {
+        const OP: &str = "kl_div_loss";
+        require_same_shape(input.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let (ic, tc) = (input.contiguous(), target.contiguous());
+        let (x, t) = (host_slice(&ic, OP)?, host_slice(&tc, OP)?);
+        let kind_i = kl_div_kind_i32(kind)?;
+        crate::loss::validate_pair(OP, x.len(), t.len()).map_err(to_backend_error)?;
+        let out = if x.is_empty() {
+            Vec::new()
+        } else {
+            match self.engine {
+                Engine::Hip => cached_loss(self.target)
+                    .and_then(|l| l.run_kl_div_backward_f32(x, t, kind_i, scale))
+                    .map_err(to_backend_error)?,
+                #[cfg(test)]
+                Engine::HostModel => crate::loss_model::kl_div_backward(x, t, kind_i, scale),
+            }
+        };
+        Tensor::new(out, input.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// HIPRTC の行 softmax（最終軸限定。R4・#3435）。非最終軸は `Unsupported`。
@@ -1015,5 +1445,266 @@ mod tests {
             same(&got, &c.sum(&y, dim).unwrap());
         }
         assert_eq!(o.max(&y, None).unwrap().shape(), &[] as &[usize]);
+    }
+
+    // ---- R5（#3436）: loss 10 メソッドの結線（HostModel 経路。CPU と照合） ----
+
+    fn bits(x: &Tensor<f32>) -> Vec<u32> {
+        x.contiguous()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    fn parity(label: &str, got: &Tensor<f32>, want: &Tensor<f32>) {
+        assert_eq!(got.shape(), want.shape(), "{label}");
+        assert_parity(
+            label,
+            got.contiguous().as_slice().unwrap(),
+            want.contiguous().as_slice().unwrap(),
+        );
+    }
+
+    fn unit(len: usize, seed: u32) -> Vec<f32> {
+        data(len, seed)
+            .iter()
+            .map(|v| (v + 1.0) / 2.0 * 0.98 + 0.01)
+            .collect()
+    }
+
+    #[test]
+    fn loss_forward_and_backward_match_cpu() {
+        let (o, c) = (ops(), CpuBackendOps);
+        for (shape, n) in [
+            (&[3usize, 5][..], 15usize),
+            (&[300, 7][..], 2100),
+            (&[1][..], 1),
+        ] {
+            let p = t(n, shape, 1);
+            let tg = t(n, shape, 2);
+            let probs = Tensor::new(unit(n, 3), shape).unwrap();
+            let tprob = Tensor::new(unit(n, 4), shape).unwrap();
+            for red in [MseReduction::Mean, MseReduction::Sum] {
+                parity(
+                    "mse",
+                    &o.mse_loss(&p, &tg, red).unwrap(),
+                    &c.mse_loss(&p, &tg, red).unwrap(),
+                );
+                for (k, d) in [(HuberKind::Huber, 0.7f32), (HuberKind::SmoothL1, 1.3)] {
+                    parity(
+                        "huber",
+                        &o.huber_loss(&p, &tg, k, d, red).unwrap(),
+                        &c.huber_loss(&p, &tg, k, d, red).unwrap(),
+                    );
+                }
+                for k in [BceKind::Probabilities, BceKind::Logits] {
+                    let x = if matches!(k, BceKind::Probabilities) {
+                        &probs
+                    } else {
+                        &p
+                    };
+                    parity(
+                        "bce",
+                        &o.bce_loss(x, &tprob, k, red).unwrap(),
+                        &c.bce_loss(x, &tprob, k, red).unwrap(),
+                    );
+                }
+                for k in [KlDivTarget::Probabilities, KlDivTarget::LogProbabilities] {
+                    parity(
+                        "kl_div",
+                        &o.kl_div_loss(&p, &tprob, k, red).unwrap(),
+                        &c.kl_div_loss(&p, &tprob, k, red).unwrap(),
+                    );
+                }
+            }
+            // forward は shape []、backward は入力 shape。
+            let f = o.mse_loss(&p, &tg, MseReduction::Mean).unwrap();
+            assert_eq!(f.shape(), &[] as &[usize]);
+            let b = o.mse_loss_backward(&p, &tg, 0.3).unwrap();
+            assert_eq!(b.shape(), shape);
+            assert_eq!(bits(&b), bits(&c.mse_loss_backward(&p, &tg, 0.3).unwrap()));
+            for (k, d) in [(HuberKind::Huber, 0.7f32), (HuberKind::SmoothL1, 1.3)] {
+                assert_eq!(
+                    bits(&o.huber_loss_backward(&p, &tg, k, d, 0.5).unwrap()),
+                    bits(&c.huber_loss_backward(&p, &tg, k, d, 0.5).unwrap())
+                );
+            }
+            for k in [BceKind::Probabilities, BceKind::Logits] {
+                let x = if matches!(k, BceKind::Probabilities) {
+                    &probs
+                } else {
+                    &p
+                };
+                assert_eq!(
+                    bits(&o.bce_loss_backward(x, &tprob, k, 0.5).unwrap()),
+                    bits(&c.bce_loss_backward(x, &tprob, k, 0.5).unwrap())
+                );
+            }
+            for k in [KlDivTarget::Probabilities, KlDivTarget::LogProbabilities] {
+                assert_eq!(
+                    bits(&o.kl_div_loss_backward(&p, &tprob, k, 0.5).unwrap()),
+                    bits(&c.kl_div_loss_backward(&p, &tprob, k, 0.5).unwrap())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nll_matches_cpu_for_each_class_dim() {
+        let (o, c) = (ops(), CpuBackendOps);
+        let shape = [4usize, 6, 3];
+        let numel: usize = shape.iter().product();
+        let input = t(numel, &shape, 9);
+        for cd in 0..3 {
+            let rest: Vec<usize> = shape
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != cd)
+                .map(|(_, &d)| d)
+                .collect();
+            let n: usize = rest.iter().product();
+            let tg: Vec<i32> = (0..n).map(|s| ((s * 5 + 1) % shape[cd]) as i32).collect();
+            let tt = Tensor::new(tg, &rest).unwrap();
+            for red in [MseReduction::Mean, MseReduction::Sum] {
+                parity(
+                    "nll",
+                    &o.nll_loss(&input, &tt, cd, red).unwrap(),
+                    &c.nll_loss(&input, &tt, cd, red).unwrap(),
+                );
+            }
+            assert_eq!(
+                bits(&o.nll_loss_backward(&shape, &tt, cd, 0.25).unwrap()),
+                bits(&c.nll_loss_backward(&shape, &tt, cd, 0.25).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn loss_accepts_non_contiguous_inputs() {
+        let (o, c) = (ops(), CpuBackendOps);
+        let a = t(35, &[7, 5], 1).transpose_2d().unwrap();
+        let b = t(35, &[7, 5], 2).transpose_2d().unwrap();
+        parity(
+            "mse nc",
+            &o.mse_loss(&a, &b, MseReduction::Sum).unwrap(),
+            &c.mse_loss(&a, &b, MseReduction::Sum).unwrap(),
+        );
+        assert_eq!(
+            bits(&o.mse_loss_backward(&a, &b, 0.5).unwrap()),
+            bits(&c.mse_loss_backward(&a, &b, 0.5).unwrap())
+        );
+    }
+
+    #[test]
+    fn loss_shape_and_target_errors_are_typed() {
+        let o = ops();
+        let a = t(6, &[2, 3], 1);
+        let b = t(4, &[2, 2], 2);
+        assert!(matches!(
+            o.mse_loss(&a, &b, MseReduction::Mean),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            o.kl_div_loss_backward(&a, &b, KlDivTarget::Probabilities, 1.0),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        let tg = Tensor::new(vec![0i32, 1], &[2]).unwrap();
+        assert!(matches!(
+            o.nll_loss(&a, &tg, 2, MseReduction::Sum),
+            Err(BackendError::ShapeMismatch(
+                ShapeError::AxisOutOfRange { .. }
+            ))
+        ));
+        // targets の長さ不一致。
+        let short = Tensor::new(vec![0i32], &[1]).unwrap();
+        assert!(matches!(
+            o.nll_loss(&a, &short, 1, MseReduction::Sum),
+            Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch { .. }
+            ))
+        ));
+        // 範囲外の添字は CPU と同じ InvalidArgument。
+        let bad = Tensor::new(vec![0i32, 3], &[2]).unwrap();
+        let neg = Tensor::new(vec![-1i32, 0], &[2]).unwrap();
+        for tt in [&bad, &neg] {
+            assert!(matches!(
+                o.nll_loss(&a, tt, 1, MseReduction::Sum),
+                Err(BackendError::InvalidArgument(_))
+            ));
+            assert!(matches!(
+                o.nll_loss_backward(&[2, 3], tt, 1, 1.0),
+                Err(BackendError::InvalidArgument(_))
+            ));
+            assert!(matches!(
+                CpuBackendOps.nll_loss(&a, tt, 1, MseReduction::Sum),
+                Err(BackendError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn nll_backward_rejects_huge_shape_before_allocating() {
+        let o = ops();
+        let tg = Tensor::new(vec![0i32], &[1]).unwrap();
+        for shape in [[usize::MAX, 1], [1usize << 40, 1 << 30]] {
+            assert!(o.nll_loss_backward(&shape, &tg, 1, 1.0).is_err());
+        }
+    }
+
+    #[test]
+    fn empty_loss_inputs_do_not_touch_device() {
+        // 非搭載環境の Hip 経路でも、空は HIP に触れず Ok を返す。
+        let o = RocmBackendOps::new(GfxTarget::Gfx942);
+        let e = t(0, &[0], 1);
+        for red in [MseReduction::Mean, MseReduction::Sum] {
+            assert_eq!(o.mse_loss(&e, &e, red).unwrap().as_slice().unwrap(), &[0.0]);
+            assert_eq!(
+                o.bce_loss(&e, &e, BceKind::Logits, red)
+                    .unwrap()
+                    .as_slice()
+                    .unwrap(),
+                &[0.0]
+            );
+        }
+        assert_eq!(o.mse_loss_backward(&e, &e, 1.0).unwrap().shape(), &[0]);
+        let tg = Tensor::new(Vec::<i32>::new(), &[0]).unwrap();
+        let out = o.nll_loss_backward(&[0, 3], &tg, 1, 1.0).unwrap();
+        assert_eq!(out.shape(), &[0, 3]);
+    }
+
+    #[test]
+    fn loss_without_rocm_is_unavailable_after_validation() {
+        if crate::is_available() {
+            return;
+        }
+        let o = RocmBackendOps::new(GfxTarget::Gfx942);
+        let a = t(6, &[2, 3], 1);
+        let b = t(6, &[2, 3], 2);
+        assert!(matches!(
+            o.mse_loss(&a, &b, MseReduction::Mean),
+            Err(BackendError::DeviceUnavailable(_))
+        ));
+        assert!(matches!(
+            o.huber_loss_backward(&a, &b, HuberKind::Huber, 1.0, 1.0),
+            Err(BackendError::DeviceUnavailable(_))
+        ));
+        let tg = Tensor::new(vec![0i32, 1], &[2]).unwrap();
+        assert!(matches!(
+            o.nll_loss(&a, &tg, 1, MseReduction::Mean),
+            Err(BackendError::DeviceUnavailable(_))
+        ));
+        // 検証はデバイスより前: shape 不正・範囲外添字は DeviceUnavailable ではなく型付きエラー。
+        let c = t(4, &[2, 2], 3);
+        assert!(matches!(
+            o.mse_loss(&a, &c, MseReduction::Mean),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        let bad = Tensor::new(vec![0i32, 9], &[2]).unwrap();
+        assert!(matches!(
+            o.nll_loss(&a, &bad, 1, MseReduction::Mean),
+            Err(BackendError::InvalidArgument(_))
+        ));
     }
 }
