@@ -10,17 +10,32 @@
 
 use crate::error::RocmError;
 use crate::kernels_gemm::GemmSource;
+use crate::kernels_linalg::LinalgSource;
 use std::fmt::Write as _;
 
 /// `compile_code_object` が受け付けるソース。実装は本クレート内の検証済み型だけ。
 pub(crate) trait CompileSource {
     /// ソース文字列。
     fn as_str(&self) -> &str;
+    /// `hiprtcCreateProgram` へ渡す固定のプログラム名（外部入力から組み立てない）。
+    fn program_name(&self) -> &'static str;
 }
 
 impl CompileSource for GemmSource {
     fn as_str(&self) -> &str {
         GemmSource::as_str(self)
+    }
+    fn program_name(&self) -> &'static str {
+        "fandhe_gemm_f32.hip"
+    }
+}
+
+impl CompileSource for LinalgSource {
+    fn as_str(&self) -> &str {
+        LinalgSource::as_str(self)
+    }
+    fn program_name(&self) -> &'static str {
+        LinalgSource::program_name(self)
     }
 }
 
@@ -59,6 +74,9 @@ impl KernelSource {
 impl CompileSource for KernelSource {
     fn as_str(&self) -> &str {
         &self.0
+    }
+    fn program_name(&self) -> &'static str {
+        "fandhe_kernel.hip"
     }
 }
 

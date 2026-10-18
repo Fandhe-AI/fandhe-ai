@@ -4,6 +4,7 @@
 //! （`backend-cuda` の `TILED_F32` の移植）を実行する。HIP/HIPRTC は `libloading`（第 12 区分）で
 //! 実行時にロードし、`#[link]` を使わないため ROCm 非搭載環境でもビルド・テストが通る
 //! （cudarc の dynamic-loading と同じ cfg ベース方針。REQ-2・coding-rust.md）。
+//! 線形代数 6 演算（`inv`・`solve`・`det`・`cholesky`・`qr`・`eigh`。#3444）は内部 opt-in ゲート（[`linalg`]。既定 OFF）の背後にある `f64` カーネルで、`RocmLinalgLu`・`RocmLinalgFactor` が実行する。
 //! `BackendOps` の骨格（必須 9 メソッド。[`RocmBackendOps`]）は R0（#3431）、縮約系カーネル向けの
 //! wave 幅注入部品は `WarpGeometry`（#3432）、facade の
 //! Device 追加は #3157（所有者判断待ち）、unsafe 監査記録は #3158、実機 parity は #3159。
@@ -33,10 +34,15 @@ mod kernel_source;
 mod kernels_gather_scatter;
 mod kernels_gemm;
 mod kernels_interpolate;
+mod kernels_linalg;
+mod kernels_linalg_factor;
 mod kernels_scan;
 mod kernels_sort;
 mod kernels_unique;
 mod launch;
+pub mod linalg;
+#[cfg(test)]
+mod linalg_model;
 mod module;
 mod ops;
 mod scan;
@@ -60,6 +66,7 @@ pub use gather_scatter::{RocmGatherScatter, ScatterMode};
 pub use gemm::RocmGemmF32;
 pub use interpolate::RocmInterpolate;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
+pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
 pub use ops::RocmBackendOps;
 pub use scan::RocmScan;
 pub use sort::RocmSort;

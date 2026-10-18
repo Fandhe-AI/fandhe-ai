@@ -1,7 +1,8 @@
 # backend-rocm（fandhe-ai-backend-rocm）: ROCm（AMD GPU）バックエンドの雛形（イシュー #3154・親 #3150）。
 #
 # 役割: HIP ランタイムを `libloading`（第 12 区分）で実行時に動的ロードし、ROCm の有無を
-# probe でき、HIPRTC でコンパイルした f32 GEMM カーネルを起動できる（#3155）。
+# probe でき、HIPRTC でコンパイルした f32 GEMM カーネル（#3155）と、内部 opt-in ゲート配下の
+# 線形代数 f64 カーネル（#3444）を起動できる。
 #
 # 依存方向: `tensor-core`（`BackendOps` 等）と `backend-cpu`（ホスト経路の委譲先・parity 参照）へ
 # 依存する（R0・イシュー #3431）。facade からは参照しない（Device への ROCm 追加は #3157）。

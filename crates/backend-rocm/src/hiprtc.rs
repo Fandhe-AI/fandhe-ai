@@ -9,9 +9,10 @@
 //! 生存し、オプション配列の個数と `numOptions` が一致する。U3: コード取得は `GetCodeSize` の
 //! サイズどおりにバッファを確保し、サイズ 0 を拒否する。U7: プログラムは RAII で 1 回だけ破棄する。
 //!
-//! A03: ソースは [`CompileSource`] を実装する検証済みソース型のみ受け付け、オプションは [`GfxTarget`] allowlist 由来の
+//! A03: ソースは封印 trait [`CompileSource`] を実装する検証済みソース型（[`GemmSource`]・[`LinalgSource`]・`KernelSource`）のみ受け付け、オプションは [`GfxTarget`] allowlist 由来の
 //! `--gpu-architecture=gfxNNN` 1 本のみ。include パス・環境変数・`-ffp-contract` は渡さない
-//! （FMA は明示 `__builtin_fmaf` で決まるため不要。docs/backend-rocm-hiprtc-gemm-decision.md §2）。
+//! （GEMM の FMA は明示 `__builtin_fmaf`、線形代数は各ソース先頭の `#pragma clang fp contract(off)` で
+//! 決まるため不要。docs/backend-rocm-hiprtc-gemm-decision.md §2・docs/backend-gpu-linalg-decision.md §10）。
 //!
 //! 出典: soname は HIP 公式文書「HIPRTC is available as a separate library `libhiprtc.so`」
 //! （<https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_rtc.html>。版付き soname
@@ -31,9 +32,6 @@ const SYM_LOG: &str = "hiprtcGetProgramLog";
 const SYM_CODE_SIZE: &str = "hiprtcGetCodeSize";
 const SYM_CODE: &str = "hiprtcGetCode";
 const SYM_DESTROY: &str = "hiprtcDestroyProgram";
-
-/// プログラム名（固定）。
-const PROGRAM_NAME: &str = "fandhe_gemm_f32.hip";
 
 /// 取得するコンパイラログの上限（これを超えるログは取得せずサイズのみ記録する）。
 const MAX_LOG_BYTES: usize = 1 << 20;
@@ -188,7 +186,7 @@ pub(crate) fn compile_code_object(
     target: GfxTarget,
 ) -> Result<CodeObject, RocmError> {
     let c_src = cstring(src.as_str(), "ソース")?;
-    let c_name = cstring(PROGRAM_NAME, "プログラム名")?;
+    let c_name = cstring(src.program_name(), "プログラム名")?;
     let c_opt = cstring(&arch_option(target), "オプション")?;
     let opts: [*const c_char; 1] = [c_opt.as_ptr()];
 
@@ -307,6 +305,18 @@ mod tests {
         assert_eq!(log_from_buffer(b"warn\0\0"), "warn");
         assert_eq!(log_from_buffer(b"abc"), "abc");
         assert_eq!(log_from_buffer(b""), "");
+    }
+
+    #[test]
+    fn linalg_sources_have_fixed_program_names_and_no_nul() {
+        use crate::kernels_linalg::render_linalg_lu_source;
+        use crate::kernels_linalg_factor::render_linalg_factor_source;
+        let lu = render_linalg_lu_source();
+        let fa = render_linalg_factor_source();
+        assert_eq!(lu.program_name(), "fandhe_linalg_lu_f64.hip");
+        assert_eq!(fa.program_name(), "fandhe_linalg_factor_f64.hip");
+        assert!(cstring(lu.as_str(), "ソース").is_ok());
+        assert!(cstring(fa.as_str(), "ソース").is_ok());
     }
 
     #[test]

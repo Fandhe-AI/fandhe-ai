@@ -59,6 +59,23 @@ pub enum RocmError {
         /// 理由。
         detail: String,
     },
+    /// 線形代数（LU 系・分解系）の形状・スライス長・サイズが不正（デバイスに触れる前に返す）。
+    InvalidLinalgDims {
+        /// 理由。
+        detail: String,
+    },
+    /// 線形代数の入力起因の失敗（非正定値・eigh の未収束）。CPU 参照実装の
+    /// `InvalidArgument` 分類に対応する。
+    LinalgInvalidArgument {
+        /// 理由。
+        detail: String,
+    },
+    /// 線形代数カーネルが書く status・補助フラグが契約外（未起動の sentinel のまま・想定外の値）。
+    /// 成功扱いにしない（fail-closed。A08）。
+    LinalgKernelStatusInvalid {
+        /// 理由。
+        detail: String,
+    },
     /// GEMM 以外の演算（gather/scatter/sort 等）の引数・形状・スライス長が不正。
     InvalidOpArgs {
         /// 演算名（固定文字列）。
@@ -111,6 +128,15 @@ impl fmt::Display for RocmError {
                 write!(f, "カーネルのタイル設定が不正です: {detail}")
             }
             Self::InvalidGemmDims { detail } => write!(f, "GEMM の形状が不正です: {detail}"),
+            Self::InvalidLinalgDims { detail } => {
+                write!(f, "線形代数の形状・サイズが不正です: {detail}")
+            }
+            Self::LinalgInvalidArgument { detail } => {
+                write!(f, "線形代数の入力が不正です: {detail}")
+            }
+            Self::LinalgKernelStatusInvalid { detail } => {
+                write!(f, "線形代数カーネルの status が契約外です: {detail}")
+            }
             Self::InvalidOpArgs { op, detail } => write!(f, "{op} の引数が不正です: {detail}"),
             Self::SizeLimitExceeded { op, n, limit } => {
                 write!(f, "{op} のサイズ {n} が上限 {limit} を超えます")
@@ -150,6 +176,9 @@ pub(crate) fn to_backend_error(e: RocmError) -> BackendError {
         | RocmError::CodeObjectEmpty
         | RocmError::InvalidKernelConfig { .. }
         | RocmError::InvalidGemmDims { .. }
+        | RocmError::InvalidLinalgDims { .. }
+        | RocmError::LinalgInvalidArgument { .. }
+        | RocmError::LinalgKernelStatusInvalid { .. }
         | RocmError::InvalidOpArgs { .. }
         | RocmError::SizeLimitExceeded { .. }
         | RocmError::InvalidCString { .. } => BackendError::KernelLaunchFailed(msg),
@@ -194,6 +223,15 @@ mod tests {
                 detail: String::new(),
             },
             RocmError::InvalidGemmDims {
+                detail: String::new(),
+            },
+            RocmError::InvalidLinalgDims {
+                detail: String::new(),
+            },
+            RocmError::LinalgInvalidArgument {
+                detail: String::new(),
+            },
+            RocmError::LinalgKernelStatusInvalid {
                 detail: String::new(),
             },
             RocmError::InvalidCString { what: "w" },

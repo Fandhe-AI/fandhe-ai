@@ -5,7 +5,7 @@
 ## 対象範囲
 
 - 測るのは `RocmGemmF32::run`（f32 GEMM・`GfxTarget::Gfx942`）と `is_available()`（`probe_real_device.rs`）のみ。
-- reduce・softmax・norm など `docs/backend-rocm-ops-coverage-plan.md` の R0〜R13 は未実装（`BackendOps` 未実装・起票は所有者承認待ち）のため対象外。各 R イシューが同じ `#[ignore]` 方式でテストを足す。
+- reduce・softmax・norm など `docs/backend-rocm-ops-coverage-plan.md` の R0〜R13（linalg〈R13〉の kernel 実行器は #3444 で実装済み。下の「linalg」節。`BackendOps` 結線は R0 待ち）は未実装（`BackendOps` 未実装・起票は所有者承認待ち）のため対象外。各 R イシューが同じ `#[ignore]` 方式でテストを足す。
 - 判定は REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）のみ。tolerance・baseline・FMA 契約は変えない。規則は `RULE.txt`（事前登録）。
 
 ## 前提
@@ -46,6 +46,28 @@
 決定性（`ROCM_DETERMINISM`。記録のみ）: （未記入）
 
 unsafe 監査 §6（`docs/backend-rocm-unsafe-audit.md`）のうちテストの完走で間接的に確認できた項目: （未記入）。grid 上限の実照会・`hipFree` のデバイス非依存性・スレッド安全性など完走だけでは確かめられない項目は「未確認」と書いて残す。
+
+## linalg（#3444）
+
+**状態: 未実測**。`inv`・`solve`・`det`・`cholesky`・`qr`・`eigh`（`RocmLinalgLu`・`RocmLinalgFactor`。`double` カーネル・出力のみ `f32`）の実機 parity。`tests/linalg_real_device.rs`（`#[ignore]`）が `run_rocm_parity.sh` の `--ignored` 全件実行に自動で含まれる（スクリプトは変更しない）。**本テストの失敗は run の終了コードに影響する。**
+
+- 判定は REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）のみ。`RULE.txt`（事前登録・編集しない）の GEMM 用規則とは別に、linalg の追加規則は設けない。tolerance・baseline・FMA 契約は変えない。CPU との bit 不一致数は観測値で、assert しない。
+- 入力集合（`docs/backend-gpu-linalg-decision.md` §5 準拠）: n = 1・2・3・17・64（solve・inv・cholesky は `1e20`・`1e-20` 倍を含む）、対角優位・κ ≤ 1e3 の SPD・対称行列、QR は 1×1・5×3・3×5・17×17・64×64・65×17・17×65、特異（solve・inv は `Singular`、det は `0.0`）、非正定値・eigh の NaN 入力（`LinalgInvalidArgument`）。
+- ログ行は `ROCM_PARITY_LINALG\t<名前>\ttotal=…\tfail=…\tmax_abs=…\tmax_rel=…\tmean_abs=…\tp99_abs=…\tbit_mismatch=…`。
+- 補助診断（記録のみ）: オフラインの `clang -x hip --offload-arch=gfx942 --offload-device-only -O3 -S` に `render_linalg_lu_source`／`render_linalg_factor_source` と同じソースを通し、`v_fma_f64`・`v_fmac_f64` の有無を数える。HIPRTC と同一ではない。あわせて `fabs`・`copysign`・`isfinite`・`atomicExch(int*, int)` が暗黙ヘッダで解決されること、`#pragma clang fp contract(off)` がファイルスコープで受理されることを、実 HIPRTC のコンパイル成否で確認する。
+
+| 項目 | 値 |
+|---|---|
+| 実施日 | |
+| 判定（pass／fail） | |
+| HIPRTC コンパイル（LU 系・分解系） | |
+| `v_fma_f64` の有無（補助診断） | |
+
+演算ごと（`ROCM_PARITY_LINALG` 行の転記）:
+
+| 名前 | total | fail | max_abs | max_rel | bit_mismatch |
+|---|---|---|---|---|---|
+| | | | | | |
 
 ## fail 時の切り分け（推測で結論を書かない）
 
