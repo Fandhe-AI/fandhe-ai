@@ -10,6 +10,7 @@
 | 監査の種類 | 実装担当による**自己点検**（機械的インベントリ・全ブロックの手読み・clippy の臨時実行・Linux 上の検証）。**独立した security-auditor の監査ではない**。実装環境にサブエージェントの起動手段がなかったため未実施で、PR レビューで security-auditor の監査を受け、その結果を §8 へ追記する。所有者の承認を得たとは記載しない |
 | 変更範囲 | 本 doc の新設、`hiprtc.rs` の `HiprtcRuntime::_lib` の `ManuallyDrop` 化（F1）、SAFETY コメントの表記揃え。依存（`libloading =0.9.0`）・tolerance・FMA 契約・REQ-8 の境界チェック・`docs/spec/`・CI は変更しない |
 | 未検証 | §6 の実機項目すべて（MI300X・gfx942。#3159）。実機テスト（`#[ignore]`）は実行していない |
+| 追従（R1・#3432） | `WarpGeometry` は `unsafe` を追加しない（監査表の件数は不変） |
 | 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する |
 
 ## 2. 機械的インベントリ

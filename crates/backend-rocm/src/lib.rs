@@ -4,6 +4,7 @@
 //! （`backend-cuda` の `TILED_F32` の移植）を実行する。HIP/HIPRTC は `libloading`（第 12 区分）で
 //! 実行時にロードし、`#[link]` を使わないため ROCm 非搭載環境でもビルド・テストが通る
 //! （cudarc の dynamic-loading と同じ cfg ベース方針。REQ-2・coding-rust.md）。
+//! 縮約系カーネル向けの wave 幅注入部品は `WarpGeometry`（#3432）。
 //! BackendOps への統合・facade の Device 追加は #3157、unsafe 監査記録は #3158、
 //! 実機 parity は #3159。
 //!
@@ -49,6 +50,9 @@ mod typed_buffer;
 mod unique;
 #[cfg(test)]
 mod unique_model;
+mod warp_geometry;
+#[cfg(test)]
+mod warp_model;
 
 pub use error::RocmError;
 pub use gather_scatter::{RocmGatherScatter, ScatterMode};
@@ -59,6 +63,7 @@ pub use scan::RocmScan;
 pub use sort::RocmSort;
 pub use target::{GfxTarget, parse_gcn_arch_name};
 pub use unique::RocmUnique;
+pub use warp_geometry::{WarpDefines, WarpGeometry};
 
 /// HIP ランタイムをロードでき、デバイスが 1 つ以上あるとき true。
 ///
