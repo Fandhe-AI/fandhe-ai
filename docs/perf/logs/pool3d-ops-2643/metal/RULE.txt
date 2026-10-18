@@ -1,0 +1,35 @@
+事前登録規則（イシュー #3162: pool3d-ops-2643 の Metal 実機 parity）
+宣言日時（UTC）: 2026-10-18（実機実行より前。実機結果を見た後に入力・判定を変えない）
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。
+
+対象コミット: 本ファイルを追加するコミットの親。実機へ転送する展開ツリーの .rev-stamp は、
+  crates/ 配下がそのコミットと同一内容であることを条件とし、実行時の HEAD フル SHA を
+  .rev-stamp に書き、README に記録する。
+
+コマンド（厳密に順番に実行し、他のビルドを並走させない）:
+  CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
+  cargo test -p fandhe-ai --release --test pool3d_ops_backend_parity -- --ignored --nocapture --test-threads=1 metal_
+  （--release --nocapture --test-threads=1 は判定に影響しない実行オプション）
+
+期待件数: 1 件（metal_pool3d_ops_match_cpu_reference）
+
+判定:
+  pass: exit 0 かつ「1 passed; 0 failed」で、「running N tests」の N が期待件数 1 と一致すること。
+        N が 0 または期待件数と異なれば fail とする（skip を pass と見なさない）。
+  fail: テストが 1 件以上失敗すること。tape_for(Device::Metal) の失敗・想定外の Unsupported・panic も
+        fail に含める。Metal 対 CPU の不一致は自前バックエンド同士の比較なので判定不能にせず、
+        通常の parity 失敗とする。bit_exact_* の fail は「bit 一致 fail」として記録し、
+        REQ-2 pass へ読み替えない。
+  undetermined: ノードに届かない場合、またはビルドできない場合のみ。
+  注意: 1 テストは最初の fail で止まるため、全 op が評価済みと言えるのは pass の場合だけである。
+  判定は REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+  RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD・baseline・テスト入力は変えない。
+
+経路の位置づけ: 本 README の期待結果どおり、既存フック・ホストフォールバック経路の確認であり、
+  新規 GPU カーネルの parity ではない。
+
+fail 時の扱い:
+  tolerance・baseline・判定・入力は変えない。失敗件数・失敗したテスト名・ログに出た最大誤差
+  （max_abs_diff／max_rel_err 等）を引用し、README と PR に「要対応」として記録する。
+  Issue の起票・コメント、baseline 化はユーザー承認なしでは行わない。
