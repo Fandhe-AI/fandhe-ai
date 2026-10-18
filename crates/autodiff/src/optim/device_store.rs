@@ -2105,7 +2105,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         // `any_resident` の場合のみ使用: resident 経由でない slot
         // （bias 等のホスト計算勾配）を `(slot 添字, 勾配)` で保持し、
         // 更新フェーズで `GradStaging` の対応オフセットへ
@@ -2801,7 +2808,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -3099,7 +3113,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -3369,7 +3390,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -3622,7 +3650,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -5145,6 +5180,45 @@ mod tests {
             resident_b.contiguous().as_slice().unwrap(),
             "resident weight grad マージ経路と host-only 経路で bias の最終値が食い違う"
         );
+    }
+
+    /// イシュー #3194: 全 slot が resident（bias なし）で `flat_grad` を
+    /// 確保しない経路が、host-only 経路（`flat_grad` へ積む）と bit 一致する
+    /// ことを検証する。混在は上のテスト、なしは比較基準側が担う。
+    #[test]
+    fn resident_only_weight_grad_matches_host_only_grad_path() {
+        fn two_steps(tape: &Tape) -> Tensor<f32> {
+            let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+            let mut store = DeviceParamStore::new(tape, &[&w_init]).unwrap();
+            let config = SgdConfig::new(0.1);
+            for _ in 0..2 {
+                let leaves = store.register_resident_params(tape).unwrap();
+                let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+                let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+                let pred = store.linear_forward(tape, &x, &leaves[0], None).unwrap();
+                let loss = pred.mse_loss(&target).unwrap();
+                let grads = store.backward(tape, &loss).unwrap();
+                store.step(tape, &grads, &config).unwrap();
+            }
+            store.sync_to_host(tape).unwrap()[0].clone()
+        }
+
+        let host_w = two_steps(&simple_tape(None));
+        let resident_tape = Tape::new_with_ops(
+            Box::new(MockDeviceOps::resident_capable()) as Box<dyn BackendOps + Send>
+        );
+        let resident_w = two_steps(&resident_tape);
+
+        assert_ne!(resident_w.get(&[0, 0]).unwrap(), 1.0, "値が動いていない");
+        let bits = |t: &Tensor<f32>| -> Vec<u32> {
+            t.contiguous()
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        assert_eq!(bits(&host_w), bits(&resident_w));
     }
 
     /// イシュー #1479 の受入基準 AC-R3 相当（クレート内単体テスト版）:
