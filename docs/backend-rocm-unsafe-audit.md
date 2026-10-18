@@ -13,6 +13,7 @@
 | #3444 追記 | `linalg.rs` の起動 5 件（L1〜L5。§3.5）を追加し、`DeviceBuffer` を型付き（`DeviceBuffer<T>`。`f32`・`f64`・`i32`）にして M5〜M7 の前提を `elems*size_of::<T>()` へ改めた。ブロック総数は 33 → 38。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従（R1・#3432） | `WarpGeometry` は `unsafe` を追加しない（監査表の件数は不変） |
 | 追従（R3・#3434） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変）。(1) 封印 trait `DeviceElem` に `f64`（`SIZE = 8`）を追加した。sum の `double` partial バッファ用で、`f64` はビット列として memcpy してよい POD のため T1・T2 の「封印 POD」前提が 1 型ぶん広がるだけで、検査（`checked_mul`・長さ一致）は不変。(2) K1（`KernelHost::run`）の呼び出し元が `RocmReduce`・`RocmArgReduce` の分だけ増えた。全軸縮約 1 段目の `KernelHost::run_blocks` は `run` を経由する薄いラッパーで、起動点は 1 か所のまま。(3) 引数の照合は従来どおり `kernels_reduce.rs`・`kernels_arg_reduce.rs` の `spec_matches_source_signature` と `run` の実行時照合で行う。(4) `unsafe impl Send/Sync` は足さない（`RocmReduce`・`RocmArgReduce` は `!Send`。`RocmBackendOps` からは thread_local キャッシュ経由）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
+| 追従（R9・#3440） | **新しい `unsafe` ブロックは 0 件**（インベントリ §2 は不変。§3.8）。K1（`KernelHost::run`）の呼び出し元が `RocmOptim` の 2 か所（SGD・Adam）増えるだけ。in-place 更新は `TypedDeviceBuffer::as_device_ptr`（safe fn）の生ポインタ値を `Arg::Ptr` に渡す。momentum 無効時の velocity 引数は grad のポインタをダミーで渡すが、`use_momentum == 0` の分岐でカーネルは velocity を読み書きしない。`unsafe impl Send/Sync` なし。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない） |
 | 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する。R0（#3431）は新しい `unsafe` を足さない（インベントリは 33／10／17／0 のまま。`unsafe impl Send/Sync` もなし） |
 
 ## 2. 機械的インベントリ
@@ -143,6 +144,15 @@ softmax・log_softmax・log_softmax_backward の 2 実行型（`softmax.rs`）�
 - 省略された weight／bias／統計にも `hidden`（または `c`）要素のダミーバッファを渡す（predicated load 対策）。
 - 確認方法: §2 の再現コマンドで `launch.rs` の `unsafe {` が 1 件のままであること、`norm*.rs`・`kernels_norm.rs`・`tests/norm_*.rs` に `unsafe` ブロックがないこと（doc 内の言及を除く）を確認した。§2 の件数表は R6 で増減しないが、兄弟 PR が §2 を更新している場合はマージ順で再集計が必要。
 - 実機（MI300X・gfx942）で HIPRTC のコンパイル（`__shfl_xor` の double オーバーロード・`__builtin_fma` の f64 命令化）と wave64 parity を確認していない（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
+
+### 3.8 R9（#3440）: 新しい `unsafe` ブロックなし（実装担当の自己点検。未監査）
+
+SGD・Adam の in-place 更新（`optim.rs::RocmOptim`・`kernels_optim.rs`・`optim_model.rs`〈`cfg(test)`〉・`ops/optim.rs`）は **`unsafe` を一切追加しない**。起動は既存の K1 だけを通る。
+
+- 更新対象（`param`・`velocity`・`m`・`v`）は `&mut TypedDeviceBuffer<f32>` で受け、書き込みを型で表す。ポインタ値は `as_device_ptr`（safe fn）で取り出し `Arg::Ptr` に渡すだけで、`K1` の実行時照合（引数の個数・種別）と `kernels_optim.rs` の `spec_matches_source_signature` が従来どおり効く。
+- ホスト側で、ハンドル型・shape・要素数（`ElementCountMismatch`）・`i32` 収容を、**どの要素も書き換える前・HIP に触れる前**に検証する（カーネル側の `gid >= numel` と二重化。REQ-8）。
+- 確認方法: `grep -n unsafe` が `kernels_optim.rs`・`optim.rs`・`optim_model.rs`・`ops/optim.rs` で 0 件（doc 内の言及を除く）。
+- 実機（MI300X・gfx942）での HIPRTC コンパイル、`sqrtf`／除算の CPU との bit 一致、wave64 での確認は未実施（#3159）。独立した security-auditor の監査は PR レビューで実施し §8 へ追記する（未実施。得ていない承認は書かない）。
 
 ## 4. U1 の担保方法
 

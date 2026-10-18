@@ -31,6 +31,10 @@
 //! `log_softmax_backward`（[`RocmLogSoftmaxBackward`]）の HIPRTC カーネルを移植し、`RocmBackendOps`
 //! へ結線した（wave 幅は `WarpGeometry` 注入。onepass〈動的 SMEM〉経路は移植せず 2 パスのみ）。
 //!
+//! SGD・Adam/AdamW のデバイス常駐 in-place 更新（分解案 R9・#3440）は `RocmBackendOps` の
+//! `sgd_step_device`／`adam_step_device` へ結線した（HIPRTC カーネルは `kernels_optim`。非公開の
+//! `RocmOptim` が同期実行する）。FMA は CPU の `mul_add` 箇所だけ `__builtin_fmaf` で明示する。
+//!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
 //! facade からは参照しない。
@@ -68,6 +72,7 @@ mod kernels_linalg_factor;
 mod kernels_log_softmax_backward;
 mod kernels_loss;
 mod kernels_norm;
+mod kernels_optim;
 mod kernels_reduce;
 mod kernels_scalar_op;
 mod kernels_scan;
@@ -86,6 +91,9 @@ mod norm;
 #[cfg(test)]
 mod norm_model;
 mod ops;
+mod optim;
+#[cfg(test)]
+mod optim_model;
 mod reduce;
 #[cfg(test)]
 mod reduce_model;

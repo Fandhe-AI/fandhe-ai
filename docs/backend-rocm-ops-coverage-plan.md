@@ -274,6 +274,17 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - **デバイス常駐 API の到達性**: `binary_elementwise_device`／`unary_elementwise_device` は実装したが、`memory_ops()` は `None`（§4 の既定継承）のままなので crate の外から ROCm の `DeviceBuffer` を作れない。判別は `downcast_handle::<RocmBufferHandle>()` の型のみ（`device()` は #3157 まで `Device::Cpu` の仮置きで CPU 由来と区別できない）。被覆表内の不整合（#106・#107 は「移植」、#2 は `None`）として所有者の判断待ち。
 - relu は CUDA と同じ `x > 0 ? x : 0`（NaN は 0。CPU の `f32::max` と `-0.0` の符号だけ異なりうる）。新しい `unsafe` はない（`KernelHost::run`・`TypedDeviceBuffer` の監査済み `unsafe` を再利用）。
 
+### R9（#3440）の実装記録
+
+- **CUDA 側の対応**: `backend-cuda/src/{sgd.rs, kernels_sgd.rs, adam.rs, kernels_adam.rs}`、結線は `backend-cuda/src/ops.rs` の `sgd_step_device`・`adam_step_device`。rmsprop・adagrad・lamb は CUDA も未実装のため対象外。ROCm は 2 カーネルを 1 ソース（`kernels_optim.rs`）・1 実行型（`optim.rs::RocmOptim`）・1 モデル（`optim_model.rs`）にまとめた。`*_tracked` は trait 既定（非 tracked 版へ委譲）のまま。
+- **FMA**: NVRTC は `--fmad` 既定 ON のため CUDA 版は `__fmul_rn`／`__fadd_rn`／`__fsub_rn`／`__fdiv_rn` で縮約を避けていたが、ROCm は先例どおり `#pragma clang fp contract(off)` ＋素の `* + - /` で書き、CPU が `f32::mul_add` を使う SGD の 3 か所（weight_decay・momentum EMA・nesterov）と Adam の 3 か所（coupled の `g_eff`・`m_new`・`v_new`）だけ `__builtin_fmaf` で明示した。`__f*_rn` は HIPRTC で通常演算子として定義されていると pragma が効かないため使わない。`p - lr * g` は CPU が縮約しないので FMA にしない（CUDA の NVRTC では縮約されうるが ROCm では `contract(off)` で縮約させないのが正しい）。
+- **`use_momentum` は `config.momentum != 0.0` から決める**（CPU・trait doc に合わせる）。CUDA の `CudaSgd::run` は `velocity.is_some()` から決めるため、`momentum == 0 && velocity.is_some() && dampening != 0` のとき CPU と食い違う（CUDA は velocity を書き換え、`(1-dampening)` を掛ける）。本 PR では CUDA 側は直さない。追跡の要否は所有者判断。
+- **同期実行**: `KernelHost::run` は呼び出しごとに同期する（CUDA の非同期投入とは異なる。trait doc が許す差異）。CUDA Graph の記録計数は持ち込まない（graph capture は §5 で `Unsupported`）。
+- **`f64` アキュムレータ契約は該当しない**: 要素ごとの更新で縮約を含まない。
+- **`sqrtf`・`/`**: HIP-Clang の既定で正しく丸められる前提（`kernels_scalar_op.rs` の Div・Sqrt と同じ立場）。ホストモデルでは CPU と bit 一致を検証したが、実機での bit 一致は主張せず #3159 で測る。
+- **到達性**: `memory_ops()` が `None` のままなので、crate の外から ROCm の `DeviceBuffer` を作れず `DeviceParamStore` からは現状到達しない（R2 と同じ制約。#3157 の所有者判断）。
+- 新しい `unsafe` は 0 件（監査 doc §3.8）。
+
 ## 10. 起票手順（未実施）
 
 所有者の承認後に `update-issue-tree` で親 #3150 配下へ R0〜R13 を追加する。各 issue に `phase:7`・依存（`dependsOn`）・実機要否を書く。承認前は起票しない。本 doc の追加だけでは #3156 の受け入れ条件（起票）は未達のまま残る。

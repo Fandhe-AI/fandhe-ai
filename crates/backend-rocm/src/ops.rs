@@ -35,6 +35,9 @@
 //!   と各 backward）を [`RocmLoss`](crate::RocmLoss) へ結線した。shape 検査・`factor` 決定・enum
 //!   から `i32` への写像（未知 variant は `Unsupported`）・空入力の早期リターンはデバイス取得より
 //!   前に行うので、ROCm 非搭載でも型付きエラーを検査できる。
+//! - R9（#3440）で `sgd_step_device`・`adam_step_device` を [`RocmOptim`](crate::optim::RocmOptim)
+//!   （in-place・同期実行）へ結線した。検証と engine 分岐は子モジュール `optim`（`ops/optim.rs`）。
+//!   `*_tracked` は trait 既定（非 tracked 版へ委譲）のまま。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
 
 use std::cell::RefCell;
@@ -43,11 +46,11 @@ use std::thread::LocalKey;
 
 use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
-    BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Device,
-    DeviceBuffer, Element, FusionPlan, HuberKind, KlDivTarget, LayerNormBackwardOutput,
-    MseReduction, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor, UnaryElementwiseOp,
-    batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
-    row_softmax_layout,
+    AdamStepConfig, BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp,
+    Device, DeviceBuffer, Element, FusionPlan, HuberKind, KlDivTarget, LayerNormBackwardOutput,
+    MseReduction, ScalarBinaryOp, ScalarUnaryOp, SgdStepConfig, ShapeError, Tensor,
+    UnaryElementwiseOp, batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
@@ -62,6 +65,7 @@ use crate::norm::{
     batch_norm_train_empty, layer_norm_backward_empty, rmsnorm_backward_empty, validate_batch_norm,
     validate_row_norm,
 };
+use crate::optim::RocmOptim;
 use crate::reduce::{ReduceKind, RocmReduce, reduce_axis_layout};
 use crate::target::GfxTarget;
 #[cfg(test)]
@@ -94,6 +98,8 @@ thread_local! {
     static REDUCE_CACHE: Cache<RocmReduce> = const { RefCell::new(Vec::new()) };
     /// 添字縮約（argmax/argmin。#3434）。
     static ARG_REDUCE_CACHE: Cache<RocmArgReduce> = const { RefCell::new(Vec::new()) };
+    /// SGD・Adam の in-place 更新（R9・#3440）。
+    static OPTIM_CACHE: Cache<RocmOptim> = const { RefCell::new(Vec::new()) };
 }
 
 /// thread_local キャッシュ `key` から `target` 用の実行型を取得する（無ければ `make` で構築して入れる）。
@@ -662,6 +668,7 @@ fn check_nll_targets(
 }
 
 mod ew;
+mod optim;
 
 /// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
 ///
@@ -787,6 +794,29 @@ impl BackendOps for RocmBackendOps {
         b: &DeviceBuffer<f32>,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
         self.ew_binary_device(op, a, b)
+    }
+
+    /// デバイス常駐パラメータへ SGD 1 step を in-place 適用する（R9・#3440。検証は `ops/optim.rs`）。
+    fn sgd_step_device(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        velocity: Option<&mut DeviceBuffer<f32>>,
+        config: &SgdStepConfig,
+    ) -> Result<(), BackendError> {
+        self.optim_sgd_step(param, grad, velocity, config)
+    }
+
+    /// デバイス常駐パラメータへ Adam／AdamW 1 step を in-place 適用する（R9・#3440）。
+    fn adam_step_device(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        m: &mut DeviceBuffer<f32>,
+        v: &mut DeviceBuffer<f32>,
+        config: &AdamStepConfig,
+    ) -> Result<(), BackendError> {
+        self.optim_adam_step(param, grad, m, v, config)
     }
 
     /// デバイス常駐の `relu`／`exp`／`tanh`。呼び出しごとに同期する。
