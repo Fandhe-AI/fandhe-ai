@@ -5407,7 +5407,8 @@ impl CudaGemm {
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
         if let Some(t) = bias.as_ref() {
-            self.validate_bias_target(t, n)?;
+            // NT: bias 縮約は `bt`（`[n, k]`）を `outer = n, axis_len = k, inner = 1`。
+            self.validate_bias_target(t, n, bt.len(), n as usize, k as usize, 1)?;
         }
 
         if m == 0 || n == 0 {
@@ -5456,15 +5457,19 @@ impl CudaGemm {
             c_dev.push(&mut builder);
             builder.arg(&m_i).arg(&n_i).arg(&k_i).launch(cfg)?;
         }
-        if let Some(t) = bias.as_mut() {
+        let reduce_result = match bias.as_mut() {
             // NT: `bt_dev` は `[n, k]` の密配置で、bias 勾配は各行（`k` 要素）
             // の和（`outer = n, axis_len = k, inner = 1`）。
-            self.launch_bias_reduce(t, &bt_dev, n as usize, k as usize, 1)?;
-        }
+            Some(t) => self.launch_bias_reduce(t, &bt_dev, n as usize, k as usize, 1),
+            None => Ok(()),
+        };
         // 設計判断 A: `b_std` がまだ GPU 上で読まれている間にプールへ
         // 返却・別処理に再利用される race を防ぐため、drop（関数末尾の
-        // スコープ終了）より前に完了を待つ。
-        self.stream.synchronize()?;
+        // スコープ終了）より前に完了を待つ。縮約の起動失敗でも `?` で
+        // 抜けず必ず同期してから結果を返す（PR #3464 レビュー指摘）。
+        let sync_result = self.stream.synchronize();
+        reduce_result?;
+        sync_result?;
         Ok(())
     }
 
@@ -5488,7 +5493,8 @@ impl CudaGemm {
         validate_tiled_k_bound(k)?;
         validate_output_len(c_dev.len(), m, n)?;
         if let Some(t) = bias.as_ref() {
-            self.validate_bias_target(t, n)?;
+            // TN: bias 縮約は `b`（`[k, n]`）を `outer = 1, axis_len = k, inner = n`。
+            self.validate_bias_target(t, n, b.len(), 1, k as usize, n as usize)?;
         }
 
         if m == 0 || n == 0 {
@@ -5522,13 +5528,17 @@ impl CudaGemm {
             c_dev.push(&mut builder);
             builder.arg(&m_i).arg(&n_i).arg(&k_i).launch(cfg)?;
         }
-        if let Some(t) = bias.as_mut() {
+        let reduce_result = match bias.as_mut() {
             // TN: `b_dev` は `[k, n]` の密配置で、bias 勾配は列方向の和
             // （`outer = 1, axis_len = k, inner = n`）。GEMM と同じ
             // `b_dev` を再利用し g の再アップロードをしない。
-            self.launch_bias_reduce(t, &b_dev, 1, k as usize, n as usize)?;
-        }
-        self.stream.synchronize()?;
+            Some(t) => self.launch_bias_reduce(t, &b_dev, 1, k as usize, n as usize),
+            None => Ok(()),
+        };
+        // 縮約失敗でも必ず同期してから `a_std`／H2D バッファを解放する。
+        let sync_result = self.stream.synchronize();
+        reduce_result?;
+        sync_result?;
         Ok(())
     }
 
@@ -5536,7 +5546,22 @@ impl CudaGemm {
     /// あることを GEMM 起動前に確かめる（イシュー #3204。同一ストリームで
     /// なければ GEMM と縮約の実行順が保証されず、`Err` 時に weight・bias
     /// いずれも書かないという全体失敗契約も守れないため fail-closed）。
-    fn validate_bias_target(&self, t: &BiasReduceTarget<'_, '_>, n: u32) -> Result<(), CudaError> {
+    fn validate_bias_target(
+        &self,
+        t: &BiasReduceTarget<'_, '_>,
+        n: u32,
+        src_len: usize,
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<(), CudaError> {
+        // 縮約カーネル起動側が行う i32 範囲・レイアウト検査を GEMM 起動前に
+        // 先取りし、GEMM 後の縮約で検査起因の失敗が起きないようにする
+        // （weight だけが書かれた状態で `Err` になる経路の閉塞）。
+        // `axis_len == 1` の直接コピー経路は縮約カーネルを使わない。
+        if axis_len != 1 {
+            crate::reduce::validate_axis_layout(src_len, outer, axis_len, inner)?;
+        }
         if !Arc::ptr_eq(t.reduce.stream(), &self.stream) {
             return Err(CudaError::InvalidKernelConfig {
                 detail: "bias reduce: CudaReduce and CudaGemm must share one stream".to_string(),

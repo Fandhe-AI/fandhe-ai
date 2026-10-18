@@ -1088,6 +1088,41 @@ impl CudaBackendOps {
         // repack 計上を完結する〉→ `CudaMemory::upload_into`〈H2D。
         // `gemm_resident_lhs` のフォールバックと同型で新規 `DeviceBuffer`
         // を escape させない〉）。
+        // all-or-nothing（トレイト契約: エラー時は weight・bias 両レンジとも
+        // 未変更）: 失敗しうる計算・検査（GEMM、bias のホスト縮約、書き込み
+        // レンジ検査）を **いずれの書き込みよりも前に** すべて済ませ、書き込み
+        // 段階には H2D のデバイス障害以外の失敗要因を残さない（PR #3464
+        // レビュー指摘）。bias（イシュー #3204）は非 NT/TN 経路でも
+        // `Ok(true)` を保つためホスト `f64` 逐次和
+        // （`autodiff::eval::reduce_bias_grad_rows` と同一契約。`k == 1` は
+        // 直接コピーで `-0.0` を保つ）で縮約する。
+        let bias_contribution = match bias {
+            Some((bias_offset, _)) => {
+                let b_owned = b.contiguous();
+                let b_slice = b_owned.as_slice().ok_or_else(|| {
+                    BackendError::KernelLaunchFailed(
+                        "gemm_fp32_strict_into: bias reduce source not contiguous".into(),
+                    )
+                })?;
+                let contribution = reduce_bias_grad_rows_dense(b_slice, k, n);
+                let contribution =
+                    Tensor::new(contribution, &[n]).map_err(BackendError::ShapeMismatch)?;
+                let bias_end = bias_offset.checked_add(n).ok_or_else(|| {
+                    BackendError::InvalidArgument(
+                        "gemm_fp32_strict_into: bias_offset + n overflowed usize".into(),
+                    )
+                })?;
+                if bias_end > out.numel() {
+                    return Err(BackendError::InvalidArgument(format!(
+                        "gemm_fp32_strict_into: bias range [{bias_offset}, {bias_end}) exceeds \
+                         out buffer length {}",
+                        out.numel()
+                    )));
+                }
+                Some((bias_offset, contribution))
+            }
+            None => None,
+        };
         let result = self.gemm_fp32_strict(a, b)?;
         let device = self.with_driver_call(
             &[out.generation()],
@@ -1096,21 +1131,9 @@ impl CudaBackendOps {
         )?;
         let mem = CudaMemory::new(&device);
         mem.upload_into(&result, out, out_offset)?;
-
-        // bias（イシュー #3204）: 非 NT/TN 経路でも `Ok(true)` を保つため
-        // ホスト `f64` 逐次和（`autodiff::eval::reduce_bias_grad_rows` と
-        // 同一契約。`k == 1` は直接コピーで `-0.0` を保つ）で縮約して書く。
-        let Some((bias_offset, _)) = bias else {
+        let Some((bias_offset, contribution)) = bias_contribution else {
             return Ok(false);
         };
-        let b_owned = b.contiguous();
-        let b_slice = b_owned.as_slice().ok_or_else(|| {
-            BackendError::KernelLaunchFailed(
-                "gemm_fp32_strict_into: bias reduce source not contiguous".into(),
-            )
-        })?;
-        let contribution = reduce_bias_grad_rows_dense(b_slice, k, n);
-        let contribution = Tensor::new(contribution, &[n]).map_err(BackendError::ShapeMismatch)?;
         mem.upload_into(&contribution, out, bias_offset)?;
         Ok(true)
     }
