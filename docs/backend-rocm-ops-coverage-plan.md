@@ -263,6 +263,7 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 - デバイスからの gfx target 取得方法（#3157・#3159）
 - wave64 実機（MI300X 想定。`rocm-cloud-amd-procurement-decision.md`）での縮約順序の差と parity の実測は #3159 まで未検証
 - CUDA 列のファイル対応は `ops.rs` の呼び出しを基に付けた。R 案着手時に各 issue で再確認する
+- R4（#3435）着手時の再確認: #71 `log_softmax_backward` は現行 CUDA で shfl を使わない（PR #1994 で butterfly を撤回済み。lane 0 が `i` 昇順に `double` 逐次和を取り `__shared__` ＋ `__syncthreads()` で公開）。wave 幅依存は列ループの `i += 32` のみで、ROCm 版は `i += WARP_SIZE` へ置換した（§6 の「shfl のみ」分類は実態と異なる）。softmax／log_softmax は 2 パス経路のみ移植した（onepass は動的 SMEM が要るが `launch.rs` は `sharedMemBytes = 0` 固定で口がない。数値契約は同じで性能のみの差）
 
 ## 10. 起票手順（未実施）
 

@@ -5,8 +5,7 @@
 //! (2) HIP/HIPRTC のロード→コンパイル→module 保持→起動までを持つ [`KernelHost`]、
 //! (3) 型タグ付きカーネル引数 [`Arg`]／[`ArgKind`]／[`KernelSpec`] を提供する。
 //!
-//! 起動の `unsafe` は [`KernelHost::run_grid`] の 1 箇所に集約する（`run` は 1 次元グリッドを
-//! 計算して委譲するだけ）。`kernelParams` の個数・種別
+//! 起動の `unsafe` は [`KernelHost::run`] の 1 箇所に集約する。`kernelParams` の個数・種別
 //! （ポインタ／i32／i64／f32）は呼び出し側が渡す [`KernelSpec`] と実行時に突き合わせ、
 //! spec とカーネルソース署名の一致は各 `kernels_*.rs` のテスト（`kernel_param_kinds`）で固定する。
 //! 起動は null stream で行い、完了を待ってから戻る（同期 API。引数の生存期間問題を作らない）。
@@ -57,6 +56,31 @@ pub(crate) fn grid_1d(
         });
     }
     Ok(((gx as u32, 1, 1), (block, 1, 1)))
+}
+
+/// ブロックあたりスレッド数の HIP 上限。
+const MAX_THREADS_PER_BLOCK: u128 = 1024;
+
+/// 起動前の geometry 検査（純関数。HIP 非搭載でも単体で検査できる）。
+///
+/// 各次元が非 0、`block` の総スレッド数が 1024 以下であること。範囲外は `InvalidOpArgs`。
+pub(crate) fn validate_geometry(
+    op: &'static str,
+    grid: Dim3,
+    block: Dim3,
+) -> Result<(), RocmError> {
+    let bad = |detail: &str| RocmError::InvalidOpArgs {
+        op,
+        detail: detail.into(),
+    };
+    if [grid.0, grid.1, grid.2, block.0, block.1, block.2].contains(&0) {
+        return Err(bad("grid・block の各次元は非 0 が必要です"));
+    }
+    let threads = u128::from(block.0) * u128::from(block.1) * u128::from(block.2);
+    if threads > MAX_THREADS_PER_BLOCK {
+        return Err(bad("block の総スレッド数が 1024 を超えます"));
+    }
+    Ok(())
 }
 
 /// カーネル引数の種別（ソース署名との照合用）。
@@ -165,11 +189,11 @@ impl KernelHost {
         self.run(op, spec, total, args)
     }
 
-    /// `spec` のカーネルを `total` スレッド（1 次元）で起動し、完了まで待つ。
+    /// `spec` のカーネルを `total` スレッド（1 次元・block = [`INDEX_OPS_BLOCK_DIM`]）で起動し、
+    /// 完了まで待つ。
     ///
     /// `args` の個数・種別が `spec` と一致しなければ `InvalidOpArgs`。`total == 0` は拒否
-    /// （呼び出し側が 0 要素を早期リターンする契約）。グリッド計算だけを担い、起動は
-    /// [`Self::run_grid`] へ委譲する（`unsafe` の起動点を 1 か所に保つ）。
+    /// （呼び出し側が 0 要素を早期リターンする契約）。
     pub(crate) fn run(
         &self,
         op: &'static str,
@@ -178,16 +202,15 @@ impl KernelHost {
         args: &[Arg],
     ) -> Result<(), RocmError> {
         let (grid, block) = grid_1d(op, total, INDEX_OPS_BLOCK_DIM)?;
-        self.run_grid(op, spec, grid, block, args)
+        self.run_geometry(op, spec, grid, block, args)
     }
 
-    /// `spec` のカーネルを明示した `grid`／`block` で起動し、完了まで待つ（イシュー #3436・R5）。
+    /// `spec` のカーネルを呼び出し側が導出した `(grid, block)` で起動し、完了まで待つ。
     ///
-    /// 2 段縮約（loss 5 種の partial → finalize）のように、起動ブロック数を呼び出し側が
-    /// 決めて `partial` バッファ長と一致させる必要がある演算が使う。`grid`／`block` の各成分は
-    /// 非 0、`block` の総スレッド数は 64 の倍数かつ 1024 以下を検査する（fail-closed）。
-    /// `args` の個数・種別が `spec` と一致しなければ `InvalidOpArgs`。
-    pub(crate) fn run_grid(
+    /// 「1 block = 1 wave = 1 行」の softmax 系のように 1 次元・block 256 固定に合わない起動形
+    /// 向け（イシュー #3435・R4）。`unsafe` の起動箇所は [`Self::run`] と共通のここ 1 か所
+    /// （監査行 K1）。geometry は [`validate_geometry`] が起動前に検証する。
+    pub(crate) fn run_geometry(
         &self,
         op: &'static str,
         spec: &KernelSpec,
@@ -195,7 +218,6 @@ impl KernelHost {
         block: Dim3,
         args: &[Arg],
     ) -> Result<(), RocmError> {
-        validate_launch_dims(op, grid, block)?;
         if args.len() != spec.args.len() || args.iter().zip(spec.args).any(|(a, k)| a.kind() != *k)
         {
             return Err(RocmError::InvalidOpArgs {
@@ -203,6 +225,7 @@ impl KernelHost {
                 detail: format!("{} の引数が署名と一致しません", spec.name),
             });
         }
+        validate_geometry(op, grid, block)?;
         let func = self.module.function(spec.name)?;
         // 値をローカルへコピーし、その各要素へのポインタを `kernelParams` として渡す。
         let mut owned: Vec<Arg> = args.to_vec();
@@ -217,31 +240,12 @@ impl KernelHost {
             .collect();
         // SAFETY: (U5) `params` の個数・種別は `spec`（ソース署名と同一であることを各
         // `kernels_*.rs` のテストで固定）と上で照合済みで、指す `owned` は下の `synchronize`
-        // 完了まで本スコープで生存する。`grid`／`block` は `validate_launch_dims` で非 0・
-        // 64 の倍数・1024 以下を確認済み。`run` 経由では `grid_1d` が `div_ceil` で `total` を
-        // 覆い、`run_grid` 直呼びの側は自カーネルの被覆と `partial` 長の一致を保証する。範囲外
+        // 完了まで本スコープで生存する。grid／block は呼び出し側が導出し、上の
+        // `validate_geometry` が各次元の非 0 と block 総スレッド数の上限を検証済み。範囲外
         // アクセスは各カーネル内の手動境界チェック（REQ-8）が防ぐ。
         unsafe { func.launch(&self.rt, grid, block, &mut params)? };
         self.rt.synchronize()
     }
-}
-
-/// 明示起動の `grid`／`block` を検証する（0 次元・不正なブロックサイズを起動前に拒否する）。
-fn validate_launch_dims(op: &'static str, grid: Dim3, block: Dim3) -> Result<(), RocmError> {
-    let bad = |detail: String| RocmError::InvalidOpArgs { op, detail };
-    if grid.0 == 0 || grid.1 == 0 || grid.2 == 0 {
-        return Err(bad(format!("grid の各成分は 1 以上が必要です: {grid:?}")));
-    }
-    if block.0 == 0 || block.1 == 0 || block.2 == 0 {
-        return Err(bad(format!("block の各成分は 1 以上が必要です: {block:?}")));
-    }
-    let threads = u64::from(block.0) * u64::from(block.1) * u64::from(block.2);
-    if threads > 1024 || !threads.is_multiple_of(64) {
-        return Err(bad(format!(
-            "block の総スレッド数は 64 の倍数かつ 1024 以下が必要です: {block:?}"
-        )));
-    }
-    Ok(())
 }
 
 /// テスト専用: 1 次元グリッドの全スレッドの `gid`（`blockIdx.x * blockDim.x + threadIdx.x`）を
@@ -302,16 +306,21 @@ mod tests {
     }
 
     #[test]
-    fn launch_dims_accept_valid_and_reject_invalid() {
-        assert!(validate_launch_dims("t", (1, 1, 1), (256, 1, 1)).is_ok());
-        assert!(validate_launch_dims("t", (1024, 1, 1), (64, 1, 1)).is_ok());
-        assert!(validate_launch_dims("t", (1, 1, 1), (32, 2, 1)).is_ok());
-        assert!(validate_launch_dims("t", (0, 1, 1), (256, 1, 1)).is_err());
-        assert!(validate_launch_dims("t", (1, 0, 1), (256, 1, 1)).is_err());
-        assert!(validate_launch_dims("t", (1, 1, 1), (0, 1, 1)).is_err());
-        assert!(validate_launch_dims("t", (1, 1, 1), (100, 1, 1)).is_err());
-        assert!(validate_launch_dims("t", (1, 1, 1), (1088, 1, 1)).is_err());
-        assert!(validate_launch_dims("t", (1, 1, 1), (u32::MAX, 2, 1)).is_err());
+    fn geometry_validation() {
+        assert!(validate_geometry("t", (1, 1, 1), (64, 1, 1)).is_ok());
+        assert!(validate_geometry("t", (65535, 1, 1), (1024, 1, 1)).is_ok());
+        assert!(validate_geometry("t", (8, 8, 8), (16, 8, 8)).is_ok());
+        for (g, b) in [
+            ((0, 1, 1), (64, 1, 1)),
+            ((1, 0, 1), (64, 1, 1)),
+            ((1, 1, 1), (0, 1, 1)),
+            ((1, 1, 1), (64, 0, 1)),
+            ((1, 1, 1), (1025, 1, 1)),
+            ((1, 1, 1), (32, 32, 2)),
+            ((1, 1, 1), (u32::MAX, u32::MAX, u32::MAX)),
+        ] {
+            assert!(validate_geometry("t", g, b).is_err(), "{g:?} {b:?}");
+        }
     }
 
     #[test]

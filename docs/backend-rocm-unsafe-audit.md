@@ -117,12 +117,22 @@ gather/scatter・interpolate・sort・topk・unique・scan の 6 実行型は、
 | T1 | `TypedDeviceBuffer::upload` | `memcpy_htod` | `ptr` は `new` が `elems*SIZE` 以上確保済み（`checked_mul`）。`src.len() == elems` を事前検証。`T` は封印 POD | OOB | U3 |
 | T2 | `TypedDeviceBuffer::download` | `memcpy_dtoh` | T1 と対称（`dst.len() == elems` を検証。呼び出し側は起動後に `synchronize` 済み） | OOB | U3 |
 | T3 | `TypedDeviceBuffer::drop` | `free` | `ptr` は `malloc` 由来で未解放。所有権で二重解放なし | 二重解放 | U7 |
-| K1 | `KernelHost::run_grid`（R5・#3436 で `run` から移動。`run` は `grid_1d` で grid を計算して委譲） | `Function::launch` | `params` の個数・種別を `KernelSpec`（ソース署名と同一であることを各 `kernels_*.rs` の `spec_matches_source_signature` テストで固定）と**実行時にも照合**してから構築。指す `owned` は直後の `synchronize` まで生存。`grid`・`block` は `validate_launch_dims` で非 0・総スレッド数が 64 の倍数かつ 1024 以下を検査。`run` 経由のグリッドは `grid_1d` が `div_ceil` で覆う（`grid.x` と `grid.x*block` の `u32` 収容を checked で検証）。範囲外はカーネル内の手動境界チェック（REQ-8）が防ぐ。ポインタの指す要素型（`f32`／`i32`／`u64` 等）までは型で検査できないため、呼び出し側の各 `run_*` が引数順どおりにバッファを渡す（テストは非搭載環境のため起動を伴わない。実機確認は #3159） | 引数不一致・OOB・ハング | U5 |
+| K1 | `KernelHost::run` | `Function::launch` | `params` の個数・種別を `KernelSpec`（ソース署名と同一であることを各 `kernels_*.rs` の `spec_matches_source_signature` テストで固定）と**実行時にも照合**してから構築。指す `owned` は直後の `synchronize` まで生存。グリッドは `grid_1d` が `div_ceil` で覆う（`grid.x` と `grid.x*block` の `u32` 収容を checked で検証）。R4（#3435）以降は起動箇所が `KernelHost::run_geometry`（`run` が委譲）へ移り、明示 `(grid, block)` を `validate_geometry` で各次元の非 0・block 総スレッド数 1024 以下に検査してから起動する（下記 3.6）。範囲外はカーネル内の手動境界チェック（REQ-8）が防ぐ。ポインタの指す要素型（`f32`／`i32`／`u64` 等）までは型で検査できないため、呼び出し側の各 `run_*` が引数順どおりにバッファを渡す（テストは非搭載環境のため起動を伴わない。実機確認は #3159） | 引数不一致・OOB・ハング | U5 |
 
 - 起動は null stream・同期 API（`run` が `synchronize` まで待つ）。sort の `j`・`k` ループは各ステップを同期起動する（性能より単純さを優先。ステップごとの引数配列は都度構築する）。
 - ホスト側の fail-closed 検証（A04／A08）: shape・スライス長・`i32`／`i64` 収容を `checked_*`／`try_from` で検査し、gather/scatter/one_hot は index の値域を全要素走査して範囲外を拒否する。interpolate は空間軸の入力サイズ 0（カーネルのクランプが `-1` 添字になる）を拒否する。
 - 本節の件数は §2 の表（基準コミット時点の 33 ブロック）に含めていない。#3157 など兄弟 PR が §2 を更新している場合は、マージ順で再集計が必要。
 - 実機（MI300X・gfx942）で HIPRTC のコンパイルと起動結果を確認していない（#3159）。ホスト側モデル（`*_model.rs`）は CPU 参照実装との bit 一致を検証するが、HIPRTC の出力そのものの検証ではない。
+
+### 3.6 R4（#3435）の変更点（新しい `unsafe` ブロックは 0。実装担当の自己点検。未監査）
+
+softmax・log_softmax・log_softmax_backward の 2 実行型（`softmax.rs`）は、デバイスメモリを `TypedDeviceBuffer<f32>`（T1〜T3）、起動を `KernelHost`（K1）へ集約しており、**`unsafe` ブロックを追加していない**（§2 の件数は不変）。
+
+- K1 の呼び出し元が `run` から `run_geometry` へ移った。`run` は `grid_1d` の結果で `run_geometry` を呼ぶだけで、`unsafe` の起動箇所は 1 か所のまま。SAFETY コメントは「grid／block は呼び出し側が導出し、`validate_geometry` が非 0 と block 総スレッド数の上限を検証済み」へ更新した。
+- 新しい起動形は 1 block = 1 wave（`WarpGeometry::for_target` の幅 32／64）。forward は `grid = min(rows, 65535)` でカーネル内 grid-stride が全行を覆い、backward は `grid = rows`（`i32` 収容を起動前に検証）。範囲外アクセスはカーネル内の REQ-8 手動境界チェック（`base + 3 < cols`・`i < cols`・`row >= rows`）が防ぐ。
+- 出力バッファは `new_zeroed`（`hipMalloc` は 0 初期化しない）。`float4` 経路は `cols % 4 == 0` のときだけで、`hipMalloc` の整列と併せ 16 byte 整列が成立する（実機確認は #3159）。
+- HIPRTC ソースは静的テンプレート＋封印型 `WarpDefines`（検証済み幅から固定テンプレートで生成）のみ。shape・scale は実行時のカーネル引数で、ソースへ入れない（A03）。コンパイルオプションは `GfxTarget` 由来の固定リテラルのまま。
+- security-auditor の独立監査は本変更では未実施（自己点検のみ）。
 
 ## 4. U1 の担保方法
 

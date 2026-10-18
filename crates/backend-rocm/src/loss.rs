@@ -472,7 +472,7 @@ impl RocmLoss {
         let block = (LOSS_BLOCK_DIM, 1, 1);
         let args1 = partial_args(dpartial.as_device_ptr());
         self.host
-            .run_grid(op, partial_spec, (blocks_u32, 1, 1), block, &args1)?;
+            .run_geometry(op, partial_spec, (blocks_u32, 1, 1), block, &args1)?;
         let args2 = [
             Arg::Ptr(dpartial.as_device_ptr()),
             Arg::Ptr(dout.as_device_ptr()),
@@ -480,7 +480,7 @@ impl RocmLoss {
             Arg::F32(factor),
         ];
         self.host
-            .run_grid(op, &FINALIZE_SPEC, (1, 1, 1), block, &args2)?;
+            .run_geometry(op, &FINALIZE_SPEC, (1, 1, 1), block, &args2)?;
         dout.to_vec()?
             .into_iter()
             .next()
