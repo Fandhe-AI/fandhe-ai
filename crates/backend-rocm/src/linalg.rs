@@ -645,6 +645,8 @@ impl RocmLinalgLu {
     /// `inv(A)`（`A X = I` の `X`）。`B` はホストで作る単位行列で、[`Self::run_lu_solve_f32`] へ委譲する。
     pub fn run_lu_inv_f32(&self, a: &[f32], n: usize) -> Result<LuSolveOutcome, RocmError> {
         validate_lu_dims(n, n)?;
+        // 単位行列（n*n）を確保する前に入力長を検証する（空 a・巨大 n での過大確保を防ぐ）。
+        check_lu_lens(a.len(), n * n, n, n)?;
         let mut ident = vec![0.0f32; n * n];
         for i in 0..n {
             ident[i * n + i] = 1.0;

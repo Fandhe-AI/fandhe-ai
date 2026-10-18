@@ -359,6 +359,8 @@ pub(crate) fn run_solve(
 
 pub(crate) fn run_inv(a: &[f32], n: usize) -> Result<LuSolveOutcome, RocmError> {
     validate_lu_dims(n, n)?;
+    // 単位行列（n*n）を確保する前に入力長を検証する（空 a・巨大 n での過大確保を防ぐ）。
+    check_lu_lens(a.len(), n * n, n, n)?;
     let mut ident = vec![0.0f32; n * n];
     for i in 0..n {
         ident[i * n + i] = 1.0;
@@ -620,6 +622,11 @@ mod tests {
     fn invalid_dims_are_rejected_before_device() {
         assert!(matches!(
             run_solve(&[1.0; 3], &[1.0; 2], 2, 1),
+            Err(RocmError::InvalidLinalgDims { .. })
+        ));
+        // inv は単位行列の確保前に入力長を検証する（空 a・n=46340 でも即エラー）。
+        assert!(matches!(
+            run_inv(&[], 46340),
             Err(RocmError::InvalidLinalgDims { .. })
         ));
         assert!(matches!(
