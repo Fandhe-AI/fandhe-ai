@@ -44,6 +44,11 @@
 //!   （shape 再検査・空出力の早期リターン・HIP に触れる前の `Unsupported` 確定・engine 分岐）は子モジュール
 //!   `conv_pool`（`ops/conv_pool.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。avg の dilation ≠ 1 と
 //!   サイズ上限超過は `Unsupported`（ホスト参照実装へのフォールバック合図）。
+//! - R12（#3443）でデバイス常駐 KV の `paged_kv_append`・`paged_attention_forward` を [`RocmPagedKv`](crate::RocmPagedKv)
+//!   へ結線した。結線の本体（ハンドル downcast・tensor-core 共通検証・空入力・engine 分岐）は子モジュール
+//!   `paged_kv`（`ops/paged_kv.rs`）に置き、本ファイルのメソッドは 1 行で委譲する。被覆計画の「shfl を使う 1 か所」は
+//!   現行 CUDA ソースと一致せず（カーネル本体に shuffle なし）、`WarpGeometry` は使わない。`f64` アキュムレータ契約は
+//!   該当しない（f32 の逐次和）。`_tracked` 版は trait 既定の委譲のまま。ROCm 非搭載は `DeviceUnavailable`。
 //! - どの候補リスト（`ops_for`・facade の `resolve_ops`／`available_devices`）にも登録しない。
 
 use std::cell::RefCell;
@@ -54,9 +59,10 @@ use fandhe_ai_backend_cpu::CpuBackendOps;
 use fandhe_ai_tensor_core::{
     BackendError, BackendOps, BatchNormTrainOutput, BceKind, BinaryElementwiseOp, Conv2dParams,
     Device, DeviceBuffer, Element, FusionPlan, GruBackwardOutput, GruPointwiseOutput, HuberKind,
-    KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput, MseReduction, Pool2dParams,
-    ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor, UnaryElementwiseOp, batch_norm_layout,
-    gemm_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
+    KlDivTarget, LayerNormBackwardOutput, LstmPointwiseOutput, MseReduction, PagedAttentionArgs,
+    PagedKvLayout, Pool2dParams, ScalarBinaryOp, ScalarUnaryOp, ShapeError, Tensor,
+    UnaryElementwiseOp, batch_norm_layout, gemm_out_shape, reduce_out_shape, require_same_shape,
+    row_norm_layout, row_softmax_layout,
 };
 
 use crate::arg_reduce::{ArgReduceKind, RocmArgReduce};
@@ -672,6 +678,7 @@ fn check_nll_targets(
 
 mod conv_pool;
 mod ew;
+mod paged_kv;
 mod rnn_cell;
 
 /// softmax 系 3 演算の共通入口（最終軸判定・contiguous 化・`Tensor` 組み立て）。
@@ -779,6 +786,33 @@ impl BackendOps for RocmBackendOps {
         value: f32,
     ) -> Result<Tensor<f32>, BackendError> {
         self.ew_masked_fill(x, mask, value)
+    }
+
+    /// 新トークンの K／V 行をデバイス常駐のページ化 KV プールへスロット写像どおりに書く（R12・#3443）。
+    /// 同期実行。結線は `ops/paged_kv.rs`。`_tracked` 版は trait 既定の委譲。到達性は #3157 待ち。
+    fn paged_kv_append(
+        &self,
+        k_new: &DeviceBuffer<f32>,
+        v_new: &DeviceBuffer<f32>,
+        k_pool: &mut DeviceBuffer<f32>,
+        v_pool: &mut DeviceBuffer<f32>,
+        slot_mapping: &[u32],
+        layout: &PagedKvLayout,
+    ) -> Result<(), BackendError> {
+        self.paged_kv_append_impl(k_new, v_new, k_pool, v_pool, slot_mapping, layout)
+    }
+
+    /// ページ化 KV プールに対する attention（R12・#3443）。出力 `[B, L_new, E]`。結線は `ops/paged_kv.rs`。
+    fn paged_attention_forward(
+        &self,
+        q: &DeviceBuffer<f32>,
+        k_pool: &DeviceBuffer<f32>,
+        v_pool: &DeviceBuffer<f32>,
+        block_tables: &[u32],
+        seq_lens: &[u32],
+        args: &PagedAttentionArgs,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.paged_attention_impl(q, k_pool, v_pool, block_tables, seq_lens, args)
     }
 
     /// LSTM の pointwise 段（R10・#3441）。結線は `ops/rnn_cell.rs`。
