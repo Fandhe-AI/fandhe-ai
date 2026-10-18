@@ -5,8 +5,8 @@
 //! (2) HIP/HIPRTC のロード→コンパイル→module 保持→起動までを持つ [`KernelHost`]、
 //! (3) 型タグ付きカーネル引数 [`Arg`]／[`ArgKind`]／[`KernelSpec`] を提供する。
 //!
-//! 起動の `unsafe` は [`KernelHost::launch_dims`] の 1 箇所に集約する（[`KernelHost::run`]（1 次元）と
-//! [`KernelHost::run_blocks`]（1 block = 1 wave の行・チャネル単位。R6・#3437）の両方がここを通る）。`kernelParams` の個数・種別
+//! 起動の `unsafe` は [`KernelHost::run_geometry`] の 1 箇所に集約する（[`KernelHost::run`]（1 次元）と
+//! [`KernelHost::run_wave_blocks`]（1 block = 1 wave の行・チャネル単位。R6・#3437）の両方がここを通る）。`kernelParams` の個数・種別
 //! （ポインタ／i32／i64／f32）は呼び出し側が渡す [`KernelSpec`] と実行時に突き合わせ、
 //! spec とカーネルソース署名の一致は各 `kernels_*.rs` のテスト（`kernel_param_kinds`）で固定する。
 //! 起動は null stream で行い、完了を待ってから戻る（同期 API。引数の生存期間問題を作らない）。
@@ -89,6 +89,31 @@ pub(crate) fn wave_block_grid(
         });
     }
     Ok(((blocks as u32, 1, 1), (block_dim, 1, 1)))
+}
+
+/// ブロックあたりスレッド数の HIP 上限。
+const MAX_THREADS_PER_BLOCK: u128 = 1024;
+
+/// 起動前の geometry 検査（純関数。HIP 非搭載でも単体で検査できる）。
+///
+/// 各次元が非 0、`block` の総スレッド数が 1024 以下であること。範囲外は `InvalidOpArgs`。
+pub(crate) fn validate_geometry(
+    op: &'static str,
+    grid: Dim3,
+    block: Dim3,
+) -> Result<(), RocmError> {
+    let bad = |detail: &str| RocmError::InvalidOpArgs {
+        op,
+        detail: detail.into(),
+    };
+    if [grid.0, grid.1, grid.2, block.0, block.1, block.2].contains(&0) {
+        return Err(bad("grid・block の各次元は非 0 が必要です"));
+    }
+    let threads = u128::from(block.0) * u128::from(block.1) * u128::from(block.2);
+    if threads > MAX_THREADS_PER_BLOCK {
+        return Err(bad("block の総スレッド数が 1024 を超えます"));
+    }
+    Ok(())
 }
 
 /// カーネル引数の種別（ソース署名との照合用）。
@@ -197,7 +222,8 @@ impl KernelHost {
         self.run(op, spec, total, args)
     }
 
-    /// `spec` のカーネルを `total` スレッド（1 次元）で起動し、完了まで待つ。
+    /// `spec` のカーネルを `total` スレッド（1 次元・block = [`INDEX_OPS_BLOCK_DIM`]）で起動し、
+    /// 完了まで待つ。
     ///
     /// `args` の個数・種別が `spec` と一致しなければ `InvalidOpArgs`。`total == 0` は拒否
     /// （呼び出し側が 0 要素を早期リターンする契約）。
@@ -209,7 +235,7 @@ impl KernelHost {
         args: &[Arg],
     ) -> Result<(), RocmError> {
         let (grid, block) = grid_1d(op, total, INDEX_OPS_BLOCK_DIM)?;
-        self.launch_dims(op, spec, grid, block, args)
+        self.run_geometry(op, spec, grid, block, args)
     }
 
     /// `spec` のカーネルを「`blocks` 個の block × 1 wave（`block_dim` = 32 か 64）」で起動し、
@@ -224,13 +250,15 @@ impl KernelHost {
         args: &[Arg],
     ) -> Result<(), RocmError> {
         let (grid, block) = wave_block_grid(op, blocks, block_dim)?;
-        self.launch_dims(op, spec, grid, block, args)
+        self.run_geometry(op, spec, grid, block, args)
     }
 
-    /// 検証済みの `(grid, block)` で起動する唯一の `unsafe` 集約点（K1）。
-    /// 呼び出し元は [`Self::run`]（`grid_1d`）と [`Self::run_wave_blocks`]（`wave_block_grid`）だけで、
-    /// どちらも寸法を検証してから渡す。
-    fn launch_dims(
+    /// `spec` のカーネルを呼び出し側が導出した `(grid, block)` で起動し、完了まで待つ。
+    ///
+    /// 「1 block = 1 wave = 1 行」の softmax 系のように 1 次元・block 256 固定に合わない起動形
+    /// 向け（イシュー #3435・R4）。`unsafe` の起動箇所は [`Self::run`] と共通のここ 1 か所
+    /// （監査行 K1）。geometry は [`validate_geometry`] が起動前に検証する。
+    pub(crate) fn run_geometry(
         &self,
         op: &'static str,
         spec: &KernelSpec,
@@ -245,6 +273,7 @@ impl KernelHost {
                 detail: format!("{} の引数が署名と一致しません", spec.name),
             });
         }
+        validate_geometry(op, grid, block)?;
         let func = self.module.function(spec.name)?;
         // 値をローカルへコピーし、その各要素へのポインタを `kernelParams` として渡す。
         let mut owned: Vec<Arg> = args.to_vec();
@@ -259,9 +288,9 @@ impl KernelHost {
             .collect();
         // SAFETY: (U5) `params` の個数・種別は `spec`（ソース署名と同一であることを各
         // `kernels_*.rs` のテストで固定）と上で照合済みで、指す `owned` は下の `synchronize`
-        // 完了まで本スコープで生存する。`grid`／`block` は呼び出し元の `grid_1d`（`div_ceil` で
-        // `total` を覆う）か `wave_block_grid`（blocks は 1..=i32::MAX・block は 32／64）が検証した
-        // 値のみ。範囲外アクセスは各カーネル内の手動境界チェック（REQ-8）が防ぐ。
+        // 完了まで本スコープで生存する。grid／block は呼び出し側が導出し、上の
+        // `validate_geometry` が各次元の非 0 と block 総スレッド数の上限を検証済み。範囲外
+        // アクセスは各カーネル内の手動境界チェック（REQ-8）が防ぐ。
         unsafe { func.launch(&self.rt, grid, block, &mut params)? };
         self.rt.synchronize()
     }
@@ -344,6 +373,24 @@ mod tests {
         ));
         for bad in [0, 1, 16, 48, 128, 256, 1024] {
             assert!(wave_block_grid("t", 1, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn geometry_validation() {
+        assert!(validate_geometry("t", (1, 1, 1), (64, 1, 1)).is_ok());
+        assert!(validate_geometry("t", (65535, 1, 1), (1024, 1, 1)).is_ok());
+        assert!(validate_geometry("t", (8, 8, 8), (16, 8, 8)).is_ok());
+        for (g, b) in [
+            ((0, 1, 1), (64, 1, 1)),
+            ((1, 0, 1), (64, 1, 1)),
+            ((1, 1, 1), (0, 1, 1)),
+            ((1, 1, 1), (64, 0, 1)),
+            ((1, 1, 1), (1025, 1, 1)),
+            ((1, 1, 1), (32, 32, 2)),
+            ((1, 1, 1), (u32::MAX, u32::MAX, u32::MAX)),
+        ] {
+            assert!(validate_geometry("t", g, b).is_err(), "{g:?} {b:?}");
         }
     }
 

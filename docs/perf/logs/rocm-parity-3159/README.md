@@ -69,6 +69,27 @@ unsafe 監査 §6（`docs/backend-rocm-unsafe-audit.md`）のうちテストの�
 |---|---|---|---|---|---|
 | | | | | | |
 
+## softmax 系（#3435）
+
+**状態: 未実測**。`softmax`・`log_softmax`（`RocmSoftmax`）と `log_softmax_backward`（`RocmLogSoftmaxBackward`）の実機 parity。`tests/softmax_real_device.rs`（`#[ignore]`）が `run_rocm_parity.sh` の `--ignored` 全件実行に自動で含まれる（スクリプトは変更しない）。**本テストの失敗は run の終了コードに影響する。**
+
+- 判定は REQ-2 統一複合判定（相対 1e-3 未満 または 絶対 1e-5 未満）のみ。`exp2f`／`expf`／`logf` の丸めと wave64 の結合順が CPU と異なるため bit 一致は assert せず、`bit_mismatch` は観測値。tolerance・baseline・FMA 契約は変えない。
+- 入力集合: 形状 (rows, cols) = (1,1)・(3,4)・(7,63)・(5,64)・(5,65)・(4,128)・(3,1000)・(2,4096)・(70000,3)（grid-stride 発生形状）、振幅 1・30、`f32::MAX` 混在行・全要素 `-f32::MAX` 行（有限であること）、backward の相殺入力 `g=[1e20,-1e20,1,0]` と大きな上流勾配（`2e38`）。
+- ログ行は `ROCM_PARITY_SOFTMAX\t<名前>\ttotal=…\tfail=…\tmax_abs=…\tmax_rel=…\tmean_abs=…\tp99_abs=…\tbit_mismatch=…`。
+- 補助確認（記録のみ）: 実 HIPRTC で `__shfl_xor`（`WARP_SHFL_XOR`）・`float4`・`exp2f`・`logf`・`#pragma clang fp contract(off)` がコンパイルできること、wave64 で 1 block = 64 スレッドの起動が通ること、`__launch_bounds__(WARP_SIZE)` が受理されること。
+
+| 項目 | 値 |
+|---|---|
+| 実施日 | |
+| 判定（pass／fail） | |
+| HIPRTC コンパイル（softmax 系・backward） | |
+
+演算ごと（`ROCM_PARITY_SOFTMAX` 行の転記）:
+
+| 名前 | total | fail | max_abs | max_rel | bit_mismatch |
+|---|---|---|---|---|---|
+| | | | | | |
+
 ## fail 時の切り分け（推測で結論を書かない）
 
 1. fail の形状・要素数・最大誤差を上の表へ記録する。
