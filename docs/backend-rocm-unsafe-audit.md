@@ -92,6 +92,22 @@ cargo clippy -p fandhe-ai-backend-rocm --all-targets -- -D warnings -W clippy::u
 
 型エイリアス 17 件（`hip.rs` 12・`hiprtc.rs` 5）は宣言のみで呼び出しは上の各行。シグネチャは HIP／HIPRTC の C 宣言との一致を実機で確認する（§6）。
 
+### 3.5 R8（#3439）で追加した `unsafe`（4 ブロック。実装担当の自己点検。未監査）
+
+gather/scatter・interpolate・sort・topk・unique・scan の 6 実行型は、起動を `launch.rs::KernelHost::run` の 1 か所へ、デバイスメモリ操作を `typed_buffer.rs::TypedDeviceBuffer<T>` の 3 か所へ集約した（`Function::launch` の `unsafe fn` 契約は不変で、呼び出し元が K1 に 1 つ増えただけ）。型付きバッファの要素型は封印 trait `DeviceElem`（`f32`・`i32`・`u32`・`u64` の POD のみ）。
+
+| # | 場所 | 操作 | 前提条件 | 破れた場合の影響 | 守る不変条件 |
+|---|------|------|----------|------------------|--------------|
+| T1 | `TypedDeviceBuffer::upload` | `memcpy_htod` | `ptr` は `new` が `elems*SIZE` 以上確保済み（`checked_mul`）。`src.len() == elems` を事前検証。`T` は封印 POD | OOB | U3 |
+| T2 | `TypedDeviceBuffer::download` | `memcpy_dtoh` | T1 と対称（`dst.len() == elems` を検証。呼び出し側は起動後に `synchronize` 済み） | OOB | U3 |
+| T3 | `TypedDeviceBuffer::drop` | `free` | `ptr` は `malloc` 由来で未解放。所有権で二重解放なし | 二重解放 | U7 |
+| K1 | `KernelHost::run` | `Function::launch` | `params` の個数・種別を `KernelSpec`（ソース署名と同一であることを各 `kernels_*.rs` の `spec_matches_source_signature` テストで固定）と**実行時にも照合**してから構築。指す `owned` は直後の `synchronize` まで生存。グリッドは `grid_1d` が `div_ceil` で覆う（`grid.x` と `grid.x*block` の `u32` 収容を checked で検証）。範囲外はカーネル内の手動境界チェック（REQ-8）が防ぐ。ポインタの指す要素型（`f32`／`i32`／`u64` 等）までは型で検査できないため、呼び出し側の各 `run_*` が引数順どおりにバッファを渡す（テストは非搭載環境のため起動を伴わない。実機確認は #3159） | 引数不一致・OOB・ハング | U5 |
+
+- 起動は null stream・同期 API（`run` が `synchronize` まで待つ）。sort の `j`・`k` ループは各ステップを同期起動する（性能より単純さを優先。ステップごとの引数配列は都度構築する）。
+- ホスト側の fail-closed 検証（A04／A08）: shape・スライス長・`i32`／`i64` 収容を `checked_*`／`try_from` で検査し、gather/scatter/one_hot は index の値域を全要素走査して範囲外を拒否する。interpolate は空間軸の入力サイズ 0（カーネルのクランプが `-1` 添字になる）を拒否する。
+- 本節の件数は §2 の表（基準コミット時点の 33 ブロック）に含めていない。#3157 など兄弟 PR が §2 を更新している場合は、マージ順で再集計が必要。
+- 実機（MI300X・gfx942）で HIPRTC のコンパイルと起動結果を確認していない（#3159）。ホスト側モデル（`*_model.rs`）は CPU 参照実装との bit 一致を検証するが、HIPRTC の出力そのものの検証ではない。
+
 ## 4. U1 の担保方法
 
 1. ハンドル（`Library`）と関数ポインタを同じ構造体（`HipRuntime`・`HiprtcRuntime`）に格納し、フィールドは private、getter はない。`resolve` の結果は構造体リテラルへ直接格納し、ローカルへコピーして保持しない。
