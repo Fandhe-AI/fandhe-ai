@@ -11,7 +11,7 @@
 | 変更範囲 | 本 doc の新設、`hiprtc.rs` の `HiprtcRuntime::_lib` の `ManuallyDrop` 化（F1）、SAFETY コメントの表記揃え。依存（`libloading =0.9.0`）・tolerance・FMA 契約・REQ-8 の境界チェック・`docs/spec/`・CI は変更しない |
 | 未検証 | §6 の実機項目すべて（MI300X・gfx942。#3159）。実機テスト（`#[ignore]`）は実行していない |
 | 追従（R1・#3432） | `WarpGeometry` は `unsafe` を追加しない（監査表の件数は不変） |
-| 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する |
+| 追従 | #3157（facade の Device に ROCm を追加）が `backend-rocm` へ `unsafe` を足す場合は、#3157 側で本 doc の §3 を追記する。R0（#3431）は新しい `unsafe` を足さない（インベントリは 33／10／17／0 のまま。`unsafe impl Send/Sync` もなし） |
 
 ## 2. 機械的インベントリ
 
