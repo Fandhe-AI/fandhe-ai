@@ -4,8 +4,8 @@
 //! （`backend-cuda` の `TILED_F32` の移植）を実行する。HIP/HIPRTC は `libloading`（第 12 区分）で
 //! 実行時にロードし、`#[link]` を使わないため ROCm 非搭載環境でもビルド・テストが通る
 //! （cudarc の dynamic-loading と同じ cfg ベース方針。REQ-2・coding-rust.md）。
-//! BackendOps への統合・facade の Device 追加は #3157、unsafe 監査記録は #3158、
-//! 実機 parity は #3159。
+//! `BackendOps` の骨格（必須 9 メソッド。[`RocmBackendOps`]）は R0（#3431）、facade の
+//! Device 追加は #3157（所有者判断待ち）、unsafe 監査記録は #3158、実機 parity は #3159。
 //!
 //! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
 //! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
@@ -19,11 +19,13 @@ mod hip;
 mod hiprtc;
 mod kernels_gemm;
 mod module;
+mod ops;
 mod target;
 
 pub use error::RocmError;
 pub use gemm::RocmGemmF32;
 pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
+pub use ops::RocmBackendOps;
 pub use target::{GfxTarget, parse_gcn_arch_name};
 
 /// HIP ランタイムをロードでき、デバイスが 1 つ以上あるとき true。

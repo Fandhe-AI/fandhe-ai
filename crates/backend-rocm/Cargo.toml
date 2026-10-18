@@ -3,8 +3,8 @@
 # 役割: HIP ランタイムを `libloading`（第 12 区分）で実行時に動的ロードし、ROCm の有無を
 # probe でき、HIPRTC でコンパイルした f32 GEMM カーネルを起動できる（#3155）。
 #
-# 依存方向: 現時点で内部クレートへは依存しない（BackendOps の実装は #3155 以降）。
-# facade からも参照しない（Device への ROCm 追加は #3157）。
+# 依存方向: `tensor-core`（`BackendOps` 等）と `backend-cpu`（ホスト経路の委譲先・parity 参照）へ
+# 依存する（R0・イシュー #3431）。facade からは参照しない（Device への ROCm 追加は #3157）。
 #
 # 公開区分: `publish = false`（workspace 既定を継承）。
 #
@@ -21,10 +21,9 @@ publish.workspace = true
 
 [dependencies]
 libloading.workspace = true
-
-[dev-dependencies]
-# CPU 参照実装（`gemm_naive`・`assert_parity`）を GEMM のホスト側モデル照合・実機 parity の比較対象に使う
-# （src/gemm_model.rs・tests/gemm_real_device.rs）。workspace 内クレート同士の path 依存で、
-# 許容依存区分（外部クレート）の新規追加には当たらない。`version` を付けない理由は
-# backend-cuda の同名 dev-dependency と同じ（イシュー #881。公開物へ残らない・非公開クレート）。
+# `impl BackendOps for RocmBackendOps`（src/ops.rs）の trait・Tensor・エラー型。workspace 内の path 依存で
+# 許容依存区分（外部クレート）の追加には当たらない。`publish = false` のため `version` は付けない
+# （crates.io 公開する場合は version の併記が必要。公開可否は所有者判断・被覆計画 §8 の Q2）。
+fandhe-ai-tensor-core = { path = "../tensor-core" }
+# ホスト経路 7 メソッドの委譲先（R2・R3 でカーネル化するまで）と、テストの CPU 参照。
 fandhe-ai-backend-cpu = { path = "../backend-cpu" }

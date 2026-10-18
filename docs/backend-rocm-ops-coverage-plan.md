@@ -255,7 +255,7 @@ HIP の `__shfl_xor` はマスク引数を取らず、lane mask は 64 bit の�
 
 ## 8. #3157 との境界（所有者確認事項）
 
-`backend-rocm-hiprtc-gemm-decision.md` §7 は #3157 を「BackendOps・facade 統合」と書くが、#3157 本文は facade の `Device`・`tape_for`・`available_devices` だけを扱う。本計画は「`impl BackendOps for RocmBackendOps` の骨格は R0、#3157 は facade 側のみ」と**提案**する。確定は所有者判断で、確定までは R0 の範囲を最終としない。R0 では `backend-rocm` の `lib.rs`・`Cargo.toml` のコメントも実態に合わせて更新する。
+`backend-rocm-hiprtc-gemm-decision.md` §7 は #3157 を「BackendOps・facade 統合」と書くが、#3157 本文は facade の `Device`・`tape_for`・`available_devices` だけを扱う。本計画は「`impl BackendOps for RocmBackendOps` の骨格は R0、#3157 は facade 側のみ」と**提案**する。所有者が確定済み（#3150 コメント 6248286174）。R0 は #3431 で実装。R0 では `backend-rocm` の `lib.rs`・`Cargo.toml` のコメントも実態に合わせて更新する。
 
 ## 9. 未確認事項
 
