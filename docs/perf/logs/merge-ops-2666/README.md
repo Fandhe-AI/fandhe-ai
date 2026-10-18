@@ -40,4 +40,5 @@ CPU 版は属性なしテスト（`cpu_matches_naive_reference`・`hand_computed
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+| 未実測 | Mac mini（Apple M4） | 上記 Metal（`--test merge_ops_backend_parity` 分） | 未実測 | #3166 で Mac 側へ申し送り（`../metal-facade-parity-3166/`） |
+| 未実測 | Mac mini（Apple M4） | 上記 Metal（`--lib` 分） | 未実測 | #3166 で Mac 側へ申し送り |

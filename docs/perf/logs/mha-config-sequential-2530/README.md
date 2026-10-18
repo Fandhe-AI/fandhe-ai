@@ -9,7 +9,7 @@ forward が CPU と REQ-2 統一複合判定（相対誤差 1e-3 未満 また�
 ```sh
 # CUDA（DGX Spark GB10）
 cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity -- --ignored cuda_multihead_attention_config_matches_cpu
-# Metal（M4 Max）
+# Metal（Mac mini・Apple M4）
 cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity -- --ignored metal_multihead_attention_config_matches_cpu
 ```
 
@@ -18,4 +18,4 @@ cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity -- --igno
 | 実機 | 結果 | 実測日 |
 |------|------|--------|
 | CUDA（GB10） | 未実測（実機到達手段なし。申し送り） | - |
-| Metal（M4 Max） | 未実測（実機到達手段なし。申し送り） | - |
+| Metal（Mac mini・Apple M4） | 未実測（Mac 側へ申し送り。#3166・`../metal-facade-parity-3166/`） | - |
