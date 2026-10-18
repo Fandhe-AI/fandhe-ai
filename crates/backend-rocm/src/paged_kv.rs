@@ -254,8 +254,12 @@ impl RocmPagedKv {
         let rt = self.host.runtime();
         let d_tables = TypedDeviceBuffer::<u32>::from_slice(rt.clone(), block_tables)?;
         let d_seq = TypedDeviceBuffer::<u32>::from_slice(rt.clone(), seq_lens)?;
-        let d_scores = TypedDeviceBuffer::<f32>::new_zeroed(rt.clone(), plan.workspace_elems)?;
-        let d_out = TypedDeviceBuffer::<f32>::new_zeroed(rt, plan.out_numel)?;
+        // スコア workspace は最大 1<<30 要素になり得るため、host の Vec を経由するゼロ初期化はしない
+        // （host abort・数 GiB の H2D 転送の回避。CUDA 側と同じ未初期化確保）。カーネルは各行で
+        // `j < limit` の要素を書いてから読み（違反時は読まずに return）、出力は grid = query_rows の
+        // 全ブロックが各自の `head_dim` 要素を全経路で書くため、未初期化領域は読まれない。
+        let d_scores = TypedDeviceBuffer::<f32>::new(rt.clone(), plan.workspace_elems)?;
+        let d_out = TypedDeviceBuffer::<f32>::new(rt, plan.out_numel)?;
         let kargs = [
             Arg::Ptr(q.as_device_ptr()),
             Arg::Ptr(k_pool.as_device_ptr()),
