@@ -10,9 +10,8 @@
 //!     （`assert_parity`）で一致することを確認する。`sum`（イシュー
 //!     #1896 で `reduce::MetalReduce` へ結線済み）は下記 `#[ignore]`
 //!     `sum_matches_f32_backend_ops_rounded_bit_exact` が別途担う。
-//!     `max` は Metal f32 reduction 未実装のため対象外（`crate::
-//!     typed_f16` モジュール doc「`max` は `Unsupported` を継承する」
-//!     参照）。
+//!     `max`（イシュー #3475 で結線済み）は下記 `#[ignore]`
+//!     `max_matches_f32_backend_ops_rounded_bit_exact` が担う。
 //!
 //! `tests/gemm_f16_auto_parity.rs` と同じ判定基盤
 //! （`fandhe_ai_backend_cpu::parity::assert_parity`。REQ-2 統一複合判定
@@ -94,21 +93,40 @@ fn add_mul_reject_shape_mismatch_before_touching_device() {
     assert!(matches!(mul_err, BackendError::ShapeMismatch(_)));
 }
 
-/// `max` が Metal f32 reduction 未実装（`ops::MetalBackendOps::max`）
-/// と同じ `Unsupported` を返すことを、デバイス構築すら経由せず確認する
-/// （`crate::typed_f16` の 3 段構成〈昇格→委譲→丸め〉が委譲先の
-/// `Unsupported` をそのまま伝播することの直接検証）。`sum`（イシュー
-/// #1896 で結線済み）は `sum_matches_f32_backend_ops_rounded_bit_exact`
-/// が担う。
+/// `max`（イシュー #3475 で結線済み）の範囲外 `dim` は f16／f32 とも
+/// デバイス非接触で `ShapeMismatch` になる。
 #[test]
-fn max_is_unsupported_matching_metal_f32_backend_ops() {
+fn max_rejects_out_of_range_dim_before_touching_device() {
     let ops = MetalBackendOps::new();
-    let a = f16_tensor(&[1.0, 5.0, 3.0, 2.0], &[2, 2]);
-    for dim in [None, Some(0), Some(5)] {
-        assert!(matches!(
-            TypedOps::<f16>::max(&ops, &a, dim),
-            Err(BackendError::Unsupported(_))
-        ));
+    let a16 = f16_tensor(&[1.0, 5.0, 3.0, 2.0], &[2, 2]);
+    let a32 = Tensor::new(f16_to_f32_vec(&a16), a16.shape()).expect("tensor");
+    assert!(matches!(
+        TypedOps::<f16>::max(&ops, &a16, Some(5)),
+        Err(BackendError::ShapeMismatch(_))
+    ));
+    assert!(matches!(
+        BackendOps::max(&ops, &a32, Some(5)),
+        Err(BackendError::ShapeMismatch(_))
+    ));
+}
+
+/// `max` が `f16::from_f32(BackendOps::max(f32))` と要素ごと bit 一致する
+/// ことを Metal 実機で検証する（イシュー #3475）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn max_matches_f32_backend_ops_rounded_bit_exact() {
+    let ops = MetalBackendOps::new();
+    let a16 = f16_tensor(&[1.0, 5.0, 3.0, 2.0], &[2, 2]);
+    let a32_t = Tensor::new(f16_to_f32_vec(&a16), a16.shape()).expect("tensor");
+    for dim in [None, Some(0), Some(1)] {
+        let v16 = TypedOps::<f16>::max(&ops, &a16, dim).expect("metal f16 max");
+        let v32 = BackendOps::max(&ops, &a32_t, dim).expect("metal f32 max");
+        let rounded32: Vec<f32> = v32
+            .host_slice()
+            .iter()
+            .map(|&x| f16::from_f32(x).to_f32())
+            .collect();
+        assert_eq!(f16_to_f32_vec(&v16), rounded32, "dim={dim:?}");
     }
 }
 
@@ -237,7 +255,7 @@ fn typed_f16_gemm_matches_cpu_reference_rounded() {
 /// `add`／`mul`／`relu`／`exp`／`tanh`（f16）が CPU `BackendOps`（f32）を
 /// f16 へ丸めた値と一致することを確認する（broadcast・単項演算を含む。
 /// `sum` は `sum_matches_f32_backend_ops_rounded_bit_exact` が別途担い、
-/// `max` は Metal f32 reduction 未実装のため対象外）。
+/// `max` は #3475 で結線済み）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn typed_f16_elementwise_matches_cpu_backend_ops_rounded() {

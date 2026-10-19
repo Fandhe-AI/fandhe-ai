@@ -275,6 +275,70 @@ pub fn min_axis_lane(xs: &[f32]) -> f32 {
     f32::from_bits(best_bits)
 }
 
+/// max 用の ±0 を区別する全順序キー（`reduce.metal::red_max_key` の
+/// 逐語モデル。イシュー #3475）。[`arg_key`] から `-0 → +0` の正規化を
+/// 除いたもので、`+0 > -0`。NaN は呼び出し元が先に除外する契約。
+pub fn max_key(bits: u32) -> u32 {
+    if bits >> 31 == 1 {
+        !bits
+    } else {
+        bits | 0x8000_0000
+    }
+}
+
+fn is_nan_bits(bits: u32) -> bool {
+    (bits >> 23) & 0xFF == 0xFF && bits & 0x7F_FFFF != 0
+}
+
+/// `reduce.metal::reduce_max_all_chunk_f32`／`reduce_max_all_finalize_f32`
+/// の 2 段構成モデル（イシュー #3475）。NaN（quiet・signaling）は読み飛ばし、
+/// 候補なしは `-inf`。比較は整数のみで可換・結合的のため結合順序に依存せず
+/// CPU `reduction::max` と bit 一致する（±0 の扱いは aarch64 の CPU 挙動に
+/// 依存。`docs/backend-metal-reduce-sum-design.md` §14）。
+pub fn max_all_chunked(x: &[f32]) -> f32 {
+    let mut g_bits = f32::NEG_INFINITY.to_bits();
+    let mut g_key = max_key(g_bits);
+    for chunk in x.chunks(REDUCE_SUM_CHUNK) {
+        let mut l_bits = f32::NEG_INFINITY.to_bits();
+        let mut l_key = max_key(l_bits);
+        for &v in chunk {
+            let bits = v.to_bits();
+            if is_nan_bits(bits) {
+                continue;
+            }
+            let key = max_key(bits);
+            if key > l_key {
+                l_key = key;
+                l_bits = bits;
+            }
+        }
+        if l_key > g_key {
+            g_key = l_key;
+            g_bits = l_bits;
+        }
+    }
+    f32::from_bits(g_bits)
+}
+
+/// [`max_all_chunked`] の平坦走査版。`reduce_max_axis_f32` の 1 lane 分の
+/// ループ本体の逐語モデルでもある。
+pub fn max_axis_lane(xs: &[f32]) -> f32 {
+    let mut best_bits = f32::NEG_INFINITY.to_bits();
+    let mut best_key = max_key(best_bits);
+    for &v in xs {
+        let bits = v.to_bits();
+        if is_nan_bits(bits) {
+            continue;
+        }
+        let key = max_key(bits);
+        if key > best_key {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    f32::from_bits(best_bits)
+}
+
 /// 全要素縮約（`dim=None`）の起動計画。[`plan_reduce_all`] に加えて
 /// `numel > i32::MAX` を検査する（候補添字が `i32` 範囲を超えうる
 /// ため。`ops.rs::metal_argext` が `Unsupported` へ写像しホスト
@@ -1138,6 +1202,137 @@ mod tests {
                     assert_eq!(
                         model,
                         expected_slice[o * inner + i],
+                        "dim={dim} o={o} i={i}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- max（イシュー #3475）----
+
+    use fandhe_ai_backend_cpu::reduction::max as cpu_max;
+
+    fn cpu_max_bits(data: &[f32], shape: &[usize], dim: Option<usize>) -> Vec<u32> {
+        let tensor = Tensor::new(data.to_vec(), shape).unwrap();
+        cpu_max(&tensor, dim)
+            .unwrap()
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    }
+
+    #[test]
+    fn max_all_matches_cpu_bit_exact_across_sizes() {
+        let mut rng = Rng(0x5555_3333_9999_7777);
+        for &n in &[1usize, 2, 4095, 4096, 4097, 2 * 4096 + 1, 3 * 4096 + 17] {
+            let data: Vec<f32> = (0..n).map(|_| rng.f32()).collect();
+            assert_eq!(
+                max_all_chunked(&data).to_bits(),
+                cpu_max_bits(&data, &[n], None)[0],
+                "n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_all_returns_negative_infinity_for_all_nan_input() {
+        for &n in &[1usize, 4095, 4096, 4097, 2 * 4096 + 3] {
+            let data = vec![f32::NAN; n];
+            assert_eq!(max_all_chunked(&data).to_bits(), 0xFF80_0000, "n={n}");
+            assert_eq!(cpu_max_bits(&data, &[n], None)[0], 0xFF80_0000, "n={n}");
+        }
+    }
+
+    #[test]
+    fn max_ignores_nan_including_signaling() {
+        let data = vec![3.0f32, f32::NAN, -5.0, f32::from_bits(0x7F80_0001), 2.0];
+        assert_eq!(max_all_chunked(&data), 3.0);
+        assert_eq!(max_axis_lane(&data), 3.0);
+        let neg_snan = [f32::from_bits(0xFF80_0001), -7.0];
+        assert_eq!(max_axis_lane(&neg_snan), -7.0);
+    }
+
+    #[test]
+    fn max_model_prefers_positive_zero() {
+        let f = |a: f32, b: f32| {
+            (
+                max_axis_lane(&[a, b]).to_bits(),
+                max_all_chunked(&[a, b]).to_bits(),
+            )
+        };
+        assert_eq!(f(-0.0, 0.0), (0, 0));
+        assert_eq!(f(0.0, -0.0), (0, 0));
+        assert_eq!(f(-0.0, -0.0), (0x8000_0000, 0x8000_0000));
+    }
+
+    /// ±0 の CPU 側の挙動は aarch64（fmaxnm）でのみ +0 優先と実測済み。
+    /// それ以外のアーキテクチャでは値一致のみ検証する。
+    #[test]
+    fn max_zero_mix_matches_cpu() {
+        for data in [[-0.0f32, 0.0], [0.0, -0.0], [-0.0, -0.0]] {
+            let model = max_all_chunked(&data);
+            let cpu = f32::from_bits(cpu_max_bits(&data, &[2], None)[0]);
+            if cfg!(target_arch = "aarch64") {
+                assert_eq!(model.to_bits(), cpu.to_bits(), "{data:?}");
+            } else {
+                assert_eq!(model, cpu, "{data:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn max_boundary_values_match_cpu() {
+        let data = vec![
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1.0e-40,
+            -1.0e-40,
+            f32::MAX,
+            f32::MIN,
+        ];
+        assert_eq!(
+            max_all_chunked(&data).to_bits(),
+            cpu_max_bits(&data, &[data.len()], None)[0]
+        );
+        assert_eq!(max_all_chunked(&data), f32::INFINITY);
+    }
+
+    #[test]
+    fn max_all_chunked_matches_flat_scan() {
+        let mut rng = Rng(0x1357_9bdf_2468_ace0);
+        for &n in &[1usize, 4095, 4096, 4097, 8192, 3 * 4096 + 17] {
+            let data: Vec<f32> = (0..n).map(|_| rng.f32()).collect();
+            assert_eq!(
+                max_all_chunked(&data).to_bits(),
+                max_axis_lane(&data).to_bits(),
+                "n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_axis_matches_cpu_bit_exact_for_various_axes() {
+        let mut rng = Rng(0x4444_3333_2222_1111);
+        let shape = [3usize, 4, 5];
+        let data: Vec<f32> = (0..shape.iter().product()).map(|_| rng.f32()).collect();
+        for dim in 0..shape.len() {
+            let expected = cpu_max_bits(&data, &shape, Some(dim));
+            let outer: usize = shape[..dim].iter().product();
+            let axis_len = shape[dim];
+            let inner: usize = shape[dim + 1..].iter().product();
+            for o in 0..outer {
+                for i in 0..inner {
+                    let lane: Vec<f32> = (0..axis_len)
+                        .map(|a| data[(o * axis_len + a) * inner + i])
+                        .collect();
+                    assert_eq!(
+                        max_axis_lane(&lane).to_bits(),
+                        expected[o * inner + i],
                         "dim={dim} o={o} i={i}"
                     );
                 }

@@ -61,15 +61,13 @@
 //! CUDA 版と同じく `gemm_fp32_strict` を選ぶ（将来 Metal 側に TF32 相当の
 //! opt-in 精度モードが追加された場合でも本ファイルの変更が不要になる）。
 //!
-//! # `sum`／`max` は `Unsupported` をそのまま伝播する
+//! # `sum`／`max` は結線済み（#1896・#3475）
 //!
-//! Metal f32 `BackendOps::sum`／`max`（`ops.rs`）は GPU カーネル未実装の
-//! ため `Err(BackendError::Unsupported(_))` を返す（out-of-scope-
-//! tracking.md 対象。`tests/backend_ops_real_device.rs::
-//! reduction_remains_unsupported_without_device_init` が固定済み）。
-//! 本モジュールはこれを bf16 へ「昇格」せず（f32 版より高機能にしない）、
-//! `upcast_bf16` 後にそのまま `BackendOps::sum`／`max` を呼び
-//! `Unsupported` エラーをそのまま返す（f32 契約と同一の fail-closed）。
+//! Metal f32 `BackendOps::sum`（イシュー #1896）・`max`（イシュー
+//! #3475）は `reduce::MetalReduce` へ結線済みのため、本モジュールは
+//! `upcast_bf16` 後にそのまま `BackendOps::sum`／`max` を呼び、結果を
+//! `bf16::from_f32` で 1 回丸める（範囲外 `dim` はデバイス非接触で
+//! `ShapeMismatch`）。
 //!
 //! # REQ-8（カーネル境界検査）の適用状況
 //!
@@ -186,8 +184,7 @@ impl TypedOps<bf16> for MetalBackendOps {
         downcast_f32(&out32)
     }
 
-    /// 既存 `BackendOps::max` へ委譲する。`max` は Metal f32 reduction
-    /// カーネル未実装のため常に `Unsupported` を伝播する。
+    /// 既存 `BackendOps::max`（イシュー #3475 で結線済み）へ委譲する。
     fn max(&self, a: &Tensor<bf16>, dim: Option<usize>) -> Result<Tensor<bf16>, BackendError> {
         let a32 = upcast_bf16(a)?;
         let out32 = BackendOps::max(self, &a32, dim)?;
@@ -211,19 +208,37 @@ mod tests {
         );
     }
 
-    /// `max` がデバイス初期化なしで `Unsupported` を返すことを
-    /// 確認する（`tests/backend_ops_real_device.rs::
-    /// max_remains_unsupported_without_device_init` の bf16 版。
-    /// f32 版と同じく `MetalContext::new` を呼ばないため実機不要）。
+    /// `max` の範囲外 `dim` がデバイス初期化なしで `ShapeMismatch` を
+    /// 返すことを確認する（実機不要）。
     #[test]
-    fn max_remains_unsupported_without_device_init() {
+    fn max_rejects_out_of_range_dim_without_device_init() {
         let metal = MetalBackendOps::new();
         let a = Tensor::new(vec![bf16::from_f32(1.0), bf16::from_f32(-2.0)], &[1, 2]).unwrap();
 
         assert!(matches!(
-            TypedOps::<bf16>::max(&metal, &a, None),
-            Err(BackendError::Unsupported(_))
+            TypedOps::<bf16>::max(&metal, &a, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
         ));
+    }
+
+    /// `max` が `bf16::from_f32(BackendOps::max(f32))` と一致することを
+    /// Metal 実機で検証する（イシュー #3475）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn max_matches_f32_backend_ops_rounded_bit_exact() {
+        let metal = MetalBackendOps::new();
+        let a = Tensor::new(vec![bf16::from_f32(1.0), bf16::from_f32(-2.0)], &[1, 2]).unwrap();
+        let a32 = upcast_bf16(&a).unwrap();
+
+        let v16 = TypedOps::<bf16>::max(&metal, &a, None).unwrap();
+        let v32 = BackendOps::max(&metal, &a32, None).unwrap();
+        let rounded32: Vec<f32> = v32
+            .host_slice()
+            .iter()
+            .map(|&x| bf16::from_f32(x).to_f32())
+            .collect();
+        let got: Vec<f32> = v16.host_slice().iter().map(|x| x.to_f32()).collect();
+        assert_eq!(got, rounded32);
     }
 
     /// `sum`（イシュー #1896 で `reduce::MetalReduce` へ結線済み）が
