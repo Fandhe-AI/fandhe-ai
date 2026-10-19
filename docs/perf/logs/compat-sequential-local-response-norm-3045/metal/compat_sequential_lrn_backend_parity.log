@@ -2,7 +2,7 @@
      Running tests/compat_sequential_lrn_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/compat_sequential_lrn_backend_parity-0cc3fe51cf6eb9e0)
 
 running 1 test
-test metal_<metal-node>_response_norm_forward_backward_matches_cpu ... ok
+test metal_local_response_norm_forward_backward_matches_cpu ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.04s
 
