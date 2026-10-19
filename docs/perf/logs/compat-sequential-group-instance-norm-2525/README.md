@@ -1,6 +1,6 @@
 # compat::Sequential の GroupNorm／InstanceNorm 実機 parity 申し送り（イシュー #2525）
 
-> CUDA は #3163 で GB10 実測済み（2026-10-19・コミット b640875f・pass 1/1）。結果は末尾「CUDA 実測記入欄（#3163）」節。Metal は未実測（#3164）。
+> CUDA は #3163 で GB10 実測済み（2026-10-19・コミット b640875f・pass 1/1）。結果は末尾「CUDA 実測記入欄（#3163）」節。Metal は #3164 で Mac mini 実測済み（次行参照）。
 > Metal は Mac mini（Apple M4）で実測済み（#3164・2026-10-19）。結果は結果記入欄と末尾の「Metal 実測記入欄（#3164）」節、成果物は `metal/` を参照。
 
 本エージェントの実行環境には CUDA／Metal 実機への到達手段がないため、実機テストは未実測のまま
@@ -22,7 +22,7 @@ cargo test -p fandhe-ai --test compat_sequential_group_instance_norm_backend_par
 cargo test -p fandhe-ai --test compat_sequential_group_instance_norm_backend_parity -- --ignored metal_
 ```
 
-## 結果記入欄（CUDA は実測済み・Metal は未実測）
+## 結果記入欄（CUDA は #3163 で実測済み・Metal は #3164 で実測済み）
 
 | 環境 | テスト | 結果 | 日付 |
 |---|---|---|---|
