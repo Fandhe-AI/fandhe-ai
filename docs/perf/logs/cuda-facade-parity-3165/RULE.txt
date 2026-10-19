@@ -1,0 +1,61 @@
+事前登録規則（イシュー #3165: Transformer・Functional・可変長系列 7 群の CUDA 実機 parity）
+宣言日時（UTC）: 2026-10-19T08:50Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+経緯: PR #3469 は所有者判断（2026-10-19）で close した（回収後のログ手編集・実行スクリプトとコミット済みスクリプトの不一致）。
+  本規則は測り直しの事前登録であり、マスクを是正した run_cuda_parity.sh を先にコミットしてから実機へ送る。
+
+機体: DGX Spark GB10（aarch64・sm_121）だけ。ホスト名は記録しない（docs/real-hardware-verification-env.md §1）。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  d79f4895d1337ab5035f76f79eea7619196de874
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること（後続のコミットは docs のみ）。
+    git diff --quiet d79f4895d1337ab5035f76f79eea7619196de874 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、本ファイルを新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 1 行形式（git rev-parse HEAD の 40 桁小文字 16 進数 + 改行）。dirty かどうかは送信側で
+  git status --porcelain が空であることを確かめて担保する。実行時の HEAD フル SHA を展開ツリー直下の
+  .rev-stamp に書き、README に記録する。
+
+実行環境: 展開先は専用の ~/work/rust-ai-library-run-3165（並列セッションとの衝突回避）。
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する。
+  計測中は他のビルドを並走させない。実行前に他の cargo／rustc プロセスが無いことを pgrep で確かめ、記録する。
+
+ビルドを先に済ませる（判定外）:
+  cargo test -p fandhe-ai --lib --no-run
+  cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity --no-run
+  cargo test -p fandhe-ai --test merge_ops_backend_parity --no-run
+  cargo test -p fandhe-ai --test packed_sequence_backend_parity --no-run
+
+コマンド（8 本。上から順に 1 本ずつ。共通オプション: -- --ignored --exact --nocapture --test-threads=1 <フルパス>）:
+  各行の頭に「timeout 1800 cargo test -p fandhe-ai」を付ける。--release は付けない（各 README のコマンド形を正とする）。
+  1. --test compat_sequential_layers_backend_parity  cuda_multihead_attention_config_matches_cpu
+  2. --test compat_sequential_layers_backend_parity  cuda_transformer_decoder_layer_matches_cpu
+  3. --test compat_sequential_layers_backend_parity  cuda_transformer_matches_cpu
+  4. --lib  compat::functional::tests::cuda_functional_graph_matches_cpu_reference
+  5. --lib  compat::functional::fit_parity_tests::cuda_parameter_gradients_match_cpu_reference
+  6. --test merge_ops_backend_parity  cuda_merge_ops_match_cpu_reference
+  7. --lib  compat::functional::merge_tests::cuda_merge_graph_matches_cpu_reference
+  8. --test packed_sequence_backend_parity  cuda_packed_sequence_matches_cpu_reference
+  compat_sequential_layers_backend_parity.rs には cuda_* が 7 本あるため、他の #[ignore] を巻き込まないよう
+  --exact を必ず付ける。--exact・--nocapture・--test-threads=1 はテストの選び方と出力だけに効き判定には影響しない。
+
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行
+  （対象のフルパス）であることを確かめる。0 行または 2 行以上なら実行せず undetermined とする。
+
+判定（REQ-2 統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。tolerance 定数・baseline は不変）:
+  pass: exit 0 かつ "running 1 test" かつ "test result: ok. 1 passed; 0 failed"。
+  fail: 1 件以上のテスト失敗（パニックを含む）。CUDA と CPU は自前バックエンド同士の比較なので判定不能にせず
+    通常の parity 失敗として扱う。
+  undetermined: timeout（exit 124）、--list で選ばれた件数が 1 でない、ビルド不能、ノード到達不能。
+  時間計測ではないので中央値は取らない。群ごと・テストごとの pass／fail の件数で記録する。
+
+fail 時の扱い:
+  tolerance・baseline・判定方式・入力は変えない。パニックメッセージの fail_count・max_abs_diff・
+  max_rel_err 等を引用して事実を記録し、README と PR に「要対応」と書く。Issue の起票・コメント、
+  baseline 化はユーザー承認なしでは行わない。
+
+記録規則:
+  ホスト名は <cuda-node>、$HOME は ~、ユーザー名は前後とも境界（英数字・_・.・- 以外）のときだけ <user> にする。
+  crate 名・パッケージ名・ディレクトリ名（fandhe-ai・fandhe_ai*・target-fandhe-ai・Fandhe-AI 等）は変えない。
+  マスク漏れ（ホスト名・$HOME・/home/・境界付きユーザー名の残存）があれば当該記録を捨てる（fail-closed）。
+  回収したログは手で編集しない。漏れや化けが見つかったときはスクリプトを直して新しいコミットにし、
+  本ファイルを再登録して測り直す。
+  実行と提出物の対応: env_info.txt の script_sha256 と rev_stamp、成果物の SHA256SUMS で検証する。
