@@ -1,0 +1,23 @@
+== 実行前 ==
+UTC: 2026-10-19T02:59:17Z
+chip: Apple M4
+mem_bytes: 17179869184
+sw_vers: ProductName:		macOS ProductVersion:		27.0.1 BuildVersion:		26A434 
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+arch: arm64
+uptime: 11:59  up 8 days, 11:33, 1 user, load averages: 8.00 3.09 1.93
+pgrep cargo|rustc:
+rev-stamp: b640875f86399515b2dab4dfc38089caaa5e5c08 dirty=0 
+
+== 実行後 ==
+UTC: 2026-10-19T02:59:22Z
+chip: Apple M4
+mem_bytes: 17179869184
+sw_vers: ProductName:		macOS ProductVersion:		27.0.1 BuildVersion:		26A434 
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+arch: arm64
+uptime: 11:59  up 8 days, 11:33, 1 user, load averages: 7.84 3.14 1.95
+pgrep cargo|rustc:
+rev-stamp: b640875f86399515b2dab4dfc38089caaa5e5c08 dirty=0 
