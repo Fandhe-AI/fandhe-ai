@@ -25,5 +25,5 @@ cargo test -p fandhe-ai --test create_graph_facade -- --ignored metal
 
 | 環境 | 実行日 | コミット | 結果 | fail 要素数 |
 |------|--------|---------|------|-------------|
-| GB10（CUDA） | 未実施 | - | - | - |
+| GB10（CUDA） | 2026-10-19 | 9e2f7ddcc（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)） | pass（1/1・1.39s。`--exact --nocapture --test-threads=1 create_graph_extended_ops_cuda_matches_cpu`。ログ [`cuda/create_graph_extended_ops_cuda_matches_cpu.log`](./cuda/create_graph_extended_ops_cuda_matches_cpu.log)。#3168。GPU 経路かホストフォールバックかは確かめていない） | 0 |
 | Mac mini（Apple M4・Metal） | 2026-10-19 | bf894108a（[`metal/rev-stamp.txt`](./metal/rev-stamp.txt)） | `create_graph_extended_ops_metal_matches_cpu` pass（1/1・0.29s。`--exact --nocapture --test-threads=1`。ログ [`metal/create_graph_extended_ops_metal_matches_cpu.log`](./metal/create_graph_extended_ops_metal_matches_cpu.log)）。#3169（集計 [`../metal-autodiff-parity-3169/`](../metal-autodiff-parity-3169/README.md)）。GPU 経路かホストフォールバックかは確かめていない | 0 |
