@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/elementwise_loss_ops_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/elementwise_loss_ops_backend_parity-6aef08ed1ac28e7d)
+
+running 4 tests
+test cuda_bit_exact_backward_matches_cpu_reference ... ok
+test cuda_bit_exact_forward_matches_cpu_reference ... ok
+test cuda_req2_backward_matches_cpu_reference_within_tolerance ... ok
+test cuda_req2_forward_matches_cpu_reference_within_tolerance ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.28s
+
+rc=0

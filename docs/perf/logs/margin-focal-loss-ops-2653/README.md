@@ -1,5 +1,6 @@
 # MultiMargin・MultiLabelMargin・MultiLabelSoftMargin・sigmoid focal loss（#2653）CUDA／Metal 実機未実測の申し送り
 
+> CUDA は #3161 で GB10 実測済み（2026-10-19・コミット `b640875f`・pass 2/2）。結果は末尾「CUDA 実測記入欄（#3161）」節。
 > Metal は Mac mini（Apple M4）で実測済み（#3162・2026-10-19・コミット `d79f4895`・pass 2/2）。結果は末尾の「Metal 実測記入欄（#3162）」節、成果物は `metal/`。
 
 `docs/autodiff-margin-focal-loss-ops-decision.md` §10 参照。本実装エージェント実行環境は CUDA／Metal 実機に
@@ -34,7 +35,7 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
+| 2026-10-19 | DGX Spark GB10 | `cargo test -p fandhe-ai --test margin_focal_loss_ops_backend_parity -- --ignored --nocapture --test-threads=1 cuda_`（`cuda/RULE.txt`） | pass（2/2） | `.rev-stamp` `b640875f`・dirty=0。ログは `cuda/` |
 | 2026-10-19 | Mac mini（Apple M4） | `cargo test -p fandhe-ai --release --test margin_focal_loss_ops_backend_parity -- --ignored --nocapture --test-threads=1 metal_`（`metal/RULE.txt`） | pass 2/2（fail 0） | `.rev-stamp` `d79f4895`（40 桁は `metal/rev-stamp.txt`）。ログは `metal/margin_focal_loss_ops_backend_parity.log` |
 
 ## Metal 実測記入欄（#3162）
@@ -58,3 +59,19 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 - tolerance 定数・baseline・判定式・テストコードは不変。
 - 注記: 実機ノードは他用途と共有で、実行前後の load average が 6〜9 だった（判定テストのため時間計測には使わない）。
   GPU カーネル経路とホストフォールバック経路のどちらを通ったかはログから断定できないため未確認である。
+
+## CUDA 実測記入欄（#3161）
+
+- 判定規則・fail の扱い・実行コマンド・期待件数（2 件）は事前登録規則 `cuda/RULE.txt` を正とする（実測前に固定済み。事後に変更していない）。
+- 実行コマンド: 上記 `RULE.txt` のとおり独立プロセスで 1 回（並列度 1・`--release` なし・`timeout 1800`）。再実行・選別はしていない。
+- 対象コミット: `b640875f`（`cuda/rev-stamp.txt`: 1 行目 sha・2 行目 `dirty=0`。実行前・各ファイル実行後・実行後の 8 回の読み出しがすべて一致）。
+- 環境: NVIDIA GB10（aarch64・ドライバ 580.173.02）・CUDA 13.0（nvcc 13.0.88）・rustc 1.97.0。詳細は `cuda/env_info.txt`（実行前後）。
+- 備考: 常駐サービスの GPU プロセス 3 件（実行前後で同一 pid・`utilization.gpu` 0%）以外の GPU 負荷なし。作業ツリーは初回転送でビルドキャッシュが冷えていたため、判定外のウォームアップ（`--no-run`、`cuda/build.log`）で 6 テストファイル分をビルドしてからテストを実行した（テスト自体は 1 回ずつ）。
+
+| ファイル | 関数 | 結果 | 備考 |
+|---|---|---|---|
+| `crates/facade/tests/margin_focal_loss_ops_backend_parity.rs` | `cuda_bit_exact_backward_matches_cpu_reference` | pass | |
+| `crates/facade/tests/margin_focal_loss_ops_backend_parity.rs` | `cuda_bit_exact_forward_matches_cpu_reference` | pass | |
+
+- 合計 2/2 pass（fail 0）。実行時間 0.21s と短く、経路確認（GPU フック経由かフォールバックか）は追従課題。フォールバック経路を通ったとは断定しない。
+- tolerance 定数・baseline・判定規則・テストコードは不変。
