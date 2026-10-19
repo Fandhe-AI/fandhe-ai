@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/model_download_real_network.rs (<home>/work/target-fandhe-ai/release/deps/model_download_real_network-b9a7781ab8eac31a)
+
+running 1 test
+test real_network_wrong_pin_is_rejected ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.42s
+
