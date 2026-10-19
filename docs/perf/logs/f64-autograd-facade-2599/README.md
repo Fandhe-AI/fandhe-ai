@@ -27,4 +27,4 @@ cargo test -p fandhe-ai --test f64_autograd_facade -- --ignored f64_autograd_met
 | 環境 | 実行日 | コミット | 結果 | fail 要素数 |
 |------|--------|---------|------|-------------|
 | GB10（CUDA） | 未実施 | - | - | - |
-| Mac mini（Apple M4・Metal） | 2026-10-19 | bf894108a（[`metal/rev-stamp.txt`](./metal/rev-stamp.txt)） | `f64_autograd_metal_matches_cpu` pass（1/1・0.03s。`--exact --nocapture --test-threads=1`。ログ [`metal/f64_autograd_metal_matches_cpu.log`](./metal/f64_autograd_metal_matches_cpu.log)）。#3169（集計 [`../metal-autodiff-parity-3169/`](../metal-autodiff-parity-3169/README.md)）。GPU 経路かホストフォールバックかは確かめていない（MSL が `double` 非対応のため Metal は常にホスト計算） | 0 | 0 |
+| Mac mini（Apple M4・Metal） | 2026-10-19 | bf894108a（[`metal/rev-stamp.txt`](./metal/rev-stamp.txt)） | `f64_autograd_metal_matches_cpu` pass（1/1・0.03s。`--exact --nocapture --test-threads=1`。ログ [`metal/f64_autograd_metal_matches_cpu.log`](./metal/f64_autograd_metal_matches_cpu.log)）。#3169（集計 [`../metal-autodiff-parity-3169/`](../metal-autodiff-parity-3169/README.md)）。GPU 経路かホストフォールバックかは確かめていない（MSL が `double` 非対応のため Metal は常にホスト計算） | 0 |
