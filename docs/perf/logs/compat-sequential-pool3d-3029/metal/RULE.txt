@@ -1,0 +1,43 @@
+事前登録規則（イシュー #3172: Pool3d 層経路 の Metal 実機 parity。実測前に固定し、結果が出た後に緩めない）
+宣言日時（UTC）: 2026-10-19（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。M4 Max 開発機では測らない・記録しない
+  （docs/real-hardware-verification-env.md §1・§7）。
+
+対象: crates/facade/tests/compat_sequential_pool3d_backend_parity.rs の Metal #[ignore] テスト（フィルタ metal_）
+  期待件数: 1 件（metal_pool3d_forward_backward_matches_cpu）
+
+想定経路: ../README.md「判定契約」「期待結果」節のとおり。GPU カーネルが無く Unsupported からホストフォールバックする想定のため、pass でも GPU カーネルの parity とは書かない。経路は断定しない。
+
+判定: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。厳密ゼロ fail。baseline 方式は使わない。
+  bit 一致を要求するアサートがあれば bit 一致のまま判定し、REQ-2 pass へ読み替えない。
+  RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD・baseline・テストコード・入力は変えない。
+
+判定区分:
+  pass: exit 0 かつ「running N test(s)」の N が期待件数 1 と一致し、「test result: ok. N passed; 0 failed」。
+        N が 0 または期待件数と異なれば fail とする（skip を pass と読まない）。
+  fail: テスト失敗が 1 件以上。panic・tape_for(Device::Metal) の失敗・想定外の Unsupported を含む。
+        Metal と CPU は自前バックエンド同士の比較なので判定不能にせず通常の parity 失敗とする。
+  undetermined: ノードに届かない場合、ビルドできない場合、他の cargo／rustc が並走していた場合のみ。
+
+fail の扱い: tolerance 定数・判定式・入力・テストコード・baseline は変えない。事後の緩和・ケース除外・
+  再実行による選別をしない。fail は件数・テスト名・panic メッセージ中の最大誤差を記録し、是正の要否は所有者判断
+  （Issue の起票・コメントは承認なしでは行わない）。
+
+実行回数: 独立プロセスで 1 回。例外はテスト開始前の環境起因の失敗（SSH 切断・ビルド環境の破損等）のみで、
+  その場合も失敗ログと破棄の理由を残し、結果による選別とは区別して記録する。
+
+実行コマンド（docs/real-hardware-verification-env.md §3・§7。同期先は並走実行との衝突回避のため <home>/work/rust-ai-library-run-3172）:
+  ssh "<metal-node>" 'zsh -lc "cd ~/work/rust-ai-library-run-3172 && CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai cargo test -p fandhe-ai --release --test compat_sequential_pool3d_backend_parity -- --ignored --nocapture --test-threads=1 metal_"'
+  （--release --nocapture --test-threads=1 は判定に影響しない実行オプション。README の素のコマンドとの差はこれだけ。
+   --release は先行する Metal 実測と揃え、ノード上の共有 target を再利用するため）
+
+対象コミット: 実測時点の origin/main。展開ツリーの .rev-stamp（1 行目 SHA・2 行目 dirty=<件数>）で固定し、
+  dirty=0 以外の実測は無効。測定 SHA が本ファイルの事前登録コミットと異なる場合は、
+  git diff --quiet <事前登録コミット> <測定 SHA> -- crates/ Cargo.toml Cargo.lock が成立するときに限り有効とする。
+
+同梱物: rev-stamp.txt・実行ログ（末尾に rc=<終了コード>）・env_info.txt（実行前後）・build.log。
+  ホスト名・ユーザー名・絶対パスは <metal-node>・<home> へ置換してから収録する。
+
+計測中はビルドや別の負荷を並走させない（並列度 1）。ビルドは判定外のウォームアップ（build.log）で事前に済ませる。
+本ファイル作成時点では実測値を含まない（未実測）。
