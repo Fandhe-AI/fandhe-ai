@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/typed_ops_f16_parity.rs (~/work/target-fandhe-ai/debug/deps/typed_ops_f16_parity-cfb9066c8cac2307)
+
+running 1 test
+test max_matches_f32_backend_ops_rounded_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.08s
+
+rc=0
