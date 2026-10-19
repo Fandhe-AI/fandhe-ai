@@ -57,7 +57,7 @@ fi
 HN=$(hostname)
 LEAK=0
 mask() { # mask <raw> <final>
-  sed -e "s|$HN|<cuda-node>|g" -e "s|$HOME|~|g" -e "s|${USER:-__nouser__}|<user>|g" "$1" >"$2"
+  sed -e "s|$HN|<cuda-node>|g" -e "s|$HOME|~|g" -e "s|${USER:-__nouser__}\([^-A-Za-z0-9_]\)|<user>\1|g" "$1" >"$2"
   rm -f "$1"
   for s in "$HN" "$HOME" "/home/"; do
     if [ -n "$s" ] && grep -Fq -- "$s" "$2"; then

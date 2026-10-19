@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/merge_ops_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/merge_ops_backend_parity-4317ef05bcbff109)
+
+running 1 test
+test cuda_merge_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.34s
+

@@ -1,5 +1,7 @@
 # Functional API（多入力グラフの構築と forward。#2665）CUDA／Metal 実機未実測の申し送り
 
+> CUDA は #3165 で GB10 実測済み（2026-10-19・04e48feb・pass 1/1）。Metal は未実測（#3166 段 B）。
+
 `docs/facade-functional-api-decision.md` 末尾「#2665 実装記録」参照。本実装エージェント実行環境は CUDA／Metal 実機に
 到達できないため、`crates/facade/src/compat/functional/tests.rs` の CUDA（`Device::Cuda(0)`）・Metal
 （`Device::Metal`。`cfg(target_os = "macos")` 限定）を対象とする 2 テスト
@@ -37,5 +39,5 @@ CPU 版は同ファイルの属性なしテスト（`matches_pytorch_reference_o
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
+| 2026-10-19 | DGX Spark GB10 | `cargo test -p fandhe-ai --lib -- --ignored --exact --nocapture --test-threads=1 compat::functional::tests::cuda_functional_graph_matches_cpu_reference` | pass（1/1・0.73s。`cuda/cuda_functional_graph_matches_cpu_reference.log`） | GB10（aarch64・sm_121）・ドライバ 580.173.02・CUDA 13.0（nvcc）・rustc 1.97.0。実行コミット 04e48feb（`../cuda-facade-parity-3165/rev-stamp.txt`・`cuda/rev-stamp.txt` とも dirty=0。対象コミット b640875f との `crates/` 等の diff なしを確認）。展開先は専用ツリー（RULE.txt の意図的な逸脱）。ビルドは判定外。GPU 経路（GPU フック経由かホストフォールバックか）は確認していない |
 | 未実測 | Mac mini（Apple M4） | 上記 Metal | 未実測 | #3166 で Mac 側へ申し送り（`../metal-facade-parity-3166/`） |
