@@ -246,14 +246,16 @@ def aggregate(d):
     c0 = pm[("SME", 0)]
     w("### (64,256,784) での固定費の占有（micro-call 256 組 = 4x16x4）")
     w("")
-    w("| T | SME GFLOPS | 実測時間 us | 256 組 x kc=0 固定費 us（T で等分と仮定） | 占有 % |")
-    w("|---|---|---|---|---|")
+    w("| T | SME GFLOPS | 実測時間 us | 256 組 x kc=0 固定費 us（T で等分と仮定） | 占有 %（kc=0 基準） | 占有 %（切片 c 基準） |")
+    w("|---|---|---|---|---|---|")
     m_, n_, k_ = 64, 256, 784
     for t in THREADS:
         g = med[("SME", t, (m_, n_, k_))]
         t_ns = 2.0 * m_ * n_ * k_ / g  # flop / (GFLOP/s) = ns
         fixed = 256 * c0 / t
-        w(f"| {t} | {g:.1f} | {t_ns / 1e3:.1f} | {fixed / 1e3:.1f} | {100.0 * fixed / t_ns:.1f} |")
+        fixed_c = 256 * fit["SME"][0] / t
+        w(f"| {t} | {g:.1f} | {t_ns / 1e3:.1f} | {fixed / 1e3:.1f} | {100.0 * fixed / t_ns:.1f} | "
+          f"{100.0 * fixed_c / t_ns:.1f} |")
     w("")
 
     ep = os.path.join(d, "ecore_t1_run1.log")

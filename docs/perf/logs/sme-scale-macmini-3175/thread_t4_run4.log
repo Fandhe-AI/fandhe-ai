@@ -1,0 +1,14 @@
+num_threads=4
+rayon_current_num_threads=4
+variant=NEON(TwoDDynamic) num_threads=4 size=(256,256,128) median_gflops=169.040
+variant=SME(TwoDDynamicSme) num_threads=4 size=(256,256,128) median_gflops=272.614
+variant=NEON(TwoDDynamic) num_threads=4 size=(512,512,256) median_gflops=281.453
+variant=SME(TwoDDynamicSme) num_threads=4 size=(512,512,256) median_gflops=643.986
+variant=NEON(TwoDDynamic) num_threads=4 size=(1024,1024,512) median_gflops=239.697
+variant=SME(TwoDDynamicSme) num_threads=4 size=(1024,1024,512) median_gflops=804.979
+variant=NEON(TwoDDynamic) num_threads=4 size=(2048,2048,1024) median_gflops=275.736
+variant=SME(TwoDDynamicSme) num_threads=4 size=(2048,2048,1024) median_gflops=760.729
+variant=NEON(TwoDDynamic) num_threads=4 size=(64,256,784) median_gflops=128.692
+variant=SME(TwoDDynamicSme) num_threads=4 size=(64,256,784) median_gflops=184.766
+variant=NEON(TwoDDynamic) num_threads=4 size=(784,256,64) median_gflops=169.245
+variant=SME(TwoDDynamicSme) num_threads=4 size=(784,256,64) median_gflops=218.639

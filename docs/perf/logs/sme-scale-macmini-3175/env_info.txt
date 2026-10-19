@@ -1,0 +1,8 @@
+chip=Apple M4
+perflevel0_physicalcpu=4
+perflevel1_physicalcpu=6
+FEAT_SME=1
+macOS=27.0.1
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+rev_stamp=146bc9e9a3a32da76042f793fd83b2ba25b69b4c
+utc=2026-10-19T21:48:26Z

@@ -77,7 +77,9 @@ run_one() {
     RAYON_NUM_THREADS="${t}" "$@" cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
         "${TEST_PREFIX}::${test}" --exact --nocapture --test-threads=1 > "${OUT}/${base}.raw.log" 2>&1
     rc=$?
-    grep -E "${pat}" "${OUT}/${base}.raw.log" > "${OUT}/${base}.log"
+    # libtest は先頭の出力を "test <name> ... " と同じ行に出すため、その接頭辞を除いてから抽出する
+    # （初回実測で num_threads 行と最初の probe 行が接頭辞つきで落ちた。再抽出の経緯は README 参照）
+    sed 's/^test [^ ]* \.\.\. //' "${OUT}/${base}.raw.log" | grep -E "${pat}" > "${OUT}/${base}.log"
     grc=$?
     echo "END series=${series} run=${run} T=${t} exit=${rc} grep_exit=${grc} end_load1=$(load1_now)" >> "${OUT}/load_gate.log"
     if [ "${rc}" -ne 0 ] || [ "${grc}" -ne 0 ]; then

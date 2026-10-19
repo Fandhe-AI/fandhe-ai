@@ -24,3 +24,7 @@
 2. `cargo test -p fandhe-ai-backend-cpu --release --lib --no-run` で事前ビルド（計測中はビルドを並走させない）
 3. `nohup sh docs/perf/logs/sme-scale-macmini-3175/orchestrate_macmini.sh > run.out 2>&1 &` で切り離して起動し、`ps` で生存確認（macOS に `setsid` は無い）
 4. 完了後にこのディレクトリを回収し、`python3 -I aggregate.py > aggregate.md`
+
+## 再抽出の経緯
+
+初回実測（`.rev-stamp` = `146bc9e9a`）の `.log` は、libtest が先頭出力を `test <name> ... ` と同じ行に出すため `num_threads=` 行と最初の probe 行を取りこぼした。`.raw.log` は無編集で、接頭辞を除いてから同じ行頭アンカー grep を適用して `.log` を再抽出した（`orchestrate_macmini.sh` の抽出部も同じ形に修正済み）。新たな計測は行っていない。
