@@ -1,0 +1,38 @@
+事前登録規則（イシュー #3164: compat-sequential-conv3d-2524 の Metal 実機 parity）
+宣言日時（UTC）: 2026-10-19（実機実行より前。実機結果を見た後に入力・判定を変えない）
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。
+
+対象コミット: 本ファイルを追加するコミットの親（b640875f86399515b2dab4dfc38089caaa5e5c08）。
+  実機へ転送する展開ツリーは archive 展開で作り、.rev-stamp にフル SHA と dirty=0 を書く。
+  crates/ 配下がそのコミットと同一内容であることを条件とし、README に記録する。
+
+コマンド（厳密に順番に実行し、他のビルドを並走させない。プロファイルは debug 固定）:
+  CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai perl -e 'alarm shift; exec @ARGV' 1800 \
+  cargo test -p fandhe-ai --test compat_sequential_conv3d_backend_parity -- --ignored --nocapture --test-threads=1 metal_
+  （--nocapture --test-threads=1 は判定に影響しない実行オプション。ノードに timeout が無いため perl alarm 1800 秒）
+  本実行の前に同プロファイルの --no-run ビルドを済ませる（判定外）。各ファイル 1 回だけ実行し、結果を見ての選別・再実行はしない。
+
+期待件数: 1 件（metal_conv3d_forward_backward_matches_cpu）
+
+判定:
+  pass: exit 0 かつ「1 passed; 0 failed」で、「running N tests」の N が期待件数 1 と一致すること。
+  fail: テストが 1 件以上失敗すること。tape_for(Device::Metal) の失敗・想定外の Unsupported・panic も
+        fail に含める。Metal 対 CPU の不一致は自前バックエンド同士の比較なので判定不能にせず、
+        通常の parity 失敗とする。bit_exact の fail は「bit 一致 fail」として記録し、
+        REQ-2 pass へ読み替えない。
+  undetermined: ノードに届かない・ビルドできない・timeout（rc 142）・filter 後の件数が期待値と異なる
+        （0 passed 等）のいずれか。undetermined は pass と見なさない。
+  注意: 1 テストは最初の fail で止まるため、全項目が評価済みと言えるのは pass の場合だけである。
+  REQ-2 部分の判定は統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+  RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD・baseline・テスト入力は変えない。
+
+経路の位置づけ: ホストフォールバック経路か GPU カーネル経路かは本ログから断定しない（未確認）。
+
+同梱物: rev-stamp.txt（.rev-stamp の写し）・env_info.txt（実行前後）・生ログ（末尾に rc=）。
+  ホスト名・ユーザー名・ホーム配下の絶対パスは <metal-node>・<user>・<home> にマスクして収録する。
+
+fail 時の扱い:
+  tolerance・baseline・判定・入力は変えない。失敗件数・失敗したテスト名・ログに出た最大誤差
+  （max_abs_diff／max_rel_err 等）を引用し、README と PR に「要対応」として記録する。
+  Issue の起票・コメント、baseline 化はユーザー承認なしでは行わない。

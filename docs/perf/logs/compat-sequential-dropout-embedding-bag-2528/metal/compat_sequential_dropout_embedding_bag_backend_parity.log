@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/compat_sequential_dropout_embedding_bag_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_dropout_embedding_bag_backend_parity-285c77ecc278c3fd)
+
+running 1 test
+test metal_dropout_embedding_bag_bit_exact ... 
+thread 'metal_dropout_embedding_bag_bit_exact' (10350314) panicked at crates/facade/tests/compat_sequential_dropout_embedding_bag_backend_parity.rs:67:31:
+called `Result::unwrap()` on an `Err` value: Backend(Unsupported("MetalBackendOps::max: reduction カーネル未実装（TASK-1.9c スコープ外）"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    metal_dropout_embedding_bag_bit_exact
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_parity`
+rc=101
