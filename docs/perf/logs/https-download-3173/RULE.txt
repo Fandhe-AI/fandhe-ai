@@ -1,0 +1,28 @@
+# RULE.txt — イシュー #3173 HTTPS 取得の実機確認（事前登録。実測前に固定。段 A のコミットで固定し、段 B はこの版より後のコミットで実行する）
+fixed_at_utc: 2026-10-19T00:00:00Z
+base: 段 B で展開したツリーの .rev-stamp（git rev-parse HEAD）を収録する。本ファイルのコミットより後であること
+machines: DGX Spark GB10（aarch64-unknown-linux-gnu）・Mac mini（Apple M4・aarch64-apple-darwin）。他の機材の結果は参考扱い
+scope: ModelRegistry::download／download_with の実通信（ureq =3.4.2・native-tls vendored・NativeTls＋PlatformVerifier）とビルド・リンク・実行のみ。依存・tolerance・本番コードは変更しない
+targets（認証情報なし・クエリなしの公開宛先。再現性のため記録する。ルート README には実値を書かない）:
+  URL: https://huggingface.co/hf-internal-testing/tiny-random-gpt2/resolve/71034c5d8bde858ff824298bdedc65515b97d2b9/model.safetensors
+  SHA256: 8111d5afb0715dbf5a31396d31432cb56370ba23f6650a035ea0fc8a20b4e500
+    （開発機で curl -L により独立取得して計算し、Hub 公開の lfs.sha256 と一致を確認。F32 のみ・453864 byte。ヘッダの全テンソル dtype が F32 であることも確認済み。URL は 302 で CDN へ 1 ホップ遷移する）
+  BAD_TLS: https://expired.badssl.com/ https://self-signed.badssl.com/ https://untrusted-root.badssl.com/ https://wrong.host.badssl.com/
+  BLACKHOLE: https://192.0.2.1/model.safetensors （RFC 5737 TEST-NET-1。実ホストへは通信しない）
+  機ごとの除外: 事前調査（到達性）で両機とも huggingface.co へ HTTPS 200 を確認済み。除外なし
+build_then_run: 先に cargo test -p fandhe-ai --release --locked --test model_download_real_network --no-run を実行する（ビルド・リンクの証跡）。
+  その後に各実行を行う。計測中は同じ機で別の cargo を走らせない
+runs（各 1 回。cargo test --release --locked --test model_download_real_network -- --ignored --nocapture --exact <name>）:
+  R1 real_network_download_verifies_pin_and_reuses_cache（URL＋SHA256）: 期待 pass（取得・公開・2 回目の再利用）
+  R2 real_network_wrong_pin_is_rejected（URL＋SHA256）: 期待 pass（HashMismatch で拒否・非公開）
+  R3 real_network_bad_tls_certificate_is_rejected（BAD_TLS を 1 ホストずつ）: 期待 pass（Network で拒否）
+  R4 real_network_blackhole_connect_times_out（BLACKHOLE）: 期待 pass（Network）
+observed_not_judged:
+  - R4 の BLACKHOLE_ELAPSED_MS（期待は TIMEOUT_PHASE の 30 秒前後。即時 RST／unreachable なら接続タイムアウトの実挙動は未確認と記録）
+  - リダイレクトの独立観測（curl -I、-L なし）の HTTP ステータスと Location のスキーム・ホスト変化の有無（Location の値そのものは記録しない）
+  - システム OpenSSL の版・libssl-dev の有無・perl／make の有無（env_info.txt）
+fail_handling: 想定外の結果が出ても規則・宛先・テストを差し替えない。合格させるための追加実行はしない。結果をそのまま記録し、原因は推測で書かない。
+  宛先が使えなくなった場合も差し替えず「未確認」と記録する
+masking: ホスト名・ユーザー名・ホームのパスは収録しない（<node>・<user>・<home> へ置換）。リダイレクト先 Location・署名付きクエリ・認証情報は収録しない。
+  残留はスクリプトが fail-closed で停止する（URL・pin の文字列がログに残った場合も停止）
+concurrency: 計測前に pgrep で他の cargo／rustc が走っていないことを確認し、走っていれば待つ（兄弟イシューの実機計測を妨げない）
