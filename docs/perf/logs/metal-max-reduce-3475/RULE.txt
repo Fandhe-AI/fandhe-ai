@@ -1,0 +1,83 @@
+事前登録規則（イシュー #3475: Metal f32 `max` reduction の Mac mini 実機 parity）
+宣言日時（UTC）: 2026-10-20T00:00Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+背景: カーネル実装と CPU 参照との bit 一致テストは PR #3479（merge commit
+  b6c0ae40ad63ee35260b9ae57f6c6066b2e4efe4）で導入済み。本イシューの残りは Mac mini での実測と記録のみ。
+  コード（crates/）・tolerance 定数・parity baseline・ガードレール閾値・依存は変更しない。
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。M4 Max 開発機の値は記録しない
+（docs/real-hardware-verification-env.md §1・§7）。
+
+対象コミット: 本ファイルを追加するコミット自身の HEAD（成果物の .rev-stamp / rev-stamp.txt に書く）。
+  「実行したコードは #3479 のマージ内容と同じ」と README に書ける有効条件（成立したときに限る）:
+    git diff --quiet b6c0ae40ad63ee35260b9ae57f6c6066b2e4efe4 <HEAD> -- 'crates/*/src' 'crates/*/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml
+  かつ対象テストファイル（次の 6 本）も同じ diff 検査で差がないこと:
+    crates/backend-metal/tests/reduce_parity.rs
+    crates/backend-metal/tests/backend_ops_real_device.rs
+    crates/backend-metal/tests/typed_ops_f16_parity.rs
+    crates/backend-metal/src/typed_bf16.rs
+    crates/facade/tests/reduce_backend_parity.rs
+    crates/facade/tests/compat_sequential_dropout_embedding_bag_backend_parity.rs
+  成立しなければその主張は書かず、HEAD だけを対象コミットとして記録する。
+  .rev-stamp は展開ツリー直下に置く 1 行形式: git rev-parse HEAD の 40 桁小文字 16 進数 + 改行 1 個のみ。
+  dirty 検査は別に行う: 送信前にローカルで git status --porcelain が空であることを確かめ、件数を記録する。
+  展開ツリーは git archive <HEAD> から作る。ノード側で展開した crates/ の指紋
+  （find crates -type f | sort | xargs shasum | shasum）がローカルと一致することを確かめ、README に記録する。
+
+展開先: ~/work/rust-ai-library-run-3475（専用。並列する他イシューの Metal 実測との衝突を避けるため、
+  docs/real-hardware-verification-env.md §3 の既定 ~/work/rust-ai-library-run からの意図的な逸脱）。
+
+実行環境: zsh -lc で包み、CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する
+  （docs/real-hardware-verification-env.md §7.1）。debug プロファイル（--release は付けない）。
+
+並走禁止: 実行前に pgrep -x cargo／pgrep -x rustc が空になるまで 30 秒間隔で最大 60 分待つ。
+  空にならなければ undetermined。待機回数は env_info に記録する。
+時間制限: 各 cargo コマンドを perl -e 'alarm shift; exec @ARGV' 1800 で包む（rc 142 は undetermined）。
+
+ビルドを先に済ませる（判定外。計測中にコンパイルを並走させない）:
+  cargo test -p fandhe-ai-backend-metal --test reduce_parity --no-run
+  cargo test -p fandhe-ai-backend-metal --test backend_ops_real_device --no-run
+  cargo test -p fandhe-ai-backend-metal --test typed_ops_f16_parity --no-run
+  cargo test -p fandhe-ai-backend-metal --lib --no-run
+  cargo test -p fandhe-ai --test reduce_backend_parity --no-run
+  cargo test -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_parity --no-run
+
+コマンド（9 本。上から順に 1 本ずつ・各 1 回・再実行なし。共通オプション: -- --ignored --exact --nocapture --test-threads=1 <フルパス>）:
+  1. -p fandhe-ai-backend-metal --test reduce_parity  metal_max_all_matches_cpu_bit_exact
+  2. -p fandhe-ai-backend-metal --test reduce_parity  metal_max_axis_matches_cpu_bit_exact
+  3. -p fandhe-ai-backend-metal --test reduce_parity  metal_max_nan_zero_inf_edge_cases_match_cpu_bit_exact
+  4. -p fandhe-ai-backend-metal --test reduce_parity  metal_max_signaling_nan_matches_cpu_bit_exact
+  5. -p fandhe-ai-backend-metal --test backend_ops_real_device  backend_ops_max_matches_cpu_bit_exact
+  6. -p fandhe-ai-backend-metal --test typed_ops_f16_parity  max_matches_f32_backend_ops_rounded_bit_exact
+  7. -p fandhe-ai-backend-metal --lib  typed_bf16::tests::max_matches_f32_backend_ops_rounded_bit_exact
+  8. -p fandhe-ai --test reduce_backend_parity  metal_max_all_and_axis_forward_and_backward_match_cpu_bit_exact
+  9. -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_parity  metal_dropout_embedding_bag_bit_exact
+  各行の頭に「cargo test」を付ける。1〜5・8・9 は所有者コメントが挙げた必須の対象、6・7 は
+  docs/backend-metal-reduce-sum-design.md §14.4 が挙げる typed 経路で、追加の対象として登録する。
+  reduce_parity.rs の max 以外（sum・argext・min）は対象外。--exact で絞って巻き込まない。
+  9 は同じファイルに他の #[ignore] テストがあるため --exact を必ず付ける。
+
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行
+  （対象のフルパス）であることを確かめる。0 行または 2 行以上なら実行せず undetermined とする。
+
+期待する数値挙動（docs/backend-metal-reduce-sum-design.md §14.1。実行前に宣言）:
+  すべて CPU 参照と bit 一致。NaN（quiet・signaling とも）は読み飛ばし、全 NaN は -inf、±0 混在は +0。
+  Mac mini は aarch64 なので cfg(target_arch = "aarch64") 限定の ±0 厳密 assert も有効になる。
+
+判定:
+  pass: exit 0 かつ "running 1 test" かつ "test result: ok. 1 passed; 0 failed"。
+  fail: テストの失敗・panic・Unsupported・tape_for(Device::Metal) の失敗。Metal と CPU は自前バックエンド同士の
+    比較なので判定不能にせず通常の失敗として扱う。bit 一致の fail を REQ-2 pass へ読み替えない。
+  undetermined: ノード到達不能・ビルド不能・timeout（rc 142）・--list で選ばれた件数が 1 でない・並走プロセスが消えない・
+    マスク後のテスト名残存検査の失敗。undetermined は pass と見なさない。
+  時間計測ではないので中央値は取らない。pass／fail／undetermined の件数で記録する。
+
+fail 時の扱い:
+  tolerance・baseline・判定方式・入力は変えない。失敗したテスト名とパニックメッセージ（差が出た要素・bit 値など）を
+  引用して記録し、README と PR に「要対応・所有者へ報告」と書いて止まる。カーネルの修正は本 PR で行わない。
+  Issue へのコメント・起票、baseline 化は所有者の承認なしには行わない。
+
+記録規則: ホスト名・ユーザー名・ホームパスだけを <metal-node>・<user>・~ にマスクする。マスク漏れがあれば
+  そのファイルを捨てる（fail-closed）。マスク後に各ログで「test <対象テスト名> ... 」の行がちょうど 1 行
+  残っていることを確かめ、テスト名・crate 名がマスクで壊れていなければ記録を有効とする。
+  回収したログは手で編集しない。
