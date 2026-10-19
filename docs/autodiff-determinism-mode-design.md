@@ -42,7 +42,7 @@ autodiff に追加するにあたり、非決定的な経路（rayon 縮約順�
 ### §2.1 rayon 使用ファイルの棚卸し（`crates/backend-cpu/src`）
 
 `par_iter`／`par_chunks`／`into_par_iter`／`rayon::` のいずれかを含む
-ファイルは **24 件**（実装時の再 grep で確定。計画時点の見込み 22 件
+ファイルは **25 件**（#3177 で `gemm_blis/jobgrid_probe.rs` を追加。実装時の再 grep で確定。計画時点の見込み 22 件
 から `gemm.rs`・`gb10_affinity.rs` の扱いを含め再集計して訂正）:
 
 | ファイル | 分類 | 決定性の根拠 |
@@ -53,6 +53,7 @@ autodiff に追加するにあたり、非決定的な経路（rayon 縮約順�
 | `elementwise.rs`・`fused_elementwise.rs`・`scalar_elementwise.rs` | 要素独立演算 | 出力要素ごとに独立（`par_iter_mut` で書き込み先が要素ごとに排他）。縮約を伴わないため決定性契約の対象外（常に決定的） |
 | `nll.rs`・`typed_f64.rs`・`rnn_cell.rs`・`pooling.rs`（`gemm.rs` に統合） | 損失・RNN セル・pooling | `reduction.rs`／損失関数群と同じチャンク分割＋逐次結合、または要素独立の並列化（`typed_f64.rs` モジュール doc「並列化・決定性」参照） |
 | `gemm.rs`・`gemm_blis/mod.rs`・`gemm_blis/partition.rs` | GEMM | §2.2 参照（静的パーティション） |
+| `gemm_blis/jobgrid_probe.rs` | 診断プローブ（#3177） | `mod` 宣言が `#[cfg(test)]` 限定で本番ビルドに含まれない（テスト `jobgrid_probe_module_is_cfg_test_gated` で担保）。計数用の atomic・Mutex のみで数値蓄積には関与しない |
 | `gb10_affinity.rs`・`small_shape_thread_cap.rs`・`thread_limit.rs` | スレッドプール管理 | 縮約を一切行わない（専用 `rayon::ThreadPool` の構築・pin・スレッド数決定のみ）。既存 GEMM ロジックへ手を加えず `f()` をそのまま実行するラッパーのため決定性契約の対象外。GB10 大コア pin（`gb10_affinity.rs`）・macOS P/E 非対称キャップ（`small_shape_thread_cap.rs`）はいずれも実機検出ゲート付きで、非対象環境（本リポジトリの CI・ubuntu-latest 含む）では常に `f()` 直呼びへフォールバックする |
 | `lib.rs` | クレートルート | コメント中の `par_chunks_mut` 言及のみ（コード本体に rayon 呼び出しなし） |
 | `gemm_prefetch_bandwidth_diag_tests.rs` | テスト専用 | `crates/backend-cpu/src/lib.rs:191` で `#[cfg(all(test, target_arch = "aarch64"))]` ゲート済み（本番ビルドに一切含まれない診断用ベンチテスト）。本番インベントリの対象外として明示除外 |
@@ -298,7 +299,7 @@ determinism_inventory.rs` 冒頭の `//!` を正とし、本節では要点の�
 
 ロック越しの共有蓄積（`Mutex`／`RwLock`／`.lock(`／`.write(`）も
 同じ非決定性（加算順がスケジューリング依存）を持つため同様に検索した。
-コード上の出現は `gemm_blis/mod.rs` の 4 行（`#[cfg(test)]` 付き `use`
+コード上の出現は `gemm_blis/mod.rs` の 4 行と `gemm_blis/jobgrid_probe.rs`（#3177。`#[cfg(test)]` 限定の計数プローブ）の 4 行（`#[cfg(test)]` 付き `use`
 と、`gemm_blis_ic_dynamic_region` の行パネル配布スロット）のみで、
 いずれも本番未結線の診断コードである。
 
@@ -363,7 +364,7 @@ float の `atomicAdd` は使わない方針（ソース検査テストあり:
 green）に、次の fail-closed ソース走査テストを置く:
 
 - `rayon_marker_files_match_fixed_allowlist`: rayon 並列イテレータ
-  使用ファイル集合を allowlist（24 件。§2.1）で固定する。
+  使用ファイル集合を allowlist（25 件。§2.1）で固定する。
 - `no_rayon_parallel_reduce_cooccurrence_in_backend_cpu_src`: §2.3 の
   走査方式（ブロック深さ・トークン照合によるマーカー検出・括弧深さ・
   UFCS 呼び出し検出・同一メソッド連鎖上に限った `Vec` collect 遮断
@@ -372,11 +373,11 @@ green）に、次の fail-closed ソース走査テストを置く:
   共起を検出し、`crates/backend-cpu/src` 実測で**0 件**であることを
   固定する。
 - `atomic_rmw_occurrences_match_expected_test_only_count`: atomic
-  蓄積箇所を 1 件（`gemm_blis/mod.rs` の `#[cfg(test)]` 限定診断コード
-  のみ）で固定する（`fetch_update`・`fetch_nand`・`fetch_xor` を含む）。
+  蓄積箇所を 12 件（`gemm_blis/mod.rs` 1・`jobgrid_probe.rs` 10・`test_temp_dir.rs` 1。
+  いずれも `#[cfg(test)]` 限定）で固定する（`fetch_update`・`fetch_nand`・`fetch_xor` を含む）。
 - `lock_accumulation_markers_match_expected_test_only_locations`:
-  ロック越しの共有蓄積の目印の出現を `gemm_blis/mod.rs` の 4 行
-  （`#[cfg(test)]` 限定診断コード）で固定する（§2.4）。
+  ロック越しの共有蓄積の目印の出現を `gemm_blis/mod.rs` の 4 行と
+  `jobgrid_probe.rs` の 4 行（いずれも `#[cfg(test)]` 限定診断コード）で固定する（§2.4）。
 - `no_parallel_iterator_valued_function_signature_in_backend_cpu_src`:
   §2.3 の走査（トークン走査）が追跡しない**既知の限界**——関数引数・
   戻り値経由で並列イテレータの値が流れる経路（例: 並列イテレータを

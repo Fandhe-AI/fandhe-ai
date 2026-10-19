@@ -269,8 +269,9 @@ fn backend_cpu_src_dir() -> PathBuf {
 
 /// rayon 並列イテレータ・`rayon::` 直接参照のいずれかを含むファイル名
 /// （`src/` からの相対パス、`/` 区切り）の固定 allowlist。
-/// `docs/autodiff-determinism-mode-design.md` §2.1 の実測結果（24 件）。
-/// `gemm_prefetch_bandwidth_diag_tests.rs` は `#[cfg(all(test,
+/// `docs/autodiff-determinism-mode-design.md` §2.1 の実測結果（25 件）。
+/// `gemm_blis/jobgrid_probe.rs` は `gemm_blis/mod.rs` で `#[cfg(test)]` ゲート済みの
+/// 診断プローブ（#3177。本番ビルドに含まれない）。`gemm_prefetch_bandwidth_diag_tests.rs` は `#[cfg(all(test,
 /// target_arch = "aarch64"))]` ゲート済みのテスト専用ファイル（`src/
 /// lib.rs:191`）で、本番ビルドに一切含まれないが「rayon マーカーを
 /// 含むファイル」としては引き続き allowlist に載せる（走査自体は
@@ -282,6 +283,7 @@ const RAYON_MARKER_FILE_ALLOWLIST: &[&str] = &[
     "fused_elementwise.rs",
     "gb10_affinity.rs",
     "gemm.rs",
+    "gemm_blis/jobgrid_probe.rs",
     "gemm_blis/mod.rs",
     "gemm_blis/partition.rs",
     "gemm_prefetch_bandwidth_diag_tests.rs",
@@ -327,7 +329,7 @@ fn contains_generic_par_marker(text: &str) -> bool {
 /// （`docs/autodiff-determinism-mode-design.md` §3.3。codex-review
 /// 指摘・PR #2274）。旧実装が拾っていた `into_par_iter`（`par_` 接頭
 /// 辞パターンに当たらない）・`par_bridge`・`rayon::` は個別に維持し、
-/// allowlist（24 件。§2.1）を後退させない。
+/// allowlist（25 件。§2.1）を後退させない。
 fn contains_rayon_marker(content: &str) -> bool {
     content.contains("into_par_iter")
         || content.contains("par_bridge")
@@ -1990,25 +1992,27 @@ fn atomic_rmw_occurrences_match_expected_test_only_count() {
     // 限定の一時ディレクトリ一意名採番カウンタ `fetch_add`。数値蓄積とは
     // 無関係で本番未結線）も許容される test 専用の出現として固定する。
     assert_eq!(
-        total, 2,
-        "atomic read-modify-write の出現数が期待（2 件・gemm_blis/mod.rs\
-         と test_temp_dir.rs の #[cfg(test)] 限定コードのみ）と一致しない（新規の atomic\
+        total, 12,
+        "atomic read-modify-write の出現数が期待（12 件・gemm_blis/jobgrid_probe.rs・\
+         gemm_blis/mod.rs と test_temp_dir.rs の #[cfg(test)] 限定コードのみ）と一致しない（新規の atomic\
          蓄積が本番経路へ混入した可能性がある）: per_file={per_file:?}"
     );
     assert_eq!(
         per_file,
         vec![
+            ("gemm_blis/jobgrid_probe.rs".to_string(), 10usize),
             ("gemm_blis/mod.rs".to_string(), 1usize),
             ("test_temp_dir.rs".to_string(), 1usize),
         ],
         "atomic read-modify-write の出現元ファイルが期待\
-         （gemm_blis/mod.rs・test_temp_dir.rs のみ）と一致しない: {per_file:?}"
+         （gemm_blis/jobgrid_probe.rs・gemm_blis/mod.rs・test_temp_dir.rs のみ）と一致しない: {per_file:?}"
     );
 }
 
 /// ロックによる共有蓄積の目印（`LOCK_ACCUMULATION_MARKERS`）の出現元
 /// ファイル集合と行数を固定する。`docs/autodiff-determinism-mode-design.md`
-/// §2.2 実測: 出現は `gemm_blis/mod.rs` の `#[cfg(test)]` 限定診断コード
+/// §2.2 実測: 出現は `gemm_blis/jobgrid_probe.rs`（#3177。`mod` 宣言が `#[cfg(test)]` 限定）と
+/// `gemm_blis/mod.rs` の `#[cfg(test)]` 限定診断コード
 /// （`gemm_blis_ic_dynamic_region` の行パネル配布スロットと、その
 /// `#[cfg(test)]` 付き `use`）のみで、本番経路にロック越しの蓄積はない。
 #[test]
@@ -2031,7 +2035,10 @@ fn lock_accumulation_markers_match_expected_test_only_locations() {
     }
     assert_eq!(
         per_file,
-        vec![("gemm_blis/mod.rs".to_string(), 4usize)],
+        vec![
+            ("gemm_blis/jobgrid_probe.rs".to_string(), 4usize),
+            ("gemm_blis/mod.rs".to_string(), 4usize),
+        ],
         "Mutex／RwLock／.lock(／.write( の出現が期待（gemm_blis/mod.rs の\
          #[cfg(test)] 限定診断コード 4 行のみ）と一致しない（ロック越しの\
          共有蓄積が本番経路へ混入した可能性がある。決定性の根拠を棚卸し\
@@ -2780,4 +2787,22 @@ fn count_par_reduce_detects_raw_identifier_method_names() {
         ),
         1
     );
+}
+
+/// #3177 の診断プローブ `gemm_blis/jobgrid_probe.rs` が本番ビルドに入らないこと
+/// （`gemm_blis/mod.rs` の `mod jobgrid_probe;` 宣言の直前行が `#[cfg(test)]`）を固定する。
+/// atomic／Mutex／rayon を含むため、ゲートが外れると本番経路へ混入する。
+#[test]
+fn jobgrid_probe_module_is_cfg_test_gated() {
+    let path = backend_cpu_src_dir().join("gemm_blis/mod.rs");
+    let content = std::fs::read_to_string(&path).expect("gemm_blis/mod.rs を読める");
+    let lines: Vec<&str> = content.lines().collect();
+    let idx: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim() == "mod jobgrid_probe;")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(idx.len(), 1, "mod jobgrid_probe; 宣言は 1 件のはず");
+    assert!(idx[0] > 0 && lines[idx[0] - 1].trim() == "#[cfg(test)]");
 }

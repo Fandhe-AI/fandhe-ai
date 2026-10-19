@@ -1,0 +1,39 @@
+イシュー #3177 事前登録規則（計測前に固定。計測後に緩めない）
+================================================================
+目的: m=64 級 GEMM の job 数・再 pack 語数・確保回数を実ログで数え、単スレッドの実効
+GFLOPS を測る。診断のみ。本番の既定値（TWO_D_JOBS_PER_WORKER=2・
+TWO_D_DYNAMIC_PRODUCTION_ENABLED=true・SME_PRODUCTION_ENABLED=false・MC/KC/NC）と
+コードパスは変えない。既定の変更は #3227、実装は #3198 以降。
+
+1. 機体: Mac mini（Apple M4・10 コア）と GB10（20 コア）。記録項目はチップ・OS・rustc・
+   perflevel・rayon::current_num_threads()・.rev-stamp。内部ホスト名は書かない。
+2. 形状（m,n,k / 転置）: L1 fwd 64x256x784 Nn / L1 dW 784x256x64 Tn / L1 dX 64x784x256 Nt /
+   L2 fwd 64x10x256 Nn / L2 dW 256x10x64 Tn / L2 dX 64x256x10 Nt。
+   参照（判定に使わない）: 正方 512。
+3. バイナリを 2 系統に分ける。
+   計数: cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored
+         gemm_blis::jobgrid_probe::tests::jobgrid_probe_mlp_shapes --exact --nocapture --test-threads=1
+         （cfg(test) あり。計数専用で計時には使わない）
+   計時と A/B: example cpu_jobgrid_bench（cfg(test) なし。フックはコンパイルされない）。
+4. 計数の腕: native（機体の既定プール）と専用 ThreadPool の T=1・T=10・T=20。
+   計数は 5 run 実行し、再現性を要求するフィールド（regions・jobs・a_pack_tiles・
+   a_pack_words・a_ideal_words・確保回数）が全 run 同一でなければ集計を止める（fail-closed）。
+   workers_used は WORKER_MASK 由来で Rayon のスケジューリングにより run 間で変動しうる
+   観測値のため、一致条件から除外し run ごとに記録だけする（計数の判定には使わない）。
+5. 単スレッド GFLOPS: RAYON_NUM_THREADS=1 で起動し、出力行の rayon_threads= を正とする
+   （環境変数・ファイル名と食い違えば集計を止める）。プロセス内は
+   MeasurementConfig::default（warmup 20・iters 20）の中央値、5 プロセスの中央値を採る。
+   GFLOPS = 2mnk / median_secs / 1e9。参照腕（判定に使わない）: 直列 gemm_blis（serial_ref）。
+6. A/B の腕: base（main そのまま jpw=2）/ jpw1（TWO_D_JOBS_PER_WORKER=1）/
+   cap4・cap8（job_grid_with_trace の bound に .min(CAP) を追加。CAP=4,8。#1575 で
+   0.33 MFLOP 級は 2〜4 スレッドが最速だったことが根拠）。jpw1・cap 系は計測専用 worktree で
+   ビルドし、差分を ab_patch_*.diff として記録する。main にはコミットしない。
+7. 記録する指標（採否は決めない）: ratio = median(腕)/median(base) と、5 run 中に腕が base に
+   勝った run 数。checksum（C 全要素の f64 逐次和のビット表現）は全腕・全 run で一致しなければ
+   fail-closed。
+8. 負荷ゲート: 各プロセス開始前に load1 が閾値未満になるまで 30 秒間隔で最大 30 分待つ。
+   閾値は Mac mini 5.0・GB10 10.0。通過できなかったプロセスは unavailable とし、全プロセスが
+   通過した系列だけを正式系列と呼ぶ（それ以外は参考系列）。
+9. 運用: run ごとに腕の起動順をローテーションする。run の差し替え・追加起動はしない。ログは
+   上書きしない。ビルドは全腕分を逐次に済ませてから計測を始め、ビルドと計測を並走させない。
+10. 機体に到達できない場合は数値を埋めず unavailable と記録する。推定値で埋めない。
