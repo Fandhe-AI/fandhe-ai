@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/elementwise_loss_ops_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/elementwise_loss_ops_backend_parity-27aec61c66f97fe1)
+
+running 4 tests
+test metal_bit_exact_backward_matches_cpu_reference ... ok
+test metal_bit_exact_forward_matches_cpu_reference ... ok
+test metal_req2_backward_matches_cpu_reference_within_tolerance ... ok
+test metal_req2_forward_matches_cpu_reference_within_tolerance ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.05s
+
+rc=0

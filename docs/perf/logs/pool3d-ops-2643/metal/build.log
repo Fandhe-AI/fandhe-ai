@@ -1,0 +1,16 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/rust-ai-library-run/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/rust-ai-library-run/crates/tensor-core)
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/rust-ai-library-run/crates/backend-metal)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/rust-ai-library-run/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/rust-ai-library-run/crates/autodiff)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (<home>/work/rust-ai-library-run/crates/onnx-interop)
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run/crates/facade)
+    Finished `release` profile [optimized] target(s) in 16.87s
+  Executable tests/conv_transpose3d_max_unpool_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/conv_transpose3d_max_unpool_backend_parity-7ccb79eca6579817)
+  Executable tests/elementwise_loss_ops_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/elementwise_loss_ops_backend_parity-27aec61c66f97fe1)
+  Executable tests/fold_unfold_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/fold_unfold_backend_parity-3769063c45ba48ae)
+  Executable tests/lrn_weight_reparam_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/lrn_weight_reparam_backend_parity-3bfbce7640f70cbf)
+  Executable tests/margin_focal_loss_ops_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/margin_focal_loss_ops_backend_parity-20cd54be1a0f7c92)
+  Executable tests/pool3d_ops_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/pool3d_ops_backend_parity-59cb8051614bf1fb)
+rc=0
