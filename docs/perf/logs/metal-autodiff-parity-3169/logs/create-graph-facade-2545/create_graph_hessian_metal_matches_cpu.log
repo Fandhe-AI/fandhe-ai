@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/create_graph_facade.rs (~/work/target-fandhe-ai/debug/deps/create_graph_facade-dee4bf1c869daa0e)
+
+running 1 test
+test create_graph_hessian_metal_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.14s
+

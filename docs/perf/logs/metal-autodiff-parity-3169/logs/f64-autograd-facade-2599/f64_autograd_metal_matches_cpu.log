@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/f64_autograd_facade.rs (~/work/target-fandhe-ai/debug/deps/f64_autograd_facade-38a7feb04835cd41)
+
+running 1 test
+test f64_autograd_metal_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.03s
+

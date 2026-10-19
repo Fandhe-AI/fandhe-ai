@@ -63,7 +63,7 @@ REQ-2 統一複合判定（`assert_parity`）で比べ、shape も検査する�
 # CUDA（DGX Spark GB10 等の実機上で。担当 #3168）
 cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity -- --ignored --nocapture cuda
 
-# Metal（Apple Silicon 実機上で。担当 #3169）
+# Metal（Apple Silicon 実機上で。#3169 で Mac mini にて実測済み）
 cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity -- --ignored --nocapture metal
 ```
 
@@ -77,4 +77,5 @@ tolerance の単独緩和は行わない。
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 2026-10-19（#3168） | DGX Spark GB10 | 上記 cuda コマンド（`--test functional_transforms_jvp_backend_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>` で 1 本ずつ） | pass 2 / fail 0（`cuda_jvp_jacfwd_basic_ops_match_cpu_reference` 1/1・0.52s、`cuda_jvp_jacfwd_extended_ops_match_cpu_reference` 1/1・0.86s） | 実行コミット 9e2f7ddcc（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)）・ログ [`cuda/`](./cuda/)。GPU 経路かホストフォールバックかは確かめていない |
-| 未実測（#3169） | Apple Silicon（Mac mini） | 上記 metal コマンド | 未実測 | |
+| 2026-10-19（#3169） | Apple Silicon（Mac mini・Apple M4） | `cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity -- --ignored --exact --nocapture --test-threads=1 metal_jvp_jacfwd_basic_ops_match_cpu_reference` | pass 1 / fail 0（0.10s。ログ [`metal/metal_jvp_jacfwd_basic_ops_match_cpu_reference.log`](./metal/metal_jvp_jacfwd_basic_ops_match_cpu_reference.log)） | 実行コミット `bf894108a`（[`metal/rev-stamp.txt`](./metal/rev-stamp.txt)）・集計 [`../metal-autodiff-parity-3169/`](../metal-autodiff-parity-3169/README.md)。GPU 経路かホストフォールバックかは確かめていない |
+| 2026-10-19（#3169） | Apple Silicon（Mac mini・Apple M4） | `cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity -- --ignored --exact --nocapture --test-threads=1 metal_jvp_jacfwd_extended_ops_match_cpu_reference` | pass 1 / fail 0（0.21s。ログ [`metal/metal_jvp_jacfwd_extended_ops_match_cpu_reference.log`](./metal/metal_jvp_jacfwd_extended_ops_match_cpu_reference.log)） | 実行コミット `bf894108a`（[`metal/rev-stamp.txt`](./metal/rev-stamp.txt)）・集計 [`../metal-autodiff-parity-3169/`](../metal-autodiff-parity-3169/README.md)。GPU 経路かホストフォールバックかは確かめていない |

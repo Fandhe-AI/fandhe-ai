@@ -1,7 +1,7 @@
 # `Var` f64 自動微分の CUDA／Metal 実機 parity（イシュー #3168・#3169）
 
-決定記録 `docs/autodiff-var-dtype-multiplexing-design.md` §13「バックエンド別 dispatch（実測記録）」の CUDA 実機側を埋める記録。
-対象は `crates/facade/tests/var_f64_autograd_backend_parity.rs` の CUDA 実機テスト 1 本。
+決定記録 `docs/autodiff-var-dtype-multiplexing-design.md` §13「バックエンド別 dispatch（実測記録）」の CUDA／Metal 実機側を埋める記録。
+対象は `crates/facade/tests/var_f64_autograd_backend_parity.rs` の CUDA 実機テスト 1 本（#3168）と Metal 実機テスト 1 本（#3169）。
 
 ## 判定契約
 
@@ -17,7 +17,7 @@ CUDA（DGX Spark GB10。#3168。全体の実行は [`../cuda-autodiff-parity-316
 cargo test -p fandhe-ai --test var_f64_autograd_backend_parity -- --ignored --exact --nocapture --test-threads=1 cuda_f64_autograd_forward_and_grad_match_host_reference
 ```
 
-Metal（Apple Silicon。#3169 の担当。MSL が `double` 非対応のため Metal は常にホスト計算で、このテストは Metal 側の dispatch 確認になる）:
+Metal（Apple Silicon。#3169。全体の実行は [`../metal-autodiff-parity-3169/`](../metal-autodiff-parity-3169/README.md) の `run_metal_parity.sh`。MSL が `double` 非対応のため Metal は常にホスト計算で、このテストは Metal 側の dispatch 確認になる）:
 
 ```
 cargo test -p fandhe-ai --test var_f64_autograd_backend_parity -- --ignored --exact --nocapture --test-threads=1 metal_f64_autograd_forward_and_grad_match_host_reference
@@ -28,6 +28,6 @@ cargo test -p fandhe-ai --test var_f64_autograd_backend_parity -- --ignored --ex
 | 環境 | 実行日 | コミット | 結果 | fail 数 |
 |------|--------|---------|------|---------|
 | GB10（CUDA） | 2026-10-19 | 9e2f7ddcc（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)） | pass（1/1・0.28s。ログ [`cuda/cuda_f64_autograd_forward_and_grad_match_host_reference.log`](./cuda/cuda_f64_autograd_forward_and_grad_match_host_reference.log)）。GPU 経路かホストフォールバックかは確かめていない | 0 |
-| Mac mini（Metal） | 未実施 | - | #3169 の担当 | - |
+| Mac mini（Apple M4・Metal） | 2026-10-19 | bf894108a（[`metal/rev-stamp.txt`](./metal/rev-stamp.txt)） | pass（1/1・0.00s。ログ [`metal/metal_f64_autograd_forward_and_grad_match_host_reference.log`](./metal/metal_f64_autograd_forward_and_grad_match_host_reference.log)）。Metal は MSL が `double` 非対応で常にホスト計算のため、Metal 指定のテープがホストテープと bit 一致することの確認で、新規カーネルの parity ではない | 0 |
 
 CPU 版（`cpu_f64_autograd_forward_and_grad_match_host_reference`）は CI で実行済み。
