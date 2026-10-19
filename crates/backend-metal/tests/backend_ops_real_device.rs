@@ -109,47 +109,113 @@ fn backend_ops_gemm_matches_cpu_non_power_of_two_shape() {
     assert_backend_ops_gemm_parity(511, 512, 97, 71, 83);
 }
 
-/// `max`（reduction）の `Unsupported` 契約を検証する。
-///
-/// `MetalBackendOps::max`（`backend-metal/src/ops.rs`）は
-/// `MetalContext::new` を呼ばず即座に `BackendError::Unsupported` を返す
-/// 実装（スコープ外の未実装カーネル用プレースホルダ。
-/// out-of-scope-tracking.md 対象）のため、本テストは Metal 実機・デバイス
-/// 初期化を一切必要としない。他の実機依存テストと同じファイルに
-/// 置かれてはいるが（`MetalBackendOps` 自体が `cfg(target_os = "macos")`
-/// 限定のため非 macOS 環境ではコンパイル対象に入らない）、実機依存では
-/// ないため `#[ignore]` を付けない。macOS 上での通常の
-/// `cargo test -p fandhe-ai-backend-metal`（`--ignored` なし）で毎回実行され、
-/// `max` が `Unsupported` を返し続けることを回帰的に固定する。
-///
-/// `sum` はイシュー #1896 で `reduce::MetalReduce` へ結線されデバイス
-/// 初期化を要するようになったため本テストの対象外とし、実機での数値
-/// 一致検証は下記 `#[ignore]` 付き `backend_ops_sum_matches_cpu_bit_exact`
-/// が担う。
-///
-/// `add`／`mul`／`relu`／`exp`／`tanh` はイシュー #605 で実カーネル化
-/// 済みのため（`elementwise::MetalElementwise` 経由。`MetalContext::new`
-/// を呼びデバイス初期化を要する）本テストの対象外とし、実機での数値
-/// 一致検証は下記 `#[ignore]` 付き
-/// `backend_ops_elementwise_matches_cpu` が引き継ぐ（Cursor Bugbot
-/// 指摘・PR #717 レビュースレッド。旧テストはこの分離前に 5 演算も
-/// `Unsupported` と誤って assert しており、実カーネル化後は macOS の
-/// 通常 `cargo test` が失敗していた）。
-///
-/// `backend_ops_dispatch.rs`（`backend-cpu/tests/`）は `ops_for` 経由の
-/// GEMM ディスパッチのみを検証しており、Metal の reduction カバレッジは
-/// 含まない（Cursor Bugbot 指摘・PR #264 レビュースレッド。旧コメントは
-/// 誤って「テストと分離していない」と記述していたが、実際は「そもそも
-/// カバーしていない」が正確な記述である）。
+/// `max`（イシュー #3475 で `reduce::MetalReduce` へ結線済み）の形状由来
+/// エラー経路（範囲外 dim・空縮約・空出力）が、デバイス初期化より前に
+/// 決まることを確認する（`min_shape_errors_without_device_init` と対称。
+/// デバイス非接触のため非 `#[ignore]`）。実機での bit 一致検証は下記
+/// `#[ignore]` の `backend_ops_max_matches_cpu_bit_exact` が担う。
 #[test]
-fn max_remains_unsupported_without_device_init() {
+fn max_shape_errors_without_device_init() {
     let metal = MetalBackendOps::new();
-    let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[2, 2]).expect("valid tensor");
 
+    let a = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor");
     assert!(matches!(
-        metal.max(&a, None),
-        Err(BackendError::Unsupported(_))
+        metal.max(&a, Some(5)),
+        Err(BackendError::ShapeMismatch(_))
     ));
+
+    let empty = Tensor::<f32>::new(Vec::new(), &[0]).expect("empty tensor");
+    assert!(matches!(
+        metal.max(&empty, None),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+
+    let empty_axis = Tensor::<f32>::new(Vec::new(), &[0, 3]).expect("tensor");
+    assert!(matches!(
+        metal.max(&empty_axis, Some(0)),
+        Err(BackendError::KernelLaunchFailed(_))
+    ));
+
+    let empty_output = Tensor::<f32>::new(Vec::new(), &[0, 3, 5]).expect("tensor");
+    let out = metal
+        .max(&empty_output, Some(1))
+        .expect("empty output is not an error");
+    assert!(out.as_slice().expect("contiguous").is_empty());
+}
+
+/// `MetalBackendOps::max`（イシュー #3475）を CPU 参照実装と **bit 一致**
+/// で実機突合する（max は丸めを伴わない。NaN 混在・全 NaN・±0・
+/// 非 contiguous view を含む）。差異が出た場合も判定は緩めず記録・報告する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_max_matches_cpu_bit_exact() {
+    let metal = MetalBackendOps::new();
+    let cpu = CpuBackendOps::new();
+
+    fn assert_bits(label: &str, cpu: &Tensor<f32>, metal: &Tensor<f32>) {
+        assert_eq!(cpu.shape(), metal.shape(), "{label}: shape");
+        let c: Vec<u32> = cpu
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let m: Vec<u32> = metal
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(c, m, "{label}: bit mismatch");
+    }
+
+    let mut rng = Xorshift64Star::new(0x3475_2000);
+    let cases: [(&[usize], Vec<Option<usize>>); 5] = [
+        (&[1], vec![None, Some(0)]),
+        (&[4097], vec![None, Some(0)]),
+        (&[3, 5], vec![None, Some(0), Some(1)]),
+        (&[2, 3, 4], vec![None, Some(0), Some(1), Some(2)]),
+        (&[2, 3, 4, 5], vec![None, Some(0), Some(2), Some(3)]),
+    ];
+    for (shape, dims) in cases {
+        let numel: usize = shape.iter().product();
+        let data: Vec<f32> = (0..numel)
+            .map(|_| (rng.next_u64() % 20001) as f32 / 1000.0 - 10.0)
+            .collect();
+        let a = Tensor::new(data, shape).expect("tensor");
+        for dim in dims {
+            let m = metal.max(&a, dim).expect("metal max");
+            let c = cpu.max(&a, dim).expect("cpu max");
+            assert_bits(&format!("shape={shape:?} dim={dim:?}"), &c, &m);
+        }
+    }
+
+    // NaN 混在・全 NaN・±0 は入力ごとに独立して比較する。
+    let special: Vec<Vec<f32>> = vec![
+        vec![1.0, f32::NAN, 3.0, f32::NAN],
+        vec![f32::NAN; 6],
+        vec![-f32::NAN, 2.0, f32::from_bits(0x7FC0_1234), -1.0],
+        vec![-0.0, 0.0, -0.0],
+        vec![0.0, -0.0],
+        vec![-0.0, -0.0],
+        vec![f32::INFINITY, f32::MAX, f32::NEG_INFINITY],
+        vec![1.0e-40, -1.0e-40, f32::MIN_POSITIVE],
+    ];
+    for (i, data) in special.into_iter().enumerate() {
+        let n = data.len();
+        let a = Tensor::new(data, &[n]).expect("tensor");
+        let m = metal.max(&a, None).expect("metal max");
+        let c = cpu.max(&a, None).expect("cpu max");
+        assert_bits(&format!("special[{i}]"), &c, &m);
+    }
+
+    // 非 contiguous（transpose view）。
+    let data: Vec<f32> = (0..35).map(|i| ((i * 7) % 11) as f32 - 5.0).collect();
+    let a = Tensor::new(data, &[5, 7]).expect("tensor");
+    let a_t = a.transpose(0, 1).expect("transpose");
+    let m = metal.max(&a_t, Some(1)).expect("metal max on view");
+    let c = cpu.max(&a_t, Some(1)).expect("cpu max on view");
+    assert_bits("transposed view", &c, &m);
 }
 
 /// `sum`（`reduce::MetalReduce` 経由。イシュー #1896）が
@@ -326,7 +392,7 @@ fn backend_ops_sum_matches_cpu_bit_exact() {
 
 /// `argmax`／`argmin`（イシュー #1951）の形状由来エラー経路
 /// （範囲外 `dim`・空縮約〈`dim=None` で `numel==0`・`dim=Some(axis)` で
-/// `shape[axis]==0` かつ他軸非零〉）が、`max_remains_unsupported_
+/// `shape[axis]==0` かつ他軸非零〉）が、`max_shape_errors_
 /// without_device_init` と同じ理由で `MetalContext::new` を呼ばず
 /// （`ops.rs::metal_argext` が `reduce_out_shape`／`shape.contains(&0)`
 /// の検査を `context_cache::cached_context()` 呼び出しより前に行う

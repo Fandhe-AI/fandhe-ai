@@ -232,20 +232,17 @@ fn typed_ops_bf16_accessor_returns_some_without_device_init() {
     );
 }
 
-/// `max` が実機不要で `Unsupported` を返すこと（Metal f32
-/// `BackendOps::max` が GPU カーネル未実装のため。`typed_bf16.rs` の
-/// 同名ユニットテストと同じ確認だが、統合テスト側にも固定して回帰
-/// 対象を明示する）。`sum`（イシュー #1896 で結線済み）は層 1 の
-/// `sum_matches_f32_backend_ops_rounded_bit_exact`（`#[ignore]`）が
-/// 別途担う。
+/// `max`（イシュー #3475 で結線済み）の範囲外 `dim` が実機不要で
+/// `ShapeMismatch` になること。実機での一致は `typed_bf16.rs` の
+/// `#[ignore]` ユニットテストが担う。
 #[test]
-fn max_remains_unsupported_without_device_init() {
+fn max_rejects_out_of_range_dim_without_device_init() {
     let metal = MetalBackendOps::new();
     let a = small_int_bf16_tensor(1, &[1, 2]);
 
     assert!(matches!(
-        TypedOps::<bf16>::max(&metal, &a, None),
-        Err(BackendError::Unsupported(_))
+        TypedOps::<bf16>::max(&metal, &a, Some(5)),
+        Err(BackendError::ShapeMismatch(_))
     ));
 }
 

@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/compat_sequential_spatial_layers_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_spatial_layers_backend_parity-5916e582ed109ede)
+
+running 2 tests
+test metal_spatial_layers_bilinear_matches_cpu ... ok
+test metal_spatial_layers_nearest_bit_exact ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.13s
+
+rc=0

@@ -92,6 +92,18 @@
 // 契約（±0 の符号は実装依存のため bit 一致は主張しない。詳細は
 // `docs/backend-metal-reduce-sum-design.md` §13）。
 
+// ---- max（イシュー #3475）----
+//
+// `reduce_max_all_chunk_f32`／`reduce_max_all_finalize_f32`／
+// `reduce_max_axis_f32` を本ファイル末尾に追加する（`crate::
+// reduce_model` の `max_all_chunked`／`max_axis_lane` の逐語移植）。
+// min と同じ 2 段／1 段構成・`ulong` partial 再利用だが、比較キーは
+// ±0 を区別する `red_max_key`（-0 → +0 の正規化を行わない全順序キー、
+// `+0 > -0`）を使い、NaN（quiet・signaling とも）は読み飛ばす。
+// 単位元は `-inf`。CPU 参照実装 `reduction::max`（`fold(NEG_INFINITY,
+// f32::max)`）と bit 一致する契約（aarch64 の fmaxnm では ±0 混在時に
+// +0 が返る。詳細は `docs/backend-metal-reduce-sum-design.md` §14）。
+
 #include <metal_stdlib>
 using namespace metal;
 
@@ -617,6 +629,103 @@ kernel void reduce_min_axis_f32(
         }
         uint key = red_arg_key(bits);
         if (key < best_key) {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    out[gid] = as_type<float>(best_bits);
+}
+
+// ---- max（イシュー #3475。`crate::reduce_model` の
+// `max_all_chunked`／`max_axis_lane` の逐語移植）----
+//
+// ±0 を区別する全順序キー（`crate::reduce_model::max_key` の逐語移植）。
+// NaN は呼び出し元が `red_arg_is_nan` で先に除外する契約。
+inline uint red_max_key(uint bits) {
+    return (bits >> 31) == 1u ? ~bits : (bits | 0x80000000u);
+}
+
+// `f32::NEG_INFINITY` の bit パターン。全要素 NaN の場合この値が残る。
+#define RED_MAX_NEG_INF_BITS 0xFF800000u
+
+kernel void reduce_max_all_chunk_f32(
+    device const float* x [[buffer(0)]],
+    device ulong* partial [[buffer(1)]],
+    constant uint& numel [[buffer(2)]],
+    constant uint& num_chunks [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= num_chunks) {
+        return;
+    }
+    ulong begin = (ulong)gid * (ulong)REDUCE_SUM_CHUNK;
+    ulong end = begin + (ulong)REDUCE_SUM_CHUNK;
+    if (end > (ulong)numel) {
+        end = (ulong)numel;
+    }
+    uint best_bits = RED_MAX_NEG_INF_BITS;
+    uint best_key = red_max_key(best_bits);
+    for (ulong idx = begin; idx < end; idx++) {
+        uint bits = as_type<uint>(x[idx]);
+        if (red_arg_is_nan(bits)) {
+            continue;
+        }
+        uint key = red_max_key(bits);
+        if (key > best_key) {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    partial[gid] = (ulong)best_bits;
+}
+
+kernel void reduce_max_all_finalize_f32(
+    device const ulong* partial [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& num_chunks [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid != 0u) {
+        return;
+    }
+    uint best_bits = RED_MAX_NEG_INF_BITS;
+    uint best_key = red_max_key(best_bits);
+    for (uint c = 0u; c < num_chunks; c++) {
+        uint bits = (uint)partial[c];
+        uint key = red_max_key(bits);
+        if (key > best_key) {
+            best_key = key;
+            best_bits = bits;
+        }
+    }
+    out[0] = as_type<float>(best_bits);
+}
+
+// ---- 単一軸 max（`crate::reduce_model::max_axis_lane` の逐語移植）----
+
+kernel void reduce_max_axis_f32(
+    device const float* x [[buffer(0)]],
+    device float* out [[buffer(1)]],
+    constant uint& lanes [[buffer(2)]],
+    constant uint& axis_len [[buffer(3)]],
+    constant uint& inner [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= lanes) {
+        return;
+    }
+    ulong o = (ulong)gid / (ulong)inner;
+    ulong i = (ulong)gid % (ulong)inner;
+    uint best_bits = RED_MAX_NEG_INF_BITS;
+    uint best_key = red_max_key(best_bits);
+    for (uint a = 0u; a < axis_len; a++) {
+        ulong idx = (o * (ulong)axis_len + (ulong)a) * (ulong)inner + i;
+        uint bits = as_type<uint>(x[idx]);
+        if (red_arg_is_nan(bits)) {
+            continue;
+        }
+        uint key = red_max_key(bits);
+        if (key > best_key) {
             best_key = key;
             best_bits = bits;
         }

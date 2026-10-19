@@ -14,8 +14,8 @@
 //! 対象とし、既知の解析値との一致を確認する（CI で常時実行）。
 //! `#[ignore]` テストは `tape_for(Device::Cuda(0))` の forward／backward
 //! を CPU tape と REQ-2 統一複合判定（[`fandhe_ai_backend_cpu::
-//! assert_parity`]）で突き合わせる（実機必須。`max`／`min` は Metal で
-//! 未実装のため対象外のまま）。
+//! assert_parity`]）で突き合わせる（実機必須。Metal の `max` はイシュー
+//! #3475 で結線済みで、末尾の `metal_max_*` が bit 一致で検証する）。
 //!
 //! イシュー #1896 で `sum`（Metal）が `reduce::MetalReduce` へ結線
 //! されたことを受け、`sum`／`mean`／`sum_dims`（axis なしの単純縮約）
@@ -39,8 +39,7 @@
 //! - (g) `sum_dims`／`max_dims`／`mean_dims` の CPU 解析値突合
 //!   （複数軸・`keepdim`）。
 //! - (h) `#[ignore]` CUDA 実機 parity（`sum_dims`／`max_dims`／
-//!   `mean_dims`。Metal は `max` 自体が `Unsupported`〈TASK-1.9c
-//!   スコープ外〉のため `max_dims` は対象外のまま。`sum`（イシュー
+//!   `mean_dims`。Metal の `max` はイシュー #3475 で結線済み。`sum`（イシュー
 //!   #1896 結線済み）を用いる `sum_dims`／`mean_dims` の Metal parity
 //!   は下記 (l) が別途追加する）。
 
@@ -694,5 +693,36 @@ fn metal_min_all_and_axis_forward_and_backward_match_cpu() {
             dense_vec(cpu_da),
             "min(dim={dim:?}) backward が Metal/CPU で bit 一致しない"
         );
+    }
+}
+
+/// (p) `tape_for(Device::Metal)` の `Var::max`（全軸・単一軸）forward／
+/// backward が CPU tape と bit 完全一致することを確認する（イシュー
+/// #3475。max は丸めを伴わず、VJP は先勝ち方式〈`extremum_first_match_vjp`〉
+/// で算術を伴わないため勾配も bit 一致する）。
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn metal_max_all_and_axis_forward_and_backward_match_cpu_bit_exact() {
+    let data = vec![1.0, 5.0, 3.0, 4.0, 5.0, 6.0, -2.0, 6.0];
+    let shape = [2usize, 4];
+
+    for dim in [None, Some(0usize), Some(1usize)] {
+        let run = |device: Device| {
+            let tape = tape_for(device).unwrap();
+            let a = tape.var(&tensor(data.clone(), &shape));
+            let loss = a.max(dim).unwrap();
+            let fwd = dense_vec(&loss.to_tensor());
+            // 非スカラー出力は sum で縮約してから backward する。
+            let scalar = loss.sum(None).unwrap();
+            let grads = tape.backward(&scalar).unwrap();
+            let da = dense_vec(grads.get(&a).unwrap().expect("a は loss に到達する"));
+            (fwd, da)
+        };
+        let (m_fwd, m_da) = run(Device::Metal);
+        let (c_fwd, c_da) = run(Device::Cpu);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&m_fwd), bits(&c_fwd), "max({dim:?}) forward");
+        assert_eq!(bits(&m_da), bits(&c_da), "max({dim:?}) backward");
     }
 }

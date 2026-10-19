@@ -23,9 +23,7 @@
 //! （`add`／`mul`／`relu`／`exp`／`tanh`）は `elementwise::MetalElementwise`
 //! へ委譲する（イシュー #605。CUDA 側 #599 の Metal 対応版）。汎用
 //! reduction のうち `sum` は `reduce::MetalReduce` へ結線済み（イシュー
-//! #1896）。`max`（`min` 含む）は未実装のまま
-//! [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
-//! out-of-scope-tracking.md 対象）。
+//! #1896）。`min` はイシュー #2155、`max` はイシュー #3475 で結線済み。
 //!
 //! `cfg(target_os = "macos")` 限定（`objc2`／`objc2-foundation`／
 //! `objc2-metal` と同じ cfg 境界。`.claude/rules/deps-policy.md`）。
@@ -3539,15 +3537,93 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// `max`（`min`・`sum` とは異なり）reduction カーネル未実装
-    /// （`sum` は #1896 で結線済み。`min` はイシュー #2155 で結線済み
-    /// （下記 [`Self::min`]）――`max` は引き続き親 #1894 の残項目
-    /// （`docs/backend-metal-reduce-sum-design.md` §8「スコープ外」・
-    /// イシュー #2155 実装計画 §7「スコープ外」）である）。
-    fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
-        Err(BackendError::Unsupported(
-            "MetalBackendOps::max: reduction カーネル未実装（TASK-1.9c スコープ外）".into(),
-        ))
+    /// `torch.max(x)` / `torch.max(x, dim=dim).values` 相当（イシュー
+    /// #3475。`reduce::MetalReduce::run_max_all_f32`／`run_max_axis_f32`
+    /// への委譲）。段取りは [`Self::min`] と同一（shape 検査 → 空縮約の
+    /// 早期分岐 → `checked_numel` → 起動計画の先出し → `contiguous()` →
+    /// `context_cache::cached_reduce`）。空縮約（`dim=None` かつ
+    /// `numel==0`、または `dim=Some(axis)` かつ `shape[axis]==0`）は
+    /// GPU を起動せず `KernelLaunchFailed("empty reduction for op
+    /// \"max\"")` を返す（CPU `reduce_error_to_backend_error` の `"max"`
+    /// 分岐と同じ分類）。
+    ///
+    /// **挙動変更の記録**（イシュー #3475）: 従来は常に `Unsupported` を
+    /// 返していたが、本結線で実際に計算される。範囲外 `dim` は
+    /// `Unsupported` から `ShapeMismatch` に、空縮約は `Unsupported`
+    /// から `KernelLaunchFailed` に変わる。`Var::max`／`amax`／
+    /// `Op::Max` の再計算はホストフォールバックを持たない（`sum` と
+    /// 同じ）ため、カーネル引数上限超過の `Unsupported` は
+    /// `AutodiffError::Backend` として伝わる。これにより `Var::max`／
+    /// `EmbeddingBag(Max)` などが Metal で動く。
+    ///
+    /// 数値契約: `fandhe_ai_backend_cpu::reduction::max` と **bit 一致**
+    /// （NaN は読み飛ばし全 NaN は `-inf`。±0 混在は `+0` 優先で、
+    /// CPU の aarch64 実測挙動と一致。`crate::reduce_model` doc・
+    /// `docs/backend-metal-reduce-sum-design.md` §14）。
+    fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = reduce_out_shape(a.shape(), dim).map_err(BackendError::ShapeMismatch)?;
+        let shape = a.shape().to_vec();
+
+        if shape.contains(&0) {
+            if dim.is_none() {
+                // `numel == 0`: CPU `reduction::max` は単位元を持たない
+                // `fold` のため `EmptyReduction` を返す（本関数 doc
+                // 「空縮約」参照）。
+                return Err(BackendError::KernelLaunchFailed(
+                    "empty reduction for op \"max\"".into(),
+                ));
+            }
+            if out_shape.contains(&0) {
+                // 空出力（`dim` 以外のいずれかの軸が 0）: 空 Tensor。
+                return Tensor::new(Vec::new(), &out_shape).map_err(BackendError::ShapeMismatch);
+            }
+            // `dim=Some(axis)` かつ `shape[axis]==0` のみ（他軸は非零）:
+            // 空縮約でありエラー（CPU と同じ `EmptyReduction` 相当）。
+            return Err(BackendError::KernelLaunchFailed(
+                "empty reduction for op \"max\"".into(),
+            ));
+        }
+
+        let numel = crate::gather_scatter_model::checked_numel(&shape)
+            .map_err(BackendError::ShapeMismatch)?;
+
+        // カーネル `uint` 引数の上限超過を、デバイス初期化
+        // （`context_cache::cached_context`）より前に先出しして検査する
+        // （`Self::sum` と同型。`Var::max` はホストフォールバックを
+        // 持たないため、この `Unsupported` は `AutodiffError::Backend`
+        // として伝わる〈`sum` と同じ・`min`／argmax とは異なる〉）。
+        let axis_plan = match dim {
+            None => {
+                crate::reduce_model::plan_reduce_all(numel).map_err(map_reduce_prepare_error)?;
+                None
+            }
+            Some(axis) => Some(
+                crate::reduce_model::plan_reduce_axis(&shape, axis)
+                    .map_err(map_reduce_prepare_error)?,
+            ),
+        };
+
+        let a_owned = a.contiguous();
+        let a_slice = a_owned
+            .as_slice()
+            .ok_or_else(|| BackendError::KernelLaunchFailed("max: input not contiguous".into()))?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let reduce = context_cache::cached_reduce(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        let data = match axis_plan {
+            None => {
+                let value = reduce
+                    .run_max_all_f32(&ctx, a_slice)
+                    .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+                vec![value]
+            }
+            Some(plan) => reduce
+                .run_max_axis_f32(&ctx, a_slice, plan.outer, plan.axis_len, plan.inner)
+                .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?,
+        };
+        Tensor::new(data, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
     /// `torch.min(x)` / `torch.min(x, dim=dim).values` 相当（イシュー
