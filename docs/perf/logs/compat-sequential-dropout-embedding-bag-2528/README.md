@@ -2,6 +2,7 @@
 
 > CUDA は #3163 で GB10 実測済み（2026-10-19・コミット b640875f・pass 1/1）。結果は末尾「CUDA 実測記入欄（#3163）」節。Metal は #3164 で Mac mini 実測済み（次行参照）。
 > Metal は Mac mini（Apple M4）で実測済み（#3164・2026-10-19）。結果は結果記入欄と末尾の「Metal 実測記入欄（#3164）」節、成果物は `metal/` を参照。
+> Metal の 2 回目（#3164・2026-10-19・main HEAD 相当のコミット `b728b9cb`）は 1/1 pass。1 回目の記録は残す。結果は末尾「Metal 再実測（#3164・2 回目）」節、成果物は `../metal-compat-sequential-rerun-3164/`。
 
 本エージェントの実行環境には CUDA／Metal 実機への到達手段がないため、実機テストは未実測のまま
 GB10・M4 Max セッションへ申し送る。CPU 側の正しさは Linux 実行可能な
@@ -32,6 +33,7 @@ cargo test -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_p
 | GB10 | cuda_dropout_embedding_bag_bit_exact | pass | 2026-10-19 |
 | Mac mini（Apple M4） | metal_dropout_embedding_bag_bit_exact | **fail**（Unsupported・要対応。#3164） | 2026-10-19 |
 | Mac mini（Apple M4） | metal_dropout_embedding_bag_bit_exact | pass（`max` reduction 結線後の再実測。#3475） | 2026-10-19 |
+| Mac mini（Apple M4） | metal_dropout_embedding_bag_bit_exact | pass（2 回目・main HEAD。#3164） | 2026-10-19 |
 
 ## CUDA 実測手順（#3163）
 
@@ -77,4 +79,15 @@ cargo test -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_p
 
 - #3164 の fail 原因は `MetalBackendOps::max` の常時 `Unsupported`。PR #3479 で `max` の GPU カーネルを結線した後、Mac mini（Apple M4）で測り直した。上の #3164 の fail 記録は履歴として残し、書き換えない。
 - 結果: `metal_dropout_embedding_bag_bit_exact` は **pass**（rc=0・`1 passed; 0 failed`）。判定規則・対象コミット `922c285e087c620ef95e41426f832d9819867486`・環境・生ログは [`../metal-max-reduce-3475/README.md`](../metal-max-reduce-3475/README.md) と `logs/facade-dropout-embbag-3164/`。
+- tolerance 定数・baseline・判定式・テストコードは不変。
+
+## Metal 再実測（#3164・2 回目）
+
+1 回目の記録（上の各節・`metal/`）は書き換えず、main HEAD での 2 回目を追記する（イシュー #3164 追記 2026-10-19）。
+
+- 対象コミット: `b728b9cb85b718daea90884cdd66b5e06f357bea`（事前登録規則 `RULE.txt` の追加コミット。`crates/`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` は main `e1a3c5e25` と差分なし。#3479 の `max` 結線を含む）
+- 結果（各 1 回・rc=0・`running 1 test`）:
+  - `metal_dropout_embedding_bag_bit_exact`: pass（`1 passed; 0 failed`）
+- 成果物・全 10 本の集計: `../metal-compat-sequential-rerun-3164/README.md`、ログ `../metal-compat-sequential-rerun-3164/logs/`
+- 注記: GPU カーネル経路かホストフォールバック経路かは本ログから断定できず未確認。
 - tolerance 定数・baseline・判定式・テストコードは不変。

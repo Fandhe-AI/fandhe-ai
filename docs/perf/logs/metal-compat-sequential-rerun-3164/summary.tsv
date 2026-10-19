@@ -1,0 +1,11 @@
+group	target	test	exit_code	running	result	verdict
+activation-layers-2529	fandhe-ai --test compat_sequential_activation_layers_backend_parity	metal_activation_layers_parity	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.11s	pass
+activation-scalar-layers-2679	fandhe-ai --test compat_sequential_activation_scalar_layers_backend_parity	metal_activation_scalar_layers_parity	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.13s	pass
+adaptive-max-global-pool-2527	fandhe-ai --test compat_sequential_adaptive_max_global_pool_backend_parity	metal_adaptive_max_global_pool_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.09s	pass
+conv-transpose2d-2523	fandhe-ai --test compat_sequential_conv_transpose2d_backend_parity	metal_conv_transpose2d_forward_backward_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.10s	pass
+conv3d-2524	fandhe-ai --test compat_sequential_conv3d_backend_parity	metal_conv3d_forward_backward_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.10s	pass
+dropout-embedding-bag-2528	fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_parity	metal_dropout_embedding_bag_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s	pass
+group-instance-norm-2525	fandhe-ai --test compat_sequential_group_instance_norm_backend_parity	metal_group_instance_norm_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.09s	pass
+pixel-shuffle-2526	fandhe-ai --test compat_sequential_pixel_shuffle_backend_parity	metal_pixel_shuffle_layers_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s	pass
+spatial-2522	fandhe-ai --test compat_sequential_spatial_layers_backend_parity	metal_spatial_layers_nearest_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.09s	pass
+spatial-2522	fandhe-ai --test compat_sequential_spatial_layers_backend_parity	metal_spatial_layers_bilinear_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.09s	pass

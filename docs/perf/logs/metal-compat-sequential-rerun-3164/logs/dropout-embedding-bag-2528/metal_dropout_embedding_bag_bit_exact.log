@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/compat_sequential_dropout_embedding_bag_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/compat_sequential_dropout_embedding_bag_backend_parity-285c77ecc278c3fd)
+
+running 1 test
+test metal_dropout_embedding_bag_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.10s
+
+rc=0
