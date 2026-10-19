@@ -2,7 +2,7 @@
 
 `MetalBackendOps::max`（全要素 2 段・単一軸 1 段の GPU カーネル。NaN 読み飛ばし・全 NaN は `-inf`・±0 混在は `+0`・CPU 参照と bit 完全一致の契約。設計は [`backend-metal-reduce-sum-design.md`](../../../backend-metal-reduce-sum-design.md) §14）の `#[ignore]` 実機テスト 9 本を Mac mini（Apple M4）で実測した記録。カーネル実装と CPU 参照との bit 一致テストは PR #3479 で導入済みで、本記録は実測のみ（コード・tolerance 定数・parity baseline・ガードレール閾値・依存は不変）。
 
-- 判定規則: 事前登録の [`RULE.txt`](./RULE.txt)（実機実行より前の独立コミットで固定。事後に変更していない）
+- 判定規則: 事前登録の [`RULE.txt`](./RULE.txt)（実機実行より前の独立コミットで固定。実行後に宣言日時の誤記（JST 日付の UTC 取り違え）のみ訂正。規則本文は不変。RULE.txt 末尾参照）
 - 実行スクリプト: [`run_metal_parity.sh`](./run_metal_parity.sh)（`../metal-facade-parity-3166/run_metal_parity.sh` の骨格を流用）
 - 実行日: 2026-10-19（UTC）。機体: Mac mini（Apple M4・macOS 27.0.1・rustc 1.99.0）。ホスト名は記録しない
 - 対象コミット: `922c285e087c620ef95e41426f832d9819867486`（RULE.txt を追加したコミット。`rev-stamp.txt` は 40 桁 1 行。送信前のローカル `git status --porcelain` は 0 件）
