@@ -1,0 +1,65 @@
+事前登録規則（イシュー #3169: f64 自動微分・create_graph・jvp／jacfwd の Metal 実機 parity）
+宣言日時（UTC）: 2026-10-19T16:54Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。M4 Max 開発機では測らない・記録しない
+（docs/real-hardware-verification-env.md §1・§7）。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  5df7986446fd6e19bbfa2d73539fef95ba2e9d0e
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること（後続のコミットは docs のみ）。
+    git diff --quiet 5df7986446fd6e19bbfa2d73539fef95ba2e9d0e <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、本ファイルを新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 2 行形式（1 行目: git rev-parse HEAD の 40 桁小文字 16 進数、2 行目: dirty=<git status --porcelain の件数>）。
+  展開ツリー直下の .rev-stamp に書く。dirty=0 以外は無効（実行しない）。中央の rev-stamp.txt に写して README に記録する。
+  （兄弟の CUDA 版 #3168 は 1 行形式だが、本件は Metal 前例 #3166 に合わせて 2 行形式とする。）
+
+展開先: ~/work/rust-ai-library-run-3169（専用。並列セッションとの衝突を避けるため、
+  docs/real-hardware-verification-env.md §3 の既定 ~/work/rust-ai-library-run からの意図的な逸脱）。
+
+実行環境: zsh -lc で包み、CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する
+  （docs/real-hardware-verification-env.md §7.1）。計測中は他のビルドを並走させない。
+  計測前に他の cargo／rustc プロセスが無いことを pgrep で確かめ、記録する。
+
+ビルドを先に済ませる（計測中にコンパイルを並走させない。判定外）:
+  cargo test -p fandhe-ai --test f64_autograd_facade --no-run
+  cargo test -p fandhe-ai --test var_f64_autograd_backend_parity --no-run
+  cargo test -p fandhe-ai --test create_graph_facade --no-run
+  cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity --no-run
+
+コマンド（6 本。上から順に 1 本ずつ。共通オプション: -- --ignored --exact --nocapture --test-threads=1 <テスト名>）:
+  1. --test f64_autograd_facade  f64_autograd_metal_matches_cpu
+  2. --test var_f64_autograd_backend_parity  metal_f64_autograd_forward_and_grad_match_host_reference
+  3. --test create_graph_facade  create_graph_hessian_metal_matches_cpu
+  4. --test create_graph_facade  create_graph_extended_ops_metal_matches_cpu
+  5. --test functional_transforms_jvp_backend_parity  metal_jvp_jacfwd_basic_ops_match_cpu_reference
+  6. --test functional_transforms_jvp_backend_parity  metal_jvp_jacfwd_extended_ops_match_cpu_reference
+  各行の頭に「cargo test -p fandhe-ai」を付ける。--release は付けない（各 README のコマンド形を正とする）。
+  --exact・--nocapture・--test-threads=1 はテストの選び方と出力だけに効き判定には影響しない。
+  create_graph_facade.rs は複数の #[ignore] テストが同居するため --exact を必ず付ける。
+  対象外: create_graph_rejects_device_mismatch（CUDA 専用の型付きエラー検査。Metal 版なし）、
+  metal_double_vjp_jvp_jacfwd_match_cpu_reference（2026-10-09 に pass 記録済みで再測しない）。
+  Metal は MSL が double 非対応で typed_ops_f64() が常に None のため、f64 グラフはホスト経路になる。
+  1・2 は新規カーネルの parity ではなく「Metal 指定でもホスト経路が参照と一致する」ことの確認である。
+
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行
+  （対象のフルパス）であることを確かめる。0 行または 2 行以上なら実行せず undetermined とする。
+
+判定（判定契約は各テストのコードが定める。ここでは変えない）:
+  2 は Metal 指定テープと NaiveOps ホストテープの bit 完全一致。ほか（1・3〜6）は REQ-2 統一複合判定
+  （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。tolerance 定数・baseline は不変）。
+  pass: exit 0 かつ "running 1 test" かつ "test result: ok. 1 passed; 0 failed"。
+  fail: 1 件以上のテスト失敗。tape_for(Device::Metal) の失敗や Unsupported を含む。
+    Metal と CPU は自前バックエンド同士の比較なので判定不能にせず通常の parity 失敗として扱う。
+    2 の bit 不一致はそのテスト自身の bit 一致契約の fail として記録し、ただちに REQ-2 違反とはみなさない。
+  undetermined: ノード到達不能、ビルド不能、--list で選ばれた件数が 1 でない。
+  時間計測ではないので中央値は取らない。テストごとの pass／fail の件数で記録する。
+
+fail 時の扱い:
+  tolerance・baseline・判定方式・入力は変えない。パニックメッセージの fail_count・max_abs_diff・
+  max_rel_err 等を引用して事実を記録し、README と PR に「要対応」と書く。Issue の起票・コメント、
+  baseline 化はユーザー承認なしでは行わない。
+
+記録規則: ホスト名・ユーザー名・個人のパス（$HOME・/Users/）はマスクする。crate 名・ディレクトリ名
+  （fandhe-ai・target-fandhe-ai・Fandhe-AI 等）は変えない。マスク漏れがあれば記録を捨てる（fail-closed）。
+  回収ログは手で編集しない。漏れ・化けはスクリプトを直して新コミットで再登録し測り直す。
+  実行と提出物の対応は env_info.txt の script_sha256・rev_stamp と SHA256SUMS で検証する。

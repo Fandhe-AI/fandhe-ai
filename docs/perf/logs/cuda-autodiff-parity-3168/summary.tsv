@@ -1,0 +1,8 @@
+group	target	test	exit_code	running	result	verdict
+f64-autograd-facade-2599	--test f64_autograd_facade	f64_autograd_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.54s	pass
+var-f64-autograd-backend-parity-3168	--test var_f64_autograd_backend_parity	cuda_f64_autograd_forward_and_grad_match_host_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.28s	pass
+create-graph-facade-2545	--test create_graph_facade	create_graph_hessian_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.55s	pass
+create-graph-facade-2545	--test create_graph_facade	create_graph_rejects_device_mismatch	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.21s	pass
+create-graph-extended-ops-3087	--test create_graph_facade	create_graph_extended_ops_cuda_matches_cpu	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 1.39s	pass
+functional-transforms-jvp-2942	--test functional_transforms_jvp_backend_parity	cuda_jvp_jacfwd_basic_ops_match_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.52s	pass
+functional-transforms-jvp-2942	--test functional_transforms_jvp_backend_parity	cuda_jvp_jacfwd_extended_ops_match_cpu_reference	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.86s	pass

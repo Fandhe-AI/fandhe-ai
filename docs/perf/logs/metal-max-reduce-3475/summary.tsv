@@ -1,0 +1,10 @@
+group	target	test	exit_code	running	result	verdict
+reduce-parity	fandhe-ai-backend-metal --test reduce_parity	metal_max_all_matches_cpu_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.12s	pass
+reduce-parity	fandhe-ai-backend-metal --test reduce_parity	metal_max_axis_matches_cpu_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.08s	pass
+reduce-parity	fandhe-ai-backend-metal --test reduce_parity	metal_max_nan_zero_inf_edge_cases_match_cpu_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.08s	pass
+reduce-parity	fandhe-ai-backend-metal --test reduce_parity	metal_max_signaling_nan_matches_cpu_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.08s	pass
+backend-ops	fandhe-ai-backend-metal --test backend_ops_real_device	backend_ops_max_matches_cpu_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.09s	pass
+typed-f16	fandhe-ai-backend-metal --test typed_ops_f16_parity	max_matches_f32_backend_ops_rounded_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.08s	pass
+typed-bf16	fandhe-ai-backend-metal --lib	typed_bf16::tests::max_matches_f32_backend_ops_rounded_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.08s	pass
+facade-reduce	fandhe-ai --test reduce_backend_parity	metal_max_all_and_axis_forward_and_backward_match_cpu_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.08s	pass
+facade-dropout-embbag-3164	fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_parity	metal_dropout_embedding_bag_bit_exact	0	1	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.09s	pass
