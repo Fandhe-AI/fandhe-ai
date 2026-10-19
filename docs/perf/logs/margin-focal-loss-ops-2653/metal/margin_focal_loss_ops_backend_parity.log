@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/margin_focal_loss_ops_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/margin_focal_loss_ops_backend_parity-20cd54be1a0f7c92)
+
+running 2 tests
+test metal_bit_exact_backward_matches_cpu_reference ... ok
+test metal_bit_exact_forward_matches_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.03s
+

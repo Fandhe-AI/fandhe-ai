@@ -1,5 +1,8 @@
 # ConvTranspose3d・MaxUnpool（#2644）CUDA／Metal 実機未実測の申し送り
 
+> Metal（Mac mini・Apple M4）は 2026-10-19 に実機実測済み（#3162・pass 1/1・対象コミット `c0deb302`）。下の「Metal 実測記入欄」を参照。
+
+
 `docs/autodiff-conv-transpose3d-max-unpool-decision.md` §10 参照。本実装エージェント実行環境は CUDA／Metal 実機に
 到達できないため、`fandhe_ai_autodiff::conv_transpose3d_ops`・`max_unpool_ops`（#2850 以降は同テストが facade 公開の `Var::conv_transpose3d`／`Var::max_unpool1d/2d/3d` 経由で同じ経路を測る）の
 `crates/facade/tests/conv_transpose3d_max_unpool_backend_parity.rs` のうち CUDA（`Device::Cuda(0)`）・Metal
@@ -44,15 +47,28 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Mac mini（Apple M4） | 上記 Metal | 未実測 | Linux 環境から Mac mini に届かない（接続先情報なし）。Mac 側へ申し送り（#3162）。事前登録規則は `metal/RULE.txt` |
+| 2026-10-19 | Mac mini（Apple M4） | `conv_transpose3d_max_unpool_backend_parity` の `metal_` を `RULE.txt` のコマンドで実行 | pass 1/1 | `c0deb302`・`dirty=0`・ログは `metal/`（事前登録規則 `metal/RULE.txt`） |
 
-## Metal 実測記入欄（#3162・準備済み・未実測）
+## Metal 実測記入欄（#3162）
 
-- 判定規則・実行コマンド・期待件数（1 件）は事前登録規則 `metal/RULE.txt` を正とする（実機実行より前に固定済み）。
-- 本セッションは Linux 環境で Mac mini（Apple M4）に到達できなかったため実機を実行していない。
-  pass／fail・`.rev-stamp`・`env_info.txt`・ログは作っておらず、結果は「未実測」のままである。
-- Mac 側の手順: 展開ツリーの `.rev-stamp` に HEAD の全桁 SHA を書いて転送（`docs/real-hardware-verification-env.md` §3・§7）、
-  ノード側で `.rev-stamp` 一致と他の cargo／rustc 不在を確認、`RULE.txt` のコマンドを実行、
-  ログ・env_info（before／after）をホスト名・ユーザー名・個人パスをマスクして `metal/` へ置き、
-  `metal/rev-stamp.txt` に `.rev-stamp` を写し、本節と上の記入欄へ pass／fail 件数を記録する。
-- fail の場合は tolerance・baseline・入力を変えず、失敗件数・テスト名・最大誤差を記録する。
+- 判定規則・実行コマンド・期待件数（1 件）は事前登録規則 `metal/RULE.txt` を正とする。実機実行より前に固定済みで、事後に変更していない（`RULE.txt` は無変更）。
+- 実行日（UTC）: 2026-10-19。機体: Mac mini（Apple M4・16GiB・macOS 27.0.1・rustc 1.99.0。詳細は `metal/env_info.txt` の実行前後 2 節。他の cargo／rustc 不在を実行前後に確認）。
+- 実行コマンド（`RULE.txt` どおり 1 回だけ。再実行による選別なし）:
+
+```sh
+CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai cargo test -p fandhe-ai --release --test conv_transpose3d_max_unpool_backend_parity -- --ignored --nocapture --test-threads=1 metal_
+```
+
+- 対象コミット: `c0deb302dfbdfb8361075eea9f4270a5b45dd5b1`（`.rev-stamp` は 2 行目 `dirty=0`。`metal/rev-stamp.txt` に写し、ノード側で各実行の前後に読み出して一致を確認した）。
+  main HEAD ではなく `c0deb302` を測ったのは、`RULE.txt` が「`crates/` 配下が対象コミット（`RULE.txt` 追加コミットの親 `75afa05`）と同一内容」を有効条件にしているため。
+  `git diff 75afa05 c0deb302 -- crates/` は空で条件を満たす。その後の main では `crates/` が変わっているので、現行 main での再確認は後続候補（未起票）。
+  展開ツリーは `git archive c0deb302` で作り、`crates/` のファイル指紋（`shasum -a 256` の集約値）をローカルとノードで突合して一致を確認した。
+- 判定外のウォームアップとして 6 テストバイナリを `--release` で `--no-run` ビルドした（ログ: `metal/build.log`。`exit=0`）。実行時間は参考値で、判定には使わない。
+
+| ファイル | 関数 | 結果 |
+|---|---|---|
+| `crates/facade/tests/conv_transpose3d_max_unpool_backend_parity.rs` | `metal_conv_transpose3d_max_unpool_match_cpu_reference` | pass |
+
+- 合計: `running 1 tests` → `1 passed; 0 failed`（exit 0。期待件数 1 と一致）。ログ: `metal/conv_transpose3d_max_unpool_backend_parity.log`。
+- tolerance（`RELATIVE_TOLERANCE`／`ABSOLUTE_RESCUE_THRESHOLD`）・baseline・判定・入力・テストコードは変更していない。
+- 本実測は pass／fail の判定のみ。ホストフォールバック経路（`Unsupported`）を実際に通ったかの確認はログから断定できないため、経路確認は追従課題とする。

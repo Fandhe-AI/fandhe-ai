@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/fold_unfold_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/fold_unfold_backend_parity-3769063c45ba48ae)
+
+running 1 test
+test metal_fold_unfold_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.15s
+

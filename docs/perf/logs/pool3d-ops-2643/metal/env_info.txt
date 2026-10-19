@@ -1,0 +1,30 @@
+## 実行前
+2026-10-19T02:08:17Z
+Apple M4
+17179869184
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+rustc 1.99.0 (b940084d7 2026-09-28)
+cargo 1.99.0 (5f94df478 2026-08-27)
+arm64
+11:08  up 8 days, 10:42, 1 user, load averages: 14.46 5.00 2.60
+pgrep:
+rev-stamp:
+c0deb302dfbdfb8361075eea9f4270a5b45dd5b1
+dirty=0
+## 実行後
+2026-10-19T02:08:24Z
+Apple M4
+17179869184
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+rustc 1.99.0 (b940084d7 2026-09-28)
+cargo 1.99.0 (5f94df478 2026-08-27)
+arm64
+11:08  up 8 days, 10:42, 1 user, load averages: 13.95 5.20 2.70
+pgrep:
+rev-stamp:
+c0deb302dfbdfb8361075eea9f4270a5b45dd5b1
+dirty=0
