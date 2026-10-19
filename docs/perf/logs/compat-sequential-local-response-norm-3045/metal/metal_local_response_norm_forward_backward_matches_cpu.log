@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/compat_sequential_lrn_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/compat_sequential_lrn_backend_parity-e6ff7ffdb7efde1f)
+
+running 1 test
+test metal_local_response_norm_forward_backward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.06s
+
+rc=0

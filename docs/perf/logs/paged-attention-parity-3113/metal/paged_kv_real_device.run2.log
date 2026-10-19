@@ -1,0 +1,147 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/paged_kv_real_device.rs (~/work/target-fandhe-ai/release/deps/paged_kv_real_device-fd67c90a5189f10e)
+
+running 3 tests
+test metal_paged_attention_matrix_matches_cpu_reference ... PAGED_PARITY backend=metal case=legacy_bs1_b1 step=0 total=24 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs1_b1 step=1 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.5078638492431692e-7 mean_abs=7.450580596923828e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs1_b1 step=2 total=8 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs4_b2 step=0 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=2.8579961508512498e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs4_b2 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.1902852771282402e-6 mean_abs=1.3387762010097504e-8 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs4_b2 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=3.0230568546302652e-6 mean_abs=7.101334631443024e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs4_b2 step=3 total=128 fail=0 max_abs=2.9802322387695313e-8 max_rel=3.7377963696909276e-6 mean_abs=7.325070328079164e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs16_b1 step=0 total=1088 fail=0 max_abs=8.940696716308594e-8 max_rel=3.0915606753804126e-5 mean_abs=7.467646997504156e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs16_b1 step=1 total=64 fail=0 max_abs=4.470348358154297e-8 max_rel=1.0467596532706783e-5 mean_abs=7.079506758600473e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs16_b1 step=2 total=64 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.3813113816834074e-6 mean_abs=8.527422323822975e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs16_b3 step=0 total=2304 fail=0 max_abs=1.1920928955078125e-7 max_rel=9.190319398601294e-5 mean_abs=8.82483972317358e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs16_b3 step=1 total=144 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6395214611602637e-6 mean_abs=8.216981465617815e-9 judgement=strict
+PAGED_PARITY backend=metal case=legacy_bs16_b3 step=2 total=2160 fail=0 max_abs=1.1920928955078125e-7 max_rel=8.817714737240819e-4 mean_abs=8.234851352258207e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs1_prefill1 step=0 total=32 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal case=bs1_prefill1 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.420257882498366e-7 mean_abs=2.561137080192566e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs1_prefill1 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.649290900241674e-7 mean_abs=1.594889909029007e-8 judgement=strict
+PAGED_PARITY backend=metal case=bs1_prefill2 step=0 total=64 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal case=bs1_prefill2 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=2.1057295215698297e-7 mean_abs=9.313225746154785e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs1_prefill2 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.357637451062086e-7 mean_abs=8.381903171539307e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill1 step=0 total=32 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill1 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.420257882498366e-7 mean_abs=2.561137080192566e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill1 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.649290900241674e-7 mean_abs=1.594889909029007e-8 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill2 step=0 total=64 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill2 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=2.1057295215698297e-7 mean_abs=9.313225746154785e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill2 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.357637451062086e-7 mean_abs=8.381903171539307e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill3 step=0 total=96 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=3.6573813607295356e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill3 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.309150789045705e-6 mean_abs=1.2685632100328803e-8 judgement=strict
+PAGED_PARITY backend=metal case=bs2_prefill3 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=6.508501404534603e-7 mean_abs=6.28642737865448e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill15 step=0 total=480 fail=0 max_abs=5.960464477539063e-8 max_rel=4.702813766958236e-6 mean_abs=7.257525188227495e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill15 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=1.9974175207291083e-6 mean_abs=8.254573913291097e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill15 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.7640929249178897e-6 mean_abs=9.255018085241318e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill16 step=0 total=512 fail=0 max_abs=5.960464477539063e-8 max_rel=4.457543746105695e-4 mean_abs=7.304325144730228e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill16 step=1 total=32 fail=0 max_abs=3.166496753692627e-8 max_rel=3.0976773615143366e-6 mean_abs=1.0244548320770264e-8 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill16 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=3.4250435638018645e-6 mean_abs=6.810296326875687e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill17 step=0 total=544 fail=0 max_abs=5.960464477539063e-8 max_rel=7.922560928207238e-6 mean_abs=7.0756547810400235e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill17 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=7.209162733190718e-5 mean_abs=9.19681042432785e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs16_prefill17 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.8324311597522155e-6 mean_abs=1.0884832590818405e-8 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill255 step=0 total=8160 fail=0 max_abs=5.960464477539063e-8 max_rel=1.2862114130197635e-2 mean_abs=5.667526711120302e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill255 step=1 total=32 fail=0 max_abs=1.862645149230957e-8 max_rel=2.180535382764026e-6 mean_abs=5.311449058353901e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill255 step=2 total=32 fail=0 max_abs=1.4901161193847656e-8 max_rel=1.4429858262717215e-5 mean_abs=3.819877747446299e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill256 step=0 total=8192 fail=0 max_abs=7.450580596923828e-8 max_rel=1.2862114130197635e-2 mean_abs=5.825820270644044e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill256 step=1 total=32 fail=0 max_abs=2.2351741790771484e-8 max_rel=3.1415180294613212e-6 mean_abs=5.842593964189291e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill256 step=2 total=32 fail=0 max_abs=7.450580596923828e-9 max_rel=3.3211425874449924e-6 mean_abs=3.41970007866621e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill257 step=0 total=8224 fail=0 max_abs=7.078051567077637e-8 max_rel=1.2862114130197635e-2 mean_abs=5.766976264452334e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill257 step=1 total=32 fail=0 max_abs=1.4901161193847656e-8 max_rel=4.468479901335964e-6 mean_abs=3.3396645449101925e-9 judgement=strict
+PAGED_PARITY backend=metal case=bs256_prefill257 step=2 total=32 fail=0 max_abs=1.862645149230957e-8 max_rel=1.2948416099941055e-6 mean_abs=4.598405212163925e-9 judgement=strict
+PAGED_PARITY backend=metal case=long_bs16_s301 step=0 total=6400 fail=0 max_abs=1.1920928955078125e-7 max_rel=9.260359933181778e-5 mean_abs=6.36364006822987e-9 judgement=strict
+PAGED_PARITY backend=metal case=long_bs16_s301 step=1 total=6400 fail=0 max_abs=5.960464477539063e-8 max_rel=2.2306659223618073e-3 mean_abs=5.035055323787674e-9 judgement=strict
+PAGED_PARITY backend=metal case=long_bs16_s301 step=2 total=6400 fail=0 max_abs=5.21540641784668e-8 max_rel=2.9225345681041883e-4 mean_abs=4.505570565527251e-9 judgement=strict
+PAGED_PARITY backend=metal case=long_bs16_s301 step=3 total=64 fail=0 max_abs=1.862645149230957e-8 max_rel=6.501242851883484e-7 mean_abs=4.001776687800884e-9 judgement=strict
+PAGED_PARITY backend=metal case=dh160_h1 step=0 total=800 fail=0 max_abs=5.960464477539063e-8 max_rel=2.3746106007899105e-4 mean_abs=5.689598765457049e-9 judgement=strict
+PAGED_PARITY backend=metal case=dh160_h1 step=1 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=5.294504063415078e-6 mean_abs=8.13015503808856e-9 judgement=strict
+PAGED_PARITY backend=metal case=dh160_h1 step=2 total=160 fail=0 max_abs=1.1920928955078125e-7 max_rel=1.4763356524678394e-4 mean_abs=2.234462499473011e-8 judgement=strict
+PAGED_PARITY backend=metal case=dh1_e4_h4 step=0 total=48 fail=0 max_abs=5.960464477539063e-8 max_rel=2.063981784122366e-7 mean_abs=4.6566128730773926e-9 judgement=strict
+PAGED_PARITY backend=metal case=dh1_e4_h4 step=1 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.379943207117756e-6 mean_abs=7.101334631443024e-9 judgement=strict
+PAGED_PARITY backend=metal case=dh1_e4_h4 step=2 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.9879457305392853e-7 mean_abs=1.3969838619232178e-8 judgement=strict
+PAGED_PARITY backend=metal case=multi_prefill_bs4 step=0 total=96 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=3.6573813607295356e-9 judgement=strict
+PAGED_PARITY backend=metal case=multi_prefill_bs4 step=1 total=128 fail=0 max_abs=5.960464477539063e-8 max_rel=2.431566142760802e-6 mean_abs=5.991751095280051e-9 judgement=strict
+PAGED_PARITY backend=metal case=multi_prefill_bs4 step=2 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=2.32667696904456e-6 mean_abs=7.759081199765206e-9 judgement=strict
+PAGED_PARITY backend=metal case=multi_prefill_bs4 step=3 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=5.515732984837066e-7 mean_abs=6.05359673500061e-9 judgement=strict
+PAGED_PARITY backend=metal case=rewind_mid_block step=0 total=288 fail=0 max_abs=5.960464477539063e-8 max_rel=5.645176655218719e-6 mean_abs=6.111804395914078e-9 judgement=strict
+PAGED_PARITY backend=metal case=rewind_mid_block step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.67028236592769e-6 mean_abs=6.497430149465799e-9 judgement=strict
+PAGED_PARITY backend=metal case=rewind_mid_block step=2 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=3.174967500053775e-5 mean_abs=1.0199801181443035e-8 judgement=strict
+PAGED_PARITY backend=metal case=rewind_to_boundary step=0 total=288 fail=0 max_abs=5.960464477539063e-8 max_rel=5.645176655218719e-6 mean_abs=6.111804395914078e-9 judgement=strict
+PAGED_PARITY backend=metal case=rewind_to_boundary step=1 total=64 fail=0 max_abs=5.960464477539063e-8 max_rel=5.01084541378785e-5 mean_abs=1.461012288928032e-8 judgement=strict
+PAGED_PARITY backend=metal case=large_amplitude step=0 total=1088 fail=0 max_abs=2.384185791015625e-7 max_rel=1.562618836857344e-5 mean_abs=1.4037034227786695e-8 judgement=strict
+PAGED_PARITY backend=metal case=large_amplitude step=1 total=64 fail=0 max_abs=2.384185791015625e-7 max_rel=7.47729938639412e-7 mean_abs=1.885928213596344e-8 judgement=strict
+PAGED_PARITY backend=metal case=large_amplitude step=2 total=64 fail=0 max_abs=2.384185791015625e-7 max_rel=1.18194534167639e-6 mean_abs=1.4668330550193787e-8 judgement=strict
+ok
+test metal_paged_attention_tolerance_constants_pinned ... ok
+test metal_paged_attention_tracked_matrix_matches_cpu_reference ... PAGED_PARITY backend=metal-tracked case=legacy_bs1_b1 step=0 total=24 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs1_b1 step=1 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.5078638492431692e-7 mean_abs=7.450580596923828e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs1_b1 step=2 total=8 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs4_b2 step=0 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=2.8579961508512498e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs4_b2 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.1902852771282402e-6 mean_abs=1.3387762010097504e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs4_b2 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=3.0230568546302652e-6 mean_abs=7.101334631443024e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs4_b2 step=3 total=128 fail=0 max_abs=2.9802322387695313e-8 max_rel=3.7377963696909276e-6 mean_abs=7.325070328079164e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs16_b1 step=0 total=1088 fail=0 max_abs=8.940696716308594e-8 max_rel=3.0915606753804126e-5 mean_abs=7.467646997504156e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs16_b1 step=1 total=64 fail=0 max_abs=4.470348358154297e-8 max_rel=1.0467596532706783e-5 mean_abs=7.079506758600473e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs16_b1 step=2 total=64 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.3813113816834074e-6 mean_abs=8.527422323822975e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs16_b3 step=0 total=2304 fail=0 max_abs=1.1920928955078125e-7 max_rel=9.190319398601294e-5 mean_abs=8.82483972317358e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs16_b3 step=1 total=144 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6395214611602637e-6 mean_abs=8.216981465617815e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=legacy_bs16_b3 step=2 total=2160 fail=0 max_abs=1.1920928955078125e-7 max_rel=8.817714737240819e-4 mean_abs=8.234851352258207e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs1_prefill1 step=0 total=32 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs1_prefill1 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.420257882498366e-7 mean_abs=2.561137080192566e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs1_prefill1 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.649290900241674e-7 mean_abs=1.594889909029007e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs1_prefill2 step=0 total=64 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs1_prefill2 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=2.1057295215698297e-7 mean_abs=9.313225746154785e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs1_prefill2 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.357637451062086e-7 mean_abs=8.381903171539307e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill1 step=0 total=32 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill1 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.420257882498366e-7 mean_abs=2.561137080192566e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill1 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.649290900241674e-7 mean_abs=1.594889909029007e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill2 step=0 total=64 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill2 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=2.1057295215698297e-7 mean_abs=9.313225746154785e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill2 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=6.357637451062086e-7 mean_abs=8.381903171539307e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill3 step=0 total=96 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=3.6573813607295356e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill3 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.309150789045705e-6 mean_abs=1.2685632100328803e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs2_prefill3 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=6.508501404534603e-7 mean_abs=6.28642737865448e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill15 step=0 total=480 fail=0 max_abs=5.960464477539063e-8 max_rel=4.702813766958236e-6 mean_abs=7.257525188227495e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill15 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=1.9974175207291083e-6 mean_abs=8.254573913291097e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill15 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.7640929249178897e-6 mean_abs=9.255018085241318e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill16 step=0 total=512 fail=0 max_abs=5.960464477539063e-8 max_rel=4.457543746105695e-4 mean_abs=7.304325144730228e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill16 step=1 total=32 fail=0 max_abs=3.166496753692627e-8 max_rel=3.0976773615143366e-6 mean_abs=1.0244548320770264e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill16 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=3.4250435638018645e-6 mean_abs=6.810296326875687e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill17 step=0 total=544 fail=0 max_abs=5.960464477539063e-8 max_rel=7.922560928207238e-6 mean_abs=7.0756547810400235e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill17 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=7.209162733190718e-5 mean_abs=9.19681042432785e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs16_prefill17 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.8324311597522155e-6 mean_abs=1.0884832590818405e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill255 step=0 total=8160 fail=0 max_abs=5.960464477539063e-8 max_rel=1.2862114130197635e-2 mean_abs=5.667526711120302e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill255 step=1 total=32 fail=0 max_abs=1.862645149230957e-8 max_rel=2.180535382764026e-6 mean_abs=5.311449058353901e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill255 step=2 total=32 fail=0 max_abs=1.4901161193847656e-8 max_rel=1.4429858262717215e-5 mean_abs=3.819877747446299e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill256 step=0 total=8192 fail=0 max_abs=7.450580596923828e-8 max_rel=1.2862114130197635e-2 mean_abs=5.825820270644044e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill256 step=1 total=32 fail=0 max_abs=2.2351741790771484e-8 max_rel=3.1415180294613212e-6 mean_abs=5.842593964189291e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill256 step=2 total=32 fail=0 max_abs=7.450580596923828e-9 max_rel=3.3211425874449924e-6 mean_abs=3.41970007866621e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill257 step=0 total=8224 fail=0 max_abs=7.078051567077637e-8 max_rel=1.2862114130197635e-2 mean_abs=5.766976264452334e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill257 step=1 total=32 fail=0 max_abs=1.4901161193847656e-8 max_rel=4.468479901335964e-6 mean_abs=3.3396645449101925e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=bs256_prefill257 step=2 total=32 fail=0 max_abs=1.862645149230957e-8 max_rel=1.2948416099941055e-6 mean_abs=4.598405212163925e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=long_bs16_s301 step=0 total=6400 fail=0 max_abs=1.1920928955078125e-7 max_rel=9.260359933181778e-5 mean_abs=6.36364006822987e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=long_bs16_s301 step=1 total=6400 fail=0 max_abs=5.960464477539063e-8 max_rel=2.2306659223618073e-3 mean_abs=5.035055323787674e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=long_bs16_s301 step=2 total=6400 fail=0 max_abs=5.21540641784668e-8 max_rel=2.9225345681041883e-4 mean_abs=4.505570565527251e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=long_bs16_s301 step=3 total=64 fail=0 max_abs=1.862645149230957e-8 max_rel=6.501242851883484e-7 mean_abs=4.001776687800884e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=dh160_h1 step=0 total=800 fail=0 max_abs=5.960464477539063e-8 max_rel=2.3746106007899105e-4 mean_abs=5.689598765457049e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=dh160_h1 step=1 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=5.294504063415078e-6 mean_abs=8.13015503808856e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=dh160_h1 step=2 total=160 fail=0 max_abs=1.1920928955078125e-7 max_rel=1.4763356524678394e-4 mean_abs=2.234462499473011e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=dh1_e4_h4 step=0 total=48 fail=0 max_abs=5.960464477539063e-8 max_rel=2.063981784122366e-7 mean_abs=4.6566128730773926e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=dh1_e4_h4 step=1 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.379943207117756e-6 mean_abs=7.101334631443024e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=dh1_e4_h4 step=2 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.9879457305392853e-7 mean_abs=1.3969838619232178e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=multi_prefill_bs4 step=0 total=96 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=3.6573813607295356e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=multi_prefill_bs4 step=1 total=128 fail=0 max_abs=5.960464477539063e-8 max_rel=2.431566142760802e-6 mean_abs=5.991751095280051e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=multi_prefill_bs4 step=2 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=2.32667696904456e-6 mean_abs=7.759081199765206e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=multi_prefill_bs4 step=3 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=5.515732984837066e-7 mean_abs=6.05359673500061e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=rewind_mid_block step=0 total=288 fail=0 max_abs=5.960464477539063e-8 max_rel=5.645176655218719e-6 mean_abs=6.111804395914078e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=rewind_mid_block step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.67028236592769e-6 mean_abs=6.497430149465799e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=rewind_mid_block step=2 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=3.174967500053775e-5 mean_abs=1.0199801181443035e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=rewind_to_boundary step=0 total=288 fail=0 max_abs=5.960464477539063e-8 max_rel=5.645176655218719e-6 mean_abs=6.111804395914078e-9 judgement=strict
+PAGED_PARITY backend=metal-tracked case=rewind_to_boundary step=1 total=64 fail=0 max_abs=5.960464477539063e-8 max_rel=5.01084541378785e-5 mean_abs=1.461012288928032e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=large_amplitude step=0 total=1088 fail=0 max_abs=2.384185791015625e-7 max_rel=1.562618836857344e-5 mean_abs=1.4037034227786695e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=large_amplitude step=1 total=64 fail=0 max_abs=2.384185791015625e-7 max_rel=7.47729938639412e-7 mean_abs=1.885928213596344e-8 judgement=strict
+PAGED_PARITY backend=metal-tracked case=large_amplitude step=2 total=64 fail=0 max_abs=2.384185791015625e-7 max_rel=1.18194534167639e-6 mean_abs=1.4668330550193787e-8 judgement=strict
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.09s
+
+rc=0

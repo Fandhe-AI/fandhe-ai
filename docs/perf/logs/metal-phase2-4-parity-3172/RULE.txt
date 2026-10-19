@@ -1,0 +1,86 @@
+事前登録規則（イシュー #3172: Phase 2〜4 で追加した 8 機能の Metal 実機 parity。再測定）
+宣言日時（UTC）: 2026-10-19T18:20Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+経緯（記録の完全性のための再測定。結果による選別ではない）:
+  前回測定（PR #3474。2026-10-19・対象 b640875f）は所有者判断で不採用（未マージで close）。理由は、ホスト名のマスクが
+  境界なしの部分文字列置換で LRN のテスト名の一部（local）を壊し、回収後のログを手で直していたため。
+  今回は (1) ホスト名にもユーザー名と同じ前後境界を課す (2) 本実行冒頭の実値での自己検査 (3) 事後の識別子保存検査
+  （期待するテスト名が逐語で残ること）をスクリプトで必須にし、回収ログを手で編集しない。判定・入力・コマンドの判定部分は前回と同じで、
+  今回の結果は pass／fail にかかわらず採用する。前回のログは本提出物に流用しない。
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。M4 Max 開発機では測らない・記録しない
+（docs/real-hardware-verification-env.md §1・§7）。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  5df7986446fd6e19bbfa2d73539fef95ba2e9d0e
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること（後続のコミットは docs のみ）。
+    git diff --quiet 5df7986446fd6e19bbfa2d73539fef95ba2e9d0e <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、本ファイルを新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 2 行形式（1 行目: HEAD の 40 桁小文字 16 進数、2 行目: dirty=<status --porcelain の件数>）。
+  展開ツリー直下の .rev-stamp に書く。dirty=0 以外は無効（実行しない）。中央の rev-stamp.txt に写して README に記録する。
+
+展開先: ~/work/rust-ai-library-run-3172（専用。並列セッションとの衝突を避けるため、
+  docs/real-hardware-verification-env.md §3 の既定 ~/work/rust-ai-library-run からの意図的な逸脱）。
+
+実行環境: zsh -lc で包み、CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する
+  （docs/real-hardware-verification-env.md §7.1）。計測中は他のビルドを並走させない。
+  計測前に他の cargo／rustc プロセスが無いことを pgrep で確かめ、env_info に記録する。
+  実行ロジックは同ディレクトリの run_metal_parity.sh。実行物の対応は env_info.txt の script_sha256 と SHA256SUMS で検証する。
+
+ビルドを先に済ませる（計測中にコンパイルを並走させない。判定外）:
+  debug: cargo test -p fandhe-ai --test <下記の 1〜8 のターゲット> --no-run
+  release: cargo test --release -p fandhe-ai-backend-metal --test paged_kv_real_device --no-run
+           cargo test --release -p fandhe-ai --test paged_attention_facade --no-run
+
+コマンド（12 テスト。上から順。1〜8 は 1 テスト 1 プロセスで 1 回、9〜12 は paged として 5 回）:
+  1〜8: cargo test -p fandhe-ai <ターゲット> -- --ignored --exact --nocapture --test-threads=1 <テスト名>
+    1. --test compat_sequential_pool3d_backend_parity  metal_pool3d_forward_backward_matches_cpu
+    2. --test compat_sequential_conv_transpose3d_backend_parity  metal_conv_transpose3d_forward_backward_matches_cpu
+    3. --test compat_functional_max_unpool_backend_parity  metal_functional_max_unpool_2d_forward_backward_matches_cpu
+    4. --test compat_functional_max_unpool_backend_parity  metal_functional_max_unpool_3d_forward_backward_matches_cpu
+    5. --test compat_sequential_fold_unfold_backend_parity  metal_fold_unfold_forward_backward_matches_cpu
+    6. --test compat_sequential_lrn_backend_parity  metal_local_response_norm_forward_backward_matches_cpu
+    7. --test functional_transforms_jvp_multi_backend_parity  metal_jvp_multi_matches_cpu_reference
+    8. --test functional_transforms_facade  metal_vmap_grad_matches_cpu_reference
+  1〜8 に --release は付けない（各 README の素のコマンド形を正とする）。--exact・--nocapture・--test-threads=1 は
+  テストの選び方と出力だけに効き判定には影響しない。8 は同居する #2931 の metal_functional_transforms_match_cpu_reference を
+  巻き込まないため --exact が必須。
+  9〜12（paged attention。判定は既存の ../paged-attention-parity-3113/RULE.txt が支配し、本規則はそれを書き換えない）:
+    backend（3 テスト: matrix・tracked_matrix・tolerance_constants_pinned）を 5 回 → facade（1 テスト）を 5 回、すべて独立プロセス:
+      cargo test --release -p fandhe-ai-backend-metal --test paged_kv_real_device -- --ignored --nocapture --test-threads=1 metal_paged_attention
+      cargo test --release -p fandhe-ai --test paged_attention_facade -- --ignored --exact --nocapture --test-threads=1 metal_paged_attention_forward_matches_cpu_tape
+    README の測定コマンドは --release の素の形で、--test-threads=1 は判定に影響しない追加。--release を付けるのは paged の README
+    のコマンド形に合わせた意図的な混在（1〜8 は debug）。
+    期待件数: backend は "running 3 tests"・"3 passed"、facade は "running 1 test"・"1 passed"。
+    合否は 5 回すべて pass で pass。PAGED_PARITY 行は (backend, case, step) ごとに 5 回の中央値を paged_parity_median.tsv に記録する
+    （metal と metal-tracked の双方が必須。run 欠損・行集合の不一致・数値パース不能は undetermined）。
+    古い *_on_metal 3 本（paged_kv_real_device.rs の既存テスト）は #3113 の範囲外で対象外。
+  対象に bit 一致を求めるアサートは無い（9 ファイルを確認済み）。bit 一致を求めるテストは本件では該当なし。
+
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、1〜8 は ": test" で終わる行がちょうど 1 行（対象のフルパスと逐語一致）、
+  paged backend はフィルタ metal_paged_attention の選択が上記の 3 件と完全一致、paged facade は exact で 1 件であること。
+  満たさなければ実行せず undetermined とする。
+
+判定（判定契約は各テストのコードが定める。ここでは変えない）:
+  REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。tolerance 定数・baseline は不変）。
+  paged は同モジュールの BASELINES が空（登録 0 件）で既定は厳密（全ステップ fail_count == 0）。
+  pass: exit 0 かつ期待の "running N test(s)" かつ "test result: ok. N passed; 0 failed"。
+  fail: 1 件以上のテスト失敗。tape_for(Device::Metal) の失敗や Unsupported を含む。
+    Metal と CPU は自前バックエンド同士の比較なので判定不能にせず通常の parity 失敗として扱う。
+  undetermined: ノード到達不能、ビルド不能、--list の選択が期待と異なる、自己検査失敗、識別子保存検査失敗。
+  時間計測ではないので中央値は取らない（paged の PAGED_PARITY 数値指標を除く）。
+
+実行回数: 1〜8 は 1 回、paged は 5 回。再実行・選別はしない。例外はテスト開始前の環境起因の失敗のみで、
+  その場合は破棄理由を記録して全体を新しい出力先で取り直す（結果を見たうえでの選別はしない）。
+
+fail 時の扱い:
+  tolerance・baseline・判定方式・入力・テストコードは変えない。パニックメッセージの fail_count・max_abs_diff・
+  max_rel_err・PAGED_PARITY 行を引用して事実を記録し、README と PR に「要対応」と書く。Issue の起票・コメント、
+  BASELINES への追加（人間承認が必要）は行わない。事後の緩和・ケース除外・再実行での選別はしない。
+  GPU カーネル経路かホストフォールバックかは本測定から断定しない（追従課題）。
+
+記録規則: ホスト名・ユーザー名・個人のパス（$HOME・/Users/）はマスクする（ホスト名・ユーザー名は前後が識別子文字でない場合のみ置換）。
+  crate 名・テスト名・ディレクトリ名（fandhe-ai・target-fandhe-ai・Fandhe-AI・metal_* 等）は変えない。
+  マスク漏れがあれば記録を捨てる（fail-closed）。回収ログは手で編集しない。漏れ・化けはスクリプトを直して
+  新コミットで再登録し測り直す。各ログ末尾に rc=<終了コード>。
+  実行と提出物の対応は env_info.txt の script_sha256・rev_stamp と SHA256SUMS で検証する。
