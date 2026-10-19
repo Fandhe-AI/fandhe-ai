@@ -1,0 +1,19 @@
+hostname: masked
+date_utc: 2026-10-19T05:04:52Z
+rev: b640875f86399515b2dab4dfc38089caaa5e5c08
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+compute-apps (before):
+pid, process_name
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+nvcc: Build cuda_13.0.r13.0/compiler.36424714_0
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+uptime (before):  14:04:52 up 53 days,  1:31, 10 users,  load average: 3.44, 1.02, 0.41
+compute-apps (after):
+pid, process_name
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+uptime (after):  14:04:54 up 53 days,  1:31, 10 users,  load average: 3.25, 1.02, 0.41

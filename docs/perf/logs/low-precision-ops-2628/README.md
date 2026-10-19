@@ -57,7 +57,7 @@ CPU 版（P1・非有限出力）は同テストファイルの属性なしテ�
 
 ## #2994 大形状（Tensor Core 経路）
 
-状態: **undetermined（未実測）**。実装時の隔離 worktree に実機接続情報（`docs/real-hardware-verification-env.local.md`。gitignore 対象）がなく、GB10 へ到達できなかった。下記コマンドの実測結果を「実測記入欄（#2994）」へ追記すること。
+状態: **実測済み（#3170・2026-10-19 UTC・コミット `b640875f`）**。f16 は 8 形状中 5 形状（64³・128³・256³・128×128×100・65×63×33）で fail=0、3 形状（512³・1024³・256×256×1024）で fail≠0。bf16（f32 strict 経路）は 8 形状すべて fail=0 かつ CPU と bit 一致。判定は下記の事前登録規則どおり（結果判明後に規則は変更していない）。なお #3009 時点では GB10 へ到達できず undetermined だった。
 
 ### 対象と経路
 
@@ -92,12 +92,54 @@ cargo test -p fandhe-ai --release --test low_precision_ops_backend_parity -- --i
 
 | 日付 | 実機 | コミット（`.rev-stamp`） | exit | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | - | - | undetermined |
+| 2026-10-19 UTC | DGX Spark GB10（driver 580.173.02・CUDA 13.0・cc 12.1） | `b640875f86399515b2dab4dfc38089caaa5e5c08`（`cuda/rev-stamp-large.txt`） | 0（`test result: ok. 1 passed`） | 計測は単独ビルド後に実施（ビルド並走なし）。計測前後の compute-apps・utilization 0% に変化なし（常駐 3 プロセスのみ・`cuda/env_info_large.txt`）。`ROUTE cuda cc=(12, 1) mma_available=true reason=None`。ログ `cuda/large_shape_report.log`・ビルドログ `cuda/build_large.log` |
 
-形状 × dtype の結果表・baseline 化の提案は実測後に追記する。
+### 結果表（`cuda/large_shape_report.log` の `REPORT` 行を転記。16 行 = 8 形状 × {F16, Bf16}）
+
+`route=` は予測であり観測ではない。
+
+| dtype | 形状 m×n×k | seed | route（予測） | total | bit_eq | fail | mean_abs | max_abs | max_rel | ulp0 | ulp1 | ulp_gt1 | strict_pass |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| F16 | 64x64x64 | 11 | f16:Mma | 4096 | 4096 | 0 | 0e0 | 0e0 | 0e0 | 4096 | 0 | 0 | true |
+| F16 | 128x128x128 | 12 | f16:Mma | 16384 | 16364 | 0 | 3.711174940690398e-7 | 1.953125e-3 | 9.433962264150943e-4 | 16364 | 20 | 0 | true |
+| F16 | 256x256x256 | 13 | f16:Mma | 65536 | 65401 | 0 | 1.9330200302647427e-6 | 7.8125e-3 | 1.2142857142857143e-2 | 65401 | 127 | 8 | true |
+| F16 | 512x512x512 | 14 | f16:Mma | 262144 | 261313 | 5 | 4.145593038629158e-6 | 1.5625e-2 | 3.8848920863309355e-1 | 261313 | 764 | 67 | false |
+| F16 | 1024x1024x1024 | 15 | f16:Mma | 1048576 | 1043013 | 192 | 1.0508246703011537e-5 | 3.125e-2 | 4.803921568627451e-1 | 1043013 | 5114 | 449 | false |
+| F16 | 256x256x1024 | 16 | f16:Mma | 65536 | 65205 | 16 | 8.295384759549052e-6 | 1.5625e-2 | 2.5336500395882817e-2 | 65205 | 293 | 38 | false |
+| F16 | 128x128x100 | 17 | f16:Wmma-or-Tiled | 16384 | 16366 | 0 | 6.130503606982529e-7 | 3.90625e-3 | 8.19000819000819e-4 | 16366 | 18 | 0 | true |
+| F16 | 65x63x33 | 18 | f16:Wmma-or-Tiled | 4095 | 4094 | 0 | 2.91109376192384e-11 | 1.1920928955078125e-7 | 8.143322475570033e-4 | 4094 | 1 | 0 | true |
+| Bf16 | 64x64x64 | 11 | fp32_strict(non-TC) | 4096 | 4096 | 0 | 0e0 | 0e0 | 0e0 | 4096 | 0 | 0 | true |
+| Bf16 | 128x128x128 | 12 | fp32_strict(non-TC) | 16384 | 16384 | 0 | 0e0 | 0e0 | 0e0 | 16384 | 0 | 0 | true |
+| Bf16 | 256x256x256 | 13 | fp32_strict(non-TC) | 65536 | 65536 | 0 | 0e0 | 0e0 | 0e0 | 65536 | 0 | 0 | true |
+| Bf16 | 512x512x512 | 14 | fp32_strict(non-TC) | 262144 | 262144 | 0 | 0e0 | 0e0 | 0e0 | 262144 | 0 | 0 | true |
+| Bf16 | 1024x1024x1024 | 15 | fp32_strict(non-TC) | 1048576 | 1048576 | 0 | 0e0 | 0e0 | 0e0 | 1048576 | 0 | 0 | true |
+| Bf16 | 256x256x1024 | 16 | fp32_strict(non-TC) | 65536 | 65536 | 0 | 0e0 | 0e0 | 0e0 | 65536 | 0 | 0 | true |
+| Bf16 | 128x128x100 | 17 | fp32_strict(non-TC) | 16384 | 16384 | 0 | 0e0 | 0e0 | 0e0 | 16384 | 0 | 0 | true |
+| Bf16 | 65x63x33 | 18 | fp32_strict(non-TC) | 4095 | 4095 | 0 | 0e0 | 0e0 | 0e0 | 4095 | 0 | 0 | true |
+
+`SUMMARY`: strict_zero_fail は F16 の 5 形状と Bf16 の 8 形状、nonzero_fail は `F16@512x512x512`・`F16@1024x1024x1024`・`F16@256x256x1024`。
+
+### 判定（事前登録規則 1〜4 を逐条適用）
+
+- 規則 1: tolerance・baseline・`compare`／`passes` は未変更。テストは assert を満たし exit=0。
+- 規則 2（f16）: **厳密ゼロ fail 成立形状** は 64³・128³・256³・128×128×100（Wmma-or-Tiled）・65×63×33（Wmma-or-Tiled）。fail≠0 の 3 形状は形状二分方式（`docs/cuda-tensor-core-parity-judgment-decision.md`）の baseline 非後退方式の候補として**提案のみ**とする。`ParityBaseline` 行の候補値（実測値。既存 `ParityPath::MmaF16` とは入力生成経路が異なり直接比較できない）:
+
+| 形状 | fail_count | total | mean_abs | max_abs | max_rel |
+|---|---|---|---|---|---|
+| 512×512×512 | 5 | 262144 | 4.145593038629158e-6 | 1.5625e-2 | 3.8848920863309355e-1 |
+| 1024×1024×1024 | 192 | 1048576 | 1.0508246703011537e-5 | 3.125e-2 | 4.803921568627451e-1 |
+| 256×256×1024 | 16 | 65536 | 8.295384759549052e-6 | 1.5625e-2 | 2.5336500395882817e-2 |
+
+  fail は K が大きい Mma 形状に限られ、ulp 分布は 512³ が ulp0=261313・ulp1=764・ulp_gt1=67、1024³ が ulp0=1043013・ulp1=5114・ulp_gt1=449、256×256×1024 が ulp0=65205・ulp1=293・ulp_gt1=38。baseline 追加は人間承認事項で別 issue・別 PR とする。
+- 規則 3（bf16）: fail=0（全 8 形状で bit 一致）のため適用対象なし。f32 strict 経路は CPU と bit 一致した。
+
+### 所有者判断待ち（提案のみ）
+
+- f16: fail≠0 の 3 形状（fail 件数 5／192／16・上記 ulp 分布）の扱い。baseline 非後退方式（形状二分方式）への追加を提案する。tolerance 変更は提案しない。実施する場合は別 issue・別 PR で人間承認を経る。
+- bf16: fail なし。判定方式の変更は不要。
 
 ### スコープ外・申し送り
 
 - baseline 行の追加・更新（実測後、人間承認を経て別 issue）
-- bf16 で fail が出た場合の判定方式の決定（決定記録・spec 側の論点）
+- f16 の fail≠0 形状の baseline 化（上記「所有者判断待ち」。別 issue 要）
 - Metal の大形状 parity、`F16MatrixUnitImpl` の facade 経由の実観測（公開面の拡張を伴う）
