@@ -17,8 +17,16 @@ cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity -- --igno
 
 | 実機 | 結果 | 実測日 |
 |------|------|--------|
-| CUDA（GB10） | 未実測（実機到達手段なし。申し送り） | - |
+| CUDA（GB10） | pass（1/1。#3165・実行コミット a115595c6・`cuda/cuda_transformer_decoder_layer_matches_cpu.log`） | 2026-10-19 |
 | Metal（Mac mini・Apple M4） | pass（1/1・0.05s） | 2026-10-19 |
+
+## CUDA 実測（#3165）
+
+- 日付: 2026-10-19。DGX Spark GB10（aarch64・sm_121）。判定は REQ-2 統一複合判定（tolerance・baseline は不変）。
+- コマンド: `cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity -- --ignored --exact --nocapture --test-threads=1 cuda_transformer_decoder_layer_matches_cpu`
+- 結果: pass 1/1（`test result: ok. 1 passed; 0 failed`）。ログ: [`cuda/cuda_transformer_decoder_layer_matches_cpu.log`](./cuda/cuda_transformer_decoder_layer_matches_cpu.log)。
+- 実行コミット: `a115595c6716b3614869fa157aaa7a3ad8378c76`（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)）。事前登録・全体結果は [`../cuda-facade-parity-3165/`](../cuda-facade-parity-3165/README.md)。
+- 備考: GPU 経路かホストフォールバックかは確かめていない（pass は CUDA デバイス指定の実行結果が CPU 参照と判定内で一致したことのみを示す）。
 
 - Metal の実測（#3166。2026-10-19・Mac mini〈Apple M4〉・実行コミット 6570171a・`metal/rev-stamp.txt` は dirty=0）
   - コマンド: `cargo test -p fandhe-ai --test compat_sequential_layers_backend_parity -- --ignored --exact --nocapture --test-threads=1 metal_transformer_decoder_layer_matches_cpu`（debug ビルド）

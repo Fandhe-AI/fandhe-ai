@@ -38,5 +38,5 @@ CPU 版は属性なしテスト（`parameter_gradients_match_pytorch`・`fit_tra
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
+| 2026-10-19 | DGX Spark GB10 | 上記 CUDA（実測は `--lib -- --ignored --exact --nocapture --test-threads=1 compat::functional::fit_parity_tests::cuda_parameter_gradients_match_cpu_reference`） | pass（1/1） | #3165・実行コミット a115595c6（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)）・ログ [`cuda/cuda_parameter_gradients_match_cpu_reference.log`](./cuda/cuda_parameter_gradients_match_cpu_reference.log)。GPU 経路かホストフォールバックかは確かめていない |
 | 2026-10-19 | Mac mini（Apple M4） | 上記 Metal（`--lib`。`--ignored --exact --nocapture --test-threads=1`） | pass（1/1・0.10s） | #3166。実行コミット 6570171a・`metal/rev-stamp.txt` は dirty=0。ログ `metal/metal_parameter_gradients_match_cpu_reference.log`。GPU 経路かホストフォールバックかは未確認 |
