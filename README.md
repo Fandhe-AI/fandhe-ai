@@ -277,10 +277,11 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 FANDHE_AI_DOWNLOAD_TEST_URL=<https の safetensors URL> \
 FANDHE_AI_DOWNLOAD_TEST_SHA256=<64 桁 16 進> \
 FANDHE_AI_DOWNLOAD_TEST_BAD_TLS_URL=<証明書不正のホスト URL。任意> \
+FANDHE_AI_DOWNLOAD_TEST_BLACKHOLE_URL=<応答しない到達不能 IP の https URL。任意。接続タイムアウトの確認> \
 cargo test -p fandhe-ai --test model_download_real_network -- --ignored --nocapture
 ```
 
-URL と SHA-256 は両方設定するか両方未設定にします（両方未設定なら skip 表示で成功し、`make test-ignored` を落としません。片方だけは設定ミスで失敗します）。GB10・macOS 実機での実行と確認は #3173 で行います。
+URL と SHA-256 は両方設定するか両方未設定にします（両方未設定なら skip 表示で成功し、`make test-ignored` を落としません。片方だけは設定ミスで失敗します）。GB10・macOS 実機での実行手順・事前登録・結果は `docs/perf/logs/https-download-3173/` と `docs/model-download-design.md` §22（#3173）に記録します。
 
 ## CI
 
