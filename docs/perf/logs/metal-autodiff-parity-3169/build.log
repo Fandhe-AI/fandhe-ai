@@ -1,0 +1,19 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (~/work/rust-ai-library-run-3169/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.11.0 (~/work/rust-ai-library-run-3169/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (~/work/rust-ai-library-run-3169/crates/backend-cuda)
+   Compiling fandhe-ai-backend-metal v0.11.0 (~/work/rust-ai-library-run-3169/crates/backend-metal)
+   Compiling fandhe-ai-autodiff v0.11.0 (~/work/rust-ai-library-run-3169/crates/autodiff)
+   Compiling bench-harness v0.11.0 (~/work/rust-ai-library-run-3169/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (~/work/rust-ai-library-run-3169/crates/onnx-interop)
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run-3169/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.04s
+  Executable tests/f64_autograd_facade.rs (~/work/target-fandhe-ai/debug/deps/f64_autograd_facade-38a7feb04835cd41)
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run-3169/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+  Executable tests/var_f64_autograd_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/var_f64_autograd_backend_parity-6525890e4bd08b98)
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run-3169/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+  Executable tests/create_graph_facade.rs (~/work/target-fandhe-ai/debug/deps/create_graph_facade-dee4bf1c869daa0e)
+   Compiling fandhe-ai v0.11.0 (~/work/rust-ai-library-run-3169/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+  Executable tests/functional_transforms_jvp_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/functional_transforms_jvp_backend_parity-b78effec470f870c)

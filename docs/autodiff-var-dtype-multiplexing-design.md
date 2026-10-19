@@ -106,7 +106,7 @@
 - **保留ガードの反転について**: 着手時点で f64 autograd 専用の保留ガードは無く（上記「専用ガードなし」）、既存の汎用 2 ガード（`facade_does_not_reexport_tape_or_backend_ops`・`facade_pub_use_leaves_are_not_modules`）は承認事項 (g) のとおり変更せず否定層として残した（`pub use` 行だけを見るため newtype の直接宣言は通る）。したがって書き換えた否定テストは無く、承認形だけを許す上記の正ガードを新設した。
 - 利用テスト: `crates/facade/tests/f64_autograd_facade.rs`（解析勾配・`TapeMismatch`・`GradientTrackingDisabled`・`Backward`・未到達の `Ok(None)`・f32 `Var::cast::<f64>()` の detached 経路・rank 3 `matmul` の拒否・CUDA／Metal の `#[ignore]` parity）と `TapeF64` の doctest。内部 doc（`f64_autograd.rs` の「承認事項 1〜5」の誤記を含む）は文言のみ更新した。
 - 追加しなかったもの: 3 型への trait impl 全般、`Tape`／`TapeRef` 上の accessor、`keepdim`・多軸縮約・`min`・rank≥3 のバッチ matmul・GPU ネイティブカーネル・`TypedOps<f64>` 拡張（§14 の申し送りのまま対象外）、`Var`（f32）との橋渡しメソッド（既存の `Var::cast::<f64>()` → `TapeF64::var` のみ）。
-- CUDA（GB10）・Metal（M4 Max）実機 parity は未実測。手順と記入欄は `docs/perf/logs/f64-autograd-facade-2599/README.md`。
+- CUDA（GB10。#3168）・Metal（Mac mini〈Apple M4〉。#3169。ホスト計算の確認）の実機 parity は 2026-10-19 に実測済みで、いずれも pass。手順と記入欄は `docs/perf/logs/f64-autograd-facade-2599/README.md`。
 
 **名前衝突**: facade 内に同名はない。下流で `use fandhe_ai::*;` と他クレートの glob が同名を持ち、かつ使う場合に限り曖昧性エラーになる。内部型と同名の別型が 2 系統存在することになるが、facade が唯一のサポート面である（`docs/compat-api-scope.md` §0）。本記録は互換性の保証を断定しない。
 
@@ -358,8 +358,17 @@ CPU ネイティブ経路とホスト経路（`RawTape::new()`。`NaiveOps`）�
 var_f64_autograd_backend_parity.rs::
 cpu_f64_autograd_forward_and_grad_match_host_reference` で確認した（CI
 実行）。CUDA・Metal の同経路（`#[ignore]` テスト 2 件）は、本エージェント
-実行環境に DGX Spark GB10・Apple Silicon 実機への到達手段がないため
-**未実施のまま**であり、Mac／GB10 実機セッションへ申し送る。
+実行環境に DGX Spark GB10・Apple Silicon 実機への到達手段がなかったため
+当初は未実施だった。**CUDA 側は #3168 で 2026-10-19 に DGX Spark GB10 で実測した**
+（`cuda_f64_autograd_forward_and_grad_match_host_reference`・bit 完全一致の契約で
+pass 1 / fail 0・実行コミット `9e2f7ddcc`・ログ
+`docs/perf/logs/var-f64-autograd-backend-parity-3168/`）。GPU 経路かホスト
+フォールバックかは確かめていない。**Metal 側は #3169 で 2026-10-19 に Mac mini
+（Apple M4）で実測した**（`metal_f64_autograd_forward_and_grad_match_host_reference`・
+同契約で pass 1 / fail 0・実行コミット `bf894108a`・ログ
+`docs/perf/logs/var-f64-autograd-backend-parity-3168/metal/`）。Metal は MSL が
+`double` 非対応で常にホスト計算のため、このテストは「Metal 指定でもホスト経路が
+参照と一致する」ことの確認であり、新規カーネルの parity ではない。
 
 ### #2196 への申し送り（実装済み。§14 参照）
 

@@ -5,7 +5,7 @@
 - facade の `Tape::backward_create_graph`・`hvp` で、#3077〜#3086 で対象に加えた Op（LayerNorm・Conv2d・MaxPool2d を代表）が CPU と同じ二階の結果になることを実機で確かめる。決定記録は `docs/autodiff-higher-order-grad-decision.md` §32
 - 新規カーネルはなく `Var` 演算の合成のみ。線形代数は forward が GPU からホスト f64 にフォールバックするので代表にしていない
 - 判定は REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。tolerance は変更しない
-- 実測は本イシューの範囲外で #3168・#3169 へ申し送る
+- 実測は #3168（CUDA）・#3169（Metal。2026-10-19 に Mac mini〈Apple M4〉で pass。下の記入欄）で行った
 
 ## 実行コマンド
 
@@ -26,4 +26,4 @@ cargo test -p fandhe-ai --test create_graph_facade -- --ignored metal
 | 環境 | 実行日 | コミット | 結果 | fail 要素数 |
 |------|--------|---------|------|-------------|
 | GB10（CUDA） | 未実施 | - | - | - |
-| M4 Max（Metal） | 未実施 | - | - | - |
+| Mac mini（Apple M4・Metal） | 2026-10-19 | bf894108a（[`metal/rev-stamp.txt`](./metal/rev-stamp.txt)） | `create_graph_extended_ops_metal_matches_cpu` pass（1/1・0.29s。`--exact --nocapture --test-threads=1`。ログ [`metal/create_graph_extended_ops_metal_matches_cpu.log`](./metal/create_graph_extended_ops_metal_matches_cpu.log)）。#3169（集計 [`../metal-autodiff-parity-3169/`](../metal-autodiff-parity-3169/README.md)）。GPU 経路かホストフォールバックかは確かめていない | 0 |
