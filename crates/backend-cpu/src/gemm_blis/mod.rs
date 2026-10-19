@@ -64,6 +64,10 @@
 mod cache_params;
 pub mod microkernel;
 mod pack;
+// イシュー #3177 診断専用: 2D 動的分配の job・pack・確保回数を数える
+// `cfg(test)` 限定プローブ（本番ビルドには含まれない）。
+#[cfg(test)]
+mod jobgrid_probe;
 // イシュー #1313 で本番結線（`gemm_blis_parallel_with_transpose`／
 // `gemm_blis_bias_act_parallel` からの [`dispatch_two_d_dynamic`] 呼び出し）
 // を追加したため、`partition::job_grid` が本番経路から到達可能になり
@@ -1340,6 +1344,9 @@ fn gemm_blis_ic_loop<K: Microkernel>(
             let ir = ir_block * mr;
             let mr_eff = mr.min(mc_len - ir);
             let dst = &mut a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr];
+            // #3177 診断専用: A pack 語数の計数（非テストビルドでは消える）。
+            #[cfg(test)]
+            jobgrid_probe::on_a_pack(dst.len());
             match transpose {
                 GemmTranspose::Tn => pack_a_from_transposed(
                     dst,
@@ -2648,6 +2655,10 @@ fn split_c_into_jobs<'c>(
         return Vec::new();
     }
 
+    // #3177 診断専用: split 側の確保回数の計数（非テストビルドでは消える）。
+    #[cfg(test)]
+    jobgrid_probe::on_split(col_bands.len(), row_bands.len() * col_bands.len());
+
     // 行ごとに列帯境界で split_at_mut 連鎖し、列帯ごとの行セグメント列
     // （`per_col_band[col_band_idx]` は絶対行順に並ぶ `Vec<&'c mut [f32]>`）
     // へ集約する。
@@ -2725,6 +2736,11 @@ fn run_two_d_job<K: Microkernel>(
         return Ok(());
     }
 
+    // #3177 診断専用: job 数・worker・確保・C staging の計数。
+    // ガードは job 終了まで pack 計数を有効にする（非テストビルドでは消える）。
+    #[cfg(test)]
+    let _probe_scope = jobgrid_probe::on_job(b.as_ptr() as usize, mc_len, nc_len_job);
+
     let c_local_len = mc_len
         .checked_mul(nc_len_job)
         .ok_or(GemmError::DimProductOverflow)?;
@@ -2757,6 +2773,9 @@ fn run_two_d_job<K: Microkernel>(
                 let jr = jr_block * nr;
                 let nr_eff = nr.min(nc_len - jr);
                 let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+                // #3177 診断専用: B pack 語数の計数（非テストビルドでは消える）。
+                #[cfg(test)]
+                jobgrid_probe::on_b_pack(dst.len());
                 // B は絶対列位置（`job.cols.start + jc + jr`）で pack する
                 // （job 内の相対 jc に対し、実際の B 参照は元の n 幅の
                 // 行列へアクセスするため）。
@@ -2877,7 +2896,20 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
 
     let num_threads = crate::thread_limit::effective_num_threads(rayon::current_num_threads());
     let grid = partition::job_grid(mc_total, n, mr, nr, &blocks, num_threads, jobs_per_worker)?;
+    // #3177 診断専用: grid 確定値の記録と split 確保計数の開始／終了
+    // （非テストビルドでは消える）。
+    #[cfg(test)]
+    jobgrid_probe::on_region(
+        b.as_ptr() as usize,
+        mr,
+        nr,
+        num_threads,
+        rayon::current_num_threads(),
+        &grid,
+    );
     let mut jobs = split_c_into_jobs(c_region, n, &grid);
+    #[cfg(test)]
+    jobgrid_probe::on_region_split_done();
 
     jobs.par_iter_mut().try_for_each(|job| {
         run_two_d_job(
