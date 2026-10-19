@@ -40,5 +40,5 @@ CPU 版は属性なしテスト（`cpu_matches_naive_reference`・`hand_computed
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Mac mini（Apple M4） | 上記 Metal（`--test merge_ops_backend_parity` 分） | 未実測 | #3166 で Mac 側へ申し送り（`../metal-facade-parity-3166/`） |
-| 未実測 | Mac mini（Apple M4） | 上記 Metal（`--lib` 分） | 未実測 | #3166 で Mac 側へ申し送り |
+| 2026-10-19 | Mac mini（Apple M4） | 上記 Metal（`--test merge_ops_backend_parity` 分。`--ignored --exact --nocapture --test-threads=1`） | pass（1/1・0.05s） | #3166。実行コミット 6570171a・`metal/rev-stamp.txt` は dirty=0。ログ `metal/metal_merge_ops_match_cpu_reference.log`。GPU 経路かホストフォールバックかは未確認 |
+| 2026-10-19 | Mac mini（Apple M4） | 上記 Metal（`--lib` 分。`--ignored --exact --nocapture --test-threads=1`） | pass（1/1・0.05s） | #3166。実行コミット 6570171a・`metal/rev-stamp.txt` は dirty=0。ログ `metal/metal_merge_graph_matches_cpu_reference.log`。GPU 経路かホストフォールバックかは未確認 |
