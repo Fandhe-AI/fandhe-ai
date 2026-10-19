@@ -1,0 +1,18 @@
+# 事前登録規則（#3171 CUDA 実機 parity。実測前に固定し、結果が出た後に緩めない）
+- 公式の実機: DGX Spark GB10（aarch64・sm_121）のみ。他の GPU の結果は判定に使わない
+- 対象: crates/facade/tests/functional_transforms_jvp_multi_backend_parity.rs の CUDA #[ignore] テスト 1 件
+  cuda_jvp_multi_matches_cpu_reference
+- 想定経路: ../README.md「期待結果／判定契約」節のとおり（ホストフォールバックの可能性があり、新しい GPU カーネルの parity とは限らない。経路は断定しない）
+- 判定: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。assert_parity）。厳密ゼロ fail。baseline 方式は使わない
+- 追加の pass 条件: ログの「running N test(s)」と「test result: ok. N passed; 0 failed」の N が上記の期待件数 1 と一致すること（0 件実行を pass と読まない）
+- fail の扱い: tolerance 定数・判定式・入力集合・テストコードは変えない。事後の緩和・ケース除外・
+  再実行による選別をしない。fail は件数と panic メッセージ中の最大誤差を記録し、是正は別イシューで扱う
+- 実行回数: 独立プロセスで 1 回。例外はテスト開始前の環境起因の失敗（SSH 切断・ドライバロード失敗・他者の GPU 占有の出現等）のみで、
+  その場合も失敗ログと破棄の理由を残し、結果による選別とは区別して記録する
+- 実行コマンド（docs/real-hardware-verification-env.md §3・§4.1 の形式。同期先は並走実行との衝突回避のため <home>/work/rust-ai-library-run-3171）:
+  ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run-3171 && env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai timeout 1800 cargo test -p fandhe-ai --test functional_transforms_jvp_multi_backend_parity -- --ignored --nocapture --test-threads=1 cuda'
+- 対象コミット: 実測時点の origin/main（��。.rev-stamp（1 行目 sha・2 行目 dirty=<件数>）で固定し、dirty=0 以外の実測は無効
+- 同梱物: rev-stamp.txt・実行ログ・env_info.txt（ドライバ・CUDA／NVRTC・rustc・uname -m）・実行前後の GPU 占有ログ。
+  ホスト名・ユーザー名・絶対パスは <cuda-node>・<home>・<resident-process> へ置換してから収録する
+- 計測中はビルドや別の GPU 負荷を並走させない（並列度 1）。ビルドは判定外のウォームアップ（build.log）で事前に済ませる
+- 本ファイル作成時点では実測値を含まない（未実測）

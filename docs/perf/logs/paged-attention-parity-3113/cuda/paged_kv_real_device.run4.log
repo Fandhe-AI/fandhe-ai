@@ -1,0 +1,78 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/paged_kv_real_device.rs (<home>/work/target-fandhe-ai/release/deps/paged_kv_real_device-cad078cd619d99df)
+
+running 2 tests
+test cuda_paged_attention_matrix_matches_cpu_reference ... PAGED_PARITY backend=cuda case=legacy_bs1_b1 step=0 total=24 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs1_b1 step=1 total=8 fail=0 max_abs=1.4901161193847656e-8 max_rel=1.2899983333221533e-7 mean_abs=1.862645149230957e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs1_b1 step=2 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.9064926103878627e-7 mean_abs=8.847564458847046e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs4_b2 step=0 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=5.058245733380318e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs4_b2 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.1902804797891527e-6 mean_abs=7.334165275096893e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs4_b2 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=3.211997301166503e-6 mean_abs=9.167706593871117e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs4_b2 step=3 total=128 fail=0 max_abs=2.9802322387695313e-8 max_rel=5.97785649328763e-6 mean_abs=9.476934792473912e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs16_b1 step=0 total=1088 fail=0 max_abs=8.940696716308594e-8 max_rel=3.38149902979157e-5 mean_abs=8.060423544306747e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs16_b1 step=1 total=64 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.8622252345552692e-6 mean_abs=5.321453500073403e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs16_b1 step=2 total=64 fail=0 max_abs=3.725290298461914e-8 max_rel=1.0287321679726743e-6 mean_abs=7.58154783397913e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs16_b3 step=0 total=2304 fail=0 max_abs=1.1920928955078125e-7 max_rel=2.2972631609174515e-4 mean_abs=7.3797031695398294e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs16_b3 step=1 total=144 fail=0 max_abs=8.940696716308594e-8 max_rel=2.3755164588737633e-6 mean_abs=7.250087542666329e-9 judgement=strict
+PAGED_PARITY backend=cuda case=legacy_bs16_b3 step=2 total=2160 fail=0 max_abs=8.940696716308594e-8 max_rel=3.365246208511181e-5 mean_abs=7.478178708374294e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs1_prefill1 step=0 total=32 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=cuda case=bs1_prefill1 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=9.349468690470918e-6 mean_abs=9.589712135493755e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs1_prefill1 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.649290900241674e-7 mean_abs=1.0128132998943329e-8 judgement=strict
+PAGED_PARITY backend=cuda case=bs1_prefill2 step=0 total=64 fail=0 max_abs=5.960464477539063e-8 max_rel=4.601961931420413e-7 mean_abs=3.026798367500305e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs1_prefill2 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=3.071559189483104e-7 mean_abs=1.0128132998943329e-8 judgement=strict
+PAGED_PARITY backend=cuda case=bs1_prefill2 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=2.8935492875973145e-7 mean_abs=7.450580596923828e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill1 step=0 total=32 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill1 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=9.349468690470918e-6 mean_abs=9.589712135493755e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill1 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=8.649290900241674e-7 mean_abs=1.0128132998943329e-8 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill2 step=0 total=64 fail=0 max_abs=5.960464477539063e-8 max_rel=4.601961931420413e-7 mean_abs=3.026798367500305e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill2 step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=3.071559189483104e-7 mean_abs=1.0128132998943329e-8 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill2 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=2.8935492875973145e-7 mean_abs=7.450580596923828e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill3 step=0 total=96 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=4.588703935345014e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill3 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=8.309150789045705e-6 mean_abs=5.4678821470588446e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs2_prefill3 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=6.885253577003988e-7 mean_abs=1.1292286217212677e-8 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill15 step=0 total=480 fail=0 max_abs=5.960464477539063e-8 max_rel=4.092870034940959e-6 mean_abs=6.4309764032562574e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill15 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.78427896828906e-6 mean_abs=5.75528247281909e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill15 step=2 total=32 fail=0 max_abs=4.470348358154297e-8 max_rel=2.9830699593295698e-6 mean_abs=9.313225746154785e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill16 step=0 total=512 fail=0 max_abs=5.960464477539063e-8 max_rel=3.0899407922511496e-4 mean_abs=7.164652870983446e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill16 step=1 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.5690346308497902e-6 mean_abs=4.190951585769653e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill16 step=2 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=3.1192361027481266e-6 mean_abs=9.626091923564672e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill17 step=0 total=544 fail=0 max_abs=5.960464477539063e-8 max_rel=7.922560928207238e-6 mean_abs=7.59695574422093e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill17 step=1 total=32 fail=0 max_abs=1.4901161193847656e-8 max_rel=2.882833780562015e-4 mean_abs=4.190951585769653e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs16_prefill17 step=2 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=8.947849250214972e-7 mean_abs=8.978531695902348e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill255 step=0 total=8160 fail=0 max_abs=5.960464477539063e-8 max_rel=7.0074081061909455e-3 mean_abs=5.512948201650639e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill255 step=1 total=32 fail=0 max_abs=1.4901161193847656e-8 max_rel=8.915882217629552e-7 mean_abs=4.001776687800884e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill255 step=2 total=32 fail=0 max_abs=1.4901161193847656e-8 max_rel=9.619951779991703e-6 mean_abs=4.431058187037706e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill256 step=0 total=8192 fail=0 max_abs=5.960464477539063e-8 max_rel=7.0074081061909455e-3 mean_abs=5.627047640344163e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill256 step=1 total=32 fail=0 max_abs=1.862645149230957e-8 max_rel=3.057099588993341e-6 mean_abs=3.914465196430683e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill256 step=2 total=32 fail=0 max_abs=7.450580596923828e-9 max_rel=1.4629148751777857e-6 mean_abs=3.699824446812272e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill257 step=0 total=8224 fail=0 max_abs=8.940696716308594e-8 max_rel=7.0074081061909455e-3 mean_abs=5.769904647453186e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill257 step=1 total=32 fail=0 max_abs=3.3527612686157227e-8 max_rel=2.7841378045097017e-5 mean_abs=5.289621185511351e-9 judgement=strict
+PAGED_PARITY backend=cuda case=bs256_prefill257 step=2 total=32 fail=0 max_abs=1.1175870895385742e-8 max_rel=4.978957817826793e-6 mean_abs=3.1086528906598687e-9 judgement=strict
+PAGED_PARITY backend=cuda case=long_bs16_s301 step=0 total=6400 fail=0 max_abs=5.960464477539063e-8 max_rel=1.7779976038553085e-4 mean_abs=6.319779402019776e-9 judgement=strict
+PAGED_PARITY backend=cuda case=long_bs16_s301 step=1 total=6400 fail=0 max_abs=4.470348358154297e-8 max_rel=3.50265519327847e-3 mean_abs=4.935812256690042e-9 judgement=strict
+PAGED_PARITY backend=cuda case=long_bs16_s301 step=2 total=6400 fail=0 max_abs=5.960464477539063e-8 max_rel=6.424255960652872e-4 mean_abs=4.338971457684692e-9 judgement=strict
+PAGED_PARITY backend=cuda case=long_bs16_s301 step=3 total=64 fail=0 max_abs=1.4901161193847656e-8 max_rel=1.8344330759623728e-6 mean_abs=4.372850526124239e-9 judgement=strict
+PAGED_PARITY backend=cuda case=dh160_h1 step=0 total=800 fail=0 max_abs=5.960464477539063e-8 max_rel=7.155487726075079e-6 mean_abs=4.115572664886713e-9 judgement=strict
+PAGED_PARITY backend=cuda case=dh160_h1 step=1 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=5.294504063415078e-6 mean_abs=8.13015503808856e-9 judgement=strict
+PAGED_PARITY backend=cuda case=dh160_h1 step=2 total=160 fail=0 max_abs=1.1920928955078125e-7 max_rel=1.4763356524678394e-4 mean_abs=2.1855680643056986e-8 judgement=strict
+PAGED_PARITY backend=cuda case=dh1_e4_h4 step=0 total=48 fail=0 max_abs=5.960464477539063e-8 max_rel=1.8646744404743587e-6 mean_abs=7.974449545145035e-9 judgement=strict
+PAGED_PARITY backend=cuda case=dh1_e4_h4 step=1 total=8 fail=0 max_abs=2.9802322387695313e-8 max_rel=2.379943207117756e-6 mean_abs=9.42964106798172e-9 judgement=strict
+PAGED_PARITY backend=cuda case=dh1_e4_h4 step=2 total=8 fail=0 max_abs=5.960464477539063e-8 max_rel=2.9879457305392853e-7 mean_abs=1.4901161193847656e-8 judgement=strict
+PAGED_PARITY backend=cuda case=multi_prefill_bs4 step=0 total=96 fail=0 max_abs=5.960464477539063e-8 max_rel=1.6021889461424187e-6 mean_abs=4.588703935345014e-9 judgement=strict
+PAGED_PARITY backend=cuda case=multi_prefill_bs4 step=1 total=128 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.2120983704947227e-5 mean_abs=7.492417353205383e-9 judgement=strict
+PAGED_PARITY backend=cuda case=multi_prefill_bs4 step=2 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=2.4215046564021103e-5 mean_abs=9.173527359962463e-9 judgement=strict
+PAGED_PARITY backend=cuda case=multi_prefill_bs4 step=3 total=32 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.0782153595012608e-6 mean_abs=7.2177499532699585e-9 judgement=strict
+PAGED_PARITY backend=cuda case=rewind_mid_block step=0 total=288 fail=0 max_abs=5.960464477539063e-8 max_rel=4.669814445895871e-6 mean_abs=7.499086981018385e-9 judgement=strict
+PAGED_PARITY backend=cuda case=rewind_mid_block step=1 total=32 fail=0 max_abs=5.960464477539063e-8 max_rel=5.545940310071469e-6 mean_abs=1.278385752812028e-8 judgement=strict
+PAGED_PARITY backend=cuda case=rewind_mid_block step=2 total=160 fail=0 max_abs=5.960464477539063e-8 max_rel=3.174967500053775e-5 mean_abs=9.317955118604005e-9 judgement=strict
+PAGED_PARITY backend=cuda case=rewind_to_boundary step=0 total=288 fail=0 max_abs=5.960464477539063e-8 max_rel=4.669814445895871e-6 mean_abs=7.499086981018385e-9 judgement=strict
+PAGED_PARITY backend=cuda case=rewind_to_boundary step=1 total=64 fail=0 max_abs=8.940696716308594e-8 max_rel=5.01084541378785e-5 mean_abs=1.3915268937125802e-8 judgement=strict
+PAGED_PARITY backend=cuda case=large_amplitude step=0 total=1088 fail=0 max_abs=2.384185791015625e-7 max_rel=1.1719687059939485e-5 mean_abs=1.264614933033419e-8 judgement=strict
+PAGED_PARITY backend=cuda case=large_amplitude step=1 total=64 fail=0 max_abs=2.384185791015625e-7 max_rel=1.202799081855349e-7 mean_abs=9.313225746154785e-9 judgement=strict
+PAGED_PARITY backend=cuda case=large_amplitude step=2 total=64 fail=0 max_abs=2.384185791015625e-7 max_rel=8.457787154107467e-7 mean_abs=1.1867086868733168e-8 judgement=strict
+ok
+test cuda_paged_attention_tolerance_constants_pinned ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.25s
+
+rc=0
