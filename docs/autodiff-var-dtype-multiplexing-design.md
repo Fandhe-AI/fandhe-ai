@@ -358,8 +358,13 @@ CPU ネイティブ経路とホスト経路（`RawTape::new()`。`NaiveOps`）�
 var_f64_autograd_backend_parity.rs::
 cpu_f64_autograd_forward_and_grad_match_host_reference` で確認した（CI
 実行）。CUDA・Metal の同経路（`#[ignore]` テスト 2 件）は、本エージェント
-実行環境に DGX Spark GB10・Apple Silicon 実機への到達手段がないため
-**未実施のまま**であり、Mac／GB10 実機セッションへ申し送る。
+実行環境に DGX Spark GB10・Apple Silicon 実機への到達手段がなかったため
+当初は未実施だった。**CUDA 側は #3168 で 2026-10-19 に DGX Spark GB10 で実測した**
+（`cuda_f64_autograd_forward_and_grad_match_host_reference`・bit 完全一致の契約で
+pass 1 / fail 0・実行コミット `9e2f7ddcc`・ログ
+`docs/perf/logs/var-f64-autograd-backend-parity-3168/`）。GPU 経路かホスト
+フォールバックかは確かめていない。Metal 側は未実施のままで、Apple Silicon 実機
+（Mac mini）の担当イシュー #3169 へ申し送る。
 
 ### #2196 への申し送り（実装済み。§14 参照）
 

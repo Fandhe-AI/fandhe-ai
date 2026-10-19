@@ -27,5 +27,5 @@ cargo test -p fandhe-ai --test create_graph_facade -- --ignored metal
 
 | 環境 | 実行日 | コミット | 結果 | fail 要素数 |
 |------|--------|---------|------|-------------|
-| GB10（CUDA） | 未実施 | - | - | - |
+| GB10（CUDA） | 2026-10-19 | 9e2f7ddcc（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)） | `create_graph_hessian_cuda_matches_cpu` pass（1/1・0.55s。ログ [`cuda/create_graph_hessian_cuda_matches_cpu.log`](./cuda/create_graph_hessian_cuda_matches_cpu.log)）。`create_graph_rejects_device_mismatch` pass（1/1・0.21s。型付きエラー検査で parity ではない。ログ [`cuda/create_graph_rejects_device_mismatch.log`](./cuda/create_graph_rejects_device_mismatch.log)）。#3168。各 `--exact --nocapture --test-threads=1`。GPU 経路かホストフォールバックかは確かめていない | 0 |
 | M4 Max（Metal） | 未実施 | - | - | - |

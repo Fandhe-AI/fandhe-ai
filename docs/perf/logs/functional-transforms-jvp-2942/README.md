@@ -76,5 +76,5 @@ tolerance の単独緩和は行わない。
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測（#3168） | DGX Spark GB10 | 上記 cuda コマンド | 未実測 | |
+| 2026-10-19（#3168） | DGX Spark GB10 | 上記 cuda コマンド（`--test functional_transforms_jvp_backend_parity -- --ignored --exact --nocapture --test-threads=1 <テスト名>` で 1 本ずつ） | pass 2 / fail 0（`cuda_jvp_jacfwd_basic_ops_match_cpu_reference` 1/1・0.52s、`cuda_jvp_jacfwd_extended_ops_match_cpu_reference` 1/1・0.86s） | 実行コミット 9e2f7ddcc（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)）・ログ [`cuda/`](./cuda/)。GPU 経路かホストフォールバックかは確かめていない |
 | 未実測（#3169） | Apple Silicon（Mac mini） | 上記 metal コマンド | 未実測 | |
