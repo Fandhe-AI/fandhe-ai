@@ -1,0 +1,79 @@
+# #3171 GB10 実測の環境情報（実行前後。ホスト名・パス・常駐プロセス名はマスク済み）
+
+===== compat_sequential_fold_unfold_backend_parity / after =====
+date_utc=2026-10-19T05:33:02Z
+stamp: b640875f86399515b2dab4dfc38089caaa5e5c08 dirty=0 
+uname -m: aarch64
+uptime: 14:33:02 up 53 days,  2:00, 11 users,  load average: 1.57, 0.61, 0.33
+Mon Oct 19 14:33:02 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.173.02             Driver Version: 580.173.02     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0 Off |                  N/A |
+| N/A   46C    P0             11W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A         1240736      G   /usr/lib/xorg/Xorg                       18MiB |
+|    0   N/A  N/A         1240825      G   /usr/bin/gnome-shell                      6MiB |
+|    0   N/A  N/A         2083578      C   <resident-process>       5586MiB |
+|    0   N/A  N/A         2084616      C   <resident-process>       1285MiB |
+|    0   N/A  N/A         2626105      C   <resident-process>      29089MiB |
++-----------------------------------------------------------------------------------------+
+name, driver_version, utilization.gpu [%], memory.used [MiB]
+NVIDIA GB10, 580.173.02, 0 %, [N/A]
+pid, process_name, used_gpu_memory [MiB]
+2083578, <resident-process>, 5586 MiB
+2084616, <resident-process>, 1285 MiB
+2626105, <resident-process>, 29089 MiB
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+rustc 1.97.0 (2d8144b78 2026-07-07)
+
+===== compat_sequential_fold_unfold_backend_parity / before =====
+date_utc=2026-10-19T05:33:01Z
+stamp: b640875f86399515b2dab4dfc38089caaa5e5c08 dirty=0 
+uname -m: aarch64
+uptime: 14:33:01 up 53 days,  1:59, 10 users,  load average: 1.57, 0.61, 0.33
+Mon Oct 19 14:33:01 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.173.02             Driver Version: 580.173.02     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0 Off |                  N/A |
+| N/A   45C    P0             11W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A         1240736      G   /usr/lib/xorg/Xorg                       18MiB |
+|    0   N/A  N/A         1240825      G   /usr/bin/gnome-shell                      6MiB |
+|    0   N/A  N/A         2083578      C   <resident-process>       5586MiB |
+|    0   N/A  N/A         2084616      C   <resident-process>       1285MiB |
+|    0   N/A  N/A         2626105      C   <resident-process>      29089MiB |
++-----------------------------------------------------------------------------------------+
+name, driver_version, utilization.gpu [%], memory.used [MiB]
+NVIDIA GB10, 580.173.02, 0 %, [N/A]
+pid, process_name, used_gpu_memory [MiB]
+2083578, <resident-process>, 5586 MiB
+2084616, <resident-process>, 1285 MiB
+2626105, <resident-process>, 29089 MiB
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+rustc 1.97.0 (2d8144b78 2026-07-07)

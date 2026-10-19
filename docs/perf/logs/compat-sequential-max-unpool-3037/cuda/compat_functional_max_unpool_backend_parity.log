@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/compat_functional_max_unpool_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_functional_max_unpool_backend_parity-976eaa604f50bc85)
+
+running 2 tests
+test cuda_functional_max_unpool_2d_forward_backward_matches_cpu ... ok
+test cuda_functional_max_unpool_3d_forward_backward_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.70s
+
+rc=0
