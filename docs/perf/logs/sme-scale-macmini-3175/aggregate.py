@@ -20,7 +20,8 @@ ALL_SHAPES = MAIN_SHAPES + REF_SHAPES
 VARIANTS = {"NEON(TwoDDynamic)": "NEON", "SME(TwoDDynamicSme)": "SME"}
 KCS = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256]
 THIRD_PARTY_GFLOPS = 2008.0
-MICRO_FLOP_PER_KC = 2 * 16 * 16  # MR=NR=16 の 1 kc あたり flop
+# 1 kc あたり flop はカーネル別: SME は 16x16 の ZA0 タイル（2*16*16）、NEON は MR=8 x NR=12（2*8*12）
+MICRO_FLOP_PER_KC = {"SME": 2 * 16 * 16, "NEON": 2 * 8 * 12}
 
 
 class ParseError(Exception):
@@ -240,7 +241,7 @@ def aggregate(d):
         c, s = lsq_line(xs, ys)
         fit[kern] = (c, s)
         w(f"- {kern}: kc=0 直接計時 {pm[(kern, 0)]:.1f} ns / kc>=1 の最小二乗 切片 c={c:.1f} ns・傾き s={s:.3f} ns/kc"
-          f"（定常 {MICRO_FLOP_PER_KC / s:.1f} GFLOPS）")
+          f"（定常 {MICRO_FLOP_PER_KC[kern] / s:.1f} GFLOPS）")
     w("- 固定費は smstart/smstop 単体ではなく、SVL・TPIDR2_EL0 検査・長さ検査・C 16 行の ZA0 出し入れを含む「1 組の固定費の上限」")
     w("")
     c0 = pm[("SME", 0)]

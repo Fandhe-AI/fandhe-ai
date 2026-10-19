@@ -110,8 +110,19 @@ if [ "${DRY}" = "1" ]; then
 fi
 
 # 既存ログがあれば停止（差し替え・上書き禁止）
-if ls "${OUT}"/thread_t*_run*.log "${OUT}"/microcall_run*.log "${OUT}"/ecore_t1_run*.log "${OUT}"/load_gate.log >/dev/null 2>&1; then
-    echo "既存ログがあるため停止（上書き禁止）" >&2
+# .log だけでなく孤立した .raw.log も対象にし、1 つでも存在すれば停止する（ls は一部のみ存在で非ゼロ終了し保護を素通りするため候補を個別に判定）
+existing=""
+for f in "${OUT}"/thread_t*_run*.log "${OUT}"/thread_t*_run*.raw.log \
+         "${OUT}"/microcall_run*.log "${OUT}"/microcall_run*.raw.log \
+         "${OUT}"/ecore_t1_run*.log "${OUT}"/ecore_t1_run*.raw.log \
+         "${OUT}"/load_gate.log; do
+    if [ -e "${f}" ]; then
+        existing="${f}"
+        break
+    fi
+done
+if [ -n "${existing}" ]; then
+    echo "既存ログがあるため停止（上書き禁止）: ${existing}" >&2
     exit 1
 fi
 
