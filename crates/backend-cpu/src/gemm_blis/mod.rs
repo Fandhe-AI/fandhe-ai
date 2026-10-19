@@ -6594,4 +6594,120 @@ mod tests {
             }
         }
     }
+
+    // --- Mac mini の SME 多スレッド頭打ち・micro-call 固定費の診断（イシュー
+    //     #3175・親 #3174）。事前登録規則は
+    //     `docs/perf/logs/sme-scale-macmini-3175/RULE.txt`。本番定数
+    //     （`SME_PRODUCTION_ENABLED`・`SME_MIN_*`・`MC/KC/NC`）は参照せず
+    //     `GemmDriverVariant` を直接指定する診断経路のみ ---
+
+    /// SME（`TwoDDynamicSme`）と NEON（`TwoDDynamic`）の GFLOPS を、実効
+    /// スレッド数つきで出力する（`RAYON_NUM_THREADS` は起動側
+    /// `orchestrate_macmini.sh` が 1/2/4/10 で与える）。既存の
+    /// [`sme_vs_neon_ab_shape_sweep`] は出力行に `num_threads` を持たず、
+    /// 集計側がスレッド数をファイル名から推測する羽目になるため、#1312 の
+    /// 慣例どおり出力行自体にスレッド数を入れた別テストとして分離する。
+    /// 出力形式: `variant={..} num_threads={t} size=({m},{n},{k})
+    /// median_gflops={v}`。末尾 2 形状は MNIST 規模の参考形状で頭打ち判定
+    /// には使わない。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "実機（Mac mini。SME 対応環境限定）での診断専用（#3175。 \
+                cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+                sme_vs_neon_ab_thread_sweep --exact --nocapture --test-threads=1）"]
+    fn sme_vs_neon_ab_thread_sweep() {
+        if microkernel::SmeKernel::try_new().is_none() {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        }
+        println!("num_threads={}", ab_effective_num_threads());
+        println!("rayon_current_num_threads={}", rayon::current_num_threads());
+        let num_threads = ab_effective_num_threads();
+        let shapes: &[(usize, usize, usize)] = &[
+            (256, 256, 128),
+            (512, 512, 256),
+            (1024, 1024, 512),
+            (2048, 2048, 1024),
+            (64, 256, 784),
+            (784, 256, 64),
+        ];
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0x1234_abcd ^ (m as u32), m * k);
+            let b = xorshift32_vec(0x5678_ef01 ^ (n as u32), k * n);
+            let candidates: Vec<(GemmDriverVariant, BlockSizes)> = vec![
+                (GemmDriverVariant::TwoDDynamic, default_blocks()),
+                (GemmDriverVariant::TwoDDynamicSme, default_blocks()),
+            ];
+            let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 10);
+            let labels = ["NEON(TwoDDynamic)", "SME(TwoDDynamicSme)"];
+            for (label, gflops) in labels.iter().zip(gflops) {
+                println!(
+                    "variant={label} num_threads={num_threads} size=({m},{n},{k}) \
+                     median_gflops={gflops:.3}"
+                );
+            }
+        }
+    }
+
+    /// 1 回の `Microkernel::run` の所要 ns を、約 1 ms 以上のバッチ 21 個の
+    /// 中央値として返す（[`sme_microcall_fixed_cost_probe`] の共通部）。
+    /// 反復数は事前較正（1 ms を超えるまで倍々）で決める。
+    #[cfg(target_arch = "aarch64")]
+    fn microcall_median_ns<K: microkernel::Microkernel>(kernel: &K, kc: usize) -> (usize, f64) {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let ap = xorshift32_vec(0x0a0a_0a01, K::MR * kc);
+        let bp = xorshift32_vec(0x0b0b_0b01, kc * K::NR);
+        let mut c = xorshift32_vec(0x0c0c_0c01, K::MR * K::NR);
+
+        let batch = |reps: usize, c: &mut Vec<f32>| -> f64 {
+            let start = Instant::now();
+            for _ in 0..reps {
+                kernel.run(
+                    black_box(&ap),
+                    black_box(&bp),
+                    black_box(c.as_mut_slice()),
+                    kc,
+                );
+            }
+            start.elapsed().as_secs_f64() * 1e9
+        };
+
+        let mut reps = 16usize;
+        while batch(reps, &mut c) < 1.0e6 && reps < (1 << 28) {
+            reps *= 2;
+        }
+        let mut samples: Vec<f64> = (0..21).map(|_| batch(reps, &mut c) / reps as f64).collect();
+        samples.sort_by(|x, y| x.total_cmp(y));
+        (reps, samples[samples.len() / 2])
+    }
+
+    /// `smstart`／`smstop` を含む SME micro-call 1 回の固定費を直接計時する
+    /// （`kc_len` を 0〜256 で振り、`kc=0` を主値、`kc>=1` の最小二乗を補助
+    /// 値とする。集計は `aggregate.py`）。単スレッドでテストスレッド上から
+    /// safe な `Microkernel::run` だけを呼ぶ（新規 `unsafe`・`asm!` なし）。
+    /// 計測値は `smstart`／`smstop` 単体ではなく、SVL 検査・C 16 行の
+    /// ZA0 読み込みと書き戻しを含む「1 組の固定費の上限」。NEON は同じ
+    /// 方法の参考値（C タイルの出し入れのみ）。
+    /// 出力形式: `probe=microcall kernel={SME|NEON} kc={kc} reps={n}
+    /// median_ns_per_call={v}`。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "実機（Mac mini。SME 対応環境限定）での診断専用（#3175。 \
+                cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+                sme_microcall_fixed_cost_probe --exact --nocapture --test-threads=1）"]
+    fn sme_microcall_fixed_cost_probe() {
+        let Some(sme) = microkernel::SmeKernel::try_new() else {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        };
+        let neon = microkernel::NeonKernel;
+        for &kc in &[0usize, 1, 2, 4, 8, 16, 32, 64, 128, 256] {
+            let (reps, ns) = microcall_median_ns(&sme, kc);
+            println!("probe=microcall kernel=SME kc={kc} reps={reps} median_ns_per_call={ns:.3}");
+            let (reps, ns) = microcall_median_ns(&neon, kc);
+            println!("probe=microcall kernel=NEON kc={kc} reps={reps} median_ns_per_call={ns:.3}");
+        }
+    }
 }
