@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/compat_sequential_adaptive_max_global_pool_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/compat_sequential_adaptive_max_global_pool_backend_parity-39bc4909bd52593a)
+
+running 1 test
+test cuda_adaptive_max_global_pool_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.35s
+
+rc=0

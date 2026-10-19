@@ -34,7 +34,7 @@ use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_reduce::{self, REDUCE_BLOCK_DIM, REDUCE_LASTAXIS_BLOCK_DIM, REDUCE_MAX_BLOCKS};
-use crate::memory::readback;
+use crate::memory::{CudaArg, CudaArgMut, readback};
 use crate::nvrtc::compile_ptx;
 use crate::pool::CudaAllocator;
 
@@ -354,7 +354,7 @@ impl CudaReduce {
             let a_dev = self.stream.clone_htod(a)?;
             let mut out_dev = self.allocator.alloc_uninit_f32(total_out)?;
 
-            let (outer_i, axis_len_i, inner_i) = (outer as i32, axis_len as i32, inner as i32);
+            let (outer_i, axis_len_i) = (outer as i32, axis_len as i32);
 
             if inner == 1 {
                 let num_blocks = (outer as u32).clamp(1, REDUCE_MAX_BLOCKS);
@@ -379,30 +379,88 @@ impl CudaReduce {
                         .launch(cfg)?;
                 }
             } else {
-                let cfg = LaunchConfig {
-                    grid_dim: ((total_out as u32).div_ceil(REDUCE_BLOCK_DIM), 1, 1),
-                    block_dim: (REDUCE_BLOCK_DIM, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                // SAFETY: `a_dev` は `outer*axis_len*inner` 要素の H2D 済み
-                // バッファ、`out_dev` は `total_out = outer*inner` 要素
-                // 確保済みでカーネルは `idx < total`（REQ-8）を維持した
-                // まま各出力要素を 1 回だけ書く
-                // （`kernels_reduce.rs::REDUCE_SUM_AXIS_F32` 参照）。
-                unsafe {
-                    self.stream
-                        .launch_builder(&self.sum_axis_f32)
-                        .arg(&a_dev)
-                        .arg(&mut out_dev.as_view_mut())
-                        .arg(&outer_i)
-                        .arg(&axis_len_i)
-                        .arg(&inner_i)
-                        .launch(cfg)?;
-                }
+                // 起動本体（`unsafe` ブロック）は
+                // [`Self::launch_sum_axis_generic_into`] へ集約済み（イシュー
+                // #3204。`gemm_fp32_strict_into_with_bias_reduce_tracked` の
+                // bias 勾配縮約と共用する。`unsafe` ブロックの総数は不変）。
+                // `a_dev`（`outer*axis_len*inner` 要素）・`out_dev`
+                // （`total_out = outer*inner` 要素）は上の
+                // `validate_axis_layout` と確保サイズから導出済み。
+                let a_arg = CudaArg::Slice(&a_dev);
+                let mut out_arg = CudaArgMut::View(out_dev.as_view_mut());
+                self.launch_sum_axis_generic_into(&a_arg, &mut out_arg, outer, axis_len, inner)?;
             }
 
             readback(&self.stream, &out_dev.as_view())
         })
+    }
+
+    /// ストリームハンドル（`gemm.rs::CudaGemm` と同一デバイスストリームを
+    /// 共有しているかを呼び出し側が `Arc::ptr_eq` で確かめるためのアクセサ。
+    /// イシュー #3204）。
+    pub(crate) fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
+
+    /// 汎用軸版 `reduce_sum_axis_f32` を device バッファ同士で起動する
+    /// （イシュー #3204）。ホスト往復を持たず、完了待ちもしない（同期は
+    /// 呼び出し元の次の同期点へ委ねる）。
+    ///
+    /// 呼び出し元: [`Self::run_sum_axis_f32`]（`inner != 1` 分岐）と
+    /// `gemm.rs::CudaGemm::launch_tiled_f32_{tn,nt}_into_with_bias`
+    /// （`Op::LinearResident` の bias 勾配縮約。TN は `outer=1, axis_len=k,
+    /// inner=n`、NT は `outer=n, axis_len=k, inner=1`）。`inner == 1` でも
+    /// warp butterfly 版（縮約順が変わる）へは回さず、本カーネルの
+    /// 「1 スレッド = 1 出力・`double` で軸を昇順に逐次加算・最後に 1 回
+    /// `float` へ narrow」を常に使う（ホスト `f64` 逐次和との bit 一致契約。
+    /// `.claude/rules/coding-rust.md` の勾配長軸縮約方針）。
+    ///
+    /// 検査（driver 呼び出しの前）: 各次元の `i32` 収容、`input.len() ==
+    /// outer*axis_len*inner`、`out.len() == outer*inner`。いずれかが 0 の
+    /// 形状は呼び出し元が事前に分岐する前提のため `InvalidReduceShape`。
+    pub(crate) fn launch_sum_axis_generic_into(
+        &self,
+        input: &CudaArg<'_>,
+        out: &mut CudaArgMut<'_>,
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Result<(), CudaError> {
+        let total_out = validate_axis_layout(input.len(), outer, axis_len, inner)?;
+        if total_out == 0 || axis_len == 0 || out.len() != total_out {
+            return Err(CudaError::InvalidReduceShape {
+                detail: format!(
+                    "launch_sum_axis_generic_into: out.len() ({}) must equal outer*inner \
+                     ({total_out}) and every dimension must be non-zero",
+                    out.len()
+                ),
+            });
+        }
+        let (outer_i, axis_len_i, inner_i) = (outer as i32, axis_len as i32, inner as i32);
+        let cfg = LaunchConfig {
+            grid_dim: ((total_out as u32).div_ceil(REDUCE_BLOCK_DIM), 1, 1),
+            block_dim: (REDUCE_BLOCK_DIM, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: `input` は上の `validate_axis_layout` で
+        // `outer*axis_len*inner` 要素ちょうど、`out` は `total_out =
+        // outer*inner` 要素ちょうどと確認済み（部分ビューでも `len()` は
+        // ビュー長）。カーネルは `idx < total`（REQ-8）を維持したまま各
+        // 出力要素を 1 回だけ書き、入力は `(o*axis_len + a)*inner + i` を
+        // `a < axis_len` の範囲でのみ読む
+        // （`kernels_reduce.rs::REDUCE_SUM_AXIS_F32` 参照）。引数の型・個数
+        // （`const float*`/`float*`/`int`×3）はカーネル宣言と一致する。
+        unsafe {
+            let mut builder = self.stream.launch_builder(&self.sum_axis_f32);
+            input.push(&mut builder);
+            out.push(&mut builder);
+            builder
+                .arg(&outer_i)
+                .arg(&axis_len_i)
+                .arg(&inner_i)
+                .launch(cfg)?;
+        }
+        Ok(())
     }
 
     /// 単一軸 `max`。[`Self::run_sum_axis_f32`] と同一のルーティング

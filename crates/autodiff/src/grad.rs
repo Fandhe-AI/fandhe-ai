@@ -1184,8 +1184,8 @@ pub(crate) fn vjp(
             // `DeviceParamStore::step` は自身の grad staging を直接
             // 参照するため `Gradients` 経由の読み出しを必要としない）。
             // `Unsupported`（バックエンドが `gemm_fp32_strict_into`／
-            // `MemoryOps` を実装しない。現時点で CUDA／Metal はここに
-            // 該当する）の場合のみ、従来どおりホスト経路
+            // `MemoryOps` を実装しない。CPU・CUDA〈#1559〉・Metal は実装済みで
+            // 通常ここには到達しない）の場合のみ、従来どおりホスト経路
             // （`ops.gemm_fp32_strict`）へフォールバックする（判定迂回
             // を作らない。`.claude/rules/security.md` A08）。
             // イシュー #1212 codex-review P0 追加是正: `weight`

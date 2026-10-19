@@ -1,0 +1,12 @@
+uname: Linux aarch64
+os: Ubuntu 24.04.4 LTS
+cpu:
+  Model name:                              Cortex-X925
+  Model name:                              Cortex-A725
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+perl: This is perl 5, version 38, subversion 2 (v5.38.2) built for aarch64-linux-gnu-thread-multi
+make: GNU Make 4.3
+system_openssl: OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)
+libssl-dev: 未導入
+tree_fingerprint_sha256: 14050b31d404e945e01da24df5acef5c96710b5ae3064c327e59bdbb5308df13

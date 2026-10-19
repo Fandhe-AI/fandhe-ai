@@ -128,12 +128,36 @@ P3 CUDA 由来の差（R0/R3 > 1.50）・P4 sync 待ち（構造上 0。測定�
 
 1. CUDA `gemm_resident_rhs_act` の override（`act_relu = true` の融合起動で relu の往復を排除。
    `train-linear-epilogue-fusion.md` §4）
-2. `mse_loss` の target アップロードのキャッシュ（毎 step 定数の target の再 H2D を避ける）
+2. `mse_loss` の target アップロードのキャッシュ（毎 step 定数の target の再 H2D を避ける）。**#3203 で実装済み（§7.1。GB10 前後計測は未実施）**
 3. 学習 forward のデバイス常駐チェーン化（`Op::LinearResident` が VJP 用にホスト `y` を保持して
    いるため設計変更が必要）
 4. `param_readout` の事前タッチ済み再利用バッファ化（fresh 経路のみ。scoreboard の判定行には効かない）
 
 実測結果次第で優先度が変わる（支配項に対応する施策のみ起票する）。
+
+### 7.1 #3203: `CudaMse` の target デバイス再利用（実装済み・GB10 計測は申し送り）
+
+- 実装: `crates/backend-cuda/src/mse.rs`。`CudaMse`（context ごとに 1 つ）が直前の target の
+  ホスト内容とデバイスバッファを 1 組保持し、`f32::to_bits` 単位で完全一致したときだけ H2D を
+  省く。ミス時は先にキャッシュを無効化し、H2D 成功時のみ登録する。上限 `1 << 20` 要素超と
+  Mutex poison は従来経路（一時バッファへ H2D）に縮退する。公開 API・カーネル・`unsafe` は不変で、
+  出力は従来とビット同一。
+- 効く範囲: forward と backward が同じ target を送る学習 step で 2 回目の H2D を必ず省く。
+  step ごとに target が変わる場合も、同長なら確保を省いて上書きするのみで、1 step あたり
+  1 回の H2D は残る。`pred` の H2D・readback 同期は対象外（#3249・#3252）。
+- 検証: 単体テスト（`mse::tests`）・`tests/mse_parity.rs` のスモークは CI で実行。
+  ビット一致・別 context・複数 ordinal は `#[ignore]` の実機テストで、**未検証（GB10 申し送り）**。
+- 申し送り（受入基準 4）: GB10 で変更前 commit（`1a7eb9a2`）と変更後を、`logs/cuda-train-forward-resident-2116/README.md`
+  の手順で各 5 run・中央値・機体名・版つきで測り、下表へ記入する。
+
+| 区間 | 変更前（中央値） | 変更後（中央値） | 機体・版 |
+|------|------------------|------------------|----------|
+| `mse` | 未計測 | 未計測 | |
+| `prod` | 未計測 | 未計測 | |
+| `total`（train CUDA reuse） | 未計測 | 未計測 | |
+
+  mse 区間への寄与がノイズ以下だった場合（#3189 の判定）は、その結果をここへ記録したうえで
+  本変更を戻すかどうかを所有者が判断する。
 
 ## 8. 限界
 

@@ -119,6 +119,7 @@
 // できる——Rust の可視性は「定義モジュールとその子孫モジュール」単位の
 // ため（`amp.rs` モジュール冒頭コメント参照）。
 mod amp;
+mod distributed;
 
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
@@ -2104,7 +2105,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         // `any_resident` の場合のみ使用: resident 経由でない slot
         // （bias 等のホスト計算勾配）を `(slot 添字, 勾配)` で保持し、
         // 更新フェーズで `GradStaging` の対応オフセットへ
@@ -2800,7 +2808,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -3098,7 +3113,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -3368,7 +3390,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -3621,7 +3650,14 @@ impl DeviceParamStore {
         let resident_filled = self.resident_filled_slots(pending, grads);
         let any_resident = resident_filled.iter().any(|&f| f);
 
-        let mut flat_grad: Vec<f32> = Vec::with_capacity(self.total_numel);
+        // `any_resident` のとき `flat_grad` は読まれず、消費するのは後段の
+        // `if !any_resident` 分岐だけ。使われない total_numel 分の確保を
+        // 避ける（#3194・`docs/perf/cpu-reuse-device-update.md` §7-1）。
+        let mut flat_grad: Vec<f32> = if any_resident {
+            Vec::new()
+        } else {
+            Vec::with_capacity(self.total_numel)
+        };
         let mut host_grads_for_staging: Vec<(usize, Tensor<f32>)> = Vec::new();
         for (i, var) in vars.iter().enumerate() {
             if resident_filled[i] {
@@ -3846,8 +3882,8 @@ impl DeviceParamStore {
     /// がって resident 経由の重み勾配は、#1479 以前はホストから一切
     /// 観測できなかった（PR #1390 codex-review P2「対象外」・
     /// `crates/facade/tests/cuda_graph_step_common/mod.rs` doc 参照）。
-    /// **bias 勾配は Metal（#1566 以降）のみ同様に resident 経由で
-    /// `GradStaging` へ直接書き込まれる**（CPU・CUDA は bias 縮約が
+    /// **bias 勾配は Metal（#1566 以降）・CUDA（#3204 以降）が同様に
+    /// resident 経由で `GradStaging` へ直接書き込む**（CPU は bias 縮約が
     /// `gemm_fp32_strict_into_with_bias_reduce_tracked` の trait 既定
     /// 実装〈bias を無視〉のまま残るため引き続き `Gradients` 経由。
     /// イシュー #1898 参照）。
@@ -3866,8 +3902,8 @@ impl DeviceParamStore {
     /// **戻り値**: `pending` の登録順（`sync_to_host` と同じ並び）で
     /// slot ごとに `Some(Tensor<f32>)`（今回の backward で resident 経由
     /// により新鮮に充填された slot）または `None`（resident 未充填の
-    /// slot。CPU・CUDA の bias slot は常にこちら。Metal〈#1566 以降〉の
-    /// bias slot は resident 経由のため `Some`。呼び出し元は
+    /// slot。CPU の bias slot は常にこちら。Metal〈#1566 以降〉・CUDA
+    /// 〈#3204 以降〉の bias slot は resident 経由のため `Some`。呼び出し元は
     /// `grads.get(...)` へフォールバックする。[`Self::
     /// param_grads_to_host`] がその統合版）。
     ///
@@ -3920,11 +3956,11 @@ impl DeviceParamStore {
     /// `pending` の登録順（`sync_to_host` と同じ並び）で全パラメータ
     /// 勾配を返す。
     ///
-    /// **strict 版と分ける理由**: bias 縮約は CPU・CUDA では常に
+    /// **strict 版と分ける理由**: bias 縮約は CPU では常に
     /// `Gradients` 側（通常の `ResidentLeaf` ではなく、backward が
     /// `Op::LinearResident` の VJP から生成した寄与）に載り、strict 版
     /// （`GradStaging` 限定）は bias slot を `None` のまま返す
-    /// （Metal〈#1566 以降〉のみ bias も resident 経由で `Some`）。
+    /// （Metal〈#1566 以降〉・CUDA〈#3204 以降〉は bias も resident 経由で `Some`）。
     /// また resident 対応可否がバックエンド構成によって非対応
     /// （`gemm_fp32_strict_into` 未実装）でありうるため、strict 版
     /// 単独では「各 step の全パラメータ勾配を読む」ことがバックエンド
@@ -5144,6 +5180,45 @@ mod tests {
             resident_b.contiguous().as_slice().unwrap(),
             "resident weight grad マージ経路と host-only 経路で bias の最終値が食い違う"
         );
+    }
+
+    /// イシュー #3194: 全 slot が resident（bias なし）で `flat_grad` を
+    /// 確保しない経路が、host-only 経路（`flat_grad` へ積む）と bit 一致する
+    /// ことを検証する。混在は上のテスト、なしは比較基準側が担う。
+    #[test]
+    fn resident_only_weight_grad_matches_host_only_grad_path() {
+        fn two_steps(tape: &Tape) -> Tensor<f32> {
+            let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+            let mut store = DeviceParamStore::new(tape, &[&w_init]).unwrap();
+            let config = SgdConfig::new(0.1);
+            for _ in 0..2 {
+                let leaves = store.register_resident_params(tape).unwrap();
+                let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+                let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+                let pred = store.linear_forward(tape, &x, &leaves[0], None).unwrap();
+                let loss = pred.mse_loss(&target).unwrap();
+                let grads = store.backward(tape, &loss).unwrap();
+                store.step(tape, &grads, &config).unwrap();
+            }
+            store.sync_to_host(tape).unwrap()[0].clone()
+        }
+
+        let host_w = two_steps(&simple_tape(None));
+        let resident_tape = Tape::new_with_ops(
+            Box::new(MockDeviceOps::resident_capable()) as Box<dyn BackendOps + Send>
+        );
+        let resident_w = two_steps(&resident_tape);
+
+        assert_ne!(resident_w.get(&[0, 0]).unwrap(), 1.0, "値が動いていない");
+        let bits = |t: &Tensor<f32>| -> Vec<u32> {
+            t.contiguous()
+                .as_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        assert_eq!(bits(&host_w), bits(&resident_w));
     }
 
     /// イシュー #1479 の受入基準 AC-R3 相当（クレート内単体テスト版）:
@@ -7721,5 +7796,292 @@ mod tests {
         store.step(&tape, &grads2, &config).unwrap();
         let after = store.sync_to_host(&tape).unwrap();
         assert_ne!(after[0].host_slice(), w_init.host_slice());
+    }
+
+    // --- DDP 勾配平均の結線（イシュー #3146・`device_store/distributed.rs`・
+    // `crate::distributed::step`）単体テスト ---
+    //
+    // `autodiff` は `backend-cpu` に依存できないため `MockDeviceOps`（naive な CPU モック）で
+    // 検証する。`new()` は resident 非対応、`resident_capable()` は resident 混在の経路。
+    // 実 CPU バックエンドでの複数プロセス検証は #3148、facade 公開は #3147。
+    // `MockDeviceOps` は `adam_step_device` を持たないため、Adam／AdamW は all-reduce 後に
+    // 既存 `step_adam*` が返す `Unsupported` が素通しされることだけを確認する（数値は #3148）。
+    mod ddp {
+        use super::*;
+        use crate::distributed::step::{step_adam, step_adamw, step_sgd};
+        use crate::distributed::test_util::establish_group;
+        use crate::distributed::{
+            CollectiveOptions, DistributedError, DistributedStepError, RingCommunicator,
+        };
+        use fandhe_ai_tensor_core::tolerance::composite_close_f32;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        fn opts() -> CollectiveOptions {
+            CollectiveOptions::default()
+                .io_timeout(Duration::from_secs(2))
+                .op_timeout(Duration::from_secs(8))
+        }
+
+        fn comm(links: crate::distributed::RingLinks) -> RingCommunicator {
+            RingCommunicator::new(links, opts()).unwrap()
+        }
+
+        fn mk_tape(resident: bool) -> Tape {
+            let ops: Box<dyn BackendOps + Send> = if resident {
+                Box::new(MockDeviceOps::resident_capable())
+            } else {
+                Box::new(MockDeviceOps::new())
+            };
+            Tape::new_with_ops(ops)
+        }
+
+        fn init_params() -> (Tensor<f32>, Tensor<f32>) {
+            (
+                tensor(vec![0.5, -0.25, 0.75, 1.0], &[2, 2]),
+                tensor(vec![0.1, -0.2], &[2]),
+            )
+        }
+
+        /// 1 回の forward + backward（`mse_loss` の平均縮約）。`x`／`t` は `[rows, 2]`。
+        fn fwd_bwd(tape: &Tape, store: &mut DeviceParamStore, x: &[f32], t: &[f32]) -> Gradients {
+            let rows = x.len() / 2;
+            let leaves = store.register_resident_params(tape).unwrap();
+            let xv = tape.var(&tensor(x.to_vec(), &[rows, 2]));
+            let tv = tape.var(&tensor(t.to_vec(), &[rows, 2]));
+            let pred = store
+                .linear_forward(tape, &xv, &leaves[0], Some(&leaves[1]))
+                .unwrap();
+            let loss = pred.mse_loss(&tv).unwrap();
+            store.backward(tape, &loss).unwrap()
+        }
+
+        fn flat(store: &DeviceParamStore, tape: &Tape) -> Vec<f32> {
+            store
+                .sync_to_host(tape)
+                .unwrap()
+                .iter()
+                .flat_map(|t| t.host_slice().to_vec())
+                .collect()
+        }
+
+        fn bits(v: &[f32]) -> Vec<u32> {
+            v.iter().map(|x| x.to_bits()).collect()
+        }
+
+        const X: [f32; 8] = [1.0, 2.0, -1.0, 0.5, 0.25, -2.0, 1.5, 1.0];
+        const T: [f32; 8] = [0.0, 1.0, 2.0, -1.0, 0.5, 0.5, -0.5, 1.0];
+
+        fn sgd_cfg() -> SgdConfig {
+            let mut c = SgdConfig::new(0.05);
+            c.momentum = 0.9;
+            c
+        }
+
+        #[test]
+        fn distributed_world_size_one_is_bit_identical_to_step() {
+            for resident in [false, true] {
+                let (w, b) = init_params();
+                let tape_a = mk_tape(resident);
+                let mut a = DeviceParamStore::new(&tape_a, &[&w, &b]).unwrap();
+                let tape_b = mk_tape(resident);
+                let mut s = DeviceParamStore::new(&tape_b, &[&w, &b]).unwrap();
+                let mut c = comm(establish_group(1).pop().unwrap());
+                for _ in 0..3 {
+                    let ga = fwd_bwd(&tape_a, &mut a, &X, &T);
+                    a.step(&tape_a, &ga, &sgd_cfg()).unwrap();
+                    let gb = fwd_bwd(&tape_b, &mut s, &X, &T);
+                    step_sgd(&mut s, &tape_b, &gb, &sgd_cfg(), &mut c).unwrap();
+                    assert_eq!(
+                        bits(&flat(&a, &tape_a)),
+                        bits(&flat(&s, &tape_b)),
+                        "resident={resident}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn distributed_world_size_one_adam_passes_through_to_existing_step() {
+            let (w, b) = init_params();
+            let tape = mk_tape(false);
+            let mut s = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+            let mut c = comm(establish_group(1).pop().unwrap());
+            let g = fwd_bwd(&tape, &mut s, &X, &T);
+            let e1 = step_adam(&mut s, &tape, &g, &AdamConfig::default(), &mut c).unwrap_err();
+            assert!(matches!(
+                e1,
+                DistributedStepError::Backend(BackendError::Unsupported(_))
+            ));
+            let e2 = step_adamw(&mut s, &tape, &g, &AdamWConfig::default(), &mut c).unwrap_err();
+            assert!(matches!(
+                e2,
+                DistributedStepError::Backend(BackendError::Unsupported(_))
+            ));
+        }
+
+        /// 2 ランク（半分ずつ）の k ステップ後のパラメータ。rank0／rank1 の順。
+        fn run_two_ranks(resident: bool, steps: usize) -> Vec<Vec<f32>> {
+            let links = establish_group(2);
+            thread::scope(|sc| {
+                let hs: Vec<_> = links
+                    .into_iter()
+                    .enumerate()
+                    .map(|(r, l)| {
+                        sc.spawn(move || {
+                            let (w, b) = init_params();
+                            let tape = mk_tape(resident);
+                            let mut st = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+                            let mut c = comm(l);
+                            let (x, t) = (&X[r * 4..r * 4 + 4], &T[r * 4..r * 4 + 4]);
+                            for _ in 0..steps {
+                                let g = fwd_bwd(&tape, &mut st, x, t);
+                                step_sgd(&mut st, &tape, &g, &sgd_cfg(), &mut c).unwrap();
+                            }
+                            flat(&st, &tape)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            })
+        }
+
+        #[test]
+        fn distributed_two_ranks_half_batch_matches_full_batch() {
+            for resident in [false, true] {
+                let (w, b) = init_params();
+                let tape = mk_tape(resident);
+                let mut full = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+                for _ in 0..3 {
+                    let g = fwd_bwd(&tape, &mut full, &X, &T);
+                    full.step(&tape, &g, &sgd_cfg()).unwrap();
+                }
+                let want = flat(&full, &tape);
+                let got = run_two_ranks(resident, 3);
+                assert_eq!(bits(&got[0]), bits(&got[1]), "ランク間で bit 一致しない");
+                for (g, w) in got[0].iter().zip(&want) {
+                    assert!(
+                        composite_close_f32(*g, *w),
+                        "resident={resident} got={g} want={w}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn distributed_two_ranks_adam_surfaces_unsupported_after_all_reduce() {
+            let links = establish_group(2);
+            let errs: Vec<_> = thread::scope(|sc| {
+                let hs: Vec<_> = links
+                    .into_iter()
+                    .enumerate()
+                    .map(|(r, l)| {
+                        sc.spawn(move || {
+                            let (w, b) = init_params();
+                            let tape = mk_tape(false);
+                            let mut st = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+                            let mut c = comm(l);
+                            let g =
+                                fwd_bwd(&tape, &mut st, &X[r * 4..r * 4 + 4], &T[r * 4..r * 4 + 4]);
+                            step_adam(&mut st, &tape, &g, &AdamConfig::default(), &mut c)
+                                .unwrap_err()
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for e in errs {
+                assert!(matches!(
+                    e,
+                    DistributedStepError::Backend(BackendError::Unsupported(_))
+                ));
+            }
+        }
+
+        #[test]
+        fn distributed_peer_failure_leaves_params_untouched() {
+            let mut links = establish_group(2);
+            drop(links.pop());
+            let mut c = comm(links.pop().unwrap());
+            let (w, b) = init_params();
+            let tape = mk_tape(false);
+            let mut st = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
+            let before = flat(&st, &tape);
+            let g = fwd_bwd(&tape, &mut st, &X, &T);
+            let t0 = Instant::now();
+            let err = step_sgd(&mut st, &tape, &g, &sgd_cfg(), &mut c).unwrap_err();
+            assert!(
+                t0.elapsed() < Duration::from_secs(20),
+                "ハングしてはならない"
+            );
+            assert!(
+                matches!(
+                    err,
+                    DistributedStepError::Collective(
+                        DistributedError::PeerDisconnected
+                            | DistributedError::Timeout { .. }
+                            | DistributedError::Io(_)
+                    )
+                ),
+                "{err:?}"
+            );
+            assert_eq!(bits(&before), bits(&flat(&st, &tape)));
+            assert!(c.is_poisoned());
+            assert!(st.abandon_pending_forward(), "pending は消費されない");
+
+            // poisoned な communicator は次のステップも更新せずに拒否する。
+            let g2 = fwd_bwd(&tape, &mut st, &X, &T);
+            let err2 = step_sgd(&mut st, &tape, &g2, &sgd_cfg(), &mut c).unwrap_err();
+            assert!(matches!(
+                err2,
+                DistributedStepError::Collective(DistributedError::Poisoned)
+            ));
+            assert_eq!(bits(&before), bits(&flat(&st, &tape)));
+        }
+
+        /// 長さの異なる 3 パラメータで 1 ステップ。`comm` が `None` なら通常 `step`。
+        #[allow(deprecated)]
+        fn three_param_step(comm: Option<RingCommunicator>) -> Vec<f32> {
+            let p0 = tensor(vec![1.0, 2.0, 3.0], &[3]);
+            let p1 = tensor(vec![0.5, -0.5, 0.25, 4.0], &[2, 2]);
+            let p2 = tensor(vec![-1.0, 0.0, 1.0, 2.0, 3.0], &[5]);
+            let tape = mk_tape(false);
+            let mut st = DeviceParamStore::new(&tape, &[&p0, &p1, &p2]).unwrap();
+            let v = st.register_resident_leaves(&tape).unwrap();
+            let t0 = tape.var(&tensor(vec![0.0; 3], &[3]));
+            let t1 = tape.var(&tensor(vec![1.0; 4], &[2, 2]));
+            let t2 = tape.var(&tensor(vec![-2.0; 5], &[5]));
+            let loss = v[0]
+                .mse_loss(&t0)
+                .unwrap()
+                .add(&v[1].mse_loss(&t1).unwrap())
+                .unwrap()
+                .add(&v[2].mse_loss(&t2).unwrap())
+                .unwrap();
+            let g = tape.backward(&loss).unwrap();
+            let cfg = SgdConfig::new(0.1);
+            match comm {
+                Some(mut c) => step_sgd(&mut st, &tape, &g, &cfg, &mut c).unwrap(),
+                None => st.step(&tape, &g, &cfg).unwrap(),
+            }
+            flat(&st, &tape)
+        }
+
+        #[test]
+        fn distributed_flatten_order_matches_layout() {
+            // 全ランク同じ入力なら平均 `(x+x)/2` は厳密に元の勾配と一致するため、通常 `step` と
+            // bit 一致するはず（平坦化・分割の順序と shape を固定する）。
+            let want = three_param_step(None);
+            let links = establish_group(2);
+            let got: Vec<Vec<f32>> = thread::scope(|sc| {
+                let hs: Vec<_> = links
+                    .into_iter()
+                    .map(|l| sc.spawn(move || three_param_step(Some(comm(l)))))
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert_eq!(bits(&got[0]), bits(&want));
+            assert_eq!(bits(&got[1]), bits(&want));
+        }
     }
 }

@@ -1,0 +1,30 @@
+# backend-rocm（fandhe-ai-backend-rocm）: ROCm（AMD GPU）バックエンドの雛形（イシュー #3154・親 #3150）。
+#
+# 役割: HIP ランタイムを `libloading`（第 12 区分）で実行時に動的ロードし、ROCm の有無を
+# probe でき、HIPRTC でコンパイルした f32 GEMM カーネル（#3155）と、内部 opt-in ゲート配下の
+# 線形代数 f64 カーネル（#3444）を起動できる。
+#
+# 依存方向: `tensor-core`（`BackendOps` 等）と `backend-cpu`（ホスト経路の委譲先・parity 参照）へ
+# 依存する（R0・イシュー #3431）。facade からは参照しない（Device への ROCm 追加は #3157）。
+#
+# 公開区分: `publish = false`（workspace 既定を継承）。
+#
+# `libloading` は無条件依存（cfg なし。cudarc の dynamic-loading と同じ構成）。ビルド時に
+# `libamdhip64` へリンクしないため ROCm 非搭載でもビルドが成立する。承認根拠は
+# deps-policy.md 第 12 区分・docs/backend-rocm-hip-ffi-decision.md §5。
+[package]
+name = "fandhe-ai-backend-rocm"
+description = "ROCm（AMD GPU）バックエンドの雛形（HIP を実行時に動的ロードする。非公開）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libloading.workspace = true
+# `impl BackendOps for RocmBackendOps`（src/ops.rs）の trait・Tensor・エラー型。workspace 内の path 依存で
+# 許容依存区分（外部クレート）の追加には当たらない。`publish = false` のため `version` は付けない
+# （crates.io 公開する場合は version の併記が必要。公開可否は所有者判断・被覆計画 §8 の Q2）。
+fandhe-ai-tensor-core = { path = "../tensor-core" }
+# sum/max のホスト経路（R3 でカーネル化するまで）の委譲先と、テストの CPU 参照。
+fandhe-ai-backend-cpu = { path = "../backend-cpu" }

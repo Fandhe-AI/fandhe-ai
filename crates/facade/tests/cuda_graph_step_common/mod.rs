@@ -130,8 +130,8 @@ pub type TrainOnCudaResult = (
 /// NT/TN 形状であれば resident staging（`GradStaging`）へデバイス側で
 /// 直接書き込まれるようになった（それ以外の形状はホスト経路
 /// `ops.gemm_fp32_strict` へフォールバック）。strict 版
-/// `resident_grads_to_host` は CUDA でも weight slot を `Some`・bias
-/// slot を `None` で返すようになった（`crates/facade/tests/
+/// `resident_grads_to_host` は CUDA でも weight slot を `Some` で返す
+/// ようになった（bias slot も #3204 以降は resident 経由で `Some`）（`crates/facade/tests/
 /// device_param_store_backend_parity.rs::assert_grad_readout_contract`
 /// が別途検証。CPU と同じ扱い）。**Metal は #1566（PR #1659）以降 bias
 /// slot も resident 経由で `Some` を返す点が CPU・CUDA と異なる**（イ

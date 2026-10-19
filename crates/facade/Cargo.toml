@@ -94,6 +94,17 @@ bench-harness = { path = "../bench-harness" }
 # のと同種の判断（外部依存の新規追加ではない。ユーザー承認不要）。
 serde_json.workspace = true
 
+# イシュー #3194: resident 分岐で `flat_grad` を確保しないことを
+# `TrackingAllocator`（`#[global_allocator]`）の確保ピークで実測する。静的
+# カウンタをプロセスで共有するため libtest の並列実行を避け、
+# `crates/autodiff/Cargo.toml` の `view_zero_alloc` と同じく
+# `harness = false` の単一スレッドバイナリにする。`bench-harness` は既存の
+# dev-dependency で、依存の追加ではない。
+[[test]]
+name = "device_param_store_resident_no_flat_grad_alloc"
+path = "tests/device_param_store_resident_no_flat_grad_alloc.rs"
+harness = false
+
 # イシュー #1919: `crates/backend-cpu`／`crates/backend-metal` にも同名
 # `examples/gemm_bench.rs` があり、`cargo build --workspace --examples`
 # が出力先（`target/debug/examples/gemm_bench`）の衝突警告を出していた

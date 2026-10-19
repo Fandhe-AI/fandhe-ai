@@ -1,0 +1,17 @@
+# 事前宣言（実測前に固定。2026-10-17。イシュー #3149。結果が出た後に緩めない）
+- 対象（同一 GPU を共有する 2 OS プロセスの分散学習。DDP 初期形のホスト側 ring all-reduce の CUDA 実機確認。実測は GB10 に到達できるセッションが担当）:
+  - crates/facade/tests/distributed_cuda_multiprocess_real_device.rs の cuda_two_process_ddp_on_shared_gpu_matches_single_cuda_and_cpu
+  - W = 2 固定。親がランク 0・子がランク 1。両プロセスとも Device::Cuda(0) を使い、各自の CUDA コンテキストを持つ。待受は loopback のみ（allow_non_loopback は呼ばない）。
+  - モデル・データ・ステップ数は #3148 と同じ（8-16-4 の MLP・全 8 行・各ランク連続 4 行・5 ステップ）。optimizer は SGD(lr 0.05)・Adam・AdamW（既定値）。
+- 判定: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。fandhe_ai_backend_cpu::parity::compare の CompareReport）。厳密判定（全 optimizer × 次の 2 比較で fail_count == 0）。baseline 非後退判定へは切り替えない。
+  - 分散学習のランク 0 の最終パラメータ 対 single_dev（同じ初期値・全 8 行を 1 プロセスで Device::Cuda(0) の resident 経路で学習）
+  - 同 対 single_cpu（同じ条件を CPU tape で学習）
+  - 参考（判定対象外）: single_dev 対 single_cpu。fail の切り分けに使う。
+- 判定に使わないもの: ランク 0 とランク 1 の bit 一致、run A と run B の bit 一致は記録だけ（DDP_GB10 bits_equal 行）。GPU 経路の backward 決定性は未検証（docs/facade-distributed-host-collective-decision.md §6）で、合否の条件にしない。不一致は事実として記録する。
+- その他の合否条件: 子が正常終了すること・シナリオ全体が 600 秒以内に終わること・待受が loopback であること。
+- タイムアウト（NVRTC の JIT による偽 Timeout を避けるため #3148 より長い）: establish 120 秒・io 60 秒・op 180 秒・シナリオ全体 600 秒。establish 後に使い捨て store で 1 ステップを前払いする。値は結果を見て変えない。
+- fail の扱い: tolerance 定数（RELATIVE_TOLERANCE・ABSOLUTE_RESCUE_THRESHOLD）・判定式・既存 baseline・カーネルは変えない。DDP_GB10 行をそのまま記録して申し送る。事後の緩和・ケース除外・再実行での選別はしない。原因調査は別 issue として所有者の判断に委ねる。
+- 実行: README.md の測定コマンドを使う。独立プロセスで 5 回実行する。合否は「5 回すべて pass で pass」。DDP_GB10 行の数値は 5 回の中央値を記録し、run 間の不一致は事実として記録する。
+- 同梱: .rev-stamp（docs/real-hardware-verification-env.md §3 の形式。実測したコミット）。ホスト名・ユーザー名・絶対パスは <cuda-node>・<home> へマスクしてから収録する。
+- 計測中にビルドや別の GPU 負荷を並走させない。
+- 本ディレクトリには実測値をまだ 1 件も入れていない（未実測）。

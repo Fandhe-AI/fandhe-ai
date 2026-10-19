@@ -109,7 +109,7 @@ save／load は引き続き `fandhe-ai` からの再エクスポートが未提�
 利用できません。
 
 このほか、自己修復ループ（`guardrail`・`self-repair`）・ベンチ計測（`bench-harness`）・
-ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。1 段目は非公開）を担う非公開の内部クレートがあります。
+ドキュメントサイト生成（`docs-site`）や HF Hub 連携の補助（`hf-hub`。1 段目は非公開）・ROCm バックエンドの雛形（`backend-rocm`。HIP を実行時に動的ロードする）を担う非公開の内部クレートがあります。
 compat API のサポート境界の詳細は [`docs/compat-api-scope.md`](docs/compat-api-scope.md) を参照してください。
 
 ## バックエンド
@@ -138,14 +138,14 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 以下はライブラリを clone してコントリビュートする開発者向けの情報です（利用者は上記の
 「インストール」「最小コード例」だけで十分です）。
 
-- 依存は許容 11 区分のみを `=x.y.z` 完全固定で管理する。本体 workspace の直接依存として許容するのは第 1〜8 区分・第 10 区分・第 11 区分の 10 区分で、うち第 1〜8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）は本体 workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義済み。第 10 区分の `libc`〈`cfg(unix)` 限定〉は本体 workspace の直接依存として追加する場合も同じくルート `Cargo.toml` で完全固定する（実追加は PR #2348。用途は facade のキャッシュ書き込みへも拡張〈#3124〉）。第 11 区分の `ureq`〈`native-tls`＋`vendored`・`cfg(unix)` 限定・HTTPS 取得用途限定。#3124〉もルート `Cargo.toml` で完全固定する。第 9 区分（`matrixmultiply`／`gemm`。OSS GEMM ベンチ比較対象）は `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト）限定で本体 workspace への混入を禁止する（詳細 → [`.claude/rules/deps-policy.md`](.claude/rules/deps-policy.md)）
+- 依存は許容 12 区分のみを `=x.y.z` 完全固定で管理する。本体 workspace の直接依存として許容するのは第 1〜8 区分・第 10〜12 区分の 11 区分で、うち第 1〜8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）は本体 workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義済み。第 10 区分の `libc`〈`cfg(unix)` 限定〉は本体 workspace の直接依存として追加する場合も同じくルート `Cargo.toml` で完全固定する（実追加は PR #2348。用途は facade のキャッシュ書き込みへも拡張〈#3124〉）。第 11 区分の `ureq`〈`native-tls`＋`vendored`・`cfg(unix)` 限定・HTTPS 取得用途限定。#3124〉もルート `Cargo.toml` で完全固定する。第 12 区分の `libloading`〈HIP／HIPRTC の動的ロード用途限定・`backend-rocm` のみ・無条件依存。#3154〉もルート `Cargo.toml` で完全固定する。第 9 区分（`matrixmultiply`／`gemm`。OSS GEMM ベンチ比較対象）は `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト）限定で本体 workspace への混入を禁止する（詳細 → [`.claude/rules/deps-policy.md`](.claude/rules/deps-policy.md)）
 - 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査
 
 ### 依存追加・更新フロー
 
 依存の追加・更新は必ずユーザー承認を経て行う（`.claude/rules/deps-policy.md`）。承認後の実施手順:
 
-1. **判断理由の記録**: 許容依存 11 区分（`.claude/rules/deps-policy.md`）に列挙されていないクレートを追加する場合（新しい区分を設ける場合を含む）、および既存区分へ新たなクレートを加える場合のいずれも、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
+1. **判断理由の記録**: 許容依存 12 区分（`.claude/rules/deps-policy.md`）に列挙されていないクレートを追加する場合（新しい区分を設ける場合を含む）、および既存区分へ新たなクレートを加える場合のいずれも、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
 2. **バージョン固定**: `Cargo.toml` で `=x.y.z` 完全固定とし、`Cargo.lock` を同一コミットでコミットする
 3. **`docs/license-matrix.md` の同時更新**: 新規・更新する依存のライセンスを確認し、`docs/license-matrix.md`（未作成の場合は同一 PR で作成）を更新する。MPL-2.0 等コピーレフトの推移的混入は推定で記述せず、有効化しうる feature 組合せごとの `cargo tree` 実測で個別に適合確認する
 4. **CI 検査の確認**: `deps-forbidden` ジョブ（禁止リストの `Cargo.lock` 機械検査）・`deny` ジョブ（`deny.toml` によるライセンス監査）が green であることを確認する
@@ -277,10 +277,11 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 FANDHE_AI_DOWNLOAD_TEST_URL=<https の safetensors URL> \
 FANDHE_AI_DOWNLOAD_TEST_SHA256=<64 桁 16 進> \
 FANDHE_AI_DOWNLOAD_TEST_BAD_TLS_URL=<証明書不正のホスト URL。任意> \
+FANDHE_AI_DOWNLOAD_TEST_BLACKHOLE_URL=<応答しない到達不能 IP の https URL。任意。接続タイムアウトの確認> \
 cargo test -p fandhe-ai --test model_download_real_network -- --ignored --nocapture
 ```
 
-URL と SHA-256 は両方設定するか両方未設定にします（両方未設定なら skip 表示で成功し、`make test-ignored` を落としません。片方だけは設定ミスで失敗します）。GB10・macOS 実機での実行と確認は #3173 で行います。
+URL と SHA-256 は両方設定するか両方未設定にします（両方未設定なら skip 表示で成功し、`make test-ignored` を落としません。片方だけは設定ミスで失敗します）。GB10・macOS 実機での実行手順・事前登録・結果は `docs/perf/logs/https-download-3173/` と `docs/model-download-design.md` §22（#3173）に記録します。
 
 ## CI
 

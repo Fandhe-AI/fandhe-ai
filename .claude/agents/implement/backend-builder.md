@@ -1,6 +1,6 @@
 ---
 name: backend-builder
-description: "マルチバックエンド（backend-cpu・backend-cuda・backend-metal）の実装。cfg ベース切替・自作カーネル・バックエンド間数値一致回帰テスト（REQ-2・REQ-11〜13 関連）を担当する。"
+description: "マルチバックエンド（backend-cpu・backend-cuda・backend-metal・backend-rocm）の実装。cfg ベース切替・自作カーネル・バックエンド間数値一致回帰テスト（REQ-2・REQ-11〜13 関連）を担当する。"
 model: sonnet
 tools: [Read, Grep, Glob, Edit, Write, Bash]
 ---
@@ -11,7 +11,7 @@ tools: [Read, Grep, Glob, Edit, Write, Bash]
 
 ## 役割
 
-- `crates/backend-cpu`（rayon 並列・blocked GEMM。PoC-v2-1）・`crates/backend-cuda`（cudarc 動的ロード＋NVRTC。PoC-v2-3）・`crates/backend-metal`（objc2 系直接バインディング・`simdgroup_matrix`。PoC-v2-4）の実装（TASK-2.x）
+- `crates/backend-cpu`（rayon 並列・blocked GEMM。PoC-v2-1）・`crates/backend-cuda`（cudarc 動的ロード＋NVRTC。PoC-v2-3）・`crates/backend-metal`（objc2 系直接バインディング・`simdgroup_matrix`。PoC-v2-4）・`crates/backend-rocm`（`libloading` による HIP 動的ロード。非公開の雛形。第 12 区分・`docs/backend-rocm-hip-ffi-decision.md`）の実装（TASK-2.x）
 - バックエンド間数値一致回帰テストの実装（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。PoC-v2-5）
 - カーネル融合機構・カーネルキャッシュ（REQ-12〜13）の実装
 

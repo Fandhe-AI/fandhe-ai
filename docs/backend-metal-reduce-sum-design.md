@@ -143,8 +143,8 @@ CPU 参照実装（`fandhe_ai_backend_cpu::reduction::sum`）と **bit 完全
 
 ## 8. スコープ外（後続イシューへ引き継ぐ）
 
-- `max`／`min`／`mean` の Metal カーネル自体（`sum` は #1896 で結線
-  済み。`argmax`／`argmin` は #1951 で実装済み〈§11〉。`mean` は
+- `mean` の Metal カーネル自体（`sum` は #1896、`min` は #2155〈§13〉、
+  `max` は #3475〈§14〉で結線済み。`argmax`／`argmin` は #1951 で実装済み〈§11〉。`mean` は
   `sum` の結果をホスト側で 1 回除算する合成実装のため対象外のまま
   自動的に有効化されている）
 - M4 Max 実機での結線後の実測（§9・11 件の backward テスト判定不能の
@@ -526,3 +526,62 @@ argmax／argmin と同じ迂回経路）。
   一致・backward bit 一致）。**未実測**（本実装環境は Linux のため
   Mac 実機実測は申し送り。`docs/perf/logs/gpu-min-log-softmax-2155/
   README.md` 参照）。
+
+## 14. `max`（イシュー #3475）
+
+#3164 の Mac mini 実測（PR #3468）で `metal_dropout_embedding_bag_bit_exact`
+が `MetalBackendOps::max` の常時 `Unsupported` により panic した
+（`EmbeddingBagMode::Max` が `Var::max` を呼ぶ。`Var::max`／`amax`／
+`Op::Max` の再計算はホストフォールバックを持たない）。本節はその解消
+として `max` の GPU カーネルを結線した記録である。
+
+### 14.1 数値契約（CPU 参照実装と bit 一致）
+
+- CPU 参照 `reduction::max` は `fold(NEG_INFINITY, f32::max)` で、max は
+  丸めを伴わないため **bit 一致**を主張する（§13 の `min` は ±0 を同値と
+  して扱い値一致のみ）。
+- aarch64 の CPU は `fmaxnm` lowering により、±0 混在時に順序に関係なく
+  `+0` を返し、quiet／signaling NaN とも無視し、全 NaN なら `-inf` を返す
+  （計画時に M4 Max で実測。Rust の `f32::max` は ±0 の返り値を保証しない
+  ため言語仕様ではなく実測挙動）。
+- GPU／ホストモデルは `+0 > -0` を区別する全順序キー（`red_max_key`／
+  `reduce_model::max_key`。`arg_key` から `-0 → +0` 正規化を除いたもの）で
+  比較し、NaN（指数部全 1 かつ仮数部非零）は読み飛ばす。単位元は `-inf`。
+  比較は整数のみで可換・結合的のため、CPU の rayon 分割と GPU 2 段構成の
+  結合順序の違いに依存しない。
+- x86_64 の CPU `f32::max` の ±0 は保証外のため、±0 の CPU 比較 assert は
+  `cfg(target_arch = "aarch64")` に限り、それ以外は値一致で比べる。
+  実機の正式判定は Mac mini の `#[ignore]` テストで行う。差異が出ても
+  tolerance・判定は緩めず記録して所有者へ報告する。
+
+### 14.2 実装構成
+
+- `shaders/reduce.metal`: `reduce_max_all_chunk_f32`／
+  `reduce_max_all_finalize_f32`／`reduce_max_axis_f32`（境界検査
+  `gid >= num_chunks`／`gid != 0u`／`gid >= lanes`、添字は `ulong`）。
+- `src/reduce.rs`: `run_max_all_f32`／`run_max_axis_f32`。既存の
+  `encode_sum_*` を流用し新規 `unsafe` なし。
+- `src/reduce_model.rs`: `max_key`／`max_all_chunked`／`max_axis_lane`。
+- `src/ops.rs::MetalBackendOps::max`: `min` と同一手順。
+
+### 14.3 挙動変更の記録
+
+従来は常に `Unsupported` だったものが実際に計算される。範囲外 `dim` は
+`Unsupported` から `ShapeMismatch` に、空縮約は `Unsupported` から
+`KernelLaunchFailed("empty reduction for op \"max\"")`（CPU と同分類）に
+変わる。カーネル引数上限超過の `Unsupported` は `AutodiffError::Backend`
+として伝わる（`sum` と同じ）。`Var::max`／`amax`／`max_dims`／
+`EmbeddingBag(Max)` などが Metal で動くようになる。
+
+### 14.4 テスト構成と実測状況
+
+- ホストモデル単体テスト（`reduce_model.rs`）・証跡テスト
+  （`reduce_source_evidence.rs`。max 3 カーネルと境界検査 4 回出現）。
+- `#[ignore]` 実機: `reduce_parity.rs::metal_max_*`（signaling NaN は
+  別関数）・`backend_ops_real_device.rs::backend_ops_max_matches_cpu_bit_exact`・
+  `typed_ops_f16_parity.rs`／`typed_bf16.rs` の max・
+  `facade/tests/reduce_backend_parity.rs::metal_max_all_and_axis_*`。
+- 実測: 実装者の開発機（M4 Max）で上記 `--ignored` が全て pass した
+  smoke 確認のみ（記録には使わない）。**Mac mini（`METAL_NODE`）での
+  正式実測と `metal_dropout_embedding_bag_bit_exact` の測り直しは未実施
+  （undetermined）**。受け入れ基準は Mac mini 実測後に確定する。

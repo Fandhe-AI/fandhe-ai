@@ -228,3 +228,244 @@ fn gemm_fp32_strict_into_rejects_out_on_different_ordinal_on_real_device() {
     );
     assert_eq!(out.device(), Device::Cuda(device.ordinal()));
 }
+
+// ---------------------------------------------------------------------
+// bias 勾配のデバイス縮約（イシュー #3204）
+//
+// `gemm_fp32_strict_into_with_bias_reduce_tracked` が weight を
+// `gemm_fp32_strict` と bit 一致で、bias を「`f64` アキュムレータで行昇順に
+// 加算し最後に 1 回 `f32`（縮約軸長 1 は直接コピー）」のホスト参照と bit 一致
+// で書くことを確認する。NaN のみ payload がハードウェア依存のためクラス一致。
+// ---------------------------------------------------------------------
+
+/// `autodiff::eval::reduce_bias_grad_rows` と同一契約のホスト参照
+/// （`backend-cuda` は `autodiff` に依存できないため独立に再実装する）。
+fn host_bias_reference(b: &Tensor<f32>) -> Vec<f32> {
+    let data = contiguous_slice(b);
+    let (rows, cols) = (b.shape()[0], b.shape()[1]);
+    if rows == 1 {
+        return data[..cols].to_vec();
+    }
+    let mut acc = vec![0f64; cols];
+    for r in 0..rows {
+        for (c, a) in acc.iter_mut().enumerate() {
+            *a += f64::from(data[r * cols + c]);
+        }
+    }
+    acc.into_iter().map(|v| v as f32).collect()
+}
+
+/// NaN 同士はクラス一致、それ以外は bit 完全一致（`-0.0` と `+0.0` も区別）。
+fn assert_bits_or_nan_class_eq(actual: &[f32], expected: &[f32], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: 長さ不一致");
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        if a.is_nan() || e.is_nan() {
+            assert!(
+                a.is_nan() && e.is_nan(),
+                "{what}[{i}]: NaN クラス不一致 {a} vs {e}"
+            );
+        } else {
+            assert_eq!(a.to_bits(), e.to_bits(), "{what}[{i}]: {a} vs {e}");
+        }
+    }
+}
+
+/// weight（`[m, n]`）の前後どちらかに bias（`n`）を置いて検証する。
+/// `bias_first == true` なら bias を weight より前に置く。
+fn check_bias_reduce(
+    cuda_ops: &CudaBackendOps,
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    bias_first: bool,
+    label: &str,
+) {
+    use fandhe_ai_tensor_core::DispatchFailureCell;
+    let mem = cuda_ops.memory_ops().expect("MemoryOps");
+    let (m, n) = (a.shape()[0], b.shape()[1]);
+    let expected_w = cuda_ops.gemm_fp32_strict(a, b).unwrap();
+    let expected_b = host_bias_reference(b);
+
+    let total = m * n + n + 8;
+    let (w_off, b_off) = if bias_first {
+        (n + 4, 2)
+    } else {
+        (3, m * n + 3 + 2)
+    };
+    let mut out = mem.alloc_zeroed(&[total]).unwrap();
+    // 範囲外を NaN で事前に埋め、書き込み範囲外が不変であることを確認する。
+    let sentinel = tensor(vec![f32::NAN; total], &[total]);
+    mem.upload_into(&sentinel, &mut out, 0).unwrap();
+
+    let token = DispatchFailureCell::default();
+    let filled = cuda_ops
+        .gemm_fp32_strict_into_with_bias_reduce_tracked(
+            a,
+            b,
+            &mut out,
+            w_off,
+            Some((b_off, n)),
+            &token,
+        )
+        .unwrap();
+    assert!(filled, "{label}: bias を書いたら Ok(true)");
+    let all = contiguous_slice(&mem.download(&out).unwrap());
+    assert_bits_or_nan_class_eq(
+        &all[w_off..w_off + m * n],
+        &contiguous_slice(&expected_w),
+        &format!("{label} weight"),
+    );
+    assert_bits_or_nan_class_eq(
+        &all[b_off..b_off + n],
+        &expected_b,
+        &format!("{label} bias"),
+    );
+    for (i, v) in all.iter().enumerate() {
+        let inside = (w_off..w_off + m * n).contains(&i) || (b_off..b_off + n).contains(&i);
+        if !inside {
+            assert!(v.is_nan(), "{label}: 範囲外 [{i}] が書き換えられた: {v}");
+        }
+    }
+}
+
+/// TN・NT・NN フォールバックで bias が `gemm_fp32_strict`／ホスト参照と bit
+/// 一致し、weight の前後どちらの配置でも範囲外が不変であること。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn gemm_fp32_strict_into_bias_reduce_matches_host_reference_on_real_device() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let cuda_ops = CudaBackendOps::new(device.ordinal());
+
+    // (m, k, n): TN は x_t[k, m] @ g[m, n]、NT は g[m, k] @ w_t[k, n]。
+    for &(m, k, n) in &[
+        (1usize, 1usize, 1usize),
+        (4, 8, 4),
+        (37, 65, 33),
+        (64, 256, 784),
+        (128, 96, 128),
+        (5, 1, 7), // NT・NN の縮約軸長 1（直接コピー・-0.0 保持の分岐）
+        (6, 9, 1), // n == 1
+    ] {
+        for bias_first in [false, true] {
+            // TN: 縮約軸は g の行（m 行）。
+            let x = tensor(random_matrix(0x7000 + m as u64, m * k), &[m, k]);
+            let x_t = x.transpose_2d().unwrap();
+            let g = tensor(random_matrix(0x7100 + n as u64, m * n), &[m, n]);
+            check_bias_reduce(
+                &cuda_ops,
+                &x_t,
+                &g,
+                bias_first,
+                &format!("TN m={m} k={k} n={n}"),
+            );
+
+            // NT: 縮約軸は w_t の行（k 行）。
+            let g2 = tensor(random_matrix(0x7200 + m as u64, m * k), &[m, k]);
+            let w = tensor(random_matrix(0x7300 + n as u64, n * k), &[n, k]);
+            let w_t = w.transpose_2d().unwrap();
+            check_bias_reduce(
+                &cuda_ops,
+                &g2,
+                &w_t,
+                bias_first,
+                &format!("NT m={m} k={k} n={n}"),
+            );
+
+            // NN（フォールバック）。
+            let a = tensor(random_matrix(0x7400 + m as u64, m * k), &[m, k]);
+            let b = tensor(random_matrix(0x7500 + n as u64, k * n), &[k, n]);
+            check_bias_reduce(
+                &cuda_ops,
+                &a,
+                &b,
+                bias_first,
+                &format!("NN m={m} k={k} n={n}"),
+            );
+        }
+    }
+}
+
+/// 相殺列・`-0.0`・NaN・±inf を含む入力でホスト参照（f64 逐次和）と一致する
+/// こと。f32 のみの縮約では `[1e8, 1.0, -1e8]` で 1.0 が失われる。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn gemm_fp32_strict_into_bias_reduce_special_values_on_real_device() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let cuda_ops = CudaBackendOps::new(device.ordinal());
+
+    // TN: 縮約軸 3 行の g（x_t は [2, 3]）。
+    let g = tensor(
+        vec![
+            1e8,
+            -0.0,
+            f32::NAN,
+            f32::INFINITY,
+            1.0,
+            -0.0,
+            1.0,
+            f32::NEG_INFINITY,
+            -1e8,
+            -0.0,
+            2.0,
+            1.0,
+        ],
+        &[3, 4],
+    );
+    let x = tensor(random_matrix(0x8000, 3 * 2), &[3, 2]);
+    let x_t = x.transpose_2d().unwrap();
+    check_bias_reduce(&cuda_ops, &x_t, &g, false, "special TN");
+
+    // 縮約軸長 1 の `-0.0` は直接コピーで保たれる。
+    let g1 = tensor(vec![-0.0, 0.0, -0.0, 1.5], &[1, 4]);
+    let x1 = tensor(random_matrix(0x8100, 2), &[1, 2]);
+    let x1_t = x1.transpose_2d().unwrap();
+    check_bias_reduce(&cuda_ops, &x1_t, &g1, true, "special TN k=1");
+}
+
+/// `bias = None` は従来どおり weight のみを書き `Ok(false)` を返し、範囲外
+/// bias オフセットは weight も書かずに `InvalidArgument` で拒否すること。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn gemm_fp32_strict_into_bias_none_and_invalid_range_on_real_device() {
+    use fandhe_ai_tensor_core::DispatchFailureCell;
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let cuda_ops = CudaBackendOps::new(device.ordinal());
+    let mem = cuda_ops.memory_ops().expect("MemoryOps");
+    let (m, k, n) = (4usize, 6usize, 5usize);
+    let x = tensor(random_matrix(0x9000, m * k), &[m, k]);
+    let x_t = x.transpose_2d().unwrap();
+    let g = tensor(random_matrix(0x9100, m * n), &[m, n]);
+    let token = DispatchFailureCell::default();
+
+    let expected = cuda_ops.gemm_fp32_strict(&x_t, &g).unwrap();
+    let mut out = mem.alloc_zeroed(&[k * n]).unwrap();
+    let filled = cuda_ops
+        .gemm_fp32_strict_into_with_bias_reduce_tracked(&x_t, &g, &mut out, 0, None, &token)
+        .unwrap();
+    assert!(!filled, "bias=None は Ok(false)");
+    assert_eq!(
+        contiguous_slice(&mem.download(&out).unwrap()),
+        contiguous_slice(&expected)
+    );
+
+    let mut out2 = mem.alloc_zeroed(&[k * n + 2]).unwrap();
+    let err = cuda_ops
+        .gemm_fp32_strict_into_with_bias_reduce_tracked(
+            &x_t,
+            &g,
+            &mut out2,
+            0,
+            Some((k * n, n)), // bias 範囲が out を超える
+            &token,
+        )
+        .unwrap_err();
+    assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+    assert!(
+        contiguous_slice(&mem.download(&out2).unwrap())
+            .iter()
+            .all(|v| *v == 0.0),
+        "Err のとき weight も書かれていないこと"
+    );
+}

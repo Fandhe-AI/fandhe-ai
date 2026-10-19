@@ -146,3 +146,50 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 ### #3138（CUDA 実機 parity Stage C）の実施内容
 
 事前登録規則・測定手順・記入欄と facade 経由ゲート ON の `#[ignore]` テスト（`crates/facade/tests/linalg_gpu_optin_cuda_parity.rs`）を用意した（`docs/perf/logs/cuda-linalg-parity-3138/`）。GB10 での実測は未実施（申し送り）。判定方式（§5）・tolerance・入力集合は不変。
+
+### #3444（ROCm linalg 6 演算の移植）の実施内容
+
+`docs/backend-rocm-ops-coverage-plan.md` §4・§7 の R13。`linalg_inv`・`solve`・`det`・`cholesky`・`qr`・`eigh` の `double` カーネルを HIPRTC へ移植した（`linalg_svd`・`matrix_norm` は CUDA も `Unsupported` のため対象外）。
+
+- **実装範囲**: 単体で動く実行器（`RocmLinalgLu`・`RocmLinalgFactor`。`crates/backend-rocm/src/linalg.rs`）・ソース生成（`kernels_linalg.rs`・`kernels_linalg_factor.rs`）・ゲート（`backend_rocm::linalg::{set_gpu_linalg_enabled, gpu_linalg_enabled}`。CUDA とは別の `static`・既定 OFF・`SeqCst`）・ホスト側モデル（`linalg_model.rs`）まで。`BackendOps` への結線（`RocmBackendOps` の 6 メソッド・`Unsupported` の返却・ゲート → 形状 → サイズ → `n == 0` → デバイスの検査順序）は **R0（#3431）が未マージのため未実装**で、R0 のマージ後に同じ検査順序で足す（`tests/linalg_absent.rs` にも追記）。facade は `backend-rocm` を参照しないため保留ガードは不要。
+- **FMA（CUDA 版との意図的な差分）**: CUDA 版は `--fmad` 既定 ON のため `__dmul_rn` 等で縮約を避けたが、HIP-Clang の contraction 既定は異なり、`__d*_rn` が HIPRTC の暗黙ヘッダ内の通常演算子であればソース先頭の pragma はその内部に効かず縮約を保証できない。そこで各ソースの先頭に `#pragma clang fp contract(off)` を置き、素の `*`・`+`・`-`・`/` と正しく丸める `sqrt`（double）で書いた（Metal の linalg と同じ先例）。`fma(`・`__builtin_fma*`・`#include` は使わない（ソース内容テストで固定）。**issue 本文の「`__builtin_fmaf` で明示」は matmul 系（f32 SIMT）の FMA 契約向けのテンプレート文で、線形代数は §4 の別の軸（全経路 `double`・CPU 参照が `mul_add` を使わない）に従う。FMA 契約は変更していない。** HIP の double 組み込み関数の実装形・縮約の保証を一次情報で確認できていないため、`__d*_rn` は採用していない（確認できた場合に限り併用可とする判断規則）。実命令（`v_fma_f64` の不在）・`fabs`/`copysign`/`isfinite`/`atomicExch(int*, int)` が暗黙ヘッダで使えること・pragma がファイルスコープで効くことは **未確認**で、#3159 段 B の補助診断（オフラインの `clang -x hip -S`）へ申し送る。
+- **f64 アキュムレータ契約**: 全経路 `double` で縮約は thread 0 が添字昇順に逐次加算する（CUDA と同じ）ため、正規化統計・勾配の長軸縮約の契約は直接は当たらない。
+- **wave64**: shfl・warp 幅を使わず共有メモリの木構造縮約と `__syncthreads` のみ。block 次元 256（LU・分解系）・128（代入）は 2 のべき乗かつ 64 の倍数で、const assert で固定した。
+- **`hipMalloc` は 0 初期化しない**: CUDA の `alloc_zeros` に頼っていた `perm`・`status`・`solve_err`・出力バッファを含む全バッファを起動前に upload する。`status`・`refl_valid` は `{0,1}` 以外の sentinel（-1）を書いて読み戻し、契約外（未起動を含む）は `LinalgKernelStatusInvalid` にして成功扱いにしない。
+- **CUDA との差分（安全側・数値不変）**: cholesky・eigh の `total = n*n` を走るストライドループ変数を `long long` にした（QR が既にそうしている理由と同じで、`idx += BLOCK` が `INT_MAX` を超える符号付きオーバーフロー UB を避ける）。eigh のフロベニウスノルム縮約の添字も同様。
+- **検証（実機なし）**: 5 カーネルを f64 で逐語に再現したホスト側モデルを、本番と同じホスト後処理へ通し、`CpuBackendOps::linalg_*` と統一複合判定（`assert_parity`）および bit 一致で照合した（n は block 境界の前後を含む 1・2・3・17・64・65・129・257、`1e±20` 倍・`1e20 × I₂`・特異・非正定値・eigh 未収束・perm の値域違反・QR の `m<n`／`m>n`／零列）。モデルは CPU と bit 一致した。tolerance・baseline・定数は変更していない。
+- **実機（MI300X・gfx942）**: 未実測。`tests/linalg_real_device.rs`（`#[ignore]`）を用意し、`docs/perf/logs/rocm-parity-3159/README.md` に記入欄を追加した。実測は #3159 段 B。
+
+## 11. #3140（Stage D）: facade 公開形の承認依頼と公開保留の記録
+
+#3140 は GPU 線形代数の opt-in 関数を facade へ公開し、`api_surface.rs` の否定ガード（`facade_does_not_expose_gpu_linalg_optin*`）を正ガードへ反転する。
+着手時点（2026-10-16・origin/main a20d036f）で公開の前提 2 条件がどちらも満たされていないため、**コード公開は行わず本節に公開形の承認依頼だけを記録した**（前例: #3115→#3116・#3095→#3096・#3118→#3119 の二段構成）。
+
+### 11.1 ゲート状況
+
+| ゲート | 状況 | 根拠 |
+|---|---|---|
+| G1: 公開形の所有者承認 | **取得済み（2026-10-17）** | §11.2 の推奨形 9 項目を所有者が承認した（#3140 コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3140#issuecomment-6227907703）。既定 ON（Stage E）・tolerance／baseline・新しい `unsafe`・依存は承認範囲外。着手時点（a20d036f）では未取得で、D-C の承認対象は GPU 線形代数の `unsafe` のみだった |
+| G2: #3138・#3139 の実機 parity | **未実測** | `docs/perf/logs/cuda-linalg-parity-3138/README.md`・`docs/perf/logs/metal-linalg-parity-3139/README.md` がともに未実測 |
+
+「D-C の延長」と解釈して G1 を迂回しない（着手時点の判断。G1 はその後に個別承認で取得した）。
+
+**所有者の判断（2026-10-17）**: G2 が未充足のため、#3140 は「公開形の記録（第 1 段）」として閉じる。公開の実装（第 2 段・§11.3）は #3018 ツリー外の #3405 に切り出し、#3138・#3139 の実機 parity 実測が pass してから着手する（#3133 コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3133#issuecomment-6227908086）。
+
+### 11.2 推奨する公開形（承認依頼）
+
+1. CUDA: `pub fn set_cuda_gpu_linalg_enabled(enabled: bool)`／`pub fn cuda_gpu_linalg_enabled() -> bool`
+2. Metal: `pub fn set_metal_gpu_linalg_enabled(enabled: bool)`／`pub fn metal_gpu_linalg_enabled() -> bool`。どちらも `#[cfg(target_os = "macos")]`（facade の `fandhe-ai-backend-metal` 依存が macOS 限定のため）
+3. getter を付ける（先例 `cuda_graph_infer_enabled`・`metal_split_k_gemm_enabled` 等と同形）
+4. 本体は backend のゲート関数への 1 行委譲のみ。`pub use` による再エクスポート・新しい演算名・モジュール公開は足さない
+5. 既定 OFF・プロセスワイド（`Device` 単位ではない）・環境変数は足さない
+6. 数値契約: ゲート OFF は変更前（ホスト f64）と bit 同一。CUDA は f64 内部計算で精度クラス不変。**Metal は f32 のため精度クラスが変わる**（判定は §5: 統一複合判定・厳密ゼロ fail・入力集合 κ ≤ 1e3）
+7. 範囲外の Op（Metal の eigh・SVD・slogdet／pinv／lstsq 等）は従来どおり `Unsupported` でホスト f64 へフォールバック
+8. CUDA 非搭載でも setter は呼べる（フラグのみ。driver に触れず panic しない）
+9. `fandhe-ai =0.11.0` に対して追加のみ
+
+### 11.3 承認後の作業（Phase 2。#3405 で追跡）
+
+G1 の承認コメント URL を特定し、G2 の実測 pass を確認したうえで、(a) `lib.rs` に上記関数を追加、(b) `api_surface.rs` の否定ガード 2 件を「シグネチャ・委譲本体の固定＋allowlist 方式の違反スキャナ＋正のプローブ自己テスト＋到達性テスト」へ置換、(c) 常時実行の受入テスト `gpu_linalg_optin.rs` と実機 parity テスト（CUDA は `GateOn` を facade 経由へ、Metal は新規）、(d) backend 側 doc の「facade へ再公開しない」更新、(e) 本節への実装記録と `compat-api-scope.md` の適用記録を行う。既定 ON（Stage E）は別承認で本件の範囲外。
+
+§9 の「facade 公開の実施」は #3405 で扱う（公開形は承認済み・実機 parity 実測待ち）。

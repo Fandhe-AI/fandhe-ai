@@ -1,0 +1,190 @@
+//! ROCm（AMD GPU）バックエンドクレート（イシュー #3154・#3155・親 #3150）。
+//!
+//! 役割: HIP ランタイムの有無を probe し、HIPRTC でコンパイルした f32 GEMM カーネル
+//! （`backend-cuda` の `TILED_F32` の移植）を実行する。HIP/HIPRTC は `libloading`（第 12 区分）で
+//! 実行時にロードし、`#[link]` を使わないため ROCm 非搭載環境でもビルド・テストが通る
+//! （cudarc の dynamic-loading と同じ cfg ベース方針。REQ-2・coding-rust.md）。
+//! 線形代数 6 演算（`inv`・`solve`・`det`・`cholesky`・`qr`・`eigh`。#3444）は内部 opt-in ゲート（[`linalg`]。既定 OFF）の背後にある `f64` カーネルで、`RocmLinalgLu`・`RocmLinalgFactor` が実行する。
+//! loss 5 種（mse・huber/smooth_l1・bce・nll・kl_div）と backward（#3436・R5）は `RocmLoss` の
+//! 1 ソース 11 カーネルで、wave 幅（32／64）を `WarpGeometry` から注入した 2 段縮約を使う。
+//! 縮約（R3・#3434）として sum/max/min（[`RocmReduce`]。wave 幅は `WarpGeometry` で注入）と
+//! argmax/argmin（[`RocmArgReduce`]。wave 幅非依存）の HIPRTC カーネルを `RocmBackendOps` へ結線した。
+//! `BackendOps` の骨格（必須 9 メソッド。[`RocmBackendOps`]）は R0（#3431）、縮約系カーネル向けの
+//! wave 幅注入部品は `WarpGeometry`（#3432）、facade の
+//! Device 追加は #3157（所有者判断待ち）、unsafe 監査記録は #3158、実機 parity は #3159。
+//!
+//! 添字系演算（分解案 R8・#3439）として cumsum/cumprod（[`RocmScan`]）・gather/scatter/one_hot
+//! （[`RocmGatherScatter`]）・interpolate の nearest/bilinear（[`RocmInterpolate`]）・sort/topk
+//! （[`RocmSort`]）・unique（[`RocmUnique`]）の HIPRTC カーネルを移植した。いずれもホストのスライスを
+//! 受けて `Vec` を返す実行型で、`BackendOps` への結線は `RocmBackendOps`（#3431・R0）で行う。
+//!
+//! 正規化（分解案 R6・#3437）として rmsnorm・layer_norm・両 backward・batch_norm の train/infer の
+//! HIPRTC カーネル（[`RocmNorm`]。wave 幅は `WarpGeometry` で注入）を移植し、`RocmBackendOps` の
+//! 6 メソッドへ結線した。実機での HIPRTC コンパイル・wave64 parity は #3159。
+//!
+//! elementwise 一式（分解案 R2・#3433）として `add`・`mul`・`relu`・`exp`・`tanh`・`where_cond`・
+//! `masked_fill`（[`RocmElementwise`]）、`scalar_unary`／`scalar_binary`（[`RocmScalarOp`]）、融合
+//! （[`RocmFusedElementwise`]。静的インタプリタカーネルで A03 を守る）の HIPRTC カーネルを移植し、
+//! `RocmBackendOps` へ結線した。いずれも `#pragma clang fp contract(off)` で FMA への暗黙縮約を止める。
+//!
+//! softmax 系（分解案 R4・#3435）として `softmax`・`log_softmax`（[`RocmSoftmax`]）と
+//! `log_softmax_backward`（[`RocmLogSoftmaxBackward`]）の HIPRTC カーネルを移植し、`RocmBackendOps`
+//! へ結線した（wave 幅は `WarpGeometry` 注入。onepass〈動的 SMEM〉経路は移植せず 2 パスのみ）。
+//!
+//! SGD・Adam/AdamW のデバイス常駐 in-place 更新（分解案 R9・#3440）は `RocmBackendOps` の
+//! `sgd_step_device`／`adam_step_device` へ結線した（HIPRTC カーネルは `kernels_optim`。非公開の
+//! `RocmOptim` が同期実行する）。FMA は CPU の `mul_add` 箇所だけ `__builtin_fmaf` で明示する。
+//!
+//! LSTM／GRU セル（分解案 R10・#3441）として pointwise 段と backward 3 本（`lstm_pointwise`・
+//! `lstm_hidden_backward`・`lstm_cell_backward`・`gru_pointwise`・`gru_backward`）の HIPRTC カーネル
+//! （[`RocmRnnCell`]）を移植し、`RocmBackendOps` へ結線した。縮約を持たず wave 幅に依存しない。FMA は
+//! CPU の `mul_add` と同じ 3 か所だけ `__builtin_fmaf` で明示する。実機 parity は #3159。
+//!
+//! 畳み込み・pooling 系（分解案 R7・#3438）として `pad`（[`RocmConstantPad`]）、Conv2d の `im2col`／`col2im`
+//! （[`RocmIm2col`]）、`max_pool2d`／`avg_pool2d`／`adaptive_avg_pool2d`（[`RocmPooling`]）の HIPRTC カーネルを
+//! 移植し、`RocmBackendOps` へ結線した（いずれも wave 幅非依存。col2im・avg 系は `double` アキュムレータ）。
+//!
+//! GEMM 派生（分解案 R11・#3442）として `gemm_resident_rhs`・`gemm_resident_lhs`・`gemm_fp32_strict_into`・
+//! `linear_forward_device` を、R0 の f32 タイル GEMM に bias／ReLU の epilogue とオペランドのオフセット引数を
+//! 足した 1 本の HIPRTC カーネル（[`RocmGemmBiasAct`]）へ結線した。主ループは R0 とバイト同一で、
+//! 常駐オペランドを download せずに計算する。
+//!
+//! デバイス常駐 KV（分解案 R12・#3443）として `paged_kv_append`・`paged_attention_forward` の HIPRTC カーネル
+//! （[`RocmPagedKv`]）を移植し、`RocmBackendOps` へ結線した。縮約順序は CPU 参照と同じ単一の連続ループ（thread 0 の
+//! 逐次 max／和）で wave 幅に依存せず（block 寸法 128・256 は 64 の倍数）、FMA は score・加重和の 2 か所だけ
+//! `__builtin_fmaf` で明示する。実機での HIPRTC コンパイル・wave64 parity は #3159。
+//!
+//! 設計の正本は `docs/backend-rocm-hip-ffi-decision.md`（FFI）と
+//! `docs/backend-rocm-hiprtc-gemm-decision.md`（HIPRTC・GEMM・FMA・wave64）。
+//! facade からは参照しない。
+
+mod arg_reduce;
+#[cfg(test)]
+mod arg_reduce_model;
+mod buffer_handle;
+mod constant_pad;
+#[cfg(test)]
+mod conv_pool_model;
+mod elementwise;
+#[cfg(test)]
+mod elementwise_model;
+mod error;
+#[cfg(test)]
+mod fused_elementwise_model;
+mod gather_scatter;
+#[cfg(test)]
+mod gather_scatter_model;
+mod gemm;
+mod gemm_bias_act;
+#[cfg(test)]
+mod gemm_model;
+mod hip;
+mod hiprtc;
+mod im2col;
+mod interpolate;
+#[cfg(test)]
+mod interpolate_model;
+mod kernel_source;
+mod kernels_arg_reduce;
+mod kernels_constant_pad;
+mod kernels_elementwise;
+mod kernels_fused_elementwise;
+mod kernels_gather_scatter;
+mod kernels_gemm;
+mod kernels_gemm_bias_act;
+mod kernels_im2col;
+mod kernels_interpolate;
+mod kernels_linalg;
+mod kernels_linalg_factor;
+mod kernels_log_softmax_backward;
+mod kernels_loss;
+mod kernels_norm;
+mod kernels_optim;
+mod kernels_paged_kv;
+mod kernels_pooling;
+mod kernels_reduce;
+mod kernels_rnn_cell;
+mod kernels_scalar_op;
+mod kernels_scan;
+mod kernels_softmax;
+mod kernels_sort;
+mod kernels_unique;
+mod launch;
+pub mod linalg;
+#[cfg(test)]
+mod linalg_model;
+mod loss;
+#[cfg(test)]
+mod loss_model;
+mod module;
+mod norm;
+#[cfg(test)]
+mod norm_model;
+mod ops;
+mod optim;
+#[cfg(test)]
+mod optim_model;
+mod paged_kv;
+#[cfg(test)]
+mod paged_kv_model;
+mod pooling;
+mod reduce;
+#[cfg(test)]
+mod reduce_model;
+mod rnn_cell;
+#[cfg(test)]
+mod rnn_cell_model;
+mod scan;
+#[cfg(test)]
+mod scan_model;
+mod shape_util;
+mod softmax;
+#[cfg(test)]
+mod softmax_model;
+mod sort;
+#[cfg(test)]
+mod sort_model;
+mod target;
+mod typed_buffer;
+mod unique;
+#[cfg(test)]
+mod unique_model;
+mod warp_geometry;
+#[cfg(test)]
+mod warp_model;
+
+pub use arg_reduce::RocmArgReduce;
+pub use constant_pad::RocmConstantPad;
+pub use elementwise::{RocmElementwise, RocmFusedElementwise, RocmScalarOp};
+pub use error::RocmError;
+pub use gather_scatter::{RocmGatherScatter, ScatterMode};
+pub use gemm::RocmGemmF32;
+pub use gemm_bias_act::RocmGemmBiasAct;
+pub use im2col::RocmIm2col;
+pub use interpolate::RocmInterpolate;
+pub use kernels_gemm::{GemmF32Tile, GemmSource, render_gemm_f32_source};
+pub use linalg::{LuSolveOutcome, RocmLinalgFactor, RocmLinalgLu};
+pub use loss::RocmLoss;
+pub use norm::{BatchNormTrainHost, LayerNormBackwardHost, RmsNormBackwardHost, RocmNorm};
+pub use ops::RocmBackendOps;
+pub use paged_kv::RocmPagedKv;
+pub use pooling::RocmPooling;
+pub use reduce::RocmReduce;
+pub use rnn_cell::RocmRnnCell;
+pub use scan::RocmScan;
+pub use softmax::{RocmLogSoftmaxBackward, RocmSoftmax};
+pub use sort::RocmSort;
+pub use target::{GfxTarget, parse_gcn_arch_name};
+pub use unique::RocmUnique;
+pub use warp_geometry::{WarpDefines, WarpGeometry};
+
+/// HIP ランタイムをロードでき、デバイスが 1 つ以上あるとき true。
+///
+/// ROCm 非搭載・ロード失敗・デバイス 0・非対応 OS ではすべて false を返し、panic しない。
+/// HIPRTC の有無は含めない（コンパイル経路が型付きエラーを返す）。
+pub fn is_available() -> bool {
+    hip::load()
+        .and_then(|rt| rt.device_count())
+        .map(|n| n >= 1)
+        .unwrap_or(false)
+}

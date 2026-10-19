@@ -38,4 +38,4 @@ CPU 版は同ファイルの属性なしテスト（`matches_pytorch_reference_o
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+| 2026-10-19 | Mac mini（Apple M4） | 上記 Metal（`--lib`。`--ignored --exact --nocapture --test-threads=1`） | pass（1/1・0.05s） | #3166。実行コミット 6570171a・`metal/rev-stamp.txt` は dirty=0。ログ `metal/metal_functional_graph_matches_cpu_reference.log`。GPU 経路かホストフォールバックかは未確認 |

@@ -1,0 +1,18 @@
+# 事前登録規則（#3161 CUDA 実機 parity。実測前に固定し、結果が出た後に緩めない）
+- 公式の実機: DGX Spark GB10（aarch64・sm_121）のみ。他の GPU（RTX 3060 等）の結果は判定に使わない
+- 対象: crates/facade/tests/elementwise_loss_ops_backend_parity.rs の CUDA #[ignore] テスト 4 件
+  cuda_bit_exact_forward_*・cuda_bit_exact_backward_*・cuda_req2_forward_*・cuda_req2_backward_*
+- 想定経路: ../README.md「期待結果」節のとおり（新しい GPU カーネルの parity とは限らない）
+- 判定: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。assert_parity）と、
+  bit_exact／索引の完全一致。厳密ゼロ fail。baseline 方式は使わない
+- fail の扱い: tolerance 定数・判定式・入力集合・テストコードは変えない。事後の緩和・ケース除外・
+  再実行による選別をしない。fail は件数と panic メッセージ中の最大誤差を記録し、是正は別イシューで扱う
+- 実行回数: 独立プロセスで 1 回。例外はテスト開始前の環境起因の失敗（SSH 切断・ドライバロード失敗等）のみで、
+  その場合も失敗ログを残し理由を記録する
+- 実行コマンド（docs/real-hardware-verification-env.md §3・§4.1 の形式）:
+  ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai timeout 1800 cargo test -p fandhe-ai --test elementwise_loss_ops_backend_parity -- --ignored --nocapture --test-threads=1 cuda_'
+- 対象コミット: .rev-stamp（1 行目 sha・2 行目 dirty=<件数>）。dirty=0 以外の実測は無効
+- 同梱物: .rev-stamp・実行ログ・env_info.txt（ドライバ・CUDA／NVRTC・rustc・uname -m）・実行前後の GPU 占有ログ。
+  ホスト名・ユーザー名・絶対パスは <cuda-node>・<home> へ置換してから収録する
+- 計測中はビルドや別の GPU 負荷を並走させない（並列度 1）
+- 本ファイル作成時点では実測値を含まない（未実測）

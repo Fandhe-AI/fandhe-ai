@@ -507,6 +507,13 @@ impl BackendOps for CpuBackendOps {
     /// PyTorch 参照 fixture との parity を優先し `mul_add` を使わない別の
     /// 契約を持つ〈`sgd.rs` 該当コメント参照〉が、本メソッドは 3
     /// バックエンド間一致が目的のため対象が異なる）。
+    ///
+    /// イシュー #3193: 添字ループは境界検査・分岐・早期 return を内包し
+    /// 自動ベクトル化が効かなかったため、ハンドル実体の長さ（param・
+    /// grad・velocity）を書き込み前にすべて検証してから、確定したスライス
+    /// の zip 反復（`sgd_step_slices`）へ委ねる。長さ検証が手動境界検査
+    /// そのもの（REQ-8）で、エラー時はどの要素も更新前のまま。評価順・
+    /// FMA 契約は従前どおり。
     fn sgd_step_device(
         &self,
         param: &mut DeviceBuffer<f32>,
@@ -523,12 +530,14 @@ impl BackendOps for CpuBackendOps {
                 rhs: grad.shape().to_vec(),
             }));
         }
+        let numel = param.numel();
         let grad_handle = grad
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
+        check_sgd_handle_len(grad_handle.data.len(), numel)?;
 
         let use_momentum = config.momentum != 0.0;
-        let mut velocity_handle = match velocity {
+        let velocity_handle = match velocity {
             Some(v) => {
                 if v.device() != Device::Cpu {
                     return Err(BackendError::DeviceMismatch);
@@ -539,10 +548,11 @@ impl BackendOps for CpuBackendOps {
                         rhs: v.shape().to_vec(),
                     }));
                 }
-                Some(
-                    v.downcast_handle_mut::<CpuBufferHandle>()
-                        .ok_or(BackendError::DeviceMismatch)?,
-                )
+                let h = v
+                    .downcast_handle_mut::<CpuBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                check_sgd_handle_len(h.data.len(), numel)?;
+                Some(h)
             }
             None => {
                 if use_momentum {
@@ -556,38 +566,20 @@ impl BackendOps for CpuBackendOps {
         let param_handle = param
             .downcast_handle_mut::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
+        check_sgd_handle_len(param_handle.data.len(), numel)?;
 
-        for j in 0..param_handle.data.len() {
-            let p = param_handle.data[j];
-            let mut g = grad_handle.data[j];
-            if config.weight_decay != 0.0 {
-                g = config.weight_decay.mul_add(p, g);
-            }
-            if use_momentum {
-                // 直前の分岐（`velocity.is_none() && use_momentum` の
-                // 早期 return）により、ここへ到達する時点で
-                // `velocity_handle` は必ず `Some` である。
-                let Some(velocity_handle) = velocity_handle.as_deref_mut() else {
-                    return Err(BackendError::Unsupported(
-                        "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
-                    ));
-                };
-                let prev = velocity_handle.data[j];
-                let b = if config.is_first_step {
-                    g
-                } else {
-                    config.momentum.mul_add(prev, (1.0 - config.dampening) * g)
-                };
-                velocity_handle.data[j] = b;
-                g = if config.nesterov {
-                    config.momentum.mul_add(b, g)
-                } else {
-                    b
-                };
-            }
-            param_handle.data[j] = p - config.lr * g;
-        }
-        Ok(())
+        // momentum 無効時は velocity を検証だけして触らない（従前挙動）。
+        let velocity_slice = if use_momentum {
+            velocity_handle.map(|h| &mut h.data[..numel])
+        } else {
+            None
+        };
+        sgd_step_slices(
+            &mut param_handle.data[..numel],
+            &grad_handle.data[..numel],
+            velocity_slice,
+            config,
+        )
     }
 
     /// `fandhe_ai_autodiff::nn::optim::{adam::Adam::step, adamw::AdamW::
@@ -1488,19 +1480,22 @@ impl BackendOps for CpuBackendOps {
     /// ものであるため `downcast_handle` の直読みだけでゼロコピーに
     /// なる（`gemm_resident_rhs`／`sgd_step_device` と同じモデル）。
     ///
-    /// **bit-exactness 契約**（`docs/inference-forward-fixed-cost-
-    /// design.md` §3.3 (b)）: 旧経路（`Sequential::predict` 等が
-    /// `tape.ops()` 経由で呼ぶ非融合 `gemm` → `add`（bias 行方向複製）
-    /// → `relu` の 3 段合成）と**同一の累積順序**を保つため、本メソッドは
-    /// `gemm_bias_act`／`gemm_resident_rhs` が使う融合カーネル
-    /// （[`gemm_blis_bias_act_parallel`]。bias／act をカーネル内
-    /// epilogue で適用するため tiling 次第で加算順序が変わりうる）を
-    /// 使わず、`gemm`（[`gemm_blis_parallel`]）→ bias 行方向複製加算
-    /// （単一の `a + b` はグルーピングに依らず IEEE 754 で一意に定まる
-    /// ため、ループ構造が異なっても `elementwise::add` と bit-exact）→
-    /// `relu`（`max(x, 0.0)`。`elementwise::relu_slice` と同一定義）の
-    /// 3 段を明示的に合成する。将来 CPU 側に融合カーネル版を追加する
-    /// 場合は、本 doc の bit-exactness 契約ごと見直すこと。
+    /// **実装経路と bit-exactness 契約**（イシュー #3196）: `gemm_bias_act`／
+    /// `gemm_resident_rhs_act` と同一の融合カーネル
+    /// （[`gemm_blis_bias_act_parallel`]）で bias／act を epilogue 適用する。
+    /// epilogue は GEMM 本体が K 全域を累積し終えた後に要素独立で 1 回だけ
+    /// 適用され、GEMM 本体の p 昇順 FMA 連鎖・累積順序は [`gemm_blis_parallel`]
+    /// と同一のため、旧経路（`Sequential::predict` 等が `tape.ops()` 経由で
+    /// 呼ぶ非融合 `gemm` → `add`（bias 行方向複製）→ `relu`）と bit 完全一致
+    /// する（`tests/linear_forward_device_parity.rs` の `fused_epilogue_*`・
+    /// `linear_forward_device_matches_*` が `to_bits` 比較で検証。設計は
+    /// `docs/inference-forward-fixed-cost-design.md` §3.3 (b)）。
+    ///
+    /// **エラー契約**: 未対応の `act` は GEMM 実行前に `BackendError::
+    /// Unsupported` で拒否する（`predict_device_chain` がチェーン全体の
+    /// フォールバック判定に使う。`docs/inference-chain-single-sync-design.md`
+    /// 決定 7）。融合カーネルの `GemmError` を `KernelLaunchFailed` へ写す
+    /// ため、この検査は融合カーネル呼び出しの前に置く必要がある。
     fn linear_forward_device(
         &self,
         a: &DeviceBuffer<f32>,
@@ -1570,7 +1565,18 @@ impl BackendOps for CpuBackendOps {
             None => None,
         };
 
-        // 1 段目: 非融合 `gemm`（`self.gemm` と同一カーネル）。
+        // 未対応 act は GEMM の前に `Unsupported` で拒否する（fail-closed。
+        // 融合カーネルの `UnsupportedActivation` が `KernelLaunchFailed` へ
+        // 変わるとチェーン全体のフォールバック判定が壊れるため）。
+        match act {
+            Activation::None | Activation::Relu => {}
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "linear_forward_device: unsupported activation {act:?}"
+                )));
+            }
+        }
+
         // `m * n` はホスト入力由来の shape 積であり、アロケーション前に
         // オーバーフロー検査を行う（REQ-8・OWASP A03。`reduction.rs` の
         // `ElementCountOverflow` 使用箇所と同一方針）。
@@ -1578,35 +1584,8 @@ impl BackendOps for CpuBackendOps {
             ShapeError::ElementCountOverflow,
         ))?;
         let mut out = vec![0.0f32; out_len];
-        gemm_blis_parallel(a_slice, w_slice, &mut out, m, n, k)
+        gemm_blis_bias_act_parallel(a_slice, w_slice, &mut out, m, n, k, bias_handle_slice, act)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-
-        // 2 段目: bias の行方向複製加算（`elementwise::add` の broadcast
-        // と同じ結果を単一ループで生成。単一の浮動小数点加算はグルー
-        // ピングに依らず一意に定まるため bit-exact）。
-        if let Some(bias_slice) = bias_handle_slice {
-            for i in 0..m {
-                let row = &mut out[i * n..(i + 1) * n];
-                for (c, b) in row.iter_mut().zip(bias_slice.iter()) {
-                    *c += b;
-                }
-            }
-        }
-
-        // 3 段目: activation（`elementwise::relu_slice` と同一定義）。
-        match act {
-            Activation::None => {}
-            Activation::Relu => {
-                for v in out.iter_mut() {
-                    *v = v.max(0.0);
-                }
-            }
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "linear_forward_device: unsupported activation {act:?}"
-                )));
-            }
-        }
 
         shared_cpu_memory().wrap_vec(out, vec![m, n])
     }
@@ -4614,6 +4593,162 @@ mod device_resident_elementwise_tests {
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
             self
         }
+    }
+}
+
+/// `sgd_step_device` 用: ハンドル実体の長さが shape 要素数と一致するかを
+/// 書き込み前に検証する（REQ-8・OWASP A03。zip は短い側へ黙って切り詰め
+/// るため、この検証が部分更新を構造的に防ぐ）。
+fn check_sgd_handle_len(actual: usize, expected: usize) -> Result<(), BackendError> {
+    if actual != expected {
+        return Err(BackendError::ShapeMismatch(
+            ShapeError::ElementCountMismatch { expected, actual },
+        ));
+    }
+    Ok(())
+}
+
+/// `sgd_step_device` の算術本体（イシュー #3193）。`CpuBackendOps::
+/// sgd_step_device` から、検証済みスライスだけを受けて呼ばれる。
+///
+/// bit 同一性の不変条件（#3193 以前の添字ループと出力が bit 一致）:
+/// - `p - lr * g` は 2 演算のまま（`mul_add` にしない）
+/// - weight_decay・momentum の判定式は `!= 0.0` のまま（-0.0・NaN の扱い）
+/// - momentum 経路の式順序は weight_decay → velocity 更新 → nesterov
+///
+/// 長さ不一致は fail-closed で `Err`（呼び出し元の検証と二重化。コストは
+/// ループ外の比較のみ）。
+pub(crate) fn sgd_step_slices(
+    param: &mut [f32],
+    grad: &[f32],
+    velocity: Option<&mut [f32]>,
+    config: &SgdStepConfig,
+) -> Result<(), BackendError> {
+    let n = param.len();
+    check_sgd_handle_len(grad.len(), n)?;
+    let wd = config.weight_decay;
+    let lr = config.lr;
+    match velocity {
+        None => {
+            for (p, &g0) in param.iter_mut().zip(grad) {
+                let mut g = g0;
+                if wd != 0.0 {
+                    g = wd.mul_add(*p, g);
+                }
+                *p -= lr * g;
+            }
+        }
+        Some(velocity) => {
+            check_sgd_handle_len(velocity.len(), n)?;
+            let momentum = config.momentum;
+            let one_minus_damp = 1.0 - config.dampening;
+            for ((p, &g0), v) in param.iter_mut().zip(grad).zip(velocity.iter_mut()) {
+                let mut g = g0;
+                if wd != 0.0 {
+                    g = wd.mul_add(*p, g);
+                }
+                let b = if config.is_first_step {
+                    g
+                } else {
+                    momentum.mul_add(*v, one_minus_damp * g)
+                };
+                *v = b;
+                g = if config.nesterov {
+                    momentum.mul_add(b, g)
+                } else {
+                    b
+                };
+                *p -= lr * g;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod sgd_step_device_length_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::buffer::MemoryOps;
+
+    fn cfg(momentum: f32) -> SgdStepConfig {
+        SgdStepConfig {
+            lr: 0.1,
+            momentum,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+            is_first_step: false,
+        }
+    }
+
+    fn upload(ops: &CpuBackendOps, v: Vec<f32>) -> DeviceBuffer<f32> {
+        let n = v.len();
+        ops.upload(&Tensor::new(v, &[n]).unwrap()).unwrap()
+    }
+
+    fn truncate(buf: &mut DeviceBuffer<f32>) {
+        buf.downcast_handle_mut::<CpuBufferHandle>()
+            .unwrap()
+            .data
+            .pop();
+    }
+
+    fn data(buf: &DeviceBuffer<f32>) -> Vec<f32> {
+        buf.downcast_handle::<CpuBufferHandle>()
+            .unwrap()
+            .data
+            .clone()
+    }
+
+    fn assert_rejected_untouched(which: &str) {
+        let ops = CpuBackendOps::new();
+        let mut p = upload(&ops, vec![1.0, 2.0, 3.0]);
+        let mut g = upload(&ops, vec![0.5; 3]);
+        let mut v = upload(&ops, vec![0.25; 3]);
+        match which {
+            "param" => truncate(&mut p),
+            "grad" => truncate(&mut g),
+            _ => truncate(&mut v),
+        }
+        let (p0, v0) = (data(&p), data(&v));
+        let r = ops.sgd_step_device(&mut p, &g, Some(&mut v), &cfg(0.9));
+        assert!(
+            matches!(
+                r,
+                Err(BackendError::ShapeMismatch(
+                    ShapeError::ElementCountMismatch {
+                        expected: 3,
+                        actual: 2
+                    }
+                ))
+            ),
+            "{which}: {r:?}"
+        );
+        assert_eq!(data(&p), p0, "{which}: param が更新された");
+        assert_eq!(data(&v), v0, "{which}: velocity が更新された");
+    }
+
+    #[test]
+    fn rejects_short_param_handle() {
+        assert_rejected_untouched("param");
+    }
+
+    #[test]
+    fn rejects_short_grad_handle() {
+        assert_rejected_untouched("grad");
+    }
+
+    #[test]
+    fn rejects_short_velocity_handle() {
+        assert_rejected_untouched("velocity");
+    }
+
+    #[test]
+    fn slices_reject_length_mismatch() {
+        let mut p = [1.0f32; 3];
+        let r = sgd_step_slices(&mut p, &[0.0; 2], None, &cfg(0.0));
+        assert!(r.is_err());
+        assert_eq!(p, [1.0; 3]);
     }
 }
 

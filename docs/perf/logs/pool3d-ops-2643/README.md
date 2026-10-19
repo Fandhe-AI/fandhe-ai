@@ -1,5 +1,8 @@
 # 3D プーリング 2 種（#2643）CUDA／Metal 実機未実測の申し送り
 
+> CUDA は #3161 で GB10 実測済み（2026-10-19・コミット `b640875f`・pass 1/1）。結果は末尾「CUDA 実測記入欄（#3161）」節。
+> Metal は Mac mini（Apple M4）で実測済み（#3162・2026-10-19・コミット `d79f4895`・pass 1/1）。結果は末尾の「Metal 実測記入欄（#3162）」節、成果物は `metal/`。
+
 `docs/autodiff-pool3d-ops-decision.md` §10 参照。本実装エージェント実行環境は CUDA／Metal 実機に
 到達できないため、`fandhe_ai_autodiff::pool3d_ops`（`max_pool3d`／`avg_pool3d`。#2850 以降は同テストが facade 公開の `Var::max_pool3d`／`avg_pool3d` 経由で同じ経路を測る）の
 `crates/facade/tests/pool3d_ops_backend_parity.rs` のうち CUDA（`Device::Cuda(0)`）・Metal
@@ -35,5 +38,41 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Apple Silicon（M4 Max） | 上記 Metal | 未実測 | |
+| 2026-10-19 | DGX Spark GB10 | `cargo test -p fandhe-ai --test pool3d_ops_backend_parity -- --ignored --nocapture --test-threads=1 cuda`（`cuda/RULE.txt`） | pass（1/1） | `.rev-stamp` `b640875f`・dirty=0。ログは `cuda/` |
+| 2026-10-19 | Mac mini（Apple M4） | `cargo test -p fandhe-ai --release --test pool3d_ops_backend_parity -- --ignored --nocapture --test-threads=1 metal_`（`metal/RULE.txt`） | pass 1/1（fail 0） | `.rev-stamp` `d79f4895`（40 桁は `metal/rev-stamp.txt`）。ログは `metal/pool3d_ops_backend_parity.log` |
+
+## Metal 実測記入欄（#3162）
+
+- 判定規則は `metal/RULE.txt`（実機実行より前の独立コミットで main HEAD `d79f4895` を対象に再登録済み。事後に変更していない）。
+  所有者判断（2026-10-19）により、前回の c0deb302 での実測は採用していない。M4 Max（手元機）の値は使っていない。
+- 実行日（UTC）: 2026-10-19。機体: Mac mini（Apple M4・メモリ 16GiB・macOS 27.0.1・rustc 1.99.0）。ホスト名・ユーザー名・個人パスは記録しない。
+- 対象コミット: `d79f4895d1337ab5035f76f79eea7619196de874`（`metal/rev-stamp.txt`。`git rev-parse HEAD` の 40 桁 1 行）。展開ツリーは `git archive` で作成し、
+  RULE 更新コミットが `crates/`・`Cargo.toml`・`Cargo.lock` を変えていないこと（`git diff --quiet d79f4895 HEAD -- crates Cargo.toml Cargo.lock`）を確認済み。
+  ノード側の `.rev-stamp` は実行前後とも一致した。
+- 実行コマンド: `cargo test -p fandhe-ai --release --test pool3d_ops_backend_parity -- --ignored --nocapture --test-threads=1 metal_`（`perl -e 'alarm shift; exec @ARGV' 1800` で包む。各ファイル 1 回のみで選別・再実行はしていない）。
+  判定外の `--no-run` ビルドは 1 回だけ行った（6 機能共通。`metal/build.log`）。
+- 成果物: `metal/env_info.txt`（実行前後）・`metal/pool3d_ops_backend_parity.log`（末尾に `rc=`）・`metal/rev-stamp.txt`・`metal/RULE.txt`。
+
+| ファイル | 関数 | 結果（rc） |
+|---|---|---|
+| `pool3d_ops_backend_parity.rs` | `metal_pool3d_ops_match_cpu_reference` | pass（rc=0） |
+
+- 合計: pass 1 / fail 0 / undetermined 0（「running 1 test」が期待件数 1 と一致）。
+- tolerance 定数・baseline・判定式・テストコードは不変。
+- 注記: 実機ノードは他用途と共有で、実行前後の load average が 6〜9 だった（判定テストのため時間計測には使わない）。
+  GPU カーネル経路とホストフォールバック経路のどちらを通ったかはログから断定できないため未確認である。
+
+## CUDA 実測記入欄（#3161）
+
+- 判定規則・fail の扱い・実行コマンド・期待件数（1 件）は事前登録規則 `cuda/RULE.txt` を正とする（実測前に固定済み。事後に変更していない）。
+- 実行コマンド: 上記 `RULE.txt` のとおり独立プロセスで 1 回（並列度 1・`--release` なし・`timeout 1800`）。再実行・選別はしていない。
+- 対象コミット: `b640875f`（`cuda/rev-stamp.txt`: 1 行目 sha・2 行目 `dirty=0`。実行前・各ファイル実行後・実行後の 8 回の読み出しがすべて一致）。
+- 環境: NVIDIA GB10（aarch64・ドライバ 580.173.02）・CUDA 13.0（nvcc 13.0.88）・rustc 1.97.0。詳細は `cuda/env_info.txt`（実行前後）。
+- 備考: 常駐サービスの GPU プロセス 3 件（実行前後で同一 pid・`utilization.gpu` 0%）以外の GPU 負荷なし。作業ツリーは初回転送でビルドキャッシュが冷えていたため、判定外のウォームアップ（`--no-run`、`cuda/build.log`）で 6 テストファイル分をビルドしてからテストを実行した（テスト自体は 1 回ずつ）。
+
+| ファイル | 関数 | 結果 | 備考 |
+|---|---|---|---|
+| `crates/facade/tests/pool3d_ops_backend_parity.rs` | `cuda_pool3d_ops_match_cpu_reference` | pass | |
+
+- 合計 1/1 pass（fail 0）。実行時間 0.53s と短く、経路確認（GPU フック経由かフォールバックか）は追従課題。フォールバック経路を通ったとは断定しない。
+- tolerance 定数・baseline・判定規則・テストコードは不変。

@@ -15,7 +15,7 @@
 |---|---|
 | CUDA（sm_121／GB10） | 本番結線済みは tiled pipeline 128×64 と `WARP_SIZE` 注入（rmsnorm／softmax／mse）。REJECT 4 件のうち StreamK・TMA Stage 1 は (D)／(I) 起因で再挑戦可、persistent は価値低、3×TF32 は opt-in 維持・非推奨（ユーザー判断確定）。#2122 の GB10 実測で cluster 2／4／8・DSMEM・`tma.multicast`・`setmaxnreg`（121a／121f）は「成立」、tcgen05／TMEM／wgmma は「ptxas 拒否（オフライン）」。新規候補 C1〜C4 はいずれも設計のみ |
 | Metal（M4 Max） | 本番結線済みの ADOPT 施策は split-K のみ。async copy・aligned load・Morton・E6〜E8 は Non-Goal。MPP（Route C）はユーザー判断待ち。#2110〜#2114 は opt-in・既定 OFF・M4 Max 実測未実施 |
-| AMD ROCm | readiness 1（#2125）・2（#2126）は実装済み、3（#2127）は設計のみ（unsafe 未承認）。`backend-rocm` 本体は Won't（条件付き）据え置き。**Non-Goal 確定（v1.0 スコープ外）を推奨**（0.3） |
+| AMD ROCm | readiness 1（#2125）・2（#2126）は実装済み、3（#2127）は設計のみ（unsafe 未承認）。`backend-rocm` 本体は Won't（条件付き）据え置き。**Non-Goal 確定（v1.0 スコープ外）を推奨**（D-B により取り下げ。0.3） |
 
 ### 0.2 v1.0 候補に向けた推奨優先順位（上位 5 件。詳細は §8）
 
@@ -29,6 +29,7 @@
 
 - 推奨: **「ROCm は Non-Goal 確定（v1.0 のスコープ外）」**。根拠は `docs/rocm-grade-up-conditions-v2-spec-proposal.md` §8 の発火条件で、#2129 の時点までに (a)' の承認もクラウドスパイクも実施されていないため該当する（2026-10-01 時点の open issue・PR 検索で該当なし）
 - **未承認**: 確定には (i) ユーザー承認と、(ii) spec 側で Won't の条件記述を条件なしの Won't へ改める追加提案（fandhe-ai-spec 側）が必要。本 doc は spec を編集しない
+- **取り下げ（#3151・2026-10-11 所有者判断 D-B）**: ROCm は実装へ進めると決まった。上記の Non-Goal 推奨は取り下げる（旧推奨は履歴として残す）。spec は fandhe-ai-spec#86 で Won't→Could 行を v2 前提へ再定義済み（`04-requirements.md@7534c9c:399-407`）。状態は Won't（条件付き）のままで、Could への格上げは宣言していない。初期スコープは f32 SIMT。続く作業は #3152（クラウド実機）・#3153（HIP FFI 依存方式。案 B に確定）・#3154（`backend-rocm` 新設）
 
 ## §1 位置づけ・入力集合
 
@@ -139,8 +140,8 @@ Issue 本文の想定と HEAD の記録が食い違う点を、黙って直さ�
 | readiness 1（#2125 `warp_width`） | 実装済み | 4.1 参照 | amd-readiness §6b |
 | readiness 2（#2126 `WARP_SIZE` 注入） | 実装済み | CUDA 側のみ。Metal は 32 固定のまま | amd-readiness §6c |
 | readiness 3（#2127 cooperative・HIPRTC・unsafe 整理） | 設計済み | 設計（草案）のみ。unsafe は未承認 | `rocm-cooperative-hiprtc-unsafe-readiness-decision.md` |
-| spec 提案（#2128 格上げ条件の v2 再定義） | 設計済み | 未起票。承認事項（§6）はすべて未実施 | `rocm-grade-up-conditions-v2-spec-proposal.md` §0・§6（#2614 で最新化・承認依頼中） |
-| `backend-rocm` 本体 | Non-Goal（**推奨**・未承認） | spec は Won't（条件付き）据え置き。確定の手順は §0.3 | 同 §8、`docs/backend-matrix.md` §3.4 |
+| spec 提案（#2128 格上げ条件の v2 再定義） | 設計済み | spec 反映済み（fandhe-ai-spec#86）。承認事項の状態は同 §6 | `rocm-grade-up-conditions-v2-spec-proposal.md` §0・§6（#2614 で最新化・承認依頼中） |
+| `backend-rocm` 本体 | 着手（D-B）。#3154 | spec は Won't（条件付き）据え置き。Non-Goal 推奨は §0.3 で取り下げ | 同 §8、`docs/backend-matrix.md` §3.4 |
 
 ## §5 Non-Goal の根拠リスト
 
@@ -162,7 +163,7 @@ Issue 本文の想定と HEAD の記録が食い違う点を、黙って直さ�
 | Metal E2〜E4・E6〜E8 | 実装・実測後退 | 実測で REJECT または組み込み対象なし | m4max §3 | #2110 系の結果次第 |
 | Metal NAX（本番結線） | 契約・物理 | Neural Accelerator 非搭載。N>=2048 で後退。再訪条件は M5 世代実機・MPP 可用性・classic が REQ-8 未達の 3 点 | `backend-metal-mlx-classic-nax-decision.md` §3、m4max §5 | M5 世代実機の入手、Metal Toolchain の導入 |
 | Metal MPP Route C（本番結線） | 契約（承認待ち） | M4 Max で実装・実測済み（診断テスト限定）。採否は REQ-1 の解釈に関するユーザー判断待ちで、NAX の物理制約（M5 世代実機待ち）とは別 | `backend-metal-mpp-tensor-decision.md` §2・§6、m4max §5 | §6 の (a)〜(c) のユーザー判断 |
-| ROCm 本体 | リソース・承認 | (a)' 未承認・クラウドスパイク未実施。spec は Won't（条件付き） | `rocm-grade-up-conditions-v2-spec-proposal.md` §8 | (a)' の承認・(c) 実測・(b) 費用確認の三者が揃う |
+| ROCm 本体 | リソース・承認 | (a)' 未達（依存方式は #3153 で案 B に確定）・クラウドスパイク未実施（#3152）。D-B により Non-Goal 推奨は取り下げ。spec は Won't（条件付き） | `rocm-grade-up-conditions-v2-spec-proposal.md` §8 | (a)' の承認・(c) 実測・(b) 費用確認の三者が揃う |
 
 注意: Metal UMA readback の first-touch は仮説段階であり、Non-Goal の根拠には使わない（m4max §7）。
 
@@ -262,14 +263,14 @@ flowchart LR
 
 | 候補 | 前提 |
 |---|---|
-| ROCm の Won't を条件なしへ改める追加提案 | 0.3 のユーザー承認 |
-| #2128 §5 段 1（Won't→Could の v2 再定義）の起票 | ユーザー承認のみ。(d)' の数値閾値とは独立に起票できる（`rocm-grade-up-conditions-v2-spec-proposal.md` §5・§6 項目 1）。ROCm を Non-Goal に確定する場合は不要になりうる |
+| ROCm の Won't を条件なしへ改める追加提案 | 不要（D-B により Non-Goal 推奨を取り下げ） |
+| #2128 §5 段 1（Won't→Could の v2 再定義）の起票 | 反映済み（fandhe-ai-spec#86）。旧記述: ユーザー承認のみ。(d)' の数値閾値とは独立に起票できる（`rocm-grade-up-conditions-v2-spec-proposal.md` §5・§6 項目 1）。ROCm を Non-Goal に確定する場合は不要になりうる |
 | #2128 §5 段 2（Could→Should の v2 再定義。軸のみ記載の将来提案） | 段 1 の採択・Could 到達後に、(d)' の数値閾値のユーザー承認と記入を得てから別提案として起票する（同 §6 項目 6）。それまで spec の Could→Should 旧行は暫定・参考扱い |
 
 ## §10 spec 除外事項「ROCm」への参照
 
-- **現行条文**: `docs/spec/04-requirements.md:367`（@ `2e998dd`。「ROCm バックエンドの正式対応（Won't・条件付き、2026-07-29 更新）」）と `docs/spec/03-poc/poc-10-rocm-promotion/README.md` §2〜§4。行番号は submodule 更新でずれうる
-- **未反映の提案**: `docs/rocm-grade-up-conditions-v2-spec-proposal.md`（#2128）の §0 結論表・§5 文案（未起票）・§6 承認事項（未実施）・§8 発火条件（#2614 で最新化・承認依頼中。2 段構成化と依存方式の推奨を追加）。spec は旧条件のままで、「反映済み」とは書かない
+- **現行条文**: `docs/spec/04-requirements.md:399`（@ `7534c9c`。「ROCm バックエンドの正式対応（Won't・条件付き、2026-10-12 更新）」。表 `:401-404`・契約 `:405`・取り決め `:406`・`:407`。旧記録は `:367` @ `2e998dd`）と `docs/spec/03-poc/poc-10-rocm-promotion/README.md` §2〜§4。行番号は submodule 更新でずれうる
+- **反映済みの提案**: `docs/rocm-grade-up-conditions-v2-spec-proposal.md`（#2128）の段 1 は fandhe-ai-spec#86 で反映済み（@`7534c9c:399`。#3151 で更新）。段 2（Could→Should）は将来提案のまま
 - **関係**: #2128 は「Won't のまま据え置き、Could 再評価は発火条件待ち」とし、本 doc の 0.3 は同 §8 の「Non-Goal 確定の推奨条件」を適用して推奨するもの。どちらも決定ではない
 - spec リポは private のため、repo 内の相対パスで参照する
 

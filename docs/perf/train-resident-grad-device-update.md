@@ -530,3 +530,47 @@ before（main の f32 逐次和）／after（f64 逐次和）の A/B・checksum 
 同様）で行う。tolerance・REQ-2 の適用範囲は不変。経緯・検証方法は
 `docs/backend-metal-command-batching-design.md` §10.14 を参照。カーネル置換後
 の reuse `step_total` 再計測は未実施（並走ビルド中はベンチを行わない規約）。
+
+## 10. CUDA の bias 勾配縮約をデバイス上で行う（イシュー #3204）
+
+§9（Metal・#1566）の CUDA 版。`CudaBackendOps` が
+`gemm_fp32_strict_into_with_bias_reduce_tracked` をオーバーライドし、
+`Op::LinearResident` の bias 勾配を d_weight と同じ呼び出しの中で縮約して
+grad staging へ直接書く。これにより resident 経路から、ホスト縮約
+（`reduce_bias_grad`）と bias ごとの `upload_into`（2 層 MLP で step あたり
+2 回）が消える（#3252 の同期なしチェーンの部品）。
+
+- **カーネルは新設しない**: 既存の `reduce_sum_axis_f32`（汎用軸版。
+  1 スレッド = 1 出力・`double` で軸を昇順に逐次加算・最後に 1 回 `float`・
+  `idx < total` の手動境界検査）がホスト `f64` 逐次和の契約をそのまま満たす。
+  掛け算が無く FMA 契約の対象外。tolerance・FMA 契約・`f64` アキュムレータ契約は
+  不変。
+- **起動形**: TN（`b = g` が `[k, n]` 密）は `outer=1, axis_len=k, inner=n`、
+  NT（`bt` が `[n, k]` 密）は `outer=n, axis_len=k, inner=1`。`inner == 1` でも
+  warp butterfly 版（縮約順が変わる）へは回さず、汎用軸版を使う。
+- **入力は GEMM の device バッファを再利用**: `launch_tiled_f32_{tn,nt}_into` の
+  GEMM 起動後・最終 `synchronize()` 前に、同じストリームへ縮約を積む。g の再
+  アップロード（m·n 要素の H2D）は発生しない。`CudaReduce` と `CudaGemm` が
+  同一ストリームでなければ GEMM 起動前に fail-closed で拒否する。
+- **縮約軸長 1**: ホスト参照は直接コピーで `-0.0` を保つため、カーネルではなく
+  D2D コピー（cudarc の safe API `memcpy_dtod`）にする。`k == 0` は bias もゼロ埋め。
+- **NN/TT・分類不能・退化形状**: weight は従来のフォールバック、bias はホスト
+  `f64` 逐次和（`k == 1` は直接コピー）で計算して `upload_into` し、`Ok(true)` を返す
+  （`resident_grad_capability` を汚さない契約は不変。Metal と同型）。
+- **範囲検査**: `validate_gemm_bias_write_ranges`（純関数。`m*n`・オフセット加算の
+  オーバーフロー、バッファ超過、`bn != n`、weight と bias の重複禁止）を driver
+  呼び出しの前に実行する。weight と bias は同一ストレージを `split_at_mut`
+  （cudarc の safe API）で重ならない 2 ビューに分けて同時に書く。
+- **`unsafe`**: 純増なし。`run_sum_axis_f32` の汎用分岐にあった起動ブロック 1 か所を
+  `CudaReduce::launch_sum_axis_generic_into`（入力・出力を device 引数で受ける）へ
+  移し、`run_sum_axis_f32` と bias 縮約の両方がそれを呼ぶ。移設に伴い SAFETY の前提
+  （入力 `outer*axis_len*inner` 要素・出力 `outer*inner` 要素ちょうど）をヘルパー内の
+  ホスト側検査で担保する形に書き直した。security-auditor の監査対象。
+- **検証**: CI 実行可能なものは範囲検査・ホスト参照・DeviceMismatch／範囲外拒否の
+  単体テスト。GB10 実機テスト（`gemm_fp32_strict_into_parity.rs` の bias 3 件、
+  `device_param_store_backend_parity.rs::grad_readout_contract_on_cuda` の期待を
+  `Resident` へ是正）は `#[ignore]` で追加済みで、**GB10 での実行は未検証**。
+  backward 区間の前後計測（5 回計測の中央値）も実機セッションへ申し送る。
+- **スコープ外**: weight tying で累積する経路（`fill_bias_slot_via_host_reduce`）は
+  ホスト縮約のまま。CPU・ROCm の bias 縮約 override、ランチャーの `synchronize()`
+  削減（#3252）。

@@ -1,0 +1,8 @@
+build rc=0 seconds=16
+r1 rc=0
+r2 rc=0
+r3_1 rc=0
+r3_2 rc=0
+r3_3 rc=0
+r3_4 rc=0
+r4 rc=0

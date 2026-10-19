@@ -1,0 +1,1 @@
+redirect_probe: status=302 location_scheme=https host=different_host

@@ -26,7 +26,9 @@
 #                加えて各エントリが `source = "registry+https://github.com/rust-lang/
 #                crates.io-index"` を伴うこと＝path/git 依存への差し替えで source/
 #                checksum 行が消える・書き換わるケースを fail-closed に検出する。
-#                イシュー #982）、(4) 各メンバー crate の [dependencies] が承認済み
+#                イシュー #982）、(3b) `zip` の版集合が承認済み集合（0.6.6・7.2.0・8.6.0。
+#                RUSTSEC-2026-0367〜0369 の ignore の前提）と完全一致し全エントリが
+#                registry 取得元であること、(4) 各メンバー crate の [dependencies] が承認済み
 #                allowlist（比較対象の =x.y.z 完全固定 + bench-common の path 依存）の
 #                範囲内であること（`tch` 等 allowlist 外の直接依存追加・ドット付きキー
 #                宣言・完全固定でないバージョン指定に加え、`@=` 付き承認済みエントリが
@@ -84,6 +86,15 @@ ORIGIN_KEY_ALT='path|git|registry|rev|branch|tag|package'
 # ユーザー承認必須（検査対象の追加は fail-closed の強化であり承認不要）。
 FRAMEWORK_COMPARE_DIR="scripts/bench/framework-compare"
 FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.11.0"
+
+# `zip` の承認済み版集合（スペース区切り）。`scripts/bench/framework-compare/deny.toml` の
+# `[advisories] ignore` にある RUSTSEC-2026-0367／0368／0369 は勧告 ID 単位で効くため、
+# ignore の前提はこの版集合（0.6.6／7.2.0／8.6.0）に固定される。Cargo.lock の `zip`
+# エントリがこの集合と完全一致すること（追加・削除・変更のいずれも fail）と、各エントリが
+# crates.io registry 取得元であることを check_lock_name_versions_text が fail-closed に
+# 検査する。版集合が変わったら ignore を足さずにユーザー承認を取り直す（承認日
+# 2026-10-17。`docs/framework-compare-harness-decision.md` の zip 勧告の記録を参照）。
+FRAMEWORK_COMPARE_ZIP_VERSIONS="0.6.6 7.2.0 8.6.0"
 
 # 同ベンチの各メンバー crate が [dependencies] に宣言してよい直接依存の allowlist
 # （`<manifest 相対パス>:<crate>[@=version]...` 形式）。承認済み比較対象（=x.y.z 完全
@@ -233,6 +244,44 @@ check_lock_pin_text() {
       return 1
       ;;
   esac
+}
+
+# Cargo.lock 形式テキスト上の指定クレート名の [[package]] エントリについて、版の集合が
+# 承認済み集合（スペース区切り）と完全一致し、かつ全エントリが crates.io registry 取得元
+# であることを検査する（テキスト入力版。check_lock_pin_text と同じくエントリ単位の
+# awk paragraph mode で判定する）。FRAMEWORK_COMPARE_ZIP_VERSIONS 参照: 勧告 ignore の
+# 前提となる版集合のドリフト（別の該当版の混入・承認版の消失）を検出する。重複エントリは
+# 集合不一致として扱う。
+check_lock_name_versions_text() {
+  local label="$1"
+  local text="$2"
+  local crate="$3"
+  local approved="$4"
+  local actual non_registry expected_sorted
+  actual=$(echo "${text}" | awk -v crate="${crate}" '
+    BEGIN { RS = ""; FS = "\n" }
+    {
+      has_name = 0; ver = ""; has_source = 0
+      for (i = 1; i <= NF; i++) {
+        line = $i
+        if (line == "name = \"" crate "\"") has_name = 1
+        if (line ~ /^version = "/) { ver = line; sub(/^version = "/, "", ver); sub(/"$/, "", ver) }
+        if (line == "source = \"registry+https://github.com/rust-lang/crates.io-index\"") has_source = 1
+      }
+      if (has_name) print ver (has_source ? "" : " NO_SOURCE")
+    }
+  ' | sort)
+  non_registry=$(echo "${actual}" | grep ' NO_SOURCE' || true)
+  if [ -n "${non_registry}" ]; then
+    echo "::error::${label} の ${crate} に crates.io registry 取得元でないエントリがあります（path/git 依存等への差し替えの可能性。.claude/rules/deps-policy.md 第 9 区分）: $(echo "${non_registry}" | tr '\n' ',')" >&2
+    return 1
+  fi
+  expected_sorted=$(echo "${approved}" | tr ' ' '\n' | sort)
+  if [ "${actual}" != "${expected_sorted}" ]; then
+    echo "::error::${label} の ${crate} の版集合が承認済み集合と一致しません（勧告 ignore の前提のドリフト。ignore を足さず承認を取り直す）。承認済み: $(echo "${expected_sorted}" | tr '\n' ' ')/ 実際: $(echo "${actual}" | tr '\n' ' ')" >&2
+    return 1
+  fi
+  echo "OK: ${label} の ${crate} の版集合は承認済み集合（${approved}）と完全一致（全て registry 取得元）"
 }
 
 # Cargo.toml 形式テキストの [dependencies] セクションを、許容された直接依存の
@@ -395,6 +444,10 @@ check_framework_compare() {
     version="${pin#*=}"
     check_lock_pin_text "${lock}" "$(cat "${lock}")" "${crate}" "${version}" || failed=1
   done
+
+  # (3b) zip の版集合が承認済み集合と完全一致すること（RUSTSEC-2026-0367〜0369 の
+  #      ignore の前提。FRAMEWORK_COMPARE_ZIP_VERSIONS 参照）。
+  check_lock_name_versions_text "${lock}" "$(cat "${lock}")" "zip" "${FRAMEWORK_COMPARE_ZIP_VERSIONS}" || failed=1
 
   # (4) 各メンバー crate の [dependencies] が allowlist（承認済み比較対象の完全固定 +
   #     bench-common の path 依存）の範囲内であること。allowlist 外の直接依存
@@ -624,6 +677,93 @@ checksum = "deadbeef"'
   else
     echo "self-test OK: pin cross-entry fixture は fail する"
   fi
+
+  # check_lock_name_versions_text（zip の版集合固定）の正負ケース。承認集合
+  # {0.6.6, 7.2.0, 8.6.0} に対し、一致で pass・版追加／版削除／版変更／非 registry
+  # source で fail することを固定入力で検証する。
+  local zip_src='source = "registry+https://github.com/rust-lang/crates.io-index"'
+  local zip_approved="${FRAMEWORK_COMPARE_ZIP_VERSIONS}"
+  local zip_ok_text="[[package]]
+name = \"zip\"
+version = \"0.6.6\"
+${zip_src}
+
+[[package]]
+name = \"zip\"
+version = \"7.2.0\"
+${zip_src}
+
+[[package]]
+name = \"zip\"
+version = \"8.6.0\"
+${zip_src}
+
+[[package]]
+name = \"zip-extra\"
+version = \"9.9.9\"
+${zip_src}"
+  local zip_added_text="${zip_ok_text}
+
+[[package]]
+name = \"zip\"
+version = \"9.0.0\"
+${zip_src}"
+  local zip_removed_text="[[package]]
+name = \"zip\"
+version = \"0.6.6\"
+${zip_src}
+
+[[package]]
+name = \"zip\"
+version = \"8.6.0\"
+${zip_src}"
+  local zip_changed_text="${zip_ok_text//8.6.0/8.7.0}"
+  # git ケースは版集合を承認集合と一致させたまま 7.2.0 の 1 件だけを git source にする
+  # （版の重複・不一致ではなく取得元の検出だけで fail することを確かめる）。
+  local zip_git_text="[[package]]
+name = \"zip\"
+version = \"0.6.6\"
+${zip_src}
+
+[[package]]
+name = \"zip\"
+version = \"7.2.0\"
+source = \"git+https://example.com/zip#deadbeef\"
+
+[[package]]
+name = \"zip\"
+version = \"8.6.0\"
+${zip_src}"
+  local zip_path_text="[[package]]
+name = \"zip\"
+version = \"0.6.6\"
+${zip_src}
+
+[[package]]
+name = \"zip\"
+version = \"7.2.0\"
+${zip_src}
+
+[[package]]
+name = \"zip\"
+version = \"8.6.0\""
+  if check_lock_name_versions_text "self-test zip ok fixture" "${zip_ok_text}" "zip" "${zip_approved}" >/dev/null; then
+    echo "self-test OK: zip 版集合 fixture（承認集合と一致）は pass する"
+  else
+    echo "self-test NG: zip 版集合 fixture（承認集合と一致）が誤って fail した" >&2
+    failed=1
+  fi
+  local zip_case zip_label zip_text
+  for zip_case in "added:${zip_added_text}" "removed:${zip_removed_text}" "changed:${zip_changed_text}" "git:${zip_git_text}" "path:${zip_path_text}"; do
+    zip_label="${zip_case%%:*}"
+    zip_text="${zip_case#*:}"
+    if check_lock_name_versions_text "self-test zip ${zip_label} fixture" "${zip_text}" "zip" "${zip_approved}" >/dev/null 2>&1; then
+      echo "self-test NG: zip ${zip_label} fixture が誤って pass した（版集合固定の検出が退行している）" >&2
+      failed=1
+    else
+      echo "self-test OK: zip ${zip_label} fixture は fail する"
+    fi
+  done
 
   # check_manifest_deps_text（framework-compare の直接依存 allowlist 検査）も同方式で
   # 直接検証する（allowlist 外依存・非完全固定の検出退行の防止）。
