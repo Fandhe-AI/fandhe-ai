@@ -2,6 +2,7 @@
 
 > CUDA は #3163 で GB10 実測済み（2026-10-19・コミット b640875f・pass 1/1）。結果は末尾「CUDA 実測記入欄（#3163）」節。Metal は #3164 で Mac mini 実測済み（次行参照）。
 > Metal は Mac mini（Apple M4）で実測済み（#3164・2026-10-19）。結果は結果記入欄と末尾の「Metal 実測記入欄（#3164）」節、成果物は `metal/` を参照。
+> Metal の 2 回目（#3164・2026-10-19・main HEAD 相当のコミット `b728b9cb`）は 1/1 pass。1 回目の記録は残す。結果は末尾「Metal 再実測（#3164・2 回目）」節、成果物は `../metal-compat-sequential-rerun-3164/`。
 
 本エージェントの実行環境には CUDA／Metal 実機への到達手段がないため、実機テストは未実測のまま
 GB10・M4 Max セッションへ申し送る。CPU 側の正しさは Linux 実行可能な
@@ -29,6 +30,7 @@ cargo test -p fandhe-ai --test compat_sequential_adaptive_max_global_pool_backen
 |---|---|---|---|
 | GB10 | cuda_adaptive_max_global_pool_bit_exact | pass | 2026-10-19 |
 | Mac mini（Apple M4） | metal_adaptive_max_global_pool_bit_exact | pass | 2026-10-19 |
+| Mac mini（Apple M4） | metal_adaptive_max_global_pool_bit_exact | pass（2 回目・main HEAD。#3164） | 2026-10-19 |
 
 ## CUDA 実測手順（#3163）
 
@@ -68,3 +70,14 @@ cargo test -p fandhe-ai --test compat_sequential_adaptive_max_global_pool_backen
 - 合計: 1 件中 pass 1／fail 0／undetermined 0（`running 1 test` が期待件数と一致）。
 - tolerance 定数・baseline・判定式・テストコードは不変。
 - 注記: Metal の GPU カーネル経路を通ったか、Unsupported 経由のホストフォールバック経路を通ったかは本ログから断定できず未確認。
+
+## Metal 再実測（#3164・2 回目）
+
+1 回目の記録（上の各節・`metal/`）は書き換えず、main HEAD での 2 回目を追記する（イシュー #3164 追記 2026-10-19）。
+
+- 対象コミット: `b728b9cb85b718daea90884cdd66b5e06f357bea`（事前登録規則 `RULE.txt` の追加コミット。`crates/`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` は main `e1a3c5e25` と差分なし。#3479 の `max` 結線を含む）
+- 結果（各 1 回・rc=0・`running 1 test`）:
+  - `metal_adaptive_max_global_pool_bit_exact`: pass（`1 passed; 0 failed`）
+- 成果物・全 10 本の集計: `../metal-compat-sequential-rerun-3164/README.md`、ログ `../metal-compat-sequential-rerun-3164/logs/`
+- 注記: GPU カーネル経路かホストフォールバック経路かは本ログから断定できず未確認。
+- tolerance 定数・baseline・判定式・テストコードは不変。
