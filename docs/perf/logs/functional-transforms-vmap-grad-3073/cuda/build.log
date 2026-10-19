@@ -1,0 +1,42 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/backend-cpu)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/bench-harness)
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/facade)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.47s
+  Executable tests/compat_functional_max_unpool_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_functional_max_unpool_backend_parity-976eaa604f50bc85)
+  Executable tests/compat_sequential_conv_transpose3d_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_conv_transpose3d_backend_parity-2f5802dadc361004)
+  Executable tests/compat_sequential_fold_unfold_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_fold_unfold_backend_parity-5d8a5f3079e63cbf)
+  Executable tests/compat_sequential_lrn_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_lrn_backend_parity-dcf9f9b5e2442a57)
+  Executable tests/compat_sequential_pool3d_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_pool3d_backend_parity-43ff5b4a1ba69584)
+  Executable tests/functional_transforms_facade.rs (<home>/work/target-fandhe-ai/debug/deps/functional_transforms_facade-b26955f853f159e0)
+  Executable tests/functional_transforms_jvp_multi_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/functional_transforms_jvp_multi_backend_parity-57915440eb81999f)
+   Compiling libc v0.2.189
+   Compiling syn v2.0.119
+   Compiling serde_core v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/backend-cpu)
+   Compiling getrandom v0.3.4
+   Compiling rand_core v0.9.5
+   Compiling zerocopy-derive v0.8.56
+   Compiling zerocopy v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/tensor-core)
+   Compiling cudarc v0.19.8
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/backend-cuda)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 10.01s
+  Executable tests/paged_kv_real_device.rs (<home>/work/target-fandhe-ai/release/deps/paged_kv_real_device-cad078cd619d99df)
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/backend-cpu)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/bench-harness)
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3171/crates/facade)
+    Finished `release` profile [optimized] target(s) in 5.46s
+  Executable tests/paged_attention_facade.rs (<home>/work/target-fandhe-ai/release/deps/paged_attention_facade-979e52a116d3c590)
+
+real	0m22.038s
+user	1m46.829s
+sys	0m12.580s
+rc=0

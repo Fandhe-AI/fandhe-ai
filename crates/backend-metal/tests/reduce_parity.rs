@@ -414,3 +414,142 @@ fn metal_min_nan_zero_inf_edge_cases_match_cpu() {
         );
     }
 }
+
+// ---- max（イシュー #3475。丸めを伴わないため CPU 参照実装と bit 一致で比較）----
+
+fn cpu_max_all_bits(x: &[f32]) -> u32 {
+    let t = Tensor::new(x.to_vec(), &[x.len()]).expect("tensor");
+    fandhe_ai_backend_cpu::reduction::max(&t, None)
+        .expect("cpu max always succeeds for non-empty reduction")
+        .as_slice()
+        .expect("contiguous")[0]
+        .to_bits()
+}
+
+fn cpu_max_axis_bits(x: &[f32], shape: &[usize], dim: usize) -> Vec<u32> {
+    let t = Tensor::new(x.to_vec(), shape).expect("tensor");
+    fandhe_ai_backend_cpu::reduction::max(&t, Some(dim))
+        .expect("cpu max always succeeds for non-empty axis")
+        .as_slice()
+        .expect("contiguous")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
+/// [`MetalReduce::run_max_all_f32`] が CPU 参照実装と bit 一致し、
+/// run-to-run でも決定的であることを複数サイズで確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_max_all_matches_cpu_bit_exact() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    for &n in &[1usize, 2, 4095, 4096, 4097, 8192, 3 * 4096 + 17, 1 << 20] {
+        let data = gen_data(n, 0x3475_0000 + n as u64);
+        let metal_out = reduce.run_max_all_f32(&ctx, &data).expect("metal max");
+        assert_eq!(metal_out.to_bits(), cpu_max_all_bits(&data), "n={n}");
+        let metal_out2 = reduce.run_max_all_f32(&ctx, &data).expect("metal max run2");
+        assert_eq!(
+            metal_out2.to_bits(),
+            metal_out.to_bits(),
+            "n={n}: run-to-run"
+        );
+    }
+}
+
+/// [`MetalReduce::run_max_axis_f32`] が CPU 参照実装と複数 rank・dim で
+/// bit 一致することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_max_axis_matches_cpu_bit_exact() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    let cases: &[(&[usize], usize)] = &[
+        (&[5], 0),
+        (&[3, 4], 0),
+        (&[3, 4], 1),
+        (&[2, 3, 5], 0),
+        (&[2, 3, 5], 1),
+        (&[2, 3, 5], 2),
+        (&[2, 3, 4, 2], 2),
+    ];
+    for &(shape, dim) in cases {
+        let numel: usize = shape.iter().product();
+        let data = gen_data(numel, 0x3475_1000 + numel as u64);
+        let outer: usize = shape[..dim].iter().product();
+        let axis_len = shape[dim];
+        let inner: usize = shape[dim + 1..].iter().product();
+        let metal_out: Vec<u32> = reduce
+            .run_max_axis_f32(&ctx, &data, outer, axis_len, inner)
+            .expect("metal max axis")
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(
+            metal_out,
+            cpu_max_axis_bits(&data, shape, dim),
+            "shape={shape:?} dim={dim}"
+        );
+    }
+}
+
+/// quiet NaN・全 NaN（→ `-inf`）・±0・非正規化数・`±inf`・`f32::MAX`／`MIN`
+/// の境界値が CPU 参照実装と bit 一致することを確認する。差異が出ても
+/// 判定は緩めず記録・報告する（イシュー #3475）。signaling NaN は別関数。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_max_nan_zero_inf_edge_cases_match_cpu_bit_exact() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    let cases: &[Vec<f32>] = &[
+        vec![f32::NAN; 4097],
+        vec![-f32::NAN; 3],
+        vec![f32::NAN, 3.0, f32::NAN, -5.0, f32::NAN],
+        vec![
+            f32::from_bits(0x7FC0_1234),
+            1.0,
+            f32::from_bits(0xFFC0_0001),
+        ],
+        vec![-0.0f32, 0.0f32],
+        vec![0.0f32, -0.0f32],
+        vec![-0.0f32, -0.0f32],
+        vec![f32::INFINITY, f32::NEG_INFINITY, 0.0f32],
+        vec![f32::MAX, f32::MIN, 1.0],
+        vec![1.0e-40f32, -1.0e-40f32, f32::MIN_POSITIVE],
+    ];
+    for data in cases {
+        let metal_out = reduce.run_max_all_f32(&ctx, data).expect("metal max edge");
+        assert_eq!(
+            metal_out.to_bits(),
+            cpu_max_all_bits(data),
+            "data bits={:?}",
+            data.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// signaling NaN（`0x7F800001`／`0xFF800001`）の扱いを CPU と bit 比較する。
+/// quiet NaN の判定を汚染しないよう別関数に分離している。失敗した場合は
+/// assert を緩めず差異を記録・報告する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）必須"]
+fn metal_max_signaling_nan_matches_cpu_bit_exact() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let reduce = MetalReduce::new(&ctx).expect("MetalReduce::new に失敗した");
+
+    let cases: &[Vec<f32>] = &[
+        vec![f32::from_bits(0x7F80_0001); 5],
+        vec![
+            f32::from_bits(0x7F80_0001),
+            2.0,
+            f32::from_bits(0xFF80_0001),
+        ],
+    ];
+    for data in cases {
+        let metal_out = reduce.run_max_all_f32(&ctx, data).expect("metal max snan");
+        assert_eq!(metal_out.to_bits(), cpu_max_all_bits(data), "snan case");
+    }
+}

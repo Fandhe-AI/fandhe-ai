@@ -1,0 +1,32 @@
+== before ==
+2026-10-19T02:34:05Z
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+pid, process_name, used_gpu_memory [MiB]
+2083578, <resident-process>, 5586 MiB
+2084616, <resident-process>, 1285 MiB
+2626105, <resident-process>, 29089 MiB
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+rustc 1.97.0 (2d8144b78 2026-07-07)
+aarch64
+ 11:34:05 up 52 days, 23:01, 10 users,  load average: 3.18, 0.97, 0.44
+rev-stamp:
+b640875f86399515b2dab4dfc38089caaa5e5c08
+dirty=0
+== after ==
+2026-10-19T02:34:12Z
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %
+pid, process_name, used_gpu_memory [MiB]
+2083578, <resident-process>, 5586 MiB
+2084616, <resident-process>, 1285 MiB
+2626105, <resident-process>, 29089 MiB
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+rustc 1.97.0 (2d8144b78 2026-07-07)
+aarch64
+ 11:34:12 up 52 days, 23:01, 11 users,  load average: 3.00, 1.00, 0.46
+rev-stamp:
+b640875f86399515b2dab4dfc38089caaa5e5c08
+dirty=0

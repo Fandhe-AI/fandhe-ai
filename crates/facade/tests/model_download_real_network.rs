@@ -10,7 +10,12 @@
 //!   skip（`make test-ignored` の `--ignored` 一括実行で落とさない）、片方だけなら設定ミスで panic
 //! - `FANDHE_AI_DOWNLOAD_TEST_BAD_TLS_URL`: 任意。証明書が不正なホストの URL（`Err(Network)` を確認）
 //!
-//! GB10・macOS 実機での実行と確認は #3173 で行う。
+//! - `FANDHE_AI_DOWNLOAD_TEST_BLACKHOLE_URL`: 任意（#3173）。実ホストへ通信しない到達不能な https URL
+//!   （RFC 5737 TEST-NET 等）。接続タイムアウトが `Err(Network)` で返ることと経過時間（観測値のみ）を確認
+//!
+//! 追加テスト（#3173）: `URL`／`SHA256` の対から pin を 1 桁だけ壊して `HashMismatch` での拒否と
+//! 非公開を確認する。GB10・macOS 実機での実行結果は `docs/perf/logs/https-download-3173/`
+//! と `docs/model-download-design.md` §22 に記録する。
 
 #![cfg(unix)]
 
@@ -21,6 +26,7 @@ use fandhe_ai::model::{DownloadOptions, ModelError, ModelRegistry, Sha256Pin};
 const ENV_URL: &str = "FANDHE_AI_DOWNLOAD_TEST_URL";
 const ENV_SHA: &str = "FANDHE_AI_DOWNLOAD_TEST_SHA256";
 const ENV_BAD_TLS: &str = "FANDHE_AI_DOWNLOAD_TEST_BAD_TLS_URL";
+const ENV_BLACKHOLE: &str = "FANDHE_AI_DOWNLOAD_TEST_BLACKHOLE_URL";
 
 /// 一時キャッシュルート（Drop で削除）。
 struct TempRoot(PathBuf);
@@ -109,4 +115,59 @@ fn real_network_bad_tls_certificate_is_rejected() {
         "証明書不正のホストは Network エラーで拒否される必要があります"
     );
     assert!(!root.0.join("badtls").exists());
+}
+
+/// pin の最後の 16 進 1 桁を反転した値で取得し、`HashMismatch` で拒否され何も公開されないことを確認する
+/// （A08。issue #3173 の「ハッシュ不一致時の拒否」の実通信確認）。
+#[test]
+#[ignore = "実ネットワーク必須（CI では実行しない）。手順は README"]
+fn real_network_wrong_pin_is_rejected() {
+    let Some((url, sha)) = required_pair() else {
+        eprintln!("skip: {ENV_URL} と {ENV_SHA} が未設定のため pin 不一致テストを実行しません");
+        return;
+    };
+    let mut wrong = sha.clone();
+    let Some(last) = wrong.pop() else {
+        panic!("{ENV_SHA} が空です");
+    };
+    wrong.push(if last == '0' { '1' } else { '0' });
+    let pin = Sha256Pin::from_hex(&wrong).unwrap_or_else(|_| panic!("{ENV_SHA} の形式が不正です"));
+    let root = temp_root();
+    let registry = ModelRegistry::with_cache_dir(&root.0);
+    let r = registry.download_with(
+        &url,
+        "badpin",
+        "v1",
+        DownloadOptions::default().expected_sha256(pin),
+    );
+    match &r {
+        Err(ModelError::HashMismatch { .. }) => {}
+        Err(e) => panic!(
+            "HashMismatch を期待しましたが別のエラーでした: {}",
+            error_kind(e)
+        ),
+        Ok(_) => panic!("pin 不一致なのに取得が成功しました"),
+    }
+    assert!(!root.0.join("badpin/v1/model.safetensors").exists());
+}
+
+/// 到達しない宛先への接続が `Err(Network)` で返ることを確認し、経過時間を観測値として出す
+/// （時間では assert しない。即時に RST／unreachable が返る環境では接続タイムアウトの実挙動は未確認）。
+#[test]
+#[ignore = "実ネットワーク必須（CI では実行しない）。手順は README"]
+fn real_network_blackhole_connect_times_out() {
+    let Some(url) = std::env::var(ENV_BLACKHOLE).ok().filter(|v| !v.is_empty()) else {
+        eprintln!("skip: {ENV_BLACKHOLE} が未設定のため接続タイムアウトテストを実行しません");
+        return;
+    };
+    let root = temp_root();
+    let registry = ModelRegistry::with_cache_dir(&root.0);
+    let started = std::time::Instant::now();
+    let r = registry.download(&url, "blackhole", "v1");
+    eprintln!("BLACKHOLE_ELAPSED_MS={}", started.elapsed().as_millis());
+    assert!(
+        matches!(r, Err(ModelError::Network(_))),
+        "到達不能な宛先は Network エラーで返る必要があります"
+    );
+    assert!(!root.0.join("blackhole").exists());
 }

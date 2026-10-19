@@ -1,0 +1,9 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/autodiff)
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/backend-metal)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/onnx-interop)
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/facade)
+    Finished `release` profile [optimized] target(s) in 16.41s

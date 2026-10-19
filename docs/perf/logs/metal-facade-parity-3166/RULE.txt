@@ -1,16 +1,19 @@
 事前登録規則（イシュー #3166: Transformer・Functional・可変長系列 7 群の Metal 実機 parity）
-宣言日時（UTC）: 2026-10-18T00:00Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+宣言日時（UTC）: 2026-10-19T04:11Z（再登録。旧宣言 2026-10-18T00:00Z の対象コミットは main の perf 変更で有効条件を満たさなくなった。実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
 
 機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。M4 Max 開発機では測らない・記録しない
 （docs/real-hardware-verification-env.md §1・§7）。
 
 対象コミット（テスト入力・判定を含むコミット）:
-  75afa05fbba95249a09b9ef5b9dd7f4aca159f06
+  b640875f86399515b2dab4dfc38089caaa5e5c08
   実行時の HEAD がこれより後でもよい条件: 次が成立すること（後続のコミットは docs のみ）。
-    git diff --quiet 75afa05fbba95249a09b9ef5b9dd7f4aca159f06 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+    git diff --quiet b640875f86399515b2dab4dfc38089caaa5e5c08 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
   成立しなければ実行せず、本ファイルを新しい宣言日時・対象コミットで再登録してから測る。
-  .rev-stamp は 1 行形式（git rev-parse HEAD の 40 桁小文字 16 進数 + 改行）。実行時の HEAD フル SHA を
-  展開ツリー直下の .rev-stamp に書き、README に記録する。
+  .rev-stamp は 2 行形式（1 行目: git rev-parse HEAD の 40 桁小文字 16 進数、2 行目: dirty=<git status --porcelain の件数>）。
+  展開ツリー直下の .rev-stamp に書く。dirty=0 以外は無効（実行しない）。中央の rev-stamp.txt に写して README に記録する。
+
+展開先: ~/work/rust-ai-library-run-3166（専用。並列セッションとの衝突を避けるため、
+  docs/real-hardware-verification-env.md §3 の既定 ~/work/rust-ai-library-run からの意図的な逸脱）。
 
 実行環境: zsh -lc で包み、CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する
   （docs/real-hardware-verification-env.md §7.1）。計測中は他のビルドを並走させない。

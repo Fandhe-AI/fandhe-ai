@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/merge_ops_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/merge_ops_backend_parity-dd58b9e331a1b90d)
+
+running 1 test
+test metal_merge_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.05s
+

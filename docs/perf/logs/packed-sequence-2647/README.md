@@ -36,4 +36,4 @@ CPU（`CpuBackendOps`）版は同テストファイルの属性なしテスト�
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 2026-10-19 | DGX Spark GB10 | 上記 CUDA（実測は `--test packed_sequence_backend_parity -- --ignored --exact --nocapture --test-threads=1 cuda_packed_sequence_matches_cpu_reference`） | pass（1/1） | #3165・実行コミット a115595c6（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)）・ログ [`cuda/cuda_packed_sequence_matches_cpu_reference.log`](./cuda/cuda_packed_sequence_matches_cpu_reference.log)。GPU 経路かホストフォールバックかは確かめていない |
-| 未実測 | Mac mini（Apple M4） | 上記 Metal | 未実測 | #3166 で Mac 側へ申し送り（`../metal-facade-parity-3166/`） |
+| 2026-10-19 | Mac mini（Apple M4） | 上記 Metal（`--test packed_sequence_backend_parity`。`--ignored --exact --nocapture --test-threads=1`） | pass（1/1・0.26s） | #3166。実行コミット 6570171a・`metal/rev-stamp.txt` は dirty=0。ログ `metal/metal_packed_sequence_matches_cpu_reference.log`。GPU 経路かホストフォールバックかは未確認 |
