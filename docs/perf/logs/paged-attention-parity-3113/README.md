@@ -1,6 +1,7 @@
 # paged attention（K-3）の CPU 参照一致と CUDA／Metal 実機 parity（#3113）未実測の申し送り
 
 > CUDA は #3171 で GB10 実測済み（2026-10-19・コミット b640875f・backend 2 件×5 回・facade 1 件×5 回すべて pass）。結果は末尾「CUDA 実測記入欄（#3171）」節。
+> Metal は #3172 で Mac mini（Apple M4）実測済み（2026-10-19・実行コミット 66537019・backend 3 件×5 回・facade 1 件×5 回すべて pass）。結果は末尾「Metal 実測記入欄（#3172）」節。
 
 `docs/device-resident-kv-paged-attention-design.md` §5・§14 参照。本実装エージェント実行環境は CUDA／Metal 実機に
 到達できないため、下記の `#[ignore]` テストは**未実測**である。実測は #3171（GB10）・#3172（Mac mini）が担当する。
@@ -63,7 +64,7 @@ PAGED_PARITY backend=<cuda|metal|metal-tracked> case=<id> step=<n> total=<要素
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 2026-10-19 | DGX Spark GB10 | 上記 cuda コマンド（backend・facade。`--test-threads=1` 付き） | 5 回すべて pass（backend 2/2・facade 1/1 が各回。fail 0） | `.rev-stamp` dirty=0・ログ `cuda/*.run{1..5}.log`・中央値表 `cuda/paged_parity_median.tsv` |
-| 未実測（#3172） | Apple Silicon（Mac mini M4） | 上記 metal コマンド（backend・facade） | 未実測 | |
+| 2026-10-19 | Apple Silicon（Mac mini M4） | 下記 metal コマンド（backend・facade。`--test-threads=1` 付き） | 5 回すべて pass（backend 3/3・facade 1/1 が各回。fail 0） | `.rev-stamp` dirty=0・ログ `metal/*.run{1..5}.log`・中央値表 `metal/paged_parity_median.tsv` |
 
 ## CUDA 実測記入欄（#3171）
 
@@ -86,3 +87,25 @@ PAGED_PARITY backend=<cuda|metal|metal-tracked> case=<id> step=<n> total=<要素
 - facade 層は `PAGED_PARITY` 行を出さない（厳密判定のみ）。
 - ウォームアップ（`--release` ビルド。`cuda/build.log`）は判定外。測定中にビルドは並走させていない（並列度 1）。
 - tolerance 定数・判定式・`BASELINES`・テストコードは変更していない。再実行・選別はしていない。
+
+## Metal 実測記入欄（#3172）
+
+- 事前登録規則: 既存の `RULE.txt`（2026-10-16 固定。本件では変更していない）が判定を支配し、`../metal-phase2-4-parity-3172/RULE.txt` は 12 本全体の実行手順を固定した（コミット `66537019` で実測前に固定。前回測定〈PR #3474〉は記録手順の欠陥で不採用となり、本測定はその再測定。結果は pass／fail にかかわらず採用）。実行は `RULE.txt` どおり独立プロセスで **5 回**。
+- 実行日 2026-10-19（UTC 18:1x）。対象コミットは `5df7986446fd6e19bbfa2d73539fef95ba2e9d0e` 以降で `crates/`・`Cargo.toml`・`Cargo.lock`・`rust-toolchain.toml` に差分が無い `66537019`（`metal/rev-stamp.txt` は `dirty=0`）。
+- 環境: Mac mini（Apple M4・macOS 27.0.1・rustc 1.99.0）。詳細は `../metal-phase2-4-parity-3172/env_info.txt`。ホスト名・ユーザー名・絶対パスはマスク済みで、ログは手で編集していない。
+- 実行コマンド: `--release -p fandhe-ai-backend-metal --test paged_kv_real_device -- --ignored --nocapture --test-threads=1 metal_paged_attention`（backend を 5 回）、`--release -p fandhe-ai --test paged_attention_facade -- --ignored --exact --nocapture --test-threads=1 metal_paged_attention_forward_matches_cpu_tape`（facade を 5 回）。各ログ末尾に `rc=0`。
+- 対象外: `paged_kv_real_device.rs` の古い `*_on_metal` 3 本は #3113 の範囲外で、フィルタ `metal_paged_attention` で走らない（ログの `3 filtered out`）。
+
+| 層 | テスト | 5 回の結果 | ログ |
+|---|---|---|---|
+| backend | `metal_paged_attention_matrix_matches_cpu_reference`・`metal_paged_attention_tracked_matrix_matches_cpu_reference`・`metal_paged_attention_tolerance_constants_pinned` | 毎回 `running 3 tests` → `3 passed; 0 failed`（5/5 回 pass） | `metal/paged_kv_real_device.run{1..5}.log` |
+| facade | `metal_paged_attention_forward_matches_cpu_tape` | 毎回 `running 1 test` → `1 passed; 0 failed`（5/5 回 pass） | `metal/paged_attention_facade.run{1..5}.log` |
+
+### PAGED_PARITY（backend 層）の 5 回中央値
+
+- `PAGED_PARITY` 行は 1 回あたり 136 行（`metal` と `metal-tracked` が各 68 行〈case×step〉）。5 回で全 136 行の `total`・`fail`・`max_abs`・`max_rel`・`mean_abs` が完全一致した（不一致 0。`runs_identical` は全行 yes）ため、中央値は各回の値と同じ。fail は全行 0、`judgement=strict`（`BASELINES` は 0 件のまま。追加していない）。
+- 全 136 行の中央値表は `metal/paged_parity_median.tsv`（列: backend, case, step, total, fail, max_abs_median, max_rel_median, mean_abs_median, judgement, runs_identical）。
+- tracked 版（encode のみ・待たない）の健全実行で `DispatchFailureCell` が立たないことも、同テストの assert として毎回 pass した。
+- facade 層は `PAGED_PARITY` 行を出さない（厳密判定のみ）。
+- ビルド（`../metal-phase2-4-parity-3172/build.log`）は判定外で、測定中にビルドは並走させていない（並列度 1）。
+- tolerance 定数・判定式・`BASELINES`・テストコードは変更していない。再実行・選別はしていない。経路（GPU カーネルかフォールバックか）は本測定からは断定しない（追従課題）。

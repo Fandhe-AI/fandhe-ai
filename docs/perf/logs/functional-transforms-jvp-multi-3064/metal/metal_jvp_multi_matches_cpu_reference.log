@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running tests/functional_transforms_jvp_multi_backend_parity.rs (~/work/target-fandhe-ai/debug/deps/functional_transforms_jvp_multi_backend_parity-8074df2dcabe8e00)
+
+running 1 test
+test metal_jvp_multi_matches_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.09s
+
+rc=0
