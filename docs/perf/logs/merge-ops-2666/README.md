@@ -39,6 +39,7 @@ CPU 版は属性なしテスト（`cpu_matches_naive_reference`・`hand_computed
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
+| 2026-10-19 | DGX Spark GB10 | 上記 CUDA（`--test merge_ops_backend_parity -- --ignored --exact --nocapture --test-threads=1 cuda_merge_ops_match_cpu_reference` 分） | pass（1/1） | #3165・実行コミット a115595c6（[`cuda/rev-stamp.txt`](./cuda/rev-stamp.txt)）・ログ [`cuda/cuda_merge_ops_match_cpu_reference.log`](./cuda/cuda_merge_ops_match_cpu_reference.log)。GPU 経路かホストフォールバックかは確かめていない |
+| 2026-10-19 | DGX Spark GB10 | 上記 CUDA（`--lib -- --ignored --exact --nocapture --test-threads=1 compat::functional::merge_tests::cuda_merge_graph_matches_cpu_reference` 分） | pass（1/1） | #3165・同上の実行コミット・ログ [`cuda/cuda_merge_graph_matches_cpu_reference.log`](./cuda/cuda_merge_graph_matches_cpu_reference.log) |
 | 未実測 | Mac mini（Apple M4） | 上記 Metal（`--test merge_ops_backend_parity` 分） | 未実測 | #3166 で Mac 側へ申し送り（`../metal-facade-parity-3166/`） |
 | 未実測 | Mac mini（Apple M4） | 上記 Metal（`--lib` 分） | 未実測 | #3166 で Mac 側へ申し送り |
