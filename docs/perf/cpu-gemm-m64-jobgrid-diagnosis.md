@@ -16,7 +16,7 @@ C の job-local コピーイン／アウト）を、実行ログで数えるた�
 | CI テスト 3 件 | 再計算（22／44 job ほか）の固定、計数と解析式の一致（Nn／Nt／Tn・Nn は直列と bit 一致）、未 arm 時に何も数えないこと |
 
 確保回数は rayon 内部の確保を含まず、`vec!` の発行 site を解析的に数えた値である
-（job 内 3 回 = `c_local`・`b_panel`・`a_panel`。`split_c_into_jobs` 側 = `2 + col_bands + jobs`。
+（job 内 3 回 = `c_local`・`b_panel`・`a_panel`。`split_c_into_jobs` 側 = `4 + col_bands + jobs`。内訳は `partition::bands` の行帯・列帯 Vec 各 1、`per_col_band` 外側 1、内側 col_bands、`jobs` 1、job ごとの `c_rows`。
 後者は今回新たに分かった事実で、Issue の再計算には無かった）。
 
 ## 2. job 数・再 pack の計数（NEON MR=8／NR=12・開発機 M4 Max で動作確認した値）

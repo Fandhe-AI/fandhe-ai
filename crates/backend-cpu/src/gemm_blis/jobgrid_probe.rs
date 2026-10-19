@@ -90,10 +90,11 @@ pub(super) fn on_region_split_done() {
 }
 
 /// `split_c_into_jobs` が行帯・列帯数を確定した直後に呼ぶ。
-/// 確保 site: `per_col_band` 外側 1 + 内側 col_bands + `jobs` 1 + job ごとの `c_rows`。
+/// 確保 site: `partition::bands` の行帯 Vec 1 + 列帯 Vec 1 + `per_col_band` 外側 1
+/// + 内側 col_bands + `jobs` 1 + job ごとの `c_rows`（= `4 + col_bands + jobs`）。
 pub(super) fn on_split(col_bands: usize, jobs: usize) {
     if IN_REGION.with(Cell::get) {
-        ALLOC_SPLIT.fetch_add((2 + col_bands + jobs) as u64, Ordering::Relaxed);
+        ALLOC_SPLIT.fetch_add((4 + col_bands + jobs) as u64, Ordering::Relaxed);
     }
 }
 
@@ -344,7 +345,7 @@ mod tests {
             let jobs = (r.row_bands * r.col_bands) as u64;
             assert_eq!(r.jobs, jobs, "{t:?}");
             assert_eq!(r.alloc_job, 3 * jobs);
-            assert_eq!(r.alloc_split, (2 + r.col_bands) as u64 + jobs);
+            assert_eq!(r.alloc_split, (4 + r.col_bands) as u64 + jobs);
             assert_eq!(r.c_stage_words, 2 * (m * n) as u64);
             // k=70 <= KC かつ job 幅 <= NC のため pc／jc ループは 1 周: job ごとに
             // A は ceil(mc/mr)·mr·k 語、B は ceil(nc/nr)·nr·k 語 pack される。
