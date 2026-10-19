@@ -6,9 +6,10 @@ CUDA（`CudaBackendOps`）・Metal（`MetalBackendOps`。`cfg(target_os = "macos
 （`cuda_double_vjp_jvp_jacfwd_match_cpu_reference`・`metal_double_vjp_jvp_jacfwd_match_cpu_reference`）は
 `#[ignore]` のまま未実測である。
 
-`fandhe_ai_autodiff::functional_ops::{jvp, jacfwd}` は `pub(crate)`（facade 非公開）で統合テストから
-直接呼べないため、同テストは公開 API だけで #2940 の double-VJP 手順をミラーしている。公開が承認された後は
-本物の関数呼び出しへ置き換える（#2941 の担当範囲）。
+`fandhe_ai_autodiff::functional_ops::{jvp, jacfwd}` は #2956 で facade の `Tape::jvp`／`Tape::jacfwd` として公開済み。
+上記ミラー（公開 API だけで #2940 の double-VJP 手順を再現）は #2942 の実測記録の対象として維持する
+（決定記録 §28）。本物の `Tape::jvp`／`Tape::jacfwd` を実機 tape で呼ぶテストは別ファイル
+`functional_transforms_jvp_backend_parity.rs`（#3167。末尾の節）が担当する。
 
 ## 測定コマンド案
 
@@ -42,3 +43,38 @@ cargo test -p fandhe-ai --test functional_ops_jvp_backend_parity -- --ignored --
 |---|---|---|---|---|
 | 2026-10-09 | DGX Spark GB10 | `cargo test -p fandhe-ai --test functional_ops_jvp_backend_parity -- --ignored --nocapture cuda` | pass 1 / fail 0（`cuda_double_vjp_jvp_jacfwd_match_cpu_reference` ok。running 1 test） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・`rustc 1.97.0 (2d8144b78 2026-07-07)` |
 | 2026-10-09 | Apple Silicon（M4 Max） | `cargo test -p fandhe-ai --test functional_ops_jvp_backend_parity -- --ignored --nocapture metal` | pass 1 / fail 0（`metal_double_vjp_jvp_jacfwd_match_cpu_reference` ok。running 1 test） | main `8bbeb874ceb4748cbcf01b52e7162d02812bf8ba`・Apple M4 Max・macOS 27.0（26A428）・`rustc 1.98.1 (48a229cea 2026-09-01)` |
+
+## 本物の `Tape::jvp`／`Tape::jacfwd` の実機 parity（#3167）
+
+`crates/facade/tests/functional_transforms_jvp_backend_parity.rs` の 4 テスト（いずれも `#[ignore]`）。
+Metal 2 本は `cfg(target_os = "macos")` 限定。
+
+- `cuda_jvp_jacfwd_basic_ops_match_cpu_reference`・`metal_jvp_jacfwd_basic_ops_match_cpu_reference`:
+  mul・matmul_tanh・sum・broadcast_add・rank0（`functional_transforms_jvp_facade.rs` と同じフィクスチャ）
+- `cuda_jvp_jacfwd_extended_ops_match_cpu_reference`・`metal_jvp_jacfwd_extended_ops_match_cpu_reference`:
+  softmax・layer_norm・gelu_tanh・cumsum・pad・conv2d（#3087 の代表。`rfft`・`solve`・`avg_pool2d` は
+  実機側の対応状況が不確かなため対象外）
+
+各ケースで、デバイス tape の `jvp`／`jacfwd` を (1) 同デバイスの `jacobian` 参照、(2) `Device::Cpu` の同一計算と
+REQ-2 統一複合判定（`assert_parity`）で比べ、shape も検査する。基本と拡張を別関数にしてあるのは、拡張側が
+実機で失敗しても基本側の結果が埋もれないようにするため。
+
+```sh
+# CUDA（DGX Spark GB10 等の実機上で。担当 #3168）
+cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity -- --ignored --nocapture cuda
+
+# Metal（Apple Silicon 実機上で。担当 #3169）
+cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity -- --ignored --nocapture metal
+```
+
+`scripts/test-ignored.sh metal-facade` はテストバイナリ名で絞っており本テストを含まない。CPU 版は
+`functional_transforms_jvp_facade.rs` の属性なしテストで検証済み。期待結果は上の節と同じ（新規カーネルなし・
+REQ-2 統一複合判定・split-K 非発動の形状）。判定外や `Unsupported` 等は推測で直さず事実を記録し、
+tolerance の単独緩和は行わない。
+
+### 実測記入欄（#3167）
+
+| 日付 | 実機 | コマンド | 結果 | 備考 |
+|---|---|---|---|---|
+| 未実測（#3168） | DGX Spark GB10 | 上記 cuda コマンド | 未実測 | |
+| 未実測（#3169） | Apple Silicon（Mac mini） | 上記 metal コマンド | 未実測 | |
