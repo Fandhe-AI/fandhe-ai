@@ -581,7 +581,9 @@ argmax／argmin と同じ迂回経路）。
   別関数）・`backend_ops_real_device.rs::backend_ops_max_matches_cpu_bit_exact`・
   `typed_ops_f16_parity.rs`／`typed_bf16.rs` の max・
   `facade/tests/reduce_backend_parity.rs::metal_max_all_and_axis_*`。
-- 実測: 実装者の開発機（M4 Max）で上記 `--ignored` が全て pass した
-  smoke 確認のみ（記録には使わない）。**Mac mini（`METAL_NODE`）での
-  正式実測と `metal_dropout_embedding_bag_bit_exact` の測り直しは未実施
-  （undetermined）**。受け入れ基準は Mac mini 実測後に確定する。
+- 実測: 実装者の開発機（M4 Max）での smoke 確認は記録に使わない。
+  **2026-10-19 に Mac mini（Apple M4）で正式実測済み**: 上記 `--ignored`
+  の max 系 8 本と `metal_dropout_embedding_bag_bit_exact`（#3164 で
+  `Unsupported` により fail していたもの）の計 9 本が全て pass
+  （CPU 参照と bit 一致・各 1 回実行）。規則・対象コミット・生ログは
+  `docs/perf/logs/metal-max-reduce-3475/`。

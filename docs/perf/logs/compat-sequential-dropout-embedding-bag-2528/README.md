@@ -31,6 +31,7 @@ cargo test -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_p
 |---|---|---|---|
 | GB10 | cuda_dropout_embedding_bag_bit_exact | pass | 2026-10-19 |
 | Mac mini（Apple M4） | metal_dropout_embedding_bag_bit_exact | **fail**（Unsupported・要対応。#3164） | 2026-10-19 |
+| Mac mini（Apple M4） | metal_dropout_embedding_bag_bit_exact | pass（`max` reduction 結線後の再実測。#3475） | 2026-10-19 |
 
 ## CUDA 実測手順（#3163）
 
@@ -71,3 +72,9 @@ cargo test -p fandhe-ai --test compat_sequential_dropout_embedding_bag_backend_p
 - fail の内容: Metal 経路の `Sequential::forward`（どの段〈Dropout／Sum／Mean／Max〉かはログから断定しない。メッセージは `max` reduction 由来のため EmbeddingBag の Max モードの可能性が高い）が `Backend(Unsupported("MetalBackendOps::max: reduction カーネル未実装（TASK-1.9c スコープ外）"))`（`compat_sequential_dropout_embedding_bag_backend_parity.rs:67`） を返して `unwrap()` で panic した。数値の不一致ではなく Metal バックエンドの `max` reduction が未実装であることによる。ログの最大誤差の出力はない。**要対応**（原因の切り分けと修正は別イシュー候補。tolerance・baseline・判定・テストは変えていない）。
 - tolerance 定数・baseline・判定式・テストコードは不変。
 - 注記: Metal の GPU カーネル経路を通ったか、Unsupported 経由のホストフォールバック経路を通ったかは本ログから断定できず未確認。
+
+## Metal 再実測（#3475）
+
+- #3164 の fail 原因は `MetalBackendOps::max` の常時 `Unsupported`。PR #3479 で `max` の GPU カーネルを結線した後、Mac mini（Apple M4）で測り直した。上の #3164 の fail 記録は履歴として残し、書き換えない。
+- 結果: `metal_dropout_embedding_bag_bit_exact` は **pass**（rc=0・`1 passed; 0 failed`）。判定規則・対象コミット `922c285e087c620ef95e41426f832d9819867486`・環境・生ログは [`../metal-max-reduce-3475/README.md`](../metal-max-reduce-3475/README.md) と `logs/facade-dropout-embbag-3164/`。
+- tolerance 定数・baseline・判定式・テストコードは不変。

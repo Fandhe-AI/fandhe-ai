@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (~/work/target-fandhe-ai/debug/deps/fandhe_ai_backend_metal-920f8fd91671ebaa)
+
+running 1 test
+test typed_bf16::tests::max_matches_f32_backend_ops_rounded_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.08s
+
+rc=0
