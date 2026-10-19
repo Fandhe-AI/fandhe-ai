@@ -39,4 +39,4 @@ CPU 版は属性なしテスト（`parameter_gradients_match_pytorch`・`fit_tra
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測 | DGX Spark GB10 | 上記 CUDA | 未実測 | |
-| 未実測 | Mac mini（Apple M4） | 上記 Metal | 未実測 | #3166 で Mac 側へ申し送り（`../metal-facade-parity-3166/`） |
+| 2026-10-19 | Mac mini（Apple M4） | 上記 Metal（`--lib`。`--ignored --exact --nocapture --test-threads=1`） | pass（1/1・0.10s） | #3166。実行コミット 6570171a・`metal/rev-stamp.txt` は dirty=0。ログ `metal/metal_parameter_gradients_match_cpu_reference.log`。GPU 経路かホストフォールバックかは未確認 |
