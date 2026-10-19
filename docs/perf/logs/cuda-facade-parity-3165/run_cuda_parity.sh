@@ -55,9 +55,13 @@ fi
 # マスクしてから収録し、残っていれば fail-closed で止める（残ったファイルは raw ごと削除する）。
 # 異常終了（set -e・exit 2 を含む）でも未処理の .raw が出力先に残らないよう、EXIT trap でも mask_all を呼ぶ。
 HN=$(hostname)
+UN=${USER:-__nouser__}
+# ユーザー名を正規表現（sed -E／grep -E 共通）で安全に使うため、メタ文字をエスケープしておく。
+UN_RE=$(printf '%s' "$UN" | sed -e 's#[][\\.^$*+?(){}|/]#\\&#g')
 LEAK=0
 mask() { # mask <raw> <final>
-  sed -e "s|$HN|<cuda-node>|g" -e "s|$HOME|~|g" -e "s|${USER:-__nouser__}\([^-A-Za-z0-9_]\)|<user>\1|g" "$1" >"$2"
+  # ユーザー名の直後は「区切り文字 または 行末」を境界とする（行末で終わる owner=<user> も置換する）。
+  sed -E -e "s|$HN|<cuda-node>|g" -e "s|$HOME|~|g" -e "s#${UN_RE}([^-A-Za-z0-9_]|\$)#<user>\1#g" "$1" >"$2"
   rm -f "$1"
   for s in "$HN" "$HOME" "/home/"; do
     if [ -n "$s" ] && grep -Fq -- "$s" "$2"; then
@@ -67,11 +71,21 @@ mask() { # mask <raw> <final>
       break
     fi
   done
+  # ユーザー名も同じ境界（行末含む）で残存検査する。部分文字列の誤検知は避ける。
+  if [ -e "$2" ] && grep -Eq -- "(^|[^-A-Za-z0-9_])${UN_RE}([^-A-Za-z0-9_]|\$)" "$2"; then
+    echo "マスク漏れ(user): $2" >&2
+    rm -f "$2"
+    LEAK=1
+  fi
 }
 mask_all() {
   for raw in "$OUT"/*.raw "$OUT"/logs/*/*.raw; do
     [ -e "$raw" ] || continue
-    mask "$raw" "${raw%.raw}.log"
+    # env_info.raw のみ収集手順・コミット済み成果物・Metal 側に合わせて .txt で出力する。
+    case "$raw" in
+      "$OUT/env_info.raw") mask "$raw" "$OUT/env_info.txt" ;;
+      *) mask "$raw" "${raw%.raw}.log" ;;
+    esac
   done
 }
 trap mask_all EXIT
