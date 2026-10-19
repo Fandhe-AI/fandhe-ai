@@ -1,0 +1,68 @@
+事前登録規則（イシュー #3164・2 回目: compat::Sequential の層 9 群の Metal 実機 parity を Mac mini で測り直す）
+宣言日時（UTC）: 2026-10-19T21:05Z（`date -u` の出力に基づく。実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+
+背景: 1 回目（PR #3468・コミット b640875f）は 10 本中 9 本 pass・metal_dropout_embedding_bag_bit_exact の 1 本が
+  MetalBackendOps::max の Unsupported で fail だった。その後 #3475（PR #3479）で max の GPU カーネルが結線された。
+  イシュー追記（2026-10-19）の条件「10 本すべてを main HEAD で測り直し、1 回目の記録は残して 2 回目を追記する」に従う。
+  コード（crates/）・tolerance 定数・parity baseline・判定式・テスト入力・依存は変更しない。1 回目の metal/ 成果物は変更しない。
+
+機体: Mac mini（Apple M4）。計測専用機。ホスト名は記録しない。M4 Max 開発機の値は記録しない
+  （docs/real-hardware-verification-env.md §1・§7）。並列度 1。
+
+対象コミット: 本ファイルを追加するコミット自身の HEAD（成果物の .rev-stamp / rev-stamp.txt に書く）。
+  「実行したコードは main HEAD（e1a3c5e25e232d6ed7376f786f0af7bb35997c33）と同じ」と README に書ける有効条件（成立したときに限る）:
+    git diff --quiet e1a3c5e25e232d6ed7376f786f0af7bb35997c33 <HEAD> -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければその主張は書かず、HEAD だけを対象コミットとして記録する。
+  .rev-stamp は展開ツリー直下に置く 1 行形式: git rev-parse HEAD の 40 桁小文字 16 進数 + 改行 1 個のみ。
+  dirty 検査は別に行う: 送信前にローカルで git status --porcelain が空であることを確かめる。
+  展開ツリーは git archive <HEAD> から作る。ノード側で展開した crates/ の指紋
+  （find crates -type f | sort | xargs shasum | shasum）がローカルと一致することを確かめ、README に記録する。
+
+展開先: ~/work/rust-ai-library-run-3164（専用。並列する他イシューの Metal 実測との衝突を避けるため、
+  docs/real-hardware-verification-env.md §3 の既定からの意図的な逸脱）。
+
+実行環境: zsh -lc で包み、CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する
+  （docs/real-hardware-verification-env.md §7.1）。debug プロファイル（--release は付けない）。
+
+並走禁止: 実行前に pgrep -x cargo／pgrep -x rustc が空になるまで 30 秒間隔で最大 60 分待つ。
+  空にならなければ undetermined。待機回数は env_info に記録する。
+時間制限: 各 cargo コマンドを perl -e 'alarm shift; exec @ARGV' 1800 で包む（rc 142 は undetermined）。
+
+ビルドを先に済ませる（判定外）: 9 ターゲットそれぞれ
+  cargo test -p fandhe-ai --test compat_sequential_<名>_backend_parity --no-run
+
+コマンド（10 本。上から順に 1 本ずつ・各 1 回・再実行なし。共通オプション: -- --ignored --exact --nocapture --test-threads=1 <関数名>）:
+  1. activation_layers           metal_activation_layers_parity                          （bit 一致＋REQ-2）
+  2. activation_scalar_layers    metal_activation_scalar_layers_parity                   （REQ-2）
+  3. adaptive_max_global_pool    metal_adaptive_max_global_pool_bit_exact                （bit 一致）
+  4. conv_transpose2d            metal_conv_transpose2d_forward_backward_matches_cpu     （REQ-2）
+  5. conv3d                      metal_conv3d_forward_backward_matches_cpu               （REQ-2）
+  6. dropout_embedding_bag       metal_dropout_embedding_bag_bit_exact                   （bit 一致）
+  7. group_instance_norm         metal_group_instance_norm_matches_cpu                   （REQ-2）
+  8. pixel_shuffle               metal_pixel_shuffle_layers_bit_exact                    （bit 一致）
+  9. spatial_layers              metal_spatial_layers_nearest_bit_exact                  （bit 一致）
+ 10. spatial_layers              metal_spatial_layers_bilinear_matches_cpu               （REQ-2）
+  各行は cargo test -p fandhe-ai --test compat_sequential_<名>_backend_parity -- ... の形。
+  REQ-2 は統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行であることを確かめる。
+  0 行または 2 行以上なら実行せず undetermined とする。
+
+経路の位置づけ: GPU カーネル経路かホストフォールバックかはログから断定しない（未確認）。
+
+判定:
+  pass: exit 0 かつ "running 1 test" かつ "test result: ok. 1 passed; 0 failed"。
+  fail: テストの失敗・panic・Unsupported・tape_for(Device::Metal) の失敗。bit 一致の fail を REQ-2 pass へ読み替えない。
+  undetermined: ノード到達不能・ビルド不能・timeout（rc 142）・--list の選択件数が 1 でない・並走プロセスが消えない・
+    マスク後のテスト名残存検査の失敗。undetermined は pass と見なさない。
+  時間計測ではないので中央値は取らない。pass／fail／undetermined の件数で記録する。期待件数は 10。
+
+fail 時の扱い:
+  tolerance・baseline・判定方式・入力は変えない。失敗したテスト名・rc・ログに出た最大誤差を引用して記録し、
+  「要対応」と書いて止まる。原因の切り分け・カーネル修正は本 PR で行わない。
+  Issue へのコメント・起票、baseline 化は所有者の承認なしには行わない。
+
+記録規則: ホスト名・ユーザー名・ホームパスだけを <metal-node>・<user>・~ にマスクする。マスク漏れがあれば
+  そのファイルを捨てる（fail-closed）。マスク後に各ログで「test <テスト名> ... 」の行がちょうど 1 行
+  残っていることを確かめ、テスト名・crate 名がマスクで壊れていなければ記録を有効とする。
+  回収したログは手で編集しない。
