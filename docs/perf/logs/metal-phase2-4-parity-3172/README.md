@@ -70,7 +70,13 @@ paged attention（9〜12）の判定は既存の `../paged-attention-parity-3113
 sed -E 's|  logs/([^/]+)/|  ../\1/metal/|' SHA256SUMS | shasum -a 256 -c
 ```
 
-`run_metal_parity.sh` の SHA-256 は `env_info.txt` の `script_sha256` と一致する（`shasum -a 256 run_metal_parity.sh`）。
+`env_info.txt` の `script_sha256` は実行時の版（コミット `66537019`）の `run_metal_parity.sh` のハッシュである。
+その後 `711430ce`（leak_check のホスト名検査の修正）でスクリプトが変更されたため、現在のファイルのハッシュとは一致しない
+（`env_info.txt` の記録は変更しない）。実行時の版は次で照合する。
+
+```
+git show 66537019:docs/perf/logs/metal-phase2-4-parity-3172/run_metal_parity.sh | shasum -a 256
+```
 
 ## 申し送り（本件の対象外）
 
