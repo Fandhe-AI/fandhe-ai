@@ -16,7 +16,10 @@ TWO_D_DYNAMIC_PRODUCTION_ENABLED=true・SME_PRODUCTION_ENABLED=false・MC/KC/NC�
          （cfg(test) あり。計数専用で計時には使わない）
    計時と A/B: example cpu_jobgrid_bench（cfg(test) なし。フックはコンパイルされない）。
 4. 計数の腕: native（機体の既定プール）と専用 ThreadPool の T=1・T=10・T=20。
-   計数は決定的だが 5 run 実行し、全 run 同一でなければ集計を止める（fail-closed）。
+   計数は 5 run 実行し、再現性を要求するフィールド（regions・jobs・a_pack_tiles・
+   a_pack_words・a_ideal_words・確保回数）が全 run 同一でなければ集計を止める（fail-closed）。
+   workers_used は WORKER_MASK 由来で Rayon のスケジューリングにより run 間で変動しうる
+   観測値のため、一致条件から除外し run ごとに記録だけする（計数の判定には使わない）。
 5. 単スレッド GFLOPS: RAYON_NUM_THREADS=1 で起動し、出力行の rayon_threads= を正とする
    （環境変数・ファイル名と食い違えば集計を止める）。プロセス内は
    MeasurementConfig::default（warmup 20・iters 20）の中央値、5 プロセスの中央値を採る。
