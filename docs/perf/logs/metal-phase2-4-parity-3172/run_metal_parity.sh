@@ -47,10 +47,11 @@ mask_stream() {
 }
 
 # leak_check <file> <user> <host> <host-short> <home>: 残存があれば 1、無ければ 0。
-# 長いホスト名・$HOME・/Users/ は境界なしの固定文字列で、ホスト名・ユーザー名は境界付きで検査する。
+# $HOME・/Users/ は境界なしの固定文字列で、ホスト名・ユーザー名はマスクと同じ境界付きで検査する
+# （境界なしだと host=local が metal_local_response_norm に誤一致するため。PR #3482 指摘）。
 leak_check() {
   local f=$1 un=$2 hn=$3 hns=$4 home=$5 s
-  for s in "$hn" "$home" "/Users/"; do
+  for s in "$home" "/Users/"; do
     if [ -n "$s" ] && [ "$s" != "/" ] && grep -Fq -- "$s" "$f"; then return 1; fi
   done
   for s in "$hn" "$hns" "$un"; do
@@ -124,6 +125,11 @@ KEEP
   fi
   if ! leak_check "$d/chg.out" "$un" "$hn" "$hns" "$home"; then
     echo "selfcheck: 置換後に残存がある" >&2
+    rc=1
+  fi
+  # 識別子行（metal_local_response_norm 等）を leak_check が誤検出しない回帰ケース。
+  if ! leak_check "$d/keep.out" "$un" "$hn" "$hns" "$home"; then
+    echo "selfcheck: 識別子行を残存と誤検出した" >&2
     rc=1
   fi
   rm -rf "$d"
