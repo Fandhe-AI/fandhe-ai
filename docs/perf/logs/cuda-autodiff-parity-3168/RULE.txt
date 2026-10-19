@@ -1,0 +1,71 @@
+事前登録規則（イシュー #3168: f64 自動微分・create_graph・jvp／jacfwd の CUDA 実機 parity）
+宣言日時（UTC）: 2026-10-19T16:19Z（実機実行より前。実機結果を見た後に入力・判定・コマンドを変えない）
+経緯: #3165（PR #3477）と同型の手順。実行スクリプトは ../cuda-facade-parity-3165/run_cuda_parity.sh の複製で、
+  対象テスト一覧・事前ビルド一覧・summary の行数検査だけを変えた。マスク・leak 検査のロジックは不変。
+  実行スクリプトはコミット済みのものをそのまま送る（PR #3469 の「実行スクリプトとコミット済みスクリプトの不一致」を繰り返さない）。
+
+機体: DGX Spark GB10（aarch64・sm_121）だけ。ホスト名は記録しない（docs/real-hardware-verification-env.md §1）。
+
+対象コミット（テスト入力・判定を含むコミット）:
+  d8e38b479e43b09c35aad5c7f881bc503b08e841
+  実行時の HEAD がこれより後でもよい条件: 次が成立すること（後続のコミットは docs のみ）。
+    git diff --quiet d8e38b479e43b09c35aad5c7f881bc503b08e841 <HEAD> -- crates/ Cargo.toml Cargo.lock rust-toolchain.toml
+  成立しなければ実行せず、本ファイルを新しい宣言日時・対象コミットで再登録してから測る。
+  .rev-stamp は 1 行形式（git rev-parse HEAD の 40 桁小文字 16 進数 + 改行）。dirty かどうかは送信側で
+  git status --porcelain が空であることを確かめて担保する。実行時の HEAD フル SHA を展開ツリー直下の
+  .rev-stamp に書き、README に記録する。
+
+実行環境: 展開先は専用の ~/work/rust-ai-library-run-3168（並列セッションとの衝突回避）。
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai を指定する。
+  計測中は他のビルドを並走させない。実行前に他の cargo／rustc プロセスが無いことを pgrep で確かめ（スクリプトも検査する）、
+  env_info.txt の concurrent_cargo_rustc に記録する。
+
+ビルドを先に済ませる（判定外）:
+  cargo test -p fandhe-ai --test f64_autograd_facade --no-run
+  cargo test -p fandhe-ai --test var_f64_autograd_backend_parity --no-run
+  cargo test -p fandhe-ai --test create_graph_facade --no-run
+  cargo test -p fandhe-ai --test functional_transforms_jvp_backend_parity --no-run
+
+コマンド（7 本。上から順に 1 本ずつ。共通オプション: -- --ignored --exact --nocapture --test-threads=1 <テスト名>）:
+  各行の頭に「timeout 1800 cargo test -p fandhe-ai」を付ける。--release は付けない（各 README のコマンド形を正とする）。
+  1. --test f64_autograd_facade  f64_autograd_cuda_matches_cpu
+  2. --test var_f64_autograd_backend_parity  cuda_f64_autograd_forward_and_grad_match_host_reference
+  3. --test create_graph_facade  create_graph_hessian_cuda_matches_cpu
+  4. --test create_graph_facade  create_graph_rejects_device_mismatch
+  5. --test create_graph_facade  create_graph_extended_ops_cuda_matches_cpu
+  6. --test functional_transforms_jvp_backend_parity  cuda_jvp_jacfwd_basic_ops_match_cpu_reference
+  7. --test functional_transforms_jvp_backend_parity  cuda_jvp_jacfwd_extended_ops_match_cpu_reference
+  5 は create-graph-extended-ops-3087/README.md と docs/README.md の索引が「実測は #3168・#3169」と申し送っている分で、
+  同じテストバイナリ・同じセッションで測れるため本イシューの表（6 本）に加えて測る（3087 README からの申し送り分）。
+  各 README の既存コマンド形は複数の cuda テストに一致しうるため、判定の分離のため --exact で 1 本ずつ起動する。
+  --exact・--nocapture・--test-threads=1 はテストの選び方と出力だけに効き判定には影響しない。
+  既に 2026-10-09 に pass 済みの functional_ops_jvp_backend_parity（double-VJP ミラー）は再測しない。
+
+選択の検証: 各コマンドの前に同じ引数で --list を実行し、": test" で終わる行がちょうど 1 行
+  （対象のテスト）であることを確かめる。0 行または 2 行以上なら実行せず undetermined とする。
+
+判定（tolerance 定数 RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD・baseline・入力・テストコードは不変）:
+  共通の pass: exit 0 かつ "running 1 test" かつ "test result: ok. 1 passed; 0 failed"。
+  共通の fail: 1 件以上のテスト失敗（パニックを含む）。CUDA と CPU は自前バックエンド同士の比較なので
+    判定不能にせず通常の失敗として扱う。
+  undetermined: timeout（exit 124）、--list で選ばれた件数が 1 でない、ビルド不能、ノード到達不能。
+  テストごとの判定契約（テストコードが定める。ここでは変えない）:
+    1・3・5・6・7: REQ-2 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。6・7 は同デバイスの jacobian 参照も含む。
+    2: bit 完全一致（CUDA ネイティブ f64 経路とホスト経路の比較。REQ-2 より厳しい）。bit 不一致による fail は
+       テスト自身の bit 一致契約の fail として、パニックメッセージを引用して記録する。ただちに REQ-2 違反とはみなさない。
+    4: 型付きエラー（DeviceMismatch）を返すことの検査。parity ではないので exit code と出力件数だけで判定する。
+  jvp 系で Unsupported 等の型付きエラーが出た場合も fail として事実を記録する。推測で直さない。
+  時間計測ではないので中央値は取らない。テストごとの pass／fail の件数で記録する。
+
+fail 時の扱い:
+  tolerance・baseline・判定方式・入力は変えない。パニックメッセージの fail_count・max_abs_diff・
+  max_rel_err 等を引用して事実を記録し、README と PR に「要対応」と書く。Issue の起票・コメント、
+  baseline 化はユーザー承認なしでは行わない。
+
+記録規則:
+  ホスト名は <cuda-node>、$HOME は ~、ユーザー名は前後とも境界（英数字・_・.・- 以外）のときだけ <user> にする。
+  crate 名・パッケージ名・ディレクトリ名（fandhe-ai・fandhe_ai*・target-fandhe-ai・Fandhe-AI 等）は変えない。
+  マスク漏れ（ホスト名・$HOME・/home/・境界付きユーザー名の残存）があれば当該記録を捨てる（fail-closed）。
+  回収したログは手で編集しない。漏れや化けが見つかったときはスクリプトを直して新しいコミットにし、
+  本ファイルを再登録して測り直す。
+  実行と提出物の対応: env_info.txt の script_sha256 と rev_stamp、成果物の SHA256SUMS で検証する。
