@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests/compat_sequential_activation_layers_backend_parity.rs (<home>/work/target-fandhe-ai/debug/deps/compat_sequential_activation_layers_backend_parity-49e1887c152f2092)
+
+running 1 test
+test metal_activation_layers_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.23s
+
+rc=0
