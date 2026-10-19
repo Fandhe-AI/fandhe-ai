@@ -1,0 +1,10 @@
+uname: Darwin arm64
+os: macOS 27.0.1
+cpu:
+  Apple M4
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+perl: This is perl 5, version 34, subversion 1 (v5.34.1) built for darwin-thread-multi-2level
+make: GNU Make 3.81
+system_openssl: OpenSSL 4.0.3 29 Sep 2026 (Library: OpenSSL 4.0.3 29 Sep 2026)
+tree_fingerprint_sha256: 14050b31d404e945e01da24df5acef5c96710b5ae3064c327e59bdbb5308df13

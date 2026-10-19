@@ -1,0 +1,17 @@
+host_triple: aarch64-apple-darwin
+== cargo tree -p fandhe-ai --locked -e normal,build --target aarch64-apple-darwin -i openssl-src
+warning: nothing to print.
+
+To find dependencies that require specific target platforms, try to use option `--target all` first, and then narrow your search scope accordingly.
+== cargo tree -p fandhe-ai --locked -e normal,build --target aarch64-apple-darwin -i openssl-sys
+warning: nothing to print.
+
+To find dependencies that require specific target platforms, try to use option `--target all` first, and then narrow your search scope accordingly.
+== cargo tree -p fandhe-ai --locked -e normal,build --target aarch64-apple-darwin -i security-framework
+security-framework v3.7.0
+└── native-tls v0.2.18
+    └── ureq v3.4.2
+        └── fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3173/crates/facade)
+binary_links_Security.framework: 1
+binary_links_libssl_or_libcrypto: 0
+openssl-sys_build_output: なし（この構成では openssl-sys をビルドしていない、または CARGO_TARGET_DIR 未指定）

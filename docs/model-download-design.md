@@ -492,6 +492,8 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 - gzip 等の圧縮応答（今回の構成は圧縮 feature を有効にしていない）、プロキシ環境変数の扱い、接続プールの挙動。
 - MSRV での実ビルド（今回は rustc 1.98.1 のみ。解決集合内で宣言された `rust-version` の最大は 3 構成とも 1.85）。
 
+- **#3173 の追記（2026-10-19）**: 公開サーバとの TLS 実通信・GB10／macOS 実機のビルドと実行・vendored ビルド（GB10）・不正証明書の拒否・接続タイムアウトの観測は §22 で実測した（確認の範囲と未確認の残りは §22.4・§22.5）。
+
 ### 15.8 判断材料としての要約（採否は未決定）
 
 - §14.3 の推奨案（`ureq =3.4.2`・`native-tls-no-default`）は、ビルド・`deny`（advisories／licenses）は通るが、**HTTPS が成立しないことを実測した**。推奨案はこのままでは採用できる状態にない。
@@ -698,6 +700,8 @@ MSRV（`cargo info` の直接 crate）: `ureq` 1.85・`minreq` 1.63・`reqwest` 
 - `native-tls-no-default` が上流の意図した仕様か不具合か（文書と実装の食い違いまでは確認。上流の issue・CHANGELOG・docs.rs は未参照）、`ureq` の `3.4.2` 以外の版での挙動。crates.io の最新安定版は今回も `3.4.2` だった（2026-10-16 に crates.io API で確認）。古い版は、推奨の根拠にならないため実測しなかった。
 - アイドル（無通信）タイムアウトを満たす設定、`timeout_per_call`・`timeout_resolve`・gzip 等の圧縮応答・プロキシ環境変数・接続プール。
 - 解決集合内の `rust-version` の最大値（宣言値は §16.3）。
+
+- **#3173 の追記（2026-10-19）**: 公開サーバとの TLS 実通信・GB10／macOS 実機のビルドと実行・vendored ビルド（GB10）・不正証明書の拒否・接続タイムアウトの観測は §22 で実測した（確認の範囲と未確認の残りは §22.4・§22.5）。
 
 ### 16.8 判定軸と推奨
 
@@ -1010,7 +1014,62 @@ SYN 段階の純粋な接続タイムアウトはループバックで決定的�
 
 `crates/facade/tests/model_download_real_network.rs`（`#[ignore]`・`cfg(unix)`）。`FANDHE_AI_DOWNLOAD_TEST_URL`／`FANDHE_AI_DOWNLOAD_TEST_SHA256` の対（片方だけは panic・両方未設定は skip 表示で成功。`make test-ignored` を落とさない）と、任意の `FANDHE_AI_DOWNLOAD_TEST_BAD_TLS_URL`（`Err(Network)`）を使う。手順はルート README。環境変数の値・URL・pin は出力しない。GB10・macOS 実機での実行と確認は #3173 で行い、本イシューでは実通信を実行していない（環境変数なしの skip 経路のみ確認）。
 
+実機（GB10・Mac mini）での実行結果は §22 に記録した（#3173）。
+
 ### 21.6 `api_surface.rs` に追加したガードと限界
 
 `DownloadOptions`／`DownloadProgress` のフィールド・`#[non_exhaustive]`・`pub fn new` 非追加の正ガード（自己テスト付き）、`FORBIDDEN_SIGNATURE_SUBSTRINGS` の実効性テスト、`src/model/*.rs` に制限なし `pub` が無く `pub mod` も無いこと、TLS 検証無効化手段が無いこと（`disable_verification` は getter 形のみ・`danger`／`insecure`／`accept_invalid` 識別子なし・`transport.rs` 本番部分の `https_only(false)` 不在と固定構成の存在）、`ureq` トークンが `transport.rs` 以外の `src/`・`tests/*.rs` に無いこと、`download`／`download_with` の利用例 doctest の正プローブ。限界: トークン列走査のため、別名の再エクスポートや文字列経由の構成は検出しない。`libc` は他テストが正当に参照するため `tests/` 側の走査対象にしていない。
 
+
+## 22. #3173 実機確認記録（HTTPS 取得の実通信とビルド。2026-10-19）
+
+### 22.1 位置づけ
+
+§15.7・§16.7・§21.5 が #3173 に委ねた項目を、DGX Spark GB10（`aarch64-unknown-linux-gnu`）と Mac mini（Apple M4・`aarch64-apple-darwin`）で実測した記録。依存ピン（`Cargo.toml`・`Cargo.lock`・`deny.toml`）・本番コード（`crates/facade/src/`）・tolerance・判定規則は変えていない。
+
+- 事前登録: `docs/perf/logs/https-download-3173/RULE.txt`（宛先・実行順・判定は各 `cargo test` の終了コードのみ）
+- 実行コミット: `8eb15ab572369c99f59fcfbee4c488e5d6d7e14d`（RULE.txt・実行スクリプト・テストを含む。両機の `.rev-stamp` が一致し、ツリー指紋 `14050b31…df13` も手元で同コミットから展開したツリーと両機で一致）
+- 回収したログは編集していない（マスクは実行スクリプトがユーザー名・ホスト名・ホームのパスだけを置換）。1 回目の試行（手で編集したログを含む）は使っていない
+- 実行コマンドと証跡: `docs/perf/logs/https-download-3173/README.md`・`gb10/`・`mac-mini/`
+
+### 22.2 実行環境
+
+| 項目 | GB10 | Mac mini |
+|---|---|---|
+| OS／rustc | Ubuntu 24.04.4 LTS／1.97.0 | macOS 27.0.1／1.99.0 |
+| TLS 経路（`tls_path.txt` の `cargo tree -e normal,build -i`） | `openssl-src v300.6.1+3.6.3`（build-dependency）→ `openssl-sys` → `native-tls` → `ureq` → `fandhe-ai` | `security-framework v3.7.0` → `native-tls` → `ureq`。`openssl-src`／`openssl-sys` は無い |
+| 実行バイナリのリンク | `libssl`／`libcrypto` への動的リンク 0 件。`openssl-sys` の build 出力に `vendored=1` あり | `Security.framework` あり・`libssl`／`libcrypto` なし |
+| OpenSSL 開発パッケージ | `libssl-dev` 未導入（システムの OpenSSL 3.0.13 ランタイムのみ）で vendored ビルドが成功 | 該当なし（`openssl-sys` を使わない） |
+| perl／make | perl 5.38.2／GNU Make 4.3 | perl 5.34.1／GNU Make 3.81 |
+
+### 22.3 結果
+
+| 実行 | GB10 | Mac mini |
+|---|---|---|
+| ビルド（`--release --locked --no-run`） | rc=0・23.6 秒（専用 `CARGO_TARGET_DIR` の cold。`openssl-src` をコンパイル） | rc=0・16 秒（共有 target の warm） |
+| R1 取得・pin 検証・2 回目の再利用 | pass（2.81 秒） | pass（2.86 秒） |
+| R2 pin 不一致（`HashMismatch`・非公開） | pass | pass |
+| R3 不正証明書 4 種（expired／self-signed／untrusted-root／wrong.host）の拒否 | 4 件とも pass（`Network`） | 4 件とも pass |
+| R4 ブラックホール宛て（TEST-NET-1） | pass。`BLACKHOLE_ELAPSED_MS=30029` | pass。`BLACKHOLE_ELAPSED_MS=30002` |
+| リダイレクトの独立観測（`curl -I`・`-L` なし） | 302・`https`・別ホスト | 302・`https`・別ホスト |
+
+### 22.4 §15.7・§16.7 の項目ごとの扱い
+
+| 項目 | 扱い |
+|---|---|
+| 公開サーバとの TLS 実通信・実在の証明書チェーンの検証（`PlatformVerifier`） | 確認した（両機の R1。GB10 は OpenSSL＋システム CA、Mac mini は `security-framework`）。不正証明書 4 種の拒否も両機で確認した（R3） |
+| `aarch64-unknown-linux-gnu`（GB10）・macOS 実機のビルド・リンク・実行 | 確認した（`--lib` だけでなくテストバイナリのリンクと実行まで） |
+| macOS の `security-framework` 経路での証明書検証の実挙動 | 確認した（R1・R3）。`SSL_CERT_FILE` が効くかは未確認 |
+| OpenSSL 開発パッケージが無い環境での vendored ビルド | GB10 で確認した（`libssl-dev` 未導入で成功・動的リンクなし）。perl／make が無い環境は未確認 |
+| `https_only` とリダイレクトのホップ | 一部確認。実装は手動追従（`max_redirects(0)`・各ホップを再検証。§19.2）。実測で言えるのは「302 で別ホストの `https` へ 1 ホップした取得が成功した」まで。`Location` が `http://` のときの拒否はループバックで固定済み（§21.2）で、公開ホストでは未確認 |
+| 接続タイムアウト（`timeout_connect`） | 観測のみ。IP リテラル宛てで名前解決は起きず、相手のいない TCP 接続では TLS も始まらないため、約 30 秒での `Network` は TCP 接続フェーズのタイムアウト（§19.2）と消去法で結びつけた。名前解決タイムアウト単独は未確認 |
+
+### 22.5 未確認のまま残した点
+
+- `ubuntu-latest` の実ランナー（Ubuntu 26.04 を含む）・開発コンテナでのビルド、Windows、`SSL_CERT_FILE` の効き方
+- perl または make が無い環境での `vendored` ビルド
+- 圧縮応答・プロキシ環境変数・接続プール・アイドルタイムアウト・`timeout_resolve`・`timeout_per_call`、MSRV での実ビルド
+- `native-tls-no-default` の上流仕様と `ureq` の `3.4.2` 以外の版（採用構成ではないため追跡の優先度は低い）
+- `webpki-roots`・`minreq`・`aws-lc-sys` は採用構成でないため対象外
+
+追跡が必要なら `out-of-scope-tracking.md` に沿い、ユーザー承認のうえで Issue を起票する。
