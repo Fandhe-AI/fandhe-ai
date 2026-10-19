@@ -1,5 +1,7 @@
 # サンプルごとの勾配（`Tape::vmap_grad`。#3073）CUDA／Metal 実機未実測の申し送り
 
+> **Metal は #3172 で Mac mini（Apple M4）実測済み（2026-10-19・対象 main `b640875f`・`dirty=0`・pass 1/1）。** 事前登録規則は `metal/RULE.txt`。
+
 `docs/autodiff-functional-transforms-design.md` §32 参照。本実装エージェント実行環境は CUDA／Metal 実機に
 到達できないため、`crates/facade/tests/functional_transforms_facade.rs` の 2 テスト
 （`cuda_vmap_grad_matches_cpu_reference`・`metal_vmap_grad_matches_cpu_reference`。後者は `cfg(target_os = "macos")` 限定）
@@ -37,4 +39,22 @@ CPU 版は同ファイルの属性なしテスト（`vmap_grad_*`）で検証済
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測（#3171） | DGX Spark GB10 | 上記 cuda コマンド | 未実測 | |
-| 未実測（#3172） | Apple Silicon（Mac mini） | 上記 metal コマンド | 未実測 | |
+| 2026-10-19 | Mac mini（Apple M4） | 上記 metal コマンド（実測は `--release --test-threads=1` 付き） | pass（1/1） | main `b640875f`・dirty=0 |
+
+## Metal 実測記入欄（#3172）
+
+- 事前登録規則: `metal/RULE.txt`（実測前のコミットで固定。実測コミットでは変更していない）
+- 実行日: 2026-10-19（UTC）
+- 対象コミット: main `b640875f86399515b2dab4dfc38089caaa5e5c08`（`metal/rev-stamp.txt` の 2 行目は `dirty=0`。`metal/env_info.txt` の実行前後の stamp と一致）。事前登録コミットとの間で `crates/` の差分は無い
+- 機体: Mac mini（Apple M4（10 コア）・メモリ 16GiB・macOS 27.0.1（26A434）・rustc 1.99.0・cargo 1.99.0・arm64（`metal/env_info.txt`））
+- 実行コマンド: `cargo test -p fandhe-ai --release --test functional_transforms_facade -- --ignored --nocapture --test-threads=1 metal_vmap_grad`
+  （`--release --nocapture --test-threads=1` は判定に影響しない実行オプション。上の素のコマンドとの差はこれだけ）
+- ログ: `metal/functional_transforms_facade.log`（末尾 `rc=0`）・`metal/env_info.txt`・`metal/build.log`（判定外のウォームアップ）・`metal/rev-stamp.txt`
+
+| テスト | 結果 |
+|---|---|
+| `metal_vmap_grad_matches_cpu_reference` | pass（1 回） |
+
+- 件数: `running 1 test`・`1 passed; 0 failed` で期待件数 1 と一致
+- tolerance 定数・判定式・baseline・テストコード・入力は変更していない（REQ-2 統一複合判定。厳密ゼロ fail）
+- 経路: フィルタは `metal_vmap_grad`（`metal_` では同バイナリの #2931 テストも走るため）。新規カーネルは無く、実行経路は本測定では確認していない。

@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/paged_attention_facade.rs (<home>/work/target-fandhe-ai/release/deps/paged_attention_facade-7be702f339c91cf1)
+
+running 1 test
+test metal_paged_attention_forward_matches_cpu_tape ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.03s
+
+rc=0

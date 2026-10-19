@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/functional_transforms_facade.rs (<home>/work/target-fandhe-ai/release/deps/functional_transforms_facade-536f1286b22c45c5)
+
+running 1 test
+test metal_vmap_grad_matches_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.08s
+
+rc=0

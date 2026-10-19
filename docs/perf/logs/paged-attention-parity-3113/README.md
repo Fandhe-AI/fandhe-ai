@@ -1,5 +1,7 @@
 # paged attention（K-3）の CPU 参照一致と CUDA／Metal 実機 parity（#3113）未実測の申し送り
 
+> **Metal は #3172 で Mac mini（Apple M4）実測済み（2026-10-19・対象 main `b640875f`・`dirty=0`・5 回すべて pass）。** 判定規則は同ディレクトリの `RULE.txt`（#3113 で固定済み）を正とする。
+
 `docs/device-resident-kv-paged-attention-design.md` §5・§14 参照。本実装エージェント実行環境は CUDA／Metal 実機に
 到達できないため、下記の `#[ignore]` テストは**未実測**である。実測は #3171（GB10）・#3172（Mac mini）が担当する。
 事前宣言は同ディレクトリの `RULE.txt`（実測前に固定し、事後に緩めない）。
@@ -61,4 +63,28 @@ PAGED_PARITY backend=<cuda|metal|metal-tracked> case=<id> step=<n> total=<要素
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
 | 未実測（#3171） | DGX Spark GB10 | 上記 cuda コマンド（backend・facade） | 未実測 | |
-| 未実測（#3172） | Apple Silicon（Mac mini M4） | 上記 metal コマンド（backend・facade） | 未実測 | |
+| 2026-10-19 | Mac mini（Apple M4） | 上記 metal コマンド（backend・facade。実測は `--test-threads=1` 無し・`--release`） | pass（backend 3 件 × 5 回、facade 1 件 × 5 回、全 pass） | main `b640875f`・dirty=0。`PAGED_PARITY` は 5 回完全一致 |
+
+## Metal 実測記入欄（#3172）
+
+- 判定規則: `RULE.txt`（実測前に固定済み。本実測コミットでは変更していない）。baseline 切り替えは 0 件（`BASELINES` は空のまま）で、全ステップ `judgement=strict`
+- 実行日: 2026-10-19（UTC）
+- 対象コミット: main `b640875f86399515b2dab4dfc38089caaa5e5c08`（`metal/rev-stamp.txt` の 2 行目は `dirty=0`。`metal/env_info.txt` の実行前後の stamp と一致）
+- 機体: Mac mini（Apple M4（10 コア）・メモリ 16GiB・macOS 27.0.1（26A434）・rustc 1.99.0・cargo 1.99.0・arm64（`metal/env_info.txt`））
+- 実行コマンド（独立プロセスで各 5 回。「測定コマンド案」の Metal 2 行のとおり）:
+  - `cargo test -p fandhe-ai-backend-metal --release --test paged_kv_real_device -- --ignored --nocapture metal_paged_attention`
+  - `cargo test -p fandhe-ai --release --test paged_attention_facade -- --ignored --nocapture metal_paged_attention`
+- ログ: `metal/paged_kv_real_device.run{1..5}.log`・`metal/paged_attention_facade.run{1..5}.log`（末尾 `rc=0`）・`metal/env_info.txt`・`metal/build.log`（判定外）・`metal/rev-stamp.txt`
+- 数値: `metal/paged_parity_median.tsv`（backend ∈ {`metal`, `metal-tracked`} の case/step 136 行。5 回の中央値。5 回で全行が完全一致のため中央値は各回の値と同じ）
+
+| 層 | テスト | 結果（5 回） |
+|---|---|---|
+| backend | `metal_paged_attention_matrix_matches_cpu_reference` | 5/5 pass |
+| backend | `metal_paged_attention_tracked_matrix_matches_cpu_reference` | 5/5 pass |
+| backend | `metal_paged_attention_tolerance_constants_pinned` | 5/5 pass |
+| facade | `metal_paged_attention_forward_matches_cpu_tape` | 5/5 pass |
+
+- 件数: backend は毎回 `running 3 tests`・`3 passed; 0 failed`、facade は毎回 `running 1 test`・`1 passed; 0 failed`
+- `PAGED_PARITY` の `fail` 合計は 0（136 行すべて `fail=0`）
+- tolerance 定数・判定式・baseline・カーネル・テストコードは変更していない
+- 古い `*_on_metal` の 3 件は #3113 の対象外のため測っていない

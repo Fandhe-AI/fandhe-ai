@@ -1,0 +1,40 @@
+no-cargo
+### build fandhe-ai compat_sequential_pool3d_backend_parity
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/bench-harness)
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 7.11s
+  Executable tests/compat_sequential_pool3d_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/compat_sequential_pool3d_backend_parity-9dc134e0ce170caa)
+### build fandhe-ai compat_sequential_conv_transpose3d_backend_parity
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.33s
+  Executable tests/compat_sequential_conv_transpose3d_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/compat_sequential_conv_transpose3d_backend_parity-d6db77e666c0da39)
+### build fandhe-ai compat_functional_max_unpool_backend_parity
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.34s
+  Executable tests/compat_functional_max_unpool_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/compat_functional_max_unpool_backend_parity-147120276fa3e5b1)
+### build fandhe-ai compat_sequential_fold_unfold_backend_parity
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.33s
+  Executable tests/compat_sequential_fold_unfold_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/compat_sequential_fold_unfold_backend_parity-5b497f077fdf1880)
+### build fandhe-ai compat_sequential_lrn_backend_parity
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.31s
+  Executable tests/compat_sequential_lrn_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/compat_sequential_lrn_backend_parity-0cc3fe51cf6eb9e0)
+### build fandhe-ai functional_transforms_jvp_multi_backend_parity
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.32s
+  Executable tests/functional_transforms_jvp_multi_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/functional_transforms_jvp_multi_backend_parity-e5c486d7eabf36d4)
+### build fandhe-ai functional_transforms_facade
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.61s
+  Executable tests/functional_transforms_facade.rs (<home>/work/target-fandhe-ai/release/deps/functional_transforms_facade-536f1286b22c45c5)
+### build fandhe-ai paged_attention_facade
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.39s
+  Executable tests/paged_attention_facade.rs (<home>/work/target-fandhe-ai/release/deps/paged_attention_facade-7be702f339c91cf1)
+### build fandhe-ai-backend-metal paged_kv_real_device
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/backend-metal)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3172/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 17.83s
+  Executable tests/paged_kv_real_device.rs (<home>/work/target-fandhe-ai/release/deps/paged_kv_real_device-fd67c90a5189f10e)
+build rc done

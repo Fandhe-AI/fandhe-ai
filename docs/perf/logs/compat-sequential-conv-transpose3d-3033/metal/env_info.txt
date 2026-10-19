@@ -1,0 +1,28 @@
+## env before compat_sequential_conv_transpose3d_backend_parity
+Mon Oct 19 06:06:29 UTC 2026
+Apple M4
+17179869184
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+rustc 1.99.0 (b940084d7 2026-09-28)
+cargo 1.99.0 (5f94df478 2026-08-27)
+arm64
+15:06  up 8 days, 14:40, 1 user, load averages: 8.71 3.66 2.21
+no-cargo
+b640875f86399515b2dab4dfc38089caaa5e5c08
+dirty=0
+## env after compat_sequential_conv_transpose3d_backend_parity
+Mon Oct 19 06:06:30 UTC 2026
+Apple M4
+17179869184
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+rustc 1.99.0 (b940084d7 2026-09-28)
+cargo 1.99.0 (5f94df478 2026-08-27)
+arm64
+15:06  up 8 days, 14:40, 1 user, load averages: 8.17 3.64 2.21
+no-cargo
+b640875f86399515b2dab4dfc38089caaa5e5c08
+dirty=0

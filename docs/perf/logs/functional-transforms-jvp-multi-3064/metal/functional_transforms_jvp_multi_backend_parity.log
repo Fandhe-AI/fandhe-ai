@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/functional_transforms_jvp_multi_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/functional_transforms_jvp_multi_backend_parity-e5c486d7eabf36d4)
+
+running 1 test
+test metal_jvp_multi_matches_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.07s
+
+rc=0
