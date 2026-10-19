@@ -1991,6 +1991,13 @@ AB_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" bash run_ab_readback_
 判定規則・順序制約（#2107 の実測を先に旧コミットで実施）は `docs/perf/logs/cuda-gemm-readback-reuse-2108/RULE.txt`、
 設計は `docs/perf/cuda-gemm-readback-reuse-2108.md`。
 
+## Mac mini の CPU スレッド方針 A/B（`run_ab_thread_policy_macmini_cpu.sh`、イシュー #3178）
+
+`AB_GATE=big-core|small-cap` で `BIG_CORE_LIMIT_ENABLED`／`SMALL_SHAPE_CAP_ENABLED` を 1 本ずつ反転した after 腕（計測専用 checkout）と
+main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の fresh/reuse 12 セル × 5 round で交互に測り、同じ round で PyTorch
+（`AB_TORCH_PYTHON`）も測る。macOS の bash 3.2 で動き、jq には依存しない。末尾で `compare_gemm_ab.py --sizes threadpolicy`（cpu 専用）を実行する。
+規則は `docs/perf/logs/cpu-thread-policy-macmini-3178/RULE.txt`、結論は `docs/perf/cpu-thread-policy-macmini.md`。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）

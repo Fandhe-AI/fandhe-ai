@@ -183,3 +183,7 @@ rsync 転送・`PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH`）へ到達し
 構造的非到達を実機上で直接確認する健全性記録に留める（framework-compare
 train/infer/gemm cpu の before/after 比較は、機構が既定 OFF かつ GB10 が
 構造的非到達のため意味を持たず実施しない）。
+
+## 追記（#3178）
+
+本 doc の判定（#1575 の REJECT）は変更しない。Mac mini（M4。P4＋E6）で現行の `TwoDDynamic`・専有機・5 round の条件を変えた再測定の基盤と事前登録規則を `docs/perf/cpu-thread-policy-macmini.md` に置いた（実測は未実施）。

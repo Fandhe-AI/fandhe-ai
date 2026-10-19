@@ -1,0 +1,76 @@
+イシュー #3178 事前登録規則 (Mac mini の CPU スレッド方針 A/B)
+fixed-at: 2026-10-20 (この規則は計測前にコミットして固定する。以後、緩和・事後調整はしない)
+
+0. 位置づけ (過去の REJECT を覆さない)
+  - #1364 (BIG_CORE_LIMIT_ENABLED) と #1575 (SMALL_SHAPE_CAP_ENABLED) の REJECT は覆さない。
+    本計測は「条件を変えた再測定」であり、結果が ADOPT 候補でも本イシューでは既定を変えない。
+    既定の反転は #3227 で行う。REJECT なら決定記録だけを残す。
+  - 条件の違い (結論 doc にも同じ表を書く)
+
+    | 項目 | 過去の REJECT | 本計測 |
+    |---|---|---|
+    | 機体 | #1364: GB10 (cpu_capacity の誤検出を含む) と M4 Max (P12+E4) の両機判定 / #1575: M4 Max | Mac mini M4 (P4+E6、論理 10) |
+    | 負荷 | #1575: load 22〜23 の共有環境・単発 (record_only) | 専有機・load1 < 3.0・5 round |
+    | 分配方式 | #1364: 旧静的行パネル | 現行 TwoDDynamic (TWO_D_DYNAMIC_PRODUCTION_ENABLED = true) |
+
+  - main のゲート定数は変更しない。after 腕は計測専用 checkout (main へコミットしない)。
+    unsafe と依存の追加はしない。
+
+1. 腕 (2 ゲートを個別に反転。系列の順番は big-core を先、small-cap を後に固定)
+  - before: 同一コミットの main (ゲート定数は両方 false)。
+  - after (big-core): on-arm-big-core.patch (thread_limit.rs の BIG_CORE_LIMIT_ENABLED false -> true、1 行)。
+  - after (small-cap): on-arm-small-cap.patch (small_shape_thread_cap.rs の SMALL_SHAPE_CAP_ENABLED false -> true と、
+    ELIGIBLE_BRANDS へ Mac mini の brand を追加する 2 行)。
+    brand 文字列の暫定値は "Apple M4"。計測前に Mac mini で `sysctl -n machdep.cpu.brand_string` を読み、
+    異なる場合は patch の文字列だけを実測値へ直す (env_info に実測値を記録する。この修正は規則の緩和ではない)。
+    本番の ELIGIBLE_BRANDS 追加は #3227 の範囲。
+  - 解釈上の注意 (結論に必ず書く):
+    * big-core 腕は「4 スレッドで動かす」ことと同じではない。effective_num_threads は job_grid に渡す
+      並列度を 4 に絞るだけで、job はグローバルプール (10 スレッド) 上で走る。affinity もプール縮小もない。
+      PyTorch の set_num_threads(4) とは意味が異なる。
+    * small-cap 腕の発火条件は m * max(n, 8) * k < 2^24。GEMM N>=256 の正方 GEMM (256^3 = 2^24 ちょうど) は
+      すべて発火しない「ガードセル」で、処置セルは train/infer の 4 セルだけ。ただし判定規則は 12 セル全部に
+      同じものを適用する (ガードの除外はしない)。
+
+2. セル (12 個)
+  - gemm N=256/512/1024/2048 x fresh/reuse (8 セル)、train と infer (size=64) x fresh/reuse (4 セル)。
+  - 各セル 5 round。奇数 round は before -> after、偶数 round は after -> before の順で起動 (独立プロセス)。
+  - 各 round で同じ run の中の PyTorch (bench_py.py --framework pytorch --device cpu) も測る。
+
+3. 機構発火の前提 (ベンチ前に fail-closed で確認。不成立なら系列は undetermined)
+  - big-core: before は effective == current。after は env_override == false・detected_big_cores == Some(4)・
+    current == 10・effective == 4。(crates/backend-cpu/tests/thread_limit_report.rs、EXPECT_BIG_CORE_LIMIT)
+  - small-cap: cap 対象の学習形状 (64x256x784) の GEMM を 1 回実行した後で、before は pool_active == false、
+    after は eligible・!env_override・current > cap_threads・pool_active == true。
+    (crates/backend-cpu/tests/small_shape_cap_report.rs、EXPECT_SMALL_SHAPE_CAP)
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する (どちらの機構も無効化されて偽の ADOPT になるため)。
+  - after では --lib を実行しない (ゲートが true の単体テストが落ちるため)。
+
+4. checksum (hard)
+  - before/after の全 round・全セルの checksum が数値で完全一致すること。不一致は FAIL (ADOPT/REJECT に数えない)。
+
+5. 専有ゲート
+  - 各 round の開始前に load1 < 3.0 (30 秒間隔・最大 30 分待つ)。5/5 round が gate_ok=1 の系列だけを正式とする。
+    それ以外 (AB_LOAD_GATE で緩めた系列・timeout・unavailable・report-only の smoke) は reference/record_only で、
+    判定は undetermined。
+  - 機体は専有の Mac mini、他の重い処理は止める、計測中にビルドを並走させない。
+
+6. ゲートごとの総合判定 (4 値。2 ゲートそれぞれに適用)
+  - ADOPT 候補: 正式系列・機構発火の前提が成立・12 セル全部で 5 round 中央値の after/before 比 <= 1.00・checksum 完全一致。
+  - REJECT: 正式系列で 1 セルでも中央値比 > 1.00 (ガード除外・閾値の事後調整はしない)。
+  - undetermined: 専有ゲート不成立・前提不成立・標本不足 (5 round 未満)・実機に到達できず未実測。
+  - FAIL: checksum 不一致。
+  - 閾値 1.00 は compare_gemm_ab.py --threshold 1.00 --require-checksum-exact で適用する。
+
+7. PyTorch 比 (R5)
+  - 同じ round 内の (PyTorch median_s / fandhe median_s) の 5 round 中央値を before・after の両方で記録する。
+    bench_py.py は fresh のみのため、fandhe の fresh と reuse の両方を同じ torch 行と比べる。
+  - PyTorch 比は記録だけで、判定には使わない。
+
+8. 結果の扱い
+  - ADOPT 候補でも本イシューでは既定を変えない。BIG_CORE は GB10 で REJECT のままなので、M4 限定の分岐が前提。
+  - 範囲外: SMALL_SHAPE_CAP_THREADS=4 の変種、RAYON_NUM_THREADS=4 の参考腕、affinity 機構、GB10 での再計測、SME (#3175)。
+  - E コア仮説 (Mac mini で N=2048 が落ちる原因は E コア比率) の支持/不支持は、結果の範囲で書き、断定しない。
+
+9. マスク規則
+  - 収録するログのホスト名は masked、$HOME は <home>、ユーザー名と絶対パスは除去。実機のホスト名はリポに書かない。

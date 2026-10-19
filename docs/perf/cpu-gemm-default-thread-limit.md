@@ -149,3 +149,7 @@ framework-compare 前後比較（`run_gemm_gate_cpu.sh` 同一バイナリ 5 回
   不変）
 - **A08 整合性**: bit 完全一致契約（REQ-2）・FMA 契約は不変。tolerance／
   baseline／ガードレール閾値には触れない。`unsafe` の新規導入なし
+
+## 追記（#3178）
+
+本 doc の判定（#1364 の REJECT）は変更しない。Mac mini（M4。P4＋E6）で現行の `TwoDDynamic`・専有機・5 round の条件を変えた再測定の基盤と事前登録規則を `docs/perf/cpu-thread-policy-macmini.md` に置いた（実測は未実施）。
