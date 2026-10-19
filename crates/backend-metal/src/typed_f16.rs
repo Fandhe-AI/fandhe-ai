@@ -53,26 +53,15 @@
 //! という不変条件を満たす。`elementwise.rs`／`gemm.rs`（関数本体）の
 //! f32 実装は本ファイル追加によって一切変更されない。
 //!
-//! # `max` は `Unsupported` を継承する・`sum` は結線済み（#1896）
+//! # `sum`／`max` は結線済み（#1896・#3475）
 //!
-//! `ops::MetalBackendOps::max`（f32）は reduction カーネル未実装の
-//! ため常に [`BackendError::Unsupported`] を返す（`ops.rs` 冒頭
-//! コメント参照）。本ファイルの `max` は上記 3 段構成（昇格 →
-//! `BackendOps::max` へ委譲 → 丸め）をそのまま適用するだけで、
-//! 委譲先が常に `Unsupported` を返すため構造的に同じ結果になる
-//! ——ホスト側で reduction を計算して `Unsupported` を偽装しない
-//! （バックエンド内部で CPU 計算を隠す silent fallback を避ける。
-//! レイヤリング上、ホストフォールバックは `autodiff` 側の責務であり
-//! `backend-metal` の責務ではない）。
-//!
-//! `sum` は `ops::MetalBackendOps::sum` がイシュー #1896 で
-//! `reduce::MetalReduce` へ結線されたため、範囲外 `dim`（デバイス
-//! 非接触で `ShapeMismatch`）を除き実際にデバイスへ到達し、CPU 参照
-//! 実装と bit 完全一致する f32 結果を `f16::from_f32` で 1 回丸めた
-//! 値を返す（本ファイル自体は無変更のまま委譲先の実装差し替えを
-//! 自動的に反映する設計どおり）。`max`（`min` も含む）が将来実装
-//! されれば同様に本ファイルは変更なしでそのまま有効になる
-//! （out-of-scope-tracking.md 対象）。
+//! `ops::MetalBackendOps::sum`（イシュー #1896）・`max`（イシュー
+//! #3475）は `reduce::MetalReduce` へ結線済みで、範囲外 `dim`（デバイス
+//! 非接触で `ShapeMismatch`）を除き実際にデバイスへ到達し、f32 結果を
+//! `f16::from_f32` で 1 回丸めた値を返す。本ファイルは委譲先の実装
+//! 差し替えを変更なしで自動的に反映する設計どおり。ホスト側で
+//! reduction を計算する silent fallback は持たない（レイヤリング上、
+//! ホストフォールバックは `autodiff` 側の責務）。
 //!
 //! # スコープ外
 //!
@@ -254,28 +243,21 @@ mod tests {
         assert!(matches!(mul_err, BackendError::ShapeMismatch(_)));
     }
 
-    /// `max` は Metal f32 reduction 未実装のため、有効な入力・範囲外
-    /// `dim` のいずれでも `BackendOps::max`（f32）と同じ結果クラス
-    /// （`Unsupported`）を返すことをデバイスに触れずに確認する
-    /// （モジュール doc「`max` は `Unsupported` を継承する」の直接
-    /// 検証。`max` は shape 検査すら行わず常に `Unsupported` を返す
-    /// ため `None`／`Some(0)`／`Some(5)` いずれもデバイス非接触）。
+    /// `max` の範囲外 `dim` は f16／f32 とも `ShapeMismatch` で、デバイス
+    /// 初期化より前に決まる（イシュー #3475 で結線済み）。
     #[test]
-    fn max_inherit_f32_backend_ops_unsupported_without_device_init() {
+    fn max_rejects_out_of_range_dim_before_touching_device() {
         let ops = MetalBackendOps::new();
         let a16 = t(&[1.0, 5.0, 3.0, 2.0], &[2, 2]);
         let a32 = upcast_f16(&a16).unwrap();
-
-        for dim in [None, Some(0), Some(5)] {
-            let max16 = TypedOps::<f16>::max(&ops, &a16, dim);
-            let max32 = BackendOps::max(&ops, &a32, dim);
-            assert_eq!(
-                max16.is_ok(),
-                max32.is_ok(),
-                "max(dim={dim:?}) の結果クラスが f16/f32 で不一致: f16={max16:?} f32={max32:?}"
-            );
-            assert!(max16.is_err(), "max は常に Unsupported を返すはず");
-        }
+        assert!(matches!(
+            TypedOps::<f16>::max(&ops, &a16, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            BackendOps::max(&ops, &a32, Some(5)),
+            Err(BackendError::ShapeMismatch(_))
+        ));
     }
 
     /// `sum` は範囲外 `dim` を [`fandhe_ai_tensor_core::ops_shape::

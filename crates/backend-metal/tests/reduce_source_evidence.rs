@@ -62,6 +62,9 @@ fn kernel_names_and_buffer_indices_are_declared() {
         "reduce_min_all_chunk_f32",
         "reduce_min_all_finalize_f32",
         "reduce_min_axis_f32",
+        "reduce_max_all_chunk_f32",
+        "reduce_max_all_finalize_f32",
+        "reduce_max_axis_f32",
     ] {
         assert!(
             REDUCE_METAL_SOURCE.contains(&format!("kernel void {kernel}(")),
@@ -90,27 +93,27 @@ fn kernel_names_and_buffer_indices_are_declared() {
 /// `gid != 0u`、`reduce_sum_axis_f32`／`reduce_arg_axis_f32`／
 /// `reduce_min_axis_f32` は `gid >= lanes` の境界検査を持つことを
 /// 機械検証する（最適化を理由に省略しない契約のロック。sum／argext／
-/// min の各 3 つ組で 1 回ずつ、計 3 回出現する）。
+/// min／max（イシュー #3475）の各 3 つ組で 1 回ずつ、計 4 回出現する）。
 #[test]
 fn boundary_checks_are_present() {
     assert_eq!(
         REDUCE_METAL_SOURCE
             .matches("if (gid >= num_chunks)")
             .count(),
-        3,
-        "reduce_sum_all_chunk_f32／reduce_arg_all_chunk_f32／reduce_min_all_chunk_f32 に \
+        4,
+        "reduce_sum／arg／min／max_all_chunk_f32 に \
          `if (gid >= num_chunks)` 境界検査が必要"
     );
     assert_eq!(
         REDUCE_METAL_SOURCE.matches("if (gid != 0u)").count(),
-        3,
-        "reduce_sum_all_finalize_f32／reduce_arg_all_finalize_f32／reduce_min_all_finalize_f32 に \
+        4,
+        "reduce_sum／arg／min／max_all_finalize_f32 に \
          `if (gid != 0u)` 境界検査が必要"
     );
     assert_eq!(
         REDUCE_METAL_SOURCE.matches("if (gid >= lanes)").count(),
-        3,
-        "reduce_sum_axis_f32／reduce_arg_axis_f32／reduce_min_axis_f32 に \
+        4,
+        "reduce_sum／arg／min／max_axis_f32 に \
          `if (gid >= lanes)` 境界検査が必要"
     );
 }
