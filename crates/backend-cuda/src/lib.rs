@@ -454,6 +454,11 @@ mod warp_geometry;
 // ためクレートルートの兄弟モジュールとして配置する。本番経路は変更しない。
 #[cfg(test)]
 mod readback_attribution_diag_tests_2107;
+// イシュー #3186: reuse が fresh の 2 倍以上遅い原因（窓の構成〈tape 蓄積〉
+// × readback 宛先方式）の切り分け計装。#2107 の入力生成・統計ヘルパーを共用する
+// ため 2107 の兄弟モジュールとして配置する。本番経路は変更しない。
+#[cfg(test)]
+mod fresh_reuse_window_diag_tests_3186;
 // イシュー #1336: `MemoryOps::with_host_view` の CUDA 実装
 // （`memory.rs`）が使う、形状ごとに再利用するホストステージング
 // バッファのキャッシュ（D2H 側）。イシュー #1585 で H2D 側（`memory.rs`

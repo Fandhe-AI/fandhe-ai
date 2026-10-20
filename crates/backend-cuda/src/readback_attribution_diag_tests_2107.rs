@@ -156,8 +156,8 @@ impl Arm {
 /// Layer A（`bench-fandhe` の `gemm --mode reuse`）と同一の入力シード。
 /// `scripts/bench/framework-compare/bench-common/src/lib.rs` の `SEED_A`／`SEED_B`
 /// と一致させる（Layer A−ΣLayer B の残差へデータ差を混入させないため。#2107）。
-const SEED_A: u64 = 0xA11CE;
-const SEED_B: u64 = 0xB0B;
+pub(crate) const SEED_A: u64 = 0xA11CE;
+pub(crate) const SEED_B: u64 = 0xB0B;
 
 /// Layer A（`bench-common::Xorshift64Star`）と bit 同一の xorshift64* PRNG。
 ///
@@ -202,13 +202,13 @@ impl LayerAXorshift64Star {
 }
 
 /// Layer A と同一入力（A は `SEED_A`、B は `SEED_B` の別ストリーム、各 `n*n` 要素）を生成する。
-fn gen_square_ab(n: usize) -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn gen_square_ab(n: usize) -> (Vec<f32>, Vec<f32>) {
     let a = LayerAXorshift64Star::new(SEED_A).fill_vec(n * n);
     let b = LayerAXorshift64Star::new(SEED_B).fill_vec(n * n);
     (a, b)
 }
 
-fn checksum_f64(v: &[f32]) -> f64 {
+pub(crate) fn checksum_f64(v: &[f32]) -> f64 {
     v.iter().map(|&x| x as f64).sum()
 }
 
@@ -388,7 +388,7 @@ fn measure_one_trial(
 }
 
 /// 1 区間の統計（μs）。
-struct Stat {
+pub(crate) struct Stat {
     median: f64,
     q1: f64,
     q3: f64,
@@ -396,7 +396,7 @@ struct Stat {
     max: f64,
 }
 
-fn stat_us(samples_secs: &[f64]) -> Stat {
+pub(crate) fn stat_us(samples_secs: &[f64]) -> Stat {
     let q = median_q1_q3(samples_secs)
         .expect("samples collected from successful trials must be non-empty and NaN-free");
     let min = samples_secs.iter().copied().fold(f64::INFINITY, f64::min);
@@ -413,7 +413,7 @@ fn stat_us(samples_secs: &[f64]) -> Stat {
     }
 }
 
-fn stat_json(s: &Stat) -> String {
+pub(crate) fn stat_json(s: &Stat) -> String {
     format!(
         "{{\"median_us\":{:.3},\"q1_us\":{:.3},\"q3_us\":{:.3},\"min_us\":{:.3},\"max_us\":{:.3}}}",
         s.median, s.q1, s.q3, s.min, s.max
