@@ -1,0 +1,71 @@
+イシュー #3185 事前登録規則（計測前に固定。計測後に緩めない）
+================================================================
+目的: GB10 で PyTorch の cuBLAS 純カーネル時間（FP32・TF32）と Python 側 checksum
+（bench_py.checksum）の ns／要素を別々に測り、fandhe FP32 カーネル単体と並べる。診断のみ
+（record_only）。変えないもの: bench_py.py・相手側ベンチ（bench-candle／bench-burn／
+bench-common の計測コード）・判定規則（checksum_contract.py・bench-common::parity・
+compare_gemm_gate.py）・#3179 の opp_kernel_torch_diag.py／RULE.txt／テスト。
+結果は #3214（FP32 カーネル候補の目標値）と #3262（既定精度の判断材料）の入力になる
+（両 Issue へのコメント投稿はしない。引き継ぎは結論 doc に書く）。
+burn（cubecl）の純カーネルは対象外。TF32 の目安は allow_tf32 ON の値で見る。
+
+1. 機体: DGX Spark GB10。記録項目は nvidia-smi（driver・GPU 名）・CUDA の版・uname -m・
+   Python／torch／numpy の版・torch.__config__.show()・torch.version.cuda・
+   torch.backends.cudnn.version()・.rev-stamp（HEAD sha）・使用した bench_py.py の sha256・
+   ノード上の ~/work/bench_py.py があればその sha256（同一とは仮定せず別に記録）。
+   内部ホスト名・ユーザー名・絶対ホームパスは書かない（env.txt に uname -n を出さない）。
+2. 環境: ~/work/.venv-bench を使う。torch.__version__ == "2.14.0+cu130" でなければ停止する
+   （fail-closed。別版の torch へ読み替えない）。Python と numpy の版は記録だけする。
+3. bench_py.py は repo の docs/perf/logs/lowlayer-diagnosis-2026-09-12/bench_py.py を転送して使う。
+   sha256 = 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+   （opp_kernel_torch_diag.py の BENCH_PY_SHA256。不一致なら停止）。
+4. 形状: 正方 NN の N=256／512／1024／2048／4096。入力は bench_py の SEED_A／SEED_B・fill_vec。
+5. 腕（1 腕 = 1 プロセス）: fp32（cuda・allow_tf32=False）／tf32（cuda・allow_tf32=True）／
+   cpu（cpu・fp32。CPU 側の参考と checksum ns／要素のクロス確認用）。
+6. 区間（プロセス内 warmup 20＋iters 20 の中央値。bench_py の WARMUP／ITERS・線形補間分位点）:
+   mm_pure（perf_counter で torch.mm と torch.cuda.synchronize を挟む。各反復の前後と warmup の
+   各反復でも同期する）／mm_event（torch.cuda.Event(enable_timing=True) の対で torch.mm を挟む。
+   elapsed_time の前に synchronize）／mm_event_batch10（参考。10 回投入した event 区間を 10 で割る。
+   判定に使わない）／readout（.cpu().numpy()）／checksum（毎回新しく実体化した配列への
+   bench_py.checksum 単体。ns／要素 = median / N^2 * 1e9）／checksum_hot（参考。同一配列に反復）／
+   window（bench_py の窓の再現: matmul → readout → checksum。追加の synchronize を挟まない）。
+   検算: mm_pure+readout+checksum と window の比を記録する。食い違いは隠さない。
+   cpu 腕は mm_event 系を持たない。
+7. fandhe 側（HEAD の既存 #[ignore] 診断テスト。Rust のコードは足さない）:
+   - cargo test --release -p fandhe-ai-backend-cuda --lib gemm_reuse_phase_diag_select
+     -- --ignored --exact --test-threads=1 --nocapture（N=1024／2048／4096。wall 時計）
+   - cargo test --release -p fandhe-ai-backend-cuda --lib gemm_small_launch_cost_diag
+     -- --ignored --exact --test-threads=1 --nocapture（N=256／512 を使い、128 は記録のみ。
+     L2S kernel_wait は wall、D 層 dev_kernel_seg／dev_kernel_b2b は CUDA event 時計）
+   各 5 プロセス。ビルドは計測前に済ませ、ビルドと計測を並走させない。
+   "test result: ok" の行がない run は無効。入力は bench_py と別シード（FP32 SIMT の時間は
+   データにほぼ依存しない前提だが doc に明記する）。warmup／計測回数は 20/20 と 50/200 で
+   torch 側と異なる点を表に注記する。
+8. 回数: 各腕・各 fandhe テストを 5 プロセス（5 run）。値は 5 run の中央値、run 別も表に出す。
+9. 負荷ゲート（#2109 RULE 項 9 と同じ閾値）: 各プロセス開始前に load1 < 1.0 かつ
+   nvidia-smi --query-gpu=utilization.gpu が 0% になるまで 30 秒間隔で最大 30 分待つ。
+   数値で読めなければ GATE-INVALID、30 分待っても下がらなければ GATE-TIMEOUT として停止。
+   全プロセスが通過した系列だけを正式系列と呼ぶ。
+10. 運用: run ごとに腕の起動順をローテーションする。run の差し替え・追加起動はしない。ログは
+    上書きしない。fandhe テストは Python 計測の後にまとめて流す。
+11. 整合検査: 正方 N の checksum について fp32 腕と cpu 腕は framework-compare-0.11.0-remeasure/gb10/
+    results-dgx-py-0.11.0-median5.jsonl（pytorch gemm）と checksum_contract.checksums_match で
+    一致すること。一致しなければ fail-closed。tf32 腕は照合せず記録のみで、fp32 との差を報告する
+    （一致しないのが正常）。TF32 の checksum が FP32 と bit 一致した場合は「TF32 が効いた証拠なし」
+    と事実だけ記録する。
+12. TF32 の有効化確認: 腕に応じて torch.backends.cuda.matmul.allow_tf32 を設定し、全行に
+    allow_tf32・torch.get_float32_matmul_precision()・（属性があれば）
+    torch.backends.cuda.matmul.fp32_precision を読み戻して記録する。allow_tf32 の読み戻しが
+    腕と食い違えば停止する。
+13. CPU 側 BLAS 経路: DNNL_VERBOSE=1（加えて ONEDNN_VERBOSE=1）で cpu の torch.mm（N=1024）を
+    1 回実行し stderr を記録する。あわせて torch.__config__.show()・
+    torch.backends.mkldnn.is_available()・実行後の /proc/self/maps から BLAS 系共有ライブラリ
+    （nvpl・openblas・mkl・armpl・arm_compute・dnnl を含むもの）のファイル名部分だけの一覧を記録する。
+    判定は「確認できた（根拠の行を引用）」か「確認できなかった」のどちらか。出力がないことから
+    経路を推測しない。
+14. 機体に到達できない、または項 2 の環境が揃わない場合は数値を埋めず unavailable と記録する。
+    推定値では埋めない。
+15. 判定・閾値は設けない。fandhe／cuBLAS 比、TF32／FP32 比、公称ピーク（FP32 約 27〜31 TFLOPS・
+    TF32 第三者実測 53.3 TFLOPS）に対する到達率を並べるだけにする。比は時計ごとに列を分ける
+    （wall 対 wall、event 対 event）。N>=1024 の fandhe には event 時計の値がないので
+    「該当計測なし」と明記する。
