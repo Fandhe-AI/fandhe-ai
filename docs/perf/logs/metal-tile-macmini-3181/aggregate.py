@@ -13,6 +13,7 @@ load_gate.log・rev-stamp.txt。出力（標準出力）は aggregate.md 相当�
 `--self-test` は埋め込み fixture（正常系・異常系）で上記を検証する。
 """
 import json
+import math
 import os
 import re
 import statistics
@@ -165,9 +166,18 @@ def parse_candle(path):
         med = rec.get("median_s")
         if n in out:
             fail("candle excl が重複 N=%s: %s" % (n, os.path.basename(path)))
-        if not isinstance(med, (int, float)) or isinstance(med, bool) or med <= 0:
-            fail("median_s が不正 N=%s: %s" % (n, os.path.basename(path)))
-        out[n] = float(med)
+        if (not isinstance(med, (int, float)) or isinstance(med, bool)
+                or not math.isfinite(med) or med <= 0):
+            fail("median_s が不正（非数値・非有限・非正）N=%s: %s" % (n, os.path.basename(path)))
+        ptot = rec.get("parity_total")
+        pfail = rec.get("parity_fail_count")
+        if (not isinstance(n, int) or isinstance(n, bool)
+                or not isinstance(ptot, int) or isinstance(ptot, bool)
+                or not isinstance(pfail, int) or isinstance(pfail, bool)
+                or pfail < 0 or ptot != n * n):
+            fail("parity_total / parity_fail_count が欠損・不正 N=%s: %s" % (n, os.path.basename(path)))
+        # parity 不成立のセルは比較データとして判定不能（None）。比率集計から除外する。
+        out[n] = float(med) if pfail == 0 else None
         version = rec.get("version")
     if sorted(out) != SIZES:
         fail("candle excl の N が揃っていない: %s (%s)" % (os.path.basename(path), sorted(out)))
@@ -305,16 +315,21 @@ def render(r):
     w("| N | candle excl ms (5 run 中央値) | run 別 | 選択タイル idx | 主比 (excl / fandhe wall_sum) | 参考比 (excl / fandhe kernel_gpu) | 全候補での最大 参考比 (idx) |")
     w("|---|---|---|---|---|---|---|")
     for n in SIZES:
-        c = [x[n] * 1e3 for x in r["candle"]]
-        cm = med(c)
+        raw = [x[n] for x in r["candle"]]
         sel = idx_of(trace[n][1])
+        valid = [i for i in range(NUM_CAND) if not ident[(n, i)]["fallback"]]
+        best_i = min(valid, key=lambda i: kmed[(n, i)])
+        if any(v is None for v in raw):
+            w("| %d | 判定不能（candle parity 不成立の run あり） | - | %s | n/a | n/a | n/a (%d) |" % (
+                n, sel, best_i))
+            continue
+        c = [v * 1e3 for v in raw]
+        cm = med(c)
         if sel is None:
             main_r = ref_r = "n/a"
         else:
             main_r = "%.3f" % (cm / wmed[(n, sel)])
             ref_r = "%.3f" % (cm / kmed[(n, sel)])
-        valid = [i for i in range(NUM_CAND) if not ident[(n, i)]["fallback"]]
-        best_i = min(valid, key=lambda i: kmed[(n, i)])
         w("| %d | %.4f | %s | %s | %s | %s | %.3f (%d) |" % (
             n, cm, "[" + ", ".join("r%d=%.4f" % (j + 1, v) for j, v in enumerate(c)) + "]",
             sel, main_r, ref_r, cm / kmed[(n, best_i)], best_i))
@@ -389,7 +404,8 @@ def _fx_make(d):
             cj.append(json.dumps({"task": "gemm_transfer_incl", "device": "metal", "size": n,
                                   "median_s": 0.5, "version": "0.11.0"}))
             cj.append(json.dumps({"task": "gemm_transfer_excl", "device": "metal", "size": n,
-                                  "median_s": 0.002, "version": "0.11.0"}))
+                                  "median_s": 0.002, "version": "0.11.0",
+                                  "parity_total": n * n, "parity_fail_count": 0}))
         _fx_write(d, "candle_run%d.jsonl" % r, "\n".join(cj) + "\n")
 
 
@@ -429,6 +445,15 @@ def self_test():
     expect_fail("FAILED 混入", edit("load_gate.log", "series done", "run1 FAILED x\nseries done"))
     expect_fail("非数値", edit("cand_run1.log", "kernel_gpu_median_ms=1.3010", "kernel_gpu_median_ms=abc"))
     expect_fail("parity 失敗", edit("parity.log", "test result: ok. 1 passed", "test result: FAILED. 0 passed"))
+    expect_fail("candle median_s 非有限", edit("candle_run1.jsonl", '"median_s": 0.002', '"median_s": 1e999'))
+    expect_fail("candle median_s NaN", edit("candle_run1.jsonl", '"median_s": 0.002', '"median_s": NaN'))
+    expect_fail("candle parity 欠損", edit("candle_run1.jsonl", ', "parity_total": 65536', ''))
+    expect_fail("candle parity 総数不一致", edit("candle_run1.jsonl", '"parity_total": 65536', '"parity_total": 1'))
+    with tempfile.TemporaryDirectory() as d:
+        _fx_make(d)
+        edit("candle_run1.jsonl", '"parity_fail_count": 0', '"parity_fail_count": 3')(d)
+        t = render(build(d, expect_rev="abc123"))
+        assert "判定不能" in t
     expect_fail("行不足", edit("trace_run1.log", "TRACE N=4096", "TRACE M=4096"))
     with tempfile.TemporaryDirectory() as d:
         _fx_make(d)
