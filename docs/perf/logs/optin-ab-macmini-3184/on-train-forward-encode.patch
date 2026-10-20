@@ -1,0 +1,13 @@
+diff --git a/crates/backend-metal/src/train_forward_encode_runtime.rs b/crates/backend-metal/src/train_forward_encode_runtime.rs
+index 88f78d691..61dfc4994 100644
+--- a/crates/backend-metal/src/train_forward_encode_runtime.rs
++++ b/crates/backend-metal/src/train_forward_encode_runtime.rs
+@@ -30,7 +30,7 @@
+ use std::sync::atomic::{AtomicBool, Ordering};
+ 
+ /// encode-only 合流の既定値の単一情報源（本モジュール冒頭「契約」参照）。
+-pub(crate) const TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED: bool = false;
++pub(crate) const TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED: bool = true;
+ 
+ static TRAIN_FORWARD_ENCODE_ONLY: AtomicBool =
+     AtomicBool::new(TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED);
