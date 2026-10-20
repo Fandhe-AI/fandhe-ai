@@ -1998,6 +1998,12 @@ main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の
 （`AB_TORCH_PYTHON`）も測る。macOS の bash 3.2 で動き、jq には依存しない。末尾で `compare_gemm_ab.py --sizes threadpolicy`（cpu 専用）を実行する。
 規則は `docs/perf/logs/cpu-thread-policy-macmini-3178/RULE.txt`、結論は `docs/perf/cpu-thread-policy-macmini.md`。
 
+## 相手の純カーネル時間と Python 側 checksum の診断（`opp_kernel_torch_diag.py`、イシュー #3179）
+
+`bench_py.py` の計測窓（matmul + `.cpu().numpy()` + `checksum()`）を区間に分け、PyTorch（CPU／MPS）の `torch.mm` 純時間・読み出し・checksum の ns／要素を Mac mini で測る診断専用ツール。
+`bench_py.py`・相手側ベンチ・判定規則は変えず、`--bench-py` を sha256 照合のうえ importlib で再利用する。`measure`／`aggregate`／`--self-test` を持ち、CI では torch 不要部分の `opp_kernel_torch_diag_test.py` だけを実行する。
+実行は `docs/perf/logs/opp-kernel-macmini-3179/run-macmini.sh`、規則は同 `RULE.txt`、結論は `docs/perf/opp-kernel-macmini.md`。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）

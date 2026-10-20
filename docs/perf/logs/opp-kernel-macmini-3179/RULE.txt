@@ -1,0 +1,51 @@
+イシュー #3179 事前登録規則（計測前に固定。計測後に緩めない）
+================================================================
+目的: Mac mini で PyTorch（CPU／MPS）の torch.mm 純カーネル時間と、Python 側 checksum
+（bench_py.checksum）の ns／要素を別々に測る。診断のみ（record_only）。変えないもの:
+bench_py.py・相手側ベンチ（bench-candle／bench-burn／bench-common の計測コード）・判定規則
+（checksum_contract.py・bench-common::parity・compare_gemm_gate.py）。
+fandhe-ai 側の純カーネルは #3180／#3182、負け帰属表の更新は #3191。
+
+1. 機体: Mac mini（Apple M4・4P＋6E・16 GB）。記録項目はチップ・macOS・Python／torch／numpy
+   の版・torch.__config__.show()・np.show_config()・torch.get_num_threads()・
+   sysctl hw.perflevel*・.rev-stamp・bench_py.py の sha256。内部ホスト名・ユーザー名は書かない
+   （env.txt に uname -n を出さない）。
+2. 環境: 0.11.0 計測の venv-torch（torch 2.14.0・numpy 2.5.4・Python 3.12.15）と同じ作業
+   ディレクトリ（fill_vec の .npy キャッシュを再利用）。版が違えば計測を止める（fail-closed）。
+3. bench_py.py の sha256 =
+   9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+   （opp_kernel_torch_diag.py の BENCH_PY_SHA256。不一致なら停止）。
+4. 形状（m,n,k / 転置）: 正方 NN の N=256／512／1024／2048／4096（入力は bench_py の
+   SEED_A／SEED_B・fill_vec）。MLP 6 形状は #3177 RULE 項 2 と同じ:
+   L1 fwd 64x256x784 NN / L1 dW 784x256x64 TN / L1 dX 64x784x256 NT /
+   L2 fwd 64x10x256 NN / L2 dW 256x10x64 TN / L2 dX 64x256x10 NT。
+   MLP の入力シードは A=0x3179A・B=0x3179B（bench_py の SEED_* と混ぜない）。
+   TN／NT は .t() のビューで渡す（連続コピーにしない）。
+   注記: bench_py の train は x に勾配を求めないので L1 dX は相手の学習ステップに出てこない。
+5. 区間（プロセス内 warmup 20＋iters 20 の中央値。bench_py の WARMUP／ITERS・線形補間分位点）:
+   mm_pure（CPU は perf_counter、MPS は torch.mps.synchronize で挟む）／
+   mm_pure_batch10（参考。10 回続けて同期し 10 で割る。判定に使わない）／
+   readout（.cpu().numpy()）／checksum（毎回新しく実体化した配列への bench_py.checksum 単体。
+   ns／要素 = median / (m*n) * 1e9）／checksum_hot（参考。同一配列に反復）／
+   window（bench_py の窓の再現: matmul → readout → checksum）。
+   検算: mm_pure+readout+checksum と window の比を記録する。食い違いは隠さない。
+6. スレッド軸（N=512 と N=2048 の CPU のみ）: torch.set_num_threads ∈ {既定, 1, 4, 10}、
+   VECLIB_MAXIMUM_THREADS ∈ {未設定, 1, 4}（プロセスごとの環境変数）。効いたかどうかは
+   値を記録するだけで推測を書かない。
+7. ビルド軸（参考腕）: np.matmul（f32・同じ入力）。np.show_config() が Accelerate を
+   示すときだけ測り、示さなければ unavailable。
+8. Rust 側の逐次総和: bench-fandhe --task gemm --device cpu --mode reuse --phases の checksum
+   区間（Rust のコードは足さない）。M4 Max の値 約 0.56 ns／要素は Mac mini の値として書かない。
+9. 回数: 各腕 5 プロセス（5 run）。値は 5 run の中央値、run 別も表に出す。
+10. 負荷ゲート: 各プロセス開始前に load1 < 3.0 になるまで 30 秒間隔で最大 30 分待つ
+    （0.11.0 系列 B と同じ閾値）。数値で読めなければ GATE-INVALID、30 分待っても下がらなければ
+    GATE-TIMEOUT。全プロセスが通過した系列だけを正式系列と呼ぶ。
+11. 運用: run ごとに腕の起動順をローテーションする。run の差し替え・追加起動はしない。ログは
+    上書きしない。ビルドは計測より前に済ませ、ビルドと計測を並走させない。
+12. 整合検査: 正方 N の checksum は系列 B（framework-compare-0.11.0-macmini-remeasure/
+    macmini-series-b の results-macmini-py-0.11.0-median5.jsonl）と checksum_contract.checksums_match
+    で一致すること。一致しなければ fail-closed。
+13. 機体に到達できない場合は数値を埋めず unavailable と記録する。推定値で埋めない。
+14. 判定・閾値は設けない。約 480 GFLOPS（PyTorch CPU N=2048）の切り分けは「総和で説明できる分」
+    「スレッド腕で変わる分」「numpy 経由の Accelerate との差」を並べ、分けられたか分けられなかった
+    かを明記する。第三者公開値は別機体なので、ビルド差はこの機体だけでは決着しない可能性がある。
