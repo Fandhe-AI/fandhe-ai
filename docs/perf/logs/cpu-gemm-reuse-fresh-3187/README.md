@@ -19,7 +19,7 @@
 bash docs/perf/logs/cpu-gemm-reuse-fresh-3187/orchestrate.sh gb10
 python3 docs/perf/logs/cpu-gemm-reuse-fresh-3187/aggregate.py \
   docs/perf/logs/cpu-gemm-reuse-fresh-3187/gb10 > docs/perf/logs/cpu-gemm-reuse-fresh-3187/gb10/aggregate.md
-# ページ確保の補助（別ディレクトリ・1 run 相当。系列には混ぜない）
+# ページ確保の補助（別ディレクトリ・run1 のみの 1 run。aggregate.py も 1 run を受け付ける。系列には混ぜない）
 GEMM_REUSE_MINFLT=1 bash docs/perf/logs/cpu-gemm-reuse-fresh-3187/orchestrate.sh gb10 --out <別ディレクトリ>
 ```
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""イシュー #3187: 独立 5 run の JSONL を RULE.txt の規則で集計する（標準ライブラリのみ）。
+"""イシュー #3187: 独立 5 run（GEMM_REUSE_MINFLT=1 補助系列のみ 1 run）の JSONL を RULE.txt の規則で集計する（標準ライブラリのみ）。
 
 使い方: aggregate.py <dir>   （dir は run1.jsonl..run5.jsonl と load_gate_status.txt を持つ）
         aggregate.py --self-test
@@ -77,7 +77,7 @@ def load_run(path):
     return cells
 
 
-def load_gate(d):
+def load_gate(d, nruns):
     """(未通過 run 名の一覧, record_only の run 名の一覧) を返す（欠落・不正は fail-closed）。"""
     path = os.path.join(d, GATE_FILE)
     try:
@@ -94,8 +94,8 @@ def load_gate(d):
         if status not in ("pass", "unpassed", "record_only") or parts[0] in seen:
             raise AggError(f"{path}: 不正または重複した行 {ln!r}")
         seen[parts[0]] = status
-    if set(seen) != {f"run{n}" for n in range(1, RUNS + 1)}:
-        raise AggError(f"{path}: run1..run{RUNS} の全行が必要 ({sorted(seen)})")
+    if set(seen) != {f"run{n}" for n in range(1, nruns + 1)}:
+        raise AggError(f"{path}: run1..run{nruns} の全行が必要 ({sorted(seen)})")
     return (sorted(r for r, st in seen.items() if st == "unpassed"),
             sorted(r for r, st in seen.items() if st == "record_only"))
 
@@ -183,11 +183,17 @@ def us(x):
 
 
 def aggregate(d):
-    runs = [load_run(os.path.join(d, f"run{i}.jsonl")) for i in range(1, RUNS + 1)]
-    unpassed, record_only = load_gate(d)
+    # 補助系列（run1 が minflt_enabled=true）は RULE.txt どおり 1 run のみ。それ以外は 5 run 必須。
+    # 補助系列で run2 以降が存在する、または run1 以外が ON の混在は fail-closed。
+    first = load_run(os.path.join(d, "run1.jsonl"))
+    nruns = 1 if all(rec["minflt_enabled"] for rec in first.values()) else RUNS
+    runs = [first] + [load_run(os.path.join(d, f"run{i}.jsonl")) for i in range(2, nruns + 1)]
+    if nruns == 1 and os.path.exists(os.path.join(d, "run2.jsonl")):
+        raise AggError("minflt 補助系列は run1 のみ（run2 以降が存在する）")
+    unpassed, record_only = load_gate(d, nruns)
     # record_only（M4 Max 疎通確認）は RULE.txt で判定対象外。全 run 一致のときだけ数値記録モード、
     # 混在は系列の性質が不明なため fail-closed。
-    if record_only and len(record_only) != RUNS:
+    if record_only and len(record_only) != nruns:
         raise AggError(f"record_only と他状態の run が混在 ({record_only})")
     # GEMM_REUSE_MINFLT=1 の補助系列は判定外（RULE.txt「ページ確保の機構」）。正式系列は全レコード OFF。
     flags = {rec["minflt_enabled"] for r in runs for rec in r.values()}
@@ -210,7 +216,7 @@ def aggregate(d):
         w("")
     w("checksum: 全 n・全腕・全 run で iter_total の checksum_bits が一致（hard 検査通過）。")
     w("")
-    w("## 判定表（5 run 中央値。単位 us）" if judge else "## 記録表（判定なし。5 run 中央値。単位 us）")
+    w("## 判定表（5 run 中央値。単位 us）" if judge else f"## 記録表（判定なし。{nruns} run 中央値。単位 us）")
     w("")
     for n in SIZES:
         f_tot = med(runs, "fresh", n, "iter_total")
@@ -269,7 +275,7 @@ def aggregate(d):
         w("")
     if minflt_series:
         out.extend(minflt_section(runs, d))
-    w("## 区間表（5 run 中央値 [min–max]、us）")
+    w(f"## 区間表（{nruns} run 中央値 [min–max]、us）")
     w("")
     for n in SIZES:
         w(f"### N={n}")
@@ -283,8 +289,8 @@ def aggregate(d):
         w("")
     w("## run 別 iter_total（fresh / reuse、us）")
     w("")
-    w("| N | arm | " + " | ".join(f"run{i}" for i in range(1, RUNS + 1)) + " |")
-    w("|---|---|" + "---|" * RUNS)
+    w("| N | arm | " + " | ".join(f"run{i}" for i in range(1, nruns + 1)) + " |")
+    w("|---|---|" + "---|" * nruns)
     for n in SIZES:
         for arm in ("fresh", "reuse"):
             w(f"| {n} | {arm} | " + " | ".join(us(r[(arm, n, 'iter_total')]['median_s']) for r in runs) + " |")
@@ -297,9 +303,9 @@ def _rec(arm, n, ph, med_s, bits="3ff0000000000000", ns=EXPECTED_N, arena=None):
             "checksum_bits": bits if ph == "iter_total" else None, "arena_stats": arena}
 
 
-def _write_series(d, mutate=None, gate=True, gate_status="pass"):
+def _write_series(d, mutate=None, gate=True, gate_status="pass", nruns=RUNS):
     os.makedirs(d, exist_ok=True)
-    for r in range(1, RUNS + 1):
+    for r in range(1, nruns + 1):
         lines = []
         for arm, phases in EXPECTED.items():
             for n in SIZES:
@@ -316,7 +322,7 @@ def _write_series(d, mutate=None, gate=True, gate_status="pass"):
                 f.write(json.dumps(rec) + "\n")
     if gate:
         with open(os.path.join(d, GATE_FILE), "w", encoding="utf-8") as f:
-            for r in range(1, RUNS + 1):
+            for r in range(1, nruns + 1):
                 f.write(f"run{r} gate={gate_status}\n")
 
 
@@ -341,7 +347,7 @@ def self_test():
             return m
 
         mf = os.path.join(t, "mf")
-        _write_series(mf, set_minflt(lambda r: True))
+        _write_series(mf, set_minflt(lambda r: True), nruns=1)
         text = aggregate(mf)
         assert "判定: 逆転が再現" not in text and "MINFLT" in text
         assert "minflt / iter" in text and "取得不能" in text
@@ -382,6 +388,17 @@ def self_test():
         expect_fail("median", bad_median)
         expect_fail("cell", missing_cell)
         expect_fail("nogate", gate=False)
+        # 補助系列に run2 が混入した場合は fail-closed
+        mf2 = os.path.join(t, "mf2")
+        _write_series(mf2, set_minflt(lambda r: True), nruns=1)
+        with open(os.path.join(mf2, "run2.jsonl"), "w", encoding="utf-8") as f:
+            f.write(open(os.path.join(mf2, "run1.jsonl"), encoding="utf-8").read())
+        try:
+            aggregate(mf2)
+            print("self-test 失敗: mf_extra_run が fail-closed にならない", file=sys.stderr)
+            ok = False
+        except AggError:
+            pass
         expect_fail("minflt_mix", set_minflt(lambda r: r == 2))
         expect_fail("norun", drop_run=True)
     if not ok:

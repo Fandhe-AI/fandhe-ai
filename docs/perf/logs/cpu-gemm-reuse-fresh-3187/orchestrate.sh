@@ -3,7 +3,7 @@
 # 判定規則は同ディレクトリの RULE.txt（実測前に固定）が正。構成は
 # docs/perf/logs/cpu-predict-resident-fixedcost-2105/orchestrate.sh と同型。
 # テストバイナリを 1 回ビルドし、独立 5 プロセスで cpu_gemm_reuse_fresh_phases を
-# 実行して run{1..5}.jsonl を残す。
+# 実行して run{1..5}.jsonl を残す（GEMM_REUSE_MINFLT=1 の補助計測のみ run1 の 1 run）。
 # 使い方: orchestrate.sh <m4max|gb10> [--out <dir>]
 # 集計は `python3 aggregate.py <dir>`。既存 run ファイルの上書きは拒否する。
 # 計測ツリーのルートに .rev-stamp（1 行目 HEAD・2 行目 dirty=<件数>）が必須
@@ -41,11 +41,14 @@ if [ ! -f "$repo_root/.rev-stamp" ]; then
   exit 1
 fi
 
+# 補助計測（GEMM_REUSE_MINFLT=1）は RULE.txt どおり 1 run のみ、通常は独立 5 run。
+if [ "${GEMM_REUSE_MINFLT:-}" = "1" ]; then run_count=1; else run_count=5; fi
+
 mkdir -p "$out_dir"
 out_dir="$(cd "$out_dir" && pwd)"
 
 # 差し替え禁止: 既存の run ファイルがあれば中止する。
-for n in 1 2 3 4 5; do
+for n in $(seq 1 "$run_count"); do
   if [ -e "$out_dir/run$n.jsonl" ]; then
     echo "既存の run$n.jsonl があるため中止する（差し替え禁止）" >&2
     exit 1
@@ -106,7 +109,7 @@ load1() {
 
 # 集計器へ渡す負荷ゲート状態（aggregate.py が読み、未通過 run があれば参考扱いを出力へ反映する）
 : >"$out_dir/load_gate_status.txt"
-for n in 1 2 3 4 5; do
+for n in $(seq 1 "$run_count"); do
   if [ "$host_kind" = "gb10" ]; then
     gate_status=pass
     waited=0
