@@ -44,11 +44,20 @@ REJECT／undetermined でも機構（既定 OFF）と記録を残す。
 
 ## 5. 実測記入欄（GB10 セッション）
 
+実施: 2026-10-20（イシュー #3186 の一環）。HEAD `0889838c8` の facade を `AB_PATCH_FACADE_PATH` で参照、`AB_ROUNDS=5`、
+専有ゲート exclusive（load1 < 1.0 かつ GPU 0% を 3 サンプル連続で通過）。前提ゲートは #2107 の全 N が「支持」
+（`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §13.4）。`readback_reuse_bit_match_2108` は 2 件 pass。
+生ログ・manifest・比較表: `docs/perf/logs/cuda-gemm-readback-reuse-2108/`。
+
 | セル | before 中央値 | after 中央値 | ratio | checksum |
 |---|---|---|---|---|
-| gemm reuse N=1024 | 未計測 | 未計測 | - | - |
-| gemm reuse N=2048 | 未計測 | 未計測 | - | - |
-| gemm reuse N=4096 | 未計測 | 未計測 | - | - |
+| gemm reuse N=1024 | 2.053 ms | 2.256 ms | 1.0991 | 完全一致 |
+| gemm reuse N=2048 | 8.287 ms | 9.326 ms | 1.1254 | 完全一致 |
+| gemm reuse N=4096 | 38.268 ms | 42.024 ms | 1.0982 | 完全一致 |
+
+**判定: REJECT**（RULE: 専有ゲートが成立した系列でいずれかの判定セルが ratio > 1.00）。3 セルとも後退した。
+copy-out の memcpy が追加されるため後退しうるという事前表明（RULE「事前表明する期待値」）と整合する。
+`READBACK_DEST` 既定は `PretouchedFresh` のまま変更しない（機構は既定 OFF のまま残す）。
 
 ## 6. 検証状況（本 PR）
 

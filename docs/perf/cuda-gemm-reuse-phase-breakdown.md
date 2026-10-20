@@ -575,8 +575,21 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
 | 項目 | 状態 |
 | --- | --- |
 | 計装・事前登録規則・オーケストレータ・集計器（`--self-test` 済み） | 実装済み |
-| x86 実機（RTX 3060）smoke | **不可**: 開発ホストに NVRTC（CUDA toolkit）が無く `CudaGemm` 構築が `NvrtcUnavailable` になるため未実施（コンパイル・純粋単体テストのみ確認） |
-| GB10 での 5 run 実測・帰属判定 | **未実施（実機セッションへ申し送り）**。`orchestrate.sh gb10` → `aggregate.py` の判定をここへ転記する |
+| GB10 での 5 run 実測・帰属判定 | **実施済み（イシュー #3186 の一環。2026-10-20）**。計測コミットは `622594f15`（#2452 のマージコミット。`layerA_same_code: yes`）。生ログと `aggregate.md` は `docs/perf/logs/cuda-gemm-readback-attribution-2107/gb10/`。専有ゲートは 5 run とも pass |
+
+判定（`aggregate.py` の出力。alloc_fill_share = exposed_alloc_fill / residual）:
+
+| N | exposed_alloc_fill (us) | residual (us) | alloc_fill_share | 判定 |
+| --- | --- | --- | --- | --- |
+| 1024 | 1191.2 | 1116.4 | 1.067 | 宛先確保・事前タッチへの帰属を支持 |
+| 2048 | 3836.1 | 4173.4 | 0.919 | 同上 |
+| 4096 | 15322.9 | 15630.7 | 0.980 | 同上 |
+
+計測コミットの選択: #2108 の RULE が例に挙げる `8bba6b57` は `check_layer_a_path_identity.py v0.9.0 8bba6b57` が
+`gemm.rs::run_f32_kernel` と `memory.rs::readback_with` を DIFFERS にして `layerA_same_code: no`（帰属判定は
+参考扱い）になることを実測前に確認した。その直接の親 `622594f15` は `yes`（生成・起動経路の 3 項目は
+reviewed-equivalent）で、#2108 の導入コミット `392771151` より前にあり RULE の順序制約も満たす。
+RULE の「例」は例示であり、この選択は事後緩和に当たらない。
 
 ### §13.5 スコープ外
 
@@ -586,3 +599,86 @@ N=2048 4.254 ms・N=4096 約 18 ms〈上界〉）を、本番 `memory::readback`
 - N=4096 Layer B `d2h` 二峰性の原因究明・M4 Max（Metal）側の対応計測
 
 後続 #2108（readback 宛先の pinned staging 再利用 opt-in と A/B 基盤）は `docs/perf/cuda-gemm-readback-reuse-2108.md` を参照。
+
+## §14 reuse と fresh の差の原因特定（イシュー #3186）
+
+### §14.1 位置づけ
+
+0.11.0 の GB10 再計測（`docs/perf/logs/framework-compare-0.11.0-remeasure/gb10/`）では、gemm CUDA の reuse が
+N=512/1024/2048 で fresh の約 2.2〜2.4 倍遅く、N=4096 ではほぼ同じになる。本節はその原因を診断だけで切り分ける
+（是正は #3225。本番コード・`READBACK_DEST` 既定 `PretouchedFresh`・tolerance・baseline は不変）。
+判定規則は `docs/perf/logs/cuda-gemm-reuse-fresh-gap-3186/RULE.txt`（実測前に固定）が正。
+
+仮説: reuse 窓は結果ノード（readout のホスト `Vec`）を tape に溜め続けるため free が起きず、毎回まだタッチしていない
+新規ページへ事前タッチと D2H を行う。fresh 窓は毎反復で宛先を解放するため glibc の動的 mmap 閾値が上がり
+（上限 32 MiB）、N=2048 まではタッチ済みの brk ヒープを再利用できる。N=4096（64 MiB）は上限を超えるため
+どちらの窓でも常に mmap になる。
+
+### §14.2 計装
+
+`crates/backend-cuda/src/fresh_reuse_window_diag_tests_3186.rs`（`#[ignore]`・新規 `unsafe` なし・依存追加なし）。
+窓パターン（`drop`＝宛先を毎反復解放／`keep`＝溜める）× 宛先方式（`pretouched`／`untouched`／`reused`／`pinned`）の
+9 腕を本番順序で計測し、`/proc/self/stat` の minflt/majflt と THP 設定を併記する。5 run・腕ごとに独立プロセス・
+run ごとに腕順を巡回・warmup 20 + 計測 20。同一セッションで Layer A（bench-fandhe `gemm --mode fresh`／`reuse`。
+HEAD の `crates/facade` を path patch で差し込む）も計測した。計測ツリーは `.rev-stamp` で同定済み
+（`docs/perf/logs/cuda-gemm-reuse-fresh-gap-3186/rev-stamp-verification-3186.md`）。
+
+### §14.3 結果
+
+生ログ・`aggregate.md`: `docs/perf/logs/cuda-gemm-reuse-fresh-gap-3186/gb10/`。専有ゲート 5 run とも pass、
+checksum は全系列で完全一致（既知値とも一致）。
+
+**判定 W（窓の構成＝tape 蓄積の寄与。5 run 中央値、単位 us）**
+
+| N | Layer A fresh | Layer A reuse | gap_A | gap_retention | retention_share | 判定 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 512（record_only） | 259.0 | 537.0 | 278.0 | 292.7 | 1.053 | 支持 |
+| 1024 | 958.0 | 2171.8 | 1213.8 | 1290.7 | 1.063 | 支持 |
+| 2048 | 4195.2 | 8168.4 | 3973.1 | 3904.5 | 0.983 | 支持 |
+| 4096 | 38706.5 | 38521.2 | -185.4 | 1950.2 | - | 非再現（reuse−fresh が 0 以下。判定しない） |
+
+機構の裏付け（minflt。計測 20 試行の合計・run 間中央値。付記）: `drop_pretouched` は N=512〜2048 で 1（ヒープ再利用）、
+`keep_pretouched` は N=1024 で 20501（= 20 試行 × 1025 ページ）、N=2048 で 81941。N=4096 は `drop`・`keep` とも
+327701（= 20 × 16384。毎回 mmap の新規ページ）で、両窓が並ぶ理由と整合する。
+
+**判定 F（N=4096 fresh の未説明分）**: Layer A fresh 38706.5 us − Σ Layer B（`drop_reused`）13462.0 us −
+host checksum 8757.7 us = residual 16486.8 us。page_cost = `drop_pretouched` 26914.8 us − `drop_reused` の D2H 11175.5 us
+= 15471.7 us。share_F = 0.938 で **帰属できた**（事前登録の閾値 0.80 以上）。記録のみ: `drop_reused` の D2H 区間は
+11175.5 us で、RULE が置いた帯域下限の推定（約 1100 us）の約 10 倍だった。推定値の方が誤っていた可能性が高く、
+帯域の下限は未確定（本イシューの判定には使わない）。
+
+**二峰性の条件（N=4096）**: 高モード（閾値 55877 us）は `drop_untouched` だけに出た（run1〜5 で 2/2/4/5/0 試行。
+値は約 0.5〜0.6 s）。`keep_untouched`・`drop_pretouched_split`・`keep_pretouched_split`・`drop_reused` は全 run で 0 件。
+RULE の文言どおり判定は「未タッチ宛先が条件」。ただし `keep_untouched` も未タッチ宛先なのに 0 件だったため、
+未タッチは必要条件であっても十分条件とは言えない。それ以上の原因は本イシューでは追わない（record_only）。
+
+**前提の判定（#2108）**: #2107 の判定が全 N で「支持」だったため、#2108 の A/B を実施した（HEAD、`AB_ROUNDS=5`、
+専有ゲート exclusive 通過）。結果は REJECT（`docs/perf/cuda-gemm-readback-reuse-2108.md` §5）。pinned-reuse は
+N=1024/2048/4096 で 1.10/1.13/1.10 倍に後退した。
+
+### §14.4 reuse と fresh の差の分類
+
+| 要因 | 窓の構成／実装差 | ライブラリ側で是正可能か | 推定寄与（実測） | 是正先 |
+| --- | --- | --- | --- | --- |
+| (a) tape 蓄積による未タッチ宛先 | 窓の構成（reuse は結果ノードを溜め続け free しない） | 新規 `unsafe` なしでは宛先を返却して再利用できない（Tensor の `Arc<Storage{Vec<T>}>` に drop フックがない）。真の再利用／ゼロコピーはストレージ抽象の変更と新規 `unsafe` が要り所有者承認事項 | N=512/1024/2048 の reuse−fresh のほぼ全量（retention_share 1.05/1.06/0.98）。N=4096 は差なし | #3225 |
+| (b) 反復ごとの H2D | reuse・fresh 共通 | reuse−fresh には寄与しない。相手（candle は A/B をデバイス常駐）との差に寄与する。デバイス常駐 Tensor API は既存 §8 のスコープ外 | 本イシューでは未測定（Layer B の h2d_a+h2d_b は N=1024 で約 160 us） | スコープ外 |
+| (c) readout 方式（借用ビュー vs `to_vec2`） | ハーネス側の窓の構成 | ハーネス側（本イシューは判定対象にしない） | 判定 W の対象外 | ハーネス |
+| (d) カーネル・同期の実装差 | §12.4 で候補外 | 対象外 | gap_retention が gap_A とほぼ一致する（N=1024 は gap_retention が 77 us 上回る）ため、(a) 以外の残余は検出されない | なし |
+
+### §14.5 #3225 への入力
+
+- 差は「宛先ページの新規性」で決まる。`drop`（再利用）の 1 回あたり readback は N=1024 で 248 us、`keep` は 1544 us。
+  事前タッチ済みの宛先を確保する経路（glibc の mmap 閾値の挙動に依存しない方法）が取れれば、reuse の readback は
+  fresh 並み（N=1024 で約 1.3 ms、N=2048 で約 3.9 ms の短縮余地）になる。
+- pinned staging 再利用（#2108 の opt-in）は copy-out 1 回が足されて全 N で後退した（REJECT）。copy-out が残る限り
+  床は「pinned D2H + memcpy」になる。残る候補はゼロコピー（読み取り専用ビューを呼び出し側へ貸す）で、
+  新規 `unsafe` とストレージ抽象の変更を伴うため所有者承認が前提。
+- N=4096 は fresh でも readback の事前タッチが約 15 ms（share_F 0.938）残る。64 MiB は glibc の動的閾値上限を
+  超えるため、ヒープ再利用では解消せず、確保方式（再利用可能なバッファ）の議論が要る。
+
+### §14.6 スコープ外・限界
+
+- 本節は診断のみ。本番コード・既定値・tolerance・baseline は変更していない（`git diff origin/main -- crates/backend-cuda/src/memory.rs crates/backend-cuda/src/readback_policy.rs` は空）。
+- N=512 は record_only（既知 checksum なし・#2107 の対象外）。
+- 判定が示すのは宛先の保持の有無で readback 区間に出る差だけで、H2D・readout 方式・カーネル／同期の差は検出対象外。
+- 常駐サービスの停止・THP などシステム設定の変更はしていない（THP は `madvise`）。

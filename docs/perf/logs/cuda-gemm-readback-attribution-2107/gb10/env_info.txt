@@ -1,0 +1,91 @@
+date_utc: 2026-10-20T09:08:01Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+git_head: 622594f15994e7c21641c5dd4497b764a334ade5
+host_kind: gb10
+layerA_same_code: yes
+path_item: gemm.rs::validate_gemm_dims identical
+path_item: gemm.rs::validate_output_len identical
+path_item: gemm.rs::validate_tiled_k_bound identical
+path_item: gemm.rs::tiled_f32_kernel_kind identical
+path_item: gemm.rs::TILED_PIPELINE_128X64_PRODUCTION_ENABLED identical
+path_item: gemm.rs::TILED_PIPELINE_128X64_MIN_N identical
+path_item: gemm.rs::TILED_PIPELINE_128X64_MIN_K identical
+path_item: gemm.rs::tiled_pipeline_tile_kind identical
+path_item: gemm.rs::tiled_pipeline_launch_config identical
+path_item: gemm.rs::tiled_f32_launch_config identical
+path_item: gemm.rs::select_tiled_f32_kernel identical
+path_item: gemm.rs::select_tiled_pipeline_handle identical
+path_item: gemm.rs::run_f32_kernel identical
+path_item: kernels.rs::TILED_F32 identical
+path_item: kernels_tiled_pipeline.rs::tiled_pipeline_f32_source identical
+path_item: kernels_tiled_pipeline.rs::tiled_pipeline_f32_source_with_stages identical
+path_item: memory.rs::pretouched_host_vec identical
+path_item: memory.rs::readback identical
+path_item: memory.rs::readback_with identical
+path_item: memory.rs::READBACK_DEST identical
+path_item: kernels_tiled_pipeline.rs::TP_BM identical
+path_item: kernels_tiled_pipeline.rs::TP_BN identical
+path_item: kernels_tiled_pipeline.rs::TP_BK identical
+path_item: kernels_tiled_pipeline.rs::TP_THREAD_M identical
+path_item: kernels_tiled_pipeline.rs::TP_THREAD_N identical
+path_item: kernels_tiled_pipeline.rs::TP_THREADS_X identical
+path_item: kernels_tiled_pipeline.rs::TP_THREADS_Y identical
+path_item: kernels_tiled_pipeline.rs::TP_BLOCK_THREADS identical
+path_item: kernels_tiled_pipeline.rs::TP_DEFAULT_STAGES identical
+path_item: kernels_tiled_pipeline.rs::TP_MIN_STAGES identical
+path_item: kernels_tiled_pipeline.rs::TP_MAX_STAGES identical
+path_item: kernels_tiled_pipeline.rs::TP_A_PAD identical
+path_item: kernels_tiled_pipeline.rs::TP_B_PAD identical
+path_item: kernels_tiled_pipeline.rs::TP_A_CHUNKS identical
+path_item: kernels_tiled_pipeline.rs::TP_B_CHUNKS identical
+path_item: kernels_tiled_pipeline.rs::TP_SMEM_BYTES_PER_STAGE identical
+path_item: kernels_tiled_pipeline.rs::MAX_WAIT_GROUP_IMMEDIATE identical
+path_item: kernels_tiled_pipeline.rs::TP_CP_ASYNC_HELPER identical
+path_item: kernels_tiled_pipeline.rs::TP_NON_PERSISTENT_PREFIX identical
+path_item: kernels_tiled_pipeline.rs::TP_TILE_CORE identical
+path_item: kernels_tiled_pipeline.rs::TP_KERNEL_SUFFIX identical
+path_item: kernels_tiled_pipeline.rs::render_defines identical
+path_item: kernels_tiled_pipeline.rs::render_source identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_BM identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_BN identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_BK identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_THREAD_M identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_THREAD_N identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_THREADS_X identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_THREADS_Y identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_BLOCK_THREADS identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_DEFAULT_STAGES identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_MIN_STAGES identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_MAX_STAGES identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_A_CHUNKS identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_B_CHUNKS identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_A_CHUNKS_PER_ROW identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_SMEM_BYTES_PER_STAGE identical
+path_item: kernels_tiled_pipeline_128x64.rs::MAX_WAIT_GROUP_IMMEDIATE identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_CP_ASYNC_HELPER identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_NON_PERSISTENT_PREFIX identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_TILE_CORE identical
+path_item: kernels_tiled_pipeline_128x64.rs::TP128_KERNEL_SUFFIX identical
+path_item: kernels_tiled_pipeline_128x64.rs::render_defines identical
+path_item: kernels_tiled_pipeline_128x64.rs::render_source identical
+path_item: kernels_tiled_pipeline.rs::TILED_PIPELINE_F32_SOURCE identical
+path_item: kernels_tiled_pipeline_128x64.rs::TILED_PIPELINE_128X64_F32_SOURCE identical
+path_item: kernels_tiled_pipeline_128x64.rs::tiled_pipeline_128x64_f32_source identical
+path_item: gemm.rs::new reviewed-equivalent（生成・起動経路。feature gate 由来の人手レビュー済み既知差分）
+path_item: gemm.rs::kernel_specs identical（生成・起動経路）
+path_item: gemm.rs::tiled_pipeline_descriptor identical（生成・起動経路）
+path_item: gemm.rs::compile_tiled_pipeline reviewed-equivalent（生成・起動経路。feature gate 由来の人手レビュー済み既知差分）
+path_item: gemm.rs::compile_tiled_pipeline_128x64 reviewed-equivalent（生成・起動経路。feature gate 由来の人手レビュー済み既知差分）
+path_item: gemm.rs::new_with_tiled_pipeline_128x64 identical（生成・起動経路）
+path_item: gemm.rs::launch_tiled_f32 identical（生成・起動経路）
+path_item: gemm.rs::launch_tiled_f32_pooled identical（生成・起動経路）
+path_item: module_cache.rs::load_function_cached identical（生成・起動経路）
+os_release: Ubuntu 24.04.4 LTS
+NVIDIA GB10, 580.173.02
+Build cuda_13.0.r13.0/compiler.36424714_0
+load_avg: 3.17 1.84 1.10
+gpu_util_start: 0 %
+計測終了時刻（UTC）: 2026-10-20T09:16:37Z
+load_avg_end: 0.98 1.15 1.03

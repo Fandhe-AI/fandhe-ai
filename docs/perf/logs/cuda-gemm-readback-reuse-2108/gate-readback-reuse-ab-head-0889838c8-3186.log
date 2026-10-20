@@ -1,0 +1,5 @@
+2026-10-20T09:17:41Z attempt=0 load1=1.78 gpu_util=1% threshold=1.0 consecutive_ok=0
+2026-10-20T09:19:11Z attempt=1 load1=0.61 gpu_util=0% threshold=1.0 consecutive_ok=0
+2026-10-20T09:19:41Z attempt=2 load1=0.37 gpu_util=0% threshold=1.0 consecutive_ok=1
+2026-10-20T09:20:11Z attempt=3 load1=0.22 gpu_util=0% threshold=1.0 consecutive_ok=2
+gate: ok (3 consecutive checks: load1 < threshold and GPU util 0%)
