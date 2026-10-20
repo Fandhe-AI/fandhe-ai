@@ -1,0 +1,23 @@
+RULE fixed-at-utc: 2026-10-20T12:09:52Z
+イシュー #3188: GB10 の CPU train の device_update と predict_resident の固定費の内訳（追加規則）
+本規則は計測前に固定し、事後に緩めない。
+
+1. 継承: 次の 2 RULE を無変更で適用する。判定（支持／未確定・逆転非再現・checksum fail-closed・負荷ゲート）は
+   継承 RULE と各 aggregate.py の出力が正。
+   - cpu-reuse-device-update-2106/RULE.txt        sha256=39ff24728588e838273feb280b0bc28d86f3777285c07c139e356b8602e5196b
+   - cpu-predict-resident-fixedcost-2105/RULE.txt sha256=c8d65f4afb83115faeb48fbb9b8258329fd3de60383dcb0d30e84cea07e28541
+2. 系列（40 桁 SHA）:
+   - pre  = 17c7767b588a8c4c52eccccc39ba880519962d53 （Phase 10 の CPU 修正 #3196・#3194・#3193 の直前）
+   - head = 4f6716f638a6997559847480ddf93cf6924a96e3 （RULE 固定時の origin/main）
+   継承スクリプト・診断テストは pre と main で実質同一（差分はコメントのみ）。
+3. 実行順（直列・計測中に別ビルドを走らせない）: head/2106 -> head/2105 -> pre/2106 -> pre/2105。
+4. 実行条件: affinity pin なし・RAYON_NUM_THREADS 未設定。
+5. ツリー同定: git archive <sha> を専用ディレクトリへ展開し .rev-stamp を置く。ノード側に .git はないため
+   env_info の git_head 欠落は想定どおり。計測前後にツリー指紋を取り、Mac 側 git archive の指紋と一致しない系列は無効。
+6. HEAD 系列の読み方: 2106 の alloc 腕は standalone の写しで、head の本番経路は flat_grad を確保しない。
+   aggregate の判定は転記し、参考行（判定ではない）として本番経路換算の残差を併記する。
+   head の sgd_kernel 系 H1、2105 の H1 は構造上 0 付近と見込む。
+7. pre と head の中央値比は #3193・#3194・#3196 の GB10 実測効果の参考値（継承判定とは別）。
+   #3193 と #3194 は同じ系列間に入るため insitu の T では分離できない。
+8. 失敗時: 負荷ゲート未通過 run を含む系列は参考扱い。checksum・指紋不一致は系列無効（差し替え・追加 run なし）。
+9. 診断のみ。コード・既定値・tolerance・FMA 契約は変更しない。MSE backward 区間は対象外（#3180）。
