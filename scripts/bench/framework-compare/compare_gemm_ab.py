@@ -127,6 +127,14 @@ _AFFINITY_SIZES_BY_DEVICE = {
     "cpu": frozenset({256, 512, 1024, 2048, 4096}),
 }
 
+# イシュー #3178: `--sizes threadpolicy`（cpu 専用）。Mac mini の CPU スレッド方針
+# A/B（`run_ab_thread_policy_macmini_cpu.sh`）の gemm 8 セル
+# （N=256/512/1024/2048 × fresh/reuse）。判定規則は
+# `docs/perf/logs/cpu-thread-policy-macmini-3178/RULE.txt`。cpu 以外は拒否する。
+_THREADPOLICY_SIZES_BY_DEVICE = {
+    "cpu": frozenset({256, 512, 1024, 2048}),
+}
+
 # イシュー #1517: `--task train` 用のセル集合。`bench-fandhe --task train`
 # は `Record.size` に `BATCH`（`scripts/bench/framework-compare/
 # bench-fandhe/src/main.rs` の `const BATCH: usize = 64;`）を emit する
@@ -166,6 +174,10 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
         if device not in _AFFINITY_SIZES_BY_DEVICE:
             raise ValueError("--sizes affinity は --device cpu 専用（イシュー #2117）")
         return _AFFINITY_SIZES_BY_DEVICE[device]
+    if sizes_arg == "threadpolicy":
+        if device not in _THREADPOLICY_SIZES_BY_DEVICE:
+            raise ValueError("--sizes threadpolicy は --device cpu 専用（イシュー #3178）")
+        return _THREADPOLICY_SIZES_BY_DEVICE[device]
     if sizes_arg == "gate":
         return _GATE_SIZES_BY_DEVICE[device]
     if sizes_arg == "large":
@@ -774,7 +786,7 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate", "large", "readback", "infer-batches", "affinity"),
+        choices=("full", "gate", "large", "readback", "infer-batches", "affinity", "threadpolicy"),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "
@@ -785,6 +797,7 @@ def main(argv):
             "または 'infer-batches'（--task infer 専用。batch 64/1024/4096 の "
             "3 形状。イシュー #2115）"
             "または 'affinity'（cpu 専用。N=256/512/1024/2048/4096。イシュー #2117）"
+            "または 'threadpolicy'（cpu 専用。N=256/512/1024/2048。イシュー #3178）"
         ),
     )
     parser.add_argument(

@@ -1,0 +1,14 @@
+diff --git a/crates/backend-cpu/src/small_shape_thread_cap.rs b/crates/backend-cpu/src/small_shape_thread_cap.rs
+index 00999bf90..79a98d328 100644
+--- a/crates/backend-cpu/src/small_shape_thread_cap.rs
++++ b/crates/backend-cpu/src/small_shape_thread_cap.rs
+@@ -86,3 +86,3 @@ use std::sync::OnceLock;
+ /// `docs/perf/logs/cpu-gemm-small-shape-thread-cap-1575/` を参照。
+-pub(crate) const SMALL_SHAPE_CAP_ENABLED: bool = false;
++pub(crate) const SMALL_SHAPE_CAP_ENABLED: bool = true;
+ 
+@@ -128,3 +128,3 @@ const N_CLAMP: usize = 8;
+ #[cfg(any(target_os = "macos", test))]
+-const ELIGIBLE_BRANDS: &[&str] = &["Apple M4 Max"];
++const ELIGIBLE_BRANDS: &[&str] = &["Apple M4 Max", "Apple M4"];
+ 

@@ -1,0 +1,9 @@
+diff --git a/crates/backend-cpu/src/thread_limit.rs b/crates/backend-cpu/src/thread_limit.rs
+index 17b6b7598..f0015a2fa 100644
+--- a/crates/backend-cpu/src/thread_limit.rs
++++ b/crates/backend-cpu/src/thread_limit.rs
+@@ -111,3 +111,3 @@ use std::sync::OnceLock;
+ /// （[`crate::gb10_affinity::GB10_AFFINITY_ENABLED`] も既定 `false`）。
+-pub(crate) const BIG_CORE_LIMIT_ENABLED: bool = false;
++pub(crate) const BIG_CORE_LIMIT_ENABLED: bool = true;
+ 

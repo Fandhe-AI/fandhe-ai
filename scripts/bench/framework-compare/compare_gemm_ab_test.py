@@ -626,6 +626,32 @@ class SizesLargeTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("affinity", err)
 
+    def test_cpu_threadpolicy_accepts_256_to_2048(self):
+        # イシュー #3178: 4 size x 2 mode = 8 セル。
+        sizes = (256, 512, 1024, 2048)
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=sizes, device="cpu")
+        code, out, _ = self._run(before, after, ["--device", "cpu", "--sizes", "threadpolicy"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("非後退"), 8)
+
+    def test_cpu_threadpolicy_rejects_4096_row(self):
+        sizes = (256, 512, 1024, 2048, 4096)
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=sizes, device="cpu")
+        code, _, _ = self._run(before, after, ["--device", "cpu", "--sizes", "threadpolicy"])
+        self.assertEqual(code, 2)
+
+    def test_cpu_threadpolicy_missing_cell_exit_three(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(512, 1024, 2048), device="cpu")
+        code, out, _ = self._run(before, after, ["--device", "cpu", "--sizes", "threadpolicy"])
+        self.assertEqual(code, 3)
+        self.assertIn("欠測セル", out)
+
+    def test_metal_threadpolicy_is_invalid_input(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(256,), device="metal")
+        code, _, err = self._run(before, after, ["--device", "metal", "--sizes", "threadpolicy"])
+        self.assertEqual(code, 2)
+        self.assertIn("threadpolicy", err)
+
     def test_cpu_large_set_unchanged_by_affinity(self):
         # 回帰: `--sizes large` の cpu 集合に 256 が混入しない。
         self.assertEqual(
