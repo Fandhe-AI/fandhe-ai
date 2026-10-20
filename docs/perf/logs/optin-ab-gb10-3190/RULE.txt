@@ -1,0 +1,92 @@
+イシュー #3190 事前登録規則 (補遺: 未計測 opt-in 候補 6 件の GB10 A/B)
+fixed-at: 2026-10-21 (この規則は計測前にコミットして固定する。以後、緩和・事後調整はしない)
+
+0. 位置づけ
+  - 継承元の RULE.txt 6 件は 1 字も変えない。固定時点の sha256:
+    e688197bcbb4a2fad1c8e6aecbbbd3e52735a27ccbde38f81a582b1749ad3a7b  tape-arena-reuse-2104/RULE.txt
+    1bf99f9c3c36ee85a7a21b15f389cfc2371b73a5f0eb939d85a38e72d1b24e74  elemental-reduction-threshold-2101/RULE.txt
+    a1cab9c9dea01a5dbbddeb2e723aabb322e55efb74607e001302119cb15aadc2  elemental-reduction-ab-2102/RULE.txt
+    b64dbd75c9d1685de7e04772c30f90a060ce560974d81a901dc38c03a8bf312d  cuda-infer-chain-graphcapture-2115/RULE.txt
+    703406426765dc8282301fc5e7258063245d6684d6a3417787ab8da58cba669b  cuda-gemm-small-launch-cost-2109/RULE.txt
+    977ba6f935105715ff16c7a0759b6ef18c994491b296bcb54889eabf34f06076  cuda-gemm-readback-reuse-2108/RULE.txt
+    本書は GB10 固有の差分と、継承 RULE が無いセル (B5・B6 の N=256) の新規登録だけを足す補遺であり、
+    条件を足して厳しくするだけで継承規則を緩めない。
+  - 過去の REJECT (pinned H2D・managed 配置・TMA Stage 1・#3186 の readback N>=1024・MSE backward の並列しきい値)
+    は覆さない。
+  - 既定の反転は ADOPT 後に #3227・#3205 が行う。本イシューは診断のみで、main の定数・環境変数既定を変えない。
+    after 腕は計測専用 clone (main へコミットしない)。unsafe と依存の追加はしない。
+  - 兄弟 #3184 (Mac mini 版。docs/perf/logs/optin-ab-macmini-3184/RULE.txt) と共通のゲートは G1=B1・G2=B2。
+
+1. 計測対象ゲートと継承 RULE (判定語彙は継承 RULE の語をそのまま使い、読み替えない)
+  B1 HOST_ARENA_DEFAULT_ENABLED                  : 2104 (ADOPT / REJECT / undetermined、checksum 不一致は FAIL)
+  B2 REDUCTION_SEQUENTIAL_FALLBACK_ENABLED       : 2101 (Stage 0) -> 2102 (Stage 1)
+  B3 推論チェーンの Graph capture (FANDHE_AI_CUDA_GRAPH_INFER) : 2115
+  B4 CUDA GEMM N=256 の起動固定費の内訳           : 2109 (採否ではなく H1〜H6 の支持/未確定)
+  B5 タイル端境界述語の事前計算 (MMA_F16。#537)    : 継承 RULE なし。本書 8 で新規登録
+  B6 readback 宛先 pinned-reuse の N=256         : 2108 の文言を N=256 へ適用。本書 9
+
+2. 条件差 (結論 doc にも同じ表を書く)
+  | 項目 | 継承 RULE の想定 | 本計測 |
+  |---|---|---|
+  | 機体 | GB10 (2104・2101・2102・2115・2109・2108 が指定) | GB10 (20 コア・sm_121・CUDA 13.0)。同じ |
+  | registry 腕 (B4) | fandhe-ai =0.9.0 と記載 | framework-compare の現行ピン =0.11.0。registry 腕は 2109 RULE 4 で record_only のため判定不変 |
+  | ツリー同定 | git 付きツリー | git bundle を送り before/after の 2 clone を作る。.rev-stamp とツリー指紋を記録 |
+  | 計測時点の HEAD | - | 42107efc1460694feec258df09e00a5a282aa2a9 (origin/main) を基準とし、RULE 固定コミット以降の SHA を .rev-stamp に記録 |
+
+3. 負荷ゲート
+  - 継承スクリプトの登録値のまま使う (CPU の B1・B2 は load1 < 8.0、CUDA の B3・B4・B6 は専有ゲート
+    〈load1 < 1.0 かつ GPU 0%〉)。GB10 用の外側ゲートは追加しない。
+  - ビルドとの並走を禁じる。RAYON_NUM_THREADS は unset。affinity の固定はしない。
+
+4. 2 機体判定 (2104 / 2102) での GB10 の位置づけ
+  - 機体ごとの条件 (セル別 5 round 中央値 ratio <= 1.00・checksum 完全一致・5/5 round 一貫) は GB10 にそのまま適用する。
+  - REJECT 条件 (いずれかの機体で 5/5 round 一貫して後退) を GB10 で満たせば単機で REJECT 確定。
+  - ADOPT は両機体の成立が要る。GB10 だけが成立した場合は
+    「GB10 機体判定: ADOPT 条件成立 (総合は Mac mini〈#3184〉待ち)」と書き、ADOPT とは書かない。
+
+5. B2 の固定事項
+  - T_gb10 は 2101 の決定規則を GB10 の 5 演算に適用して機械的に計算する (optin-ab-gb10-3190/aggregate_sweep_single.py。
+    継承の aggregate_sweep.py は --m4max と --gb10 の両方を必須とするため、関数を再利用する単機補助を使う)。
+  - T_gb10 <= 640 なら REJECT で Stage 1 へ進まない。Stage 0 の checksum が 1 件でも合わなければ FAIL。
+  - on-reduction-gb10.patch の @T@ は Stage 0 確定後に記入する (規則の緩和ではない)。最終 T = min(T_macmini, T_gb10)。
+  - MSE backward は適用外 (2102 の除外節)。
+
+6. B3 の固定事項
+  - 2115 の R0 -> R1 -> R2 -> 5 run A/B の順。専有ゲートが成り立たなければ、2115 の規則どおり計測せず
+    undetermined を 1 回記録して終える (やり直しのループはしない)。
+  - 既定の反転はイベント追跡の無効化を含むため別 PR。
+
+7. B4 の固定事項
+  - orchestrate.sh を LOG_DIR=<2109>/gb10 で 1 回だけ実行する。aggregate.py が非ゼロで終わったら系列ごと無効とし
+    原因を記録する (一部 run の差し替えはしない)。RUN_NSYS=1 は nsys があれば使う (判定には使わない)。
+
+8. B5 (新規登録。cuda-gemm-boundary-predicate-ab.md の判断基準を厳しくする方向で形式化)
+  - base = 本規則を固定したコミット、head = base + on-boundary-predicate.patch (kernels_mma.rs の MMA_F16 のみ。
+    ソースの証跡テストは事前計算後の形へ合わせ、境界検査があることの機械検証を保つ)。
+  - 前提ゲート (順序固定。1 件でも外れたら性能判定へ進まない):
+    (a) cargo test -p fandhe-ai-backend-cuda --release -- --ignored の parity 系を base・head の両方で実行し、
+        head が base から後退していない (base で既に FAIL のものは base でも FAIL と示して区別)。
+    (b) レジスタ数・local memory 使用量 (NVRTC の ptxas -v 相当) を base/head で記録。
+        local memory が増える、またはスピルが出たら前提不成立として undetermined。
+  - 計測: gemm_mma_bench を腕ごとに 5 プロセス独立で起動し、round ごとに起動順を反転。専有ゲートは load1 < 1.0 かつ GPU 0%。
+  - 判定: 全形状で head の 5 run 中央値 TFLOPS >= base、かつ 1 形状以上で 5/5 run 一貫して改善 -> 採用候補。
+    いずれかの形状で 5/5 run 一貫して後退 -> 不採用。それ以外 -> undetermined。採用しても main のカーネルは変えない。
+  - REQ-8: 検査を前倒しするだけで省かない。クランプ済みアドレス計算は変えない。境界検査を省く変種は採らない。
+  - 打ち切り: patch が前提ゲート (a) を通らない、または実装が時間内に終わらないときは「未実施 (undetermined)」と書き、推定で埋めない。
+
+9. B6 (新規セル。2108 の文言をそのまま適用)
+  - 判定セル = gemm cuda reuse N=256。before は env 未設定、after は FANDHE_AI_CUDA_READBACK_DEST=pinned-reuse。
+    5 round 固定・専有ゲート exclusive・--threshold 1.00 --require-checksum-exact。
+    run_ab_readback_reuse_cuda.sh を AB_READBACK_SIZES=n256 で起動する (本書と同じ PR で入れる allowlist 拡張。既定は不変)。
+  - #2107 の前提ゲートは N=256 で測られていない。2108 RULE の「前提ゲートで支持でない N を含む場合は undetermined」により
+    ADOPT はない。専有ゲートが成り立った系列で ratio > 1.00 または checksum 不一致なら REJECT、それ以外は undetermined。
+  - readback_reuse_bit_match_2108 を先に 1 回実行して pass を記録する。
+  - readback 宛先全体の判定 (#3186 の REJECT) は変えない。
+
+10. 運用
+  - run の差し替え・追加・セルの除外は禁止。再実行は別 label で行い旧系列も残す。
+  - 欠損・round 数 != 5・非有限値・checksum 不一致は FAIL / undetermined (fail-closed)。
+  - 実機に届かない・完走しない系列は推定で埋めず undetermined (未実測) と書く。
+  - マスク規則: ホスト名は masked、$HOME は <home>、ユーザー名・絶対パスは除く。
+  - 2 時間を超える場合は CPU 系 (B1 -> B2) と CUDA 系 (B3 -> B4 -> B6 -> B5) の 2 セッションに分ける。
+  - 定数は main で変えない。計測前にこの規則を単独でコミットして固定する。
