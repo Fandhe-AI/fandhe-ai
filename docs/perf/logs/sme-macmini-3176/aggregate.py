@@ -61,7 +61,10 @@ def parse_variant_log(path):
             raise AggError("%s: 未知の行: %r" % (path, ln))
         kind = "SME" if mt.group(1).startswith("SME") else "NEON"
         shape = (int(mt.group(2)), int(mt.group(3)), int(mt.group(4)))
-        g = float(mt.group(5))
+        try:
+            g = float(mt.group(5))
+        except ValueError:
+            raise AggError("%s: 数値でない GFLOPS: %r" % (path, ln))
         if not math.isfinite(g) or g <= 0:
             raise AggError("%s: 非有限の GFLOPS: %r" % (path, ln))
         d = pts.setdefault(shape, {})
@@ -236,13 +239,21 @@ def checksum_mismatch(d, label):
     return any(len(vs) > 1 for vs in seen.values())
 
 
+GATE_ROUND = re.compile(r"^round([0-9]+) gate=(\S+) gate_ok=(\S+)$")
+
+
 def gate_series(d):
     """load_gate.log の round 行から正式系列（5/5 gate_ok=1）かを返す。"""
     paths = glob.glob(os.path.join(d, "r1r2", "load_gate-3176-*.log"))
     if len(paths) != 1:
         return False
-    rounds = [ln for ln in read_lines(paths[0]) if ln.startswith("round")]
-    return len(rounds) == ROUNDS and all("gate_ok=1" in ln for ln in rounds)
+    seen = {}
+    for ln in read_lines(paths[0]):
+        mt = GATE_ROUND.match(ln)
+        if mt:
+            seen.setdefault(int(mt.group(1)), []).append(mt.group(3))
+    # round1〜ROUNDS が各 1 件ずつ・gate_ok がフィールド完全一致で 1 のものだけを正式系列とする
+    return sorted(seen) == list(range(1, ROUNDS + 1)) and all(v == ["1"] for v in seen.values())
 
 
 SHA_LINE = re.compile(r"^on-arm\.patch sha256: ([0-9a-f]{64})$")
@@ -521,6 +532,24 @@ def self_test():
         _fixture(d)
         with open(os.path.join(d, "r4_run1.log"), "a") as f:
             f.write("variant=SME(TwoDDynamicSme) size=(64,64,32) median_gflops=1.0\n")
+        assert "undetermined" in render(d, "L").split("\n")[2]
+    with tempfile.TemporaryDirectory() as d:  # 数値でない GFLOPS は集計を中断せず、他セルの checksum FAIL も出す
+        _fixture(d, ck_after=2.5)
+        with open(os.path.join(d, "r4_run1.log"), "a") as f:
+            f.write("variant=SME(TwoDDynamicSme) size=(1,2,3) median_gflops=broken\n")
+        assert "FAIL" in render(d, "L").split("\n")[2]
+    with tempfile.TemporaryDirectory() as d:  # round1 の 5 重複・round2〜5 欠損は正式系列でない
+        _fixture(d)
+        with open(os.path.join(d, "r1r2", "load_gate-3176-sme-cpu-L.log"), "w") as f:
+            f.write("threshold=3.0 rule_threshold=3.0 series=official\n")
+            for _ in range(ROUNDS):
+                f.write("round1 gate=pass gate_ok=1\n")
+        assert "undetermined" in render(d, "L").split("\n")[2]
+    with tempfile.TemporaryDirectory() as d:  # gate_ok=10 のような部分一致は不可
+        _fixture(d)
+        with open(os.path.join(d, "r1r2", "load_gate-3176-sme-cpu-L.log"), "w") as f:
+            for i in range(1, ROUNDS + 1):
+                f.write("round%d gate=pass gate_ok=10\n" % i)
         assert "undetermined" in render(d, "L").split("\n")[2]
     with tempfile.TemporaryDirectory() as d:  # 非有限値
         _fixture(d)
