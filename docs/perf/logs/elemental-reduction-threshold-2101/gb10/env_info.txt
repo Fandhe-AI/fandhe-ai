@@ -1,0 +1,17 @@
+label=gb10
+uname=Linux masked 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+head=d89a0937021e351573ae754bf35eae4c4408f740
+cpu=
+nproc=20
+RAYON_NUM_THREADS=<unset>
+run1_start load1=3.93 at=2026-10-20T15:23:07Z
+run1_end load1=4.65 at=2026-10-20T15:23:30Z
+run2_start load1=4.65 at=2026-10-20T15:23:30Z
+run2_end load1=4.36 at=2026-10-20T15:23:34Z
+run3_start load1=4.36 at=2026-10-20T15:23:34Z
+run3_end load1=4.09 at=2026-10-20T15:23:38Z
+run4_start load1=4.09 at=2026-10-20T15:23:38Z
+run4_end load1=4.09 at=2026-10-20T15:23:42Z
+run5_start load1=4.09 at=2026-10-20T15:23:42Z
+run5_end load1=5.36 at=2026-10-20T15:23:46Z

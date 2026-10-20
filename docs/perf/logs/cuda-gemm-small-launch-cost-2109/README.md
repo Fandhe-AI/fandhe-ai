@@ -8,9 +8,10 @@ G-CUDA-G256（fandhe-ai 2 位・対 candle 0.83×）の起動固定費（launch 
 
 ## 位置づけ
 
-- 本 PR は計装・診断テスト・事前登録規則・計測スクリプトまで。**GB10 での
-  5 run 実測（受入基準 2・3 の数値記入）は実機セッションへ申し送る**
-  （開発機は CUDA toolkit〈NVRTC〉非搭載のため実機テストを実行できない）。
+- 初版は計装・診断テスト・事前登録規則・計測スクリプトまで。**GB10 の 5 run 実測は
+  イシュー #3190（2026-10-20）で `gb10/` に収録した**。ただし `aggregate.py` が Layer B ログの先頭行融合で
+  exit 1 となったため、RULE.txt 7 により**系列は無効**（判定に使わない）。融合行を分離しただけの正規化コピー
+  `gb10-normalized-reference/` に同じ `aggregate.py` を当てた参考集計を `docs/perf/cuda-gemm-small-launch-cost.md` §7 に載せた。
 - 修正実装（readback 宛先再利用 #2108・Graph capture #2115 等）は対象外。
 
 ## 構成

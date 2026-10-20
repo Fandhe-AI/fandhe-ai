@@ -37,25 +37,41 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 - fresh は推論チェーンへ到達しない（`model.forward`）。効き得るのは created stream 化のみ。reuse は stream 化と capture の合算
 - ADOPT: 専有ゲート成立・全 6 セル中央値 ratio ≤ 1.00・checksum 完全一致・reuse の 1 セル以上で 5/5 run ratio < 1.00・R0〜R2 合格
 
-## 3. 実測記入欄（GB10。未実施）
+## 3. 実測（GB10。イシュー #3190・2026-10-20）
+
+収録: `logs/cuda-infer-chain-graphcapture-2115/gb10/`。補遺規則は `logs/optin-ab-gb10-3190/RULE.txt` 6。
+判定は RULE.txt のとおり機械的に当てはめた（事後に緩めていない）。
 
 | 項目 | 結果 |
 |------|------|
-| 専有ゲート | 未実施 |
-| R0（前提ゲート） | 未実施 |
-| R1（capture 正当性） | 未実施（本機 RTX 3060 では NVRTC ヘッダ不足で実行不能。`logs/…/env_info.txt`） |
-| R2（bit ダンプ diff） | 未実施 |
+| 専有ゲート | 成立（A/B 起動前に enforce モードで通過。第 2 系列〈`2115-gb10-3190b`〉のゲートログは作業ミスで消失〈下記〉。計測が走ったこと自体が通過の証跡〈不成立なら計測せず終了する設計〉）。第 1 系列のゲートは 8 サンプル目で 3 連続 ok |
+| R0（前提ゲート） | 合格（`linear_forward_device_real_device` 5 passed・`graph_capture_real_device` 2 passed） |
+| R1（capture 正当性） | **(a) 合格**（`INFER_CAPTURE_R1: PASS` が 5 行）。**(b) 不合格**: README の事前登録コマンド（`--test-threads` 指定なし）で `predict_device_chain_cuda_bit_identity` が ON で 4 件失敗（`Backend(DeviceContextCaptureInProgress { ordinal: 0 })`。1 passed・4 failed）。bit 不一致ではなく、別スレッドの capture 中に同一デバイスを使った呼び出しがエラーを返したもの |
+| R2（bit ダンプ diff） | 合格（batch 64／1024／4096 の OFF/ON ダンプが行数〈640／10240／40960〉・sha256 とも完全一致） |
+| 診断（判定に使わない） | `--test-threads=1` で R1(b) を再実行すると 5 passed（`diag-r1b-single-thread.log`）。失敗は並列実行下の capture 競合に限られる |
 
 | batch/mode | before 中央値 | after 中央値 | after/before | 5 run 一貫 < 1.00 | checksum |
 |---|---|---|---|---|---|
-| 64/fresh | – | – | – | – | – |
-| 64/reuse | – | – | – | – | – |
-| 1024/fresh | – | – | – | – | – |
-| 1024/reuse | – | – | – | – | – |
-| 4096/fresh | – | – | – | – | – |
-| 4096/reuse | – | – | – | – | – |
+| 64/fresh | 155.1 us | 143.4 us | 0.9243 | はい | 完全一致 |
+| 64/reuse | 99.0 us | 85.2 us | 0.8610 | はい | 完全一致 |
+| 1024/fresh | 298.9 us | 291.8 us | 0.9763 | はい | 完全一致 |
+| 1024/reuse | 182.8 us | 169.4 us | 0.9270 | はい | 完全一致 |
+| 4096/fresh | 804.3 us | 800.7 us | 0.9955 | いいえ（run 1 が 1.0054） | 完全一致 |
+| 4096/reuse | 509.4 us | 497.2 us | 0.9761 | はい | 完全一致 |
 
-**verdict: undetermined**（RULE.txt の undetermined 条件「R0〜R2 の未実行」「GB10 以外での計測」に該当）
+**verdict: undetermined**。ADOPT 条件 1〜4（専有ゲート・全 6 セル中央値 ratio <= 1.00・checksum 完全一致・reuse の 5/5 一貫改善）は成立したが、
+条件 5（R0〜R2 がすべて合格）が R1(b) の失敗で成立しない。REJECT 条件（中央値 ratio > 1.00・checksum 不一致・R1/R2 の **bit 不一致**）には該当しない
+（R1(b) の失敗はエラーであり bit 不一致ではないため、規則の文言どおり REJECT にはしない）。診断の再実行が通ったことを理由に判定を ADOPT へ寄せない。
+
+- 性能は全セルで改善方向（reuse 0.86〜0.98。batch 64 が最大）。fresh は created stream 化（event tracking 無効化）の寄与が小さく出ている。
+- **既定の反転の前に直すべき欠陥**: `FANDHE_AI_CUDA_GRAPH_INFER=1` のとき、別スレッドが capture 中の同一デバイスで推論を呼ぶと
+  `DeviceContextCaptureInProgress` をエラーとして返す。複数スレッド推論（既存の並列テストと同じ使い方）が壊れるため、待機またはフォールバックが要る。
+  これを直したうえでの R1(b) 再判定は、別 label・新規の事前登録で行う（#3205 へ申し送り）。
+- 記録上の注意（作業ミスの開示）: 第 1 系列（`2115-gb10-3190`）は、セッションスクリプトの `CARGO_TARGET_DIR` 設定がスクリプトのバイナリ探索を壊し、
+  全 run が起動できず計測値ゼロで失敗した（`invalid-attempt1-2115-gb10-3190/`）。結果を一度も見ていない状態の環境起因の失敗で、別 label `2115-gb10-3190b` で再実行した。
+  第 2 系列の `compare` 表・JSONL・ゲートログは、成果物の掃除（`git clean`）で作業ツリー上のファイルを消してしまったため、
+  実行時の標準出力ログ（`ab-stdout-2115-gb10-3190b.log`。全 run の JSON 行を含む）から JSON 行を無加工で取り出して再構成し（`*.reconstructed.jsonl`）、
+  同じ `compare_gemm_ab.py` コマンドで表を再生成した。値の改変・補完はしていない。
 
 ## 4. 実装セッションで確認できたこと
 

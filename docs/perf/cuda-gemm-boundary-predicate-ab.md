@@ -173,4 +173,8 @@ cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 
 ## 実測結果
 
-（未計測。実機セッションで本節へ追記する）
+**未実施（undetermined。イシュー #3190・2026-10-20）**。補遺規則（`logs/optin-ab-gb10-3190/RULE.txt` 8）は事前登録済みだが、
+`on-boundary-predicate.patch`（`MMA_F16` の境界述語の事前計算）を作らなかったため、前提ゲート（parity 非後退・レジスタ／local memory）も TFLOPS 計測も行っていない。
+本節の行番号（415-425 等）は古く、`kernels_mma.rs` は現在 `LOAD_A_STAGE_GROUP` 方式へ変わっているため、実装前に境界比較の位置と
+ソース証跡テストの needle の再確認が要る。`MMA_F16` は f16 経路で、f32 の N=256 起動固定費（`cuda-gemm-small-launch-cost.md` §7: 支配項は転送）
+には効かない。推定で採否を書かない。打ち切り条件（補遺 RULE 8 末尾）に該当する。

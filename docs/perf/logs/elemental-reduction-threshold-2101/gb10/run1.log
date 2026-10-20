@@ -1,0 +1,132 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling zerocopy v0.8.56
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.1
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling rayon-core v1.13.0
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling cudarc v0.19.8
+   Compiling either v1.17.0
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/r3190/runner/crates/backend-cpu)
+   Compiling libloading v0.9.0
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling rand_core v0.9.5
+   Compiling rayon v1.12.0
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/r3190/runner/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3190/runner/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/r3190/runner/crates/autodiff)
+   Compiling bench-harness v0.11.0 (<home>/work/r3190/runner/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 19.15s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cpu-6344e2f6f3e87765)
+threads=20
+op=sum_all n=640 arm=seq median_ns=608 threads=20 checksum=0xc25db55b
+op=sum_all n=640 arm=par median_ns=624 threads=20 checksum=0xc25db55b
+op=sum_axis0 n=640 arm=seq median_ns=3008 threads=20 checksum=0x675e8d5f19d99062
+op=sum_axis0 n=640 arm=par median_ns=14576 threads=20 checksum=0x675e8d5f19d99062
+op=sum_axis1 n=640 arm=seq median_ns=3360 threads=20 checksum=0x69c1093bc3ef860e
+op=sum_axis1 n=640 arm=par median_ns=16368 threads=20 checksum=0x69c1093bc3ef860e
+op=max_all n=640 arm=seq median_ns=176 threads=20 checksum=0x407f7edc
+op=max_all n=640 arm=par median_ns=176 threads=20 checksum=0x407f7edc
+op=mean_all n=640 arm=seq median_ns=416 threads=20 checksum=0xbdb15de2
+op=mean_all n=640 arm=par median_ns=432 threads=20 checksum=0xbdb15de2
+op=sum_all n=2560 arm=seq median_ns=1408 threads=20 checksum=0xc2c86f1d
+op=sum_all n=2560 arm=par median_ns=1408 threads=20 checksum=0xc2c86f1d
+op=sum_axis0 n=2560 arm=seq median_ns=5632 threads=20 checksum=0xc9acf254249e9a30
+op=sum_axis0 n=2560 arm=par median_ns=16064 threads=20 checksum=0xc9acf254249e9a30
+op=sum_axis1 n=2560 arm=seq median_ns=6352 threads=20 checksum=0x8e3152856c521129
+op=sum_axis1 n=2560 arm=par median_ns=17424 threads=20 checksum=0x8e3152856c521129
+op=max_all n=2560 arm=seq median_ns=416 threads=20 checksum=0x407fd512
+op=max_all n=2560 arm=par median_ns=432 threads=20 checksum=0x407fd512
+op=mean_all n=2560 arm=seq median_ns=1408 threads=20 checksum=0xbd2058e4
+op=mean_all n=2560 arm=par median_ns=1408 threads=20 checksum=0xbd2058e4
+op=sum_all n=4096 arm=seq median_ns=2192 threads=20 checksum=0xc32d005a
+op=sum_all n=4096 arm=par median_ns=2192 threads=20 checksum=0xc32d005a
+op=sum_axis0 n=4096 arm=seq median_ns=8704 threads=20 checksum=0x266416bd77691c9c
+op=sum_axis0 n=4096 arm=par median_ns=17040 threads=20 checksum=0x266416bd77691c9c
+op=sum_axis1 n=4096 arm=seq median_ns=8640 threads=20 checksum=0x9f89d387e9fa5e53
+op=sum_axis1 n=4096 arm=par median_ns=17072 threads=20 checksum=0x9f89d387e9fa5e53
+op=max_all n=4096 arm=seq median_ns=624 threads=20 checksum=0x407fe87c
+op=max_all n=4096 arm=par median_ns=624 threads=20 checksum=0x407fe87c
+op=mean_all n=4096 arm=seq median_ns=2192 threads=20 checksum=0xbd2d005a
+op=mean_all n=4096 arm=par median_ns=2208 threads=20 checksum=0xbd2d005a
+op=sum_all n=8192 arm=seq median_ns=4208 threads=20 checksum=0xc364a1d1
+op=sum_all n=8192 arm=par median_ns=19824 threads=20 checksum=0xc364a1d1
+op=sum_axis0 n=8192 arm=seq median_ns=17616 threads=20 checksum=0x29b77cc43e9fcc1e
+op=sum_axis0 n=8192 arm=par median_ns=21440 threads=20 checksum=0x29b77cc43e9fcc1e
+op=sum_axis1 n=8192 arm=seq median_ns=15056 threads=20 checksum=0x51e50ff509ab7c02
+op=sum_axis1 n=8192 arm=par median_ns=17296 threads=20 checksum=0x51e50ff509ab7c02
+op=max_all n=8192 arm=seq median_ns=1120 threads=20 checksum=0x407ff698
+op=max_all n=8192 arm=par median_ns=16864 threads=20 checksum=0x407ff698
+op=mean_all n=8192 arm=seq median_ns=4240 threads=20 checksum=0xbce4a1d1
+op=mean_all n=8192 arm=par median_ns=19392 threads=20 checksum=0xbce4a1d1
+op=sum_all n=16384 arm=seq median_ns=8352 threads=20 checksum=0xc3ad5d2f
+op=sum_all n=16384 arm=par median_ns=20576 threads=20 checksum=0xc3ad5d2f
+op=sum_axis0 n=16384 arm=seq median_ns=36416 threads=20 checksum=0x824db81161cf03ca
+op=sum_axis0 n=16384 arm=par median_ns=27456 threads=20 checksum=0x824db81161cf03ca
+op=sum_axis1 n=16384 arm=seq median_ns=28144 threads=20 checksum=0x3921914eb075de89
+op=sum_axis1 n=16384 arm=par median_ns=18160 threads=20 checksum=0x3921914eb075de89
+op=max_all n=16384 arm=seq median_ns=2128 threads=20 checksum=0x407ff698
+op=max_all n=16384 arm=par median_ns=15120 threads=20 checksum=0x407ff698
+op=mean_all n=16384 arm=seq median_ns=8352 threads=20 checksum=0xbcad5d2f
+op=mean_all n=16384 arm=par median_ns=20448 threads=20 checksum=0xbcad5d2f
+op=sum_all n=32768 arm=seq median_ns=16560 threads=20 checksum=0xc3d10d99
+op=sum_all n=32768 arm=par median_ns=15744 threads=20 checksum=0xc3d10d99
+op=sum_axis0 n=32768 arm=seq median_ns=74720 threads=20 checksum=0x2d139f0d7edac753
+op=sum_axis0 n=32768 arm=par median_ns=35664 threads=20 checksum=0x2d139f0d7edac753
+op=sum_axis1 n=32768 arm=seq median_ns=54144 threads=20 checksum=0xaff4c02e34087059
+op=sum_axis1 n=32768 arm=par median_ns=20224 threads=20 checksum=0xaff4c02e34087059
+op=max_all n=32768 arm=seq median_ns=4144 threads=20 checksum=0x407ff698
+op=max_all n=32768 arm=par median_ns=12208 threads=20 checksum=0x407ff698
+op=mean_all n=32768 arm=seq median_ns=16512 threads=20 checksum=0xbc510d99
+op=mean_all n=32768 arm=par median_ns=16224 threads=20 checksum=0xbc510d99
+op=sum_all n=65536 arm=seq median_ns=32992 threads=20 checksum=0xc3c451f8
+op=sum_all n=65536 arm=par median_ns=13728 threads=20 checksum=0xc3c451f8
+op=sum_axis0 n=65536 arm=seq median_ns=154288 threads=20 checksum=0x5beee1ceaeb86bac
+op=sum_axis0 n=65536 arm=par median_ns=47072 threads=20 checksum=0x5beee1ceaeb86bac
+op=sum_axis1 n=65536 arm=seq median_ns=105696 threads=20 checksum=0x70501406bef11582
+op=sum_axis1 n=65536 arm=par median_ns=24960 threads=20 checksum=0x70501406bef11582
+op=max_all n=65536 arm=seq median_ns=8176 threads=20 checksum=0x407ffd02
+op=max_all n=65536 arm=par median_ns=11904 threads=20 checksum=0x407ffd02
+op=mean_all n=65536 arm=seq median_ns=32960 threads=20 checksum=0xbbc451f8
+op=mean_all n=65536 arm=par median_ns=13520 threads=20 checksum=0xbbc451f8
+op=sum_all n=131072 arm=seq median_ns=65872 threads=20 checksum=0x43b7a363
+op=sum_all n=131072 arm=par median_ns=17824 threads=20 checksum=0x43b7a363
+op=sum_axis0 n=131072 arm=seq median_ns=310768 threads=20 checksum=0x9ad592c6e205f24d
+op=sum_axis0 n=131072 arm=par median_ns=63888 threads=20 checksum=0x9ad592c6e205f24d
+op=sum_axis1 n=131072 arm=seq median_ns=207311 threads=20 checksum=0xb85f6a78ae759662
+op=sum_axis1 n=131072 arm=par median_ns=34240 threads=20 checksum=0xb85f6a78ae759662
+op=max_all n=131072 arm=seq median_ns=16224 threads=20 checksum=0x407fff48
+op=max_all n=131072 arm=par median_ns=14112 threads=20 checksum=0x407fff48
+op=mean_all n=131072 arm=seq median_ns=65152 threads=20 checksum=0x3b37a363
+op=mean_all n=131072 arm=par median_ns=17584 threads=20 checksum=0x3b37a363
+op=sum_all n=262144 arm=seq median_ns=129952 threads=20 checksum=0xc28fa98b
+op=sum_all n=262144 arm=par median_ns=23808 threads=20 checksum=0xc28fa98b
+op=sum_axis0 n=262144 arm=seq median_ns=644895 threads=20 checksum=0x966ddde34c486bfc
+op=sum_axis0 n=262144 arm=par median_ns=92032 threads=20 checksum=0x966ddde34c486bfc
+op=sum_axis1 n=262144 arm=seq median_ns=410271 threads=20 checksum=0xb9085e9de5f0d513
+op=sum_axis1 n=262144 arm=par median_ns=55072 threads=20 checksum=0xb9085e9de5f0d513
+op=max_all n=262144 arm=seq median_ns=32400 threads=20 checksum=0x407fff48
+op=max_all n=262144 arm=par median_ns=17984 threads=20 checksum=0x407fff48
+op=mean_all n=262144 arm=seq median_ns=130048 threads=20 checksum=0xb98fa98b
+op=mean_all n=262144 arm=par median_ns=23600 threads=20 checksum=0xb98fa98b
