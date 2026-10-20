@@ -239,7 +239,7 @@ def checksum_mismatch(d, label):
     return any(len(vs) > 1 for vs in seen.values())
 
 
-GATE_ROUND = re.compile(r"^round([0-9]+) gate=(\S+) gate_ok=(\S+)$")
+GATE_ROUND = re.compile(r"^round([0-9]+) (gate=\S+(?: [A-Za-z_0-9]+=\S+)*)$")
 
 
 def gate_series(d):
@@ -251,7 +251,9 @@ def gate_series(d):
     for ln in read_lines(paths[0]):
         mt = GATE_ROUND.match(ln)
         if mt:
-            seen.setdefault(int(mt.group(1)), []).append(mt.group(3))
+            # run_ab_sme_macmini_cpu.sh は gate_ok の後ろに threshold・load1・waited_s・at を続けて出力する。
+            # 後続フィールドは許容し、gate_ok はキー完全一致の値だけを見る（欠落は "" で不合格）
+            seen.setdefault(int(mt.group(1)), []).append(kv(mt.group(2)).get("gate_ok", ""))
     # round1〜ROUNDS が各 1 件ずつ・gate_ok がフィールド完全一致で 1 のものだけを正式系列とする
     return sorted(seen) == list(range(1, ROUNDS + 1)) and all(v == ["1"] for v in seen.values())
 
@@ -465,7 +467,8 @@ def _fixture(d, after_scale=0.9, ck_after=1.5, sme_scale=1.5, probe_true=True, g
     with open(os.path.join(d, "r1r2", "load_gate-3176-sme-cpu-L.log"), "w") as f:
         f.write("threshold=3.0 rule_threshold=3.0 series=official\n")
         for i in range(1, ROUNDS + 1):
-            f.write("round%d gate=%s gate_ok=%d\n" % (i, "pass" if gate_ok else "timeout", 1 if gate_ok else 0))
+            # run_ab_sme_macmini_cpu.sh の実出力形式（gate_ok の後ろに threshold・load1・waited_s・at が続く）
+            f.write("round%d gate=%s gate_ok=%d threshold=3.0 load1=0.5 waited_s=0 at=2026-10-21T00:00:00Z\n" % (i, "pass" if gate_ok else "timeout", 1 if gate_ok else 0))
 
 
 def _drop_line(path, prefix):
@@ -545,6 +548,17 @@ def self_test():
             for _ in range(ROUNDS):
                 f.write("round1 gate=pass gate_ok=1\n")
         assert "undetermined" in render(d, "L").split("\n")[2]
+    with tempfile.TemporaryDirectory() as d:  # 実形式の行（後続フィールド付き）なら正式系列になり、1 round 欠落・gate_ok 欠落は不可
+        _fixture(d)
+        assert gate_series(d), "実形式の 5/5 round が正式系列と判定されない"
+        gp = os.path.join(d, "r1r2", "load_gate-3176-sme-cpu-L.log")
+        good = [ln for ln in open(gp).read().splitlines() if ln.startswith("round")]
+        with open(gp, "w") as f:
+            f.write("\n".join(good[:-1]) + "\n")
+        assert not gate_series(d)
+        with open(gp, "w") as f:
+            f.write("\n".join(good[:-1] + ["round5 gate=pass threshold=3.0 load1=0.5"]) + "\n")
+        assert not gate_series(d)
     with tempfile.TemporaryDirectory() as d:  # gate_ok=10 のような部分一致は不可
         _fixture(d)
         with open(os.path.join(d, "r1r2", "load_gate-3176-sme-cpu-L.log"), "w") as f:
