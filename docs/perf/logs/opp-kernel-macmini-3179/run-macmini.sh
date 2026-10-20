@@ -90,7 +90,10 @@ if [ -n "${BENCH_FANDHE:-}" ]; then
   for n in 256 512 1024 2048 4096; do
     for r in 1 2 3 4 5; do
       wait_gate "rust/n${n}/r${r}"
-      "${BENCH_FANDHE}" --task gemm --device cpu --mode reuse --phases --size "${n}" > "${OUT}/rust/n${n}_r${r}.jsonl"
+      # --out を明示しないと bench-common の Cli が既定の results/raw/results.jsonl へ追記し、
+      # 作業ディレクトリの既存結果へ診断行が混入する（RULE 項 11）。専用パスへ出し stdout は別ログへ。
+      "${BENCH_FANDHE}" --task gemm --device cpu --mode reuse --phases --size "${n}" \
+        --out "${OUT}/rust/n${n}_r${r}.jsonl" > "${OUT}/rust/n${n}_r${r}.stdout.log"
     done
   done
 fi
