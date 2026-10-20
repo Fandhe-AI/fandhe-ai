@@ -1,0 +1,65 @@
+イシュー #3182 事前登録規則（計測前に固定。計測後に緩めない）
+固定日時: 2026-10-20T04:20:00Z（このファイルを含む計測前コミットの作成より前。結果が出る前）
+================================================================
+目的: Mac mini（Apple M4・GPU 10 コア・16 GB）の Metal GEMM reuse 計測窓の内訳（upload・commit_wait・
+kernel_gpu・readback・host_copy・checksum）を測り、candle との差のうちカーネル由来の割合と、fandhe-ai
+固有の非カーネルコスト（upload・host_copy）・全フレームワーク共通のコスト（checksum）を分ける。
+後続 #3181（純カーネル差）・#3211（目標設定）・#3265（窓側の是正）への入力。診断のみ（record-only）。
+変えないもの: tolerance・baseline・判定規則・計測窓の構成・相手側ベンチ・scripts/bench/framework-compare/**・
+ライブラリの src/ と既定値・Cargo.toml／Cargo.lock・framework-compare の依存ピンと allowlist。
+本 PR の新規物はテスト 2 本（crates/backend-metal/src/gemm_reuse_phase_diag_tests.rs。#[ignore]）と
+ログ・文書のみ。
+
+1. 腕（計測対象ツリー）。全て .rev-stamp（フル SHA）で同定し、ツリー指紋（find crates
+   scripts/bench/framework-compare -type f ! -path '*/target*' を sort した sha256 一覧の sha256）を
+   送信側と Mac mini 側で突き合わせて記録する。
+   - 腕 A（Layer A）: 計測前コミットを git archive したツリーの scripts/bench/framework-compare。
+     bench-fandhe は registry fandhe-ai =0.11.0、bench-candle は candle-core =0.11.0 のまま。
+     tree.txt が `fandhe-ai v0.11.0` の 1 行でなければ中止（fail-closed）。
+   - 腕 B（Layer B）: 同ツリーの main workspace（backend-metal の診断テスト。HEAD ソースの path 依存）。
+   - 乖離の明記: 腕 A（0.11.0）と腕 B（HEAD）はソース版が違う。A の列と B の列を足して 1 つの窓として
+     扱わない。A の matmul と B の Σ（host_copy 除く）の残差は「未説明」として残し吸収させない。
+2. 区間と出典（A／B）。
+   - B から取る: upload_a・upload_b・alloc_c・encode・commit_wait・kernel_gpu・
+     commit_wait_minus_kernel_gpu・readback・host_copy（突合用）。
+   - A から取る: matmul・to_tensor・host_copy（正）・checksum・iter_total。
+   - AC の 6 区間: upload（B の a+b）・commit_wait（B）・kernel_gpu（B）・readback（B）・
+     host_copy（A）・checksum（A）。
+3. サイズ: N=256／512／1024／2048／4096（Metal）。
+4. 1 run の固定順（5 run＝5 独立プロセス群。差し替え・追加起動をしない。既存 run ファイルがあれば停止）:
+   (1) 負荷ゲート (2) bench-fandhe gemm metal reuse --phases（5 サイズ） (3) bench-fandhe gemm reuse
+   （phases なし。窓合計） (4) bench-fandhe gemm fresh（窓合計） (5) bench-candle gemm metal（fresh）
+   (6) bench-candle gemm-transfer-split metal (7) Layer B を 1 プロセスで:
+   gemm_window_route_precheck・gemm_window_phase_diag_small_sizes・gemm_reuse_phase_diag_production_batch。
+   乖離: `gemm --mode fresh --phases` は bench-fandhe が MEASURE_ERROR で拒否する仕様（ハーネスは変えない）
+   ため、fresh は phases なしの窓合計のみを取り、区間内訳は reuse の --phases と Layer B で取る。
+5. 負荷ゲート: 各 run の開始前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ。読めなければ unavailable、
+   下がらなければ timeout を記録。5/5 gate=pass のみ正式系列。それ以外は参考扱いと結論に明記する。
+6. 運用: ビルドは計測前に全て終える。計測中に他のビルド・ベンチを並走させない。ログは上書きしない。
+   orchestrate_macmini.sh は /bin/sh 互換・変数は ${VAR}・外部入力を eval しない。
+7. 事前登録の式（aggregate.py がそのまま出力する。事後に変えない）:
+   (F1) 各区間 = 5 run の「run 内中央値」の中央値（列ごとに独立）。min–max 併記。Σ(B) は run 合計の中央値
+        （Σ = upload_a+upload_b+alloc_c+encode+commit_wait+readback。host_copy は除く）。
+   (F2) checksum の ns／要素 = A の checksum 区間中央値 / N^2。
+   (F3) 割合表（分母は A の iter_total。版の異なる A と B を同じ分母で割る点を注記）:
+        kernel_gpu(B)・upload(B: a+b)・host_copy(A)・checksum(A)・to_tensor(A)・
+        その他(B: alloc_c+encode+(commit_wait−kernel_gpu)+readback)・未説明＝iter_total−上記合計。
+   (F4) 窓合計: fresh と reuse（phases なし）の中央値、reuse−fresh、出力バイト数あたりの ms/MiB。
+        ページフォルト仮説等は推測のまま断定しない。
+   (F5) G = fandhe reuse 窓合計（phases なし）− candle gemm（fresh）窓合計（同一セッションの中央値）。
+   (F6) カーネル由来の割合: (a) (kernel_gpu(B) − candle gemm_transfer_excl)/G、
+        (b) (encode+commit_wait(B) − candle gemm_transfer_excl)/G。transfer_excl は壁時計（matmul+
+        synchronize）で kernel_gpu は GPU タイムスタンプのため (a) はカーネル差を小さく見積もりやすい。
+        負値や 1 超は丸めずフラグ付きで出す。G<=0 は「算出不能」。M4 Max・0.6.0 の値は別機体・別版として
+        併記のみで算術に混ぜない。
+   (F7) fandhe 固有で削れる分 = upload(B)+host_copy(A)（G に占める割合も出す）。共通の床 = checksum。
+8. ドリフト検査: 同一セッションの fandhe reuse と candle fresh（N=4096）を系列 B（122.82 ms／71.19 ms。
+   framework-compare-0.11.0-macmini-remeasure）と比べ、乖離 10% 超を記録（判定は変えない）。
+9. 経路の前提: ROUTE_ACTUAL が SplitK の N、または DIAG_BITEQ equal=false の N は「Layer B 非代表」として
+   F3・F6 の B 由来の値に注記する。assert や期待値は緩めない。
+10. AC4 照合: 同一 run・同一 N で A（phases あり）と window-reuse（phases なし）の checksum が一致すること。
+    一致は bit 同一の証拠ではない。
+11. 判定は aggregate.py の機械出力をそのまま採用。欠損・非数値・run／サイズの欠けは 0 埋めせず拒否する。
+12. ホスト名・ユーザー名・$HOME・絶対パスはコミット物に書かない（<home>／<WORK> へマスク）。
+13. Mac mini に到達できない／計測が成立しない場合は数値を埋めず「未実測（undetermined）」と記録し、
+    推定値を実測と書かない。
