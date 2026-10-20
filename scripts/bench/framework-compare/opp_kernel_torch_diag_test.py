@@ -88,6 +88,86 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 D.aggregate_rows(D.load_runs(t), REF, match)
 
+    def test_series_b_absent_cpu_4096_recorded_not_raised(self):
+        with tempfile.TemporaryDirectory() as t:
+            write_runs(t, full(sid="sq4096", m=4096, n=4096, k=4096))
+            out = D.aggregate_rows(D.load_runs(t), REF, match)
+            win = [e for e in out if e["phase"] == "window"][0]
+            self.assertTrue(win["series_b_absent"])
+            self.assertNotIn("ratio_to_series_b", win)
+            self.assertIn("系列B不在", D.render_md(out))
+
+    def test_series_b_absent_other_fails_closed(self):
+        with tempfile.TemporaryDirectory() as t:
+            write_runs(t, full(sid="sq512", m=512, n=512, k=512))
+            with self.assertRaises(ValueError):
+                D.aggregate_rows(D.load_runs(t), REF, match)
+
+    def test_checksum_checked_for_non_base_arm(self):
+        with tempfile.TemporaryDirectory() as t:
+            write_runs(t, full() + full(arm="threads1", ck=99.0))
+            with self.assertRaises(ValueError):
+                D.aggregate_rows(D.load_runs(t), REF, match)
+
+    def test_checksum_checked_for_non_window_phase(self):
+        with tempfile.TemporaryDirectory() as t:
+            rows = full()
+            for r in rows:
+                if r["phase"] == "readout":
+                    r["checksum"] = 99.0
+            write_runs(t, rows)
+            with self.assertRaises(ValueError):
+                D.aggregate_rows(D.load_runs(t), REF, match)
+
+    def _complete_rows(self, drop=lambda g: False):
+        rows = []
+        for (arm, dev, sid, ph) in sorted(D.expected_groups()):
+            if drop((arm, dev, sid, ph)):
+                continue
+            veclib = ""
+            a = arm
+            if arm.startswith("base+vl"):
+                a, veclib = "base", arm[len("base+vl"):]
+            n = int(sid[2:]) if sid.startswith("sq") else 64
+            for run in range(1, 6):
+                r = row(run=run, phase=ph, sid=sid, arm=a, dev=dev, m=n, n=n, k=n)
+                r["veclib_max_threads"] = veclib
+                rows.append(r)
+        return rows
+
+    def test_check_complete_ok(self):
+        D.check_complete(self._complete_rows())
+
+    def test_check_complete_missing_phase_everywhere(self):
+        rows = self._complete_rows(lambda g: g[3] == "checksum" and g[0] == "base" and g[1] == "cpu")
+        with self.assertRaises(ValueError):
+            D.check_complete(rows)
+
+    def test_check_complete_missing_arm_file(self):
+        with self.assertRaises(ValueError):
+            D.check_complete(self._complete_rows(lambda g: g[0] == "threads4"))
+
+    def test_numpy_unavailable_only_when_declared(self):
+        rows = self._complete_rows(lambda g: g[0] == "numpy")
+        with self.assertRaises(ValueError):
+            D.check_complete(rows)
+        D.check_complete(rows, numpy_unavailable=True)
+
+    def test_load_numpy_unavailable(self):
+        with tempfile.TemporaryDirectory() as t:
+            for k in range(1, 6):
+                d = Path(t) / f"run{k}"
+                d.mkdir()
+                (d / "unavailable.txt").write_text("unavailable numpy-cpu-vlunset\n")
+            self.assertTrue(D.load_numpy_unavailable(t))
+        with tempfile.TemporaryDirectory() as t:
+            self.assertFalse(D.load_numpy_unavailable(t))
+            d = Path(t) / "run1"
+            d.mkdir()
+            (d / "unavailable.txt").write_text("unavailable numpy-cpu-vlunset\n")
+            with self.assertRaises(ValueError):
+                D.load_numpy_unavailable(t)
+
     def test_bench_py_sha_mismatch_stops(self):
         with tempfile.TemporaryDirectory() as t:
             p = Path(t) / "b.py"

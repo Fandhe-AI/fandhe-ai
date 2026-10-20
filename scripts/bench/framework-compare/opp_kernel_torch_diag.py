@@ -221,7 +221,10 @@ def cmd_measure(args):
             secs.append(time.perf_counter() - t)
         meas["checksum"] = (bp.quantile(secs, 0.5), bp.quantile(secs, 0.25), bp.quantile(secs, 0.75))
         meas["checksum_hot"] = sample(lambda: bp.checksum(host), bp)
-        meas["window"] = sample(lambda: bp.checksum(to_host(mm())), bp, sync)
+        # window は bench_py.py の計測区間と同じにそろえる（追加の synchronize を挟まない）。
+        # MPS の `.cpu().numpy()` が暗黙に同期するため、計時内に余分な post-wait を入れると
+        # ratio_to_series_b が系統的に過大になる（PR #3488 Bugbot 指摘）。
+        meas["window"] = sample(lambda: bp.checksum(to_host(mm())), bp)
         cks = bp.checksum(host)
         for ph, (med, q1, q3) in meas.items():
             rows.append(validate_row({
@@ -258,6 +261,57 @@ def load_runs(runs_dir, num_runs=NUM_RUNS):
     return rows
 
 
+# 系列 B（RULE 項 12 の results-macmini-py-0.11.0-median5.jsonl）に基準行が無いことを許す (device, size)。
+# PyTorch CPU GEMM は 256〜2048 のみで 4096 は metal だけ。ここに無い欠落は fail-closed。
+SERIES_B_ABSENT_OK = frozenset({("cpu", 4096)})
+NUMPY_TAG = "numpy-cpu-vlunset"
+
+
+def expected_groups(numpy_unavailable=False):
+    """RULE 項 4・5・6・7・9 の計測集合から必須の (arm_key, device, shape_id, phase) 集合を導く。"""
+    all_shapes = [s[0] for s in shapes_for("all")]
+    axis = [f"sq{n}" for n in THREAD_AXIS_SIZES]
+    phases = [p for p in PHASES]
+    want = set()
+
+    def add(arm, dev, sids, phs):
+        for sid in sids:
+            for ph in phs:
+                want.add((arm, dev, sid, ph))
+
+    add("base", "cpu", all_shapes, phases)
+    add("base", "mps", all_shapes, phases)
+    for arm in ("threads1", "threads4", "threads10", "base+vl1", "base+vl4"):
+        add(arm, "cpu", axis, phases)
+    if not numpy_unavailable:
+        add("numpy", "cpu", axis, [p for p in phases if p != "mm_pure_batch10"])
+    return want
+
+
+def load_numpy_unavailable(runs_dir, num_runs=NUM_RUNS):
+    """全 run の unavailable.txt が numpy 腕を明示記録しているときだけ True（推測で除外しない）。"""
+    hits = 0
+    for k in range(1, num_runs + 1):
+        f = Path(runs_dir) / f"run{k}" / "unavailable.txt"
+        if f.is_file() and NUMPY_TAG in f.read_text().split():
+            hits += 1
+    if hits not in (0, num_runs):
+        raise ValueError(f"numpy 腕の unavailable 記録が一部の run だけ: {hits}/{num_runs}")
+    return hits == num_runs
+
+
+def check_complete(rows, numpy_unavailable=False):
+    """必須グループの欠落・想定外グループを検出する（phase 全体・腕ファイル丸ごとの欠落を含む）。"""
+    have = {(arm_key(r), r["device"], r["shape_id"], r["phase"]) for r in rows}
+    want = expected_groups(numpy_unavailable)
+    missing = sorted(want - have)
+    extra = sorted(have - want)
+    if missing:
+        raise ValueError(f"必須グループが欠落: {len(missing)} 件 例={missing[:3]}")
+    if extra:
+        raise ValueError(f"想定外のグループ: {len(extra)} 件 例={extra[:3]}")
+
+
 def aggregate_rows(rows, reference, checksums_match):
     """5 run の中央値・Σ区間/window の検算・系列 B との比・checksum 一致を返す（不一致は例外）。
 
@@ -290,16 +344,27 @@ def aggregate_rows(rows, reference, checksums_match):
             if sid.startswith("sq") and arm == "base":  # arm_key は VECLIB 指定腕を含まない
                 ref = reference.get((dev, int(sid[2:])))
                 if ref is None:
-                    raise ValueError(f"系列 B に基準行が無い: {dev} {sid}")
-                e["ratio_to_series_b"] = v["median_s"] / ref["median_s"]
-                for r in rows:
-                    if (arm_key(r), r["device"], r["shape_id"]) == (arm, dev, sid) and not checksums_match(
-                        r["checksum"], ref["checksum"]
-                    ):
-                        raise ValueError(
-                            f"checksum が系列 B と不一致: {dev} {sid} {r['checksum']} vs {ref['checksum']}"
-                        )
+                    if (dev, int(sid[2:])) not in SERIES_B_ABSENT_OK:
+                        raise ValueError(f"系列 B に基準行が無い: {dev} {sid}")
+                    e["series_b_absent"] = True  # 比は出さない（欠落を明示。0 や 1 で埋めない）
+                else:
+                    e["ratio_to_series_b"] = v["median_s"] / ref["median_s"]
         out.append(e)
+    # RULE 項 12: 正方 N の checksum は全腕・全 phase の行で系列 B と照合する（ratio 表示とは独立）。
+    for r in rows:
+        if not r["shape_id"].startswith("sq"):
+            continue
+        key = (r["device"], int(r["shape_id"][2:]))
+        ref = reference.get(key)
+        if ref is None:
+            if key not in SERIES_B_ABSENT_OK:
+                raise ValueError(f"系列 B に基準行が無い: {key[0]} {r['shape_id']}")
+            continue
+        if not checksums_match(r["checksum"], ref["checksum"]):
+            raise ValueError(
+                f"checksum が系列 B と不一致: {arm_key(r)} {key[0]} {r['shape_id']} "
+                f"{r['checksum']} vs {ref['checksum']}"
+            )
     return out
 
 
@@ -316,7 +381,7 @@ def render_md(entries):
         lines.append(
             f"| {e['arm']} | {e['device']} | {e['shape_id']} | {e['phase']} | {e['median_s']:.4e} | "
             f"{f(e.get('ns_per_element'), '.3f')} | {f(e.get('gflops'), '.1f')} | "
-            f"{f(e.get('sum_over_window'), '.3f')} | {f(e.get('ratio_to_series_b'), '.3f')} | {runs} |"
+            f"{f(e.get('sum_over_window'), '.3f')} | {'系列B不在' if e.get('series_b_absent') else f(e.get('ratio_to_series_b'), '.3f')} | {runs} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -344,6 +409,7 @@ def load_checksums_match():
 
 def cmd_aggregate(args):
     rows = load_runs(args.runs_dir, args.runs)
+    check_complete(rows, load_numpy_unavailable(args.runs_dir, args.runs))
     entries = aggregate_rows(rows, load_reference(args.reference_py_jsonl), load_checksums_match())
     for p in (args.out_json, args.out_md):
         if Path(p).exists():
