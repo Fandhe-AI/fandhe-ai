@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/mnist_scale_train_reuse_bench.rs (<WORK>/target-3180/release/deps/mnist_scale_train_reuse_bench-f22a50518fbb4a5f)
+
+running 1 test
+test mnist_scale_train_reuse_metal_backward_dinput_phase ... [mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only median=1.108750ms q1=1.108625ms q3=1.111500ms (n=5) encode_deltas=[5, 5, 5, 5, 5] command_buffer_deltas=[3, 3, 3, 3, 3] wait_deltas=[3, 3, 3, 3, 3] — 事前登録仮説（#1562 codex-review 是正後・#1563 で更新）: encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + d_input 2 回 + d_weight 2 回。不変）・command_buffer_delta=3（cb 生成は MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。#1562 時点の 4 から 1 減る）・wait_delta=3（MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。窓終了時点で open バッチが残らないため全て本窓内で wait 済み）。record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.4）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.08s
+

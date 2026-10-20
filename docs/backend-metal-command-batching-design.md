@@ -1293,6 +1293,11 @@ env_info（内部ホスト名は含めない）: 未実測
 実測は `docs/perf/logs/metal-mse-backward-1691/orchestrate.sh` へ記録
 （README・事前登録判定規則を参照）。本 PR 時点では未実測。
 
+**#3180 追記（Mac mini 実測。2026-10-20）**: HEAD ソースの `mnist_scale_train_reuse_metal_batch_counters` は
+steady-state 1 step で encode／command_buffer／wait = **11／7／7**（机上導出と一致）。backward 窓
+（`mnist_scale_train_reuse_metal_backward_dinput_phase`）は 5 試行とも **5／3／3**（一致）。出典:
+`docs/perf/logs/train-infer-phases-macmini-3180/counters/`・`docs/perf/train-step-phase-breakdown.md` §18.3。
+
 ### 7.6 #2113: train forward の encode-only 合流（opt-in・既定 OFF）
 
 #### 7.6.1 対象と変更点
@@ -1304,7 +1309,7 @@ env_info（内部ホスト名は含めない）: 未実測
 
 #### 7.6.2 カウンタ見積り（机上導出・Mac 実機未確認）
 
-- HEAD の steady-state 1 step は 11/7/7（#1690 適用後。`mnist_scale_train_reuse_metal_batch_counters`）。ON で L1 gemm と relu が 1 同期へ合流し **11/6/6**（encode 不変・cb −1・wait −1）。backward 区間のみの窓（5/3/3）は不変。
+- HEAD の steady-state 1 step は 11/7/7（#1690 適用後。`mnist_scale_train_reuse_metal_batch_counters`。Mac mini 実機で 11/7/7 を確認済み〈#3180・`docs/perf/train-step-phase-breakdown.md` §18.3〉）。ON で L1 gemm と relu が 1 同期へ合流し **11/6/6**（encode 不変・cb −1・wait −1）。backward 区間のみの窓（5/3/3）は不変。
 - `device_update` フェーズ（3.4 µs）は本変更の対象外で record_only。効果は `forward_resident` フェーズに現れる見込み。
 - 融合 epilogue（`act_relu=true` の結線）は encode-only 化ではなくカーネル融合（#1044 の Metal 未実施分）で効果の帰属が混ざるため採らない（10/6/6 見込み。別途検討）。
 

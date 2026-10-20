@@ -453,3 +453,23 @@ checksum（0.4%・0.6 µs）。フェーズ和／合計: 99.9%（差分は各フ
   のみと事前宣言）
 - §7（v0.6.0 当時の GB10 記入欄）は未実測のまま残す。本節は v0.9.0
   の実測であり §4／§5 の v0.6.0 Mac 実測と同一条件の比較ではない
+
+## 11. v0.11.0 Mac mini 再計測（Apple M4・2026-10-20。イシュー #3180）
+
+条件・腕・限界は `docs/perf/train-step-phase-breakdown.md` §18.1・§18.6 と同じ（registry `fandhe-ai =0.11.0`・5 run・load1 < 3.0 ゲート 5/5 通過。
+生ログは `docs/perf/logs/train-infer-phases-macmini-3180/`）。診断のみ。
+
+### 11.1 infer の区間内訳（Mac mini・5 run 中央値。µs）と M4 Max 0.9.0（§10.2。版違い）との差
+
+| セル | 区間 | Mini 0.11.0 | M4 Max 0.9.0 |
+|---|---|---:|---:|
+| cpu fresh | predict／iter_total | 201.6／202.2 | 184.9／185.5 |
+| cpu reuse | predict_resident／iter_total | 194.0／194.5 | 175.3／176.0 |
+| metal fresh | forward＋to_tensor／iter_total | 570.9＋183.7／754.9 | 431.6＋110.2／538.2 |
+| metal reuse | predict_resident／iter_total | 330.5／331.0 | 365.2／366.1 |
+
+- infer は Metal reuse だけ Mini のほうが M4 Max（0.9.0）より速い（331.0 対 366.1 µs。版違いで、原因は切り分けていない）。fresh は Mini が遅い（754.9 対 538.2 µs）。
+- Metal reuse は `predict_resident` 単独区間で、cpu reuse（194.5 µs）の約 1.7 倍。train より区間が粗く、同期回数は bench-fandhe から読めない。
+- 実カーネル同期の固定費（`infer_fixed_cost_diag`・単発）: wall 400.3 µs・GPU busy 168.3 µs・`host_fixed` 208.4 µs。空 dispatch は 14.5 µs（train doc §18.4）。
+  `phases` の `iter_total` は通常ベンチの窓と一致しない（系列 B の infer Metal reuse は 388.4 µs・cpu reuse は 215.4 µs）。
+- `predict_resident`／`forward` 内部の内訳は registry 版では取得不能。
