@@ -51,6 +51,7 @@ def load_run(path):
                     key = (rec["arm"], rec["n"], rec["phase"])
                     rec["median_s"] = float(rec["median_s"])
                     ns = rec["n_samples"]
+                    mf = rec["minflt_enabled"]
                 except (ValueError, KeyError, TypeError) as e:
                     raise AggError(f"{path}:{i}: 不正な行 ({e})")
                 if key[0] not in EXPECTED or key[2] not in EXPECTED[key[0]] or key[1] not in SIZES:
@@ -59,6 +60,8 @@ def load_run(path):
                     raise AggError(f"{path}:{i}: median_s が有限の正値でない {key}")
                 if isinstance(ns, bool) or ns != EXPECTED_N:
                     raise AggError(f"{path}:{i}: n_samples={ns!r} が {EXPECTED_N} でない {key}")
+                if not isinstance(mf, bool):
+                    raise AggError(f"{path}:{i}: minflt_enabled が bool でない {key}")
                 if key in cells:
                     raise AggError(f"{path}:{i}: セル重複 {key}")
                 if key[2] == "iter_total" and not isinstance(rec.get("checksum_bits"), str):
@@ -75,7 +78,7 @@ def load_run(path):
 
 
 def load_gate(d):
-    """未通過 run 名の一覧を返す（欠落・不正は fail-closed）。"""
+    """(未通過 run 名の一覧, record_only の run 名の一覧) を返す（欠落・不正は fail-closed）。"""
     path = os.path.join(d, GATE_FILE)
     try:
         with open(path, encoding="utf-8") as f:
@@ -93,7 +96,8 @@ def load_gate(d):
         seen[parts[0]] = status
     if set(seen) != {f"run{n}" for n in range(1, RUNS + 1)}:
         raise AggError(f"{path}: run1..run{RUNS} の全行が必要 ({sorted(seen)})")
-    return sorted(r for r, st in seen.items() if st == "unpassed")
+    return (sorted(r for r, st in seen.items() if st == "unpassed"),
+            sorted(r for r, st in seen.items() if st == "record_only"))
 
 
 def check_checksums(runs):
@@ -135,7 +139,18 @@ def us(x):
 
 def aggregate(d):
     runs = [load_run(os.path.join(d, f"run{i}.jsonl")) for i in range(1, RUNS + 1)]
-    unpassed = load_gate(d)
+    unpassed, record_only = load_gate(d)
+    # record_only（M4 Max 疎通確認）は RULE.txt で判定対象外。全 run 一致のときだけ数値記録モード、
+    # 混在は系列の性質が不明なため fail-closed。
+    if record_only and len(record_only) != RUNS:
+        raise AggError(f"record_only と他状態の run が混在 ({record_only})")
+    # GEMM_REUSE_MINFLT=1 の補助系列は判定外（RULE.txt「ページ確保の機構」）。正式系列は全レコード OFF。
+    flags = {rec["minflt_enabled"] for r in runs for rec in r.values()}
+    if len(flags) > 1:
+        raise AggError("minflt_enabled が true/false 混在")
+    minflt_series = flags == {True}
+    # 補助系列は正式判定へ入れず、記録専用処理（数値表のみ）へ分離する
+    judge = not (record_only or minflt_series)
     check_checksums(runs)
     out = []
     w = out.append
@@ -144,9 +159,13 @@ def aggregate(d):
     if unpassed:
         w(f"**注意: 負荷ゲート未通過の run あり（{', '.join(unpassed)}）。系列は参考扱い。**")
         w("")
+    if not judge:
+        why = "GEMM_REUSE_MINFLT=1 の補助系列" if minflt_series else "record_only（疎通確認）系列"
+        w(f"**{why}: 数値記録のみ。再現判定・帰属・因果・arena 判定は行わない（RULE.txt: 判定対象外）。**")
+        w("")
     w("checksum: 全 n・全腕・全 run で iter_total の checksum_bits が一致（hard 検査通過）。")
     w("")
-    w("## 判定表（5 run 中央値。単位 us）")
+    w("## 判定表（5 run 中央値。単位 us）" if judge else "## 記録表（判定なし。5 run 中央値。単位 us）")
     w("")
     for n in SIZES:
         f_tot = med(runs, "fresh", n, "iter_total")
@@ -155,6 +174,14 @@ def aggregate(d):
         w(f"### N={n}")
         w("")
         w(f"- fresh.iter_total = {us(f_tot)}, reuse.iter_total = {us(r_tot)}, ratio = {ratio:.3f}")
+        # 残差 = iter_total - sum(区間)（RULE.txt）。区間外の時間が総時間差を説明していないか確認する
+        res_f = f_tot - sum(med(runs, "fresh", n, ph) for ph in FRESH_PHASES[:-1])
+        res_r = r_tot - sum(med(runs, "reuse", n, ph) for ph in REUSE_PHASES[:-1])
+        w(f"- 残差 (iter_total - sum(区間)): fresh = {us(res_f)}, reuse = {us(res_r)}, "
+          f"reuse - fresh = {us(res_r - res_f)}（総時間差 {us(r_tot - f_tot)}）")
+        if not judge:
+            w("")
+            continue
         if ratio <= 1.0:
             w("- 判定: 非再現（ratio <= 1.00）。帰属は行わない。")
             w("")
@@ -219,11 +246,11 @@ def aggregate(d):
 
 
 def _rec(arm, n, ph, med_s, bits="3ff0000000000000", ns=EXPECTED_N, arena=None):
-    return {"arm": arm, "n": n, "phase": ph, "median_s": med_s, "n_samples": ns,
+    return {"arm": arm, "n": n, "phase": ph, "median_s": med_s, "n_samples": ns, "minflt_enabled": False,
             "checksum_bits": bits if ph == "iter_total" else None, "arena_stats": arena}
 
 
-def _write_series(d, mutate=None, gate=True):
+def _write_series(d, mutate=None, gate=True, gate_status="pass"):
     os.makedirs(d, exist_ok=True)
     for r in range(1, RUNS + 1):
         lines = []
@@ -243,7 +270,7 @@ def _write_series(d, mutate=None, gate=True):
     if gate:
         with open(os.path.join(d, GATE_FILE), "w", encoding="utf-8") as f:
             for r in range(1, RUNS + 1):
-                f.write(f"run{r} gate=pass\n")
+                f.write(f"run{r} gate={gate_status}\n")
 
 
 def self_test():
@@ -252,7 +279,24 @@ def self_test():
         good = os.path.join(t, "good")
         _write_series(good)
         text = aggregate(good)
-        assert "逆転が再現" in text and "hard 検査通過" in text
+        assert "逆転が再現" in text and "hard 検査通過" in text and "残差" in text
+
+        ro = os.path.join(t, "ro")
+        _write_series(ro, gate_status="record_only")
+        text = aggregate(ro)
+        assert "判定: 逆転が再現" not in text and "- 帰属" not in text and "数値記録のみ" in text
+
+        def set_minflt(val):
+            def m(r, lines):
+                for rec in lines:
+                    rec["minflt_enabled"] = val(r)
+                return lines
+            return m
+
+        mf = os.path.join(t, "mf")
+        _write_series(mf, set_minflt(lambda r: True))
+        text = aggregate(mf)
+        assert "判定: 逆転が再現" not in text and "MINFLT" in text
 
         def expect_fail(name, mutate=None, gate=True, drop_run=False):
             nonlocal ok
@@ -290,6 +334,7 @@ def self_test():
         expect_fail("median", bad_median)
         expect_fail("cell", missing_cell)
         expect_fail("nogate", gate=False)
+        expect_fail("minflt_mix", set_minflt(lambda r: r == 2))
         expect_fail("norun", drop_run=True)
     if not ok:
         sys.exit(1)
