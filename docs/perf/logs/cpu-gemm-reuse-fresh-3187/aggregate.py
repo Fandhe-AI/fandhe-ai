@@ -133,6 +133,51 @@ def arena_hits(runs, arm, n):
     return tuple(tot)
 
 
+def read_pagesize(d):
+    """env_info.txt の `pagesize: N` を返す（欠落・不正・unknown は None＝取得不能）。"""
+    try:
+        with open(os.path.join(d, "env_info.txt"), encoding="utf-8") as f:
+            for ln in f:
+                if ln.startswith("pagesize:"):
+                    v = ln.split(":", 1)[1].strip()
+                    return int(v) if v.isdigit() and int(v) > 0 else None
+    except OSError:
+        pass
+    return None
+
+
+def minflt_section(runs, d):
+    """補助系列の minflt/iter 表（判定外）。N^2*4/PAGESIZE と並べる。取得不能は明示する。"""
+    ps = read_pagesize(d)
+    lines = ["## ページ確保の機構（補助・判定外）: minflt / iter", ""]
+    if ps is None:
+        lines.append("pagesize: 取得不能（env_info.txt に有効な pagesize 行なし）。N^2*4/PAGESIZE は算出しない。")
+    else:
+        lines.append(f"pagesize = {ps} B。基準ページ数 = N^2*4/PAGESIZE（f32 の N x N 出力 1 枚分）。")
+    lines += ["", "| N | arm | phase | minflt/iter (run 中央値) | N^2*4/PAGESIZE | 比 |", "|---|---|---|---|---|---|"]
+    missing = 0
+    for n in SIZES:
+        pages = (n * n * 4 / ps) if ps else None
+        for arm, phases in EXPECTED.items():
+            for ph in phases:
+                vals = []
+                for r in runs:
+                    v = r[(arm, n, ph)].get("minflt_delta_per_iter")
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                        vals.append(float(v))
+                if not vals:
+                    missing += 1
+                    lines.append(f"| {n} | {arm} | {ph} | 取得不能 | {f'{pages:.1f}' if pages else '取得不能'} | - |")
+                    continue
+                m = statistics.median(vals)
+                ratio = f"{m / pages:.2f}" if pages else "-"
+                lines.append(f"| {n} | {arm} | {ph} | {m:.1f} | {f'{pages:.1f}' if pages else '取得不能'} | {ratio} |")
+    if missing:
+        lines += ["", f"注意: minflt を取得できなかったセルが {missing} 件（取得不能と表示）。"]
+    lines.append("")
+    return lines
+
+
 def us(x):
     return f"{x * 1e6:.1f}"
 
@@ -222,6 +267,8 @@ def aggregate(d):
             w("  - " + ("host arena で差の 50% 以上が動く" if fixed
                         else "既存の host arena (#2104) では reuse の逆転を是正できない"))
         w("")
+    if minflt_series:
+        out.extend(minflt_section(runs, d))
     w("## 区間表（5 run 中央値 [min–max]、us）")
     w("")
     for n in SIZES:
@@ -297,6 +344,7 @@ def self_test():
         _write_series(mf, set_minflt(lambda r: True))
         text = aggregate(mf)
         assert "判定: 逆転が再現" not in text and "MINFLT" in text
+        assert "minflt / iter" in text and "取得不能" in text
 
         def expect_fail(name, mutate=None, gate=True, drop_run=False):
             nonlocal ok
