@@ -1,0 +1,7 @@
+   10240 b3-r2-dump-off-1024.txt
+   40960 b3-r2-dump-off-4096.txt
+     640 b3-r2-dump-off-64.txt
+   10240 b3-r2-dump-on-1024.txt
+   40960 b3-r2-dump-on-4096.txt
+     640 b3-r2-dump-on-64.txt
+  103680 total

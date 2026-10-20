@@ -2,8 +2,8 @@
 
 判定規則は [`RULE.txt`](./RULE.txt)（実測前に固定・事後に緩めない）、記録本文は
 [`../../infer-chain-graphcapture-cuda-ab.md`](../../infer-chain-graphcapture-cuda-ab.md)。
-**現時点の verdict は `undetermined`**（実装セッションに DGX Spark GB10 がなく、
-R0〜R2・5 run A/B は未実行）。
+**GB10 実測済み（2026-10-20・イシュー #3190）。verdict は `undetermined`**（性能は全 6 セルで ratio <= 1.00 だが、R1(b) の `predict_device_chain_cuda_bit_identity` が
+並列実行下の capture 競合で失敗し ADOPT 条件 5 が不成立。bit 不一致ではないので REJECT でもない）。収録は `gb10/`、記録は `docs/perf/infer-chain-graphcapture-cuda-ab.md` §3。
 
 ## GB10 での実行手順（別セッション・ユーザー承認後）
 

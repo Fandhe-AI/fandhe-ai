@@ -1,0 +1,11 @@
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3190/before/crates/backend-cuda)
+   Compiling bench-harness v0.11.0 (<home>/work/r3190/before/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 5.56s
+     Running tests/readback_reuse_bit_match_2108.rs (<home>/work/r3190/target-tests/release/deps/readback_reuse_bit_match_2108-b385ec397d9df224)
+
+running 2 tests
+test non_f32_falls_back_to_pretouched_f16 ... ok
+test pinned_reuse_is_bit_identical_and_reuses_staging_f32 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+

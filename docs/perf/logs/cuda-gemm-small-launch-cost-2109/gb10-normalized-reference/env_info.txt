@@ -1,0 +1,4 @@
+計測終了時刻（UTC）: 2026-10-20T15:53:17Z
+ 00:53:17 up 54 days, 12:20, 11 users,  load average: 0.18, 0.55, 1.44
+name, driver_version, utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 0 %

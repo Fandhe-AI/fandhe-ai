@@ -1,7 +1,7 @@
 # CUDA readback 宛先再利用 A/B（イシュー #2108）実行手順
 
 GB10 実機セッション向け。判定は同ディレクトリの `RULE.txt`（実測前固定）に従う。設計は
-`docs/perf/cuda-gemm-readback-reuse-2108.md`。**2026-10-20 に GB10 実測済み（イシュー #3186）: 判定 REJECT（全 3 セルが ratio > 1.00）。生ログ・比較表は本ディレクトリの `*-head-0889838c8-3186*`**。
+`docs/perf/cuda-gemm-readback-reuse-2108.md`。**2026-10-20 に GB10 実測済み（イシュー #3186）: 判定 REJECT（全 3 セルが ratio > 1.00）。N=256 の補遺セルも #3190 で REJECT（ratio 1.0475。`../optin-ab-gb10-3190/readback-n256/`・doc §5.1）。生ログ・比較表は本ディレクトリの `*-head-0889838c8-3186*`**。
 
 ## 0. 順序（必須）
 
