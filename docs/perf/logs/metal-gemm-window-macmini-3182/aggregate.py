@@ -77,6 +77,13 @@ def load_jsonl(path, framework):
     return out
 
 
+def need_ck(ck, what):
+    """AC4 照合対象行の checksum は必須（RULE.txt §10・§11）。欠損を None==None で素通しさせない。"""
+    if ck is None:
+        raise AggError(f"checksum 欠損: {what}")
+    return ck
+
+
 def get(rows, key, name):
     if key not in rows:
         raise AggError(f"欠損: {name} {key}")
@@ -182,10 +189,10 @@ def aggregate(d):
                 v, ck = get(la, ("gemm_phases", "reuse", n, ph), f"layerA run{i} N={n}")
                 A[(i, n, ph)] = v * 1e3
                 if ph == "iter_total":
-                    A[(i, n, "ck")] = ck
+                    A[(i, n, "ck")] = need_ck(ck, f"layerA run{i} N={n} iter_total")
             WR[(i, n)], WRck = get(wr, ("gemm", "reuse", n, None), f"window-reuse run{i} N={n}")
             WR[(i, n)] *= 1e3
-            A[(i, n, "wr_ck")] = WRck
+            A[(i, n, "wr_ck")] = need_ck(WRck, f"window-reuse run{i} N={n}")
             FR[(i, n)] = get(fr, ("gemm", "fresh", n, None), f"fresh run{i} N={n}")[0] * 1e3
             CF[(i, n)] = get(ca, ("gemm", "fresh", n, None), f"candle gemm run{i} N={n}")[0] * 1e3
             CX[(i, n)] = get(ca, ("gemm_transfer_excl", "fresh", n, None), f"candle excl run{i} N={n}")[0] * 1e3
@@ -437,6 +444,17 @@ def _self_test():
         with open(failed / "load_gate.log", "a") as f:
             f.write("run2 layerB FAILED\n")
         expect_fail("FAILED 記録", lambda: aggregate(failed))
+        for tag, fname, only_total in (("ck 欠損 layerA", "layerA-run2.jsonl", True),
+                                       ("ck 欠損 window-reuse", "window-reuse-run2.jsonl", False)):
+            ck = root / tag.replace(" ", "_")
+            build(ck)
+            q = ck / fname
+            rows = [json.loads(l) for l in q.read_text().splitlines()]
+            for r in rows:
+                if not only_total or r.get("phase") == "iter_total":
+                    r.pop("checksum", None)
+            q.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            expect_fail(tag, lambda ck=ck: aggregate(ck))
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print("self-test OK")
