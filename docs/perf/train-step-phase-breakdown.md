@@ -1657,7 +1657,8 @@ CUDA Graph の step capture は #1350（§16）で中立と判定済みで、そ
 ### 19.4 launch／同期の固定費
 
 未実測。`sync_idle`・`tiny_roundtrip`（1×1×1 GEMM の launch＋同期。引数なしの空カーネルの代替）・L2 `launch_issue`・L2S `kernel_wait`（いずれも N=128）を #2109 の診断から 5 run で取る。
-`unified_memory_probe` の属性値も未取得。
+`unified_memory_probe` の属性値（腕 B-4）も未取得。実測後は `aggregate.py` が `unified_memory_probe.txt` の device_name と属性 9 件を検証して
+出す「腕 B-4」節（`aggregate.md`）だけを転記する。成果物の欠落・属性キーの欠落・`error`・非整数値は集計が exit 1 で拒否する。
 
 ### 19.5 帰属と見込み
 

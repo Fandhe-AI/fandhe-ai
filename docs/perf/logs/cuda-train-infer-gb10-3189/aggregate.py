@@ -11,8 +11,10 @@
   fixed-cost/run{1..5}.log        DIAG2109 行（N=128 の E／L2／L2S）
   census/<window>-K<k>-r<n>.{json,cuda_api_sum.csv,cuda_gpu_kern_sum.csv,cuda_gpu_mem_time_sum.csv,cuda_gpu_mem_size_sum.csv}
   load_gate.log                   負荷ゲート記録
+  unified_memory_probe.txt        腕 B-4。unified_memory_probe の `key=value` 出力（device_name + 属性 9 件）
 
-欠損・非数値・n≠80・checksum 不一致・run の欠落・ゲート状態の欠落・ホスト名／絶対パスの残存は
+unified_memory_probe.txt の欠落・属性キーの欠落／重複／未知キー・`key=error`・非整数値・`key=value` 以外の行も
+例外で拒否する。欠損・非数値・n≠80・checksum 不一致・run の欠落・ゲート状態の欠落・ホスト名／絶対パスの残存は
 例外（exit 1）で拒否する（0 埋めしない）。判定閾値は RULE.txt が正で、本スクリプトは変更しない。
 census が無い場合（nsys 不在）は同期回数の節を「未実測」と出す（コード読解の値を実測と書かない）。
 """
@@ -67,6 +69,71 @@ LEAK_RE = re.compile(r"(/home/[A-Za-z0-9_.-]+|/Users/[A-Za-z0-9_.-]+|spark-dbd9|
 
 class AggError(Exception):
     pass
+
+
+# ---- 腕 B-4（unified_memory_probe） ----
+# 正は crates/backend-cuda/examples/unified_memory_probe.rs の `device_name=` 行と print_attr 呼び出し（出力順）。
+# 各属性は cudarc の attribute()（i32）を `{key}={v}`、取得失敗は `{key}=error` で出す。
+UMP_FILE = "unified_memory_probe.txt"
+UMP_KEYS = (
+    "MANAGED_MEMORY",
+    "CONCURRENT_MANAGED_ACCESS",
+    "PAGEABLE_MEMORY_ACCESS",
+    "PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES",
+    "DIRECT_MANAGED_MEM_ACCESS_FROM_HOST",
+    "HOST_NATIVE_ATOMIC_SUPPORTED",
+    "INTEGRATED",
+    "CAN_MAP_HOST_MEMORY",
+    "CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM",
+)
+UMP_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+UMP_INT_RE = re.compile(r"^-?[0-9]+$")
+I32_MIN, I32_MAX = -(2**31), 2**31 - 1
+
+
+def load_unified_memory_probe(d: Path):
+    """B-4 の属性値を厳格に読む。欠落・余計な行・`error`・非整数は例外（0 埋め・推定はしない）。"""
+    f = d / UMP_FILE
+    if not f.is_file():
+        raise AggError(f"{UMP_FILE} が無い（腕 B-4 の成果物欠落）")
+    vals = {}
+    for ln, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        m = UMP_LINE_RE.match(line)
+        if not m:
+            # orchestrate は 2>&1 で回収するため、ドライバ不在のスキップ行・stderr の失敗行もここで拒否される
+            raise AggError(f"{UMP_FILE}:{ln} が key=value 形式でない: {line!r}")
+        k, v = m.group(1), m.group(2)
+        if k in vals:
+            raise AggError(f"{UMP_FILE}:{ln} にキー {k} が重複")
+        vals[k] = v
+    need = {"device_name", *UMP_KEYS}
+    if set(vals) != need:
+        raise AggError(f"{UMP_FILE} のキー集合が不一致（欠落 {sorted(need - set(vals))}・未知 {sorted(set(vals) - need)}）")
+    if not vals["device_name"].strip():
+        raise AggError(f"{UMP_FILE} の device_name が空")
+    attrs = {}
+    for k in UMP_KEYS:
+        v = vals[k]
+        if v == "error":
+            raise AggError(f"{UMP_FILE} の {k} が取得失敗（error）")
+        if not UMP_INT_RE.match(v) or not (I32_MIN <= int(v) <= I32_MAX):
+            raise AggError(f"{UMP_FILE} の {k} が i32 整数でない: {v!r}")
+        attrs[k] = int(v)
+    return vals["device_name"], attrs
+
+
+def render_ump(ump):
+    name, attrs = ump
+    out = ["## 腕 B-4: unified memory 属性（unified_memory_probe。決定的な値・1 回）\n"]
+    out.append(f"- device_name: `{name}`\n")
+    out.append("| 属性（CU_DEVICE_ATTRIBUTE_*） | 値 |")
+    out.append("|---|---:|")
+    for k in UMP_KEYS:
+        out.append(f"| {k} | {attrs[k]} |")
+    out.append("")
+    return out
 
 
 def finite(v, what, signed=False):
@@ -504,6 +571,7 @@ def main_report(d: Path):
     fac, bak = load_infer(d)
     fx = load_fixed(d)
     cs = load_census(d)
+    ump = load_unified_memory_probe(d)
     out = [f"# #3189 GB10 集計（{'正式系列' if gate_ok else '参考系列'}）\n", f"- {gate_msg}\n"]
     sec, meds = render_arm_a(vals, order, gate_ok)
     out += sec
@@ -511,6 +579,7 @@ def main_report(d: Path):
     out += sec
     sec, fixed_m = render_fixed(fx, all(gate_status[f"run{i}-fixedcost"] == "pass" for i in RUNS))
     out += sec
+    out += render_ump(ump)
     sec, steps = render_census(cs)
     out += sec
     out += render_attrib(meds, fixed_m, steps, bm, ok)
@@ -565,6 +634,7 @@ def _fixture(d: Path, with_census=True):
         _w(d / "fixed-cost" / f"run{i}.log", "\n".join(dl) + "\n")
         for s in ("", "-infer", "-fixedcost"):
             gate.append(f"run{i}{s} gate=pass load1=0.1 gpu_util=0 waited_s=0 at=x")
+    _w(d / UMP_FILE, "device_name=NVIDIA Test\n" + "".join(f"{k}=1\n" for k in UMP_KEYS))
     _w(d / "load_gate.log", "\n".join(gate) + ("" if with_census else "\n" + NSYS_MISSING_MARK) + "\nseries done\n")
     if with_census:
         base_cnt = {"fwd": 3, "fwd_bwd": 6, "full": 9, "infer_reuse": 1}
@@ -590,6 +660,7 @@ def self_test():
         rep = main_report(d)
         assert "正式系列" in rep and "| full（1 step） | 9 |" in rep, rep
         assert "backward | 3 |" in rep
+        assert "## 腕 B-4" in rep and "| INTEGRATED | 1 |" in rep and "device_name: `NVIDIA Test`" in rep, rep
         # 決定性: 1 run の値を変えると非決定が出る
         p = d / "census" / "full-K120-r3.cuda_api_sum.csv"
         p.write_text(p.read_text(encoding="utf-8").replace('"cuStreamSynchronize"', '"cuStreamSynchronize"').replace('"50","1","1085"', '"50","1","1086"'), encoding="utf-8")
@@ -645,11 +716,36 @@ def self_test():
         import shutil
         shutil.rmtree(dd / "census", ignore_errors=True)
     expect_fail("census 欠損（nsys 不在の記録なし）", _rm_census)
+    def _ump(dd, f):
+        p = dd / UMP_FILE
+        _w(p, f(p.read_text(encoding="utf-8")))
+    expect_fail("B-4 成果物欠落", lambda dd: (dd / UMP_FILE).unlink())
+    expect_fail("B-4 キー欠落", lambda dd: _ump(dd, lambda t: t.replace("INTEGRATED=1\n", "")))
+    expect_fail("B-4 device_name 欠落", lambda dd: _ump(dd, lambda t: t.replace("device_name=NVIDIA Test\n", "")))
+    expect_fail("B-4 取得失敗 error", lambda dd: _ump(dd, lambda t: t.replace("MANAGED_MEMORY=1", "MANAGED_MEMORY=error", 1)))
+    expect_fail("B-4 非整数", lambda dd: _ump(dd, lambda t: t.replace("INTEGRATED=1", "INTEGRATED=nan")))
+    expect_fail("B-4 i32 超過", lambda dd: _ump(dd, lambda t: t.replace("INTEGRATED=1", "INTEGRATED=2147483648")))
+    expect_fail("B-4 値が空", lambda dd: _ump(dd, lambda t: t.replace("INTEGRATED=1", "INTEGRATED=")))
+    expect_fail("B-4 キー重複", lambda dd: _ump(dd, lambda t: t + "INTEGRATED=1\n"))
+    expect_fail("B-4 未知キー", lambda dd: _ump(dd, lambda t: t + "EXTRA=1\n"))
+    expect_fail("B-4 スキップ行", lambda dd: _w(dd / UMP_FILE, "unified_memory_probe: CUDA driver unavailable (x); skipping (--allow-no-driver).\n"))
+    expect_fail("B-4 空ファイル", lambda dd: _w(dd / UMP_FILE, ""))
     # census 無しは「未実測」
     with tempfile.TemporaryDirectory() as t:
         dd = Path(t)
         _fixture(dd, with_census=False)
         assert "未実測" in main_report(dd)
+    # nsys 不在（census 無し）でも B-4 は必須
+    with tempfile.TemporaryDirectory() as t:
+        dd = Path(t)
+        _fixture(dd, with_census=False)
+        (dd / UMP_FILE).unlink()
+        try:
+            main_report(dd)
+        except AggError:
+            pass
+        else:
+            raise SystemExit("self-test 失敗: census 無しで B-4 欠落を検出できない")
     print("self-test OK")
 
 
