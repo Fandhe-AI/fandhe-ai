@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<WORK>/target-3180/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test infer_fixed_cost_diag_tests::infer_fixed_cost_diag_wall_vs_gpu_busy ... infer_fixed_cost_diag (record-only, n=40):
+  upload      median=23.4 us
+  encode      median=4.9 us
+  commit_wait median=372.0 us
+  download    median=0.3 us
+  wall        median=400.3 us
+  gpu_busy    median=168.3 us
+  gpu_idle (wall - gpu_busy) median=232.1 us (58% of wall。転送を含むため H4 判定には使わない)
+  host_fixed (wall - gpu_busy - upload - download) median=208.4 us (52% of wall)
+  batches_with_timestamps/iter min=1 max=1; wait_until_completed/iter min=1 max=1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.08s
+

@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/mnist_scale_train_reuse_bench.rs (<WORK>/target-3180/release/deps/mnist_scale_train_reuse_bench-f22a50518fbb4a5f)
+
+running 1 test
+test mnist_scale_train_reuse_metal_batch_counters ... [mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: encode_delta=11 command_buffer_delta=7 wait_delta=7 — before（#1099 適用前）は 9/9/9、#1099 適用直後は 9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9、#1563 （d_weight encode を d_input の同期点より前へ移し層内で合流）適用後は 11/8/8、#1566（bias 勾配も同一 encode-only ディスパッチへ統合。 机上導出では #1563 時点で bias 用 upload_into が既に no-op だった ため 11/8/8 から不変と結論。本ファイル冒頭 doc comment「#1566 追記（是正版）」参照）適用後も 11/8/8（見込み・Mac 実機未確認） （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」「#1555」「#1563」節・§10.7〜§10.9「#1566」節）
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.23s
+

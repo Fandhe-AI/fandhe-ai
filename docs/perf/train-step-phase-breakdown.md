@@ -1557,3 +1557,78 @@ param_readout（16.8%・87.0 µs）。フェーズ和／合計: 102.8%（差分�
   のみと事前宣言）
 - v0.6.0 実測（§11）との差は条件差（バイナリ・負荷・経路変更）を
   分離していないため参考にとどめる
+
+## 18. v0.11.0 Mac mini 再計測（Apple M4・2026-10-20。イシュー #3180）
+
+### 18.1 目的・条件
+
+Mac mini の 0.11.0 系列 B で fandhe-ai の train Metal（reuse 2.133 ms）が PyTorch（0.689 ms）に大きく劣後し、M4 Max（1.121 ms）の約 2 倍
+だったため、どの区間・どの同期が時間を占めるかを測った。**診断のみ**（tolerance・判定規則・相手側ベンチ・ライブラリの `src/` と既定値は不変）。
+規則・生ログ・集計は `docs/perf/logs/train-infer-phases-macmini-3180/`（`RULE.txt` は計測前に固定）。
+
+- 腕 A（phase 内訳）: registry `fandhe-ai =0.11.0` の `bench-fandhe --task train|infer --phases`・cpu／metal × fresh／reuse の 8 セル・5 プロセス・
+  load1 < 3.0 ゲート 5/5 通過。計測前コミット `b2267d46` の展開ツリー（`.rev-stamp`・ツリー指紋一致）。
+- 腕 B（同期回数・同期固定費）: 同ツリーの main workspace（HEAD ソース。v0.11.0 から 95 commit 先）。**腕 A と腕 B はソース版が異なる**
+  （bench-fandhe からは同期カウンタを読めず、backend-metal の直接依存追加は承認事項のため行っていない）。
+
+### 18.2 train の区間内訳（Mac mini・5 run 中央値。µs）
+
+出典: `logs/train-infer-phases-macmini-3180/aggregate.md`。
+
+| セル | tape_build | forward(_resident) | backward | 更新区間 | step_total |
+|---|---:|---:|---:|---|---:|
+| cpu fresh | 0.0 | 210.7 | 440.8 | readout＋host_sgd＋apply 58.1 | 719.1 |
+| cpu reuse | 0.0 | 206.4 | 451.5 | device_update 117.6 | 778.4 |
+| metal fresh | 14.2 | 958.3 | 1293.1 | readout＋host_sgd＋apply 57.8 | 2324.4 |
+| metal reuse | 11.4 | 945.4 | 928.4 | device_update 2.2 | 1885.9 |
+
+- Metal は forward と backward がほぼ二分する（reuse は 50.1%／49.2%）。cpu は backward が 58.0〜61.3%。
+- 注意: `phases` の `step_total` は通常ベンチの測定窓より狭く、系列 B の値と一致しない（Metal reuse は 1885.9 µs 対 2132.9 µs。cpu reuse は 778.4 対 1105.9 µs）。差の原因は切り分けていない。
+- CPU `device_update`（reuse）は 117.6 µs（M4 Max 0.9.0 は 122.3 µs）。参考: 既存の #2106 診断テスト（HEAD ソース・単発 2 回）の in-situ `device_update` は 28.0〜30.0 µs で、
+  bench の区間値と約 4 倍の差がある（原因未調査。cpu-diag は依存版が正式系列と異なりうる参考値。ログ README 参照）。backward 内部（GEMM／非 GEMM）の内訳は
+  診断パッチが必要で**未取得**。
+
+### 18.3 同期回数の実測（腕 B・Mac mini）
+
+| 窓 | encode／command_buffer／wait | 設計 doc の机上導出 |
+|---|---|---|
+| steady-state 1 step 全体 | 11／7／7 | 11／7／7 と一致 |
+| backward 窓のみ（5 試行） | 5／3／3（全試行同一） | 5／3／3 と一致 |
+| 差し引き（forward＋loss＋update） | 6／4／4 | — |
+
+backward 3 wait・forward 側 4 wait という構成が実機で確認できた（assert は緩めていない）。副系列（v0.11.0 タグのツリー）は未実施。
+
+### 18.4 同期 1 回の固定費（Mac mini）
+
+- 空 dispatch（`MetalContext::dispatch_sync(|_| {})`。cb＋1・wait＋1 の構造検査を全反復で通過）: 5 run 中央値 **14.5 µs**（run 別 11.5〜25.0 µs。`crates/backend-metal/tests/sync_fixed_cost_diag.rs`）。
+  従来の推定値（約 0.29 ms）の約 1/20 で、**この推定は空の同期では再現しない**。
+- 実カーネルを伴う同期（既存 `infer_fixed_cost_diag`・単発 n=40）: wall 400.3 µs・GPU busy 168.3 µs・`host_fixed`（wall − GPU busy − 転送）208.4 µs。
+  同じ wait 1 回でも空 dispatch の約 14 倍で、**同期の固定費は実カーネルを載せた同期のほうが大きい**（原因は切り分けていない。GPU 起床・クロック状態・完了通知の遅延などが候補だが未検証）。
+- 同一機体内の外挿: (train Metal reuse 1885.9 − infer Metal reuse 331.0) ÷ (wait 7 − 1) = **259.1 µs／同期**。この値は空 dispatch より実カーネル同期（208.4 µs）と近い。
+  infer の wait 数は診断テストが再現する経路の 1 回を仮定した値で、`predict_resident` の実 wait 数は未確認。
+
+### 18.5 M4 Max との差の帰属（版違いの比較。数値のみで原因は断定しない）
+
+M4 Max 0.9.0（§17.2）と Mini 0.11.0 の区間差（Metal・µs）。**版が異なる比較**で、M4 Max の 0.11.0 phase 内訳は無い（新規計測は所有者指示により Mac mini に限る）。
+
+| 区間 | M4 Max 0.9.0 reuse | Mini 0.11.0 reuse | 差 | M4 Max 0.9.0 fresh | Mini 0.11.0 fresh | 差 |
+|---|---:|---:|---:|---:|---:|---:|
+| tape_build | 14.9 | 11.4 | −3.5 | 15.7 | 14.2 | −1.5 |
+| forward(_resident) | 516.3 | 945.4 | +429.1 | 668.4 | 958.3 | +289.9 |
+| backward | 524.6 | 928.4 | +403.8 | 854.3 | 1293.1 | +438.8 |
+| device_update／更新 3 区間 | 3.4 | 2.2 | −1.2 | 51.0 | 57.8 | +6.8 |
+| step_total | 1061.6 | 1885.9 | +824.3 | 1596.6 | 2324.4 | +727.8 |
+
+- 差の大半は forward（reuse で +429.1 µs・52.1%）と backward（+403.8 µs・49.0%）に出ている。tape_build と更新区間は無視できる。
+- forward 4 wait・backward 3 wait で割ると 107 µs／wait・135 µs／wait（算術のみ。GPU 計算速度の差〔M4 は M4 Max より GPU コアが少ない〕と同期固定費の差は、この計測だけでは分離できない）。
+- 同期で説明できる量（Mini reuse）: wait 7 × 空 dispatch 14.5 µs = 101.8 µs は step_total の **5.4%**（未説明の残差 94.6%）。wait 7 × 実カーネル同期の `host_fixed` 208.4 µs = 1458.8 µs は
+  step_total の **77.4%**（残差 22.6%）。M4 Max 側の同期固定費は未測定のため、Mini と M4 Max の差 824.3 µs のうち同期が占める分は**算出できない**。
+- 結論の範囲: 空の同期固定費は小さく、同期ゼロ化の効果見積りには使えない。実カーネルを伴う同期の固定費（約 208〜259 µs／同期）が Mini の step_total の大半を説明しうるが、
+  GPU 計算時間との分離は未了。同期回数を相手並みへ減らす・ゼロ化する判断（#3195・#3208・#3217）には、実カーネル同期を 1 回減らした A/B が必要。
+
+### 18.6 限界
+
+- 腕 A（0.11.0）と腕 B（HEAD）のソース版が違う。同期カウンタは bench-fandhe から読めていない。
+- 実カーネル同期の固定費は `infer_fixed_cost_diag` の単発値（n=40）のみで 5 run 化していない。
+- `diag-instrumentation.patch` による backward 内部の内訳は未取得。M4 Max の 0.11.0 phase 内訳は無い。
+- checksum の一致は bit 同一の証拠ではない。

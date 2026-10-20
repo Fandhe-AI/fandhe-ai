@@ -116,7 +116,7 @@ def render_phases(vals, order, cells, machine):
 
 
 SYNC_RE = re.compile(
-    r"^SYNC_FIXED_COST_EMPTY_DISPATCH trials=(\d+) warmup=(\d+) median_us=([0-9.]+) q1_us=([0-9.]+) q3_us=([0-9.]+) structure=cb\+1,wait\+1$"
+    r"SYNC_FIXED_COST_EMPTY_DISPATCH trials=(\d+) warmup=(\d+) median_us=([0-9.]+) q1_us=([0-9.]+) q3_us=([0-9.]+) structure=cb\+1,wait\+1$"
 )
 
 
@@ -127,7 +127,7 @@ def load_sync(d):
         if not f.exists():
             raise AggError(f"{f} が無い（5 run 揃っていない）")
         text = f.read_text(encoding="utf-8")
-        hits = [m for m in (SYNC_RE.match(l.strip()) for l in text.splitlines()) if m]
+        hits = [m for m in (SYNC_RE.search(l.strip()) for l in text.splitlines()) if m]
         if len(hits) != 1:
             raise AggError(f"{f.name}: SYNC_FIXED_COST_EMPTY_DISPATCH 行が {len(hits)} 件（構造検査を通った行が 1 件でない）")
         if not re.search(r"test result: ok\. 1 passed", text):
@@ -238,7 +238,7 @@ def _write_fixture(d, drop=None, bad=None):
     (d / "sync-fixed-cost").mkdir()
     for i in range(1, 6):
         (d / "sync-fixed-cost" / f"run{i}.log").write_text(
-            f"SYNC_FIXED_COST_EMPTY_DISPATCH trials=200 warmup=20 median_us={290+i}.500 q1_us=280.000 q3_us=300.000 structure=cb+1,wait+1\n"
+            f"test sync_fixed_cost_empty_dispatch ... SYNC_FIXED_COST_EMPTY_DISPATCH trials=200 warmup=20 median_us={290+i}.500 q1_us=280.000 q3_us=300.000 structure=cb+1,wait+1\n"
             "test result: ok. 1 passed; 0 failed\n"
         )
     (d / "sync-fixed-cost" / "infer_fixed_cost_diag.log").write_text("  batches_with_timestamps/iter min=1 max=1; wait_until_completed/iter min=2 max=2\n")
