@@ -50,8 +50,10 @@ class AggError(Exception):
     pass
 
 
-def finite(v, what):
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+def finite(v, what, signed=False):
+    """所要時間は非負の有限数。signed=True（paired/residual＝反復ごとの public − Σ decomposed の符号付き差分）は
+    負も許し、数値・有限のみを検証する（許容誤差・判定閾値は緩めない）。"""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or (v < 0 and not signed):
         raise AggError(f"{what} が数値でない/負/非有限: {v!r}")
     return float(v)
 
@@ -100,8 +102,11 @@ def check_gate(d: Path):
     if missing:
         raise AggError(f"load_gate.log に gate 記録がない: {missing}")
     bad = {k: status[k] for k in expected if status[k] != "pass"}
-    if bad or failed:
-        return False, f"負荷ゲート未通過/実行失敗あり（{bad or ''} {len(failed)} 件の FAILED）"
+    if failed:
+        # RULE.txt 規則7: 実行失敗の痕跡は参考系列へ降格せず例外（exit≠0）で拒否する
+        raise AggError(f"load_gate.log に実行失敗の痕跡（{len(failed)} 件の FAILED）: {failed[:3]}")
+    if bad:
+        return False, f"負荷ゲート未通過（{bad}）"
     return True, "負荷ゲート 15/15 pass（run 5 × armA／infer／fixedcost）"
 
 
@@ -211,7 +216,8 @@ def load_infer(d: Path):
                 key = (r.get("arm", "backend"), r["phase"])
                 if i in store[key]:
                     raise AggError(f"infer-diag/run{i}.{part} に重複 {key}")
-                store[key][i] = finite(r.get("median_s"), f"infer-diag/run{i}.{part} {key} median_s")
+                store[key][i] = finite(r.get("median_s"), f"infer-diag/run{i}.{part} {key} median_s",
+                                          signed=(key[0] == "paired"))
             if i not in sums:
                 raise AggError(f"infer-diag/run{i}.{part} に checksum 行がない")
     for name, s in (("facade", fsum), ("backend", bsum)):
@@ -518,6 +524,7 @@ def self_test():
     expect_fail("checksum 不一致", lambda dd: _w(dd / "infer-diag" / "run3.facade.jsonl", (dd / "infer-diag" / "run3.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": 8')))
     expect_fail("非数値", lambda dd: _w(dd / "armA" / "run1.jsonl", re.sub(r'"median_s": [0-9.e-]+', '"median_s": "x"', (dd / "armA" / "run1.jsonl").read_text(), count=1)))
     expect_fail("ゲート欠落", lambda dd: _w(dd / "load_gate.log", "series done\n"))
+    expect_fail("FAILED 痕跡", lambda dd: _w(dd / "load_gate.log", (dd / "load_gate.log").read_text() + "run1 FAILED infer facade\n"))
     expect_fail("err 非空", lambda dd: _w(dd / "armA" / "run2.err", "boom"))
     expect_fail("絶対パス残存", lambda dd: _w(dd / "env_info.txt", "/home/someone/x"))
     expect_fail("CPU 混入", lambda dd: _w(dd / "infer-diag" / "run1.facade.jsonl", (dd / "infer-diag" / "run1.facade.jsonl").read_text().replace('"cuda"', '"cpu"', 1)))

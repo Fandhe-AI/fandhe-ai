@@ -58,7 +58,8 @@ cd "${FC}" || exit 1
 # shellcheck disable=SC1091
 . ./bench_fandhe_lock_restore.sh
 bench_fandhe_setup_lock_restore_trap
-if ! CARGO_TARGET_DIR="${FC_TARGET}" cargo build --release -p bench-fandhe > "${OUT}/build_bench.log" 2>&1; then
+# cargo の "Compiling … (/home/…)" 行が絶対パスを含むためビルドログも mask を通す（pipefail で cargo の失敗を保持）
+if ! (set -o pipefail; CARGO_TARGET_DIR="${FC_TARGET}" cargo build --release -p bench-fandhe 2>&1 | mask > "${OUT}/build_bench.log"); then
   echo "BUILD FAILED（bench-fandhe）" >&2; tail -20 "${OUT}/build_bench.log" >&2; exit 1
 fi
 CARGO_TARGET_DIR="${FC_TARGET}" cargo tree -p bench-fandhe --depth 1 | grep -E 'fandhe-ai v' > "${OUT}/tree.txt"
@@ -100,7 +101,7 @@ CENSUS_BIN="$(find_bin cuda_train_infer_sync_census_3189 -p fandhe-ai --test cud
 INFER_BIN="$(find_bin cuda_infer_reuse_phase_diag_3189 -p fandhe-ai --test cuda_infer_reuse_phase_diag_3189)" || { echo "infer facade バイナリ特定失敗" >&2; exit 1; }
 BACKEND_BIN="$(find_bin infer_chain_phase_diag_3189 -p fandhe-ai-backend-cuda --test infer_chain_phase_diag_3189)" || { echo "infer backend バイナリ特定失敗" >&2; exit 1; }
 LIB_BIN="$(find_bin lib:fandhe_ai_backend_cuda -p fandhe-ai-backend-cuda --lib)" || { echo "backend lib バイナリ特定失敗" >&2; exit 1; }
-if ! cargo build --release --locked -p fandhe-ai-backend-cuda --features internal-diagnostics --example unified_memory_probe > "${OUT}/build_probe.log" 2>&1; then
+if ! (set -o pipefail; cargo build --release --locked -p fandhe-ai-backend-cuda --features internal-diagnostics --example unified_memory_probe 2>&1 | mask > "${OUT}/build_probe.log"); then
   echo "BUILD FAILED（unified_memory_probe）" >&2; tail -20 "${OUT}/build_probe.log" >&2; exit 1
 fi
 PROBE_BIN="${CARGO_TARGET_DIR}/release/examples/unified_memory_probe"
@@ -167,7 +168,8 @@ bash "${ROOT}/docs/perf/logs/cuda-train-forward-resident-2116/orchestrate.sh" gb
   || echo "FAILED 2116 orchestrate" >> "${OUT}/load_gate.log"
 
 # ---- 腕 B-4（unified_memory_probe。決定的な値） ----
-"${PROBE_BIN}" 2>&1 | mask > "${OUT}/unified_memory_probe.txt" \
+# pipefail を subshell に閉じ、probe 自体の失敗が mask の終了状態で隠れないようにする
+(set -o pipefail; "${PROBE_BIN}" 2>&1 | mask > "${OUT}/unified_memory_probe.txt") \
   || echo "FAILED unified_memory_probe" >> "${OUT}/load_gate.log"
 
 # ---- 腕 B-1（nsys による回数計測。時間の統計には使わない。最後に実行） ----
