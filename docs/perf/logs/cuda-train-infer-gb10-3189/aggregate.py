@@ -55,6 +55,9 @@ CATEGORIES = {
     "launch": re.compile(r"^cuLaunchKernel"),
     "htod": re.compile(r"^cuMemcpyHtoD"),
     "dtoh": re.compile(r"^cuMemcpyDtoH"),
+    # 暗黙に同期しうる非 async の memcpy のみ（RULE 規則 1 の別列記録。htod／dtoh は Async を含む転送全体）
+    "htod_sync": re.compile(r"^cuMemcpyHtoD(?!Async)"),
+    "dtoh_sync": re.compile(r"^cuMemcpyDtoH(?!Async)"),
     "alloc": re.compile(r"^cuMemAlloc"),
     "free": re.compile(r"^cuMemFree"),
     "wait_event": re.compile(r"^cuStreamWaitEvent"),
@@ -368,6 +371,8 @@ def load_census(d: Path):
     if not cdir.exists() or not any(cdir.glob("*.cuda_api_sum.csv")):
         return None
     res = {}
+    # 規則 7: 同じ window／K の 5 反復で loss_bits／checksum_bits が一致すること（K 違いは学習結果が変わるため比較しない）
+    sigs = defaultdict(set)
     for w in WINDOWS:
         for r in RUNS:
             per_k = {}
@@ -380,6 +385,11 @@ def load_census(d: Path):
                 meta = json.loads(j.read_text(encoding="utf-8").replace("CENSUS_JSON ", "", 1))
                 if meta.get("window") != w or meta.get("steps") != k:
                     raise AggError(f"census/{base.name}.json の窓/steps が不一致")
+                lb, cb = meta.get("loss_bits"), meta.get("checksum_bits")
+                for nm, v, hi in (("loss_bits", lb, 2**32 - 1), ("checksum_bits", cb, U64_MAX)):
+                    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= hi:
+                        raise AggError(f"census/{base.name}.json の {nm} が欠落または範囲外の整数でない: {v!r}")
+                sigs[(w, k)].add((lb, cb))
                 # 必須レポート（GPU kernel／memory）の存在と内容を検証する（RULE 規則 7）
                 for rep in ("cuda_gpu_kern_sum", "cuda_gpu_mem_time_sum", "cuda_gpu_mem_size_sum"):
                     rf = cdir / f"{base.name}.{rep}.csv"
@@ -390,6 +400,9 @@ def load_census(d: Path):
                     raise AggError(f"census/{base.name}.cuda_gpu_kern_sum.csv に CSV ヘッダが無い（kernel は必ず発生する）")
                 per_k[k] = parse_api_csv(f.read_text(encoding="utf-8"))
             res[(w, r)] = {c: (per_k[120][c] - per_k[20][c]) / 100 for c in CATEGORIES}
+    for (w, k), v in sigs.items():
+        if len(v) != 1:
+            raise AggError(f"census {w}-K{k} の loss_bits／checksum_bits が 5 反復で不一致: {sorted(v)}")
     return res
 
 
@@ -410,8 +423,8 @@ def render_census(cs):
             cells.append(f"{med(v):g}" if len(set(v)) == 1 else f"{med(v):g} ({min(v):g}–{max(v):g})")
         out.append(f"| {w} | " + " | ".join(cells) + f" | {'決定的' if det else '**非決定**'} |")
     out.append("\n### 区間への割り当て（RULE 規則 2）\n")
-    out.append("| 区間 | sync | launch | htod | dtoh |")
-    out.append("|---|---:|---:|---:|---:|")
+    out.append("| 区間 | sync | launch | htod | dtoh | htod（非 async） | dtoh（非 async） |")
+    out.append("|---|---:|---:|---:|---:|---:|---:|")
     rows = {
         "forward": {c: steps["fwd"][c] for c in CATEGORIES},
         "backward": {c: steps["fwd_bwd"][c] - steps["fwd"][c] for c in CATEGORIES},
@@ -420,7 +433,7 @@ def render_census(cs):
         "infer_reuse": steps["infer_reuse"],
     }
     for name, v in rows.items():
-        out.append(f"| {name} | {v['sync']:g} | {v['launch']:g} | {v['htod']:g} | {v['dtoh']:g} |")
+        out.append(f"| {name} | {v['sync']:g} | {v['launch']:g} | {v['htod']:g} | {v['dtoh']:g} | {v['htod_sync']:g} | {v['dtoh_sync']:g} |")
     out.append("")
     return out, steps
 
@@ -547,7 +560,7 @@ def _fixture(d: Path, with_census=True):
                     kt = '"Time (%)","Total Time (ns)","Instances","Avg (ns)","Name"\n"100.0","1","1","1","k"\n'
                     for rep in ("cuda_gpu_kern_sum", "cuda_gpu_mem_time_sum", "cuda_gpu_mem_size_sum"):
                         _w(d / "census" / f"{w}-K{k}-r{r}.{rep}.csv", kt)
-                    _w(d / "census" / f"{w}-K{k}-r{r}.json", json.dumps({"window": w, "steps": k}))
+                    _w(d / "census" / f"{w}-K{k}-r{r}.json", json.dumps({"window": w, "steps": k, "loss_bits": 1000 + k, "checksum_bits": 55}))
 
 
 def self_test():
@@ -586,6 +599,14 @@ def self_test():
     expect_fail("CUDA infer fresh の forward 欠落", lambda dd: _w(dd / "armA" / "run1.jsonl", "\n".join(l for l in (dd / "armA" / "run1.jsonl").read_text().splitlines() if not ('"cuda"' in l and '"infer_phases"' in l and '"fresh"' in l and '"forward"' in l)) + "\n"))
     expect_fail("checksum が bool", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": true')) for i in RUNS])
     expect_fail("checksum が u64 超過", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": 18446744073709551616')) for i in RUNS])
+    def _cj(dd, mut):
+        p = dd / "census" / "full-K120-r2.json"
+        m = json.loads(p.read_text())
+        mut(m)
+        _w(p, json.dumps(m))
+    expect_fail("census checksum_bits 欠落", lambda dd: _cj(dd, lambda m: m.pop("checksum_bits")))
+    expect_fail("census loss_bits 範囲外", lambda dd: _cj(dd, lambda m: m.update(loss_bits=2**32)))
+    expect_fail("census checksum_bits 不一致", lambda dd: _cj(dd, lambda m: m.update(checksum_bits=56)))
     expect_fail("ヘッダのみ CSV", lambda dd: _w(dd / "census" / "fwd-K20-r1.cuda_api_sum.csv", '"Time (%)","Total Time (ns)","Num Calls","Avg (ns)","Name"\n'))
     expect_fail("kernel レポート欠落", lambda dd: (dd / "census" / "fwd-K20-r1.cuda_gpu_kern_sum.csv").unlink())
     expect_fail("memory レポート空", lambda dd: _w(dd / "census" / "fwd-K20-r1.cuda_gpu_mem_time_sum.csv", ""))
