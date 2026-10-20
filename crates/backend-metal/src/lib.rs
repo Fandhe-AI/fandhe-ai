@@ -801,6 +801,14 @@ mod typed_bf16;
 // 到達するため `lib.rs` の兄弟モジュールとして置く）。
 #[cfg(all(test, target_os = "macos"))]
 mod typed_bf16_probe_diag_tests;
+// Mac mini の Metal GEMM タイル選択の追跡と全 `CANDIDATES` の純カーネル時間計測
+// （イシュー #3181・診断専用。規則は `docs/perf/logs/metal-tile-macmini-3181/RULE.txt`）。
+// `gemm_reuse_phase_diag_tests` の `pub(crate)` 面・`tile::{select*, CANDIDATES}`・
+// `MetalGemm::{resolve_tile_config, dispatch_auto_with_route}`（`pub(crate)`）へ到達するため、
+// `gemm_steel_candidate_diag_tests` と同じ理由でクレートルートの兄弟モジュールとして置く。
+// プロダクションコード（`tile.rs`／`gemm.rs`／`shaders/`）は無変更。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_tile_select_macmini_diag_tests;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
 // バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの
