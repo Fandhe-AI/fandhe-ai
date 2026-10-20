@@ -210,8 +210,8 @@ verify_same_commit_and_diff() {
   if [[ "$GATE" == big-core ]]; then
     # 変更行は `BIG_CORE_LIMIT_ENABLED` の宣言行（-1 行・+1 行）だけであること。
     if [[ "$(printf '%s\n' "$changed" | wc -l | tr -d ' ')" != "2" ]] ||
-      [[ "$(printf '%s\n' "$changed" | grep -cE '^-.*const BIG_CORE_LIMIT_ENABLED\b')" != "1" ]] ||
-      [[ "$(printf '%s\n' "$changed" | grep -cE '^\+.*const BIG_CORE_LIMIT_ENABLED\b')" != "1" ]]; then
+      [[ "$(printf '%s\n' "$changed" | grep -cE '^-.*const BIG_CORE_LIMIT_ENABLED([^A-Za-z0-9_]|$)')" != "1" ]] ||
+      [[ "$(printf '%s\n' "$changed" | grep -cE '^\+.*const BIG_CORE_LIMIT_ENABLED([^A-Za-z0-9_]|$)')" != "1" ]]; then
       echo "error: after checkout の差分が BIG_CORE_LIMIT_ENABLED 宣言 1 行の置換のみではありません" >&2
       exit 1
     fi
@@ -219,10 +219,10 @@ verify_same_commit_and_diff() {
     # small-cap: `SMALL_SHAPE_CAP_ENABLED` 宣言 1 行と `ELIGIBLE_BRANDS` 宣言 1 行（-2／+2）だけ。
     # brand 追加は既存の "Apple M4 Max" を残した追加であること（診断用の上書き。本番 allowlist は #3227）。
     if [[ "$(printf '%s\n' "$changed" | wc -l | tr -d ' ')" != "4" ]] ||
-      [[ "$(printf '%s\n' "$changed" | grep -cE '^-.*const SMALL_SHAPE_CAP_ENABLED\b')" != "1" ]] ||
-      [[ "$(printf '%s\n' "$changed" | grep -cE '^\+.*const SMALL_SHAPE_CAP_ENABLED\b')" != "1" ]] ||
-      [[ "$(printf '%s\n' "$changed" | grep -cE '^-.*const ELIGIBLE_BRANDS\b')" != "1" ]] ||
-      [[ "$(printf '%s\n' "$changed" | grep -cE '^\+.*const ELIGIBLE_BRANDS\b.*"Apple M4 Max"')" != "1" ]]; then
+      [[ "$(printf '%s\n' "$changed" | grep -cE '^-.*const SMALL_SHAPE_CAP_ENABLED([^A-Za-z0-9_]|$)')" != "1" ]] ||
+      [[ "$(printf '%s\n' "$changed" | grep -cE '^\+.*const SMALL_SHAPE_CAP_ENABLED([^A-Za-z0-9_]|$)')" != "1" ]] ||
+      [[ "$(printf '%s\n' "$changed" | grep -cE '^-.*const ELIGIBLE_BRANDS([^A-Za-z0-9_]|$)')" != "1" ]] ||
+      [[ "$(printf '%s\n' "$changed" | grep -cE '^\+.*const ELIGIBLE_BRANDS([^A-Za-z0-9_]|$).*"Apple M4 Max"')" != "1" ]]; then
       echo "error: after checkout の差分が SMALL_SHAPE_CAP_ENABLED／ELIGIBLE_BRANDS 宣言 2 行の置換のみではありません" >&2
       exit 1
     fi
