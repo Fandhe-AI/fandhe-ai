@@ -114,11 +114,15 @@ def event_sample(torch, mm, bp, reps=1):
     for _ in range(bp.WARMUP):
         mm()
         torch.cuda.synchronize()
+    # event 対はループ外で作り、両方を一度 record・同期して遅延初期化を計測前に済ませて再利用する
+    s = torch.cuda.Event(enable_timing=True)
+    e = torch.cuda.Event(enable_timing=True)
+    s.record()
+    e.record()
+    torch.cuda.synchronize()
     secs = []
     for _ in range(bp.ITERS):
         torch.cuda.synchronize()
-        s = torch.cuda.Event(enable_timing=True)
-        e = torch.cuda.Event(enable_timing=True)
         s.record()
         for _ in range(reps):
             mm()
