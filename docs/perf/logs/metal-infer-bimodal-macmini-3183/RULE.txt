@@ -1,0 +1,61 @@
+RULE fixed-at-utc: 2026-10-20T05:19:48Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #3183 Mac mini の infer Metal reuse の二峰性の原因特定（診断のみ）
+doc: docs/perf/metal-infer-bimodal-macmini.md
+
+[実行方法]
+- 1 run = 1 プロセス群。run1〜run5 の 5 run。差し替え・追加起動・既存 run ファイルの上書きはしない。
+- 腕（各腕を別 #[test] として独立に起動し、腕ごとに warmup 20 反復 + 計測 500 反復の長い系列を回す。
+  腕を交互に挟まない。GPU のアイドル間隔を bench に近づけるため）:
+  - R   : predict_resident → legacy 読み出し（contiguous().as_slice().to_vec()）→ checksum（bench 再現）
+  - D   : provider_select → tape_new → snapshot → chain → host_copy → checksum（キャッシュ OFF = 既定）
+  - Don : D と同じ列を override_device_verify_cache_for_scope(true) のスコープ内で実行（診断専用）
+  - G   : backend-metal: upload → linear×2 → synchronize_with_gpu_timestamps → download（GPU タイムスタンプ付き）
+- 腕の起動順は run ごとにローテーション: run1 R,D,Don,G / run2 D,Don,G,R / run3 Don,G,R,D / run4 G,R,D,Don / run5 R,D,Don,G。
+- 1 反復 1 行の JSON（DIAG_JSON 接頭辞）。対象は計測 500 反復（warmup は出力しない）。
+- 対象ホスト: Mac mini（macmini）のみ。M4 Max でのスモークは計測として扱わずコミットしない。
+
+[モード検出（「2 つ」を前提にしない）]
+- 対象: 腕ごと・run ごとの iter_total（G は wall）の計測 500 反復。
+- 手順: 昇順に並べ、隣接値の相対ギャップ x[i+1]/x[i]-1 を求め、分割の両側に全体の 5% 以上が残る位置に限り
+  相対ギャップが 10% 以上の位置をすべて分割点にする。クラスタの数・割合・中央値を報告する。
+- 「多峰あり」= クラスタ 2 つ以上。「高モード」= 中央値最大のクラスタ、「低モード」= 中央値最小のクラスタ。
+- Q3/Q1 比は補助記録のみ（判定に使わない）。
+- 時間方向: 時系列の各反復にクラスタラベルを付け、同一モード連続区間（run 長）の中央値と切り替え回数を報告する。
+  「プロセス内の交互出現」= 切り替え 10 回以上。「プロセス単位の固着」= 5 run のうち低モード 95% 以上の run と
+  高モード 95% 以上の run が両方ある。
+- 閾値（10%・5%・10 回・95%）は事後に変えない。
+
+[帰属規則]
+- 対象: 多峰ありの run の高モード・低モード反復。
+- 区間 P（provider_select/tape_new/snapshot/chain/host_copy/checksum/predict_resident/encode/commit_wait/
+  gpu_busy/commit_wait-gpu_busy/upload/download）ごとに run 単位で
+  Δ_P = median(P|高) - median(P|低)、Δ_total = median(iter_total|高) - median(iter_total|低)、比 = Δ_P/Δ_total。
+- 帰属: 比 >= 0.5 の run が、多峰ありの run の過半数になった区間 P。該当なしなら「特定できなかった」と記す。
+- カウンタ（encode/command_buffers/wait/probe の 1 反復あたり回数）が高モードと低モードで異なる場合は所見として記録。
+- G の GPU 実行時間（クロック・電力状態の推定）への帰属は G 自体が多峰ありの場合に限る。
+  R・D が多峰で G が単峰なら、チェーン外の層または tracked 経路の違いが原因という対照関係を所見とする。
+- G で返却バッチ数 != wait 回数、またはタイムスタンプ欠落の反復は gpu_busy を null とし、帰属判定から外して件数を報告する。
+- OS 要因: run ごとの load1（前後）、pmset -g therm、低電力モードを記録し run 単位の高モード割合と並べる（記録のみ、判定に使わない）。
+  powermetrics は sudo -n が通る場合だけ run 単位で取得し、通らなければ「未取得」と記録。sudo は使わない。
+
+[系列 A と系列 B の差の説明]
+- R の各 run の計測系列から連続 20 反復の窓を全て取り（481 窓/run）、窓の中央値（10 番目と 11 番目の平均）を求める。
+- 判定（3 条件全部 =「説明できる」、一部 =「部分的」、なし =「説明できない」）:
+  (a) R で多峰あり
+  (b) 窓中央値分布の 5〜95% 範囲が bench 観測値 0.388 ms と 0.539 ms を両方含む（低モード中央値で割った比 0.388/0.385・0.539/0.385 でも併記）
+  (c) 窓中央値が低モード側に入る窓と高モード側に入る窓がそれぞれ 10% 以上ある
+- 参考: 窓中央値分布から「5 run 中央値の中央値」を 1 万回ブートストラップ（乱数種固定 3183）した 5〜95% 区間を記録のみ。
+
+[checksum 規則（hard・fail-closed）]
+- 同一腕の全反復・全 run で checksum_bits が一致すること。R と D と Don の checksum も一致すること。
+  1 つでも不一致・欠落・n != 500・非有限/負値・腕欠落・ゲート状態欠落なら系列は無効（集計は exit != 0）。
+
+[ゲート]
+- 各 run 開始前に load1 < 3.0 を 60 秒間隔で最大 20 回待つ。超過は GATE-TIMEOUT、値の検証失敗は GATE-INVALID で系列無効。
+- ほかのプロセスを並走させない。ビルドは計測前に 1 回だけ。
+
+[対照]
+- 同セッションで bench-fandhe（crates.io 0.11.0・変更なし）の infer metal 64 reuse を 5 回実行し記録のみ。
+
+[マスク規則]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。
