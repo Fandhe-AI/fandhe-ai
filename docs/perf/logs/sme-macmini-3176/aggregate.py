@@ -7,7 +7,10 @@ JSONL（`macmini/r1r2/`）を読み、RULE.txt の評価順 FAIL > REJECT > ADOP
 規則そのものは RULE.txt が正。本番定数（SME_PRODUCTION_ENABLED）は切り替えない。
 
 入力の厳格性: 重複行・非有限値・未知のキー・点数の過不足・m≠n の R4 行・欠損は捨てず、
-前提ゲート不成立（undetermined）へ写像する。python3 標準ライブラリのみ。
+前提ゲート不成立（undetermined）へ写像する。JSONL は読み取り時に各行がオブジェクト（重複キーなし）で、
+識別フィールド task（str）・size（int。bool は不可）・mode（str。省略時 fresh）の型を満たすことを
+検証し、null・配列・数値の行や size が配列の行は AttributeError／TypeError ではなく AggError にする
+（PR #3501 codex P2）。python3 標準ライブラリのみ。
 
 使い方:
   python3 -I aggregate.py <macmini-dir> [<label>]   # 既定 label は 3176-r1
@@ -46,8 +49,11 @@ class AggError(Exception):
 
 
 def read_lines(path):
-    with open(path) as f:
-        return [ln.rstrip("\n") for ln in f]
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [ln.rstrip("\n") for ln in f]
+    except UnicodeDecodeError as e:
+        raise AggError("%s: UTF-8 として読めない: %s" % (path, e))
 
 
 def parse_variant_log(path):
@@ -117,23 +123,61 @@ def rect_analysis(runs):
     return out
 
 
-def read_jsonl(path):
+def _no_dup_keys(pairs):
+    """json.loads の object_pairs_hook。同じキーが 2 回現れる行（後勝ちで黙って潰れる）を拒否する。"""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise AggError("重複キー %r" % k)
+        d[k] = v
+    return d
+
+
+def validate_row(o, where):
+    """1 行の構造と識別フィールドの型を検証する（不正は AggError）。
+
+    行はオブジェクトであること（null・配列・数値・文字列の行を拒否）、task は str、size は
+    bool を除く int（配列・float・文字列・true/false を拒否）、mode は省略または str。
+    値域（期待セル集合・device・parity）は checked_cells、数値フィールドは fnum が検証する。"""
+    if not isinstance(o, dict):
+        raise AggError("%s: 行がオブジェクトではない（%s）" % (where, type(o).__name__))
+    t, sz, m = o.get("task"), o.get("size"), o.get("mode", "fresh")
+    if not isinstance(t, str) or isinstance(sz, bool) or not isinstance(sz, int) or not isinstance(m, str):
+        raise AggError("%s: 識別フィールドの型が不正: task=%r size=%r mode=%r" % (where, t, sz, m))
+    return o
+
+
+def read_jsonl(path, skip_bad=False):
+    """JSONL の全行を検証して返す。JSON 不正・構造不正は AggError。
+
+    skip_bad=True は checksum_mismatch 専用で、不正な行だけを飛ばして残りを返す（FAIL 判定を
+    他の行の異常から独立させるため。不正行そのものは本流の checked_cells 側で undetermined になる）。"""
     if not os.path.isfile(path):
         raise AggError("ファイルがありません: %s" % path)
     rows = []
-    with open(path) as f:
-        for i, ln in enumerate(f, 1):
-            ln = ln.strip()
-            if ln:
-                try:
-                    rows.append(json.loads(ln))
-                except ValueError as e:
-                    raise AggError("%s:%d JSON 不正: %s" % (path, i, e))
+    for i, ln in enumerate(read_lines(path), 1):
+        ln = ln.strip()
+        if not ln:
+            continue
+        where = "%s:%d" % (path, i)
+        try:
+            try:
+                o = json.loads(ln, object_pairs_hook=_no_dup_keys)
+            except (ValueError, RecursionError) as e:
+                raise AggError("%s JSON 不正: %s" % (where, e))
+            rows.append(validate_row(o, where))
+        except AggError:
+            if not skip_bad:
+                raise
     return rows
 
 
 def fnum(v, what):
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+    try:
+        ok = not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+    except OverflowError:  # float へ変換できない巨大な JSON 整数
+        ok = False
+    if not ok:
         raise AggError("非数値の %s: %r" % (what, v))
     return float(v)
 
@@ -218,7 +262,8 @@ def ab_analysis(d, label):
 
 def checksum_mismatch(d, label):
     """before／after の checksum 不一致を、他セルの欠損・median_s 不正と独立に判定する（RULE §6: FAIL 最優先）。
-    読めない行・ファイルは飛ばし、読めた値だけで同一セル内に 2 値以上あれば True。
+    読めない行・ファイルは飛ばし、読めた値だけで同一セル内に 2 値以上あれば True。行の構造・識別フィールドの
+    検証は read_jsonl と同じ（validate_row）で、不正な行は飛ばす（本流では P-CELLS の undetermined になる）。
     対象セル（CELLS）の行で checksum が null・文字列・非有限値・欠落の場合も「数値として完全一致しない」異常として
     True を返す（RULE §6。実行スクリプトが非数値を FAIL と記録するのと整合させる）。"""
     seen = {}
@@ -226,16 +271,18 @@ def checksum_mismatch(d, label):
         for arm in ("before", "after"):
             path = os.path.join(d, "results-%s-%s-cpu-%s.jsonl" % (arm, label, task))
             try:
-                rows = read_jsonl(path)
+                rows = read_jsonl(path, skip_bad=True)
             except (OSError, AggError):
                 continue
             for r in rows:
                 v = r.get("checksum")
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                try:
+                    v = fnum(v, "checksum")
+                except AggError:
                     if (r.get("task"), r.get("size"), r.get("mode", "fresh")) in CELLS_SET:
                         return True
                     continue
-                seen.setdefault((r.get("task"), r.get("size"), r.get("mode", "fresh")), set()).add(float(v))
+                seen.setdefault((r.get("task"), r.get("size"), r.get("mode", "fresh")), set()).add(v)
     return any(len(vs) > 1 for vs in seen.values())
 
 
@@ -248,7 +295,11 @@ def gate_series(d):
     if len(paths) != 1:
         return False
     seen = {}
-    for ln in read_lines(paths[0]):
+    try:
+        lines = read_lines(paths[0])
+    except (OSError, AggError):
+        return False
+    for ln in lines:
         mt = GATE_ROUND.match(ln)
         if mt:
             # run_ab_sme_macmini_cpu.sh は gate_ok の後ろに threshold・load1・waited_s・at を続けて出力する。
@@ -282,7 +333,7 @@ def orchestration_checks(d):
     why = []
     try:
         lines = read_lines(os.path.join(d, "load_gate.log"))
-    except OSError:
+    except (OSError, AggError):
         return ["P-R4-EXEC: load_gate.log なし（R4・rect の負荷ゲート／開始・終了記録を検証できない）"]
     starts, ends, singles = {}, {}, {}
     for ln in lines:
@@ -332,7 +383,7 @@ def preconditions(d, label):
         for arm in ("before", "after"):
             if not any("kernel_enabled: true" in ln for ln in read_lines(os.path.join(d, "sme_probe_%s.log" % arm))):
                 why.append("P-R0: %s で kernel_enabled が true でない" % arm)
-    except OSError:
+    except (OSError, AggError):
         why.append("P-R0: 記録なし")
     try:
         sha = read_lines(os.path.join(d, "patch_sha256.txt"))
@@ -577,11 +628,64 @@ def self_test():
         ("device 不一致", lambda d: _edit_jsonl(d, lambda r: r.update(device="gpu"))),
         ("parity 失敗", lambda d: _edit_jsonl(d, lambda r: r.update(parity_fail_count=2))),
         ("余分セル", lambda d: _append_jsonl(d, dict(task="gemm", size=4096, mode="fresh", device="cpu", median_s=0.01, checksum=1.5))),
+        ("median_s 巨大整数", lambda d: _edit_jsonl(d, lambda r: r.update(median_s=10 ** 400))),
     ):
         with tempfile.TemporaryDirectory() as d:
             _fixture(d)
             mut(d)
             assert "undetermined" in render(d, "L").split("\n")[2], name
+    # JSONL の構造・識別フィールドの型の不正（PR #3501 codex P2）。例外で落ちず undetermined になること。
+    # 本流（checked_cells）でも独立確認（checksum_mismatch）でも AttributeError／TypeError を出さない
+    good = dict(task="gemm", size=512, mode="fresh", device="cpu", median_s=0.01, checksum=1.5)
+    gemm_after = os.path.join("r1r2", "results-after-L-cpu-gemm.jsonl")
+    torch_f = os.path.join("r1r2", "results-torch-3176-sme-L-cpu.jsonl")
+    bad_lines = [
+        ("null 行", gemm_after, "null"),
+        ("配列行", gemm_after, "[1, 2]"),
+        ("数値行", gemm_after, "3.5"),
+        ("文字列行", gemm_after, '"gemm"'),
+        ("size が配列", gemm_after, json.dumps(dict(good, size=[512]))),
+        ("size が bool", gemm_after, json.dumps(dict(good, size=True))),
+        ("size が float", gemm_after, json.dumps(dict(good, size=512.0))),
+        ("size が文字列", gemm_after, json.dumps(dict(good, size="512"))),
+        ("task が配列", gemm_after, json.dumps(dict(good, task=["gemm"]))),
+        ("mode が配列", gemm_after, json.dumps(dict(good, mode=["fresh"]))),
+        ("重複キー", gemm_after, '{"task": "gemm", "size": 512, "size": 1024, "mode": "fresh", "device": "cpu", "median_s": 0.01, "checksum": 1.5}'),
+        ("深い入れ子", gemm_after, "[" * 100000),
+    ]
+    for name, rel, line in bad_lines:
+        with tempfile.TemporaryDirectory() as d:
+            _fixture(d)
+            with open(os.path.join(d, rel), "a") as f:
+                f.write(line + "\n")
+            head = render(d, "L").split("\n")[2]
+            assert "undetermined" in head and "P-CELLS" in head, (name, head)
+            assert not checksum_mismatch(os.path.join(d, "r1r2"), "L"), name
+    with tempfile.TemporaryDirectory() as d:  # 不正行が混ざっても、同じファイルの読める行の checksum 不一致は FAIL のまま
+        _fixture(d)
+        _edit_jsonl(d, lambda r: r.update(checksum=9.5))
+        with open(os.path.join(d, gemm_after), "a") as f:
+            f.write("null\n" + json.dumps(dict(good, size=[512])) + "\n")
+        assert "FAIL" in render(d, "L").split("\n")[2]
+    for name, line in (("torch の null 行", "null"), ("torch の size が配列", json.dumps(dict(good, size=[512])))):
+        with tempfile.TemporaryDirectory() as d:  # PyTorch は記録専用。不正行は注記に回り ADOPT を妨げない（落ちない）
+            _fixture(d)
+            with open(os.path.join(d, torch_f), "a") as f:
+                f.write(line + "\n")
+            text = render(d, "L")
+            assert "ADOPT 候補" in text.split("\n")[2] and "注記" in text, name
+    for name, data in (("UTF-8 不正の JSONL", b"\xff\xfe\n"),):
+        with tempfile.TemporaryDirectory() as d:
+            _fixture(d)
+            with open(os.path.join(d, gemm_after), "ab") as f:
+                f.write(data)
+            assert "undetermined" in render(d, "L").split("\n")[2], name
+    with tempfile.TemporaryDirectory() as d:  # UTF-8 不正の load_gate.log・round ログでも落ちない
+        _fixture(d)
+        for rel in ("load_gate.log", os.path.join("r1r2", "load_gate-3176-sme-cpu-L.log"), "sme_probe_after.log"):
+            with open(os.path.join(d, rel), "ab") as f:
+                f.write(b"\xff\n")
+        assert "undetermined" in render(d, "L").split("\n")[2]
     print("self-test ok")
 
 

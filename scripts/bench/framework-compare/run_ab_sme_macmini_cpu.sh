@@ -265,8 +265,13 @@ for line in open(sys.argv[1]):
         o = json.loads(line)
     except ValueError:
         continue
-    if (o.get("reason") == "compiler-artifact" and o.get("target", {}).get("name") == "bench-fandhe"
-            and "bin" in o.get("target", {}).get("kind", []) and o.get("executable")):
+    # cargo の非 JSON 行・オブジェクト以外は読み飛ばす（AttributeError で落ちない。PR #3501 codex P2）
+    if not isinstance(o, dict):
+        continue
+    t = o.get("target")
+    if (o.get("reason") == "compiler-artifact" and isinstance(t, dict) and t.get("name") == "bench-fandhe"
+            and isinstance(t.get("kind"), list) and "bin" in t["kind"]
+            and isinstance(o.get("executable"), str) and o["executable"]):
         last = o["executable"]
 print(last)
 ' "$msg")"
@@ -305,6 +310,8 @@ BIN_AFTER="$OUT/bench-fandhe-3176-${GATE}-after-${LABEL}"
 # 5 件検証で共用する（PR #2448 codex P1 指摘）。
 # gemm は size ごとに別セルのため、第 4 引数 size を指定した場合はその size に限って数える
 # （省略時は size を問わない。train／infer は単一形状）。
+# 行がオブジェクトでない・size が bool を除く int でない・mode が str でない場合は python が
+# 非ゼロ終了し空文字を返す（呼び出し側が不足＝判定不能として扱う。PR #3501 codex P2）。
 count_cell_rows() { # count_cell_rows <arm> <task> <mode> [size] -> 行数 | (空)
   local f="$OUT/results-${1}-${LABEL}-${DEVICE}-${2}.jsonl" sz="${4:-}"
   [[ -f "$f" ]] || return 0
@@ -317,7 +324,12 @@ for line in open(f):
     if not line:
         continue
     o = json.loads(line)
-    if o.get("mode", "fresh") == mode and (size == "" or str(o.get("size")) == size):
+    if not isinstance(o, dict):
+        sys.exit("row is not an object")
+    sz, md = o.get("size"), o.get("mode", "fresh")
+    if isinstance(sz, bool) or not isinstance(sz, int) or not isinstance(md, str):
+        sys.exit("bad size/mode type")
+    if md == mode and (size == "" or str(sz) == size):
         n += 1
 print(n)
 ' "$f" "$3" "$sz" 2>/dev/null || true
@@ -486,28 +498,50 @@ for task in gemm train infer; do
   # checksum 不一致を同じ終了コード 3 で返し区別できないため、比較の前に JSONL から
   # セル（mode × size）ごとに before・after 全行の checksum が数値かつ完全一致であることを
   # 確認し、不一致・欠損・検査不能なら比較へ進まず FAIL として停止する（fail-closed。PR #2451 codex P1 指摘）。
+  # 行がオブジェクトでない・識別フィールド（device／mode は str、size は bool を除く int）の型が
+  # 不正・checksum が非有限の行は「入力構造不正」を出して exit 2 とし、AttributeError／TypeError
+  # の素の例外で落とさない（下の分岐で checksum 不一致〈FAIL〉とは区別し判定不能として停止する。PR #3501 codex P2）。
   CK_BAD="$(python3 -c '
-import json, sys
+import json, math, sys
 dev = sys.argv[1]
 groups = {}
+def malformed(where, why):
+    print("入力構造不正 %s: %s" % (where, why))
+    sys.exit(2)
 for path in sys.argv[2:]:
-    for line in open(path):
+    for i, line in enumerate(open(path, encoding="utf-8"), 1):
         line = line.strip()
         if not line:
             continue
-        o = json.loads(line)
-        if o.get("device") != dev:
+        where = "%s:%d" % (path, i)
+        try:
+            o = json.loads(line)
+        except (ValueError, RecursionError) as e:
+            malformed(where, "JSON 不正")
+        if not isinstance(o, dict):
+            malformed(where, "行がオブジェクトではない")
+        d, m, sz = o.get("device"), o.get("mode", "fresh"), o.get("size")
+        if not isinstance(d, str) or not isinstance(m, str) or isinstance(sz, bool) or not isinstance(sz, int):
+            malformed(where, "device／mode／size の型が不正")
+        if d != dev:
             continue
-        groups.setdefault((o.get("mode", "fresh"), str(o.get("size", "NA"))), []).append(o.get("checksum"))
+        groups.setdefault((m, str(sz)), []).append(o.get("checksum"))
 bad = []
 for (mode, size), cs in sorted(groups.items()):
-    numeric = all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in cs)
+    numeric = all(isinstance(c, float) or (isinstance(c, int) and not isinstance(c, bool) and abs(c) < 2 ** 53) for c in cs) and all(math.isfinite(c) for c in cs)
     if not numeric or len(set(cs)) != 1:
         bad.append("mode=%s size=%s" % (mode, size))
 print(", ".join(bad))
 ' "$DEVICE" \
     "${OUT}/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "${OUT}/results-after-${LABEL}-${DEVICE}-${task}.jsonl" 2>/dev/null)"
   CK_RC=$?
+  if [[ "$CK_RC" -eq 2 ]]; then
+    # 入力構造不正は checksum 不一致（FAIL）ではなく判定不能として停止する（RULE.txt の undetermined）
+    echo "compare task=$task: 判定不能（${CK_BAD:-入力構造不正}。checksum 不一致ではない）" >>"$SKIP"
+    echo "compare task=$task exit=NA (判定不能: JSONL の入力構造不正)" | tee -a "$OUT/compare-exit-3176-${GATE}-${DEVICE}-${LABEL}.log"
+    ANY_FAILED=$((ANY_FAILED + 1))
+    continue
+  fi
   if [[ "$CK_RC" -ne 0 || -n "$CK_BAD" ]]; then
     echo "compare task=$task: FAIL（checksum 完全一致の確認に失敗: ${CK_BAD:-検査不能 python exit=${CK_RC}}。機構の不具合として ADOPT／REJECT に数えず停止）" >>"$SKIP"
     echo "compare task=$task exit=NA (FAIL: checksum 不一致。性能判定へ進まない)" | tee -a "$OUT/compare-exit-3176-${GATE}-${DEVICE}-${LABEL}.log"
