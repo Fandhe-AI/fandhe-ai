@@ -266,7 +266,9 @@ def cmd_cpu_blas_probe(args):
 # ---- fandhe 側ログのパーサー（RULE 項 7） ----
 
 TEST_OK = re.compile(r"^test result: ok\.")
-LAYERB_HEAD = re.compile(r"^  N=(\d+) kernel=(\w+) \(median over")
+# --test-threads=1 --nocapture では最初のヘッダが libtest 接頭辞（"test <path> ... "）と同一行に出る
+# （docs/perf/logs/cuda-gemm-reuse-phase-1182/layerB-run1.log:186）。接頭辞だけを限定的に許容する。
+LAYERB_HEAD = re.compile(r"^(?:test \S+ \.\.\. )?  N=(\d+) kernel=(\w+) \(median over")
 LAYERB_LINE = re.compile(
     r"^    (launch_issue|kernel_wait): median=([0-9.]+) ms  q1=([0-9.]+) ms  q3=([0-9.]+) ms\s*$")
 DIAG_LINE = re.compile(
@@ -581,6 +583,17 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("不正行を拒否していない")
+    hd = "test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select ...   N=1024 kernel=Select (median over 20 trials, 20 warmup):"
+    hm = LAYERB_HEAD.match(hd)
+    assert hm and hm.groups() == ("1024", "Select"), "libtest 接頭辞付きヘッダを認識しない"
+    assert LAYERB_HEAD.match("  N=2048 kernel=Select (median over 20 trials, 20 warmup):")
+    assert not LAYERB_HEAD.match("xtest foo ...   N=1024 kernel=Select (median over")
+    txt = hd + "\n    launch_issue: median=0.0029 ms  q1=0.0029 ms  q3=0.0030 ms\n" \
+        "    kernel_wait: median=1.0 ms  q1=1.0 ms  q3=1.0 ms\n"
+    for n in (2048, 4096):
+        txt += f"  N={n} kernel=Select (median over 20 trials, 20 warmup):\n" \
+            "    launch_issue: median=0.1 ms  q1=0.1 ms  q3=0.1 ms\n    kernel_wait: median=1.0 ms  q1=1.0 ms  q3=1.0 ms\n"
+    assert len(parse_layerb(txt + "test result: ok. 1 passed\n", 1)) == 6
     assert blas_libs_from_maps("7f 0 0 0 0 /usr/lib/libopenblas.so.0\n") == ["libopenblas.so.0"]
     print("self-test ok")
 
