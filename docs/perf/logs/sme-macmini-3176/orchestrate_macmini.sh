@@ -178,7 +178,8 @@ for r in ${RUNS}; do run_one rect "${r}" "rect_run${r}" sme_vs_neon_ab_mlp_rect 
 (cd "${BEFORE}/scripts/bench/framework-compare" && \
     AB_BEFORE_FACADE_PATH="${BEFORE}/crates/facade" AB_AFTER_FACADE_PATH="${AFTER}/crates/facade" \
     AB_TORCH_PYTHON="${TORCH_PY}" bash run_ab_sme_macmini_cpu.sh 3176-r1) > "${OUT}/run_ab.log" 2>&1
-echo "run_ab exit=$?" >> "${OUT}/load_gate.log"
+run_ab_rc=$?
+echo "run_ab exit=${run_ab_rc}" >> "${OUT}/load_gate.log"
 # 未加工ログ（build の絶対パス・cargo tree 等を含みうる）も収録前に同じマスクを適用する（RULE §8）。失敗は collect_rc に積む
 mask_rc=0
 for f in "${OUT}"/*.raw.log "${OUT}/run_ab.log" "${OUT}/patch_apply.log"; do
@@ -202,4 +203,6 @@ echo "collect exit=${collect_rc}" >> "${OUT}/load_gate.log"
 # 全計測の終了後にだけ before ツリー内の収録先へ複製する（計測中に before を汚さない）
 cp -R "${OUT}" "${FINAL}" || { echo "収録先への複製に失敗: ${FINAL}" >&2; exit 1; }
 [ "${collect_rc}" = "0" ] || { echo "収録に失敗（collect exit=${collect_rc}）" >&2; exit 1; }
+# A/B 実行自体の失敗（ビルド失敗・checksum 不一致・負荷ゲート不成立等）はログ収録後に非 0 で伝播する（「完了」を出さない）
+[ "${run_ab_rc}" = "0" ] || { echo "A/B 実行が失敗（run_ab exit=${run_ab_rc}）。ログは収録済み" >&2; exit "${run_ab_rc}"; }
 echo "完了"

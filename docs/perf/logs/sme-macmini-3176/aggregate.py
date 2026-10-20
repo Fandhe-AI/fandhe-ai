@@ -212,6 +212,25 @@ def ab_analysis(d, label):
     return res, torch_note
 
 
+def checksum_mismatch(d, label):
+    """before／after の checksum 不一致を、他セルの欠損・median_s 不正と独立に判定する（RULE §6: FAIL 最優先）。
+    読めない行・ファイル・非数値は黙って飛ばし、読めた値だけで同一セル内に 2 値以上あれば True。"""
+    seen = {}
+    for task in ("gemm", "train", "infer"):
+        for arm in ("before", "after"):
+            path = os.path.join(d, "results-%s-%s-cpu-%s.jsonl" % (arm, label, task))
+            try:
+                rows = read_jsonl(path)
+            except (OSError, AggError):
+                continue
+            for r in rows:
+                v = r.get("checksum")
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    continue
+                seen.setdefault((r.get("task"), r.get("size"), r.get("mode", "fresh")), set()).add(float(v))
+    return any(len(vs) > 1 for vs in seen.values())
+
+
 def gate_series(d):
     """load_gate.log の round 行から正式系列（5/5 gate_ok=1）かを返す。"""
     paths = glob.glob(os.path.join(d, "r1r2", "load_gate-3176-*.log"))
@@ -317,6 +336,7 @@ def preconditions(d, label):
         data["ab"], data["torch_note"] = ab_analysis(os.path.join(d, "r1r2"), label)
     except (OSError, AggError) as e:
         why.append("P-CELLS: %s" % e)
+    data["ck_fail"] = checksum_mismatch(os.path.join(d, "r1r2"), label)
     data["official"] = gate_series(d)
     if not data["official"]:
         why.append("系列: 5/5 round が gate_ok=1 ではない（record_only）")
@@ -325,7 +345,7 @@ def preconditions(d, label):
 
 def verdict(why, data):
     ab = data.get("ab")
-    if ab and any(not r["ck_ok"] for r in ab):
+    if data.get("ck_fail") or (ab and any(not r["ck_ok"] for r in ab)):
         return "FAIL（checksum 不一致。ADOPT／REJECT に数えない）"
     if why:
         return "undetermined（" + "；".join(why) + "）"
@@ -469,6 +489,15 @@ def self_test():
     with tempfile.TemporaryDirectory() as d:  # torch 欠損 + checksum 不一致でも FAIL を失わない
         _fixture(d, ck_after=2.5)
         os.remove(os.path.join(d, "r1r2", "results-torch-3176-sme-L-cpu.jsonl"))
+        assert "FAIL" in render(d, "L").split("\n")[2]
+    with tempfile.TemporaryDirectory() as d:  # 別タスクの記録欠損・median_s 不正で ab_analysis が例外でも確認済み checksum 不一致は FAIL
+        _fixture(d)
+        _edit_jsonl(d, lambda r: r.update(checksum=9.5))
+        os.remove(os.path.join(d, "r1r2", "results-after-L-cpu-infer.jsonl"))
+        assert "FAIL" in render(d, "L").split("\n")[2]
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d)
+        _edit_jsonl(d, lambda r: r.update(checksum=9.5, median_s=-1))
         assert "FAIL" in render(d, "L").split("\n")[2]
     with tempfile.TemporaryDirectory() as d:  # torch の parity_fail_count 非 0 は記録のみで ADOPT を妨げない
         _fixture(d)
