@@ -1,0 +1,12 @@
+build-done 2026-10-20T04:24:19Z
+run1 gate=pass load1=2.65 waited_s=150 at=2026-10-20T04:26:50Z
+run1 end_load1=3.22
+run2 gate=pass load1=2.28 waited_s=30 at=2026-10-20T04:28:04Z
+run2 end_load1=3.31
+run3 gate=pass load1=2.80 waited_s=30 at=2026-10-20T04:29:18Z
+run3 end_load1=2.55
+run4 gate=pass load1=2.55 waited_s=0 at=2026-10-20T04:30:02Z
+run4 end_load1=3.60
+run5 gate=pass load1=2.58 waited_s=30 at=2026-10-20T04:31:16Z
+run5 end_load1=3.38
+series done

@@ -1,0 +1,20 @@
+2026-10-20T04:23:16Z
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+Apple M4
+hw.ncpu: 10
+hw.perflevel0.logicalcpu: 4
+hw.perflevel1.logicalcpu: 6
+hw.memsize: 17179869184
+rustc 1.99.0 (b940084d7 2026-09-28)
+13:23  up 9 days, 12:57, 1 user, load averages: 5.33 2.11 1.59
+-- pmset -g therm (before)
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+-- pmset -g therm (after)
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+13:32  up 9 days, 13:05, 1 user, load averages: 3.38 3.84 3.21

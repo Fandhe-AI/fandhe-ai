@@ -49,8 +49,8 @@ class AggError(Exception):
     pass
 
 
-def num(v, what):
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+def num(v, what, signed=False):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or (v < 0 and not signed):
         raise AggError(f"非数値または負値: {what}={v!r}")
     return float(v)
 
@@ -73,7 +73,7 @@ def load_jsonl(path, framework):
         if key in out:
             raise AggError(f"{path.name}:{ln} 重複: {key}")
         out[key] = (num(r.get("median_s"), f"{path.name}:{ln} median_s"),
-                    num(r.get("checksum"), f"{path.name}:{ln} checksum") if "checksum" in r else None)
+                    num(r.get("checksum"), f"{path.name}:{ln} checksum", signed=True) if "checksum" in r else None)
     return out
 
 
