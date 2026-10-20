@@ -1,0 +1,85 @@
+RULE fixed-at-utc: 2026-10-20T09:00:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #3186 GB10 の CUDA GEMM で reuse が fresh の 2 倍以上遅い原因の特定（診断のみ）
+doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §14
+背景: 0.11.0 再計測で gemm CUDA の reuse が N=512/1024/2048 で fresh の約 2.2〜2.4 倍遅い
+      （N=4096 はほぼ同じ）。§12.5 の未説明分は reuse−fresh の差と同程度。仮説は
+      「reuse 窓は結果ノードを tape に溜め続け free が起きないため、毎回未タッチの新規
+      ページへ事前タッチと D2H を行う。fresh 窓は毎反復 free するため glibc の動的 mmap
+      閾値が上がり（32 MiB 以下）タッチ済みヒープを再利用できる」。本イシューは診断のみで、
+      本番コード（memory::READBACK_DEST 既定 PretouchedFresh）・tolerance・baseline は変えない。
+      是正は #3225。ゼロコピー readback は範囲外（所有者承認が別に要る）。
+
+[実行方法]
+- 1 run = (N, 腕) ごとに独立プロセスで 1 回。テストバイナリ
+  crates/backend-cuda/src/fresh_reuse_window_diag_tests_3186.rs を
+  `--ignored --exact <test> --nocapture --test-threads=1` で起動し、出力は JSONL（DIAG_JSON）。
+- N = 512 / 1024 / 2048 / 4096。ただし N=512 は record_only（判定は出すが既知 checksum が
+  無く、#2107 の対象外のため参考。判定文言に record_only を明記する）。
+- 腕（窓パターン × 宛先方式）: drop_pretouched / keep_pretouched / drop_untouched /
+  keep_untouched / drop_reused / drop_pinned / keep_pinned / drop_pretouched_split /
+  keep_pretouched_split。全腕、起動後に同期せず本番順序で計る。
+- run1〜run5 の 5 run。run ごとに腕の順序を巡回させる。差し替え・追加起動・既存 run ファイルの
+  上書きはしない。1 プロセスあたり warmup 20 + 計測 20 試行。単位 μs。
+- 同一セッションの Layer A: bench-fandhe --task gemm --device cuda --mode fresh / --mode reuse を
+  N ごとに run ごと 1 回（HEAD の crates/facade を --config patch.crates-io.fandhe-ai.path で
+  差し込んで計測）。median_s と checksum を使う。
+- 各区間は run ごとの median（20 試行）を採り、run 間の中央値と min-max を報告する。
+  合算量は run ごとに合算してから run 間の中央値を採る。
+
+[checksum 規則（hard・fail-closed）]
+- (N, 腕) 内の全 run で checksum_bits が一致すること。
+- 同一 N の全腕で checksum_bits が一致すること。
+- 同一 N の Layer A（fresh・reuse の全 run）の checksum が Layer B と 1e-5 以内で一致すること。
+- N=1024/2048/4096 は既知値（-1855.597736 / -6016.774008 / -25768.747284）と 1e-5 以内で一致すること。
+- 1 件でも不一致・欠損・run 不足なら系列は無効（aggregate.py は exit != 0）。
+
+[判定 W: 窓の構成（tape 蓄積）の寄与]
+- gap_retention(N) = median(keep_pretouched.readback_total) − median(drop_pretouched.readback_total)
+- gap_A(N)         = LayerA_reuse.median − LayerA_fresh.median（同一セッション）
+- retention_share  = gap_retention / gap_A
+  - >= 0.80 : 窓の構成（宛先の保持）への帰属を支持
+  - <  0.50 : 棄却（主因は別）
+  - それ以外: 未確定
+  - gap_A <= 0 : reuse−fresh の差が再現しない。判定しない
+- 閾値は #2107 と揃える。判定が示す範囲は「宛先の保持の有無で readback 区間に出る差」のみ。
+  H2D・readout 方式（借用ビュー vs to_vec2）・カーネル／同期の実装差は検出対象外。
+
+[判定 F: N=4096 fresh の未説明分]
+- page_cost_4096 = median(drop_pretouched.readback_total) − median(drop_reused.d2h_issue+d2h_sync)
+- host_checksum_4096 = median(drop_reused.host_read)（Layer B で同じ f64 和を区間計測した値。固定）
+- residual_fresh_4096 = LayerA_fresh.median
+                        − [drop_reused の h2d_a+h2d_b+alloc_c+launch_issue+d2h_issue+d2h_sync]
+                        − host_checksum_4096
+- share_F = page_cost_4096 / residual_fresh_4096
+  - >= 0.80 : 帰属できた
+  - <  0.50 : 帰属できなかった（主因は別）
+  - それ以外: 未確定
+  - residual <= 0 : 非再現
+- 記録のみ（判定に使わない）: drop_reused の D2H 区間と帯域の下限（約 1.1 ms の推定値）の差。
+
+[二峰性の条件（N=4096。D2H 区間が約 25 ms / 約 620 ms の二峰性）]
+- 高モード試行 = d2h 区間 > 5 × median(drop_reused の d2h_issue+d2h_sync)。
+  d2h 区間は D2H のみを分離できる腕で取る: drop_untouched / keep_untouched は readback_total
+  （clone_dtoh + 同期。未タッチ宛先への D2H そのもの）、drop/keep_pretouched_split と drop_reused は
+  d2h_issue+d2h_sync。pretouched / pinned の readback_total は確保・事前タッチ・コピーアウトを含み
+  D2H のみを表さないため高モード判定に使わない。
+- 腕ごと・run ごとに高モード試行の件数を数える。
+- 判定: 高モードが untouched 系の腕にだけ出て、split 系・reused の全 run で 0 件なら
+  「未タッチ宛先が条件」。どの腕にも出なければ「再現せず」。それ以外は「未確定（混在）」。
+- minflt / majflt と THP 設定（/sys/kernel/mm/transparent_hugepage/{enabled,defrag}・
+  AnonHugePages）は付記のみ（record_only）。システム状態は変更しない。
+
+[専有ゲート]
+- gb10: 各 run 開始前に load1 < 1.0 かつ GPU 利用率 0% を 30 秒間隔・最大 30 分待つ。
+  通過しない run があれば系列全体を参考扱い。集計器は load_gate_status.txt の run1..5 が全て
+  gate=pass の GB10 系列のみ通常判定とし、欠落・不明値・未通過は各判定に「参考扱い」を明示する。
+- x86 は record_only。GB10 実測の代替ではない。
+
+[対象外（再評価しない）]
+- REJECT 済み施策: Stream-K・persistent kernel・TMA Stage 1・managed 配置（#1353）・pinned H2D（#1585）。
+- ゼロコピー readback（新規 unsafe・tensor-core のストレージ抽象変更）。
+- MALLOC_MMAP_THRESHOLD_ の固定・THP などシステム設定の変更。
+- 宛先方針の変更・pinned-reuse の既定化（#3225。ADOPT 判定が出ても本イシューでは切り替えない）。
+
+[マスク]
+- ホスト名は masked、$HOME は <home> に置換してから収録する。
