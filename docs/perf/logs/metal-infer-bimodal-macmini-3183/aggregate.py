@@ -236,6 +236,9 @@ def attributed_spans(entries):
     spans = set()
     for e in multi:
         spans.update(e["attr"].keys())
+    # 腕 G の wall は iter_total の複製（比が常に 1.0）で、RULE.txt も帰属対象区間に含めない。
+    # 表の分布表示には残すが、帰属候補からは除外する（AC2 の「特定できなかった」を潰さないため）。
+    spans.discard("wall")
     out = []
     for k in sorted(spans):
         cnt = sum(1 for e in multi if e["attr"].get(k) is not None and e["attr"][k] >= ATTR_RATIO)
@@ -508,6 +511,12 @@ def self_test():
         write_synth(d, {1: "uni", 2: "uni", 3: "sticky_hi", 4: "uni", 5: "sticky_hi"})
         md = aggregate(d)
         check("固着: あり" in md, "run 単位の固着を検出")
+    # wall は iter_total の複製なので、実区間の比がすべて閾値未満なら帰属なしになる
+    ent = [{"multimodal": True, "attr": {"upload": 0.25, "encode": 0.25, "commit_wait": 0.25,
+                                          "download": 0.25, "wall": 1.0, "gpu_busy": 0.25}}] * 3
+    check(attributed_spans(ent)[0] == [], "G: wall 比 1.0 でも実区間が全て 0.25 なら帰属なし")
+    ent = [{"multimodal": True, "attr": {"encode": 0.9, "wall": 1.0, "gpu_busy": 0.25}}] * 3
+    check([k for k, _ in attributed_spans(ent)[0]] == ["encode"], "G: 実区間 encode のみ帰属")
     print("self-test: " + ("OK" if ok else "NG"))
     return 0 if ok else 1
 
