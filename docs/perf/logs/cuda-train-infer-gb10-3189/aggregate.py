@@ -29,6 +29,14 @@ from pathlib import Path
 
 RUNS = (1, 2, 3, 4, 5)
 EXPECTED_N = 80
+# 腕 A の cell（task, mode）ごとの必須フェーズ（bench-fandhe 固定版。cuda／cpu 共通の最小集合。RULE.txt 規則 7）
+REQUIRED_PHASES = {
+    ("train_phases", "fresh"): frozenset({"forward", "backward", "step_total"}),
+    ("train_phases", "reuse"): frozenset({"forward_resident", "backward", "device_update", "step_total"}),
+    ("infer_phases", "fresh"): frozenset({"predict", "iter_total"}),
+    ("infer_phases", "reuse"): frozenset({"predict_resident", "iter_total"}),
+}
+U64_MAX = 2**64 - 1
 TOTAL = {"train_phases": "step_total", "infer_phases": "iter_total"}
 WINDOWS = ("fwd", "fwd_bwd", "full", "infer_reuse")
 KS = (20, 120)
@@ -147,6 +155,9 @@ def load_arm_a(d: Path):
                     c = (dev, task, mode)
                     if c not in cells:
                         raise AggError(f"armA/{f.name} に欠落セル {c}")
+                    miss = REQUIRED_PHASES[(task, mode)] - cells[c]
+                    if miss:
+                        raise AggError(f"armA/{f.name} の {c} に必須フェーズ {sorted(miss)} がない")
                     if TOTAL[task] not in cells[c]:
                         raise AggError(f"armA/{f.name} の {c} に合計フェーズ {TOTAL[task]} がない")
         sets[i] = {c: frozenset(p) for c, p in cells.items()}
@@ -209,7 +220,10 @@ def load_infer(d: Path):
                 if r.get("backend") != "cuda":
                     raise AggError(f"infer-diag/run{i}.{part}: backend が cuda でない（{r.get('backend')!r}）")
                 if r.get("phase") == "checksum":
-                    sums[i] = r.get("checksum")
+                    cs = r.get("checksum")
+                    if "checksum" not in r or isinstance(cs, bool) or not isinstance(cs, int) or not 0 <= cs <= U64_MAX:
+                        raise AggError(f"infer-diag/run{i}.{part}: checksum が u64 整数でない/欠落: {cs!r}")
+                    sums[i] = cs
                     continue
                 if r.get("n") != EXPECTED_N:
                     raise AggError(f"infer-diag/run{i}.{part}: n={r.get('n')!r} ≠ {EXPECTED_N}")
@@ -317,6 +331,8 @@ def parse_api_csv(text: str):
         raise AggError("nsys cuda_api_sum の CSV ヘッダが見つからない")
     rows = list(csv.DictReader(io.StringIO("\n".join(lines[start:]))))
     cnt = {c: 0 for c in CATEGORIES}
+    if not rows:
+        raise AggError("nsys cuda_api_sum にデータ行が無い（ヘッダのみ。ゼロ回として扱わない）")
     for r in rows:
         name = (r.get("Name") or "").strip()
         n = r.get("Num Calls")
@@ -325,6 +341,8 @@ def parse_api_csv(text: str):
         for c, rx in CATEGORIES.items():
             if rx.match(name):
                 cnt[c] += int(n)
+    if cnt["launch"] == 0:
+        raise AggError("nsys cuda_api_sum に cuLaunchKernel の記録が無い（必ず発生する記録の欠落）")
     return cnt
 
 
@@ -383,7 +401,7 @@ def render_census(cs):
 
 
 # ---- 帰属 ----
-def render_attrib(meds, fixed_m, steps, bm):
+def render_attrib(meds, fixed_m, steps, bm, fidelity_ok=True):
     out = ["## 帰属と見込み（record-only。原因の断定はしない）\n"]
     if steps is None:
         out.append("同期回数が未実測のため、同期回数に基づく見込みは出さない。\n")
@@ -397,6 +415,10 @@ def render_attrib(meds, fixed_m, steps, bm):
         "実カーネル同期(kernel_wait_derived)": bm["kernel_wait_derived"],
     }
     gap = step - inf
+    if not fidelity_ok:
+        # fidelity 範囲外の backend 区間は参考扱い: 実カーネル同期を c に使う見込みは出さない
+        del cs["実カーネル同期(kernel_wait_derived)"]
+        out.append("- **fidelity 範囲外のため kernel_wait_derived に基づく削減見込み・説明率は算出しない（参考扱い）**")
     out.append(f"- train reuse step_total = {step*1e6:.1f} µs、infer reuse iter_total = {inf*1e6:.1f} µs、差 = {gap*1e6:.1f} µs")
     out.append(f"- 同期回数: train full = {n_full:g}、infer = {n_inf:g}")
     out.append("\n| c の種別 | c (µs) | (n_full−1)×c (µs) | step_total に対する説明率 | 未説明残差 (µs) |")
@@ -433,7 +455,7 @@ def main_report(d: Path):
     out += sec
     sec, steps = render_census(cs)
     out += sec
-    out += render_attrib(meds, fixed_m, steps, bm)
+    out += render_attrib(meds, fixed_m, steps, bm, ok)
     return "\n".join(out)
 
 
@@ -445,7 +467,7 @@ def _w(p: Path, text: str):
 
 def _fixture(d: Path, with_census=True):
     phases = {
-        ("train_phases", "fresh"): ["forward", "step_total"],
+        ("train_phases", "fresh"): ["forward", "backward", "step_total"],
         ("train_phases", "reuse"): ["forward_resident", "backward", "device_update", "step_total"],
         ("infer_phases", "fresh"): ["predict", "iter_total"],
         ("infer_phases", "reuse"): ["predict_resident", "iter_total"],
@@ -528,6 +550,10 @@ def self_test():
     expect_fail("err 非空", lambda dd: _w(dd / "armA" / "run2.err", "boom"))
     expect_fail("絶対パス残存", lambda dd: _w(dd / "env_info.txt", "/home/someone/x"))
     expect_fail("CPU 混入", lambda dd: _w(dd / "infer-diag" / "run1.facade.jsonl", (dd / "infer-diag" / "run1.facade.jsonl").read_text().replace('"cuda"', '"cpu"', 1)))
+    expect_fail("必須フェーズ欠落", lambda dd: _w(dd / "armA" / "run1.jsonl", "\n".join(l for l in (dd / "armA" / "run1.jsonl").read_text().splitlines() if '"device_update"' not in l or '"cpu"' not in l) + "\n"))
+    expect_fail("checksum が bool", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": true')) for i in RUNS])
+    expect_fail("checksum が u64 超過", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": 18446744073709551616')) for i in RUNS])
+    expect_fail("ヘッダのみ CSV", lambda dd: _w(dd / "census" / "fwd-K20-r1.cuda_api_sum.csv", '"Time (%)","Total Time (ns)","Num Calls","Avg (ns)","Name"\n'))
     expect_fail("固定費行欠落", lambda dd: _w(dd / "fixed-cost" / "run1.log", ""))
     # census 無しは「未実測」
     with tempfile.TemporaryDirectory() as t:
