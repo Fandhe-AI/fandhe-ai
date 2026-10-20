@@ -69,6 +69,12 @@ CARGO_TARGET_DIR="${FC_TARGET}" cargo tree -p bench-fandhe --depth 1 | grep -E '
 if ! grep -q 'fandhe-ai v0.11.0$' "${OUT}/tree.txt" || [ "$(wc -l < "${OUT}/tree.txt" | tr -d ' ')" != 1 ]; then
   echo "registry pin 0.11.0 not resolved（腕 A の同定に失敗）" >&2; exit 1
 fi
+# framework-compare 内で Cargo.lock を復元してから trap を解除する。trap のまま ROOT へ cd すると
+# 相対パス Cargo.lock の復元先が本体ルートの Cargo.lock にずれ、framework-compare 側の lock で上書きしてしまう
+if ! bench_fandhe_restore_lock; then
+  echo "framework-compare の Cargo.lock 復元に失敗" >&2; exit 1
+fi
+trap - EXIT
 BIN="${FC_TARGET}/release/bench-fandhe"
 [ -x "${BIN}" ] || { echo "bench-fandhe が無い" >&2; exit 1; }
 
@@ -108,6 +114,10 @@ BACKEND_BIN="$(find_bin infer_chain_phase_diag_3189 -p fandhe-ai-backend-cuda --
 LIB_BIN="$(find_bin lib:fandhe_ai_backend_cuda -p fandhe-ai-backend-cuda --lib)" || { echo "backend lib バイナリ特定失敗" >&2; exit 1; }
 if ! (trap - EXIT ERR; set -o pipefail; cargo build --release --locked -p fandhe-ai-backend-cuda --features internal-diagnostics --example unified_memory_probe 2>&1 | mask > "${OUT}/build_probe.log"); then
   echo "BUILD FAILED（unified_memory_probe）" >&2; tail -20 "${OUT}/build_probe.log" >&2; exit 1
+fi
+# 腕 B-0（#2116）の orchestrate.sh が冒頭で build する診断バイナリも、計測開始前（RULE.txt 規則 8）にここで準備する
+if ! (trap - EXIT ERR; set -o pipefail; cargo test --release --locked -p fandhe-ai --test cuda_train_forward_resident_diag --no-run 2>&1 | mask > "${OUT}/build_2116.log"); then
+  echo "BUILD FAILED（2116 cuda_train_forward_resident_diag）" >&2; tail -20 "${OUT}/build_2116.log" >&2; exit 1
 fi
 PROBE_BIN="${CARGO_TARGET_DIR}/release/examples/unified_memory_probe"
 [ -x "${PROBE_BIN}" ] || { echo "unified_memory_probe が無い" >&2; exit 1; }

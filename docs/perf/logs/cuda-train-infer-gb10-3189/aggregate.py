@@ -36,6 +36,14 @@ REQUIRED_PHASES = {
     ("infer_phases", "fresh"): frozenset({"predict", "iter_total"}),
     ("infer_phases", "reuse"): frozenset({"predict_resident", "iter_total"}),
 }
+# device 別の上書き: CUDA の infer fresh は predict ではなく forward／to_tensor を出す（predict は CPU fresh のみ）
+REQUIRED_PHASES_BY_DEVICE = {
+    ("cuda", "infer_phases", "fresh"): frozenset({"forward", "to_tensor", "iter_total"}),
+}
+
+
+def required_phases(dev, task, mode):
+    return REQUIRED_PHASES_BY_DEVICE.get((dev, task, mode), REQUIRED_PHASES[(task, mode)])
 U64_MAX = 2**64 - 1
 TOTAL = {"train_phases": "step_total", "infer_phases": "iter_total"}
 WINDOWS = ("fwd", "fwd_bwd", "full", "infer_reuse")
@@ -155,7 +163,7 @@ def load_arm_a(d: Path):
                     c = (dev, task, mode)
                     if c not in cells:
                         raise AggError(f"armA/{f.name} に欠落セル {c}")
-                    miss = REQUIRED_PHASES[(task, mode)] - cells[c]
+                    miss = required_phases(dev, task, mode) - cells[c]
                     if miss:
                         raise AggError(f"armA/{f.name} の {c} に必須フェーズ {sorted(miss)} がない")
                     if TOTAL[task] not in cells[c]:
@@ -276,7 +284,16 @@ def render_infer(fac, bak, meds):
     upper = fm[("decomposed", "tape")] + fm[("decomposed", "snapshot")] + fm[("decomposed", "steps")] + fm[("paired", "residual")]
     out.append(f"- 上位の固定費 = tape＋snapshot＋steps＋paired/residual = {upper*1e6:.1f} µs")
     pub = fm[("public", "predict_resident")]
-    out.append(f"- public predict_resident = {pub*1e6:.1f} µs（decomposed 合計 {sum(fm[('decomposed', p)] for p in ('tape','snapshot','steps','chain','readout'))*1e6:.1f} µs ＋ residual {fm[('paired','residual')]*1e6:.1f} µs）")
+    dec_sum = sum(fm[('decomposed', p)] for p in ('tape', 'snapshot', 'steps', 'chain', 'readout'))
+    out.append(f"- public predict_resident = {pub*1e6:.1f} µs（decomposed 合計 {dec_sum*1e6:.1f} µs ＋ residual {fm[('paired','residual')]*1e6:.1f} µs）")
+    # decomposed 合計 / public の比も独立に評価する（RULE.txt 規則 4）。範囲外なら上位区間と固定費は参考扱い
+    pub_fid = dec_sum / pub if pub > 0 else float("nan")
+    pub_ok = FIDELITY_LO <= pub_fid <= FIDELITY_HI
+    out.append(
+        f"- fidelity(上位) = decomposed 合計 / public predict_resident = {pub_fid:.3f}（許容 {FIDELITY_LO}〜{FIDELITY_HI}）→ "
+        f"{'上位区間は正式扱い' if pub_ok else '**範囲外: 上位区間と上位の固定費は参考扱い**'}"
+    )
+    ok = ok and pub_ok
     ref = meds.get(("cuda", "infer_phases", "reuse", "iter_total"))
     if ref is not None:
         out.append(f"- 腕 A の infer reuse iter_total = {ref*1e6:.1f} µs（版差を含む。腕をまたぐ比較）")
@@ -472,11 +489,15 @@ def _fixture(d: Path, with_census=True):
         ("infer_phases", "fresh"): ["predict", "iter_total"],
         ("infer_phases", "reuse"): ["predict_resident", "iter_total"],
     }
+    # CUDA の infer fresh は実出力に合わせて leaf_register／forward／to_tensor（predict なし）
+    cuda_infer_fresh = ["leaf_register", "forward", "to_tensor", "iter_total"]
     gate = []
     for i in RUNS:
         lines = []
         for dev in ("cuda", "cpu"):
             for (task, mode), ps in phases.items():
+                if dev == "cuda" and (task, mode) == ("infer_phases", "fresh"):
+                    ps = cuda_infer_fresh
                 for idx, p in enumerate(ps):
                     t = 3e-4 if p in ("step_total", "iter_total") else 1e-4
                     if task == "infer_phases" and p == "iter_total":
@@ -551,6 +572,7 @@ def self_test():
     expect_fail("絶対パス残存", lambda dd: _w(dd / "env_info.txt", "/home/someone/x"))
     expect_fail("CPU 混入", lambda dd: _w(dd / "infer-diag" / "run1.facade.jsonl", (dd / "infer-diag" / "run1.facade.jsonl").read_text().replace('"cuda"', '"cpu"', 1)))
     expect_fail("必須フェーズ欠落", lambda dd: _w(dd / "armA" / "run1.jsonl", "\n".join(l for l in (dd / "armA" / "run1.jsonl").read_text().splitlines() if '"device_update"' not in l or '"cpu"' not in l) + "\n"))
+    expect_fail("CUDA infer fresh の forward 欠落", lambda dd: _w(dd / "armA" / "run1.jsonl", "\n".join(l for l in (dd / "armA" / "run1.jsonl").read_text().splitlines() if not ('"cuda"' in l and '"infer_phases"' in l and '"fresh"' in l and '"forward"' in l)) + "\n"))
     expect_fail("checksum が bool", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": true')) for i in RUNS])
     expect_fail("checksum が u64 超過", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": 18446744073709551616')) for i in RUNS])
     expect_fail("ヘッダのみ CSV", lambda dd: _w(dd / "census" / "fwd-K20-r1.cuda_api_sum.csv", '"Time (%)","Total Time (ns)","Num Calls","Avg (ns)","Name"\n'))
