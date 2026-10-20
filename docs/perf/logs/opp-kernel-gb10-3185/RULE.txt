@@ -32,9 +32,9 @@ burn（cubecl）の純カーネルは対象外。TF32 の目安は allow_tf32 ON
    検算: mm_pure+readout+checksum と window の比を記録する。食い違いは隠さない。
    cpu 腕は mm_event 系を持たない。
 7. fandhe 側（HEAD の既存 #[ignore] 診断テスト。Rust のコードは足さない）:
-   - cargo test --release -p fandhe-ai-backend-cuda --lib gemm_reuse_phase_diag_select
+   - cargo test --release -p fandhe-ai-backend-cuda --lib gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select
      -- --ignored --exact --test-threads=1 --nocapture（N=1024／2048／4096。wall 時計）
-   - cargo test --release -p fandhe-ai-backend-cuda --lib gemm_small_launch_cost_diag
+   - cargo test --release -p fandhe-ai-backend-cuda --lib gemm_small_launch_cost_diag_tests::gemm_small_launch_cost_diag
      -- --ignored --exact --test-threads=1 --nocapture（N=256／512 を使い、128 は記録のみ。
      L2S kernel_wait は wall、D 層 dev_kernel_seg／dev_kernel_b2b は CUDA event 時計）
    各 5 プロセス。ビルドは計測前に済ませ、ビルドと計測を並走させない。

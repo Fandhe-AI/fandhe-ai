@@ -31,6 +31,7 @@ import argparse
 import importlib.util
 import json
 import math
+import os
 import re
 import statistics
 import subprocess
@@ -227,11 +228,16 @@ def blas_libs_from_maps(maps_text):
 
 
 def judge_blas(stderr_text, libs):
-    """根拠行を引用して「確認できた／確認できなかった」を返す。出力が無いことから経路を推測しない。"""
-    evidence = [ln for ln in stderr_text.splitlines() if re.match(r"^(onednn|dnnl)_verbose", ln, re.I)]
-    if evidence or libs:
-        return {"verdict": "確認できた", "evidence_lines": evidence[:5], "libs": list(libs)}
-    return {"verdict": "確認できなかった", "evidence_lines": [], "libs": []}
+    """実行イベント行（`*_verbose,...,exec,...`）だけを根拠に「確認できた／確認できなかった」を返す（RULE 項 13）。
+
+    共有ライブラリのロード（libs）と verbose の初期化情報（`,info,` 行）は matmul を呼んだ証拠ではないため、
+    参考情報（libs・info_lines）として残すだけで判定には使わない。出力が無いことから経路を推測しない。
+    """
+    verbose = [ln for ln in stderr_text.splitlines() if re.match(r"^(onednn|dnnl)_verbose", ln, re.I)]
+    evidence = [ln for ln in verbose if "exec" in ln.lower().split(",")]
+    info_lines = [ln for ln in verbose if ln not in evidence]
+    verdict = "確認できた" if evidence else "確認できなかった"
+    return {"verdict": verdict, "evidence_lines": evidence[:5], "info_lines": info_lines[:5], "libs": list(libs)}
 
 
 def cmd_cpu_blas_probe(args):
@@ -239,7 +245,7 @@ def cmd_cpu_blas_probe(args):
     if out_dir.exists():
         raise SystemExit(f"出力先が既にある（上書きしない）: {out_dir}")
     out_dir.mkdir(parents=True)
-    env = {"DNNL_VERBOSE": "1", "ONEDNN_VERBOSE": "1", "PATH": "/usr/bin:/bin"}
+    env = {**os.environ, "DNNL_VERBOSE": "1", "ONEDNN_VERBOSE": "1"}
     p = subprocess.run([sys.executable, "-c", _PROBE_CODE], env=env, capture_output=True, text=True, timeout=600)
     (out_dir / "cpu_blas_stderr.txt").write_text(p.stderr)
     if p.returncode != 0:

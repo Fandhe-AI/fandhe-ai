@@ -90,12 +90,12 @@ wait_gate "cpu-blas-probe"
 mkdir -p "${OUT}/fandhe" "${OUT}/fandhe_rows"
 for r in 1 2 3 4 5; do
   wait_gate "fandhe/layerb/r${r}"
-  (cd "${REPO_DIR}" && cargo test --release -p fandhe-ai-backend-cuda --lib gemm_reuse_phase_diag_select \
+  (cd "${REPO_DIR}" && cargo test --release -p fandhe-ai-backend-cuda --lib gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select \
     -- --ignored --exact --test-threads=1 --nocapture) > "${OUT}/fandhe/layerb-run${r}.log" 2>&1
   "${VENV_PY}" "${DIAG}" parse-fandhe --log "${OUT}/fandhe/layerb-run${r}.log" --kind layerb --run "${r}" \
     --out "${OUT}/fandhe_rows/layerb-run${r}.jsonl"
   wait_gate "fandhe/diag2109/r${r}"
-  (cd "${REPO_DIR}" && cargo test --release -p fandhe-ai-backend-cuda --lib gemm_small_launch_cost_diag \
+  (cd "${REPO_DIR}" && cargo test --release -p fandhe-ai-backend-cuda --lib gemm_small_launch_cost_diag_tests::gemm_small_launch_cost_diag \
     -- --ignored --exact --test-threads=1 --nocapture) > "${OUT}/fandhe/diag2109-run${r}.log" 2>&1
   "${VENV_PY}" "${DIAG}" parse-fandhe --log "${OUT}/fandhe/diag2109-run${r}.log" --kind diag2109 --run "${r}" \
     --out "${OUT}/fandhe_rows/diag2109-run${r}.jsonl"

@@ -226,7 +226,11 @@ class Tests(unittest.TestCase):
         j = G.judge_blas("onednn_verbose,v1,primitive,exec,cpu,matmul\n", [])
         self.assertEqual(j["verdict"], "確認できた")
         self.assertEqual(len(j["evidence_lines"]), 1)
-        self.assertEqual(G.judge_blas("", ["libopenblas.so.0"])["verdict"], "確認できた")
+        # ロードのみ・初期化情報のみは確認済みにしない（参考情報として残る）
+        j = G.judge_blas("onednn_verbose,v1,info,oneDNN v3\n", ["libopenblas.so.0"])
+        self.assertEqual(j["verdict"], "確認できなかった")
+        self.assertEqual(j["libs"], ["libopenblas.so.0"])
+        self.assertEqual(len(j["info_lines"]), 1)
 
     def test_load_bench_py_rejects_wrong_sha(self):
         with tempfile.TemporaryDirectory() as d:
