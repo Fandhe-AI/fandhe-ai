@@ -135,6 +135,14 @@ _THREADPOLICY_SIZES_BY_DEVICE = {
     "cpu": frozenset({256, 512, 1024, 2048}),
 }
 
+# イシュー #3190: `--sizes readback-n256`（cuda 専用）。GB10 の readback 宛先
+# `pinned-reuse` を N=256 だけで測る補遺セル（`run_ab_readback_reuse_cuda.sh` の
+# `AB_READBACK_SIZES=n256`。判定規則は `docs/perf/logs/optin-ab-gb10-3190/RULE.txt` §9）。
+# 既存の `large`／`readback` 集合は変えない。cuda 以外は拒否する。
+_READBACK_N256_SIZES_BY_DEVICE = {
+    "cuda": frozenset({256}),
+}
+
 # イシュー #1517: `--task train` 用のセル集合。`bench-fandhe --task train`
 # は `Record.size` に `BATCH`（`scripts/bench/framework-compare/
 # bench-fandhe/src/main.rs` の `const BATCH: usize = 64;`）を emit する
@@ -174,6 +182,10 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
         if device not in _AFFINITY_SIZES_BY_DEVICE:
             raise ValueError("--sizes affinity は --device cpu 専用（イシュー #2117）")
         return _AFFINITY_SIZES_BY_DEVICE[device]
+    if sizes_arg == "readback-n256":
+        if device not in _READBACK_N256_SIZES_BY_DEVICE:
+            raise ValueError("--sizes readback-n256 は --device cuda 専用（イシュー #3190）")
+        return _READBACK_N256_SIZES_BY_DEVICE[device]
     if sizes_arg == "threadpolicy":
         if device not in _THREADPOLICY_SIZES_BY_DEVICE:
             raise ValueError("--sizes threadpolicy は --device cpu 専用（イシュー #3178）")
@@ -786,7 +798,7 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate", "large", "readback", "infer-batches", "affinity", "threadpolicy"),
+        choices=("full", "gate", "large", "readback", "infer-batches", "affinity", "threadpolicy", "readback-n256"),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "
@@ -798,6 +810,7 @@ def main(argv):
             "3 形状。イシュー #2115）"
             "または 'affinity'（cpu 専用。N=256/512/1024/2048/4096。イシュー #2117）"
             "または 'threadpolicy'（cpu 専用。N=256/512/1024/2048。イシュー #3178）"
+            "または 'readback-n256'（cuda 専用。N=256 のみ。イシュー #3190）"
         ),
     )
     parser.add_argument(

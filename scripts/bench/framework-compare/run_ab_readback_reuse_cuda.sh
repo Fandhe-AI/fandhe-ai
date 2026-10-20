@@ -8,6 +8,9 @@
 # （本スクリプトは計測と compare_gemm_ab.py の実行のみ。ADOPT／結線判断は RULE.txt と別 PR）。
 # 判定セルは gemm cuda reuse N=1024/2048/4096。fresh は参考行としても計測しない（計測量抑制）。
 #
+# #3190: `AB_READBACK_SIZES=n256` で N=256 のみを測る（既定 `default` は不変。補遺 RULE は
+# `docs/perf/logs/optin-ab-gb10-3190/RULE.txt` §9）。
+#
 # 順序制約（RULE.txt）: #2107 の `orchestrate.sh gb10` は本 PR より前のコミットで先に実行済みである
 # こと。本スクリプトは HEAD（本 PR 以降）の facade で実行する。
 #
@@ -106,7 +109,23 @@ if [[ -n "${FANDHE_AI_CUDA_READBACK_DEST+x}" ]]; then
   exit 1
 fi
 
-GEMM_SIZES=(1024 2048 4096)
+# イシュー #3190: `AB_READBACK_SIZES` は完全一致 allowlist（`default` = 従来の 1024/2048/4096、
+# `n256` = N=256 のみの補遺セル。判定は `docs/perf/logs/optin-ab-gb10-3190/RULE.txt` §9）。
+# 未設定は `default` で従来挙動を変えない。上記以外の値は fail-closed。
+case "${AB_READBACK_SIZES:-default}" in
+  default)
+    GEMM_SIZES=(1024 2048 4096)
+    COMPARE_SIZES=large
+    ;;
+  n256)
+    GEMM_SIZES=(256)
+    COMPARE_SIZES=readback-n256
+    ;;
+  *)
+    echo "error: AB_READBACK_SIZES は default|n256 のみ許可（イシュー #3190）" >&2
+    exit 1
+    ;;
+esac
 
 OUT_BEFORE="results/raw/results-dgx-readback-reuse-ab-${LABEL}-before.jsonl"
 OUT_AFTER="results/raw/results-dgx-readback-reuse-ab-${LABEL}-after.jsonl"
@@ -609,7 +628,7 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
   # 判定（RULE.txt）: 5 run 中央値の ratio と checksum 完全一致（fail-closed）。ADOPT 判断は
   # RULE.txt の前提ゲート（#2107 の帰属判定）と合わせて人間が行う。
   # REPORT の既存確認は計測前に実施済み（write_excl も排他作成で二重に守る）。
-  python3 compare_gemm_ab.py "$OUT_BEFORE" "$OUT_AFTER" --device cuda --sizes large --modes reuse --threshold 1.00 \
+  python3 compare_gemm_ab.py "$OUT_BEFORE" "$OUT_AFTER" --device cuda --sizes "$COMPARE_SIZES" --modes reuse --threshold 1.00 \
     --require-checksum-exact | write_excl "$REPORT"
   # 比較器と書き込み先の両方の終了状態を検査する（片方だけ見ると、write_excl 失敗で
   # レポートが無いのに exit 0 になる。fail-closed。security.md A08）。
