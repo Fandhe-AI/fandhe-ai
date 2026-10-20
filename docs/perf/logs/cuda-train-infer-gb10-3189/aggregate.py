@@ -125,8 +125,8 @@ def check_gate(d: Path):
         # RULE.txt 規則7: 実行失敗の痕跡は参考系列へ降格せず例外（exit≠0）で拒否する
         raise AggError(f"load_gate.log に実行失敗の痕跡（{len(failed)} 件の FAILED）: {failed[:3]}")
     if bad:
-        return False, f"負荷ゲート未通過（{bad}）"
-    return True, "負荷ゲート 15/15 pass（run 5 × armA／infer／fixedcost）"
+        return False, f"負荷ゲート未通過（{bad}）", status
+    return True, "負荷ゲート 15/15 pass（run 5 × armA／infer／fixedcost）", status
 
 
 # ---- 腕 A ----
@@ -263,7 +263,7 @@ def load_infer(d: Path):
     return fac, bak
 
 
-def render_infer(fac, bak, meds):
+def render_infer(fac, bak, meds, gate_ok=True):
     out = ["## 腕 B-2: infer reuse の内部内訳\n"]
     fm = {k: med(v.values()) for k, v in fac.items()}
     bm = {k[1]: med(v.values()) for k, v in bak.items()}
@@ -282,7 +282,7 @@ def render_infer(fac, bak, meds):
     ok = FIDELITY_LO <= fid <= FIDELITY_HI
     out.append(
         f"\n- fidelity = backend total / facade chain = {fid:.3f}（許容 {FIDELITY_LO}〜{FIDELITY_HI}）→ "
-        f"{'区間は正式扱い' if ok else '**範囲外: 区間は参考扱い**'}"
+        f"{'区間は正式扱い' if ok and gate_ok else ('**範囲外: 区間は参考扱い**' if not ok else '**負荷ゲート未通過: 区間は参考扱い**')}"
     )
     upper = fm[("decomposed", "tape")] + fm[("decomposed", "snapshot")] + fm[("decomposed", "steps")] + fm[("paired", "residual")]
     out.append(f"- 上位の固定費 = tape＋snapshot＋steps＋paired/residual = {upper*1e6:.1f} µs")
@@ -294,9 +294,13 @@ def render_infer(fac, bak, meds):
     pub_ok = FIDELITY_LO <= pub_fid <= FIDELITY_HI
     out.append(
         f"- fidelity(上位) = decomposed 合計 / public predict_resident = {pub_fid:.3f}（許容 {FIDELITY_LO}〜{FIDELITY_HI}）→ "
-        f"{'上位区間は正式扱い' if pub_ok else '**範囲外: 上位区間と上位の固定費は参考扱い**'}"
+        f"{'上位区間は正式扱い' if pub_ok and gate_ok else ('**範囲外: 上位区間と上位の固定費は参考扱い**' if not pub_ok else '**負荷ゲート未通過: 上位区間と上位の固定費は参考扱い**')}"
     )
     ok = ok and pub_ok
+    if not gate_ok:
+        # RULE.txt 規則 3: runN-infer の負荷ゲート未通過は fidelity が範囲内でも区間・固定費を参考扱いにする
+        out.append("- **runN-infer の負荷ゲート未通過: infer の区間と上位の固定費は参考扱い**")
+        ok = False
     ref = meds.get(("cuda", "infer_phases", "reuse", "iter_total"))
     if ref is not None:
         out.append(f"- 腕 A の infer reuse iter_total = {ref*1e6:.1f} µs（版差を含む。腕をまたぐ比較）")
@@ -330,7 +334,7 @@ def load_fixed(d: Path):
     return res
 
 
-def render_fixed(fx):
+def render_fixed(fx, gate_ok=True):
     out = ["## 腕 B-3: launch／同期の固定費（N=128。#2109 の診断を計測器として借用）\n"]
     out.append("| layer | phase | 中央値 (µs) | min–max (µs) |")
     out.append("|---|---|---:|---|")
@@ -339,6 +343,8 @@ def render_fixed(fx):
         runs = [fx[k][i] for i in RUNS]
         m[k] = med(runs)
         out.append(f"| {k[0]} | {k[1]} | {m[k]*1e6:.2f} | {rng(runs)} |")
+    if not gate_ok:
+        out.append("\n- **runN-fixedcost の負荷ゲート未通過: 固定費は参考扱い**")
     out.append("\n- tiny_roundtrip は 1×1×1 GEMM の launch＋同期で、引数なしの空カーネルの代替（RULE 規則 5）\n")
     return out, m
 
@@ -366,10 +372,24 @@ def parse_api_csv(text: str):
     return cnt
 
 
+NSYS_MISSING_MARK = "nsys が無い（B-1 は未実測）"
+
+
 def load_census(d: Path):
     cdir = d / "census"
-    if not cdir.exists() or not any(cdir.glob("*.cuda_api_sum.csv")):
+    log = (d / "load_gate.log").read_text(encoding="utf-8").splitlines()
+    # RULE.txt 規則 7: 系列の完了記録が無いもの（計測の中断）は拒否する
+    if "series done" not in log:
+        raise AggError("load_gate.log に series done が無い（未完了の系列）")
+    has_csv = cdir.exists() and any(cdir.glob("*.cuda_api_sum.csv"))
+    nsys_missing = NSYS_MISSING_MARK in log
+    if nsys_missing:
+        if has_csv:
+            raise AggError("nsys 不在の記録があるのに census/ に成果物がある（矛盾）")
         return None
+    if not has_csv:
+        # nsys 不在の明示記録が無い census 欠損は未実測として許可しない
+        raise AggError("census/ が欠損（nsys 不在の明示記録も無い。中断または成果物欠落）")
     res = {}
     # 規則 7: 同じ window／K の 5 反復で loss_bits／checksum_bits が一致すること（K 違いは学習結果が変わるため比較しない）
     sigs = defaultdict(set)
@@ -479,7 +499,7 @@ def render_attrib(meds, fixed_m, steps, bm, fidelity_ok=True):
 
 def main_report(d: Path):
     check_leaks(d)
-    gate_ok, gate_msg = check_gate(d)
+    gate_ok, gate_msg, gate_status = check_gate(d)
     vals, order = load_arm_a(d)
     fac, bak = load_infer(d)
     fx = load_fixed(d)
@@ -487,9 +507,9 @@ def main_report(d: Path):
     out = [f"# #3189 GB10 集計（{'正式系列' if gate_ok else '参考系列'}）\n", f"- {gate_msg}\n"]
     sec, meds = render_arm_a(vals, order, gate_ok)
     out += sec
-    sec, bm, fm, fid, ok = render_infer(fac, bak, meds)
+    sec, bm, fm, fid, ok = render_infer(fac, bak, meds, all(gate_status[f"run{i}-infer"] == "pass" for i in RUNS))
     out += sec
-    sec, fixed_m = render_fixed(fx)
+    sec, fixed_m = render_fixed(fx, all(gate_status[f"run{i}-fixedcost"] == "pass" for i in RUNS))
     out += sec
     sec, steps = render_census(cs)
     out += sec
@@ -545,7 +565,7 @@ def _fixture(d: Path, with_census=True):
         _w(d / "fixed-cost" / f"run{i}.log", "\n".join(dl) + "\n")
         for s in ("", "-infer", "-fixedcost"):
             gate.append(f"run{i}{s} gate=pass load1=0.1 gpu_util=0 waited_s=0 at=x")
-    _w(d / "load_gate.log", "\n".join(gate) + "\nseries done\n")
+    _w(d / "load_gate.log", "\n".join(gate) + ("" if with_census else "\n" + NSYS_MISSING_MARK) + "\nseries done\n")
     if with_census:
         base_cnt = {"fwd": 3, "fwd_bwd": 6, "full": 9, "infer_reuse": 1}
         for w in WINDOWS:
@@ -611,6 +631,20 @@ def self_test():
     expect_fail("kernel レポート欠落", lambda dd: (dd / "census" / "fwd-K20-r1.cuda_gpu_kern_sum.csv").unlink())
     expect_fail("memory レポート空", lambda dd: _w(dd / "census" / "fwd-K20-r1.cuda_gpu_mem_time_sum.csv", ""))
     expect_fail("固定費行欠落", lambda dd: _w(dd / "fixed-cost" / "run1.log", ""))
+    def _gate_fail(dd):
+        t = (dd / "load_gate.log").read_text(encoding="utf-8")
+        _w(dd / "load_gate.log", t.replace("run2-infer gate=pass", "run2-infer gate=timeout"))
+    with tempfile.TemporaryDirectory() as t:
+        dd = Path(t)
+        _fixture(dd)
+        _gate_fail(dd)
+        rep_t = main_report(dd)
+        assert "参考系列" in rep_t and "infer の区間と上位の固定費は参考扱い" in rep_t and "区間は正式扱い" not in rep_t, rep_t
+    expect_fail("series done 欠落", lambda dd: _w(dd / "load_gate.log", (dd / "load_gate.log").read_text().replace("series done", "")))
+    def _rm_census(dd):
+        import shutil
+        shutil.rmtree(dd / "census", ignore_errors=True)
+    expect_fail("census 欠損（nsys 不在の記録なし）", _rm_census)
     # census 無しは「未実測」
     with tempfile.TemporaryDirectory() as t:
         dd = Path(t)
