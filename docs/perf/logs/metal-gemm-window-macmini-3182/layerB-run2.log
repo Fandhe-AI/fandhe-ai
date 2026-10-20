@@ -1,0 +1,80 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-3182/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 3 tests
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_production_batch ...   [production] N=1024 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.2723 ms  q1=0.2675 ms  q3=0.2843 ms
+    upload_b: median=0.2492 ms  q1=0.2428 ms  q3=0.2532 ms
+    alloc_c: median=0.0001 ms  q1=0.0001 ms  q3=0.0001 ms
+    encode: median=0.0027 ms  q1=0.0026 ms  q3=0.0027 ms
+    commit_wait: median=1.2593 ms  q1=1.1670 ms  q3=1.2662 ms
+    commit_wait.kernel_gpu: median=0.8610 ms  q1=0.8600 ms  q3=0.8620 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.3981 ms
+    readback: median=0.1024 ms  q1=0.0742 ms  q3=0.1048 ms
+    host_copy: median=0.2428 ms  q1=0.2341 ms  q3=0.2456 ms
+    sum of medians: 2.1288 ms
+  [production] N=2048 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.9235 ms  q1=0.9133 ms  q3=0.9468 ms
+    upload_b: median=0.9027 ms  q1=0.8894 ms  q3=0.9139 ms
+    alloc_c: median=0.0000 ms  q1=0.0000 ms  q3=0.0001 ms
+    encode: median=0.0043 ms  q1=0.0042 ms  q3=0.0044 ms
+    commit_wait: median=8.6005 ms  q1=8.5654 ms  q3=8.6450 ms
+    commit_wait.kernel_gpu: median=8.0250 ms  q1=7.9930 ms  q3=8.0455 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.5768 ms
+    readback: median=0.3732 ms  q1=0.3710 ms  q3=0.3772 ms
+    host_copy: median=0.8862 ms  q1=0.8684 ms  q3=0.9015 ms
+    sum of medians: 11.6903 ms
+  [production] N=4096 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=3.8581 ms  q1=3.7317 ms  q3=3.8738 ms
+    upload_b: median=3.9169 ms  q1=3.7660 ms  q3=4.0257 ms
+    alloc_c: median=0.0003 ms  q1=0.0002 ms  q3=0.0005 ms
+    encode: median=0.0120 ms  q1=0.0102 ms  q3=0.0129 ms
+    commit_wait: median=67.5694 ms  q1=67.3649 ms  q3=67.6917 ms
+    commit_wait.kernel_gpu: median=65.2678 ms  q1=65.1354 ms  q3=65.3865 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=2.2820 ms
+    readback: median=1.4693 ms  q1=1.4631 ms  q3=1.4711 ms
+    host_copy: median=3.8775 ms  q1=3.8328 ms  q3=3.9341 ms
+    sum of medians: 80.7035 ms
+ok
+test gemm_reuse_phase_diag_tests::gemm_window_phase_diag_small_sizes ...   [production] N=256 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.0195 ms  q1=0.0192 ms  q3=0.0198 ms
+    upload_b: median=0.0166 ms  q1=0.0162 ms  q3=0.0178 ms
+    alloc_c: median=0.0000 ms  q1=0.0000 ms  q3=0.0000 ms
+    encode: median=0.0020 ms  q1=0.0020 ms  q3=0.0020 ms
+    commit_wait: median=0.2352 ms  q1=0.2335 ms  q3=0.2358 ms
+    commit_wait.kernel_gpu: median=0.0197 ms  q1=0.0195 ms  q3=0.0197 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2154 ms
+    readback: median=0.0045 ms  q1=0.0044 ms  q3=0.0045 ms
+    host_copy: median=0.0158 ms  q1=0.0155 ms  q3=0.0162 ms
+    sum of medians: 0.2937 ms
+  [production] N=512 requested_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } (median over 20 trials, 20 warmup):
+    upload_a: median=0.0655 ms  q1=0.0640 ms  q3=0.0677 ms
+    upload_b: median=0.0640 ms  q1=0.0617 ms  q3=0.0670 ms
+    alloc_c: median=0.0000 ms  q1=0.0000 ms  q3=0.0000 ms
+    encode: median=0.0022 ms  q1=0.0022 ms  q3=0.0023 ms
+    commit_wait: median=0.3484 ms  q1=0.3456 ms  q3=0.3518 ms
+    commit_wait.kernel_gpu: median=0.1130 ms  q1=0.1129 ms  q3=0.1132 ms
+    commit_wait.commit_wait_minus_kernel_gpu: median=0.2354 ms
+    readback: median=0.0195 ms  q1=0.0185 ms  q3=0.0203 ms
+    host_copy: median=0.0595 ms  q1=0.0574 ms  q3=0.0604 ms
+    sum of medians: 0.5591 ms
+ok
+test gemm_reuse_phase_diag_tests::gemm_window_route_precheck ... ROUTE N=256 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=256 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=256 equal=true
+ROUTE N=512 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=512 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=512 equal=true
+ROUTE N=1024 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=1024 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=1024 equal=true
+ROUTE N=2048 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=2048 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=2048 equal=true
+ROUTE N=4096 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }) resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+ROUTE_ACTUAL N=4096 route=Classic(TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true })
+DIAG_BITEQ N=4096 equal=true
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 803 filtered out; finished in 4.41s
+

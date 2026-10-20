@@ -32,6 +32,11 @@ candle 比ギャップ（1.52 倍）のうちカーネル専有時間に帰属�
 約 27.6%、残り約 72.4% は非カーネル要因（`commit_wait − kernel_gpu`・
 アップロード・readback 等）であることを確定した（§11）。
 
+**追記（イシュー #3182）**: Mac mini（Apple M4）で同じ窓の内訳（upload・commit_wait・
+kernel_gpu・readback・host_copy・checksum）を N=256〜4096 で取り直した（§12。0.11.0＋HEAD）。
+N=4096 の candle との差のうちカーネル（＋同期）由来は 65.5〜72.2%、fandhe 固有の
+upload＋host_copy は 32.6%。M4 Max・0.6.0 の §3〜§11 とは別機体・別版の値。
+
 ## §2 計測環境・プロトコル
 
 - 実機: Apple M4 Max（GPU 40 コア。`docs/perf/logs/metal-gemm-reuse-
@@ -402,6 +407,8 @@ N=4096 の `matmul` 内部（カーネル専有時間そのもの）の追加分
 - `docs/perf/metal-bench-noise-protocol.md`（計測衛生プロトコル）
 - `docs/perf/logs/metal-gemm-reuse-phase-1277/`（本節 §11 の実行ログ・
   env_info・集計。イシュー #1277）
+- `docs/perf/logs/metal-gemm-window-macmini-3182/`（§12 の事前登録規則・
+  生ログ・集計。Mac mini。イシュー #3182）
 
 ## §11 GPU タイムスタンプによる純カーネル専有時間の分離（イシュー #1277）
 
@@ -545,3 +552,134 @@ ms 帯）に対し、本計測の kernel_gpu 中央値 13.7051 ms（10.028 TFLOP
   が担う）
 - tolerance／baseline／依存の追加変更は行っていない
 
+
+## §12 Mac mini（Apple M4・GPU 10 コア）の計測窓の内訳（イシュー #3182）
+
+§3〜§4・§11 は M4 Max・`fandhe-ai =0.6.0` の値だった。本節は **Mac mini** で同じ窓の内訳を取り直した記録で、
+診断のみ（計測窓の構成・判定式・tolerance・baseline・`scripts/bench/framework-compare/**`・本番コードは不変）。
+規則の正は `docs/perf/logs/metal-gemm-window-macmini-3182/RULE.txt`（計測前に固定）、生ログ・集計は同ディレクトリ
+（`aggregate.md` が機械出力）。M4 Max の §3・§4・§11 は書き換えず、並置は §12.8 に版と機体を付けて置く。
+
+### §12.1 環境・腕・プロトコル
+
+- 機体: Mac mini（Apple M4・10 コア・16 GB・macOS 27.0.1・rustc 1.99.0）。5 run（独立プロセス群）・負荷ゲート 5/5 `pass`
+  （load1 < 3.0。`load_gate.log`）。`run{1..5}.err` は全て空。
+- 腕 A（Layer A）: 計測前コミット `3114cdda2fe6c073184ad704537a5ed1076f6a10` の `scripts/bench/framework-compare`。
+  `bench-fandhe` は registry `fandhe-ai =0.11.0`（`tree.txt` が 1 行で確認）、`bench-candle` は `candle-core =0.11.0`。
+- 腕 B（Layer B）: 同ツリーの main workspace（`backend-metal` の診断テスト。HEAD ソースの path 依存）。
+  **腕 A（0.11.0）と腕 B（HEAD）はソース版が違う**ため、A の列と B の列を足して 1 つの窓として扱わない。
+- ツリー指紋（`find crates scripts/bench/framework-compare -type f ! -path '*/target*'` を sort した sha256 一覧の sha256）は
+  送信側・Mac mini 側とも `063846beb…ad7909` で一致。
+- `gemm --mode fresh --phases` は `bench-fandhe` が MEASURE_ERROR で拒否する仕様（`tests::phases_with_gemm_fresh_is_measure_error`
+  で固定）で、ハーネスは変えない方針のため、fresh は phases なしの窓合計のみを取った（§12.7）。区間内訳は reuse の `--phases` と Layer B。
+- 経路: 診断経路（`diag_encode_tiled_nn`）が本番 `dispatch_auto` を代表するかを `gemm_window_route_precheck` で確認した。
+  5 サイズ × 5 run とも `ROUTE_ACTUAL=Classic`・出力 bit 一致（`DIAG_BITEQ equal=true`）で、全 N で Layer B は代表。
+  Mac mini の resolved_tile は N=256〜4096 の全てで `bm32 bn32 bk16 wm2 wn2 staged`。M4 Max（§4）とは構成が違う。
+
+### §12.2 Layer A（bench-fandhe 0.11.0 `gemm reuse --phases`。5 run の中央値の中央値、ms）
+
+| N | matmul | host_copy | checksum | iter_total |
+|---|---|---|---|---|
+| 256 | 0.3308 | 0.0221 | 0.0546 | 0.4157 |
+| 512 | 0.6354 | 0.0729 | 0.1580 | 0.8655 |
+| 1024 | 2.1986 | 0.2406 | 0.5665 | 3.0144 |
+| 2048 | 10.8913 | 0.9032 | 2.2352 | 14.0395 |
+| 4096 | 78.1085 | 3.7062 | 8.6361 | 90.1252 |
+
+`to_tensor` は全 N で 0.0001 ms 以下。5 run 分の生値と min–max は `aggregate.md`。
+
+### §12.3 Layer B（backend-metal 診断テスト・HEAD。5 run の中央値の中央値、ms）
+
+| N | upload(a+b) | commit_wait | kernel_gpu | commit_wait−kernel_gpu | readback | encode | Σ（host_copy 除く） |
+|---|---|---|---|---|---|---|---|
+| 256 | 0.0370 | 0.2328 | 0.0197 | 0.2132 | 0.0045 | 0.0022 | 0.2766 |
+| 512 | 0.1248 | 0.3471 | 0.1148 | 0.2318 | 0.0195 | 0.0022 | 0.4934 |
+| 1024 | 0.5203 | 1.2534 | 0.8607 | 0.3912 | 0.1024 | 0.0027 | 1.8732 |
+| 2048 | 1.8262 | 8.6615 | 8.0716 | 0.5814 | 0.3732 | 0.0043 | 10.8482 |
+| 4096 | 7.6416 | 67.5694 | 65.2521 | 2.2951 | 1.4676 | 0.0110 | 76.6727 |
+
+- `alloc_c` は 0.0003 ms 以下（4096）。`host_copy`（B）は A の値と同水準（突合用）。
+- N=1024 の run1 だけ外れ値（kernel_gpu 1.85 ms、他 4 run は 0.86 ms 付近。`aggregate.md`）。中央値集計のため最終値への影響は限定的。原因は未特定。
+- A の `matmul` と B の Σ の残差（A−B。未説明）: N=256 +0.054、512 +0.142、1024 +0.325、2048 +0.043、4096 +1.436 ms。原因は断定しない（A と B の版が違う点を含む）。
+
+### §12.4 checksum の ns／要素
+
+A の `checksum` 区間中央値 / N²: N=256 0.834、512 0.603、1024 0.540、2048 0.533、4096 0.515 ns／要素。
+checksum は全フレームワーク共通の Rust 側 f64 逐次総和で、N=4096 では 8.64 ms。
+
+### §12.5 割合表（分母は A の `iter_total`）
+
+| N | kernel_gpu(B) | upload(B) | host_copy(A) | checksum(A) | その他(B) | 未説明 |
+|---|---|---|---|---|---|---|
+| 256 | 4.7% | 8.9% | 5.3% | 13.1% | 52.9% | 15.0% |
+| 512 | 13.3% | 14.4% | 8.4% | 18.3% | 29.3% | 16.3% |
+| 1024 | 28.6% | 17.3% | 8.0% | 18.8% | 16.6% | 10.9% |
+| 2048 | 57.5% | 13.0% | 6.4% | 15.9% | 6.8% | 0.3% |
+| 4096 | 72.4% | 8.5% | 4.1% | 9.6% | 4.2% | 1.2% |
+
+- 区分: カーネル = kernel_gpu、**fandhe-ai 固有の非カーネルコスト = upload・host_copy**、**全フレームワーク共通 = checksum**、
+  その他 = alloc_c＋encode＋(commit_wait−kernel_gpu)＋readback（B）、未説明 = iter_total − 上記合計。
+- 各列は中央値のため合計は iter_total と一致しない（差は「未説明」に入れ、吸収させない）。A（0.11.0）と B（HEAD）を同じ分母で割っている。
+- N=4096 の fandhe 固有分は upload 7.64 ms＋host_copy 3.71 ms＝11.35 ms、共通の床 checksum は 8.64 ms。
+  `host_copy` は Metal が `readout_uses_borrowed_view("metal", None) == false` のため全面コピーが 1 回入る分（N=4096 で 64 MiB）。
+
+### §12.6 candle との差とカーネル由来の割合
+
+G = fandhe reuse の窓合計（phases なし）− candle `gemm`（fresh）の窓合計（同一セッション・5 run の中央値）。
+
+| N | fandhe reuse | candle fresh | G | candle transfer_excl | (a) (kernel_gpu−excl)/G | (b) ((encode+commit_wait)−excl)/G | 固有(upload+host_copy)/G |
+|---|---|---|---|---|---|---|---|
+| 256 | 0.3334 | 0.3054 | +0.0281 | 0.2046 | −658.4%（負値） | 108.2%（1 超） | 210.4%（1 超） |
+| 512 | 0.7091 | 0.5403 | +0.1688 | 0.3234 | −123.6%（負値） | 15.3% | 117.1%（1 超） |
+| 1024 | 3.0510 | 2.2893 | +0.7617 | 0.9503 | −11.8%（負値） | 40.2% | 99.9% |
+| 2048 | 14.0746 | 9.4911 | +4.5835 | 5.4463 | 57.3% | 70.2% | 59.5% |
+| 4096 | 90.0727 | 55.3087 | +34.7640 | 42.4764 | 65.5% | 72.2% | 32.6% |
+
+- **N=4096 のカーネル由来は (a) 65.5%・(b) 72.2%**。candle との差 34.76 ms のうち約 3 分の 2 から 7 割強がカーネル（＋同期）側、
+  fandhe 固有の upload＋host_copy が 32.6%。N=2048 は (a) 57.3%・(b) 70.2%。
+- N=256〜1024 は G が小さく（0.03〜0.76 ms）、負値・1 超が出ているため**割合として読まない**（丸めずフラグ付きで出力）。
+- 限界: candle の `gemm_transfer_excl` は壁時計（matmul＋synchronize）、`kernel_gpu` は GPU タイムスタンプなので (a) はカーネル差を小さく見積もりやすい。
+  (b) は同じ壁時計の境界（エンコード＋同期）に揃えた値。candle 側の readback・fandhe 側の A/B 版差は分離していない。
+- M4 Max・0.6.0 の §11.4(b)（candle 13.17 TFLOPS 基準で 27.6%）とは機体・版・基準が違うため算術に混ぜない。
+- ドリフト検査（N=4096）: fandhe reuse 90.07 ms は系列 B（122.82 ms）比 −26.7%、candle fresh 55.31 ms は系列 B（71.19 ms）比 −22.3%。
+  どちらも **10% 超の乖離**（規則どおり記録のみで判定は不変）。両者とも系列 B より速く、fandhe/candle 比は 1.63（系列 B は 1.73）。原因は切り分けていない。
+
+### §12.7 fresh と reuse の窓合計
+
+| N | fresh | reuse | reuse−fresh | (reuse−fresh)/出力 MiB |
+|---|---|---|---|---|
+| 256 | 0.3354 | 0.3334 | −0.0019 | −0.0078 |
+| 512 | 0.6742 | 0.7091 | +0.0349 | +0.0349 |
+| 1024 | 2.8566 | 3.0510 | +0.1944 | +0.0486 |
+| 2048 | 13.5325 | 14.0746 | +0.5422 | +0.0339 |
+| 4096 | 84.8794 | 90.0727 | +5.1933 | +0.0811 |
+
+N=512 以上で reuse の方が fresh より遅い（N=4096 で +5.19 ms）。反復ごとの解放をしない keep-alive の影響などは**推測であり、本記録では断定しない**
+（窓側の是正は #3265）。fresh の区間内訳は `--phases` が使えないため取っていない。
+
+### §12.8 M4 Max・0.6.0 との並置（別機体・別版。混ぜない）
+
+| N | 項目 | M4 Max 0.6.0（§3・§11.2） | Mac mini（A: 0.11.0／B: HEAD） |
+|---|---|---|---|
+| 2048 | iter_total | 8.622 | 14.0395 |
+| 2048 | kernel_gpu | 3.1849 | 8.0716 |
+| 2048 | host_copy / checksum | 0.9196 / 2.2682 | 0.9032 / 2.2352 |
+| 4096 | iter_total | 47.944 | 90.1252 |
+| 4096 | kernel_gpu | 13.7051 | 65.2521 |
+| 4096 | host_copy / checksum | 3.7191 / 9.6276 | 3.7062 / 8.6361 |
+
+CPU 側の host_copy／checksum は機体間でほぼ同水準、GPU 側（kernel_gpu／commit_wait）は Mac mini が大きい。全項目の並置は `aggregate.md`。
+
+### §12.9 後続イシューへの含意（事実のみ。目標値の決定は #3211）
+
+- #3181（純カーネル差）: Mac mini の N=4096 では candle との差の 65.5〜72.2% がカーネル（＋同期）側に当たる。N≤1024 は差が小さく割合では測れない。
+- #3265（窓側の是正）: fandhe 固有の upload＋host_copy は N=4096 で 11.35 ms（G の 32.6%）。共通の checksum 8.64 ms は削れない床。
+- #3211: 上の値は Mac mini・0.11.0（A）＋HEAD（B）の実測で、M4 Max の値とは別に扱う。
+
+### §12.10 未確定事項・スコープ外
+
+- A と B の版差（0.11.0／HEAD）、A−B 残差、N=1024 run1 の外れ値、系列 B とのドリフト（−26.7%／−22.3%）、reuse が fresh より遅い原因は未特定。
+- fresh の `--phases`（ハーネス変更を要する）と candle 側の GPU タイムスタンプ計測は行っていない。
+- `aggregate.py` は計測後に 1 点だけ直した（checksum は負値がありうるため符号を許す）。計測値・判定式には影響しない。
+- checksum が一致しても bit 同一の証拠ではない。tolerance／baseline／依存の変更は行っていない。
+- 生ログ: `docs/perf/logs/metal-gemm-window-macmini-3182/`。

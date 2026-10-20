@@ -45,8 +45,8 @@
 //! | `readback` | `MetalBuffer::read_to_vec`（`contents()` からの memcpy。D2H 固有の同期は存在しない。`synchronize` 済み） |
 //! | `host_copy` | `Vec::to_vec()`（`bench-fandhe` の `readout_var` 二重コピーに対応） |
 //!
-//! `pad_a`／`pad_b`／`unpad` は対象サイズ（1024/2048/4096。いずれも 8
-//! の倍数）では `pad::pad_matrix` が `Cow::Borrowed` の no-op になる
+//! `pad_a`／`pad_b`／`unpad` は対象サイズ（256/512/1024/2048/4096。
+//! いずれも 8 の倍数）では `pad::pad_matrix` が `Cow::Borrowed` の no-op になる
 //! ため計測しない（`docs/perf/metal-gemm-reuse-phase-breakdown.md` §2
 //! に明記）。
 //!
@@ -72,6 +72,22 @@
 //! gemm-reuse-phase-breakdown.md` への数表転記は本イシューのスコープ
 //! 外（親 #1275 配下の実測 sub-issue が担う）。
 //!
+//! # Mac mini の窓内訳計測用の追加テスト（イシュー #3182）
+//!
+//! 既存の `SIZES`（1024/2048/4096）と `gemm_reuse_phase_diag_production_
+//! batch` は #1277 のログ・§11.5 の再現コマンドとの比較可能性のため
+//! 変更しない。#3182（Mac mini の計測窓内訳。結論は
+//! `docs/perf/metal-gemm-reuse-phase-breakdown.md` §12）は次の 2 本を
+//! 別名で追加する（いずれも `#[ignore]`。性能値・route・bit 一致を
+//! assert せず出力のみ。判定は集計側 `aggregate.py` が行う）:
+//!
+//! - `gemm_window_phase_diag_small_sizes`: N=256/512 を `run_size` で計測
+//! - `gemm_window_route_precheck`: N=256/512/1024/2048/4096 について
+//!   本番 `dispatch_auto` の採用経路（Classic/SplitK）と診断経路
+//!   （`diag_encode_tiled_nn`）の出力 bit 一致を `ROUTE`／`DIAG_BITEQ`
+//!   行で出力する。SplitK になる N や bit 不一致の N では、診断経路は
+//!   本番経路を代表しない
+//!
 //! # 実行時は必ず `--test-threads=1`
 //!
 //! CUDA 側と同じ理由（同一 GPU 上での複数テストスレッド競合を避ける）。
@@ -80,7 +96,7 @@
 //!
 //! ホスト側キープアライブ（`Vec<Vec<f32>>`）は N=4096 で
 //! (20 warmup + 20 測定) × 4096² × 4 bytes ≈ 2.7 GiB（統合メモリ上。
-//! CUDA 側と同じオーダー）。
+//! CUDA 側と同じオーダー。16 GB 機〈Mac mini〉でも収まる）。
 //!
 //! # gating しない方針（CUDA 側と同じ理由）
 //!
@@ -126,6 +142,9 @@ pub(crate) const MEASURED_TRIALS: usize = 20;
 /// 対象とするのと同じサイズ（`docs/perf/metal-gemm-candle-gate-
 /// remeasurement.md` 対象形状。CUDA 側 `SIZES` と同一）。
 const SIZES: [usize; 3] = [1024, 2048, 4096];
+
+/// #3182 が追加で測る小サイズ（`SIZES` と合わせて 256〜4096 を覆う）。
+const SMALL_SIZES: [usize; 2] = [256, 512];
 
 pub(crate) fn gen_square_ab(seed: u64, n: usize) -> (Vec<f32>, Vec<f32>) {
     let mut rng = Xorshift64Star::new(seed);
@@ -542,5 +561,54 @@ fn gpu_timestamps_within_commit_wait_window() {
             s.kernel_gpu_secs * 1e3,
             (s.commit_wait_secs - s.kernel_gpu_secs) * 1e3
         );
+    }
+}
+
+/// #3182: N=256/512 の窓内訳（`run_size` と同一の出力形式）。既存
+/// `gemm_reuse_phase_diag_production_batch` の `SIZES` を変えずに小サイズ
+/// を足すための別テスト。`--test-threads=1` 必須。
+#[test]
+#[ignore]
+fn gemm_window_phase_diag_small_sizes() {
+    for n in SMALL_SIZES {
+        run_size(n);
+    }
+}
+
+/// #3182: 診断経路（`diag_encode_tiled_nn`）が本番 `dispatch_auto` の
+/// 経路を代表するかの事前確認。N ごとに `ROUTE`（Mac mini の GPU コア数
+/// で解決した route と構成）と `DIAG_BITEQ`（両経路の出力 bit 一致）を
+/// 出力する。値は assert しない（判定は `aggregate.py`）。
+#[test]
+#[ignore]
+fn gemm_window_route_precheck() {
+    let ctx = cached_context().expect("Metal device (system default) must be available");
+    let gemm = cached_gemm(&ctx).expect("MetalGemm construction must succeed");
+    let core = ctx.verified_m4_max_gpu_core_count();
+    for n in [256usize, 512, 1024, 2048, 4096] {
+        let n8 = crate::pad::pad8(n);
+        let route = tile::select_route_for_device(n8, n8, n8, core);
+        let cfg = tile::select_for_device(n, n, n, core);
+        println!("ROUTE N={n} route={route:?} resolved_tile={cfg:?}");
+
+        let (a, b) = gen_square_ab(0x3182_a000 ^ (n as u64), n);
+        let (prod, actual) = gemm
+            .dispatch_auto_with_route(&ctx, &a, &b, n, n, n)
+            .expect("dispatch_auto must succeed");
+        println!("ROUTE_ACTUAL N={n} route={actual:?}");
+
+        let a_buf = MetalBuffer::new_with_data(&ctx, &a).expect("A upload");
+        let b_buf = MetalBuffer::new_with_data(&ctx, &b).expect("B upload");
+        let c_buf = MetalBuffer::alloc_uninit_pooled(&ctx, n * n).expect("C alloc");
+        gemm.diag_encode_tiled_nn(&ctx, &a_buf, &b_buf, &c_buf, n, n, n, cfg)
+            .expect("diag_encode_tiled_nn must succeed");
+        ctx.synchronize().expect("synchronize must succeed");
+        let diag = c_buf.read_to_vec();
+        let equal = prod.len() == diag.len()
+            && prod
+                .iter()
+                .zip(diag.iter())
+                .all(|(x, y)| x.to_bits() == y.to_bits());
+        println!("DIAG_BITEQ N={n} equal={equal}");
     }
 }
