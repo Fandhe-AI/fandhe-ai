@@ -155,7 +155,8 @@ def checked_cells(rows, expected, what, torch=False):
         if r.get("device") != "cpu":
             raise AggError("%s: device が cpu ではない行: %r" % (what, r.get("device")))
         pf = r.get("parity_fail_count")
-        if pf is not None and (isinstance(pf, bool) or not isinstance(pf, int) or pf != 0):
+        # PyTorch は記録専用（RULE §7）。Accelerate を FMA 参照と比べる parity は非 0 になりうるので判定に使わない
+        if not torch and pf is not None and (isinstance(pf, bool) or not isinstance(pf, int) or pf != 0):
             raise AggError("%s: parity_fail_count が 0 でない: %r" % (what, pf))
     cells = cells_of(rows, torch=torch)
     if set(cells) != set(expected):
@@ -173,11 +174,16 @@ def ab_analysis(d, label):
         exp = [k for k in CELLS if k[0] == task]
         before[task] = checked_cells(read_jsonl(os.path.join(d, "results-before-%s-cpu-%s.jsonl" % (label, task))), exp, "before/" + task)
         after[task] = checked_cells(read_jsonl(os.path.join(d, "results-after-%s-cpu-%s.jsonl" % (label, task))), exp, "after/" + task)
-    hits = glob.glob(os.path.join(d, "results-torch-3176-*-%s-cpu.jsonl" % label))
-    if len(hits) != 1:
-        raise AggError("torch の JSONL が 1 件ではない: %r" % hits)
-    texp = sorted({(t, s, "fresh") for t, s, _ in CELLS})
-    torch = checked_cells(read_jsonl(hits[0]), texp, "torch", torch=True)
+    # PyTorch は記録専用。欠損・不正は A/B 判定（特に checksum FAIL）から切り離して注記のみにする（RULE §6・§7）
+    torch, torch_note = None, None
+    try:
+        hits = glob.glob(os.path.join(d, "results-torch-3176-*-%s-cpu.jsonl" % label))
+        if len(hits) != 1:
+            raise AggError("torch の JSONL が 1 件ではない: %r" % hits)
+        texp = sorted({(t, s, "fresh") for t, s, _ in CELLS})
+        torch = checked_cells(read_jsonl(hits[0]), texp, "torch", torch=True)
+    except (OSError, AggError) as e:
+        torch_note = str(e)
     res = []
     for key in CELLS:
         task, size, _ = key
@@ -187,16 +193,23 @@ def ab_analysis(d, label):
         ac = series(after[task], key, "checksum", "after")
         if any(x <= 0 for x in a + b):
             raise AggError("median_s が正でない: %s" % (key,))
-        t = series(torch, (task, size, "fresh"), "median_s", "torch")
+        t = None
+        if torch is not None:
+            try:
+                t = series(torch, (task, size, "fresh"), "median_s", "torch")
+                if any(x <= 0 for x in t):
+                    t = None
+            except AggError as e:
+                torch_note = torch_note or str(e)
         rr = [x / y for x, y in zip(a, b)]
         res.append(dict(
             key=key, ratio=statistics.median(a) / statistics.median(b), rounds=rr,
             n_le=sum(1 for x in rr if x <= 1.0), n_gt=sum(1 for x in rr if x > 1.0),
             ck_ok=len(set(bc) | set(ac)) == 1,
-            t_before=statistics.median([x / y for x, y in zip(t, b)]),
-            t_after=statistics.median([x / y for x, y in zip(t, a)]),
+            t_before=statistics.median([x / y for x, y in zip(t, b)]) if t else None,
+            t_after=statistics.median([x / y for x, y in zip(t, a)]) if t else None,
         ))
-    return res
+    return res, torch_note
 
 
 def gate_series(d):
@@ -301,7 +314,7 @@ def preconditions(d, label):
     except (OSError, AggError) as e:
         why.append("P-RECT-LOG: %s" % e)
     try:
-        data["ab"] = ab_analysis(os.path.join(d, "r1r2"), label)
+        data["ab"], data["torch_note"] = ab_analysis(os.path.join(d, "r1r2"), label)
     except (OSError, AggError) as e:
         why.append("P-CELLS: %s" % e)
     data["official"] = gate_series(d)
@@ -336,10 +349,14 @@ def render(d, label):
               "|---|---|---|---|---|---|---|---|"]
         for r in data["ab"]:
             t, s, m = r["key"]
-            L.append("| %s %d %s | %s | %.4f | %s | %d/5 | %s | %.3f | %.3f |" % (
+            L.append("| %s %d %s | %s | %.4f | %s | %d/5 | %s | %s | %s |" % (
                 t, s, m, "到達" if r["key"] in REACHED else "非到達", r["ratio"],
                 " ".join("%.3f" % x for x in r["rounds"]), r["n_le"],
-                "一致" if r["ck_ok"] else "**不一致**", r["t_before"], r["t_after"]))
+                "一致" if r["ck_ok"] else "**不一致**",
+                "%.3f" % r["t_before"] if r["t_before"] is not None else "n/a",
+                "%.3f" % r["t_after"] if r["t_after"] is not None else "n/a"))
+        if data.get("torch_note"):
+            L += ["", "注記（PyTorch は記録専用で判定に影響しない）: " + data["torch_note"]]
         reached = [r for r in data["ab"] if r["key"] in REACHED]
         ac1 = all(r["ratio"] <= 1.0 and r["n_le"] == ROUNDS for r in reached) and all(r["ck_ok"] for r in data["ab"])
         L += ["", "AC1 直接判定（到達セルの中央値 <=1.00 かつ 5/5、checksum 一致）: %s" % ("成立" if ac1 else "不成立"), ""]
@@ -449,6 +466,18 @@ def self_test():
             _fixture(d, **kw)
             text = render(d, "L")
             assert want in text.split("\n")[2], (kw, text.split("\n")[2])
+    with tempfile.TemporaryDirectory() as d:  # torch 欠損 + checksum 不一致でも FAIL を失わない
+        _fixture(d, ck_after=2.5)
+        os.remove(os.path.join(d, "r1r2", "results-torch-3176-sme-L-cpu.jsonl"))
+        assert "FAIL" in render(d, "L").split("\n")[2]
+    with tempfile.TemporaryDirectory() as d:  # torch の parity_fail_count 非 0 は記録のみで ADOPT を妨げない
+        _fixture(d)
+        p = os.path.join(d, "r1r2", "results-torch-3176-sme-L-cpu.jsonl")
+        rows = read_jsonl(p)
+        for r in rows:
+            r["parity_fail_count"] = 3
+        _w(p, rows)
+        assert "ADOPT 候補" in render(d, "L").split("\n")[2]
     with tempfile.TemporaryDirectory() as d:  # 異常入力（重複行）は捨てず undetermined
         _fixture(d)
         with open(os.path.join(d, "r4_run1.log"), "a") as f:

@@ -179,8 +179,14 @@ for r in ${RUNS}; do run_one rect "${r}" "rect_run${r}" sme_vs_neon_ab_mlp_rect 
     AB_BEFORE_FACADE_PATH="${BEFORE}/crates/facade" AB_AFTER_FACADE_PATH="${AFTER}/crates/facade" \
     AB_TORCH_PYTHON="${TORCH_PY}" bash run_ab_sme_macmini_cpu.sh 3176-r1) > "${OUT}/run_ab.log" 2>&1
 echo "run_ab exit=$?" >> "${OUT}/load_gate.log"
+# 未加工ログ（build の絶対パス・cargo tree 等を含みうる）も収録前に同じマスクを適用する（RULE §8）。失敗は collect_rc に積む
+mask_rc=0
+for f in "${OUT}"/*.raw.log "${OUT}/run_ab.log" "${OUT}/patch_apply.log"; do
+    [ -e "${f}" ] || continue
+    if mask < "${f}" > "${f}.masked"; then mv "${f}.masked" "${f}"; else rm -f "${f}.masked"; mask_rc=1; fi
+done
 # 収録（マスク）。失敗は collect_rc に積み、load_gate.log へ記録する（aggregate.py が P-COLLECT で検証）
-collect_rc=0
+collect_rc=${mask_rc}
 mkdir -p "${OUT}/r1r2" || collect_rc=1
 for f in "${BEFORE}"/scripts/bench/framework-compare/results/raw/*3176*; do
     [ -e "${f}" ] || { collect_rc=1; continue; }
