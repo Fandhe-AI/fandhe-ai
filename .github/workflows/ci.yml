@@ -1040,6 +1040,12 @@ jobs:
       - name: フレームワーク横並びベンチ opp_kernel_torch_diag.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/opp_kernel_torch_diag_test.py
 
+      # イシュー #3185: opp_kernel_cuda_diag.py（GB10 で PyTorch の cuBLAS 純カーネル時間と
+      # Python 側 checksum を測る診断。#3179 のモジュールを importlib で再利用）の torch／numpy
+      # 不要部分の回帰テスト。同一方針（stdlib の unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ opp_kernel_cuda_diag.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/opp_kernel_cuda_diag_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
