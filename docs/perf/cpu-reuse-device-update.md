@@ -2,8 +2,8 @@
 
 DGX Spark GB10 の CPU reuse 学習で `device_update` が 277.5 µs（step_total の
 25.7%）を占める件について、内訳を sub-phase に分解して支配項を特定するための
-診断基盤の記録。**本書の時点では診断基盤のみ実装済みで、M4 Max／GB10 の 5 run
-実測と仮説判定（§6）は未実施（実機セッションへの申し送り）**。本番コード・
+診断基盤の記録。**GB10 の 5 run 実測と仮説判定は #3188 で実施済み（§11。pre／head の 2 系列）。
+M4 Max の実測は未実施**。本番コード・
 tolerance・baseline・`Cargo.toml`・`docs/spec/` は変更していない。
 
 ## 1. 背景
@@ -86,7 +86,7 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
 
 | ホスト | 状態 |
 |---|---|
-| GB10（5 run・load1 < 1.0 ゲート） | 未実施（実機セッションへ申し送り） |
+| GB10（5 run・load1 < 1.0 ゲート） | 実施（#3188。pre／head の 2 系列。結果は §11） |
 | M4 Max（5 run・record_only） | 未実施（実機セッションへ申し送り） |
 
 参考（判定外）: x86_64 Linux（Core i7-13700K・10 コア）の 5 run スモーク
@@ -133,8 +133,8 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
   `resident_weight_grad_merge_matches_host_only_grad_path`、resident のみは新規
   `resident_only_weight_grad_matches_host_only_grad_path`（SGD・mock）、なしは確保式が
   不変のため構造上不変
-- 未実施（実機セッションへ申し送り）: GB10 と Mac mini の device_update 前後の記録
-  （機体・版つき。#3193 とは別 run）。測定手段は `cpu_reuse_device_update_diag.rs` の
+- GB10 の前後は #3188 で測定済み（§11。ただし #3193 と同じ系列間に入るため分離不能）。
+  Mac mini の記録は未実施。測定手段は `cpu_reuse_device_update_diag.rs` の
   テスト 2（`#[ignore]`）と `logs/cpu-reuse-device-update-2106/orchestrate.sh`
 
 
@@ -149,10 +149,59 @@ momentum 0 のため velocity は確保されず、momentum 系の腕は作ら�
 |---|---|---|---|---|
 | x86_64 Linux（Core i7-13700K・共有環境・record_only） | before = `1a7eb9a2`（origin/main） | 269.1 µs（範囲 192.6-278.8） | 197.3 µs | 参考値（判定外・5 run 独立プロセス） |
 | 同上 | after = 本変更 | 42.7 µs（範囲 41.5-43.7） | 34.2 µs | 同上 |
-| GB10 | - | 未計測 | 未計測 | 実機セッションへ申し送り |
+| GB10（#3188。5 run・負荷ゲート全 run pass） | before = `17c7767b5`（#3193・#3194・#3196 の直前） | 279.1 µs（範囲 270.9-281.0） | 107.1 µs | 実測。#3193 と #3194 を含む区間の合算（§11） |
+| GB10（同） | after = `4f6716f63`（origin/main） | 169.2 µs（範囲 165.5-172.6） | 27.7 µs | 同上 |
 | M4 Max | - | 未計測 | 未計測 | 実機セッションへ申し送り |
 | Mac mini | - | 未計測 | 未計測 | 実機セッションへ申し送り |
 
 - ログ: `logs/cpu-reuse-device-update-2106/smoke-x86-3193/{before,after}/`。before は共有環境のため run 間ばらつきが大きい（§6 と同じく RULE.txt のゲートを通していない）。後退は観測されなかった
 - 受け入れ条件「前後の device_update（機体・版つき）」のうち実機分は未達。GB10・Mac mini・M4 Max では、各版で `orchestrate.sh` を回して `aggregate.py` で集計する。`bench-fandhe --task train --device cpu --mode reuse --phases` の前後比較は `[patch.crates-io.fandhe-ai]` の path patch で行う（既存 `run_ab_*_cpu.sh` は定数反転専用でコード差分の A/B には流用できず、派生スクリプトが要る。本変更の範囲外）
 - x86 baseline（FMA の target feature なし）では `mul_add` が `fmaf` 呼び出しになるため weight_decay・momentum 経路は自動ベクトル化されない（bit は同一）。計測経路（momentum 0・wd 0）は `p - lr*g` のみでベクトル化が効く
+
+## 11. GB10 実測（#3188）
+
+DGX Spark GB10（20 コア・rustc 1.97.0・affinity pin なし・`RAYON_NUM_THREADS` 未設定）で、継承 RULE（§5）を無変更のまま 2 系列について 5 run ずつ実測した。追加規則は `logs/cpu-train-fixedcost-gb10-3188/RULE.txt`（計測前に固定）。診断のみで、コード・既定値・tolerance は無変更。
+
+- 系列: **pre** = `17c7767b588a8c4c52eccccc39ba880519962d53`（#3196・#3194・#3193 の直前）、**head** = `4f6716f638a6997559847480ddf93cf6924a96e3`（#3188 着手時の origin/main）
+- ツリー同定: 各 run 出力と `.rev-stamp` が上記 SHA と一致。計測前後のツリー指紋は同一で、Mac 側 `git archive` の指紋とも差分 0 件（`logs/cpu-train-fixedcost-gb10-3188/{pre,head}/tree_verify.txt`）。負荷ゲートは 2 系列とも全 run pass。checksum は run 間・腕間一致。aarch64 での bit 一致テストも pass（`aarch64_ci_test_*.txt`）
+- 生ログと集計: `logs/cpu-train-fixedcost-gb10-3188/{pre,head}/device-update-2106/`（`run{1..5}.jsonl`・`aggregate.md`）
+
+| 区間（中央値 µs。min-max） | pre | head |
+|---|---|---|
+| T = insitu_direct `device_update` | 279.1（270.9-281.0） | 169.2（165.5-172.6） |
+| insitu_pretouch `device_update` | 323.9（317.1-325.1） | 172.2（168.1-174.9） |
+| standalone `sgd_kernel`（SGD ループ） | 107.1（105.6-121.5） | 27.7（23.9-31.7） |
+| standalone `sgd_kernel_zip` | 22.3 | 22.6 |
+| standalone `sgd_kernel_fixed` | 0.1 | 0.1 |
+| standalone `alloc`（`flat_grad` 相当の `with_capacity`） | 0.9 | 0.9 |
+| standalone `stage` | 0.7 | 0.7 |
+| H1 ループ形 | 84.7（T 比 0.30） | 5.0（0.03） |
+| H2 cache 状態（direct − pretouch） | -44.8 | -3.0 |
+| H3 ホスト確保（alloc + stage） | 1.6（0.01） | 1.6（0.01） |
+| H4 prologue + 残差 | 215.2（0.77）**支持** | 142.8（0.84）**支持** |
+| 補助: apply_params_split / (compute + apply)_split | 0.36 | 0.34 |
+
+継承 RULE の判定は両系列とも「H4 prologue + 残差」に帰属する。
+
+### イシュー指定の 3 区分への対応（head = 現行の姿）
+
+| 区分 | head の値 | T 比 |
+|---|---|---|
+| SGD ループ（`sgd_kernel`） | 27.7 µs | 0.16 |
+| `flat_grad` 確保 | 構造上 0（#3194 で resident 分岐は確保しない）。standalone の `alloc` は 0.9 µs（未タッチの `with_capacity` のため、ページ初回アクセスのコストは含まない） | 0.01 以下 |
+| その他（stage・prologue・cache 状態ほか） | 約 141.5 µs（T − sgd_kernel） | 0.84 |
+
+参考（判定ではない）: 本番経路換算の残差 = insitu_pretouch −（sgd_kernel + stage）= 172.2 −（27.7 + 0.7）= 143.8 µs。
+
+### pre → head の変化（参考。#3193・#3194 の GB10 実測効果）
+
+- T は 279.1 → 169.2 µs（-109.9 µs、0.61 倍）。うち `sgd_kernel` の短縮が 79.4 µs（#3193 の zip 化に対応。H1 が 84.7 → 5.0 µs）。T − `sgd_kernel` は 172.0 → 141.5 µs（-30.5 µs）で、#3194 の `flat_grad` 確保除去（約 814 KB）に対応しうるが、T では #3193 と #3194 を分離できない。分離できるのは standalone 区間（`sgd_kernel`）だけで、この値は #3193 の効果を示す
+- 0.9.0 の bench（277.5 µs）は pre の T（279.1 µs）とほぼ一致する。0.11.0 の bench の train reuse 1.030 ms は別プロトコルの値で、本診断の T とは窓が異なる
+- 現行の `device_update` は T の約 84% が SGD ループ以外に残る。この内訳は `stage`（0.7 µs）と `alloc`（0.9 µs）で説明されず、standalone の区間に現れない固定費（prologue・tape 側の状態）が支配している。**因果の確定は本診断の範囲外**（H4 は残差項のため）
+
+### 限界と申し送り
+
+- MSE backward の区間はどちらの診断も測らない（#3180 の担当）。#3195 へは、head の `device_update` が約 169 µs で、そのうち SGD ループが約 28 µs にとどまることを前提として渡す
+- H4 の内訳（prologue と残差の分離）は本診断で分解できていない。分離するには別の計測が要る（本イシューのスコープ外）
+- M4 Max・Mac mini は未実施。`bench-fandhe --phases` の前後比較は未実施
+- 診断の値は bench の値と計測窓が異なる（`logs/cpu-train-fixedcost-gb10-3188/RULE.txt`）

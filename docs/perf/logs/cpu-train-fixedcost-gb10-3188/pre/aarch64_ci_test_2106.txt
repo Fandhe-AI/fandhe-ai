@@ -1,0 +1,15 @@
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/fandhe-3188-pre/crates/autodiff)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/fandhe-3188-pre/crates/backend-cuda)
+   Compiling bench-harness v0.11.0 (<home>/work/fandhe-3188-pre/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (<home>/work/fandhe-3188-pre/crates/onnx-interop)
+   Compiling ureq v3.4.2
+   Compiling fandhe-ai v0.11.0 (<home>/work/fandhe-3188-pre/crates/facade)
+    Finished `release` profile [optimized] target(s) in 23.45s
+     Running tests/cpu_reuse_device_update_diag.rs (<home>/work/target-fandhe-3188-pre/release/deps/cpu_reuse_device_update_diag-d55a218255f52866)
+
+running 2 tests
+test cpu_reuse_device_update_phases ... ignored, 実機計測用の record-only 診断（RULE.txt・orchestrate.sh 参照）
+test cpu_reuse_device_update_decomposition_matches_public_api_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.07s
+

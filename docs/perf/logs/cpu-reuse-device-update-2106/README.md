@@ -11,7 +11,7 @@
 | `orchestrate.sh` | テストバイナリを 1 回ビルドし、独立 5 プロセスで実行して `run{1..5}.jsonl`・`env_info.txt`・`load_gate.log`・`load_gate_status.txt` を残す |
 | `aggregate.py` | 5 run を集計（python3 標準ライブラリのみ。欠落・不正・n≠80・非有限/非正の median_s・checksum 不一致・ゲート状態欠落は fail-closed。`--self-test` あり） |
 | `smoke-x86/` | x86_64 Linux での 5 run スモーク（**判定外**。動作確認用。ホスト名は `masked`） |
-| `m4max/`・`gb10/` | 実機実測時の生ログ（現状は未実測のため存在しない） |
+| `m4max/`・`gb10/` | 実機実測時の生ログ（本ディレクトリには存在しない。GB10 の実測は #3188 の `../cpu-train-fixedcost-gb10-3188/{pre,head}/device-update-2106/`） |
 
 ## 実行手順（実機セッション）
 
