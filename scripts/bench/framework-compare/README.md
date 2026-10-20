@@ -2004,6 +2004,12 @@ main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の
 `bench_py.py`・相手側ベンチ・判定規則は変えず、`--bench-py` を sha256 照合のうえ importlib で再利用する。`measure`／`aggregate`／`--self-test` を持ち、CI では torch 不要部分の `opp_kernel_torch_diag_test.py` だけを実行する。
 実行は `docs/perf/logs/opp-kernel-macmini-3179/run-macmini.sh`、規則は同 `RULE.txt`、結論は `docs/perf/opp-kernel-macmini.md`。
 
+## GB10 の cuBLAS 純カーネル時間と Python 側 checksum の診断（`opp_kernel_cuda_diag.py`、イシュー #3185）
+
+#3179 の GB10 版。PyTorch（cuBLAS）の `torch.mm` を FP32（`allow_tf32=False`）・TF32（`allow_tf32=True`）で、`perf_counter` と `torch.cuda.Event` の 2 つの時計で測り、読み出し・checksum の ns／要素と併せて区間に分ける。fandhe 側は既存の `#[ignore]` 診断テスト（Rust は変更しない）のログを `parse-fandhe` で読み、wall 対 wall・event 対 event の比を別列で出す。
+#3179 の `opp_kernel_torch_diag.py` は変更せず importlib で再利用し、`bench_py.py`・相手側ベンチ・判定規則も変えない。`measure`／`cpu-blas-probe`／`parse-fandhe`／`aggregate`／`--self-test` を持ち、CI では torch 不要部分の `opp_kernel_cuda_diag_test.py` だけを実行する。
+実行は `docs/perf/logs/opp-kernel-gb10-3185/run-gb10.sh`、規則は同 `RULE.txt`、結論は `docs/perf/opp-kernel-gb10.md`。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）
