@@ -44,7 +44,7 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 
 | 項目 | 結果 |
 |------|------|
-| 専有ゲート | 成立（A/B 起動前に enforce モードで通過。第 2 系列〈`2115-gb10-3190b`〉のゲートログは作業ミスで消失〈下記〉。計測が走ったこと自体が通過の証跡〈不成立なら計測せず終了する設計〉）。第 1 系列のゲートは 8 サンプル目で 3 連続 ok |
+| 専有ゲート | 成立（A/B 起動前に enforce モードで通過。第 2 系列〈`2115-gb10-3190b`〉のゲートログは作業ミスで消失〈下記〉。計測が走ったこと自体が通過の推定証跡〈不成立なら計測せず終了する設計〉。残る実測証跡は `ab-stdout-2115-gb10-3190b.log` の run 終了時 `load average` 行〈2.59〜3.4 は自身の計測負荷を含む〉）。第 1 系列のゲートは 8 サンプル目で 3 連続 ok |
 | R0（前提ゲート） | 合格（`linear_forward_device_real_device` 5 passed・`graph_capture_real_device` 2 passed） |
 | R1（capture 正当性） | **(a) 合格**（`INFER_CAPTURE_R1: PASS` が 5 行）。**(b) 不合格**: README の事前登録コマンド（`--test-threads` 指定なし）で `predict_device_chain_cuda_bit_identity` が ON で 4 件失敗（`Backend(DeviceContextCaptureInProgress { ordinal: 0 })`。1 passed・4 failed）。bit 不一致ではなく、別スレッドの capture 中に同一デバイスを使った呼び出しがエラーを返したもの |
 | R2（bit ダンプ diff） | 合格（batch 64／1024／4096 の OFF/ON ダンプが行数〈640／10240／40960〉・sha256 とも完全一致） |

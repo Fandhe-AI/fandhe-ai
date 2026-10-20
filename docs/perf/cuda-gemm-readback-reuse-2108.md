@@ -71,6 +71,8 @@ facade、`AB_READBACK_SIZES=n256`、`AB_ROUNDS=5`、専有ゲート exclusive（
 |---|---|---|---|---|---|
 | gemm reuse N=256 | 92.1 us | 96.4 us | 1.0475 | 1.0724, 1.0500, 1.0498, 1.0472, 1.0724（5/5 後退） | 完全一致 |
 
+なお標準出力に `他の bench-fandhe/bench-candle プロセスが実行中の可能性がある（pgrep 検出）` の警告が出た。専有ゲートは各 run の前に load1 < 1.0 かつ GPU 0% を 3 サンプル連続で要求しており（初回 load1 2.92 で待機後 0.39 で通過）、各 round 末尾の status 行は GPU 0〜1% だった。
+
 **判定: REJECT**（補遺 RULE 9: 専有ゲートが成立した系列で ratio > 1.00）。N>=1024 の #3186 の結論と同じ向きで、全 N で pinned-reuse は後退した。
 `READBACK_DEST` 既定は `PretouchedFresh` のまま。標準出力ログから JSON 行を無加工で取り出して表を再生成している（`*.reconstructed.*`。
 `compare` の出力ファイルを作業中に誤って削除したため。値の改変なし。詳細は `docs/perf/optin-ab-gb10.md`）。
