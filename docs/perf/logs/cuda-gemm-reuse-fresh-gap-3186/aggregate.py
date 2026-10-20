@@ -9,10 +9,12 @@ fail-closed: ファイル欠落・run 不足・checksum 不一致は例外（exi
 欠損を寛容にパースしない（集計を黙って通さない）。
 """
 import json
+import math
 import os
 import statistics
 import sys
 
+TRIALS = 20
 SIZES = [512, 1024, 2048, 4096]
 RUNS = 5
 ARMS = [
@@ -43,6 +45,23 @@ def load_jsonl_one(path):
     return json.loads(lines[0])
 
 
+def check_trials(row, label):
+    """全区間の trials_us が TRIALS 要素の有限数値配列であることを検証する（欠損・短縮を拒否）。"""
+    for name, ph in row.get("phases", {}).items():
+        t = ph.get("trials_us") if isinstance(ph, dict) else None
+        if not isinstance(t, list) or len(t) != TRIALS:
+            raise Invalid(f"trials_us が {TRIALS} 要素でない: {label} {name}")
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+                   for x in t):
+            raise Invalid(f"trials_us に非有限・非数値: {label} {name}")
+
+
+def finite_number(x, label):
+    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+        raise Invalid(f"checksum が有限の数値でない: {label} = {x!r}")
+    return x
+
+
 def load_dir(d):
     """{(run, n, arm): row}, {(run, n, mode): layerA row}, gate dict を返す。"""
     b, a = {}, {}
@@ -52,6 +71,7 @@ def load_dir(d):
                 row = load_jsonl_one(os.path.join(d, f"run{k}", f"n{n}_{arm}.jsonl"))
                 if row.get("n") != n or row.get("arm") != arm:
                     raise Invalid(f"n/arm 不一致: run{k} n{n} {arm}")
+                check_trials(row, f"run{k} n{n} {arm}")
                 b[(k, n, arm)] = row
             for mode in ("fresh", "reuse"):
                 a[(k, n, mode)] = load_jsonl_one(
@@ -75,13 +95,16 @@ def check_checksums(b, a):
         bits = {b[(k, n, arm)]["checksum_bits"] for k in range(1, RUNS + 1) for arm in ARMS}
         if len(bits) != 1:
             raise Invalid(f"N={n}: Layer B checksum_bits が不一致 {sorted(bits)}")
+        for k in range(1, RUNS + 1):
+            for arm in ARMS:
+                finite_number(b[(k, n, arm)].get("checksum"), f"Layer B run{k} n{n} {arm}")
         ref = b[(1, n, ARMS[0])]["checksum"]
         if n in KNOWN and abs(ref - KNOWN[n]) > CHECKSUM_TOL:
             raise Invalid(f"N={n}: 既知 checksum と不一致 {ref} vs {KNOWN[n]}")
         for k in range(1, RUNS + 1):
             for mode in ("fresh", "reuse"):
-                c = a[(k, n, mode)].get("checksum")
-                if c is None or abs(c - ref) > CHECKSUM_TOL:
+                c = finite_number(a[(k, n, mode)].get("checksum"), f"Layer A {mode} run{k} n{n}")
+                if abs(c - ref) > CHECKSUM_TOL:
                     raise Invalid(f"N={n}: Layer A {mode} run{k} checksum {c} vs {ref}")
 
 
@@ -127,8 +150,9 @@ def verdict(share, ok):
 
 
 def judge_w(b, a, n, gate_pass):
-    gap_ret = across_runs(lambda k: readback_total(b[(k, n, "keep_pretouched")])
-                          - readback_total(b[(k, n, "drop_pretouched")]))[0]
+    # RULE.txt: median(keep) - median(drop)（各腕の run 間中央値を取ってから差を取る）
+    gap_ret = (across_runs(lambda k: readback_total(b[(k, n, "keep_pretouched")]))[0]
+               - across_runs(lambda k: readback_total(b[(k, n, "drop_pretouched")]))[0])
     a_fresh = across_runs(lambda k: a[(k, n, "fresh")]["median_s"] * 1e6)[0]
     a_reuse = across_runs(lambda k: a[(k, n, "reuse")]["median_s"] * 1e6)[0]
     gap_a = a_reuse - a_fresh
@@ -146,8 +170,9 @@ def judge_w(b, a, n, gate_pass):
 
 def judge_f(b, a, gate_pass, n=4096):
     reused = lambda k: b[(k, n, "drop_reused")]
-    page = across_runs(lambda k: readback_total(b[(k, n, "drop_pretouched")])
-                       - readback_total(reused(k)))[0]
+    # RULE.txt: median(drop_pretouched) - median(drop_reused)（中央値の差）
+    page = (across_runs(lambda k: readback_total(b[(k, n, "drop_pretouched")]))[0]
+            - across_runs(lambda k: readback_total(reused(k)))[0])
     host = across_runs(lambda k: med_phase(reused(k), "host_read"))[0]
     layerb_sum = across_runs(lambda k: sum(med_phase(reused(k), p) for p in FRONT)
                              + readback_total(reused(k)))[0]
@@ -321,6 +346,22 @@ def self_test():
         raise AssertionError("checksum 不一致を検出できていない")
     except Invalid:
         pass
+    # NaN checksum / trials 欠損・短縮は例外
+    b, a = _synthetic()
+    a[(2, 1024, "reuse")]["checksum"] = float("nan")
+    try:
+        check_checksums(b, a)
+        raise AssertionError("NaN checksum を検出できていない")
+    except Invalid:
+        pass
+    for bad in ([], [1.0] * 19):
+        try:
+            r = _row(4096, "drop_untouched")
+            r["phases"]["readback_total"]["trials_us"] = bad
+            check_trials(r, "t")
+            raise AssertionError("trials 長不足を検出できていない")
+        except Invalid:
+            pass
     # 欠損は例外
     try:
         load_jsonl_one("/nonexistent/path.jsonl")
