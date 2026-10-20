@@ -1,0 +1,71 @@
+イシュー #3184 事前登録規則 (補遺: 未計測 opt-in 候補 7 件の Mac mini A/B)
+fixed-at: 2026-10-20 (この規則は計測前にコミットして固定する。以後、緩和・事後調整はしない)
+
+0. 位置づけ
+  - 継承元の RULE.txt (tape-arena-reuse-2104 / elemental-reduction-threshold-2101 / elemental-reduction-ab-2102 /
+    metal-reuse-readback-2112 / metal-train-forward-encodeonly-2113 / metal-gemm-candidate-ab-2111 /
+    metal-tape-build-infer-phase-2114 と metal-gemm-candle-gate-remeasurement.md §15.1) は 1 字も変えない。
+    本書は Mac mini 固有の差分だけを足す補遺であり、継承規則を緩めない (条件を足して厳しくするだけ)。
+  - 過去の判定 (#1520 の readout REJECT、M4 Max の既存結果) は覆さない。Mac mini 分は「条件を変えた再測定」。
+  - 既定の反転は #3227、readout 方式の採否は #3265、GB10 の計測は #3190。本イシューは診断のみで
+    main の定数・環境変数既定を変えない。after 腕は計測専用 checkout (main へコミットしない)。
+    unsafe と依存の追加はしない。
+
+1. 計測対象ゲートと継承 RULE (判定語彙は継承 RULE の語をそのまま使い、読み替えない)
+  G1 HOST_ARENA_DEFAULT_ENABLED                      : 2104 (ADOPT / REJECT / undetermined、checksum 不一致は FAIL)
+  G2 REDUCTION_SEQUENTIAL_FALLBACK_ENABLED           : 2101 (Stage 0) -> 2102 (Stage 1)
+  G3 TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED       : 2113 (前提ゲート不成立・checksum 不一致は FAIL)
+  G4 READBACK_DEST_DEFAULT (同一バイナリの環境変数切替) : 2112
+  G5 readout legacy|borrowed                         : metal-gemm-candle-gate-remeasurement.md §15.1
+  G6 steel 候補 (T0U / LU / T0U-LU / T0U-LU-FB)      : 2111 (ADOPT_CANDIDATE / REJECT / UNDETERMINED / NOT_ADOPTABLE / INCOMPLETE / REFERENCE_ONLY)
+  G7 METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED       : 2114 (ADOPT 判定なし。H1〜H4 の支持/未確定のみ)
+
+2. 条件差 (結論 doc にも同じ表を書く)
+  | 項目 | 継承 RULE の想定 | 本計測 |
+  |---|---|---|
+  | 機体 | M4 Max (P12+E4) + GB10 | Mac mini M4 (P4+E6、GPU 10 コア) |
+  | 負荷 | 継承 RULE ごとの登録値 (8.0 / exclusive 4.0 / record_only) | 専有機・load1 < 3.0 (下記 3) |
+  | verified_m4_max_gpu_core_count | 解決済み | M4 では None に解決する見込み。実測値を env_info に記録 |
+
+3. 負荷ゲート (継承を緩めず、外側で厳しくする)
+  - 継承スクリプトと orchestrate.sh は編集しない。継承の閾値 (登録値) のまま起動する。
+  - 外側ゲート: 系列開始前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ。値と時刻を machine_gate.log へ書く。
+  - 事後検査: 継承ゲートログの各 round の load1 が全て < 3.0 であること。round 単位で machine_gate_ok=0|1 を記録する。
+  - 正式系列 = 継承 RULE の正式系列条件が成立 かつ 外側ゲートと全 round の machine_gate_ok が成立。
+    どちらかが欠けた系列は record_only で、判定は undetermined。
+
+4. 2 機体判定 (2104 / 2102 / 2113) での Mac mini の位置づけ
+  - 所有者指示 (2026-10-11、docs/real-hardware-verification-env.md §7.1) により、Mac mini を継承 RULE の
+    「M4 Max」枠 (Apple Silicon 側) として扱う。条件差は 2 の表で宣言し、判定条件の文言は変えない。
+  - 機体ごとの条件 (セル別 5 round 中央値 ratio <= 1.00・checksum 完全一致・5/5 round 一貫) は Mac mini にそのまま適用する。
+  - REJECT 条件 (いずれかの機体で 5/5 round 一貫して後退) を Mac mini で満たせば単機で REJECT 確定。
+  - ADOPT 条件は両機体の成立が要る。Mac mini だけが成立した場合は
+    「Mac mini 機体判定: ADOPT 条件成立 (総合は GB10〈#3190〉待ち)」と書き、ADOPT とは書かない。
+    #3190 が未実測なら GB10 列は「未実測」、総合は undetermined。
+
+5. ゲート別の固定事項
+  - G2: Mac mini 単機の閾値を T_macmini とし Stage 1 はこの値を使う。最終 T は将来 min(T_macmini, T_gb10) で、
+    T_macmini より小さくなれば Stage 1 は #3227 側で再計測。T <= 640 なら REJECT で Stage 1 へ進まない。
+    on-reduction.patch の @T@ は Stage 0 確定後に確定値を記入する (この記入は規則の緩和ではない)。
+    Stage 0 の生ログは本ディレクトリの reduction/stage0/ に収め、継承ディレクトリに macmini/ を作らない。
+    MSE backward は適用外 (2102 の除外節)。
+  - G3: 前提ゲート (a) bit 一致テスト (b) カウンタ再現 (ON 11/6/6、OFF 11/7/7、backward_dinput_phase は両方 5/3/3)
+    (c) 既存 #[ignore] 群の非後退 (before で既に FAIL のものは before でも FAIL を示して区別) を性能 round より先に実行。
+    1 件でも不一致なら FAIL で性能判定へ進まない。
+  - G4: PARALLEL_READBACK_MIN_BYTES = 8 MiB / MAX_THREADS = 8 は凍結。borrowed readout は判定に使わない。
+    N=1024 の ratio > 1.00 もそのまま REJECT として記録する。
+  - G5: 出力ファイル名の m4max は直書きのため、label に macmini を含めファイル名と機体の対応を README に書く。
+  - G6: base は M4 (非 Max) で select_for_device が None 解決する見込みのため Mac mini 固有。条件差として記録。
+    candle デバイス区分の仮定は未確認として N=512 の結論に注記 (N>=1024 は区分に依らない)。
+    env_info.txt には run 1 の前に load_policy: exclusive_gate を書く。REQ-8: 固定 4 arm が手動境界チェックを
+    外さないことを steel 設計 doc §2・§4 で確認して結論 doc に書く。境界検査を省く候補は採用しない。
+  - G7: orchestrate.sh の host_kind は m4max のみ受けるため、トークンを流用して --out で出力先を指定する (README に明記)。
+
+6. 運用
+  - run の差し替え・追加・セル除外は禁止。再実行は別 label で行い旧系列も残す。
+  - 欠損・round 数 != 5・非有限値・checksum 不一致は FAIL / undetermined (fail-closed)。
+  - 実機に届かない・完走できない系列は推定で埋めず undetermined (未実測) と書く。
+  - 定数は main で変えない。計測前にこの規則を単独でコミットして固定する。
+  - マスク規則: ホスト名は masked、$HOME は <home>、ユーザー名・絶対パスは除く。
+  - 計測は Mac mini で行い、ビルドを並走させない。RAYON_NUM_THREADS は unset。
+    2 時間を超える場合は CPU 系 (G1→G2) と Metal 系 (G4→G5→G3→G6→G7) の 2 セッションに分ける。

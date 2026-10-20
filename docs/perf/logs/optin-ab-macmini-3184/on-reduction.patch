@@ -1,0 +1,20 @@
+diff --git a/crates/backend-cpu/src/reduction.rs b/crates/backend-cpu/src/reduction.rs
+index 9155d64d5..9c9579d7c 100644
+--- a/crates/backend-cpu/src/reduction.rs
++++ b/crates/backend-cpu/src/reduction.rs
+@@ -102,13 +102,13 @@ pub(crate) const CHUNK: usize = 4096;
+ /// 宣言を 1 行形式のまま sed で読むため、宣言の書式を変えない（ドリフト検査は
+ /// `tests::ab_script_constant_declarations_are_parseable`）。`mse_loss_backward` は #1578 で REJECT
+ /// 確定のため対象外。
+-pub(crate) const REDUCTION_SEQUENTIAL_FALLBACK_ENABLED: bool = false;
++pub(crate) const REDUCTION_SEQUENTIAL_FALLBACK_ENABLED: bool = true;
+ 
+ /// 逐次へ落とす入力要素数（`numel`）の**未実測の暫定候補**。ゲートが
+ /// `false` の間は効かない。値は #2102 の実測（Phase 0 で決めた T）で決める（#1578 Phase 0 で両機体
+ /// とも `1 << 18` まで逐次が優位だったことのみを参考根拠とする）。
+ /// `elementwise::PARALLEL_THRESHOLD` は流用しない（モジュール doc 参照）。
+-pub(crate) const REDUCTION_PARALLEL_MIN_ELEMS: usize = 1 << 18;
++pub(crate) const REDUCTION_PARALLEL_MIN_ELEMS: usize = @T@;
+ 
+ /// 逐次・並列の選択規則。判定尺度は入力要素数（`numel`）で、`dim=None`・
+ /// `dim=Some(axis)`（`outer*axis_len*inner`）とも同じ量を使う。
