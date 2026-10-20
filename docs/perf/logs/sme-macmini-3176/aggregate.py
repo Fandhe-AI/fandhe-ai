@@ -28,6 +28,7 @@ MODES = ("fresh", "reuse")
 CELLS = [("gemm", s, m) for s in GEMM_SIZES for m in MODES] + [
     (t, 64, m) for t in ("train", "infer") for m in MODES
 ]
+CELLS_SET = set(CELLS)
 # 到達セル（m=n=k>=512 の gemm 6 + train size=64 の 2。RULE.txt §2）。infer は m=64 で非到達
 REACHED = [c for c in CELLS if c[0] == "gemm" or c[0] == "train"]
 R4_MN = (64, 128, 256, 512)
@@ -214,7 +215,9 @@ def ab_analysis(d, label):
 
 def checksum_mismatch(d, label):
     """before／after の checksum 不一致を、他セルの欠損・median_s 不正と独立に判定する（RULE §6: FAIL 最優先）。
-    読めない行・ファイル・非数値は黙って飛ばし、読めた値だけで同一セル内に 2 値以上あれば True。"""
+    読めない行・ファイルは飛ばし、読めた値だけで同一セル内に 2 値以上あれば True。
+    対象セル（CELLS）の行で checksum が null・文字列・非有限値・欠落の場合も「数値として完全一致しない」異常として
+    True を返す（RULE §6。実行スクリプトが非数値を FAIL と記録するのと整合させる）。"""
     seen = {}
     for task in ("gemm", "train", "infer"):
         for arm in ("before", "after"):
@@ -226,6 +229,8 @@ def checksum_mismatch(d, label):
             for r in rows:
                 v = r.get("checksum")
                 if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    if (r.get("task"), r.get("size"), r.get("mode", "fresh")) in CELLS_SET:
+                        return True
                     continue
                 seen.setdefault((r.get("task"), r.get("size"), r.get("mode", "fresh")), set()).add(float(v))
     return any(len(vs) > 1 for vs in seen.values())
@@ -499,6 +504,11 @@ def self_test():
         _fixture(d)
         _edit_jsonl(d, lambda r: r.update(checksum=9.5, median_s=-1))
         assert "FAIL" in render(d, "L").split("\n")[2]
+    for bad in (None, "x", float("nan"), float("inf")):  # 非数値 checksum は undetermined でなく FAIL
+        with tempfile.TemporaryDirectory() as d:
+            _fixture(d)
+            _edit_jsonl(d, lambda r, bad=bad: r.update(checksum=bad))
+            assert "FAIL" in render(d, "L").split("\n")[2], bad
     with tempfile.TemporaryDirectory() as d:  # torch の parity_fail_count 非 0 は記録のみで ADOPT を妨げない
         _fixture(d)
         p = os.path.join(d, "r1r2", "results-torch-3176-sme-L-cpu.jsonl")
