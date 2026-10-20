@@ -166,7 +166,7 @@ class Tests(unittest.TestCase):
         self.assertIsNone(by[2048]["event_ratio_seg_over_cublas_fp32"])  # N>=1024 に event 時計なし
         self.assertIsNotNone(by[256]["event_ratio_seg_over_cublas_fp32"])
         self.assertAlmostEqual(by[2048]["fandhe_wall_s"], 2e-3)  # launch_issue + kernel_wait
-        self.assertAlmostEqual(by[256]["fandhe_wall_s"], 1e-3)  # L2S kernel_wait
+        self.assertIsNone(by[256]["fandhe_wall_s"])  # L2S は投入を含まないため未計測
         self.assertIn("該当計測なし", G.render_md(agg))
 
     def test_layerb_parser(self):

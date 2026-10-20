@@ -473,9 +473,11 @@ def aggregate_rows(py_rows, fandhe_rows, reference, checksums_match):
         fandhe[(n, "wall")] = {"median_s": statistics.median(per.values()), "per_run": per,
                                "source": "Layer B launch_issue+kernel_wait"}
     for n in DIAG_SIZES:
+        # L2S は kernel_wait（同期のみ）しか持たず、mm_pure（投入〜同期完了）と境界が違うため
+        # wall 比の分子にしない（未計測扱い。codex P2）。参考値だけ別キーで残す。
         per = fb[(n, "L2S", "kernel_wait")]
-        fandhe[(n, "wall")] = {"median_s": statistics.median(per.values()), "per_run": dict(sorted(per.items())),
-                               "source": "L2S kernel_wait"}
+        fandhe[(n, "kernel_wait_only")] = {"median_s": statistics.median(per.values()),
+                                           "per_run": dict(sorted(per.items())), "source": "L2S kernel_wait"}
         for ph in ("dev_kernel_seg", "dev_kernel_b2b"):
             per = fb[(n, "D", ph)]
             fandhe[(n, ph)] = {"median_s": statistics.median(per.values()), "per_run": dict(sorted(per.items())),
@@ -530,7 +532,7 @@ def render_md(agg):
             f"{f(r['event_ratio_b2b_over_cublas_fp32'], '.3f')} | {r['tf32_over_fp32_wall']:.3f} | "
             f"{r['tf32_over_fp32_event']:.3f} | {r['tf32_checksum_minus_fp32']:.6g} | "
             f"{r['tf32_checksum_bit_equal_fp32']} |")
-    L += ["", "注: fandhe の wall は N>=1024 が Layer B（warmup20/計測20）、N<=512 が L2S（50/200）。"
+    L += ["", "注: fandhe の wall は N>=1024 が Layer B（warmup20/計測20）、N<=512 は投入を含む同境界の計測がないため wall 比を未計測（-）とする。"
           "event 時計は N<=512 のみ。入力は bench_py と別シード。", "",
           "## 区間（arm|N|phase）", "",
           "| arm | N | phase | median [s] | ns/要素 | TFLOPS | Σ区間/window | 推定2.7との差[ns] | run 別 |",

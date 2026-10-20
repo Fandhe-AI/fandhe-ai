@@ -28,8 +28,9 @@ GATE_LOG="${OUT}/gate.log"
   nvcc --version || true
   uname -m
   "${VENV_PY}" -c 'import torch,numpy; print(torch.__config__.show()); print(torch.version.cuda, torch.backends.cudnn.version())'
-  sha256sum "${BENCH_PY}"
-  if [ -n "${NODE_BENCH_PY:-}" ] && [ -f "${NODE_BENCH_PY}" ]; then echo "node bench_py.py:"; sha256sum "${NODE_BENCH_PY}"; fi
+  # 標準入力経由でハッシュのみ出す（sha256sum はパスを併記し、絶対ホームパスが env.txt に残るため。RULE 項 1）。
+  echo "bench_py.py: $(sha256sum < "${BENCH_PY}" | cut -d' ' -f1)"
+  if [ -n "${NODE_BENCH_PY:-}" ] && [ -f "${NODE_BENCH_PY}" ]; then echo "node bench_py.py: $(sha256sum < "${NODE_BENCH_PY}" | cut -d' ' -f1)"; fi
   cat "${REPO_DIR}/.rev-stamp"
 } > "${OUT}/env.txt" 2>&1
 
