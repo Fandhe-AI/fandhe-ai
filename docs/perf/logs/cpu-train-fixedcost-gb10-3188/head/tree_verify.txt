@@ -1,0 +1,2 @@
+series=head sha=4f6716f638a6997559847480ddf93cf6924a96e3
+node(before)==node(after)==git archive on Mac: 差分 0 件 (    2112 files)

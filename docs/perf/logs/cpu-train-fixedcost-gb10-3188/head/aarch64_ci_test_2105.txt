@@ -1,0 +1,9 @@
+   Compiling fandhe-ai v0.11.0 (<home>/work/fandhe-3188-head/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.90s
+     Running tests/cpu_predict_resident_fixedcost_diag.rs (<home>/work/target-fandhe-3188-head/release/deps/cpu_predict_resident_fixedcost_diag-3d76602b9ff9bf67)
+
+running 1 test
+test cpu_predict_resident_decomposition_matches_public_api_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

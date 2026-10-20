@@ -1,0 +1,2 @@
+series=pre sha=17c7767b588a8c4c52eccccc39ba880519962d53
+node(before)==node(after)==git archive on Mac: 差分 0 件 (    2073 files)

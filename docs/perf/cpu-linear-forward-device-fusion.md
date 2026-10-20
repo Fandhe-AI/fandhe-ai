@@ -54,6 +54,8 @@ fresh で見えた短縮は rayon 並列の `elementwise::add`／`relu` 3 リー
 | Mac mini | 未実測 | 未実測 | 未実測 | 未実測 |
 | DGX Spark GB10 | 未実測 | 未実測 | 未実測 | 未実測 |
 
+参考: 診断ベース（bench-fandhe ではない別プロトコル）の GB10 前後は `cpu-predict-resident-fixedcost.md` §6（#3188）。bench-fandhe の前後比較は未実測のまま。
+
 ## 7. 限界・申し送り
 
 - 実測は未実施（この環境に実機なし）。Issue は実測記録まで open のままにする（PR は `Refs #3196`）
