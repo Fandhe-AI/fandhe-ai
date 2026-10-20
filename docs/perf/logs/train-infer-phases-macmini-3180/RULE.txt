@@ -1,0 +1,52 @@
+イシュー #3180 事前登録規則（計測前に固定。計測後に緩めない）
+固定日時: 2026-10-20T02:05:00Z（このファイルを含む計測前コミットの作成より前。結果が出る前）
+================================================================
+目的: Mac mini（Apple M4・4P＋6E・16 GB）で train／infer の phase 内訳（cpu／metal × fresh／reuse）、
+Metal の同期回数、同期 1 回の固定費を測り、「同期回数を相手と同じにする」「同期ゼロ化」のどちらがどれだけ
+効くかを決める入力（後続 #3195・#3208・#3217）を作る。診断のみ（record-only）。変えないもの:
+tolerance・baseline・判定規則・相手側ベンチ・ライブラリの src/ と既定値・Cargo.toml／Cargo.lock・
+framework-compare の依存ピンと allowlist。本 PR の新規物はテスト 1 本（crates/backend-metal/tests/
+sync_fixed_cost_diag.rs）とログ・文書のみ。
+
+1. 腕（計測対象ツリー）。全て .rev-stamp（フル SHA）で同定し、ツリー指紋（find crates
+   scripts/bench/framework-compare -type f ! -path '*/target*' を sort した sha256 一覧）を送信側と
+   Mac mini 側で突き合わせて記録する。
+   - 腕 A（phase 内訳。正式）: 実装ブランチの計測前コミットを git archive したツリーで
+     scripts/bench/framework-compare の bench-fandhe を registry fandhe-ai =0.11.0 のままビルドして
+     `--task train|infer --phases`。tree.txt が `fandhe-ai v0.11.0` の 1 行でなければ中止（fail-closed）。
+     系列 B（2.133 ms）と直接比較できる版。
+   - 腕 B（同期回数・同期固定費。正式）: 同ツリーの main workspace（facade・backend-metal は path 依存＝
+     HEAD ソース。v0.11.0 から 95 commit 先）。
+   - 乖離の明記: bench-fandhe は registry 0.11.0 で、同期カウンタ（__diagnostic_batch_counters_snapshot。
+     doc(hidden)・facade 非再公開）を読めない。backend-metal を直接依存に足すのは依存 allowlist の変更で
+     所有者承認が要るため行わない。よって「同一バイナリで回数も記録」はできず、回数は腕 B（HEAD ソース）の
+     既存テストで取る。この乖離を README・perf doc・PR 本文・summary に書く。
+   - 副系列 B'（任意）: v0.11.0 タグのツリーで同じカウンタテストを回す。取れれば別 SHA として併記。
+   - 参考系列 cpu-diag（任意・正式値ではない）: lowlayer-diagnosis-2026-09-12/diag-instrumentation.patch を
+     Mac mini 上の展開ツリーにだけ当て、別 CARGO_TARGET_DIR でビルドする。パッチ適用後のソースは
+     コミットしない。当たらなければ「未取得（理由）」と書く。
+2. セル: 1 run = cpu／metal × train／infer × fresh／reuse の 8 セル（size=64）。AC の 6 セル以上を満たす。
+3. 回数: 5 プロセス（5 run）。各 run の JSONL は run{1..5}.jsonl。値は 5 run の phase 別中央値、
+   min–max を併記。run の差し替え・追加起動はしない（既存 run*.jsonl があれば停止）。
+4. 負荷ゲート: 各 run 開始前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ（系列 B と同じ閾値）。
+   数値で読めなければ gate=unavailable、30 分で下がらなければ gate=timeout を記録。
+   5/5 gate=pass のみ正式系列。部分通過・timeout・unavailable は参考扱い（結論は参考と明記）。
+5. 運用: ビルドは計測より前に全て終える。計測中に Mac mini で他のビルド・ベンチを並走させない。
+   ログは上書きしない。orchestrate_macmini.sh は /bin/sh 互換・変数は ${VAR}・外部入力を eval しない。
+6. 同期回数（AC3）: 既存テスト mnist_scale_train_reuse_metal_batch_counters（1 step 全体。期待 11/7/7）と
+   mnist_scale_train_reuse_metal_backward_dinput_phase（backward 窓。期待 5/3/3）を各 1 回（決定的な値）。
+   不一致でも assert・期待値を緩めず、実測値を finding として記録する。_forward_encode_only（opt-in・
+   既定 OFF）は対象外。差し引き（11/7/7 − 5/3/3）を forward＋loss＋update 窓とする。
+7. 同期 1 回の固定費（AC4）: sync_fixed_cost_diag.rs の空 dispatch（MetalContext::dispatch_sync(|_| {})。
+   warmup 20・200 反復の壁時間の中央値）。各 run の後に 1 プロセス（計 5）。構造検査: 各反復で
+   command_buffers +1・wait_until_completed +1（自インスタンスのカウンタ）。外れたら固定費として不採用。
+   タイミングは record-only で大小を assert しない。クロスチェックに infer_fixed_cost_diag（wall − GPU busy）
+   を併記する。空 dispatch は実カーネルを伴う同期を代表しない可能性があり、README に注記する。
+8. 帰属の書き方（AC2）: 3 本立てで数値化する。(i) Mini 0.11.0 の区間表と M4 Max 0.9.0（§17.2）を並べ差分を出す
+   （版違いと明記）。(ii) 「wait 回数 × 固定費」が step_total（Mini）と M4 Max との差 1.012 ms のどれだけを
+   説明するか（説明率 % と「未説明の残差」を必ず併記）。(iii) 同一機体内の train − infer 差を同期回数の差で割った
+   1 同期あたり外挿値と実測固定費の比較（約 0.29 ms の推定の検証）。M4 Max の 0.11.0 phase 内訳は無く新規計測もしない
+   （Metal の計測は Mac mini。所有者指示 2026-10-11）。原因の断定をしない。説明できなかった部分は未説明と書く。
+9. 判定は aggregate.py の機械出力をそのまま採用し、事後に緩和しない。欠損・非数値は 0 埋めせず拒否する。
+10. checksum 一致は bit 同一の証拠ではない。Mac mini のホスト名・ユーザー名・絶対パスはコミット物に書かない。
+11. Mac mini に到達できない／計測が成立しない場合は数値を埋めず「未実測」と記録し、推定値を実測と書かない。
