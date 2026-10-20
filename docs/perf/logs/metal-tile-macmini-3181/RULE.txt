@@ -1,0 +1,59 @@
+イシュー #3181 事前登録規則（計測前に固定。計測後に緩めない）
+================================================================
+目的: Mac mini（Apple M4・GPU 10 コア）の Metal GEMM について、(1) 本番経路が実際に選ぶタイル、
+(2) 全 CANDIDATES の純カーネル時間と candle 純境界時間の比、を実測で確定する。診断のみ（record_only）。
+変えないもの: tile.rs の選択ロジック・gemm.rs・shaders/gemm.metal・split_k_runtime.rs・tolerance 定数
+（RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD）・split-K parity baseline・
+scripts/bench/framework-compare/ の相手側計測コード（bench-candle 等）・Cargo.toml／Cargo.lock。
+Mini 専用表の追加は #3206、m=64 は #3208、candle 構造の再現は #3211、カーネル由来比率は #3182、
+帰属表の更新は #3191。REQ-8 の手動境界検査を省く候補は対象外。
+
+1. 機体: Mac mini（Apple M4・GPU 10 コア・16 GB）。記録項目はチップ・macOS・rustc・.rev-stamp・
+   probe_gpu_core_count・probe_soc_brand_string・verified_m4_max の有無・split_k_enabled。
+   内部ホスト名・ユーザー名は書かない（env_info.txt に uname -n を出さない）。
+2. 前提: tile.rs が v0.11.0 から変わっていないこと（git diff v0.11.0 <計測ツリー> -- tile.rs が空）を
+   結論 doc に記録する。系列 B（0.11.0）と同じ選択ロジックであることの根拠にする。
+3. 形状: 正方 NN の N = 256 / 512 / 1024 / 2048 / 4096。入力は gen_square_ab(0x3181_a000 ^ N, N)。
+4. 候補: CANDIDATES[0..=10] の 11 件をすべて同一形状で強制実行する（dispatch_tiled_prepared）。
+   各 N で計測の前に resolve_tile_config を呼び、要求と解決が違う候補は fallback=true として記録する
+   （abort しない）。fallback セルは「最良候補」の判定から除く。
+5. 選択の追跡（決定的。閾値なし）: N ごとに select(n,n,n)・select_for_device(n,n,n,verified)・
+   should_split_k・select_route_for_device・dispatch_auto_with_route が実際に返した経路・
+   その cfg の resolve_tile_config 結果・split_k_enabled を記録する。5 run すべてで取り、
+   全 run 一致を整合検査とする（不一致は fail-closed）。
+6. 区間: プロセス内で warmup 20 + 計測 20（WARMUP_TRIALS／MEASURED_TRIALS）の中央値（median_of）。
+   主指標は kernel_gpu（GPUEnd-GPUStart）。副指標は encode・commit_wait・alloc_c と
+   壁時計合計（alloc_c+encode+commit_wait）。trial ごとに候補の実行順を開始オフセットで回す。
+   keep_alive は trial ごとに clear する（16 GB 機のため）。
+7. bit 一致: 出力全要素の to_bits の FNV-1a 64bit hash で判定する。checksum（f64 逐次和）は参考値
+   （checksum 一致は bit 同一の証拠ではない）。候補ごとの run 間 hash 一致を整合検査とする
+   （不一致は fail-closed）。タイル形状が違う候補どうしの bit 一致は契約外で、記録のみ。
+8. CPU 参照 parity（前提ゲート）: fallback しない全候補 x 5 N を matmul_reference_fma と
+   assert_parity（REQ-2 統一複合判定。tolerance 不変）で比べる。計測系列の前に 1 回だけ実行し
+   parity.log へ保存する。assert が落ちたら系列を開始しない（parity_fail を表に書き、
+   最良候補の判定から除く）。
+9. candle: 計測系列と同じ負荷ゲートの下で
+   bench-candle --task gemm-transfer-split --device metal --size N --out <file> を N ごとに 1 プロセス
+   実行し、gemm_transfer_excl の stats.median_s を使う。相手側コードは変えない。
+   candle の版は cargo tree で記録する。
+10. 比（定義固定）: 速度比 = candle 時間 / fandhe 時間（1 未満は fandhe が遅い。イシューの reuse 比と同じ向き）。
+    主比: candle excl（壁時計）÷ fandhe 壁時計合計（alloc_c+encode+commit_wait）。
+    参考比: candle excl ÷ fandhe kernel_gpu（candle 側に encode・同期が余計に入るため fandhe に有利に偏る）。
+    どちらも「純カーネル比そのもの」とは書かず、境界の違いを表の注に書く。
+11. 回数: 5 プロセス（5 run）。値は各 run 内の中央値の 5 run 中央値。run 別の値も表に出す。
+12. 負荷ゲート: 各プロセスの開始前に load1 < 3.0 になるまで 30 秒間隔で最大 30 分待つ。
+    読めなければ GATE-INVALID、30 分待っても下がらなければ GATE-TIMEOUT。全プロセスが
+    通過した系列だけを正式系列と呼ぶ。
+13. 運用: ビルドは計測より前にすべて済ませ、ビルドと計測を並走させない。fandhe 診断と candle の
+    起動順は run ごとに入れ替える（奇数 run は fandhe -> candle、偶数 run は candle -> fandhe）。
+    run の差し替え・追加起動はしない。ログは上書きしない。nohup のサブシェルで切り離す。
+14. 判定（診断上の分類。ゲートでも tolerance でもない）:
+    (a) AC3: N ごとに select_for_device の結果が CANDIDATES[3] で、かつ解決構成も [3]、
+        かつ経路が Classic なら「支持」、それ以外なら「棄却」とし、実際の構成を書く。
+    (b) N ごとの最良候補 = fallback・parity_fail を除いた候補のうち kernel_gpu の 5 run 中央値が最小のもの。
+        次の 2 条件を両方満たしたときだけ「Mini 専用表の候補あり（#3206 へ）」とし、
+        それ以外は「現行選択と帯内（専用表は不要）」とする。
+        - 選択タイルとの差が 2% を超えて速い（2% 以内は同等とみなし選択タイルを優先）
+        - 最良候補が 5 run すべての run 内中央値で選択タイルより速い
+        選択タイルが CANDIDATES に無い場合（selected_idx なし）は分類せず unclassified と書く。
+15. 機体に到達できない場合は数値を埋めず unavailable と記録する。推定値で埋めない。
