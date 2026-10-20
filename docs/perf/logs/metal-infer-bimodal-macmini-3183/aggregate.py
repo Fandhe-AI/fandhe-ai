@@ -192,6 +192,7 @@ def analyze_arm(arm, per_run):
             "q3_q1": percentile(q, 0.75) / percentile(q, 0.25),
             "median": median(totals),
             "labels": labels,
+            "totals": totals,
         }
         entry["switches"], entry["run_len_median"] = time_structure(labels)
         if entry["multimodal"]:
@@ -207,19 +208,24 @@ def attribute(series, labels, hi, lo):
     """高モードと低モードで区間ごとの中央値差を iter_total の差で割った比。"""
     hs = [s for s, lb in zip(series, labels) if lb == hi]
     ls = [s for s, lb in zip(series, labels) if lb == lo]
-    d_total = median([s["spans"]["iter_total"] for s in hs]) - median([s["spans"]["iter_total"] for s in ls])
     attr, excluded = {}, 0
     for k in series[0]["spans"]:
         if k == "iter_total":
             continue
-        hv = [s["spans"][k] for s in hs if s["spans"][k] is not None]
-        lv = [s["spans"][k] for s in ls if s["spans"][k] is not None]
+        # GPU 計測不能（None）の反復は区間側だけでなく分母 Δ_total の標本からも外す（RULE.txt:
+        # 「帰属判定から外す」）。区間ごとに有効反復へ対応する iter_total で高低差を取る。
+        hv = [s for s in hs if s["spans"][k] is not None]
+        lv = [s for s in ls if s["spans"][k] is not None]
         if k in ("gpu_busy", "commit_wait-gpu_busy"):
             excluded = max(excluded, len(hs) + len(ls) - len(hv) - len(lv))
-        if not hv or not lv or d_total <= 0:
+        if not hv or not lv:
             attr[k] = None
             continue
-        attr[k] = (median(hv) - median(lv)) / d_total
+        d_total = median([s["spans"]["iter_total"] for s in hv]) - median([s["spans"]["iter_total"] for s in lv])
+        if d_total <= 0:
+            attr[k] = None
+            continue
+        attr[k] = (median([s["spans"][k] for s in hv]) - median([s["spans"][k] for s in lv])) / d_total
     cdiff = {}
     for k in series[0]["counters"]:
         hm = statistics.mean(s["counters"][k] for s in hs)
@@ -248,7 +254,13 @@ def attributed_spans(entries):
 
 
 def sticky_state(entries):
-    """プロセス単位の固着判定。単峰 run は参照モード（多峰 run があればその中央値、無ければ run 中央値）に近い側で分類。"""
+    """プロセス単位の固着判定。戻り値: (固着 True/False/None=判定不能, 説明)。
+
+    各反復を共通の基準（参照低モード・参照高モードの中点）で分類して低/高の割合を求める。
+    単峰 run でも広い分布なら両側に割合が分かれ、95% 条件を満たさない。参照モードは
+    多峰 run があればそのクラスタ中央値、無ければ run 中央値の最小・最大（相対差 10% 以上）。
+    対応する 2 モードが定義できない場合は判定不能（None）。
+    """
     multi = [e for e in entries if e["multimodal"]]
     if multi:
         ref_lo = median([e["clusters"][0]["median"] for e in multi])
@@ -256,15 +268,14 @@ def sticky_state(entries):
     else:
         meds = [e["median"] for e in entries]
         ref_lo, ref_hi = min(meds), max(meds)
-        if ref_hi / ref_lo - 1.0 < GAP:
-            return False, ["全 run が単峰かつ run 間差 10% 未満"]
+    if ref_lo <= 0 or ref_hi / ref_lo - 1.0 < GAP:
+        return None, ["モードが定義できない（参照モード間差 10% 未満）"]
+    mid = (ref_lo + ref_hi) / 2
     desc, lows, highs = [], 0, 0
     for e in entries:
-        if e["multimodal"]:
-            lo_share, hi_share = e["low_share"], e["high_share"]
-        else:
-            near_lo = abs(e["median"] - ref_lo) <= abs(e["median"] - ref_hi)
-            lo_share, hi_share = (1.0, 0.0) if near_lo else (0.0, 1.0)
+        vals = e["totals"]
+        lo_share = sum(1 for v in vals if v < mid) / len(vals)
+        hi_share = 1.0 - lo_share
         if lo_share >= STICKY:
             lows += 1
         if hi_share >= STICKY:
@@ -329,7 +340,7 @@ def render(per_run, gate):
         alt = [e["run"] for e in entries if e["switches"] >= SWITCH_ALT and e["multimodal"]]
         out.append(f"- プロセス内の交互出現（切替 {SWITCH_ALT} 回以上）: {alt if alt else 'なし'}")
         sticky, desc = sticky_state(entries)
-        out.append(f"- プロセス単位の固着: {'あり' if sticky else 'なし'}（" + "; ".join(desc) + "）")
+        out.append(f"- プロセス単位の固着: {'判定不能' if sticky is None else ('あり' if sticky else 'なし')}（" + "; ".join(desc) + "）")
         spans, nm = attributed_spans(entries)
         if nm == 0:
             out.append("- 帰属: 多峰の run がないため判定対象なし")
@@ -517,6 +528,23 @@ def self_test():
     check(attributed_spans(ent)[0] == [], "G: wall 比 1.0 でも実区間が全て 0.25 なら帰属なし")
     ent = [{"multimodal": True, "attr": {"encode": 0.9, "wall": 1.0, "gpu_busy": 0.25}}] * 3
     check([k for k, _ in attributed_spans(ent)[0]] == ["encode"], "G: 実区間 encode のみ帰属")
+    # 広い単峰 run（隣接ギャップ 10% 未満）は中央値だけで固着扱いにしない
+    def _ent(run, vals, multi):
+        return {"run": run, "totals": vals, "median": median(vals), "multimodal": multi,
+                "clusters": [{"median": 1.0}, {"median": 2.0}] if multi else []}
+    wide = [1.0 + 1.0 * i / 499 for i in range(500)]
+    st, _ = sticky_state([_ent(1, [1.0] * 500, True), _ent(2, [2.0] * 500, True), _ent(3, wide, False)])
+    check(st is True, "固着: 両端 run があれば広い単峰 run は無関係に判定")
+    st, _ = sticky_state([_ent(1, [1.0] * 500, True), _ent(2, wide, False)])
+    check(st is False, "固着: 広い単峰 run は 95% を満たさない")
+    st, _ = sticky_state([_ent(r, [1.0] * 500, False) for r in RUNS])
+    check(st is None, "固着: モード未定義は判定不能")
+
+    def _s(t, g):
+        return {"spans": {"iter_total": t, "gpu_busy": g}, "counters": {}}
+    ser = [_s(1.0, 0.5)] * 5 + [_s(2.0, 1.5)] * 5 + [_s(9.0, None)] * 5
+    at, ex, _ = attribute(ser, [0] * 5 + [1] * 5 + [1] * 5, 1, 0)
+    check(abs(at["gpu_busy"] - 1.0) < 1e-9 and ex == 5, "gpu_busy: null 反復を分母からも除外")
     print("self-test: " + ("OK" if ok else "NG"))
     return 0 if ok else 1
 
