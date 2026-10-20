@@ -2,7 +2,7 @@
 # イシュー #3188: GB10 ノード上で 1 系列（2106 -> 2105）を直列実行するラッパー。
 # 判定規則は同ディレクトリの RULE.txt（計測前に固定）が正。継承の orchestrate.sh を呼ぶだけで、
 # ビルド・計測・マスクの実体は 2105/2106 側にある。
-# 使い方: measure_series.sh <pre|head> <order: 2106-first|2105-first>
+# 使い方: measure_series.sh <pre|head> [both|2106|2105]（省略時 both。2106 のみ・2105 のみの片側計測も可）
 # 前提: ~/work/fandhe-3188-<label> に git archive 展開済みのツリーがある（.git なし）。
 # ラベルは固定 allowlist、期待 SHA はラベルから引く（外部入力から組み立てない）。
 set -euo pipefail
