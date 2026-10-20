@@ -744,6 +744,14 @@ GB10（外側専有ゲートは記録のみ）:
   `aarch64-unknown-linux-gnu`／`aarch64-apple-darwin` 通過（コンパイル確認のみ）、
   `aggregate.py --self-test`、スクリプトの `bash -n`／`shellcheck`／`--dry-run`。
 
+### 5.9 Mac mini（Apple M4）での A/B（イシュー #3176。**未実測**・事前登録と実行基盤のみ）
+
+§5.4 の M4 Max とは SME ユニットの構成（P クラスタに 1 基）とコア構成（P4＋E6）が異なる Mac mini で、
+`SME_PRODUCTION_ENABLED` を反転した framework-compare の CPU 10 セル（到達 8・非到達 2）、R4 格子、
+MLP 長方形 4 形状を測る基盤と事前登録規則を用意した。実測は未実施で判定は undetermined。
+`SME_PRODUCTION_ENABLED` は `false` のまま。規則は `logs/sme-macmini-3176/RULE.txt`、
+詳細は [`cpu-gemm-sme-ab-macmini.md`](cpu-gemm-sme-ab-macmini.md)。
+
 ## 6. セキュリティ考慮（OWASP Top 10）
 
 - **unsafe の統制**: `asm!` は `compute`／`has_pending_lazy_za_save`

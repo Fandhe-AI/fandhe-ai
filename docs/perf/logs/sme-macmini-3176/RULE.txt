@@ -1,0 +1,71 @@
+イシュー #3176 事前登録規則 (Mac mini の SME カーネル ON/OFF A/B)
+fixed-at: 2026-10-21 (この規則は計測前にコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る)
+登録基準: origin/main e68b6ce16 + 本規則を含むコミット (計測はこのコミットのツリーで行う)
+on-arm.patch sha256: 28c86e7737a7dbce274d348aa49080b66c65b9654a0b4eb558a246944fb4bd02
+
+0. 位置づけ
+  - 本イシューは診断だけ。SME_PRODUCTION_ENABLED の本番切替は #3230、しきい値 (SME_MIN_M/N/K) の確定は #3231。
+    結果が ADOPT 候補でも main の定数は変更しない。FMA 契約・tolerance・unsafe・依存は変えない。
+  - #1587 (R1〜R4) と #2118 (K=64 列) の規則を緩めない。腕構成・セル集合・--require-checksum-exact は
+    run_ab_sme_cpu.sh から継承する。
+  - #3175 との接続: (2048,2048,1024) の SME は T=10 まで伸び頭打ちが無い (S(10)=3.07) が、第三者ピークの 54% 止まり。
+    本計測はその上で「本番ゲートを ON にしたとき framework-compare の CPU セルがどう変わるか」を測る。
+
+1. 腕
+  - before: 同一コミットの main (SME_PRODUCTION_ENABLED = false)。
+  - after : on-arm.patch (crates/backend-cpu/src/gemm_blis/mod.rs の SME_PRODUCTION_ENABLED false -> true、1 行)。
+    計測専用ツリーで、main へコミットしない。
+  - run_ab_sme_cpu.sh を変えず、Mac mini 派生版 run_ab_sme_macmini_cpu.sh を使う。派生の理由:
+    (1) 同じ round 内の PyTorch 計測が無く R5 を満たせない
+    (2) 内側の負荷ゲート 8.0 が 16 コア機向けで専有ゲート 3.0 と合わない
+    (3) jq 依存 (Mac mini 向け姉妹スクリプトは jq を使わない)
+    (4) compare の exit 3 が後退と checksum 不一致を区別せず FAIL 停止を満たせない
+
+2. セルの分類 (数値を見る前に固定。#2118 §2 の K=64 列を継承)
+  - 到達 (8): gemm 512/1024/2048 x fresh/reuse (m=n=k>=512)、train size=64 fresh/reuse
+    (L1 の d_weight 784x256x64 が sme_shape_eligible を満たす)。
+  - 非到達 (2): infer size=64 fresh/reuse (m=64)。
+  - #1587 RULE の「train/infer は一括で非到達」は継承しない (#2118 §2 が正)。
+
+3. R4 格子 / 長方形
+  - R4: 既存の sme_vs_neon_ab_r4_grid (正方 16 点) を before ツリーで 5 プロセス独立に起動。プロセスごとに負荷ゲート。
+    格子点ごとに 5/5 run で SME/NEON >= 1.0 なら「SME>=NEON」。パレート極小の採用候補を列挙し、
+    K in {64,128,256} それぞれについて {min(m,n) in {256,512}} x {k>=K} の全点が SME>=NEON かを参考として出す (#3231 用)。
+    現行しきい値の領域 (min>=256 かつ k>=64) が成立するかを明示する。
+  - 長方形: 新規 sme_vs_neon_ab_mlp_rect で (64,256,784)・(784,256,64)・(784,64,256)・(64,10,256) を 5 run 測る。
+    計時の前に SME と NEON の出力が bit 完全一致であること (assert) を確かめる。判定値は出さず記録のみ。
+    現行 sme_shape_eligible の可否を併記する (可は (784,256,64) のみ)。
+
+4. 前提ゲート (1 つでも不成立なら undetermined。理由はすべて併記)
+  - P-TREE : before と after で内容が異なるファイルが gemm_blis/mod.rs の 1 件だけ (パス一覧の一致と cmp の終了コードで比較)、
+             after の該当行が `const SME_PRODUCTION_ENABLED: bool = true;`、patch の sha256 が上記と一致。
+  - P-R0   : 両腕で sme_report() が kernel_enabled: true (実行時ディスパッチの報告 API は無く、新設もしない。
+             この指紋検査を代わりの証拠とする)。false なら計測を中止して記録だけ残す。
+  - P-RUNAB / P-COLLECT : A/B スクリプトと収録が exit 0。
+  - P-CELLS: 10 セル x 両腕 x 5 行ちょうど (重複・欠損・値不正は不成立)。
+  - P-R4-EXEC / P-R4-LOG: 5 run とも exit 0、各 run が 16 点 x 2 variant = 32 行をちょうど 1 回ずつ。
+  - P-RECT-LOG: 5 run とも 4 形状 x 2 variant = 8 行をちょうど 1 回ずつ。
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する。after では --lib を実行しない
+    (ゲートが true のドリフトガード単体テストが構造上落ちるため)。
+
+5. 負荷ゲート
+  - 各 round (A/B)・各 run (R4・rect) の開始前に load1 < 3.0 (30 秒間隔・最大 30 分待つ)。
+    5/5 が通過した系列だけを正式とし、それ以外は record_only (参考表示)。run の差し替え・追加起動はしない。
+  - 計測中は Mac mini でも開発機でもビルドを並走させない。
+
+6. 判定 (評価順 FAIL > REJECT > ADOPT 候補 > undetermined)
+  - FAIL: checksum が数値として完全一致しない (R2。hard)。性能判定へ進まず停止。ADOPT にも REJECT にも数えない。
+  - REJECT: 到達セル (または非到達セル) に、全 5 round で after/before > 1.00 の一貫した後退がある。
+  - ADOPT 候補: 前提ゲートがすべて成立、現行しきい値の R4 領域が成立、到達 8 セルがすべて
+    「5 round 中央値の after/before <= 1.00 かつ 5/5 round <= 1.00」、非到達セルに 5/5 一貫の後退が無い、R2 が全一致。
+  - 上記以外: undetermined。
+  - AC1 の直接判定欄 (到達セルの中央値 <= 1.00 かつ 5/5、かつ checksum 一致) は総合判定とは別に記録する。
+  - どの結果でも SME_PRODUCTION_ENABLED は切り替えない。
+
+7. PyTorch 比 (R5。記録のみ)
+  - 同じ round 内の (PyTorch median_s / fandhe median_s) の 5 round 中央値を before・after の両方で記録する。
+    bench_py.py は fresh のみのため、fandhe の fresh と reuse の両方を同じ torch 行と比べる。判定には使わない。
+  - Mac mini と M4 Max (§5.4.2) の倍率は結論 doc に機体別に並べる。
+
+8. マスク規則
+  - 収録するログのホスト名は masked、$HOME は <home>、ユーザー名と絶対パスは除去。実機のホスト名はリポに書かない。
