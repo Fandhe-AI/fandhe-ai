@@ -12,10 +12,17 @@
 //! | 区間 | 中身 |
 //! |---|---|
 //! | `h2d_upload` | 入力の `MemoryOps::upload`（H2D＋確保） |
-//! | `l1_issue`／`l2_issue` | `linear_forward_device` の戻りまで（確保＋カーネル起動の発行。完了は待たない） |
+//! | `l1_issue` | L1 `linear_forward_device` の戻りまで（確保＋カーネル起動の発行。完了は待たない）＋**入力バッファ `a` の drop** |
+//! | `l2_issue` | L2 `linear_forward_device` の戻りまで（同上）＋**中間バッファ `h` の drop** |
 //! | `download` | `MemoryOps::download`（先行カーネルの完了待ち＋D2H。同期点） |
 //! | `download_again` | 同じバッファの 2 回目の `download`（カーネル完了済みなので純 D2H） |
 //! | `kernel_wait` | `download − download_again`（導出値。公開 API からは stream を直接同期できないための代替） |
+//!
+//! drop の位置は本番 `predict_device_chain` の `current = linear_forward_device_tracked(&current, ..)?` に
+//! 合わせる。本番は右辺の評価後に代入で旧 `current` を drop するため、`a` は L1 発行後、`h` は L2 発行後に
+//! 解放され、その費用（プール返却等のホスト処理と GPU 実行の重なり）は各層の区間に含まれる。最終出力 `y` は
+//! 本番では download 後（関数末尾）に drop されるが、カーネル完了済みで GPU と重ならないため計時窓の外
+//! （`download_again` の後）で drop する。
 //!
 //! `download_again` は 1 反復あたり 1 回余分に D2H するため、`prod` 区間の合計（fidelity の評価）には
 //! 含めない。`prod` 区間 = h2d_upload＋l1_issue＋l2_issue＋download の合計が、本番の
@@ -116,24 +123,32 @@ fn chain(ops: &CudaBackendOps, p: &Params, input: &Tensor<f32>) -> (Tensor<f32>,
     let mut parts = Parts::default();
     let (a, dt) = timed(|| mem.upload(input).expect("入力 H2D"));
     parts.h2d_upload = dt;
-    let (h, dt) = timed(|| {
-        ops.linear_forward_device(
-            &a,
-            DeviceBufferView::new(&p.w1, 0, &W1S).expect("w1 view"),
-            Some(DeviceBufferView::new(&p.b1, 0, &B1S).expect("b1 view")),
-            Activation::Relu,
-        )
-        .expect("L1")
+    // 本番どおり L1 発行の直後に入力バッファ a を drop し、その費用も l1_issue に含める。
+    let (h, dt) = timed(move || {
+        let h = ops
+            .linear_forward_device(
+                &a,
+                DeviceBufferView::new(&p.w1, 0, &W1S).expect("w1 view"),
+                Some(DeviceBufferView::new(&p.b1, 0, &B1S).expect("b1 view")),
+                Activation::Relu,
+            )
+            .expect("L1");
+        drop(a);
+        h
     });
     parts.l1_issue = dt;
-    let (y, dt) = timed(|| {
-        ops.linear_forward_device(
-            &h,
-            DeviceBufferView::new(&p.w2, 0, &W2S).expect("w2 view"),
-            Some(DeviceBufferView::new(&p.b2, 0, &B2S).expect("b2 view")),
-            Activation::None,
-        )
-        .expect("L2")
+    // 同様に L2 発行の直後に中間バッファ h を drop し、その費用を l2_issue に含める。
+    let (y, dt) = timed(move || {
+        let y = ops
+            .linear_forward_device(
+                &h,
+                DeviceBufferView::new(&p.w2, 0, &W2S).expect("w2 view"),
+                Some(DeviceBufferView::new(&p.b2, 0, &B2S).expect("b2 view")),
+                Activation::None,
+            )
+            .expect("L2");
+        drop(h);
+        y
     });
     parts.l2_issue = dt;
     let (out, dt) = timed(|| mem.download(&y).expect("D2H"));
@@ -146,6 +161,8 @@ fn chain(ops: &CudaBackendOps, p: &Params, input: &Tensor<f32>) -> (Tensor<f32>,
         host(&again).iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
         "同一バッファの 2 回の download が不一致"
     );
+    // 最終出力 y の drop は計時窓の外（カーネル完了済み。上記モジュール doc 参照）。
+    drop(y);
     (out, parts)
 }
 
