@@ -203,8 +203,10 @@ else
           > "${TMPD}/${base}.out" 2>&1 || echo "FAILED census ${base}" >> "${OUT}/load_gate.log"
         grep -o 'CENSUS_JSON .*' "${TMPD}/${base}.out" > "${OUT}/census/${base}.json"
         for rep in cuda_api_sum cuda_gpu_kern_sum cuda_gpu_mem_time_sum cuda_gpu_mem_size_sum; do
-          nsys stats --report "${rep}" --format csv --force-export=true "${TMPD}/${base}.nsys-rep" 2> /dev/null |
-            mask > "${OUT}/census/${base}.${rep}.csv" || echo "FAILED nsys stats ${base} ${rep}" >> "${OUT}/load_gate.log"
+          # pipefail を subshell に閉じ、nsys stats の失敗が mask の終了状態で隠れないようにする（RULE 規則 7）
+          (trap - EXIT ERR; set -o pipefail
+            nsys stats --report "${rep}" --format csv --force-export=true "${TMPD}/${base}.nsys-rep" 2> /dev/null |
+              mask > "${OUT}/census/${base}.${rep}.csv") || echo "FAILED nsys stats ${base} ${rep}" >> "${OUT}/load_gate.log"
         done
         rm -f "${TMPD}/${base}".nsys-rep "${TMPD}/${base}".sqlite
       done

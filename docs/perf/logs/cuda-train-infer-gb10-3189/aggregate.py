@@ -9,7 +9,7 @@
   armA/run{1..5}.jsonl            bench-fandhe --phases（cuda 正式・cpu 参考）
   infer-diag/run{1..5}.facade.jsonl／.backend.jsonl   infer 上位・下位の分解診断（n=80）
   fixed-cost/run{1..5}.log        DIAG2109 行（N=128 の E／L2／L2S）
-  census/<window>-K<k>-r<n>.{json,cuda_api_sum.csv,cuda_gpu_kern_sum.csv,cuda_gpu_mem_time_sum.csv}
+  census/<window>-K<k>-r<n>.{json,cuda_api_sum.csv,cuda_gpu_kern_sum.csv,cuda_gpu_mem_time_sum.csv,cuda_gpu_mem_size_sum.csv}
   load_gate.log                   負荷ゲート記録
 
 欠損・非数値・n≠80・checksum 不一致・run の欠落・ゲート状態の欠落・ホスト名／絶対パスの残存は
@@ -380,6 +380,14 @@ def load_census(d: Path):
                 meta = json.loads(j.read_text(encoding="utf-8").replace("CENSUS_JSON ", "", 1))
                 if meta.get("window") != w or meta.get("steps") != k:
                     raise AggError(f"census/{base.name}.json の窓/steps が不一致")
+                # 必須レポート（GPU kernel／memory）の存在と内容を検証する（RULE 規則 7）
+                for rep in ("cuda_gpu_kern_sum", "cuda_gpu_mem_time_sum", "cuda_gpu_mem_size_sum"):
+                    rf = cdir / f"{base.name}.{rep}.csv"
+                    if not rf.exists() or not rf.read_text(encoding="utf-8").strip():
+                        raise AggError(f"census/{base.name}.{rep}.csv が欠落または空")
+                kern = (cdir / f"{base.name}.cuda_gpu_kern_sum.csv").read_text(encoding="utf-8")
+                if "Time (%)" not in kern:
+                    raise AggError(f"census/{base.name}.cuda_gpu_kern_sum.csv に CSV ヘッダが無い（kernel は必ず発生する）")
                 per_k[k] = parse_api_csv(f.read_text(encoding="utf-8"))
             res[(w, r)] = {c: (per_k[120][c] - per_k[20][c]) / 100 for c in CATEGORIES}
     return res
@@ -536,6 +544,9 @@ def _fixture(d: Path, with_census=True):
                             f'"30","1","{(n + 2 * k)}","1","cuLaunchKernel"\n'
                             f'"20","1","{k}","1","cuMemcpyDtoH_v2"\n')
                     _w(d / "census" / f"{w}-K{k}-r{r}.cuda_api_sum.csv", csvt)
+                    kt = '"Time (%)","Total Time (ns)","Instances","Avg (ns)","Name"\n"100.0","1","1","1","k"\n'
+                    for rep in ("cuda_gpu_kern_sum", "cuda_gpu_mem_time_sum", "cuda_gpu_mem_size_sum"):
+                        _w(d / "census" / f"{w}-K{k}-r{r}.{rep}.csv", kt)
                     _w(d / "census" / f"{w}-K{k}-r{r}.json", json.dumps({"window": w, "steps": k}))
 
 
@@ -576,6 +587,8 @@ def self_test():
     expect_fail("checksum が bool", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": true')) for i in RUNS])
     expect_fail("checksum が u64 超過", lambda dd: [_w(dd / "infer-diag" / f"run{i}.facade.jsonl", (dd / "infer-diag" / f"run{i}.facade.jsonl").read_text().replace('"checksum": 7', '"checksum": 18446744073709551616')) for i in RUNS])
     expect_fail("ヘッダのみ CSV", lambda dd: _w(dd / "census" / "fwd-K20-r1.cuda_api_sum.csv", '"Time (%)","Total Time (ns)","Num Calls","Avg (ns)","Name"\n'))
+    expect_fail("kernel レポート欠落", lambda dd: (dd / "census" / "fwd-K20-r1.cuda_gpu_kern_sum.csv").unlink())
+    expect_fail("memory レポート空", lambda dd: _w(dd / "census" / "fwd-K20-r1.cuda_gpu_mem_time_sum.csv", ""))
     expect_fail("固定費行欠落", lambda dd: _w(dd / "fixed-cost" / "run1.log", ""))
     # census 無しは「未実測」
     with tempfile.TemporaryDirectory() as t:
