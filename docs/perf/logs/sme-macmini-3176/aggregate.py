@@ -149,15 +149,35 @@ def series(cells, key, field, what):
     return [fnum(r.get(field), "%s %s.%s" % (what, key, field)) for r in rows]
 
 
+def checked_cells(rows, expected, what, torch=False):
+    """行を device／parity で検証し、セル集合が expected と完全一致（余分・欠損なし）か確かめて返す（RULE P-CELLS）。"""
+    for r in rows:
+        if r.get("device") != "cpu":
+            raise AggError("%s: device が cpu ではない行: %r" % (what, r.get("device")))
+        pf = r.get("parity_fail_count")
+        if pf is not None and (isinstance(pf, bool) or not isinstance(pf, int) or pf != 0):
+            raise AggError("%s: parity_fail_count が 0 でない: %r" % (what, pf))
+    cells = cells_of(rows, torch=torch)
+    if set(cells) != set(expected):
+        raise AggError("%s: セル集合が期待と完全一致しない（余分: %s／欠損: %s）" % (
+            what, sorted(map(str, set(cells) - set(expected))), sorted(map(str, set(expected) - set(cells)))))
+    for key, rs in cells.items():
+        if len(rs) != ROUNDS:
+            raise AggError("%s: セル %s が %d 件（%d 件を要求）" % (what, key, len(rs), ROUNDS))
+    return cells
+
+
 def ab_analysis(d, label):
     before, after = {}, {}
     for task in ("gemm", "train", "infer"):
-        before[task] = cells_of(read_jsonl(os.path.join(d, "results-before-%s-cpu-%s.jsonl" % (label, task))))
-        after[task] = cells_of(read_jsonl(os.path.join(d, "results-after-%s-cpu-%s.jsonl" % (label, task))))
+        exp = [k for k in CELLS if k[0] == task]
+        before[task] = checked_cells(read_jsonl(os.path.join(d, "results-before-%s-cpu-%s.jsonl" % (label, task))), exp, "before/" + task)
+        after[task] = checked_cells(read_jsonl(os.path.join(d, "results-after-%s-cpu-%s.jsonl" % (label, task))), exp, "after/" + task)
     hits = glob.glob(os.path.join(d, "results-torch-3176-*-%s-cpu.jsonl" % label))
     if len(hits) != 1:
         raise AggError("torch の JSONL が 1 件ではない: %r" % hits)
-    torch = cells_of(read_jsonl(hits[0]), torch=True)
+    texp = sorted({(t, s, "fresh") for t, s, _ in CELLS})
+    torch = checked_cells(read_jsonl(hits[0]), texp, "torch", torch=True)
     res = []
     for key in CELLS:
         task, size, _ = key
@@ -188,6 +208,65 @@ def gate_series(d):
     return len(rounds) == ROUNDS and all("gate_ok=1" in ln for ln in rounds)
 
 
+SHA_LINE = re.compile(r"^on-arm\.patch sha256: ([0-9a-f]{64})$")
+LOAD1 = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+
+
+def rule_patch_sha():
+    """同ディレクトリ RULE.txt の on-arm.patch sha256 固定値（取得できなければ AggError）。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for ln in read_lines(os.path.join(here, "RULE.txt")):
+        m = SHA_LINE.match(ln)
+        if m:
+            return m.group(1)
+    raise AggError("RULE.txt から patch の sha256 を取得できない")
+
+
+def kv(line):
+    return dict(p.split("=", 1) for p in line.split() if "=" in p)
+
+
+def orchestration_checks(d):
+    """macmini/load_gate.log を検証する（RULE §4 P-R4-EXEC・P-RUNAB・P-COLLECT、§5 R4／rect の負荷ゲート、
+    全 run の開始・終了記録）。欠損・重複・非ゼロ終了・ゲート不通過は理由リストへ返す。"""
+    why = []
+    try:
+        lines = read_lines(os.path.join(d, "load_gate.log"))
+    except OSError:
+        return ["P-R4-EXEC: load_gate.log なし（R4・rect の負荷ゲート／開始・終了記録を検証できない）"]
+    starts, ends, singles = {}, {}, {}
+    for ln in lines:
+        f = kv(ln)
+        if ln.startswith("START "):
+            starts.setdefault((f.get("series"), f.get("run")), []).append(f)
+        elif ln.startswith("END "):
+            ends.setdefault((f.get("series"), f.get("run")), []).append(f)
+        elif ln.startswith("run_ab exit="):
+            singles.setdefault("run_ab", []).append(f.get("exit"))
+        elif ln.startswith("collect exit="):
+            singles.setdefault("collect", []).append(f.get("exit"))
+    for series in ("r4", "rect"):
+        for r in range(1, ROUNDS + 1):
+            key = (series, str(r))
+            ss, es = starts.get(key, []), ends.get(key, [])
+            if len(ss) != 1 or len(es) != 1:
+                why.append("%s run%d: 開始 %d 件・終了 %d 件の記録（各 1 件を要求）" % (series, r, len(ss), len(es)))
+                continue
+            l1 = ss[0].get("load1", "")
+            if ss[0].get("gate") != "pass" or not LOAD1.match(l1) or float(l1) >= 3.0:
+                why.append("%s run%d: 負荷ゲート不通過（gate=%s load1=%s。record_only）" % (series, r, ss[0].get("gate"), l1))
+            if es[0].get("exit") != "0" or es[0].get("grep_exit") != "0":
+                why.append("%s run%d: 診断の終了コードが 0 でない（exit=%s grep_exit=%s）" % (series, r, es[0].get("exit"), es[0].get("grep_exit")))
+    extra = sorted(k for k in set(starts) | set(ends) if k[0] not in ("r4", "rect") or k[1] not in [str(i) for i in range(1, ROUNDS + 1)])
+    if extra:
+        why.append("想定外の series／run の記録: %s" % extra)
+    for name, label in (("run_ab", "P-RUNAB"), ("collect", "P-COLLECT")):
+        v = singles.get(name, [])
+        if v != ["0"]:
+            why.append("%s: %s の終了コード記録が exit=0 の 1 件ではない（%r）" % (label, name, v))
+    return why
+
+
 def preconditions(d, label):
     """前提ゲートを 1 か所で評価する。戻り値: (理由リスト, 計算済みデータ)。"""
     why, data = [], {}
@@ -205,6 +284,13 @@ def preconditions(d, label):
                 why.append("P-R0: %s で kernel_enabled が true でない" % arm)
     except OSError:
         why.append("P-R0: 記録なし")
+    try:
+        sha = read_lines(os.path.join(d, "patch_sha256.txt"))
+        if sha != [rule_patch_sha()]:
+            why.append("P-TREE: patch の sha256 が RULE 記載と一致しない")
+    except (OSError, AggError) as e:
+        why.append("P-TREE: patch sha256 を検証できない（%s）" % e)
+    why.extend(orchestration_checks(d))
     r4_shapes = [(mn, mn, k) for mn in R4_MN for k in R4_K] + [(mn, mn, k) for mn in R4_MN for k in R4_K]
     try:
         data["r4"] = r4_analysis(load_series(d, "r4", set(r4_shapes)))
@@ -290,7 +376,7 @@ def _variant_log(path, shapes, sme_scale):
             f.write("variant=SME(TwoDDynamicSme) size=(%d,%d,%d) median_gflops=%.1f\n" % (sh + (100.0 * sme_scale,)))
 
 
-def _fixture(d, after_scale=0.9, ck_after=1.5, sme_scale=1.5, probe_true=True, gate_ok=True):
+def _fixture(d, after_scale=0.9, ck_after=1.5, sme_scale=1.5, probe_true=True, gate_ok=True, r4_gate_ok=True, run_ab_exit=0):
     os.makedirs(os.path.join(d, "r1r2"))
     with open(os.path.join(d, "tree_verify.txt"), "w") as f:
         f.write("./crates/backend-cpu/src/gemm_blis/mod.rs\n")
@@ -299,6 +385,15 @@ def _fixture(d, after_scale=0.9, ck_after=1.5, sme_scale=1.5, probe_true=True, g
     for arm in ("before", "after"):
         with open(os.path.join(d, "sme_probe_%s.log" % arm), "w") as f:
             f.write("sme_report=Report { kernel_enabled: %s }\n" % ("true" if probe_true else "false"))
+    with open(os.path.join(d, "patch_sha256.txt"), "w") as f:
+        f.write(rule_patch_sha() + "\n")
+    with open(os.path.join(d, "load_gate.log"), "w") as f:
+        for series in ("r4", "rect"):
+            for r in range(1, ROUNDS + 1):
+                f.write("START series=%s run=%d gate=%s load1=%s waited_s=0 at=x\n" % (series, r, "pass" if r4_gate_ok else "unavailable", "0.5" if r4_gate_ok else "9.0"))
+                f.write("END series=%s run=%d exit=0 grep_exit=0 end_load1=0.5\n" % (series, r))
+        f.write("run_ab exit=%d\n" % run_ab_exit)
+        f.write("collect exit=0\n")
     r4 = [(mn, mn, k) for mn in R4_MN for k in R4_K]
     for r in range(1, ROUNDS + 1):
         _variant_log(os.path.join(d, "r4_run%d.log" % r), r4, sme_scale)
@@ -320,6 +415,24 @@ def _fixture(d, after_scale=0.9, ck_after=1.5, sme_scale=1.5, probe_true=True, g
             f.write("round%d gate=%s gate_ok=%d\n" % (i, "pass" if gate_ok else "timeout", 1 if gate_ok else 0))
 
 
+def _drop_line(path, prefix):
+    keep = [ln for ln in read_lines(path) if not ln.startswith(prefix)]
+    with open(path, "w") as f:
+        f.write("\n".join(keep) + "\n")
+
+
+def _edit_jsonl(d, fn):
+    p = os.path.join(d, "r1r2", "results-after-L-cpu-gemm.jsonl")
+    rows = read_jsonl(p)
+    fn(rows[0])
+    _w(p, rows)
+
+
+def _append_jsonl(d, row):
+    p = os.path.join(d, "r1r2", "results-after-L-cpu-gemm.jsonl")
+    _w(p, read_jsonl(p) + [row])
+
+
 def self_test():
     cases = [
         (dict(), "ADOPT 候補"),
@@ -328,6 +441,8 @@ def self_test():
         (dict(probe_true=False), "undetermined"),
         (dict(gate_ok=False), "undetermined"),
         (dict(sme_scale=0.5), "undetermined"),
+        (dict(r4_gate_ok=False), "undetermined"),
+        (dict(run_ab_exit=1), "undetermined"),
     ]
     for kw, want in cases:
         with tempfile.TemporaryDirectory() as d:
@@ -344,6 +459,18 @@ def self_test():
         with open(os.path.join(d, "rect_run2.log"), "a") as f:
             f.write("variant=SME(TwoDDynamicSme) size=(1,2,3) median_gflops=nan\n")
         assert "undetermined" in render(d, "L").split("\n")[2]
+    for name, mut in (
+        ("欠損 END", lambda d: _drop_line(os.path.join(d, "load_gate.log"), "END series=rect run=3")),
+        ("patch sha 不一致", lambda d: open(os.path.join(d, "patch_sha256.txt"), "w").write("0" * 64 + "\n")),
+        ("patch sha 欠損", lambda d: os.remove(os.path.join(d, "patch_sha256.txt"))),
+        ("device 不一致", lambda d: _edit_jsonl(d, lambda r: r.update(device="gpu"))),
+        ("parity 失敗", lambda d: _edit_jsonl(d, lambda r: r.update(parity_fail_count=2))),
+        ("余分セル", lambda d: _append_jsonl(d, dict(task="gemm", size=4096, mode="fresh", device="cpu", median_s=0.01, checksum=1.5))),
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            _fixture(d)
+            mut(d)
+            assert "undetermined" in render(d, "L").split("\n")[2], name
     print("self-test ok")
 
 

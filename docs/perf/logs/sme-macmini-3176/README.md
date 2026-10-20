@@ -11,7 +11,7 @@
 | `on-arm.patch` | after 腕（`gemm_blis/mod.rs` の `SME_PRODUCTION_ENABLED` 1 行。sha256 は RULE 記載） |
 | `orchestrate_macmini.sh` | P-TREE → P-R0 → R4 5 run → 長方形 5 run → A/B の一括実行（`--dry-run` あり） |
 | `aggregate.py` | 厳密集計（`--self-test` あり。異常入力は undetermined へ写像） |
-| `macmini/` | 実測ログ（マスク済み）。**未実測のため未生成** |
+| `macmini/` | 実測ログ（マスク済み）。計測中は `${WORK}/macmini` に出力し、全計測後にここへ複製する。**未実測のため未生成** |
 
 A/B 本体は `scripts/bench/framework-compare/run_ab_sme_macmini_cpu.sh`、長方形の診断は `crates/backend-cpu/src/gemm_blis/mod.rs` の `sme_vs_neon_ab_mlp_rect`（`#[ignore]`）。
 
@@ -21,7 +21,7 @@ A/B 本体は `scripts/bench/framework-compare/run_ab_sme_macmini_cpu.sh`、長�
 2. `RAYON_NUM_THREADS` を unset し、他の重い処理を止める。torch venv はリポ外の既存 venv を使う。
 3. 計画確認: `BEFORE=… TORCH_PY=… WORK=… bash docs/perf/logs/sme-macmini-3176/orchestrate_macmini.sh --dry-run`
 4. macOS には `setsid` がないので `nohup` のサブシェルで `zsh -lc` 経由で起動し、`ps` で生存確認する（`--dry-run` を外す）。
-5. 完了後に `macmini/` を回収し、`python3 -I aggregate.py <macmini> > aggregate.md`。終わったら before/after の `target-ab-*` と probe の target を削除する（SSD は 228 GiB）。
+5. 完了後に `${WORK}/macmini`（複製先は `docs/perf/logs/sme-macmini-3176/macmini/`）を回収し、`python3 -I aggregate.py <macmini> > aggregate.md`。終わったら before/after の `target-ab-*` と probe の target を削除する（SSD は 228 GiB）。
 
 ## 状態
 
