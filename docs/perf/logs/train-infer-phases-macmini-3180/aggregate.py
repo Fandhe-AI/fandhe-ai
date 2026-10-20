@@ -14,6 +14,7 @@ python3 標準ライブラリのみ。使い方（`python3 -I` で実行）:
 """
 import argparse
 import json
+import math
 import re
 import statistics
 import sys
@@ -24,6 +25,28 @@ from pathlib import Path
 TOTAL = {"train_phases": "step_total", "infer_phases": "iter_total"}
 EXPECT_STEP = (11, 7, 7)
 EXPECT_BACKWARD = (5, 3, 3)
+
+# RULE.txt §9: device／task／mode ごとの必須フェーズ集合（run1 との一致だけでは全 run 同時欠落を拒否できない）。
+REQUIRED_PHASES = {
+    ("cpu", "infer_phases", "fresh"): {"predict", "host_copy", "checksum", "iter_total"},
+    ("cpu", "infer_phases", "reuse"): {"predict_resident", "host_copy", "checksum", "iter_total"},
+    ("metal", "infer_phases", "fresh"): {"leaf_register", "forward", "to_tensor", "host_copy", "checksum", "iter_total"},
+    ("metal", "infer_phases", "reuse"): {"predict_resident", "host_copy", "checksum", "iter_total"},
+    **{
+        (dev, "train_phases", "fresh"): {
+            "tape_build", "leaf_register", "forward", "loss_readout", "backward",
+            "param_readout", "host_sgd", "apply_params", "tape_drop", "step_total",
+        }
+        for dev in ("cpu", "metal")
+    },
+    **{
+        (dev, "train_phases", "reuse"): {
+            "tape_build", "leaf_register", "forward_resident", "loss_readout", "backward",
+            "device_update", "tape_drop", "step_total",
+        }
+        for dev in ("cpu", "metal")
+    },
+}
 
 
 class AggError(Exception):
@@ -60,8 +83,8 @@ def load_phases(d, devices):
                 raise AggError(f"{f.name}:{ln} に重複行 {key}")
             seen.add(key)
             m = r.get("median_s")
-            if isinstance(m, bool) or not isinstance(m, (int, float)) or m != m or m < 0:
-                raise AggError(f"{f.name}:{ln} の median_s が数値でない/負/NaN: {m!r}")
+            if isinstance(m, bool) or not isinstance(m, (int, float)) or not math.isfinite(m) or m < 0:
+                raise AggError(f"{f.name}:{ln} の median_s が数値でない/負/非有限（NaN・Infinity）: {m!r}")
             vals[key][i] = float(m)
             order[key] = r["phase_index"]
         per_cell = defaultdict(set)
@@ -76,6 +99,10 @@ def load_phases(d, devices):
         for c, ph in per_cell.items():
             if TOTAL[c[1]] not in ph:
                 raise AggError(f"{f.name} の {c} に合計フェーズ {TOTAL[c[1]]} がない")
+        for c, ph in per_cell.items():
+            req = REQUIRED_PHASES.get(c)
+            if req is not None and ph != req:
+                raise AggError(f"{f.name} の {c} が必須フェーズ集合と不一致（差分 {sorted(ph ^ req)}）")
         phase_sets[i] = {c: frozenset(ph) for c, ph in per_cell.items()}
     for i in range(2, 6):
         for c in cells_expected:
@@ -87,8 +114,40 @@ def load_phases(d, devices):
     return vals, order, cells_expected
 
 
-def render_phases(vals, order, cells, machine):
+GATE_RE = re.compile(r"^(run[1-5](?:-syncfc)?) gate=(\S+) ")
+
+
+def check_load_gate(d):
+    """load_gate.log を検証し (全通過か, 説明文) を返す。記録欠損は拒否、未通過は参考系列扱い（RULE.txt §4）。"""
+    f = d / "load_gate.log"
+    if not f.exists():
+        raise AggError(f"{f.name} が無い（負荷ゲート記録欠損）")
+    status = {}
+    failed = []
+    for line in f.read_text(encoding="utf-8").splitlines():
+        m = GATE_RE.match(line)
+        if m:
+            if m.group(1) in status:
+                raise AggError(f"load_gate.log に {m.group(1)} の gate 記録が重複")
+            status[m.group(1)] = m.group(2)
+        elif " FAILED " in line or line.startswith("FAILED"):
+            failed.append(line)
+    expected = [f"run{i}{suf}" for i in range(1, 6) for suf in ("", "-syncfc")]
+    missing = [k for k in expected if k not in status]
+    if missing:
+        raise AggError(f"load_gate.log に gate 記録がない: {missing}")
+    bad = {k: status[k] for k in expected if status[k] != "pass"}
+    if bad or failed:
+        return False, f"負荷ゲート未通過/実行失敗あり（{bad or ''} {len(failed)} 件の FAILED）"
+    return True, "負荷ゲート 10/10 pass（run 5 + 同期固定費 5）"
+
+
+def render_phases(vals, order, cells, machine, gate=(True, "")):
     out = [f"# train／infer `--phases` 5 run 中央値（registry `fandhe-ai =0.11.0`・{machine}）\n"]
+    if gate[0]:
+        out.append(f"- 系列区分: **正式系列**（{gate[1]}）\n")
+    else:
+        out.append(f"- 系列区分: **参考系列（正式ではない。結論は参考扱い）** — {gate[1]}\n")
     medians = {}
     for cell in cells:
         dev, task, mode = cell
@@ -211,7 +270,8 @@ def render_sync(meds, counters, medians, d):
 
 def run(d, devices, machine):
     vals, order, cells = load_phases(d, devices)
-    lines, medians = render_phases(vals, order, cells, machine)
+    gate = check_load_gate(d)
+    lines, medians = render_phases(vals, order, cells, machine, gate)
     meds = load_sync(d)
     counters = parse_counters(d)
     lines += render_sync(meds, counters, medians, d)
@@ -219,22 +279,32 @@ def run(d, devices, machine):
 
 
 # ---------------- self-test ----------------
-def _write_fixture(d, drop=None, bad=None):
+def _write_fixture(d, drop=None, bad=None, gate="pass", allrun_drop=None):
     for i in range(1, 6):
         rows = []
         for dev in ("cpu", "metal"):
             for task, total in (("train_phases", "step_total"), ("infer_phases", "iter_total")):
                 for mode in ("fresh", "reuse"):
-                    for idx, ph in enumerate(("a", "b", total)):
+                    names = sorted(REQUIRED_PHASES[(dev, task, mode)] - {total}) + [total]
+                    for idx, ph in enumerate(names):
                         rows.append(
                             {"task": task, "device": dev, "mode": mode, "phase": ph, "phase_index": idx,
                              "median_s": 1e-4 * (idx + 1) * (1 + i / 100)}
                         )
+        if allrun_drop:
+            rows = [r for r in rows if not (r["device"] == "cpu" and r["task"] == "infer_phases" and r["phase"] == allrun_drop)]
         if drop == i:
             rows = [r for r in rows if not (r["device"] == "metal" and r["task"] == "infer_phases")]
         if bad == i:
-            rows[0]["median_s"] = "nan?"
+            rows[0]["median_s"] = "nan?" if bad != 5 else float("inf")
         (d / f"run{i}.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    (d / "load_gate.log").write_text(
+        "".join(
+            f"run{i}{suf} gate={gate if (i, suf) == (3, '') else 'pass'} load1=1.00 waited_s=0 at=x\n"
+            for i in range(1, 6)
+            for suf in ("", "-syncfc")
+        )
+    )
     (d / "sync-fixed-cost").mkdir()
     for i in range(1, 6):
         (d / "sync-fixed-cost" / f"run{i}.log").write_text(
@@ -253,7 +323,7 @@ def self_test():
     def expect_reject(label, **kw):
         with tempfile.TemporaryDirectory() as t:
             d = Path(t)
-            _write_fixture(d, **{k: v for k, v in kw.items() if k in ("drop", "bad")})
+            _write_fixture(d, **{k: v for k, v in kw.items() if k in ("drop", "bad", "allrun_drop")})
             if kw.get("rm"):
                 (d / kw["rm"]).unlink()
             try:
@@ -270,6 +340,14 @@ def self_test():
     expect_reject("run 欠損", rm="run3.jsonl")
     expect_reject("行（セル）欠損", drop=2)
     expect_reject("非数値", bad=4)
+    expect_reject("正の無限大", bad=5)
+    expect_reject("全 run 同一フェーズ欠落", allrun_drop="host_copy")
+    expect_reject("load_gate.log 欠損", rm="load_gate.log")
+    with tempfile.TemporaryDirectory() as t:
+        d = Path(t)
+        _write_fixture(d, gate="timeout")
+        out = run(d, ["cpu", "metal"], "test")
+        assert "参考系列" in out and "正式系列" not in out, out
     expect_reject("sync ログ欠損", rm="sync-fixed-cost/run5.log")
     expect_reject("counters 欠損", rm="counters/batch_counters.log")
     print("self-test ok")

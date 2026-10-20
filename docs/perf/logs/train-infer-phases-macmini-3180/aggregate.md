@@ -1,5 +1,7 @@
 # train／infer `--phases` 5 run 中央値（registry `fandhe-ai =0.11.0`・Apple M4 (Mac mini)）
 
+- 系列区分: **正式系列**（負荷ゲート 10/10 pass（run 5 + 同期固定費 5））
+
 ## infer_phases / cpu / fresh
 
 | phase | 中央値 (µs) | min–max (µs) | 合計比 |
