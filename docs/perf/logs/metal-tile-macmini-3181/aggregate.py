@@ -162,17 +162,17 @@ def parse_candle(path):
         if rec.get("device") != "metal":
             fail("device が metal でない %s:%d" % (os.path.basename(path), ln))
         n = rec.get("size")
-        med = rec.get("stats", {}).get("median_s")
+        med = rec.get("median_s")
         if n in out:
             fail("candle excl が重複 N=%s: %s" % (n, os.path.basename(path)))
         if not isinstance(med, (int, float)) or isinstance(med, bool) or med <= 0:
             fail("median_s が不正 N=%s: %s" % (n, os.path.basename(path)))
         out[n] = float(med)
-        version = rec.get("framework_version")
+        version = rec.get("version")
     if sorted(out) != SIZES:
         fail("candle excl の N が揃っていない: %s (%s)" % (os.path.basename(path), sorted(out)))
     if not version:
-        fail("candle の framework_version が無い")
+        fail("candle の version が無い")
     return out, version
 
 
@@ -264,7 +264,7 @@ def render(r):
     w("- rev-stamp: `%s`" % r["rev"].split()[0])
     w("- DEVICE: gpu_cores=%s soc=\"%s\" verified_m4_max=%s split_k_enabled=%s" % (gc, soc, ver, sk))
     w("- 負荷ゲート: %d/%d プロセスが pass（load_gate.log）" % (r["gates"], r["gates"]))
-    w("- candle: framework_version=%s・5 run・TRACE と hash は 5 run 全一致\n" % r["candle_version"])
+    w("- candle: version=%s・5 run・TRACE と hash は 5 run 全一致\n" % r["candle_version"])
 
     w("## (i) 選択の追跡（AC1・AC3）\n")
     w("| N | select(N,N,N) | select_for_device | should_split_k | executed_route | resolved | AC3 |")
@@ -387,9 +387,9 @@ def _fx_make(d):
         cj = []
         for n in SIZES:
             cj.append(json.dumps({"task": "gemm_transfer_incl", "device": "metal", "size": n,
-                                  "stats": {"median_s": 0.5}, "framework_version": "0.11.0"}))
+                                  "median_s": 0.5, "version": "0.11.0"}))
             cj.append(json.dumps({"task": "gemm_transfer_excl", "device": "metal", "size": n,
-                                  "stats": {"median_s": 0.002}, "framework_version": "0.11.0"}))
+                                  "median_s": 0.002, "version": "0.11.0"}))
         _fx_write(d, "candle_run%d.jsonl" % r, "\n".join(cj) + "\n")
 
 

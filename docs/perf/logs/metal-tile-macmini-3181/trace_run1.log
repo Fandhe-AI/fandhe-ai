@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<WORK>/target-3181/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_tile_select_macmini_diag_tests::tile_select_trace_square_sizes ... DEVICE gpu_cores=10 soc="Apple M4" verified_m4_max=false split_k_enabled=true
+TRACE N=256 select=3:bm32xbn32xbk16_wm2xwn2_stagedtrue select_for_device=3:bm32xbn32xbk16_wm2xwn2_stagedtrue should_split_k=none route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue executed_route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=3:bm32xbn32xbk16_wm2xwn2_stagedtrue
+TRACE N=512 select=3:bm32xbn32xbk16_wm2xwn2_stagedtrue select_for_device=3:bm32xbn32xbk16_wm2xwn2_stagedtrue should_split_k=none route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue executed_route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=3:bm32xbn32xbk16_wm2xwn2_stagedtrue
+TRACE N=1024 select=3:bm32xbn32xbk16_wm2xwn2_stagedtrue select_for_device=3:bm32xbn32xbk16_wm2xwn2_stagedtrue should_split_k=none route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue executed_route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=3:bm32xbn32xbk16_wm2xwn2_stagedtrue
+TRACE N=2048 select=3:bm32xbn32xbk16_wm2xwn2_stagedtrue select_for_device=3:bm32xbn32xbk16_wm2xwn2_stagedtrue should_split_k=none route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue executed_route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=3:bm32xbn32xbk16_wm2xwn2_stagedtrue
+TRACE N=4096 select=3:bm32xbn32xbk16_wm2xwn2_stagedtrue select_for_device=3:bm32xbn32xbk16_wm2xwn2_stagedtrue should_split_k=none route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue executed_route=Classic/3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=3:bm32xbn32xbk16_wm2xwn2_stagedtrue
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 803 filtered out; finished in 0.19s
+

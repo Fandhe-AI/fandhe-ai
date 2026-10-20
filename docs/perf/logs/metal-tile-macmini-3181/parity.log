@@ -1,0 +1,63 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<WORK>/target-3181/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_tile_select_macmini_diag_tests::tile_candidates_match_cpu_reference ... PARITY N=256 cand=0 fallback=false ok=true
+PARITY N=256 cand=1 fallback=false ok=true
+PARITY N=256 cand=2 fallback=false ok=true
+PARITY N=256 cand=3 fallback=false ok=true
+PARITY N=256 cand=4 fallback=false ok=true
+PARITY N=256 cand=5 fallback=false ok=true
+PARITY N=256 cand=6 fallback=false ok=true
+PARITY N=256 cand=7 fallback=false ok=true
+PARITY N=256 cand=8 fallback=false ok=true
+PARITY N=256 cand=9 fallback=false ok=true
+PARITY N=256 cand=10 fallback=false ok=true
+PARITY N=512 cand=0 fallback=false ok=true
+PARITY N=512 cand=1 fallback=false ok=true
+PARITY N=512 cand=2 fallback=false ok=true
+PARITY N=512 cand=3 fallback=false ok=true
+PARITY N=512 cand=4 fallback=false ok=true
+PARITY N=512 cand=5 fallback=false ok=true
+PARITY N=512 cand=6 fallback=false ok=true
+PARITY N=512 cand=7 fallback=false ok=true
+PARITY N=512 cand=8 fallback=false ok=true
+PARITY N=512 cand=9 fallback=false ok=true
+PARITY N=512 cand=10 fallback=false ok=true
+PARITY N=1024 cand=0 fallback=false ok=true
+PARITY N=1024 cand=1 fallback=false ok=true
+PARITY N=1024 cand=2 fallback=false ok=true
+PARITY N=1024 cand=3 fallback=false ok=true
+PARITY N=1024 cand=4 fallback=false ok=true
+PARITY N=1024 cand=5 fallback=false ok=true
+PARITY N=1024 cand=6 fallback=false ok=true
+PARITY N=1024 cand=7 fallback=false ok=true
+PARITY N=1024 cand=8 fallback=false ok=true
+PARITY N=1024 cand=9 fallback=false ok=true
+PARITY N=1024 cand=10 fallback=false ok=true
+PARITY N=2048 cand=0 fallback=false ok=true
+PARITY N=2048 cand=1 fallback=false ok=true
+PARITY N=2048 cand=2 fallback=false ok=true
+PARITY N=2048 cand=3 fallback=false ok=true
+PARITY N=2048 cand=4 fallback=false ok=true
+PARITY N=2048 cand=5 fallback=false ok=true
+PARITY N=2048 cand=6 fallback=false ok=true
+PARITY N=2048 cand=7 fallback=false ok=true
+PARITY N=2048 cand=8 fallback=false ok=true
+PARITY N=2048 cand=9 fallback=false ok=true
+PARITY N=2048 cand=10 fallback=false ok=true
+PARITY N=4096 cand=0 fallback=false ok=true
+PARITY N=4096 cand=1 fallback=false ok=true
+PARITY N=4096 cand=2 fallback=false ok=true
+PARITY N=4096 cand=3 fallback=false ok=true
+PARITY N=4096 cand=4 fallback=false ok=true
+PARITY N=4096 cand=5 fallback=false ok=true
+PARITY N=4096 cand=6 fallback=false ok=true
+PARITY N=4096 cand=7 fallback=false ok=true
+PARITY N=4096 cand=8 fallback=false ok=true
+PARITY N=4096 cand=9 fallback=false ok=true
+PARITY N=4096 cand=10 fallback=false ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 803 filtered out; finished in 10.36s
+
