@@ -134,6 +134,11 @@ def sample(fn, bp, sync=None):
     """warmup + iters 回の秒数列から (median, q1, q3) を返す。"""
     for _ in range(bp.WARMUP):
         fn()
+        # warmup は計時外。MPS では各反復の後に同期し、未同期の出力が
+        # キューに滞留してメモリを使い切らないようにする（PR #3488 Bugbot 指摘。
+        # mm_pure_batch10 の N=4096 で warmup 全体を同期なしにすると約 12.8GB 滞留しうる）。
+        if sync:
+            sync()
     secs = []
     for _ in range(bp.ITERS):
         if sync:
