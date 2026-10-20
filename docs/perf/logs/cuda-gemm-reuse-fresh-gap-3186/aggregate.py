@@ -54,6 +54,17 @@ def check_trials(row, label):
         if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
                    for x in t):
             raise Invalid(f"trials_us に非有限・非数値: {label} {name}")
+        # 判定の分母・分子に使う run 内 median も有限・非負の数値であることを要求する
+        st = ph.get("stat")
+        nonneg_number(st.get("median_us") if isinstance(st, dict) else None,
+                      f"stat.median_us {label} {name}")
+
+
+def nonneg_number(x, label):
+    """有限かつ非負の数値（bool 不可）であることを検証する。NaN・inf・負値・欠損は例外。"""
+    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0:
+        raise Invalid(f"有限・非負の数値でない: {label} = {x!r}")
+    return x
 
 
 def finite_number(x, label):
@@ -103,6 +114,7 @@ def check_checksums(b, a):
             raise Invalid(f"N={n}: 既知 checksum と不一致 {ref} vs {KNOWN[n]}")
         for k in range(1, RUNS + 1):
             for mode in ("fresh", "reuse"):
+                nonneg_number(a[(k, n, mode)].get("median_s"), f"Layer A {mode} run{k} n{n} median_s")
                 c = finite_number(a[(k, n, mode)].get("checksum"), f"Layer A {mode} run{k} n{n}")
                 if abs(c - ref) > CHECKSUM_TOL:
                     raise Invalid(f"N={n}: Layer A {mode} run{k} checksum {c} vs {ref}")
@@ -248,7 +260,7 @@ def render(b, a, gate):
           f"{f['d2h_reused'] - 1100:.1f} us）"]
     thr, hm, hv = high_mode_counts(b)
     L += ["", "## 二峰性（N=4096）", "", f"- 高モード閾値: {thr:.1f} us（5 x drop_reused の D2H 中央値）",
-          f"- 判定: {hv}", "", "| 腕 | run1..5 の高モード試行数 |", "|---|---|"]
+          f"- 判定: {hv}{'' if gp else '（参考扱い: 専有ゲート未通過／不明）'}", "", "| 腕 | run1..5 の高モード試行数 |", "|---|---|"]
     for arm, cnt in hm.items():
         L.append(f"| {arm} | {cnt} |")
     L += ["", "## minflt 合計（計測 20 試行・run 間中央値。付記のみ）", ""]
@@ -362,6 +374,22 @@ def self_test():
             raise AssertionError("trials 長不足を検出できていない")
         except Invalid:
             pass
+    # median_s / stat.median_us の NaN・負値は例外
+    for bad in (float("nan"), float("inf"), -1.0, None):
+        b, a = _synthetic()
+        a[(1, 1024, "fresh")]["median_s"] = bad
+        try:
+            check_checksums(b, a)
+            raise AssertionError("median_s 不正を検出できていない")
+        except Invalid:
+            pass
+        r = _row(4096, "drop_untouched")
+        r["phases"]["readback_total"]["stat"]["median_us"] = bad
+        try:
+            check_trials(r, "t")
+            raise AssertionError("stat.median_us 不正を検出できていない")
+        except Invalid:
+            pass
     # 欠損は例外
     try:
         load_jsonl_one("/nonexistent/path.jsonl")
@@ -384,6 +412,7 @@ def self_test():
     # render が通る
     b, a = _synthetic(keep_extra=2100.0)
     assert "判定 W" in render(b, a, {f"run{k}": "pass" for k in range(1, 6)})
+    assert "二峰性（N=4096）" in render(b, a, {}) and "参考扱い" in render(b, a, {}).split("## 二峰性")[1]
     print("self-test OK")
 
 
