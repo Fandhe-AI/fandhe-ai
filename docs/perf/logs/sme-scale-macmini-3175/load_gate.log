@@ -1,0 +1,60 @@
+START series=thread run=1 T=1 gate=pass load1=3.69 waited_s=90 at=2026-10-19T21:50:02Z
+END series=thread run=1 T=1 exit=0 grep_exit=0 end_load1=3.72
+START series=thread run=1 T=2 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:04Z
+END series=thread run=1 T=2 exit=0 grep_exit=0 end_load1=3.72
+START series=thread run=1 T=4 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:05Z
+END series=thread run=1 T=4 exit=0 grep_exit=0 end_load1=3.72
+START series=thread run=1 T=10 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:06Z
+END series=thread run=1 T=10 exit=0 grep_exit=0 end_load1=3.72
+START series=microcall run=1 T=1 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:06Z
+END series=microcall run=1 T=1 exit=0 grep_exit=0 end_load1=3.72
+START series=thread run=2 T=2 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:07Z
+END series=thread run=2 T=2 exit=0 grep_exit=0 end_load1=3.58
+START series=thread run=2 T=4 gate=pass load1=3.58 waited_s=0 at=2026-10-19T21:50:08Z
+END series=thread run=2 T=4 exit=0 grep_exit=0 end_load1=3.58
+START series=thread run=2 T=10 gate=pass load1=3.58 waited_s=0 at=2026-10-19T21:50:09Z
+END series=thread run=2 T=10 exit=0 grep_exit=0 end_load1=3.58
+START series=thread run=2 T=1 gate=pass load1=3.58 waited_s=0 at=2026-10-19T21:50:09Z
+END series=thread run=2 T=1 exit=0 grep_exit=0 end_load1=3.58
+START series=microcall run=2 T=1 gate=pass load1=3.58 waited_s=0 at=2026-10-19T21:50:11Z
+END series=microcall run=2 T=1 exit=0 grep_exit=0 end_load1=3.58
+START series=thread run=3 T=4 gate=pass load1=3.58 waited_s=0 at=2026-10-19T21:50:12Z
+END series=thread run=3 T=4 exit=0 grep_exit=0 end_load1=3.58
+START series=thread run=3 T=10 gate=pass load1=3.58 waited_s=0 at=2026-10-19T21:50:12Z
+END series=thread run=3 T=10 exit=0 grep_exit=0 end_load1=3.93
+START series=thread run=3 T=1 gate=pass load1=3.93 waited_s=0 at=2026-10-19T21:50:13Z
+END series=thread run=3 T=1 exit=0 grep_exit=0 end_load1=3.93
+START series=thread run=3 T=2 gate=pass load1=3.93 waited_s=0 at=2026-10-19T21:50:14Z
+END series=thread run=3 T=2 exit=0 grep_exit=0 end_load1=3.93
+START series=microcall run=3 T=1 gate=pass load1=3.93 waited_s=0 at=2026-10-19T21:50:16Z
+END series=microcall run=3 T=1 exit=0 grep_exit=0 end_load1=3.93
+START series=thread run=4 T=10 gate=pass load1=3.93 waited_s=0 at=2026-10-19T21:50:16Z
+END series=thread run=4 T=10 exit=0 grep_exit=0 end_load1=3.93
+START series=thread run=4 T=1 gate=pass load1=3.93 waited_s=0 at=2026-10-19T21:50:17Z
+END series=thread run=4 T=1 exit=0 grep_exit=0 end_load1=3.78
+START series=thread run=4 T=2 gate=pass load1=3.78 waited_s=0 at=2026-10-19T21:50:18Z
+END series=thread run=4 T=2 exit=0 grep_exit=0 end_load1=3.78
+START series=thread run=4 T=4 gate=pass load1=3.78 waited_s=0 at=2026-10-19T21:50:20Z
+END series=thread run=4 T=4 exit=0 grep_exit=0 end_load1=3.78
+START series=microcall run=4 T=1 gate=pass load1=3.78 waited_s=0 at=2026-10-19T21:50:20Z
+END series=microcall run=4 T=1 exit=0 grep_exit=0 end_load1=3.78
+START series=thread run=5 T=1 gate=pass load1=3.78 waited_s=0 at=2026-10-19T21:50:21Z
+END series=thread run=5 T=1 exit=0 grep_exit=0 end_load1=3.78
+START series=thread run=5 T=2 gate=pass load1=3.78 waited_s=0 at=2026-10-19T21:50:23Z
+END series=thread run=5 T=2 exit=0 grep_exit=0 end_load1=3.72
+START series=thread run=5 T=4 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:24Z
+END series=thread run=5 T=4 exit=0 grep_exit=0 end_load1=3.72
+START series=thread run=5 T=10 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:25Z
+END series=thread run=5 T=10 exit=0 grep_exit=0 end_load1=3.72
+START series=microcall run=5 T=1 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:25Z
+END series=microcall run=5 T=1 exit=0 grep_exit=0 end_load1=3.72
+START series=ecore run=1 T=1 gate=pass load1=3.72 waited_s=0 at=2026-10-19T21:50:26Z
+END series=ecore run=1 T=1 exit=0 grep_exit=0 end_load1=3.47
+START series=ecore run=2 T=1 gate=pass load1=3.47 waited_s=0 at=2026-10-19T21:50:38Z
+END series=ecore run=2 T=1 exit=0 grep_exit=0 end_load1=3.39
+START series=ecore run=3 T=1 gate=pass load1=3.39 waited_s=0 at=2026-10-19T21:50:50Z
+END series=ecore run=3 T=1 exit=0 grep_exit=0 end_load1=3.10
+START series=ecore run=4 T=1 gate=pass load1=3.10 waited_s=0 at=2026-10-19T21:51:03Z
+END series=ecore run=4 T=1 exit=0 grep_exit=0 end_load1=2.63
+START series=ecore run=5 T=1 gate=pass load1=2.63 waited_s=0 at=2026-10-19T21:51:15Z
+END series=ecore run=5 T=1 exit=0 grep_exit=0 end_load1=2.46

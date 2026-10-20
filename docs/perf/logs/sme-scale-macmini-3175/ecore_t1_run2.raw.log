@@ -1,0 +1,22 @@
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running unittests src/lib.rs (/Users/nancy/work/target-3175/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
+
+running 1 test
+test gemm_blis::tests::sme_vs_neon_ab_thread_sweep ... num_threads=1
+rayon_current_num_threads=1
+variant=NEON(TwoDDynamic) num_threads=1 size=(256,256,128) median_gflops=11.743
+variant=SME(TwoDDynamicSme) num_threads=1 size=(256,256,128) median_gflops=55.090
+variant=NEON(TwoDDynamic) num_threads=1 size=(512,512,256) median_gflops=12.915
+variant=SME(TwoDDynamicSme) num_threads=1 size=(512,512,256) median_gflops=79.335
+variant=NEON(TwoDDynamic) num_threads=1 size=(1024,1024,512) median_gflops=12.992
+variant=SME(TwoDDynamicSme) num_threads=1 size=(1024,1024,512) median_gflops=73.644
+variant=NEON(TwoDDynamic) num_threads=1 size=(2048,2048,1024) median_gflops=12.609
+variant=SME(TwoDDynamicSme) num_threads=1 size=(2048,2048,1024) median_gflops=69.737
+variant=NEON(TwoDDynamic) num_threads=1 size=(64,256,784) median_gflops=11.205
+variant=SME(TwoDDynamicSme) num_threads=1 size=(64,256,784) median_gflops=50.221
+variant=NEON(TwoDDynamic) num_threads=1 size=(784,256,64) median_gflops=11.070
+variant=SME(TwoDDynamicSme) num_threads=1 size=(784,256,64) median_gflops=44.094
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 723 filtered out; finished in 11.95s
+
