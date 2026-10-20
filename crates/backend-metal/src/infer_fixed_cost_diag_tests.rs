@@ -201,3 +201,158 @@ fn infer_fixed_cost_diag_wall_vs_gpu_busy() {
         "  batches_with_timestamps/iter min={ts_min} max={ts_max}; wait_until_completed/iter min={w_min} max={w_max}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// イシュー #3183: Mac mini の infer Metal 二峰性の腕 G（1 反復 1 行の GPU タイムスタンプ付き時系列）
+// ---------------------------------------------------------------------------
+
+const BIMODAL_MEASURED: usize = 500;
+
+/// 腕 G: 上の `infer_fixed_cost_diag_wall_vs_gpu_busy` と同じ列を、中央値ではなく
+/// **反復ごと**に `DIAG_JSON ` 接頭辞の 1 行 JSON で出力する（集計・モード検出は
+/// `docs/perf/logs/metal-infer-bimodal-macmini-3183/aggregate.py`、規則は同 `RULE.txt`）。
+///
+/// 本番の `predict_device_chain` は `linear_forward_device_tracked` を呼ぶため、ここでも
+/// `DispatchFailureCell` 付きの tracked 版を使う。ただし facade 層（tape・snapshot・
+/// legacy 読み出し）は含まないため、R・D 腕との差は「チェーン外の層」と読む。
+/// 返却バッチ数と wait 回数が合わない反復・タイムスタンプ欠落の反復は `gpu_busy` を
+/// null にする（#2114 の判定不能規則と同じ）。値の大小は assert しない。
+/// 本 crate の dev-dependency に `serde_json` を足さないため、JSON は手組みする。
+#[test]
+#[ignore = "Mac mini 実機計測用の record-only 診断（RULE.txt・orchestrate.sh 参照）"]
+fn infer_bimodal_diag_per_iter_gpu_timestamps() {
+    use fandhe_ai_tensor_core::DispatchFailureCell;
+
+    let ops = MetalBackendOps::new();
+    let mem = ops.memory_ops().expect("Metal は MemoryOps を実装");
+    let ctx = cached_context().expect("Metal context");
+    let x = tensor(1, &[BATCH, IN_FEATURES]);
+    let w1 = tensor(2, &[IN_FEATURES, HIDDEN]);
+    let b1 = tensor(3, &[HIDDEN]);
+    let w2 = tensor(4, &[HIDDEN, OUT_FEATURES]);
+    let b2 = tensor(5, &[OUT_FEATURES]);
+    let (w1d, b1d) = (mem.upload(&w1).expect("w1"), mem.upload(&b1).expect("b1"));
+    let (w2d, b2d) = (mem.upload(&w2).expect("w2"), mem.upload(&b2).expect("b2"));
+    let (s_w1, s_b1) = ([IN_FEATURES, HIDDEN], [HIDDEN]);
+    let (s_w2, s_b2) = ([HIDDEN, OUT_FEATURES], [OUT_FEATURES]);
+    let token = DispatchFailureCell::new();
+
+    let counters = || {
+        let c = crate::__diagnostic_batch_counters_snapshot().expect("counters");
+        (c.encode_calls, c.command_buffers, c.wait_until_completed)
+    };
+    let t0 = Instant::now();
+    let mut rows: Vec<String> = Vec::with_capacity(BIMODAL_MEASURED);
+    let mut first_bits: Option<Vec<u32>> = None;
+    for i in 0..(WARMUP + BIMODAL_MEASURED) {
+        let t_start = t0.elapsed().as_secs_f64();
+        let b0 = counters();
+        let t_all = Instant::now();
+        let t = Instant::now();
+        let a = mem.upload(&x).expect("upload");
+        let upload = t.elapsed().as_secs_f64();
+
+        let t = Instant::now();
+        let h = ops
+            .linear_forward_device_tracked(
+                &a,
+                DeviceBufferView::new(&w1d, 0, &s_w1).expect("view"),
+                Some(DeviceBufferView::new(&b1d, 0, &s_b1).expect("view")),
+                Activation::Relu,
+                &token,
+            )
+            .expect("L1");
+        let y = ops
+            .linear_forward_device_tracked(
+                &h,
+                DeviceBufferView::new(&w2d, 0, &s_w2).expect("view"),
+                Some(DeviceBufferView::new(&b2d, 0, &s_b2).expect("view")),
+                Activation::None,
+                &token,
+            )
+            .expect("L2");
+        let encode = t.elapsed().as_secs_f64();
+
+        let t = Instant::now();
+        let batches = ctx
+            .synchronize_with_gpu_timestamps()
+            .expect("commit + wait");
+        let commit_wait = t.elapsed().as_secs_f64();
+        let b1_ = counters();
+
+        let t = Instant::now();
+        let out = mem.download(&y).expect("download");
+        let download = t.elapsed().as_secs_f64();
+        let wall = t_all.elapsed().as_secs_f64();
+        let b2_ = counters();
+
+        let with_ts = batches
+            .iter()
+            .filter(|b| b.kernel_gpu_secs().is_some())
+            .count();
+        let wait_calls = b1_.2.saturating_sub(b0.2);
+        let ts_complete =
+            !batches.is_empty() && with_ts == batches.len() && wait_calls == batches.len();
+        let gpu_busy = if ts_complete {
+            format!(
+                "{:e}",
+                batches
+                    .iter()
+                    .filter_map(|b| b.kernel_gpu_secs())
+                    .sum::<f64>()
+            )
+        } else {
+            "null".to_string()
+        };
+
+        // 出力の反復間 bit 一致（warmup 後の全反復で同一であること）と FNV-1a ダイジェスト。
+        let bits: Vec<u32> = out
+            .as_slice()
+            .expect("download は contiguous")
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        if i < WARMUP {
+            continue;
+        }
+        match &first_bits {
+            None => first_bits = Some(bits.clone()),
+            Some(prev) => assert_eq!(prev, &bits, "G: 反復間で出力が不一致"),
+        }
+        let mut fnv: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in (bits.len() as u64).to_le_bytes() {
+            fnv = (fnv ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        for byte in bits.iter().flat_map(|v| v.to_le_bytes()) {
+            fnv = (fnv ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        rows.push(format!(
+            "{{\"issue\":3183,\"arm\":\"G\",\"iter\":{},\"t_since_start_s\":{:e},\
+\"spans\":{{\"upload\":{:e},\"encode\":{:e},\"commit_wait\":{:e},\"download\":{:e},\
+\"wall\":{:e},\"iter_total\":{:e},\"gpu_busy\":{}}},\
+\"counters\":{{\"encode\":{},\"command_buffers\":{},\"wait\":{},\
+\"batches_returned\":{},\"batches_with_timestamps\":{}}},\
+\"checksum_bits\":\"{:016x}\",\"target_arch\":\"{}\",\"target_os\":\"{}\"}}",
+            i - WARMUP,
+            t_start,
+            upload,
+            encode,
+            commit_wait,
+            download,
+            wall,
+            wall,
+            gpu_busy,
+            b1_.0.saturating_sub(b0.0),
+            b1_.1.saturating_sub(b0.1),
+            b2_.2.saturating_sub(b0.2),
+            batches.len(),
+            with_ts,
+            fnv,
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+        ));
+    }
+    for r in rows {
+        println!("DIAG_JSON {r}");
+    }
+}
