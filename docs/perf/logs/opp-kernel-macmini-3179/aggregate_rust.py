@@ -18,6 +18,7 @@ from pathlib import Path
 
 SIZES = (256, 512, 1024, 2048, 4096)
 RUNS = (1, 2, 3, 4, 5)
+PHASES = ("matmul", "to_tensor", "host_copy", "checksum", "iter_total")
 
 
 class AggError(Exception):
@@ -28,6 +29,7 @@ def _checksum_median(path, n):
     if not path.is_file():
         raise AggError(f"欠損: {path.name}")
     found = None
+    seen = set()
     for ln, line in enumerate(path.read_text().splitlines(), 1):
         if not line.strip():
             continue
@@ -35,16 +37,25 @@ def _checksum_median(path, n):
             r = json.loads(line)
         except json.JSONDecodeError as e:
             raise AggError(f"{path.name}:{ln} JSON 不正: {e}")
-        if r.get("task") != "gemm_phases" or r.get("phase") != "checksum":
+        if not isinstance(r, dict):
+            raise AggError(f"{path.name}:{ln} JSON オブジェクトではない")
+        # 読み飛ばさず全行を検証する（別タスク・未知 phase・別 size／device／mode の混入を拒否）
+        if r.get("task") != "gemm_phases" or r.get("device") != "cpu" or r.get("size") != n or r.get("mode") != "reuse":
+            raise AggError(f"{path.name}:{ln} 想定外の行: task={r.get('task')!r} device={r.get('device')!r} size={r.get('size')!r} mode={r.get('mode')!r}")
+        phase = r.get("phase")
+        if phase not in PHASES:
+            raise AggError(f"{path.name}:{ln} 未知の phase: {phase!r}")
+        if phase in seen:
+            raise AggError(f"{path.name}:{ln} phase={phase} の行が重複")
+        seen.add(phase)
+        if phase != "checksum":
             continue
-        if r.get("device") != "cpu" or r.get("size") != n or r.get("mode") != "reuse":
-            raise AggError(f"{path.name}:{ln} 想定外の行: device={r.get('device')!r} size={r.get('size')!r} mode={r.get('mode')!r}")
         v = r.get("median_s")
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
             raise AggError(f"{path.name}:{ln} median_s が不正: {v!r}")
-        if found is not None:
-            raise AggError(f"{path.name}:{ln} checksum 行が重複")
         found = float(v)
+    if seen != set(PHASES):
+        raise AggError(f"{path.name}: phase 欠損: {sorted(set(PHASES) - seen)}")
     if found is None:
         raise AggError(f"{path.name}: checksum 行が無い")
     return found
@@ -81,11 +92,14 @@ def self_test():
     def row(n, v, phase="checksum"):
         return json.dumps({"task": "gemm_phases", "phase": phase, "device": "cpu", "mode": "reuse", "size": n, "median_s": v}) + "\n"
 
+    def full(n, ck=None):
+        return "".join(row(n, (5e-10 * n * n if ck is None else ck) if ph == "checksum" else 1e-9 * n * n, ph) for ph in PHASES)
+
     def build(d, mutate=None):
         (d / "rust").mkdir()
         for n in SIZES:
             for r in RUNS:
-                (d / "rust" / f"n{n}_r{r}.jsonl").write_text(row(n, 1e-9 * n * n, "matmul") + row(n, 5e-10 * n * n))
+                (d / "rust" / f"n{n}_r{r}.jsonl").write_text(full(n))
         if mutate:
             mutate(d)
 
@@ -97,9 +111,13 @@ def self_test():
         assert all(abs(tb[n]["ns_per_elem_median"] - 0.5) < 1e-9 for n in SIZES)
         bad = {
             "missing": lambda d: (d / "rust" / "n512_r3.jsonl").unlink(),
-            "dup": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(row(256, 1e-5) * 2),
+            "dup": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(full(256) + row(256, 1e-5)),
+            "othertask": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(full(256) + json.dumps({"task": "gemm", "phase": "checksum", "device": "cpu", "mode": "reuse", "size": 256, "median_s": 1e-5}) + "\n"),
+            "unknownphase": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(full(256) + row(256, 1e-5, "bogus")),
+            "wrongsize": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(full(256) + row(512, 1e-5, "matmul")),
+            "missingphase": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(row(256, 1e-5)),
             "extra": lambda d: (d / "rust" / "n999_r1.jsonl").write_text(row(999, 1e-5)),
-            "nonnum": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(row(256, "x")),
+            "nonnum": lambda d: (d / "rust" / "n256_r1.jsonl").write_text(full(256, "x")),
         }
         for k, m in bad.items():
             d2 = Path(t) / k
