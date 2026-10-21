@@ -430,19 +430,31 @@ if [[ -e "$TORCH_OUT" ]]; then
   exit 1
 fi
 : >"$TORCH_OUT"
-run_torch_cell() { # run_torch_cell <task> <size>
-  echo "== torch $1 ${DEVICE} size=$2 =="
-  if ! "$TORCH_PY" "$BENCH_PY" --framework pytorch --task "$1" --device "$DEVICE" --size "$2" --out "$TORCH_OUT" >/dev/null 2>"${OUT}/err-torch-${LABEL}.tmp"; then
-    echo "torch task=$1 size=$2 : $(tail -3 "${OUT}/err-torch-${LABEL}.tmp" | tr '\n' ' ')" >>"$SKIP"
-    ANY_FAILED=$((ANY_FAILED + 1))
+# PyTorch は記録専用（RULE.txt §7「判定には使わない」）。PyTorch の計測失敗は SME/NEON 本体の
+# ANY_FAILED・$SKIP・終了コードへ伝えず、専用カウンタ TORCH_FAILED と専用ログ $TORCH_FAIL_LOG にだけ
+# 記録する（PR #3501 codex P2。PyTorch だけの失敗で P-RUNAB が不成立になり総合判定が undetermined へ
+# 落ちるのを防ぐ）。行形式は `torch round=<r> task=<task> size=<n> : <stderr 末尾>` で、最後に
+# `torch_failed_total=<n>` を 1 行だけ書く。aggregate.py がこのログを厳格に読み、PyTorch 欠損の注記へ回す。
+TORCH_FAILED=0
+TORCH_FAIL_LOG="${OUT}/torch-failed-3176-${GATE}-${DEVICE}-${LABEL}.log"
+if [[ -e "$TORCH_FAIL_LOG" ]]; then
+  echo "error: 既存の失敗記録 $TORCH_FAIL_LOG があります。差し替え禁止のため別の LABEL で実行してください" >&2
+  exit 1
+fi
+: >"$TORCH_FAIL_LOG"
+run_torch_cell() { # run_torch_cell <round> <task> <size>
+  echo "== torch round=$1 $2 ${DEVICE} size=$3 =="
+  if ! "$TORCH_PY" "$BENCH_PY" --framework pytorch --task "$2" --device "$DEVICE" --size "$3" --out "$TORCH_OUT" >/dev/null 2>"${OUT}/err-torch-${LABEL}.tmp"; then
+    echo "torch round=$1 task=$2 size=$3 : $(tail -3 "${OUT}/err-torch-${LABEL}.tmp" | tr '\n' ' ')" >>"$TORCH_FAIL_LOG"
+    TORCH_FAILED=$((TORCH_FAILED + 1))
   fi
   rm -f "${OUT}/err-torch-${LABEL}.tmp"
 }
 run_torch_round() { # run_torch_round <round>
   local s
-  for s in 512 1024 2048; do run_torch_cell gemm "$s"; done
-  run_torch_cell train 64
-  run_torch_cell infer 64
+  for s in 512 1024 2048; do run_torch_cell "$1" gemm "$s"; done
+  run_torch_cell "$1" train 64
+  run_torch_cell "$1" infer 64
 }
 
 for run_i in $(seq 1 "$ROUNDS"); do
@@ -582,6 +594,11 @@ if [[ "$GATE_NOT_OK" -gt 0 ]]; then
   ANY_FAILED=$((ANY_FAILED + 1))
 fi
 
+# PyTorch の失敗件数は記録専用のログにだけ書き、ANY_FAILED と終了コードには加えない（RULE.txt §7）
+echo "torch_failed_total=${TORCH_FAILED}" >>"$TORCH_FAIL_LOG"
+if [[ "$TORCH_FAILED" -gt 0 ]]; then
+  echo "note: PyTorch の計測が ${TORCH_FAILED} 件失敗（記録専用。判定・終了コードには影響しない）; see $TORCH_FAIL_LOG" >&2
+fi
 echo "done. results in $OUT ; failures (if any) in $SKIP"
 if [[ "$ANY_FAILED" -gt 0 ]]; then
   echo "FAILED: $ANY_FAILED run(s) failed; see $SKIP" >&2

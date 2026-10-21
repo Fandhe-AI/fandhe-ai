@@ -11,6 +11,9 @@ JSONL（`macmini/r1r2/`）を読み、RULE.txt の評価順 FAIL > REJECT > ADOP
 識別フィールド task（str）・size（int。bool は不可）・mode（str。省略時 fresh）の型を満たすことを
 検証し、null・配列・数値の行や size が配列の行は AttributeError／TypeError ではなく AggError にする
 （PR #3501 codex P2）。python3 標準ライブラリのみ。
+PyTorch の計測失敗は run_ab_sme_macmini_cpu.sh が A/B 本体の終了コードから切り離して専用ログ
+`torch-failed-3176-*-cpu-<label>.log` に記録する（RULE §7「記録のみ」。PR #3501 codex P2）。本ツールは
+このログを厳格に読み（欠損・形式不正・件数不一致は AggError）、結果も異常も注記にだけ出して判定には使わない。
 
 使い方:
   python3 -I aggregate.py <macmini-dir> [<label>]   # 既定 label は 3176-r1
@@ -216,6 +219,40 @@ def checked_cells(rows, expected, what, torch=False):
     return cells
 
 
+TORCH_FAIL_LINE = re.compile(r"^torch round=([1-9][0-9]*) task=(gemm|train|infer) size=([1-9][0-9]*) : (.*)$")
+TORCH_FAIL_TOTAL = re.compile(r"^torch_failed_total=(0|[1-9][0-9]*)$")
+
+
+def read_torch_failures(d, label):
+    """run_ab_sme_macmini_cpu.sh の PyTorch 失敗ログを厳格に読み、[(round, task, size, 理由)] を返す。
+
+    形式: 失敗 1 件ごとに `torch round=<r> task=<task> size=<n> : <stderr 末尾>`、最後に
+    `torch_failed_total=<n>` を 1 行。ファイル欠損・複数・未知の行・round／セルの範囲外・合計行の欠損や
+    重複・件数不一致はすべて AggError（呼び出し側で注記へ回す。PyTorch は判定に使わない）。"""
+    hits = glob.glob(os.path.join(d, "torch-failed-3176-*-cpu-%s.log" % label))
+    if len(hits) != 1:
+        raise AggError("PyTorch 失敗記録が 1 件ではない: %r" % hits)
+    lines = [ln for ln in read_lines(hits[0]) if ln.strip()]
+    if not lines:
+        raise AggError("PyTorch 失敗記録が空（torch_failed_total 行なし）: %s" % hits[0])
+    m = TORCH_FAIL_TOTAL.match(lines[-1])
+    if not m:
+        raise AggError("PyTorch 失敗記録の最終行が torch_failed_total=<n> ではない: %r" % lines[-1])
+    torch_cells = {(t, s) for t, s, _ in CELLS}
+    fails = []
+    for i, ln in enumerate(lines[:-1], 1):
+        f = TORCH_FAIL_LINE.match(ln)
+        if not f:
+            raise AggError("PyTorch 失敗記録の %d 行目が形式外: %r" % (i, ln))
+        rnd, task, size = int(f.group(1)), f.group(2), int(f.group(3))
+        if rnd > ROUNDS or (task, size) not in torch_cells:
+            raise AggError("PyTorch 失敗記録の %d 行目が範囲外: round=%d task=%s size=%d" % (i, rnd, task, size))
+        fails.append((rnd, task, size, f.group(4).strip()))
+    if int(m.group(1)) != len(fails):
+        raise AggError("PyTorch 失敗記録の件数不一致: total=%s 行数=%d" % (m.group(1), len(fails)))
+    return fails
+
+
 def ab_analysis(d, label):
     before, after = {}, {}
     for task in ("gemm", "train", "infer"):
@@ -232,6 +269,15 @@ def ab_analysis(d, label):
         torch = checked_cells(read_jsonl(hits[0]), texp, "torch", torch=True)
     except (OSError, AggError) as e:
         torch_note = str(e)
+    # PyTorch の失敗記録（A/B 本体の終了コードとは独立）。失敗の有無・記録の異常はどちらも注記に足すだけ
+    try:
+        fails = read_torch_failures(d, label)
+        if fails:
+            fn = "PyTorch 計測失敗 %d 件: %s" % (len(fails), "；".join(
+                "round%d %s %d（%s）" % (r, t, s, why) for r, t, s, why in fails))
+            torch_note = fn if not torch_note else torch_note + "／" + fn
+    except (OSError, AggError) as e:
+        torch_note = str(e) if not torch_note else torch_note + "／" + str(e)
     res = []
     for key in CELLS:
         task, size, _ = key
@@ -515,6 +561,8 @@ def _fixture(d, after_scale=0.9, ck_after=1.5, sme_scale=1.5, probe_true=True, g
             _w(os.path.join(d, "r1r2", "results-%s-L-cpu-%s.jsonl" % (arm, task)), rows)
     _w(os.path.join(d, "r1r2", "results-torch-3176-sme-L-cpu.jsonl"),
        [dict(task=t, size=s, device="cpu", median_s=0.02, checksum=1.0) for _ in range(ROUNDS) for t, s, m in CELLS if m == "fresh"])
+    with open(os.path.join(d, "r1r2", "torch-failed-3176-sme-cpu-L.log"), "w") as f:
+        f.write("torch_failed_total=0\n")
     with open(os.path.join(d, "r1r2", "load_gate-3176-sme-cpu-L.log"), "w") as f:
         f.write("threshold=3.0 rule_threshold=3.0 series=official\n")
         for i in range(1, ROUNDS + 1):
@@ -674,6 +722,52 @@ def self_test():
                 f.write(line + "\n")
             text = render(d, "L")
             assert "ADOPT 候補" in text.split("\n")[2] and "注記" in text, name
+    # PyTorch だけが失敗した run（run_ab は exit 0・torch JSONL の当該行が欠損・失敗ログに記録あり）は
+    # A/B 判定を保ち、失敗は注記に出る（PR #3501 codex P2。RULE §7「PyTorch は記録のみ」）
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d)
+        p = os.path.join(d, torch_f)
+        rows = read_jsonl(p)
+        _w(p, [r for i, r in enumerate(rows) if not (i < 5 and r["task"] == "gemm" and r["size"] == 1024)])
+        with open(os.path.join(d, "r1r2", "torch-failed-3176-sme-cpu-L.log"), "w") as f:
+            f.write("torch round=1 task=gemm size=1024 : RuntimeError: boom\ntorch_failed_total=1\n")
+        text = render(d, "L")
+        head = text.split("\n")[2]
+        assert "ADOPT 候補" in head, head
+        assert "注記" in text and "PyTorch 計測失敗 1 件" in text and "round1 gemm 1024" in text, text
+        assert "P-RUNAB" not in text, text
+    for name, body in (("合計行なし", "torch round=1 task=gemm size=512 : x\n"),
+                       ("件数不一致", "torch round=1 task=gemm size=512 : x\ntorch_failed_total=2\n"),
+                       ("範囲外 round", "torch round=6 task=gemm size=512 : x\ntorch_failed_total=1\n"),
+                       ("未知セル", "torch round=1 task=gemm size=4096 : x\ntorch_failed_total=1\n"),
+                       ("形式外の行", "garbage\ntorch_failed_total=0\n"),
+                       ("ファイル欠損", None)):
+        with tempfile.TemporaryDirectory() as d:  # 失敗記録の異常は厳格に検出するが、PyTorch は判定外のため注記のみ
+            _fixture(d)
+            fp = os.path.join(d, "r1r2", "torch-failed-3176-sme-cpu-L.log")
+            if body is None:
+                os.remove(fp)
+            else:
+                with open(fp, "w") as f:
+                    f.write(body)
+            try:
+                read_torch_failures(os.path.join(d, "r1r2"), "L")
+                raise AssertionError("AggError にならない: " + name)
+            except AggError:
+                pass
+            text = render(d, "L")
+            assert "ADOPT 候補" in text.split("\n")[2] and "注記" in text, name
+    # SME/NEON 本体の失敗（after 腕のセル欠損 → run_ab が非 0）は、PyTorch が全件成功でも undetermined、
+    # 同じ run に checksum 不一致があれば FAIL（PyTorch 側の切り離しで本体の失敗を弱めない）
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d, run_ab_exit=1)
+        p = os.path.join(d, gemm_after)
+        _w(p, read_jsonl(p)[1:])
+        head = render(d, "L").split("\n")[2]
+        assert "undetermined" in head and "P-RUNAB" in head and "P-CELLS" in head, head
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d, run_ab_exit=1, ck_after=2.5)
+        assert "FAIL" in render(d, "L").split("\n")[2]
     for name, data in (("UTF-8 不正の JSONL", b"\xff\xfe\n"),):
         with tempfile.TemporaryDirectory() as d:
             _fixture(d)
