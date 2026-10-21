@@ -81,10 +81,11 @@ def parse_parity(text: str, name: str) -> dict:
         raise LogIntegrityError(f"{name}: test 行が 1 件も無い")
     if not any(v == "ok" for v in res.values()) and not any(v == "FAILED" for v in res.values()):
         raise LogIntegrityError(f"{name}: ok/FAILED のテストが無い")
-    ran = {b for (b, _t) in res}
+    # RULE-reopen-2.txt: 必須バイナリごとに ok／FAILED が 1 件以上（ignored だけのバイナリは未実行扱い）
+    ran = {b for (b, _t), v in res.items() if v in ("ok", "FAILED")}
     missing = [b for b in REQUIRED_BINARIES if b not in ran]
     if missing:
-        raise LogIntegrityError(f"{name}: 必須のテストバイナリのテストが 1 件も実行されていない: {missing}")
+        raise LogIntegrityError(f"{name}: 必須のテストバイナリで ok/FAILED のテストが 1 件も無い: {missing}")
     return res
 
 
@@ -269,7 +270,8 @@ def load_dir(d: Path) -> str:
 
 # ---- self-test ----------------------------------------------------------
 
-def _parity(fail: tuple = (), extra: tuple = (), skip_bin: str | None = None) -> str:
+def _parity(fail: tuple = (), extra: tuple = (), skip_bin: str | None = None,
+            ignore_bin: str | None = None) -> str:
     names = ["a_ok", "b_ok", "c_ok", *extra]
     lines = []
     for b in REQUIRED_BINARIES:
@@ -277,7 +279,8 @@ def _parity(fail: tuple = (), extra: tuple = (), skip_bin: str | None = None) ->
             continue
         lines += [f"     Running {b} (target/release/deps/x-0)", "", f"running {len(names)} tests"]
         for n in names:
-            lines.append(f"test {n} ... {'FAILED' if n in fail else 'ok'}")
+            st = "ignored" if b == ignore_bin else ("FAILED" if n in fail else "ok")
+            lines.append(f"test {n} ... {st}")
         lines.append(f"test result: ok. {len(names)} passed; 0 failed")
     return "\n".join(lines) + "\n"
 
@@ -362,6 +365,8 @@ def self_test() -> None:
     must_fail(lambda: aggregate(pb, "     Running tests/x.rs (a)\ntest a ... 12.3 ok\n", xb, xh, None, None), "融合行")
     must_fail(lambda: aggregate(pb, _parity(skip_bin="tests/specialized_mma_parity.rs"), xb, xh, None, None),
               "必須バイナリが未実行（feature 不足でビルド失敗した形）")
+    must_fail(lambda: aggregate(pb, _parity(ignore_bin="tests/specialized_mma_parity.rs"), xb, xh, None, None),
+              "必須バイナリが ignored のみ（別バイナリの ok で受理しない）")
     must_fail(lambda: aggregate(pb, "no tests\n", xb, xh, None, None), "test 0 件")
     must_fail(lambda: aggregate(pb, ph, xb, xh + xh, None, None), "ptxas 2 エントリ")
     must_fail(lambda: aggregate(pb, ph, xb, "nothing", None, None), "ptxas 空")
