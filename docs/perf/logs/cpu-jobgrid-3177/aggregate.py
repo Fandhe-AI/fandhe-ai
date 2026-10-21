@@ -3,6 +3,8 @@
 
 判定規則は同ディレクトリ RULE.txt。採否は書かない（ratio と勝ち run 数を記録するだけ）。
 欠損・数値でない値・checksum 不一致・rayon_threads の食い違いは例外にし exit 非 0 とする
+（ただしゲート記録 load_gate.log が gate=unavailable と明記した (series, run, arm) だけはログ不在を許し、
+数値を補完せず unavailable として出す＝参考系列。ゲート記録は期待 35 組と厳密照合する）
 （寛容パースで欠損を握りつぶさない。前例: sme-macmini-3176/aggregate.py）。
 標準ライブラリのみ。`python3 -I aggregate.py [--dir DIR] [--machines a,b]`・`--self-test`。
 """
@@ -88,11 +90,22 @@ def read_lines(path, prefix_re):
     return out
 
 
-def parse_count(root):
-    """arm -> shape -> run -> dict。run 間で STABLE が全一致でなければ止める。"""
+def skip_unavailable(gate, key, path):
+    """ゲートが unavailable と記録した組はログ不在が正（存在すれば矛盾として止める）。それ以外の欠損は read_lines が例外にする。"""
+    if gate.get(key) == "unavailable":
+        if os.path.exists(path):
+            raise AggError(f"{path}: gate=unavailable なのにログが存在する")
+        return True
+    return False
+
+
+def parse_count(root, gate):
+    """arm -> shape -> run -> dict（unavailable の run は欠く）。利用可能 run 間で STABLE が全一致でなければ止める。"""
     data = {a: {s: {} for s in SHAPES} for a in COUNT_ARMS}
     for r in RUNS:
         p = os.path.join(root, "count", f"run{r}.log")
+        if skip_unavailable(gate, ("count", r, "base"), p):
+            continue
         rows = read_lines(p, r"probe=jobgrid ")
         seen = set()
         for d in rows:
@@ -111,15 +124,16 @@ def parse_count(root):
             raise AggError(f"{p}: 腕×形状が揃っていない（{len(seen)} 行）")
     for arm in COUNT_ARMS:
         for shape in SHAPES:
-            base = data[arm][shape][1]
-            for r in RUNS[1:]:
+            got = sorted(data[arm][shape])
+            for r in got[1:]:
+                base = data[arm][shape][got[0]]
                 for k in STABLE:
                     if data[arm][shape][r][k] != base[k]:
-                        raise AggError(f"計数が run 間で不一致: {arm}/{shape}/{k} run1={base[k]} run{r}={data[arm][shape][r][k]}")
+                        raise AggError(f"計数が run 間で不一致: {arm}/{shape}/{k} run{got[0]}={base[k]} run{r}={data[arm][shape][r][k]}")
     return data
 
 
-def parse_bench(root, sub, series, arm_of, shapes, want_threads=None):
+def parse_bench(root, sub, series, arm_of, shapes, gate, want_threads=None):
     """sub/run{N}[-arm].log -> {arm: {shape: {run: (median, checksum, rayon_threads)}}}"""
     out = {}
     for arm in arm_of:
@@ -127,6 +141,8 @@ def parse_bench(root, sub, series, arm_of, shapes, want_threads=None):
         for r in RUNS:
             name = f"run{r}-{arm}.log" if sub == "ab" else f"run{r}.log"
             p = os.path.join(root, sub, name)
+            if skip_unavailable(gate, (sub, r, arm), p):
+                continue
             rows = read_lines(p, r"arm=")
             seen = set()
             for d in rows:
@@ -154,19 +170,37 @@ def gflops(shape_tbl, shape, med):
     return 2.0 * m * n * k / med / 1e9
 
 
+def expected_gate_keys():
+    return ([("count", r, "base") for r in RUNS] + [("st", r, "base") for r in RUNS]
+            + [("serial_ref", r, "base") for r in RUNS] + [("ab", r, a) for r in RUNS for a in ARMS])
+
+
 def gate_status(root):
+    """load_gate.log の START 行を期待 35 組 (series, run, arm) と厳密照合し {key: pass|unavailable} を返す。
+    欠損・重複・未知の組・gate 値の不正は AggError（RULE.txt §8: 全プロセス通過のみ正式系列）。"""
     p = os.path.join(root, "load_gate.log")
     if not os.path.isfile(p):
         raise AggError(f"欠損: {p}")
-    passes = unavail = 0
+    status = {}
     with open(p, encoding="utf-8") as f:
         for ln in f:
-            if ln.startswith("START "):
-                if " gate=pass " in ln:
-                    passes += 1
-                elif " gate=unavailable " in ln:
-                    unavail += 1
-    return passes, unavail
+            if not ln.startswith("START "):
+                continue
+            d = dict(re.findall(r"(\w+)=(\S+)", ln))
+            if not re.fullmatch(r"\d+", d.get("run", "")):
+                raise AggError(f"{p}: START 行の run が不正: {ln!r}")
+            key = (d.get("series"), int(d["run"]), d.get("arm"))
+            if d.get("gate") not in ("pass", "unavailable"):
+                raise AggError(f"{p}: START 行の gate が不正: {ln!r}")
+            if key in status:
+                raise AggError(f"{p}: ゲート記録が重複: {key}")
+            status[key] = d["gate"]
+    exp = set(expected_gate_keys())
+    unknown = sorted(set(status) - exp, key=str)
+    missing = sorted(exp - set(status), key=str)
+    if unknown or missing:
+        raise AggError(f"{p}: ゲート記録が期待 {len(exp)} 組と不一致: 欠損={missing} 未知={unknown}")
+    return status
 
 
 def require_files(root):
@@ -180,20 +214,26 @@ def machine_report(root, name):
     require_files(root)
     ok = True
     L = [f"## {name}", ""]
-    passes, unavail = gate_status(root)
+    gate = gate_status(root)
+    passes = sum(1 for v in gate.values() if v == "pass")
+    unavail = sum(1 for v in gate.values() if v == "unavailable")
     formal = passes == GATE_STARTS and unavail == 0
     L += [f"- 負荷ゲート: pass {passes}/{GATE_STARTS}・unavailable {unavail} -> "
           f"**{'正式系列' if formal else '参考系列（全プロセスがゲートを通っていない）'}**",
           f"- .rev-stamp: `{open(os.path.join(root, '.rev-stamp')).read().strip()[:60]}`", ""]
 
-    cnt = parse_count(root)
-    native_threads = cnt["native"]["l1_fwd"][1]["rayon_threads"]
-    L += [f"### 計数（5 run 全一致。native の rayon_threads={native_threads}）", "",
+    cnt = parse_count(root, gate)
+    cnt_runs = sorted(cnt["native"]["l1_fwd"])
+    native_threads = cnt["native"]["l1_fwd"][cnt_runs[0]]["rayon_threads"] if cnt_runs else None
+    L += [f"### 計数（利用可能 {len(cnt_runs)}/5 run 全一致。native の rayon_threads={native_threads if cnt_runs else 'unavailable'}）", "",
           "| 形状 | 腕 | job（行帯×列帯） | A 再 pack 倍率 | B 再 pack 倍率 | alloc_job | alloc_split | C staging 語 | workers_used（run1〜5） | 再計算との突合 |",
           "|---|---|---|---|---|---|---|---|---|---|"]
     for shape in SHAPES:
         for arm in COUNT_ARMS:
-            r1 = cnt[arm][shape][1]
+            if not cnt_runs:
+                L.append(f"| {shape} | {arm} | unavailable | - | - | - | - | - | - | unavailable |")
+                continue
+            r1 = cnt[arm][shape][cnt_runs[0]]
             th = {"native": native_threads, "T1": 1, "T10": 10, "T20": 20}[arm]
             exp = EXPECT.get(th, {}).get(shape)
             if exp is None:
@@ -201,50 +241,68 @@ def machine_report(root, name):
             else:
                 got = (r1["jobs"], r1["row_bands"], r1["col_bands"], round(r1["a_repack_x"], 1), round(r1["b_repack_x"], 1))
                 verdict = "一致" if got == exp else f"**不一致**（期待 {exp}）"
-            ws = "/".join(str(cnt[arm][shape][r]["workers_used"]) for r in RUNS)
+            ws = "/".join(str(cnt[arm][shape][r]["workers_used"]) if r in cnt[arm][shape] else "NA" for r in RUNS)
             L.append(f"| {shape} | {arm} | {r1['jobs']}（{r1['row_bands']}×{r1['col_bands']}） | {r1['a_repack_x']:.1f} | "
                      f"{r1['b_repack_x']:.1f} | {r1['alloc_job']} | {r1['alloc_split']} | {r1['c_stage_words']} | {ws} | {verdict} |")
     L.append("")
 
-    st = parse_bench(root, "st", "threads", ["base"], BENCH_SHAPES, want_threads=1)["base"]
+    st = parse_bench(root, "st", "threads", ["base"], BENCH_SHAPES, gate, want_threads=1)["base"]
     ref = parse_bench(root, "serial_ref", "serial_ref", ["base"],
-                      {s: v for s, v in BENCH_SHAPES.items() if v[0] == "nn"})["base"]
-    L += ["### 単スレッド実効 GFLOPS（RAYON_NUM_THREADS=1・5 プロセスの median_secs の中央値から算出）", "",
+                      {s: v for s, v in BENCH_SHAPES.items() if v[0] == "nn"}, gate)["base"]
+    L += ["### 単スレッド実効 GFLOPS（RAYON_NUM_THREADS=1・利用可能 run の median_secs の中央値から算出。unavailable は補完しない）", "",
           "| 形状 | GFLOPS（中央値） | run1〜5 の GFLOPS | serial_ref の GFLOPS（参照） |", "|---|---|---|---|"]
     for shape in BENCH_SHAPES:
-        meds = [st[shape][r][0] for r in RUNS]
-        per = "/".join(f"{gflops(BENCH_SHAPES, shape, st[shape][r][0]):.1f}" for r in RUNS)
+        meds = [st[shape][r][0] for r in RUNS if r in st[shape]]
+        per = "/".join(f"{gflops(BENCH_SHAPES, shape, st[shape][r][0]):.1f}" if r in st[shape] else "unavailable" for r in RUNS)
         rf = "-"
         if shape in ref:
-            rf = f"{gflops(BENCH_SHAPES, shape, statistics.median([ref[shape][r][0] for r in RUNS])):.1f}"
-        L.append(f"| {shape} | {gflops(BENCH_SHAPES, shape, statistics.median(meds)):.1f} | {per} | {rf} |")
+            rm = [ref[shape][r][0] for r in RUNS if r in ref[shape]]
+            rf = f"{gflops(BENCH_SHAPES, shape, statistics.median(rm)):.1f}" if rm else "unavailable"
+        med = f"{gflops(BENCH_SHAPES, shape, statistics.median(meds)):.1f}" if meds else "unavailable"
+        L.append(f"| {shape} | {med} | {per} | {rf} |")
     L.append("")
 
-    ab = parse_bench(root, "ab", "threads", ARMS, BENCH_SHAPES)
-    ab_threads = ab["base"]["l1_fwd"][1][2]
-    ab_all = {ab[a][s][r][2] for a in ARMS for s in BENCH_SHAPES for r in RUNS}
-    if ab_all != {native_threads}:
+    ab = parse_bench(root, "ab", "threads", ARMS, BENCH_SHAPES, gate)
+    ab_all = {ab[a][s][r][2] for a in ARMS for s in BENCH_SHAPES for r in ab[a][s]}
+    if len(ab_all) > 1 or (ab_all and native_threads is not None and ab_all != {native_threads}):
         raise AggError(f"{root}: A/B の rayon_threads={sorted(ab_all)} が native の計数値 {native_threads} と不一致")
-    L += [f"### A/B（既定プール・rayon_threads={ab_threads}・ratio = median(腕)/median(base)・採否は書かない）", "",
+    ab_threads = next(iter(ab_all)) if ab_all else "unavailable"
+    L += [f"### A/B（既定プール・rayon_threads={ab_threads}・ratio = median(腕)/median(base)・採否は書かない。unavailable の run は補完せず、腕が勝った run は双方が利用可能な run のみで数える）", "",
           "| 形状 | base median（s） | 腕 | 腕 median（s） | ratio | 腕が勝った run（5 中） | checksum |", "|---|---|---|---|---|---|---|"]
     for shape in BENCH_SHAPES:
-        sums = {ab[a][shape][r][1] for a in ARMS for r in RUNS}
-        csum_ok = len(sums) == 1
+        sums = {ab[a][shape][r][1] for a in ARMS for r in ab[a][shape]}
+        csum_ok = len(sums) <= 1
         if not csum_ok:
             ok = False
-        bmed = statistics.median([ab["base"][shape][r][0] for r in RUNS])
+        bruns = [r for r in RUNS if r in ab["base"][shape]]
+        bmed = statistics.median([ab["base"][shape][r][0] for r in bruns]) if bruns else None
         for arm in ARMS[1:]:
+            aruns = [r for r in RUNS if r in ab[arm][shape]]
             if not csum_ok:
                 L.append(f"| {shape} | - | {arm} | - | unavailable | - | **不一致**（{len(sums)} 種） |")
                 continue
-            amed = statistics.median([ab[arm][shape][r][0] for r in RUNS])
-            wins = sum(1 for r in RUNS if ab[arm][shape][r][0] < ab["base"][shape][r][0])
-            L.append(f"| {shape} | {bmed:.9f} | {arm} | {amed:.9f} | {amed / bmed:.3f} | {wins} | 一致 |")
+            if bmed is None or not aruns:
+                bcell = "unavailable" if bmed is None else f"{bmed:.9f}"
+                acell = "unavailable" if not aruns else "-"
+                L.append(f"| {shape} | {bcell} | {arm} | {acell} | unavailable | - | - |")
+                continue
+            amed = statistics.median([ab[arm][shape][r][0] for r in aruns])
+            both = [r for r in aruns if r in ab["base"][shape]]
+            wins = sum(1 for r in both if ab[arm][shape][r][0] < ab["base"][shape][r][0])
+            L.append(f"| {shape} | {bmed:.9f} | {arm} | {amed:.9f} | {amed / bmed:.3f} | {wins}（{len(both)} 中） | 一致 |")
     L.append("")
     return "\n".join(L), ok
 
 
 def self_test():
+    def write_gate(root, unavail=(), drop=(), extra=()):
+        with open(os.path.join(root, "load_gate.log"), "w") as f:
+            for k in list(expected_gate_keys()) + list(extra):
+                if k in drop:
+                    continue
+                g = "unavailable" if k in unavail else "pass"
+                f.write(f"START series={k[0]} run={k[1]} arm={k[2]} gate={g} load1=1.0 waited_s=0 at=t\n")
+
     def mk(root, mutate=None):
         os.makedirs(os.path.join(root, "count"))
         for d in ("st", "serial_ref", "ab"):
@@ -252,8 +310,7 @@ def self_test():
         for f, txt in (("env_info.txt", "x"), (".rev-stamp", "abc"), ("uname.txt", "x"),
                        ("tree_verify.txt", "x"), ("patch_sha256.txt", "x"), ("DONE", "x")):
             open(os.path.join(root, f), "w").write(txt + "\n")
-        open(os.path.join(root, "load_gate.log"), "w").write(
-            "".join("START series=s run=1 arm=base gate=pass load1=1.0 waited_s=0 at=t\n" for _ in range(GATE_STARTS)))
+        write_gate(root)
         for r in RUNS:
             with open(os.path.join(root, "count", f"run{r}.log"), "w") as f:
                 for arm, th in (("native", 10), ("T1", 1), ("T10", 10), ("T20", 20)):
@@ -294,6 +351,22 @@ def self_test():
         mk(t)
         _, ok = machine_report(t, "fx")
         assert ok, "正常 fixture が ok でない"
+    expect_raise("START 欠落と重複（行数 35 のまま）",
+                 lambda r: write_gate(r, drop=[("st", 1, "base")], extra=[("st", 2, "base")]))
+    expect_raise("未知の組", lambda r: write_gate(r, drop=[("st", 1, "base")], extra=[("zz", 1, "base")]))
+    expect_raise("unavailable なのにログが存在", lambda r: write_gate(r, unavail=[("st", 1, "base")]))
+
+    def unavail_ok(r):
+        keys = [("st", 2, "base"), ("count", 3, "base"), ("ab", 1, "cap4"), ("serial_ref", 5, "base")]
+        write_gate(r, unavail=keys)
+        os.remove(os.path.join(r, "st", "run2.log"))
+        os.remove(os.path.join(r, "count", "run3.log"))
+        os.remove(os.path.join(r, "ab", "run1-cap4.log"))
+        os.remove(os.path.join(r, "serial_ref", "run5.log"))
+    with tempfile.TemporaryDirectory() as t:
+        mk(t, unavail_ok)
+        md, ok = machine_report(t, "fx")
+        assert ok and "参考系列" in md and "unavailable" in md, "参考系列が出力されない"
     expect_raise("ログ欠損", lambda r: os.remove(os.path.join(r, "ab", "run3-cap4.log")))
 
     def bad_threads(r):
