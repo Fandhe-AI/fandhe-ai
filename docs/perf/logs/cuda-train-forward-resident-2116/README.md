@@ -10,7 +10,7 @@
 | `RULE.txt` | 事前登録の判定規則（実測前に固定。事後に緩めない） |
 | `orchestrate.sh` | 上位（facade）・下位（backend-cuda lib）の 2 テストバイナリを 1 回ずつビルドし、独立 5 回ずつ実行して `run{1..5}.facade.jsonl`・`run{1..5}.backend.jsonl`・`env_info.txt`・`load_gate.log`・`load_gate_status.txt` を残す |
 | `aggregate.py` | 5 run を集計（python3 標準ライブラリのみ。欠落・不正・n≠80・非有限の median_s・checksum 不一致・ゲート状態欠落は fail-closed。`--self-test` あり） |
-| `gb10/`・`rtx3060/` | 実機実測時の生ログ（現状は未実測のため存在しない） |
+| `gb10/` | GB10 の実測生ログ（#3189 が 2026-10-21 に HEAD `ad1d106e4` で実行。`aggregate.md` を含む）。`rtx3060/` は未実測のため存在しない |
 
 ## 実行手順（実機セッション）
 

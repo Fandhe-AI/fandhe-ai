@@ -5,8 +5,11 @@
 計測後に置く生ログ一式。**診断のみ**（tolerance・baseline・判定規則・相手側ベンチ・ライブラリの `src/` と既定値・
 公開 API・`Cargo.toml`／`Cargo.lock`・framework-compare の依存ピンは不変）。規則の正は `RULE.txt`（計測前に固定）。
 
-**現状: 計測基盤のみ。GB10 での実測は未実施**（本ディレクトリに `armA/`・`census/` 等の生ログは無い。
-各 doc は「未実測」と書く）。実測は下記手順で行い、`aggregate.py` の機械出力だけを doc へ転記する。
+**現状: GB10 で実測済み**（2026-10-21、計測 SHA `ad1d106e4`、負荷ゲート 15/15 pass）。生ログ一式は `gb10/` に置く
+（`armA/`・`infer-diag/`・`fixed-cost/`・`census/`〈csv・json のみ。`.nsys-rep`／`.sqlite` は除外〉・`env_info.txt`・`rev-stamp.txt`・`tree.txt`・
+`tree_sha256_before.txt`／`tree_sha256_after.txt`／`tree_verify.txt`・`unified_memory_probe.txt`・`aggregate.md`・`SHA256SUMS`）。
+`aggregate.py` の機械出力だけを各 doc へ転記した。2116（B-0）の出力は 2116 側 `gb10/`。ホスト名・`$HOME`・ユーザー名は収録前に検査し、漏えい 0 件。
+腕 C（#3203 前後の A/B）は実施していない（未計測）。
 
 ## 構成
 

@@ -1,0 +1,18 @@
+Generating SQLite file /tmp/tmp.6mCjbnyNbW/fwd-K20-r2.sqlite from /tmp/tmp.6mCjbnyNbW/fwd-K20-r2.nsys-rep
+Processing [/tmp/tmp.6mCjbnyNbW/fwd-K20-r2.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_api_sum.py]... 
+Time (%),Total Time (ns),Num Calls,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+58.3,7161984,104,68865.2,336.0,240,7103744,696524.2,cuMemAllocAsync
+18.4,2255456,15,150363.7,143328.0,32672,330976,83788.9,cuModuleLoadData
+14.6,1796192,62,28970.8,22368.0,5952,74512,20725.5,cuMemcpyDtoHAsync_v2
+3.7,452800,62,7303.2,5592.0,2128,52912,6980.3,cuMemcpyHtoDAsync_v2
+1.8,223216,80,2790.2,2336.0,2112,19776,2311.7,cuLaunchKernel
+0.9,110672,40,2766.8,2256.0,1520,23632,3555.5,cuMemsetD8Async
+0.7,80016,164,487.9,384.0,304,6464,588.0,cuEventRecord
+0.4,49600,101,491.1,416.0,368,3456,337.9,cuMemFreeAsync
+0.4,45632,202,225.9,240.0,48,1936,170.3,cuStreamWaitEvent
+0.3,39472,62,636.6,528.0,432,3008,471.0,cuStreamSynchronize
+0.2,26720,208,128.5,112.0,80,1728,121.9,cuEventCreate
+0.2,24288,202,120.2,96.0,64,2992,206.8,cuEventDestroy_v2
+0.1,14768,23,642.1,336.0,320,2864,699.8,cuInit
+0.0,752,1,752.0,752.0,752,752,0.0,cuCtxSetCurrent
+

@@ -1,0 +1,7 @@
+Generating SQLite file /tmp/tmp.6mCjbnyNbW/infer_reuse-K20-r2.sqlite from /tmp/tmp.6mCjbnyNbW/infer_reuse-K20-r2.nsys-rep
+Processing [/tmp/tmp.6mCjbnyNbW/infer_reuse-K20-r2.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_gpu_mem_time_sum.py]... 
+Time (%),Total Time (ns),Count,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Operation
+66.9,144384,21,6875.4,4864.0,4832,45600,8877.1,[CUDA memcpy Host-to-Device]
+20.3,43712,22,1986.9,608.0,544,15712,4276.4,[CUDA memcpy Device-to-Host]
+12.8,27680,40,692.0,768.0,448,2432,328.2,[CUDA memset]
+

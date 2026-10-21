@@ -1635,7 +1635,8 @@ M4 Max 0.9.0（§17.2）と Mini 0.11.0 の区間差（Metal・µs）。**版が
 
 ## 19. v0.11.0 GB10 再計測（DGX Spark GB10・イシュー #3189）
 
-**状態: 計測基盤のみ。GB10 での実測は未実施（未実測）。** 本節の数値は埋めていない。推定値・開発機（Mac）の出力・コード読解の約 9 回を実測とは書かない。
+**状態: GB10 で実測済み（2026-10-21、計測 SHA `ad1d106e4`、負荷ゲート 15/15 pass）。** 数値は `docs/perf/logs/cuda-train-infer-gb10-3189/gb10/aggregate.md`（`aggregate.py` exit 0）の機械出力の転記で、
+生ログ一式（5 run・nsys 窓別 csv・env_info・rev-stamp・ツリー指紋 before／after／verify・SHA256SUMS）は同 `gb10/` に置く。推定値・開発機（Mac）の出力・コード読解の約 9 回は実測として使っていない。
 規則は `docs/perf/logs/cuda-train-infer-gb10-3189/RULE.txt`（計測前に固定）、実行手順は同 `README.md`。診断のみで本番コード・既定値・tolerance は不変。
 CUDA Graph の step capture は #1350（§16）で中立と判定済みで、その判定は覆さない（見込みの数値化だけを行う）。
 
@@ -1644,30 +1645,93 @@ CUDA Graph の step capture は #1350（§16）で中立と判定済みで、そ
 - 腕 A: `bench-fandhe`（registry `fandhe-ai =0.11.0`）の `--task train|infer --device cuda|cpu --mode fresh|reuse --phases` を 5 run。
 - 腕 B: HEAD ソースの main workspace（同期・launch の計数は nsys、固定費は #2109 の診断を借用、forward 内訳は #2116 を無改変で実行）。
 - 腕 A と腕 B のソース版が違う（腕をまたぐ比較には版差を含む）。bench-fandhe に backend-cuda の直接依存を足すのは依存 allowlist の変更で所有者承認が要るため行わない。
+- 計測ノードは GB10 単独（常駐サービスは停止せず、各計測前に load1 < 1.0 かつ GPU utilization 0% の負荷ゲートを 15 回通過）。
 
-### 19.2 train の区間表（cuda fresh／reuse）
+### 19.2 train の区間表（cuda fresh／reuse。腕 A、5 run 中央値）
 
-未実測。0.9.0 の既存値（§17.6.2）: forward_resident 155.9 µs・backward 149.1 µs・device_update 8.0 µs。
+fresh（step_total 511.1 µs）:
 
-### 19.3 同期回数・launch 回数
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| tape_build | 3.1 | 2.9–3.7 | 0.6% |
+| leaf_register | 1.7 | 1.2–2.0 | 0.3% |
+| forward | 176.2 | 174.0–178.2 | 34.5% |
+| backward | 207.5 | 190.2–217.6 | 40.6% |
+| param_readout | 66.9 | 65.7–91.0 | 13.1% |
+| host_sgd | 52.1 | 49.9–64.4 | 10.2% |
+| apply_params | 0.3 | 0.3–0.3 | 0.1% |
+| tape_drop | 2.1 | 1.7–2.2 | 0.4% |
 
-未実測。計数ドライバ `crates/facade/tests/cuda_train_infer_sync_census_3189.rs` を nsys の下で窓（fwd／fwd_bwd／full／infer_reuse）× K（20／120）で回し、
-`(count(K=120) − count(K=20)) / 100` で 1 step あたりを出す（RULE 規則 1・2）。CPU スモークでは 4 窓とも状態機械に拒否されないことを確認済み。
+reuse（step_total 332.3 µs）:
 
-### 19.4 launch／同期の固定費
+| phase | 中央値 (µs) | min–max (µs) | 合計比 |
+|---|---:|---|---:|
+| tape_build | 2.4 | 2.3–2.7 | 0.7% |
+| leaf_register | 0.3 | 0.3–0.4 | 0.1% |
+| forward_resident | 154.8 | 153.2–155.6 | 46.6% |
+| backward | 165.0 | 164.7–166.4 | 49.7% |
+| device_update | 7.9 | 7.8–8.0 | 2.4% |
+| tape_drop | 0.9 | 0.8–0.9 | 0.3% |
 
-未実測。`sync_idle`・`tiny_roundtrip`（1×1×1 GEMM の launch＋同期。引数なしの空カーネルの代替）・L2 `launch_issue`・L2S `kernel_wait`（いずれも N=128）を #2109 の診断から 5 run で取る。
-`unified_memory_probe` の属性値（腕 B-4）も未取得。実測後は `aggregate.py` が `unified_memory_probe.txt` の device_name と属性 9 件を検証して
-出す「腕 B-4」節（`aggregate.md`）だけを転記する。成果物の欠落・属性キーの欠落・`error`・非整数値は集計が exit 1 で拒否する。
+0.9.0 の既存値（§17.6.2）は forward_resident 155.9 µs・backward 149.1 µs・device_update 8.0 µs。0.11.0 の forward_resident は 154.8 µs でほぼ同じ、backward は 165.0 µs。
+cpu の区間表（参考）は `aggregate.md` を参照（cpu reuse の step_total 970.7 µs、device_update 289.0 µs）。
 
-### 19.5 帰属と見込み
+### 19.3 同期回数・launch 回数（nsys・窓別 K=20／120 の差分法。1 step あたり）
 
-未実測のため式（RULE 規則 6）だけを固定している。説明率と未説明残差を必ず併記し、原因は断定しない。
+| window | sync | launch | htod | dtoh | htod_sync | dtoh_sync | alloc | free | wait_event | 決定性 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| fwd | 3 | 4 | 3 | 3 | 0 | 0 | 5 | 5 | 10 | 決定的 |
+| fwd_bwd | 8 | 15 | 10 | 6 | 0 | 0 | 14 | 14 | 28 | 決定的 |
+| full | 8 | 16 | 10 | 6 | 0 | 0 | 14 | 14 | 28 | 決定的 |
+| infer_reuse | 1 | 2 | 1 | 1 | 0 | 0 | 3 | 3 | 6 | 決定的 |
+
+区間への割り当て（RULE 規則 2）: forward 3 同期・4 launch、backward 5 同期・11 launch、update＋tape_drop 0 同期・1 launch、full 8 同期・16 launch。infer reuse は 1 同期・2 launch。
+コード読解の推定値「約 9 回」は実測の **8 回**（決定的）に置き換わる。
+
+### 19.4 launch／同期の固定費（N=128・5 run 中央値）
+
+| layer | phase | 中央値 (µs) | min–max (µs) |
+|---|---|---:|---|
+| E | sync_idle | 0.29 | 0.3–0.3 |
+| E | tiny_roundtrip | 6.14 | 5.4–6.2 |
+| E | event_create_drop | 0.18 | 0.2–0.2 |
+| L2 | launch_issue | 1.82 | 1.7–2.2 |
+| L2S | kernel_wait | 9.65 | 9.4–9.7 |
+
+`tiny_roundtrip` は 1×1×1 GEMM の launch＋同期で、引数なしの空カーネルの代替（RULE 規則 5）。
+
+`unified_memory_probe`（腕 B-4。device_name `NVIDIA GB10`。決定的な値・1 回）: MANAGED_MEMORY=1・CONCURRENT_MANAGED_ACCESS=1・PAGEABLE_MEMORY_ACCESS=1・
+PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES=1・DIRECT_MANAGED_MEM_ACCESS_FROM_HOST=0・HOST_NATIVE_ATOMIC_SUPPORTED=1・INTEGRATED=1・CAN_MAP_HOST_MEMORY=1・
+CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM=1。#2123 側 doc への転記は同イシューの担当で本件では行わない。
+
+### 19.5 帰属と見込み（record-only。原因の断定はしない）
+
+train reuse step_total 332.3 µs、infer reuse iter_total 99.7 µs、差 232.6 µs。同期回数は train full 8・infer 1。
+
+| c の種別 | c (µs) | (n_full−1)×c (µs) | step_total に対する説明率 | 未説明残差 (µs) |
+|---|---:|---:|---:|---:|
+| sync_idle | 0.29 | 2.0 | 0.6% | 330.3 |
+| tiny_roundtrip | 6.14 | 43.0 | 12.9% | 289.3 |
+| 実カーネル同期（kernel_wait_derived） | 63.18 | 442.3 | 133.1% | −110.0 |
+
+- 見込みの幅は 2.0〜442.3 µs と極めて広く、c の取り方で step_total を説明できる割合が 0.6%〜133% まで動く。実カーネル同期の 63.18 µs は同期待ちにカーネル実行時間が混じる値で、
+  同期 1 回の固定費とは読めない（説明率 133.1% は過大で未説明残差が負になる）。固定費としての下限側（sync_idle・tiny_roundtrip）では説明率は 0.6%〜12.9% で、残りの大半は未説明。
+- launch 固定費の上限 (launch_count−1)×launch_issue = (16−1)×1.82 = 27.4 µs（step_total の 8.2%）。
+- 1 同期あたりの外挿 (step_total−iter_total)/(n_full−n_infer) = 33.2 µs。実測の固定費（tiny_roundtrip 6.14 µs）と比べて約 5 倍で、約 27 µs の再計算とは一致しない。
 
 ### 19.6 後続（#3205・#3217・#3202・#3203）への入力
 
-実測後に記入する。現時点で渡せる入力は計測基盤と式のみ。
+- 同期は 1 step 8 回（forward 3・backward 5）で決定的。1 回あたりの純固定費（sync_idle 0.29 µs・tiny_roundtrip 6.14 µs）が小さいため、同期回数の削減だけで step_total の大半を取れる見込みは実測では支持されない
+  （(n_full−1)×c は 2.0〜43.0 µs＝説明率 0.6%〜12.9%）。同期点ごとに待たされるカーネル実行・D2H 時間（kernel_wait_derived 側）の寄与は未分解で、後続は同期点単位の A/B で確認する。
+- launch 集約の上限は 27.4 µs（step_total の 8.2%）。
+- H2D 10 回・D2H 6 回・alloc／free 各 14 回が 1 step にある（いずれも非 async 経路は 0）。回数と区間の対応づけは今後の入力。
+- GB10 は INTEGRATED=1・PAGEABLE_MEMORY_ACCESS=1 で、ホスト・デバイス間の往復が統一メモリ上にある（施策の可否判断は #2123 の担当）。
+- 2116 の forward_resident 内訳は `cuda-train-forward-resident-diagnosis.md` §6。
 
 ### 19.7 限界
 
-- GB10 未実測。腕 A／B の版差。`tiny_roundtrip` は空カーネルの代替。nsys は時間を汚すため回数にのみ使う。checksum の一致は bit 同一の証拠ではない。
+- 腕 A（registry 0.11.0）と腕 B（HEAD）の版差。腕 A の infer reuse iter_total（99.7 µs）と腕 B の public predict_resident（99.3 µs）は近いが、同一バイナリではない。
+- `tiny_roundtrip` は空カーネルの代替（空カーネルの直接計測は新規 `unsafe` が要るため行っていない）。
+- nsys は時間を汚すため回数と record-only の用途にだけ使い、区間時間には使っていない。
+- checksum の一致は bit 同一の証拠ではない。
+- 腕 C（#3203 前後の A/B）は未計測。

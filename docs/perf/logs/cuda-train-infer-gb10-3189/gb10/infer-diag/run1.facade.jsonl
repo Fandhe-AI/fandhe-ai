@@ -1,0 +1,8 @@
+{"backend":"cuda","arm":"public","phase":"predict_resident","n":80,"median_s":0.000099793,"q1_s":0.000099168,"q3_s":0.000100000}
+{"backend":"cuda","arm":"decomposed","phase":"tape","n":80,"median_s":0.000000032,"q1_s":0.000000032,"q3_s":0.000000048}
+{"backend":"cuda","arm":"decomposed","phase":"snapshot","n":80,"median_s":0.000000240,"q1_s":0.000000224,"q3_s":0.000000256}
+{"backend":"cuda","arm":"decomposed","phase":"steps","n":80,"median_s":0.000000032,"q1_s":0.000000032,"q3_s":0.000000032}
+{"backend":"cuda","arm":"decomposed","phase":"chain","n":80,"median_s":0.000096064,"q1_s":0.000095280,"q3_s":0.000096481}
+{"backend":"cuda","arm":"decomposed","phase":"readout","n":80,"median_s":0.000000848,"q1_s":0.000000624,"q3_s":0.000001024}
+{"backend":"cuda","arm":"paired","phase":"residual","n":80,"median_s":0.000002625,"q1_s":0.000002031,"q3_s":0.000003073}
+{"backend":"cuda","arm":"meta","phase":"checksum","checksum":14296708189902901374}
