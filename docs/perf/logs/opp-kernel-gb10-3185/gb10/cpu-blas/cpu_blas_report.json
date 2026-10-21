@@ -1,0 +1,26 @@
+{
+ "mkldnn_available": true,
+ "libs": [
+  "libarm_compute.so",
+  "libarm_compute_graph.so",
+  "libnvpl_blas_core.so.0",
+  "libnvpl_blas_lp64_gomp.so.0",
+  "libnvpl_lapack_core.so.0",
+  "libnvpl_lapack_lp64_gomp.so.0",
+  "libscipy_openblas64_-f552eb69.so"
+ ],
+ "judge": {
+  "verdict": "確認できなかった",
+  "evidence_lines": [],
+  "info_lines": [],
+  "libs": [
+   "libarm_compute.so",
+   "libarm_compute_graph.so",
+   "libnvpl_blas_core.so.0",
+   "libnvpl_blas_lp64_gomp.so.0",
+   "libnvpl_lapack_core.so.0",
+   "libnvpl_lapack_lp64_gomp.so.0",
+   "libscipy_openblas64_-f552eb69.so"
+  ]
+ }
+}

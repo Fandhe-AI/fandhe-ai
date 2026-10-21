@@ -1,0 +1,28 @@
+wrote 35 rows -> ~/work/out-3185/run1/fp32.jsonl
+wrote 35 rows -> ~/work/out-3185/run1/tf32.jsonl
+wrote 25 rows -> ~/work/out-3185/run1/cpu.jsonl
+wrote 35 rows -> ~/work/out-3185/run2/tf32.jsonl
+wrote 25 rows -> ~/work/out-3185/run2/cpu.jsonl
+wrote 35 rows -> ~/work/out-3185/run2/fp32.jsonl
+wrote 25 rows -> ~/work/out-3185/run3/cpu.jsonl
+wrote 35 rows -> ~/work/out-3185/run3/fp32.jsonl
+wrote 35 rows -> ~/work/out-3185/run3/tf32.jsonl
+wrote 35 rows -> ~/work/out-3185/run4/fp32.jsonl
+wrote 35 rows -> ~/work/out-3185/run4/tf32.jsonl
+wrote 25 rows -> ~/work/out-3185/run4/cpu.jsonl
+wrote 35 rows -> ~/work/out-3185/run5/tf32.jsonl
+wrote 25 rows -> ~/work/out-3185/run5/cpu.jsonl
+wrote 35 rows -> ~/work/out-3185/run5/fp32.jsonl
+cpu-blas-probe: 確認できなかった libs=['libarm_compute.so', 'libarm_compute_graph.so', 'libnvpl_blas_core.so.0', 'libnvpl_blas_lp64_gomp.so.0', 'libnvpl_lapack_core.so.0', 'libnvpl_lapack_lp64_gomp.so.0', 'libscipy_openblas64_-f552eb69.so']
+wrote 6 rows -> ~/work/out-3185/fandhe_rows/layerb-run1.jsonl
+wrote 9 rows -> ~/work/out-3185/fandhe_rows/diag2109-run1.jsonl
+wrote 6 rows -> ~/work/out-3185/fandhe_rows/layerb-run2.jsonl
+wrote 9 rows -> ~/work/out-3185/fandhe_rows/diag2109-run2.jsonl
+wrote 6 rows -> ~/work/out-3185/fandhe_rows/layerb-run3.jsonl
+wrote 9 rows -> ~/work/out-3185/fandhe_rows/diag2109-run3.jsonl
+wrote 6 rows -> ~/work/out-3185/fandhe_rows/layerb-run4.jsonl
+wrote 9 rows -> ~/work/out-3185/fandhe_rows/diag2109-run4.jsonl
+wrote 6 rows -> ~/work/out-3185/fandhe_rows/layerb-run5.jsonl
+wrote 9 rows -> ~/work/out-3185/fandhe_rows/diag2109-run5.jsonl
+aggregate ok: 95 py entries, 12 fandhe entries
+RUN-GB10-DONE rc=0
