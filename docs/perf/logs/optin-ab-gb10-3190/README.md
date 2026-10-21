@@ -12,7 +12,7 @@
 | `RULE.txt` | 補遺の事前登録規則（計測前に単独コミットで固定。継承 RULE 6 件の sha256 を記録） |
 | `RULE-reopen.txt` | 再開分の事前登録（B4 の再計測・B5 の具体化・条件 4 の機体別併記。元 RULE と継承 RULE の sha256 を記録。コミット `fbf6ecbbe` で固定） |
 | `RULE-reopen-2.txt`・`RULE-reopen-3.txt` | B5 前提ゲート (a) のコマンド訂正（`--features internal-diagnostics`・`--no-fail-fast`）。いずれも再実行の前にコミット |
-| `on-boundary-predicate.patch` | B5 head 腕（`MMA_F16` の境界述語の事前計算。計測専用。`230937f5f` に当たる） |
+| `on-boundary-predicate.patch` | B5 head 腕（`MMA_F16` の境界述語の事前計算。計測専用。`230937f5f` に当たる）。**有効なのは `WARP_TILES_M × WARP_TILES_N ≤ 8` の構成だけ**（計測した既定 2×2 は 16 ビット）。`epilogue_valid` は 32 ビットの `unsigned` で、4×4 では 64 ビット分の述語が要る。そのため `mi ≥ 2` でシフト量が 32 以上になり、未定義動作になる。B5 は不採用で本番に入れないため、計測した patch は書き換えず、そのまま残す。再利用するときは、マスクをタイル数に応じた幅にするか、タイル数を制限すること） |
 | `aggregate_b5.py` | B5 の判定集計（`python3 -I`。`--self-test` あり。前提ゲート (a)(b)・TFLOPS・fail-closed） |
 | `b5/` | B5 の生ログ（`parity-{base,head}.log`・旧 (a) の `parity-attempt{1,2}-*.log`・`ptxas-*`・`run{1..5}-{base,head}.log`・`gate.log`・`env_info.txt`・`rev-stamp.txt`・`preflight-procs.txt`・`aggregate.md`） |
 | `on-host-arena.patch` | B1 after 腕（`HOST_ARENA_DEFAULT_ENABLED` を true。#3184 と同一内容） |
