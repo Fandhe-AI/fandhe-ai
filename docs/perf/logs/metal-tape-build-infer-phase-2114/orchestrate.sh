@@ -4,16 +4,16 @@
 # `docs/perf/logs/cpu-predict-resident-fixedcost-2105/orchestrate.sh`（#2105）と同型で、
 # テストバイナリを 1 回ビルドし、独立 5 プロセスで metal_infer_tape_build_fixedcost_phases を
 # 実行して run{1..5}.jsonl を残す。
-# 使い方: orchestrate.sh m4max [--out <dir>]
+# 使い方: orchestrate.sh m4max|macmini [--out <dir>]（macmini は #3184 再開分で追加。m4max と同じ record_only の経路）
 # 集計は `python3 aggregate.py <dir>`。既存 run ファイルの上書きは拒否する。
 set -euo pipefail
 
-usage() { echo "usage: $0 m4max [--out <dir>]" >&2; exit 2; }
+usage() { echo "usage: $0 m4max|macmini [--out <dir>]" >&2; exit 2; }
 
 host_kind="${1:-}"
 [ -n "$host_kind" ] || usage
 shift
-case "$host_kind" in m4max) ;; *) usage ;; esac
+case "$host_kind" in m4max|macmini) ;; *) usage ;; esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../../.." && pwd)"

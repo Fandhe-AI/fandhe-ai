@@ -22,6 +22,9 @@ set -u
 cd "$(dirname "$0")" || exit 1
 # shellcheck source=./bench_fandhe_lock_restore.sh
 source ./bench_fandhe_lock_restore.sh
+# イシュー #3184（再開分）: round 前クールダウン hook（既定 OFF。AB_ROUND_COOLDOWN_MAX_LOAD1 設定時のみ待機・記録。
+# 継承の閾値・gate_ok・series 判定は不変。docs/perf/logs/optin-ab-macmini-3184/RULE-reopen.txt）
+source ./ab_round_cooldown.sh
 
 LABEL=${1:-}
 # RULE.txt は「5 round 中央値・5/5 round 一貫性」を事前登録しており、
@@ -333,7 +336,9 @@ wait_load_gate() { # wait_load_gate <round>
 : >"$OUT/uptime-2113-${DEVICE}-${LABEL}.log"
 uptime | sed 's/.*load/load/' >>"$OUT/uptime-2113-${DEVICE}-${LABEL}.log"
 
+ab_round_cooldown_init "$OUT/cooldown-2113-${DEVICE}-${LABEL}.log"
 for run_i in $(seq 1 "$ROUNDS"); do
+  ab_round_cooldown "$run_i"
   wait_load_gate "$run_i"
   for task in train infer; do
     for mode in fresh reuse; do

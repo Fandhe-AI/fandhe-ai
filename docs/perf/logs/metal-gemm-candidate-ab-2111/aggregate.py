@@ -46,9 +46,23 @@ RE_MEDIAN = re.compile(
 )
 
 
+# #3184 再開分（RULE-reopen.txt 1.(ii)）: `--nocapture` 実行では libtest の `test <name> ...` と
+# テスト本体の最初の出力行（`N=...`）が同じ行に融合する。受理する融合形はこの 1 形だけで、
+# 1 ログにつき 1 回に限る（2 回以上・別テスト名・行頭以外の融合は受理しない）。
+RE_FUSED = re.compile(r"^test " + re.escape(AB_TEST) + r" \.\.\. (N=\d+ arm=\S+ .*)$", re.M)
+
+
+def defuse_first_line(text):
+    """融合 1 形（ちょうど 1 回）のときだけ `test ... ` 前置きを別行へ分離する。それ以外は無変更。"""
+    if len(RE_FUSED.findall(text)) != 1:
+        return text
+    return RE_FUSED.sub(lambda m: f"test {AB_TEST} ...\n{m.group(1)}", text, count=1)
+
+
 def parse_run(text):
     """1 run 分のログを {(arm, n): {...}} へ解析する。未知の行は無視する。"""
     out = {}
+    text = defuse_first_line(text)
     for line in text.splitlines():
         line = line.strip()
         m = RE_BIT.match(line)
@@ -244,6 +258,8 @@ def check_run_log(text):
     """
     if "FAILED" in text or "panicked" in text:
         return False, "FAILED／panicked を含む"
+    # 融合 1 形（ちょうど 1 回）のみ前置きを分離してから従来の検査を適用する（弱めない）
+    text = defuse_first_line(text)
     # `--nocapture` 実行では libtest が `test <name> ...` を出した後にテスト本体の標準出力が続き、
     # 判定語 `ok` は後続の独立行になる。同一行（`... ok`）・別行（`...` 行 + 独立 `ok` 行）の双方を許容する。
     if not re.search(r"^test " + re.escape(AB_TEST) + r" \.\.\.(?: ok)?$", text, re.M) or not (
@@ -549,6 +565,22 @@ def self_test():
     nocap = f"test {AB_TEST} ...\nN=512 arm=base x\nok\ntest result: ok. 1 passed; 0 failed; 0 ignored"
     assert check_run_log(nocap)[0]
     assert not check_run_log(nocap.replace("\nok\n", "\n"))[0]
+    # #3184 再開分: 融合 1 形（`test <name> ... N=...` + 独立 ok 行）は受理、それ以外は従来どおり拒否
+    fused = f"test {AB_TEST} ... N=512 arm=base x\nN=512 arm=T0U y\nok\ntest result: ok. 1 passed; 0 failed; 0 ignored"
+    assert check_run_log(fused)[0]
+    assert not check_run_log(fused.replace("\nok\n", "\n"))[0]  # 独立 ok 行が無い
+    assert not check_run_log(fused.replace("0 failed", "1 failed"))[0]
+    assert not check_run_log(fused + "\ntest x ... FAILED")[0]
+    assert not check_run_log(fused.replace("1 passed", "0 passed"))[0]
+    assert not check_run_log(fused + f"\ntest {AB_TEST} ... N=1024 arm=base z")[0]  # 融合 2 回
+    assert not check_run_log(fused.replace(AB_TEST, "other_diag::other_test", 1))[0]  # 別テスト名
+    assert not check_run_log(f"prefix test {AB_TEST} ... N=512 arm=base x\nok\ntest result: ok. 1 passed; 0 failed")[0]  # 行頭以外
+    assert not check_run_log(f"test {AB_TEST} ... NOTN arm=base x\nok\ntest result: ok. 1 passed; 0 failed")[0]  # N= 以外の融合
+    # 融合 1 行目の解析（base 行が読める）。融合 2 回のときは解析しない
+    pr = parse_run(fused.replace("N=512 arm=base x", "N=512 arm=base head_over_base_kernel_gpu=1.0"))
+    assert pr[(BASE, 512)]["ratio"] == 1.0
+    two = fused.replace("N=512 arm=base x", "N=512 arm=base head_over_base_kernel_gpu=1.0") + f"\ntest {AB_TEST} ... N=1024 arm=base head_over_base_kernel_gpu=1.0"
+    assert (BASE, 512) not in parse_run(two)
     # 負荷ゲート記録検証
     assert check_load_gate("run1 OK load1=1 waited=0s\n", 1)[0] == "OK"
     assert check_load_gate("run1 TIMEOUT load1=9 waited=1800s\n", 1)[0] == "TIMEOUT"
