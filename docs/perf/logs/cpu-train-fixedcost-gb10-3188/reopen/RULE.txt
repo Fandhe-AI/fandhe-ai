@@ -1,4 +1,4 @@
-RULE fixed-at-utc: 2026-10-21T11:50:00Z
+RULE fixed-at-utc: 2026-10-21T11:48:52Z
 イシュー #3188（再オープン分）: device_update の H4（prologue + 残差）の分解と bench-fandhe の pre／head 前後比較
 本規則は計測前に固定し、事後に緩めない。「未確定」も正当な結果であり、差し替え・追加 run は行わない。
 
