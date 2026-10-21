@@ -1,0 +1,88 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling zerocopy v0.8.56
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling objc2 v0.6.4
+   Compiling objc2-encode v4.1.0
+   Compiling crossbeam-utils v0.8.22
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.20
+   Compiling bitflags v2.13.1
+   Compiling crossbeam-deque v0.8.7
+   Compiling serde_core v1.0.229
+   Compiling rayon-core v1.13.0
+   Compiling syn v2.0.119
+   Compiling cudarc v0.19.8
+   Compiling zmij v1.0.23
+   Compiling syn v3.0.3
+   Compiling rand_core v0.9.5
+   Compiling libloading v0.9.0
+   Compiling objc2-core-foundation v0.3.2
+   Compiling block2 v0.6.2
+   Compiling dispatch2 v0.3.1
+   Compiling serde v1.0.229
+   Compiling either v1.17.0
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/sme-3176/before/crates/backend-cpu)
+   Compiling serde_json v1.0.151
+   Compiling memchr v2.8.3
+   Compiling objc2-foundation v0.3.2
+   Compiling itoa v1.0.18
+   Compiling rayon v1.12.0
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/sme-3176/before/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/sme-3176/before/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/sme-3176/before/crates/autodiff)
+   Compiling objc2-metal v0.3.2
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/sme-3176/before/crates/backend-metal)
+   Compiling bench-harness v0.11.0 (<home>/work/sme-3176/before/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 25.18s
+     Running unittests src/lib.rs (<home>/work/sme-3176/work/target-before/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
+
+running 1 test
+test gemm_blis::tests::sme_vs_neon_ab_r4_grid ... variant=NEON(TwoDDynamic) size=(64,64,32) median_gflops=4.781
+variant=SME(TwoDDynamicSme) size=(64,64,32) median_gflops=5.891
+variant=NEON(TwoDDynamic) size=(64,64,64) median_gflops=8.566
+variant=SME(TwoDDynamicSme) size=(64,64,64) median_gflops=11.245
+variant=NEON(TwoDDynamic) size=(64,64,128) median_gflops=16.688
+variant=SME(TwoDDynamicSme) size=(64,64,128) median_gflops=23.675
+variant=NEON(TwoDDynamic) size=(64,64,256) median_gflops=26.602
+variant=SME(TwoDDynamicSme) size=(64,64,256) median_gflops=41.874
+variant=NEON(TwoDDynamic) size=(128,128,32) median_gflops=21.327
+variant=SME(TwoDDynamicSme) size=(128,128,32) median_gflops=22.192
+variant=NEON(TwoDDynamic) size=(128,128,64) median_gflops=38.539
+variant=SME(TwoDDynamicSme) size=(128,128,64) median_gflops=40.460
+variant=NEON(TwoDDynamic) size=(128,128,128) median_gflops=55.249
+variant=SME(TwoDDynamicSme) size=(128,128,128) median_gflops=59.283
+variant=NEON(TwoDDynamic) size=(128,128,256) median_gflops=67.176
+variant=SME(TwoDDynamicSme) size=(128,128,256) median_gflops=84.449
+variant=NEON(TwoDDynamic) size=(256,256,32) median_gflops=59.529
+variant=SME(TwoDDynamicSme) size=(256,256,32) median_gflops=57.293
+variant=NEON(TwoDDynamic) size=(256,256,64) median_gflops=102.092
+variant=SME(TwoDDynamicSme) size=(256,256,64) median_gflops=140.198
+variant=NEON(TwoDDynamic) size=(256,256,128) median_gflops=121.098
+variant=SME(TwoDDynamicSme) size=(256,256,128) median_gflops=212.483
+variant=NEON(TwoDDynamic) size=(256,256,256) median_gflops=159.846
+variant=SME(TwoDDynamicSme) size=(256,256,256) median_gflops=256.141
+variant=NEON(TwoDDynamic) size=(512,512,32) median_gflops=126.223
+variant=SME(TwoDDynamicSme) size=(512,512,32) median_gflops=160.933
+variant=NEON(TwoDDynamic) size=(512,512,64) median_gflops=163.216
+variant=SME(TwoDDynamicSme) size=(512,512,64) median_gflops=267.900
+variant=NEON(TwoDDynamic) size=(512,512,128) median_gflops=219.519
+variant=SME(TwoDDynamicSme) size=(512,512,128) median_gflops=368.898
+variant=NEON(TwoDDynamic) size=(512,512,256) median_gflops=293.399
+variant=SME(TwoDDynamicSme) size=(512,512,256) median_gflops=566.418
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 728 filtered out; finished in 0.07s
+

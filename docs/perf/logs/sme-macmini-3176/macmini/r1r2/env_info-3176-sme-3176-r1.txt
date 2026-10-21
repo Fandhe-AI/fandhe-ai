@@ -1,0 +1,13 @@
+gate=sme
+sw_vers=ProductName:		macOS ProductVersion:		27.0.1 BuildVersion:		26A434 
+uname_m=arm64
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+head=1a9031537c54692b9bf143920ad72e8815c20a7e
+cpu_brand=Apple M4
+hw.logicalcpu=10
+hw.perflevel0.logicalcpu=4
+hw.perflevel1.logicalcpu=6
+hw.memsize=17179869184
+rayon_num_threads=unset
+bench_py_sha256=9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+torch=2.14.0 4

@@ -1,0 +1,22 @@
+START series=r4 run=1 gate=pass load1=2.98 waited_s=150 at=2026-10-21T02:13:27Z
+END series=r4 run=1 exit=0 grep_exit=0 end_load1=8.46
+START series=r4 run=2 gate=pass load1=2.91 waited_s=90 at=2026-10-21T02:15:23Z
+END series=r4 run=2 exit=0 grep_exit=0 end_load1=2.91
+START series=r4 run=3 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=r4 run=3 exit=0 grep_exit=0 end_load1=2.91
+START series=r4 run=4 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=r4 run=4 exit=0 grep_exit=0 end_load1=2.91
+START series=r4 run=5 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=r4 run=5 exit=0 grep_exit=0 end_load1=2.91
+START series=rect run=1 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=rect run=1 exit=0 grep_exit=0 end_load1=2.91
+START series=rect run=2 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=rect run=2 exit=0 grep_exit=0 end_load1=2.91
+START series=rect run=3 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=rect run=3 exit=0 grep_exit=0 end_load1=2.91
+START series=rect run=4 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=rect run=4 exit=0 grep_exit=0 end_load1=2.91
+START series=rect run=5 gate=pass load1=2.91 waited_s=0 at=2026-10-21T02:15:23Z
+END series=rect run=5 exit=0 grep_exit=0 end_load1=2.91
+run_ab exit=0
+collect exit=0

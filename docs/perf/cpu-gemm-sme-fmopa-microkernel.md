@@ -744,6 +744,15 @@ GB10（外側専有ゲートは記録のみ）:
   `aarch64-unknown-linux-gnu`／`aarch64-apple-darwin` 通過（コンパイル確認のみ）、
   `aggregate.py --self-test`、スクリプトの `bash -n`／`shellcheck`／`--dry-run`。
 
+### 5.9 Mac mini（Apple M4）での A/B（イシュー #3176。実測済み・総合判定 ADOPT 候補）
+
+§5.4 の M4 Max とは SME ユニットの構成（P クラスタに 1 基）とコア構成（P4＋E6）が異なる Mac mini で、
+`SME_PRODUCTION_ENABLED` を反転した framework-compare の CPU 10 セル、R4 格子、MLP 長方形 4 形状を実測した（2026-10-21・計測コミット `1a9031537`）。
+全セルで checksum 完全一致。gemm 到達 6 セルの after/before は 0.47〜0.60 倍（M4 Max は 0.57〜0.74 倍）で 5/5。
+PyTorch 比（同 run 内）は gemm で 0.49〜0.74 倍から 1.03〜1.41 倍へ。現行しきい値領域（min>=256 かつ k>=64）は R4 で全点成立。
+`SME_PRODUCTION_ENABLED` は `false` のまま。ログは `logs/sme-macmini-3176/macmini/`、結論は
+[`cpu-gemm-sme-ab-macmini.md`](cpu-gemm-sme-ab-macmini.md)。本番切替は #3230、しきい値の確定は #3231。
+
 ## 6. セキュリティ考慮（OWASP Top 10）
 
 - **unsafe の統制**: `asm!` は `compute`／`has_pending_lazy_za_save`

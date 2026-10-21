@@ -1,0 +1,9 @@
+num_threads=10
+variant=NEON(TwoDDynamic) size=(64,256,784) median_gflops=164.241
+variant=SME(TwoDDynamicSme) size=(64,256,784) median_gflops=218.407
+variant=NEON(TwoDDynamic) size=(784,256,64) median_gflops=158.255
+variant=SME(TwoDDynamicSme) size=(784,256,64) median_gflops=267.605
+variant=NEON(TwoDDynamic) size=(784,64,256) median_gflops=164.154
+variant=SME(TwoDDynamicSme) size=(784,64,256) median_gflops=259.714
+variant=NEON(TwoDDynamic) size=(64,10,256) median_gflops=12.136
+variant=SME(TwoDDynamicSme) size=(64,10,256) median_gflops=12.956

@@ -1,0 +1,17 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/sme-3176/work/target-before/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
+
+running 1 test
+test gemm_blis::tests::sme_vs_neon_ab_mlp_rect ... num_threads=10
+variant=NEON(TwoDDynamic) size=(64,256,784) median_gflops=164.241
+variant=SME(TwoDDynamicSme) size=(64,256,784) median_gflops=218.407
+variant=NEON(TwoDDynamic) size=(784,256,64) median_gflops=158.255
+variant=SME(TwoDDynamicSme) size=(784,256,64) median_gflops=267.605
+variant=NEON(TwoDDynamic) size=(784,64,256) median_gflops=164.154
+variant=SME(TwoDDynamicSme) size=(784,64,256) median_gflops=259.714
+variant=NEON(TwoDDynamic) size=(64,10,256) median_gflops=12.136
+variant=SME(TwoDDynamicSme) size=(64,10,256) median_gflops=12.956
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 728 filtered out; finished in 0.02s
+

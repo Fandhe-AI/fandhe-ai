@@ -1,0 +1,40 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/sme-3176/work/target-before/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
+
+running 1 test
+test gemm_blis::tests::sme_vs_neon_ab_r4_grid ... variant=NEON(TwoDDynamic) size=(64,64,32) median_gflops=8.322
+variant=SME(TwoDDynamicSme) size=(64,64,32) median_gflops=8.949
+variant=NEON(TwoDDynamic) size=(64,64,64) median_gflops=16.470
+variant=SME(TwoDDynamicSme) size=(64,64,64) median_gflops=17.476
+variant=NEON(TwoDDynamic) size=(64,64,128) median_gflops=27.564
+variant=SME(TwoDDynamicSme) size=(64,64,128) median_gflops=32.598
+variant=NEON(TwoDDynamic) size=(64,64,256) median_gflops=48.819
+variant=SME(TwoDDynamicSme) size=(64,64,256) median_gflops=57.065
+variant=NEON(TwoDDynamic) size=(128,128,32) median_gflops=31.184
+variant=SME(TwoDDynamicSme) size=(128,128,32) median_gflops=32.683
+variant=NEON(TwoDDynamic) size=(128,128,64) median_gflops=53.149
+variant=SME(TwoDDynamicSme) size=(128,128,64) median_gflops=55.248
+variant=NEON(TwoDDynamic) size=(128,128,128) median_gflops=89.161
+variant=SME(TwoDDynamicSme) size=(128,128,128) median_gflops=100.665
+variant=NEON(TwoDDynamic) size=(128,128,256) median_gflops=121.135
+variant=SME(TwoDDynamicSme) size=(128,128,256) median_gflops=149.575
+variant=NEON(TwoDDynamic) size=(256,256,32) median_gflops=79.765
+variant=SME(TwoDDynamicSme) size=(256,256,32) median_gflops=90.768
+variant=NEON(TwoDDynamic) size=(256,256,64) median_gflops=125.751
+variant=SME(TwoDDynamicSme) size=(256,256,64) median_gflops=176.602
+variant=NEON(TwoDDynamic) size=(256,256,128) median_gflops=154.867
+variant=SME(TwoDDynamicSme) size=(256,256,128) median_gflops=264.554
+variant=NEON(TwoDDynamic) size=(256,256,256) median_gflops=183.316
+variant=SME(TwoDDynamicSme) size=(256,256,256) median_gflops=329.773
+variant=NEON(TwoDDynamic) size=(512,512,32) median_gflops=134.982
+variant=SME(TwoDDynamicSme) size=(512,512,32) median_gflops=178.799
+variant=NEON(TwoDDynamic) size=(512,512,64) median_gflops=177.380
+variant=SME(TwoDDynamicSme) size=(512,512,64) median_gflops=314.207
+variant=NEON(TwoDDynamic) size=(512,512,128) median_gflops=199.309
+variant=SME(TwoDDynamicSme) size=(512,512,128) median_gflops=408.473
+variant=NEON(TwoDDynamic) size=(512,512,256) median_gflops=277.095
+variant=SME(TwoDDynamicSme) size=(512,512,256) median_gflops=575.116
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 728 filtered out; finished in 0.05s
+

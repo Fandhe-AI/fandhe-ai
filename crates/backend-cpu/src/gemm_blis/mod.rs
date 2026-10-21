@@ -6681,6 +6681,80 @@ mod tests {
         }
     }
 
+    /// MLP 長方形 4 形状での SME／NEON 比較（イシュー #3176・親 #3174）。
+    /// `docs/perf/logs/sme-macmini-3176/orchestrate_macmini.sh` が before
+    /// ツリーで 5 プロセス独立に起動する診断専用テストで、R4 格子（正方
+    /// 専用）と [`sme_vs_neon_ab_thread_sweep`]（(784,64,256)・(64,10,256)
+    /// を持たない）では測れない形状を補う。計時の前に SME と NEON の出力が
+    /// bit 完全一致することを確かめる（n=10 < NR の端タイル保護と、R3 の
+    /// bit 一致契約の確認を兼ねる）。本番定数（`SME_PRODUCTION_ENABLED`・
+    /// `SME_MIN_*`）は参照せず `GemmDriverVariant` を直接指定する診断経路で、
+    /// 新規 `unsafe`・`asm!` は持たない。
+    /// 出力形式: `variant={..} size=({m},{n},{k}) median_gflops={v}`
+    /// （冒頭に `num_threads={t}` 行）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "実機（Mac mini。SME 対応環境限定）での診断専用（#3176。 \
+                cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored \
+                gemm_blis::tests::sme_vs_neon_ab_mlp_rect --exact --nocapture --test-threads=1）"]
+    fn sme_vs_neon_ab_mlp_rect() {
+        if microkernel::SmeKernel::try_new().is_none() {
+            eprintln!("SME 非対応環境のためスキップ");
+            return;
+        }
+        println!("num_threads={}", ab_effective_num_threads());
+        let shapes: &[(usize, usize, usize)] = &[
+            (64, 256, 784),
+            (784, 256, 64),
+            (784, 64, 256),
+            (64, 10, 256),
+        ];
+        for &(m, n, k) in shapes {
+            let a = xorshift32_vec(0x1234_abcd ^ (m as u32), m * k);
+            let b = xorshift32_vec(0x5678_ef01 ^ (n as u32), k * n);
+            let mut c_neon = vec![0.0f32; m * n];
+            let mut c_sme = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::TwoDDynamic,
+                &a,
+                &b,
+                &mut c_neon,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::TwoDDynamicSme,
+                &a,
+                &b,
+                &mut c_sme,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+            let neon_bits: Vec<u32> = c_neon.iter().map(|v| v.to_bits()).collect();
+            let sme_bits: Vec<u32> = c_sme.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                neon_bits, sme_bits,
+                "SME と NEON の出力が bit 一致しない shape=({m},{n},{k})"
+            );
+
+            let candidates: Vec<(GemmDriverVariant, BlockSizes)> = vec![
+                (GemmDriverVariant::TwoDDynamic, default_blocks()),
+                (GemmDriverVariant::TwoDDynamicSme, default_blocks()),
+            ];
+            let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 10);
+            let labels = ["NEON(TwoDDynamic)", "SME(TwoDDynamicSme)"];
+            for (label, gflops) in labels.iter().zip(gflops) {
+                println!("variant={label} size=({m},{n},{k}) median_gflops={gflops:.3}");
+            }
+        }
+    }
+
     /// 1 回の `Microkernel::run` の所要 ns を、約 1 ms 以上のバッチ 21 個の
     /// 中央値として返す（[`sme_microcall_fixed_cost_probe`] の共通部）。
     /// 反復数は事前較正（1 ms を超えるまで倍々）で決める。

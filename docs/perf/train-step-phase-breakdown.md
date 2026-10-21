@@ -1632,3 +1632,42 @@ M4 Max 0.9.0（§17.2）と Mini 0.11.0 の区間差（Metal・µs）。**版が
 - 実カーネル同期の固定費は `infer_fixed_cost_diag` の単発値（n=40）のみで 5 run 化していない。
 - `diag-instrumentation.patch` による backward 内部の内訳は未取得。M4 Max の 0.11.0 phase 内訳は無い。
 - checksum の一致は bit 同一の証拠ではない。
+
+## 19. v0.11.0 GB10 再計測（DGX Spark GB10・イシュー #3189）
+
+**状態: 計測基盤のみ。GB10 での実測は未実施（未実測）。** 本節の数値は埋めていない。推定値・開発機（Mac）の出力・コード読解の約 9 回を実測とは書かない。
+規則は `docs/perf/logs/cuda-train-infer-gb10-3189/RULE.txt`（計測前に固定）、実行手順は同 `README.md`。診断のみで本番コード・既定値・tolerance は不変。
+CUDA Graph の step capture は #1350（§16）で中立と判定済みで、その判定は覆さない（見込みの数値化だけを行う）。
+
+### 19.1 条件
+
+- 腕 A: `bench-fandhe`（registry `fandhe-ai =0.11.0`）の `--task train|infer --device cuda|cpu --mode fresh|reuse --phases` を 5 run。
+- 腕 B: HEAD ソースの main workspace（同期・launch の計数は nsys、固定費は #2109 の診断を借用、forward 内訳は #2116 を無改変で実行）。
+- 腕 A と腕 B のソース版が違う（腕をまたぐ比較には版差を含む）。bench-fandhe に backend-cuda の直接依存を足すのは依存 allowlist の変更で所有者承認が要るため行わない。
+
+### 19.2 train の区間表（cuda fresh／reuse）
+
+未実測。0.9.0 の既存値（§17.6.2）: forward_resident 155.9 µs・backward 149.1 µs・device_update 8.0 µs。
+
+### 19.3 同期回数・launch 回数
+
+未実測。計数ドライバ `crates/facade/tests/cuda_train_infer_sync_census_3189.rs` を nsys の下で窓（fwd／fwd_bwd／full／infer_reuse）× K（20／120）で回し、
+`(count(K=120) − count(K=20)) / 100` で 1 step あたりを出す（RULE 規則 1・2）。CPU スモークでは 4 窓とも状態機械に拒否されないことを確認済み。
+
+### 19.4 launch／同期の固定費
+
+未実測。`sync_idle`・`tiny_roundtrip`（1×1×1 GEMM の launch＋同期。引数なしの空カーネルの代替）・L2 `launch_issue`・L2S `kernel_wait`（いずれも N=128）を #2109 の診断から 5 run で取る。
+`unified_memory_probe` の属性値（腕 B-4）も未取得。実測後は `aggregate.py` が `unified_memory_probe.txt` の device_name と属性 9 件を検証して
+出す「腕 B-4」節（`aggregate.md`）だけを転記する。成果物の欠落・属性キーの欠落・`error`・非整数値は集計が exit 1 で拒否する。
+
+### 19.5 帰属と見込み
+
+未実測のため式（RULE 規則 6）だけを固定している。説明率と未説明残差を必ず併記し、原因は断定しない。
+
+### 19.6 後続（#3205・#3217・#3202・#3203）への入力
+
+実測後に記入する。現時点で渡せる入力は計測基盤と式のみ。
+
+### 19.7 限界
+
+- GB10 未実測。腕 A／B の版差。`tiny_roundtrip` は空カーネルの代替。nsys は時間を汚すため回数にのみ使う。checksum の一致は bit 同一の証拠ではない。
