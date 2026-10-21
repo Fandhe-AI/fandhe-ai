@@ -1,0 +1,64 @@
+RULE fixed-at-utc: 2026-10-21T11:48:52Z
+イシュー #3188（再オープン分）: device_update の H4（prologue + 残差）の分解と bench-fandhe の pre／head 前後比較
+本規則は計測前に固定し、事後に緩めない。「未確定」も正当な結果であり、差し替え・追加 run は行わない。
+
+0. 固定済みの先行規則（編集しない）:
+   - cpu-train-fixedcost-gb10-3188/RULE.txt sha256=e757b381ec0a7e857265cf82af293a311d6794db477ddf1ddc99c9c81b16c0bb
+     （§8 により pre／head の 2106／2105 は再実行しない。本規則はそれらと別の新規計測）
+   - cpu-reuse-device-update-2106/RULE.txt        sha256=39ff24728588e838273feb280b0bc28d86f3777285c07c139e356b8602e5196b
+   - cpu-predict-resident-fixedcost-2105/RULE.txt sha256=c8d65f4afb83115faeb48fbb9b8258329fd3de60383dcb0d30e84cea07e28541
+
+1. 計測ツリー（40 桁 SHA）:
+   - A（H4 診断・bench ハーネス）= 02d2aa87a3fc66fc8a642704e8b5e419baf577c9
+     本番コード（crates/{autodiff,backend-cpu,facade,tensor-core}/src）は head と同一。
+     `git diff --stat 4f6716f638a6997559847480ddf93cf6924a96e3 A -- crates/autodiff/src crates/backend-cpu/src
+     crates/facade/src crates/tensor-core/src` は crates/backend-cpu/src/gemm_blis/mod.rs の #[ignore] テスト追加
+     1 件（74 行）のみ。H4 診断は A のツリーで実行する。
+   - pre  = 17c7767b588a8c4c52eccccc39ba880519962d53
+   - head = 4f6716f638a6997559847480ddf93cf6924a96e3
+   ツリー同定は git archive <sha> の専用ディレクトリ + .rev-stamp。計測前後のツリー指紋を取り、Mac 側 git archive の
+   指紋と一致しない系列は無効（A・pre・head 全て）。
+
+2. 実行条件: affinity pin なし。GB10 負荷ゲート load1 < 1.0（30 秒間隔・最大 30 分。未通過 run を含む系列は参考扱い）。
+   ビルドは計測前に完了し、計測中はビルドを走らせない。
+
+3. H4 診断（cpu_reuse_device_update_h4_diag.rs の cpu_reuse_device_update_h4_phases）:
+   - 系列 multi = RAYON_NUM_THREADS 未設定（本番条件）、系列 single = RAYON_NUM_THREADS=1。run ごとに交互の
+     独立プロセス、各 5 プロセス。single は書き手コアの帰属判定用の 1 点差分であり、スレッド数最適化の
+     スイープではない（先行 RULE の対象外項目とは目的が異なる）。
+   - 各プロセス: warmup 20、計測 20 反復 x 4 ラウンド、in-situ 2 腕はラウンドごとに順序反転。n=80/セル。
+   - 代表値 = 各セルの run ごとの median_s の 5 run 中央値（min-max 併記）。
+   - 記号: T=insitu_direct/device_update、P=insitu_probe/prologue_probe、R=insitu_probe/after_probe、
+     K=standalone/sgd_kernel（hot）、S=standalone/stage、Kc=standalone/sgd_kernel_cold、
+     Zh=standalone/zip_hot、Zx=standalone/zip_xcore。
+   - probe の限界: P は momentum 不一致エラーの文字列 format! を含むため僅かに過大。
+   帰属規則（aggregate_h4.py が機械適用）:
+   1) 加算性: |P+R-T| <= 0.15*T。不成立なら分解は参考扱いで判定は「未確定」。
+   2) H4' = T-(K+S)。
+   3) H4a(prologue)=P、H4b(in-situ カーネル超過)=R-(K+S)。H4' の 50% 以上を占める項を「支持」、届かなければ「未確定」。
+   4) H4b が支持された場合のみ状態の説明を付ける。x=R-S を、cold=Kc と xcore=K+(Zx-Zh) の各候補と比べ、
+      ±25% 以内で x に最も近いものを「整合」、どちらも入らなければ「未確定」。
+   5) 書き手コア: (T_single-K_single) <= 0.5*(T_multi-K_multi) なら「マルチコア由来の状態を支持」、そうでなければ
+      「非支持」。single が負荷ゲート未通過なら「判定なし」。
+   6) checksum（in-situ 2 腕の最終 params、standalone 4 腕の最終 params の bit 一致）の不一致、n 不一致、
+      セル欠落、ツリー指紋・.rev-stamp の不一致は系列を無効にする。
+   - 補助（判定に使わない）: 計時区間の minflt 差とコア移動回数（Linux の /proc/thread-self/stat）。
+   - 計測前に aarch64 で CI テスト（cpu_reuse_device_update_h4_diag）の pass を記録する。
+
+4. bench-fandhe の pre／head 前後比較（参考値。判定ゲートは置かない）:
+   - ハーネス = A の scripts/bench/framework-compare の bench-fandhe を pre／head の facade（`--config
+     patch.crates-io.fandhe-ai.path`）に差した 2 本。cargo tree で path patch の解決を確認する。
+   - フォールバック（事前登録）: A のハーネスが pre の facade に対してコンパイルできない場合に限り、各ツリー自身の
+     framework-compare を使う（bench_prepost.sh の第 2 引数 own）。使った場合は結果 doc に理由を記録する。
+   - セル: train reuse（total と --phases）、infer reuse（total と --phases）、infer fresh（total と --phases）。
+     いずれも --device cpu --size 64。warmup/measure は bench-fandhe の既定値。
+   - 5 round（奇数 round は pre→head、偶数 round は head→pre）。各セルは独立プロセス。round の前に負荷ゲート。
+   - 報告: round median の 5 round 中央値と min-max、head/pre 比、checksum の pre／head 一致、infer の reuse/fresh 比。
+     checksum が不一致でも値はそのまま報告する。
+   - pre→head 間で infer 経路に効く本番変更は git log で列挙して注記する。pre／head の差が #3196 単独の前後ではない
+     ことを結果 doc に書く。
+
+5. 失敗時: 負荷ゲート未通過 run を含む系列は参考扱い。checksum・指紋不一致は系列無効（差し替え・追加 run なし）。
+   計測に到達できない場合は ssh のコマンドとエラーを記録し、値を推測や代替機の値で埋めない。
+6. 対象外: MSE backward 区間（#3180）、M4 Max・Mac mini、prologue 自体の改善（#3195 など）、先行 RULE の再実行。
+   診断のみで、コード・既定値・tolerance・FMA 契約は変更しない。

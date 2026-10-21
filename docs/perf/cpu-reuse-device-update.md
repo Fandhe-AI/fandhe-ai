@@ -202,6 +202,60 @@ DGX Spark GB10（20 コア・rustc 1.97.0・affinity pin なし・`RAYON_NUM_THR
 ### 限界と申し送り
 
 - MSE backward の区間はどちらの診断も測らない（#3180 の担当）。#3195 へは、head の `device_update` が約 169 µs で、そのうち SGD ループが約 28 µs にとどまることを前提として渡す
-- H4 の内訳（prologue と残差の分離）は本診断で分解できていない。分離するには別の計測が要る（本イシューのスコープ外）
-- M4 Max・Mac mini は未実施。`bench-fandhe --phases` の前後比較は未実施
+- H4 の内訳（prologue と残差の分離）は本節の診断では分解できていない。再オープン後に §12 で分解した
+- M4 Max・Mac mini は未実施。`bench-fandhe --phases` の前後比較は §12.4 で実施した
 - 診断の値は bench の値と計測窓が異なる（`logs/cpu-train-fixedcost-gb10-3188/RULE.txt`）
+
+## 12. H4（prologue + 残差）の分解と bench-fandhe の前後比較（#3188 再オープン分）
+
+§11 で head の T の 84%（142.8 µs）を占めた H4 を、公開 API だけで prologue と in-situ カーネルの超過分に分けた。診断は `crates/facade/tests/cpu_reuse_device_update_h4_diag.rs`、規則は計測前に固定した `logs/cpu-train-fixedcost-gb10-3188/reopen/RULE.txt`。診断のみで、本番コード・既定値・tolerance は変更しない。
+
+### 12.1 方法
+
+- prologue probe: `DeviceParamStore::step` は `sgd_used` かつ velocity 未確保のとき `momentum != 0` の設定を受けると「momentum configuration changed」の `InvalidArgument` を返す。この検査は検査群・`resident_filled_slots`・bias 勾配の `grads.get`／`clone` の後、`pending.take()`・`upload_into`・カーネルより前にある（`crates/autodiff/src/optim/device_store.rs`）。momentum 0.9 の step が Err を返すまでを P、続けて呼ぶ本物の step を R とする（P はエラー文字列の `format!` を含むため僅かに過大）
+- 系列: multi（`RAYON_NUM_THREADS` 未設定。本番条件）と single（`RAYON_NUM_THREADS=1`。書き手コアの帰属判定用の 1 点差分）。各 5 独立プロセス（run ごとに交互）・n=80/セル
+- 代理腕: standalone の `sgd_kernel_cold`（256 MiB を触って LLC を追い出した直後）、`zip_hot`／`zip_xcore`（勾配 Vec を main／別スレッド 4 本が書いた直後の zip 更新）
+- ツリー: A = `02d2aa87a3fc66fc8a642704e8b5e419baf577c9`（本番コードは head と同一。差分は `backend-cpu/src/gemm_blis/mod.rs` の `#[ignore]` テスト追加のみ）。`.rev-stamp`・計測前後のツリー指紋（Mac 側 `git archive` との差分 0 件）・負荷ゲート全 run pass・checksum 一致・aarch64 での CI テスト pass を確認（`logs/cpu-train-fixedcost-gb10-3188/reopen/`）
+
+### 12.2 結果（GB10。中央値 µs。5 run の min-max。生ログと集計は `reopen/h4-{multi,single}/`・`reopen/aggregate_h4.md`）
+
+| 区間 | multi | single |
+|---|---|---|
+| T = `device_update`（direct） | 163.2（158.9-164.4） | 26.2（21.5-27.1） |
+| P = prologue probe | 2.3（1.9-2.6） | 2.1（1.6-2.6） |
+| R = probe 後の本物の step | 157.4（153.7-158.1） | 25.4（20.8-26.1） |
+| K = standalone `sgd_kernel`（hot） | 34.2（33.6-34.8） | 33.0（30.1-33.7） |
+| S = standalone `stage` | 1.0 | 0.9 |
+| `sgd_kernel_cold` | 49.9 | 49.3 |
+| `zip_hot` / `zip_xcore` | 33.8 / 41.7 | 33.2 / 40.7 |
+
+- 規則 1（加算性）: multi の |P+R−T| = 3.5 µs（許容 24.5 µs）で成立
+- 規則 2・3（multi）: H4′ = T−(K+S) = 128.0 µs。H4a（prologue）= P = 2.3 µs で H4′ の 1.8%（支持の 50% に届かず「未確定」扱い）。**H4b（in-situ カーネル超過）= R−(K+S) = 122.2 µs で H4′ の 95.5%（支持）**
+- 規則 4（状態の説明）: x = R−S = 156.4 µs に対し、cold 候補 49.9 µs・xcore 候補 42.1 µs はいずれも ±25% に入らない（差は −68%・−73%）。**未確定**。LLC 追い出し後の読み出しや他コアが書いた Vec の読み出しという代理腕では、in-situ の約 156 µs を再現できない
+- 規則 5（書き手コア）: single では T = 26.2 µs で standalone の K（33.0 µs）より速い。(T−K)_single = −6.8 µs ≦ 0.5×(T−K)_multi = 64.5 µs なので **マルチコア由来の状態を支持**
+- 補助（判定外）: 計時区間中の minflt は全セル 0、main スレッドのコア移動も 0（ページフォルトと main の移動は H4b の原因ではない）
+
+### 12.3 読み方
+
+- §11 の H4（約 142.8 µs）は prologue（検査・小 Vec 構築・bias 2 本の `clone`）ではない。prologue は約 2.3 µs で、T の約 1.4% にとどまる
+- 残差の本体は、学習ループ内で呼ばれる `sgd_step_device`（と stage）が、rayon ワーカーで forward／backward を走らせた直後に限って約 120 µs 遅くなる分である。同じ処理を `RAYON_NUM_THREADS=1` で走らせると T は 26 µs で、standalone の hot カーネルより速い。したがってカーネルのコード（zip 化後のループ）自体は遅くない
+- 遅くなる機構は特定できていない。LLC 追い出しと他コア書き込みの代理腕はどちらも ±25% に届かない。残る候補（本診断では未検証）は、ワーカーの待機復帰・クラスタ間のキャッシュ状態・params バッファが別コアの dirty line を抱えた状態などで、それぞれ別の計測が要る。**因果は確定していない**
+- #3195 など prologue の削減では効果が小さい見込み（prologue は約 2.3 µs）。効きうるのは、状態そのものに働く変更（`device_update` を backward の並列区間の直後に置かない、更新をワーカー側で行う、等）である。これは見込みであり実測はしていない
+
+### 12.4 bench-fandhe の pre／head 前後比較（GB10・CPU・参考値）
+
+pre = `17c7767b5`、head = `4f6716f63`（§11 と同じ系列）。ハーネスは A の `scripts/bench/framework-compare` の bench-fandhe を pre／head の facade（path patch）に差した 2 本（`cargo tree` で patch の解決を確認。pre でもコンパイルできたためフォールバックは未使用）。5 round（奇数 round は pre→head、偶数 round は head→pre）・負荷ゲート全 round pass。判定ゲートは置かない。
+
+| セル（中央値 µs。5 round の min-max） | pre | head | head/pre |
+|---|---|---|---|
+| train reuse step_total | 979.1（947.1-1000.8） | 860.7（829.9-872.8） | 0.879 |
+| train reuse `device_update` | 293.9（284.6-296.5） | 172.7（170.1-174.1） | 0.588 |
+| train reuse `forward_resident` | 221.8 | 218.7 | 0.986 |
+| train reuse `backward` | 449.7 | 453.0 | 1.007 |
+| infer reuse total | 189.4（170.3-209.9） | 192.8（172.9-204.2） | 1.018 |
+| infer fresh total | 176.4（170.2-184.9） | 175.8（171.7-186.9） | 0.997 |
+
+- bench の `device_update` は 293.9 → 172.7 µs（0.59 倍）で、§11 の診断 T（279.1 → 169.2 µs）とほぼ同じ。checksum は pre／head で全セル一致
+- pre→head の本番変更のうち CPU の train／infer に効くのは #3193（`sgd_step_device`）・#3194（`flat_grad`）・#3196（`linear_forward_device`、infer 経路）で、pre／head の差は #3196 単独の前後ではない。infer の reuse total は 189.4 → 192.8 µs で変化がなく、min-max は重なる
+- infer の reuse/fresh 比は pre 1.074・head 1.097 で、reuse が fresh より遅い逆転は bench でも再現する（診断の ratio 1.01〜1.02 より大きい）。詳細は `cpu-predict-resident-fixedcost.md` §6.1
+- 全セルの表は `logs/cpu-train-fixedcost-gb10-3188/reopen/aggregate_bench_prepost.md`

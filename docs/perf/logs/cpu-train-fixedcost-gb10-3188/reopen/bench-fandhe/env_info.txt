@@ -1,0 +1,4 @@
+date_utc: 2026-10-21T11:53:30Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+harness_mode: a

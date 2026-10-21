@@ -52,12 +52,15 @@ fresh で見えた短縮は rayon 並列の `elementwise::add`／`relu` 3 リー
 | 機体 | 版 | before 中央値 (min–max) | after 中央値 (min–max) | checksum 一致 |
 |---|---|---|---|---|
 | Mac mini | 未実測 | 未実測 | 未実測 | 未実測 |
-| DGX Spark GB10 | 未実測 | 未実測 | 未実測 | 未実測 |
+| DGX Spark GB10（#3188 再オープン分。infer reuse total） | pre `17c7767b5`／head `4f6716f63` | 189.4 µs（170.3-209.9） | 192.8 µs（172.9-204.2） | 一致 |
 
-参考: 診断ベース（bench-fandhe ではない別プロトコル）の GB10 前後は `cpu-predict-resident-fixedcost.md` §6（#3188）。bench-fandhe の前後比較は未実測のまま。
+- GB10 の行は bench-fandhe（`--task infer --device cpu --size 64 --mode reuse`）の 5 round 中央値。pre／head は #3196 単独の前後ではなく、#3193・#3194 を含む区間である（infer 経路に効く本番変更は #3196 のみ）。reuse total は 189.4 → 192.8 µs で変化がなく、min-max は重なる（head/pre = 1.018）。fresh は 176.4 → 175.8 µs（0.997）。出典: `logs/cpu-train-fixedcost-gb10-3188/reopen/aggregate_bench_prepost.md`
+- Mac mini は未実測のまま
+
+参考: 診断ベース（別プロトコル）の GB10 前後は `cpu-predict-resident-fixedcost.md` §6（#3188）、bench の詳細は同 §6.1。
 
 ## 7. 限界・申し送り
 
-- 実測は未実施（この環境に実機なし）。Issue は実測記録まで open のままにする（PR は `Refs #3196`）
+- GB10 の bench-fandhe 実測は #3188 再オープン分で実施した（§6）。Mac mini は未実施。#3196 の効果は GB10 の infer reuse total では確認できなかった（変化なし）
 - スコープ外: `predict_device_chain` の入力 upload コピー削減・出力 arena 確保、GEMM 本体の改善（#3197・#3233）、
   epilogue のパネル単位適用（カーネル契約の変更になるため別 Issue）
