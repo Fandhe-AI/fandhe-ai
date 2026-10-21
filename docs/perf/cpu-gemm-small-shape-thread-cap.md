@@ -186,4 +186,4 @@ train/infer/gemm cpu の before/after 比較は、機構が既定 OFF かつ GB1
 
 ## 追記（#3178）
 
-本 doc の判定（#1575 の REJECT）は変更しない。Mac mini（M4。P4＋E6）で現行の `TwoDDynamic`・専有機・5 round の条件を変えた再測定の基盤と事前登録規則を `docs/perf/cpu-thread-policy-macmini.md` に置いた（実測は未実施）。
+本 doc の判定（#1575 の REJECT）は変更しない。Mac mini（M4。P4＋E6）で現行の `TwoDDynamic`・専有機・5 round の条件を変えた再測定の再測定を行った（2026-10-21。専有ゲート 5/5 round 成立）。small-cap 腕はtrain／infer の処置セルで infer 64 は 10〜15% 改善したが、train 64 fresh が約 4% 悪化するなど 3 セルで中央値比が 1.00 を超え REJECT（既定は変更しない）。詳細と条件差は `docs/perf/cpu-thread-policy-macmini.md`。

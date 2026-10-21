@@ -1,0 +1,11 @@
+# ssh 疎通・前提確認（実測日 2026-10-21。ホスト名・ユーザー名はマスク）
+## uname -a
+Darwin masked 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+## sysctl（brand / logicalcpu / perflevel0 / perflevel1）
+Apple M4
+10
+4
+6
+## uptime（計測完了後）
+13:50  up 10 days, 13:24, 1 user, load averages: 2.47 4.32 4.69
+## 計測前の確認: RAYON_NUM_THREADS 未設定、重い処理なし（cargo／rustc／bench-fandhe／run_ab のプロセスなし）、load1=1.35、Data ボリューム空き 82GiB。torch venv は自専用に新規作成（torch 2.14.0・numpy 2.5.4）

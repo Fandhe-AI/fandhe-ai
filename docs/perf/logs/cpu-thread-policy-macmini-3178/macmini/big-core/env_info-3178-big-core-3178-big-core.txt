@@ -1,0 +1,14 @@
+gate=big-core
+sw_vers=ProductName:		macOS ProductVersion:		27.0.1 BuildVersion:		26A434 
+uname_m=arm64
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+head=3637b4af283f72bde163fb5b799603b856247ef7
+cpu_brand=Apple M4
+hw.logicalcpu=10
+hw.perflevel0.logicalcpu=4
+hw.perflevel1.logicalcpu=6
+hw.memsize=17179869184
+rayon_num_threads=unset
+precheck=assert
+bench_py_sha256=9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+torch=2.14.0 4
