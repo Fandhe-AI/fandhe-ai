@@ -26,12 +26,12 @@ bash docs/perf/logs/metal-infer-bimodal-macmini-3183/stage-tree.sh v0.11.0 "${st
   --overlay crates/facade/tests/metal_infer_bimodal_diag.rs
 # 2. rsync（`.git` は末尾スラッシュなしで gitfile も除く。.env*・*.local.md は渡さない）
 rsync -a --delete --exclude '.git' --exclude '.env*' --exclude 'real-hardware-verification-env.local.md' \
-  "${stage}/" "${METAL_NODE}":~/work/rust-ai-library-run/
+  "${stage}/" "${METAL_NODE}":~/work/rust-ai-library-run-3183/
 rsync -a --delete --exclude '.git' --exclude '.env*' --exclude 'real-hardware-verification-env.local.md' \
-  "${stage_v0}/" "${METAL_NODE}":~/work/rust-ai-library-run-v0110/
-# 3. ノード側（zsh -lc。nohup で切り離して生存確認。HEAD は target-fandhe-ai、v0110 は target-fandhe-ai-v0110、
-#    bench は target-fandhe-fc の別 CARGO_TARGET_DIR。ビルドと計測を並走させない）
-bash docs/perf/logs/metal-infer-bimodal-macmini-3183/orchestrate.sh macmini --r2 --out "${HOME}/work/bimodal3183-r2"
+  "${stage_v0}/" "${METAL_NODE}":~/work/rust-ai-library-run-3183-v0110/
+# 3. ノード側（zsh -lc。nohup で切り離して生存確認。他の計測と衝突しないよう issue 番号付きの専用ディレクトリを使う。HEAD は CARGO_TARGET_DIR=$HOME/work/target-3183、v0110 は V0_TREE・V0_TARGET_DIR（target-3183-v0110）、
+#    bench は FC_TARGET_DIR（target-3183-fc）の別 target。ビルドと計測を並走させない）
+bash docs/perf/logs/metal-infer-bimodal-macmini-3183/orchestrate.sh macmini --r2 --out "${HOME}/work/out-3183-r2"
 # 4. 集計（出力はそのまま macmini-r2/aggregate.md にする）
 python3 -I docs/perf/logs/metal-infer-bimodal-macmini-3183/aggregate.py --rule 2 \
   docs/perf/logs/metal-infer-bimodal-macmini-3183/macmini-r2

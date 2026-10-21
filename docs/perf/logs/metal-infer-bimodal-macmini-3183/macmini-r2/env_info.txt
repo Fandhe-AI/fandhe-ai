@@ -1,0 +1,14 @@
+date_utc: 2026-10-21T16:54:08Z
+uname: Darwin 27.0.0 arm64
+Apple M4
+10
+4
+6
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+git_head: 60abbd553d466883aa9151cec250ddc0612506f2
+tree_fingerprint: dcf8eb8199566215fb4f4223a0e7b7f6a08119de8eda9382be45a8a81c137db1
+v0110_git_head: 6b14fdb420f1d5ecb5d118b3451f3fe0aacd333b
+v0110_tree_fingerprint: d04df64d946d800fc396864757dc78f3c1f42b33e61e72e3f8306af0a323a14d
+host_kind: macmini
+round: 2

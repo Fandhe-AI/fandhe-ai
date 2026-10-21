@@ -1,0 +1,22 @@
+== run3 before ==
+ 1:57  up 11 days,  1:30, 1 user, load averages: 2.23 5.91 3.89
+order: v0R v0D v0Don Bc BcT R D Don G  since_build_s: 185
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ lowpowermode         0
+-- CPU 使用率上位 8 プロセス（pcpu comm）--
+ %CPU COMM
+120.5 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  2.7 /usr/libexec/opendirectoryd
+  2.1 bash
+  1.8 /Library/Application Support/org.pqrs/Karabiner-Elements/Karabiner-Elements Privileged Daemons v2.app/Contents/MacOS/Karabiner-Elements Privileged Daemons v2
+  1.7 /usr/sbin/notifyd
+  1.6 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared
+  1.5 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd
+  1.5 /usr/sbin/bluetoothd
+== run3 after ==
+ 1:57  up 11 days,  1:30, 1 user, load averages: 2.21 5.84 3.88
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

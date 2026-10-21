@@ -1,0 +1,5 @@
+run=1 order=R,D,Don,G,v0R,v0D,v0Don,Bc,BcT since_build_s=180 load1=2.34 load5=5.99
+run=2 order=Don,G,v0R,v0D,v0Don,Bc,BcT,R,D since_build_s=184 load1=2.23 load5=5.91
+run=3 order=v0R,v0D,v0Don,Bc,BcT,R,D,Don,G since_build_s=185 load1=2.23 load5=5.91
+run=4 order=v0Don,Bc,BcT,R,D,Don,G,v0R,v0D since_build_s=187 load1=2.21 load5=5.84
+run=5 order=BcT,R,D,Don,G,v0R,v0D,v0Don,Bc since_build_s=189 load1=2.21 load5=5.84
