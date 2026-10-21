@@ -20,6 +20,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# イシュー #3184（再開分）: round 前クールダウン hook（既定 OFF。AB_ROUND_COOLDOWN_MAX_LOAD1 設定時のみ待機・記録。
+# 継承の閾値・gate_ok・series 判定は不変。docs/perf/logs/optin-ab-macmini-3184/RULE-reopen.txt）
+source "$SCRIPT_DIR/ab_round_cooldown.sh"
 LABEL=${1:-}
 
 # A03 インジェクション対策: ラベルはファイル名へ直接埋め込むため、
@@ -494,7 +497,9 @@ trap restore_lock_and_kill_sampler_trap EXIT
 
 # run 単位で fresh/parallel を交互起動する。奇数 round: fresh→parallel・偶数 round:
 # parallel→fresh（起動順序の系統誤差を均す）。プロセスは run ごとに独立起動。
+ab_round_cooldown_init "results/raw/cooldown-2112-${LABEL}.log"
 for run_i in $(seq 1 "$AB_ROUNDS"); do
+  ab_round_cooldown "$run_i"
   for size in "${GEMM_SIZES[@]}"; do
     run_cell "$run_i" gemm "$size"
   done

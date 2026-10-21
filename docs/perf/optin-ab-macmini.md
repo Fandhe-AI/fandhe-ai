@@ -1,8 +1,82 @@
 # Mac mini の未計測 opt-in 候補 A/B（イシュー #3184）
 
-状態: **実測済み（2026-10-21・Mac mini M4・main `26e60f63`）。ただし補遺 RULE 3 の「全 round で load1 < 3.0」を満たす正式系列は 1 つも成立せず、全ゲートの Mac mini 判定は undetermined（record_only）**。
-G6 は継承集計器が入力形式を受理せず INCOMPLETE、G7 は集計器が fail-closed で停止した。値と生ログは全て収録した（`logs/optin-ab-macmini-3184/`）。
-main の定数・環境変数既定は変更していない。規則は `logs/optin-ab-macmini-3184/RULE.txt`（計測前に単独コミットで固定。継承 RULE も補遺も計測後に緩めていない）。
+状態: **再開分の実測済み（2026-10-22 JST。Mac mini M4・事前登録コミット `c80d9818`）。正式系列が成立し、G1・G4 は REJECT（Mac mini 単機で確定）、G2・G3 は undetermined、G5 は継承集計器が ADOPT（#1520 を覆さず #3265 へ）、G6 は arm 別の判定語彙が出た、G7 は record_only（H1〜H3 未確定・H4 支持）**。詳細は「再開分の結果」節。
+初回（2026-10-21・main `26e60f63`）は正式系列が成立せず全ゲート undetermined だった（旧系列として残す。「初回の記録」節）。
+main の定数・環境変数既定は変更していない。規則は `logs/optin-ab-macmini-3184/RULE.txt`（初回）と `RULE-reopen.txt`（再開分。いずれも計測前に固定。継承 RULE も補遺も計測後に緩めていない）。
+
+## 再開分の結果（2026-10-22 JST／UTC 2026-10-21・Mac mini M4・事前登録コミット `c80d9818`）
+
+初回は正式系列が成立せず判定が出なかったため、補遺 2（`logs/optin-ab-macmini-3184/RULE-reopen.txt`）を計測前に固定して取り直した。
+継承 RULE と元の補遺は 1 字も変えていない（修正前の sha256 を RULE-reopen.txt に記録）。事前登録コミット `c80d9818` の作者日時は 2026-10-21T18:16:02Z で、最初の実機ログ（`macmini-r2/steps.log` の 18:16:41Z）より 39 秒前。
+before／after／diag の 3 clone と GB10 の 2 clone は全て同じ `c80d9818` で、`git status --porcelain` は 0 件（`macmini-r2/rev-stamp.txt`・`gb10/rev-stamp.txt`）。系列は新 label（`3184-macmini-r2-*`・`3184-gb10-g3-*`）で 1 回ずつ実行し、差し替え・追加・セル除外はない。
+
+### 変更点（判定を緩めない・条件を足すだけ）
+
+| 変更 | 内容 |
+|---|---|
+| round 前クールダウン hook | `scripts/bench/framework-compare/ab_round_cooldown.sh`。`AB_ROUND_COOLDOWN_MAX_LOAD1` 設定時のみ round ごとに load1 < 閾値を待ち、`cooldown-*.log` へ round 別 load1 を記録する。未設定なら no-op（self-test `ab_round_cooldown_test.sh` で確認）。継承 5 スクリプトへは追加行のみ。継承の閾値 8.0・`gate_ok`・series 判定は不変なので、継承 gate log は `series=official` かつ load1 < 3.0 が同じ行に並ぶ |
+| G6 の外側待機 | run ごとに `orchestrate.sh` の外で load1 < 3.0 を待ち、float で `steel-r2/cooldown.log` に記録 |
+| 2111 集計器 | `--nocapture` で融合する最初の出力行（`test NAME ... N=...`）を 1 ログにつき 1 回だけ受理。FAILED／panicked・`1 passed; 0 failed`・独立 `ok` 行の検査は不変（拒否ケースを self-test に固定） |
+| 2114 `orchestrate.sh` | host_kind に `macmini` を追加（`m4max` と同じ record_only の経路） |
+| `machine_gate_check.py` | cooldown ログ形式を追加。`cooldown=` が pass 以外の行は 0 として扱う（厳しくなる方向のみ。判定式 < 3.0・5 round 完備は不変） |
+
+### 条件差（初回との違い）
+
+| 項目 | 初回 | 再開分 |
+|---|---|---|
+| round 開始時の load1 | 継承スクリプトの直前ビルド・前 round の負荷で 3.0 を超えた | 全系列・全 round で < 3.0（G1 2.48〜2.52、G2 2.38〜2.71、G3 2.8〜2.9、G4 2.28〜2.65、G5 2.29〜2.68、G6 1.62〜2.78。`macmini-r2/machine_gate_ok.txt`） |
+| G4／G5 の round 別記録 | uptime の 30 秒サンプルのみ（判定不能） | `cooldown-*.log` に round 別 load1。全 5 round が `cooldown=pass` |
+| 外側ゲート | 成立 | 成立（load1 < 3.0 かつ並走プロセス 0 件。`macmini-r2/machine_gate.log`・`preflight-procs.txt`）。同じ Mac mini を使う他セッションの計測とは並走していない |
+| G2 Stage 0 | 実施（T_macmini = 16384） | **再計測しない**（2101 RULE が Stage 0 の負荷を record_only と定め、run の追加による再判定を行わないため。T_macmini = 16384 を継承）。初回 `stage0/env_info.txt` の load1 推移（2.92→5.60）は参考値で、Stage 0 の判定には効かない |
+| G3 前提ゲート | rev `26e60f63` | 新しい rev `c80d9818` で取り直した（初回の結果は流用しない） |
+| G3 GB10 対照セル | 未実測 | 実測（cpu・cuda × train {fresh, reuse}。継承ゲート 8.0。Mac mini 用の 3.0 は GB10 に適用しない） |
+| G6 `mtl_architecture_name` | 未取得 | `applegpu_g16g`（`p0_device_attributes` の出力を転記。`steel-r2/env_info.txt`） |
+| G7 `host_kind` | `m4max`（流用） | `macmini` |
+
+### ゲート別判定（再開分）
+
+比 = after/before（G5 は borrowed/legacy）の 5 round 中央値。全セル checksum 完全一致（`--require-checksum-exact`）、5 round 完備、非有限値なし。継承 RULE の文言を機械的に当てはめた。
+
+| ゲート | Mac mini 判定（再開分） | 根拠 | GB10（#3190／本再開分） | 総合 |
+|---|---|---|---|---|
+| G1 `HOST_ARENA_DEFAULT_ENABLED`（2104） | **REJECT**（Mac mini 単機で確定） | 正式系列（gate 8.0 pass・全 round load1 < 3.0）で train reuse が 1.0090、5 round 全てが ratio > 1.00（1.0153・1.0036・1.0420・1.0025・1.0060）。他セル: train fresh 1.0115（4/5）・infer fresh 0.9961・infer reuse 1.0181（3/5） | undetermined（#3190 B1。train fresh 0.8648 の改善は別機体の値で判定を覆さない） | **REJECT**（2104 は「いずれかの機体で 5/5 一貫の後退セルが 1 つでもあれば REJECT」） |
+| G2 `REDUCTION_SEQUENTIAL_FALLBACK_ENABLED`（2102 Stage 1。T = 16384） | undetermined | 後退セルが 2 つ（gemm 2048/reuse 1.0114〈4/5 round 後退〉・gemm 4096/fresh 1.0010〈3/5〉）で ADOPT 不成立。5/5 一貫の後退はなく REJECT 不成立。train 64／fresh 0.9978・reuse 0.9951、infer 64／fresh 0.9657・reuse 0.9473、gemm 1024／fresh 0.9860・reuse 0.9930、2048／fresh 0.9902、4096／reuse 0.9983 | undetermined（#3190 B2） | undetermined。最終 T = min(16384, 16384) = 16384 の候補は不変 |
+| G3 `TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED`（2113） | undetermined。前提ゲート (a)(b)(c) は成立 | train fresh 1.0077（後退・5 round 中 3 回のみ > 1.00）で ADOPT 不成立。train reuse **0.9000**（全 5 round が 0.8835〜0.9060 で改善）。5/5 一貫の後退なし。infer は record_only（fresh 0.9977・reuse 0.9434） | 対照セル（A/A）: cpu fresh 0.9771・reuse 1.0138、cuda fresh 1.0071・reuse 0.9944。いずれも 5/5 一貫の後退でなく、非後退でないセルがあるため undetermined | undetermined |
+| G4 `READBACK_DEST_DEFAULT`（2112） | **REJECT**（専有ゲート成立の系列） | 専有ゲート（load1 < 4.0 を 2 回連続）成立・全 round `cooldown=pass`。gemm reuse N=1024 1.0228・N=4096 1.0074・infer reuse 1.1604（全て > 1.00）。2112 は「専有ゲートが成立した系列でいずれかのセルが ratio > 1.00」で REJECT | 対象外 | **REJECT**（Mac mini を M4 Max 枠として扱う補遺 RULE 4 による） |
+| G5 readout legacy／borrowed（§15.1） | 継承集計器の総合判定は ADOPT（6 セル全て ≤ 1.00） | borrowed/legacy は 1024／fresh 0.9592・reuse 0.9688、2048／fresh 0.9773・reuse 0.9679、4096／fresh 0.9752・reuse 0.9750。専有ゲート成立・全 round `cooldown=pass`。#1520 の REJECT は覆さない（条件を変えた再測定）ため、採否は #3265 | 対象外 | #3265 へ「専有 Mac mini での再測定」として渡す。本イシューは既定を変えない |
+| G6 steel 候補（2111） | 正式系列（gate OK・`reference_only=False`）。LU: UNDETERMINED、T0U: **REJECT**、T0U-LU: **REJECT**、T0U-LU-FB: UNDETERMINED | T0U／T0U-LU は N=512 が 1.0378／1.0547 で 5/5 run 符号一貫の後退（REJECT の条件）。N=1024 以上は T0U 0.8987／0.7657／0.7748、T0U-LU 0.8903／0.7587／0.7575 と 10〜24% 速い。N=512 の結論には candle デバイス区分の仮定が未確認という注記が付く | 対象外 | Mac mini 固有の結果（M4 では本番が 32×32 タイルのため） |
+| G7 `METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED`（2114。ADOPT 判定なし） | record_only。H1〜H3 は**未確定**、H4 は**支持** | 集計器が fail-closed で停止（run2 の `provider_select` の `median_s` = 0.0。`tape_new` は median 4.1e-8・q1 0.0 で、計時分解能 41.67 ns を下回る）。集計器の正値検査は変えていないため H1〜H3 は推定で埋めない。H4 は (c) の出力を転記: host_fixed 368.7 us が wall 588.6 us の 63%（>= 50% で支持） | 対象外 | record_only |
+
+機体間で判定が割れたゲート: G1（Mac mini REJECT／GB10 undetermined。GB10 の train fresh は 0.8648 と改善、Mac mini の train reuse は後退。2104 の規則上は REJECT が優先）。
+
+### 生ログ・集計の所在
+
+| ゲート | 収録先（`logs/optin-ab-macmini-3184/`） |
+|---|---|
+| G1 | `host-arena-r2/`（compare-{train,infer}・`load-gate`・`cooldown`・生 JSONL） |
+| G2 Stage 1 | `reduction/stage1-r2/`（`on-reduction-filled.sha256`・`patch_apply.log` を含む。Stage 0 は初回の `reduction/stage0/` を継承） |
+| G3 | `encode-only-r2/`（`prereq/` に前提ゲート (a)(b)(c)）・GB10 対照は `encode-only-gb10/` |
+| G4 | `readback-r2/`（`split/`・`compare-gemm-readback.md`・`compare-infer-readback.md`） |
+| G5 | `readout-r2/`（`compare-readout.md`） |
+| G6 | `steel-r2/`（`aggregate.md`・`cooldown.log`・`env_info.txt`） |
+| G7 | `verify-cache-r2/`（`aggregate.err`・`h4c.log`・`env_info.txt`） |
+| 機体の証跡 | Mac mini は `macmini-r2/`、GB10 は `gb10/`（`uname.txt`・`rev-stamp.txt`・`steps.log`・`machine_gate*`・`preflight-procs*`） |
+
+G3 前提ゲートの (c): `device_param_store_backend_parity` は after／before とも同じ 2 件（`device_resident_matches_host_sgd_on_cuda_across_100_steps`・`grad_readout_contract_on_cuda`。CUDA 前提で Mac では動かない）が失敗する既存の失敗で、非後退。その他の群は全て rc 0。
+REQ-8 の確認（G6）は初回と同じ（固定 4 arm は手動境界チェックを外さない）。
+
+### 申し送り（再開分）
+
+- #3227: 反転できるゲートはない（ADOPT は両機体の成立が要り、GB10 側が undetermined）。G1 と G4 は Mac mini の正式系列で REJECT が確定したため、既定 OFF の維持が妥当。G3 は train reuse が 5/5 改善（0.9000）だが train fresh が 1.0077 で未成立。
+- #3265: G5 は専有 Mac mini の正式系列で全 6 セル ≤ 1.00（0.9592〜0.9773）。#1520 の REJECT を覆す材料として渡す（採否は #3265 の判断）。
+- 初回系列（record_only）は無効にせず残してある。旧 `steel/` を修正後の集計器で再集計すると判定語彙が出るが、旧系列は遡って有効にしない（RULE-reopen.txt 1.(ii)）。
+- スコープ外: `tape_new` が計時分解能を下回る問題（2114 の集計器と計測粒度の見直し）は継承側の別対応が必要。ruleset の required check の追加・変更は不要だった（workflow は触っていない）。
+
+---
+
+## 初回（2026-10-21）の記録（旧系列・record_only）
+
+以下は初回系列の記録で、判定の正は上の再開分。
 
 ## 条件差
 

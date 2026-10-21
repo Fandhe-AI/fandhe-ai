@@ -1,0 +1,41 @@
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.229
+   Compiling syn v2.0.119
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling getrandom v0.3.4
+   Compiling objc2-foundation v0.3.2
+   Compiling rand_core v0.9.5
+   Compiling zerocopy-derive v0.8.56
+   Compiling zerocopy v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/optin-3184/diag/crates/tensor-core)
+   Compiling cudarc v0.19.8
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/optin-3184/diag/crates/backend-cuda)
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/optin-3184/diag/crates/backend-cpu)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/optin-3184/diag/crates/autodiff)
+   Compiling objc2-metal v0.3.2
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/optin-3184/diag/crates/backend-metal)
+   Compiling bench-harness v0.11.0 (<home>/work/optin-3184/diag/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 22.39s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+infer_fixed_cost_diag (record-only, n=40):
+  upload      median=37.0 us
+  encode      median=6.6 us
+  commit_wait median=542.4 us
+  download    median=0.5 us
+  wall        median=588.6 us
+  gpu_busy    median=182.4 us
+  gpu_idle (wall - gpu_busy) median=406.2 us (69% of wall。転送を含むため H4 判定には使わない)
+  host_fixed (wall - gpu_busy - upload - download) median=368.7 us (63% of wall)
+  batches_with_timestamps/iter min=1 max=1; wait_until_completed/iter min=1 max=1
+test infer_fixed_cost_diag_tests::infer_fixed_cost_diag_wall_vs_gpu_busy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.08s
+

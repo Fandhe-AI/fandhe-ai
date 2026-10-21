@@ -1,0 +1,14 @@
+hardware: Mac mini (M4, P4+E6)
+chip: Apple M4
+gpu_cores: 10
+macos: 27.0.1
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+git_commit: c80d981840ab6bed86012cbf1d2fbfa8935ea7a8
+date_utc: 2026-10-21T18:48:28Z
+load_policy: exclusive_gate
+mtl_architecture_name: applegpu_g16g
+run1 completed at 2026-10-21T18:50:24Z
+run2 completed at 2026-10-21T18:50:43Z
+run3 completed at 2026-10-21T18:51:03Z
+run4 completed at 2026-10-21T18:51:22Z
+run5 completed at 2026-10-21T18:51:42Z

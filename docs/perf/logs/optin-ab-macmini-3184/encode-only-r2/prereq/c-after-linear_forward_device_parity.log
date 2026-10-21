@@ -1,0 +1,15 @@
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/optin-3184/after/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.46s
+     Running tests/linear_forward_device_parity.rs (<home>/work/optin-3184/target-tests/release/deps/linear_forward_device_parity-32869b0169d5bff7)
+
+running 6 tests
+test linear_forward_device_rejects_shape_mismatches_and_handles_empty_input ... ok
+test linear_forward_device_two_layer_chain_matches_cpu_reference ... ok
+test linear_forward_device_tracked_matches_linear_forward_device_and_leaves_token_unset ... ok
+test linear_forward_device_matches_cpu_reference ... ok
+test linear_forward_device_matches_gemm_resident_rhs_act_bit_exact ... ok
+[linear_forward_device_bench:metal] before_median_s=0.000953 after_median_s=0.000594 speedup_x=1.605
+test linear_forward_device_bench_metal ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
