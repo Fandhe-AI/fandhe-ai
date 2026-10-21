@@ -1,0 +1,8 @@
+# series=ab run=2 arm=jpw1 rev=ff3cc4b4d3c9a3c4210ce705b0e079f7d65b1100 start=2026-10-21T03:19:59Z
+arm=jpw1 series=threads shape=l1_fwd trans=nn m=64 n=256 k=784 rayon_threads=10 median_secs=0.000157084 gflops=163.544 checksum=0x40b128afdd627000
+arm=jpw1 series=threads shape=l1_dw trans=tn m=784 n=256 k=64 rayon_threads=10 median_secs=0.000154208 gflops=166.594 checksum=0x40a3c0856c6c1b80
+arm=jpw1 series=threads shape=l1_dx trans=nt m=64 n=784 k=256 rayon_threads=10 median_secs=0.000157916 gflops=162.682 checksum=0xc0d7791b1a023f00
+arm=jpw1 series=threads shape=l2_fwd trans=nn m=64 n=10 k=256 rayon_threads=10 median_secs=0.000024708 gflops=13.262 checksum=0xc0b7bdb5992a8000
+arm=jpw1 series=threads shape=l2_dw trans=tn m=256 n=10 k=64 rayon_threads=10 median_secs=0.000027084 gflops=12.099 checksum=0xc0b08c929e2dc000
+arm=jpw1 series=threads shape=l2_dx trans=nt m=64 n=256 k=10 rayon_threads=10 median_secs=0.000027375 gflops=11.970 checksum=0x40b26cd56e507d00
+arm=jpw1 series=threads shape=ref_square_512 trans=nn m=512 n=512 k=512 rayon_threads=10 median_secs=0.000765083 gflops=350.858 checksum=0xc0e9b13f0ea78000
