@@ -6,16 +6,29 @@
 # 使い方（Mac mini 上。作業ディレクトリ D に venv-torch と bench_py.py がある前提）:
 #   VENV_PY=<venv-torch/bin/python> BENCH_PY=<bench_py.py> DIAG=<opp_kernel_torch_diag.py> \
 #   REF_JSONL=<results-macmini-py-0.11.0-median5.jsonl> OUT=<出力ディレクトリ(未作成)> \
-#   [BENCH_FANDHE=<ビルド済み bench-fandhe>] bash run-macmini.sh
+#   REV_STAMP=<.rev-stamp> [BENCH_FANDHE=<ビルド済み bench-fandhe> TREE_TXT=<cargo tree の結果>] bash run-macmini.sh
 set -euo pipefail
 
-: "${VENV_PY:?}" "${BENCH_PY:?}" "${DIAG:?}" "${REF_JSONL:?}" "${OUT:?}"
+: "${VENV_PY:?}" "${BENCH_PY:?}" "${DIAG:?}" "${REF_JSONL:?}" "${OUT:?}" "${REV_STAMP:?}"
+# Rust 腕の既定スレッド数を守る（#3182 の orchestrator と同じ）。設定されていれば停止。
+if [ -n "${RAYON_NUM_THREADS:-}" ]; then
+  echo "RAYON_NUM_THREADS が設定されている（既定スレッドで測る）" >&2
+  exit 3
+fi
+[ -f "${REV_STAMP}" ] || { echo "REV_STAMP が無い: ${REV_STAMP}" >&2; exit 2; }
+if [ -n "${BENCH_FANDHE:-}" ]; then
+  : "${TREE_TXT:?}"
+  [ -f "${TREE_TXT}" ] || { echo "TREE_TXT が無い: ${TREE_TXT}" >&2; exit 2; }
+  { [ "$(wc -l < "${TREE_TXT}" | tr -d ' ')" = 1 ] && grep -Eq '^fandhe-ai v0\.11\.0$' "${TREE_TXT}"; } \
+    || { echo "tree.txt が fandhe-ai v0.11.0 の 1 行ではない" >&2; exit 2; }
+fi
 GATE_LOAD=3.0
 if [ -e "${OUT}" ]; then
   echo "OUT が既にある（上書きしない）: ${OUT}" >&2
   exit 2
 fi
 mkdir -p "${OUT}"
+cp "${REV_STAMP}" "${OUT}/rev-stamp.txt"
 GATE_LOG="${OUT}/gate.log"
 
 # 版の固定（RULE 項 2）。違えば停止。
@@ -25,6 +38,7 @@ GATE_LOG="${OUT}/gate.log"
   sw_vers; sysctl -n machdep.cpu.brand_string; sysctl hw.perflevel0.logicalcpu hw.perflevel1.logicalcpu
   "${VENV_PY}" -c 'import torch,numpy; print(torch.__config__.show()); print(torch.get_num_threads()); numpy.show_config()'
   shasum -a 256 "${BENCH_PY}"
+  date -u; uptime; pmset -g therm
 } > "${OUT}/env.txt" 2>&1
 
 wait_gate() { # $1=ラベル。load1 < GATE_LOAD になるまで 30 秒間隔で最大 30 分。
@@ -87,6 +101,7 @@ done
 # Python の計測を終えてから Rust 側の総和（ビルド済みバイナリのみ。cargo build はここでは走らせない）。
 if [ -n "${BENCH_FANDHE:-}" ]; then
   mkdir -p "${OUT}/rust"
+  cp "${TREE_TXT}" "${OUT}/rust/tree.txt"
   for n in 256 512 1024 2048 4096; do
     for r in 1 2 3 4 5; do
       wait_gate "rust/n${n}/r${r}"
