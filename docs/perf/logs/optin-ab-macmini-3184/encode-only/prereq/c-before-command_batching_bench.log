@@ -1,0 +1,12 @@
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/optin-3184/before/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.28s
+     Running tests/command_batching_bench.rs (<home>/work/optin-3184/target-tests/release/deps/command_batching_bench-7f12b63e33126177)
+
+running 2 tests
+[command_batching_micro_bench] steps=100 numel=1024 untracked_median_s=0.016306 (q1=0.016046, q3=0.016714) tracked_median_s=0.000365 (q1=0.000362, q3=0.000366) speedup_x=44.710 tracked_faster=true — record only, non-gating（本ファイル冒頭コメント参照）
+test command_batching_micro_bench_untracked_vs_tracked ... ok
+[pool_reuse_interleaved_with_tracked_steps_preserves_batching] steps=50 encode_delta=50 command_buffer_delta=1
+test pool_reuse_interleaved_with_tracked_steps_preserves_batching ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+

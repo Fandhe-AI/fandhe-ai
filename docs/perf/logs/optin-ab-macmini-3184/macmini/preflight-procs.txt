@@ -1,0 +1,14 @@
+series=g1 watchlist_procs=0
+series=g2s0 watchlist_procs=0
+series=g1w watchlist_procs=0
+series=g1f watchlist_procs=0
+series=g2w watchlist_procs=0
+series=g1f watchlist_procs=0
+series=g2w watchlist_procs=0
+series=g2f watchlist_procs=0
+series=g4 watchlist_procs=0
+series=g5 watchlist_procs=0
+series=g3 watchlist_procs=0
+series=g3ab watchlist_procs=0
+series=g6 watchlist_procs=0
+series=g7 watchlist_procs=0

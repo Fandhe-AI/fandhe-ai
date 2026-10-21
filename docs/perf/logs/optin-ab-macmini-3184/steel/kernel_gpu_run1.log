@@ -1,0 +1,68 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::steel_candidate_kernel_gpu_ab_production_sizes ... N=512 arm=base checksum=-203.019415 hash=457e680751d71ad4 bit_identical=true same_kernel=true same_tile=true
+N=512 arm=T0U checksum=-203.019415 hash=457e680751d71ad4 bit_identical=true same_kernel=false same_tile=false
+N=512 arm=LU checksum=-203.019415 hash=457e680751d71ad4 bit_identical=true same_kernel=false same_tile=true
+N=512 arm=T0U-LU checksum=-203.019415 hash=457e680751d71ad4 bit_identical=true same_kernel=false same_tile=false
+N=512 arm=T0U-LU-FB checksum=-203.019415 hash=457e680751d71ad4 bit_identical=true same_kernel=false same_tile=false
+N=512 arm=base resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.1149 q1=0.1140 q3=0.1166
+N=512 arm=T0U resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.1187 q1=0.1183 q3=0.1190
+N=512 arm=LU resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.1169 q1=0.1161 q3=0.1171
+N=512 arm=T0U-LU resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.1204 q1=0.1200 q3=0.1209
+N=512 arm=T0U-LU-FB resolved_tile=TileConfig { bm: 64, bn: 32, bk: 32, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.1163 q1=0.1160 q3=0.1165
+N=512 arm=base head_over_base_kernel_gpu=1.000000
+N=512 arm=T0U head_over_base_kernel_gpu=1.033731
+N=512 arm=LU head_over_base_kernel_gpu=1.017409
+N=512 arm=T0U-LU head_over_base_kernel_gpu=1.048240
+N=512 arm=T0U-LU-FB head_over_base_kernel_gpu=1.011969
+N=1024 arm=base checksum=10218.906884 hash=b1f7706c58676644 bit_identical=true same_kernel=true same_tile=true
+N=1024 arm=T0U checksum=10218.906884 hash=b1f7706c58676644 bit_identical=true same_kernel=false same_tile=false
+N=1024 arm=LU checksum=10218.906884 hash=b1f7706c58676644 bit_identical=true same_kernel=false same_tile=true
+N=1024 arm=T0U-LU checksum=10218.906884 hash=b1f7706c58676644 bit_identical=true same_kernel=false same_tile=false
+N=1024 arm=T0U-LU-FB checksum=10218.906884 hash=b1f7706c58676644 bit_identical=true same_kernel=false same_tile=false
+N=1024 arm=base resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.8751 q1=0.8736 q3=0.8782
+N=1024 arm=T0U resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.7855 q1=0.7834 q3=0.7902
+N=1024 arm=LU resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.8761 q1=0.8718 q3=0.8786
+N=1024 arm=T0U-LU resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.7793 q1=0.7763 q3=0.7819
+N=1024 arm=T0U-LU-FB resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=0.7480 q1=0.7457 q3=0.7496
+N=1024 arm=base head_over_base_kernel_gpu=1.000000
+N=1024 arm=T0U head_over_base_kernel_gpu=0.897586
+N=1024 arm=LU head_over_base_kernel_gpu=1.001143
+N=1024 arm=T0U-LU head_over_base_kernel_gpu=0.890492
+N=1024 arm=T0U-LU-FB head_over_base_kernel_gpu=0.854735
+N=2048 arm=base checksum=-2977.291236 hash=0196fbbc46dc3ad3 bit_identical=true same_kernel=true same_tile=true
+N=2048 arm=T0U checksum=-2977.291236 hash=0196fbbc46dc3ad3 bit_identical=true same_kernel=false same_tile=false
+N=2048 arm=LU checksum=-2977.291236 hash=0196fbbc46dc3ad3 bit_identical=true same_kernel=false same_tile=true
+N=2048 arm=T0U-LU checksum=-2977.291236 hash=0196fbbc46dc3ad3 bit_identical=true same_kernel=false same_tile=false
+N=2048 arm=T0U-LU-FB checksum=-2977.291236 hash=0196fbbc46dc3ad3 bit_identical=true same_kernel=false same_tile=false
+N=2048 arm=base resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=8.0534 q1=8.0296 q3=8.0941
+N=2048 arm=T0U resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=6.1520 q1=6.1476 q3=6.1579
+N=2048 arm=LU resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=8.0561 q1=8.0277 q3=8.0803
+N=2048 arm=T0U-LU resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=6.1081 q1=6.1014 q3=6.1138
+N=2048 arm=T0U-LU-FB resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=5.8433 q1=5.8328 q3=5.8533
+N=2048 arm=base head_over_base_kernel_gpu=1.000000
+N=2048 arm=T0U head_over_base_kernel_gpu=0.763905
+N=2048 arm=LU head_over_base_kernel_gpu=1.000336
+N=2048 arm=T0U-LU head_over_base_kernel_gpu=0.758451
+N=2048 arm=T0U-LU-FB head_over_base_kernel_gpu=0.725562
+N=4096 arm=base checksum=-16035.539505 hash=08b2a5087bcc233c bit_identical=true same_kernel=true same_tile=true
+N=4096 arm=T0U checksum=-16035.539505 hash=08b2a5087bcc233c bit_identical=true same_kernel=false same_tile=false
+N=4096 arm=LU checksum=-16035.539505 hash=08b2a5087bcc233c bit_identical=true same_kernel=false same_tile=true
+N=4096 arm=T0U-LU checksum=-16035.539505 hash=08b2a5087bcc233c bit_identical=true same_kernel=false same_tile=false
+N=4096 arm=T0U-LU-FB checksum=-16035.539505 hash=08b2a5087bcc233c bit_identical=true same_kernel=false same_tile=false
+N=4096 arm=base resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=64.9826 q1=64.8813 q3=65.0535
+N=4096 arm=T0U resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=50.5442 q1=50.1740 q3=50.5777
+N=4096 arm=LU resolved_tile=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=65.0533 q1=64.8791 q3=65.2034
+N=4096 arm=T0U-LU resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=49.1547 q1=49.1200 q3=49.2207
+N=4096 arm=T0U-LU-FB resolved_tile=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true } kernel_gpu_median_ms=47.0174 q1=46.9116 q3=47.0828
+N=4096 arm=base head_over_base_kernel_gpu=1.000000
+N=4096 arm=T0U head_over_base_kernel_gpu=0.777812
+N=4096 arm=LU head_over_base_kernel_gpu=1.001088
+N=4096 arm=T0U-LU head_over_base_kernel_gpu=0.756429
+N=4096 arm=T0U-LU-FB head_over_base_kernel_gpu=0.723538
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 19.34s
+

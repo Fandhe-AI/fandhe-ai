@@ -1,0 +1,8 @@
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000717333,"q1_s":0.000692334,"q3_s":0.000750687,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000705438,"q1_s":0.000676552,"q3_s":0.000732781,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000207042}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000727208,"q1_s":0.000695958,"q3_s":0.000748812,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000708458,"q1_s":0.000683260,"q3_s":0.000736906,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000189291}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000727729,"q1_s":0.000701666,"q3_s":0.000762603,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000710104,"q1_s":0.000678907,"q3_s":0.000732677,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000192750}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000713333,"q1_s":0.000690479,"q3_s":0.000746438,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cpu","size":64,"median_s":0.000696625,"q1_s":0.000670781,"q3_s":0.000727448,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.000191334}

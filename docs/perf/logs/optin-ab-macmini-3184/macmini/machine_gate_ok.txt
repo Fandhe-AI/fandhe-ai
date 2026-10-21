@@ -1,0 +1,10 @@
+load-gate-2104-cpu-3184-macmini-g1.log: round1=0(load1=5.65) round2=0(load1=5.65) round3=0(load1=5.65) round4=0(load1=5.65) round5=0(load1=5.65) machine_gate_ok=0
+load-gate-2104-cpu-3184-macmini-g1w.log: round1=0(load1=7.77) round2=0(load1=7.77) round3=0(load1=7.77) round4=0(load1=7.77) round5=0(load1=7.77) machine_gate_ok=0
+load-gate-2104-cpu-3184-macmini-g1f.log: round1=0(load1=7.79) round2=0(load1=7.97) round3=0(load1=7.97) round4=0(load1=7.97) round5=0(load1=7.97) machine_gate_ok=0
+load_gate-2102-cpu-3184-macmini-g2w.log: round1=0(load1=7.18) round2=0(load1=7.78) round3=0(load1=6.1) round4=0(load1=6.13) round5=0(load1=None) machine_gate_ok=0
+load_gate-2102-cpu-3184-macmini-g2f.log: round1=0(load1=7.4) round2=0(load1=6.07) round3=0(load1=5.98) round4=0(load1=7.25) round5=0(load1=7.78) machine_gate_ok=0
+load-gate-2113-metal-3184-macmini-g3.log: round1=0(load1=5.81) round2=0(load1=5.43) round3=0(load1=5.43) round4=0(load1=5.43) round5=0(load1=5.43) machine_gate_ok=0
+uptime-readback-ab-head-26e60f63-3184-macmini-g4.log: round 対応なし（uptime 定期サンプル 3 件）machine_gate_ok=undetermined
+uptime-readout-ab-head-26e60f63-3184-macmini-g5.log: round 対応なし（uptime 定期サンプル 5 件）machine_gate_ok=undetermined
+load_gate.log: round1=0(load1=3.0) round2=1(load1=2.0) round3=1(load1=2.0) round4=1(load1=1.0) round5=1(load1=1.0) machine_gate_ok=0
+load_gate.log: round1=0(load1=8.53) round2=0(load1=8.53) round3=0(load1=8.53) round4=0(load1=8.53) round5=0(load1=8.53) machine_gate_ok=0

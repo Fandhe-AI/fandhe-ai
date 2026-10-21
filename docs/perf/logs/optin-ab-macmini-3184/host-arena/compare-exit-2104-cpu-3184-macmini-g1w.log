@@ -1,0 +1,2 @@
+compare task=train exit=3
+compare task=infer exit=3
