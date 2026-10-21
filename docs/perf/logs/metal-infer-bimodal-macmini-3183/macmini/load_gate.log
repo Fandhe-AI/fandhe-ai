@@ -1,0 +1,8 @@
+run1 load1=16.49 try=0
+run1 load1=7.33 try=1
+run1 load1=3.52 try=2
+run1 load1=2.15 try=3
+run2 load1=2.15 try=0
+run3 load1=2.15 try=0
+run4 load1=2.15 try=0
+run5 load1=2.14 try=0
