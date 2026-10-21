@@ -1,4 +1,4 @@
-# GB10 CPU GEMM の reuse>fresh 逆転の帰属（診断基盤。実機実測は未実施）
+# GB10 CPU GEMM の reuse>fresh 逆転の帰属（GB10 実測済み。2026-10-21）
 
 イシュー #3187。対応表の GEMM（GB10 CPU）で N=256／512 が負けている（reuse の対最速比が
 0.74／0.70）。0.11.0 の GB10 実測では reuse が fresh より遅い（N=256〜2048 の全点で
@@ -11,14 +11,15 @@
 | 項目 | 状態 |
 |---|---|
 | フェーズ分解テスト（`crates/facade/tests/cpu_gemm_reuse_fresh_diag.rs`） | 実装済み（CI 実行の bit 一致テスト 1 本 + 実機用 `#[ignore]` 1 本） |
-| 事前登録の判定規則（`docs/perf/logs/cpu-gemm-reuse-fresh-3187/RULE.txt`） | 固定済み（実測前） |
-| 計測・集計スクリプト（`orchestrate.sh`／`aggregate.py`） | 実装済み（`aggregate.py --self-test` あり。M4 Max 手元機で JSONL 形式の疎通のみ確認し、数値は記録に使わない） |
-| GB10 での 5 run 実測と帰属判定（AC1） | **未実施（実機セッションへ申し送り）** |
-| affinity A/B（#2117 の RULE.txt どおり 14 セル 5 round。AC2） | **未実施（verdict は undetermined のまま）** |
-| `.rev-stamp` による計測ツリーの同定（AC3） | 実測時に `orchestrate.sh` が `env_info.txt` へ記録する（`.rev-stamp` 無しは開始前に停止） |
-| `GB10_AFFINITY_ENABLED`（AC4） | false のまま（`crates/backend-cpu/src/gb10_affinity.rs` 無変更） |
+| 事前登録の判定規則（`docs/perf/logs/cpu-gemm-reuse-fresh-3187/RULE.txt`） | 固定済み（実測前）。本実測で変更していない |
+| 計測・集計スクリプト（`orchestrate.sh`／`aggregate.py`） | 実装済み（`aggregate.py --self-test` OK） |
+| GB10 での 5 run 実測と帰属判定（AC1） | **実測済み（2026-10-21）。5 run すべて負荷ゲート通過・checksum 全 bit 一致・n_samples=80。結果は §6** |
+| affinity A/B（#2117 の RULE.txt どおり 14 セル 5 round。AC2） | **実測済み（2026-10-21）。正式系列・verdict は REJECT。結果は §4** |
+| `.rev-stamp` による計測ツリーの同定（AC3） | 実測済み。runner・before・after の 3 ツリーに `.rev-stamp`（HEAD `d56c64ba87e825e0fa6b6e0958c456214d9083f6`・dirty=0）を置き、ツリー指紋を Mac 側 `git archive` 展開物と突合した（`logs/cpu-gemm-reuse-fresh-3187/rev-stamp-verification-3187.md`）。`env_info.txt` の `rule_sha256` は RULE.txt と一致 |
+| `GB10_AFFINITY_ENABLED`（AC4） | false のまま（`crates/backend-cpu/src/gb10_affinity.rs` 無変更。REJECT のため反転しない） |
 
-本書に実測値は載せていない。数値は §6 を実機セッションで RULE.txt の規則に沿って埋める。
+実測ログは `docs/perf/logs/cpu-gemm-reuse-fresh-3187/gb10/`（5 run）・`gb10-minflt/`（補助 1 run）・
+`docs/perf/logs/cpu-gb10-affinity-ab-2117/gb10/`（A/B）。実測コミットは `d56c64ba8`（本イシューの実装ブランチの起点）。
 
 ## 2. 仮説
 
@@ -57,31 +58,62 @@
 ## 4. affinity A/B（#2117）
 
 判定規則は `docs/perf/logs/cpu-gb10-affinity-ab-2117/RULE.txt`、実行は
-`scripts/bench/framework-compare/run_ab_gb10_affinity_cpu.sh`。手順は同ディレクトリ README.md。
-結果は `cpu-gemm-gb10-affinity-ab.md` に記入する。ADOPT でも本イシューでは
-`GB10_AFFINITY_ENABLED` を変えない（既定反転は #3227）。
+`scripts/bench/framework-compare/run_ab_gb10_affinity_cpu.sh`（ラベル `2117-gb10-3187`）。
+結果の全 14 セルは `cpu-gemm-gb10-affinity-ab.md` に記入した。
+
+- 系列: 正式（`series=official`・`precheck=assert`）。5 round すべて `gate=pass gate_ok=1`
+  （`logs/cpu-gb10-affinity-ab-2117/gb10/load_gate-2117-cpu-2117-gb10-3187.log`）
+- 機構発火: before は `enabled=false`・`pool_active=false`、after は `enabled=true`・`env_override=false`・
+  大コア 10 個（`[5,6,7,8,9,15,16,17,18,19]`）・`pool_active=true`（`affinity-report-2117-*`）
+- checksum: 14 セルすべてで完全一致
+- 判定: **REJECT**。中央値 ratio（after/before）が 1.00 を超えたセルは 6 つ
+  （gemm 512/fresh 1.0857・512/reuse 1.0341・1024/reuse 1.0043・2048/fresh 1.0449、train size=64 の
+  fresh 1.0662・reuse 1.1115）。train reuse は 5 round すべてで 1.00 超。RULE どおり、ガードセルの除外や
+  閾値の事後調整はしていない
+- 処置セル（N=256）は fresh 0.8352・reuse 0.9979 で非後退、infer は 0.7470／0.7704 で改善しており、
+  効く形状と悪化する形状が混在する（既定 ON にはできない）
+- `GB10_AFFINITY_ENABLED` は変えていない（false のまま）。`GB10_AFFINITY_MAX_WORK` の再チューニングは
+  RULE の対象外（別イシュー）
 
 ## 5. 申し送り
 
 | 項目 | 担当 |
 |---|---|
-| 逆転の是正（glibc の mmap 閾値・出力プール・Tape 結果の解放・prefault 等）。本書は列挙のみで実装しない | #3226 |
-| affinity の既定反転（A/B が ADOPT の場合） | #3227 |
-| 0.11.0 境界の同一セッション照合（framework-compare の `bench-fandhe` を fresh／reuse で各 5 run。record-only） | 実機セッション（本 PR では `orchestrate.sh` に `boundary` を実装していない） |
+| 逆転の是正（glibc の mmap 閾値・出力プール・Tape 結果の解放・prefault 等）。**§6 の結論から、是正の対象は「出力バッファの新規確保（first-touch のページフォールト）」。既存の host arena（#2104）は reuse で hit=0 のため効かない**。本書は列挙のみで実装しない | #3226 |
+| affinity の既定反転 | #3227。**A/B が REJECT のため反転の前提が成立していない**（`GB10_AFFINITY_ENABLED` は false のまま）。#3227 は判断が必要 |
+| 0.11.0 境界の同一セッション照合（framework-compare の `bench-fandhe` を fresh／reuse で各 5 run。record-only） | **本イシューでは対象外**（`orchestrate.sh` に boundary モードが無く、AC にも含まれない）。必要なら別イシュー |
 
-## 6. 結果（未実測）
+## 6. 結果（GB10・2026-10-21）
+
+出典: `docs/perf/logs/cpu-gemm-reuse-fresh-3187/gb10/aggregate.md`（5 run 中央値。単位 us）、
+補助は `gb10-minflt/aggregate.md`。
 
 | N | ratio (reuse/fresh) | G | 帰属 | rho_FH | rho_B | arena A/B |
 |---|---|---|---|---|---|---|
-| 256 | 未実測 | — | — | — | — | — |
-| 512 | 未実測 | — | — | — | — | — |
-| 1024 | 未実測 | — | — | — | — | — |
-| 2048 | 未実測 | — | — | — | — | — |
+| 256 | 1.434（fresh 179.9／reuse 258.0） | 79.4 | matmul（出力確保・結果蓄積）100% | 0.77（支持） | 0.72（支持） | fresh_arena hit=780・reuse_arena hit=0。host arena では是正できない（240.4 対 258.0） |
+| 512 | 1.563（794.2／1241.6） | 459.1 | matmul 100% | 1.01（支持） | 0.94（支持） | 同上（1292.8 対 1241.6） |
+| 1024 | 1.495（3105.5／4641.2） | 1370.9 | matmul 115% | 0.96（支持） | 1.03（支持） | 同上（4578.0 対 4641.2） |
+| 2048 | 1.116（16091.6／17952.4） | 1881.8 | matmul 101% | 1.06（支持） | 0.97（支持） | 同上（17783.9 対 17952.4） |
 
-総合: **未確定（実測未実施）**
+総合: **逆転は 4 サイズすべてで再現（ratio 1.12〜1.56）。原因は matmul 区間の出力確保（結果蓄積）。**
+
+- 区間差は matmul 区間にほぼ集中する（D_matmul 79.6／459.2／1581.5／1891.2 us に対し、D_readout は ±0.1 us 以内。
+  D_checksum は N=1024 だけ -210.6 us で、fresh 側の checksum に二峰性〈757／542 us〉があるため。G の符号は変わらない）
+- 因果腕: 結果を保持するだけで（fresh_hold）fresh の matmul が reuse の水準まで悪化し（rho_FH 0.77〜1.06）、
+  Tape を介さず `BackendOps::gemm` の結果を保持するだけでも同じ（backend_hold。rho_B 0.72〜1.03）。
+  tape／autodiff の機構ではなく、**結果を保持し続けることで毎回新しい出力バッファが必要になる**ことが原因
+- ページ確保（補助・判定外。`gb10-minflt/aggregate.md`、pagesize 4096 B。minflt／iter を N²×4／PAGESIZE で割った比）:
+  fresh と backend_drop は 0.00（解放済みブロックを再利用）、reuse は 1.37（N=256）・1.73・1.81・1.84、
+  backend_hold は 0.60・1.00（N=512）・1.92・1.26。結果を保持する腕だけが毎反復ほぼ出力 1 枚分のページを
+  新規に first-touch しており、機構は H-P（新規確保対解放済みブロック再利用）と整合する。
+  比が 1 を超える点（1.4〜1.9）は出力以外のページ（packing 用領域等）の寄与を含みうるが、本計測では切り分けていない
+- readout 方式（H-R）と checksum 側（H-C）は支持されない（D_readout ≈ 0。legacy 腕は読み出しコピー分が増えるだけで
+  fresh／reuse の差は縮まない）
+- arena A/B: reuse_arena の hit は 0（事前予測どおり）。`|reuse_arena − reuse| < 0.5×(reuse − fresh)` を 4 サイズとも満たし、
+  「既存の host arena（#2104）では reuse の逆転を是正できない」を記録する
 
 ## 7. 限界
 
-- 5 run は同一ホスト・同一セッション。GB10 の専有ゲート（load1<1.0）を通らない run がある場合は参考扱い
+- 5 run は同一ホスト・同一セッション。GB10 の専有ゲート（load1<1.0）は 5 run すべて通過した（`load_gate_status.txt`: pass×5。補助 1 run も pass）。record_only の系列はない
 - arena 統計は warmup を含むブロック全体の累計
 - N=4096 の同型の帰属、M4 Max の正式系列は対象外（Issue は N=256〜2048、GB10 限定）

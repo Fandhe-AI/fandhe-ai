@@ -1,8 +1,8 @@
 # GB10 大コア affinity（#1576）A/B の事前登録規則・実行基盤（イシュー #2117）
 
-状態: **未実測**（実行ホストが x86_64 で DGX Spark GB10 への到達手段が無い）。
-`GB10_AFFINITY_ENABLED = false`（`crates/backend-cpu/src/gb10_affinity.rs`）は維持し、実測・判定・結線は GB10 セッションへ申し送る。
-実測値・推定値は本ディレクトリにも `docs/perf/cpu-gemm-gb10-affinity-ab.md` にも記入していない（verdict は undetermined のまま）。
+状態: **GB10 で実測済み（2026-10-21・イシュー #3187。ラベル `2117-gb10-3187`）。verdict は REJECT**
+（正式系列。14 セル中 6 セルで中央値 ratio > 1.00。詳細は `docs/perf/cpu-gemm-gb10-affinity-ab.md` の記入欄）。
+`GB10_AFFINITY_ENABLED = false`（`crates/backend-cpu/src/gb10_affinity.rs`）は維持している。
 
 ## 収録物
 
@@ -11,7 +11,7 @@
 | `RULE.txt` | 実測前に固定した判定規則（14 セル・5 round 中央値・checksum 完全一致・専有ゲート load1<1.0・機構発火の前提） |
 | `on-arm.patch` | after 腕用の 1 行差分（`GB10_AFFINITY_ENABLED = false -> true`） |
 | `smoke-x86/` | x86 でのパイプライン疎通 smoke（**系列ではない**。機構は発火せず ratio に意味はない） |
-| `gb10/` | （GB10 セッションで追加）正式系列の生ログ・env_info・compare 表 |
+| `gb10/` | 正式系列（`2117-gb10-3187`）の生ログ（`results-{before,after}-*-cpu-{gemm,train,infer}.jsonl`）・`compare-{gemm,train,infer}-*.md`・`compare-exit-*.log`・`load_gate-*.log`・`affinity-report-*.txt`・`env_info-*.txt`・`tree-*`・`sha-*`・`uptime-*`・`build-*.err`・`skipped-*.log`。ELF（`bench-fandhe-2117-*`）は収録しない。ホスト名・`$HOME` はマスク済み。計測ツリーの同定は `../cpu-gemm-reuse-fresh-3187/rev-stamp-verification-3187.md` |
 
 ## GB10 での実行手順
 
@@ -31,6 +31,8 @@
    ADOPT なら `RULE.txt` の「ADOPT 時の結線」を別 PR で実施する。
 
 ## 注意
+
+- 実測では before／after の checkout に `.rev-stamp`（HEAD の sha）を置き、`.git/info/exclude` へ追記して `verify_no_untracked_build_inputs` を通した（未追跡扱いにならない）。
 
 - after worktree では `--lib` テストを実行しない（`GB10_AFFINITY_ENABLED` が false 前提の単体テストが落ちる）。
   機構発火の確認は結合テスト `--test gb10_affinity_report` のみ（スクリプトが実行する）。

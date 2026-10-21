@@ -1,0 +1,12 @@
+date_utc: 2026-10-21T10:32:08Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+pagesize: 4096
+thp: always [madvise] never
+glibc: ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+rev_stamp_head: d56c64ba87e825e0fa6b6e0958c456214d9083f6
+rev_stamp_dirty: dirty=0
+rule_sha256: d57ba0221ef9f20fbcb4f128c36ecbf0c5071929a6f7a6d600ce5a1cc8bf26f3
+RAYON_NUM_THREADS: unset
+host_kind: gb10
