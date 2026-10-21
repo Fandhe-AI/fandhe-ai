@@ -1,0 +1,77 @@
+RULE2 fixed-at-utc: 2026-10-21T16:48:22Z (第 2 ラウンドの実機計測より前にコミットして固定。事後に緩めない)
+issue: #3183 Mac mini の infer Metal reuse の二峰性の原因特定（診断のみ・第 2 ラウンド）
+doc: docs/perf/metal-infer-bimodal-macmini.md
+前提: RULE.txt（第 1 ラウンド）は変更しない。固定済みの事前登録へ後から追記すると緩めたように見えるため、
+      第 2 ラウンドの規則は本ファイルへ別に固定する。RULE.txt の checksum 規則・マスク規則・負荷ゲートは本ラウンドも踏襲する。
+
+[位置づけ]
+- 第 1 ラウンドで残った課題を切り分ける: (AC2) 増分の場所は「GPU チェーン全体」までしか絞れていない / (AC3) B 水準 0.388 ms も
+  bench 対照 0.427 ms も再現していない。
+- 第 1 ラウンドの生ログを事後に探索して得た仮説（判定には使わない。第 2 ラウンドの新規実測で本規則により確かめる）:
+  H1 run 内の裾は GPU 実行時間ではなく commit_wait（ホスト側の完了待ち）で増える / H2 run 全体の低性能状態（run1）/
+  H3 bench と同じ窓（計測 iter 0〜19）の立ち上がり / H4 v0.11.0 と main HEAD の版差 / H5 train 直後という実行順。
+- ライブラリのコード・既定値・診断テストは変えない（AC4）。新しい診断カウンタも足さない。
+
+[計測条件（5 run。run ごとに条件の起動順を巡回ローテーション）]
+- 条件（1 条件 = 1 プロセス。腕ごとに warmup 20 + 計測 500 反復。RULE.txt の腕と同じテスト関数）:
+  - HEAD-R / HEAD-D / HEAD-Don / HEAD-G: 実装ツリー（main HEAD）の診断テスト
+  - v0110-R / v0110-D / v0110-Don: `git archive v0.11.0` を展開したツリーに、HEAD の
+    `crates/facade/tests/metal_infer_bimodal_diag.rs` だけを重ねたテスト（G は v0.11.0 で可視性が異なるため対象外）
+  - Bc : bench-fandhe（crates.io fandhe-ai =0.11.0・変更なし）の `infer metal 64 reuse` を 1 プロセス
+  - BcT: bench-fandhe の `train metal 64 reuse` の直後に `infer metal 64 reuse`（系列 A／B の実行順を再現）。記録・判定に使うのは infer の行
+- 起動順: 9 条件の並び [HEAD-R, HEAD-D, HEAD-Don, HEAD-G, v0110-R, v0110-D, v0110-Don, Bc, BcT] を、run n では
+  2×(n-1) 個ずつ左へ巡回させた順に実行する（run1 は先頭が HEAD-R、run2 は HEAD-Don、run3 は v0110-R、run4 は v0110-Don、run5 は BcT）。
+- run1 はビルド終了の直後に始める（第 1 ラウンドと同じ）。各 run の開始時にビルド終了からの経過秒数・load1・load5・
+  CPU 使用率上位プロセス・pmset therm・低電力モードを記録する（記録のみ）。
+- v0.11.0 ツリーがビルドできない場合、またはノードの空き容量が 20 GiB 未満の場合は、v0110 条件を「未実施（理由）」として
+  記録し（v0110/NOT_RUN.txt）、残りの条件で続ける。この場合の (v) は判定不能とし、(h) は HEAD-R の W で代用する。
+- 負荷ゲート: 各 run 開始前に load1 < 3.0 を 60 秒間隔で最大 20 回待つ（超過 GATE-TIMEOUT、値不正 GATE-INVALID で系列無効）。
+- ほかのプロセスを並走させない。ビルドは計測前に 1 回だけ。
+
+[裾の帰属（AC2。全腕×全 run）]
+- 裾 = iter_total（G は wall）が、その腕×run の中央値の 1.25 倍を超える反復。それ以外を本体とする。
+- 対象 run: 裾が 10 反復（2%）以上ある腕×run（本体が空でないこと）。
+- 区間 P: R は predict_resident・host_copy・checksum、D と Don は provider_select・tape_new・snapshot・chain・host_copy・checksum、
+  G は upload・encode・commit_wait・gpu_busy・commit_wait-gpu_busy・download。
+  Δ_P = median(P|裾) - median(P|本体)、Δ_total = median(iter_total|裾) - median(iter_total|本体)、比 = Δ_P / Δ_total。
+- 帰属: 対象 run の過半数で比 >= 0.5 になった区間。該当なしなら「特定できなかった」と記す。
+- 追加判定「GPU 実行時間は不変」（G）: 対象 run の過半数で |Δ gpu_busy| / median(gpu_busy|本体) < 5%。
+- gpu_busy が null の反復は区間側だけでなく Δ_total の標本からも外し、件数を報告する。
+- 帰属は commit_wait - gpu_busy（ホスト側の完了待ち）までとする。commit_wait を GPUStartTime より前と GPUEndTime より後に
+  さらに分けるには context.rs への cfg(test) アクセサが要り、ライブラリのファイルを変えるため本ラウンドの対象外とする。
+- 記録のみ: 0.4 ms を超える反復の割合を腕×run ごとに出す。RULE.txt の 5% 規則による多峰判定も併記する。
+
+[run 全体の低性能状態（H2）]
+- GPU の代理指標: HEAD-G の gpu_busy の run 中央値。CPU の代理指標: HEAD-R の checksum 区間の run 中央値（v0110-R も記録）。
+- 「低性能 run」: その指標が、5 run の中央値の 1.5 倍以上の run。GPU と CPU の両方で低性能の run を
+  「システム全体の低性能状態」とする。起動順・経過秒数・load・上位プロセスは並べて記録のみ（判定に使わない）。
+
+[立ち上がり窓（H3。bench と同じ窓）]
+- 各腕×run について、計測 iter 0〜19 の中央値（窓 W）と iter 20〜499 の中央値（定常 S）を求める（bench の計測は
+  プロセス内の反復 20〜39、すなわち warmup 20 の直後の 20 反復で、これが計測 iter 0〜19 に当たる）。
+- W / S >= 1.10 の腕×run を「立ち上がり上振れ」とし、件数を報告する。
+
+[系列 A／B の説明（AC3）。以下はすべて run 単位の値の 5 run 中央値で判定する]
+- (v) 版差あり: v0110-R の S ÷ HEAD-R の S が 1.10 以上、または 1/1.10 以下
+- (h) bench 固有の差あり: Bc ÷ v0110-R の W が 1.10 以上（v0110 が未実施・無効なら HEAD-R の W で代用し、その旨を明記）
+- (o) 実行順の効果あり: BcT ÷ Bc が 1.10 以上
+- B 水準の再現: Bc・BcT・HEAD-R の W・v0110-R の W のいずれかが 0.388 ms の ±10% に入る
+- A 水準の再現: 上のいずれかが 0.539 ms の ±10% に入る、または低性能 run（システム全体）の R の run 中央値が 0.539 ms の ±10% に入る
+- 結論: 両方を再現 =「説明できる」、片方 =「部分的」、どちらもなし =「説明できない」。再現した条件（立ち上がり・版差・
+  実行順・低性能状態）を併記する。
+
+[checksum 規則（hard・fail-closed）]
+- RULE.txt と同じ。加えて v0110 の checksum を HEAD と照合する。v0110 内で不一致（腕間・run 間）なら系列無効。
+  v0110 が HEAD と一致しない場合は不一致と記録し、版差による出力の差は判定不能として性能値の比較から外す。
+- bench 対照（Bc・BcT 全 run）の checksum は一致すること。1 つでも不一致・欠落・行数不正・非有限なら系列は無効（exit != 0）。
+
+[第 1 ラウンドへの適用]
+- 本規則を第 1 ラウンドの生ログへ適用した結果（macmini-r2/posthoc-r1.md）は事後の探索であり、判定に使わない。
+
+[記録の出どころ]
+- 実装ツリーは git archive から作った転送物で、ツリー直下に .rev-stamp（1 行目が HEAD）と .tree-manifest（sha256 の一覧）を置き、
+  ノードで照合してから計測する（照合に失敗すれば停止）。env_info の git_head は .rev-stamp、tree_fingerprint は
+  .tree-manifest 自体の sha256。
+
+[マスク規則]
+- ホスト名は masked、$HOME は <home> に置換してから収録する（上位プロセスの comm も同様）。

@@ -1,6 +1,6 @@
 # Mac mini の infer Metal reuse の二峰性の原因特定（イシュー #3183）
 
-**状態: Mac mini で 5 run 実測済み（2026-10-21・負荷ゲート 5 run とも pass・集計は exit 0）。** AC1（分布）・AC3（系列 A／B の説明）は充足、AC2（帰属）は「GPU チェーン区間まで特定・その内訳は未特定」と明記して充足。AC4（ライブラリのコードと既定値を変えない）も充足している。生ログは `logs/metal-infer-bimodal-macmini-3183/macmini/`。
+**状態（第 1 ラウンド後の評価。第 2 ラウンドの結果は §6 で上書きする）: Mac mini で 5 run 実測済み（2026-10-21・負荷ゲート 5 run とも pass・集計は exit 0）。** AC1（分布）は充足。AC2（帰属）は「GPU チェーン全体」までで、encode／commit_wait／gpu_busy の内訳は未特定（腕 G で多峰を再現できなかったため）。AC3（系列 A／B の説明）は **部分的**（事前登録の機械判定は「説明できる」だが run1 の張り付きにほぼ依存し、B 水準 0.388 ms も bench 対照 0.427 ms も再現していない）。AC4（ライブラリのコードと既定値を変えない）は充足している。生ログは `logs/metal-infer-bimodal-macmini-3183/macmini/`。
 
 ## 1. 背景
 
@@ -43,6 +43,7 @@
 - 多峰の run は R／D／Don で各 1 run（5 run 中）だけ。いずれも高モードは 0.44〜0.46 ms（低モード比 約 +0.12〜0.14 ms）で、反復の 6〜9% を占め、プロセス内で 29〜37 回切り替わる（モード連続長の中央値 12〜22 反復）。プロセス単位の固着ではなく、同一プロセス内で交互に出現する
 - run1 は別の現象で、R と G が run 全体で 0.55 ms 付近（Q3/Q1 約 1.75）に張り付いた。同じ run1 の D と Don（R の直後に起動、G の直前）は 0.31〜0.32 ms で、腕固有ではなく時間局所の状態に見える。原因は特定できていない（OS 要因は取得できた範囲では差がない）
 - 腕 G（facade 層を含まない GPU 実行）は、run1 の全体上振れを除き多峰の run がない
+- 追記（第 2 ラウンドでの訂正）: 上の「多峰の run」は RULE.txt の閾値（両側 5% 以上が残る位置の相対ギャップ 10% 以上）による判定で、各腕 1 run だけになる。一方、0.4 ms を超える反復は 20 の腕×run のうち 18 で 1.6〜8.2% 出ており（`logs/metal-infer-bimodal-macmini-3183/macmini-r2/posthoc-r1.md`。事後・探索）、高モードに当たる反復はほぼ常に現れている。5% 規則が「多峰」を稀に見せているだけで、分布が単峰だったわけではない
 
 ### 3.2 帰属（AC2）
 
@@ -53,10 +54,12 @@
 
 ### 3.3 系列 A／B の差の説明（AC3）
 
-`aggregate.py` の事前登録判定（腕 R・連続 20 反復の窓）の結論は「説明できる」。
+`aggregate.py` の事前登録判定（腕 R・連続 20 反復の窓）の機械判定は「説明できる」。ただしこれは事前登録の機械判定であり、次の限定付きで **「部分的」** と読み替える（第 2 ラウンドでの訂正。冒頭の状態行も同じ評価）。
 
 - 窓中央値の 5〜95% は 0.315〜0.586 ms で、bench 観測の B=0.388 ms・A=0.539 ms の両方を含む。窓中央値が低側に入る割合は 84.9%、高側は 15.1%（条件 (a)(b)(c) はすべて成立）
-- ただし限定付き。R の run 別中央値は 0.323〜0.550 ms で、系列 A に近い値は run1 の張り付き（0.550 ms）だけである。5 run 中央値の中央値のブートストラップ 5〜95% は 0.322〜0.326 ms（参考・判定に不使用）で、系列 B の 0.388 ms には届かない。R の水準が bench 側より低いことは §4 の水準比較も参照
+- 限定: 条件 (c) と窓中央値の 5〜95% の広がりは run1 の張り付き（R が 0.55 ms）にほぼ依存している。B 水準 0.388 ms も bench 対照 0.427 ms も、run1 を除く R の水準では再現していない。R の run 別中央値は 0.323〜0.550 ms で、系列 A に近い値は run1 の張り付き（0.550 ms）だけである。5 run 中央値の中央値のブートストラップ 5〜95% は 0.322〜0.326 ms（参考・判定に不使用）で、系列 B の 0.388 ms には届かない。R の水準が bench 側より低いことは §4 の水準比較も参照
+
+- bench 比（B・A を低モード中央値 0.323 ms で割った値）は 1.20／1.67。第 1 ラウンドの `aggregate.md` は分母を定数 0.385 ms にしており 1.01／1.40 と出ていたが、RULE.txt は「低モード中央値で割った比」と定めており、同じ表の低モード中央値と食い違っていたため第 2 ラウンドで分母を実測値に訂正した（記録のみで判定は変わらない。`macmini/aggregate.md` は再生成済み）
 
 ### 3.4 #3191 への申し送り（安定させたときの比）
 
@@ -69,7 +72,7 @@
 - bench-fandhe は crates.io の `fandhe-ai =0.11.0`、本診断は main HEAD を使う。`v0.11.0..HEAD` には `crates/autodiff/src/optim/device_store.rs`（約 380 行）、`crates/backend-metal/src/ops.rs`（約 590 行）、`crates/facade/src/compat/sequential.rs` ほかの変更があり、infer チェーンへの影響の有無は実測側で R 腕の水準が bench 対照（0.11.0）と同程度かで確かめる。同程度でなければ原因特定の前提が崩れるため、その旨を結果に書く
 - M4 Max での同じ診断は対象外
 - 実測時の補足（2026-10-21）:
-  - `env_info.txt` の `git_head` 行が空で `fatal: gitfile does not point to a valid repository` が出ているのは、転送ツリーに worktree 由来の `.git` ファイル（ディレクトリではなく gitfile）が rsync の除外パターン `.git/` をすり抜けて渡り、ノード側で解決できないため。リビジョンは転送時の `.rev-stamp`（`macmini/rev-stamp.txt` = 計測時の HEAD）で特定する。転送物に秘密情報（`.env*`・`settings.local.json`・`.local.md`）が渡っていないことは find で確認した。ツリー指紋の突合は取っていない
+  - `env_info.txt` の `git_head` 行が空で `fatal: gitfile does not point to a valid repository` が出ているのは、転送ツリーに worktree 由来の `.git` ファイル（ディレクトリではなく gitfile）が rsync の除外パターン `.git/` をすり抜けて渡り、ノード側で解決できないため。リビジョンは転送時の `.rev-stamp`（`macmini/rev-stamp.txt` = 計測時の HEAD）で特定する。転送物に秘密情報（`.env*`・`settings.local.json`・`.local.md`）が渡っていないことは find で確認した。ツリー指紋の突合は取っていなかった。第 2 ラウンドで対処した: `stage-tree.sh` が `git archive` から転送ツリーを作り（gitfile も追跡外のファイルも入らない）、`.rev-stamp` と `.tree-manifest` を書く。`orchestrate.sh` は `.rev-stamp` から `git_head` を、`.tree-manifest` の照合と sha256 から `tree_fingerprint` を env_info へ書く（`git rev-parse` は使わない。無い・不一致なら計測前に停止）。rsync の除外は `--exclude '.git'`（末尾スラッシュなし）にする。共有 doc `docs/real-hardware-verification-env.md` §3 の `.git/` 除外は別イシューで修正を提案する（本書では手を入れない）
   - ホスト名と `$HOME` は収録前にマスクした。前提テストのビルドログだけは orchestrate.sh を通らないため、`/Users/<ユーザー>` を `<home>` へ手置換した
   - bench 対照（crates.io 0.11.0・`infer metal 64 reuse`・5 回）の中央値は 0.418／0.422／0.480／0.465／0.427 ms（中央値の中央値 0.427 ms。`macmini/bench_control/`）。R 腕の低モード 0.323 ms より約 32% 高く、水準は同程度とは言えない。差の原因（`v0.11.0..HEAD` の変更、bench のウォームアップ 20・計測 20 反復の集計方式、診断の枠組みの違い）は切り分けていない。そのため R 腕の絶対値を bench の系列 A／B と直接比べる結論（§3.3・§3.4）は、この水準差を前提に読むこと
   - 帰属の機械判定（§3.2）は、各腕の多峰 run が 1 run ずつで過半数の根拠が薄い。再現性の確認には run 数を増やした再測が要る
