@@ -1,0 +1,75 @@
+START series=count run=1 arm=base gate=pass load1=4.50 waited_s=180 at=2026-10-21T03:19:55Z
+END series=count run=1 arm=base exit=0 grep_exit=0 end_load1=4.50
+START series=count run=2 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:56Z
+END series=count run=2 arm=base exit=0 grep_exit=0 end_load1=4.50
+START series=count run=3 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:56Z
+END series=count run=3 arm=base exit=0 grep_exit=0 end_load1=4.50
+START series=count run=4 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:56Z
+END series=count run=4 arm=base exit=0 grep_exit=0 end_load1=4.50
+START series=count run=5 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:56Z
+END series=count run=5 arm=base exit=0 grep_exit=0 end_load1=4.50
+START series=st run=1 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:56Z
+END series=st run=1 arm=base exit=0 end_load1=4.50
+START series=st run=2 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:56Z
+END series=st run=2 arm=base exit=0 end_load1=4.50
+START series=st run=3 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=st run=3 arm=base exit=0 end_load1=4.50
+START series=st run=4 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=st run=4 arm=base exit=0 end_load1=4.50
+START series=st run=5 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=st run=5 arm=base exit=0 end_load1=4.50
+START series=serial_ref run=1 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=serial_ref run=1 arm=base exit=0 end_load1=4.50
+START series=serial_ref run=2 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=serial_ref run=2 arm=base exit=0 end_load1=4.50
+START series=serial_ref run=3 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=serial_ref run=3 arm=base exit=0 end_load1=4.50
+START series=serial_ref run=4 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=serial_ref run=4 arm=base exit=0 end_load1=4.50
+START series=serial_ref run=5 arm=base gate=pass load1=4.50 waited_s=0 at=2026-10-21T03:19:57Z
+END series=serial_ref run=5 arm=base exit=0 end_load1=4.30
+ab run=1 order=base jpw1 cap4 cap8
+START series=ab run=1 arm=base gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:58Z
+END series=ab run=1 arm=base exit=0 end_load1=4.30
+START series=ab run=1 arm=jpw1 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:58Z
+END series=ab run=1 arm=jpw1 exit=0 end_load1=4.30
+START series=ab run=1 arm=cap4 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:58Z
+END series=ab run=1 arm=cap4 exit=0 end_load1=4.30
+START series=ab run=1 arm=cap8 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:58Z
+END series=ab run=1 arm=cap8 exit=0 end_load1=4.30
+ab run=2 order=jpw1 cap4 cap8 base
+START series=ab run=2 arm=jpw1 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=2 arm=jpw1 exit=0 end_load1=4.30
+START series=ab run=2 arm=cap4 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=2 arm=cap4 exit=0 end_load1=4.30
+START series=ab run=2 arm=cap8 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=2 arm=cap8 exit=0 end_load1=4.30
+START series=ab run=2 arm=base gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=2 arm=base exit=0 end_load1=4.30
+ab run=3 order=cap4 cap8 base jpw1
+START series=ab run=3 arm=cap4 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=3 arm=cap4 exit=0 end_load1=4.30
+START series=ab run=3 arm=cap8 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=3 arm=cap8 exit=0 end_load1=4.30
+START series=ab run=3 arm=base gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=3 arm=base exit=0 end_load1=4.30
+START series=ab run=3 arm=jpw1 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=3 arm=jpw1 exit=0 end_load1=4.30
+ab run=4 order=cap8 base jpw1 cap4
+START series=ab run=4 arm=cap8 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=4 arm=cap8 exit=0 end_load1=4.30
+START series=ab run=4 arm=base gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=4 arm=base exit=0 end_load1=4.30
+START series=ab run=4 arm=jpw1 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=4 arm=jpw1 exit=0 end_load1=4.30
+START series=ab run=4 arm=cap4 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:19:59Z
+END series=ab run=4 arm=cap4 exit=0 end_load1=4.30
+ab run=5 order=base jpw1 cap4 cap8
+START series=ab run=5 arm=base gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:20:00Z
+END series=ab run=5 arm=base exit=0 end_load1=4.30
+START series=ab run=5 arm=jpw1 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:20:00Z
+END series=ab run=5 arm=jpw1 exit=0 end_load1=4.30
+START series=ab run=5 arm=cap4 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:20:00Z
+END series=ab run=5 arm=cap4 exit=0 end_load1=4.30
+START series=ab run=5 arm=cap8 gate=pass load1=4.30 waited_s=0 at=2026-10-21T03:20:00Z
+END series=ab run=5 arm=cap8 exit=0 end_load1=4.30

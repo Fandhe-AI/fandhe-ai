@@ -1,0 +1,3 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/jobgrid-3177/base/crates/backend-cpu)
+    Finished `release` profile [optimized] target(s) in 5.28s
+  Executable unittests src/lib.rs (<home>/work/jobgrid-3177/work/target-base/release/deps/fandhe_ai_backend_cpu-6344e2f6f3e87765)

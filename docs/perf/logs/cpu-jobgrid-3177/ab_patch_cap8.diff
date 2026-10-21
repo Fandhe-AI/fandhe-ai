@@ -1,0 +1,11 @@
+--- a/crates/backend-cpu/src/gemm_blis/partition.rs
++++ b/crates/backend-cpu/src/gemm_blis/partition.rs
+@@ -240,7 +240,7 @@
+     let target_jobs = jobs_per_worker
+         .checked_mul(num_threads)
+         .ok_or(GemmError::DimProductOverflow)?;
+-    let bound = target_jobs.min(max_jobs);
++    let bound = target_jobs.min(max_jobs).min(8);
+ 
+     // `real_rb(rb)`（設計 §5.2）: `rb` について単調非減少
+     // （`ceil(m/rb)` が非増加・`align_up` が非減少写像のため

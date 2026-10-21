@@ -1,0 +1,11 @@
+--- a/crates/backend-cpu/src/gemm_blis/mod.rs
++++ b/crates/backend-cpu/src/gemm_blis/mod.rs
+@@ -3080,7 +3080,7 @@
+ /// 本番結線した（`docs/perf/cpu-gemm-2d-dynamic-partition-ab.md`
+ /// 「#1313 追記」節）。本番経路（[`gemm_blis_parallel_with_transpose`]／
+ /// [`gemm_blis_bias_act_parallel`]）もこの値を使う。
+-const TWO_D_JOBS_PER_WORKER: usize = 2;
++const TWO_D_JOBS_PER_WORKER: usize = 1;
+ 
+ /// [`GemmDriverVariant::TwoDDynamic`]（(mc, nc) 2D job 動的分配）を本番
+ /// 公開入口（[`gemm_blis_parallel_with_transpose`]／
