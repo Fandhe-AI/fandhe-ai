@@ -2,8 +2,8 @@
 
 DGX Spark GB10 の CUDA reuse 学習で `forward_resident` が 155.9 µs（step_total の 49.1%）と
 最大の区間になった件と、cuda fresh の `param_readout` が cpu fresh の約 2.2 倍ある件を、
-区間に分解して支配項を特定するための診断基盤の記録。**本書の時点では診断基盤のみ実装済みで、
-GB10 の 5 run 実測と仮説判定（§6）は未実施（実機セッションへの申し送り）**。削減の修正実装は
+区間に分解して支配項を特定するための診断基盤の記録。**診断基盤に加え、GB10 の 5 run 実測と仮説判定（§6）を
+#3189 で実施済み（2026-10-21、HEAD `ad1d106e4`）**。削減の修正実装は
 含まない（§7 は起票案の列挙のみ）。本番コード・tolerance・baseline・`Cargo.toml`・
 `docs/spec/` は変更していない。
 
@@ -14,7 +14,7 @@ GB10 の 5 run 実測と仮説判定（§6）は未実施（実機セッショ�
 | 上位層のフェーズ分解テスト（`crates/facade/tests/cuda_train_forward_resident_diag.rs`） | 実装済み。CPU の bit 一致テストは CI 実行 |
 | 下位層のフェーズ分解テスト（`crates/backend-cuda/src/train_forward_resident_diag_tests.rs`） | 実装済み（`#[ignore]`・CUDA 実機必須） |
 | 事前登録規則・計測・集計スクリプト（`logs/cuda-train-forward-resident-2116/`） | 実装済み（`RULE.txt` は実測前に固定） |
-| GB10 の 5 run 実測・支配項の判定 | **未実施（実機セッションへ申し送り）** |
+| GB10 の 5 run 実測・支配項の判定 | **実施済み（#3189。§6、生ログ `logs/cuda-train-forward-resident-2116/gb10/`）** |
 | 修正実装 | スコープ外（§7 に起票案を列挙） |
 
 作業ホストには RTX 3060 があるが `libnvrtc` が無く（CUDA toolkit 非搭載）、CUDA の
@@ -120,9 +120,33 @@ P3 CUDA 由来の差（R0/R3 > 1.50）・P4 sync 待ち（構造上 0。測定�
 
 ## 6. 結果
 
-**未実施（GB10 の 5 run 実測は実機セッションへ申し送り）。** 実測後、`aggregate.py` の出力を
-ここへ記入する。RTX 3060 等の系列を取る場合は「非 GB10・参考・record_only」と明記し、GB10 の
-受け入れ条件を満たしたとは扱わない。
+GB10（NVIDIA GB10）、HEAD `ad1d106e4`（#3203 の target デバイス再利用を含む版）、独立 5 プロセス、負荷ゲート 5/5 pass、checksum は run 間・腕間で一致。
+生ログと機械出力は `logs/cuda-train-forward-resident-2116/gb10/`（`aggregate.md`。`aggregate.py` exit 0）。以下は RULE.txt の判定文言どおりの転記。
+
+forward_resident（public、5 run 中央値）: batch 16 = 102.1 µs・64 = 131.8 µs・256 = 149.4 µs・1024 = 255.2 µs。
+
+| 項 | batch 16 | batch 64 | batch 256 | batch 1024 |
+|---|---|---|---|---|
+| H1 層境界の upload/download 呼び出し全体 | 20.4 µs・0.20 寄与あり | 31.4 µs・0.24 寄与あり | 61.0 µs・0.41 支持（支配項） | 154.6 µs・0.61 支持（支配項） |
+| H2 未融合 relu の往復 | 14.0 µs・0.14 非支持 | 17.2 µs・0.13 非支持 | 34.6 µs・0.23 寄与あり | 89.5 µs・0.35 寄与あり |
+| H3 呼び出しごとのデバイス確保 | 5.5 µs・0.05 非支持 | 5.6 µs・0.04 非支持 | 5.9 µs・0.04 非支持 | 5.9 µs・0.02 非支持 |
+| H4 カーネル実行（syncsplit） | 53.2 µs・0.52 支持（支配項） | 69.7 µs・0.53 支持（支配項） | 69.5 µs・0.47 支持（支配項） | 97.4 µs・0.38 寄与あり |
+| H5 上位 API 固定費 | 0.6 µs・0.01 非支持 | 0.6 µs・0.00 非支持 | 0.8 µs・0.01 非支持 | 0.2 µs・0.00 非支持 |
+| H6 mse の往復 | 13.5 µs・0.13 非支持 | 13.5 µs・0.10 非支持 | 14.8 µs・0.10 非支持 | 19.5 µs・0.08 非支持 |
+
+- 支配項: batch 16・64 は H4、batch 256 は H1 と H4、batch 1024 は H1。各項は計測スケジュールの異なる独立した参考指標で、F 比の和は 1.0 を超えうる（排他的な内訳ではない）。
+- fidelity（nosync total / prod total）は l1 = 0.95〜0.98・l2 = 0.89〜0.94 で範囲内。層 l1・l2 の支配区間は d2h_download（batch 1024 の l2 は h2d_upload と d2h_download）。
+- what-if（融合 relu）は total / (prod l1 + prod relu) = 0.76（16）・0.79（64）・0.70（256）・0.64（1024）で bits_equal=True（record-only）。
+- 非後退 ratio（record_only）= 131.8 µs / 155.9 µs = 0.85。バイナリ（HEAD 対 registry 0.9.0）・ハーネスが異なる。
+
+param_readout（batch 64、5 run 中央値）: R0 mirror 78.5 µs・R1 split 75.1 µs（param_to_vec 34.7・grad_to_vec 36.5）・R2 pretouched 76.7 µs・R3 cpu control 47.4 µs。
+
+- P1 host alloc / page fault: (R0−R2)/R0 = 0.02 → 非支持
+- P2 非 contiguous の gather: noncontig_grad_count = 0・grad_contiguous/R0 = 0.00 → 非支持
+- P3 CUDA 由来の差: R0/R3 = 1.65 → CUDA 由来の差あり
+- P4 sync 待ち: 構造上 0（測定対象外。RULE.txt）
+
+mse（#3203 の判定）: decomposed の mse_loss は 14.2〜23.0 µs（batch 16〜1024）、H6 は F の 0.08〜0.13 で非支持。#3203 の前後 A/B（腕 C）は本件では未計測のため、変更を戻すかどうかの所有者判断の材料は §7.1 では「未計測」のまま。
 
 ## 7. 削減施策の起票案（列挙のみ。起票はユーザー承認待ち）
 
@@ -161,7 +185,7 @@ P3 CUDA 由来の差（R0/R3 > 1.50）・P4 sync 待ち（構造上 0。測定�
 
 ## 8. 限界
 
-- GB10 未実測。本書の時点で帰属の主張はない
+- GB10 実測は #3189 で 1 系列（5 run）のみ。帰属は RULE.txt の判定文言に限り、原因の断定はしない。腕 C（#3203 前後）は未計測
 - 診断は HEAD のソースをテストとして実行するため、registry 版 `fandhe-ai =0.9.0` の bench-fandhe
   とはバイナリ・ハーネスが異なる。非後退 ratio は参考値
 - 下位層は本番経路の写しで、本番の `with_driver_call`（poison・世代検査）を通らない。fidelity

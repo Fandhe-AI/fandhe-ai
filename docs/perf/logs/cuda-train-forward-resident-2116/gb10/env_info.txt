@@ -1,0 +1,10 @@
+date_utc: 2026-10-21T12:53:50Z
+uname: Linux 6.17.0-1031-nvidia aarch64
+NVIDIA GB10, 580.173.02, 12.1
+CUDA Version: 13.0
+compute_apps_count: 3
+rustc: rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+fatal: not a git repository (or any of the parent directories): .git
+git_head: 
+host_kind: gb10

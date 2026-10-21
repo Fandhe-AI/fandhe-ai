@@ -1,0 +1,8 @@
+{"backend":"cuda","phase":"h2d_upload","n":80,"median_s":0.000011328,"q1_s":0.000011169,"q3_s":0.000011440}
+{"backend":"cuda","phase":"l1_issue","n":80,"median_s":0.000007440,"q1_s":0.000007328,"q3_s":0.000007520}
+{"backend":"cuda","phase":"l2_issue","n":80,"median_s":0.000006576,"q1_s":0.000006464,"q3_s":0.000006672}
+{"backend":"cuda","phase":"download","n":80,"median_s":0.000069184,"q1_s":0.000068752,"q3_s":0.000069408}
+{"backend":"cuda","phase":"download_again","n":80,"median_s":0.000006176,"q1_s":0.000006032,"q3_s":0.000006256}
+{"backend":"cuda","phase":"kernel_wait_derived","n":80,"median_s":0.000062976,"q1_s":0.000062592,"q3_s":0.000063312}
+{"backend":"cuda","phase":"total","n":80,"median_s":0.000094752,"q1_s":0.000094017,"q3_s":0.000094913}
+{"backend":"cuda","phase":"checksum","checksum":5494912908153880973}

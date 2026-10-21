@@ -476,10 +476,62 @@ checksum（0.4%・0.6 µs）。フェーズ和／合計: 99.9%（差分は各フ
 
 ## 12. v0.11.0 GB10 再計測（DGX Spark GB10・イシュー #3189）
 
-**状態: 計測基盤のみ。GB10 での実測は未実施（未実測）。** 数値は埋めていない。規則は `docs/perf/logs/cuda-train-infer-gb10-3189/RULE.txt`、手順は同 `README.md`。
-既存値（§10.6）: infer reuse 98.8 µs。相手（PyTorch）との差 約 55 µs の中身は未切り分け。
+**状態: GB10 で実測済み（2026-10-21、計測 SHA `ad1d106e4`、負荷ゲート 15/15 pass、5 run）。** 数値は `docs/perf/logs/cuda-train-infer-gb10-3189/gb10/aggregate.md`（`aggregate.py` exit 0）の転記。規則は `docs/perf/logs/cuda-train-infer-gb10-3189/RULE.txt`、手順は同 `README.md`。
+既存値（§10.6）: infer reuse 98.8 µs。腕 A の再計測は 99.7 µs で同水準。
 
-- 上位の分解診断: `crates/facade/tests/cuda_infer_reuse_phase_diag_3189.rs`（`predict_resident` を tape・snapshot・steps・chain・readout・paired/residual に分解。CPU の bit 一致は CI で実行）。
+- 上位の分解診断: `crates/facade/tests/cuda_infer_reuse_phase_diag_3189.rs`（`predict_resident` を tape・snapshot・steps・chain・readout・paired/residual に分解）。
 - 下位の分解診断: `crates/backend-cuda/tests/infer_chain_phase_diag_3189.rs`（h2d_upload・l1_issue・l2_issue・download・download_again と導出 kernel_wait。公開 trait のみで `src/` 無変更）。
-- 腕 A（`--phases` の infer cuda／cpu）・nsys の GPU 側所要時間（record-only）・相手との差に対する説明率は実測後に記入する。
-- 限界: `kernel_wait` は `download − download_again` の導出値。腕 A（registry 0.11.0）と腕 B（HEAD）の版差。
+
+### 12.1 腕 A（`--phases` infer・5 run 中央値）
+
+| mode | phase | 中央値 (µs) |
+|---|---|---:|
+| cuda fresh | forward | 133.7 |
+| cuda fresh | to_tensor | 19.0 |
+| cuda fresh | iter_total | 154.4 |
+| cuda reuse | predict_resident | 98.7 |
+| cuda reuse | iter_total | 99.7 |
+| cpu fresh | iter_total | 175.1 |
+| cpu reuse | iter_total | 183.9 |
+
+### 12.2 上位の内訳（facade・5 run 中央値）
+
+| arm | phase | 中央値 (µs) |
+|---|---|---:|
+| decomposed | chain | 95.9 |
+| decomposed | readout | 0.6 |
+| decomposed | snapshot | 0.2 |
+| decomposed | steps・tape | 0.0 |
+| paired | residual | 2.6 |
+| public | predict_resident | 99.3 |
+
+上位の固定費（tape＋snapshot＋steps＋paired/residual）は 2.9 µs。fidelity（上位）= decomposed 合計 96.8 µs / public 99.3 µs = 0.975（許容 0.8〜1.2、正式扱い）。
+
+### 12.3 下位の内訳（backend-cuda・5 run 中央値）
+
+| phase | 中央値 (µs) | min–max (µs) |
+|---|---:|---|
+| h2d_upload | 11.3 | 11.0–11.4 |
+| l1_issue | 7.5 | 7.4–7.5 |
+| l2_issue | 6.6 | 6.6–6.7 |
+| download | 69.2 | 69.1–69.5 |
+| download_again | 6.1 | 5.8–6.4 |
+| kernel_wait（導出 = download − download_again） | 63.2 | 62.7–63.5 |
+| total | 94.5 | 94.2–95.0 |
+
+fidelity = backend total 94.5 / facade chain 95.9 = 0.986（許容 0.8〜1.2、正式扱い）。
+
+### 12.4 同期・launch と固定費（nsys 差分法・N=128）
+
+infer reuse は 1 step あたり 1 同期・2 launch・H2D 1・D2H 1（決定的）。固定費は sync_idle 0.29 µs・tiny_roundtrip 6.14 µs・launch_issue 1.82 µs・L2S kernel_wait 9.65 µs。
+詳細は `train-step-phase-breakdown.md` §19.3〜19.4。
+
+### 12.5 相手との差（約 55 µs）に対する説明率
+
+infer reuse の 99.7 µs の大半（chain 95.9 µs、うち download 69.2 µs。そのうち導出 kernel_wait 63.2 µs）はデバイス側の実行待ちと D2H で占められ、上位の固定費は 2.9 µs（2.9%）、
+launch 発行は l1_issue＋l2_issue = 14.1 µs、h2d_upload は 11.3 µs。相手との差 約 55 µs の内訳は相手側を同じ区間に分解していないため、本計測だけでは説明率を数値化できない（record-only。原因の断定はしない）。
+
+### 12.6 限界
+
+- `kernel_wait` は `download − download_again` の導出値。腕 A（registry 0.11.0）と腕 B（HEAD）の版差。
+- nsys は回数にのみ使い、区間時間には使っていない。checksum の一致は bit 同一の証拠ではない。

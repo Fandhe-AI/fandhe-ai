@@ -1,0 +1,13 @@
+Generating SQLite file /tmp/tmp.6mCjbnyNbW/full-K120-r1.sqlite from /tmp/tmp.6mCjbnyNbW/full-K120-r1.nsys-rep
+Processing [/tmp/tmp.6mCjbnyNbW/full-K120-r1.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+57.6,7725248,240,32188.5,32288.0,17440,62944,14710.7,gemm_tiled_bias_act_f32
+15.4,2060288,240,8584.5,8720.0,5664,11776,2710.9,gemm_tiled_pipeline_f32
+12.2,1634688,240,6811.2,6784.0,5120,8704,1658.5,reduce_sum_axis_f32
+6.0,810528,241,3363.2,4864.0,1696,5120,1558.3,gemm_tiled_f32
+4.0,542784,481,1128.4,992.0,928,2432,221.5,transpose_smem_f32
+1.9,256800,120,2140.0,2080.0,2016,8128,552.2,sgd_step_f32
+1.1,141440,120,1178.7,1152.0,1120,1600,72.6,mse_partial_f32
+1.0,132384,120,1103.2,1088.0,1056,1408,54.4,mse_finalize_f32
+0.8,105088,120,875.7,864.0,832,1056,40.8,mse_backward_f32
+

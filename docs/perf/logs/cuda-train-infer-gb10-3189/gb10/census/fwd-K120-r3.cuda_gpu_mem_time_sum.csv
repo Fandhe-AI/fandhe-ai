@@ -1,0 +1,7 @@
+Generating SQLite file /tmp/tmp.6mCjbnyNbW/fwd-K120-r3.sqlite from /tmp/tmp.6mCjbnyNbW/fwd-K120-r3.nsys-rep
+Processing [/tmp/tmp.6mCjbnyNbW/fwd-K120-r3.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_gpu_mem_time_sum.py]... 
+Time (%),Total Time (ns),Count,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Operation
+60.6,925408,362,2556.4,2240.0,256,19488,2097.3,[CUDA memcpy Host-to-Device]
+29.4,449280,362,1241.1,800.0,544,14848,1185.9,[CUDA memcpy Device-to-Host]
+10.0,153472,240,639.5,640.0,416,2336,202.1,[CUDA memset]
+

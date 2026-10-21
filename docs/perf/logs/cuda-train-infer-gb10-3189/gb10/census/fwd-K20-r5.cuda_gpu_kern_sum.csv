@@ -1,0 +1,7 @@
+Generating SQLite file /tmp/tmp.6mCjbnyNbW/fwd-K20-r5.sqlite from /tmp/tmp.6mCjbnyNbW/fwd-K20-r5.nsys-rep
+Processing [/tmp/tmp.6mCjbnyNbW/fwd-K20-r5.sqlite] with [/opt/nvidia/nsight-systems/2025.3.2/host-linux-armv8/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+96.6,1304608,40,32615.2,32064.0,17600,62784,15369.9,gemm_tiled_bias_act_f32
+1.8,23968,20,1198.4,1152.0,1120,1376,86.5,mse_partial_f32
+1.6,21920,20,1096.0,1088.0,1056,1408,75.5,mse_finalize_f32
+

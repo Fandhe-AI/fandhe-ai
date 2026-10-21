@@ -1,0 +1,3 @@
+   Compiling user-ai-backend-cuda v0.11.0 (<home>/work/rust-ai-library-run-3189/crates/backend-cuda)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3189/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 5.36s
