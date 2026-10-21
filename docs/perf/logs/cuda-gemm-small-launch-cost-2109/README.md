@@ -12,6 +12,11 @@ G-CUDA-G256（fandhe-ai 2 位・対 candle 0.83×）の起動固定費（launch 
   イシュー #3190（2026-10-20）で `gb10/` に収録した**。ただし `aggregate.py` が Layer B ログの先頭行融合で
   exit 1 となったため、RULE.txt 7 により**系列は無効**（判定に使わない）。融合行を分離しただけの正規化コピー
   `gb10-normalized-reference/` に同じ `aggregate.py` を当てた参考集計を `docs/perf/cuda-gemm-small-launch-cost.md` §7 に載せた。
+- **再開分（イシュー #3190・2026-10-21）**: `aggregate.py` を、`--nocapture` で最初の `DIAG2109` 行がテスト名行の行末に融合する形
+  （`test <LAYER_B_TEST> ... DIAG2109 ...`）だけ受理するよう修正した（前置きは `LAYER_B_TEST` 完全一致のものを 1 ログにつき高々 1 回。
+  2 回以上・別テスト名・途中融合は従来どおり拒否。fail-closed の検査は弱めていない。`--self-test` に fixture を追加。規則は
+  `../optin-ab-gb10-3190/RULE-reopen.txt` 1）。修正後に空の別ディレクトリ **`gb10-r2/`** で `orchestrate.sh` を 1 回だけ実行し、
+  `aggregate.py` が exit 0 で完走した**有効系列**を `gb10-r2/aggregate.md` に収録した。旧 `gb10/` は元 RULE.txt 7 により無効のまま残す（遡って有効にしない）。
 - 修正実装（readback 宛先再利用 #2108・Graph capture #2115 等）は対象外。
 
 ## 構成
@@ -22,6 +27,8 @@ G-CUDA-G256（fandhe-ai 2 位・対 candle 0.83×）の起動固定費（launch 
 | `orchestrate.sh` | Layer A（registry）／HEAD path-patch Layer A（H5 の突合相手）／AC-2／candle 参照／Layer B（5 プロセス）／counts-exact／任意の nsys 補助診断（`RUN_NSYS=1` 時のみ後段でちょうど 1 回。RULE.txt 1a）を一括実行。`--dry-run` は起動列も表示。収録時にホスト名・`$HOME` をマスク |
 | `aggregate.py` | 集計（python3 標準ライブラリのみ）。`--self-test` あり。checksum・件数・run 数・nsys 補助ログの形式と 5 run 入力からの分離（値は判定に不使用）・未マスクパス（nsys・env_info の任意入力を含む全入力）に加え、全レコード種別（Layer B の出力一致 `verify` 行を含む）の重複とキー集合の過不足（RULE.txt 1）を fail-closed で検査 |
 | `env_info.txt` | 環境情報の記入欄（実測時に記入） |
+| `gb10-r2/` | GB10 の**有効系列**（#3190 再開分。`aggregate.py` exit 0。`aggregate.md`・`env_info.txt`・`load_gate.log`・`orchestrate-stdout.log` ほか生ログ一式。ホスト名・`$HOME` はマスク済み） |
+| `gb10/` | 無効系列（元 RULE.txt 7。`aggregate.py` が先頭行融合で exit 1）。履歴として残す |
 | `layerA-*.log` `candle-fresh-N256.log` `layerB-run{1..5}.log` `counts-exact.log` `nsys-cuda-api.log` `load_gate.log` | 実測時に生成される生ログ（未生成） |
 
 ## 実行手順（GB10 実機。別セッション）
@@ -40,4 +47,5 @@ python3 docs/perf/logs/cuda-gemm-small-launch-cost-2109/aggregate.py > docs/perf
 
 ## 結果欄
 
-未記入（GB10 実測待ち）。
+`gb10-r2/aggregate.md`（有効系列）を `docs/perf/cuda-gemm-small-launch-cost.md` §7 に転記した。要点: gap（HEAD − candle）15.632 µs・
+H1（毎反復 H2D）・H3（D2H readback）が「支持」、H2・H4・H5 は「未確定」、支配項は L2 readback（L0 比 48.2%）。

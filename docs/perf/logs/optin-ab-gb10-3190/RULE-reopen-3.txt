@@ -1,0 +1,18 @@
+イシュー #3190 事前登録規則 (再開補遺 3: B5 前提ゲート (a) に --no-fail-fast を足す)
+fixed-at: 2026-10-21 (この規則は、訂正後の (a) を GB10 で再実行する前にコミットして固定する。TFLOPS の計測 (段 2) より前でもある)
+
+0. 経緯 (正直な記録)
+  - RULE-reopen-2.txt の訂正後コマンドを GB10 の段 1b で実行したところ、base・head の両方で最初の integration テストバイナリ
+    (cpu_cuda_mma_parity) の 1 件 (mma_f16_k4096_stress) が FAILED となり、cargo test は既定で最初に失敗したバイナリで残りのバイナリを
+    実行せずに止まった (残り 5 バイナリが未実行。aggregate_b5.py の必須バイナリ検査が空の成立として拒否する形)。
+    この FAILED は base・head の双方に出ており、head だけの後退ではない (集計前の目視。判定はしていない)。
+  - 旧ログは parity-attempt2-{base,head}.log として残し、差し替えない。(a) の成立には使わない。
+
+1. 訂正の内容 (条件を足すだけ。判定式・緩和なし)
+  - (a) の integration テストのコマンドに --no-fail-fast を足す (失敗があっても全バイナリを実行して全結果を得るため)。
+      cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics --no-fail-fast
+        --test cpu_cuda_mma_parity --test gemm_mma --test parity_nonregression --test specialized_mma_parity --test gemm_auto --test dispatch_boundary
+        -- --ignored --test-threads=1
+  - 判定は RULE-reopen.txt 2・RULE-reopen-2.txt のまま。head で FAILED かつ base で ok のテストが 1 件でもあれば不成立。
+    base でも FAILED のテストは区別して記録し、後退とは数えない。必須バイナリが 1 つでも未実行なら FAIL。
+  - これ以上の (a) コマンドの訂正はしない。次の再実行でも実行が成立しなければ、(a) は「実行できず undetermined」とし、TFLOPS 計測へ進まず Refs にする。

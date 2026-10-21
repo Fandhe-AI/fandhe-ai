@@ -1,0 +1,6 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'gemm_mma_f16' for 'sm_121'
+ptxas info    : Function properties for gemm_mma_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 66 registers, used 1 barriers, 41472 bytes smem
+ptxas info    : Compile time = 17.176 ms

@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cuda-64c87007ab0af02b)
+
+running 1 test
+test gemm_small_launch_cost_diag_tests::gemm_small_launch_counts_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1311 filtered out; finished in 0.42s
+

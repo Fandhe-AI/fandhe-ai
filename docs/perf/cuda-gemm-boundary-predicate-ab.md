@@ -7,14 +7,12 @@ head 案設計スケッチ・判断基準・記録テンプレート。`crates/b
 「スレッドごとに 1 回だけビットマスクへ事前計算し、以後はビット参照のみで判定する」方式へ置き換える価値
 があるかを評価する。
 
-## 状態: 未計測・実機計測待ち（本番カーネルは一切変更していない）
+## 状態: 実測済み（イシュー #3190 再開分・2026-10-21）。判定は「不採用」（本番カーネルは一切変更していない）
 
-本ドキュメントは #497（蛇行走査。`docs/perf/cuda-gemm-serpentine-ab.md`）・PR #657 の codex-review 指摘
-（P1: 性能改善を実測せずに `MMA_F16` 本番カーネルへ変更を導入している）を受けた前例（doc-only 整備 →
-実機セッションで計測 → 判断基準を満たした場合のみ別 PR で導入）と同一方針に従う。Linux worktree
-（NVRTC 非搭載環境）では実機計測ができないため、本 PR の時点では計測手順・head 案設計・記録テンプレート
-のみを整備し、`kernels_mma.rs` 自体は未変更のまま据え置く。実機ツリー #408 側のセッションで下記手順に
-従い計測し、判断基準を満たした場合にのみ別 PR で導入する。
+`logs/optin-ab-gb10-3190/on-boundary-predicate.patch`（head 腕。計測専用で main へは入れない）を実装し、GB10 で前提ゲート (a)(b) と
+5 プロセスの TFLOPS A/B を事前登録規則（`RULE.txt` 8・`RULE-reopen.txt`・`-2`・`-3`）どおりに実施した。結果は末尾「実測結果」節。
+本ドキュメントの設計スケッチ・手順は、実装時に実際の `kernels_mma.rs`（`LOAD_*_STAGE_GROUP` 方式）に合わせて具体化した。
+前例（#497 の蛇行走査・PR #657 の codex-review 指摘）と同じ方針で、改善が確認できない案は本番へ導入しない。
 
 ## 参照実装の根拠（CUTLASS `predicated_tile_access_iterator.h`）
 
@@ -34,12 +32,14 @@ CUTLASS の `PredicatedTileAccessIterator` は、タイルアクセスごとの�
 
 ## 本実装の現状（現行 main 時点の行番号・証跡）
 
-| 箇所 | ファイル・行 | 内容 |
+| 箇所 | ファイル・行（base = `230937f5f`。#3190 再開分で再確認） | 内容 |
 |------|------------|------|
-| A タイルロード | `crates/backend-cuda/src/kernels_mma.rs:415-425`（`LOAD_A_STAGE` マクロ） | 8 要素チャンクごとに `int valid = (gr < m && gc < k) ? 16 : 0;`（423 行）を毎回評価し `mma_cp_async16` の src-size に渡す |
-| B タイルロード | `crates/backend-cuda/src/kernels_mma.rs:427-437`（`LOAD_B_STAGE` マクロ） | 同様に `int valid = (gr < k && gc < n) ? 16 : 0;`（435 行） |
-| エピローグ guarded store | `crates/backend-cuda/src/kernels_mma.rs:690-704` | `WARP_TILES_M x WARP_TILES_N`（2x2）の mi/nj ループ内で、フラグメント 4 要素それぞれに `r0 < m && c0 < n`・`r0 < m && c1 < n`・`r1 < m && c0 < n`・`r1 < m && c1 < n`（699-702 行）を評価してから `c[...] = __float2half(...)` する |
-| ソース証跡テスト | `crates/backend-cuda/src/kernels_mma.rs:763-778`（`mma_f16_source_retains_req8_boundary_guards`） | 上記 6 つの式文字列（`"gr < m && gc < k"`・`"gr < k && gc < n"`・`"r0 < m && c0 < n"`・`"r0 < m && c1 < n"`・`"r1 < m && c0 < n"`・`"r1 < m && c1 < n"`）を needle として `MMA_F16.contains(needle)` をロックしている |
+| A タイルロード | `crates/backend-cuda/src/kernels_mma.rs:1330-1342`（`LOAD_A_STAGE_GROUP` マクロ） | 8 要素チャンクごとに `int valid = (gr < DIM_M && gc < DIM_K) ? 16 : 0;` を毎回評価し `mma_cp_async16` の src-size に渡す。`gr_c`/`gc_c` のクランプ計算が先行 |
+| B タイルロード | 同 `1344-1356`（`LOAD_B_STAGE_GROUP` マクロ） | 同様に `int valid = (gr < DIM_K && gc < DIM_N) ? 16 : 0;` |
+| エピローグ guarded store | 同 `1680-1705` | `WARP_TILES_M x WARP_TILES_N`（2x2）の mi/nj ループ内で `r0/r1 < DIM_M && c0/c1 < DIM_N` の 4 条件を評価し、`__half2` ペア store（#805）または c0 単独のスカラー store へ分岐 |
+| ソース証跡テスト | 同 `2874`（`mma_f16_source_retains_req8_boundary_guards`）ほか、特化 render の 2 テスト | 6 つの式文字列を needle として `contains` をロック。ペア store は別テスト（#805）がロック |
+
+（旧版の行番号 `415-425` 等は `LOAD_A_STAGE`/`LOAD_B_STAGE` 時代の値で、現在は上表。`m`/`n`/`k` 直書きは `DIM_M`/`DIM_N`/`DIM_K` マクロ経由へ変わっている。）
 
 **採用する場合、このソース証跡テストは事前計算後のコード（ビットマスク変数名・`valid()` 相当の参照式）
 に合わせて更新が必須になる**（needle 文字列がそのまま残らないため）。REQ-8「境界検査を省略しない」は
@@ -173,8 +173,60 @@ cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 
 ## 実測結果
 
-**未実施（undetermined。イシュー #3190・2026-10-20）**。補遺規則（`logs/optin-ab-gb10-3190/RULE.txt` 8）は事前登録済みだが、
-`on-boundary-predicate.patch`（`MMA_F16` の境界述語の事前計算）を作らなかったため、前提ゲート（parity 非後退・レジスタ／local memory）も TFLOPS 計測も行っていない。
-本節の行番号（415-425 等）は古く、`kernels_mma.rs` は現在 `LOAD_A_STAGE_GROUP` 方式へ変わっているため、実装前に境界比較の位置と
-ソース証跡テストの needle の再確認が要る。`MMA_F16` は f16 経路で、f32 の N=256 起動固定費（`cuda-gemm-small-launch-cost.md` §7: 支配項は転送）
-には効かない。推定で採否を書かない。打ち切り条件（補遺 RULE 8 末尾）に該当する。
+イシュー #3190（再開分）。GB10（sm_121・CUDA 13.0・20 コア）。生ログと集計は `logs/optin-ab-gb10-3190/b5/`（`aggregate.md` が `aggregate_b5.py` の出力）。
+ツリーは `b5/rev-stamp.txt`（base = `230937f5f`、head = base + `on-boundary-predicate.patch` を未コミットで適用。
+`230937f5f` から `origin/main`（`ef3b2d715`）の間の `backend-cuda` の `src`・`examples` の差分は 0 行）。
+
+### head 案（`on-boundary-predicate.patch`）の要点
+
+- A の行述語 `a_gr < DIM_M` と B の列述語 `b_gc < DIM_N` は k0 に依存しないので、グループ g ごとに入口で 1 回評価し、ビット（`a_row_ok`／`b_col_ok` の第 g ビット）に詰める。
+  K 方向の述語は各 stage で評価して AND する（`row_ok && gc < DIM_K`／`col_ok && gr < DIM_K`）。`gr_c`/`gc_c` のクランプ計算と範囲外ゼロ充填は不変。
+  ループが 2 周目以降に入る構成（`blockDim.x` が小さい非既定 config）では、ビットを使わず従来の比較（`gr < DIM_M`／`gc < DIM_N`）へ落とす（`idx == g * *_GROUP_CHUNKS + tid` の判定）。
+- エピローグは入口で 16 ビットの `epilogue_valid` を 1 回計算し（ビット `(mi*WARP_TILES_N+nj)*4 + {0..3}` = `[r0&c1, r0&c0, r1&c1, r1&c0]`）、書き戻しはビット参照のみ。`__half2` ペア store と c0 単独フォールバックの構造は不変。
+- ソース証跡テストの needle: 述語を作る式（`a_gr < DIM_M`・`b_gc < DIM_N`・`row_ok && gc < DIM_K`・`col_ok && gr < DIM_K`・`r0 < DIM_M && c0 < DIM_N` 等のエピローグ 4 式）と、
+  ビット参照式（`((a_row_ok >> (g)) & 1u)`・`((b_col_ok >> (g)) & 1u)`・`epilogue_valid & (1u << (ep_shift + {0..3}u))`）の両方を `contains` でロックする（3 テストの needle を更新）。
+  検査は省略でなく前倒しであることを機械的に検証する形を保った。REQ-8 の境界検査を省く変種は作っていない。
+- Mac での確認: `cargo test -p fandhe-ai-backend-cuda --lib kernels_mma`（NVRTC 不要の範囲）が通る。NVRTC のコンパイルは GB10 で確認した（下記 (a) の lib テストと `mma_ptx_dump`）。
+
+### 前提ゲート (a) parity 非後退（`parity-{base,head}.log`）
+
+`cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics --no-fail-fast --test cpu_cuda_mma_parity --test gemm_mma --test parity_nonregression --test specialized_mma_parity --test gemm_auto --test dispatch_boundary -- --ignored --test-threads=1`
+と `--lib kernels_mma` を base・head の両方で実行した。**成立**: テスト 111 件（head ok 109・FAILED 1・ignored 1）。base ok → head FAILED の後退は 0 件。
+
+| テスト | base | head | 備考 |
+|---|---|---|---|
+| `cpu_cuda_mma_parity::mma_f16_k4096_stress` | FAILED | FAILED | **base でも FAILED**（head の後退ではない。別の `..._non_regression` は ok） |
+| `kernels_mma::...::mma_f16_sources_compile_with_nvrtc_when_available` | ignored | ignored | 理由「手動実行」。非対象 |
+
+作業の開示: (a) のコマンドは 2 回訂正した（初版は `internal-diagnostics` 指定漏れで integration が実行されず、次は最初の失敗バイナリで cargo が停止した）。
+旧ログは `parity-attempt1-*.log`・`parity-attempt2-*.log` として残してあり、訂正は再実行前にコミットした（`RULE-reopen-2.txt`・`RULE-reopen-3.txt`）。
+判定式は変えていない。
+
+### 前提ゲート (b) レジスタ・local memory（`ptxas-{base,head}.log`。`ptxas -arch=sm_121 -v`、本番構成 `mma_f16_base.ptx`）
+
+| 腕 | registers | stack frame | spill stores／loads | lmem |
+|---|---|---|---|---|
+| base | 58 | 0 B | 0／0 B | 0 B |
+| head | 66 | 0 B | 0／0 B | 0 B |
+
+**成立**（lmem・stack は増えず、spill は 0）。registers は +8（記録のみで判定に使わない）。
+
+### TFLOPS（`gemm_mma_bench` の `mma_f16_tflops`。5 プロセス独立・round 内の順序反転・専有ゲートは全 10 run PASS）
+
+| size | run 別 base（TFLOPS） | run 別 head（TFLOPS） | base 中央値 | head 中央値 | head/base | 5/5 改善 | 5/5 後退 |
+|---:|---|---|---:|---:|---:|:-:|:-:|
+| 512 | 16.6606 / 16.7772 / 16.9638 / 16.9982 / 17.0500 | 16.0548 / 16.1475 / 16.3044 / 16.1010 / 16.2099 | 16.9638 | 16.1475 | 0.9519 | - | ○ |
+| 1024 | 38.3041 / 38.5240 / 38.4028 / 38.5794 / 38.6127 | 31.8278 / 31.9490 / 32.0558 / 32.0176 / 31.9186 | 38.5240 | 31.9490 | 0.8293 | - | ○ |
+| 2048 | 52.3647 / 52.3673 / 52.4056 / 52.3366 / 52.3928 | 40.3964 / 40.2859 / 38.1205 / 40.1652 / 40.1142 | 52.3673 | 40.1652 | 0.7670 | - | ○ |
+| 4096 | 55.9432 / 56.1344 / 56.0882 / 55.8402 / 55.7558 | 40.8075 / 40.9511 / 40.6860 / 40.7247 / 41.0863 | 55.9432 | 40.8075 | 0.7294 | - | ○ |
+
+round 番号と起動順は `b5/gate.log`（奇数 round は base→head、偶数 round は head→base）と `run{1..5}-{base,head}.log`。
+
+### 判定: **不採用**（RULE.txt 8: いずれかの形状で 5/5 run 一貫して後退）
+
+4 形状すべてで 5/5 後退（head/base は 0.73〜0.95、大きい形状ほど悪化）。採用候補の条件（全形状で head の中央値 ≥ base）も満たさない。
+本番の `MMA_F16` は変更せず、#537 は「境界述語の事前計算（この形）は採らない」という実測つきの判断で閉じられる。
+考えられる要因（**推定。本計測では切り分けていない**）: registers が 58 → 66 に増え、`__launch_bounds__`／occupancy 側の制約を受けた可能性、
+および `cp.async` 発行直前の述語の依存関係が長くなった可能性。切り分けるなら、述語ビットを一部だけ（例: エピローグのみ）前倒しする別案を新規に事前登録して測る。
+本計測では head 案の再調整（事後の変更）はしない。
+

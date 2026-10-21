@@ -1,0 +1,155 @@
+diff --git a/crates/backend-cuda/src/kernels_mma.rs b/crates/backend-cuda/src/kernels_mma.rs
+index e577ba05c..ade2df9bb 100644
+--- a/crates/backend-cuda/src/kernels_mma.rs
++++ b/crates/backend-cuda/src/kernels_mma.rs
+@@ -1284,6 +1284,27 @@ extern "C" __global__ void gemm_mma_f16(
+ 
+     int num_k_tiles = (DIM_K > 0) ? (DIM_K - 1) / BK + 1 : 0;
+ 
++    // #3190 B5: エピローグの境界述語を入口で 1 回だけ評価して 16 ビットに詰める
++    // （WARP_TILES_M x WARP_TILES_N x 4 ビット。ビット (mi*WARP_TILES_N+nj)*4+{0..3} =
++    // [r0&c1, r0&c0, r1&c1, r1&c0]）。述語の式は従来のエピローグと同一で、評価位置
++    // だけが前倒しになる（REQ-8 の境界検査を省略しない）。書き戻しは下のビット参照のみ。
++    unsigned epilogue_valid = 0u;
++#pragma unroll
++    for (int mi = 0; mi < WARP_TILES_M; ++mi) {
++#pragma unroll
++        for (int nj = 0; nj < WARP_TILES_N; ++nj) {
++            int r0 = row0_warp + mi * MMA_M + group_id;
++            int r1 = row0_warp + mi * MMA_M + group_id + 8;
++            int c0 = col0_warp + nj * MMA_N + tid_in_group * 2;
++            int c1 = c0 + 1;
++            unsigned ep_shift = (unsigned)((mi * WARP_TILES_N + nj) * 4);
++            epilogue_valid |= (unsigned)(r0 < DIM_M && c1 < DIM_N) << (ep_shift + 0u);
++            epilogue_valid |= (unsigned)(r0 < DIM_M && c0 < DIM_N) << (ep_shift + 1u);
++            epilogue_valid |= (unsigned)(r1 < DIM_M && c1 < DIM_N) << (ep_shift + 2u);
++            epilogue_valid |= (unsigned)(r1 < DIM_M && c0 < DIM_N) << (ep_shift + 3u);
++        }
++    }
++
+     // REQ-8: A/B タイルを stage へ非同期ロードする。gr/gc は呼び出し側で
+     // クランプ済みの添字（境界外ポインタを作らないため）。valid は実際の
+     // コピーサイズ（16 or 0）を選ぶだけで、アドレス自体は常に確保済み
+@@ -1320,6 +1341,24 @@ extern "C" __global__ void gemm_mma_f16(
+     #define A_GROUP_CHUNKS ((A_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+     #define B_GROUP_CHUNKS ((B_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+ 
++    // #3190 B5（計測専用・境界述語の事前計算。REQ-8 の境界検査は「省略」ではなく
++    // 「前倒し」: 述語の式は従来と同一で、評価位置をカーネル入口へ移すだけ）。
++    // A の行述語 `gr < DIM_M` と B の列述語 `gc < DIM_N` は k0 に依存しないため、
++    // グループ g ごとに 1 回だけ評価してビット（a_row_ok/b_col_ok の第 g ビット）に
++    // 詰める。K 方向の述語（`gc < DIM_K`／`gr < DIM_K`）は k0 依存なので各 stage で
++    // 評価し、ビットと AND する。クランプ済みアドレス計算（gr_c/gc_c）は不変。
++    unsigned a_row_ok = 0u;
++    unsigned b_col_ok = 0u;
++#pragma unroll
++    for (int g_ = 0; g_ < K_GROUPS; ++g_) {
++        int a_idx = g_ * A_GROUP_CHUNKS + tid;
++        int a_gr = block_row0 + a_idx / (BK / 8);
++        a_row_ok |= (unsigned)(a_gr < DIM_M) << g_;
++        int b_idx = g_ * B_GROUP_CHUNKS + tid;
++        int b_gc = block_col0 + (b_idx % (BN / 8)) * 8;
++        b_col_ok |= (unsigned)(b_gc < DIM_N) << g_;
++    }
++
+     // #496: グループ `g`（0 <= g < K_GROUPS）が担当するチャンクレンジ
+     // `[g * A_GROUP_CHUNKS, min((g+1) * A_GROUP_CHUNKS, A_CHUNKS))` のみを
+     // 発行する（CUTLASS `copy_tiles_and_advance` の per-group 発行と同旨）。
+@@ -1337,7 +1376,9 @@ extern "C" __global__ void gemm_mma_f16(
+             int gc = (k0) + col0; \
+             int gr_c = gr < DIM_M ? gr : (DIM_M > 0 ? DIM_M - 1 : 0); \
+             int gc_c = gc < DIM_K ? gc : (DIM_K > 0 ? ((DIM_K - 1) / 8) * 8 : 0); \
+-            int valid = (gr < DIM_M && gc < DIM_K) ? 16 : 0; \
++            bool row_ok = (idx == (g) * A_GROUP_CHUNKS + tid) \
++                ? (((a_row_ok >> (g)) & 1u) != 0u) : (gr < DIM_M); \
++            int valid = (row_ok && gc < DIM_K) ? 16 : 0; \
+             mma_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * DIM_K + gc_c], valid); \
+         }
+ 
+@@ -1351,7 +1392,9 @@ extern "C" __global__ void gemm_mma_f16(
+             int gc = block_col0 + col0; \
+             int gr_c = gr < DIM_K ? gr : (DIM_K > 0 ? DIM_K - 1 : 0); \
+             int gc_c = gc < DIM_N ? gc : (DIM_N > 0 ? ((DIM_N - 1) / 8) * 8 : 0); \
+-            int valid = (gr < DIM_K && gc < DIM_N) ? 16 : 0; \
++            bool col_ok = (idx == (g) * B_GROUP_CHUNKS + tid) \
++                ? (((b_col_ok >> (g)) & 1u) != 0u) : (gc < DIM_N); \
++            int valid = (col_ok && gr < DIM_K) ? 16 : 0; \
+             mma_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * DIM_N + gc_c], valid); \
+         }
+ 
+@@ -1687,19 +1730,19 @@ extern "C" __global__ void gemm_mma_f16(
+             int r0 = row0_warp + mi * MMA_M + group_id;
+             int r1 = row0_warp + mi * MMA_M + group_id + 8;
+             int c0 = col0_warp + nj * MMA_N + tid_in_group * 2;
+-            int c1 = c0 + 1;
++            unsigned ep_shift = (unsigned)((mi * WARP_TILES_N + nj) * 4);
+ 
+-            if (r0 < DIM_M && c1 < DIM_N) {
++            if (epilogue_valid & (1u << (ep_shift + 0u))) {
+                 *reinterpret_cast<__half2*>(&c[(size_t)r0 * DIM_N + c0]) =
+                     __floats2half2_rn(d[mi][nj][0], d[mi][nj][1]);
+-            } else if (r0 < DIM_M && c0 < DIM_N) {
++            } else if (epilogue_valid & (1u << (ep_shift + 1u))) {
+                 c[(size_t)r0 * DIM_N + c0] = __float2half(d[mi][nj][0]);
+             }
+ 
+-            if (r1 < DIM_M && c1 < DIM_N) {
++            if (epilogue_valid & (1u << (ep_shift + 2u))) {
+                 *reinterpret_cast<__half2*>(&c[(size_t)r1 * DIM_N + c0]) =
+                     __floats2half2_rn(d[mi][nj][2], d[mi][nj][3]);
+-            } else if (r1 < DIM_M && c0 < DIM_N) {
++            } else if (epilogue_valid & (1u << (ep_shift + 3u))) {
+                 c[(size_t)r1 * DIM_N + c0] = __float2half(d[mi][nj][2]);
+             }
+         }
+@@ -2874,8 +2917,16 @@ mod tests {
+     fn mma_f16_source_retains_req8_boundary_guards() {
+         let src = mma_f16_source();
+         for needle in [
+-            "gr < DIM_M && gc < DIM_K",
+-            "gr < DIM_K && gc < DIM_N",
++            "a_gr < DIM_M",
++            "row_ok && gc < DIM_K",
++            "((a_row_ok >> (g)) & 1u)",
++            "b_gc < DIM_N",
++            "col_ok && gr < DIM_K",
++            "((b_col_ok >> (g)) & 1u)",
++            "epilogue_valid & (1u << (ep_shift + 0u))",
++            "epilogue_valid & (1u << (ep_shift + 1u))",
++            "epilogue_valid & (1u << (ep_shift + 2u))",
++            "epilogue_valid & (1u << (ep_shift + 3u))",
+             "r0 < DIM_M && c0 < DIM_N",
+             "r0 < DIM_M && c1 < DIM_N",
+             "r1 < DIM_M && c0 < DIM_N",
+@@ -3253,7 +3304,11 @@ mod tests {
+                 "特化 render に `{expected}` が見つかりません: config={cfg:?}"
+             );
+         }
+-        for needle in ["gr < DIM_M && gc < DIM_K", "r0 < DIM_M && c0 < DIM_N"] {
++        for needle in [
++            "a_gr < DIM_M",
++            "row_ok && gc < DIM_K",
++            "r0 < DIM_M && c0 < DIM_N",
++        ] {
+             assert!(
+                 src.contains(needle),
+                 "特化 render に REQ-8 境界チェック `{needle}` が見つかりません"
+@@ -3309,8 +3364,16 @@ mod tests {
+             let rendered = render_mma_f16(&cfg).expect("有効な構成が拒否されました");
+             let src = rendered.source();
+             for needle in [
+-                "gr < DIM_M && gc < DIM_K",
+-                "gr < DIM_K && gc < DIM_N",
++                "a_gr < DIM_M",
++                "row_ok && gc < DIM_K",
++                "((a_row_ok >> (g)) & 1u)",
++                "b_gc < DIM_N",
++                "col_ok && gr < DIM_K",
++                "((b_col_ok >> (g)) & 1u)",
++                "epilogue_valid & (1u << (ep_shift + 0u))",
++                "epilogue_valid & (1u << (ep_shift + 1u))",
++                "epilogue_valid & (1u << (ep_shift + 2u))",
++                "epilogue_valid & (1u << (ep_shift + 3u))",
+                 "r0 < DIM_M && c0 < DIM_N",
+                 "r0 < DIM_M && c1 < DIM_N",
+                 "r1 < DIM_M && c0 < DIM_N",

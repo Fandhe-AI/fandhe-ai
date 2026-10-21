@@ -1,0 +1,71 @@
+イシュー #3190 事前登録規則 (再開補遺: B4 の再計測・B5 の実装と実測・条件 4 の機体別併記)
+fixed-at: 2026-10-21 (この規則は GB10 上の計測ログを生成する前にコミットして固定する。以後、緩和・事後調整はしない)
+
+0. 位置づけ
+  - 元の補遺 RULE.txt は 1 字も変えない。継承 RULE 6 件も変えない。固定時点の sha256:
+    5ffb54d48739cad26b95046a3654686bb7fd5d3cea0f60df194b12deca5fa53d  optin-ab-gb10-3190/RULE.txt
+    e688197bcbb4a2fad1c8e6aecbbbd3e52735a27ccbde38f81a582b1749ad3a7b  tape-arena-reuse-2104/RULE.txt
+    1bf99f9c3c36ee85a7a21b15f389cfc2371b73a5f0eb939d85a38e72d1b24e74  elemental-reduction-threshold-2101/RULE.txt
+    a1cab9c9dea01a5dbbddeb2e723aabb322e55efb74607e001302119cb15aadc2  elemental-reduction-ab-2102/RULE.txt
+    b64dbd75c9d1685de7e04772c30f90a060ce560974d81a901dc38c03a8bf312d  cuda-infer-chain-graphcapture-2115/RULE.txt
+    703406426765dc8282301fc5e7258063245d6684d6a3417787ab8da58cba669b  cuda-gemm-small-launch-cost-2109/RULE.txt
+    977ba6f935105715ff16c7a0759b6ef18c994491b296bcb54889eabf34f06076  cuda-gemm-readback-reuse-2108/RULE.txt
+    修正前の cuda-gemm-small-launch-cost-2109/aggregate.py:
+    4d63ccd8f81a6e4653befe73d00cec9ae2fc98a0ff2d5d3772586b14127af6c8
+  - 本書は条件を足すだけで、元の補遺と継承規則を緩めない。判定語彙・判定式は元の文言をそのまま使う。
+  - 既定の反転は行わない。main の定数・環境変数既定は変えない (crates/ 差分なし)。B5 の after 腕は計測専用 clone に限る。
+  - B3 は本書の対象外。DeviceContextCaptureInProgress の是正と、その後の再判定 (R1(b) の別 label・新規事前登録) は #3205 で行う。
+    本イシューでは B3 を再計測しない。
+
+1. B4 (再計測)
+  - 出力先は cuda-gemm-small-launch-cost-2109/gb10-r2/ (空のディレクトリ。label gb10-r2)。
+    旧 gb10/ は元 RULE.txt 7 により無効のまま残す。パーサー修正後も遡って有効にしない。
+  - orchestrate.sh は LOG_DIR=<gb10-r2> RUN_NSYS=1 で 1 回だけ実行する。aggregate.py が非ゼロで終わったら系列ごと無効とする。
+    一部 run の差し替え・追加起動はしない。
+  - 判定語彙は 2109 RULE.txt 6 の「支持／未確定」をそのまま使う (50% 閾値は変えない)。
+  - aggregate.py の修正 (本コミットに含む)。範囲は次の 1 点に限る:
+    * 受理する形は、行頭が `test <LAYER_B_TEST> ... DIAG2109 ` で始まる行 1 種類だけ。LAYER_B_TEST は完全一致でなければならない。
+    * 剥がす前置きは `test <LAYER_B_TEST> ... ` だけで、1 ログにつき高々 1 回。2 回以上は LogIntegrityError。
+    * 次は 1 つも弱めない: LAYER_B_NAME_RE の出現数 1、register_once、require_exact_keys、未マスク検査、成功行 (test result: ok. 1 passed) の検査。
+    * 他のテスト名が前置きされた行、DIAG2109 の途中で融合した行は従来どおり非 DIAG 行として読まれず、キー欠落で LogIntegrityError になる。
+    * --self-test に融合 1 回 (受理)・融合 2 回 (拒否)・別テスト名 (拒否)・途中融合 (拒否) の fixture を追加済み。
+
+2. B5 (境界述語の事前計算。元 RULE.txt 8 の文言どおり。以下は具体化だけ)
+  - base = 230937f5f (元 RULE.txt を固定したコミット)、head = base + on-boundary-predicate.patch。
+    kernels_mma.rs の MMA_F16_BODY とソース証跡テストの needle だけを変える。patch はリポジトリに収録するだけで、適用は GB10 上の計測専用 clone に限る。
+    230937f5f から origin/main の間の backend-cuda 差分が tests 以外で空であることを記録する。
+  - patch の設計: A の行述語 (gr < DIM_M) と B の列述語 (gc < DIM_N) は k0 に依存しないため、グループごとに入口で 1 回だけ評価してビットに詰め、
+    K 方向の述語は各 stage で評価してビットと AND する。エピローグは入口で 16 ビットの epilogue_valid を 1 回計算し、書き戻しはビット参照のみ。
+    クランプ済みアドレス計算 (gr_c/gc_c)・範囲外ゼロ充填・__half2 ペア store と c0 単独フォールバックの構造は変えない。
+    境界検査を省く変種は採らない。
+  - 前提ゲート (a): base・head の両方で次を実行する (--nocapture は付けない)。
+      cargo test -p fandhe-ai-backend-cuda --release --test cpu_cuda_mma_parity --test gemm_mma --test parity_nonregression
+        --test specialized_mma_parity --test gemm_auto --test dispatch_boundary -- --ignored --test-threads=1
+      cargo test -p fandhe-ai-backend-cuda --release --lib kernels_mma
+    head で FAILED かつ base で ok のテストが 1 件でもあれば前提不成立。base でも FAILED のものは区別して記録し、後退とは数えない。
+    base と head のテスト集合が一致しなければ FAIL (fail-closed)。
+  - 前提ゲート (b): 腕ごとに mma_ptx_dump で PTX をダンプし、本番構成 (mma_f16_base.ptx) を ptxas -arch=sm_121 -v に掛けて
+    registers・stack frame・spill stores/loads・lmem を記録する。head の lmem または stack frame が base より増える、
+    または head の spill が 0 でなければ前提不成立 (undetermined)。registers は記録のみで判定に使わない。
+  - 前提ゲートのどちらかが不成立なら TFLOPS 計測へ進まず undetermined を記録して終える。
+  - 計測: gemm_mma_bench を腕ごとに 5 プロセス独立で起動する。奇数 round は base -> head、偶数 round は head -> base。
+    各プロセスの前に専有ゲート (load1 < 1.0 かつ GPU 0%。30 秒間隔・最大 30 分) を通す。1 回でも不成立なら系列は参考扱い (undetermined)。
+    判定値は mma_f16_tflops 列の size 512/1024/2048/4096 だけ。判定式は元 RULE.txt 8 のとおり
+    (全形状で head の 5 run 中央値 >= base かつ 1 形状以上で 5/5 run 一貫改善 -> 採用候補、いずれかの形状で 5/5 一貫後退 -> 不採用、それ以外 -> undetermined)。
+    「5/5 一貫」は round 対 (同じ round 番号の base と head) の比較で、全 5 対が改善 (後退) であること。
+    集計は aggregate_b5.py (python3 -I。--self-test あり。欠損・round 数 != 5・非有限値・未マスクは FAIL)。
+  - 採用候補になっても main のカーネルは変えない。本番カーネルへの導入は #537 で別途行う。
+
+3. 条件 4 (#3184 との機体別併記)
+  - B1=G1・B2=G2 は、2104・2102 の 2 機体規則を機械的に当てはめる。ADOPT には両機の成立が要る。REJECT には、どちらかの機体の
+    正式系列で 5/5 一貫の後退が要る。#3184 (Mac mini) が undetermined (record_only) の機体は REJECT の根拠にしない。
+  - 最終 T = min(T_macmini, T_gb10)。値は docs/perf/optin-ab-macmini.md の記載を出典とする。GB10 の Stage 1 が同じ T で計測済みなら再計測しない。
+
+4. 運用 (元 RULE.txt 3・10 を継承して追加)
+  - 計測前に GB10 上の他セッション (cargo・bench・nvidia-smi のプロセス一覧) を preflight-procs.txt に記録する。ビルドと計測は並走させない。RAYON_NUM_THREADS は unset。
+  - 各 clone の git rev-parse HEAD と git status --porcelain が空であることを rev-stamp.txt に記録する (clone 内には置かない)。
+  - CARGO_TARGET_DIR は export しない。PATH に /usr/local/cuda/bin を足す。
+  - run の差し替え・追加・セルの除外は禁止。再実行は別 label／別ディレクトリで行い、旧系列も残す。
+  - マスク規則: ホスト名は masked、$HOME は <home>、ユーザー名・絶対パスは除く。
+  - 2 時間を超える場合は B4 -> B5(a)(b) -> B5 計測の順にセッションを分ける。
+  - 本書は GB10 上の最初のログを生成する前に、aggregate.py の修正・aggregate_b5.py・on-boundary-predicate.patch と同じコミットで固定する。

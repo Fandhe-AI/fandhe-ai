@@ -158,6 +158,7 @@ LAYER_B_TEST = "gemm_small_launch_cost_diag_tests::gemm_small_launch_cost_diag"
 # `--nocapture` ではテスト名行の後ろに標準出力が続くため、テスト名行は行頭一致のみで判定し、
 # 成功は `test result: ok. 1 passed; 0 failed;` で確認する（失敗・パニックの痕跡も拒否する）。
 LAYER_B_NAME_RE = re.compile(r"^test " + re.escape(LAYER_B_TEST) + r" \.\.\.", re.M)
+LAYER_B_FUSED_PREFIX = "test " + LAYER_B_TEST + " ... DIAG2109 "
 LAYER_B_FAIL_RE = re.compile(r"(^test result: FAILED|\.\.\. FAILED|panicked at)", re.M)
 
 
@@ -240,8 +241,17 @@ def parse_layer_b(text: str, name: str) -> dict:
     counts: dict = {}
     kernel: dict = {}
     verify: dict = {}
+    fused = 0
     for raw in text.splitlines():
         line = raw.strip()
+        # `--nocapture` では最初の DIAG2109 行がテスト名行の行末に融合する
+        # （`test <LAYER_B_TEST> ... DIAG2109 ...`）。#3190 再開補遺（RULE-reopen.txt B4）で受理する
+        # 唯一の形。前置きは LAYER_B_TEST 完全一致のものだけを 1 ログにつき高々 1 回剥がす。
+        if line.startswith(LAYER_B_FUSED_PREFIX):
+            fused += 1
+            if fused > 1:
+                raise LogIntegrityError(f"{name}: テスト名行への DIAG2109 の融合が 2 回以上ある")
+            line = line[len(LAYER_B_FUSED_PREFIX) - len("DIAG2109 "):]
         if not line.startswith("DIAG2109 "):
             continue
         if m := DIAG_RE.match(line):
@@ -676,6 +686,21 @@ def self_test() -> None:
     must_fail(lb0(lambda t: t.replace("mode=bit_exact", "mode=loose", 1)), "Layer B 出力検証の mode 不正")
     must_fail(lb0(dup_line("test result:")), "Layer B test result の重複")
     must_fail(lb0(dup_line("test " + LAYER_B_TEST)), "Layer B テスト名行の重複")
+    # #3190 再開補遺: テスト名行末への最初の DIAG2109 行の融合（実機の --nocapture 出力の形）
+    base_lb = lb[0]
+    first_diag = next(l for l in base_lb.splitlines() if l.startswith("DIAG2109 "))
+    nm = "test " + LAYER_B_TEST + " ... "
+    fused_ok = base_lb.replace(nm + "ok\n", "", 1).replace(first_diag + "\n", nm + first_diag + "\n", 1) + "ok\n"
+    assert nm + first_diag in fused_ok
+    parse_layer_b(fused_ok, "fused-ok")  # 融合 1 回は受理される
+    agg([fused_ok] + lb[1:], pa, ac2, cd, gate)
+    second_diag = [l for l in base_lb.splitlines() if l.startswith("DIAG2109 ")][1]
+    must_fail(lambda: parse_layer_b(fused_ok.replace(second_diag + "\n", nm + second_diag + "\n", 1), "fused-twice"),
+              "融合 2 回")
+    must_fail(lambda: parse_layer_b(fused_ok.replace(nm + first_diag, "test other::t ... " + first_diag, 1), "fused-other"),
+              "別テスト名への融合（先頭区間が欠落）")
+    must_fail(lambda: parse_layer_b(fused_ok.replace(nm + first_diag, nm + "X" + first_diag, 1), "fused-mid"),
+              "DIAG2109 の途中で融合")
     must_fail(lb0(drop_line(f"DIAG2109 n={n_} layer=L2 phase=h2d_a ")), "Layer B 区間の欠落")
     must_fail(lb0(drop_line("DIAG2109 n=128 layer=L0 ")), "Layer B 別サイズの区間欠落")
     must_fail(lb0(drop_line(f"DIAG2109 n={n_} checksum_bits=")), "Layer B checksum_bits の欠落")

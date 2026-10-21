@@ -1,0 +1,42 @@
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3190-reopen/b5-head/crates/backend-cuda)
+   Compiling bench-harness v0.11.0 (<home>/work/r3190-reopen/b5-head/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 5.76s
+     Running `target/release/examples/mma_ptx_dump --out-dir <home>/work/r3190-reopen/out/ptx-head`
+device: name=NVIDIA GB10 compute_capability=(12, 1) nvrtc_arch=compute_121 ptxas_arch=sm_121 num_sms=48
+base: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_base.ptx (nvrtc_arch=compute_121)
+swizzle: dynamic group_width=8 (derived from num_sms=48)
+swizzle: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_swizzle_g8.ptx (nvrtc_arch=compute_121)
+wt2x2: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x2.ptx (nvrtc_arch=compute_121)
+wt2x2_lb512: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x2_lb512.ptx (nvrtc_arch=compute_121)
+wt2x4: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x4.ptx (nvrtc_arch=compute_121)
+wt2x4_lb256: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x4_lb256.ptx (nvrtc_arch=compute_121)
+wt4x2: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x2.ptx (nvrtc_arch=compute_121)
+wt4x2_lb256: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x2_lb256.ptx (nvrtc_arch=compute_121)
+wt4x4: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x4.ptx (nvrtc_arch=compute_121)
+wt4x4_lb128: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x4_lb128.ptx (nvrtc_arch=compute_121)
+device: optin_budget_bytes=101376
+bt64x128_s4: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_bt64x128_s4.ptx (nvrtc_arch=compute_121)
+bt64x128_s4_lb512: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_bt64x128_s4_lb512.ptx (nvrtc_arch=compute_121)
+bt128x128_s3_wt2x4: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x128_s3_wt2x4.ptx (nvrtc_arch=compute_121)
+bt128x128_s3_wt2x4_lb512: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x128_s3_wt2x4_lb512.ptx (nvrtc_arch=compute_121)
+bt128x256_s3_wt4x4: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x256_s3_wt4x4.ptx (nvrtc_arch=compute_121)
+bt128x256_s3_wt4x4_lb512: wrote <home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x256_s3_wt4x4_lb512.ptx (nvrtc_arch=compute_121)
+desk-excluded: bt128x256_s4 (128x256x32 S4) mma_f16_source_with_block_tile candidate bm=128 bn=256 bk=32 stages=4 requires 108544 bytes of shared memory, exceeding the opt-in budget (101376 bytes; CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)
+desk-excluded: bt128x256_s4_lb512 (128x256x32 S4) mma_f16_source_with_block_tile candidate bm=128 bn=256 bk=32 stages=4 requires 108544 bytes of shared memory, exceeding the opt-in budget (101376 bytes; CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)
+done. out_dir=<home>/work/r3190-reopen/out/ptx-head nvrtc_arch=compute_121 ptxas_arch=sm_121 group_width=8. Run the following to inspect register/spill counts (docs/perf/cuda-gemm-swizzle-ab.md §3・docs/perf/cuda-gemm-mma-warp-tile-register-budget.md §4・docs/perf/cuda-gemm-mma-block-tile-stages.md §3):
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_base.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_base.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_swizzle_g8.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_swizzle_g8.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x2.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x2.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x2_lb512.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x2_lb512.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x4.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x4.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x4_lb256.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt2x4_lb256.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x2.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x2.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x2_lb256.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x2_lb256.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x4.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x4.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x4_lb128.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_wt4x4_lb128.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt64x128_s4.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt64x128_s4.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt64x128_s4_lb512.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt64x128_s4_lb512.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x128_s3_wt2x4.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x128_s3_wt2x4.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x128_s3_wt2x4_lb512.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x128_s3_wt2x4_lb512.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x256_s3_wt4x4.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x256_s3_wt4x4.ptx.cubin'
+    ptxas -arch=sm_121 -v '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x256_s3_wt4x4_lb512.ptx' -o '<home>/work/r3190-reopen/out/ptx-head/mma_f16_bt128x256_s3_wt4x4_lb512.ptx.cubin'

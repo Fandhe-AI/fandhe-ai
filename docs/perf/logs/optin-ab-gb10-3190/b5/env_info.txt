@@ -1,0 +1,6 @@
+計測時刻(UTC): 2026-10-21T14:05:45Z (段 2 完了直後に採取)
+OS/arch: Linux 6.17.0-1031-nvidia aarch64
+GPU: NVIDIA GB10, driver 580.173.02, compute_cap 12.1 (sm_121)
+CUDA: nvcc 13.0.88
+rustc: 1.97.0 (2d8144b78 2026-07-07)
+CPU コア: 20

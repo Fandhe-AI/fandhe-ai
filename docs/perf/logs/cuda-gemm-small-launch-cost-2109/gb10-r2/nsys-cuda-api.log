@@ -1,0 +1,171 @@
+WARNING: CPU IP/backtrace sampling not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cuda-64c87007ab0af02b)
+
+running 1 test
+test gemm_small_launch_cost_diag_tests::gemm_small_launch_cost_diag ... DIAG2109 n=128 layer=L0 phase=ops_total median_us=32.400 q1_us=32.000 q3_us=32.848
+DIAG2109 n=128 layer=L1 phase=gemm_total median_us=31.056 q1_us=30.480 q3_us=31.488
+DIAG2109 n=128 checksum_bits=0x407fb58219edf800
+DIAG2109 n=128 layer=L2 phase=h2d_a median_us=4.544 q1_us=4.496 q3_us=4.624
+DIAG2109 n=128 layer=L2 phase=h2d_b median_us=5.296 q1_us=5.168 q3_us=5.712
+DIAG2109 n=128 layer=L2 phase=alloc_c median_us=0.064 q1_us=0.064 q3_us=0.064
+DIAG2109 n=128 layer=L2 phase=launch_issue median_us=2.672 q1_us=2.384 q3_us=2.928
+DIAG2109 n=128 layer=L2 phase=readback median_us=14.352 q1_us=14.128 q3_us=14.576
+DIAG2109 n=128 layer=L2 phase=teardown median_us=3.360 q1_us=3.296 q3_us=3.472
+DIAG2109 n=128 layer=L2 phase=driver_scope median_us=0.544 q1_us=0.528 q3_us=0.544
+DIAG2109 n=128 layer=L2 phase=l2_sum median_us=30.928 q1_us=30.528 q3_us=31.680
+DIAG2109 n=128 layer=L2S phase=kernel_wait median_us=9.648 q1_us=9.504 q3_us=9.824
+DIAG2109 n=128 layer=L2S phase=d2h median_us=11.696 q1_us=11.568 q3_us=11.840
+DIAG2109 n=128 layer=D phase=dev_h2d_a median_us=7.328 q1_us=7.040 q3_us=7.456
+DIAG2109 n=128 layer=D phase=dev_h2d_b median_us=6.880 q1_us=6.592 q3_us=7.424
+DIAG2109 n=128 layer=D phase=dev_kernel_seg median_us=10.720 q1_us=10.272 q3_us=11.168
+DIAG2109 n=128 layer=D phase=dev_d2h median_us=10.016 q1_us=9.696 q3_us=10.112
+DIAG2109 n=128 layer=D phase=dev_span median_us=35.104 q1_us=34.272 q3_us=35.584
+DIAG2109 n=128 layer=D phase=dev_kernel_b2b median_us=8.200 q1_us=8.140 q3_us=8.312
+DIAG2109 n=128 layer=E phase=sync_idle median_us=0.528 q1_us=0.528 q3_us=0.544
+DIAG2109 n=128 layer=E phase=tiny_roundtrip median_us=6.992 q1_us=6.928 q3_us=7.184
+DIAG2109 n=128 layer=E phase=event_create_drop median_us=0.544 q1_us=0.528 q3_us=0.560
+DIAG2109 n=128 layer=E phase=h2d_prealloc median_us=3.536 q1_us=3.488 q3_us=3.584
+DIAG2109 n=128 layer=E phase=h2d_clone_drop median_us=7.568 q1_us=7.376 q3_us=7.728
+DIAG2109 n=128 counts driver_call_scopes=1 h2d_calls=2 h2d_bytes=131072 pool_allocs=1 kernel_launches=1 d2h_calls=1 d2h_bytes=65536 stream_syncs=1
+DIAG2109 n=128 verify arm=D_b2b checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=D_dev_trial checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=E_h2d_clone checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=E_h2d_prealloc checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=E_tiny checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=L0_ops checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=L1_gemm checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=L2 checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=L2S checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=count_run checks=1 mode=bit_exact
+DIAG2109 n=256 layer=L0 phase=ops_total median_us=60.272 q1_us=59.953 q3_us=60.608
+DIAG2109 n=256 layer=L1 phase=gemm_total median_us=55.920 q1_us=55.616 q3_us=56.464
+DIAG2109 n=256 checksum_bits=0xc08a4beb76029c50
+DIAG2109 n=256 layer=L2 phase=h2d_a median_us=14.048 q1_us=13.904 q3_us=14.256
+DIAG2109 n=256 layer=L2 phase=h2d_b median_us=12.912 q1_us=12.816 q3_us=13.264
+DIAG2109 n=256 layer=L2 phase=alloc_c median_us=0.064 q1_us=0.064 q3_us=0.064
+DIAG2109 n=256 layer=L2 phase=launch_issue median_us=2.352 q1_us=2.272 q3_us=2.624
+DIAG2109 n=256 layer=L2 phase=readback median_us=25.680 q1_us=25.424 q3_us=25.968
+DIAG2109 n=256 layer=L2 phase=teardown median_us=3.344 q1_us=3.280 q3_us=3.424
+DIAG2109 n=256 layer=L2 phase=driver_scope median_us=0.544 q1_us=0.528 q3_us=0.560
+DIAG2109 n=256 layer=L2 phase=l2_sum median_us=59.280 q1_us=58.688 q3_us=60.848
+DIAG2109 n=256 layer=L2S phase=kernel_wait median_us=14.704 q1_us=14.512 q3_us=16.352
+DIAG2109 n=256 layer=L2S phase=d2h median_us=25.136 q1_us=24.896 q3_us=26.512
+DIAG2109 n=256 layer=D phase=dev_h2d_a median_us=13.536 q1_us=13.408 q3_us=13.664
+DIAG2109 n=256 layer=D phase=dev_h2d_b median_us=14.432 q1_us=14.368 q3_us=14.560
+DIAG2109 n=256 layer=D phase=dev_kernel_seg median_us=15.840 q1_us=15.520 q3_us=16.096
+DIAG2109 n=256 layer=D phase=dev_d2h median_us=15.456 q1_us=15.136 q3_us=15.712
+DIAG2109 n=256 layer=D phase=dev_span median_us=59.232 q1_us=58.976 q3_us=59.584
+DIAG2109 n=256 layer=D phase=dev_kernel_b2b median_us=12.580 q1_us=12.432 q3_us=12.684
+DIAG2109 n=256 layer=E phase=sync_idle median_us=0.528 q1_us=0.512 q3_us=0.544
+DIAG2109 n=256 layer=E phase=tiny_roundtrip median_us=6.944 q1_us=6.800 q3_us=7.072
+DIAG2109 n=256 layer=E phase=event_create_drop median_us=0.528 q1_us=0.512 q3_us=0.544
+DIAG2109 n=256 layer=E phase=h2d_prealloc median_us=12.352 q1_us=12.064 q3_us=12.496
+DIAG2109 n=256 layer=E phase=h2d_clone_drop median_us=15.088 q1_us=14.848 q3_us=15.264
+DIAG2109 n=256 counts driver_call_scopes=1 h2d_calls=2 h2d_bytes=524288 pool_allocs=1 kernel_launches=1 d2h_calls=1 d2h_bytes=262144 stream_syncs=1
+DIAG2109 n=256 verify arm=D_b2b checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=D_dev_trial checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=E_h2d_clone checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=E_h2d_prealloc checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=E_tiny checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=L0_ops checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=L1_gemm checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=L2 checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=L2S checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=count_run checks=1 mode=bit_exact
+DIAG2109 n=512 layer=L0 phase=ops_total median_us=134.208 q1_us=133.712 q3_us=134.768
+DIAG2109 n=512 layer=L1 phase=gemm_total median_us=126.961 q1_us=126.673 q3_us=127.280
+DIAG2109 n=512 checksum_bits=0xc074525ae91a5400
+DIAG2109 n=512 layer=L2 phase=h2d_a median_us=28.096 q1_us=27.952 q3_us=28.240
+DIAG2109 n=512 layer=L2 phase=h2d_b median_us=26.528 q1_us=26.400 q3_us=26.656
+DIAG2109 n=512 layer=L2 phase=alloc_c median_us=0.064 q1_us=0.064 q3_us=0.064
+DIAG2109 n=512 layer=L2 phase=launch_issue median_us=2.480 q1_us=2.432 q3_us=2.528
+DIAG2109 n=512 layer=L2 phase=readback median_us=70.352 q1_us=70.032 q3_us=70.768
+DIAG2109 n=512 layer=L2 phase=teardown median_us=3.456 q1_us=3.392 q3_us=3.536
+DIAG2109 n=512 layer=L2 phase=driver_scope median_us=0.560 q1_us=0.544 q3_us=0.576
+DIAG2109 n=512 layer=L2 phase=l2_sum median_us=131.713 q1_us=131.137 q3_us=132.176
+DIAG2109 n=512 layer=L2S phase=kernel_wait median_us=37.056 q1_us=36.864 q3_us=37.328
+DIAG2109 n=512 layer=L2S phase=d2h median_us=69.808 q1_us=69.456 q3_us=70.065
+DIAG2109 n=512 layer=D phase=dev_h2d_a median_us=27.712 q1_us=27.424 q3_us=28.192
+DIAG2109 n=512 layer=D phase=dev_h2d_b median_us=28.288 q1_us=28.128 q3_us=28.768
+DIAG2109 n=512 layer=D phase=dev_kernel_seg median_us=38.688 q1_us=38.336 q3_us=40.992
+DIAG2109 n=512 layer=D phase=dev_d2h median_us=36.864 q1_us=35.584 q3_us=37.472
+DIAG2109 n=512 layer=D phase=dev_span median_us=131.936 q1_us=131.328 q3_us=133.728
+DIAG2109 n=512 layer=D phase=dev_kernel_b2b median_us=35.380 q1_us=35.172 q3_us=35.724
+DIAG2109 n=512 layer=E phase=sync_idle median_us=0.528 q1_us=0.512 q3_us=0.528
+DIAG2109 n=512 layer=E phase=tiny_roundtrip median_us=6.944 q1_us=6.848 q3_us=7.008
+DIAG2109 n=512 layer=E phase=event_create_drop median_us=0.528 q1_us=0.512 q3_us=0.544
+DIAG2109 n=512 layer=E phase=h2d_prealloc median_us=26.000 q1_us=25.824 q3_us=26.112
+DIAG2109 n=512 layer=E phase=h2d_clone_drop median_us=28.689 q1_us=28.512 q3_us=28.864
+DIAG2109 n=512 counts driver_call_scopes=1 h2d_calls=2 h2d_bytes=2097152 pool_allocs=1 kernel_launches=1 d2h_calls=1 d2h_bytes=1048576 stream_syncs=1
+DIAG2109 n=512 verify arm=D_b2b checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=D_dev_trial checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=E_h2d_clone checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=E_h2d_prealloc checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=E_tiny checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=L0_ops checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=L1_gemm checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=L2 checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=L2S checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=count_run checks=1 mode=bit_exact
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1311 filtered out; finished in 1.57s
+
+Collecting data...
+Generating '/tmp/nsys-report-547c.qdstrm'
+[1/6] [0%                          ] gemm2109.nsys-rep[1/6] [0%                          ] gemm2109.nsys-rep[1/6] [6%                          ] gemm2109.nsys-rep[1/6] [13%                         ] gemm2109.nsys-rep[1/6] [==19%                       ] gemm2109.nsys-rep[1/6] [===24%                      ] gemm2109.nsys-rep[1/6] [=====30%                    ] gemm2109.nsys-rep[1/6] [=======37%                  ] gemm2109.nsys-rep[1/6] [=========43%                ] gemm2109.nsys-rep[1/6] [==========49%               ] gemm2109.nsys-rep[1/6] [============55%             ] gemm2109.nsys-rep[1/6] [==============61%           ] gemm2109.nsys-rep[1/6] [===============67%          ] gemm2109.nsys-rep[1/6] [=================73%        ] gemm2109.nsys-rep[1/6] [===================79%      ] gemm2109.nsys-rep[1/6] [===================82%      ] gemm2109.nsys-rep[1/6] [========================100%] gemm2109.nsys-rep[1/6] [========================100%] gemm2109.nsys-rep
+[2/6] [0%                          ] gemm2109.sqlite[2/6] [1%                          ] gemm2109.sqlite[2/6] [2%                          ] gemm2109.sqlite[2/6] [3%                          ] gemm2109.sqlite[2/6] [4%                          ] gemm2109.sqlite[2/6] [5%                          ] gemm2109.sqlite[2/6] [6%                          ] gemm2109.sqlite[2/6] [7%                          ] gemm2109.sqlite[2/6] [8%                          ] gemm2109.sqlite[2/6] [9%                          ] gemm2109.sqlite[2/6] [10%                         ] gemm2109.sqlite[2/6] [11%                         ] gemm2109.sqlite[2/6] [12%                         ] gemm2109.sqlite[2/6] [13%                         ] gemm2109.sqlite[2/6] [14%                         ] gemm2109.sqlite[2/6] [=15%                        ] gemm2109.sqlite[2/6] [=16%                        ] gemm2109.sqlite[2/6] [=17%                        ] gemm2109.sqlite[2/6] [==18%                       ] gemm2109.sqlite[2/6] [==19%                       ] gemm2109.sqlite[2/6] [==20%                       ] gemm2109.sqlite[2/6] [==21%                       ] gemm2109.sqlite[2/6] [===22%                      ] gemm2109.sqlite[2/6] [===23%                      ] gemm2109.sqlite[2/6] [===24%                      ] gemm2109.sqlite[2/6] [====25%                     ] gemm2109.sqlite[2/6] [====26%                     ] gemm2109.sqlite[2/6] [====27%                     ] gemm2109.sqlite[2/6] [====28%                     ] gemm2109.sqlite[2/6] [=====29%                    ] gemm2109.sqlite[2/6] [=====30%                    ] gemm2109.sqlite[2/6] [=====31%                    ] gemm2109.sqlite[2/6] [=====32%                    ] gemm2109.sqlite[2/6] [======33%                   ] gemm2109.sqlite[2/6] [======34%                   ] gemm2109.sqlite[2/6] [======35%                   ] gemm2109.sqlite[2/6] [=======36%                  ] gemm2109.sqlite[2/6] [=======37%                  ] gemm2109.sqlite[2/6] [=======38%                  ] gemm2109.sqlite[2/6] [=======39%                  ] gemm2109.sqlite[2/6] [========40%                 ] gemm2109.sqlite[2/6] [========41%                 ] gemm2109.sqlite[2/6] [========42%                 ] gemm2109.sqlite[2/6] [=========43%                ] gemm2109.sqlite[2/6] [=========44%                ] gemm2109.sqlite[2/6] [=========45%                ] gemm2109.sqlite[2/6] [=========46%                ] gemm2109.sqlite[2/6] [==========47%               ] gemm2109.sqlite[2/6] [==========48%               ] gemm2109.sqlite[2/6] [==========49%               ] gemm2109.sqlite[2/6] [===========50%              ] gemm2109.sqlite[2/6] [===========51%              ] gemm2109.sqlite[2/6] [===========52%              ] gemm2109.sqlite[2/6] [===========53%              ] gemm2109.sqlite[2/6] [============54%             ] gemm2109.sqlite[2/6] [============55%             ] gemm2109.sqlite[2/6] [============56%             ] gemm2109.sqlite[2/6] [============57%             ] gemm2109.sqlite[2/6] [=============58%            ] gemm2109.sqlite[2/6] [=============59%            ] gemm2109.sqlite[2/6] [=============60%            ] gemm2109.sqlite[2/6] [==============61%           ] gemm2109.sqlite[2/6] [==============62%           ] gemm2109.sqlite[2/6] [==============63%           ] gemm2109.sqlite[2/6] [==============64%           ] gemm2109.sqlite[2/6] [===============65%          ] gemm2109.sqlite[2/6] [===============66%          ] gemm2109.sqlite[2/6] [===============67%          ] gemm2109.sqlite[2/6] [================68%         ] gemm2109.sqlite[2/6] [================69%         ] gemm2109.sqlite[2/6] [================70%         ] gemm2109.sqlite[2/6] [================71%         ] gemm2109.sqlite[2/6] [=================72%        ] gemm2109.sqlite[2/6] [=================73%        ] gemm2109.sqlite[2/6] [=================74%        ] gemm2109.sqlite[2/6] [==================75%       ] gemm2109.sqlite[2/6] [==================76%       ] gemm2109.sqlite[2/6] [==================77%       ] gemm2109.sqlite[2/6] [==================78%       ] gemm2109.sqlite[2/6] [===================79%      ] gemm2109.sqlite[2/6] [===================80%      ] gemm2109.sqlite[2/6] [===================81%      ] gemm2109.sqlite[2/6] [===================82%      ] gemm2109.sqlite[2/6] [====================83%     ] gemm2109.sqlite[2/6] [====================84%     ] gemm2109.sqlite[2/6] [====================85%     ] gemm2109.sqlite[2/6] [=====================86%    ] gemm2109.sqlite[2/6] [=====================87%    ] gemm2109.sqlite[2/6] [=====================88%    ] gemm2109.sqlite[2/6] [=====================89%    ] gemm2109.sqlite[2/6] [======================90%   ] gemm2109.sqlite[2/6] [======================91%   ] gemm2109.sqlite[2/6] [======================92%   ] gemm2109.sqlite[2/6] [=======================93%  ] gemm2109.sqlite[2/6] [=======================94%  ] gemm2109.sqlite[2/6] [=======================95%  ] gemm2109.sqlite[2/6] [=======================96%  ] gemm2109.sqlite[2/6] [========================97% ] gemm2109.sqlite[2/6] [========================98% ] gemm2109.sqlite[2/6] [========================99% ] gemm2109.sqlite[2/6] [========================100%] gemm2109.sqlite[2/6] [========================100%] gemm2109.sqlite
+[3/6] Executing 'cuda_api_sum' stats report
+
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)   Med (ns)   Min (ns)  Max (ns)   StdDev (ns)          Name        
+ --------  ---------------  ---------  ---------  ---------  --------  ---------  -----------  --------------------
+     38.2      155,395,680     11,274   13,783.5      464.0       288    432,272     47,467.8  cuStreamSynchronize 
+     30.5      124,149,040      9,030   13,748.5   11,584.0     1,824    824,352     12,933.5  cuMemcpyHtoDAsync_v2
+     14.2       57,913,744      3,768   15,369.9   10,896.0     6,176    245,424      8,461.8  cuMemcpyDtoHAsync_v2
+      6.3       25,708,096     12,006    2,141.3    2,096.0     1,744     40,720        464.0  cuLaunchKernel      
+      4.1       16,586,032     19,551      848.3      400.0       272    102,304      1,011.6  cuEventRecord       
+      2.2        8,795,616      8,284    1,061.8      288.0       160  6,173,136     67,821.2  cuMemAllocAsync     
+      1.2        4,820,320     24,068      200.3      112.0        48    882,832      6,310.0  cuEventCreate       
+      0.8        3,406,784      8,283      411.3      400.0       320     34,112        379.2  cuMemFreeAsync      
+      0.7        2,799,184     16,566      169.0      208.0        32      5,888         96.4  cuStreamWaitEvent   
+      0.7        2,747,664     10,500      261.7      256.0       192        912         38.3  cuEventSynchronize  
+      0.7        2,689,104     24,066      111.7       96.0        32      4,352        132.5  cuEventDestroy_v2   
+      0.5        2,055,392         12  171,282.7  174,792.0    65,904    329,744     75,061.6  cuModuleLoadData    
+      0.0           27,440          3    9,146.7    8,896.0     8,128     10,416      1,164.4  cuMemsetD8Async     
+      0.0            2,576          1    2,576.0    2,576.0     2,576      2,576          0.0  cuInit              
+      0.0            1,648          1    1,648.0    1,648.0     1,648      1,648          0.0  cuCtxSetCurrent     
+      0.0              880          3      293.3      368.0       144        368        129.3  cuDeviceGetMemPool  
+      0.0              656          3      218.7      224.0       192        240         24.4  cuMemPoolTrimTo     
+
+[4/6] Executing 'cuda_gpu_kern_sum' stats report
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)           Name          
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  -----------------------
+     99.4      196,975,520     11,256  17,499.6  11,264.0     6,368   144,512     12,265.8  gemm_tiled_pipeline_f32
+      0.6        1,140,000        750   1,520.0   1,408.0     1,344    12,736        845.7  gemm_tiled_f32         
+
+[5/6] Executing 'cuda_gpu_mem_time_sum' stats report
+
+ Time (%)  Total Time (ns)  Count  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)           Operation          
+ --------  ---------------  -----  --------  --------  --------  --------  -----------  ----------------------------
+     71.9       81,419,168  9,030   9,016.5   5,760.0       160    61,056      7,127.3  [CUDA memcpy Host-to-Device]
+     28.1       31,794,560  3,768   8,438.0   5,216.0       736    45,600      7,239.5  [CUDA memcpy Device-to-Host]
+      0.0            3,456      3   1,152.0     928.0       832     1,696        473.6  [CUDA memset]               
+
+[6/6] Executing 'cuda_gpu_mem_size_sum' stats report
+
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)           Operation          
+ ----------  -----  --------  --------  --------  --------  -----------  ----------------------------
+  4,139.778  9,030     0.458     0.262     0.000     1.049        0.425  [CUDA memcpy Host-to-Device]
+  1,727.201  3,768     0.458     0.262     0.000     1.049        0.425  [CUDA memcpy Device-to-Host]
+      1.376      3     0.459     0.262     0.066     1.049        0.520  [CUDA memset]               
+
+Generated:
+	/tmp/tmp.nl9CjA1Gq6/gemm2109.nsys-rep
+	/tmp/tmp.nl9CjA1Gq6/gemm2109.sqlite

@@ -1,8 +1,7 @@
 # CUDA gemm N=256 起動固定費の診断（イシュー #2109）
 
 親 #2099（Phase 3 負けセル対処）の sub。**計装・診断テスト・事前登録規則・
-計測スクリプトまでを本 PR で整備し、GB10 での 5 run 実測は実機セッションへ
-申し送る**（開発機は NVRTC 非搭載で実機テスト不可）。修正実装は対象外。
+計測スクリプトまでを初版 PR で整備し、GB10 での 5 run 実測は #3190 で実施した**（有効系列は §7.1）。修正実装は対象外。
 
 ## 1. 課題と数値の扱い
 
@@ -62,9 +61,47 @@
 | Stream-K・persistent・TMA Stage 1 | REJECT／調査済み | `loss-attribution-matrix.md` §5 |
 | reuse フェーズ分解（N=1024〜4096。#1182／#1973） | 記録済み（N=256 は本件で新規計測） | `cuda-gemm-reuse-phase-breakdown.md` §12 |
 
-## 7. 結果（GB10 実測。イシュー #3190・2026-10-20）
+## 7. 結果（GB10 実測。イシュー #3190）
 
-**系列の扱い: RULE.txt 7 により「無効」**。`orchestrate.sh` は完走し（`logs/cuda-gemm-small-launch-cost-2109/gb10/`。
+### 7.1 有効系列（`gb10-r2/`。2026-10-21・再開分）
+
+**系列の扱い: 有効**。`aggregate.py` の Layer B 先頭行融合への対応（融合 1 形だけを受理。fail-closed の検査は弱めていない。
+規則は `logs/optin-ab-gb10-3190/RULE-reopen.txt` 1。事前登録のコミットは GB10 上の最初のログより前）を入れたうえで、空の別ディレクトリ
+`logs/cuda-gemm-small-launch-cost-2109/gb10-r2/` に `orchestrate.sh` を 1 回だけ実行し（`RUN_NSYS=1`）、`aggregate.py` は **exit 0** で完走した
+（`gb10-r2/aggregate.md`）。専有ゲートは全 30 run が PASS（load1 0.29〜0.85・GPU 0%。`gb10-r2/load_gate.log`）、checksum・件数は一致、nsys 補助診断は取得済み。
+registry 腕は framework-compare の現行ピン `fandhe-ai =0.11.0`（RULE.txt の `=0.9.0` 表記との条件差。RULE 4 で record_only のため判定は不変）。
+
+| 項目 | 値（5 run 中央値, µs） |
+|---|---|
+| HEAD path-patch reuse（AC-2） | 90.720 |
+| candle fresh | 75.088 |
+| gap（HEAD − candle。RULE 5 の分母） | 15.632 |
+| registry 腕 reuse | 89.769（HEAD/registry = 1.011。record_only・RULE 4。「要調査・別 issue」） |
+| L0 ops_total／L1 gemm_total／L2 l2_sum | 52.737／48.752／52.208 |
+| Layer A（HEAD）iter_total／matmul | 90.425／56.216 |
+| 床: host→kernel 往復（E tiny_roundtrip） | 6.096（L0 の 11.6%） |
+| 床: device idle 推定 | 2.268（4.3%） |
+
+| 仮説 | µs (min–max) | L0 比 | gap 比 | 判定（RULE 6） |
+|---|---|---|---|---|
+| H1 毎反復 H2D | 22.896 (22.448–23.248) | 43.4% | 146.5% | **支持** |
+| H2 launch+同期の往復 | 3.948 (3.948–4.032) | 7.5% | 25.3% | 未確定 |
+| H3 D2H readback | 25.056 (24.832–25.120) | 47.5% | 160.3% | **支持** |
+| H4a host dispatch（L0−L1） | 4.144 (3.376–5.231) | 7.9% | 26.5% | 未確定 |
+| H5 facade/tape | 3.625 (3.001–5.599) | 6.9% | 23.2% | 未確定 |
+| H6 checksum | 33.696 | 63.9% | 215.6% | 記録のみ |
+
+- 支配項は **L2 readback（25.408 µs・L0 比 48.2%・iter_total 比 28.1%）**、次いで h2d_a（11.984 µs）・h2d_b（10.880 µs）。launch 往復の床は 6.1 µs（L0 の 11.6%）で、
+  H2 の推定（3.9 µs）は床の 64.8%（E tiny_roundtrip 比）にとどまる。reuse が candle fresh より遅い逆転は GB10 でも再現した（+15.6 µs）。
+- 含意: N=256 の差は launch 往復より **入出力の転送（H1・H3）が L0 の約 9 割（43.4% + 47.5% = 90.9%）を占める**。gap への寄与は相手側の転送時間を測っていないため未分離。
+  readback 宛先の変更（#3186 で N>=1024 は REJECT、N=256 は #3190 の補遺 B6 でも REJECT〈ratio 1.0475〉）では縮まらず、計測境界の対称化（入力の resident 化）が先に要る。
+  #3214・#3259 の前提データとして使う（旧無効系列の参考値〈7.2〉とも同じ向き。値は今回の有効系列を使う）。
+- 判定は RULE 6 の語彙（支持／未確定）のとおり。H1・H3 の「支持」は、各項が gap の 50% 以上を占めるという RULE 6 の閾値を満たした結果である（gap 比 146.5%・160.3%）。
+  H2・H4・H5 は閾値未満で未確定（推定しない）。
+
+### 7.2 履歴: 旧系列（`gb10/`。無効。イシュー #3190・2026-10-20）
+
+**系列の扱い: RULE.txt 7 により「無効」（履歴。7.1 の有効系列で置き換えた）**。`orchestrate.sh` は完走し（`logs/cuda-gemm-small-launch-cost-2109/gb10/`。
 専有ゲート全 run PASS〈load1 0.11〜0.30・GPU 0%〉・nsys 補助診断取得済み）、`aggregate.py` は exit 1 で止まった
 （原因: `LogIntegrityError: layerB-run1 区間: キー集合が期待と不一致（欠落 [(128, 'L0', 'ops_total')]）`）。
 原因は、`--nocapture` の `test ... ... ` 行末に最初の `DIAG2109` 行が融合し（`layerB-run*.log` の 6 行目）、
@@ -105,5 +142,5 @@ registry 腕は framework-compare の現行ピン `fandhe-ai =0.11.0`（RULE.txt
 - 入力の resident 化による計測境界の対称化（H1 が支配的な場合。compare 側の設計判断を含む）
 - Legacy stream での event tracking 無効化（`unsafe` を伴うため要承認）
 - `teardown` 削減（drop 時の free・event 破棄。teardown が支配的な場合）
-- `aggregate.py` の Layer B パーサーが `--nocapture` の test 行末に融合した最初の `DIAG2109` 行を読めない問題の是正（#3190 で発覚）
+- ~~`aggregate.py` の Layer B パーサーが `--nocapture` の test 行末に融合した最初の `DIAG2109` 行を読めない問題の是正~~（#3190 再開分で是正済み。7.1）
 - readback 宛先の再利用（#2108）・CUDA 推論 Graph capture（#2115）は既存 issue

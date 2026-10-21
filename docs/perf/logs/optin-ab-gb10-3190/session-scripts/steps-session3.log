@@ -1,0 +1,54 @@
+2026-10-21T13:44:41Z B4 (gb10-r2) orchestrate start
+2026-10-21T13:55:04Z B4 orchestrate rc=0
+2026-10-21T13:55:04Z B5(a) parity base start
+2026-10-21T13:55:04Z B5(a) parity base integration rc=101
+2026-10-21T13:55:21Z B5(a) parity base lib kernels_mma rc=0
+2026-10-21T13:55:21Z B5(a) parity head start
+2026-10-21T13:55:21Z B5(a) parity head integration rc=101
+2026-10-21T13:55:37Z B5(a) parity head lib kernels_mma rc=0
+2026-10-21T13:55:37Z B5(b) ptxas base start
+2026-10-21T13:55:44Z B5(b) ptx dump base rc=0
+2026-10-21T13:55:44Z B5(b) ptxas base rc=0
+2026-10-21T13:55:44Z B5(b) ptxas head start
+2026-10-21T13:55:51Z B5(b) ptx dump head rc=0
+2026-10-21T13:55:51Z B5(b) ptxas head rc=0
+2026-10-21T13:55:51Z STAGE1 DONE
+2026-10-21T13:56:52Z B5(a)v2 parity base start
+2026-10-21T13:56:54Z B5(a)v2 parity base integration rc=101
+2026-10-21T13:56:54Z B5(a)v2 parity base lib kernels_mma rc=0
+2026-10-21T13:56:54Z B5(a)v2 parity head start
+2026-10-21T13:56:57Z B5(a)v2 parity head integration rc=101
+2026-10-21T13:56:57Z B5(a)v2 parity head lib kernels_mma rc=0
+2026-10-21T13:56:57Z STAGE1b DONE
+2026-10-21T13:57:49Z B5(a)v3 parity base start
+2026-10-21T13:58:08Z B5(a)v3 parity base integration rc=101
+2026-10-21T13:58:08Z B5(a)v3 parity base lib kernels_mma rc=0
+2026-10-21T13:58:08Z B5(a)v3 parity head start
+2026-10-21T13:58:29Z B5(a)v3 parity head integration rc=101
+2026-10-21T13:58:29Z B5(a)v3 parity head lib kernels_mma rc=0
+2026-10-21T13:58:29Z STAGE1c DONE
+2026-10-21T13:59:42Z B5 prebuild base
+2026-10-21T13:59:43Z B5 prebuild base rc=0
+2026-10-21T13:59:43Z B5 prebuild head
+2026-10-21T13:59:43Z B5 prebuild head rc=0
+2026-10-21T13:59:43Z B5 run1-base start
+2026-10-21T13:59:48Z B5 run1-base rc=0
+2026-10-21T14:00:18Z B5 run1-head start
+2026-10-21T14:00:23Z B5 run1-head rc=0
+2026-10-21T14:00:53Z B5 run2-head start
+2026-10-21T14:00:58Z B5 run2-head rc=0
+2026-10-21T14:01:28Z B5 run2-base start
+2026-10-21T14:01:32Z B5 run2-base rc=0
+2026-10-21T14:02:02Z B5 run3-base start
+2026-10-21T14:02:07Z B5 run3-base rc=0
+2026-10-21T14:02:37Z B5 run3-head start
+2026-10-21T14:02:41Z B5 run3-head rc=0
+2026-10-21T14:03:11Z B5 run4-head start
+2026-10-21T14:03:16Z B5 run4-head rc=0
+2026-10-21T14:03:46Z B5 run4-base start
+2026-10-21T14:03:50Z B5 run4-base rc=0
+2026-10-21T14:04:20Z B5 run5-base start
+2026-10-21T14:04:25Z B5 run5-base rc=0
+2026-10-21T14:04:55Z B5 run5-head start
+2026-10-21T14:05:00Z B5 run5-head rc=0
+2026-10-21T14:05:00Z STAGE2 DONE

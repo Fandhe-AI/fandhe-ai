@@ -1,0 +1,133 @@
+error: target `specialized_mma_parity` in package `fandhe-ai-backend-cuda` requires the features: `internal-diagnostics`
+Consider enabling them by passing, e.g., `--features="internal-diagnostics"`
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling zerocopy v0.8.56
+   Compiling getrandom v0.3.4
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling serde_core v1.0.229
+   Compiling rayon-core v1.13.0
+   Compiling cudarc v0.19.8
+   Compiling zmij v1.0.23
+   Compiling either v1.17.0
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/r3190-reopen/b5-base/crates/backend-cpu)
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling libloading v0.9.0
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling rand_core v0.9.5
+   Compiling rayon v1.12.0
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/r3190-reopen/b5-base/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3190-reopen/b5-base/crates/backend-cuda)
+   Compiling bench-harness v0.11.0 (<home>/work/r3190-reopen/b5-base/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 16.04s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cuda-64c87007ab0af02b)
+
+running 86 tests
+test kernels_mma::tests::dim_spec_matches_launch_dim_accepts_dynamic_and_exact_static_match ... ok
+test kernels_mma::tests::derive_mma_block_tile_layout_matches_candidate_table_smem_bytes ... ok
+test kernels_mma::tests::derive_mma_block_tile_layout_default_matches_production_constants ... ok
+test kernels_mma::tests::mma_block_threads_matches_warp_layout ... ok
+test kernels_mma::tests::dim_spec_matches_launch_dim_rejects_mismatched_static ... ok
+test kernels_mma::tests::dynamic_m_dim_render_never_bakes_in_a_concrete_m_value ... ok
+test kernels_mma::tests::mma_default_config_dim_defines_alias_kernel_parameters ... ok
+test kernels_mma::tests::mma_f16_source_epilogue_store_is_inside_warp_tile_loop ... ok
+test kernels_mma::tests::mma_f16_source_retains_req8_boundary_guards ... ok
+test kernels_mma::tests::mma_f16_source_interleaves_cp_async_issue_into_kstep_loop ... ok
+test kernels_mma::tests::mma_f16_source_has_single_numeric_wait_group_literal ... ok
+test kernels_mma::tests::mma_f16_source_has_pragma_unroll_before_kstep_loop ... ok
+test kernels_mma::tests::mma_f16_source_issues_mma_sync_from_single_loop_site ... ok
+test kernels_mma::tests::mma_f16_source_uses_2x2_register_blocking_structure ... ok
+test kernels_mma::tests::mma_f16_source_epilogue_uses_half2_pair_store ... ok
+test kernels_mma::tests::mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain ... ok
+test kernels_mma::tests::mma_f16_source_stages_are_swappable_without_kernel_source_edits ... ok
+test kernels_mma::tests::mma_f16_source_uses_mma_fragment_quadrant_order_for_a ... ok
+test kernels_mma::tests::mma_f16_source_uses_ldmatrix_double_buffer_structure ... ok
+test kernels_mma::tests::mma_f16_source_uses_mma_sync_ldmatrix_cp_async_instructions ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_rejects_launch_bounds_mismatch ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_default_matches_mma_f16_source ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_rejects_stages_above_nine ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_accepts_stages_at_nine ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_rejects_stages_below_two ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_rejects_over_optin_budget ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_expanded_tile_replaces_all_defines ... ok
+test kernels_mma::tests::mma_f16_source_with_swizzle_does_not_mutate_mma_f16_source ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_rejects_zero_arguments ... ok
+test kernels_mma::tests::mma_f16_source_with_swizzle_contains_group_define_and_remap_fragment ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_stage_increase_uses_dynamic_smem ... ok
+test kernels_mma::tests::mma_f16_source_with_warp_tiles_rejects_invalid_inputs ... ok
+test kernels_mma::tests::mma_f16_source_with_warp_tiles_default_matches_mma_f16_source ... ok
+test kernels_mma::tests::mma_f16_source_with_swizzle_rejects_group_width_below_two ... ok
+test kernels_mma::tests::mma_f16_source_with_warp_tiles_launch_bounds_none_omits_attribute ... ok
+test kernels_mma::tests::mma_f16_sources_compile_with_nvrtc_when_available ... ignored, requires NVRTC (libnvrtc); run manually on a CUDA-enabled host
+test kernels_mma::tests::mma_f16_source_with_warp_tiles_rejects_multiplication_overflow ... ok
+test kernels_mma::tests::mma_f16_source_zero_fill_clamp_stays_16_byte_aligned ... ok
+test kernels_mma::tests::mma_kernel_config_launch_config_grid_dim_covers_m_and_n_via_div_ceil ... ok
+test kernels_mma::tests::mma_kernel_config_validate_launch_shape_rejects_k_mismatch ... ok
+test kernels_mma::tests::mma_shared_mem_and_k_steps_match_block_tile_expansion ... ok
+test kernels_mma::tests::mma_tile_constants_match_kernel_source_defines ... ok
+test kernels_mma::tests::mma_f16_source_with_block_tile_forced_dynamic_smem_applies_transform_below_static_budget ... ok
+test kernels_mma::tests::mma_tile_constants_pinned_for_shape_table_cross_reference ... ok
+test kernels_mma::tests::mma_tile_dims_satisfy_cp_async_alignment_granularity ... ok
+test kernels_mma::tests::mma_tile_padding_distributes_bank_phase_across_rows ... ok
+test kernels_mma::tests::render_mma_f16_accepts_static_dims_aligned_to_eight_and_exempts_dim_m ... ok
+test kernels_mma::tests::mma_f16_source_with_warp_tiles_replaces_defines_for_each_candidate ... ok
+test kernels_mma::tests::render_mma_f16_block_tile_rejects_over_optin_budget ... ok
+test kernels_mma::tests::render_mma_f16_is_deterministic_for_same_config ... ok
+test kernels_mma::tests::render_mma_f16_rejects_invalid_configs ... ok
+test kernels_mma::tests::render_mma_f16_block_tile_forced_dynamic_smem_marks_uses_dynamic_smem ... ok
+test kernels_mma::tests::render_mma_f16_specializes_tile_and_static_dim ... ok
+test kernels_mma::tests::render_mma_f16_retains_req8_boundary_guards_for_static_nk_and_mnk ... ok
+test kernels_mma::tests::validate_mma_k_tile_bound_accepts_ordinary_k ... ok
+test kernels_mma::tests::validate_mma_k_tile_bound_accepts_zero_k_regardless_of_bk ... ok
+test kernels_mma::tests::validate_mma_k_tile_bound_rejects_i32_overflow_for_non_default_bk ... ok
+test kernels_mma_tf32::tests::derive_mma_tf32_block_tile_layout_matches_candidate_table_smem_bytes ... ok
+test kernels_mma_tf32::tests::derive_mma_tf32_block_tile_layout_default_matches_production_constants ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_issues_mma_sync_from_single_loop_site ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_commit_wait_group_invariant ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_retains_req8_boundary_checks ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_rounds_only_in_convert_stage_group_macros ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_uses_mma_fragment_quadrant_order_for_a ... ok
+test kernels_mma::tests::render_mma_f16_block_tile_source_matches_mma_f16_source_with_block_tile ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_uses_mma_sync_ldmatrix_cp_async_instructions ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_accepts_stages_at_nine ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_rejects_non_multiple_of_four_bm_bn ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_rejects_launch_bounds_mismatch ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_expanded_tile_uses_dynamic_smem ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_default_matches_mma_tf32_source ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_applies_launch_bounds ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_rejects_over_optin_budget ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_rejects_stages_above_nine ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_rejects_stages_below_two ... ok
+test kernels_mma_tf32::tests::mma_tf32_source_with_block_tile_rejects_zero_arguments ... ok
+test kernels_mma_tf32::tests::mma_tf32_tile_constants_are_internally_consistent ... ok
+test kernels_mma_tf32::tests::render_mma_tf32_block_tile_rejects_over_optin_budget ... ok
+test kernels_mma_tf32x3::tests::mma_tf32x3_source_commit_wait_group_invariant ... ok
+test kernels_mma_tf32::tests::render_mma_tf32_block_tile_source_matches_mma_tf32_source_with_block_tile ... ok
+test kernels_mma_tf32x3::tests::mma_tf32x3_source_issues_mma_sync_from_single_macro_site_called_three_times ... ok
+test kernels_mma_tf32x3::tests::mma_tf32x3_source_issue_call_order_matches_hi_lo_lo_hi_hi_hi ... ok
+test kernels_mma_tf32x3::tests::mma_tf32x3_source_retains_req8_boundary_checks ... ok
+test kernels_mma_tf32x3::tests::mma_tf32x3_source_rounds_only_in_split_macro ... ok
+test kernels_mma_tf32x3::tests::mma_tf32x3_source_uses_mma_sync_ldmatrix_cp_async_instructions ... ok
+test kernels_mma_tf32x3::tests::mma_tf32x3_tile_constants_alias_mma_tf32 ... ok
+
+test result: ok. 85 passed; 0 failed; 1 ignored; 0 measured; 1226 filtered out; finished in 0.00s
+
