@@ -32,6 +32,13 @@ ARMS = ("base", "head")
 UNMASKED_RE = re.compile(r"/home/[A-Za-z0-9_.-]+")
 TEST_LINE_RE = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored)$")
 RUNNING_RE = re.compile(r"^\s*Running (.+?) \(")
+# 前提 (a) で必ず実行されていなければならないテストバイナリ（RULE-reopen-2.txt。1 つでも欠ければ
+# 「実行できなかったのに後退なし」という空の成立を避けるため FAIL）。
+REQUIRED_BINARIES = (
+    "tests/cpu_cuda_mma_parity.rs", "tests/gemm_mma.rs", "tests/parity_nonregression.rs",
+    "tests/specialized_mma_parity.rs", "tests/gemm_auto.rs", "tests/dispatch_boundary.rs",
+    "unittests src/lib.rs",
+)
 BENCH_RE = re.compile(
     r"^size=(\d+) tiled_f32_tflops=(\S+) wmma_f16_tflops=(\S+) mma_f16_tflops=(\S+) "
     r"mma_over_tiled=(\S+) mma_over_wmma=(\S+)$"
@@ -74,6 +81,10 @@ def parse_parity(text: str, name: str) -> dict:
         raise LogIntegrityError(f"{name}: test 行が 1 件も無い")
     if not any(v == "ok" for v in res.values()) and not any(v == "FAILED" for v in res.values()):
         raise LogIntegrityError(f"{name}: ok/FAILED のテストが無い")
+    ran = {b for (b, _t) in res}
+    missing = [b for b in REQUIRED_BINARIES if b not in ran]
+    if missing:
+        raise LogIntegrityError(f"{name}: 必須のテストバイナリのテストが 1 件も実行されていない: {missing}")
     return res
 
 
@@ -256,12 +267,16 @@ def load_dir(d: Path) -> str:
 
 # ---- self-test ----------------------------------------------------------
 
-def _parity(fail: tuple = (), extra: tuple = ()) -> str:
+def _parity(fail: tuple = (), extra: tuple = (), skip_bin: str | None = None) -> str:
     names = ["a_ok", "b_ok", "c_ok", *extra]
-    lines = ["     Running tests/gemm_mma.rs (target/release/deps/gemm_mma-0)", "", "running 3 tests"]
-    for n in names:
-        lines.append(f"test {n} ... {'FAILED' if n in fail else 'ok'}")
-    lines.append("test result: ok. 3 passed; 0 failed")
+    lines = []
+    for b in REQUIRED_BINARIES:
+        if b == skip_bin:
+            continue
+        lines += [f"     Running {b} (target/release/deps/x-0)", "", f"running {len(names)} tests"]
+        for n in names:
+            lines.append(f"test {n} ... {'FAILED' if n in fail else 'ok'}")
+        lines.append(f"test result: ok. {len(names)} passed; 0 failed")
     return "\n".join(lines) + "\n"
 
 
@@ -342,6 +357,8 @@ def self_test() -> None:
     must_fail(lambda: aggregate(pb, _parity(extra=("d_ok",)), xb, xh, None, None), "テスト集合の不一致")
     must_fail(lambda: aggregate(pb + "test dup ... ok\ntest dup ... ok\n", ph, xb, xh, None, None), "test 重複")
     must_fail(lambda: aggregate(pb, "     Running tests/x.rs (a)\ntest a ... 12.3 ok\n", xb, xh, None, None), "融合行")
+    must_fail(lambda: aggregate(pb, _parity(skip_bin="tests/specialized_mma_parity.rs"), xb, xh, None, None),
+              "必須バイナリが未実行（feature 不足でビルド失敗した形）")
     must_fail(lambda: aggregate(pb, "no tests\n", xb, xh, None, None), "test 0 件")
     must_fail(lambda: aggregate(pb, ph, xb, xh + xh, None, None), "ptxas 2 エントリ")
     must_fail(lambda: aggregate(pb, ph, xb, "nothing", None, None), "ptxas 空")

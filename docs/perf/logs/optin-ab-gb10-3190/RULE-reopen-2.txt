@@ -1,0 +1,23 @@
+イシュー #3190 事前登録規則 (再開補遺 2: B5 前提ゲート (a) のコマンド訂正)
+fixed-at: 2026-10-21 (この規則は、訂正後の (a) を GB10 で実行する前にコミットして固定する。TFLOPS の計測 (段 2) より前でもある)
+
+0. 経緯 (正直な記録)
+  - RULE-reopen.txt 2 が登録した (a) のコマンドを GB10 の段 1 で実行したところ、integration テストのコマンドが
+    「target `specialized_mma_parity` requires the features: internal-diagnostics」で cargo に拒否され、base・head の両方で
+    integration テストが 1 件も実行されなかった (rc=101)。lib の kernels_mma テストだけが実行された。
+    これは登録したコマンドの記述ミス (必要な feature の指定漏れ) であり、parity の結果ではない。結果は 1 件も見ていない。
+  - 段 1 の ptxas (b) と B4 は成功した (B4 の値は集計前。(b) の値は本書の固定前に見えているが、(a) の判定とは独立で、本書の訂正は (b) に触れない)。
+  - 旧 (a) のログは parity-attempt1-{base,head}.log として残し、差し替えない。これは「(a) を実行できなかった」証跡であり、(a) の成立には使わない。
+
+1. 訂正の内容 (条件を足すだけ。判定式・緩和なし)
+  - (a) の integration テストのコマンドに --features internal-diagnostics を足す (診断用 feature。テストバイナリを有効にするだけで、依存の追加・変更ではない)。
+      cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics
+        --test cpu_cuda_mma_parity --test gemm_mma --test parity_nonregression --test specialized_mma_parity --test gemm_auto --test dispatch_boundary
+        -- --ignored --test-threads=1
+    lib の kernels_mma テストのコマンドは変えない (旧 (a) で base・head とも 85 passed / 0 failed / 1 ignored が実行済み。再実行はして同じ形で新ログに含める)。
+  - aggregate_b5.py に必須テストバイナリの検査を足す: 上の 6 integration テストと lib (unittests src/lib.rs) の各バイナリで、
+    ok または FAILED のテストが 1 件以上実行されたことを要求する。1 つでも欠ければ FAIL (fail-closed)。
+    これは「実行できなかったのに後退なし」という空の成立を防ぐ追加で、判定は厳しくなる方向のみ。
+  - 訂正後の (a) を base・head で 1 回ずつ実行する。結果が後退なしなら (a) 成立。head だけ FAILED で base が ok のテストがあれば不成立 (RULE-reopen.txt 2 のとおり)。
+    実行できない・テスト集合が一致しないときは FAIL / undetermined (推定で埋めない)。
+  - (b) の判定 (lmem・stack が増えない・head の spill が 0) と 段 2 の TFLOPS 計測 (専有ゲート・round ごとの順序反転・判定式) は RULE-reopen.txt のまま変えない。
