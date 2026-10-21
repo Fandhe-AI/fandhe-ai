@@ -1,7 +1,7 @@
 # cpu-gemm-reuse-fresh-3187
 
 イシュー #3187（GB10 の CPU GEMM で reuse が fresh より遅い原因の帰属）の計測ログ置き場。
-背景・仮説・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md`。状態: **未実測**。
+背景・仮説・限界は `docs/perf/cpu-gemm-reuse-fresh-inversion.md`。状態: **GB10 実測済み（2026-10-21）**。
 
 ## 構成
 
@@ -10,7 +10,10 @@
 | `RULE.txt` | 事前登録の判定規則（実測前に固定。事後に緩めない） |
 | `orchestrate.sh` | テストバイナリを 1 回ビルドし、独立 5 プロセスで実行して `run{1..5}.jsonl`・`env_info.txt`（`.rev-stamp`・RULE.txt の sha256 を含む）・`load_gate.log`・`load_gate_status.txt` を残す。`.rev-stamp` が無ければ開始前に停止。`RAYON_NUM_THREADS` 設定時は拒否 |
 | `aggregate.py` | 5 run を集計（python3 標準ライブラリのみ。欠落・不正・n_samples≠80・非有限/非正の median_s・checksum の bit 不一致・ゲート状態欠落は fail-closed。`--self-test` あり） |
-| `gb10/` | 実機実測時の生ログ（現状は未実測のため存在しない） |
+| `gb10/` | GB10 の 5 run 生ログ（`run{1..5}.jsonl`・`run{1..5}.err`）・`env_info.txt`・`load_gate.log`・`load_gate_status.txt`・`aggregate.md`（集計。判定の正） |
+| `gb10-minflt/` | `GEMM_REUSE_MINFLT=1` の補助 1 run（ページ確保。判定外）と `aggregate.md` |
+| `session-scripts/` | GB10 で実行したセッションスクリプト（`setup-3187.sh`・`session-3187.sh`）と `steps.log`・各ステップのログ（マスク済み） |
+| `rev-stamp-verification-3187.md` | 計測ツリーの `.rev-stamp` とツリー指紋の突合表 |
 
 ## 実行手順（GB10 セッション）
 
