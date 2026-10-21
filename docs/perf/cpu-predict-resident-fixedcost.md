@@ -135,6 +135,23 @@ minflt の採取は `/proc` 読み出しが計測区間を歪めるため既定 
 - upload（約 6 µs）＋ readout（約 1 µs）は定常的な固定費で、fresh 側の `input_to_vec_copy`（約 7 µs）と同規模
 - bench と診断の値がずれる理由: 計測窓（bench は連続窓、診断は区間ごとの `Instant`）と版（bench 記録は 0.9.0〜0.11.0 の公開版）が異なる
 
+### 6.1 bench-fandhe の infer reuse／fresh（GB10・pre／head。#3188 再オープン分・参考値）
+
+診断（上表）とは別プロトコルの bench-fandhe（`--task infer --device cpu --size 64`）で、同じ pre／head を 5 round 交互に実測した（規則は `logs/cpu-train-fixedcost-gb10-3188/reopen/RULE.txt`、集計は `reopen/aggregate_bench_prepost.md`。判定ゲートなし）。
+
+| セル（中央値 µs。5 round の min-max） | pre | head | head/pre |
+|---|---|---|---|
+| infer reuse total | 189.4（170.3-209.9） | 192.8（172.9-204.2） | 1.018 |
+| infer fresh total | 176.4（170.2-184.9） | 175.8（171.7-186.9） | 0.997 |
+| infer reuse `predict_resident` | 187.3 | 187.9 | 1.003 |
+| infer fresh `predict` | 187.3 | 179.9 | 0.960 |
+| reuse / fresh（total） | 1.074 | 1.097 | - |
+
+- reuse が fresh より遅い逆転は bench でも再現する（reuse/fresh = 1.07〜1.10。診断の ratio 1.01〜1.02 より大きい）。reuse total の min-max（170-210 µs）は fresh（170-187 µs）より広く、負荷変動の寄与が残る
+- `--phases` セルでは fresh の `predict`（pre 187.3 µs・head 179.9 µs）が total セル（176.4・175.8 µs）より大きく、reuse との差は pre で 0、head で 7.9 µs にとどまる。phases セルは区間の内訳を見る用途に限り、逆転の大きさの判断には total セルを使う（プロトコルが異なるため両者を直接比べない）
+- pre→head は #3196 単独の前後ではない（infer 経路に効く本番変更は #3196 のみ。#3193・#3194 は train 側）。head/pre はいずれも 1.0 付近で、#3196 の効果は bench でも確認できなかった（§6 の診断と同じ結論）
+- 「reuse > fresh の差を説明できるか」: 診断（§6）の帰属は一部のみ（H1 L1 カーネル差・H2 コピー／確保・H6）という結論を変えない。bench の差（total セルで 13.0〜17.0 µs）は診断の差（2.4〜3.5 µs）の約 4〜7 倍で、診断の窓では再現しない部分が残る。この差の原因は本実測では切り分けていない
+
 ## 7. 対処の起票案（列挙のみ。起票はユーザー承認待ち）
 
 実測で支持された仮説に応じた候補。いずれも本イシューでは実装しない。

@@ -1,0 +1,5 @@
+run1 load1=0.86 waited=0s
+run2 load1=0.87 waited=0s
+run3 load1=0.80 waited=0s
+run4 load1=0.80 waited=0s
+run5 load1=0.82 waited=0s

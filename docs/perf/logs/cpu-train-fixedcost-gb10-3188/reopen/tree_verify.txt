@@ -1,0 +1,1 @@
+ツリー指紋の突き合わせ（Mac 側 git archive 展開との diff 行数）: A before/after 0、pre before/after 0、head before/after 0（差分 0 件）
