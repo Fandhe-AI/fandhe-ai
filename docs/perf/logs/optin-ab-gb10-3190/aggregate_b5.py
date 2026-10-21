@@ -30,7 +30,7 @@ RUNS = 5
 SIZES = (512, 1024, 2048, 4096)
 ARMS = ("base", "head")
 UNMASKED_RE = re.compile(r"/home/[A-Za-z0-9_.-]+")
-TEST_LINE_RE = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored)$")
+TEST_LINE_RE = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored)(?:, .*)?$")  # `ignored, <理由>` 形式も読む
 RUNNING_RE = re.compile(r"^\s*Running (.+?) \(")
 # 前提 (a) で必ず実行されていなければならないテストバイナリ（RULE-reopen-2.txt。1 つでも欠ければ
 # 「実行できなかったのに後退なし」という空の成立を避けるため FAIL）。
@@ -96,7 +96,9 @@ def judge_parity(base: dict, head: dict) -> tuple[bool, str]:
     regress = sorted(k for k in head if head[k] == "FAILED" and base[k] == "ok")
     both_fail = sorted(k for k in head if head[k] == "FAILED" and base[k] == "FAILED")
     n_ok_head = sum(1 for v in head.values() if v == "ok")
-    detail = (f"テスト {len(head)} 件（head ok {n_ok_head}・head FAILED {len(head) - n_ok_head}）。"
+    n_fail_head = sum(1 for v in head.values() if v == "FAILED")
+    detail = (f"テスト {len(head)} 件（head ok {n_ok_head}・head FAILED {n_fail_head}・"
+              f"ignored {len(head) - n_ok_head - n_fail_head}）。"
               f"後退（base ok → head FAILED）{len(regress)} 件"
               + (f": {regress}" if regress else "")
               + f"。base でも FAILED（区別して記録）{len(both_fail)} 件"
@@ -356,6 +358,7 @@ def self_test() -> None:
     must_fail(lambda: aggregate(pb, ph, xb, xh, None, None), "前提成立なのに run ログ無し")
     must_fail(lambda: aggregate(pb, _parity(extra=("d_ok",)), xb, xh, None, None), "テスト集合の不一致")
     must_fail(lambda: aggregate(pb + "test dup ... ok\ntest dup ... ok\n", ph, xb, xh, None, None), "test 重複")
+    parse_parity(pb + "test z::ign ... ignored, requires NVRTC; run manually\n", "ignored-with-reason")
     must_fail(lambda: aggregate(pb, "     Running tests/x.rs (a)\ntest a ... 12.3 ok\n", xb, xh, None, None), "融合行")
     must_fail(lambda: aggregate(pb, _parity(skip_bin="tests/specialized_mma_parity.rs"), xb, xh, None, None),
               "必須バイナリが未実行（feature 不足でビルド失敗した形）")

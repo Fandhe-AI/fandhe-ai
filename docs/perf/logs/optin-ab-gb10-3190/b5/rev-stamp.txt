@@ -1,0 +1,5 @@
+runner  : fbf6ecbbec74da56c93fa369f9b19e8ec86c13f0 status=[0]
+b5-base : 230937f5fb1fcbca1daef5fec15ae3490640794b status=[0]
+b5-head : 230937f5fb1fcbca1daef5fec15ae3490640794b status=[ M crates/backend-cuda/src/kernels_mma.rs ] (base + on-boundary-predicate.patch。未コミット)
+b5-base-vs-origin-main backend-cuda src/examples diff (tests 以外) lines: 0
+origin/main = ef3b2d715bb4ea61fc42a41e973c1f6fd30339c6

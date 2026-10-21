@@ -1,0 +1,6 @@
+--- date: 2026-10-21T13:44:22Z
+--- uptime:  22:44:22 up 55 days, 10:11, 10 users,  load average: 0.18, 0.13, 0.17
+--- nvidia-smi
+name, utilization.gpu [%], memory.used [MiB]
+NVIDIA GB10, 0 %, [N/A]
+--- procs (cargo|bench|rustc|nsys|nvidia-smi)

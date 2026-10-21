@@ -1,0 +1,8 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running `target/release/examples/gemm_mma_bench`
+NOTE: mma_f16_tflops excludes H2D/D2H transfer and output buffer allocation from the timed region (GPU execution only); tiled_f32_tflops/wmma_f16_tflops still include them. mma_over_tiled/mma_over_wmma are therefore NOT apples-to-apples (biased in mma's favor). See PR #255 review.
+size=512 tiled_f32_tflops=2.3221 wmma_f16_tflops=2.3429 mma_f16_tflops=16.0548 mma_over_tiled=6.9139 mma_over_wmma=6.8526
+size=1024 tiled_f32_tflops=5.2449 wmma_f16_tflops=5.6740 mma_f16_tflops=31.8278 mma_over_tiled=6.0683 mma_over_wmma=5.6095
+size=2048 tiled_f32_tflops=8.4124 wmma_f16_tflops=4.5605 mma_f16_tflops=40.3964 mma_over_tiled=4.8020 mma_over_wmma=8.8578
+size=4096 tiled_f32_tflops=4.5189 wmma_f16_tflops=3.7305 mma_f16_tflops=40.8075 mma_over_tiled=9.0303 mma_over_wmma=10.9389
+size=4096 mma_over_pytorch_f16=0.4181 (PyTorch f16 reference: 97.6 TFLOPS, PoC-v2-3)
