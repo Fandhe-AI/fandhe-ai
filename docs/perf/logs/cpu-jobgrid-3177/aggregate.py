@@ -65,6 +65,14 @@ def to_float(d, k, path):
     return v
 
 
+def check_dims(d, table, shape, path):
+    """ログの trans・m・n・k が期待表と一致することを要求する（GFLOPS は表の寸法から算出するため）。"""
+    trans, m, n, k = table[shape]
+    got = (d.get("trans"), *(d.get(x) for x in ("m", "n", "k")))
+    if got != (trans, str(m), str(n), str(k)):
+        raise AggError(f"{path}: {shape} の寸法・転置が期待 {(trans, m, n, k)} と不一致: {got}")
+
+
 def read_lines(path, prefix_re):
     if not os.path.isfile(path):
         raise AggError(f"欠損: {path}")
@@ -94,6 +102,7 @@ def parse_count(root):
             if (arm, shape) in seen:
                 raise AggError(f"{p}: 重複: {arm}/{shape}")
             seen.add((arm, shape))
+            check_dims(d, SHAPES, shape, p)
             rec = {k: to_int(d, k, p) for k in STABLE + ["workers_used"]}
             for k in ("a_repack_x", "b_repack_x"):
                 rec[k] = to_float(d, k, p)
@@ -127,6 +136,7 @@ def parse_bench(root, sub, series, arm_of, shapes, want_threads=None):
                 if shape not in shapes or shape in seen:
                     raise AggError(f"{p}: 未知または重複の shape: {shape}")
                 seen.add(shape)
+                check_dims(d, shapes, shape, p)
                 rt = to_int(d, "rayon_threads", p)
                 if want_threads is not None and rt != want_threads:
                     raise AggError(f"{p}: rayon_threads={rt} が期待値 {want_threads} と食い違い")
@@ -212,6 +222,9 @@ def machine_report(root, name):
 
     ab = parse_bench(root, "ab", "threads", ARMS, BENCH_SHAPES)
     ab_threads = ab["base"]["l1_fwd"][1][2]
+    ab_all = {ab[a][s][r][2] for a in ARMS for s in BENCH_SHAPES for r in RUNS}
+    if ab_all != {native_threads}:
+        raise AggError(f"{root}: A/B の rayon_threads={sorted(ab_all)} が native の計数値 {native_threads} と不一致")
     L += [f"### A/B（既定プール・rayon_threads={ab_threads}・ratio = median(腕)/median(base)・採否は書かない）", "",
           "| 形状 | base median（s） | 腕 | 腕 median（s） | ratio | 腕が勝った run（5 中） | checksum |", "|---|---|---|---|---|---|---|"]
     for shape in BENCH_SHAPES:
@@ -244,13 +257,13 @@ def self_test():
         for r in RUNS:
             with open(os.path.join(root, "count", f"run{r}.log"), "w") as f:
                 for arm, th in (("native", 10), ("T1", 1), ("T10", 10), ("T20", 20)):
-                    for shape, (_, m, n, k) in SHAPES.items():
+                    for shape, (tr, m, n, k) in SHAPES.items():
                         e = EXPECT.get(th, {}).get(shape, (1, 1, 1, 1.0, 1.0))
                         vals = dict(rayon_threads=th, eff_threads=th, mr=8, nr=12, row_bands=e[1], col_bands=e[2], mc_job=8,
                                     nc_job=12, regions=1, jobs=e[0], workers_used=r, a_pack_tiles=1, a_pack_words=1,
                                     a_ideal_words=1, b_pack_tiles=1, b_pack_words=1, b_ideal_words=1, alloc_job=3, alloc_split=4,
                                     c_stage_words=2, a_repack_x=e[3], b_repack_x=e[4])
-                        f.write(f"probe=jobgrid shape={shape} trans=nn m={m} n={n} k={k} arm={arm} "
+                        f.write(f"probe=jobgrid shape={shape} trans={tr} m={m} n={n} k={k} arm={arm} "
                                 + " ".join(f"{a}={b}" for a, b in vals.items()) + "\n")
 
         def bench(path, arm, series, shapes, threads):
@@ -294,6 +307,24 @@ def self_test():
         s = open(p).read().replace("jobs=22 ", "jobs=23 ", 1)
         open(p, "w").write(s)
     expect_raise("計数の run 間不一致", bad_count)
+
+    def bad_ab_threads(r):
+        p = os.path.join(r, "ab", "run3-cap4.log")
+        s = open(p).read().replace("rayon_threads=10 ", "rayon_threads=20 ")
+        open(p, "w").write(s)
+    expect_raise("A/B の rayon_threads が native と不一致", bad_ab_threads)
+
+    def bad_dims(r):
+        p = os.path.join(r, "ab", "run2-jpw1.log")
+        s = open(p).read().replace(" m=64 ", " m=65 ", 1)
+        open(p, "w").write(s)
+    expect_raise("bench ログの寸法不一致", bad_dims)
+
+    def bad_count_dims(r):
+        p = os.path.join(r, "count", "run2.log")
+        s = open(p).read().replace(" trans=nn ", " trans=tn ", 1)
+        open(p, "w").write(s)
+    expect_raise("count ログの転置不一致", bad_count_dims)
 
     def nan_median(r):
         p = os.path.join(r, "ab", "run1-base.log")
