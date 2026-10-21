@@ -1,0 +1,4 @@
+--- date: 2026-10-21T18:17:06Z
+--- uptime:  03:17:06 up 55 days, 14:44, 10 users,  load average: 1.12, 0.37, 0.22
+--- procs (cargo|bench|rustc|nsys)
+1901841       00:04 bash -c set -eu; R=$HOME/work/r3184-gb10; rm -rf $R; mkdir -p $R/out; for c in before after; do git init -q $R/$c; git -C $R/$c fetch -q $HOME/work/r3184full.bundle HEAD; git -C $R/$c checkout -q --detach FETCH_HEAD; printf "%s\n" "scripts/bench/framework-compare/target-ab-*" "scripts/bench/framework-compare/results/raw/" "scripts/bench/framework-compare/compare-*" >> $R/$c/.git/info/exclude; done; uname -a > $R/out/uname.txt; for c in before after; do echo $c $(git -C $R/$c rev-parse HEAD) dirty=$(git -C $R/$c status --porcelain | wc -l); done | tee $R/out/rev-stamp.txt; cd $R/before; setsid nohup bash docs/perf/logs/optin-ab-macmini-3184/session-scripts/gb10_g3_session.sh > $R/gb10.session.log 2>&1 < /dev/null & sleep 3; echo started

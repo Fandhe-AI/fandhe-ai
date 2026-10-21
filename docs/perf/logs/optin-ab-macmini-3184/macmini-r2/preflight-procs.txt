@@ -1,0 +1,9 @@
+series=g1r2 watchlist_procs=0
+series=g2r2 watchlist_procs=0
+series=g4r2 watchlist_procs=0
+series=g5r2 watchlist_procs=0
+series=g3r2 watchlist_procs=0
+series=g3abr2 watchlist_procs=0
+series=g6r2 watchlist_procs=0
+series=g7r2 watchlist_procs=0
+series=g7h4c watchlist_procs=0

@@ -1,0 +1,96 @@
+== build before ==(facade=<home>/work/r3184-gb10/before/crates/facade)
+== build after  ==(facade=<home>/work/r3184-gb10/after/crates/facade)
+bench-fandhe v0.1.0 (<home>/work/r3184-gb10/before/scripts/bench/framework-compare/bench-fandhe)
+├── bench-common v0.1.0 (<home>/work/r3184-gb10/before/scripts/bench/framework-compare/bench-common)
+└── fandhe-ai v0.11.0 (<home>/work/r3184-gb10/after/crates/facade)
+bench-fandhe v0.1.0 (<home>/work/r3184-gb10/before/scripts/bench/framework-compare/bench-fandhe)
+├── bench-common v0.1.0 (<home>/work/r3184-gb10/before/scripts/bench/framework-compare/bench-common)
+└── fandhe-ai v0.11.0 (<home>/work/r3184-gb10/before/crates/facade)
+== train cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000506535,"q1_s":0.000502192,"q3_s":0.000508892,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000513344,"q1_s":0.000509148,"q3_s":0.000518064,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000313544,"q1_s":0.000311744,"q3_s":0.000315120,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.220239606}
+== train cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000313112,"q1_s":0.000311420,"q3_s":0.000315172,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.210966633}
+== infer cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000156832,"q1_s":0.000154232,"q3_s":0.000157632,"throughput_per_s":6376.250,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000157824,"q1_s":0.000152772,"q3_s":0.000158240,"throughput_per_s":6336.172,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000099384,"q1_s":0.000099184,"q3_s":0.000099760,"throughput_per_s":10061.982,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.216745787}
+== infer cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000098912,"q1_s":0.000098640,"q3_s":0.000099144,"throughput_per_s":10109.997,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.213718587}
+round 1: load average: 5.22, 3.23, 1.37
+== train cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000543336,"q1_s":0.000521320,"q3_s":0.000571512,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000534296,"q1_s":0.000530151,"q3_s":0.000542792,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000312208,"q1_s":0.000310728,"q3_s":0.000314628,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.206405039}
+== train cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000313568,"q1_s":0.000312380,"q3_s":0.000314724,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.216797071}
+== infer cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000150776,"q1_s":0.000150235,"q3_s":0.000153412,"throughput_per_s":6632.355,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000155784,"q1_s":0.000152096,"q3_s":0.000159876,"throughput_per_s":6419.144,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000099000,"q1_s":0.000098812,"q3_s":0.000099252,"throughput_per_s":10101.010,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.215647857}
+== infer cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000099888,"q1_s":0.000099328,"q3_s":0.000099988,"throughput_per_s":10011.213,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.216050642}
+round 2: load average: 4.89, 3.19, 1.37
+== train cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000508040,"q1_s":0.000503508,"q3_s":0.000510792,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000511960,"q1_s":0.000494396,"q3_s":0.000531824,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000314304,"q1_s":0.000312544,"q3_s":0.000315468,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.221729444}
+== train cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000312528,"q1_s":0.000311204,"q3_s":0.000314532,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.209318006}
+== infer cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000152480,"q1_s":0.000149616,"q3_s":0.000157600,"throughput_per_s":6558.237,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000156752,"q1_s":0.000154816,"q3_s":0.000157672,"throughput_per_s":6379.504,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000098984,"q1_s":0.000098888,"q3_s":0.000099216,"throughput_per_s":10102.643,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.216756807}
+== infer cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000100000,"q1_s":0.000099716,"q3_s":0.000100068,"throughput_per_s":10000.000,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.218800888}
+round 3: load average: 4.65, 3.17, 1.37
+== train cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000528664,"q1_s":0.000525272,"q3_s":0.000534376,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000531400,"q1_s":0.000528064,"q3_s":0.000534888,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000313384,"q1_s":0.000312404,"q3_s":0.000314744,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.204009868}
+== train cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000316152,"q1_s":0.000310624,"q3_s":0.000317700,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.221938171}
+== infer cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000157360,"q1_s":0.000156512,"q3_s":0.000158412,"throughput_per_s":6354.855,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000156800,"q1_s":0.000151524,"q3_s":0.000157480,"throughput_per_s":6377.551,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000099032,"q1_s":0.000098976,"q3_s":0.000099104,"throughput_per_s":10097.746,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.207241743}
+== infer cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000099984,"q1_s":0.000099888,"q3_s":0.000100132,"throughput_per_s":10001.600,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.219086127}
+round 4: load average: 4.36, 3.14, 1.37
+== train cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000509712,"q1_s":0.000490296,"q3_s":0.000533824,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000507792,"q1_s":0.000502788,"q3_s":0.000510516,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000319432,"q1_s":0.000313564,"q3_s":0.000321660,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.222644929}
+== train cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000312544,"q1_s":0.000311584,"q3_s":0.000315824,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.216532691}
+== infer cuda size=64 mode=fresh arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000152928,"q1_s":0.000150644,"q3_s":0.000157820,"throughput_per_s":6539.025,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=fresh arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000157840,"q1_s":0.000150456,"q3_s":0.000158836,"throughput_per_s":6335.530,"checksum":13.976574,"warmup":20,"iters":20,"mode":"fresh"}
+== infer cuda size=64 mode=reuse arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000099320,"q1_s":0.000098864,"q3_s":0.000099988,"throughput_per_s":10068.466,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.216153958}
+== infer cuda size=64 mode=reuse arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000099008,"q1_s":0.000098748,"q3_s":0.000099184,"throughput_per_s":10100.194,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.221663813}
+round 5: load average: 4.09, 3.10, 1.37
+compare task=train exit=3
+compare task=infer exit=3
+done. results in results/raw ; failures (if any) in results/raw/skipped-2113-cuda-3184-gb10-g3-cuda.log

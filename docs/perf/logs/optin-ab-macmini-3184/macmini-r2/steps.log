@@ -1,0 +1,52 @@
+2026-10-21T18:16:41Z G1 patch rc=0
+2026-10-21T18:16:41Z G1 start
+2026-10-21T18:19:41Z G1 rc=0
+2026-10-21T18:19:41Z status before=       0 after=       0
+2026-10-21T18:19:41Z G2s1 patch rc=0
+2026-10-21T18:19:41Z G2s1 start
+2026-10-21T18:33:50Z G2s1 rc=0
+2026-10-21T18:33:50Z status before=       0 after=       0
+2026-10-21T18:33:50Z CPU-R2 DONE
+2026-10-21T18:35:14Z G4 start
+2026-10-21T18:37:53Z G4 AB rc=0
+2026-10-21T18:38:23Z G5 start
+2026-10-21T18:42:23Z G5 AB rc=0
+2026-10-21T18:42:23Z status before=       0
+2026-10-21T18:42:23Z METAL-R2 G4G5 DONE
+2026-10-21T18:42:23Z G3 prereq start
+2026-10-21T18:42:23Z G3 patch rc=0
+2026-10-21T18:42:43Z G3 a1 rc=0
+2026-10-21T18:43:07Z G3 a2 rc=0
+2026-10-21T18:43:10Z G3 b rc=0
+2026-10-21T18:43:11Z G3 c after command_batching rc=0
+2026-10-21T18:43:11Z G3 c after command_batching_bench rc=0
+2026-10-21T18:43:12Z G3 c after gemm_resident_parity rc=0
+2026-10-21T18:43:13Z G3 c after linear_forward_device_parity rc=0
+2026-10-21T18:43:15Z G3 c after mnist rc=0
+2026-10-21T18:43:16Z G3 c after dpsbp rc=101
+2026-10-21T18:43:20Z G3 c before command_batching rc=0
+2026-10-21T18:43:21Z G3 c before command_batching_bench rc=0
+2026-10-21T18:43:21Z G3 c before gemm_resident_parity rc=0
+2026-10-21T18:43:22Z G3 c before linear_forward_device_parity rc=0
+2026-10-21T18:43:31Z G3 c before mnist rc=0
+2026-10-21T18:43:31Z G3 c before dpsbp rc=101
+2026-10-21T18:43:31Z G3 PREREQ DONE
+2026-10-21T18:45:32Z G3 AB start
+2026-10-21T18:48:03Z G3 AB rc=0
+2026-10-21T18:48:03Z G3AB DONE
+2026-10-21T18:48:04Z G6 start
+2026-10-21T18:48:28Z G6 p0 rc=0
+2026-10-21T18:49:04Z G6 gate rc=0
+2026-10-21T18:50:24Z G6 run1 rc=0
+2026-10-21T18:50:43Z G6 run2 rc=0
+2026-10-21T18:51:03Z G6 run3 rc=0
+2026-10-21T18:51:22Z G6 run4 rc=0
+2026-10-21T18:51:42Z G6 run5 rc=0
+2026-10-21T18:51:42Z G6 aggregate rc=0
+2026-10-21T18:51:42Z status diag=       0
+2026-10-21T18:51:42Z G6 DONE
+2026-10-21T18:51:42Z G7 start
+2026-10-21T18:52:10Z G7 rc=0
+2026-10-21T18:52:10Z G7 aggregate rc=1
+2026-10-21T18:54:33Z G7 H4c rc=0
+2026-10-21T18:54:33Z G7 DONE
