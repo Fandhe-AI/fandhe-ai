@@ -8,10 +8,11 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import aggregate_bench_prepost as a  # noqa: E402
 
-PHASES = ["device_update", "step_total"]
+EXP = a.EXPECTED_PHASES
+PHASES = list(EXP["train_reuse_phases"])
 
 
-def write(d, drop=None, bad_phase_set=False):
+def write(d, drop=None, bad_phase_set=False, missing_all=False):
     for l in a.LABELS:
         for r in range(1, a.ROUNDS + 1):
             rd = os.path.join(d, l, f"round{r}")
@@ -22,7 +23,10 @@ def write(d, drop=None, bad_phase_set=False):
                 with open(os.path.join(rd, c + ".jsonl"), "w") as f:
                     base = 100e-6 * (2 if l == "pre" else 1) * (1 + 0.01 * r)
                     if c.endswith("_phases"):
-                        phs = PHASES if not (bad_phase_set and l == "head" and r == 3) else ["x"]
+                        phs = list(EXP[c])
+                        if missing_all and c == "train_reuse_phases":
+                            phs = [p for p in phs if p != "device_update"]
+                        phs = phs if not (bad_phase_set and l == "head" and r == 3) else ["x"]
                         for p in phs:
                             f.write(json.dumps({"median_s": base, "checksum": 1.5, "phase": p}) + "\n")
                     else:
@@ -51,4 +55,7 @@ with tempfile.TemporaryDirectory() as t:
     bad = os.path.join(t, "bad")
     write(bad, bad_phase_set=True)
     expect_err(lambda: a.load_all(bad))
+    miss_all = os.path.join(t, "miss_all")
+    write(miss_all, missing_all=True)
+    expect_err(lambda: a.load_all(miss_all))
 print("aggregate_bench_prepost self-test: OK")

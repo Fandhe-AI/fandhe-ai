@@ -52,7 +52,7 @@ fresh で見えた短縮は rayon 並列の `elementwise::add`／`relu` 3 リー
 | 機体 | 版 | before 中央値 (min–max) | after 中央値 (min–max) | checksum 一致 |
 |---|---|---|---|---|
 | Mac mini | 未実測 | 未実測 | 未実測 | 未実測 |
-| DGX Spark GB10（#3188 再オープン分。infer reuse total） | pre `17c7767b5`: 189.4 µs（170.3-209.9） | head `4f6716f63`: 192.8 µs（172.9-204.2） | 一致 |
+| DGX Spark GB10（#3188 再オープン分。infer reuse total） | pre `17c7767b5`／head `4f6716f63` | 189.4 µs（170.3-209.9） | 192.8 µs（172.9-204.2） | 一致 |
 
 - GB10 の行は bench-fandhe（`--task infer --device cpu --size 64 --mode reuse`）の 5 round 中央値。pre／head は #3196 単独の前後ではなく、#3193・#3194 を含む区間である（infer 経路に効く本番変更は #3196 のみ）。reuse total は 189.4 → 192.8 µs で変化がなく、min-max は重なる（head/pre = 1.018）。fresh は 176.4 → 175.8 µs（0.997）。出典: `logs/cpu-train-fixedcost-gb10-3188/reopen/aggregate_bench_prepost.md`
 - Mac mini は未実測のまま

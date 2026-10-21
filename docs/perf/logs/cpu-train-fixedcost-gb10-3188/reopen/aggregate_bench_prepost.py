@@ -19,6 +19,13 @@ CELLS = [
     "infer_reuse_total", "infer_reuse_phases",
     "infer_fresh_total", "infer_fresh_phases",
 ]
+# セルごとの期待 phase 集合（固定。入力同士の一致だけでは全ファイルから欠落しても通るため。fail-closed）
+EXPECTED_PHASES = {
+    "train_reuse_phases": ("tape_build", "leaf_register", "forward_resident", "loss_readout",
+                           "backward", "device_update", "tape_drop", "step_total"),
+    "infer_reuse_phases": ("predict_resident", "host_copy", "checksum", "iter_total"),
+    "infer_fresh_phases": ("predict", "host_copy", "checksum", "iter_total"),
+}
 
 
 class AggError(Exception):
@@ -67,6 +74,9 @@ def load_all(d):
         sets = {tuple(data[(l, r, c)]) for l in LABELS for r in range(1, ROUNDS + 1)}
         if len(sets) != 1:
             raise AggError(f"{c}: phase 集合が round/ラベル間で不一致 {sorted(sets)}")
+        exp = EXPECTED_PHASES.get(c)
+        if exp is not None and set(next(iter(sets))) != set(exp):
+            raise AggError(f"{c}: phase 集合が期待値と不一致 {sorted(next(iter(sets)))} != {sorted(exp)}")
     gate = {}
     path = os.path.join(d, "load_gate_status.txt")
     try:

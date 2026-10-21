@@ -221,8 +221,8 @@ def aggregate(multi, single=None, unpassed_multi=(), unpassed_single=()):
         a = vm["T"] - vm["K"]
         b = vs["T"] - vs["K"]
         lines.append("## 規則 5 書き手コアの判定")
-        if unpassed_single:
-            lines.append("single 系列が負荷ゲート未通過のため 判定なし")
+        if unpassed_single or unpassed_multi:
+            lines.append("multi／single のいずれかの系列に負荷ゲート未通過 run があるため 判定なし（RULE §2・§5）")
         else:
             ok = b <= WRITER_RATIO * a
             lines.append(f"(T_single-K_single) = {us(b)} us、(T_multi-K_multi) = {us(a)} us、比 {b / a:.2f}"

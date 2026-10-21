@@ -76,6 +76,8 @@ def main():
         assert "マルチコア由来の状態を支持" in out, out
         out = a.aggregate(a.load_series(d)[0], a.load_series(ds)[0], (), ("run1",))
         assert "判定なし" in out
+        out = a.aggregate(a.load_series(d)[0], a.load_series(ds)[0], ("run1",), ())
+        assert "判定なし" in out and "マルチコア由来の状態を支持" not in out, out
         # fail-closed 各種
         for name, kw in {
             "drop": dict(drop=("standalone", "stage")),
