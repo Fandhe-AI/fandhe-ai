@@ -473,3 +473,13 @@ checksum（0.4%・0.6 µs）。フェーズ和／合計: 99.9%（差分は各フ
 - 実カーネル同期の固定費（`infer_fixed_cost_diag`・単発）: wall 400.3 µs・GPU busy 168.3 µs・`host_fixed` 208.4 µs。空 dispatch は 14.5 µs（train doc §18.4）。
   `phases` の `iter_total` は通常ベンチの窓と一致しない（系列 B の infer Metal reuse は 388.4 µs・cpu reuse は 215.4 µs）。
 - `predict_resident`／`forward` 内部の内訳は registry 版では取得不能。
+
+## 12. v0.11.0 GB10 再計測（DGX Spark GB10・イシュー #3189）
+
+**状態: 計測基盤のみ。GB10 での実測は未実施（未実測）。** 数値は埋めていない。規則は `docs/perf/logs/cuda-train-infer-gb10-3189/RULE.txt`、手順は同 `README.md`。
+既存値（§10.6）: infer reuse 98.8 µs。相手（PyTorch）との差 約 55 µs の中身は未切り分け。
+
+- 上位の分解診断: `crates/facade/tests/cuda_infer_reuse_phase_diag_3189.rs`（`predict_resident` を tape・snapshot・steps・chain・readout・paired/residual に分解。CPU の bit 一致は CI で実行）。
+- 下位の分解診断: `crates/backend-cuda/tests/infer_chain_phase_diag_3189.rs`（h2d_upload・l1_issue・l2_issue・download・download_again と導出 kernel_wait。公開 trait のみで `src/` 無変更）。
+- 腕 A（`--phases` の infer cuda／cpu）・nsys の GPU 側所要時間（record-only）・相手との差に対する説明率は実測後に記入する。
+- 限界: `kernel_wait` は `download − download_again` の導出値。腕 A（registry 0.11.0）と腕 B（HEAD）の版差。

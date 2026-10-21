@@ -1,0 +1,83 @@
+イシュー #3189 事前登録規則（計測前に固定。計測後に緩めない）
+固定日時: 2026-10-20T13:00:00Z（このファイルを含む計測前コミットの作成より前。GB10 での初回計測より前）
+================================================================
+目的: GB10 の CUDA train（forward／backward／update）と infer の内訳、backward を含む 1 step の
+stream 同期回数、launch・同期 1 回の固定費を実測し、対応表の MLP 学習（candle 比 0.82 倍）・推論
+（PyTorch 比 0.40 倍）の負けを「ホスト往復」「H2D」「launch／同期の固定費」のどれが占めるかを切り分ける
+入力（後続 #3205・#3217・#3202・#3203）を作る。診断のみ（record-only）。変えないもの: tolerance・
+baseline・判定規則・相手側ベンチ・ライブラリの src/ と既定値・公開 API・Cargo.toml／Cargo.lock・
+framework-compare の依存ピンと allowlist・docs/spec。#1350（CUDA Graph step capture は中立）の判定は覆さず、
+見込みの数値化だけを行う。
+
+0. 腕（計測対象ツリー）。全て .rev-stamp（フル SHA）で同定し、ツリー指紋（find crates
+   scripts/bench/framework-compare -type f ! -path '*/target*' を sort した sha256 一覧）を送信側と
+   GB10 側で突き合わせて記録する。
+   - 腕 A（phase 内訳。正式）: bench-fandhe（registry fandhe-ai =0.11.0。path patch なし）の
+     `--task train|infer --device cuda --mode fresh|reuse --phases` 4 セル（正式）＋ cpu 4 セル（参考）。
+     tree.txt が `fandhe-ai v0.11.0` の 1 行でなければ中止（fail-closed）。5 プロセス（run1〜5）。
+   - 腕 B-0（#2116 forward 診断。AC4）: HEAD ソースの main workspace で
+     docs/perf/logs/cuda-train-forward-resident-2116/orchestrate.sh gb10 を無改変で実行し、
+     2116 の aggregate.py で集計する（2116 の RULE.txt を継承し、本規則では一切上書きしない）。
+   - 腕 B-1（同期・launch の計数。AC2）: crates/facade/tests/cuda_train_infer_sync_census_3189.rs の
+     `cuda_train_infer_sync_census` を nsys profile --trace=cuda の下で、窓 {fwd, fwd_bwd, full,
+     infer_reuse} × step 数 K {20, 120} ごとに 1 プロセスずつ、決定性確認のため 5 反復。
+   - 腕 B-2（infer の内部内訳。AC1）: facade の cuda_infer_reuse_phases（上位）と backend-cuda の
+     infer_chain_phase_diag_3189（下位）を 5 run。
+   - 腕 B-3（固定費。AC3）: backend-cuda lib の既存診断 gemm_small_launch_cost_diag（#2109）を 5 プロセス。
+     固定費の計測器として借りるだけで、#2109 の RULE の系列（正式 5 run と判定）とは別物。
+   - 腕 B-4（属性。AC3）: `cargo run -p fandhe-ai-backend-cuda --release --features internal-diagnostics
+     --example unified_memory_probe`（--allow-no-driver は付けない）を 1 回（決定的）。
+   - 腕 C（任意・record-only）: #3203 の変更前コミット 1a7eb9a2 のツリーで 2116 の orchestrate を別
+     ディレクトリへ出し mse／prod／total を前後比較する。実施しなければ「未計測」と書く。
+   - 乖離の明記: 腕 A は registry 0.11.0、腕 B は HEAD ソース。bench-fandhe に backend-cuda の直接依存を
+     足すと依存 allowlist の変更で所有者承認が要るため行わない。腕をまたぐ比較には版差が含まれる。
+   - nsys の計測（B-1）はオーバーヘッドで時間を汚すため、時間の統計には使わない。回数と GPU 側所要時間
+     （record-only）だけに使う。
+
+1. 同期 1 回の定義: 主指標はホストを止める明示同期 = cuStreamSynchronize + cuCtxSynchronize +
+   cuEventSynchronize の呼び出し回数。暗黙に同期しうる呼び出し（非 async の cuMemcpyDtoH*／cuMemcpyHtoD*、
+   cuMemAlloc*／cuMemFree*）は別列に record-only で記録する。cuStreamWaitEvent はホストを止めないので
+   別列にする。
+
+2. 1 step あたりの回数: 窓 w について n_w = (count(w, K=120) − count(w, K=20)) / 100。
+   forward = n_fwd、backward = n_fwd_bwd − n_fwd、update ＋ tape_drop = n_full − n_fwd_bwd、
+   infer = n_infer_reuse。同じ式で cuLaunchKernel、HtoD・DtoH の memcpy 回数、確保・解放の回数も出す。
+   5 反復で値が一致すれば「決定的」とし、一致しなければ中央値と min–max を記録して「非決定」と書く。
+   整数にならない値は丸めずそのまま記録する。コード読解の約 9 回は実測ではない。
+   縮退: 窓 fwd／fwd_bwd が状態機械に拒否される場合は、窓を外し「full − fwd を backward ＋ update の
+   合算」として記録する（CPU スモークでは全窓が通過したため縮退は不要）。
+
+3. phase 内訳（腕 A）: run ごとの median_s を取り、5 run の中央値と min–max を出す。比は 5 run 中央値
+   どうしで取る。負荷ゲートは load1 < 1.0 かつ GPU utilization 0%（30 秒間隔・最大 30 分）。5/5 通過した
+   ときだけ正式とし、それ以外は参考扱い（結論にも参考と明記）。run の差し替え・追加起動はしない。
+
+4. infer 内訳（B-2）: fidelity = nosync の合計 / prod の合計（backend 下位層は h2d_upload＋l1_issue＋
+   l2_issue＋download の合計と、上位層 chain 区間との比で評価）。0.8〜1.2 を外れたら区間を参考扱いにする。
+   kernel_wait は download − download_again の導出値（公開 API から stream を直接同期できないため）で、
+   実カーネルを伴う同期の代表値としてだけ使う。上位の固定費 = decomposed の（tape ＋ snapshot ＋ steps）
+   ＋ paired/residual。checksum は 5 run で一致することを hard（fail-closed）とする。
+
+5. 固定費（B-3）: sync_idle（空のストリームでの同期）、tiny_roundtrip（1×1×1 GEMM の launch ＋ 同期。
+   引数なしの空カーネルの代替であることを明記。空カーネルの起動には新規 unsafe が要るため行わない）、
+   L2 の launch_issue（N=128）、L2S の kernel_wait（N=128）。いずれも 5 run の中央値。実カーネルを伴う
+   同期の代表値は B-0 の syncsplit kernel_wait と B-2 の kernel_wait とし、空の同期の値だけで見込みを
+   立てない（#3180 で空 dispatch 14.5 µs と実カーネル 208〜259 µs が乖離した教訓）。
+
+6. 見込みの式（record-only）:
+   - 「同期を相手と同じ 1 回にした場合」の削減見込みは (n_full − 1) × c。c は {sync_idle,
+     tiny_roundtrip, 実カーネル同期} の 3 値で幅として出す。
+   - 「launch 固定費の上限（CUDA Graph 等で launch 発行を 1 回にまとめた場合）」は
+     (launch_count − 1) × launch_issue。
+   - 「1 同期あたり約 27 µs」の外挿は (train reuse step_total − infer reuse iter_total) /
+     (n_full − n_infer) で再計算し、実測固定費と比べる。
+   - いずれも step_total や相手との差に対する説明率（%）と未説明残差を必ず併記する。原因の断定はしない。
+
+7. 判定は aggregate.py の機械出力をそのまま採用し、事後に緩和しない。欠損・非数値・n≠80・checksum
+   不一致・run の欠落・ゲート状態の欠落・ビルド失敗の痕跡は例外（exit≠0）で拒否し、0 埋めしない。
+8. 運用: ビルドは計測より前に全て終える。計測中に GB10 で他のビルド・ベンチを並走させない。ログは
+   上書きしない（既存の run ファイルがあれば中止）。orchestrate_gb10.sh は変数を ${VAR} で参照し、
+   外部入力を eval しない（セル列は固定）。
+9. 未計測の値は推定で埋めない。開発機の出力を GB10 の代わりにしない。checksum の一致を bit 同一の証拠とは
+   扱わない。ホスト名は masked、$HOME は <home> に置換して収録する。nsys の生レポート
+   （.nsys-rep／.sqlite）はノードの一時領域に残しコミットしない。GB10 に到達できない／計測が成立しない
+   場合は数値を埋めず「未実測（理由）」と記録する。
