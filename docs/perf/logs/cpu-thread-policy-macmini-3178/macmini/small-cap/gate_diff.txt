@@ -1,0 +1,22 @@
+diff --git a/crates/backend-cpu/src/small_shape_thread_cap.rs b/crates/backend-cpu/src/small_shape_thread_cap.rs
+index 00999bf9..79a98d32 100644
+--- a/crates/backend-cpu/src/small_shape_thread_cap.rs
++++ b/crates/backend-cpu/src/small_shape_thread_cap.rs
+@@ -84,7 +84,7 @@ use std::sync::OnceLock;
+ /// あるが、事前登録規則の事後緩和は行わない。実測記録は
+ /// `docs/perf/cpu-gemm-small-shape-thread-cap.md`「Phase 1」節・
+ /// `docs/perf/logs/cpu-gemm-small-shape-thread-cap-1575/` を参照。
+-pub(crate) const SMALL_SHAPE_CAP_ENABLED: bool = false;
++pub(crate) const SMALL_SHAPE_CAP_ENABLED: bool = true;
+ 
+ /// 専用プールのスレッド数（Phase 0 スイープで確定。M4 Max 実機・
+ /// `examples/small_shape_cap_sweep.rs` の学習 5 形状 5 回中央値実測
+@@ -126,7 +126,7 @@ const N_CLAMP: usize = 8;
+ /// `cfg(any(target_os = "macos", test))` で明示し、非 macOS 非テスト
+ /// ビルド（Linux CI 等）での `dead_code` 誤検出を避ける。
+ #[cfg(any(target_os = "macos", test))]
+-const ELIGIBLE_BRANDS: &[&str] = &["Apple M4 Max"];
++const ELIGIBLE_BRANDS: &[&str] = &["Apple M4 Max", "Apple M4"];
+ 
+ /// `m * n.max(N_CLAMP) * k < SMALL_SHAPE_CAP_MAX_WORK` を判定する純関数。
+ /// 飽和乗算を用い、オーバーフロー時は cap しない（安全側＝並列側）。

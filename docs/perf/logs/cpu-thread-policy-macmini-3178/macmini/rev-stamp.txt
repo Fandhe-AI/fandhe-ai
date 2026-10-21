@@ -1,0 +1,9 @@
+計測した before の commit（4 クローン bc-before・bc-after・sc-before・sc-after が同一であることを確認）:
+3637b4af283f72bde163fb5b799603b856247ef7
+
+big-core（before・after の順）
+3637b4af283f72bde163fb5b799603b856247ef7
+3637b4af283f72bde163fb5b799603b856247ef7
+small-cap（before・after の順）
+3637b4af283f72bde163fb5b799603b856247ef7
+3637b4af283f72bde163fb5b799603b856247ef7

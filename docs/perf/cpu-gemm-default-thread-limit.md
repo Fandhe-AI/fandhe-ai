@@ -152,4 +152,4 @@ framework-compare 前後比較（`run_gemm_gate_cpu.sh` 同一バイナリ 5 回
 
 ## 追記（#3178）
 
-本 doc の判定（#1364 の REJECT）は変更しない。Mac mini（M4。P4＋E6）で現行の `TwoDDynamic`・専有機・5 round の条件を変えた再測定の基盤と事前登録規則を `docs/perf/cpu-thread-policy-macmini.md` に置いた（実測は未実施）。
+本 doc の判定（#1364 の REJECT）は変更しない。Mac mini（M4。P4＋E6）で現行の `TwoDDynamic`・専有機・5 round の条件を変えた再測定の再測定を行った（2026-10-21。専有ゲート 5/5 round 成立）。big-core 腕はgemm N=1024 が 5/5 round で約 12〜14% 悪化するなど 6 セルで中央値比が 1.00 を超え REJECT（既定は変更しない）。詳細と条件差は `docs/perf/cpu-thread-policy-macmini.md`。

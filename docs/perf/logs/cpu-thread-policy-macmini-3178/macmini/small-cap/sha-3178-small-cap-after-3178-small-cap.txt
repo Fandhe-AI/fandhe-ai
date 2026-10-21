@@ -1,0 +1,1 @@
+8fb96e3226897c7c2cead75c88685f94590023d0e67a7407e9cbb0075d038fb9  results/raw/bench-fandhe-3178-small-cap-after-3178-small-cap
