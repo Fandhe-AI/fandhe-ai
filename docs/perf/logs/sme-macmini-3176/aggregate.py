@@ -97,6 +97,24 @@ def load_series(d, prefix, expected):
     return runs
 
 
+def r4_candidates(ok):
+    """ok[(mn, k)] -> bool から R4 の採用候補を返す（RULE §3。#1587 の
+    `cpu-gemm-sme-fmopa-1587/aggregate.py::candidates` と同じ定義）。
+
+    しきい値 (a, b) は mn>=a かつ k>=b の全格子点が 5/5 で SME>=NEON のときだけ採用可能とし、
+    採用可能なしきい値のパレート極小を候補とする。孤立した勝ち点（右上に負け点がある）は候補にしない。
+    格子点の欠損は #1587（KeyError で停止）に合わせて判定不能（AggError）とする。"""
+    missing = [(mn, k) for mn in R4_MN for k in R4_K if (mn, k) not in ok]
+    if missing:
+        raise AggError("R4 格子点の欠損 %s（採用候補を判定できない）" % missing)
+    feas = [(a, b) for a in R4_MN for b in R4_K
+            if all(ok[(mn, k)] for mn in R4_MN for k in R4_K if mn >= a and k >= b)]
+    return sorted(
+        (a, b) for (a, b) in feas
+        if not any(c <= a and d <= b and (c, d) != (a, b) for (c, d) in feas)
+    )
+
+
 def r4_analysis(runs):
     """格子点ごとの SME/NEON 比・5/5 で SME>=NEON か・パレート極小・K 別の参考領域。"""
     table = {}
@@ -105,10 +123,7 @@ def r4_analysis(runs):
             ratios = [r[(mn, mn, k)]["SME"] / r[(mn, mn, k)]["NEON"] for r in runs]
             table[(mn, k)] = dict(median=statistics.median(ratios), all_ge=all(x >= 1.0 for x in ratios))
     ok = {key for key, v in table.items() if v["all_ge"]}
-    minimal = sorted(
-        key for key in ok
-        if not any(o != key and o[0] <= key[0] and o[1] <= key[1] for o in ok)
-    )
+    minimal = r4_candidates({key: v["all_ge"] for key, v in table.items()})
     region = {}
     for kk in (64, 128, 256):
         pts = [(mn, k) for mn in (256, 512) for k in R4_K if k >= kk]
@@ -588,7 +603,37 @@ def _append_jsonl(d, row):
     _w(p, read_jsonl(p) + [row])
 
 
+def _r4_candidate_tests():
+    """r4_candidates の単体ケース（Cursor Bugbot 指摘: 孤立した勝ちを候補にしない）。"""
+    grid = [(mn, k) for mn in R4_MN for k in R4_K]
+    # 孤立した勝ち (256, 64): (512, 64) が負けなので (256, 64) は採用可能でない
+    ok = {p: False for p in grid}
+    ok[(256, 64)] = True
+    assert r4_candidates(ok) == [], r4_candidates(ok)
+    ok = {p: (p[0] >= 256 and p[1] >= 64) for p in grid}
+    ok[(512, 64)] = False
+    assert (256, 64) not in r4_candidates(ok), r4_candidates(ok)
+    assert r4_candidates(ok) == [(256, 128)], r4_candidates(ok)
+    # 現行しきい値の領域だけ勝つ: 候補は (256, 64) のみ
+    ok = {p: (p[0] >= 256 and p[1] >= 64) for p in grid}
+    assert r4_candidates(ok) == [(256, 64)], r4_candidates(ok)
+    # 全勝: 最小の格子点 1 つ
+    assert r4_candidates({p: True for p in grid}) == [(R4_MN[0], R4_K[0])]
+    # 全敗: 候補なし
+    assert r4_candidates({p: False for p in grid}) == []
+    # 欠損: 判定不能（AggError）
+    ok = {p: True for p in grid}
+    del ok[(512, 256)]
+    try:
+        r4_candidates(ok)
+    except AggError:
+        pass
+    else:
+        raise AssertionError("欠損で AggError にならない")
+
+
 def self_test():
+    _r4_candidate_tests()
     cases = [
         (dict(), "ADOPT 候補"),
         (dict(after_scale=1.2), "REJECT"),
