@@ -10,7 +10,7 @@
 | `RULE.txt` | 事前登録の判定規則（実測前に単独コミットで固定。事後に緩めない） |
 | `orchestrate.sh` | テストバイナリ 2 本を 1 回だけビルドし、run ごとに腕の起動順をローテーションして独立 5 回実行する。`run{1..5}.jsonl`・`env_info.txt`・`env_run{N}.txt`・`load_gate*.{log,txt}`・`power_run{N}.txt` を残す（`macmini` のみ受け付ける。既存 run があれば中止） |
 | `aggregate.py` | 5 run を集計（python3 標準ライブラリのみ。n≠500・非有限／負値・JSON 不正・腕／run／ゲート状態の欠落・checksum 不一致は fail-closed。`--self-test` あり） |
-| `macmini/` | 実機実測時の生ログ（**現状は未実測のため存在しない**） |
+| `macmini/` | Mac mini の実測生ログ（2026-10-21。`rev-stamp.txt`・`prereq_bit_exact.log`・`aggregate.md`・`bench_control/` を含む） |
 
 ## 実行手順（Mac mini セッション）
 
