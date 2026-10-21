@@ -8,7 +8,7 @@
 | `RULE.txt` | 事前登録の補遺規則（継承 RULE は変更しない） |
 | `on-host-arena.patch`・`on-reduction.patch`・`on-train-forward-encode.patch` | after 腕 patch。`on-reduction.patch` の `@T@` は Stage 0 の T_macmini = 16384 を記入済み（`reduction/on-reduction-filled.sha256`） |
 | `aggregate_sweep_single.py` | Stage 0 の単機集計（継承 `aggregate_sweep.py` を import。`--self-test` あり） |
-| `machine_gate_check.py` | 継承ゲートログから round 別 load1 < 3.0 を判定（`--self-test` あり）。結果は `macmini/machine_gate_ok.txt` |
+| `machine_gate_check.py` | 継承ゲートログから round 別 load1 < 3.0 を判定（uptime 定期サンプルのみのログは round 非対応のため判定不能。`--self-test` あり）。結果は `macmini/machine_gate_ok.txt` |
 | `split_by_task.py` | 混在 JSONL を task だけで分割する前処理（G4。2112 README §3 のコマンドを実行可能にする） |
 | `session-scripts/` | Mac mini 上で実行したセッションスクリプト（`cpu_session.sh`・`cpu_session2.sh`・`metal_session.sh`・`lib.sh`・`prep.sh`） |
 | `macmini/` | `uname.txt`（ホスト名マスク）・`rev-stamp.txt`（before の HEAD）・`machine_gate.log`・`preflight-procs.txt`・`df-*.txt`・`steps.log` ほか |

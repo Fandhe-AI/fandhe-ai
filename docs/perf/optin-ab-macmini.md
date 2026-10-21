@@ -11,7 +11,7 @@ main の定数・環境変数既定は変更していない。規則は `logs/op
 | 機体 | M4 Max + GB10 | Mac mini M4（P4+E6、GPU 10 コア、macOS 27.0.1、rustc 1.99.0。Apple Silicon 枠として扱う。`logs/optin-ab-macmini-3184/macmini/uname.txt`・`rev-stamp.txt`） |
 | 負荷 | 継承登録値（8.0／exclusive 4.0／record_only） | 継承スクリプトは登録値のまま。外側で系列開始前に load1 < 3.0 を待ち、事後に round 別 load1 < 3.0 を検査（`machine_gate_check.py`） |
 | 外側ゲート | — | 全系列で成立（load1 1.4〜2.9。`macmini/machine_gate.log`）。並走プロセスは全系列で 0 件（`macmini/preflight-procs.txt`） |
-| 事後検査（round 別 load1 < 3.0） | — | **全系列で不成立**（`macmini/machine_gate_ok.txt`） |
+| 事後検査（round 別 load1 < 3.0） | — | **全系列で不成立または判定不能**（round 番号付きログの系列は不成立、G4／G5 は uptime の定期サンプルのみで round と対応しないため判定不能。`macmini/machine_gate_ok.txt`） |
 | verified_m4_max_gpu_core_count | 解決済み | G6 の `env_info.txt` に gpu_cores=10 を記録（`mtl_architecture_name` は未取得） |
 
 事後検査が全系列で不成立になった理由: 継承スクリプトは **自身のビルド直後、または直前 round の計測直後** に round 開始の load1 を読む。10 コア全利用の計測（CPU GEMM・縮約・Metal host 側）では load1 の 1 分平均が自分自身の負荷で 5〜8 に上がり、round 間 30 秒待ちでは < 3.0 に戻らない。継承スクリプトの閾値は変えない規則のため、この条件は実測前の運用では満たせなかった。補遺 RULE 3 は「どちらかが欠けた系列は record_only で判定は undetermined」と定めているため、その規則どおりに扱う。
@@ -75,7 +75,7 @@ CPU 系 G1／G2 Stage 1 は、初回（label `g1`）が自分のビルド由来�
 
 ### G5 readout legacy／borrowed
 
-`readout/`。専有ゲート成立。N=1024／2048／4096 × fresh／reuse の borrowed/legacy は 0.9754／0.9462／0.9691／0.9658／0.9800／0.9928（全セル checksum 完全一致）。継承 §15.1 のみで読むと ADOPT 相当だが、#1520 の REJECT を覆すものではなく「専有 Mac mini での条件を変えた再測定」であり、round 開始の load1 が 3.0 を超えた系列（G5 は round 3〜5 が 3.67〜5.15）のため判定は undetermined。#3265 には参考値として渡す。
+`readout/`。専有ゲート成立。N=1024／2048／4096 × fresh／reuse の borrowed/legacy は 0.9754／0.9462／0.9691／0.9658／0.9800／0.9928（全セル checksum 完全一致）。継承 §15.1 のみで読むと ADOPT 相当だが、#1520 の REJECT を覆すものではなく「専有 Mac mini での条件を変えた再測定」であり、round 別の load1 を確認できない系列（G5 は 30 秒間隔の uptime 定期サンプル 5 件のみで round 開始値ではなく、うち 3.67〜5.15 が 3.0 超。round との対応は判定不能）のため判定は undetermined。#3265 には参考値として渡す。
 
 ### G6 steel 候補
 

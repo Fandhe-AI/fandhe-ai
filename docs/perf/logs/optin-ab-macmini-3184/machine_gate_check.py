@@ -6,6 +6,8 @@
 < 3.0 のとき machine_gate_ok=1 を出力する。欠損・非数値・round 数 != 5 は fail-closed（0）。
 継承ログは編集しない。stdlib のみ。`python3 -I machine_gate_check.py <gate_log>...` で実行。
 各 round の最後の記録を採用する（同一 round が複数行ある場合は後勝ち）。
+round 番号を持たない `uptime` 形式のログ（30 秒間隔の定期サンプル）は round との対応を確認できないため
+machine_gate_ok=undetermined（判定不能。1 と見なさない）とし、サンプルは参考値として列挙するだけにする。
 出力: `<file>: round1=0|1(load1=..) ... machine_gate_ok=0|1`。終了コード 0 / 2（入力不正）。
 """
 import math
@@ -26,9 +28,10 @@ def check_text(text):
         if m:
             seen[int(m.group(1))] = m.group(2)
     if not seen:
-        # round 番号付き行が無い場合は uptime 行を出現順に round 1.. とみなす（ちょうど 5 件のときだけ成立）
+        # round 番号付き行が無い: uptime は定期サンプルで round と対応しないため判定不能（None）を返す
         readings = UPTIME.findall(text)
-        seen = {i + 1: v for i, v in enumerate(readings)}
+        if readings:
+            return {i + 1: (None, None) for i in range(len(readings))}, None
     per_round = {}
     for n in range(1, 6):
         raw = seen.get(n)
@@ -43,6 +46,9 @@ def check_text(text):
 
 
 def render(name, per_round, ok):
+    if ok is None:
+        n = len(per_round)
+        return f"{name}: round 対応なし（uptime 定期サンプル {n} 件）machine_gate_ok=undetermined"
     cells = " ".join(f"round{n}={g}(load1={v})" for n, (v, g) in per_round.items())
     return f"{name}: {cells} machine_gate_ok={1 if ok else 0}"
 
@@ -58,9 +64,10 @@ def self_test():
     assert check_text("run1 load1=0.5 (record_only)\nrun2 load1=0.5\nrun3 load1=0.5\nrun4 load1=0.5\nrun5 load1=0.5")[1]
     assert check_text("")[1] is False
     up = "\n".join(f"17:2{n}  up 1 day, load averages: 1.{n} 2.0 2.0" for n in range(1, 6))
-    assert check_text(up)[1] is True
-    assert check_text(up + "\n17:30  up, load averages: 1.0 1 1")[1] is False
-    assert check_text(up.replace("1.3", "3.4"))[1] is False
+    assert check_text(up)[1] is None  # 定期サンプルは round と対応しないので 5 件でも成立させない
+    assert check_text(up.replace("1.3", "3.4"))[1] is None
+    assert check_text(up + "\n17:30  up, load averages: 1.0 1 1")[1] is None
+    assert render("x", *check_text(up)).endswith("machine_gate_ok=undetermined")
     print("self-test OK")
 
 
