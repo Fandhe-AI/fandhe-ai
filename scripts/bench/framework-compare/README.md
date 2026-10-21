@@ -1991,6 +1991,9 @@ AB_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" bash run_ab_readback_
 判定規則・順序制約（#2107 の実測を先に旧コミットで実施）は `docs/perf/logs/cuda-gemm-readback-reuse-2108/RULE.txt`、
 設計は `docs/perf/cuda-gemm-readback-reuse-2108.md`。
 
+N=256 だけを測る補遺セル（イシュー #3190。判定は `docs/perf/logs/optin-ab-gb10-3190/RULE.txt` §9）は
+`AB_READBACK_SIZES=n256` を付ける（`default`／`n256` の完全一致だけ許可。未設定は従来の 1024/2048/4096）。
+
 ## Mac mini の CPU スレッド方針 A/B（`run_ab_thread_policy_macmini_cpu.sh`、イシュー #3178）
 
 `AB_GATE=big-core|small-cap` で `BIG_CORE_LIMIT_ENABLED`／`SMALL_SHAPE_CAP_ENABLED` を 1 本ずつ反転した after 腕（計測専用 checkout）と

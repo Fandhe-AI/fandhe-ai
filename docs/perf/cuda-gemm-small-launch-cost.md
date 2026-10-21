@@ -62,15 +62,48 @@
 | Stream-K・persistent・TMA Stage 1 | REJECT／調査済み | `loss-attribution-matrix.md` §5 |
 | reuse フェーズ分解（N=1024〜4096。#1182／#1973） | 記録済み（N=256 は本件で新規計測） | `cuda-gemm-reuse-phase-breakdown.md` §12 |
 
-## 7. 結果（GB10 実測待ち）
+## 7. 結果（GB10 実測。イシュー #3190・2026-10-20）
 
-未記入。`logs/cuda-gemm-small-launch-cost-2109/orchestrate.sh` → `aggregate.py` の
-出力を本節へ転記する（受入基準 2: 5 run 中央値・単位 µs、受入基準 3: launch
-overhead の定量化）。
+**系列の扱い: RULE.txt 7 により「無効」**。`orchestrate.sh` は完走し（`logs/cuda-gemm-small-launch-cost-2109/gb10/`。
+専有ゲート全 run PASS〈load1 0.11〜0.30・GPU 0%〉・nsys 補助診断取得済み）、`aggregate.py` は exit 1 で止まった
+（原因: `LogIntegrityError: layerB-run1 区間: キー集合が期待と不一致（欠落 [(128, 'L0', 'ops_total')]）`）。
+原因は、`--nocapture` の `test ... ... ` 行末に最初の `DIAG2109` 行が融合し（`layerB-run*.log` の 6 行目）、
+行頭アンカーのパーサーが n=128 の最初のレコードを読めないこと。5 run すべてで同一であり、計測値の欠損ではない。
+一部 run の差し替えはしない（RULE.txt）ので、**下表は判定に使わない参考値**として併記する。
+参考値は、融合行を改行で分離しただけの正規化コピー（`logs/cuda-gemm-small-launch-cost-2109/gb10-normalized-reference/`。
+変換は `logs/optin-ab-gb10-3190/` の README に記載）に同じ `aggregate.py` を当てたもの。
+registry 腕は framework-compare の現行ピン `fandhe-ai =0.11.0`（RULE.txt の `=0.9.0` 表記との条件差。RULE 4 で record_only のため判定は不変）。
+
+| 項目 | 値（5 run 中央値, µs） |
+|---|---|
+| HEAD path-patch reuse（AC-2） | 90.065 |
+| candle fresh | 75.865 |
+| gap（HEAD − candle） | 14.200 |
+| registry 腕 reuse | 91.816（HEAD/registry = 0.981） |
+| L0 ops_total／L1 gemm_total／L2 l2_sum | 51.648／47.808／51.057 |
+| 床: host→kernel 往復（E tiny_roundtrip） | 6.064（L0 の 11.7%） |
+| 床: device idle 推定 | 2.284（4.4%） |
+
+| 仮説 | µs | L0 比 | 方向（参考・RULE 判定ではない） |
+|---|---|---|---|
+| H1 毎反復 H2D | 23.120 | 44.8% | 支持 |
+| H2 launch+同期の往復 | 3.916 | 7.6% | 未確定 |
+| H3 D2H readback | 23.776 | 46.0% | 支持 |
+| H4a host dispatch | 3.968 | 7.7% | 未確定 |
+| H5 facade/tape | 5.840 | 11.3% | 未確定 |
+
+- 支配項は **L2 readback（24.1 µs・L0 比 46.7%）**、次いで h2d_a／h2d_b（各 約 11〜12 µs）。launch 往復の床は 6.1 µs で、
+  gap 14.2 µs のうち起動往復で説明できるのは小さい。reuse が candle fresh より遅い逆転は GB10 でも再現した（+14.2 µs）。
+- 含意: N=256 の差は launch 往復より **入出力の転送（H1・H3）が L0 の約 9 割（H1+H3 は L0 の約 91%）を占める**。gap への寄与は相手側の転送時間を測っていないため未分離。readback 宛先の変更（#3186 で N>=1024 は REJECT、
+  N=256 は #3190 の補遺 B6 でも REJECT〈ratio 1.0475〉）では縮まらず、計測境界の対称化（入力の resident 化）が先に要る。
+  #3214・#3259 の前提データとして使う。
+- 判定の厳密さ: 上表の「方向」は本系列が無効なため RULE 判定ではなく、採用判断に使わない（「支持」は参考値が仮説の向きに大きいという意味にとどまる）。再計測が必要なら別の空ディレクトリで
+  `orchestrate.sh` を再実行し、`aggregate.py` 側の先頭行融合の扱いを直す（起票候補）。
 
 ## 8. 起票候補（列挙のみ。起票はユーザー承認後）
 
 - 入力の resident 化による計測境界の対称化（H1 が支配的な場合。compare 側の設計判断を含む）
 - Legacy stream での event tracking 無効化（`unsafe` を伴うため要承認）
 - `teardown` 削減（drop 時の free・event 破棄。teardown が支配的な場合）
+- `aggregate.py` の Layer B パーサーが `--nocapture` の test 行末に融合した最初の `DIAG2109` 行を読めない問題の是正（#3190 で発覚）
 - readback 宛先の再利用（#2108）・CUDA 推論 Graph capture（#2115）は既存 issue

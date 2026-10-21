@@ -1,0 +1,131 @@
+== build bench-fandhe (path patch) ==
+cp: 'target/release/bench-fandhe' を stat できません: そのようなファイルやディレクトリはありません
+sha256sum: results/raw/bench-fandhe-2115-gb10-3190: そのようなファイルやディレクトリはありません
+== infer cuda mode=fresh batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+run 1:  00:36:24 up 54 days, 12:03, 11 users,  load average: 3.19, 3.26, 2.85
+== infer cuda mode=fresh batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+run 2:  00:36:24 up 54 days, 12:03, 11 users,  load average: 3.19, 3.26, 2.85
+== infer cuda mode=fresh batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+run 3:  00:36:24 up 54 days, 12:03, 11 users,  load average: 3.19, 3.26, 2.85
+== infer cuda mode=fresh batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+run 4:  00:36:24 up 54 days, 12:03, 11 users,  load average: 3.19, 3.26, 2.85
+== infer cuda mode=fresh batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=64 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=1024 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=fresh batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=before ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+== infer cuda mode=reuse batch=4096 arm=after ==
+  -> FAILED (recorded in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log)
+run 5:  00:36:24 up 54 days, 12:03, 11 users,  load average: 3.19, 3.26, 2.85
+compare exit=2
+done. results in results/raw ; failures (if any) in results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log
+FAILED: 61 run(s) failed; see results/raw/skipped-dgx-infer-graph-ab-2115-gb10-3190.log

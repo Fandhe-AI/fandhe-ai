@@ -1,0 +1,54 @@
+warning: 他の bench-fandhe/bench-candle プロセスが実行中の可能性がある（pgrep 検出）
+2026-10-20T15:41:17Z attempt=0 load1=2.92 gpu_util=0% threshold=1.0 consecutive_ok=0
+2026-10-20T15:42:47Z attempt=1 load1=0.65 gpu_util=0% threshold=1.0 consecutive_ok=0
+2026-10-20T15:43:17Z attempt=2 load1=0.39 gpu_util=0% threshold=1.0 consecutive_ok=1
+2026-10-20T15:43:47Z attempt=3 load1=0.39 gpu_util=0% threshold=1.0 consecutive_ok=2
+gate: ok (3 consecutive checks: load1 < threshold and GPU util 0%)
+== build bench-fandhe (HEAD path patch) ==
+bench-fandhe sha256: 51ea3ae8492fe3374e27e31bca402a4a4c119e487f6e77508f2e6864efe03875 (source: path:crates/facade)
+== manifest（一時ファイル）記録: results/raw/manifest-dgx-readback-reuse-ab-head-d89a093-3190-n256.json.tmp ==
+{"label":"head-d89a093-3190-n256","device":"cuda","script_repo_head_sha":"d89a0937021e351573ae754bf35eae4c4408f740","facade_head_sha":"d89a0937021e351573ae754bf35eae4c4408f740","bin_sha256":"51ea3ae8492fe3374e27e31bca402a4a4c119e487f6e77508f2e6864efe03875","bin_source":"path:crates/facade","readback_arms":["pretouched","pinned-reuse"],"env":"FANDHE_AI_CUDA_READBACK_DEST","gate_mode":"exclusive","load_gate_max_load1":"1.0","recorded_at":"2026-10-20T15:43:51Z"}
+== cuda status (before loop) ==
+name, driver_version, temperature.gpu, clocks.current.sm [MHz], utilization.gpu [%]
+NVIDIA GB10, 580.173.02, 45, 2411 MHz, 0 %
+ 00:43:51 up 54 days, 12:10, 11 users,  load average: 0.35, 1.57, 2.23
+== bench-fandhe gemm cuda reuse size=256 arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000089824,"q1_s":0.000089584,"q3_s":0.000091309,"gflops":373.558,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.410831041,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm cuda reuse size=256 arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000096328,"q1_s":0.000095532,"q3_s":0.000109540,"gflops":348.333,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.407501774,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== round 1/5 完了時点の status ==
+45, 2418 MHz, 0 %
+ 00:43:52 up 54 days, 12:10, 11 users,  load average: 0.35, 1.57, 2.23
+== bench-fandhe gemm cuda reuse size=256 arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000096665,"q1_s":0.000096304,"q3_s":0.000100285,"gflops":347.123,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.426688058,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm cuda reuse size=256 arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000092064,"q1_s":0.000091452,"q3_s":0.000100821,"gflops":364.469,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.427964384,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== round 2/5 完了時点の status ==
+45, 2411 MHz, 1 %
+ 00:43:53 up 54 days, 12:10, 11 users,  load average: 0.35, 1.57, 2.23
+== bench-fandhe gemm cuda reuse size=256 arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000092072,"q1_s":0.000091297,"q3_s":0.000101164,"gflops":364.437,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.433093869,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm cuda reuse size=256 arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000096656,"q1_s":0.000096089,"q3_s":0.000112384,"gflops":347.151,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.425277742,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== round 3/5 完了時点の status ==
+45, 2411 MHz, 1 %
+ 00:43:54 up 54 days, 12:10, 11 users,  load average: 0.41, 1.56, 2.23
+== bench-fandhe gemm cuda reuse size=256 arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000096433,"q1_s":0.000096237,"q3_s":0.000113180,"gflops":347.956,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.422153244,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm cuda reuse size=256 arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000092088,"q1_s":0.000091405,"q3_s":0.000102441,"gflops":364.374,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.419522346,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== round 4/5 完了時点の status ==
+46, 2418 MHz, 3 %
+ 00:43:55 up 54 days, 12:10, 11 users,  load average: 0.41, 1.56, 2.23
+== bench-fandhe gemm cuda reuse size=256 arm=before ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000089776,"q1_s":0.000089208,"q3_s":0.000090629,"gflops":373.757,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.402921914,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm cuda reuse size=256 arm=after ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"cuda","size":256,"median_s":0.000096280,"q1_s":0.000095724,"q3_s":0.000105993,"gflops":348.509,"checksum":237.546660,"warmup":20,"iters":20,"mode":"reuse","init_s":0.409936209,"parity_total":65536,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== round 5/5 完了時点の status ==
+46, 2418 MHz, 0 %
+ 00:43:56 up 54 days, 12:10, 11 users,  load average: 0.41, 1.56, 2.23
+== cuda status (after loop) ==
+46, 2418 MHz, 0 %
+ 00:43:56 up 54 days, 12:10, 11 users,  load average: 0.41, 1.56, 2.23
+done. results in results/raw/results-dgx-readback-reuse-ab-head-d89a093-3190-n256-before.jsonl / results/raw/results-dgx-readback-reuse-ab-head-d89a093-3190-n256-after.jsonl ; manifest in results/raw/manifest-dgx-readback-reuse-ab-head-d89a093-3190-n256.json
+compare_gemm_ab.py exit=3; report write exit=0; report: results/raw/compare-readback-reuse-ab-head-d89a093-3190-n256.md

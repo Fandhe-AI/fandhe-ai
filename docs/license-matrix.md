@@ -104,7 +104,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - **`objc2-metal`/`objc2-core-foundation`/`dispatch2`**（Zlib OR Apache-2.0 OR MIT）: 2 節の `objc2-metal` と同様、MIT を選択すれば適合する
 - **`memchr`等**（Unlicense OR MIT）: MIT を選択すれば適合する
 - **`zerocopy v0.8.56`**（BSD-2-Clause OR Apache-2.0 OR MIT）: MIT を選択すれば適合する
-- **`webpki-root-certs v1.0.9`**（`CDLA-Permissive-2.0`。イシュー #3124）: Mozilla のルート証明書一覧を収めたデータクレートで、許諾的なデータライセンス（コピーレフトではない）。`native-tls` feature が必ず含める。`deny.toml` の allow へ `CDLA-Permissive-2.0` を追加した（今回の allow 追加はこの 1 識別子のみ）
+- **`webpki-root-certs v1.0.10`**（`CDLA-Permissive-2.0`。イシュー #3124 で v1.0.9 を実測、2026-10-21 に RUSTSEC-2026-0383 対応で v1.0.10 へ更新。末尾の追加実測を参照）: Mozilla のルート証明書一覧を収めたデータクレートで、許諾的なデータライセンス（コピーレフトではない）。`native-tls` feature が必ず含める。`deny.toml` の allow へ `CDLA-Permissive-2.0` を追加した（今回の allow 追加はこの 1 識別子のみ）
 - **`openssl-src v300.6.1+3.6.3`**（宣言は `MIT/Apache-2.0`。イシュー #3124）: 宣言ライセンスで `cargo deny` が通っても、成果物には OpenSSL 本体（同梱ソースは Apache License 2.0）が静的にリンクされる。Apache-2.0 は allow にあり適合する。OpenSSL の脆弱性対応は `openssl-src` の版更新（依存の更新は人間承認。deps-policy.md）に依存し、システム OpenSSL のように OS の更新では直らない（受容済み）
 - **`security-framework v3.7.0`／`core-foundation v0.10.1` 系**（macOS 向け `native-tls` 経路。イシュー #3124）: 実測では `MIT OR Apache-2.0` の式で allow 内（5 節追加実測の分布参照）
 - **`wasip2`等**（Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT）: MIT を選択すれば適合する（LLVM 例外条項の受諾は不要）
@@ -346,3 +346,11 @@ PR（イシュー #755・PR #770）がマージされる際の必須条件とし
 - `default-features = false` の組合せは決定記録 §5.2 の擬似実測で 3 ターゲットとも default と同一（`std` は依存を追加しない）。本実装は default feature のみで確認した。
 - `cargo deny --locked check advisories bans licenses sources`: `advisories ok, bans ok, licenses ok, sources ok`。`deny.toml` の設定値（allow）は変更していない。
 - `scripts/check-forbidden-deps.sh lock-all`・`tree`: ok。
+
+## 追加実測（RUSTSEC-2026-0383・2026-10-21）
+
+`webpki-root-certs` を 1.0.9 から 1.0.10 へ更新した（`cargo update -p webpki-root-certs --precise 1.0.10`）。`ureq`（第 11 区分）の推移的依存で、直接依存の `Cargo.toml` は変えていない。理由は RUSTSEC-2026-0383（同梱のルート証明書が、信頼を取り消された emSign の中間証明書を信頼してしまう。修正版は 1.0.10 以上）で、`cargo deny` の advisories が全 PR で fail していた。2026-10-21 に所有者が承認した。
+
+- `Cargo.lock` の差分: `webpki-root-certs` の version と checksum だけ。ほかの crate の追加・版変更はない。
+- ライセンス: `cargo metadata --locked` で 1.0.10 も `CDLA-Permissive-2.0`。`deny.toml` の allow は変更していない。
+- `cargo deny --locked check advisories bans licenses sources`: ok。`scripts/check-forbidden-deps.sh lock-all`: ok。

@@ -1,0 +1,13 @@
+diff --git a/crates/tensor-core/src/alloc.rs b/crates/tensor-core/src/alloc.rs
+index 8947b33d8..266defb39 100644
+--- a/crates/tensor-core/src/alloc.rs
++++ b/crates/tensor-core/src/alloc.rs
+@@ -22,7 +22,7 @@ use crate::tensor::Tensor;
+ 
+ /// arena の既定有効フラグ。**既定 OFF**。両機体 A/B（`RULE.txt`）が ADOPT となった後の
+ /// 後続 PR でのみ `true` に切り替える。A/B の after 側 worktree ではこの定数だけを反転する。
+-pub(crate) const HOST_ARENA_DEFAULT_ENABLED: bool = false;
++pub(crate) const HOST_ARENA_DEFAULT_ENABLED: bool = true;
+ 
+ /// スレッドごとのアイドル保持上限（バイト）。REQ-14 14-3（メモリ係数）の安全側として
+ /// `pool.rs` の既定 128 MiB の半分とした。ガードレール閾値ではない。

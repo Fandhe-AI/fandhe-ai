@@ -652,6 +652,36 @@ class SizesLargeTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("threadpolicy", err)
 
+    def test_cuda_readback_n256_accepts_only_256(self):
+        # イシュー #3190: cuda reuse N=256 の 1 セルだけを要求する。
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(256,), device="cuda")
+        code, out, _ = self._run(
+            before, after, ["--device", "cuda", "--modes", "reuse", "--sizes", "readback-n256"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("非後退"), 1)
+
+    def test_cuda_readback_n256_rejects_other_sizes_row(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(256, 1024), device="cuda")
+        code, _, _ = self._run(
+            before, after, ["--device", "cuda", "--modes", "reuse", "--sizes", "readback-n256"]
+        )
+        self.assertEqual(code, 2)
+
+    def test_cpu_readback_n256_is_invalid_input(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(256,), device="cpu")
+        code, _, err = self._run(before, after, ["--device", "cpu", "--sizes", "readback-n256"])
+        self.assertEqual(code, 2)
+        self.assertIn("readback-n256", err)
+
+    def test_cuda_large_and_readback_sets_unchanged_by_n256(self):
+        self.assertEqual(
+            compare_gemm_ab._size_set_for("cuda", "large"), frozenset({1024, 2048, 4096})
+        )
+        self.assertEqual(
+            compare_gemm_ab._size_set_for("cuda", "readback"), frozenset({1024, 4096})
+        )
+
     def test_cpu_large_set_unchanged_by_affinity(self):
         # 回帰: `--sizes large` の cpu 集合に 256 が混入しない。
         self.assertEqual(

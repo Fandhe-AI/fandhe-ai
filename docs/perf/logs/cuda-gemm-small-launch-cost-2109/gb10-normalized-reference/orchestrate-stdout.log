@@ -1,0 +1,97 @@
+== ビルド（release） ==
+    Finished `release` profile [optimized] target(s) in 0.08s
+== ビルド（release・HEAD path-patch） ==
+    Updating crates.io index
+     Locking 27 packages to latest compatible versions
+      Adding base64 v0.23.1
+      Adding core-foundation v0.10.1
+      Adding der v0.8.2
+      Adding fandhe-ai v0.11.0 (<home>/work/r3190/runner/crates/facade)
+      Adding fandhe-ai-autodiff v0.11.0 (<home>/work/r3190/runner/crates/autodiff)
+      Adding fandhe-ai-backend-cpu v0.11.0 (<home>/work/r3190/runner/crates/backend-cpu)
+      Adding fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3190/runner/crates/backend-cuda)
+      Adding fandhe-ai-backend-metal v0.11.0 (<home>/work/r3190/runner/crates/backend-metal)
+      Adding fandhe-ai-onnx-interop v0.11.0 (<home>/work/r3190/runner/crates/onnx-interop)
+      Adding fandhe-ai-tensor-core v0.11.0 (<home>/work/r3190/runner/crates/tensor-core)
+      Adding foreign-types v0.3.2
+      Adding foreign-types-shared v0.1.1
+      Adding native-tls v0.2.18
+      Adding openssl v0.10.81
+      Adding openssl-macros v0.1.1
+      Adding openssl-probe v0.2.1
+      Adding openssl-src v300.6.1+3.6.3
+      Adding openssl-sys v0.9.117
+      Adding pem-rfc7468 v1.0.0
+      Adding schannel v0.1.30
+      Adding security-framework v3.7.0
+      Adding security-framework-sys v2.17.0
+      Adding ureq v3.4.2
+      Adding ureq-proto v0.6.5
+      Adding utf8-zero v0.8.1
+      Adding vcpkg v0.2.15
+      Adding webpki-root-certs v1.0.10
+    Finished `release` profile [optimized] target(s) in 0.72s
+   Compiling zerocopy-derive v0.8.56
+   Compiling bytemuck v1.25.2
+   Compiling serde v1.0.229
+   Compiling darling_macro v0.20.11
+   Compiling thiserror v2.0.20
+   Compiling zerofrom-derive v0.1.7
+   Compiling onig_sys v69.9.3
+   Compiling monostate-impl v0.1.18
+   Compiling tempfile v3.27.0
+   Compiling regex v1.13.1
+   Compiling rayon-cond v0.4.0
+   Compiling cudarc v0.19.8
+   Compiling yoke-derive v0.8.2
+   Compiling typed-path v0.12.3
+   Compiling unicode_categories v0.1.1
+   Compiling memmap2 v0.9.11
+   Compiling num_cpus v1.17.0
+   Compiling byteorder v1.5.0
+   Compiling num-complex v0.4.6
+   Compiling dyn-stack v0.13.2
+   Compiling onig v6.5.3
+   Compiling cudaforge v0.1.6
+   Compiling dary_heap v0.3.9
+   Compiling monostate v0.1.18
+   Compiling pulp v0.22.3
+   Compiling compact_str v0.9.1
+   Compiling spm_precompiled v0.1.4
+   Compiling safetensors v0.8.0
+   Compiling darling v0.20.11
+   Compiling derive_builder_core v0.20.2
+   Compiling zip v8.6.0
+   Compiling zerofrom v0.1.8
+   Compiling candle-kernels v0.11.0
+   Compiling yoke v0.8.3
+   Compiling zerocopy v0.8.56
+   Compiling derive_builder_macro v0.20.2
+   Compiling derive_builder v0.20.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling ahash v0.8.12
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling tokenizers v0.22.2
+   Compiling half v2.7.1
+   Compiling gemm-common v0.19.0
+   Compiling float8 v0.7.0
+   Compiling gemm-f32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-f16 v0.19.0
+   Compiling gemm v0.19.0
+   Compiling candle-core v0.11.0
+   Compiling bench-candle v0.1.0 (<home>/work/r3190/runner/scripts/bench/framework-compare/bench-candle)
+    Finished `release` profile [optimized] target(s) in 53.15s
+== Layer A: reuse --phases N=256 ==
+== AC-2: reuse（非 phases） N=256 ==
+== HEAD path-patch Layer A: reuse --phases N=256 ==
+== HEAD path-patch AC-2: reuse（非 phases） N=256 ==
+== candle 参照（診断用） fresh N=256 ==
+== Layer B: 診断テスト（5 プロセス） ==
+== 件数の厳密断言 ==
+== 補助診断: nsys CUDA API 集計（Layer B 1 プロセス。統計・判定に不使用） ==
+done. 次: python3 <home>/work/r3190/runner/docs/perf/logs/cuda-gemm-small-launch-cost-2109/aggregate.py --log-dir <home>/work/r3190/cuda-out3/b4

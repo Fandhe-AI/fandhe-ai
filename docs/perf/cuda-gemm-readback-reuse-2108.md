@@ -59,6 +59,24 @@ REJECT／undetermined でも機構（既定 OFF）と記録を残す。
 copy-out の memcpy が追加されるため後退しうるという事前表明（RULE「事前表明する期待値」）と整合する。
 `READBACK_DEST` 既定は `PretouchedFresh` のまま変更しない（機構は既定 OFF のまま残す）。
 
+### 5.1 N=256 の補遺セル（イシュー #3190・2026-10-20）
+
+継承 RULE の判定セルは N=1024／2048／4096 で、N=256 は含まれない。#3190 の補遺規則（`logs/optin-ab-gb10-3190/RULE.txt` 9。事前登録）が
+同じ判定文言を N=256 へ適用した。#2107 の前提ゲートは N=256 で測られていないため、2108 RULE の「前提ゲートで支持でない N を含む場合は
+undetermined」により **ADOPT はあり得ない**（REJECT か undetermined のみ）。HEAD `d89a09370`（`origin/main` `42107efc1` に A/B 基盤の追加だけを載せたもの）の
+facade、`AB_READBACK_SIZES=n256`、`AB_ROUNDS=5`、専有ゲート exclusive（load1 0.39・GPU 0% を 3 サンプル連続で通過）。
+`readback_reuse_bit_match_2108` は 2 件 pass。収録: `logs/optin-ab-gb10-3190/readback-n256/`。
+
+| セル | before 中央値 | after 中央値 | ratio | 5 run 内比 | checksum |
+|---|---|---|---|---|---|
+| gemm reuse N=256 | 92.1 us | 96.4 us | 1.0475 | 1.0724, 1.0500, 1.0498, 1.0472, 1.0724（5/5 後退） | 完全一致 |
+
+なお標準出力に `他の bench-fandhe/bench-candle プロセスが実行中の可能性がある（pgrep 検出）` の警告が出た。専有ゲート（load1 < 1.0 かつ GPU 0% を 3 サンプル連続で要求）は計測開始前（ビルド前）に 1 回だけ実行しており（初回 load1 2.92 で待機後 0.39 で通過）、計測ループ内では毎回検証していない。各 round 末尾の status 行は状態の記録であり、GPU 0〜1% だった。
+
+**判定: REJECT**（補遺 RULE 9: 専有ゲートが成立した系列で ratio > 1.00）。N>=1024 の #3186 の結論と同じ向きで、全 N で pinned-reuse は後退した。
+`READBACK_DEST` 既定は `PretouchedFresh` のまま。標準出力ログから JSON 行を無加工で取り出して表を再生成している（`*.reconstructed.*`。
+`compare` の出力ファイルを作業中に誤って削除したため。値の改変なし。詳細は `docs/perf/optin-ab-gb10.md`）。
+
 ## 6. 検証状況（本 PR）
 
 - 単体テスト: env allowlist・既定ドリフトガード（`READBACK_DEST` 直接検査）・override の入れ子復元・pool の ordinal 分離／世代破棄／cap／解放
