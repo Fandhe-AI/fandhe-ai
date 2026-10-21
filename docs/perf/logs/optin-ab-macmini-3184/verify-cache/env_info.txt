@@ -1,0 +1,10 @@
+date_utc: 2026-10-21T08:38:02Z
+uname: Darwin 27.0.0 arm64
+Apple M4
+10
+4
+6
+rustc: rustc 1.99.0 (b940084d7 2026-09-28)
+cargo: cargo 1.99.0 (5f94df478 2026-08-27)
+git_head: 26e60f6322e438acb007c6024c237224ddceb008
+host_kind: m4max

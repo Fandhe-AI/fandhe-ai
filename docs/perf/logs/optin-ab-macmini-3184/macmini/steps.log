@@ -1,0 +1,61 @@
+2026-10-21T07:50:11Z G1 start
+2026-10-21T07:50:11Z G1 patch rc=0
+2026-10-21T07:51:40Z G1 AB rc=0
+2026-10-21T07:51:42Z status before=       4 after=       0
+2026-10-21T07:52:42Z G2 stage0 start
+2026-10-21T07:53:27Z G2 stage0 rc=0
+2026-10-21T07:53:27Z CPU1 DONE
+2026-10-21T07:55:21Z G1b patch rc=0
+2026-10-21T07:56:49Z G1w rc=0
+2026-10-21T07:58:49Z G1f rc=1
+2026-10-21T07:58:49Z status before=       0 after=       0
+2026-10-21T07:58:49Z G2s1 patch rc=0
+2026-10-21T08:05:56Z G1b patch rc=0
+2026-10-21T08:09:25Z G1f rc=0
+2026-10-21T08:09:25Z status before=       0 after=       0
+2026-10-21T08:09:25Z G2s1 patch rc=0
+2026-10-21T08:10:55Z G2w rc=1
+2026-10-21T08:20:34Z G2f rc=0
+2026-10-21T08:20:34Z status before=       0 after=       0
+2026-10-21T08:20:34Z CPU2 DONE
+2026-10-21T08:22:25Z G4 start
+2026-10-21T08:24:32Z G4 AB rc=0
+2026-10-21T08:24:32Z status before=       0
+2026-10-21T08:25:32Z G5 start
+2026-10-21T08:28:31Z G5 AB rc=0
+2026-10-21T08:28:31Z status before=       0
+2026-10-21T08:28:31Z METAL1 DONE
+2026-10-21T08:29:02Z G3 start
+2026-10-21T08:29:02Z G3 patch rc=0
+2026-10-21T08:29:23Z G3 a1 rc=0
+2026-10-21T08:29:47Z G3 a2 rc=0
+2026-10-21T08:29:50Z G3 b rc=0
+2026-10-21T08:29:51Z G3 c after command_batching rc=101
+2026-10-21T08:29:52Z G3 c after command_batching_bench rc=0
+2026-10-21T08:29:52Z G3 c after gemm_resident_parity rc=0
+2026-10-21T08:29:53Z G3 c after linear_forward_device_parity rc=0
+2026-10-21T08:29:56Z G3 c after mnist rc=0
+2026-10-21T08:29:57Z G3 c after dpsbp rc=101
+2026-10-21T08:30:01Z G3 c before command_batching rc=101
+2026-10-21T08:30:01Z G3 c before command_batching_bench rc=0
+2026-10-21T08:30:01Z G3 c before gemm_resident_parity rc=0
+2026-10-21T08:30:02Z G3 c before linear_forward_device_parity rc=0
+2026-10-21T08:30:11Z G3 c before mnist rc=0
+2026-10-21T08:30:12Z G3 c before dpsbp rc=101
+2026-10-21T08:30:12Z G3 PREREQ DONE
+2026-10-21T08:31:25Z G3 AB start
+2026-10-21T08:33:24Z G3 AB rc=0
+2026-10-21T08:33:24Z G3AB DONE
+2026-10-21T08:34:55Z G6 start
+2026-10-21T08:35:57Z G6 gate rc=0
+2026-10-21T08:36:16Z G6 run1 rc=0
+2026-10-21T08:36:36Z G6 run2 rc=0
+2026-10-21T08:36:56Z G6 run3 rc=0
+2026-10-21T08:37:15Z G6 run4 rc=0
+2026-10-21T08:37:35Z G6 run5 rc=0
+2026-10-21T08:37:35Z G6 aggregate rc=0
+2026-10-21T08:37:36Z status diag=       0
+2026-10-21T08:37:36Z G7 start
+2026-10-21T08:38:04Z G7 rc=0
+2026-10-21T08:38:04Z G7 aggregate rc=1
+2026-10-21T08:38:04Z METAL4 DONE

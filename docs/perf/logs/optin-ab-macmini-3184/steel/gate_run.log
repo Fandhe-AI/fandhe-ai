@@ -1,0 +1,80 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling cfg-if v1.0.4
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling objc2 v0.6.4
+   Compiling objc2-encode v4.1.0
+   Compiling crossbeam-utils v0.8.22
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.20
+   Compiling bitflags v2.13.1
+   Compiling crossbeam-deque v0.8.7
+   Compiling serde_core v1.0.229
+   Compiling rayon-core v1.13.0
+   Compiling zmij v1.0.23
+   Compiling rand_core v0.9.5
+   Compiling cudarc v0.19.8
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling block2 v0.6.2
+   Compiling objc2-core-foundation v0.3.2
+   Compiling dispatch2 v0.3.1
+   Compiling libloading v0.9.0
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/optin-3184/diag/crates/backend-cpu)
+   Compiling serde_json v1.0.151
+   Compiling serde v1.0.229
+   Compiling either v1.17.0
+   Compiling objc2-foundation v0.3.2
+   Compiling rayon v1.12.0
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/optin-3184/diag/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/optin-3184/diag/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/optin-3184/diag/crates/autodiff)
+   Compiling objc2-metal v0.3.2
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/optin-3184/diag/crates/backend-metal)
+   Compiling bench-harness v0.11.0 (<home>/work/optin-3184/diag/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 24.27s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_all_candidates ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 9.57s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_dispatch_auto ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.31s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_transposed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.64s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::steel_candidate_arms_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 26.23s
+

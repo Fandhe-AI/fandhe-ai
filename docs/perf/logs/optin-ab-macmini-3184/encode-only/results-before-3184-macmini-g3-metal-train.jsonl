@@ -1,0 +1,10 @@
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.002597063,"q1_s":0.002341375,"q3_s":0.003231521,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.001901334,"q1_s":0.001886093,"q3_s":0.001911646,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.012187958}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.002326396,"q1_s":0.002180406,"q3_s":0.002350521,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.001885583,"q1_s":0.001877938,"q3_s":0.001895750,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.011882459}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.002323521,"q1_s":0.002313854,"q3_s":0.002341416,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.001886187,"q1_s":0.001878542,"q3_s":0.001893969,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.012156917}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.002340938,"q1_s":0.002330740,"q3_s":0.002363563,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.001877730,"q1_s":0.001870063,"q3_s":0.001887406,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.011925333}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.002344062,"q1_s":0.002330365,"q3_s":0.002363322,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"metal","size":64,"median_s":0.001891354,"q1_s":0.001885281,"q3_s":0.001905041,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.011757500}
