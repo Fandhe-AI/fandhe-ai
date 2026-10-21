@@ -1,0 +1,3 @@
+2026-10-21T08:22:25Z attempt=0 load1=2.31 threshold=4.0 consecutive_ok=0
+2026-10-21T08:22:55Z attempt=1 load1=2.11 threshold=4.0 consecutive_ok=1
+gate: ok (2 consecutive checks under threshold)

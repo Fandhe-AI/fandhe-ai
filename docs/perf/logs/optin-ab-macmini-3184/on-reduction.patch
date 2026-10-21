@@ -14,7 +14,7 @@ index 9155d64d5..9c9579d7c 100644
  /// とも `1 << 18` まで逐次が優位だったことのみを参考根拠とする）。
  /// `elementwise::PARALLEL_THRESHOLD` は流用しない（モジュール doc 参照）。
 -pub(crate) const REDUCTION_PARALLEL_MIN_ELEMS: usize = 1 << 18;
-+pub(crate) const REDUCTION_PARALLEL_MIN_ELEMS: usize = @T@;
++pub(crate) const REDUCTION_PARALLEL_MIN_ELEMS: usize = 16384;
  
  /// 逐次・並列の選択規則。判定尺度は入力要素数（`numel`）で、`dim=None`・
  /// `dim=Some(axis)`（`outer*axis_len*inner`）とも同じ量を使う。

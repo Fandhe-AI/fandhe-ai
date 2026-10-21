@@ -1,0 +1,10 @@
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/optin-3184/after/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 0.31s
+     Running tests/gemm_resident_parity.rs (<home>/work/optin-3184/target-tests/release/deps/gemm_resident_parity-0c88f2a8366b43ce)
+
+running 2 tests
+test gemm_resident_lhs_matches_cpu_reference ... ok
+test gemm_resident_rhs_matches_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

@@ -1,0 +1,8 @@
+# 固定 watchlist（python torch mlx cargo gemm_ bench）に一致するプロセス名の件数のみを記録する
+# （コマンドライン全文・絶対パスは含めない）。
+watchlist_proc name=python count=0
+watchlist_proc name=torch count=0
+watchlist_proc name=mlx count=0
+watchlist_proc name=cargo count=0
+watchlist_proc name=gemm_ count=0
+watchlist_proc name=bench count=0

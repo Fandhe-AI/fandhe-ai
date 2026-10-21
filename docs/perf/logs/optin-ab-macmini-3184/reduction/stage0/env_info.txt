@@ -1,0 +1,17 @@
+label=macmini
+uname=Darwin masked 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+head=26e60f6322e438acb007c6024c237224ddceb008
+cpu=Apple M4
+nproc=10
+RAYON_NUM_THREADS=<unset>
+run1_start load1=2.92 at=2026-10-21T07:52:42Z
+run1_end load1=5.60 at=2026-10-21T07:53:11Z
+run2_start load1=5.60 at=2026-10-21T07:53:11Z
+run2_end load1=5.47 at=2026-10-21T07:53:15Z
+run3_start load1=5.47 at=2026-10-21T07:53:15Z
+run3_end load1=5.28 at=2026-10-21T07:53:19Z
+run4_start load1=5.28 at=2026-10-21T07:53:19Z
+run4_end load1=5.01 at=2026-10-21T07:53:23Z
+run5_start load1=5.01 at=2026-10-21T07:53:23Z
+run5_end load1=4.77 at=2026-10-21T07:53:27Z

@@ -1,0 +1,27 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/optin-3184/before/crates/backend-cpu)
+   Compiling bench-harness v0.11.0 (<home>/work/optin-3184/before/crates/bench-harness)
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/optin-3184/before/crates/backend-metal)
+    Finished `release` profile [optimized] target(s) in 3.87s
+     Running tests/command_batching.rs (<home>/work/optin-3184/target-tests/release/deps/command_batching-2f543a558947527a)
+
+running 5 tests
+test dispatch_sync_callers_unchanged_regression_is_covered_elsewhere ... ok
+test dependent_dispatches_in_one_batch_execute_in_order ... ok
+
+thread 'pool_reuse_zero_fill_does_not_synchronize_open_batch' (13233528) panicked at crates/backend-metal/tests/command_batching.rs:330:5:
+assertion `left == right` failed: alloc_zeroed 自体は encode() を呼ばない
+  left: 7
+ right: 6
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test pool_reuse_zero_fill_does_not_synchronize_open_batch ... FAILED
+test sgd_batched_multi_param_matches_cpu_across_many_steps ... ok
+test synchronize_after_auto_flush_at_limit ... ok
+
+failures:
+
+failures:
+    pool_reuse_zero_fill_does_not_synchronize_open_batch
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-metal --test command_batching`

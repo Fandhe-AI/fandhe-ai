@@ -1,0 +1,26 @@
+   Compiling fandhe-ai v0.11.0 (<home>/work/optin-3184/after/crates/facade)
+    Finished `release` profile [optimized] target(s) in 0.41s
+     Running tests/device_param_store_backend_parity.rs (<home>/work/optin-3184/target-tests/release/deps/device_param_store_backend_parity-3750c43644eb76ea)
+
+running 4 tests
+
+thread 'device_resident_matches_host_sgd_on_cuda_across_100_steps' (13233254) panicked at crates/facade/tests/device_param_store_backend_parity.rs:86:37:
+実機が利用可能な前提のテストのため成功するはず: CudaUnavailable("CUDA driver library unavailable: libcuda dynamic library not found (dlopen failed); CUDA driver is not installed or not on the library search path")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test device_resident_matches_host_sgd_on_cuda_across_100_steps ... FAILED
+
+thread 'grad_readout_contract_on_cuda' (13233256) panicked at crates/facade/tests/device_param_store_backend_parity.rs:244:37:
+実機が利用可能な前提のテストのため成功するはず: CudaUnavailable("CUDA driver library unavailable: libcuda dynamic library not found (dlopen failed); CUDA driver is not installed or not on the library search path")
+test grad_readout_contract_on_cuda ... FAILED
+test grad_readout_contract_on_metal ... ok
+test device_resident_matches_host_sgd_on_metal_across_100_steps ... ok
+
+failures:
+
+failures:
+    device_resident_matches_host_sgd_on_cuda_across_100_steps
+    grad_readout_contract_on_cuda
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+
+error: test failed, to rerun pass `-p fandhe-ai --test device_param_store_backend_parity`
