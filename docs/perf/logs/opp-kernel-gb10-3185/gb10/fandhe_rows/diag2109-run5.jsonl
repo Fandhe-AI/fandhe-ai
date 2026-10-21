@@ -1,0 +1,9 @@
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 128, "layer": "L2S", "phase": "kernel_wait", "clock": "wall", "median_s": 9.631999999999999e-06, "q1_s": 9.503999999999999e-06, "q3_s": 9.791999999999999e-06, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 128, "layer": "D", "phase": "dev_kernel_seg", "clock": "event", "median_s": 9.44e-06, "q1_s": 8.64e-06, "q3_s": 9.791999999999999e-06, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 128, "layer": "D", "phase": "dev_kernel_b2b", "clock": "event", "median_s": 8.195999999999999e-06, "q1_s": 8.188e-06, "q3_s": 8.204e-06, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 256, "layer": "L2S", "phase": "kernel_wait", "clock": "wall", "median_s": 1.4528e-05, "q1_s": 1.4416e-05, "q3_s": 1.456e-05, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 256, "layer": "D", "phase": "dev_kernel_seg", "clock": "event", "median_s": 1.4592e-05, "q1_s": 1.4336e-05, "q3_s": 1.488e-05, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 256, "layer": "D", "phase": "dev_kernel_b2b", "clock": "event", "median_s": 1.2084e-05, "q1_s": 1.2064e-05, "q3_s": 1.2496e-05, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 512, "layer": "L2S", "phase": "kernel_wait", "clock": "wall", "median_s": 3.6832e-05, "q1_s": 3.6657e-05, "q3_s": 3.7023999999999997e-05, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 512, "layer": "D", "phase": "dev_kernel_seg", "clock": "event", "median_s": 3.7216e-05, "q1_s": 3.6991999999999994e-05, "q3_s": 3.7504e-05, "run": 5}
+{"issue": 3185, "source": "fandhe", "kind": "diag2109", "n": 512, "layer": "D", "phase": "dev_kernel_b2b", "clock": "event", "median_s": 3.492e-05, "q1_s": 3.482e-05, "q3_s": 3.5091999999999995e-05, "run": 5}

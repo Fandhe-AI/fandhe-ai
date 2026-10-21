@@ -1,0 +1,35 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (~/work/target-3185/release/deps/fandhe_ai_backend_cuda-64c87007ab0af02b)
+
+running 1 test
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select ...   N=1024 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=0.0812 ms  q1=0.0808 ms  q3=0.0814 ms
+    h2d_b: median=0.0791 ms  q1=0.0787 ms  q3=0.0793 ms
+    alloc_c: median=0.0001 ms  q1=0.0001 ms  q3=0.0001 ms
+    launch_issue: median=0.0029 ms  q1=0.0027 ms  q3=0.0030 ms
+    kernel_wait: median=0.1819 ms  q1=0.1813 ms  q3=0.1827 ms
+    d2h: median=0.0750 ms  q1=0.0749 ms  q3=0.0752 ms
+    host_copy: median=1.6130 ms  q1=1.4346 ms  q3=1.6206 ms
+    sum of medians: 2.0331 ms
+  N=2048 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=0.3041 ms  q1=0.3035 ms  q3=0.3047 ms
+    h2d_b: median=0.2913 ms  q1=0.2910 ms  q3=0.2921 ms
+    alloc_c: median=0.0003 ms  q1=0.0003 ms  q3=0.0003 ms
+    launch_issue: median=0.0069 ms  q1=0.0069 ms  q3=0.0072 ms
+    kernel_wait: median=1.1611 ms  q1=1.1593 ms  q3=1.1627 ms
+    d2h: median=0.2797 ms  q1=0.2795 ms  q3=0.2799 ms
+    host_copy: median=5.6281 ms  q1=5.3904 ms  q3=5.6349 ms
+    sum of medians: 7.6716 ms
+  N=4096 kernel=Select (median over 20 trials, 20 warmup):
+    h2d_a: median=1.1659 ms  q1=1.1648 ms  q3=1.1664 ms
+    h2d_b: median=1.1446 ms  q1=1.1443 ms  q3=1.1450 ms
+    alloc_c: median=0.0005 ms  q1=0.0005 ms  q3=0.0006 ms
+    launch_issue: median=0.0086 ms  q1=0.0084 ms  q3=0.0088 ms
+    kernel_wait: median=10.3712 ms  q1=10.3419 ms  q3=10.3917 ms
+    d2h: median=537.0332 ms  q1=507.6612 ms  q3=546.2311 ms
+    host_copy: median=20.6479 ms  q1=20.5181 ms  q3=20.7183 ms
+    sum of medians: 570.3720 ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1311 filtered out; finished in 21.38s
+

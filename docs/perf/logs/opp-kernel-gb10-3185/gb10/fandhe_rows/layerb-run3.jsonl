@@ -1,0 +1,6 @@
+{"issue": 3185, "source": "fandhe", "kind": "layerb", "n": 1024, "layer": "B", "phase": "launch_issue", "clock": "wall", "median_s": 5e-06, "q1_s": 4.8e-06, "q3_s": 5.1e-06, "run": 3}
+{"issue": 3185, "source": "fandhe", "kind": "layerb", "n": 1024, "layer": "B", "phase": "kernel_wait", "clock": "wall", "median_s": 0.00018140000000000002, "q1_s": 0.000181, "q3_s": 0.00018260000000000002, "run": 3}
+{"issue": 3185, "source": "fandhe", "kind": "layerb", "n": 2048, "layer": "B", "phase": "launch_issue", "clock": "wall", "median_s": 7.9e-06, "q1_s": 7.8e-06, "q3_s": 8e-06, "run": 3}
+{"issue": 3185, "source": "fandhe", "kind": "layerb", "n": 2048, "layer": "B", "phase": "kernel_wait", "clock": "wall", "median_s": 0.0011624, "q1_s": 0.0011602, "q3_s": 0.0011884999999999999, "run": 3}
+{"issue": 3185, "source": "fandhe", "kind": "layerb", "n": 4096, "layer": "B", "phase": "launch_issue", "clock": "wall", "median_s": 8.200000000000001e-06, "q1_s": 8e-06, "q3_s": 8.500000000000002e-06, "run": 3}
+{"issue": 3185, "source": "fandhe", "kind": "layerb", "n": 4096, "layer": "B", "phase": "kernel_wait", "clock": "wall", "median_s": 0.009991, "q1_s": 0.0099582, "q3_s": 0.0100003, "run": 3}

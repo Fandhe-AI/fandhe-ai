@@ -1,0 +1,16 @@
+== self-test
+self-test ok
+== cpu arm
+  File "~/work/rust-ai-library-run-3185/scripts/bench/framework-compare/opp_kernel_cuda_diag.py", line 98, in validate_row
+    raise ValueError("run が不正")
+ValueError: run が不正
+wc: ~/work/smoke-3185/cpu0.jsonl: そのようなファイルやディレクトリはありません
+== cpu arm (smoke, run=1 as label only)
+wrote 25 rows -> ~/work/smoke-3185/cpu1.jsonl
+25 ~/work/smoke-3185/cpu1.jsonl
+layerb rc=0
+wrote 6 rows -> ~/work/smoke-3185/layerb.jsonl
+6 ~/work/smoke-3185/layerb.jsonl
+d2109 rc=0
+wrote 9 rows -> ~/work/smoke-3185/d2109.jsonl
+9 ~/work/smoke-3185/d2109.jsonl

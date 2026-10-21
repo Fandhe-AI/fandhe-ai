@@ -1,0 +1,113 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (~/work/target-3185/release/deps/fandhe_ai_backend_cuda-64c87007ab0af02b)
+
+running 1 test
+test gemm_small_launch_cost_diag_tests::gemm_small_launch_cost_diag ... DIAG2109 n=128 layer=L0 phase=ops_total median_us=24.864 q1_us=24.657 q3_us=25.248
+DIAG2109 n=128 layer=L1 phase=gemm_total median_us=23.584 q1_us=23.408 q3_us=23.840
+DIAG2109 n=128 checksum_bits=0x407fb58219edf800
+DIAG2109 n=128 layer=L2 phase=h2d_a median_us=3.168 q1_us=3.136 q3_us=3.232
+DIAG2109 n=128 layer=L2 phase=h2d_b median_us=3.200 q1_us=3.168 q3_us=3.232
+DIAG2109 n=128 layer=L2 phase=alloc_c median_us=0.064 q1_us=0.064 q3_us=0.064
+DIAG2109 n=128 layer=L2 phase=launch_issue median_us=1.840 q1_us=1.776 q3_us=2.032
+DIAG2109 n=128 layer=L2 phase=readback median_us=12.832 q1_us=12.640 q3_us=13.136
+DIAG2109 n=128 layer=L2 phase=teardown median_us=1.936 q1_us=1.744 q3_us=2.128
+DIAG2109 n=128 layer=L2 phase=driver_scope median_us=0.528 q1_us=0.512 q3_us=0.528
+DIAG2109 n=128 layer=L2 phase=l2_sum median_us=23.712 q1_us=23.488 q3_us=24.080
+DIAG2109 n=128 layer=L2S phase=kernel_wait median_us=9.728 q1_us=9.584 q3_us=9.936
+DIAG2109 n=128 layer=L2S phase=d2h median_us=9.664 q1_us=9.552 q3_us=9.808
+DIAG2109 n=128 layer=D phase=dev_h2d_a median_us=5.344 q1_us=5.312 q3_us=5.888
+DIAG2109 n=128 layer=D phase=dev_h2d_b median_us=4.512 q1_us=4.192 q3_us=4.608
+DIAG2109 n=128 layer=D phase=dev_kernel_seg median_us=9.440 q1_us=8.704 q3_us=9.824
+DIAG2109 n=128 layer=D phase=dev_d2h median_us=8.480 q1_us=7.808 q3_us=8.576
+DIAG2109 n=128 layer=D phase=dev_span median_us=27.456 q1_us=27.008 q3_us=28.352
+DIAG2109 n=128 layer=D phase=dev_kernel_b2b median_us=8.196 q1_us=8.188 q3_us=8.204
+DIAG2109 n=128 layer=E phase=sync_idle median_us=0.288 q1_us=0.272 q3_us=0.288
+DIAG2109 n=128 layer=E phase=tiny_roundtrip median_us=5.440 q1_us=5.360 q3_us=5.568
+DIAG2109 n=128 layer=E phase=event_create_drop median_us=0.176 q1_us=0.176 q3_us=0.192
+DIAG2109 n=128 layer=E phase=h2d_prealloc median_us=2.752 q1_us=2.688 q3_us=2.848
+DIAG2109 n=128 layer=E phase=h2d_clone_drop median_us=4.352 q1_us=4.288 q3_us=4.432
+DIAG2109 n=128 counts driver_call_scopes=1 h2d_calls=2 h2d_bytes=131072 pool_allocs=1 kernel_launches=1 d2h_calls=1 d2h_bytes=65536 stream_syncs=1
+DIAG2109 n=128 verify arm=D_b2b checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=D_dev_trial checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=E_h2d_clone checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=E_h2d_prealloc checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=E_tiny checks=1 mode=bit_exact
+DIAG2109 n=128 verify arm=L0_ops checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=L1_gemm checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=L2 checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=L2S checks=250 mode=bit_exact
+DIAG2109 n=128 verify arm=count_run checks=1 mode=bit_exact
+DIAG2109 n=256 layer=L0 phase=ops_total median_us=52.192 q1_us=52.016 q3_us=52.432
+DIAG2109 n=256 layer=L1 phase=gemm_total median_us=47.952 q1_us=47.712 q3_us=48.209
+DIAG2109 n=256 checksum_bits=0xc08a4beb76029c50
+DIAG2109 n=256 layer=L2 phase=h2d_a median_us=12.432 q1_us=12.256 q3_us=12.544
+DIAG2109 n=256 layer=L2 phase=h2d_b median_us=11.248 q1_us=11.136 q3_us=11.344
+DIAG2109 n=256 layer=L2 phase=alloc_c median_us=0.064 q1_us=0.064 q3_us=0.064
+DIAG2109 n=256 layer=L2 phase=launch_issue median_us=1.648 q1_us=1.632 q3_us=1.664
+DIAG2109 n=256 layer=L2 phase=readback median_us=24.592 q1_us=24.352 q3_us=24.768
+DIAG2109 n=256 layer=L2 phase=teardown median_us=1.856 q1_us=1.696 q3_us=1.888
+DIAG2109 n=256 layer=L2 phase=driver_scope median_us=0.528 q1_us=0.512 q3_us=0.544
+DIAG2109 n=256 layer=L2 phase=l2_sum median_us=52.256 q1_us=51.936 q3_us=52.561
+DIAG2109 n=256 layer=L2S phase=kernel_wait median_us=14.512 q1_us=14.416 q3_us=14.560
+DIAG2109 n=256 layer=L2S phase=d2h median_us=24.240 q1_us=24.080 q3_us=24.416
+DIAG2109 n=256 layer=D phase=dev_h2d_a median_us=11.200 q1_us=11.072 q3_us=11.328
+DIAG2109 n=256 layer=D phase=dev_h2d_b median_us=11.968 q1_us=11.808 q3_us=12.096
+DIAG2109 n=256 layer=D phase=dev_kernel_seg median_us=14.464 q1_us=14.208 q3_us=14.752
+DIAG2109 n=256 layer=D phase=dev_d2h median_us=14.240 q1_us=13.952 q3_us=14.464
+DIAG2109 n=256 layer=D phase=dev_span median_us=51.776 q1_us=51.392 q3_us=52.192
+DIAG2109 n=256 layer=D phase=dev_kernel_b2b median_us=12.284 q1_us=12.068 q3_us=12.512
+DIAG2109 n=256 layer=E phase=sync_idle median_us=0.288 q1_us=0.288 q3_us=0.304
+DIAG2109 n=256 layer=E phase=tiny_roundtrip median_us=5.360 q1_us=5.200 q3_us=6.048
+DIAG2109 n=256 layer=E phase=event_create_drop median_us=0.176 q1_us=0.176 q3_us=0.192
+DIAG2109 n=256 layer=E phase=h2d_prealloc median_us=10.160 q1_us=10.032 q3_us=10.720
+DIAG2109 n=256 layer=E phase=h2d_clone_drop median_us=11.248 q1_us=11.136 q3_us=12.032
+DIAG2109 n=256 counts driver_call_scopes=1 h2d_calls=2 h2d_bytes=524288 pool_allocs=1 kernel_launches=1 d2h_calls=1 d2h_bytes=262144 stream_syncs=1
+DIAG2109 n=256 verify arm=D_b2b checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=D_dev_trial checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=E_h2d_clone checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=E_h2d_prealloc checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=E_tiny checks=1 mode=bit_exact
+DIAG2109 n=256 verify arm=L0_ops checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=L1_gemm checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=L2 checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=L2S checks=250 mode=bit_exact
+DIAG2109 n=256 verify arm=count_run checks=1 mode=bit_exact
+DIAG2109 n=512 layer=L0 phase=ops_total median_us=118.929 q1_us=118.529 q3_us=119.424
+DIAG2109 n=512 layer=L1 phase=gemm_total median_us=113.537 q1_us=113.281 q3_us=113.777
+DIAG2109 n=512 checksum_bits=0xc074525ae91a5400
+DIAG2109 n=512 layer=L2 phase=h2d_a median_us=24.880 q1_us=24.768 q3_us=25.008
+DIAG2109 n=512 layer=L2 phase=h2d_b median_us=23.408 q1_us=23.344 q3_us=23.584
+DIAG2109 n=512 layer=L2 phase=alloc_c median_us=0.064 q1_us=0.064 q3_us=0.064
+DIAG2109 n=512 layer=L2 phase=launch_issue median_us=1.808 q1_us=1.776 q3_us=1.824
+DIAG2109 n=512 layer=L2 phase=readback median_us=65.312 q1_us=65.040 q3_us=65.553
+DIAG2109 n=512 layer=L2 phase=teardown median_us=1.840 q1_us=1.744 q3_us=1.952
+DIAG2109 n=512 layer=L2 phase=driver_scope median_us=0.560 q1_us=0.544 q3_us=0.576
+DIAG2109 n=512 layer=L2 phase=l2_sum median_us=117.969 q1_us=117.537 q3_us=118.400
+DIAG2109 n=512 layer=L2S phase=kernel_wait median_us=36.800 q1_us=36.609 q3_us=37.024
+DIAG2109 n=512 layer=L2S phase=d2h median_us=64.624 q1_us=64.385 q3_us=64.833
+DIAG2109 n=512 layer=D phase=dev_h2d_a median_us=23.584 q1_us=23.456 q3_us=23.680
+DIAG2109 n=512 layer=D phase=dev_h2d_b median_us=23.936 q1_us=23.872 q3_us=24.000
+DIAG2109 n=512 layer=D phase=dev_kernel_seg median_us=37.216 q1_us=36.960 q3_us=37.472
+DIAG2109 n=512 layer=D phase=dev_d2h median_us=32.032 q1_us=31.648 q3_us=32.416
+DIAG2109 n=512 layer=D phase=dev_span median_us=116.768 q1_us=116.448 q3_us=117.088
+DIAG2109 n=512 layer=D phase=dev_kernel_b2b median_us=34.924 q1_us=34.816 q3_us=35.084
+DIAG2109 n=512 layer=E phase=sync_idle median_us=0.288 q1_us=0.288 q3_us=0.304
+DIAG2109 n=512 layer=E phase=tiny_roundtrip median_us=6.064 q1_us=5.440 q3_us=6.128
+DIAG2109 n=512 layer=E phase=event_create_drop median_us=0.176 q1_us=0.160 q3_us=0.176
+DIAG2109 n=512 layer=E phase=h2d_prealloc median_us=23.712 q1_us=23.120 q3_us=23.792
+DIAG2109 n=512 layer=E phase=h2d_clone_drop median_us=24.928 q1_us=24.320 q3_us=25.041
+DIAG2109 n=512 counts driver_call_scopes=1 h2d_calls=2 h2d_bytes=2097152 pool_allocs=1 kernel_launches=1 d2h_calls=1 d2h_bytes=1048576 stream_syncs=1
+DIAG2109 n=512 verify arm=D_b2b checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=D_dev_trial checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=E_h2d_clone checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=E_h2d_prealloc checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=E_tiny checks=1 mode=bit_exact
+DIAG2109 n=512 verify arm=L0_ops checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=L1_gemm checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=L2 checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=L2S checks=250 mode=bit_exact
+DIAG2109 n=512 verify arm=count_run checks=1 mode=bit_exact
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1311 filtered out; finished in 1.30s
+
