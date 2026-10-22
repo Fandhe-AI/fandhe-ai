@@ -395,3 +395,222 @@ fn tiled_pipeline_tma_parity_smoke_env_adaptive() {
          ありません"
     );
 }
+// =====================================================================
+// 128×64 TMA 版（イシュー #3214・Stage 2・候補 C1）
+// =====================================================================
+//
+// 比較相手は **同じ 128×64 タイル・同じ 3 stage の本番 cp.async 版**
+// （`compile_tiled_pipeline_128x64_variant(dev, 3)`）。64×64 の cp.async 版
+// とは担当要素の並びが異なるため、ゲート A（bit 一致）の比較相手に使わない。
+// 全テスト `to_bits` 比較。性能の A/B（ゲート C・D）は #3215 の担当で、
+// ここでは判定しない。
+
+use fandhe_ai_backend_cuda::TmaRowMap;
+
+/// 128×64 TMA の 2 腕（swizzle は 128×64 では `None` のみ）。
+const TMA128_ARMS: [TmaRowMap; 2] = [TmaRowMap::Contiguous, TmaRowMap::Strided];
+
+/// 128×64 TMA の bit 一致形状。m が 128 の倍数でない・n が 64 の倍数で
+/// ない・k が 16 の倍数でない 4 の倍数（`n % 4 == 0 && k % 4 == 0` の
+/// 整列契約内）を含む端数形状と、1024²／2048²／4096² を含む。
+fn tma128_bit_exact_shapes() -> Vec<(u32, u32, u32)> {
+    vec![
+        (128, 64, 16),
+        (129, 68, 20),
+        (255, 132, 36),
+        (1000, 1004, 1028),
+        (1024, 1024, 1024),
+        (2048, 2048, 2048),
+        (4096, 4096, 4096),
+    ]
+}
+
+/// 本番 128×64 cp.async 版（3 stage）で同じ入力を実行して結果を返す。
+fn run_cp_async_128x64(
+    device: &CudaDevice,
+    gemm: &CudaGemm,
+    a: &[f32],
+    b: &[f32],
+    (m, n, k): (u32, u32, u32),
+) -> Vec<f32> {
+    let func = CudaGemm::compile_tiled_pipeline_128x64_variant(device, 3)
+        .expect("compile_tiled_pipeline_128x64_variant(3) must succeed on a cp.async runner");
+    let (a_dev, b_dev) = gemm.upload_f32(a, b).expect("upload_f32 must succeed");
+    let mut c_dev = gemm.alloc_output_f32(m, n).expect("alloc_output_f32");
+    gemm.launch_tiled_pipeline_f32(&func, &a_dev, &b_dev, &mut c_dev, m, n, k)
+        .expect("launch_tiled_pipeline_f32 (128x64) must succeed");
+    gemm.download_f32(&c_dev).expect("download_f32")
+}
+
+/// ゲート A: 128×64 TMA（各腕）が同タイルの cp.async 版と bit 一致する。
+#[test]
+#[ignore = "CUDA 実機（compute capability 9.0 以降、TMA 対応）必須"]
+fn tiled_pipeline_tma_128x64_matches_cp_async_128x64_bit_exact() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    for rows in TMA128_ARMS {
+        let func =
+            CudaGemm::compile_tiled_pipeline_tma_128x64_variant(&device, TmaSwizzleA::None, rows)
+                .expect("compile_tiled_pipeline_tma_128x64_variant must succeed on TMA runner");
+        for (seed, (m, n, k)) in tma128_bit_exact_shapes().into_iter().enumerate() {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(seed as u64 + 3001);
+            let a = rng.fill_vec((m as usize) * (k as usize));
+            let b = rng.fill_vec((k as usize) * (n as usize));
+            let c_ref = run_cp_async_128x64(&device, &gemm, &a, &b, (m, n, k));
+            let c_tma = gemm
+                .run_tiled_pipeline_tma_f32(&func, &a, &b, m, n, k)
+                .unwrap_or_else(|e| panic!("tma128 {rows:?} must succeed m={m},n={n},k={k}: {e}"));
+            assert!(
+                bits_eq(&c_tma, &c_ref),
+                "128x64 TMA ({rows:?}) と cp.async 128x64 の出力が bit 同一ではありません \
+                 (m={m}, n={n}, k={k})"
+            );
+        }
+    }
+}
+
+/// NaN／inf を混ぜた入力でも bit 一致し、かつ有限な出力要素が残って一致
+/// することを確かめる（timeout 時のセンチネル 0x7fc00000 は NaN 出力と見分け
+/// にくく、全要素 NaN の bit 一致だけでは「全タイルが timed_out」を検出
+/// できないため、有限値が残る入力にして区別する）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 9.0 以降、TMA 対応）必須"]
+fn tiled_pipeline_tma_128x64_matches_cp_async_with_nan_inf_inputs() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    let (m, n, k) = (255u32, 132u32, 36u32);
+    let mut rng = bench_harness::rng::Xorshift64Star::new(77);
+    let mut a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+    // 特定の行にだけ NaN／inf を置く（他の行は有限のまま残る）。
+    a[3 * k as usize + 5] = f32::NAN;
+    a[10 * k as usize + 1] = f32::INFINITY;
+    a[200 * k as usize + 35] = f32::NEG_INFINITY;
+    let c_ref = run_cp_async_128x64(&device, &gemm, &a, &b, (m, n, k));
+    assert!(
+        c_ref.iter().any(|v| v.is_finite()),
+        "テスト入力は有限な出力要素を残す必要があります"
+    );
+    for rows in TMA128_ARMS {
+        let func =
+            CudaGemm::compile_tiled_pipeline_tma_128x64_variant(&device, TmaSwizzleA::None, rows)
+                .expect("compile must succeed");
+        let c_tma = gemm
+            .run_tiled_pipeline_tma_f32(&func, &a, &b, m, n, k)
+            .expect("run_tiled_pipeline_tma_f32 must succeed");
+        assert!(
+            bits_eq(&c_tma, &c_ref),
+            "NaN/inf 入力で bit 不一致 ({rows:?})"
+        );
+        let finite_matches = c_tma
+            .iter()
+            .zip(c_ref.iter())
+            .filter(|(x, y)| x.is_finite() && x.to_bits() == y.to_bits())
+            .count();
+        assert!(
+            finite_matches > 0,
+            "有限な出力要素が一致していません ({rows:?})"
+        );
+    }
+}
+
+/// k=0 の全 +0.0・同一入力での再実行が決定的・prepared 版と one-shot 版の
+/// bit 一致・事前転置ホスト入力を NN として渡す場合の bit 一致。
+#[test]
+#[ignore = "CUDA 実機（compute capability 9.0 以降、TMA 対応）必須"]
+fn tiled_pipeline_tma_128x64_k_zero_determinism_prepared_and_pretransposed() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("tiled pipeline kernel compilation must succeed");
+    for rows in TMA128_ARMS {
+        let func =
+            CudaGemm::compile_tiled_pipeline_tma_128x64_variant(&device, TmaSwizzleA::None, rows)
+                .expect("compile must succeed");
+
+        // k = 0: 全要素 +0.0（符号ビットまで確認）。
+        let c0 = gemm
+            .run_tiled_pipeline_tma_f32(&func, &[], &[], 128, 64, 0)
+            .expect("k=0 must succeed");
+        assert!(c0.iter().all(|v| v.to_bits() == 0.0f32.to_bits()));
+
+        // 決定性。
+        let (m, n, k) = (512u32, 512u32, 512u32);
+        let mut rng = bench_harness::rng::Xorshift64Star::new(9);
+        let a = rng.fill_vec((m * k) as usize);
+        let b = rng.fill_vec((k * n) as usize);
+        let first = gemm
+            .run_tiled_pipeline_tma_f32(&func, &a, &b, m, n, k)
+            .unwrap();
+        let second = gemm
+            .run_tiled_pipeline_tma_f32(&func, &a, &b, m, n, k)
+            .unwrap();
+        assert!(
+            bits_eq(&first, &second),
+            "連続 2 回起動の出力が一致しません ({rows:?})"
+        );
+
+        // prepared 版と one-shot 版。
+        let (a_dev, b_dev) = gemm.upload_f32(&a, &b).unwrap();
+        let mut c_dev = gemm.alloc_output_f32(m, n).unwrap();
+        let maps = gemm
+            .prepare_tiled_pipeline_tma_maps(&func, &a_dev, &b_dev, (m, n, k))
+            .unwrap();
+        gemm.launch_tiled_pipeline_tma_f32_prepared(&func, &maps, &mut c_dev)
+            .unwrap();
+        let prepared = gemm.download_f32(&c_dev).unwrap();
+        assert!(
+            bits_eq(&prepared, &first),
+            "prepared 版と one-shot 版が不一致 ({rows:?})"
+        );
+
+        // 事前転置したホスト入力を NN として渡す（転置用 API は新設しない）。
+        let (m2, n2, k2) = (128u32, 96u32, 64u32);
+        let a_t = rng.fill_vec((k2 * m2) as usize);
+        let mut a2 = vec![0.0f32; (m2 * k2) as usize];
+        for row in 0..m2 as usize {
+            for col in 0..k2 as usize {
+                a2[row * k2 as usize + col] = a_t[col * m2 as usize + row];
+            }
+        }
+        let b2 = rng.fill_vec((k2 * n2) as usize);
+        let c_ref = run_cp_async_128x64(&device, &gemm, &a2, &b2, (m2, n2, k2));
+        let c_tma = gemm
+            .run_tiled_pipeline_tma_f32(&func, &a2, &b2, m2, n2, k2)
+            .unwrap();
+        assert!(bits_eq(&c_tma, &c_ref), "事前転置入力で不一致 ({rows:?})");
+    }
+}
+
+/// 128×64 で B64 を拒否する・cc<9.0 は TiledPipelineUnavailable で拒否する。
+/// デバイスが作れる環境でのみ検証する（環境適応。通常 CI で実行）。
+#[test]
+fn tiled_pipeline_tma_128x64_rejects_b64_and_old_arch_env_adaptive() {
+    let Ok(device) = CudaDevice::new(0) else {
+        return;
+    };
+    let err = CudaGemm::compile_tiled_pipeline_tma_128x64_variant(
+        &device,
+        TmaSwizzleA::B64,
+        TmaRowMap::Contiguous,
+    )
+    .err()
+    .expect("B64 must be rejected for 128x64");
+    assert!(
+        matches!(err, CudaError::InvalidKernelConfig { .. }),
+        "{err:?}"
+    );
+
+    let (major, _) = device.compute_capability();
+    if major < 9 {
+        let err = CudaGemm::compile_tiled_pipeline_tma_128x64_variant(
+            &device,
+            TmaSwizzleA::None,
+            TmaRowMap::Strided,
+        )
+        .err()
+        .expect("cc < 9.0 must be rejected");
+        assert!(
+            matches!(err, CudaError::TiledPipelineUnavailable { .. }),
+            "{err:?}"
+        );
+    }
+}
