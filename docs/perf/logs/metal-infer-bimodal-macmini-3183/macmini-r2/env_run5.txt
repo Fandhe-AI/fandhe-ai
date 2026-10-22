@@ -1,0 +1,22 @@
+== run5 before ==
+ 1:57  up 11 days,  1:31, 1 user, load averages: 2.21 5.84 3.88
+order: BcT R D Don G v0R v0D v0Don Bc  since_build_s: 189
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ lowpowermode         0
+-- CPU 使用率上位 8 プロセス（pcpu comm）--
+ %CPU COMM
+124.1 /System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
+  1.9 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+  1.5 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd
+  1.4 /usr/libexec/trustd
+  1.2 /Applications/Docker.app/Contents/MacOS/com.docker.backend
+  1.2 /usr/libexec/spotlightknowledged.importer
+  1.1 /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Resources/backgroundtaskmanagementd
+  1.0 /usr/libexec/smd
+== run5 after ==
+ 1:57  up 11 days,  1:31, 1 user, load averages: 2.21 5.84 3.88
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

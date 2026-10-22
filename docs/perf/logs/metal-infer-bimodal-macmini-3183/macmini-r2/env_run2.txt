@@ -1,0 +1,22 @@
+== run2 before ==
+ 1:57  up 11 days,  1:30, 1 user, load averages: 2.23 5.91 3.89
+order: Don G v0R v0D v0Don Bc BcT R D  since_build_s: 184
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ lowpowermode         0
+-- CPU 使用率上位 8 プロセス（pcpu comm）--
+ %CPU COMM
+  4.7 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+  2.9 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd
+  1.6 /usr/libexec/syspolicyd
+  1.0 /Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/Frameworks/Docker Desktop Helper (Renderer).app/Contents/MacOS/Docker Desktop Helper (Renderer)
+  0.8 /usr/libexec/trustd
+  0.7 /usr/libexec/sharingd
+  0.5 /usr/sbin/notifyd
+  0.5 /usr/sbin/cfprefsd
+== run2 after ==
+ 1:57  up 11 days,  1:30, 1 user, load averages: 2.23 5.91 3.89
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded

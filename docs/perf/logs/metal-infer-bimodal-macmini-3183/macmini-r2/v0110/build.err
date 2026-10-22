@@ -1,0 +1,30 @@
+   Compiling itertools v0.14.0
+   Compiling dispatch2 v0.3.1
+   Compiling objc2-foundation v0.3.2
+   Compiling libloading v0.9.0
+   Compiling foldhash v0.2.0
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/backend-cpu)
+   Compiling bytes v1.12.1
+   Compiling rayon v1.12.0
+   Compiling hashbrown v0.16.1
+   Compiling serde_derive v1.0.229
+   Compiling zerocopy-derive v0.8.56
+   Compiling prost-derive v0.14.4
+   Compiling prost v0.14.4
+   Compiling safetensors v0.7.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/autodiff)
+   Compiling objc2-metal v0.3.2
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/backend-metal)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/onnx-interop)
+   Compiling fandhe-ai v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/facade)
+   Compiling bench-harness v0.11.0 (<home>/work/rust-ai-library-run-3183-v0110/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 22.33s

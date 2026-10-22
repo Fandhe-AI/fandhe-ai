@@ -8,7 +8,10 @@ run{1..5}.jsonl（1 反復 1 行）と load_gate_status.txt を読み、モー�
 fail-closed（exit != 0）: run の欠落、n != 500、非有限値・負値、JSON 不正、腕の欠落、
 iter の欠番、ゲート状態の欠落・不合格、checksum の反復間／run 間／腕間（R・D・Don）不一致。
 
-使い方: python3 -I aggregate.py <dir> / python3 -I aggregate.py --self-test
+第 2 ラウンドの規則は RULE2.txt（実測前に固定）。`--rule 2 <dir>` が第 2 ラウンド、
+`--rule 2 --r1 <dir>` が第 1 ラウンドへの事後適用（探索・判定に使わない）。
+
+使い方: python3 -I aggregate.py <dir> / python3 -I aggregate.py --rule 2 [--r1] <dir> / python3 -I aggregate.py --self-test
 """
 import json
 import math
@@ -48,8 +51,8 @@ def finite_nonneg(v, what):
     return float(v)
 
 
-def load_run(path, n):
-    rows = {a: [] for a in ARMS}
+def load_run(path, n, arms=ARMS):
+    rows = {a: [] for a in arms}
     try:
         with open(path, encoding="utf-8") as f:
             lines = [ln for ln in f.read().splitlines() if ln.strip()]
@@ -65,7 +68,7 @@ def load_run(path, n):
             raise Invalid(f"run{n}: 未知の arm {arm!r}")
         rows[arm].append(r)
     out = {}
-    for arm in ARMS:
+    for arm in arms:
         rs = rows[arm]
         if len(rs) != N:
             raise Invalid(f"run{n} arm {arm}: n={len(rs)} (期待 {N})")
@@ -311,7 +314,10 @@ def window_judgement(per_run, r_entries):
     return {
         "p5": p5, "p95": p95, "cond": (cond_a, cond_b, cond_c), "verdict": verdict,
         "frac": (frac_lo, frac_hi), "low_med": low_med,
-        "ratio_b": BENCH_B / BENCH_LOW, "ratio_a": BENCH_A / BENCH_LOW,
+        # RULE.txt は「低モード中央値で割った比」と定める。分母は実測の low_med（BENCH_LOW は事前の想定値で
+        # 併記のみ。#3183 第 2 ラウンドで分母の取り違えを訂正。比は記録のみで判定に使わない）。
+        "ratio_b": BENCH_B / low_med, "ratio_a": BENCH_A / low_med,
+        "ratio_b_const": BENCH_B / BENCH_LOW, "ratio_a_const": BENCH_A / BENCH_LOW,
         "boot": (percentile(boot, 0.05), percentile(boot, 0.95)),
     }
 
@@ -368,7 +374,9 @@ def render(per_run, gate):
     w = window_judgement(per_run, all_entries["R"])
     out += ["## 系列 A/B の差の説明（腕 R・連続 20 反復の窓）", "",
             f"- 窓中央値の 5〜95%: {ms(w['p5'])} 〜 {ms(w['p95'])}（bench 観測 B={ms(BENCH_B)} / A={ms(BENCH_A)}）",
-            f"- 低モード中央値: {ms(w['low_med'])}。bench 比（B/低・A/低）: {w['ratio_b']:.2f} / {w['ratio_a']:.2f}"]
+            f"- 低モード中央値: {ms(w['low_med'])}。bench 比（B/低・A/低、分母は実測の低モード中央値）: "
+            f"{w['ratio_b']:.2f} / {w['ratio_a']:.2f}"
+            f"（RULE 記載の定数 {ms(BENCH_LOW)} で割った値: {w['ratio_b_const']:.2f} / {w['ratio_a_const']:.2f}）"]
     if w["frac"][0] is not None:
         out.append(f"- 窓中央値が低側／高側に入る割合: {w['frac'][0]:.1%} / {w['frac'][1]:.1%}")
     ca, cb, cc = w["cond"]
@@ -395,6 +403,347 @@ def aggregate(d):
     if len(gs) != 1:
         raise Invalid(f"腕 G: run 間で checksum 不一致 {sorted(gs)}")
     return render(per_run, gate)
+
+
+# --------------------------------------------------------------------------- RULE2（第 2 ラウンド）
+# 判定規則は同ディレクトリの RULE2.txt（実測前に固定）が正。RULE.txt の集計（上記）とは別系統で、
+# 同じ入力の読み込み・fail-closed の流儀を共有する（`--rule 2 <dir>`、事後適用は `--rule 2 --r1 <dir>`）。
+
+TAIL_MULT = 1.25     # 裾 = 腕×run の中央値のこの倍率を超える反復
+TAIL_MIN = 10        # 対象 run: 裾が 10 反復（2%）以上
+GPU_FLAT = 0.05      # 「GPU 実行時間は不変」: |Δ gpu_busy| / 本体中央値 < 5%
+LOWPERF = 1.5        # 低性能 run: 指標が 5 run 中央値の 1.5 倍以上
+STARTUP = 1.10       # 立ち上がり上振れ: W / S >= 1.10
+STARTUP_WIN = 20     # bench の計測窓（計測 iter 0〜19）
+VERSION_RATIO = 1.10
+BAND = 0.10          # 水準の再現: ±10%
+OVER_MS = 0.4e-3     # 記録のみ: 0.4 ms を超える反復の割合
+R2_CONDS_HEAD = ("R", "D", "Don", "G")
+R2_CONDS_V0 = ("R", "D", "Don")
+R2_G_SPANS = ("upload", "encode", "commit_wait", "gpu_busy", "commit_wait-gpu_busy", "download")
+
+
+def span_names(arm):
+    """裾の帰属で対象にする区間（iter_total と、G で iter_total の複製である wall は除く）。"""
+    return R2_G_SPANS if arm == "G" else tuple(k for k in SPANS[arm] if k != "iter_total")
+
+
+def read_meta(d):
+    """run_meta.txt（記録のみ・書式は fail-closed）。書式: run=N order=<条件列> since_build_s=<int> load1=<f> load5=<f>。"""
+    path = os.path.join(d, "run_meta.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except OSError as e:
+        raise Invalid(f"run_meta.txt の読み込み失敗: {e}")
+    meta = {}
+    for ln in lines:
+        kv = {}
+        for tok in ln.split():
+            if "=" not in tok:
+                raise Invalid(f"run_meta.txt の書式不正: {ln!r}")
+            k, v = tok.split("=", 1)
+            kv[k] = v
+        try:
+            n = int(kv["run"])
+            meta[n] = {
+                "order": kv["order"], "since_build_s": int(kv["since_build_s"]),
+                "load1": finite_nonneg(float(kv["load1"]), f"run{n} load1"),
+                "load5": finite_nonneg(float(kv["load5"]), f"run{n} load5"),
+            }
+        except (KeyError, ValueError) as e:
+            raise Invalid(f"run_meta.txt の値不正: {ln!r} ({e})")
+    for n in RUNS:
+        if n not in meta:
+            raise Invalid(f"run_meta.txt の欠落: run{n}")
+    return meta
+
+
+def read_bench_line(path, what):
+    """bench-fandhe の infer metal 64 reuse の 1 行（1 プロセス 1 行）。fail-closed。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    except OSError as e:
+        raise Invalid(f"{what}: 読み込み失敗 {e}")
+    if len(lines) != 1:
+        raise Invalid(f"{what}: 行数 {len(lines)} (期待 1)")
+    try:
+        r = json.loads(lines[0])
+    except ValueError as e:
+        raise Invalid(f"{what}: JSON 不正 {e}")
+    if not isinstance(r, dict) or r.get("task") != "infer" or r.get("device") != "metal" \
+            or r.get("mode") != "reuse" or r.get("size") != 64:
+        raise Invalid(f"{what}: infer metal 64 reuse の行ではない")
+    med = finite_nonneg(r.get("median_s"), f"{what} median_s")
+    if med <= 0:
+        raise Invalid(f"{what}: median_s <= 0")
+    cs = r.get("checksum")
+    if isinstance(cs, bool) or not isinstance(cs, (int, float)) or not math.isfinite(cs):
+        raise Invalid(f"{what}: checksum 欠落/非有限")
+    return {"median": med, "checksum": float(cs)}
+
+
+def r2_load(d, posthoc_r1=False):
+    """第 2 ラウンドの入力一式（posthoc_r1 は第 1 ラウンドのディレクトリへの事後適用）。"""
+    gate = read_gate(d)
+    head_dir = d if posthoc_r1 else os.path.join(d, "head")
+    head = {n: load_run(os.path.join(head_dir, f"run{n}.jsonl"), n, R2_CONDS_HEAD) for n in RUNS}
+    v0, v0_reason = None, None
+    if posthoc_r1:
+        v0_reason = "第 1 ラウンドに存在しない条件"
+    else:
+        nr = os.path.join(d, "v0110", "NOT_RUN.txt")
+        if os.path.exists(nr):
+            with open(nr, encoding="utf-8") as f:
+                v0_reason = f.read().strip() or "理由の記載なし"
+        else:
+            v0 = {n: load_run(os.path.join(d, "v0110", f"run{n}.jsonl"), n, R2_CONDS_V0) for n in RUNS}
+    bc, bct = {}, None
+    bdir = os.path.join(d, "bench_control")
+    for n in RUNS:
+        name = f"run{n}.jsonl" if posthoc_r1 else f"run{n}_Bc.jsonl"
+        bc[n] = read_bench_line(os.path.join(bdir, name), f"Bc run{n}")
+    if not posthoc_r1:
+        bct = {n: read_bench_line(os.path.join(bdir, f"run{n}_BcT.jsonl"), f"BcT run{n}") for n in RUNS}
+    meta = None if posthoc_r1 else read_meta(d)
+    # checksum 規則（fail-closed）: HEAD の R・D・Don は全 run で一致、G は腕内で一致。
+    ref = {head[n][a]["checksum"] for n in RUNS for a in ("R", "D", "Don")}
+    if len(ref) != 1:
+        raise Invalid(f"HEAD の R・D・Don の checksum が不一致 {sorted(ref)}")
+    if len({head[n]["G"]["checksum"] for n in RUNS}) != 1:
+        raise Invalid("HEAD の G の checksum が run 間で不一致")
+    v0_valid, v0_note = False, None
+    if v0 is not None:
+        sums = {v0[n][a]["checksum"] for n in RUNS for a in R2_CONDS_V0}
+        if len(sums) != 1:
+            raise Invalid(f"v0110 の R・D・Don の checksum が腕間・run 間で不一致 {sorted(sums)}")
+        v0_valid = sums == ref
+        v0_note = "HEAD と一致" if v0_valid else "HEAD と不一致（出力差は判定不能として性能値の比較から外す）"
+    bsums = {x["checksum"] for x in bc.values()} | ({x["checksum"] for x in bct.values()} if bct else set())
+    if len(bsums) != 1:
+        raise Invalid(f"bench 対照の checksum が不一致 {sorted(bsums)}")
+    return {"gate": gate, "head": head, "v0": v0, "v0_reason": v0_reason, "v0_valid": v0_valid,
+            "v0_note": v0_note, "bc": bc, "bct": bct, "meta": meta, "posthoc": posthoc_r1}
+
+
+def tail_analysis(series, arm):
+    """腕×run の裾の帰属。対象外（裾 10 反復未満）なら eligible=False。"""
+    totals = [s["spans"]["iter_total"] for s in series]
+    med = median(totals)
+    tail = [s for s, t in zip(series, totals) if t > TAIL_MULT * med]
+    body = [s for s, t in zip(series, totals) if t <= TAIL_MULT * med]
+    res = {"median": med, "tail_n": len(tail), "eligible": len(tail) >= TAIL_MIN and len(body) > 0,
+           "over_ms": sum(1 for t in totals if t > OVER_MS) / len(totals), "ratios": {}, "delta": {},
+           "excluded": 0, "gpu_flat": None}
+    if not res["eligible"]:
+        return res
+    for k in span_names(arm):
+        tv = [s for s in tail if s["spans"][k] is not None]
+        bv = [s for s in body if s["spans"][k] is not None]
+        if k in ("gpu_busy", "commit_wait-gpu_busy"):
+            res["excluded"] = max(res["excluded"], len(tail) + len(body) - len(tv) - len(bv))
+        if not tv or not bv:
+            res["ratios"][k] = None
+            continue
+        # gpu_busy が null の反復は区間側だけでなく分母 Δ_total の標本からも外す（RULE.txt と同じ扱い）
+        d_tot = median([s["spans"]["iter_total"] for s in tv]) - median([s["spans"]["iter_total"] for s in bv])
+        d_p = median([s["spans"][k] for s in tv]) - median([s["spans"][k] for s in bv])
+        res["delta"][k] = d_p
+        res["ratios"][k] = d_p / d_tot if d_tot > 0 else None
+    if arm == "G":
+        bv = [s["spans"]["gpu_busy"] for s in body if s["spans"]["gpu_busy"] is not None]
+        if bv and "gpu_busy" in res["delta"] and median(bv) > 0:
+            res["gpu_flat"] = abs(res["delta"]["gpu_busy"]) / median(bv) < GPU_FLAT
+    return res
+
+
+def tail_attributed(per_run_res, arm):
+    """対象 run の過半数で比 >= 0.5 になった区間と、G の「GPU 実行時間は不変」判定。"""
+    elig = [r for r in per_run_res if r["eligible"]]
+    out = []
+    for k in span_names(arm):
+        cnt = sum(1 for r in elig if r["ratios"].get(k) is not None and r["ratios"][k] >= ATTR_RATIO)
+        if elig and cnt * 2 > len(elig):
+            out.append((k, cnt))
+    flat = None
+    if arm == "G" and elig:
+        yes = sum(1 for r in elig if r["gpu_flat"])
+        flat = (yes * 2 > len(elig), yes, len(elig))
+    return out, len(elig), flat
+
+
+def startup_window(series):
+    t = [s["spans"]["iter_total"] for s in series]
+    return median(t[:STARTUP_WIN]), median(t[STARTUP_WIN:])
+
+
+def run_median(series, k):
+    v = [s["spans"][k] for s in series if s["spans"][k] is not None]
+    return median(v) if v else None
+
+
+def r2_judge(data):
+    """AC3 の機械判定と低性能 run の抽出。"""
+    head, v0, bc, bct = data["head"], data["v0"], data["bc"], data["bct"]
+    use_v0 = v0 is not None and data["v0_valid"]
+    gpu = {n: run_median(head[n]["G"]["series"], "gpu_busy") for n in RUNS}
+    cpu = {n: run_median(head[n]["R"]["series"], "checksum") for n in RUNS}
+    valid_gpu = [x for x in gpu.values() if x is not None]
+    if not valid_gpu:
+        raise Invalid("G の gpu_busy が全 run で判定不能")
+    gm, cm = median(valid_gpu), median(list(cpu.values()))
+    low_gpu = [n for n in RUNS if gpu[n] is not None and gpu[n] >= LOWPERF * gm]
+    low_cpu = [n for n in RUNS if cpu[n] >= LOWPERF * cm]
+    sys_low = [n for n in RUNS if n in low_gpu and n in low_cpu]
+    v0_cpu, v0_low = {}, None
+    if v0 is not None:
+        v0_cpu = {n: run_median(v0[n]["R"]["series"], "checksum") for n in RUNS}
+        v0m = median(list(v0_cpu.values()))
+        v0_low = [n for n in RUNS if v0_cpu[n] >= LOWPERF * v0m]
+    h_w = median([startup_window(head[n]["R"]["series"])[0] for n in RUNS])
+    h_s = median([startup_window(head[n]["R"]["series"])[1] for n in RUNS])
+    v_w = v_s = None
+    if use_v0:
+        v_w = median([startup_window(v0[n]["R"]["series"])[0] for n in RUNS])
+        v_s = median([startup_window(v0[n]["R"]["series"])[1] for n in RUNS])
+    bc_m = median([bc[n]["median"] for n in RUNS])
+    bct_m = median([bct[n]["median"] for n in RUNS]) if bct else None
+    ver = None if v_s is None else (v_s / h_s >= VERSION_RATIO or v_s / h_s <= 1 / VERSION_RATIO)
+    if v_w is not None:
+        ref_w, ref_name = v_w, "v0110-R の W"
+    else:
+        ref_w, ref_name = h_w, "HEAD-R の W（v0110 が未実施または無効のため代用）"
+    hsp = bc_m / ref_w >= VERSION_RATIO
+    ordr = None if bct_m is None else bct_m / bc_m >= VERSION_RATIO
+    cands = [("Bc", bc_m)]
+    if bct_m is not None:
+        cands.append(("BcT", bct_m))
+    cands.append(("HEAD-R の W", h_w))
+    if v_w is not None:
+        cands.append(("v0110-R の W", v_w))
+
+    def in_band(x, c):
+        return c * (1 - BAND) <= x <= c * (1 + BAND)
+
+    b_hit = [name for name, x in cands if in_band(x, BENCH_B)]
+    a_hit = [name for name, x in cands if in_band(x, BENCH_A)]
+    for n in sys_low:
+        r_med = median([s["spans"]["iter_total"] for s in head[n]["R"]["series"]])
+        if in_band(r_med, BENCH_A):
+            a_hit.append(f"低性能 run{n} の R 中央値")
+    reproduced = int(bool(b_hit)) + int(bool(a_hit))
+    verdict = {2: "説明できる", 1: "部分的", 0: "説明できない"}[reproduced]
+    return {"gpu": gpu, "cpu": cpu, "gm": gm, "cm": cm, "low_gpu": low_gpu, "low_cpu": low_cpu, "sys_low": sys_low,
+            "v0_cpu": v0_cpu, "v0_low": v0_low, "h_w": h_w, "h_s": h_s, "v_w": v_w, "v_s": v_s, "bc_m": bc_m,
+            "bct_m": bct_m, "ver": ver, "hsp": hsp, "ord": ordr, "ref_w": ref_w, "ref_name": ref_name,
+            "b_hit": b_hit, "a_hit": a_hit, "verdict": verdict, "use_v0": use_v0}
+
+
+def yn(x):
+    return "判定不能（条件未実施）" if x is None else ("あり" if x else "なし")
+
+
+def r2_render(data):
+    head, v0 = data["head"], data["v0"]
+    title = ("# 第 1 ラウンドへの RULE2 の事後適用（事後・探索。判定に使わない。イシュー #3183）" if data["posthoc"]
+             else "# 集計結果（イシュー #3183 第 2 ラウンド。RULE2.txt の規則どおり）")
+    out = [title, ""]
+    out.append("ゲート状態: " + ", ".join(f"{k}={v}" for k, v in sorted(data["gate"].items())))
+    out.append("")
+    if data["meta"]:
+        out += ["## run の記録（記録のみ）", "", "| run | 条件の起動順 | ビルド終了からの経過 (s) | load1 | load5 |",
+                "|---|---|---|---|---|"]
+        for n in RUNS:
+            m = data["meta"][n]
+            out.append(f"| {n} | {m['order']} | {m['since_build_s']} | {m['load1']:.2f} | {m['load5']:.2f} |")
+        out.append("")
+    conds = [("HEAD", a, head) for a in R2_CONDS_HEAD]
+    if v0 is not None:
+        conds += [("v0110", a, v0) for a in R2_CONDS_V0]
+    out += ["## 裾の帰属（裾 = 腕×run の中央値の 1.25 倍超。対象 run = 裾 10 反復以上）", ""]
+    if v0 is None:
+        out += [f"- v0110 条件は未実施: {data['v0_reason']}", ""]
+    else:
+        out += [f"- v0110 の checksum: {data['v0_note']}", ""]
+    for tag, arm, src in conds:
+        res = [tail_analysis(src[n][arm]["series"], arm) for n in RUNS]
+        out += [f"### {tag}-{arm}", "",
+                "| run | 中央値 | 裾の反復数 | 対象 | 0.4 ms 超の割合（記録のみ） | 5% 規則の多峰（記録のみ） |",
+                "|---|---|---|---|---|---|"]
+        for n, r in zip(RUNS, res):
+            totals = [s["spans"]["iter_total"] for s in src[n][arm]["series"]]
+            nclu = len(detect_modes(totals)[1])
+            out.append(f"| {n} | {ms(r['median'])} | {r['tail_n']} | {'○' if r['eligible'] else '-'} | "
+                       f"{r['over_ms']:.1%} | {'あり' if nclu >= 2 else 'なし'} |")
+        attr, ne, flat = tail_attributed(res, arm)
+        out.append("")
+        if ne == 0:
+            out.append("- 帰属: 対象 run なし（裾が 10 反復以上ある run がない）")
+        else:
+            out.append(f"- 帰属（比 {ATTR_RATIO} 以上が対象 run {ne} の過半数）: " +
+                       (", ".join(f"{k}（{c}/{ne} run）" for k, c in attr) if attr else "**特定できなかった**"))
+            if flat is not None:
+                out.append("- G の GPU 実行時間は不変（|Δ gpu_busy| / 本体中央値 < 5% が対象 run の過半数）: "
+                           f"{'成立' if flat[0] else '不成立'}（{flat[1]}/{flat[2]} run）")
+            if arm == "G":
+                ex = max(r["excluded"] for r in res if r["eligible"])
+                out.append(f"- gpu_busy 判定不能で除外した反復の最大数（run 内）: {ex}")
+            elig = [(n, r) for n, r in zip(RUNS, res) if r["eligible"]]
+            out += ["", "| 区間 | " + " | ".join(f"run{n}（比 / Δ µs）" for n, _ in elig) + " |",
+                    "|---|" + "---|" * len(elig)]
+            for k in span_names(arm):
+                cells = []
+                for _, r in elig:
+                    ra, de = r["ratios"].get(k), r["delta"].get(k)
+                    cells.append("n/a" if ra is None else f"{ra:.2f} / {de * 1e6:+.1f}")
+                out.append(f"| {k} | " + " | ".join(cells) + " |")
+        out.append("")
+    j = r2_judge(data)
+    out += ["## run 全体の低性能状態（指標が 5 run 中央値の 1.5 倍以上の run）", "",
+            "| run | G gpu_busy 中央値 (µs) | HEAD-R checksum 中央値 (µs) | v0110-R checksum 中央値 (µs) |",
+            "|---|---|---|---|"]
+    for n in RUNS:
+        g = "n/a" if j["gpu"][n] is None else f"{j['gpu'][n] * 1e6:.2f}"
+        v = "未実施" if not j["v0_cpu"] else f"{j['v0_cpu'][n] * 1e6:.2f}"
+        out.append(f"| {n} | {g} | {j['cpu'][n] * 1e6:.2f} | {v} |")
+    out += ["", f"- GPU 低性能の run: {j['low_gpu'] or 'なし'} / CPU 低性能の run: {j['low_cpu'] or 'なし'}",
+            f"- **システム全体の低性能状態（GPU・CPU 両方）の run: {j['sys_low'] or 'なし'}**",
+            f"- v0110-R の CPU 低性能 run（記録のみ）: {'未実施' if j['v0_low'] is None else (j['v0_low'] or 'なし')}", ""]
+    out += ["## 立ち上がり窓（bench と同じ計測 iter 0〜19 の中央値 W と iter 20〜499 の中央値 S）", "",
+            "| 条件 | " + " | ".join(f"run{n} W/S (ms)" for n in RUNS) + " | 上振れ（W/S >= 1.10）の件数 |",
+            "|---|" + "---|" * (len(RUNS) + 1)]
+    tot_up = 0
+    for tag, arm, src in conds:
+        ws = [startup_window(src[n][arm]["series"]) for n in RUNS]
+        up = sum(1 for w, s_ in ws if w / s_ >= STARTUP)
+        tot_up += up
+        out.append(f"| {tag}-{arm} | " + " | ".join(f"{w * 1e3:.3f}/{s_ * 1e3:.3f}={w / s_:.2f}" for w, s_ in ws)
+                   + f" | {up} |")
+    out += ["", f"- 立ち上がり上振れの腕×run: {tot_up} / {len(conds) * len(RUNS)}", ""]
+    if v0 is None:
+        v0_line = "- v0110-R: 未実施（" + str(data["v0_reason"]) + "）"
+    elif j["use_v0"]:
+        v0_line = f"- v0110-R: W = {ms(j['v_w'])} / S = {ms(j['v_s'])}"
+    else:
+        v0_line = f"- v0110-R: checksum 不一致のため性能値の比較から除外（{data['v0_note']}）"
+    out += ["## 系列 A／B の説明（run 単位の値の 5 run 中央値）", "",
+            f"- HEAD-R: W = {ms(j['h_w'])} / S = {ms(j['h_s'])}", v0_line,
+            f"- Bc（bench の infer metal 64 reuse 単独）: {ms(j['bc_m'])}",
+            "- BcT（train の直後の infer）: " + ("未実施" if j["bct_m"] is None else ms(j["bct_m"])),
+            f"- (v) 版差（v0110-R の S ÷ HEAD-R の S が 1.10 以上または 1/1.10 以下）: {yn(j['ver'])}"
+            + ("" if j["v_s"] is None else f"（比 {j['v_s'] / j['h_s']:.3f}）"),
+            f"- (h) bench 固有の差（Bc ÷ {j['ref_name']} が 1.10 以上）: {yn(j['hsp'])}（比 {j['bc_m'] / j['ref_w']:.3f}）",
+            f"- (o) 実行順の効果（BcT ÷ Bc が 1.10 以上）: {yn(j['ord'])}"
+            + ("" if j["bct_m"] is None else f"（比 {j['bct_m'] / j['bc_m']:.3f}）"),
+            f"- B 水準 {ms(BENCH_B)} ±10% の再現: " + (", ".join(j["b_hit"]) if j["b_hit"] else "なし"),
+            f"- A 水準 {ms(BENCH_A)} ±10% の再現: " + (", ".join(j["a_hit"]) if j["a_hit"] else "なし"),
+            f"- **判定: {j['verdict']}**", ""]
+    return "\n".join(out)
+
+
+def r2_aggregate(d, posthoc_r1=False):
+    return r2_render(r2_load(d, posthoc_r1))
 
 
 # --------------------------------------------------------------------------- self-test
@@ -545,6 +894,141 @@ def self_test():
     ser = [_s(1.0, 0.5)] * 5 + [_s(2.0, 1.5)] * 5 + [_s(9.0, None)] * 5
     at, ex, _ = attribute(ser, [0] * 5 + [1] * 5 + [1] * 5, 1, 0)
     check(abs(at["gpu_busy"] - 1.0) < 1e-9 and ex == 5, "gpu_busy: null 反復を分母からも除外")
+    # ---- RULE2（第 2 ラウンド）
+    def r2_rows(arm, run, *, tail=False, startup=False, low=False, cs="beef"):
+        rows = []
+        for i in range(N):
+            is_tail = tail and i % 20 == 5          # 25 反復 = 5%
+            mult = 1.3 if (startup and i < STARTUP_WIN) else 1.0
+            lowm = 2.0 if low else 1.0
+            if arm == "G":
+                cw = (250e-6 + (150e-6 if is_tail else 0.0)) * mult * lowm
+                gb = 90e-6 * lowm
+                sp = {"upload": 20e-6, "encode": 5e-6, "commit_wait": cw, "download": 10e-6, "gpu_busy": gb}
+                sp["wall"] = sp["iter_total"] = sp["upload"] + sp["encode"] + cw + sp["download"]
+            else:
+                chk = 2e-6 * lowm
+                pr = (290e-6 + (200e-6 if is_tail else 0.0)) * mult * lowm
+                sp = {k: 1e-6 for k in SPANS[arm]}
+                sp["checksum"] = chk
+                sp["predict_resident" if arm == "R" else "chain"] = pr
+                sp["iter_total"] = pr + 3 * 1e-6 + chk
+            rows.append(json.dumps({"arm": arm, "iter": i, "t_since_start_s": i * 1e-3, "spans": sp,
+                                    "counters": {"encode": 2}, "checksum_bits": cs if arm != "G" else "g1"}))
+        return "\n".join(rows) + "\n"
+
+    def r2_bench_line(m):
+        return json.dumps({"task": "infer", "device": "metal", "size": 64, "mode": "reuse",
+                           "median_s": m, "checksum": 13.97}) + "\n"
+
+    def write_r2(d, *, tail_runs=(), startup=False, low_run=None, v0="ok", bc=0.40e-3, bct=0.45e-3,
+                 drop=None, posthoc=False, v0_slow=1.0):
+        os.makedirs(d, exist_ok=True)
+        hd = d if posthoc else os.path.join(d, "head")
+        bd = os.path.join(d, "bench_control")
+        os.makedirs(hd, exist_ok=True)
+        os.makedirs(bd, exist_ok=True)
+        with open(os.path.join(d, "load_gate_status.txt"), "w") as f:
+            f.write("".join(f"run{r} gate=pass\n" for r in RUNS))
+        if not posthoc:
+            os.makedirs(os.path.join(d, "v0110"), exist_ok=True)
+        for r in RUNS:
+            with open(os.path.join(hd, f"run{r}.jsonl"), "w") as f:
+                for arm in R2_CONDS_HEAD:
+                    f.write(r2_rows(arm, r, tail=r in tail_runs, startup=startup, low=(r == low_run)))
+            if not posthoc and v0 != "none":
+                with open(os.path.join(d, "v0110", f"run{r}.jsonl"), "w") as f:
+                    for arm in R2_CONDS_V0:
+                        txt = r2_rows(arm, r, cs="beef" if v0 == "ok" else "dead")
+                        if v0_slow != 1.0:
+                            scaled = []
+                            for ln in txt.splitlines():
+                                o = json.loads(ln)
+                                o["spans"] = {k: v * v0_slow for k, v in o["spans"].items()}
+                                scaled.append(json.dumps(o))
+                            txt = "\n".join(scaled) + "\n"
+                        f.write(txt)
+            if posthoc:
+                with open(os.path.join(bd, f"run{r}.jsonl"), "w") as f:
+                    f.write(r2_bench_line(bc))
+            else:
+                if not (drop == "bc" and r == 3):
+                    with open(os.path.join(bd, f"run{r}_Bc.jsonl"), "w") as f:
+                        f.write(r2_bench_line(bc))
+                with open(os.path.join(bd, f"run{r}_BcT.jsonl"), "w") as f:
+                    f.write(r2_bench_line(bct))
+        if not posthoc:
+            if v0 == "none":
+                with open(os.path.join(d, "v0110", "NOT_RUN.txt"), "w") as f:
+                    f.write("ビルド不能（テスト用）\n")
+            with open(os.path.join(d, "run_meta.txt"), "w") as f:
+                for r in RUNS:
+                    f.write(f"run={r} order=R,D,Don,G since_build_s={r * 10} load1=1.20 load5=1.10\n")
+
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, tail_runs=(2, 3, 4), v0="ok")
+        md = r2_aggregate(d)
+        sec = md.split("### HEAD-G")[1].split("###")[0]
+        check("commit_wait（3/3 run）" in sec and "commit_wait-gpu_busy（3/3 run）" in sec, "r2: 裾は G の commit_wait に帰属")
+        check(not any(x.startswith("gpu_busy（") for x in sec.split("帰属（")[1].split("\n")[0].split(": ", 1)[1].split(", ")),
+              "r2: gpu_busy は帰属に入らない")
+        check("GPU 実行時間は不変" in sec and "成立（3/3 run）" in sec, "r2: G の GPU 実行時間は不変が成立")
+        check("**システム全体の低性能状態（GPU・CPU 両方）の run: なし**" in md, "r2: 低性能 run なし")
+        check("立ち上がり上振れの腕×run: 0 /" in md, "r2: 立ち上がり上振れなし")
+        check("なし（比 1.000）" in md, "r2: 同一データなら版差なし")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, startup=True, low_run=2, v0="ok")
+        md = r2_aggregate(d)
+        check("立ち上がり上振れの腕×run: 20 / 35" in md, "r2: 立ち上がり窓を検出")
+        check("**システム全体の低性能状態（GPU・CPU 両方）の run: [2]**" in md, "r2: 低性能 run を検出")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, v0="none")
+        md = r2_aggregate(d)
+        check("v0110 条件は未実施: ビルド不能（テスト用）" in md and "判定不能（条件未実施）" in md, "r2: v0110 未実施を明記")
+        check("HEAD-R の W（v0110 が未実施または無効のため代用）" in md, "r2: (h) は HEAD-R の W で代用")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, v0="mismatch")
+        md = r2_aggregate(d)
+        check("HEAD と不一致" in md and "比較から除外" in md, "r2: v0110 の checksum 不一致は比較から除外")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, v0="ok", v0_slow=1.5, bc=0.39e-3, bct=0.54e-3)
+        md = r2_aggregate(d)
+        check("(v) 版差（v0110-R の S ÷ HEAD-R の S が 1.10 以上または 1/1.10 以下）: あり" in md, "r2: 版差あり")
+        check("(o) 実行順の効果（BcT ÷ Bc が 1.10 以上）: あり" in md, "r2: 実行順の効果あり")
+        check("B 水準 0.388 ms ±10% の再現: Bc" in md and "A 水準 0.539 ms ±10% の再現: BcT" in md, "r2: A/B 水準の再現を列挙")
+        check("**判定: 説明できる**" in md, "r2: 両水準を再現なら説明できる")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, v0="ok", bc=0.30e-3, bct=0.31e-3)
+        md = r2_aggregate(d)
+        check("**判定: 説明できない**" in md, "r2: どちらも再現しなければ説明できない")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, v0="ok", drop="bc")
+        try:
+            r2_aggregate(d)
+            check(False, "r2: Bc の欠落は拒否されるべき")
+        except Invalid:
+            check(True, "r2: 拒否 Bc の欠落")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, v0="ok")
+        os.remove(os.path.join(d, "run_meta.txt"))
+        try:
+            r2_aggregate(d)
+            check(False, "r2: run_meta 欠落は拒否されるべき")
+        except Invalid:
+            check(True, "r2: 拒否 run_meta の欠落")
+    with tempfile.TemporaryDirectory() as d:
+        write_r2(d, posthoc=True, tail_runs=(2, 3, 4))
+        md = r2_aggregate(d, posthoc_r1=True)
+        check("事後・探索。判定に使わない" in md and "第 1 ラウンドに存在しない条件" in md, "r2: 事後適用の表示")
+    # RULE 1 の bench 比の分母は実測の低モード中央値（定数 0.385 ms ではない）
+    with tempfile.TemporaryDirectory() as d:
+        write_synth(d, {r: "bi_alt" for r in RUNS})
+        md = aggregate(d)
+        wj = [ln for ln in md.splitlines() if "bench 比" in ln][0]
+        lowm = float(wj.split("低モード中央値: ")[1].split(" ms")[0]) * 1e-3
+        b_ratio = float(wj.split("分母は実測の低モード中央値）: ")[1].split(" /")[0])
+        check(abs(b_ratio - BENCH_B / lowm) < 0.01 and abs(lowm - BENCH_LOW) > 1e-5,
+              "RULE1: bench 比の分母は実測の低モード中央値")
     print("self-test: " + ("OK" if ok else "NG"))
     return 0 if ok else 1
 
@@ -552,8 +1036,15 @@ def self_test():
 def main(argv):
     if len(argv) == 2 and argv[1] == "--self-test":
         return self_test()
+    if len(argv) in (4, 5) and argv[1] == "--rule" and argv[2] == "2" and (len(argv) == 4 or argv[3] == "--r1"):
+        try:
+            print(r2_aggregate(argv[-1], posthoc_r1=(len(argv) == 5)))
+        except Invalid as e:
+            print(f"INVALID: {e}", file=sys.stderr)
+            return 1
+        return 0
     if len(argv) != 2:
-        print("usage: aggregate.py <dir> | --self-test", file=sys.stderr)
+        print("usage: aggregate.py <dir> | --rule 2 [--r1] <dir> | --self-test", file=sys.stderr)
         return 2
     try:
         print(aggregate(argv[1]))

@@ -1,0 +1,1 @@
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000359374,"q1_s":0.000350541,"q3_s":0.000370937,"throughput_per_s":2782.613,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.011025208}
