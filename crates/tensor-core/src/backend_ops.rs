@@ -3943,6 +3943,84 @@ pub trait BackendOps {
         self.relu_backward_mask_device(g, g_layout, mask_src)
     }
 
+    /// 平均二乗誤差の forward をデバイス入出力で行う（イシュー #3219・設計
+    /// `docs/train-step-resident-parts-design.md` §3）。意味論は
+    /// [`Self::mse_loss`] と同じで、`pred`・`target` はデバイス常駐の
+    /// `DeviceBuffer`、戻り値は shape `[]`（numel 1）のデバイス常駐スカラー。
+    /// `numel == 0` は 0.0。学習 1 step 1 同期のチェーンで loss を最後に 1 回だけ
+    /// 読むための部品。
+    ///
+    /// # 入力契約
+    /// `pred.shape() == target.shape()`（不一致は `ShapeMismatch`）、device 不一致は
+    /// `DeviceMismatch`、未知の `MseReduction` は `Unsupported`。
+    ///
+    /// # 既定実装
+    /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示フォール
+    /// バックは禁止）。Metal が #3219 で実装し、CPU は #3253、CUDA は別イシューで
+    /// 対応する。ROCm は既定を継承する。
+    ///
+    /// # 同期契約
+    /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。encode のみの
+    /// 入口は [`Self::mse_loss_device_tracked`] だけ（設計 §5）。
+    fn mse_loss_device(
+        &self,
+        _pred: &DeviceBuffer<f32>,
+        _target: &DeviceBuffer<f32>,
+        _reduction: MseReduction,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss_device: default fail-safe (no device-resident MSE forward kernel \
+             available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::mse_loss_device`] と同型で共有失敗トークン [`DispatchFailureCell`] を
+    /// 受け取る非破壊拡張。既定は `token` を無視して非 tracked 版へ委譲する。
+    /// Metal のオーバーライドは待たずに encode のみ行い、`token` を `encode` と
+    /// 同一ロック区間でバッチへ登録する。
+    fn mse_loss_device_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device(pred, target, reduction)
+    }
+
+    /// 平均二乗誤差の backward（`dPred = scale·(pred−target)`）をデバイス入出力で
+    /// 行う（イシュー #3219）。意味論は [`Self::mse_loss_backward`] と同じ。戻り値は
+    /// `pred.shape()` の `dPred` のみで、`dTarget = −dPred` は呼び出し側の責務
+    /// （#3249）。`scale` はホスト `f32`（`mse_loss_scale(1.0, n, reduction)` を
+    /// ホストで計算する前提。設計 §3）。
+    ///
+    /// 入力契約・既定実装・同期契約は [`Self::mse_loss_device`] と同じ。
+    fn mse_loss_backward_device(
+        &self,
+        _pred: &DeviceBuffer<f32>,
+        _target: &DeviceBuffer<f32>,
+        _scale: f32,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss_backward_device: default fail-safe (no device-resident MSE backward \
+             kernel available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::mse_loss_backward_device`] の `_tracked` 版（encode のみ・
+    /// [`Self::mse_loss_device_tracked`] と同じ契約）。
+    fn mse_loss_backward_device_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device(pred, target, scale)
+    }
+
     /// 新トークンの K／V 行を、デバイス常駐のページ化 KV プールへスロット写像どおりに
     /// 書き込む（K-3。イシュー #3111・設計 `docs/device-resident-kv-paged-attention-
     /// design.md` §2・§4）。
@@ -5894,6 +5972,60 @@ mod tests {
         let tracked =
             ops.relu_backward_mask_device_tracked(g, DeviceMatrixLayout::Transposed, m, &token);
 
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
+                assert_eq!(a, b);
+            }
+            other => panic!("expected both to return the same Unsupported error: {other:?}"),
+        }
+        assert!(!token.is_set());
+    }
+
+    /// MSE デバイス入出力版の既定実装が fail-safe を返し、`_tracked` が
+    /// token を無視して委譲することを確認する（イシュー #3219）。
+    #[test]
+    fn mse_loss_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let p = empty_device_buffer(Device::Cpu);
+        let t = empty_device_buffer(Device::Cpu);
+        let result = ops.mse_loss_device(&p, &t, MseReduction::Mean);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    #[test]
+    fn mse_loss_device_tracked_default_delegates_to_mse_loss_device() {
+        let ops = MockOps(Device::Cpu);
+        let p = empty_device_buffer(Device::Cpu);
+        let t = empty_device_buffer(Device::Cpu);
+        let token = DispatchFailureCell::new();
+        let direct = ops.mse_loss_device(&p, &t, MseReduction::Sum);
+        let tracked = ops.mse_loss_device_tracked(&p, &t, MseReduction::Sum, &token);
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
+                assert_eq!(a, b);
+            }
+            other => panic!("expected both to return the same Unsupported error: {other:?}"),
+        }
+        assert!(!token.is_set());
+    }
+
+    #[test]
+    fn mse_loss_backward_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let p = empty_device_buffer(Device::Cpu);
+        let t = empty_device_buffer(Device::Cpu);
+        let result = ops.mse_loss_backward_device(&p, &t, 1.0);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    #[test]
+    fn mse_loss_backward_device_tracked_default_delegates_to_mse_loss_backward_device() {
+        let ops = MockOps(Device::Cpu);
+        let p = empty_device_buffer(Device::Cpu);
+        let t = empty_device_buffer(Device::Cpu);
+        let token = DispatchFailureCell::new();
+        let direct = ops.mse_loss_backward_device(&p, &t, 2.0);
+        let tracked = ops.mse_loss_backward_device_tracked(&p, &t, 2.0, &token);
         match (direct, tracked) {
             (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
                 assert_eq!(a, b);

@@ -1182,6 +1182,19 @@ fn metal_buffer_ref<'a>(
     })
 }
 
+/// MSE forward の縮約係数（`Mean` は `1/numel`〈`numel == 0` は 1.0〉、`Sum` は 1.0）。
+/// ホスト版 `mse_loss` とデバイス版 `mse_loss_device_impl` が共有する唯一の式で、
+/// 両者の factor を bit 同一にする（イシュー #3219）。未知の variant は `Unsupported`。
+fn mse_factor(reduction: MseReduction, numel: usize) -> Result<f32, BackendError> {
+    match reduction {
+        MseReduction::Mean => Ok(if numel == 0 { 1.0 } else { 1.0 / numel as f32 }),
+        MseReduction::Sum => Ok(1.0),
+        _ => Err(BackendError::Unsupported(format!(
+            "mse_loss: unsupported MseReduction variant {reduction:?}"
+        ))),
+    }
+}
+
 impl MetalBackendOps {
     /// [`BackendOps::paged_kv_append`]／[`BackendOps::paged_kv_append_tracked`] の共有本体
     /// （イシュー #3111。`sgd_step_device_impl` と同じ二重化回避パターン）。デバイス一致検査 →
@@ -1511,6 +1524,109 @@ impl MetalBackendOps {
                 let local = DispatchFailureCell::new();
                 ew.encode_relu_mask_select_tracked(&ctx, g_buf, mask_buf, out_buf, &plan, &local)
                     .map_err(map_metal_error)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+            }
+        }
+        Ok(out_dev_buf)
+    }
+
+    /// [`BackendOps::mse_loss_device`]／[`BackendOps::mse_loss_device_tracked`] の共有本体
+    /// （イシュー #3219。`relu_backward_mask_device_impl` と同じ二重化回避パターン）。
+    ///
+    /// 検証（device・shape・u32 上限・reduction。すべて encode／FFI より前）→ 出力確保
+    /// （escape する `DeviceBuffer` のため REQ-14 の計測系列に乗せ `alloc_zeroed`）→
+    /// encode。`token == None` はローカル cell で encode → `synchronize` →
+    /// `check_merged_dispatch_token`、`Some` は encode のみで待たない。確保は pool 再利用
+    /// 時に同期しない（#1099。OOM フォールバックのみ例外）。縮約は
+    /// `MetalMse::encode_mse_loss_f32_tracked` を通りホスト版と同一カーネル・同一 factor。
+    fn mse_loss_device_impl(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        reduction: MseReduction,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if pred.device() != Device::Metal || target.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let numel = pred.numel();
+        crate::mse::validate_mse_len(numel)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let factor = mse_factor(reduction, numel)?;
+        if numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(&[]);
+        }
+        let pred_buf = metal_buffer_ref(pred, "mse_loss_device: pred")?;
+        let target_buf = metal_buffer_ref(target, "mse_loss_device: target")?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mse = context_cache::cached_mse(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out_dev_buf = static_metal_memory()?.alloc_zeroed(&[])?;
+        let out_buf = metal_buffer_ref(&out_dev_buf, "mse_loss_device: output")?;
+
+        match token {
+            Some(token) => {
+                mse.encode_mse_loss_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, factor, token,
+                )
+                .map_err(map_metal_error)?;
+            }
+            None => {
+                let local = DispatchFailureCell::new();
+                mse.encode_mse_loss_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, factor, &local,
+                )
+                .map_err(map_metal_error)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+            }
+        }
+        Ok(out_dev_buf)
+    }
+
+    /// [`BackendOps::mse_loss_backward_device`]／`_tracked` の共有本体（イシュー
+    /// #3219）。構成は [`Self::mse_loss_device_impl`] と同じで、出力は `pred.shape()` の
+    /// `dPred`。`scale` はホスト版と同じく検証せずそのまま渡す。
+    fn mse_loss_backward_device_impl(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        scale: f32,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if pred.device() != Device::Metal || target.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let numel = pred.numel();
+        crate::mse::validate_mse_len(numel)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        if numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(pred.shape());
+        }
+        let pred_buf = metal_buffer_ref(pred, "mse_loss_backward_device: pred")?;
+        let target_buf = metal_buffer_ref(target, "mse_loss_backward_device: target")?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mse = context_cache::cached_mse(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out_dev_buf = static_metal_memory()?.alloc_zeroed(pred.shape())?;
+        let out_buf = metal_buffer_ref(&out_dev_buf, "mse_loss_backward_device: output")?;
+
+        match token {
+            Some(token) => {
+                mse.encode_mse_backward_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, scale, token,
+                )
+                .map_err(map_metal_error)?;
+            }
+            None => {
+                let local = DispatchFailureCell::new();
+                mse.encode_mse_backward_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, scale, &local,
+                )
+                .map_err(map_metal_error)?;
                 check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
             }
         }
@@ -3145,6 +3261,54 @@ impl BackendOps for MetalBackendOps {
         self.relu_backward_mask_device_impl(g, g_layout, mask_src, Some(token))
     }
 
+    /// MSE forward のデバイス入出力版の Metal 実装（イシュー #3219）。復帰時点で GPU
+    /// 実行の完了・成否を返す同期版。実体は `mse_loss_device_impl`。
+    fn mse_loss_device(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        reduction: MseReduction,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction, None)
+    }
+
+    /// [`BackendOps::mse_loss_device_tracked`] の Metal オーバーライド（#3219）。待たない
+    /// encode のみの版で、`token` を `MetalContext::encode` と同一ロック区間で登録する
+    /// （既定実装のままでは失敗がどの cell にも登録されず取りこぼす。
+    /// `relu_backward_mask_device_tracked` と同じ理由）。
+    fn mse_loss_device_tracked(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        reduction: MseReduction,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction, Some(token))
+    }
+
+    /// MSE backward のデバイス入出力版の Metal 実装（#3219）。同期版。実体は
+    /// `mse_loss_backward_device_impl`。
+    fn mse_loss_backward_device(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        scale: f32,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale, None)
+    }
+
+    /// [`BackendOps::mse_loss_backward_device_tracked`] の Metal オーバーライド（#3219）。
+    /// encode のみで待たない。理由は [`Self::mse_loss_device_tracked`] と同じ。
+    fn mse_loss_backward_device_tracked(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        scale: f32,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale, Some(token))
+    }
+
     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
     /// `token: None` の同期版で、復帰時点で GPU 実行の完了・成否を返す
     /// （`sgd_step_device` と同じ契約）。実体は `paged_kv_append_impl`。
@@ -4635,21 +4799,7 @@ impl BackendOps for MetalBackendOps {
             BackendError::KernelLaunchFailed("mse_loss: target not contiguous".into())
         })?;
         let numel = pred_slice.len();
-        let factor = match reduction {
-            MseReduction::Mean => {
-                if numel == 0 {
-                    1.0
-                } else {
-                    1.0 / numel as f32
-                }
-            }
-            MseReduction::Sum => 1.0,
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "mse_loss: unsupported MseReduction variant {reduction:?}"
-                )));
-            }
-        };
+        let factor = mse_factor(reduction, numel)?;
 
         let ctx = context_cache::cached_context().map_err(map_metal_error)?;
         let mse = context_cache::cached_mse(&ctx)
