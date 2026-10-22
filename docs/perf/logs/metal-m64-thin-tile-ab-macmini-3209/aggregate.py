@@ -228,7 +228,7 @@ def check_prereq_bitident(path):
     if "test result:" not in text:
         fail("prereq_bitident.log に test result: 行が無い（前提ゲート未完了）")
     ok = "test result: ok." in text and not re.search(r"test result: FAILED", text)
-    return ok, ("厳密診断（既存 bit 一致テスト）: %s" % ("全件 pass" if ok else "失敗あり（候補別の結果は bitident_report.log を正とする）"))
+    return ok, ("厳密診断（既存 bit 一致テスト）: %s" % ("全件 pass" if ok else "失敗あり（不合格候補を特定できないため全候補・ゲートを ADOPT にしない）"))
 
 
 def parse_bitident(path):
@@ -285,12 +285,14 @@ def candidate_overall(statuses):
     return "REJECT"
 
 
-def gate_verdict(pair_info, official, reach_ok, cell_ab):
+def gate_verdict(pair_info, official, reach_ok, cell_ab, strict_ok=True):
     """RULE 項 12・13。pair_info: [(status, ratio, faster, slower)]（NN の 2 写像対）。"""
     if cell_ab == "fail":
         return "FAIL（セル A/B の checksum 不一致）"
     if not official:
         return "undetermined（正式系列でない）"
+    if not strict_ok:
+        return "undetermined（既存の厳密診断〈RULE 項 6(a)〉が失敗。不合格候補を特定できないため ADOPT にしない）"
     if not reach_ok:
         return "undetermined（規則の前提不成立: 到達追跡が机上の前提と食い違う）"
     if any(s in ("undetermined", "NOT_ADOPTABLE") for s, _, _, _ in pair_info):
@@ -311,7 +313,7 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
     rev = read_text(os.path.join(d, "rev-stamp.txt")).strip()
     if expect_rev is not None and rev != expect_rev:
         fail("rev-stamp 不一致: %r != %r" % (rev, expect_rev))
-    _, strict_note = check_prereq_bitident(os.path.join(d, "prereq_bitident.log"))
+    strict_ok, strict_note = check_prereq_bitident(os.path.join(d, "prereq_bitident.log"))
     bitident = parse_bitident(os.path.join(d, "bitident_report.log"))
     official, gate_reasons = parse_gate(os.path.join(d, "load_gate.log"))
     parity = parse_parity(os.path.join(d, "parity.log"))
@@ -388,6 +390,10 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
                 st, ratio, fa, sl = judge_cell(kg["cur"], kg[a], h["fallback"] or pr[0] or bi_fallback, bit_ok, pr[1] != "false")
                 if not official:
                     st = "undetermined"
+                elif not strict_ok and st == "ADOPT_CANDIDATE":
+                    # 既存診断（RULE 項 6(a)。NN 11 形状・strided 12 セル・NaN／inf／極端値）の失敗は
+                    # 不合格候補を特定できないため、候補別の 8 セル診断が通っても ADOPT にしない
+                    st = "undetermined"
                 cand_statuses[a].append(st)
                 cell_status[(o, s, a)] = (st, ratio, fa, sl)
                 ratio_txt = "%+.1f%%" % (ratio * 100) if ratio is not None else "-"
@@ -404,7 +410,7 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
 
     out.append("\n## ゲート（M64_THIN_TILE_ENABLED の写像。RULE 項 12）\n")
     pair_info = [cell_status[("NN", s, c)] for s, c in GATE_PAIRS]
-    verdict = gate_verdict(pair_info, official, reach_ok, cell_ab)
+    verdict = gate_verdict(pair_info, official, reach_ok, cell_ab, strict_ok)
     for (s, c), info in zip(GATE_PAIRS, pair_info):
         out.append("- (%s, %s): %s、比 %s" % (s, c, info[0], "%+.1f%%" % (info[1] * 100) if info[1] is not None else "-"))
     out.append("- セル A/B（A/A 対照）の結果: %s" % cell_ab)
@@ -604,10 +610,10 @@ def self_test():
         with open(os.path.join(d, "prereq_bitident.log"), "w") as f:
             f.write("test result: FAILED. 1 passed; 1 failed\n")
         md = aggregate(d, "deadbeef", cell_ab="ok")
-        if "| T2 | REJECT |" in md and "| T1 | ADOPT |" in md and "失敗あり" in md:
-            print("PASS bit 不一致の候補だけ除外し残りは判定する")
+        if "| T2 | REJECT |" in md and "| T1 | ADOPT |" not in md and "| T1 | undetermined |" in md and "ゲート判定: ADOPT" not in md and "失敗あり" in md:
+            print("PASS 厳密診断失敗時は全候補を ADOPT にしない")
         else:
-            print("FAIL bit 不一致候補の部分除外"); ok = False
+            print("FAIL 厳密診断失敗時の ADOPT 抑止"); ok = False
     with tempfile.TemporaryDirectory() as d:
         _fixture(d)
         os.remove(os.path.join(d, "bitident_report.log"))
