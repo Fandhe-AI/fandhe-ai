@@ -175,7 +175,7 @@ def parse_parity(path):
     return res
 
 
-GATE_LABELS = (["prereq-bitident", "parity"]
+GATE_LABELS = (["prereq-bitident", "prereq-bitident-report", "parity"]
                + ["run%d-%s" % (i, k) for i in RUNS for k in ("trace", "kern")])
 
 

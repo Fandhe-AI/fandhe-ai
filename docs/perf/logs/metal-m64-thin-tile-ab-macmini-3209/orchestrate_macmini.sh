@@ -90,7 +90,9 @@ run_diag() { # $1 = モジュール、$2 = テスト名（空なら全件）、$
 gate "prereq-bitident"
 run_diag "${PREREQ_MOD}" "" "${OUT}/prereq_bitident.log"
 echo "prereq_bitident_strict rc=$? （非 0 でも系列は継続。候補別の結果は bitident_report.log）" >> "${OUT}/load_gate.log"
+# 候補別記録は別プロセスのため RULE 項 9 に従い専用の負荷ゲートを通す（aggregate.py が通過記録を必須化）。
 # 候補別記録の失敗は基準 cur 側の異常か基盤の異常なので系列を開始しない。
+gate "prereq-bitident-report"
 if ! run_diag "${MOD}" m64_thin_prereq_bitident_report "${OUT}/bitident_report.log"; then
   echo "bitident_report FAILED（系列を開始しない）" >> "${OUT}/load_gate.log"
   echo "BITIDENT REPORT FAILED" >&2; tail -20 "${OUT}/bitident_report.log" >&2; exit 1
