@@ -1,0 +1,18 @@
+RULE.txt 補遺（イシュー #3201。判定を厳しくするか中立な明確化のみ。閾値・判定式は不変）
+================================================================
+
+RULE.txt は #3198 の RULE.template.txt の逐語コピーである。次の運用上の差分だけを補う。
+
+1. 「after 腕では cargo test --lib を実行しない」は次のとおり読み替える。#3201 のテスト変更
+   （gate_is_off_by_default 系 3 件を実行時 assert 化）により、ゲート反転ツリーでも lib テストは
+   コンパイルできる。ただし after 腕で実行してよいのは発火確認の report テスト 1 件を --exact で
+   指定した場合だけとし、全件実行はしない（gate_is_off_by_default が意図どおり落ちるため）。
+2. G2 の発火確認には resident_w_prepack_fire_report を使う（ON なら builds==1・hits>=1）。
+   G1 は small_m_shared_a_report（a_shared_bands == row_bands）。GB10 affinity は
+   EXPECT_GB10_AFFINITY_POOL_ACTIVE=0/1 の gb10_affinity_report。
+3. PyTorch 比は framework-compare の train／infer 4 セルで記録する。単体 6 形状の PyTorch 比は
+   「未計測」とする（判定に使わない）。
+4. merge+prepack／merge の比を #3200 の上乗せとして参考記録する（判定には使わない）。
+5. SME_PRODUCTION_ENABLED=false（main）のため G1 と SME の同時有効は到達不能。腕にはしない。
+6. GB10 の affinity 組み合わせ腕は相互作用を見るためだけに置き、affinity 単独の再判定はしない。
+7. Mac mini の負荷ゲートは 3.0、GB10 は 10.0（雛形どおり）。
