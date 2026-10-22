@@ -4021,6 +4021,106 @@ pub trait BackendOps {
         self.mse_loss_backward_device(pred, target, scale)
     }
 
+    /// dW の GEMM（`out[out_offset..+m*n] = A @ B`、`bias` が `Some` のときは
+    /// `B` の行方向和を `out[bias_offset..+n]` へ）を、デバイス常駐の view を
+    /// 入力・`DeviceBuffer` を出力として行う（イシュー #3220・設計
+    /// `docs/train-step-resident-parts-design.md` §3 行 4）。学習 1 step 1 同期の
+    /// チェーン（#3251）が backward の dW を同期なしで積むための部品で、
+    /// ホスト版 [`Self::gemm_fp32_strict_into_with_bias_reduce_tracked`] の
+    /// 入力側を device view に置き換えたもの。bit 一致の比較先もそのホスト版。
+    ///
+    /// # 意味論
+    /// - 戻り値 `bias_filled` と、`Err` のとき weight・bias のどちらも書かれない
+    ///   契約はホスト版と同じ。
+    /// - `a`・`b` の `view.shape()` は**格納形**（rank 2 必須）で、`Transposed` は
+    ///   格納行列の転置を論理オペランドとして読む。
+    /// - `out` は `&mut` なので、`&DeviceBuffer` を借用する `a`・`b` と同一バッファ
+    ///   にはなり得ない（借用規則。追加のエイリアス検査は不要）。
+    ///
+    /// # 既定実装
+    /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示フォール
+    /// バックは禁止）。Metal が #3220 で実装し、CUDA は #3223、CPU は #3253 で
+    /// 対応する。ROCm は既定を継承する。
+    ///
+    /// # 同期契約
+    /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。encode のみの
+    /// 入口は [`Self::gemm_fp32_strict_into_device_tracked`] だけ（設計 §5）。
+    // 引数は a/b それぞれ view+layout・out+offset・bias の 7 個で削れない
+    // （既存の `gemm_fp32_strict_into_with_bias_reduce_tracked` と同じ判断）。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fp32_strict_into_device(
+        &self,
+        _a: DeviceBufferView<'_>,
+        _a_layout: DeviceMatrixLayout,
+        _b: DeviceBufferView<'_>,
+        _b_layout: DeviceMatrixLayout,
+        _out: &mut DeviceBuffer<f32>,
+        _out_offset: usize,
+        _bias: Option<(usize, usize)>,
+    ) -> Result<bool, BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_fp32_strict_into_device: default fail-safe (no device-input dW GEMM \
+             available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::gemm_fp32_strict_into_device`] と同型で共有失敗トークン
+    /// [`DispatchFailureCell`] を受け取る非破壊拡張。既定は `token` を無視して
+    /// 非 tracked 版へ委譲する。Metal のオーバーライドは待たずに encode のみ行い、
+    /// `token` を `encode` と同一ロック区間でバッチへ登録する。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fp32_strict_into_device_tracked(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: DeviceMatrixLayout,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+        _token: &DispatchFailureCell,
+    ) -> Result<bool, BackendError> {
+        self.gemm_fp32_strict_into_device(a, a_layout, b, b_layout, out, out_offset, bias)
+    }
+
+    /// d_input の GEMM（`W @ B`。`W` は行優先 `[p, q]`、`B` の論理形は `[q, r]`）を
+    /// デバイス入出力で行い、デバイス常駐の `[p, r]` を返す（イシュー #3220・設計
+    /// §3 行 5）。ホスト版 [`Self::gemm_resident_lhs`] の入力側を device view に
+    /// し、戻り値をホスト `Tensor` ではなく `DeviceBuffer` にしたもの（末尾の
+    /// download による同期が無い）。bit 一致の比較先はそのホスト版。
+    ///
+    /// `b_layout` の意味は [`Self::gemm_fp32_strict_into_device`] と同じ。
+    /// `p == 0 || r == 0` は空、`q == 0` は全 0 の `[p, r]` を返す。
+    ///
+    /// # 既定実装・同期契約
+    /// [`Self::gemm_fp32_strict_into_device`] と同じ（Metal が #3220、CUDA は
+    /// #3223、CPU は #3253。encode のみの入口は `_tracked` 版だけ）。
+    fn gemm_resident_lhs_device(
+        &self,
+        _w: DeviceBufferView<'_>,
+        _b: DeviceBufferView<'_>,
+        _b_layout: DeviceMatrixLayout,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_resident_lhs_device: default fail-safe (no device-input d_input GEMM \
+             available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::gemm_resident_lhs_device`] の `_tracked` 版（encode のみ・
+    /// [`Self::gemm_fp32_strict_into_device_tracked`] と同じ契約）。
+    fn gemm_resident_lhs_device_tracked(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: DeviceMatrixLayout,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.gemm_resident_lhs_device(w, b, b_layout)
+    }
+
     /// 新トークンの K／V 行を、デバイス常駐のページ化 KV プールへスロット写像どおりに
     /// 書き込む（K-3。イシュー #3111・設計 `docs/device-resident-kv-paged-attention-
     /// design.md` §2・§4）。
@@ -6029,6 +6129,99 @@ mod tests {
         match (direct, tracked) {
             (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
                 assert_eq!(a, b);
+            }
+            other => panic!("expected both to return the same Unsupported error: {other:?}"),
+        }
+        assert!(!token.is_set());
+    }
+
+    /// dW・d_input のデバイス入力 GEMM の既定実装が fail-safe を返し、`_tracked`
+    /// が token を無視して委譲することを確認する（イシュー #3220）。
+    #[test]
+    fn gemm_fp32_strict_into_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a_buf = empty_device_buffer(Device::Cpu);
+        let b_buf = empty_device_buffer(Device::Cpu);
+        let mut out = empty_device_buffer(Device::Cpu);
+        let numel_before = out.numel();
+        let a = DeviceBufferView::new(&a_buf, 0, &[1, 1]).unwrap();
+        let b = DeviceBufferView::new(&b_buf, 0, &[1, 1]).unwrap();
+        let result = ops.gemm_fp32_strict_into_device(
+            a,
+            DeviceMatrixLayout::Transposed,
+            b,
+            DeviceMatrixLayout::RowMajor,
+            &mut out,
+            0,
+            Some((0, 1)),
+        );
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+        // Err のとき out は書き換えられない。
+        assert_eq!(out.numel(), numel_before);
+    }
+
+    #[test]
+    fn gemm_fp32_strict_into_device_tracked_default_delegates_to_gemm_fp32_strict_into_device() {
+        let ops = MockOps(Device::Cpu);
+        let a_buf = empty_device_buffer(Device::Cpu);
+        let b_buf = empty_device_buffer(Device::Cpu);
+        let mut out = empty_device_buffer(Device::Cpu);
+        let a = DeviceBufferView::new(&a_buf, 0, &[1, 1]).unwrap();
+        let b = DeviceBufferView::new(&b_buf, 0, &[1, 1]).unwrap();
+        let token = DispatchFailureCell::new();
+        let direct = ops.gemm_fp32_strict_into_device(
+            a,
+            DeviceMatrixLayout::Transposed,
+            b,
+            DeviceMatrixLayout::RowMajor,
+            &mut out,
+            0,
+            None,
+        );
+        let tracked = ops.gemm_fp32_strict_into_device_tracked(
+            a,
+            DeviceMatrixLayout::Transposed,
+            b,
+            DeviceMatrixLayout::RowMajor,
+            &mut out,
+            0,
+            None,
+            &token,
+        );
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(x)), Err(BackendError::Unsupported(y))) => {
+                assert_eq!(x, y);
+            }
+            other => panic!("expected both to return the same Unsupported error: {other:?}"),
+        }
+        assert!(!token.is_set());
+    }
+
+    #[test]
+    fn gemm_resident_lhs_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let w_buf = empty_device_buffer(Device::Cpu);
+        let b_buf = empty_device_buffer(Device::Cpu);
+        let w = DeviceBufferView::new(&w_buf, 0, &[1, 1]).unwrap();
+        let b = DeviceBufferView::new(&b_buf, 0, &[1, 1]).unwrap();
+        let result = ops.gemm_resident_lhs_device(w, b, DeviceMatrixLayout::Transposed);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    #[test]
+    fn gemm_resident_lhs_device_tracked_default_delegates_to_gemm_resident_lhs_device() {
+        let ops = MockOps(Device::Cpu);
+        let w_buf = empty_device_buffer(Device::Cpu);
+        let b_buf = empty_device_buffer(Device::Cpu);
+        let w = DeviceBufferView::new(&w_buf, 0, &[1, 1]).unwrap();
+        let b = DeviceBufferView::new(&b_buf, 0, &[1, 1]).unwrap();
+        let token = DispatchFailureCell::new();
+        let direct = ops.gemm_resident_lhs_device(w, b, DeviceMatrixLayout::RowMajor);
+        let tracked =
+            ops.gemm_resident_lhs_device_tracked(w, b, DeviceMatrixLayout::RowMajor, &token);
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(x)), Err(BackendError::Unsupported(y))) => {
+                assert_eq!(x, y);
             }
             other => panic!("expected both to return the same Unsupported error: {other:?}"),
         }
