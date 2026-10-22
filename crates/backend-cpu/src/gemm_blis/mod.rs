@@ -76,6 +76,9 @@ mod jobgrid_probe;
 // [`gemm_blis_parallel_2d_with_blocks`] 経由のみ使用）は個別に
 // `#[cfg(test)]` を付与している（`partition.rs` 冒頭コメント参照）。
 mod partition;
+// イシュー #3198: m が小さい GEMM の job 統合ゲート（既定 OFF。決定記録は
+// `docs/cpu-gemm-small-m-job-merge-prepack-decision.md`）。
+mod small_m;
 
 use std::ops::Range;
 // `IcDynamic`（イシュー #1366）専用: 行パネルの動的配布に使う
@@ -238,7 +241,6 @@ pub(crate) const GEMM_THREADING_THRESHOLD: usize = 48 * 48 * 256;
 /// ISA ごとに異なる実際の NR 値より安全側（並列判定が並列寄りになる方向）
 /// に倒す保守的な近似とする（`should_serialize` の判定は「実行される
 /// 実効仕事量」の proxy であり FLOP 数そのものではない）。
-#[cfg(test)]
 const NR_CLAMP: usize = 8;
 
 /// `gemm_blis_parallel`／`gemm_blis_bias_act_parallel` が rayon 行パネル
@@ -613,7 +615,7 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
                     0..m,
                     blocks,
                     transpose,
-                    TWO_D_JOBS_PER_WORKER,
+                    small_m::jobs_per_worker_for(m, n, k),
                 )
             })
         } else {
@@ -800,7 +802,7 @@ pub fn gemm_blis_bias_act_parallel(
                     0..m,
                     blocks,
                     GemmTranspose::Nn,
-                    TWO_D_JOBS_PER_WORKER,
+                    small_m::jobs_per_worker_for(m, n, k),
                 )
             })?;
             apply_epilogue(c, n, bias, act)
@@ -3333,6 +3335,18 @@ pub(crate) fn gemm_blis_parallel_variant(
             )
         }
     }
+}
+
+/// テスト専用: 指定スレッド数の rayon プール内で `f` を実行する。`small_m` のテストが
+/// rayon を直接参照すると `determinism_inventory` の allowlist（ソース走査）が
+/// ドリフトするため、rayon 参照を本ファイルへ集約する（#3198）。
+#[cfg(test)]
+pub(super) fn install_in_pool_for_test<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("test pool")
+        .install(f)
 }
 
 #[cfg(test)]
