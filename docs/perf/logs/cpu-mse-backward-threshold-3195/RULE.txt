@@ -1,0 +1,65 @@
+# イシュー #3195: MSE backward 逐次しきい値の再測定 事前登録規則
+fixed-at: 2026-10-22T01:45:00Z（最初の実機ログより前。この規則を含む commit の作者日時で確認する）
+
+## 1. 位置づけ
+- #1578（T = 1<<18・REJECT 確定）の規則・記録・doc §1〜§8 は変更しない。
+  固定時点の sha256:
+    50587d0cc2b47ec1847466bd91baf6204efdde2636eb97bb2dc180dc2f34673e  docs/perf/cpu-mse-backward-sequential-threshold.md
+    36b4de10db83a0861853e7ac9bfb8df4af36717edaf7d603463851d8d7a1a47a  docs/perf/logs/cpu-mse-backward-threshold-1578/README.md
+    e37ebf607fb75f6f882c351bc492509c33ed916565ad4294d568b653e5237a8a  scripts/bench/framework-compare/run_ab_1578.sh
+- 本規則は #1578 のデータを読み直さない。新しい候補に新しい規則を当てるだけで、旧規則の事後緩和ではない。
+- 変える条件:
+  1. 候補を T = 4096（1<<12。mse.rs の CHUNK と同値）の単一候補に固定する。
+     注記: train セル（n = 640）では 640 < T のどの T でも同じ逐次分岐を通る。よって after 腕の
+     train 実行コードパスは #1578 の T = 1<<18 と同一である。候補変更が効くのは
+     640 < n < 1<<18 の入力が並列のまま残る点（train 以外）であり、train の差は条件 2〜4 による。
+  2. GB10 の device_update 固定費が #3193・#3194 で 279 -> 169 us に下がった後の再測定である。
+  3. Mac mini と GB10 で round ごとの負荷ゲートとクールダウンを付ける（#1578 は負荷ゲートなし）。
+  4. 判定は 3 値（ADOPT／REJECT／undetermined。#2102 型）。ADOPT 条件は #1578 より緩めない。
+
+## 2. 候補
+- T = 4096 のみ。Stage 0 の結果で T を選び直さない（Stage 0 は T の選定根拠にしない）。
+
+## 3. Stage 0（現状確定。記録 + 前提ゲート）
+- コマンド: cargo test -p fandhe-ai-backend-cpu --release --lib mse::tests::mse_backward_threshold_sweep -- --ignored --nocapture
+- Mac mini と GB10 で各 5 プロセス。RAYON_NUM_THREADS は unset。
+- 記録: n = 640・2560・4096 の seq／par 中央値と r(n) = seq/par の 5 プロセス中央値。
+- 前提ゲート:
+  (a) 全行で seq と par の checksum が一致すること。不一致は FAIL で停止。
+  (b) 両機体とも n in {640, 2560} で 5/5 プロセス r(n) < 1.00。不成立なら undetermined とし Stage 1 へ進まない。
+
+## 4. Stage 1（framework-compare A/B。CPU）
+- before = main HEAD の crates/facade。after = 同一コミットで mse.rs の定数宣言 1 行だけを
+  `= 4096;` にした計測専用 worktree（コミットしない）。各腕は [patch.crates-io.fandhe-ai] path patch。
+- 判定セル: bench-fandhe --task train --size 64 --device cpu --mode {fresh, reuse} の両方。
+- --phases 系列は記録のみ（判定に使わない）。
+- 5 round 固定。各起動は独立プロセス。round ごとに before/after の起動順を反転。
+- checksum は compare の前に JSONL から完全一致を独立確認。不一致は FAIL で停止。
+- 比較: compare_gemm_ab.py --task train --threshold 1.00 --per-run --require-checksum-exact
+- ハーネス: scripts/bench/framework-compare/run_ab_mse_backward_threshold_cpu.sh
+
+## 5. 負荷ゲート
+- Mac mini: AB_ROUND_COOLDOWN_MAX_LOAD1=3.0 のクールダウン + round 開始時 load1 < 3.0。
+- GB10: round 開始時 load1 < 1.0。
+- 各 round 最大 30 分待ち、gate=pass|timeout|unavailable gate_ok=0|1 を記録。
+- 5/5 round が gate_ok=1 の系列のみ正式系列。それ以外は record_only で判定は undetermined。
+- 系列開始前に他セッションの cargo・rustc・bench プロセスが 0 件であることを preflight-procs.txt に記録。
+
+## 6. 総合判定
+- ADOPT: Stage 0 前提ゲート成立 かつ 両機体の全判定セル（train fresh・reuse）で 5 round 中央値 ratio <= 1.00、
+  checksum 完全一致、両機体とも正式系列。
+- REJECT: いずれかの機体のいずれかの判定セルが 5/5 round 一貫して後退（全 round で ratio > 1.00）。
+- undetermined: 上記以外（ゲート不成立・一部 round のみの後退・Stage 0 (b) 不成立・未計測）。
+- FAIL: checksum 不一致、または 3 者 bit 一致テストの失敗。ADOPT にも REJECT にも数えず停止。
+
+## 7. 禁止事項
+- run の差し替え・追加起動・セル除外・事後の緩和・T の再選定による再判定。
+- 同一 label の既存 JSONL があればスクリプトが停止する。再実行は別 label で行い旧系列も残す。
+
+## 8. 結線
+- ADOPT: 同じ PR で定数を 4096 にし、doc §9 に前後比較表を収録。tolerance・baseline・依存・
+  ガードレール閾値・docs/spec は変更しない。
+- REJECT／undetermined: 定数は 0 のまま結果を記録。undetermined は REJECT と呼ばず所有者判断へ回す。
+
+## 9. マスク
+- ホスト名・絶対パス・ユーザー名は <home>・<metal-node> 等へ置換してから収録する。
