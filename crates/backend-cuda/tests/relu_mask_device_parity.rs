@@ -87,7 +87,8 @@ fn upload(ops: &CudaBackendOps, data: &[f32]) -> DeviceBuffer<f32> {
 }
 
 /// Metal 側の `SHAPES` に揃えた形状 + m=64 の MLP 形状 + ブロック境界をまたぐ端数。
-const SHAPES: [(usize, usize); 10] = [
+const SHAPES: [(usize, usize); 11] = [
+    (64, 256),
     (1, 1),
     (1, 13),
     (13, 1),

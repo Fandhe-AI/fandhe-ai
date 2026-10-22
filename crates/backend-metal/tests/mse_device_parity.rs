@@ -78,7 +78,7 @@ fn download(ops: &MetalBackendOps, buf: &DeviceBuffer<f32>) -> Vec<f32> {
         .to_vec()
 }
 
-const NUMELS: [usize; 7] = [1, 7, 255, 256, 257, 4096, 256 * 1024 + 3];
+const NUMELS: [usize; 8] = [1, 7, 255, 256, 257, 640, 4096, 256 * 1024 + 3];
 const KINDS: [Kind; 3] = [Kind::Finite, Kind::WithInf, Kind::WithNan];
 
 #[test]

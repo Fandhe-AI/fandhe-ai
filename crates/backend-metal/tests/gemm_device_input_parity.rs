@@ -117,7 +117,8 @@ fn sentinel(total: usize) -> Vec<f32> {
 }
 
 /// (B, in, out) 形状: MLP 形状 + 端数形状。
-const SHAPES: [(usize, usize, usize); 7] = [
+const SHAPES: [(usize, usize, usize); 8] = [
+    (64, 784, 256),
     (64, 128, 256),
     (64, 256, 10),
     (64, 784, 128),

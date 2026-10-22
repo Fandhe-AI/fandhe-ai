@@ -385,6 +385,10 @@ mod init_cost_diag_tests;
 // 診断カウンタ検証（`gemm_small_launch_cost_diag_tests` と同じ理由で兄弟配置）。
 #[cfg(test)]
 mod gemm_device_input_diag_tests_3223;
+// イシュー #3224: 常駐化 3 部品（ReLU マスク・MSE・dW／d_input）の MLP 形状での
+// 同期・D2H（GEMM は H2D も）0 の検証と tracked 連結区間の確認（兄弟配置の理由は同上）。
+#[cfg(test)]
+mod train_step_parts_sync_diag_tests_3224;
 // イシュー #2116: CUDA train reuse の `forward_resident` 区間（層ごとの
 // `gemm_resident_rhs` 往復・未融合 relu・mse の H2D／確保／起動／同期 D2H）を
 // 層の種類別・batch 別に分解する診断テスト。`context_cache`・

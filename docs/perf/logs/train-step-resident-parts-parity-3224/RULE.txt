@@ -1,0 +1,40 @@
+事前登録規則（イシュー #3224）。固定日: 2026-10-23。本規則の固定時点で実測値は 1 件も含まない。
+
+[対象]  部品との対応は README.md の表を正とする。各行 = 独立プロセス 1 本 x 5 run。
+Metal（Mac mini / Apple M4）, 共通引数: cargo test -p fandhe-ai-backend-metal --release
+  M1  --test relu_mask_device_parity -- --ignored --test-threads=1 --nocapture
+  M2  --test mse_device_parity -- --ignored --test-threads=1 --nocapture
+  M3  --test gemm_device_input_parity -- --ignored --test-threads=1 --nocapture
+  M4  --test train_step_parts_no_wait_3224 -- --ignored --test-threads=1 --nocapture
+  M5  --lib gemm_device_tracked_registers_token_and_does_not_wait -- --ignored --exact --test-threads=1 --nocapture
+CUDA（DGX Spark GB10 / sm_121）, 共通引数: cargo test -p fandhe-ai-backend-cuda --release
+  C1  --test relu_mask_device_parity -- --ignored --test-threads=1 --nocapture
+  C2  --test mse_device_parity -- --ignored --test-threads=1 --nocapture
+  C3  --test gemm_device_input_parity -- --ignored --test-threads=1 --nocapture
+  C4  --lib gemm_device_input_diag_tests_3223 -- --ignored --test-threads=1 --nocapture
+  C5  --lib train_step_parts_sync_diag_tests_3224 -- --ignored --test-threads=1 --nocapture
+
+[判定]
+  - 値: to_bits() 一致。NaN は両者 is_nan() のクラス一致（設計 docs/train-step-resident-parts-design.md 4 節）。
+  - MSE の CUDA 版の CPU 参照判定は既存の REQ-2 統一複合判定のまま。tolerance 定数・判定式・baseline は変えない。
+  - カウンタ: Metal は tracked 区間の wait_until_completed 差 = 0（非 tracked の対照は差 = 1）。
+    CUDA は新版区間で stream_syncs・d2h_calls（GEMM は h2d_calls も）= 0、対照（download／ホスト版）は >= 1。
+  - 合否: 5 run すべて pass で pass。1 run でも fail なら fail。
+
+[実行]
+  - 独立プロセスで 5 回。ビルドは計測前に 1 回だけ（build.log。判定外）。
+  - 計測中はビルドも別の GPU 負荷も並走させない。
+
+[run の無効化]
+  - 各 run の前後で、foreign の cargo／rustc プロセス、または（GB10 で）常駐サービス以外の
+    新しい compute プロセスを検出した run は invalid とし、同じ番号で取り直す。
+  - invalid の件数と理由はすべて記録する。それ以外の理由での再実行・選別・ケースの除外はしない。
+
+[fail の扱い]
+  - 結果は pass／fail にかかわらず採用する。fail は事実として記録し、README の「不一致」節に
+    部品・形状・入力・最初の食い違い・原因分類・戻し先（#3218〜#3223）を書く。事後に規則を緩めない。
+  - 子 issue の reopen・コメント・起票は自動で行わない（ユーザー承認後）。
+
+[同梱物]
+  - .rev-stamp（展開ツリーのもの）・.tree-manifest の照合結果・env（前後）。
+  - ホスト名・ユーザー名・絶対パスはマスクする（<metal-node>・<cuda-node>・<home>）。
