@@ -2450,8 +2450,8 @@ impl MetalGemm {
             // なしでスクラッチ確保サイズへ使うため、その手前で桁あふれを
             // 検出しておく必要がある。
             validate_effective_dims(m_eff, n_eff, k_eff)?;
-            let core = ctx.verified_m4_max_gpu_core_count();
-            let decision = tile::select_route_for_device(m_eff, n_eff, k_eff, core);
+            let core = ctx.verified_tile_table_device();
+            let decision = tile::select_route_for_verified_device(m_eff, n_eff, k_eff, core);
             if let tile::GemmRoute::SplitK(plan) = decision {
                 let (out, executed_route) = self
                     .dispatch_split_k_auto_padded(ctx, a, b, m, n, k, m_eff, n_eff, k_eff, plan)?;
@@ -2469,7 +2469,7 @@ impl MetalGemm {
                 return Ok((out, route));
             }
         }
-        let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
+        let cfg = tile::select_for_verified_device(m, n, k, ctx.verified_tile_table_device());
         let out = self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)?;
         Ok((out, tile::GemmRoute::Classic(cfg)))
     }
@@ -2602,6 +2602,7 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<half::f16>, MetalError> {
+        // f16 は Mini 未実測のため M4 Max token のまま（#3206 対象外）
         let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
         self.dispatch_f16_tiled_unverified(ctx, a, b, m, n, k, cfg)
     }
@@ -3088,7 +3089,8 @@ impl MetalGemm {
                 strided_tiled_eligibility(m, n, k, a_layout, a_offset, b_layout, b_offset)?;
                 let pattern =
                     TransposePattern::from_flags(a_layout.transposed, b_layout.transposed);
-                let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
+                let cfg =
+                    tile::select_for_verified_device(m, n, k, ctx.verified_tile_table_device());
                 let resolved_cfg = self.encode_tiled_by_class(
                     ctx, a_buf, a_offset, b_buf, b_offset, c_buf, dims, cfg, strides, pattern,
                 )?;
@@ -3215,18 +3217,19 @@ impl MetalGemm {
         strided_tiled_eligibility(m, n, k, a_layout, a_offset, b_layout, b_offset)?;
         let pattern = TransposePattern::from_flags(a_layout.transposed, b_layout.transposed);
 
-        let fallback_to_classic =
-            |reason: SplitKFallbackReason, this: &Self| -> Result<SplitKRoute, MetalError> {
-                let cfg = tile::select_for_device(m, n, k, ctx.verified_m4_max_gpu_core_count());
-                let resolved_cfg = this.encode_tiled_by_class(
-                    ctx, a_buf, a_offset, b_buf, b_offset, c_buf, dims, cfg, strides, pattern,
-                )?;
-                SPLIT_K_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
-                Ok(SplitKRoute::Classic {
-                    tile: resolved_cfg,
-                    reason,
-                })
-            };
+        let fallback_to_classic = |reason: SplitKFallbackReason,
+                                   this: &Self|
+         -> Result<SplitKRoute, MetalError> {
+            let cfg = tile::select_for_verified_device(m, n, k, ctx.verified_tile_table_device());
+            let resolved_cfg = this.encode_tiled_by_class(
+                ctx, a_buf, a_offset, b_buf, b_offset, c_buf, dims, cfg, strides, pattern,
+            )?;
+            SPLIT_K_FALLBACK_COUNT.with(|c| c.set(c.get() + 1));
+            Ok(SplitKRoute::Classic {
+                tile: resolved_cfg,
+                reason,
+            })
+        };
 
         // host 側の構造的妥当性検証（`Self::dispatch_split_k_strided_prepared_
         // with_plan` doc コメント参照）。ここを通過すれば

@@ -351,6 +351,20 @@ impl MetalContext {
         )
     }
 
+    /// 厳密一致表を適用してよい検証済み機種（M4 Max／M4 無印 10 コア）を返す
+    /// （イシュー #3206）。本番 f32 GEMM 入口は
+    /// `tile::select_for_verified_device` へこの値を渡す。M4 Max の照合を先に
+    /// 試すが、両条件は相互排他のため順序で結果は変わらない。
+    pub fn verified_tile_table_device(&self) -> Option<tile::VerifiedTileTableDevice> {
+        let cores = self.occupancy_params.map(|p| p.gpu_core_count);
+        let brand = self.soc_brand.as_deref();
+        tile::verify_m4_max(cores, brand)
+            .map(tile::VerifiedTileTableDevice::M4Max)
+            .or_else(|| {
+                tile::verify_m4_base(cores, brand).map(tile::VerifiedTileTableDevice::M4Base)
+            })
+    }
+
     /// コマンドバッファ生成に使うコマンドキュー
     /// （TASK-1.8b・#39 のディスパッチ経路から参照される）。
     pub fn queue(&self) -> &MtlQueue {

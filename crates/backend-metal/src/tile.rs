@@ -1152,6 +1152,79 @@ pub(crate) fn verify_m4_max(
     }
 }
 
+/// M4 無印（GPU 10 コア構成）を識別する GPU コア数（イシュー #3206）。
+///
+/// **識別対象は Mac mini 単体ではなく「M4 無印・GPU 10 コア構成」**であり、
+/// 同構成の MacBook Air・iMac・MacBook Pro も一致する（`hw.model` による
+/// 機種推定は `crate::device` が却下済みのため使わない）。実測機体は
+/// Mac mini 1 台のみ（#3181）。熱設計が異なる同 SoC 機体は未実測だが、全
+/// 候補が REQ-2 parity を満たすため誤適用の影響は性能のみで正しさに及ばない。
+#[cfg(any(test, target_os = "macos"))]
+const M4_BASE_GPU_CORE_COUNT: u32 = 10;
+
+/// `verify_m4_base` が SoC ブランド文字列の実測値と完全一致比較する名前。
+#[cfg(any(test, target_os = "macos"))]
+const M4_BASE_SOC_BRAND: &str = "Apple M4";
+
+/// `verify_m4_base` からのみ構築可能な、M4 無印（GPU 10 コア）として検証済み
+/// であることを表す opaque 型（イシュー #3206。[`VerifiedM4MaxGpuCoreCount`]
+/// と同じ担保方式: フィールド非公開で、crate 外から偽造して未検証機体で
+/// 厳密一致表を有効化する経路を作らない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedM4BaseGpuCoreCount(u32);
+
+impl VerifiedM4BaseGpuCoreCount {
+    /// 検証済みの GPU コア数を返す（常に 10。ログ・デバッグ表示向け）。
+    pub fn gpu_core_count(self) -> u32 {
+        self.0
+    }
+}
+
+/// GPU コア数と SoC ブランドの完全一致で M4 無印・10 コア構成を検証する
+/// （[`VerifiedM4BaseGpuCoreCount`] の唯一の構築経路。イシュー #3206）。
+/// 8 コア GPU の M4（binned）・M4 Pro・M4 Max は一致しない。
+/// `crate::context::MetalContext` が `new` 時にキャッシュした実測値を渡す。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn verify_m4_base(
+    gpu_core_count: Option<u32>,
+    soc_brand: Option<&str>,
+) -> Option<VerifiedM4BaseGpuCoreCount> {
+    if gpu_core_count == Some(M4_BASE_GPU_CORE_COUNT) && soc_brand == Some(M4_BASE_SOC_BRAND) {
+        Some(VerifiedM4BaseGpuCoreCount(M4_BASE_GPU_CORE_COUNT))
+    } else {
+        None
+    }
+}
+
+/// 厳密一致テーブルを適用してよいと検証済みの機種（イシュー #3206）。
+///
+/// 各 variant の token は検証関数（`verify_m4_max`／`verify_m4_base`）経由
+/// でしか作れないため、本 enum を pub にしても偽造経路は生まれない。
+/// pub である理由: pub(crate) だと非テストの Linux lib ビルドで `M4Base` が
+/// 未構築となり `clippy -D warnings` が落ち、`#[allow(dead_code)]` は規約で
+/// 禁止されているため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerifiedTileTableDevice {
+    /// M4 Max（GPU 40 コア。#1039 の表）。
+    M4Max(VerifiedM4MaxGpuCoreCount),
+    /// M4 無印（GPU 10 コア。#3181 実測・#3206 の表）。
+    M4Base(VerifiedM4BaseGpuCoreCount),
+}
+
+/// [`select_for_device`] の機種拡張版（イシュー #3206）。本番 f32 GEMM 入口
+/// （`crate::gemm::MetalGemm::dispatch_auto` 等）が
+/// `MetalContext::verified_tile_table_device` の戻り値を渡す。
+/// f16 経路は Mini 未実測のため本入口へ切り替えていない。
+pub fn select_for_verified_device(
+    m: usize,
+    n: usize,
+    k: usize,
+    device: Option<VerifiedTileTableDevice>,
+) -> TileConfig {
+    select_impl(m, n, k, device, None)
+}
+
 /// `(m, n, k)` から [`TileConfig`] を選択する（後方互換入口）。
 ///
 /// **公開 API 互換性（P1・codex-review 指摘・PR #1108 レビュー）**: 本関数
@@ -1243,6 +1316,26 @@ pub fn select_with_occupancy_for_device(
     gpu_core_count: Option<VerifiedM4MaxGpuCoreCount>,
     params: Option<OccupancyParams>,
 ) -> TileConfig {
+    select_impl(
+        m,
+        n,
+        k,
+        gpu_core_count.map(VerifiedTileTableDevice::M4Max),
+        params,
+    )
+}
+
+/// 選択ロジック本体（イシュー #3206 で `select_with_occupancy_for_device` から
+/// 移設。既存 pub 入口は M4Max variant へ委譲するため挙動は不変）。
+/// Mini の `OccupancyParams` を渡した場合、`[1]`・`[2]` も M4 Max の `[5]`・
+/// `[6]` と同様に縮退判定の対象になる（本番は `params: None`）。
+fn select_impl(
+    m: usize,
+    n: usize,
+    k: usize,
+    device: Option<VerifiedTileTableDevice>,
+    params: Option<OccupancyParams>,
+) -> TileConfig {
     const SMALL: usize = 64;
     const ASPECT_RATIO: usize = 2;
     const LARGE: usize = 512;
@@ -1311,7 +1404,18 @@ pub fn select_with_occupancy_for_device(
     // **実測は下記の厳密な `(m, n, k)` タプルのみ**であり、近傍値・未測定点
     // へは拡張しない（実測範囲外への無根拠拡張をしない方針。#744/PR #760
     // と同一判断軸）。
-    let exact_match_cfg = if gpu_core_count.is_some() {
+    let exact_match_cfg = if let Some(VerifiedTileTableDevice::M4Base(_)) = device {
+        // M4 無印・GPU 10 コア（イシュー #3206。#3181 の Mac mini 実測で
+        // 現行 `[3]` より 2% 超かつ 5 run 全て速かった正方立方 4 点のみ。
+        // N=256 は `[3]` が帯内のため含めない。近傍・非正方は未測定）。
+        match (m, n, k) {
+            (512, 512, 512) => Some(CANDIDATES[1]),
+            (1024, 1024, 1024) => Some(CANDIDATES[1]),
+            (2048, 2048, 2048) => Some(CANDIDATES[2]),
+            (4096, 4096, 4096) => Some(CANDIDATES[2]),
+            _ => None,
+        }
+    } else if let Some(VerifiedTileTableDevice::M4Max(_)) = device {
         match (m, n, k) {
             // 正方立方（m == n == k）実測点。2 回計測いずれも順位一致。
             (512, 512, 512) => Some(CANDIDATES[5]), // 64x32/bk32/wm2wn2
@@ -2808,6 +2912,19 @@ pub fn select_route_for_device(
     match should_split_k(m, n, k) {
         Some(plan) => GemmRoute::SplitK(plan),
         None => GemmRoute::Classic(select_for_device(m, n, k, gpu_core_count)),
+    }
+}
+
+/// [`select_route_for_device`] の機種拡張版（イシュー #3206）。
+pub fn select_route_for_verified_device(
+    m: usize,
+    n: usize,
+    k: usize,
+    device: Option<VerifiedTileTableDevice>,
+) -> GemmRoute {
+    match should_split_k(m, n, k) {
+        Some(plan) => GemmRoute::SplitK(plan),
+        None => GemmRoute::Classic(select_for_verified_device(m, n, k, device)),
     }
 }
 
@@ -6795,6 +6912,142 @@ mod tests {
                 thread_elements_coord(lane),
                 expected,
                 "lane {lane} coord mismatch"
+            );
+        }
+    }
+
+    // --- #3206: M4 無印（GPU 10 コア）の厳密一致表 ---
+
+    fn m4_base_dev() -> Option<VerifiedTileTableDevice> {
+        verify_m4_base(Some(M4_BASE_GPU_CORE_COUNT), Some(M4_BASE_SOC_BRAND))
+            .map(VerifiedTileTableDevice::M4Base)
+    }
+
+    fn m4_max_dev() -> Option<VerifiedTileTableDevice> {
+        verified_m4_max_for_test().map(VerifiedTileTableDevice::M4Max)
+    }
+
+    #[test]
+    fn verify_m4_base_accepts_only_exact_10core_m4() {
+        assert!(verify_m4_base(Some(10), Some("Apple M4")).is_some());
+        for (c, b) in [
+            (Some(10), Some("Apple M4 Max")),
+            (Some(10), Some("Apple M4 Pro")),
+            (Some(40), Some("Apple M4")),
+            (Some(8), Some("Apple M4")),
+            (Some(10), Some("Apple M4 ")),
+            (Some(10), Some("apple m4")),
+            (Some(10), None),
+            (None, Some("Apple M4")),
+            (None, None),
+        ] {
+            assert!(verify_m4_base(c, b).is_none(), "{c:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn verify_m4_max_and_m4_base_are_mutually_exclusive() {
+        let cores = [None, Some(8), Some(10), Some(40)];
+        let brands = [
+            None,
+            Some("Apple M4"),
+            Some("Apple M4 Max"),
+            Some("Apple M4 Pro"),
+        ];
+        for c in cores {
+            for b in brands {
+                assert!(
+                    !(verify_m4_max(c, b).is_some() && verify_m4_base(c, b).is_some()),
+                    "{c:?} {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn m4_base_exact_match_table_selects_measured_best() {
+        let d = m4_base_dev();
+        assert_eq!(select_for_verified_device(512, 512, 512, d), CANDIDATES[1]);
+        assert_eq!(
+            select_for_verified_device(1024, 1024, 1024, d),
+            CANDIDATES[1]
+        );
+        assert_eq!(
+            select_for_verified_device(2048, 2048, 2048, d),
+            CANDIDATES[2]
+        );
+        assert_eq!(
+            select_for_verified_device(4096, 4096, 4096, d),
+            CANDIDATES[2]
+        );
+        assert_eq!(select_for_verified_device(256, 256, 256, d), CANDIDATES[3]);
+    }
+
+    #[test]
+    fn m4_base_table_does_not_extend_to_unmeasured_shapes() {
+        for (m, n, k) in [
+            (1536, 1024, 1024),
+            (2048, 2048, 512),
+            (2048, 2048, 64),
+            (8192, 8192, 8192),
+            (1000, 1000, 1000),
+        ] {
+            assert_eq!(
+                select_for_verified_device(m, n, k, m4_base_dev()),
+                select_for_verified_device(m, n, k, None),
+                "{m}x{n}x{k}"
+            );
+        }
+    }
+
+    #[test]
+    fn m4_max_and_m4_base_tables_do_not_leak() {
+        let (x, b) = (m4_max_dev(), m4_base_dev());
+        let sel = |n, d| select_for_verified_device(n, n, n, d);
+        assert_eq!(sel(512, x), CANDIDATES[5]);
+        assert_eq!(sel(512, b), CANDIDATES[1]);
+        assert_eq!(sel(1024, x), CANDIDATES[6]);
+        assert_eq!(sel(1024, b), CANDIDATES[1]);
+        assert_eq!(sel(2048, x), CANDIDATES[1]);
+        assert_eq!(sel(2048, b), CANDIDATES[2]);
+    }
+
+    #[test]
+    fn legacy_select_for_device_maps_to_m4max_variant() {
+        let tok = verified_m4_max_for_test();
+        let dev = tok.map(VerifiedTileTableDevice::M4Max);
+        for m in [32, 64, 256, 512, 1024, 1536, 2048, 4096, 8192] {
+            for n in [64, 512, 1024, 2048, 4096] {
+                for k in [64, 512, 1024, 2048, 4096] {
+                    assert_eq!(
+                        select_for_device(m, n, k, tok),
+                        select_for_verified_device(m, n, k, dev)
+                    );
+                    assert_eq!(
+                        select_for_device(m, n, k, None),
+                        select_for_verified_device(m, n, k, None)
+                    );
+                    assert_eq!(
+                        select_route_for_device(m, n, k, tok),
+                        select_route_for_verified_device(m, n, k, dev)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m4_base_table_entries_never_take_split_k_route() {
+        // split-K parity baseline の全行は m,n <= 128 のため、本表（m,n >= 512）
+        // とは交差しない（tests/common/splitk_parity_baseline.rs）。
+        for (n, want) in [(512, 1), (1024, 1), (2048, 2), (4096, 2)] {
+            assert!(n >= 512);
+            assert!(should_split_k(n, n, n).is_none());
+            let p = crate::pad::pad8(n);
+            assert!(should_split_k(p, p, p).is_none());
+            assert_eq!(
+                select_route_for_verified_device(n, n, n, m4_base_dev()),
+                GemmRoute::Classic(CANDIDATES[want])
             );
         }
     }
