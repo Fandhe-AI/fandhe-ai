@@ -2919,9 +2919,10 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
     // pack して job 間で共有する経路へ進む。`m <= blocks.mc` は適格 job の ic ループが
     // 1 周であること（= 共有 A の 1 区画が従来の a_panel と同一内容）を保証する。
     // SME は m >= 256 を要求するため、この経路とは構造的に重ならない。
+    // split 計数の終了は共有 A 経路内（`split_c_into_jobs` 直後、または split なしの
+    // 直接書き込み分岐）で行う。ここで先に止めると col_bands > 1 の split 確保が
+    // 計数されず alloc_split が過少報告になる。
     if small_m::select_shared_a(share_a, mc_total, n, k_dim, mr, blocks.mc) {
-        #[cfg(test)]
-        jobgrid_probe::on_region_split_done();
         return gemm_blis_two_d_shared_a(
             kernel,
             a_for_region,
@@ -3176,6 +3177,9 @@ fn gemm_blis_two_d_shared_a<K: Microkernel>(
     let shared: &[f32] = &shared;
 
     if grid.col_bands == 1 {
+        // 直接書き込み分岐は split なし: 計数をここで終了する。
+        #[cfg(test)]
+        jobgrid_probe::on_region_split_done();
         return c_region
             .par_chunks_mut(grid.mc_job * n)
             .enumerate()
@@ -3208,6 +3212,8 @@ fn gemm_blis_two_d_shared_a<K: Microkernel>(
     }
 
     let mut jobs = split_c_into_jobs(c_region, n, grid);
+    #[cfg(test)]
+    jobgrid_probe::on_region_split_done();
     jobs.par_iter_mut().try_for_each_init(
         || {
             #[cfg(test)]

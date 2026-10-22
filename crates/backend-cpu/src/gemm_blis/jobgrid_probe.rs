@@ -576,6 +576,12 @@ alloc_job={} alloc_split={} c_stage_words={}",
             assert_eq!(r.a_pack_words, 0);
             assert_eq!(r.alloc_job, 0);
             assert_eq!(r.alloc_shared_a, 1);
+            // split 確保: 直接書き込みは split なし、staging 経路は従来式と一致。
+            if r.col_bands == 1 {
+                assert_eq!(r.alloc_split, 0);
+            } else {
+                assert_eq!(r.alloc_split, (4 + r.col_bands) as u64 + r.jobs);
+            }
             // init 回数は job 数以下（init ごとの確保は直接書き込み 1・staging 2）。
             let per_init = if r.col_bands == 1 { 1 } else { 2 };
             assert!(
