@@ -1991,16 +1991,18 @@ fn atomic_rmw_occurrences_match_expected_test_only_count() {
     // atomic 蓄積は存在しない。加えて `test_temp_dir.rs`（`#[cfg(test)]`
     // 限定の一時ディレクトリ一意名採番カウンタ `fetch_add`。数値蓄積とは
     // 無関係で本番未結線）も許容される test 専用の出現として固定する。
+    // #3199: `jobgrid_probe.rs`（`mod` 宣言が `#[cfg(test)]` 限定の計数専用プローブ）に
+    // A 共有経路の計数フック 3 行を追加（10→13。計数のみで数値結果へは影響しない）。
     assert_eq!(
-        total, 12,
-        "atomic read-modify-write の出現数が期待（12 件・gemm_blis/jobgrid_probe.rs・\
+        total, 15,
+        "atomic read-modify-write の出現数が期待（15 件・gemm_blis/jobgrid_probe.rs・\
          gemm_blis/mod.rs と test_temp_dir.rs の #[cfg(test)] 限定コードのみ）と一致しない（新規の atomic\
          蓄積が本番経路へ混入した可能性がある）: per_file={per_file:?}"
     );
     assert_eq!(
         per_file,
         vec![
-            ("gemm_blis/jobgrid_probe.rs".to_string(), 10usize),
+            ("gemm_blis/jobgrid_probe.rs".to_string(), 13usize),
             ("gemm_blis/mod.rs".to_string(), 1usize),
             ("test_temp_dir.rs".to_string(), 1usize),
         ],

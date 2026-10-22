@@ -16,5 +16,5 @@
    - G1: `crates/backend-cpu/src/gemm_blis/small_m.rs` の `SMALL_M_JOB_MERGE_ENABLED`
    - G2: `RESIDENT_W_PREPACK_ENABLED`（#3200 で追加）
    - GB10 の組み合わせ腕は `GB10_AFFINITY_ENABLED`（`crates/backend-cpu/src/gb10_affinity.rs`）も反転する。
-3. 機構が発火したことは、#3199・#3200 が用意する `#[ignore]` の report テストで確認する。未用意の間は prepack・A 共有の腕は undetermined とする。
+3. 機構が発火したことは、#3199・#3200 が用意する `#[ignore]` の report テストで確認する。A 共有（#3199）は `cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored small_m_shared_a_report --nocapture --test-threads=1`（本番入口。ゲート ON の checkout で適格形状の `a_shared_bands == row_bands` を assert する）。#3200 の report が未用意の間は prepack の腕は undetermined とする。
 4. 前例の手順（rsync・オーケストレーション・マスク）は [`../cpu-jobgrid-3177/README.md`](../cpu-jobgrid-3177/README.md) に従う。
