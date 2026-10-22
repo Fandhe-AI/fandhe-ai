@@ -682,6 +682,25 @@ class SizesLargeTest(unittest.TestCase):
             compare_gemm_ab._size_set_for("cuda", "readback"), frozenset({1024, 4096})
         )
 
+    def test_metal_square5_accepts_256_to_4096(self):
+        # イシュー #3212: N=256 を含む 5 size x 2 mode = 10 セル。
+        sizes = (256, 512, 1024, 2048, 4096)
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=sizes, device="metal")
+        code, out, _ = self._run(before, after, ["--device", "metal", "--sizes", "metal-square5"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("非後退"), 10)
+
+    def test_cpu_square5_is_invalid_input(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(256,), device="cpu")
+        code, _, err = self._run(before, after, ["--device", "cpu", "--sizes", "metal-square5"])
+        self.assertEqual(code, 2)
+        self.assertIn("metal-square5", err)
+
+    def test_metal_full_set_unchanged_by_square5(self):
+        self.assertEqual(
+            compare_gemm_ab._size_set_for("metal", "full"), frozenset({512, 1024, 2048, 4096})
+        )
+
     def test_cpu_large_set_unchanged_by_affinity(self):
         # 回帰: `--sizes large` の cpu 集合に 256 が混入しない。
         self.assertEqual(
