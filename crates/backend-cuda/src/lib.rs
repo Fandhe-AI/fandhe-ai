@@ -381,6 +381,10 @@ mod gemm_reuse_phase_diag_tests;
 mod gemm_small_launch_cost_diag_tests;
 #[cfg(test)]
 mod init_cost_diag_tests;
+// イシュー #3223: デバイス入力 GEMM 入口が H2D・同期・D2H を出さないことの
+// 診断カウンタ検証（`gemm_small_launch_cost_diag_tests` と同じ理由で兄弟配置）。
+#[cfg(test)]
+mod gemm_device_input_diag_tests_3223;
 // イシュー #2116: CUDA train reuse の `forward_resident` 区間（層ごとの
 // `gemm_resident_rhs` 往復・未融合 relu・mse の H2D／確保／起動／同期 D2H）を
 // 層の種類別・batch 別に分解する診断テスト。`context_cache`・
@@ -530,6 +534,7 @@ mod pooling_model;
 // イシュー #3221: `BackendOps::relu_backward_mask_device` の GPU 非依存な
 // 検証・ホストモデル。integration test（`tests/relu_mask_cpu_reference.rs`）が
 // 使うため `pub`（内部用・安定性保証なし）。
+pub mod gemm_device_model;
 pub mod relu_mask_model;
 mod sort;
 mod sort_model;

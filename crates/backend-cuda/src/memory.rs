@@ -426,6 +426,24 @@ impl<'d> CudaArg<'d> {
         }
     }
 
+    /// 先頭 `n` 要素の部分ビュー（配置・部分ビューに依らない。イシュー #3223）。
+    /// bias 勾配の縮約軸長 1 の直接コピー（`gemm.rs::launch_bias_reduce`）が、
+    /// 入力 view の先頭 `n` 要素だけを読むために使う。`cudarc` の `slice` は
+    /// 範囲外で panic するため、`n > len` は型付きエラーで先に拒否する。
+    pub(crate) fn prefix(&self, n: usize) -> Result<CudaArg<'_>, CudaError> {
+        if n > self.len() {
+            return Err(CudaError::InvalidShape {
+                detail: format!("CudaArg::prefix: n ({n}) exceeds len ({})", self.len()),
+            });
+        }
+        Ok(match self {
+            CudaArg::Slice(s) => CudaArg::View(s.slice(0..n)),
+            CudaArg::View(v) => CudaArg::View(v.slice(0..n)),
+            CudaArg::Unified(s) => CudaArg::UnifiedView(s.slice(0..n)),
+            CudaArg::UnifiedView(v) => CudaArg::UnifiedView(v.slice(0..n)),
+        })
+    }
+
     /// `builder` へ本引数を積む。`CudaArg` のバリアントに応じて
     /// cudarc 側の対応する `PushKernelArg` 実装（`&CudaSlice`／
     /// `&CudaView`／`&UnifiedSlice`／`&UnifiedView`）へ委譲するだけの
