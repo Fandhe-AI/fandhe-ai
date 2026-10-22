@@ -358,7 +358,7 @@ pub fn reduce_bias_grad_rows_host(
     Ok(acc.into_iter().map(|v| v as f32).collect())
 }
 
-/// デバイス view の格納形と [`DeviceMatrixLayout`] から GEMM 入口の
+/// デバイス view の格納形と [`fandhe_ai_tensor_core::DeviceMatrixLayout`] から GEMM 入口の
 /// [`MatrixLayout`] を導出する純関数（イシュー #3220。`ops.rs` の
 /// `gemm_fp32_strict_into_device_impl`／`gemm_resident_lhs_device_impl` から呼ばれる）。
 ///
