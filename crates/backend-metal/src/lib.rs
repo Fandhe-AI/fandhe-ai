@@ -457,6 +457,11 @@ mod gemm_bm128_diag_tests;
 // として置く。全件 `#[ignore]`・プロダクションコードは tile.rs の追加のみ。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_m64_thin_tile_diag_tests;
+// イシュー #3209: 上記 m=64 細タイル候補の Mac mini 純カーネル A/B（到達追跡・
+// CPU 参照 parity・`kernel_gpu` 計測）。全件 `#[ignore]`・診断専用。
+// 呼び出し元は `docs/perf/logs/metal-m64-thin-tile-ab-macmini-3209/orchestrate_macmini.sh`。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_m64_thin_tile_ab_diag_tests;
 // イシュー #1326 調査: Metal 4 `tensor<>`＋Metal Performance Primitives
 // （`matmul2d`）の可用性・`objc2-metal =0.3.2` バインディングからの
 // 到達性・純カーネル時間（GPU タイムスタンプ）を実測し、「完全自作

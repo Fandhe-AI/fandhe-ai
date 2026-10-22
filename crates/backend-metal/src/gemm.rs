@@ -2853,6 +2853,74 @@ impl MetalGemm {
         )
     }
 
+    /// [`Self::dispatch_strided_tiled_prepared`] と同じ前検証・同じ dispatch
+    /// 計画を発行しつつ、**commit せず encode だけ**を行う診断テスト専用入口
+    /// （イシュー #3209。呼び出し元は `gemm_m64_thin_tile_ab_diag_tests.rs`）。
+    /// `dispatch_strided_tiled_prepared` は `dispatch_sync`（encode 直後に
+    /// synchronize）のため GPU タイムスタンプを取れない。本入口は
+    /// `MetalContext::synchronize_with_gpu_timestamps` で純カーネル時間
+    /// （`kernel_gpu`）を計測するために、ラベル `"diag_encode_strided_tiled"`
+    /// で記録だけ行う。出力は `dispatch_strided_tiled_prepared` と同一
+    /// （同じ [`Self::encode_tiled_plan`] を発行する）。
+    /// `STRIDED_TILED_ROUTE_COUNT` は増やさない。`#[cfg(test)]` 限定で
+    /// 本体ビルドには含まれない（本番経路は不変）。
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn diag_encode_strided_tiled(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        a_offset: usize,
+        a_layout: MatrixLayout,
+        b_buf: &MetalBuffer,
+        b_offset: usize,
+        b_layout: MatrixLayout,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        let (dims, strides) = validate_strided_dims(
+            a_buf.len(),
+            a_offset,
+            a_layout,
+            b_buf.len(),
+            b_offset,
+            b_layout,
+            c_buf.len(),
+            m,
+            n,
+            k,
+        )?;
+        strided_tiled_eligibility(m, n, k, a_layout, a_offset, b_layout, b_offset)?;
+        let pattern = TransposePattern::from_flags(a_layout.transposed, b_layout.transposed);
+        let plan = self.plan_tiled_by_class(ctx, cfg, dims, pattern)?;
+        let resolved_cfg = plan.resolved_cfg;
+        let swizzle_enabled = self.swizzle_enabled;
+        ctx.encode(
+            "diag_encode_strided_tiled",
+            &[a_buf.raw(), b_buf.raw(), c_buf.raw()],
+            None,
+            |encoder| {
+                Self::encode_tiled_plan(
+                    encoder,
+                    &plan,
+                    a_buf,
+                    a_offset,
+                    b_buf,
+                    b_offset,
+                    c_buf,
+                    dims,
+                    swizzle_enabled,
+                    strides,
+                    pattern,
+                );
+            },
+        )?;
+        Ok(resolved_cfg)
+    }
+
     /// [`Self::encode_tiled_nn_recorded`] の入口（イシュー #1259。
     /// ラベルは `"gemm_tiled_prepared"`）。ベンチ example
     /// （`examples/gemm_transpose_route_ab_bench.rs` の `--gpu-timestamps`）

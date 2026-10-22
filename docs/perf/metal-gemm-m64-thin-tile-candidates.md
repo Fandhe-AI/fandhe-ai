@@ -54,3 +54,50 @@
 
 - ゲートは `crates/backend-metal/src/tile.rs` の `pub(crate) const M64_THIN_TILE_ENABLED: bool = false;` の 1 行を書き換える（`TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED` と同書式）。
 - 上記のとおり既定経路の train reuse／infer には届かないため、純カーネル時間は `MetalGemm::dispatch_variant(GemmVariant::SimdgroupTiled(T))` と `dispatch_strided_tiled_prepared(.., cfg = T)` で候補を明示指定して測る。strided は m,n,k が 8 の倍数・ld が 4 の倍数の形状のみ適格。
+
+## 7. Mac mini A/B（#3209）
+
+**状態: 計測基盤と事前登録規則のみ出荷。Mac mini 実測は未実施（unavailable）。** 候補・ゲートの判定はすべて
+undetermined とし、数値は埋めない（RULE 項 15）。実測ログと判定は、下記「再現」を Mac mini で実行して本節へ追記する。
+
+### 7.1 条件
+
+| 項目 | 値 |
+|---|---|
+| 機体 | Mac mini（Apple M4・GPU 10 コア・16 GB）。**未実測のため env_info なし** |
+| 規則 | `docs/perf/logs/metal-m64-thin-tile-ab-macmini-3209/RULE.txt`（sha256 `d5bfebcacf27b6b95da47297cc71ba66f2ce3e44a76d3e50c107e8cd26a26e40`。固定コミット `b5da0c2b0f4a080edf183ce7cb7fa6c7eb922d2b`。計測前に単独コミット） |
+| 判定の根拠 | 純カーネル時間（`kernel_gpu`）のみ。train／infer セルは A/A の対照（record_only） |
+| 計測基盤 | `gemm_m64_thin_tile_ab_diag_tests.rs`（到達追跡・CPU 参照 parity・純カーネル計測。全件 `#[ignore]`）・`MetalGemm::diag_encode_strided_tiled`（`#[cfg(test)]`。encode-only）・`orchestrate_macmini.sh`・`aggregate.py`・`run_ab_m64_thin_tile_metal.sh` |
+
+### 7.2 開発機でのスモーク（判定に使わない）
+
+M4 Max（`verified_tile_table=M4Max`）で診断 3 テストを 1 回ずつ実行し、行の書式・assert（1 バッチ・1 ラベル・
+`kernel_gpu <= commit_wait`）・CPU 参照 parity（候補 × 8 セルすべて fallback なしで pass）・
+`aggregate.py` の正規表現との一致を確認した。M4 Max は Mac mini と性能を直接比較できないため、値は収録しない。
+
+### 7.3 実装上の確認事項
+
+- NN の 8 非整列形状（n=10 または k=10 の 3 形状）は、本番 `dispatch_auto` と同じく 8 の倍数へゼロ詰めした実効次元
+  （(64,16,256)・(256,64,16)・(256,16,64)）で計測する（`diag_encode_tiled_nn` が非整列を拒否するため）。
+- 到達追跡は実効次元で行う。机上の前提（ゲート ON で変わるのは (64,256,784)→T1 と (784,64,256)→T3 の 2 件）が
+  食い違う場合、ゲート判定は undetermined に落ちる（RULE 項 5・13）。
+
+### 7.4 結果（未実測）
+
+| 項目 | 結果 |
+|---|---|
+| 前提ゲート（既存 bit 一致 92 件・CPU 参照 parity） | 未実施 |
+| 到達表 | 未実施 |
+| 候補 × 形状の `kernel_gpu` | 未実施 |
+| 候補別の判定（T1〜T4） | undetermined |
+| ゲート（`M64_THIN_TILE_ENABLED` の写像）の判定 | undetermined |
+| train／infer セル A/B（A/A 対照） | 未実施 |
+
+### 7.5 所有者への申し送り
+
+- ADOPT 候補が出た場合の結線（`M64_THIN_TILE_ENABLED` の反転や選択表への追加）は、結合順序が変わらない候補に限って
+  別 PR で行う。ゲートの写像は機体非依存（M4 Max にも効く）ため、結線の前に M4 Max での確認が要る。
+- 型 B（B1: 常駐 strided のスカラー経路の simdgroup 化、B2: split-K の拡張）は結合順序・演算方式が変わるため、
+  引き続き所有者判断（baseline の追加は実機実測値のみ・人間承認）。
+- `docs/backend-metal-command-batching-design.md` §7.3.4（Mac mini の L1 `kernel_gpu` が未実測）への反映は、
+  実測後に本節を参照する 1 行で足りる（本 PR では行わない）。
