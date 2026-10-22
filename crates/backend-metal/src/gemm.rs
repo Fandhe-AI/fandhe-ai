@@ -616,6 +616,12 @@ pub struct MetalGemm {
     /// ため既定挙動は不変。f16／hfrag／split-K パス 1 は常に `false`（no-op 契約）。
     /// 実測・結線判断は #2111 のスコープ。
     unroll_load_enabled: bool,
+    /// simdgroup 交互配置軸（イシュー #3211。`shaders/gemm.metal` の
+    /// `FRAG_INTERLEAVE_ENABLED`〈index 19〉へ畳み込まれる）。`MetalGemm::new` を含む
+    /// 全構築経路は本番既定 `tile::FRAG_INTERLEAVE_ENABLED`（`false`）で初期化し、
+    /// テスト専用 `new_with_frag_interleave` だけが上書きする。f16／hfrag／te／
+    /// split-K パス 1 は常に `false`（no-op 契約）。
+    frag_interleave_enabled: bool,
     /// タイルクラス分割（イシュー #1327・E6 試作）をこのインスタンスの
     /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]・
     /// [`Self::encode_tiled_by_class`]）で有効化するかどうか。
@@ -995,6 +1001,34 @@ impl MetalGemm {
             tile::SMEM_SWIZZLE,
             unroll_load,
         )
+    }
+
+    /// テスト専用: [`Self::new`] と同じ構築で simdgroup 交互配置ゲート
+    /// （イシュー #3211。`FRAG_INTERLEAVE_ENABLED`）だけを `enabled` に指定する。
+    /// 呼び出し元は `gemm_frag_interleave_diag_tests` のみ。`#[cfg(test)] pub(crate)`
+    /// に留めるのは公開面を増やさないため。パイプラインキャッシュはインスタンス
+    /// 単位で、構築直後（パイプライン未構築）に上書きするためキー変更は不要。
+    #[cfg(test)]
+    pub(crate) fn new_with_frag_interleave(
+        ctx: &MetalContext,
+        enabled: bool,
+    ) -> Result<Self, MetalError> {
+        Ok(Self::new(ctx)?.with_frag_interleave(enabled))
+    }
+
+    /// テスト専用: 構築済みインスタンスの交互配置ゲート（#3211）を上書きする。
+    /// 他の直交ゲート（`new_with_steel_candidate` 経由の `unroll_load`・
+    /// `fine_barrier`）との併用 bit 一致テストが使う。パイプライン構築前に呼ぶこと。
+    #[cfg(test)]
+    pub(crate) fn with_frag_interleave(mut self, enabled: bool) -> Self {
+        self.frag_interleave_enabled = enabled;
+        self
+    }
+
+    /// テスト専用: このインスタンスの simdgroup 交互配置ゲート（#3211）。
+    #[cfg(test)]
+    pub(crate) fn frag_interleave_enabled(&self) -> bool {
+        self.frag_interleave_enabled
     }
 
     /// テスト専用: このインスタンスの協調ロード unroll ゲート（#2110）。
@@ -1398,6 +1432,7 @@ impl MetalGemm {
             coop_load,
             smem_swizzle,
             unroll_load_enabled,
+            frag_interleave_enabled: tile::FRAG_INTERLEAVE_ENABLED,
             tile_class_mode,
             tiled_splitk_cache: Mutex::new(HashMap::new()),
             pipeline_splitk_reduce,
@@ -1542,6 +1577,7 @@ impl MetalGemm {
                 // 方式）。
                 coop_smem_swizzle: self.smem_swizzle.as_u32(),
                 unroll_load_enabled: self.unroll_load_enabled,
+                frag_interleave_enabled: self.frag_interleave_enabled,
             };
             // イシュー #1693: `mma_frag_load` に応じてカーネル関数名を
             // 切り替える（`GemmVariant::SimdgroupTiled` の本番関数名
@@ -1672,6 +1708,7 @@ impl MetalGemm {
                 // `SmemSwizzle::Off`）で固定する。
                 coop_smem_swizzle: 0,
                 unroll_load_enabled: false,
+                frag_interleave_enabled: false,
             };
             let function_name = GemmVariant::SimdgroupTiled(candidate).function_name();
             let build_result = pipeline::make_pipeline_with_constants(
@@ -2004,6 +2041,7 @@ impl MetalGemm {
                 // no-op 契約（他ゲートと同じ扱い）。
                 coop_smem_swizzle: 0,
                 unroll_load_enabled: false,
+                frag_interleave_enabled: false,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),
@@ -2107,6 +2145,7 @@ impl MetalGemm {
                 // no-op 契約（`pipeline_for_tile_f16` と同じ扱い）。
                 coop_smem_swizzle: 0,
                 unroll_load_enabled: false,
+                frag_interleave_enabled: false,
             };
             match pipeline::make_pipeline_with_constants(
                 ctx.device(),

@@ -119,6 +119,13 @@ pub(crate) struct GemmGateConstants {
     /// `unroll_load_enabled` から渡し、f16／hfrag／split-K パス 1 用の
     /// 構築は常に `false`（no-op 契約）。
     pub(crate) unroll_load_enabled: bool,
+    /// simdgroup 交互配置（candle／MLX steel 型）軸（イシュー #3211。
+    /// `FRAG_INTERLEAVE_ENABLED`。index 19）。呼び出し元
+    /// [`crate::gemm::MetalGemm::pipeline_for_tile`] がインスタンスの
+    /// `frag_interleave_enabled` から渡し、f16／hfrag／split-K パス 1 用の
+    /// 構築は常に `false`（no-op 契約）。実効条件はシェーダ側
+    /// `FRAG_INTERLEAVE_ACTIVE` が決める。
+    pub(crate) frag_interleave_enabled: bool,
 }
 
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
@@ -263,6 +270,7 @@ pub(crate) fn make_pipeline_with_constants(
         split_k_enabled,
         coop_smem_swizzle,
         unroll_load_enabled,
+        frag_interleave_enabled,
     } = gates;
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -464,6 +472,16 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::Bool,
             18,
         );
+        // simdgroup 交互配置軸（イシュー #3211）。index は UNROLL_LOAD_ENABLED
+        // （index 18）の直後の 19（`shaders/gemm.metal` の
+        // FRAG_INTERLEAVE_ENABLED 宣言と 1:1 対応。`tests/shader_source_evidence.rs`
+        // が固定）。f16／hfrag／te は参照しない no-op。
+        let frag_interleave = frag_interleave_enabled;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&frag_interleave).cast(),
+            MTLDataType::Bool,
+            19,
+        );
     }
 
     let func = library
@@ -521,6 +539,7 @@ pub(crate) fn make_pipeline_source_specialized(
         split_k_enabled,
         coop_smem_swizzle,
         unroll_load_enabled,
+        frag_interleave_enabled,
     } = gates;
     let params = crate::spec_source::SpecializationParams {
         // イシュー #1298/#1327/#1474/#1970: 協調ロード軸（`tgp_pad_elems`/
@@ -536,6 +555,7 @@ pub(crate) fn make_pipeline_source_specialized(
         split_k_enabled,
         coop_smem_swizzle,
         unroll_load_enabled,
+        frag_interleave_enabled,
         ..crate::spec_source::SpecializationParams::new(
             cfg,
             swizzle_enabled,

@@ -775,10 +775,12 @@ fn gemm_simdgroup_tiled_source_gates_fine_barrier_between_fragment_load_and_mma(
     // バイト同一のため、`gate_pattern`（インデント込み厳密一致）の出現数は
     // 1 のまま不変とする。
     let if_count = kernel_body.matches("if (FINE_BARRIER_ENABLED) {").count();
+    // イシュー #3211: 交互配置 variant（`FRAG_INTERLEAVE_ACTIVE`）の kk ループにも
+    // 同じフェンスを備えたため 4→5 へ変わる（既定側の出現数・インデントは不変）。
     assert_eq!(
-        if_count, 4,
+        if_count, 5,
         "gemm_simdgroup_tiled の FINE_BARRIER_ENABLED 分岐の出現数が期待値と異なります \
-         （見つかった数: {if_count}、期待値: 4）"
+         （見つかった数: {if_count}、期待値: 5）"
     );
     let gate_pattern = "if (FINE_BARRIER_ENABLED) {\n                    simdgroup_barrier(mem_flags::mem_none);\n                }";
     let occurrences = kernel_body.matches(gate_pattern).count();
@@ -1010,8 +1012,10 @@ fn gemm_simdgroup_tiled_f16_source_does_not_reference_unroll_acc() {
 fn gemm_simdgroup_tiled_source_retains_req8_boundary_guards_in_both_unroll_variants() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     for (needle, expected) in [
-        ("if (out_row >= dims.m) {", 2),
-        ("if (out_col >= dims.n) {", 2),
+        // イシュー #3211: 交互配置 variant のストアにも REQ-8 ガードを維持したため
+        // 2→3（unroll 版・非 unroll 版・交互配置版に 1 回ずつ。減らす方向の変更はしない）。
+        ("if (out_row >= dims.m) {", 3),
+        ("if (out_col >= dims.n) {", 3),
         ("if (a_row < dims.m) {", 3),
         ("if (b_col < dims.n) {", 3),
     ] {
@@ -1136,6 +1140,7 @@ fn gemm_metal_source_else_branch_retains_all_eighteen_function_constants() {
         "constant bool SPLIT_K_ENABLED [[function_constant(16)]];",
         "constant uint COOP_SMEM_SWIZZLE [[function_constant(17)]];",
         "constant bool UNROLL_LOAD_ENABLED [[function_constant(18)]];",
+        "constant bool FRAG_INTERLEAVE_ENABLED [[function_constant(19)]];",
     ] {
         assert!(
             GEMM_METAL_SOURCE.contains(needle),
@@ -1230,26 +1235,28 @@ fn gemm_simdgroup_tiled_source_uses_smem_swizzle_col_helper() {
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
     let total_calls = kernel_body.matches("smem_swizzle_col(").count();
     assert_eq!(
-        total_calls, 24,
-        "gemm_simdgroup_tiled 本体内の smem_swizzle_col 呼び出しがちょうど 24 箇所で \
+        total_calls, 28,
+        "gemm_simdgroup_tiled 本体内の smem_swizzle_col 呼び出しがちょうど 28 箇所で \
          あるはずです（見つかった数: {total_calls}）"
     );
     let a_gate_calls = kernel_body
         .matches("smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1,")
         .count();
     assert_eq!(
-        a_gate_calls, 12,
-        "A タイル箇所（協調ロード書き込み 4〈#2110 の unroll_load 複製込み〉+ フラグメントロード 8）の \
-         COOP_SMEM_SWIZZLE >= 1 ゲート呼び出しが 12 箇所であるはずです \
+        a_gate_calls, 14,
+        "A タイル箇所（協調ロード書き込み 4〈#2110 の unroll_load 複製込み〉+ フラグメントロード 8\
+         + 交互配置 variant 2〈#3211〉）の \
+         COOP_SMEM_SWIZZLE >= 1 ゲート呼び出しが 14 箇所であるはずです \
          （見つかった数: {a_gate_calls}）"
     );
     let b_gate_calls = kernel_body
         .matches("smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2,")
         .count();
     assert_eq!(
-        b_gate_calls, 12,
-        "B タイル箇所（協調ロード書き込み 4〈#2110 の unroll_load 複製込み〉+ フラグメントロード 8）の \
-         COOP_SMEM_SWIZZLE >= 2 ゲート呼び出しが 12 箇所であるはずです \
+        b_gate_calls, 14,
+        "B タイル箇所（協調ロード書き込み 4〈#2110 の unroll_load 複製込み〉+ フラグメントロード 8\
+         + 交互配置 variant 2〈#3211〉）の \
+         COOP_SMEM_SWIZZLE >= 2 ゲート呼び出しが 14 箇所であるはずです \
          （見つかった数: {b_gate_calls}）"
     );
 
@@ -1263,7 +1270,7 @@ fn gemm_simdgroup_tiled_source_uses_smem_swizzle_col_helper() {
     let staged_scope = &kernel_body[..direct_load_start];
     let staged_calls = staged_scope.matches("smem_swizzle_col(").count();
     assert_eq!(
-        staged_calls, 24,
+        staged_calls, 28,
         "smem_swizzle_col 呼び出しは全て staged 経路（direct-load 目印コメントより前）に \
          収まっているはずです（staged 側で見つかった数: {staged_calls}）"
     );
@@ -1599,11 +1606,11 @@ fn gemm_simdgroup_tiled_hfrag_source_does_not_reference_experimental_gates() {
 fn gemm_simdgroup_tiled_hfrag_introduces_no_new_function_constants() {
     let declared = GEMM_METAL_SOURCE.matches("[[function_constant(").count();
     // `gemm_metal_source_declares_spec_ifdef_block_with_all_eighteen_defines`
-    // が個々の宣言文字列（index 0〜18 の 19 個。#2110 で index 18 追加）を固定済みのため、本テストは
+    // が個々の宣言文字列（index 0〜19 の 20 個。#2110 で index 18、#3211 で index 19 追加）を固定済みのため、本テストは
     // 総数のみを再確認する（`gemm_simdgroup_tiled_hfrag` が新規宣言を追加
     // していないことの裏付け）。
     assert_eq!(
-        declared, 19,
+        declared, 20,
         "function_constant 宣言の総数が想定外です（gemm_simdgroup_tiled_hfrag または他カーネルが新規 function constant を追加した疑い）"
     );
 }
@@ -1916,6 +1923,89 @@ fn other_gemm_kernels_do_not_reference_unroll_load() {
         assert!(
             !body.contains("UNROLL_LOAD_ENABLED"),
             "gemm_simdgroup_tiled_{name} が UNROLL_LOAD_ENABLED を参照しています（no-op 契約違反）"
+        );
+    }
+}
+
+/// イシュー #3211 の証跡: simdgroup 交互配置軸 `FRAG_INTERLEAVE_ENABLED` が
+/// function constant index 19 として `UNROLL_LOAD_ENABLED`（18）の直後にちょうど
+/// 1 回宣言され、ソーステキスト特殊化経路（`#ifdef GEMM_SPEC_ENABLED` 側）の束縛も
+/// 1 回であること、実効条件 `FRAG_INTERLEAVE_ACTIVE` が TILE_CLASS・staged・
+/// FRAG_LOAD_KSTEPS・UNROLL_ACC・split-K で no-op になる形で定義されていること、
+/// 新 variant が `8 * WM`／`8 * WN` ストライドでロードとストアを行うこと、
+/// `if (FRAG_INTERLEAVE_ACTIVE)` 系の分岐がロード 1・ストア 1 であること、
+/// 新 variant に unroll pragma を足していない（総数 14 のまま）ことをロックする。
+#[test]
+fn gemm_simdgroup_tiled_source_gates_frag_interleave_behind_function_constant() {
+    assert_eq!(
+        GEMM_METAL_SOURCE
+            .matches("constant bool FRAG_INTERLEAVE_ENABLED [[function_constant(19)]];")
+            .count(),
+        1,
+        "FRAG_INTERLEAVE_ENABLED の function constant 宣言（index 19）がちょうど 1 回ではありません"
+    );
+    assert_eq!(
+        GEMM_METAL_SOURCE
+            .matches("constant bool FRAG_INTERLEAVE_ENABLED = GEMM_SPEC_FRAG_INTERLEAVE_ENABLED;")
+            .count(),
+        1,
+        "特殊化経路（#ifdef 側）の FRAG_INTERLEAVE_ENABLED 束縛がちょうど 1 回ではありません"
+    );
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    assert!(
+        kernel_body.contains(
+            "const bool FRAG_INTERLEAVE_ACTIVE = FRAG_INTERLEAVE_ENABLED && TILE_CLASS == 0\n        && USE_TGP_STAGING && FRAG_LOAD_KSTEPS == 1 && !UNROLL_ACC_ENABLED && !SPLIT_K_ENABLED;"
+        ),
+        "FRAG_INTERLEAVE_ACTIVE の実効条件が計画（#3211）と異なります"
+    );
+    assert_eq!(
+        kernel_body
+            .matches("else if (FRAG_INTERLEAVE_ACTIVE) {")
+            .count(),
+        1,
+        "交互配置 variant の kk ループ分岐がちょうど 1 回ではありません"
+    );
+    assert_eq!(
+        kernel_body.matches("if (FRAG_INTERLEAVE_ACTIVE) {").count(),
+        2,
+        "FRAG_INTERLEAVE_ACTIVE 分岐（kk ループの else if + ストアの if）が 2 回ではありません"
+    );
+    // 交互配置のストライドでロード・ストアする（8*WM／8*WN）。
+    assert!(kernel_body.contains("const uint FRAG_ROW_STEP = 8 * WM;"));
+    assert!(kernel_body.contains("const uint FRAG_COL_STEP = 8 * WN;"));
+    assert!(kernel_body.contains("uint a_row = frag_row_base + r * FRAG_ROW_STEP;"));
+    assert!(kernel_body.contains("uint b_col_il = frag_col_base + c_ * FRAG_COL_STEP;"));
+    assert!(
+        kernel_body.contains("uint out_row = row0 + frag_row_base + r * FRAG_ROW_STEP;"),
+        "交互配置 variant のストア原点（行）が見つかりません"
+    );
+    assert!(
+        kernel_body.contains("uint out_col = col0 + frag_col_base + c_ * FRAG_COL_STEP;"),
+        "交互配置 variant のストア原点（列）が見つかりません"
+    );
+    // 新 variant に unroll pragma を足さない（acc 系 10 + 協調ロード 4 = 14 のまま）。
+    assert_eq!(
+        kernel_body
+            .matches("#pragma clang loop unroll(full)")
+            .count(),
+        14,
+        "交互配置 variant 追加後も unroll pragma 総数は 14 のままのはずです"
+    );
+}
+
+/// イシュー #3211 の証跡: `gemm_simdgroup_tiled_f16`／`_hfrag`／`_te`／
+/// `gemm_splitk_reduce` は `FRAG_INTERLEAVE_ENABLED` を参照しない no-op 契約。
+#[test]
+fn other_gemm_kernels_do_not_reference_frag_interleave() {
+    for (name, body) in [
+        ("f16", gemm_simdgroup_tiled_f16_kernel_body()),
+        ("hfrag", gemm_simdgroup_tiled_hfrag_kernel_body()),
+        ("te", gemm_simdgroup_tiled_te_kernel_body()),
+        ("splitk_reduce", gemm_splitk_reduce_kernel_body()),
+    ] {
+        assert!(
+            !body.contains("FRAG_INTERLEAVE"),
+            "gemm_{name} が FRAG_INTERLEAVE を参照しています（no-op 契約違反）"
         );
     }
 }

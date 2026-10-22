@@ -102,6 +102,9 @@ pub(crate) struct SpecializationParams {
     /// `crate::pipeline::GemmGateConstants::unroll_load_enabled` と同じ意味。
     /// [`new`](Self::new) は本番既定 `false`（現行ループ）を渡す。
     pub(crate) unroll_load_enabled: bool,
+    /// `GEMM_SPEC_FRAG_INTERLEAVE_ENABLED`（イシュー #3211）。
+    /// `crate::pipeline::GemmGateConstants::frag_interleave_enabled` と同じ意味。
+    pub(crate) frag_interleave_enabled: bool,
 }
 
 impl SpecializationParams {
@@ -150,6 +153,7 @@ impl SpecializationParams {
             coop_smem_swizzle: 0,
             // イシュー #2110: 協調ロード unroll 軸も本番既定値（`false`）で埋める。
             unroll_load_enabled: false,
+            frag_interleave_enabled: false,
         }
     }
 }
@@ -246,6 +250,10 @@ pub(crate) fn specialized_gemm_source(params: &SpecializationParams) -> String {
         "#define GEMM_SPEC_UNROLL_LOAD_ENABLED {}\n",
         msl_bool(params.unroll_load_enabled)
     ));
+    header.push_str(&format!(
+        "#define GEMM_SPEC_FRAG_INTERLEAVE_ENABLED {}\n",
+        msl_bool(params.frag_interleave_enabled)
+    ));
     header.push_str(&format!("#define GEMM_SPEC_ACC_ROWS {acc_rows}\n"));
     header.push_str(&format!("#define GEMM_SPEC_ACC_COLS {acc_cols}\n"));
     header.push_str(GEMM_MSL_SRC);
@@ -287,6 +295,7 @@ mod tests {
                 assert!(src.contains("#define GEMM_SPEC_COOP_LOAD_LAYOUT 0\n"));
                 assert!(src.contains("#define GEMM_SPEC_COOP_SMEM_SWIZZLE 0\n"));
                 assert!(src.contains("#define GEMM_SPEC_UNROLL_LOAD_ENABLED false\n"));
+                assert!(src.contains("#define GEMM_SPEC_FRAG_INTERLEAVE_ENABLED false\n"));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_ROWS {}\n", cfg.acc_rows())));
                 assert!(src.contains(&format!("#define GEMM_SPEC_ACC_COLS {}\n", cfg.acc_cols())));
             }
@@ -469,6 +478,29 @@ mod tests {
         };
         let src = specialized_gemm_source(&overridden);
         assert!(src.contains("#define GEMM_SPEC_UNROLL_LOAD_ENABLED true\n"));
+        assert_ne!(specialized_gemm_source(&base), src);
+    }
+
+    /// イシュー #3211: 交互配置軸（`frag_interleave_enabled`）の上書きが生成
+    /// `#define` へ反映されること（既定 false・true で差分）。
+    #[test]
+    fn frag_interleave_override_is_reflected_in_generated_defines() {
+        let base = SpecializationParams::new(
+            CANDIDATES[3],
+            false,
+            false,
+            false,
+            false,
+            1,
+            TransposePattern::Nn,
+        );
+        assert!(!base.frag_interleave_enabled);
+        let overridden = SpecializationParams {
+            frag_interleave_enabled: true,
+            ..base
+        };
+        let src = specialized_gemm_source(&overridden);
+        assert!(src.contains("#define GEMM_SPEC_FRAG_INTERLEAVE_ENABLED true\n"));
         assert_ne!(specialized_gemm_source(&base), src);
     }
 }

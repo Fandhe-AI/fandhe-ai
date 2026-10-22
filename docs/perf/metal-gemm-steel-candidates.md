@@ -135,3 +135,67 @@ Mac セッションで実施する手順:
 6. §6 を記入し実測 PR を作る。
 7. ADOPT_CANDIDATE があれば §8 に従い、**ユーザー承認後**に結線 PR（別 PR）を作る。
 8. 両 PR のマージ後に #2111 をクローズする。
+
+## 10. simdgroup 交互配置候補（イシュー #3211）
+
+### 10.1 背景
+
+Mac mini（M4・GPU 10 コア）の gemm Metal は N=2048／4096 で candle の 0.83／0.80 倍にとどまる（`metal-gemm-tile-select-macmini.md` §0・§8）。#3182 は N=4096 の差の 65.5〜72.2% がカーネル（＋同期）由来と分解した（`metal-gemm-reuse-phase-breakdown.md` §12）。タイル選択（#3181／#3206）では埋まらない残りがカーネル本体にあるため、candle との構造差のうち「レジスタ配置」を 1 軸だけ opt-in で足す。
+
+### 10.2 candle の構造と本候補
+
+- candle（`candle-metal-kernels-0.11.0/src/metal_src/mlx_gemm.metal`。BlockMMA のコンストラクタ・定数が L280〜L331、`mma` が L334〜L386）では、simdgroup `(wm, wn)` が持つ `i` 番目の 8×8 ブロックは行 `8*wm + i*8*WM`、列 `8*wn + j*8*WN` にある。WM／WN 個の simdgroup が 8 行（列）単位で交互にブロックを受け持つ（`TM_stride = 8*WM`）。
+- 自作の現行は simdgroup が連続した `sub_bm × sub_bn` の帯を持つ（行 `wm_idx*sub_bm + r*8`）。
+- 本候補 `FRAG_INTERLEAVE_ENABLED`（function constant index 19・既定 OFF）は、staged 経路のフラグメントロードとエピローグのストアの原点だけを交互配置へ切り替える。
+- 出典の取り扱い: `analysis/candle-metal-01.md` §0 の契約に従い、コードは引用せず行番号で示す。
+
+### 10.3 設計と実効条件
+
+- 実効条件 `FRAG_INTERLEAVE_ACTIVE = FRAG_INTERLEAVE_ENABLED && TILE_CLASS == 0 && USE_TGP_STAGING && FRAG_LOAD_KSTEPS == 1 && !UNROLL_ACC_ENABLED && !SPLIT_K_ENABLED`。function constant のみで決まり、コンパイル時に畳み込まれる。外れる構成は現行コードを通る。`_f16`／`_hfrag`／`_te`／split-K パス 1 は参照しない（ホストは常に `false`）。
+- 構築入口はテスト専用の `MetalGemm::new_with_frag_interleave`／`with_frag_interleave`（`#[cfg(test)] pub(crate)`）。公開 API・依存・`unsafe` の追加はない。
+- 却下した実装形: 既定経路の式を `base + r * step` に一本化する案。既定経路のソースが変わり、既存の証跡 needle を書き換えることになり、両 variant を証跡テストで固定できなくなるため採らない。既定の kk ループは無変更のまま `else if` で新 variant を足し、`if (FINE_BARRIER_ENABLED)` の厳密一致 needle を既定側だけに当てるため新 variant は 4 スペース深くインデントしている。
+
+### 10.4 bit 一致の論拠と REQ-8
+
+- 出力の各 8×8 ブロックは、どの simdgroup が持つかに依らず「K タイル昇順・kk 昇順の `simdgroup_multiply_accumulate` 列」で計算される。オペランド列・結合順序は不変で、割当は threadgroup 内 (BM/8)×(BN/8) ブロックへの全単射（Rust モデル `tile::interleaved_block_origin_model` と単体テストで固定）。結合順序が変わらないため、所有者へ上げる条件（K 方向の累算順の変更）には当たらない。
+- REQ-8: 協調ロードの境界検査（`*_group_in_bounds`・スカラー 0 埋め）は変更しない。ストアの `out_row >= dims.m`／`out_col >= dims.n` ガードは新 variant でも同じ形で維持する。検査なしロード（`load_unsafe`）は使わない。
+
+### 10.5 重複確認（過去の不採用・REJECT 候補との関係）
+
+| 既存の候補・判定 | 本候補との関係 |
+|---|---|
+| `load_unsafe`（検査なしロード）／REQ-8 | 使わない。協調ロードとストアの境界検査は変更しない |
+| aligned load（#752 保留・#808 不採用。`backend-metal-aligned-load-decision.md`） | 整列可否で分岐しない |
+| E6 タイルクラス分割（§12.4 REJECT） | `TILE_CLASS != 0` では無効化 |
+| E1 `UNROLL_ACC`（acc 積 8 以下への無条件 unroll は後退して撤回） | r／c ループの unroll に触れない。`UNROLL_ACC_ENABLED` 実効時は無効化 |
+| #2110 の `UNROLL_LOAD`・`T0U` など（#3184 G6: T0U と T0U-LU は REJECT、LU と T0U-LU-FB は UNDETERMINED） | タイル選択・協調ロードループ・acc unroll のいずれも変えない別軸。`STEEL_ARMS` も変えない |
+| E2 アキュムレータ配列の厳密サイズ化（#1289 REJECT） | 配列容量は変えない |
+| E3 フラグメントロード方式（#1295） | `FRAG_LOAD_KSTEPS == 1` のときだけ有効。ロード元・幅は変えない |
+| thread_elements 方式（#1693／#1694 REJECT） | レーン単位配置は使わない。`simdgroup_load`／`simdgroup_store` のまま |
+| #745 フラグメント配列のレジスタ常駐 | 前提として維持 |
+| #536 蛇行走査 | MMA 発行順は行優先のまま |
+| FINE_BARRIER（E5）・tgid swizzle・smem XOR swizzle・協調ロードレイアウト | 直交。併用して bit 一致を確認（§10.7） |
+| #3181／#3182 | タイル選択と計測窓の診断。カーネル本体の軸とは重ならない |
+
+`metal-gemm-thread-elements-candidate.md` §6 が「MLX 型 interleaved フラグメント配置」をスコープ外と明記しており、他の記録でも実装・実測されていない。
+
+### 10.6 スコープ外・フォローアップ候補
+
+Issue は承認なしに起票しない。以下は申し送りのみ。
+
+- kk ループの full unroll（`#2110` §4 が除外した理由が残る。本候補と同時に入れると効果を切り分けられない）
+- ロード先アドレスの K ループ外事前計算とポインタ前進（§7 が既にスコープ外）
+- candle の MMA 蛇行発行順、本候補と `UNROLL_ACC` の併用
+- 性能 A/B（Mac mini の kernel_gpu 5 run と結線判断）
+
+### 10.7 自己検証の結果
+
+Apple Silicon（macOS）上で実施。
+
+- `cargo test -p fandhe-ai-backend-metal`（lib 708 件・`shader_source_evidence` 61 件ほか pass）、`make fmt-check`、`make lint`（clippy `-D warnings`）pass。
+- `cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored frag_interleave --test-threads=1` の 7 件 pass: 全 `CANDIDATES` × 正方 256〜4096・端数形状の ON/OFF bit 一致、`dispatch_auto` の真の端数形状・split-K 形状（no-op）、NT／TN／TT、NaN／±inf／inf×0、FINE_BARRIER・UNROLL_LOAD 併用、CPU 参照 parity（`assert_parity`。tolerance 不変）、ゲート転送。
+- 回帰: 既存 `unroll_load_on_off_bit_match_*`・`steel_candidate_arms_match_cpu_reference` が既定 OFF のまま pass。
+
+### 10.8 実測記入欄
+
+性能は**未実測**。結線判断・既定値変更はユーザー承認事項。
