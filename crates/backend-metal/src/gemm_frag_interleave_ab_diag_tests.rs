@@ -191,7 +191,6 @@ struct Sample {
 
 /// 腕 1 回ぶんを encode-only で記録し、commit + GPU 完了待ちで `kernel_gpu` を取る。
 /// 1 バッチ・1 ラベル・`kernel_gpu <= commit_wait` を assert する（RULE.txt 項 7）。
-#[allow(clippy::too_many_arguments)]
 fn trial(
     ctx: &MetalContext,
     gemms: (&MetalGemm, &MetalGemm),
