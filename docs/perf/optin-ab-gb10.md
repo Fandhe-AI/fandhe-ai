@@ -22,7 +22,7 @@ GB10 上の最初のログ（`preflight-procs.txt` 13:44:22Z）より前。(a) �
 
 | ID | 対象 | 継承 RULE | GB10 判定 | Mac mini（#3184） | 総合 |
 |---|---|---|---|---|---|
-| B1（= #3184 の G1） | `HOST_ARENA_DEFAULT_ENABLED` | 2104 | **undetermined** | undetermined（record_only） | undetermined |
+| B1（= #3184 の G1） | `HOST_ARENA_DEFAULT_ENABLED` | 2104 | **undetermined** | **REJECT**（#3184 再開分 `3184-macmini-r2-g1`。正式系列で train reuse 1.0090・5/5 後退。初回 3 系列は record_only） | **REJECT**（2104 は「いずれかの機体で 5/5 一貫の後退セルがあれば REJECT」） |
 | B2（= #3184 の G2） | `REDUCTION_SEQUENTIAL_FALLBACK_ENABLED` | 2101→2102 | **undetermined**（T_gb10 = 16384・Stage 0 PROCEED） | Stage 0: T_macmini = 16384（PROCEED）／Stage 1: undetermined（record_only） | undetermined。最終 T = min(16384, 16384) = 16384 |
 | B3 | 推論 Graph capture | 2115 | **undetermined**（性能は全セル改善・R1(b) 失敗）。**再計測は #3205 へ切り出し** | 対象外 | undetermined |
 | B4 | N=256 起動固定費の内訳 | 2109 | **有効系列（`gb10-r2`・`aggregate.py` exit 0）**: H1・H3 支持、H2・H4・H5 未確定、支配項は readback | 対象外 | 診断（採否ではない） |
@@ -31,8 +31,9 @@ GB10 上の最初のログ（`preflight-procs.txt` 13:44:22Z）より前。(a) �
 
 ADOPT になったゲートはない。従って #3227・#3205 が反転できる定数は現時点でない。
 総合判定は、2104／2102 の 2 機体規則を機械的に当てはめた（ADOPT には両機体の成立が要る。REJECT には、どちらかの機体の**正式系列**で 5/5 round 一貫の後退が要る。
-#3184 の Mac mini は補遺 RULE 3 の負荷条件を満たす正式系列が 1 つも成立せず record_only なので、Mac mini の値を REJECT の根拠にしない）。
-GB10 側にも 5/5 一貫の後退はないため、B1・B2 の総合は undetermined のまま。数値の出典: GB10 は本書下記、Mac mini は `optin-ab-macmini.md`（#3184・PR #3509）。
+#3184 の初回 Mac mini 系列は補遺 RULE 3 の負荷条件を満たさず record_only だったため根拠にしなかったが、再開分〈事前登録コミット `c80d9818`・round 前クールダウンで全 round の load1 < 3.0〉で正式系列が成立した）。
+再開分の Mac mini 正式系列で B1 の train reuse が 5/5 一貫の後退（1.0090）となったため、B1 の総合は REJECT に更新した（GB10 は 5/5 一貫の後退がなく undetermined のまま）。B2 は Mac mini も undetermined のまま。
+数値の出典: GB10 は本書下記、Mac mini は `optin-ab-macmini.md`（#3184。初回は PR #3509、再開分は「再開分の結果」節）。
 
 ### B1 host arena（2104）
 
@@ -60,6 +61,8 @@ train fresh は 0.82〜0.91 で一貫して改善した（fresh 側にだけ効�
 
 両機体とも ADOPT 条件（全セル非後退）を満たさない。REJECT の根拠になりうる 5/5 一貫の後退は、Mac mini g1w の train fresh のみ（record_only）。GB10 の train fresh は 0.8648 と改善、Mac mini は 1.0057〜1.0291 と悪化方向で
 **機体間で符号が割れている**（GB10 は 20 コア、Mac mini は P4+E6 で arena 確保の相対コストが違う可能性。推定であり本計測では切り分けていない）。
+
+再開分（#3184。正式系列 `3184-macmini-r2-g1`）の Mac mini: train fresh 1.0115・train reuse **1.0090（5/5 後退。1.0153・1.0036・1.0420・1.0025・1.0060）**・infer fresh 0.9961・infer reuse 1.0181。上の表の g1／g1w／g1f は record_only の旧系列。
 
 ### B2 縮約逐次化（2101→2102）
 
@@ -147,8 +150,7 @@ ratio > 1.00 のセルは GB10 が 2（gemm 2048/fresh 1.0192・infer 64/reuse 1
 
 ## 申し送り
 
-- #3227: ADOPT 条件が成立したゲートはない。B1（GB10 の train fresh に利得 0.8648、Mac mini は 1.0057〜1.0291）と B2（最終 T = 16384）は、機体別の併記のとおり両機体で正式系列が成立していない。
-  Mac mini の正式系列が成立するまで（#3184 の申し送り）、反転は判定できない。
+- #3227: ADOPT 条件が成立したゲートはない。B1 は #3184 再開分の Mac mini 正式系列で REJECT（train reuse が 5/5 後退・1.0090。GB10 の train fresh は 0.8648 と改善で機体間の符号は割れる）、B2 は両機体とも undetermined（最終 T = 16384）。B1 の既定は OFF の維持が妥当。
 - #3205: B3 の capture 競合（`DeviceContextCaptureInProgress`）の是正と、その後の再判定（別 label・新規事前登録）はこちらで行う。性能は改善方向（reuse 0.86〜0.98）。
 - #3214・#3259: B4 の有効系列（転送 H1+H3 が L0 の 90.9%）を前提に使う。入出力の resident 化（計測境界の対称化）を先に検討する。
 - #537: B5 の実測で「不採用」。クローズ可能（採らない判断と実測は `cuda-gemm-boundary-predicate-ab.md`）。別案を測るなら新規事前登録で。

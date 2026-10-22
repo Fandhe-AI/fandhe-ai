@@ -1,0 +1,9 @@
+series=g1r2 outer_gate_ok=1 load1=1.36 watchlist_procs=0 waited_s=0 at=2026-10-21T18:16:41Z
+series=g2r2 outer_gate_ok=1 load1=2.48 watchlist_procs=0 waited_s=0 at=2026-10-21T18:19:41Z
+series=g4r2 outer_gate_ok=1 load1=2.98 watchlist_procs=0 waited_s=60 at=2026-10-21T18:35:14Z
+series=g5r2 outer_gate_ok=1 load1=2.60 watchlist_procs=0 waited_s=30 at=2026-10-21T18:38:23Z
+series=g3r2 outer_gate_ok=1 load1=2.91 watchlist_procs=0 waited_s=0 at=2026-10-21T18:42:23Z
+series=g3abr2 outer_gate_ok=1 load1=2.18 watchlist_procs=0 waited_s=120 at=2026-10-21T18:45:32Z
+series=g6r2 outer_gate_ok=1 load1=2.90 watchlist_procs=0 waited_s=0 at=2026-10-21T18:48:04Z
+series=g7r2 outer_gate_ok=1 load1=1.47 watchlist_procs=0 waited_s=0 at=2026-10-21T18:51:42Z
+series=g7h4c outer_gate_ok=1 load1=2.36 watchlist_procs=0 waited_s=120 at=2026-10-21T18:54:11Z

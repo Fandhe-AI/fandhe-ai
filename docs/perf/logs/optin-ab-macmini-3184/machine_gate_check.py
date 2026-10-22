@@ -26,7 +26,13 @@ def check_text(text):
     for line in text.splitlines():
         m = LINE.search(line)
         if m:
-            seen[int(m.group(1))] = m.group(2)
+            raw = m.group(2)
+            # #3184 再開分: cooldown ログ行の状態が pass 以外（timeout／unavailable 等）は load1 の値に
+            # 依らず非有限扱い（0）にする。厳しくなる方向のみの追加で、判定式（< 3.0・5 round 完備）は不変。
+            st = re.search(r"\bcooldown=(\S+)", line)
+            if st and st.group(1) != "pass":
+                raw = "NA"
+            seen[int(m.group(1))] = raw
     if not seen:
         # round 番号付き行が無い: uptime は定期サンプルで round と対応しないため判定不能（None）を返す
         readings = UPTIME.findall(text)
@@ -68,6 +74,18 @@ def self_test():
     assert check_text(up.replace("1.3", "3.4"))[1] is None
     assert check_text(up + "\n17:30  up, load averages: 1.0 1 1")[1] is None
     assert render("x", *check_text(up)).endswith("machine_gate_ok=undetermined")
+    # #3184 再開分: cooldown ログ形式（ヘッダ行は round 番号が無く無視される）
+    cd = "threshold=3.0 interval_s=30 max_wait_s=1800\n" + "\n".join(
+        f"round{n} cooldown=pass threshold=3.0 load1=1.{n} waited_s=0 at=2026-10-22T00:00:0{n}Z" for n in range(1, 6))
+    assert check_text(cd)[1] is True
+    assert check_text(cd.replace("cooldown=pass threshold=3.0 load1=1.3", "cooldown=timeout threshold=3.0 load1=2.9"))[1] is False
+    assert check_text(cd.replace("cooldown=pass threshold=3.0 load1=1.3", "cooldown=timeout threshold=3.0 load1=5.1"))[1] is False
+    assert check_text(cd.replace("cooldown=pass threshold=3.0 load1=1.3", "cooldown=unavailable threshold=3.0 load1=NA"))[1] is False
+    assert check_text(cd.replace("load1=1.3", "load1=3.0"))[1] is False
+    assert check_text("\n".join(cd.splitlines()[:5]))[1] is False  # 4 round のみ
+    # G6 の float ログ（run<N> load1=<float>）
+    g6 = "\n".join(f"run{n} cooldown=pass threshold=3.0 load1=0.{n}5 waited_s=30" for n in range(1, 6))
+    assert check_text(g6)[1] is True
     print("self-test OK")
 
 

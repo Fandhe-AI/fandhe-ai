@@ -1,0 +1,18 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/optin-3184/before/crates/backend-cpu)
+   Compiling bench-harness v0.11.0 (<home>/work/optin-3184/before/crates/bench-harness)
+   Compiling fandhe-ai v0.11.0 (<home>/work/optin-3184/before/crates/facade)
+    Finished `release` profile [optimized] target(s) in 6.51s
+     Running tests/mnist_scale_train_reuse_bench.rs (<home>/work/optin-3184/target-tests/release/deps/mnist_scale_train_reuse_bench-7da927ef5c1585c2)
+
+running 4 tests
+test mnist_scale_train_fresh_vs_reuse_metal ... [mnist_scale_train_reuse_bench:metal] trials=5 fresh_median_ms=2.315 (q1=2.261, q3=2.316) reuse_median_ms=1.683 (q1=1.683, q3=1.687) reuse_vs_fresh_x=1.375 — HEAD 絶対値。0.4.0 基準点との境界差は 本ファイル冒頭コメント参照。record only, non-gating
+ok
+test mnist_scale_train_reuse_metal_backward_dinput_phase ... [mnist_scale_train_reuse_metal_backward_dinput_phase] backward-only median=0.928792ms q1=0.918875ms q3=0.931333ms (n=5) encode_deltas=[5, 5, 5, 5, 5] command_buffer_deltas=[3, 3, 3, 3, 3] wait_deltas=[3, 3, 3, 3, 3] — 事前登録仮説（#1562 codex-review 是正後・#1563 で更新）: encode_delta=5（MseLoss VJP の dispatch_sync 1 回 + d_input 2 回 + d_weight 2 回。不変）・command_buffer_delta=3（cb 生成は MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。#1562 時点の 4 から 1 減る）・wait_delta=3（MseLoss 1 + [d_weight(L2)+d_input(L2)合流] 1 + [d_weight(L1)+d_input(L1)合流] 1。窓終了時点で open バッチが残らないため全て本窓内で wait 済み）。record only, non-gating（`docs/backend-metal-command-batching-design.md` §7.4）
+ok
+test mnist_scale_train_reuse_metal_batch_counters ... [mnist_scale_train_reuse_metal_batch_counters] steady-state 1 step: encode_delta=11 command_buffer_delta=7 wait_delta=7 — before（#1099 適用前）は 9/9/9、#1099 適用直後は 9/8/8、#1223（VJP の Metal GPU dispatch 化）適用直後は 11/10/10、#1555 （gemm_fp32_strict_into の Metal 実装）適用後は 11/9/9、#1563 （d_weight encode を d_input の同期点より前へ移し層内で合流）適用後は 11/8/8、#1566（bias 勾配も同一 encode-only ディスパッチへ統合。 机上導出では #1563 時点で bias 用 upload_into が既に no-op だった ため 11/8/8 から不変と結論。本ファイル冒頭 doc comment「#1566 追記（是正版）」参照）適用後も 11/8/8（見込み・Mac 実機未確認） （`docs/backend-metal-command-batching-design.md` §4.2・§7「#1550」「#1555」「#1563」節・§10.7〜§10.9「#1566」節）
+ok
+test mnist_scale_train_reuse_metal_batch_counters_forward_encode_only ... [mnist_scale_train_reuse_metal_batch_counters_forward_encode_only] steady-state 1 step: encode_delta=11 command_buffer_delta=6 wait_delta=6（机上導出 11/6/6・OFF は 11/7/7）
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.14s
+

@@ -1,0 +1,94 @@
+イシュー #3184 事前登録規則 補遺 2 (再開分: Mac mini の opt-in 候補 A/B の取り直し)
+fixed-at: 2026-10-22 (この補遺は再開分の実機計測より前に、実装・集計器修正・セッションスクリプトと同じコミットで固定する。
+  以後、緩和・事後調整はしない。コミットの作者日時が最初の実機ログより前であることを結論 doc に記録する)
+
+0. 位置づけ
+  - 元の補遺 RULE.txt と継承 RULE 7 件 (2104・2101・2102・2112・2113・2111・2114) と
+    metal-gemm-candle-gate-remeasurement.md §15.1 は 1 字も変えない。本書は条件を足して厳しくするだけで、
+    判定語彙 (ADOPT／REJECT／undetermined／FAIL、2111 の ADOPT_CANDIDATE 等) と判定式は継承の文言をそのまま使う。
+  - 再開の理由: 初回 (2026-10-21) はゲート単位の判定が 1 件も出なかった。
+    (1) round 開始時の load1 が 3.0 を超え補遺 RULE 3 の事後検査が成立しなかった (G1・G3 は継承スクリプトが直前に行う
+        cargo build の負荷、G2 Stage 1 は round 間に冷却が無いこと、G4・G5 は round 別ゲートの記録が無かったこと)。
+    (2) G6 は集計器が `--nocapture` の融合行 (`test NAME ... N=512 ...`) を受理せず INCOMPLETE、mtl_architecture_name 未取得。
+    (3) G7 は tape_build_micro／tape_new の median_s=0.0 で集計器が fail-closed、H4(c) 未実行、env_info の host_kind が m4max。
+    (4) G3 の GB10 対照セルが未実測。
+  - 固定時点の sha256 (修正前の内容。git show origin/main:<path> と一致すること):
+      858101ed281b6bad1e94ea88d570a4a283341bb49d5c35740318b242a7ea0559  docs/perf/logs/optin-ab-macmini-3184/RULE.txt (補遺)
+      e688197bcbb4a2fad1c8e6aecbbbd3e52735a27ccbde38f81a582b1749ad3a7b  docs/perf/logs/tape-arena-reuse-2104/RULE.txt
+      1bf99f9c3c36ee85a7a21b15f389cfc2371b73a5f0eb939d85a38e72d1b24e74  docs/perf/logs/elemental-reduction-threshold-2101/RULE.txt
+      a1cab9c9dea01a5dbbddeb2e723aabb322e55efb74607e001302119cb15aadc2  docs/perf/logs/elemental-reduction-ab-2102/RULE.txt
+      7258985ac7be563478ca03e845ac489658d30e59b99e67a88a3f4e9f0094bedd  docs/perf/logs/metal-reuse-readback-2112/RULE.txt
+      4a402b77b1f83781dd16ffbcff356787db254cad9f7314e4062fd336ed4a9286  docs/perf/logs/metal-train-forward-encodeonly-2113/RULE.txt
+      ac8c4a1fb64a1978df09c351c411c3d7910a91a00b27df3ee6778ac478fb9bf6  docs/perf/logs/metal-gemm-candidate-ab-2111/RULE.txt
+      1b9819079a9025a0fd75ae2d766dffa1b6cba6b64581ea5e146a0256ecfc2d7b  docs/perf/logs/metal-tape-build-infer-phase-2114/RULE.txt
+      540b9fd01af3bac1bed73b75de7b122b448f9de5947619f0839d51d31d9b8c7e  docs/perf/metal-gemm-candle-gate-remeasurement.md
+    修正前の編集対象:
+      97f086eda4d94fe55716c962d81a1ea6c1bc2e25eaf7667a81a4af8c85871b24  docs/perf/logs/metal-gemm-candidate-ab-2111/aggregate.py
+      f09ec239a3d015ab9f8297ccbe47f2d8561f62026f9961e42476d4df672da405  docs/perf/logs/metal-tape-build-infer-phase-2114/orchestrate.sh
+      b3449f669eb34c0138a7ae93333976431dec38ee1aade492dd299aba95b58f29  docs/perf/logs/optin-ab-macmini-3184/machine_gate_check.py
+      068931ea3bdc439f2c6a1f50cf28de60dbc7e6c81e820ed0e108e9b38173f43b  scripts/bench/framework-compare/run_ab_tape_arena_cpu.sh
+      b795b0451a7ec2886d810a8ee59cce71212991d561d56bba8ed6a7cc128fb848  scripts/bench/framework-compare/run_ab_reduction_threshold_cpu.sh
+      01c93670150982ae70ebcd3de50c28c455313075987a6cd66ad57179e0998b77  scripts/bench/framework-compare/run_ab_train_forward_encode_metal.sh
+      e613024df663f24aac9392dc28d4dd701fe28ab4e52a4c4f51d8b93b4e0b1d7b  scripts/bench/framework-compare/run_ab_readback_metal.sh
+      3cc282e53f7dbfa86b097882498eff3dbedb764960a643821838d31599ee71ab  scripts/bench/framework-compare/run_ab_readout_metal.sh
+
+1. 補遺 RULE 3 の運用改定 (「継承スクリプトと orchestrate.sh は編集しない」の例外を次の 3 点に限る)
+  (i)   round 前クールダウン hook (scripts/bench/framework-compare/ab_round_cooldown.sh) の追加。継承 5 スクリプトに
+        source 1 行・init 1 行・round ループ先頭の呼び出し 1 行・コメントを足す (既存行の変更・削除なし)。
+        環境変数 AB_ROUND_COOLDOWN_MAX_LOAD1 が未設定なら即 return しファイルも作らない (未設定時の挙動は不変)。
+        設定時は load1 < 閾値まで 30 秒間隔・最大 1800 秒待ち、round ごとに
+        `round<N> cooldown=<pass|timeout|unavailable> threshold=<x> load1=<x> waited_s=<n> at=<UTC>` を記録する。
+        閾値は 0 より大きく 8.0 以下の数値のみ受理 (継承閾値より緩い値を受け付けない)。継承の閾値 8.0・gate_ok・series 判定は変えない。
+  (ii)  metal-gemm-candidate-ab-2111/aggregate.py の run ログ検証 (check_run_log) と解析 (parse_run) が、
+        `--nocapture` で融合する最初の出力行 `^test <AB_TEST> \.\.\. N=<n> arm=<arm> ...` をちょうど 1 回に限り受理する。
+        FAILED／panicked の検査・`test result: ok. 1 passed; 0 failed` の検査・独立した `ok` 行の要求・他の全検査は変えない。
+        融合 2 回以上・別テスト名・行頭以外・N= 以外の融合は従来どおり拒否する (self-test に固定)。
+        旧系列 (steel/) は遡って有効にしない (record_only のまま)。
+  (iii) metal-tape-build-infer-phase-2114/orchestrate.sh の host_kind に macmini を追加 (m4max と同じ record_only の経路。
+        差分は usage・case 行・コメントのみ)。集計器 (2114/aggregate.py) の正値検査は変えない。
+  いずれも判定を緩めない (待機・記録・受理形の限定・識別子の追加だけ) ことを理由とする。
+
+2. 負荷条件 (Mac mini の再開系列は AB_ROUND_COOLDOWN_MAX_LOAD1=3.0 で起動する)
+  - G1〜G3: 補遺 RULE 3 の事後検査ソースは継承 gate log の round 行 (従来どおり)。cooldown ログは補助記録。
+    継承ゲート (8.0) が pass で gate_ok=1 の round でなければ継承 RULE どおり参考扱い。
+  - G4・G5: cooldown-*.log を事後検査ソースとし、全 5 round が cooldown=pass かつ load1 < 3.0 であること。
+    加えて系列開始前の専有ゲート (継承 exclusive 4.0) の成立を要求する。
+  - G6: steel-r2/cooldown.log (run 前の外側待機。float の load1) と継承 load_gate.log (run<N> OK) の両方を要求する。
+  - cooldown が timeout・unavailable の round がある系列は record_only (undetermined)。
+  - 系列開始前の外側ゲート (lib_r2.sh outer_gate: load1 < 3.0 かつ並走プロセス 0 件、30 秒間隔・最大 30 分) は継続する。
+  - 事後判定は machine_gate_check.py (判定式 < 3.0・5 round 完備・非有限は 0 は不変。cooldown=pass 以外の行は 0)。
+  - GB10 は Mac mini 用の 3.0 を適用しない (補遺 RULE 2 は Mac mini 固有)。継承閾値 8.0 で測る。
+
+3. 系列
+  - 新しい label (3184-macmini-r2-g1 など) で 1 回だけ実行する。差し替え・追加・セル除外は禁止。失敗したら別 label で再実行し旧系列も残す。
+  - 初回の系列 (g1／g1w／g1f／g2w／g2f／g3／g4／g5／steel／verify-cache) は無効にせず record_only のまま残す。
+  - 初回の結果を再開系列の判定へ流用しない (G3 の前提ゲートも新しい rev で取り直す)。
+
+4. G2: Stage 0 は再計測しない (2101 RULE の「負荷 record_only」「run の追加による再判定は行わない」)。
+  T_macmini = 16384 を継承し Stage 1 だけを取り直す。最終 T = min(16384, T_gb10 = 16384)。
+  Stage 0 env_info の load1 推移 (2.92→5.60) は record_only の参考値で Stage 0 の判定には効かない。
+
+5. G3
+  - Mac mini: 新しい rev で前提ゲート (a)(b)(c) を再実行。1 件でも不一致なら FAIL で性能判定へ進まない。
+  - GB10 対照セル: 2113 の GB10 定義 (cpu・cuda × train {fresh, reuse}) を継承ゲート 8.0 で測る。
+    Linux では Metal コードがコンパイルされず after 腕は A/A の対照。
+  - 総合は 2113 の 2 機体規則を機械的に当てはめる。
+
+6. G6: run 1 の前に既存 #[ignore] テスト typed_bf16_probe_diag_tests::p0_device_attributes を実行し、
+  `device_architecture=` の値を env_info.txt の mtl_architecture_name へ転記する (コード追加なし)。
+  load_policy: exclusive_gate。判定語彙は 2111 のまま。REQ-8 の確認 (境界検査を外す arm が無いこと) は継承。
+
+7. G7: `orchestrate.sh macmini --out <dir>` で起動 (record_only・ADOPT 判定なし)。集計器の正値検査は変えない。
+  集計器が fail-closed (median_s=0 等) したら H1〜H3 は「未確定 (集計器停止・原因は計時分解能)」と書き、推定で埋めない。
+  H4 は (c) infer_fixed_cost_diag_tests::infer_fixed_cost_diag_wall_vs_gpu_busy の出力を手動転記し、
+  host_fixed が wall の 50% 以上なら「支持」(2114 RULE のまま)。
+
+8. 運用
+  - 計測前に ssh <node> 'uname -a' を実行して保存する。Mac mini は nohup、GB10 は setsid nohup で切り離す。
+  - ビルドと計測を並走させない。RAYON_NUM_THREADS は unset。
+  - 他セッションの cargo・rustc・bench・python・gemm 系プロセスを preflight-procs.txt に記録し、0 件になるまで待つ。
+  - 各 clone の git rev-parse HEAD と git status --porcelain が空であることを rev-stamp.txt に記録する。
+  - マスク規則は元 RULE 6 を継承する (ホスト名は masked、$HOME は <home>、ユーザー名・絶対パスは除く)。
+  - 欠損・round 数 != 5・非有限値・checksum 不一致は FAIL／undetermined (fail-closed)。到達できない・完走できない系列は推定で埋めず undetermined。
+  - 2 時間を超える場合は CPU (G1→G2 Stage 1) と Metal (G4→G5→G3 前提→G3 A/B→G6→G7) に分け、GB10 は別セッション。
+  - 定数は main で変えない。unsafe・依存の追加なし。

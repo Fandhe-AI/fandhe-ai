@@ -1,0 +1,104 @@
+2026-10-21T18:35:14Z attempt=0 load1=2.98 threshold=4.0 consecutive_ok=0
+2026-10-21T18:35:44Z attempt=1 load1=2.46 threshold=4.0 consecutive_ok=1
+gate: ok (2 consecutive checks under threshold)
+== build bench-fandhe (HEAD path patch) ==
+bench-fandhe sha256: 588720428b51b1fe7a3dd5980ef6ee812b93e868b89e7c1bc115dd8697b932ff (source: path:<home>/work/optin-3184/before/crates/facade)
+== manifest（一時ファイル）記録: results/raw/manifest-m4max-readback-ab-head-c80d9818-3184-macmini-r2-g4.json.tmp ==
+{"label":"head-c80d9818-3184-macmini-r2-g4","device":"metal","script_repo_head_sha":"c80d981840ab6bed86012cbf1d2fbfa8935ea7a8","facade_head_sha":"c80d981840ab6bed86012cbf1d2fbfa8935ea7a8","bin_sha256":"588720428b51b1fe7a3dd5980ef6ee812b93e868b89e7c1bc115dd8697b932ff","bin_source":"path:<home>/work/optin-3184/before/crates/facade","readback_arms":["fresh","parallel"],"env":"FANDHE_AI_METAL_READBACK_DEST","gate_mode":"exclusive","load_gate_max_load1":"4.0","recorded_at":"2026-10-21T18:35:48Z"}
+== metal status (before loop) ==
+Apple M4
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 3:35  up 11 days,  3:09, 1 user, load averages: 2.35 4.15 3.71
+== bench-fandhe gemm metal reuse size=1024 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003619333,"q1_s":0.003080094,"q3_s":0.004667073,"gflops":593.337,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.031595416,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=1024 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003039375,"q1_s":0.002980916,"q3_s":0.003070125,"gflops":706.554,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.019303167,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.089079480,"q1_s":0.088412344,"q3_s":0.091144000,"gflops":1542.880,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.111361292,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.091847875,"q1_s":0.090504615,"q3_s":0.092176104,"gflops":1496.376,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.110140584,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe infer metal reuse size=n/a readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000418021,"q1_s":0.000358406,"q3_s":0.000468937,"throughput_per_s":2392.227,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.010916542}
+== bench-fandhe infer metal reuse size=n/a readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000389666,"q1_s":0.000333562,"q3_s":0.000407916,"throughput_per_s":2566.300,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.010875458}
+== round 1/5 完了時点の status ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 3:36  up 11 days,  3:09, 1 user, load averages: 3.29 4.27 3.76
+== bench-fandhe gemm metal reuse size=1024 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003374584,"q1_s":0.003073584,"q3_s":0.004492771,"gflops":636.370,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.020673708,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=1024 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003097750,"q1_s":0.003027719,"q3_s":0.003195031,"gflops":693.240,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.019990708,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.091661896,"q1_s":0.089374042,"q3_s":0.092272510,"gflops":1499.412,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.110367708,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.091100666,"q1_s":0.089360135,"q3_s":0.091865469,"gflops":1508.649,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.111779834,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe infer metal reuse size=n/a readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000447145,"q1_s":0.000416625,"q3_s":0.000523958,"throughput_per_s":2236.409,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.010972458}
+== bench-fandhe infer metal reuse size=n/a readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000335813,"q1_s":0.000333906,"q3_s":0.000339334,"throughput_per_s":2977.852,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.010929667}
+== round 2/5 完了時点の status ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 3:36  up 11 days,  3:10, 1 user, load averages: 2.52 3.94 3.66
+== bench-fandhe gemm metal reuse size=1024 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003051104,"q1_s":0.003022396,"q3_s":0.003105625,"gflops":703.838,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.019492208,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=1024 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003029187,"q1_s":0.002973698,"q3_s":0.003102949,"gflops":708.931,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.020658291,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.090774458,"q1_s":0.089240562,"q3_s":0.091672895,"gflops":1514.071,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.113933625,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.091772729,"q1_s":0.090894594,"q3_s":0.092129802,"gflops":1497.601,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.111914334,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe infer metal reuse size=n/a readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000330896,"q1_s":0.000327625,"q3_s":0.000399437,"throughput_per_s":3022.102,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.011314000}
+== bench-fandhe infer metal reuse size=n/a readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000332855,"q1_s":0.000330541,"q3_s":0.000334552,"throughput_per_s":3004.316,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.011320875}
+== round 3/5 完了時点の status ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 3:36  up 11 days,  3:10, 1 user, load averages: 3.00 3.98 3.68
+== bench-fandhe gemm metal reuse size=1024 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003536208,"q1_s":0.003172906,"q3_s":0.004509771,"gflops":607.284,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.020685208,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=1024 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003037979,"q1_s":0.002983302,"q3_s":0.003089166,"gflops":706.879,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.019748167,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.092074645,"q1_s":0.090672438,"q3_s":0.092498302,"gflops":1492.691,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.112704542,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.091545292,"q1_s":0.091056552,"q3_s":0.091874031,"gflops":1501.322,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.115713875,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe infer metal reuse size=n/a readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000332167,"q1_s":0.000330364,"q3_s":0.000432104,"throughput_per_s":3010.538,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.011241875}
+== bench-fandhe infer metal reuse size=n/a readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000335125,"q1_s":0.000331198,"q3_s":0.000408584,"throughput_per_s":2983.966,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.010800666}
+== round 4/5 完了時点の status ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 3:37  up 11 days,  3:11, 1 user, load averages: 2.28 3.67 3.57
+== bench-fandhe gemm metal reuse size=1024 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003075083,"q1_s":0.003029250,"q3_s":0.003139989,"gflops":698.350,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.019452917,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=1024 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":1024,"median_s":0.003145062,"q1_s":0.003070489,"q3_s":0.003234687,"gflops":682.811,"checksum":-1855.597736,"warmup":20,"iters":20,"mode":"reuse","init_s":0.020790792,"parity_total":1048576,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.091807896,"q1_s":0.090351041,"q3_s":0.092088157,"gflops":1497.028,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.115169208,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe gemm metal reuse size=4096 readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"gemm","device":"metal","size":4096,"median_s":0.091223708,"q1_s":0.090068218,"q3_s":0.092172739,"gflops":1506.614,"checksum":-25768.747284,"warmup":20,"iters":20,"mode":"reuse","init_s":0.113146375,"parity_total":16777216,"parity_fail_count":0,"parity_max_abs_err":0.000000e0,"parity_max_rel_err":0.000000e0,"parity_scaled_abs_bound":0.000000e0,"parity_scaled_abs_rescued":0}
+== bench-fandhe infer metal reuse size=n/a readback=fresh ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000448917,"q1_s":0.000409417,"q3_s":0.000482344,"throughput_per_s":2227.586,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.011604250}
+== bench-fandhe infer metal reuse size=n/a readback=parallel ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"infer","device":"metal","size":64,"median_s":0.000417834,"q1_s":0.000414313,"q3_s":0.000458427,"throughput_per_s":2393.298,"checksum":13.976574,"warmup":20,"iters":20,"mode":"reuse","init_s":0.011152166}
+== round 5/5 完了時点の status ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 3:37  up 11 days,  3:11, 1 user, load averages: 3.64 3.91 3.66
+== metal status (after loop) ==
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+ 3:37  up 11 days,  3:11, 1 user, load averages: 3.64 3.91 3.66
+done. results in results/raw/results-m4max-readback-ab-head-c80d9818-3184-macmini-r2-g4-fresh.jsonl / results/raw/results-m4max-readback-ab-head-c80d9818-3184-macmini-r2-g4-parallel.jsonl ; manifest in results/raw/manifest-m4max-readback-ab-head-c80d9818-3184-macmini-r2-g4.json

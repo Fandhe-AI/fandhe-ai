@@ -1,0 +1,32 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_all_candidates ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 9.06s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_dispatch_auto ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.31s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::unroll_load_on_off_bit_match_transposed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 0.11s
+
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/optin-3184/target-diag/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_steel_candidate_diag_tests::steel_candidate_arms_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 806 filtered out; finished in 26.08s
+

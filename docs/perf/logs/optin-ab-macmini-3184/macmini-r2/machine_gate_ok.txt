@@ -1,0 +1,10 @@
+load-gate-2104-cpu-3184-macmini-r2-g1.log: round1=1(load1=2.52) round2=1(load1=2.48) round3=1(load1=2.48) round4=1(load1=2.48) round5=1(load1=2.48) machine_gate_ok=1
+cooldown-2104-cpu-3184-macmini-r2-g1.log: round1=1(load1=2.52) round2=1(load1=2.48) round3=1(load1=2.48) round4=1(load1=2.48) round5=1(load1=2.48) machine_gate_ok=1
+load_gate-2102-cpu-3184-macmini-r2-g2.log: round1=1(load1=2.6) round2=1(load1=2.54) round3=1(load1=2.38) round4=1(load1=2.71) round5=1(load1=2.58) machine_gate_ok=1
+cooldown-2102-cpu-3184-macmini-r2-g2.log: round1=1(load1=2.6) round2=1(load1=2.54) round3=1(load1=2.38) round4=1(load1=2.71) round5=1(load1=2.58) machine_gate_ok=1
+load-gate-2113-metal-3184-macmini-r2-g3.log: round1=1(load1=2.8) round2=1(load1=2.8) round3=1(load1=2.9) round4=1(load1=2.9) round5=1(load1=2.9) machine_gate_ok=1
+cooldown-2113-metal-3184-macmini-r2-g3.log: round1=1(load1=2.8) round2=1(load1=2.8) round3=1(load1=2.9) round4=1(load1=2.9) round5=1(load1=2.9) machine_gate_ok=1
+cooldown-2112-head-c80d9818-3184-macmini-r2-g4.log: round1=1(load1=2.35) round2=1(load1=2.65) round3=1(load1=2.52) round4=1(load1=2.33) round5=1(load1=2.28) machine_gate_ok=1
+cooldown-1477-head-c80d9818-3184-macmini-r2-g5.log: round1=1(load1=2.6) round2=1(load1=2.5) round3=1(load1=2.56) round4=1(load1=2.29) round5=1(load1=2.68) machine_gate_ok=1
+cooldown.log: round1=1(load1=2.78) round2=1(load1=2.29) round3=1(load1=1.94) round4=1(load1=1.76) round5=1(load1=1.62) machine_gate_ok=1
+load_gate.log: round1=1(load1=2.0) round2=1(load1=2.0) round3=1(load1=1.0) round4=1(load1=1.0) round5=1(load1=1.0) machine_gate_ok=1
