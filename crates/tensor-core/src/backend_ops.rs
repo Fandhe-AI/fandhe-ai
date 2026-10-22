@@ -3906,13 +3906,17 @@ pub trait BackendOps {
     /// # 既定実装
     /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示
     /// フォールバックは同期回数の受け入れ条件を静かに破るため禁止）。
-    /// Metal（`backend-metal::ops::MetalBackendOps`）が実装し、CPU は #3253、
-    /// CUDA は #3221 で対応する。ROCm は既定を継承する。
+    /// Metal（`backend-metal::ops::MetalBackendOps`）と CUDA
+    /// （`backend-cuda::ops::CudaBackendOps`。#3221）が実装し、CPU は #3253 で
+    /// 対応する。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。
     /// 待たない encode-only 版は [`Self::relu_backward_mask_device_tracked`]
     /// のみとする（トークンなしの encode-only 入口は作らない。設計 §5）。
+    /// CUDA は例外で、ストリーム順序契約に従い非 tracked・tracked とも同期せず
+    /// 起動だけを積む（起動エラーは次の同期点で poison／世代検査から観測される。
+    /// `linear_forward_device` と同じ。`docs/backend-cuda-async-execution-design.md`）。
     fn relu_backward_mask_device(
         &self,
         _g: DeviceBufferView<'_>,
@@ -3932,7 +3936,8 @@ pub trait BackendOps {
     ///
     /// 既定は `token` を無視して [`Self::relu_backward_mask_device`] へ委譲する。
     /// Metal のオーバーライドは待たずに encode のみ行い、`token` を `encode`
-    /// と同一ロック区間でバッチへ登録する。
+    /// と同一ロック区間でバッチへ登録する。CUDA は `token` を使わず非 tracked 版と
+    /// 機能的に同一の明示 override を置く（設計 §5）。
     fn relu_backward_mask_device_tracked(
         &self,
         g: DeviceBufferView<'_>,

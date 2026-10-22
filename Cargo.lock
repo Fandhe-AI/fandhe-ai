@@ -365,6 +365,7 @@ version = "0.11.0"
 dependencies = [
  "bench-harness",
  "cudarc",
+ "fandhe-ai-autodiff",
  "fandhe-ai-backend-cpu",
  "fandhe-ai-tensor-core",
  "half",
