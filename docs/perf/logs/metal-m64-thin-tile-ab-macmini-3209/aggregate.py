@@ -64,6 +64,7 @@ def num(s, what):
     return v
 
 
+EXPECT_DEVICE = ("10", "Apple M4", "Some(M4Base)")
 DEVICE_RE = re.compile(
     r'^DEVICE gpu_cores=(\S+) soc="([^"]*)" verified_tile_table=(\S+) split_k_enabled=(true|false)$')
 TRACE_RE = re.compile(
@@ -294,6 +295,12 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
                 fail("%s が run 間で一致しない %s" % (field, key))
     dev, trace = traces[0]
     heads0 = kerns[0][0]
+    # 対象機体の同定（RULE: Mac mini = Apple M4・GPU 10 コア・M4Base 表）。不一致は参考系列へ落とす
+    # （M4 Max 等の系列を正式な Mac mini 系列として ADOPT にしない）。
+    if tuple(dev[:3]) != EXPECT_DEVICE:
+        official = False
+        gate_reasons = list(gate_reasons) + [
+            "DEVICE が Mac mini（M4Base）の期待値と不一致: gpu_cores=%s soc=\"%s\" verified_tile_table=%s" % tuple(dev[:3])]
 
     # 到達前提（RULE 項 5）
     reach_ok = True
@@ -378,7 +385,7 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
 # ---------------- self-test ----------------
 
 def _fixture(d, kg_t=None, official=True, drop_run=None, nonfinite=False, hash_mismatch=False,
-             thin_wrong=False):
+             thin_wrong=False, soc="Apple M4"):
     """正常系 fixture を d に書く。kg_t は候補の kernel_gpu 倍率（cur 比。既定 0.9）。"""
     kg_t = kg_t if kg_t is not None else 0.9
     with open(os.path.join(d, "rev-stamp.txt"), "w") as f:
@@ -399,7 +406,7 @@ def _fixture(d, kg_t=None, official=True, drop_run=None, nonfinite=False, hash_m
         if drop_run == i:
             continue
         with open(os.path.join(d, "trace_run%d.log" % i), "w") as f:
-            f.write('DEVICE gpu_cores=10 soc="Apple M4" verified_tile_table=Some(M4Base) split_k_enabled=true\n')
+            f.write('DEVICE gpu_cores=10 soc="%s" verified_tile_table=Some(M4Base) split_k_enabled=true\n' % soc)
             for s in NN_SHAPES:
                 thin = "none"
                 if s in EXPECT_THIN and not thin_wrong:
@@ -471,6 +478,13 @@ def self_test():
             print("PASS 正式系列でなければ undetermined")
         else:
             print("FAIL 正式系列判定"); ok = False
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d, soc="Apple M4 Max")
+        md = aggregate(d, "deadbeef", cell_ab="ok")
+        if "正式系列（load1 ゲート全通過）: いいえ" in md and "ゲート判定: ADOPT" not in md and "| T1 | ADOPT |" not in md:
+            print("PASS 機体不一致（M4 Max）は参考系列で ADOPT にならない")
+        else:
+            print("FAIL 機体不一致の判定"); ok = False
     with tempfile.TemporaryDirectory() as d:
         _fixture(d, thin_wrong=True)
         md = aggregate(d, "deadbeef", cell_ab="ok")

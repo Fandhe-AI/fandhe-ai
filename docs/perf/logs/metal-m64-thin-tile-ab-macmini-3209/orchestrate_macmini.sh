@@ -19,7 +19,10 @@ MOD="gemm_m64_thin_tile_ab_diag_tests"
 PREREQ_MOD="gemm_m64_thin_tile_diag_tests"
 
 [ -f "${ROOT}/.rev-stamp" ] || { echo ".rev-stamp が無い（腕の同定不能）" >&2; exit 1; }
-mkdir -p "${OUT}"
+mkdir -p "${OUT}" || exit 1
+# 相対指定の OUT は以降の cd（ROOT へ移動）で別基準になり、項 14 のログ上書き禁止検査を迂回しうるため、
+# 検査・保存を始める前に絶対パスへ正規化する。
+OUT=$(cd "${OUT}" && pwd) || exit 1
 for f in prereq_bitident.log parity.log load_gate.log rev-stamp.txt env_info.txt build_tests.log; do
   if [ -e "${OUT}/${f}" ]; then
     echo "${f} が既に存在する（差し替え禁止。再実行は別の OUT で行う）" >&2
