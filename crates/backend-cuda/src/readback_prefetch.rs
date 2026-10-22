@@ -147,14 +147,16 @@ impl Prefetcher {
         loop {
             match g.slots.get_mut(&numel).map(|s| &mut s.state) {
                 Some(st @ SlotState::Ready(_)) => {
-                    let SlotState::Ready(v) = std::mem::replace(st, SlotState::Empty) else {
-                        unreachable!("直前に Ready と判定済み");
-                    };
-                    g.hits += 1;
-                    if waited {
-                        g.waits += 1;
+                    // Ready 判定済みのため else は到達しないが、panic せずインライン確保へ倒す。
+                    if let SlotState::Ready(v) = std::mem::replace(st, SlotState::Empty) {
+                        g.hits += 1;
+                        if waited {
+                            g.waits += 1;
+                        }
+                        return Some(v);
                     }
-                    return Some(v);
+                    g.misses += 1;
+                    return None;
                 }
                 Some(SlotState::Pending) => {
                     let now = Instant::now();
