@@ -2,13 +2,13 @@
 """イシュー #3209 の集計（標準ライブラリのみ。`python3 -I aggregate.py <dir> [opts]`）。
 
 規則の正は同ディレクトリの RULE.txt。入力は orchestrate_macmini.sh が出力した
-trace_run{1..5}.log・kern_run{1..5}.log・parity.log・load_gate.log・rev-stamp.txt。
+trace_run{1..5}.log・kern_run{1..5}.log・parity.log・prereq_bitident.log・load_gate.log・rev-stamp.txt。
 出力（標準出力）は aggregate.md 相当の Markdown。判定は RULE 項 10〜12 の機械判定そのもの。
 
 厳格パース方針（欠損は寛容に埋めず必ず例外 → exit 1）:
 - run が 5 本揃わない・行が足りない・欠損フィールド・非数値・非有限値は拒否する
 - DEVICE／TRACE が run 間で一致しない、同じ腕の hash が run 間で一致しない系列は拒否する
-- load_gate.log に gate=pass 以外・FAILED を含む系列は「正式系列でない」（判定は undetermined）
+- load_gate.log に全 gate 行（prereq-bitident・parity・各 run の trace／kern）が重複なく揃わない・gate=pass 以外・FAILED を含む・series done が無い系列は「正式系列でない」（判定は undetermined）
 - `--expect-rev` 指定時は rev-stamp.txt と不一致なら拒否する
 - `--cell-ab {ok,anomaly,fail,unavailable}` は train/infer セル A/B（RULE 項 13）の結果。既定は
   unavailable。ok 以外ではゲート判定を ADOPT にしない（fail は FAIL、anomaly／unavailable は
@@ -166,19 +166,56 @@ def parse_parity(path):
     return res
 
 
+GATE_LABELS = (["prereq-bitident", "parity"]
+               + ["run%d-%s" % (i, k) for i in RUNS for k in ("trace", "kern")])
+
+
 def parse_gate(path):
+    """load_gate.log を厳格に読む（RULE 項 9）。
+
+    正式系列の条件: 全プロセス（prereq-bitident・parity・各 run の trace／kern）の gate 行が
+    重複なく揃い、すべて gate=pass で、FAILED を含まず、`series done` で終わっていること。
+    欠損・重複・未知ラベルは正式系列でない（official=False。判定は undetermined）。
+    """
     text = read_text(path)
     official = True
     reasons = []
+    seen = {}
     for line in text.splitlines():
         if "FAILED" in line:
             official = False
             reasons.append(line.strip())
-        m = re.search(r"gate=(\S+)", line)
-        if m and m.group(1) != "pass":
+        m = re.match(r"^(\S+) gate=(\S+)", line)
+        if m:
+            label, status = m.group(1), m.group(2)
+            if label in seen:
+                official = False
+                reasons.append("gate 行が重複: %s" % label)
+            seen[label] = status
+            if status != "pass":
+                official = False
+                reasons.append(line.strip())
+    for label in GATE_LABELS:
+        if label not in seen:
             official = False
-            reasons.append(line.strip())
+            reasons.append("gate 行が欠損: %s" % label)
+    for label in seen:
+        if label not in GATE_LABELS:
+            official = False
+            reasons.append("未知の gate ラベル: %s" % label)
+    if not re.search(r"^series done\s*$", text, re.MULTILINE):
+        official = False
+        reasons.append("series done が無い（系列が完了していない）")
     return official, reasons
+
+
+def check_prereq_bitident(path):
+    """前提ゲート（RULE 項 6(a)）のログの存在と完了を検証する。欠損・未完了は例外（採用判定を出さない）。"""
+    text = read_text(path)
+    if "test result: ok." not in text:
+        fail("prereq_bitident.log に test result: ok. が無い（前提ゲート未完了）")
+    if re.search(r"test result: FAILED|\d+ failed", text) and not re.search(r"\b0 failed", text):
+        fail("prereq_bitident.log に失敗がある")
 
 
 def median(xs):
@@ -214,10 +251,10 @@ def candidate_overall(statuses):
 
 def gate_verdict(pair_info, official, reach_ok, cell_ab):
     """RULE 項 12・13。pair_info: [(status, ratio, faster, slower)]（NN の 2 写像対）。"""
-    if not official:
-        return "undetermined（正式系列でない）"
     if cell_ab == "fail":
         return "FAIL（セル A/B の checksum 不一致）"
+    if not official:
+        return "undetermined（正式系列でない）"
     if not reach_ok:
         return "undetermined（規則の前提不成立: 到達追跡が机上の前提と食い違う）"
     if any(s in ("undetermined", "NOT_ADOPTABLE") for s, _, _, _ in pair_info):
@@ -238,6 +275,7 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
     rev = read_text(os.path.join(d, "rev-stamp.txt")).strip()
     if expect_rev is not None and rev != expect_rev:
         fail("rev-stamp 不一致: %r != %r" % (rev, expect_rev))
+    check_prereq_bitident(os.path.join(d, "prereq_bitident.log"))
     official, gate_reasons = parse_gate(os.path.join(d, "load_gate.log"))
     parity = parse_parity(os.path.join(d, "parity.log"))
     traces, kerns = [], []
@@ -345,10 +383,13 @@ def _fixture(d, kg_t=None, official=True, drop_run=None, nonfinite=False, hash_m
     kg_t = kg_t if kg_t is not None else 0.9
     with open(os.path.join(d, "rev-stamp.txt"), "w") as f:
         f.write("deadbeef\n")
+    with open(os.path.join(d, "prereq_bitident.log"), "w") as f:
+        f.write("test result: ok. 2 passed; 0 failed\n")
     with open(os.path.join(d, "load_gate.log"), "w") as f:
         f.write("build-done x\n")
-        for i in RUNS:
-            f.write("run%d-trace gate=%s load1=0.5\n" % (i, "pass" if official or i != 3 else "timeout"))
+        for lab in GATE_LABELS:
+            f.write("%s gate=%s load1=0.5\n" % (lab, "pass" if official or lab != "run3-trace" else "timeout"))
+        f.write("series done\n")
     with open(os.path.join(d, "parity.log"), "w") as f:
         for o, s in CELLS:
             for a in ["cur"] + CANDS:
@@ -455,6 +496,32 @@ def self_test():
             print("FAIL parity 欠損が拒否されなかった"); ok = False
         except AggregateError:
             print("PASS fail-closed: parity.log 欠損")
+    # 空・一部のみの load_gate.log は正式系列にならない
+    for name, body in (("空", ""), ("一部のみ", "build-done x\nprereq-bitident gate=pass load1=0.5\nseries done\n")):
+        with tempfile.TemporaryDirectory() as d:
+            _fixture(d)
+            with open(os.path.join(d, "load_gate.log"), "w") as f:
+                f.write(body)
+            md = aggregate(d, "deadbeef", cell_ab="ok")
+            if "正式系列（load1 ゲート全通過）: いいえ" in md and "ゲート判定: ADOPT" not in md:
+                print("PASS load_gate.log %s は正式系列でない" % name)
+            else:
+                print("FAIL load_gate.log %s" % name); ok = False
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d)
+        os.remove(os.path.join(d, "prereq_bitident.log"))
+        try:
+            aggregate(d, "deadbeef", cell_ab="ok")
+            print("FAIL prereq_bitident.log 欠損が拒否されなかった"); ok = False
+        except AggregateError:
+            print("PASS fail-closed: prereq_bitident.log 欠損")
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d, official=False)
+        md = aggregate(d, "deadbeef", cell_ab="fail")
+        if "ゲート判定: FAIL" in md:
+            print("PASS 参考系列でも cell_ab=fail は FAIL")
+        else:
+            print("FAIL cell_ab=fail の優先"); ok = False
     return 0 if ok else 1
 
 

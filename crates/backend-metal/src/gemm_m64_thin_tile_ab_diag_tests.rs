@@ -197,10 +197,14 @@ fn zero_pad(src: &[f32], rows: usize, cols: usize, rows_p: usize, cols_p: usize)
 
 /// `prod` 腕の bias・act（RULE.txt 項 4。L1 forward は bias+relu、L2 forward は bias、
 /// ほかはなし）。
+///
+/// 引数は `trial` が受け取る **実効次元（pad8 済み）**。生の L2 forward (64,10,256) は
+/// (64,16,256) へゼロ詰めされるため、生の形状ではなく pad8 後の形状で照合する
+/// （照合を生の形状にすると prod 腕の bias が省略される。PR #3527 レビュー指摘）。
 fn prod_epilogue(m: usize, n: usize, k: usize) -> (bool, bool) {
     match (m, n, k) {
         (64, 256, 784) => (true, true),
-        (64, 10, 256) => (true, false),
+        (64, 16, 256) => (true, false),
         _ => (false, false),
     }
 }
