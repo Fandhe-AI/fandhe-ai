@@ -205,7 +205,7 @@ Apple Silicon（macOS）上で実施。
 **機体・版**: Mac mini（Apple M4・GPU 10 コア・16 GB・macOS 27.0.1・rustc 1.99.0）、`host_kind=macmini`、
 `verified_tile_table=M4Base`、`split_k_enabled=true`。計測対象リビジョン `3d5a08b318b13ac54925766e34c8823337b51498`
 （`.rev-stamp` とツリー指紋〈`tree-fingerprint.txt`〉は開発機の `git archive` と一致）。candle-core 0.11.0。
-load1 < 3.0 ゲートは全 38 プロセスが待機なしで通過（正式系列）。5 run（run 内は warmup 20 + 計測 20）。
+load1 < 3.0 ゲートは全 38 プロセスが（prereq-bitident 210 秒・run2-candle-N256 30 秒・run2-trace 60 秒の待機後を含め）全ゲート通過（正式系列）。5 run（run 内は warmup 20 + 計測 20）。
 
 **前提ゲート**: 既存 7 件（`gemm_frag_interleave_diag_tests`）pass、主腕 × 全 N の CPU 参照 parity（REQ-2 統一複合判定）pass、
 `fi` と `cur` の出力 hash は全 N・5 run で一致（bit 一致）、補助腕の ON/OFF も全件 bit 一致。fallback なし。

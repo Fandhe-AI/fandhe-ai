@@ -10,7 +10,7 @@
   規則を固定したコミット = `bf2dbe7c8`（計測基盤はそのあとの別コミット。規則本文は固定後に変更していない）。
 - 計測対象リビジョン（`rev-stamp.txt`）= `3d5a08b318b13ac54925766e34c8823337b51498`。ツリー指紋は開発機の `git archive` と一致（`tree-fingerprint.txt`）。
 - 機体: Mac mini（Apple M4・GPU 10 コア・16 GB）、`host_kind=macmini`。ホスト名・ユーザー名・`$HOME` はマスク済み。
-- 純カーネル計測は load1 < 3.0 ゲートを全 38 プロセスが待機なしで通過。gemm セル A/B も 5 round 全て pass。
+- 純カーネル計測は load1 < 3.0 ゲートを全 38 プロセスが（prereq-bitident 210 秒・run2-candle-N256 30 秒・run2-trace 60 秒の待機後を含め）全ゲート通過。gemm セル A/B も 5 round 全て pass。
 
 ## 収録物
 
