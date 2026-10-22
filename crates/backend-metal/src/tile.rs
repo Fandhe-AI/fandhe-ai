@@ -1002,6 +1002,86 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         staged: true,
     },
 ];
+/// m=64 級の細長い GEMM 向けタイル候補（イシュー #3208。#3209 が Mac mini
+/// で A/B 計測する対象）。`CANDIDATES` とは別配列にして添字依存・既存の
+/// 全候補走査テスト・examples の複製配列へ波及させない。
+///
+/// いずれも `gemm_simdgroup_tiled` の細いタイル構成で、`bk=16`・staged は
+/// 現行 `CANDIDATES[1..=3]` と同一。K ループの結合順序は `bk` と 8 要素
+/// チャンクの K 昇順だけで決まり bm/bn/wm/wn に依存しないため、現行 classic
+/// 構成と bit 一致する見込み（実機の `#[ignore]` テストで確認。
+/// `docs/perf/metal-gemm-m64-thin-tile-candidates.md`）。シェーダは無変更で
+/// REQ-8 の手動境界検査は既存カーネルのまま維持される。
+///
+/// - `[0]`（T1）16×32・acc 1×2: 横長（短辺 64）。64×256 で 32 TG
+/// - `[1]`（T2）16×64・acc 1×4: 横長。acc を多く持つ版（16 TG）
+/// - `[2]`（T3）32×16・acc 2×1: 縦長（短辺 64）。784×64 で 100 TG
+/// - `[3]`（T4）16×16・acc 1×1: 最大 TG 数の版
+pub(crate) const M64_THIN_CANDIDATES: &[TileConfig] = &[
+    TileConfig {
+        bm: 16,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
+    TileConfig {
+        bm: 16,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
+    TileConfig {
+        bm: 32,
+        bn: 16,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
+    TileConfig {
+        bm: 16,
+        bn: 16,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
+];
+
+/// [`M64_THIN_CANDIDATES`] を [`select_for_verified_device`] へ結線するか。
+/// **既定 OFF**。#3209 の A/B はこの 1 行を書き換えて計測する
+/// （`TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED` と同じ書式）。
+pub(crate) const M64_THIN_TILE_ENABLED: bool = false;
+
+/// m=64 級形状に対する細タイル選択の純関数（#3208）。`enabled == false` なら
+/// 常に `None`。`true` のとき、m,n,k がすべて 64 以上（`select_impl` の
+/// SMALL 判定を先に尊重）かつ `min(m,n) == 64`・`max(m,n) >= 128` の形状に
+/// だけ、横長（`n >= m`）は T1、縦長は T3 を返す。
+///
+/// 到達範囲は `dispatch_auto` の classic 分岐だけで、split-K が先に取る形状と
+/// 常駐 strided 経路（スカラー `gemm_tiled_bias_act`）には届かない。
+pub(crate) fn select_m64_thin_with(
+    m: usize,
+    n: usize,
+    k: usize,
+    enabled: bool,
+) -> Option<TileConfig> {
+    if !enabled || m < 64 || n < 64 || k < 64 {
+        return None;
+    }
+    if m.min(n) != 64 || m.max(n) < 128 {
+        return None;
+    }
+    if n >= m {
+        Some(M64_THIN_CANDIDATES[0])
+    } else {
+        Some(M64_THIN_CANDIDATES[2])
+    }
+}
 
 /// `primary` を先頭に、常に妥当な [`TileConfig::SINGLE_SIMDGROUP_8X8`] を
 /// 末尾に持つフォールバック候補列を返す（`primary` が既に単一 simdgroup
@@ -1222,6 +1302,9 @@ pub fn select_for_verified_device(
     k: usize,
     device: Option<VerifiedTileTableDevice>,
 ) -> TileConfig {
+    if let Some(cfg) = select_m64_thin_with(m, n, k, M64_THIN_TILE_ENABLED) {
+        return cfg;
+    }
     select_impl(m, n, k, device, None)
 }
 
@@ -6927,6 +7010,70 @@ mod tests {
         verified_m4_max_for_test().map(VerifiedTileTableDevice::M4Max)
     }
 
+    // ---- #3208 m=64 細タイル候補 ----
+
+    #[test]
+    fn m64_thin_candidates_are_valid_and_distinct_from_candidates() {
+        for c in M64_THIN_CANDIDATES {
+            assert!(c.validate(1024, 32768).is_ok(), "{c:?}");
+            assert!(c.shared_mem_bytes_f16() <= 32768, "{c:?}");
+            assert!((c.bm / c.wm) / 8 <= TileConfig::MAX_ACC, "{c:?}");
+            assert!((c.bn / c.wn) / 8 <= TileConfig::MAX_ACC, "{c:?}");
+            assert_eq!(c.bk % TileConfig::VEC_WIDTH, 0);
+            assert_eq!(c.bn % TileConfig::VEC_WIDTH, 0);
+            assert!(!CANDIDATES.contains(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn m64_thin_gate_is_off_by_default() {
+        const { assert!(!M64_THIN_TILE_ENABLED) };
+    }
+
+    #[test]
+    fn m64_thin_off_keeps_select_for_verified_device_identical_to_select_impl() {
+        let devs = [None, m4_base_dev(), m4_max_dev()];
+        for m in [8, 63, 64, 65, 128, 784] {
+            for n in [10, 63, 64, 127, 128, 256, 784] {
+                for k in [10, 63, 64, 256, 784] {
+                    for d in devs {
+                        assert_eq!(
+                            select_for_verified_device(m, n, k, d),
+                            select_impl(m, n, k, d, None),
+                            "{m}x{n}x{k} {d:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn m64_thin_disabled_always_none() {
+        for (m, n, k) in [(64, 256, 784), (784, 64, 256), (64, 64, 64)] {
+            assert_eq!(select_m64_thin_with(m, n, k, false), None);
+        }
+    }
+
+    #[test]
+    fn m64_thin_enabled_maps_target_shapes() {
+        let t1 = Some(M64_THIN_CANDIDATES[0]);
+        let t3 = Some(M64_THIN_CANDIDATES[2]);
+        assert_eq!(select_m64_thin_with(64, 256, 784, true), t1);
+        assert_eq!(select_m64_thin_with(784, 64, 256, true), t3);
+        assert_eq!(select_m64_thin_with(784, 256, 64, true), None);
+        // 小形状（n<64 / k<64）は SMALL 判定を尊重して対象外
+        assert_eq!(select_m64_thin_with(64, 10, 256, true), None);
+        assert_eq!(select_m64_thin_with(256, 64, 10, true), None);
+        assert_eq!(select_m64_thin_with(256, 10, 64, true), None);
+        // 境界
+        assert_eq!(select_m64_thin_with(63, 256, 256, true), None);
+        assert_eq!(select_m64_thin_with(65, 256, 256, true), None);
+        assert_eq!(select_m64_thin_with(64, 127, 256, true), None);
+        assert_eq!(select_m64_thin_with(64, 128, 256, true), t1);
+        assert_eq!(select_m64_thin_with(64, 256, 63, true), None);
+        assert_eq!(select_m64_thin_with(64, 64, 64, true), None);
+    }
     #[test]
     fn verify_m4_base_accepts_only_exact_10core_m4() {
         assert!(verify_m4_base(Some(10), Some("Apple M4")).is_some());
