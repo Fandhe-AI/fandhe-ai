@@ -1,0 +1,100 @@
+イシュー #3209: m=64 向け細タイル候補（#3208）の Mac mini A/B — 事前登録規則（計測前に固定。以後、本文は変更しない）
+
+0. 判定の根拠
+   ADOPT／REJECT の根拠は「純カーネル時間（kernel_gpu）」に限る。train／infer のセル A/B は
+   A/A の対照（record_only）であり、改善の証拠にしない。
+
+1. 位置づけ・不変事項
+   - 診断のみ。main の定数 M64_THIN_TILE_ENABLED（false）を変えない。after 腕は計測専用の checkout とし、
+     main へはコミットしない。
+   - tolerance（RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD）・parity baseline・FMA 契約・シェーダ・
+     tile.rs の選択ロジックは変えない。#3181／#3184／#2113 の継承規則は 1 字も変えない。
+   - ADOPT の意味は「その形状向けに選択表へ入れる価値がある（結合順序不変）」に限る。結線は別 PR かつ所有者判断。
+
+2. 機体と記録項目
+   Mac mini（Apple M4・GPU 10 コア・16 GB）。記録: チップ・macOS・rustc、.rev-stamp（HEAD）と git archive による
+   ツリー指紋の突合、probe_gpu_core_count・probe_soc_brand_string・verified_tile_table_device の解決値
+   （M4Base を期待）・split_k_enabled。uname -n・ユーザー名・$HOME はマスクする（ホスト名は masked、$HOME は <home>）。
+
+3. 形状と向き（MLP 784→256→10・batch 64 の 6 形状）
+   (a) NN 計測（6 形状すべて）: (64,256,784)・(64,10,256)・(784,64,256)・(256,64,10)・(784,256,64)・(256,10,64)。
+       dispatch_auto の classic 分岐は NN なので、ゲート判定にはこちらを使う。
+   (b) 実向き strided 計測: 適格な形状（m,n,k が 8 の倍数、ld が 4 の倍数）だけ。
+       (784,64,256) NT（L1 d_input）と (784,256,64) TN（L1 dW）。
+       非適格の (256,64,10) NT と (256,10,64) TN は strided 計測の対象外とし、(a) の NN 値だけを記録する。
+       代替寸法による proxy は使わない。
+   入力は決定的シードの有限値（NaN・inf を含めない）。
+
+4. 腕（各形状）
+   - cur: ゲート OFF の select_for_verified_device(m,n,k, ctx.verified_tile_table_device()) の構成
+   - T1〜T4: M64_THIN_CANDIDATES を明示指定
+   - prod（record_only）: 本番スカラー経路 encode_strided_bias_act_prepared。L1 forward は bias+relu、
+     L2 forward は bias、d_input と dW はなし。カーネルが異なるため bit 比較・判定の対象外。
+   - 計測前に全腕の resolve_tile_config を記録する。要求と解決が違う腕は fallback=true として判定から除く（abort しない）。
+
+5. 到達追跡（決定的・閾値なし）
+   形状ごとに should_split_k、select_route_for_verified_device（ゲート OFF）、select_m64_thin_with(m,n,k,true) を
+   記録し、5 run 全一致を整合検査とする（不一致は fail-closed）。ゲート ON で実際に変わるのは
+   (64,256,784) から T1、(784,64,256) から T3 の 2 件だけ、という机上の前提を検証する。
+   食い違った場合は §13 のセル判定を「規則の前提不成立」とし、ゲート判定を undetermined にする。
+
+6. 前提ゲート（性能 run の前に 1 回実行し、ログを保存する）
+   (a) 既存の gemm_m64_thin_tile_diag_tests（NN 44 件・NT/TN 48 件）を Mac mini で実行する。
+       不一致の候補は NOT_ADOPTABLE とし性能判定しない。
+   (b) 候補 × 形状（fallback なし）ごとに matmul_reference_fma と assert_parity（REQ-2 統一複合判定）で突き合わせる。
+       fail は parity_fail として判定から除く。
+
+7. 計測区間
+   プロセス内で warmup 20 + 計測 20（WARMUP_TRIALS／MEASURED_TRIALS）を取り、その中央値を使う。
+   主指標は kernel_gpu（GPUEnd−GPUStart）。副指標は encode・commit_wait・alloc_c。
+   trial ごとに開始オフセットを回して腕の実行順を巡回させる。
+   1 バッチ 1 ラベルを assert し、kernel_gpu <= commit_wait も assert する。
+
+8. bit 一致
+   trial 0 で全要素 to_bits の FNV-1a 64bit hash を取り、T と cur の一致を見る（型 A なので一致を期待）。
+   候補ごとに run 間の hash 一致を整合検査とする（不一致は fail-closed）。
+   checksum（f64 逐次和）は参考値にとどめ、「bit 同一の証拠」とは書かない。
+
+9. 回数・負荷
+   5 プロセス（5 run）。値は「run 内中央値」の 5 run 中央値とし、run 別の値も表に出す。
+   各プロセスの開始前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ（GATE-INVALID／GATE-TIMEOUT を記録）。
+   全プロセスが通過した系列だけを正式系列とする。
+
+10. 純カーネル判定（候補 × 形状 × 向き。この判定だけが ADOPT／REJECT の根拠）
+    ADOPT_CANDIDATE: 次のすべてを満たす。
+      - cur より 5 run 中央値で 2% を超えて速い
+      - 5 run すべての run 内中央値で cur より速い
+      - bit 一致・parity pass・fallback なし
+    REJECT: 上記を満たさない（2% 以内の帯内・遅い・一貫しない）。
+    NOT_ADOPTABLE: bit 不一致・parity_fail・fallback。
+    undetermined: 正式系列でない、run 数 != 5、欠損・非有限値。
+
+11. 候補ごとの総合
+    ADOPT: 6 形状（NN）または実向き strided のいずれかで ADOPT_CANDIDATE が 1 件以上あり、かつ NOT_ADOPTABLE が 0 件。
+    undetermined: 必要なセルが 1 件でも undetermined。
+    REJECT: 上記以外。
+
+12. ゲート（M64_THIN_TILE_ENABLED の写像そのもの）の判定
+    写像対 (64,256,784)/T1 と (784,64,256)/T3（NN）について判定する。
+    ADOPT: 両対とも「ADOPT_CANDIDATE または帯内」で、少なくとも 1 対が ADOPT_CANDIDATE。
+    REJECT: いずれかの対が 2% を超えて遅く、かつ 5/5 run で遅い。
+    undetermined: それ以外。
+    Mac mini 単機の判定である。写像は機体非依存（M4 Max にも効く）ため、結線の前に M4 Max での確認が要る。
+
+13. train/infer セル A/B（A/A 対照・record_only）
+    before は main、after は同一コミットで M64_THIN_TILE_ENABLED の false→true の 1 行だけを変える。
+    metal × {train, infer} × {fresh, reuse}・size=64・5 round。round ごとに起動順を反転し、
+    compare_gemm_ab.py --threshold 1.00 --per-run --require-checksum-exact で比較する。
+    checksum 不一致は FAIL として停止し、ゲート判定も FAIL にする。
+    あるセルが 5/5 round 一貫して後退または改善した場合は「異常（到達前提と矛盾）」として報告し、
+    ゲート判定は ADOPT にしない（undetermined に落とす）。比はノイズ帯として扱う。
+
+14. 運用
+    ビルドは計測前にすべて済ませ、計測と並走させない。純カーネル計測と A/B runner を同時に走らせない。
+    run の差し替え・追加・セル除外・ログ上書きは禁止。再実行は別 label で行い、旧系列も残す。
+    nohup のサブシェルで切り離して起動し、生存を確認する。
+    2 時間を超える場合は「純カーネル」「セル A/B」の 2 セッションに分ける。
+
+15. 到達不能時
+    機体に届かない、または完走できない場合は、数値を埋めず unavailable／undetermined と記録する。
+    推定値では埋めない。
