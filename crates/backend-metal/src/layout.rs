@@ -358,6 +358,51 @@ pub fn reduce_bias_grad_rows_host(
     Ok(acc.into_iter().map(|v| v as f32).collect())
 }
 
+/// デバイス view の格納形と [`DeviceMatrixLayout`] から GEMM 入口の
+/// [`MatrixLayout`] を導出する純関数（イシュー #3220。`ops.rs` の
+/// `gemm_fp32_strict_into_device_impl`／`gemm_resident_lhs_device_impl` から呼ばれる）。
+///
+/// 格納形を `[r, c]`（行優先・`ld = c`）とし、`RowMajor` は
+/// `{rows: r, cols: c, ld: c, transposed: false}`、`Transposed`（格納の転置を論理
+/// オペランドとして読む）は `{rows: c, cols: r, ld: c, transposed: true}`。これは
+/// ホスト版が `classify_2d(t.shape(), t.strides())`（`t` は格納の行優先、または
+/// その `transpose(0, 1)` view）で得る値と一致し、同じ `MatrixLayout` を同じカーネルへ
+/// 渡すことでホスト版との bit 一致を構造で保つ。`rank != 2` は `RankMismatch`、
+/// 未知の variant（`#[non_exhaustive]`）は `Unsupported`（fail-closed）。
+pub fn matrix_layout_from_device_view(
+    stored_shape: &[usize],
+    layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+) -> Result<MatrixLayout, fandhe_ai_tensor_core::device::BackendError> {
+    use fandhe_ai_tensor_core::DeviceMatrixLayout;
+    use fandhe_ai_tensor_core::ShapeError;
+    use fandhe_ai_tensor_core::device::BackendError;
+
+    if stored_shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: stored_shape.len(),
+        }));
+    }
+    let (r, c) = (stored_shape[0], stored_shape[1]);
+    match layout {
+        DeviceMatrixLayout::RowMajor => Ok(MatrixLayout {
+            rows: r,
+            cols: c,
+            ld: c,
+            transposed: false,
+        }),
+        DeviceMatrixLayout::Transposed => Ok(MatrixLayout {
+            rows: c,
+            cols: r,
+            ld: c,
+            transposed: true,
+        }),
+        _ => Err(BackendError::Unsupported(
+            "matrix_layout_from_device_view: unknown DeviceMatrixLayout variant".into(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,5 +959,47 @@ mod tests {
             err,
             fandhe_ai_tensor_core::device::BackendError::InvalidArgument(_)
         ));
+    }
+
+    /// デバイス view の写像が、ホスト版の `classify_2d`（格納の行優先 strides と
+    /// その転置 view の strides）と一致することを固定する（イシュー #3220）。
+    #[test]
+    fn device_view_layout_matches_classify_2d() {
+        use fandhe_ai_tensor_core::DeviceMatrixLayout;
+        for &(r, c) in &[(2usize, 3usize), (7, 13), (64, 128), (1, 5), (5, 1)] {
+            let row =
+                matrix_layout_from_device_view(&[r, c], DeviceMatrixLayout::RowMajor).unwrap();
+            // 縮退形状（1 行・1 列）は classify_2d が行優先側を先に返すため比較は
+            // transposed でない側のみ厳密に行う。
+            assert_eq!(
+                Some(row),
+                classify_2d(&[r, c], &[c as isize, 1]),
+                "row-major [{r}, {c}]"
+            );
+            let tr =
+                matrix_layout_from_device_view(&[r, c], DeviceMatrixLayout::Transposed).unwrap();
+            assert_eq!(tr.rows, c);
+            assert_eq!(tr.cols, r);
+            assert_eq!(tr.ld, c);
+            assert!(tr.transposed);
+            if r > 1 && c > 1 {
+                assert_eq!(
+                    Some(tr),
+                    classify_2d(&[c, r], &[1, c as isize]),
+                    "transposed [{r}, {c}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn device_view_layout_rejects_non_rank2() {
+        use fandhe_ai_tensor_core::DeviceMatrixLayout;
+        use fandhe_ai_tensor_core::device::BackendError;
+        for shape in [&[4usize][..], &[2, 3, 4][..]] {
+            let err =
+                matrix_layout_from_device_view(shape, DeviceMatrixLayout::RowMajor).unwrap_err();
+            assert!(matches!(err, BackendError::ShapeMismatch(_)), "{shape:?}");
+        }
     }
 }
