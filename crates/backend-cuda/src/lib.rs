@@ -527,6 +527,10 @@ mod pooling;
 // `#![cfg(test)]`（`pooling_model.rs` 冒頭参照）のため非 test ビルドでは
 // 存在しない。
 mod pooling_model;
+// イシュー #3221: `BackendOps::relu_backward_mask_device` の GPU 非依存な
+// 検証・ホストモデル。integration test（`tests/relu_mask_cpu_reference.rs`）が
+// 使うため `pub`（内部用・安定性保証なし）。
+pub mod relu_mask_model;
 mod sort;
 mod sort_model;
 mod unique;

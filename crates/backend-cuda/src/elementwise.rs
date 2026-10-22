@@ -2,7 +2,8 @@
 //! コンパイル・保持・実行。イシュー #599）。
 //!
 //! `gemm.rs::CudaGemm` と同じ構成方針を踏襲する: `CudaElementwise::new` が
-//! `CudaDevice` から 5 カーネルを一括 NVRTC コンパイルして保持し、以降は
+//! `CudaDevice` から全カーネル（add／mul／relu／exp／tanh に加え where・
+//! masked_fill・ReLU マスク選択）を一括 NVRTC コンパイルして保持し、以降は
 //! `run_*_f32` へホスト側スライスを渡すだけで GPU 実行できる（H2D 転送 →
 //! 起動 → 同期 → D2H 転送を内部で完結させる）。カーネルソース自体は
 //! `kernels_elementwise.rs`（NVRTC 文字列埋め込み）に閉じ込め、本モジュール
@@ -123,6 +124,10 @@ pub struct CudaElementwise {
     where_f32: CudaFunction,
     /// `torch.masked_fill` 相当（イシュー #1637）。
     masked_fill_f32: CudaFunction,
+    /// ReLU マスク選択 `out = (mask > 0) ? g : +0.0`（イシュー #3221。
+    /// `launch_relu_mask_select_resident` 専用。シグネチャは二項カーネルの
+    /// `(a, b, out, numel)` の後ろへ `rows`・`cols`・`g_transposed` を足した形）。
+    relu_mask_select_f32: CudaFunction,
 }
 
 impl CudaElementwise {
@@ -148,6 +153,7 @@ impl CudaElementwise {
         let tanh_ptx = compile_ptx(kernels_elementwise::EW_TANH_F32, arch)?;
         let where_ptx = compile_ptx(kernels_elementwise::EW_WHERE_F32, arch)?;
         let masked_fill_ptx = compile_ptx(kernels_elementwise::EW_MASKED_FILL_F32, arch)?;
+        let relu_mask_select_ptx = compile_ptx(kernels_elementwise::EW_RELU_MASK_SELECT_F32, arch)?;
 
         let add_f32 = device
             .context()
@@ -177,6 +183,10 @@ impl CudaElementwise {
             .context()
             .load_module(masked_fill_ptx)?
             .load_function("ew_masked_fill_f32")?;
+        let relu_mask_select_f32 = device
+            .context()
+            .load_module(relu_mask_select_ptx)?
+            .load_function("ew_relu_mask_select_f32")?;
 
         let allocator = context_cache::cached_allocator(device)?;
 
@@ -191,6 +201,7 @@ impl CudaElementwise {
             tanh_f32,
             where_f32,
             masked_fill_f32,
+            relu_mask_select_f32,
         })
     }
 
@@ -528,6 +539,63 @@ impl CudaElementwise {
         out: &mut CudaArgMut<'_>,
         numel: usize,
     ) -> Result<(), CudaError> {
+        let func = self.function_for_binary(op)?;
+        // 追加引数なし（`tail = &[]`）なので起動引数列は #1584 導入時と同一。
+        self.launch_binary_resident_with(func, a, b, out, numel, &[])
+    }
+
+    /// ReLU マスク選択 `out[i] = (mask[i] > 0.0) ? g_logical[i] : +0.0` を
+    /// デバイス常駐のまま起動する（イシュー #3221。
+    /// `BackendOps::relu_backward_mask_device` の CUDA 実装が呼ぶ）。
+    ///
+    /// `g` は格納形、`mask` は論理形・行優先。`g_transposed` が真なら `g` を
+    /// 格納 `[cols, rows]` として転置して読む（カーネルの添字式は
+    /// `relu_mask_model::relu_mask_select_host_model` が逐語再現する）。
+    /// 同期・H2D・D2H はしない（同期点は呼び出し元の `download` へ集約）。
+    /// `numel = rows * cols`。`rows`・`cols`・`numel` が `i32` に収まらなければ
+    /// [`CudaError::InvalidElementwiseShape`]。
+    pub(crate) fn launch_relu_mask_select_resident(
+        &self,
+        g: &CudaArg<'_>,
+        mask: &CudaArg<'_>,
+        out: &mut CudaArgMut<'_>,
+        rows: usize,
+        cols: usize,
+        g_transposed: bool,
+    ) -> Result<(), CudaError> {
+        let numel = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaError::InvalidElementwiseShape {
+                detail: format!("relu mask select: rows * cols overflows usize: {rows}x{cols}"),
+            })?;
+        let to_i32 = |name: &str, v: usize| {
+            i32::try_from(v).map_err(|_| CudaError::InvalidElementwiseShape {
+                detail: format!("relu mask select: {name} must fit in i32: {name}={v}"),
+            })
+        };
+        let tail = [
+            to_i32("rows", rows)?,
+            to_i32("cols", cols)?,
+            i32::from(g_transposed),
+        ];
+        self.launch_binary_resident_with(&self.relu_mask_select_f32, g, mask, out, numel, &tail)
+    }
+
+    /// 二項形シグネチャ `(a, b, out, int numel, int tail...)` のカーネルを
+    /// 起動する共通プリミティブ（`launch_binary_resident`／
+    /// `launch_relu_mask_select_resident` の 2 経路だけが呼ぶ。非公開）。
+    /// `a.len()==b.len()==out.len()==numel` の検証と `numel == 0` の早期
+    /// return、`unsafe` の起動ブロックをここへ 1 か所に集約する（#3221 で
+    /// `launch_binary_resident` から移設。`unsafe` ブロック数は不変）。
+    fn launch_binary_resident_with(
+        &self,
+        func: &CudaFunction,
+        a: &CudaArg<'_>,
+        b: &CudaArg<'_>,
+        out: &mut CudaArgMut<'_>,
+        numel: usize,
+        tail: &[i32],
+    ) -> Result<(), CudaError> {
         validate_elementwise_binary_dims(a.len(), b.len())?;
         validate_elementwise_len(out.len())?;
         // `a.len()==b.len()==out.len()==numel` を明示検証する（advisor
@@ -550,17 +618,23 @@ impl CudaElementwise {
             return Ok(());
         }
 
-        let func = self.function_for_binary(op)?;
         let cfg = elementwise_launch_config(numel as u32);
         let numel_i = numel as i32;
 
         // SAFETY: `a`／`b`／`out` は呼び出し元（`ops.rs::
-        // binary_elementwise_device`）が `numel` 要素と 1:1 対応する
-        // ことを検証済みのデバイスバッファ・ビューであり（上記の
-        // `a.len()`／`out.len()` 検証で本関数自身も再検証している）、
+        // binary_elementwise_device`／`relu_backward_mask_device_impl`）が
+        // `numel` 要素と 1:1 対応することを検証済みのデバイスバッファ・
+        // ビューであり（上記の長さ検証で本関数自身も再検証している）、
         // カーネル内の手動境界チェック（`if (idx < numel)`。
         // `kernels_elementwise.rs` 参照、REQ-8）と合わせて OOB 読み書き
         // が起きない根拠とする。
+        // 前提（本関数では検査できない）: `func` のシグネチャは
+        // `(a, b, out, int numel, int tail...)`（`tail.len()` 個の `int`）で
+        // ある。本関数は非公開で、`func` は `self` が保持するコンパイル済み
+        // ハンドルだけが渡る（呼び出し元は `launch_binary_resident`〈
+        // `tail = &[]`〉と `launch_relu_mask_select_resident`〈`tail` 3 個〉の
+        // 2 経路のみ）。`tail` はスカラー値渡しでデバイスメモリの境界とは
+        // 無関係。
         // `CudaArg`／`CudaArgMut` は配置（`Device`／`Managed`）ごとに
         // 異なる cudarc 型へ委譲するのみで、カーネル本体・起動 config
         // は配置に依らず完全に共有する（`gemm.rs::
@@ -570,7 +644,11 @@ impl CudaElementwise {
             a.push(&mut builder);
             b.push(&mut builder);
             out.push(&mut builder);
-            builder.arg(&numel_i).launch(cfg)?;
+            builder.arg(&numel_i);
+            for t in tail {
+                builder.arg(t);
+            }
+            builder.launch(cfg)?;
         }
         Ok(())
     }
