@@ -535,3 +535,5 @@ launch 発行は l1_issue＋l2_issue = 14.1 µs、h2d_upload は 11.3 µs。相�
 
 - `kernel_wait` は `download − download_again` の導出値。腕 A（registry 0.11.0）と腕 B（HEAD）の版差。
 - nsys は回数にのみ使い、区間時間には使っていない。checksum の一致は bit 同一の証拠ではない。
+
+- 固定費の削減表への参照: `infer-chain-fixed-cost-reduction-3205.md`（#3205。kernel_wait は固定費ではなく占有率の問題とする整理を含む）

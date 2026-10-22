@@ -1,0 +1,25 @@
+# イシュー #3205 事前登録規則（計測前に固定。事後に緩めない）
+# 継承元: docs/perf/logs/cuda-train-infer-gb10-3189/RULE.txt（腕の同定・負荷ゲート・5 run）
+
+対象: infer CUDA（GB10・reuse／fresh）の固定費を 1 項目ずつ削る変更の採否判定。
+腕:
+  before = 変更の直前の main の SHA、after = 変更を含む HEAD。
+  各腕の展開ツリーの .rev-stamp を成果物へ回収し、ツリー指紋を git archive と突合する。
+計測:
+  プロセスを独立に 5 run 起動し、中央値を採る。起動順は run ごとに反転する。
+  負荷ゲートは 3189 の RULE.txt から継承する（ゲート不通過の run は invalid として
+  記録し、除外せずに run 数へ数える。捏造・補充はしない）。
+採用条件（すべて満たすときのみ ADOPT）:
+  1. 中央値の比 after/before <= 1.00
+  2. 5 run のうち after が速い run が 3 以上
+  3. bit 完全一致（プロセス内比較に加え、別バイナリ間で bit ダンプの sha256 が一致）。
+     checksum の一致は bit 一致の証拠にしない。
+  どれか 1 つでも満たさなければ REJECT（実装を残さない）。未実測は undetermined。
+B3（推論 Graph capture の再判定。capture 競合の是正後）:
+  新しい label・新しい RULE で行い、旧 label（cuda-infer-chain-graphcapture-2115）の
+  再実行にはしない。R0〜R2 と判定規則は 2115 の RULE.txt を継承する。
+  ADOPT でも既定値（INFER_GRAPH_DEFAULT_ENABLED）は変えない（反転は #3227）。
+相手（PyTorch・candle）との比:
+  同じセッションの record-only。合格ラインは持たない。
+変更しないもの:
+  tolerance・baseline・既定値の定数・facade の公開 API・unsafe。

@@ -132,6 +132,11 @@ use fandhe_ai_tensor_core::{
     LambStepConfig, RmsPropStepConfig, SgdStepConfig, Tensor,
 };
 
+/// 推論チェーンが別スレッドの capture 終了を待つ上限（イシュー #3205）。
+/// capture 区間は数 ms 規模のため 100 ms で十分とし、超えたら従来どおり
+/// `DeviceContextCaptureInProgress` を返す。
+const PREDICT_CAPTURE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
 use crate::eval::reduce_bias_grad_rows;
@@ -1859,6 +1864,28 @@ impl DeviceParamStore {
     /// `BackendError::StorePoisoned` を返す（`register_resident_leaves`
     /// の「事後再検査」パターンと同じ）。
     pub fn predict_device_chain<'t>(
+        &self,
+        tape: &'t Tape,
+        input: &Tensor<f32>,
+        steps: &[ChainStep<'_, 't>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        // イシュー #3205: 別スレッドの Graph capture と衝突した場合
+        // （`DeviceContextCaptureInProgress`）は、上限付きで capture 終了を
+        // 待ってチェーン全体を 1 回だけやり直す。本メソッドは store を
+        // 書き換えないため、やり直しで部分結果は漏れない。待てなければ
+        // （期限切れ・自スレッドが driver 呼び出し中）従来のエラーのまま返す。
+        match self.predict_device_chain_once(tape, input, steps) {
+            Err(BackendError::DeviceContextCaptureInProgress { .. }) => {
+                tape.ops()
+                    .wait_device_capture_idle(PREDICT_CAPTURE_WAIT_TIMEOUT)?;
+                self.predict_device_chain_once(tape, input, steps)
+            }
+            other => other,
+        }
+    }
+
+    /// [`Self::predict_device_chain`] の 1 回分（待機・再試行を含まない本体）。
+    fn predict_device_chain_once<'t>(
         &self,
         tape: &'t Tape,
         input: &Tensor<f32>,
@@ -4152,6 +4179,18 @@ mod tests {
         Success,
         /// `Err(KernelLaunchFailed)`（driver 失敗を模す）。
         Failure,
+        /// 1 回目だけ `DeviceContextCaptureInProgress`、以降は `Success`
+        /// （別スレッド capture の終了を待って再試行できる場合。#3205）。
+        BusyOnce,
+        /// 常に `DeviceContextCaptureInProgress`（期限切れ相当。#3205）。
+        BusyAlways,
+    }
+
+    thread_local! {
+        /// `BusyOnce` が既に 1 回 busy を返したか（テストスレッドごと）。
+        static BUSY_RETURNED: Cell<bool> = const { Cell::new(false) };
+        /// `wait_device_capture_idle` の呼び出し回数（テストスレッドごと）。
+        static IDLE_WAITS: Cell<usize> = const { Cell::new(0) };
     }
 
     impl MockDeviceOps {
@@ -4453,6 +4492,19 @@ mod tests {
     }
 
     impl BackendOps for MockDeviceOps {
+        fn wait_device_capture_idle(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> Result<(), BackendError> {
+            IDLE_WAITS.with(|c| c.set(c.get() + 1));
+            match self.chain_captured {
+                ChainCapturedMode::BusyAlways => {
+                    Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 })
+                }
+                _ => Ok(()),
+            }
+        }
+
         fn device(&self) -> Device {
             Device::Cpu
         }
@@ -4666,7 +4718,18 @@ mod tests {
                 Activation,
             )],
         ) -> Result<Option<Tensor<f32>>, BackendError> {
-            match self.chain_captured {
+            let mode = match self.chain_captured {
+                ChainCapturedMode::BusyOnce if !BUSY_RETURNED.with(|b| b.replace(true)) => {
+                    return Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 });
+                }
+                ChainCapturedMode::BusyOnce => ChainCapturedMode::Success,
+                other => other,
+            };
+            match mode {
+                ChainCapturedMode::BusyAlways => {
+                    Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 })
+                }
+                ChainCapturedMode::BusyOnce => unreachable!("BusyOnce は上で解決済み"),
                 ChainCapturedMode::Off => Ok(None),
                 ChainCapturedMode::Failure => Err(BackendError::KernelLaunchFailed(
                     "MockDeviceOps: simulated chain capture failure".into(),
@@ -7109,6 +7172,47 @@ mod tests {
 
         assert!(matches!(result, Err(BackendError::StorePoisoned)));
         assert!(store.poisoned.load(Ordering::SeqCst));
+    }
+
+    fn chain_busy_fixture(mode: ChainCapturedMode) -> Result<Tensor<f32>, BackendError> {
+        let ops = MockDeviceOps::chain_captured(mode);
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        store.predict_device_chain(&tape, &input, &steps)
+    }
+
+    /// イシュー #3205: capture 競合は 1 回待って再試行し成功する。
+    #[test]
+    fn predict_device_chain_waits_and_retries_once_on_capture_in_progress() {
+        BUSY_RETURNED.with(|b| b.set(false));
+        IDLE_WAITS.with(|c| c.set(0));
+        let r = chain_busy_fixture(ChainCapturedMode::BusyOnce).expect("retry succeeds");
+        assert_eq!(&*r.host_slice(), &[2.0_f32, 3.0][..]);
+        assert_eq!(IDLE_WAITS.with(|c| c.get()), 1);
+    }
+
+    /// イシュー #3205: 待っても解消しない場合は従来のエラーを返す（再試行は 1 回）。
+    #[test]
+    fn predict_device_chain_returns_capture_in_progress_when_wait_expires() {
+        IDLE_WAITS.with(|c| c.set(0));
+        let r = chain_busy_fixture(ChainCapturedMode::BusyAlways);
+        assert!(matches!(
+            r,
+            Err(BackendError::DeviceContextCaptureInProgress { .. })
+        ));
+        assert_eq!(IDLE_WAITS.with(|c| c.get()), 1);
+    }
+
+    /// イシュー #3205: 競合が無ければ一切待たない。
+    #[test]
+    fn predict_device_chain_never_waits_without_capture_conflict() {
+        IDLE_WAITS.with(|c| c.set(0));
+        chain_busy_fixture(ChainCapturedMode::Success).expect("ok");
+        assert_eq!(IDLE_WAITS.with(|c| c.get()), 0);
     }
 
     /// イシュー #2115: `linear_chain_forward_captured` が `Some` を返す場合、

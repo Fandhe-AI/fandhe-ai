@@ -3116,6 +3116,10 @@ impl BackendOps for CudaBackendOps {
             .map(Some)
     }
 
+    fn wait_device_capture_idle(&self, timeout: std::time::Duration) -> Result<(), BackendError> {
+        context_cache::wait_foreign_capture_idle(self.ordinal, timeout)
+    }
+
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
     /// 本イシュー導入前と bit-exact に不変（`crate::precision` モジュール
     /// 冒頭コメントの契約）。`crate::precision::gemm_precision()` が
