@@ -5,7 +5,7 @@
 # 各ログ末尾に rc=<n> を書く（summarize.py が厳密に検査する）。foreign の cargo／rustc を
 # run 前後で検出したら <name>.run<N>.invalid に理由を書く（RULE.txt: 同番号で取り直す）。
 # CUDA は nvidia-smi の compute プロセスも起動時のベースライン（常駐サービス）との差で検出する。
-# 同じ番号を取り直せるのは現行の .invalid がある run だけ（無ければ exit 3 で拒否）。取り直すとき、前の試行のログ・invalid 理由は <出力>/attempts/ へ退避して残す
+# 同じ番号を取り直せるのは現行の .invalid がある run だけ。.invalid の無い既存ログ（有効な run）は保持してそのテスト・番号だけ skip し、残りの取り直しは続行する。取り直すとき、前の試行のログ・invalid 理由は <出力>/attempts/ へ退避して残す
 # （全 invalid の件数と理由を保存する契約）。採用結果の有効性は現行の .invalid の有無だけで決まる。
 set -euo pipefail
 
@@ -67,7 +67,8 @@ env_snapshot() {
   } >> "${OUT}/env_info.txt" 2>&1
 }
 
-printf '%s\n' "${SPECS}" | while IFS='|' read -r NAME ARGS EXACT; do
+# here-string で回す（pipe のサブシェルにしない。サブシェルだと途中の失敗が親へ伝わらず DONE が書かれる）。
+while IFS='|' read -r NAME ARGS EXACT; do
   [ -n "${NAME}" ] || continue
   N="${FIRST}"
   while [ "${N}" -le "${LAST}" ]; do
@@ -75,8 +76,9 @@ printf '%s\n' "${SPECS}" | while IFS='|' read -r NAME ARGS EXACT; do
     # 取り直し: 現行の .invalid がある run だけが対象。.invalid の無い既存ログ（有効な pass／fail）は
     # 上書き・再実行しない（RULE.txt「それ以外の理由での再実行・選別はしない」「1 run でも fail なら fail」）。
     if [ -e "${LOG}" ] && [ ! -e "${OUT}/${NAME}.run${N}.invalid" ]; then
-      echo "refuse: ${LOG} は有効な既存 run（.invalid なし）のため再実行しない。取り直しは invalid の run のみ" >&2
-      exit 3
+      echo "skip: ${LOG} は有効な既存 run（.invalid なし）のため保持して再実行しない。取り直しは invalid の run のみ" >&2
+      N=$((N + 1))
+      continue
     fi
     # 前の試行のログと invalid 理由を attempts/ へ退避し、現行の .invalid を外す。
     if [ -e "${LOG}" ] || [ -e "${OUT}/${NAME}.run${N}.invalid" ]; then
@@ -110,5 +112,5 @@ printf '%s\n' "${SPECS}" | while IFS='|' read -r NAME ARGS EXACT; do
     fi
     N=$((N + 1))
   done
-done
+done <<< "${SPECS}"
 echo "done" > "${OUT}/DONE"
