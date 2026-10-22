@@ -13,7 +13,6 @@
 #   CELL_OUT=<出力ディレクトリ(未作成の絶対パス)> bash run_cell_gemm_cuda_3215.sh <label> <crates/facade の絶対パス>
 # 出力: ${CELL_OUT}/results.jsonl（bench の JSONL）・manifest.json・skipped.log・load_gate.log・uptime_*.txt・done 行
 set -euo pipefail
-export LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 # shellcheck source=./bench_fandhe_lock_restore.sh
@@ -57,7 +56,7 @@ sha256_of() { bench_fandhe_sha256_of "$1"; }
 dep_source() { # dep_source <package> <crate> [cargo args...]
   local pkg=$1 crate=$2 line path_part
   shift 2
-  line=$(cargo tree -p "$pkg" --depth 1 "$@" 2>/dev/null | grep -E "^[├└]── ${crate} " || true)
+  line=$(cargo tree -p "$pkg" --depth 1 --charset utf8 "$@" 2>/dev/null | grep -E "^[├└]── ${crate} " || true)
   if [[ -z "$line" ]]; then
     return 1
   elif [[ "$line" == *"("* ]]; then
