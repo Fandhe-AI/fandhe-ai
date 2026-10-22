@@ -1,0 +1,105 @@
+イシュー #3215 事前登録判定規則（TMA Stage 2: 候補 C1 の GB10 A/B。計測前に固定。計測後に緩めない）
+=====================================================================================
+目的: #3214 で追加した候補 C1（TMA 2 段 128x64。腕 tma128_none／tma128_strided）が、本番の現行カーネル
+（select_tiled_f32_kernel が選ぶ cp.async pipeline）より速いかを GB10 実機で判定する。
+正本の設計は docs/backend-cuda-tma-gemm-load-design.md §6（事前登録ゲート）・§11、
+docs/cuda-sm121-gemm-candidates-design.md §4・§6。Stage 1（#1976）の規則
+（docs/perf/logs/cuda-tma-stage1-1975/RULE.txt）を継承する。
+本番結線（既定の反転）は ADOPT を前提とした別 PR であり、本 issue の対象外。
+変えないもの: 本番ディスパッチ・NVRTC カーネル文字列・REQ-8 の手動境界検査・FMA 契約・
+tolerance 定数（RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD）・ParityBaseline・facade 公開 API・依存・
+相手側ベンチ（bench-candle／bench-burn／bench-common の計測コード）・bench_py.py・
+判定規則（checksum_contract.py・compare_gemm_gate.py）。fail が出ても tolerance は緩めない。
+
+1. 機体と記録: DGX Spark GB10（driver・CUDA 13.0・compute_cap 12.1・rustc・torch 版）を env_info.txt に記録する。
+   内部ホスト名・ユーザー名・絶対ホームパスは <home>／<node> 等へマスクする。
+   計測ツリーは本ファイルを含むコミット（SHA は .rev-stamp／rev-stamp.txt に記録）。
+   ツリー指紋: ノード側のツリーと、Mac 側の git archive（同 SHA）の全ファイル sha256 一覧を突合する。
+   ドリフトガード除外は最初から次に固定する: 本成果物ディレクトリ（docs/perf/logs/cuda-tma-stage2-ab-gb10-3215/）・
+   target/・Cargo.lock（cargo が書き換える）・.git・.rev-stamp。除外以外に 1 件でも差があれば停止（fail-closed）。
+2. 腕と形状: 正方 NN の N=256／512／1024／2048／4096。入力は固定シード 0xC0FFEE の Xorshift64Star（腕間で同一）。
+   - cur: 本番の select_tiled_f32_kernel が実際に選ぶカーネル（CudaGemm::launch_tiled_f32。N<1024 は 64x64 pipeline、
+     N>=1024 かつ K>=1024 は 128x64 pipeline）。計画書の launch_tiled_f32_pooled(Select) は cfg(test) 限定で
+     example から到達できないため launch_tiled_f32 を使う（選択ロジックは同一。出力確保は計測区間外で差は生じない。
+     意図的な逸脱として記録）。選択タイルは tiled_pipeline_tile_for の結果を tile= として出力する。
+   - pipe128: 同タイル・同 3 stage の cp.async 128x64（帰属用の参照腕）。
+   - tma128_none: compile_tiled_pipeline_tma_128x64_variant(TmaSwizzleA::None, TmaRowMap::Contiguous)。
+   - tma128_strided: 同 (TmaSwizzleA::None, TmaRowMap::Strided)。
+   TMA のテンソルマップは prepare_tiled_pipeline_tma_maps で計測区間の外に 1 回だけ encode する。
+3. 純カーネル時間（主指標 kern_event）: examples/gemm_candidate_event_ab_3215.rs。
+   cudaEvent の対で 1 launch を挟む（H2D・出力確保・event 生成は区間外。cuBLAS の mm_event reps=1 と同じ境界）。
+   プロセス内で warmup 20・計測 20 の中央値。計測ごとに腕の実行順を巡回させる。
+   副指標 kern_b2b（record_only）: 連続 10 launch を挟み 1 回あたりに割る。
+   1 プロセス = 1 run。5 プロセスを独立に起動する（kern_run1..5.log）。
+   実行: cargo run --release -p fandhe-ai-backend-cuda --features internal-diagnostics --example gemm_candidate_event_ab_3215
+   （ビルドは計測前に済ませる）。
+4. bit 一致の整合検査: 同 example が各腕の出力全要素の f32::to_bits を FNV-1a 64bit でハッシュして BITIDENT3215 行へ出す。
+   - tma128_none／tma128_strided と pipe128 は全 N で一致必須。
+   - cur と pipe128 は N>=1024 で一致必須（同一 128x64 経路のため）。N<1024 は記録のみ（タイルが異なる）。
+   - 5 run の全てで同一であること。checksum は bit 同一の証拠にしない。
+5. ゲート A（bit 一致・必須）:
+   実行: cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics --test cpu_cuda_tiled_pipeline_tma_parity
+         -- --ignored --nocapture --test-threads=1
+   次の 4 件が全て ok であること:
+     tiled_pipeline_tma_128x64_matches_cp_async_128x64_bit_exact
+     tiled_pipeline_tma_128x64_matches_cp_async_with_nan_inf_inputs
+     tiled_pipeline_tma_128x64_k_zero_determinism_prepared_and_pretransposed
+     tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact（ベンチ経路の前提）
+   上位 3 件のいずれかが FAILED なら両腕を含めて NOT_ADOPTABLE（REJECT）。4 件目が FAILED ならゲート C は無効（undetermined）。
+   同ログの Stage 1 既存テスト（64x64 系）の結果は記録のみ。BITIDENT（項 4）の不一致も必須条件違反（REJECT）。
+6. ゲート B（parity 非後退・必須）: 次の 6 バイナリを各 1 回実行（cargo test -p fandhe-ai-backend-cuda --release
+   --features internal-diagnostics --test <名前> -- --ignored --nocapture）:
+     parity_nonregression／cpu_cuda_parity／cpu_cuda_tiled_pipeline_parity／gemm_transposed_parity／transpose_parity／gemm_tiled
+   判定: FAILED が 0 件。既知の無関係 fail は docs/perf/logs/cuda-tma-stage1-1975/gateB_failed_names.txt と
+   docs/perf/logs/cuda-realdevice-phase4-2026-09-18/README.md（#2031）に名前があるものに限り除外し、名前を記録する。
+   本番非結線のため機構上は再確認。既知外の FAILED があれば総合判定は「undetermined（ゲート B 要調査）」とし是正しない。
+7. ゲート C（純カーネル・主判定）: 腕（tma128_none／tma128_strided）ごとに判定する。
+   比 = cur の kern_event（5 run 中央値）÷ 候補の kern_event（5 run 中央値）。>1 が改善。
+   結線範囲は本番 128x64 と同じ N>=1024 かつ K>=1024、すなわち N=1024／2048／4096 に固定する。
+   - ADOPT 候補（全て満たす）: 結線範囲のいずれかの N で比 >= 1.05、かつ結線範囲の全 N で比 >= 1.00、
+     かつゲート A pass、かつ BITIDENT 整合。
+   - REJECT: 結線範囲のいずれかの N で比 < 1.00、またはゲート A（上位 3 件）fail、または BITIDENT 不一致。
+   - undetermined: 上記以外（全 N が 1.00〜1.05 未満）。run が 5 本そろわない・欠損・非有限値・専有ゲート不通過・
+     ゲート A の 4 件目 FAILED もここに含める。
+   補足: run 内中央値の符号が全体判定と反対の run が 2 run 以上ある N は「5/5 一貫ではない」と併記する（判定は中央値）。
+   N=256／512 は結線範囲外のため記録のみ（cur＝64x64 との比と pipe128 比を出す）。N=512 の比は design doc §4 の
+   「N>=512」仮説の材料として別欄に記す。
+   帰属欄（記録のみ）: tma128_* ÷ pipe128＝ロード命令とバンク配置の差。pipe128 ÷ cur は N>=1024 で 1.00 付近が期待値
+   （同一カーネルのため整合検査に使う）。
+8. ゲート D（結線後の本番ディスパッチ非後退）: 本 issue では対象外。定数ゲートは PR #3530 §11.5 で意図的に未導入で、
+   計測専用の after 腕を作ると tensor map キャッシュなしの毎回 encode と TMA の unsafe を既定ビルドへ持ち込む
+   結線作業そのものになり代表性がないため。ゲート D は結線 PR の受け入れ条件とする（Stage 1 #1976 と同じ扱い）。
+9. 総合判定の語彙（腕ごとに出す。素の ADOPT は使わない）:
+   「ADOPT（結線候補。ゲート D は結線 PR で実施）」／「REJECT」／「undetermined」。
+   ゲート B に既知外の FAILED があれば「undetermined（ゲート B 要調査）」。両腕 REJECT なら C1 は REJECT。
+10. cuBLAS 比（record_only）: scripts/bench/framework-compare/opp_kernel_cuda_diag.py measure を fp32・tf32 の 2 腕 x 5 run
+    実行（~/work/.venv-bench。torch.__version__ == "2.14.0+cu130" でなければ停止。bench_py.py の sha256 は
+    9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b でなければ停止）。
+    比は event 対 event のみ: fandhe kern_event ÷ cuBLAS mm_event（fp32／tf32 それぞれ）。各腕の TFLOPS（2N^3 ÷ 時間）も出す。
+    #3185 の値（opp-kernel-gb10-3185）と並べ、10% を超える乖離はドリフトとして記録する（判定は変えない）。
+11. gemm CUDA セル（record_only・現行のみ）: before のみ測る。before ＝計測ツリー（本ファイルのコミット）の crates/facade を
+    --config patch.crates-io.fandhe-ai.path で path 解決した bench-fandhe。セルは cuda x gemm x N{256,512,1024,2048,4096} x
+    {fresh, reuse} を 5 round。同 round で bench-candle（fresh）と bench-burn（fresh。TF32 固定）を測り、
+    round ごとに起動順（fandhe 先／相手先）を反転する。ビルド直後に 3 バイナリの sha256 と依存解決元を manifest に記録し、
+    計測直前に再照合する（不一致なら測定せず fail-closed）。
+    出力: 対最速相手の比 ＝ min(candle fresh, burn fresh) の median_s ÷ fandhe の median_s（reuse と best＝min(fresh,reuse)）を
+    round ごとに出し 5 round の中央値。0.11.0 スコアボード値（reuse 0.85／0.42／0.40／0.48／1.01、best 0.88／0.92／0.97／0.99／1.01。
+    N=256..4096）と並べ、版差（0.11.0 → 本ツリー）を明記する。
+    候補のセル値は、ADOPT 候補の腕に限り「cur のセル −（cur − 候補）の kern_event 差」で推定し、「推定」と明記する（測定値と書かない）。
+12. 運用:
+    - 専有ゲート: 各プロセスの起動前に load1 < 1.0 かつ nvidia-smi utilization.gpu 0% を 30 秒間隔・最大 30 分待つ。
+      不通過は GATE-TIMEOUT／GATE-INVALID として load_gate.log に記録し、正式系列から外す（異常は隠さない）。
+    - 各計測プロセスの実行中はビルド・集計・転送を走らせない。ゲート A／B・純カーネル用のビルド（cargo test --no-run と example の
+      cargo build）は計測前に済ませる。セルのビルドは path patch と計測の不可分性（run_gemm_gate.sh と同じ方針）のためセルスクリプトの
+      冒頭で行い、他の計測と直列に実行する。純カーネル・セル・cuBLAS の計測は同時に走らせない。
+    - ノードへの転送は git archive <計測 SHA> のパイプ（追跡ファイルのみ。.env*・*.local.md 等は構造的に含まれない）。
+    - run の差し替え・追加・除外・上書きは禁止。再実行は別ラベル（-r2 等）で行い、旧系列も残す。
+    - 到達不能・完走不能のときは unavailable／undetermined と記録し、推定値・他機の値で埋めない。
+13. 3 分類（届かないセルの要因。実測値で更新する。推定は推定と明記）:
+    ハードの上限（公称 31 TFLOPS〈FP32 SIMT〉・TF32 53.3 は公称・第三者値。実測で書けるのは cuBLAS FP32 の到達率と各腕の達成 TFLOPS）／
+    計測窓（Rust 逐次総和 0.51 ns／要素・Python checksum 2.56〜3.25 ns／要素は既存実測。gemm セル窓と kern_event の差〈固定費〉は本 run の実測）／
+    自分たちの制約（FP32 strict〈burn は TF32 固定〉・REQ-8 境界検査の単独コストは「未計測」〈検査を外す実験は行わない〉・REQ-1〈cuBLAS を呼ばない〉）。
+    既定精度の判断は #3262。緩和は提案しない。正本は docs/perf/loss-attribution-matrix.md §10.3.3・§10.5.3。
+14. 保存物（本ディレクトリ）: RULE.txt・README.md・orchestrate_gb10.sh・aggregate.py・aggregate.md・env_info.txt・load_gate.log・
+    rev-stamp.txt・tree-fingerprint.txt・build.log・gateA_*.log・gateB_*.log・kern_run{1..5}.log・cublas/run{1..5}/*.jsonl・cell/。
+    集計は python3 標準ライブラリのみの aggregate.py（欠損は例外・run 完備検証・非有限値拒否・--self-test）で機械的に出す。

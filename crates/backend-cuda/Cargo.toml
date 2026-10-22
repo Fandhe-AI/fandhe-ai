@@ -224,6 +224,16 @@ required-features = ["internal-diagnostics"]
 name = "gemm_tiled_pipeline_bench"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #3215: 候補 C1（TMA 2 段 128x64）の純カーネル時間を cudaEvent で A/B 計測
+# する診断 example。`gemm_tiled_pipeline_bench`（上記）と同じ理由
+# （`compile_tiled_pipeline_*_variant`・`launch_tiled_pipeline_*`・`device.stream()` が
+# `internal-diagnostics` 限定）で feature を要求する。純関数の単体テスト
+# （中央値・FNV-1a・腕の巡回順）を CI で実行するため `test = true` を明示する。
+name = "gemm_candidate_event_ab_3215"
+test = true
+required-features = ["internal-diagnostics"]
+
 [[test]]
 # イシュー #1033・PR #1071 codex-review P1 指摘の是正: `cpu_cuda_tiled_
 # pipeline_parity` は `CudaGemm::compile_tiled_pipeline_variant`・
