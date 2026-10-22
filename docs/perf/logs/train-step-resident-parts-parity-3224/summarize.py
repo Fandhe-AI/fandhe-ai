@@ -25,10 +25,10 @@ EXPECTED = {
         "gemm_device_tracked_token": 1,
     },
     "cuda": {
-        "relu_mask_device_parity": None,
-        "mse_device_parity": None,
-        "gemm_device_input_parity": None,
-        "gemm_device_input_diag_tests_3223": None,
+        "relu_mask_device_parity": 5,
+        "mse_device_parity": 5,
+        "gemm_device_input_parity": 7,
+        "gemm_device_input_diag_tests_3223": 1,
         "train_step_parts_sync_diag_tests_3224": 4,
     },
 }
@@ -89,6 +89,14 @@ def summarize(platform, directory):
            "|---|" + "---|" * RUNS]
     for name, cells in rows:
         out.append("| %s | %s |" % (name, " | ".join(cells)))
+    out.append("")
+    # 取り直しで attempts/ へ退避された invalid 試行（件数と理由をすべて出す）。
+    adir = os.path.join(directory, "attempts")
+    inv = sorted(f for f in os.listdir(adir) if f.endswith(".invalid")) if os.path.isdir(adir) else []
+    out.append("退避済み invalid 試行: %d 件" % len(inv))
+    for f in inv:
+        with open(os.path.join(adir, f), encoding="utf-8") as fh:
+            out.append("- %s: %s" % (f, fh.read().strip()))
     out.append("")
     out.append("総合: %s" % ("fail（または invalid を含む）" if overall_fail else "pass（全テスト x 5 run）"))
     return "\n".join(out) + "\n", overall_fail

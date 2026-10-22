@@ -4,6 +4,9 @@
 # 使い方: run_parity.sh <metal|cuda> <出力ディレクトリ> [run 開始番号 run 終了番号]
 # 各ログ末尾に rc=<n> を書く（summarize.py が厳密に検査する）。foreign の cargo／rustc を
 # run 前後で検出したら <name>.run<N>.invalid に理由を書く（RULE.txt: 同番号で取り直す）。
+# CUDA は nvidia-smi の compute プロセスも起動時のベースライン（常駐サービス）との差で検出する。
+# 同じ番号を取り直すとき、前の試行のログ・invalid 理由は <出力>/attempts/ へ退避して残す
+# （全 invalid の件数と理由を保存する契約）。採用結果の有効性は現行の .invalid の有無だけで決まる。
 set -euo pipefail
 
 PLATFORM="${1:?usage: run_parity.sh <metal|cuda> <outdir> [first last]}"
@@ -20,7 +23,7 @@ case "${PLATFORM}" in
 mse_device_parity|--test mse_device_parity|
 gemm_device_input_parity|--test gemm_device_input_parity|
 train_step_parts_no_wait_3224|--test train_step_parts_no_wait_3224|
-gemm_device_tracked_token|--lib gemm_device_tracked_registers_token_and_does_not_wait|--exact"
+gemm_device_tracked_token|--lib ops::tests::gemm_device_tracked_registers_token_and_does_not_wait|--exact"
     ;;
   cuda)
     PKG="fandhe-ai-backend-cuda"
@@ -36,6 +39,19 @@ esac
 # cargo／rustc の稼働（テスト実行前後の汚染検知。自分のテスト実行中の cargo は含まない時点で呼ぶ）。
 foreign_builds() {
   ps -axo comm= | grep -E '(^|/)(cargo|rustc)$' || true
+}
+
+# GB10 の compute プロセス一覧（pid,name のみ。used_memory は変動するため比較に使わない）。
+compute_apps() {
+  if [ "${PLATFORM}" = "cuda" ]; then
+    nvidia-smi --query-compute-apps=pid,name --format=csv,noheader 2>/dev/null | sort || true
+  fi
+}
+BASE_APPS="$(compute_apps)"
+
+# ベースラインに無い compute プロセス（新規の GPU 負荷）を返す。
+new_compute_apps() {
+  compute_apps | grep -vxF -f <(printf '%s\n' "${BASE_APPS}") || true
 }
 
 env_snapshot() {
@@ -56,8 +72,17 @@ printf '%s\n' "${SPECS}" | while IFS='|' read -r NAME ARGS EXACT; do
   N="${FIRST}"
   while [ "${N}" -le "${LAST}" ]; do
     LOG="${OUT}/${NAME}.run${N}.log"
+    # 取り直し: 前の試行のログと invalid 理由を attempts/ へ退避し、現行の .invalid を外す。
+    if [ -e "${LOG}" ] || [ -e "${OUT}/${NAME}.run${N}.invalid" ]; then
+      mkdir -p "${OUT}/attempts"
+      K=1
+      while [ -e "${OUT}/attempts/${NAME}.run${N}.attempt${K}.log" ] || [ -e "${OUT}/attempts/${NAME}.run${N}.attempt${K}.invalid" ]; do K=$((K + 1)); done
+      [ -e "${LOG}" ] && mv "${LOG}" "${OUT}/attempts/${NAME}.run${N}.attempt${K}.log"
+      [ -e "${OUT}/${NAME}.run${N}.invalid" ] && mv "${OUT}/${NAME}.run${N}.invalid" "${OUT}/attempts/${NAME}.run${N}.attempt${K}.invalid"
+    fi
     env_snapshot "before ${NAME} run${N}"
     PRE="$(foreign_builds)"
+    PRE_GPU="$(new_compute_apps)"
     set +e
     # ARGS・EXACT は上の固定値。語分割を意図して無引用。
     cargo test -p "${PKG}" --release ${ARGS} -- --ignored ${EXACT} --test-threads=1 --nocapture > "${LOG}" 2>&1 < /dev/null
@@ -66,8 +91,16 @@ printf '%s\n' "${SPECS}" | while IFS='|' read -r NAME ARGS EXACT; do
     echo "rc=${RC}" >> "${LOG}"
     env_snapshot "after ${NAME} run${N}"
     POST="$(foreign_builds)"
+    POST_GPU="$(new_compute_apps)"
+    REASON=""
     if [ -n "${PRE}${POST}" ]; then
-      echo "foreign cargo/rustc detected: pre=[${PRE}] post=[${POST}]" > "${OUT}/${NAME}.run${N}.invalid"
+      REASON="foreign cargo/rustc detected: pre=[${PRE}] post=[${POST}]"
+    fi
+    if [ -n "${PRE_GPU}${POST_GPU}" ]; then
+      REASON="${REASON:+${REASON}; }new compute process detected: pre=[${PRE_GPU}] post=[${POST_GPU}]"
+    fi
+    if [ -n "${REASON}" ]; then
+      echo "${REASON}" > "${OUT}/${NAME}.run${N}.invalid"
     fi
     N=$((N + 1))
   done

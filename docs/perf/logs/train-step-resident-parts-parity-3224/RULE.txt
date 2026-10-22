@@ -6,7 +6,7 @@ Metal（Mac mini / Apple M4）, 共通引数: cargo test -p fandhe-ai-backend-me
   M2  --test mse_device_parity -- --ignored --test-threads=1 --nocapture
   M3  --test gemm_device_input_parity -- --ignored --test-threads=1 --nocapture
   M4  --test train_step_parts_no_wait_3224 -- --ignored --test-threads=1 --nocapture
-  M5  --lib gemm_device_tracked_registers_token_and_does_not_wait -- --ignored --exact --test-threads=1 --nocapture
+  M5  --lib ops::tests::gemm_device_tracked_registers_token_and_does_not_wait -- --ignored --exact --test-threads=1 --nocapture
 CUDA（DGX Spark GB10 / sm_121）, 共通引数: cargo test -p fandhe-ai-backend-cuda --release
   C1  --test relu_mask_device_parity -- --ignored --test-threads=1 --nocapture
   C2  --test mse_device_parity -- --ignored --test-threads=1 --nocapture
@@ -28,6 +28,7 @@ CUDA（DGX Spark GB10 / sm_121）, 共通引数: cargo test -p fandhe-ai-backend
 [run の無効化]
   - 各 run の前後で、foreign の cargo／rustc プロセス、または（GB10 で）常駐サービス以外の
     新しい compute プロセスを検出した run は invalid とし、同じ番号で取り直す。
+  - 取り直し時は前の試行のログと理由を attempts/ へ退避して残す（採用結果の有効性は現行の .invalid の有無で決める）。
   - invalid の件数と理由はすべて記録する。それ以外の理由での再実行・選別・ケースの除外はしない。
 
 [fail の扱い]
