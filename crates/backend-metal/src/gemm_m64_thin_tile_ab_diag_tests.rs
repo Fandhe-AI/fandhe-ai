@@ -25,8 +25,8 @@
 //! # テスト構成
 //!
 //! - 記録のみ: `m64_thin_reach_trace`（到達追跡）・`m64_thin_candidates_kernel_gpu`（計測）
-//! - assert あり（前提ゲート）: `m64_thin_candidates_match_cpu_reference`
-//!   （REQ-2 `assert_parity`。tolerance は不変）
+//! - 前提ゲート: `m64_thin_candidates_match_cpu_reference`（REQ-2 `compare` の成否を候補・
+//!   セルごとに記録。候補の不合格は除外して継続し、`cur` の不合格のみ最後に assert。tolerance は不変）
 //!
 //! # 前提
 //!
@@ -408,14 +408,15 @@ fn m64_thin_reach_trace() {
 /// 候補と `cur` が CPU 参照（FMA 契約）と REQ-2 複合判定で一致すること（前提ゲート。
 /// tolerance は不変）。fallback する腕は記録してスキップする（abort しない）。
 ///
-/// 出力行: `PARITY orient=<o> shape=<m>x<n>x<k> eff=<m>x<n>x<k> arm=<a> fallback=<bool> ok=<bool|skipped>`
+/// 出力行: `PARITY orient=<o> shape=<m>x<n>x<k> eff=<m>x<n>x<k> arm=<a> fallback=<bool> ok=<true|false|skipped>`（false = 複合判定 FAIL。候補は除外、cur は系列不成立）
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn m64_thin_candidates_match_cpu_reference() {
-    use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+    use fandhe_ai_backend_cpu::parity::{compare, matmul_reference_fma};
 
     let ctx = MetalContext::new().expect("Metal 初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let mut cur_failed = false;
     for (orient, m, n, k) in cells() {
         let shape = format!("{m}x{n}x{k}");
         let ops = operands(orient, m, n, k);
@@ -448,18 +449,35 @@ fn m64_thin_candidates_match_cpu_reference() {
                 continue;
             }
             let out = s.output.expect("capture=true");
-            assert_parity(
-                &format!("m64-thin {} {m}x{n}x{k} {}", orient.name(), arm.name()),
-                &out,
-                &expected,
-            );
+            // 統一複合判定（tolerance は不変）の成否をセル・腕ごとに記録する。候補の不合格は
+            // parity_fail として集計側が NOT_ADOPTABLE に落とす（RULE 項 6(b)・10。系列は止めない）。
+            let report = compare(&out, &expected).expect("出力長が参照と一致しない");
+            let pass = report.passes();
             println!(
-                "PARITY orient={} shape={shape} eff={m}x{n}x{k} arm={} fallback=false ok=true",
+                "PARITY orient={} shape={shape} eff={m}x{n}x{k} arm={} fallback=false ok={pass}",
                 orient.name(),
                 arm.name()
             );
+            if !pass {
+                println!(
+                    "PARITY-DETAIL arm={} fail_count={}/{} max_abs_diff={:.3e} max_rel_err={:.3e}",
+                    arm.name(),
+                    report.fail_count,
+                    report.total,
+                    report.max_abs_diff,
+                    report.max_rel_err
+                );
+                if arm == Arm::Cur {
+                    cur_failed = true;
+                }
+            }
         }
     }
+    // 基準腕 `cur` の不合格は参照側・計測系の異常であり系列を成立させない（全行出力後に落とす）。
+    assert!(
+        !cur_failed,
+        "cur 腕が CPU 参照との複合判定に失敗した（系列を成立させない）"
+    );
 }
 
 /// 全腕を同一セルで巡回順に計測する（記録のみ。fallback は abort せず記録する）。

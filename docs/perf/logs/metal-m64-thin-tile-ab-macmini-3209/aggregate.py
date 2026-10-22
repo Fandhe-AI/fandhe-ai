@@ -64,7 +64,10 @@ def num(s, what):
     return v
 
 
-EXPECT_DEVICE = ("10", "Apple M4", "Some(M4Base)")
+EXPECT_DEVICE = ("10", "Apple M4")
+# verified_tile_table は `{device:?}`（空白除去）の実出力 `Some(M4Base(VerifiedM4BaseGpuCoreCount(10)))`
+# に合わせて前方一致で判定する（短縮形 `Some(M4Base)` も許容）。
+EXPECT_TABLE_PREFIXES = ("Some(M4Base(", "Some(M4Base)")
 DEVICE_RE = re.compile(
     r'^DEVICE gpu_cores=(\S+) soc="([^"]*)" verified_tile_table=(\S+) split_k_enabled=(true|false)$')
 TRACE_RE = re.compile(
@@ -80,7 +83,7 @@ CAND_TIME_RE = re.compile(
     r"commit_wait_median_ms=(\S+) alloc_c_median_ms=(\S+)$")
 PARITY_RE = re.compile(
     r"^PARITY orient=(NN|NT|TN) shape=(\d+x\d+x\d+) eff=(\d+x\d+x\d+) arm=(cur|T[1-4]) "
-    r"fallback=(true|false) ok=(true|skipped)$")
+    r"fallback=(true|false) ok=(true|false|skipped)$")
 TOKENS = ("DEVICE ", "TRACE ", "CAND ", "PARITY ")
 
 
@@ -158,6 +161,8 @@ def parse_parity(path):
         m = PARITY_RE.match(line)
         if m:
             res[(m.group(1), m.group(2), m.group(4))] = (m.group(5) == "true", m.group(6))
+            if m.group(4) == "cur" and m.group(6) == "false":
+                fail("cur 腕の parity が FAIL（系列を成立させない）")
     for o, s in CELLS:
         for a in ["cur"] + CANDS:
             if (o, s, a) not in res:
@@ -297,7 +302,7 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
     heads0 = kerns[0][0]
     # 対象機体の同定（RULE: Mac mini = Apple M4・GPU 10 コア・M4Base 表）。不一致は参考系列へ落とす
     # （M4 Max 等の系列を正式な Mac mini 系列として ADOPT にしない）。
-    if tuple(dev[:3]) != EXPECT_DEVICE:
+    if tuple(dev[:2]) != EXPECT_DEVICE or not dev[2].startswith(EXPECT_TABLE_PREFIXES):
         official = False
         gate_reasons = list(gate_reasons) + [
             "DEVICE が Mac mini（M4Base）の期待値と不一致: gpu_cores=%s soc=\"%s\" verified_tile_table=%s" % tuple(dev[:3])]
@@ -305,12 +310,15 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
     # 到達前提（RULE 項 5）
     reach_ok = True
     for s in NN_SHAPES:
-        thin = trace[s][4]
+        split, route, thin = trace[s][2], trace[s][3], trace[s][4]
         want = EXPECT_THIN.get(s)
         if want is None:
             reach_ok = reach_ok and thin == "none"
         else:
-            reach_ok = reach_ok and thin.startswith(want + ":")
+            # split-K が先に選ばれる形状（should_split_k≠none／route が SplitK）は、ゲート反転でも
+            # classic 経路の候補へ到達しないため前提不成立（実際の選択順: split-K → classic）。
+            reach_ok = (reach_ok and thin.startswith(want + ":") and split == "none"
+                        and route.startswith("Classic/"))
 
     out = []
     out.append("# #3209 集計（m=64 細タイル候補 Mac mini A/B）\n")
@@ -342,9 +350,9 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
                 h = heads0[(o, s, a)]
                 bit_ok = h["hash"] == heads0[(o, s, "cur")]["hash"]
                 pr = parity[(o, s, a)]
-                # parity は前提ゲートで assert 済み。skipped は fallback（pr[0]）として扱い、
-                # 欠損は parse_parity が拒否するため、ここでの parity 引数は常に True。
-                st, ratio, fa, sl = judge_cell(kg["cur"], kg[a], h["fallback"] or pr[0], bit_ok, True)
+                # pr = (fallback, ok)。ok=false は複合判定 FAIL（parity_fail → NOT_ADOPTABLE）。
+                # skipped は fallback（pr[0]）として扱う。欠損は parse_parity が拒否する。
+                st, ratio, fa, sl = judge_cell(kg["cur"], kg[a], h["fallback"] or pr[0], bit_ok, pr[1] != "false")
                 if not official:
                     st = "undetermined"
                 cand_statuses[a].append(st)
@@ -385,7 +393,7 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
 # ---------------- self-test ----------------
 
 def _fixture(d, kg_t=None, official=True, drop_run=None, nonfinite=False, hash_mismatch=False,
-             thin_wrong=False, soc="Apple M4"):
+             thin_wrong=False, soc="Apple M4", split_gate=False, parity_fail=None):
     """正常系 fixture を d に書く。kg_t は候補の kernel_gpu 倍率（cur 比。既定 0.9）。"""
     kg_t = kg_t if kg_t is not None else 0.9
     with open(os.path.join(d, "rev-stamp.txt"), "w") as f:
@@ -400,19 +408,23 @@ def _fixture(d, kg_t=None, official=True, drop_run=None, nonfinite=False, hash_m
     with open(os.path.join(d, "parity.log"), "w") as f:
         for o, s in CELLS:
             for a in ["cur"] + CANDS:
-                f.write("PARITY orient=%s shape=%s eff=%s arm=%s fallback=false ok=true\n" % (o, s, s, a))
+                f.write("PARITY orient=%s shape=%s eff=%s arm=%s fallback=false ok=%s\n"
+                        % (o, s, s, a, "false" if a == parity_fail else "true"))
         f.write("test result: ok. 1 passed\n")
     for i in RUNS:
         if drop_run == i:
             continue
         with open(os.path.join(d, "trace_run%d.log" % i), "w") as f:
-            f.write('DEVICE gpu_cores=10 soc="%s" verified_tile_table=Some(M4Base) split_k_enabled=true\n' % soc)
+            f.write('DEVICE gpu_cores=10 soc="%s" verified_tile_table=Some(M4Base(VerifiedM4BaseGpuCoreCount(10))) split_k_enabled=true\n' % soc)
             for s in NN_SHAPES:
                 thin = "none"
                 if s in EXPECT_THIN and not thin_wrong:
                     thin = EXPECT_THIN[s] + ":bm16"
-                f.write("TRACE shape=%s eff=%s should_split_k=none route_off=Classic/C1 thin_on=%s cur=C1 resolved_cur=C1\n"
-                        % (s, s, thin))
+                sk, ro = "none", "Classic/C1"
+                if split_gate and s == "64x256x784":
+                    sk, ro = "Plan(g=4)", "SplitK/Plan(g=4)"
+                f.write("TRACE shape=%s eff=%s should_split_k=%s route_off=%s thin_on=%s cur=C1 resolved_cur=C1\n"
+                        % (s, s, sk, ro, thin))
         with open(os.path.join(d, "kern_run%d.log" % i), "w") as f:
             for o, s in CELLS:
                 for a in ARMS:
@@ -492,6 +504,24 @@ def self_test():
             print("PASS 到達前提の食い違いはゲート undetermined")
         else:
             print("FAIL 到達前提の判定"); ok = False
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d, split_gate=True)
+        md = aggregate(d, "deadbeef", cell_ab="ok")
+        if "規則の前提不成立" in md and "ゲート判定: ADOPT" not in md:
+            print("PASS split-K 優先形状は到達前提不成立")
+        else:
+            print("FAIL split-K 到達前提"); ok = False
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d, parity_fail="T1")
+        md = aggregate(d, "deadbeef", cell_ab="ok")
+        if "| T1 | undetermined |" in md or "| T1 | REJECT |" in md:
+            print("PASS 候補 parity FAIL は除外して継続（T1 は ADOPT にならない）")
+        else:
+            print("FAIL 候補 parity FAIL の扱い"); ok = False
+        if "| T2 | ADOPT |" in md:
+            print("PASS 他候補は判定される")
+        else:
+            print("FAIL 他候補の判定"); ok = False
     with tempfile.TemporaryDirectory() as d:
         _fixture(d)
         try:
