@@ -42,18 +42,18 @@ foreign_builds() {
   ps -axo comm= | grep -E '(^|/)(cargo|rustc)$' || true
 }
 
-# GB10 の compute プロセス一覧（pid,name のみ。used_memory は変動するため比較に使わない）。
+# GB10 の compute プロセス一覧（pid,process_name のみ。stderr は捨てず診断を残す。used_memory は変動するため比較に使わない）。
 # nvidia-smi の失敗は空一覧と区別するため終了コードをそのまま返す（失敗を握りつぶさない）。
 compute_apps() {
   if [ "${PLATFORM}" = "cuda" ]; then
     local out
-    out="$(nvidia-smi --query-compute-apps=pid,name --format=csv,noheader 2>/dev/null)" || return 1
+    out="$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader)" || return 1
     printf '%s\n' "${out}" | sort
   fi
 }
 
 # 起動時に存在してよい compute プロセスは、確認済みの常駐サービスだけ（env PARITY_RESIDENT_APP_REGEX。
-# 拡張正規表現を「pid, name」行の name 部へ完全一致で当てる。既定は空 = 起動時に 1 件でもあれば中止）。
+# 拡張正規表現を「pid, process_name」行の process_name 部へ完全一致で当てる。既定は空 = 起動時に 1 件でもあれば中止）。
 # RULE.txt「計測中は別の GPU 負荷を並走させない」を満たすため、先行する別ジョブの負荷は許容しない。
 RESIDENT_RE="${PARITY_RESIDENT_APP_REGEX:-}"
 BASE_APPS=""
@@ -85,7 +85,7 @@ env_snapshot() {
     uname -a
     rustc --version
     if [ "${PLATFORM}" = "cuda" ]; then
-      nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv || true
+      nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv || true
       nvidia-smi --query-gpu=utilization.gpu --format=csv || true
     fi
     foreign_builds
