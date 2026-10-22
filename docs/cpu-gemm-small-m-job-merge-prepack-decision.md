@@ -26,7 +26,7 @@
 
 - 本リポジトリは `#[allow(dead_code)]` で黙らせない。読み手のない const は `clippy -D warnings` で落ちるため、G2 の const は #3200 で読み手と同時に足す。G2 は分割方式ではなくキャッシュなので、「分割方式ごとのゲート」の例外として扱う（名前・置き場・条件は本書で確定）。
 - G1 が ON のときの挙動: 対象形状の `jobs_per_worker` を 1 に下げる。OFF のときは `TWO_D_JOBS_PER_WORKER`（2）のままで、現行と同一。#3199 は同じゲートの下で A の共有と確保削減を足す。
-- 既存ゲートとの関係: `TWO_D_DYNAMIC_PRODUCTION_ENABLED=false` なら G1 は効かない（行パネル経路には分岐を入れない）。`SME_PRODUCTION_ENABLED` の対象（m≥256）とは形状で互いに素。`GB10_AFFINITY_ENABLED`・`SMALL_SHAPE_CAP_ENABLED` は外側のプール選択で、G1 の内側にそのまま重なる。
+- 既存ゲートとの関係: `TWO_D_DYNAMIC_PRODUCTION_ENABLED=false` なら G1 は効かない（行パネル経路には分岐を入れない）。`SME_PRODUCTION_ENABLED` の対象（`sme_shape_eligible`: m≥256・n≥256・k≥64）とは、A 共有の対象だけが重複せず、job 統合（G1）は重複する（例: L1 dW 784×256×64 は G1 の対象かつ `sme_shape_eligible` も満たし、`dispatch_two_d_dynamic` は SME カーネルにも G1 が選んだ jpw=1 を渡す）。G1 と SME を同時に有効にした組み合わせを、後続の実装・採否判断の検証対象に含める。`GB10_AFFINITY_ENABLED`・`SMALL_SHAPE_CAP_ENABLED` は外側のプール選択で、G1 の内側にそのまま重なる。
 
 ## 4. 対象形状の判定
 
