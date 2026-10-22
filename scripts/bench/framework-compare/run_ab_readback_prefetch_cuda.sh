@@ -633,6 +633,52 @@ with open(src, encoding="utf-8") as f, open(dst, "w", encoding="utf-8") as o:
             o.write(line)
 PY
   }
+  # RULE.txt [checksum]: 全セル（N=256 含む）の全 run・全腕が完全一致し、N=1024/2048/4096 は
+  # 既知値と絶対差 1e-5 以内であること。欠損・非数値・run 数不足も不合格（fail-closed）。
+  checksum_gate() { # checksum_gate <before.jsonl> <after.jsonl>
+    python3 -I - "$1" "$2" <<'PY'
+import json, math, sys
+KNOWN = {1024: -1855.597736, 2048: -6016.774008, 4096: -25768.747284}
+SIZES = (256, 512, 1024, 2048, 4096)
+MODES = ("reuse", "fresh")
+cells = {}
+bad = []
+for arm, path in (("before", sys.argv[1]), ("after", sys.argv[2])):
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                bad.append("%s: 不正な JSON 行" % arm)
+                continue
+            if not isinstance(o, dict) or o.get("task", "gemm") != "gemm":
+                continue
+            cells.setdefault((o.get("mode", "fresh"), o.get("size")), []).append((arm, o.get("checksum")))
+for mode in MODES:
+    for size in SIZES:
+        rows = cells.get((mode, size), [])
+        for arm in ("before", "after"):
+            n = sum(1 for a, _ in rows if a == arm)
+            if n != 5:
+                bad.append("%s N=%d %s: run 数 %d != 5" % (mode, size, arm, n))
+        vals = [c for _, c in rows]
+        if any(isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c) for c in vals):
+            bad.append("%s N=%d: checksum 欠損または非数値" % (mode, size))
+            continue
+        if vals and any(c != vals[0] for c in vals):
+            bad.append("%s N=%d: checksum が全 run・全腕で完全一致しない %r" % (mode, size, vals))
+        if size in KNOWN and any(abs(c - KNOWN[size]) > 1e-5 for c in vals):
+            bad.append("%s N=%d: 既知値 %r から 1e-5 超 %r" % (mode, size, KNOWN[size], vals))
+if bad:
+    print("checksum_gate: FAIL")
+    for b in bad:
+        print("  - " + b)
+    sys.exit(1)
+print("checksum_gate: OK")
+PY
+  }
   cmp_group() { # cmp_group <name> <modes csv> <sizes csv> <sizes-set> <threshold>
     local name=$1 modes=$2 sizes=$3 set=$4 thr=$5
     split_group "$OUT_BEFORE" "$SPLIT_DIR/$name.before" "$modes" "$sizes" || return 2
@@ -650,8 +696,12 @@ PY
     echo
     cmp_group guard fresh 512,1024,2048 readback-prefetch-guard 1.03 || rc_all=1
     echo
-    # N=256 は record_only（判定に使わない）。終了コードは rc_all へ反映しない。
-    cmp_group n256 reuse,fresh 256 readback-prefetch-n256 1.03 || echo "(n256 は record_only。上の判定は参考値)"
+    # N=256 は性能比の後退のみ record_only（判定対象外）。checksum 不一致・データ欠損は
+    # 下の checksum_gate が全セルで fail-closed に検査し rc_all へ反映する（RULE.txt [checksum]）。
+    cmp_group n256 reuse,fresh 256 readback-prefetch-n256 1.03 || echo "(n256 の性能比は record_only。上の判定は参考値。checksum は下の検査が判定)"
+    echo
+    echo "## checksum_gate (全 run・全腕の完全一致 + 既知値 1e-5 以内。N=256 を含む)"
+    checksum_gate "$OUT_BEFORE" "$OUT_AFTER" || rc_all=1
     exit "$rc_all"
   } | write_excl "$REPORT"
   # 比較器と書き込み先の両方の終了状態を検査する（片方だけ見ると、write_excl 失敗で
