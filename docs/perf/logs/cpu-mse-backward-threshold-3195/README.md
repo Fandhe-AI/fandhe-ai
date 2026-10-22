@@ -19,3 +19,7 @@
 - 計測手順は `docs/real-hardware-verification-env.md` §3・§4.4・§7 に従い、`.rev-stamp` とツリー指紋で腕を同定し、
   Stage 0（`mse_backward_threshold_sweep` 5 プロセス）→ Stage 1（ハーネス）の順に実行し、成果物を
   `macmini/`・`gb10/` へ回収して本 README に判定表を追記する。
+- 系列開始前の preflight は**手動で記録する**（ハーネスは記録も未実施時の停止もしない）。各機体で
+  `ps -axo pid,etime,command | grep -E 'cargo|rustc|bench' | grep -v grep` の出力を、他セッションの該当プロセスが
+  0 件であることを確認したうえで `preflight-procs.txt`（`macmini/`・`gb10/` 配下）へ保存してから Stage 0 を開始する。
+  1 件でも残っていれば計測を開始しない（RULE.txt §5）。
