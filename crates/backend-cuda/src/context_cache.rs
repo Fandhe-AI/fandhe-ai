@@ -1380,6 +1380,62 @@ impl Drop for CaptureGuard {
     }
 }
 
+/// 別スレッドの CUDA Graph capture が終わるまで、上限付きで待つ
+/// （イシュー #3205・`docs/perf/infer-chain-graphcapture-cuda-ab.md` §3 の
+/// R1(b) 是正）。
+///
+/// 役割: 推論チェーン（`DeviceParamStore::predict_device_chain`）の入口が
+/// `DeviceContextCaptureInProgress` を受けたとき、`BackendOps::
+/// wait_device_capture_idle` 経由で 1 回だけ呼ばれる。`begin_driver_call` 自体は
+/// 待ち型にしない（学習 step 側は同エラーで直接実行へ落ちる契約のため）。
+///
+/// 契約（fail-closed）:
+/// - このスレッドが `ordinal` 上で [`CallToken`] を保持している場合は待たず
+///   `DeviceContextCaptureInProgress` を返す（`begin_capture_session` の
+///   in_flight ドレインとの相互待ち＝自己デッドロックを防ぐ）。
+/// - 待つのは `state.capture` が別スレッドのときだけ。`timeout` を過ぎたら
+///   `DeviceContextCaptureInProgress` を返す（無限待ちしない）。
+/// - phase が `Active` でない場合・capture が無い場合は待たず `Ok(())` を返す
+///   （poison／Retiring の検査は呼び直された `begin_driver_call` が従来どおり行い、
+///   本関数はそれらを弱めない）。
+/// - `Ok(())` は「再試行してよい」であって「成功を保証する」ではない。
+pub(crate) fn wait_foreign_capture_idle(
+    ordinal: usize,
+    timeout: std::time::Duration,
+) -> Result<(), BackendError> {
+    if has_in_flight_call_on_this_thread(ordinal) {
+        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+    }
+    let cell = ordinal_registry().entry(ordinal)?;
+    let poisoned = |e: &dyn std::fmt::Display| {
+        BackendError::DeviceContextPoisoned(format!(
+            "context_cache::OrdinalState の Mutex が poison しました（ordinal={ordinal}）: {e}"
+        ))
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    let me = std::thread::current().id();
+    let mut state = cell.0.lock().map_err(|e| poisoned(&e))?;
+    loop {
+        if !matches!(state.phase, Phase::Active) {
+            return Ok(());
+        }
+        match state.capture {
+            Some(owner) if owner != me => {}
+            _ => return Ok(()),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+        }
+        // `CaptureGuard::drop` が `notify_all` する同じ Condvar で起きる。
+        let (next, _) = cell
+            .1
+            .wait_timeout(state, remaining)
+            .map_err(|e| poisoned(&e))?;
+        state = next;
+    }
+}
+
 /// `graph::run_captured_sgd_step_segment` が stream capture 開始直前に 1 回だけ
 /// 呼ぶ（イシュー #1349・codex-review P0 指摘対応）。同一 ordinal で既に
 /// capture 中（別スレッド・同一スレッドいずれも）なら
@@ -3336,6 +3392,85 @@ mod poison_state_tests {
             matches!(second, Err(BackendError::InvalidArgument(_))),
             "同一 ordinal への 2 重 capture 開始は拒否されるはず: {second:?}"
         );
+    }
+
+    /// イシュー #3205: capture 無しでは待たず即 `Ok`。
+    #[test]
+    fn wait_foreign_capture_idle_returns_immediately_without_capture() {
+        let ordinal = unique_ordinal();
+        let t = std::time::Instant::now();
+        assert!(wait_foreign_capture_idle(ordinal, std::time::Duration::from_secs(5)).is_ok());
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// イシュー #3205: 別スレッドの capture が期限内に終われば `Ok`。
+    #[test]
+    fn wait_foreign_capture_idle_succeeds_when_capture_ends_in_time() {
+        let ordinal = unique_ordinal();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let guard = begin_capture_session(ordinal).expect("capture starts");
+            tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            drop(guard);
+        });
+        rx.recv().unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            go_tx.send(()).unwrap();
+        });
+        let r = wait_foreign_capture_idle(ordinal, std::time::Duration::from_secs(10));
+        assert!(r.is_ok(), "{r:?}");
+        holder.join().unwrap();
+        releaser.join().unwrap();
+    }
+
+    /// イシュー #3205: 期限切れは従来の `DeviceContextCaptureInProgress`。
+    #[test]
+    fn wait_foreign_capture_idle_times_out_with_capture_in_progress() {
+        let ordinal = unique_ordinal();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let guard = begin_capture_session(ordinal).expect("capture starts");
+            tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            drop(guard);
+        });
+        rx.recv().unwrap();
+        let r = wait_foreign_capture_idle(ordinal, std::time::Duration::from_millis(30));
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextCaptureInProgress { ordinal: o }) if o == ordinal),
+            "{r:?}"
+        );
+        go_tx.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    /// イシュー #3205: 自スレッドが capture 中なら待たない（別スレッドではない）。
+    #[test]
+    fn wait_foreign_capture_idle_does_not_wait_for_own_capture() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture starts");
+        assert!(wait_foreign_capture_idle(ordinal, std::time::Duration::from_secs(5)).is_ok());
+        drop(guard);
+    }
+
+    /// イシュー #3205: CallToken 保持中は別スレッド capture でも待たず拒否
+    /// （自己デッドロック防止）。
+    #[test]
+    fn wait_foreign_capture_idle_rejects_without_waiting_when_holding_call_token() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[]).expect("token");
+        let t = std::time::Instant::now();
+        let r = wait_foreign_capture_idle(ordinal, std::time::Duration::from_secs(5));
+        assert!(matches!(
+            r,
+            Err(BackendError::DeviceContextCaptureInProgress { .. })
+        ));
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+        drop(token);
     }
 
     #[test]

@@ -4001,6 +4001,22 @@ pub trait BackendOps {
         Ok(None)
     }
 
+    /// 別スレッドが同じデバイスで行っている Graph capture の終了を、上限
+    /// `timeout` 付きで待つ（イシュー #3205。推論チェーンの capture 競合是正）。
+    ///
+    /// 呼び出し元は `DeviceParamStore::predict_device_chain` のみで、
+    /// `DeviceContextCaptureInProgress` を受けたときに 1 回だけ呼んで
+    /// チェーン全体をやり直す。`Ok(())` は「再試行してよい」の意味で、
+    /// 期限切れ・自スレッドが driver 呼び出し中の場合は
+    /// `DeviceContextCaptureInProgress` を返す（fail-closed）。
+    ///
+    /// # デフォルト実装
+    /// 待つべき capture が無いため常に `Ok(())`（CPU・Metal は既定のまま。
+    /// 非破壊拡張）。
+    fn wait_device_capture_idle(&self, _timeout: std::time::Duration) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
     /// いずれも [`DeviceBuffer`] 常駐のまま計算する（イシュー #1584）。
     /// `linear_forward_device` と同じ動機（`docs/inference-forward-
@@ -5893,6 +5909,17 @@ mod tests {
         let result = ops.linear_chain_forward_captured(&input, &[(w_view, None, Activation::None)]);
 
         assert!(matches!(result, Ok(None)));
+    }
+
+    /// [`BackendOps::wait_device_capture_idle`] の既定実装が待たず `Ok(())`
+    /// を返すこと（イシュー #3205）。
+    #[test]
+    fn wait_device_capture_idle_default_returns_ok() {
+        let ops = MockOps(Device::Cpu);
+        assert!(
+            ops.wait_device_capture_idle(std::time::Duration::from_millis(1))
+                .is_ok()
+        );
     }
 
     /// [`BackendOps::fft_rfft`]／[`BackendOps::fft_irfft`] の既定実装が
