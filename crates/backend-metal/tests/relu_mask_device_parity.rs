@@ -11,12 +11,18 @@
 
 #![cfg(target_os = "macos")]
 
-use fandhe_ai_backend_metal::MetalBackendOps;
+use fandhe_ai_backend_metal::{__diagnostic_batch_counters_snapshot, MetalBackendOps};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{
     BackendOps, DeviceBuffer, DeviceBufferView, DeviceMatrixLayout, DispatchFailureCell,
     ShapeError, Tensor,
 };
+
+/// 診断カウンタはプロセス共有のため、ファイル内のテストを直列化する。
+fn serialize() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 fn pattern(n: usize, salt: usize) -> Vec<f32> {
     const SPECIAL: [f32; 9] = [
@@ -77,7 +83,8 @@ fn upload(ops: &MetalBackendOps, data: &[f32]) -> DeviceBuffer<f32> {
         .expect("upload")
 }
 
-const SHAPES: [(usize, usize); 8] = [
+const SHAPES: [(usize, usize); 9] = [
+    (64, 256),
     (1, 1),
     (1, 13),
     (13, 1),
@@ -127,6 +134,7 @@ fn run_case(layout: DeviceMatrixLayout, r: usize, c: usize, g_off: usize, m_off:
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn row_major_bit_identical_including_view_offsets() {
+    let _g = serialize();
     for &(r, c) in &SHAPES {
         for (g_off, m_off) in [(0, 0), (5, 3), (0, 9)] {
             run_case(DeviceMatrixLayout::RowMajor, r, c, g_off, m_off);
@@ -137,6 +145,7 @@ fn row_major_bit_identical_including_view_offsets() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn transposed_bit_identical_including_view_offsets() {
+    let _g = serialize();
     for &(r, c) in &SHAPES {
         for (g_off, m_off) in [(0, 0), (4, 6)] {
             run_case(DeviceMatrixLayout::Transposed, r, c, g_off, m_off);
@@ -147,6 +156,7 @@ fn transposed_bit_identical_including_view_offsets() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn error_paths_are_typed() {
+    let _g = serialize();
     let ops = MetalBackendOps::new();
     let g_buf = upload(&ops, &[1.0; 12]);
     let m_buf = upload(&ops, &[1.0; 12]);
@@ -194,6 +204,7 @@ fn error_paths_are_typed() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn zero_numel_returns_empty_output() {
+    let _g = serialize();
     let ops = MetalBackendOps::new();
     let g_buf = upload(&ops, &[1.0; 4]);
     let m_buf = upload(&ops, &[1.0; 4]);
@@ -205,4 +216,91 @@ fn zero_numel_returns_empty_output() {
         .unwrap();
     assert_eq!(out.shape(), [0, 5]);
     assert_eq!(out.numel(), 0);
+}
+
+/// #3224: MLP の L1 出力形 `[64, 256]` で、tracked 版が wait を出さず（encode は 1）、
+/// 非 tracked 版の対照が wait +1 になること（カウンタが常に 0 を返す壊れ方の否定）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn tracked_variant_issues_no_wait() {
+    let _g = serialize();
+    let ops = MetalBackendOps::new();
+    let (r, c) = (64usize, 256usize);
+    let n = r * c;
+    for layout in [DeviceMatrixLayout::RowMajor, DeviceMatrixLayout::Transposed] {
+        let g_store = pattern(n, 1);
+        let m_store = pattern(n, 2);
+        let g_buf = upload(&ops, &g_store);
+        let m_buf = upload(&ops, &m_store);
+        let (logical, g_logical) = match layout {
+            DeviceMatrixLayout::Transposed => ([c, r], transpose(&g_store, r, c)),
+            _ => ([r, c], g_store.clone()),
+        };
+        let want = reference(&g_logical, &m_store);
+        let g_shape = [r, c];
+        let g = DeviceBufferView::new(&g_buf, 0, &g_shape).unwrap();
+        let m = DeviceBufferView::new(&m_buf, 0, &logical).unwrap();
+        // 先行する GPU 仕事を download で同期しておく。
+        let _ = ops.memory_ops().unwrap().download(&g_buf).unwrap();
+
+        let token = DispatchFailureCell::new();
+        let b = __diagnostic_batch_counters_snapshot().unwrap();
+        let out_t = ops
+            .relu_backward_mask_device_tracked(g, layout, m, &token)
+            .unwrap();
+        let a = __diagnostic_batch_counters_snapshot().unwrap();
+        assert_eq!(
+            a.wait_until_completed - b.wait_until_completed,
+            0,
+            "{layout:?}"
+        );
+        assert_eq!(a.encode_calls - b.encode_calls, 1, "{layout:?}");
+        assert!(!token.is_set());
+        let got = ops.memory_ops().unwrap().download(&out_t).unwrap();
+        assert_bits_or_nan_class(got.as_slice().unwrap(), &want, &format!("{layout:?}"));
+
+        let b = __diagnostic_batch_counters_snapshot().unwrap();
+        let _ = ops.relu_backward_mask_device(g, layout, m).unwrap();
+        let a = __diagnostic_batch_counters_snapshot().unwrap();
+        assert_eq!(
+            a.wait_until_completed - b.wait_until_completed,
+            1,
+            "{layout:?}"
+        );
+    }
+}
+
+/// #3224: マスクが非正規化数（`f32::MIN_POSITIVE` 未満の正値）のときの選択。
+/// CPU 参照は `m > 0.0` が真（g を通す）。GPU が非正規化数を 0 へ flush すると
+/// 偽になり不一致となる。この結果は実機の事実として記録する（tolerance・判定式は
+/// 変えない。不一致時の戻し先は #3218）。共有 `pattern` へは混ぜない（他の形状の
+/// 判定を巻き込まないため）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn denormal_mask_selects_like_cpu_reference() {
+    let _g = serialize();
+    let ops = MetalBackendOps::new();
+    let (r, c) = (64usize, 256usize);
+    let n = r * c;
+    let g_store: Vec<f32> = (0..n).map(|i| (i % 23) as f32 - 11.0).collect();
+    let m_store: Vec<f32> = (0..n)
+        .map(|i| match i % 4 {
+            0 => 1e-40,
+            1 => -1e-40,
+            2 => 1.0e-45,
+            _ => 1.5,
+        })
+        .collect();
+    assert!(m_store.iter().take(3).all(|v| v.abs() < f32::MIN_POSITIVE));
+    let g_buf = upload(&ops, &g_store);
+    let m_buf = upload(&ops, &m_store);
+    let shape = [r, c];
+    let g = DeviceBufferView::new(&g_buf, 0, &shape).unwrap();
+    let m = DeviceBufferView::new(&m_buf, 0, &shape).unwrap();
+    let want = reference(&g_store, &m_store);
+    let out = ops
+        .relu_backward_mask_device(g, DeviceMatrixLayout::RowMajor, m)
+        .unwrap();
+    let got = ops.memory_ops().unwrap().download(&out).unwrap();
+    assert_bits_or_nan_class(got.as_slice().unwrap(), &want, "denormal mask");
 }

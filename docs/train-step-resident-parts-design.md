@@ -65,7 +65,7 @@ pub enum DeviceMatrixLayout { RowMajor, Transposed }
   - stride 読みの別カーネルへ差し替えると REQ-2 判定にしか落ちない（`docs/matmul-vjp-zero-copy-decision.md` §4.4）ため採らない。
 - 検証方法:
   - CI で実行できる単体テスト: 既定メソッドの `Unsupported`・`_tracked` の委譲を `backend_ops.rs` の既存テスト（`linear_forward_device_default_is_unsupported` 等）と同型で書く。
-  - 実機テスト（`#[ignore]`）は `to_bits()` 一致で判定し、NaN は両者 `is_nan()` のクラス一致とする。形状は m=64 の MLP 形状と端数形状、入力は NaN／inf を含める。#3224 で Mac mini と GB10 について RULE.txt・5 run・`.rev-stamp` つきで記録する。
+  - 実機テスト（`#[ignore]`）は `to_bits()` 一致で判定し、NaN は両者 `is_nan()` のクラス一致とする。形状は m=64 の MLP 形状と端数形状、入力は NaN／inf を含める。#3224 で Mac mini と GB10 について RULE.txt・5 run・`.rev-stamp` つきで記録する。記録先は `docs/perf/logs/train-step-resident-parts-parity-3224/`（規則と手順は固定済み・正式実測は未取得。開発機試走で Metal の正の非正規化数マスクが CPU と不一致〈FTZ とみられる。戻し先 #3218〉）。
   - tolerance・baseline は変えない。
 
 ## 5. 失敗トークン（`_tracked`）

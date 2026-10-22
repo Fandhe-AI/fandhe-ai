@@ -125,7 +125,8 @@ fn sentinel(total: usize) -> Vec<f32> {
 }
 
 /// (B, in, out) 形状: MLP 形状 + 端数形状 + `k == 1`（bias の -0.0 直接コピー経路）。
-const SHAPES: [(usize, usize, usize); 8] = [
+const SHAPES: [(usize, usize, usize); 9] = [
+    (64, 784, 256),
     (64, 128, 256),
     (64, 256, 10),
     (64, 784, 128),
