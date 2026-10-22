@@ -452,6 +452,11 @@ mod gemm_bk32_diag_tests;
 // 追加のみ。ADOPT 時の `tile.rs` 変更は別途 docs 判断を経て行う）。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_bm128_diag_tests;
+// イシュー #3208: m=64 級 GEMM 向け細タイル候補（`tile::M64_THIN_CANDIDATES`。
+// 既定 OFF）の実機 bit 一致テスト。`pub(crate)` 定数へ届くため兄弟モジュール
+// として置く。全件 `#[ignore]`・プロダクションコードは tile.rs の追加のみ。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_m64_thin_tile_diag_tests;
 // イシュー #1326 調査: Metal 4 `tensor<>`＋Metal Performance Primitives
 // （`matmul2d`）の可用性・`objc2-metal =0.3.2` バインディングからの
 // 到達性・純カーネル時間（GPU タイムスタンプ）を実測し、「完全自作
