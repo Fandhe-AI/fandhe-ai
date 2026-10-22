@@ -4239,7 +4239,7 @@ impl BackendOps for CudaBackendOps {
 
     /// ReLU マスク選択 `out = (mask_src > 0) ? g : +0.0` をデバイス常駐のまま
     /// 計算する（イシュー #3221。意味論・レイアウト契約は trait doc を正とする。
-    /// 本体は [`Self::relu_backward_mask_device_impl`]）。**CUDA は非 tracked でも
+    /// 本体は `relu_backward_mask_device_impl`）。**CUDA は非 tracked でも
     /// 同期しない**（ストリーム順序契約。Metal の「復帰時に完了」とは異なる。
     /// 起動エラーは次の同期点で poison／世代検査から観測される。
     /// `linear_forward_device` と同じ）。
