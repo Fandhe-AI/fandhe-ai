@@ -1071,6 +1071,20 @@ pub struct UniqueExtOutput {
     pub counts: Tensor<i32>,
 }
 
+/// [`BackendOps::relu_backward_mask_device`] が `g` の格納形をどう読むか
+/// （イシュー #3218・設計 `docs/train-step-resident-parts-design.md` §3）。
+/// `RowMajor` は格納形をそのまま、`Transposed` は格納 `[r, c]` を論理
+/// `[c, r]` として転置して読む。行列系のデバイス常駐 API（#3220・#3221・
+/// #3223）が共有する。`#[non_exhaustive]` のため追加は非破壊。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMatrixLayout {
+    /// 格納形をそのまま行優先で読む。
+    RowMajor,
+    /// 格納 `[r, c]` を論理 `[c, r]` として読む。
+    Transposed,
+}
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -3869,6 +3883,66 @@ pub trait BackendOps {
         self.linear_forward_device(a, w, bias, act)
     }
 
+    /// ReLU の backward マスクをデバイス常駐のまま適用する（イシュー #3218・
+    /// 設計 `docs/train-step-resident-parts-design.md` §3 行 3・§4・§5。
+    /// 学習 1 step の同期回数を 1 回へ減らす #3248・#3251 の部品）。
+    ///
+    /// # 意味論（最重要。乗算ではなく**選択**）
+    /// 論理形の各要素について
+    /// `out[i] = (mask_src[i] > 0.0) ? g[i] : +0.0` を返す。
+    /// - `mask_src[i]` が NaN のときは比較が偽となり `+0.0` を返す。
+    /// - `g[i]` の NaN／inf／−0.0 は mask が真ならビットのまま保存する。
+    /// - `g * (m > 0)` の乗算形は禁止（NaN×0・負値×0 で bit がずれる）。
+    ///   CPU 参照は `autodiff::grad::elementwise_mul_mask(.., |v| v > 0.0)`。
+    ///
+    /// # レイアウト契約
+    /// - `g.shape()` は**格納形**で rank 2（`[r, c]`）を必須とする（不一致は
+    ///   `ShapeError::RankMismatch`）。論理形は `RowMajor` なら `[r, c]`、
+    ///   `Transposed` なら `[c, r]`（格納 `[r, c]` を転置して読む）。
+    /// - `mask_src.shape()` は論理形と完全一致し、行優先の連続とみなす
+    ///   （不一致は `ShapeError::ShapeMismatch`）。
+    /// - 戻り値の shape は論理形・行優先。
+    ///
+    /// # 既定実装
+    /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示
+    /// フォールバックは同期回数の受け入れ条件を静かに破るため禁止）。
+    /// Metal（`backend-metal::ops::MetalBackendOps`）が実装し、CPU は #3253、
+    /// CUDA は #3221 で対応する。ROCm は既定を継承する。
+    ///
+    /// # 同期契約
+    /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。
+    /// 待たない encode-only 版は [`Self::relu_backward_mask_device_tracked`]
+    /// のみとする（トークンなしの encode-only 入口は作らない。設計 §5）。
+    fn relu_backward_mask_device(
+        &self,
+        _g: DeviceBufferView<'_>,
+        _g_layout: DeviceMatrixLayout,
+        _mask_src: DeviceBufferView<'_>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "relu_backward_mask_device: default fail-safe (no device-resident ReLU mask \
+             select kernel available)"
+                .into(),
+        ))
+    }
+
+    /// [`Self::relu_backward_mask_device`] と同型だが、Metal のコマンド
+    /// バッファ共有向けに共有失敗トークン [`DispatchFailureCell`] を受け取る
+    /// 非破壊拡張（`linear_forward_device_tracked` と同じパターン）。
+    ///
+    /// 既定は `token` を無視して [`Self::relu_backward_mask_device`] へ委譲する。
+    /// Metal のオーバーライドは待たずに encode のみ行い、`token` を `encode`
+    /// と同一ロック区間でバッチへ登録する。
+    fn relu_backward_mask_device_tracked(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.relu_backward_mask_device(g, g_layout, mask_src)
+    }
+
     /// 新トークンの K／V 行を、デバイス常駐のページ化 KV プールへスロット写像どおりに
     /// 書き込む（K-3。イシュー #3111・設計 `docs/device-resident-kv-paged-attention-
     /// design.md` §2・§4）。
@@ -5788,6 +5862,45 @@ mod tests {
         let result = ops.linear_forward_device(&a, w_view, None, Activation::None);
 
         assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// [`BackendOps::relu_backward_mask_device`] の既定実装が fail-safe
+    /// （[`BackendError::Unsupported`]）を返すことを確認する（イシュー #3218）。
+    #[test]
+    fn relu_backward_mask_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let g_buf = empty_device_buffer(Device::Cpu);
+        let m_buf = empty_device_buffer(Device::Cpu);
+        let g = DeviceBufferView::new(&g_buf, 0, &[1, 1]).unwrap();
+        let m = DeviceBufferView::new(&m_buf, 0, &[1, 1]).unwrap();
+
+        let result = ops.relu_backward_mask_device(g, DeviceMatrixLayout::RowMajor, m);
+
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    /// `_tracked` の既定実装が `token` を無視して非 tracked 版へ委譲する
+    /// ことを確認する（`linear_forward_device_tracked` と同型のガード）。
+    #[test]
+    fn relu_backward_mask_device_tracked_default_delegates_to_relu_backward_mask_device() {
+        let ops = MockOps(Device::Cpu);
+        let g_buf = empty_device_buffer(Device::Cpu);
+        let m_buf = empty_device_buffer(Device::Cpu);
+        let g = DeviceBufferView::new(&g_buf, 0, &[1, 1]).unwrap();
+        let m = DeviceBufferView::new(&m_buf, 0, &[1, 1]).unwrap();
+        let token = DispatchFailureCell::new();
+
+        let direct = ops.relu_backward_mask_device(g, DeviceMatrixLayout::Transposed, m);
+        let tracked =
+            ops.relu_backward_mask_device_tracked(g, DeviceMatrixLayout::Transposed, m, &token);
+
+        match (direct, tracked) {
+            (Err(BackendError::Unsupported(a)), Err(BackendError::Unsupported(b))) => {
+                assert_eq!(a, b);
+            }
+            other => panic!("expected both to return the same Unsupported error: {other:?}"),
+        }
+        assert!(!token.is_set());
     }
 
     /// [`BackendOps::linear_forward_device_tracked`] のデフォルト実装が

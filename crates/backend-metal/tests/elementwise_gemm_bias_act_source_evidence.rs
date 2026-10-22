@@ -105,3 +105,25 @@ fn gemm_tiled_bias_act_applies_relu_with_cpu_matching_comparison_direction() {
          CPU 参照実装と異なります"
     );
 }
+
+/// `ew_relu_mask_select_f32`（イシュー #3218）の手動境界チェック（REQ-8）と
+/// 「乗算ではなく選択」の意味論をロックする。`ulong` 添字・view 終端検査・
+/// `uint` ビットコピー（NaN payload／−0.0 を GPU 側で触らない）を固定する。
+#[test]
+fn relu_mask_select_keeps_bounds_checks_and_is_selection_not_multiplication() {
+    let src = ELEMENTWISE_METAL_SOURCE;
+    let start = src
+        .find("kernel void ew_relu_mask_select_f32(")
+        .expect("ew_relu_mask_select_f32 が見つかりません");
+    let body = &src[start..];
+    assert!(body.contains("if (idx < numel && cols_l != 0u) {"));
+    assert!(body.contains("gi < (ulong)g_end && mi < (ulong)mask_end"));
+    assert!(body.contains("ulong gi;"));
+    assert!(body.contains("(mask[mi] > 0.0f) ? g[gi] : 0u"));
+    assert!(body.contains("device const uint* g [[buffer(0)]]"));
+    assert!(body.contains("device uint* out [[buffer(2)]]"));
+    assert!(
+        !body.contains("g[gi] *") && !body.contains("* g[gi]"),
+        "ReLU マスクは選択であり乗算ではない（NaN×0・−x×0 で bit がずれる）"
+    );
+}
