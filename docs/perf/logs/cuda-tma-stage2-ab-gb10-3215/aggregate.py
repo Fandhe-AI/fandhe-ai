@@ -41,6 +41,24 @@ GATE_B_BINARIES = (
     "transpose_parity",
     "gemm_tiled",
 )
+# 実行完備の期待値（fail-closed）。Stage 1 同型の収録ログ（GB10 実測）の `test result` 行の passed+failed（実行総数）。
+# 一部のテストだけ走った・0 passed の空走りを ADOPT 判定へ通さないための下限固定（RULE 項 6 の必須ゲート）。
+GATE_A_EXPECTED_PASSED = 9
+GATE_B_EXPECTED_PASSED = {
+    "parity_nonregression": 1,
+    "cpu_cuda_parity": 2,
+    "cpu_cuda_tiled_pipeline_parity": 18,
+    "gemm_transposed_parity": 5,
+    "transpose_parity": 4,
+    "gemm_tiled": 6,
+}
+# 判定に必須の段（stage_rc.txt の rc が 0 であること。欠落・非 0 は ADOPT を出さない）。
+# cuBLAS・セルは record_only のため含めない（RULE 項 9。セル失敗は判定に影響させない）。
+REQUIRED_STAGES = (
+    ("build", "gateA")
+    + tuple(f"gateB_{b}" for b in GATE_B_BINARIES)
+    + tuple(f"kern_run{r}" for r in RUNS)
+)
 # 既知の無関係 fail の除外（RULE 項 6）。Stage 1 の gateB_failed_names.txt は空のため空集合。
 KNOWN_UNRELATED_FAILS = frozenset()
 # #3185 の cuBLAS mm_event 中央値 [ms]（docs/perf/logs/opp-kernel-gb10-3185。RULE 項 10 の比較基準）。
@@ -163,13 +181,13 @@ def verdict_for(rows):
 
 # ---------- テストログ（ゲート A／B） ----------
 TEST_RE = re.compile(r"^test (\S+) \.\.\. (ok|FAILED|ignored)\b")
-TEST_RESULT_RE = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed;")
+TEST_RESULT_RE = re.compile(r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;")
 
 
 def parse_test_log(text, label):
-    """戻り値: ({名前: 状態}, test result 行の数)。--nocapture で結果が後続行に分かれる場合は
+    """戻り値: ({名前: 状態}, [(判定語, passed, failed, ignored) の test result 行リスト])。--nocapture で結果が後続行に分かれる場合は
     `test <name> ...` の行末に出力が続き `ok` が次行に来るため、名前行のみで ok/FAILED が取れない場合は後続の単独 `ok`/`FAILED` 行を拾う。"""
-    names, results = {}, 0
+    names, results = {}, []
     pending = None
     for line in text.splitlines():
         m = TEST_RE.match(line)
@@ -189,17 +207,34 @@ def parse_test_log(text, label):
             names[pending] = line.strip()
             pending = None
             continue
-        if TEST_RESULT_RE.match(line):
-            results += 1
+        mr = TEST_RESULT_RE.match(line)
+        if mr:
+            results.append((mr.group(1), int(mr.group(2)), int(mr.group(3)), int(mr.group(4))))
     if pending is not None:
         raise AggError(f"{label}: テスト {pending} の結果行が無い")
     return names, results
 
 
+def check_complete(names, results, expected_passed, label):
+    """実行完備の検査（fail-closed。違反は AggError で集計を止める）。
+    test result 行がちょうど 1 つ・passed が期待数・個別結果の件数が summary と一致することを要求する。"""
+    if len(results) != 1:
+        raise AggError(f"{label}: test result 行が {len(results)} 個（ちょうど 1 個が必要。途中終了または重複）")
+    status, passed, failed, ignored = results[0]
+    if passed + failed != expected_passed or passed + failed == 0:
+        raise AggError(f"{label}: passed+failed={passed + failed} が期待数 {expected_passed} と不一致（テスト欠落または 0 passed の空走り）")
+    n_ok = sum(1 for s in names.values() if s == "ok")
+    n_failed = sum(1 for s in names.values() if s == "FAILED")
+    n_ign = sum(1 for s in names.values() if s == "ignored")
+    if (n_ok, n_failed, n_ign) != (passed, failed, ignored):
+        raise AggError(f"{label}: 個別結果 ok/FAILED/ignored={n_ok}/{n_failed}/{n_ign} が summary {passed}/{failed}/{ignored} と不一致")
+    if (status == "ok") != (failed == 0):
+        raise AggError(f"{label}: summary の判定語 {status} と failed={failed} が矛盾")
+
+
 def gate_a(text):
     names, results = parse_test_log(text, "gateA")
-    if results < 1:
-        raise AggError("gateA: test result 行が無い（途中終了）")
+    check_complete(names, results, GATE_A_EXPECTED_PASSED, "gateA")
     st = {}
     for n in GATE_A_CRITICAL + (GATE_A_PREREQ,):
         if n not in names:
@@ -214,8 +249,7 @@ def gate_b(texts):
     fails = []
     for b in GATE_B_BINARIES:
         names, results = parse_test_log(texts[b], f"gateB_{b}")
-        if results < 1:
-            raise AggError(f"gateB_{b}: test result 行が無い（途中終了）")
+        check_complete(names, results, GATE_B_EXPECTED_PASSED[b], f"gateB_{b}")
         fails += [f"{b}::{n}" for n, s in names.items() if s == "FAILED" and n not in KNOWN_UNRELATED_FAILS]
     return fails
 
@@ -334,6 +368,11 @@ def aggregate(base):
         problems_undetermined.append("専有ゲート不通過あり")
     bad_rc = {k: v for k, v in rcs.items() if v != "0"}
     md.append(f"- 終了コード非 0 の段: {len(bad_rc)} 件" + ("" if not bad_rc else "（" + ", ".join(f"{k}={v}" for k, v in sorted(bad_rc.items())) + "）"))
+    missing_rc = [k for k in REQUIRED_STAGES if k not in rcs]
+    bad_required = sorted(k for k in REQUIRED_STAGES if k in rcs and rcs[k] != "0")
+    if missing_rc or bad_required:
+        md.append("- **必須段の終了コード異常**: " + "、".join([f"{k}=欠落" for k in missing_rc] + [f"{k}={rcs[k]}" for k in bad_required]))
+        problems_undetermined.append("必須段（build/ゲート A・B/純カーネル）の終了コードが 0 でない・欠落")
     md.append("")
 
     # ゲート A
@@ -514,7 +553,8 @@ def _kern_log(run, cur_scale, cand_scale, bad_hash=False, nan=False):
     return "\n".join(lines) + "\n"
 
 
-def _write_fixture(d, cand_scale=0.9, bad_hash=False, nan=False, gate_a_fail=False, gate_b_fail=False, with_cell=True):
+def _write_fixture(d, cand_scale=0.9, bad_hash=False, nan=False, gate_a_fail=False, gate_b_fail=False, with_cell=True,
+                   bad_rc=None, zero_pass_b=False):
     os.makedirs(os.path.join(d, "cell"), exist_ok=True)
     for r in RUNS:
         open(os.path.join(d, f"kern_run{r}.log"), "w").write(_kern_log(r, 1.0, cand_scale, bad_hash, nan))
@@ -523,17 +563,28 @@ def _write_fixture(d, cand_scale=0.9, bad_hash=False, nan=False, gate_a_fail=Fal
             with open(os.path.join(d, "cublas", f"run{r}", f"{arm}.jsonl"), "w") as f:
                 for n in SIZES:
                     f.write(json.dumps({"arm": arm, "run": r, "phase": "mm_event", "n": n, "median_s": REF_3185_MS[arm][n] / 1e3}) + "\n")
-    names = list(GATE_A_CRITICAL) + [GATE_A_PREREQ]
+    names = list(GATE_A_CRITICAL) + [GATE_A_PREREQ] + [f"filler_a_{i}" for i in range(GATE_A_EXPECTED_PASSED - 4)]
     with open(os.path.join(d, "gateA_cpu_cuda_tiled_pipeline_tma_parity.log"), "w") as f:
         for i, nm in enumerate(names):
             f.write(f"test {nm} ... {'FAILED' if (gate_a_fail and i == 0) else 'ok'}\n")
-        f.write("test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1s\n")
+        nf = 1 if gate_a_fail else 0
+        f.write(f"test result: {'FAILED' if nf else 'ok'}. {len(names) - nf} passed; {nf} failed; 0 ignored; 0 measured; 0 filtered out; finished in 1s\n")
     for b in GATE_B_BINARIES:
         with open(os.path.join(d, f"gateB_{b}.log"), "w") as f:
-            f.write(f"test some_test_{b} ... {'FAILED' if (gate_b_fail and b == 'gemm_tiled') else 'ok'}\n")
-            f.write("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1s\n")
+            if zero_pass_b and b == "gemm_tiled":
+                f.write("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0s\n")
+                continue
+            total = GATE_B_EXPECTED_PASSED[b]
+            fails = 1 if (gate_b_fail and b == "gemm_tiled") else 0
+            for i in range(total):
+                f.write(f"test some_test_{b}_{i} ... {'FAILED' if i < fails else 'ok'}\n")
+            f.write(f"test result: {'FAILED' if fails else 'ok'}. {total - fails} passed; {fails} failed; 0 ignored; 0 measured; 0 filtered out; finished in 1s\n")
     open(os.path.join(d, "load_gate.log"), "w").write("GATE-PASS x load1=0.1 gpu_util=0\n")
-    open(os.path.join(d, "stage_rc.txt"), "w").write("build rc=0\n")
+    with open(os.path.join(d, "stage_rc.txt"), "w") as f:
+        for k in REQUIRED_STAGES:
+            if bad_rc is not None and k == bad_rc[0] and bad_rc[1] is None:
+                continue  # 欠落
+            f.write(f"{k} rc={0 if bad_rc is None or k != bad_rc[0] else bad_rc[1]}\n")
     if with_cell:
         with open(os.path.join(d, "cell", "results.jsonl"), "w") as f:
             for rnd in RUNS:
@@ -565,8 +616,13 @@ def self_test():
     assert all(v == "undetermined（ゲート B 要調査）" for v in ov.values()), ov
     _, ov = run(cand_scale=0.9, with_cell=False)
     assert all(v.startswith("ADOPT") for v in ov.values()), ov  # セル unavailable は判定に影響しない（record_only）
+    # 実行完備の fail-closed（codex #3531 P1）
+    for kw in ({"bad_rc": ("gateA", 1)}, {"bad_rc": ("gateB_gemm_tiled", None)}, {"bad_rc": ("kern_run3", "GATE-FAIL")}):
+        _, ov = run(cand_scale=0.9, **kw)
+        assert all(v == "undetermined" for v in ov.values()), (kw, ov)
+    _, ov = run(cand_scale=0.9, bad_rc=("cublas_run1_fp32", 1))  # record_only 段は判定に影響しない（必須段でないので fixture には出ない）
     # 拒否ケース
-    for kw, label in (({"nan": True}, "NaN"),):
+    for kw, label in (({"nan": True}, "NaN"), ({"zero_pass_b": True}, "0 passed のゲート B")):
         try:
             run(**kw)
         except AggError:
