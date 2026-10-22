@@ -1,0 +1,64 @@
+RULE fixed-at-utc: 2026-10-22T23:22Z (実機計測より前にコミットして固定。事後に緩和・変更しない)
+issue: #3225 CUDA reuse モードの readback の遅さの是正（背景事前タッチ宛先プール・既定 OFF）
+doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §15（入力は §14.5）
+
+[対象]
+- 同一バイナリ（HEAD の facade を AB_PATCH_FACADE_PATH で参照。本スクリプトのリポジトリ HEAD と一致必須）。
+  before = FANDHE_AI_CUDA_READBACK_DEST 未設定（既定 PretouchedFresh）
+  after  = FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch（PrefetchedPretouched）
+- env 許容値は pretouched／pinned-reuse／pretouched-prefetch（完全一致。未知値は既定へ倒す）
+- 機構: 同じ要素数の readback が 2 回目に来た後、D2H の同期が終わってから専用 worker スレッド 1 本が
+  次回ぶんの宛先 Vec<f32> を非ゼロ sentinel で確保・事前タッチしておく。次の readback は取り出して使う。
+  worker は CUDA に触れない。新規 unsafe なし。f32 のみ（f16 など他型は従来経路）
+- 凍結する定数（crates/backend-cuda/src/readback_prefetch.rs の PREFETCH_LIMITS）:
+  min_bytes = 1 MiB（N=256 の 256 KiB は対象外。N=512 は対象）
+  max_buffer_bytes = 128 MiB（N=4096 の 64 MiB を含む）
+  cap_bytes = 256 MiB（Ready と Pending の合計）
+  max_entries = 8
+  repeat_trigger = 2
+  wait_timeout = 20 ms
+- 腕の性格: #2108 の pinned-reuse（copy-out が 1 回増えて REJECT）とは別の機構。#2108 の RULE が
+  対象外とした「並列フィル腕」に当たり、REJECT 済み実験の再実行ではない
+
+[セル]
+- gemm cuda の reuse／fresh × N=256/512/1024/2048/4096（10 セル）。run_ab_readback_prefetch_cuda.sh
+- 主判定セル: reuse N=512/1024/2048/4096、fresh N=4096（ratio <= 0.95 を要求）
+- ガードセル: fresh N=512/1024/2048（ratio <= 1.03 を要求）
+- N=256（reuse・fresh）: プール対象外でコード経路は同一。record_only の非後退確認で、判定に使わない
+
+[計測]
+- 5 round 固定（AB_ROUNDS=5 以外は拒否）、プロセス独立起動、round ごとに起動順を反転
+- run の差し替え・追加起動はしない。同一 label の既存出力があれば停止する
+- 各セルの ratio = median(after) / median(before)（5 run の中央値どうし。単位は bench-fandhe の median_s）
+- 同一バイナリ・同一 HEAD（bin の sha256 を manifest に記録。.rev-stamp を回収して git archive の指紋と突合する）
+
+[checksum]
+- 全 run・全腕で完全一致（--require-checksum-exact）。不一致は fail-closed で REJECT
+- N=1024/2048/4096 は既知値（-1855.597736／-6016.774008／-25768.747284）と 1e-5 以内であること
+
+[判定]
+- ADOPT: 専有ゲート（AB_LOAD_GATE_MODE=exclusive。load1 < 1.0 かつ GPU 使用率 0% を 3 サンプル連続）を
+  通過し、主判定セルの全てで ratio <= 0.95、ガードセルの全てで ratio <= 1.03、checksum 条件を満たす
+- REJECT: 専有ゲートが成立した系列で、いずれかの条件を満たさない
+- undetermined: 専有ゲート不成立（record_only を含む）・取得不能・GB10 に到達できず未計測
+- しきい値・定数を事後調整して再計測しない
+- 後退したセル（ratio > 1.00）は判定に関わらず全て併記する
+
+[事前表明する期待値（仮説。実測ではない）]
+- reuse N=512〜2048: 背景の事前タッチが次の反復の checksum・H2D・カーネルと重なり fresh 並みに近づく
+- N=4096: 反復約 38 ms のうちに 64 MiB の事前タッチ（約 15 ms）が隠れ、reuse・fresh とも短縮する
+- fresh N<=2048: 中立の見込み。ただし worker スレッドの起動費用とメモリ帯域の競合で後退しうる
+- REJECT／undetermined でも機構（既定 OFF）と記録を残す
+
+[ADOPT 時]
+- 既定値（memory::READBACK_DEST）の反転は #3227 の方針に従って別 PR とする。本 PR では既定値を変えない
+
+[対象外]
+- ゼロコピー readback・Tensor ストレージの drop フック・mallopt／madvise／MAP_POPULATE／THP ヒント・
+  2 MiB 整列確保（いずれも新規 unsafe か libc 用途の拡張が要り、所有者承認事項）
+- pinned-reuse の既定化（#2108 で REJECT 済み）・managed 配置（#1353）・pinned H2D（#1585）
+- f32 以外の型への拡張・Metal・MLP の mem.download 経路の借用ビュー化
+
+[記録]
+- 生成物に内部ホスト名・絶対パスを含めない（<home> 等でマスクする）
+- tolerance・baseline・Cargo.toml・ガードレール閾値・docs/spec・#2107／#2108／#3186 の成果物は変更しない
