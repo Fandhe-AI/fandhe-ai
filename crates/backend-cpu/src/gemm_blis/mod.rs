@@ -78,6 +78,7 @@ mod jobgrid_probe;
 mod partition;
 // イシュー #3198: m が小さい GEMM の job 統合ゲート（既定 OFF。決定記録は
 // `docs/cpu-gemm-small-m-job-merge-prepack-decision.md`）。
+pub(crate) mod prepack;
 mod small_m;
 
 use std::ops::Range;
@@ -617,6 +618,7 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
                     transpose,
                     small_m::jobs_per_worker_for(m, n, k),
                     small_m::SMALL_M_JOB_MERGE_ENABLED,
+                    None,
                 )
             })
         } else {
@@ -727,6 +729,26 @@ pub fn gemm_blis_bias_act_parallel(
     bias: Option<&[f32]>,
     act: Activation,
 ) -> Result<(), GemmError> {
+    gemm_blis_bias_act_parallel_prepacked(a, b, c, m, n, k, bias, act, None)
+}
+
+/// [`gemm_blis_bias_act_parallel`] の事前 pack 対応版（イシュー #3200）。`prepack` が `Some` で
+/// 形状が適格（[`prepack::select_prepack`]）なら、B（常駐重み W）の pack 済み全幅 panel を
+/// `PrepackSource` のキャッシュから引き当て（無ければ構築し）job 内の B pack を省く。`None` や
+/// 不適格形状では [`gemm_blis_bias_act_parallel`] と同一の経路になる。呼び出し元は `ops.rs`
+/// （`prepack::RESIDENT_W_PREPACK_ENABLED` が ON のときだけ `Some` を渡す）。公開面には出さない。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_blis_bias_act_parallel_prepacked(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    bias: Option<&[f32]>,
+    act: Activation,
+    prepack: Option<prepack::PrepackSource<'_>>,
+) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
     if let Some(bias) = bias
         && bias.len() != n
@@ -805,6 +827,7 @@ pub fn gemm_blis_bias_act_parallel(
                     GemmTranspose::Nn,
                     small_m::jobs_per_worker_for(m, n, k),
                     small_m::SMALL_M_JOB_MERGE_ENABLED,
+                    prepack,
                 )
             })?;
             apply_epilogue(c, n, bias, act)
@@ -2718,7 +2741,8 @@ fn split_c_into_jobs<'c>(
 /// 条件 1〜8）の充足」）。
 ///
 /// B は呼び出し元から共有せず job ごとに個別 pack する（設計 §2.2
-/// 「packing: job 内 private」）。`region_row_offset` は呼び出し元
+/// 「packing: job 内 private」）。ただし `prepacked`（#3200。常駐 W の pack 済み全幅 panel。
+/// [`prepack`] 参照）が `Some` のときは pack を省き、同一内容の区画を切り出して読む。`region_row_offset` は呼び出し元
 /// （[`gemm_blis_two_d_dynamic_region`]）が受け取った `rows: Range<usize>`
 /// の `start`（通常 0）で、`Tn`（転置格納 A）の絶対行位置解決にのみ使う
 /// （`gemm_blis_region` の `row_offset`／`m_total` 引き回しと同型。#1213）。
@@ -2735,6 +2759,7 @@ fn run_two_d_job<K: Microkernel>(
     blocks: BlockSizes,
     transpose: GemmTranspose,
     region_row_offset: usize,
+    prepacked: Option<prepack::PrepackedB<'_>>,
 ) -> Result<(), GemmError> {
     let nr = K::NR;
     let mc_len = job.rows.end - job.rows.start;
@@ -2775,46 +2800,53 @@ fn run_two_d_job<K: Microkernel>(
         for pc in (0..k_dim).step_by(blocks.kc) {
             let kc_len = blocks.kc.min(k_dim - pc);
             let nr_blocks = nc_len.div_ceil(nr);
-            let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
-            for jr_block in 0..nr_blocks {
-                let jr = jr_block * nr;
-                let nr_eff = nr.min(nc_len - jr);
-                let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
-                // #3177 診断専用: B pack 語数の計数（非テストビルドでは消える）。
-                #[cfg(test)]
-                jobgrid_probe::on_b_pack(dst.len());
-                // B は絶対列位置（`job.cols.start + jc + jr`）で pack する
-                // （job 内の相対 jc に対し、実際の B 参照は元の n 幅の
-                // 行列へアクセスするため）。
-                let col_start = job.cols.start + jc + jr;
-                match transpose {
-                    GemmTranspose::Nt => pack_b_from_transposed(
-                        dst,
-                        b,
-                        BTPackTile {
-                            k_total: k_dim,
-                            n_total: n,
-                            kc_start: pc,
-                            kc_len,
-                            col_start,
-                            nr,
-                            nr_eff,
-                        },
-                    ),
-                    GemmTranspose::Nn | GemmTranspose::Tn => pack_b(
-                        dst,
-                        b,
-                        BPackTile {
-                            n_total: n,
-                            kc_start: pc,
-                            kc_len,
-                            col_start,
-                            nr,
-                            nr_eff,
-                        },
-                    ),
+            // #3200: 事前 pack 済み全幅 panel があれば job 内 B pack を省いて切り出す
+            // （job 列帯の先頭と jc は nr 格子上にある。`select_prepack` が保証）。
+            let b_panel: &[f32] = if let Some(pb) = prepacked {
+                pb.slice(nr, pc, kc_len, (job.cols.start + jc) / nr, nr_blocks)
+            } else {
+                let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
+                for jr_block in 0..nr_blocks {
+                    let jr = jr_block * nr;
+                    let nr_eff = nr.min(nc_len - jr);
+                    let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+                    // #3177 診断専用: B pack 語数の計数（非テストビルドでは消える）。
+                    #[cfg(test)]
+                    jobgrid_probe::on_b_pack(dst.len());
+                    // B は絶対列位置（`job.cols.start + jc + jr`）で pack する
+                    // （job 内の相対 jc に対し、実際の B 参照は元の n 幅の
+                    // 行列へアクセスするため）。
+                    let col_start = job.cols.start + jc + jr;
+                    match transpose {
+                        GemmTranspose::Nt => pack_b_from_transposed(
+                            dst,
+                            b,
+                            BTPackTile {
+                                k_total: k_dim,
+                                n_total: n,
+                                kc_start: pc,
+                                kc_len,
+                                col_start,
+                                nr,
+                                nr_eff,
+                            },
+                        ),
+                        GemmTranspose::Nn | GemmTranspose::Tn => pack_b(
+                            dst,
+                            b,
+                            BPackTile {
+                                n_total: n,
+                                kc_start: pc,
+                                kc_len,
+                                col_start,
+                                nr,
+                                nr_eff,
+                            },
+                        ),
+                    }
                 }
-            }
+                b_panel
+            };
 
             // `ctx.n = nc_len_job`（job 幅。C 行ストライドとしてのみ
             // 使われる。`IcLoopContext` ドキュメント参照）・`ctx.jc` は
@@ -2884,6 +2916,7 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
     transpose: GemmTranspose,
     jobs_per_worker: usize,
     share_a: bool,
+    prepack: Option<prepack::PrepackSource<'_>>,
 ) -> Result<(), GemmError> {
     let mr = K::MR;
     let nr = K::NR;
@@ -2922,6 +2955,36 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
     // split 計数の終了は共有 A 経路内（`split_c_into_jobs` 直後、または split なしの
     // 直接書き込み分岐）で行う。ここで先に止めると col_bands > 1 の split 確保が
     // 計数されず alloc_split が過少報告になる。
+    // #3200: 常駐 W の pack 済み全幅 panel（ゲート ON かつ適格形状のときだけ引き当て・構築）。
+    // GEMM 1 回につき 1 回だけ引き当て、job には読み取りビューだけを渡す。
+    let panel: Option<std::sync::Arc<[f32]>> = match prepack {
+        Some(src)
+            if prepack::select_prepack(
+                transpose == GemmTranspose::Nn,
+                k_dim,
+                n,
+                nr,
+                grid.nc_job,
+                blocks.nc,
+            ) =>
+        {
+            let key = prepack::PrepackKey {
+                offset: src.offset,
+                k: k_dim,
+                n,
+                nr,
+                kc: blocks.kc,
+            };
+            Some(src.cache.get_or_build(key, || {
+                prepack::build_full_width_panel(b, k_dim, n, nr, blocks.kc)
+            }))
+        }
+        _ => None,
+    };
+    let prepacked = panel.as_deref().map(|data| prepack::PrepackedB {
+        data,
+        n_padded: n.div_ceil(nr) * nr,
+    });
     if small_m::select_shared_a(share_a, mc_total, n, k_dim, mr, blocks.mc) {
         return gemm_blis_two_d_shared_a(
             kernel,
@@ -2934,6 +2997,7 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
             blocks,
             transpose,
             &grid,
+            prepacked,
         );
     }
     let mut jobs = split_c_into_jobs(c_region, n, &grid);
@@ -2951,6 +3015,7 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
             blocks,
             transpose,
             row_start,
+            prepacked,
         )
     })
 }
@@ -3039,6 +3104,7 @@ fn run_shared_a_job_body<K: Microkernel>(
     blocks: BlockSizes,
     transpose: GemmTranspose,
     b_scratch: &mut [f32],
+    prepacked: Option<prepack::PrepackedB<'_>>,
 ) -> Result<(), GemmError> {
     let mr = K::MR;
     let nr = K::NR;
@@ -3049,42 +3115,48 @@ fn run_shared_a_job_body<K: Microkernel>(
         for pc in (0..k_dim).step_by(blocks.kc) {
             let kc_len = blocks.kc.min(k_dim - pc);
             let nr_blocks = nc_len.div_ceil(nr);
-            let b_panel = &mut b_scratch[..nr_blocks * kc_len * nr];
-            for jr_block in 0..nr_blocks {
-                let jr = jr_block * nr;
-                let nr_eff = nr.min(nc_len - jr);
-                let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
-                #[cfg(test)]
-                jobgrid_probe::on_b_pack(dst.len());
-                let col_start = col0 + jc + jr;
-                match transpose {
-                    GemmTranspose::Nt => pack_b_from_transposed(
-                        dst,
-                        b,
-                        BTPackTile {
-                            k_total: k_dim,
-                            n_total,
-                            kc_start: pc,
-                            kc_len,
-                            col_start,
-                            nr,
-                            nr_eff,
-                        },
-                    ),
-                    GemmTranspose::Nn | GemmTranspose::Tn => pack_b(
-                        dst,
-                        b,
-                        BPackTile {
-                            n_total,
-                            kc_start: pc,
-                            kc_len,
-                            col_start,
-                            nr,
-                            nr_eff,
-                        },
-                    ),
+            // #3200: 事前 pack 済み全幅 panel があれば B pack を省いて切り出す（`col0` は nr 格子上）。
+            let b_panel: &[f32] = if let Some(pb) = prepacked {
+                pb.slice(nr, pc, kc_len, (col0 + jc) / nr, nr_blocks)
+            } else {
+                let b_panel = &mut b_scratch[..nr_blocks * kc_len * nr];
+                for jr_block in 0..nr_blocks {
+                    let jr = jr_block * nr;
+                    let nr_eff = nr.min(nc_len - jr);
+                    let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+                    #[cfg(test)]
+                    jobgrid_probe::on_b_pack(dst.len());
+                    let col_start = col0 + jc + jr;
+                    match transpose {
+                        GemmTranspose::Nt => pack_b_from_transposed(
+                            dst,
+                            b,
+                            BTPackTile {
+                                k_total: k_dim,
+                                n_total,
+                                kc_start: pc,
+                                kc_len,
+                                col_start,
+                                nr,
+                                nr_eff,
+                            },
+                        ),
+                        GemmTranspose::Nn | GemmTranspose::Tn => pack_b(
+                            dst,
+                            b,
+                            BPackTile {
+                                n_total,
+                                kc_start: pc,
+                                kc_len,
+                                col_start,
+                                nr,
+                                nr_eff,
+                            },
+                        ),
+                    }
                 }
-            }
+                b_panel
+            };
             let off = mr_blocks * mr * pc;
             let a_slice = &a_band[off..off + mr_blocks * kc_len * mr];
             let ctx = IcLoopContext {
@@ -3129,6 +3201,7 @@ fn gemm_blis_two_d_shared_a<K: Microkernel>(
     blocks: BlockSizes,
     transpose: GemmTranspose,
     grid: &partition::JobGrid,
+    prepacked: Option<prepack::PrepackedB<'_>>,
 ) -> Result<(), GemmError> {
     let mr = K::MR;
     let nr = K::NR;
@@ -3206,6 +3279,7 @@ fn gemm_blis_two_d_shared_a<K: Microkernel>(
                         blocks,
                         transpose,
                         b_scratch,
+                        prepacked,
                     )
                 },
             );
@@ -3249,6 +3323,7 @@ fn gemm_blis_two_d_shared_a<K: Microkernel>(
                 blocks,
                 transpose,
                 b_scratch,
+                prepacked,
             )?;
             for (i, row) in job.c_rows.iter_mut().enumerate() {
                 row.copy_from_slice(&c_buf[i * nc_len_job..(i + 1) * nc_len_job]);
@@ -3274,6 +3349,7 @@ fn dispatch_two_d_dynamic(
     transpose: GemmTranspose,
     jobs_per_worker: usize,
     share_a: bool,
+    prepack: Option<prepack::PrepackSource<'_>>,
 ) -> Result<(), GemmError> {
     #[cfg(avx512_stable)]
     if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
@@ -3289,6 +3365,7 @@ fn dispatch_two_d_dynamic(
             transpose,
             jobs_per_worker,
             share_a,
+            prepack,
         );
     }
     if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
@@ -3304,6 +3381,7 @@ fn dispatch_two_d_dynamic(
             transpose,
             jobs_per_worker,
             share_a,
+            prepack,
         )
     } else {
         gemm_blis_two_d_dynamic_region(
@@ -3318,6 +3396,7 @@ fn dispatch_two_d_dynamic(
             transpose,
             jobs_per_worker,
             share_a,
+            prepack,
         )
     }
 }
@@ -3344,6 +3423,7 @@ fn dispatch_two_d_dynamic(
     transpose: GemmTranspose,
     jobs_per_worker: usize,
     share_a: bool,
+    prepack: Option<prepack::PrepackSource<'_>>,
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
     if SME_PRODUCTION_ENABLED
@@ -3362,6 +3442,7 @@ fn dispatch_two_d_dynamic(
             transpose,
             jobs_per_worker,
             share_a,
+            prepack,
         );
     }
     gemm_blis_two_d_dynamic_region(
@@ -3376,6 +3457,7 @@ fn dispatch_two_d_dynamic(
         transpose,
         jobs_per_worker,
         share_a,
+        prepack,
     )
 }
 
@@ -3394,6 +3476,7 @@ fn dispatch_two_d_dynamic(
     transpose: GemmTranspose,
     jobs_per_worker: usize,
     share_a: bool,
+    prepack: Option<prepack::PrepackSource<'_>>,
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Scalar);
     gemm_blis_two_d_dynamic_region(
@@ -3408,6 +3491,7 @@ fn dispatch_two_d_dynamic(
         transpose,
         jobs_per_worker,
         share_a,
+        prepack,
     )
 }
 
@@ -3500,6 +3584,7 @@ fn two_d_dynamic_with_params_impl(
     jobs_per_worker: usize,
     transpose: GemmTranspose,
     share_a: bool,
+    prepack: Option<prepack::PrepackSource<'_>>,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
     validate_block_sizes(blocks)?;
@@ -3526,6 +3611,7 @@ fn two_d_dynamic_with_params_impl(
         transpose,
         jobs_per_worker.max(1),
         share_a,
+        prepack,
     )
 }
 
@@ -3544,7 +3630,19 @@ pub(crate) fn gemm_blis_parallel_two_d_dynamic_with_params(
     jobs_per_worker: usize,
     transpose: GemmTranspose,
 ) -> Result<(), GemmError> {
-    two_d_dynamic_with_params_impl(a, b, c, m, n, k, blocks, jobs_per_worker, transpose, false)
+    two_d_dynamic_with_params_impl(
+        a,
+        b,
+        c,
+        m,
+        n,
+        k,
+        blocks,
+        jobs_per_worker,
+        transpose,
+        false,
+        None,
+    )
 }
 
 /// テスト専用（#3199）: ゲート ON 相当の強制入口。適格形状（`small_m::select_shared_a`）では
@@ -3563,7 +3661,50 @@ pub(crate) fn gemm_blis_parallel_two_d_dynamic_shared_a_with_params(
     jobs_per_worker: usize,
     transpose: GemmTranspose,
 ) -> Result<(), GemmError> {
-    two_d_dynamic_with_params_impl(a, b, c, m, n, k, blocks, jobs_per_worker, transpose, true)
+    two_d_dynamic_with_params_impl(
+        a,
+        b,
+        c,
+        m,
+        n,
+        k,
+        blocks,
+        jobs_per_worker,
+        transpose,
+        true,
+        None,
+    )
+}
+
+/// テスト専用（#3200）: 事前 pack 済み panel の強制入口（Nn 固定）。`share_a` で A 共有経路
+/// （#3199）との併用も強制できる。適格でない形状は job 内 pack へフォールバックする。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_blis_parallel_two_d_dynamic_prepacked_with_params(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+    jobs_per_worker: usize,
+    share_a: bool,
+    prepack: prepack::PrepackSource<'_>,
+) -> Result<(), GemmError> {
+    two_d_dynamic_with_params_impl(
+        a,
+        b,
+        c,
+        m,
+        n,
+        k,
+        blocks,
+        jobs_per_worker,
+        GemmTranspose::Nn,
+        share_a,
+        Some(prepack),
+    )
 }
 
 /// A/B 一括計測ハーネス（イシュー #1041）向け: 並列 5-loop ドライバの
@@ -3690,6 +3831,7 @@ pub(crate) fn gemm_blis_parallel_variant(
             GemmTranspose::Nn,
             TWO_D_JOBS_PER_WORKER,
             false,
+            None,
         ),
         #[cfg(target_arch = "aarch64")]
         GemmDriverVariant::TwoDDynamicSme => {
@@ -3711,6 +3853,7 @@ pub(crate) fn gemm_blis_parallel_variant(
                 GemmTranspose::Nn,
                 TWO_D_JOBS_PER_WORKER,
                 false,
+                None,
             )
         }
     }

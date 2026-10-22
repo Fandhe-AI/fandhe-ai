@@ -30,8 +30,10 @@ use fandhe_ai_tensor_core::{
 };
 
 use crate::batch_norm;
+use crate::gemm_blis::prepack::{PrepackSource, RESIDENT_W_PREPACK_ENABLED};
 use crate::gemm_blis::{
-    gemm_blis_bias_act_parallel, gemm_blis_parallel, gemm_blis_parallel_nt, gemm_blis_parallel_tn,
+    gemm_blis_bias_act_parallel, gemm_blis_bias_act_parallel_prepacked, gemm_blis_parallel,
+    gemm_blis_parallel_nt, gemm_blis_parallel_tn,
 };
 use crate::kl_div;
 use crate::layer_norm;
@@ -376,7 +378,7 @@ pub(crate) fn upload_into_cpu_buffer(
     let handle = dst
         .downcast_handle_mut::<CpuBufferHandle>()
         .ok_or(BackendError::DeviceMismatch)?;
-    handle.data[dst_offset..end].copy_from_slice(src);
+    handle.data_mut()[dst_offset..end].copy_from_slice(src);
     Ok(())
 }
 
@@ -390,6 +392,19 @@ fn gemm_resident_rhs_impl(
     w: DeviceBufferView<'_>,
     bias: Option<DeviceBufferView<'_>>,
     act: Activation,
+) -> Result<Tensor<f32>, BackendError> {
+    gemm_resident_rhs_impl_with(a, w, bias, act, RESIDENT_W_PREPACK_ENABLED)
+}
+
+/// [`gemm_resident_rhs_impl`] の本体。`prepack_enabled` が true のとき、W（B 側）の pack 済み
+/// 全幅 panel を W のハンドルのキャッシュから引き当てる（#3200。既定の呼び出しはゲート
+/// `RESIDENT_W_PREPACK_ENABLED`〈既定 OFF〉を渡す。単体テストは true を渡して ON 経路を強制する）。
+fn gemm_resident_rhs_impl_with(
+    a: &Tensor<f32>,
+    w: DeviceBufferView<'_>,
+    bias: Option<DeviceBufferView<'_>>,
+    act: Activation,
+    prepack_enabled: bool,
 ) -> Result<Tensor<f32>, BackendError> {
     if w.device() != Device::Cpu {
         return Err(BackendError::DeviceMismatch);
@@ -414,7 +429,7 @@ fn gemm_resident_rhs_impl(
         .buffer()
         .downcast_handle::<CpuBufferHandle>()
         .ok_or(BackendError::DeviceMismatch)?;
-    let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
+    let w_slice = &w_handle.data()[w.offset()..w.offset() + w.numel()];
 
     let bias_handle = match bias {
         Some(b) => {
@@ -431,7 +446,7 @@ fn gemm_resident_rhs_impl(
                 .buffer()
                 .downcast_handle::<CpuBufferHandle>()
                 .ok_or(BackendError::DeviceMismatch)?;
-            Some(&handle.data[b.offset()..b.offset() + b.numel()])
+            Some(&handle.data()[b.offset()..b.offset() + b.numel()])
         }
         None => None,
     };
@@ -442,9 +457,135 @@ fn gemm_resident_rhs_impl(
     })?;
 
     let mut out = vec![0.0f32; m * n];
-    gemm_blis_bias_act_parallel(a_slice, w_slice, &mut out, m, n, k, bias_handle, act)
-        .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+    let prepack = prepack_enabled.then(|| PrepackSource {
+        cache: w_handle.prepack_cache(),
+        offset: w.offset(),
+    });
+    gemm_blis_bias_act_parallel_prepacked(
+        a_slice,
+        w_slice,
+        &mut out,
+        m,
+        n,
+        k,
+        bias_handle,
+        act,
+        prepack,
+    )
+    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
     Tensor::new(out, &[m, n]).map_err(BackendError::ShapeMismatch)
+}
+
+/// [`BackendOps::linear_forward_device`] の本体（#3200 で trait 実装から切り出した）。
+/// `prepack_enabled` が true のとき、W（B 側）の pack 済み全幅 panel を W のハンドルのキャッシュから
+/// 引き当てる。infer チェーン（`predict_device_chain`）が通る forward の B で、train forward の
+/// `gemm_resident_rhs_impl_with` と同じく決定記録 §6 の「forward の B」に当たる。
+fn linear_forward_device_with(
+    a: &DeviceBuffer<f32>,
+    w: DeviceBufferView<'_>,
+    bias: Option<DeviceBufferView<'_>>,
+    act: Activation,
+    prepack_enabled: bool,
+) -> Result<DeviceBuffer<f32>, BackendError> {
+    if a.device() != Device::Cpu || w.device() != Device::Cpu {
+        return Err(BackendError::DeviceMismatch);
+    }
+    let a_shape = a.shape();
+    if a_shape.len() != 2 {
+        return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+            expected: 2,
+            actual: a_shape.len(),
+        }));
+    }
+    let (m, k) = (a_shape[0], a_shape[1]);
+    let w_shape = w.shape();
+    if w_shape.len() != 2 || w_shape[0] != k {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: a_shape.to_vec(),
+            rhs: w_shape.to_vec(),
+        }));
+    }
+    let n = w_shape[1];
+
+    let a_handle = a
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    if a_handle.data().len() != a.numel() {
+        // `DeviceBuffer::new` 経由で構築される限り到達しないはずだが、
+        // shape とハンドル実体のずれを本番経路で `unwrap`/`expect` に
+        // 頼らず検出する（REQ-8・OWASP A03 と同種の防御）。
+        return Err(BackendError::ShapeMismatch(
+            ShapeError::ElementCountMismatch {
+                expected: a.numel(),
+                actual: a_handle.data().len(),
+            },
+        ));
+    }
+    let a_slice = a_handle.data();
+
+    let w_handle = w
+        .buffer()
+        .downcast_handle::<CpuBufferHandle>()
+        .ok_or(BackendError::DeviceMismatch)?;
+    let w_slice = &w_handle.data()[w.offset()..w.offset() + w.numel()];
+
+    let bias_handle_slice = match bias {
+        Some(b) => {
+            if b.device() != Device::Cpu {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+            let handle = b
+                .buffer()
+                .downcast_handle::<CpuBufferHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            Some(&handle.data()[b.offset()..b.offset() + b.numel()])
+        }
+        None => None,
+    };
+
+    // 未対応 act は GEMM の前に `Unsupported` で拒否する（fail-closed。
+    // 融合カーネルの `UnsupportedActivation` が `KernelLaunchFailed` へ
+    // 変わるとチェーン全体のフォールバック判定が壊れるため）。
+    match act {
+        Activation::None | Activation::Relu => {}
+        _ => {
+            return Err(BackendError::Unsupported(format!(
+                "linear_forward_device: unsupported activation {act:?}"
+            )));
+        }
+    }
+
+    // `m * n` はホスト入力由来の shape 積であり、アロケーション前に
+    // オーバーフロー検査を行う（REQ-8・OWASP A03。`reduction.rs` の
+    // `ElementCountOverflow` 使用箇所と同一方針）。
+    let out_len = m.checked_mul(n).ok_or(BackendError::ShapeMismatch(
+        ShapeError::ElementCountOverflow,
+    ))?;
+    let mut out = vec![0.0f32; out_len];
+    let prepack = prepack_enabled.then(|| PrepackSource {
+        cache: w_handle.prepack_cache(),
+        offset: w.offset(),
+    });
+    gemm_blis_bias_act_parallel_prepacked(
+        a_slice,
+        w_slice,
+        &mut out,
+        m,
+        n,
+        k,
+        bias_handle_slice,
+        act,
+        prepack,
+    )
+    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+    shared_cpu_memory().wrap_vec(out, vec![m, n])
 }
 
 impl BackendOps for CpuBackendOps {
@@ -534,7 +675,7 @@ impl BackendOps for CpuBackendOps {
         let grad_handle = grad
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        check_sgd_handle_len(grad_handle.data.len(), numel)?;
+        check_sgd_handle_len(grad_handle.data().len(), numel)?;
 
         let use_momentum = config.momentum != 0.0;
         let velocity_handle = match velocity {
@@ -551,7 +692,7 @@ impl BackendOps for CpuBackendOps {
                 let h = v
                     .downcast_handle_mut::<CpuBufferHandle>()
                     .ok_or(BackendError::DeviceMismatch)?;
-                check_sgd_handle_len(h.data.len(), numel)?;
+                check_sgd_handle_len(h.data().len(), numel)?;
                 Some(h)
             }
             None => {
@@ -566,17 +707,17 @@ impl BackendOps for CpuBackendOps {
         let param_handle = param
             .downcast_handle_mut::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        check_sgd_handle_len(param_handle.data.len(), numel)?;
+        check_sgd_handle_len(param_handle.data().len(), numel)?;
 
         // momentum 無効時は velocity を検証だけして触らない（従前挙動）。
         let velocity_slice = if use_momentum {
-            velocity_handle.map(|h| &mut h.data[..numel])
+            velocity_handle.map(|h| &mut h.data_mut()[..numel])
         } else {
             None
         };
         sgd_step_slices(
-            &mut param_handle.data[..numel],
-            &grad_handle.data[..numel],
+            &mut param_handle.data_mut()[..numel],
+            &grad_handle.data()[..numel],
             velocity_slice,
             config,
         )
@@ -648,9 +789,13 @@ impl BackendOps for CpuBackendOps {
             }
         }
 
-        for j in 0..param_handle.data.len() {
-            let p = param_handle.data[j];
-            let g = grad_handle.data[j];
+        let grad_data = grad_handle.data();
+        let m_data = m_handle.data_mut();
+        let v_data = v_handle.data_mut();
+        let param_data = param_handle.data_mut();
+        for j in 0..param_data.len() {
+            let p = param_data[j];
+            let g = grad_data[j];
 
             // `Adam::step`（coupled L2）: `weight_decay == 0.0` では
             // decay 項の演算自体を skip する（`docs/perf` の
@@ -674,17 +819,17 @@ impl BackendOps for CpuBackendOps {
                 _ => unreachable!("AdamStepKind variant validated before the loop"),
             };
 
-            let m_new = f32::mul_add(config.beta1, m_handle.data[j], (1.0 - config.beta1) * g_eff);
+            let m_new = f32::mul_add(config.beta1, m_data[j], (1.0 - config.beta1) * g_eff);
             let v_new = f32::mul_add(
                 config.beta2,
-                v_handle.data[j],
+                v_data[j],
                 (1.0 - config.beta2) * g_eff * g_eff,
             );
-            m_handle.data[j] = m_new;
-            v_handle.data[j] = v_new;
+            m_data[j] = m_new;
+            v_data[j] = v_new;
 
             let denom = v_new.sqrt() / config.bias_correction2_sqrt + config.eps;
-            param_handle.data[j] = p_eff - config.step_size * m_new / denom;
+            param_data[j] = p_eff - config.step_size * m_new / denom;
         }
         Ok(())
     }
@@ -739,7 +884,7 @@ impl BackendOps for CpuBackendOps {
             ));
         }
 
-        let mut grad_avg_handle = match grad_avg {
+        let grad_avg_handle = match grad_avg {
             Some(ga) => {
                 if ga.device() != Device::Cpu {
                     return Err(BackendError::DeviceMismatch);
@@ -757,7 +902,7 @@ impl BackendOps for CpuBackendOps {
             }
             None => None,
         };
-        let mut momentum_handle = match momentum_buf {
+        let momentum_handle = match momentum_buf {
             Some(mb) => {
                 if mb.device() != Device::Cpu {
                     return Err(BackendError::DeviceMismatch);
@@ -789,54 +934,57 @@ impl BackendOps for CpuBackendOps {
         let alpha = config.alpha;
         let one_minus_alpha = 1.0 - alpha;
 
-        for j in 0..param_handle.data.len() {
-            let p = param_handle.data[j];
-            let mut g = grad_handle.data[j];
+        let grad_data = grad_handle.data();
+        let square_avg_data = square_avg_handle.data_mut();
+        let param_data = param_handle.data_mut();
+        let mut grad_avg_data: Option<&mut [f32]> = grad_avg_handle.map(|h| h.data_mut());
+        let mut momentum_data: Option<&mut [f32]> = momentum_handle.map(|h| h.data_mut());
+        for j in 0..param_data.len() {
+            let p = param_data[j];
+            let mut g = grad_data[j];
             if config.weight_decay != 0.0 {
                 g = f32::mul_add(config.weight_decay, p, g);
             }
 
-            square_avg_handle.data[j] =
-                f32::mul_add(alpha, square_avg_handle.data[j], one_minus_alpha * g * g);
+            square_avg_data[j] = f32::mul_add(alpha, square_avg_data[j], one_minus_alpha * g * g);
 
             let avg = if config.centered {
                 // `centered == true` は上の事前検査で `grad_avg_handle`
                 // が `Some` であることを保証済み。
-                let Some(grad_avg_handle) = grad_avg_handle.as_deref_mut() else {
+                let Some(grad_avg_data) = grad_avg_data.as_deref_mut() else {
                     return Err(BackendError::Unsupported(
                         "rmsprop_step_device: centered enabled but no grad_avg buffer provided"
                             .into(),
                     ));
                 };
-                let start = grad_avg_handle.data[j];
+                let start = grad_avg_data[j];
                 let end = g;
                 let weight = one_minus_alpha;
-                grad_avg_handle.data[j] = if weight.abs() < 0.5 {
+                grad_avg_data[j] = if weight.abs() < 0.5 {
                     start + weight * (end - start)
                 } else {
                     end - (end - start) * alpha
                 };
-                (square_avg_handle.data[j] - grad_avg_handle.data[j] * grad_avg_handle.data[j])
-                    .sqrt()
+                (square_avg_data[j] - grad_avg_data[j] * grad_avg_data[j]).sqrt()
             } else {
-                square_avg_handle.data[j].sqrt()
+                square_avg_data[j].sqrt()
             };
             let avg = avg + config.eps;
 
             if use_momentum {
                 // 直前の事前検査により `momentum_handle` は必ず `Some`。
-                let Some(momentum_handle) = momentum_handle.as_deref_mut() else {
+                let Some(momentum_data) = momentum_data.as_deref_mut() else {
                     return Err(BackendError::Unsupported(
                         "rmsprop_step_device: momentum enabled but no momentum_buf buffer \
                          provided"
                             .into(),
                     ));
                 };
-                let buf = f32::mul_add(config.momentum, momentum_handle.data[j], g / avg);
-                momentum_handle.data[j] = buf;
-                param_handle.data[j] = p - config.lr * buf;
+                let buf = f32::mul_add(config.momentum, momentum_data[j], g / avg);
+                momentum_data[j] = buf;
+                param_data[j] = p - config.lr * buf;
             } else {
-                param_handle.data[j] = p - (config.lr * g) / avg;
+                param_data[j] = p - (config.lr * g) / avg;
             }
         }
         Ok(())
@@ -880,15 +1028,18 @@ impl BackendOps for CpuBackendOps {
             .downcast_handle_mut::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
 
-        for j in 0..param_handle.data.len() {
-            let p = param_handle.data[j];
-            let mut g = grad_handle.data[j];
+        let grad_data = grad_handle.data();
+        let state_sum_data = state_sum_handle.data_mut();
+        let param_data = param_handle.data_mut();
+        for j in 0..param_data.len() {
+            let p = param_data[j];
+            let mut g = grad_data[j];
             if config.weight_decay != 0.0 {
                 g = f32::mul_add(config.weight_decay, p, g);
             }
-            state_sum_handle.data[j] = f32::mul_add(g, g, state_sum_handle.data[j]);
-            let std = state_sum_handle.data[j].sqrt() + config.eps;
-            param_handle.data[j] = p - (config.clr * g) / std;
+            state_sum_data[j] = f32::mul_add(g, g, state_sum_data[j]);
+            let std = state_sum_data[j].sqrt() + config.eps;
+            param_data[j] = p - (config.clr * g) / std;
         }
         Ok(())
     }
@@ -962,18 +1113,22 @@ impl BackendOps for CpuBackendOps {
             }
             acc
         };
-        if total != param_handle.data.len() {
+        let grad_data = grad_handle.data();
+        let m_data = m_handle.data_mut();
+        let v_data = v_handle.data_mut();
+        let param_data = param_handle.data_mut();
+        if total != param_data.len() {
             return Err(BackendError::InvalidArgument(format!(
                 "lamb_step_device: segment_numels sum ({total}) does not match param numel ({})",
-                param_handle.data.len()
+                param_data.len()
             )));
         }
 
         // 計算フェーズ（状態変更なし）: segment ごとに新しい m/v/t と
         // trust ratio を scratch へ積む。
-        let mut new_m: Vec<f32> = Vec::with_capacity(param_handle.data.len());
-        let mut new_v: Vec<f32> = Vec::with_capacity(param_handle.data.len());
-        let mut t: Vec<f32> = Vec::with_capacity(param_handle.data.len());
+        let mut new_m: Vec<f32> = Vec::with_capacity(param_data.len());
+        let mut new_v: Vec<f32> = Vec::with_capacity(param_data.len());
+        let mut t: Vec<f32> = Vec::with_capacity(param_data.len());
         let mut trust_ratios: Vec<f32> = Vec::with_capacity(segment_numels.len());
 
         let mut offset = 0usize;
@@ -981,9 +1136,9 @@ impl BackendOps for CpuBackendOps {
             let mut norm_x_sq: f64 = 0.0;
             let mut norm_t_sq: f64 = 0.0;
             for j in offset..offset + seg_len {
-                let g = grad_handle.data[j];
-                let prev_m = m_handle.data[j];
-                let prev_v = v_handle.data[j];
+                let g = grad_data[j];
+                let prev_m = m_data[j];
+                let prev_v = v_data[j];
                 let m_new = f32::mul_add(config.beta1, prev_m, (1.0 - config.beta1) * g);
                 let v_new = f32::mul_add(config.beta2, prev_v, (1.0 - config.beta2) * g * g);
                 if !m_new.is_finite() || !v_new.is_finite() {
@@ -997,7 +1152,7 @@ impl BackendOps for CpuBackendOps {
 
                 let denom = v_new.sqrt() / config.bias_correction2_sqrt + config.eps;
                 let s = config.step_size * m_new / denom;
-                let x = param_handle.data[j];
+                let x = param_data[j];
                 let ti = if config.weight_decay == 0.0 {
                     s
                 } else {
@@ -1040,9 +1195,9 @@ impl BackendOps for CpuBackendOps {
         for (seg_idx, &seg_len) in segment_numels.iter().enumerate() {
             let f = trust_ratios[seg_idx];
             for j in offset..offset + seg_len {
-                m_handle.data[j] = new_m[j];
-                v_handle.data[j] = new_v[j];
-                param_handle.data[j] = f32::mul_add(-f, t[j], param_handle.data[j]);
+                m_data[j] = new_m[j];
+                v_data[j] = new_v[j];
+                param_data[j] = f32::mul_add(-f, t[j], param_data[j]);
             }
             offset += seg_len;
         }
@@ -1257,7 +1412,7 @@ impl BackendOps for CpuBackendOps {
         let handle = out
             .downcast_handle_mut::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let dst = &mut handle.data[out_offset..end];
+        let dst = &mut handle.data_mut()[out_offset..end];
         // 上書き契約（doc 参照）: 永続バッファの残留値を消してから
         // 累積カーネルへ渡す。転置オペランド（`LinearResident` の
         // d_weight が渡す `x_t = transpose2d(x)`）は `gemm` と同じ
@@ -1451,7 +1606,7 @@ impl BackendOps for CpuBackendOps {
             .buffer()
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
+        let w_slice = &w_handle.data()[w.offset()..w.offset() + w.numel()];
 
         let mut out = fandhe_ai_tensor_core::alloc::take_zeroed_f32(p * r);
         if let Some(bt) = dense_transposed_view(b) {
@@ -1503,91 +1658,7 @@ impl BackendOps for CpuBackendOps {
         bias: Option<DeviceBufferView<'_>>,
         act: Activation,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
-        if a.device() != Device::Cpu || w.device() != Device::Cpu {
-            return Err(BackendError::DeviceMismatch);
-        }
-        let a_shape = a.shape();
-        if a_shape.len() != 2 {
-            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
-                expected: 2,
-                actual: a_shape.len(),
-            }));
-        }
-        let (m, k) = (a_shape[0], a_shape[1]);
-        let w_shape = w.shape();
-        if w_shape.len() != 2 || w_shape[0] != k {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: a_shape.to_vec(),
-                rhs: w_shape.to_vec(),
-            }));
-        }
-        let n = w_shape[1];
-
-        let a_handle = a
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        if a_handle.data.len() != a.numel() {
-            // `DeviceBuffer::new` 経由で構築される限り到達しないはずだが、
-            // shape とハンドル実体のずれを本番経路で `unwrap`/`expect` に
-            // 頼らず検出する（REQ-8・OWASP A03 と同種の防御）。
-            return Err(BackendError::ShapeMismatch(
-                ShapeError::ElementCountMismatch {
-                    expected: a.numel(),
-                    actual: a_handle.data.len(),
-                },
-            ));
-        }
-        let a_slice = &a_handle.data[..];
-
-        let w_handle = w
-            .buffer()
-            .downcast_handle::<CpuBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let w_slice = &w_handle.data[w.offset()..w.offset() + w.numel()];
-
-        let bias_handle_slice = match bias {
-            Some(b) => {
-                if b.device() != Device::Cpu {
-                    return Err(BackendError::DeviceMismatch);
-                }
-                if b.shape() != [n] {
-                    return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                        lhs: b.shape().to_vec(),
-                        rhs: vec![n],
-                    }));
-                }
-                let handle = b
-                    .buffer()
-                    .downcast_handle::<CpuBufferHandle>()
-                    .ok_or(BackendError::DeviceMismatch)?;
-                Some(&handle.data[b.offset()..b.offset() + b.numel()])
-            }
-            None => None,
-        };
-
-        // 未対応 act は GEMM の前に `Unsupported` で拒否する（fail-closed。
-        // 融合カーネルの `UnsupportedActivation` が `KernelLaunchFailed` へ
-        // 変わるとチェーン全体のフォールバック判定が壊れるため）。
-        match act {
-            Activation::None | Activation::Relu => {}
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "linear_forward_device: unsupported activation {act:?}"
-                )));
-            }
-        }
-
-        // `m * n` はホスト入力由来の shape 積であり、アロケーション前に
-        // オーバーフロー検査を行う（REQ-8・OWASP A03。`reduction.rs` の
-        // `ElementCountOverflow` 使用箇所と同一方針）。
-        let out_len = m.checked_mul(n).ok_or(BackendError::ShapeMismatch(
-            ShapeError::ElementCountOverflow,
-        ))?;
-        let mut out = vec![0.0f32; out_len];
-        gemm_blis_bias_act_parallel(a_slice, w_slice, &mut out, m, n, k, bias_handle_slice, act)
-            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-
-        shared_cpu_memory().wrap_vec(out, vec![m, n])
+        linear_forward_device_with(a, w, bias, act, RESIDENT_W_PREPACK_ENABLED)
     }
 
     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
@@ -1634,10 +1705,10 @@ impl BackendOps for CpuBackendOps {
             .downcast_handle_mut::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
         paged_kv::append_rows(
-            &kn.data[..],
-            &vn.data[..],
-            &mut kp.data[..],
-            &mut vp.data[..],
+            kn.data(),
+            vn.data(),
+            &mut kp.data_mut()[..],
+            &mut vp.data_mut()[..],
             slot_mapping,
             layout,
         )
@@ -1678,9 +1749,9 @@ impl BackendOps for CpuBackendOps {
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
         let out = paged_kv::attention(
-            &qh.data[..],
-            &kh.data[..],
-            &vh.data[..],
+            qh.data(),
+            kh.data(),
+            vh.data(),
             block_tables,
             seq_lens,
             args,
@@ -1721,7 +1792,7 @@ impl BackendOps for CpuBackendOps {
         let b_handle = b
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        if a_handle.data.len() != numel || b_handle.data.len() != numel {
+        if a_handle.data().len() != numel || b_handle.data().len() != numel {
             // `linear_forward_device` の同種防御と同じ理由
             // （`DeviceBuffer::new` 経由で構築される限り到達しないはず
             // だが、shape とハンドル実体のずれを本番経路で `unwrap`/
@@ -1729,7 +1800,7 @@ impl BackendOps for CpuBackendOps {
             return Err(BackendError::ShapeMismatch(
                 ShapeError::ElementCountMismatch {
                     expected: numel,
-                    actual: a_handle.data.len().max(b_handle.data.len()),
+                    actual: a_handle.data().len().max(b_handle.data().len()),
                 },
             ));
         }
@@ -1737,10 +1808,10 @@ impl BackendOps for CpuBackendOps {
         let mut out = vec![0.0f32; numel];
         match op {
             BinaryElementwiseOp::Add => {
-                elementwise::add_slice(&a_handle.data, &b_handle.data, &mut out)
+                elementwise::add_slice(a_handle.data(), b_handle.data(), &mut out)
             }
             BinaryElementwiseOp::Mul => {
-                elementwise::mul_slice(&a_handle.data, &b_handle.data, &mut out)
+                elementwise::mul_slice(a_handle.data(), b_handle.data(), &mut out)
             }
             // `BinaryElementwiseOp` は `#[non_exhaustive]`。未知 variant
             // は `linear_forward_device` の未知 `Activation` 拒否と同じ
@@ -1770,20 +1841,20 @@ impl BackendOps for CpuBackendOps {
         let a_handle = a
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        if a_handle.data.len() != numel {
+        if a_handle.data().len() != numel {
             return Err(BackendError::ShapeMismatch(
                 ShapeError::ElementCountMismatch {
                     expected: numel,
-                    actual: a_handle.data.len(),
+                    actual: a_handle.data().len(),
                 },
             ));
         }
 
         let mut out = vec![0.0f32; numel];
         match op {
-            UnaryElementwiseOp::Relu => elementwise::relu_slice(&a_handle.data, &mut out),
-            UnaryElementwiseOp::Exp => elementwise::exp_slice(&a_handle.data, &mut out),
-            UnaryElementwiseOp::Tanh => elementwise::tanh_slice(&a_handle.data, &mut out),
+            UnaryElementwiseOp::Relu => elementwise::relu_slice(a_handle.data(), &mut out),
+            UnaryElementwiseOp::Exp => elementwise::exp_slice(a_handle.data(), &mut out),
+            UnaryElementwiseOp::Tanh => elementwise::tanh_slice(a_handle.data(), &mut out),
             _ => {
                 return Err(BackendError::Unsupported(format!(
                     "unary_elementwise_device: unsupported op {op:?}"
@@ -4689,15 +4760,14 @@ mod sgd_step_device_length_tests {
     fn truncate(buf: &mut DeviceBuffer<f32>) {
         buf.downcast_handle_mut::<CpuBufferHandle>()
             .unwrap()
-            .data
-            .pop();
+            .pop_for_test();
     }
 
     fn data(buf: &DeviceBuffer<f32>) -> Vec<f32> {
         buf.downcast_handle::<CpuBufferHandle>()
             .unwrap()
-            .data
-            .clone()
+            .data()
+            .to_vec()
     }
 
     fn assert_rejected_untouched(which: &str) {
@@ -4893,3 +4963,7 @@ mod col2im_shape_validation_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "ops_resident_w_prepack_tests.rs"]
+mod resident_w_prepack_tests;

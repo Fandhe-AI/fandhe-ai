@@ -2035,14 +2035,20 @@ fn lock_accumulation_markers_match_expected_test_only_locations() {
             per_file.push((rel, count));
         }
     }
+    // #3200: `gemm_blis/prepack.rs`（常駐 W の pack 済み panel キャッシュ）の `Mutex` は
+    // 「キー → panel」の引き当て専用で、数値アキュムレータではない（panel の内容は
+    // (W の内容, キー) の純関数で、同時構築しても同一内容のため後勝ちで結果は変わらない）。
+    // 7 行の内訳は use 1・フィールド 1・`.lock(` 5（`len`・`get_or_build` の 3 行
+    // 〈うち 2 行は `cfg(test)`／`cfg(not(test))` の二択〉・テスト専用の計数取得 1）。atomic は足していないため `atomic_rmw_*`（15 件）は不変。
     assert_eq!(
         per_file,
         vec![
             ("gemm_blis/jobgrid_probe.rs".to_string(), 4usize),
             ("gemm_blis/mod.rs".to_string(), 4usize),
+            ("gemm_blis/prepack.rs".to_string(), 7usize),
         ],
         "Mutex／RwLock／.lock(／.write( の出現が期待（gemm_blis/mod.rs の\
-         #[cfg(test)] 限定診断コード 4 行のみ）と一致しない（ロック越しの\
+         #[cfg(test)] 限定診断コード 4 行と prepack.rs の引き当て専用ロック）と一致しない（ロック越しの\
          共有蓄積が本番経路へ混入した可能性がある。決定性の根拠を棚卸し\
          してから期待値を更新すること）: {per_file:?}"
     );
