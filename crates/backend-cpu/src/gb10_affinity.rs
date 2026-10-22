@@ -619,11 +619,10 @@ mod tests {
     fn with_affinity_gate_disabled_calls_closure_directly() {
         // GB10_AFFINITY_ENABLED は既定 false のため、対象形状であっても
         // affinity_pool() は常に None を返し f() が直接呼ばれる。
-        // `const` の値に対する `assert!` は clippy
-        // `assertions_on_constants` の対象になるため、意図（ゲートが
-        // 万一 true へ切り替わった際にビルド時点で気づけるようにする）
-        // をより強く表す `const` ブロックへ寄せる。
-        const { assert!(!GB10_AFFINITY_ENABLED) };
+        // `black_box` を挟んだ実行時 assert にする（clippy `assertions_on_constants` 回避）。
+        // `const { assert! }` はゲート反転の計測ツリーで lib テストがコンパイル不能になるため
+        // 使わない（#3201）。
+        assert!(!std::hint::black_box(GB10_AFFINITY_ENABLED));
         let result = with_gb10_affinity_if_applicable(64, 256, 784, || 42);
         assert_eq!(result, 42);
     }
