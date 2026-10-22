@@ -225,3 +225,46 @@ fn memory_footprint_matches_formula() {
         assert_eq!(panel_words(kn.0, kn.1, nr), Some(words), "{kn:?} NR={nr}");
     }
 }
+
+/// #3201 の A/B 用: 本番のゲート定数を読む入口（`gemm_resident_rhs_impl`・`linear_forward_device`）で
+/// 事前 pack が実際に発火したかを確かめる。`_with(true)` の強制入口は使わない（計測腕の
+/// ゲート反転ツリーで本番経路の引き当てが成立した証跡にするため）。
+/// ゲート ON なら構築 1 回・引き当て 1 回以上、OFF ならキャッシュが空であることを assert する。
+#[test]
+#[ignore = "報告専用（#3201 の発火確認）: cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored --exact ops::resident_w_prepack_tests::resident_w_prepack_fire_report --nocapture --test-threads=1"]
+fn resident_w_prepack_fire_report() {
+    use crate::gemm_blis::prepack::RESIDENT_W_PREPACK_ENABLED as GATE;
+    let gate = std::hint::black_box(GATE);
+    for (entry, off, kn) in [
+        ("rhs", OFF_L1, L1),
+        ("rhs", OFF_L2, L2),
+        ("linear", OFF_L1, L1),
+        ("linear", OFF_L2, L2),
+    ] {
+        let ops = CpuBackendOps::new();
+        let buf = params_buf(&ops, 1);
+        let a = Tensor::new(rnd(64 * kn.0, 9), &[64, kn.0]).unwrap();
+        for _ in 0..2 {
+            if entry == "rhs" {
+                gemm_resident_rhs_impl(&a, view(&buf, off, kn), None, Activation::None).unwrap();
+            } else {
+                let ad = ops.upload(&a).unwrap();
+                ops.linear_forward_device(&ad, view(&buf, off, kn), None, Activation::None)
+                    .unwrap();
+            }
+        }
+        let h = buf.downcast_handle::<CpuBufferHandle>().unwrap();
+        let (builds, hits) = h.prepack_cache().counts();
+        let len = h.prepack_cache().len();
+        println!(
+            "probe=resident_w_prepack gate={gate} entry={entry} shape={}x{} cache_len={len} builds={builds} hits={hits}",
+            kn.0, kn.1
+        );
+        if gate {
+            assert_eq!(builds, 1, "{entry} {kn:?}");
+            assert!(hits >= 1, "{entry} {kn:?}");
+        } else {
+            assert_eq!(len, 0, "{entry} {kn:?}");
+        }
+    }
+}

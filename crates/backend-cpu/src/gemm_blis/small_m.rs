@@ -107,7 +107,10 @@ mod tests {
 
     #[test]
     fn gate_is_off_by_default() {
-        const { assert!(!SMALL_M_JOB_MERGE_ENABLED) };
+        // 実行時 assert にする理由（#3201）: `const { assert! }` だとゲートを反転した計測ツリーで
+        // lib テスト自体がコンパイル不能（E0080）になり report テストを実行できない。
+        // main（OFF）での固定という意味は変えない。
+        assert!(!std::hint::black_box(SMALL_M_JOB_MERGE_ENABLED));
     }
 
     #[test]

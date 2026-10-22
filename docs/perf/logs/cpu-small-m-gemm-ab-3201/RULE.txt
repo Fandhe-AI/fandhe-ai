@@ -1,0 +1,58 @@
+事前登録規則（雛形。イシュー #3198 → 実行は #3201）
+================================================
+使い方: 計測前にこのファイルを自分のログ dir へ RULE.txt としてコピーし、末尾の
+fixed-at と計測コミットだけを書き足す。判定条件・閾値・round 数は緩めない。
+
+位置づけ
+- 本番の既定は変えない（反転は #3227）。
+- GB10_AFFINITY_ENABLED は単独では REJECT 済み（#2117）。組み合わせの腕は相互作用を
+  見るためだけに置き、単独の判定をやり直すものではない。
+
+腕
+- Mac mini（Apple M4）: off（G1・G2 とも false）／merge（G1 SMALL_M_JOB_MERGE_ENABLED のみ true）／
+  merge+prepack（G1・G2 RESIDENT_W_PREPACK_ENABLED とも true）
+- GB10: 上の 3 腕 × GB10_AFFINITY_ENABLED の false／true の 6 腕
+- after 腕は計測専用の checkout に const を 1 行反転する patch を当てて作る。main にはコミットしない。patch は収録する。
+
+セル
+- 6 形状の単体（examples/cpu_jobgrid_bench.rs）: L1 fwd 64x256x784 Nn／L1 dW 784x256x64 Tn／
+  L1 dX 64x784x256 Nt／L2 fwd 64x10x256 Nn／L2 dW 256x10x64 Tn／L2 dX 64x256x10 Nt
+- 参照: 正方 512（判定に使わない）
+- framework-compare の train／infer CPU（size=64）の fresh／reuse の 4 セル
+- prepack 腕で機構が発火しないセルも判定に含める（ガードセルを除外しない）
+
+反復
+- 各セル 5 round。腕の起動順は round ごとにローテーションし、独立プロセスで測る。
+- 5 回計測の中央値を採用する。
+- 同じ round 内で PyTorch CPU も測り比を記録する（判定には使わない）。
+
+機構発火の前提（fail-closed）
+- #3199・#3200 が用意する report テストで、対象形状に新経路が乗ったこと（A の pack が行帯あたり 1 回・
+  事前 pack の引き当て成功）を確認する。
+- RAYON_NUM_THREADS が設定されていれば実行を拒否する。
+- after 腕では cargo test --lib を実行しない（ゲート OFF を固定するテストがあるため）。
+
+checksum
+- 全腕・全 round・全セルで完全一致しなければ FAIL。bit 一致テストのログも収録する。
+
+専有ゲート
+- round ごとに load1 < 3.0（Mac mini。#3178 と同じ）／load1 < 10.0（GB10。#3177 と同じ共有ノードの扱い）。
+- 30 秒間隔で最大 30 分待つ。5/5 round が通過した系列だけを正式系列とする。
+
+判定（4 値。腕ごと・機体ごと）
+- ADOPT: 正式系列・機構発火の前提が成立・全セルの中央値比（腕／off）が 1.00 以下・checksum 一致
+- REJECT: 1 セルでも中央値比が 1.00 を超える
+- undetermined: ゲート不成立・前提不成立・標本不足・未到達
+- FAIL: checksum 不一致
+- 閾値の事後調整とガードセルの除外はしない。機体で割れた場合は機体別既定の可否を #3227 に併記する。
+
+運用
+- .rev-stamp（HEAD とツリー指紋）を成果物に入れる。
+- 計測中はビルドを並走させない。ログは上書きせず、run の差し替えもしない。
+- 未到達は数値を埋めず unavailable と書く。
+
+マスク規則
+- ホスト名は masked、$HOME は <home> に置き換える。ユーザー名と絶対パスは収録しない。
+
+fixed-at: （計測前に記入）
+計測コミット: （計測前に記入）

@@ -15,7 +15,7 @@
 //! - それ以外: panic で拒否する（fail-closed）。
 //!
 //! 実機（GB10）依存のため `#[ignore]`。after checkout では `--lib` の単体テスト
-//! （`const { assert!(!GB10_AFFINITY_ENABLED) }` を持つ）が落ちるため、本テストは
+//! （`assert!(!GB10_AFFINITY_ENABLED)` を実行時に検査する）の全件実行が落ちるため、本テストは
 //! `--test gb10_affinity_report` で単独実行すること。
 
 use fandhe_ai_backend_cpu::gb10_affinity_report;

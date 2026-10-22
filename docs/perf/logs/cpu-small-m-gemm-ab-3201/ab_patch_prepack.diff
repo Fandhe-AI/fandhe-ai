@@ -1,0 +1,13 @@
+diff --git a/crates/backend-cpu/src/gemm_blis/prepack.rs b/crates/backend-cpu/src/gemm_blis/prepack.rs
+index c6b98c94f..46c3de028 100644
+--- a/crates/backend-cpu/src/gemm_blis/prepack.rs
++++ b/crates/backend-cpu/src/gemm_blis/prepack.rs
+@@ -29,7 +29,7 @@ use super::pack::{BPackTile, pack_b};
+ 
+ /// 常駐 W の pack 済み panel キャッシュの本番ゲート（既定 OFF。反転は #3201 の A/B 後に
+ /// #3227 が判断する）。
+-pub(crate) const RESIDENT_W_PREPACK_ENABLED: bool = false;
++pub(crate) const RESIDENT_W_PREPACK_ENABLED: bool = true;
+ 
+ /// 1 エントリの panel 語数の上限（`k * align_up(n, nr)`。4 MiB）。超える形状は通常経路。
+ pub(crate) const RESIDENT_W_PREPACK_MAX_WORDS: usize = 1 << 20;

@@ -255,7 +255,8 @@ mod tests {
 
     #[test]
     fn gate_is_off_by_default() {
-        const { assert!(!RESIDENT_W_PREPACK_ENABLED) };
+        // 実行時 assert にする理由は small_m.rs の同名テストと同じ（#3201）。
+        assert!(!std::hint::black_box(RESIDENT_W_PREPACK_ENABLED));
     }
 
     #[test]

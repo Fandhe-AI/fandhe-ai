@@ -1,0 +1,13 @@
+diff --git a/crates/backend-cpu/src/gemm_blis/small_m.rs b/crates/backend-cpu/src/gemm_blis/small_m.rs
+index 65e19a89f..0df0d58ea 100644
+--- a/crates/backend-cpu/src/gemm_blis/small_m.rs
++++ b/crates/backend-cpu/src/gemm_blis/small_m.rs
+@@ -21,7 +21,7 @@
+ use super::{NR_CLAMP, TWO_D_JOBS_PER_WORKER};
+ 
+ /// job 統合の本番ゲート（既定 OFF。#3201 の A/B 後に #3227 が反転を判断する）。
+-pub(super) const SMALL_M_JOB_MERGE_ENABLED: bool = false;
++pub(super) const SMALL_M_JOB_MERGE_ENABLED: bool = true;
+ 
+ /// job 統合の対象にする仕事量の上限（`m * max(n, NR_CLAMP) * k` がこれ未満）。
+ /// `small_shape_thread_cap::SMALL_SHAPE_CAP_MAX_WORK`（#1575）と同じ境界で、学習の最大仕事量
