@@ -4047,12 +4047,15 @@ pub trait BackendOps {
     ///
     /// # 既定実装
     /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示フォール
-    /// バックは禁止）。Metal が #3220 で実装し、CUDA は #3223、CPU は #3253 で
+    /// バックは禁止）。Metal が #3220、CUDA が #3223 で実装し、CPU は #3253 で
     /// 対応する。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。encode のみの
     /// 入口は [`Self::gemm_fp32_strict_into_device_tracked`] だけ（設計 §5）。
+    /// CUDA は例外で、ストリーム順序契約に従い非 tracked・tracked とも同期せず起動
+    /// だけを積む（`_tracked` は `token` を使わない明示 override。起動エラーは次の
+    /// 同期点で poison／世代検査から観測される。#3223）。
     // 引数は a/b それぞれ view+layout・out+offset・bias の 7 個で削れない
     // （既存の `gemm_fp32_strict_into_with_bias_reduce_tracked` と同じ判断）。
     #[allow(clippy::too_many_arguments)]
@@ -4102,8 +4105,9 @@ pub trait BackendOps {
     /// `p == 0 || r == 0` は空、`q == 0` は全 0 の `[p, r]` を返す。
     ///
     /// # 既定実装・同期契約
-    /// [`Self::gemm_fp32_strict_into_device`] と同じ（Metal が #3220、CUDA は
-    /// #3223、CPU は #3253。encode のみの入口は `_tracked` 版だけ）。
+    /// [`Self::gemm_fp32_strict_into_device`] と同じ（Metal が #3220、CUDA が
+    /// #3223、CPU は #3253。encode のみの入口は `_tracked` 版だけ。CUDA は非
+    /// tracked・tracked とも同期しない）。
     fn gemm_resident_lhs_device(
         &self,
         _w: DeviceBufferView<'_>,
