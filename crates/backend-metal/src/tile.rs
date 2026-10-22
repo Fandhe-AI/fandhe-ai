@@ -1762,6 +1762,56 @@ pub(crate) const UNROLL_ACC_ENABLED: bool = false;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const UNROLL_LOAD_ENABLED: bool = false;
 
+/// simdgroup 交互配置軸（`FRAG_INTERLEAVE_ENABLED`。`shaders/gemm.metal` index 19。
+/// イシュー #3211）の**本番既定値**。
+///
+/// candle／MLX steel の BlockMMA は 8×8 ブロック単位で行・列を WM／WN 個の
+/// simdgroup が交互に受け持つ（`TM_stride = 8*WM`）。自作の現行配置は連続帯。
+/// 本軸は staged 経路のフラグメントロード・ストアの原点だけを交互配置へ
+/// 切り替える opt-in で、各 8×8 出力ブロックの K 方向累算列・結合順序は
+/// 不変（bit 一致）。[`crate::gemm::MetalGemm::new`] 系は常に本定数（`false`）を
+/// 渡すため既定挙動は不変。構築入口は `#[cfg(test)]` の
+/// `MetalGemm::new_with_frag_interleave` のみ。性能実測・結線判断は後続 issue で、
+/// 既定値変更はユーザー承認事項（`docs/perf/metal-gemm-steel-candidates.md` §10）。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`UNROLL_ACC_ENABLED`] と同じ。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const FRAG_INTERLEAVE_ENABLED: bool = false;
+
+/// `shaders/gemm.metal` の `FRAG_INTERLEAVE_ACTIVE` の Rust 側モデル（テスト専用）。
+/// 実効条件: ゲート ON・Legacy タイルクラス・staged・K=1 段ロード・実効 unroll_acc
+/// なし・split-K なし。外れる構成はシェーダ側で現行コードを通る（no-op 契約）。
+#[cfg(test)]
+pub(crate) fn frag_interleave_active_model(
+    cfg: TileConfig,
+    gate_enabled: bool,
+    unroll_acc_effective: bool,
+    split_k: bool,
+    tile_class_legacy: bool,
+    ksteps: u32,
+) -> bool {
+    gate_enabled
+        && tile_class_legacy
+        && cfg.staged
+        && ksteps == 1
+        && !unroll_acc_effective
+        && !split_k
+}
+
+/// 交互配置での simdgroup `(wm_idx, wn_idx)` の `(r, c)` 番目アキュムレータの
+/// threadgroup 内 8×8 ブロック原点 `(row, col)`（要素単位）。シェーダの
+/// `frag_*_base + i * FRAG_*_STEP`（`8*wm_idx + r*8*WM`）と 1:1 対応するモデル。
+#[cfg(test)]
+pub(crate) fn interleaved_block_origin_model(
+    wm_idx: u32,
+    wn_idx: u32,
+    r: u32,
+    c: u32,
+    cfg: TileConfig,
+) -> (u32, u32) {
+    (wm_idx * 8 + r * 8 * cfg.wm, wn_idx * 8 + c * 8 * cfg.wn)
+}
+
 /// candle 0.11.0 `select_tile_config`（f32・NN・batch=1）のタイル選択を純関数で
 /// モデル化したもの（イシュー #2110。テスト・診断専用。コードは持ち込まず
 /// `docs/analysis/candle-metal-01.md` §3.2 の結論のみを使う）。
@@ -5037,6 +5087,102 @@ mod tests {
             "UNROLL_LOAD_ENABLED が true のままコミットされている疑いがあります。\
              本番既定は false です（イシュー #2110・tile.rs UNROLL_LOAD_ENABLED doc）。"
         );
+    }
+
+    /// `FRAG_INTERLEAVE_ENABLED` の**コミット状態既定値**が `false` に固定されて
+    /// いることをロックする（イシュー #3211。`unroll_load_enabled_is_false_by_default` と同型）。
+    #[test]
+    fn frag_interleave_enabled_is_false_by_default() {
+        assert!(
+            !std::hint::black_box(FRAG_INTERLEAVE_ENABLED),
+            "FRAG_INTERLEAVE_ENABLED が true のままコミットされている疑いがあります。\
+             本番既定は false です（イシュー #3211・tile.rs FRAG_INTERLEAVE_ENABLED doc）。"
+        );
+    }
+
+    /// 交互配置の割当が threadgroup 内 (BM/8)×(BN/8) ブロックへの全単射である
+    /// こと（重複なし・欠落なし・範囲内）。bit 一致と REQ-8（二重書き・範囲外書き
+    /// 込みなし）の構造的論拠（イシュー #3211）。
+    #[test]
+    fn interleaved_block_assignment_is_bijection_for_staged_candidates() {
+        use std::collections::HashSet;
+        for cfg in CANDIDATES.iter().chain(M64_THIN_CANDIDATES.iter()) {
+            if !cfg.staged {
+                continue;
+            }
+            let (acc_rows, acc_cols) = (cfg.acc_rows(), cfg.acc_cols());
+            let mut seen = HashSet::new();
+            for wm_idx in 0..cfg.wm {
+                for wn_idx in 0..cfg.wn {
+                    for r in 0..acc_rows {
+                        for c in 0..acc_cols {
+                            let (row, col) =
+                                interleaved_block_origin_model(wm_idx, wn_idx, r, c, *cfg);
+                            assert_eq!(row % 8, 0);
+                            assert_eq!(col % 8, 0);
+                            assert!(row < cfg.bm && col < cfg.bn, "範囲外: {cfg:?}");
+                            assert!(seen.insert((row, col)), "重複: {cfg:?} ({row},{col})");
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                seen.len() as u32,
+                (cfg.bm / 8) * (cfg.bn / 8),
+                "欠落: {cfg:?}"
+            );
+        }
+    }
+
+    /// 実効条件モデル: production staged 候補で true、direct-load・split-K・
+    /// unroll_acc 実効・Legacy 以外・KSTEPS=2・ゲート OFF で false（#3211）。
+    #[test]
+    fn frag_interleave_active_model_conditions() {
+        let staged = CANDIDATES
+            .iter()
+            .copied()
+            .find(|c| c.staged)
+            .expect("staged 候補が存在する");
+        let direct = CANDIDATES
+            .iter()
+            .copied()
+            .find(|c| !c.staged)
+            .expect("direct-load 候補が存在する");
+        assert!(frag_interleave_active_model(
+            staged, true, false, false, true, 1
+        ));
+        assert!(!frag_interleave_active_model(
+            direct, true, false, false, true, 1
+        ));
+        assert!(!frag_interleave_active_model(
+            staged, true, true, false, true, 1
+        ));
+        assert!(!frag_interleave_active_model(
+            staged, true, false, true, true, 1
+        ));
+        assert!(!frag_interleave_active_model(
+            staged, true, false, false, false, 1
+        ));
+        assert!(!frag_interleave_active_model(
+            staged, true, false, false, true, 2
+        ));
+        assert!(!frag_interleave_active_model(
+            staged, false, false, false, true, 1
+        ));
+        for idx in [1usize, 2, 3] {
+            assert!(
+                frag_interleave_active_model(CANDIDATES[idx], true, false, false, true, 1),
+                "CANDIDATES[{idx}] は staged の production 候補のはず"
+            );
+        }
+        assert!(!frag_interleave_active_model(
+            CANDIDATES[7],
+            true,
+            false,
+            false,
+            true,
+            1
+        ));
     }
 
     /// candle 相当タイル選択の分岐境界（`docs/analysis/candle-metal-01.md` §3.2）。

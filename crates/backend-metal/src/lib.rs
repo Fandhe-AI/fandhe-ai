@@ -398,6 +398,14 @@ mod gemm_smem_swizzle_diag_tests;
 // `cfg(all(test, target_os = "macos"))` を付ける。実機実測・結線判断は #2111。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_steel_candidate_diag_tests;
+// simdgroup 交互配置候補（`FRAG_INTERLEAVE_ENABLED`・index 19。イシュー #3211。
+// `docs/perf/metal-gemm-steel-candidates.md` §10）の bit 一致・CPU 参照 parity の
+// 自己検証。`MetalGemm::new_with_frag_interleave`（`#[cfg(test)] pub(crate)`）と
+// `gemm_reuse_phase_diag_tests` の `pub(crate)` 面へ到達するため
+// `gemm_steel_candidate_diag_tests` と同じ理由でクレートルートの兄弟モジュールとして
+// 配置し、同じ `cfg(all(test, target_os = "macos"))` を付ける。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_frag_interleave_diag_tests;
 // E6 タイルクラス分割（`tile::TileClassMode`。イシュー #1327・PR #1388で
 // opt-in 機構を追加・bit 一致を自己検証済み）の N=1024/2048/4096 純カー
 // ネル時間（GPU タイムスタンプ）を候補 0/4/5/8（`tile::CANDIDATES`）で

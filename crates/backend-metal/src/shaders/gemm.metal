@@ -624,6 +624,7 @@ constant uint TILE_CLASS = GEMM_SPEC_TILE_CLASS;
 constant bool SPLIT_K_ENABLED = GEMM_SPEC_SPLIT_K_ENABLED;
 constant uint COOP_SMEM_SWIZZLE = GEMM_SPEC_COOP_SMEM_SWIZZLE;
 constant bool UNROLL_LOAD_ENABLED = GEMM_SPEC_UNROLL_LOAD_ENABLED;
+constant bool FRAG_INTERLEAVE_ENABLED = GEMM_SPEC_FRAG_INTERLEAVE_ENABLED;
 #else
 constant uint BM [[function_constant(0)]];
 constant uint BN [[function_constant(1)]];
@@ -876,6 +877,24 @@ constant uint COOP_SMEM_SWIZZLE [[function_constant(17)]];
 // no-op 契約。index は COOP_SMEM_SWIZZLE（17）の直後の 18
 // （`tests/shader_source_evidence.rs` が固定する）。
 constant bool UNROLL_LOAD_ENABLED [[function_constant(18)]];
+// イシュー #3211: simdgroup の担当ブロックを candle／MLX steel 型の「交互配置
+// （interleaved）」へ切り替える opt-in 軸（既定 false = 現行の連続帯配置と
+// 同一コード。`FRAG_INTERLEAVE_ACTIVE` が偽なら従来の else 側へ畳み込まれる）。
+// 現行は simdgroup `(wm, wn)` が連続した `sub_bm × sub_bn` の帯を持つのに対し、
+// candle の BlockMMA（`TM_stride = 8*WM`）は 8×8 ブロック単位で行・列を WM／WN
+// 個の simdgroup が交互に受け持つ（i 番目のブロックは行 `8*wm + i*8*WM`）。
+// **bit 一致の論拠**: 出力の各 8×8 ブロックは、どの simdgroup が持つかに
+// 依らず「K タイル昇順・kk 昇順の `simdgroup_multiply_accumulate` 列」で
+// 計算され、オペランド列・結合順序は不変。割当は threadgroup 内の
+// (BM/8)×(BN/8) ブロックへの全単射（`crate::tile` の Rust モデル
+// `interleaved_block_origin_model` と単体テストで固定）。
+// **REQ-8**: 協調ロードの境界検査は一切変更せず、ストアの
+// `out_row >= dims.m`／`out_col >= dims.n` ガードも新 variant で維持する。
+// 実効条件は `FRAG_INTERLEAVE_ACTIVE`（kernel 内）: TILE_CLASS==0・staged・
+// FRAG_LOAD_KSTEPS==1・非 UNROLL_ACC・非 split-K のときのみ有効で、外れる場合は
+// 現行コードを通る（no-op 契約）。`_f16`／`_hfrag`／`_te`／split-K パス 1 は
+// 本定数を参照しない。index は UNROLL_LOAD_ENABLED（18）の直後の 19。
+constant bool FRAG_INTERLEAVE_ENABLED [[function_constant(19)]];
 #endif
 
 // イシュー #1298: 協調ロードの「スレッド → float4 グループ」割当を
@@ -1193,6 +1212,16 @@ kernel void gemm_simdgroup_tiled(
     // （`if (staging_active)` は以下の 2 ブロックそのものを丸ごと選ぶだけで、
     // ブロック本体〈境界チェックを含む〉は 1 文字も複製・変更しない）。
     const bool staging_active = (TILE_CLASS == 0) ? USE_TGP_STAGING : (TILE_CLASS == 2);
+    // 交互配置の実効条件（イシュー #3211。FRAG_INTERLEAVE_ENABLED 宣言のコメント参照）。
+    // 全項が function constant のみから成りコンパイル時に畳み込まれる。
+    const bool FRAG_INTERLEAVE_ACTIVE = FRAG_INTERLEAVE_ENABLED && TILE_CLASS == 0
+        && USE_TGP_STAGING && FRAG_LOAD_KSTEPS == 1 && !UNROLL_ACC_ENABLED && !SPLIT_K_ENABLED;
+    // 交互配置の simdgroup 基点とストライド（8 の倍数。smem swizzle の鍵 `row >> 3` の
+    // 前提を保つ）。非有効時は未使用。
+    const uint frag_row_base = wm_idx * 8;
+    const uint frag_col_base = wn_idx * 8;
+    const uint FRAG_ROW_STEP = 8 * WM;
+    const uint FRAG_COL_STEP = 8 * WN;
 
     for (uint t = 0; t < k_tile_count; t++) {
         uint p0 = k_begin + t * BK;
@@ -1584,6 +1613,41 @@ kernel void gemm_simdgroup_tiled(
                         }
                     }
                 }
+            } else if (FRAG_INTERLEAVE_ACTIVE) {
+            // 交互配置 variant（イシュー #3211）: フラグメントロードの行・列を
+            // `frag_*_base + i * FRAG_*_STEP`（8*WM／8*WN ストライド）にする。
+            // 各 acc[r][c_] の K 方向オペランド列は現行と同一。unroll pragma は付けない。
+            // 本ブロックを 4 スペース深くインデントしているのは、既定側の
+            // `if (FINE_BARRIER_ENABLED)` 厳密一致 needle（インデント込み。
+            // shader_source_evidence.rs）を既定側だけに当てるため。
+                for (uint kk = 0; kk < BK; kk += 8) {
+                    simdgroup_float8x8 a_frag[ACC_ROWS_CAP];
+                    simdgroup_float8x8 b_frag[ACC_COLS_CAP];
+                    for (uint r = 0; r < acc_rows; r++) {
+                        uint a_row = frag_row_base + r * FRAG_ROW_STEP;
+                        if (TRANS_A) {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)kk * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, kk, a_row, BM), lda, ulong2(0), true);
+                        } else {
+                            simdgroup_load(a_frag[r], tile_a + (size_t)a_row * (size_t)lda + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 1, a_row, kk, BK), lda);
+                        }
+                    }
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        uint b_col_il = frag_col_base + c_ * FRAG_COL_STEP;
+                        if (TRANS_B) {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)b_col_il * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, b_col_il, kk, BK), ldb, ulong2(0), true);
+                        } else {
+                            simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)smem_swizzle_col(COOP_SMEM_SWIZZLE >= 2, kk, b_col_il, BN), ldb);
+                        }
+                    }
+                    if (FINE_BARRIER_ENABLED) {
+                        simdgroup_barrier(mem_flags::mem_none);
+                    }
+                    for (uint r = 0; r < acc_rows; r++) {
+                        for (uint c_ = 0; c_ < acc_cols; c_++) {
+                            simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
+                        }
+                    }
+                } // FRAG_INTERLEAVE_ACTIVE の for(kk) 閉じ
             } else {
             for (uint kk = 0; kk < BK; kk += 8) {
                 // フラグメントのレジスタ常駐化（イシュー #745）: kk ステップ
@@ -1921,7 +1985,24 @@ kernel void gemm_simdgroup_tiled(
     // コメント参照）: unroll 版・非 unroll 版のどちらも同じ境界チェック
     // 付き `simdgroup_store` を r/c_ 昇順で行うだけで、書き込み先・値は
     // 不変（数値はビット単位で従来と一致する）。
-    if (UNROLL_ACC_ENABLED) {
+    if (FRAG_INTERLEAVE_ACTIVE) {
+        // 交互配置 variant のストア（イシュー #3211）: 出力原点を
+        // `frag_*_base + i * FRAG_*_STEP` から求める。REQ-8 の境界ガードは
+        // 現行ストアと同じ形で維持する。
+        for (uint r = 0; r < acc_rows; r++) {
+            uint out_row = row0 + frag_row_base + r * FRAG_ROW_STEP;
+            if (out_row >= dims.m) {
+                continue;
+            }
+            for (uint c_ = 0; c_ < acc_cols; c_++) {
+                uint out_col = col0 + frag_col_base + c_ * FRAG_COL_STEP;
+                if (out_col >= dims.n) {
+                    continue;
+                }
+                simdgroup_store(acc[r][c_], c_out + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
+            }
+        }
+    } else if (UNROLL_ACC_ENABLED) {
 #pragma clang loop unroll(full)
         for (uint r = 0; r < acc_rows; r++) {
             uint out_row = sub_row0 + r * 8;
