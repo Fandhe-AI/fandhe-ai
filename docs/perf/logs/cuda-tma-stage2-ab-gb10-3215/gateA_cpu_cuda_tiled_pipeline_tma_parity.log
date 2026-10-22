@@ -1,0 +1,17 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/cpu_cuda_tiled_pipeline_tma_parity.rs (target/release/deps/cpu_cuda_tiled_pipeline_tma_parity-1595bbab0eea7bbf)
+
+running 9 tests
+test tiled_pipeline_tma_128x64_k_zero_determinism_prepared_and_pretransposed ... ok
+test tiled_pipeline_tma_128x64_matches_cp_async_128x64_bit_exact ... ok
+test tiled_pipeline_tma_128x64_matches_cp_async_with_nan_inf_inputs ... ok
+test tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap ... B64 swizzle 仮説（kernels_tiled_pipeline.rs::tma_swizzled_chunk_a 相当）は 全 7 形状で cp.async pipeline 版と bit 同一でした
+ok
+test tiled_pipeline_tma_k_zero_produces_all_zero_output ... ok
+test tiled_pipeline_tma_none_matches_pipeline_bit_exact ... ok
+test tiled_pipeline_tma_none_matches_pipeline_with_pretransposed_host_input ... ok
+test tiled_pipeline_tma_none_repeated_launch_is_deterministic ... ok
+test tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 3.63s
+

@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/gemm_tiled.rs (target/release/deps/gemm_tiled-bc4821ee04afd13e)
+
+running 6 tests
+test tiled_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_f32_zero_k_returns_all_zero ... ok
+test tiled_f16_runs_and_returns_expected_shape ... ok
+test tiled_f32_matches_cpu_reference_across_shapes ... ok
+test tiled_f32_matches_cpu_reference_k_stress ... ok
+[#1203 diag] naive: samples=[0.145347594, 0.129042252, 0.127152512, 0.128281374, 0.129840538]s median=0.129042s q1=0.128281s q3=0.129841s
+[#1203 diag] tiled: samples=[0.027286102, 0.024259836, 0.024540524, 0.02836914, 0.029256961]s median=0.027286s q1=0.024541s q3=0.028369s
+[#1203 diag] speedup=4.729230x (naive_median=0.129042s, tiled_median=0.027286s)
+test tiled_f32_outperforms_naive_at_4096 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.87s
+

@@ -1,0 +1,13 @@
+name, driver_version, compute_cap
+NVIDIA GB10, 580.173.02, 12.1
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Aug_20_01:57:39_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo 1.97.0 (c980f4866 2026-06-30)
+3.12.3 2.14.0+cu130 2.5.4 13.0
+bench_py.py sha256: 9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+lscpu model: Model name:                              Cortex-X925

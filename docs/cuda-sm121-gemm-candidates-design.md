@@ -116,7 +116,7 @@ SM 数 48・L2 25,165,824 B（24 MiB）・global 実効帯域 212.34 GB/s・L2 �
 
 | 候補 | 根拠 | #2122 依存 | 想定効果・対象形状 | 事前登録ゲート | opt-in 方式 |
 |---|---|---|---|---|---|
-| C1: TMA Stage 2（128×64 タイルへの TMA 適用）＋形状条件 N≥512。tensor map キャッシュを同時設計 | `backend-cuda-tma-gemm-load-design.md` §10.8「再評価の仮説」 | なし（TMA は確定済み） | 本番構成と同一タイルで比較可能。N≥512 で Stage 1 の改善（最大 20.7%）が本番比でも出るか | A〜D | 初期は P-diag、合格後に形状分岐。**2026-10-22 #3214 で P-diag 実装済み**（`TmaRowMap`・`compile_tiled_pipeline_tma_128x64_variant`。GB10 での A/B は #3215。`backend-cuda-tma-gemm-load-design.md` §11） |
+| C1: TMA Stage 2（128×64 タイルへの TMA 適用）＋形状条件 N≥512。tensor map キャッシュを同時設計 | `backend-cuda-tma-gemm-load-design.md` §10.8「再評価の仮説」 | なし（TMA は確定済み） | 本番構成と同一タイルで比較可能。N≥512 で Stage 1 の改善（最大 20.7%）が本番比でも出るか | A〜D | 初期は P-diag、合格後に形状分岐。**2026-10-22 #3214 で P-diag 実装済み**（`TmaRowMap`・`compile_tiled_pipeline_tma_128x64_variant`。**2026-10-22 #3215 で GB10 A/B 済み**: 純カーネル（event）の比 cur ÷ 候補が N=1024／2048／4096 で `tma128_none` 1.145／1.124／1.035・`tma128_strided` 1.175／1.133／1.038（5/5 run 一貫）、ゲート A・B は pass で判定は **ADOPT（結線候補。ゲート D は結線 PR で実施）**。N=256 は 0.68〜0.76 の後退で形状ゲートが要る。出典 `docs/perf/logs/cuda-tma-stage2-ab-gb10-3215/aggregate.md`・`backend-cuda-tma-gemm-load-design.md` §11.6） |
 | C2: producer/consumer 非対称レジスタ（warp specialization）＋TMA | 同 §2 F2・§7 | **`setmaxnreg` の受理・実行の確定が前提**（#2122 GB10 実測: `compute_121a`／`121f` で「成立」・`compute_121` で「ptxas 拒否（オフライン）」。着手可否の判断は後続） | 非同期オーバーラップの上振れ | A〜D | P-diag |
 | C3: Stream-K の fixup 固定費削減。(a) co-residency 保証付きのカーネル内 fixup（cooperative launch。raw FFI の `unsafe` を伴うため #2127 の整理と security-auditor 監査が前提）／(b) cluster>1 と DSMEM が確定した場合のクラスタ内固定順序還元（クラスタ内 CTA は同時スケジュールされ、デッドロック要因を排除できる） | `cuda-gemm-tiled-pipeline-streamk.md` §6.8 | (b) のみ cluster・DSMEM（#2122 GB10 実測: cluster 2／4／8 と DSMEM は 3 target とも「成立」。着手可否の判断は後続） | N=1024／2048 で wave 損失 11〜33% の回復余地。固定順序で決定性を維持 | A〜D（A は決定性・full タイル bit 一致。B-1 必須・fail>0 の扱いは承認事項） | P-diag |
 | C4: 128×64 版 Stream-K | 同 §6.8 | なし | C3 の成否に従属。ゲート C が 64×64 で FAIL のため優先度低 | A〜D | P-diag |
@@ -167,7 +167,7 @@ TMA・`setmaxnreg`・Stream-K・persistent・cluster で open issue を検索し
 | test(backend-cuda): CTA→SM 分布プローブ（`%smid`・`%globaltimer`。§3.1） | なし | 診断のみ | 高 |
 | test(backend-cuda): TMA N=256 判別実験（§3.3 の (a)〜(c)） | なし | 診断のみ | 高 |
 | perf(backend-cuda): TMA Stage 2（128×64）opt-in 実装（C1） | 上記の判別実験 | A〜D | 中（**#3214 で P-diag 実装済み**） |
-| test(backend-cuda): Stage 2 の GB10 実測・採否 | C1 の実装 | C・D | 中 |
+| test(backend-cuda): Stage 2 の GB10 実測・採否 | C1 の実装 | C・D | 中（**2026-10-22 #3215 で C まで実施・ADOPT（結線候補）。D は結線 PR**。`docs/perf/logs/cuda-tma-stage2-ab-gb10-3215/`） |
 | test(backend-cuda): 3×TF32 累積意味論の判別実験（§3.4） | なし | 診断のみ | 低 |
 | perf(backend-cuda): Stream-K の cooperative fixup（C3(a)） | #2127・security-auditor 監査 | A〜D | 中 |
 | perf(backend-cuda): クラスタ内還元（C3(b)） | #2122（cluster・DSMEM の確定） | A〜D | #2122 次第（2026-10-01 GB10 実測で cluster 2／4／8・DSMEM は「成立」。優先度は未設定） |
