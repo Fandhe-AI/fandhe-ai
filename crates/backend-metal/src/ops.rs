@@ -1461,6 +1461,62 @@ impl MetalBackendOps {
         .map_err(map_metal_error)
     }
 
+    /// [`BackendOps::relu_backward_mask_device`]／
+    /// [`BackendOps::relu_backward_mask_device_tracked`] の共有本体（イシュー
+    /// #3218。`sgd_step_device_impl` と同じ二重化回避パターン）。
+    ///
+    /// 手順は 検証（device・`relu_mask_model::plan_relu_mask`。encode より前）→
+    /// 出力の確保（最初の encode より前に `static_metal_memory()` で確保。escape
+    /// する `DeviceBuffer` のため REQ-14 の単一計測系列。`linear_forward_device_
+    /// impl` と同じ）→ encode。`token == None`（非 tracked）はローカル cell で
+    /// encode → `synchronize` → `check_merged_dispatch_token` で完了と成否を
+    /// 保証する。`Some`（tracked）は encode のみで待たない。
+    fn relu_backward_mask_device_impl(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if g.device() != Device::Metal || mask_src.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = crate::relu_mask_model::plan_relu_mask(
+            g.shape(),
+            g.offset(),
+            g_layout,
+            mask_src.shape(),
+            mask_src.offset(),
+        )?;
+        let logical = plan.logical_shape();
+        if plan.numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(&logical);
+        }
+
+        let g_buf = metal_buffer_ref(g.buffer(), "relu_backward_mask_device: g")?;
+        let mask_buf = metal_buffer_ref(mask_src.buffer(), "relu_backward_mask_device: mask_src")?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ew = context_cache::cached_elementwise(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out_dev_buf = static_metal_memory()?.alloc_zeroed(&logical)?;
+        let out_buf = metal_buffer_ref(&out_dev_buf, "relu_backward_mask_device: output")?;
+
+        match token {
+            Some(token) => {
+                ew.encode_relu_mask_select_tracked(&ctx, g_buf, mask_buf, out_buf, &plan, token)
+                    .map_err(map_metal_error)?;
+            }
+            None => {
+                let local = DispatchFailureCell::new();
+                ew.encode_relu_mask_select_tracked(&ctx, g_buf, mask_buf, out_buf, &plan, &local)
+                    .map_err(map_metal_error)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+            }
+        }
+        Ok(out_dev_buf)
+    }
+
     /// [`BackendOps::adam_step_device`]／
     /// [`BackendOps::adam_step_device_tracked`] 共通の検証・ディスパッチ
     /// 本体（イシュー #2070。`sgd_step_device_impl` と同じ二重化回避
@@ -3059,6 +3115,34 @@ impl BackendOps for MetalBackendOps {
         token: &DispatchFailureCell,
     ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
         self.linear_forward_device_impl(a, w, bias, act, Some(token))
+    }
+
+    /// ReLU backward マスク選択の Metal 実装（イシュー #3218）。復帰時点で GPU
+    /// 実行の完了・成否を返す同期版（ローカル cell で encode → `synchronize` →
+    /// token 検査）。実体は `relu_backward_mask_device_impl`。
+    fn relu_backward_mask_device(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.relu_backward_mask_device_impl(g, g_layout, mask_src, None)
+    }
+
+    /// [`BackendOps::relu_backward_mask_device_tracked`] の Metal オーバー
+    /// ライド（イシュー #3218）。**待たない** encode-only 版で、`token` を
+    /// `MetalContext::encode` と同一ロック区間でバッチへ登録する（既定実装の
+    /// ままでは本 dispatch の失敗がどの cell にも登録されず、共有 context の
+    /// 別スレッドが先に `synchronize` すると失敗を取りこぼす。
+    /// `linear_forward_device_tracked` と同じ理由）。
+    fn relu_backward_mask_device_tracked(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.relu_backward_mask_device_impl(g, g_layout, mask_src, Some(token))
     }
 
     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。

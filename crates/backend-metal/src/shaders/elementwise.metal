@@ -25,6 +25,9 @@
 // ため、backend 間の数値突合は統一複合判定「相対誤差 1e-3 未満 または
 // 絶対誤差 1e-5 未満」（`.claude/rules/coding-rust.md`）で検証する。
 //
+// `ew_relu_mask_select_f32`（イシュー #3218）の意味論の正は
+// `autodiff::grad::elementwise_mul_mask`（選択。末尾コメント参照）。
+//
 // # ブロードキャスト
 //
 // 本カーネルは同一長の 1 次元化済みバッファのみを扱う（ブロードキャスト
@@ -130,5 +133,52 @@ kernel void ew_masked_fill_f32(
 ) {
     if (idx < numel) {
         out[idx] = (mask[idx] != 0.0f) ? value : x[idx];
+    }
+}
+
+// ReLU backward マスクの選択（`BackendOps::relu_backward_mask_device`。
+// イシュー #3218・設計 `docs/train-step-resident-parts-design.md` §3 行 3）。
+// `out[i] = (mask[i] > 0.0f) ? g[i] : +0.0f`。意味論の正は
+// `autodiff::grad::elementwise_mul_mask(.., |v| v > 0.0)`。**乗算ではなく選択**
+// （NaN×0・−x×0 で bit がずれるのを避ける）。`g`／`out` は `uint` として
+// ビットをそのままコピーし、GPU 側での NaN payload 正規化や −0.0 の揺れを
+// 構造的に排除する。mask が NaN のとき比較は偽で `+0.0`（ビット 0）を返す。
+//
+// 添字は `ulong`（`uint` 積の wraparound で境界検査を迂回されないため）。
+// `g_transposed != 0` のとき `g` は格納 `[cols_l, rows_l]` を転置して読む
+// （論理 `[rows_l, cols_l]` の `(r_l, c_l)` → 格納 `c_l * rows_l + r_l`）。
+// `g_off`／`mask_off` は要素単位の view 起点で、`setBuffer` のバイトオフセット
+// は使わない（ホスト側で `offset + numel <= u32::MAX` を検証済み）。
+// 手動境界チェック（REQ-8）: `idx < numel` に加え view 終端（`g_end`／
+// `mask_end`）も検査する。範囲外は書き込まず、出力は事前ゼロ確保のため
+// `+0.0` のまま残る。
+kernel void ew_relu_mask_select_f32(
+    device const uint* g [[buffer(0)]],
+    device const float* mask [[buffer(1)]],
+    device uint* out [[buffer(2)]],
+    constant uint& numel [[buffer(3)]],
+    constant uint& rows_l [[buffer(4)]],
+    constant uint& cols_l [[buffer(5)]],
+    constant uint& g_transposed [[buffer(6)]],
+    constant uint& g_off [[buffer(7)]],
+    constant uint& mask_off [[buffer(8)]],
+    constant uint& g_end [[buffer(9)]],
+    constant uint& mask_end [[buffer(10)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx < numel && cols_l != 0u) {
+        ulong i = (ulong)idx;
+        ulong gi;
+        if (g_transposed != 0u) {
+            ulong r_l = i / (ulong)cols_l;
+            ulong c_l = i % (ulong)cols_l;
+            gi = (ulong)g_off + c_l * (ulong)rows_l + r_l;
+        } else {
+            gi = (ulong)g_off + i;
+        }
+        ulong mi = (ulong)mask_off + i;
+        if (gi < (ulong)g_end && mi < (ulong)mask_end) {
+            out[idx] = (mask[mi] > 0.0f) ? g[gi] : 0u;
+        }
     }
 }
