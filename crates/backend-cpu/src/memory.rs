@@ -42,11 +42,58 @@ use fandhe_ai_tensor_core::pool::PoolZeroFill;
 /// sgd_step_device` が `DeviceBuffer::downcast_handle_mut` 経由で in-place
 /// 書き換えを行うために `crate::memory::CpuBufferHandle` として参照する
 /// 必要があり、可視性を crate 内に広げた）。
-#[derive(Debug)]
-pub(crate) struct CpuBufferHandle {
-    pub(crate) data: Vec<f32>,
-    _alloc: TrackedAllocation,
+mod handle {
+    use super::TrackedAllocation;
+    use crate::gemm_blis::prepack::PrepackCache;
+
+    /// 本体。`data` は private で、書き込み口は [`CpuBufferHandle::data_mut`] だけにする
+    /// （#3200。常駐重みの pack 済み panel キャッシュ `prepack` を、書き込みのたびに必ず
+    /// 無効化するための型による強制。読み手は `&CpuBufferHandle` を GEMM の間じゅう保持するため、
+    /// `&mut self` を要求する `data_mut` と重なることは借用規則上起きない）。
+    #[derive(Debug)]
+    pub(crate) struct CpuBufferHandle {
+        data: Vec<f32>,
+        prepack: PrepackCache,
+        _alloc: TrackedAllocation,
+    }
+
+    impl CpuBufferHandle {
+        /// 構築口（`memory.rs` の 4 か所の確保経路が共有する）。
+        pub(super) fn new(data: Vec<f32>, alloc: TrackedAllocation) -> Self {
+            Self {
+                data,
+                prepack: PrepackCache::default(),
+                _alloc: alloc,
+            }
+        }
+
+        /// 読み取り専用のホストデータ。
+        pub(crate) fn data(&self) -> &[f32] {
+            &self.data
+        }
+
+        /// 書き込み口。pack 済み panel キャッシュを先に破棄してから返す
+        /// （`Mutex::get_mut` でロック不要）。
+        pub(crate) fn data_mut(&mut self) -> &mut [f32] {
+            self.prepack.clear_mut();
+            &mut self.data
+        }
+
+        /// テスト用: 要素数を 1 つ減らす（長さ不一致の拒否経路の検証用。キャッシュも破棄する）。
+        #[cfg(test)]
+        pub(crate) fn pop_for_test(&mut self) {
+            self.prepack.clear_mut();
+            self.data.pop();
+        }
+
+        /// pack 済み B panel キャッシュ（`ops.rs` の forward が引き当てに使う）。
+        pub(crate) fn prepack_cache(&self) -> &PrepackCache {
+            &self.prepack
+        }
+    }
 }
+
+pub(crate) use handle::CpuBufferHandle;
 
 impl BufferHandle for CpuBufferHandle {
     fn as_any(&self) -> &dyn Any {
@@ -112,10 +159,7 @@ impl CpuMemory {
         }
         let bytes = checked_byte_len(data.len())?;
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
-        let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle {
-            data,
-            _alloc: alloc,
-        });
+        let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle::new(data, alloc));
         Ok(DeviceBuffer::new(Device::Cpu, shape, handle))
     }
 }
@@ -153,7 +197,7 @@ impl PoolZeroFill for CpuMemory {
         let Some(cpu_handle) = handle.as_any_mut().downcast_mut::<CpuBufferHandle>() else {
             return Err(BackendError::DeviceMismatch);
         };
-        cpu_handle.data.fill(0.0);
+        cpu_handle.data_mut().fill(0.0);
         Ok(())
     }
 }
@@ -201,10 +245,7 @@ impl MemoryOps for CpuMemory {
         let bytes = checked_byte_len(numel)?;
         let data = vec![0.0f32; numel];
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
-        let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle {
-            data,
-            _alloc: alloc,
-        });
+        let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle::new(data, alloc));
         Ok(DeviceBuffer::new(Device::Cpu, shape.to_vec(), handle))
     }
 
@@ -212,10 +253,7 @@ impl MemoryOps for CpuMemory {
         let shape = tensor.shape().to_vec();
         if tensor.numel() == 0 {
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
-            let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle {
-                data: Vec::new(),
-                _alloc: alloc,
-            });
+            let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle::new(Vec::new(), alloc));
             return Ok(DeviceBuffer::new(Device::Cpu, shape, handle));
         }
         // 非 contiguous な入力（transpose/narrow 後の view）は実体化して
@@ -234,10 +272,7 @@ impl MemoryOps for CpuMemory {
             .to_vec();
         let bytes = checked_byte_len(data.len())?;
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
-        let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle {
-            data,
-            _alloc: alloc,
-        });
+        let handle: Box<dyn BufferHandle> = Box::new(CpuBufferHandle::new(data, alloc));
         Ok(DeviceBuffer::new(Device::Cpu, shape, handle))
     }
 
@@ -251,7 +286,7 @@ impl MemoryOps for CpuMemory {
         if buffer.numel() == 0 {
             return Tensor::new(Vec::new(), buffer.shape()).map_err(BackendError::ShapeMismatch);
         }
-        Tensor::new(handle.data.clone(), buffer.shape()).map_err(BackendError::ShapeMismatch)
+        Tensor::new(handle.data().to_vec(), buffer.shape()).map_err(BackendError::ShapeMismatch)
     }
 
     /// [`MemoryOps::upload_into`] の CPU 実装（イシュー #1212）。
@@ -286,7 +321,7 @@ impl MemoryOps for CpuMemory {
         let handle = buffer
             .downcast_handle::<CpuBufferHandle>()
             .ok_or(BackendError::DeviceMismatch)?;
-        f(&handle.data);
+        f(handle.data());
         Ok(())
     }
 }

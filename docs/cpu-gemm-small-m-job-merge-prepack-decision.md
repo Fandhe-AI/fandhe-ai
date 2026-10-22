@@ -96,3 +96,24 @@ FMA 契約（`f32::mul_add`／`vfmaq_laneq_f32`）・tolerance・公開 API は�
 - `col_bands == 1`: C を行帯で直接分割し、staging なし。`col_bands > 1`: `split_c_into_jobs` と C staging は残し（§5 の受容済み残差）、`c_local`・B パネルを rayon の init ごとに 1 回だけ確保して使い回す。残る確保は共有 A 1 回・スクラッチ（直接書き込み 1／staging 2）・`split_c_into_jobs` 側（col_bands > 1 のみ）。
 - 計数は `jobgrid_probe`（`#[cfg(test)]`）に追加。受け入れは `shared_a_packs_once_per_row_band`（`a_shared_bands == row_bands`）と、small_m.rs の bit 一致テスト群。`determinism_inventory` の atomic RMW 期待値は、test 限定プローブの計数フック追加に伴い 12→15（jobgrid_probe 10→13）へ更新した。
 - 報告用 `#[ignore]` テスト `small_m_shared_a_report`（本番入口・6 形状 × T）を #3201 向けに用意した。既定は OFF のまま（反転は #3227）。
+
+## 12. #3200 実装記録
+
+- 置き場とゲート: `crates/backend-cpu/src/gemm_blis/prepack.rs`。ゲート `RESIDENT_W_PREPACK_ENABLED`（G2）は既定 OFF。OFF のとき `ops.rs` は `PrepackSource` を渡さず、現行の job 内 pack と同一の経路になる。既定の反転は #3201（A/B）・#3227（判断）で、本 PR は行わない。実測値（時間）も本 PR には含めない。
+- 入口は 2 つを結線した。§6 は `gemm_resident_rhs_impl` を例示するが、infer の CPU セルは `predict_device_chain` → `linear_forward_device`（`ops.rs`）を通るため、こちらも W を Nn の B として使う「forward の B」として結線した（`linear_forward_device_with`。trait 実装から切り出した）。範囲外（従来どおり pack）は `m == 1`・行パネル経路・backward の `gemm_resident_lhs`・Nt／Tn。
+- 持ち主と無効化: `CpuBufferHandle`（`memory.rs`）がキャッシュ `PrepackCache` を持つ。`data` は private で、書き込み口 `data_mut()` が必ずキャッシュを破棄する（`Mutex::get_mut`。ロック不要）。`zero_fill`（pool 再利用）・`upload_into`・各 optimizer も同じ口を通る。ハンドルと一緒に drop されるため、ストア破棄・別 Tape・ABA は構造的に起きない。optimizer の要素ループは `data_mut()` をループ外へ出して束縛する。
+- キー: `(offset, k, n, nr, kc)`。転置は Nn 固定。配置は `pc * align_up(n, nr) + jb * kc_len * nr`（各区画は `pack_b` 単独の出力とバイト一致。テストで固定）。job 側は `((cols.start + jc) / nr)` から `nr_blocks * kc_len * nr` 語を連続で切り出す。
+- 使える条件（`select_prepack`）: Nn・`k * align_up(n, nr) <= 1 << 20`（`checked_mul`。溢れは不可）・`nc_job <= NC || NC % nr == 0`。満たさないときは job 内 pack へフォールバックする。NEON（NR=12）は `512 % 12 != 0` のため実質 `nc_job <= NC` だけが条件で、n > 512 で col_bands == 1 になる形状はフォールバックする。L1（n=256）・L2（n=10）は全 ISA で適格。AVX2（16）・AVX-512（32）・Scalar（4）は `512 % nr == 0` で常に通る。
+- エントリ数の上限 `RESIDENT_W_PREPACK_MAX_ENTRIES = 16`（安全側の追加）。超えたら挿入せず、構築した panel をその呼び出しだけで使う。
+- 構築は逐次で、並列ライブラリを使わない（`determinism_inventory` の rayon allowlist を動かさない）。W の更新ごとに 1 回（train）または初回のみ（infer）で、job ごとの B pack を 1 回の全幅 pack に置き換える。構築はロックの外で行い、同時構築は後勝ち（内容は同一）。
+- 決定性の棚卸し: キャッシュの `Mutex` は引き当て専用で数値アキュムレータではない。`determinism_inventory` の lock 期待値に `gemm_blis/prepack.rs` 7 行を根拠付きで追加した。atomic は足していないため RMW 15 件は不変。
+- 追加メモリ（式 `k * align_up(n, NR) * 4` バイト。`memory_footprint_matches_formula` で語数を固定）。`MemoryStats` には計上しない（キャッシュはデバイス確保ではなくハンドル付随の派生データで、計上すると既存の報告値・peak-memory の契約が変わるため。将来の候補）:
+
+  | W | W 本体 | NEON NR=12 | AVX2 NR=16 | AVX-512 NR=32 | Scalar NR=4 |
+  |---|---|---|---|---|---|
+  | L1 784×256 | 200,704 語（802,816 B） | 206,976 語（827,904 B） | 200,704 語（802,816 B） | 200,704 語（802,816 B） | 200,704 語（802,816 B） |
+  | L2 256×10 | 2,560 語（10,240 B） | 3,072 語（12,288 B） | 4,096 語（16,384 B） | 8,192 語（32,768 B） | 3,072 語（12,288 B） |
+
+  ゲート OFF のときの増分は 0（ハンドルあたり Mutex と空 Vec の数十バイトのみ）。
+- テスト: gemm レベルは forward 形状（64×256×784・64×10×256）・端数（63×257×785・65×10×9・2×13×7）・KC またぎ（64×256×1000）・フォールバック形状（64×1024×256）を T=1／10／20・jpw 2／1・A 共有（G1）併用・NaN／inf 混入で `to_bits` 一致。ops 層は ON／OFF 一致、3 step の更新後に古い panel を使わないこと、書き込み経路ごとの無効化、同一 `params_buf` 上の別 offset・別形状・複数ストアのキー分離。報告用 `#[ignore]` テスト `resident_w_prepack_report`（語数表示）を #3201 向けに用意した。
+
