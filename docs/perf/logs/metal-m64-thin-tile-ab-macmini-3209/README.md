@@ -21,6 +21,7 @@
 | `aggregate.py` | 厳格な集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`／`python3 -I aggregate.py <dir> --expect-rev <SHA> --cell-ab <ok｜anomaly｜fail｜unavailable> > aggregate.md`）。self-test の fixture は実行時に一時ディレクトリへ生成する（欠損・run 数不足・非有限値・hash 不一致・正式系列でない・rev 不一致を検証） |
 | （実測後）`trace_run{1..5}.log`・`kern_run{1..5}.log` | `DEVICE`／`TRACE`／`CAND` 行 |
 | （実測後）`prereq_bitident.log`・`parity.log` | 前提ゲート（既存 bit 一致テスト 92 件・CPU 参照 parity） |
+| （実測後）`bitident_report.log` | 候補別 bit 一致の記録（`BITIDENT` 行。不一致候補は `ok=false` で記録して継続し、集計側が NOT_ADOPTABLE として除外する。既存の厳密診断 `prereq_bitident.log` は 1 件の不一致で panic するため失敗しても系列は止めず、rc を `load_gate.log` へ残す） |
 | （実測後）`load_gate.log`・`env_info.txt`・`rev-stamp.txt`・`tree-fingerprint.txt`・`build_tests.log` | 負荷ゲート・機体情報・腕の同定・ビルドログ（ホスト名・ユーザー名・`$HOME` はマスク） |
 | （実測後）`ab/` | セル A/B runner の出力（`results-*.jsonl`・`sha-*.txt`・`tree-*.txt`・`compare-*.md／.err`・`load-gate-*.log`・`cooldown-*.log`・`skipped-*.log`・`uptime-*.log`） |
 | `aggregate.md` | 機械集計（実測後） |

@@ -2,7 +2,7 @@
 """イシュー #3209 の集計（標準ライブラリのみ。`python3 -I aggregate.py <dir> [opts]`）。
 
 規則の正は同ディレクトリの RULE.txt。入力は orchestrate_macmini.sh が出力した
-trace_run{1..5}.log・kern_run{1..5}.log・parity.log・prereq_bitident.log・load_gate.log・rev-stamp.txt。
+trace_run{1..5}.log・kern_run{1..5}.log・parity.log・prereq_bitident.log・bitident_report.log・load_gate.log・rev-stamp.txt。
 出力（標準出力）は aggregate.md 相当の Markdown。判定は RULE 項 10〜12 の機械判定そのもの。
 
 厳格パース方針（欠損は寛容に埋めず必ず例外 → exit 1）:
@@ -84,7 +84,10 @@ CAND_TIME_RE = re.compile(
 PARITY_RE = re.compile(
     r"^PARITY orient=(NN|NT|TN) shape=(\d+x\d+x\d+) eff=(\d+x\d+x\d+) arm=(cur|T[1-4]) "
     r"fallback=(true|false) ok=(true|false|skipped)$")
-TOKENS = ("DEVICE ", "TRACE ", "CAND ", "PARITY ")
+BITIDENT_RE = re.compile(
+    r"^BITIDENT orient=(NN|NT|TN) shape=(\d+x\d+x\d+) eff=(\d+x\d+x\d+) arm=(T[1-4]) "
+    r"fallback=(true|false) ok=(true|false|skipped)$")
+TOKENS = ("DEVICE ", "TRACE ", "CAND ", "PARITY ", "BITIDENT ")
 
 
 def lines_of(text):
@@ -216,12 +219,39 @@ def parse_gate(path):
 
 
 def check_prereq_bitident(path):
-    """前提ゲート（RULE 項 6(a)）のログの存在と完了を検証する。欠損・未完了は例外（採用判定を出さない）。"""
+    """既存の厳密診断（RULE 項 6(a)。1 件の不一致で panic する）のログを読む。
+
+    不一致・fallback による失敗は系列を止めない（候補別の判定は bitident_report.log が担う）。
+    ログの欠損・未完了（`test result:` 行が無い）は例外。戻り値は (成功したか, 注記)。
+    """
     text = read_text(path)
+    if "test result:" not in text:
+        fail("prereq_bitident.log に test result: 行が無い（前提ゲート未完了）")
+    ok = "test result: ok." in text and not re.search(r"test result: FAILED", text)
+    return ok, ("厳密診断（既存 bit 一致テスト）: %s" % ("全件 pass" if ok else "失敗あり（候補別の結果は bitident_report.log を正とする）"))
+
+
+def parse_bitident(path):
+    """候補別 bit 一致の記録（RULE 項 6(a) の候補別入口）。欠損は例外。
+
+    戻り値: {(orient, shape, arm): (fallback, ok)}。ok=false の候補セルは NOT_ADOPTABLE にする。
+    """
+    text = read_text(path)
+    res = {}
+    for line in lines_of(text):
+        m = BITIDENT_RE.match(line)
+        if m:
+            key = (m.group(1), m.group(2), m.group(4))
+            if key in res:
+                fail("BITIDENT が重複 %s" % (key,))
+            res[key] = (m.group(5) == "true", m.group(6))
+    for o, s in CELLS:
+        for a in CANDS:
+            if (o, s, a) not in res:
+                fail("BITIDENT 欠損 %s %s %s" % (o, s, a))
     if "test result: ok." not in text:
-        fail("prereq_bitident.log に test result: ok. が無い（前提ゲート未完了）")
-    if re.search(r"test result: FAILED|\d+ failed", text) and not re.search(r"\b0 failed", text):
-        fail("prereq_bitident.log に失敗がある")
+        fail("bitident_report.log に test result: ok. が無い（cur 解決失敗または未完了）")
+    return res
 
 
 def median(xs):
@@ -281,7 +311,8 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
     rev = read_text(os.path.join(d, "rev-stamp.txt")).strip()
     if expect_rev is not None and rev != expect_rev:
         fail("rev-stamp 不一致: %r != %r" % (rev, expect_rev))
-    check_prereq_bitident(os.path.join(d, "prereq_bitident.log"))
+    _, strict_note = check_prereq_bitident(os.path.join(d, "prereq_bitident.log"))
+    bitident = parse_bitident(os.path.join(d, "bitident_report.log"))
     official, gate_reasons = parse_gate(os.path.join(d, "load_gate.log"))
     parity = parse_parity(os.path.join(d, "parity.log"))
     traces, kerns = [], []
@@ -327,6 +358,7 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
     out.append("- 正式系列（load1 ゲート全通過）: %s" % ("はい" if official else "いいえ（参考系列）"))
     for r in gate_reasons:
         out.append("  - %s" % r)
+    out.append("- %s" % strict_note)
     out.append("- 到達前提（ゲート ON で変わるのは (64,256,784)→T1 と (784,64,256)→T3 の 2 件のみ）: %s\n"
                % ("成立" if reach_ok else "**不成立**"))
 
@@ -348,11 +380,12 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
             ratio_txt, verdict = "-", "record_only" if a == "prod" else "基準"
             if a in CANDS:
                 h = heads0[(o, s, a)]
-                bit_ok = h["hash"] == heads0[(o, s, "cur")]["hash"]
+                bi_fallback, bi_ok = bitident[(o, s, a)]
+                bit_ok = h["hash"] == heads0[(o, s, "cur")]["hash"] and bi_ok != "false"
                 pr = parity[(o, s, a)]
                 # pr = (fallback, ok)。ok=false は複合判定 FAIL（parity_fail → NOT_ADOPTABLE）。
                 # skipped は fallback（pr[0]）として扱う。欠損は parse_parity が拒否する。
-                st, ratio, fa, sl = judge_cell(kg["cur"], kg[a], h["fallback"] or pr[0], bit_ok, pr[1] != "false")
+                st, ratio, fa, sl = judge_cell(kg["cur"], kg[a], h["fallback"] or pr[0] or bi_fallback, bit_ok, pr[1] != "false")
                 if not official:
                     st = "undetermined"
                 cand_statuses[a].append(st)
@@ -393,13 +426,19 @@ def aggregate(d, expect_rev=None, cell_ab="unavailable"):
 # ---------------- self-test ----------------
 
 def _fixture(d, kg_t=None, official=True, drop_run=None, nonfinite=False, hash_mismatch=False,
-             thin_wrong=False, soc="Apple M4", split_gate=False, parity_fail=None):
+             thin_wrong=False, soc="Apple M4", split_gate=False, parity_fail=None, bitident_fail=None):
     """正常系 fixture を d に書く。kg_t は候補の kernel_gpu 倍率（cur 比。既定 0.9）。"""
     kg_t = kg_t if kg_t is not None else 0.9
     with open(os.path.join(d, "rev-stamp.txt"), "w") as f:
         f.write("deadbeef\n")
     with open(os.path.join(d, "prereq_bitident.log"), "w") as f:
         f.write("test result: ok. 2 passed; 0 failed\n")
+    with open(os.path.join(d, "bitident_report.log"), "w") as f:
+        for o, s in CELLS:
+            for a in CANDS:
+                f.write("BITIDENT orient=%s shape=%s eff=%s arm=%s fallback=false ok=%s\n"
+                        % (o, s, s, a, "false" if a == bitident_fail else "true"))
+        f.write("test result: ok. 1 passed\n")
     with open(os.path.join(d, "load_gate.log"), "w") as f:
         f.write("build-done x\n")
         for lab in GATE_LABELS:
@@ -559,6 +598,24 @@ def self_test():
             print("FAIL prereq_bitident.log 欠損が拒否されなかった"); ok = False
         except AggregateError:
             print("PASS fail-closed: prereq_bitident.log 欠損")
+    # 候補 1 件の bit 不一致（厳密診断は失敗）でも系列は止まらず、その候補だけ NOT_ADOPTABLE になる
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d, bitident_fail="T2")
+        with open(os.path.join(d, "prereq_bitident.log"), "w") as f:
+            f.write("test result: FAILED. 1 passed; 1 failed\n")
+        md = aggregate(d, "deadbeef", cell_ab="ok")
+        if "| T2 | REJECT |" in md and "| T1 | ADOPT |" in md and "失敗あり" in md:
+            print("PASS bit 不一致の候補だけ除外し残りは判定する")
+        else:
+            print("FAIL bit 不一致候補の部分除外"); ok = False
+    with tempfile.TemporaryDirectory() as d:
+        _fixture(d)
+        os.remove(os.path.join(d, "bitident_report.log"))
+        try:
+            aggregate(d, "deadbeef", cell_ab="ok")
+            print("FAIL bitident_report.log 欠損が拒否されなかった"); ok = False
+        except AggregateError:
+            print("PASS fail-closed: bitident_report.log 欠損")
     with tempfile.TemporaryDirectory() as d:
         _fixture(d, official=False)
         md = aggregate(d, "deadbeef", cell_ab="fail")

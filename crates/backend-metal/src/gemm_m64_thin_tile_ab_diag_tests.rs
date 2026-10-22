@@ -25,6 +25,7 @@
 //! # テスト構成
 //!
 //! - 記録のみ: `m64_thin_reach_trace`（到達追跡）・`m64_thin_candidates_kernel_gpu`（計測）
+//! - 前提ゲート（候補別 bit 一致）: `m64_thin_prereq_bitident_report`（不一致候補は `ok=false` で記録し継続）
 //! - 前提ゲート: `m64_thin_candidates_match_cpu_reference`（REQ-2 `compare` の成否を候補・
 //!   セルごとに記録。候補の不合格は除外して継続し、`cur` の不合格のみ最後に assert。tolerance は不変）
 //!
@@ -477,6 +478,77 @@ fn m64_thin_candidates_match_cpu_reference() {
     assert!(
         !cur_failed,
         "cur 腕が CPU 参照との複合判定に失敗した（系列を成立させない）"
+    );
+}
+
+/// 候補と `cur` の出力 bit 一致を候補・セルごとに記録する前提ゲート（RULE.txt 項 6(a) の候補別入口）。
+///
+/// 既存の `gemm_m64_thin_tile_diag_tests`（厳密診断。1 件の不一致で panic する）は維持し、本テストは
+/// 不一致の候補を `ok=false` として記録して継続する（候補は集計側が NOT_ADOPTABLE として除外し、
+/// 残りの候補の計測・判定は止めない）。fallback した腕は `ok=skipped`。基準 `cur` が解決されない
+/// 場合は比較が成立しないため記録後に assert する（系列を成立させない）。
+///
+/// 出力行: `BITIDENT orient=<o> shape=<m>x<n>x<k> eff=<m>x<n>x<k> arm=<a> fallback=<bool> ok=<true|false|skipped>`
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn m64_thin_prereq_bitident_report() {
+    let ctx = MetalContext::new().expect("Metal 初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した");
+    let mut cur_unresolved = false;
+    for (orient, m, n, k) in cells() {
+        let shape = format!("{m}x{n}x{k}");
+        let ops = operands(orient, m, n, k);
+        let (m, n, k) = ops.eff;
+        let a_buf = MetalBuffer::new_with_data(&ctx, &ops.a_phys).expect("A アップロード");
+        let b_buf = MetalBuffer::new_with_data(&ctx, &ops.b_phys).expect("B アップロード");
+        let bias = MetalBuffer::new_zeroed(&ctx, n).expect("bias 確保");
+        let run = |arm: Arm| {
+            let cfg = arm_cfg(arm, &ctx, m, n, k).expect("構成あり");
+            let s = trial(
+                &ctx,
+                &gemm,
+                arm,
+                orient,
+                (&a_buf, &b_buf, &bias),
+                (ops.a_layout, ops.b_layout),
+                (m, n, k),
+                true,
+            );
+            (s.resolved == Some(cfg), s.output.expect("capture=true"))
+        };
+        let (cur_ok, cur_out) = run(Arm::Cur);
+        if !cur_ok {
+            cur_unresolved = true;
+        }
+        for arm in all_arms()
+            .into_iter()
+            .filter(|a| *a != Arm::Prod && *a != Arm::Cur)
+        {
+            let (resolved, out) = run(arm);
+            let ok = if !resolved || !cur_ok {
+                "skipped".to_string()
+            } else {
+                let same = out.len() == cur_out.len()
+                    && out.iter().zip(&cur_out).all(|(x, y)| {
+                        if x.is_nan() || y.is_nan() {
+                            x.is_nan() && y.is_nan()
+                        } else {
+                            x.to_bits() == y.to_bits()
+                        }
+                    });
+                same.to_string()
+            };
+            println!(
+                "BITIDENT orient={} shape={shape} eff={m}x{n}x{k} arm={} fallback={} ok={ok}",
+                orient.name(),
+                arm.name(),
+                !resolved
+            );
+        }
+    }
+    assert!(
+        !cur_unresolved,
+        "cur 腕の構成が解決されなかった（bit 一致の基準が成立しない。系列を成立させない）"
     );
 }
 
