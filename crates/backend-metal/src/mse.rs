@@ -25,6 +25,12 @@
 //! 関数を出る前に必ず自ら `ctx.synchronize()` する必要があり、wait 回数
 //! は 1→1 のまま変わらない（詳細は `run_mse_backward_f32_tracked` の
 //! doc コメント）。
+//!
+//! イシュー #3219: デバイス入出力版（`ops.rs::MetalBackendOps::mse_loss_device*`／
+//! `mse_loss_backward_device*`）向けに、`MetalBuffer` を受けて **encode のみ（wait 0）**
+//! を行う `encode_mse_*_tracked` を追加した。ホスト入出力版 `run_mse_*_tracked` も
+//! この encode 本体を共有する（同一カーネル・同一 dispatch 形状のため bit 一致が
+//! コード共有で担保される。設計 `docs/train-step-resident-parts-design.md` §4）。
 
 use fandhe_ai_tensor_core::DispatchFailureCell;
 use objc2::runtime::ProtocolObject;
@@ -179,49 +185,16 @@ impl MetalMse {
 
         let pred_buf = MetalBuffer::new_with_data(ctx, pred)?;
         let target_buf = MetalBuffer::new_with_data(ctx, target)?;
-        let num_tg = mse_num_threadgroups(numel);
-        // `mse_partial_f32` は起動する `num_tg` 個の threadgroup それぞれ
-        // が `partial[tg_id]` を必ず 1 回書く（`shaders/mse.metal` 参照）
-        // ため `alloc_uninit_pooled` を使える（`elementwise.rs::run_binary`
-        // と同じ適用条件。イシュー #1021 設計文書 §6「A02」）。
-        let partial_buf = MetalBuffer::alloc_uninit_pooled(ctx, num_tg)?;
-
-        ctx.encode(
-            "mse_partial_f32",
-            &[pred_buf.raw(), target_buf.raw(), partial_buf.raw()],
-            Some(token),
-            |encoder| {
-                encode_partial_dispatch(
-                    encoder,
-                    &self.partial_f32,
-                    &pred_buf,
-                    &target_buf,
-                    &partial_buf,
-                    numel as u32,
-                    num_tg,
-                );
-            },
-        )?;
-
-        // `alloc_uninit_pooled` は `zero_on_reuse=false`（未初期化確保）
-        // のため、この 2 段目の確保自体が 1 段目の GPU 完了を待つ同期
-        // 境界にはならない（モジュール冒頭コメント参照）。したがって
-        // 1・2 段目とも待たずに同一バッチへ積める。
+        // `mse_finalize_f32` が `out[0]` を必ず 1 回書くため uninit 確保でよい。
         let out_buf = MetalBuffer::alloc_uninit_pooled(ctx, 1)?;
-        ctx.encode(
-            "mse_finalize_f32",
-            &[partial_buf.raw(), out_buf.raw()],
-            Some(token),
-            |encoder| {
-                encode_finalize_dispatch(
-                    encoder,
-                    &self.finalize_f32,
-                    &partial_buf,
-                    &out_buf,
-                    num_tg as u32,
-                    factor,
-                );
-            },
+        self.encode_mse_loss_f32_tracked(
+            ctx,
+            &pred_buf,
+            &target_buf,
+            &out_buf,
+            numel,
+            factor,
+            token,
         )?;
 
         check_dispatch_token(ctx.synchronize(), token)?;
@@ -283,7 +256,106 @@ impl MetalMse {
         // `alloc_uninit_pooled` を使う（`elementwise.rs::run_unary` と
         // 同じ適用条件）。
         let dpred_buf = MetalBuffer::alloc_uninit_pooled(ctx, numel)?;
+        self.encode_mse_backward_f32_tracked(
+            ctx,
+            &pred_buf,
+            &target_buf,
+            &dpred_buf,
+            numel,
+            scale,
+            token,
+        )?;
 
+        check_dispatch_token(ctx.synchronize(), token)?;
+
+        Ok(dpred_buf.read_to_vec())
+    }
+
+    /// forward（2 段）を `MetalBuffer` 入出力のまま encode する（イシュー #3219）。
+    /// **待たず・読み戻さない**。`ops.rs::MetalBackendOps::mse_loss_device*` と、ホスト
+    /// 入出力版 [`Self::run_mse_loss_f32_tracked`] が共有する唯一の forward encode 本体
+    /// で、同じカーネル・同じ `num_tg`・同じ `factor` を構造上保証する
+    /// （ホスト版との bit 一致。設計 `docs/train-step-resident-parts-design.md` §4）。
+    /// `numel == 0` は encode せず `Ok(())`（呼び出し側が `out` を 0.0 にする責務）。
+    /// 各バッファ長は encode 前に検査する（fail-closed。カーネル側の境界ガードも維持。
+    /// REQ-8）。`resources` へ retain させるため、呼び出し側の `DeviceBuffer` が GPU
+    /// 完了前に drop されても生存する。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_mse_loss_f32_tracked(
+        &self,
+        ctx: &MetalContext,
+        pred_buf: &MetalBuffer,
+        target_buf: &MetalBuffer,
+        out_buf: &MetalBuffer,
+        numel: usize,
+        factor: f32,
+        token: &DispatchFailureCell,
+    ) -> Result<(), MetalError> {
+        validate_mse_len(numel)?;
+        if numel == 0 {
+            return Ok(());
+        }
+        validate_mse_buffer_lens(numel, pred_buf, target_buf, out_buf.len(), 1)?;
+        let num_tg = mse_num_threadgroups(numel);
+        // `mse_partial_f32` は起動する `num_tg` 個の threadgroup それぞれが
+        // `partial[tg_id]` を必ず 1 回書く（`shaders/mse.metal` 参照）ため
+        // `alloc_uninit_pooled` を使える（イシュー #1021 設計文書 §6「A02」）。
+        // 本関数の復帰後に drop されても、pool は in-flight 中の返却を遅延する。
+        let partial_buf = MetalBuffer::alloc_uninit_pooled(ctx, num_tg)?;
+
+        ctx.encode(
+            "mse_partial_f32",
+            &[pred_buf.raw(), target_buf.raw(), partial_buf.raw()],
+            Some(token),
+            |encoder| {
+                encode_partial_dispatch(
+                    encoder,
+                    &self.partial_f32,
+                    pred_buf,
+                    target_buf,
+                    &partial_buf,
+                    numel as u32,
+                    num_tg,
+                );
+            },
+        )?;
+        ctx.encode(
+            "mse_finalize_f32",
+            &[partial_buf.raw(), out_buf.raw()],
+            Some(token),
+            |encoder| {
+                encode_finalize_dispatch(
+                    encoder,
+                    &self.finalize_f32,
+                    &partial_buf,
+                    out_buf,
+                    num_tg as u32,
+                    factor,
+                );
+            },
+        )?;
+        Ok(())
+    }
+
+    /// backward（1 段）を `MetalBuffer` 入出力のまま encode する（イシュー #3219）。
+    /// 待たず・読み戻さない。[`Self::encode_mse_loss_f32_tracked`] と同じ位置づけ。
+    /// `numel == 0` は encode せず `Ok(())`。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_mse_backward_f32_tracked(
+        &self,
+        ctx: &MetalContext,
+        pred_buf: &MetalBuffer,
+        target_buf: &MetalBuffer,
+        dpred_buf: &MetalBuffer,
+        numel: usize,
+        scale: f32,
+        token: &DispatchFailureCell,
+    ) -> Result<(), MetalError> {
+        validate_mse_len(numel)?;
+        if numel == 0 {
+            return Ok(());
+        }
+        validate_mse_buffer_lens(numel, pred_buf, target_buf, dpred_buf.len(), numel)?;
         ctx.encode(
             "mse_backward_f32",
             &[pred_buf.raw(), target_buf.raw(), dpred_buf.raw()],
@@ -292,19 +364,37 @@ impl MetalMse {
                 encode_backward_dispatch(
                     encoder,
                     &self.backward_f32,
-                    &pred_buf,
-                    &target_buf,
-                    &dpred_buf,
+                    pred_buf,
+                    target_buf,
+                    dpred_buf,
                     numel as u32,
                     scale,
                 );
             },
         )?;
-
-        check_dispatch_token(ctx.synchronize(), token)?;
-
-        Ok(dpred_buf.read_to_vec())
+        Ok(())
     }
+}
+
+/// encode 前のバッファ長検査（pred／target は `numel` 以上、出力は `out_min` 以上）。
+fn validate_mse_buffer_lens(
+    numel: usize,
+    pred_buf: &MetalBuffer,
+    target_buf: &MetalBuffer,
+    out_len: usize,
+    out_min: usize,
+) -> Result<(), MetalError> {
+    if pred_buf.len() < numel || target_buf.len() < numel || out_len < out_min {
+        return Err(MetalError::InvalidElementwiseShape {
+            detail: format!(
+                "mse buffer too small: numel={numel}, pred_len={}, target_len={}, \
+                 out_len={out_len} (need >= {out_min})",
+                pred_buf.len(),
+                target_buf.len()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// `ctx.synchronize()` の戻り値を `token` の状態と突き合わせる共通
@@ -349,7 +439,7 @@ fn mse_dispatch_sizes(units: usize, threadgroup_width: usize) -> (MTLSize, MTLSi
 
 /// forward 1 段目のエンコード（バッファ結線 index 0〜2・`numel` index
 /// 3・`num_tg` 個の threadgroup をディスパッチ）。
-/// [`MetalMse::run_mse_loss_f32_tracked`] が [`MetalContext::encode`]
+/// [`MetalMse::encode_mse_loss_f32_tracked`] が [`MetalContext::encode`]
 /// のクロージャから呼ぶ（イシュー #1690。旧 `ctx.dispatch_sync` から
 /// 切替）。
 fn encode_partial_dispatch(
@@ -366,8 +456,8 @@ fn encode_partial_dispatch(
     // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
     // `MTLBuffer` への参照を保持するのみで即座に読み書きしない
     // （`elementwise.rs::encode_binary_dispatch` と同種のコメント参照）。
-    // 各バッファは `MetalMse::run_mse_loss_f32_tracked` が `ctx.encode`
-    // の `resources` 引数として渡し `Batch::in_flight` へ retain
+    // 各バッファは `MetalMse::encode_mse_loss_f32_tracked`／`encode_mse_backward_f32_tracked`
+    // が `ctx.encode` の `resources` 引数として渡し `Batch::in_flight` へ retain
     // される、または本関数呼び出し中は関数スコープで生存するため
     // （イシュー #1690。`sgd.rs::encode_sgd_dispatch` と同種の根拠）、
     // エンコード完了まで有効である。
