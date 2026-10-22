@@ -135,7 +135,9 @@ for run in 1 2 3 4 5; do
 done
 
 # --- gemm セル（5 round。専有ゲートはスクリプト内で round ごとに通す） ---
-CELL_OUT="${OUT}/cell" bash "${FC}/run_cell_gemm_cuda_3215.sh" head-3215 "${REPO_DIR}/crates/facade" \
+# 子の dep_source は cargo tree の UTF-8 罫線（├└）を grep する。LC_ALL=C だとバイト解釈で一致せず
+# 依存元の取得が毎回 fail-closed に停止する（README 手順 3 の 2 回の失敗）ため、セルだけ UTF-8 ロケールで起動する。
+LC_ALL=C.UTF-8 CELL_OUT="${OUT}/cell" bash "${FC}/run_cell_gemm_cuda_3215.sh" head-3215 "${REPO_DIR}/crates/facade" \
   >"${OUT}/cell.stdout.log" 2>&1
 echo "cell rc=$?" >>"${STAGE_RC}"
 echo "ORCHESTRATE-DONE stages=$(wc -l <"${STAGE_RC}")"
