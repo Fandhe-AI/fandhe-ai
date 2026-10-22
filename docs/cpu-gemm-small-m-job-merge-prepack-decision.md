@@ -79,7 +79,7 @@ FMA 契約（`f32::mul_add`／`vfmaq_laneq_f32`）・tolerance・公開 API は�
 
 | issue | 内容 |
 |---|---|
-| #3199 | §5 の A 共有と確保削減。ゲート G1 の下に実装。pack が行帯あたり 1 回であることを確認する `#[ignore]` の report テストを用意する |
+| #3199 | §5 の A 共有と確保削減。ゲート G1 の下に実装。pack が行帯あたり 1 回であることを確認する `#[ignore]` の report テストを用意する（実装済み。§11 参照） |
 | #3200 | §6 の事前 pack と G2 の const 追加。引き当て成功を確認する report テストを用意する |
 | #3201 | `docs/perf/logs/cpu-small-m-gemm-partition-3198/RULE.template.txt` を使った両機体の A/B |
 | #3227 | 既定の反転判断。機体で結果が割れた場合は機体別既定の可否を併記する |
@@ -87,3 +87,12 @@ FMA 契約（`f32::mul_add`／`vfmaq_laneq_f32`）・tolerance・公開 API は�
 ## 10. 所有者へ戻す論点
 
 現時点でなし。§6 末尾の条件に該当した場合のみ停止して戻す。ruleset・リポジトリ設定の変更は行っていない。
+
+## 11. #3199 実装記録
+
+- 適格判定は `small_m::select_shared_a`（純関数）。`SMALL_M_SHARE_A_MAX_WORDS = 1 << 18`（判定は `<=`）を追加し、条件は §3 のとおり（`m <= MC`・`align_up(m, MR) * k <= 上限`・仕事量 `< 1 << 24`・`m >= 2`）。ゲートは G1 のまま。本番 2 入口が `SMALL_M_JOB_MERGE_ENABLED` を `share_a` として `dispatch_two_d_dynamic` へ渡す。テスト入口 `gemm_blis_parallel_two_d_dynamic_with_params` は常に `share_a = false`（#3198 の jpw=1・staging 腕のまま）。強制入口は `gemm_blis_parallel_two_d_dynamic_shared_a_with_params`。
+- 共有 A は `gemm_blis_two_d_shared_a`（`mod.rs`）が呼び出しスレッドで 1 回確保する（`row_bands * band_stride`。`checked_mul`）。区画 (rb, pc, ir_block) の先頭は `rb * band_stride + mr_blocks * mr * pc + ir_block * kc_len * mr`。pack 段は行帯単位で並列に走り、job 段は共有読み出しのみ（新しい `unsafe` なし）。
+- `gemm_blis_jr_ir_loop` の `#[cfg(test)]` を外して本番へ昇格した。適格 job では ic ループが 1 周のため ic=0 の `gemm_blis_ic_loop` と同一のタイル書き戻しになる。
+- `col_bands == 1`: C を行帯で直接分割し、staging なし。`col_bands > 1`: `split_c_into_jobs` と C staging は残し（§5 の受容済み残差）、`c_local`・B パネルを rayon の init ごとに 1 回だけ確保して使い回す。残る確保は共有 A 1 回・スクラッチ（直接書き込み 1／staging 2）・`split_c_into_jobs` 側（col_bands > 1 のみ）。
+- 計数は `jobgrid_probe`（`#[cfg(test)]`）に追加。受け入れは `shared_a_packs_once_per_row_band`（`a_shared_bands == row_bands`）と、small_m.rs の bit 一致テスト群。`determinism_inventory` の atomic RMW 期待値は、test 限定プローブの計数フック追加に伴い 12→15（jobgrid_probe 10→13）へ更新した。
+- 報告用 `#[ignore]` テスト `small_m_shared_a_report`（本番入口・6 形状 × T）を #3201 向けに用意した。既定は OFF のまま（反転は #3227）。

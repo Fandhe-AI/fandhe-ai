@@ -47,12 +47,23 @@ static B_PACK_WORDS: AtomicU64 = AtomicU64::new(0);
 static ALLOC_JOB: AtomicU64 = AtomicU64::new(0);
 static ALLOC_SPLIT: AtomicU64 = AtomicU64::new(0);
 static C_STAGE_WORDS: AtomicU64 = AtomicU64::new(0);
+// #3199: A 共有経路の計数欄。
+static A_SHARED_BANDS: AtomicU64 = AtomicU64::new(0);
+static A_SHARED_TILES: AtomicU64 = AtomicU64::new(0);
+static A_SHARED_WORDS: AtomicU64 = AtomicU64::new(0);
+static ALLOC_SHARED_A: AtomicU64 = AtomicU64::new(0);
+static ALLOC_SCRATCH: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     /// 呼び出しスレッドが arm 中の region 内にいる（split 確保を数える）。
     static IN_REGION: Cell<bool> = const { Cell::new(false) };
     /// worker スレッドが arm 中の job を処理中（pack 語数を数える）。
     static IN_JOB: Cell<bool> = const { Cell::new(false) };
+}
+
+/// #3199 の新欄の加算を 1 か所へ集約する（`determinism_inventory` の atomic RMW 行数を最小に保つ）。
+fn add(counter: &AtomicU64, n: u64) {
+    counter.fetch_add(n, Ordering::Relaxed);
 }
 
 fn armed(b_ptr: usize) -> bool {
@@ -128,6 +139,59 @@ pub(super) fn on_job(b_ptr: usize, mc_len: usize, nc_len_job: usize) -> JobScope
     JobScope(true)
 }
 
+/// A 共有経路（#3199）: 共有バッファを確保した直後に 1 回呼ぶ。
+pub(super) fn on_shared_a_alloc(b_ptr: usize) {
+    if armed(b_ptr) {
+        add(&ALLOC_SHARED_A, 1);
+    }
+}
+
+/// A 共有経路（#3199）: 行帯の pack 開始ごとに 1 回呼ぶ（pack 段は worker で走るためキーで判定）。
+pub(super) fn on_shared_a_band(b_ptr: usize) {
+    if armed(b_ptr) {
+        add(&A_SHARED_BANDS, 1);
+    }
+}
+
+/// A 共有経路（#3199）: 共有 pack の区画（pc × ir_block）ごとに呼ぶ（パディングを含む語数）。
+pub(super) fn on_shared_a_pack(b_ptr: usize, words: usize) {
+    if armed(b_ptr) {
+        add(&A_SHARED_TILES, 1);
+        add(&A_SHARED_WORDS, words as u64);
+    }
+}
+
+/// A 共有経路（#3199）: worker スクラッチの初期化ごとに `allocs` 回の確保として数える。
+pub(super) fn on_scratch_init(b_ptr: usize, allocs: u64) {
+    if armed(b_ptr) {
+        add(&ALLOC_SCRATCH, allocs);
+    }
+}
+
+/// A 共有経路（#3199）の job 入口。`JOBS`・`WORKER_MASK` は数えるが `ALLOC_JOB` は数えない
+/// （確保は共有バッファとスクラッチ側で数える）。`staged` のときだけ C staging 語数を加える。
+pub(super) fn on_job_shared(
+    b_ptr: usize,
+    mc_len: usize,
+    nc_len_job: usize,
+    staged: bool,
+) -> JobScope {
+    if !armed(b_ptr) {
+        return JobScope(false);
+    }
+    JOBS.fetch_add(1, Ordering::Relaxed);
+    let bit = match rayon::current_thread_index() {
+        Some(i) => i.min(62),
+        None => 63,
+    };
+    WORKER_MASK.fetch_or(1u64 << bit, Ordering::Relaxed);
+    if staged {
+        add(&C_STAGE_WORDS, 2 * (mc_len * nc_len_job) as u64);
+    }
+    IN_JOB.with(|f| f.set(true));
+    JobScope(true)
+}
+
 /// `run_two_d_job` の B pack tile ごとに呼ぶ。
 pub(super) fn on_b_pack(words: usize) {
     if IN_JOB.with(Cell::get) {
@@ -165,6 +229,11 @@ pub(super) struct ProbeReport {
     pub alloc_job: u64,
     pub alloc_split: u64,
     pub c_stage_words: u64,
+    pub a_shared_bands: u64,
+    pub a_shared_tiles: u64,
+    pub a_shared_words: u64,
+    pub alloc_shared_a: u64,
+    pub alloc_scratch: u64,
 }
 
 /// arm の RAII ガード。生存中は他の probe を排他し、drop で disarm する。
@@ -195,6 +264,11 @@ impl ProbeGuard {
             &ALLOC_JOB,
             &ALLOC_SPLIT,
             &C_STAGE_WORDS,
+            &A_SHARED_BANDS,
+            &A_SHARED_TILES,
+            &A_SHARED_WORDS,
+            &ALLOC_SHARED_A,
+            &ALLOC_SCRATCH,
         ] {
             c.store(0, Ordering::Relaxed);
         }
@@ -223,6 +297,11 @@ impl ProbeGuard {
             alloc_job: l(&ALLOC_JOB),
             alloc_split: l(&ALLOC_SPLIT),
             c_stage_words: l(&C_STAGE_WORDS),
+            a_shared_bands: l(&A_SHARED_BANDS),
+            a_shared_tiles: l(&A_SHARED_TILES),
+            a_shared_words: l(&A_SHARED_WORDS),
+            alloc_shared_a: l(&ALLOC_SHARED_A),
+            alloc_scratch: l(&ALLOC_SCRATCH),
         }
     }
 }
@@ -246,7 +325,9 @@ pub(super) fn b_ideal_words(n: usize, k: usize, nr: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        GemmTranspose, default_blocks, gemm_blis, gemm_blis_parallel_with_transpose, partition,
+        GemmTranspose, default_blocks, gemm_blis,
+        gemm_blis_parallel_two_d_dynamic_shared_a_with_params, gemm_blis_parallel_with_transpose,
+        install_in_pool_for_test, partition, small_m,
     };
     use super::*;
 
@@ -435,6 +516,135 @@ alloc_job={} alloc_split={} c_stage_words={}",
                     r.alloc_split,
                     r.c_stage_words,
                 );
+            }
+        }
+    }
+
+    /// 共有 A 強制入口（#3199）を probe 付きで実行する。
+    fn run_probed_shared(
+        threads: usize,
+        t: GemmTranspose,
+        m: usize,
+        n: usize,
+        k: usize,
+        jpw: usize,
+    ) -> (ProbeReport, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let a = fill(m * k, 1);
+        let b = fill(k * n, 2);
+        let mut c = vec![0.0f32; m * n];
+        let guard = ProbeGuard::arm(&b);
+        install_in_pool_for_test(threads, || {
+            gemm_blis_parallel_two_d_dynamic_shared_a_with_params(
+                &a,
+                &b,
+                &mut c,
+                m,
+                n,
+                k,
+                default_blocks(),
+                jpw,
+                t,
+            )
+            .expect("gemm");
+        });
+        let report = guard.report();
+        drop(guard);
+        (report, a, b, c)
+    }
+
+    /// A の pack が行帯あたり 1 回・job 内 A pack 0・確保は共有 1 + スクラッチのみ（#3199 受け入れ条件）。
+    #[test]
+    fn shared_a_packs_once_per_row_band() {
+        for (m, n, k, threads) in [(40usize, 50usize, 70usize, 4usize), (64, 256, 784, 10)] {
+            let (r, a, b, c) = run_probed_shared(threads, GemmTranspose::Nn, m, n, k, 1);
+            assert_eq!(r.regions, 1);
+            assert!(small_m::select_shared_a(
+                true,
+                m,
+                n,
+                k,
+                r.mr,
+                default_blocks().mc
+            ));
+            assert_eq!(r.a_shared_bands, r.row_bands as u64, "{m}x{n}x{k}");
+            let rows = partition::bands(m, r.mc_job);
+            let ideal: u64 = rows
+                .iter()
+                .map(|rb| a_ideal_words(rb.end - rb.start, k, r.mr))
+                .sum();
+            assert_eq!(r.a_shared_words, ideal);
+            assert_eq!(r.a_pack_words, 0);
+            assert_eq!(r.alloc_job, 0);
+            assert_eq!(r.alloc_shared_a, 1);
+            // split 確保: 直接書き込みは split なし、staging 経路は従来式と一致。
+            if r.col_bands == 1 {
+                assert_eq!(r.alloc_split, 0);
+            } else {
+                assert_eq!(r.alloc_split, (4 + r.col_bands) as u64 + r.jobs);
+            }
+            // init 回数は job 数以下（init ごとの確保は直接書き込み 1・staging 2）。
+            let per_init = if r.col_bands == 1 { 1 } else { 2 };
+            assert!(
+                r.alloc_scratch <= per_init * r.jobs,
+                "{} > {}",
+                r.alloc_scratch,
+                per_init * r.jobs
+            );
+            if r.col_bands == 1 {
+                assert_eq!(r.c_stage_words, 0);
+            } else {
+                assert_eq!(r.c_stage_words, 2 * (m * n) as u64);
+            }
+            let mut c_ref = vec![0.0f32; m * n];
+            gemm_blis(&a, &b, &mut c_ref, m, n, k).unwrap();
+            assert!(
+                c.iter()
+                    .zip(&c_ref)
+                    .all(|(x, y)| x.to_bits() == y.to_bits())
+            );
+        }
+    }
+
+    /// #3201 向け報告（本番入口。ゲート ON の checkout で機構の発火を確認する）。
+    #[test]
+    #[ignore = "報告専用（#3199）: cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored small_m_shared_a_report --nocapture --test-threads=1"]
+    fn small_m_shared_a_report() {
+        let gate = small_m::SMALL_M_JOB_MERGE_ENABLED;
+        for arm in ["native", "T1", "T10", "T20"] {
+            let pool = match arm {
+                "T1" => Some(1),
+                "T10" => Some(10),
+                "T20" => Some(20),
+                _ => None,
+            };
+            for (label, t, m, n, k) in SHAPES {
+                let (r, ..) = run_probed(pool, t, m, n, k);
+                let a_ideal = a_ideal_words(m, k, r.mr);
+                let b_ideal = b_ideal_words(n, k, r.nr);
+                let eligible = small_m::select_shared_a(gate, m, n, k, r.mr, default_blocks().mc);
+                println!(
+                    "probe=small_m_shared_a gate={gate} eligible={eligible} shape={label} trans={} \
+m={m} n={n} k={k} arm={arm} row_bands={} col_bands={} jobs={} a_shared_bands={} \
+a_shared_words={} a_ideal_words={a_ideal} a_pack_words_in_job={} b_pack_words={} \
+b_ideal_words={b_ideal} alloc_job={} alloc_shared_a={} alloc_scratch={} alloc_split={} \
+c_stage_words={}",
+                    trans_label(t),
+                    r.row_bands,
+                    r.col_bands,
+                    r.jobs,
+                    r.a_shared_bands,
+                    r.a_shared_words,
+                    r.a_pack_words,
+                    r.b_pack_words,
+                    r.alloc_job,
+                    r.alloc_shared_a,
+                    r.alloc_scratch,
+                    r.alloc_split,
+                    r.c_stage_words,
+                );
+                if eligible {
+                    assert_eq!(r.a_shared_bands, r.row_bands as u64, "{label} {arm}");
+                }
             }
         }
     }

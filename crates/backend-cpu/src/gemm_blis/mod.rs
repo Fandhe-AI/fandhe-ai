@@ -616,6 +616,7 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
                     blocks,
                     transpose,
                     small_m::jobs_per_worker_for(m, n, k),
+                    small_m::SMALL_M_JOB_MERGE_ENABLED,
                 )
             })
         } else {
@@ -803,6 +804,7 @@ pub fn gemm_blis_bias_act_parallel(
                     blocks,
                     GemmTranspose::Nn,
                     small_m::jobs_per_worker_for(m, n, k),
+                    small_m::SMALL_M_JOB_MERGE_ENABLED,
                 )
             })?;
             apply_epilogue(c, n, bias, act)
@@ -2064,7 +2066,10 @@ fn ic_dynamic_b_capacity(n: usize, kc_len_max: usize, nr: usize) -> Result<usize
 /// 有無」というループ構造の違いを吸収するための意図的な選択。共通化
 /// すると `ic` 変数の有無で分岐が増え可読性が下がるため、#750 の
 /// `IcLoopContext` と同型の「文脈を引数で渡す」設計のみ踏襲する）。
-#[cfg(test)]
+///
+/// #3199 で `#[cfg(test)]` を外して本番へ昇格した。呼び出し元は
+/// `SharedBPcOuter`（テスト）と、2D 動的分配の A 共有経路
+/// （[`run_shared_a_job_body`]。m が小さい形状で A を行帯ごとに 1 回だけ pack する）。
 fn gemm_blis_jr_ir_loop<K: Microkernel>(
     kernel: K,
     c_chunk: &mut [f32],
@@ -2878,6 +2883,7 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
     blocks: BlockSizes,
     transpose: GemmTranspose,
     jobs_per_worker: usize,
+    share_a: bool,
 ) -> Result<(), GemmError> {
     let mr = K::MR;
     let nr = K::NR;
@@ -2909,6 +2915,27 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
         rayon::current_num_threads(),
         &grid,
     );
+    // #3199: ゲート ON かつ適格形状（m が小さく A が小さい）では、A を行帯ごとに 1 回だけ
+    // pack して job 間で共有する経路へ進む。`m <= blocks.mc` は適格 job の ic ループが
+    // 1 周であること（= 共有 A の 1 区画が従来の a_panel と同一内容）を保証する。
+    // SME は m >= 256 を要求するため、この経路とは構造的に重ならない。
+    // split 計数の終了は共有 A 経路内（`split_c_into_jobs` 直後、または split なしの
+    // 直接書き込み分岐）で行う。ここで先に止めると col_bands > 1 の split 確保が
+    // 計数されず alloc_split が過少報告になる。
+    if small_m::select_shared_a(share_a, mc_total, n, k_dim, mr, blocks.mc) {
+        return gemm_blis_two_d_shared_a(
+            kernel,
+            a_for_region,
+            b,
+            c_region,
+            n,
+            k_dim,
+            row_start,
+            blocks,
+            transpose,
+            &grid,
+        );
+    }
     let mut jobs = split_c_into_jobs(c_region, n, &grid);
     #[cfg(test)]
     jobgrid_probe::on_region_split_done();
@@ -2928,6 +2955,308 @@ fn gemm_blis_two_d_dynamic_region<K: Microkernel>(
     })
 }
 
+/// 共有 A バッファ 1 行帯ぶんを pack する（[`gemm_blis_two_d_shared_a`] の pack 段）。
+///
+/// 区画 (pc, ir_block) の先頭は `mr_blocks * mr * pc + ir_block * kc_len * mr`
+/// （それ以前の pc ブロックの kc_len の総和が pc に等しいため表は不要）。内容は
+/// [`gemm_blis_ic_loop`] が a_panel へ pack するものと同一で、pack は純粋な配置換えのため
+/// 誰がいつ pack しても同じバイト列になる（bit 一致の根拠 (a)）。
+#[allow(clippy::too_many_arguments)]
+fn pack_shared_a_band<K: Microkernel>(
+    buf: &mut [f32],
+    a: &[f32],
+    band: &Range<usize>,
+    k_dim: usize,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    region_row_offset: usize,
+    _probe_key: usize,
+) {
+    let mr = K::MR;
+    let band_len = band.end - band.start;
+    let mr_blocks = band_len.div_ceil(mr);
+    #[cfg(test)]
+    jobgrid_probe::on_shared_a_band(_probe_key);
+    for pc in (0..k_dim).step_by(blocks.kc) {
+        let kc_len = blocks.kc.min(k_dim - pc);
+        for ir_block in 0..mr_blocks {
+            let ir = ir_block * mr;
+            let mr_eff = mr.min(band_len - ir);
+            let off = mr_blocks * mr * pc + ir_block * kc_len * mr;
+            let dst = &mut buf[off..off + kc_len * mr];
+            #[cfg(test)]
+            jobgrid_probe::on_shared_a_pack(_probe_key, dst.len());
+            match transpose {
+                GemmTranspose::Tn => pack_a_from_transposed(
+                    dst,
+                    a,
+                    ATPackTile {
+                        k_total: k_dim,
+                        m_total: a.len() / k_dim.max(1),
+                        row_start: region_row_offset + band.start + ir,
+                        mr,
+                        mr_eff,
+                        kc_start: pc,
+                        kc_len,
+                    },
+                ),
+                GemmTranspose::Nn | GemmTranspose::Nt => pack_a(
+                    dst,
+                    a,
+                    APackTile {
+                        k_total: k_dim,
+                        row_start: band.start + ir,
+                        mr,
+                        mr_eff,
+                        kc_start: pc,
+                        kc_len,
+                    },
+                ),
+            }
+        }
+    }
+}
+
+/// A 共有経路の job 本体: C 小ブロック `c_buf`（行ストライド = 列幅 `width`、行数 `band_len`）に
+/// 対し、jc→pc→(jr→ir) を回す。A は共有 pack 済みの `a_band`（[`pack_shared_a_band`] の
+/// 配置）から区画を切り出すだけで pack しない。B は `b_scratch` へ job 内で pack する
+/// （`col0` は `c_buf` の列 0 に対応する B の絶対列位置）。
+///
+/// 適格 job では ic ループが 1 周のため、[`gemm_blis_jr_ir_loop`] は ic=0 の
+/// [`gemm_blis_ic_loop`] と同一のタイル書き戻し・同一の p 昇順 FMA 連鎖になる。
+/// 境界検査（スライス添字・`run_with_ldc` の入口検査）は維持する。
+#[allow(clippy::too_many_arguments)]
+fn run_shared_a_job_body<K: Microkernel>(
+    kernel: K,
+    a_band: &[f32],
+    b: &[f32],
+    c_buf: &mut [f32],
+    width: usize,
+    col0: usize,
+    band_len: usize,
+    n_total: usize,
+    k_dim: usize,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    b_scratch: &mut [f32],
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    debug_assert!(band_len <= blocks.mc);
+    let mr_blocks = band_len.div_ceil(mr);
+    for jc in (0..width).step_by(blocks.nc) {
+        let nc_len = blocks.nc.min(width - jc);
+        for pc in (0..k_dim).step_by(blocks.kc) {
+            let kc_len = blocks.kc.min(k_dim - pc);
+            let nr_blocks = nc_len.div_ceil(nr);
+            let b_panel = &mut b_scratch[..nr_blocks * kc_len * nr];
+            for jr_block in 0..nr_blocks {
+                let jr = jr_block * nr;
+                let nr_eff = nr.min(nc_len - jr);
+                let dst = &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+                #[cfg(test)]
+                jobgrid_probe::on_b_pack(dst.len());
+                let col_start = col0 + jc + jr;
+                match transpose {
+                    GemmTranspose::Nt => pack_b_from_transposed(
+                        dst,
+                        b,
+                        BTPackTile {
+                            k_total: k_dim,
+                            n_total,
+                            kc_start: pc,
+                            kc_len,
+                            col_start,
+                            nr,
+                            nr_eff,
+                        },
+                    ),
+                    GemmTranspose::Nn | GemmTranspose::Tn => pack_b(
+                        dst,
+                        b,
+                        BPackTile {
+                            n_total,
+                            kc_start: pc,
+                            kc_len,
+                            col_start,
+                            nr,
+                            nr_eff,
+                        },
+                    ),
+                }
+            }
+            let off = mr_blocks * mr * pc;
+            let a_slice = &a_band[off..off + mr_blocks * kc_len * mr];
+            let ctx = IcLoopContext {
+                b_panel,
+                n: width,
+                k_dim,
+                pc,
+                kc_len,
+                jc,
+                nr_blocks,
+                nc_len,
+                blocks,
+            };
+            gemm_blis_jr_ir_loop(kernel, c_buf, band_len, a_slice, &ctx)?;
+        }
+    }
+    Ok(())
+}
+
+/// A 共有経路（イシュー #3199）: 行帯ごとに A を 1 回だけ pack して全 job で共有し、
+/// job ごとの確保を worker スクラッチの使い回しへ寄せる。呼び出し元は
+/// [`gemm_blis_two_d_dynamic_region`]（`small_m::select_shared_a` が true のときのみ）。
+///
+/// - pack 段: 共有バッファ（`row_bands * band_stride`）を呼び出しスレッドで 1 回確保し、
+///   行帯ごとに可変借用で分けて pack する。job 段は `&[f32]` で共有読み出しのみ
+///   （借用分割でデータ競合をコンパイル時に排除。新しい `unsafe` なし）。
+/// - `col_bands == 1`: C を行帯で直接分割し staging なしで書く。
+/// - `col_bands > 1`: 従来どおり [`split_c_into_jobs`] と job ごとの C staging を残し
+///   （決定記録 §5 の受容済み残差）、staging と B のスクラッチだけを使い回す。
+///
+/// bit 一致: 各 C 要素は 1 job に属し、pc 昇順・p 昇順の同一 FMA 連鎖で、初期値への累積の
+/// 意味論も staging 有無で変わらない。確保量は `checked_mul` で求める（REQ-8）。
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_two_d_shared_a<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c_region: &mut [f32],
+    n: usize,
+    k_dim: usize,
+    region_row_offset: usize,
+    blocks: BlockSizes,
+    transpose: GemmTranspose,
+    grid: &partition::JobGrid,
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    if k_dim == 0 || n == 0 {
+        return Ok(());
+    }
+    let mc_total = c_region.len() / n;
+    let band_rows = partition::bands(mc_total, grid.mc_job);
+    let band_stride = grid
+        .mc_job
+        .div_ceil(mr)
+        .checked_mul(mr)
+        .and_then(|v| v.checked_mul(k_dim))
+        .ok_or(GemmError::DimProductOverflow)?;
+    let total = band_stride
+        .checked_mul(band_rows.len())
+        .ok_or(GemmError::DimProductOverflow)?;
+    let c_cap = grid
+        .mc_job
+        .checked_mul(grid.nc_job)
+        .ok_or(GemmError::DimProductOverflow)?;
+    let b_cap = panel_capacity(grid.nc_job.min(n), k_dim, 1, mr, nr, blocks).0;
+    #[cfg(test)]
+    let probe_key = b.as_ptr() as usize;
+    #[cfg(not(test))]
+    let probe_key = 0usize;
+
+    let mut shared = vec![0.0f32; total];
+    #[cfg(test)]
+    jobgrid_probe::on_shared_a_alloc(probe_key);
+    shared
+        .par_chunks_mut(band_stride)
+        .enumerate()
+        .for_each(|(rb, buf)| {
+            pack_shared_a_band::<K>(
+                buf,
+                a,
+                &band_rows[rb],
+                k_dim,
+                blocks,
+                transpose,
+                region_row_offset,
+                probe_key,
+            );
+        });
+    let shared: &[f32] = &shared;
+
+    if grid.col_bands == 1 {
+        // 直接書き込み分岐は split なし: 計数をここで終了する。
+        #[cfg(test)]
+        jobgrid_probe::on_region_split_done();
+        return c_region
+            .par_chunks_mut(grid.mc_job * n)
+            .enumerate()
+            .try_for_each_init(
+                || {
+                    #[cfg(test)]
+                    jobgrid_probe::on_scratch_init(probe_key, 1);
+                    vec![0.0f32; b_cap]
+                },
+                |b_scratch, (rb, c_band)| {
+                    let band_len = band_rows[rb].end - band_rows[rb].start;
+                    #[cfg(test)]
+                    let _probe_scope = jobgrid_probe::on_job_shared(probe_key, band_len, n, false);
+                    run_shared_a_job_body(
+                        kernel,
+                        &shared[rb * band_stride..(rb + 1) * band_stride],
+                        b,
+                        c_band,
+                        n,
+                        0,
+                        band_len,
+                        n,
+                        k_dim,
+                        blocks,
+                        transpose,
+                        b_scratch,
+                    )
+                },
+            );
+    }
+
+    let mut jobs = split_c_into_jobs(c_region, n, grid);
+    #[cfg(test)]
+    jobgrid_probe::on_region_split_done();
+    jobs.par_iter_mut().try_for_each_init(
+        || {
+            #[cfg(test)]
+            jobgrid_probe::on_scratch_init(probe_key, 2);
+            (vec![0.0f32; c_cap], vec![0.0f32; b_cap])
+        },
+        |(c_local, b_scratch), job| {
+            let mc_len = job.rows.end - job.rows.start;
+            let nc_len_job = job.cols.end - job.cols.start;
+            if mc_len == 0 || nc_len_job == 0 {
+                return Ok(());
+            }
+            #[cfg(test)]
+            let _probe_scope = jobgrid_probe::on_job_shared(probe_key, mc_len, nc_len_job, true);
+            let len = mc_len
+                .checked_mul(nc_len_job)
+                .ok_or(GemmError::DimProductOverflow)?;
+            let c_buf = &mut c_local[..len];
+            for (i, row) in job.c_rows.iter().enumerate() {
+                c_buf[i * nc_len_job..(i + 1) * nc_len_job].copy_from_slice(row);
+            }
+            let rb = job.rows.start / grid.mc_job;
+            run_shared_a_job_body(
+                kernel,
+                &shared[rb * band_stride..(rb + 1) * band_stride],
+                b,
+                c_buf,
+                nc_len_job,
+                job.cols.start,
+                mc_len,
+                n,
+                k_dim,
+                blocks,
+                transpose,
+                b_scratch,
+            )?;
+            for (i, row) in job.c_rows.iter_mut().enumerate() {
+                row.copy_from_slice(&c_buf[i * nc_len_job..(i + 1) * nc_len_job]);
+            }
+            Ok(())
+        },
+    )
+}
 /// [`dispatch_ic_dynamic`] の 2D 動的分配版（イシュー #1311）。
 /// x86_64: AVX-512（stable cfg 時）→ AVX2 → スカラーの優先順位で ISA
 /// トークンを 1 回だけ確定する（既存 dispatch 系と同一方針）。本番結線
@@ -2944,6 +3273,7 @@ fn dispatch_two_d_dynamic(
     blocks: BlockSizes,
     transpose: GemmTranspose,
     jobs_per_worker: usize,
+    share_a: bool,
 ) -> Result<(), GemmError> {
     #[cfg(avx512_stable)]
     if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
@@ -2958,6 +3288,7 @@ fn dispatch_two_d_dynamic(
             blocks,
             transpose,
             jobs_per_worker,
+            share_a,
         );
     }
     if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
@@ -2972,6 +3303,7 @@ fn dispatch_two_d_dynamic(
             blocks,
             transpose,
             jobs_per_worker,
+            share_a,
         )
     } else {
         gemm_blis_two_d_dynamic_region(
@@ -2985,6 +3317,7 @@ fn dispatch_two_d_dynamic(
             blocks,
             transpose,
             jobs_per_worker,
+            share_a,
         )
     }
 }
@@ -3010,6 +3343,7 @@ fn dispatch_two_d_dynamic(
     blocks: BlockSizes,
     transpose: GemmTranspose,
     jobs_per_worker: usize,
+    share_a: bool,
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
     if SME_PRODUCTION_ENABLED
@@ -3027,6 +3361,7 @@ fn dispatch_two_d_dynamic(
             blocks,
             transpose,
             jobs_per_worker,
+            share_a,
         );
     }
     gemm_blis_two_d_dynamic_region(
@@ -3040,6 +3375,7 @@ fn dispatch_two_d_dynamic(
         blocks,
         transpose,
         jobs_per_worker,
+        share_a,
     )
 }
 
@@ -3057,6 +3393,7 @@ fn dispatch_two_d_dynamic(
     blocks: BlockSizes,
     transpose: GemmTranspose,
     jobs_per_worker: usize,
+    share_a: bool,
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Scalar);
     gemm_blis_two_d_dynamic_region(
@@ -3070,6 +3407,7 @@ fn dispatch_two_d_dynamic(
         blocks,
         transpose,
         jobs_per_worker,
+        share_a,
     )
 }
 
@@ -3151,7 +3489,7 @@ fn sme_shape_eligible(m_total: usize, n: usize, k: usize) -> bool {
 /// なってしまうのを防ぐ）。
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn gemm_blis_parallel_two_d_dynamic_with_params(
+fn two_d_dynamic_with_params_impl(
     a: &[f32],
     b: &[f32],
     c: &mut [f32],
@@ -3161,6 +3499,7 @@ pub(crate) fn gemm_blis_parallel_two_d_dynamic_with_params(
     blocks: BlockSizes,
     jobs_per_worker: usize,
     transpose: GemmTranspose,
+    share_a: bool,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
     validate_block_sizes(blocks)?;
@@ -3186,7 +3525,45 @@ pub(crate) fn gemm_blis_parallel_two_d_dynamic_with_params(
         blocks,
         transpose,
         jobs_per_worker.max(1),
+        share_a,
     )
+}
+
+/// テスト専用: 従来どおりの jobs_per_worker 注入入口（A 共有なし = job ごと pack・C staging あり）。
+/// #3198 の jpw=1 腕はこの入口を使う。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_blis_parallel_two_d_dynamic_with_params(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+    jobs_per_worker: usize,
+    transpose: GemmTranspose,
+) -> Result<(), GemmError> {
+    two_d_dynamic_with_params_impl(a, b, c, m, n, k, blocks, jobs_per_worker, transpose, false)
+}
+
+/// テスト専用（#3199）: ゲート ON 相当の強制入口。適格形状（`small_m::select_shared_a`）では
+/// 行帯ごとに A を 1 回だけ pack して job 間で共有し、job ごとの確保を worker スクラッチへ
+/// 寄せる経路を通る。不適格形状は従来経路へフォールバックする。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_blis_parallel_two_d_dynamic_shared_a_with_params(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+    jobs_per_worker: usize,
+    transpose: GemmTranspose,
+) -> Result<(), GemmError> {
+    two_d_dynamic_with_params_impl(a, b, c, m, n, k, blocks, jobs_per_worker, transpose, true)
 }
 
 /// A/B 一括計測ハーネス（イシュー #1041）向け: 並列 5-loop ドライバの
@@ -3312,6 +3689,7 @@ pub(crate) fn gemm_blis_parallel_variant(
             blocks,
             GemmTranspose::Nn,
             TWO_D_JOBS_PER_WORKER,
+            false,
         ),
         #[cfg(target_arch = "aarch64")]
         GemmDriverVariant::TwoDDynamicSme => {
@@ -3332,6 +3710,7 @@ pub(crate) fn gemm_blis_parallel_variant(
                 blocks,
                 GemmTranspose::Nn,
                 TWO_D_JOBS_PER_WORKER,
+                false,
             )
         }
     }
