@@ -216,3 +216,17 @@ GB10 の reuse セルが `ratio = 1.0167 > 1.00` であるため、
   （本イシューの変更対象コードではない）。
 - Metal／CUDA ガードセルの実測（verdict に影響しないため本イシューでは
   未実施）。
+
+## 9. #3195 再測定（T = 4096）
+
+§1〜§8 は変更しない（#1578 の REJECT 判定は不変）。本節は別候補・別規則による再測定の記録である。
+
+- 規則: `docs/perf/logs/cpu-mse-backward-threshold-3195/RULE.txt`（計測前に固定）。候補は T = 4096 の単一。
+- 変える条件: (1) 候補 T = 4096、(2) GB10 `device_update` 固定費の低下（#3193・#3194。279 -> 169 µs）、
+  (3) round ごとの負荷ゲート・クールダウン、(4) ADOPT／REJECT／undetermined の 3 値判定（ADOPT 条件は #1578 より緩めない）。
+- train セル（n = 640）では 640 < T のどの T も同じ逐次分岐を通るため、after 腕の train 実行コードパスは
+  #1578 の T = 1<<18 と同一。候補変更が効くのは train 以外の 640 < n < 1<<18 の入力。
+- 状態: **未計測**。Stage 0（現状確定）・Stage 1（A/B）とも実機未実施で、判定は出していない。
+  出荷状態は `MSE_BACKWARD_PARALLEL_MIN_ELEMS = 0`（常に並列）のまま。
+- ハーネス: `scripts/bench/framework-compare/run_ab_mse_backward_threshold_cpu.sh`。計測結果は
+  `docs/perf/logs/cpu-mse-backward-threshold-3195/` に収録し、本節へ前後比較表を追記する。
