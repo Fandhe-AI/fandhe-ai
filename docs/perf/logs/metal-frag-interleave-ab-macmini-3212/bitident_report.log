@@ -1,0 +1,28 @@
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_frag_interleave_ab_diag_tests::frag_interleave_ab_bitident_report ... BITIDENT n=256 pair=fi_vs_cur fallback=false ok=true
+BITIDENT n=256 pair=c1_on_vs_c1_off fallback=false ok=true
+BITIDENT n=256 pair=c2_on_vs_c2_off fallback=false ok=true
+BITIDENT n=256 pair=c3_on_vs_c3_off fallback=false ok=true
+BITIDENT n=512 pair=fi_vs_cur fallback=false ok=true
+BITIDENT n=512 pair=c1_on_vs_c1_off fallback=false ok=true
+BITIDENT n=512 pair=c2_on_vs_c2_off fallback=false ok=true
+BITIDENT n=512 pair=c3_on_vs_c3_off fallback=false ok=true
+BITIDENT n=1024 pair=fi_vs_cur fallback=false ok=true
+BITIDENT n=1024 pair=c1_on_vs_c1_off fallback=false ok=true
+BITIDENT n=1024 pair=c2_on_vs_c2_off fallback=false ok=true
+BITIDENT n=1024 pair=c3_on_vs_c3_off fallback=false ok=true
+BITIDENT n=2048 pair=fi_vs_cur fallback=false ok=true
+BITIDENT n=2048 pair=c1_on_vs_c1_off fallback=false ok=true
+BITIDENT n=2048 pair=c2_on_vs_c2_off fallback=false ok=true
+BITIDENT n=2048 pair=c3_on_vs_c3_off fallback=false ok=true
+BITIDENT n=4096 pair=fi_vs_cur fallback=false ok=true
+BITIDENT n=4096 pair=c1_on_vs_c1_off fallback=false ok=true
+BITIDENT n=4096 pair=c2_on_vs_c2_off fallback=false ok=true
+BITIDENT n=4096 pair=c3_on_vs_c3_off fallback=false ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 842 filtered out; finished in 0.77s
+

@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 7 tests
+test gemm_frag_interleave_diag_tests::frag_interleave_combinations_bit_match ... ok
+test gemm_frag_interleave_diag_tests::frag_interleave_gate_is_forwarded ... ok
+test gemm_frag_interleave_diag_tests::frag_interleave_matches_cpu_reference ... ok
+test gemm_frag_interleave_diag_tests::frag_interleave_on_off_bit_match_all_candidates ... ok
+test gemm_frag_interleave_diag_tests::frag_interleave_on_off_bit_match_dispatch_auto ... shape=(129,131,133) は split-K 経路（no-op 煙テストとして比較）
+split-K smoke route=SplitK(SplitKPlan { tile: TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }, partitions: 32, k_per_partition: 128 })
+ok
+test gemm_frag_interleave_diag_tests::frag_interleave_on_off_bit_match_nan_inf ... ok
+test gemm_frag_interleave_diag_tests::frag_interleave_on_off_bit_match_transposed ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 836 filtered out; finished in 13.63s
+

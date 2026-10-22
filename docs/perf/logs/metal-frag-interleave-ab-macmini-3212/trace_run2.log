@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_frag_interleave_ab_diag_tests::frag_interleave_ab_reach_trace ... DEVICE gpu_cores=10 soc="Apple M4" verified_tile_table=Some(M4Base(VerifiedM4BaseGpuCoreCount(10))) split_k_enabled=true
+TRACE n=256 should_split_k=none route=Classic/C3:bm32xbn32xbk16_wm2xwn2_stagedtrue cur=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved_cur=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue unroll_acc_eff=false classic=true active_on=true
+TRACE n=512 should_split_k=none route=Classic/C1:bm64xbn32xbk16_wm2xwn2_stagedtrue cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved_cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue unroll_acc_eff=false classic=true active_on=true
+TRACE n=1024 should_split_k=none route=Classic/C1:bm64xbn32xbk16_wm2xwn2_stagedtrue cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved_cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue unroll_acc_eff=false classic=true active_on=true
+TRACE n=2048 should_split_k=none route=Classic/C2:bm32xbn64xbk16_wm2xwn2_stagedtrue cur=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved_cur=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue unroll_acc_eff=false classic=true active_on=true
+TRACE n=4096 should_split_k=none route=Classic/C2:bm32xbn64xbk16_wm2xwn2_stagedtrue cur=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved_cur=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue unroll_acc_eff=false classic=true active_on=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 842 filtered out; finished in 0.02s
+

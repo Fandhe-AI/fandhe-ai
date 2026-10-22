@@ -196,6 +196,74 @@ Apple Silicon（macOS）上で実施。
 - `cargo test -p fandhe-ai-backend-metal --release --lib -- --ignored frag_interleave --test-threads=1` の 7 件 pass: 全 `CANDIDATES` × 正方 256〜4096・端数形状の ON/OFF bit 一致、`dispatch_auto` の真の端数形状・split-K 形状（no-op）、NT／TN／TT、NaN／±inf／inf×0、FINE_BARRIER・UNROLL_LOAD 併用、CPU 参照 parity（`assert_parity`。tolerance 不変）、ゲート転送。
 - 回帰: 既存 `unroll_load_on_off_bit_match_*`・`steel_candidate_arms_match_cpu_reference` が既定 OFF のまま pass。
 
-### 10.8 実測記入欄
+### 10.8 実測記入欄（イシュー #3212。Mac mini 実測）
 
-性能は**未実測**。結線判断・既定値変更はユーザー承認事項。
+規則（計測前に単独コミットで固定）: `docs/perf/logs/metal-frag-interleave-ab-macmini-3212/RULE.txt`
+（sha256 `50e53980ddaab3a891548a5df362e4b3c90da9bab075f131bfc973375e6cbd46`・固定コミット `bf2dbe7c8`）。
+生ログ・集計: 同ディレクトリ（`aggregate.md` が機械集計の全文。再現手順は `README.md`）。結線判断・既定値変更はユーザー承認事項で、本節は結線しない。
+
+**機体・版**: Mac mini（Apple M4・GPU 10 コア・16 GB・macOS 27.0.1・rustc 1.99.0）、`host_kind=macmini`、
+`verified_tile_table=M4Base`、`split_k_enabled=true`。計測対象リビジョン `3d5a08b318b13ac54925766e34c8823337b51498`
+（`.rev-stamp` とツリー指紋〈`tree-fingerprint.txt`〉は開発機の `git archive` と一致）。candle-core 0.11.0。
+load1 < 3.0 ゲートは全 38 プロセスが待機なしで通過（正式系列）。5 run（run 内は warmup 20 + 計測 20）。
+
+**前提ゲート**: 既存 7 件（`gemm_frag_interleave_diag_tests`）pass、主腕 × 全 N の CPU 参照 parity（REQ-2 統一複合判定）pass、
+`fi` と `cur` の出力 hash は全 N・5 run で一致（bit 一致）、補助腕の ON/OFF も全件 bit 一致。fallback なし。
+到達追跡は 5 run 全一致で、全 N が Classic・split-K なし・ON で `active=true`（OFF と OFF の比較にはなっていない）。
+
+**`cur`（#3206 適用後の選択）の実測確認**: N=256→`[3]`、512／1024→`[1]`、2048／4096→`[2]`（想定どおり）。
+
+**純カーネル時間（kernel_gpu の run 内中央値 ms。5 run 中央値。run 別は `aggregate.md`）**
+
+| N | cur | fi | fi/cur | 速い run | cur TFLOPS | fi TFLOPS | 判定（RULE 項 10） |
+|---|---|---|---|---|---|---|---|
+| 256 | 0.0200 | 0.0199 | -0.5% | 4/5 | 1.678 | 1.686 | REJECT_CELL |
+| 512 | 0.1105 | 0.1094 | -1.0% | 5/5 | 2.429 | 2.454 | REJECT_CELL |
+| 1024 | 0.8005 | 0.7920 | -1.1% | 5/5 | 2.683 | 2.711 | REJECT_CELL |
+| 2048 | 6.5288 | 6.4294 | -1.5% | 5/5 | 2.631 | 2.672 | REJECT_CELL |
+| 4096 | 51.5791 | 50.7728 | -1.6% | 5/5 | 2.665 | 2.707 | REJECT_CELL |
+
+- 全 N で fi は cur より速い方向だが、改善は 0.5〜1.6% で、事前登録した 2% の帯内。ADOPT_CANDIDATE は 0 件、後退（2% 超かつ 5/5 遅い）も 0 件。
+- N=256 の run 2 は cur・fi とも 0.038 ms（他 run の約 2 倍）で、同 run の candle excl も遅い。外れ値として run 別の表に残してあり、除外していない。
+- 補助腕（記録のみ。判定に使わない）: `CANDIDATES[1]`／`[2]`／`[3]` の ON/OFF 比は 0.979〜0.995（全 15 組で ON が 0.5〜2.1% 速い方向）。いずれも bit 一致。タイル表の参考値であり判定には使わない。
+
+**gemm Metal セル A/B（非後退ゲート。before = main、after = `FRAG_INTERLEAVE_ENABLED` のみ true。5 round）**
+
+- 全 10 セルで checksum 完全一致。5/5 round で 2% 超後退したセルは 0 件 → 状態 `ok`。
+- 中央値比（after/before）は 0.972〜1.024。N=512 reuse（1.024）・N=1024 fresh（1.006）は 2% 超の round を含む（round ごとの揺れが大きい: 0.916〜1.165）。N=2048／4096 は 0.972〜0.994 で安定。このゲートは改善の証拠にしない。
+- 同じ round の candle gemm 窓との比（candle/fandhe。1 未満は fandhe が遅い、fresh のみ）: N=256 0.88・512 0.72〜0.76・1024 0.83・2048 0.79・4096 0.75〜0.76。
+
+**candle 比（同一セッションで candle excl を 5 run 再計測。record_only）**
+
+| N | candle excl ms | 主比 cur | 主比 fi | 参考比 cur | 参考比 fi | #3181 の excl とのドリフト |
+|---|---|---|---|---|---|---|
+| 256 | 0.2120 | 0.875 | 0.874 | 10.599 | 10.652 | -2.3% |
+| 512 | 0.3325 | 0.921 | 0.922 | 3.009 | 3.040 | +3.1% |
+| 1024 | 0.9562 | 0.824 | 0.797 | 1.195 | 1.207 | +3.3% |
+| 2048 | 5.4380 | 0.762 | 0.773 | 0.833 | 0.846 | -0.2% |
+| 4096 | 42.2758 | 0.790 | 0.802 | 0.820 | 0.833 | -0.3% |
+
+主比 = candle excl ÷ fandhe wall_sum、参考比 = candle excl ÷ fandhe kernel_gpu。candle excl は `matmul + synchronize` のホスト壁時計で、
+どちらの比も純カーネル比そのものではない（#3181 §4）。ドリフトは全 N で 10% 以内（#3181 の値と整合）。
+
+**候補 `FRAG_INTERLEAVE_ENABLED` の総合判定: REJECT**（規則 項 12。ADOPT_CANDIDATE が 0 件のため）。
+意味は「2% の帯を超える純カーネル改善が Mac mini では確認できなかった」であり、方向は一貫して改善側（-0.5〜-1.6%）なので、
+既定 OFF のまま残す。なお本判定は Mac mini 単機で、ゲートは機体に依存しない。M4 Max や別の組合せでの再評価は別 issue・所有者判断（結線の前提にもなる）。
+
+### 10.9 candle に届かない差の 3 分類（イシュー #3212）
+
+N=2048／4096 を中心に、実測した値と推定を区別して書く。緩和の提案はしない（所有者判断の材料のみ）。
+
+| 分類 | 実測した値 | 推定（推定と明記） |
+|---|---|---|
+| ハードの上限 | 達成 TFLOPS（kernel_gpu から算出）: N=2048 で 2.63（cur）、N=4096 で 2.67 | M4 10 コア GPU の f32 FMA 上限 3.3〜3.8 TFLOPS（**推定**。コア数 × ALU 幅 × クロックからの概算で、本 run では測っていない）。fandhe の到達率は推定上限の 70〜82%（N=2048／4096） |
+| 計測窓（全フレームワーク共通） | candle の gemm 窓と excl の差: N=4096 で 13.85 ms（0.83 ns/要素）、N=2048 で 4.08 ms（0.97 ns/要素）。#3182 §12.4 の checksum 実測 0.515〜0.834 ns/要素と同水準 | 窓差には checksum に加え readback 等が含まれ、checksum 単独の値ではない。fandhe の fresh 窓と wall_sum の差は N=4096 で 21.3 ms（#3182 §12.5 の upload＋host_copy 11.35 ms と checksum 8.64 ms の合計 19.99 ms と同程度） |
+| 自分たちの制約 | upload＋host_copy: N=4096 で 11.35 ms（窓の 32.6%。#3182 §12.5。`metal-gemm-reuse-phase-breakdown.md`） | REQ-8 境界検査の単独コストは**未計測**（検査を外す実験は禁止のため、推定値も書かない）。REQ-1（MPS 不使用）は `docs/backend-metal-mpp-tensor-decision.md` を参照 |
+
+- candle excl との比（kernel_gpu 基準の参考比）は N=4096 で 0.82〜0.83、N=2048 で 0.83〜0.85。FI の寄与は参考比で +0.01 程度で、差の主因ではない。
+- 「実質の天井」（総和 ＋ カーネル ＋ readback の算術）は上表の推定を足し合わせたもので、推定として扱う。実測した項目と混ぜて結論にしない。
+
+### 10.10 申し送り（Issue は起票しない）
+
+- 結線（既定の反転）はしない。仮に行う場合は別 PR・所有者判断で、M4 Max での確認が先に要る。
+- 本 issue で扱っていない候補: kk full unroll、`UNROLL_ACC` との併用、蛇行発行順、f16 への適用（§10.6）。

@@ -1,0 +1,88 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_frag_interleave_ab_diag_tests::frag_interleave_ab_kernel_gpu ... ARM n=256 arm=cur role=judge gate=off requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-917.267864 hash=ddada87773ac2ccb
+ARM n=256 arm=fi role=judge gate=on requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-917.267864 hash=ddada87773ac2ccb
+ARM n=256 arm=c1_off role=record_only gate=off requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-917.267864 hash=ddada87773ac2ccb
+ARM n=256 arm=c1_on role=record_only gate=on requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-917.267864 hash=ddada87773ac2ccb
+ARM n=256 arm=c2_off role=record_only gate=off requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-917.267864 hash=ddada87773ac2ccb
+ARM n=256 arm=c2_on role=record_only gate=on requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-917.267864 hash=ddada87773ac2ccb
+ARM n=256 arm=c3_off role=record_only gate=off requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-917.267864 hash=ddada87773ac2ccb
+ARM n=256 arm=c3_on role=record_only gate=on requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-917.267864 hash=ddada87773ac2ccb
+MEAS n=256 arm=cur kernel_gpu_median_ms=0.0200 q1=0.0197 q3=0.0201 encode_median_ms=0.0028 commit_wait_median_ms=0.2333 alloc_c_median_ms=0.0070 wall_sum_median_ms=0.2423
+MEAS n=256 arm=fi kernel_gpu_median_ms=0.0199 q1=0.0197 q3=0.0200 encode_median_ms=0.0028 commit_wait_median_ms=0.2325 alloc_c_median_ms=0.0070 wall_sum_median_ms=0.2423
+MEAS n=256 arm=c1_off kernel_gpu_median_ms=0.0270 q1=0.0260 q3=0.0271 encode_median_ms=0.0028 commit_wait_median_ms=0.2392 alloc_c_median_ms=0.0071 wall_sum_median_ms=0.2487
+MEAS n=256 arm=c1_on kernel_gpu_median_ms=0.0265 q1=0.0263 q3=0.0265 encode_median_ms=0.0028 commit_wait_median_ms=0.2400 alloc_c_median_ms=0.0070 wall_sum_median_ms=0.2499
+MEAS n=256 arm=c2_off kernel_gpu_median_ms=0.0284 q1=0.0283 q3=0.0285 encode_median_ms=0.0028 commit_wait_median_ms=0.2424 alloc_c_median_ms=0.0071 wall_sum_median_ms=0.2515
+MEAS n=256 arm=c2_on kernel_gpu_median_ms=0.0281 q1=0.0280 q3=0.0282 encode_median_ms=0.0028 commit_wait_median_ms=0.2416 alloc_c_median_ms=0.0070 wall_sum_median_ms=0.2516
+MEAS n=256 arm=c3_off kernel_gpu_median_ms=0.0201 q1=0.0201 q3=0.0201 encode_median_ms=0.0028 commit_wait_median_ms=0.2335 alloc_c_median_ms=0.0070 wall_sum_median_ms=0.2431
+MEAS n=256 arm=c3_on kernel_gpu_median_ms=0.0200 q1=0.0197 q3=0.0200 encode_median_ms=0.0028 commit_wait_median_ms=0.2327 alloc_c_median_ms=0.0072 wall_sum_median_ms=0.2427
+ARM n=512 arm=cur role=judge gate=off requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=3687.309341 hash=251aa020b11941c7
+ARM n=512 arm=fi role=judge gate=on requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=3687.309341 hash=251aa020b11941c7
+ARM n=512 arm=c1_off role=record_only gate=off requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=3687.309341 hash=251aa020b11941c7
+ARM n=512 arm=c1_on role=record_only gate=on requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=3687.309341 hash=251aa020b11941c7
+ARM n=512 arm=c2_off role=record_only gate=off requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=3687.309341 hash=251aa020b11941c7
+ARM n=512 arm=c2_on role=record_only gate=on requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=3687.309341 hash=251aa020b11941c7
+ARM n=512 arm=c3_off role=record_only gate=off requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=3687.309341 hash=251aa020b11941c7
+ARM n=512 arm=c3_on role=record_only gate=on requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=3687.309341 hash=251aa020b11941c7
+MEAS n=512 arm=cur kernel_gpu_median_ms=0.1105 q1=0.1104 q3=0.1109 encode_median_ms=0.0027 commit_wait_median_ms=0.3530 alloc_c_median_ms=0.0073 wall_sum_median_ms=0.3632
+MEAS n=512 arm=fi kernel_gpu_median_ms=0.1094 q1=0.1092 q3=0.1099 encode_median_ms=0.0027 commit_wait_median_ms=0.3506 alloc_c_median_ms=0.0073 wall_sum_median_ms=0.3610
+MEAS n=512 arm=c1_off kernel_gpu_median_ms=0.1107 q1=0.1104 q3=0.1111 encode_median_ms=0.0027 commit_wait_median_ms=0.3533 alloc_c_median_ms=0.0073 wall_sum_median_ms=0.3640
+MEAS n=512 arm=c1_on kernel_gpu_median_ms=0.1094 q1=0.1092 q3=0.1097 encode_median_ms=0.0027 commit_wait_median_ms=0.3525 alloc_c_median_ms=0.0073 wall_sum_median_ms=0.3624
+MEAS n=512 arm=c2_off kernel_gpu_median_ms=0.1155 q1=0.1147 q3=0.1178 encode_median_ms=0.0027 commit_wait_median_ms=0.3590 alloc_c_median_ms=0.0073 wall_sum_median_ms=0.3694
+MEAS n=512 arm=c2_on kernel_gpu_median_ms=0.1137 q1=0.1132 q3=0.1142 encode_median_ms=0.0028 commit_wait_median_ms=0.3563 alloc_c_median_ms=0.0074 wall_sum_median_ms=0.3664
+MEAS n=512 arm=c3_off kernel_gpu_median_ms=0.1188 q1=0.1179 q3=0.1196 encode_median_ms=0.0028 commit_wait_median_ms=0.3612 alloc_c_median_ms=0.0073 wall_sum_median_ms=0.3715
+MEAS n=512 arm=c3_on kernel_gpu_median_ms=0.1179 q1=0.1168 q3=0.1183 encode_median_ms=0.0027 commit_wait_median_ms=0.3591 alloc_c_median_ms=0.0074 wall_sum_median_ms=0.3694
+ARM n=1024 arm=cur role=judge gate=off requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-5228.648162 hash=5f4387ae833d6b64
+ARM n=1024 arm=fi role=judge gate=on requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-5228.648162 hash=5f4387ae833d6b64
+ARM n=1024 arm=c1_off role=record_only gate=off requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-5228.648162 hash=5f4387ae833d6b64
+ARM n=1024 arm=c1_on role=record_only gate=on requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-5228.648162 hash=5f4387ae833d6b64
+ARM n=1024 arm=c2_off role=record_only gate=off requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-5228.648162 hash=5f4387ae833d6b64
+ARM n=1024 arm=c2_on role=record_only gate=on requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-5228.648162 hash=5f4387ae833d6b64
+ARM n=1024 arm=c3_off role=record_only gate=off requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-5228.648162 hash=5f4387ae833d6b64
+ARM n=1024 arm=c3_on role=record_only gate=on requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-5228.648162 hash=5f4387ae833d6b64
+MEAS n=1024 arm=cur kernel_gpu_median_ms=0.8005 q1=0.7953 q3=0.8031 encode_median_ms=0.0095 commit_wait_median_ms=1.1453 alloc_c_median_ms=0.0172 wall_sum_median_ms=1.1607
+MEAS n=1024 arm=fi kernel_gpu_median_ms=0.7878 q1=0.7851 q3=0.7919 encode_median_ms=0.0064 commit_wait_median_ms=1.1171 alloc_c_median_ms=0.0124 wall_sum_median_ms=1.1365
+MEAS n=1024 arm=c1_off kernel_gpu_median_ms=0.7975 q1=0.7926 q3=0.8003 encode_median_ms=0.0042 commit_wait_median_ms=1.1356 alloc_c_median_ms=0.0125 wall_sum_median_ms=1.1552
+MEAS n=1024 arm=c1_on kernel_gpu_median_ms=0.7909 q1=0.7871 q3=0.7923 encode_median_ms=0.0057 commit_wait_median_ms=1.1198 alloc_c_median_ms=0.0172 wall_sum_median_ms=1.1481
+MEAS n=1024 arm=c2_off kernel_gpu_median_ms=0.8319 q1=0.8300 q3=0.8341 encode_median_ms=0.0034 commit_wait_median_ms=1.1772 alloc_c_median_ms=0.0107 wall_sum_median_ms=1.1982
+MEAS n=1024 arm=c2_on kernel_gpu_median_ms=0.8256 q1=0.8226 q3=0.8273 encode_median_ms=0.0056 commit_wait_median_ms=1.1566 alloc_c_median_ms=0.0183 wall_sum_median_ms=1.1802
+MEAS n=1024 arm=c3_off kernel_gpu_median_ms=0.8588 q1=0.8567 q3=0.8632 encode_median_ms=0.0066 commit_wait_median_ms=1.1937 alloc_c_median_ms=0.0137 wall_sum_median_ms=1.2171
+MEAS n=1024 arm=c3_on kernel_gpu_median_ms=0.8470 q1=0.8440 q3=0.8505 encode_median_ms=0.0057 commit_wait_median_ms=1.1794 alloc_c_median_ms=0.0114 wall_sum_median_ms=1.2022
+ARM n=2048 arm=cur role=judge gate=off requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=34856.189485 hash=f997f04719a194c5
+ARM n=2048 arm=fi role=judge gate=on requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=34856.189485 hash=f997f04719a194c5
+ARM n=2048 arm=c1_off role=record_only gate=off requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=34856.189485 hash=f997f04719a194c5
+ARM n=2048 arm=c1_on role=record_only gate=on requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=34856.189485 hash=f997f04719a194c5
+ARM n=2048 arm=c2_off role=record_only gate=off requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=34856.189485 hash=f997f04719a194c5
+ARM n=2048 arm=c2_on role=record_only gate=on requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=34856.189485 hash=f997f04719a194c5
+ARM n=2048 arm=c3_off role=record_only gate=off requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=34856.189485 hash=f997f04719a194c5
+ARM n=2048 arm=c3_on role=record_only gate=on requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=34856.189485 hash=f997f04719a194c5
+MEAS n=2048 arm=cur kernel_gpu_median_ms=6.5017 q1=6.4972 q3=6.5077 encode_median_ms=0.0030 commit_wait_median_ms=7.0913 alloc_c_median_ms=0.0216 wall_sum_median_ms=7.1173
+MEAS n=2048 arm=fi kernel_gpu_median_ms=6.4179 q1=6.4122 q3=6.4241 encode_median_ms=0.0047 commit_wait_median_ms=7.0040 alloc_c_median_ms=0.0219 wall_sum_median_ms=7.0295
+MEAS n=2048 arm=c1_off kernel_gpu_median_ms=7.5399 q1=7.5318 q3=7.5492 encode_median_ms=0.0063 commit_wait_median_ms=8.1295 alloc_c_median_ms=0.0210 wall_sum_median_ms=8.1547
+MEAS n=2048 arm=c1_on kernel_gpu_median_ms=7.4181 q1=7.4073 q3=7.4244 encode_median_ms=0.0062 commit_wait_median_ms=8.0095 alloc_c_median_ms=0.0217 wall_sum_median_ms=8.0380
+MEAS n=2048 arm=c2_off kernel_gpu_median_ms=6.5079 q1=6.5030 q3=6.5105 encode_median_ms=0.0068 commit_wait_median_ms=7.0901 alloc_c_median_ms=0.0217 wall_sum_median_ms=7.1162
+MEAS n=2048 arm=c2_on kernel_gpu_median_ms=6.4191 q1=6.4108 q3=6.4218 encode_median_ms=0.0081 commit_wait_median_ms=6.9984 alloc_c_median_ms=0.0213 wall_sum_median_ms=7.0280
+MEAS n=2048 arm=c3_off kernel_gpu_median_ms=8.0239 q1=8.0176 q3=8.0329 encode_median_ms=0.0077 commit_wait_median_ms=8.5975 alloc_c_median_ms=0.0215 wall_sum_median_ms=8.6270
+MEAS n=2048 arm=c3_on kernel_gpu_median_ms=7.8885 q1=7.8771 q3=7.9047 encode_median_ms=0.0069 commit_wait_median_ms=8.4784 alloc_c_median_ms=0.0222 wall_sum_median_ms=8.5089
+ARM n=4096 arm=cur role=judge gate=off requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-42280.267106 hash=8808758b2977df5d
+ARM n=4096 arm=fi role=judge gate=on requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-42280.267106 hash=8808758b2977df5d
+ARM n=4096 arm=c1_off role=record_only gate=off requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-42280.267106 hash=8808758b2977df5d
+ARM n=4096 arm=c1_on role=record_only gate=on requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-42280.267106 hash=8808758b2977df5d
+ARM n=4096 arm=c2_off role=record_only gate=off requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-42280.267106 hash=8808758b2977df5d
+ARM n=4096 arm=c2_on role=record_only gate=on requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-42280.267106 hash=8808758b2977df5d
+ARM n=4096 arm=c3_off role=record_only gate=off requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=false checksum=-42280.267106 hash=8808758b2977df5d
+ARM n=4096 arm=c3_on role=record_only gate=on requested=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue resolved=C3:bm32xbn32xbk16_wm2xwn2_stagedtrue fallback=false active=true checksum=-42280.267106 hash=8808758b2977df5d
+MEAS n=4096 arm=cur kernel_gpu_median_ms=54.1732 q1=53.9642 q3=54.3400 encode_median_ms=0.0066 commit_wait_median_ms=55.6551 alloc_c_median_ms=0.0286 wall_sum_median_ms=55.6932
+MEAS n=4096 arm=fi kernel_gpu_median_ms=53.3559 q1=53.1630 q3=53.4430 encode_median_ms=0.0098 commit_wait_median_ms=54.8571 alloc_c_median_ms=0.0284 wall_sum_median_ms=54.8972
+MEAS n=4096 arm=c1_off kernel_gpu_median_ms=62.8992 q1=62.6020 q3=62.9867 encode_median_ms=0.0102 commit_wait_median_ms=64.4021 alloc_c_median_ms=0.0281 wall_sum_median_ms=64.4396
+MEAS n=4096 arm=c1_on kernel_gpu_median_ms=61.6074 q1=61.2957 q3=61.7223 encode_median_ms=0.0092 commit_wait_median_ms=63.1433 alloc_c_median_ms=0.0296 wall_sum_median_ms=63.1820
+MEAS n=4096 arm=c2_off kernel_gpu_median_ms=54.1609 q1=54.0355 q3=54.3880 encode_median_ms=0.0082 commit_wait_median_ms=55.7202 alloc_c_median_ms=0.0291 wall_sum_median_ms=55.7590
+MEAS n=4096 arm=c2_on kernel_gpu_median_ms=53.3760 q1=53.2112 q3=53.4517 encode_median_ms=0.0089 commit_wait_median_ms=54.8817 alloc_c_median_ms=0.0298 wall_sum_median_ms=54.9171
+MEAS n=4096 arm=c3_off kernel_gpu_median_ms=66.6128 q1=66.4683 q3=66.7024 encode_median_ms=0.0089 commit_wait_median_ms=68.1517 alloc_c_median_ms=0.0297 wall_sum_median_ms=68.1802
+MEAS n=4096 arm=c3_on kernel_gpu_median_ms=65.9464 q1=65.7699 q3=65.9714 encode_median_ms=0.0092 commit_wait_median_ms=67.4548 alloc_c_median_ms=0.0288 wall_sum_median_ms=67.4945
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 842 filtered out; finished in 23.72s
+

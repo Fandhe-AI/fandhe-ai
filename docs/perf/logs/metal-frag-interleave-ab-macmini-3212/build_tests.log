@@ -1,0 +1,8 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/run-3212/diag/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/run-3212/diag/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/run-3212/diag/crates/backend-cuda)
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/run-3212/diag/crates/backend-metal)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/run-3212/diag/crates/autodiff)
+   Compiling bench-harness v0.11.0 (<home>/work/run-3212/diag/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 20.76s
+  Executable unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)

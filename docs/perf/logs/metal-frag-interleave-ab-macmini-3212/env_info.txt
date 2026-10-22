@@ -1,0 +1,11 @@
+host_kind=macmini
+2026-10-22T11:27:32Z
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+Apple M4
+hw.perflevel0.logicalcpu: 4
+hw.perflevel1.logicalcpu: 6
+hw.memsize: 17179869184
+rustc 1.99.0 (b940084d7 2026-09-28)
+20:27  up 11 days, 20:01, 1 user, load averages: 5.75 3.26 2.41
