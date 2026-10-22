@@ -1,0 +1,102 @@
+イシュー #3212: candle 構造の GEMM カーネル候補（simdgroup 交互配置 FRAG_INTERLEAVE_ENABLED・#3211）の Mac mini A/B — 事前登録規則（計測前に固定。以後、本文は変更しない）
+
+0. 判定の根拠
+   ADOPT／REJECT の根拠は純カーネル時間（kernel_gpu = GPUEnd−GPUStart）に限る。gemm Metal セルの A/B は
+   非後退ゲートとして使い、改善の証拠にはしない。
+
+1. 不変事項
+   - 診断のみ。main の FRAG_INTERLEAVE_ENABLED（false）・選択ロジック・シェーダ・tolerance
+     （RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD）・parity baseline・FMA 契約は変えない。
+   - after 腕は計測専用の checkout とし、main へはコミットしない。
+   - #3181／#3182／#3184／#3209 の既存規則は 1 字も変えない。
+   - ADOPT の意味は「結線（既定の反転）を所有者が判断する価値がある」に限る。結線は別 PR かつ所有者判断。
+
+2. 機体と記録項目
+   Mac mini（Apple M4・GPU 10 コア・16 GB）。記録: チップ・macOS・rustc、.rev-stamp（HEAD）と git archive による
+   ツリー指紋の突合結果、probe_gpu_core_count・probe_soc_brand_string・verified_tile_table_device（M4Base を期待）・
+   split_k_enabled、host_kind=macmini（#3184 の事後監査でラベル誤りが指摘されたため明記）。
+   ホスト名・ユーザー名・$HOME はマスクする。
+
+3. 形状
+   正方 NN の N ∈ {256, 512, 1024, 2048, 4096}。入力は決定的シードの有限値（NaN・inf を含めない）。
+
+4. 腕
+   - 主腕: cur = ゲート OFF（MetalGemm::new）で select_for_verified_device(m,n,k, ctx.verified_tile_table_device()) が返す構成。
+           FI  = ゲート ON（MetalGemm::new_with_frag_interleave(ctx, true)）で cur と同一の構成。
+   - 記録のみの補助腕（判定に使わない）: Legacy・staged の CANDIDATES から [1]／[2]／[3] それぞれの OFF／ON。
+   - 計測前に全腕の resolve_tile_config を記録する。要求と解決が違う腕は fallback=true として判定から除く（abort しない）。
+   - 「現行」は #3206 適用後の HEAD。#3181 の [3] 固定基準は使わない。解決後のタイルは N ごとに記録する。
+
+5. 到達追跡（決定的・閾値なし。5 run 全一致を整合検査とし、不一致は fail-closed）
+   N ごとに should_split_k・select_route_for_verified_device・解決構成を記録する。
+   tile::frag_interleave_active_model(cfg, gate, unroll_acc_effective, split_k=false, tile_class_legacy=true, ksteps=1) を記録する。
+   期待: 全 N で Classic・split-K なし・ON で active=true。active=false の N は「規則の前提不成立」とし、
+   その N を undetermined にする（OFF と OFF の比較を黙って判定に使わない）。
+
+6. 前提ゲート（性能 run の前に 1 回実行し、ログを保存する）
+   (a) 既存 gemm_frag_interleave_diag_tests 7 件を Mac mini で --ignored --test-threads=1 実行する。
+   (b) 主腕 × N ごとに matmul_reference_fma を参照として REQ-2 統一複合判定（compare）にかける。
+   不一致・parity fail の N は NOT_ADOPTABLE とする。
+
+7. 計測区間
+   プロセス内で warmup 20 + 計測 20（gemm_reuse_phase_diag_tests の WARMUP_TRIALS／MEASURED_TRIALS）を取り、その中央値を使う。
+   主指標は kernel_gpu。副指標は encode・commit_wait・alloc_c・wall_sum（= alloc_c + encode + commit_wait）。
+   trial ごとに腕の実行順を巡回させる。1 バッチ 1 ラベルを assert し、kernel_gpu <= commit_wait も assert する。
+
+8. bit 一致
+   trial 0 で全要素の to_bits を FNV-1a 64bit hash にし、FI と cur が一致するかを見る（契約上、一致が必須）。
+   run 間の hash 一致を整合検査とする。checksum（f64 逐次和）は参考値にとどめ、bit 同一の証拠とは書かない。
+
+9. 回数・負荷
+   5 プロセス（5 run）。値は「run 内中央値」の 5 run 中央値とし、run 別の値も表に出す。
+   各プロセスの開始前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ（GATE-INVALID／GATE-TIMEOUT を記録）。
+   全プロセスが通過した系列だけを正式系列とする。
+   ビルド・集計・rsync はゲート付きの round の外で行う（#3184 ではスクリプト自身の負荷で load1 が 3.0 を超えて reopen された）。
+
+10. 純カーネル判定（N ごと）
+   - ADOPT_CANDIDATE: 次をすべて満たす。cur より 5 run 中央値で 2% を超えて速い／5/5 run の run 内中央値で cur より速い／
+     bit 一致・parity pass・fallback なし・active=true。
+   - REJECT_CELL: 上記を満たさない（2% 以内の帯内・遅い・一貫しない）。2% を超えて遅く、かつ 5/5 run で遅いものは
+     「後退」と区別して記録する。
+   - NOT_ADOPTABLE: bit 不一致・parity fail・fallback。
+   - undetermined: 正式系列でない・run 数が 5 でない・欠損・非有限値・active=false。
+
+11. gemm Metal セルの A/B（非後退ゲート）
+   - before = main の crates/facade。after = 同一コミットで tile.rs の FRAG_INTERLEAVE_ENABLED 宣言 1 行だけを true にした計測専用 checkout。
+   - 両方を [patch.crates-io.fandhe-ai] の path patch でビルドする。before と after でバイナリの sha256 が同じなら fail-closed で停止する。
+   - セルは metal × gemm × N {256,512,1024,2048,4096} × {fresh, reuse}。5 round で、round ごとに起動順を反転する。
+   - 比較は compare_gemm_ab.py --threshold 1.00 --per-run --require-checksum-exact。checksum 不一致は FAIL として停止し、
+     候補の判定も FAIL にする。
+   - 同じ round で candle（bench-candle --task gemm --device metal）も測る（record_only。candle 比の算出用）。
+
+12. 候補の総合判定
+   - ADOPT: ADOPT_CANDIDATE が 1 件以上、NOT_ADOPTABLE が 0 件、純カーネルの「後退」が 0 件、
+     セル A/B で 5/5 round 一貫して 2% を超えて後退したセルが 0 件。
+   - undetermined: 必要なセルが 1 件でも undetermined（最優先）。
+   - REJECT: 上記以外。
+   - Mac mini 単機の判定である。ゲートは機体に依存しない（M4 Max にも効く）ため、結線の前に M4 Max での確認が要る。
+
+13. candle 比の定義
+   - 主比 = candle excl ÷ fandhe wall_sum。参考比 = candle excl ÷ fandhe kernel_gpu。
+   - candle excl は #3181 と同じ bench-candle --task gemm-transfer-split --device metal の gemm_transfer_excl で、
+     境界は matmul + synchronize の壁時計。どちらの比も純カーネル比そのものではない（#3181 §4 の注を引き継ぐ）。
+   - candle excl は同じセッションで 5 run 再計測する（record_only）。#3181 の値（0.11.0）と並べ、10% を超える乖離は
+     ドリフトとして記録する（判定は変えない）。
+   - セル比 = candle gemm 窓 ÷ fandhe gemm 窓（同じ round の値）。
+
+14. 3 分類の書き方
+   - 「ハードの上限」は測れない。達成 TFLOPS（= 2N^3 ÷ kernel_gpu）は実測から算出する。上限 3.3〜3.8 TFLOPS は導出根拠を添え、
+     出てくるたびに「推定」と書く。
+   - 「計測窓」は checksum の ns／要素の実測値（#3182 §12.4 と本 run）で書く。
+   - 「自分たちの制約」は upload＋host_copy の実測値（#3182 §12.5）で書く。REQ-8 境界検査の単独コストは
+     「未計測（検査を外す実験は禁止）」と書き、推定値も書かない。
+
+15. 運用
+   - ビルドは計測前にすべて済ませる。純カーネル計測とセル A/B は同時に走らせない。
+   - run の差し替え・追加・セル除外・ログの上書きは禁止。再実行は別 label で行い、旧系列も残す。
+   - nohup のサブシェルで切り離して起動し、生存を確認する。2 時間を超える場合は 2 セッションに分ける。
+   - ドリフトガードの除外対象（成果物ディレクトリ・target）は最初から規則に書く。
+
+16. 到達不能時
+   機体に届かない、または完走できない場合は、数値を埋めず unavailable／undetermined と記録する。
+   推定値・M4 Max の値・代替機の値で埋めない。

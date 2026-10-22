@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_frag_interleave_ab_diag_tests::frag_interleave_ab_prereq_parity ... PARITY n=256 arm=cur fallback=false ok=true
+PARITY n=256 arm=fi fallback=false ok=true
+PARITY n=512 arm=cur fallback=false ok=true
+PARITY n=512 arm=fi fallback=false ok=true
+PARITY n=1024 arm=cur fallback=false ok=true
+PARITY n=1024 arm=fi fallback=false ok=true
+PARITY n=2048 arm=cur fallback=false ok=true
+PARITY n=2048 arm=fi fallback=false ok=true
+PARITY n=4096 arm=cur fallback=false ok=true
+PARITY n=4096 arm=fi fallback=false ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 842 filtered out; finished in 5.73s
+

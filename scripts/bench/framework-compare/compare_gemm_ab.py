@@ -143,6 +143,14 @@ _READBACK_N256_SIZES_BY_DEVICE = {
     "cuda": frozenset({256}),
 }
 
+# イシュー #3212: `--sizes metal-square5`（metal 専用）。Mac mini の simdgroup 交互配置候補
+# （`FRAG_INTERLEAVE_ENABLED`）の gemm セル A/B（`run_ab_frag_interleave_gemm_metal.sh`）が扱う
+# N=256/512/1024/2048/4096 × fresh/reuse の 10 セル。既存の `full` 集合（metal は 512〜4096）は
+# 変えない。判定規則は `docs/perf/logs/metal-frag-interleave-ab-macmini-3212/RULE.txt` 項 11。
+_METAL_SQUARE5_SIZES_BY_DEVICE = {
+    "metal": frozenset({256, 512, 1024, 2048, 4096}),
+}
+
 # イシュー #1517: `--task train` 用のセル集合。`bench-fandhe --task train`
 # は `Record.size` に `BATCH`（`scripts/bench/framework-compare/
 # bench-fandhe/src/main.rs` の `const BATCH: usize = 64;`）を emit する
@@ -182,6 +190,10 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
         if device not in _AFFINITY_SIZES_BY_DEVICE:
             raise ValueError("--sizes affinity は --device cpu 専用（イシュー #2117）")
         return _AFFINITY_SIZES_BY_DEVICE[device]
+    if sizes_arg == "metal-square5":
+        if device not in _METAL_SQUARE5_SIZES_BY_DEVICE:
+            raise ValueError("--sizes metal-square5 は --device metal 専用（イシュー #3212）")
+        return _METAL_SQUARE5_SIZES_BY_DEVICE[device]
     if sizes_arg == "readback-n256":
         if device not in _READBACK_N256_SIZES_BY_DEVICE:
             raise ValueError("--sizes readback-n256 は --device cuda 専用（イシュー #3190）")
@@ -798,7 +810,7 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate", "large", "readback", "infer-batches", "affinity", "threadpolicy", "readback-n256"),
+        choices=("full", "gate", "large", "readback", "infer-batches", "affinity", "threadpolicy", "readback-n256", "metal-square5"),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "
@@ -811,6 +823,7 @@ def main(argv):
             "または 'affinity'（cpu 専用。N=256/512/1024/2048/4096。イシュー #2117）"
             "または 'threadpolicy'（cpu 専用。N=256/512/1024/2048。イシュー #3178）"
             "または 'readback-n256'（cuda 専用。N=256 のみ。イシュー #3190）"
+            "または 'metal-square5'（metal 専用。N=256/512/1024/2048/4096。イシュー #3212）"
         ),
     )
     parser.add_argument(

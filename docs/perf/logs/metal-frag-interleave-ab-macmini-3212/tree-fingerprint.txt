@@ -1,0 +1,7 @@
+rev=3d5a08b318b13ac54925766e34c8823337b51498
+source: git archive HEAD（開発機）, Mac mini diag tree (rsync 後)
+algorithm: .rev-stamp と .git を除く全ファイルの sha256 を LC_ALL=C 整列して再ハッシュ
+local_fingerprint=017271ab31e606f4cf5f74336b101a686161599b1039ad09c46e0aa7f2fa1ba8
+macmini_fingerprint=017271ab31e606f4cf5f74336b101a686161599b1039ad09c46e0aa7f2fa1ba8
+match=true
+ab trees: before = diag tree を git init で 1 コミット化（HEAD 8edc57b634ee477fca90f11b1937ddc7463940a7）、after = その clone に tile.rs FRAG_INTERLEAVE_ENABLED false->true の 1 行のみ（runner が検証）
