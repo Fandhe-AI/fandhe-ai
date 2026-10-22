@@ -249,3 +249,38 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 - N≥512 限定の形状条件
 - 128×64 タイルへの TMA 適用（Stage 2）
 - N=256 後退の原因切り分け（encode 固定費仮説の棄却・残仮説の判別実験設計）と Stage 2 の候補設計は `docs/cuda-sm121-gemm-candidates-design.md` §3.3・§4（#2130）を参照。
+
+
+## 11. Stage 2 実装記録（イシュー #3214。128×64 への TMA 適用・候補 C1・`internal-diagnostics` 限定・本番非結線）
+
+`docs/cuda-sm121-gemm-candidates-design.md` §4 の候補 C1 を、既定 OFF（`internal-diagnostics` feature 限定・本番非到達）の診断実装として追加した。採否（ADOPT／REJECT）と本番結線は #3215 とその後続 PR の担当で、本節は判定しない。
+
+### 11.1 実装ファイル・シンボル
+
+- `crates/backend-cuda/src/kernels_tiled_pipeline.rs`: `TmaRowMap`（`Contiguous`／`Strided`）・`render_tma_source_128x64`・`tiled_pipeline_tma_128x64_f32_source`・定数 `TP_TMA128_A_BOX_BYTES`（8192）／`TP_TMA128_B_BOX_BYTES`（4096）／`TP_TMA128_EXPECT_TX_BYTES`（12288）。`TP_TMA_HELPER`／`TP_TMA_PREFIX`／`TP_TMA_TILE_CORE`／`TP_TMA_SUFFIX` は 64×64 版と共有し、`TP_*` マクロの値だけを `TP128_*` 由来へ差し替える。本番の cp.async 断片（`TP_TILE_CORE`・`TP128_TILE_CORE` 等）は無変更（固定ハッシュテストが無変更で緑）。
+- `crates/backend-cuda/src/gemm.rs::tma_tiled_pipeline`: `compile_tiled_pipeline_tma_128x64_variant(device, swizzle, rows)` を追加。`TmaTiledPipelineFunction`／`TmaTiledPipelineMaps` に `tile`・`rows` を保持させ、`prepare_tiled_pipeline_tma_maps` の box 寸法と `launch_tiled_pipeline_tma_f32_prepared` の grid／block を `func.tile` から導出する。func と maps の tile・rows の不一致は `TiledPipelineContextMismatch` で拒否する。
+- `crates/backend-cuda/src/lib.rs`: `TmaRowMap` を `internal-diagnostics` ゲートで公開。facade の API は追加しない。
+
+### 11.2 腕・REQ-8
+
+- 本番 128×64 は A の smem 行を連続割り当て（`ty*8+i`）すると生じる 8 行差の 2-way バンク衝突をソフトウェア XOR（`(row>>3)&3`）で避けている。TMA はハードウェアが smem へ書くためこの swizzle は移植できない。
+- **`Contiguous`**: swizzle なし・本番と同じ担当行。同じタイルで TMA ロードと cp.async ロードを比べる純粋な比較腕。A フラグメント読みに 2-way 衝突が残る（原因の帰属用）。
+- **`Strided`**: swizzle なし・担当行を `ty + 16*i` に変更。warp 内の 2 つの `ty` が隣接行（64B 差 = バンク差 16）を読むため衝突しない（単体テスト `tma128_strided_rows_avoid_a_read_bank_conflicts` がホスト側モデルで 2-way 対 1-way を確認）。各要素の `fmaf` 連鎖（`acc=+0.0` から kk 昇順の単一連鎖）は不変で bit 中立。
+- **B64 は 128×64 で fail-closed 拒否**（`InvalidKernelConfig`）。`(row>>1)&3` は `row → row+8` で不変（周期 8 行）で、衝突する行を分けられない。
+- REQ-8 のガード（タイル起点ガード・`s < num_k_tiles`・エピローグの `if (r < m && cc < n)`・mbarrier ポーリング上限と timed_out 時の NaN センチネル）は Stage 1 の TMA コアと同一。smem は 3 段で 36,864 B（静的 48 KiB 未満。const assert で検査）で動的 smem は不要。
+
+### 11.3 新規 `unsafe`
+
+**新しい `unsafe` キーワードは 0 件**（差分の `unsafe` を含む追加行はコメントのみ）。Stage 1 の 3 箇所（`DeviceRepr` マーカー実装・`cuTensorMapEncodeTiled` 呼び出し・`launch_builder(...).launch(cfg)` ブロック）を無変更で再利用し、128×64 用の関数コピーはしていない。SAFETY コメントは「grid／block・box 寸法・expect_tx が同じ `func.tile` から導出され、func と maps のタイル一致を検査済み」という根拠へ更新した。想定外の動的 smem 等で新しい `unsafe` が要る場合は実装を止めて所有者へ上げる。
+
+### 11.4 検証状態
+
+- CI 相当（GPU 不要）: 静的テスト（ソース構造・REQ-8 ガード行・`#define` と Rust 定数の一致・行割り当ての全単射・バンクモデル・ラベル一意性・launch config）と、本番の固定ハッシュが無変更で緑であること、`cargo clippy --workspace --all-targets --all-features -- -D warnings` が緑であることを確認した。
+- **GB10 未実測**。bit 一致（ゲート A）の `#[ignore]` テストは `crates/backend-cuda/tests/cpu_cuda_tiled_pipeline_tma_parity.rs` に追加済みで、実行は #3215 の GB10 実測に委ねる。NVRTC 実コンパイルもこの実装セッションでは未実施（Mac 開発機）。実機でのコンパイル・bit 一致が確認されるまで「bit 一致」は主張しない。
+- 実行コマンド: `cargo test -p fandhe-ai-backend-cuda --release --features internal-diagnostics --test cpu_cuda_tiled_pipeline_tma_parity -- --ignored --nocapture`。比較相手は同タイルの本番 128×64 cp.async（`compile_tiled_pipeline_128x64_variant(dev, 3)`）。
+
+### 11.5 #3215 への申し送り
+
+- ベンチ列: `gemm_tiled_pipeline_bench` に `tma128_none_gpu_only_tflops`・`tma128_strided_gpu_only_tflops` と、`pipeline128x64_gpu_only` との比（`tma128_*_over_pipeline128x64_gpu_only`）を追加した。
+- **目標値**（#3185 の cuBLAS fp32 **純カーネル**時間。`docs/perf/opp-kernel-gb10.md`）: N=1024: 0.137 ms・N=2048: 0.974 ms・N=4096: 7.96 ms（約 15.7／17.6／17.3 TFLOPS）。これは目標値であって測定値ではない。fandhe 側の既存列は起動＋同期を含む wall 時計で、純カーネル同士の比較ではない点に注意する（時計の違いは同 doc の注記を参照）。
+- 本番結線（const ゲート・形状分岐 N≥512 等・tensor map キャッシュ）は ADOPT 後の別 PR。`TILED_PIPELINE_128X64_PRODUCTION_ENABLED` 同型の定数を今入れていない理由: 既定ビルドで参照先がない const は `dead_code` で `-D warnings` に落ち、参照させると TMA の `unsafe` を既定ビルドへ持ち込むことになる。

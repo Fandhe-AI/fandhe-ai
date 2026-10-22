@@ -81,11 +81,25 @@
 //! 物理配置仮説の実機性能を記録するためのものであり、本イシューでも
 //! `select_tiled_f32_kernel`／`CudaGemm::new` への本番結線は行わない
 //! （`docs/backend-cuda-tma-gemm-load-design.md` §6「スコープ外」）。
+//!
+//! イシュー #3214（TMA Stage 2。候補 C1）: 128×64 タイルへ TMA を適用した
+//! 2 腕（`tma128_none`＝本番 128×64 cp.async と同じ担当行／
+//! `tma128_strided`＝A フラグメント読みを間隔割り当てにしたバンク衝突
+//! 回避腕）の GPU-only 列を追加する。主判定は **同一 128×64 タイル・同一
+//! 3 stage の `pipeline128x64_gpu_only` との比**
+//! （`tma128_*_over_pipeline128x64_gpu_only`。ロード命令とバンク配置の違い
+//! のみを表す）。目標値（#3185 実測の cuBLAS fp32 **純カーネル**時間
+//! N=1024: 0.137 ms・N=2048: 0.974 ms・N=4096: 7.96 ms）は TFLOPS
+//! に直すと約 15.7／17.6／17.3 であり、本ベンチの列はいずれも
+//! 起動＋同期の wall 時計のため **純カーネル同士の比較ではない**
+//! （時計の違いは `docs/perf/opp-kernel-gb10.md`）。ADOPT／REJECT の判定は
+//! #3215 が行い、本イシューは判定しない。
 
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
 use fandhe_ai_backend_cuda::{
-    CudaDevice, CudaError, CudaGemm, TiledPipelineFunction, TmaSwizzleA, TmaTiledPipelineFunction,
+    CudaDevice, CudaError, CudaGemm, TiledPipelineFunction, TmaRowMap, TmaSwizzleA,
+    TmaTiledPipelineFunction,
 };
 
 /// 128×64×16 pipeline カーネル（イシュー #1343）の既定ステージ数。
@@ -387,6 +401,37 @@ fn main() {
         }
     };
 
+    // イシュー #3214: 128×64 TMA 版（Stage 2。候補 C1）の 2 腕。swizzle は
+    // 128×64 では `None` のみ（B64 は fail-closed で拒否される）。
+    let tma128_none_func = match CudaGemm::compile_tiled_pipeline_tma_128x64_variant(
+        &device,
+        TmaSwizzleA::None,
+        TmaRowMap::Contiguous,
+    ) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            println!(
+                "tiled pipeline TMA 128x64 (rows=Contiguous) compilation failed ({e}); \
+                 tma128_none column will be skipped."
+            );
+            None
+        }
+    };
+    let tma128_strided_func = match CudaGemm::compile_tiled_pipeline_tma_128x64_variant(
+        &device,
+        TmaSwizzleA::None,
+        TmaRowMap::Strided,
+    ) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            println!(
+                "tiled pipeline TMA 128x64 (rows=Strided) compilation failed ({e}); \
+                 tma128_strided column will be skipped."
+            );
+            None
+        }
+    };
+
     for size in [256usize, 512, 1024, 2048, 4096] {
         let config = MeasurementConfig::default();
 
@@ -444,6 +489,37 @@ fn main() {
                 }
             }
         });
+
+        // イシュー #3214: 128×64 TMA 版の GPU-only 列（計測コアは 64×64 の
+        // TMA 列と共通。func がタイルを保持するため同じ関数を使える）。
+        let tma128_none_gpu_only = tma128_none_func.as_ref().and_then(|func| {
+            match measure_tiled_pipeline_tma_gpu_only(&gemm, func, size, &config) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    println!(
+                        "size={size}: tma128_none GPU-only measurement failed ({e}); skipping."
+                    );
+                    None
+                }
+            }
+        });
+        let tma128_strided_gpu_only = tma128_strided_func.as_ref().and_then(|func| {
+            match measure_tiled_pipeline_tma_gpu_only(&gemm, func, size, &config) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    println!(
+                        "size={size}: tma128_strided GPU-only measurement failed ({e}); skipping."
+                    );
+                    None
+                }
+            }
+        });
+        let ratio_over_p128 = |num: Option<f64>| match (pipeline128x64_gpu_only, num) {
+            (Some(p128), Some(v)) if p128 != 0.0 => format!("{:.4}", v / p128),
+            _ => "n/a".to_string(),
+        };
+        let tma128_none_over_pipeline128x64_gpu_only = ratio_over_p128(tma128_none_gpu_only);
+        let tma128_strided_over_pipeline128x64_gpu_only = ratio_over_p128(tma128_strided_gpu_only);
 
         let fmt = |v: Option<f64>| v.map_or("n/a".to_string(), |x| format!("{x:.4}"));
         // 転送込み同士（`tiled_f32` vs `pipeline3`）の比率。
@@ -507,7 +583,10 @@ fn main() {
              pipeline128x64_gpu_only_tflops={} pipeline128x64_over_pipeline3_gpu_only={} | \
              tma_none_gpu_only_tflops={} tma_none_over_pipeline3_gpu_only={} \
              tma_none_over_pipeline128x64_gpu_only={} | tma_b64_gpu_only_tflops={} \
-             tma_b64_over_pipeline3_gpu_only={} tma_b64_over_pipeline128x64_gpu_only={}",
+             tma_b64_over_pipeline3_gpu_only={} tma_b64_over_pipeline128x64_gpu_only={} | \
+             tma128_none_gpu_only_tflops={} tma128_none_over_pipeline128x64_gpu_only={} \
+             tma128_strided_gpu_only_tflops={} \
+             tma128_strided_over_pipeline128x64_gpu_only={}",
             tiled,
             tiled_classic,
             dispatch_over_classic,
@@ -524,6 +603,10 @@ fn main() {
             fmt(tma_b64_gpu_only),
             tma_b64_over_pipeline3_gpu_only,
             tma_b64_over_pipeline128x64_gpu_only,
+            fmt(tma128_none_gpu_only),
+            tma128_none_over_pipeline128x64_gpu_only,
+            fmt(tma128_strided_gpu_only),
+            tma128_strided_over_pipeline128x64_gpu_only,
         );
     }
 }

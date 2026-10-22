@@ -102,6 +102,11 @@ use std::sync::LazyLock;
 // code になる。
 #[cfg(any(test, feature = "internal-diagnostics"))]
 use crate::error::CudaError;
+#[cfg(any(test, feature = "internal-diagnostics"))]
+use crate::kernels_tiled_pipeline_128x64::{
+    TP128_BK, TP128_BM, TP128_BN, TP128_DEFAULT_STAGES, TP128_MAX_STAGES, TP128_THREAD_M,
+    TP128_THREAD_N, TP128_THREADS_X, TP128_THREADS_Y,
+};
 
 /// ブロックタイル M（C の行方向。64）。
 pub const TP_BM: u32 = 64;
@@ -1330,10 +1335,110 @@ pub fn tma_swizzled_chunk_a(row: u32, kk: u32) -> u32 {
     swz * 4 + (kk % 4)
 }
 
+/// TMA 版カーネルの「スレッド→A タイル行」割り当て方式（イシュー #3214）。
+///
+/// TMA はハードウェアが smem へ書き込むため、本番 128×64 cp.async 版が
+/// 使うソフトウェア XOR swizzle（`TP128_SWZ_A`）は移植できない。swizzle
+/// なし（`SWIZZLE_NONE`）の密レイアウトで 128×64 を読むと、連続割り当て
+/// （`ty*TP_THREAD_M + i`）では warp 内の隣り合う 2 つの `ty` が 8 行
+/// （= 128 word）離れた行を読み、同一バンクで 2-way 衝突する。本列挙は
+/// その衝突を「どのスレッドがどの行を担当するか」の入れ替えだけで
+/// 避けられるかを A/B で切り分けるための腕である。**どちらの腕でも各出力
+/// 要素の `fmaf` 連鎖（`acc = +0.0` から kk 昇順の単一連鎖）は不変**で、
+/// 担当スレッドが変わるだけなので bit 中立（`.claude/rules/coding-rust.md`
+/// の FMA 契約に抵触しない）。`crate::gemm::CudaGemm::
+/// compile_tiled_pipeline_tma_128x64_variant` のパラメータとしてのみ
+/// 露出する（本番既定経路は非到達）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub enum TmaRowMap {
+    /// 連続割り当て（`ty * TP_THREAD_M + i`）。本番 128×64 cp.async と同じ
+    /// 担当行で「同じタイルで TMA ロードと cp.async ロードを比べる」ための
+    /// 純粋な比較腕。A フラグメント読みに 2-way バンク衝突が残る。
+    Contiguous,
+    /// 間隔を空けた割り当て（`ty + TP_THREADS_Y * i`）。warp 内の 2 つの
+    /// `ty` が隣接行（64B 差 = バンク差 16）を読むため swizzle なしでも
+    /// 衝突しない。
+    Strided,
+}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+impl TmaRowMap {
+    /// カーネルソースへ埋め込む `#define TP_TMA_ROW_MODE` の値。
+    pub const fn mode_bit(self) -> u32 {
+        match self {
+            TmaRowMap::Contiguous => 0,
+            TmaRowMap::Strided => 1,
+        }
+    }
+}
+
+/// 128×64 TMA 版: A タイル（`TP128_BM x TP128_BK`）1 box の転送バイト数。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub const TP_TMA128_A_BOX_BYTES: u32 = TP128_BM * TP128_BK * 4;
+/// 128×64 TMA 版: B タイル（`TP128_BK x TP128_BN`）1 box の転送バイト数。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub const TP_TMA128_B_BOX_BYTES: u32 = TP128_BK * TP128_BN * 4;
+/// 128×64 TMA 版: 1 ステージあたりの mbarrier `expect_tx`（A+B 合計）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub const TP_TMA128_EXPECT_TX_BYTES: u32 = TP_TMA128_A_BOX_BYTES + TP_TMA128_B_BOX_BYTES;
+
+// 128×64 TMA 版のコンパイル時契約検査。TMA の box 次元上限（各 256）・
+// 内側次元の 16B 倍数・全段の静的 smem が 48KiB 未満（動的 smem 属性
+// `cuFuncSetAttribute` を要さず新規 unsafe を生まない前提）を機械検証する。
+// smem 見積りは 2 配列を `TP_TMA_SMEM_ALIGN` 整列で確保する際の最大
+// パディング（各配列 1 個分）と mbarrier 配列（8B x 段数）・`timed_out`
+// （4B）を含む。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+const _: () = assert!(
+    TP128_BM <= 256 && TP128_BN <= 256 && TP128_BK <= 256,
+    "TMA box dimensions must not exceed 256 elements"
+);
+#[cfg(any(test, feature = "internal-diagnostics"))]
+const _: () = assert!(
+    (TP128_BK * 4).is_multiple_of(16) && (TP128_BN * 4).is_multiple_of(16),
+    "TMA box inner dimension must be a multiple of 16 bytes"
+);
+#[cfg(any(test, feature = "internal-diagnostics"))]
+const _: () = assert!(
+    (TP_TMA128_A_BOX_BYTES + TP_TMA128_B_BOX_BYTES) * TP128_MAX_STAGES
+        + 2 * TP_TMA_SMEM_ALIGN
+        + 8 * TP128_MAX_STAGES
+        + 4
+        < crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES,
+    "128x64 TMA static shared memory (at TP128_MAX_STAGES) must stay below the 48KiB static limit"
+);
+
+/// タイル構成ごとの TMA box 幾何（`render_tma_defines` の入力）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[derive(Clone, Copy)]
+struct TmaTileGeometry {
+    a_box_bytes: u32,
+    b_box_bytes: u32,
+    expect_tx_bytes: u32,
+    threads_y: u32,
+}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+const TMA_GEOMETRY_64X64: TmaTileGeometry = TmaTileGeometry {
+    a_box_bytes: TP_TMA_A_BOX_BYTES,
+    b_box_bytes: TP_TMA_B_BOX_BYTES,
+    expect_tx_bytes: TP_TMA_EXPECT_TX_BYTES,
+    threads_y: TP_THREADS_Y,
+};
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+const TMA_GEOMETRY_128X64: TmaTileGeometry = TmaTileGeometry {
+    a_box_bytes: TP_TMA128_A_BOX_BYTES,
+    b_box_bytes: TP_TMA128_B_BOX_BYTES,
+    expect_tx_bytes: TP_TMA128_EXPECT_TX_BYTES,
+    threads_y: TP128_THREADS_Y,
+};
+
 /// [`render_tma_source`] 用の TMA 固有 `#define` 群
 /// （[`render_defines`] が生成する共通定義に続けて連結する）。
 #[cfg(any(test, feature = "internal-diagnostics"))]
-fn render_tma_defines(swizzle: TmaSwizzleA) -> String {
+fn render_tma_defines(swizzle: TmaSwizzleA, rows: TmaRowMap, geometry: TmaTileGeometry) -> String {
     format!(
         "#define TP_TMA_A_BOX_BYTES {a_box}\n\
          #define TP_TMA_B_BOX_BYTES {b_box}\n\
@@ -1341,23 +1446,83 @@ fn render_tma_defines(swizzle: TmaSwizzleA) -> String {
          #define TP_TMA_SMEM_ALIGN {align}\n\
          #define TP_TMA_POLL_LIMIT {poll_limit}u\n\
          #define TP_TMA_SWZ_A_MODE {swz_mode}\n\
+         #define TP_TMA_ROW_MODE {row_mode}\n\
+         #define TP_THREADS_Y {threads_y}\n\
          \n",
-        a_box = TP_TMA_A_BOX_BYTES,
-        b_box = TP_TMA_B_BOX_BYTES,
-        expect_tx = TP_TMA_EXPECT_TX_BYTES,
+        a_box = geometry.a_box_bytes,
+        b_box = geometry.b_box_bytes,
+        expect_tx = geometry.expect_tx_bytes,
         align = TP_TMA_SMEM_ALIGN,
         poll_limit = TP_TMA_POLL_LIMIT,
         swz_mode = swizzle.mode_bit(),
+        row_mode = rows.mode_bit(),
+        threads_y = geometry.threads_y,
     )
 }
 
 /// TMA 版カーネルソース全文を生成する（[`render_source`] の TMA 版）。
 #[cfg(any(test, feature = "internal-diagnostics"))]
 pub fn render_tma_source(stages: u32, swizzle: TmaSwizzleA) -> String {
+    assemble_tma_source(
+        render_defines(stages),
+        swizzle,
+        TmaRowMap::Contiguous,
+        TMA_GEOMETRY_64X64,
+    )
+}
+
+/// 128×64 版 TMA カーネルソース全文を生成する（イシュー #3214）。
+///
+/// タイル寸法 `TP_*` マクロの値だけを `kernels_tiled_pipeline_128x64::TP128_*`
+/// へ差し替え、`TP_TMA_HELPER`／`TP_TMA_PREFIX`／`TP_TMA_TILE_CORE`／
+/// `TP_TMA_SUFFIX` は 64×64 版と共有する（K 連鎖・REQ-8 ガード・mbarrier
+/// 待機を共通化し、差分をタイル寸法と行割り当てに限る）。swizzle は常に
+/// `None`（B64 は 128×64 では成立しないためホスト側 API が fail-closed で
+/// 拒否する。`gemm.rs::tma_tiled_pipeline` 参照）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub fn render_tma_source_128x64(stages: u32, rows: TmaRowMap) -> String {
+    assemble_tma_source(
+        render_defines_128x64_as_tp(stages),
+        TmaSwizzleA::None,
+        rows,
+        TMA_GEOMETRY_128X64,
+    )
+}
+
+/// 128×64 の寸法を TMA コア共通の `TP_*` マクロ名で出力する
+/// （[`render_defines`] の 128×64 版。`TP_A_PAD`/`TP_B_PAD` は密レイアウトの
+/// TMA 版では使わないため出力しない）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+fn render_defines_128x64_as_tp(stages: u32) -> String {
+    format!(
+        "\n#define TP_BM {bm}\n\
+         #define TP_BN {bn}\n\
+         #define TP_BK {bk}\n\
+         #define TP_THREAD_M {thread_m}\n\
+         #define TP_THREAD_N {thread_n}\n\
+         #define TP_THREADS_X {threads_x}\n\
+         #define TP_STAGES {stages}\n\
+         \n",
+        bm = TP128_BM,
+        bn = TP128_BN,
+        bk = TP128_BK,
+        thread_m = TP128_THREAD_M,
+        thread_n = TP128_THREAD_N,
+        threads_x = TP128_THREADS_X,
+        stages = stages,
+    )
+}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+fn assemble_tma_source(
+    defines: String,
+    swizzle: TmaSwizzleA,
+    rows: TmaRowMap,
+    geometry: TmaTileGeometry,
+) -> String {
     format!(
         "{defines}{tma_defines}{helper}{prefix}{core}{suffix}",
-        defines = render_defines(stages),
-        tma_defines = render_tma_defines(swizzle),
+        tma_defines = render_tma_defines(swizzle, rows, geometry),
         helper = TP_TMA_HELPER,
         prefix = TP_TMA_PREFIX,
         core = TP_TMA_TILE_CORE,
@@ -1386,6 +1551,15 @@ typedef struct __align__(128) {
     as_tile[stage][row][((((kk) / 4) ^ (((row) >> 1) & 3)) * 4 + ((kk) % 4))]
 #else
 #define TP_TMA_A_AT(stage, row, kk) as_tile[stage][row][kk]
+#endif
+
+// スレッド内ローカル行 i（0..TP_THREAD_M）が担当する A/C タイル内の行。
+// 連続: ty*TP_THREAD_M+i／間隔: ty+TP_THREADS_Y*i（`TmaRowMap` 参照）。
+// どちらも 0..TP_BM を重複なく覆い、各要素の fmaf 連鎖は変わらない。
+#if TP_TMA_ROW_MODE == 1
+#define TP_TMA_ROW(i) (ty + TP_THREADS_Y * (i))
+#else
+#define TP_TMA_ROW(i) (ty * TP_THREAD_M + (i))
 #endif
 
 "#;
@@ -1455,7 +1629,6 @@ const TP_TMA_TILE_CORE: &str = r#"    int tid = threadIdx.x;
     int tx = tid % TP_THREADS_X;
     int ty = tid / TP_THREADS_X;
 
-    int thread_row0 = block_row0 + ty * TP_THREAD_M;
     int thread_col0 = block_col0 + tx * TP_THREAD_N;
 
     float acc[TP_THREAD_M][TP_THREAD_N] = {};
@@ -1541,7 +1714,7 @@ const TP_TMA_TILE_CORE: &str = r#"    int tid = threadIdx.x;
                 float a_reg[TP_THREAD_M];
 #pragma unroll
                 for (int i = 0; i < TP_THREAD_M; ++i) {
-                    a_reg[i] = TP_TMA_A_AT(compute_stage, ty * TP_THREAD_M + i, kk);
+                    a_reg[i] = TP_TMA_A_AT(compute_stage, TP_TMA_ROW(i), kk);
                 }
                 float b_reg[TP_THREAD_N];
 #pragma unroll
@@ -1594,7 +1767,7 @@ const TP_TMA_TILE_CORE: &str = r#"    int tid = threadIdx.x;
     for (int i = 0; i < TP_THREAD_M; ++i) {
 #pragma unroll
         for (int j = 0; j < TP_THREAD_N; ++j) {
-            int r = thread_row0 + i;
+            int r = block_row0 + TP_TMA_ROW(i);
             int cc = thread_col0 + j;
             if (r < m && cc < n) {
                 if (timed_out) {
@@ -1635,6 +1808,25 @@ static TILED_PIPELINE_TMA_F32_SOURCE_NONE: LazyLock<String> =
 #[cfg(any(test, feature = "internal-diagnostics"))]
 static TILED_PIPELINE_TMA_F32_SOURCE_B64: LazyLock<String> =
     LazyLock::new(|| render_tma_source(TP_DEFAULT_STAGES, TmaSwizzleA::B64));
+
+/// 128×64 版 TMA カーネルソース（`rows` 腕ごとに 1 本。イシュー #3214。
+/// `internal-diagnostics` feature 限定 opt-in API 〈`crate::gemm::CudaGemm::
+/// compile_tiled_pipeline_tma_128x64_variant`〉からのみ呼ばれ、本番既定経路
+/// 〈`CudaGemm::new`〉は生成しない）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+pub fn tiled_pipeline_tma_128x64_f32_source(rows: TmaRowMap) -> &'static str {
+    match rows {
+        TmaRowMap::Contiguous => &TILED_PIPELINE_TMA_128X64_F32_SOURCE_CONTIGUOUS,
+        TmaRowMap::Strided => &TILED_PIPELINE_TMA_128X64_F32_SOURCE_STRIDED,
+    }
+}
+
+#[cfg(any(test, feature = "internal-diagnostics"))]
+static TILED_PIPELINE_TMA_128X64_F32_SOURCE_CONTIGUOUS: LazyLock<String> =
+    LazyLock::new(|| render_tma_source_128x64(TP128_DEFAULT_STAGES, TmaRowMap::Contiguous));
+#[cfg(any(test, feature = "internal-diagnostics"))]
+static TILED_PIPELINE_TMA_128X64_F32_SOURCE_STRIDED: LazyLock<String> =
+    LazyLock::new(|| render_tma_source_128x64(TP128_DEFAULT_STAGES, TmaRowMap::Strided));
 
 /// 任意のステージ数（[`TP_MIN_STAGES`]..=[`TP_MAX_STAGES`]）の TMA 版
 /// カーネルソースをオンデマンド生成する（[`tiled_pipeline_persistent_
@@ -2453,5 +2645,201 @@ mod tests {
                  (open={open}, close={close})"
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // 128×64 TMA（イシュー #3214・候補 C1）
+    // -------------------------------------------------------------------
+
+    const TMA128_ROW_ARMS: [TmaRowMap; 2] = [TmaRowMap::Contiguous, TmaRowMap::Strided];
+
+    /// 128×64 TMA ソースの波括弧均衡・TMA 命令の存在・cp.async ロード命令の
+    /// 不在・単一関数であることを検査する。
+    #[test]
+    fn tma128_source_structure_is_sound() {
+        for rows in TMA128_ROW_ARMS {
+            let source = tiled_pipeline_tma_128x64_f32_source(rows);
+            assert_eq!(
+                source.matches('{').count(),
+                source.matches('}').count(),
+                "128x64 TMA ({rows:?}) の波括弧数が不均衡です"
+            );
+            for needle in [
+                "mbarrier.init.shared::cta.b64",
+                "mbarrier.arrive.expect_tx.shared::cta.b64",
+                "cp.async.bulk.tensor.2d.shared::cta.global.",
+                "mbarrier.try_wait.parity.shared::cta.b64",
+                "fmaf(",
+            ] {
+                assert!(
+                    source.contains(needle),
+                    "({rows:?}) が `{needle}` を含みません"
+                );
+            }
+            for needle in [
+                "cp.async.cg.shared.global",
+                "cp.async.commit_group",
+                "cp.async.wait_group",
+                "atomicAdd",
+            ] {
+                assert!(
+                    !source.contains(needle),
+                    "({rows:?}) が `{needle}` を含んでいます"
+                );
+            }
+            assert_eq!(source.matches("extern \"C\" __global__ void").count(), 1);
+        }
+    }
+
+    /// REQ-8: タイル起点ガード・guarded store（行は `TP_TMA_ROW` 経由）・
+    /// ポーリング上限・timed_out の NaN センチネルが 128×64 でも残る。
+    /// needle は行頭アンカー（インデント込みの完全一致行）で、コメント内の
+    /// 同一文字列による素通りを防ぐ。
+    #[test]
+    fn tma128_source_retains_req8_guards() {
+        for rows in TMA128_ROW_ARMS {
+            let source = tiled_pipeline_tma_128x64_f32_source(rows);
+            let has_line = |line: &str| source.lines().any(|l| l == line);
+            assert!(has_line(
+                "                if (block_row0 < m && block_col0 < n && kt < k) {"
+            ));
+            assert!(has_line("            if (r < m && cc < n) {"));
+            assert!(has_line("            int r = block_row0 + TP_TMA_ROW(i);"));
+            assert!(has_line("            if (s < num_k_tiles) {"));
+            assert!(has_line(
+                "            while (!complete && poll_count < TP_TMA_POLL_LIMIT) {"
+            ));
+            assert!(has_line("                    nan_bits.u = 0x7fc00000u;"));
+            assert!(has_line("    float acc[TP_THREAD_M][TP_THREAD_N] = {};"));
+            assert_eq!(
+                source
+                    .matches("acc[i][j] = fmaf(a_reg[i], b_reg[j], acc[i][j]);")
+                    .count(),
+                1,
+                "単一アキュムレータの fmaf 連鎖がちょうど 1 箇所であること"
+            );
+        }
+    }
+
+    /// `#define` が Rust 側定数（TP128_* 由来・box バイト数・expect_tx）と
+    /// 一致する（8192 / 4096 / 12288 の期待値も固定して桁ドリフトを検出）。
+    #[test]
+    fn tma128_defines_match_rust_constants() {
+        assert_eq!(TP_TMA128_A_BOX_BYTES, 8192);
+        assert_eq!(TP_TMA128_B_BOX_BYTES, 4096);
+        assert_eq!(TP_TMA128_EXPECT_TX_BYTES, 12288);
+        for rows in TMA128_ROW_ARMS {
+            let source = tiled_pipeline_tma_128x64_f32_source(rows);
+            for (name, value) in [
+                ("TP_BM", TP128_BM),
+                ("TP_BN", TP128_BN),
+                ("TP_BK", TP128_BK),
+                ("TP_THREAD_M", TP128_THREAD_M),
+                ("TP_THREAD_N", TP128_THREAD_N),
+                ("TP_THREADS_X", TP128_THREADS_X),
+                ("TP_STAGES", TP128_DEFAULT_STAGES),
+                ("TP_THREADS_Y", TP128_THREADS_Y),
+                ("TP_TMA_A_BOX_BYTES", TP_TMA128_A_BOX_BYTES),
+                ("TP_TMA_B_BOX_BYTES", TP_TMA128_B_BOX_BYTES),
+                ("TP_TMA_EXPECT_TX_BYTES", TP_TMA128_EXPECT_TX_BYTES),
+                ("TP_TMA_SMEM_ALIGN", TP_TMA_SMEM_ALIGN),
+                ("TP_TMA_SWZ_A_MODE", 0),
+                ("TP_TMA_ROW_MODE", rows.mode_bit()),
+            ] {
+                let needle = format!("#define {name} {value}\n");
+                assert!(
+                    source.contains(&needle),
+                    "({rows:?}) の `{needle:?}` がありません"
+                );
+            }
+        }
+    }
+
+    /// 本番の cp.async 断片は無変更（受入条件 1 の機械的根拠）。固定ハッシュ
+    /// テスト（既存）に加え、TMA 側の変更が `TP_TILE_CORE` へ波及していない
+    /// ことを、cp.async 系ソースに `TP_TMA` が一切現れないことで確認する。
+    #[test]
+    fn production_cp_async_sources_do_not_reference_tma_macros() {
+        assert!(!tiled_pipeline_f32_source().contains("TP_TMA"));
+        assert!(
+            !crate::kernels_tiled_pipeline_128x64::tiled_pipeline_128x64_f32_source()
+                .contains("TP_TMA")
+        );
+    }
+
+    /// カーネル側 `TP_TMA_ROW` の定義文字列とホスト側モデル
+    /// （[`tma128_model_row`]）の式がドリフトしていないこと。
+    #[test]
+    fn tma_row_macro_matches_host_model_formula() {
+        let source = tiled_pipeline_tma_128x64_f32_source(TmaRowMap::Strided);
+        assert!(source.contains("#define TP_TMA_ROW(i) (ty + TP_THREADS_Y * (i))"));
+        assert!(source.contains("#define TP_TMA_ROW(i) (ty * TP_THREAD_M + (i))"));
+    }
+
+    /// ホスト側モデル: スレッド `ty` のローカル行 `i` が担当するタイル内の行。
+    fn tma128_model_row(rows: TmaRowMap, ty: u32, i: u32) -> u32 {
+        match rows {
+            TmaRowMap::Contiguous => ty * TP128_THREAD_M + i,
+            TmaRowMap::Strided => ty + TP128_THREADS_Y * i,
+        }
+    }
+
+    /// どちらの腕も 0..TP128_BM を重複なく覆う（各出力行をちょうど 1 スレッド
+    /// が担当する = bit 中立の前提）。
+    #[test]
+    fn tma128_row_maps_are_bijections() {
+        for rows in TMA128_ROW_ARMS {
+            let mut seen = vec![false; TP128_BM as usize];
+            for ty in 0..TP128_THREADS_Y {
+                for i in 0..TP128_THREAD_M {
+                    let r = tma128_model_row(rows, ty, i);
+                    assert!(r < TP128_BM, "({rows:?}) 行 {r} が範囲外");
+                    assert!(!seen[r as usize], "({rows:?}) 行 {r} が重複");
+                    seen[r as usize] = true;
+                }
+            }
+            assert!(seen.iter().all(|&x| x));
+        }
+    }
+
+    /// warp 内の A フラグメント読み（swizzle なしの密レイアウト: 語アドレス
+    /// = `row * TP128_BK + kk`）で、同一バンクに異なる語アドレスが何個
+    /// 当たるかの最大値（1 = 衝突なし・2 = 2-way）。同一 `ty` の lane は同一
+    /// アドレスを読むためブロードキャストで衝突に数えない。
+    fn tma128_a_read_max_ways(rows: TmaRowMap) -> usize {
+        let mut worst = 1;
+        for kk in 0..TP128_BK {
+            for i in 0..TP128_THREAD_M {
+                for warp in 0..(TP128_THREADS_Y * TP128_THREADS_X / 32) {
+                    let mut by_bank: [Vec<u32>; 32] = std::array::from_fn(|_| Vec::new());
+                    for lane in 0..32 {
+                        let tid = warp * 32 + lane;
+                        let ty = tid / TP128_THREADS_X;
+                        let addr = tma128_model_row(rows, ty, i) * TP128_BK + kk;
+                        let bank = (addr % 32) as usize;
+                        if !by_bank[bank].contains(&addr) {
+                            by_bank[bank].push(addr);
+                        }
+                    }
+                    worst = worst.max(by_bank.iter().map(Vec::len).max().unwrap_or(1));
+                }
+            }
+        }
+        worst
+    }
+
+    /// 連続割り当ては 2-way 衝突（対照）・間隔割り当ては衝突なし。
+    #[test]
+    fn tma128_strided_rows_avoid_a_read_bank_conflicts() {
+        assert_eq!(tma128_a_read_max_ways(TmaRowMap::Contiguous), 2);
+        assert_eq!(tma128_a_read_max_ways(TmaRowMap::Strided), 1);
+    }
+
+    /// 64×64 版の TMA ソースは Contiguous 固定（既存の担当行を維持）。
+    #[test]
+    fn tma64_source_keeps_contiguous_rows() {
+        let source = tiled_pipeline_tma_f32_source(TmaSwizzleA::None);
+        assert!(source.contains("#define TP_TMA_ROW_MODE 0\n"));
+        assert!(source.contains("#define TP_THREADS_Y 16\n"));
     }
 }

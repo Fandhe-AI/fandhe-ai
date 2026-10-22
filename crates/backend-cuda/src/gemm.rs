@@ -6405,14 +6405,15 @@ mod tma_tiled_pipeline {
 
     use crate::device::CudaDevice;
     use crate::error::CudaError;
-    use crate::kernels_tiled_pipeline::{self, TmaSwizzleA};
+    use crate::kernels_tiled_pipeline::{self, TmaRowMap, TmaSwizzleA};
+    use crate::kernels_tiled_pipeline_128x64;
     use crate::memory::GuardedSlice;
     use crate::module_cache::load_function_cached;
     use crate::nvrtc::CompiledDims;
 
     use super::{
-        CudaGemm, tiled_pipeline_alignment_ok, validate_gemm_dims, validate_output_len,
-        validate_tiled_pipeline_k_bound,
+        CudaGemm, TiledPipelineTile, tiled_pipeline_alignment_ok, tiled_pipeline_launch_config,
+        validate_gemm_dims, validate_output_len, validate_tiled_pipeline_k_bound,
     };
 
     /// `cuTensorMapEncodeTiled`（driver API）が書き込む `CUtensorMap` の
@@ -6579,10 +6580,19 @@ mod tma_tiled_pipeline {
     /// 生成時の `CUtensorMapSwizzle` 選択と一致させる（マップ側と
     /// カーネル側の swizzle 設定が食い違うと、カーネルが誤った物理配置を
     /// 読むため）。
+    ///
+    /// イシュー #3214: `tile`（64×64／128×64）と `rows`（スレッド→行割り当て
+    /// 腕。[`TmaRowMap`]）も保持する。tensor map の box 寸法・grid・カーネル
+    /// 側 `TP_*` マクロがタイルで食い違うと範囲外 TMA 転送や誤った行の読みに
+    /// なるため、[`CudaGemm::prepare_tiled_pipeline_tma_maps`]／
+    /// [`CudaGemm::launch_tiled_pipeline_tma_f32_prepared`] はこれらの一致を
+    /// fail-closed に検査する。
     pub struct TmaTiledPipelineFunction {
         func: CudaFunction,
         context_ptr: usize,
         swizzle: TmaSwizzleA,
+        tile: TiledPipelineTile,
+        rows: TmaRowMap,
     }
 
     /// [`TmaTiledPipelineMaps`] が保持する準備結果の種別。`m == 0 ||
@@ -6630,6 +6640,8 @@ mod tma_tiled_pipeline {
         dims: (u32, u32, u32),
         context_ptr: usize,
         swizzle: TmaSwizzleA,
+        tile: TiledPipelineTile,
+        rows: TmaRowMap,
     }
 
     /// `swizzle` 腕ごとに一意な `CudaKernelDescriptor` ラベルを返す
@@ -6647,6 +6659,32 @@ mod tma_tiled_pipeline {
             TmaSwizzleA::None => "tiled_pipeline_f32_tma_variant_none",
             TmaSwizzleA::B64 => "tiled_pipeline_f32_tma_variant_b64",
         }
+    }
+
+    /// 128×64 TMA 版（イシュー #3214）の腕ごとに一意な descriptor ラベル。
+    /// [`tma_descriptor_label`] と同じ理由（モジュールキャッシュ衝突回避）で
+    /// `match` を網羅にする。64×64 版のラベルとも重複させない。
+    fn tma_descriptor_label_128x64(rows: TmaRowMap) -> &'static str {
+        match rows {
+            TmaRowMap::Contiguous => "tiled_pipeline_f32_tma_128x64_variant_contiguous",
+            TmaRowMap::Strided => "tiled_pipeline_f32_tma_128x64_variant_strided",
+        }
+    }
+
+    /// TMA の前提（compute capability 9.0 以上）を検査する（64×64／128×64
+    /// 共通。NVRTC 自体は通る環境があり得るため実行前に fail-closed 拒否）。
+    fn require_tma_capable(device: &CudaDevice) -> Result<(), CudaError> {
+        let (major, minor) = device.compute_capability();
+        if major < 9 {
+            return Err(CudaError::TiledPipelineUnavailable {
+                detail: format!(
+                    "TMA (cp.async.bulk.tensor) requires compute capability >= 9.0; this \
+                     device reports {major}.{minor} (arch={arch})",
+                    arch = device.arch()
+                ),
+            });
+        }
+        Ok(())
     }
 
     impl CudaGemm {
@@ -6667,17 +6705,7 @@ mod tma_tiled_pipeline {
             device: &CudaDevice,
             swizzle: TmaSwizzleA,
         ) -> Result<TmaTiledPipelineFunction, CudaError> {
-            let (major, _minor) = device.compute_capability();
-            if major < 9 {
-                return Err(CudaError::TiledPipelineUnavailable {
-                    detail: format!(
-                        "TMA (cp.async.bulk.tensor) requires compute capability >= 9.0; this \
-                         device reports {major}.{minor} (arch={arch})",
-                        minor = device.compute_capability().1,
-                        arch = device.arch()
-                    ),
-                });
-            }
+            require_tma_capable(device)?;
 
             let source = kernels_tiled_pipeline::tiled_pipeline_tma_f32_source(swizzle);
             let descriptor_label = tma_descriptor_label(swizzle);
@@ -6698,6 +6726,63 @@ mod tma_tiled_pipeline {
                 func,
                 context_ptr,
                 swizzle,
+                tile: TiledPipelineTile::Bm64Bn64,
+                rows: TmaRowMap::Contiguous,
+            })
+        }
+
+        /// 128×64 TMA 版カーネル（イシュー #3214・Stage 2。候補 C1）を
+        /// `device` 上でコンパイルする。本番 128×64 cp.async 版
+        /// （[`Self::compile_tiled_pipeline_128x64_variant`]）と同じタイル・
+        /// 同じ K 連鎖で、ロード段だけを TMA へ置き換えた派生。
+        ///
+        /// - `swizzle`: 128×64 では [`TmaSwizzleA::None`] のみ受理する。
+        ///   `B64`（64B ハードウェア swizzle。周期 8 行）は、本番版が衝突回避に
+        ///   使う `(row>>3)&3` 型の置換を表現できず、`(row>>1)&3` 仮説も
+        ///   `row → row+8` で不変なため衝突する行を分けられない。黙って
+        ///   `None` へ切り替えず `InvalidKernelConfig` で拒否する（fail-closed）。
+        /// - `rows`: スレッド→行割り当て腕（[`TmaRowMap`]）。
+        ///
+        /// compute capability 9.0 未満は [`CudaError::TiledPipelineUnavailable`]。
+        /// **公開面ゲート**: `internal-diagnostics` feature（既定 off）。本番
+        /// 既定経路（`CudaGemm::new`・`select_tiled_f32_kernel`）は本メソッドを
+        /// 一切呼ばない。本番結線は #3215 の A/B で ADOPT された後の別 PR。
+        pub fn compile_tiled_pipeline_tma_128x64_variant(
+            device: &CudaDevice,
+            swizzle: TmaSwizzleA,
+            rows: TmaRowMap,
+        ) -> Result<TmaTiledPipelineFunction, CudaError> {
+            if swizzle != TmaSwizzleA::None {
+                return Err(CudaError::InvalidKernelConfig {
+                    detail: format!(
+                        "128x64 TMA kernel supports only TmaSwizzleA::None (got {swizzle:?}): \
+                         the 64B hardware swizzle has a period of 8 rows and cannot separate \
+                         the rows that conflict on shared-memory banks"
+                    ),
+                });
+            }
+            require_tma_capable(device)?;
+
+            let source = kernels_tiled_pipeline::tiled_pipeline_tma_128x64_f32_source(rows);
+            let descriptor = crate::nvrtc::CudaKernelDescriptor::new_with_compiled_dims(
+                tma_descriptor_label_128x64(rows),
+                fandhe_ai_tensor_core::dispatch::GemmShape::new(0, 0, 0),
+                kernels_tiled_pipeline_128x64::TP128_BM,
+                kernels_tiled_pipeline_128x64::TP128_BN,
+                kernels_tiled_pipeline_128x64::TP128_BK,
+                kernels_tiled_pipeline_128x64::TP128_DEFAULT_STAGES,
+                fandhe_ai_tensor_core::dispatch::DType::F32,
+                CompiledDims::DYNAMIC_ALL,
+            )?;
+            let func =
+                load_function_cached(device, descriptor, source, "gemm_tiled_pipeline_tma_f32")?;
+            let context_ptr = Arc::as_ptr(device.context()) as usize;
+            Ok(TmaTiledPipelineFunction {
+                func,
+                context_ptr,
+                swizzle,
+                tile: TiledPipelineTile::Bm128Bn64,
+                rows,
             })
         }
 
@@ -6781,6 +6866,8 @@ mod tma_tiled_pipeline {
                     dims,
                     context_ptr: self_context_ptr,
                     swizzle: func.swizzle,
+                    tile: func.tile,
+                    rows: func.rows,
                 });
             }
             // `k == 0`: `num_k_tiles == 0` となりテンソルマップを構築
@@ -6801,6 +6888,17 @@ mod tma_tiled_pipeline {
                     dims,
                     context_ptr: self_context_ptr,
                     swizzle: func.swizzle,
+                    tile: func.tile,
+                    rows: func.rows,
+                });
+            }
+
+            if func.tile == TiledPipelineTile::Bm128Bn64 && func.swizzle != TmaSwizzleA::None {
+                return Err(CudaError::InvalidKernelConfig {
+                    detail: format!(
+                        "128x64 TMA kernel supports only TmaSwizzleA::None (got {:?})",
+                        func.swizzle
+                    ),
                 });
             }
 
@@ -6826,6 +6924,21 @@ mod tma_tiled_pipeline {
             // エントリと同じ fail-closed 保護契約〈このファイル冒頭
             // 「`context_cache::begin_driver_call` の capture 排他検査」節
             // 参照〉に反していた）。
+            // box 寸法は func のタイルから決める（イシュー #3214）。カーネル側
+            // `TP_*` マクロ（TP128_* 由来）と 1:1 対応させ、`expect_tx`
+            // （`TP_TMA*_EXPECT_TX_BYTES`）と一致するバイト数だけが転送される。
+            let (tile_bm, tile_bn, tile_bk) = match func.tile {
+                TiledPipelineTile::Bm64Bn64 => (
+                    kernels_tiled_pipeline::TP_BM,
+                    kernels_tiled_pipeline::TP_BN,
+                    kernels_tiled_pipeline::TP_BK,
+                ),
+                TiledPipelineTile::Bm128Bn64 => (
+                    kernels_tiled_pipeline_128x64::TP128_BM,
+                    kernels_tiled_pipeline_128x64::TP128_BN,
+                    kernels_tiled_pipeline_128x64::TP128_BK,
+                ),
+            };
             let (a_map, b_map) = self.with_driver_call(|| {
                 let a_map = encode_tensor_map_2d_f32(
                     &self.stream,
@@ -6833,8 +6946,8 @@ mod tma_tiled_pipeline {
                     &TmaBoxSpec {
                         global_rows: m,
                         global_cols: k,
-                        box_rows: kernels_tiled_pipeline::TP_BM,
-                        box_cols: kernels_tiled_pipeline::TP_BK,
+                        box_rows: tile_bm,
+                        box_cols: tile_bk,
                         swizzle: swizzle_mode,
                     },
                 )?;
@@ -6844,8 +6957,8 @@ mod tma_tiled_pipeline {
                     &TmaBoxSpec {
                         global_rows: k,
                         global_cols: n,
-                        box_rows: kernels_tiled_pipeline::TP_BK,
-                        box_cols: kernels_tiled_pipeline::TP_BN,
+                        box_rows: tile_bk,
+                        box_cols: tile_bn,
                         // B は swizzle 対象外に固定する
                         // （`kernels_tiled_pipeline.rs`「swizzle」節。B box の
                         // 内側次元が 64B swizzle アトムを跨ぐため）。
@@ -6862,6 +6975,8 @@ mod tma_tiled_pipeline {
                 dims,
                 context_ptr: self_context_ptr,
                 swizzle: func.swizzle,
+                tile: func.tile,
+                rows: func.rows,
             })
         }
 
@@ -6910,6 +7025,16 @@ mod tma_tiled_pipeline {
                     ),
                 });
             }
+            if func.tile != maps.tile || func.rows != maps.rows {
+                return Err(CudaError::TiledPipelineContextMismatch {
+                    detail: format!(
+                        "TmaTiledPipelineFunction (tile={:?}, rows={:?}) does not match the \
+                         tile/rows (tile={:?}, rows={:?}) that TmaTiledPipelineMaps was \
+                         prepared with; refusing to launch a mismatched func/maps pair",
+                        func.tile, func.rows, maps.tile, maps.rows
+                    ),
+                });
+            }
             let c_context_ptr = Arc::as_ptr(c_dev.as_raw().context()) as usize;
             if c_context_ptr != self_context_ptr {
                 return Err(CudaError::TiledPipelineContextMismatch {
@@ -6930,16 +7055,10 @@ mod tma_tiled_pipeline {
                 }),
                 TmaTiledPipelineMapsKind::Ready(maps_box) => {
                     let (a_map, b_map) = maps_box.as_ref();
-                    let grid_dim = (
-                        n.div_ceil(kernels_tiled_pipeline::TP_BN),
-                        m.div_ceil(kernels_tiled_pipeline::TP_BM),
-                        1,
-                    );
-                    let cfg = LaunchConfig {
-                        grid_dim,
-                        block_dim: (kernels_tiled_pipeline::TP_BLOCK_THREADS, 1, 1),
-                        shared_mem_bytes: 0,
-                    };
+                    // grid／block は func のタイルから導く（イシュー #3214。func と
+                    // maps のタイル一致は上で検査済み）。静的 smem のみで
+                    // `shared_mem_bytes` は 0（動的 smem 属性は不要）。
+                    let cfg: LaunchConfig = tiled_pipeline_launch_config(func.tile, m, n);
                     let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
                     // SAFETY: `run_tiled_pipeline_persistent_f32`（`gemm.rs`）と
@@ -6951,7 +7070,12 @@ mod tma_tiled_pipeline {
                     // `kernels_tiled_pipeline.rs::TP_TMA_TILE_CORE` ドキュメンテーション
                     // コメント「不変条件」参照）と合わせて OOB 読み書きが起きない根拠と
                     // する。`a_map`/`b_map` は `launch_builder` の safe `.arg(&...)`
-                    // 経由で渡す（`raw` launch へフォールバックしない。設計 doc §2
+                    // 経由で渡す（イシュー #3214: 128×64 でも本ブロックを共有し、
+                    // 新しい `unsafe` ブロックは増やさない。根拠の差分は grid／block が
+                    // `func.tile` 由来になった点のみで、tensor map の box 寸法・
+                    // `expect_tx`・grid はいずれも同じ `func.tile` から導出され、
+                    // `func.tile == maps.tile` を上で検査済み）。
+                    // （`raw` launch へフォールバックしない。設計 doc §2
                     // 「調査で確定した事実」参照: `PushKernelArg<&T: DeviceRepr>` は
                     // ポインタを push するだけで、プローブの raw `kernel_params` と
                     // 同一表現）。
@@ -7156,6 +7280,35 @@ mod tma_tiled_pipeline {
                 tma_descriptor_label(TmaSwizzleA::B64),
                 "tiled_pipeline_f32_tma_variant_b64"
             );
+        }
+
+        /// イシュー #3214: 128×64 の腕ごとにラベルが異なり、64×64 版の
+        /// どのラベルとも衝突しない（モジュールキャッシュ衝突の防止）。
+        #[test]
+        fn tma_128x64_descriptor_labels_are_unique_across_tiles_and_arms() {
+            let labels = [
+                tma_descriptor_label(TmaSwizzleA::None),
+                tma_descriptor_label(TmaSwizzleA::B64),
+                tma_descriptor_label_128x64(TmaRowMap::Contiguous),
+                tma_descriptor_label_128x64(TmaRowMap::Strided),
+            ];
+            for i in 0..labels.len() {
+                assert!(!labels[i].is_empty());
+                for j in (i + 1)..labels.len() {
+                    assert_ne!(labels[i], labels[j], "ラベル {i} と {j} が衝突している");
+                }
+            }
+        }
+
+        /// イシュー #3214: 128×64 の launch config が TMA の box 寸法・
+        /// expect_tx と同じタイル（128×64・256 スレッド・動的 smem なし）から
+        /// 導出されること。
+        #[test]
+        fn tma_128x64_launch_config_uses_128x64_tile_without_dynamic_smem() {
+            let cfg = tiled_pipeline_launch_config(TiledPipelineTile::Bm128Bn64, 129, 65);
+            assert_eq!(cfg.grid_dim, (2, 2, 1));
+            assert_eq!(cfg.block_dim, (256, 1, 1));
+            assert_eq!(cfg.shared_mem_bytes, 0);
         }
     }
 }

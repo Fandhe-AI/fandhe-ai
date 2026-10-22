@@ -688,8 +688,9 @@ pub use gemm_auto::{
     TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
     enumerate_tile_candidates_for_device, select_tile_config, select_tile_config_for_device,
 };
+// `TmaRowMap`（イシュー #3214。128×64 TMA 版のスレッド→行割り当て腕）も同じゲート。
 #[cfg(feature = "internal-diagnostics")]
-pub use kernels_tiled_pipeline::TmaSwizzleA;
+pub use kernels_tiled_pipeline::{TmaRowMap, TmaSwizzleA};
 // イシュー #2122（PR-B）: TMA swizzle 意味論プローブが候補モデルとして再利用する
 // ホスト側モデル（`TmaSwizzleA::B64` 仮説の逐語）。`TmaSwizzleA` と同じゲート
 // （`internal-diagnostics`。既定 off）で公開し、通常ビルドの公開面は増やさない。
