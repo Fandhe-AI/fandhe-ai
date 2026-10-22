@@ -2084,6 +2084,27 @@ fn cuda_storage_mut<'a>(
     Ok(storage)
 }
 
+/// MSE の `reduction` に応じた係数 `factor`（`Mean` は `1.0/numel`、空は `1.0`、
+/// `Sum` は `1.0`）を求める（イシュー #3222。ホスト版 `mse_loss` とデバイス版
+/// `mse_loss_device_impl` が同じ関数を通り、bit 同一の係数を構造的に保証する。
+/// Metal の `mse_factor` と同名・同形）。未知 variant は `Unsupported` で拒否する。
+fn mse_factor(reduction: MseReduction, numel: usize) -> Result<f32, BackendError> {
+    match reduction {
+        MseReduction::Mean => Ok(if numel == 0 { 1.0 } else { 1.0 / numel as f32 }),
+        MseReduction::Sum => Ok(1.0),
+        _ => Err(BackendError::Unsupported(format!(
+            "mse_loss: unsupported MseReduction variant {reduction:?}"
+        ))),
+    }
+}
+
+/// MSE デバイス版（イシュー #3222）の入口検査結果。
+struct MseDevicePlan {
+    shape: Vec<usize>,
+    numel: usize,
+    generations: [u64; 2],
+}
+
 /// [`CudaBackendOps::reduce_dispatch`] が `sum`／`max` のどちらを実行
 /// するかを選ぶ内部専用の選択子（イシュー #1584）。`tensor-core` 公開
 /// API の一部ではなく `ops.rs` 内でのみ使う（`BackendOps::sum`／`max`
@@ -2534,6 +2555,160 @@ impl CudaBackendOps {
         )?;
 
         // `download` しない: 同期点は呼び出し元の `download` へ集約。
+        Ok(out_dev_buf)
+    }
+
+    /// MSE デバイス版 2 本（forward／backward）の driver 前検査（イシュー #3222）:
+    /// device 一致 → shape 一致 → numel（checked・`i32::MAX` 以下）→ 世代採取。
+    /// いずれも driver 呼び出しより前に型付きエラーで拒否する（A03）。
+    fn mse_device_plan(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        what: &str,
+    ) -> Result<MseDevicePlan, BackendError> {
+        if pred.device() != Device::Cuda(self.ordinal)
+            || target.device() != Device::Cuda(self.ordinal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let numel = pred
+            .shape()
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                BackendError::InvalidArgument(format!(
+                    "{what}: shape {:?} の要素数が usize を超える",
+                    pred.shape()
+                ))
+            })?;
+        if numel > i32::MAX as usize {
+            return Err(BackendError::InvalidArgument(format!(
+                "{what}: numel must fit in i32 (kernel argument type): numel={numel}"
+            )));
+        }
+        Ok(MseDevicePlan {
+            shape: pred.shape().to_vec(),
+            numel,
+            generations: [pred.generation(), target.generation()],
+        })
+    }
+
+    /// [`BackendOps::mse_loss_device`]／[`BackendOps::mse_loss_device_tracked`] の
+    /// 共有本体（イシュー #3222。Metal の `mse_loss_device_impl` と同じ二重化回避）。
+    ///
+    /// 手順は `binary_elementwise_device` と同じ: 検査（`mse_device_plan`）→
+    /// factor（未知 variant を driver 前に拒否）→ 世代・poison 検査 → 空形状の
+    /// 早期 return（0.0 のスカラー）→ storage 取り出し → 出力確保（呼び出し元へ
+    /// 渡るため `static_cuda_memory`）→ 起動。`download`・`synchronize` は
+    /// しない（同期点は呼び出し元へ集約。起動エラーは次の同期点で poison／世代
+    /// 検査から観測される）。出力は shape `[]` の 1 要素バッファ。
+    fn mse_loss_device_impl(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let plan = self.mse_device_plan(pred, target, "mse_loss_device")?;
+        let factor = mse_factor(reduction, plan.numel)?;
+        let generations = plan.generations;
+
+        let device = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        if plan.numel == 0 {
+            // `with_driver_call` 経由で poison・世代は検査済み。空和は 0.0。
+            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            return mem.alloc_zeroed(&[]);
+        }
+
+        let pred_arg = cuda_storage_ref(pred, plan.numel, "mse_loss_device: pred")?.as_arg();
+        let target_arg = cuda_storage_ref(target, plan.numel, "mse_loss_device: target")?.as_arg();
+        let mut out_dev_buf = mem.alloc_zeroed(&[])?;
+        let mut out_arg =
+            cuda_storage_mut(&mut out_dev_buf, 1, "mse_loss_device: out")?.as_arg_mut();
+
+        let mse = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_mse(&device),
+        )?;
+        self.with_driver_call(
+            &generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                mse.launch_mse_loss_device_f32(
+                    &pred_arg,
+                    &target_arg,
+                    &mut out_arg,
+                    plan.numel,
+                    factor,
+                )
+            },
+        )?;
+
+        // `download` しない: 同期点は呼び出し元の `download` へ集約。
+        Ok(out_dev_buf)
+    }
+
+    /// [`BackendOps::mse_loss_backward_device`]／`_tracked` の共有本体（イシュー
+    /// #3222）。手順・同期契約は [`Self::mse_loss_device_impl`] と同じ。
+    /// `dPred`（`pred.shape()`）のみ返す（`dTarget` は呼び出し側の責務）。
+    fn mse_loss_backward_device_impl(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let plan = self.mse_device_plan(pred, target, "mse_loss_backward_device")?;
+        let generations = plan.generations;
+
+        let device = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        if plan.numel == 0 {
+            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            return mem.alloc_zeroed(&plan.shape);
+        }
+
+        let pred_arg =
+            cuda_storage_ref(pred, plan.numel, "mse_loss_backward_device: pred")?.as_arg();
+        let target_arg =
+            cuda_storage_ref(target, plan.numel, "mse_loss_backward_device: target")?.as_arg();
+        let mut out_dev_buf = mem.alloc_zeroed(&plan.shape)?;
+        let mut out_arg = cuda_storage_mut(
+            &mut out_dev_buf,
+            plan.numel,
+            "mse_loss_backward_device: out",
+        )?
+        .as_arg_mut();
+
+        let mse = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_mse(&device),
+        )?;
+        self.with_driver_call(
+            &generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                mse.launch_mse_backward_device_f32(
+                    &pred_arg,
+                    &target_arg,
+                    &mut out_arg,
+                    plan.numel,
+                    scale,
+                )
+            },
+        )?;
+
         Ok(out_dev_buf)
     }
 
@@ -5407,21 +5582,7 @@ impl BackendOps for CudaBackendOps {
             BackendError::KernelLaunchFailed("mse_loss: target not contiguous".into())
         })?;
         let numel = pred_slice.len();
-        let factor = match reduction {
-            MseReduction::Mean => {
-                if numel == 0 {
-                    1.0
-                } else {
-                    1.0 / numel as f32
-                }
-            }
-            MseReduction::Sum => 1.0,
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "mse_loss: unsupported MseReduction variant {reduction:?}"
-                )));
-            }
-        };
+        let factor = mse_factor(reduction, numel)?;
 
         let mse = self.with_driver_call(
             &[],
@@ -5474,6 +5635,55 @@ impl BackendOps for CudaBackendOps {
             || mse.run_mse_backward_f32(pred_slice, target_slice, scale),
         )?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// MSE forward をデバイス入出力で行う（イシュー #3222。本体は
+    /// `mse_loss_device_impl`）。**CUDA は非 tracked でも同期しない**
+    /// （ストリーム順序契約。Metal の「復帰時に完了」とは異なる。起動エラーは
+    /// 次の同期点で poison／世代検査から観測される。`linear_forward_device` と同じ）。
+    fn mse_loss_device(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction)
+    }
+
+    /// [`Self::mse_loss_device`] の tracked 版。**`token` を使わず機能的に
+    /// 同一な明示 override を置く**（設計 `docs/train-step-resident-parts-design.md`
+    /// §5。`relu_backward_mask_device_tracked` と同じ理由）。
+    fn mse_loss_device_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction)
+    }
+
+    /// MSE backward（`dPred = scale·(pred−target)`）をデバイス入出力で行う
+    /// （イシュー #3222。同期契約は [`Self::mse_loss_device`] と同じ）。
+    fn mse_loss_backward_device(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale)
+    }
+
+    /// [`Self::mse_loss_backward_device`] の tracked 版（`token` を使わない明示
+    /// override。[`Self::mse_loss_device_tracked`] と同じ）。
+    fn mse_loss_backward_device_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::huber_loss`] の CUDA 実装
@@ -9066,6 +9276,118 @@ mod tests {
 
     fn is_invalid_arg<T: std::fmt::Debug>(r: Result<T, BackendError>) -> bool {
         matches!(r, Err(BackendError::InvalidArgument(_)))
+    }
+
+    /// MSE デバイス版（#3222）: device 不一致は driver に触れず拒否（forward・backward）。
+    #[test]
+    fn mse_device_rejects_wrong_device() {
+        use fandhe_ai_tensor_core::MseReduction;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let p = DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(
+            Device::Cuda(unique_test_ordinal()),
+            vec![4],
+            Box::new(EmptyHandle),
+        );
+        assert!(matches!(
+            cuda.mse_loss_device(&p, &t, MseReduction::Mean),
+            Err(BackendError::DeviceMismatch)
+        ));
+        assert!(matches!(
+            cuda.mse_loss_backward_device(&p, &t, 1.0),
+            Err(BackendError::DeviceMismatch)
+        ));
+    }
+
+    /// shape 不一致と numel の `i32::MAX` 超過は driver 前に型付きエラー。
+    #[test]
+    fn mse_device_rejects_shape_and_numel_violations_before_driver() {
+        use fandhe_ai_tensor_core::MseReduction;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let p = DeviceBuffer::<f32>::new(dev, vec![2, 3], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![3, 2], Box::new(EmptyHandle));
+        assert!(matches!(
+            cuda.mse_loss_device(&p, &t, MseReduction::Sum),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            cuda.mse_loss_backward_device(&p, &t, 1.0),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+
+        let big = (i32::MAX as usize) + 1;
+        let p = DeviceBuffer::<f32>::new(dev, vec![big], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![big], Box::new(EmptyHandle));
+        assert!(is_invalid_arg(cuda.mse_loss_device(
+            &p,
+            &t,
+            MseReduction::Mean
+        )));
+        assert!(is_invalid_arg(cuda.mse_loss_backward_device(&p, &t, 1.0)));
+        // usize を超える shape の積も panic せず拒否する。
+        let p = DeviceBuffer::<f32>::new(dev, vec![usize::MAX, 2], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![usize::MAX, 2], Box::new(EmptyHandle));
+        assert!(is_invalid_arg(cuda.mse_loss_device(
+            &p,
+            &t,
+            MseReduction::Mean
+        )));
+    }
+
+    /// poison 済み ordinal は空形状でも `DeviceContextPoisoned`（4 通り）。
+    #[test]
+    fn mse_device_rejects_poisoned_ordinal_on_empty_shape() {
+        use fandhe_ai_tensor_core::MseReduction;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let p = DeviceBuffer::<f32>::new(dev, vec![0, 5], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![0, 5], Box::new(EmptyHandle));
+        let token = DispatchFailureCell::default();
+        let poisoned = |r: Result<DeviceBuffer<f32>, BackendError>| {
+            matches!(r, Err(BackendError::DeviceContextPoisoned(_)))
+        };
+        assert!(poisoned(cuda.mse_loss_device(&p, &t, MseReduction::Mean)));
+        assert!(poisoned(cuda.mse_loss_device_tracked(
+            &p,
+            &t,
+            MseReduction::Mean,
+            &token
+        )));
+        assert!(poisoned(cuda.mse_loss_backward_device(&p, &t, 1.0)));
+        assert!(poisoned(
+            cuda.mse_loss_backward_device_tracked(&p, &t, 1.0, &token)
+        ));
+    }
+
+    /// 未知でない reduction の係数がホスト版の旧式（Mean=1/n・空=1・Sum=1）と bit 一致。
+    #[test]
+    fn mse_factor_matches_legacy_formula() {
+        use fandhe_ai_tensor_core::MseReduction;
+        assert_eq!(
+            mse_factor(MseReduction::Mean, 0).unwrap().to_bits(),
+            1.0f32.to_bits()
+        );
+        for n in [1usize, 3, 640, 4099] {
+            assert_eq!(
+                mse_factor(MseReduction::Mean, n).unwrap().to_bits(),
+                (1.0 / n as f32).to_bits()
+            );
+        }
+        assert_eq!(
+            mse_factor(MseReduction::Sum, 7).unwrap().to_bits(),
+            1.0f32.to_bits()
+        );
     }
 
     /// `relu_backward_mask_device`（#3221）: device 不一致は driver に触れず拒否。
