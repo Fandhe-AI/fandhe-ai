@@ -4,7 +4,8 @@
 # 使い方: run_parity.sh <metal|cuda> <出力ディレクトリ> [run 開始番号 run 終了番号]
 # 各ログ末尾に rc=<n> を書く（summarize.py が厳密に検査する）。foreign の cargo／rustc を
 # run 前後で検出したら <name>.run<N>.invalid に理由を書く（RULE.txt: 同番号で取り直す）。
-# CUDA は nvidia-smi の compute プロセスも起動時のベースライン（常駐サービス）との差で検出する。
+# CUDA は nvidia-smi の compute プロセスも起動時のベースラインとの差で検出する。起動時に許可外のプロセスがあれば中止し
+# （許可は env PARITY_RESIDENT_APP_REGEX の常駐サービス名のみ）、run 前後の nvidia-smi 失敗は invalid にする。
 # 同じ番号を取り直せるのは現行の .invalid がある run だけ。.invalid の無い既存ログ（有効な run）は保持してそのテスト・番号だけ skip し、残りの取り直しは続行する。取り直すとき、前の試行のログ・invalid 理由は <出力>/attempts/ へ退避して残す
 # （全 invalid の件数と理由を保存する契約）。採用結果の有効性は現行の .invalid の有無だけで決まる。
 set -euo pipefail
@@ -42,16 +43,40 @@ foreign_builds() {
 }
 
 # GB10 の compute プロセス一覧（pid,name のみ。used_memory は変動するため比較に使わない）。
+# nvidia-smi の失敗は空一覧と区別するため終了コードをそのまま返す（失敗を握りつぶさない）。
 compute_apps() {
   if [ "${PLATFORM}" = "cuda" ]; then
-    nvidia-smi --query-compute-apps=pid,name --format=csv,noheader 2>/dev/null | sort || true
+    local out
+    out="$(nvidia-smi --query-compute-apps=pid,name --format=csv,noheader 2>/dev/null)" || return 1
+    printf '%s\n' "${out}" | sort
   fi
 }
-BASE_APPS="$(compute_apps)"
 
-# ベースラインに無い compute プロセス（新規の GPU 負荷）を返す。
+# 起動時に存在してよい compute プロセスは、確認済みの常駐サービスだけ（env PARITY_RESIDENT_APP_REGEX。
+# 拡張正規表現を「pid, name」行の name 部へ完全一致で当てる。既定は空 = 起動時に 1 件でもあれば中止）。
+# RULE.txt「計測中は別の GPU 負荷を並走させない」を満たすため、先行する別ジョブの負荷は許容しない。
+RESIDENT_RE="${PARITY_RESIDENT_APP_REGEX:-}"
+BASE_APPS=""
+if [ "${PLATFORM}" = "cuda" ]; then
+  if ! BASE_APPS="$(compute_apps)"; then
+    echo "nvidia-smi による起動時の compute プロセス取得に失敗したため中止する" >&2
+    exit 3
+  fi
+  while IFS= read -r LINE; do
+    [ -n "${LINE}" ] || continue
+    APP_NAME="${LINE#*, }"
+    if [ -z "${RESIDENT_RE}" ] || ! printf '%s\n' "${APP_NAME}" | grep -qxE "${RESIDENT_RE}"; then
+      echo "起動時に許可外の compute プロセスが存在するため中止する: ${LINE}（許可は PARITY_RESIDENT_APP_REGEX で明示）" >&2
+      exit 3
+    fi
+  done <<< "${BASE_APPS}"
+fi
+
+# ベースラインに無い compute プロセス（新規の GPU 負荷）を stdout へ返す。取得失敗は return 1。
 new_compute_apps() {
-  compute_apps | grep -vxF -f <(printf '%s\n' "${BASE_APPS}") || true
+  local cur
+  cur="$(compute_apps)" || return 1
+  printf '%s\n' "${cur}" | grep -vxF -f <(printf '%s\n' "${BASE_APPS}") || true
 }
 
 env_snapshot() {
@@ -90,7 +115,8 @@ while IFS='|' read -r NAME ARGS EXACT; do
     fi
     env_snapshot "before ${NAME} run${N}"
     PRE="$(foreign_builds)"
-    PRE_GPU="$(new_compute_apps)"
+    GPU_ERR=""
+    PRE_GPU="$(new_compute_apps)" || { GPU_ERR="pre"; PRE_GPU=""; }
     set +e
     # ARGS・EXACT は上の固定値。語分割を意図して無引用。
     cargo test -p "${PKG}" --release ${ARGS} -- --ignored ${EXACT} --test-threads=1 --nocapture > "${LOG}" 2>&1 < /dev/null
@@ -99,13 +125,16 @@ while IFS='|' read -r NAME ARGS EXACT; do
     echo "rc=${RC}" >> "${LOG}"
     env_snapshot "after ${NAME} run${N}"
     POST="$(foreign_builds)"
-    POST_GPU="$(new_compute_apps)"
+    POST_GPU="$(new_compute_apps)" || { GPU_ERR="${GPU_ERR:+${GPU_ERR},}post"; POST_GPU=""; }
     REASON=""
     if [ -n "${PRE}${POST}" ]; then
       REASON="foreign cargo/rustc detected: pre=[${PRE}] post=[${POST}]"
     fi
     if [ -n "${PRE_GPU}${POST_GPU}" ]; then
       REASON="${REASON:+${REASON}; }new compute process detected: pre=[${PRE_GPU}] post=[${POST_GPU}]"
+    fi
+    if [ -n "${GPU_ERR}" ]; then
+      REASON="${REASON:+${REASON}; }nvidia-smi failed (${GPU_ERR}): GPU 負荷を確認できていない"
     fi
     if [ -n "${REASON}" ]; then
       echo "${REASON}" > "${OUT}/${NAME}.run${N}.invalid"
