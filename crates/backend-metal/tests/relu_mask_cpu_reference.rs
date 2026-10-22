@@ -67,7 +67,7 @@ fn host_model_matches_cpu_tape_relu_vjp() {
         let g = pattern(n, 1);
         let m = pattern(n, 2);
         let plan = plan_relu_mask(&[r, c], 0, DeviceMatrixLayout::RowMajor, &[r, c], 0).unwrap();
-        let model = relu_mask_select_host_model(&plan, &g, &m);
+        let model = relu_mask_select_host_model(&plan, &g, &m).unwrap();
         if let Some(want) = tape_reference(&g, &m, &[r, c]) {
             assert_bits_or_nan_class(&model, &want);
             compared += 1;
@@ -81,7 +81,7 @@ fn host_model_matches_cpu_tape_relu_vjp() {
             .iter()
             .map(|v| if v.is_finite() { *v } else { -0.5 })
             .collect();
-        let model_f = relu_mask_select_host_model(&plan, &gf, &mf);
+        let model_f = relu_mask_select_host_model(&plan, &gf, &mf).unwrap();
         let want_f = tape_reference(&gf, &mf, &[r, c]).expect("finite input must backprop");
         assert_bits_or_nan_class(&model_f, &want_f);
         compared += 1;

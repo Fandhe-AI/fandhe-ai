@@ -117,16 +117,43 @@ pub fn plan_relu_mask(
 /// 逐語再現するホストモデル。`g_storage`／`mask_storage` は連結バッファ全体
 /// （`plan` の offset を起点に読む）。出力は論理形の行優先。
 ///
+/// `ReluMaskPlan` は全フィールド公開で外部から組み立てられるため、`plan` の
+/// 整合（`numel == rows * cols`、`cols == 0` で `numel > 0` でない）と、
+/// 両入力スライスが `offset + numel` を覆う長さであることを検証し、違反は
+/// `InvalidArgument` で返す（本番経路で panic しない）。
+///
 /// カーネルと同じく view 終端（`g_off + numel`／`mask_off + numel`）を超える
 /// 添字は読まず `+0.0` のまま残す。
 pub fn relu_mask_select_host_model(
     plan: &ReluMaskPlan,
     g_storage: &[f32],
     mask_storage: &[f32],
-) -> Vec<f32> {
-    let mut out = vec![0.0f32; plan.numel];
-    let g_end = plan.g_off + plan.numel;
-    let mask_end = plan.mask_off + plan.numel;
+) -> Result<Vec<f32>, BackendError> {
+    let invalid =
+        |msg: &str| BackendError::InvalidArgument(format!("relu_mask_select_host_model: {msg}"));
+    let numel = plan
+        .rows
+        .checked_mul(plan.cols)
+        .ok_or_else(|| invalid("rows * cols overflows usize"))?;
+    if numel != plan.numel {
+        return Err(invalid("plan.numel != rows * cols"));
+    }
+    let g_end = plan
+        .g_off
+        .checked_add(numel)
+        .ok_or_else(|| invalid("g_off + numel overflows usize"))?;
+    let mask_end = plan
+        .mask_off
+        .checked_add(numel)
+        .ok_or_else(|| invalid("mask_off + numel overflows usize"))?;
+    if g_storage.len() < g_end {
+        return Err(invalid("g_storage is shorter than g_off + numel"));
+    }
+    if mask_storage.len() < mask_end {
+        return Err(invalid("mask_storage is shorter than mask_off + numel"));
+    }
+    let mut out = vec![0.0f32; numel];
+    // numel > 0 なら rows・cols ともに 1 以上なので除算の分母は 0 にならない。
     for (idx, slot) in out.iter_mut().enumerate() {
         let gi = if plan.g_transposed {
             let r_l = idx / plan.cols;
@@ -142,7 +169,7 @@ pub fn relu_mask_select_host_model(
             *slot = if m > 0.0 { g_storage[gi] } else { 0.0 };
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -225,7 +252,7 @@ mod tests {
                 let plan =
                     plan_relu_mask(&[r, c], g_off, DeviceMatrixLayout::RowMajor, &[r, c], m_off)
                         .unwrap();
-                let got = relu_mask_select_host_model(&plan, &g_store, &m_store);
+                let got = relu_mask_select_host_model(&plan, &g_store, &m_store).unwrap();
                 let want = reference(&g_store[g_off..g_off + n], &m_store[m_off..m_off + n]);
                 assert_bits_or_nan_class(&got, &want);
             }
@@ -249,7 +276,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(plan.logical_shape(), [c, r]);
-                let got = relu_mask_select_host_model(&plan, &g_store, &m_store);
+                let got = relu_mask_select_host_model(&plan, &g_store, &m_store).unwrap();
                 let g_logical = transpose(&g_store[g_off..g_off + n], r, c);
                 let want = reference(&g_logical, &m_store[m_off..m_off + n]);
                 assert_bits_or_nan_class(&got, &want);
@@ -264,7 +291,7 @@ mod tests {
         let g = [f32::NAN, f32::INFINITY, -0.0, -3.0, f32::NAN];
         let m = [0.0, -1.0, 1.0, f32::NAN, 2.0];
         let plan = plan_relu_mask(&[1, 5], 0, DeviceMatrixLayout::RowMajor, &[1, 5], 0).unwrap();
-        let out = relu_mask_select_host_model(&plan, &g, &m);
+        let out = relu_mask_select_host_model(&plan, &g, &m).unwrap();
         assert_eq!(out[0].to_bits(), 0.0f32.to_bits());
         assert_eq!(out[1].to_bits(), 0.0f32.to_bits());
         assert_eq!(out[2].to_bits(), (-0.0f32).to_bits());
@@ -327,6 +354,24 @@ mod tests {
     fn zero_numel_is_planned_as_empty() {
         let plan = plan_relu_mask(&[0, 5], 0, DeviceMatrixLayout::RowMajor, &[0, 5], 0).unwrap();
         assert_eq!(plan.numel, 0);
-        assert!(relu_mask_select_host_model(&plan, &[], &[]).is_empty());
+        assert!(
+            relu_mask_select_host_model(&plan, &[], &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_short_slices_and_inconsistent_plan() {
+        let plan = plan_relu_mask(&[1, 1], 0, DeviceMatrixLayout::RowMajor, &[1, 1], 0).unwrap();
+        assert!(relu_mask_select_host_model(&plan, &[1.0], &[]).is_err());
+        assert!(relu_mask_select_host_model(&plan, &[], &[1.0]).is_err());
+        let mut bad = plan;
+        bad.cols = 0;
+        bad.g_transposed = true;
+        assert!(relu_mask_select_host_model(&bad, &[1.0], &[1.0]).is_err());
+        let mut bad = plan;
+        bad.g_off = usize::MAX;
+        assert!(relu_mask_select_host_model(&bad, &[1.0], &[1.0]).is_err());
     }
 }

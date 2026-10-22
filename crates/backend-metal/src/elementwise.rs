@@ -1050,7 +1050,7 @@ mod relu_mask_encode_tests {
 
         ctx.synchronize().expect("synchronize");
         assert!(!token.is_set());
-        let want = relu_mask_select_host_model(&plan, &g, &m);
+        let want = relu_mask_select_host_model(&plan, &g, &m).unwrap();
         let got = out.read_to_vec();
         for (i, (a, e)) in got.iter().zip(&want).enumerate() {
             if e.is_nan() {
