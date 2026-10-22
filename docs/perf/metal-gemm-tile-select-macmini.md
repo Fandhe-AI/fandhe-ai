@@ -125,3 +125,30 @@ M4 Max の厳密一致表（`docs/perf/metal-gemm-tile-table.md`・`docs/perf/me
 - 計測前コミット（`bc5b42bcf…`）の後に追加したのは成果物と doc だけで、計測対象のコードと規則は変わっていない。
   なお `aggregate.py` は計測後に 1 点だけ直した（candle の JSONL がフラットなスキーマ `median_s`／`version` だったため、パース箇所を合わせた）。値・判定には影響しない。
 - 生ログのパスは `<WORK>`／`<HOME>` にマスクしてある。
+
+## 8. #3206 実装後の追加前後比較（Mac mini 実機）
+
+実装の決定記録は `docs/perf/metal-gemm-tile-table.md` §7。実機は Apple M4・GPU 10 コア（`token=M4Base`）。
+`#[ignore]` テスト 3 本（`gemm_tile_macmini_table_diag_tests`。release・`--test-threads=1`・1 プロセス）の結果。
+生ログは `docs/perf/logs/metal-tile-macmini-3206/mini_run.log`。
+
+- **選択確認（AC1）**: N=512／1024／2048／4096 で `Classic(CANDIDATES[1|1|2|2])`・fallback なし。N=256 は `[3]`。
+- **bit 一致と parity（AC3）**: N=256〜4096 の全 5 点で、追加後と追加前（`[3]` 強制）の出力が bit 一致（FNV-1a hash 一致）。CPU 参照との REQ-2 複合判定も両者 pass。
+- **A/B 時間（AC4。同一プロセス内の交互実行・20 試行中央値。ms）**:
+
+| N | kernel_gpu 前 | 後 | 後/前 | 壁時計合計 前 | 後 |
+|---|---|---|---|---|---|
+| 256 | 0.0409 | 0.0406 | 0.993 | 0.2517 | 0.2522 |
+| 512 | 0.2258 | 0.2167 | 0.960 | 0.5529 | 0.5484 |
+| 1024 | 0.8694 | 0.8155 | 0.938 | 1.2909 | 1.2420 |
+| 2048 | 8.0020 | 6.5133 | 0.814 | 8.8531 | 7.3784 |
+| 4096 | 64.6980 | 52.8948 | 0.818 | 67.5612 | 55.7715 |
+
+上表の値は `mini_run.log` の `AB` 行（`kernel_gpu_median_ms`・`wall_sum_median_ms`）をそのまま転記し、後/前は kernel_gpu の比（小数 3 桁）。
+
+退行（追加後が 2% 超遅い N）はなし。
+
+### 限界（未実測）
+
+- RULE 型の 5 プロセス系列・負荷ゲート・candle 同系列再計測（主比・参考比）は**未実施**。上表は 1 プロセスの記録で、candle 比は #3181 §4 の値を更新していない。
+- そのため本イシューの実測受け入れ条件のうち candle 比の再記録は未達で、PR は `Refs #3206` とする。

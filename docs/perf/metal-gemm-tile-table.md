@@ -159,3 +159,45 @@ device` の選択ロジック・本表 §5 の判断は変更しない（詳細�
 - `gemm_simdgroup_tiled` への転置ロード導入（NT/TN/TT へのタイル variant 適用）: §4 の定量化を判断材料として親 #1037 系の別イシューへ引き継ぐ
 - 親 #1037 の受け入れ条件（N=4096 で candle Metal 5,040 GFLOPS 超え）の達成判定自体: 本イシュー（#1039。本表 §3・§5・37/55 行目、`sweep_run{1,2}.log`。#1143 自身の計測ではない）の実測値（NN 4096 立方で 9.76〜9.91 TFLOPS）は判断材料として記録するが、達成ゲート判定は親側で行う
 - M4 Max 以外の Apple Silicon 別テーブル・DGX Spark 側作業
+
+## 7. M4 無印・GPU 10 コア構成の厳密一致表（#3206）
+
+#3181 の Mac mini 実測（`docs/perf/metal-gemm-tile-select-macmini.md`。§0 項 4 の分類）に基づき、
+M4 Max とは別の検証済み識別と表を追加した。M4 Max の表・挙動は変えない。
+
+### 7.1 識別の形（D-A 推奨形）
+
+- 判定は「GPU コア数 == 10」かつ「SoC ブランド == `"Apple M4"`」の完全一致（`tile::verify_m4_base`）。
+  `MetalContext::new` が 1 回キャッシュした実測値を使う。`hw.model` による機種推定は使わない（`crate::device` が却下済み）。
+- **識別対象は Mac mini 単体ではなく「M4 無印・GPU 10 コア構成」**。同構成の MacBook Air・iMac・MacBook Pro も一致する。
+  実測機体は Mac mini 1 台のみで、熱設計が違う同 SoC 機体（ファンレスの Air 等）は未実測。
+  全候補が REQ-2 parity を満たすため、誤適用の影響は性能のみで正しさには及ばない。8 コア GPU の M4 は一致しない。
+- 型は `VerifiedM4BaseGpuCoreCount`（フィールド非公開・`verify_m4_base` が唯一の構築経路）。
+  `#[non_exhaustive] pub enum VerifiedTileTableDevice { M4Max, M4Base }` で表を切り替える。
+  enum を pub にしても、中身の token は偽造できない（pub(crate) だと Linux 非テストビルドで `M4Base` が未構築になり clippy が落ち、`#[allow(dead_code)]` は規約で禁止のため）。
+
+### 7.2 公開 API
+
+追加のみ。`select_for_device`・`select_with_occupancy_for_device`・`select_route_for_device`・`VerifiedM4MaxGpuCoreCount`・
+`MetalContext::verified_m4_max_gpu_core_count` のシグネチャは不変（`select_for_device` 系は M4Max variant へ委譲）。
+追加: `select_for_verified_device`・`select_route_for_verified_device`・`MetalContext::verified_tile_table_device`。
+
+### 7.3 エントリ（正方立方 4 点のみ。近傍・非正方・未測定点へ拡張しない）
+
+| (m, n, k) | 採用 | 根拠（#3181 §3。kernel_gpu 5 run 中央値） |
+|---|---|---|
+| 512³ | `CANDIDATES[1]` | 0.1104 ms 対 現行 `[3]` 0.1167 ms（0.946） |
+| 1024³ | `CANDIDATES[1]` | 0.8165 ms 対 0.8738 ms（0.934） |
+| 2048³ | `CANDIDATES[2]` | 6.5449 ms 対 8.0560 ms（0.812） |
+| 4096³ | `CANDIDATES[2]` | 53.3344 ms 対 64.9883 ms（0.821） |
+
+N=256 は現行選択が帯内のため表に入れない。
+
+### 7.4 適用範囲
+
+- 本番 f32 の入口（`dispatch_auto`・strided split-K の classic フォールバック）だけを新入口へ切り替える。
+  **f16 経路は Mini 未実測のため対象外**（旧入口・M4 Max token のまま）。
+- 新エントリは split-K に入らない（`should_split_k` は N=512 で並列度条件、N≥1024 で `tmn16` 条件により `None`。pad8 後も同じ）。
+  split-K parity baseline の全行は m,n ≤ 128 で、新エントリとは交差しない。単体テストで固定している。
+- 既存の診断テスト（#3181 の `verified_m4_max_gpu_core_count` 利用）は Mini で `verified=None` と表示するが、本番は Mini 表を使う。この表示上のずれは仕様。
+- tolerance・split-K baseline・`should_split_k` パラメータ・シェーダは変更しない。

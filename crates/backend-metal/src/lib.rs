@@ -809,6 +809,10 @@ mod typed_bf16_probe_diag_tests;
 // プロダクションコード（`tile.rs`／`gemm.rs`／`shaders/`）は無変更。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_tile_select_macmini_diag_tests;
+// M4 無印（GPU 10 コア）厳密一致表の実機検証（イシュー #3206・診断専用）。
+// #3181 の診断モジュールと同じ理由（`pub(crate)` 面への到達）でクレートルートの兄弟として置く。
+#[cfg(all(test, target_os = "macos"))]
+mod gemm_tile_macmini_table_diag_tests;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
 // バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの
