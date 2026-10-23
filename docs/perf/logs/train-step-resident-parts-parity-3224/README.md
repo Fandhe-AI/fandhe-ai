@@ -133,6 +133,7 @@ tracked 版の失敗トークン登録と非 wait は `crates/backend-metal/src/
 
 カウンタ: カウンタ値はテスト内の assert が検査する（pass はその成立を意味する）。
 `crates/backend-cuda/src/gemm_device_input_diag_tests_3223.rs:97-99`（`h2d_calls`／`stream_syncs`／`d2h_calls` = 0・C4 は pass）、
+（以下の行番号は計測対象 `45347ae0a` 時点のもの。是正コミットでの assert 削除・`last_out` 追加により現行コードとはずれている）
 `crates/backend-cuda/src/train_step_parts_sync_diag_tests_3224.rs:278-280`・`:377-378`（GEMM・backward 連結。C5 のうち pass 2 件）、
 `:140-141`（ReLU）・`:188-189`・`:206-207`（MSE）の「新版は同期 0・D2H 0」assert。対照の assert は `:97-98`・`:221-222`（`>= 1`）。
 正の非正規化数マスク（NVRTC の ftz 無効）は C1 の pass（`relu_mask_device_parity.rs:32` の `1e-40`／`-1e-40`）で確認した。
@@ -158,7 +159,7 @@ Metal（Mac mini・`macmini/`）の正式記録に不一致はない（M1〜M5 x
 
 | テスト | 食い違い（ログ） | 場所 |
 |---|---|---|
-| `relu_mask_device_issues_no_sync_no_d2h` | `download must D2H: ... d2h_calls: 0, ... stream_syncs: 1` | `train_step_parts_sync_diag_tests_3224.rs:98`（`assert_download_is_counted`） |
+| `relu_mask_device_issues_no_sync_no_d2h` | `download must D2H: ... d2h_calls: 0, ... stream_syncs: 1` | `train_step_parts_sync_diag_tests_3224.rs:98`（`assert_download_is_counted`。`45347ae0a` 時点の行番号） |
 | `mse_device_issues_no_sync_no_d2h` | `host mse must D2H: ... d2h_calls: 0, ... stream_syncs: 1` | 同 `:222` |
 
 - 部品・形状: ReLU マスク `[64,256]`（RowMajor。対照は最初の周回）・MSE `[64,10]` のホスト版。入力は固定パターン。
@@ -166,7 +167,7 @@ Metal（Mac mini・`macmini/`）の正式記録に不一致はない（M1〜M5 x
 - 原因分類（推定。実機で未切り分け）: **カウンタの数え方**。計測コードは #3227（PR #3552・readback 先読み既定 ON）を含む。先読み経路の readback が
   `d2h_calls` を増やさなくなり、対照が前提とした「ホストの readback = D2H を数える」が既定経路で成立しなくなったとみられる。
   新版（device 入力版）の挙動の不一致ではない。`e62cce21b`（先読み導入前）で同テストが pass するかは未確認（本記録は `45347ae0a` の事実のみ）。
-- 戻し先: 対照 assert（`:92-99`・`:221-222`）はテスト側の前提で、先読み既定 ON（#3227）との整合を取る修正が要る。
+- 戻し先: 対照 assert（`45347ae0a` 時点の `:92-99`・`:221-222`。現行コードでは行がずれている）はテスト側の前提で、先読み既定 ON（#3227）との整合を取る修正が要る。
   RULE.txt に従い tolerance・baseline・判定式は変更しない。子 issue の reopen・起票は未実施（ユーザー承認待ち）。
 - **テスト側の是正（レビュー指摘対応・未検証）**: 対照 assert から `d2h_calls >= 1` を外し `stream_syncs >= 1` のみにした
   （`assert_download_is_counted`・ホスト版 MSE の対照）。ReLU の対照は layout ループの外へ出し、Transposed 周回の
