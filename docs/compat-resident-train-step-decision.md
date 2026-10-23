@@ -210,6 +210,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 
 - **#3250**: P1〜P4 の実装。別ストア・別デバイス・古い世代の型付きエラー。ホスト版との
   bit 一致テスト（CPU は CI、CUDA・Metal は `#[ignore]`）。H2D 0 回の診断カウンタ確認。
+  **実装済み（§10 に記録）。実機のうち GB10（CUDA）は未実測、Metal は開発機で実測済み。**
 - **#3251／#3252／#3253**: P5 の内部チェーン（`_tracked` で store の failure_token へ登録、
   L1 の d_input は計算しない）と完了待ちの内部メソッド。
 - **#3254**: facade 公開の仕上げ。`crates/facade/tests/api_surface.rs` に正ガード（追加した名前の
@@ -234,3 +235,62 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   完了待ちの後に失敗トークンを再検査して poison する。Tape 経路との bit 一致を受け入れ条件に
   固定し、tolerance・baseline は変えない。
 - **A09**: 同期・H2D 回数の診断カウンタによる実機確認を後続 issue の受け入れ条件に残す。
+
+## §10 #3250 実装記録（P1〜P4）
+
+### 実装した名前と配置
+
+| 層 | 名前 |
+|---|---|
+| tensor-core | `BackendOps::gemm_device(&self, a, b) -> Result<DeviceBuffer<f32>, BackendError>`（既定は `Unsupported`。非破壊） |
+| autodiff（内部名） | `optim::resident_input::ResidentInput`（P1 の実体）、`optim::resident_input::matmul_resident(tape, a, b)`、`DeviceParamStore::upload_resident_input(tape, x)`、`DeviceParamStore::predict_device_chain_resident(tape, input, steps)` |
+| facade（確定名） | `ResidentTensor`（P1。`shape()`・`device()`・`Debug` のみ）、`Tape::upload_resident`（P2）、`Sequential::predict_resident_input`（P3）、`Tape::matmul_resident`（P4） |
+
+- facade の `pub use fandhe_ai_autodiff::optim::{..}` には `ResidentInput` を足さない（`facade::Tape.0` が
+  `pub(crate)` で生の autodiff `Tape` を facade から渡せないため、前例の `predict_device_chain` と同じく
+  autodiff 側は `&Tape` を取る `pub fn`、facade が薄く委譲する）。
+- 公開の仕上げ（`api_surface.rs` の正ガード・doctest・`compat-api-scope.md` §5）は #3254。本 PR は
+  doc コメントに ```rust の例を書かない。`!Send`（`DeviceBuffer` が `Send` でない）で `assert_send` なし。
+
+### 挙動の決定
+
+- **P3 はホスト経路へ落とさない**。`predict_resident`（ホスト入力版）は `build_device_chain_steps` が
+  `None`（Sigmoid／Tanh 混在・層の過不足・空 `Sequential`）やバックエンドの `Unsupported` のとき
+  ホストの Var 経路へ全体フォールバックするが、`predict_resident_input` はフォールバックすると本件が
+  取り除く H2D が戻る（入力を download する）ため、`Unsupported` を返して止める。チェーンは store を
+  書き換えないので状態は変わらない。`predict_resident` の挙動は不変。
+- **チェーン本体を共有**: `predict_device_chain_once` が入力を `ChainInput`（ホスト〈upload して所有し第 1 層の
+  発行直後に解放〉／常駐〈借用のみ・解放しない〉）で受け、層ループ・scratch 再利用・download 後の
+  failure_token 再検査と poison・capture 衝突の待機再試行を両版で共有する（bit 一致を構造で保つ）。
+- 常駐入力のチェーンは Graph capture 経路（`linear_chain_forward_captured`。ホスト入力を capture 内で
+  upload する API）を通らない。**常駐入力の capture 対応は #3258 への申し送り**。
+- 追加検査はチェーンを積む前: 別 store → `InvalidArgument`、別デバイス → `DeviceMismatch`、rank != 2 →
+  `InvalidArgument`、列数と第 1 層 weight の行数の不一致 → `ShapeMismatch`、世代切れ（CUDA）→
+  バックエンドの `StaleDeviceGeneration`。poison 済み store → `StorePoisoned`。
+- **P4 のカーネルは `gemm` と同じ出どころ**: ホスト版は `Var::matmul` → `ops.gemm`。既存のデバイス入力
+  カーネルは別の起動経路なので bit 一致を当てにせず、`gemm_device` を足した。
+  - CPU: `gemm` の汎用分岐と同じ `gemm_blis_parallel` をスライスのまま呼ぶ。
+  - CUDA: `Fp32Strict`（既定）のみ。`gemm` が contiguous 入力で通る NN 経路（`select_tiled_f32_kernel(0, ..)`）と
+    同じ `launch_tiled_f32_resident`（`a_offset = 0`）を持つ `gemm_resident_lhs_device_impl`（`w @ b`・RowMajor）へ
+    委譲する。**`Tf32`／`Tf32x3` はデバイスポインタを受ける核がないため `Unsupported`**（別の精度で黙って計算しない）。
+  - Metal: `gemm`（`dispatch_auto`）と同じ経路選択（split-K の 3 段ゲート → 経路 → classic）を、upload 済み
+    バッファに対し `MetalGemm::dispatch_auto_resident` で行う。`dispatch_auto` は 8 の倍数へホストでパディング
+    してから起動するため、**`m`／`n`／`k` が 8 の倍数のときだけ**同じ dispatch・bit 一致になる。倍数でない形状は
+    常駐バッファをホストへ戻さずにパディングできないため `Unsupported`。まず `linear_forward_device` の核で
+    試したところ、split-K 形状（64×784×256）で 1 ULP ずれたため採らなかった。
+  - ROCm: 既定の `Unsupported` を継承。
+- 新規 `unsafe` なし・依存追加なし・tolerance／baseline 変更なし。
+
+### 検証
+
+- CI で動く: tensor-core（既定）・CPU の `tests/gemm_device_parity.rs`（`gemm` と bit 一致・不正 shape）、autodiff の
+  モック（常駐版 Δupload = 0・Δdownload = 呼び出し数、対照のホスト版 Δupload = 1、別 store・rank・列数・
+  poison）、facade の `tests/resident_input_inference.rs`（CPU の bit 一致・型付きエラー・同じハンドルを a と b に
+  渡す・拒否後も store が使える）。
+- 実機 `#[ignore]`: facade の同ファイル（CUDA・Metal）、`backend-cuda/src/resident_input_diag_tests_3250.rs`、
+  `backend-metal/src/resident_input_diag_tests_3250.rs`（`gemm_device` と `gemm` の bit 一致、窓の中の入力 H2D = 0
+  〈CUDA は `mem_uploads`〈`MemoryOps::upload` の新カウンタ〉と `h2d_calls`、Metal は `new_with_data` の
+  `cfg(test)` カウンタ〉、D2H は読み出し 1 回以上）。
+- **実測状況**: Metal は開発機（Apple M4 Max・debug ビルド）で `#[ignore]` テスト全件 pass を確認した
+  （bit 一致・窓の中の H2D = 0）。**GB10（CUDA）は未実測**（ビルドのみ確認）。性能（N=256〜4096 の gemm・infer の
+  H2D 除去量）は未計測で、本 PR は性能の合格ラインを主張しない。

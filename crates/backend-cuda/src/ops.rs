@@ -4058,6 +4058,37 @@ impl BackendOps for CudaBackendOps {
         self.gemm_fp32_strict_into_device_impl(a, a_layout, b, b_layout, out, out_offset, bias)
     }
 
+    /// [`BackendOps::gemm_device`] の CUDA 実装（イシュー #3250 P4）。精度モードが
+    /// `Fp32Strict`（既定）のときだけ実装し、`gemm` が contiguous 入力で通る NN 経路
+    /// （`run_tiled_f32` → `select_tiled_f32_kernel(0, ..)`）と同じカーネル選択
+    /// （`launch_tiled_f32_resident`・`a_offset = 0`）を持つ
+    /// `gemm_resident_lhs_device_impl`（`w @ b`、b は `RowMajor`）へ委譲する。
+    /// 世代・poison 検査、`u32` 検査、退化形状（m/n = 0 は空、k = 0 は全 0）、起動検証は
+    /// 委譲先が行う。`Tf32`／`Tf32x3` はデバイスポインタを受ける核がないため `Unsupported`
+    /// （別の精度で黙って計算しない）。同期しない（ストリーム順序。読み出しで同期）。
+    fn gemm_device(
+        &self,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if crate::precision::gemm_precision() != crate::precision::CudaGemmPrecision::Fp32Strict {
+            return Err(BackendError::Unsupported(
+                "gemm_device: only the FP32-strict GEMM precision mode has a device-pointer kernel \
+                 (TF32 / 3xTF32 modes are not supported)"
+                    .into(),
+            ));
+        }
+        fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let a_view = DeviceBufferView::new(a, 0, a.shape())?;
+        let b_view = DeviceBufferView::new(b, 0, b.shape())?;
+        self.gemm_resident_lhs_device_impl(
+            a_view,
+            b_view,
+            fandhe_ai_tensor_core::DeviceMatrixLayout::RowMajor,
+        )
+    }
+
     /// [`BackendOps::gemm_resident_lhs_device`] の CUDA 実装（イシュー #3223）。
     /// 本体は `gemm_resident_lhs_device_impl`。非 tracked でも同期しない。
     fn gemm_resident_lhs_device(
