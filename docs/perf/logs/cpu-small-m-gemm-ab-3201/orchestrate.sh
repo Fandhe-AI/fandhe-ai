@@ -67,7 +67,7 @@ if [ "${DRY}" = "1" ]; then
     echo "3. ビルド（逐次・計測前に全部）: 腕ごとに ${EX}、bench-fandhe（共有 target・path patch・exe を腕別にコピー）"
     echo "4. 機構発火の事前確認（fail-closed）: small_m_shared_a_report・resident_w_prepack_fire_report"
     [ "${MACHINE}" = "gb10" ] && echo "   gb10_affinity_report_dump（EXPECT_GB10_AFFINITY_POOL_ACTIVE=1|0）"
-    echo "5. bit 一致ログ（off のみ）: small_m::tests・prepack::tests・ops_resident_w_prepack_tests"
+    echo "5. bit 一致ログ（off のみ）: small_m::tests・prepack::tests・ops::resident_w_prepack_tests"
     set -- ${ARMS}
     n=$#
     for r in ${RUNS}; do
@@ -314,7 +314,7 @@ rm -f "${WORK}/prereq.tmp"
 
 # 5. bit 一致ログ（off＝BASE のみ。ゲート OFF のまま _with(true) 経路を強制するテスト群）
 (cd "${BASE}" && CARGO_TARGET_DIR="${WORK}/target-off" cargo test -p "${PKG}" --release --lib -- \
-    small_m::tests prepack::tests ops_resident_w_prepack_tests) > "${WORK}/bitmatch.tmp" 2>&1
+    small_m::tests prepack::tests ops::resident_w_prepack_tests) > "${WORK}/bitmatch.tmp" 2>&1
 rc=$?
 mask < "${WORK}/bitmatch.tmp" > "${OUT}/bitmatch.log"
 echo "exit=${rc}" >> "${OUT}/bitmatch.log"

@@ -148,8 +148,11 @@ def parse_jobgrid(root, arms, gate):
     return data, threads
 
 
-def load_jsonl(path):
+def load_jsonl(path, optional=False):
+    """optional=True（利用可能 run が 0 件の腕・系列）に限り、ファイル不在を空データとして扱う。"""
     rows = []
+    if optional and not os.path.exists(path):
+        return rows
     with open(need(path), encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
@@ -168,7 +171,7 @@ def parse_fc(root, arms, gate):
     for a in arms:
         avail = [r for r in RUNS if gate[("ab", r, a)] == "pass"]
         for task in ("train", "infer"):
-            rows = load_jsonl(os.path.join(root, "fc", f"results-{a}-{task}.jsonl"))
+            rows = load_jsonl(os.path.join(root, "fc", f"results-{a}-{task}.jsonl"), optional=not avail)
             per = {"fresh": [], "reuse": []}
             for o in rows:
                 if o.get("framework") != "fandhe-ai" or o.get("task") != task or o.get("device") != "cpu" or o.get("size") != 64:
@@ -191,7 +194,7 @@ def parse_fc(root, arms, gate):
     torch = {}
     tavail = [r for r in RUNS if gate[("torch", r, "torch")] == "pass"]
     for task in ("train", "infer"):
-        rows = load_jsonl(os.path.join(root, "fc", f"results-torch-{task}.jsonl"))
+        rows = load_jsonl(os.path.join(root, "fc", f"results-torch-{task}.jsonl"), optional=not tavail)
         if len(rows) != len(tavail):
             raise AggError(f"results-torch-{task}.jsonl: 行数 {len(rows)} が利用可能 run 数 {len(tavail)} と不一致")
         torch[task] = {}
@@ -500,6 +503,18 @@ def self_test():
             open(q, "w").write("\n".join(lines) + "\n")
     _, ok, v = run("macmini", unavail)
     assert v["merge"] == "undetermined" and v["mergeprepack"] == "ADOPT", v
+
+    def all_unavail(r):
+        p = f"{r}/load_gate.log"
+        s = open(p).read()
+        for n in RUNS:
+            s = s.replace(f"START series=ab run={n} arm=merge gate=pass", f"START series=ab run={n} arm=merge gate=unavailable")
+            os.remove(f"{r}/ab/run{n}-merge.log")
+        open(p, "w").write(s)
+        for task in ("train", "infer"):
+            os.remove(f"{r}/fc/results-merge-{task}.jsonl")
+    _, ok, v = run("macmini", all_unavail)
+    assert v["merge"] == "undetermined", v
 
     def unavail_with_log(r):
         p = f"{r}/load_gate.log"

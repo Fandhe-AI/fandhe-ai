@@ -87,8 +87,11 @@ checksum 完全一致・bit 一致テスト 24 件 pass のもとでの判定で
 
 - checksum: 単体 6 形状＋正方 512 は全腕・全 round で同一の `checksum=0x…`。train／infer は (task, mode) ごとに全腕・全 round
   で完全一致。両機体とも不一致 0 件（`aggregate.md` の「checksum 完全一致」）。
-- bit 一致: `small_m::tests`・`prepack::tests`・`ops_resident_w_prepack_tests` の 24 件が両機体で pass（`bitmatch.log`。
-  ゲート OFF のまま `_with(true)` 経路を強制するテスト群。BASE ツリーで実行）。
+- bit 一致: `small_m::tests`・`prepack::tests` の 24 件（+ ignored 1）が両機体で pass（`bitmatch.log`。ゲート OFF のまま
+  `_with(true)` 経路を強制するテスト群。BASE ツリーで実行）。ops 層の `ops::resident_w_prepack_tests` はフィルタ誤記
+  （`ops_resident_w_prepack_tests` はモジュールパスと不一致）で両機体の `bitmatch.log` には含まれない。フィルタを
+  `orchestrate.sh` で是正したうえで、開発機（Mac）で同 3 スイートを再実行し 32 件 pass（+ ignored 2）を確認した
+  （ops 層 8 件 pass＋ignored 1。`bitmatch-ops-local.log`）。両機体の実測ログ自体は再計測していない。
 - 機構発火の前提（`prereq/<arm>.log`）: G1 は merge 系の腕で適格形状の行が `gate=true` かつ `a_shared_bands == row_bands`、
   OFF 系で全行 `gate=false`。G2 は prepack 系の腕で 4 入口すべて `builds=1`・`hits>=1`、それ以外で `cache_len=0`。
   GB10 の affinity は `EXPECT_GB10_AFFINITY_POOL_ACTIVE=1／0` で期待どおり（`enabled`・専用プール有効・大コア 10 個）。
