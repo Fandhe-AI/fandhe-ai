@@ -271,9 +271,9 @@ fn tracked_variant_issues_no_wait() {
 }
 
 /// #3224: マスクが非正規化数（`f32::MIN_POSITIVE` 未満の正値）のときの選択。
-/// CPU 参照は `m > 0.0` が真（g を通す）。GPU が非正規化数を 0 へ flush すると
-/// 偽になり不一致となる。この結果は実機の事実として記録する（tolerance・判定式は
-/// 変えない。不一致時の戻し先は #3218）。共有 `pattern` へは混ぜない（他の形状の
+/// CPU 参照は `m > 0.0` が真（g を通す）。マスクはカーネル側でビット判定に
+/// 直した（#3218 reopen。float 比較は FTZ で偽になっていた）。回帰検出用で、
+/// tolerance・判定式は変えない。共有 `pattern` へは混ぜない（他の形状の
 /// 判定を巻き込まないため）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
@@ -284,10 +284,18 @@ fn denormal_mask_selects_like_cpu_reference() {
     let n = r * c;
     let g_store: Vec<f32> = (0..n).map(|i| (i % 23) as f32 - 11.0).collect();
     let m_store: Vec<f32> = (0..n)
-        .map(|i| match i % 4 {
+        .map(|i| match i % 12 {
             0 => 1e-40,
             1 => -1e-40,
             2 => 1.0e-45,
+            3 => f32::from_bits(1),
+            4 => f32::from_bits(0x007F_FFFF),
+            5 => f32::MIN_POSITIVE,
+            6 => -0.0,
+            7 => 0.0,
+            8 => f32::INFINITY,
+            9 => f32::from_bits(0x7FC0_0000),
+            10 => f32::from_bits(0xFFC0_0000),
             _ => 1.5,
         })
         .collect();
@@ -303,4 +311,25 @@ fn denormal_mask_selects_like_cpu_reference() {
         .unwrap();
     let got = ops.memory_ops().unwrap().download(&out).unwrap();
     assert_bits_or_nan_class(got.as_slice().unwrap(), &want, "denormal mask");
+
+    // Transposed layout でも同じ（格納 [r, c] → 論理 [c, r]。件数は増やさない）。
+    let mshape_t = [c, r];
+    let m_t = DeviceBufferView::new(&m_buf, 0, &mshape_t).unwrap();
+    let g_t = DeviceBufferView::new(&g_buf, 0, &shape).unwrap();
+    let mut g_logical = vec![0.0f32; n];
+    for i in 0..r {
+        for j in 0..c {
+            g_logical[j * r + i] = g_store[i * c + j];
+        }
+    }
+    let want_t = reference(&g_logical, &m_store);
+    let out_t = ops
+        .relu_backward_mask_device(g_t, DeviceMatrixLayout::Transposed, m_t)
+        .unwrap();
+    let got_t = ops.memory_ops().unwrap().download(&out_t).unwrap();
+    assert_bits_or_nan_class(
+        got_t.as_slice().unwrap(),
+        &want_t,
+        "denormal mask (transposed)",
+    );
 }

@@ -59,7 +59,7 @@ wait／同期が 0 であることと、各部品の出力がホスト版の連�
   マスクが正の非正規化数（`1e-40`）のとき、CPU 参照は `m > 0.0` が真（g を通す）だが、Metal は 0 を返した
   （`idx 0: 0 vs -11`）。GPU 側で非正規化数が 0 へ flush されている（FTZ）とみられる。設計 §3 の
   「正の非正規化数の mask は CPU と同じく真になる」は CUDA（#3221）の記述で、Metal では成立しない。
-  - 分類: 非正規化数の扱い（ftz）。戻し先: **#3218**（Metal ReLU マスク）。
+  - 分類: 非正規化数の扱い（ftz）。戻し先: **#3218**（Metal ReLU マスク）。#3218 でマスクのビット判定へ修正済み（下記「#3218 修正後の確認」）。
   - 他の ReLU テスト（`(64,256)` 追加後の RowMajor／Transposed・tracked wait 0）は pass。
   - 本テストは共有 `pattern` に混ぜず専用テストに分けた（他形状の判定を巻き込まないため）。
     tolerance・判定式は変えていない。子 issue の reopen・コメントは未実施（ユーザー承認待ち）。
@@ -79,3 +79,24 @@ wait／同期が 0 であることと、各部品の出力がホスト版の連�
 ## 不一致
 
 上記「試走で分かったこと」の Metal 非正規化数を除き、正式記録としての不一致は未取得。
+
+## #3218 修正後の確認（Mac mini・2026-10-23）
+
+イシュー #3218 の reopen 分（Metal ReLU マスク選択を、マスクの正負をビットで判定する方式へ修正）の確認として、
+Mac mini（Apple M4・macOS 27.0.1・rustc 1.99.0）で RULE.txt の M1〜M5 を独立プロセス x 5 run 取得した。
+**PR ブランチ上・マージ前のコミット `af2c2adabfa6bdd25d3b64dcc68e3024152f3ac9`**（`dirty=0`・`.tree-manifest` を
+`shasum -a 256 -c` で全件照合済み・crate 版 0.11.0）。ログ一式は `macmini-3218-fix/`（`.rev-stamp`・`env_info.txt`・
+`build.log`・`summary.md`。ホスト名・ユーザー名・絶対パスは `<metal-node>`・`<user>`・`<home>` へ置換）。
+
+| テスト | 結果（5 run） |
+|---|---|
+| M1 relu_mask_device_parity | 5/5 pass（各 6 件。`denormal_mask_selects_like_cpu_reference` を含む） |
+| M2 mse_device_parity | 5/5 pass（各 5 件） |
+| M3 gemm_device_input_parity | 5/5 pass（各 6 件） |
+| M4 train_step_parts_no_wait_3224 | 5/5 pass（各 2 件） |
+| M5 gemm_device_tracked_token | 5/5 pass（1 件） |
+
+- invalid（退避済み試行）: 0 件。
+- M1 の denormal ケース（`1e-40`・`1e-45`・`f32::from_bits(1)`・`0x007F_FFFF`・`f32::MIN_POSITIVE`・`±0`・`+inf`・正負の NaN、
+  RowMajor／Transposed）は CPU 参照と bit 一致（NaN はクラス一致）。試走で出た `idx 0: 0 vs -11` は解消した。
+- 上記「状態」表の Mac mini の正式記録の採否は #3224 側の判断に委ねる（本取得分は版・手順が揃っており、正式記録として使える）。状態表は書き換えない。

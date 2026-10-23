@@ -119,7 +119,14 @@ fn relu_mask_select_keeps_bounds_checks_and_is_selection_not_multiplication() {
     assert!(body.contains("if (idx < numel && cols_l != 0u) {"));
     assert!(body.contains("gi < (ulong)g_end && mi < (ulong)mask_end"));
     assert!(body.contains("ulong gi;"));
-    assert!(body.contains("(mask[mi] > 0.0f) ? g[gi] : 0u"));
+    // マスクは uint ビット列で判定する（float 比較は FTZ で正の非正規化数を落とす。#3218）。
+    assert!(body.contains("device const uint* mask [[buffer(1)]]"));
+    assert!(body.contains("uint mb = mask[mi];"));
+    assert!(body.contains("(mb != 0u && mb <= 0x7F800000u) ? g[gi] : 0u"));
+    assert!(
+        !body.contains("mask[mi] > 0.0f"),
+        "float 比較は FTZ で正の非正規化数を 0 扱いにする（#3218 reopen）"
+    );
     assert!(body.contains("device const uint* g [[buffer(0)]]"));
     assert!(body.contains("device uint* out [[buffer(2)]]"));
     assert!(

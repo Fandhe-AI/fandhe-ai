@@ -138,11 +138,20 @@ kernel void ew_masked_fill_f32(
 
 // ReLU backward マスクの選択（`BackendOps::relu_backward_mask_device`。
 // イシュー #3218・設計 `docs/train-step-resident-parts-design.md` §3 行 3）。
-// `out[i] = (mask[i] > 0.0f) ? g[i] : +0.0f`。意味論の正は
+// `out[i] = (mask[i] > 0.0) ? g[i] : +0.0f`。意味論の正は
 // `autodiff::grad::elementwise_mul_mask(.., |v| v > 0.0)`。**乗算ではなく選択**
 // （NaN×0・−x×0 で bit がずれるのを避ける）。`g`／`out` は `uint` として
 // ビットをそのままコピーし、GPU 側での NaN payload 正規化や −0.0 の揺れを
 // 構造的に排除する。mask が NaN のとき比較は偽で `+0.0`（ビット 0）を返す。
+//
+// マスクの正負は float 比較ではなく**ビット列（uint）で判定**する（イシュー
+// #3218 reopen。Mac mini 実機で float 比較が正の非正規化数を 0 へ flush〈FTZ〉し
+// CPU の `m > 0.0` と不一致だった。`docs/perf/logs/train-step-resident-parts-parity-3224/README.md`）。
+// `mb != 0u`（±0 を除外。+0 は 0 ビット）かつ `mb <= 0x7F800000u`（符号ビット 0
+// ＝負値・−0・負 NaN を除外し、+inf までを真・0x7F800001 以上の正 NaN を偽に
+// する）は、全ビット列で FTZ なしの `as_float(mb) > 0.0` と同値。正の非正規化数
+// （0x00000001..0x007FFFFF）は真になる。ホスト逐語モデルは
+// `relu_mask_model::relu_mask_is_positive_bits`。
 //
 // 添字は `ulong`（`uint` 積の wraparound で境界検査を迂回されないため）。
 // `g_transposed != 0` のとき `g` は格納 `[cols_l, rows_l]` を転置して読む
@@ -154,7 +163,7 @@ kernel void ew_masked_fill_f32(
 // `+0.0` のまま残る。
 kernel void ew_relu_mask_select_f32(
     device const uint* g [[buffer(0)]],
-    device const float* mask [[buffer(1)]],
+    device const uint* mask [[buffer(1)]],
     device uint* out [[buffer(2)]],
     constant uint& numel [[buffer(3)]],
     constant uint& rows_l [[buffer(4)]],
@@ -178,7 +187,8 @@ kernel void ew_relu_mask_select_f32(
         }
         ulong mi = (ulong)mask_off + i;
         if (gi < (ulong)g_end && mi < (ulong)mask_end) {
-            out[idx] = (mask[mi] > 0.0f) ? g[gi] : 0u;
+            uint mb = mask[mi];
+            out[idx] = (mb != 0u && mb <= 0x7F800000u) ? g[gi] : 0u;
         }
     }
 }
