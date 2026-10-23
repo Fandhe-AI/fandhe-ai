@@ -704,7 +704,37 @@ N=1024/2048/4096 で 1.10/1.13/1.10 倍に後退した。
 - 単体テスト（GPU 不要）: env allowlist・閾値・repeat_trigger・cap・エントリ上限・poison 回復・解放・OOM・待ち期限切れ。
 - A/B ハーネス: `run_ab_readback_prefetch_cuda.sh`。判定規則は `logs/cuda-readback-reuse-fix-3225/RULE.txt`
   （reuse N=512〜4096 と fresh N=4096 は ratio <= 0.95、fresh N=512〜2048 は <= 1.03、checksum 完全一致）。
-- **GB10 実測は未実施**。判定は undetermined。実測後に本節へ結果（全セルの ratio と後退セルの併記）を追記する。
+- **GB10 実測（2026-10-23・イシュー #3225）: 判定 ADOPT**（規則 `RULE.txt` を逐語適用）。
+  - 機体・版: DGX Spark GB10（sm_121）・driver 580.173.02・CUDA 13.0・rustc 1.97.0。計測 sha `73768af83c0f45b482f1a209d4539a4f06b8e0bc`・
+    ラベル `head-73768af-3225`・`fandhe-ai 0.11.0` を HEAD の `crates/facade` で path patch。before = env 未設定（`PretouchedFresh`）・after = `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch`。
+    同一バイナリ（`bin_sha256` `4d5ea174…`）・5 回交互・専有ゲート exclusive 成立（load1<1.0 かつ GPU util 0% を 3 連続）。
+  - 全 10 セル（5 回中央値。run 内比は run1〜5 の after/before）:
+
+| size/mode | before | after | after/before | run 内比（5 回） | checksum |
+|---|---|---|---|---|---|
+| 512/reuse | 564.9 us | 265.6 us | 0.4703 | 1.174 0.459 0.449 0.475 0.876 | 完全一致 |
+| 1024/reuse | 2.397 ms | 976.7 us | 0.4075 | 0.405 0.403 0.399 0.451 0.421 | 完全一致 |
+| 2048/reuse | 8.631 ms | 4.230 ms | 0.4901 | 0.491 0.484 0.493 0.486 0.487 | 完全一致 |
+| 4096/reuse | 38.759 ms | 22.797 ms | 0.5882 | 0.587 0.587 0.586 0.591 0.589 | 完全一致 |
+| 4096/fresh | 39.754 ms | 22.432 ms | 0.5643 | 0.566 0.558 0.564 0.566 0.572 | 完全一致 |
+| 512/fresh（ガード） | 265.0 us | 258.7 us | 0.9761 | 0.968 0.998 0.976 0.976 0.996 | 完全一致 |
+| 1024/fresh（ガード） | 956.7 us | 966.8 us | 1.0106 | 1.011 0.998 1.013 1.015 1.015 | 完全一致 |
+| 2048/fresh（ガード） | 4.196 ms | 4.201 ms | 1.0012 | 0.996 1.007 1.005 1.000 1.001 | 完全一致 |
+| 256/reuse（record_only） | 92.1 us | 91.9 us | 0.9978 | 0.994 1.006 0.995 0.999 1.006 | 完全一致 |
+| 256/fresh（record_only） | 88.0 us | 88.4 us | 1.0054 | 1.015 1.010 1.009 1.001 0.985 | 完全一致 |
+
+  - 判定: 主判定 5 セルは ratio 0.41〜0.59（全て <= 0.95）、ガード 3 セルは最大 1.0106（全て <= 1.03）、`checksum_gate: OK` → ADOPT。
+  - **後退セル（ratio > 1.00。判定に関係なく全て併記）**: 1024/fresh 1.0106・256/fresh 1.0054（record_only）・2048/fresh 1.0012。いずれもガード閾値 1.03 内（中立の範囲）。
+    run 内では 512/reuse の run1 が 1.174（after 側 run1 の最大 663 us の外れ値。run5 も 0.876 でばらつく）で、中央値は 0.4703。
+  - 事前表明した期待値との対比: reuse N=512〜2048 は「fresh 並みに近づく」と表明し、実測は fresh と同水準（512: 265.6 vs 265.0 us・1024: 976.7 vs 956.7 us・2048: 4.230 vs 4.196 ms）。
+    N=4096 は「約 15 ms の事前タッチが隠れる」と表明し、実測は reuse で 16.0 ms・fresh で 17.3 ms 短縮（約 15 ms 見込みを上回る）。
+    fresh N<=2048 は「中立の見込み・後退しうる」と表明し、実測は 0.976〜1.011（微小な後退が出たが閾値内）。
+  - bit 一致: `readback_prefetch_bit_match_3225.rs`（`#[ignore]`）が GB10 で pass（`PrefetchedPretouched` と `PretouchedFresh`・元データの全要素を `to_bits()` で比較。
+    numel 0/1/37/4099 は従来経路、262144〜16777216 はプール命中 3 回・解放バイト一致・最後に `cached_bytes == 0`）。framework-compare の checksum は 6 桁に丸めた和のため bit 同一の証拠ではなく、
+    bit 一致の根拠は本テストの pass とする。`crates/backend-cuda/src` は origin/main から無変更（本番コード・新規 `unsafe` なし）。
+  - 突合: `.rev-stamp` 一致・tracked ツリー指紋（2453 ファイル）がノードと `git archive` 展開で一致（`logs/cuda-readback-reuse-fix-3225/rev-stamp-verification-3225.md`）。
+  - 補足: 実行ログ冒頭に pgrep の「他の bench プロセスの可能性」警告が出たが専有ゲートは成立。
+  - 後の扱い: 既定値 `READBACK_DEST` の反転は #3227 の方針に従う別 PR（本 PR では `PretouchedFresh` のまま）。収録物は `logs/cuda-readback-reuse-fix-3225/`。
 
 ### §15.3 範囲外
 
