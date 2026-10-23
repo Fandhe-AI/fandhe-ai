@@ -402,8 +402,11 @@ impl<'t> Var<'t> {
             let rhs_val = materialize_fallible(&nodes, self.tape.ops(), other.id)?.clone();
             (lhs_val, rhs_val)
         };
+        // #3226: 確保の前に、consumer のない直近 matmul 結果を解放する（既定 OFF）。
+        crate::eager_release::release_before_matmul(self.tape, self.id, other.id);
         let value = matmul_forward(self.tape.ops(), &lhs_val, &rhs_val)?;
         let id = self.tape.push_eager(Op::MatMul(self.id, other.id), value);
+        crate::eager_release::note_matmul(self.tape, id);
         Ok(Var::from_raw(self.tape, id))
     }
 

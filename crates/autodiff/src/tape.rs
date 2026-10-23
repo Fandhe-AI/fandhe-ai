@@ -2895,6 +2895,10 @@ pub struct Tape {
     /// 現在の `epoch()` と比較して不一致なら fail-closed に拒否する
     /// （`Gradients::get`・`DeviceParamStore::step` 参照）。
     epoch: Cell<u64>,
+    /// 直近に `Var::matmul`（通常版）が積んだ `Op::MatMul` の ID（#3226。
+    /// `eager_release` の解放候補）。`reset`・`rollback_to` で必ず `None` へ戻す
+    /// （truncate 後の ID 再利用による誤解放を防ぐ）。
+    pub(crate) last_eager_matmul: Cell<Option<NodeId>>,
     /// 葉プレフィックス長（#1048）。最初の非葉ノード（`Op::Leaf`/
     /// `Op::ResidentLeaf` 以外）が push された時点の `nodes.len()` を
     /// [`Tape::freeze_leaf_prefix`] が 1 回だけ `Some` に固定する。
@@ -3021,6 +3025,7 @@ impl Tape {
             nodes: RefCell::new(Vec::new()),
             ops,
             epoch: Cell::new(0),
+            last_eager_matmul: Cell::new(None),
             retained_leaf_len: Cell::new(None),
             checkpoints: RefCell::new(HashMap::new()),
             hooks: RefCell::new(crate::hooks::HookRegistry::default()),
@@ -3230,6 +3235,7 @@ impl Tape {
     /// 葉プレフィックスを入口状態へ戻す。`rollback_to` は世代・hook を触らないので `reset` と必ず併用する）。
     pub(crate) fn rollback_to(&self, point: (usize, Option<usize>)) {
         self.nodes.borrow_mut().truncate(point.0);
+        self.last_eager_matmul.set(None);
         self.retained_leaf_len.set(point.1);
     }
 
@@ -3339,6 +3345,7 @@ impl Tape {
             }
         }
         self.nodes.get_mut().truncate(keep);
+        self.last_eager_matmul.set(None);
         self.epoch.set(self.epoch.get() + 1);
         // checkpoint 区間（イシュー #1624）は葉プレフィックスより後ろの
         // ノードのみを指すため、上記 truncate で必ず区間の対象ノード
