@@ -80,26 +80,25 @@
 //! `docs/perf/cuda-gemm-reuse-phase-breakdown.md` に記録する。詳細は
 //! README「`gemm --mode reuse --phases`」節を参照。
 //!
-//! 借用ビュー readout（CPU/CUDA 既定経路・Metal は runtime legacy 維持。
-//! イシュー #1337/#1437/#1438・codex-review 指摘 PR #1452 P2）: 上記
+//! 借用ビュー readout（全デバイス既定経路。Metal は #3265 で既定化。
+//! イシュー #1337/#1437/#1438/#3265・codex-review 指摘 PR #1452 P2）: 上記
 //! `readout_var` の展開（`to_tensor` 区間 + `host_copy` 区間）は、
 //! #1182 §6/§9 が確定した「`host_copy`（`.to_vec()` の memcpy）が
 //! `iter_total` の 25.6〜53.0%（CUDA）を占める」の対策として、`readout_var`
 //! 自体を借用ビュー（`fandhe_ai::VarHostView`／`Tensor::host_slice`。
-//! #1335・#1336）へ切り替えたものを CPU/CUDA の既定経路とする（#1438 で
+//! #1335・#1336）へ切り替えたものを既定経路とする（#1438 で
 //! 旧計測専用 cargo feature（#1337 導入）を撤去し常時有効化。#1436/#1437
 //! が CUDA D2H 宛先未タッチによる N=1024/2048 の後退を診断・是正し、
 //! #1438 で全 N 非後退を確認したうえで既定化した）。`to_tensor` 区間は
 //! `Var::host_view()`（contiguous なら `Arc` 複製のみ）、`host_copy` 区間
 //! は借用スライス取得（追加コピーなし・想定 ≈0）。
 //!
-//! **Metal は既定経路に含めない**: `docs/perf/metal-gemm-candle-gate-
-//! remeasurement.md` §13.5 が「負荷変動と readout 切替の効果が分離
-//! できておらず、ADOPT 判定は暫定の参考結果に留める」と明記しており、
-//! `readout_uses_borrowed_view`（本ファイル。`device == "metal"` で
-//! `false`）が runtime 判定で legacy 経路（`to_tensor()` + `.to_vec()`）
-//! を維持する。cargo feature（#1337 導入・#1438 で撤去）を再導入する
-//! ものではなく、`device` 文字列 1 個の比較に閉じた分岐である。
+//! **Metal も既定経路に含める（#3265）**: #1520 の REJECT（共有負荷下の
+//! M4 Max。`docs/perf/metal-gemm-candle-gate-remeasurement.md` §17）は
+//! 書き換えず、#3184 G5（専有 Mac mini・`readout-r2`）が §15.1 の規則で
+//! ADOPT となったため、条件を変えた再測定の結果として `device` 分岐を
+//! 除去した（同 doc §20）。`--readout legacy`（A/B 用 override）は
+//! `to_tensor()` + `.to_vec()` の legacy 経路として残す。
 //!
 //! checksum（全要素 `f64` 逐次和）・parity（`GemmReference::verify`）の
 //! 契約・計算式はいずれの分岐でも不変（呼び出し側は両型とも
@@ -250,50 +249,36 @@ fn make_tape(device: &str) -> Result<Tape, Box<dyn std::error::Error>> {
     }
 }
 
-/// Metal 限定の runtime legacy フォールバック判定（codex-review 指摘・
-/// PR #1452 P2）。
-///
-/// `docs/perf/metal-gemm-candle-gate-remeasurement.md` §13.5 は「負荷
-/// 変動と借用ビュー readout 切替の効果が分離できておらず、Metal の
-/// ADOPT 判定は暫定の参考結果に留め、`runtime Device::Metal` 限定の
-/// legacy フォールバックの要否は再計測後の判断とする」と明記している。
-/// 本関数はその「要否判断」自体を、再計測が揃うまでの間 fail-closed に
-/// 「Metal は legacy を維持する」へ倒したものであり、CPU/CUDA は #1337/
-/// #1438 で確定した ADOPT（借用ビュー既定）のまま変えない。
-///
-/// #1438 が撤去したのはコンパイル時 cargo feature（`host-view-readout`）
-/// のみであり、本関数はその cargo feature を再導入しない runtime 分岐
-/// （`device` 文字列 1 個の比較）である——`readout_var`／`checksum_var`／
+/// 借用ビュー readout を使うかを決める。`readout_var`／`checksum_var`／
 /// `checksum_tensor`／`measure_gemm_reuse_phases`／`measure_infer_phases`
-/// （codex-review 指摘・PR #1452 P2 でインライン展開を 3 箇所追加）の
-/// インライン展開すべてがこの 1 箇所を経由するため、Metal の既定経路
-/// （gemm・infer 本体計測と `--phases` 診断）が内部で矛盾しない。Metal
-/// の ADOPT が確定したら、この関数を `true` 固定に変更する（または
-/// 呼び出し側から分岐ごと削除する）1 箇所の変更で足りるよう集約して
-/// ある。
+/// のインライン展開すべてがこの 1 箇所を経由する。
+///
+/// #3265: Metal の legacy フォールバック（旧 §13.5 が fail-closed に倒した
+/// 分岐）は、#3184 G5（専有 Mac mini・`readout-r2`）が
+/// `docs/perf/metal-gemm-candle-gate-remeasurement.md` §15.1 の規則で
+/// ADOPT となったため除去した。#1520（§17）の REJECT は書き換えず、条件を
+/// 変えた再測定として扱う（§20）。infer の Metal 経路も同じ関数を経由する
+/// ため借用ビューになる（checksum は同じ順序の `f64` 逐次和で bit 同一）。
+///
 /// イシュー #1477 追記: `readout_override`（`--readout legacy`／
-/// `--readout borrowed`。`cli.readout.as_deref()`）を渡すと device 既定を
-/// 上書きする。両腕を同一バイナリ・同一 facade ソースで run 単位
-/// interleave 計測し、負荷変動と切替効果を分離するための再計測専用
-/// override であり、`None`（`--readout` 未指定）のときは既存の device
-/// 既定契約（CPU/CUDA 借用ビュー・Metal legacy）を変更しない
-/// （`docs/perf/metal-gemm-candle-gate-remeasurement.md` §15）。
-fn readout_uses_borrowed_view(device: &str, readout_override: Option<&str>) -> bool {
+/// `--readout borrowed`。`cli.readout.as_deref()`）を渡すと
+/// 既定（借用ビュー）を上書きする。両腕を同一バイナリ・同一 facade
+/// ソースで run 単位 interleave 計測し、負荷変動と切替効果を分離するための
+/// 再計測専用 override（`docs/perf/metal-gemm-candle-gate-remeasurement.md`
+/// §15）。`None`（`--readout` 未指定）は全デバイスで借用ビュー。
+fn readout_uses_borrowed_view(readout_override: Option<&str>) -> bool {
     match readout_override {
         Some("borrowed") => true,
         Some("legacy") => false,
         // `--readout` 未指定（`None`）または不明値（`parse_cli_from` の
         // allowlist 検証で既に拒否済みのためここには来ないが、フォール
-        // バックとして device 既定へ倒す）は既存の device 既定契約を
-        // 維持する（イシュー #1477。CPU/CUDA は借用ビュー既定・Metal は
-        // legacy フォールバック既定。`--readout` は再計測用の明示
-        // override であり既定契約自体を変更しない）。
-        _ => device != "metal",
+        // バックとして既定（借用ビュー）へ倒す（#1477・#3265）。
+        _ => true,
     }
 }
 
 /// `readout_var`（`gemm --mode reuse` の `host_copy` 区間。#1182 §6/§9）
-/// の戻り型。CPU/CUDA（[`readout_uses_borrowed_view`] が `true`）では
+/// の戻り型。既定（[`readout_uses_borrowed_view`] が `true`）では
 /// `fandhe_ai::VarHostView`（`Deref<Target=[f32]>`。#1335）を返し、
 /// `contiguous()` が `Arc` 複製のみで済む形状では memcpy を伴わない借用
 /// 読み出しになる（`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §6/§9
@@ -309,8 +294,8 @@ fn readout_uses_borrowed_view(device: &str, readout_override: Option<&str>) -> b
 /// 収録済み）のため、registry 解決のまま既定ビルドが成立する（path
 /// patch は不要。旧
 /// `bench_fandhe_pin_guard.sh` は #1487 で撤去済み。#1438 で既定経路化・
-/// 旧計測専用 cargo feature〈#1337 導入〉は撤去済み。Metal の legacy
-/// 分岐は runtime 判定のためこの制約と無関係に成立する）。
+/// 旧計測専用 cargo feature〈#1337 導入〉は撤去済み。`--readout
+/// legacy` の分岐は runtime 判定のためこの制約と無関係に成立する）。
 enum HostReadout {
     Borrowed(fandhe_ai::VarHostView),
     Owned(Vec<f32>),
@@ -330,17 +315,16 @@ impl std::ops::Deref for HostReadout {
 /// Host-materialize a Var result and return a checksum (forces sync).
 ///
 /// CPU/CUDA は借用ビュー（`Var::host_view()`）に対して `f64` 逐次和を
-/// 計算する（#1337・#1438 で既定経路化）。Metal は
-/// [`readout_uses_borrowed_view`] により legacy 経路（`to_tensor()` +
-/// `.to_vec()`）を維持する。要素順序・型・和の計算式はいずれの分岐でも
+/// 計算する（#1337・#1438・#3265 で全デバイス既定経路化）。
+/// `--readout legacy` では [`readout_uses_borrowed_view`] により legacy
+/// 経路（`to_tensor()` + `.to_vec()`）を通る。要素順序・型・和の計算式はいずれの分岐でも
 /// 不変（`readout_var_matches_legacy_to_vec_bit_exact` で bit 同一を
 /// 確認）。
 fn checksum_var(
     v: &fandhe_ai::Var,
-    device: &str,
     readout_override: Option<&str>,
 ) -> Result<f64, Box<dyn std::error::Error>> {
-    if readout_uses_borrowed_view(device, readout_override) {
+    if readout_uses_borrowed_view(readout_override) {
         let view = v.host_view();
         Ok(view.iter().map(|&x| x as f64).sum())
     } else {
@@ -361,20 +345,19 @@ fn checksum_var(
 /// （`checksum_var`/`checksum_tensor` は `run_infer` が引き続き使うため
 /// シグネチャを変更しない）。
 ///
-/// イシュー #1337・#1438: CPU/CUDA は `Var::to_tensor()` + `.to_vec()`
+/// イシュー #1337・#1438・#3265: 既定は `Var::to_tensor()` + `.to_vec()`
 /// （旧 legacy 経路の `host_copy` memcpy）の代わりに `Var::host_view()`
 /// （`contiguous()` が `Arc` 複製のみで済む場合は memcpy を伴わない）を
-/// 返す。Metal は [`readout_uses_borrowed_view`]（codex-review 指摘・
-/// PR #1452 P2）により legacy 経路を維持する。戻り値
+/// 返す。`--readout legacy` は [`readout_uses_borrowed_view`]（codex-review
+/// 指摘・PR #1452 P2）により legacy 経路を通る。戻り値
 /// （[`HostReadout`]）はいずれの分岐も `Deref<Target=[f32]>` のため、
 /// 呼び出し側（`run_gemm`/`run_gemm_reuse`/`measure_gemm_reuse_phases`
 /// の `out.iter()`・`reference.verify(&out)`）は無変更で成立する。
 fn readout_var(
     v: &fandhe_ai::Var,
-    device: &str,
     readout_override: Option<&str>,
 ) -> Result<HostReadout, Box<dyn std::error::Error>> {
-    if readout_uses_borrowed_view(device, readout_override) {
+    if readout_uses_borrowed_view(readout_override) {
         Ok(HostReadout::Borrowed(v.host_view()))
     } else {
         let t = v.to_tensor();
@@ -387,17 +370,16 @@ fn readout_var(
     }
 }
 
-/// CPU/CUDA は [`fandhe_ai_tensor_core::Tensor::host_slice`]（contiguous
+/// 既定は [`fandhe_ai_tensor_core::Tensor::host_slice`]（contiguous
 /// なら借用 `Cow::Borrowed`・非 contiguous のみ実体化して `Cow::Owned`。
 /// #1335）に対して `f64` 逐次和を計算する（#1337・#1438 で既定経路化）。
-/// Metal は [`readout_uses_borrowed_view`] により legacy 経路
-/// （`contiguous().as_slice().to_vec()`）を維持する。
+/// `--readout legacy` では [`readout_uses_borrowed_view`] により legacy 経路
+/// （`contiguous().as_slice().to_vec()`）を通る。
 fn checksum_tensor(
     t: &Tensor<f32>,
-    device: &str,
     readout_override: Option<&str>,
 ) -> Result<f64, Box<dyn std::error::Error>> {
-    if readout_uses_borrowed_view(device, readout_override) {
+    if readout_uses_borrowed_view(readout_override) {
         let slice = t.host_slice();
         Ok(slice.iter().map(|&x| x as f64).sum())
     } else {
@@ -467,7 +449,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let c = a.matmul(&b)?;
         // sync: materialize result on host and read elements（従来どおり
         // 計測窓内。checksum の計算コストも従来と変えない）。
-        let out = readout_var(&c, &cli.device, cli.readout.as_deref())?;
+        let out = readout_var(&c, cli.readout.as_deref())?;
         *sync_checksum = out.iter().map(|&x| x as f64).sum();
         let elapsed = start.elapsed();
         // イシュー #965 codex-review 指摘: sync_checksum は毎反復上書きされる
@@ -532,6 +514,40 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `gemm --mode reuse` が tape に登録する葉の個数（`a`・`b`）。
+const GEMM_REUSE_LEAF_COUNT: usize = 2;
+
+/// reuse 反復の葉 `a`・`b` を `reset` 後の tape から再取得する（#3265）。
+/// 計測窓（`start` 〜 `elapsed`）の外で呼ぶ。`None` は panic にせず
+/// 型付き `MEASURE_ERROR` で fail-closed にする。
+fn gemm_reuse_leaves(
+    tape: &Tape,
+) -> Result<(fandhe_ai::Var<'_>, fandhe_ai::Var<'_>), Box<dyn std::error::Error>> {
+    let err = || -> Box<dyn std::error::Error> {
+        "MEASURE_ERROR: tape.leaf(i) returned None after reset (issue #3265)".into()
+    };
+    let a = tape.leaf(0).ok_or_else(err)?;
+    let b = tape.leaf(1).ok_or_else(err)?;
+    Ok((a, b))
+}
+
+/// reuse 反復の結果ノードを解放する（#3264 §7.1 (1)・#3265）。`Tape::reset`
+/// は葉プレフィックスまで切り詰めるため、`a`・`b` の `Var` 借用は呼び出し前に
+/// 終えておくこと。`leaf_count` が葉 2 個と一致しなければ fail-closed。
+/// host arena（#2104・opt-in 既定 OFF）が有効な場合は reset がバッファも
+/// 回収するが、既定構成の計測条件は変わらない。計測窓の外で呼ぶ。
+fn release_gemm_reuse_iteration(tape: &mut Tape) -> Result<(), Box<dyn std::error::Error>> {
+    tape.reset();
+    let n = tape.leaf_count();
+    if n != GEMM_REUSE_LEAF_COUNT {
+        return Err(format!(
+            "MEASURE_ERROR: leaf_count after reset = {n}, expected {GEMM_REUSE_LEAF_COUNT} (issue #3265)"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// `--mode reuse` の gemm 計測（イシュー #925）。tape/デバイスを 1 回だけ
 /// 構築し、その構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの経過を
 /// init_s として分離記録したうえで、同一 tape 上で warmup 残り + 計測を回す。
@@ -568,40 +584,54 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // 経過（CUDA コンテキスト作成・NVRTC コンパイル等の一度きりのコストを
     // すべて含む）。
     let init_start = Instant::now();
-    let tape = make_tape(&cli.device)?;
-    let a = tape.var(&a_data);
-    let b = tape.var(&b_data);
-    let c0 = a.matmul(&b)?;
-    let out0 = readout_var(&c0, &cli.device, cli.readout.as_deref())?;
-    let mut checksum: f64 = out0.iter().map(|&x| x as f64).sum();
-    let init_s = init_start.elapsed().as_secs_f64();
-    // イシュー #965 codex-review 指摘: checksum は毎反復上書きされるため、
-    // ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。init 計測分
-    // を含め reuse 経路（同一 tape を使い回す）でも fresh 経路と同様に
-    // checksum 計算直後・全反復で検証する。
-    validate_gemm_checksum(checksum)?;
-    // イシュー #970: init 計測分の要素単位検証は init_s の外（elapsed 取得後）
-    // で行う。以後の反復と worst-case で集約する。
-    let mut parity = reference.verify_strict(&out0)?;
+    let mut tape = make_tape(&cli.device)?;
+    let (mut checksum, init_s, mut parity) = {
+        let a = tape.var(&a_data);
+        let b = tape.var(&b_data);
+        let c0 = a.matmul(&b)?;
+        let out0 = readout_var(&c0, cli.readout.as_deref())?;
+        let checksum: f64 = out0.iter().map(|&x| x as f64).sum();
+        let init_s = init_start.elapsed().as_secs_f64();
+        // イシュー #965 codex-review 指摘: checksum は毎反復上書きされるため、
+        // ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。init 計測分
+        // を含め reuse 経路（同一 tape を使い回す）でも fresh 経路と同様に
+        // checksum 計算直後・全反復で検証する。
+        validate_gemm_checksum(checksum)?;
+        // イシュー #970: init 計測分の要素単位検証は init_s の外（elapsed 取得後）
+        // で行う。以後の反復と worst-case で集約する。
+        (checksum, init_s, reference.verify_strict(&out0)?)
+    };
+    // #3265: init の結果ノードも解放し、計測反復と同じ状態（葉 2 個のみ）から始める。
+    release_gemm_reuse_iteration(&mut tape)?;
 
     // 残り warmup（1 回は init 計測内で消費済み）+ 計測本体。同一 tape・同一
-    // 葉 Var を使い回し、matmul のみを繰り返す。
-    let mut one = || -> Result<Duration, Box<dyn std::error::Error>> {
-        let start = Instant::now();
-        let c = a.matmul(&b)?;
-        let out = readout_var(&c, &cli.device, cli.readout.as_deref())?;
-        checksum = out.iter().map(|&x| x as f64).sum();
-        let elapsed = start.elapsed();
-        validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify_strict(&out)?);
+    // 葉（反復ごとに `tape.leaf(i)` で再取得）を使い回し、matmul のみを繰り返す。
+    // #3265: 反復の結果ノードは tape に積まれ続けるため、窓の外で `reset` する
+    // （candle が `c` を反復ごとに捨てる挙動との非対称の是正）。
+    let mut one = |tape: &mut Tape| -> Result<Duration, Box<dyn std::error::Error>> {
+        let elapsed = {
+            // 葉の再取得は計測窓の外（`start` より前）。
+            let (a, b) = gemm_reuse_leaves(tape)?;
+            let start = Instant::now();
+            let c = a.matmul(&b)?;
+            let out = readout_var(&c, cli.readout.as_deref())?;
+            checksum = out.iter().map(|&x| x as f64).sum();
+            let elapsed = start.elapsed();
+            validate_gemm_checksum(checksum)?;
+            parity = parity.worst(reference.verify_strict(&out)?);
+            // `Borrowed` は `Tensor` の `Arc` を持つため、reset の前に手放す。
+            drop(out);
+            elapsed
+        };
+        release_gemm_reuse_iteration(tape)?;
         Ok(elapsed)
     };
     for _ in 0..WARMUP_ITERS.saturating_sub(1) {
-        one()?;
+        one(&mut tape)?;
     }
     let mut durations = Vec::with_capacity(MEASURE_ITERS);
     for _ in 0..MEASURE_ITERS {
-        durations.push(one()?);
+        durations.push(one(&mut tape)?);
     }
     let st = stats(&durations)?;
     Record {
@@ -838,21 +868,27 @@ fn measure_gemm_reuse_phases(
     // 残り + 計測本体のみとし、init 自体は phase を push しない
     // （`measure_train_reuse_phases` の init と同型）。
     let init_start = Instant::now();
-    let tape = make_tape(&cli.device)?;
-    let a = tape.var(&a_data);
-    let b = tape.var(&b_data);
-    let c0 = a.matmul(&b)?;
-    let out0 = readout_var(&c0, &cli.device, cli.readout.as_deref())?;
-    let mut checksum: f64 = out0.iter().map(|&x| x as f64).sum();
-    let init_s = init_start.elapsed().as_secs_f64();
-    validate_gemm_checksum(checksum)?;
-    let mut parity = reference.verify_strict(&out0)?;
+    let mut tape = make_tape(&cli.device)?;
+    let (mut checksum, init_s, mut parity) = {
+        let a = tape.var(&a_data);
+        let b = tape.var(&b_data);
+        let c0 = a.matmul(&b)?;
+        let out0 = readout_var(&c0, cli.readout.as_deref())?;
+        let checksum: f64 = out0.iter().map(|&x| x as f64).sum();
+        let init_s = init_start.elapsed().as_secs_f64();
+        validate_gemm_checksum(checksum)?;
+        (checksum, init_s, reference.verify_strict(&out0)?)
+    };
+    // #3265: `run_gemm_reuse` と同じく結果ノードを窓の外で解放する。
+    release_gemm_reuse_iteration(&mut tape)?;
 
     let mut phases = PhaseSamples::new();
     // 1 回は init 計測内で消費済み（`run_gemm_reuse` と同じ warmup 消費
     // 規約）。
     let total_iters = WARMUP_ITERS.saturating_sub(1) + MEASURE_ITERS;
     for _ in 0..total_iters {
+        // 葉の再取得は計測窓（`iter_start`）の外（#3265）。
+        let (a, b) = gemm_reuse_leaves(&tape)?;
         let iter_start = Instant::now();
 
         let t0 = Instant::now();
@@ -863,11 +899,11 @@ fn measure_gemm_reuse_phases(
         // `readout_var` の実装（`readout_uses_borrowed_view` 分岐）を
         // ここで展開したもの（module doc・README「`gemm --mode reuse
         // --phases`」節参照）。区間名・順序・件数（5 区間）はいずれの
-        // 分岐でも不変。Metal は `readout_var` と同じく
+        // 分岐でも不変。`readout_var` と同じく
         // [`readout_uses_borrowed_view`]（codex-review 指摘・PR #1452
-        // P2）により legacy 経路を維持し、`--phases` 診断と gemm 本体
-        // 計測が同じ分岐判定を共有する（内部矛盾を避ける）。
-        let out = if readout_uses_borrowed_view(&cli.device, cli.readout.as_deref()) {
+        // P2）の判定を共有し、`--phases` 診断と gemm 本体計測の間で
+        // 分岐が矛盾しない。
+        let out = if readout_uses_borrowed_view(cli.readout.as_deref()) {
             // `to_tensor` 区間: `Var::host_view()` の構築
             // （`materialize_non_fallible(..).contiguous()`。contiguous
             // な場合は `Tensor` 内部 `Arc` の複製のみで memcpy を伴わない
@@ -915,6 +951,10 @@ fn measure_gemm_reuse_phases(
 
         validate_gemm_checksum(checksum)?;
         parity = parity.worst(reference.verify_strict(&out)?);
+        // `Borrowed` の `Arc` と `Var` 借用を手放してから reset する（#3265。
+        // phase は 5 区間のまま増やさない）。
+        drop(out);
+        release_gemm_reuse_iteration(&mut tape)?;
     }
 
     Ok((phases, checksum, init_s, parity))
@@ -1211,7 +1251,12 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // fresh tape per step（モジュール doc 参照: DeviceParamStore は
         // 使い回すが tape は使い回さない）。
         let tape = make_tape(&cli.device)?;
-        let x = tape.var(&x_data);
+        // #3265（#3245 案 2・#3264 §7.1 (6)）: PyTorch・burn は入力の勾配を計算
+        // しないため、入力 `x` は `var_no_grad`（`requires_grad=false`）で渡す。
+        // 0.11.0 は d_input を計算してから捨てるので速度は変わらず、効果は 0.12.0
+        // （#3246）で出る。`Gradients::get(&x)` は `GradientTrackingDisabled` を
+        // 返すが bench は読まない。`y`（mse target）は #3245 §9 でスコープ外。
+        let x = tape.var_no_grad(&x_data);
         let y = tape.var(&y_data);
         let pred = model.forward_resident(&tape, &x, &mut store)?;
         let loss = pred.mse_loss(&y)?;
@@ -1422,7 +1467,12 @@ fn measure_train_reuse_phases(
         phases.push(PHASE_TAPE_BUILD, t0.elapsed());
 
         let t0 = Instant::now();
-        let x = tape.var(&x_data);
+        // #3265（#3245 案 2・#3264 §7.1 (6)）: PyTorch・burn は入力の勾配を計算
+        // しないため、入力 `x` は `var_no_grad`（`requires_grad=false`）で渡す。
+        // 0.11.0 は d_input を計算してから捨てるので速度は変わらず、効果は 0.12.0
+        // （#3246）で出る。`Gradients::get(&x)` は `GradientTrackingDisabled` を
+        // 返すが bench は読まない。`y`（mse target）は #3245 §9 でスコープ外。
+        let x = tape.var_no_grad(&x_data);
         let y = tape.var(&y_data);
         phases.push(PHASE_LEAF_REGISTER, t0.elapsed());
 
@@ -1561,7 +1611,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // predict() builds an internal default (CPU) tape
                 let start = Instant::now();
                 let out = model.predict(&x_data)?;
-                *sync_checksum = checksum_tensor(&out, &cli.device, cli.readout.as_deref())?;
+                *sync_checksum = checksum_tensor(&out, cli.readout.as_deref())?;
                 Ok(start.elapsed())
             }
             _ => {
@@ -1570,7 +1620,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let start = Instant::now();
                 let x = tape.var(&x_data);
                 let out = model.forward(&tape, &x)?;
-                *sync_checksum = checksum_var(&out, &cli.device, cli.readout.as_deref())?;
+                *sync_checksum = checksum_var(&out, cli.readout.as_deref())?;
                 Ok(start.elapsed())
             }
         }
@@ -1648,7 +1698,7 @@ fn run_infer_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let out = model.predict_resident(&store, &x_data)?;
-        *sync_checksum = checksum_tensor(&out, &cli.device, cli.readout.as_deref())?;
+        *sync_checksum = checksum_tensor(&out, cli.readout.as_deref())?;
         Ok(start.elapsed())
     };
 
@@ -1773,7 +1823,7 @@ fn measure_infer_phases(
             // gemm 側の分岐判定と矛盾しないようにする。
             let t0 = Instant::now();
             let host_slice: std::borrow::Cow<'_, [f32]> =
-                if readout_uses_borrowed_view(&cli.device, cli.readout.as_deref()) {
+                if readout_uses_borrowed_view(cli.readout.as_deref()) {
                     out.host_slice()
                 } else {
                     std::borrow::Cow::Owned(
@@ -1827,7 +1877,7 @@ fn measure_infer_phases(
             // する（module doc 参照）。
             let t0 = Instant::now();
             let host_slice: std::borrow::Cow<'_, [f32]> =
-                if readout_uses_borrowed_view(&cli.device, cli.readout.as_deref()) {
+                if readout_uses_borrowed_view(cli.readout.as_deref()) {
                     out.host_slice()
                 } else {
                     std::borrow::Cow::Owned(
@@ -1873,7 +1923,7 @@ fn measure_infer_phases(
             // `host_copy` 区間は同一判定を共有する）。
             let t0 = Instant::now();
             let host_slice: std::borrow::Cow<'_, [f32]> =
-                if readout_uses_borrowed_view(&cli.device, cli.readout.as_deref()) {
+                if readout_uses_borrowed_view(cli.readout.as_deref()) {
                     t.host_slice()
                 } else {
                     std::borrow::Cow::Owned(
@@ -2956,7 +3006,7 @@ mod tests {
             .expect("test: as_slice() が None")
             .to_vec();
 
-        let via_readout = readout_var(&c, "cpu", None).expect("test: readout_var 失敗");
+        let via_readout = readout_var(&c, None).expect("test: readout_var 失敗");
         assert_eq!(
             &via_readout[..],
             &legacy[..],
@@ -2966,7 +3016,7 @@ mod tests {
         // checksum も同一（`f64` 逐次和の計算式・順序が feature 有無で
         // 不変であることの確認）。
         let legacy_checksum: f64 = legacy.iter().map(|&x| x as f64).sum();
-        let via_checksum = checksum_var(&a.matmul(&b).expect("test: matmul(2) 失敗"), "cpu", None)
+        let via_checksum = checksum_var(&a.matmul(&b).expect("test: matmul(2) 失敗"), None)
             .expect("test: checksum_var 失敗");
         assert_eq!(via_checksum.to_bits(), legacy_checksum.to_bits());
     }
@@ -2978,23 +3028,18 @@ mod tests {
     /// バイナリで両腕を切り替えられるための契約）。
     #[test]
     fn readout_uses_borrowed_view_override_forces_borrowed_regardless_of_device() {
-        assert!(readout_uses_borrowed_view("metal", Some("borrowed")));
-        assert!(readout_uses_borrowed_view("cpu", Some("borrowed")));
-        assert!(readout_uses_borrowed_view("cuda", Some("borrowed")));
+        assert!(readout_uses_borrowed_view(Some("borrowed")));
     }
 
     #[test]
     fn readout_uses_borrowed_view_override_forces_legacy_regardless_of_device() {
-        assert!(!readout_uses_borrowed_view("cpu", Some("legacy")));
-        assert!(!readout_uses_borrowed_view("cuda", Some("legacy")));
-        assert!(!readout_uses_borrowed_view("metal", Some("legacy")));
+        assert!(!readout_uses_borrowed_view(Some("legacy")));
     }
 
     #[test]
-    fn readout_uses_borrowed_view_none_override_keeps_device_default() {
-        assert!(readout_uses_borrowed_view("cpu", None));
-        assert!(readout_uses_borrowed_view("cuda", None));
-        assert!(!readout_uses_borrowed_view("metal", None));
+    fn readout_uses_borrowed_view_none_override_defaults_to_borrowed() {
+        // #3265: Metal を含む全デバイスで既定は借用ビュー（device 引数は廃止）。
+        assert!(readout_uses_borrowed_view(None));
     }
 
     /// codex-review 指摘（PR #1493 P1）: `--readout` override が実際の
@@ -3055,18 +3100,16 @@ mod tests {
         );
     }
 
-    /// codex-review 指摘（PR #1452 P2）: `readout_uses_borrowed_view` が
-    /// `device == "metal"` で選ぶ legacy 分岐（[`HostReadout::Owned`]）
-    /// が、CPU/CUDA の借用ビュー分岐（[`HostReadout::Borrowed`]）と
-    /// bit 同一の値・checksum を返すことを固定する回帰テスト（tape 自体
-    /// は cpu。`readout_var`/`checksum_var` の `device` 引数はコピー方式
-    /// のみを選ぶため、`Device::Metal` 実機を要さず両分岐を同一プロセス
-    /// 内で直接比較できる）。
+    /// codex-review 指摘（PR #1452 P2）・#3265: `--readout legacy` override
+    /// が選ぶ legacy 分岐（[`HostReadout::Owned`]）が、既定（`None` =
+    /// 借用ビュー分岐 [`HostReadout::Borrowed`]）と bit 同一の値・checksum
+    /// を返すことを固定する回帰テスト（A/B tooling が使う legacy 経路を
+    /// 残した以上、その bit 一致を引き続き固定する。`Device::Metal` 実機を
+    /// 要さず両分岐を同一プロセス内で直接比較できる）。
     #[test]
-    fn readout_var_metal_legacy_branch_matches_borrowed_view_bit_exact() {
-        assert!(readout_uses_borrowed_view("cpu", None));
-        assert!(readout_uses_borrowed_view("cuda", None));
-        assert!(!readout_uses_borrowed_view("metal", None));
+    fn readout_var_legacy_override_matches_borrowed_view_bit_exact() {
+        assert!(readout_uses_borrowed_view(None));
+        assert!(!readout_uses_borrowed_view(Some("legacy")));
 
         let tape = make_tape("cpu").expect("test: make_tape 失敗");
         let a_data = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
@@ -3077,30 +3120,134 @@ mod tests {
         let b = tape.var(&b_data);
 
         let c_borrowed = a.matmul(&b).expect("test: matmul(borrowed) 失敗");
-        let via_borrowed =
-            readout_var(&c_borrowed, "cpu", None).expect("test: readout_var(cpu) 失敗");
+        let via_borrowed = readout_var(&c_borrowed, None).expect("test: readout_var(cpu) 失敗");
 
         let c_owned = a.matmul(&b).expect("test: matmul(owned) 失敗");
         let via_owned =
-            readout_var(&c_owned, "metal", None).expect("test: readout_var(metal) 失敗");
+            readout_var(&c_owned, Some("legacy")).expect("test: readout_var(legacy) 失敗");
 
         assert_eq!(
             &via_borrowed[..],
             &via_owned[..],
-            "device=\"metal\" の legacy 分岐が借用ビュー分岐と bit 一致しない"
+            "legacy override が借用ビュー分岐と bit 一致しない"
         );
 
-        let checksum_borrowed =
-            checksum_var(&a.matmul(&b).expect("test: matmul(3) 失敗"), "cpu", None)
-                .expect("test: checksum_var(cpu) 失敗");
+        let checksum_borrowed = checksum_var(&a.matmul(&b).expect("test: matmul(3) 失敗"), None)
+            .expect("test: checksum_var(cpu) 失敗");
         let checksum_owned =
-            checksum_var(&a.matmul(&b).expect("test: matmul(4) 失敗"), "metal", None)
+            checksum_var(&a.matmul(&b).expect("test: matmul(4) 失敗"), Some("legacy"))
                 .expect("test: checksum_var(metal) 失敗");
         assert_eq!(
             checksum_borrowed.to_bits(),
             checksum_owned.to_bits(),
-            "device=\"metal\" の checksum_var が借用ビュー分岐と bit 一致しない"
+            "legacy override の checksum_var が借用ビュー分岐と bit 一致しない"
         );
+    }
+
+    /// #3265: `release_gemm_reuse_iteration` が葉 2 個を残して結果ノードを
+    /// 解放し、再取得した葉による matmul 結果・checksum が毎反復 bit 一致
+    /// することを固定する（`reset` が値を変えないことの確認）。
+    #[test]
+    fn gemm_reuse_release_keeps_leaves_and_bit_identical_result() {
+        let mut tape = make_tape("cpu").expect("test: make_tape 失敗");
+        let a_data = Tensor::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("a");
+        let b_data = Tensor::new(vec![1.0f32, 0.5, -1.0, 2.0, 1.0, 1.0], &[3, 2]).expect("b");
+        let first: Vec<u32> = {
+            let a = tape.var(&a_data);
+            let b = tape.var(&b_data);
+            let c = a.matmul(&b).expect("matmul");
+            readout_var(&c, None)
+                .expect("readout")
+                .iter()
+                .map(|x| x.to_bits())
+                .collect()
+        };
+        let mut first_sum = None;
+        for _ in 0..3 {
+            release_gemm_reuse_iteration(&mut tape).expect("release");
+            assert_eq!(tape.leaf_count(), GEMM_REUSE_LEAF_COUNT);
+            let (bits, sum) = {
+                let (a, b) = gemm_reuse_leaves(&tape).expect("leaves");
+                let c = a.matmul(&b).expect("matmul");
+                let out = readout_var(&c, None).expect("readout");
+                let bits: Vec<u32> = out.iter().map(|x| x.to_bits()).collect();
+                let sum: f64 = out.iter().map(|&x| x as f64).sum();
+                (bits, sum)
+            };
+            assert_eq!(bits, first, "reset 後の matmul 結果が初回と bit 一致しない");
+            match first_sum {
+                None => first_sum = Some(sum.to_bits()),
+                Some(s0) => assert_eq!(s0, sum.to_bits(), "checksum が反復間で不一致"),
+            }
+        }
+    }
+
+    /// #3265: 葉が足りない tape では panic せず `MEASURE_ERROR` を返す。
+    #[test]
+    fn gemm_reuse_leaves_missing_is_measure_error() {
+        let mut tape = make_tape("cpu").expect("test: make_tape 失敗");
+        {
+            let a_data = Tensor::new(vec![1.0f32, 2.0], &[1, 2]).expect("a");
+            let _a = tape.var(&a_data);
+        }
+        let err = match gemm_reuse_leaves(&tape) {
+            Ok(_) => panic!("葉 1 個の tape で Ok が返った"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.starts_with("MEASURE_ERROR"), "{err}");
+        let err = release_gemm_reuse_iteration(&mut tape)
+            .expect_err("葉 1 個では leaf_count 検査が失敗するはず")
+            .to_string();
+        assert!(err.starts_with("MEASURE_ERROR"), "{err}");
+    }
+
+    /// #3265（#3245 案 2）: 0.11.0 では入力を `var_no_grad` にしても最終 loss
+    /// と更新後パラメータが `var` の場合と bit 一致することを固定する。
+    #[test]
+    fn train_reuse_var_no_grad_input_is_bit_identical_to_var() {
+        fn run(no_grad: bool) -> (u32, Vec<Vec<u32>>) {
+            let (x_data, y_data) = mlp_data().expect("mlp_data");
+            let model = build_model().expect("build_model");
+            let init_tape = make_tape("cpu").expect("tape");
+            let mut store = model.init_device_param_store(&init_tape).expect("store");
+            drop(init_tape);
+            let config = SgdConfig::new(LR);
+            let mut last = 0.0f32;
+            for _ in 0..5 {
+                let tape = make_tape("cpu").expect("tape");
+                let x = if no_grad {
+                    tape.var_no_grad(&x_data)
+                } else {
+                    tape.var(&x_data)
+                };
+                let y = tape.var(&y_data);
+                let pred = model.forward_resident(&tape, &x, &mut store).expect("fwd");
+                let loss = pred.mse_loss(&y).expect("mse");
+                last = loss.to_tensor().get(&[]).expect("scalar");
+                let grads = tape
+                    .backward_device_param_store(&loss, &store)
+                    .expect("backward");
+                tape.step_device_param_store(&mut store, &grads, &config)
+                    .expect("step");
+            }
+            let final_tape = make_tape("cpu").expect("tape");
+            let synced = final_tape
+                .sync_device_param_store_to_host(&store)
+                .expect("sync");
+            let params = synced
+                .iter()
+                .map(|t| {
+                    t.contiguous()
+                        .as_slice()
+                        .expect("as_slice")
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect()
+                })
+                .collect();
+            (last.to_bits(), params)
+        }
+        assert_eq!(run(false), run(true));
     }
 
     /// イシュー #1337・#1335・#1438: `Var::host_view()`（`readout_var`
@@ -3120,14 +3267,14 @@ mod tests {
         let b = tape.var(&b_data);
 
         let c1 = a.matmul(&b).expect("test: matmul(1) 失敗");
-        let out1 = readout_var(&c1, "cpu", None).expect("test: readout_var(1) 失敗");
+        let out1 = readout_var(&c1, None).expect("test: readout_var(1) 失敗");
         // `out1`（`VarHostView`）を生存させたまま同じ `Tape` へ演算を
         // 追加で呼ぶ。旧実装（`Tape` の `RefCell` 借用を持ち越す版）は
         // ここで `borrow_mut()` の実行時 panic を起こしていた。
         let c2 = a
             .matmul(&b)
             .expect("test: matmul(2) failed while out1 alive (panic bug?)");
-        let out2 = readout_var(&c2, "cpu", None).expect("test: readout_var(2) 失敗");
+        let out2 = readout_var(&c2, None).expect("test: readout_var(2) 失敗");
 
         assert_eq!(
             &out1[..],
@@ -3231,7 +3378,7 @@ mod tests {
             task: "gemm".to_string(),
             device: "metal".to_string(),
             size: 1024,
-            out: out.to_string_lossy().into_owned(),
+            out: out.path().to_string_lossy().into_owned(),
             mode: "reuse".to_string(),
             phases: true,
             tf32: false,
@@ -3548,7 +3695,7 @@ mod tests {
             task: "infer".to_string(),
             device: "metal".to_string(),
             size: 64,
-            out: reuse_out.to_string_lossy().into_owned(),
+            out: reuse_out.path().to_string_lossy().into_owned(),
             mode: "reuse".to_string(),
             phases: false,
             tf32: false,
@@ -3574,7 +3721,7 @@ mod tests {
                 task: "infer".to_string(),
                 device: "metal".to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
@@ -4203,7 +4350,7 @@ mod tests {
                 task: "train".to_string(),
                 device: "metal".to_string(),
                 size: 64,
-                out: out.to_string_lossy().into_owned(),
+                out: out.path().to_string_lossy().into_owned(),
                 mode: mode.to_string(),
                 phases: true,
                 tf32: false,
@@ -4255,7 +4402,7 @@ mod tests {
             let a = tape.var(&a_data);
             let b = tape.var(&b_data);
             let c = a.matmul(&b).expect("matmul");
-            let out = readout_var(&c, "cpu", None).expect("readout_var");
+            let out = readout_var(&c, None).expect("readout_var");
 
             let stats = reference.verify(&out).expect("verify");
             assert_eq!(stats.fail_count, 0, "n={n}: fail_count must be 0");
