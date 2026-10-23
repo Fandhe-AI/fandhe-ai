@@ -10,7 +10,7 @@
 - PyTorch: torch 2.14.0・numpy 2.5.4（リポ外の venv。torch のスレッド数 4）
 - P-TREE（差分は `mod.rs` の 1 件のみ・patch sha256 一致）・P-R0（両腕 `kernel_enabled: true`）は成立（`macmini/tree_verify.txt`・`macmini/sme_report.txt`）
 - `SME_PRODUCTION_ENABLED` は main で `false` のまま（after 腕は Mac mini 上の計測専用ツリーのみ。ドリフトガード
-  `sme_production_enabled_is_false_pending_measurement` が機械的に担保）。本番切替は #3230、しきい値の確定は #3231
+  `sme_production_enabled_is_false_pending_measurement` が機械的に担保）。本番切替は #3230、しきい値の確定は #3231（訂正: 本番切替は #3231。#3230 は unsafe 監査の更新と再開条件の確認で、結果は `docs/cpu-gemm-sme-unsafe-audit.md` §12）
 
 ## 目的
 
