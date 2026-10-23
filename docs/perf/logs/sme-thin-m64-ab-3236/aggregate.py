@@ -37,6 +37,13 @@ SMALL_K_REACH = ("l2_dx",)
 GATE_FILE = "crates/backend-cpu/src/gemm_blis/mod.rs"
 GATE_CONST = "SME_THIN_M64_ENABLED"
 # 系列 B（0.11.0 registry 版の値。本 run の値ではない）: fandhe の対 PyTorch 倍率（torch median / fandhe median）
+# GEMM 単体の各 shape の (転置, m, n, k)。cpu_jobgrid_bench.rs の SHAPES・RULE §2 と一致させる（P-CELLS の契約）
+JOBGRID_SPEC = {
+    "l1_fwd": ("nn", 64, 256, 784), "l1_dw": ("tn", 784, 256, 64), "l1_dx": ("nt", 64, 784, 256),
+    "l2_fwd": ("nn", 64, 10, 256), "l2_dw": ("tn", 256, 10, 64), "l2_dx": ("nt", 64, 256, 10),
+    "ref_square_512": ("nn", 512, 512, 512),
+}
+KGRID_M, KGRID_N = 64, 256
 SERIES_B = {("train", 64): 0.20, ("infer", 64): 0.25}
 
 
@@ -146,11 +153,26 @@ def load_grid(gdir, kind, arm, shapes, problems, ck_all):
                 shape = d["shape"]
                 med = float(d["median_secs"])
                 ck = d["checksum"]
+                row_arm = d["arm"]
+                dims = tuple(int(d[x]) for x in ("m", "n", "k"))
+                trans = d["trans"] if kind == "jobgrid" else None
             except (ValueError, KeyError) as e:
                 problems.append(where + " 行が不正: %s" % e)
                 continue
+            if row_arm != arm:
+                problems.append(where + " arm 不一致: 行=%s 期待=%s（別腕のログの誤収録）" % (row_arm, arm))
+                continue
             if shape not in shapes:
                 problems.append(where + " 未知の shape: " + shape)
+                continue
+            if kind == "jobgrid":
+                want = JOBGRID_SPEC[shape]
+                got = (trans,) + dims
+            else:
+                want = (None, KGRID_M, KGRID_N, int(shape[len("kgrid_k"):]))
+                got = (None,) + dims
+            if got != want:
+                problems.append(where + " shape 契約違反: %s は 期待 %s・実際 %s" % (shape, want, got))
                 continue
             if shape in seen:
                 problems.append(where + " shape 重複: " + shape)
@@ -398,7 +420,7 @@ def _write(path, text):
     open(path, "w", encoding="utf-8").write(text)
 
 
-def _fixture(root, on_ratio=0.9, ck_bad=None, drop=None, dup=False, gate_ok=True, regress=None, kmin=None, rm_tree=False, torch=True):
+def _fixture(root, on_ratio=0.9, bad_arm=False, bad_dim=False, ck_bad=None, drop=None, dup=False, gate_ok=True, regress=None, kmin=None, rm_tree=False, torch=True):
     """regress: 5/5 後退させる GEMM shape 名。kmin: K 格子で ON が遅くなる k の上限（k < kmin が後退）。"""
     ab, gd = os.path.join(root, "ab"), os.path.join(root, "gemm")
     for arm in ("before", "after"):
@@ -422,14 +444,18 @@ def _fixture(root, on_ratio=0.9, ck_bad=None, drop=None, dup=False, gate_ok=True
                     ratio = 1.2
                 ck = 0x1000 + (1 if (ck_bad == "gemm" and arm == "after" and s == "l1_fwd") else 0)
                 if not (drop == "gemm" and arm == "after" and s == "l2_dw" and r == 1):
-                    jl.append("arm=%s series=threads shape=%s trans=nn m=1 n=1 k=1 rayon_threads=10 median_secs=%.9f gflops=1.0 checksum=0x%016x"
-                              % (arm, s, 0.001 * (ratio if arm == "after" else 1.0), ck))
+                    jl.append("arm=%s series=threads shape=%s trans=%s m=%d n=%d k=%d rayon_threads=10 median_secs=%.9f gflops=1.0 checksum=0x%016x"
+                              % ((arm, s) + JOBGRID_SPEC[s] + ( 0.001 * (ratio if arm == "after" else 1.0), ck)))
             for k in KS:
                 ratio = on_ratio
                 if kmin is not None and k < kmin:
                     ratio = 1.2
                 kl.append("arm=%s shape=kgrid_k%d m=64 n=256 k=%d rayon_threads=10 median_secs=%.9f gflops=1.0 checksum=0x%016x"
                           % (arm, k, k, 0.001 * (ratio if arm == "after" else 1.0), 0x2000 + k))
+            if bad_arm and arm == "after" and r == 1:
+                jl = [x.replace("arm=after", "arm=before") for x in jl]
+            if bad_dim and arm == "after" and r == 1:
+                jl = [x.replace("trans=nn m=64 n=256 k=784", "trans=nn m=64 n=256 k=785") for x in jl]
             _write(os.path.join(gd, "jobgrid-%s-r%d.txt" % (arm, r)), "\n".join(jl) + "\n")
             _write(os.path.join(gd, "kgrid-%s-r%d.txt" % (arm, r)), "\n".join(kl) + "\n")
     g = "".join("round%d gate=%s gate_ok=%d threshold=3.0 load1=0.5 waited_s=0 at=x\n" % (r, "pass" if gate_ok else "timeout", 1 if gate_ok else 0) for r in range(1, 6))
@@ -486,6 +512,8 @@ def self_test():
     check("checksum 不一致 + 後退でも FAIL", _verdict(ck_bad="fc", regress="l1_fwd"), "FAIL")
     check("ゲート不通過は undetermined", _verdict(gate_ok=False), "undetermined")
     check("ゲート不通過 + 後退でも undetermined（REJECT より先）", _verdict(gate_ok=False, regress="l1_fwd"), "undetermined")
+    check("after 名に before 腕ログを誤収録は undetermined", _verdict(bad_arm=True), "undetermined")
+    check("shape ラベルだけ一致し次元が違う行は undetermined", _verdict(bad_dim=True), "undetermined")
     check("tree 欠損は undetermined", _verdict(rm_tree=True), "undetermined")
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
