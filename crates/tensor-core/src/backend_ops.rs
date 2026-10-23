@@ -1620,6 +1620,38 @@ pub trait BackendOps {
     /// [`BackendError::ShapeMismatch`]）。
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError>;
 
+    /// [`Self::gemm`] と同じ行列積 `C = A @ B` を、**デバイスに upload 済みの
+    /// 入力 [`DeviceBuffer`]** に対して行い、結果もデバイス常駐の
+    /// [`DeviceBuffer`] で返す（イシュー #3250 P4・`docs/
+    /// compat-resident-train-step-decision.md` §4・§10）。
+    ///
+    /// `fandhe_ai_autodiff::optim::resident_input::matmul_resident`（facade
+    /// `Tape::matmul_resident`）から呼ばれる。入力の H2D を計測窓の外へ出し、
+    /// 窓の中を「演算＋ D2H 1 回」にするための入口。
+    ///
+    /// # 契約
+    /// - `a: [m, k]`・`b: [k, n]`（いずれも upload 済みの contiguous 行優先 2 次元）。
+    ///   shape 不整合は [`BackendError::ShapeMismatch`]、デバイス違いは
+    ///   [`BackendError::DeviceMismatch`]
+    /// - 同じ入力に対し、現在の精度モードの [`Self::gemm`] と **bit 一致**する
+    ///   （カーネルの出どころを `gemm` と同じにするバックエンドだけが実装する）
+    /// - 同期: CUDA はストリーム順序で積むだけ（結果の読み出しで同期）。
+    ///   Metal・CPU は復帰時に完了している
+    /// - 失敗トークンの義務は持ち込まない（`_tracked` 版は #3251／#3252 が必要なら足す）
+    ///
+    /// # デフォルト実装
+    /// [`BackendError::Unsupported`]（ホストへの黙示フォールバックはしない。
+    /// 呼び出し側もホスト経路へ落とさず `Unsupported` を返して止める）。
+    fn gemm_device(
+        &self,
+        _a: &DeviceBuffer<f32>,
+        _b: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_device: default fail-safe (no device-resident gemm available)".into(),
+        ))
+    }
+
     /// `gemm` と同じ行列積だが、**`crate::precision`（`backend-cuda`）の
     /// TF32 opt-in フラグ（`set_cuda_tf32_gemm_enabled`）の状態に関わらず
     /// 常に FP32 厳密で計算する**ことを契約するエントリ。

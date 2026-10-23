@@ -389,6 +389,10 @@ mod gemm_device_input_diag_tests_3223;
 // 同期・D2H（GEMM は H2D も）0 の検証と tracked 連結区間の確認（兄弟配置の理由は同上）。
 #[cfg(test)]
 mod train_step_parts_sync_diag_tests_3224;
+// イシュー #3250: 常駐入力の行列積・推論チェーン層列が窓の中で入力 H2D を起こさないことの
+// 検証（兄弟配置の理由は同上）。
+#[cfg(test)]
+mod resident_input_diag_tests_3250;
 // イシュー #2116: CUDA train reuse の `forward_resident` 区間（層ごとの
 // `gemm_resident_rhs` 往復・未融合 relu・mse の H2D／確保／起動／同期 D2H）を
 // 層の種類別・batch 別に分解する診断テスト。`context_cache`・
