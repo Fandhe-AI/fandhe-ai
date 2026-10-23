@@ -3883,6 +3883,35 @@ pub trait BackendOps {
         self.linear_forward_device(a, w, bias, act)
     }
 
+    /// [`Self::linear_forward_device_tracked`] と同じ計算を、**呼び出し元が持つ既存の出力バッファ
+    /// `out` へ書き込む**版（イシュー #3205。推論チェーンの層ごとの出力確保・memset・解放を
+    /// 呼び出しを跨いで再利用して削る内部 trait の非破壊拡張。公開 API ではない）。
+    ///
+    /// # 契約
+    /// - `out` は shape `[m, n]`・同一デバイス・現行世代でなければならない（不一致は型付きエラー）。
+    ///   `out` の既存内容は読まれず、論理形の全要素が上書きされる（前回の値が残らない）。
+    /// - `a` と `out` は別バッファ（Rust の借用規則が `&`／`&mut` の同時保持を禁じる）。
+    /// - 同期点は [`Self::linear_forward_device`] と同じく呼び出し元の `download` に集約する。
+    ///
+    /// # デフォルト実装
+    /// 既定は [`BackendError::Unsupported`]。呼び出し元（`autodiff::DeviceParamStore::
+    /// predict_device_chain`）はこれを「その層は確保経路を使う」の合図として扱い、
+    /// [`Self::linear_forward_device_tracked`] へ進む（呼び出し元の全体フォールバックには
+    /// 伝播させない）。CUDA のみがオーバーライドする。
+    fn linear_forward_device_into_tracked(
+        &self,
+        _a: &DeviceBuffer<f32>,
+        _w: DeviceBufferView<'_>,
+        _bias: Option<DeviceBufferView<'_>>,
+        _act: Activation,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "linear_forward_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
     /// ReLU の backward マスクをデバイス常駐のまま適用する（イシュー #3218・
     /// 設計 `docs/train-step-resident-parts-design.md` §3 行 3・§4・§5。
     /// 学習 1 step の同期回数を 1 回へ減らす #3248・#3251 の部品）。
@@ -6263,6 +6292,28 @@ mod tests {
             other => panic!("expected both to return the same Unsupported error: {other:?}"),
         }
         // デフォルト委譲は token に一切触れない。
+        assert!(!token.is_set());
+    }
+
+    /// 既定の `linear_forward_device_into_tracked` は `Unsupported` を返し、`token` に触れない
+    /// （イシュー #3205。呼び出し元は層単位で確保経路へ進む合図として扱う）。
+    #[test]
+    fn linear_forward_device_into_tracked_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = empty_device_buffer(Device::Cpu);
+        let w_buf = empty_device_buffer(Device::Cpu);
+        let w_view = DeviceBufferView::new(&w_buf, 0, &[1]).unwrap();
+        let mut out = empty_device_buffer(Device::Cpu);
+        let token = DispatchFailureCell::new();
+        let r = ops.linear_forward_device_into_tracked(
+            &a,
+            w_view,
+            None,
+            Activation::None,
+            &mut out,
+            &token,
+        );
+        assert!(matches!(r, Err(BackendError::Unsupported(_))));
         assert!(!token.is_set());
     }
 
