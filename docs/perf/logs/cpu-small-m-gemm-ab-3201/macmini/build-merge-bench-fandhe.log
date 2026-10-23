@@ -1,0 +1,38 @@
+    Updating crates.io index
+     Locking 27 packages to highest compatible versions
+      Adding base64 v0.23.1
+      Adding core-foundation v0.10.1
+      Adding der v0.8.2
+      Adding fandhe-ai v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/facade)
+      Adding fandhe-ai-autodiff v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/autodiff)
+      Adding fandhe-ai-backend-cpu v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/backend-cpu)
+      Adding fandhe-ai-backend-cuda v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/backend-cuda)
+      Adding fandhe-ai-backend-metal v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/backend-metal)
+      Adding fandhe-ai-onnx-interop v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/onnx-interop)
+      Adding fandhe-ai-tensor-core v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/tensor-core)
+      Adding foreign-types v0.3.2
+      Adding foreign-types-shared v0.1.1
+      Adding native-tls v0.2.18
+      Adding openssl v0.10.81
+      Adding openssl-macros v0.1.1
+      Adding openssl-probe v0.2.1
+      Adding openssl-src v300.6.1+3.6.3
+      Adding openssl-sys v0.9.117
+      Adding pem-rfc7468 v1.0.0
+      Adding schannel v0.1.30
+      Adding security-framework v3.7.0
+      Adding security-framework-sys v2.17.0
+      Adding ureq v3.4.2 (available: v3.5.0)
+      Adding ureq-proto v0.6.5
+      Adding utf8-zero v0.8.1
+      Adding vcpkg v0.2.15
+      Adding webpki-root-certs v1.0.10
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/tensor-core)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/autodiff)
+   Compiling fandhe-ai-backend-metal v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/backend-metal)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/backend-cuda)
+   Compiling fandhe-ai-onnx-interop v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/onnx-interop)
+   Compiling fandhe-ai v0.11.0 (<home>/work/small-m-ab-3201/work/arm-merge/crates/facade)
+   Compiling bench-fandhe v0.1.0 (<home>/work/small-m-ab-3201/work/arm-merge/scripts/bench/framework-compare/bench-fandhe)
+    Finished `release` profile [optimized] target(s) in 17.30s

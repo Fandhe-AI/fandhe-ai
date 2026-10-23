@@ -1,0 +1,12 @@
+off changed=(BASE そのまま)
+off G1=false G2=false aff=false
+merge changed=./crates/backend-cpu/src/gemm_blis/small_m.rs,
+merge G1=true G2=false aff=false
+mergeprepack changed=./crates/backend-cpu/src/gemm_blis/prepack.rs,./crates/backend-cpu/src/gemm_blis/small_m.rs,
+mergeprepack G1=true G2=true aff=false
+off-aff changed=./crates/backend-cpu/src/gb10_affinity.rs,
+off-aff G1=false G2=false aff=true
+merge-aff changed=./crates/backend-cpu/src/gb10_affinity.rs,./crates/backend-cpu/src/gemm_blis/small_m.rs,
+merge-aff G1=true G2=false aff=true
+mergeprepack-aff changed=./crates/backend-cpu/src/gb10_affinity.rs,./crates/backend-cpu/src/gemm_blis/prepack.rs,./crates/backend-cpu/src/gemm_blis/small_m.rs,
+mergeprepack-aff G1=true G2=true aff=true

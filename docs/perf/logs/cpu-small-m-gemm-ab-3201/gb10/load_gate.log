@@ -1,0 +1,75 @@
+ORDER run=1 order=off merge mergeprepack off-aff merge-aff mergeprepack-aff
+START series=ab run=1 arm=off gate=pass load1=9.21 waited_s=0 at=2026-10-23T05:52:36Z
+END series=ab run=1 arm=off exit=0 end_load1=9.21
+START series=ab run=1 arm=merge gate=pass load1=9.21 waited_s=0 at=2026-10-23T05:52:37Z
+END series=ab run=1 arm=merge exit=0 end_load1=9.21
+START series=ab run=1 arm=mergeprepack gate=pass load1=9.21 waited_s=0 at=2026-10-23T05:52:37Z
+END series=ab run=1 arm=mergeprepack exit=0 end_load1=9.21
+START series=ab run=1 arm=off-aff gate=pass load1=9.21 waited_s=0 at=2026-10-23T05:52:37Z
+END series=ab run=1 arm=off-aff exit=0 end_load1=8.55
+START series=ab run=1 arm=merge-aff gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:38Z
+END series=ab run=1 arm=merge-aff exit=0 end_load1=8.55
+START series=ab run=1 arm=mergeprepack-aff gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:38Z
+END series=ab run=1 arm=mergeprepack-aff exit=0 end_load1=8.55
+START series=torch run=1 arm=torch gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:39Z
+END series=torch run=1 arm=torch exit=0 end_load1=8.55
+ORDER run=2 order=merge mergeprepack off-aff merge-aff mergeprepack-aff off
+START series=ab run=2 arm=merge gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:41Z
+END series=ab run=2 arm=merge exit=0 end_load1=8.55
+START series=ab run=2 arm=mergeprepack gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:41Z
+END series=ab run=2 arm=mergeprepack exit=0 end_load1=8.55
+START series=ab run=2 arm=off-aff gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:41Z
+END series=ab run=2 arm=off-aff exit=0 end_load1=8.55
+START series=ab run=2 arm=merge-aff gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:42Z
+END series=ab run=2 arm=merge-aff exit=0 end_load1=8.55
+START series=ab run=2 arm=mergeprepack-aff gate=pass load1=8.55 waited_s=0 at=2026-10-23T05:52:42Z
+END series=ab run=2 arm=mergeprepack-aff exit=0 end_load1=7.95
+START series=ab run=2 arm=off gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:43Z
+END series=ab run=2 arm=off exit=0 end_load1=7.95
+START series=torch run=2 arm=torch gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:43Z
+END series=torch run=2 arm=torch exit=0 end_load1=7.95
+ORDER run=3 order=mergeprepack off-aff merge-aff mergeprepack-aff off merge
+START series=ab run=3 arm=mergeprepack gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:45Z
+END series=ab run=3 arm=mergeprepack exit=0 end_load1=7.95
+START series=ab run=3 arm=off-aff gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:45Z
+END series=ab run=3 arm=off-aff exit=0 end_load1=7.95
+START series=ab run=3 arm=merge-aff gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:46Z
+END series=ab run=3 arm=merge-aff exit=0 end_load1=7.95
+START series=ab run=3 arm=mergeprepack-aff gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:46Z
+END series=ab run=3 arm=mergeprepack-aff exit=0 end_load1=7.95
+START series=ab run=3 arm=off gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:47Z
+END series=ab run=3 arm=off exit=0 end_load1=7.95
+START series=ab run=3 arm=merge gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:47Z
+END series=ab run=3 arm=merge exit=0 end_load1=7.95
+START series=torch run=3 arm=torch gate=pass load1=7.95 waited_s=0 at=2026-10-23T05:52:48Z
+END series=torch run=3 arm=torch exit=0 end_load1=7.39
+ORDER run=4 order=off-aff merge-aff mergeprepack-aff off merge mergeprepack
+START series=ab run=4 arm=off-aff gate=pass load1=7.39 waited_s=0 at=2026-10-23T05:52:49Z
+END series=ab run=4 arm=off-aff exit=0 end_load1=7.39
+START series=ab run=4 arm=merge-aff gate=pass load1=7.39 waited_s=0 at=2026-10-23T05:52:50Z
+END series=ab run=4 arm=merge-aff exit=0 end_load1=7.39
+START series=ab run=4 arm=mergeprepack-aff gate=pass load1=7.39 waited_s=0 at=2026-10-23T05:52:50Z
+END series=ab run=4 arm=mergeprepack-aff exit=0 end_load1=7.39
+START series=ab run=4 arm=off gate=pass load1=7.39 waited_s=0 at=2026-10-23T05:52:51Z
+END series=ab run=4 arm=off exit=0 end_load1=7.39
+START series=ab run=4 arm=merge gate=pass load1=7.39 waited_s=0 at=2026-10-23T05:52:51Z
+END series=ab run=4 arm=merge exit=0 end_load1=7.39
+START series=ab run=4 arm=mergeprepack gate=pass load1=7.39 waited_s=0 at=2026-10-23T05:52:51Z
+END series=ab run=4 arm=mergeprepack exit=0 end_load1=7.39
+START series=torch run=4 arm=torch gate=pass load1=7.39 waited_s=0 at=2026-10-23T05:52:52Z
+END series=torch run=4 arm=torch exit=0 end_load1=6.88
+ORDER run=5 order=merge-aff mergeprepack-aff off merge mergeprepack off-aff
+START series=ab run=5 arm=merge-aff gate=pass load1=6.88 waited_s=0 at=2026-10-23T05:52:54Z
+END series=ab run=5 arm=merge-aff exit=0 end_load1=6.88
+START series=ab run=5 arm=mergeprepack-aff gate=pass load1=6.88 waited_s=0 at=2026-10-23T05:52:54Z
+END series=ab run=5 arm=mergeprepack-aff exit=0 end_load1=6.88
+START series=ab run=5 arm=off gate=pass load1=6.88 waited_s=0 at=2026-10-23T05:52:54Z
+END series=ab run=5 arm=off exit=0 end_load1=6.88
+START series=ab run=5 arm=merge gate=pass load1=6.88 waited_s=0 at=2026-10-23T05:52:55Z
+END series=ab run=5 arm=merge exit=0 end_load1=6.88
+START series=ab run=5 arm=mergeprepack gate=pass load1=6.88 waited_s=0 at=2026-10-23T05:52:55Z
+END series=ab run=5 arm=mergeprepack exit=0 end_load1=6.88
+START series=ab run=5 arm=off-aff gate=pass load1=6.88 waited_s=0 at=2026-10-23T05:52:56Z
+END series=ab run=5 arm=off-aff exit=0 end_load1=6.88
+START series=torch run=5 arm=torch gate=pass load1=6.88 waited_s=0 at=2026-10-23T05:52:56Z
+END series=torch run=5 arm=torch exit=0 end_load1=6.41

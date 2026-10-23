@@ -1,0 +1,61 @@
+### G1 small_m_shared_a_report
+   Compiling <user>-ai-backend-cpu v0.11.0 (<home>/work/small-m-ab-3201/work/arm-mergeprepack-aff/crates/backend-cpu)
+    Finished `release` profile [optimized] target(s) in 5.73s
+     Running unittests src/lib.rs (<home>/work/small-m-ab-3201/work/target-mergeprepack-aff/release/deps/<user>_ai_backend_cpu-6344e2f6f3e87765)
+
+running 1 test
+probe=small_m_shared_a gate=true eligible=true shape=l1_fwd trans=nn m=64 n=256 k=784 arm=native row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=50176 a_ideal_words=50176 a_pack_words_in_job=0 b_pack_words=413952 b_ideal_words=206976 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+probe=small_m_shared_a gate=true eligible=false shape=l1_dw trans=tn m=784 n=256 k=64 arm=native row_bands=5 col_bands=2 jobs=10 a_shared_bands=0 a_shared_words=0 a_ideal_words=50176 a_pack_words_in_job=100352 b_pack_words=84480 b_ideal_words=16896 alloc_job=30 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=401408
+probe=small_m_shared_a gate=true eligible=true shape=l1_dx trans=nt m=64 n=784 k=256 arm=native row_bands=1 col_bands=10 jobs=10 a_shared_bands=1 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=202752 b_ideal_words=202752 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=24 c_stage_words=100352
+probe=small_m_shared_a gate=true eligible=true shape=l2_fwd trans=nn m=64 n=10 k=256 arm=native row_bands=8 col_bands=1 jobs=8 a_shared_bands=8 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=24576 b_ideal_words=3072 alloc_job=0 alloc_shared_a=1 alloc_scratch=8 alloc_split=0 c_stage_words=0
+probe=small_m_shared_a gate=true eligible=false shape=l2_dw trans=tn m=256 n=10 k=64 arm=native row_bands=11 col_bands=1 jobs=11 a_shared_bands=0 a_shared_words=0 a_ideal_words=16384 a_pack_words_in_job=16384 b_pack_words=8448 b_ideal_words=768 alloc_job=33 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=5120
+probe=small_m_shared_a gate=true eligible=true shape=l2_dx trans=nt m=64 n=256 k=10 arm=native row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=640 a_ideal_words=640 a_pack_words_in_job=0 b_pack_words=5280 b_ideal_words=2640 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+probe=small_m_shared_a gate=true eligible=true shape=l1_fwd trans=nn m=64 n=256 k=784 arm=T1 row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=50176 a_ideal_words=50176 a_pack_words_in_job=0 b_pack_words=413952 b_ideal_words=206976 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+probe=small_m_shared_a gate=true eligible=false shape=l1_dw trans=tn m=784 n=256 k=64 arm=T1 row_bands=5 col_bands=2 jobs=10 a_shared_bands=0 a_shared_words=0 a_ideal_words=50176 a_pack_words_in_job=100352 b_pack_words=84480 b_ideal_words=16896 alloc_job=30 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=401408
+probe=small_m_shared_a gate=true eligible=true shape=l1_dx trans=nt m=64 n=784 k=256 arm=T1 row_bands=1 col_bands=10 jobs=10 a_shared_bands=1 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=202752 b_ideal_words=202752 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=24 c_stage_words=100352
+probe=small_m_shared_a gate=true eligible=true shape=l2_fwd trans=nn m=64 n=10 k=256 arm=T1 row_bands=8 col_bands=1 jobs=8 a_shared_bands=8 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=24576 b_ideal_words=3072 alloc_job=0 alloc_shared_a=1 alloc_scratch=8 alloc_split=0 c_stage_words=0
+probe=small_m_shared_a gate=true eligible=false shape=l2_dw trans=tn m=256 n=10 k=64 arm=T1 row_bands=11 col_bands=1 jobs=11 a_shared_bands=0 a_shared_words=0 a_ideal_words=16384 a_pack_words_in_job=16384 b_pack_words=8448 b_ideal_words=768 alloc_job=33 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=5120
+probe=small_m_shared_a gate=true eligible=true shape=l2_dx trans=nt m=64 n=256 k=10 arm=T1 row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=640 a_ideal_words=640 a_pack_words_in_job=0 b_pack_words=5280 b_ideal_words=2640 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+probe=small_m_shared_a gate=true eligible=true shape=l1_fwd trans=nn m=64 n=256 k=784 arm=T10 row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=50176 a_ideal_words=50176 a_pack_words_in_job=0 b_pack_words=413952 b_ideal_words=206976 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+probe=small_m_shared_a gate=true eligible=false shape=l1_dw trans=tn m=784 n=256 k=64 arm=T10 row_bands=5 col_bands=2 jobs=10 a_shared_bands=0 a_shared_words=0 a_ideal_words=50176 a_pack_words_in_job=100352 b_pack_words=84480 b_ideal_words=16896 alloc_job=30 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=401408
+probe=small_m_shared_a gate=true eligible=true shape=l1_dx trans=nt m=64 n=784 k=256 arm=T10 row_bands=1 col_bands=10 jobs=10 a_shared_bands=1 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=202752 b_ideal_words=202752 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=24 c_stage_words=100352
+probe=small_m_shared_a gate=true eligible=true shape=l2_fwd trans=nn m=64 n=10 k=256 arm=T10 row_bands=8 col_bands=1 jobs=8 a_shared_bands=8 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=24576 b_ideal_words=3072 alloc_job=0 alloc_shared_a=1 alloc_scratch=8 alloc_split=0 c_stage_words=0
+probe=small_m_shared_a gate=true eligible=false shape=l2_dw trans=tn m=256 n=10 k=64 arm=T10 row_bands=11 col_bands=1 jobs=11 a_shared_bands=0 a_shared_words=0 a_ideal_words=16384 a_pack_words_in_job=16384 b_pack_words=8448 b_ideal_words=768 alloc_job=33 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=5120
+probe=small_m_shared_a gate=true eligible=true shape=l2_dx trans=nt m=64 n=256 k=10 arm=T10 row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=640 a_ideal_words=640 a_pack_words_in_job=0 b_pack_words=5280 b_ideal_words=2640 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+probe=small_m_shared_a gate=true eligible=true shape=l1_fwd trans=nn m=64 n=256 k=784 arm=T20 row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=50176 a_ideal_words=50176 a_pack_words_in_job=0 b_pack_words=413952 b_ideal_words=206976 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+probe=small_m_shared_a gate=true eligible=false shape=l1_dw trans=tn m=784 n=256 k=64 arm=T20 row_bands=5 col_bands=2 jobs=10 a_shared_bands=0 a_shared_words=0 a_ideal_words=50176 a_pack_words_in_job=100352 b_pack_words=84480 b_ideal_words=16896 alloc_job=30 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=401408
+probe=small_m_shared_a gate=true eligible=true shape=l1_dx trans=nt m=64 n=784 k=256 arm=T20 row_bands=1 col_bands=10 jobs=10 a_shared_bands=1 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=202752 b_ideal_words=202752 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=24 c_stage_words=100352
+probe=small_m_shared_a gate=true eligible=true shape=l2_fwd trans=nn m=64 n=10 k=256 arm=T20 row_bands=8 col_bands=1 jobs=8 a_shared_bands=8 a_shared_words=16384 a_ideal_words=16384 a_pack_words_in_job=0 b_pack_words=24576 b_ideal_words=3072 alloc_job=0 alloc_shared_a=1 alloc_scratch=8 alloc_split=0 c_stage_words=0
+probe=small_m_shared_a gate=true eligible=false shape=l2_dw trans=tn m=256 n=10 k=64 arm=T20 row_bands=11 col_bands=1 jobs=11 a_shared_bands=0 a_shared_words=0 a_ideal_words=16384 a_pack_words_in_job=16384 b_pack_words=8448 b_ideal_words=768 alloc_job=33 alloc_shared_a=0 alloc_scratch=0 alloc_split=16 c_stage_words=5120
+probe=small_m_shared_a gate=true eligible=true shape=l2_dx trans=nt m=64 n=256 k=10 arm=T20 row_bands=2 col_bands=5 jobs=10 a_shared_bands=2 a_shared_words=640 a_ideal_words=640 a_pack_words_in_job=0 b_pack_words=5280 b_ideal_words=2640 alloc_job=0 alloc_shared_a=1 alloc_scratch=20 alloc_split=19 c_stage_words=32768
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 765 filtered out; finished in 0.02s
+
+exit=0
+### G2 resident_w_prepack_fire_report
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running unittests src/lib.rs (<home>/work/small-m-ab-3201/work/target-mergeprepack-aff/release/deps/<user>_ai_backend_cpu-6344e2f6f3e87765)
+
+running 1 test
+probe=resident_w_prepack gate=true entry=rhs shape=784x256 cache_len=1 builds=1 hits=1
+probe=resident_w_prepack gate=true entry=rhs shape=256x10 cache_len=1 builds=1 hits=1
+probe=resident_w_prepack gate=true entry=linear shape=784x256 cache_len=1 builds=1 hits=1
+probe=resident_w_prepack gate=true entry=linear shape=256x10 cache_len=1 builds=1 hits=1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 765 filtered out; finished in 0.01s
+
+exit=0
+### gb10_affinity_report_dump EXPECT=1
+   Compiling <user>-ai-backend-cpu v0.11.0 (<home>/work/small-m-ab-3201/work/arm-mergeprepack-aff/crates/backend-cpu)
+    Finished `release` profile [optimized] target(s) in 0.24s
+     Running tests/gb10_affinity_report.rs (<home>/work/small-m-ab-3201/work/target-mergeprepack-aff/release/deps/gb10_affinity_report-0cd9587ca986e60a)
+
+running 1 test
+gb10_affinity_report enabled=true env_override=false detected_big_core_ids=[5,6,7,8,9,15,16,17,18,19] pool_active=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+exit=0

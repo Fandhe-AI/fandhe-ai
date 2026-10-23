@@ -1,0 +1,33 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/small-m-ab-3201/work/target-off/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
+
+running 25 tests
+test gemm_blis::prepack::tests::cache_hits_and_distinct_keys ... ok
+test gemm_blis::prepack::tests::clear_mut_empties_cache ... ok
+test gemm_blis::prepack::tests::resident_w_prepack_report ... ignored, 報告専用（メモリ記録）
+test gemm_blis::prepack::tests::gate_is_off_by_default ... ok
+test gemm_blis::prepack::tests::entry_cap_does_not_insert_but_returns_panel ... ok
+test gemm_blis::prepack::tests::select_prepack_boundaries ... ok
+test gemm_blis::small_m::tests::gate_is_off_by_default ... ok
+test gemm_blis::small_m::tests::off_keeps_default_jobs_per_worker ... ok
+test gemm_blis::small_m::tests::on_selects_merge_only_for_small_work ... ok
+test gemm_blis::small_m::tests::select_shared_a_off_is_always_false ... ok
+test gemm_blis::small_m::tests::select_shared_a_boundaries ... ok
+test gemm_blis::small_m::tests::select_shared_a_on_six_shapes ... ok
+test gemm_blis::prepack::tests::full_width_panel_matches_per_block_pack_b ... ok
+test gemm_blis::prepack::tests::prepacked_builds_once_per_cache_and_hits_afterwards ... ok
+test gemm_blis::small_m::tests::bias_act_entry_matches_jpw1_plus_epilogue_on_l1_forward ... ok
+test gemm_blis::small_m::tests::shared_a_paths_cover_direct_write_and_staging ... ok
+test gemm_blis::small_m::tests::shared_a_bias_act_matches_entry_plus_epilogue ... ok
+test gemm_blis::prepack::tests::bias_act_prepacked_matches_public_entry_bit_for_bit ... ok
+test gemm_blis::small_m::tests::shared_a_is_bit_identical_with_non_default_blocks ... ok
+test gemm_blis::prepack::tests::prepacked_is_bit_identical_on_forward_shapes ... ok
+test gemm_blis::small_m::tests::jpw1_is_bit_identical_on_fractional_shapes ... ok
+test gemm_blis::small_m::tests::jpw1_is_bit_identical_to_production_on_target_shapes ... ok
+test gemm_blis::prepack::tests::prepacked_is_bit_identical_on_remainder_and_boundary_shapes ... ok
+test gemm_blis::small_m::tests::shared_a_is_bit_identical_on_target_shapes ... ok
+test gemm_blis::small_m::tests::shared_a_is_bit_identical_on_fractional_and_tn_shapes ... ok
+
+test result: ok. 24 passed; 0 failed; 1 ignored; 0 measured; 741 filtered out; finished in 0.09s
+
+exit=0

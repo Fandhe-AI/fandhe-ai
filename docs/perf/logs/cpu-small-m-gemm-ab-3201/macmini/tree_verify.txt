@@ -1,0 +1,6 @@
+off changed=(BASE そのまま)
+off G1=false G2=false aff=false
+merge changed=./crates/backend-cpu/src/gemm_blis/small_m.rs,
+merge G1=true G2=false aff=false
+mergeprepack changed=./crates/backend-cpu/src/gemm_blis/prepack.rs,./crates/backend-cpu/src/gemm_blis/small_m.rs,
+mergeprepack G1=true G2=true aff=false
