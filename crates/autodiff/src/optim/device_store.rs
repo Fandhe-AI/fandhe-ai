@@ -8723,6 +8723,9 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(c0, 6);
         assert_eq!(c2, 3);
-        let _ = dis;
+        assert!(
+            dis,
+            "view 経由の var_no_grad 入力の get は GradientTrackingDisabled"
+        );
     }
 }
