@@ -143,7 +143,7 @@
 | 項目 | 状態 |
 |---|---|
 | 事前登録規則（`docs/perf/logs/cpu-gemm-reuse-release-3226/RULE.txt`） | 固定済み（計測より前にコミット） |
-| GB10・Mac mini の 5 round A/B（RULE の ADOPT／REJECT 判定） | **未実施**（A/B スクリプト・Mac mini 計測は本ブランチに含まれない。判定は未確定で、既定は OFF のまま） |
+| GB10・Mac mini の 5 round A/B（RULE の ADOPT／REJECT 判定） | **実施済み（2026-10-23）。判定は REJECT**（§8.4）。既定は OFF のまま |
 | 補助 diag（GB10・1 run・record-only・判定外） | 実施済み（下記）。`diag-gb10/run1.jsonl` |
 
 ### 8.3 補助 diag の結果（GB10・1 run・record-only。RULE の判定ではない）
@@ -161,3 +161,44 @@ checksum bit は全腕・全サイズで一致。時間は 1 反復（matmul + r
 解放により reuse は fresh 並みへ戻る方向（N=256〜512 で reuse 比 0.57〜0.62、N=1024 は fresh より速い）。
 単一 run・単一セッションのため後退セルの有無・ADOPT 判定は言えない。RULE の A/B（5 round・両機体）が
 次の作業。Mac mini の train CPU（reuse が +0.169 ms）は本機構の予測対象ではない。
+
+### 8.4 A/B 結果と判定（#3226・2026-10-23）
+
+計測 sha `3c5549027edd58c15917432add08dfd2d34f9d6d`（before は main 相当・after は `on-arm.patch` の 1 行差分）。
+GB10 は 14 セル・Mac mini は 12 セル、各 5 round・round ごとに起動順を反転。両機体とも 5/5 round が `gate_ok=1`
+（GB10 load1 < 1.0・Mac mini load1 < 3.0）・precheck 通過（before は `released=false`・after は `released=true`）・
+checksum 全一致。`.rev-stamp`・ツリー指紋・`rule_sha256` は `logs/cpu-gemm-reuse-release-3226/rev-stamp-verification-3226.md` で突合済み。
+生ログと最終判定（`judge-3226-combined.md`）は `logs/cpu-gemm-reuse-release-3226/{gb10,macmini}/`。
+
+**判定: REJECT**（RULE: 5/5 round で後退したセルがある）。後退セルは次の 2 つ。
+
+| 機体 | セル | before 中央値 | after 中央値 | ratio | round 別 ratio |
+|---|---|---|---|---|---|
+| GB10 | gemm reuse N=4096（非処置ガード） | 124.84 ms | 138.01 ms | 1.106 | 1.098 1.107 1.102 1.063 1.094 |
+| GB10 | train reuse size=64 | 0.825 ms | 0.860 ms | 1.042 | 1.036 1.036 1.045 1.085 1.027 |
+
+処置セル（GB10 gemm reuse）は ADOPT 条件の ratio <= 0.95 を 4 セルとも満たした（5/5 round で ratio < 1.00）。
+
+| GB10 gemm reuse | before (ms) | after (ms) | ratio | reuse/fresh（before → after） |
+|---|---|---|---|---|
+| N=256 | 0.364 | 0.202 | 0.554 | 1.818 → 1.018 |
+| N=512 | 1.654 | 0.933 | 0.564 | 1.663 → 0.947 |
+| N=1024 | 5.218 | 4.276 | 0.819 | 1.235 → 1.050 |
+| N=2048 | 27.02 | 16.88 | 0.625 | 1.620 → 1.011 |
+
+その他の中央値後退セル（5/5 ではない・判定に直接は効かないが ADOPT 条件の「非処置は ratio <= 1.00」は満たさない）:
+
+- GB10: gemm fresh N=2048（1.001）・infer fresh（1.036）。
+- Mac mini: gemm fresh N=256／512／1024（1.016／1.007／1.000 超）・gemm reuse N=256（1.067。round 別 0.996〜1.128）・infer fresh／reuse（1.003／1.004）・train reuse（1.006）。
+  Mac mini の処置相当 reuse は N=1024／2048 が 0.958／0.949 で改善、N=512 は 0.991。
+
+副次（判定外・記録のみ）:
+
+- 解放後の GB10 reuse/fresh 比は上表のとおり 1.0 近傍（N=256／512／2048 は 1.02／0.95／1.01）へ戻った。是正機構としての効果は確認できたが、
+  N=4096（出力 64 MiB）では解放した出力の再確保が毎反復の確保コストとして残り逆に遅くなる。ゲートの対象を出力サイズで絞る案は本 RULE の対象外
+  （RULE を事後に変えずに別イシューで事前登録して測る）。
+- Mac mini の train CPU: 本系列では reuse が fresh より速く（before 0.673 ms vs 0.696 ms）、先行の +0.169 ms 差は再現しなかった。
+  本機構の予測対象でもない（train は step ごとに Tape を作り直す）。原因特定は未実施。
+- minflt 補助 run（GB10・1 回・`gb10/minflt-run.txt`）: reuse の minflt/iter は N=512 で 925・N=1024 で 3169・N=2048 で 7719 に対し、
+  reuse_release は 0.00（fresh 並み）。「minflt/iter が 0 に近づく」予測と一致。
+- 既定は OFF のまま。REJECT のため #3227（既定反転）は進めない。

@@ -1,0 +1,4 @@
+compare task=gemm exit=3
+compare task=train exit=3
+compare task=infer exit=3
+judge exit=2 (0=ADOPT 1=REJECT 2=undetermined) -> judge-3226-3226-macmini.md

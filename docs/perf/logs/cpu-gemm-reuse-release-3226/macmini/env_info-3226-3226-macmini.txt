@@ -1,0 +1,16 @@
+profile=macmini
+rule_sha256=2d4b390c7a0c2cfe48d7b66daaa897acb400ee94043df0cd1b3638c32b6d6f47
+rev_stamp_head=3c5549027edd58c15917432add08dfd2d34f9d6d
+rev_stamp_head_after=3c5549027edd58c15917432add08dfd2d34f9d6d
+rev_stamp_head_runner=3c5549027edd58c15917432add08dfd2d34f9d6d
+sw_vers=ProductName:		macOS ProductVersion:		27.0.1 BuildVersion:		26A434 
+uname_m=arm64
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+head=3c5549027edd58c15917432add08dfd2d34f9d6d
+cpu_brand=Apple M4
+hw.logicalcpu=10
+hw.perflevel0.logicalcpu=4
+hw.perflevel1.logicalcpu=6
+hw.memsize=17179869184
+rayon_num_threads=unset
+precheck=assert
