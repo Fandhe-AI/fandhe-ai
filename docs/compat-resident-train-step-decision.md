@@ -213,6 +213,9 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   **実装済み（§10 に記録）。実機のうち GB10（CUDA）は未実測、Metal は開発機で実測済み。**
 - **#3251／#3252／#3253**: P5 の内部チェーン（`_tracked` で store の failure_token へ登録、
   L1 の d_input は計算しない）と完了待ちの内部メソッド。
+  **#3251 は実装済み（§11 に記録。ループはバックエンド非依存で #3252・#3253 が再利用する。
+  Metal は Mac mini で wait 1 回・Tape 経路と bit 一致を実測済み）。完了待ちの内部メソッド（P7 の実体）は
+  #3251 では足さず #3254 へ寄せた（§11 範囲外）。**
 - **#3254**: facade 公開の仕上げ。`crates/facade/tests/api_surface.rs` に正ガード（追加した名前の
   `pub use` 行・facade の inherent `pub fn` 集合・関数ポインタ型による署名固定プローブ・
   利用例 doctest の実在検査）を足す。内部実装が先に入る期間に facade へ早期に漏れないよう、
@@ -294,3 +297,72 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 - **実測状況**: Metal は開発機（Apple M4 Max・debug ビルド）で `#[ignore]` テスト全件 pass を確認した
   （bit 一致・窓の中の H2D = 0）。**GB10（CUDA）は未実測**（ビルドのみ確認）。性能（N=256〜4096 の gemm・infer の
   H2D 除去量）は未計測で、本 PR は性能の合格ラインを主張しない。
+
+## §11 #3251 実装記録（学習ステップ全体の encode-only チェーン。P5・P6 の内部実装）
+
+### 実装した名前と配置
+
+| 層 | 名前 |
+|---|---|
+| autodiff（内部名） | `DeviceParamStore::train_step_device_chain(tape, x, y, steps, config) -> TrainStepLoss`、`DeviceParamStore::read_train_step_loss(tape, &TrainStepLoss) -> f32`、`optim::resident_input::TrainStepLoss`（P6 の内部側。`store_id` と世代だけを持つ不透明型） |
+| autodiff（配置） | `crates/autodiff/src/optim/device_store/train_chain.rs`（`amp.rs`・`distributed.rs` と同じ子モジュール）。`grad.rs::mse_loss_scale` を `pub(crate)` にした（Tape 経路と同じ式を共有） |
+| facade | 本番コードの追加なし。`Sequential`・`Tape` に `pub fn` を足さない（`api_surface.rs` が impl 面を走査しているため）。テスト補助だけを `#[cfg(test)]` の `compat/sequential/train_step_chain_tests_3251.rs` に置いた |
+
+- **チェーンのループはバックエンド非依存**: ループが呼ぶのは `BackendOps::*_tracked` の 6 部品と
+  `sgd_step_device_tracked` だけ。Metal 固有なのは実機テストと記録だけで、#3252（CUDA）・#3253（CPU）は
+  部品を実装すれば同じループを再利用する（チェーンが 2 本にならない）。
+- 手順（層 `i = 1..N`）: forward（`linear_forward_device_tracked` を連鎖。層出力は全部保持）→ `mse_loss_device_tracked`
+  （mean）→ `mse_loss_backward_device_tracked`（`scale` は Tape 経路と同じ `mse_loss_scale(1.0, m*n, Mean)`）→
+  `i = N..1` の降順で dW（`gemm_fp32_strict_into_device_tracked`。入力は転置、勾配は RowMajor、bias 縮約を融合し、
+  勾配連結バッファの `layout` のオフセットへ直接書く）、`i >= 2` のときだけ d_input（`gemm_resident_lhs_device_tracked`）
+  → ReLU マスク（`relu_backward_mask_device_tracked`）。**L1 の d_input は計算しない**（#3245）→ SGD 1 回。
+- 勾配連結バッファ（`train_chain_grad`）・loss スカラー・中間バッファは store が次の step まで保持する。
+  `grad_staging` とは別にして、その鮮度契約（`filled`／`bias_host_routed`）を汚さない。
+
+### 対応範囲と事前検証（encode より前。違反は型付きエラーで store 不変）
+
+- `steps` の最後の層以外は `Activation::Relu`、最後の層は `Activation::None`（`Unsupported`）。
+  ReLU のない中間 Linear は勾配が転置格納のまま dW に渡り、Metal の dW デバイス版が `Unsupported` になる
+  （Tape 経路もホスト経路へ落ちて bit 一致を保証できない）ため。最終層の ReLU は MSE の出力側マスクが要るため範囲外。
+- `steps` が store の全パラメータをちょうど 1 回ずつ覆うこと（取りこぼし〈勾配バッファに古い値が残る〉は
+  `Unsupported`、weight tying は `InvalidArgument`）。層の `in/out` の連鎖、`x`・`y` の rank／形状、空バッチ（`Unsupported`）。
+- `x`・`y` は同じ store・同じデバイスの `ResidentInput`。`pending`（forward 登録が未消費）があれば `PendingForwardUnconsumed`。
+- SGD の前提条件は `step()` と同じ（`config.validate()`、RmsProp／Adagrad／LAMB の履歴の拒否、momentum 構成の途中変更の拒否、
+  `is_first_step = !sgd_used`、velocity の遅延確保）。
+
+### 失敗の境界（§5 の 2 段目）
+
+- 最初の dW を書く前に部品が `Unsupported` を返したら、そのまま返して poison しない。params・velocity・`step_count`・
+  `sgd_used` は不変。
+- それ以外の `Err`（dW 以降・SGD・`bias_filled == false` の契約違反）は `step()` と同じく poison。
+  `DeviceContextCaptureInProgress`（SGD 入口。params 未変更）だけは poison しない。
+- 成功時は encode 成功の時点で `step_count`・`sgd_used`・世代を確定する。loss の読み出しは確定に影響しない。
+- `read_train_step_loss`: 別 store・古い世代のハンドルは `InvalidArgument`。download の失敗は poison。
+  download の後に `failure_token` を再検査し、セット済みなら poison して `StorePoisoned`（A08）。
+- Tape 経路への**全体フォールバックは作らない**（黙って別の計算をしない）。公開入口（#3254）が判断する。
+
+### 検証
+
+- CI（GitHub ホステッド）: autodiff の記録型モック 8 件（部品の呼び出し回数〈L1 の d_input 無し〉・チェーン区間の
+  upload／download 0・全部品が store の `failure_token` を受けること・`is_first_step` の列・失敗時の poison 境界・
+  事前検証・古い／別 store のハンドル・pending）と、facade の CPU テスト 1 件（CPU は部品が未実装〈#3253〉で `Unsupported`、
+  store 不変。#3253 が入って `Ok` になったら loss の有限性を見る）。
+- 実機 `#[ignore]`（facade の in-crate）: Tape 経路（`forward_resident` → `mse_loss` → `backward_device_param_store` →
+  `step_device_param_store`）との bit 一致（784-256-10・784-128-64-10、batch 64、momentum 0／0.9／dampening／weight_decay／
+  nesterov、各 3〜4 step、loss と全パラメータ）、1 step の wait。
+- **実測（Mac mini・5 run すべて pass）**: bit 一致 A1・A2 は全 run で Tape 経路と一致。A3 はチェーン区間 wait = 0、
+  loss 読み出しを含めて wait = 1、encode = 10（机上導出と一致。MSE forward が partial + finalize の 2 段のため 9 部品呼び出しで
+  10 encode）、command_buffers = 1。受け入れ条件 1（学習 1 step の wait が 1 回）を満たす。
+  記録は `docs/perf/logs/train-step-chain-metal-3251/`（RULE.txt を事前登録）。
+- 性能（0.65〜0.9 ms の目安）は本 issue では計測していない（`m = 64` タイルの見直し〈#3207〉との合算評価が別途要る）。
+
+### 範囲外・申し送り
+
+- **#3254**: 公開入口 `Sequential::train_step_resident`・`ResidentLoss::read`、P7 `Tape::wait_device_param_store`、
+  `BackendOps` の D2H なし同期メソッド（P7 の内部実体。#3251〜#3253 に割り当てていたが本 issue の作業項目・受け入れ条件に
+  なく、並行する #3252・#3253 との trait の衝突点になるため #3254 へ寄せる）、Tape 経路への全体フォールバック（§5 の 2 段目）。
+  facade のテスト補助（`chain_train_step`）の形を本番コードへ移す。
+- **確保ゼロ化は範囲外**: Metal の各部品は新しいバッファを返す（pool 再利用で同期は起きない。#3219・#3224 の実測で部品連結は
+  wait 0）。`_into` 版の部品は新しい設計項目で #3258 と同系。
+- **#3252（CUDA）・#3253（CPU）**: 部品が実装済みなら同じ `train_step_device_chain` がそのまま動く。CUDA の Graph capture
+  （#3258）は固定構造（永続ワークスペース・永続 loss スカラー）を前提にする。

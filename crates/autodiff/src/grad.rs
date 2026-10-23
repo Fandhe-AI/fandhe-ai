@@ -8640,7 +8640,7 @@ fn mse_loss_vjp(
 /// このスケールを事前計算して渡す契約（`backend_ops.rs` doc 参照）
 /// であり、フォールバック（`mse_loss_vjp`）と融合カーネル経路とで
 /// 同一の数式を 2 か所に別実装しないための切り出し。
-fn mse_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
+pub(crate) fn mse_loss_scale(g_value: f32, n: usize, reduction: Reduction) -> f32 {
     match reduction {
         Reduction::Mean => g_value * 2.0 / n as f32,
         Reduction::Sum => g_value * 2.0,
