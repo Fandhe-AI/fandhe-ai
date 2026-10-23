@@ -464,7 +464,7 @@ impl std::fmt::Debug for Tape {
 /// `docs/compat-resident-train-step-decision.md` §4）。
 ///
 /// [`Tape::upload_resident`] が計測窓の外で 1 回だけ upload して作り、
-/// [`Sequential::predict_resident_input`]（推論）と [`Tape::matmul_resident`]（行列積）が
+/// [`compat::Sequential::predict_resident_input`]（推論）と [`Tape::matmul_resident`]（行列積）が
 /// 入力の H2D なしで受け取る。中身（バッファ）は公開しない。推論では作成時の
 /// [`DeviceParamStore`] に束縛され、別 store・別デバイス・古い世代のハンドルは型付きエラーに
 /// なる。`!Send`（`Send` を足さない）。
