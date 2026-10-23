@@ -12,6 +12,8 @@
 //!   存在しないため本モジュールでは扱えない）・確保・encode。
 //!
 //! # 意味論（設計 `docs/train-step-resident-parts-design.md` §3 行 3）
+//! Metal は float 比較で非正規化数を 0 へ flush する（FTZ）ため、`> 0.0` は
+//! マスクのビット列で評価する（[`relu_mask_is_positive_bits`]。#3218 reopen）。
 //! `out[i] = (mask[i] > 0.0) ? g[i] : +0.0`。乗算ではなく**選択**で、`g` の
 //! NaN／inf／−0.0 は mask が真ならビットのまま通り、mask が NaN なら `+0.0`。
 //! CPU 参照は `autodiff::grad::elementwise_mul_mask(.., |v| v > 0.0)` の式と
@@ -113,6 +115,13 @@ pub fn plan_relu_mask(
     })
 }
 
+/// マスクのビット列が「`f32::from_bits(bits) > 0.0`（FTZ なし）」と同値かを返す。
+/// `ew_relu_mask_select_f32` の判定式の逐語再現（#3218 reopen）。
+/// 非ゼロ・符号ビット 0・`+inf` 以下（正の NaN を除く）なら真で、正の非正規化数も真。
+pub fn relu_mask_is_positive_bits(bits: u32) -> bool {
+    bits != 0 && bits <= 0x7F80_0000
+}
+
 /// `shaders/elementwise.metal::ew_relu_mask_select_f32` の添字計算と選択式を
 /// 逐語再現するホストモデル。`g_storage`／`mask_storage` は連結バッファ全体
 /// （`plan` の offset を起点に読む）。出力は論理形の行優先。
@@ -164,9 +173,13 @@ pub fn relu_mask_select_host_model(
         };
         let mi = plan.mask_off + idx;
         if gi < g_end && mi < mask_end {
-            let m = mask_storage[mi];
             // 乗算ではなく選択（NaN×0・−x×0 で bit がずれるのを避ける）。
-            *slot = if m > 0.0 { g_storage[gi] } else { 0.0 };
+            // 判定はカーネルと同じくビット列で行う（FTZ 非依存）。
+            *slot = if relu_mask_is_positive_bits(mask_storage[mi].to_bits()) {
+                g_storage[gi]
+            } else {
+                0.0
+            };
         }
     }
     Ok(out)
@@ -373,5 +386,67 @@ mod tests {
         let mut bad = plan;
         bad.g_off = usize::MAX;
         assert!(relu_mask_select_host_model(&bad, &[1.0], &[1.0]).is_err());
+    }
+
+    #[test]
+    fn bits_predicate_matches_float_compare_on_boundaries() {
+        for b in [
+            0u32,
+            1,
+            0x007F_FFFF,
+            0x0080_0000,
+            0x7F7F_FFFF,
+            0x7F80_0000,
+            0x7F80_0001,
+            0x7FC0_0000,
+            0x7FFF_FFFF,
+            0x8000_0000,
+            0x8000_0001,
+            0x8080_0000,
+            0xFF80_0000,
+            0xFFC0_0000,
+            0xFFFF_FFFF,
+        ] {
+            assert_eq!(
+                relu_mask_is_positive_bits(b),
+                f32::from_bits(b) > 0.0,
+                "bits {b:#010x}"
+            );
+        }
+    }
+
+    #[test]
+    fn bits_predicate_matches_float_compare_on_sweep() {
+        let mut b = 0u32;
+        loop {
+            assert_eq!(relu_mask_is_positive_bits(b), f32::from_bits(b) > 0.0);
+            match b.checked_add(4099) {
+                Some(n) => b = n,
+                None => break,
+            }
+        }
+    }
+
+    #[test]
+    fn denormal_mask_matches_reference_both_layouts() {
+        let (r, c) = (7usize, 13usize);
+        let n = r * c;
+        let m: Vec<f32> = (0..n)
+            .map(|i| match i % 6 {
+                0 => 1e-40,
+                1 => -1e-40,
+                2 => 1e-45,
+                3 => f32::from_bits(1),
+                4 => f32::MIN_POSITIVE,
+                _ => 1.5,
+            })
+            .collect();
+        let g: Vec<f32> = (0..n).map(|i| (i % 23) as f32 - 11.0).collect();
+        let plan = plan_relu_mask(&[r, c], 0, DeviceMatrixLayout::RowMajor, &[r, c], 0).unwrap();
+        let got = relu_mask_select_host_model(&plan, &g, &m).unwrap();
+        assert_bits_or_nan_class(&got, &reference(&g, &m));
+        let plan = plan_relu_mask(&[r, c], 0, DeviceMatrixLayout::Transposed, &[c, r], 0).unwrap();
+        let got = relu_mask_select_host_model(&plan, &g, &m).unwrap();
+        assert_bits_or_nan_class(&got, &reference(&transpose(&g, r, c), &m));
     }
 }
