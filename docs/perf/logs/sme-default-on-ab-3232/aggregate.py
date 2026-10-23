@@ -58,7 +58,11 @@ def finite_num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def load_rows(path, task, allow_modes=True):
+def load_rows(path, task, bad):
+    """正常行だけを返し、不正行は理由を bad へ収集する（例外で全行を捨てない）。
+
+    正常行の checksum を保持して不一致 FAIL の確認を続けるため（RULE §4: FAIL は常に最優先）。
+    ログ欠損（ファイルなし）のみ AggError。"""
     rows = []
     for i, line in enumerate(read_text(path).splitlines(), 1):
         if not line.strip():
@@ -67,22 +71,30 @@ def load_rows(path, task, allow_modes=True):
         try:
             o = json.loads(line)
         except ValueError:
-            raise AggError(where + " JSON 不正")
+            bad.append(where + " JSON 不正")
+            continue
         if not isinstance(o, dict):
-            raise AggError(where + " 行がオブジェクトではない")
+            bad.append(where + " 行がオブジェクトではない")
+            continue
         if o.get("task") != task:
-            raise AggError(where + " task が不一致: %r" % (o.get("task"),))
+            bad.append(where + " task が不一致: %r" % (o.get("task"),))
+            continue
         if o.get("device") != "cpu":
-            raise AggError(where + " device が cpu ではない")
+            bad.append(where + " device が cpu ではない")
+            continue
         size, mode = o.get("size"), o.get("mode", "fresh")
         if isinstance(size, bool) or not isinstance(size, int) or not isinstance(mode, str):
-            raise AggError(where + " size/mode の型が不正")
-        if (task, size, mode) not in CELLS and task != "torch":
-            raise AggError(where + " 未知のセル: %s size=%s mode=%s" % (task, size, mode))
+            bad.append(where + " size/mode の型が不正")
+            continue
+        if (task, size, mode) not in CELLS:
+            bad.append(where + " 未知のセル: %s size=%s mode=%s" % (task, size, mode))
+            continue
         if not finite_num(o.get("median_s")) or o["median_s"] <= 0:
-            raise AggError(where + " median_s が不正")
+            bad.append(where + " median_s が不正")
+            continue
         if not finite_num(o.get("checksum")):
-            raise AggError(where + " checksum が非有限・欠損")
+            bad.append(where + " checksum が非有限・欠損")
+            continue
         rows.append(o)
     return rows
 
@@ -102,7 +114,7 @@ def load_arm_cells(ab, arm, problems):
     for task in KNOWN_TASKS:
         try:
             path = find_one(os.path.join(ab, "results-%s-*-cpu-%s.jsonl" % (arm, task)))
-            rows = load_rows(path, task)
+            rows = load_rows(path, task, problems)
         except AggError as e:
             problems.append("arm=%s: %s" % (arm, e))
             continue
@@ -393,7 +405,7 @@ def _write(path, text):
     open(path, "w", encoding="utf-8").write(text)
 
 
-def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False, bd_cmp=None):
+def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False, bd_cmp=None, bad_row=False):
     ab = os.path.join(root, "ab")
     for arm in ("before", "after"):
         for task in KNOWN_TASKS:
@@ -413,6 +425,8 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
                 lines.pop()
             if dup and arm == "after" and task == "gemm":
                 lines.append(lines[0])
+            if bad_row and arm == "after" and task == "gemm":
+                lines.append(json.dumps({"task": "gemm", "device": "cpu", "size": 256, "mode": "fresh", "median_s": -1, "checksum": 1.5}))
             _write(os.path.join(ab, "results-%s-3232-r1-cpu-%s.jsonl" % (arm, task)), "\n".join(lines) + "\n")
     tl = []
     for r in range(ROUNDS):
@@ -486,6 +500,8 @@ def self_test():
     check("torch 一部欠損でも REJECT を保つ", _verdict("macmini", torch_mode="partial", bad_regress=True), "REJECT")
     check("checksum 不一致 + 前提ログ欠損でも FAIL を保つ", _verdict("macmini", ck_bad=True, rm_tree=True), "FAIL")
     check("欠測 + checksum 不一致でも FAIL（1 機内）", _verdict("macmini", ck_bad=True, drop_row=True), "FAIL")
+    check("不正行混在 + checksum 不一致でも FAIL を保つ", _verdict("macmini", ck_bad=True, bad_row=True), "FAIL")
+    check("不正行のみは undetermined", _verdict("macmini", bad_row=True), "undetermined")
     check("cmp 実行エラー（exit 2）は undetermined", _verdict("gb10", bd_cmp=2), "undetermined")
     check("cmp exit 1 は FAIL", _verdict("gb10", bd_cmp=1), "FAIL")
     check("torch task 不正（リスト）でも判定継続", _verdict("macmini", torch_mode="badtask"), "ADOPT")
