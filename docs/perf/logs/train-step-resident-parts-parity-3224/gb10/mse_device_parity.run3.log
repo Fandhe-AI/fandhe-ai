@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/mse_device_parity.rs (<home>/work/target-fandhe-ai/release/deps/mse_device_parity-cf11ec9f0703b175)
+
+running 5 tests
+test backward_device_matches_host_bits_and_cpu_reference ... ok
+test empty_and_error_paths ... ok
+test forward_device_matches_host_bits_and_cpu_reference ... ok
+test tracked_chain_without_sync_matches_host ... ok
+test workspace_reuse_without_intermediate_sync_keeps_bits ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+rc=0
