@@ -1,0 +1,8 @@
+runner : c8bb8448d6f8258a86bb1564d6c825fceed0f6b6 status=[0]
+before : fd1ca01a90fc79599d443e28a10daec6045be1a9 status=[0]
+after  : fd1ca01a90fc79599d443e28a10daec6045be1a9 status=[ M crates/backend-cpu/src/mse.rs ] (before と同一 sha + mse.rs 定数 1 行。未コミット)
+after-diff:
+ crates/backend-cpu/src/mse.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+-pub(crate) const MSE_BACKWARD_PARALLEL_MIN_ELEMS: usize = 0;
++pub(crate) const MSE_BACKWARD_PARALLEL_MIN_ELEMS: usize = 4096;

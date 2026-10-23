@@ -1,0 +1,27 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cpu-cd606ecd7b51363f)
+
+running 1 test
+threads=10
+n=640 arm=seq median_ns=42 first_call_ns=84 threads=10 checksum=0x9671507bbc
+n=640 arm=par median_ns=23625 first_call_ns=23167 threads=10 checksum=0x9671507bbc
+n=2560 arm=seq median_ns=125 first_call_ns=166 threads=10 checksum=0x26472d59819
+n=2560 arm=par median_ns=30041 first_call_ns=26458 threads=10 checksum=0x26472d59819
+n=4096 arm=seq median_ns=167 first_call_ns=250 threads=10 checksum=0x3d9710ad5e6
+n=4096 arm=par median_ns=30791 first_call_ns=32583 threads=10 checksum=0x3d9710ad5e6
+n=8192 arm=seq median_ns=333 first_call_ns=417 threads=10 checksum=0x7c31c838bd3
+n=8192 arm=par median_ns=35416 first_call_ns=48250 threads=10 checksum=0x7c31c838bd3
+n=16384 arm=seq median_ns=750 first_call_ns=792 threads=10 checksum=0xfa673b4f7b0
+n=16384 arm=par median_ns=37500 first_call_ns=40292 threads=10 checksum=0xfa673b4f7b0
+n=32768 arm=seq median_ns=2875 first_call_ns=2792 threads=10 checksum=0x1f8d2257cf6a
+n=32768 arm=par median_ns=39084 first_call_ns=31500 threads=10 checksum=0x1f8d2257cf6a
+n=65536 arm=seq median_ns=5792 first_call_ns=5750 threads=10 checksum=0x3f9a7fdd7eda
+n=65536 arm=par median_ns=45167 first_call_ns=57083 threads=10 checksum=0x3f9a7fdd7eda
+n=131072 arm=seq median_ns=12708 first_call_ns=11541 threads=10 checksum=0x80353b28ddc3
+n=131072 arm=par median_ns=50583 first_call_ns=34208 threads=10 checksum=0x80353b28ddc3
+n=262144 arm=seq median_ns=25625 first_call_ns=23417 threads=10 checksum=0x1026ab1ff9b94
+n=262144 arm=par median_ns=56875 first_call_ns=45792 threads=10 checksum=0x1026ab1ff9b94
+test mse::tests::mse_backward_threshold_sweep ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 764 filtered out; finished in 0.42s
+

@@ -226,7 +226,21 @@ GB10 の reuse セルが `ratio = 1.0167 > 1.00` であるため、
   (3) round ごとの負荷ゲート・クールダウン、(4) ADOPT／REJECT／undetermined の 3 値判定（ADOPT 条件は #1578 より緩めない）。
 - train セル（n = 640）では 640 < T のどの T も同じ逐次分岐を通るため、after 腕の train 実行コードパスは
   #1578 の T = 1<<18 と同一。候補変更が効くのは train 以外の 640 < n < 1<<18 の入力。
-- 状態: **未計測**。Stage 0（現状確定）・Stage 1（A/B）とも実機未実施で、判定は出していない。
-  出荷状態は `MSE_BACKWARD_PARALLEL_MIN_ELEMS = 0`（常に並列）のまま。
-- ハーネス: `scripts/bench/framework-compare/run_ab_mse_backward_threshold_cpu.sh`。計測結果は
-  `docs/perf/logs/cpu-mse-backward-threshold-3195/` に収録し、本節へ前後比較表を追記する。
+- 状態: **ADOPT**（2026-10-23。RULE.txt §6 を機械適用）。`MSE_BACKWARD_PARALLEL_MIN_ELEMS` を 0 から 4096 へ変更した。
+- 前提: 3 者 bit 一致テスト（`mse_loss_backward_threshold_bit_exact`）pass（両機体）。Stage 0 前提ゲート (a) checksum 全一致・
+  (b) 両機体 n in {640, 2560} で 5/5 プロセス r(n) < 1.00 とも成立（r(640) 中央値: Mac mini 0.0018・GB10 0.0014、
+  r(2560): 0.0041・0.0030、r(4096): 0.0055・0.0042）。
+- Stage 1（framework-compare train 64・cpu。before = main `fd1ca01a9`〈定数 0〉、after = 同 sha + 定数 1 行〈4096〉。5 round）:
+
+| 機体 | mode | before 中央値 | after 中央値 | after/before | round ごとの ratio | checksum | gate_ok |
+|---|---|---|---|---|---|---|---|
+| Mac mini | fresh | 721.8 µs | 692.6 µs | 0.9595 | 0.9904, 0.9667, 0.9549, 0.9559, 0.9962 | 完全一致 | 5/5 |
+| Mac mini | reuse | 698.5 µs | 670.5 µs | 0.9599 | 0.9598, 0.9650, 0.9474, 0.9669, 0.9608 | 完全一致 | 5/5 |
+| GB10 | fresh | 885.4 µs | 850.2 µs | 0.9602 | 0.9482, 0.9875, 0.9570, 0.9103, 0.9774 | 完全一致 | 5/5 |
+| GB10 | reuse | 862.7 µs | 827.3 µs | 0.9589 | 0.9367, 0.9624, 0.9644, 1.0493, 0.9556 | 完全一致 | 5/5 |
+
+- GB10 reuse の round 4 のみ ratio > 1.00（1.0493）だが、全 round 一貫の後退ではなく REJECT 条件に該当しない。
+- 注記: train（n = 640）の after 腕の実行コードパスは #1578 の T = 1<<18 と同一で、#1578 で GB10 reuse が後退した（1.0167）のに対し
+  今回の差が出た要因は RULE §1 条件 2〜4（固定費低下・負荷ゲート）である。系列間の差の因果確定は本節の範囲外。
+- 記録: `docs/perf/logs/cpu-mse-backward-threshold-3195/`（README・`macmini/`・`gb10/`・`stage0-aggregate.md`）。
+- ハーネス: `scripts/bench/framework-compare/run_ab_mse_backward_threshold_cpu.sh`。
