@@ -74,6 +74,9 @@ pub mod neon;
 // パターン。本モジュール doc 冒頭参照）。
 #[cfg(target_arch = "aarch64")]
 pub mod sme;
+// m=64 専用 4 タイル SME カーネル（#3235。既定 OFF ゲートの先で `SmeKernel::run_thin_m64_block` から呼ぶ）。
+#[cfg(target_arch = "aarch64")]
+pub mod sme_thin_m64;
 
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
@@ -824,6 +827,28 @@ impl SmeKernel {
         // の `# Safety` 契約を満たす）。
         let pending_lazy_save = unsafe { sme::has_pending_lazy_za_save() };
         !pending_lazy_save
+    }
+
+    /// m=64 専用カーネル（#3235）を 1 ブロック分実行する。`current_thread_capable` を**実行スレッド
+    /// 自身**で確認し、真なら `sme_thin_m64::kernel_unchecked`、偽（非対応・SVL 不一致・保留中 lazy
+    /// save）なら ZA に触れず bit 一致の `sme_thin_m64::scalar_fallback` へ切り替える。
+    /// `gemm_blis/mod.rs` の m=64 ドライバ（rayon worker 上）から呼ばれる。
+    pub(crate) fn run_thin_m64_block(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        b_stride: usize,
+        c: &mut [f32],
+        ldc: usize,
+        k: usize,
+    ) -> Result<(), TileBoundsError> {
+        if self.current_thread_capable() {
+            // SAFETY: 実行スレッド自身で SME 対応・SVL=64 を確認済み
+            // （`sme_thin_m64::kernel_unchecked` の `# Safety` 契約）。
+            unsafe { sme_thin_m64::kernel_unchecked(ap, bp, b_stride, c, ldc, k) }
+        } else {
+            sme_thin_m64::scalar_fallback(ap, bp, b_stride, c, ldc, k)
+        }
     }
 }
 
