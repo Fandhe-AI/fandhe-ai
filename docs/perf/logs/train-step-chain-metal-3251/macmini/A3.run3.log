@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai-b9e1ba5ea1ebba4e)
+
+running 1 test
+test compat::sequential::train_step_chain_tests_3251::metal::metal_chain_step_issues_exactly_one_wait ... chain: encode=10 command_buffers=1 wait=0 / read: wait=1 loss=0.08841032
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 531 filtered out; finished in 0.02s
+
+rc=0

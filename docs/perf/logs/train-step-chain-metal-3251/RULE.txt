@@ -1,0 +1,34 @@
+事前登録規則（イシュー #3251）。固定日: 2026-10-24。本規則の固定時点で Mac mini の実測値は 1 件も含まない。
+
+[対象]  各行 = 独立プロセス 1 本 x 5 run。Metal（Mac mini / Apple M4）。
+共通引数: cargo test -p fandhe-ai --lib --release <フィルタ> -- --ignored --exact --test-threads=1 --nocapture
+  A1  compat::sequential::train_step_chain_tests_3251::metal::metal_chain_matches_tape_path_bit_exact_two_layers
+  A2  compat::sequential::train_step_chain_tests_3251::metal::metal_chain_matches_tape_path_bit_exact_three_layers
+  A3  compat::sequential::train_step_chain_tests_3251::metal::metal_chain_step_issues_exactly_one_wait
+
+[判定]
+  - A1・A2: チェーンの loss と更新後の全パラメータが Tape 経路と to_bits() 一致（NaN は両者 is_nan() のクラス一致）。
+    構成は A1 = 784-256-10・batch 64・momentum 0／0.9（dampening 0.1・weight_decay 1e-3）／0.9（nesterov）、
+    A2 = 784-128-64-10・batch 64・momentum 0.9／0。各 step（3〜4 回）で比較する。
+  - A3: warmup 3 step の後の 1 step で、
+      (a) チェーン区間（encode のみ）の wait_until_completed 差 = 0
+      (b) チェーン + loss 読み出しの wait_until_completed 差 = 1
+      (c) encode 差 = 10（机上導出: forward 2 + MSE forward 2〈partial + finalize の 2 段〉+ MSE backward 1
+          + dW 2 + d_input 1 + ReLU マスク 1 + SGD 1。L1 の d_input は計算しない〈#3245〉）
+    command_buffers 差は観測値を記録するだけで判定しない。
+  - 合否: 5 run すべて pass で pass。1 run でも fail なら fail。期待値（0／1／10）は事後に変更しない。
+
+[実行]
+  - 独立プロセスで 5 回。ビルドは計測前に 1 回だけ（build.log。判定外）。
+  - 計測中はビルドも別の GPU 負荷も並走させない。
+
+[run の無効化]
+  - 各 run の前後で foreign の cargo／rustc プロセスを検出した run は invalid とし、同じ番号で取り直す
+    （前の試行のログと理由は attempts/ へ退避して残す）。invalid の件数と理由はすべて記録する。
+  - それ以外の理由での再実行・選別・ケースの除外はしない。
+
+[fail の扱い]
+  - 結果は pass／fail にかかわらず採用する。fail は事実として README の「不一致」節に記録し、事後に規則を緩めない。
+
+[同梱物]
+  - .rev-stamp（展開ツリーのもの）・env_info.txt（前後）。ホスト名・ユーザー名・絶対パスはマスクする。

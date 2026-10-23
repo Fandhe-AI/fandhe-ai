@@ -119,3 +119,36 @@ pub fn matmul_resident(
     let out = tape.ops().gemm_device(&a.buf, &b.buf)?;
     mem.download(&out)
 }
+
+/// 学習ステップのチェーン（`DeviceParamStore::train_step_device_chain`）が積んだ loss への
+/// 不透明なハンドル（イシュー #3251。決定記録 `docs/compat-resident-train-step-decision.md`
+/// §4 の P6 `ResidentLoss` の autodiff 内部側）。
+///
+/// loss の値はデバイス上のスカラーとして store が保持し、本ハンドルは作成時の
+/// `store_id` と世代だけを持つ。[`DeviceParamStore::read_train_step_loss`](super::DeviceParamStore::read_train_step_loss)
+/// が D2H と同期を 1 回だけ行って `f32` を返す。次の step が積まれると世代が進み、
+/// 古いハンドルは `InvalidArgument` で拒否される（上書きされた loss を黙って返さない）。
+/// フィールドは非公開で、facade の公開面には出さない（公開入口は #3254）。
+#[derive(Debug)]
+pub struct TrainStepLoss {
+    store_id: u64,
+    generation: u64,
+}
+
+impl TrainStepLoss {
+    /// `DeviceParamStore::train_step_device_chain` だけが呼ぶ構築入口。
+    pub(super) fn new(store_id: u64, generation: u64) -> Self {
+        Self {
+            store_id,
+            generation,
+        }
+    }
+
+    pub(super) fn store_id(&self) -> u64 {
+        self.store_id
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+}

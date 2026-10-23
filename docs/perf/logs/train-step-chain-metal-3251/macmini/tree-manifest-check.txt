@@ -1,0 +1,2 @@
+tree-manifest: 12047 件を ノード側 shasum -a 256 -c で照合し、非 OK 行 0 件
+crates/ の tree hash（git rev-parse <commit>:crates）: 12e9049f12d5ca42738aaac049fbd66182286ac3
