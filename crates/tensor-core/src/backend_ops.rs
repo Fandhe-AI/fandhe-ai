@@ -4045,7 +4045,7 @@ pub trait BackendOps {
     /// フォールバックは同期回数の受け入れ条件を静かに破るため禁止）。
     /// Metal（`backend-metal::ops::MetalBackendOps`）と CUDA
     /// （`backend-cuda::ops::CudaBackendOps`。#3221）が実装し、CPU は #3253 で
-    /// 対応する。ROCm は既定を継承する。
+    /// 実装済み（`backend-cpu::ops`）。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。
@@ -4099,7 +4099,7 @@ pub trait BackendOps {
     /// # 既定実装
     /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示フォール
     /// バックは禁止）。Metal が #3219、CUDA が #3222 で実装し、CPU は #3253 で
-    /// 対応する。ROCm は既定を継承する。
+    /// 実装済み（`backend-cpu::ops`）。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。encode のみの
@@ -4185,7 +4185,7 @@ pub trait BackendOps {
     /// # 既定実装
     /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示フォール
     /// バックは禁止）。Metal が #3220、CUDA が #3223 で実装し、CPU は #3253 で
-    /// 対応する。ROCm は既定を継承する。
+    /// 実装済み（`backend-cpu::ops`）。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。encode のみの

@@ -215,7 +215,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   L1 の d_input は計算しない）と完了待ちの内部メソッド。
   **#3251 は実装済み（§11 に記録。ループはバックエンド非依存で #3252・#3253 が再利用する。
   Metal は Mac mini で wait 1 回・Tape 経路と bit 一致を実測済み）。完了待ちの内部メソッド（P7 の実体）は
-  #3251 では足さず #3254 へ寄せた（§11 範囲外）。**
+  #3251 では足さず #3254 へ寄せた（§11 範囲外）。#3253（CPU）は実装済み（§13）。**
 - **#3254**: facade 公開の仕上げ。`crates/facade/tests/api_surface.rs` に正ガード（追加した名前の
   `pub use` 行・facade の inherent `pub fn` 集合・関数ポインタ型による署名固定プローブ・
   利用例 doctest の実在検査）を足す。内部実装が先に入る期間に facade へ早期に漏れないよう、
@@ -440,4 +440,58 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 - **#3258**: step 全体の CUDA Graph capture。永続スクラッチ・永続 loss は固定構造として揃った（capture 中は確保・grow を
   拒否するため、capture 前にウォームアップで定常状態にする必要がある）
 - **Metal の `_into` 版部品（確保ゼロ化）**: 未着手。Metal は従来どおり step ごとに確保する（pool 再利用で同期は起きない）
-- **CPU（#3253）**: 部品が実装されれば同じループを再利用する
+- **CPU（#3253）**: 実装済み（§13）。同じループを再利用する
+
+## §13 #3253 実装記録（CPU の学習チェーン部品）
+
+所有者回答（§2。案 A・既存シグネチャは変えず追加のみ・初期対応は MSE と SGD）の範囲で、CPU の
+`BackendOps` に足りなかった部品を override した。**CPU 専用のチェーンは作らず、§11 のループをそのまま
+再利用する**（チェーンを 2 本にしない）。facade の本番コード・公開面（`api_surface.rs`）は変えていない
+（公開入口 P5〜P7 は #3254）。
+
+### 実装した部品（`crates/backend-cpu/src/ops_train_chain_parts.rs`・`ops.rs` の `impl BackendOps`）
+
+| 部品 | 確保版 | `_into_tracked` | 比較先のホスト経路・核 |
+|---|---|---|---|
+| forward | 既存 `linear_forward_device` | 新規 | 同じ `gemm_blis_bias_act_parallel_prepacked`（共有本体 `linear_forward_device_core`） |
+| MSE forward | 新規 | 新規 | `mse::mse_sum_sq_f32`＋最終式（`mse_reduce_value` をホスト `mse_loss` と共有） |
+| MSE backward | 新規 | 新規 | `mse::mse_loss_backward_f32` |
+| ReLU マスク | 新規 | 新規 | 選択（`mask > 0 ? g : +0.0`）。`elementwise_mul_mask` と同式 |
+| dW＋bias 縮約 | 新規 | （trait に `_into` 版は無い。確保版が out と offset を直接受ける） | `(Transposed, RowMajor)`→`gemm_blis_parallel_tn`・`(RowMajor, Transposed)`→`_nt`・`(RowMajor, RowMajor)`→`gemm_blis_parallel` |
+| d_input | 新規 | 新規 | `Transposed`→`gemm_blis_parallel_nt`・`RowMajor`→`gemm_blis_parallel` |
+
+各部品は共有本体 `*_core(.., out: Option<&mut DeviceBuffer<f32>>)` を 1 本持ち、確保版は `None`、`_into`
+は `Some(out)` を渡す（検査とカーネル呼び出しを二重に持たない。CUDA §12 と同じ構成）。`_tracked`
+（非 into）は override せず既定の委譲に任せる。CPU は同期実行のため `DispatchFailureCell` は使わず、
+エラーは同期的に `Err` で返す。
+
+### 設計判断
+
+- **0 埋めが必須**: BLIS 核は C タイルを load して書き戻すため、再利用する出力先は書き込み前に必ず
+  `fill(0.0)` する（ホスト `gemm_fp32_strict_into` と同じ。無いと 2 step 目以降で bit が崩れる）
+- **bias 縮約の融合**: チェーンは dW の呼び出しで `bias_filled == false` を契約違反として止める。CPU は
+  ホストで `reduce_bias_grad_rows`（`f64` 逐次和・最後に 1 回 `f32`・`k == 1` は複製して `-0.0` 保持）を
+  通るため、デバイス版も同一アルゴリズムで `out[bias_offset..+n]` へ書き `true` を返す
+  （`.claude/rules/coding-rust.md` の `f64` アキュムレータ契約。ホストの CPU 経路は変更していない）
+- **`(Transposed, Transposed)` は `Unsupported`**: ホストは `contiguous()` 実体化の別経路で 1 対 1 の核が
+  無い。別の核で黙って計算しない（チェーンはこの形を使わない）
+- **退化形状**: `_into` 版は空・`q == 0` を契約どおり `Unsupported`（確保版へ任せる）。確保版は空／全 0 を返す
+- 境界検査（REQ-8・A03）: shape・offset は `checked_*`、スライス取得は `get(range)`。検査はすべて書き込み前で、
+  `Err` のとき `out` は変わらない
+
+### 検証（すべて CI で実行。`#[ignore]` なし）
+
+- `crates/backend-cpu/tests/mse_device_parity.rs`・`relu_mask_device_parity.rs`・`gemm_device_input_parity.rs`:
+  ホスト版との `to_bits()` 一致（NaN はクラス一致）、事前に汚した `out` への上書き、view offset、
+  `k == 1` の `-0.0`、`out_offset`・bias 範囲のオーバーフロー／重なり拒否、型付きエラー時の `out` 不変
+- facade `train_step_chain_tests_3251.rs`: CPU のチェーンが Tape 経路と loss 列・全パラメータで bit 一致
+  （`[784,256,10]` plain 4 step・`[96,64,10]` momentum／nesterov・3 層・端数形状・batch 1。step 2 以降は
+  `_into` 再利用経路）。範囲外（Sigmoid／Tanh・最終層 ReLU・空バッチ・別 store の入力）は型付きエラーで
+  store 不変。CI の debug ビルドの負荷のため 784 幅は 1 構成に絞った
+- 新規 `unsafe` なし・依存追加なし・tolerance／baseline 不変
+
+### 範囲外・申し送り
+
+- 公開入口・`ResidentLoss::read`・P7 の D2H なし完了待ち・Tape 経路への全体フォールバック: #3254
+- GEMM 内部のパック用ヒープ確保の削減: #3197（job 統合）の範囲
+- Mac mini・GB10 の CPU セルでの A/B 計測: 受け入れ条件外（CPU は同期がなく効果は小さい見込み）

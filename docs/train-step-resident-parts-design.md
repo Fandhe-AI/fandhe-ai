@@ -12,7 +12,7 @@
   - L2 の d_input をデバイス入出力で計算する版
 - 非範囲:
   - `linear_backward_device` のような一括の backward 入口、`backward_impl` でデバイスに勾配を運ぶ機構は作らない（公開形を伴うため #3249・#3251・#3252）。`backward_impl` はホスト専用のまま。
-  - CPU の override は #3253 の判断に委ねる。
+  - CPU の override は #3253 の判断に委ねる。→ #3253 で実装した（`_into` 版を含む。記録は決定記録 `compat-resident-train-step-decision.md` §13）。
 - 出典: `docs/backend-metal-command-batching-design.md` §7.3.3 (b)（本記録はその部品分割にあたる）、`docs/inference-chain-single-sync-design.md`（推論チェーンでの `_tracked` 契約の前例）。
 
 ## 2. 公開 API に触れない根拠
