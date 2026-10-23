@@ -1,0 +1,4 @@
+# tree fingerprint (対象: crates scripts docs/perf/logs/metal-m64-thin-tile-ab-macmini-3209。target・Cargo.lock・.rev-stamp 除外。find|LC_ALL=C sort -z|shasum -a 256|shasum -a 256)
+dev(git archive 展開): 833be67bf0b8478f615d1ca74ddc96da9dc5ed9ab8cdb31ce5c0c5f5ac2525f2
+mac-mini diag: 833be67bf0b8478f615d1ca74ddc96da9dc5ed9ab8cdb31ce5c0c5f5ac2525f2
+rev: bd2ce9464783edfdc395a923a76d4b88f6529ab3

@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 2 tests
+test gemm_m64_thin_tile_diag_tests::m64_thin_candidates_nn_bit_identical_to_current ... NN bit 一致: 44 件 pass
+ok
+test gemm_m64_thin_tile_diag_tests::m64_thin_candidates_strided_nt_tn_bit_identical_to_current ... NT/TN bit 一致: 48 件 pass
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 853 filtered out; finished in 0.38s
+

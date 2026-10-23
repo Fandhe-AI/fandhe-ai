@@ -57,15 +57,25 @@
 
 ## 7. Mac mini A/B（#3209）
 
-**状態: 計測基盤と事前登録規則のみ出荷。Mac mini 実測は未実施（unavailable）。** 候補・ゲートの判定はすべて
-undetermined とし、数値は埋めない（RULE 項 15）。実測ログと判定は、下記「再現」を Mac mini で実行して本節へ追記する。
+**状態: Mac mini 実測済み（正式系列。純カーネル 5 run 全 gate pass・セル A/B 5 round 全 gate pass）。**
+機械判定は `docs/perf/logs/metal-m64-thin-tile-ab-macmini-3209/aggregate.md`（以下 `aggregate.md`）をそのまま採用した。
+結論の要点は次の 3 つ。
+
+1. 純カーネル（`kernel_gpu`）では、T1〜T4 は規則 11 の機械判定でいずれも ADOPT（ADOPT_CANDIDATE の形状を 1 つ以上持ち、
+   bit 一致・parity 失敗なし）。ただし形状ごとの勝ち負けは分かれる（T4 は (784,64,256) と (784,256,64) で +23〜54% 悪化、T2 は 2 形状でのみ改善）。
+2. **ゲート `M64_THIN_TILE_ENABLED` の写像判定は undetermined（規則の前提不成立）**。到達追跡で、本番の選択順（split-K → classic）により
+   (64,256,784) は split-K が先に取るため、ゲートを ON にしても T1 には到達しない（route は SplitK のまま）。
+   ゲート反転で実際に変わる形状は (784,64,256)→T3 の 1 件だけだった。机上の前提（2 件）が食い違ったため RULE 項 5 に従い undetermined とする。
+3. train／infer セル A/B は `anomaly`（train の 64/fresh が 5/5 round で after が遅い向き）。ゲート判定は ADOPT にしない（RULE 項 13）。
+   checksum は 4 セルとも完全一致。
 
 ### 7.1 条件
 
 | 項目 | 値 |
 |---|---|
-| 機体 | Mac mini（Apple M4・GPU 10 コア・16 GB）。**未実測のため env_info なし** |
-| 規則 | `docs/perf/logs/metal-m64-thin-tile-ab-macmini-3209/RULE.txt`（sha256 `d5bfebcacf27b6b95da47297cc71ba66f2ce3e44a76d3e50c107e8cd26a26e40`。固定コミット `b5da0c2b0f4a080edf183ce7cb7fa6c7eb922d2b`。計測前に単独コミット） |
+| 機体 | Mac mini（Apple M4・GPU 10 コア〈`gpu_cores=10`・`verified_tile_table=M4Base`〉・P 4 + E 6 コア・16 GB・macOS 27.0.1・rustc 1.99.0）。出典 `env_info.txt`・`aggregate.md` |
+| 計測対象リビジョン | `bd2ce9464783edfdc395a923a76d4b88f6529ab3`（`rev-stamp.txt`）。展開ツリー指紋は開発機と Mac mini で一致（`tree-fingerprint.txt`） |
+| 規則 | `docs/perf/logs/metal-m64-thin-tile-ab-macmini-3209/RULE.txt`（sha256 `d5bfebcacf27b6b95da47297cc71ba66f2ce3e44a76d3e50c107e8cd26a26e40`。固定コミット `b5da0c2b0f4a080edf183ce7cb7fa6c7eb922d2b`。計測前に単独コミット。本文は変更していない） |
 | 判定の根拠 | 純カーネル時間（`kernel_gpu`）のみ。train／infer セルは A/A の対照（record_only） |
 | 計測基盤 | `gemm_m64_thin_tile_ab_diag_tests.rs`（到達追跡・CPU 参照 parity・純カーネル計測。全件 `#[ignore]`）・`MetalGemm::diag_encode_strided_tiled`（`#[cfg(test)]`。encode-only）・`orchestrate_macmini.sh`・`aggregate.py`・`run_ab_m64_thin_tile_metal.sh` |
 
@@ -80,24 +90,81 @@ M4 Max（`verified_tile_table=M4Max`）で診断 3 テストを 1 回ずつ実�
 - NN の 8 非整列形状（n=10 または k=10 の 3 形状）は、本番 `dispatch_auto` と同じく 8 の倍数へゼロ詰めした実効次元
   （(64,16,256)・(256,64,16)・(256,16,64)）で計測する（`diag_encode_tiled_nn` が非整列を拒否するため）。
 - 到達追跡は実効次元で行う。机上の前提（ゲート ON で変わるのは (64,256,784)→T1 と (784,64,256)→T3 の 2 件）が
-  食い違う場合、ゲート判定は undetermined に落ちる（RULE 項 5・13）。
+  食い違う場合、ゲート判定は undetermined に落ちる（RULE 項 5・13）。**今回は (64,256,784) が split-K 先取りで食い違った**（7.4）。
+- `prod` 腕は本番スカラー strided 経路（bias+relu 等）で、カーネルが異なるため判定対象外（record_only）。
+  `docs/backend-metal-command-batching-design.md` §7.3.4 の L1 `kernel_gpu` は dinput 位相（別カーネル・別条件）の値であり、
+  `prod` 腕の L1 forward とは同条件ではないため、同節への参照行は追加しない。
 
-### 7.4 結果（未実測）
+### 7.4 結果
+
+出典はすべて `docs/perf/logs/metal-m64-thin-tile-ab-macmini-3209/`（以下 `logs/`）。`kernel_gpu` は run 内中央値（ms）の 5 run 中央値で、
+run 別の値・副指標（encode／commit_wait／alloc_c）は `logs/aggregate.md` に全件ある（外れ値の除外はしていない）。
 
 | 項目 | 結果 |
 |---|---|
-| 前提ゲート（既存 bit 一致 92 件・CPU 参照 parity） | 未実施 |
-| 到達表 | 未実施 |
-| 候補 × 形状の `kernel_gpu` | 未実施 |
-| 候補別の判定（T1〜T4） | undetermined |
-| ゲート（`M64_THIN_TILE_ENABLED` の写像）の判定 | undetermined |
-| train／infer セル A/B（A/A 対照） | 未実施 |
+| 前提ゲート: 既存 bit 一致 | NN 44 件・NT/TN 48 件の計 92 件 pass（`logs/prereq_bitident.log`、`prereq_bitident_strict rc=0`） |
+| 候補別 bit 一致（`BITIDENT`） | 32 件すべて `ok=true`（`logs/bitident_report.log`） |
+| 前提ゲート: CPU 参照 parity（統一複合判定） | 40 件すべて `ok=true`・fallback なし（`logs/parity.log`） |
+| 正式系列 | はい（`logs/load_gate.log` の全 gate pass・`series done`。`ab/load-gate-*.log` は `series=official` で 5 round 全 pass） |
+
+到達表（`logs/trace_run{1..5}.log`。5 run 全一致）:
+
+| 形状（実効） | ゲート OFF の route | ゲート ON の thin |
+|---|---|---|
+| 64x256x784 | SplitK（partitions 4） | T1（ただし split-K が先に選ばれるため本番では到達しない） |
+| 64x10x256（64x16x256） | SplitK（partitions 8） | none |
+| 784x64x256 | Classic C1 | T3 |
+| 256x64x10（256x64x16） | Classic C7 | none |
+| 784x256x64 | Classic C1 | none |
+| 256x10x64（256x16x64） | Classic C7 | none |
+
+`kernel_gpu` 5 run 中央値（ms。比は cur 比。**太字は ADOPT_CANDIDATE＝5/5 run 速い**）:
+
+| 向き | 形状 | cur | T1 | T2 | T3 | T4 | prod（参考） |
+|---|---|---|---|---|---|---|---|
+| NN | 64x256x784 | 0.0623 | **0.0328（-47.4%）** | **0.0508（-18.5%）** | **0.0341（-45.3%）** | **0.0312（-49.9%）** | 0.0785 |
+| NN | 64x10x256 | 0.0110 | 0.0133（+20.9%） | 0.0231（+110.0%） | 0.0125（+13.6%） | 0.0110（+0.0%） | 0.0126 |
+| NN | 784x64x256 | 0.0252 | **0.0189（-25.0%）** | **0.0228（-9.5%）** | **0.0204（-19.0%）** | 0.0310（+23.0%） | 0.0694 |
+| NN | 256x64x10 | 0.0040 | **0.0039（-2.5%）** | 0.0052（+30.0%） | 0.0042（+5.0%） | 0.0042（+5.0%） | 0.0045 |
+| NN | 784x256x64 | 0.0181 | 0.0235（+29.8%） | 0.0239（+32.0%） | 0.0243（+34.3%） | 0.0278（+53.6%） | 0.0703 |
+| NN | 256x10x64 | 0.0065 | **0.0062（-4.6%）** | 0.0090（+38.5%） | **0.0063（-3.1%）** | **0.0057（-12.3%）** | 0.0056 |
+| NT（実向き strided） | 784x64x256 | 0.0255 | **0.0188（-26.3%）** | **0.0227（-11.0%）** | **0.0205（-19.6%）** | 0.0303（+18.8%） | 0.0700 |
+| TN（実向き strided） | 784x256x64 | 0.0190 | 0.0243（+27.9%） | 0.0240（+26.3%） | 0.0259（+36.3%） | 0.0285（+50.0%） | 0.0711 |
+
+判定（RULE 項 11・12。機械判定の採用。出典 `logs/aggregate.md`）:
+
+| 対象 | 判定 |
+|---|---|
+| T1 | ADOPT |
+| T2 | ADOPT |
+| T3 | ADOPT |
+| T4 | ADOPT |
+| ゲート（`M64_THIN_TILE_ENABLED` の写像） | **undetermined**（到達前提不成立・セル A/B anomaly） |
+
+注意: 候補の総合 ADOPT は「規則 11 の機械判定」であり、形状別に悪化する候補を全形状に適用してよいという意味ではない。
+結線するなら形状ごとの写像（勝つ形状のみ）が必要で、それは別 PR・所有者判断になる（7.5）。
+
+train／infer セル A/B（`logs/ab/compare-{train,infer}-3209-metal-3209.md`。before = main、after = ゲート ON の 1 行差。`--cell-ab anomaly`）:
+
+| セル | before 中央値 | after 中央値 | after/before | checksum | 5 round の向き |
+|---|---|---|---|---|---|
+| train 64/fresh | 2.325 ms | 2.347 ms | 1.0093 | 完全一致 | 全 round で after が遅い（5/5）→ anomaly |
+| train 64/reuse | 1.881 ms | 1.878 ms | 0.9984 | 完全一致 | 混在 |
+| infer 64/fresh | 754.9 us | 762.5 us | 1.0100 | 完全一致 | 混在 |
+| infer 64/reuse | 366.1 us | 374.4 us | 1.0229 | 完全一致 | 混在（0.73〜1.48 の大きなばらつき） |
+
+before／after のバイナリ sha256 は異なり（`logs/ab/sha-3209-*.txt`）、`fandhe-ai` は各 checkout の `crates/facade` に解決している（`logs/ab/tree-3209-*.txt`）。
+anomaly は RULE 項 13 の字義どおり（5/5 round 一貫）。差は 0.9% で、ゲート ON で本番が変えるのは (784,64,256) の 1 形状のみ
+（かつ train reuse／infer の Metal セルは `tile::select` を通らずスカラー strided カーネルで動く。7.3・`docs/perf/metal-gemm-m64-thin-tile-candidates.md` §2）なので、
+因果は未確認で、ノイズ帯として扱う。
 
 ### 7.5 所有者への申し送り
 
-- ADOPT 候補が出た場合の結線（`M64_THIN_TILE_ENABLED` の反転や選択表への追加）は、結合順序が変わらない候補に限って
-  別 PR で行う。ゲートの写像は機体非依存（M4 Max にも効く）ため、結線の前に M4 Max での確認が要る。
+- ADOPT 候補（T1〜T4）の結線（`M64_THIN_TILE_ENABLED` の反転や選択表への追加）は、結合順序が変わらない候補に限って別 PR で行う。
+  今回の実測では、split-K が先取りする (64,256,784) には写像が効かないこと、候補によっては形状別に +20〜54% 悪化することから、
+  「ゲートを丸ごと ON」は推奨しない。勝つ形状だけを写す形（例: (784,64,256)→T1／T3）にするなら別 PR で設計する。
+  いずれもゲートの写像は機体非依存（M4 Max にも効く）ため、結線の前に M4 Max での確認が要る。
+- (64,256,784) は split-K（partitions 4）が選ばれるため、細タイルの効果を得るには split-K 側の拡張（型 B2）が要る。
 - 型 B（B1: 常駐 strided のスカラー経路の simdgroup 化、B2: split-K の拡張）は結合順序・演算方式が変わるため、
   引き続き所有者判断（baseline の追加は実機実測値のみ・人間承認）。
-- `docs/backend-metal-command-batching-design.md` §7.3.4（Mac mini の L1 `kernel_gpu` が未実測）への反映は、
-  実測後に本節を参照する 1 行で足りる（本 PR では行わない）。
+- `docs/backend-metal-command-batching-design.md` §7.3.4 への反映は不要と判断した（7.3 参照）。

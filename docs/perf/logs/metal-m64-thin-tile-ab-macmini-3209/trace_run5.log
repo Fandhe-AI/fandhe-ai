@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_m64_thin_tile_ab_diag_tests::m64_thin_reach_trace ... DEVICE gpu_cores=10 soc="Apple M4" verified_tile_table=Some(M4Base(VerifiedM4BaseGpuCoreCount(10))) split_k_enabled=true
+TRACE shape=64x256x784 eff=64x256x784 should_split_k=SplitKPlan{tile:TileConfig{bm:32,bn:32,bk:16,wm:2,wn:2,staged:true},partitions:4,k_per_partition:192} route_off=SplitK/SplitKPlan{tile:TileConfig{bm:32,bn:32,bk:16,wm:2,wn:2,staged:true},partitions:4,k_per_partition:192} thin_on=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue cur=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved_cur=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue
+TRACE shape=64x10x256 eff=64x16x256 should_split_k=SplitKPlan{tile:TileConfig{bm:32,bn:16,bk:16,wm:2,wn:2,staged:true},partitions:8,k_per_partition:32} route_off=SplitK/SplitKPlan{tile:TileConfig{bm:32,bn:16,bk:16,wm:2,wn:2,staged:true},partitions:8,k_per_partition:32} thin_on=none cur=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse resolved_cur=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse
+TRACE shape=784x64x256 eff=784x64x256 should_split_k=none route_off=Classic/C1:bm64xbn32xbk16_wm2xwn2_stagedtrue thin_on=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved_cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue
+TRACE shape=256x64x10 eff=256x64x16 should_split_k=none route_off=Classic/C7:bm8xbn8xbk8_wm1xwn1_stagedfalse thin_on=none cur=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse resolved_cur=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse
+TRACE shape=784x256x64 eff=784x256x64 should_split_k=none route_off=Classic/C1:bm64xbn32xbk16_wm2xwn2_stagedtrue thin_on=none cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved_cur=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue
+TRACE shape=256x10x64 eff=256x16x64 should_split_k=none route_off=Classic/C7:bm8xbn8xbk8_wm1xwn1_stagedfalse thin_on=none cur=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse resolved_cur=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 854 filtered out; finished in 0.02s
+
