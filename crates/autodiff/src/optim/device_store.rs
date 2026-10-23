@@ -2152,6 +2152,13 @@ impl DeviceParamStore {
     /// LinearResident` doc 参照）。`Sequential::forward_resident` で
     /// forward したグラフは必ず本メソッドで backward すること。
     ///
+    /// イシュー #3246: 入力が `requires_grad=false`（`Tape::var_no_grad`・
+    /// `Var::detach` と、それらだけを祖先に持つ view・elementwise）の
+    /// `Op::LinearResident` は d_input の GEMM を実行しない。その入力に対する
+    /// `Gradients::get` は従来どおり `Err(GradientTrackingDisabled)`。
+    /// `Tape::var` で登録した入力は従来どおり d_input を計算する
+    /// （`docs/autodiff-nograd-leaf-dinput-skip-decision.md`）。
+    ///
     /// イシュー #1212: 走査開始前に `backward_serial` をインクリメント
     /// する（`GradStaging::filled` の鮮度検査の基準値。`fill_resident_
     /// weight_grad` が今回の走査中に書き込む値と、後続 `step()` が
@@ -4269,6 +4276,9 @@ mod tests {
         /// forward／backward が実際に `download()` を呼んでいないことを
         /// 区別して検証できる。
         download_count: Arc<AtomicUsize>,
+        /// `gemm_resident_lhs`（`Op::LinearResident` VJP の d_input GEMM）の累計
+        /// 呼び出し回数（イシュー #3246。勾配不要な入力で省かれることの検証用）。
+        resident_lhs_count: Arc<AtomicUsize>,
         /// `true` の場合のみ [`BackendOps::gemm_fp32_strict_into`] を
         /// `Unsupported` の既定実装からオーバーライドし、`d_weight` を
         /// `out` へ直接書き込む（イシュー #1212 review 指摘対応）。
@@ -4372,6 +4382,7 @@ mod tests {
                 call_count: Arc::new(AtomicUsize::new(0)),
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
+                resident_lhs_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
                 bias_fusion_capable: false,
                 graph_capable: false,
@@ -4392,6 +4403,7 @@ mod tests {
                 call_count: Arc::new(AtomicUsize::new(0)),
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
+                resident_lhs_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
                 bias_fusion_capable: false,
                 graph_capable: false,
@@ -4416,6 +4428,7 @@ mod tests {
                 call_count: Arc::new(AtomicUsize::new(0)),
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
+                resident_lhs_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: false,
                 bias_fusion_capable: false,
                 graph_capable: true,
@@ -4453,6 +4466,7 @@ mod tests {
                 call_count: Arc::new(AtomicUsize::new(0)),
                 upload_count: Arc::new(AtomicUsize::new(0)),
                 download_count: Arc::new(AtomicUsize::new(0)),
+                resident_lhs_count: Arc::new(AtomicUsize::new(0)),
                 resident_capable: true,
                 bias_fusion_capable: true,
                 graph_capable: false,
@@ -5107,6 +5121,7 @@ mod tests {
             w: DeviceBufferView<'_>,
             b: &Tensor<f32>,
         ) -> Result<Tensor<f32>, BackendError> {
+            self.resident_lhs_count.fetch_add(1, Ordering::SeqCst);
             let w_tensor = Self::read_resident(w)?;
             Ok(crate::eval::matmul(&w_tensor, b))
         }
@@ -8621,5 +8636,96 @@ mod tests {
             assert_eq!(bits(&got[0]), bits(&want));
             assert_eq!(bits(&got[1]), bits(&want));
         }
+    }
+
+    /// イシュー #3246: `Op::LinearResident` の d_input GEMM が、入力が
+    /// `requires_grad=false` のときだけ省かれることと、省いても weight・bias
+    /// の勾配（更新後パラメータ）が bit 同一であることを検証する共通ヘルパー。
+    /// `mode`: 0 = `var`、1 = `var_no_grad`、2 = `var_no_grad` + `reshape`。
+    /// 戻り値は (更新後パラメータ全要素の bit 列, `gemm_resident_lhs` 回数,
+    /// 入力に対する `Gradients::get` の結果が `GradientTrackingDisabled` か)。
+    fn nograd_dinput_run(ops: MockDeviceOps, mode: u8) -> (Vec<u32>, usize, bool) {
+        let counter = ops.resident_lhs_count.clone();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w1 = tensor(vec![0.5, -0.25, 0.75, 0.1, -0.6, 0.3], &[2, 3]);
+        let b1 = tensor(vec![0.1, -0.2, 0.05], &[3]);
+        let w2 = tensor(vec![0.4, -0.3, 0.2, 0.9, -0.1, 0.6], &[3, 2]);
+        let b2 = tensor(vec![0.0, 0.3], &[2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w1, &b1, &w2, &b2]).unwrap();
+        let config = SgdConfig::new(0.05);
+        let mut disabled = false;
+        for _ in 0..3 {
+            let leaves = store.register_resident_params(&tape).unwrap();
+            let xv = tensor(vec![1.0, -2.0, 0.5, 3.0], &[2, 2]);
+            let x = if mode == 0 {
+                tape.var(&xv)
+            } else {
+                tape.var_no_grad(&xv)
+            };
+            let xin = if mode == 2 {
+                x.reshape(&[2, 2]).unwrap()
+            } else {
+                x
+            };
+            let target = tape.var(&tensor(vec![1.0, 0.0, -1.0, 2.0], &[2, 2]));
+            let h = store
+                .linear_forward(&tape, &xin, &leaves[0], Some(&leaves[1]))
+                .unwrap();
+            let out = store
+                .linear_forward(&tape, &h.relu(), &leaves[2], Some(&leaves[3]))
+                .unwrap();
+            let loss = out.mse_loss(&target).unwrap();
+            let grads = store.backward(&tape, &loss).unwrap();
+            disabled = matches!(grads.get(&x), Err(AutodiffError::GradientTrackingDisabled));
+            store.step(&tape, &grads, &config).unwrap();
+        }
+        let synced = store.sync_to_host(&tape).unwrap();
+        let bits: Vec<u32> = synced
+            .iter()
+            .flat_map(|t| {
+                t.contiguous()
+                    .as_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        (bits, counter.load(Ordering::SeqCst), disabled)
+    }
+
+    #[test]
+    fn linear_resident_skips_dinput_gemm_for_no_grad_input() {
+        let (_, with_grad, dis0) = nograd_dinput_run(MockDeviceOps::resident_capable(), 0);
+        let (_, no_grad, dis1) = nograd_dinput_run(MockDeviceOps::resident_capable(), 1);
+        // 3 step × (var: 2 層分 / var_no_grad: 第 2 層のみ)
+        assert_eq!(with_grad, 6);
+        assert_eq!(no_grad, 3);
+        assert!(!dis0, "var 入力は勾配が返る");
+        assert!(dis1, "var_no_grad 入力の get は GradientTrackingDisabled");
+    }
+
+    #[test]
+    fn linear_resident_no_grad_input_grads_and_params_bit_identical() {
+        for make in [MockDeviceOps::resident_capable, MockDeviceOps::new] {
+            let (a, _, _) = nograd_dinput_run(make(), 0);
+            let (b, _, _) = nograd_dinput_run(make(), 1);
+            assert_eq!(a, b, "d_input 省略で weight/bias 更新が bit 一致しない");
+            let init_bits = [0.5f32, -0.25, 0.75, 0.1, -0.6, 0.3].map(f32::to_bits);
+            assert_ne!(&a[..6], &init_bits[..], "退化比較（更新なし）");
+        }
+    }
+
+    #[test]
+    fn linear_resident_no_grad_input_through_view_skips_dinput() {
+        let (a, c0, _) = nograd_dinput_run(MockDeviceOps::resident_capable(), 0);
+        let (b, c2, dis) = nograd_dinput_run(MockDeviceOps::resident_capable(), 2);
+        assert_eq!(a, b);
+        assert_eq!(c0, 6);
+        assert_eq!(c2, 3);
+        assert!(
+            dis,
+            "view 経由の var_no_grad 入力の get は GradientTrackingDisabled"
+        );
     }
 }
