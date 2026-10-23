@@ -663,6 +663,9 @@ impl Tape {
     /// 薄い委譲であり、`BackendOps`／`MemoryOps` を利用者向け公開面へ
     /// 露出しない（`crate::lib.rs` モジュール doc「公開面の設計」・
     /// REQ-12）。
+    ///
+    /// 入力が `var_no_grad` 等で勾配不要な層は d_input の GEMM を省く（#3246）。
+    /// その入力の `Gradients::get` は `Err(GradientTrackingDisabled)`。
     pub fn backward_device_param_store(
         &self,
         loss: &Var<'_>,
