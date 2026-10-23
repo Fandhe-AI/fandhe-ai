@@ -33,8 +33,12 @@
 //! # 失敗の境界（決定記録 §5 の 2 段目）
 //! - 最初の dW を勾配バッファへ書く前に部品が `Unsupported` を返した場合は、そのまま返し
 //!   poison しない。params・velocity・`step_count`・`sgd_used` は不変
+//! - 書き込み前の `DeviceContextCaptureInProgress`（一時的な capture 衝突）も params 未変更のため
+//!   poison せずそのまま返す（`predict_device_chain` と同じ扱い）
 //! - それ以外の `Err`（書き込み後の失敗・SGD の失敗）は `step()` と同じく store を poison する
-//!   （`DeviceContextCaptureInProgress` だけは params 未変更のため poison しない）
+//!   （SGD 段の `DeviceContextCaptureInProgress` だけは params 未変更のため poison しない）
+//! - どの失敗経路でも、encode 済みの中間バッファは drop せず `train_chain_hold` へ退避する
+//!   （encode-only の GPU 処理が実行中でも同じデバイスメモリを再利用させないため）
 //! - 成功時は encode 成功の時点で `step_count`・`sgd_used`・世代を確定する
 //!
 //! # 失敗トークン（A08）
@@ -71,6 +75,26 @@ struct ChainLayer {
 
 /// encode 中の失敗。`written` は勾配バッファへ 1 回以上書いたか。
 type EncodeFailure = (BackendError, bool);
+
+/// encode 中に生成した GPU バッファの置き場。成功・失敗どちらの経路でも、encode-only の GPU 処理が
+/// 完了するまでバッファを解放しないよう、呼び出し側が [`Self::into_held`] で store へ退避する。
+#[derive(Default)]
+struct ChainScratch {
+    outs: Vec<DeviceBuffer<f32>>,
+    loss: Option<DeviceBuffer<f32>>,
+    g_cur: Option<DeviceBuffer<f32>>,
+    hold: Vec<DeviceBuffer<f32>>,
+}
+
+impl ChainScratch {
+    /// loss を除く保持対象を 1 本の Vec へ集約し、loss と共に返す。
+    fn into_held(self) -> (Option<DeviceBuffer<f32>>, Vec<DeviceBuffer<f32>>) {
+        let mut hold = self.hold;
+        hold.extend(self.g_cur);
+        hold.extend(self.outs);
+        (self.loss, hold)
+    }
+}
 
 fn invalid(msg: String) -> BackendError {
     BackendError::InvalidArgument(format!("DeviceParamStore::train_step_device_chain: {msg}"))
@@ -162,19 +186,36 @@ impl DeviceParamStore {
             }
         }
 
-        let encoded = self.encode_train_chain(ops, x, y, &layers, &mut grad, scale);
+        let mut scratch = ChainScratch::default();
+        let encoded = self.encode_train_chain(ops, (x, y), &layers, &mut grad, scale, &mut scratch);
         self.train_chain_grad = Some(grad);
-        let (loss, mut hold) = match encoded {
-            Ok(v) => v,
-            Err((e, written)) => {
-                // 書き込み前の `Unsupported` だけが「何も変わっていない」ことを保証できる。
-                if written || !matches!(e, BackendError::Unsupported(_)) {
-                    self.poisoned.store(true, Ordering::SeqCst);
-                } else if velocity_is_new {
-                    self.velocity = None;
-                }
-                return Err(e);
+        let (loss_opt, mut hold) = scratch.into_held();
+        if let Err((e, written)) = encoded {
+            // 成功経路と同様、中間バッファは GPU 処理の完了まで store が保持する（loss も含む）。
+            let mut keep = hold;
+            keep.extend(loss_opt);
+            self.train_chain_hold = keep;
+            // 書き込み前の `Unsupported`・一時的な capture 衝突だけが「何も変わっていない」ことを
+            // 保証できる。
+            let unchanged = !written
+                && matches!(
+                    e,
+                    BackendError::Unsupported(_)
+                        | BackendError::DeviceContextCaptureInProgress { .. }
+                );
+            if !unchanged {
+                self.poisoned.store(true, Ordering::SeqCst);
+            } else if velocity_is_new {
+                self.velocity = None;
             }
+            return Err(e);
+        }
+        let Some(loss) = loss_opt else {
+            self.train_chain_hold = hold;
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(invalid(
+                "loss buffer is missing (internal error)".to_string(),
+            ));
         };
 
         let step_config = SgdStepConfig {
@@ -203,6 +244,9 @@ impl DeviceParamStore {
             &self.failure_token,
         ) {
             // `step()` と同じ: capture 競合は params 未変更の一過性エラーで poison しない。
+            // encode 済みの GPU 処理が実行中でありうるため、中間バッファ・loss は解放せず退避する。
+            hold.push(loss);
+            self.train_chain_hold = std::mem::take(&mut hold);
             if !matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
                 self.poisoned.store(true, Ordering::SeqCst);
             } else if velocity_is_new {
@@ -410,16 +454,17 @@ impl DeviceParamStore {
     }
 
     /// forward → loss → MSE backward → 層ごとの dW（と L2 以降の d_input・ReLU マスク）を
-    /// encode のみで積む。SGD は呼ばない。戻り値は loss スカラーと、保持すべき中間バッファ。
+    /// encode のみで積む。SGD は呼ばない。生成したバッファ（loss 含む）は成否に依らず `scratch` へ置く。
     fn encode_train_chain(
         &self,
         ops: &dyn BackendOps,
-        x: &ResidentInput,
-        y: &ResidentInput,
+        io: (&ResidentInput, &ResidentInput),
         layers: &[ChainLayer],
         grad: &mut DeviceBuffer<f32>,
         scale: f32,
-    ) -> Result<(DeviceBuffer<f32>, Vec<DeviceBuffer<f32>>), EncodeFailure> {
+        scratch: &mut ChainScratch,
+    ) -> Result<(), EncodeFailure> {
+        let (x, y) = io;
         let token = &self.failure_token;
         let mut written = false;
         let n_layers = layers.len();
@@ -427,7 +472,7 @@ impl DeviceParamStore {
         let y_buf = y.buffer();
 
         // forward: 層出力は ReLU マスク元・次層の dW 入力として全部保持する。
-        let mut outs: Vec<DeviceBuffer<f32>> = Vec::with_capacity(n_layers);
+        scratch.outs.reserve(n_layers);
         for (i, l) in layers.iter().enumerate() {
             let w = self
                 .checked_resident_buffer(self.store_id, l.w_slot)
@@ -440,25 +485,32 @@ impl DeviceParamStore {
                 None => None,
             };
             let out = {
-                let src = if i == 0 { x_buf } else { &outs[i - 1] };
+                let src = if i == 0 { x_buf } else { &scratch.outs[i - 1] };
                 ops.linear_forward_device_tracked(src, w, b, l.act, token)
                     .map_err(|e| (e, written))?
             };
-            outs.push(out);
+            scratch.outs.push(out);
         }
 
-        let pred = &outs[n_layers - 1];
-        let loss = ops
-            .mse_loss_device_tracked(pred, y_buf, MseReduction::Mean, token)
-            .map_err(|e| (e, written))?;
-        let mut g_cur = ops
-            .mse_loss_backward_device_tracked(pred, y_buf, scale, token)
-            .map_err(|e| (e, written))?;
+        let pred = &scratch.outs[n_layers - 1];
+        scratch.loss = Some(
+            ops.mse_loss_device_tracked(pred, y_buf, MseReduction::Mean, token)
+                .map_err(|e| (e, written))?,
+        );
+        scratch.g_cur = Some(
+            ops.mse_loss_backward_device_tracked(pred, y_buf, scale, token)
+                .map_err(|e| (e, written))?,
+        );
 
-        let mut hold: Vec<DeviceBuffer<f32>> = Vec::new();
         for i in (0..n_layers).rev() {
             let l = &layers[i];
-            let src = if i == 0 { x_buf } else { &outs[i - 1] };
+            let src = if i == 0 { x_buf } else { &scratch.outs[i - 1] };
+            let g_cur = scratch.g_cur.as_ref().ok_or_else(|| {
+                (
+                    invalid("gradient chain buffer is missing (internal error)".to_string()),
+                    written,
+                )
+            })?;
             let w_off = self.layout[l.w_slot].offset;
             let n = self.layout[l.w_slot].shape.get(1).copied().unwrap_or(0);
             let bias = l.b_slot.map(|s| (self.layout[s].offset, n));
@@ -467,7 +519,7 @@ impl DeviceParamStore {
                 let src_view =
                     DeviceBufferView::new(src, 0, src.shape()).map_err(|e| (e, written))?;
                 let g_view =
-                    DeviceBufferView::new(&g_cur, 0, g_cur.shape()).map_err(|e| (e, written))?;
+                    DeviceBufferView::new(g_cur, 0, g_cur.shape()).map_err(|e| (e, written))?;
                 let bias_filled = ops
                     .gemm_fp32_strict_into_device_tracked(
                         src_view,
@@ -507,7 +559,7 @@ impl DeviceParamStore {
                             token,
                         )
                         .map_err(|e| (e, written))?;
-                    let prev_out = &outs[i - 1];
+                    let prev_out = &scratch.outs[i - 1];
                     let prev_view = DeviceBufferView::new(prev_out, 0, prev_out.shape())
                         .map_err(|e| (e, written))?;
                     let t_view =
@@ -520,17 +572,17 @@ impl DeviceParamStore {
                             token,
                         )
                         .map_err(|e| (e, written))?;
-                    hold.push(t);
+                    scratch.hold.push(t);
                     Some(g_prev)
                 }
             };
-            if let Some(g_prev) = g_prev {
-                hold.push(std::mem::replace(&mut g_cur, g_prev));
+            if let Some(g_prev) = g_prev
+                && let Some(old) = scratch.g_cur.replace(g_prev)
+            {
+                scratch.hold.push(old);
             }
         }
-        hold.push(g_cur);
-        hold.extend(outs);
-        Ok((loss, hold))
+        Ok(())
     }
 }
 #[cfg(test)]
@@ -574,6 +626,10 @@ mod tests {
         SgdFails,
         /// dW が `bias_filled == false` を返す。
         BiasNotFilled,
+        /// forward が一時的な capture 衝突を返す（どの書き込みよりも前）。
+        ForwardCaptureBusy,
+        /// 最初の dW が一時的な capture 衝突を返す（書き込み前・forward 出力は生成済み）。
+        FirstDwCaptureBusy,
     }
 
     struct Rec {
@@ -677,6 +733,11 @@ mod tests {
             if self.fault == Fault::ForwardUnsupported {
                 return Err(BackendError::Unsupported("mock fwd".into()));
             }
+            // 一時的な衝突は最初の 1 回だけ（再試行で解消する想定）。
+            if self.fault == Fault::ForwardCaptureBusy && self.c.forward.load(Ordering::SeqCst) == 1
+            {
+                return Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 });
+            }
             Ok(buf(&[a.shape()[0], w.shape()[1]], 1.0))
         }
         fn mse_loss_device_tracked(
@@ -716,6 +777,9 @@ mod tests {
             self.note(t);
             if self.fault == Fault::FirstDwUnsupported {
                 return Err(BackendError::Unsupported("mock dw".into()));
+            }
+            if self.fault == Fault::FirstDwCaptureBusy && self.c.dw.load(Ordering::SeqCst) == 1 {
+                return Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 });
             }
             Ok(bias.is_some() && self.fault != Fault::BiasNotFilled)
         }
@@ -963,6 +1027,47 @@ mod tests {
                 assert!(store.velocity.is_none());
             }
             store.check_not_poisoned().unwrap();
+        }
+    }
+
+    #[test]
+    fn transient_capture_conflict_before_write_does_not_poison_the_store() {
+        for fault in [Fault::ForwardCaptureBusy, Fault::FirstDwCaptureBusy] {
+            let (tape, mut store, c) = setup(fault);
+            let err = run(&tape, &mut store, &ACTS, &cfg(0.9)).unwrap_err();
+            assert!(
+                matches!(err, BackendError::DeviceContextCaptureInProgress { .. }),
+                "{err:?}"
+            );
+            store.check_not_poisoned().unwrap();
+            assert_eq!(store.step_count, 0);
+            assert!(!store.sgd_used);
+            assert!(store.velocity.is_none(), "新規 velocity は残さない");
+            assert_eq!(count(&c.sgd), 0);
+            // 衝突が解消した後の step は成功する（同じストアを使い続けられる）。
+            let loss = run(&tape, &mut store, &ACTS, &cfg(0.9)).unwrap();
+            assert_eq!(store.step_count, 1);
+            assert!(store.sgd_used);
+            assert_eq!(count(&c.sgd), 1);
+            store.read_train_step_loss(&tape, &loss).unwrap();
+        }
+    }
+
+    #[test]
+    fn failure_paths_keep_in_flight_buffers_alive_in_the_store() {
+        // 成功経路と同様、Err でも encode 済みの中間バッファを drop せず store が保持する。
+        for fault in [
+            Fault::FirstDwUnsupported,
+            Fault::FirstDwCaptureBusy,
+            Fault::LhsUnsupported,
+            Fault::SgdFails,
+        ] {
+            let (tape, mut store, _c) = setup(fault);
+            assert!(run(&tape, &mut store, &ACTS, &cfg(0.0)).is_err());
+            assert!(
+                !store.train_chain_hold.is_empty(),
+                "Err 経路でも中間バッファを train_chain_hold へ退避するはず"
+            );
         }
     }
 
