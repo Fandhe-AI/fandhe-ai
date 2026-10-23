@@ -55,7 +55,13 @@ def read_text(path):
 
 
 def finite_num(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v)
+    except (OverflowError, ValueError, TypeError):
+        # JSON の巨大整数（10**400 等）は float へ変換できず OverflowError になる。不正値として扱い集計を止めない
+        return False
 
 
 def load_rows(path, task, bad, ck_all):
@@ -409,7 +415,7 @@ def _write(path, text):
     open(path, "w", encoding="utf-8").write(text)
 
 
-def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False, bd_cmp=None, bad_row=False, bad_time_ck=False):
+def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False, bd_cmp=None, bad_row=False, bad_time_ck=False, huge_time=False, torch_huge=False):
     ab = os.path.join(root, "ab")
     for arm in ("before", "after"):
         for task in KNOWN_TASKS:
@@ -431,6 +437,9 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
                 lines.append(lines[0])
             if bad_row and arm == "after" and task == "gemm":
                 lines.append(json.dumps({"task": "gemm", "device": "cpu", "size": 256, "mode": "fresh", "median_s": -1, "checksum": 1.5}))
+            if huge_time and arm == "after" and task == "gemm":
+                # median_s が float 変換不能な巨大整数の行（checksum は before と不一致）
+                lines.append('{"task": "gemm", "device": "cpu", "size": 256, "mode": "fresh", "median_s": 1' + "0" * 400 + ', "checksum": 9.5}')
             if bad_time_ck and arm == "after" and task == "gemm":
                 # 計測時間が不正かつ before と異なる checksum の行（正常 5 行は維持）
                 lines.append(json.dumps({"task": "gemm", "device": "cpu", "size": 256, "mode": "fresh", "median_s": 0, "checksum": 9.5}))
@@ -447,6 +456,8 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
         _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "\n".join(tl[:-3]) + "\n")
     elif torch_mode == "badtask":
         _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), json.dumps({"task": ["x"], "size": 256, "median_s": 0.1}) + "\n")
+    elif torch_mode == "hugeint":
+        _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), '{"task": "gemm", "size": 256, "median_s": 1' + "0" * 400 + '}\n')
     elif torch_mode == "garbage":
         _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "not json\n")
     g = "".join("round%d gate=%s gate_ok=%d threshold=3.0 load1=0.5 waited_s=0 at=x\n" % (r, "pass" if gate_ok else "timeout", 1 if gate_ok else 0) for r in range(1, 6))
@@ -509,6 +520,9 @@ def self_test():
     check("欠測 + checksum 不一致でも FAIL（1 機内）", _verdict("macmini", ck_bad=True, drop_row=True), "FAIL")
     check("不正行混在 + checksum 不一致でも FAIL を保つ", _verdict("macmini", ck_bad=True, bad_row=True), "FAIL")
     check("median_s 不正行の checksum 不一致でも FAIL", _verdict("macmini", bad_time_ck=True), "FAIL")
+    check("median_s が巨大整数でも集計は止まらず checksum 不一致 FAIL", _verdict("macmini", huge_time=True), "FAIL")
+    check("torch の median_s 巨大整数でも macmini は ADOPT 候補", _verdict("macmini", torch_mode="hugeint"), "ADOPT")
+    check("torch の巨大整数 + checksum 不一致でも FAIL", _verdict("gb10", torch_mode="hugeint", ck_bad=True), "FAIL")
     check("不正行のみは undetermined", _verdict("macmini", bad_row=True), "undetermined")
     check("cmp 実行エラー（exit 2）は undetermined", _verdict("gb10", bd_cmp=2), "undetermined")
     check("cmp exit 1 は FAIL", _verdict("gb10", bd_cmp=1), "FAIL")
