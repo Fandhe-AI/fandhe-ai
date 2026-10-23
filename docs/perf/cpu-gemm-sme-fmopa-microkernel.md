@@ -773,6 +773,29 @@ PyTorch 比（同 run 内）は gemm で 0.49〜0.74 倍から 1.03〜1.41 倍�
 - bit 同一: `production_gemm_matches_naive_and_neon_forced_bit_exact_across_thread_counts`（NN/TN/NT/bias+ReLU・スレッド {1,2,3,4,8}）と
   プロセス単位の `RAYON_NUM_THREADS` sweep（`logs/sme-default-on-3231/`）。GB10 の全出力 bit 同一は §5.6（旧 sha）を参照。
 
+### 5.11 job ごとの SME／NEON 混在分配の着手条件の判定（イシュー #3238。不成立・未着手で close）
+
+`dispatch_two_d_dynamic` は領域ごとに SME か NEON のどちらか 1 種類を選ぶ。これを job ごとに混在させる分配は、
+「SME が 1 スレッドで飽和し、残りのコアで回す NEON が上乗せになる」ことが #3175 の実測で確認できた場合だけ着手する条件付きの工夫である。
+判定元は `docs/perf/cpu-sme-thread-scaling-macmini.md` §2・§3（Mac mini・5 run 中央値）で、新しい計測は行っていない。
+
+| 観点 | 実測 | 条件との照合 |
+|---|---|---|
+| 1 スレッドで飽和しているか | (2048,2048,1024) の SME T=1 は 355.5 GFLOPS。第三者ピーク 2008 GFLOPS の 0.177 | 飽和していない |
+| SME 自身がスレッドで伸びるか | (2048,…) は S(4)=2.14・S(10)=3.07、(1024,1024,512) は S(4)=2.14・S(10)=2.70。判定欄はどちらも「頭打ちなし」 | 対象セル（N=1024／2048）で SME はスレッド数に応じて伸びる |
+| 結論との整合 | 「1 コアで飽和し P コアを増やしても足し算にならない」描像は現行カーネルでは観測されなかった（同 doc §3） | 前提が成立しない |
+| T=4→10 の増加量 | (2048,…) は SME 760.9→1092.5（+331.6）、NEON 276.4→474.5（+198.1） | 6 スレッドを SME から NEON に回すと増加幅が小さくなる（算術による推定） |
+
+- (256,256,128)・(512,512,256) は T=4→10 で SME が低下・停滞する（G(10)/G(4)=0.90／0.88）が、対象セルではなく、1 スレッドで飽和していない点も同じため判定は変わらない。
+- 結論: **着手条件は不成立**。混在分配のゲート・実装・bit 一致テストは行わず、`dispatch_two_d_dynamic` の分配・ゲート・テストは一切変えていない。
+  FMA 契約・tolerance・baseline・REQ-8 の境界検査も不変。
+- 実測ログ: `docs/perf/logs/sme-scale-macmini-3175/` の `RULE.txt`（規則）・`aggregate.md`（集計）・`env_info.txt`（機体・ツリー）・
+  `thread_t{1,2,4,10}_run{1..5}.log`（生ログ。無編集の `.raw.log` を併置）。
+- 計測時点の注意: #3175 は `SME_PRODUCTION_ENABLED=false` の時期に診断テスト `sme_vs_neon_ab_thread_sweep` で SME 腕と NEON 腕を直接比べたもので、
+  既定値に依存しない。#3231 で既定 ON にした後もカーネル（MR=NR=16・ZA0 1 タイル・micro-call ごとの `smstart`/`smstop`）は同じなので判定は有効。
+- 再評価の条件: 1 スレッドで SME を飽和させる別カーネル（例: m=64 専用・ZA 4 タイル・`smstart` 1 区間の #3233／#3234 系）が本番に入り、
+  #3175 と同じ RULE で対象セルの頭打ち（S(4) < 1.25）が観測された場合に限り、新しい issue として再提起する。
+
 ## 6. セキュリティ考慮（OWASP Top 10）
 
 - **unsafe の統制**: `asm!` は `compute`／`has_pending_lazy_za_save`
