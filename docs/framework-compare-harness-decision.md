@@ -352,3 +352,11 @@ GEMM の結果検証は 2 層防御で構成する。
 - fmt・clippy（`-D warnings`・`device-checksum` あり／なし）・`cargo test`（bench-fandhe・bench-common）・Mac の `--ignored` smoke 3 件が通る。あわせて、macOS 限定の `#[ignore]` テスト 4 件が `TempOutFile` のメソッド呼び出しの誤りでコンパイルできなかった既存の不具合を `.path()` に直した（Linux では対象外のため CI では見えなかった）
 - 未検証: GB10 の CUDA 実機（`reset` は値を変えず、`var_no_grad` は 0.11.0 では計算してから捨てるだけ、という机上の根拠のみ）
 - 承認: 本変更は #3264 の範囲（D-C 承認の bench-fandhe 側の是正）内であり、新しい承認は得ていない
+
+### 7.8 新旧併記の計測記録（#3266）
+
+§7.3 の方針（旧条件の値を残し、判定規則を変えずに新条件を並べる）の実行用に、計測の部品と事前登録規則を `docs/perf/logs/bench-fandhe-symmetry-ab-3266/` と `scripts/bench/framework-compare/`（`run_ab_bench_fandhe_symmetry.sh`・`judge_bench_fandhe_symmetry_ab.py`）へ用意した。腕は #3265 の直前（`61c69352d`）と #3265（`40453506a`）で、どちらも registry の `fandhe-ai =0.11.0`。判定式は 0.11.0 スコアボードと同一で、集計器のテストが 0.11.0 のログから `gen_0110_macmini.out` の 27 行を再現することを確認している。
+
+- 実測の状態: **未実施**（Mac mini・GB10 とも未測定。結果が入るまで本節に数値を書かない）。
+- 事実の記録: #3265 の (3) は `readout_uses_borrowed_view` から Metal 分岐を除いたため、Metal の fresh（gemm・infer）の readout も変わっている。「fresh は変更しない」は CPU・CUDA にだけ当てはまり、併記では Metal の fresh を「参考・変化あり」として読む。
+- 対象外: 入力のデバイス常駐と学習ステップ入口（#3272）、0.12.0 へのピン更新（#3271）、`--phases`・TF32 行の併記。
