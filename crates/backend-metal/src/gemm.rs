@@ -2411,6 +2411,98 @@ impl MetalGemm {
             .map(|(out, _route)| out)
     }
 
+    /// [`Self::dispatch_auto`] と同じ結線判断（split-K の 3 段ゲート → 経路選択 → classic）を、
+    /// **upload 済みの `a_buf`／`b_buf`**（行優先・パディングなし）に対して行い、結果を
+    /// `c_buf`（`m * n` 要素の出力専用バッファ）へ書く（イシュー #3250 P4。
+    /// `ops::MetalBackendOps::gemm_device` が呼ぶ）。復帰時点で GPU 実行は完了している
+    /// （classic・split-K とも `dispatch_sync` 経由）。
+    ///
+    /// **適用条件**: `m`／`n`／`k` がすべて 8 の倍数。`dispatch_auto` は 8 の倍数へのホスト側
+    /// パディング（`pad_matrix`）を経てから起動するため、倍数のときに限りパディング後の
+    /// バッファが入力と同一になり、同じ dispatch・同じ累積順序（bit 一致）になる。倍数でない形状
+    /// では常駐バッファをホストへ戻さずにパディングできないため `Ok(false)` を返し、呼び出し側が
+    /// `Unsupported` にする（別カーネルで黙って計算しない）。起動したら `Ok(true)`。
+    // `dispatch_variant`・`dispatch_split_k_auto_padded` と同じ判断（呼び出し側の意図明確化のため
+    // 個別引数のまま構造体へまとめない）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_auto_resident(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<bool, MetalError> {
+        if m == 0 || n == 0 || k == 0 {
+            return Err(MetalError::ZeroDimension { m, n, k });
+        }
+        if pad8(m) != m || pad8(n) != n || pad8(k) != k {
+            return Ok(false);
+        }
+        // 実長さの検査（REQ-8。バッファ実体と論理 shape のずれを起動前に拒否する）。
+        let mk = m.checked_mul(k).ok_or(MetalError::DimProductOverflow)?;
+        let kn = k.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+        let mn = m.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+        if a_buf.len() != mk {
+            return Err(MetalError::ALenMismatch {
+                expected: mk,
+                actual: a_buf.len(),
+            });
+        }
+        if b_buf.len() != kn {
+            return Err(MetalError::BLenMismatch {
+                expected: kn,
+                actual: b_buf.len(),
+            });
+        }
+        if c_buf.len() != mn {
+            return Err(MetalError::DimProductOverflow);
+        }
+        let dims = validate_effective_dims(m, n, k)?;
+        if self.split_k_auto_enabled
+            && SPLIT_K_NUMERIC_CONTRACT_APPROVED
+            && crate::split_k_runtime::split_k_enabled()
+        {
+            let core = ctx.verified_tile_table_device();
+            if let tile::GemmRoute::SplitK(plan) =
+                tile::select_route_for_verified_device(m, n, k, core)
+            {
+                let a_layout = MatrixLayout {
+                    rows: m,
+                    cols: k,
+                    ld: k,
+                    transposed: false,
+                };
+                let b_layout = MatrixLayout {
+                    rows: k,
+                    cols: n,
+                    ld: n,
+                    transposed: false,
+                };
+                self.dispatch_split_k_strided_prepared_with_plan(
+                    ctx, a_buf, 0, a_layout, b_buf, 0, b_layout, c_buf, m, n, k, plan,
+                )?;
+                return Ok(true);
+            }
+        }
+        let cfg = tile::select_for_verified_device(m, n, k, ctx.verified_tile_table_device());
+        self.encode_tiled_by_class(
+            ctx,
+            a_buf,
+            0,
+            b_buf,
+            0,
+            c_buf,
+            dims,
+            cfg,
+            GemmStrides::nn(dims.k, dims.n),
+            TransposePattern::Nn,
+        )?;
+        Ok(true)
+    }
+
     /// [`Self::dispatch_auto`] と同じ結線判断を行うが、実際に採用した
     /// 経路（[`tile::GemmRoute`]）を戻り値で返す診断専用入口（イシュー
     /// #1516）。`dispatch_auto` は本関数の結果からベクトルのみを取り出す

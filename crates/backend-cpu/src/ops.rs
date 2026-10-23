@@ -1661,6 +1661,44 @@ impl BackendOps for CpuBackendOps {
         linear_forward_device_with(a, w, bias, act, RESIDENT_W_PREPACK_ENABLED)
     }
 
+    /// [`BackendOps::gemm_device`] の CPU 実装（イシュー #3250 P4）。入力は upload 済みの
+    /// contiguous 行優先なので、[`Self::gemm`] が転置判定の後に通る汎用分岐と同じ
+    /// `gemm_blis_parallel` をスライスのまま呼ぶ（`Tensor` への再コピーなし）。
+    /// `gemm` が TN 分岐へ回る `[1,1]` 入力だけは経路が違うが、k = 1 の単一積は
+    /// どの経路でも同じ bit になる。
+    fn gemm_device(
+        &self,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Cpu || b.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+        let a_handle = a
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let b_handle = b
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        // shape とハンドル実体のずれは本番経路で panic させず拒否する（REQ-8）。
+        if a_handle.data().len() != a.numel() || b_handle.data().len() != b.numel() {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: a.numel().max(b.numel()),
+                    actual: a_handle.data().len().min(b_handle.data().len()),
+                },
+            ));
+        }
+        let mut out = zeroed_output(m * n);
+        gemm_blis_parallel(a_handle.data(), b_handle.data(), &mut out, m, n, k)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        shared_cpu_memory().wrap_vec(out, out_shape)
+    }
+
     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
     /// CPU は「デバイス」がホストメモリそのもので、`paged_kv::append_rows` が
     /// スロット行を `copy_from_slice` する。検証は `tensor-core` の共通関数。

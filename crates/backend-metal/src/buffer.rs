@@ -85,6 +85,20 @@ fn checked_byte_len(len: usize) -> Result<usize, MetalError> {
         .ok_or(MetalError::AllocationSizeOverflow { len })
 }
 
+// ホストデータからのバッファ生成（`new_with_data`。H2D 相当の `newBufferWithBytes` memcpy）の
+// 回数（`cfg(test)` のスレッドローカル診断。イシュー #3250）。常駐入力の演算が窓の中で
+// 入力の H2D を起こさないことを `resident_input_diag_tests_3250` が差分で確かめる。
+#[cfg(test)]
+thread_local! {
+    static H2D_BUFFER_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`H2D_BUFFER_COUNT`] の現在値（診断テスト専用）。
+#[cfg(test)]
+pub(crate) fn diag_h2d_buffer_count() -> u64 {
+    H2D_BUFFER_COUNT.with(|c| c.get())
+}
+
 impl MetalBuffer {
     /// `data` の内容を Metal バッファへアップロードして確保する。
     ///
@@ -98,6 +112,8 @@ impl MetalBuffer {
     /// ため呼び出し後の `data` の生存は不要）。
     pub fn new_with_data(ctx: &MetalContext, data: &[f32]) -> Result<Self, MetalError> {
         let len = data.len();
+        #[cfg(test)]
+        H2D_BUFFER_COUNT.with(|c| c.set(c.get() + 1));
         let bytes_len = checked_byte_len(len)?;
 
         // SAFETY: `&[f32]` の先頭ポインタは Rust のスライス仕様上つねに

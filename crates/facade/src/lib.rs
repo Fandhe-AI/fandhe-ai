@@ -460,7 +460,64 @@ impl std::fmt::Debug for Tape {
     }
 }
 
+/// デバイスに常駐する入力テンソルの不透明ハンドル（イシュー #3250 P1。公開形の決定は
+/// `docs/compat-resident-train-step-decision.md` §4）。
+///
+/// [`Tape::upload_resident`] が計測窓の外で 1 回だけ upload して作り、
+/// [`Sequential::predict_resident_input`]（推論）と [`Tape::matmul_resident`]（行列積）が
+/// 入力の H2D なしで受け取る。中身（バッファ）は公開しない。推論では作成時の
+/// [`DeviceParamStore`] に束縛され、別 store・別デバイス・古い世代のハンドルは型付きエラーに
+/// なる。`!Send`（`Send` を足さない）。
+pub struct ResidentTensor(pub(crate) fandhe_ai_autodiff::optim::resident_input::ResidentInput);
+
+impl ResidentTensor {
+    /// 入力の shape。
+    pub fn shape(&self) -> &[usize] {
+        self.0.shape()
+    }
+
+    /// 入力が常駐するデバイス。
+    pub fn device(&self) -> Device {
+        self.0.device()
+    }
+}
+
+impl std::fmt::Debug for ResidentTensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
 impl Tape {
+    /// `x` を `store` のデバイスへ **1 回だけ** upload し、常駐入力ハンドルを返す
+    /// （イシュー #3250 P2。計測窓の外で呼ぶ想定）。`store` は `self` と同じデバイスで
+    /// なければならず、違えば [`BackendError::DeviceMismatch`]。poison 済みの `store` は
+    /// [`BackendError::StorePoisoned`]。
+    pub fn upload_resident(
+        &self,
+        store: &DeviceParamStore,
+        x: &Tensor<f32>,
+    ) -> Result<ResidentTensor, AutodiffError> {
+        store
+            .upload_resident_input(&self.0, x)
+            .map(ResidentTensor)
+            .map_err(AutodiffError::Backend)
+    }
+
+    /// 常駐した `a: [m, k]`・`b: [k, n]` の行列積を計算し、結果を D2H 1 回でホストへ返す
+    /// （イシュー #3250 P4）。ホスト入力の `Var::matmul` と bit 一致する（バックエンドが
+    /// `gemm` と同じ核を持つ場合。CUDA の TF32 系精度モードなど未対応なら
+    /// [`BackendError::Unsupported`]。ホスト経路へは落とさない）。同じハンドルを `a` と `b`
+    /// の両方に渡してもよい。
+    pub fn matmul_resident(
+        &self,
+        a: &ResidentTensor,
+        b: &ResidentTensor,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        fandhe_ai_autodiff::optim::resident_input::matmul_resident(&self.0, &a.0, &b.0)
+            .map_err(AutodiffError::Backend)
+    }
+
     /// 入力テンソルをテープ上の葉ノード `Var` として登録する
     /// （`fandhe_ai_autodiff::Tape::var` への委譲）。
     pub fn var(&self, tensor: &Tensor<f32>) -> Var<'_> {

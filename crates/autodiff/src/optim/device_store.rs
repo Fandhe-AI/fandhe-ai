@@ -143,6 +143,7 @@ use crate::backward::Gradients;
 use crate::error::AutodiffError;
 use crate::eval::reduce_bias_grad_rows;
 use crate::nn::optim::{AdagradConfig, AdamConfig, AdamWConfig, LambConfig, RmsPropConfig};
+use crate::optim::resident_input::ResidentInput;
 use crate::optim::sgd::SgdConfig;
 use crate::tape::{
     NodeId, Op, ResidentBiasTarget, ResidentFillOutcome, ResidentResolver, Tape, TapeId,
@@ -1213,6 +1214,25 @@ impl ResidentResolver for DeviceParamStore {
     }
 }
 
+/// `predict_device_chain_once` が受ける入力。ホスト入力は本体が upload して所有し、
+/// 常駐入力（イシュー #3250）は利用者のバッファを借用するだけで解放しない。
+enum ChainInput<'a> {
+    Host(&'a Tensor<f32>),
+    Resident(&'a DeviceBuffer<f32>),
+}
+
+/// チェーンの入力バッファ（借用された常駐入力か、本体が所有する upload 済みバッファ）を返す。
+fn chain_input_ref<'x>(
+    borrowed: Option<&'x DeviceBuffer<f32>>,
+    owned: &'x Option<DeviceBuffer<f32>>,
+) -> Result<&'x DeviceBuffer<f32>, BackendError> {
+    borrowed.or(owned.as_ref()).ok_or_else(|| {
+        BackendError::InvalidArgument(
+            "DeviceParamStore::predict_device_chain: chain input is missing".to_string(),
+        )
+    })
+}
+
 /// [`DeviceParamStore::predict_device_chain`] の 1 layer 分のステップ
 /// （非 pub 型エイリアス。展開先はすべて既存の公開型のタプルのため、
 /// 本エイリアス自体は新規 pub 型を公開面へ追加しない
@@ -1910,7 +1930,7 @@ impl DeviceParamStore {
         // （期限切れ・自スレッドが driver 呼び出し中）従来のエラーのまま返す。
         let deadline = std::time::Instant::now() + PREDICT_CAPTURE_WAIT_TIMEOUT;
         loop {
-            match self.predict_device_chain_once(tape, input, steps) {
+            match self.predict_device_chain_once(tape, ChainInput::Host(input), steps) {
                 Err(BackendError::DeviceContextCaptureInProgress { ordinal }) => {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
@@ -1923,11 +1943,83 @@ impl DeviceParamStore {
         }
     }
 
+    /// [`Self::predict_device_chain`] の常駐入力版（イシュー #3250 P3）。入力は
+    /// [`ResidentInput`]（`upload_resident_input` が窓の外で 1 回 upload 済み）で、
+    /// 本メソッドは入力の H2D を行わず、出力の D2H 1 回だけを同期点に持つ。
+    /// チェーン本体（層ループ・scratch 再利用・失敗トークンの事後再検査・
+    /// capture 衝突の待機再試行）はホスト入力版と同一の
+    /// `predict_device_chain_once` を共有する（bit 一致を構造で保つ）。
+    ///
+    /// 追加検査（チェーンを積む前）: 別 store のハンドルは
+    /// [`BackendError::InvalidArgument`]、別デバイスは [`BackendError::DeviceMismatch`]、
+    /// rank が 2 でない場合は [`BackendError::InvalidArgument`]、第 1 層 weight の行数と
+    /// 列数が合わない場合は [`BackendError::ShapeMismatch`]。世代切れ
+    /// （CUDA の `invalidate` 後）はバックエンドの [`BackendError::StaleDeviceGeneration`]
+    /// をそのまま伝える。Graph capture 経路（`linear_chain_forward_captured`）は
+    /// ホスト入力の API のため通らない（常駐入力の capture 対応は #3258 の課題）。
+    /// ホスト経路へは落とさず、`Unsupported` はそのまま返す。
+    pub fn predict_device_chain_resident<'t>(
+        &self,
+        tape: &'t Tape,
+        input: &ResidentInput,
+        steps: &[ChainStep<'_, 't>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        if input.store_id() != self.store_id {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::predict_device_chain_resident: input belongs to a \
+                 different DeviceParamStore (store_id mismatch)"
+                    .to_string(),
+            ));
+        }
+        if input.device() != self.device {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let deadline = std::time::Instant::now() + PREDICT_CAPTURE_WAIT_TIMEOUT;
+        loop {
+            match self.predict_device_chain_once(tape, ChainInput::Resident(input.buffer()), steps)
+            {
+                Err(BackendError::DeviceContextCaptureInProgress { ordinal }) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+                    }
+                    tape.ops().wait_device_capture_idle(remaining)?;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// 入力 `x` を **1 回だけ** デバイスへ upload し、常駐入力ハンドルとして返す
+    /// （イシュー #3250 P2。計測窓の外で呼ぶ想定）。ハンドルは `self`（store）と
+    /// `tape` のデバイスに束縛され、別 store・別デバイスでの利用は型付きエラーになる。
+    /// 非 contiguous の `x` は upload の契約どおり実体化される。
+    pub fn upload_resident_input(
+        &self,
+        tape: &Tape,
+        x: &Tensor<f32>,
+    ) -> Result<ResidentInput, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        let mem = tape.ops().memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::upload_resident_input: backend does not implement MemoryOps"
+                    .to_string(),
+            )
+        })?;
+        let buf = mem.upload(x)?;
+        Ok(ResidentInput::new(buf, self.store_id, self.device))
+    }
+
     /// [`Self::predict_device_chain`] の 1 回分（待機・再試行を含まない本体）。
+    /// `input` がホスト入力ならここで upload して所有し（第 1 層の発行直後に解放）、
+    /// 常駐入力なら借用するだけで upload も解放もしない。
     fn predict_device_chain_once<'t>(
         &self,
         tape: &'t Tape,
-        input: &Tensor<f32>,
+        input: ChainInput<'_>,
         steps: &[ChainStep<'_, 't>],
     ) -> Result<Tensor<f32>, BackendError> {
         self.check_not_poisoned()?;
@@ -1981,7 +2073,10 @@ impl DeviceParamStore {
         // 区別する契約は `BackendOps::linear_chain_forward_captured` doc）。
         // 同期点は機構側が入力 1・出力 1 を守る（決定 3）。`Err` は実際の
         // driver 失敗のみで、そのまま伝播する。
-        if let Some(result) = tape.ops().linear_chain_forward_captured(input, &resolved)? {
+        // 常駐入力はホスト入力の API（capture 内で upload する）を通らない（#3250）。
+        if let ChainInput::Host(host) = &input
+            && let Some(result) = tape.ops().linear_chain_forward_captured(host, &resolved)?
+        {
             if self.failure_token.is_set() {
                 self.poisoned.store(true, Ordering::SeqCst);
                 return Err(BackendError::StorePoisoned);
@@ -1989,11 +2084,41 @@ impl DeviceParamStore {
             return Ok(result);
         }
 
+        // 常駐入力の形状検査（#3250）: rank 2、かつ列数が第 1 層 weight の行数と一致。
+        if let ChainInput::Resident(buf) = &input {
+            if buf.shape().len() != 2 {
+                return Err(BackendError::InvalidArgument(format!(
+                    "DeviceParamStore::predict_device_chain_resident: input must be rank 2, \
+                     got shape {:?}",
+                    buf.shape()
+                )));
+            }
+            if let Some((w, _, _)) = resolved.first()
+                && w.shape().first() != buf.shape().get(1)
+            {
+                return Err(BackendError::ShapeMismatch(
+                    fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                        lhs: buf.shape().to_vec(),
+                        rhs: w.shape().to_vec(),
+                    },
+                ));
+            }
+        }
+
         // 決定 3（設計文書）: 入力側の同期点は upload 1 回のみ
         // （`upload_into` は使わない。Metal の `upload_into` は
         // synchronize を挟むため「チェーン全体で同期 1 回」の契約に
-        // 反する）。
-        let mut input_buf = Some(mem.upload(input)?);
+        // 反する）。常駐入力は upload 済みなので 0 回。
+        let (mut input_buf, borrowed_input, batch_rows) = match input {
+            ChainInput::Host(host) => (
+                Some(mem.upload(host)?),
+                None,
+                host.shape().first().copied().unwrap_or(0),
+            ),
+            ChainInput::Resident(buf) => {
+                (None, Some(buf), buf.shape().first().copied().unwrap_or(0))
+            }
+        };
 
         // イシュー #3205: 層ごとの出力バッファの再利用。`try_lock` が取れない（他スレッドが
         // チェーン実行中）場合は待たずに従来の確保経路を使う。
@@ -2004,7 +2129,7 @@ impl DeviceParamStore {
             None
         };
         let key = (
-            input.shape().first().copied().unwrap_or(0),
+            batch_rows,
             resolved
                 .iter()
                 .map(|(w, _, _)| w.shape().get(1).copied().unwrap_or(0))
@@ -2026,12 +2151,7 @@ impl DeviceParamStore {
             // ない。
             let src = match outs.last() {
                 Some(o) => o,
-                None => input_buf.as_ref().ok_or_else(|| {
-                    BackendError::InvalidArgument(
-                        "DeviceParamStore::predict_device_chain: chain input is missing"
-                            .to_string(),
-                    )
-                })?,
+                None => chain_input_ref(borrowed_input, &input_buf)?,
             };
             let mut produced = None;
             // 空出力（m == 0 または n == 0）は into 経路に入れず従来の確保経路へ回す。
@@ -2111,11 +2231,7 @@ impl DeviceParamStore {
         // 層が 0 件なら入力そのものを download する（従来どおり）。
         let current = match outs.last() {
             Some(o) => o,
-            None => input_buf.as_ref().ok_or_else(|| {
-                BackendError::InvalidArgument(
-                    "DeviceParamStore::predict_device_chain: chain input is missing".to_string(),
-                )
-            })?,
+            None => chain_input_ref(borrowed_input, &input_buf)?,
         };
 
         // 決定 3: 最終出力側の同期点は download 1 回のみ。
@@ -4872,6 +4988,25 @@ mod tests {
                     ));
                 }
             }
+            let contiguous = y.contiguous();
+            let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
+                data: RefCell::new(contiguous.as_slice().unwrap_or(&[]).to_vec()),
+            });
+            Ok(DeviceBuffer::new(Device::Cpu, y.shape().to_vec(), handle))
+        }
+
+        /// イシュー #3250: `chain_capable` のモックだけがホスト行列積と同じ値を返す
+        /// （upload／download を経由しないため、呼び出しをまたいだ H2D・D2H の計数で
+        /// 「常駐入力の演算が H2D を起こさない」ことを確かめられる）。
+        fn gemm_device(
+            &self,
+            a: &DeviceBuffer<f32>,
+            b: &DeviceBuffer<f32>,
+        ) -> Result<DeviceBuffer<f32>, BackendError> {
+            if !self.chain_capable {
+                return Err(BackendError::Unsupported("mock: gemm_device".into()));
+            }
+            let y = crate::eval::matmul(&Self::read_buffer(a)?, &Self::read_buffer(b)?);
             let contiguous = y.contiguous();
             let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
                 data: RefCell::new(contiguous.as_slice().unwrap_or(&[]).to_vec()),
@@ -8621,5 +8756,147 @@ mod tests {
             assert_eq!(bits(&got[0]), bits(&want));
             assert_eq!(bits(&got[1]), bits(&want));
         }
+    }
+
+    /// イシュー #3250 P2・P3: 常駐入力のチェーンはホスト入力版と bit 一致し、呼び出しの間に
+    /// H2D を起こさず D2H は 1 回だけ。対照としてホスト入力版は H2D が 1 回（カウンタが常に 0 を
+    /// 返す壊れ方を除く）。
+    #[test]
+    fn resident_chain_matches_host_chain_without_h2d() {
+        let ops = MockDeviceOps::chain_capable();
+        let upload = ops.upload_count.clone();
+        let download = ops.download_counter();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w1 = tensor(vec![1.0, -2.0, 0.5, 1.0], &[2, 2]);
+        let b1 = tensor(vec![0.1, -0.2], &[2]);
+        let w2 = tensor(vec![2.0, 0.0, 0.0, 2.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w1, &b1, &w2]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let steps = vec![
+            (&leaves[0], Some(&leaves[1]), Activation::Relu),
+            (&leaves[2], None, Activation::None),
+        ];
+        let input = tensor(vec![1.0, -3.0, 2.0, 0.5], &[2, 2]);
+
+        // 対照: ホスト入力版は呼び出しごとに upload が 1 回。
+        let (u0, d0) = (
+            upload.load(Ordering::SeqCst),
+            download.load(Ordering::SeqCst),
+        );
+        let host = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert_eq!(upload.load(Ordering::SeqCst) - u0, 1);
+        assert_eq!(download.load(Ordering::SeqCst) - d0, 1);
+
+        // 常駐入力: upload は窓の外の 1 回だけ。
+        let handle = store.upload_resident_input(&tape, &input).unwrap();
+        assert_eq!(handle.shape(), &[2, 2]);
+        let (u1, d1) = (
+            upload.load(Ordering::SeqCst),
+            download.load(Ordering::SeqCst),
+        );
+        for _ in 0..2 {
+            let got = store
+                .predict_device_chain_resident(&tape, &handle, &steps)
+                .unwrap();
+            assert_eq!(got.shape(), host.shape());
+            for (x, y) in got.as_slice().unwrap().iter().zip(host.as_slice().unwrap()) {
+                assert_eq!(x.to_bits(), y.to_bits());
+            }
+        }
+        assert_eq!(upload.load(Ordering::SeqCst) - u1, 0, "H2D must not happen");
+        assert_eq!(download.load(Ordering::SeqCst) - d1, 2, "one D2H per call");
+        assert!(!store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// イシュー #3250 P3: 別 store・rank 不正・列数不一致・poison 済みは型付きエラー。
+    #[test]
+    fn resident_chain_rejects_foreign_store_bad_shape_and_poisoned() {
+        let tape = Tape::new_with_ops(
+            Box::new(MockDeviceOps::chain_capable()) as Box<dyn BackendOps + Send>
+        );
+        let w1 = tensor(vec![1.0, -2.0, 0.5, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w1]).unwrap();
+        let other = DeviceParamStore::new(&tape, &[&w1]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let steps = vec![(&leaves[0], None, Activation::None)];
+
+        let foreign = other
+            .upload_resident_input(&tape, &tensor(vec![1.0, 2.0], &[1, 2]))
+            .unwrap();
+        assert!(matches!(
+            store.predict_device_chain_resident(&tape, &foreign, &steps),
+            Err(BackendError::InvalidArgument(_))
+        ));
+
+        let rank1 = store
+            .upload_resident_input(&tape, &tensor(vec![1.0, 2.0], &[2]))
+            .unwrap();
+        assert!(matches!(
+            store.predict_device_chain_resident(&tape, &rank1, &steps),
+            Err(BackendError::InvalidArgument(_))
+        ));
+
+        let wrong_k = store
+            .upload_resident_input(&tape, &tensor(vec![1.0, 2.0, 3.0], &[1, 3]))
+            .unwrap();
+        assert!(matches!(
+            store.predict_device_chain_resident(&tape, &wrong_k, &steps),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        // 拒否しても store は壊れない。
+        let ok = store
+            .upload_resident_input(&tape, &tensor(vec![1.0, 2.0], &[1, 2]))
+            .unwrap();
+        assert!(
+            store
+                .predict_device_chain_resident(&tape, &ok, &steps)
+                .is_ok()
+        );
+
+        store.poisoned.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            store.predict_device_chain_resident(&tape, &ok, &steps),
+            Err(BackendError::StorePoisoned)
+        ));
+        assert!(matches!(
+            store.upload_resident_input(&tape, &tensor(vec![1.0, 2.0], &[1, 2])),
+            Err(BackendError::StorePoisoned)
+        ));
+    }
+
+    /// イシュー #3250 P4: 常駐入力の行列積は呼び出しの間に H2D を起こさず D2H は 1 回。
+    /// shape 不一致は型付きエラー（非対応バックエンドの `Unsupported` は `gemm_device` の既定実装が返す）。
+    #[test]
+    fn matmul_resident_has_no_h2d_and_rejects_bad_operands() {
+        use crate::optim::resident_input::matmul_resident;
+        let ops = MockDeviceOps::chain_capable();
+        let upload = ops.upload_count.clone();
+        let download = ops.download_counter();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let store = DeviceParamStore::new(&tape, &[&tensor(vec![1.0], &[1, 1])]).unwrap();
+        let a = tensor(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let b = tensor(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2]);
+        let ah = store.upload_resident_input(&tape, &a).unwrap();
+        let bh = store.upload_resident_input(&tape, &b).unwrap();
+        let (u, d) = (
+            upload.load(Ordering::SeqCst),
+            download.load(Ordering::SeqCst),
+        );
+        let got = matmul_resident(&tape, &ah, &bh).unwrap();
+        assert_eq!(upload.load(Ordering::SeqCst) - u, 0);
+        assert_eq!(download.load(Ordering::SeqCst) - d, 1);
+        assert_eq!(got.as_slice().unwrap(), &[4.0, 5.0, 10.0, 11.0]);
+
+        assert!(matches!(
+            matmul_resident(&tape, &ah, &ah),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        let v = store
+            .upload_resident_input(&tape, &tensor(vec![1.0], &[1]))
+            .unwrap();
+        assert!(matches!(
+            matmul_resident(&tape, &v, &bh),
+            Err(BackendError::InvalidArgument(_))
+        ));
     }
 }
