@@ -189,7 +189,9 @@ def parse_fc(root, arms, gate):
                     data[a][(task, mode)][r] = (pos_float(o.get("median_s"), f"{a} {task} {mode} median_s"), o["checksum"])
     versions = {(v, w, i, t) for (v, w, i, t) in meta}
     for t in ("train", "infer"):
-        if len({(v, w, i) for (v, w, i, tt) in versions if tt == t}) != 1:
+        vs = {(v, w, i) for (v, w, i, tt) in versions if tt == t}
+        # 全腕が負荷ゲート不成立で計測 0 件のときは比較対象が無い。判定不能（undetermined）処理へ進める。
+        if vs and len(vs) != 1:
             raise AggError(f"fc {t}: version/warmup/iters が腕間で不一致")
     torch = {}
     tavail = [r for r in RUNS if gate[("torch", r, "torch")] == "pass"]
@@ -515,6 +517,17 @@ def self_test():
             os.remove(f"{r}/fc/results-merge-{task}.jsonl")
     _, ok, v = run("macmini", all_unavail)
     assert v["merge"] == "undetermined", v
+
+    def every_arm_unavail(r):
+        # 全腕・全 round が負荷ゲート不成立（計測 0 件）でも AggError にならず undetermined になること。
+        import glob
+        p = f"{r}/load_gate.log"
+        s = open(p).read().replace("gate=pass", "gate=unavailable")
+        open(p, "w").write(s)
+        for f in glob.glob(f"{r}/ab/run*-*.log") + glob.glob(f"{r}/fc/results-*.jsonl"):
+            os.remove(f)
+    _, ok, v = run("macmini", every_arm_unavail)
+    assert v and all(x == "undetermined" for x in v.values()), v
 
     def unavail_with_log(r):
         p = f"{r}/load_gate.log"
