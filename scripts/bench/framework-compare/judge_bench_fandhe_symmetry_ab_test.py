@@ -141,6 +141,14 @@ class JudgeTest(unittest.TestCase):
         shutil.rmtree(d / 'run5')
         self.assertEqual(run_judge(d, 'macmini', rule, env, glog)[0], 2)
 
+    def test_extra_round_exit2(self):
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini')
+        shutil.copytree(d / 'run5', d / 'run6')
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 2, text)
+        self.assertIn('追加ラウンド検出', text)
+
     def test_duplicate_row_exit2(self):
         def mut(arm, run, rows):
             return rows + [rows[0]] if arm == 'new' and run == 2 else rows

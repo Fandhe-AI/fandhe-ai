@@ -17,6 +17,7 @@
 import argparse
 import hashlib
 import json
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -114,6 +115,13 @@ def index(rows):
 
 def load_runs(series_dir, arms, nruns=NRUNS):
     """run ごとに {arm: 索引} を返す。run 不足・ファイル欠損は Undetermined。"""
+    # RULE.txt「5 ラウンド固定・追加起動はしない」: run 集合が run1〜run{nruns} と完全一致しなければ判定不能。
+    sd = Path(series_dir)
+    if sd.is_dir():
+        expected = {f'run{i}' for i in range(1, nruns + 1)}
+        extra = sorted(c.name for c in sd.iterdir() if re.fullmatch(r'run\d+', c.name) and c.name not in expected)
+        if extra:
+            raise Undetermined(f'追加ラウンド検出（{",".join(extra)}。run1〜run{nruns} 固定のため判定不能）')
     runs = []
     for i in range(1, nruns + 1):
         rd = Path(series_dir) / f'run{i}'
