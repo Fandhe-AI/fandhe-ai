@@ -1,0 +1,1 @@
+base=4fb2a39c859ac4c40705aa37461f4d34b0fc5dd7 (origin/main 先端。本 PR の変更を作業ツリーに載せて実行)

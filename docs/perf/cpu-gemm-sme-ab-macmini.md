@@ -9,8 +9,7 @@
 - 負荷ゲート（load1 < 3.0）: R4 5 run・長方形 5 run・A/B 5 round のすべて通過（`macmini/load_gate.log`・`macmini/r1r2/load_gate-3176-sme-cpu-3176-r1.log`）。正式系列
 - PyTorch: torch 2.14.0・numpy 2.5.4（リポ外の venv。torch のスレッド数 4）
 - P-TREE（差分は `mod.rs` の 1 件のみ・patch sha256 一致）・P-R0（両腕 `kernel_enabled: true`）は成立（`macmini/tree_verify.txt`・`macmini/sme_report.txt`）
-- `SME_PRODUCTION_ENABLED` は main で `false` のまま（after 腕は Mac mini 上の計測専用ツリーのみ。ドリフトガード
-  `sme_production_enabled_is_false_pending_measurement` が機械的に担保）。本番切替は #3230、しきい値の確定は #3231（訂正: 本番切替は #3231。#3230 は unsafe 監査の更新と再開条件の確認で、結果は `docs/cpu-gemm-sme-unsafe-audit.md` §12）
+- `SME_PRODUCTION_ENABLED` は計測時点の main では `false`（after 腕は Mac mini 上の計測専用ツリーのみ）。#3231 で `true` へ切替済み（ドリフトガードは `sme_production_enabled_is_true_with_neon_fallback`）。本番切替は #3230、しきい値の確定は #3231（訂正: 本番切替は #3231。#3230 は unsafe 監査の更新と再開条件の確認で、結果は `docs/cpu-gemm-sme-unsafe-audit.md` §12）
 
 ## 目的
 
