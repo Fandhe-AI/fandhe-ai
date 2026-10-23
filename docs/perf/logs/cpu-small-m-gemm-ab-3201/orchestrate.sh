@@ -254,7 +254,7 @@ run_report() { # run_report <arm> <label> <cargo test args...> ; 出力を prere
     echo "### ${label}" >> "${OUT}/prereq/${arm}.log"
     (cd "${TREE}" && CARGO_TARGET_DIR="${WORK}/target-${arm}" "$@") > "${WORK}/prereq.tmp" 2>&1
     rc=$?
-    mask < "${WORK}/prereq.tmp" >> "${OUT}/prereq/${arm}.log"
+    mask < "${WORK}/prereq.tmp" | sed "s/^test [^ ]* \.\.\. //" >> "${OUT}/prereq/${arm}.log"
     echo "exit=${rc}" >> "${OUT}/prereq/${arm}.log"
     return ${rc}
 }
@@ -303,7 +303,7 @@ for arm in ${ARMS}; do
         (cd "${TREE}" && CARGO_TARGET_DIR="${WORK}/target-${arm}" EXPECT_GB10_AFFINITY_POOL_ACTIVE="${ev}" \
             cargo test -p "${PKG}" --release --test gb10_affinity_report -- --ignored --nocapture) > "${WORK}/prereq.tmp" 2>&1
         rc=$?
-        mask < "${WORK}/prereq.tmp" >> "${OUT}/prereq/${arm}.log"
+        mask < "${WORK}/prereq.tmp" | sed "s/^test [^ ]* \.\.\. //" >> "${OUT}/prereq/${arm}.log"
         echo "exit=${rc}" >> "${OUT}/prereq/${arm}.log"
         [ "${rc}" -eq 0 ] || die "affinity report 失敗（${arm}）。前提不成立"
         grep -q "^gb10_affinity_report enabled=${wa} " "${OUT}/prereq/${arm}.log" || die "affinity report の enabled が期待 ${wa} と不一致（${arm}）"
