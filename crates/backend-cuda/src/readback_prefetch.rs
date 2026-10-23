@@ -66,6 +66,10 @@ struct Slot {
 #[derive(Default)]
 struct State {
     slots: HashMap<usize, Slot>,
+    /// 世代番号。`release_all` で加算し、補充要求に載せた世代と完了時に突き合わせる。
+    /// 解放後に完了した古い補充結果を破棄し、解放直後に Ready が再登録されて
+    /// 最大 `cap_bytes` が居座るのを防ぐ（REQ-14 の明示解放経路。PR #3540 指摘）。
+    epoch: u64,
     hits: u64,
     waits: u64,
     misses: u64,
@@ -95,7 +99,7 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
 pub(crate) struct Prefetcher {
     limits: Limits,
     shared: Arc<Shared>,
-    tx: Mutex<Sender<usize>>,
+    tx: Mutex<Sender<(usize, u64)>>,
 }
 
 impl Prefetcher {
@@ -105,16 +109,21 @@ impl Prefetcher {
             state: Mutex::new(State::default()),
             cv: Condvar::new(),
         });
-        let (tx, rx) = channel::<usize>();
+        let (tx, rx) = channel::<(usize, u64)>();
         let worker_shared = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("fandhe-cuda-readback-prefetch".into())
             .spawn(move || {
                 // tx が全て drop されると recv が Err を返して終了する。
-                while let Ok(numel) = rx.recv() {
+                while let Ok((numel, epoch)) = rx.recv() {
                     let buf = alloc_pretouched(numel);
                     let mut g = lock(&worker_shared);
-                    if let Some(slot) = g.slots.get_mut(&numel) {
+                    // 世代不一致（要求後に release_all された）なら結果を破棄する（buf は drop）。
+                    let current = g.epoch == epoch;
+                    if let Some(slot) = g.slots.get_mut(&numel)
+                        && current
+                        && matches!(slot.state, SlotState::Pending)
+                    {
                         slot.state = match buf {
                             Some(v) => SlotState::Ready(v),
                             None => SlotState::Empty,
@@ -221,12 +230,13 @@ impl Prefetcher {
             return;
         }
         slot.state = SlotState::Pending;
+        let epoch = g.epoch;
         drop(g);
         let sent = self
             .tx
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .send(numel)
+            .send((numel, epoch))
             .is_ok();
         if !sent {
             // worker が不在: Pending のまま残さず Empty へ戻す。
@@ -237,15 +247,20 @@ impl Prefetcher {
     }
 
     /// Ready のバッファを破棄し、解放したバイト数を返す（REQ-14 の明示解放経路）。
+    /// Pending（補充中）も Empty へ戻し世代を進めるため、worker が解放後に完了しても Ready は残らない。
     pub(crate) fn release_all(&self) -> u64 {
         let mut g = lock(&self.shared);
+        g.epoch = g.epoch.wrapping_add(1);
         let mut freed = 0u64;
         for slot in g.slots.values_mut() {
             if let SlotState::Ready(v) = &slot.state {
                 freed += (v.len() * 4) as u64;
-                slot.state = SlotState::Empty;
             }
+            slot.state = SlotState::Empty;
         }
+        drop(g);
+        // Pending を待っていた acquire を起こす（Empty なので即 miss へ倒れる）。
+        self.shared.cv.notify_all();
         freed
     }
 
@@ -392,6 +407,31 @@ mod tests {
         assert_eq!(p.stats().3, 1024);
         assert_eq!(p.release_all(), 1024);
         assert_eq!(p.stats().3, 0);
+    }
+
+    #[test]
+    fn release_during_pending_discards_late_refill() {
+        let p = Prefetcher::new(small()).unwrap();
+        // worker を介さず、世代 0 の Pending を作る。
+        lock(&p.shared).slots.insert(
+            256,
+            Slot {
+                seen: 2,
+                state: SlotState::Pending,
+            },
+        );
+        assert_eq!(p.release_all(), 0);
+        // 解放前の世代 0 の要求が解放後に完了する状況を worker へ直接再現する。
+        p.tx.lock().unwrap().send((256, 0)).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(p.stats().3, 0, "解放後に Ready が再登録されてはならない");
+        assert!(matches!(
+            lock(&p.shared).slots[&256].state,
+            SlotState::Empty
+        ));
+        // 現世代の補充は従来どおり成立する。
+        p.note_used(256);
+        assert!(p.acquire(256).is_some());
     }
 
     #[test]
