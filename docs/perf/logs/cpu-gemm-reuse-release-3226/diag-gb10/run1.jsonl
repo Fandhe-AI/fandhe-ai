@@ -1,0 +1,17 @@
+RELEASE_DIAG_JSON {"arm":"fresh","n":256,"median_s":0.000176097,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"reuse","n":256,"median_s":0.000350353,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":256,"median_s":0.000200689,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":256,"median_s":0.000176753,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"fresh","n":512,"median_s":0.000842499,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"reuse","n":512,"median_s":0.001397237,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":512,"median_s":0.000859523,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":512,"median_s":0.000817123,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"fresh","n":1024,"median_s":0.003672828,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"reuse","n":1024,"median_s":0.004447646,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":1024,"median_s":0.003262219,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":1024,"median_s":0.003148250,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"fresh","n":2048,"median_s":0.016108420,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+RELEASE_DIAG_JSON {"arm":"reuse","n":2048,"median_s":0.018385035,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":2048,"median_s":0.016855751,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":2048,"median_s":0.016516262,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+ 10:12:24 up 56 days, 21:39, 10 users,  load average: 2.24, 0.75, 0.36

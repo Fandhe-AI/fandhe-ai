@@ -259,6 +259,8 @@ pub mod cumulative_ops;
 mod custom;
 mod default_ops;
 pub mod determinism;
+#[doc(hidden)]
+pub mod eager_release;
 mod einsum;
 pub mod einsum_batch;
 mod error;

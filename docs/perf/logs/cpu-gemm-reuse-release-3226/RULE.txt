@@ -1,0 +1,54 @@
+RULE fixed-at-utc: 2026-10-23T00:00:00Z (実機 A/B 計測より前にコミットして固定。事後に緩めない)
+issue: #3226 reuse モードの出力バッファ蓄積（#3187 で確定した原因）を、eager matmul 結果の
+        自動解放で是正する（crates/autodiff/src/eager_release.rs・既定 OFF のゲート）
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §8
+
+[対象]
+- before: 計測コミットの main 相当（EAGER_MATMUL_RELEASE_DEFAULT_ENABLED = false）
+- after : 同じコミットで crates/autodiff/src/eager_release.rs の
+          EAGER_MATMUL_RELEASE_DEFAULT_ENABLED の 1 行だけを true にした計測専用 checkout
+          （main へはコミットしない。同一コミットかつ 1 ファイル差分であることを検証する）
+
+[セル]
+- GB10（14 セル。#2117 と同じ構成）: gemm N=256／512／1024／2048 x fresh／reuse と
+  train／infer（size=64）x fresh／reuse など。
+- Mac mini（12 セル。#3178 と同じ構成）。
+- 処置セル = GB10 の gemm reuse N=256／512／1024／2048 の 4 セル。それ以外は非処置セル。
+
+[手順]
+- 5 round。プロセスは独立に起動し、round ごとに before／after の起動順を反転する。
+- run の差し替え・追加起動・セル除外はしない。同じラベルの既存 JSONL があれば停止する。
+- 5 回計測の中央値を採用する。checksum の完全一致は hard 条件
+  （compare_gemm_ab.py --require-checksum-exact）。
+
+[判定（機体ごと・セルごと）]
+- ratio = after / before（5 round の中央値）。
+- ADOPT:
+    処置セル 4 つすべてで中央値 ratio <= 0.95 かつ 5/5 round で ratio < 1.00、
+    さらに両機体のその他すべてのセルで中央値 ratio <= 1.00、checksum 全一致。
+- REJECT（いずれか 1 つでも該当）:
+    5/5 round で後退（全 round で ratio > 1.00）したセルがある／
+    処置セルの中央値 ratio > 1.00／checksum が 1 件でも不一致。
+- undetermined: 上記のどちらでもない。
+- REJECT・undetermined も正当な結果で、既定は OFF のまま。既定の反転は ADOPT 後の #3227。
+
+[副次（判定外・記録のみ）]
+- 解放後の reuse/fresh 比（GB10 gemm N=256〜2048）が 1.0 へ近づいたか。
+- Mac mini の train CPU（reuse が +0.169 ms 遅い）は測るセルであって、本機構で直ると予測する
+  セルではない（train の reuse は step ごとに Tape を作り直すため結果の蓄積が起きない。
+  Mac mini の phase 内訳は未実測）。
+- arena ON + 解放 ON の補助腕（reuse_release_arena）と、diag テスト
+  cpu_gemm_reuse_release_phases の minflt 補助 run（reuse_release の minflt/iter が 0 に
+  近づくという予測）。
+
+[負荷ゲート]
+- GB10: load1 < 1.0 を 30 秒間隔・最大 30 分待つ（#3187 と同じ）。
+- Mac mini: 既存 RULE（#3178・#3184 の再開分）の作法に従う。
+- 不通過の round を含む系列は record_only と明記する。
+
+[ドリフトガード]
+- env_info に rule_sha256 と rev_stamp_head を記録する。
+
+[対象外（再実験しない）]
+- #1299／#1481 の並列ゼロ書き込み、#1364 の P コア限定、#1575 の小形状 thread cap、
+  #2117 の affinity、#2104 の arena 単独 A/B。
