@@ -310,3 +310,14 @@
 
 - 案 1 も併せて採るか（採る場合は、`Ok(None)` と型付きエラーのどちらにするか、「対象パラメータ」の範囲をどうするか）
 - framework-compare の効果を確定するための `fandhe-ai =0.12.0` へのピン更新の承認（deps-policy によりユーザー承認が必要）
+
+## 実装記録（#3246）
+
+決定記録（#3245）案 2 を実装した。
+
+- 変更: `crates/autodiff/src/grad.rs` の `Op::LinearResident` VJP は、入力ノードの `requires_grad` が `false` のとき `transpose2d`×2 と `gemm_resident_lhs`（d_input）を実行せず、`(input, d_input)` を寄与に積まない。判定は `Op::Leaf` か否かではなく `requires_grad` を正とする（§4。view・elementwise 経由も対象）。入力ノードは `nodes.get` で範囲検査する（fail-closed）。
+- 省かないもの: `x_t` 用の入力実体化、ReLU マスク段、bias 解決、`fill_resident_weight_grad`、weight・bias のフォールバック寄与。d_weight・bias の計算は d_input と独立のため、勾配は構造上 bit 同一。
+- `Gradients::get` は従来どおり `Err(GradientTrackingDisabled)`。公開シグネチャ・依存・tolerance は不変。
+- テスト: `crates/autodiff/src/optim/device_store.rs` の `linear_resident_*`（呼び出し回数 6→3、`var` と `var_no_grad`・view 経由の bit 一致、resident／非 resident モック）、`crates/facade/tests/device_param_store_nograd_input_dinput_skip.rs`（CPU は CI、Metal・CUDA は `#[ignore]`）。
+- 未実測: Metal・CUDA の `#[ignore]` テストは実機セッションへ申し送り。Metal で第 1 層の d_weight（encode-only）の完了点が d_input の同期点を失った後にどこへ移るか（`DeviceParamStore::step` の bias `upload_into` の `synchronize`・SGD と同一 queue の順序・download 時の同期のいずれか）は、コード上の机上確認に留まり実測していない。`fill_resident_weight_grad` は既存の `*_tracked` と failure_token を使うため、登録の追加は不要の見込み。
+- スコープ外: bench-fandhe 入力の `var_no_grad` 化（#3264）、A/B 計測（#3247）、案 1、`LinearAct`・`MatMul` の d_input 省略、compat `fit` の入力登録。

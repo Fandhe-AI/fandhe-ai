@@ -1271,13 +1271,35 @@ pub(crate) fn vjp(
             // d_weight のコマンドバッファも合流させて完了させる合流点
             // になる（`crates/backend-metal/src/ops.rs::
             // gemm_resident_lhs` doc 参照）。
-            let g_t = transpose2d(g);
-            let tmp = ops
-                .gemm_resident_lhs(w_dev, &g_t)
-                .map_err(AutodiffError::Backend)?;
-            let d_input = transpose2d(&tmp);
-
-            let mut contributions = vec![(input, d_input)];
+            //
+            // イシュー #3246（決定記録 `docs/autodiff-nograd-leaf-dinput-skip-decision.md`
+            // #3245 §4・§5）: 入力ノードが `requires_grad=false`
+            // （`var_no_grad`・`detach` 由来）の場合、`backward.rs` の
+            // `requires_grad` ゲートが d_input の寄与を `accumulate` へ渡さず
+            // 捨てる。捨てられることが確定している寄与を最初から作らない
+            // （`transpose2d`×2 と `gemm_resident_lhs` を省く）。判定は
+            // `Op::Leaf` か否かではなく `requires_grad` を正とする。
+            // Metal の #1563 の合流点は d_input を計算する場合に限られる。
+            // d_weight・bias の計算は d_input と独立のため値は bit 同一。
+            let input_requires_grad = nodes
+                .get(input.0)
+                .ok_or_else(|| {
+                    AutodiffError::InvalidArgument(
+                        "grad::vjp: Op::LinearResident.input node_id is out of range for this \
+                         tape (contract violation)"
+                            .to_string(),
+                    )
+                })?
+                .requires_grad;
+            let mut contributions = Vec::with_capacity(3);
+            if input_requires_grad {
+                let g_t = transpose2d(g);
+                let tmp = ops
+                    .gemm_resident_lhs(w_dev, &g_t)
+                    .map_err(AutodiffError::Backend)?;
+                let d_input = transpose2d(&tmp);
+                contributions.push((input, d_input));
+            }
             if !outcome.weight_filled {
                 let d_weight = ops
                     .gemm_fp32_strict(&x_t, g)
