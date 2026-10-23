@@ -1,0 +1,10 @@
+dev=cpu run 1:  02:39:17 up 57 days, 14:06,  2 users,  load average: 0.97, 1.35, 0.66
+dev=cpu run 2:  02:39:18 up 57 days, 14:06,  2 users,  load average: 0.97, 1.35, 0.66
+dev=cpu run 3:  02:39:18 up 57 days, 14:06,  2 users,  load average: 0.97, 1.35, 0.66
+dev=cpu run 4:  02:39:19 up 57 days, 14:06,  2 users,  load average: 2.17, 1.59, 0.74
+dev=cpu run 5:  02:40:19 up 57 days, 14:07,  2 users,  load average: 0.86, 1.31, 0.70
+dev=cuda run 1:  02:40:27 up 57 days, 14:07,  2 users,  load average: 0.79, 1.29, 0.69
+dev=cuda run 2:  02:40:34 up 57 days, 14:07,  2 users,  load average: 0.75, 1.26, 0.69
+dev=cuda run 3:  02:41:11 up 57 days, 14:08,  2 users,  load average: 0.42, 1.12, 0.66
+dev=cuda run 4:  02:41:18 up 57 days, 14:08,  2 users,  load average: 0.51, 1.12, 0.67
+dev=cuda run 5:  02:41:25 up 57 days, 14:08,  2 users,  load average: 0.55, 1.12, 0.67
