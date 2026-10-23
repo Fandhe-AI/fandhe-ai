@@ -143,17 +143,24 @@ impl DeviceParamStore {
         // 式は Tape 経路（`grad.rs` の `Op::MseLoss` VJP）と同じ関数を共有する（二重に書かない）。
         let scale = mse_loss_scale(1.0, m * n_last, Reduction::Mean);
 
-        // この呼び出しで新規確保した velocity は、poison せず戻る失敗経路で `None` へ戻す
-        // （残すと `sgd_used == false` のまま velocity だけ在り、次回以降の momentum 構成
-        // 検査が「途中変更」と誤判定してストアが固着する）。
-        let velocity_is_new = use_momentum && self.velocity.is_none();
-        if velocity_is_new {
-            self.velocity = Some(mem.alloc_zeroed(&[self.total_numel])?);
-        }
+        // 勾配バッファを先に確保し、そのあとで velocity を確定する。この呼び出しで新規確保した
+        // velocity は、poison せず戻る失敗経路（velocity 自身・勾配バッファの確保失敗を含む）で
+        // `None` へ戻す（残すと `sgd_used == false` のまま velocity だけ在り、次回以降の
+        // momentum 構成検査が「途中変更」と誤判定してストアが固着する）。
         let mut grad = match self.train_chain_grad.take() {
             Some(g) if g.shape() == [self.total_numel] => g,
             _ => mem.alloc_zeroed(&[self.total_numel])?,
         };
+        let velocity_is_new = use_momentum && self.velocity.is_none();
+        if velocity_is_new {
+            match mem.alloc_zeroed(&[self.total_numel]) {
+                Ok(v) => self.velocity = Some(v),
+                Err(e) => {
+                    self.train_chain_grad = Some(grad);
+                    return Err(e);
+                }
+            }
+        }
 
         let encoded = self.encode_train_chain(ops, x, y, &layers, &mut grad, scale);
         self.train_chain_grad = Some(grad);

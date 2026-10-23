@@ -276,6 +276,11 @@ mod metal {
         );
         assert!(loss.is_finite());
         assert_eq!(
+            s1.encode_calls - s0.encode_calls,
+            10,
+            "A3(c): 学習ステップ全体の encode 回数は 10"
+        );
+        assert_eq!(
             s1.wait_until_completed - s0.wait_until_completed,
             0,
             "チェーン区間（encode のみ）は wait を出さない"
