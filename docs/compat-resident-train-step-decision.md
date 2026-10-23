@@ -117,7 +117,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 | P3 | `predict_resident` の常駐入力版 | `Sequential::predict_resident_input(&self, store: &DeviceParamStore, input: &ResidentTensor) -> Result<Tensor<f32>, AutodiffError>`（出力はホスト `Tensor`。D2H と同期 1 回は残る） | #3250 |
 | P4 | 行列積の常駐入力版 | `Tape::matmul_resident(&self, a: &ResidentTensor, b: &ResidentTensor) -> Result<Tensor<f32>, AutodiffError>`（rank 2・勾配なしの推論用。返り値はホスト `Tensor`） | #3250 |
 | P5 | 学習ステップ入口 | `Sequential::train_step_resident(&self, store: &mut DeviceParamStore, x: &ResidentTensor, y: &ResidentTensor, config: &SgdConfig) -> Result<ResidentLoss, AutodiffError>`（損失は MSE・mean 固定を doc に明記。将来の損失・最適化は別入口の追加で扱い本シグネチャは変えない） | #3251〜#3253（内部）・#3254（公開） |
-| P6 | loss ハンドル | `pub struct ResidentLoss(…)`（`!Send`）。`ResidentLoss::read(&self) -> Result<f32, AutodiffError>` が唯一の D2H＋同期点。読み出し後に失敗トークンを再検査し、セット済みなら store を poison して `StorePoisoned` | #3254 |
+| P6 | loss ハンドル | `pub struct ResidentLoss(…)`（`!Send`）。`ResidentLoss::read(&self, store: &mut DeviceParamStore) -> Result<f32, AutodiffError>` が唯一の D2H＋同期点。ハンドルは store を所有・借用しないため、loss バッファ・step 世代・失敗トークン・poison 状態へは引数の store 経由で到達する（`store_id` 不一致は `InvalidArgument`）。読み出し後に失敗トークンを再検査し、セット済みなら store を poison して `StorePoisoned`。store を drop した後はハンドルを渡す先がなく read できない（バッファ寿命は store が保証し、共有所有〈Arc 等〉は採らない） | #3254 |
 | P7 | ホスト転送を伴わない完了待ち | `Tape::wait_device_param_store(&self, store: &DeviceParamStore) -> Result<(), AutodiffError>`（既存 `sync_device_param_store_to_host`〈`crates/facade/src/lib.rs:676`〉の命名に揃える。D2H なしでデバイス完了を待ち、失敗トークンを検査） | #3253／#3254 |
 
 ### 付随決定
@@ -139,7 +139,8 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   | 別 Tape の登録を渡された場合 | `TapeMismatch` |
 
 - **loss バッファ**: store が持つ永続スカラー（ワークスペース）に書き、`ResidentLoss` は
-  軽量ハンドル（`store_id`＋step 世代カウンタ）とする。次の `train_step_resident` で
+  軽量ハンドル（`store_id`＋step 世代カウンタ。バッファ・失敗状態は持たず、`read` が受け取る
+  store 経由で参照する。所有権は store に一本化し共有所有は採らない）とする。次の `train_step_resident` で
   上書きされた後の古いハンドルの `read` は fail-closed（`InvalidArgument`）。理由:
   定常状態の確保ゼロが #3258 の capture 前提であるため。
 - **完了待ちの内部部品**: `BackendOps`／`MemoryOps` に D2H なしの同期メソッドは存在
