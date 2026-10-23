@@ -1321,6 +1321,34 @@ steady-state 1 step で encode／command_buffer／wait = **11／7／7**（机上
 
 未実測。判定規則は `docs/perf/logs/metal-train-forward-encodeonly-2113/RULE.txt`、手順は同 README を参照（M4 Max・GB10 とも実機セッションへ申し送り）。
 
+### 7.7 #3251: 学習ステップ全体の encode-only チェーン
+
+#### 7.7.1 対象と変更点
+
+- 対象は学習 1 step 全体（forward・MSE・backward・SGD）。入力 `x`・目標 `y` を常駐入力（#3250）として受け、#3218〜#3220 の
+  `_tracked` 部品と `sgd_step_device_tracked` だけで 1 区間に積む。実体は backend 非依存の
+  `DeviceParamStore::train_step_device_chain`（`crates/autodiff/src/optim/device_store/train_chain.rs`）。Metal 側のコード変更は無い
+  （部品は #3218〜#3220・#3224 で実装・実測済み）。公開形は `docs/compat-resident-train-step-decision.md` §4・実装記録は同 §11。
+- 同期は loss を読む `download` の 1 回だけ。比較: 従来の `Tape` 経路は 11 / 7 / 7（§7.5.4。encode / command_buffer / wait）。
+
+#### 7.7.2 カウンタの机上導出
+
+2 層 MLP（784-256-10）の 1 step: forward 2（各層 1）+ MSE forward 2（partial + finalize の 2 段）+ MSE backward 1 + dW 2 + d_input 1
+（L1 の d_input は計算しない〈#3245〉）+ ReLU マスク 1 + SGD 1 = **encode 10**。同期は loss 読み出しの 1 回（チェーン区間は 0）。
+
+#### 7.7.3 実測（Mac mini・5 run）
+
+| 項目 | 導出 | 実測 |
+|---|---|---|
+| チェーン区間の wait | 0 | 0（5 run） |
+| チェーン + loss 読み出しの wait | 1 | 1（5 run） |
+| encode | 10 | 10（5 run） |
+| command_buffers | 判定外 | 1（5 run） |
+
+- 従来の 7 回から **1 回**へ。判定規則は `docs/perf/logs/train-step-chain-metal-3251/RULE.txt`（事前登録）、記録は同 `README.md`・`macmini/`。
+- loss・更新後パラメータは Tape 経路と bit 一致（784-256-10・784-128-64-10、momentum 0／0.9 系、各 3〜4 step）。
+- 性能（0.65〜0.9 ms の目安）は本節の範囲外（未計測）。
+
 ## 8. 実装記録（#1099。§4.2・§4.4・§4.5・§3.4・§3.5 の追記）
 
 §4.2・§4.5 が特定した「9 個のバッチがいずれも dispatch 数 1（マージ
