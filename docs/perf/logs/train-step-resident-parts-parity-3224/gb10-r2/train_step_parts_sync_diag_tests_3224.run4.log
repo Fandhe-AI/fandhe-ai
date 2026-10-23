@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai-3224/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
+
+running 4 tests
+test train_step_parts_sync_diag_tests_3224::gemm_device_input_mlp_shapes_issue_no_h2d_no_sync_no_d2h ... ok
+test train_step_parts_sync_diag_tests_3224::mlp_backward_parts_tracked_chain_issues_no_sync ... ok
+test train_step_parts_sync_diag_tests_3224::mse_device_issues_no_sync_no_d2h ... ok
+test train_step_parts_sync_diag_tests_3224::relu_mask_device_issues_no_sync_no_d2h ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1363 filtered out; finished in 0.89s
+
+rc=0
