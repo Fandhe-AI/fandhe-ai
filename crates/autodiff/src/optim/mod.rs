@@ -25,6 +25,7 @@
 //! （過剰な抽象化を避ける。#193 計画 §8）。
 
 mod device_store;
+pub mod resident_input;
 mod sgd;
 
 pub use device_store::{DeviceParamStore, ResidentLeaf};

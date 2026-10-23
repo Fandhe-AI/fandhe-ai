@@ -1391,6 +1391,7 @@ impl CudaMemory {
                 data,
             )?)
         };
+        crate::gemm::diag_count_mem_upload();
         let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
         let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
             storage: Some(storage),

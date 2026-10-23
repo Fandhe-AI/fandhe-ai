@@ -281,6 +281,9 @@ pub(crate) struct GemmLaunchDiagCounters {
     pub d2h_bytes: u64,
     /// `readback_with` 内で実行された `synchronize` の成功回数（同期箇所で計上）。
     pub stream_syncs: u64,
+    /// `MemoryOps::upload`（`CudaMemory::upload_inner`）の成功回数（イシュー #3250）。
+    /// `h2d_calls`（`upload_h2d_new`＝ホスト入力 GEMM の転送）とは別経路なので別に数える。
+    pub mem_uploads: u64,
 }
 
 // 差分計算は診断テスト専用（`internal-diagnostics` 単独ビルドでは
@@ -300,6 +303,7 @@ impl GemmLaunchDiagCounters {
             d2h_calls: self.d2h_calls.saturating_sub(earlier.d2h_calls),
             d2h_bytes: self.d2h_bytes.saturating_sub(earlier.d2h_bytes),
             stream_syncs: self.stream_syncs.saturating_sub(earlier.stream_syncs),
+            mem_uploads: self.mem_uploads.saturating_sub(earlier.mem_uploads),
         }
     }
 }
@@ -319,6 +323,7 @@ thread_local! {
             d2h_calls: 0,
             d2h_bytes: 0,
             stream_syncs: 0,
+            mem_uploads: 0,
         }) };
 }
 
@@ -396,6 +401,16 @@ pub(crate) fn diag_count_readback(bytes: usize) {
 #[cfg(not(any(test, feature = "internal-diagnostics")))]
 #[inline(always)]
 pub(crate) fn diag_count_readback(_bytes: usize) {}
+
+/// `MemoryOps::upload`（`memory.rs::upload_inner`。常駐入力の H2D。イシュー #3250）の成功を数える。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+pub(crate) fn diag_count_mem_upload() {
+    gemm_launch_diag_update(|c| c.mem_uploads += 1);
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+pub(crate) fn diag_count_mem_upload() {}
 
 /// `CudaStream::synchronize` の成功を実行箇所で数える（`memory.rs::readback_with`
 /// の各同期直後から呼ぶ）。

@@ -3408,6 +3408,64 @@ impl BackendOps for MetalBackendOps {
         self.linear_forward_device_impl(a, w, bias, act, Some(token))
     }
 
+    /// [`BackendOps::gemm_device`] の Metal 実装（イシュー #3250 P4）。upload 済みの
+    /// `a`／`b` に対し、`gemm`（`dispatch_auto`）と同じ経路選択・同じ dispatch を
+    /// `MetalGemm::dispatch_auto_resident` で行う。復帰時点で GPU 実行は完了している。
+    /// `k == 0` は `gemm` と同じ全 0 を返す。**`m`／`n`／`k` が 8 の倍数でない形状は
+    /// `Unsupported`**（`gemm` はホストでパディングしてから起動するが、常駐バッファを
+    /// ホストへ戻さずにパディングできない。別カーネルで黙って計算しない）。
+    fn gemm_device(
+        &self,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        b: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if a.device() != Device::Metal || b.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let out_shape = fandhe_ai_tensor_core::gemm_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+        let mem = static_metal_memory()?;
+        if m == 0 || n == 0 || k == 0 {
+            return mem.alloc_zeroed(&out_shape);
+        }
+        let a_handle = a
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let b_handle = b
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let (Some(a_buf), Some(b_buf)) = (a_handle.buffer.as_ref(), b_handle.buffer.as_ref())
+        else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_device: operand has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let c_dev_buf = mem.alloc_zeroed(&out_shape)?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_device: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let launched = gemm
+            .dispatch_auto_resident(&ctx, a_buf, b_buf, c_buf, m, n, k)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        if !launched {
+            return Err(BackendError::Unsupported(format!(
+                "gemm_device: Metal requires m, n, k to be multiples of 8 (got {m}x{k}x{n}); \
+                 padding a resident buffer would need a host round trip"
+            )));
+        }
+        Ok(c_dev_buf)
+    }
+
     /// ReLU backward マスク選択の Metal 実装（イシュー #3218）。復帰時点で GPU
     /// 実行の完了・成否を返す同期版（ローカル cell で encode → `synchronize` →
     /// token 検査）。実体は `relu_backward_mask_device_impl`。
