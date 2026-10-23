@@ -562,8 +562,17 @@ impl DeviceParamStore {
                     let prev_out = &scratch.outs[i - 1];
                     let prev_view = DeviceBufferView::new(prev_out, 0, prev_out.shape())
                         .map_err(|e| (e, written))?;
+                    // gemm は `t` へ書く GPU 作業を積み済み。後続の view 設定・mask encode が失敗
+                    // しても完了前に drop されプールが再利用しないよう、成功直後に hold へ移す。
+                    scratch.hold.push(t);
+                    let t = scratch.hold.last().ok_or_else(|| {
+                        (
+                            invalid("hold buffer is missing (internal error)".to_string()),
+                            written,
+                        )
+                    })?;
                     let t_view =
-                        DeviceBufferView::new(&t, 0, t.shape()).map_err(|e| (e, written))?;
+                        DeviceBufferView::new(t, 0, t.shape()).map_err(|e| (e, written))?;
                     let g_prev = ops
                         .relu_backward_mask_device_tracked(
                             t_view,
@@ -572,7 +581,6 @@ impl DeviceParamStore {
                             token,
                         )
                         .map_err(|e| (e, written))?;
-                    scratch.hold.push(t);
                     Some(g_prev)
                 }
             };
@@ -630,6 +638,8 @@ mod tests {
         ForwardCaptureBusy,
         /// 最初の dW が一時的な capture 衝突を返す（書き込み前・forward 出力は生成済み）。
         FirstDwCaptureBusy,
+        /// ReLU マスク encode が失敗（d_input の `gemm_resident_lhs` 出力は生成・encode 済み）。
+        MaskUnsupported,
     }
 
     struct Rec {
@@ -806,6 +816,9 @@ mod tests {
         ) -> Result<DeviceBuffer<f32>, BackendError> {
             self.c.mask.fetch_add(1, Ordering::SeqCst);
             self.note(t);
+            if self.fault == Fault::MaskUnsupported {
+                return Err(BackendError::Unsupported("mock mask".into()));
+            }
             Ok(buf(m.shape(), 1.0))
         }
         fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -1009,6 +1022,18 @@ mod tests {
             assert_eq!(count(&c.sgd), 0);
             assert!(store.train_chain_loss.is_none());
         }
+    }
+
+    #[test]
+    fn mask_failure_keeps_d_input_buffer_held_until_gpu_work_completes() {
+        let (tape, mut store, c) = setup(Fault::MaskUnsupported);
+        let err = run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap_err();
+        assert!(matches!(err, BackendError::Unsupported(_)), "{err:?}");
+        assert_eq!(count(&c.lhs), 1);
+        assert_eq!(count(&c.mask), 1);
+        // forward 出力 3 + g_cur 1 + gemm_resident_lhs の出力 1 + loss 1。
+        // gemm の出力を mask 成功後にしか hold へ置かないと 1 本欠けて GPU 実行中に解放される。
+        assert_eq!(store.train_chain_hold.len(), 6);
     }
 
     #[test]
