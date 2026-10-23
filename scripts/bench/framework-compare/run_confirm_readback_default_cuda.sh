@@ -629,6 +629,12 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
     echo "error: 比較レポートの書き込みに失敗した（レポートなし。fail-closed）" >&2
     exit 1
   fi
+  # 集計（python）が例外で落ちた場合、write_excl が成功しても不完全なレポートが残る。
+  # 集計の異常終了は非 0 で返す（性能の採否判定ではなく実行の健全性の検査）。
+  if [[ "$cmp_rc" -ne 0 ]]; then
+    echo "error: 集計（summarize_readback_confirm.py）が異常終了した（exit=${cmp_rc}。レポートは不完全の可能性がある）" >&2
+    exit 1
+  fi
   # record_only は判定を出さない確認計測。比較値はレポートへ記録済みで、ここでは正常終了とする。
   exit 0
 else

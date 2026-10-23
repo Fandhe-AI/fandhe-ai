@@ -17,6 +17,14 @@ import sys
 
 RUNS = 5
 
+# RULE.txt の固定 14 セル（task, mode, size）。表示対象を入力キーの和集合だけにすると、
+# 両腕から丸ごと欠落したセルが表に出ないため、この集合との和集合を表示対象にする。
+EXPECTED_CELLS = (
+    [("gemm", mode, size) for mode in ("reuse", "fresh") for size in (256, 512, 1024, 2048, 4096)]
+    + [("train", mode, None) for mode in ("fresh", "reuse")]
+    + [("infer", mode, None) for mode in ("fresh", "reuse")]
+)
+
 
 def load(path):
     cells = {}
@@ -39,7 +47,7 @@ def main(before_path, after_path):
     before, bad_b = load(before_path)
     after, bad_a = load(after_path)
     order = {"gemm": 0, "train": 1, "infer": 2}
-    keys = sorted(set(before) | set(after), key=lambda k: (order.get(k[0], 9), k[1], k[2] or 0))
+    keys = sorted(set(before) | set(after) | set(EXPECTED_CELLS), key=lambda k: (order.get(k[0], 9), k[1], k[2] or 0))
     print("| task | mode | size | before median | after median | after/before | run 内比 | run 数 b/a | checksum |")
     print("|---|---|---|---|---|---|---|---|---|")
     regress = []
@@ -50,7 +58,7 @@ def main(before_path, after_path):
         am = [x for x, _ in a]
         ok = len(b) == RUNS and len(a) == RUNS and all(isinstance(x, (int, float)) for x in bm + am)
         cs = {c for _, c in b + a}
-        cs_txt = "完全一致" if len(cs) == 1 else "不一致 %r" % sorted(cs, key=str)
+        cs_txt = "データなし" if not cs else "完全一致" if len(cs) == 1 else "不一致 %r" % sorted(cs, key=str)
         if not ok:
             print("| %s | %s | %s | - | - | 欠損 | - | %d/%d | %s |" % (k[0], k[1], k[2], len(b), len(a), cs_txt))
             continue
