@@ -1,0 +1,5 @@
+GATE-PASS cell-round1 load1=0.05 gpu_util=0
+GATE-PASS cell-round2 load1=0.68 gpu_util=0
+GATE-PASS cell-round3 load1=0.95 gpu_util=0
+GATE-PASS cell-round4 load1=0.74 gpu_util=0
+GATE-PASS cell-round5 load1=0.77 gpu_util=0

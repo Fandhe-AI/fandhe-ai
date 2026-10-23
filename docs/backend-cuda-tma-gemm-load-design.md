@@ -284,3 +284,23 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 - ベンチ列: `gemm_tiled_pipeline_bench` に `tma128_none_gpu_only_tflops`・`tma128_strided_gpu_only_tflops` と、`pipeline128x64_gpu_only` との比（`tma128_*_over_pipeline128x64_gpu_only`）を追加した。
 - **目標値**（#3185 の cuBLAS fp32 **純カーネル**時間。`docs/perf/opp-kernel-gb10.md`）: N=1024: 0.137 ms・N=2048: 0.974 ms・N=4096: 7.96 ms（約 15.7／17.6／17.3 TFLOPS）。これは目標値であって測定値ではない。fandhe 側の既存列は起動＋同期を含む wall 時計で、純カーネル同士の比較ではない点に注意する（時計の違いは同 doc の注記を参照）。
 - 本番結線（const ゲート・形状分岐 N≥512 等・tensor map キャッシュ）は ADOPT 後の別 PR。`TILED_PIPELINE_128X64_PRODUCTION_ENABLED` 同型の定数を今入れていない理由: 既定ビルドで参照先がない const は `dead_code` で `-D warnings` に落ち、参照させると TMA の `unsafe` を既定ビルドへ持ち込むことになる。
+
+### 11.6 Stage 2 の GB10 A/B（イシュー #3215・2026-10-22）
+
+候補 C1 を事前登録規則（`docs/perf/logs/cuda-tma-stage2-ab-gb10-3215/RULE.txt`。計測前にコミットして固定。Stage 1 の §6 ゲートを継承）で GB10 実測した。計測基盤は `crates/backend-cuda/examples/gemm_candidate_event_ab_3215.rs`（cudaEvent で 1 launch を挟む純カーネル時間。本番コード・カーネル文字列・tolerance・依存は無変更）。集計と判定語は同ディレクトリの `aggregate.py` が収録ログから機械生成した `aggregate.md` を正とする。
+
+- **ゲート A（必須）**: 128×64 の 3 件（`..._bit_exact`・`..._with_nan_inf_inputs`・`..._k_zero_determinism_prepared_and_pretransposed`）と前提の `tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact` が全て ok。全 N・5 run で `cur`（N≥1024）・`pipe128`・`tma128_none`・`tma128_strided` の出力ハッシュ（`f32::to_bits` の FNV-1a）が一致した。実機の NVRTC コンパイルと bit 一致は、11.4 で「未確認」としていた点をここで確認した。
+- **ゲート B（必須）**: 6 バイナリ（`parity_nonregression`・`cpu_cuda_parity`・`cpu_cuda_tiled_pipeline_parity`・`gemm_transposed_parity`・`transpose_parity`・`gemm_tiled`）で FAILED 0 件。本番非結線のため機構上は再確認。
+- **ゲート C（主判定。結線範囲は N=1024・2048・4096。比 = 現行カーネルの純カーネル時間 ÷ 候補、5 run 中央値、>1 が改善）**:
+
+| 腕 | N=1024 | N=2048 | N=4096 | 判定 |
+|---|---|---|---|---|
+| `tma128_none` | 1.1452 | 1.1241 | 1.0354 | ADOPT（結線候補。ゲート D は結線 PR で実施） |
+| `tma128_strided` | 1.1750 | 1.1327 | 1.0376 | ADOPT（結線候補。ゲート D は結線 PR で実施） |
+
+  全 N で 5/5 run 一貫。結線範囲外の N=256 は 0.68／0.76（64×64 の現行に対し後退）、N=512 は 1.07／1.07。帰属は、`pipe128 ÷ cur` が N≥1024 で 1.00（0.9998〜1.0021。同一カーネルの整合検査）、`pipe128 ÷ tma128_*` が 1.04〜1.17 であることから、改善はタイルではなく**ロード命令（TMA）側**に帰属する。`Strided` は `Contiguous` よりわずかに速い（N=1024 で 1.17 対 1.14）が、差は小さい。
+- **cuBLAS 比（純カーネル event 同士）**: `tma128_strided` ÷ cuBLAS FP32 は N=1024・2048・4096 で 1.128／1.057／1.250（現行は 1.325／1.198／1.297）。達成 TFLOPS は 13.91／16.42／13.79（現行 11.84／14.49／13.29。cuBLAS FP32 は 15.69／17.36／17.24）。N=4096 は +3.5〜3.8% にとどまり、cuBLAS との差 1.25 倍が残る。
+- **ゲート D は本 issue の対象外**（定数ゲートがなく、計測専用の after 腕は tensor map キャッシュなしの毎回 encode と TMA の `unsafe` を既定ビルドへ持ち込む結線作業そのものになるため。§11.5）。結線 PR の受け入れ条件とする。
+- **結線 PR への申し送り（起票は所有者判断。本 PR では起票していない）**: 形状ゲートは N≥1024 かつ K≥1024 を基準とし、N=256 の後退（0.68〜0.76）を避ける下限が要る。N=512 は 1.07 だが結線範囲外のため、ゲート D で別途確認する。tensor map は毎回 encode しているため（計測区間の外に出していた）、キャッシュの設計が先に要る。選ぶ腕は `tma128_strided`（わずかに速い）が既定の候補で、`Contiguous` との差は 1〜3 ポイント。
+
+実測の運用記録（セル計測スクリプトの 2 回の修正・`cur` 腕の起動 API の逸脱・ツリー指紋の突合）は `docs/perf/logs/cuda-tma-stage2-ab-gb10-3215/README.md` に記録した。

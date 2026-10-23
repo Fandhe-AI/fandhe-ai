@@ -1,0 +1,44 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/examples/gemm_candidate_event_ab_3215`
+DEVICE3215 compute_capability=12.1
+BITIDENT3215 n=256 arm=cur fnv=0x9bc403c2047395ad elems=65536
+BITIDENT3215 n=256 arm=pipe128 fnv=0x9bc403c2047395ad elems=65536
+BITIDENT3215 n=256 arm=tma128_none fnv=0x9bc403c2047395ad elems=65536
+BITIDENT3215 n=256 arm=tma128_strided fnv=0x9bc403c2047395ad elems=65536
+ARM3215 n=256 arm=cur kern_event_ms=0.012976 kern_b2b_ms=0.012517 tflops=2.5859 tile=Bm64Bn64 samples=20
+ARM3215 n=256 arm=pipe128 kern_event_ms=0.021232 kern_b2b_ms=0.020686 tflops=1.5804 tile=Bm128Bn64 samples=20
+ARM3215 n=256 arm=tma128_none kern_event_ms=0.018992 kern_b2b_ms=0.018526 tflops=1.7668 tile=Bm128Bn64 samples=20
+ARM3215 n=256 arm=tma128_strided kern_event_ms=0.017056 kern_b2b_ms=0.017264 tflops=1.9673 tile=Bm128Bn64 samples=20
+BITIDENT3215 n=512 arm=cur fnv=0xc3d521c64199a3bf elems=262144
+BITIDENT3215 n=512 arm=pipe128 fnv=0xc3d521c64199a3bf elems=262144
+BITIDENT3215 n=512 arm=tma128_none fnv=0xc3d521c64199a3bf elems=262144
+BITIDENT3215 n=512 arm=tma128_strided fnv=0xc3d521c64199a3bf elems=262144
+ARM3215 n=512 arm=cur kern_event_ms=0.035584 kern_b2b_ms=0.034976 tflops=7.5437 tile=Bm64Bn64 samples=20
+ARM3215 n=512 arm=pipe128 kern_event_ms=0.037552 kern_b2b_ms=0.036934 tflops=7.1484 tile=Bm128Bn64 samples=20
+ARM3215 n=512 arm=tma128_none kern_event_ms=0.033248 kern_b2b_ms=0.031584 tflops=8.0737 tile=Bm128Bn64 samples=20
+ARM3215 n=512 arm=tma128_strided kern_event_ms=0.033376 kern_b2b_ms=0.032848 tflops=8.0428 tile=Bm128Bn64 samples=20
+BITIDENT3215 n=1024 arm=cur fnv=0xd9981381006e018b elems=1048576
+BITIDENT3215 n=1024 arm=pipe128 fnv=0xd9981381006e018b elems=1048576
+BITIDENT3215 n=1024 arm=tma128_none fnv=0xd9981381006e018b elems=1048576
+BITIDENT3215 n=1024 arm=tma128_strided fnv=0xd9981381006e018b elems=1048576
+ARM3215 n=1024 arm=cur kern_event_ms=0.179168 kern_b2b_ms=0.179779 tflops=11.9859 tile=Bm128Bn64 samples=20
+ARM3215 n=1024 arm=pipe128 kern_event_ms=0.181008 kern_b2b_ms=0.180061 tflops=11.8640 tile=Bm128Bn64 samples=20
+ARM3215 n=1024 arm=tma128_none kern_event_ms=0.158368 kern_b2b_ms=0.156712 tflops=13.5601 tile=Bm128Bn64 samples=20
+ARM3215 n=1024 arm=tma128_strided kern_event_ms=0.154128 kern_b2b_ms=0.152893 tflops=13.9331 tile=Bm128Bn64 samples=20
+BITIDENT3215 n=2048 arm=cur fnv=0xfa269d39ac1799c6 elems=4194304
+BITIDENT3215 n=2048 arm=pipe128 fnv=0xfa269d39ac1799c6 elems=4194304
+BITIDENT3215 n=2048 arm=tma128_none fnv=0xfa269d39ac1799c6 elems=4194304
+BITIDENT3215 n=2048 arm=tma128_strided fnv=0xfa269d39ac1799c6 elems=4194304
+ARM3215 n=2048 arm=cur kern_event_ms=1.179152 kern_b2b_ms=1.276926 tflops=14.5697 tile=Bm128Bn64 samples=20
+ARM3215 n=2048 arm=pipe128 kern_event_ms=1.177232 kern_b2b_ms=1.277077 tflops=14.5934 tile=Bm128Bn64 samples=20
+ARM3215 n=2048 arm=tma128_none kern_event_ms=1.050320 kern_b2b_ms=1.138037 tflops=16.3568 tile=Bm128Bn64 samples=20
+ARM3215 n=2048 arm=tma128_strided kern_event_ms=1.044048 kern_b2b_ms=1.131221 tflops=16.4551 tile=Bm128Bn64 samples=20
+BITIDENT3215 n=4096 arm=cur fnv=0x9fbd67954b75fb06 elems=16777216
+BITIDENT3215 n=4096 arm=pipe128 fnv=0x9fbd67954b75fb06 elems=16777216
+BITIDENT3215 n=4096 arm=tma128_none fnv=0x9fbd67954b75fb06 elems=16777216
+BITIDENT3215 n=4096 arm=tma128_strided fnv=0x9fbd67954b75fb06 elems=16777216
+ARM3215 n=4096 arm=cur kern_event_ms=10.316656 kern_b2b_ms=10.376511 tflops=13.3220 tile=Bm128Bn64 samples=20
+ARM3215 n=4096 arm=pipe128 kern_event_ms=10.356256 kern_b2b_ms=10.377565 tflops=13.2711 tile=Bm128Bn64 samples=20
+ARM3215 n=4096 arm=tma128_none kern_event_ms=9.975792 kern_b2b_ms=10.008067 tflops=13.7772 tile=Bm128Bn64 samples=20
+ARM3215 n=4096 arm=tma128_strided kern_event_ms=9.949072 kern_b2b_ms=9.964602 tflops=13.8142 tile=Bm128Bn64 samples=20
+done3215
