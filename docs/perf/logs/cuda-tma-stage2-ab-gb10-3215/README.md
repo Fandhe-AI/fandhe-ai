@@ -42,6 +42,13 @@ DGX Spark GB10 で事前登録規則どおりに判定した記録。実測日�
 5. **ツリーの転送**: `git archive <SHA>` のパイプ（追跡ファイルのみ）。`docs/spec`（submodule）は含まれない。
 6. 専有ゲートは全て通過（ゲート A・B・純カーネル・cuBLAS の 22 回は `load_gate.log`、セル 5 round は `cell/load_gate.log`）。環境は driver 580.173.02・CUDA 13.0・compute_cap 12.1・rustc 1.97.0・torch 2.14.0+cu130（`env_info.txt`）。ホスト名・ユーザー名・ホームは `<node>`・`<home>` に伏せた。
 
+7. **計測後に変更した収録スクリプト（2 件。判定は不変）**: 計測結果のコミット `d5188a03d` の後に、次の 2 件を変更した。
+   - `orchestrate_gb10.sh`（コミット `dbb6453c2`）: セル起動だけを `LC_ALL=C.UTF-8` にした（+3/−1）。手順 3 の失敗を再現手順で繰り返さないための修正で、
+     収録版は計測時に実行した版と一致しない。ゲート A・B・純カーネル・cuBLAS を実行した版は `git show 31cd381f0:docs/perf/logs/cuda-tma-stage2-ab-gb10-3215/orchestrate_gb10.sh`。
+   - `aggregate.py`（コミット `15e3fa779`）: ゲートの完備検査を足した（検査を厳しくする方向のみ）。収録ログから再生成した出力は `aggregate.md` と完全一致する。
+8. **再実行のラベル**: RULE.txt 項 12 は再実行を別ラベル（`-r2` 等）で行うと定めるが、セルの再実行は失敗分を `cell-attempt1-failed/`・`cell-attempt2-failed/` へ退避し
+   `cell/` を再利用した（手順 3）。失敗時の `results.jsonl` は 0 行で値の流用はない。また RULE.txt 項 14 の `tree-fingerprint.txt` は、実体が `tree-fingerprint-{node,mac}.txt` の 2 ファイル。
+
 ## 保存物
 
 `RULE.txt`・`orchestrate_gb10.sh`・`tree_fingerprint.py`・`aggregate.py`（`--self-test` 付き）・`aggregate.md`・`env_info.txt`・`load_gate.log`・`stage_rc.txt`・`build.log`・
