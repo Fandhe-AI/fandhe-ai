@@ -751,7 +751,7 @@ GB10（外側専有ゲートは記録のみ）:
 全セルで checksum 完全一致。gemm 到達 6 セルの after/before は 0.47〜0.60 倍（M4 Max は 0.57〜0.74 倍）で 5/5。
 PyTorch 比（同 run 内）は gemm で 0.49〜0.74 倍から 1.03〜1.41 倍へ。現行しきい値領域（min>=256 かつ k>=64）は R4 で全点成立。
 `SME_PRODUCTION_ENABLED` は `false` のまま。ログは `logs/sme-macmini-3176/macmini/`、結論は
-[`cpu-gemm-sme-ab-macmini.md`](cpu-gemm-sme-ab-macmini.md)。本番切替は #3230、しきい値の確定は #3231。
+[`cpu-gemm-sme-ab-macmini.md`](cpu-gemm-sme-ab-macmini.md)。本番切替は #3230、しきい値の確定は #3231。（訂正: 本番切替は #3231。#3230 は unsafe 監査の更新と再開条件の確認〈`docs/cpu-gemm-sme-unsafe-audit.md` §12〉）
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 
