@@ -661,6 +661,22 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 
 判定材料が揃っていない入力: #3201（実機 A/B）、B3 の GB10 再判定、G2・G3 の再計測、#3225・#3226・#3207 の A/B。ADOPT が出たらゲートごとの PR で反転し、その時点で `#[ignore]` 全件を main と突き合わせる。
 
+
+#### 10.8.2 #3227 の既定反転監査（第 2 回・2026-10-23）
+
+結論: **反転は 1 件**（CUDA readback `PrefetchedPretouched`・#3225）。判定語彙は出典 doc のまま転記する（契約 3）。§10.8.1 は変更しない。
+
+| 入力 | 判定（出典 doc の語彙） | 出典 | 反転 |
+|---|---|---|---|
+| #3225 CUDA readback `READBACK_DEST` | **ADOPT**（GB10・主判定 5 セル ratio 0.41〜0.59・ガード最大 1.0106・checksum 完全一致） | `cuda-gemm-reuse-phase-breakdown.md` §15.2・§15.4 | 反転（GB10 実機の突き合わせは未検証。§15.4） |
+| #3201 m 小 GEMM の分割（両機体） | **REJECT**（全腕が forward で後退。GB10 affinity 併用も train/fresh 1.065〜1.161） | `cpu-gemm-small-m-partition-ab.md` | しない。形状別に G1 を絞る案は別件（起票は所有者判断） |
+| #3226 `EAGER_MATMUL_RELEASE_DEFAULT_ENABLED` | **REJECT** | `cpu-gemm-reuse-fresh-inversion.md` §8.4 | しない |
+| #3207／#3209 `M64_THIN_TILE_ENABLED` | 純カーネルは T1〜T4 が ADOPT・ゲート写像は undetermined（split-K が先に選ばれる） | `metal-gemm-m64-thin-tile-candidates.md` §7 | しない（結線は所有者判断） |
+| #3205 B3 `INFER_GRAPH_DEFAULT_ENABLED` | undetermined（固定費は是正済み・R1(b) 残件は所有者判断） | `infer-chain-fixed-cost-reduction-3205.md` | しない |
+
+- G2・G3 は再計測に新しい事前登録が要る。
+- 監査対象外の ADOPT 系: G5 は #3265、SME は #3230／#3231、C1 TMA は #3213。
+
 ### 10.9 Phase 10・11 へのつながり（診断 → 前提にする実装 → 参照するセル）
 
 親 issue の葉は `gh api repos/Fandhe-AI/fandhe-ai/issues/<親>/sub_issues` の結果（2026-10-22 時点。すべて open）。タイトルは要約で、番号と親子関係は API の結果のとおり。
@@ -690,7 +706,7 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 | #3206 | open | Mac mini（M4・GPU 10 コア）向けの Metal タイル表 | MM-MTL-G512〜G4096 |
 | #3225 | open | CUDA の reuse の readback の遅さの是正 | G-CUDA-G512〜G2048 |
 | #3226 | open | CPU で reuse が fresh より遅い逆転の是正 | G-CPU-G256〜G2048 |
-| #3227 | open | ADOPT になった opt-in の既定を ON にする（監査済み・反転 0 件。§10.8.1） | 全 opt-in 対象セル |
+| #3227 | open | ADOPT になった opt-in の既定を ON にする（第 1 回は反転 0 件〈§10.8.1〉・第 2 回は CUDA readback 1 件を反転〈§10.8.2〉。GB10 突き合わせ未検証のため open） | 全 opt-in 対象セル |
 | #3262 | open | CUDA GEMM の既定精度の判断材料（§10.7 の値を入力にする） | G-CUDA-G2048・G4096 |
 | #3273 | open | 0.12.0 の 6 フレームワーク同席計測（本表との突き合わせ先） | 27 セルすべて |
 | #3195 | open | 要素数の小さい MSE backward を逐次で実行する（G2 縮約逐次化の関連） | MM-MTL-TRN・MM-CPU-TRN |

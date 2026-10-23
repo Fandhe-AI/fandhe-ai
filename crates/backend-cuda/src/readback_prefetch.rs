@@ -1,9 +1,9 @@
-//! readback 宛先の「背景事前タッチ済みバッファ」プール（イシュー #3225。既定 OFF）。
+//! readback 宛先の「背景事前タッチ済みバッファ」プール（イシュー #3225。#3227 で既定化）。
 //!
 //! # 位置づけ
 //! - 呼び出し元: `memory::ReadbackSentinel::readback_prefetched`（f32 のみ override）。
-//!   `ReadbackDest::PrefetchedPretouched`（env `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch`
-//!   でのみ選ばれる。`crate::readback_policy`）が選ばれたときだけ本モジュールが動く。
+//!   `ReadbackDest::PrefetchedPretouched`（#3227 で既定。env `FANDHE_AI_CUDA_READBACK_DEST=pretouched`
+//!   で無効化。`crate::readback_policy`）が選ばれたときだけ本モジュールが動く。
 //! - 動機（`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §14）: reuse モードは tape が readout の
 //!   宛先 `Vec` を保持し続けるため、毎回まだタッチしていない新規ページへ事前タッチと D2H をする。
 //!   fresh モードは宛先が毎回 free されるので glibc がタッチ済みヒープを再利用できる。
@@ -307,7 +307,7 @@ fn global_cell() -> &'static OnceLock<Option<Prefetcher>> {
     &P
 }
 
-/// プロセスワイドのプール。opt-in された最初の readback で遅延 spawn する。
+/// プロセスワイドのプール。既定（#3227）経路の最初の readback で遅延 spawn する。
 /// spawn 失敗なら `None` を保持し、以後は常に従来経路。
 pub(crate) fn global() -> Option<&'static Prefetcher> {
     global_cell()
