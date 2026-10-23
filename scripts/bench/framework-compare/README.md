@@ -2025,6 +2025,10 @@ main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の
 #3179 の `opp_kernel_torch_diag.py` は変更せず importlib で再利用し、`bench_py.py`・相手側ベンチ・判定規則も変えない。`measure`／`cpu-blas-probe`／`parse-fandhe`／`aggregate`／`--self-test` を持ち、CI では torch 不要部分の `opp_kernel_cuda_diag_test.py` だけを実行する。
 実行は `docs/perf/logs/opp-kernel-gb10-3185/run-gb10.sh`、規則は同 `RULE.txt`、結論は `docs/perf/opp-kernel-gb10.md`。
 
+## d_input 省略（#3246）の train A/B（`run_ab_dinput_skip_train.sh`・`judge_dinput_skip_ab.py`、イシュー #3247）
+
+`AB_PROFILE=macmini|gb10` で両機体の train fresh／reuse を before／after の 2 本の facade path patch で 5 round 計測する。runner ツリーへ計測専用パッチ `docs/perf/logs/dinput-skip-ab-3247/bench-var-no-grad.patch`（reuse の入力を `var_no_grad` にし、`BENCH_PARAM_DIGEST=1` で更新後パラメータの digest を出す）を当てることが前提で、precheck が行頭アンカー付き grep とパッチの逆適用チェックで確認する。macOS の bash 3.2 で動き、jq には依存しない。判定は `judge_dinput_skip_ab.py`（stdlib のみ。テストは `python3 -I judge_dinput_skip_ab_test.py`）。規則は `docs/perf/logs/dinput-skip-ab-3247/RULE.txt`。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）
