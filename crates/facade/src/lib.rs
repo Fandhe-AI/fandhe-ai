@@ -467,7 +467,12 @@ impl std::fmt::Debug for Tape {
 /// [`compat::Sequential::predict_resident_input`]（推論）と [`Tape::matmul_resident`]（行列積）が
 /// 入力の H2D なしで受け取る。中身（バッファ）は公開しない。推論では作成時の
 /// [`DeviceParamStore`] に束縛され、別 store・別デバイス・古い世代のハンドルは型付きエラーに
-/// なる。`!Send`（`Send` を足さない）。
+/// なる。`!Send`（`Send` を足さない。イシュー #3254 で次の `compile_fail` により公開形として固定）。
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<fandhe_ai::ResidentTensor>();
+/// ```
 pub struct ResidentTensor(pub(crate) fandhe_ai_autodiff::optim::resident_input::ResidentInput);
 
 impl ResidentTensor {
@@ -483,6 +488,67 @@ impl ResidentTensor {
 }
 
 impl std::fmt::Debug for ResidentTensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+/// 学習 1 step の loss（デバイス常駐スカラー）の不透明ハンドル（イシュー #3254 P6。公開形の決定は
+/// `docs/compat-resident-train-step-decision.md` §4）。
+///
+/// [`compat::Sequential::train_step_resident`] が返し、[`Self::read`] で `f32` に読み出す。
+/// **`read` が 1 step の唯一の D2H・同期点**（読まなければ同期は起きない）。所有権は
+/// [`DeviceParamStore`] に一本化している（ハンドル自体は store の loss 領域を指す鍵で、共有所有は
+/// 採らない）。次の step を積むと世代が進み、古いハンドルは [`BackendError::InvalidArgument`]
+/// になる。別 store のハンドルも `InvalidArgument`。store を drop した後は渡す先が無く読めない。
+/// `!Send`（`Send` を足さない。将来 `Send` を外す破壊的変更を避けるため marker で固定している）。
+///
+/// ```
+/// use fandhe_ai::{SgdConfig, Tensor, compat::Sequential};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let tape = fandhe_ai::tape();
+/// let model = Sequential::new().add_linear(2, 4, 1)?.add_relu().add_linear(4, 1, 2)?;
+/// let mut store = model.init_device_param_store(&tape)?;
+/// let x = tape.upload_resident(&store, &Tensor::new(vec![0.5_f32; 6], &[3, 2])?)?;
+/// let y = tape.upload_resident(&store, &Tensor::new(vec![1.0_f32; 3], &[3, 1])?)?;
+/// let loss = model.train_step_resident(&mut store, &x, &y, &SgdConfig::new(0.05))?;
+/// tape.wait_device_param_store(&store)?; // 読み出しなしの完了待ち（P7）
+/// assert!(loss.read(&mut store)?.is_finite()); // 唯一の D2H・同期点（P6）
+/// # Ok(())
+/// # }
+/// ```
+///
+/// `Send` を要求するとコンパイルが通らない（公開形の固定）。
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<fandhe_ai::ResidentLoss>();
+/// ```
+pub struct ResidentLoss(
+    pub(crate) fandhe_ai_autodiff::optim::resident_input::TrainStepLoss,
+    std::marker::PhantomData<*const ()>,
+);
+
+impl ResidentLoss {
+    /// loss を `f32` で読む（D2H と同期はここ 1 回だけ。イシュー #3254 P6）。
+    ///
+    /// 別 `store`・古い世代のハンドルは [`BackendError::InvalidArgument`]。poison 済み `store` は
+    /// [`BackendError::StorePoisoned`]。読み出し後に失敗トークンがセット済みなら `store` を
+    /// poison して `StorePoisoned`（積んだ GPU 仕事の失敗が表面化した場合）。Tape 経路へ
+    /// フォールバックした step の loss はホストで確定済みで、同期なしで返る。
+    pub fn read(&self, store: &mut DeviceParamStore) -> Result<f32, AutodiffError> {
+        // 内部 tape は作り直しても順序が保たれる: CUDA は ordinal で context／default stream を
+        // プロセス内共有（`backend-cuda::context_cache::cached_device`）、Metal はプロセス全体の
+        // バッチ（`cached_context`）に積むため、`train_step_resident` 側の tape を drop しても
+        // 積んだ仕事は失われず、download はストリーム順で SGD 書き込みの後に並ぶ。
+        let tape = tape_for(store.device())?;
+        store
+            .read_train_step_loss(&tape.0, &self.0)
+            .map_err(AutodiffError::Backend)
+    }
+}
+
+impl std::fmt::Debug for ResidentLoss {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(&self.0, f)
     }
@@ -509,6 +575,22 @@ impl Tape {
     /// `gemm` と同じ核を持つ場合。CUDA の TF32 系精度モードなど未対応なら
     /// [`BackendError::Unsupported`]。ホスト経路へは落とさない）。同じハンドルを `a` と `b`
     /// の両方に渡してもよい。
+    ///
+    /// ```
+    /// use fandhe_ai::{Tensor, compat::Sequential};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let model = Sequential::new().add_linear(2, 3, 1)?;
+    /// let store = model.init_device_param_store(&tape)?;
+    /// let a = tape.upload_resident(&store, &Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2])?)?;
+    /// let product = tape.matmul_resident(&a, &a)?; // D2H 1 回
+    /// assert_eq!(product.shape(), &[2, 2]);
+    /// // 推論は常駐入力のまま渡せる（入力の H2D なし）。
+    /// let out = model.predict_resident_input(&store, &a)?;
+    /// assert_eq!(out.shape(), &[2, 3]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn matmul_resident(
         &self,
         a: &ResidentTensor,
@@ -516,6 +598,16 @@ impl Tape {
     ) -> Result<Tensor<f32>, AutodiffError> {
         fandhe_ai_autodiff::optim::resident_input::matmul_resident(&self.0, &a.0, &b.0)
             .map_err(AutodiffError::Backend)
+    }
+
+    /// `store` のデバイスに積まれた仕事の完了を、ホスト転送（D2H）なしで待つ（イシュー #3254 P7）。
+    /// loss を読まない step の間でデバイスの進行を区切りたいときに使う（読み出しは
+    /// [`ResidentLoss::read`]）。poison 済み `store` は [`BackendError::StorePoisoned`]、別デバイスは
+    /// [`BackendError::DeviceMismatch`]。待機後に失敗トークンがセット済みなら `store` を poison して
+    /// `StorePoisoned`。バックエンドが D2H なしの待機を持たない場合は [`BackendError::Unsupported`]
+    /// （store は変わらない。ホストへは落とさない）。
+    pub fn wait_device_param_store(&self, store: &DeviceParamStore) -> Result<(), AutodiffError> {
+        store.wait_device(&self.0).map_err(AutodiffError::Backend)
     }
 
     /// 入力テンソルをテープ上の葉ノード `Var` として登録する

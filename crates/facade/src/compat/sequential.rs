@@ -108,7 +108,8 @@ use crate::inference::batch::{
 };
 use crate::{
     AutodiffError, BackendError, DeviceParamStore, EmbeddingBagMode, GlobalPoolMode, Gradients,
-    InterpolateMode, LinearVars, ResidentLeaf, ResidentTensor, Tape, Tensor, Var,
+    InterpolateMode, LinearVars, ResidentLeaf, ResidentLoss, ResidentTensor, SgdConfig, Tape,
+    Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
     Celu, Elu, Gelu, GeluTanh, Glu, Hardsigmoid, Hardswish, Hardtanh, LeakyRelu, LogSigmoid,
@@ -133,7 +134,27 @@ use fandhe_ai_autodiff::nn::{
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
-// イシュー #3251: 学習ステップのチェーン（autodiff 内部）の facade 側テスト補助。公開入口は #3254。
+/// `Sequential::train_step_resident` が学習チェーン本体として呼ぶ関数の型（イシュー #3254）。
+/// 本番は `DeviceParamStore::train_step_device_chain` 固定で、テストだけが「バックエンドが部品を
+/// 持たない（`Unsupported`）」を注入する差し替え点（公開面には出さない）。
+type ResidentChainRunner = for<'a, 't> fn(
+    &mut DeviceParamStore,
+    &'t fandhe_ai_autodiff::Tape,
+    &fandhe_ai_autodiff::optim::resident_input::ResidentInput,
+    &fandhe_ai_autodiff::optim::resident_input::ResidentInput,
+    &[(
+        &'a ResidentLeaf<'t>,
+        Option<&'a ResidentLeaf<'t>>,
+        Activation,
+    )],
+    &SgdConfig,
+) -> Result<
+    fandhe_ai_autodiff::optim::resident_input::TrainStepLoss,
+    BackendError,
+>;
+
+// イシュー #3251・#3254: 学習ステップのチェーン（autodiff 内部）と公開入口 `train_step_resident` の
+// facade 側テスト。
 #[cfg(test)]
 mod train_step_chain_tests_3251;
 
@@ -3823,6 +3844,148 @@ impl Sequential {
         store
             .predict_device_chain_resident(&tape.0, &input.0, &steps)
             .map_err(AutodiffError::Backend)
+    }
+
+    /// 学習 1 step（forward・MSE（mean）・backward・SGD）を、常駐入力 `x`・`y` から**同期なし**で
+    /// デバイスへ積み、loss ハンドルを返す（イシュー #3254 P5。公開形の決定は
+    /// `docs/compat-resident-train-step-decision.md` §4・§5）。同期は [`ResidentLoss::read`] の
+    /// 1 回だけ（読まなければ起きない）。
+    ///
+    /// - **対応範囲**: 全層が `Linear`（中間は `ReLU` 融合・最終層は活性なし）。損失は **MSE（mean）固定**・
+    ///   最適化は **SGD 固定**（momentum・nesterov・weight decay 可）。他の損失・最適化は別の入口を
+    ///   追加して扱い、本シグネチャは変えない。第 1 層の d_input は計算しない。
+    /// - **範囲外は黙って別の計算をしない**: `Sigmoid`／`Tanh`・独立 `ReLU`・空 `Sequential`・最終層
+    ///   `ReLU`・Conv 等の非対応層・空バッチ・出力幅 0・weight tying・形状不一致・別 `store`／別
+    ///   デバイスの入力・未消費の forward・poison 済み `store` は、`store` を変更する前に型付き
+    ///   エラー（`Unsupported`／`InvalidArgument`／`ShapeMismatch`／`DeviceMismatch` 等）で返す。
+    /// - **バックエンドが部品を持たない場合だけ従来経路へフォールバック**: 事前検証を通った後、
+    ///   チェーンが最初の書き込み前に `Unsupported` を返したとき（例: CUDA の TF32 系精度モード）は、
+    ///   step 全体を Tape 経路（`x`・`y` を download → `forward_resident` → `mse_loss` →
+    ///   `backward_device_param_store` → `step_device_param_store`）で実行する。この経路は D2H を伴うが、
+    ///   loss・更新後パラメータはチェーンと bit 一致する。書き込み後の失敗は poison した上でエラーを返す。
+    /// - **契約**: 同じバックエンドの Tape 経路と loss・更新後パラメータが bit 一致する（NaN はクラス一致）。
+    ///   融合・カーネル選択・同期方式は利用者に選ばせない（REQ-12）。
+    ///
+    /// 内部で `store.device()` へ結線した [`Tape`] を作る。ハンドル（[`ResidentTensor`]・
+    /// [`ResidentLoss`]）は `store` に束縛され tape には束縛されないため、tape を作り直しても
+    /// 順序は保たれる（[`ResidentLoss::read`] 参照）。
+    ///
+    /// ```
+    /// use fandhe_ai::{SgdConfig, Tensor, compat::Sequential};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tape = fandhe_ai::tape();
+    /// let model = Sequential::new().add_linear(2, 4, 1)?.add_relu().add_linear(4, 1, 2)?;
+    /// let mut store = model.init_device_param_store(&tape)?;
+    /// // 窓の外で 1 回だけ upload。
+    /// let x = tape.upload_resident(&store, &Tensor::new(vec![0.5_f32; 6], &[3, 2])?)?;
+    /// let y = tape.upload_resident(&store, &Tensor::new(vec![1.0_f32; 3], &[3, 1])?)?;
+    /// let config = SgdConfig::new(0.05);
+    /// for _ in 0..3 {
+    ///     // 窓の中: 同期なしで積む。
+    ///     let _ = model.train_step_resident(&mut store, &x, &y, &config)?;
+    /// }
+    /// let last = model.train_step_resident(&mut store, &x, &y, &config)?;
+    /// let loss = last.read(&mut store)?; // 唯一の D2H・同期
+    /// assert!(loss.is_finite());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn train_step_resident(
+        &self,
+        store: &mut DeviceParamStore,
+        x: &ResidentTensor,
+        y: &ResidentTensor,
+        config: &SgdConfig,
+    ) -> Result<ResidentLoss, AutodiffError> {
+        self.train_step_resident_with(
+            store,
+            x,
+            y,
+            config,
+            DeviceParamStore::train_step_device_chain,
+        )
+    }
+
+    /// [`Self::train_step_resident`] の本体。`run_chain` はチェーン実行部分の差し替え点（本番は
+    /// `train_step_device_chain`。テストだけが第 2 段のフォールバックを `Unsupported` 注入で検証する）。
+    fn train_step_resident_with(
+        &self,
+        store: &mut DeviceParamStore,
+        x: &ResidentTensor,
+        y: &ResidentTensor,
+        config: &SgdConfig,
+        run_chain: ResidentChainRunner,
+    ) -> Result<ResidentLoss, AutodiffError> {
+        const CTX: &str = "Sequential::train_step_resident";
+        // 第 1 段（範囲外。フォールバックしない）: モデル構成。
+        if self.contains_resident_unsupported_layer() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(format!(
+                "{CTX}: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を含む Sequential は\
+                 デバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
+            ))));
+        }
+        self.reject_untracked_parametric_layer_resident(CTX)
+            .map_err(AutodiffError::Backend)?;
+        let tape = crate::tape_for(store.device())?;
+        let leaves = store.snapshot_resident_params(&tape.0)?;
+        let Some(steps) = self.build_device_chain_steps(&leaves) else {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(format!(
+                "{CTX}: Linear（＋ReLU）以外の層を含む、または層が空の Sequential は\
+                 デバイス常駐チェーン非対応（Tape 経路へは落とさない。イシュー #3254）"
+            ))));
+        };
+        // 第 1 段（範囲外）: チェーンの事前検証（副作用なし。ここのエラーはそのまま返す）。
+        store.validate_train_step_device_chain(&tape.0, &x.0, &y.0, &steps, config)?;
+        match run_chain(store, &tape.0, &x.0, &y.0, &steps, config) {
+            Ok(loss) => Ok(ResidentLoss(loss, std::marker::PhantomData)),
+            // 第 2 段: バックエンドが部品を持たない。最初の書き込み前の `Unsupported` は store を
+            // 変えない（poison 済みなら以降の download／register が `StorePoisoned` で拒否する）。
+            Err(BackendError::Unsupported(_)) => {
+                drop(steps);
+                drop(leaves);
+                self.train_step_via_tape_path(store, &tape, x, y, config)
+            }
+            Err(e) => Err(AutodiffError::Backend(e)),
+        }
+    }
+
+    /// 第 2 段のフォールバック: step 全体を Tape 経路で実行し、loss をホストで確定して
+    /// `ResidentLoss` にする（イシュー #3254。D2H を伴う。チェーンと bit 一致する経路）。
+    fn train_step_via_tape_path(
+        &self,
+        store: &mut DeviceParamStore,
+        tape: &Tape,
+        x: &ResidentTensor,
+        y: &ResidentTensor,
+        config: &SgdConfig,
+    ) -> Result<ResidentLoss, AutodiffError> {
+        let x_host = store.download_resident_input(&tape.0, &x.0)?;
+        let y_host = store.download_resident_input(&tape.0, &y.0)?;
+        let xv = tape.var_no_grad(&x_host);
+        let yv = tape.var_no_grad(&y_host);
+        let pred = self.forward_resident(tape, &xv, store)?;
+        let result = (|| {
+            let loss = pred.mse_loss(&yv)?;
+            let loss_value = loss.to_tensor().get(&[]).ok_or_else(|| {
+                AutodiffError::Backend(BackendError::InvalidArgument(
+                    "Sequential::train_step_resident: loss is not a scalar (internal error)"
+                        .to_string(),
+                ))
+            })?;
+            let grads = tape.backward_device_param_store(&loss, store)?;
+            tape.step_device_param_store(store, &grads, config)?;
+            Ok::<f32, AutodiffError>(loss_value)
+        })();
+        let loss_value = match result {
+            Ok(v) => v,
+            Err(e) => {
+                // forward が登録した pending を残さない（次の step が拒否されないように）。
+                store.abandon_pending_forward();
+                return Err(e);
+            }
+        };
+        let handle = store.record_host_train_step_loss(&tape.0, loss_value)?;
+        Ok(ResidentLoss(handle, std::marker::PhantomData))
     }
 
     /// `self.layers` を走査し、[`DeviceParamStore::predict_device_chain`]

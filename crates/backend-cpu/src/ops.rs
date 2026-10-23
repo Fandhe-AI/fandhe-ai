@@ -646,6 +646,12 @@ impl BackendOps for CpuBackendOps {
         Some(self)
     }
 
+    /// CPU は呼び出しの中で同期実行する（待つべき仕事が無い）ため即 `Ok(())`（イシュー #3254 P7。
+    /// `BackendOps::synchronize_device` の CPU 実装）。
+    fn synchronize_device(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     /// `TypedOps<f64>` の CPU 実装（`crate::typed_f64`。イシュー #1697・
     /// 親 #1649）への capability accessor。`CpuBackendOps` 自身が
     /// `impl TypedOps<f64> for CpuBackendOps`（`typed_f64.rs`）を実装する
@@ -5199,3 +5205,15 @@ mod resident_w_prepack_tests;
 // `linear_forward_device_core` を子モジュールとして参照するため `ops` 配下に置く。
 #[path = "ops_train_chain_parts.rs"]
 mod train_chain_parts;
+
+#[cfg(test)]
+mod synchronize_device_tests_3254 {
+    use super::*;
+
+    /// CPU は同期実行のため `synchronize_device` が `Ok`（`Unsupported` の既定にならない）
+    /// であること（イシュー #3254 P7）。
+    #[test]
+    fn cpu_synchronize_device_is_ok() {
+        assert!(CpuBackendOps::new().synchronize_device().is_ok());
+    }
+}

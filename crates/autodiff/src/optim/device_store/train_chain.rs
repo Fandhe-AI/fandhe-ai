@@ -15,8 +15,10 @@
 //! `Unsupported` を返し、黙ってホスト経路へ落とさない。
 //!
 //! # 呼び出し元・境界
-//! - 呼ぶ: facade の `#[cfg(test)]` 補助（#3251）。公開入口 `Sequential::train_step_resident`・
-//!   `ResidentLoss::read` は #3254 の担当で、本 PR では公開面を増やさない
+//! - 呼ぶ: facade の公開入口 `Sequential::train_step_resident`・`ResidentLoss::read`
+//!   （#3254）。入口は先に [`DeviceParamStore::validate_train_step_device_chain`] で範囲外を
+//!   型付きエラーにし、チェーンが書き込み前に `Unsupported` を返した場合だけ Tape 経路へ全体
+//!   フォールバックする（`download_resident_input`・`record_host_train_step_loss` が内部入口）
 //! - 生の autodiff `Tape` を取るため facade の利用者からは到達できない
 //!   （`predict_device_chain_resident` と同じ前例）
 //!
@@ -289,46 +291,9 @@ impl DeviceParamStore {
         steps: &[ChainStep<'_, 't>],
         config: &SgdConfig,
     ) -> Result<TrainStepLoss, BackendError> {
-        self.check_not_poisoned()?;
-        self.check_device(tape)?;
-        if self.pending.is_some() {
-            return Err(BackendError::PendingForwardUnconsumed);
-        }
-        for (name, r) in [("x", x), ("y", y)] {
-            if r.store_id() != self.store_id {
-                return Err(invalid(format!(
-                    "{name} belongs to a different DeviceParamStore (store_id mismatch)"
-                )));
-            }
-            if r.device() != self.device {
-                return Err(BackendError::DeviceMismatch);
-            }
-        }
-        // `step()` と同じ SGD の前提条件（有限値・非負・nesterov 条件、他 optimizer 状態の拒否、
-        // momentum 構成の途中変更の拒否）を encode より前に通す。
-        config
-            .validate()
-            .map_err(|e| BackendError::InvalidArgument(e.to_string()))?;
-        if self.rmsprop_state.is_some() || self.adagrad_state.is_some() || self.lamb_state.is_some()
-        {
-            return Err(invalid(
-                "this store already has RmsProp/Adagrad/LAMB step history; reconstruct the \
-                 store to switch optimizers"
-                    .to_string(),
-            ));
-        }
+        let layers = self.precheck_train_chain(tape, x, y, steps, config)?;
         let use_momentum = config.momentum != 0.0;
-        let momentum_state_exists = self.velocity.is_some();
-        if self.sgd_used && momentum_state_exists != use_momentum {
-            return Err(invalid(format!(
-                "momentum configuration changed mid-training (previously \
-                 {momentum_state_exists}, now {use_momentum}); reconstruct the store to change \
-                 momentum settings"
-            )));
-        }
         let is_first_step = !self.sgd_used;
-
-        let layers = self.plan_train_chain(tape, x, y, steps)?;
         let ops = tape.ops();
         let mem = ops.memory_ops().ok_or_else(|| {
             BackendError::Unsupported(
@@ -450,6 +415,7 @@ impl DeviceParamStore {
         self.sgd_used = true;
         self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
         self.train_chain_loss = Some(loss);
+        self.train_chain_host_loss = None;
         // 成功した step のバッファを次 step の再利用元として保持する。再利用できず捨てた分だけを
         // hold へ残す（解放は backend 側で deferred のため同期しない）。
         self.train_chain_bufs = Some(bufs);
@@ -458,6 +424,95 @@ impl DeviceParamStore {
             self.store_id,
             self.train_chain_generation,
         ))
+    }
+
+    /// [`Self::train_step_device_chain`] の事前検証だけを行う（副作用なし。イシュー #3254）。
+    ///
+    /// facade の `Sequential::train_step_resident` が「モデル構成・損失・最適化が範囲外（型付き
+    /// エラーで止める）」と「バックエンドが部品を持たない（Tape 経路へ全体フォールバックしてよい）」を
+    /// 判別するために、チェーンを積む前に呼ぶ。ここを通った後にチェーンが返す `Unsupported` は
+    /// 後者（最初の dW の前の失敗は store を変えない。モジュール doc「失敗の境界」）に限られる。
+    /// 生の `&Tape` を取るため facade の利用者からは到達できない。
+    pub fn validate_train_step_device_chain<'t>(
+        &self,
+        tape: &'t Tape,
+        x: &ResidentInput,
+        y: &ResidentInput,
+        steps: &[ChainStep<'_, 't>],
+        config: &SgdConfig,
+    ) -> Result<(), BackendError> {
+        self.precheck_train_chain(tape, x, y, steps, config)
+            .map(|_| ())
+    }
+
+    /// 常駐入力をホストへ download する（イシュー #3254。Tape 経路フォールバック専用。D2H が入る
+    /// ため通常のチェーン経路では呼ばない）。別 store・別デバイスのハンドルは拒否する。
+    pub fn download_resident_input(
+        &self,
+        tape: &Tape,
+        input: &ResidentInput,
+    ) -> Result<fandhe_ai_tensor_core::Tensor<f32>, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        if input.store_id() != self.store_id {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::download_resident_input: input belongs to a different \
+                 DeviceParamStore (store_id mismatch)"
+                    .to_string(),
+            ));
+        }
+        if input.device() != self.device {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let mem = tape.ops().memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::download_resident_input: backend does not implement MemoryOps"
+                    .to_string(),
+            )
+        })?;
+        mem.download(input.buffer())
+    }
+
+    /// Tape 経路へフォールバックした step の loss（ホスト `f32`）を記録し、新しい世代の
+    /// ハンドルを返す（イシュー #3254）。世代を進めるため、それ以前のハンドル（チェーン・
+    /// フォールバックのどちらのものも）は `InvalidArgument` になる。読み出し
+    /// （[`Self::read_train_step_loss`]）は同期なしでこの値を返す。
+    pub fn record_host_train_step_loss(
+        &mut self,
+        tape: &Tape,
+        loss: f32,
+    ) -> Result<TrainStepLoss, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
+        self.train_chain_host_loss = Some(loss);
+        Ok(TrainStepLoss::new(
+            self.store_id,
+            self.train_chain_generation,
+        ))
+    }
+
+    /// このバックエンドへ積まれた仕事の完了を D2H なしで待つ（イシュー #3254 P7。facade の
+    /// `Tape::wait_device_param_store` の実体）。poison 済み・別デバイスは拒否し、待機後に失敗
+    /// トークンを再検査してセット済みなら poison して `StorePoisoned`（A08）。ops が同期の部品を
+    /// 持たない（`Unsupported`）場合は store の状態を変えずにそのまま返す。待機自体が失敗した
+    /// 場合は積んだ GPU 仕事の失敗が表面化したとみなして poison する。
+    pub fn wait_device(&self, tape: &Tape) -> Result<(), BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        match tape.ops().synchronize_device() {
+            Ok(()) => {}
+            Err(e @ BackendError::Unsupported(_)) => return Err(e),
+            Err(e) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+        if self.failure_token.is_set() {
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(BackendError::StorePoisoned);
+        }
+        Ok(())
     }
 
     /// [`Self::train_step_device_chain`] が積んだ step の loss を `f32` で読む。D2H と同期は
@@ -483,6 +538,11 @@ impl DeviceParamStore {
                  has replaced this loss)"
                     .to_string(),
             ));
+        }
+        // Tape 経路フォールバックの step（`record_host_train_step_loss`）はホストで確定済みの値を
+        // 同期なしで返す（poison・失敗トークンは上の `check_not_poisoned` が検査済み）。
+        if let Some(v) = self.train_chain_host_loss {
+            return Ok(v);
         }
         let buf = self.train_chain_loss.as_ref().ok_or_else(|| {
             BackendError::InvalidArgument(
@@ -516,6 +576,57 @@ impl DeviceParamStore {
                     "DeviceParamStore::read_train_step_loss: loss buffer is empty".to_string(),
                 )
             })
+    }
+
+    /// encode より前の事前検証一式（poison・デバイス・pending・入力の束縛・SGD 設定・optimizer
+    /// 状態・[`Self::plan_train_chain`]）。`self` を変更しない。[`Self::train_step_device_chain`] と
+    /// [`Self::validate_train_step_device_chain`] が共有する（検査を二重に書かない）。
+    fn precheck_train_chain<'t>(
+        &self,
+        tape: &'t Tape,
+        x: &ResidentInput,
+        y: &ResidentInput,
+        steps: &[ChainStep<'_, 't>],
+        config: &SgdConfig,
+    ) -> Result<Vec<ChainLayer>, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        if self.pending.is_some() {
+            return Err(BackendError::PendingForwardUnconsumed);
+        }
+        for (name, r) in [("x", x), ("y", y)] {
+            if r.store_id() != self.store_id {
+                return Err(invalid(format!(
+                    "{name} belongs to a different DeviceParamStore (store_id mismatch)"
+                )));
+            }
+            if r.device() != self.device {
+                return Err(BackendError::DeviceMismatch);
+            }
+        }
+        // `step()` と同じ SGD の前提条件（有限値・非負・nesterov 条件、他 optimizer 状態の拒否、
+        // momentum 構成の途中変更の拒否）を encode より前に通す。
+        config
+            .validate()
+            .map_err(|e| BackendError::InvalidArgument(e.to_string()))?;
+        if self.rmsprop_state.is_some() || self.adagrad_state.is_some() || self.lamb_state.is_some()
+        {
+            return Err(invalid(
+                "this store already has RmsProp/Adagrad/LAMB step history; reconstruct the \
+                 store to switch optimizers"
+                    .to_string(),
+            ));
+        }
+        let use_momentum = config.momentum != 0.0;
+        let momentum_state_exists = self.velocity.is_some();
+        if self.sgd_used && momentum_state_exists != use_momentum {
+            return Err(invalid(format!(
+                "momentum configuration changed mid-training (previously \
+                 {momentum_state_exists}, now {use_momentum}); reconstruct the store to change \
+                 momentum settings"
+            )));
+        }
+        self.plan_train_chain(tape, x, y, steps)
     }
 
     /// encode より前の事前検証。`self` を変更しない。
@@ -871,6 +982,8 @@ mod tests {
         sgd: AtomicUsize,
         download: AtomicUsize,
         upload: AtomicUsize,
+        /// `synchronize_device` の呼び出し回数（イシュー #3254）。
+        sync: AtomicUsize,
         /// `MemoryOps::alloc_zeroed` の呼び出し回数。
         alloc: AtomicUsize,
         /// `*_into_tracked` が成功した回数（部品の合計）。
@@ -901,6 +1014,10 @@ mod tests {
         FirstDwCaptureBusy,
         /// ReLU マスク encode が失敗（d_input の `gemm_resident_lhs` 出力は生成・encode 済み）。
         MaskUnsupported,
+        /// `synchronize_device` が `Unsupported`（既定実装と同じ。イシュー #3254）。
+        SyncUnsupported,
+        /// `synchronize_device` が実行時エラー。
+        SyncFails,
     }
 
     struct Rec {
@@ -988,6 +1105,14 @@ mod tests {
         }
         fn memory_ops(&self) -> Option<&dyn MemoryOps> {
             Some(self)
+        }
+        fn synchronize_device(&self) -> Result<(), BackendError> {
+            self.c.sync.fetch_add(1, Ordering::SeqCst);
+            match self.fault {
+                Fault::SyncUnsupported => Err(BackendError::Unsupported("mock sync".into())),
+                Fault::SyncFails => Err(BackendError::KernelLaunchFailed("mock sync".into())),
+                _ => Ok(()),
+            }
         }
         fn sgd_step_device(
             &self,
@@ -1630,5 +1755,113 @@ mod tests {
         );
         assert!(!store2.train_chain_hold.is_empty());
         let _ = c;
+    }
+
+    // ---- イシュー #3254: facade 公開入口のための内部入口 ----
+
+    /// 事前検証は store を変えない（pending・世代・step_count・params・確保・encode なし）。
+    #[test]
+    fn validate_does_not_touch_store_or_encode() {
+        let (tape, store, c) = setup(Fault::None);
+        let x = store.upload_resident_input(&tape, &t(&[M, D_IN])).unwrap();
+        let y = store.upload_resident_input(&tape, &t(&[M, D_OUT])).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let steps: Vec<ChainStep<'_, '_>> = ACTS
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (&leaves[2 * i], Some(&leaves[2 * i + 1]), *a))
+            .collect();
+        let gen_before = store.train_chain_generation;
+        store
+            .validate_train_step_device_chain(&tape, &x, &y, &steps, &cfg(0.9))
+            .unwrap();
+        assert_eq!(store.step_count, 0);
+        assert!(!store.sgd_used);
+        assert!(store.velocity.is_none());
+        assert_eq!(store.train_chain_generation, gen_before);
+        assert_eq!(count(&c.forward) + count(&c.sgd) + count(&c.dw), 0);
+        // 範囲外（最終層 ReLU）は encode 前に Unsupported。
+        let bad: Vec<ChainStep<'_, '_>> = [Activation::Relu; 3]
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (&leaves[2 * i], Some(&leaves[2 * i + 1]), *a))
+            .collect();
+        let r = store.validate_train_step_device_chain(&tape, &x, &y, &bad, &cfg(0.0));
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        assert_eq!(count(&c.forward), 0);
+    }
+
+    /// フォールバックの loss は同期なしで読め、世代が進むと古いデバイスハンドルは拒否される。
+    #[test]
+    fn host_loss_handle_reads_without_download_and_invalidates_older_handles() {
+        let (tape, mut store, c) = setup(Fault::None);
+        let dev = run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        let host = store.record_host_train_step_loss(&tape, 1.25).unwrap();
+        let before = count(&c.download);
+        assert_eq!(store.read_train_step_loss(&tape, &host).unwrap(), 1.25);
+        assert_eq!(count(&c.download), before, "host loss は download しない");
+        let r = store.read_train_step_loss(&tape, &dev);
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+    }
+
+    /// チェーンが成功すると古い host ハンドルは拒否され、新しいデバイスハンドルが読める。
+    #[test]
+    fn chain_after_host_loss_invalidates_host_handle() {
+        let (tape, mut store, _c) = setup(Fault::None);
+        let host = store.record_host_train_step_loss(&tape, 9.0).unwrap();
+        let dev = run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        let r = store.read_train_step_loss(&tape, &host);
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+        assert_eq!(store.read_train_step_loss(&tape, &dev).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn download_resident_input_checks_store_and_returns_host_copy() {
+        let (tape, store, _c) = setup(Fault::None);
+        let x = store.upload_resident_input(&tape, &t(&[M, D_IN])).unwrap();
+        let host = store.download_resident_input(&tape, &x).unwrap();
+        assert_eq!(host.shape(), &[M, D_IN]);
+        let (tape2, store2, _c2) = setup(Fault::None);
+        let other = store2
+            .upload_resident_input(&tape2, &t(&[M, D_IN]))
+            .unwrap();
+        let r = store.download_resident_input(&tape, &other);
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+    }
+
+    #[test]
+    fn wait_device_syncs_without_download_and_rejects_poisoned_store() {
+        let (tape, store, c) = setup(Fault::None);
+        let before = count(&c.download);
+        store.wait_device(&tape).unwrap();
+        assert_eq!(count(&c.sync), 1);
+        assert_eq!(count(&c.download), before, "D2H なし");
+        store.poisoned.store(true, Ordering::SeqCst);
+        let r = store.wait_device(&tape);
+        assert!(matches!(r, Err(BackendError::StorePoisoned)), "{r:?}");
+        assert_eq!(count(&c.sync), 1, "poison 済みは待たずに拒否");
+    }
+
+    #[test]
+    fn wait_device_rejects_set_failure_token_and_poisons() {
+        let (tape, store, _c) = setup(Fault::None);
+        store
+            .failure_token
+            .set(BackendError::KernelLaunchFailed("mock".into()));
+        let r = store.wait_device(&tape);
+        assert!(matches!(r, Err(BackendError::StorePoisoned)), "{r:?}");
+        assert!(store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// `Unsupported` は状態を変えない（poison しない）。実行時エラーは poison する。
+    #[test]
+    fn wait_device_unsupported_keeps_store_usable_and_runtime_error_poisons() {
+        let (tape, store, _c) = setup(Fault::SyncUnsupported);
+        let r = store.wait_device(&tape);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        assert!(!store.poisoned.load(Ordering::SeqCst));
+        let (tape, store, _c) = setup(Fault::SyncFails);
+        assert!(store.wait_device(&tape).is_err());
+        assert!(store.poisoned.load(Ordering::SeqCst));
     }
 }

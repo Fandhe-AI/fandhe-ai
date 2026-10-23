@@ -13,7 +13,7 @@ tolerance・baseline は変更しない。
 | 方式 | **案 A**（専用の学習ステップ・チェーン。facade の公開 API の追加）。案 B（Tape のデバイス値化）は不採用（§3） |
 | 変更の種類 | **追加のみ**。既存の公開シグネチャ・挙動は変えない（`fandhe-ai =0.11.0` に対する追加。§7） |
 | 初期の対応範囲 | 損失は MSE（mean）のみ、最適化は SGD のみ、層は `Linear`＋`ReLU` 系の常駐対応構成のみ（§5） |
-| 公開状態 | 未公開（本記録は公開形の確定のみ。実装は #3250・#3251〜#3253・公開は #3254） |
+| 公開状態 | 未公開（本記録は公開形の確定のみ。実装は #3250・#3251〜#3253・公開は #3254）。**追記（#3254）: P1〜P7 を facade に公開済み（§14。公開形は本記録の表のとおりで変更なし）** |
 | `unsafe`・依存 | 新規 `unsafe`・依存追加なし。`unsafe impl Send` は作らない（§4） |
 | REQ-12 | 整合する。所有者へ戻す項目なし（§6） |
 
@@ -224,6 +224,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   `docs/compat-api-scope.md` §5 の適用記録・`docs/public-api-design.md`・`docs/README.md` を更新する。
 - **#3258**: P5 の固定構造（永続ワークスペース・永続 loss スカラー）を capture 区間の前提として
   参照する。
+  **#3254 は実装済み（§14 に記録）。**
 
 ## §9 OWASP Top 10 観点
 
@@ -495,3 +496,84 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 - 公開入口・`ResidentLoss::read`・P7 の D2H なし完了待ち・Tape 経路への全体フォールバック: #3254
 - GEMM 内部のパック用ヒープ確保の削減: #3197（job 統合）の範囲
 - Mac mini・GB10 の CPU セルでの A/B 計測: 受け入れ条件外（CPU は同期がなく効果は小さい見込み）
+
+## §14 #3254 実装記録（facade への公開。P1〜P7 の仕上げ）
+
+イシュー #3254（親 #3248）。公開形は §4 の表のとおりで**署名は変えていない**（追加のみ）。
+新しい `pub use` 行・依存・`unsafe`・エラー型・variant は足していない。
+
+### 実装した名前と配置
+
+| 名前 | 配置 |
+|---|---|
+| P1〜P4（実装は #3250） | `crates/facade/src/lib.rs`（`ResidentTensor`・`Tape::upload_resident`・`Tape::matmul_resident`）・`compat/sequential.rs`（`predict_resident_input`）。本 PR で正ガード・doctest を追加 |
+| P5 `Sequential::train_step_resident` | `crates/facade/src/compat/sequential.rs`（`predict_resident_input` の直後） |
+| P6 `ResidentLoss`・`ResidentLoss::read` | `crates/facade/src/lib.rs`（`ResidentTensor` の直後。`facade` 内で定義する型） |
+| P7 `Tape::wait_device_param_store` | `crates/facade/src/lib.rs`（`impl Tape`。1 行の委譲） |
+| P7 の部品 `BackendOps::synchronize_device` | `crates/tensor-core/src/backend_ops.rs`（既定は `Unsupported`）。CPU は `Ok(())`、Metal は共有コンテキストの `synchronize`、CUDA は `with_sync_point_call` 内で default stream を `synchronize`（`unsafe` 追加なし）。ROCm は既定のまま |
+| 内部入口（autodiff。生の `&Tape` を取るため利用者から到達不可） | `crates/autodiff/src/optim/device_store/train_chain.rs`: `validate_train_step_device_chain`・`download_resident_input`・`record_host_train_step_loss`・`wait_device` |
+
+### 設計判断
+
+- **tape を内部で作る**: P5・P6 は `Tape` を引数に取らない（§4 の署名どおり）。`predict_resident_input` の
+  前例に倣い `tape_for(store.device())` を内部で作る。作り直しても順序が保たれる根拠: CUDA は
+  `CudaBackendOps::new(ordinal)` が `context_cache::cached_device(ordinal)`（プロセス内キャッシュ）経由で
+  同じ context・default stream を共有し、Metal は `MetalBackendOps` が ZST で積んだ仕事を
+  `context_cache::cached_context()` のプロセス全体のバッチに持つ。`ResidentInput`・`TrainStepLoss` は
+  `store_id`（＋世代）に束縛され tape には束縛されない（§4「ハンドルの寿命」）。
+  固定費として、Metal の `tape_for` は呼び出しごとに存在確認（#2114）の費用がかかる（同期回数とは無関係）。
+- **範囲外の 2 段の判別（§5）**: 第 1 段（モデル・損失・最適化が範囲外）は**フォールバックせず**、
+  `store` を変更する前に型付きエラーを返す。判別を 1 か所にまとめるため、チェーンの encode 前検査を
+  autodiff の private `precheck_train_chain` に切り出し、`train_step_device_chain` と
+  副作用のない `validate_train_step_device_chain` が共有する（検査を二重に書かない）。第 2 段
+  （バックエンドが部品を持たない）は、**事前検証を通った後**にチェーンが `Unsupported` を返した場合だけ
+  step 全体を Tape 経路（`x`・`y` を download → `forward_resident` → `mse_loss` →
+  `backward_device_param_store` → `step_device_param_store`）で実行する。§11 の失敗境界により、最初の dW の前の
+  `Unsupported` は store を poison せず状態を変えない。`Unsupported` 以外のエラー（書き込み後の失敗・poison・
+  capture 衝突）はフォールバックせずそのまま返す。この経路は D2H を伴う（§5 が許す）。
+- **フォールバックの loss ハンドルも 1 型**: `ResidentLoss`・`read` は 1 本のまま保つため、フォールバックの
+  loss（ホスト `f32`）は store の `train_chain_host_loss` に置き、世代を進めて新しい `TrainStepLoss` を返す。
+  `read_train_step_loss` は host loss が `Some` なら同期なしで返す（poison・失敗トークンは従来どおり検査）。
+  チェーンが成功した step の確定時に host loss を `None` へ戻す。古いハンドルは両経路の後で `InvalidArgument`。
+- **`synchronize_device`**: `BackendOps` に既定実装つき（`Unsupported`）で足す非破壊追加（#3217 記録 §3 と同型）。
+  `wait_device_capture_idle`（capture 専用）とは別物。`DeviceParamStore::wait_device` は poison・デバイス検査 →
+  待機 → 失敗トークン再検査（セット済みなら poison して `StorePoisoned`）。待機の `Unsupported` は store を変えず
+  返し、実行時エラーは poison する。
+- **`!Send`**: `ResidentLoss` は `PhantomData<*const ()>` を持つ newtype で `!Send` を固定する（`unsafe` なし。
+  内部の `TrainStepLoss` は整数だけで自動では `Send` になるため）。`assert_send` は書かず、`ResidentTensor`・
+  `ResidentLoss` の `compile_fail` doctest で固定する。
+- **`ResidentLoss::read` が `&mut DeviceParamStore` を取る**のは §4 の署名どおり（内部の読み出しは `&self`）。
+
+### 追加したガード
+
+- `crates/facade/tests/api_surface.rs`: `facade_resident_train_step_surface_matches_approved_shape`
+  （P2〜P7 のシグネチャ完全一致・置き場所〈`impl Tape`／`impl Sequential`／`impl ResidentLoss` 直下に各 1 件〉・他ファイルに同名 `fn` が無いこと、
+  `ResidentTensor`＝`{device, shape}`・`ResidentLoss`＝`{read}`・タプルフィールド非公開・属性なし・trait impl は `Debug` のみ、
+  `ResidentInput`／`TrainStepLoss`／`resident_input` の `pub use` が無いこと、利用例 doctest と `!Send` の `compile_fail` doctest の実在）、
+  `facade_resident_train_step_signatures_are_pinned_by_fn_pointer_probes`（関数ポインタ型での署名固定）、
+  自己テスト `facade_resident_train_step_surface_detects_each_category`。保留ガード（`*HoldDoctestGuard`）は
+  常駐学習ステップ用のものが存在しなかったため反転対象なし（新設もしない）。
+- doctest: `ResidentLoss`（P1・P2・P5・P6・P7 の利用例）・`Tape::matmul_resident`（P3・P4）・
+  `Sequential::train_step_resident`・`compile_fail` 2 件。
+
+### 検証
+
+- CI で実行（すべて CPU）: `cargo test -p fandhe-ai-tensor-core`（`synchronize_device` の既定は `Unsupported`）・
+  `-p fandhe-ai-backend-cpu`・`-p fandhe-ai-autodiff train_chain`（24 件。既存 17 件は変更なし）・
+  `-p fandhe-ai --lib train_step_chain`（付け替えた公開入口越しの bit 一致〈`[784,256,10]`・momentum／nesterov・3 層・端数形状・batch 1〉、
+  第 1 段の拒否で `Unsupported` 注入のチェーンが呼ばれないこと、第 2 段フォールバックが Tape 経路と bit 一致すること、
+  `Unsupported` 以外はフォールバックしないこと）・`--test resident_train_step`（公開 API だけの結合テスト）・
+  `--test api_surface`・`--doc`。
+- 実機: Metal は**開発機（M4 Max）で `#[ignore]` テストを通過確認**（公開入口の bit 一致・1 step の wait 1 回・
+  `wait_device_param_store` の wait 1 回）。**Mac mini での受け入れ記録の再取得は未実施**。
+  **GB10（CUDA）は未実測**（`#[ignore]` テストは追加済み。窓内の `stream_syncs`／`d2h_calls` の数値は未取得）。
+  性能（ms）は受け入れ条件外のため計測していない。
+
+### 範囲外・申し送り
+
+- `scripts/bench/framework-compare/bench-fandhe` の `run_train_reuse` の P7 化: crates.io の `fandhe-ai` を新しい版へ
+  上げた後（ピン更新は所有者承認）。
+- step 全体の CUDA Graph capture・常駐入力の capture 対応: #3258。
+- Metal の `_into` 版部品（確保ゼロ化）: §12 の申し送りのまま。
+- `ResidentInput` を永続バッファへ `upload_into` で更新する入口（§12 で #3254 へ申し送り）: 新しい公開形を伴い §4 の
+  P1〜P7 に無いため本 PR では足さない。**公開形の追加は決定記録 → 所有者確認の 2 段が必要**。

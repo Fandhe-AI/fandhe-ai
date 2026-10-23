@@ -3903,6 +3903,28 @@ impl BackendOps for CudaBackendOps {
         context_cache::wait_foreign_capture_idle(self.ordinal, timeout)
     }
 
+    /// default stream の完了を D2H なしで待つ（イシュー #3254 P7。`BackendOps::synchronize_device`
+    /// の CUDA 実装）。`DeviceParamStore::wait_device` から呼ばれる。
+    ///
+    /// ストリーム順序契約（`*_tracked` の部品は同じ context の default stream へ積まれる）により、
+    /// この同期が返った時点で積んだ仕事はすべて完了している。driver に触れるため
+    /// `with_sync_point_call`（poison 検査・sticky エラー観測・Graph capture 中の拒否）の内側で
+    /// 行い、`device_handle()`（driver 非接触経路専用）は使わない。`unsafe` は追加しない。
+    /// 同期は診断カウンタ `stream_syncs` に数える（D2H ではないので `d2h_calls` は増えない）。
+    fn synchronize_device(&self) -> Result<(), BackendError> {
+        self.with_sync_point_call(
+            &[],
+            "synchronize_device",
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                device.stream().synchronize()?;
+                crate::gemm::diag_count_stream_sync();
+                Ok(())
+            },
+        )
+    }
+
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
     /// 本イシュー導入前と bit-exact に不変（`crate::precision` モジュール
     /// 冒頭コメントの契約）。`crate::precision::gemm_precision()` が

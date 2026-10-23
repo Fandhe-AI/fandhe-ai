@@ -4418,6 +4418,25 @@ pub trait BackendOps {
         Ok(())
     }
 
+    /// D2H（ホスト転送）を伴わずに、このバックエンドへ積まれた仕事（`*_tracked` で encode-only に
+    /// 積んだ部品を含む）の完了を待つ（イシュー #3254 P7。決定記録
+    /// `docs/compat-resident-train-step-decision.md` §4・§11）。
+    ///
+    /// 呼び出し元は autodiff の `DeviceParamStore::wait_device`（facade の
+    /// `Tape::wait_device_param_store` の実体）。学習ループの途中（loss を読まない step）で
+    /// デバイスの進行を区切りたい利用者が、読み出しなしに同期点だけを置くための部品。
+    ///
+    /// # デフォルト実装
+    /// `Err(BackendError::Unsupported)`。「待てない」を黙って `Ok` にすると、完了を前提にした
+    /// 呼び出し側（計測窓の終端など）が誤るため fail-closed とする（非破壊拡張。#3217 記録 §3 と同型）。
+    /// ホストへの黙示フォールバックはしない。同期実行のバックエンド（CPU）は `Ok(())` で override する。
+    fn synchronize_device(&self) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "BackendOps::synchronize_device: this backend does not implement a D2H-free wait"
+                .to_string(),
+        ))
+    }
+
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
     /// いずれも [`DeviceBuffer`] 常駐のまま計算する（イシュー #1584）。
     /// `linear_forward_device` と同じ動機（`docs/inference-forward-
@@ -6571,6 +6590,17 @@ mod tests {
             ops.wait_device_capture_idle(std::time::Duration::from_millis(1))
                 .is_ok()
         );
+    }
+
+    /// [`BackendOps::synchronize_device`] の既定実装が `Unsupported`（`Ok` に黙示フォールバック
+    /// しない）を返すこと（イシュー #3254 P7）。
+    #[test]
+    fn synchronize_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        assert!(matches!(
+            ops.synchronize_device(),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     /// [`BackendOps::fft_rfft`]／[`BackendOps::fft_irfft`] の既定実装が
