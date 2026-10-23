@@ -94,6 +94,19 @@ class T(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(J.main(args + ["--record-only"]), 2)
 
+    def test_record_only_regression_is_not_reject(self):
+        args = []
+        for m in ("gb10", "macmini"):
+            b, a = make(m, other_ratio=1.01)
+            args += [f"--{m}-before", b, f"--{m}-after", a]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = J.main(args + ["--record-only"])
+        self.assertEqual(rc, 2)
+        self.assertIn("verdict: undetermined", out.getvalue())
+        self.assertNotIn("verdict: REJECT", out.getvalue())
+        self.assertIn("参考", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

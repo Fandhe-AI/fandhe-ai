@@ -15,7 +15,7 @@ ratio = after / before。セルごとの before・after は各ちょうど 5 件
 - ADOPT: 処置 4 セルの中央値 ratio <= 0.95 かつ 5/5 round で ratio < 1.00、
   両機体の非処置セルの中央値 ratio <= 1.00、checksum 全一致、両機体が揃っている。
 - REJECT: 全 round で ratio > 1.00 のセル／処置セルの中央値 ratio > 1.00／checksum 不一致。
-- それ以外は undetermined。`--record-only` 指定（負荷ゲート不通過の系列）は ADOPT を出さない。
+- それ以外は undetermined。`--record-only` 指定（負荷ゲート不通過の系列）は ADOPT も REJECT も出さず undetermined とし、後退は参考情報として残す。
 """
 import argparse
 import json
@@ -131,6 +131,10 @@ def verdict(rows, machines, record_only=False):
             reject = True
             reasons.append(f"{r['machine']} {r['cell']}: 処置セルの中央値 ratio > 1.00")
     if reject:
+        if record_only:
+            # 負荷ゲート不通過・smoke の系列は正式判定にしない（ADOPT／REJECT に数えない）。
+            # 観測された後退は参考情報として reasons に残す。
+            return "undetermined", ["参考（record_only のため REJECT に数えない）: " + x for x in reasons]
         return "REJECT", reasons
     ok = {"gb10", "macmini"} <= set(machines) and not record_only
     if not ok:
