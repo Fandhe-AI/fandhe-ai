@@ -1,0 +1,6 @@
+threshold=3.0 interval_s=30 max_wait_s=1800
+round1 cooldown=pass threshold=3.0 load1=2.59 waited_s=330 at=2026-10-23T17:45:15Z
+round2 cooldown=pass threshold=3.0 load1=2.47 waited_s=0 at=2026-10-23T17:45:16Z
+round3 cooldown=pass threshold=3.0 load1=2.47 waited_s=0 at=2026-10-23T17:45:16Z
+round4 cooldown=pass threshold=3.0 load1=2.47 waited_s=0 at=2026-10-23T17:45:17Z
+round5 cooldown=pass threshold=3.0 load1=2.47 waited_s=0 at=2026-10-23T17:45:17Z

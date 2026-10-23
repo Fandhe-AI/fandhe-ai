@@ -321,3 +321,74 @@
 - テスト: `crates/autodiff/src/optim/device_store.rs` の `linear_resident_*`（呼び出し回数 6→3、`var` と `var_no_grad`・view 経由の bit 一致、resident／非 resident モック）、`crates/facade/tests/device_param_store_nograd_input_dinput_skip.rs`（CPU は CI、Metal・CUDA は `#[ignore]`）。
 - 未実測: Metal・CUDA の `#[ignore]` テストは実機セッションへ申し送り。Metal で第 1 層の d_weight（encode-only）の完了点が d_input の同期点を失った後にどこへ移るか（`DeviceParamStore::step` の bias `upload_into` の `synchronize`・SGD と同一 queue の順序・download 時の同期のいずれか）は、コード上の机上確認に留まり実測していない。`fill_resident_weight_grad` は既存の `*_tracked` と failure_token を使うため、登録の追加は不要の見込み。
 - スコープ外: bench-fandhe 入力の `var_no_grad` 化（#3264）、A/B 計測（#3247）、案 1、`LinearAct`・`MatMul` の d_input 省略、compat `fit` の入力登録。
+
+## 実測記録（#3247）
+
+#3246（d_input GEMM の省略。PR #3559）の前後を、Mac mini（Apple M4。CPU・Metal）と DGX Spark GB10（CPU・CUDA）の train セルで A/B した記録。規則は計測前に固定した `docs/perf/logs/dinput-skip-ab-3247/RULE.txt`（`sha256` 先頭 16 桁 `b4d2915487e8e020`）で、判定は `judge_dinput_skip_ab.py` が機械的に適用した。生ログ・env_info・判定出力は `docs/perf/logs/dinput-skip-ab-3247/`（`macmini/`・`gb10/`・`judge-3247-combined.md`・`rev-stamp-verification-3247.md`）にある。
+
+### 計測条件
+
+- 日: 2026-10-23（ノード時計の UTC。実機ロックは GB10 が 17:36:06Z〜17:43:48Z、Mac mini が 17:38:36Z〜17:47:58Z。取得・解放とも各ノードの `~/work/.fandhe-hw-lock`）。
+- 腕: before = `b6579c3f5`（#3246 直前の main）、after = `4fb2a39c8`（#3246 のマージ）。runner = `a5fa15fd3`（RULE を含む main 先頭。`.rev-stamp`・RULE・パッチ・バイナリの sha256 の照合は `rev-stamp-verification-3247.md`）。両腕とも `fandhe-ai =0.11.0` を path patch（`--config` 引数のみ。`Cargo.toml`・`Cargo.lock` へはコミットしない）で別ツリーの `crates/facade` へ差し替えてビルドした。
+- 入力: `bench-var-no-grad.patch`（コミットしない計測専用パッチ）で train reuse の入力 `x` を `tape.var_no_grad` にした。fresh と mse の target は変えない。bench 入力の切り替えのコミットは #3265・#3264 の担当で本件の対象外。
+- 機体: Apple M4 の Mac mini（`cpu_brand=Apple M4`。M4 Max の開発機の値ではない）、GB10（aarch64・`NVIDIA GB10`）。5 round・プロセス独立・round ごとに before／after の起動順を反転。ラベル `3247-macmini`・`3247-gb10`（起動し直しなし）。
+- 負荷ゲート: 全 round `gate=pass`（GB10 は load1 0.42〜0.97 < 1.0・CUDA は GPU 使用率 0% を 3 サンプル連続。Mac mini は load1 2.43〜2.59 < 3.0）。`skipped-*.log` は両機体とも空。precheck は両機体 `assert` で ok。
+- **CPU セルの注意**: CPU 経路の値は #3560（SME 既定 ON）より前のカーネルでの値で、現在の main の CPU 性能ではない。各腕が自分のツリーの facade からビルドしているため。
+
+### 結果（judge の出力。手で数値を作っていない）
+
+処置セル = train reuse、ガードセル = train fresh（`Op::LinearAct` 経路。#3246 でコード不変の対照）。size=64。ratio = after 中央値 / before 中央値。
+
+| 機体 | device | mode | before 中央値 ms | after 中央値 ms | ratio | ratio_r（5 round） | 判定 |
+|---|---|---|---|---|---|---|---|
+| Mac mini | cpu | reuse | 0.6740 | 0.4980 | 0.739 | 0.764, 0.723, 0.741, 0.720, 0.745 | ADOPT |
+| Mac mini | cpu | fresh | 0.6951 | 0.6956 | 1.001 | 0.991, 0.983, 1.032, 1.001, 1.008 | guard-pass |
+| Mac mini | metal | reuse | 1.8841 | 1.5754 | 0.836 | 0.836, 0.836, 0.838, 0.839, 0.836 | ADOPT |
+| Mac mini | metal | fresh | 2.3363 | 2.3305 | 0.998 | 0.828, 0.995, 1.004, 0.997, 1.000 | guard-pass |
+| GB10 | cpu | reuse | 0.9181 | 0.7456 | 0.812 | 0.717, 0.675, 0.856, 0.898, 0.970 | ADOPT |
+| GB10 | cpu | fresh | 0.9975 | 0.8504 | 0.853 | 0.807, 0.798, 0.958, 0.777, 0.861 | guard-pass |
+| GB10 | cuda | reuse | 0.3119 | 0.2778 | 0.891 | 0.884, 0.887, 0.901, 0.891, 0.869 | ADOPT |
+| GB10 | cuda | fresh | 0.5260 | 0.5229 | 0.994 | 1.031, 1.024, 0.956, 0.997, 0.994 | guard-pass |
+
+- 終了コード 0（処置セル 4 つがすべて ADOPT）。後退したセル・guard-fail・undetermined は無い。ガードセルの fresh は Mac mini の 2 セルと GB10 CUDA が ratio 0.99〜1.00 で中立。
+- 読み方の注意（判定は変えない）: GB10 CPU の fresh は ratio 0.853 と「中立」より速く出ており、コードが変わっていない対照セルが 15% 動いた。GB10 CPU reuse も ratio_r が 0.675 → 0.970 と round で単調に上がっている。GB10 CPU は計測が負荷ゲートぎりぎり（load1 0.86〜0.97）で行われ、この 2 セルは run 間のばらつきが大きい。CPU reuse の 0.812 のうち d_input 省略に帰属できる分は fresh の動き（約 0.85）を差し引いて読む必要がある。Mac mini の CPU は fresh が 1.001 で中立のため 0.739 はそのまま効果として読める。Mac mini は計測中 `mediaanalysisd` が CPU を占有しており load1 は 2.4〜2.6（ゲート 3.0 未満）だった。
+- Mac mini Metal fresh の 1 round 目だけ ratio_r が 0.828 で、2〜5 round は 0.995〜1.004。判定（ガード）は中央値と 5/5 後退でないかで行われ pass。
+
+### hard 条件（正しさ）
+
+- loss checksum: 8 セルの全 run・両腕で `0.080541` に完全一致（train 行 80 本。judge が検査）。
+- 更新後パラメータの PARAM_DIGEST（FNV-1a 64。`n_tensors=4`・`n_elems=203530`）: 機体・device・mode ごとに before／after・全 5 run で同値（欠落なし）。値は次のとおり。
+  - CPU（Mac mini・GB10 とも reuse・fresh）: `0x7d9d7aefaeaf43d5`
+  - Metal reuse: `0xfb061246845ce46f`、Metal fresh: `0x83b6afd6a2b260dd`
+  - CUDA reuse: `0xfb061246845ce46f`、CUDA fresh: `0x7d9d7aefaeaf43d5`
+  - reuse の Metal と CUDA が同値になった点は記録のみ（判定に使っていない）。
+- 実機 `#[ignore]` テスト（`crates/facade/tests/device_param_store_nograd_input_dinput_skip.rs`。after ツリー・`--exact` でテスト名を指定）: Mac mini の `nograd_input_dinput_skip_is_bit_identical_on_metal` は pass（`ignored-metal-after-3247.log`）、GB10 の `nograd_input_dinput_skip_is_bit_identical_on_cuda` は pass（`ignored-cuda-after-3247.log`）。「実装記録（#3246）」の「未実測」のうち、この bit 一致テストの分はここで埋まった。第 1 層の d_weight の完了点の特定（§8 の Metal の合流点）は本件の対象外で未実施。
+
+### 相手比（参考。別セッションの 0.11.0 再計測の参照値で、判定外）
+
+fandhe-ai の median を最速の相手（pytorch または candle）の median で割った値。1 を超えるほど fandhe-ai が遅い。参照は `framework-compare-0.11.0-macmini-remeasure/macmini-series-b/` と `framework-compare-0.11.0-remeasure/gb10/` の median5 で、本件の計測とは別セッション・別条件のため厳密な比較ではない。
+
+| 機体 | device | 最速の相手 | reuse before | reuse after | fresh before | fresh after |
+|---|---|---|---|---|---|---|
+| Mac mini | cpu | pytorch | 3.04x | 2.25x | 3.14x | 3.14x |
+| Mac mini | metal | pytorch | 2.74x | 2.29x | 3.39x | 3.38x |
+| GB10 | cpu | pytorch | 2.57x | 2.09x | 2.79x | 2.38x |
+| GB10 | cuda | candle | 1.15x | 1.02x | 1.94x | 1.92x |
+
+GB10 CUDA の reuse は candle に対し 1.15x から 1.02x まで縮まった。ほかの 3 セルは相手より遅いまま（2.09〜2.29x）。
+
+### 推定（実測ではない。事前表明した仮説）
+
+次は RULE が計測前に表明した見込みで、合格ラインではなく、本件の計測で個別に検証していない（`--phases` の診断は判定に使わない）。
+
+- GEMM FLOP は 78.05 → 52.36 MFLOP（32.9% 減）。
+- Metal の同期は 7 → 5 回。CUDA は `gemm_resident_lhs` の同期 1 回と readback の減少。
+- CPU は dX1 の 25.7 MFLOP の GEMM が消える。fresh は中立。
+
+実測の ratio（reuse 0.74〜0.89）は FLOP 比（52.36/78.05 = 0.67）が示す上限より小さい改善にとどまる。差は GEMM 以外の固定費（起動・同期・更新・データ移送）によると推定されるが、同期回数の減少が寄与した割合を含め、本件のデータからは分離できない。
+
+### 後退・判断材料
+
+- 後退したセル、guard-fail、undetermined、hard 条件の不一致はいずれも無い。#3246 の既定（`requires_grad` が false の入力で d_input を省く）を維持する根拠が、4 セルの reuse で ratio 0.74〜0.89・5/5 round で後退なしとして実測で得られた。
+- ただし #3246 の効果が bench に出るのは入力を `var_no_grad` にした場合に限る（#3265・#3264 の担当）。framework-compare の公開向けの数値として確定するには `fandhe-ai =0.12.0` へのピン更新が要り、deps-policy によりユーザー承認が必要（§10）。
+- 維持・撤回・ゲート化の判断は所有者に委ねる。本件では revert を行っていない。GB10 CPU の 2 セルのばらつき（上の読み方の注意）は、効果を数値で引用するときの留保として残す。
