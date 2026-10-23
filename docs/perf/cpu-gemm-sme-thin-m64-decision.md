@@ -154,3 +154,14 @@ train CPU に効くのは forward と dX の GEMM 経由だけである。
 - **挿入位置**: `gemm_blis_parallel_with_transpose`（Nn／Nt）と `gemm_blis_bias_act_parallel_prepacked`（Nn。bias+ReLU は GEMM 完了後に `apply_epilogue` を 1 回）の `m == 1` 分岐の直後。GB10 affinity／`run_capped` の外にあり、現在の rayon プールで動く。スレッド方針は #3236 で扱う（GB10 は `try_new` が `None` でここへ入らない）。
 - **適格条件**: `m == 64`・`n >= 16 && n % 16 == 0`・`k >= 1`・Nn／Nt。k の下限は #3236 の格子で決める。
 - **ゲート**: `SME_THIN_M64_ENABLED = false`（既定 OFF）。監査は `docs/cpu-gemm-sme-unsafe-audit.md` §13。性能は本 issue では測っていない。
+
+## 11. #3236 の A/B（2026-10-24 追記。状態: 未実測）
+
+§1〜§10 は変えない。#3236 の計測基盤と事前登録規則を置いた段階の記録で、**実機での計測値・判定はまだ無い**。
+
+- **事前登録規則**: `docs/perf/logs/sme-thin-m64-ab-3236/RULE.txt`。腕は before = main（`SME_THIN_M64_ENABLED = false`）・after = `on-arm.patch`（同宣言 1 行を true）。ADOPT／ADOPT-k／REJECT／FAIL／undetermined を機械判定する。
+- **計測**: GEMM 単体 7 形状（到達 3・非到達 4）、framework-compare の train／infer size=64（fresh／reuse）、k 下限用の K 格子（`cpu_sme_thin_m64_kgrid`、k = 10〜784）。Mac mini のみ。GB10 は SME 非搭載で経路が変わらないため測らない。
+- **到達の静的確認**: infer は `ops.rs:464`・`:575` から thin 分岐、train は L1 fwd と L2 dX（`ops.rs:260/272/294`）。train の L1 dX が #3559 以降で実行されるかは未確認で、到達根拠に数えない。
+- **bit 同一の根拠**: framework-compare の checksum（6 桁丸め）は bit 同一の証明にならない。根拠は P-BIT（Mac mini 実機での `sme_thin_m64` テスト）とする。
+- **既定の扱い**: 現時点では OFF のまま。反転 PR は ADOPT／ADOPT-k に加え、(i) `docs/cpu-gemm-sme-unsafe-audit.md` §13 の独立した security-auditor 監査（現状は実装担当の自己点検のみ）と (ii) 所有者の確認が前提。
+- **相手比**: 実測後に記録する（PyTorch 同 round の値のみ「実測」。issue の到達目安は「推定」で合格ラインに使わない）。
