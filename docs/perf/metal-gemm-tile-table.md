@@ -201,3 +201,9 @@ N=256 は現行選択が帯内のため表に入れない。
   split-K parity baseline の全行は m,n ≤ 128 で、新エントリとは交差しない。単体テストで固定している。
 - 既存の診断テスト（#3181 の `verified_m4_max_gpu_core_count` 利用）は Mini で `verified=None` と表示するが、本番は Mini 表を使う。この表示上のずれは仕様。
 - tolerance・split-K baseline・`should_split_k` パラメータ・シェーダは変更しない。
+
+### 7.5 正式系列の結果（AC4）
+
+5 プロセス・負荷ゲート・candle 同系列の正式系列（`docs/perf/metal-gemm-tile-select-macmini.md` §9）で、追加後は追加前（`[3]` 強制）に対し
+kernel_gpu が N=512／1024／2048／4096 で 0.949／0.935／0.810／0.818 倍（全 N で「改善」、退行なし）。candle 主比（後）は N=2048／4096 で 0.735／0.761。
+bit 一致と選択確認は 5 run 全一致。f16 と系列 B（reuse 比）は対象外のまま。

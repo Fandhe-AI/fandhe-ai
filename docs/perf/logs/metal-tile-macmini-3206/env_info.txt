@@ -1,0 +1,10 @@
+2026-10-23T09:24:27Z
+ProductName:		macOS
+ProductVersion:		27.0.1
+BuildVersion:		26A434
+Apple M4
+hw.perflevel0.logicalcpu: 4
+hw.perflevel1.logicalcpu: 6
+hw.memsize: 17179869184
+rustc 1.99.0 (b940084d7 2026-09-28)
+18:24  up 12 days, 17:58, 1 user, load averages: 4.07 1.78 1.38

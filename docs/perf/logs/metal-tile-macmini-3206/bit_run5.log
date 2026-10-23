@@ -1,0 +1,13 @@
+
+running 1 test
+test gemm_tile_macmini_table_diag_tests::m4_base_table_bit_match_and_parity ... DEVICE gpu_cores=10 soc="Apple M4" token=M4Base
+MINI_TABLE_ACTIVE
+BITMATCH N=256 bit_identical=true hash_after=f3462a72d52ccfa3 hash_before=f3462a72d52ccfa3 parity_ok=true
+BITMATCH N=512 bit_identical=true hash_after=6b7f6342a69cd196 hash_before=6b7f6342a69cd196 parity_ok=true
+BITMATCH N=1024 bit_identical=true hash_after=bb75f07cd04331c4 hash_before=bb75f07cd04331c4 parity_ok=true
+BITMATCH N=2048 bit_identical=true hash_after=04493e80c04b9a76 hash_before=04493e80c04b9a76 parity_ok=true
+BITMATCH N=4096 bit_identical=true hash_after=a4718e671cfb6e1b hash_before=a4718e671cfb6e1b parity_ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 854 filtered out; finished in 5.71s
+

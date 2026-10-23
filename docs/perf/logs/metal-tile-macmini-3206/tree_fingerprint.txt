@@ -1,0 +1,6 @@
+計測前コミット: 315fe263dc46aab56bb86cf49bec077d15e0a738（PR #3525 のマージコミット 0ae3f00ff の子孫。merge-base --is-ancestor 成立）
+対象: crates・scripts/bench/framework-compare の全ファイル（target・Cargo.lock を除く）を LC_ALL=C 順に並べた sha256 一覧
+手元の git archive 展開ツリーと Mac mini の rsync 展開ツリーの一覧: 一致（cmp 差分なし）
+ファイル数: 2452
+一覧全体の sha256: 95ca292c660db804ff3aebc23c136713bbf859cbfe8983ccd4dd97395321e089
+実行バイナリ（run 専用ディレクトリへコピーして直接実行）の sha256 は binaries.sha256

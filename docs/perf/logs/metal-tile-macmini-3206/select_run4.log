@@ -1,0 +1,13 @@
+
+running 1 test
+test gemm_tile_macmini_table_diag_tests::m4_base_table_selected_on_macmini ... DEVICE gpu_cores=10 soc="Apple M4" token=M4Base
+MINI_TABLE_ACTIVE
+SELECT N=256 idx=3 fallback=false ok=true
+SELECT N=512 idx=1 fallback=false ok=true
+SELECT N=1024 idx=1 fallback=false ok=true
+SELECT N=2048 idx=2 fallback=false ok=true
+SELECT N=4096 idx=2 fallback=false ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 854 filtered out; finished in 0.21s
+

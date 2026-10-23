@@ -1,0 +1,18 @@
+
+running 1 test
+test gemm_tile_macmini_table_diag_tests::m4_base_table_ab_timing ... DEVICE gpu_cores=10 soc="Apple M4" token=M4Base
+MINI_TABLE_ACTIVE
+AB N=256 arm=before kernel_gpu_median_ms=0.0264 wall_sum_median_ms=0.2359
+AB N=256 arm=after kernel_gpu_median_ms=0.0263 wall_sum_median_ms=0.2356
+AB N=512 arm=before kernel_gpu_median_ms=0.1194 wall_sum_median_ms=0.3560
+AB N=512 arm=after kernel_gpu_median_ms=0.1113 wall_sum_median_ms=0.3514
+AB N=1024 arm=before kernel_gpu_median_ms=0.8724 wall_sum_median_ms=1.3069
+AB N=1024 arm=after kernel_gpu_median_ms=0.8155 wall_sum_median_ms=1.2441
+AB N=2048 arm=before kernel_gpu_median_ms=8.0204 wall_sum_median_ms=8.8797
+AB N=2048 arm=after kernel_gpu_median_ms=6.5233 wall_sum_median_ms=7.3781
+AB N=4096 arm=before kernel_gpu_median_ms=64.8407 wall_sum_median_ms=67.5015
+AB N=4096 arm=after kernel_gpu_median_ms=52.9960 wall_sum_median_ms=55.6509
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 854 filtered out; finished in 7.60s
+
