@@ -557,6 +557,8 @@ P1」）を受けた是正である。
 
 **公開形の記録（イシュー #3118・親 #3117。承認: 同 D-A の URL）**: `ModelRegistry` に `save(&self, name: &str, version: &str, tensors: &HashMap<String, Tensor<f32>>) -> Result<(), ModelError>` の 1 メソッドを追加し、`ModelError` に `EmptyModel`・`Save(SaveError)` の 2 variant を追加する形を決定した（追加のみ。std のみの原子的書き込み〈一時ファイル → `rename`〉・Linux x86_64／aarch64 と macOS 限定で他は `Unsupported`・dirfd 経路への強化は #3123 の承認後）。本文書は転記であり、公開形・エラー型・安全契約・Windows の扱いは `docs/facade-model-registry-decision.md` §16 を正とする。公開状態は未公開で、実装は #3119。
 
+**公開形の記録（イシュー #3249・親 #3248。承認: `https://github.com/Fandhe-AI/fandhe-ai/issues/3249#issuecomment-6111772331`〈所有者回答。案 A・追加のみ・初期は MSE と SGD〉）**: 学習 1 step の同期を減らすため、不透明な常駐ハンドル `ResidentTensor`（入力・ターゲット共用）・`ResidentLoss`、`Tape::upload_resident`・`Tape::matmul_resident`・`Tape::wait_device_param_store`、`Sequential::predict_resident_input`・`Sequential::train_step_resident` を追加する形を決定した（追加のみ・既存シグネチャ不変・新規 `unsafe` なし・ハンドルは `!Send` で `Tape: Send` は不変・REQ-12 と整合）。本文書は転記であり、公開形・不変条件・範囲外の扱いは `docs/compat-resident-train-step-decision.md` を正とする。公開状態は未公開で、実装は #3250・#3251〜#3253・#3254。
+
 **適用記録（イシュー #3119・#3120。承認: 同 #3118 の D-A）**: `ModelRegistry::save`・`ModelError::{EmptyModel, Save}` を公開済み（追加のみ）。対応範囲は `docs/facade-model-registry-decision.md` §16.9 で **Linux x86_64／aarch64 のみ**へ狭めた（上の #3118 記録の「macOS を含む」を置き換える。同記録の本文は書き換えない）。`api_surface.rs` が公開面ちょうど 8 件・`impl ModelRegistry` の pub fn 6 件を正ガードで固定し、`save` の関数ポインタ型到達プローブと利用例 doctest の実在検査を持つ。実装記録は同 doc §17。
 
 **テスト記録（イシュー #3127）**: `ModelRegistry::download`／`download_with` の公開面の追加なし。ループバック HTTP モック・実通信 opt-in テスト・`api_surface.rs` の正ガードで公開形を固定した（`docs/model-download-design.md` §21）。
