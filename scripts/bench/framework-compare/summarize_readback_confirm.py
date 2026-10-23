@@ -12,6 +12,7 @@ ratio = median(after)/median(before)、run 内比、checksum 一致を表にす�
 <before.jsonl> <after.jsonl>` で実行できる。終了コードは常に 0（記録のみ。欠損は表に明示する）。
 """
 import json
+import math
 import statistics
 import sys
 
@@ -24,6 +25,11 @@ EXPECTED_CELLS = (
     + [("train", mode, 64) for mode in ("fresh", "reuse")]
     + [("infer", mode, 64) for mode in ("fresh", "reuse")]
 )
+
+
+def valid_time(x):
+    """bool を除く有限の正の数だけを有効な計測時間とする（NaN・Infinity・0・負数・bool は不正セル扱い）。"""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0
 
 
 def load(path):
@@ -56,11 +62,19 @@ def main(before_path, after_path):
         a = after.get(k, [])
         bm = [x for x, _ in b]
         am = [x for x, _ in a]
-        ok = len(b) == RUNS and len(a) == RUNS and all(isinstance(x, (int, float)) for x in bm + am)
-        cs = {c for _, c in b + a}
-        cs_txt = "データなし" if not cs else "完全一致" if len(cs) == 1 else "不一致 %r" % sorted(cs, key=str)
+        ok = len(b) == RUNS and len(a) == RUNS and all(valid_time(x) for x in bm + am)
+        allc = [c for _, c in b + a]
+        cs = set(allc)
+        if not allc:
+            cs_txt = "データなし"
+        elif any(c is None for c in allc):
+            cs_txt = "欠損（checksum 欠落・null %d/%d 行）" % (sum(c is None for c in allc), len(allc))
+        elif len(cs) == 1:
+            cs_txt = "完全一致"
+        else:
+            cs_txt = "不一致 %r" % sorted(cs, key=str)
         if not ok:
-            print("| %s | %s | %s | - | - | 欠損 | - | %d/%d | %s |" % (k[0], k[1], k[2], len(b), len(a), cs_txt))
+            print("| %s | %s | %s | - | - | 欠損または不正値 | - | %d/%d | %s |" % (k[0], k[1], k[2], len(b), len(a), cs_txt))
             continue
         mb, ma = statistics.median(bm), statistics.median(am)
         ratio = ma / mb
