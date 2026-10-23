@@ -503,6 +503,9 @@ impl DeviceParamStore {
         match tape.ops().synchronize_device() {
             Ok(()) => {}
             Err(e @ BackendError::Unsupported(_)) => return Err(e),
+            // 別スレッドの capture 中は driver に触れる前に返る一過性エラー。積んだ GPU 仕事の
+            // 失敗ではないため poison せず、store を変えずに返す（step 系と同じ再試行可能な契約）。
+            Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => return Err(e),
             Err(e) => {
                 self.poisoned.store(true, Ordering::SeqCst);
                 return Err(e);
@@ -557,6 +560,8 @@ impl DeviceParamStore {
         })?;
         let host = match mem.download(buf) {
             Ok(t) => t,
+            // capture 競合は GPU 仕事の失敗ではない一過性エラー。poison せず再試行可能にする。
+            Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => return Err(e),
             Err(e) => {
                 // 積んだ GPU 仕事の失敗がここで表面化しうるため、store を隔離する。
                 self.poisoned.store(true, Ordering::SeqCst);
@@ -1006,6 +1011,8 @@ mod tests {
         /// d_input（`gemm_resident_lhs`）が `Unsupported`（最初の dW の後）。
         LhsUnsupported,
         SgdFails,
+        /// `synchronize_device` が一時的な capture 衝突を返す。
+        SyncCaptureBusy,
         /// dW が `bias_filled == false` を返す。
         BiasNotFilled,
         /// forward が一時的な capture 衝突を返す（どの書き込みよりも前）。
@@ -1111,6 +1118,9 @@ mod tests {
             match self.fault {
                 Fault::SyncUnsupported => Err(BackendError::Unsupported("mock sync".into())),
                 Fault::SyncFails => Err(BackendError::KernelLaunchFailed("mock sync".into())),
+                Fault::SyncCaptureBusy => {
+                    Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 })
+                }
                 _ => Ok(()),
             }
         }
@@ -1523,6 +1533,24 @@ mod tests {
             }
             store.check_not_poisoned().unwrap();
         }
+    }
+
+    #[test]
+    fn wait_device_capture_conflict_does_not_poison_the_store() {
+        let (tape, store, _c) = setup(Fault::SyncCaptureBusy);
+        let err = store.wait_device(&tape).unwrap_err();
+        assert!(
+            matches!(err, BackendError::DeviceContextCaptureInProgress { .. }),
+            "{err:?}"
+        );
+        store.check_not_poisoned().unwrap();
+        // 衝突解消後の再試行は poison されずに到達する（失敗トークンも未設定）。
+        let err2 = store.wait_device(&tape).unwrap_err();
+        assert!(matches!(
+            err2,
+            BackendError::DeviceContextCaptureInProgress { .. }
+        ));
+        store.check_not_poisoned().unwrap();
     }
 
     #[test]
