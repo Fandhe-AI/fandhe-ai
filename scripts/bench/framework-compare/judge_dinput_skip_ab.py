@@ -19,7 +19,7 @@ ratio_r = after_r/before_r（JSONL の行順 = round 順）。
 - それ以外・ゲート不成立・env_info 不一致・run 数不足は undetermined。
 ガードセル: pass = ratio <= 1.03 かつ 5/5 round 後退でない。fail は併記（終了コードには影響しない）。
 
-終了コード: 0 = 処置セルがすべて ADOPT / 2 = undetermined あり（REJECT なし）/ 3 = REJECT あり。
+終了コード: 0 = 処置セルがすべて ADOPT かつ全セルが判定可能（guard-fail は影響しない）/ 2 = undetermined あり（REJECT なし）/ 3 = REJECT あり。
 """
 import argparse
 import hashlib
@@ -104,7 +104,27 @@ def parse_kv(line):
     return dict(tok.split("=", 1) for tok in line.split() if "=" in tok)
 
 
-def check_env(profile, env_path, rule_sha):
+def load_expect(rule_path):
+    """RULE.txt の [対象] の before／after コミットと、同ディレクトリの計測パッチの sha256 を返す。
+    env_info の腕・パッチ照合に使う期待値。取れなければ Bad（fail-closed）。"""
+    import os
+    text = "\n".join(_read_lines(rule_path))
+    exp = {}
+    for arm in ("before", "after"):
+        m = re.search(rf"^- {arm}\s*=\s*([0-9a-f]{{40}})\b", text, re.M)
+        if not m:
+            raise Bad(f"RULE.txt から {arm} のコミットを取れない")
+        exp[arm] = m.group(1)
+    patch = os.path.join(os.path.dirname(os.path.abspath(rule_path)), "bench-var-no-grad.patch")
+    try:
+        with open(patch, "rb") as fh:
+            exp["patch"] = hashlib.sha256(fh.read()).hexdigest()
+    except OSError as e:
+        raise Bad(f"計測パッチを開けない ({e})")
+    return exp
+
+
+def check_env(profile, env_path, rule_sha, expect):
     kv = {}
     for ln in _read_lines(env_path):
         if "=" in ln:
@@ -123,6 +143,15 @@ def check_env(profile, env_path, rule_sha):
             raise Bad(f"env_info の {k} が欠落または不正")
     if kv["rev_stamp_head_before"] == kv["rev_stamp_head_after"]:
         raise Bad("before と after の rev_stamp_head が同一（腕が区別できない）")
+    if kv["rev_stamp_head_before"] != expect["before"]:
+        raise Bad("rev_stamp_head_before が RULE の before コミットと一致しない")
+    if kv["rev_stamp_head_after"] != expect["after"]:
+        raise Bad("rev_stamp_head_after が RULE の after コミットと一致しない")
+    if kv["patch_sha256"] != expect["patch"]:
+        raise Bad("patch_sha256 が計測パッチ（bench-var-no-grad.patch）の sha256 と一致しない")
+    for k in ("bin_sha256_before", "bin_sha256_after"):
+        if not re.match(r"^[0-9a-f]{64}$", kv.get(k, "")):
+            raise Bad(f"env_info の {k} が欠落または不正")
 
 
 def check_gate(profile, dev, path):
@@ -156,7 +185,7 @@ def cell_stats(before, after):
     return mb, ma, ma / mb, per
 
 
-def judge_cell(machine, profile, dev, mode, d, label, rule_sha):
+def judge_cell(machine, profile, dev, mode, d, label, rule_sha, expect):
     """1 セルの判定。戻り値 dict(verdict, reason, ...)。"""
     base = f"{d}/results-%s-{label}-{dev}-train.jsonl"
     res = {"machine": machine, "dev": dev, "mode": mode, "verdict": "undetermined",
@@ -189,7 +218,7 @@ def judge_cell(machine, profile, dev, mode, d, label, rule_sha):
             res["verdict"] = "REJECT"
             res["reason"] = "正しさ: 更新後パラメータの digest が不一致"
             return res
-        check_env(profile, f"{d}/env_info-{label}.txt", rule_sha)
+        check_env(profile, f"{d}/env_info-{label}.txt", rule_sha, expect)
         check_gate(profile, dev, f"{d}/load_gate-{label}-{dev}.log")
     except Bad as e:
         res["verdict"] = "undetermined"
@@ -275,6 +304,11 @@ def main(argv):
         print("error: --machine が無い", file=sys.stderr)
         return 2
 
+    try:
+        expect = load_expect(a.rule)
+    except Bad as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     results = []
     for prof in ("macmini", "gb10"):
         if prof not in machines:
@@ -282,7 +316,7 @@ def main(argv):
         d, label = machines[prof]
         for dev in PROFILES[prof]["devices"]:
             for mode in ("reuse", "fresh"):
-                results.append(judge_cell(prof, prof, dev, mode, d, label, rule_sha))
+                results.append(judge_cell(prof, prof, dev, mode, d, label, rule_sha, expect))
 
     out = [f"# #3247 判定（rule_sha256={rule_sha[:16]}…）", "",
            "| 機体 | device | mode | before 中央値 ms | after 中央値 ms | ratio | ratio_r（5 round） | 判定 | 理由 | 参考: 相手比 after（別セッション参照値・判定外） | 参考: 相手比 before |",
@@ -303,6 +337,9 @@ def main(argv):
     if any(r["verdict"] == "REJECT" for r in results):
         return 3
     if any(r["verdict"] != "ADOPT" for r in treated):
+        return 2
+    # ガードセルの判定不能（fresh の欠落・件数不足等）は必須 8 セルが揃わないので 2。guard-fail は従来どおり反映しない。
+    if any(r["verdict"] == "undetermined" for r in results):
         return 2
     return 0
 

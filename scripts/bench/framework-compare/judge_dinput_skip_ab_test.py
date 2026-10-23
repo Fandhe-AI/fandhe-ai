@@ -17,8 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import judge_dinput_skip_ab as J  # noqa: E402
 
 LABEL = "t1"
-RULE_TEXT = b"RULE test\n"
+RULE_TEXT = ("RULE test\n- before = " + "b" * 40 + "\n- after  = " + "c" * 40 + "\n").encode()
+PATCH_TEXT = b"patch body\n"
+PATCH_SHA = hashlib.sha256(PATCH_TEXT).hexdigest()
 RULE_SHA = hashlib.sha256(RULE_TEXT).hexdigest()
+EXPECT = {"before": "b" * 40, "after": "c" * 40, "patch": PATCH_SHA}
 DIG = "PARAM_DIGEST task=train mode={m} device={d} n_tensors=6 n_elems=100 fnv1a64=0x0123456789abcdef"
 
 
@@ -52,8 +55,9 @@ def make_machine(d, profile, devices, ratios, checksum=0.5, digests=None, gate_o
                     line = (digests or {}).get((arm, dev, mode, r), DIG.format(m=mode, d=dev))
                     write(f"{d}/digest-{arm}-{LABEL}-{dev}-{mode}-r{r}.log", (line or "") + "\n")
     env = {
-        "profile": profile, "rule_sha256": rule_sha, "precheck": "assert", "patch_sha256": "a" * 64,
+        "profile": profile, "rule_sha256": rule_sha, "precheck": "assert", "patch_sha256": PATCH_SHA,
         "rev_stamp_head_before": "b" * 40, "rev_stamp_head_after": "c" * 40, "rev_stamp_head_runner": "d" * 40,
+        "bin_sha256_before": "e" * 64, "bin_sha256_after": "f" * 64,
     }
     if profile == "macmini":
         env["cpu_brand"] = "Apple M4"
@@ -67,13 +71,15 @@ class JudgeTest(unittest.TestCase):
         self.rule = os.path.join(self.tmp.name, "RULE.txt")
         with open(self.rule, "wb") as fh:
             fh.write(RULE_TEXT)
+        with open(os.path.join(self.tmp.name, "bench-var-no-grad.patch"), "wb") as fh:
+            fh.write(PATCH_TEXT)
 
     def cell(self, mode="reuse", **kw):
         d = os.path.join(self.tmp.name, "m")
         os.makedirs(d, exist_ok=True)
         ratios = kw.pop("ratios")
         make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): ratios for dv in ("cpu", "cuda") for m in ("fresh", "reuse")}, **kw)
-        return J.judge_cell("gb10", "gb10", "cpu", mode, d, LABEL, RULE_SHA)
+        return J.judge_cell("gb10", "gb10", "cpu", mode, d, LABEL, RULE_SHA, EXPECT)
 
     def test_adopt(self):
         self.assertEqual(self.cell(ratios=[0.9] * 5)["verdict"], "ADOPT")
@@ -110,7 +116,7 @@ class JudgeTest(unittest.TestCase):
         p = f"{d}/results-after-{LABEL}-cpu-train.jsonl"
         text = open(p, encoding="utf-8").read().replace('"checksum": 0.5', '"checksum": 0.6', 1)
         write(p, text)
-        c = J.judge_cell("gb10", "gb10", "cpu", "fresh", d, LABEL, RULE_SHA)
+        c = J.judge_cell("gb10", "gb10", "cpu", "fresh", d, LABEL, RULE_SHA, EXPECT)
         self.assertEqual(c["verdict"], "REJECT")
 
     def test_digest_mismatch_rejects(self):
@@ -127,6 +133,38 @@ class JudgeTest(unittest.TestCase):
         c = self.cell(ratios=[0.9] * 5, rule_sha="0" * 64)
         self.assertEqual(c["verdict"], "undetermined")
 
+    def _edit_env(self, old, new):
+        d = os.path.join(self.tmp.name, "m")
+        os.makedirs(d)
+        make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): [0.9] * 5 for dv in ("cpu", "cuda") for m in ("fresh", "reuse")})
+        p = f"{d}/env_info-{LABEL}.txt"
+        text = open(p, encoding="utf-8").read()
+        self.assertIn(old, text)
+        write(p, text.replace(old, new))
+        return J.judge_cell("gb10", "gb10", "cpu", "reuse", d, LABEL, RULE_SHA, EXPECT)
+
+    def test_env_wrong_commit_or_patch_is_undetermined(self):
+        for old, new in (("rev_stamp_head_before=" + "b" * 40, "rev_stamp_head_before=" + "1" * 40),
+                         ("rev_stamp_head_after=" + "c" * 40, "rev_stamp_head_after=" + "2" * 40),
+                         ("patch_sha256=" + PATCH_SHA, "patch_sha256=" + "3" * 64)):
+            self.assertEqual(self._edit_env(old, new)["verdict"], "undetermined")
+            self.tmp.cleanup()
+            self.tmp = tempfile.TemporaryDirectory()
+
+    def test_env_missing_bin_sha_is_undetermined(self):
+        c = self._edit_env("bin_sha256_after=" + "f" * 64, "")
+        self.assertEqual(c["verdict"], "undetermined")
+        self.assertIn("bin_sha256_after", c["reason"])
+
+    def test_fresh_missing_makes_exit_2(self):
+        d = os.path.join(self.tmp.name, "b")
+        os.makedirs(d)
+        make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): [0.9] * 5 for dv in ("cpu", "cuda") for m in ("fresh", "reuse")})
+        p = f"{d}/results-after-{LABEL}-cuda-train.jsonl"
+        write(p, "".join(ln + "\n" for ln in open(p, encoding="utf-8").read().splitlines() if '"fresh"' not in ln))
+        rc, _ = self.run_main("--machine", f"gb10={d}:{LABEL}")
+        self.assertEqual(rc, 2)
+
     def test_short_runs_are_undetermined(self):
         self.assertEqual(self.cell(ratios=[0.9] * 5, nrows=4)["verdict"], "undetermined")
 
@@ -136,7 +174,7 @@ class JudgeTest(unittest.TestCase):
         make_machine(d, "macmini", ("cpu", "metal"), {(dv, m): [0.9] * 5 for dv in ("cpu", "metal") for m in ("fresh", "reuse")})
         p = f"{d}/env_info-{LABEL}.txt"
         write(p, open(p, encoding="utf-8").read().replace("Apple M4", "Apple M4 Max"))
-        c = J.judge_cell("macmini", "macmini", "cpu", "reuse", d, LABEL, RULE_SHA)
+        c = J.judge_cell("macmini", "macmini", "cpu", "reuse", d, LABEL, RULE_SHA, EXPECT)
         self.assertEqual(c["verdict"], "undetermined")
 
     def test_device_mixup_is_undetermined(self):
@@ -145,7 +183,7 @@ class JudgeTest(unittest.TestCase):
         make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): [0.9] * 5 for dv in ("cpu", "cuda") for m in ("fresh", "reuse")})
         p = f"{d}/results-after-{LABEL}-cuda-train.jsonl"
         write(p, open(f"{d}/results-after-{LABEL}-cpu-train.jsonl", encoding="utf-8").read())
-        c = J.judge_cell("gb10", "gb10", "cuda", "reuse", d, LABEL, RULE_SHA)
+        c = J.judge_cell("gb10", "gb10", "cuda", "reuse", d, LABEL, RULE_SHA, EXPECT)
         self.assertEqual(c["verdict"], "undetermined")
         self.assertIn("device", c["reason"])
 
@@ -155,7 +193,7 @@ class JudgeTest(unittest.TestCase):
         make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): [0.9] * 5 for dv in ("cpu", "cuda") for m in ("fresh", "reuse")})
         p = f"{d}/results-before-{LABEL}-cpu-train.jsonl"
         write(p, open(p, encoding="utf-8").read().replace('"size": 64', '"size": 256'))
-        c = J.judge_cell("gb10", "gb10", "cpu", "reuse", d, LABEL, RULE_SHA)
+        c = J.judge_cell("gb10", "gb10", "cpu", "reuse", d, LABEL, RULE_SHA, EXPECT)
         self.assertEqual(c["verdict"], "undetermined")
 
     def test_digest_device_mixup_rejects(self):
