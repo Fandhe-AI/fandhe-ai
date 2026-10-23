@@ -284,3 +284,49 @@
 |--------|------|
 | D-C（SME カーネルの本番化。#3018 コメント 6111643437） | 条件付き承認（unsafe 監査が条件）。#3231 で既定 ON |
 | 本節の更新所見の受理 | 条件つき受理（2026-10-24 所有者・https://github.com/Fandhe-AI/fandhe-ai/issues/3231#issuecomment-6369076139） |
+
+## 13. 2026-10-24 追記（イシュー #3235: m=64 専用 4 タイル SME カーネル。既定 OFF）
+
+§1〜§12 は書き換えず、本節に #3235 の新規 `unsafe asm!` の監査を追記する。**承認ではない**。
+
+### 13.1 状態
+
+| 項目 | 内容 |
+|------|------|
+| 対象 | `crates/backend-cpu/src/gemm_blis/microkernel/sme_thin_m64.rs`（新規）・`microkernel.rs` の `SmeKernel::run_thin_m64_block`・`mod.rs` のゲートとドライバ |
+| 基準コミット | `83a1e08e5`（main）＋本 PR |
+| ゲート | `SME_THIN_M64_ENABLED = false`（`mod.rs:3601`）。既定反転は #3236 の事前登録 A/B の ADOPT が前提。ロールバックは 1 行 |
+| 監査方法 | 実装担当による自己点検（自動運転モードで独立 security-auditor を起動できなかった）。**独立した security-auditor の読み取り専用監査は PR レビューで要実施**。承認を得たとは記載しない |
+
+### 13.2 機械的インベントリ（差分）
+
+- 本番の `asm!` は 3 → 4 ブロック（追加: `sme_thin_m64.rs:129` の `compute_thin_m64`）。テストの `asm!` は増えない。
+- 本番の `unsafe fn` は +2（`compute_thin_m64`:89・`kernel_unchecked`:230）。本番の `unsafe` ブロックは +4（`sme_thin_m64.rs` 128・240・246、`microkernel.rs` 848）。テストの `unsafe` は `sme_thin_m64.rs` の `mod tests` 内のみ。
+- `mod.rs` の追加コードは safe のみ（`thin_m64_drive` は job-local の連続バッファへ copy-in/out し、スレッド間で生ポインタを共有しない）。`unwrap`／`expect`／`panic` の追加は `cfg(test)` 内のみ。
+
+### 13.3 項目別の所見
+
+| 観点 | 判定 | 根拠 |
+|------|------|------|
+| smstart/smstop の対 | 良 | 同一 `asm!` 内で対。ストリーミング中は SME 系命令のみ |
+| clobber の網羅 | 良 | v0-v31・p0-p15・ffr・w12 を宣言。ZA0〜ZA3 の全タイルを破壊する旨を SAFETY に明記。`options(nostack)` のみ（`preserves_flags`・`nomem` なし） |
+| 境界（REQ-8） | 良 | asm 前に `check_bounds` が `checked_mul`／`checked_add` で `ap`・`bp`・`c`・`b_stride`・`ldc` を検査し型付きエラーで返す。最大オフセットの算術を SAFETY に記載。ドライバ側も pack の前に長さを検査 |
+| 保留中 lazy ZA save | 良 | `kernel_unchecked` が `has_pending_lazy_za_save` を自己確認し、真なら ZA に触れず bit 一致の `scalar_fallback` へ。`run_thin_m64_block` は実行スレッドで `current_thread_capable`（SVL・TPIDR2）を再確認 |
+| fail-closed | 良 | 既定 OFF。OFF では `SmeKernel::try_new` も呼ばれない（短絡評価）。非 SME・SVL≠64 は従来経路かフォールバックで出力は bit 同一 |
+| K の幅 | 良 | `cbz`/`subs` は X レジスタ（64bit） |
+| ポインタ算術 | 注意 | タイル先頭行ポインタは Rust 側で `wrapping_add`。検査済み長の範囲内に収まるため実質オーバーフローしない |
+| 残留リスク L3 | 引き継ぎ | ストリーミング中のシグナル配送。K 全長を 1 区間で流すため区間は長くなるが、新しい種類のリスクではない（§12.11 で所有者が受け入れた L3 と同じ） |
+| 依存・設定 | なし | `Cargo.toml`／`Cargo.lock`・ruleset・CI は変更しない |
+
+### 13.4 OWASP Top 10
+
+A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OFF・fail-closed）・A06（依存追加なし）・A08（unsafe は理由コメントと本監査を同一 PR に同梱。ゲート反転は #3236 の ADOPT が前提）。環境変数・外部入力で経路を切り替えない。
+
+### 13.5 検証結果（M4 Max・aarch64-apple-darwin・SME 搭載）
+
+- `cargo fmt --all`・`cargo clippy --workspace --all-targets --all-features -- -D warnings`: 警告 0。`cargo clippy -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu --lib --tests -- -D warnings`: 警告 0。
+- 報告専用 lint（`-W clippy::undocumented_unsafe_blocks -W clippy::missing_safety_doc`、`--lib`）: 警告 3 件はすべて既存（`neon.rs:236`・`softmax.rs:235`・`softmax.rs:243`）で、本 PR の新規コードは 0 件。
+- `cargo test -p fandhe-ai-backend-cpu --release`: lib 737 passed・0 failed・44 ignored ほか全スイート PASS。
+- 実機テスト（`--ignored sme_thin_m64 --test-threads=1`）: 4 件 PASS（scalar 参照との bit 一致〈ldc>16・b_stride>16 を含む〉・非正規化数・正規数から非正規化数の結果・NaN で panic なし）。
+- 非 `#[ignore]` の `sme_thin_m64_matches_naive_and_neon_bit_exact` は SME 搭載ホストでカーネルを実行し、`gemm_naive`・NEON 強制と要素単位で一致（スレッド数 {1,2,3,4,8}・Nn／Nt・C 初期値 0／非ゼロ）。
+- 未実施: Mac mini・GB10 での計測（性能は本 issue の範囲外。#3236）。x86_64 の CI で実行されるのは fall-through のテストのみ。
