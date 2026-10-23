@@ -65,7 +65,17 @@ const CHUNK: usize = 4096;
 /// しない契約のため、GB10 の後退 1 件で全体を REJECT とし、既定値は
 /// `0`（常に並列＝変更前と bit 同一の挙動）へ確定する（機構自体は
 /// 残す。詳細・原因分析は同 doc §6・§7）。
-pub(crate) const MSE_BACKWARD_PARALLEL_MIN_ELEMS: usize = 0;
+///
+/// **#3195 で候補 `T = 4096` を再測定して ADOPT し、既定を `4096` へ変更した**
+/// （上記 #1578 の REJECT は史実として不変。別候補・新しい事前登録規則
+/// `docs/perf/logs/cpu-mse-backward-threshold-3195/RULE.txt` による再判定）。
+/// Mac mini・GB10 とも Stage 0 前提ゲート成立・framework-compare train
+/// の fresh／reuse 全セルで 5 round 中央値 ratio <= 1.00（0.9589〜0.9602）・
+/// checksum 完全一致・正式系列（5/5 round gate_ok=1）。bit 同一契約
+/// （逐次・並列・素朴ループの 3 者一致）は不変。MLP 学習 1 step の MSE
+/// backward（64×10 = 640 要素）がこの値未満のため逐次分岐に入る。
+/// 実測記録は同 doc §9。
+pub(crate) const MSE_BACKWARD_PARALLEL_MIN_ELEMS: usize = 4096;
 
 /// 2 つの長さの一致を検証する（`backend-cuda::mse::
 /// validate_mse_binary_len` と同じ構成）。
@@ -295,7 +305,10 @@ mod tests {
         // 素朴ループの 3 者が bit 単位で完全一致することを、NaN・-0.0・
         // subnormal・±inf・scale 負値/0 を含む入力で検証する（イシュー
         // #1578 の bit 同一契約）。
-        let sizes = [0usize, 1, 2, 639, 640, 641, 32767, 32768, 32769];
+        // 4095・4096・4097 は #3195 で採用した既定しきい値 T = 4096 の境界前後。
+        let sizes = [
+            0usize, 1, 2, 639, 640, 641, 4095, 4096, 4097, 32767, 32768, 32769,
+        ];
         for &n in &sizes {
             let pred: Vec<f32> = (0..n)
                 .map(|i| match i % 7 {
@@ -334,10 +347,21 @@ mod tests {
     }
 
     #[test]
+    fn mse_backward_default_threshold_value_is_pinned() {
+        // #3195 の ADOPT 値（T = 4096）を固定する。MLP 学習 1 step の
+        // MSE backward（64×10 = 640 要素）が逐次分岐（`len < T`）に入ることも示す。
+        // black_box は clippy::assertions_on_constants を allow で黙らせず避けるため。
+        let min_elems = std::hint::black_box(MSE_BACKWARD_PARALLEL_MIN_ELEMS);
+        assert_eq!(min_elems, 4096);
+        assert!(640 < min_elems);
+    }
+
+    #[test]
     fn mse_loss_backward_default_threshold_is_expected() {
         // 既定ラッパー（mse_loss_backward_f32）が MSE_BACKWARD_PARALLEL_MIN_ELEMS
         // を使う `_with_threshold` 呼び出しと bit 一致することを固定し、
-        // ラッパー結線のドリフトを検出する。
+        // ラッパー結線のドリフトを検出する。n = 4096 は既定しきい値ちょうど
+        // （`4096 < 4096` は偽なので並列側）で、境界の並列側を通る。
         let n = 4096;
         let pred: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001).collect();
         let target: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0005).collect();
