@@ -11,6 +11,8 @@
 | 監査方法 | 機械的インベントリ（grep）・aarch64 2 ターゲットでの clippy・全 `asm!` ブロックの手読み突合。所見は監査者（本 PR の実装担当）のもので、最終判断はユーザーが行う |
 | 変更範囲 | `.md` のみ。`.rs`・`Cargo.toml`・`Cargo.lock`・tolerance・baseline・ガードレール閾値・`docs/spec/` は変更しない |
 
+> 2026-10-23 に現行 main 基準で更新した（イシュー #3230）。更新内容・再開条件の判定・所有者確認欄は §12 を参照。本節以降は 2026-09-30 時点の記録として残す。
+
 ## 2. 背景
 
 - #1979（SME 本番結線の承認依頼）は 2026-09-19 のユーザー判断で「SME は既定 OFF のまま・結線しない」となり NOT_PLANNED で close された。その際、再開条件が 3 つ定められた。
@@ -142,3 +144,124 @@
 - `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §3・§4・§5.4〜§5.7・§6
 - イシュー #1587（SME マイクロカーネル）・#1978（実測）・#1979（ユーザー判断）・#2050（GB10 bit 同一実証）・#2118（再実測）・#2119（本監査）
 - Linux `Documentation/arch/arm64/sme.rst`（シグナル配送時の状態・スレッドごとの VL）
+
+## 12. 2026-10-23 更新（イシュー #3230）
+
+§1〜§11 は 2026-09-30 時点の記録として書き換えず、本節に現行 main 基準の更新を追記する。条件 3（security-auditor の監査）の更新と、再開条件 1〜3 の充足判定が目的。**承認ではない**。
+
+### 12.1 状態
+
+| 項目 | 内容 |
+|------|------|
+| 承認状態 | **未承認**。D-C（#3018 コメント 6111643437・2026-10-11）は「SME カーネルの本番化」を承認したが、個々の `unsafe` ブロックの security-auditor 監査を条件とする条件付き承認である。本節の更新所見の受理は 12.8 のとおり確認依頼中 |
+| `SME_PRODUCTION_ENABLED` | **`false` のまま（本 PR では変更しない）**。`crates/backend-cpu/src/gemm_blis/mod.rs:3541` の `const SME_PRODUCTION_ENABLED: bool = false;`（§1 の 3085 から移動） |
+| 監査対象コミット | `45347ae0a5f3ca436b8136424a136d660c5a5280`（main 先端。本節の行番号はこの sha 基準。旧: `8bba6b57dd05…`） |
+| 監査日 | 2026-10-23 |
+| 監査方法 | 旧監査との差分評価・機械的インベントリの再取得・全項目の再突合・lint とテストの再実行。所見は監査者（本 PR の実装担当）のものであり、最終判断はユーザーが行う。独立した security-auditor subagent による監査は自動運転モードの制約により未実施で、PR レビューでの実施を要する |
+| 変更範囲 | `.md` のみ。`.rs`・`Cargo.toml`・`Cargo.lock`・tolerance・baseline・`docs/spec/` は変更しない |
+
+### 12.2 旧 sha からの差分評価
+
+- `git diff --stat 8bba6b57..45347ae0a` を SME 関連 4 ファイルへ限ると、差分は `crates/backend-cpu/src/gemm_blis/mod.rs`（+800／-42）のみ。`microkernel/sme.rs`・`sme_detect.rs`・`microkernel.rs` は差分なし。したがって §4・§6 の行番号はこの 3 ファイルについて現行 main でもそのまま有効。
+- `mod.rs` の差分（+800／-42）は診断テストだけではない。内訳は次のとおり。
+  - `#[ignore]` の診断テスト（#3175・#3176。`sme_vs_neon_ab_thread_sweep`・`sme_vs_neon_ab_mlp_rect`・`microcall_median_ns`・`sme_microcall_fixed_cost_probe`）と、`cfg(test)` 限定の `jobgrid_probe`（#3486）。
+  - 本番経路の safe コードの変更。小 m GEMM の job 統合・A の pack 共有（#3521）、常駐重みの pack 済み panel キャッシュ（#3522）に伴い、`run_two_d_job`・`gemm_blis_two_d_dynamic_region`・`dispatch_two_d_dynamic` が `jobs_per_worker`・`share_a`・`prepack` を受け取るようになった。SME 経路もこの region 関数を経由する。
+  - 差分の追加行で `unsafe`・`asm!` に一致するのはコメント行 3 件のみで、**新規の `unsafe`・`asm!` は 0 件**。`unwrap`／`expect` の追加はいずれも `cfg(test)` 内（`install_in_pool_for_test` ほか）。追加テストは safe な `SmeKernel::try_new`・`Microkernel::run` だけを呼ぶ。
+  - 上記の本番経路の変更が SME の `unsafe` 境界に与える影響: `SmeKernel::run`／`run_with_ldc` は引き続き `check_panel_lengths`／`check_c_tile_bounds` を経由してから asm に入る（`microkernel.rs` 無変更）。C の分割（`split_c_into_jobs`）は safe なスライス分割。したがって unsafe の前提（M3・M4）を変える変更は見つからなかった。ただし region 関数の新しい分配ロジック自体の逐行レビューは本更新の範囲外で、PR レビューでの確認を要する。
+- `mod.rs` の行番号の対応表。
+
+| 項目 | 旧 | 新 |
+|------|----|----|
+| `SME_PRODUCTION_ENABLED` | 3085 | 3541 |
+| `SME_MIN_M`／`SME_MIN_N`／`SME_MIN_K` | （未記載） | 3549／3551／3553 |
+| `sme_shape_eligible` | （未記載） | 3561 |
+| `dispatch_two_d_dynamic`（aarch64 版。ゲート式） | 2981 | 3415（3429） |
+| `sme_production_enabled_is_false_pending_measurement` | 5044 付近 | 5612 |
+
+### 12.3 機械的インベントリ（新 sha）
+
+再現コマンド: `grep -n "asm!" <ファイル>`、`grep -n "unsafe fn\|unsafe {" <ファイル>`、`grep -rn "asm!" crates/backend-cpu/src`（コメント行を除く）。実行コードの `asm!` は 6 ブロックのまま（本番 3・テスト 3）で、§4 の表と行番号まで一致する。
+
+| 場所 | 区分 | 用途 |
+|------|------|------|
+| `sme.rs:127` | 本番 | `mrs`（TPIDR2_EL0 読み取り） |
+| `sme.rs:201` | 本番 | `compute` 本体 |
+| `sme.rs:911`・`1005`・`1107` | テスト | 順に `read_za0_and_finish_streaming`・`finish_pending_save`・`enter_dormant_za_with_pending_lazy_save` |
+| `sme_detect.rs:160` | 本番 | `rdsvl` |
+
+- 本番の `unsafe fn`: `has_pending_lazy_za_save`（`sme.rs:112`）・`compute`（154）・`kernel_unchecked_with_ldc`（299）・`kernel_unchecked`（352）・`rdsvl_bytes`（`sme_detect.rs:150`）。本番の `unsafe` ブロック: `sme.rs` 126・200・311・321・360、`sme_detect.rs` 159・209、`microkernel.rs` の呼び出し 825・864・883。
+- `mod tests`（`sme.rs:432` 以降）の `unsafe` はテスト専用で本番から到達しない。
+
+### 12.4 項目別の再突合
+
+| ID | 判定 | 根拠（新 sha） |
+|----|------|----------------|
+| M1 | 適合（変更なし） | `sme.rs` が無変更。`compute`（201）は `smstart` で始まり `smstop` で閉じる |
+| M2 | 適合（変更なし） | `sme.rs:311`→`321` の直列。`microkernel.rs:825` も実行スレッドで `has_pending_lazy_za_save` を確認 |
+| M3 | 適合（変更なし） | `check_panel_lengths`／`check_c_tile_bounds`（`microkernel.rs:228`・282）が経路上に残る。`mod.rs` の追加行は `unsafe`・`asm!` を持たず、カーネル呼び出しは `Microkernel::run` 経由（12.2 の注記のとおり region 関数の分配ロジックの逐行レビューは範囲外） |
+| M4 | 適合（変更なし） | `sme.rs` 無変更 |
+| M5 | 適合（変更なし） | 6 ブロックの `out(...)` 宣言は旧監査から不変（ファイル無変更） |
+| L1 | 適合（既存記録に依拠） | Arm ARM の再読は未実施 |
+| L2 | 適合 | `sme.rs:783`・800 は無変更。テスト専用 |
+| L3 | 条件付き適合（据え置き） | macOS のシグナル配送時の一次ソースは本更新でも未確認。推測で断定しない |
+| P1 | 適合 | `microkernel.rs` の `SmeKernel` 経路とあわせ、追加行に `unwrap`／`expect` の本番経路混入なし（診断テストはテスト専用） |
+| R1 | 条件付き適合（据え置き） | 公開面は不変。facade は SME を公開していない |
+| G1 | 適合 | `dispatch_two_d_dynamic`（`mod.rs:3415`）のゲート式は `SME_PRODUCTION_ENABLED && sme_shape_eligible(..) && let Some(kernel) = SmeKernel::try_new()`（3429〜3431）の短絡評価で、`false` の間は `try_new` が呼ばれない。ドリフト検出テスト（`mod.rs:5612`）が PASS。環境変数による上書き機構はない。追加された診断テストは `#[ignore]` かつ `mod tests`（`#[cfg(test)]`）内で本番経路に入らない |
+| D1 | 適合（変更なし） | `sme_detect.rs` 無変更 |
+
+新しい所見は追加なし。
+
+### 12.5 lint とテストの再実行（M4 Max・aarch64-apple-darwin。このホストは SME 対応）
+
+| 実行 | 結果 |
+|------|------|
+| `cargo clippy -p fandhe-ai-backend-cpu --target aarch64-apple-darwin --all-targets -- -D warnings` | 成功（§5 で失敗していた `backend-metal` の警告は解消している） |
+| 同 `--target aarch64-unknown-linux-gnu --all-targets` | 成功 |
+| 報告専用 `-W clippy::undocumented_unsafe_blocks -W clippy::missing_safety_doc`（`--lib`） | SME 関連の警告は `sme_detect.rs:159` の 1 件のみ（発見事項 d が残存。ほかに SME 無関係の `neon.rs`・`softmax.rs` に警告あり） |
+| `cargo test -p fandhe-ai-backend-cpu --release` | 失敗 0 件。ドリフトガード `sme_production_enabled_is_false_pending_measurement` を含む |
+| `cargo test … --release --lib -- --ignored sme_kernel gemm_blis_parallel_variant_sme_matches_naive_bit_exact_when_available --test-threads=1` | 11 件 PASS（scalar 参照との bit 一致・非正規化数・NaN・lazy save フォールバック・決定性）。#[ignore] の計測テストは実行していない |
+
+- §9 の残留リスク (3)（実機テストが引用のみ）は、SME 対応ホストでの再実行で PASS を確認したため解消した。同 (2)（L1 の一次ソース）・(1)（L3）は据え置き。
+- Mac mini・GB10 には接続していない（計測しないため実機ロックも不要）。
+
+### 12.6 発見事項 a〜e の現状
+
+| # | 現行 main の位置 | 扱い |
+|---|------------------|------|
+| a | `sme.rs:172`（存在しないパス `docs/cpu-gemm-sme-fmopa-microkernel.md` を参照） | 残存。`.rs` のコメント修正のため本 issue の範囲外。未起票・所有者承認待ち |
+| b | `sme.rs:170`「外径」 | 同上 |
+| c | `sme_detect.rs:29`・`147`（`rdsvl` を「ストリーミングモードへ遷移」と記述） | 残存。Arm ARM の一次ソースを本更新で参照していないため「要確認」のまま。同上 |
+| d | `sme_detect.rs:152`（SAFETY の書式。unsafe ブロックは 159） | 残存（12.5 の報告専用 lint で再確認）。同上 |
+| e | `compute` は呼び出し元の ZA 使用中状態を検出しない | 情報。現行の呼び出し元（`dispatch_two_d_dynamic` → `gemm_blis_two_d_dynamic_region`）と新しい診断テストは ZA を持ち込まないため据え置き |
+
+起票候補: a〜d を 1 件の docs/lint issue として #3231 に含めるか別 issue にするか。自動運転モードのため起票していない。
+
+### 12.7 再開条件の判定
+
+| 条件 | 判定 | 根拠 | 保留・補足 |
+|------|------|------|-----------|
+| 1（到達セル 5/5 で 1.00 以下かつ checksum 一致の ADOPT） | **Mac mini では充足。ただし計測機の読み替えは所有者確認が未取得のため判定保留** | `docs/perf/cpu-gemm-sme-ab-macmini.md`・`docs/perf/logs/sme-macmini-3176/aggregate.md`・`macmini/r1r2/`・`macmini/r4_run{1..5}.log`・`macmini/sme_report.txt`。#3175 の `docs/perf/cpu-sme-thread-scaling-macmini.md` は参考 | 元の条件は M4 Max。M4 Max は §5.4.4 が undetermined で、#2118 の §5.8.3 は全欄未実測。2026-10-11 の所有者指示（計測は Mac mini）は根拠として引用するが、条件 1 の読み替えへの確認の代わりにはしない。M4 Max の値を Mac mini の値として扱わない |
+| 2（GB10 既存経路が 5/5 一貫で非後退） | **未充足** | `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.5（後退あり。1024/reuse が 5/5 一貫）・§5.6（bit 同一は成立）・§5.7（未分離。ノイズ帯。§5.5 の判定は覆っていない）・`docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/` | GB10 は SME 非対応で `kernel_enabled: false`。ツリー設計では最終確認を #3232（ON の前後比較）が担い、後退があれば #3231 を戻す。この「後置ゲート」扱いも 12.8 の確認対象 |
+| 3（unsafe 監査＋別 issue での承認） | **監査は本 PR で更新（自己点検。独立監査は PR レビューで要実施）。承認は D-C の条件付き承認にとどまる** | 12.3〜12.5・#3018 コメント 6111643437 | D-C は本更新前の方針承認のため、更新所見の受理を 12.8 で確認する |
+
+### 12.8 所有者確認欄
+
+| # | 確認事項 | 状態 |
+|---|----------|------|
+| 1 | 条件 1 の計測機を M4 Max から Mac mini へ読み替えてよいか | 依頼中・未確認 |
+| 2 | 条件 2（GB10 非後退）を #3232 の後置ゲートとして扱い、#3231 は条件 2 未充足のまま着手してよいか | 依頼中・未確認 |
+| 3 | 12.3〜12.5 の更新所見の受理（独立 security-auditor 監査を含む） | 依頼中・未確認 |
+
+確認依頼は PR 本文と #3230 で行う。承認を得ていないものを承認済みとは記載しない。
+
+### 12.9 #3231 のゲート
+
+**12.8 の 3 項目が「確認済み」になるまで、#3231（しきい値の確定と `SME_PRODUCTION_ENABLED` の既定 ON）は着手しない。** 条件 2 は未充足のため、条件 2 を後置ゲートとして扱う確認が取れない限り止める側に倒す。#3229 の前提作業としての本 issue の結論はこれである。
+
+### 12.10 承認欄の追記
+
+| 承認欄 | 状態 |
+|--------|------|
+| D-C（SME カーネルの本番化。#3018 コメント 6111643437） | 条件付き承認（unsafe 監査が条件） |
+| 本節の更新所見の受理 | 未確認（12.8 の 3） |
+| §10 の再承認申請 | §10 の記載は 2026-09-30 時点のまま。現在の状態は本節を正とする |
