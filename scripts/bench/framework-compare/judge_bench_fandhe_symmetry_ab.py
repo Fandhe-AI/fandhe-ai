@@ -23,7 +23,7 @@ from pathlib import Path
 
 NRUNS = 5
 FW_ORDER = ['candle', 'burn', 'pytorch', 'tensorflow', 'scipy']
-# hard 条件で完全一致を要求する項目（欠落同士は None 一致。片側のみ欠落は不一致）
+# hard 条件で完全一致を要求する項目（欠落・非数値は undetermined。値の不一致のみ hard 失敗）
 HARD_FIELDS = ('checksum', 'parity_total', 'parity_fail_count', 'parity_max_abs_err',
                'parity_max_rel_err', 'parity_scaled_abs_bound', 'parity_scaled_abs_rescued')
 
@@ -158,24 +158,41 @@ def arm_stats(runs, arm, task, device, size, required=()):
                 fresh_ms=None if fresh_ms is None else fresh_ms * 1e3)
 
 
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and v not in (float('inf'), float('-inf'))
+
+
+def _required_fields(task):
+    """checksum は全タスクで必須、parity 項目は出力対象の GEMM で必須（train／infer の行には出力されない）。"""
+    return HARD_FIELDS if task == 'gemm' else ('checksum',)
+
+
 def hard_check(runs, task, device, size):
-    """checksum・parity 項目が全 run・両腕・両モードで完全一致するか。不一致の説明リストを返す。"""
-    problems = []
+    """checksum・parity 項目が全 run・両腕・両モードで完全一致するか。
+
+    (mismatch, missing) を返す。missing = 行欠損・必須項目の欠落／非数値（判定不能 = 終了コード 2）、
+    mismatch = 存在し妥当な行どうしの値の不一致のみ（正しさの失敗 = 終了コード 3）。"""
+    mismatch, missing = [], []
+    req = _required_fields(task)
     for mode in ('reuse', 'fresh'):
         base = None
         for i, r in enumerate(runs, 1):
             for arm in ('old', 'new'):
                 row = r[arm].get(('fandhe-ai', task, device, size, mode))
                 if row is None:
-                    problems.append(f'{mode} run{i} {arm}: 行欠損')
+                    missing.append(f'{mode} run{i} {arm}: 行欠損')
                     continue
-                sig = tuple(row.get(f) for f in HARD_FIELDS)
+                bad = [f for f in req if not _is_num(row.get(f))]
+                if bad:
+                    missing.append(f'{mode} run{i} {arm}: 必須項目の欠落／不正値 {",".join(bad)}')
+                    continue
+                sig = tuple(row[f] for f in req)
                 if base is None:
                     base = sig
                 elif sig != base:
-                    diff = [f for f, a, b in zip(HARD_FIELDS, sig, base) if a != b]
-                    problems.append(f'{mode} run{i} {arm}: 不一致 {",".join(diff)}')
-    return problems
+                    diff = [f for f, a, b in zip(req, sig, base) if a != b]
+                    mismatch.append(f'{mode} run{i} {arm}: 不一致 {",".join(diff)}')
+    return mismatch, missing
 
 
 def check_series_meta(rule_path, env_info_path, gate_log, require_gate):
@@ -253,10 +270,12 @@ def build(args):
             out.append(f'| {name} | {refs} | 判定不能 | | | | | | | |')
             continue
         # hard 条件は勝敗の判定可否から独立に評価する（判定不能セルでも不一致を落とさない。終了コード 3 が優先）。
-        probs = hard_check(runs, task, device, size)
+        probs, miss = hard_check(runs, task, device, size)
         if probs:
             hard.append(f'{name}: ' + '; '.join(probs))
-        hs = 'OK' if not probs else 'NG'
+        if miss:
+            undetermined.append(f'{name}: hard 検証項目が判定不能: ' + '; '.join(miss))
+        hs = 'NG' if probs else ('判定不能' if miss else 'OK')
         req = expected_opponents(args.profile, task, device, size)
         try:
             o = arm_stats(runs, 'old', task, device, size, req)

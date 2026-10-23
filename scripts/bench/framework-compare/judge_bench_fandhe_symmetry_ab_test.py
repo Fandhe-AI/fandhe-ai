@@ -228,6 +228,43 @@ class JudgeTest(unittest.TestCase):
         code, text = run_judge(d, 'macmini', rule, env, glog)
         self.assertEqual(code, 3, text)
 
+    def test_hard_fields_removed_everywhere_is_undetermined(self):
+        def mut(arm, run, rows):
+            out = []
+            for l in rows:
+                r = json.loads(l)
+                for f in J.HARD_FIELDS:
+                    r.pop(f, None)
+                out.append(json.dumps(r))
+            return out
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini', mut)
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 2, text)
+        self.assertIn('必須項目の欠落', text)
+
+    def _drop_row(self, arm_name, run_no, mode):
+        def mut(arm, run, rows):
+            if arm == arm_name and run == run_no:
+                rows = [l for l in rows if not (
+                    '"framework":"fandhe-ai"' in l and f'"mode":"{mode}"' in l
+                    and '"task":"gemm"' in l and '"device":"cpu"' in l and '"size":256' in l)]
+            return rows
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini', mut)
+        return run_judge(d, 'macmini', rule, env, glog)
+
+    def test_missing_fresh_row_in_one_arm_is_undetermined_not_hard(self):
+        code, text = self._drop_row('old', 2, 'fresh')
+        self.assertEqual(code, 2, text)
+        self.assertIn('行欠損', text)
+        self.assertNotIn('hard 条件の不一致', text)
+
+    def test_missing_reuse_row_in_one_arm_is_undetermined_not_hard(self):
+        code, text = self._drop_row('new', 4, 'reuse')
+        self.assertEqual(code, 2, text)
+        self.assertNotIn('hard 条件の不一致', text)
+
 
 if __name__ == '__main__':
     unittest.main()
