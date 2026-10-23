@@ -1,0 +1,76 @@
+diff --git a/scripts/bench/framework-compare/bench-fandhe/src/main.rs b/scripts/bench/framework-compare/bench-fandhe/src/main.rs
+index 80e1693d3..b22fc0c87 100644
+--- a/scripts/bench/framework-compare/bench-fandhe/src/main.rs
++++ b/scripts/bench/framework-compare/bench-fandhe/src/main.rs
+@@ -1035,6 +1035,36 @@ fn build_model() -> Result<Sequential, Box<dyn std::error::Error>> {
+         .add_linear(D_HIDDEN, D_OUT, SEED_L2)?)
+ }
+ 
++/// #3247 計測専用: 更新後パラメータの bit 列 FNV-1a 64 を stderr へ 1 行出す。
++/// `BENCH_PARAM_DIGEST=1` のときだけ動作し、計測窓の外から呼ぶ。
++fn emit_param_digest(
++    mode: &str,
++    device: &str,
++    params: &[impl std::borrow::Borrow<Tensor<f32>>],
++) -> Result<(), Box<dyn std::error::Error>> {
++    if std::env::var("BENCH_PARAM_DIGEST").as_deref() != Ok("1") {
++        return Ok(());
++    }
++    let mut h: u64 = 0xcbf29ce484222325;
++    let mut n_elems = 0usize;
++    for t in params {
++        let c = t.borrow().contiguous();
++        let sl = c.as_slice().ok_or("digest: param as_slice None")?;
++        for v in sl {
++            for b in v.to_bits().to_le_bytes() {
++                h ^= u64::from(b);
++                h = h.wrapping_mul(0x100000001b3);
++            }
++        }
++        n_elems += sl.len();
++    }
++    eprintln!(
++        "PARAM_DIGEST task=train mode={mode} device={device} n_tensors={} n_elems={n_elems} fnv1a64=0x{h:016x}",
++        params.len()
++    );
++    Ok(())
++}
++
+ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+     let mut model = build_model()?;
+     let (x_data, y_data) = mlp_data()?;
+@@ -1083,6 +1113,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+     if !last_loss.is_finite() {
+         return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
+     }
++    emit_param_digest("fresh", &cli.device, &model.trainable_parameters())?;
+     let measured = &durations[TRAIN_WARMUP..];
+     let st = stats(measured)?;
+     Record {
+@@ -1211,7 +1242,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+         // fresh tape per step（モジュール doc 参照: DeviceParamStore は
+         // 使い回すが tape は使い回さない）。
+         let tape = make_tape(&cli.device)?;
+-        let x = tape.var(&x_data);
++        let x = tape.var_no_grad(&x_data);
+         let y = tape.var(&y_data);
+         let pred = model.forward_resident(&tape, &x, &mut store)?;
+         let loss = pred.mse_loss(&y)?;
+@@ -1255,6 +1286,8 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+         }
+     }
+ 
++    emit_param_digest("reuse", &cli.device, &synced.iter().collect::<Vec<_>>())?;
++
+     let measured = &durations[TRAIN_WARMUP..];
+     let st = stats(measured)?;
+     Record {
+@@ -1422,7 +1455,7 @@ fn measure_train_reuse_phases(
+         phases.push(PHASE_TAPE_BUILD, t0.elapsed());
+ 
+         let t0 = Instant::now();
+-        let x = tape.var(&x_data);
++        let x = tape.var_no_grad(&x_data);
+         let y = tape.var(&y_data);
+         phases.push(PHASE_LEAF_REGISTER, t0.elapsed());
+ 
