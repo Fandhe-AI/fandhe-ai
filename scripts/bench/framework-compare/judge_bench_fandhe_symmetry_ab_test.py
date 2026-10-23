@@ -324,6 +324,24 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(code, 2, text)
         self.assertIn('parity_fail_count が 0 でない', text)
 
+    def test_parity_fail_row_still_compared_hard_mismatch_exit3(self):
+        # run3 の new reuse のみ checksum と parity_fail_count を変える: 判定不能に加え hard 不一致も報告し exit 3
+        d = self.tmp / 'pf-mismatch'
+        rule, env, glog = make_series(d, 'macmini')
+        p = d / 'run3' / 'results-new.jsonl'
+        out = []
+        for l in p.read_text().splitlines():
+            r = json.loads(l)
+            if (r['framework'] == 'fandhe-ai' and r['mode'] == 'reuse' and r['task'] == 'gemm'
+                    and r['device'] == 'cpu' and r['size'] == 256):
+                r['checksum'] = r['checksum'] + 1
+                r['parity_fail_count'] = 2
+            out.append(json.dumps(r))
+        p.write_text('\n'.join(out) + '\n')
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 3, text)
+        self.assertIn('不一致 checksum', text)
+
     def test_gb10_gate_enforced_without_flag_and_env_gate1(self):
         for profile, env_line in (('gb10', ''), ('macmini', 'gate=1\n')):
             d = self.tmp / f's-{profile}'

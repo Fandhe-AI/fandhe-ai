@@ -231,8 +231,8 @@ def hard_check(runs, task, device, size):
                 pf = row.get('parity_fail_count')
                 if isinstance(pf, (int, float)) and not isinstance(pf, bool) and pf != 0:
                     # fresh 側を含め fandhe の要素検証不合格は判定不能（RULE: parity_fail_count > 0）
+                    # 判定不能として記録したうえで一致比較は継続する（checksum 等の不一致を落とさない。hard 不一致が優先）
                     missing.append(f'{mode} run{i} {arm}: parity_fail_count が 0 でない（{pf!r}。判定不能）')
-                    continue
                 sig = tuple(row[f] for f in req)
                 if base is None:
                     base = sig
