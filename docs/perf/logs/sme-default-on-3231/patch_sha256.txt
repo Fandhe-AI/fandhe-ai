@@ -1,0 +1,1 @@
+869c75ba33ab564780775b76bc3fa28aa0ad171a3f60c73a1f0a062c2d7fe06c  off-arm.patch

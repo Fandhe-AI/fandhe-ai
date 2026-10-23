@@ -1,0 +1,2 @@
+host=Apple M4 Max (hw.optional.arm.FEAT_SME=1) / aarch64-apple-darwin / cargo test --release
+性能計測ではないため Mac mini ではなく開発機で実施（実機ロック不要）
