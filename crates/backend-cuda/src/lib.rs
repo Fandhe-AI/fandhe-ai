@@ -487,6 +487,7 @@ mod nll;
 mod norm_backward;
 mod paged_kv;
 mod readback_policy;
+mod readback_prefetch;
 mod rnn_cell;
 // イシュー #1584: 汎用 reduction（`sum`／`max`）起動 API・カーネル
 // ソース。`mse.rs`／`kernels_mse.rs` と同じ 2 ファイル構成

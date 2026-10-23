@@ -1975,6 +1975,18 @@ jq -s '[.[] | select(.mode=="fresh" or .mode=="reuse")] | group_by(.mode)[] | {m
   上の同期点として残る（`docs/backend-cuda-async-execution-design.md`）。
   定常状態では計測窓のずれ（1 step）を無視でき 1 step 総和と等価とみなす。
 
+### CUDA readback 背景事前タッチプール A/B（`run_ab_readback_prefetch_cuda.sh`。イシュー #3225）
+
+`FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch`（既定 OFF）の before（env 未設定）／after を、同一バイナリ・
+HEAD の facade path patch で run 単位に interleave 計測する。セルは gemm cuda の reuse／fresh × N=256〜4096
+（10 セル）、5 round 固定・専有ゲート。セル群ごとに閾値が違うため、公開済み JSONL を群へ分けて
+`compare_gemm_ab.py --sizes readback-prefetch-{gate,4096,guard,n256}` を 4 回実行する
+（判定規則は `docs/perf/logs/cuda-readback-reuse-fix-3225/RULE.txt`）。#2108 用スクリプトは変更しない。
+
+```sh
+AB_PATCH_FACADE_PATH="$(cd ../../../crates/facade && pwd)" bash run_ab_readback_prefetch_cuda.sh head-<short sha>-3225
+```
+
 ### CUDA readback 宛先ポリシー A/B（`run_ab_readback_reuse_cuda.sh`。イシュー #2108）
 
 `FANDHE_AI_CUDA_READBACK_DEST`（`crates/backend-cuda/src/readback_policy.rs`。既定 OFF）の before（env 未設定＝
