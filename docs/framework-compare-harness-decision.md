@@ -335,3 +335,20 @@ GEMM の結果検証は 2 層防御で構成する。
 - #3265: (1)・条件つきの (3)・(6)
 - #3266: 新旧併記の計測
 - #3272: (4)・(5)（#3271 のピン更新後）
+
+### 7.7 実装記録（#3265）
+
+#3265 で §7.1 の (1)・(3)・(6) を `bench-fandhe/src/main.rs` に実装した。変更はこのファイルと docs に閉じ、相手側コード・`bench-common`・`Cargo.toml`・`Cargo.lock` は変えていない。
+
+- (1) GEMM reuse の結果解放: `run_gemm_reuse` と `measure_gemm_reuse_phases`（`--phases`）は、反復の終わりに `Tape::reset` で結果ノードを解放し、次の反復の先頭で `tape.leaf(0)`・`tape.leaf(1)` から `a`・`b` を再取得する。解放と再取得は計測窓の外に置き、窓の中身と phase の 5 区間は変えない。葉の取得失敗と `leaf_count` の不一致は型付き `MEASURE_ERROR`（panic なし）にする。`run_gemm_reuse_device_checksum`（`--device-checksum`）は変えない。`matmul_checksum` は tape にノードを積まないため、蓄積という非対称が無い
+- (3) Metal の readout: 条件は成立した。#3184 G5（専有 Mac mini）の `docs/perf/logs/optin-ab-macmini-3184/readout-r2/compare-readout.md` は総合判定 ADOPT（`.exit`=0）。6 セルとも borrowed/legacy が 0.9592〜0.9773 で 1.00 以下、checksum は完全一致、専有ゲートは load1 2.60 < 4.0 を 2 回連続で満たした。`readout_uses_borrowed_view` の Metal 分岐を除去し、`device` 引数を削除した。`--readout legacy|borrowed` の override は残す。#1520 の REJECT は書き換えない（条件を変えた再測定として扱う。`docs/perf/metal-gemm-candle-gate-remeasurement.md` §20）。この関数は infer の Metal 経路にも使われるため、infer の Metal も借用ビューになる。G5 が測ったのは gemm の 6 セルだけだが、§15.1 の処置は「関数の Metal 分岐を除去する」であり、集約した 1 箇所の切り替えを意図している。checksum は同じ順序の `f64` 逐次和で bit 同一。infer の新旧併記は #3266
+- (6) train reuse の入力: 条件は成立した（#3245 は案 2 を採用）。`run_train_reuse` と `measure_train_reuse_phases` の入力 `x` を `tape.var_no_grad` に変えた。`y`（mse target）は #3245 §9 のとおり対象外。fresh は変えない。0.11.0 は d_input を計算してから捨てるので速度は変わらず、効果は 0.12.0（#3246）で出る
+- #3247 への影響: `docs/perf/logs/dinput-skip-ab-3247/bench-var-no-grad.patch` は `tape.var(&x_data)` を前提にしており、本変更の後のツリーには適用できない（runner の precheck が fail-closed で止める）。RULE.txt は runner ツリーを `a5fa15fd3` に固定しているため運用は変わらない。`dinput-skip-ab-3247/*` は変更していない
+
+検証（正しさの確認のみ。性能値は報告しない）:
+
+- AC1: 変更前（`origin/main`）と変更後のバイナリで、CPU と Metal の `gemm reuse`（512・1024）、`gemm reuse --phases`、`train reuse`、`infer reuse` を実行し、`checksum`・`parity_total`・`parity_fail_count`・`parity_max_abs_err`・`parity_max_rel_err`・`parity_scaled_abs_*` が完全一致した。phases は 5 行のまま。Metal の gemm 1024 は変更前（legacy）・変更後（borrowed）・変更後 `--readout legacy` の 3 者で checksum が一致した。さらに単体テストで、`var_no_grad` と `var` の最終 loss と全パラメータ、reset 前後の matmul 結果と checksum を bit で比較して一致を固定した
+- AC3: `scripts/check-forbidden-deps.sh lock-all` は rc=0、`OK:` 行は 17 行で、変更前と同じ
+- fmt・clippy（`-D warnings`・`device-checksum` あり／なし）・`cargo test`（bench-fandhe・bench-common）・Mac の `--ignored` smoke 3 件が通る。あわせて、macOS 限定の `#[ignore]` テスト 4 件が `TempOutFile` のメソッド呼び出しの誤りでコンパイルできなかった既存の不具合を `.path()` に直した（Linux では対象外のため CI では見えなかった）
+- 未検証: GB10 の CUDA 実機（`reset` は値を変えず、`var_no_grad` は 0.11.0 では計算してから捨てるだけ、という机上の根拠のみ）
+- 承認: 本変更は #3264 の範囲（D-C 承認の bench-fandhe 側の是正）内であり、新しい承認は得ていない

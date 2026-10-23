@@ -1,0 +1,39 @@
+RULE fixed-at-utc: 2026-10-24 (実機計測より前にコミットして固定。事後に緩和・変更しない)
+issue: #3227 ADOPT 判定が出た opt-in の既定を ON にする（第 3 回: CUDA readback 既定反転 PR #3552 の GB10 確認）
+doc: docs/perf/cuda-gemm-reuse-phase-breakdown.md §15.4、docs/perf/loss-attribution-matrix.md §10.8.3
+性格: 確認計測。ADOPT／REJECT の判定は出さない（#3225 の判定は ADOPT で凍結済み・再判定しない）。
+
+[対象]
+- 同一バイナリ（HEAD の facade を AB_PATCH_FACADE_PATH で参照）。
+  before = FANDHE_AI_CUDA_READBACK_DEST=pretouched（旧既定 PretouchedFresh）
+  after  = env 未設定（新既定 PrefetchedPretouched）
+- ratio = median(after) / median(before) = 新既定 / 旧既定。ratio > 1.00 が後退セル（#3225・#1478 と同じ向き）
+
+[セル]
+- gemm cuda の reuse／fresh × N=256/512/1024/2048/4096（10）、train cuda の fresh／reuse（2）、infer cuda の fresh／reuse（2）
+- スクリプト: scripts/bench/framework-compare/run_confirm_readback_default_cuda.sh
+
+[計測]
+- 5 round 固定、プロセス独立起動、round ごとに起動順を反転。AB_LOAD_GATE_MODE=record_only（load1・GPU util を記録）
+- run の差し替え・追加起動はしない。同一 label の既存出力があれば停止する
+- 実機ロック（~/work/.fandhe-hw-lock）を持った状態の値だけを使う。bin の sha256・.rev-stamp とツリー指紋を記録・突合する
+- 計測中は同一ノードで他のビルド・テストを起動しない
+
+[#[ignore] 全件の突き合わせ（main との突き合わせの定義）]
+- 反転は origin/main に入済みのため、主系列は PR head（crates/*/src は origin/main と同一）を env 未設定で全件実行する
+- 範囲: backend-cuda 全件・backend-cpu・autodiff・tensor-core・facade（--tests）。範囲外: hf-hub・backend-rocm・onnx-interop・
+  bench-harness・guardrail・self-repair（readback に届かない・ネットワーク・ROCm 非搭載）
+- FAIL は 1 テストずつ (1) 単独再実行 (2) FANDHE_AI_CUDA_READBACK_DEST=pretouched で再実行 (3) 反転前 c00d27a11 で実行 の順に切り分け、
+  「反転が原因／既存の不具合／並走による一過性／環境要因」の 4 分類で件数とテスト名を記録する
+- 反転が原因の FAIL が出ても tolerance・baseline・PREFETCH_LIMITS は変えない。記録して止め、所有者判断事項として報告する
+
+[記録]
+- 後退セル（ratio > 1.00）は全て併記する。checksum 不一致は停止せず記録する
+- 性能の判定語は出力・記録に使わない。tolerance・parity baseline・FMA 契約・PREFETCH_LIMITS・#3225 RULE は変更しない
+
+[事前表明する期待値（仮説。実測ではない）]
+- gemm は #3225（§15.2）と同じ傾向。train／infer は readback の多くが 1 MiB 未満でプール対象外のため中立（0.98〜1.02 程度）
+- worker スレッド起動費用による微小な後退はありうる
+
+[対象外]
+- 残りのゲートの反転（§10.8.1・§10.8.2 に判定と理由。本 PR では反転しない）、f32 以外の型・Metal・MLP への拡張
