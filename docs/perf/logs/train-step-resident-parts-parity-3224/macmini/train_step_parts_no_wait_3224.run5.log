@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/train_step_parts_no_wait_3224.rs (<home>/work/target-fandhe-ai/release/deps/train_step_parts_no_wait_3224-6a92475480c11e37)
+
+running 2 tests
+test mlp_backward_parts_tracked_chain_issues_no_wait ... ok
+test mlp_backward_parts_tracked_chain_with_nan_inf_issues_no_wait ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+rc=0

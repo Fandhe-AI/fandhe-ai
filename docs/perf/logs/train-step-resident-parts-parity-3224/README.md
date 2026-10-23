@@ -4,8 +4,8 @@
 
 | 機体 | 状態 |
 |---|---|
-| Mac mini（Apple M4） | **未実測**（正式記録は未取得） |
-| DGX Spark GB10（sm_121） | **未実測**（正式記録は未取得） |
+| Mac mini（Apple M4） | **実測済み**（`e62cce21b`・2026-10-23・M1〜M5 x 5 run 全 pass・記録は `macmini/`） |
+| DGX Spark GB10（sm_121） | **未実測**（計測前の GPU に常駐サービス以外の compute プロセスがあり中止。下記「DGX Spark GB10」） |
 | 開発機（Apple M4 Max）での試走（記録ではない・1 回のみ） | 下記「試走で分かったこと」 |
 
 事前登録規則は `RULE.txt`（2026-10-23 固定。実測値を 1 件も含まない）。実測を取るときは、規則を変えず、
@@ -64,21 +64,63 @@ wait／同期が 0 であることと、各部品の出力がホスト版の連�
   - 本テストは共有 `pattern` に混ぜず専用テストに分けた（他形状の判定を巻き込まないため）。
     tolerance・判定式は変えていない。子 issue の reopen・コメントは未実施（ユーザー承認待ち）。
 
-## 実測記入欄（未記入）
+## 実測記入欄
 
 ### Mac mini（Apple M4）
 
-未実測。記入項目: 日付・コミット SHA と `dirty=0`・crate 版・rustc・macOS 版・M1〜M5 x 5 run の表・
-カウンタ（tracked の wait 差 0／非 tracked 対照 +1）・invalid の有無と理由・6 部品の判定。
+記録: `macmini/`（`.rev-stamp`・`tree-manifest-check.txt`・`env_info.txt`・`build.log`・`<name>.run{1..5}.log`・`DONE`・`summary.md`）。
+ホスト名・ユーザー名・絶対パスは `<metal-node>`・`<user>`・`<home>` へ置換済み。
+
+- 日付: 2026-10-23。計測コード: `e62cce21b7001327f0e5807e6539b863f80fdbd1`（main。#3218 の FTZ 修正〈PR #3548〉を含む）。
+  `dirty=0`（`tree-manifest-check.txt` 11894 件が全件 OK）。crate 版 0.11.0（workspace）。
+- 環境: Apple M4・macOS 27.0.1・rustc 1.99.0（b940084d7 2026-09-28）。`cargo build --release --tests -p fandhe-ai-backend-metal` は `build_rc=0`（判定外）。
+- 実行: `run_parity.sh metal`（独立プロセス x 5 run）。foreign の cargo／rustc 検知なし。invalid 0 件・再実行 0 件。
+
+| テスト | run1 | run2 | run3 | run4 | run5 |
+|---|---|---|---|---|---|
+| M1 relu_mask_device_parity | pass 6/6 | pass 6/6 | pass 6/6 | pass 6/6 | pass 6/6 |
+| M2 mse_device_parity | pass 5/5 | pass 5/5 | pass 5/5 | pass 5/5 | pass 5/5 |
+| M3 gemm_device_input_parity | pass 6/6 | pass 6/6 | pass 6/6 | pass 6/6 | pass 6/6 |
+| M4 train_step_parts_no_wait_3224 | pass 2/2 | pass 2/2 | pass 2/2 | pass 2/2 | pass 2/2 |
+| M5 gemm_device_tracked_token | pass 1/1 | pass 1/1 | pass 1/1 | pass 1/1 | pass 1/1 |
+
+総合: pass（`summary.md`。`summarize.py` は期待件数 6/5/6/2/1 を厳密検査して 0 終了）。
+
+カウンタ: カウンタ値はログへ出力されず、テスト内の assert が検査する。pass はその assert の成立を意味する。
+tracked 連結区間の `wait_until_completed` 差 = 0 は `crates/backend-metal/tests/train_step_parts_no_wait_3224.rs:206`、
+各部品の出力のビット一致（NaN はクラス一致）は同ファイル `assert_bits_or_nan_class`（:52）。
+tracked 版の失敗トークン登録と非 wait は `crates/backend-metal/src/ops.rs` の
+`gemm_device_tracked_registers_token_and_does_not_wait`（M5）。
+
+6 部品の判定（Metal）: 6 部品すべて pass（bit 一致・wait 0）。
+
+| 部品 | Metal | CUDA |
+|---|---|---|
+| ReLU マスク | pass（M1・M4） | 未実測 |
+| MSE forward／backward | pass（M2・M4） | 未実測 |
+| dW（TN・bias あり） | pass（M3・M4） | 未実測 |
+| d_input（Transposed） | pass（M3・M4） | 未実測 |
+
+`macmini-3218-fix/` との関係: 同ディレクトリは PR ブランチ上・マージ前の `af2c2ada` での #3218 修正の確認記録である。
+`macmini/` はマージ後の main（`e62cce21b`）での別の計測であり、RULE の「取り直し」ではない。両方とも pass で、どちらの結果も選別・除外していない。
+正式記録は `macmini/`。
 
 ### DGX Spark GB10
 
-未実測。記入項目: 日付・コミット SHA と `dirty=0`・crate 版・rustc・ドライバ／CUDA 版・C1〜C5 x 5 run の表・
-カウンタ（`stream_syncs`／`d2h_calls`／`h2d_calls` = 0・対照 >= 1）・invalid の有無と理由・6 部品の判定。
+**未実測（未検証）**。2026-10-23 に計測ノード（GB10・sm_121・CUDA 13.0・rustc 1.97.0）へ ssh で到達し、`e62cce21b` のツリーを
+`.rev-stamp`・`.tree-manifest` つきで転送する前に GPU を確認した。`nvidia-smi --query-compute-apps` に
+`VLLM::StageEngineCoreProc_stage0_replica0_DP0`・`VLLM::StageEngineCoreProc_stage1_replica0_DP0`（root 所有・稼働 11 日超）と
+ComfyUI の python があり（`utilization.gpu` は 0 %）、vLLM の 2 プロセスは確認済みの常駐サービス
+（ComfyUI・Kokoro・gateway）に含まれない。RULE.txt「計測中は別の GPU 負荷を並走させない」と `run_parity.sh` の
+許可リスト方式に従い、推定で `PARITY_RESIDENT_APP_REGEX` へ追加せず中止した（結果の選別ではない）。
+残作業: 常駐サービスであることの確認（所有者）または空きノードでの `run_parity.sh cuda`。C1〜C5 の期待件数は 5/5/7/1/4。
+カウンタの assert（CUDA）は `crates/backend-cuda/src/train_step_parts_sync_diag_tests_3224.rs`・
+`gemm_device_input_diag_tests_3223.rs` にある（`stream_syncs`／`d2h_calls`／`h2d_calls` = 0・対照 >= 1）。
+設計 §3 の CUDA の正の非正規化数マスク（NVRTC の ftz 無効）は実機で未確認。
 
 ## 不一致
 
-上記「試走で分かったこと」の Metal 非正規化数を除き、正式記録としての不一致は未取得。
+Metal（Mac mini・`macmini/`）の正式記録に不一致はない（M1〜M5 x 5 run 全 pass）。試走（開発機）で出た Metal の正の非正規化数マスクの不一致（部品: ReLU マスク・形状 `[64,256]`・入力: マスク `1e-40`・最初の食い違い: `idx 0: 0 vs -11`・分類: FTZ・戻し先 #3218）は #3218 の修正で解消した。CUDA は未実測のため判定なし。
 
 ## #3218 修正後の確認（Mac mini・2026-10-23）
 
@@ -99,4 +141,4 @@ Mac mini（Apple M4・macOS 27.0.1・rustc 1.99.0）で RULE.txt の M1〜M5 を
 - invalid（退避済み試行）: 0 件。
 - M1 の denormal ケース（`1e-40`・`1e-45`・`f32::from_bits(1)`・`0x007F_FFFF`・`f32::MIN_POSITIVE`・`±0`・`+inf`・正負の NaN、
   RowMajor／Transposed）は CPU 参照と bit 一致（NaN はクラス一致）。試走で出た `idx 0: 0 vs -11` は解消した。
-- 上記「状態」表の Mac mini の正式記録の採否は #3224 側の判断に委ねる（本取得分は版・手順が揃っており、正式記録として使える）。状態表は書き換えない。
+- 正式記録としては、マージ後の main で取り直した `macmini/` を採る（本取得分は #3218 修正の確認記録として残す。上記「実測記入欄」参照）。
