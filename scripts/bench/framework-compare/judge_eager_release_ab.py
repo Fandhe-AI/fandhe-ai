@@ -17,7 +17,7 @@ ratio = after / before。セルごとの before・after は各ちょうど 5 件
 - REJECT: 全 round で ratio > 1.00 のセル／処置セルの中央値 ratio > 1.00／checksum 不一致。
 - 負荷ゲートの証跡: 機体ごとに `run_ab_eager_release_cpu.sh` が出す `load_gate-*.log` を
   `--<machine>-gate-log` で必須入力とする（JSONL には系列の属性が残らないため）。ヘッダが
-  `series=official`・`threshold == rule_threshold`・`precheck=assert`、かつ round1〜5 がすべて
+  `series=official`・`threshold` と `rule_threshold` がともに機体の規則値（GB10=1.0・Mac mini=3.0）・`precheck=assert`、かつ round1〜5 がすべて
   `gate=pass gate_ok=1` でなければ undetermined（欠落・参考／smoke 系列・不通過 round を含む）。
   この検査は ADOPT・REJECT のどちらを出す経路よりも前に必ず通す。
 - それ以外は undetermined。`--record-only` 指定（負荷ゲート不通過の系列）は ADOPT も REJECT も出さず undetermined とし、後退は参考情報として残す。
@@ -35,6 +35,8 @@ PROFILES = {
     "macmini": {"gemm_sizes": [256, 512, 1024, 2048]},
 }
 TREATED_SIZES = (256, 512, 1024, 2048)
+# 機体ごとの専有ゲート規則値（RULE.txt の load1 閾値。run_ab_eager_release_cpu.sh の RULE_LOAD_GATE と同値）。
+RULE_LOAD_THRESHOLD = {"gb10": 1.0, "macmini": 3.0}
 
 
 class Undetermined(Exception):
@@ -108,9 +110,17 @@ def check_gate_log(profile, path):
         raise Undetermined(f"{profile}: 系列が official でない (series={head.get('series')!r})。参考系列は正式判定不可")
     if head.get("precheck") != "assert":
         raise Undetermined(f"{profile}: precheck が assert でない (precheck={head.get('precheck')!r})")
-    if not head.get("threshold") or head.get("threshold") != head.get("rule_threshold"):
-        raise Undetermined(
-            f"{profile}: 負荷閾値が規則値と不一致 (threshold={head.get('threshold')!r} rule={head.get('rule_threshold')!r})")
+    want = RULE_LOAD_THRESHOLD[profile]
+    for key in ("threshold", "rule_threshold"):
+        try:
+            got = float(head.get(key, ""))
+        except ValueError:
+            got = None
+        if got is None or not math.isfinite(got) or got != want:
+            raise Undetermined(
+                f"{profile}: 負荷閾値が機体の規則値 {want} と不一致 ({key}={head.get(key)!r})。他機体のログは受理しない")
+    if not head.get("threshold"):
+        raise Undetermined(f"{profile}: threshold が欠落")
     round_lines = [ln for ln in lines[1:] if ln.startswith("round")]
     names = [ln.split()[0] for ln in round_lines]
     if names != [f"round{i}" for i in range(1, ROUNDS + 1)]:

@@ -564,19 +564,32 @@ for path in sys.argv[2:]:
         if o.get("device") != dev:
             continue
         groups.setdefault((o.get("mode", "fresh"), str(o.get("size", "NA"))), []).append(o.get("checksum"))
-bad = []
+invalid, mismatch = [], []
 for (mode, size), cs in sorted(groups.items()):
-    numeric = all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in cs)
-    if not numeric or len(set(cs)) != 1:
-        bad.append("mode=%s size=%s" % (mode, size))
-print(", ".join(bad))
+    numeric = all(isinstance(c, (int, float)) and not isinstance(c, bool) and c == c and abs(c) != float("inf") for c in cs)
+    cell = "mode=%s size=%s" % (mode, size)
+    if not numeric:
+        invalid.append(cell)
+    elif len(set(cs)) != 1:
+        mismatch.append(cell)
+print("invalid:" + ", ".join(invalid))
+print("mismatch:" + ", ".join(mismatch))
 ' "$DEVICE" \
     "${OUT}/results-before-${LABEL}-${DEVICE}-${task}.jsonl" "${OUT}/results-after-${LABEL}-${DEVICE}-${task}.jsonl" 2>/dev/null)"
   CK_RC=$?
-  if [[ "$CK_RC" -ne 0 || -n "$CK_BAD" ]]; then
-    echo "compare task=$task: FAIL（checksum 完全一致の確認に失敗: ${CK_BAD:-検査不能 python exit=${CK_RC}}。機構の不具合として ADOPT／REJECT に数えず停止）" >>"$SKIP"
-    echo "compare task=$task exit=NA (FAIL: checksum 不一致。性能判定へ進まない)" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+  CK_INVALID="$(printf '%s\n' "$CK_BAD" | sed -n 's/^invalid://p')"
+  CK_MISMATCH="$(printf '%s\n' "$CK_BAD" | sed -n 's/^mismatch://p')"
+  if [[ "$CK_RC" -ne 0 || -n "$CK_INVALID" ]]; then
+    # 入力欠損・解析不能・非数値・非有限は REJECT ではなく判定不能（停止）。
+    echo "compare task=$task: FAIL（checksum の確認に失敗: ${CK_INVALID:-検査不能 python exit=${CK_RC}}。入力欠損・解析不能のため ADOPT／REJECT に数えず停止）" >>"$SKIP"
+    echo "compare task=$task exit=NA (FAIL: checksum 検査不能。性能判定へ進まない)" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
     ANY_FAILED=$((ANY_FAILED + 1))
+    continue
+  fi
+  if [[ -n "$CK_MISMATCH" ]]; then
+    # 有効な数値の checksum 不一致は RULE.txt どおり REJECT。性能比較は省き、judge が REJECT を出す。
+    echo "compare task=$task: REJECT（RULE.txt: checksum 不一致 1 件で REJECT。対象: ${CK_MISMATCH}）" >>"$SKIP"
+    echo "compare task=$task exit=NA (REJECT: checksum 不一致。RULE.txt どおり)" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
     continue
   fi
   SIZES_ARGS=()
@@ -619,7 +632,16 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
     "--${PROFILE}-gate-log" "$GATE_LOG")
   if [[ "$GATE_NOT_OK" -gt 0 || "$GATE_SERIES" != official ]]; then JUDGE_ARGS+=(--record-only); fi
   python3 -I judge_eager_release_ab.py "${JUDGE_ARGS[@]}" >"judge-3226-${LABEL}.md" 2>&1
-  echo "judge exit=$? (0=ADOPT 1=REJECT 2=undetermined) -> judge-3226-${LABEL}.md" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+  JUDGE_EXIT=$?
+  echo "judge exit=${JUDGE_EXIT} (0=ADOPT 1=REJECT 2=undetermined) -> judge-3226-${LABEL}.md" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"
+  case "$JUDGE_EXIT" in
+    0 | 1 | 2) ;;
+    *)
+      # 0/1/2 以外は判定結果ではなく実行エラー（python 起動失敗・未捕捉例外等）。失敗として伝播する。
+      echo "judge: 実行エラー（exit=${JUDGE_EXIT}。判定結果ではない。詳細は judge-3226-${LABEL}.md）" >>"$SKIP"
+      ANY_FAILED=$((ANY_FAILED + 1))
+      ;;
+  esac
 fi
 
 if [[ "$GATE_NOT_OK" -gt 0 ]]; then

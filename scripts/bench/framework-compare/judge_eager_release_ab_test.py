@@ -32,10 +32,16 @@ def make(profile, treated_ratio=0.9, other_ratio=0.99, checksum=1.0, drop=None, 
     return bp, ap
 
 
-def make_gate(series="official", precheck="assert", bad_round=None, threshold="3.0", rounds=5):
+RULE = {"gb10": "1.0", "macmini": "3.0"}
+
+
+def make_gate(series="official", precheck="assert", bad_round=None, threshold=None, rounds=5,
+              machine="macmini", rule=None):
+    threshold = threshold or RULE[machine]
+    rule = rule or RULE[machine]
     fd, path = tempfile.mkstemp(suffix=".log")
     with os.fdopen(fd, "w") as f:
-        f.write(f"threshold={threshold} rule_threshold=3.0 series={series} precheck={precheck}\n")
+        f.write(f"threshold={threshold} rule_threshold={rule} series={series} precheck={precheck}\n")
         for i in range(1, rounds + 1):
             ok = i != bad_round
             f.write(f"round{i} gate={'pass' if ok else 'timeout'} gate_ok={1 if ok else 0} "
@@ -47,7 +53,7 @@ def judge(machines=("gb10", "macmini"), gate=None, **kw):
     args = []
     for m in machines:
         b, a = make(m, **kw)
-        g = make_gate() if gate is None else gate
+        g = make_gate(machine=m) if gate is None else (gate if gate == "missing" else make_gate(machine=m, **gate))
         args += [f"--{m}-before", b, f"--{m}-after", a]
         if g != "missing":
             args += [f"--{m}-gate-log", g]
@@ -88,7 +94,7 @@ class T(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = J.main(["--gb10-before", b, "--gb10-after", a, "--macmini-before", mb, "--macmini-after", ma,
-                         "--gb10-gate-log", make_gate(), "--macmini-gate-log", make_gate()])
+                         "--gb10-gate-log", make_gate(machine="gb10"), "--macmini-gate-log", make_gate(machine="macmini")])
         self.assertEqual(rc, 1)
 
     def test_missing_machine_is_undetermined(self):
@@ -105,7 +111,7 @@ class T(unittest.TestCase):
         args = []
         for m in ("gb10", "macmini"):
             b, a = make(m)
-            args += [f"--{m}-before", b, f"--{m}-after", a, f"--{m}-gate-log", make_gate()]
+            args += [f"--{m}-before", b, f"--{m}-after", a, f"--{m}-gate-log", make_gate(machine=m)]
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(J.main(args + ["--record-only"]), 2)
 
@@ -113,7 +119,7 @@ class T(unittest.TestCase):
         args = []
         for m in ("gb10", "macmini"):
             b, a = make(m, other_ratio=1.01)
-            args += [f"--{m}-before", b, f"--{m}-after", a, f"--{m}-gate-log", make_gate()]
+            args += [f"--{m}-before", b, f"--{m}-after", a, f"--{m}-gate-log", make_gate(machine=m)]
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = J.main(args + ["--record-only"])
@@ -130,13 +136,29 @@ class T(unittest.TestCase):
 
     def test_reference_or_smoke_series_is_undetermined(self):
         for series in ("reference", "smoke"):
-            self.assertEqual(judge(gate=make_gate(series=series))[0], 2)
-        self.assertEqual(judge(gate=make_gate(precheck="report-only"))[0], 2)
+            self.assertEqual(judge(gate=dict(series=series))[0], 2)
+        self.assertEqual(judge(gate=dict(precheck="report-only"))[0], 2)
 
     def test_gate_failed_round_is_undetermined(self):
-        self.assertEqual(judge(gate=make_gate(bad_round=3))[0], 2)
-        self.assertEqual(judge(gate=make_gate(rounds=4))[0], 2)
-        self.assertEqual(judge(gate=make_gate(bad_round=3), treated_ratio=1.01)[0], 2)
+        self.assertEqual(judge(gate=dict(bad_round=3))[0], 2)
+        self.assertEqual(judge(gate=dict(rounds=4))[0], 2)
+        self.assertEqual(judge(gate=dict(bad_round=3), treated_ratio=1.01)[0], 2)
+
+    def test_gate_threshold_must_match_machine_rule(self):
+        # GB10 の規則は 1.0。Mac mini 用ログ（threshold=3.0）を GB10 に渡しても受理しない。
+        args = []
+        for m in ("gb10", "macmini"):
+            b, a = make(m)
+            args += [f"--{m}-before", b, f"--{m}-after", a, f"--{m}-gate-log", make_gate(machine="macmini")]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = J.main(args)
+        self.assertEqual(rc, 2)
+        self.assertIn("規則値", out.getvalue())
+        # 自己申告の rule_threshold を改ざんして threshold と揃えても、機体の規則値と違えば不受理。
+        self.assertEqual(judge(gate=dict(threshold="3.0", rule="3.0"), machines=("gb10",))[0], 2)
+        # 規則値より緩い閾値（macmini に 5.0）も不受理。
+        self.assertEqual(judge(gate=dict(threshold="5.0", rule="5.0"), machines=("macmini",))[0], 2)
 
 
 if __name__ == "__main__":
