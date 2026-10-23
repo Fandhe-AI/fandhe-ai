@@ -615,7 +615,8 @@ done
 # 同時に渡し --require-both）で行う。機体単独では ADOPT は出ない（相手機体の欠落＝判定不能）。
 if [[ "$ANY_FAILED" -eq 0 ]]; then
   JUDGE_ARGS=("--${PROFILE}-before" "$OUT/results-before-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-before-${LABEL}-${DEVICE}-infer.jsonl"
-    "--${PROFILE}-after" "$OUT/results-after-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-infer.jsonl")
+    "--${PROFILE}-after" "$OUT/results-after-${LABEL}-${DEVICE}-gemm.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-train.jsonl" "$OUT/results-after-${LABEL}-${DEVICE}-infer.jsonl"
+    "--${PROFILE}-gate-log" "$GATE_LOG")
   if [[ "$GATE_NOT_OK" -gt 0 || "$GATE_SERIES" != official ]]; then JUDGE_ARGS+=(--record-only); fi
   python3 -I judge_eager_release_ab.py "${JUDGE_ARGS[@]}" >"judge-3226-${LABEL}.md" 2>&1
   echo "judge exit=$? (0=ADOPT 1=REJECT 2=undetermined) -> judge-3226-${LABEL}.md" | tee -a "$OUT/compare-exit-3226-${DEVICE}-${LABEL}.log"

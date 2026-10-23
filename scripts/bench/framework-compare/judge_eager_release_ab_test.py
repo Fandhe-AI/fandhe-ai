@@ -32,11 +32,25 @@ def make(profile, treated_ratio=0.9, other_ratio=0.99, checksum=1.0, drop=None, 
     return bp, ap
 
 
-def judge(machines=("gb10", "macmini"), **kw):
+def make_gate(series="official", precheck="assert", bad_round=None, threshold="3.0", rounds=5):
+    fd, path = tempfile.mkstemp(suffix=".log")
+    with os.fdopen(fd, "w") as f:
+        f.write(f"threshold={threshold} rule_threshold=3.0 series={series} precheck={precheck}\n")
+        for i in range(1, rounds + 1):
+            ok = i != bad_round
+            f.write(f"round{i} gate={'pass' if ok else 'timeout'} gate_ok={1 if ok else 0} "
+                    f"threshold={threshold} load1=0.5\n")
+    return path
+
+
+def judge(machines=("gb10", "macmini"), gate=None, **kw):
     args = []
     for m in machines:
         b, a = make(m, **kw)
+        g = make_gate() if gate is None else gate
         args += [f"--{m}-before", b, f"--{m}-after", a]
+        if g != "missing":
+            args += [f"--{m}-gate-log", g]
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         rc = J.main(args)
@@ -73,7 +87,8 @@ class T(unittest.TestCase):
         mb, ma = make("macmini")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            rc = J.main(["--gb10-before", b, "--gb10-after", a, "--macmini-before", mb, "--macmini-after", ma])
+            rc = J.main(["--gb10-before", b, "--gb10-after", a, "--macmini-before", mb, "--macmini-after", ma,
+                         "--gb10-gate-log", make_gate(), "--macmini-gate-log", make_gate()])
         self.assertEqual(rc, 1)
 
     def test_missing_machine_is_undetermined(self):
@@ -90,7 +105,7 @@ class T(unittest.TestCase):
         args = []
         for m in ("gb10", "macmini"):
             b, a = make(m)
-            args += [f"--{m}-before", b, f"--{m}-after", a]
+            args += [f"--{m}-before", b, f"--{m}-after", a, f"--{m}-gate-log", make_gate()]
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(J.main(args + ["--record-only"]), 2)
 
@@ -98,7 +113,7 @@ class T(unittest.TestCase):
         args = []
         for m in ("gb10", "macmini"):
             b, a = make(m, other_ratio=1.01)
-            args += [f"--{m}-before", b, f"--{m}-after", a]
+            args += [f"--{m}-before", b, f"--{m}-after", a, f"--{m}-gate-log", make_gate()]
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = J.main(args + ["--record-only"])
@@ -106,6 +121,22 @@ class T(unittest.TestCase):
         self.assertIn("verdict: undetermined", out.getvalue())
         self.assertNotIn("verdict: REJECT", out.getvalue())
         self.assertIn("参考", out.getvalue())
+
+    def test_missing_gate_log_is_undetermined(self):
+        rc, out = judge(gate="missing")
+        self.assertEqual(rc, 2)
+        self.assertIn("負荷ゲートログ", out)
+        self.assertEqual(judge(gate="missing", treated_ratio=1.01)[0], 2)
+
+    def test_reference_or_smoke_series_is_undetermined(self):
+        for series in ("reference", "smoke"):
+            self.assertEqual(judge(gate=make_gate(series=series))[0], 2)
+        self.assertEqual(judge(gate=make_gate(precheck="report-only"))[0], 2)
+
+    def test_gate_failed_round_is_undetermined(self):
+        self.assertEqual(judge(gate=make_gate(bad_round=3))[0], 2)
+        self.assertEqual(judge(gate=make_gate(rounds=4))[0], 2)
+        self.assertEqual(judge(gate=make_gate(bad_round=3), treated_ratio=1.01)[0], 2)
 
 
 if __name__ == "__main__":

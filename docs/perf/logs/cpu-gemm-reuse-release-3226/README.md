@@ -38,8 +38,13 @@
    ```sh
    python3 -I judge_eager_release_ab.py --require-both \
      --gb10-before <gemm> <train> <infer> --gb10-after <gemm> <train> <infer> \
-     --macmini-before <gemm> <train> <infer> --macmini-after <gemm> <train> <infer>
+     --gb10-gate-log <load_gate ログ> \
+     --macmini-before <gemm> <train> <infer> --macmini-after <gemm> <train> <infer> \
+     --macmini-gate-log <load_gate ログ>
    ```
+
+   機体ごとの `load_gate-*.log` は必須入力（欠落・`series` が official 以外・precheck が assert 以外・
+   5/5 round が `gate=pass gate_ok=1` でない場合は undetermined）。
 
 ## 状態
 

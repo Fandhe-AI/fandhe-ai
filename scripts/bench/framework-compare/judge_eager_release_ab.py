@@ -15,6 +15,11 @@ ratio = after / before。セルごとの before・after は各ちょうど 5 件
 - ADOPT: 処置 4 セルの中央値 ratio <= 0.95 かつ 5/5 round で ratio < 1.00、
   両機体の非処置セルの中央値 ratio <= 1.00、checksum 全一致、両機体が揃っている。
 - REJECT: 全 round で ratio > 1.00 のセル／処置セルの中央値 ratio > 1.00／checksum 不一致。
+- 負荷ゲートの証跡: 機体ごとに `run_ab_eager_release_cpu.sh` が出す `load_gate-*.log` を
+  `--<machine>-gate-log` で必須入力とする（JSONL には系列の属性が残らないため）。ヘッダが
+  `series=official`・`threshold == rule_threshold`・`precheck=assert`、かつ round1〜5 がすべて
+  `gate=pass gate_ok=1` でなければ undetermined（欠落・参考／smoke 系列・不通過 round を含む）。
+  この検査は ADOPT・REJECT のどちらを出す経路よりも前に必ず通す。
 - それ以外は undetermined。`--record-only` 指定（負荷ゲート不通過の系列）は ADOPT も REJECT も出さず undetermined とし、後退は参考情報として残す。
 """
 import argparse
@@ -81,6 +86,40 @@ def load(paths):
                     raise Undetermined(f"{p}:{n}: checksum が欠落または非有限 ({c!r})")
                 cells.setdefault((o["task"], o["size"], o["mode"]), []).append(o)
     return cells
+
+
+def check_gate_log(profile, path):
+    """負荷ゲートログが「正式系列・5/5 round が gate_ok=1・precheck=assert」を示すか検証する。"""
+    if path is None:
+        raise Undetermined(f"{profile}: 負荷ゲートログ（--{profile}-gate-log）が未指定")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+    except OSError as e:
+        raise Undetermined(f"{profile}: 負荷ゲートログを開けない ({e})")
+    if not lines:
+        raise Undetermined(f"{profile}: 負荷ゲートログが空")
+
+    def kv(line):
+        return dict(tok.split("=", 1) for tok in line.split() if "=" in tok)
+
+    head = kv(lines[0])
+    if head.get("series") != "official":
+        raise Undetermined(f"{profile}: 系列が official でない (series={head.get('series')!r})。参考系列は正式判定不可")
+    if head.get("precheck") != "assert":
+        raise Undetermined(f"{profile}: precheck が assert でない (precheck={head.get('precheck')!r})")
+    if not head.get("threshold") or head.get("threshold") != head.get("rule_threshold"):
+        raise Undetermined(
+            f"{profile}: 負荷閾値が規則値と不一致 (threshold={head.get('threshold')!r} rule={head.get('rule_threshold')!r})")
+    round_lines = [ln for ln in lines[1:] if ln.startswith("round")]
+    names = [ln.split()[0] for ln in round_lines]
+    if names != [f"round{i}" for i in range(1, ROUNDS + 1)]:
+        raise Undetermined(f"{profile}: round 行が round1〜{ROUNDS} と一致しない ({names})")
+    for n, ln in zip(names, round_lines):
+        r = kv(ln)
+        if r.get("gate") != "pass" or r.get("gate_ok") != "1" or r.get("threshold") != head.get("threshold"):
+            raise Undetermined(
+                f"{profile} {n}: 負荷ゲート不通過または閾値不一致 (gate={r.get('gate')!r} gate_ok={r.get('gate_ok')!r})")
 
 
 def analyse(profile, before_paths, after_paths):
@@ -177,6 +216,7 @@ def main(argv=None):
     for m in PROFILES:
         ap.add_argument(f"--{m}-before", nargs="+", default=None)
         ap.add_argument(f"--{m}-after", nargs="+", default=None)
+        ap.add_argument(f"--{m}-gate-log", default=None)
     ap.add_argument("--record-only", action="store_true")
     ap.add_argument("--require-both", action="store_true",
                     help="（--combine 相当）片方の機体が欠けたら判定不能")
@@ -188,6 +228,7 @@ def main(argv=None):
             if (b is None) != (af is None):
                 raise Undetermined(f"{m}: before/after の片方だけが指定された")
             if b is not None:
+                check_gate_log(m, getattr(a, f"{m}_gate_log"))
                 rows += analyse(m, b, af)
                 machines.append(m)
         if not machines:
