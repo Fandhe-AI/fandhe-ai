@@ -533,6 +533,12 @@ pub(crate) fn gemm_blis_parallel_with_transpose(
         return Ok(());
     }
 
+    // m=64 専用 4 タイル SME 経路（#3235）。既定 OFF（[`SME_THIN_M64_ENABLED`]）かつ適格形状かつ
+    // SME 搭載のときだけ `Some`。それ以外は従来経路へ進む（OFF では `try_new` も呼ばれない）。
+    if let Some(r) = sme_thin_m64_path(SME_THIN_M64_ENABLED, a, b, c, m, n, k, transpose) {
+        return r;
+    }
+
     // ワークロード閾値直列フォールバック（イシュー #811・#1027）は
     // 本番結線しない（[`GEMM_THREADING_THRESHOLD`] ドキュメント
     // 「本番未結線」参照。REQ-8 正式対象実機 Apple M4 Max での境界
@@ -779,6 +785,13 @@ pub(crate) fn gemm_blis_bias_act_parallel_prepacked(
     // 結果（`c` 全 n 要素＝行パネル 1 つ分）へそのまま適用してよい。
     if m == 1 {
         gemm_row_vector(a, b, c, n);
+        return apply_epilogue(c, n, bias, act);
+    }
+
+    // m=64 専用 4 タイル SME 経路（#3235。既定 OFF）。Nn 固定で B 行は連続のため `prepack` は使わない。
+    // epilogue は GEMM 完了後に全体へ 1 回だけ当てる（asm へは融合しない。決定記録 §4.8 初版方針）。
+    if let Some(r) = sme_thin_m64_path(SME_THIN_M64_ENABLED, a, b, c, m, n, k, GemmTranspose::Nn) {
+        r?;
         return apply_epilogue(c, n, bias, act);
     }
 
@@ -3579,6 +3592,184 @@ fn sme_kernel_for_shape(m_total: usize, n: usize, k: usize) -> Option<microkerne
     }
 }
 
+/// m=64 専用 4 タイル SME カーネル（イシュー #3235）の本番ゲート。**既定 OFF**。
+///
+/// 設計の正は `docs/perf/cpu-gemm-sme-thin-m64-decision.md`（#3234 判定 (A)）。既定 ON への反転は
+/// #3236（Mac mini の事前登録 A/B）の ADOPT が前提で、本 issue では性能を測っていない。
+/// **ロールバックは本 const を `false` に戻す 1 行のみ**。環境変数・実行時設定では切り替えない。
+/// ドリフト検出は `sme_thin_m64_disabled_by_default`。
+const SME_THIN_M64_ENABLED: bool = false;
+
+/// m=64 専用経路の適格形状判定（純関数）。`n` は 16 の倍数（端のマスク付きストアは未対応で従来経路へ
+/// 落とす）、転置は Nn／Nt のみ（Tn は対象外）。k の下限は #3236 の格子で決めるため置かず `k >= 1` だけ
+/// を要求する（`k == 0` は従来経路に任せる）。
+#[cfg(target_arch = "aarch64")]
+fn thin_m64_shape_eligible(m: usize, n: usize, k: usize, transpose: GemmTranspose) -> bool {
+    m == 64
+        && n >= 16
+        && n.is_multiple_of(16)
+        && k >= 1
+        && matches!(transpose, GemmTranspose::Nn | GemmTranspose::Nt)
+}
+
+/// 本番ゲート式: `enabled` かつ [`thin_m64_shape_eligible`] のときだけ
+/// [`microkernel::SmeKernel::try_new`] を呼ぶ（短絡評価。OFF では検出も走らず従来経路と同一）。
+/// 本番は [`SME_THIN_M64_ENABLED`] を渡し、テストは `true` を渡す。
+#[cfg(target_arch = "aarch64")]
+fn thin_m64_kernel_for_shape(
+    enabled: bool,
+    m: usize,
+    n: usize,
+    k: usize,
+    transpose: GemmTranspose,
+) -> Option<microkernel::SmeKernel> {
+    if enabled && thin_m64_shape_eligible(m, n, k, transpose) {
+        microkernel::SmeKernel::try_new()
+    } else {
+        None
+    }
+}
+
+/// m=64 専用経路の入口（aarch64 版）。`gemm_blis_parallel_with_transpose`／
+/// `gemm_blis_bias_act_parallel_prepacked`（いずれも `validate_dims` 通過後）から呼ばれる。
+/// 適格かつ SME 搭載なら [`thin_m64_drive`] を実行して `Some(結果)`、それ以外は `None`
+/// （従来経路へ fall through）。本経路は GB10 affinity／`run_capped` の外で現在の rayon プールを使う
+/// （スレッド方針は #3236 で扱う。GB10 では `try_new` が `None` でここへ入らない）。
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+fn sme_thin_m64_path(
+    enabled: bool,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    transpose: GemmTranspose,
+) -> Option<Result<(), GemmError>> {
+    let b_transposed = match transpose {
+        GemmTranspose::Nn => false,
+        GemmTranspose::Nt => true,
+        GemmTranspose::Tn => return None,
+    };
+    let kernel = thin_m64_kernel_for_shape(enabled, m, n, k, transpose)?;
+    Some(thin_m64_drive(kernel, a, b, c, n, k, b_transposed))
+}
+
+/// 非 aarch64 版: SME は存在しないため常に `None`（従来経路。x86_64 CI でも fall through を検証できる）。
+#[cfg(not(target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
+fn sme_thin_m64_path(
+    _enabled: bool,
+    _a: &[f32],
+    _b: &[f32],
+    _c: &mut [f32],
+    _m: usize,
+    _n: usize,
+    _k: usize,
+    _transpose: GemmTranspose,
+) -> Option<Result<(), GemmError>> {
+    None
+}
+
+/// m=64 専用ドライバ。A を `[p][64]` へ 1 回だけ pack し、n/16 個の 64×16 列ブロックを rayon job に
+/// する。C は job-local の連続バッファ（ldc=16）へ copy-in → カーネル → 並列区間後に直列で copy-out
+/// する（スレッド間で生ポインタを共有する新規 `unsafe` を増やさないため。copy は値の転写のみで演算列は
+/// 変わらず bit 一致を保つ。決定記録 §4.2 の「ldc=n 直接ストア」からの差分は追記節に記録）。
+/// Nn は B 行が連続のため `b[j0..]`（stride n）を直接読み、Nt は job ごとに `[p][16]` へ pack する
+/// （`prepack` は使わない）。REQ-8: pack・asm の前に `checked_*` で全長を検査し型付きエラーで返す。
+#[cfg(target_arch = "aarch64")]
+fn thin_m64_drive(
+    kernel: microkernel::SmeKernel,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    b_transposed: bool,
+) -> Result<(), GemmError> {
+    use microkernel::TileBoundsError;
+    const M: usize = 64;
+    const NR: usize = 16;
+    let overflow = || TileBoundsError::NonPositiveMrOrOverflow { mr: M, ldc: n };
+    let a_len = M.checked_mul(k).ok_or_else(overflow)?;
+    let b_len = k.checked_mul(n).ok_or_else(overflow)?;
+    let c_len = M.checked_mul(n).ok_or_else(overflow)?;
+    n.checked_mul(size_of::<f32>()).ok_or_else(overflow)?;
+    if a.len() < a_len {
+        return Err(TileBoundsError::PanelLengthMismatch {
+            panel: "ap",
+            actual: a.len(),
+        }
+        .into());
+    }
+    if b.len() < b_len {
+        return Err(TileBoundsError::PanelLengthMismatch {
+            panel: "bp",
+            actual: b.len(),
+        }
+        .into());
+    }
+    if c.len() < c_len {
+        return Err(TileBoundsError::CBufferTooSmall {
+            required: c_len,
+            actual: c.len(),
+        }
+        .into());
+    }
+    let mut ap = vec![0.0f32; a_len];
+    pack::pack_a(
+        &mut ap,
+        a,
+        pack::APackTile {
+            k_total: k,
+            row_start: 0,
+            mr: M,
+            mr_eff: M,
+            kc_start: 0,
+            kc_len: k,
+        },
+    );
+    let c_ro: &[f32] = c;
+    let blocks: Vec<Vec<f32>> = (0..n / NR)
+        .into_par_iter()
+        .map(|jb| -> Result<Vec<f32>, GemmError> {
+            let j0 = jb * NR;
+            let mut local = vec![0.0f32; M * NR];
+            for r in 0..M {
+                local[r * NR..(r + 1) * NR].copy_from_slice(&c_ro[r * n + j0..r * n + j0 + NR]);
+            }
+            if b_transposed {
+                let mut bpack = vec![0.0f32; k * NR];
+                pack::pack_b_from_transposed(
+                    &mut bpack,
+                    b,
+                    pack::BTPackTile {
+                        k_total: k,
+                        n_total: n,
+                        kc_start: 0,
+                        kc_len: k,
+                        col_start: j0,
+                        nr: NR,
+                        nr_eff: NR,
+                    },
+                );
+                kernel.run_thin_m64_block(&ap, &bpack, NR, &mut local, NR, k)?;
+            } else {
+                kernel.run_thin_m64_block(&ap, &b[j0..], n, &mut local, NR, k)?;
+            }
+            Ok(local)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (jb, local) in blocks.iter().enumerate() {
+        let j0 = jb * NR;
+        for r in 0..M {
+            c[r * n + j0..r * n + j0 + NR].copy_from_slice(&local[r * NR..(r + 1) * NR]);
+        }
+    }
+    Ok(())
+}
+
 /// テスト・A/B 計測専用: [`GemmDriverVariant::TwoDDynamic`] の
 /// `jobs_per_worker`／`transpose` を注入できるパラメータ化入口
 /// （イシュー #1311・設計 §5.2「`#[cfg(test)]` のパラメータ化入口」）。
@@ -5742,6 +5933,171 @@ mod tests {
                 assert_eq!(fused_ref, fused, "bias+relu ({m},{n},{k}) T={threads}");
             }
         }
+    }
+
+    /// イシュー #3235: 非 aarch64（CI の x86_64 を含む）ではゲート ON でも `None`（従来経路）で、
+    /// C を変更しない。aarch64 では SME 非搭載ホストで同じ契約になる。
+    #[test]
+    fn sme_thin_m64_path_falls_through_without_sme() {
+        let (m, n, k) = (64usize, 32usize, 5usize);
+        let a = vec![1.0f32; m * k];
+        let b = vec![1.0f32; k * n];
+        let mut c = vec![7.0f32; m * n];
+        let r = sme_thin_m64_path(true, &a, &b, &mut c, m, n, k, GemmTranspose::Nn);
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            assert!(r.is_none());
+            assert!(c.iter().all(|&v| v == 7.0));
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(r.is_some(), crate::sme_detect::sme_report().kernel_enabled);
+        }
+    }
+
+    /// イシュー #3235: 既定 OFF のドリフト検出。OFF では適格形状でも `None`（`try_new` を呼ばない）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn sme_thin_m64_disabled_by_default() {
+        assert!(!std::hint::black_box(SME_THIN_M64_ENABLED));
+        let (m, n, k) = (64usize, 256usize, 784usize);
+        let a = vec![0.0f32; m * k];
+        let b = vec![0.0f32; k * n];
+        let mut c = vec![0.0f32; m * n];
+        assert!(sme_thin_m64_path(false, &a, &b, &mut c, m, n, k, GemmTranspose::Nn).is_none());
+        assert!(thin_m64_kernel_for_shape(false, m, n, k, GemmTranspose::Nn).is_none());
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn thin_m64_shape_eligibility_boundaries() {
+        use GemmTranspose::{Nn, Nt, Tn};
+        assert!(thin_m64_shape_eligible(64, 256, 784, Nn));
+        assert!(thin_m64_shape_eligible(64, 784, 256, Nt));
+        assert!(thin_m64_shape_eligible(64, 16, 1, Nn));
+        assert!(!thin_m64_shape_eligible(63, 256, 784, Nn));
+        assert!(!thin_m64_shape_eligible(65, 256, 784, Nn));
+        for n in [0usize, 10, 17] {
+            assert!(!thin_m64_shape_eligible(64, n, 64, Nn), "n={n}");
+        }
+        assert!(thin_m64_shape_eligible(64, 32, 64, Nn));
+        assert!(!thin_m64_shape_eligible(64, 32, 0, Nn));
+        assert!(!thin_m64_shape_eligible(64, 256, 784, Tn));
+        assert_eq!(
+            thin_m64_kernel_for_shape(true, 64, 256, 784, Nn).is_some(),
+            crate::sme_detect::sme_report().kernel_enabled
+        );
+        assert!(thin_m64_kernel_for_shape(true, 64, 10, 256, Nn).is_none());
+    }
+
+    /// イシュー #3235: ゲート ON の m=64 経路が `gemm_naive`・NEON 強制と bit 一致（SME 搭載ホスト）、
+    /// 非搭載ホストでは従来経路へ fall through しても同じ出力になる。C 初期値は 0 と非ゼロの 2 通り。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sme_thin_m64_matches_naive_and_neon_bit_exact() {
+        let shapes: &[(usize, usize, usize)] = &[
+            (64, 256, 784),
+            (64, 784, 256),
+            (64, 256, 10),
+            (64, 16, 1),
+            (64, 32, 7),
+            (64, 48, 64),
+        ];
+        for &(m, n, k) in shapes {
+            for nonzero_c in [false, true] {
+                let a = xorshift32_vec(0x2468_ace1 ^ (n as u32), m * k);
+                let b = xorshift32_vec(0x1357_bdf9 ^ (k as u32), k * n);
+                let mut bt = vec![0.0f32; n * k];
+                for p in 0..k {
+                    for j in 0..n {
+                        bt[j * k + p] = b[p * n + j];
+                    }
+                }
+                let c0 = if nonzero_c {
+                    xorshift32_vec(0x0bad_cafe ^ (n as u32), m * n)
+                } else {
+                    vec![0.0f32; m * n]
+                };
+                let mut naive = c0.clone();
+                // gemm_naive は C を 0 初期化せず累積する契約（単一連続 K ループの FMA）。
+                crate::gemm::gemm_naive(&a, &b, &mut naive, m, n, k).unwrap();
+                let mut neon = c0.clone();
+                gemm_blis_parallel_variant(
+                    GemmDriverVariant::TwoDDynamicNeon,
+                    &a,
+                    &b,
+                    &mut neon,
+                    m,
+                    n,
+                    k,
+                    default_blocks(),
+                )
+                .unwrap();
+                assert_eq!(naive, neon, "NEON 参照 ({m},{n},{k}) nz={nonzero_c}");
+                let sme_enabled = crate::sme_detect::sme_report().kernel_enabled;
+                for &threads in &[1usize, 2, 3, 4, 8] {
+                    for tr in [GemmTranspose::Nn, GemmTranspose::Nt] {
+                        let mut got = c0.clone();
+                        let (aa, bb) = (&a, if tr == GemmTranspose::Nt { &bt } else { &b });
+                        let r = install_in_pool_for_test(threads, || {
+                            sme_thin_m64_path(true, aa, bb, &mut got, m, n, k, tr)
+                        });
+                        match r {
+                            Some(res) => {
+                                res.unwrap();
+                                assert!(sme_enabled);
+                            }
+                            None => {
+                                assert!(!sme_enabled);
+                                got = c0.clone();
+                                install_in_pool_for_test(threads, || {
+                                    gemm_blis_parallel_with_transpose(aa, bb, &mut got, m, n, k, tr)
+                                })
+                                .unwrap();
+                            }
+                        }
+                        assert_eq!(
+                            naive, got,
+                            "({m},{n},{k}) {tr:?} T={threads} nz={nonzero_c}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// イシュー #3235: bias+ReLU（GEMM 後に 1 回 epilogue）が既定ゲート経路と bit 一致する。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sme_thin_m64_bias_relu_matches_production() {
+        let (m, n, k) = (64usize, 256usize, 784usize);
+        let a = xorshift32_vec(11, m * k);
+        let b = xorshift32_vec(12, k * n);
+        let bias = xorshift32_vec(13, n);
+        let mut expect = vec![0.0f32; m * n];
+        gemm_blis_bias_act_parallel(&a, &b, &mut expect, m, n, k, Some(&bias), Activation::Relu)
+            .unwrap();
+        let mut got = vec![0.0f32; m * n];
+        match sme_thin_m64_path(true, &a, &b, &mut got, m, n, k, GemmTranspose::Nn) {
+            Some(r) => {
+                r.unwrap();
+                apply_epilogue(&mut got, n, Some(&bias), Activation::Relu).unwrap();
+                assert_eq!(expect, got);
+            }
+            None => assert!(!crate::sme_detect::sme_report().kernel_enabled),
+        }
+    }
+
+    /// イシュー #3235: 不適格形状は `None`（従来経路）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn sme_thin_m64_ineligible_shape_falls_through() {
+        let (m, n, k) = (64usize, 10usize, 256usize);
+        let a = vec![0.0f32; m * k];
+        let b = vec![0.0f32; k * n];
+        let mut c = vec![0.0f32; m * n];
+        assert!(sme_thin_m64_path(true, &a, &b, &mut c, m, n, k, GemmTranspose::Nn).is_none());
     }
 
     /// イシュー #1366: `IcDynamic` が小さい **kc** で pc 同期点を複数
