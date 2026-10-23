@@ -613,21 +613,11 @@ if [[ "$ANY_FAILED" -eq 0 ]]; then
     exit 1
   fi
   echo "done. results in $OUT_BEFORE / $OUT_AFTER ; manifest in $MANIFEST"
-  # 確認計測（判定なし）: 5 run 中央値の ratio・run 内比・checksum を compare_gemm_ab.py で表にするだけ。
-  # gemm は全 10 セルを --sizes full で、train／infer は --task で比較する。各比較器の終了コードは
-  # 記録し、checksum 不一致があっても計測は停止しない（性能の判定語は出力・記録に使わない）。
+  # 確認計測（判定なし）: 5 run 中央値の ratio・run 内比・checksum を summarize_readback_confirm.py で
+  # 表にするだけ（compare_gemm_ab.py は gemm・train・infer 混在 JSONL と N=256／512 を含む集合を
+  # 扱えないため使わない。2026-10-24 の初回実測で判明）。性能の判定語は出力・記録に使わない。
   {
-    echo "## gemm (cuda, sizes=full, threshold=1.00。ratio>1.00 が後退セル)"
-    python3 compare_gemm_ab.py "$OUT_BEFORE" "$OUT_AFTER" --device cuda --sizes full --threshold 1.00 --per-run
-    echo "(compare_gemm_ab gemm exit=$?)"
-    echo
-    echo "## train (cuda)"
-    python3 compare_gemm_ab.py "$OUT_BEFORE" "$OUT_AFTER" --device cuda --task train --threshold 1.00 --per-run
-    echo "(compare_gemm_ab train exit=$?)"
-    echo
-    echo "## infer (cuda)"
-    python3 compare_gemm_ab.py "$OUT_BEFORE" "$OUT_AFTER" --device cuda --task infer --threshold 1.00 --per-run
-    echo "(compare_gemm_ab infer exit=$?)"
+    python3 -I summarize_readback_confirm.py "$OUT_BEFORE" "$OUT_AFTER"
   } | write_excl "$REPORT"
   # 比較器と書き込み先の両方の終了状態を検査する（片方だけ見ると、write_excl 失敗で
   # レポートが無いのに exit 0 になる。fail-closed。security.md A08）。
