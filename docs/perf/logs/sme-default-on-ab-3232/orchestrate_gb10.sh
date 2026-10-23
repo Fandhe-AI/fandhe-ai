@@ -167,7 +167,7 @@ rm -rf "${WORK}/target-bd" "${WORK}/target-probe"
 
 # 収録（マスク）
 collect_rc=0
-for f in "${OUT}/run_ab.log" "${OUT}/patch_apply.log"; do
+for f in "${OUT}/run_ab.log" "${OUT}/patch_apply.log" "${OUT}/bitdump/cmp.txt"; do
     [ -e "${f}" ] || continue
     if mask < "${f}" > "${f}.masked"; then mv "${f}.masked" "${f}"; else rm -f "${f}.masked"; collect_rc=1; fi
 done

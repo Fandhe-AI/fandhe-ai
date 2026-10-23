@@ -94,16 +94,24 @@ def find_one(pattern):
     return hits[0]
 
 
-def load_arm_cells(ab, arm):
+def load_arm_cells(ab, arm, problems):
+    """読めた行だけを返し、欠測・件数不足・不正行は problems へ収集する（例外で打ち切らない）。
+
+    checksum 不一致（FAIL）の確認を欠測で妨げないため（RULE §4: FAIL は常に最優先）。"""
     out = {}
     for task in KNOWN_TASKS:
-        path = find_one(os.path.join(ab, "results-%s-*-cpu-%s.jsonl" % (arm, task)))
-        for o in load_rows(path, task):
+        try:
+            path = find_one(os.path.join(ab, "results-%s-*-cpu-%s.jsonl" % (arm, task)))
+            rows = load_rows(path, task)
+        except AggError as e:
+            problems.append("arm=%s: %s" % (arm, e))
+            continue
+        for o in rows:
             out.setdefault((task, o["size"], o.get("mode", "fresh")), []).append(o)
     for cell in CELLS:
         n = len(out.get(cell, []))
         if n != ROUNDS:
-            raise AggError("P-CELLS 不成立: arm=%s cell=%s は %d 行（%d 行ちょうどを要求）" % (arm, cell, n, ROUNDS))
+            problems.append("P-CELLS 不成立: arm=%s cell=%s は %d 行（%d 行ちょうどを要求）" % (arm, cell, n, ROUNDS))
     return out
 
 
@@ -125,7 +133,8 @@ def load_torch(ab):
             o = json.loads(line)
         except ValueError:
             return None, "PyTorch 行が不正（%s:%d・記録のみ・判定に影響しない）" % (os.path.basename(hits[0]), i)
-        if not isinstance(o, dict) or not finite_num(o.get("median_s")) or o["median_s"] <= 0 \
+        if not isinstance(o, dict) or not isinstance(o.get("task"), str) or o["task"] not in KNOWN_TASKS \
+                or not finite_num(o.get("median_s")) or o["median_s"] <= 0 \
                 or isinstance(o.get("size"), bool) or not isinstance(o.get("size"), int):
             return None, "PyTorch 行が不正（%s:%d・記録のみ・判定に影響しない）" % (os.path.basename(hits[0]), i)
         rows.append(o)
@@ -147,17 +156,21 @@ def evaluate(base, host):
     """host のログ 1 式を評価して dict を返す。AggError は呼び出し側で undetermined へ写す。"""
     ab = os.path.join(base, "ab")
     res = {"host": host, "gate_fail": [], "notes": []}
-    arm = {a: load_arm_cells(ab, a) for a in ("before", "after")}
-    # checksum 完全一致（FAIL）
+    problems = []
+    arm = {a: load_arm_cells(ab, a, problems) for a in ("before", "after")}
+    # checksum 完全一致（FAIL）。読めた行だけで先に確認し、欠測があっても FAIL を保持する
     ck_bad = []
     for cell in CELLS:
-        vals = [o["checksum"] for a in arm for o in arm[a][cell]]
-        if len(set(vals)) != 1:
+        vals = [o["checksum"] for a in arm for o in arm[a].get(cell, [])]
+        if len(set(vals)) > 1:
             ck_bad.append(cell)
     res["checksum_bad"] = ck_bad
-    # セルごとの比
+    res["incomplete"] = bool(problems)
+    res["gate_fail"].extend(problems)
+    # セルごとの比（欠測があれば算出せず、前提ゲートと FAIL 確認だけ続ける）
     stats = {}
-    for cell in CELLS:
+    cells_for_stats = [] if problems else CELLS
+    for cell in cells_for_stats:
         ratios = [arm["after"][cell][i]["median_s"] / arm["before"][cell][i]["median_s"] for i in range(ROUNDS)]
         stats[cell] = {
             "ratios": ratios,
@@ -172,6 +185,8 @@ def evaluate(base, host):
     # 前提ゲート。checksum 不一致（FAIL）を確定済みのため、ここでのログ欠損・不正は AggError で
     # 検出済みの FAIL を捨てず、追加の前提不成立理由として gate_fail へ収集する（RULE §4: FAIL は常に最優先）
     gf = res["gate_fail"]
+    if problems:
+        gf.append("前提不成立: 計測ログの欠測・不足のため性能判定（比・後退・到達判定）を行わない")
 
     def rd(path):
         try:
@@ -241,7 +256,10 @@ def evaluate(base, host):
             res["bitdump_cmp_exit"] = int(bd.group(2))
             if bd.group(1) != "0":
                 gf.append("bitdump: 行数が期待と一致しない・実行失敗（比較不能）")
-            elif bd.group(2) != "0":
+            elif bd.group(2) != "1" and bd.group(2) != "0":
+                # cmp の終了コード 2 等は実行エラー（比較不能）。bit 不一致（終了コード 1）とは区別する
+                gf.append("bitdump: cmp が実行エラー（exit=%s・比較不能）" % bd.group(2))
+            elif bd.group(2) == "1":
                 # 両 dump を正常取得できたうえで内容が不一致。実行失敗・比較不能とは区別し、前提ゲート・性能判定より先に FAIL として報告する
                 res["bitdump_mismatch"] = True
         if summ is not None:
@@ -249,7 +267,9 @@ def evaluate(base, host):
     # PyTorch 相手比（記録のみ）
     torch, torch_note = load_torch(ab)
     res["torch"] = None
-    if torch is None:
+    if problems:
+        res["notes"].append("計測ログ欠測のため PyTorch 相手比を省略")
+    elif torch is None:
         res["notes"].append(torch_note)
     else:
         tr = {}
@@ -267,6 +287,13 @@ def evaluate(base, host):
     else:
         res["reach"] = []
         res["guard"] = list(CELLS)
+    if problems:
+        res["consistent_regress"] = []
+        res["reach_ok"] = False
+        res["verdict"] = "FAIL" if (ck_bad or res["bitdump_mismatch"]) else "undetermined"
+        if res["bitdump_mismatch"]:
+            res["notes"].append("bitdump の cmp が不一致（bit 同一でない。bit 同一のフォールバックが成り立たない）")
+        return res
     consistent = [c for c in CELLS if stats[c]["n_gt"] == ROUNDS]
     res["consistent_regress"] = consistent
     reach_ok = all(stats[c]["median"] <= 1.0 and stats[c]["n_le"] == ROUNDS for c in res["reach"])
@@ -291,24 +318,27 @@ def render(res, other):
     host = res["host"]
     L = ["# #3232 厳密集計 (%s)" % host, "",
          "機械出力（`python3 -I aggregate.py` の出力。手で直さない）。腕: before = OFF・after = ON。比 = ON / OFF（<= 1.00 なら ON が速い）。", ""]
-    L += ["## セルごと（5 round 中央値）", "",
-          "| セル | 到達区分 | OFF 中央値(s) | ON 中央値(s) | ON/OFF 中央値比 | round 別比 | <=1.00 | >1.00 | checksum |",
-          "|---|---|---|---|---|---|---|---|---|"]
-    for c in CELLS:
-        s = res["stats"][c]
-        cls = "到達" if c in res["reach"] else "ガード（非到達）"
-        L.append("| %s %d %s | %s | %.6g | %.6g | %s | %s | %d | %d | %r |" % (
-            c[0], c[1], c[2], cls, s["off_med"], s["on_med"], fmt(s["median"]),
-            " ".join("r%d=%s" % (i + 1, fmt(r)) for i, r in enumerate(s["ratios"])), s["n_le"], s["n_gt"], s["checksum"]))
-    L += ["", "## 相手（PyTorch）比: PyTorch median / fandhe median の 5 round 中央値（記録のみ・判定に使わない）", ""]
-    if res["torch"] is None:
-        L.append("PyTorch 相手比なし（未計測・欠測。注記参照）。")
+    if res.get("incomplete"):
+        L += ["計測ログの欠測・不足のためセルごとの比・相手比は算出しない（前提ゲート・FAIL 確認のみ実施）。", ""]
     else:
-        L += ["| セル | OFF | ON | 系列 B（参考。0.11.0 registry 版・本 run の値ではない） |", "|---|---|---|---|"]
+        L += ["## セルごと（5 round 中央値）", "",
+              "| セル | 到達区分 | OFF 中央値(s) | ON 中央値(s) | ON/OFF 中央値比 | round 別比 | <=1.00 | >1.00 | checksum |",
+              "|---|---|---|---|---|---|---|---|---|"]
         for c in CELLS:
-            t = res["torch"][c]
-            ref = SERIES_B.get((c[0], c[1]))
-            L.append("| %s %d %s | %s | %s | %s |" % (c[0], c[1], c[2], fmt(t["before"]), fmt(t["after"]), "%.2f" % ref if (ref and host == "macmini") else "-"))
+            s = res["stats"][c]
+            cls = "到達" if c in res["reach"] else "ガード（非到達）"
+            L.append("| %s %d %s | %s | %.6g | %.6g | %s | %s | %d | %d | %r |" % (
+                c[0], c[1], c[2], cls, s["off_med"], s["on_med"], fmt(s["median"]),
+                " ".join("r%d=%s" % (i + 1, fmt(r)) for i, r in enumerate(s["ratios"])), s["n_le"], s["n_gt"], s["checksum"]))
+        L += ["", "## 相手（PyTorch）比: PyTorch median / fandhe median の 5 round 中央値（記録のみ・判定に使わない）", ""]
+        if res["torch"] is None:
+            L.append("PyTorch 相手比なし（未計測・欠測。注記参照）。")
+        else:
+            L += ["| セル | OFF | ON | 系列 B（参考。0.11.0 registry 版・本 run の値ではない） |", "|---|---|---|---|"]
+            for c in CELLS:
+                t = res["torch"][c]
+                ref = SERIES_B.get((c[0], c[1]))
+                L.append("| %s %d %s | %s | %s | %s |" % (c[0], c[1], c[2], fmt(t["before"]), fmt(t["after"]), "%.2f" % ref if (ref and host == "macmini") else "-"))
     L += ["", "## 前提ゲート", ""]
     L += ["- " + g for g in res["gate_fail"]] if res["gate_fail"] else ["- すべて成立"]
     if res.get("bitdump_summary"):
@@ -318,7 +348,7 @@ def render(res, other):
     L += ["", "## 後退", "",
           "- 5/5 一貫の後退セル: %s" % (", ".join("%s %d %s" % c for c in res["consistent_regress"]) or "なし"),
           "- 中央値 > 1.00 だが 5/5 一貫でないセル（後退の証拠なし・ノイズ帯）: %s" % (
-              ", ".join("%s %d %s(%s)" % (c + (fmt(res["stats"][c]["median"]),)) for c in CELLS
+              ", ".join("%s %d %s(%s)" % (c + (fmt(res["stats"][c]["median"]),)) for c in res["stats"]
                         if res["stats"][c]["median"] > 1.0 and res["stats"][c]["n_gt"] < ROUNDS) or "なし")]
     for n in res["notes"]:
         L.append("- 注記: " + n)
@@ -363,7 +393,7 @@ def _write(path, text):
     open(path, "w", encoding="utf-8").write(text)
 
 
-def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False):
+def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False, bd_cmp=None):
     ab = os.path.join(root, "ab")
     for arm in ("before", "after"):
         for task in KNOWN_TASKS:
@@ -394,6 +424,8 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
         _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "")
     elif torch_mode == "partial":
         _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "\n".join(tl[:-3]) + "\n")
+    elif torch_mode == "badtask":
+        _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), json.dumps({"task": ["x"], "size": 256, "median_s": 0.1}) + "\n")
     elif torch_mode == "garbage":
         _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "not json\n")
     g = "".join("round%d gate=%s gate_ok=%d threshold=3.0 load1=0.5 waited_s=0 at=x\n" % (r, "pass" if gate_ok else "timeout", 1 if gate_ok else 0) for r in range(1, 6))
@@ -405,7 +437,7 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
     _write(os.path.join(root, "sme_report.txt"), "off: sme_report= kernel_enabled: %s\non: sme_report= kernel_enabled: %s\n" % (k, k))
     lg = "run_ab exit=0\ncollect exit=0\n"
     if host == "gb10":
-        lg += "rt_on exit=0\nbitdump exit=%d cmp_exit=%d\n" % (1 if bd_fail else 0, 1 if bd_mismatch else 0)
+        lg += "rt_on exit=0\nbitdump exit=%d cmp_exit=%d\n" % (1 if bd_fail else 0, bd_cmp if bd_cmp is not None else (1 if bd_mismatch else 0))
         _write(os.path.join(root, "load_gate_outer.log"), "start attempt=1 load1=0.1 gpu_util=0 pass\n")
         _write(os.path.join(root, "bitdump", "summary.txt"), "off_lines=6726847 on_lines=6726847 expected=6726847\n")
     _write(os.path.join(root, "load_gate.log"), lg)
@@ -441,8 +473,8 @@ def self_test():
 
     check("macmini 正常（ON が速い）", _verdict("macmini"), "ADOPT")
     check("gb10 正常", _verdict("gb10"), "非後退: pass")
-    check("欠損行", _verdict("macmini", drop_row=True), "undetermined(AggError")
-    check("重複行", _verdict("macmini", dup=True), "undetermined(AggError")
+    check("欠損行", _verdict("macmini", drop_row=True), "undetermined")
+    check("重複行", _verdict("macmini", dup=True), "undetermined")
     check("checksum 不一致", _verdict("macmini", ck_bad=True), "FAIL")
     check("5/5 一貫の後退", _verdict("macmini", bad_regress=True), "REJECT")
     check("ゲート不通過", _verdict("macmini", gate_ok=False), "undetermined")
@@ -453,6 +485,10 @@ def self_test():
     check("torch 空でも checksum 不一致 FAIL を保つ", _verdict("gb10", torch_mode="empty", ck_bad=True), "FAIL")
     check("torch 一部欠損でも REJECT を保つ", _verdict("macmini", torch_mode="partial", bad_regress=True), "REJECT")
     check("checksum 不一致 + 前提ログ欠損でも FAIL を保つ", _verdict("macmini", ck_bad=True, rm_tree=True), "FAIL")
+    check("欠測 + checksum 不一致でも FAIL（1 機内）", _verdict("macmini", ck_bad=True, drop_row=True), "FAIL")
+    check("cmp 実行エラー（exit 2）は undetermined", _verdict("gb10", bd_cmp=2), "undetermined")
+    check("cmp exit 1 は FAIL", _verdict("gb10", bd_cmp=1), "FAIL")
+    check("torch task 不正（リスト）でも判定継続", _verdict("macmini", torch_mode="badtask"), "ADOPT")
     check("ログ欠損のみは undetermined", _verdict("macmini", rm_tree=True), "undetermined")
     check("bitdump 不一致 + ゲート不通過でも FAIL", _verdict("gb10", bd_mismatch=True, gate_ok=False), "FAIL")
     check("bitdump 不一致 + 一貫後退でも FAIL", _verdict("gb10", bd_mismatch=True, bad_regress=True), "FAIL")
@@ -476,6 +512,12 @@ def self_test():
             _fixture(td4, "gb10", gate_ok=False)
             _, v = render(res, evaluate(td4, "gb10"))
             check("GB10 前提不成立は undetermined", v, "undetermined")
+    # Mac mini 側が欠測でも GB10 の FAIL を総合へ伝播する（RULE §4）
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as tg:
+        _fixture(td, "macmini", drop_row=True)
+        _fixture(tg, "gb10", ck_bad=True)
+        text, v = render(evaluate(td, "macmini"), evaluate(tg, "gb10"))
+        check("macmini 欠測でも GB10 FAIL を総合へ伝播", v, "FAIL")
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
