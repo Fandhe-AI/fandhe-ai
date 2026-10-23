@@ -5,7 +5,7 @@
 | 機体 | 状態 |
 |---|---|
 | Mac mini（Apple M4） | **実測済み**（`e62cce21b`・2026-10-23・M1〜M5 x 5 run 全 pass・記録は `macmini/`） |
-| DGX Spark GB10（sm_121） | **未実測**（計測前の GPU に常駐サービス以外の compute プロセスがあり中止。下記「DGX Spark GB10」） |
+| DGX Spark GB10（sm_121） | **実測済み・C5 が fail**（`45347ae0a`・2026-10-23・C1〜C4 x 5 run は全 pass、C5 は 5 run とも 2/4 fail。記録は `gb10/`。下記「DGX Spark GB10」「不一致」） |
 | 開発機（Apple M4 Max）での試走（記録ではない・1 回のみ） | 下記「試走で分かったこと」 |
 
 事前登録規則は `RULE.txt`（2026-10-23 固定。実測値を 1 件も含まない）。実測を取るときは、規則を変えず、
@@ -107,20 +107,67 @@ tracked 版の失敗トークン登録と非 wait は `crates/backend-metal/src/
 
 ### DGX Spark GB10
 
-**未実測（未検証）**。2026-10-23 に計測ノード（GB10・sm_121・CUDA 13.0・rustc 1.97.0）へ ssh で到達し、`e62cce21b` のツリーを
-`.rev-stamp`・`.tree-manifest` つきで転送する前に GPU を確認した。`nvidia-smi --query-compute-apps` に
-`VLLM::StageEngineCoreProc_stage0_replica0_DP0`・`VLLM::StageEngineCoreProc_stage1_replica0_DP0`（root 所有・稼働 11 日超）と
-ComfyUI の python があり（`utilization.gpu` は 0 %）、vLLM の 2 プロセスは確認済みの常駐サービス
-（ComfyUI・Kokoro・gateway）に含まれない。RULE.txt「計測中は別の GPU 負荷を並走させない」と `run_parity.sh` の
-許可リスト方式に従い、推定で `PARITY_RESIDENT_APP_REGEX` へ追加せず中止した（結果の選別ではない）。
-残作業: 常駐サービスであることの確認（所有者）または空きノードでの `run_parity.sh cuda`。C1〜C5 の期待件数は 5/5/7/1/4。
-カウンタの assert（CUDA）は `crates/backend-cuda/src/train_step_parts_sync_diag_tests_3224.rs`・
-`gemm_device_input_diag_tests_3223.rs` にある（`stream_syncs`／`d2h_calls`／`h2d_calls` = 0・対照 >= 1）。
-設計 §3 の CUDA の正の非正規化数マスク（NVRTC の ftz 無効）は実機で未確認。
+記録: `gb10/`（`.rev-stamp`・`tree-manifest-check.txt`・`env_info.txt`・`build.log`・`<name>.run{1..5}.log`・`DONE`・`summary.md`）。
+ホスト名・ユーザー名・絶対パスは `<cuda-node>`・`<user>`・`<home>` へ置換済み。
+
+- 経緯: 先に使った GB10（dbd9）は常駐 vLLM が許可リストに無く中止した（結果の選別ではない）。所有者が 2026-10-23 に指定した別の GB10 ノード
+  （dbd9 とは別。FQDN は記載しない）で取り直した。計測前の `nvidia-smi --query-compute-apps` は 0 件・`utilization.gpu` 0 %。
+  `PARITY_RESIDENT_APP_REGEX` は未設定。実機ロック（`~/work/.fandhe-hw-lock`）を取得して実施し、回収後に解放した。
+- 日付: 2026-10-23。計測コード: `45347ae0a5f3ca436b8136424a136d660c5a5280`（main。#3227 の readback 先読み既定 ON〈PR #3552〉を含む）。
+  `dirty=0`（`tree-manifest-check.txt` 11998 件が全件 OK・`.env*`／`settings.local.json`／`*.local.md` の混入 0 件）。crate 版 0.11.0（workspace）。
+- Metal 記録との関係: `e62cce21b..45347ae0a` の `crates/backend-metal`・`crates/backend-cpu`・`crates/tensor-core` の差分は空
+  （`git diff --stat` の出力が空。Metal の部品は `macmini/` の計測時から無変更）。
+- 環境: GB10（sm_121）・driver 580.173.02・CUDA 13.0 V13.0.88・rustc 1.97.1（8bab26f4f 2026-07-14）・aarch64 Linux。
+  `cargo build --release --tests -p fandhe-ai-backend-cuda` は `build_rc=0`（判定外）。
+- 実行: `run_parity.sh cuda`（独立プロセス x 5 run・`run_parity rc=0`）。invalid 0 件・再実行 0 件。
+
+| テスト | run1 | run2 | run3 | run4 | run5 |
+|---|---|---|---|---|---|
+| C1 relu_mask_device_parity | pass 5/5 | pass 5/5 | pass 5/5 | pass 5/5 | pass 5/5 |
+| C2 mse_device_parity | pass 5/5 | pass 5/5 | pass 5/5 | pass 5/5 | pass 5/5 |
+| C3 gemm_device_input_parity | pass 7/7 | pass 7/7 | pass 7/7 | pass 7/7 | pass 7/7 |
+| C4 gemm_device_input_diag_tests_3223 | pass 1/1 | pass 1/1 | pass 1/1 | pass 1/1 | pass 1/1 |
+| C5 train_step_parts_sync_diag_tests_3224 | **fail 2/4** | **fail 2/4** | **fail 2/4** | **fail 2/4** | **fail 2/4** |
+
+総合: **fail**（`summary.md`。`summarize.py` は期待件数 5/5/7/1/4 を厳密検査し、C5 の 2 件 fail で非 0 終了）。
+
+カウンタ: カウンタ値はテスト内の assert が検査する（pass はその成立を意味する）。
+`crates/backend-cuda/src/gemm_device_input_diag_tests_3223.rs:97-99`（`h2d_calls`／`stream_syncs`／`d2h_calls` = 0・C4 は pass）、
+`crates/backend-cuda/src/train_step_parts_sync_diag_tests_3224.rs:278-280`・`:377-378`（GEMM・backward 連結。C5 のうち pass 2 件）、
+`:140-141`（ReLU）・`:188-189`・`:206-207`（MSE）の「新版は同期 0・D2H 0」assert。対照の assert は `:97-98`・`:221-222`（`>= 1`）。
+正の非正規化数マスク（NVRTC の ftz 無効）は C1 の pass（`relu_mask_device_parity.rs:32` の `1e-40`／`-1e-40`）で確認した。
+
+C5 の fail 2 件は**対照 assert**（`download`／ホスト版が D2H を数えること）で、新版の判定 assert ではない。ただし ReLU は対照が layout ループの
+最初の周回の末尾にあるため、後続の周回は未実行（下記「不一致」）。
+
+6 部品の判定（CUDA）: GEMM（dW・d_input）は pass（C3・C4・C5 の GEMM テスト）。ReLU・MSE は bit 一致（C1・C2）が pass。
+同期ゼロの実機カウンタ（C5）は対照 assert の fail により ReLU・MSE で未完了。
+
+| 部品 | Metal | CUDA |
+|---|---|---|
+| ReLU マスク | pass（M1・M4） | bit 一致 pass（C1）・C5 fail（対照 assert） |
+| MSE forward／backward | pass（M2・M4） | bit 一致 pass（C2）・C5 fail（対照 assert） |
+| dW（TN・bias あり） | pass（M3・M4） | pass（C3・C4・C5） |
+| d_input（Transposed） | pass（M3・M4） | pass（C3・C4・C5） |
 
 ## 不一致
 
-Metal（Mac mini・`macmini/`）の正式記録に不一致はない（M1〜M5 x 5 run 全 pass）。試走（開発機）で出た Metal の正の非正規化数マスクの不一致（部品: ReLU マスク・形状 `[64,256]`・入力: マスク `1e-40`・最初の食い違い: `idx 0: 0 vs -11`・分類: FTZ・戻し先 #3218）は #3218 の修正で解消した。CUDA は未実測のため判定なし。
+Metal（Mac mini・`macmini/`）の正式記録に不一致はない（M1〜M5 x 5 run 全 pass）。試走（開発機）で出た Metal の正の非正規化数マスクの不一致（部品: ReLU マスク・形状 `[64,256]`・入力: マスク `1e-40`・最初の食い違い: `idx 0: 0 vs -11`・分類: FTZ・戻し先 #3218）は #3218 の修正で解消した。
+
+**CUDA（GB10・`gb10/`・`45347ae0a`）: C5 `train_step_parts_sync_diag_tests_3224` の 2 テストが 5 run とも同一に fail**（bit 不一致ではない）。
+
+| テスト | 食い違い（ログ） | 場所 |
+|---|---|---|
+| `relu_mask_device_issues_no_sync_no_d2h` | `download must D2H: ... d2h_calls: 0, ... stream_syncs: 1` | `train_step_parts_sync_diag_tests_3224.rs:98`（`assert_download_is_counted`） |
+| `mse_device_issues_no_sync_no_d2h` | `host mse must D2H: ... d2h_calls: 0, ... stream_syncs: 1` | 同 `:222` |
+
+- 部品・形状: ReLU マスク `[64,256]`（RowMajor。対照は最初の周回）・MSE `[64,10]` のホスト版。入力は固定パターン。
+- 新版の判定 assert（同期 0・D2H 0・bit 一致）は対照より前にあり通過している。落ちたのは「`download`／ホスト版が `d2h_calls >= 1` を数える」という対照だけ。`stream_syncs` は 1 と数えられている。
+- 原因分類（推定。実機で未切り分け）: **カウンタの数え方**。計測コードは #3227（PR #3552・readback 先読み既定 ON）を含む。先読み経路の readback が
+  `d2h_calls` を増やさなくなり、対照が前提とした「ホストの readback = D2H を数える」が既定経路で成立しなくなったとみられる。
+  新版（device 入力版）の挙動の不一致ではない。`e62cce21b`（先読み導入前）で同テストが pass するかは未確認（本記録は `45347ae0a` の事実のみ）。
+- 戻し先: 対照 assert（`:92-99`・`:221-222`）はテスト側の前提で、先読み既定 ON（#3227）との整合を取る修正が要る。
+  RULE.txt に従い tolerance・baseline・判定式は変更しない。子 issue の reopen・起票は未実施（ユーザー承認待ち）。
 
 ## #3218 修正後の確認（Mac mini・2026-10-23）
 
