@@ -209,6 +209,25 @@ class JudgeTest(unittest.TestCase):
         row = [l for l in text.splitlines() if l.startswith('| gemm cpu N=256 |')][0]
         self.assertNotIn('| — |', row.split('|')[2] + '|')
 
+    def test_empty_py_results_is_undetermined(self):
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini')
+        (d / 'run2' / 'results-py.jsonl').write_text('')
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 2, text)
+        self.assertIn('比較相手の行が欠損', text)
+
+    def test_hard_mismatch_wins_over_undetermined_cell(self):
+        def mut(arm, run, rows):
+            if arm == 'new' and run == 1:
+                rows = [l.replace('"parity_total":65536', '"parity_total":65537') for l in rows]
+            return rows
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini', mut)
+        (d / 'run2' / 'results-py.jsonl').write_text('')
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 3, text)
+
 
 if __name__ == '__main__':
     unittest.main()

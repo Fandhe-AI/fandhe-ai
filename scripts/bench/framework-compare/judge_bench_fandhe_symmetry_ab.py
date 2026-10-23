@@ -43,6 +43,21 @@ REF_FILES = {
 }
 
 
+def expected_opponents(profile, task, device, size):
+    """セルごとに必ず存在すべき比較相手（RULE の期待セル構成。ランナーの EXP_OPP／EXP_PY と同じ内訳）。
+
+    cpu は 5 相手、加速器は candle・burn・pytorch（macmini は tensorflow も）。除外してよいのは burn の
+    Metal GEMM N=512〜4096 の既知の記録拒否（0.11.0 と同じ 4 件）だけで、ここで明示的に除く。"""
+    fws = ['candle', 'burn', 'pytorch']
+    if profile == 'macmini' or device == 'cpu':
+        fws.append('tensorflow')
+    if device == 'cpu':
+        fws.append('scipy')
+    if profile == 'macmini' and task == 'gemm' and device == 'metal' and size >= 512:
+        fws.remove('burn')
+    return fws
+
+
 class Undetermined(Exception):
     """系列・セルを判定できない理由（握りつぶさず表に出す）。"""
 
@@ -96,7 +111,7 @@ def load_runs(series_dir, arms, nruns=NRUNS):
     return runs
 
 
-def paired_ratio(per_run_me, per_run_opp, task, device, size):
+def paired_ratio(per_run_me, per_run_opp, task, device, size, required=()):
     """gen_0110_macmini.py の paired_ratio と同式: run ごとの（有効な相手最速 ÷ fandhe reuse）の中央値。"""
     rs, best = [], {}
     for i, (me_idx, opp_idx) in enumerate(zip(per_run_me, per_run_opp), 1):
@@ -105,6 +120,9 @@ def paired_ratio(per_run_me, per_run_opp, task, device, size):
             raise Undetermined(f'run{i}: fandhe-ai reuse 欠損 {task} {device} N={size}')
         if (me.get('parity_fail_count') or 0) > 0:
             raise Undetermined(f'run{i}: fandhe-ai reuse の要素検証が不合格（判定不能）{task} {device} N={size}')
+        missing = [fw for fw in required if (fw, task, device, size, 'fresh') not in opp_idx]
+        if missing:
+            raise Undetermined(f'run{i}: 比較相手の行が欠損（{",".join(missing)}）{task} {device} N={size}')
         comp = []
         for fw in FW_ORDER:
             r = opp_idx.get((fw, task, device, size, 'fresh'))
@@ -128,10 +146,10 @@ def classify(ratio):
     return '負け'
 
 
-def arm_stats(runs, arm, task, device, size):
+def arm_stats(runs, arm, task, device, size, required=()):
     me = [r[arm] for r in runs]
     opp = [r['opp'] for r in runs]
-    ratio, rs, top = paired_ratio(me, opp, task, device, size)
+    ratio, rs, top = paired_ratio(me, opp, task, device, size, required)
     ms = [r[arm][('fandhe-ai', task, device, size, 'reuse')]['median_s'] for r in runs]
     fresh = [r[arm].get(('fandhe-ai', task, device, size, 'fresh')) for r in runs]
     fresh_ms = None if any(f is None for f in fresh) else statistics.median(f['median_s'] for f in fresh)
@@ -234,19 +252,21 @@ def build(args):
         if runs is None:
             out.append(f'| {name} | {refs} | 判定不能 | | | | | | | |')
             continue
-        try:
-            o = arm_stats(runs, 'old', task, device, size)
-            n = arm_stats(runs, 'new', task, device, size)
-        except Undetermined as e:
-            undetermined.append(f'{name}: {e}')
-            out.append(f'| {name} | {refs} | 判定不能: {e} | | | | | | | |')
-            continue
-        arm_rs = [nm / om for nm, om in zip(n['ms'], o['ms'])]
-        arm_med = statistics.median(n['ms']) / statistics.median(o['ms'])
+        # hard 条件は勝敗の判定可否から独立に評価する（判定不能セルでも不一致を落とさない。終了コード 3 が優先）。
         probs = hard_check(runs, task, device, size)
         if probs:
             hard.append(f'{name}: ' + '; '.join(probs))
         hs = 'OK' if not probs else 'NG'
+        req = expected_opponents(args.profile, task, device, size)
+        try:
+            o = arm_stats(runs, 'old', task, device, size, req)
+            n = arm_stats(runs, 'new', task, device, size, req)
+        except Undetermined as e:
+            undetermined.append(f'{name}: {e}')
+            out.append(f'| {name} | {refs} | 判定不能: {e} | | | | | | {hs} | |')
+            continue
+        arm_rs = [nm / om for nm, om in zip(n['ms'], o['ms'])]
+        arm_med = statistics.median(n['ms']) / statistics.median(o['ms'])
         top = o['top'] if o['top'] == n['top'] else f'{o["top"]}→{n["top"]}'
         fresh = '—' if o['fresh_ms'] is None or n['fresh_ms'] is None else f'{o["fresh_ms"]:.3f}→{n["fresh_ms"]:.3f}'
         out.append(f'| {name} | {refs} | {o["med_ms"]:.3f} | {o["ratio"]:.2f} {o["cls"]} {fmt_runs(o["runs"])} '

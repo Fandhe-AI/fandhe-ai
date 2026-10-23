@@ -88,9 +88,9 @@ echo "precheck=ok"
 
 # ビルド（計測の前にすべて済ませる。計測中のビルド並走禁止）。
 build() { # <root> <target-dir-name> <crate> [cargo args...]
-  local root=$1 tdir="$OUT/target-$2" crate=$3; shift 3
-  ( cd "$root/$FC_REL" && cargo build --release --locked -p "$crate" --target-dir "$tdir" "$@" ) 2>"$OUT/build-$2-$crate.err" \
-    || { tail -40 "$OUT/build-$2-$crate.err"; echo "BUILD FAILED $2 $crate" >>"$SKIP"; exit 1; }
+  local root=$1 arm=$2 crate=$3 tdir="$OUT/target-$2"; shift 3
+  ( cd "$root/$FC_REL" && cargo build --release --locked -p "$crate" --target-dir "$tdir" "$@" ) 2>"$OUT/build-${arm}-${crate}.err" \
+    || { tail -40 "$OUT/build-${arm}-${crate}.err"; echo "BUILD FAILED ${arm} ${crate}" >>"$SKIP"; exit 1; }
 }
 if [[ "$PROFILE" == "gb10" ]]; then export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"; fi
 build "$OLD_ROOT" old bench-fandhe
