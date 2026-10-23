@@ -1,0 +1,8 @@
+# series=ab run=4 arm=off rev=2ba22c432882e3c89a2de45cd499fa3dadf4742e start=2026-10-23T05:52:51Z
+arm=off series=threads shape=l1_fwd trans=nn m=64 n=256 k=784 rayon_threads=20 median_secs=0.000117137 gflops=219.317 checksum=0x40b128afdd627000
+arm=off series=threads shape=l1_dw trans=tn m=784 n=256 k=64 rayon_threads=20 median_secs=0.000136496 gflops=188.211 checksum=0x40a3c0856c6c1b80
+arm=off series=threads shape=l1_dx trans=nt m=64 n=784 k=256 rayon_threads=20 median_secs=0.000105936 gflops=242.506 checksum=0xc0d7791b1a023f00
+arm=off series=threads shape=l2_fwd trans=nn m=64 n=10 k=256 rayon_threads=20 median_secs=0.000024112 gflops=13.590 checksum=0xc0b7bdb5992a8000
+arm=off series=threads shape=l2_dw trans=tn m=256 n=10 k=64 rayon_threads=20 median_secs=0.000025776 gflops=12.713 checksum=0xc0b08c929e2dc000
+arm=off series=threads shape=l2_dx trans=nt m=64 n=256 k=10 rayon_threads=20 median_secs=0.000034336 gflops=9.543 checksum=0x40b26cd56e507d00
+arm=off series=threads shape=ref_square_512 trans=nn m=512 n=512 k=512 rayon_threads=20 median_secs=0.000503923 gflops=532.691 checksum=0xc0e9b13f0ea78000

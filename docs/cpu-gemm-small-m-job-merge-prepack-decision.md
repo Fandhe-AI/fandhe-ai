@@ -117,3 +117,12 @@ FMA 契約（`f32::mul_add`／`vfmaq_laneq_f32`）・tolerance・公開 API は�
   ゲート OFF のときの増分は 0（ハンドルあたり Mutex と空 Vec の数十バイトのみ）。
 - テスト: gemm レベルは forward 形状（64×256×784・64×10×256）・端数（63×257×785・65×10×9・2×13×7）・KC またぎ（64×256×1000）・フォールバック形状（64×1024×256）を T=1／10／20・jpw 2／1・A 共有（G1）併用・NaN／inf 混入で `to_bits` 一致。ops 層は ON／OFF 一致、3 step の更新後に古い panel を使わないこと、書き込み経路ごとの無効化、同一 `params_buf` 上の別 offset・別形状・複数ストアのキー分離。報告用 `#[ignore]` テスト `resident_w_prepack_report`（語数表示）を #3201 向けに用意した。
 
+
+## 13. #3201 A/B 結果
+
+事前登録規則（`docs/perf/logs/cpu-small-m-gemm-ab-3201/RULE.txt`。計測前に固定）のとおり、Mac mini（3 腕）と GB10（affinity を掛けた 6 腕）で
+単体 6 形状と train／infer の 4 セルを 5 round 計測した。正式系列（全腕 5/5 round が負荷ゲート pass）・機構発火の前提成立・checksum 完全一致・
+bit 一致テスト 24 件 pass のもとで、**G1（merge）・G2（merge+prepack）は両機体で REJECT**。主因は m=64 の forward 形状（`l1_fwd`・`l2_fwd`）の悪化
+（Mac mini 1.153・1.982、GB10 1.300・1.613）と、train／infer セルの悪化。GB10 affinity との組み合わせ 3 腕も train 系セルが 1.00 を超え REJECT。
+既存の節（§1〜§12）は変更しない。本件は既定を反転しない（反転の要否は #3227）。数値・判定表・PyTorch 比・#3227 への引き継ぎ表は
+[`docs/perf/cpu-gemm-small-m-partition-ab.md`](perf/cpu-gemm-small-m-partition-ab.md) を正とする。

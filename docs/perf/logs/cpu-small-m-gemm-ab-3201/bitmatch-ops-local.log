@@ -1,0 +1,17 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cpu-cb241ea3615ebbf4)
+
+running 9 tests
+test ops::resident_w_prepack_tests::resident_w_prepack_fire_report ... ignored, 報告専用（#3201 の発火確認）: cargo test -p fandhe-ai-backend-cpu --release --lib -- --ignored --exact ops::resident_w_prepack_tests::resident_w_prepack_fire_report --nocapture --test-threads=1
+test ops::resident_w_prepack_tests::memory_footprint_matches_formula ... ok
+test ops::resident_w_prepack_tests::gate_off_never_touches_the_cache ... ok
+test ops::resident_w_prepack_tests::every_write_path_clears_the_cache ... ok
+test ops::resident_w_prepack_tests::separate_stores_do_not_share_or_leak_panels ... ok
+test ops::resident_w_prepack_tests::bias_and_relu_match_with_gate_on ... ok
+test ops::resident_w_prepack_tests::linear_forward_device_on_off_are_bit_identical ... ok
+test ops::resident_w_prepack_tests::weight_update_invalidates_panel_for_three_steps ... ok
+test ops::resident_w_prepack_tests::on_off_are_bit_identical_and_keys_do_not_collide ... ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 757 filtered out; finished in 0.01s
+
+exit=0

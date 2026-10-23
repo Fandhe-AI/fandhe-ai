@@ -1,0 +1,8 @@
+# series=ab run=1 arm=merge-aff rev=2ba22c432882e3c89a2de45cd499fa3dadf4742e start=2026-10-23T05:52:38Z
+arm=merge-aff series=threads shape=l1_fwd trans=nn m=64 n=256 k=784 rayon_threads=20 median_secs=0.000077424 gflops=331.811 checksum=0x40b128afdd627000
+arm=merge-aff series=threads shape=l1_dw trans=tn m=784 n=256 k=64 rayon_threads=20 median_secs=0.000095520 gflops=268.950 checksum=0x40a3c0856c6c1b80
+arm=merge-aff series=threads shape=l1_dx trans=nt m=64 n=784 k=256 rayon_threads=20 median_secs=0.000066416 gflops=386.806 checksum=0xc0d7791b1a023f00
+arm=merge-aff series=threads shape=l2_fwd trans=nn m=64 n=10 k=256 rayon_threads=20 median_secs=0.000015648 gflops=20.941 checksum=0xc0b7bdb5992a8000
+arm=merge-aff series=threads shape=l2_dw trans=tn m=256 n=10 k=64 rayon_threads=20 median_secs=0.000012432 gflops=26.358 checksum=0xc0b08c929e2dc000
+arm=merge-aff series=threads shape=l2_dx trans=nt m=64 n=256 k=10 rayon_threads=20 median_secs=0.000018240 gflops=17.965 checksum=0x40b26cd56e507d00
+arm=merge-aff series=threads shape=ref_square_512 trans=nn m=512 n=512 k=512 rayon_threads=20 median_secs=0.000350882 gflops=765.031 checksum=0xc0e9b13f0ea78000
