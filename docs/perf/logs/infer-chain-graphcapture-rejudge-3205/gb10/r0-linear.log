@@ -1,0 +1,18 @@
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/r3205/tree/crates/tensor-core)
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/r3205/tree/crates/backend-cpu)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3205/tree/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/r3205/tree/crates/autodiff)
+   Compiling bench-harness v0.11.0 (<home>/work/r3205/tree/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 10.10s
+     Running tests/linear_forward_device_real_device.rs (<home>/work/target-3205/release/deps/linear_forward_device_real_device-fcb916dcc674d35d)
+
+running 5 tests
+test linear_forward_device_rejects_shape_mismatches_and_handles_empty_input_on_real_device ... ok
+test linear_forward_device_two_layer_chain_matches_cpu_reference_on_real_device ... ok
+test linear_forward_device_matches_gemm_resident_rhs_act_bit_exact_on_real_device ... ok
+test linear_forward_device_matches_cpu_reference_on_real_device ... ok
+[linear_forward_device_bench:cuda] before_median_s=0.000127 after_median_s=0.000105 speedup_x=1.204
+test linear_forward_device_bench_cuda ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+

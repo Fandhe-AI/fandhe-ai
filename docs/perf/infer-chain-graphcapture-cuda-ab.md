@@ -67,6 +67,9 @@ created に変わる**（イベント追跡の無効化を含む）。GB10 で A
 - **既定の反転の前に直すべき欠陥**: `FANDHE_AI_CUDA_GRAPH_INFER=1` のとき、別スレッドが capture 中の同一デバイスで推論を呼ぶと
   `DeviceContextCaptureInProgress` をエラーとして返す。複数スレッド推論（既存の並列テストと同じ使い方）が壊れるため、待機またはフォールバックが要る。
   これを直したうえでの R1(b) 再判定は、別 label・新規の事前登録で行う（#3205 へ申し送り）。
+  **#3205 の再判定（2026-10-23。label `3205-b3-rejudge`）**: `predict_resident` の競合は是正（待ち上限 1 s・上限内で繰り返し）で消えたが、
+  R1(b) のテスト自体が旧経路（`init_device_param_store`・`forward_resident`）でも同じエラーに当たり不合格のまま。verdict は undetermined。
+  詳細は `infer-chain-fixed-cost-reduction-3205.md` §10。
 - 記録上の注意（作業ミスの開示）: 第 1 系列（`2115-gb10-3190`）は、セッションスクリプトの `CARGO_TARGET_DIR` 設定がスクリプトのバイナリ探索を壊し、
   全 run が起動できず計測値ゼロで失敗した（`invalid-attempt1-2115-gb10-3190/`）。結果を一度も見ていない状態の環境起因の失敗で、別 label `2115-gb10-3190b` で再実行した。
   第 2 系列の `compare` 表・JSONL・ゲートログは、成果物の掃除（`git clean`）で作業ツリー上のファイルを消してしまったため、

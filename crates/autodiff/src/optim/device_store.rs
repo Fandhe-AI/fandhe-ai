@@ -132,10 +132,12 @@ use fandhe_ai_tensor_core::{
     LambStepConfig, RmsPropStepConfig, SgdStepConfig, Tensor,
 };
 
-/// 推論チェーンが別スレッドの capture 終了を待つ上限（イシュー #3205）。
-/// capture 区間は数 ms 規模のため 100 ms で十分とし、超えたら従来どおり
-/// `DeviceContextCaptureInProgress` を返す。
-const PREDICT_CAPTURE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+/// 推論チェーンが別スレッドの capture 終了を待つ全体の上限（イシュー #3205）。
+/// 100 ms では複数スレッドが続けて capture する並列実行（R1(b)）で不足し、1 s で
+/// `predict_resident` の失敗が消えた（GB10 実測。`docs/perf/infer-chain-fixed-cost-
+/// reduction-3205.md` §10）。上限を超えたら従来どおり `DeviceContextCaptureInProgress`
+/// を返す（無限待ちしない）。
+const PREDICT_CAPTURE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 
 use crate::backward::Gradients;
 use crate::error::AutodiffError;
@@ -383,6 +385,21 @@ impl<'t> ResidentLeaf<'t> {
     }
 }
 
+/// 推論チェーンの層ごとの出力バッファ（イシュー #3205）。
+///
+/// `DeviceParamStore::predict_device_chain` が呼び出しを跨いで保持し、2 回目以降の呼び出しで
+/// `BackendOps::linear_forward_device_into_tracked` の出力先に再利用する（出力の確保・memset・
+/// 解放の発行を省く）。`key`（バッチ行数 `m` と各層の出力列数 `n`）が変わったら破棄して
+/// 確保し直す。バッファはチェーン全体が成功し download と poison の事後再検査を通った
+/// ときだけ戻す（失敗した呼び出しのバッファは残さない）。最終層の出力は download 後も保持する
+/// （download が同期点のため、次の呼び出しまでに GPU の書き込みは完了している）。
+/// 常駐メモリは層出力 1 回分だけ増える。
+#[derive(Debug)]
+struct ChainScratch {
+    key: (usize, Vec<usize>),
+    bufs: Vec<DeviceBuffer<f32>>,
+}
+
 /// デバイス常駐パラメータ更新の状態機械本体（モジュール冒頭コメント
 /// 参照）。単一デバイス固定（`new()` 時に `tape.ops().device()` から
 /// 決定し、以後変更不可）。`Debug` は `unwrap_err()`（テストコード）が
@@ -481,6 +498,16 @@ pub struct DeviceParamStore {
     /// `ops.sgd_step_device_tracked` へ渡す共有失敗トークン
     /// （モジュール冒頭「遅延失敗トークン経由の poison」参照）。
     failure_token: DispatchFailureCell,
+    /// 推論チェーン（`predict_device_chain`）の層ごと出力バッファの再利用スロット
+    /// （イシュー #3205。[`ChainScratch`] doc 参照）。`Mutex` + `try_lock` で取得し、
+    /// 取れなければ（他スレッドが使用中・poison）確保経路へ進む（待たない）。
+    chain_scratch: std::sync::Mutex<Option<ChainScratch>>,
+    /// `BackendOps::linear_forward_device_into_tracked` が `Unsupported`（CPU／Metal 等の既定）を
+    /// 返したら立てる。以後 `chain_scratch` へバッファを保持しない（`Unsupported` を
+    /// 返すバックエンドで出力バッファを無駄に常駐させない）。
+    chain_scratch_unsupported: AtomicBool,
+    /// `_into` 経路が実際に動作すると確認済みか（初回の対応可否プローブを 1 回で済ませる）。
+    chain_scratch_probed: AtomicBool,
     /// grad の永続 staging バッファ（イシュー #1212。[`GradStaging`]
     /// doc 参照）。resident 経路が一度も成功しないバックエンド（CUDA／
     /// Metal。現時点でこれに該当）では `None` のまま——`RefCell` は
@@ -1270,6 +1297,9 @@ impl DeviceParamStore {
             poisoned: AtomicBool::new(false),
             pending: None,
             failure_token: DispatchFailureCell::new(),
+            chain_scratch: std::sync::Mutex::new(None),
+            chain_scratch_unsupported: AtomicBool::new(false),
+            chain_scratch_probed: AtomicBool::new(false),
             grad_staging: RefCell::new(None),
             backward_serial: Cell::new(0),
             resident_grad_capability: Cell::new(None),
@@ -1870,17 +1900,26 @@ impl DeviceParamStore {
         steps: &[ChainStep<'_, 't>],
     ) -> Result<Tensor<f32>, BackendError> {
         // イシュー #3205: 別スレッドの Graph capture と衝突した場合
-        // （`DeviceContextCaptureInProgress`）は、上限付きで capture 終了を
-        // 待ってチェーン全体を 1 回だけやり直す。本メソッドは store を
+        // （`DeviceContextCaptureInProgress`）は、全体の待ち上限
+        // （`PREDICT_CAPTURE_WAIT_TIMEOUT`）の範囲で capture 終了を待ってチェーン全体を
+        // やり直す。複数スレッドが続けて capture を始める（R1(b) の並列テスト）と、
+        // 1 回の再試行では次の capture に再び当たりうるため、上限内で繰り返す
+        // （GB10 の R1(b) 再判定で 1 回だけの再試行は 3/5 件失敗した。
+        // `docs/perf/infer-chain-fixed-cost-reduction-3205.md` §10）。本メソッドは store を
         // 書き換えないため、やり直しで部分結果は漏れない。待てなければ
         // （期限切れ・自スレッドが driver 呼び出し中）従来のエラーのまま返す。
-        match self.predict_device_chain_once(tape, input, steps) {
-            Err(BackendError::DeviceContextCaptureInProgress { .. }) => {
-                tape.ops()
-                    .wait_device_capture_idle(PREDICT_CAPTURE_WAIT_TIMEOUT)?;
-                self.predict_device_chain_once(tape, input, steps)
+        let deadline = std::time::Instant::now() + PREDICT_CAPTURE_WAIT_TIMEOUT;
+        loop {
+            match self.predict_device_chain_once(tape, input, steps) {
+                Err(BackendError::DeviceContextCaptureInProgress { ordinal }) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+                    }
+                    tape.ops().wait_device_capture_idle(remaining)?;
+                }
+                other => return other,
             }
-            other => other,
         }
     }
 
@@ -1954,7 +1993,30 @@ impl DeviceParamStore {
         // （`upload_into` は使わない。Metal の `upload_into` は
         // synchronize を挟むため「チェーン全体で同期 1 回」の契約に
         // 反する）。
-        let mut current = mem.upload(input)?;
+        let mut input_buf = Some(mem.upload(input)?);
+
+        // イシュー #3205: 層ごとの出力バッファの再利用。`try_lock` が取れない（他スレッドが
+        // チェーン実行中）場合は待たずに従来の確保経路を使う。
+        let use_scratch = !self.chain_scratch_unsupported.load(Ordering::Relaxed);
+        let mut scratch_guard = if use_scratch {
+            self.chain_scratch.try_lock().ok()
+        } else {
+            None
+        };
+        let key = (
+            input.shape().first().copied().unwrap_or(0),
+            resolved
+                .iter()
+                .map(|(w, _, _)| w.shape().get(1).copied().unwrap_or(0))
+                .collect::<Vec<_>>(),
+        );
+        let mut reusable = scratch_guard
+            .as_mut()
+            .and_then(|g| g.take())
+            .filter(|sc| sc.key == key && sc.bufs.len() == resolved.len())
+            .map(|sc| sc.bufs.into_iter())
+            .unwrap_or_default();
+        let mut outs: Vec<DeviceBuffer<f32>> = Vec::with_capacity(resolved.len());
 
         for (w_buf, b_buf, act) in resolved {
             // 決定 7（設計文書）: `Unsupported` はここで即座に伝播し、
@@ -1962,17 +2024,102 @@ impl DeviceParamStore {
             // フォールバックする。本メソッドは `self` の可変状態を
             // 書き換えないため、途中終了しても部分結果が漏れることは
             // ない。
-            current = tape.ops().linear_forward_device_tracked(
-                &current,
-                w_buf,
-                b_buf,
-                act,
-                &self.failure_token,
-            )?;
+            let src = match outs.last() {
+                Some(o) => o,
+                None => input_buf.as_ref().ok_or_else(|| {
+                    BackendError::InvalidArgument(
+                        "DeviceParamStore::predict_device_chain: chain input is missing"
+                            .to_string(),
+                    )
+                })?,
+            };
+            let mut produced = None;
+            // 空出力（m == 0 または n == 0）は into 経路に入れず従来の確保経路へ回す。
+            // バックエンドの `Unsupported` と区別し、`chain_scratch_unsupported` を
+            // ラッチしない（空層 1 つで以後の非空呼び出しの再利用が無効化されるのを防ぐ）。
+            let next_reusable = reusable.next();
+            if let Some(mut out) =
+                next_reusable.filter(|o| o.shape().iter().product::<usize>() != 0)
+            {
+                match tape.ops().linear_forward_device_into_tracked(
+                    src,
+                    w_buf,
+                    b_buf,
+                    act,
+                    &mut out,
+                    &self.failure_token,
+                ) {
+                    Ok(()) => produced = Some(out),
+                    Err(BackendError::Unsupported(_)) => {
+                        // この層（バックエンド）は確保経路を使う。以後は保持もしない。
+                        self.chain_scratch_unsupported
+                            .store(true, Ordering::Relaxed);
+                    }
+                    // 世代切れ（`invalidate()` 後の古いバッファ等）は破棄して確保し直す。
+                    // `a`／`w` 側が期限切れなら、確保経路が同じエラーを返す。
+                    Err(BackendError::StaleDeviceGeneration { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            let mut out = match produced {
+                Some(out) => out,
+                None => tape.ops().linear_forward_device_tracked(
+                    src,
+                    w_buf,
+                    b_buf,
+                    act,
+                    &self.failure_token,
+                )?,
+            };
+            // 再利用能力の事前判定（Codex 指摘）: 初回は再利用バッファが無く `_into` を呼ばないため、
+            // 非対応バックエンド（CPU・Metal）を検出できず全層の出力を蓄積してしまう。
+            // 未確認の間だけ、確保済みの出力へ `_into` を 1 回試して能力を確定する
+            // （同じ結果の上書き。以後は `chain_scratch_probed` で省略）。
+            if scratch_guard.is_some()
+                && !self.chain_scratch_unsupported.load(Ordering::Relaxed)
+                && !self.chain_scratch_probed.load(Ordering::Relaxed)
+                && out.shape().iter().product::<usize>() != 0
+            {
+                match tape.ops().linear_forward_device_into_tracked(
+                    src,
+                    w_buf,
+                    b_buf,
+                    act,
+                    &mut out,
+                    &self.failure_token,
+                ) {
+                    Ok(()) => self.chain_scratch_probed.store(true, Ordering::Relaxed),
+                    Err(BackendError::Unsupported(_)) => {
+                        self.chain_scratch_unsupported
+                            .store(true, Ordering::Relaxed);
+                    }
+                    Err(BackendError::StaleDeviceGeneration { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            outs.push(out);
+            // 再利用しない経路（`Unsupported` 確定後・scratch ロック取得失敗時）では従来どおり
+            // 消費済みの中間出力を次層の発行後に解放し、ピークメモリを層数比例にしない。
+            if scratch_guard.is_none() || self.chain_scratch_unsupported.load(Ordering::Relaxed) {
+                while outs.len() > 1 {
+                    outs.remove(0);
+                }
+            }
+            // 本番どおり第 1 層の発行直後に入力バッファを解放する。
+            input_buf = None;
         }
+        // 層が 0 件なら入力そのものを download する（従来どおり）。
+        let current = match outs.last() {
+            Some(o) => o,
+            None => input_buf.as_ref().ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "DeviceParamStore::predict_device_chain: chain input is missing".to_string(),
+                )
+            })?,
+        };
 
         // 決定 3: 最終出力側の同期点は download 1 回のみ。
-        let result = mem.download(&current)?;
+        let result = mem.download(current)?;
 
         // poison 契約（doc 参照）: download 自体は Ok を返したが、その
         // 間に他スレッドがバッチエラーを検出し failure_token を set
@@ -1980,6 +2127,14 @@ impl DeviceParamStore {
         if self.failure_token.is_set() {
             self.poisoned.store(true, Ordering::SeqCst);
             return Err(BackendError::StorePoisoned);
+        }
+
+        // 成功時のみ層出力を再利用スロットへ戻す（`Unsupported` を返すバックエンドでは保持しない）。
+        if !outs.is_empty()
+            && !self.chain_scratch_unsupported.load(Ordering::Relaxed)
+            && let Some(g) = scratch_guard.as_mut()
+        {
+            **g = Some(ChainScratch { key, bufs: outs });
         }
 
         Ok(result)
@@ -4188,6 +4343,9 @@ mod tests {
         /// 1 回目だけ `DeviceContextCaptureInProgress`、以降は `Success`
         /// （別スレッド capture の終了を待って再試行できる場合。#3205）。
         BusyOnce,
+        /// 最初の 2 回だけ `DeviceContextCaptureInProgress`、以降は `Success`
+        /// （続けて別 capture に当たる並列実行を模す。1 回の再試行では足りない。#3205）。
+        BusyTwice,
         /// 常に `DeviceContextCaptureInProgress`（期限切れ相当。#3205）。
         BusyAlways,
     }
@@ -4195,8 +4353,16 @@ mod tests {
     thread_local! {
         /// `BusyOnce` が既に 1 回 busy を返したか（テストスレッドごと）。
         static BUSY_RETURNED: Cell<bool> = const { Cell::new(false) };
+        /// `BusyTwice` が busy を返した回数（テストスレッドごと）。
+        static BUSY_COUNT: Cell<usize> = const { Cell::new(0) };
         /// `wait_device_capture_idle` の呼び出し回数（テストスレッドごと）。
         static IDLE_WAITS: Cell<usize> = const { Cell::new(0) };
+        /// `linear_forward_device_into_tracked` のモック挙動（イシュー #3205。テストスレッドごと）。
+        /// 0 = 既定（`Unsupported`）、1 = 書き込み成功、2 = `StaleDeviceGeneration`。
+        static INTO_MODE: Cell<u8> = const { Cell::new(0) };
+        /// `_into` が成功した回数・確保経路（`linear_forward_device`）の呼び出し回数。
+        static INTO_OK_CALLS: Cell<usize> = const { Cell::new(0) };
+        static FRESH_CALLS: Cell<usize> = const { Cell::new(0) };
     }
 
     impl MockDeviceOps {
@@ -4690,6 +4856,7 @@ mod tests {
                     "MockDeviceOps: chain_capable == false (default fail-safe)".into(),
                 ));
             }
+            FRESH_CALLS.with(|c| c.set(c.get() + 1));
             let a_tensor = Self::read_buffer(a)?;
             let w_tensor = Self::read_resident(w)?;
             let mut y = crate::eval::matmul(&a_tensor, &w_tensor);
@@ -4712,6 +4879,47 @@ mod tests {
             Ok(DeviceBuffer::new(Device::Cpu, y.shape().to_vec(), handle))
         }
 
+        /// イシュー #3205: `INTO_MODE` に従う。1 は `linear_forward_device` と同じ計算結果を
+        /// `out` の既存内容を**読まずに全置換**して書く。
+        fn linear_forward_device_into_tracked(
+            &self,
+            a: &DeviceBuffer<f32>,
+            w: DeviceBufferView<'_>,
+            bias: Option<DeviceBufferView<'_>>,
+            act: Activation,
+            out: &mut DeviceBuffer<f32>,
+            _token: &DispatchFailureCell,
+        ) -> Result<(), BackendError> {
+            match INTO_MODE.with(|m| m.get()) {
+                1 => {
+                    let a_tensor = Self::read_buffer(a)?;
+                    let mut y = crate::eval::matmul(&a_tensor, &Self::read_resident(w)?);
+                    if let Some(b) = bias {
+                        y = crate::eval::add(&y, &Self::read_resident(b)?);
+                    }
+                    if act == Activation::Relu {
+                        y = crate::eval::relu(&y);
+                    }
+                    let y = y.contiguous();
+                    if out.shape() != y.shape() {
+                        return Err(BackendError::InvalidArgument("mock: out shape".into()));
+                    }
+                    let h = out
+                        .downcast_handle::<MockHandle>()
+                        .ok_or(BackendError::DeviceMismatch)?;
+                    *h.data.borrow_mut() = y.as_slice().unwrap_or(&[]).to_vec();
+                    INTO_OK_CALLS.with(|c| c.set(c.get() + 1));
+                    Ok(())
+                }
+                2 => Err(BackendError::StaleDeviceGeneration {
+                    ordinal: 0,
+                    resource_generation: 0,
+                    current_generation: 1,
+                }),
+                _ => Err(BackendError::Unsupported("mock: into unsupported".into())),
+            }
+        }
+
         /// イシュー #2115: `chain_captured` の挙動に従う。`Success` は
         /// upload／download を一切経由せず（`upload_count`／`download_count`
         /// を増やさない）ホストで層を畳み込んだ結果を返す。
@@ -4729,6 +4937,16 @@ mod tests {
                     return Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 });
                 }
                 ChainCapturedMode::BusyOnce => ChainCapturedMode::Success,
+                ChainCapturedMode::BusyTwice
+                    if BUSY_COUNT.with(|c| {
+                        let n = c.get();
+                        c.set(n + 1);
+                        n < 2
+                    }) =>
+                {
+                    return Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 });
+                }
+                ChainCapturedMode::BusyTwice => ChainCapturedMode::Success,
                 other => other,
             };
             match mode {
@@ -4736,6 +4954,7 @@ mod tests {
                     Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 })
                 }
                 ChainCapturedMode::BusyOnce => unreachable!("BusyOnce は上で解決済み"),
+                ChainCapturedMode::BusyTwice => unreachable!("BusyTwice は上で解決済み"),
                 ChainCapturedMode::Off => Ok(None),
                 ChainCapturedMode::Failure => Err(BackendError::KernelLaunchFailed(
                     "MockDeviceOps: simulated chain capture failure".into(),
@@ -7181,6 +7400,203 @@ mod tests {
         assert!(store.poisoned.load(Ordering::SeqCst));
     }
 
+    fn reset_into_mocks(mode: u8) {
+        INTO_MODE.with(|m| m.set(mode));
+        INTO_OK_CALLS.with(|c| c.set(0));
+        FRESH_CALLS.with(|c| c.set(0));
+    }
+
+    macro_rules! two_layer_fixture {
+        ($tape:ident, $store:ident, $leaves:ident) => {
+            let ops = MockDeviceOps::chain_capable();
+            let $tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+            let w1 = tensor(vec![1.0, -1.0, 0.5, 2.0], &[2, 2]);
+            let w2 = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+            let $store = DeviceParamStore::new(&$tape, &[&w1, &w2]).unwrap();
+            let $leaves = $store.snapshot_resident_params(&$tape).unwrap();
+        };
+    }
+
+    /// イシュー #3205: 2 回目以降は層出力バッファを再利用し（確保経路を呼ばない）、結果は
+    /// 1 回目（確保経路）と一致する。
+    #[test]
+    fn predict_device_chain_reuses_layer_outputs_after_first_call() {
+        reset_into_mocks(1);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let first = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert_eq!(FRESH_CALLS.with(|c| c.get()), 2, "1 回目は確保経路");
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 1, "能力プローブ 1 回");
+        // 2 回目: 別入力でも前回の内容が残らない。
+        let input2 = tensor(vec![-4.0, 1.0], &[1, 2]);
+        let second = store.predict_device_chain(&tape, &input2, &steps).unwrap();
+        assert_eq!(
+            FRESH_CALLS.with(|c| c.get()),
+            2,
+            "2 回目は確保経路を呼ばない"
+        );
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 3);
+        // 参照: scratch なしの新しい store で同じ入力を 1 回目として計算した結果。
+        reset_into_mocks(1);
+        two_layer_fixture!(tape2, store2, leaves2);
+        let steps2 = vec![
+            (&leaves2[0], None, Activation::Relu),
+            (&leaves2[1], None, Activation::None),
+        ];
+        let ref2 = store2
+            .predict_device_chain(&tape2, &input2, &steps2)
+            .unwrap();
+        let bits = |t: &Tensor<f32>| {
+            t.host_slice()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&second), bits(&ref2));
+        assert_ne!(bits(&first), bits(&second));
+    }
+
+    /// イシュー #3205: バッチ行数が変わったらスクラッチを破棄して確保し直す。
+    #[test]
+    fn predict_device_chain_rebuilds_scratch_when_batch_shape_changes() {
+        reset_into_mocks(1);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let in1 = tensor(vec![2.0, 3.0], &[1, 2]);
+        let in2 = tensor(vec![2.0, 3.0, 1.0, 1.0], &[2, 2]);
+        store.predict_device_chain(&tape, &in1, &steps).unwrap();
+        store.predict_device_chain(&tape, &in2, &steps).unwrap();
+        assert_eq!(FRESH_CALLS.with(|c| c.get()), 4, "形状が違うので再確保");
+        assert_eq!(
+            INTO_OK_CALLS.with(|c| c.get()),
+            1,
+            "プローブのみ（確認済み後は省略）"
+        );
+        store.predict_device_chain(&tape, &in2, &steps).unwrap();
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 3);
+    }
+
+    /// イシュー #3205: `_into` が `Unsupported`（既定）なら層単位で確保経路を使い、以後保持しない。
+    #[test]
+    fn predict_device_chain_falls_back_per_layer_when_into_unsupported() {
+        reset_into_mocks(0);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let a = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        // 初回の能力プローブで非対応を確定し、初回から中間出力を保持しない（Codex 指摘）。
+        assert!(store.chain_scratch_unsupported.load(Ordering::Relaxed));
+        assert!(store.chain_scratch.lock().unwrap().is_none());
+        let b = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert_eq!(&*a.host_slice(), &*b.host_slice());
+        assert_eq!(FRESH_CALLS.with(|c| c.get()), 4);
+        assert!(store.chain_scratch_unsupported.load(Ordering::Relaxed));
+        assert!(store.chain_scratch.lock().unwrap().is_none());
+        // 3 回目以降は `_into` を試さず保持もしない。
+        store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert!(store.chain_scratch.lock().unwrap().is_none());
+    }
+
+    /// イシュー #3205（Bugbot 指摘）: 空バッチ（出力が空）の呼び出しで `Unsupported` ラッチが
+    /// 立たず、後続の非空呼び出しで再利用が維持される。
+    #[test]
+    fn predict_device_chain_empty_batch_does_not_latch_unsupported() {
+        reset_into_mocks(1);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let empty = tensor(vec![], &[0, 2]);
+        // 1 回目で空バッチのスクラッチを保持し、2 回目で空出力が into 経路を通る位置になる。
+        store.predict_device_chain(&tape, &empty, &steps).unwrap();
+        store.predict_device_chain(&tape, &empty, &steps).unwrap();
+        assert!(!store.chain_scratch_unsupported.load(Ordering::Relaxed));
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 0);
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        store.predict_device_chain(&tape, &input, &steps).unwrap();
+        store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert!(!store.chain_scratch_unsupported.load(Ordering::Relaxed));
+        assert_eq!(
+            INTO_OK_CALLS.with(|c| c.get()),
+            3,
+            "非空では再利用が維持される（初回プローブ 1 + 再利用 2）"
+        );
+    }
+
+    /// イシュー #3205（Codex 指摘）: 再利用しない経路では中間出力を保持し続けない。
+    #[test]
+    fn predict_device_chain_does_not_retain_intermediates_when_not_reusing() {
+        reset_into_mocks(0);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let _held = store.chain_scratch.lock().unwrap();
+        let r = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert_eq!(r.host_slice().len(), 2);
+        assert_eq!(FRESH_CALLS.with(|c| c.get()), 2);
+    }
+
+    /// イシュー #3205: 世代切れ（`StaleDeviceGeneration`）のスクラッチは破棄して確保経路で成功する。
+    #[test]
+    fn predict_device_chain_discards_stale_scratch_and_succeeds() {
+        reset_into_mocks(1);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let first = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        INTO_MODE.with(|m| m.set(2));
+        let second = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert_eq!(&*first.host_slice(), &*second.host_slice());
+        assert_eq!(FRESH_CALLS.with(|c| c.get()), 4, "世代切れは確保経路へ");
+        assert!(!store.chain_scratch_unsupported.load(Ordering::Relaxed));
+    }
+
+    /// イシュー #3205: スクラッチ使用中（`try_lock` が取れない）でも待たず確保経路で成功する。
+    #[test]
+    fn predict_device_chain_uses_allocating_path_when_scratch_is_locked() {
+        reset_into_mocks(1);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let _held = store.chain_scratch.lock().unwrap();
+        let r = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert_eq!(r.host_slice().len(), 2);
+        assert_eq!(FRESH_CALLS.with(|c| c.get()), 1);
+    }
+
+    /// イシュー #3205: download 後の poison 再検査で失敗したら、スクラッチを保持しない。
+    #[test]
+    fn predict_device_chain_does_not_keep_scratch_when_poisoned() {
+        reset_into_mocks(1);
+        let ops = MockDeviceOps::chain_capable_poisoning();
+        let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
+        let w = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let steps = vec![(&leaves[0], None, Activation::None)];
+        let r = store.predict_device_chain(&tape, &input, &steps);
+        assert!(matches!(r, Err(BackendError::StorePoisoned)));
+        assert!(store.chain_scratch.lock().unwrap().is_none());
+    }
+
     fn chain_busy_fixture(mode: ChainCapturedMode) -> Result<Tensor<f32>, BackendError> {
         let ops = MockDeviceOps::chain_captured(mode);
         let tape = Tape::new_with_ops(Box::new(ops) as Box<dyn BackendOps + Send>);
@@ -7202,7 +7618,18 @@ mod tests {
         assert_eq!(IDLE_WAITS.with(|c| c.get()), 1);
     }
 
-    /// イシュー #3205: 待っても解消しない場合は従来のエラーを返す（再試行は 1 回）。
+    /// イシュー #3205: 続けて 2 回 capture に当たっても、待ち上限内なら再試行して成功する
+    /// （GB10 の R1(b) で 1 回だけの再試行は不足した）。
+    #[test]
+    fn predict_device_chain_retries_repeatedly_within_wait_budget() {
+        BUSY_COUNT.with(|c| c.set(0));
+        IDLE_WAITS.with(|c| c.set(0));
+        let r = chain_busy_fixture(ChainCapturedMode::BusyTwice).expect("retries succeed");
+        assert_eq!(&*r.host_slice(), &[2.0_f32, 3.0][..]);
+        assert_eq!(IDLE_WAITS.with(|c| c.get()), 2);
+    }
+
+    /// イシュー #3205: 待っても解消しない場合は従来のエラーを返す（`wait` が期限切れを返したら終了）。
     #[test]
     fn predict_device_chain_returns_capture_in_progress_when_wait_expires() {
         IDLE_WAITS.with(|c| c.set(0));

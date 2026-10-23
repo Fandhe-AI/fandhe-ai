@@ -1,0 +1,6 @@
+gate sample 1: busy
+gate sample 2: busy
+gate sample 3: busy
+gate sample 4: ok (1/3)
+gate sample 5: ok (2/3)
+gate sample 6: ok (3/3)

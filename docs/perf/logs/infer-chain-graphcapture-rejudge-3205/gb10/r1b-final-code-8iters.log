@@ -1,0 +1,80 @@
+=== iter 1
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion' (380590) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:90:77:
+called `Result::unwrap()` on an `Err` value: DeviceContextCaptureInProgress { ordinal: 0 }
+test predict_resident_bit_dump_cuda ... ok
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape' (380588) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion' (380589) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... FAILED
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... FAILED
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... FAILED
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s
+=== iter 2
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... ok
+test predict_resident_bit_dump_cuda ... ok
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion' (380631) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... FAILED
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion' (380630) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... FAILED
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s
+=== iter 3
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape' (380673) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+test predict_resident_bit_dump_cuda ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... FAILED
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... ok
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s
+=== iter 4
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion' (380715) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:90:77:
+called `Result::unwrap()` on an `Err` value: DeviceContextCaptureInProgress { ordinal: 0 }
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... FAILED
+test predict_resident_bit_dump_cuda ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... ok
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s
+=== iter 5
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... ok
+test predict_resident_bit_dump_cuda ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... ok
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.42s
+=== iter 6
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape' (380796) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... FAILED
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... ok
+test predict_resident_bit_dump_cuda ... ok
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... ok
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s
+=== iter 7
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape' (380850) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:90:77:
+called `Result::unwrap()` on an `Err` value: DeviceContextCaptureInProgress { ordinal: 0 }
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion' (380852) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion' (380851) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... FAILED
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... FAILED
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... FAILED
+test predict_resident_bit_dump_cuda ... ok
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s
+=== iter 8
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_relu_fusion ... ok
+thread 'predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape' (380892) panicked at crates/facade/tests/predict_device_chain_cuda_bit_identity.rs:96:10:
+called `Result::unwrap()` on an `Err` value: Backend(DeviceContextCaptureInProgress { ordinal: 0 })
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_bench_shape ... out[364].bits=0x3d9a5b15
+test predict_resident_bit_dump_cuda ... ok
+test predict_device_chain_matches_legacy_path_bit_exact_on_cuda_no_activation_fusion ... ok
+test predict_resident_matches_cpu_reference_on_cuda ... ok
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s

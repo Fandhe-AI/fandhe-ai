@@ -1,0 +1,12 @@
+gate=pass load1=0.69 gpu_util=0 waited_s=90 at=2026-10-23T07:44:38Z
+run1 start load1=0.69 gpu=0
+run1 end load1=0.71
+run2 start load1=0.71 gpu=0
+run2 end load1=0.71
+run3 start load1=0.71 gpu=3
+run3 end load1=0.73
+run4 start load1=0.73 gpu=0
+run4 end load1=0.76
+run5 start load1=0.76 gpu=4
+run5 end load1=0.76
+done.

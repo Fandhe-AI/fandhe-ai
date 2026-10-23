@@ -1,0 +1,10 @@
+test infer_chain_issue_breakdown_diag_3205 ... BACKEND_JSON {"backend":"cuda","phase":"l1_issue","n":80,"median_s":0.000007328,"q1_s":0.000007232,"q3_s":0.000007392}
+BACKEND_JSON {"backend":"cuda","phase":"l2_issue","n":80,"median_s":0.000006704,"q1_s":0.000006624,"q3_s":0.000006832}
+BACKEND_JSON {"backend":"cuda","phase":"alloc_in","n":80,"median_s":0.000003392,"q1_s":0.000003312,"q3_s":0.000003440}
+BACKEND_JSON {"backend":"cuda","phase":"drop_in","n":80,"median_s":0.000001024,"q1_s":0.000001008,"q3_s":0.000001040}
+BACKEND_JSON {"backend":"cuda","phase":"alloc_h","n":80,"median_s":0.000003120,"q1_s":0.000003072,"q3_s":0.000003152}
+BACKEND_JSON {"backend":"cuda","phase":"drop_h","n":80,"median_s":0.000001024,"q1_s":0.000001008,"q3_s":0.000001024}
+BACKEND_JSON {"backend":"cuda","phase":"alloc_out","n":80,"median_s":0.000002736,"q1_s":0.000002688,"q3_s":0.000002816}
+BACKEND_JSON {"backend":"cuda","phase":"drop_out","n":80,"median_s":0.000001024,"q1_s":0.000001008,"q3_s":0.000001024}
+BACKEND_JSON {"backend":"cuda","phase":"l1_other_derived","n":1,"median_s":0.000003184}
+BACKEND_JSON {"backend":"cuda","phase":"l2_other_derived","n":1,"median_s":0.000002944}

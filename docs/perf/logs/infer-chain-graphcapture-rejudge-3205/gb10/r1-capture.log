@@ -1,0 +1,18 @@
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3205/tree/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.39s
+     Running tests/infer_graph_capture_real_device.rs (<home>/work/target-3205/release/deps/infer_graph_capture_real_device-b2cadf0e7f1b808e)
+
+running 5 tests
+test chain_capture_then_replay_is_bit_identical_to_uncaptured_chain ... INFER_CAPTURE_R1: PASS chain_capture_then_replay
+ok
+test different_batch_recaptures_under_a_different_key ... INFER_CAPTURE_R1: PASS different_batch_recaptures
+ok
+test inapplicable_inputs_return_none ... INFER_CAPTURE_R1: PASS inapplicable_inputs
+ok
+test replay_reflects_in_place_weight_update ... INFER_CAPTURE_R1: PASS replay_reflects_in_place_weight_update
+ok
+test worker_thread_exit_with_populated_cache_does_not_abort ... INFER_CAPTURE_R1: PASS worker_thread_exit
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+

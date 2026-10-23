@@ -463,6 +463,72 @@ pub struct CudaBackendOps {
 }
 
 impl CudaBackendOps {
+    /// `linear_forward_device`／`linear_forward_device_into_tracked` が共有する入力検査
+    /// （デバイス・rank・shape・bias・活性化・`k == 0`）。戻り値は `(m, k, n, act_relu)`。
+    /// 検査の内容と順序は #3205 以前の `linear_forward_device` 本体と同一（切り出しのみ）。
+    fn linear_forward_validate(
+        &self,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+    ) -> Result<(usize, usize, usize, bool), BackendError> {
+        if a.device() != Device::Cuda(self.ordinal) || w.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Cuda(self.ordinal) {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        let act_relu = match act {
+            Activation::None => false,
+            Activation::Relu => true,
+            // `Activation` は `#[non_exhaustive]`。CPU 実装・
+            // `gemm_bias_act` と同じ方針で未知 variant を黙って恒等関数
+            // として扱わず明示的に拒否する。
+            _ => {
+                return Err(BackendError::Unsupported(format!(
+                    "linear_forward_device: unsupported activation {act:?}"
+                )));
+            }
+        };
+        if k == 0 {
+            // `gemm_resident_rhs` と同じ理由（`Linear::new` が
+            // `in_features == 0` を構築時に拒否するため到達不能）で
+            // フォールバックを設けず型付きエラーで拒否する。
+            return Err(BackendError::InvalidArgument(
+                "linear_forward_device: k == 0 is unreachable via Linear::new (in_features == 0 \
+                 is rejected at construction); a host epilogue fallback would require \
+                 downloading the resident inputs, defeating the zero-D2H contract this method \
+                 exists for"
+                    .to_string(),
+            ));
+        }
+        Ok((m, k, n, act_relu))
+    }
     /// `gemm_resident_rhs`／`gemm_resident_rhs_act` の共通本体（#3202）。
     /// `act_relu` を GEMM epilogue へ渡す以外は #1022・#1023 の実装そのまま
     /// （検査順序・poison／generation 検査・エラー文言を変えない）。
@@ -4220,60 +4286,7 @@ impl BackendOps for CudaBackendOps {
         bias: Option<DeviceBufferView<'_>>,
         act: Activation,
     ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
-        if a.device() != Device::Cuda(self.ordinal) || w.device() != Device::Cuda(self.ordinal) {
-            return Err(BackendError::DeviceMismatch);
-        }
-        let a_shape = a.shape();
-        if a_shape.len() != 2 {
-            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
-                expected: 2,
-                actual: a_shape.len(),
-            }));
-        }
-        let (m, k) = (a_shape[0], a_shape[1]);
-        let w_shape = w.shape();
-        if w_shape.len() != 2 || w_shape[0] != k {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: a_shape.to_vec(),
-                rhs: w_shape.to_vec(),
-            }));
-        }
-        let n = w_shape[1];
-        if let Some(b) = bias {
-            if b.device() != Device::Cuda(self.ordinal) {
-                return Err(BackendError::DeviceMismatch);
-            }
-            if b.shape() != [n] {
-                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                    lhs: b.shape().to_vec(),
-                    rhs: vec![n],
-                }));
-            }
-        }
-        let act_relu = match act {
-            Activation::None => false,
-            Activation::Relu => true,
-            // `Activation` は `#[non_exhaustive]`。CPU 実装・
-            // `gemm_bias_act` と同じ方針で未知 variant を黙って恒等関数
-            // として扱わず明示的に拒否する。
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "linear_forward_device: unsupported activation {act:?}"
-                )));
-            }
-        };
-        if k == 0 {
-            // `gemm_resident_rhs` と同じ理由（`Linear::new` が
-            // `in_features == 0` を構築時に拒否するため到達不能）で
-            // フォールバックを設けず型付きエラーで拒否する。
-            return Err(BackendError::InvalidArgument(
-                "linear_forward_device: k == 0 is unreachable via Linear::new (in_features == 0 \
-                 is rejected at construction); a host epilogue fallback would require \
-                 downloading the resident inputs, defeating the zero-D2H contract this method \
-                 exists for"
-                    .to_string(),
-            ));
-        }
+        let (m, k, n, act_relu) = self.linear_forward_validate(a, w, bias, act)?;
 
         // `a` はこのメソッドでは呼び出しを跨いで生存するデバイス常駐
         // バッファのため、`w`・`bias` と同じく世代検査の対象に含める
@@ -4411,6 +4424,163 @@ impl BackendOps for CudaBackendOps {
         Ok(c_dev_buf)
     }
 
+    /// [`Self::linear_forward_device`] と同じ融合カーネルで、呼び出し元が持つ既存の出力バッファ
+    /// `out` へ書き込む（イシュー #3205。`DeviceParamStore::predict_device_chain` が層ごとの
+    /// 出力を呼び出しを跨いで再利用し、確保・memset・解放の発行を省くための内部経路）。
+    ///
+    /// **`alloc_zeroed` を使わない根拠（bit 一致）**: `gemm_tiled_bias_act_f32`
+    /// （`kernels.rs`）は論理形の全要素（`row < m` かつ `col < n`）へ、アキュムレータ
+    /// （0 初期化）＋bias＋活性化の結果を**無条件に代入**する（`c[row * n + col] = v`。
+    /// `+=` ではなく、`c` の既存値は読まない）。したがって `out` の前回の内容は結果に
+    /// 影響せず、memset 済みバッファと bit 一致する。REQ-8 の手動境界検査（`row < m`・
+    /// `col < n`）は変更しない。
+    ///
+    /// 検査は [`Self::linear_forward_device`] と共通（`linear_forward_validate`）に加え、
+    /// `out` のデバイス・shape `[m, n]`・世代（`resident_generations` へ含める。期限切れは
+    /// `StaleDeviceGeneration`）・ハンドル長を型付きエラーで拒否する。`m == 0 || n == 0` は
+    /// 呼び出し元の確保経路へ任せるため `Unsupported` を返す（空カーネルを起動しない）。
+    ///
+    /// 同期しない（同期点は呼び出し元の `download`。ストリーム FIFO により `out` の前回
+    /// 使用の読み出し〈`download`〉は完了済みで、今回の書き込みと競合しない）。
+    fn linear_forward_device_into_tracked(
+        &self,
+        a: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+        out: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        let (m, k, n, act_relu) = self.linear_forward_validate(a, w, bias, act)?;
+        if out.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if out.shape() != [m, n] {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: out.shape().to_vec(),
+                rhs: vec![m, n],
+            }));
+        }
+        if m == 0 || n == 0 {
+            return Err(BackendError::Unsupported(
+            "linear_forward_device_into_tracked: empty output is handled by the allocating path"
+                .to_string(),
+        ));
+        }
+
+        let resident_generations = [
+            Some(a.generation()),
+            Some(w.buffer().generation()),
+            bias.map(|b| b.buffer().generation()),
+            Some(out.generation()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        let a_handle = a
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_full) = a_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device_into_tracked: a buffer has numel > 0 but no device \
+                 allocation"
+                    .into(),
+            ));
+        };
+        if a_full.len() != a.numel() {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: a.numel(),
+                    actual: a_full.len(),
+                },
+            ));
+        }
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_full) = w_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device_into_tracked: w buffer has numel > 0 but no device \
+                 allocation"
+                    .into(),
+            ));
+        };
+        let w_view = w_full.view(w.offset()..w.offset() + w.numel());
+        let bias_handle = bias
+            .map(|b| {
+                b.buffer()
+                    .downcast_handle::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset(), b.numel()))
+            })
+            .transpose()?;
+        let bias_view = match &bias_handle {
+            Some((h, offset, numel)) => {
+                let Some(full) = h.storage.as_ref() else {
+                    return Err(BackendError::DeviceAllocationFailed(
+                        "linear_forward_device_into_tracked: bias buffer has numel > 0 but no \
+                         device allocation"
+                            .into(),
+                    ));
+                };
+                Some(full.view(*offset..*offset + *numel))
+            }
+            None => None,
+        };
+        let out_numel = out.numel();
+        let c_handle = out
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_storage) = c_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "linear_forward_device_into_tracked: out buffer has numel > 0 but no device \
+                 allocation"
+                    .into(),
+            ));
+        };
+        if c_storage.len() != out_numel {
+            return Err(BackendError::ShapeMismatch(
+                ShapeError::ElementCountMismatch {
+                    expected: out_numel,
+                    actual: c_storage.len(),
+                },
+            ));
+        }
+        let mut c_arg = c_storage.as_arg_mut();
+        let a_arg = a_full.as_arg();
+
+        // `device_handle_raw`・`cached_gemm`・起動の各 driver 呼び出しを
+        // `linear_forward_device` と同じく個別に poison 検査・観測の対象とする。
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let gemm = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                gemm.launch_tiled_bias_act_f32_resident(
+                    &a_arg,
+                    &w_view,
+                    bias_view.as_ref(),
+                    act_relu,
+                    &mut c_arg,
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                )
+            },
+        )?;
+        Ok(())
+    }
     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
     ///
     /// 手順は [`Self::linear_forward_device`] に揃える: デバイス一致検査 → 共通検証
@@ -9536,6 +9706,53 @@ mod tests {
             matches!(result, Err(BackendError::DeviceMismatch)),
             "別 ordinal の w は DeviceMismatch で拒否されるはず: {result:?}"
         );
+    }
+
+    /// イシュー #3205: `linear_forward_device_into_tracked` は `out` が別デバイスなら
+    /// driver へ触れる前に `DeviceMismatch` で拒否する（実機不要）。
+    #[test]
+    fn linear_forward_device_into_rejects_device_mismatch_on_out() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 1]).expect("view");
+        let mut out = DeviceBuffer::new(Device::Cpu, vec![1, 1], Box::new(EmptyHandle));
+        let token = DispatchFailureCell::new();
+        let r = cuda.linear_forward_device_into_tracked(
+            &a,
+            w,
+            None,
+            Activation::None,
+            &mut out,
+            &token,
+        );
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)), "{r:?}");
+    }
+
+    /// イシュー #3205: `out` の shape が `[m, n]` と違えば `ShapeMismatch` で拒否する（実機不要）。
+    #[test]
+    fn linear_forward_device_into_rejects_shape_mismatch_on_out() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let a = DeviceBuffer::new(Device::Cuda(ordinal), vec![1, 1], Box::new(EmptyHandle));
+        let w_buffer = DeviceBuffer::new(Device::Cuda(ordinal), vec![1], Box::new(EmptyHandle));
+        let w = DeviceBufferView::new(&w_buffer, 0, &[1, 1]).expect("view");
+        let mut out = DeviceBuffer::new(Device::Cuda(ordinal), vec![2, 2], Box::new(EmptyHandle));
+        let token = DispatchFailureCell::new();
+        let r = cuda.linear_forward_device_into_tracked(
+            &a,
+            w,
+            None,
+            Activation::None,
+            &mut out,
+            &token,
+        );
+        assert!(matches!(r, Err(BackendError::ShapeMismatch(_))), "{r:?}");
     }
 
     // ---------------------------------------------------------------

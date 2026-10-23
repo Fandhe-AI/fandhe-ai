@@ -1,0 +1,9 @@
+  640 dump-off-64.txt
+  640 dump-on-64.txt
+ 1280 合計
+ 10240 dump-off-1024.txt
+ 10240 dump-on-1024.txt
+ 20480 合計
+  40960 dump-off-4096.txt
+  40960 dump-on-4096.txt
+  81920 合計
