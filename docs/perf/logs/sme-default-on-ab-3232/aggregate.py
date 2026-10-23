@@ -31,7 +31,7 @@ KNOWN_TASKS = ("gemm", "train", "infer")
 # 系列 B（0.11.0 registry 版の値。本 run の値ではない。gen_0110_macmini.out）: fandhe の対 PyTorch 倍率（torch median / fandhe median）
 SERIES_B = {("gemm", 256): 1.04, ("gemm", 512): 1.04, ("gemm", 1024): 0.89, ("gemm", 2048): 0.69, ("train", 64): 0.20, ("infer", 64): 0.25}
 MACMINI_NONREACH = {"infer"}
-GATE_FILE = "./crates/backend-cpu/src/gemm_blis/mod.rs"
+GATE_FILE = "crates/backend-cpu/src/gemm_blis/mod.rs"
 # 参考: #3231 の M4 Max bitdump（記録のみ）
 M4MAX_BITDUMP_LINES = 6726847
 
@@ -108,25 +108,35 @@ def load_arm_cells(ab, arm):
 
 
 def load_torch(ab):
+    """PyTorch は記録専用（RULE §6）。欠測・空・不足・不正は (None, 注記) とし、本体判定へ波及させない。"""
     hits = sorted(glob.glob(os.path.join(ab, "results-torch-*-cpu.jsonl")))
     if not hits:
-        return None
+        return None, "PyTorch 未計測（記録のみのため判定には影響しない）"
     rows = []
-    for i, line in enumerate(read_text(hits[0]).splitlines(), 1):
+    try:
+        with open(hits[0], encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (OSError, ValueError) as e:
+        return None, "PyTorch ログを読めない（記録のみ・判定に影響しない）: %s" % e
+    for i, line in enumerate(lines, 1):
         if not line.strip():
             continue
-        o = json.loads(line)
+        try:
+            o = json.loads(line)
+        except ValueError:
+            return None, "PyTorch 行が不正（%s:%d・記録のみ・判定に影響しない）" % (os.path.basename(hits[0]), i)
         if not isinstance(o, dict) or not finite_num(o.get("median_s")) or o["median_s"] <= 0 \
                 or isinstance(o.get("size"), bool) or not isinstance(o.get("size"), int):
-            raise AggError("torch 行が不正: %s:%d" % (os.path.basename(hits[0]), i))
+            return None, "PyTorch 行が不正（%s:%d・記録のみ・判定に影響しない）" % (os.path.basename(hits[0]), i)
         rows.append(o)
     by = {}
     for o in rows:
         by.setdefault((o.get("task"), o["size"]), []).append(o["median_s"])
     for key in [("gemm", s) for s in SIZES] + [("train", 64), ("infer", 64)]:
         if len(by.get(key, [])) != ROUNDS:
-            raise AggError("torch の %s は %d 行（%d 行ちょうどを要求）" % (key, len(by.get(key, [])), ROUNDS))
-    return by
+            return None, "PyTorch の %s は %d 行（%d 行未満・過多のため相手比を省略。記録のみ・判定に影響しない）" % (
+                key, len(by.get(key, [])), ROUNDS)
+    return by, None
 
 
 def fmt(x):
@@ -205,10 +215,10 @@ def evaluate(base, host):
                 gf.append("bitdump: 行数が期待と一致しない・実行失敗")
         res["bitdump_summary"] = summ.strip()
     # PyTorch 相手比（記録のみ）
-    torch = load_torch(ab)
+    torch, torch_note = load_torch(ab)
     res["torch"] = None
     if torch is None:
-        res["notes"].append("PyTorch 未計測（記録のみのため判定には影響しない）")
+        res["notes"].append(torch_note)
     else:
         tr = {}
         for cell in CELLS:
@@ -260,7 +270,7 @@ def render(res, other):
             " ".join("r%d=%s" % (i + 1, fmt(r)) for i, r in enumerate(s["ratios"])), s["n_le"], s["n_gt"], s["checksum"]))
     L += ["", "## 相手（PyTorch）比: PyTorch median / fandhe median の 5 round 中央値（記録のみ・判定に使わない）", ""]
     if res["torch"] is None:
-        L.append("PyTorch 未計測。")
+        L.append("PyTorch 相手比なし（未計測・欠測。注記参照）。")
     else:
         L += ["| セル | OFF | ON | 系列 B（参考。0.11.0 registry 版・本 run の値ではない） |", "|---|---|---|---|"]
         for c in CELLS:
@@ -281,7 +291,12 @@ def render(res, other):
     for n in res["notes"]:
         L.append("- 注記: " + n)
     verdict = res["verdict"]
-    if host == "macmini" and verdict.startswith("ADOPT"):
+    # RULE §4・§5: どちらかの機の FAIL > REJECT を優先して総合判定へ伝播する。未計測・前提不成立だけが undetermined
+    if host == "macmini" and other is not None and other["verdict"] in ("FAIL", "REJECT") and verdict != "FAIL":
+        verdict = other["verdict"] if (other["verdict"] == "FAIL" or verdict != "REJECT") else verdict
+        if verdict == other["verdict"]:
+            verdict = "%s（GB10 が %s）" % (verdict, other["verdict"])
+    elif host == "macmini" and verdict.startswith("ADOPT"):
         if other is None:
             verdict = "undetermined（GB10 未計測のため ADOPT 不可）"
         elif other["verdict"] != "非後退: pass":
@@ -316,7 +331,7 @@ def _write(path, text):
     open(path, "w", encoding="utf-8").write(text)
 
 
-def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False):
+def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full"):
     ab = os.path.join(root, "ab")
     for arm in ("before", "after"):
         for task in KNOWN_TASKS:
@@ -341,10 +356,17 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
     for r in range(ROUNDS):
         for key in [("gemm", s) for s in SIZES] + [("train", 64), ("infer", 64)]:
             tl.append(json.dumps({"task": key[0], "device": "cpu", "size": key[1], "median_s": 0.001 * key[1] * 1.2}))
-    _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "\n".join(tl) + "\n")
+    if torch_mode == "full":
+        _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "\n".join(tl) + "\n")
+    elif torch_mode == "empty":
+        _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "")
+    elif torch_mode == "partial":
+        _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "\n".join(tl[:-3]) + "\n")
+    elif torch_mode == "garbage":
+        _write(os.path.join(ab, "results-torch-3232-sme-3232-r1-cpu.jsonl"), "not json\n")
     g = "".join("round%d gate=%s gate_ok=%d threshold=3.0 load1=0.5 waited_s=0 at=x\n" % (r, "pass" if gate_ok else "timeout", 1 if gate_ok else 0) for r in range(1, 6))
     _write(os.path.join(ab, "load_gate-3232-sme-cpu-3232-r1.log"), "threshold=3.0\n" + g)
-    _write(os.path.join(root, "tree_verify.txt"), GATE_FILE + "\n")
+    _write(os.path.join(root, "tree_verify.txt"), "crates/backend-cpu/src/gemm_blis/mod.rs\n")  # git diff --name-only の実出力形式（./ なし）
     _write(os.path.join(root, "patch_sha256.txt"), rule_sha() + "\n")
     _write(os.path.join(root, "gate_constant.txt"), "3537:const SME_PRODUCTION_ENABLED: bool = false;\n3540:const SME_PRODUCTION_ENABLED: bool = true;\n")
     k = "true" if host == "macmini" else "false"
@@ -391,6 +413,11 @@ def self_test():
     check("5/5 一貫の後退", _verdict("macmini", bad_regress=True), "REJECT")
     check("ゲート不通過", _verdict("macmini", gate_ok=False), "undetermined")
     check("ON が遅い（1.05）", _verdict("macmini", on_ratio=1.05), "REJECT")
+    for tm in ("empty", "partial", "garbage", "none"):
+        check("torch %s でも macmini は ADOPT 候補" % tm, _verdict("macmini", torch_mode=tm), "ADOPT")
+        check("torch %s でも gb10 は非後退: pass" % tm, _verdict("gb10", torch_mode=tm), "非後退: pass")
+    check("torch 空でも checksum 不一致 FAIL を保つ", _verdict("gb10", torch_mode="empty", ck_bad=True), "FAIL")
+    check("torch 一部欠損でも REJECT を保つ", _verdict("macmini", torch_mode="partial", bad_regress=True), "REJECT")
     # 総合: ADOPT は GB10 に依存する
     with tempfile.TemporaryDirectory() as td:
         _fixture(td, "macmini")
@@ -401,6 +428,15 @@ def self_test():
             _fixture(td2, "gb10")
             _, v = render(res, evaluate(td2, "gb10"))
             check("GB10 pass なら ADOPT", v, "ADOPT")
+        for kw, want in (({"ck_bad": True}, "FAIL"), ({"bad_regress": True}, "REJECT")):
+            with tempfile.TemporaryDirectory() as td3:
+                _fixture(td3, "gb10", **kw)
+                _, v = render(res, evaluate(td3, "gb10"))
+                check("GB10 %s は総合へ伝播" % want, v, want)
+        with tempfile.TemporaryDirectory() as td4:
+            _fixture(td4, "gb10", gate_ok=False)
+            _, v = render(res, evaluate(td4, "gb10"))
+            check("GB10 前提不成立は undetermined", v, "undetermined")
     print("self-test:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
