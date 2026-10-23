@@ -1,0 +1,71 @@
+イシュー #3236 事前登録規則 (m=64 専用 SME 薄型カーネル SME_THIN_M64_ENABLED の既定を Mac mini の A/B で決める)
+fixed-at: 2026-10-24T00:00:00Z (この規則は計測前にコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る)
+登録基準: origin/main bdfe6a624 + 本規則を含むコミット (計測はこのコミットのツリーで行う。docs・scripts・examples の追加だけで本番カーネルには影響しない)
+on-arm.patch sha256: 18de3c6a57d5ca3094abe046e88d89a4d389e95ce3997413070eb7b52136684e
+
+0. 位置づけ
+  - #3235 で既定 OFF のまま実装した m=64 専用 4 タイル SME カーネルの既定を決める。設計の正は docs/perf/cpu-gemm-sme-thin-m64-decision.md。
+    FMA 契約・tolerance・baseline・REQ-8 の手動境界検査・SME_PRODUCTION_ENABLED・SME_MIN_*・依存は変えない。結果を見てから規則を緩めない。
+  - 前例: docs/perf/logs/sme-macmini-3176/RULE.txt (腕の向きが同じ)・docs/perf/logs/sme-default-on-ab-3232/RULE.txt (fail-closed の語彙)。
+  - 実機は Mac mini (Apple M4) のみ。M4 Max (開発機) の値を Mac mini の値として書かない。GB10 は測らない (SME 非搭載で try_new が None を返し経路が変わらない)。
+
+1. 腕 (compare_gemm_ab.py の「after/before > 1.00 = 後退」をそのまま使う)
+  - before = 登録コミットの main (SME_THIN_M64_ENABLED = false)・クリーンなツリー。
+  - after  = on-arm.patch (crates/backend-cpu/src/gemm_blis/mod.rs の同宣言 1 行を false から true) を当てた計測専用ツリー。main へコミットしない。
+  - 比 = after / before。1.00 以下なら ON が速い。
+  - 計測: GEMM 単体 = crates/backend-cpu/examples/cpu_jobgrid_bench (threads)、K 格子 = cpu_sme_thin_m64_kgrid、framework-compare = scripts/bench/framework-compare/run_ab_sme_thin_m64_macmini_cpu.sh。
+
+2. セルの分類 (数値を見る前に固定)
+  - GEMM 単体 (7 形状。本番の入口 gemm_blis_parallel{,_nt,_tn} を呼ぶ):
+    到達 (3): l1_fwd 64x256x784 Nn・l1_dx 64x784x256 Nt・l2_dx 64x256x10 Nt (k=10。k 下限の判断対象)。
+    非到達 (4): l2_fwd 64x10x256 (n=10)・l1_dw 784x256x64 Tn (m!=64。Tn は対象外)・l2_dw 256x10x64 Tn・ref_square_512 (m!=64。ガード)。
+  - framework-compare CPU (bench-fandhe --device cpu --size 64。各 fresh/reuse):
+    infer = 到達 (L1 fwd 64x256x784 Nn が crates/backend-cpu/src/ops.rs:464・:575 から gemm_blis_bias_act_parallel_prepacked の thin 分岐へ入る。#3232 では非到達だったが本 issue では到達)。
+    train = 到達 (L1 fwd と L2 dX 64x256x10 Nt が ops.rs:260/272/294 から gemm_blis_parallel{,_nt} へ入る)。
+    L1 dX (64x784x256 Nt) が #3559 以降の train で実行されるかは静的に確認できていないため、framework-compare の到達根拠には数えない
+    (GEMM 単体の l1_dx は到達のまま測る)。
+  - K 格子 (記録用。k 下限を決める材料): (64, 256, k) Nn、k = 10, 16, 32, 64, 128, 256, 784。
+
+3. 前提ゲート (1 つでも不成立なら undetermined。理由はすべて併記)
+  - P-TREE  : 両ツリーで内容が異なるファイルが gemm_blis/mod.rs の 1 件だけ。before の該当行が `const SME_THIN_M64_ENABLED: bool = false;`、after が true。
+              SME_PRODUCTION_ENABLED は両腕とも true。patch の sha256 が上記と一致 (照合後に git apply --check)。
+  - P-R0    : 両腕で sme_report() の kernel_enabled: true (既存 probe を流用)。外れたら計測を中止して記録だけ残す。
+  - P-BIT   : 計測の前に main ツリーで Mac mini 上の `cargo test -p fandhe-ai-backend-cpu --release --lib sme_thin_m64` と
+              `-- --ignored sme_thin_m64 --test-threads=1` が pass (load_gate.log に p_bit exit=0)。
+              on-arm ツリーでは --lib を実行しない (ドリフト検出テスト sme_thin_m64_disabled_by_default が構造上必ず落ちるため。最初から除外とする)。
+  - P-LOCK  : 実機ロック (~/work/.fandhe-hw-lock) を保持したまま計測し、取得・解放の時刻を hwlock.log に残す。owner は `#3236 <UTC>`。
+  - P-GATE  : 各 round の開始前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ。GEMM 系列と framework-compare 系列のそれぞれで 5/5 round 通過した系列だけを正式とし、
+              それ以外は record_only (判定に使わず undetermined)。専有でない負荷の下で取った値は record_only。
+  - P-CELLS : 全セル x 両腕 x ちょうど 5 行 (重複・欠損・非有限値があれば不成立)。
+  - P-RUNAB / P-COLLECT: 実行 (p_bit・gemm・run_ab) と収録の終了コードがすべて 0。
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する。計測中は開発機でも Mac mini でもビルドを並走させない。
+
+4. 判定 (評価順 FAIL > 前提不成立→undetermined > REJECT / ADOPT-k > ADOPT > undetermined。緩めない)
+  - FAIL: どれかのセルで checksum が完全一致しない (GEMM 単体・K 格子は to_bits の 16 桁一致、framework-compare は 6 桁丸めの数値一致)。性能判定へ進まない。
+  - REJECT: GEMM 単体 7 形状・framework-compare 4 セルのどれかに、全 5 round で after/before > 1.00 の一貫した後退がある。ただし次の ADOPT-k に当たる場合を除く。
+  - ADOPT: 前提ゲートがすべて成立し、到達セル (GEMM 単体 3 形状と train／infer 4 セル) がすべて「5 round 中央値 <= 1.00 かつ 5/5 round <= 1.00」、
+           非到達セルに 5/5 一貫の後退が無く、checksum が全一致。
+  - ADOPT-k (k 下限つき): 5/5 一貫の後退が k < 64 の GEMM 単体到達セル (現状 l2_dx のみ) に限られ、train／infer 4 セルが ADOPT 条件を満たし、
+           K 格子で「k >= K の全点が 5/5 で ON <= OFF」になる最小の K が格子上で一意に決まり、かつ K > 10 であること。
+           この場合、既定を反転する PR は定数の反転に加えて thin_m64_shape_eligible の k 条件を `k >= K` に変える。K が決まらなければ undetermined。
+  - 上のどれでもなければ undetermined。
+
+5. 結果ごとの処置
+  - ADOPT / ADOPT-k: 既定を反転する PR は本計測の PR とは別にする。反転の前提 (i) docs/cpu-gemm-sme-unsafe-audit.md §13 の対象について
+    独立した security-auditor の読み取り専用監査を行い記録を追記する、(ii) 所有者の確認を得る。いずれかが未了なら反転 PR は作らない。
+  - REJECT / FAIL / undetermined: Rust は変えず既定 OFF のまま記録する。再計測するなら末尾に RULE-reopen を追記してから新しいラベルで測る。既存系列は差し替えない。
+
+6. 相手比 (記録だけで判定には使わない)
+  - 同じ round の PyTorch (bench_py.py。fresh のみ。sha256 を env_info に残す) の median_s / fandhe の median_s の 5 round 中央値を OFF・ON の両方で出す。
+    fandhe の fresh と reuse の両方を同じ torch 行と比べる。GEMM 単体は同 round の相手実測なし (別 run の値は「本 run の値ではない」と明記して参考併記のみ)。
+  - issue に書かれた到達目安 (infer 40〜55 us 等) は「推定」と明記し、合格ラインには使わない。candle・burn・TF・SciPy は測らない。
+
+7. checksum の範囲
+  - checksum が一致しても bit 同一の証明にはならない。bit 同一の根拠は P-BIT の実機テスト (要素単位で NEON・naive と一致) とし、そのことを記録に明記する。
+
+8. スレッド方針 (記録のみ)
+  - RAYON_NUM_THREADS=1 の GEMM 単体を 1 回、別 run として記録する。A/B の腕・判定には使わない。
+
+9. マスク規則
+  - 収録するログのホスト名は masked、$HOME は <home>、ユーザー名と絶対パスは除去。実機のホスト名・接続情報はリポに書かない。
+  - .rev-stamp (after は <sha>+on-arm.patch)・ツリー指紋 (git ls-files の sha256) を成果物に含める。
