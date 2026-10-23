@@ -9,6 +9,7 @@ run 番号付きの表を出す。0 埋め・寛容パースをしない。`*_ot
 """
 import glob
 import json
+import math
 import os
 import re
 import statistics
@@ -32,7 +33,8 @@ def parse_run(path):
             if ph in rows:
                 raise ValueError(f"{path}: phase {ph} が重複")
             v = d["median_s"]
-            if not isinstance(v, (int, float)) or v != v or (ph in PHASES and v < 0):
+            # bool は int のサブクラスなので明示除外。inf・nan（Infinity・1e309 を含む）は拒否。
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or (ph in PHASES and v < 0):
                 raise ValueError(f"{path}: phase {ph} の median_s が不正: {v!r}")
             rows[ph] = v * 1e6
     for ph in PHASES + DERIVED:
@@ -83,6 +85,9 @@ def self_test():
         ("phase 欠損", lambda d: [write(d, i, drop="alloc_h" if i == 3 else None) for i in range(1, 6)]),
         ("負値", lambda d: [write(d, i, val=-1e-6 if i == 2 else 1e-6) for i in range(1, 6)]),
         ("非数", lambda d: [write(d, i, val="NaN" if i == 2 else 1e-6) for i in range(1, 6)]),
+        ("Infinity", lambda d: [write(d, i, val="Infinity" if i == 2 else 1e-6) for i in range(1, 6)]),
+        ("1e309", lambda d: [write(d, i, val="1e309" if i == 2 else 1e-6) for i in range(1, 6)]),
+        ("bool", lambda d: [write(d, i, val="true" if i == 2 else 1e-6) for i in range(1, 6)]),
     ]
     for name, mk in rejects:
         with tempfile.TemporaryDirectory() as d:

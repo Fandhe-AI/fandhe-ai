@@ -2031,7 +2031,13 @@ impl DeviceParamStore {
                 })?,
             };
             let mut produced = None;
-            if let Some(mut out) = reusable.next() {
+            // 空出力（m == 0 または n == 0）は into 経路に入れず従来の確保経路へ回す。
+            // バックエンドの `Unsupported` と区別し、`chain_scratch_unsupported` を
+            // ラッチしない（空層 1 つで以後の非空呼び出しの再利用が無効化されるのを防ぐ）。
+            let next_reusable = reusable.next();
+            if let Some(mut out) =
+                next_reusable.filter(|o| o.shape().iter().product::<usize>() != 0)
+            {
                 match tape.ops().linear_forward_device_into_tracked(
                     src,
                     w_buf,
@@ -2063,6 +2069,13 @@ impl DeviceParamStore {
                 )?,
             };
             outs.push(out);
+            // 再利用しない経路（`Unsupported` 確定後・scratch ロック取得失敗時）では従来どおり
+            // 消費済みの中間出力を次層の発行後に解放し、ピークメモリを層数比例にしない。
+            if scratch_guard.is_none() || self.chain_scratch_unsupported.load(Ordering::Relaxed) {
+                while outs.len() > 1 {
+                    outs.remove(0);
+                }
+            }
             // 本番どおり第 1 層の発行直後に入力バッファを解放する。
             input_buf = None;
         }
@@ -7456,6 +7469,49 @@ mod tests {
         // 3 回目以降は `_into` を試さず保持もしない。
         store.predict_device_chain(&tape, &input, &steps).unwrap();
         assert!(store.chain_scratch.lock().unwrap().is_none());
+    }
+
+    /// イシュー #3205（Bugbot 指摘）: 空バッチ（出力が空）の呼び出しで `Unsupported` ラッチが
+    /// 立たず、後続の非空呼び出しで再利用が維持される。
+    #[test]
+    fn predict_device_chain_empty_batch_does_not_latch_unsupported() {
+        reset_into_mocks(1);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let empty = tensor(vec![], &[0, 2]);
+        // 1 回目で空バッチのスクラッチを保持し、2 回目で空出力が into 経路を通る位置になる。
+        store.predict_device_chain(&tape, &empty, &steps).unwrap();
+        store.predict_device_chain(&tape, &empty, &steps).unwrap();
+        assert!(!store.chain_scratch_unsupported.load(Ordering::Relaxed));
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 0);
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        store.predict_device_chain(&tape, &input, &steps).unwrap();
+        store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert!(!store.chain_scratch_unsupported.load(Ordering::Relaxed));
+        assert_eq!(
+            INTO_OK_CALLS.with(|c| c.get()),
+            2,
+            "非空では再利用が維持される"
+        );
+    }
+
+    /// イシュー #3205（Codex 指摘）: 再利用しない経路では中間出力を保持し続けない。
+    #[test]
+    fn predict_device_chain_does_not_retain_intermediates_when_not_reusing() {
+        reset_into_mocks(0);
+        two_layer_fixture!(tape, store, leaves);
+        let steps = vec![
+            (&leaves[0], None, Activation::Relu),
+            (&leaves[1], None, Activation::None),
+        ];
+        let input = tensor(vec![2.0, 3.0], &[1, 2]);
+        let _held = store.chain_scratch.lock().unwrap();
+        let r = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        assert_eq!(r.host_slice().len(), 2);
+        assert_eq!(FRESH_CALLS.with(|c| c.get()), 2);
     }
 
     /// イシュー #3205: 世代切れ（`StaleDeviceGeneration`）のスクラッチは破棄して確保経路で成功する。

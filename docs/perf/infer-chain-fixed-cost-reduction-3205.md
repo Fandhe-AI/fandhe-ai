@@ -71,7 +71,7 @@
 ## 7. 層の発行の下位分解（GB10・5 run）
 
 - 計測: `crates/backend-cuda/tests/infer_chain_issue_breakdown_diag_3205.rs`（公開 trait のみ・`unsafe` なし。record-only）。
-  batch 64・784→256＋bias＋ReLU→10＋bias。負荷ゲート: load1 < 1.0 かつ GPU 0%（5/5 通過。`logs/infer-chain-fixed-cost-3205/gb10/breakdown/load_gate.log`）。
+  batch 64・784→256＋bias＋ReLU→10＋bias。負荷ゲート: load1 < 1.0 かつ GPU 0%。`logs/infer-chain-fixed-cost-3205/gb10/breakdown/load_gate.log` の実測は load1 が 5/5 通過（0.68〜0.79）、GPU 0% は 3/5（run1・run2・run5）で、run3・run4 は gpu=1 % のため**条件未達**。run3・run4 は参考値扱いとし、条件を満たす 3 run（1・2・5）だけの中央値と 5 run 中央値は各区間とも 0.03 µs 以内（l1_issue 7.30／7.33、alloc_h 3.12／3.14、他は一致）で結論は変わらない。以下の表は 5 run 中央値（ゲート条件・許容値は緩めていない）。
 - 結果（中央値・µs。出典 `logs/infer-chain-fixed-cost-3205/gb10/breakdown/aggregate.md`。5 run の幅は各区間とも 0.2 µs 以内）:
 
 | 区間 | 中央値 (µs) | 備考 |
