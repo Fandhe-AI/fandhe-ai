@@ -1,0 +1,6 @@
+threshold=1.0 rule_threshold=1.0 series=official precheck=assert
+round1 gate=pass gate_ok=1 threshold=1.0 load1=0.81 waited_s=150 at=2026-10-23T12:24:41Z
+round2 gate=pass gate_ok=1 threshold=1.0 load1=0.62 waited_s=150 at=2026-10-23T12:27:56Z
+round3 gate=pass gate_ok=1 threshold=1.0 load1=0.91 waited_s=120 at=2026-10-23T12:30:42Z
+round4 gate=pass gate_ok=1 threshold=1.0 load1=0.87 waited_s=90 at=2026-10-23T12:32:57Z
+round5 gate=pass gate_ok=1 threshold=1.0 load1=0.85 waited_s=150 at=2026-10-23T12:36:14Z

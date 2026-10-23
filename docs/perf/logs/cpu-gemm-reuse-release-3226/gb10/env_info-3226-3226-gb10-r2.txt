@@ -1,0 +1,16 @@
+profile=gb10
+rule_sha256=2d4b390c7a0c2cfe48d7b66daaa897acb400ee94043df0cd1b3638c32b6d6f47
+rev_stamp_head=3c5549027edd58c15917432add08dfd2d34f9d6d
+rev_stamp_head_after=3c5549027edd58c15917432add08dfd2d34f9d6d
+rev_stamp_head_runner=3c5549027edd58c15917432add08dfd2d34f9d6d
+sw_vers=
+uname_m=aarch64
+rustc=rustc 1.97.0 (2d8144b78 2026-07-07)
+head=3c5549027edd58c15917432add08dfd2d34f9d6d
+cpu_brand=NA
+hw.logicalcpu=NA
+hw.perflevel0.logicalcpu=NA
+hw.perflevel1.logicalcpu=NA
+hw.memsize=NA
+rayon_num_threads=unset
+precheck=assert
