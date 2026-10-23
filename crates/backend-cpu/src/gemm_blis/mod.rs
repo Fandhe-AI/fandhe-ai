@@ -3426,10 +3426,7 @@ fn dispatch_two_d_dynamic(
     prepack: Option<prepack::PrepackSource<'_>>,
 ) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
-    if SME_PRODUCTION_ENABLED
-        && sme_shape_eligible(rows.end - rows.start, n, k)
-        && let Some(kernel) = microkernel::SmeKernel::try_new()
-    {
+    if let Some(kernel) = sme_kernel_for_shape(rows.end - rows.start, n, k) {
         return gemm_blis_two_d_dynamic_region(
             kernel,
             a,
@@ -3532,19 +3529,24 @@ const TWO_D_DYNAMIC_PRODUCTION_ENABLED: bool = true;
 /// どうかの単一 const ゲート（[`TWO_D_DYNAMIC_PRODUCTION_ENABLED`]・
 /// `thread_limit::BIG_CORE_LIMIT_ENABLED` と同型のロールバック機構）。
 ///
-/// `false` の間は実行 CPU が SME に対応していても常に
-/// [`microkernel::NeonKernel`] が選ばれる（#1313 以前と bit 完全一致）。
-/// 実測（R1〜R4。issue #1587 コメントの事前登録規則）が完了し ADOPT が
-/// 確定するまでは `false` を維持する。採否記録は
-/// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` を参照。
+/// ADOPT 確定により既定 `true`（イシュー #3231。Mac mini〈Apple M4〉A/B の
+/// 実測は `docs/perf/cpu-gemm-sme-ab-macmini.md`・確定記録は
+/// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.10）。実行 CPU が SME
+/// 非搭載・SVL≠64 等の場合は [`microkernel::SmeKernel::try_new`] が `None`
+/// を返し NEON へ fall back する（出力 bit 不変）。**ロールバックは本 const
+/// を `false` に戻す 1 行のみ**（#3232 の GB10 非後退ゲートで後退が出た
+/// 場合。`sme_production_enabled_is_true_with_neon_fallback` も反転する）。
 #[cfg(target_arch = "aarch64")]
-const SME_PRODUCTION_ENABLED: bool = false;
+const SME_PRODUCTION_ENABLED: bool = true;
 
 /// [`SME_PRODUCTION_ENABLED`] が `true` のときに SME 経路を候補とする
 /// 形状しきい値（イシュー #1587 事前登録規則 R4）。`sme_shape_eligible`
-/// の純関数として実装し単体テスト可能にする。しきい値の値自体は
-/// マイクロ A/B（R4）で確定するまでの仮値であり、`docs/perf/
-/// cpu-gemm-sme-fmopa-microkernel.md` の実測完了後に確定値へ更新する。
+/// の純関数として実装し単体テスト可能にする。値は **確定値（#3231）**:
+/// Mac mini R4 格子（`docs/perf/logs/sme-macmini-3176/macmini/r4_run{1..5}.log`・
+/// 集計 `aggregate.md`）で、本領域の全 6 点が 5/5 で SME>=NEON、K=32 や
+/// M/N<=128 へ下げると 5/5 を満たさない点が入るため据え置き。M4 Max
+/// では境界点 (256,64) が 5/5 を満たさなかった（残留事項。
+/// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.10）。
 #[cfg(target_arch = "aarch64")]
 const SME_MIN_M: usize = 256;
 #[cfg(target_arch = "aarch64")]
@@ -3560,6 +3562,21 @@ const SME_MIN_K: usize = 64;
 #[cfg(target_arch = "aarch64")]
 fn sme_shape_eligible(m_total: usize, n: usize, k: usize) -> bool {
     m_total >= SME_MIN_M && n >= SME_MIN_N && k >= SME_MIN_K
+}
+
+/// 本番ゲート式: [`SME_PRODUCTION_ENABLED`] かつ [`sme_shape_eligible`]
+/// のときだけ [`microkernel::SmeKernel::try_new`] を呼び、それ以外は
+/// `None`（NEON）。`dispatch_two_d_dynamic`（aarch64 版）から呼ばれる
+/// safe 関数で、短絡評価の意味（形状外では検出を走らせない）は従来の
+/// インライン式と同一。非 SME 環境では `try_new` が `None` を返し NEON へ
+/// fall back する契約の機械的表明点（#3231）。
+#[cfg(target_arch = "aarch64")]
+fn sme_kernel_for_shape(m_total: usize, n: usize, k: usize) -> Option<microkernel::SmeKernel> {
+    if SME_PRODUCTION_ENABLED && sme_shape_eligible(m_total, n, k) {
+        microkernel::SmeKernel::try_new()
+    } else {
+        None
+    }
 }
 
 /// テスト・A/B 計測専用: [`GemmDriverVariant::TwoDDynamic`] の
@@ -3769,6 +3786,12 @@ pub(crate) enum GemmDriverVariant {
     /// aarch64 限定トークンのため）。
     #[cfg(target_arch = "aarch64")]
     TwoDDynamicSme,
+    /// (mc, nc) 2D 動的分配を **NEON 強制・SME ゲート迂回**で実行する
+    /// 参照候補（#3231）。既定 ON 後は [`TwoDDynamic`](Self::TwoDDynamic)
+    /// が SME 搭載機で SME を含むため、A/B の NEON 腕と bit 同一テストの
+    /// 参照にはこちらを使う。aarch64 限定。
+    #[cfg(target_arch = "aarch64")]
+    TwoDDynamicNeon,
 }
 
 /// [`GemmDriverVariant`] で指定した候補を強制実行する A/B 計測専用入口
@@ -3821,6 +3844,21 @@ pub(crate) fn gemm_blis_parallel_variant(
             blocks,
         ),
         GemmDriverVariant::TwoDDynamic => dispatch_two_d_dynamic(
+            a,
+            b,
+            c,
+            n,
+            k,
+            0..m,
+            blocks,
+            GemmTranspose::Nn,
+            TWO_D_JOBS_PER_WORKER,
+            false,
+            None,
+        ),
+        #[cfg(target_arch = "aarch64")]
+        GemmDriverVariant::TwoDDynamicNeon => gemm_blis_two_d_dynamic_region(
+            microkernel::NeonKernel,
             a,
             b,
             c,
@@ -3891,6 +3929,7 @@ mod tests {
             GemmDriverVariant::IcDynamic,
             GemmDriverVariant::RowPanelBLaneqVec,
             GemmDriverVariant::TwoDDynamic,
+            GemmDriverVariant::TwoDDynamicNeon,
         ]
     }
 
@@ -5596,25 +5635,113 @@ mod tests {
         ));
     }
 
-    /// イシュー #1587: [`SME_PRODUCTION_ENABLED`] が `false` の間は
-    /// 本番入口（`dispatch_two_d_dynamic` 経由）が実行 CPU の SME 対応
-    /// 有無に関わらず常に [`microkernel::NeonKernel`] を選ぶ（#1313 以前
-    /// と bit 完全一致）ことを、大きめの形状（しきい値を超える）で確認
-    /// する回帰テスト。`SME_PRODUCTION_ENABLED` が誤って `true` へ変更
-    /// された場合、この形状は本テストではなく
-    /// `gemm_blis_parallel_variant_sme_matches_naive_bit_exact_when_available`
-    /// 側の bit 一致契約でカバーされるため、本テストは
-    /// `SME_PRODUCTION_ENABLED` の現在値が `false` であることそのものを
-    /// 検証する（値のドリフト検出）。
+    /// イシュー #3231: 既定 ON（[`SME_PRODUCTION_ENABLED`] = `true`）と
+    /// NEON fallback 契約のドリフト検出。確定しきい値 (256, 256, 64) の
+    /// 固定、およびゲート式 [`sme_kernel_for_shape`] が「SME 搭載ホストでは
+    /// `Some`・非搭載ホストでは `None`（= NEON へ fall back）」であることを
+    /// 機械的に表明する。しきい値直下の形状は環境によらず `None`。
+    ///
+    /// #3232 の off 腕（`SME_PRODUCTION_ENABLED = false`）ではこのテストが
+    /// 構造上 FAIL する（想定内の 1 件。ロールバック時は本テストを反転する）。
     #[cfg(target_arch = "aarch64")]
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn sme_production_enabled_is_false_pending_measurement() {
-        assert!(
-            !SME_PRODUCTION_ENABLED,
-            "R1〜R4（イシュー #1587 事前登録規則）の実測完了・ADOPT 確定まで \
-             SME_PRODUCTION_ENABLED は false を維持する契約"
+    fn sme_production_enabled_is_true_with_neon_fallback() {
+        assert!(SME_PRODUCTION_ENABLED, "#3231 で既定 ON に確定した契約");
+        assert_eq!((SME_MIN_M, SME_MIN_N, SME_MIN_K), (256, 256, 64));
+        assert_eq!(
+            sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K).is_some(),
+            crate::sme_detect::sme_report().kernel_enabled,
+            "しきい値ちょうどの形状は SME 搭載ホストでのみ SME を選び、非搭載では None（NEON）"
         );
+        assert!(sme_kernel_for_shape(SME_MIN_M - 1, SME_MIN_N, SME_MIN_K).is_none());
+        assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N - 1, SME_MIN_K).is_none());
+        assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K - 1).is_none());
+    }
+
+    /// イシュー #3231 (AC2・AC3): 本番入口（NN／TN／NT／bias+ReLU 融合）が
+    /// スレッド数 {1,2,3,4,8} のどれでも `gemm_naive`（単一連続 K ループ・
+    /// FMA 契約）と bit 完全一致し、NN は NEON 強制参照
+    /// （`TwoDDynamicNeon`）とも一致することを固定する。SME 搭載ホスト
+    /// （M4 系）では SME と NEON の一致、非搭載ホスト（GB10 等）では NEON
+    /// 同士の一致（fallback 契約）を示す。aarch64 限定（SME 関連アイテムが
+    /// すべて aarch64 cfg のため、x86_64 の出力は構造上変わらない）。
+    /// rayon 参照は `install_in_pool_for_test` に集約（`determinism_inventory`
+    /// の allowlist を崩さない）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn production_gemm_matches_naive_and_neon_forced_bit_exact_across_thread_counts() {
+        let shapes = [
+            (SME_MIN_M, SME_MIN_N, SME_MIN_K),
+            (SME_MIN_M + 5, SME_MIN_N + 3, SME_MIN_K + 7),
+            (SME_MIN_M - 1, SME_MIN_N, SME_MIN_K),
+            (SME_MIN_M * 2, SME_MIN_N * 2, SME_MIN_K * 3),
+        ];
+        for &(m, n, k) in &shapes {
+            let a = xorshift32_vec(0x2468_ace1 ^ (m as u32), m * k);
+            let b = xorshift32_vec(0x1357_bdf9 ^ (n as u32), k * n);
+            let bias = xorshift32_vec(0x0f0f_1234 ^ (n as u32), n);
+            let mut at = vec![0.0f32; k * m];
+            for i in 0..m {
+                for p in 0..k {
+                    at[p * m + i] = a[i * k + p];
+                }
+            }
+            let mut bt = vec![0.0f32; n * k];
+            for p in 0..k {
+                for j in 0..n {
+                    bt[j * k + p] = b[p * n + j];
+                }
+            }
+            let mut naive = vec![0.0f32; m * n];
+            crate::gemm::gemm_naive(&a, &b, &mut naive, m, n, k).unwrap();
+            let mut neon = vec![0.0f32; m * n];
+            gemm_blis_parallel_variant(
+                GemmDriverVariant::TwoDDynamicNeon,
+                &a,
+                &b,
+                &mut neon,
+                m,
+                n,
+                k,
+                default_blocks(),
+            )
+            .unwrap();
+            assert_eq!(naive, neon, "NEON 強制参照が naive と不一致 ({m},{n},{k})");
+            let mut fused_ref = naive.clone();
+            for row in fused_ref.chunks_mut(n) {
+                for (v, bv) in row.iter_mut().zip(&bias) {
+                    *v = (*v + *bv).max(0.0);
+                }
+            }
+            for &threads in &[1usize, 2, 3, 4, 8] {
+                let (nn, tn, nt, fused) = install_in_pool_for_test(threads, || {
+                    let mut nn = vec![0.0f32; m * n];
+                    gemm_blis_parallel(&a, &b, &mut nn, m, n, k).unwrap();
+                    let mut tn = vec![0.0f32; m * n];
+                    gemm_blis_parallel_tn(&at, &b, &mut tn, m, n, k).unwrap();
+                    let mut nt = vec![0.0f32; m * n];
+                    gemm_blis_parallel_nt(&a, &bt, &mut nt, m, n, k).unwrap();
+                    let mut fused = vec![0.0f32; m * n];
+                    gemm_blis_bias_act_parallel(
+                        &a,
+                        &b,
+                        &mut fused,
+                        m,
+                        n,
+                        k,
+                        Some(&bias),
+                        Activation::Relu,
+                    )
+                    .unwrap();
+                    (nn, tn, nt, fused)
+                });
+                assert_eq!(naive, nn, "NN ({m},{n},{k}) T={threads}");
+                assert_eq!(naive, tn, "TN ({m},{n},{k}) T={threads}");
+                assert_eq!(naive, nt, "NT ({m},{n},{k}) T={threads}");
+                assert_eq!(fused_ref, fused, "bias+relu ({m},{n},{k}) T={threads}");
+            }
+        }
     }
 
     /// イシュー #1366: `IcDynamic` が小さい **kc** で pc 同期点を複数
@@ -7083,7 +7210,7 @@ mod tests {
     //     スクリプトへ委ねる） ---
 
     /// SME マイクロカーネル（`GemmDriverVariant::TwoDDynamicSme`）と本番
-    /// NEON 経路（`GemmDriverVariant::TwoDDynamic`）を interleave 方式
+    /// NEON 強制経路（`GemmDriverVariant::TwoDDynamicNeon`。ゲート迂回。#3231）を interleave 方式
     /// （[`run_ab_candidates_interleaved`] と同じ round-robin＋開始位置
     /// ローテーション）で比較する。SME 非対応環境（GB10 等）では実行時
     /// スキップする。出力形式は既存 A/B と揃え（`variant=… size=…
@@ -7114,7 +7241,7 @@ mod tests {
             let b = xorshift32_vec(0x5678_ef01 ^ (n as u32), k * n);
 
             let candidates: Vec<(GemmDriverVariant, BlockSizes)> = vec![
-                (GemmDriverVariant::TwoDDynamic, default_blocks()),
+                (GemmDriverVariant::TwoDDynamicNeon, default_blocks()),
                 (GemmDriverVariant::TwoDDynamicSme, default_blocks()),
             ];
             let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 10);
@@ -7151,7 +7278,7 @@ mod tests {
                 let b = xorshift32_vec(0x5678_ef01 ^ (n as u32), k * n);
 
                 let candidates: Vec<(GemmDriverVariant, BlockSizes)> = vec![
-                    (GemmDriverVariant::TwoDDynamic, default_blocks()),
+                    (GemmDriverVariant::TwoDDynamicNeon, default_blocks()),
                     (GemmDriverVariant::TwoDDynamicSme, default_blocks()),
                 ];
                 let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 10);
@@ -7203,7 +7330,7 @@ mod tests {
             let a = xorshift32_vec(0x1234_abcd ^ (m as u32), m * k);
             let b = xorshift32_vec(0x5678_ef01 ^ (n as u32), k * n);
             let candidates: Vec<(GemmDriverVariant, BlockSizes)> = vec![
-                (GemmDriverVariant::TwoDDynamic, default_blocks()),
+                (GemmDriverVariant::TwoDDynamicNeon, default_blocks()),
                 (GemmDriverVariant::TwoDDynamicSme, default_blocks()),
             ];
             let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 10);
@@ -7251,7 +7378,7 @@ mod tests {
             let mut c_neon = vec![0.0f32; m * n];
             let mut c_sme = vec![0.0f32; m * n];
             gemm_blis_parallel_variant(
-                GemmDriverVariant::TwoDDynamic,
+                GemmDriverVariant::TwoDDynamicNeon,
                 &a,
                 &b,
                 &mut c_neon,
@@ -7280,7 +7407,7 @@ mod tests {
             );
 
             let candidates: Vec<(GemmDriverVariant, BlockSizes)> = vec![
-                (GemmDriverVariant::TwoDDynamic, default_blocks()),
+                (GemmDriverVariant::TwoDDynamicNeon, default_blocks()),
                 (GemmDriverVariant::TwoDDynamicSme, default_blocks()),
             ];
             let gflops = run_candidates_interleaved(&candidates, &a, &b, m, n, k, 10);

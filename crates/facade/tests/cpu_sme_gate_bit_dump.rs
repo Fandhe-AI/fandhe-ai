@@ -1,13 +1,16 @@
 //! イシュー #2049: `SME_PRODUCTION_ENABLED`（`crates/backend-cpu/src/
-//! gemm_blis/mod.rs:3085`。既定 `false`。aarch64 SME `fmopa` マイクロ
+//! gemm_blis/mod.rs`。既定 `true`〈#3231 で ON 確定。それ以前は `false`〉。aarch64 SME `fmopa` マイクロ
 //! カーネルを `GemmDriverVariant::TwoDDynamic` へ形状条件付きで結線
 //! するかどうかの単一 const ゲート。`TWO_D_DYNAMIC_PRODUCTION_ENABLED`・
 //! `thread_limit::BIG_CORE_LIMIT_ENABLED` と同型のロールバック機構
 //! （同ファイル doc comment 参照）で、採否記録は
 //! `docs/perf/cpu-gemm-sme-fmopa-microkernel.md`）の on/off で CPU 側
-//! 出力が bit 完全一致することを、before（`SME_PRODUCTION_ENABLED =
-//! false`）／after（同 `true`）の 2 ツリーで本ファイルを実行し
+//! 出力が bit 完全一致することを、2 ツリー（ON = main、OFF =
+//! `docs/perf/logs/sme-default-on-3231/off-arm.patch` を当てたツリー）で本ファイルを実行し
 //! 標準出力を diff することで確認する診断用テスト。
+//!
+//! `RAYON_NUM_THREADS`（未設定・1・2・4・8）を変えた実行でも出力 bit が同一
+//! であることの確認手順は `docs/perf/logs/sme-default-on-3231/README.md`。
 //!
 //! **本ファイル単体では `SME_PRODUCTION_ENABLED` を切り替えない**
 //! （常に checkout 済みのツリーの値のまま実行される）。GB10 実機での
