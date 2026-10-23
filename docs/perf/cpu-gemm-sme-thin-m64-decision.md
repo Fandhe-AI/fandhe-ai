@@ -145,3 +145,12 @@ train CPU に効くのは forward と dX の GEMM 経由だけである。
 ## 9. 変更していないもの
 
 `.rs`・`docs/spec`・tolerance（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・baseline・FMA 契約・REQ-8・`SME_MIN_*`・`SME_PRODUCTION_ENABLED`・ruleset／リポジトリ設定。
+
+## 10. #3235 の実装での差分（2026-10-24 追記）
+
+§1〜§9 の判定は変えない。実装で確定した差分のみを記す。
+
+- **C の扱い**: §4.2 の「`ldc = n` で直接ストア」ではなく、job-local の連続バッファ（ldc=16）へ copy-in → カーネル → 並列区間後に直列で copy-out する。スレッド間で生ポインタを共有する新規 `unsafe` を増やさないため。copy は値の転写のみで演算列は変わらず bit 一致を保つ。カーネルは `ldc` を引数に取る汎用形のまま。直接ストアへの戻しは #3236 の結果を見て別 issue で扱う。
+- **挿入位置**: `gemm_blis_parallel_with_transpose`（Nn／Nt）と `gemm_blis_bias_act_parallel_prepacked`（Nn。bias+ReLU は GEMM 完了後に `apply_epilogue` を 1 回）の `m == 1` 分岐の直後。GB10 affinity／`run_capped` の外にあり、現在の rayon プールで動く。スレッド方針は #3236 で扱う（GB10 は `try_new` が `None` でここへ入らない）。
+- **適格条件**: `m == 64`・`n >= 16 && n % 16 == 0`・`k >= 1`・Nn／Nt。k の下限は #3236 の格子で決める。
+- **ゲート**: `SME_THIN_M64_ENABLED = false`（既定 OFF）。監査は `docs/cpu-gemm-sme-unsafe-audit.md` §13。性能は本 issue では測っていない。
