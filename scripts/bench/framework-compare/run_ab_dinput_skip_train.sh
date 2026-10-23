@@ -101,6 +101,27 @@ check_stamp() { # <root> <stamp>
     echo "error: $1 の .rev-stamp が無い、または HEAD と不一致（stamp=${2:-none} head=${real:-none}）" >&2; exit 1
   fi
 }
+# RULE.txt が登録した before／after の SHA（`- before = <40hex>` 行）を正として両腕 HEAD を照合し、
+# 追跡ファイルの未コミット変更（腕が登録外コミット・改変になる事故）も拒否する。
+rule_sha_of() { grep -E "^- $1[[:space:]]*=[[:space:]]*[0-9a-f]{40}" "$RULE_FILE" | head -n1 | grep -oE '[0-9a-f]{40}' | head -n1; }
+EXPECT_BEFORE="$(rule_sha_of before)"
+EXPECT_AFTER="$(rule_sha_of after)"
+if [[ -z "$EXPECT_BEFORE" || -z "$EXPECT_AFTER" ]]; then
+  echo "error: RULE.txt から before/after の SHA を読めない" >&2; exit 1
+fi
+check_arm() { # <root> <expected_sha>
+  local real dirty
+  real="$(git -C "$1" rev-parse HEAD 2>/dev/null || true)"
+  if [[ "$real" != "$2" ]]; then
+    echo "error: $1 の HEAD が RULE.txt の登録 SHA と不一致（head=${real:-none} expected=$2）" >&2; exit 1
+  fi
+  dirty="$(git -C "$1" status --porcelain --untracked-files=no 2>/dev/null || echo unknown)"
+  if [[ -n "$dirty" ]]; then
+    echo "error: $1 の追跡ファイルに未コミット変更がある" >&2; exit 1
+  fi
+}
+check_arm "$BEFORE_ROOT" "$EXPECT_BEFORE"
+check_arm "$AFTER_ROOT" "$EXPECT_AFTER"
 check_stamp "$BEFORE_ROOT" "$STAMP_BEFORE"
 check_stamp "$AFTER_ROOT" "$STAMP_AFTER"
 check_stamp "$RUNNER_ROOT" "$STAMP_RUNNER"

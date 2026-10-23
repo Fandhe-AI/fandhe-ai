@@ -139,6 +139,40 @@ class JudgeTest(unittest.TestCase):
         c = J.judge_cell("macmini", "macmini", "cpu", "reuse", d, LABEL, RULE_SHA)
         self.assertEqual(c["verdict"], "undetermined")
 
+    def test_device_mixup_is_undetermined(self):
+        d = os.path.join(self.tmp.name, "m")
+        os.makedirs(d)
+        make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): [0.9] * 5 for dv in ("cpu", "cuda") for m in ("fresh", "reuse")})
+        p = f"{d}/results-after-{LABEL}-cuda-train.jsonl"
+        write(p, open(f"{d}/results-after-{LABEL}-cpu-train.jsonl", encoding="utf-8").read())
+        c = J.judge_cell("gb10", "gb10", "cuda", "reuse", d, LABEL, RULE_SHA)
+        self.assertEqual(c["verdict"], "undetermined")
+        self.assertIn("device", c["reason"])
+
+    def test_size_mismatch_is_undetermined(self):
+        d = os.path.join(self.tmp.name, "m")
+        os.makedirs(d)
+        make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): [0.9] * 5 for dv in ("cpu", "cuda") for m in ("fresh", "reuse")})
+        p = f"{d}/results-before-{LABEL}-cpu-train.jsonl"
+        write(p, open(p, encoding="utf-8").read().replace('"size": 64', '"size": 256'))
+        c = J.judge_cell("gb10", "gb10", "cpu", "reuse", d, LABEL, RULE_SHA)
+        self.assertEqual(c["verdict"], "undetermined")
+
+    def test_digest_device_mixup_rejects(self):
+        bad = {("after", "cpu", "reuse", 3): DIG.format(m="reuse", d="cuda")}
+        self.assertEqual(self.cell(ratios=[0.9] * 5, digests=bad)["verdict"], "REJECT")
+
+    def test_ref_missing_or_invalid_does_not_crash(self):
+        d = os.path.join(self.tmp.name, "m")
+        os.makedirs(d)
+        make_machine(d, "gb10", ("cpu", "cuda"), {(dv, m): [0.9] * 5 for dv in ("cpu", "cuda") for m in ("fresh", "reuse")})
+        bad = os.path.join(self.tmp.name, "bad.jsonl")
+        write(bad, "{not json\n")
+        for ref in (os.path.join(self.tmp.name, "missing.jsonl"), bad):
+            rc, out = self.run_main("--machine", f"gb10={d}:{LABEL}", "--ref", f"gb10={ref}")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("ref 不正", out)
+
     def run_main(self, *extra):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

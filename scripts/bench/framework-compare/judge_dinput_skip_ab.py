@@ -56,7 +56,7 @@ def _read_lines(path):
         raise Bad(f"{path}: 開けない ({e})")
 
 
-def load_rows(path, mode):
+def load_rows(path, mode, dev):
     """JSONL から task=train・指定 mode の fandhe-ai 行を出現順に返す。不正行は Bad。"""
     rows = []
     for n, line in enumerate(_read_lines(path), 1):
@@ -72,6 +72,10 @@ def load_rows(path, mode):
             continue
         if o.get("framework") != "fandhe-ai":
             raise Bad(f"{path}:{n}: framework != fandhe-ai")
+        if o.get("device") != dev:
+            raise Bad(f"{path}:{n}: device が要求セル {dev} と不一致 ({o.get('device')!r})")
+        if isinstance(o.get("size"), bool) or o.get("size") != 64:
+            raise Bad(f"{path}:{n}: size が 64 でない ({o.get('size')!r})")
         for k in ("median_s", "checksum"):
             v = o.get(k)
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
@@ -82,7 +86,7 @@ def load_rows(path, mode):
     return rows
 
 
-def load_digest(path):
+def load_digest(path, mode, dev):
     """digest ログから PARAM_DIGEST 行をちょうど 1 件取り出す。欠落・重複・形式不正は Bad。"""
     hits = [ln for ln in _read_lines(path) if ln.startswith("PARAM_DIGEST")]
     if len(hits) != 1:
@@ -90,7 +94,10 @@ def load_digest(path):
     m = DIGEST_RE.match(hits[0])
     if not m:
         raise Bad(f"{path}: PARAM_DIGEST 行の形式不正")
-    return m.groups()
+    g = m.groups()
+    if g[0] != mode or g[1] != dev:
+        raise Bad(f"{path}: digest の mode/device が要求セル ({mode}/{dev}) と不一致 ({g[0]}/{g[1]})")
+    return g
 
 
 def parse_kv(line):
@@ -155,8 +162,8 @@ def judge_cell(machine, profile, dev, mode, d, label, rule_sha):
     res = {"machine": machine, "dev": dev, "mode": mode, "verdict": "undetermined",
            "mb": None, "ma": None, "ratio": None, "per": [], "reason": ""}
     try:
-        before = load_rows(base % "before", mode)
-        after = load_rows(base % "after", mode)
+        before = load_rows(base % "before", mode, dev)
+        after = load_rows(base % "after", mode, dev)
         if len(before) != ROUNDS or len(after) != ROUNDS:
             raise Bad(f"run 数が 5 でない (before={len(before)} after={len(after)})")
         res["mb"], res["ma"], res["ratio"], res["per"] = cell_stats(before, after)
@@ -167,7 +174,7 @@ def judge_cell(machine, profile, dev, mode, d, label, rule_sha):
         for arm in ("before", "after"):
             for r in range(1, ROUNDS + 1):
                 try:
-                    digests.add(load_digest(f"{d}/digest-{arm}-{label}-{dev}-{mode}-r{r}.log"))
+                    digests.add(load_digest(f"{d}/digest-{arm}-{label}-{dev}-{mode}-r{r}.log", mode, dev))
                 except Bad as e:
                     digest_err = str(e)
         if len(sums) != 1:
@@ -207,15 +214,21 @@ def judge_cell(machine, profile, dev, mode, d, label, rule_sha):
 def ref_ratio(ref_paths, dev, median):
     """参考: 最速の相手 median に対する比。別セッションの参照値（判定外）。"""
     best = None
-    for p in ref_paths:
-        for ln in _read_lines(p):
-            if not ln.strip():
-                continue
-            o = json.loads(ln)
-            if o.get("task") == "train" and o.get("device") == dev and o.get("framework") != "fandhe-ai":
-                v = o.get("median_s")
-                if isinstance(v, (int, float)) and v > 0 and (best is None or v < best[0]):
-                    best = (v, o["framework"])
+    try:
+        for p in ref_paths:
+            for ln in _read_lines(p):
+                if not ln.strip():
+                    continue
+                o = json.loads(ln)
+                if not isinstance(o, dict):
+                    raise Bad(f"{p}: object でない行")
+                if o.get("task") == "train" and o.get("device") == dev and o.get("framework") != "fandhe-ai":
+                    v = o.get("median_s")
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 and (best is None or v < best[0]):
+                        best = (v, o["framework"])
+    except (Bad, ValueError, OSError, KeyError) as e:
+        # 参考値は判定外。読めない参照は握りつぶさず理由付きで n/a と表示し、判定・終了コードは不変。
+        return f"n/a (ref 不正: {str(e)[:60]})".replace("|", "/").replace("\n", " ")
     if best is None or median is None:
         return "n/a"
     return f"{median / best[0]:.2f}x ({best[1]})"
