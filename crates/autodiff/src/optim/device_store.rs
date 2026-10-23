@@ -506,6 +506,8 @@ pub struct DeviceParamStore {
     /// 返したら立てる。以後 `chain_scratch` へバッファを保持しない（`Unsupported` を
     /// 返すバックエンドで出力バッファを無駄に常駐させない）。
     chain_scratch_unsupported: AtomicBool,
+    /// `_into` 経路が実際に動作すると確認済みか（初回の対応可否プローブを 1 回で済ませる）。
+    chain_scratch_probed: AtomicBool,
     /// grad の永続 staging バッファ（イシュー #1212。[`GradStaging`]
     /// doc 参照）。resident 経路が一度も成功しないバックエンド（CUDA／
     /// Metal。現時点でこれに該当）では `None` のまま——`RefCell` は
@@ -1297,6 +1299,7 @@ impl DeviceParamStore {
             failure_token: DispatchFailureCell::new(),
             chain_scratch: std::sync::Mutex::new(None),
             chain_scratch_unsupported: AtomicBool::new(false),
+            chain_scratch_probed: AtomicBool::new(false),
             grad_staging: RefCell::new(None),
             backward_serial: Cell::new(0),
             resident_grad_capability: Cell::new(None),
@@ -2058,7 +2061,7 @@ impl DeviceParamStore {
                     Err(e) => return Err(e),
                 }
             }
-            let out = match produced {
+            let mut out = match produced {
                 Some(out) => out,
                 None => tape.ops().linear_forward_device_tracked(
                     src,
@@ -2068,6 +2071,32 @@ impl DeviceParamStore {
                     &self.failure_token,
                 )?,
             };
+            // 再利用能力の事前判定（Codex 指摘）: 初回は再利用バッファが無く `_into` を呼ばないため、
+            // 非対応バックエンド（CPU・Metal）を検出できず全層の出力を蓄積してしまう。
+            // 未確認の間だけ、確保済みの出力へ `_into` を 1 回試して能力を確定する
+            // （同じ結果の上書き。以後は `chain_scratch_probed` で省略）。
+            if scratch_guard.is_some()
+                && !self.chain_scratch_unsupported.load(Ordering::Relaxed)
+                && !self.chain_scratch_probed.load(Ordering::Relaxed)
+                && out.shape().iter().product::<usize>() != 0
+            {
+                match tape.ops().linear_forward_device_into_tracked(
+                    src,
+                    w_buf,
+                    b_buf,
+                    act,
+                    &mut out,
+                    &self.failure_token,
+                ) {
+                    Ok(()) => self.chain_scratch_probed.store(true, Ordering::Relaxed),
+                    Err(BackendError::Unsupported(_)) => {
+                        self.chain_scratch_unsupported
+                            .store(true, Ordering::Relaxed);
+                    }
+                    Err(BackendError::StaleDeviceGeneration { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
             outs.push(out);
             // 再利用しない経路（`Unsupported` 確定後・scratch ロック取得失敗時）では従来どおり
             // 消費済みの中間出力を次層の発行後に解放し、ピークメモリを層数比例にしない。
@@ -7401,7 +7430,7 @@ mod tests {
         let input = tensor(vec![2.0, 3.0], &[1, 2]);
         let first = store.predict_device_chain(&tape, &input, &steps).unwrap();
         assert_eq!(FRESH_CALLS.with(|c| c.get()), 2, "1 回目は確保経路");
-        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 0);
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 1, "能力プローブ 1 回");
         // 2 回目: 別入力でも前回の内容が残らない。
         let input2 = tensor(vec![-4.0, 1.0], &[1, 2]);
         let second = store.predict_device_chain(&tape, &input2, &steps).unwrap();
@@ -7410,7 +7439,7 @@ mod tests {
             2,
             "2 回目は確保経路を呼ばない"
         );
-        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 2);
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 3);
         // 参照: scratch なしの新しい store で同じ入力を 1 回目として計算した結果。
         reset_into_mocks(1);
         two_layer_fixture!(tape2, store2, leaves2);
@@ -7445,9 +7474,13 @@ mod tests {
         store.predict_device_chain(&tape, &in1, &steps).unwrap();
         store.predict_device_chain(&tape, &in2, &steps).unwrap();
         assert_eq!(FRESH_CALLS.with(|c| c.get()), 4, "形状が違うので再確保");
-        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 0);
+        assert_eq!(
+            INTO_OK_CALLS.with(|c| c.get()),
+            1,
+            "プローブのみ（確認済み後は省略）"
+        );
         store.predict_device_chain(&tape, &in2, &steps).unwrap();
-        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 2);
+        assert_eq!(INTO_OK_CALLS.with(|c| c.get()), 3);
     }
 
     /// イシュー #3205: `_into` が `Unsupported`（既定）なら層単位で確保経路を使い、以後保持しない。
@@ -7461,6 +7494,9 @@ mod tests {
         ];
         let input = tensor(vec![2.0, 3.0], &[1, 2]);
         let a = store.predict_device_chain(&tape, &input, &steps).unwrap();
+        // 初回の能力プローブで非対応を確定し、初回から中間出力を保持しない（Codex 指摘）。
+        assert!(store.chain_scratch_unsupported.load(Ordering::Relaxed));
+        assert!(store.chain_scratch.lock().unwrap().is_none());
         let b = store.predict_device_chain(&tape, &input, &steps).unwrap();
         assert_eq!(&*a.host_slice(), &*b.host_slice());
         assert_eq!(FRESH_CALLS.with(|c| c.get()), 4);
@@ -7493,8 +7529,8 @@ mod tests {
         assert!(!store.chain_scratch_unsupported.load(Ordering::Relaxed));
         assert_eq!(
             INTO_OK_CALLS.with(|c| c.get()),
-            2,
-            "非空では再利用が維持される"
+            3,
+            "非空では再利用が維持される（初回プローブ 1 + 再利用 2）"
         );
     }
 
