@@ -2,9 +2,11 @@
 
 ## 状態
 
-**未実測**（計測基盤と事前登録規則のみ。実機での計測・集計は未実施）。実測後に本節を「実測済み」へ更新し、
+**実測済み（総合判定 REJECT。2026-10-23 UTC・計測コミット `9cfadc452fbf6ee3633b8a5c38c016976f02f4a3`）**。
+Mac mini は到達 10 セルすべてで ON が 5/5 速い。GB10 は非到達のガードだが `gemm 256 fresh`・`gemm 2048 reuse` が 5/5 一貫の後退で、
+RULE の合成規則により総合は REJECT。GB10 の PyTorch 相手比は未計測（torch 2.14.0+cu130 の venv なし）。
 判定は `aggregate-macmini.md`・`aggregate-gb10.md`（`aggregate.py` の機械出力）と
-`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.11 に記録する。
+`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.13 に記録した。`SME_PRODUCTION_ENABLED` を戻すかは所有者判断待ち（Rust は未変更）。
 
 ## 目的
 
@@ -25,8 +27,8 @@
 | `orchestrate_macmini.sh` | Mac mini: ロック → P-TREE → P-R0 → A/B → マスク収録（`--dry-run` あり） |
 | `orchestrate_gb10.sh` | GB10: ロック → 外側ゲート → P-TREE → P-R0 → RT → A/B → bitdump → マスク収録（`--dry-run` あり） |
 | `aggregate.py` | 厳密集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`） |
-| `aggregate-macmini.md`・`aggregate-gb10.md` | `python3 -I aggregate.py macmini macmini`／`gb10 gb10` の出力（実測後に追加。手で直さない） |
-| `macmini/`・`gb10/` | 実測ログ（マスク済み。実測後に追加） |
+| `aggregate-macmini.md`・`aggregate-gb10.md` | `python3 -I aggregate.py macmini macmini`／`gb10 gb10` の出力（手で直さない。gb10 を先に実行する） |
+| `macmini/`・`gb10/` | 実測ログ（マスク済み） |
 | `../../../../scripts/bench/framework-compare/run_ab_sme_default_on_cpu.sh` | 2 機共通の A/B 本体（`AB_HOST=macmini\|gb10` 必須。#3176 の `run_ab_sme_macmini_cpu.sh` の派生で元は変更しない） |
 
 OFF 腕のパッチは `docs/perf/logs/sme-default-on-3231/off-arm.patch`（`true` を `false` に戻す 1 行。sha256 は `RULE.txt` に固定）を使う。
@@ -40,7 +42,7 @@ OFF 腕のパッチは `docs/perf/logs/sme-default-on-3231/off-arm.patch`（`tru
    （macOS に `setsid` は無い。`nohup` のサブシェルから `zsh -lc` で起動し `ps` で生存確認。torch 2.14.0・numpy 2.5.4 の venv はリポジトリの外）。
 4. GB10: `PATH` に `${HOME}/.cargo/bin` を明示し `setsid nohup` で `orchestrate_gb10.sh` を起動する。転送後は先に再ビルドする
    （openrsync の `--delete-excluded` で `framework-compare/target` が消える落とし穴）。
-5. 回収後、`aggregate.py` で 2 本の `aggregate-*.md` を作り、perf doc §5.11 を書く。
+5. 回収後、`aggregate.py` で 2 本の `aggregate-*.md` を作り、perf doc §5.13 を書く。
 
 ## マスク規則・実機ロック
 

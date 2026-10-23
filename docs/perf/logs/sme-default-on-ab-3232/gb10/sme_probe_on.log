@@ -1,0 +1,1 @@
+sme_report=SmeReport { os_flag: false, svl_bytes: None, kernel_enabled: false }

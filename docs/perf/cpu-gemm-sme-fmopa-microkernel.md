@@ -815,6 +815,78 @@ PyTorch 比（同 run 内）は gemm で 0.49〜0.74 倍から 1.03〜1.41 倍�
 - 実施しなかったこと: 実機ロック（hw-lock）の取得、Mac mini のセッション、rsync・ビルド・計測、`docs/perf/logs/sme-neon-hetero-ab-3239/` と `RULE.txt` の作成。
 - 再提起の条件: §5.11 の再評価の条件に従う。混在分配が新しい issue で実装された後に、改めて A/B の issue を起こす（起票は所有者の判断事項）。
 
+### 5.13 SME 既定 ON の前後 A/B（Mac mini・GB10。イシュー #3232）
+
+#3231 で `SME_PRODUCTION_ENABLED` を `true` にした main そのもの（ON）と、同じコミットで定数 1 行を `false` に戻したもの（OFF。`off-arm.patch`）を
+Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/perf/logs/sme-default-on-ab-3232/RULE.txt`（計測前に固定。今回も変更していない）、
+集計は `aggregate.py` の機械出力（`aggregate-macmini.md`・`aggregate-gb10.md`。手で直していない）。腕の向きは before = OFF・after = ON、比 = ON / OFF（1.00 以下なら ON が速い）。
+
+| 項目 | 内容 |
+|---|---|
+| 計測コミット | `9cfadc452fbf6ee3633b8a5c38c016976f02f4a3`（`origin/main`。RULE 登録コミット `42ea08d4d` から `crates/`・`scripts/`・`Cargo.*`・`rust-toolchain.toml` に差分なし。両機とも ON ツリーは bundle の clone で `rev-stamp.txt` と一致・tree_fingerprint は各 `macmini/`・`gb10/` に収録） |
+| 計測日時 | 2026-10-23 20:39〜20:47 UTC（Mac mini）・20:39〜20:43 UTC（GB10）。実機ロック取得・解放は各 `hwlock.log` |
+| ログ | `docs/perf/logs/sme-default-on-ab-3232/{macmini,gb10}/`（マスク済み。回収後に実ホスト名・`/Users/`・`/home/`・ユーザー名・IP の grep 検査は 0 件） |
+| 前提ゲート | 両機とも成立（P-TREE・P-R0・負荷ゲート・`run_ab exit=0`・`collect exit=0`。GB10 は加えて `rt_on exit=0`・`bitdump exit=0 cmp_exit=0`）。Mac mini の `sme_report` は両腕 `kernel_enabled: true`、GB10 は両腕 `false` |
+
+#### 判定（機械出力のまま）
+
+- GB10: **REJECT**。5/5 一貫の後退セルが 2 つある（`gemm 256 fresh`・`gemm 2048 reuse`）。
+- Mac mini: **REJECT（GB10 が REJECT のため。RULE の合成規則）**。Mac mini 単独のセルは次のとおり良好で、5/5 一貫の後退はない。
+- 総合: **REJECT**。
+
+#### Mac mini（到達 10 セル・非到達 2 セル）の ON/OFF 比（5 round 中央値）
+
+| セル | ON/OFF | 5/5 判定 |
+|---|---|---|
+| gemm 256 fresh／reuse | 0.744／0.782 | 5/5 で ON が速い |
+| gemm 512 fresh／reuse | 0.561／0.582 | 同上 |
+| gemm 1024 fresh／reuse | 0.474／0.474 | 同上 |
+| gemm 2048 fresh／reuse | 0.474／0.472 | 同上 |
+| train 64 fresh／reuse | 0.912／0.876 | 同上 |
+| infer 64 fresh／reuse（非到達ガード） | 0.998／0.982 | 4/5 が 1.00 以下。5/5 一貫の後退なし |
+
+#### GB10（全 12 セルが非到達のガード。SME 非搭載）の ON/OFF 比（5 round 中央値）
+
+| セル | ON/OFF | 1.00 以下／超 |
+|---|---|---|
+| gemm 256 fresh／reuse | **1.014**／1.098 | 0／5（5/5 後退）・2／3 |
+| gemm 512 fresh／reuse | 0.958／0.924 | 4／1・3／2 |
+| gemm 1024 fresh／reuse | 1.039／1.007 | 2／3・2／3 |
+| gemm 2048 fresh／reuse | 1.068／**1.061** | 1／4・0／5（5/5 後退） |
+| train 64 fresh／reuse | 0.980／1.057 | 3／2・2／3 |
+| infer 64 fresh／reuse | 0.947／0.932 | 3／2・4／1 |
+
+- 5/5 一貫の後退: `gemm 256 fresh`（round 別 1.002・1.014・1.148・1.008・1.172）と `gemm 2048 reuse`（1.042・1.061・1.107・1.075・1.059）。
+- 事実として確認できていること: GB10 は `kernel_enabled: false` で SME カーネルに到達せず、ON/OFF は同じ NEON 経路を通る。checksum は全 12 セルで ON/OFF 完全一致。
+  bitdump は 6,726,847 行（期待値と一致）・sha256 が ON/OFF で一致（`off_sha256`＝`on_sha256`＝`b8c399e9…94af`）・`cmp` の差分 0。
+- 後退の原因は未検証である。同じ経路で bit 同一なのに 5/5 一貫の後退が出ているため、定数の有無によるコード配置・計測ノイズの可能性があるが、**これは推定で、本 run では切り分けていない**。
+  RULE は原因の帰属を判定に使わない（規則どおり REJECT と記録する）。切り分けには別の事前登録（#2053 §5.7 の 3 腕方式など）が要る。
+
+#### 相手（PyTorch）比（記録のみ・判定に使わない）
+
+- Mac mini（本 run の実測。PyTorch median / fandhe median の 5 round 中央値。torch 2.14.0・numpy 2.5.4）:
+
+| セル | OFF | ON |
+|---|---|---|
+| gemm 256 fresh／reuse | 0.675／0.702 | 0.888／0.893 |
+| gemm 512 fresh／reuse | 0.733／0.745 | 1.303／1.283 |
+| gemm 1024 fresh／reuse | 0.656／0.649 | 1.351／1.358 |
+| gemm 2048 fresh／reuse | 0.516／0.518 | 1.081／1.094 |
+| train 64 fresh／reuse | 0.198／0.273 | 0.215／0.312 |
+| infer 64 fresh／reuse | 0.153／0.149 | 0.153／0.153 |
+
+- 系列 B（`framework-compare-0.11.0-macmini-remeasure`。0.11.0 registry 版）の値は参考列で、**本 run の値ではない（推定・参考）**。
+  gemm 256／512 は 1.04、1024 は 0.89、2048 は 0.69、train 64 は 0.20、infer 64 は 0.25。#3231 の到達見込みも推定であり、上の実測と区別する。
+- GB10: **未計測**。GB10 には RULE が前提とする torch 2.14.0+cu130 の venv がなく（確認できた torch は別 venv の 2.11.0 のみで、別版のため使っていない）、`TORCH_PY` を渡さずに実行した。
+  PyTorch の jsonl は空で、相手比は欠測（RULE §6。記録のみ）。
+
+#### 処置（所有者判断待ち）
+
+- RULE §5 は REJECT・FAIL・GB10 後退ありのとき `SME_PRODUCTION_ENABLED` を戻す別コミットを定める。一方 #3232 の再オープンコメント（後発）は「RULE どおり記録して止め、戻すかは結果を添えて所有者に確認する」と指示している。
+  自動運転では安全側に倒して後者に従い、**本 PR は Rust を一切変更していない**。`SME_PRODUCTION_ENABLED` を戻すか、GB10 の後退を別途切り分けるかは所有者の判断事項である。
+- Mac mini 単独では 10 セルすべてで ON が速く、後退がないことは事実として記録する。ただし RULE の合成規則により総合判定は REJECT のままである。
+- 再計測するなら RULE-reopen の追記と新しいラベルが要る（今回は再実行していない）。tolerance・baseline・FMA 契約・REQ-8 の境界検査は変更していない。
+
 ## 6. セキュリティ考慮（OWASP Top 10）
 
 - **unsafe の統制**: `asm!` は `compute`／`has_pending_lazy_za_save`
