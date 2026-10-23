@@ -224,3 +224,89 @@
 - **`ModuleList::set_requires_grad` ロールバック範囲の抜け（P1・review thread `PRRT_kwDOTuUCJc6lE8Gn`）**: 失敗時のロールバック範囲が `0..index` で、エラーを返した子自身（`index`）が復元対象から漏れていた。`Module` は外部実装可能でエラー時状態不変の契約も持たないため、複数内部パラメータを順に変更するカスタム複合層では、エラーを返した子自身の内部で部分適用状態が残りうる（fail-closed／全体ロールバック契約違反）。ロールバック範囲を事前スナップショットを使った `0..=index`（逆順）へ修正し、変更後に失敗する子を用いた回帰テスト（`module_list_set_requires_grad_rollback_restores_failed_child_itself`／`module_dict_set_requires_grad_rollback_restores_failed_child_itself`）を追加した。
   - この修正に伴い、`restore_requires_grad`（`nn/container.rs`）の末端（`Leaf`）復元ロジックも調整した: 復元対象の子は「もともと失敗した `set_requires_grad` 呼び出しの当事者」でありうるため、(a) 状態を一切変更せず常に `Err` を返す「半端実装」（`named_parameters` は非空だが `set_requires_grad` 未オーバーライドの既定実装）や、(b) `Err` を返しつつも内部状態への書き換え自体は完了している複合層、のいずれでも復元が正しく完了したと判定できるよう、「呼び出しが `Err` を返したか」ではなく「呼び出し後の観測可能な状態（`requires_grad()`）がスナップショット値と一致するか」でロールバック成否を判定するよう変更した（fail-closed 判定自体は維持: 一致しなければ引き続き `Err`）。
 - **ネスト時の破損（cursor[bot] Medium・`PRRT_kwDOTuUCJc6lE80z` 補足指摘）**: `ModuleList::as_module_list`（`restore_requires_grad`／`snapshot_requires_grad` が入れ子コンテナかどうかの判定に使う downcast フック）は `ModuleDict` を末端層として扱ってしまい、`ModuleList` に入れ子の `ModuleDict`（またはその逆）が混在状態を持つ場合にロールバックで混在状態が破壊されうる不備があった。`Module::as_module_dict`／`as_module_dict_mut`（`as_module_list` と同型の明示 downcast フック）を新設し、`RequiresGradSnapshot` へ `NestedDict` variant を追加、`snapshot_requires_grad`／`restore_requires_grad` の双方が `ModuleList` と `ModuleDict` のどちらのネストも再帰的に認識するよう一般化した。双方向（`ModuleList` に入れ子 `ModuleDict`／`ModuleDict` に入れ子 `ModuleList`）の混在状態保持を回帰テストで確認した。
+
+## 決定記録（#3245）: backward_device_param_store 経路での入力勾配の省略
+
+- 対応イシュー: #3245。実装は #3246、両機体での A/B 計測は #3247、bench-fandhe 側の是正は #3264、0.12.0 の変更点監査は #3269
+- 基準コミット: `origin/main` `45347ae0a`。行番号はすべて本コミットで再確認した（イシュー本文の行番号は古い）
+- 位置づけ: **設計判断のみ**。コード・テスト・`Cargo.toml`・tolerance・baseline は変更しない。§9 の起票草案は #3246 として起票済みで、その契約は本節で確定する（§9 と実装記録 #1748 の「対象外・未実装」の記述は書き換えず、本節で上書きする）
+- 承認: イシュー #3245 本文に記載の D-C 承認（推奨形を記録してそのまま #3246 へ進む運用）に基づく。本節の作成時に新たな承認は得ていない
+
+### 結論（推奨）
+
+**案 2 を採る。** 案 2 は「計算した後で捨てていたものを、最初から計算しない」変更に過ぎない。`Gradients::get` の戻り値も、勾配の値も、hook の発火も現状と同じで、変わるのは性能とバックエンドの呼び出し回数だけである。案 2 を先に入れ、案 1 を別途判断することもできる（両立する）。
+
+### 1. 現状のコード事実
+
+| 事実 | 出典 |
+|---|---|
+| `Tape::backward_device_param_store` は `DeviceParamStore::backward` へ委譲するだけで、後者が `tape.backward_with_resident(loss, self)` を呼ぶ | `crates/facade/src/lib.rs:666`（doc は :654 付近）・`crates/autodiff/src/optim/device_store.rs:2159`（doc は :2143 付近） |
+| `Op::LinearResident` の VJP は resolver が無ければ `InvalidArgument` で拒否する | `crates/autodiff/src/grad.rs:1074`・:1080 |
+| d_weight・d_bias は `fill_resident_weight_grad` で常駐 staging へ書かれる。その後 `d_input` を**無条件に**計算する（`transpose2d(g)`・`gemm_resident_lhs`・`transpose2d(tmp)` の 3 段）。学習ループはこの値を読まない | `crates/autodiff/src/grad.rs:1274`・:1276・:1278 |
+| d_weight と d_input は独立に計算され、順序を入れ替えても結果は bit 同一 | `crates/autodiff/src/grad.rs` の `LinearResident` 分岐のコメント（#1563） |
+| `requires_grad=false` の target への寄与は `accumulate` へ渡さず捨てる（**計算した後で捨てている**） | `crates/autodiff/src/backward.rs:392` |
+| `Gradients::get` は `requires_grad=false` のノードに `Err(GradientTrackingDisabled)` を返す（「未到達」の `Ok(None)` と型で区別） | `crates/autodiff/src/backward.rs:104` |
+| `create_graph` は resident／fused の Op を拒否する | `crates/autodiff/src/create_graph.rs:450`・:602 |
+| `Tape::var_no_grad` は facade で公開済み（v0.11.0 にもある） | `crates/facade/src/lib.rs:482` |
+| bench-fandhe は毎 step `tape.var(&x_data)` で入力を登録する（`requires_grad=true`）。#1748 の機構を使っても入力勾配は省けない | `scripts/bench/framework-compare/bench-fandhe/src/main.rs:1214` |
+
+### 2. 2 案の比較
+
+| 観点 | 案 1: `backward_device_param_store` が対象パラメータ以外の葉の勾配を計算しない | 案 2（推奨）: `var_no_grad` 登録の入力について `LinearResident` の VJP が d_input を省く |
+|---|---|---|
+| 効果 | ベンチのコードを変えずに効く | ベンチ側を `var_no_grad` へ切り替える必要がある（#3264） |
+| 公開入口の挙動 | 変わる。`tape.var` で登録した葉の勾配が戻り値から消え、その葉の backward hook も発火しなくなる | 変わらない |
+| `Gradients::get` の戻り値 | 下記 3 のとおり未確定（`Ok(None)` か型付きエラーか） | 既存の `Err(GradientTrackingDisabled)` のまま |
+| 「対象パラメータ」の範囲 | 曖昧。resident グラフ内にホスト側で `tape.var` 登録した学習対象の葉がある構成を含めるか決める必要がある | 該当なし（`requires_grad` で判定） |
+| semver | 0.12.0 の変更点として明記が必要（#3269 が拾う） | 不要（API も挙動も不変） |
+
+### 3. `Gradients::get` の戻り値（案 1 の論点）
+
+- 案 2: 既存の `Err(GradientTrackingDisabled)` のまま。#1748 の型付きエラーで、「loss から未到達」の `Ok(None)` と区別できる
+- 案 1: イシュー本文は常駐 weight の前例（#1212・#1224）に合わせて `Ok(None)` を挙げている。しかし本文書 §5.3 は、`Ok(None)` では fail-closed にならないとして型付きエラーを推奨している。この食い違いは案 1 に不利な点の一つであり、案 1 を採る場合の確認事項にもなる
+
+### 4. 案 2 の省略条件
+
+- 条件は `!nodes[input.0].requires_grad`。範囲外の添字は既存と同じく `nodes.get` を使い fail-closed で拒否する
+- 「入力が `Op::Leaf` か」では判定しない。#1748 は `requires_grad` を前に向かって伝播させるので、view や elementwise 越しの入力（§2.4・§3.2）も同じ条件で拾える。#3246 のイシュー本文には「入力が `Op::Leaf` で、かつ勾配不要」とあるが、**本記録は `requires_grad` の判定を正とし、#3246 はそれに従う**
+- `ResidentLeaf` は常に `requires_grad=true` なので省略の対象にならない。第 2 層以降の入力は weight を祖先に持つ非葉ノードで `requires_grad=true` なので、引き続き伝播する（§2.3）
+
+### 5. 変わるもの・変わらないもの（案 2）
+
+- 変わるもの: `requires_grad=false` の入力を持つ `LinearResident` で、`gemm_resident_lhs` の呼び出し 1 回と転置 2 回が無くなる。GPU ではそれに伴う同期と readback が無くなる。性能の見込みは推定であり、#3247 本文にある GEMM FLOP 約 32.9% 減を引用する。実測は #3247 で行う
+- 変わらないもの:
+  - 常駐パラメータの更新（d_weight・d_bias の計算式、累積順序、`f64` アキュムレータの契約、bit 一致）: 上記 1 のとおり d_weight は d_input と独立
+  - 素の `Tape::backward`: `LinearResident` を拒否するため、この分岐に到達しない（`grad.rs:1080`）
+  - `Op::LinearAct`／`Op::MatMul`: `matmul_vjp` を通る別のコード
+  - `retain_graph`・`create_graph`: resident 経路での勾配蓄積は拒否のまま（`docs/autodiff-retain-graph-accumulate-decision.md` §4）、`create_graph` も resident 経路を拒否する
+  - `tape.var` で登録した既定の葉の挙動
+  - tolerance・baseline・依存
+
+### 6. 案 1 を採る場合の semver と doc 文言案
+
+- 公開入口の挙動変更なので 0.12.0 の変更点として明記する（#3269）
+- `backward_device_param_store` の doc へ足す文言案: 「`tape.var` 等で登録した入力の葉の勾配は戻り値の `Gradients` に含まれない。`Gradients::get` が返す値は §3 の決定に従う」
+
+### 7. 影響を受けうる呼び出し元
+
+- 案 1 で壊れるもの: `crates/facade/tests/cuda_graph_step_common/mod.rs:200` 付近（`backward_device_param_store` の後に `grads.get(&x)` で勾配の存在を期待する。`x` は `tape.var` で登録）
+- 案 2 では影響を受けないもの: `crates/facade/tests/` 内で `backward_device_param_store` を使うテストファイル（記録時点で 25 件）。非葉ノードの勾配を読むもの（例: `device_param_store_grad_readout.rs` の `get(&pred)`）は案 1 でも影響を受けない
+- 実装は変わらないが文書を合わせる対象: `scripts/bench/framework-compare/README.md`・bench-fandhe の `main.rs:1214`（#3264）・`docs/compat-api-scope.md`・`docs/device-resident-update-design.md`・`docs/backend-metal-command-batching-design.md` §7.3 の表・`device_store.rs:2143` 付近と `lib.rs:654` 付近の doc（#3246）
+
+### 8. #3246・#3247・#3264 への申し送り
+
+- **Metal の合流点**: #1563 の設計では、第 1 層の encode-only な d_weight は第 1 層の `gemm_resident_lhs` の同期でまとめて完了していた（`docs/backend-metal-command-batching-design.md` §7.4）。第 1 層の d_input を省くとこの合流点が無くなり、第 1 層の d_weight は後の同期点で完了することになる。「どこで完了するか」と「encode-only 経路に `*_tracked`／failure_token の登録が要るか」を #3246 で確認・テストする。本記録では答えを断定しない
+- **ピンの連鎖**: `var_no_grad` は v0.11.0 にもあるので、#3264 が bench-fandhe を現行ピンのまま切り替えても API は壊れない。ただし VJP の省略（#3246）は main にしか無いため、ピンが `fandhe-ai =0.12.0` に上がるまで bench の性能は変わらない。#3247 の before／after は、コミットしない一時的な path 差し替えでビルドしたものを計測する必要がある
+- **#3246 のテスト観点**: 省略あり／なしで weight・bias の勾配と更新後パラメータが bit 同一であること（カウンタ付き `BackendOps` で省略を確認。§6.1 の項目 7 が先例）、view 越しの入力でも省略されること、`get(&x)` が `GradientTrackingDisabled` を返すこと
+
+### 9. スコープ外
+
+- `Op::LinearAct`（fresh 経路）と `Op::MatMul` の d_input 省略
+- `mse_loss` の VJP が計算する target 側の勾配（学習では読まれない）
+- `ResidentLeaf` への `get` の型付きエラー化（#1212 の既知の縮小点）
+- 案 1 そのものの実装
+
+### 10. 所有者への確認事項
+
+- 案 1 も併せて採るか（採る場合は、`Ok(None)` と型付きエラーのどちらにするか、「対象パラメータ」の範囲をどうするか）
+- framework-compare の効果を確定するための `fandhe-ai =0.12.0` へのピン更新の承認（deps-policy によりユーザー承認が必要）
