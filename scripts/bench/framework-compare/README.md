@@ -172,7 +172,7 @@ backward・パラメータ更新のどこが支配的か）を追跡できない
 | phase | 計測対象 |
 | --- | --- |
 | `tape_build` | `make_tape(&cli.device)` |
-| `leaf_register` | 入力/教師データの `tape.var(...)` |
+| `leaf_register` | 入力は `tape.var_no_grad(...)`・教師データは `tape.var(...)`（#3265。PyTorch・burn は入力の勾配を計算しない。0.11.0 は d_input を計算してから捨てるため速度は変わらず、効果は 0.12.0 で出る） |
 | `forward_resident` | `model.forward_resident(&tape, &x, &mut store)` + `mse_loss`（`register_resident_params` 経由〈#1059〉で D2H を伴わない。`mse_loss` 自体も遅延実体化） |
 | `loss_readout` | `loss.to_tensor().get(&[])` |
 | `backward` | `tape.backward_device_param_store(&loss, &store)`（0.5.0 から `forward_resident` が積む `Op::LinearResident` の解決に必須。イシュー #1059） |
@@ -247,6 +247,13 @@ Metal（M4 Max）・DGX Spark GB10 実機での計測結果は
 | `host_copy` | `.contiguous().as_slice().to_vec()`（ホストへのコピー） |
 | `checksum` | 全要素和（f64 アキュムレータ） |
 | `iter_total` | 反復全体のウォールクロック時間（検算用。Σphase ≤ iter_total） |
+
+**反復ごとの結果解放（#3265）**: `gemm --mode reuse`（`--phases` を含む）は、
+反復の終わりに `Tape::reset` で結果ノードを解放し、次の反復の先頭で
+`tape.leaf(0)`／`tape.leaf(1)` から葉 `a`・`b` を再取得する（candle が `c` を
+反復ごとに捨てる挙動との非対称の是正。#3264 §7.1 (1)）。解放と葉の再取得は
+計測窓（`start`〜`elapsed`／`iter_start`〜`iter_total`）の外にあり、窓の中身
+（matmul・readout・checksum）と phase の 5 区間は変えない。
 
 `matmul` 区間の内訳（H2D／カーネル専有時間／D2H の実測分解）は本節では取れない
 （`fandhe-ai` 0.11.0 の公開 API 面にホスト転送を伴わない完了待ちや区間別の
@@ -432,7 +439,7 @@ effective_num_threads(...)`（イシュー #1363）へ差し替えているが�
 であり、上記のとおり `run_all*.sh`／`run_gemm_gate*.sh` の標準スイープ
 には組み込まない。
 
-#### 借用ビュー readout（CPU/CUDA 既定経路・Metal は runtime legacy 維持。イシュー #1337・#1436・#1437・#1438・codex-review 指摘 PR #1452 P2）
+#### 借用ビュー readout（全デバイス既定経路。Metal は #3265 で既定化。イシュー #1337・#1436・#1437・#1438・#3265・codex-review 指摘 PR #1452 P2）
 
 上記 `#1182` が確定した結論（`host_copy`〈`.to_vec()` の memcpy〉が
 `iter_total` の 25.6〜53.0%〈CUDA〉を占める＝ハーネス自身の診断コストが
@@ -444,15 +451,15 @@ candle 比未達の主因）を受け、`readout_var`（`to_tensor` + `host_copy
 `#1437` が是正（`ReadbackDest::PretouchedFresh`）して全 N 非後退を確認した
 うえで、`#1438` が feature を撤去して **CPU/CUDA の既定経路**とした。
 
-**Metal は既定経路から除外する**: `docs/perf/metal-gemm-candle-gate-
-remeasurement.md` §13.5 が「負荷変動と readout 切替の効果が分離できて
-おらず、ADOPT 判定は暫定の参考結果に留める」と明記しているため、
-`readout_uses_borrowed_view`（`main.rs`。`device == "metal"` で `false`
-を返す runtime 分岐）が Metal 限定で legacy 経路（`to_tensor()` +
-`.to_vec()`）を維持する（§13.6 に実装記録・codex-review 指摘の詳細）。
-`host-view-readout` cargo feature を再導入するものではなく、CLI が渡す
-`device` 文字列 1 個を見る runtime 分岐に閉じている。Metal の ADOPT が
-確定したら `readout_uses_borrowed_view` を `true` 固定へ変更する。
+**Metal も既定経路に含める（#3265）**: #1520 の REJECT（共有負荷下の
+M4 Max。`docs/perf/metal-gemm-candle-gate-remeasurement.md` §17）は書き換
+えず、#3184 G5（専有 Mac mini・`readout-r2`）が §15.1 の規則で ADOPT と
+なったため、`readout_uses_borrowed_view` の Metal 分岐を除去した（同 doc
+§20・`docs/framework-compare-harness-decision.md` §7.7）。この関数は infer
+の Metal 経路（`checksum_var`・`checksum_tensor`・`--phases`）にも使われる
+ため、infer の Metal も借用ビューになる（checksum は同じ順序の `f64` 逐次和
+で bit 同一）。`--readout legacy` は A/B 用 override として legacy 経路
+（`to_tensor()` + `.to_vec()`）を残す。
 
 - **v0.8.0（#1487）で解消**: 承認ピンを `fandhe-ai =0.8.0` へ更新した
   ことで、`Var::host_view`／`Tensor::host_slice` API が registry 解決の
@@ -506,10 +513,10 @@ remeasurement.md` §13.5 が「負荷変動と readout 切替の効果が分離�
 「before/after を連続実行しており負荷変動と切替効果を分離できていない」
 という限界を解消するため、`bench-fandhe` は `--readout <legacy|borrowed>`
 （値付きフラグ。`--graph` と同型の allowlist 方式）を受理する。指定時は
-`readout_uses_borrowed_view` の device 既定（CPU/CUDA 借用ビュー・Metal
-legacy）を明示的に上書きし、**同一バイナリで両腕を run 単位に
+`readout_uses_borrowed_view` の既定（#3265 以降は全デバイスで借用ビュー。
+それ以前は Metal のみ legacy）を明示的に上書きし、**同一バイナリで両腕を run 単位に
 interleave 計測**できるようにする（`bench-candle`／`bench-burn` は本
-フラグを受理せず無視する）。未指定（既定）のときは device 既定契約が
+フラグを受理せず無視する）。未指定（既定）のときは既定（借用ビュー）が
 そのまま適用され、JSONL には `readout` キー自体が emit されない（`tf32`／
 `managed`／`graph` と同型の「キー欠損 = 既定」後方互換規約）。
 
@@ -541,8 +548,8 @@ interleave 計測**できるようにする（`bench-candle`／`bench-burn` は�
   `compare_gemm_ab.py` は `readout` キーを持つ行を `tf32`/`managed`/
   `graph` と同型に除外する（正式ゲート・既存 A/B 比較へ混入させない）。
 - **結果**: `docs/perf/metal-gemm-candle-gate-remeasurement.md` §15 参照。
-  ADOPT 確定時は `readout_uses_borrowed_view` の Metal 分岐が撤去され、
-  本節「借用ビュー readout」冒頭の見出しも更新される。
+  #3184 G5 の ADOPT を受け、#3265 で `readout_uses_borrowed_view` の Metal
+  分岐を撤去し、本節「借用ビュー readout」冒頭の見出しも更新した（§20）。
 
 ### `infer --mode reuse` / `infer --phases`（イシュー #1217）
 

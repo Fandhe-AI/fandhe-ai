@@ -677,6 +677,19 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 - G2・G3 は再計測に新しい事前登録が要る。
 - 監査対象外の ADOPT 系: G5 は #3265、SME は #3230／#3231、C1 TMA は #3213。
 
+#### 10.8.3 #3227 の既定反転監査（第 3 回・2026-10-24）
+
+結論: **新しい反転は 0 件**。第 2 回で反転した CUDA readback（#3225・`PrefetchedPretouched`）を GB10 実機で確認した。§10.8.1・§10.8.2 は変更しない。
+
+- 確認した内容（記録は `docs/perf/logs/cuda-readback-default-confirm-3227/`・考察は `cuda-gemm-reuse-phase-breakdown.md` §15.4）:
+  - env 未設定で本番の `download` が prefetch を通ること、`pretouched` で従来経路へ戻ること、`release_cached_device_memory()` で保持が 0 に戻ること。
+  - train／infer を含む 14 セルの record_only 確認計測（2 腕・5 round）。後退セルは 5 つで全て ratio 1.01 未満（§15.4 に併記）。
+  - `#[ignore]` 全件: 反転が原因の FAIL は 0（既存の不具合 8・並走による一過性 3・環境要因 7）。
+- 残りのゲートは origin/main で OFF のまま（定数の値は 2026-10-24 に取り直した）。判定と OFF の理由は §10.8.1・§10.8.2 の記録で代える。
+  `HOST_ARENA_DEFAULT_ENABLED`（`tensor-core/src/alloc.rs:25`）・`REDUCTION_SEQUENTIAL_FALLBACK_ENABLED`（`backend-cpu/src/reduction.rs:105`）・`SMALL_SHAPE_CAP_ENABLED`（`backend-cpu/src/small_shape_thread_cap.rs:87`）・`GB10_AFFINITY_ENABLED`（`backend-cpu/src/gb10_affinity.rs:126`）・`EAGER_MATMUL_RELEASE_DEFAULT_ENABLED`（`autodiff/src/eager_release.rs:40`）・`INFER_GRAPH_DEFAULT_ENABLED`（`backend-cuda/src/graph.rs:658`）・`TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED`（`backend-metal/src/train_forward_encode_runtime.rs:33`）・`METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED`（`backend-metal/src/fixed_cost_diag.rs:43`）・`M64_THIN_TILE_ENABLED`（`backend-metal/src/tile.rs:1058`）は全て `false`、Metal の `READBACK_DEST_DEFAULT`（`backend-metal/src/readback_policy.rs:42`）は `Fresh`。
+- Metal 機（Mac mini）での作業はない（今回の反転は CUDA のみ）。G2・G3 の再計測には新しい事前登録が要る。
+- tolerance・parity baseline・FMA 契約・`PREFETCH_LIMITS` は変更していない（`crates/*/src` は無変更）。
+
 ### 10.9 Phase 10・11 へのつながり（診断 → 前提にする実装 → 参照するセル）
 
 親 issue の葉は `gh api repos/Fandhe-AI/fandhe-ai/issues/<親>/sub_issues` の結果（2026-10-22 時点。すべて open）。タイトルは要約で、番号と親子関係は API の結果のとおり。
@@ -706,7 +719,7 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 | #3206 | open | Mac mini（M4・GPU 10 コア）向けの Metal タイル表 | MM-MTL-G512〜G4096 |
 | #3225 | open | CUDA の reuse の readback の遅さの是正 | G-CUDA-G512〜G2048 |
 | #3226 | open | CPU で reuse が fresh より遅い逆転の是正 | G-CPU-G256〜G2048 |
-| #3227 | open | ADOPT になった opt-in の既定を ON にする（第 1 回は反転 0 件〈§10.8.1〉・第 2 回は CUDA readback 1 件を反転〈§10.8.2〉。GB10 突き合わせ未検証のため open） | 全 opt-in 対象セル |
+| #3227 | open | ADOPT になった opt-in の既定を ON にする（第 1 回は反転 0 件〈§10.8.1〉・第 2 回は CUDA readback 1 件を反転〈§10.8.2〉・第 3 回で GB10 実機を確認し新しい反転は 0 件〈§10.8.3〉。今後の ADOPT を受けるため open） | 全 opt-in 対象セル |
 | #3262 | open | CUDA GEMM の既定精度の判断材料（§10.7 の値を入力にする） | G-CUDA-G2048・G4096 |
 | #3273 | open | 0.12.0 の 6 フレームワーク同席計測（本表との突き合わせ先） | 27 セルすべて |
 | #3195 | open | 要素数の小さい MSE backward を逐次で実行する（G2 縮約逐次化の関連） | MM-MTL-TRN・MM-CPU-TRN |
