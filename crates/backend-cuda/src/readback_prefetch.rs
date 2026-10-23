@@ -116,6 +116,19 @@ impl Prefetcher {
             .spawn(move || {
                 // tx が全て drop されると recv が Err を返して終了する。
                 while let Ok((numel, epoch)) = rx.recv() {
+                    // 確保前に世代と Pending 状態を確認し、解放済みの古い要求は確保・事前タッチせず破棄する
+                    // （release_all と readback の反復でキューに溜まった古い要求が、最大 128 MiB の確保で
+                    // メモリ帯域を消費し現世代の補充を遅らせるのを防ぐ。PR #3540 指摘）。
+                    {
+                        let g = lock(&worker_shared);
+                        let live = g.epoch == epoch
+                            && g.slots
+                                .get(&numel)
+                                .is_some_and(|s| matches!(s.state, SlotState::Pending));
+                        if !live {
+                            continue;
+                        }
+                    }
                     let buf = alloc_pretouched(numel);
                     let mut g = lock(&worker_shared);
                     // 世代不一致（要求後に release_all された）なら結果を破棄する（buf は drop）。
