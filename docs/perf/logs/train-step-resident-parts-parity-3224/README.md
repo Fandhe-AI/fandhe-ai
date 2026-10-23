@@ -169,9 +169,9 @@ Metal（Mac mini・`macmini/`）の正式記録に不一致はない（M1〜M5 x
   新版（device 入力版）の挙動の不一致ではない。`e62cce21b`（先読み導入前）で同テストが pass するかは未確認（本記録は `45347ae0a` の事実のみ）。
 - 戻し先: 対照 assert（`45347ae0a` 時点の `:92-99`・`:221-222`。現行コードでは行がずれている）はテスト側の前提で、先読み既定 ON（#3227）との整合を取る修正が要る。
   RULE.txt に従い tolerance・baseline・判定式は変更しない。子 issue の reopen・起票は未実施（ユーザー承認待ち）。
-- **テスト側の是正（レビュー指摘対応・未検証）**: 対照 assert から `d2h_calls >= 1` を外し `stream_syncs >= 1` のみにした
-  （`assert_download_is_counted`・ホスト版 MSE の対照）。ReLU の対照は layout ループの外へ出し、Transposed 周回の
-  「同期 0・D2H 0」と bit 一致が対照より前に必ず実行される形にした。新版の判定 assert・tolerance・baseline は不変。
+- **是正（レビュー指摘対応・未検証）**: D2H の対照 assert（`assert_download_is_counted`・ホスト版 MSE の対照。`d2h_calls >= 1` と `stream_syncs >= 1`）は**維持**している（検証条件は弱めていない）。
+  計数漏れは readback 先読み経路が `d2h_calls` を増やさなかったことが原因のため、計数を `memory::readback_with`（`crates/backend-cuda/src/memory.rs`）の共通出口へ集約して修正した。
+  ReLU の対照は layout ループの外へ出し、Transposed 周回の「同期 0・D2H 0」と bit 一致が対照より前に必ず実行される形にした。新版の判定 assert・tolerance・baseline は不変。
   **GB10 での再計測は未実施（未検証）**。C5 を pass とする記録はこの修正後の再計測を待つ。上記の `gb10/` の fail 記録は `45347ae0a` 時点の事実としてそのまま残す。
 
 ## #3218 修正後の確認（Mac mini・2026-10-23）
