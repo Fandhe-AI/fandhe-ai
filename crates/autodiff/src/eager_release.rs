@@ -23,7 +23,7 @@
 //!
 //! # 呼び出し文脈
 //!
-//! `Var::matmul`（通常版のみ）が [`release_before_matmul`]（確保前）と [`note_matmul`]
+//! `Var::matmul`（通常版のみ）が `release_before_matmul`（確保前）と `note_matmul`
 //! （push 後）を呼ぶ。`matmul_fp32_strict`・`matmul_low_precision`・その他 op は候補を
 //! 更新しない。`Tape::reset`・`rollback_to` が候補を消す。GPU（CPU 以外の device）は
 //! 対象外。ゲート定数の反転は ADOPT 後の #3227 でのみ行う。
