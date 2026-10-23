@@ -1,0 +1,48 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_m64_thin_tile_ab_diag_tests::m64_thin_candidates_match_cpu_reference ... PARITY orient=NN shape=64x256x784 eff=64x256x784 arm=cur fallback=false ok=true
+PARITY orient=NN shape=64x256x784 eff=64x256x784 arm=T1 fallback=false ok=true
+PARITY orient=NN shape=64x256x784 eff=64x256x784 arm=T2 fallback=false ok=true
+PARITY orient=NN shape=64x256x784 eff=64x256x784 arm=T3 fallback=false ok=true
+PARITY orient=NN shape=64x256x784 eff=64x256x784 arm=T4 fallback=false ok=true
+PARITY orient=NN shape=64x10x256 eff=64x16x256 arm=cur fallback=false ok=true
+PARITY orient=NN shape=64x10x256 eff=64x16x256 arm=T1 fallback=false ok=true
+PARITY orient=NN shape=64x10x256 eff=64x16x256 arm=T2 fallback=false ok=true
+PARITY orient=NN shape=64x10x256 eff=64x16x256 arm=T3 fallback=false ok=true
+PARITY orient=NN shape=64x10x256 eff=64x16x256 arm=T4 fallback=false ok=true
+PARITY orient=NN shape=784x64x256 eff=784x64x256 arm=cur fallback=false ok=true
+PARITY orient=NN shape=784x64x256 eff=784x64x256 arm=T1 fallback=false ok=true
+PARITY orient=NN shape=784x64x256 eff=784x64x256 arm=T2 fallback=false ok=true
+PARITY orient=NN shape=784x64x256 eff=784x64x256 arm=T3 fallback=false ok=true
+PARITY orient=NN shape=784x64x256 eff=784x64x256 arm=T4 fallback=false ok=true
+PARITY orient=NN shape=256x64x10 eff=256x64x16 arm=cur fallback=false ok=true
+PARITY orient=NN shape=256x64x10 eff=256x64x16 arm=T1 fallback=false ok=true
+PARITY orient=NN shape=256x64x10 eff=256x64x16 arm=T2 fallback=false ok=true
+PARITY orient=NN shape=256x64x10 eff=256x64x16 arm=T3 fallback=false ok=true
+PARITY orient=NN shape=256x64x10 eff=256x64x16 arm=T4 fallback=false ok=true
+PARITY orient=NN shape=784x256x64 eff=784x256x64 arm=cur fallback=false ok=true
+PARITY orient=NN shape=784x256x64 eff=784x256x64 arm=T1 fallback=false ok=true
+PARITY orient=NN shape=784x256x64 eff=784x256x64 arm=T2 fallback=false ok=true
+PARITY orient=NN shape=784x256x64 eff=784x256x64 arm=T3 fallback=false ok=true
+PARITY orient=NN shape=784x256x64 eff=784x256x64 arm=T4 fallback=false ok=true
+PARITY orient=NN shape=256x10x64 eff=256x16x64 arm=cur fallback=false ok=true
+PARITY orient=NN shape=256x10x64 eff=256x16x64 arm=T1 fallback=false ok=true
+PARITY orient=NN shape=256x10x64 eff=256x16x64 arm=T2 fallback=false ok=true
+PARITY orient=NN shape=256x10x64 eff=256x16x64 arm=T3 fallback=false ok=true
+PARITY orient=NN shape=256x10x64 eff=256x16x64 arm=T4 fallback=false ok=true
+PARITY orient=NT shape=784x64x256 eff=784x64x256 arm=cur fallback=false ok=true
+PARITY orient=NT shape=784x64x256 eff=784x64x256 arm=T1 fallback=false ok=true
+PARITY orient=NT shape=784x64x256 eff=784x64x256 arm=T2 fallback=false ok=true
+PARITY orient=NT shape=784x64x256 eff=784x64x256 arm=T3 fallback=false ok=true
+PARITY orient=NT shape=784x64x256 eff=784x64x256 arm=T4 fallback=false ok=true
+PARITY orient=TN shape=784x256x64 eff=784x256x64 arm=cur fallback=false ok=true
+PARITY orient=TN shape=784x256x64 eff=784x256x64 arm=T1 fallback=false ok=true
+PARITY orient=TN shape=784x256x64 eff=784x256x64 arm=T2 fallback=false ok=true
+PARITY orient=TN shape=784x256x64 eff=784x256x64 arm=T3 fallback=false ok=true
+PARITY orient=TN shape=784x256x64 eff=784x256x64 arm=T4 fallback=false ok=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 854 filtered out; finished in 0.05s
+

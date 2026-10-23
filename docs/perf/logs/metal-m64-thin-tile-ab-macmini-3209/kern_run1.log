@@ -1,0 +1,104 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (<home>/work/target-fandhe-ai/release/deps/fandhe_ai_backend_metal-a0e55994d7a285a5)
+
+running 1 test
+test gemm_m64_thin_tile_ab_diag_tests::m64_thin_candidates_kernel_gpu ... CAND orient=NN shape=64x256x784 eff=64x256x784 arm=cur role=judge requested=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue resolved=C2:bm32xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=-2310.507020 hash=1d8c4ccf7826867e bit_identical_vs_cur=true
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-2310.507020 hash=1d8c4ccf7826867e bit_identical_vs_cur=true
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=-2310.507020 hash=1d8c4ccf7826867e bit_identical_vs_cur=true
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-2310.507020 hash=1d8c4ccf7826867e bit_identical_vs_cur=true
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-2310.507020 hash=1d8c4ccf7826867e bit_identical_vs_cur=true
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=60025.809170 hash=0f53cb74c304e455 bit_identical_vs_cur=na
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=cur kernel_gpu_median_ms=0.0621 q1=0.0615 q3=0.0636 encode_median_ms=0.0020 commit_wait_median_ms=0.2701 alloc_c_median_ms=0.0060
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T1 kernel_gpu_median_ms=0.0327 q1=0.0325 q3=0.0336 encode_median_ms=0.0020 commit_wait_median_ms=0.2390 alloc_c_median_ms=0.0060
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T2 kernel_gpu_median_ms=0.0507 q1=0.0504 q3=0.0519 encode_median_ms=0.0020 commit_wait_median_ms=0.2582 alloc_c_median_ms=0.0060
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T3 kernel_gpu_median_ms=0.0340 q1=0.0338 q3=0.0342 encode_median_ms=0.0020 commit_wait_median_ms=0.2412 alloc_c_median_ms=0.0060
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=T4 kernel_gpu_median_ms=0.0311 q1=0.0305 q3=0.0313 encode_median_ms=0.0020 commit_wait_median_ms=0.2394 alloc_c_median_ms=0.0060
+CAND orient=NN shape=64x256x784 eff=64x256x784 arm=prod kernel_gpu_median_ms=0.0784 q1=0.0781 q3=0.0786 encode_median_ms=0.0020 commit_wait_median_ms=0.2868 alloc_c_median_ms=0.0060
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=cur role=judge requested=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse resolved=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse fallback=false checksum=83.920301 hash=9050ee27e410a497 bit_identical_vs_cur=true
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=83.920301 hash=9050ee27e410a497 bit_identical_vs_cur=true
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=83.920301 hash=9050ee27e410a497 bit_identical_vs_cur=true
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=83.920301 hash=9050ee27e410a497 bit_identical_vs_cur=true
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=83.920301 hash=9050ee27e410a497 bit_identical_vs_cur=true
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=148.890702 hash=f4f9ff56ebe478ce bit_identical_vs_cur=na
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=cur kernel_gpu_median_ms=0.0110 q1=0.0110 q3=0.0110 encode_median_ms=0.0020 commit_wait_median_ms=0.1967 alloc_c_median_ms=0.0020
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T1 kernel_gpu_median_ms=0.0133 q1=0.0133 q3=0.0133 encode_median_ms=0.0019 commit_wait_median_ms=0.2164 alloc_c_median_ms=0.0020
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T2 kernel_gpu_median_ms=0.0231 q1=0.0230 q3=0.0231 encode_median_ms=0.0019 commit_wait_median_ms=0.2283 alloc_c_median_ms=0.0020
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T3 kernel_gpu_median_ms=0.0125 q1=0.0125 q3=0.0126 encode_median_ms=0.0019 commit_wait_median_ms=0.2049 alloc_c_median_ms=0.0020
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=T4 kernel_gpu_median_ms=0.0110 q1=0.0110 q3=0.0110 encode_median_ms=0.0019 commit_wait_median_ms=0.1979 alloc_c_median_ms=0.0020
+CAND orient=NN shape=64x10x256 eff=64x16x256 arm=prod kernel_gpu_median_ms=0.0126 q1=0.0126 q3=0.0126 encode_median_ms=0.0019 commit_wait_median_ms=0.2052 alloc_c_median_ms=0.0020
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=cur role=judge requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=na
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=cur kernel_gpu_median_ms=0.0252 q1=0.0249 q3=0.0254 encode_median_ms=0.0020 commit_wait_median_ms=0.2358 alloc_c_median_ms=0.0060
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T1 kernel_gpu_median_ms=0.0187 q1=0.0186 q3=0.0188 encode_median_ms=0.0020 commit_wait_median_ms=0.2280 alloc_c_median_ms=0.0061
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T2 kernel_gpu_median_ms=0.0226 q1=0.0223 q3=0.0229 encode_median_ms=0.0020 commit_wait_median_ms=0.2323 alloc_c_median_ms=0.0060
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T3 kernel_gpu_median_ms=0.0198 q1=0.0185 q3=0.0202 encode_median_ms=0.0020 commit_wait_median_ms=0.2309 alloc_c_median_ms=0.0061
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=T4 kernel_gpu_median_ms=0.0310 q1=0.0307 q3=0.0310 encode_median_ms=0.0020 commit_wait_median_ms=0.2419 alloc_c_median_ms=0.0060
+CAND orient=NN shape=784x64x256 eff=784x64x256 arm=prod kernel_gpu_median_ms=0.0694 q1=0.0692 q3=0.0695 encode_median_ms=0.0038 commit_wait_median_ms=0.2814 alloc_c_median_ms=0.0060
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=cur role=judge requested=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse resolved=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse fallback=false checksum=107.936713 hash=54c4826d9801875c bit_identical_vs_cur=true
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=107.936713 hash=54c4826d9801875c bit_identical_vs_cur=true
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=107.936713 hash=54c4826d9801875c bit_identical_vs_cur=true
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=107.936713 hash=54c4826d9801875c bit_identical_vs_cur=true
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=107.936713 hash=54c4826d9801875c bit_identical_vs_cur=true
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=107.936713 hash=54c4826d9801875c bit_identical_vs_cur=na
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=cur kernel_gpu_median_ms=0.0040 q1=0.0040 q3=0.0041 encode_median_ms=0.0028 commit_wait_median_ms=0.1648 alloc_c_median_ms=0.0039
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T1 kernel_gpu_median_ms=0.0039 q1=0.0039 q3=0.0040 encode_median_ms=0.0027 commit_wait_median_ms=0.1659 alloc_c_median_ms=0.0039
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T2 kernel_gpu_median_ms=0.0052 q1=0.0051 q3=0.0052 encode_median_ms=0.0027 commit_wait_median_ms=0.1660 alloc_c_median_ms=0.0041
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T3 kernel_gpu_median_ms=0.0042 q1=0.0041 q3=0.0042 encode_median_ms=0.0027 commit_wait_median_ms=0.1630 alloc_c_median_ms=0.0039
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=T4 kernel_gpu_median_ms=0.0042 q1=0.0041 q3=0.0042 encode_median_ms=0.0027 commit_wait_median_ms=0.1654 alloc_c_median_ms=0.0039
+CAND orient=NN shape=256x64x10 eff=256x64x16 arm=prod kernel_gpu_median_ms=0.0045 q1=0.0045 q3=0.0045 encode_median_ms=0.0045 commit_wait_median_ms=0.1668 alloc_c_median_ms=0.0039
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=cur role=judge requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=na
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=cur kernel_gpu_median_ms=0.0182 q1=0.0180 q3=0.0182 encode_median_ms=0.0027 commit_wait_median_ms=0.2333 alloc_c_median_ms=0.0036
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T1 kernel_gpu_median_ms=0.0235 q1=0.0234 q3=0.0235 encode_median_ms=0.0027 commit_wait_median_ms=0.2400 alloc_c_median_ms=0.0037
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T2 kernel_gpu_median_ms=0.0239 q1=0.0238 q3=0.0240 encode_median_ms=0.0027 commit_wait_median_ms=0.2393 alloc_c_median_ms=0.0036
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T3 kernel_gpu_median_ms=0.0243 q1=0.0241 q3=0.0244 encode_median_ms=0.0027 commit_wait_median_ms=0.2386 alloc_c_median_ms=0.0035
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=T4 kernel_gpu_median_ms=0.0278 q1=0.0277 q3=0.0279 encode_median_ms=0.0026 commit_wait_median_ms=0.2432 alloc_c_median_ms=0.0037
+CAND orient=NN shape=784x256x64 eff=784x256x64 arm=prod kernel_gpu_median_ms=0.0703 q1=0.0702 q3=0.0703 encode_median_ms=0.0044 commit_wait_median_ms=0.2873 alloc_c_median_ms=0.0036
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=cur role=judge requested=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse resolved=C7:bm8xbn8xbk8_wm1xwn1_stagedfalse fallback=false checksum=8.633684 hash=03d080332ea93eff bit_identical_vs_cur=true
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=8.633684 hash=03d080332ea93eff bit_identical_vs_cur=true
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=8.633684 hash=03d080332ea93eff bit_identical_vs_cur=true
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=8.633684 hash=03d080332ea93eff bit_identical_vs_cur=true
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=8.633684 hash=03d080332ea93eff bit_identical_vs_cur=true
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=8.633684 hash=03d080332ea93eff bit_identical_vs_cur=na
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=cur kernel_gpu_median_ms=0.0065 q1=0.0064 q3=0.0065 encode_median_ms=0.0028 commit_wait_median_ms=0.1709 alloc_c_median_ms=0.0036
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T1 kernel_gpu_median_ms=0.0062 q1=0.0061 q3=0.0062 encode_median_ms=0.0027 commit_wait_median_ms=0.1712 alloc_c_median_ms=0.0036
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T2 kernel_gpu_median_ms=0.0090 q1=0.0088 q3=0.0091 encode_median_ms=0.0027 commit_wait_median_ms=0.1731 alloc_c_median_ms=0.0036
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T3 kernel_gpu_median_ms=0.0063 q1=0.0063 q3=0.0064 encode_median_ms=0.0027 commit_wait_median_ms=0.1711 alloc_c_median_ms=0.0036
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=T4 kernel_gpu_median_ms=0.0057 q1=0.0057 q3=0.0057 encode_median_ms=0.0027 commit_wait_median_ms=0.1645 alloc_c_median_ms=0.0036
+CAND orient=NN shape=256x10x64 eff=256x16x64 arm=prod kernel_gpu_median_ms=0.0056 q1=0.0055 q3=0.0056 encode_median_ms=0.0044 commit_wait_median_ms=0.1649 alloc_c_median_ms=0.0036
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=cur role=judge requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=true
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=-1397.179697 hash=49a65bd8a812e0e0 bit_identical_vs_cur=na
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=cur kernel_gpu_median_ms=0.0254 q1=0.0249 q3=0.0255 encode_median_ms=0.0028 commit_wait_median_ms=0.2242 alloc_c_median_ms=0.0036
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T1 kernel_gpu_median_ms=0.0188 q1=0.0186 q3=0.0188 encode_median_ms=0.0028 commit_wait_median_ms=0.2191 alloc_c_median_ms=0.0036
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T2 kernel_gpu_median_ms=0.0227 q1=0.0219 q3=0.0227 encode_median_ms=0.0028 commit_wait_median_ms=0.2233 alloc_c_median_ms=0.0036
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T3 kernel_gpu_median_ms=0.0202 q1=0.0186 q3=0.0206 encode_median_ms=0.0028 commit_wait_median_ms=0.2207 alloc_c_median_ms=0.0037
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=T4 kernel_gpu_median_ms=0.0301 q1=0.0300 q3=0.0304 encode_median_ms=0.0028 commit_wait_median_ms=0.2320 alloc_c_median_ms=0.0036
+CAND orient=NT shape=784x64x256 eff=784x64x256 arm=prod kernel_gpu_median_ms=0.0700 q1=0.0699 q3=0.0701 encode_median_ms=0.0044 commit_wait_median_ms=0.2727 alloc_c_median_ms=0.0036
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=cur role=judge requested=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue resolved=C1:bm64xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T1 role=judge requested=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue resolved=T1:bm16xbn32xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T2 role=judge requested=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue resolved=T2:bm16xbn64xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T3 role=judge requested=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue resolved=T3:bm32xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T4 role=judge requested=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue resolved=T4:bm16xbn16xbk16_wm2xwn2_stagedtrue fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=true
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=prod role=record_only requested=prod resolved=prod fallback=false checksum=-585.300616 hash=0b02d0f5913e7e88 bit_identical_vs_cur=na
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=cur kernel_gpu_median_ms=0.0190 q1=0.0189 q3=0.0191 encode_median_ms=0.0026 commit_wait_median_ms=0.2322 alloc_c_median_ms=0.0035
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T1 kernel_gpu_median_ms=0.0243 q1=0.0241 q3=0.0244 encode_median_ms=0.0025 commit_wait_median_ms=0.2395 alloc_c_median_ms=0.0035
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T2 kernel_gpu_median_ms=0.0240 q1=0.0239 q3=0.0242 encode_median_ms=0.0025 commit_wait_median_ms=0.2392 alloc_c_median_ms=0.0035
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T3 kernel_gpu_median_ms=0.0259 q1=0.0258 q3=0.0260 encode_median_ms=0.0027 commit_wait_median_ms=0.2399 alloc_c_median_ms=0.0036
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=T4 kernel_gpu_median_ms=0.0285 q1=0.0284 q3=0.0285 encode_median_ms=0.0027 commit_wait_median_ms=0.2442 alloc_c_median_ms=0.0035
+CAND orient=TN shape=784x256x64 eff=784x256x64 arm=prod kernel_gpu_median_ms=0.0711 q1=0.0710 q3=0.0712 encode_median_ms=0.0040 commit_wait_median_ms=0.2869 alloc_c_median_ms=0.0035
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 854 filtered out; finished in 0.49s
+

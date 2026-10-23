@@ -3,14 +3,23 @@
 結論は `docs/perf/metal-gemm-m64-thin-tile-candidates.md` §7。本ディレクトリは事前登録規則と計測基盤。
 **診断のみ**（`tile.rs` の定数・選択ロジック・tolerance・parity baseline・FMA 契約・シェーダは不変）。
 
-## 状態: 基盤のみ出荷・Mac mini 実測は未実施（unavailable）
+## 状態: Mac mini 実測済み（正式系列）
 
-- 本ディレクトリに実測ログ（`trace_run*.log`・`kern_run*.log`・`parity.log`・`aggregate.md` 等）は**まだない**。
-  RULE 項 15 により数値は埋めず、候補の判定は undetermined とする。推定値では埋めない。
-- 実測は下記「再現」で Mac mini 上で行い、同ディレクトリへ回収して `aggregate.py` で集計する。
+- 計測対象リビジョン `bd2ce9464783edfdc395a923a76d4b88f6529ab3`（`rev-stamp.txt`）。展開ツリー指紋は開発機（`git archive` 展開）と
+  Mac mini で一致（`tree-fingerprint.txt`）。機体は Mac mini（Apple M4・GPU 10 コア・`verified_tile_table=M4Base`。`env_info.txt`）。
+- 正式系列: 純カーネルは全 gate pass・`series done`（`load_gate.log`）、セル A/B は 5 round 全 gate pass・`series=official`（`ab/load-gate-*.log`）。
+  再実行・run 差し替え・セル除外はしていない（外れ値も除外していない）。
+- 判定（機械判定。`aggregate.md`）: T1〜T4 は規則 11 で ADOPT。ゲート写像は **undetermined**
+  （到達追跡で (64,256,784) が split-K 先取りのため T1 に到達せず、机上の前提 2 件と食い違った。ゲート反転で変わるのは (784,64,256)→T3 のみ）。
+- `--cell-ab anomaly` の導出: RULE 項 13 の字義どおり。`ab/skipped-*.log` は空・checksum は 4 セルとも完全一致（fail ではない）。
+  train 64/fresh の round 別比が 1.0456／1.0123／1.0005／1.0063／1.0066 と 5/5 round すべて after が遅い向きだったため anomaly
+  （差は 0.9%。ノイズ帯として扱い、ゲート判定は ADOPT にしない）。`compare_gemm_ab.py --threshold 1.00` の exit 3 は
+  「比が 1.00 を超えるセルがある」の意味で fail ではない。
+- 結論と数値表は `docs/perf/metal-gemm-m64-thin-tile-candidates.md` §7。結線（ADOPT 候補の写像）は別 PR・所有者判断で、本ディレクトリは判定の記録のみ。
 - 規則の固定: `RULE.txt` の sha256 = `d5bfebcacf27b6b95da47297cc71ba66f2ce3e44a76d3e50c107e8cd26a26e40`、
-  規則を固定したコミット = `b5da0c2b0f4a080edf183ce7cb7fa6c7eb922d2b`（計測基盤はそのあとの別コミット。
-  規則本文は固定後に変更していない）。
+  規則を固定したコミット = `b5da0c2b0f4a080edf183ce7cb7fa6c7eb922d2b`（規則本文は固定後に変更していない）。
+- マスク: ホスト名・ユーザー名・`$HOME` の絶対パスは `<home>`／`masked` に置換済み（`grep` で 0 件を確認）。バイナリ（`bench-fandhe-3209-*`）は収録していない
+  （sha256 は `ab/sha-3209-*.txt`）。
 
 ## 収録物
 
@@ -19,12 +28,12 @@
 | `RULE.txt` | 事前登録規則（計測前に単独コミット） |
 | `orchestrate_macmini.sh` | 純カーネル計測の起動（ビルド → 前提ゲート → 5 run × {trace・kern}。load1 < 3.0 ゲート・上書き禁止・`.rev-stamp` 必須） |
 | `aggregate.py` | 厳格な集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`／`python3 -I aggregate.py <dir> --expect-rev <SHA> --cell-ab <ok｜anomaly｜fail｜unavailable> > aggregate.md`）。self-test の fixture は実行時に一時ディレクトリへ生成する（欠損・run 数不足・非有限値・hash 不一致・正式系列でない・rev 不一致を検証） |
-| （実測後）`trace_run{1..5}.log`・`kern_run{1..5}.log` | `DEVICE`／`TRACE`／`CAND` 行 |
-| （実測後）`prereq_bitident.log`・`parity.log` | 前提ゲート（既存 bit 一致テスト 92 件・CPU 参照 parity） |
-| （実測後）`bitident_report.log` | 候補別 bit 一致の記録（`BITIDENT` 行。不一致候補は `ok=false` で記録して継続し、集計側が NOT_ADOPTABLE として除外する。既存の厳密診断 `prereq_bitident.log` は 1 件の不一致で panic するため失敗しても系列は止めず、rc を `load_gate.log` へ残す） |
-| （実測後）`load_gate.log`・`env_info.txt`・`rev-stamp.txt`・`tree-fingerprint.txt`・`build_tests.log` | 負荷ゲート・機体情報・腕の同定・ビルドログ（ホスト名・ユーザー名・`$HOME` はマスク） |
-| （実測後）`ab/` | セル A/B runner の出力（`results-*.jsonl`・`sha-*.txt`・`tree-*.txt`・`compare-*.md／.err`・`load-gate-*.log`・`cooldown-*.log`・`skipped-*.log`・`uptime-*.log`） |
-| `aggregate.md` | 機械集計（実測後） |
+| `trace_run{1..5}.log`・`kern_run{1..5}.log` | `DEVICE`／`TRACE`／`CAND` 行 |
+| `prereq_bitident.log`・`parity.log` | 前提ゲート（既存 bit 一致テスト 92 件・CPU 参照 parity） |
+| `bitident_report.log` | 候補別 bit 一致の記録（`BITIDENT` 行。不一致候補は `ok=false` で記録して継続し、集計側が NOT_ADOPTABLE として除外する。既存の厳密診断 `prereq_bitident.log` は 1 件の不一致で panic するため失敗しても系列は止めず、rc を `load_gate.log` へ残す） |
+| `load_gate.log`・`env_info.txt`・`rev-stamp.txt`・`tree-fingerprint.txt`・`build_tests.log` | 負荷ゲート・機体情報・腕の同定・ビルドログ（ホスト名・ユーザー名・`$HOME` はマスク） |
+| `ab/` | セル A/B runner の出力（`results-*.jsonl`・`sha-*.txt`・`tree-*.txt`・`compare-*.md／.err`・`load-gate-*.log`・`cooldown-*.log`・`skipped-*.log`・`uptime-*.log`） |
+| `aggregate.md` | 機械集計 |
 
 診断テストは `crates/backend-metal/src/gemm_m64_thin_tile_ab_diag_tests.rs`（出力行の書式は `aggregate.py` の正規表現と 1 対 1）、
 encode-only の診断入口は `MetalGemm::diag_encode_strided_tiled`（`#[cfg(test)]`。本番経路は不変）。

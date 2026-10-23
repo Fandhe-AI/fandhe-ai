@@ -1,0 +1,21 @@
+build-done 2026-10-23T09:57:27Z
+prereq-bitident gate=pass load1=2.42 waited_s=270 at=2026-10-23T10:01:57Z
+prereq_bitident_strict rc=0 （非 0 でも系列は継続。候補別の結果は bitident_report.log）
+prereq-bitident-report gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:58Z
+parity gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:58Z
+run1-trace gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:58Z
+run1-kern gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:58Z
+run1 end_load1=2.46
+run2-trace gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:58Z
+run2-kern gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:59Z
+run2 end_load1=2.46
+run3-trace gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:59Z
+run3-kern gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:01:59Z
+run3 end_load1=2.46
+run4-trace gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:02:00Z
+run4-kern gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:02:00Z
+run4 end_load1=2.46
+run5-trace gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:02:00Z
+run5-kern gate=pass load1=2.46 waited_s=0 at=2026-10-23T10:02:00Z
+run5 end_load1=2.46
+series done
