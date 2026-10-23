@@ -88,15 +88,15 @@ fn transpose(stored: &[f32], r: usize, c: usize) -> Vec<f32> {
     out
 }
 
-/// 対照: `download` が同期を数えること（カウンタが生きていることの確認）。
-/// D2H 回数は検査しない: readback 先読み既定 ON（#3227）では `d2h_calls` が 0 のまま
-/// 同期だけが 1 回出る経路があり、D2H の有無は対照として不安定なため。
+/// 対照: `download` が同期と D2H を数えること（カウンタが生きていることの確認）。
+/// D2H は `memory::readback_with` の共通出口で数えるため、先読み既定 ON（#3227）でも > 0 になる。
 fn assert_download_is_counted(ops: &CudaBackendOps, buf: &DeviceBuffer<f32>) {
     gemm_launch_diag_reset();
     let before = gemm_launch_diag_snapshot();
     let _ = download(ops, buf);
     let d = gemm_launch_diag_snapshot().since(before);
     assert!(d.stream_syncs >= 1, "download must synchronize: {d:?}");
+    assert!(d.d2h_calls >= 1, "download must count D2H: {d:?}");
 }
 
 /// ReLU マスク: `[64, 256]` の RowMajor／Transposed で、非 tracked・tracked とも同期・D2H が 0。
@@ -222,8 +222,8 @@ fn mse_device_issues_no_sync_no_d2h() {
     let before = gemm_launch_diag_snapshot();
     let _ = ops.mse_loss_backward(&p_h, &t_h, scale).unwrap();
     let d = gemm_launch_diag_snapshot().since(before);
-    // D2H 回数は readback 先読み既定 ON（#3227）で 0 になりうるため検査しない。
     assert!(d.stream_syncs >= 1, "host mse must synchronize: {d:?}");
+    assert!(d.d2h_calls >= 1, "host mse must count D2H: {d:?}");
 }
 
 /// dW（TN・bias あり）と d_input（`Transposed`）を MLP の 2 形状で呼び、H2D・同期・D2H が 0。
