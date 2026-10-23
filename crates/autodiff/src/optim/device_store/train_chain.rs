@@ -143,7 +143,11 @@ impl DeviceParamStore {
         // 式は Tape 経路（`grad.rs` の `Op::MseLoss` VJP）と同じ関数を共有する（二重に書かない）。
         let scale = mse_loss_scale(1.0, m * n_last, Reduction::Mean);
 
-        if use_momentum && self.velocity.is_none() {
+        // この呼び出しで新規確保した velocity は、poison せず戻る失敗経路で `None` へ戻す
+        // （残すと `sgd_used == false` のまま velocity だけ在り、次回以降の momentum 構成
+        // 検査が「途中変更」と誤判定してストアが固着する）。
+        let velocity_is_new = use_momentum && self.velocity.is_none();
+        if velocity_is_new {
             self.velocity = Some(mem.alloc_zeroed(&[self.total_numel])?);
         }
         let mut grad = match self.train_chain_grad.take() {
@@ -159,6 +163,8 @@ impl DeviceParamStore {
                 // 書き込み前の `Unsupported` だけが「何も変わっていない」ことを保証できる。
                 if written || !matches!(e, BackendError::Unsupported(_)) {
                     self.poisoned.store(true, Ordering::SeqCst);
+                } else if velocity_is_new {
+                    self.velocity = None;
                 }
                 return Err(e);
             }
@@ -192,6 +198,8 @@ impl DeviceParamStore {
             // `step()` と同じ: capture 競合は params 未変更の一過性エラーで poison しない。
             if !matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
                 self.poisoned.store(true, Ordering::SeqCst);
+            } else if velocity_is_new {
+                self.velocity = None;
             }
             return Err(e);
         }
@@ -929,6 +937,25 @@ mod tests {
             assert!(!store.sgd_used);
             assert_eq!(count(&c.sgd), 0);
             assert!(store.train_chain_loss.is_none());
+        }
+    }
+
+    #[test]
+    fn unsupported_before_write_with_momentum_leaves_no_velocity_behind() {
+        for fault in [Fault::ForwardUnsupported, Fault::FirstDwUnsupported] {
+            let (tape, mut store, _c) = setup(fault);
+            let err = run(&tape, &mut store, &ACTS, &cfg(0.9)).unwrap_err();
+            assert!(matches!(err, BackendError::Unsupported(_)), "{err:?}");
+            assert!(store.velocity.is_none(), "新規 velocity は残さない");
+            assert!(!store.sgd_used);
+            // momentum なしへ切り替えて繰り返しても「途中変更」で拒否されず、
+            // 毎回部品の Unsupported がそのまま返る（ストアは固着しない）。
+            for _ in 0..2 {
+                let err = run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap_err();
+                assert!(matches!(err, BackendError::Unsupported(_)), "{err:?}");
+                assert!(store.velocity.is_none());
+            }
+            store.check_not_poisoned().unwrap();
         }
     }
 
