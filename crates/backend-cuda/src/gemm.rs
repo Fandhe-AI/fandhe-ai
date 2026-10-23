@@ -284,6 +284,10 @@ pub(crate) struct GemmLaunchDiagCounters {
     /// `MemoryOps::upload`（`CudaMemory::upload_inner`）の成功回数（イシュー #3250）。
     /// `h2d_calls`（`upload_h2d_new`＝ホスト入力 GEMM の転送）とは別経路なので別に数える。
     pub mem_uploads: u64,
+    /// `CudaMemory::alloc_zeroed_inner` の成功回数と、永続ワークスペース（MSE partial・GEMM device
+    /// workspace）の grow 回数（イシュー #3252。学習チェーン窓内の確保 0 の断言用。
+    /// `numel > 0` の確保だけを数える）。
+    pub mem_allocs: u64,
 }
 
 // 差分計算は診断テスト専用（`internal-diagnostics` 単独ビルドでは
@@ -304,6 +308,7 @@ impl GemmLaunchDiagCounters {
             d2h_bytes: self.d2h_bytes.saturating_sub(earlier.d2h_bytes),
             stream_syncs: self.stream_syncs.saturating_sub(earlier.stream_syncs),
             mem_uploads: self.mem_uploads.saturating_sub(earlier.mem_uploads),
+            mem_allocs: self.mem_allocs.saturating_sub(earlier.mem_allocs),
         }
     }
 }
@@ -324,6 +329,7 @@ thread_local! {
             d2h_bytes: 0,
             stream_syncs: 0,
             mem_uploads: 0,
+            mem_allocs: 0,
         }) };
 }
 
@@ -411,6 +417,17 @@ pub(crate) fn diag_count_mem_upload() {
 #[cfg(not(any(test, feature = "internal-diagnostics")))]
 #[inline(always)]
 pub(crate) fn diag_count_mem_upload() {}
+
+/// デバイス確保（`CudaMemory::alloc_zeroed_inner` の `numel > 0` 成功と、永続ワークスペースの
+/// grow）を数える（イシュー #3252。`diag_count_mem_upload` と同じ形・同じ cfg ゲート）。
+#[cfg(any(test, feature = "internal-diagnostics"))]
+#[inline]
+pub(crate) fn diag_count_mem_alloc() {
+    gemm_launch_diag_update(|c| c.mem_allocs += 1);
+}
+#[cfg(not(any(test, feature = "internal-diagnostics")))]
+#[inline(always)]
+pub(crate) fn diag_count_mem_alloc() {}
 
 /// `CudaStream::synchronize` の成功を実行箇所で数える（`memory.rs::readback_with`
 /// の各同期直後から呼ぶ）。
@@ -5663,6 +5680,8 @@ impl CudaGemm {
                 });
             }
             *slot = Some(self.stream.alloc_zeros::<f32>(len)?);
+            // 永続ワークスペースの grow も確保として数える（#3252。定常状態では 0）。
+            diag_count_mem_alloc();
         }
         slot.as_mut().ok_or_else(|| CudaError::InvalidKernelConfig {
             detail: "gemm device workspace slot unavailable".to_string(),

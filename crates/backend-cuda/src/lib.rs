@@ -393,6 +393,10 @@ mod train_step_parts_sync_diag_tests_3224;
 // 検証（兄弟配置の理由は同上）。
 #[cfg(test)]
 mod resident_input_diag_tests_3250;
+// イシュー #3252: 学習ステップ全体のチェーンが窓の中で同期・D2H・H2D・確保を起こさず、loss を読む
+// 1 回だけが同期になることの実機診断（兄弟配置の理由は同上）。
+#[cfg(test)]
+mod train_step_chain_diag_tests_3252;
 // イシュー #2116: CUDA train reuse の `forward_resident` 区間（層ごとの
 // `gemm_resident_rhs` 往復・未融合 relu・mse の H2D／確保／起動／同期 D2H）を
 // 層の種類別・batch 別に分解する診断テスト。`context_cache`・

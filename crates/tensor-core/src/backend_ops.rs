@@ -3944,6 +3944,82 @@ pub trait BackendOps {
         ))
     }
 
+    /// [`Self::mse_loss_device_tracked`] と同じ計算を、**呼び出し元が持つ既存のスカラー出力
+    /// `out`（shape `[]`・numel 1）へ書き込む**版（イシュー #3252。学習チェーンの loss
+    /// 確保を step 間で再利用して区間内の確保を 0 にする内部 trait の非破壊拡張。公開 API ではない。
+    /// 設計 `docs/train-step-resident-parts-design.md` §3）。
+    ///
+    /// # 契約
+    /// - `out` は同一デバイス・現行世代・numel 1 でなければならない（不一致は型付きエラー。
+    ///   driver 呼び出しより前に検出する）。既存内容は読まれず全要素が上書きされる。
+    /// - `numel == 0`（pred が空）は確保経路へ任せるため `Unsupported`。
+    /// - `_tracked` 版だけを置き、トークンなしの encode-only 入口は作らない（#3217 記録 §5）。
+    ///
+    /// # デフォルト実装
+    /// 既定は [`BackendError::Unsupported`]（ホストへ黙示フォールバックしない。A08）。呼び出し元
+    /// （`autodiff::DeviceParamStore::train_step_device_chain`）はこれを「その部品は確保版の
+    /// `_tracked` を使う」合図として消費し、チェーン全体の `Unsupported` には伝播させない。
+    fn mse_loss_device_into_tracked(
+        &self,
+        _pred: &DeviceBuffer<f32>,
+        _target: &DeviceBuffer<f32>,
+        _reduction: MseReduction,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
+    /// [`Self::mse_loss_backward_device_tracked`] と同じ計算を、既存の出力 `out`（pred と同じ
+    /// shape）へ書き込む版（イシュー #3252）。契約・既定動作は
+    /// [`Self::mse_loss_device_into_tracked`] と同じ（`numel == 0` は `Unsupported`）。
+    fn mse_loss_backward_device_into_tracked(
+        &self,
+        _pred: &DeviceBuffer<f32>,
+        _target: &DeviceBuffer<f32>,
+        _scale: f32,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss_backward_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
+    /// [`Self::relu_backward_mask_device_tracked`] と同じ選択を、既存の出力 `out`（論理形・
+    /// 行優先）へ書き込む版（イシュー #3252）。契約・既定動作は
+    /// [`Self::mse_loss_device_into_tracked`] と同じ（空形状は `Unsupported`）。
+    fn relu_backward_mask_device_into_tracked(
+        &self,
+        _g: DeviceBufferView<'_>,
+        _g_layout: DeviceMatrixLayout,
+        _mask_src: DeviceBufferView<'_>,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "relu_backward_mask_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
+    /// [`Self::gemm_resident_lhs_device_tracked`] と同じ `w @ op(b)` を、既存の出力 `out`
+    /// （shape `[k, m]`。既存版の出力形と同じ）へ書き込む版（イシュー #3252）。契約・既定動作は
+    /// [`Self::mse_loss_device_into_tracked`] と同じ（退化形状は `Unsupported`）。
+    fn gemm_resident_lhs_device_into_tracked(
+        &self,
+        _w: DeviceBufferView<'_>,
+        _b: DeviceBufferView<'_>,
+        _b_layout: DeviceMatrixLayout,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_resident_lhs_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
     /// ReLU の backward マスクをデバイス常駐のまま適用する（イシュー #3218・
     /// 設計 `docs/train-step-resident-parts-design.md` §3 行 3・§4・§5。
     /// 学習 1 step の同期回数を 1 回へ減らす #3248・#3251 の部品）。
@@ -6346,6 +6422,48 @@ mod tests {
             &token,
         );
         assert!(matches!(r, Err(BackendError::Unsupported(_))));
+        assert!(!token.is_set());
+    }
+
+    /// 既定の `*_into_tracked` 4 部品は `Unsupported` を返し、`token` に触れない
+    /// （イシュー #3252。呼び出し元は部品単位で確保版へ進む合図として扱う）。
+    #[test]
+    fn train_chain_into_tracked_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = empty_device_buffer(Device::Cpu);
+        let b = empty_device_buffer(Device::Cpu);
+        let mut out = empty_device_buffer(Device::Cpu);
+        let token = DispatchFailureCell::new();
+        let va = DeviceBufferView::new(&a, 0, &[1]).unwrap();
+        let vb = DeviceBufferView::new(&b, 0, &[1]).unwrap();
+        assert!(matches!(
+            ops.mse_loss_device_into_tracked(&a, &b, MseReduction::Mean, &mut out, &token),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.mse_loss_backward_device_into_tracked(&a, &b, 1.0, &mut out, &token),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.relu_backward_mask_device_into_tracked(
+                va,
+                DeviceMatrixLayout::RowMajor,
+                vb,
+                &mut out,
+                &token
+            ),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.gemm_resident_lhs_device_into_tracked(
+                va,
+                vb,
+                DeviceMatrixLayout::RowMajor,
+                &mut out,
+                &token
+            ),
+            Err(BackendError::Unsupported(_))
+        ));
         assert!(!token.is_set());
     }
 
