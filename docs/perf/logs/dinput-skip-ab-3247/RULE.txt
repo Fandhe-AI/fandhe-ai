@@ -1,0 +1,65 @@
+RULE fixed-at-utc: 2026-10-23T16:40:00Z
+issue: #3247（親: #3246 の d_input GEMM 省略の実測）
+doc: docs/autodiff-nograd-leaf-dinput-skip-decision.md「実測記録（#3247）」節
+本規則は計測より前に固定する。事後に緩めない。変更が要る場合は別名の RULE を計測前に再登録する。
+
+[対象]
+- before = b6579c3f52689a232b81d9184f20c30778c6d26c（#3246 直前の main）
+- after  = 4fb2a39c859ac4c40705aa37461f4d34b0fc5dd7（#3246 のマージ）
+- 両腕とも crates/facade への [patch.crates-io.fandhe-ai] path patch（--config 引数のみ。Cargo.toml／Cargo.lock へはコミットしない）でビルドする。
+- runner ツリー = 本規則を含むコミット。bench-var-no-grad.patch（sha256 は env_info の patch_sha256 に記録）を適用する。両腕で共通。
+  パッチは (1) train reuse（run_train_reuse と measure_train_reuse_phases）の x 入力を tape.var_no_grad にする (2) BENCH_PARAM_DIGEST=1 のとき更新後パラメータの FNV-1a 64 を stderr へ出す、の 2 点だけ。fresh と mse target は変えない。
+- bench 入力の切り替えをコミットする作業は #3265 の担当（本件は計測専用パッチで代替）。
+
+[セル]（8 セル。いずれも train size=64）
+- 処置セル 4: train reuse × {Mac mini CPU, Mac mini Metal, GB10 CPU, GB10 CUDA}
+- ガードセル 4: train fresh × 同じ 4 つ（LinearAct 経路。#3246 でコード不変の対照）
+
+[手順]
+- 5 round 固定（AB_ROUNDS が 5 以外なら拒否）。プロセスは独立起動。round ごとに before／after の起動順を反転。run の差し替え・追加起動・セル除外はしない。同じラベルの既存出力があれば停止。RAYON_NUM_THREADS は unset。
+- 計測中はビルドを並走させない（全ビルドを計測の前に済ませる）。
+- --phases は各腕 1 回の診断で判定に使わない。
+
+[比]
+- ratio = median(after 5 run の median_s) / median(before 5 run の median_s)
+- ratio_r = after_r / before_r（r は JSONL の行順 = round 順）
+
+[hard 条件（全セル）]
+- loss checksum が全 run・両腕で完全一致。
+- 更新後パラメータの PARAM_DIGEST が全 run・両腕で同値。欠落は不一致として扱う。
+- 不一致は該当セルを REJECT（正しさの失敗）とし、#3246 の不具合として所有者へ報告する。ゲート判定より先に適用する。
+
+[判定（処置セル）]
+- ADOPT: ratio <= 0.95 かつ 5/5 round で ratio_r < 1.00。
+- REJECT: ratio > 1.00、または 5/5 round で ratio_r > 1.00、または hard 条件不成立。
+- undetermined: 上のどちらでもない場合、およびゲート・precheck・env_info・run 数が成立しない場合。
+[判定（ガードセル）]
+- pass: ratio <= 1.03 かつ 5/5 round 後退でない。fail は「ガード後退」として併記（総合の終了コードには影響しない。hard 条件の REJECT は影響する）。
+
+[負荷ゲート]
+- GB10: load1 < 1.0 を 30 秒間隔・最大 30 分待つ。CUDA はさらに GPU 使用率 0% を 3 サンプル連続。
+- Mac mini: load1 < 3.0。round 前に ab_round_cooldown.sh（AB_ROUND_COOLDOWN_MAX_LOAD1=3.0）を通し、pmset -g therm を前後で記録する。
+- 不通過 round を含む系列は undetermined（judge が拒否）。
+
+[機体の同定]
+- Mac mini: sysctl -n machdep.cpu.brand_string が "Apple M4" に完全一致。"Apple M4 Max"（開発機）の値は使わない。
+- GB10: uname -m = aarch64、nvidia-smi の GPU 名を env_info に記録。
+
+[precheck（fail-closed）]
+- after の autodiff/src/grad.rs に input_requires_grad の分岐があり、before には無い。
+- runner の bench-fandhe/src/main.rs で行頭アンカー付き ^\s*let x = tape\.var_no_grad\(&x_data\); がちょうど 2 件、^\s*let x = tape\.var\(&x_data\); が 2 件以上（fresh 分。infer 系を含むため下限）。
+- runner ツリーの変更追跡ファイルの差分が main.rs の 1 件だけで、パッチの逆適用チェックが通る。
+- 各ツリーの .rev-stamp 1 行目が実 HEAD と一致。cargo tree で fandhe-ai が crates/facade の path に解決される。
+
+[ドリフトガード]
+- env_info に rule_sha256・patch_sha256・3 ツリーの rev_stamp_head・bench バイナリ sha256 を記録し、judge が現 RULE の sha256 と突合する。
+
+[事前表明する仮説（実測ではない・合格ラインではない）]
+- GEMM FLOP 78.05 → 52.36 MFLOP（32.9% 減）、Metal 同期 7 → 5 回、CUDA で gemm_resident_lhs の同期 1 回と readback の減少、CPU で dX1 の 25.7 MFLOP 消滅。fresh は中立。
+
+[結果の扱い]
+- ADOPT は「#3246 を維持し、#3265 で bench 入力を var_no_grad にする根拠が実測で得られた」を意味する。REJECT・undetermined も正当な結果で、記録し、維持・撤回・ゲート化の判断は所有者へ委ねる（自律的に revert しない）。
+- tolerance・baseline・依存ピンは変更しない。
+
+[対象外]
+- fandhe-ai =0.12.0 へのピン更新、LinearAct／MatMul の d_input 省略、mse target 側の勾配、相手側ベンチの再計測（相手値は 0.11.0 再計測の参照値）。
