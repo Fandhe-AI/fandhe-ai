@@ -713,8 +713,9 @@ pub(crate) enum ReadbackDest {
     /// `set_len` により確保する未初期化 `Vec`）。挙動・bit 出力とも
     /// 本イシュー導入前と完全に同一。
     ///
-    /// イシュー #2299 時点: 本番既定 `READBACK_DEST` は常に
-    /// `PretouchedFresh` だった（#3227 以降の既定は `PrefetchedPretouched`）。本 variant を選ぶのは診断専用入口
+    /// イシュー #2299 時点では、本番既定 `READBACK_DEST` は常に `PretouchedFresh` だった
+    /// （#3227 以降の既定は `PrefetchedPretouched`）。
+    /// 本 variant を選ぶのは診断専用入口
     /// （`readback_f32_diag`／`readback_f16_diag`。`internal-
     /// diagnostics` feature 限定）のみ・unit test からの直接構築も
     /// ない。feature で gate する。

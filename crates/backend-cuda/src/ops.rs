@@ -7501,6 +7501,12 @@ impl BackendOps for CudaBackendOps {
                     .to_string(),
             ));
         }
+        // イシュー #3227（REQ-14）: readback 宛先の背景事前タッチプールは #3227 で既定経路になり
+        // 最大 256 MiB の通常ホストメモリを保持しうる。ホスト側のみの操作（CUDA に触れない）で
+        // 公開 API の追加でもないため、後続の driver 呼び出し（device handle 取得・
+        // `release_cached`）の成否に関わらず先に解放する（失敗・poison 経路でも保持を残さない）。
+        // capture 中の拒否だけは「何も実行しない」契約を保つため上で先に返す。
+        let _ = crate::memory::release_readback_prefetch();
         // `device_handle_raw`（キャッシュミス時の `CudaDevice::new`）自体も
         // poison 検査・観測の対象に含める（codex-review P0 指摘・PR #1064
         // 追補・`ops.rs:147` 相当）。
@@ -7533,13 +7539,7 @@ impl BackendOps for CudaBackendOps {
             Err(e) => return Err(BackendError::CudaUnavailable(e.to_string())),
         };
         match allocator.release_cached() {
-            Ok(_freed_bytes) => {
-                // イシュー #3227（REQ-14）: readback 宛先の背景事前タッチプールは #3227 で既定経路になり
-                // 最大 256 MiB の通常ホストメモリを保持しうるため、デバイスプール解放と同じ入口で解放する。
-                // ホスト側のみの操作（CUDA に触れない）で、公開 API の追加ではない。
-                let _ = crate::memory::release_readback_prefetch();
-                Ok(())
-            }
+            Ok(_freed_bytes) => Ok(()),
             Err(e) => {
                 context_cache::observe_cuda_error_ref(self.ordinal, &token, &e.detail);
                 Err(BackendError::DeviceAllocationFailed(format!(
@@ -9395,9 +9395,15 @@ mod tests {
         );
     }
 
+    /// `release_cached_device_memory` はプロセス共通の先読みプールを解放するため、これを呼ぶテスト同士を直列化する。
+    static RELEASE_PREFETCH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn release_cached_device_memory_rejects_on_poisoned_ordinal_before_device_handle_is_attempted()
     {
+        let _guard = RELEASE_PREFETCH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let ordinal = unique_test_ordinal();
         poison_ordinal(ordinal);
 
@@ -9408,6 +9414,33 @@ mod tests {
             "poison 済み ordinal では release_cached_device_memory は             device_handle_raw() が試行される前に拒否されるはず: {result:?}"
         );
     }
+    /// イシュー #3227: `release_cached_device_memory` が背景事前タッチプールを解放する結線の回帰テスト
+    /// （実機不要）。poison 済み ordinal の失敗経路でも先読みプールが解放されること（成否非依存）も確認する。
+    #[test]
+    fn release_cached_device_memory_releases_readback_prefetch_even_on_error_path() {
+        let _guard = RELEASE_PREFETCH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let numel = (1usize << 20) / 4; // PREFETCH_LIMITS.min_bytes ちょうど
+        let pf = crate::readback_prefetch::global().expect("prefetcher");
+        pf.note_used(numel);
+        pf.note_used(numel);
+        let t0 = std::time::Instant::now();
+        while pf.stats().3 == 0 && t0.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(pf.stats().3 > 0, "先読みバッファが Ready にならなかった");
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+        let result = CudaBackendOps::new(ordinal).release_cached_device_memory();
+        assert!(
+            result.is_err(),
+            "poison 済み ordinal は Err のはず: {result:?}"
+        );
+        assert_eq!(pf.stats().3, 0, "Err 経路でも先読みプールは解放される");
+    }
+
     // ---------------------------------------------------------------
     // `CudaBackendOps::paged_kv_append`／`paged_attention_forward`（イシュー
     // #3111）の CI 実行可能な回帰テスト（実機不要）。`linear_forward_device` の
