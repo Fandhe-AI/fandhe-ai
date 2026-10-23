@@ -259,3 +259,79 @@ GEMM の結果検証は 2 層防御で構成する。
 結果ダンプ + summarize.py 側突合（N=4096 で 64 MiB/行になりコミット・転送が
 非現実的）でもなく、各バイナリが自己完結で計算する自前 GEMM を採用した
 （詳細・タイミング実測は README.md「要素単位検証」節を参照）。
+
+## 7. bench-fandhe の非対称是正の範囲（イシュー #3264・親 #3263）
+
+### 7.0 位置づけ
+
+- 承認の出典は D-C（`docs/compat-api-scope.md` の D-C 表「ベンチ fandhe 側の非対称是正」・#3263）である。本節は是正の**範囲の確定**であり、新しい承認ではない。依存の追加・更新もない
+- 適用範囲は `scripts/bench/framework-compare/bench-fandhe` に限る。本イシューはドキュメントだけを変え、コードは変えない
+- 行番号は変わりやすいため、関数名と ref（tag `v0.11.0`・`origin/main` の `45347ae0a`）を併記する。ベンチは crates.io の 0.11.0 を使うため、crates 側の出典は `v0.11.0` tag 基準とする
+
+### 7.1 是正の範囲と API の区分
+
+| 項目 | 是正内容 | 必要な API | 担当 | 状態 |
+|------|---------|-----------|------|------|
+| (1) | GEMM reuse の結果を反復ごとに解放する | 現行 0.11.0 | #3265 | 確定 |
+| (2) | loss の読み出し位置を step 末尾へ移す | - | - | **採らない**（7.2） |
+| (3) | Metal の readout を借用ビューにする | 現行 0.11.0 | #3265 | 条件つき |
+| (4) | 入力（GEMM の A・B、train の x・y、infer の x）を計測窓の外で 1 回だけデバイスに置く | 0.12.0（常駐入力 API。#3250） | #3272 | 確定（0.12.0 待ち） |
+| (5) | 学習は 0.12.0 の学習ステップ入口を使う | 0.12.0 | #3272（入口の等価性確認は #3255） | 確定（0.12.0 待ち） |
+| (6) | 学習の入力を `var_no_grad` で渡す | 書き方は現行、効果は 0.12.0 | #3265 | 条件つき（#3245 が案 2 の場合） |
+
+**(1) GEMM reuse の結果の解放（0.11.0 でできる）**
+
+- 非対称の事実: `run_gemm_reuse`（`bench-fandhe/src/main.rs`。`origin/main` で `:542`）は同じ `Tape` に葉 `a`・`b` を登録し（`:572-573`）、計測窓の中で `a.matmul(&b)` を繰り返す。結果ノードが tape に溜まり続ける。candle は `c` を反復ごとに捨てる（`bench-candle/src/main.rs`。`elapsed` 確定が `:133`、closure 末尾が `:144`）
+- train の reuse は step ごとに `make_tape` で作り直し、infer の reuse は `predict_resident` の内部で tape を生成・破棄する。この非対称があるのは GEMM の reuse だけである
+- 手段: facade `Tape::reset(&mut self)`・`Tape::leaf(index)`・`Tape::leaf_count()`（`v0.11.0` の `crates/facade/src/lib.rs` で `:472`・`:485`・`:478`）
+- 反復の形: `matmul → readout → checksum／parity → c を drop → tape.reset() → a = tape.leaf(0)、b = tape.leaf(1)`（`None` は型付きエラーにする）。葉プレフィックスが 2 なのは、`a`・`b` を最初の matmul より前に登録するためである。`reset` が `&mut self` のため、既存の `one` closure（`tape`・`a`・`b` を借用）は #3265 で組み直す
+- **計測窓との位置関係**: 解放（drop・`reset`・`leaf` の再取得）は `elapsed` 確定の後、つまり計測窓の外に置く。candle の `c` の drop が `elapsed` の後にあることとの対称性による。窓に入る処理（matmul・readout・checksum 計算）は変えない
+- 同種の経路: `run_gemm_reuse_device_checksum`（`:732`。`mode=reuse` の JSONL を出す本体計測の代替経路）にも同じ処理を入れる。`run_gemm_reuse_phases`（`:976`。`--phases` 診断）も内訳を本体計測と比べられるよう揃える。揃えられない場合は #3265 の PR 本文に理由を書く
+- host arena（#2104。opt-in・既定 OFF）が有効なときは `reset` がバッファを回収する。既定構成の計測条件は変わらない
+
+**(3) Metal の借用ビュー（条件つき）**
+
+- 現状: `readout_uses_borrowed_view("metal", None)`（`:281`）は false で、legacy 経路の全面コピー（`to_vec`）が入る
+- 経緯: #1520 で REJECT 済み（`docs/perf/metal-gemm-candle-gate-remeasurement.md` §17）。#3184 の再開分（`docs/perf/optin-ab-macmini.md` の G5）は専有ゲートが成立し、継承集計器の判定は ADOPT だったが、同 doc は「#1520 を覆さず、採否は #3265」としている。出典は `docs/perf/logs/optin-ab-macmini-3184/readout-r2/compare-readout.md`
+- 本記録では切り替えを確定させない。継承集計器の規則（`docs/perf/metal-gemm-candle-gate-remeasurement.md` §15.1）で ADOPT の場合に限り、条件を変えた再測定として #3265 が切り替える。過去の判定（#1520）は書き換えない。切り替える場合は既存テスト（`readout_uses_borrowed_view_*`・`readout_var_metal_legacy_branch_*`）も更新する
+
+**(4)(5) 0.12.0 の API が要るもの**
+
+- (4) の非対称: 相手は窓の外で 1 回だけデバイスに置く。fandhe は GEMM で `tape.var(&a_data)`、train で毎 step `tape.var(&x_data)`（`:1214-1215`）、infer で `predict_resident(&store, &x_data)`（`:1650`）を呼ぶ。影響が出るのは CUDA と Metal（CPU には H2D がない）
+- 常駐入力 API（#3250）と学習ステップ入口は 0.12.0 の公開を待つ。ピン更新（#3271）の後に #3272 が切り替える。同期を 1 回にするのは入口側の仕事であり、(2) を採らない理由（7.2）とつながる
+
+**(6) 入力の勾配省略（条件つき）**
+
+- PyTorch と burn は入力の勾配を計算しない。`Tape::var_no_grad` は `v0.11.0` に既にある（`:440`・`:1527`）。ただし効果を生む `LinearResident` の VJP での `d_input` 省略（#3246）は 0.12.0 で公開されるまで計測に現れない。区分は「書き方は現行 API、効果は 0.12.0」とする
+- #3245 は本記録の時点で未確定である。案 2 にならなければ実施しない。実施する場合も `last_loss` が是正前後で一致することを確認する
+
+### 7.2 loss の読み出し位置を移さない理由
+
+- fandhe の train reuse は `loss.to_tensor().get(&[])` を `backward_device_param_store` の前で呼ぶ（`main.rs` `:1219-1223`）
+- 同期はそれより前、`mse_loss` の内部で起きる。経路は autodiff `Var::mse_loss`（`v0.11.0` の `crates/autodiff/src/var.rs:1397`）→ `mse_loss_with`（`:1419`）→ `BackendOps::mse_loss`。Metal は `run_mse_loss_f32_tracked` 内の `check_dispatch_token(ctx.synchronize(), ..)`（`crates/backend-metal/src/mse.rs:227`）、CUDA は `run_mse_loss_f32` 内の `readback(..)`（`crates/backend-cuda/src/mse.rs:201`）
+- したがって `loss.to_tensor().get()` は計算済みのホスト値を読むだけである。診断でも `loss_readout` は 0.0 µs だった（`docs/perf/cuda-train-forward-resident-diagnosis.md` §3.1）
+- 結論: 移しても速くならないため是正に含めない
+
+### 7.3 旧条件の値の出典と新旧併記の方針
+
+- 出典: `docs/perf/logs/framework-compare-0.11.0-macmini-remeasure/`（Mac mini。`macmini-series-a`・`macmini-series-b`・`aggregate/`）と `docs/perf/logs/framework-compare-0.11.0-remeasure/gb10/`（GB10。`results-dgx-0.11.0-median5.jsonl` ほか）。本記録は個別の数値を転記しない（値は出典ファイルから取る）
+- 方針: 是正後の計測（#3266・#3272 以降）は旧条件腕と新条件腕を同一ラウンドで並べて記録する。判定規則（同一 run 内の最速相手比）は変えず、旧条件の判定も併記する。旧条件の連続性のため旧条件の行は消さない
+
+### 7.4 変えないもの
+
+- 相手側のコード（`bench-candle`・`bench-burn`・Python 参照計測）
+- 判定規則（同一 run 内の最速相手比）
+- checksum の定義と `validate_gemm_checksum`、parity 判定（`bench-common::parity`・`verify_strict`）、tolerance 定数（§6。`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）、parity baseline
+- 依存ピン（`fandhe-ai =0.11.0`・`candle-core =0.11.0`・`burn =0.21.0`）、`deny.toml`、契約検査
+- `fresh` モード（全タスク）
+
+### 7.5 契約検査への影響と実行記録
+
+- `scripts/check-forbidden-deps.sh` の framework-compare 検査は manifest と `Cargo.lock` だけを見るため、`bench-fandhe/src/main.rs` の変更は影響しない
+- 実行記録: `origin/main` の `45347ae0a` 上で `bash scripts/check-forbidden-deps.sh lock-all` は rc=0、出力 17 行すべて `OK:`（本変更は docs のみで manifest・lock を変えないため、変更前後で同一）
+
+### 7.6 後続 issue への引き継ぎ
+
+- #3265: (1)・条件つきの (3)・(6)
+- #3266: 新旧併記の計測
+- #3272: (4)・(5)（#3271 のピン更新後）
