@@ -216,6 +216,32 @@ mod tests {
         );
     }
 
+    /// A/B 計測スクリプト（`scripts/bench/framework-compare/run_ab_eager_release_cpu.sh`）の
+    /// precheck。ゲートを上書きせず、各腕のビルドで機構が実際に発火する（after）／しない
+    /// （before）ことを `EXPECT_EAGER_RELEASE_ACTIVE=1|0` で assert する。機構が発火しないまま
+    /// 両腕が同一動作で通る偽 ADOPT を遮断する目的。実行は名前フィルタで限定する
+    /// （after 腕では `default_is_off_*` 等 OFF 前提の既存テストが落ちるため `--lib` 全体は回さない）。
+    #[test]
+    #[ignore = "A/B 計測の precheck 専用。EXPECT_EAGER_RELEASE_ACTIVE=0|1 を付けて名前指定で実行する"]
+    fn eager_release_report() {
+        let (a, b) = mats();
+        let tape = Tape::new_with_ops(test_ops());
+        let (va, vb) = (tape.var(&a), tape.var(&b));
+        let c1 = va.matmul(&vb).unwrap();
+        let _c2 = va.matmul(&vb).unwrap();
+        let _c3 = va.matmul(&vb).unwrap();
+        let (has_value, recompute) = state(&tape, c1.node_id());
+        let enabled = is_enabled();
+        let released = !has_value && recompute;
+        println!("eager_release_report enabled={enabled} released={released}");
+        match std::env::var("EXPECT_EAGER_RELEASE_ACTIVE").as_deref() {
+            Ok("0") => assert!(!enabled && !released, "before 腕は OFF のはず"),
+            Ok("1") => assert!(enabled && released, "after 腕は ON で解放されるはず"),
+            Ok(other) => panic!("EXPECT_EAGER_RELEASE_ACTIVE は 0 か 1: {other}"),
+            Err(_) => {}
+        }
+    }
+
     #[test]
     fn strict_output_is_not_released_and_reset_clears_candidate() {
         let _g = override_enabled_for_scope(true);
