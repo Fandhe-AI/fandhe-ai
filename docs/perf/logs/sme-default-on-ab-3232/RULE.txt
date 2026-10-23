@@ -1,0 +1,79 @@
+イシュー #3232 事前登録規則 (SME 既定 ON の前後を Mac mini と GB10 で A/B)
+fixed-at: 2026-10-23T17:00:00Z (この規則は計測前にコミットして固定する。以後、緩和・事後調整はしない。訂正は末尾への追記に限る)
+登録基準: origin/main 62eadbec7 + 本規則を含むコミット (計測はこのコミットのツリーで行う。docs と scripts の追加だけで bench バイナリには影響しない)
+off-arm.patch sha256: 869c75ba33ab564780775b76bc3fa28aa0ad171a3f60c73a1f0a062c2d7fe06c
+
+0. 位置づけ
+  - #3231 (SME 既定 ON) の効果確認と、再開条件 2 (GB10 非後退) の最終確認。
+    FMA 契約・tolerance・baseline・REQ-8 の手動境界検査・unsafe・依存は変えない。結果を見てから規則を緩めたり調整したりしない。
+  - 前例: docs/perf/logs/sme-macmini-3176/RULE.txt (Mac mini)・docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/RULE-gb10.txt (GB10)。
+    語彙 (FAIL / REJECT / ADOPT / undetermined) と 5 round・5/5 一貫性・--require-checksum-exact を継承する。
+
+1. 腕 (向きに注意: compare_gemm_ab.py の「after/before > 1.00 = 後退」をそのまま使う)
+  - before = OFF: 同一コミットに off-arm.patch (crates/backend-cpu/src/gemm_blis/mod.rs の SME_PRODUCTION_ENABLED true -> false、1 行) を当てた計測専用ツリー。main へコミットしない。
+  - after  = ON : 同一コミットの main (SME_PRODUCTION_ENABLED = true) のクリーンなツリー。
+  - 比 = ON / OFF。1.00 以下なら ON が速い。
+  - A/B 本体は scripts/bench/framework-compare/run_ab_sme_default_on_cpu.sh (#3176 の run_ab_sme_macmini_cpu.sh の派生。元は変更しない)。
+    派生点: 腕の向き・gemm に N=256 を追加 (--sizes threadpolicy)・AB_HOST=macmini|gb10 の必須化。
+
+2. セルの分類 (数値を見る前に固定)
+  - 12 セル: gemm N=256/512/1024/2048 x fresh/reuse (8)、train size=64 x fresh/reuse (2)、infer size=64 x fresh/reuse (2)。
+  - Mac mini (SME あり):
+    - 到達 (10): gemm 全 8 セル (m=n=k>=256 で sme_shape_eligible を満たす。SME_MIN_M/N/K = 256/256/64) と train size=64 (L1 の d_weight 784x256x64)。
+    - 非到達 (2): infer size=64 (m=64)。
+  - N=256 の扱い (静的確認済み。確認できなければガード扱いにする規則だった): bench-fandhe の gemm CPU 経路は
+    crates/backend-cpu/src/ops.rs:294 の gemm_blis_parallel -> gemm_blis_parallel_with_transpose -> dispatch_two_d_dynamic(.., 0..m, ..)
+    (crates/backend-cpu/src/gemm_blis/mod.rs:503・610。TWO_D_DYNAMIC_PRODUCTION_ENABLED は同 3525 行で true) を通り、
+    rows は M 全体のため sme_shape_eligible(256,256,256) が真になる。よって N=256 は到達セル。
+  - GB10 (SME なし。sme_report の kernel_enabled が false の想定): 全 12 セルが非到達 (ガード)。
+
+3. 前提ゲート (1 つでも不成立なら undetermined。理由はすべて併記)
+  - P-TREE   : 両ツリーで内容が異なるファイルが gemm_blis/mod.rs の 1 件だけ (ファイル一覧の一致と cmp)、
+               OFF の該当行が `const SME_PRODUCTION_ENABLED: bool = false;`、ON が true、patch の sha256 が上記と一致。
+  - P-R0     : 両腕で sme_report() の kernel_enabled を記録 (定数には依らず CPU 検出で決まる)。期待値は macmini = 両腕 true、gb10 = 両腕 false。外れたら計測を中止して記録だけ残す。
+  - P-RUNAB / P-COLLECT: A/B スクリプトと収録が exit 0。
+  - P-CELLS  : 12 セル x 両腕 x 5 行ちょうど (重複・欠損・非有限値は不成立)。
+  - P-LOCK   : 実機ロック (~/work/.fandhe-hw-lock) を保持したまま計測し、取得・解放の時刻を hwlock.log に残した。
+  - P-GATE   : macmini は 5/5 round が load1 < 3.0 を通過 (gate_ok=1)。gb10 は内側 8.0 の 5/5 round 通過と、外側ゲート (load1 < 1.0 かつ GPU 使用率 0%、最大 20 回待ち) の記録。
+  - P-RT     : gb10 のみ。ON ツリーで cargo test -p fandhe-ai-backend-cpu --release (#[ignore] 除く) が全件 pass。落ちたテストは直さず名前を記録し「後退あり相当 (要調査)」とする。
+               OFF ツリーでは --lib を実行しない (sme_production_enabled_is_true_with_neon_fallback が作りの上で必ず落ちるため。最初から除外とする)。
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する。
+
+4. 判定 (評価順 FAIL > REJECT > ADOPT > undetermined。緩めない)
+  - FAIL: checksum が数値として完全一致しない (どちらかの機の任意セル)。性能判定へ進まず停止し、ON を戻す側に倒す (bit 同一のフォールバックが成り立たないため)。
+  - REJECT: どちらかの機のどれかのセルに、全 5 round で after/before > 1.00 の一貫した後退がある。
+  - GB10「非後退: pass」: P-R0・P-RT・P-CELLS・P-LOCK・P-GATE が成立し、5/5 一貫の後退セルが無く、checksum が全一致。
+    中央値が 1.00 を超えても 5/5 一貫でないセルは「後退の証拠なし (ノイズ帯)」として値と一緒に記録する。
+  - ADOPT (Mac mini): 前提ゲートがすべて成立し、到達 10 セルがすべて「5 round 中央値 <= 1.00 かつ 5/5 round <= 1.00」、
+    非到達セルに 5/5 一貫の後退が無く、checksum が全一致し、かつ GB10 が「非後退: pass」。
+  - 上のどれでもない場合は undetermined。
+  - 評価の補足: FAIL（checksum 不一致）は常に最優先。前提ゲート（§3）が 1 つでも不成立なら REJECT より先に undetermined とする
+    （ゲート不成立の計測は判定に使わない）。ADOPT は Mac mini の条件に加え GB10 が「非後退: pass」であることを要する（aggregate.py が機械的に結合する）。
+
+5. 結果ごとの処置
+  - ADOPT: 既定 ON を維持する (Rust は変えない)。
+  - REJECT / FAIL / GB10 後退あり: SME_PRODUCTION_ENABLED を false に戻す 1 行とドリフト検出テストの反転を、計測記録とは別コミットで入れる
+    (sme_kernel_for_shape・TwoDDynamicNeon・しきい値・bit 同一テストは残す。#3231 のロールバック定義)。
+  - undetermined: 自動では戻さない。所有者の判断を待つ。再計測するなら末尾に RULE-reopen を追記してから新しいラベルで測る。既存系列の差し替えはしない。
+
+6. 相手比 (記録だけで、判定には使わない)
+  - 同じ round の PyTorch (bench_py.py。sha256 は env_info に記録。fresh のみ) の median_s / fandhe の median_s の 5 round 中央値を、OFF・ON の両方について出す。
+    fandhe の fresh と reuse の両方を同じ torch 行と比べる。GB10 は AB_TORCH_PYTHON 未設定なら PyTorch を測らない (記録のみ・受け入れ条件の対象外)。
+  - 参考列 (本 run の値ではない): 系列 B (docs/perf/logs/framework-compare-0.11.0-macmini-remeasure/scoreboard/gen_0110_macmini.out) の Mac mini CPU 6 行の
+    最速の相手はすべて PyTorch だった。#3231 の到達見込みは「推定」と明記して併記する。
+  - candle・burn・TF・SciPy は今回測らない。M4 Max の値を Mac mini の値として書かない。
+
+7. checksum の範囲
+  - framework-compare の checksum は小数点以下 6 桁に丸めた和で、bit 同一の証明にはならない (RULE-gb10.txt の追記と同じ限定)。
+    bit 同一は GB10 の bitdump (cpu_sme_gate_bit_dump の ^out[ 行の行数と sha256。ON/OFF 比較) と #3231 の M4 Max bitdump
+    (6,726,847 行) で補う。M4 Max の sha との突き合わせは記録だけで判定しない。
+
+8. 負荷・並走・ロック
+  - Mac mini: 各 round の開始前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ。計測中は Mac mini でも開発機でもビルドを並走させない。
+  - GB10: 外側ゲート (load1 < 1.0 かつ GPU 0%) を最大 20 回・30 秒間隔で待ち、内側は 8.0。
+  - 両機とも開始時に mkdir ~/work/.fandhe-hw-lock でロックを取り (取れなければ 60 秒おきに取り直す)、owner に `#3232 <UTC>` を書き、回収後に外す。
+    ロックを持たずに測った値は記録に使わない。
+
+9. マスク規則
+  - 収録するログのホスト名は masked、$HOME は <home>、ユーザー名と絶対パスは除去。実機のホスト名・接続情報はリポに書かない。
+  - .rev-stamp (ON は git rev-parse HEAD、OFF は <sha>+off-arm.patch) とツリー指紋を成果物に含める。
