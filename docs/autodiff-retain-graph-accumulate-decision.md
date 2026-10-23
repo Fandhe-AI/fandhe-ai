@@ -147,3 +147,20 @@ resident 経由の `Gradients` は fail-closed に拒否する
 - `crates/facade/tests/backward_accumulate_backend_parity.rs`: CPU
   本番 ops と naive 参照実装の bit 完全一致確認（属性なし）・
   Metal／CUDA `#[ignore]`（未実測）。
+
+## 追補（#3226）: recompute 契約つき自動解放（既定 OFF のゲート）は §2.1 の例外
+
+§2.1 の「明示的な解放手段は `Tape::reset` のみ」に対する例外を 1 つだけ置く。
+`crates/autodiff/src/eager_release.rs`（`EAGER_MATMUL_RELEASE_DEFAULT_ENABLED`・既定 OFF・
+CPU 限定）が、次の `Var::matmul` が出力を確保する前に、**consumer を持たない直近の
+`Op::MatMul` 結果**の値を手放す（reuse モードの結果蓄積が first-touch ページフォールトを
+生む逆転 #3187 の是正）。
+
+- §2.1 が退けたのは `recompute == false` のまま解放して release ビルドで黙ってゼロを返す形。
+  本機構は `release_checkpoint_region` と同じく `recompute = true` を立てて解放するため、解放済み
+  ノードを読むと `recompute_value` が同じ `ops.gemm` で再計算し、forward と bit 同一の値を返す
+  （黙ってゼロを返す経路はない）
+- 解放条件は checkpoint の適格条件（`!fp32_strict && !low_precision && is_checkpoint_eligible()`）
+  に加え、今回の matmul の入力でないこと・後続ノードに参照されないこと・device が CPU であること
+- `Tape` の `retain_graph` 相当の契約（グラフを reset／drop まで保持）は不変。値だけが
+  再計算可能な形で手放される。既定 OFF のため従来経路は無変更。既定反転は ADOPT 後の #3227

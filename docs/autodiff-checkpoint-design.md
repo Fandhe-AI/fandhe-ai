@@ -190,3 +190,14 @@ fn recompute_value(
 ## 9. 承認事項
 
 - **facade `Tape::checkpoint`（閉包版）の passthrough 追加**: 現時点では追加していない。`Var::checkpoint_from`（低儀式版）が既存の `Var` 再エクスポート経由で facade からも到達可能なため、facade ユーザーは checkpoint 機能自体は利用できる。閉包版が必要な場合は別途ユーザー承認のうえ追加する
+
+## 追補（#3226）: 区間を登録しない解放経路
+
+`crates/autodiff/src/eager_release.rs`（既定 OFF のゲート）は、checkpoint 区間として**登録せずに**
+`recompute = true` で `Op::MatMul` の値を解放する経路を 1 つ追加した（`docs/autodiff-retain-graph-accumulate-decision.md`
+追補）。再計算契約は本書と同じ（`recompute_value`）。`create_graph` は `has_registered_checkpoints()`
+（登録区間）だけで fail-closed にするため、本経路で解放されたノードは拒否の対象にならない。
+`create_graph.rs` の親ノード読み出しはすべて `materialize_fallible`（再計算対応）経由のため、ゲート ON でも
+従来 `Ok` の呼び出しが `Err` に変わらない（`crates/facade/tests/cpu_gemm_reuse_release_diag.rs` で固定）。
+checkpoint 区間との共存も同テストで bit 一致を確認している（backward hook との共存テストは未作成。hook は
+ノード値を保持せず値は再計算で読まれるため影響しない見込みだが未検証）。

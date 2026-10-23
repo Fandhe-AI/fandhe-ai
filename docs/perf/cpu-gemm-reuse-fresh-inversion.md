@@ -77,6 +77,8 @@
 
 ## 5. 申し送り
 
+> #3226 の是正機構（既定 OFF のゲート）は実装済み。RULE.txt 固定済み・A/B は未実施（§8 を参照）。
+
 | 項目 | 担当 |
 |---|---|
 | 逆転の是正（glibc の mmap 閾値・出力プール・Tape 結果の解放・prefault 等）。**§6 の結論から、是正の対象は「出力バッファの新規確保（first-touch のページフォールト）」。既存の host arena（#2104）は reuse で hit=0 のため効かない**。本書は列挙のみで実装しない | #3226 |
@@ -117,3 +119,45 @@
 - 5 run は同一ホスト・同一セッション。GB10 の専有ゲート（load1<1.0）は 5 run すべて通過した（`load_gate_status.txt`: pass×5。補助 1 run も pass）。record_only の系列はない
 - arena 統計は warmup を含むブロック全体の累計
 - N=4096 の同型の帰属、M4 Max の正式系列は対象外（Issue は N=256〜2048、GB10 限定）
+
+## 8. 是正（#3226）
+
+### 8.1 設計
+
+- 機構: `crates/autodiff/src/eager_release.rs`。`Var::matmul`（通常版）が出力を確保する**前**に、直前の
+  `Op::MatMul` 結果が consumer を持たなければ `recompute = true` で値を手放し、`recycle_tensor_f32` へ渡す
+  （arena OFF なら drop され glibc が再利用、ON なら次の `take_zeroed_f32` が hit）。確保の前に解放するので
+  定常状態は 1 枠に収まる
+- ゲート: `EAGER_MATMUL_RELEASE_DEFAULT_ENABLED = false`（既定 OFF・CPU 限定・新規 `unsafe` なし・公開 API 追加なし）。
+  A/B の after 腕はこの 1 行だけを反転する。既定の反転は ADOPT 後の #3227
+- bit 同一: 解放は checkpoint と同じ recompute 契約（`docs/autodiff-retain-graph-accumulate-decision.md` 追補・
+  `docs/autodiff-checkpoint-design.md` 追補）。再利用バッファは `take_zeroed_f32` で全要素ゼロ埋め。
+  `create_graph` は親ノードを `materialize_fallible` だけで読むためゲート ON でも `Ok` のまま
+- テスト: 単体（`eager_release.rs`）・CI の bit 一致（`crates/facade/tests/cpu_gemm_reuse_release_diag.rs`。
+  4 通りの全反復・NaN 番兵の残値非混入・backward／create_graph／checkpoint 共存）
+- 採らなかった案: prefault／並列 first-touch（#1481 で REJECT・フォルトの場所を動かすだけ）・mmap 閾値／madvise
+  （libc FFI と `unsafe` が要る）・arena 単独（結果が保持される間は返却が起きない）
+
+### 8.2 事前登録規則と実測の状態
+
+| 項目 | 状態 |
+|---|---|
+| 事前登録規則（`docs/perf/logs/cpu-gemm-reuse-release-3226/RULE.txt`） | 固定済み（計測より前にコミット） |
+| GB10・Mac mini の 5 round A/B（RULE の ADOPT／REJECT 判定） | **未実施**（A/B スクリプト・Mac mini 計測は本ブランチに含まれない。判定は未確定で、既定は OFF のまま） |
+| 補助 diag（GB10・1 run・record-only・判定外） | 実施済み（下記）。`diag-gb10/run1.jsonl` |
+
+### 8.3 補助 diag の結果（GB10・1 run・record-only。RULE の判定ではない）
+
+`cpu_gemm_reuse_release_phases`（release ビルド・warmup 20 + 計測 20 反復の中央値・minflt は未取得〈-1〉）。
+checksum bit は全腕・全サイズで一致。時間は 1 反復（matmul + readout + checksum）の中央値。
+
+| N | fresh (ms) | reuse (ms) | reuse_release (ms) | reuse_release_arena (ms) |
+|---|---|---|---|---|
+| 256 | 0.176 | 0.350 | 0.201 | 0.177 |
+| 512 | 0.842 | 1.397 | 0.860 | 0.817 |
+| 1024 | 3.673 | 4.448 | 3.262 | 3.148 |
+| 2048 | 16.108 | 18.385 | 16.856 | 16.516 |
+
+解放により reuse は fresh 並みへ戻る方向（N=256〜512 で reuse 比 0.57〜0.62、N=1024 は fresh より速い）。
+単一 run・単一セッションのため後退セルの有無・ADOPT 判定は言えない。RULE の A/B（5 round・両機体）が
+次の作業。Mac mini の train CPU（reuse が +0.169 ms）は本機構の予測対象ではない。
