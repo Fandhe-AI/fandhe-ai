@@ -7533,7 +7533,13 @@ impl BackendOps for CudaBackendOps {
             Err(e) => return Err(BackendError::CudaUnavailable(e.to_string())),
         };
         match allocator.release_cached() {
-            Ok(_freed_bytes) => Ok(()),
+            Ok(_freed_bytes) => {
+                // イシュー #3227（REQ-14）: readback 宛先の背景事前タッチプールは #3227 で既定経路になり
+                // 最大 256 MiB の通常ホストメモリを保持しうるため、デバイスプール解放と同じ入口で解放する。
+                // ホスト側のみの操作（CUDA に触れない）で、公開 API の追加ではない。
+                let _ = crate::memory::release_readback_prefetch();
+                Ok(())
+            }
             Err(e) => {
                 context_cache::observe_cuda_error_ref(self.ordinal, &token, &e.detail);
                 Err(BackendError::DeviceAllocationFailed(format!(

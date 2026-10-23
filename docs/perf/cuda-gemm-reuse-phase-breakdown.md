@@ -691,12 +691,13 @@ N=1024/2048/4096 で 1.10/1.13/1.10 倍に後退した。
 ### §15.1 機構（#3225 では既定 OFF・#3227 で既定化）
 
 - `memory::ReadbackDest::PrefetchedPretouched`。env `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch` でのみ
-  選ばれる（`readback_policy.rs` の完全一致 allowlist）。`READBACK_DEST` の既定は `PretouchedFresh` のまま。
+  明示選択もできる（`readback_policy.rs` の完全一致 allowlist）。#3225 時点では env のみで選ばれ既定は
+  `PretouchedFresh` だったが、#3227 以降の `READBACK_DEST` 既定は `PrefetchedPretouched`（§15.4。`pretouched` で従来方式へ戻せる）。
 - `crates/backend-cuda/src/readback_prefetch.rs`: 同じ要素数の readback が 2 回目に来た後、D2H の同期が終わってから
   専用 worker スレッド 1 本が次回ぶんの `Vec<f32>` を sentinel で確保・事前タッチする。次の readback はそれを取り出す。
   Pending は最大 20 ms 待ち、期限切れ・poison・worker 不在・OOM はインライン確保へ倒す。worker は CUDA に触れない。
 - 保持上限: 1 バッファ 1 MiB 以上 128 MiB 以下・合計 256 MiB・8 エントリ。f32 のみ。
-- 解放: `memory::release_readback_prefetch()`（REQ-14）。診断: `readback_prefetch_stats_diag`（`internal-diagnostics`）。
+- 解放: `memory::release_readback_prefetch()`（REQ-14。#3227 で `release_cached_device_memory` から呼ぶよう結線）。診断: `readback_prefetch_stats_diag`（`internal-diagnostics`）。
 - 数値契約: D2H が全要素を上書きするため `PretouchedFresh` と bit 同一。tolerance・REQ-2 判定は不変。
 
 ### §15.2 検証状況
@@ -747,6 +748,6 @@ N=1024/2048/4096 で 1.10/1.13/1.10 倍に後退した。
 - 反転: `crates/backend-cuda/src/memory.rs` の `READBACK_DEST` を `PretouchedFresh` から `PrefetchedPretouched` へ。根拠は §15.2 の ADOPT（凍結 RULE の逐語適用。主判定 5 セル ratio 0.41〜0.59・ガード最大 1.0106・checksum 完全一致）。§15.3 の「既定の反転は #3227」はここで実施した。
 - opt-out: env `FANDHE_AI_CUDA_READBACK_DEST=pretouched`（完全一致 allowlist・OnceLock は不変）。
 - 到達範囲: A/B は gemm cuda 10 セルだが、既定化で facade から届く 1 MiB 以上 128 MiB 以下の f32 readback 全般に効く。数値は D2H が全要素を上書きするため bit 同一。f32 以外・1 MiB 未満・プール miss は従来処理。
-- REQ-14: 既定経路で最大 256 MiB（8 エントリ）の通常ホストメモリと worker 1 本を保持しうる。`release_readback_prefetch()` はあるが facade の `release_cached_memory(Device::Cuda)` へは未結線（公開 API 追加は #3227 の範囲外）。結線先は `release_cached_device_memory` の `allocator.release_cached()` 直後。追跡 Issue 起票は所有者承認待ち。
+- REQ-14: 既定経路で最大 256 MiB（8 エントリ）の通常ホストメモリと worker 1 本を保持しうる。`release_readback_prefetch()` は `release_cached_device_memory`（facade の `release_cached_memory(Device::Cuda)` の経路）の `allocator.release_cached()` 成功直後から呼ぶよう内部結線した（公開 API の追加なし。レビュー指摘対応）。実機での解放バイト数確認は未検証。
 - 検証状況: CI で動く単体テスト（ドリフトガード `default_dest_is_prefetched_pretouched` を含む）のみ実施。**GB10 の `#[ignore]` 全件の main 突き合わせ・確認計測（train／infer の record_only を含む）は未検証**（本実装セッションは実機に届かない）。後退セルは未計測のため併記できない。実測後に本節へ追記する。
 - 不変: tolerance・parity baseline・FMA 契約・`PREFETCH_LIMITS`・RULE.txt は変更していない。
