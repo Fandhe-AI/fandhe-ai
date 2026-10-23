@@ -81,6 +81,8 @@ fn matmul_matches_host(device: Device) {
         assert_bits_eq(&expect, &tape.matmul_resident(&ah, &bh).unwrap());
     }
     // Metal は 8 の倍数でない形状を黙って別経路で計算せず `Unsupported` にする。
+    // `Device::Metal` は macOS 限定の variant のため cfg で分離する。
+    #[cfg(target_os = "macos")]
     if matches!(device, Device::Metal) {
         let a = tape.upload_resident(&store, &tensor(1, &[7, 13])).unwrap();
         let b = tape.upload_resident(&store, &tensor(2, &[13, 5])).unwrap();
@@ -156,6 +158,20 @@ fn cpu_predict_resident_input_matches_host_bitwise() {
 #[test]
 fn cpu_matmul_resident_matches_var_matmul_bitwise() {
     matmul_matches_host(Device::Cpu);
+}
+
+/// 出力バイトサイズが `isize::MAX` を超える空入力は panic せず型付きエラーになる。
+#[test]
+fn cpu_matmul_resident_huge_empty_output_is_typed_error_not_panic() {
+    let tape = tape_for(Device::Cpu).unwrap();
+    let store = Sequential::new().init_device_param_store(&tape).unwrap();
+    let huge_m = isize::MAX as usize / 4 + 1;
+    let a = Tensor::<f32>::new(Vec::new(), &[huge_m, 0]).unwrap();
+    let b = Tensor::<f32>::new(Vec::new(), &[0, 1]).unwrap();
+    let ah = tape.upload_resident(&store, &a).unwrap();
+    let bh = tape.upload_resident(&store, &b).unwrap();
+    let e = backend_err(tape.matmul_resident(&ah, &bh).unwrap_err());
+    assert!(matches!(e, BackendError::ShapeMismatch(_)), "{e:?}");
 }
 
 #[test]

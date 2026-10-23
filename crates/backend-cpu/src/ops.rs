@@ -1226,7 +1226,12 @@ impl BackendOps for CpuBackendOps {
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
-        let mut out = zeroed_output(m * n);
+        // 確保前に出力のバイトサイズ（`isize::MAX` 上限）まで検証する。要素数が
+        // `usize` に収まっても `Vec` 確保が capacity overflow で panic しうる
+        // ため（`gemm_batched` と同じ単一情報源。本番経路 panic 禁止規約）。
+        let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(1, m, n)
+            .map_err(BackendError::ShapeMismatch)?;
+        let mut out = zeroed_output(total);
         gemm_into_slice(a, b, &mut out, m, n, k, "gemm")?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
@@ -1693,7 +1698,10 @@ impl BackendOps for CpuBackendOps {
                 },
             ));
         }
-        let mut out = zeroed_output(m * n);
+        // 確保前に出力バイトサイズを検証する（`gemm` と同じ。capacity overflow 回避）。
+        let total = fandhe_ai_tensor_core::checked_gemm_batched_output_len(1, m, n)
+            .map_err(BackendError::ShapeMismatch)?;
+        let mut out = zeroed_output(total);
         gemm_blis_parallel(a_handle.data(), b_handle.data(), &mut out, m, n, k)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         shared_cpu_memory().wrap_vec(out, out_shape)
@@ -4231,6 +4239,26 @@ mod zeroed_output_tests {
         let len = min_elems + 1;
         let out = zeroed_output_with_threshold(len, min_elems);
         assert_all_zero_bits(&out, len);
+    }
+
+    /// 出力バイトサイズが `isize::MAX` を超える空入力（`[M, 0] @ [0, 1]`）は
+    /// 確保前に `ShapeMismatch` で拒否し、`Vec` の capacity overflow で panic
+    /// しない（`gemm`・`gemm_device` 共通。本番経路 panic 禁止規約）。
+    #[test]
+    fn gemm_and_gemm_device_reject_huge_output_bytes_without_panic() {
+        use fandhe_ai_tensor_core::BackendOps;
+        let huge_m = isize::MAX as usize / 4 + 1;
+        let a = Tensor::<f32>::new(Vec::new(), &[huge_m, 0]).unwrap();
+        let b = Tensor::<f32>::new(Vec::new(), &[0, 1]).unwrap();
+        let ops = CpuBackendOps::new();
+
+        let e = ops.gemm(&a, &b).unwrap_err();
+        assert!(matches!(e, BackendError::ShapeMismatch(_)), "{e:?}");
+
+        let ad = ops.upload(&a).unwrap();
+        let bd = ops.upload(&b).unwrap();
+        let e = ops.gemm_device(&ad, &bd).unwrap_err();
+        assert!(matches!(e, BackendError::ShapeMismatch(_)), "{e:?}");
     }
 
     #[test]
