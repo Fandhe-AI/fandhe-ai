@@ -1,0 +1,1 @@
+PARAM_DIGEST task=train mode=fresh device=cuda n_tensors=4 n_elems=203530 fnv1a64=0x7d9d7aefaeaf43d5
