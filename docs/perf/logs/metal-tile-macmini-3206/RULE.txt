@@ -1,0 +1,59 @@
+イシュー #3206 事前登録規則（計測前に固定。計測後に緩めない。2026-10-23）
+================================================================
+目的: Mac mini（Apple M4・GPU 10 コア）向けに追加した厳密一致タイル表（PR #3525。VerifiedM4BaseGpuCoreCount／
+VerifiedTileTableDevice::M4Base）について、受け入れ条件 AC4（追加前後の GEMM 時間〈機体・版つき〉と candle 比の記録）を
+5 プロセス・負荷ゲート・candle 同系列・.rev-stamp 腕同定の正式系列で取り直す。既存の mini_run.log（1 プロセス・
+20 試行中央値）は参考値として残し書き換えない。診断・記録のみ（record_only）。
+変えないもの: crates/ 配下のすべて（tile.rs・gemm.rs・shaders/・split_k_runtime.rs・診断テスト）・tolerance 定数
+（RELATIVE_TOLERANCE／ABSOLUTE_RESCUE_THRESHOLD）・split-K parity baseline・should_split_k のパラメータ・
+scripts/bench/framework-compare/ の相手側計測コード（bench-candle 等）・Cargo.toml／Cargo.lock。
+対象外: f16 経路・非正方形状（#3208）・candle 構造の再現（#3211）・カーネル由来比率（#3182）・帰属表の更新（#3191）・
+framework-compare の reuse 比（系列 B。crates.io の fandhe-ai =0.11.0 を固定参照するため Mini 表を含まない）・GB10。
+
+1. 機体: Mac mini（Apple M4・GPU 10 コア・16 GB）。記録項目はチップ・macOS・rustc・.rev-stamp・DEVICE 行
+   （gpu_cores=10 soc="Apple M4" token=M4Base）。内部ホスト名・ユーザー名・絶対パスは書かない
+   （env_info.txt に uname -n を出さない。回収後に <WORK>／<HOME> へマスクする）。
+2. 計測ツリー: 単一ツリー。RULE・orchestrate・aggregate をコミットした計測前コミットを git archive で展開し、
+   .rev-stamp に git rev-parse の値を置く。計測前コミットが PR #3525 のマージコミット（0ae3f00ff）の子孫であること
+   （git merge-base --is-ancestor。Mini 表を含むこと）を前提とし、結果を tree_fingerprint.txt に記録する。
+   展開ツリーと手元の git archive について crates・scripts/bench/framework-compare の sha256 一覧
+   （target・Cargo.lock を除く）を取り、一致を tree_fingerprint.txt に記録する。
+3. 形状・入力: 正方 NN の N = 256 / 512 / 1024 / 2048 / 4096（診断テストの固定入力。テスト側で決定的）。
+4. 腕: before と after の 2 腕。
+   - before: dispatch_tiled_prepared で CANDIDATES[3] を強制する。
+   - after: Mini 表の選択（N=512／1024 は [1]、2048／4096 は [2]、256 は [3]）。
+   m4_base_table_ab_timing が同一プロセス内で両腕を交互に実行する（warmup 20・計測 20 の中央値）。
+   forced [3] を before（追加前）と見なしてよい根拠: (a) #3181 の trace で追加前の本番経路が 5 N すべて
+   Classic/[3]・fallback なしだったこと、(b) #3525 がカーネル・シェーダを変えていないこと。
+5. 本番経路の証明（run ごと）: gemm_tile_macmini_table_diag_tests::m4_base_table_selected_on_macmini を使う。
+   #3181 の tile_select_trace_square_sizes は使わない（旧入口 verified_m4_max を見るため Mini では
+   verified=None／[3] と表示され誤読のもとになる）。
+6. bit 一致と parity: m4_base_table_bit_match_and_parity を 2 段で使う。
+   (a) 系列の前に 1 回、前提ゲートとして実行する。落ちたら系列を開始しない。
+   (b) 各 run でも実行し、出力全要素の to_bits の FNV-1a 64bit hash が run 間・腕間で一致するかを整合検査にする
+       （不一致は fail-closed）。checksum は bit 同一の証拠にしない。判定は REQ-2 の統一複合判定で tolerance は不変。
+7. AC2 の前提確認: 計測ツリーで cargo test --release -p fandhe-ai-backend-metal --lib tile:: を 1 回実行し
+   precheck.log に残す（非 ignore の単体テスト。M4 Max の表の不変と split-K 非交差を含む）。落ちたら系列を開始しない。
+8. candle: bench-candle --task gemm-transfer-split --device metal --size N --out <file> を N ごとに 1 プロセス、
+   同じ負荷ゲートの下で実行する。値は task == "gemm_transfer_excl" 行の median_s を使う。版は cargo tree で記録する。
+   相手側のコードは変えない。parity_fail_count が 0 でない行は判定不能として比から除く。
+9. 比（定義は #3181 RULE 10 と同じ）: 速度比 = candle 時間 / fandhe 時間（1 未満は fandhe が遅い）。
+   主比: candle excl ÷ fandhe 壁時計合計（alloc_c+encode+commit_wait）。
+   参考比: candle excl ÷ fandhe kernel_gpu（candle 側に encode・同期が余計に入るため fandhe に有利に偏る）。
+   どちらも before・after の両腕について出す。「純カーネル比そのもの」とは書かず、境界の違いを注に書く。
+10. 回数: 5 プロセス（5 run）。値は各 run 内中央値の 5 run 中央値。run 別の値も表に出す。
+11. 負荷ゲート: 各プロセスの開始前に load1 < 3.0 になるまで 30 秒間隔で最大 30 分待つ。読めなければ GATE-INVALID、
+    30 分で下がらなければ GATE-TIMEOUT。全プロセスが通過した系列だけを正式系列と呼ぶ。部分通過の系列は参考として
+    記録し、AC4 は未達のまま扱う。
+12. 運用: ビルドは計測より前にすべて終え、失敗したら即中止する。計測中にビルドしない。奇数 run は fandhe -> candle、
+    偶数 run は candle -> fandhe の順で起動する。run の差し替え・追加起動はしない。ログは上書きしない（既存なら exit 1）。
+    nohup のサブシェルで切り離す。完了マーカーは "series done"（rc= を grep の終端条件にしない）。
+    ビルド後、テストバイナリ（cargo test --no-run --message-format=json から得たパス）と bench-candle を
+    run 専用ディレクトリへコピーし sha256 を記録して直接実行する（他セッションが共有 target を再ビルドしても
+    計測対象が変わらないようにする）。
+13. 判定（性能の記述上の分類。ゲートでも tolerance でもない）: N ごとに after/before（kernel_gpu の 5 run 中央値）で分類する。
+    - 改善: 0.98 未満、かつ 5 run すべてで after が速い。
+    - 退行: 1.02 超、かつ 3/5 run 以上で after が遅い。
+    - 上記以外は帯内。
+    壁時計合計にも同じ分類を併記する。どの N でも退行がなければ表を維持する。退行が出たら記録して所有者へ上げ、表は変えない。
+14. 機体に到達できない場合は数値を埋めず unavailable と記録する。推定値で埋めない。

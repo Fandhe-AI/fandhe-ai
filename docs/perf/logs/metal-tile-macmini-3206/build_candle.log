@@ -1,0 +1,3 @@
+   Compiling bench-common v0.1.0 (<WORK>/rust-ai-library-run-3206/scripts/bench/framework-compare/bench-common)
+   Compiling bench-candle v0.1.0 (<WORK>/rust-ai-library-run-3206/scripts/bench/framework-compare/bench-candle)
+    Finished `release` profile [optimized] target(s) in 1.24s
