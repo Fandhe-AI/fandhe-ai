@@ -1,0 +1,13 @@
+2026-10-23T05:04:00Z bit-exact start
+2026-10-23T05:04:19Z bit-exact rc=0
+2026-10-23T05:04:19Z stage0 run1 start
+2026-10-23T05:04:19Z stage0 run1 rc=0
+2026-10-23T05:04:19Z stage0 run2 start
+2026-10-23T05:04:20Z stage0 run2 rc=0
+2026-10-23T05:04:20Z stage0 run3 start
+2026-10-23T05:04:21Z stage0 run3 rc=0
+2026-10-23T05:04:21Z stage0 run4 start
+2026-10-23T05:04:22Z stage0 run4 rc=0
+2026-10-23T05:04:22Z stage0 run5 start
+2026-10-23T05:04:22Z stage0 run5 rc=0
+2026-10-23T05:04:22Z STAGE0 DONE

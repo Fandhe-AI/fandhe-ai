@@ -1,0 +1,4 @@
+--- uname: Linux 6.17.0-1031-nvidia aarch64
+--- rustc: rustc 1.97.0 (2d8144b78 2026-07-07)  cargo: cargo 1.97.0 (c980f4866 2026-06-30)
+--- RAYON_NUM_THREADS=[unset] CARGO_TARGET_DIR=[unset]
+--- tools: jq=/usr/bin/jq python3=/usr/bin/python3 sha=/usr/bin/sha256sum

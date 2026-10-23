@@ -1,0 +1,6 @@
+threshold=1.0 rule_threshold=1.0 series=official
+round1 gate=pass gate_ok=1 threshold=1.0 load1=0.80 waited_s=0 at=2026-10-23T05:08:19Z
+round2 gate=pass gate_ok=1 threshold=1.0 load1=0.80 waited_s=0 at=2026-10-23T05:08:20Z
+round3 gate=pass gate_ok=1 threshold=1.0 load1=0.80 waited_s=0 at=2026-10-23T05:08:21Z
+round4 gate=pass gate_ok=1 threshold=1.0 load1=0.80 waited_s=0 at=2026-10-23T05:08:22Z
+round5 gate=pass gate_ok=1 threshold=1.0 load1=0.99 waited_s=0 at=2026-10-23T05:09:23Z
