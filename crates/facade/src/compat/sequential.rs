@@ -133,6 +133,10 @@ use fandhe_ai_autodiff::nn::{
 };
 use fandhe_ai_tensor_core::{Activation, BackendOps, ScalarDType};
 
+// イシュー #3251: 学習ステップのチェーン（autodiff 内部）の facade 側テスト補助。公開入口は #3254。
+#[cfg(test)]
+mod train_step_chain_tests_3251;
+
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
 /// チェーン（`self` を消費し `Self` を返す）で層を追加し、`predict` で
 /// 推論を実行する。層は `nn::Module`（`fandhe_ai_autodiff::nn::module`）実装として

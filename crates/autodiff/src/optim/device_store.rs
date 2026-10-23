@@ -120,6 +120,7 @@
 // ため（`amp.rs` モジュール冒頭コメント参照）。
 mod amp;
 mod distributed;
+mod train_chain;
 
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
@@ -537,6 +538,17 @@ pub struct DeviceParamStore {
     /// `Gradients` の再利用を fail-closed に拒否する。`PendingForward::
     /// generation` doc 参照）。
     next_pending_generation: u64,
+    /// 学習ステップのチェーン（`train_chain.rs`。イシュー #3251）専用の勾配連結バッファ
+    /// （shape `[total_numel]`）。`grad_staging`（鮮度契約を持つ）とは別にして、
+    /// そちらの `filled`／`bias_host_routed` を汚さない。初回のチェーンで確保する。
+    train_chain_grad: Option<DeviceBuffer<f32>>,
+    /// 直近のチェーン step の loss スカラー（デバイス常駐）。
+    train_chain_loss: Option<DeviceBuffer<f32>>,
+    /// 直近のチェーン step の世代（`TrainStepLoss` の鮮度検査の基準）。
+    train_chain_generation: u64,
+    /// 直近のチェーン step が積んだ中間バッファ（層出力・勾配・d_input）。encode のみで
+    /// 積んだ GPU 仕事が完了するまで解放しないために次の step まで保持する。
+    train_chain_hold: Vec<DeviceBuffer<f32>>,
 }
 
 /// `AutodiffError` を `BackendError` へ変換する（イシュー #1022）。
@@ -1324,6 +1336,10 @@ impl DeviceParamStore {
             backward_serial: Cell::new(0),
             resident_grad_capability: Cell::new(None),
             next_pending_generation: 0,
+            train_chain_grad: None,
+            train_chain_loss: None,
+            train_chain_generation: 0,
+            train_chain_hold: Vec::new(),
         })
     }
 
