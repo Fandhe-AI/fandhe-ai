@@ -169,51 +169,83 @@ def evaluate(base, host):
             "on_med": statistics.median(o["median_s"] for o in arm["after"][cell]),
         }
     res["stats"] = stats
-    # 前提ゲート
+    # 前提ゲート。checksum 不一致（FAIL）を確定済みのため、ここでのログ欠損・不正は AggError で
+    # 検出済みの FAIL を捨てず、追加の前提不成立理由として gate_fail へ収集する（RULE §4: FAIL は常に最優先）
     gf = res["gate_fail"]
-    if read_text(os.path.join(base, "tree_verify.txt")).strip() != GATE_FILE:
+
+    def rd(path):
+        try:
+            return read_text(path)
+        except AggError as e:
+            gf.append("前提不成立: %s" % e)
+            return None
+
+    t = rd(os.path.join(base, "tree_verify.txt"))
+    if t is not None and t.strip() != GATE_FILE:
         gf.append("P-TREE: 差分ファイルが 1 件（%s）ではない" % GATE_FILE)
-    if read_text(os.path.join(base, "patch_sha256.txt")).strip() != rule_sha():
-        gf.append("P-TREE: patch の sha256 が RULE と不一致")
-    consts = [re.sub(r"^\d+:", "", l) for l in read_text(os.path.join(base, "gate_constant.txt")).splitlines()]
-    if consts != ["const SME_PRODUCTION_ENABLED: bool = false;", "const SME_PRODUCTION_ENABLED: bool = true;"]:
-        gf.append("P-TREE: 定数行が OFF=false・ON=true ではない")
+    t = rd(os.path.join(base, "patch_sha256.txt"))
+    if t is not None:
+        try:
+            if t.strip() != rule_sha():
+                gf.append("P-TREE: patch の sha256 が RULE と不一致")
+        except (AggError, OSError) as e:
+            gf.append("前提不成立: %s" % e)
+    t = rd(os.path.join(base, "gate_constant.txt"))
+    if t is not None:
+        consts = [re.sub(r"^\d+:", "", l) for l in t.splitlines()]
+        if consts != ["const SME_PRODUCTION_ENABLED: bool = false;", "const SME_PRODUCTION_ENABLED: bool = true;"]:
+            gf.append("P-TREE: 定数行が OFF=false・ON=true ではない")
     expect_kernel = "true" if host == "macmini" else "false"
-    rep = read_text(os.path.join(base, "sme_report.txt"))
-    for t in ("off", "on"):
-        m = re.search(r"^%s: .*kernel_enabled: (true|false)" % t, rep, re.M)
-        if not m:
-            gf.append("P-R0: %s の sme_report が読めない" % t)
-        elif m.group(1) != expect_kernel:
-            gf.append("P-R0: %s の kernel_enabled=%s（期待 %s）" % (t, m.group(1), expect_kernel))
-    lg = read_text(os.path.join(base, "load_gate.log"))
-    for key in ("run_ab exit=0", "collect exit=0"):
-        if key not in lg.splitlines():
-            gf.append("P-RUNAB/P-COLLECT: '%s' がない" % key)
-    hw = read_text(os.path.join(base, "hwlock.log"))
-    if not re.search(r"^acquired at=", hw, re.M) or not re.search(r"^released-pending at=", hw, re.M):
+    rep = rd(os.path.join(base, "sme_report.txt"))
+    if rep is not None:
+        for t in ("off", "on"):
+            m = re.search(r"^%s: .*kernel_enabled: (true|false)" % t, rep, re.M)
+            if not m:
+                gf.append("P-R0: %s の sme_report が読めない" % t)
+            elif m.group(1) != expect_kernel:
+                gf.append("P-R0: %s の kernel_enabled=%s（期待 %s）" % (t, m.group(1), expect_kernel))
+    lg = rd(os.path.join(base, "load_gate.log"))
+    lg_lines = lg.splitlines() if lg is not None else []
+    if lg is not None:
+        for key in ("run_ab exit=0", "collect exit=0"):
+            if key not in lg_lines:
+                gf.append("P-RUNAB/P-COLLECT: '%s' がない" % key)
+    hw = rd(os.path.join(base, "hwlock.log"))
+    if hw is not None and (not re.search(r"^acquired at=", hw, re.M) or not re.search(r"^released-pending at=", hw, re.M)):
         gf.append("P-LOCK: hwlock.log に取得・解放の記録がない")
-    if len(read_text(os.path.join(base, "rev-stamp.txt")).split()) != 2:
+    t = rd(os.path.join(base, "rev-stamp.txt"))
+    if t is not None and len(t.split()) != 2:
         gf.append("rev-stamp が 2 行（ON と OFF）ではない")
-    inner = read_text(find_one(os.path.join(ab, "load_gate-*-cpu-*.log")))
-    rounds_ok = re.findall(r"^round(\d) gate=pass gate_ok=1 ", inner, re.M)
-    if sorted(rounds_ok) != ["1", "2", "3", "4", "5"]:
-        gf.append("P-GATE: 内側ゲートが 5/5 round で gate_ok=1 ではない（通過 round=%s）" % ",".join(rounds_ok))
+    try:
+        inner = rd(find_one(os.path.join(ab, "load_gate-*-cpu-*.log")))
+    except AggError as e:
+        gf.append("前提不成立: %s" % e)
+        inner = None
+    if inner is not None:
+        rounds_ok = re.findall(r"^round(\d) gate=pass gate_ok=1 ", inner, re.M)
+        if sorted(rounds_ok) != ["1", "2", "3", "4", "5"]:
+            gf.append("P-GATE: 内側ゲートが 5/5 round で gate_ok=1 ではない（通過 round=%s）" % ",".join(rounds_ok))
+    res["bitdump_mismatch"] = False
     if host == "gb10":
-        outer = read_text(os.path.join(base, "load_gate_outer.log"))
-        if not re.search(r" pass$", outer, re.M):
+        outer = rd(os.path.join(base, "load_gate_outer.log"))
+        if outer is not None and not re.search(r" pass$", outer, re.M):
             gf.append("P-GATE: 外側ゲート（load1 < 1.0・GPU 0%）の通過記録がない")
-        if "rt_on exit=0" not in lg.splitlines():
+        if lg is not None and "rt_on exit=0" not in lg_lines:
             gf.append("P-RT: ON ツリーの cargo test が全件 pass ではない（後退あり相当・要調査）")
-        bd = re.search(r"^bitdump exit=(\d+) cmp_exit=(\d+)$", lg, re.M)
-        summ = read_text(os.path.join(base, "bitdump", "summary.txt"))
+        bd = re.search(r"^bitdump exit=(\d+) cmp_exit=(\d+)$", lg or "", re.M)
+        summ = rd(os.path.join(base, "bitdump", "summary.txt"))
         if not bd:
-            gf.append("bitdump: 実行記録がない")
+            if lg is not None:
+                gf.append("bitdump: 実行記録がない")
         else:
             res["bitdump_cmp_exit"] = int(bd.group(2))
             if bd.group(1) != "0":
-                gf.append("bitdump: 行数が期待と一致しない・実行失敗")
-        res["bitdump_summary"] = summ.strip()
+                gf.append("bitdump: 行数が期待と一致しない・実行失敗（比較不能）")
+            elif bd.group(2) != "0":
+                # 両 dump を正常取得できたうえで内容が不一致。実行失敗・比較不能とは区別し、前提ゲート・性能判定より先に FAIL として報告する
+                res["bitdump_mismatch"] = True
+        if summ is not None:
+            res["bitdump_summary"] = summ.strip()
     # PyTorch 相手比（記録のみ）
     torch, torch_note = load_torch(ab)
     res["torch"] = None
@@ -240,7 +272,7 @@ def evaluate(base, host):
     reach_ok = all(stats[c]["median"] <= 1.0 and stats[c]["n_le"] == ROUNDS for c in res["reach"])
     res["reach_ok"] = reach_ok
     # ホスト単位の判定
-    if ck_bad:
+    if ck_bad or res["bitdump_mismatch"]:
         res["verdict"] = "FAIL"
     elif gf:
         res["verdict"] = "undetermined"
@@ -250,8 +282,8 @@ def evaluate(base, host):
         res["verdict"] = "非後退: pass" if res.get("bitdump_cmp_exit", 1) == 0 else "FAIL"
     else:
         res["verdict"] = "ADOPT 候補（Mac mini 側条件）" if reach_ok else "undetermined"
-    if host == "gb10" and res["verdict"] == "FAIL" and not ck_bad:
-        res["notes"].append("bitdump の cmp が不一致（bit 同一でない）")
+    if res["bitdump_mismatch"]:
+        res["notes"].append("bitdump の cmp が不一致（bit 同一でない。bit 同一のフォールバックが成り立たない）")
     return res
 
 
@@ -331,7 +363,7 @@ def _write(path, text):
     open(path, "w", encoding="utf-8").write(text)
 
 
-def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full"):
+def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False):
     ab = os.path.join(root, "ab")
     for arm in ("before", "after"):
         for task in KNOWN_TASKS:
@@ -373,12 +405,14 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
     _write(os.path.join(root, "sme_report.txt"), "off: sme_report= kernel_enabled: %s\non: sme_report= kernel_enabled: %s\n" % (k, k))
     lg = "run_ab exit=0\ncollect exit=0\n"
     if host == "gb10":
-        lg += "rt_on exit=0\nbitdump exit=0 cmp_exit=0\n"
+        lg += "rt_on exit=0\nbitdump exit=%d cmp_exit=%d\n" % (1 if bd_fail else 0, 1 if bd_mismatch else 0)
         _write(os.path.join(root, "load_gate_outer.log"), "start attempt=1 load1=0.1 gpu_util=0 pass\n")
         _write(os.path.join(root, "bitdump", "summary.txt"), "off_lines=6726847 on_lines=6726847 expected=6726847\n")
     _write(os.path.join(root, "load_gate.log"), lg)
     _write(os.path.join(root, "hwlock.log"), "acquired at=x\nreleased-pending at=y\n")
     _write(os.path.join(root, "rev-stamp.txt"), "abc\nabc+off-arm.patch\n")
+    if rm_tree:
+        os.remove(os.path.join(root, "tree_verify.txt"))
 
 
 def _verdict(host, **kw):
@@ -418,6 +452,11 @@ def self_test():
         check("torch %s でも gb10 は非後退: pass" % tm, _verdict("gb10", torch_mode=tm), "非後退: pass")
     check("torch 空でも checksum 不一致 FAIL を保つ", _verdict("gb10", torch_mode="empty", ck_bad=True), "FAIL")
     check("torch 一部欠損でも REJECT を保つ", _verdict("macmini", torch_mode="partial", bad_regress=True), "REJECT")
+    check("checksum 不一致 + 前提ログ欠損でも FAIL を保つ", _verdict("macmini", ck_bad=True, rm_tree=True), "FAIL")
+    check("ログ欠損のみは undetermined", _verdict("macmini", rm_tree=True), "undetermined")
+    check("bitdump 不一致 + ゲート不通過でも FAIL", _verdict("gb10", bd_mismatch=True, gate_ok=False), "FAIL")
+    check("bitdump 不一致 + 一貫後退でも FAIL", _verdict("gb10", bd_mismatch=True, bad_regress=True), "FAIL")
+    check("bitdump 実行失敗は undetermined（不一致と区別）", _verdict("gb10", bd_fail=True), "undetermined")
     # 総合: ADOPT は GB10 に依存する
     with tempfile.TemporaryDirectory() as td:
         _fixture(td, "macmini")
