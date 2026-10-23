@@ -107,7 +107,7 @@ checksum 完全一致・bit 一致テスト 24 件 pass のもとでの判定で
 
 ### 6.2 GB10 affinity との相互作用（affinity 単独の再判定ではない）
 
-X-aff／X 比は単体 6 形状で 0.39〜0.74 と大きく改善する。merge 系と組み合わせた方が off-aff より改善幅が大きいセルが多い
+X-aff／X 比は単体 6 形状で 0.38〜0.90（off-aff/off のみでは 0.54〜0.90、mergeprepack-aff/mergeprepack の l2_fwd が最小 0.384）と大きく改善する。merge 系と組み合わせた方が off-aff より改善幅が大きいセルが多い
 （例: `l1_fwd` off-aff 0.825 に対し merge-aff／merge 0.527）。一方 train/fresh は off-aff／off 1.065 で、train 系 4 セルの
 判定を落としている。affinity 単独は #2117 で REJECT 済みで、その判定は変えない。
 
