@@ -333,10 +333,37 @@ def cell_ratios(rounds):
 
 
 # ---------- 総合 ----------
+# 専有ゲートの記録が必須の段（RULE 項 7・12。判定に使う計測プロセスごとに起動前の GATE-PASS が 1 件ずつ要る）。
+# build はゲートを通さないため含めない。cuBLAS は record_only だが記録は検査する（不足は undetermined にしない）。
+GATE_REQUIRED_STAGES = tuple(k for k in REQUIRED_STAGES if k != "build")
+GATE_LOAD_MAX = 1.0
+GATE_PASS_RE = re.compile(r"^GATE-PASS (\S+) load1=([0-9]+(?:\.[0-9]+)?) gpu_util=([0-9]+)$")
+
+
 def load_gate_status(base):
+    """load_gate.log を段ごとに検証し、(行数, 問題の一覧) を返す。
+
+    接頭辞だけでは空ログや 1 行だけのログでも通ってしまうため（codex #3531 P2）、
+    必須段ごとに GATE-PASS がちょうど 1 件あり、load1 < 1.0 かつ gpu_util == 0 であることを確かめる。
+    問題が 1 件でもあれば呼び出し側は判定を undetermined にする。
+    """
     p = os.path.join(base, "load_gate.log")
     lines = [l for l in read_text(p).splitlines() if l.strip()]
-    bad = [l for l in lines if not l.startswith("GATE-PASS ")]
+    bad = []
+    passes = {}
+    for l in lines:
+        m = GATE_PASS_RE.match(l)
+        if not m:
+            bad.append(l)
+            continue
+        stage, load1, util = m.group(1), float(m.group(2)), int(m.group(3))
+        if not (load1 < GATE_LOAD_MAX and util == 0):
+            bad.append(f"{l}（条件 load1<{GATE_LOAD_MAX}・gpu_util=0 を満たさない）")
+        passes[stage] = passes.get(stage, 0) + 1
+    for k in GATE_REQUIRED_STAGES:
+        c = passes.get(k, 0)
+        if c != 1:
+            bad.append(f"{k}: GATE-PASS が {c} 件（必須段は 1 件）")
     return len(lines), bad
 
 
@@ -579,7 +606,9 @@ def _write_fixture(d, cand_scale=0.9, bad_hash=False, nan=False, gate_a_fail=Fal
             for i in range(total):
                 f.write(f"test some_test_{b}_{i} ... {'FAILED' if i < fails else 'ok'}\n")
             f.write(f"test result: {'FAILED' if fails else 'ok'}. {total - fails} passed; {fails} failed; 0 ignored; 0 measured; 0 filtered out; finished in 1s\n")
-    open(os.path.join(d, "load_gate.log"), "w").write("GATE-PASS x load1=0.1 gpu_util=0\n")
+    with open(os.path.join(d, "load_gate.log"), "w") as f:
+        for k in GATE_REQUIRED_STAGES:
+            f.write(f"GATE-PASS {k} load1=0.1 gpu_util=0\n")
     with open(os.path.join(d, "stage_rc.txt"), "w") as f:
         for k in REQUIRED_STAGES:
             if bad_rc is not None and k == bad_rc[0] and bad_rc[1] is None:
@@ -620,6 +649,20 @@ def self_test():
     for kw in ({"bad_rc": ("gateA", 1)}, {"bad_rc": ("gateB_gemm_tiled", None)}, {"bad_rc": ("kern_run3", "GATE-FAIL")}):
         _, ov = run(cand_scale=0.9, **kw)
         assert all(v == "undetermined" for v in ov.values()), (kw, ov)
+    # 専有ゲート記録の段ごと検証（codex #3531 P2）: 空・1 行だけ・重複・閾値外は undetermined
+    full = "".join(f"GATE-PASS {k} load1=0.1 gpu_util=0\n" for k in GATE_REQUIRED_STAGES)
+    for label, gate_txt in (
+        ("空", ""),
+        ("1 行だけ", "GATE-PASS kern_run1 load1=0.1 gpu_util=0\n"),
+        ("重複", full + "GATE-PASS kern_run1 load1=0.1 gpu_util=0\n"),
+        ("load1 超過", full.replace("GATE-PASS gateA load1=0.1", "GATE-PASS gateA load1=99")),
+        ("gpu_util 非 0", full.replace("GATE-PASS kern_run2 load1=0.1 gpu_util=0", "GATE-PASS kern_run2 load1=0.1 gpu_util=100")),
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            _write_fixture(d, cand_scale=0.9)
+            open(os.path.join(d, "load_gate.log"), "w").write(gate_txt)
+            _, ov = aggregate(d)
+            assert all(v == "undetermined" for v in ov.values()), (label, ov)
     _, ov = run(cand_scale=0.9, bad_rc=("cublas_run1_fp32", 1))  # record_only 段は判定に影響しない（必須段でないので fixture には出ない）
     # 拒否ケース
     for kw, label in (({"nan": True}, "NaN"), ({"zero_pass_b": True}, "0 passed のゲート B")):
