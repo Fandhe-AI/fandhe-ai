@@ -1,0 +1,1 @@
+{"framework": "pytorch", "version": "2.14.0+cu130", "task": "infer", "device": "cuda", "size": 64, "median_s": 4.044780507683754e-05, "q1_s": 3.985990770161152e-05, "q3_s": 4.071183502674103e-05, "throughput_per_s": 24723.220409619968, "checksum": 1381.7087400853634, "warmup": 20, "iters": 20, "mode": "fresh"}

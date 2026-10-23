@@ -1,6 +1,6 @@
 # GB10 の未計測 opt-in 候補 A/B（イシュー #3190）
 
-状態: **B1〜B4・B6 は 2026-10-20、B5 と B4 の有効系列は再開分として 2026-10-21 に GB10 で実測済み**（B3 の再計測は #3205 へ切り出し）。
+状態: **B1〜B4・B6 は 2026-10-20、B5 と B4 の有効系列は再開分として 2026-10-21 に GB10 で実測済み**（B3 の再計測は #3205 で 2026-10-23 に実施。結論は下表。ほかの行は変更していない）。
 B1・B2 は #3184（Mac mini）の実測と機体別に併記した（下記）。B4 は有効系列（`gb10-r2`）で集計し、B5 は**不採用**（4 形状すべて 5/5 後退）。
 main の定数・環境変数既定は変更していない（`crates/` 差分なし）。規則は `logs/optin-ab-gb10-3190/RULE.txt`（計測前に単独コミット `230937f5f` で固定。
 継承 RULE 6 件は 1 字も変えず sha256 を記録）。判定は継承（または補遺）RULE の文言を機械的に当てはめた。兄弟 #3184（Mac mini 版）と共通のゲートは B1=G1・B2=G2。
@@ -24,7 +24,7 @@ GB10 上の最初のログ（`preflight-procs.txt` 13:44:22Z）より前。(a) �
 |---|---|---|---|---|---|
 | B1（= #3184 の G1） | `HOST_ARENA_DEFAULT_ENABLED` | 2104 | **undetermined** | **REJECT**（#3184 再開分 `3184-macmini-r2-g1`。正式系列で train reuse 1.0090・5/5 後退。初回 3 系列は record_only） | **REJECT**（2104 は「いずれかの機体で 5/5 一貫の後退セルがあれば REJECT」） |
 | B2（= #3184 の G2） | `REDUCTION_SEQUENTIAL_FALLBACK_ENABLED` | 2101→2102 | **undetermined**（T_gb10 = 16384・Stage 0 PROCEED） | Stage 0: T_macmini = 16384（PROCEED）／Stage 1: undetermined（record_only） | undetermined。最終 T = min(16384, 16384) = 16384 |
-| B3 | 推論 Graph capture | 2115 | **undetermined**（性能は全セル改善・R1(b) 失敗）。**再計測は #3205 へ切り出し** | 対象外 | undetermined |
+| B3 | 推論 Graph capture | 2115 | **undetermined**（性能は全セル改善・R1(b) 失敗）。**再計測は #3205 で実施（label `3205-b3-rejudge`）: 全 6 セル ratio 0.944〜0.994・R0／R1(a)／R2 合格・R1(b) は旧経路側の同種エラーで不合格 → undetermined のまま**（`infer-chain-fixed-cost-reduction-3205.md` §10） | 対象外 | undetermined |
 | B4 | N=256 起動固定費の内訳 | 2109 | **有効系列（`gb10-r2`・`aggregate.py` exit 0）**: H1・H3 支持、H2・H4・H5 未確定、支配項は readback | 対象外 | 診断（採否ではない） |
 | B5 | 境界述語の事前計算（MMA_F16） | 補遺 8 | **不採用**（前提ゲート (a)(b) 成立・4 形状すべて 5/5 後退） | 対象外 | 不採用（#537 へ） |
 | B6 | readback `pinned-reuse` の N=256 | 補遺 9（2108 の文言） | **REJECT**（ratio 1.0475・5/5 後退） | 対象外 | REJECT |

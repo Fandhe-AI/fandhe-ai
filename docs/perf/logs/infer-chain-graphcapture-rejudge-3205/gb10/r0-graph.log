@@ -1,0 +1,10 @@
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/r3205/tree/crates/backend-cuda)
+    Finished `release` profile [optimized] target(s) in 0.34s
+     Running tests/graph_capture_real_device.rs (<home>/work/target-3205/release/deps/graph_capture_real_device-71d9e5706c34a1a7)
+
+running 2 tests
+test different_config_key_produces_a_different_segment_key ... ok
+test sgd_update_segment_captures_then_replays_bit_identically ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+

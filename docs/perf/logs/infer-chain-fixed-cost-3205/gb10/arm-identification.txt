@@ -1,0 +1,11 @@
+# 腕の同定（A/B と bit ダンプ）
+before: main 71321150a877be60ffb36e5df6db883cbce58e91（実装コミットの親。.rev-stamp を GB10 の展開ツリーへ置いた）
+after : 071a1ddc0f537e30c81108a9c5db3faa0a509658（層出力バッファ再利用の実装コミット）
+ツリー指紋 = crates と scripts/bench/framework-compare の全ファイル（Cargo.lock・target*・results・compare-infer-*・本 issue の bit 一致テスト 1 ファイルを除く）の sha256 一覧
+  を LC_ALL=C sort した一覧の sha256。送信側（git archive の展開）と GB10 側の展開ツリーで取った。
+before local_list_sha256=e86f2826d8e72768d99d130c7af56d386020ca1559bbf0409e7315a65e0249f4 files=2176
+before gb10_list_sha256 =e86f2826d8e72768d99d130c7af56d386020ca1559bbf0409e7315a65e0249f4 files=2176
+after local_list_sha256=a40e0642ffff78cc3099dfaa44ac3475862dafd8960bb0bab13f910562b1a394 files=2177
+after gb10_list_sha256 =20fbe6b4fc7531ea4cda6709b67b0b064c8e73285811a619fa78a3f0d82e8dcd files=2178
+before: 全ファイル一致。after: GB10 側にだけ scripts/bench/framework-compare/__pycache__/checksum_contract.cpython-312.pyc
+  （compare_gemm_ab.py の実行で生成された .pyc。ソースではない）が 1 件多い。それ以外は全一致。

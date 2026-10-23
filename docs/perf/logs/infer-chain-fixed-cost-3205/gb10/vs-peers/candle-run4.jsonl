@@ -1,0 +1,1 @@
+{"framework":"candle","version":"0.11.0","task":"infer","device":"cuda","size":64,"median_s":0.000041376,"q1_s":0.000040284,"q3_s":0.000042968,"throughput_per_s":24168.600,"checksum":1381.708740,"warmup":20,"iters":20,"mode":"fresh"}

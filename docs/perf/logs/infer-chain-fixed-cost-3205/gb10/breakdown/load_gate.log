@@ -1,0 +1,5 @@
+load_1: 0.68 gpu=0 %
+load_2: 0.79 gpu=0 %
+load_3: 0.79 gpu=1 %
+load_4: 0.79 gpu=1 %
+load_5: 0.79 gpu=0 %
