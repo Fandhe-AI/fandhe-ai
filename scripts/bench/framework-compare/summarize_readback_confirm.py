@@ -17,12 +17,12 @@ import sys
 
 RUNS = 5
 
-# RULE.txt の固定 14 セル（task, mode, size）。表示対象を入力キーの和集合だけにすると、
+# RULE.txt の固定 14 セル（task, mode, size）。train/infer は bench-fandhe の出力どおり size=64。表示対象を入力キーの和集合だけにすると、
 # 両腕から丸ごと欠落したセルが表に出ないため、この集合との和集合を表示対象にする。
 EXPECTED_CELLS = (
     [("gemm", mode, size) for mode in ("reuse", "fresh") for size in (256, 512, 1024, 2048, 4096)]
-    + [("train", mode, None) for mode in ("fresh", "reuse")]
-    + [("infer", mode, None) for mode in ("fresh", "reuse")]
+    + [("train", mode, 64) for mode in ("fresh", "reuse")]
+    + [("infer", mode, 64) for mode in ("fresh", "reuse")]
 )
 
 
