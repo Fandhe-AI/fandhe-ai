@@ -143,6 +143,17 @@ _READBACK_N256_SIZES_BY_DEVICE = {
     "cuda": frozenset({256}),
 }
 
+# イシュー #3225: `--sizes readback-prefetch-{gate,4096,guard,n256}`（cuda 専用）。背景事前タッチ
+# 宛先プール（`pretouched-prefetch`）の A/B（`run_ab_readback_prefetch_cuda.sh`）が、セル群ごとに
+# 閾値を変えて比較するための N 集合（gate = 512/1024/2048/4096・4096・guard = 512/1024/2048・
+# n256 = 256）。判定規則は `docs/perf/logs/cuda-readback-reuse-fix-3225/RULE.txt`。既存の集合は変えない。
+_READBACK_PREFETCH_SETS = {
+    "readback-prefetch-gate": frozenset({512, 1024, 2048, 4096}),
+    "readback-prefetch-4096": frozenset({4096}),
+    "readback-prefetch-guard": frozenset({512, 1024, 2048}),
+    "readback-prefetch-n256": frozenset({256}),
+}
+
 # イシュー #3212: `--sizes metal-square5`（metal 専用）。Mac mini の simdgroup 交互配置候補
 # （`FRAG_INTERLEAVE_ENABLED`）の gemm セル A/B（`run_ab_frag_interleave_gemm_metal.sh`）が扱う
 # N=256/512/1024/2048/4096 × fresh/reuse の 10 セル。既存の `full` 集合（metal は 512〜4096）は
@@ -194,6 +205,10 @@ def _size_set_for(device, sizes_arg, task=DEFAULT_TASK):
         if device not in _METAL_SQUARE5_SIZES_BY_DEVICE:
             raise ValueError("--sizes metal-square5 は --device metal 専用（イシュー #3212）")
         return _METAL_SQUARE5_SIZES_BY_DEVICE[device]
+    if sizes_arg in _READBACK_PREFETCH_SETS:
+        if device != "cuda":
+            raise ValueError(f"--sizes {sizes_arg} は --device cuda 専用（イシュー #3225）")
+        return _READBACK_PREFETCH_SETS[sizes_arg]
     if sizes_arg == "readback-n256":
         if device not in _READBACK_N256_SIZES_BY_DEVICE:
             raise ValueError("--sizes readback-n256 は --device cuda 専用（イシュー #3190）")
@@ -810,7 +825,7 @@ def main(argv):
     )
     parser.add_argument(
         "--sizes",
-        choices=("full", "gate", "large", "readback", "infer-batches", "affinity", "threadpolicy", "readback-n256", "metal-square5"),
+        choices=("full", "gate", "large", "readback", "infer-batches", "affinity", "threadpolicy", "readback-n256", "metal-square5", *sorted(_READBACK_PREFETCH_SETS)),
         default="full",
         help=(
             "セルサイズ集合。'full'（既定・後方互換。device 別の "

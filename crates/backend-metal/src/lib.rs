@@ -717,6 +717,10 @@ pub(crate) mod adam;
 // （`adam_model.rs` モジュール doc「`Device::Metal` を扱わない理由」
 // 参照）。
 pub mod adam_model;
+// `BackendOps::relu_backward_mask_device`（イシュー #3218）の GPU 非依存な
+// 検証・ホストモデル。`adam_model` と同じ設計判断で `objc2` 系 FFI に
+// 触れないため cfg なし（Linux CI でも単体テストが回る）。
+pub mod relu_mask_model;
 #[cfg(target_os = "macos")]
 pub(crate) mod sgd;
 // デバイス常駐 KV（K-3。イシュー #3111）の起動 API（`sgd` と同じ構成。`objc2` 系 FFI に

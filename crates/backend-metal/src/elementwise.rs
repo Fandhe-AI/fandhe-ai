@@ -101,6 +101,9 @@ pub struct MetalElementwise {
     where_f32: objc2::rc::Retained<MtlPipeline>,
     /// `torch.masked_fill` 相当（イシュー #1637）。
     masked_fill_f32: objc2::rc::Retained<MtlPipeline>,
+    /// ReLU backward マスクの選択（イシュー #3218。
+    /// `BackendOps::relu_backward_mask_device`）。
+    relu_mask_select_f32: objc2::rc::Retained<MtlPipeline>,
 }
 
 impl MetalElementwise {
@@ -130,6 +133,8 @@ impl MetalElementwise {
         let where_f32 = pipeline::make_pipeline(ctx.device(), &library, "ew_where_f32")?;
         let masked_fill_f32 =
             pipeline::make_pipeline(ctx.device(), &library, "ew_masked_fill_f32")?;
+        let relu_mask_select_f32 =
+            pipeline::make_pipeline(ctx.device(), &library, "ew_relu_mask_select_f32")?;
 
         Ok(Self {
             add_f32,
@@ -139,6 +144,7 @@ impl MetalElementwise {
             tanh_f32,
             where_f32,
             masked_fill_f32,
+            relu_mask_select_f32,
         })
     }
 
@@ -542,6 +548,100 @@ impl MetalElementwise {
     }
 }
 
+impl MetalElementwise {
+    /// ReLU backward マスク選択の encode-only・token 付き入口（イシュー #3218。
+    /// `ops.rs::relu_backward_mask_device_impl` から呼ばれる）。
+    ///
+    /// **待たない**: `ctx.encode` でバッチへ登録するのみ。`token` は `encode` と
+    /// 同一ロック区間で登録される（別スレッドの `synchronize` が先に失敗バッチを
+    /// 回収しても fail-closed を保つため。設計 §5）。トークンなしの encode-only
+    /// 入口は意図的に設けない。`plan` は `relu_mask_model::plan_relu_mask` で検証
+    /// 済みであることが前提で、本関数は `g`／`mask`／`out` の長さが view 終端・
+    /// 論理要素数と整合することを再確認する（REQ-8・A03）。
+    pub(crate) fn encode_relu_mask_select_tracked(
+        &self,
+        ctx: &MetalContext,
+        g: &MetalBuffer,
+        mask: &MetalBuffer,
+        out: &MetalBuffer,
+        plan: &crate::relu_mask_model::ReluMaskPlan,
+        token: &fandhe_ai_tensor_core::DispatchFailureCell,
+    ) -> Result<(), MetalError> {
+        validate_elementwise_len(plan.numel)?;
+        let g_end = plan.g_off.checked_add(plan.numel);
+        let mask_end = plan.mask_off.checked_add(plan.numel);
+        let in_bounds = g_end.is_some_and(|e| e <= g.len())
+            && mask_end.is_some_and(|e| e <= mask.len())
+            && out.len() >= plan.numel;
+        if !in_bounds {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "relu_mask_select buffer too short: g_len={}, mask_len={}, out_len={}, \
+                     g_off={}, mask_off={}, numel={}",
+                    g.len(),
+                    mask.len(),
+                    out.len(),
+                    plan.g_off,
+                    plan.mask_off,
+                    plan.numel
+                ),
+            });
+        }
+        if plan.numel == 0 {
+            return Ok(());
+        }
+        // `plan_relu_mask` が u32 範囲を保証済み。防御として変換失敗は型付きエラー。
+        let to_u32 = |v: usize| {
+            u32::try_from(v).map_err(|_| MetalError::InvalidElementwiseShape {
+                detail: format!("relu_mask_select argument {v} exceeds u32"),
+            })
+        };
+        let args = [
+            to_u32(plan.numel)?,
+            to_u32(plan.rows)?,
+            to_u32(plan.cols)?,
+            u32::from(plan.g_transposed),
+            to_u32(plan.g_off)?,
+            to_u32(plan.mask_off)?,
+            to_u32(plan.g_off + plan.numel)?,
+            to_u32(plan.mask_off + plan.numel)?,
+        ];
+        let pipeline = &self.relu_mask_select_f32;
+        ctx.encode(
+            "relu_mask_select_resident",
+            &[g.raw(), mask.raw(), out.raw()],
+            Some(token),
+            |encoder| {
+                encode_relu_mask_select_dispatch(encoder, pipeline, g, mask, out, &args);
+            },
+        )
+    }
+}
+
+/// `ew_relu_mask_select_f32` のエンコード（バッファ index 0〜2・`uint` 引数
+/// index 3〜10・ディスパッチ）。`encoder_args` の既存ヘルパだけで結線し、
+/// view 起点は `setBuffer` のバイトオフセットではなくカーネル引数
+/// （`g_off`／`mask_off`）で渡す（新規 `unsafe` を増やさないため）。
+/// `args` の順序は `shaders/elementwise.metal` の宣言順
+/// （`numel`・`rows_l`・`cols_l`・`g_transposed`・`g_off`・`mask_off`・
+/// `g_end`・`mask_end`）と一致させる。
+fn encode_relu_mask_select_dispatch(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    g: &MetalBuffer,
+    mask: &MetalBuffer,
+    out: &MetalBuffer,
+    args: &[u32; 8],
+) {
+    encoder.setComputePipelineState(pipeline);
+    crate::encoder_args::set_buffer_arg(encoder, g.raw(), 0);
+    crate::encoder_args::set_buffer_arg(encoder, mask.raw(), 1);
+    crate::encoder_args::set_buffer_arg(encoder, out.raw(), 2);
+    crate::encoder_args::set_u32_args(encoder, args, 3);
+    let (threadgroups, threads_per_tg) = ew_dispatch_sizes(args[0]);
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
 /// `numel` に対する grid/threadgroup サイズを構築する（`div_ceil` による
 /// 末尾ブロックの余剰スレッドはカーネル内境界チェックに委ねる契約。REQ-8。
 /// `crate::gemm` の `THREADGROUP_SIDE`／grid 計算と同じ考え方の 1 次元版）。
@@ -894,5 +994,70 @@ mod tests {
     fn validate_elementwise_ternary_dims_rejects_a_mismatch() {
         let err = validate_elementwise_ternary_dims(4, 5, 4).unwrap_err();
         assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
+    }
+}
+/// `encode_relu_mask_select_tracked` の encode-only／failure_token 登録の実機
+/// テスト（イシュー #3218）。専用 `MetalContext` を使い、共有 context を使う
+/// 他テストのバッチと干渉しない。
+#[cfg(all(test, target_os = "macos"))]
+mod relu_mask_encode_tests {
+    use super::*;
+    use crate::relu_mask_model::{plan_relu_mask, relu_mask_select_host_model};
+    use fandhe_ai_tensor_core::{DeviceMatrixLayout, DispatchFailureCell};
+
+    /// encode-only 版が (1) 待たず (2) token を `encode` と同一ロック区間で
+    /// バッチへ登録し、(3) 後続 `synchronize` 後の結果がホストモデルと bit
+    /// 一致することを確認する。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn tracked_encode_registers_token_without_waiting() {
+        let ctx = MetalContext::new().expect("metal context");
+        let ew = MetalElementwise::new(&ctx).expect("elementwise pipelines");
+        let (r, c) = (7usize, 13usize);
+        let n = r * c;
+        let g: Vec<f32> = (0..n)
+            .map(|i| {
+                if i.is_multiple_of(11) {
+                    f32::NAN
+                } else {
+                    i as f32 - 40.0
+                }
+            })
+            .collect();
+        let m: Vec<f32> = (0..n)
+            .map(|i| {
+                if i.is_multiple_of(7) {
+                    f32::NAN
+                } else {
+                    (i as f32 - 30.0) * 0.5
+                }
+            })
+            .collect();
+        let g_buf = MetalBuffer::new_with_data(&ctx, &g).expect("g");
+        let m_buf = MetalBuffer::new_with_data(&ctx, &m).expect("mask");
+        let out = MetalBuffer::new_zeroed(&ctx, n).expect("out");
+        let plan = plan_relu_mask(&[r, c], 0, DeviceMatrixLayout::RowMajor, &[r, c], 0).unwrap();
+        let token = DispatchFailureCell::new();
+
+        let before = ctx.diagnostic_batch_counters();
+        ew.encode_relu_mask_select_tracked(&ctx, &g_buf, &m_buf, &out, &plan, &token)
+            .expect("encode");
+        let after = ctx.diagnostic_batch_counters();
+
+        assert_eq!(ctx.open_batch_token_count().unwrap(), 1);
+        assert_eq!(after.encode_calls, before.encode_calls + 1);
+        assert_eq!(after.wait_until_completed, before.wait_until_completed);
+
+        ctx.synchronize().expect("synchronize");
+        assert!(!token.is_set());
+        let want = relu_mask_select_host_model(&plan, &g, &m).unwrap();
+        let got = out.read_to_vec();
+        for (i, (a, e)) in got.iter().zip(&want).enumerate() {
+            if e.is_nan() {
+                assert!(a.is_nan(), "idx {i}");
+            } else {
+                assert_eq!(a.to_bits(), e.to_bits(), "idx {i}");
+            }
+        }
     }
 }

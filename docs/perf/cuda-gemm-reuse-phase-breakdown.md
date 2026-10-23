@@ -682,3 +682,32 @@ N=1024/2048/4096 で 1.10/1.13/1.10 倍に後退した。
 - N=512 は record_only（既知 checksum なし・#2107 の対象外）。
 - 判定が示すのは宛先の保持の有無で readback 区間に出る差だけで、H2D・readout 方式・カーネル／同期の差は検出対象外。
 - 常駐サービスの停止・THP などシステム設定の変更はしていない（THP は `madvise`）。
+
+## §15 #3225 の是正（背景事前タッチ宛先プール）
+
+イシュー #3225。§14.5 の入力（事前タッチ済み宛先を glibc の mmap 閾値に依存せず確保する経路）を、
+`readback() -> Vec<T>` の形を変えず新規 `unsafe` なしで実現する opt-in 機構として実装した。
+
+### §15.1 機構（既定 OFF）
+
+- `memory::ReadbackDest::PrefetchedPretouched`。env `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch` でのみ
+  選ばれる（`readback_policy.rs` の完全一致 allowlist）。`READBACK_DEST` の既定は `PretouchedFresh` のまま。
+- `crates/backend-cuda/src/readback_prefetch.rs`: 同じ要素数の readback が 2 回目に来た後、D2H の同期が終わってから
+  専用 worker スレッド 1 本が次回ぶんの `Vec<f32>` を sentinel で確保・事前タッチする。次の readback はそれを取り出す。
+  Pending は最大 20 ms 待ち、期限切れ・poison・worker 不在・OOM はインライン確保へ倒す。worker は CUDA に触れない。
+- 保持上限: 1 バッファ 1 MiB 以上 128 MiB 以下・合計 256 MiB・8 エントリ。f32 のみ。
+- 解放: `memory::release_readback_prefetch()`（REQ-14）。診断: `readback_prefetch_stats_diag`（`internal-diagnostics`）。
+- 数値契約: D2H が全要素を上書きするため `PretouchedFresh` と bit 同一。tolerance・REQ-2 判定は不変。
+
+### §15.2 検証状況
+
+- 単体テスト（GPU 不要）: env allowlist・閾値・repeat_trigger・cap・エントリ上限・poison 回復・解放・OOM・待ち期限切れ。
+- A/B ハーネス: `run_ab_readback_prefetch_cuda.sh`。判定規則は `logs/cuda-readback-reuse-fix-3225/RULE.txt`
+  （reuse N=512〜4096 と fresh N=4096 は ratio <= 0.95、fresh N=512〜2048 は <= 1.03、checksum 完全一致）。
+- **GB10 実測は未実施**。判定は undetermined。実測後に本節へ結果（全セルの ratio と後退セルの併記）を追記する。
+
+### §15.3 範囲外
+
+- ゼロコピー readback・`Tensor` ストレージの drop フック・`mallopt`／`madvise`／`MAP_POPULATE`／THP ヒント・整列確保
+  （新規 `unsafe` か libc 用途の拡張が要り所有者承認事項）。
+- 既定の反転（ADOPT の場合）は #3227。f32 以外の型・Metal・MLP の `mem.download` の借用ビュー化。

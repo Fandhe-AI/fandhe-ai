@@ -393,6 +393,16 @@ impl MetalContext {
             })
     }
 
+    /// テスト専用: 現在開いている（未 commit の）バッチに登録済みの
+    /// [`DispatchFailureCell`] 数を返す。`encode` が token を同一ロック区間で
+    /// バッチへ登録することの検証に使う（イシュー #3218）。開いたバッチが
+    /// 無ければ 0。
+    #[cfg(test)]
+    pub(crate) fn open_batch_token_count(&self) -> Result<usize, MetalError> {
+        let slots = self.lock_batch("open_batch_token_count")?;
+        Ok(slots.open.as_ref().map_or(0, |b| b.tokens.len()))
+    }
+
     /// [`crate::pool::PooledMetalHandle::drop`] から呼ばれる、プール
     /// バッファ返却の GPU 完了待ち判定（イシュー #1021・設計文書 §3.3
     /// 「Metal」・§3.5「Metal `pending_pool_returns` の排他制御」）。

@@ -426,6 +426,24 @@ impl<'d> CudaArg<'d> {
         }
     }
 
+    /// 先頭 `n` 要素の部分ビュー（配置・部分ビューに依らない。イシュー #3223）。
+    /// bias 勾配の縮約軸長 1 の直接コピー（`gemm.rs::launch_bias_reduce`）が、
+    /// 入力 view の先頭 `n` 要素だけを読むために使う。`cudarc` の `slice` は
+    /// 範囲外で panic するため、`n > len` は型付きエラーで先に拒否する。
+    pub(crate) fn prefix(&self, n: usize) -> Result<CudaArg<'_>, CudaError> {
+        if n > self.len() {
+            return Err(CudaError::InvalidShape {
+                detail: format!("CudaArg::prefix: n ({n}) exceeds len ({})", self.len()),
+            });
+        }
+        Ok(match self {
+            CudaArg::Slice(s) => CudaArg::View(s.slice(0..n)),
+            CudaArg::View(v) => CudaArg::View(v.slice(0..n)),
+            CudaArg::Unified(s) => CudaArg::UnifiedView(s.slice(0..n)),
+            CudaArg::UnifiedView(v) => CudaArg::UnifiedView(v.slice(0..n)),
+        })
+    }
+
     /// `builder` へ本引数を積む。`CudaArg` のバリアントに応じて
     /// cudarc 側の対応する `PushKernelArg` 実装（`&CudaSlice`／
     /// `&CudaView`／`&UnifiedSlice`／`&UnifiedView`）へ委譲するだけの
@@ -713,6 +731,11 @@ pub(crate) enum ReadbackDest {
     /// （`crate::readback_policy`）。f32 以外の型は `PretouchedFresh` と同一処理。
     /// 返す `Vec` は D2H が全要素を上書きするため `PretouchedFresh` と bit 同一。
     PinnedStagingReuse,
+    /// 背景スレッドで事前タッチした宛先 `Vec<f32>` のプール（`crate::readback_prefetch`）から
+    /// 取り出して `memcpy_dtoh` する opt-in 方式（イシュー #3225）。既定 OFF。env
+    /// `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch` でのみ選ばれる。f32 以外・小形状・
+    /// プール miss は `PretouchedFresh` と同一処理。返す `Vec` は `PretouchedFresh` と bit 同一。
+    PrefetchedPretouched,
 }
 
 /// `crates/backend-cuda` の CUDA 実機実測（#1437・GB10）で Layer B
@@ -765,10 +788,40 @@ pub(crate) trait ReadbackSentinel: DeviceRepr + Copy {
         crate::gemm::diag_count_stream_sync();
         Ok(host)
     }
+
+    /// [`ReadbackDest::PrefetchedPretouched`] の実装点（イシュー #3225）。既定実装は
+    /// `PretouchedFresh` と同一処理（プールが f32 専用のため f32 以外はここへ落ちる）。
+    fn readback_prefetched<Src: DevicePtr<Self>>(
+        stream: &Arc<CudaStream>,
+        dev: &Src,
+    ) -> Result<Vec<Self>, CudaError> {
+        pretouched_readback_default::<Self, Src>(stream, dev)
+    }
 }
 
 impl ReadbackSentinel for f32 {
     const SENTINEL: f32 = 1.0;
+
+    /// 背景事前タッチ済みプールから宛先を取り（miss はインライン確保）、`memcpy_dtoh` →
+    /// `synchronize` の後に次回ぶんの補充を要求する。補充要求は同期の後に出し、D2H と背景の
+    /// ページフォールトが重ならないようにする。新規 `unsafe` なし。
+    fn readback_prefetched<Src: DevicePtr<f32>>(
+        stream: &Arc<CudaStream>,
+        dev: &Src,
+    ) -> Result<Vec<f32>, CudaError> {
+        let numel = dev.len();
+        let Some(pf) = crate::readback_prefetch::global().filter(|p| p.eligible(numel)) else {
+            return pretouched_readback_default::<f32, Src>(stream, dev);
+        };
+        let mut host = pf
+            .acquire(numel)
+            .unwrap_or_else(|| pretouched_host_vec::<f32>(numel));
+        stream.memcpy_dtoh(dev, &mut host)?;
+        stream.synchronize()?;
+        crate::gemm::diag_count_stream_sync();
+        pf.note_used(numel);
+        Ok(host)
+    }
 
     /// pinned staging をプールから借り（miss 時は新規確保）、`memcpy_dtoh` → `synchronize` の後
     /// `to_vec()` で所有 `Vec` へ copy-out する。D2H が全要素を上書きするため
@@ -926,6 +979,7 @@ where
             Ok(host)
         }
         ReadbackDest::PinnedStagingReuse => T::readback_pinned_reuse(stream, dev),
+        ReadbackDest::PrefetchedPretouched => T::readback_prefetched(stream, dev),
     }
 }
 
@@ -987,6 +1041,28 @@ pub fn readback_f16_policy_diag(
 /// 返す。`CudaMemory::release_host_staging` と同型の本番用解放経路（REQ-14）。未 opt-in なら 0。
 pub fn release_readback_staging() -> u64 {
     crate::readback_policy::readback_staging_pool().release_all()
+}
+
+/// 背景事前タッチプール（`PrefetchedPretouched` opt-in 時に最大 256 MiB の通常ホストメモリを保持。
+/// イシュー #3225）の Ready バッファを明示解放し、解放バイト数を返す（REQ-14）。未 opt-in なら 0。
+pub fn release_readback_prefetch() -> u64 {
+    crate::readback_prefetch::release_all_if_active()
+}
+
+/// 背景事前タッチプールの統計 `(hits, waits, misses, cached_bytes)`（イシュー #3225）。
+/// 未 opt-in なら全て 0。
+#[cfg(feature = "internal-diagnostics")]
+pub fn readback_prefetch_stats_diag() -> (u64, u64, u64, u64) {
+    crate::readback_prefetch::global_stats()
+}
+
+/// 宛先を `PrefetchedPretouched` に固定した f32 readback（イシュー #3225）。実機 `#[ignore]` テスト用。
+#[cfg(feature = "internal-diagnostics")]
+pub fn readback_f32_prefetched_diag(
+    stream: &Arc<CudaStream>,
+    dev: &CudaSlice<f32>,
+) -> Result<Vec<f32>, CudaError> {
+    readback_with(stream, dev, ReadbackDest::PrefetchedPretouched)
 }
 
 /// readback staging プールの統計 `(hits, misses, evicted, cached_bytes)`（イシュー #2108）。

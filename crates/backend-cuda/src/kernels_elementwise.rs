@@ -1,4 +1,5 @@
-//! elementwise（二項 `add`／`mul`、単項 `relu`／`exp`／`tanh`）の CUDA C
+//! elementwise（二項 `add`／`mul`、単項 `relu`／`exp`／`tanh`、ほか where・
+//! masked_fill・ReLU マスク選択）の CUDA C
 //! カーネルソース（NVRTC 実行時コンパイル用の静的文字列。イシュー #599）。
 //!
 //! `elementwise.rs`（呼び出し元）は本モジュールの定数を
@@ -161,6 +162,45 @@ extern "C" __global__ void ew_masked_fill_f32(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numel) {
         out[idx] = (mask[idx] != 0.0f) ? value : x[idx];
+    }
+}
+"#;
+
+/// ReLU マスク選択 `out[i] = (mask[i] > 0) ? g_logical[i] : +0.0`（f32。
+/// イシュー #3221。`BackendOps::relu_backward_mask_device` の CUDA 実装）。
+///
+/// **乗算ではなく選択**: `g * (m > 0)` は NaN×0・負値×0 で bit がずれるため、
+/// `g` は `__float_as_uint`／`__uint_as_float` でビットのまま通す（NaN の
+/// payload・−0.0・inf を保存）。mask が NaN なら比較が偽で `+0.0`。
+/// `g_transposed` が真なら `g` を格納 `[cols, rows]` として転置して読む
+/// （論理 `[rows, cols]` の `(r, c)` は格納の `c * rows + r`）。`mask` は論理
+/// 形の行優先。NVRTC 既定（`--ftz` なし）のため正の非正規化数の mask は
+/// CPU の `v > 0.0` と同じく真になる。REQ-8: `idx < numel` に加え `gi < numel`
+/// の手動境界検査を維持する。`numel == 0` はホスト側で起動しないため
+/// `cols` の 0 除算は起きない。
+pub const EW_RELU_MASK_SELECT_F32: &str = r#"
+extern "C" __global__ void ew_relu_mask_select_f32(
+    const float* __restrict__ g,
+    const float* __restrict__ mask,
+    float* __restrict__ out,
+    int numel,
+    int rows,
+    int cols,
+    int g_transposed
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < numel) {
+        int gi = idx;
+        if (g_transposed) {
+            int r_l = idx / cols;
+            int c_l = idx - r_l * cols;
+            gi = c_l * rows + r_l;
+        }
+        unsigned int bits = 0u;
+        if (gi >= 0 && gi < numel && mask[idx] > 0.0f) {
+            bits = __float_as_uint(g[gi]);
+        }
+        out[idx] = __uint_as_float(bits);
     }
 }
 "#;

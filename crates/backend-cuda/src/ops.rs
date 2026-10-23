@@ -153,6 +153,16 @@ fn reduce_bias_grad_rows_dense(data: &[f32], rows: usize, cols: usize) -> Vec<f3
     acc.into_iter().map(|v| v as f32).collect()
 }
 
+/// デバイス入力 GEMM 入口（イシュー #3223）の起動エラーを `BackendError` へ写す。
+/// graph capture 中にワークスペースの拡張が要る場合（確保がグラフに記録されて
+/// しまう）は `Unsupported` で fail-closed にし、それ以外は起動失敗とする。
+fn map_device_gemm_launch_error(e: CudaError) -> BackendError {
+    match e {
+        CudaError::CaptureExclusionRejected { .. } => BackendError::Unsupported(e.to_string()),
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
+}
+
 /// `bias`（`(offset, n)`）と `reduce` から GEMM 起動へ渡す縮約先ビューの
 /// 範囲を組み立てる（`reduce` は `bias` が `Some` のときだけ取得される）。
 fn bias_target(
@@ -2084,6 +2094,27 @@ fn cuda_storage_mut<'a>(
     Ok(storage)
 }
 
+/// MSE の `reduction` に応じた係数 `factor`（`Mean` は `1.0/numel`、空は `1.0`、
+/// `Sum` は `1.0`）を求める（イシュー #3222。ホスト版 `mse_loss` とデバイス版
+/// `mse_loss_device_impl` が同じ関数を通り、bit 同一の係数を構造的に保証する。
+/// Metal の `mse_factor` と同名・同形）。未知 variant は `Unsupported` で拒否する。
+fn mse_factor(reduction: MseReduction, numel: usize) -> Result<f32, BackendError> {
+    match reduction {
+        MseReduction::Mean => Ok(if numel == 0 { 1.0 } else { 1.0 / numel as f32 }),
+        MseReduction::Sum => Ok(1.0),
+        _ => Err(BackendError::Unsupported(format!(
+            "mse_loss: unsupported MseReduction variant {reduction:?}"
+        ))),
+    }
+}
+
+/// MSE デバイス版（イシュー #3222）の入口検査結果。
+struct MseDevicePlan {
+    shape: Vec<usize>,
+    numel: usize,
+    generations: [u64; 2],
+}
+
 /// [`CudaBackendOps::reduce_dispatch`] が `sum`／`max` のどちらを実行
 /// するかを選ぶ内部専用の選択子（イシュー #1584）。`tensor-core` 公開
 /// API の一部ではなく `ops.rs` 内でのみ使う（`BackendOps::sum`／`max`
@@ -2418,6 +2449,557 @@ pub(crate) fn checked_bytes_for<T>(shape: &[usize]) -> Result<usize, ShapeError>
 }
 
 impl CudaBackendOps {
+    /// [`BackendOps::relu_backward_mask_device`]／
+    /// [`BackendOps::relu_backward_mask_device_tracked`] の共有本体（イシュー
+    /// #3221。Metal の `relu_backward_mask_device_impl` と同じ二重化回避）。
+    ///
+    /// 手順は `binary_elementwise_device` と同じ: device 一致 → 形状検証
+    /// （`relu_mask_model::plan_relu_mask`。driver 呼び出しと範囲外で panic する
+    /// `CudaStorage::view` より前。A03）→ 世代・poison 検査 → 空形状の早期
+    /// return → view 切り出し → 出力確保（呼び出し元へ渡るため
+    /// `static_cuda_memory`。`linear_forward_device` と同じ判断）→ 起動。
+    /// `download`・`synchronize`・H2D／D2H はしない（同期点は呼び出し元へ集約。
+    /// 起動エラーは次の同期点で poison／世代検査から観測される）。view の起点
+    /// ずらしは `CudaStorage::view` のスライスで渡すためカーネルに offset
+    /// 引数はない。
+    fn relu_backward_mask_device_impl(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        if g.device() != Device::Cuda(self.ordinal)
+            || mask_src.device() != Device::Cuda(self.ordinal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = crate::relu_mask_model::plan_relu_mask(g.shape(), g_layout, mask_src.shape())?;
+        let logical = plan.logical_shape();
+        let numel = plan.numel;
+        let resident_generations = [g.buffer().generation(), mask_src.buffer().generation()];
+
+        if numel == 0 {
+            // 早期 return でも poison 状態・世代は fail-closed に検査する
+            // （`binary_elementwise_device` の `numel == 0` と同じ理由）。
+            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            let device = self.with_driver_call(
+                &resident_generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || self.device_handle_raw(),
+            )?;
+            let mem = static_cuda_memory(self.ordinal, &device)?;
+            return mem.alloc_zeroed(&logical);
+        }
+
+        let g_handle = g
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(g_full) = g_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "relu_backward_mask_device: g buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let mask_handle = mask_src
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(mask_full) = mask_handle.storage.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "relu_backward_mask_device: mask_src buffer has numel > 0 but no device \
+                 allocation"
+                    .into(),
+            ));
+        };
+        // `CudaStorage::view` は範囲外で panic するため、先に型付きエラーで
+        // 拒否する（`DeviceBufferView::new` も検査済みだが fail-closed で再検査）。
+        let in_range =
+            |off: usize, full_len: usize| off.checked_add(numel).is_some_and(|end| end <= full_len);
+        if !in_range(g.offset(), g_full.len()) || !in_range(mask_src.offset(), mask_full.len()) {
+            return Err(BackendError::InvalidArgument(format!(
+                "relu_backward_mask_device: view range exceeds backing buffer \
+                 (g_offset={}, mask_offset={}, numel={numel})",
+                g.offset(),
+                mask_src.offset()
+            )));
+        }
+        let g_arg = g_full.view(g.offset()..g.offset() + numel);
+        let mask_arg = mask_full.view(mask_src.offset()..mask_src.offset() + numel);
+
+        let device = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        let mut out_dev_buf = mem.alloc_zeroed(&logical)?;
+        let out_handle = out_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_storage) = out_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "relu_backward_mask_device: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+        let mut out_arg = out_storage.as_arg_mut();
+
+        let ew = self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_elementwise(&device),
+        )?;
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                ew.launch_relu_mask_select_resident(
+                    &g_arg,
+                    &mask_arg,
+                    &mut out_arg,
+                    plan.rows,
+                    plan.cols,
+                    plan.g_transposed,
+                )
+            },
+        )?;
+
+        // `download` しない: 同期点は呼び出し元の `download` へ集約。
+        Ok(out_dev_buf)
+    }
+
+    /// [`BackendOps::gemm_fp32_strict_into_device`]／`_tracked` の共有本体
+    /// （イシュー #3223。Metal の `gemm_fp32_strict_into_device_impl` と同じ二重化回避）。
+    ///
+    /// 手順は `relu_backward_mask_device_impl` と同じ: device 一致 → 形状検証
+    /// （`gemm_device_model::plan_dw_device`。NN/TT・0 次元は `Unsupported` で、ホストへ
+    /// 黙示フォールバックしない = A08）→ 書き込み範囲検証（`validate_gemm_bias_write_
+    /// ranges`）→ 各 view の範囲検証（`CudaStorage::view` は範囲外で panic するため
+    /// driver より前に型付きエラーで拒否。A03）→ 世代・poison 検査つきの起動。
+    ///
+    /// 起動は `CudaGemm::launch_gemm_dw_device`（永続ワークスペースで転置・staging し、
+    /// H2D・`synchronize`・プール由来バッファなし）。**CUDA は非 tracked でも同期
+    /// しない**（ストリーム順序契約。Metal の「復帰時に完了」とは異なる。起動エラーは
+    /// 次の同期点で poison／世代検査から観測される）。ホスト版の同期はプール由来の
+    /// 転置バッファを関数内で drop するためのもので、本入口には該当しない。
+    /// `Err` のとき weight・bias とも書かない契約のため、起動前に検証できるものは
+    /// すべて済ませる。
+    // 引数は a/b それぞれ view+layout・out+offset・bias の 7 個と self で削れない
+    // （trait の `gemm_fp32_strict_into_device` と同じ判断）。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fp32_strict_into_device_impl(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+    ) -> Result<bool, BackendError> {
+        use crate::gemm::DwDeviceKind;
+        use crate::gemm_device_model::{DwKind, plan_dw_device};
+
+        let dev = Device::Cuda(self.ordinal);
+        if a.device() != dev || b.device() != dev || out.device() != dev {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = plan_dw_device(a.shape(), a_layout, b.shape(), b_layout)?;
+        let (m, n, k) = (plan.m, plan.n, plan.k);
+        validate_gemm_bias_write_ranges(m, n, out_offset, out.numel(), bias)?;
+        let end = out_offset + m * n; // 上の検証で overflow しないことを確認済み。
+        let to_u32 = |v: usize, what: &str| {
+            u32::try_from(v).map_err(|_| {
+                BackendError::InvalidArgument(format!(
+                    "gemm_fp32_strict_into_device: {what} ({v}) exceeds u32 (kernel argument type)"
+                ))
+            })
+        };
+        let (m32, n32, k32) = (to_u32(m, "m")?, to_u32(n, "n")?, to_u32(k, "k")?);
+        let (kind, t_rows) = match plan.kind {
+            DwKind::Tn => (DwDeviceKind::Tn, k32),
+            DwKind::Nt => (DwDeviceKind::Nt, n32),
+        };
+        if !crate::transpose::transpose_rows_fit_grid_y_limit(t_rows) {
+            return Err(BackendError::Unsupported(format!(
+                "gemm_fp32_strict_into_device: transpose rows {t_rows} exceed the grid.y limit"
+            )));
+        }
+
+        let a_handle = a
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let b_handle = b
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let (Some(a_full), Some(b_full)) = (a_handle.storage.as_ref(), b_handle.storage.as_ref())
+        else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into_device: input buffer has numel > 0 but no device \
+                 allocation"
+                    .into(),
+            ));
+        };
+        let in_range = |off: usize, numel: usize, full_len: usize| {
+            off.checked_add(numel).is_some_and(|e| e <= full_len)
+        };
+        if !in_range(a.offset(), a.numel(), a_full.len())
+            || !in_range(b.offset(), b.numel(), b_full.len())
+        {
+            return Err(BackendError::InvalidArgument(format!(
+                "gemm_fp32_strict_into_device: view range exceeds backing buffer \
+                 (a_offset={}, b_offset={})",
+                a.offset(),
+                b.offset()
+            )));
+        }
+        let a_arg = a_full.view(a.offset()..a.offset() + a.numel());
+        let b_arg = b_full.view(b.offset()..b.offset() + b.numel());
+        let direct_offset = match kind {
+            DwDeviceKind::Tn => b.offset(),
+            DwDeviceKind::Nt => a.offset(),
+        };
+
+        let out_gen = out.generation();
+        let generations = [a.buffer().generation(), b.buffer().generation(), out_gen];
+        let out_handle = out
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_storage) = out_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_fp32_strict_into_device: out buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+
+        let gemm = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                context_cache::cached_gemm(&device)
+            },
+        )?;
+        if !gemm.transpose_smem_f32_available() {
+            return Err(BackendError::Unsupported(
+                "gemm_fp32_strict_into_device: transpose kernel unavailable".into(),
+            ));
+        }
+        let reduce = match bias {
+            Some(_) => Some(self.with_driver_call(
+                &generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || {
+                    let device = self.device_handle_raw()?;
+                    context_cache::cached_reduce(&device)
+                },
+            )?),
+            None => None,
+        };
+
+        self.with_driver_call(&generations, map_device_gemm_launch_error, || {
+            with_weight_and_bias_views(
+                out_storage,
+                out_offset..end,
+                bias_target(bias, reduce.as_deref(), n),
+                |c_arg, bias_t| {
+                    gemm.launch_gemm_dw_device(
+                        kind,
+                        &a_arg,
+                        &b_arg,
+                        direct_offset,
+                        c_arg,
+                        m32,
+                        n32,
+                        k32,
+                        bias_t,
+                    )
+                },
+            )
+        })?;
+        // 同期しない: 同期点は呼び出し元（チェーン末尾の download）へ集約。
+        Ok(bias.is_some())
+    }
+
+    /// [`BackendOps::gemm_resident_lhs_device`]／`_tracked` の共有本体（イシュー #3223）。
+    ///
+    /// 手順・同期契約は [`Self::gemm_fp32_strict_into_device_impl`] と同じ。退化形状は
+    /// ホスト版 `gemm_resident_lhs` と同じ（`p == 0 || r == 0` は空、`q == 0` は全 0 の
+    /// `[p, r]`。dispatch せず、早期 return でも poison・世代は検査する）。出力は
+    /// 呼び出し元へ渡る `DeviceBuffer` なので `static_cuda_memory` で確保する
+    /// （`relu_backward_mask_device_impl` と同じ判断）。
+    fn gemm_resident_lhs_device_impl(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let dev = Device::Cuda(self.ordinal);
+        if w.device() != dev || b.device() != dev {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = crate::gemm_device_model::plan_dinput_device(w.shape(), b.shape(), b_layout)?;
+        let (p, q, r) = (plan.p, plan.q, plan.r);
+        let generations = [w.buffer().generation(), b.buffer().generation()];
+
+        if p == 0 || r == 0 || q == 0 {
+            // 早期 return でも poison・世代は fail-closed に検査する
+            // （`relu_backward_mask_device_impl` の `numel == 0` と同じ理由）。
+            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            let device = self.with_driver_call(
+                &generations,
+                |e| BackendError::CudaUnavailable(e.to_string()),
+                || self.device_handle_raw(),
+            )?;
+            let mem = static_cuda_memory(self.ordinal, &device)?;
+            return mem.alloc_zeroed(&[p, r]);
+        }
+        let to_u32 = |v: usize, what: &str| {
+            u32::try_from(v).map_err(|_| {
+                BackendError::InvalidArgument(format!(
+                    "gemm_resident_lhs_device: {what} ({v}) exceeds u32 (kernel argument type)"
+                ))
+            })
+        };
+        let (p32, q32, r32) = (to_u32(p, "p")?, to_u32(q, "q")?, to_u32(r, "r")?);
+        if plan.b_transposed && !crate::transpose::transpose_rows_fit_grid_y_limit(r32) {
+            return Err(BackendError::Unsupported(format!(
+                "gemm_resident_lhs_device: transpose rows {r32} exceed the grid.y limit"
+            )));
+        }
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let b_handle = b
+            .buffer()
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let (Some(w_full), Some(b_full)) = (w_handle.storage.as_ref(), b_handle.storage.as_ref())
+        else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs_device: input buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+        let in_range = |off: usize, numel: usize, full_len: usize| {
+            off.checked_add(numel).is_some_and(|e| e <= full_len)
+        };
+        if !in_range(w.offset(), w.numel(), w_full.len())
+            || !in_range(b.offset(), b.numel(), b_full.len())
+        {
+            return Err(BackendError::InvalidArgument(format!(
+                "gemm_resident_lhs_device: view range exceeds backing buffer \
+                 (w_offset={}, b_offset={})",
+                w.offset(),
+                b.offset()
+            )));
+        }
+        let w_arg = w_full.view(w.offset()..w.offset() + w.numel());
+        let b_arg = b_full.view(b.offset()..b.offset() + b.numel());
+
+        let device = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let gemm = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_gemm(&device),
+        )?;
+        if plan.b_transposed && !gemm.transpose_smem_f32_available() {
+            return Err(BackendError::Unsupported(
+                "gemm_resident_lhs_device: transpose kernel unavailable".into(),
+            ));
+        }
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        let mut out_dev_buf = mem.alloc_zeroed(&[p, r])?;
+        let out_handle = out_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(out_storage) = out_handle.storage.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs_device: output buffer has numel > 0 but no device allocation"
+                    .into(),
+            ));
+        };
+        let mut out_arg = out_storage.as_arg_mut();
+
+        self.with_driver_call(&generations, map_device_gemm_launch_error, || {
+            gemm.launch_gemm_dinput_device(
+                &w_arg,
+                w.offset(),
+                &b_arg,
+                b.offset(),
+                plan.b_transposed,
+                &mut out_arg,
+                p32,
+                r32,
+                q32,
+            )
+        })?;
+        // `download` しない: 同期点は呼び出し元へ集約。
+        Ok(out_dev_buf)
+    }
+
+    /// MSE デバイス版 2 本（forward／backward）の driver 前検査（イシュー #3222）:
+    /// device 一致 → shape 一致 → numel（checked・`i32::MAX` 以下）→ 世代採取。
+    /// いずれも driver 呼び出しより前に型付きエラーで拒否する（A03）。
+    fn mse_device_plan(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        what: &str,
+    ) -> Result<MseDevicePlan, BackendError> {
+        if pred.device() != Device::Cuda(self.ordinal)
+            || target.device() != Device::Cuda(self.ordinal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let numel = pred
+            .shape()
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                BackendError::InvalidArgument(format!(
+                    "{what}: shape {:?} の要素数が usize を超える",
+                    pred.shape()
+                ))
+            })?;
+        if numel > i32::MAX as usize {
+            return Err(BackendError::InvalidArgument(format!(
+                "{what}: numel must fit in i32 (kernel argument type): numel={numel}"
+            )));
+        }
+        Ok(MseDevicePlan {
+            shape: pred.shape().to_vec(),
+            numel,
+            generations: [pred.generation(), target.generation()],
+        })
+    }
+
+    /// [`BackendOps::mse_loss_device`]／[`BackendOps::mse_loss_device_tracked`] の
+    /// 共有本体（イシュー #3222。Metal の `mse_loss_device_impl` と同じ二重化回避）。
+    ///
+    /// 手順は `binary_elementwise_device` と同じ: 検査（`mse_device_plan`）→
+    /// factor（未知 variant を driver 前に拒否）→ 世代・poison 検査 → 空形状の
+    /// 早期 return（0.0 のスカラー）→ storage 取り出し → 出力確保（呼び出し元へ
+    /// 渡るため `static_cuda_memory`）→ 起動。`download`・`synchronize` は
+    /// しない（同期点は呼び出し元へ集約。起動エラーは次の同期点で poison／世代
+    /// 検査から観測される）。出力は shape `[]` の 1 要素バッファ。
+    fn mse_loss_device_impl(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let plan = self.mse_device_plan(pred, target, "mse_loss_device")?;
+        let factor = mse_factor(reduction, plan.numel)?;
+        let generations = plan.generations;
+
+        let device = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        if plan.numel == 0 {
+            // `with_driver_call` 経由で poison・世代は検査済み。空和は 0.0。
+            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            return mem.alloc_zeroed(&[]);
+        }
+
+        let pred_arg = cuda_storage_ref(pred, plan.numel, "mse_loss_device: pred")?.as_arg();
+        let target_arg = cuda_storage_ref(target, plan.numel, "mse_loss_device: target")?.as_arg();
+        let mut out_dev_buf = mem.alloc_zeroed(&[])?;
+        let mut out_arg =
+            cuda_storage_mut(&mut out_dev_buf, 1, "mse_loss_device: out")?.as_arg_mut();
+
+        let mse = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_mse(&device),
+        )?;
+        self.with_driver_call(
+            &generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                mse.launch_mse_loss_device_f32(
+                    &pred_arg,
+                    &target_arg,
+                    &mut out_arg,
+                    plan.numel,
+                    factor,
+                )
+            },
+        )?;
+
+        // `download` しない: 同期点は呼び出し元の `download` へ集約。
+        Ok(out_dev_buf)
+    }
+
+    /// [`BackendOps::mse_loss_backward_device`]／`_tracked` の共有本体（イシュー
+    /// #3222）。手順・同期契約は [`Self::mse_loss_device_impl`] と同じ。
+    /// `dPred`（`pred.shape()`）のみ返す（`dTarget` は呼び出し側の責務）。
+    fn mse_loss_backward_device_impl(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let plan = self.mse_device_plan(pred, target, "mse_loss_backward_device")?;
+        let generations = plan.generations;
+
+        let device = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || self.device_handle_raw(),
+        )?;
+        let mem = static_cuda_memory(self.ordinal, &device)?;
+        if plan.numel == 0 {
+            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            return mem.alloc_zeroed(&plan.shape);
+        }
+
+        let pred_arg =
+            cuda_storage_ref(pred, plan.numel, "mse_loss_backward_device: pred")?.as_arg();
+        let target_arg =
+            cuda_storage_ref(target, plan.numel, "mse_loss_backward_device: target")?.as_arg();
+        let mut out_dev_buf = mem.alloc_zeroed(&plan.shape)?;
+        let mut out_arg = cuda_storage_mut(
+            &mut out_dev_buf,
+            plan.numel,
+            "mse_loss_backward_device: out",
+        )?
+        .as_arg_mut();
+
+        let mse = self.with_driver_call(
+            &generations,
+            |e| BackendError::CudaUnavailable(e.to_string()),
+            || context_cache::cached_mse(&device),
+        )?;
+        self.with_driver_call(
+            &generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                mse.launch_mse_backward_device_f32(
+                    &pred_arg,
+                    &target_arg,
+                    &mut out_arg,
+                    plan.numel,
+                    scale,
+                )
+            },
+        )?;
+
+        Ok(out_dev_buf)
+    }
+
     /// [`BackendOps::run_fused`] の GPU elementwise allowlist 融合経路
     /// （区分 B-1・イシュー #2085）。`run_fused_rmsnorm`／
     /// `run_fused_softmax` と同じ起動前 fail-closed 検証パターン
@@ -3376,6 +3958,63 @@ impl BackendOps for CudaBackendOps {
         self.gemm_fp32_strict_into(a, b, out, out_offset)
     }
 
+    /// [`BackendOps::gemm_fp32_strict_into_device`] の CUDA 実装（イシュー #3223）。
+    /// 本体は `gemm_fp32_strict_into_device_impl`。**CUDA は非 tracked でも同期しない**
+    /// （ストリーム順序契約。Metal の「復帰時に完了」とは異なる）。
+    fn gemm_fp32_strict_into_device(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+    ) -> Result<bool, BackendError> {
+        self.gemm_fp32_strict_into_device_impl(a, a_layout, b, b_layout, out, out_offset, bias)
+    }
+
+    /// [`Self::gemm_fp32_strict_into_device`] の tracked 版。**`token` を使わず機能的に
+    /// 同一な明示 override を置く**（`relu_backward_mask_device_tracked` と同じ理由。
+    /// CUDA は共有コマンドバッファのバッチングを持たず、失敗は poison／世代検査で
+    /// 観測される。設計 `docs/train-step-resident-parts-design.md` §5）。
+    fn gemm_fp32_strict_into_device_tracked(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+        _token: &DispatchFailureCell,
+    ) -> Result<bool, BackendError> {
+        self.gemm_fp32_strict_into_device_impl(a, a_layout, b, b_layout, out, out_offset, bias)
+    }
+
+    /// [`BackendOps::gemm_resident_lhs_device`] の CUDA 実装（イシュー #3223）。
+    /// 本体は `gemm_resident_lhs_device_impl`。非 tracked でも同期しない。
+    fn gemm_resident_lhs_device(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.gemm_resident_lhs_device_impl(w, b, b_layout)
+    }
+
+    /// [`Self::gemm_resident_lhs_device`] の tracked 版（`token` 不使用の明示 override。
+    /// [`Self::gemm_fp32_strict_into_device_tracked`] と同じ理由）。
+    fn gemm_resident_lhs_device_tracked(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.gemm_resident_lhs_device_impl(w, b, b_layout)
+    }
+
     /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、GEMM epilogue に bias 加算・
     /// activation を融合したカーネル
@@ -4116,6 +4755,36 @@ impl BackendOps for CudaBackendOps {
         )?;
 
         Ok(out_dev_buf)
+    }
+
+    /// ReLU マスク選択 `out = (mask_src > 0) ? g : +0.0` をデバイス常駐のまま
+    /// 計算する（イシュー #3221。意味論・レイアウト契約は trait doc を正とする。
+    /// 本体は `relu_backward_mask_device_impl`）。**CUDA は非 tracked でも
+    /// 同期しない**（ストリーム順序契約。Metal の「復帰時に完了」とは異なる。
+    /// 起動エラーは次の同期点で poison／世代検査から観測される。
+    /// `linear_forward_device` と同じ）。
+    fn relu_backward_mask_device(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.relu_backward_mask_device_impl(g, g_layout, mask_src)
+    }
+
+    /// [`Self::relu_backward_mask_device`] の tracked 版。**`token` を使わず
+    /// 機能的に同一な明示 override を置く**（`gemm_fp32_strict_into_tracked` と
+    /// 同じ理由。CUDA は Metal のような共有コマンドバッファのバッチングを持たず、
+    /// 失敗は poison／世代検査で観測されるため。設計
+    /// `docs/train-step-resident-parts-design.md` §5）。
+    fn relu_backward_mask_device_tracked(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.relu_backward_mask_device_impl(g, g_layout, mask_src)
     }
 
     /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
@@ -5258,21 +5927,7 @@ impl BackendOps for CudaBackendOps {
             BackendError::KernelLaunchFailed("mse_loss: target not contiguous".into())
         })?;
         let numel = pred_slice.len();
-        let factor = match reduction {
-            MseReduction::Mean => {
-                if numel == 0 {
-                    1.0
-                } else {
-                    1.0 / numel as f32
-                }
-            }
-            MseReduction::Sum => 1.0,
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "mse_loss: unsupported MseReduction variant {reduction:?}"
-                )));
-            }
-        };
+        let factor = mse_factor(reduction, numel)?;
 
         let mse = self.with_driver_call(
             &[],
@@ -5325,6 +5980,55 @@ impl BackendOps for CudaBackendOps {
             || mse.run_mse_backward_f32(pred_slice, target_slice, scale),
         )?;
         Tensor::new(out, pred.shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// MSE forward をデバイス入出力で行う（イシュー #3222。本体は
+    /// `mse_loss_device_impl`）。**CUDA は非 tracked でも同期しない**
+    /// （ストリーム順序契約。Metal の「復帰時に完了」とは異なる。起動エラーは
+    /// 次の同期点で poison／世代検査から観測される。`linear_forward_device` と同じ）。
+    fn mse_loss_device(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction)
+    }
+
+    /// [`Self::mse_loss_device`] の tracked 版。**`token` を使わず機能的に
+    /// 同一な明示 override を置く**（設計 `docs/train-step-resident-parts-design.md`
+    /// §5。`relu_backward_mask_device_tracked` と同じ理由）。
+    fn mse_loss_device_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction)
+    }
+
+    /// MSE backward（`dPred = scale·(pred−target)`）をデバイス入出力で行う
+    /// （イシュー #3222。同期契約は [`Self::mse_loss_device`] と同じ）。
+    fn mse_loss_backward_device(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale)
+    }
+
+    /// [`Self::mse_loss_backward_device`] の tracked 版（`token` を使わない明示
+    /// override。[`Self::mse_loss_device_tracked`] と同じ）。
+    fn mse_loss_backward_device_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+        _token: &DispatchFailureCell,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale)
     }
 
     /// [`fandhe_ai_tensor_core::BackendOps::huber_loss`] の CUDA 実装
@@ -8917,6 +9621,371 @@ mod tests {
 
     fn is_invalid_arg<T: std::fmt::Debug>(r: Result<T, BackendError>) -> bool {
         matches!(r, Err(BackendError::InvalidArgument(_)))
+    }
+
+    /// MSE デバイス版（#3222）: device 不一致は driver に触れず拒否（forward・backward）。
+    #[test]
+    fn mse_device_rejects_wrong_device() {
+        use fandhe_ai_tensor_core::MseReduction;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let p = DeviceBuffer::<f32>::new(Device::Cuda(ordinal), vec![4], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(
+            Device::Cuda(unique_test_ordinal()),
+            vec![4],
+            Box::new(EmptyHandle),
+        );
+        assert!(matches!(
+            cuda.mse_loss_device(&p, &t, MseReduction::Mean),
+            Err(BackendError::DeviceMismatch)
+        ));
+        assert!(matches!(
+            cuda.mse_loss_backward_device(&p, &t, 1.0),
+            Err(BackendError::DeviceMismatch)
+        ));
+    }
+
+    /// shape 不一致と numel の `i32::MAX` 超過は driver 前に型付きエラー。
+    #[test]
+    fn mse_device_rejects_shape_and_numel_violations_before_driver() {
+        use fandhe_ai_tensor_core::MseReduction;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let p = DeviceBuffer::<f32>::new(dev, vec![2, 3], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![3, 2], Box::new(EmptyHandle));
+        assert!(matches!(
+            cuda.mse_loss_device(&p, &t, MseReduction::Sum),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        assert!(matches!(
+            cuda.mse_loss_backward_device(&p, &t, 1.0),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+
+        let big = (i32::MAX as usize) + 1;
+        let p = DeviceBuffer::<f32>::new(dev, vec![big], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![big], Box::new(EmptyHandle));
+        assert!(is_invalid_arg(cuda.mse_loss_device(
+            &p,
+            &t,
+            MseReduction::Mean
+        )));
+        assert!(is_invalid_arg(cuda.mse_loss_backward_device(&p, &t, 1.0)));
+        // usize を超える shape の積も panic せず拒否する。
+        let p = DeviceBuffer::<f32>::new(dev, vec![usize::MAX, 2], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![usize::MAX, 2], Box::new(EmptyHandle));
+        assert!(is_invalid_arg(cuda.mse_loss_device(
+            &p,
+            &t,
+            MseReduction::Mean
+        )));
+    }
+
+    /// poison 済み ordinal は空形状でも `DeviceContextPoisoned`（4 通り）。
+    #[test]
+    fn mse_device_rejects_poisoned_ordinal_on_empty_shape() {
+        use fandhe_ai_tensor_core::MseReduction;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let p = DeviceBuffer::<f32>::new(dev, vec![0, 5], Box::new(EmptyHandle));
+        let t = DeviceBuffer::<f32>::new(dev, vec![0, 5], Box::new(EmptyHandle));
+        let token = DispatchFailureCell::default();
+        let poisoned = |r: Result<DeviceBuffer<f32>, BackendError>| {
+            matches!(r, Err(BackendError::DeviceContextPoisoned(_)))
+        };
+        assert!(poisoned(cuda.mse_loss_device(&p, &t, MseReduction::Mean)));
+        assert!(poisoned(cuda.mse_loss_device_tracked(
+            &p,
+            &t,
+            MseReduction::Mean,
+            &token
+        )));
+        assert!(poisoned(cuda.mse_loss_backward_device(&p, &t, 1.0)));
+        assert!(poisoned(
+            cuda.mse_loss_backward_device_tracked(&p, &t, 1.0, &token)
+        ));
+    }
+
+    /// 未知でない reduction の係数がホスト版の旧式（Mean=1/n・空=1・Sum=1）と bit 一致。
+    #[test]
+    fn mse_factor_matches_legacy_formula() {
+        use fandhe_ai_tensor_core::MseReduction;
+        assert_eq!(
+            mse_factor(MseReduction::Mean, 0).unwrap().to_bits(),
+            1.0f32.to_bits()
+        );
+        for n in [1usize, 3, 640, 4099] {
+            assert_eq!(
+                mse_factor(MseReduction::Mean, n).unwrap().to_bits(),
+                (1.0 / n as f32).to_bits()
+            );
+        }
+        assert_eq!(
+            mse_factor(MseReduction::Sum, 7).unwrap().to_bits(),
+            1.0f32.to_bits()
+        );
+    }
+
+    /// `relu_backward_mask_device`（#3221）: device 不一致は driver に触れず拒否。
+    #[test]
+    fn relu_backward_mask_device_rejects_wrong_device() {
+        use fandhe_ai_tensor_core::DeviceMatrixLayout;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let g = DeviceBuffer::new(Device::Cuda(ordinal), vec![2, 2], Box::new(EmptyHandle));
+        let m = DeviceBuffer::new(
+            Device::Cuda(unique_test_ordinal()),
+            vec![2, 2],
+            Box::new(EmptyHandle),
+        );
+        let gv = DeviceBufferView::new(&g, 0, g.shape()).expect("view");
+        let mv = DeviceBufferView::new(&m, 0, m.shape()).expect("view");
+        let r = cuda.relu_backward_mask_device(gv, DeviceMatrixLayout::RowMajor, mv);
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)));
+    }
+
+    /// 形状違反は driver に触れず型付きエラー（rank 違反・論理形不一致）。
+    #[test]
+    fn relu_backward_mask_device_rejects_shape_violations_before_driver() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+        use fandhe_ai_tensor_core::{DeviceMatrixLayout, ShapeError};
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let g3 = DeviceBuffer::new(dev, vec![2, 2, 2], Box::new(EmptyHandle));
+        let m3 = DeviceBuffer::new(dev, vec![2, 2, 2], Box::new(EmptyHandle));
+        let r = cuda.relu_backward_mask_device(
+            DeviceBufferView::new(&g3, 0, g3.shape()).expect("view"),
+            DeviceMatrixLayout::RowMajor,
+            DeviceBufferView::new(&m3, 0, m3.shape()).expect("view"),
+        );
+        assert!(matches!(
+            r,
+            Err(BackendError::ShapeMismatch(ShapeError::RankMismatch { .. }))
+        ));
+
+        let g = DeviceBuffer::new(dev, vec![2, 3], Box::new(EmptyHandle));
+        let m = DeviceBuffer::new(dev, vec![2, 3], Box::new(EmptyHandle));
+        // Transposed の論理形は [3, 2] なので mask [2, 3] は不一致。
+        let r = cuda.relu_backward_mask_device(
+            DeviceBufferView::new(&g, 0, g.shape()).expect("view"),
+            DeviceMatrixLayout::Transposed,
+            DeviceBufferView::new(&m, 0, m.shape()).expect("view"),
+        );
+        assert!(matches!(
+            r,
+            Err(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch { .. }
+            ))
+        ));
+    }
+
+    /// poison 済み ordinal は、空形状の早期 return でも `DeviceContextPoisoned`
+    /// で拒否する（`numel == 0` でも fail-closed に検査する契約）。tracked 版も同じ。
+    #[test]
+    fn relu_backward_mask_device_rejects_poisoned_ordinal_on_empty_shape() {
+        use fandhe_ai_tensor_core::DeviceMatrixLayout;
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+
+        let ordinal = unique_test_ordinal();
+        poison_ordinal(ordinal);
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let g = DeviceBuffer::new(dev, vec![0, 5], Box::new(EmptyHandle));
+        let m = DeviceBuffer::new(dev, vec![0, 5], Box::new(EmptyHandle));
+        fn view(b: &DeviceBuffer<f32>) -> DeviceBufferView<'_> {
+            DeviceBufferView::new(b, 0, b.shape()).expect("view")
+        }
+        let r = cuda.relu_backward_mask_device(view(&g), DeviceMatrixLayout::RowMajor, view(&m));
+        assert!(matches!(r, Err(BackendError::DeviceContextPoisoned(_))));
+        let token = DispatchFailureCell::default();
+        let r = cuda.relu_backward_mask_device_tracked(
+            view(&g),
+            DeviceMatrixLayout::RowMajor,
+            view(&m),
+            &token,
+        );
+        assert!(matches!(r, Err(BackendError::DeviceContextPoisoned(_))));
+    }
+
+    /// dW のデバイス入力 GEMM（#3223）が driver に触れる前に検査で拒否する契約:
+    /// device 不一致・rank・内側次元・NN/TT・0 次元・書き込み範囲（overflow・範囲超過・
+    /// bias の `bn != n`・weight との重複）。`EmptyHandle` の buffer を使うため、
+    /// driver に触れていれば `DeviceMismatch` 以外の別エラーになる。
+    #[test]
+    fn gemm_fp32_strict_into_device_rejects_before_driver() {
+        use DeviceMatrixLayout::{RowMajor, Transposed};
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+        use fandhe_ai_tensor_core::{DeviceMatrixLayout, ShapeError};
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let mk = |shape: Vec<usize>| DeviceBuffer::new(dev, shape, Box::new(EmptyHandle));
+        fn view(b: &DeviceBuffer<f32>) -> DeviceBufferView<'_> {
+            DeviceBufferView::new(b, 0, b.shape()).expect("view")
+        }
+        // TN: a は格納 [k=6, m=4]・b は [k=6, n=5]・out は 4*5 + 2 + 5 + 3 要素。
+        let a = mk(vec![6, 4]);
+        let b = mk(vec![6, 5]);
+        let mut out = mk(vec![30]);
+        let call = |a: &DeviceBuffer<f32>,
+                    al,
+                    b: &DeviceBuffer<f32>,
+                    bl,
+                    out: &mut DeviceBuffer<f32>,
+                    off,
+                    bias| {
+            cuda.gemm_fp32_strict_into_device(view(a), al, view(b), bl, out, off, bias)
+        };
+
+        // 有効な入力でも、EmptyHandle は driver 前の downcast で DeviceMismatch。
+        let r = call(&a, Transposed, &b, RowMajor, &mut out, 0, Some((22, 5)));
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)), "{r:?}");
+
+        // device 不一致。
+        let other = DeviceBuffer::new(
+            Device::Cuda(unique_test_ordinal()),
+            vec![6, 4],
+            Box::new(EmptyHandle),
+        );
+        let r = call(&other, Transposed, &b, RowMajor, &mut out, 0, None);
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)), "{r:?}");
+
+        // rank 違反。
+        let a3 = mk(vec![6, 4, 1]);
+        let r = call(&a3, Transposed, &b, RowMajor, &mut out, 0, None);
+        assert!(matches!(
+            r,
+            Err(BackendError::ShapeMismatch(ShapeError::RankMismatch { .. }))
+        ));
+        // 内側次元の不一致。
+        let a_bad = mk(vec![7, 4]);
+        let r = call(&a_bad, Transposed, &b, RowMajor, &mut out, 0, None);
+        assert!(matches!(
+            r,
+            Err(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch { .. }
+            ))
+        ));
+        // NN / TT は Unsupported。
+        let a_nn = mk(vec![4, 6]);
+        let r = call(&a_nn, RowMajor, &b, RowMajor, &mut out, 0, None);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        let b_tt = mk(vec![5, 6]);
+        let r = call(&a, Transposed, &b_tt, Transposed, &mut out, 0, None);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        // 0 次元は Unsupported。
+        let a_zero = mk(vec![6, 0]);
+        let b_zero = mk(vec![6, 5]);
+        let r = call(&a_zero, Transposed, &b_zero, RowMajor, &mut out, 0, None);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        // 書き込み範囲: overflow・範囲超過・bn != n・weight との重複。
+        let r = call(&a, Transposed, &b, RowMajor, &mut out, usize::MAX, None);
+        assert!(is_invalid_arg(r.map(|_| ())), "overflow");
+        let r = call(&a, Transposed, &b, RowMajor, &mut out, 11, None);
+        assert!(is_invalid_arg(r.map(|_| ())), "out of range");
+        let r = call(&a, Transposed, &b, RowMajor, &mut out, 0, Some((22, 6)));
+        assert!(is_invalid_arg(r.map(|_| ())), "bn != n");
+        let r = call(&a, Transposed, &b, RowMajor, &mut out, 0, Some((10, 5)));
+        assert!(is_invalid_arg(r.map(|_| ())), "overlap");
+        let r = call(&a, Transposed, &b, RowMajor, &mut out, 0, Some((26, 5)));
+        assert!(is_invalid_arg(r.map(|_| ())), "bias out of range");
+
+        // tracked 版は同じ検査を通り、同じ種類のエラーを返す。
+        let token = DispatchFailureCell::default();
+        let direct = call(&a_nn, RowMajor, &b, RowMajor, &mut out, 0, None);
+        let tracked = cuda.gemm_fp32_strict_into_device_tracked(
+            view(&a_nn),
+            RowMajor,
+            view(&b),
+            RowMajor,
+            &mut out,
+            0,
+            None,
+            &token,
+        );
+        assert!(matches!(direct, Err(BackendError::Unsupported(_))));
+        assert!(matches!(tracked, Err(BackendError::Unsupported(_))));
+    }
+
+    /// d_input のデバイス入力 GEMM（#3223）: 検査は driver 前。退化形状の早期 return
+    /// でも poison 済み ordinal は拒否する（tracked 版も同じ）。
+    #[test]
+    fn gemm_resident_lhs_device_rejects_before_driver_and_on_poison() {
+        use DeviceMatrixLayout::{RowMajor, Transposed};
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+        use fandhe_ai_tensor_core::{DeviceMatrixLayout, ShapeError};
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let mk = |shape: Vec<usize>| DeviceBuffer::new(dev, shape, Box::new(EmptyHandle));
+        fn view(b: &DeviceBuffer<f32>) -> DeviceBufferView<'_> {
+            DeviceBufferView::new(b, 0, b.shape()).expect("view")
+        }
+        let w = mk(vec![4, 3]);
+        let g_t = mk(vec![5, 3]); // 格納 [r, q]（Transposed）
+        // 有効でも EmptyHandle は driver 前の downcast で DeviceMismatch。
+        let r = cuda.gemm_resident_lhs_device(view(&w), view(&g_t), Transposed);
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)), "{r:?}");
+        // device 不一致。
+        let other = DeviceBuffer::new(
+            Device::Cuda(unique_test_ordinal()),
+            vec![5, 3],
+            Box::new(EmptyHandle),
+        );
+        let r = cuda.gemm_resident_lhs_device(view(&w), view(&other), Transposed);
+        assert!(matches!(r, Err(BackendError::DeviceMismatch)), "{r:?}");
+        // rank 違反・q の不一致。
+        let w1 = mk(vec![12]);
+        let r = cuda.gemm_resident_lhs_device(view(&w1), view(&g_t), Transposed);
+        assert!(matches!(
+            r,
+            Err(BackendError::ShapeMismatch(ShapeError::RankMismatch { .. }))
+        ));
+        let r = cuda.gemm_resident_lhs_device(view(&w), view(&g_t), RowMajor);
+        assert!(matches!(
+            r,
+            Err(BackendError::ShapeMismatch(
+                ShapeError::ShapeMismatch { .. }
+            ))
+        ));
+
+        // 退化形状の早期 return でも poison を検査する（p == 0 と q == 0）。
+        let poisoned = unique_test_ordinal();
+        poison_ordinal(poisoned);
+        let pdev = Device::Cuda(poisoned);
+        let pmk = |shape: Vec<usize>| DeviceBuffer::new(pdev, shape, Box::new(EmptyHandle));
+        let pcuda = CudaBackendOps::new(poisoned);
+        let w_p0 = pmk(vec![0, 3]);
+        let g_p0 = pmk(vec![5, 3]);
+        let r = pcuda.gemm_resident_lhs_device(view(&w_p0), view(&g_p0), Transposed);
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextPoisoned(_))),
+            "{r:?}"
+        );
+        let w_q0 = pmk(vec![4, 0]);
+        let g_q0 = pmk(vec![5, 0]);
+        let token = DispatchFailureCell::default();
+        let r =
+            pcuda.gemm_resident_lhs_device_tracked(view(&w_q0), view(&g_q0), Transposed, &token);
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextPoisoned(_))),
+            "{r:?}"
+        );
     }
 
     #[test]

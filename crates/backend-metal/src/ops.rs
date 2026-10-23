@@ -1182,6 +1182,19 @@ fn metal_buffer_ref<'a>(
     })
 }
 
+/// MSE forward の縮約係数（`Mean` は `1/numel`〈`numel == 0` は 1.0〉、`Sum` は 1.0）。
+/// ホスト版 `mse_loss` とデバイス版 `mse_loss_device_impl` が共有する唯一の式で、
+/// 両者の factor を bit 同一にする（イシュー #3219）。未知の variant は `Unsupported`。
+fn mse_factor(reduction: MseReduction, numel: usize) -> Result<f32, BackendError> {
+    match reduction {
+        MseReduction::Mean => Ok(if numel == 0 { 1.0 } else { 1.0 / numel as f32 }),
+        MseReduction::Sum => Ok(1.0),
+        _ => Err(BackendError::Unsupported(format!(
+            "mse_loss: unsupported MseReduction variant {reduction:?}"
+        ))),
+    }
+}
+
 impl MetalBackendOps {
     /// [`BackendOps::paged_kv_append`]／[`BackendOps::paged_kv_append_tracked`] の共有本体
     /// （イシュー #3111。`sgd_step_device_impl` と同じ二重化回避パターン）。デバイス一致検査 →
@@ -1459,6 +1472,340 @@ impl MetalBackendOps {
             token,
         )
         .map_err(map_metal_error)
+    }
+
+    /// [`BackendOps::relu_backward_mask_device`]／
+    /// [`BackendOps::relu_backward_mask_device_tracked`] の共有本体（イシュー
+    /// #3218。`sgd_step_device_impl` と同じ二重化回避パターン）。
+    ///
+    /// 手順は 検証（device・`relu_mask_model::plan_relu_mask`。encode より前）→
+    /// 出力の確保（最初の encode より前に `static_metal_memory()` で確保。escape
+    /// する `DeviceBuffer` のため REQ-14 の単一計測系列。`linear_forward_device_
+    /// impl` と同じ）→ encode。`token == None`（非 tracked）はローカル cell で
+    /// encode → `synchronize` → `check_merged_dispatch_token` で完了と成否を
+    /// 保証する。`Some`（tracked）は encode のみで待たない。
+    fn relu_backward_mask_device_impl(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if g.device() != Device::Metal || mask_src.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let plan = crate::relu_mask_model::plan_relu_mask(
+            g.shape(),
+            g.offset(),
+            g_layout,
+            mask_src.shape(),
+            mask_src.offset(),
+        )?;
+        let logical = plan.logical_shape();
+        if plan.numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(&logical);
+        }
+
+        let g_buf = metal_buffer_ref(g.buffer(), "relu_backward_mask_device: g")?;
+        let mask_buf = metal_buffer_ref(mask_src.buffer(), "relu_backward_mask_device: mask_src")?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ew = context_cache::cached_elementwise(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out_dev_buf = static_metal_memory()?.alloc_zeroed(&logical)?;
+        let out_buf = metal_buffer_ref(&out_dev_buf, "relu_backward_mask_device: output")?;
+
+        match token {
+            Some(token) => {
+                ew.encode_relu_mask_select_tracked(&ctx, g_buf, mask_buf, out_buf, &plan, token)
+                    .map_err(map_metal_error)?;
+            }
+            None => {
+                let local = DispatchFailureCell::new();
+                ew.encode_relu_mask_select_tracked(&ctx, g_buf, mask_buf, out_buf, &plan, &local)
+                    .map_err(map_metal_error)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+            }
+        }
+        Ok(out_dev_buf)
+    }
+
+    /// [`BackendOps::gemm_fp32_strict_into_device`]／
+    /// [`BackendOps::gemm_fp32_strict_into_device_tracked`] の共有本体（イシュー
+    /// #3220。`relu_backward_mask_device_impl` と同じ二重化回避パターン）。
+    ///
+    /// ホスト版 `gemm_fp32_strict_into_with_bias_reduce_tracked` の NT/TN 経路と
+    /// 同じ `encode_weight_and_bias_grad_with_offsets`・同じ `MatrixLayout`・同じ
+    /// dims を渡すことで bit 一致を構造で保つ（差は a/b が常駐 view の実体になり
+    /// `setBuffer:offset:` のバイトオフセットで渡る点だけ）。
+    ///
+    /// 検査の順序（REQ-8・OWASP A03。すべて encode・FFI より前）: device 一致 →
+    /// rank 2・レイアウト写像 → 内側次元一致 → weight/bias 書き込み範囲
+    /// （`layout::validate_gemm_bias_write_ranges`）→ NN/TT 拒否 → 0 次元拒否。
+    /// NN/TT はホスト版が `gemm_fp32_strict`（split-K を含む）へ落ちる形で、classic
+    /// strided カーネルとの bit 一致を保証できないため `Unsupported` にする（ホスト版が
+    /// `Unsupported` を返さない理由〈`resident_grad_capability` の汚染防止〉は、
+    /// 呼び出し元が #3251 のチェーンだけで dW が常に TN になる本入口には当てはまらない）。
+    /// 0 次元は wait なしで正しく書く方法が無い（ホスト版は `upload_into` で同期する）
+    /// ため同じく `Unsupported`。`token == None` はローカル cell で encode →
+    /// `synchronize` → `check_merged_dispatch_token`、`Some` は encode のみで待たない。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fp32_strict_into_device_impl(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<bool, BackendError> {
+        if a.device() != Device::Metal
+            || b.device() != Device::Metal
+            || out.device() != Device::Metal
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let la = layout::matrix_layout_from_device_view(a.shape(), a_layout)?;
+        let lb = layout::matrix_layout_from_device_view(b.shape(), b_layout)?;
+        let (m, k) = (la.rows, la.cols);
+        let (kb, n) = (lb.rows, lb.cols);
+        if k != kb {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: vec![m, k],
+                rhs: vec![kb, n],
+            }));
+        }
+        layout::validate_gemm_bias_write_ranges(m, n, out_offset, out.numel(), bias)?;
+        if la.transposed == lb.transposed {
+            return Err(BackendError::Unsupported(
+                "gemm_fp32_strict_into_device: NN/TT cannot be encode-only (host path uses \
+                 gemm_fp32_strict with split-K; bit parity not guaranteed)"
+                    .into(),
+            ));
+        }
+        if m == 0 || n == 0 || k == 0 {
+            return Err(BackendError::Unsupported(
+                "gemm_fp32_strict_into_device: zero-sized dimension cannot be written \
+                 without a wait"
+                    .into(),
+            ));
+        }
+
+        let a_buf = metal_buffer_ref(a.buffer(), "gemm_fp32_strict_into_device: a")?;
+        let b_buf = metal_buffer_ref(b.buffer(), "gemm_fp32_strict_into_device: b")?;
+        let out_buf = metal_buffer_ref(out, "gemm_fp32_strict_into_device: out")?;
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let encode = |cell: &DispatchFailureCell| {
+            gemm.encode_weight_and_bias_grad_with_offsets(
+                &ctx,
+                a_buf,
+                a.offset(),
+                la,
+                b_buf,
+                b.offset(),
+                lb,
+                out_buf,
+                out_offset,
+                bias,
+                m,
+                n,
+                k,
+                Some(cell),
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))
+        };
+        match token {
+            Some(token) => encode(token),
+            None => {
+                let local = DispatchFailureCell::new();
+                let filled = encode(&local)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+                Ok(filled)
+            }
+        }
+    }
+
+    /// [`BackendOps::gemm_resident_lhs_device`]／
+    /// [`BackendOps::gemm_resident_lhs_device_tracked`] の共有本体（イシュー #3220）。
+    ///
+    /// ホスト版 `gemm_resident_lhs` と同じ strided 本体（`encode_strided_bias_act_
+    /// prepared_with_c_offset`、`c_offset = 0`）・同じ `MatrixLayout` を使い bit 一致を
+    /// 保つ。ホスト版との差は入力が常駐 view であることと、末尾の `download` を行わず
+    /// `DeviceBuffer` を返す点（同期は非 tracked 版のローカル cell 経路だけ）。
+    /// 0 次元はホスト版と同じ（`p == 0 || r == 0` は空、`q == 0` は全 0。dispatch・wait なし）。
+    /// 出力は呼び出し元へ渡る `DeviceBuffer` なので `static_metal_memory()` で確保する
+    /// （REQ-14 の単一計測系列。`relu_backward_mask_device_impl` と同じ）。
+    fn gemm_resident_lhs_device_impl(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if w.device() != Device::Metal || b.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let w_layout = layout::matrix_layout_from_device_view(
+            w.shape(),
+            fandhe_ai_tensor_core::DeviceMatrixLayout::RowMajor,
+        )?;
+        let lb = layout::matrix_layout_from_device_view(b.shape(), b_layout)?;
+        let (p, q) = (w_layout.rows, w_layout.cols);
+        let (qb, r) = (lb.rows, lb.cols);
+        if qb != q {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: vec![p, q],
+                rhs: vec![qb, r],
+            }));
+        }
+        if p == 0 || r == 0 || q == 0 {
+            // `p == 0 || r == 0` は空、`q == 0` は全 0（`alloc_zeroed`）。
+            return static_metal_memory()?.alloc_zeroed(&[p, r]);
+        }
+
+        let w_buf = metal_buffer_ref(w.buffer(), "gemm_resident_lhs_device: w")?;
+        let b_buf = metal_buffer_ref(b.buffer(), "gemm_resident_lhs_device: b")?;
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let c_dev_buf = static_metal_memory()?.alloc_zeroed(&[p, r])?;
+        let c_buf = metal_buffer_ref(&c_dev_buf, "gemm_resident_lhs_device: output")?;
+        let encode = |cell: &DispatchFailureCell| {
+            gemm.encode_strided_bias_act_prepared_with_c_offset(
+                &ctx,
+                w_buf,
+                w.offset(),
+                w_layout,
+                b_buf,
+                b.offset(),
+                lb,
+                None,
+                false,
+                c_buf,
+                0,
+                p,
+                r,
+                q,
+                Some(cell),
+            )
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))
+        };
+        match token {
+            Some(token) => encode(token)?,
+            None => {
+                let local = DispatchFailureCell::new();
+                encode(&local)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+            }
+        }
+        Ok(c_dev_buf)
+    }
+
+    /// [`BackendOps::mse_loss_device`]／[`BackendOps::mse_loss_device_tracked`] の共有本体
+    /// （イシュー #3219。`relu_backward_mask_device_impl` と同じ二重化回避パターン）。
+    ///
+    /// 検証（device・shape・u32 上限・reduction。すべて encode／FFI より前）→ 出力確保
+    /// （escape する `DeviceBuffer` のため REQ-14 の計測系列に乗せ `alloc_zeroed`）→
+    /// encode。`token == None` はローカル cell で encode → `synchronize` →
+    /// `check_merged_dispatch_token`、`Some` は encode のみで待たない。確保は pool 再利用
+    /// 時に同期しない（#1099。OOM フォールバックのみ例外）。縮約は
+    /// `MetalMse::encode_mse_loss_f32_tracked` を通りホスト版と同一カーネル・同一 factor。
+    fn mse_loss_device_impl(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        reduction: MseReduction,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if pred.device() != Device::Metal || target.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let numel = pred.numel();
+        crate::mse::validate_mse_len(numel)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let factor = mse_factor(reduction, numel)?;
+        if numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(&[]);
+        }
+        let pred_buf = metal_buffer_ref(pred, "mse_loss_device: pred")?;
+        let target_buf = metal_buffer_ref(target, "mse_loss_device: target")?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mse = context_cache::cached_mse(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out_dev_buf = static_metal_memory()?.alloc_zeroed(&[])?;
+        let out_buf = metal_buffer_ref(&out_dev_buf, "mse_loss_device: output")?;
+
+        match token {
+            Some(token) => {
+                mse.encode_mse_loss_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, factor, token,
+                )
+                .map_err(map_metal_error)?;
+            }
+            None => {
+                let local = DispatchFailureCell::new();
+                mse.encode_mse_loss_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, factor, &local,
+                )
+                .map_err(map_metal_error)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+            }
+        }
+        Ok(out_dev_buf)
+    }
+
+    /// [`BackendOps::mse_loss_backward_device`]／`_tracked` の共有本体（イシュー
+    /// #3219）。構成は [`Self::mse_loss_device_impl`] と同じで、出力は `pred.shape()` の
+    /// `dPred`。`scale` はホスト版と同じく検証せずそのまま渡す。
+    fn mse_loss_backward_device_impl(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        scale: f32,
+        token: Option<&DispatchFailureCell>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        if pred.device() != Device::Metal || target.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        require_same_shape(pred.shape(), target.shape()).map_err(BackendError::ShapeMismatch)?;
+        let numel = pred.numel();
+        crate::mse::validate_mse_len(numel)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        if numel == 0 {
+            return static_metal_memory()?.alloc_zeroed(pred.shape());
+        }
+        let pred_buf = metal_buffer_ref(pred, "mse_loss_backward_device: pred")?;
+        let target_buf = metal_buffer_ref(target, "mse_loss_backward_device: target")?;
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mse = context_cache::cached_mse(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out_dev_buf = static_metal_memory()?.alloc_zeroed(pred.shape())?;
+        let out_buf = metal_buffer_ref(&out_dev_buf, "mse_loss_backward_device: output")?;
+
+        match token {
+            Some(token) => {
+                mse.encode_mse_backward_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, scale, token,
+                )
+                .map_err(map_metal_error)?;
+            }
+            None => {
+                let local = DispatchFailureCell::new();
+                mse.encode_mse_backward_f32_tracked(
+                    &ctx, pred_buf, target_buf, out_buf, numel, scale, &local,
+                )
+                .map_err(map_metal_error)?;
+                check_merged_dispatch_token(ctx.synchronize(), &local).map_err(map_metal_error)?;
+            }
+        }
+        Ok(out_dev_buf)
     }
 
     /// [`BackendOps::adam_step_device`]／
@@ -3061,6 +3408,149 @@ impl BackendOps for MetalBackendOps {
         self.linear_forward_device_impl(a, w, bias, act, Some(token))
     }
 
+    /// ReLU backward マスク選択の Metal 実装（イシュー #3218）。復帰時点で GPU
+    /// 実行の完了・成否を返す同期版（ローカル cell で encode → `synchronize` →
+    /// token 検査）。実体は `relu_backward_mask_device_impl`。
+    fn relu_backward_mask_device(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.relu_backward_mask_device_impl(g, g_layout, mask_src, None)
+    }
+
+    /// [`BackendOps::relu_backward_mask_device_tracked`] の Metal オーバー
+    /// ライド（イシュー #3218）。**待たない** encode-only 版で、`token` を
+    /// `MetalContext::encode` と同一ロック区間でバッチへ登録する（既定実装の
+    /// ままでは本 dispatch の失敗がどの cell にも登録されず、共有 context の
+    /// 別スレッドが先に `synchronize` すると失敗を取りこぼす。
+    /// `linear_forward_device_tracked` と同じ理由）。
+    fn relu_backward_mask_device_tracked(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.relu_backward_mask_device_impl(g, g_layout, mask_src, Some(token))
+    }
+
+    /// MSE forward のデバイス入出力版の Metal 実装（イシュー #3219）。復帰時点で GPU
+    /// 実行の完了・成否を返す同期版。実体は `mse_loss_device_impl`。
+    fn mse_loss_device(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        reduction: MseReduction,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction, None)
+    }
+
+    /// [`BackendOps::mse_loss_device_tracked`] の Metal オーバーライド（#3219）。待たない
+    /// encode のみの版で、`token` を `MetalContext::encode` と同一ロック区間で登録する
+    /// （既定実装のままでは失敗がどの cell にも登録されず取りこぼす。
+    /// `relu_backward_mask_device_tracked` と同じ理由）。
+    fn mse_loss_device_tracked(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        reduction: MseReduction,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_device_impl(pred, target, reduction, Some(token))
+    }
+
+    /// MSE backward のデバイス入出力版の Metal 実装（#3219）。同期版。実体は
+    /// `mse_loss_backward_device_impl`。
+    fn mse_loss_backward_device(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        scale: f32,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale, None)
+    }
+
+    /// [`BackendOps::mse_loss_backward_device_tracked`] の Metal オーバーライド（#3219）。
+    /// encode のみで待たない。理由は [`Self::mse_loss_device_tracked`] と同じ。
+    fn mse_loss_backward_device_tracked(
+        &self,
+        pred: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        target: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        scale: f32,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.mse_loss_backward_device_impl(pred, target, scale, Some(token))
+    }
+
+    /// dW の GEMM（デバイス入力版。イシュー #3220）。非 tracked 版は復帰時点で
+    /// 完了・成否を返す。実体は `gemm_fp32_strict_into_device_impl`。
+    fn gemm_fp32_strict_into_device(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+    ) -> Result<bool, BackendError> {
+        self.gemm_fp32_strict_into_device_impl(
+            a, a_layout, b, b_layout, out, out_offset, bias, None,
+        )
+    }
+
+    /// [`BackendOps::gemm_fp32_strict_into_device_tracked`] の Metal オーバーライド。
+    /// encode のみで待たず、`token` を encode と同一ロック区間でバッチへ登録する。
+    /// 既定のままだと失敗がどの cell にも登録されず取りこぼすため override 必須
+    /// （`relu_backward_mask_device_tracked` と同じ理由）。
+    fn gemm_fp32_strict_into_device_tracked(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+        token: &DispatchFailureCell,
+    ) -> Result<bool, BackendError> {
+        self.gemm_fp32_strict_into_device_impl(
+            a,
+            a_layout,
+            b,
+            b_layout,
+            out,
+            out_offset,
+            bias,
+            Some(token),
+        )
+    }
+
+    /// d_input の GEMM（デバイス入出力版。イシュー #3220）。実体は
+    /// `gemm_resident_lhs_device_impl`。
+    fn gemm_resident_lhs_device(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.gemm_resident_lhs_device_impl(w, b, b_layout, None)
+    }
+
+    /// [`BackendOps::gemm_resident_lhs_device_tracked`] の Metal オーバーライド
+    /// （encode のみ。token の扱いは `gemm_fp32_strict_into_device_tracked` と同じ）。
+    fn gemm_resident_lhs_device_tracked(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        token: &DispatchFailureCell,
+    ) -> Result<fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, BackendError> {
+        self.gemm_resident_lhs_device_impl(w, b, b_layout, Some(token))
+    }
+
     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
     /// `token: None` の同期版で、復帰時点で GPU 実行の完了・成否を返す
     /// （`sgd_step_device` と同じ契約）。実体は `paged_kv_append_impl`。
@@ -4551,21 +5041,7 @@ impl BackendOps for MetalBackendOps {
             BackendError::KernelLaunchFailed("mse_loss: target not contiguous".into())
         })?;
         let numel = pred_slice.len();
-        let factor = match reduction {
-            MseReduction::Mean => {
-                if numel == 0 {
-                    1.0
-                } else {
-                    1.0 / numel as f32
-                }
-            }
-            MseReduction::Sum => 1.0,
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "mse_loss: unsupported MseReduction variant {reduction:?}"
-                )));
-            }
-        };
+        let factor = mse_factor(reduction, numel)?;
 
         let ctx = context_cache::cached_context().map_err(map_metal_error)?;
         let mse = context_cache::cached_mse(&ctx)
@@ -6607,5 +7083,68 @@ mod tests {
             2,
             "TT (both transposed) must fall back to contiguous() host repack for both operands"
         );
+    }
+
+    /// イシュー #3220: dW・d_input の `_tracked` 版が encode のみで待たず、共有失敗
+    /// トークンを open バッチへ登録することの実機確認（`open_batch_token_count` は
+    /// `#[cfg(test)] pub(crate)` のため in-crate に置く。`elementwise.rs` の relu mask
+    /// の同型テストと同じ観点）。
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn gemm_device_tracked_registers_token_and_does_not_wait() {
+        use fandhe_ai_tensor_core::DeviceMatrixLayout;
+        let ops = MetalBackendOps::new();
+        let mem = ops.memory_ops().expect("memory_ops");
+        let up = |n: usize, shape: &[usize]| {
+            let t = Tensor::new((0..n).map(|i| (i % 7) as f32 - 3.0).collect(), shape).unwrap();
+            mem.upload(&t).expect("upload")
+        };
+        let (bsz, inf, outf) = (8usize, 5usize, 3usize);
+        let x = up(bsz * inf, &[bsz, inf]);
+        let g = up(bsz * outf, &[bsz, outf]);
+        let w = up(inf * outf, &[inf, outf]);
+        let mut out = mem.alloc_zeroed(&[inf * outf + outf]).expect("alloc out");
+        let (xs, gs, ws) = ([bsz, inf], [bsz, outf], [inf, outf]);
+        let xv = DeviceBufferView::new(&x, 0, &xs).unwrap();
+        let gv = DeviceBufferView::new(&g, 0, &gs).unwrap();
+        let wv = DeviceBufferView::new(&w, 0, &ws).unwrap();
+        let ctx = context_cache::cached_context().expect("ctx");
+
+        // dW
+        ctx.synchronize().expect("drain");
+        let token = DispatchFailureCell::new();
+        let before = ctx.diagnostic_batch_counters();
+        let filled = ops
+            .gemm_fp32_strict_into_device_tracked(
+                xv,
+                DeviceMatrixLayout::Transposed,
+                gv,
+                DeviceMatrixLayout::RowMajor,
+                &mut out,
+                0,
+                Some((inf * outf, outf)),
+                &token,
+            )
+            .expect("dW tracked");
+        let after = ctx.diagnostic_batch_counters();
+        assert!(filled);
+        assert_eq!(ctx.open_batch_token_count().unwrap(), 1);
+        assert_eq!(after.encode_calls, before.encode_calls + 1);
+        assert_eq!(after.wait_until_completed, before.wait_until_completed);
+        ctx.synchronize().expect("synchronize");
+        assert!(!token.is_set());
+
+        // d_input
+        let token = DispatchFailureCell::new();
+        let before = ctx.diagnostic_batch_counters();
+        let _din = ops
+            .gemm_resident_lhs_device_tracked(wv, gv, DeviceMatrixLayout::Transposed, &token)
+            .expect("d_input tracked");
+        let after = ctx.diagnostic_batch_counters();
+        assert_eq!(ctx.open_batch_token_count().unwrap(), 1);
+        assert_eq!(after.encode_calls, before.encode_calls + 1);
+        assert_eq!(after.wait_until_completed, before.wait_until_completed);
+        ctx.synchronize().expect("synchronize");
+        assert!(!token.is_set());
     }
 }

@@ -20,6 +20,25 @@
 //! 半端な内容の組を残さない）。カーネル・起動構成は不変のため出力は
 //! キャッシュの有無でビット同一。入力・ターゲット常駐ハンドル（#3249）や
 //! 1 回同期の学習 step（#3252）とは独立の、公開 API を変えない最適化。
+//!
+//! **デバイス入出力版（イシュー #3222。設計 `docs/train-step-resident-parts-
+//! design.md` §3）**: `launch_mse_loss_device_f32`／
+//! `launch_mse_backward_device_f32` は pred・target・出力を
+//! 呼び出し元（`ops.rs::CudaBackendOps::mse_loss_device`／
+//! `mse_loss_backward_device`）が確保済みのデバイス引数で受け、起動だけを
+//! ストリームへ積む。`readback`・`synchronize` は行わない（#1692 の
+//! ストリーム順序契約。起動エラーは次の同期点の poison／世代検査から観測
+//! される）。ホスト版と同じ起動ヘルパ（`launch_partial_finalize`／
+//! `launch_backward`）を共有するため、カーネル・起動構成・縮約順序が同一で
+//! 出力はホスト版と bit 一致する（`unsafe` ブロックもヘルパの 3 か所のまま
+//! 増えない。ホスト版から移設しただけ）。
+//! forward の `partial` はプールへ返すと「finalize がまだ読んでいる間に返却・
+//! 再利用される」race になる（readback の同期が無いため）ので、`CudaMse` が
+//! 持つ永続ワークスペースを使う。条件: (a) ロックは partial・finalize の両
+//! 起動をまたいで保持する、(b) プールへは渡さない、(c) 再利用はストリーム
+//! 順序で安全（次回の partial 書き込みは前回の finalize 読み出しより後に
+//! 積まれる）、(d) partial カーネルは起動する全ブロックが
+//! `partial[blockIdx.x]` を必ず書くので前回の内容は結果に影響しない。
 
 use std::sync::{Arc, Mutex};
 
@@ -29,7 +48,7 @@ use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_mse::{self, MSE_BLOCK_DIM, MSE_MAX_BLOCKS};
-use crate::memory::readback;
+use crate::memory::{CudaArg, CudaArgMut, readback};
 use crate::nvrtc::compile_ptx;
 use crate::pool::CudaAllocator;
 use crate::warp_geometry::WarpGeometry;
@@ -146,6 +165,10 @@ pub struct CudaMse {
     /// 直前の target のデバイス再利用キャッシュ（イシュー #3203。モジュール
     /// doc 参照）。`with_driver_call` 内でのみロックを取る。
     target_cache: Mutex<Option<CachedTarget<CudaSlice<f32>>>>,
+    /// デバイス版 forward 専用の `partial` 永続ワークスペース（イシュー
+    /// #3222。モジュール doc 参照）。`MSE_MAX_BLOCKS` 要素で遅延確保し、
+    /// 以後は使い回す。
+    partial_workspace: Mutex<Option<CudaSlice<f32>>>,
 }
 
 impl CudaMse {
@@ -184,6 +207,7 @@ impl CudaMse {
             finalize_f32,
             backward_f32,
             target_cache: Mutex::new(None),
+            partial_workspace: Mutex::new(None),
         })
     }
 
@@ -224,6 +248,189 @@ impl CudaMse {
         context_cache::with_driver_call(self.ordinal, f)
     }
 
+    /// forward の 2 起動（`mse_partial_f32` → `mse_finalize_f32`）を積む
+    /// 共通ヘルパ（ホスト版 `run_mse_loss_f32` とデバイス版
+    /// `launch_mse_loss_device_f32` だけが呼ぶ。非公開）。
+    /// 長さ（`pred`／`target` は `numel`、`partial` は `num_blocks` 以上、
+    /// `out` は 1 以上、`numel <= i32::MAX`）を fail-closed に再検査して
+    /// から起動し、`unsafe` の SAFETY 前提を実装で担保する。同期はしない。
+    /// `numel == 0` は起動せず `Ok`（出力は呼び出し元が 0.0 で用意する）。
+    fn launch_partial_finalize(
+        &self,
+        pred: &CudaArg<'_>,
+        target: &CudaArg<'_>,
+        partial: &mut CudaArgMut<'_>,
+        out: &mut CudaArgMut<'_>,
+        numel: usize,
+        factor: f32,
+    ) -> Result<(), CudaError> {
+        validate_mse_len(numel)?;
+        if pred.len() != numel || target.len() != numel {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "mse buffer length must equal numel: pred_len={}, target_len={}, numel={numel}",
+                    pred.len(),
+                    target.len()
+                ),
+            });
+        }
+        if numel == 0 {
+            return Ok(());
+        }
+        let num_blocks = mse_num_blocks(numel as u32);
+        if partial.len() < num_blocks as usize || out.len() < 1 {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "mse workspace too small: partial_len={}, num_blocks={num_blocks}, out_len={}",
+                    partial.len(),
+                    out.len()
+                ),
+            });
+        }
+
+        let numel_i = numel as i32;
+        let partial_cfg = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (MSE_BLOCK_DIM, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: `pred`／`target` は上記検査で `numel` 要素、`partial` は
+        // `num_blocks` 要素以上であり、カーネルは `blockIdx.x`
+        // （`0..num_blocks`）ごとに `partial[blockIdx.x]` を 1 回だけ書く
+        // （`kernels_mse.rs::MSE_PARTIAL_F32`）。カーネル内の grid-stride
+        // ループは `idx < numel` を維持する（REQ-8）ため OOB 読み出しは
+        // 起きない。引数順は `(pred, target, partial, int numel)`。
+        unsafe {
+            let mut builder = self.stream.launch_builder(&self.partial_f32);
+            pred.push(&mut builder);
+            target.push(&mut builder);
+            partial.push(&mut builder);
+            builder.arg(&numel_i);
+            builder.launch(partial_cfg)?;
+        }
+
+        let num_partials_i = num_blocks as i32;
+        let finalize_cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (MSE_BLOCK_DIM, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: `partial` は上記で `num_blocks` 要素すべてが書き込み済み
+        // （同一ストリームの順序で partial 起動の後に実行される）。`out` は
+        // 1 要素以上を上記で確認済みで、`mse_finalize_f32` は単一ブロックの
+        // lane 0 で `out[0]` を必ず 1 回書く（`kernels_mse.rs`）。
+        // `num_partials_i` は本関数内の単一の `num_blocks` 由来で、`partial`
+        // の長さ検査と同じ値を渡す（呼び出し元がずらせない）。引数順は
+        // `(partial, out, int num_partials, float factor)`。
+        unsafe {
+            let mut builder = self.stream.launch_builder(&self.finalize_f32);
+            partial.push(&mut builder);
+            out.push(&mut builder);
+            builder.arg(&num_partials_i);
+            builder.arg(&factor);
+            builder.launch(finalize_cfg)?;
+        }
+        Ok(())
+    }
+
+    /// backward の 1 起動（`mse_backward_f32`）を積む共通ヘルパ
+    /// （ホスト版 `run_mse_backward_f32` とデバイス版
+    /// `launch_mse_backward_device_f32` だけが呼ぶ。非公開）。
+    /// 長さを fail-closed に再検査してから起動する。同期はしない。
+    fn launch_backward(
+        &self,
+        pred: &CudaArg<'_>,
+        target: &CudaArg<'_>,
+        dpred: &mut CudaArgMut<'_>,
+        numel: usize,
+        scale: f32,
+    ) -> Result<(), CudaError> {
+        validate_mse_len(numel)?;
+        if pred.len() != numel || target.len() != numel || dpred.len() != numel {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "mse buffer length must equal numel: pred_len={}, target_len={}, \
+                     dpred_len={}, numel={numel}",
+                    pred.len(),
+                    target.len(),
+                    dpred.len()
+                ),
+            });
+        }
+        if numel == 0 {
+            return Ok(());
+        }
+
+        let numel_i = numel as i32;
+        let cfg = LaunchConfig {
+            grid_dim: (numel.div_ceil(MSE_BLOCK_DIM as usize) as u32, 1, 1),
+            block_dim: (MSE_BLOCK_DIM, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: `pred`／`target`／`dpred` はいずれも上記検査で `numel` 要素の
+        // デバイスバッファであり、カーネル内の手動境界チェック
+        // （`if (idx < numel)`。REQ-8）と合わせて OOB 読み書きが起きない根拠
+        // とする。グリッド次元は `div_ceil` で numel を包含し、末尾ブロックの
+        // 余剰スレッドはカーネル内境界チェックで弾かれる。引数順は
+        // `(pred, target, dpred, int numel, float scale)`。
+        unsafe {
+            let mut builder = self.stream.launch_builder(&self.backward_f32);
+            pred.push(&mut builder);
+            target.push(&mut builder);
+            dpred.push(&mut builder);
+            builder.arg(&numel_i);
+            builder.arg(&scale);
+            builder.launch(cfg)?;
+        }
+        Ok(())
+    }
+
+    /// デバイス版 forward（イシュー #3222）: `out[0] = factor·Σ(pred−target)²`
+    /// を積む。`out` は呼び出し元確保の 1 要素バッファ。`readback`・
+    /// `synchronize` はしない（モジュール doc 参照）。`partial` は永続
+    /// ワークスペース（ロックは 2 起動をまたぐ）。`numel == 0` は起動しない
+    /// （`out` は呼び出し元が 0.0 で用意済みの契約）。
+    pub(crate) fn launch_mse_loss_device_f32(
+        &self,
+        pred: &CudaArg<'_>,
+        target: &CudaArg<'_>,
+        out: &mut CudaArgMut<'_>,
+        numel: usize,
+        factor: f32,
+    ) -> Result<(), CudaError> {
+        self.with_driver_call(|| {
+            let mut guard =
+                self.partial_workspace
+                    .lock()
+                    .map_err(|_| CudaError::InvalidElementwiseShape {
+                        detail: "mse partial workspace mutex poisoned".to_string(),
+                    })?;
+            if guard.is_none() {
+                *guard = Some(self.stream.alloc_zeros::<f32>(MSE_MAX_BLOCKS as usize)?);
+            }
+            let Some(ws) = guard.as_mut() else {
+                return Err(CudaError::InvalidElementwiseShape {
+                    detail: "mse partial workspace missing".to_string(),
+                });
+            };
+            let mut partial = CudaArgMut::SliceMut(ws);
+            self.launch_partial_finalize(pred, target, &mut partial, out, numel, factor)
+        })
+    }
+
+    /// デバイス版 backward（イシュー #3222）: `dpred[i] = scale·(pred[i]−
+    /// target[i])` を積む。同期しない。
+    pub(crate) fn launch_mse_backward_device_f32(
+        &self,
+        pred: &CudaArg<'_>,
+        target: &CudaArg<'_>,
+        dpred: &mut CudaArgMut<'_>,
+        numel: usize,
+        scale: f32,
+    ) -> Result<(), CudaError> {
+        self.with_driver_call(|| self.launch_backward(pred, target, dpred, numel, scale))
+    }
+
     /// forward: `reduction(Σ(pred[i]−target[i])²)`。`pred.len() ==
     /// target.len()` は呼び出し元（`ops.rs`）が検証済みの契約。
     /// `numel == 0` はカーネル起動を回避し `0.0` を返す（`Mean`／`Sum`
@@ -254,51 +461,22 @@ impl CudaMse {
                 // `alloc_uninit_f32` doc の適用条件）。
                 let mut partial_dev = self.allocator.alloc_uninit_f32(num_blocks as usize)?;
 
-                let numel_i = numel as i32;
-                let partial_cfg = LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (MSE_BLOCK_DIM, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                // SAFETY: `pred_dev`／`target_dev`（キャッシュ経由でも長さは鍵と一致し
-                // `numel` 要素）は H2D 済み
-                // デバイスバッファ、`partial_dev` は `num_blocks` 要素確保済みで
-                // カーネルが `blockIdx.x`（`0..num_blocks`）ごとに 1 回だけ書く
-                // （`kernels_mse.rs::MSE_PARTIAL_F32` 参照）。カーネル内の
-                // grid-stride ループは `idx < numel` を維持する（REQ-8）ため
-                // OOB 読み出しは起きない。
-                unsafe {
-                    self.stream
-                        .launch_builder(&self.partial_f32)
-                        .arg(&pred_dev)
-                        .arg(target_dev)
-                        .arg(&mut partial_dev.as_view_mut())
-                        .arg(&numel_i)
-                        .launch(partial_cfg)?;
-                }
-
+                // `out_dev` は `mse_finalize_f32` が単一ブロックの lane 0 で
+                // `out[0]` を必ず 1 回書く（`kernels_mse.rs` 参照）ため
+                // `alloc_uninit_f32(1)` を使える。
                 let mut out_dev = self.allocator.alloc_uninit_f32(1)?;
-                let num_partials_i = num_blocks as i32;
-                let finalize_cfg = LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (MSE_BLOCK_DIM, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                // SAFETY: `partial_dev` は上記で `num_blocks` 要素すべてが書き
-                // 込み済み、`out_dev` は `mse_finalize_f32` が単一ブロックの
-                // lane 0 で `out[0]` を必ず 1 回書く（`kernels_mse.rs` 参照）ため
-                // `alloc_uninit_f32(1)` を使える。`num_partials_i` は起動時に
-                // 確保した `partial_dev` の長さと同一の値を渡す（本関数内の
-                // 単一の `num_blocks` 由来。呼び出し元がずらせない）。
-                unsafe {
-                    self.stream
-                        .launch_builder(&self.finalize_f32)
-                        .arg(&partial_dev.as_view())
-                        .arg(&mut out_dev.as_view_mut())
-                        .arg(&num_partials_i)
-                        .arg(&factor)
-                        .launch(finalize_cfg)?;
-                }
+                let pred_arg = CudaArg::Slice(&pred_dev);
+                let target_arg = CudaArg::Slice(target_dev);
+                let mut partial_arg = CudaArgMut::View(partial_dev.as_view_mut());
+                let mut out_arg = CudaArgMut::View(out_dev.as_view_mut());
+                self.launch_partial_finalize(
+                    &pred_arg,
+                    &target_arg,
+                    &mut partial_arg,
+                    &mut out_arg,
+                    numel,
+                    factor,
+                )?;
 
                 let host: Vec<f32> = readback(&self.stream, &out_dev.as_view())?;
                 Ok(host.first().copied().unwrap_or(0.0))
@@ -341,28 +519,10 @@ impl CudaMse {
                 // 適用条件）。
                 let mut dpred_dev = self.allocator.alloc_uninit_f32(numel)?;
 
-                let numel_i = numel as i32;
-                let cfg = LaunchConfig {
-                    grid_dim: (numel.div_ceil(MSE_BLOCK_DIM as usize) as u32, 1, 1),
-                    block_dim: (MSE_BLOCK_DIM, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                // SAFETY: `pred_dev`／`target_dev`／`dpred_dev` はいずれも
-                // `numel` 要素のデバイスバッファであり、カーネル内の手動境界
-                // チェック（`if (idx < numel)`。REQ-8）と合わせて OOB 読み書き
-                // が起きない根拠とする。グリッド次元は `div_ceil` で numel を
-                // 包含するよう構築しており、末尾ブロックの余剰スレッドは
-                // カーネル内境界チェックで弾かれる。
-                unsafe {
-                    self.stream
-                        .launch_builder(&self.backward_f32)
-                        .arg(&pred_dev)
-                        .arg(target_dev)
-                        .arg(&mut dpred_dev.as_view_mut())
-                        .arg(&numel_i)
-                        .arg(&scale)
-                        .launch(cfg)?;
-                }
+                let pred_arg = CudaArg::Slice(&pred_dev);
+                let target_arg = CudaArg::Slice(target_dev);
+                let mut dpred_arg = CudaArgMut::View(dpred_dev.as_view_mut());
+                self.launch_backward(&pred_arg, &target_arg, &mut dpred_arg, numel, scale)?;
 
                 readback(&self.stream, &dpred_dev.as_view())
             })

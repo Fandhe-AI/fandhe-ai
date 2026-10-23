@@ -29,7 +29,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::host_staging::{HostStaging, HostStagingCache, HostStagingKind};
 use crate::memory::{READBACK_DEST, ReadbackDest};
 
-/// readback 宛先ポリシーを選ぶ env 変数名。許容値は `pretouched`／`pinned-reuse`（完全一致）のみ。
+/// readback 宛先ポリシーを選ぶ env 変数名。許容値は `pretouched`／`pinned-reuse`／`pretouched-prefetch`（完全一致）のみ。
 pub(crate) const READBACK_DEST_ENV: &str = "FANDHE_AI_CUDA_READBACK_DEST";
 
 /// env 値の解釈。完全一致の allowlist のみ受理し、未知値は `None`（呼び出し側が既定へ倒す）。
@@ -38,6 +38,8 @@ pub(crate) fn parse_env_value(raw: &str) -> Option<ReadbackDest> {
     match raw {
         "pretouched" => Some(ReadbackDest::PretouchedFresh),
         "pinned-reuse" => Some(ReadbackDest::PinnedStagingReuse),
+        // イシュー #3225: 背景事前タッチ済み宛先プール（f32 のみ。既定 OFF）。
+        "pretouched-prefetch" => Some(ReadbackDest::PrefetchedPretouched),
         _ => None,
     }
 }
@@ -240,8 +242,15 @@ mod tests {
             parse_env_value("pinned-reuse"),
             Some(ReadbackDest::PinnedStagingReuse)
         );
+        assert_eq!(
+            parse_env_value("pretouched-prefetch"),
+            Some(ReadbackDest::PrefetchedPretouched)
+        );
         for bad in [
             "",
+            "pretouched-prefetch ",
+            "Pretouched-Prefetch",
+            "prefetch",
             "Pinned-Reuse",
             " pinned-reuse",
             "pinned-reuse ",

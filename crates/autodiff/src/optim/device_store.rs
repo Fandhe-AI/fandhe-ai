@@ -842,11 +842,11 @@ impl ResidentResolver for DeviceParamStore {
         // Bugbot 指摘（#1212）是正: `resident_grad_capability` が未確定
         // （`None`）の間は、`gemm_fp32_strict_into` の対応可否が判明する
         // 前に total_numel（全パラメータ分）サイズの永続 `grad_staging`
-        // バッファをいきなり確保しない。CUDA／Metal は `MemoryOps::
-        // alloc_zeroed`（汎用デバイス確保）自体には対応しているが
-        // `gemm_fp32_strict_into`（既定 `Unsupported`）には対応していない
-        // ため、確保だけ成功してから直後に非対応と判明する組み合わせが
-        // 現実に起こりうる。素朴に総サイズを先に確保すると、二度と
+        // バッファをいきなり確保しない。記述時点（#1212）は CUDA／Metal が
+        // `gemm_fp32_strict_into`（既定 `Unsupported`）に未対応で、確保だけ
+        // 成功してから直後に非対応と判明する組み合わせが現実に起きた。
+        // 現在は #1555・#1559 で両者とも実装済みだが、probe 方式は未対応の
+        // バックエンド（ROCm・Mock）向けに維持している。素朴に総サイズを先に確保すると、二度と
         // 使われない全パラメータ分のデバイスバッファがストアの生存期間中
         // 残り続けてしまう（未使用バッファのリーク相当）。
         //
@@ -2258,10 +2258,15 @@ impl DeviceParamStore {
         let pending_backup = self.pending.take();
 
         // ② 更新フェーズ（#1023・イシュー #1212 で分岐追加）:
-        // `any_resident == false`（resident 経由が一度も成功していない
-        // バックエンド。現時点で CUDA／Metal はここに該当）は #1023 以来
+        // `any_resident` はバックエンド種別では決まらず、今回の backward で
+        // resident への書き込みが 1 件でも成功したかで決まる（CPU・CUDA・
+        // Metal の 3 バックエンドとも `gemm_fp32_strict_into` は実装済み。
+        // #1555・#1559。設計は `docs/train-step-resident-parts-design.md` §7）。
+        // `false` になるのは `Op::LinearResident` を経由しないモデルや、
+        // AMP・distributed の合成 `Gradients`（`resident_fingerprint = None`）
+        // など resident 経由が一度も成功しない場合で、#1023 以来
         // 無変更の経路（連結済み grad を新規バッファへ **1 回だけ**
-        // upload）を実行する。`any_resident == true`（CPU）は
+        // upload）を実行する。`any_resident == true` は
         // `GradStaging`（`fill_resident_weight_grad` が resident 経路の
         // d_weight を直接書き込み済み）へ、host 計算分（bias 等）だけを
         // `upload_into` で埋めてから `staging.buf` をそのまま SGD
@@ -2332,8 +2337,9 @@ impl DeviceParamStore {
                 // launch する」ことが前提のため、grad は毎ステップ新規
                 // 確保（`mem.upload`）ではなく永続 staging バッファへの
                 // `upload_into`（capture 対象区間の外側で行う。§4.5）へ
-                // 切り替える。`any_resident == false` のバックエンド
-                // （CUDA）は現状ここでしか `grad_staging` を使わないため
+                // 切り替える。`any_resident == false` になる step
+                // （resident 経由が成功しないモデル等。バックエンド種別では
+                // 決まらない）はここでしか `grad_staging` を使わないため
                 // 新規確保は高々 1 回（2 回目以降は再利用）。
                 let mut staging_ref = self.grad_staging.borrow_mut();
                 if staging_ref.is_none() {
@@ -5452,8 +5458,9 @@ mod tests {
     }
 
     /// イシュー #1479（AC-R2 の中核）: resident 未対応バックエンド
-    /// （`MockDeviceOps::new()`。CUDA／Metal の現状と同じ
-    /// `gemm_fp32_strict_into` 未実装状態）に対し、backward 後に
+    /// （`MockDeviceOps::new()`。`gemm_fp32_strict_into` 未対応の
+    /// バックエンド〈Mock・ROCm〉を模す。CUDA／Metal は #1555・#1559 で
+    /// 実装済みのため該当しない）に対し、backward 後に
     /// `resident_grads_to_host` を呼ぶと panic せず
     /// `BackendError::Unsupported` を返し、`param_grads_to_host`（統合版）
     /// は `grads.get(...)` へのフォールバックのみで `Ok` を返すことを

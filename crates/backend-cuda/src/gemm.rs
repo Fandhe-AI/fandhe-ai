@@ -408,6 +408,25 @@ pub(crate) fn diag_count_stream_sync() {
 #[inline(always)]
 pub(crate) fn diag_count_stream_sync() {}
 
+/// dW のデバイス入力 GEMM がどちらのオペランドを転置して実体化するか
+/// （[`CudaGemm::launch_gemm_dw_device`]。イシュー #3223）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DwDeviceKind {
+    /// `a` が転置格納（`xᵀ @ g` の標準形）。`a` を転置して GEMM する。
+    Tn,
+    /// `b` が転置格納。`b` を転置して GEMM する。
+    Nt,
+}
+
+/// デバイス入力 GEMM 入口専用の永続ワークスペース（`CudaGemm::device_workspace`）。
+/// `transposed` は転置の出力、`staged` は cp.async 整列のための直接オペランドの
+/// コピー先。いずれも offset 0 から使い、必要長を超えるときだけ作り直す。
+#[derive(Default)]
+pub(crate) struct GemmDeviceWorkspace {
+    transposed: Option<CudaSlice<f32>>,
+    staged: Option<CudaSlice<f32>>,
+}
+
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
 ///
 /// `stream` は [`CudaDevice`] から `Arc` クローンで受け取る（`device.rs` の
@@ -456,6 +475,16 @@ pub struct CudaGemm {
     /// で `Clone` は同一キャッシュ系列への参照複製）。フラグ OFF（既定）
     /// 時は本フィールドを一切参照しない。
     h2d_staging: Arc<Mutex<H2dStagingCache>>,
+    /// デバイス入力 GEMM 入口（`launch_gemm_dw_device`／
+    /// `launch_gemm_dinput_device`。イシュー #3223）専用の永続ワークスペース。
+    /// 転置中間バッファと cp.async 整列用の staging を grow-only で保持し、
+    /// プール（[`PooledCudaHandle`]）へは返さない。`PooledCudaHandle` は drop 時に
+    /// ストリーム順序なしでプールへ戻るため、同期を外した入口で使うと
+    /// 「GEMM が読み終える前に別処理へ再利用される」race になる
+    /// （設計判断 A。`docs/train-step-resident-parts-design.md` §6 案 (iii)）。
+    /// 起動を積み終えるまで `Mutex` を保持し、スレッド間共有でも 1 本の
+    /// ストリーム上で順序が崩れないようにする。
+    device_workspace: Mutex<GemmDeviceWorkspace>,
     naive_f32: CudaFunction,
     naive_f16: CudaFunction,
     tiled_f32: CudaFunction,
@@ -2684,6 +2713,7 @@ impl CudaGemm {
             ordinal: device.ordinal(),
             allocator,
             h2d_staging: Arc::new(Mutex::new(H2dStagingCache::new())),
+            device_workspace: Mutex::new(GemmDeviceWorkspace::default()),
             naive_f32,
             naive_f16,
             tiled_f32,
@@ -5184,6 +5214,45 @@ impl CudaGemm {
             return Ok(dst);
         }
 
+        self.launch_transpose_f32_into(
+            &CudaArg::Slice(src),
+            &mut CudaArgMut::View(dst.as_view_mut()),
+            rows,
+            cols,
+        )?;
+        Ok(dst)
+    }
+
+    /// smem 転置カーネルの起動本体（`rows × cols` の `src` を `cols × rows` の
+    /// `dst` へ書く）。プール由来の中間バッファを使う [`Self::transpose_to_pooled`]
+    /// （ホスト入力版。呼び出し元が drop 前に同期する）と、永続ワークスペースを
+    /// 使うデバイス入力版（[`Self::launch_gemm_dw_device`]・
+    /// [`Self::launch_gemm_dinput_device`]。イシュー #3223）の両方がこの関数を
+    /// 通る。`unsafe` ブロックは元々 `transpose_to_pooled` にあったものを
+    /// 配置非依存の [`CudaArg`]／[`CudaArgMut`] で受けるよう移設しただけで、
+    /// 新規の `unsafe` は増やしていない。
+    ///
+    /// 起動のみで同期しない（非同期投入契約 #1013）。完了保証は呼び出し元の
+    /// 次の同期点へ委ねる。`dst` の全要素を書き切るカーネルのため、`dst` の
+    /// 初期内容は読まれない（`transpose_to_pooled` の alloc_uninit 根拠参照）。
+    fn launch_transpose_f32_into(
+        &self,
+        src: &CudaArg<'_>,
+        dst: &mut CudaArgMut<'_>,
+        rows: u32,
+        cols: u32,
+    ) -> Result<(), CudaError> {
+        validate_transpose_dims(src.len(), rows, cols)?;
+        validate_transpose_output_len(dst.len(), cols, rows)?;
+
+        if rows == 0 || cols == 0 {
+            // 0 次元グリッドの起動を CUDA driver が拒否するため
+            // （`transpose.rs::launch_naive_f32` の `m == 0 || n == 0`
+            // 早期 return と同じ理由）。呼び出し元の契約上は到達しないが、
+            // safe な内部ヘルパーとして防御的に no-op で返す。
+            return Ok(());
+        }
+
         let func = self.transpose_smem_f32.as_ref().ok_or_else(|| {
             CudaError::TransposeEntryUnavailable {
                 detail: self.transpose_smem_f32_error.clone().unwrap_or_else(|| {
@@ -5195,26 +5264,23 @@ impl CudaGemm {
         let cfg = tiled_launch_config(rows, cols);
         let (m_i, n_i) = (rows as i32, cols as i32);
 
-        // SAFETY: `src`（呼び出し元検証済み rows*cols 要素）・`dst`
-        // （同じく rows*cols 要素。プール確保直後は上記 alloc_uninit 根拠
-        // により起動完了までに全要素が上書きされる）はカーネル引数
-        // （`const float* src, float* dst, int m, int n`）と型・個数が
-        // 1:1 対応し、カーネル内の手動境界チェック（`transpose.rs::
-        // launch_f32` と同一の根拠。REQ-8）と合わせて OOB を防ぐ。
+        // SAFETY: `src`（上記で rows*cols 要素と検証済み）・`dst`（同じく
+        // rows*cols 要素と検証済み）はカーネル引数
+        // （`const float* src, float* dst, int m, int n`）と型・個数が 1:1
+        // 対応し、カーネル内の手動境界チェック（`transpose.rs::launch_f32` と
+        // 同一の根拠。REQ-8）と合わせて OOB を防ぐ。`CudaArg`／`CudaArgMut` は
+        // 配置ごとの cudarc 型へ委譲するのみ。
         unsafe {
-            self.stream
-                .launch_builder(func)
-                .arg(src)
-                .arg(&mut dst.as_view_mut())
-                .arg(&m_i)
-                .arg(&n_i)
-                .launch(cfg)?;
+            let mut builder = self.stream.launch_builder(func);
+            src.push(&mut builder);
+            dst.push(&mut builder);
+            builder.arg(&m_i).arg(&n_i).launch(cfg)?;
         }
         // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
         // （`download_*`／`MemoryOps::download`／明示 `synchronize`）へ
         // 委ねる（設計文書 §3〜§4）。
         GEMM_TRANSPOSED_ENTRY_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
-        Ok(dst)
+        Ok(())
     }
 
     /// VJP 専用 NT 転置入口（イシュー #1214）: `matmul_vjp` の d_weight
@@ -5434,11 +5500,14 @@ impl CudaGemm {
                 t.out.zero_fill(&self.stream)?;
             }
             self.stream.synchronize()?;
+            diag_count_stream_sync();
             return Ok(());
         }
 
         let a_dev = self.upload_h2d_new(a)?;
+        diag_count_h2d(std::mem::size_of_val(a));
         let bt_dev = self.upload_h2d_new(bt)?;
+        diag_count_h2d(std::mem::size_of_val(bt));
         let b_std = self.transpose_to_pooled(&bt_dev, n, k)?;
 
         let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
@@ -5460,7 +5529,9 @@ impl CudaGemm {
         let reduce_result = match bias.as_mut() {
             // NT: `bt_dev` は `[n, k]` の密配置で、bias 勾配は各行（`k` 要素）
             // の和（`outer = n, axis_len = k, inner = 1`）。
-            Some(t) => self.launch_bias_reduce(t, &bt_dev, n as usize, k as usize, 1),
+            Some(t) => {
+                self.launch_bias_reduce(t, &CudaArg::Slice(&bt_dev), n as usize, k as usize, 1)
+            }
             None => Ok(()),
         };
         // 設計判断 A: `b_std` がまだ GPU 上で読まれている間にプールへ
@@ -5468,6 +5539,9 @@ impl CudaGemm {
         // スコープ終了）より前に完了を待つ。縮約の起動失敗でも `?` で
         // 抜けず必ず同期してから結果を返す（PR #3464 レビュー指摘）。
         let sync_result = self.stream.synchronize();
+        if sync_result.is_ok() {
+            diag_count_stream_sync();
+        }
         reduce_result?;
         sync_result?;
         Ok(())
@@ -5507,11 +5581,14 @@ impl CudaGemm {
                 t.out.zero_fill(&self.stream)?;
             }
             self.stream.synchronize()?;
+            diag_count_stream_sync();
             return Ok(());
         }
 
         let at_dev = self.upload_h2d_new(at)?;
+        diag_count_h2d(std::mem::size_of_val(at));
         let b_dev = self.upload_h2d_new(b)?;
+        diag_count_h2d(std::mem::size_of_val(b));
         let a_std = self.transpose_to_pooled(&at_dev, k, m)?;
 
         let (func, cfg) = self.select_tiled_f32_kernel(0, m, n, k);
@@ -5532,14 +5609,255 @@ impl CudaGemm {
             // TN: `b_dev` は `[k, n]` の密配置で、bias 勾配は列方向の和
             // （`outer = 1, axis_len = k, inner = n`）。GEMM と同じ
             // `b_dev` を再利用し g の再アップロードをしない。
-            Some(t) => self.launch_bias_reduce(t, &b_dev, 1, k as usize, n as usize),
+            Some(t) => {
+                self.launch_bias_reduce(t, &CudaArg::Slice(&b_dev), 1, k as usize, n as usize)
+            }
             None => Ok(()),
         };
         // 縮約失敗でも必ず同期してから `a_std`／H2D バッファを解放する。
         let sync_result = self.stream.synchronize();
+        if sync_result.is_ok() {
+            diag_count_stream_sync();
+        }
         reduce_result?;
         sync_result?;
         Ok(())
+    }
+
+    /// デバイス入力 GEMM 用ワークスペースのスロットを `len` 要素以上にして返す
+    /// （grow-only。イシュー #3223）。足りなければ作り直す。確保は safe API の
+    /// `alloc_zeros`（プール非経由）で、旧領域は drop される。cudarc 0.19.8 の
+    /// `CudaSlice::Drop` は `has_async_alloc` が真ならストリーム順序つきの
+    /// `free_async`（旧領域を読む起動済みカーネルの完了後に解放。GB10 は真）、
+    /// 偽なら `stream.synchronize()` のあと `free_sync` を行う。したがって同期が
+    /// 出うるのは「非 async-alloc 環境で拡張したとき」だけで、定常状態の
+    /// チェーンでは確保ゼロ・同期ゼロになる（決定記録 §6）。
+    ///
+    /// CUDA Graph capture 中の確保はグラフに記録されてしまうため拡張は
+    /// `CaptureExclusionRejected`（ops 側で `Unsupported` へ写す）で拒否する。拡張が
+    /// 不要なら capture 中でも通常どおり積める。
+    fn workspace_slot<'s>(
+        &self,
+        slot: &'s mut Option<CudaSlice<f32>>,
+        len: usize,
+    ) -> Result<&'s mut CudaSlice<f32>, CudaError> {
+        let fits = slot.as_ref().is_some_and(|s| s.len() >= len);
+        if !fits {
+            if context_cache::is_capturing_on_current_thread(self.ordinal) {
+                return Err(CudaError::CaptureExclusionRejected {
+                    detail: "gemm device workspace must grow during graph capture".to_string(),
+                });
+            }
+            *slot = Some(self.stream.alloc_zeros::<f32>(len)?);
+        }
+        slot.as_mut().ok_or_else(|| CudaError::InvalidKernelConfig {
+            detail: "gemm device workspace slot unavailable".to_string(),
+        })
+    }
+
+    /// ワークスペースの先頭 `len` 要素の読み取りビュー（[`Self::workspace_slot`]
+    /// で確保・書き込み済みのスロット用）。
+    fn workspace_view(slot: &Option<CudaSlice<f32>>, len: usize) -> Result<CudaArg<'_>, CudaError> {
+        let s = slot.as_ref().filter(|s| s.len() >= len).ok_or_else(|| {
+            CudaError::InvalidKernelConfig {
+                detail: "gemm device workspace slot shorter than requested".to_string(),
+            }
+        })?;
+        Ok(CudaArg::View(s.slice(0..len)))
+    }
+
+    /// `src` をワークスペースの staging スロットへストリーム順序のまま D2D コピー
+    /// する（cp.async 整列のため。呼び出し元は [`Self::workspace_view`] で読む）。
+    /// コピーなので値は bit 不変で、起動のみ・同期なし。
+    fn stage_copy(
+        &self,
+        slot: &mut Option<CudaSlice<f32>>,
+        src: &CudaArg<'_>,
+    ) -> Result<(), CudaError> {
+        let len = src.len();
+        let s = self.workspace_slot(slot, len)?;
+        let mut dst = CudaArgMut::View(s.slice_mut(0..len));
+        dst.copy_from_dtod(&self.stream, src)
+    }
+
+    fn lock_device_workspace(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, GemmDeviceWorkspace>, CudaError> {
+        self.device_workspace
+            .lock()
+            .map_err(|_| CudaError::InvalidKernelConfig {
+                detail: "gemm device workspace mutex poisoned".to_string(),
+            })
+    }
+
+    /// dW のデバイス入力 GEMM（イシュー #3223。`ops.rs::CudaBackendOps::
+    /// gemm_fp32_strict_into_device_impl` から呼ばれる）。ホスト版
+    /// [`Self::launch_tiled_f32_tn_into`]／[`Self::launch_tiled_f32_nt_into`] と同じ
+    /// 手順（転置で実体化 → `select_tiled_f32_kernel(0, ..)` → bias 縮約）を、
+    /// H2D・`synchronize`・プール由来の転置バッファなしで積む。
+    ///
+    /// - `Tn`: `a` は格納 `[k, m]`（論理 `[m, k]` の転置）、`b` は `[k, n]`。`a` を
+    ///   ワークスペースへ転置して GEMM。bias は `b` を `outer=1, axis=k, inner=n`。
+    /// - `Nt`: `a` は `[m, k]`、`b` は格納 `[n, k]`。`b` を転置して GEMM。bias は
+    ///   `b` の格納を `outer=n, axis=k, inner=1`。
+    /// - `direct_offset`: 転置せず直接 GEMM へ渡す側（Tn は `b`、Nt は `a`）の、
+    ///   裏のバッファ上の要素 offset。`tiled_f32_kernel_kind` の整列ゲートは A の
+    ///   offset しか見ないため、直接渡す側が 4 要素（16 バイト）境界でなければ
+    ///   staging スロットへコピーしてから渡す（cp.async の非整列ロードを構造的に
+    ///   避ける。カーネル選択はホスト版の offset 0 と同一になり bit 一致の根拠が
+    ///   保たれる）。基底確保は 256 バイト整列の前提。
+    ///
+    /// 同期しない（起動のみ）。完了保証は呼び出し元の次の同期点。ホスト版の
+    /// 明示 `synchronize()` はプール由来バッファの drop 前同期のためで、本入口は
+    /// プールを使わないため不要。`m`・`n`・`k` が 0 の形状は呼び出し元が
+    /// `Unsupported` で拒否する契約（ここへ来たら `InvalidShape`）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn launch_gemm_dw_device(
+        &self,
+        kind: DwDeviceKind,
+        a: &CudaArg<'_>,
+        b: &CudaArg<'_>,
+        direct_offset: usize,
+        c_dev: &mut CudaArgMut<'_>,
+        m: u32,
+        n: u32,
+        k: u32,
+        mut bias: Option<BiasReduceTarget<'_, '_>>,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 || k == 0 {
+            return Err(CudaError::InvalidShape {
+                detail: "gemm device dW: zero-sized dimension is rejected by the caller"
+                    .to_string(),
+            });
+        }
+        let (outer, axis_len, inner, t_rows) = match kind {
+            DwDeviceKind::Tn => (1usize, k as usize, n as usize, k),
+            DwDeviceKind::Nt => (n as usize, k as usize, 1usize, n),
+        };
+        if !crate::transpose::transpose_rows_fit_grid_y_limit(t_rows) {
+            return Err(CudaError::InvalidKernelConfig {
+                detail: format!("gemm device dW: transpose rows {t_rows} exceed grid.y limit"),
+            });
+        }
+        if let Some(t) = bias.as_ref() {
+            // bias 縮約の元は常に `b`（Tn は `[k, n]`、Nt は格納 `[n, k]`）。
+            self.validate_bias_target(t, n, b.len(), outer, axis_len, inner)?;
+        }
+
+        let (m_us, n_us, k_us) = (m as usize, n as usize, k as usize);
+        let mut ws = self.lock_device_workspace()?;
+        let GemmDeviceWorkspace { transposed, staged } = &mut *ws;
+        let staged_view;
+        match kind {
+            DwDeviceKind::Tn => {
+                // `a`（格納 [k, m]）を標準 `[m, k]` へ。
+                let len = m_us * k_us;
+                {
+                    let slot = self.workspace_slot(transposed, len)?;
+                    let mut dst = CudaArgMut::View(slot.slice_mut(0..len));
+                    self.launch_transpose_f32_into(a, &mut dst, k, m)?;
+                }
+                let a_std = Self::workspace_view(transposed, len)?;
+                let b_eff: &CudaArg<'_> = if crate::gemm_device_model::needs_staging(direct_offset)
+                {
+                    self.stage_copy(staged, b)?;
+                    staged_view = Self::workspace_view(staged, b.len())?;
+                    &staged_view
+                } else {
+                    b
+                };
+                self.launch_tiled_f32_resident(&a_std, 0, b_eff, c_dev, m, n, k)?;
+            }
+            DwDeviceKind::Nt => {
+                // `b`（格納 [n, k]）を標準 `[k, n]` へ。
+                let len = k_us * n_us;
+                {
+                    let slot = self.workspace_slot(transposed, len)?;
+                    let mut dst = CudaArgMut::View(slot.slice_mut(0..len));
+                    self.launch_transpose_f32_into(b, &mut dst, n, k)?;
+                }
+                let b_std = Self::workspace_view(transposed, len)?;
+                let a_eff: &CudaArg<'_> = if crate::gemm_device_model::needs_staging(direct_offset)
+                {
+                    self.stage_copy(staged, a)?;
+                    staged_view = Self::workspace_view(staged, a.len())?;
+                    &staged_view
+                } else {
+                    a
+                };
+                self.launch_tiled_f32_resident(a_eff, 0, &b_std, c_dev, m, n, k)?;
+            }
+        }
+        if let Some(t) = bias.as_mut() {
+            // 元の device view をそのまま読む（縮約カーネルはスカラーロードで
+            // 整列制約がない）。GEMM と同一ストリーム上の起動で順序は保証される。
+            self.launch_bias_reduce(t, b, outer, axis_len, inner)?;
+        }
+        Ok(())
+    }
+
+    /// d_input のデバイス入力 GEMM（`c = w @ b`。イシュー #3223。`ops.rs::
+    /// CudaBackendOps::gemm_resident_lhs_device_impl` から呼ばれる）。ホスト版
+    /// `gemm_resident_lhs` の NT 分岐（[`Self::launch_tiled_f32_resident_nt`]）と
+    /// フォールバック（[`Self::launch_tiled_f32_resident`]）に対応する。
+    ///
+    /// - `b_transposed = true`: `b` は格納 `[r, q]`（論理 `[q, r]` の転置）。
+    ///   ワークスペースへ転置して GEMM。
+    /// - `b_transposed = false`: `b` は `[q, r]`。`b_offset` が 4 要素境界でなければ
+    ///   staging へコピーしてから渡す（[`Self::launch_gemm_dw_device`] と同じ理由）。
+    /// - `w_offset` はホスト版と同じく実 offset を `select_tiled_f32_kernel` へ渡す
+    ///   （A の整列ゲートが選択入力としてホスト版と同一になる）。
+    ///
+    /// 同期しない。`p`・`r`・`q` が 0 の形状は呼び出し元が先に処理する契約。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn launch_gemm_dinput_device(
+        &self,
+        w: &CudaArg<'_>,
+        w_offset: usize,
+        b: &CudaArg<'_>,
+        b_offset: usize,
+        b_transposed: bool,
+        c_dev: &mut CudaArgMut<'_>,
+        p: u32,
+        r: u32,
+        q: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(w.len(), b.len(), p, r, q)?;
+        validate_tiled_k_bound(q)?;
+        validate_output_len(c_dev.len(), p, r)?;
+        if p == 0 || r == 0 || q == 0 {
+            return Err(CudaError::InvalidShape {
+                detail: "gemm device d_input: zero-sized dimension is handled by the caller"
+                    .to_string(),
+            });
+        }
+        if b_transposed && !crate::transpose::transpose_rows_fit_grid_y_limit(r) {
+            return Err(CudaError::InvalidKernelConfig {
+                detail: format!("gemm device d_input: transpose rows {r} exceed grid.y limit"),
+            });
+        }
+
+        let mut ws = self.lock_device_workspace()?;
+        let GemmDeviceWorkspace { transposed, staged } = &mut *ws;
+        if b_transposed {
+            let len = (q as usize) * (r as usize);
+            {
+                let slot = self.workspace_slot(transposed, len)?;
+                let mut dst = CudaArgMut::View(slot.slice_mut(0..len));
+                self.launch_transpose_f32_into(b, &mut dst, r, q)?;
+            }
+            let b_std = Self::workspace_view(transposed, len)?;
+            self.launch_tiled_f32_resident(w, w_offset, &b_std, c_dev, p, r, q)
+        } else if crate::gemm_device_model::needs_staging(b_offset) {
+            self.stage_copy(staged, b)?;
+            let b_eff = Self::workspace_view(staged, b.len())?;
+            self.launch_tiled_f32_resident(w, w_offset, &b_eff, c_dev, p, r, q)
+        } else {
+            self.launch_tiled_f32_resident(w, w_offset, b, c_dev, p, r, q)
+        }
     }
 
     /// bias 縮約先がこの `CudaGemm` と同一ストリームで、出力長が `n` で
@@ -5586,7 +5904,7 @@ impl CudaGemm {
     fn launch_bias_reduce(
         &self,
         t: &mut BiasReduceTarget<'_, '_>,
-        src: &CudaSlice<f32>,
+        src: &CudaArg<'_>,
         outer: usize,
         axis_len: usize,
         inner: usize,
@@ -5594,12 +5912,11 @@ impl CudaGemm {
         if axis_len == 1 {
             // `outer * inner == n`。k == 1 では先頭 n 要素が bias そのもの。
             let n = t.out.len();
-            return t
-                .out
-                .copy_from_dtod(&self.stream, &CudaArg::View(src.slice(0..n)));
+            let head = src.prefix(n)?;
+            return t.out.copy_from_dtod(&self.stream, &head);
         }
         t.reduce
-            .launch_sum_axis_generic_into(&CudaArg::Slice(src), t.out, outer, axis_len, inner)
+            .launch_sum_axis_generic_into(src, t.out, outer, axis_len, inner)
     }
 
     /// f16 カーネル共通の起動手続き。[`Self::run_f32_kernel`] と同一構造

@@ -211,12 +211,12 @@ pub mod weight_reparam;
 
 pub use backend_ops::{
     Activation, AdagradStepConfig, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput,
-    BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, Conv3dParams, EighFactors,
-    GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget,
-    LambMoments, LambStepConfig, LayerNormBackwardOutput, LstmPointwiseOutput, MatrixNormOrd,
-    MseReduction, Pool2dParams, QrFactors, RmsPropOptionalBuffers, RmsPropStepConfig,
-    ScatterReduce, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig, SlogdetFactors,
-    SvdFactors, UnaryElementwiseOp, UniqueExtOutput, VectorNormOrd,
+    BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, Conv3dParams, DeviceMatrixLayout,
+    EighFactors, GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
+    KlDivTarget, LambMoments, LambStepConfig, LayerNormBackwardOutput, LstmPointwiseOutput,
+    MatrixNormOrd, MseReduction, Pool2dParams, QrFactors, RmsPropOptionalBuffers,
+    RmsPropStepConfig, ScatterReduce, SegmentKey, SegmentResource, SegmentRun, SgdStepConfig,
+    SlogdetFactors, SvdFactors, UnaryElementwiseOp, UniqueExtOutput, VectorNormOrd,
     checked_gemm_batched_output_len, gemm_batched_via_per_batch_gemm,
     gemm_batched_via_per_batch_gemm_fp32_strict, normalize_batched_operand, ops_for,
 };

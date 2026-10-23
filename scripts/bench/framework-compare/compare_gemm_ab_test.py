@@ -668,6 +668,33 @@ class SizesLargeTest(unittest.TestCase):
         )
         self.assertEqual(code, 2)
 
+    def test_cuda_readback_prefetch_sets(self):
+        # イシュー #3225: セル群ごとの N 集合（既存集合は不変）。
+        f = compare_gemm_ab._size_set_for
+        self.assertEqual(f("cuda", "readback-prefetch-gate"), frozenset({512, 1024, 2048, 4096}))
+        self.assertEqual(f("cuda", "readback-prefetch-4096"), frozenset({4096}))
+        self.assertEqual(f("cuda", "readback-prefetch-guard"), frozenset({512, 1024, 2048}))
+        self.assertEqual(f("cuda", "readback-prefetch-n256"), frozenset({256}))
+        with self.assertRaises(ValueError):
+            f("cpu", "readback-prefetch-gate")
+
+    def test_cuda_readback_prefetch_guard_accepts_fresh_three_cells(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(512, 1024, 2048), device="cuda")
+        code, out, _ = self._run(
+            before, after,
+            ["--device", "cuda", "--modes", "fresh", "--sizes", "readback-prefetch-guard"],
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("非後退"), 3)
+
+    def test_cuda_readback_prefetch_gate_rejects_n256_row(self):
+        before, after = _all_cells_rows(0.002, 0.0019, sizes=(256, 512, 1024, 2048, 4096), device="cuda")
+        code, _, _ = self._run(
+            before, after,
+            ["--device", "cuda", "--modes", "reuse", "--sizes", "readback-prefetch-gate"],
+        )
+        self.assertEqual(code, 2)
+
     def test_cpu_readback_n256_is_invalid_input(self):
         before, after = _all_cells_rows(0.002, 0.0019, sizes=(256,), device="cpu")
         code, _, err = self._run(before, after, ["--device", "cpu", "--sizes", "readback-n256"])
