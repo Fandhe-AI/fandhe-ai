@@ -28,7 +28,7 @@
 //! - 損失は MSE の mean 固定。SGD のみ（`step()` と同じ前提条件を通す）
 //! - `steps` が store の全パラメータをちょうど 1 回ずつ覆うこと（勾配バッファの
 //!   取りこぼし・weight tying を拒否する）
-//! - バッチが空（`m == 0`）は `Unsupported`
+//! - バッチが空（`m == 0`）・最終層の出力幅 0（`n == 0`）は `Unsupported`
 //!
 //! # 失敗の境界（決定記録 §5 の 2 段目）
 //! - 最初の dW を勾配バッファへ書く前に部品が `Unsupported` を返した場合は、そのまま返し
@@ -447,6 +447,14 @@ impl DeviceParamStore {
         if xs[0] == 0 {
             return Err(BackendError::Unsupported(
                 "DeviceParamStore::train_step_device_chain: empty batch (m == 0) is unsupported"
+                    .to_string(),
+            ));
+        }
+        // 最終層の出力幅 0 は `mse_loss_scale(1.0, 0, Mean)` が inf になり、backward / SGD が
+        // 非有限の更新値を書き込むため、scale 計算より前に型付きエラーで拒否する。
+        if n_last == 0 {
+            return Err(BackendError::Unsupported(
+                "DeviceParamStore::train_step_device_chain: zero-width output (n == 0) is unsupported"
                     .to_string(),
             ));
         }

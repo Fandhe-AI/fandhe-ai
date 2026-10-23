@@ -121,6 +121,40 @@ fn cpu_chain_keeps_the_store_unchanged_until_cpu_parts_exist() {
     }
 }
 
+/// 最終層の出力幅 0（n == 0）は `mse_loss_scale` が inf になるため、型付きエラーで拒否し params を変えない。
+#[test]
+fn chain_rejects_zero_width_output() {
+    let model = build_mlp(&[6, 8, 0]);
+    let tape = crate::tape();
+    let mut store = model.init_device_param_store(&tape).unwrap();
+    let before: Vec<Vec<u32>> = tape
+        .sync_device_param_store_to_host(&store)
+        .unwrap()
+        .iter()
+        .map(bits)
+        .collect();
+    let x = tape
+        .upload_resident(&store, &host_tensor(1, &[4, 6]))
+        .unwrap();
+    let y = tape
+        .upload_resident(&store, &host_tensor(2, &[4, 0]))
+        .unwrap();
+    let config = SgdConfig::new(0.05);
+    match chain_train_step(&model, &mut store, &tape, &x, &y, &config) {
+        Err(BackendError::Unsupported(msg)) => {
+            assert!(msg.contains("n == 0"), "msg={msg}");
+        }
+        other => panic!("n == 0 は Unsupported のはず: {other:?}"),
+    }
+    let after: Vec<Vec<u32>> = tape
+        .sync_device_param_store_to_host(&store)
+        .unwrap()
+        .iter()
+        .map(bits)
+        .collect();
+    assert_eq!(before, after, "拒否時は params 不変");
+}
+
 #[cfg(target_os = "macos")]
 mod metal {
     use super::*;
