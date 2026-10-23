@@ -327,7 +327,10 @@ def evaluate(base):
         if fc_ok and K is not None and K > KS[0]:
             res["verdict"] = "ADOPT-k（k >= %d）" % K
         else:
-            res["verdict"] = "REJECT" if (not fc_ok or K is None) else "undetermined"
+            # RULE.txt §4: K 下限を格子上で決められない（K is None）場合は REJECT も ADOPT-k も主張せず undetermined
+            res["verdict"] = "REJECT" if not fc_ok else "undetermined"
+            if K is None and fc_ok:
+                res["notes"].append("K 格子の全点で ON が後退し K 下限を決められない（undetermined）")
             if K is not None and K <= KS[0]:
                 res["notes"].append("K 格子では全 k で ON <= OFF だが GEMM 単体 l2_dx は後退しており矛盾（undetermined）")
     elif fc_ok and gemm_reach_ok:
@@ -470,6 +473,7 @@ def self_test():
     check("l2_dx のみ後退 + K=16 は ADOPT-k", _verdict(regress="l2_dx", kmin=16), "ADOPT-k（k >= 16）")
     check("l2_dx のみ後退 + K=64 は ADOPT-k", _verdict(regress="l2_dx", kmin=64), "ADOPT-k（k >= 64）")
     check("l2_dx のみ後退でも K 格子に後退なしは undetermined", _verdict(regress="l2_dx"), "undetermined")
+    check("l2_dx のみ後退で K 下限を格子上で決められないと undetermined", _verdict(regress="l2_dx", kmin=1000), "undetermined")
     check("l2_dx 後退 + l1_fwd 後退は REJECT", _verdict(regress="l1_fwd", kmin=16), "REJECT")
     check("ON が遅い（1.05）", _verdict(on_ratio=1.05), "REJECT")
     check("train/infer 後退 + l2_dx 後退は REJECT", _verdict(on_ratio=1.05, regress="l2_dx", kmin=16), "REJECT")

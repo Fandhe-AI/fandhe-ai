@@ -153,6 +153,11 @@ wait_gate() { # wait_gate <round>
     local r=$1 waited=0 load1
     while :; do
         load1="$(uptime | sed 's/.*load averages*: *//' | awk '{gsub(",","",$1); print $1}')"
+        # load1 が空・非数値（uptime 失敗・出力形式差）だと awk の l+0 が 0 になりゲートを素通りするため、数値形式を先に検証する（RULE.txt P-GATE）
+        if ! printf '%s' "${load1}" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+            echo "round${r} gate=load1-unavailable gate_ok=0 threshold=3.0 load1=${load1:-NA} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GATE_LOG}"
+            return 1
+        fi
         if awk -v l="${load1}" 'BEGIN{exit !(l+0 < 3.0)}'; then
             echo "round${r} gate=pass gate_ok=1 threshold=3.0 load1=${load1} waited_s=${waited} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GATE_LOG}"
             return 0
