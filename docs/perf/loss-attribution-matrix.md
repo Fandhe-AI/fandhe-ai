@@ -622,6 +622,45 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 - ADOPT 条件には両機体の成立を要するゲートがあり（2104・2102）、GB10 側が undetermined の間は反転できる定数がない（`docs/perf/optin-ab-gb10.md`）
 - HEAD に実装済みで 0.11.0 に含まれないもの（#3193・#3194・#3196・#3202・#3203）は A/B のゲートではない。効果は §10.4 に実測を置き、0.12.0 の再計測（#3273）で確認する
 
+#### 10.8.1 #3227 の既定反転監査（2026-10-23 時点・origin/main `f35f5e834`）
+
+結論: **既定を反転したゲートは 0 件**。`crates/` は変えていない。本節は判定を出さず、各結論 doc の判定語彙をそのまま転記する（契約 3）。判定が ADOPT でないゲートは OFF のまま残す。
+
+| ゲート（定数・所在） | 判定（出典 doc の語彙） | 出典 | OFF 維持の理由 |
+|---|---|---|---|
+| `HOST_ARENA_DEFAULT_ENABLED`（`crates/tensor-core/src/alloc.rs:25`）G1／B1 | **REJECT**（Mac mini 正式系列で train reuse 1.0090・5/5 後退。GB10 は undetermined） | `optin-ab-macmini.md`・`optin-ab-gb10.md` | 一機体の 5/5 後退で REJECT |
+| `REDUCTION_SEQUENTIAL_FALLBACK_ENABLED`（`crates/backend-cpu/src/reduction.rs:105`）G2／B2 | undetermined（両機体。T 候補は 16384） | 同上 | ADOPT 不成立 |
+| `TRAIN_FORWARD_ENCODE_ONLY_DEFAULT_ENABLED`（`crates/backend-metal/src/train_forward_encode_runtime.rs:33`）G3 | undetermined（train fresh 1.0077。train reuse 0.9000 は記録のみ） | `optin-ab-macmini.md` | ADOPT 不成立。再計測は新しい事前登録が要る |
+| `READBACK_DEST_DEFAULT`（`crates/backend-metal/src/readback_policy.rs:42`）G4 | **REJECT** | 同上 | — |
+| `METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED`（`crates/backend-metal/src/fixed_cost_diag.rs:43`）G7 | record_only | 同上 | 判定の枠組みが無い |
+| steel 候補（#2110） | LU・T0U-LU-FB は UNDETERMINED、T0U・T0U-LU は **REJECT** | 同上 | — |
+| `GB10_AFFINITY_ENABLED`（`crates/backend-cpu/src/gb10_affinity.rs:126`） | **REJECT**（14 セル中 6 セルで ratio > 1.00） | `cpu-gemm-gb10-affinity-ab.md` | — |
+| `SMALL_SHAPE_CAP_ENABLED`（`crates/backend-cpu/src/small_shape_thread_cap.rs:87`）・big-core（#3178） | どちらも **REJECT**（Mac mini 専有系列） | `cpu-thread-policy-macmini.md` | — |
+| `INFER_GRAPH_DEFAULT_ENABLED`（`crates/backend-cuda/src/graph.rs:658`）B3 | undetermined（#3205 で是正済み。GB10 での再判定は未実施） | `infer-chain-graphcapture-cuda-ab.md`・`infer-chain-fixed-cost-reduction-3205.md` | 再判定待ち |
+| m=64 の分割（`SMALL_M_JOB_MERGE_ENABLED`・`RESIDENT_W_PREPACK_ENABLED`、#3177 の jpw1／cap4／cap8） | 採否未定（記録のみ。#3201 は open で実機未計測） | `cpu-gemm-m64-jobgrid-diagnosis.md` §4 | 判定が無い |
+| `EAGER_MATMUL_RELEASE_DEFAULT_ENABLED`（`crates/autodiff/src/eager_release.rs:40`・#3226） | 5 round の A/B 未実施（単一 run のため判定できない） | `cpu-gemm-reuse-fresh-inversion.md` | 判定が無い |
+| CUDA readback `PrefetchedPretouched`（#3225） | GB10 で未実測・undetermined | `cuda-gemm-reuse-phase-breakdown.md` | 判定が無い |
+| `M64_THIN_TILE_ENABLED`（`crates/backend-metal/src/tile.rs:1058`・#3207） | undetermined（未計測） | `metal-gemm-m64-thin-tile-candidates.md` | 判定が無い |
+| `FRAG_INTERLEAVE_ENABLED`（Metal・#3212） | **REJECT**（候補 FI） | `logs/metal-frag-interleave-ab-macmini-3212/aggregate.md` | — |
+
+範囲外として除外した ADOPT 系（担当先を明記）:
+
+- G5 readout borrowed: 継承集計器の判定は ADOPT だが #1520 を覆さない扱いで、採否は #3265
+- SME ON（Mac mini・ADOPT 候補）: 監査は #3230、しきい値の確定と既定 ON は #3231
+- C1 TMA 2 段 128×64（GB10・ADOPT）: 既定値の定数ではなく本番カーネル選択への結線で、ゲート D は結線 PR の担当（`docs/backend-cuda-tma-gemm-load-design.md` §6・§11）
+
+機体で判定が割れたゲートの検討:
+
+- G1: Mac mini が REJECT、GB10 は undetermined（ADOPT ではない）。GB10 だけ ON にする機体別既定の根拠が無く、OFF を維持する
+- `SMALL_SHAPE_CAP` の `ELIGIBLE_BRANDS`（現在 `["Apple M4 Max"]`）: Mac mini は専有環境の再計測で REJECT（#3178）のため追加しない
+
+検証の扱い:
+
+- 反転が 0 件のため、反転後の `#[ignore]` 実機テスト全件と main の突き合わせ・前後値の記録・後退セルの併記は該当なし（実機計測は行っていない）
+- tolerance・parity baseline・FMA 契約は変更していない
+
+判定材料が揃っていない入力: #3201（実機 A/B）、B3 の GB10 再判定、G2・G3 の再計測、#3225・#3226・#3207 の A/B。ADOPT が出たらゲートごとの PR で反転し、その時点で `#[ignore]` 全件を main と突き合わせる。
+
 ### 10.9 Phase 10・11 へのつながり（診断 → 前提にする実装 → 参照するセル）
 
 親 issue の葉は `gh api repos/Fandhe-AI/fandhe-ai/issues/<親>/sub_issues` の結果（2026-10-22 時点。すべて open）。タイトルは要約で、番号と親子関係は API の結果のとおり。
@@ -651,7 +690,7 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 | #3206 | open | Mac mini（M4・GPU 10 コア）向けの Metal タイル表 | MM-MTL-G512〜G4096 |
 | #3225 | open | CUDA の reuse の readback の遅さの是正 | G-CUDA-G512〜G2048 |
 | #3226 | open | CPU で reuse が fresh より遅い逆転の是正 | G-CPU-G256〜G2048 |
-| #3227 | open | ADOPT になった opt-in の既定を ON にする（現状、反転できるゲートはない。§10.8） | 全 opt-in 対象セル |
+| #3227 | open | ADOPT になった opt-in の既定を ON にする（監査済み・反転 0 件。§10.8.1） | 全 opt-in 対象セル |
 | #3262 | open | CUDA GEMM の既定精度の判断材料（§10.7 の値を入力にする） | G-CUDA-G2048・G4096 |
 | #3273 | open | 0.12.0 の 6 フレームワーク同席計測（本表との突き合わせ先） | 27 セルすべて |
 | #3195 | open | 要素数の小さい MSE backward を逐次で実行する（G2 縮約逐次化の関連） | MM-MTL-TRN・MM-CPU-TRN |
