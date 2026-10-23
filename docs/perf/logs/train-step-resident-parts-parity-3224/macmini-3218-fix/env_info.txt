@@ -1,0 +1,150 @@
+--- before relu_mask_device_parity run1 2026-10-23T10:36:49Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after relu_mask_device_parity run1 2026-10-23T10:36:49Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before relu_mask_device_parity run2 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after relu_mask_device_parity run2 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before relu_mask_device_parity run3 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after relu_mask_device_parity run3 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before relu_mask_device_parity run4 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after relu_mask_device_parity run4 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before relu_mask_device_parity run5 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after relu_mask_device_parity run5 2026-10-23T10:36:50Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before mse_device_parity run1 2026-10-23T10:36:51Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after mse_device_parity run1 2026-10-23T10:36:51Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before mse_device_parity run2 2026-10-23T10:36:51Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after mse_device_parity run2 2026-10-23T10:36:51Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before mse_device_parity run3 2026-10-23T10:36:51Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after mse_device_parity run3 2026-10-23T10:36:52Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before mse_device_parity run4 2026-10-23T10:36:52Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after mse_device_parity run4 2026-10-23T10:36:52Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before mse_device_parity run5 2026-10-23T10:36:52Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after mse_device_parity run5 2026-10-23T10:36:52Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_input_parity run1 2026-10-23T10:36:52Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_input_parity run1 2026-10-23T10:36:53Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_input_parity run2 2026-10-23T10:36:53Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_input_parity run2 2026-10-23T10:36:53Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_input_parity run3 2026-10-23T10:36:53Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_input_parity run3 2026-10-23T10:36:54Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_input_parity run4 2026-10-23T10:36:54Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_input_parity run4 2026-10-23T10:36:54Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_input_parity run5 2026-10-23T10:36:54Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_input_parity run5 2026-10-23T10:36:54Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before train_step_parts_no_wait_3224 run1 2026-10-23T10:36:54Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after train_step_parts_no_wait_3224 run1 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before train_step_parts_no_wait_3224 run2 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after train_step_parts_no_wait_3224 run2 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before train_step_parts_no_wait_3224 run3 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after train_step_parts_no_wait_3224 run3 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before train_step_parts_no_wait_3224 run4 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after train_step_parts_no_wait_3224 run4 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before train_step_parts_no_wait_3224 run5 2026-10-23T10:36:55Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after train_step_parts_no_wait_3224 run5 2026-10-23T10:36:56Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_tracked_token run1 2026-10-23T10:36:56Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_tracked_token run1 2026-10-23T10:36:56Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_tracked_token run2 2026-10-23T10:36:56Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_tracked_token run2 2026-10-23T10:36:56Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_tracked_token run3 2026-10-23T10:36:56Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_tracked_token run3 2026-10-23T10:36:57Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_tracked_token run4 2026-10-23T10:36:57Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_tracked_token run4 2026-10-23T10:36:57Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- before gemm_device_tracked_token run5 2026-10-23T10:36:57Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
+--- after gemm_device_tracked_token run5 2026-10-23T10:36:57Z
+Darwin <metal-node> 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132 arm64
+rustc 1.99.0 (b940084d7 2026-09-28)
