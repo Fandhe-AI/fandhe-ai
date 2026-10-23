@@ -713,8 +713,8 @@ pub(crate) enum ReadbackDest {
     /// `set_len` により確保する未初期化 `Vec`）。挙動・bit 出力とも
     /// 本イシュー導入前と完全に同一。
     ///
-    /// イシュー #2299: 本番既定 `READBACK_DEST` は常に
-    /// `PretouchedFresh` で、本 variant を選ぶのは診断専用入口
+    /// イシュー #2299 時点: 本番既定 `READBACK_DEST` は常に
+    /// `PretouchedFresh` だった（#3227 以降の既定は `PrefetchedPretouched`）。本 variant を選ぶのは診断専用入口
     /// （`readback_f32_diag`／`readback_f16_diag`。`internal-
     /// diagnostics` feature 限定）のみ・unit test からの直接構築も
     /// ない。feature で gate する。
@@ -732,9 +732,11 @@ pub(crate) enum ReadbackDest {
     /// 返す `Vec` は D2H が全要素を上書きするため `PretouchedFresh` と bit 同一。
     PinnedStagingReuse,
     /// 背景スレッドで事前タッチした宛先 `Vec<f32>` のプール（`crate::readback_prefetch`）から
-    /// 取り出して `memcpy_dtoh` する opt-in 方式（イシュー #3225）。既定 OFF。env
-    /// `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch` でのみ選ばれる。f32 以外・小形状・
+    /// 取り出して `memcpy_dtoh` する opt-in 方式（イシュー #3225）。#3227 で既定化。env
+    /// `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch` でも明示選択できる。f32 以外・小形状・
     /// プール miss は `PretouchedFresh` と同一処理。返す `Vec` は `PretouchedFresh` と bit 同一。
+    /// イシュー #3227: #3225 の ADOPT 判定（`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §15.2）により
+    /// 本番既定。env `FANDHE_AI_CUDA_READBACK_DEST=pretouched` で従来方式へ戻せる。
     PrefetchedPretouched,
 }
 
@@ -757,7 +759,14 @@ pub(crate) enum ReadbackDest {
 /// ことから ADOPT 判断は変更していない。詳細・Layer A（framework-compare
 /// 実践規模）ゲート結果は `docs/perf/cuda-host-view-readout-small-shape-
 /// regression.md` §13 以降（とくに §13.3 の再評価）を参照。
-pub(crate) const READBACK_DEST: ReadbackDest = ReadbackDest::PretouchedFresh;
+///
+/// イシュー #3227: #3225 の ADOPT 判定（凍結 RULE の逐語適用・GB10・主判定 5 セル ratio 0.41〜0.59・
+/// ガード最大 1.0106・checksum 完全一致。`docs/perf/cuda-gemm-reuse-phase-breakdown.md` §15.2・§15.4）に
+/// 基づき、既定を `PrefetchedPretouched` へ反転した。f32 以外・1 MiB 未満・128 MiB 超・プール miss は
+/// `PretouchedFresh` と同じ処理になる。opt-out は env `FANDHE_AI_CUDA_READBACK_DEST=pretouched`。
+/// 保持上限は合計 256 MiB・8 エントリ（凍結定数 `PREFETCH_LIMITS`）で、解放経路は
+/// [`release_readback_prefetch`]（REQ-14）。
+pub(crate) const READBACK_DEST: ReadbackDest = ReadbackDest::PrefetchedPretouched;
 
 /// [`ReadbackDest::PretouchedFresh`] が要求する「非ゼロ事前タッチ値」を
 /// 型ごとに定義する crate 内部限定トレイト。`readback` は `f32`
@@ -933,7 +942,7 @@ pub(crate) fn pretouched_host_vec<T: ReadbackSentinel>(numel: usize) -> Vec<T> {
 /// 「同期点は D2H 境界のみ」という契約を単一箇所に集約する。
 ///
 /// 宛先確保方式は [`READBACK_DEST`]（[`ReadbackDest`]）で切り替わる
-/// （イシュー #1437）。既定は `PretouchedFresh` であり、`host-view-readout`
+/// （イシュー #1437）。既定は #3227 以降 `PrefetchedPretouched`（#1437 の時点では `PretouchedFresh`）であり、`host-view-readout`
 /// feature の有効・無効に関わらず本関数の全呼び出し（`off`／`on` 両方の
 /// 経路）が同じ既定値を通る（`ReadbackDest` の選択はこの feature flag
 /// に連動しない）。返す `Vec` の内容は `Fresh` と bit 同一だが、宛先を
@@ -948,7 +957,7 @@ where
     Src: DevicePtr<T>,
 {
     // 宛先方式は `readback_policy::current_dest()`（テスト override > env
-    // `FANDHE_AI_CUDA_READBACK_DEST` > `READBACK_DEST`。既定 `PretouchedFresh` 不変。#2108）。
+    // `FANDHE_AI_CUDA_READBACK_DEST` > `READBACK_DEST`。既定は #3227 で `PrefetchedPretouched`。#2108）。
     readback_with(stream, dev, crate::readback_policy::current_dest())
 }
 
@@ -1043,8 +1052,8 @@ pub fn release_readback_staging() -> u64 {
     crate::readback_policy::readback_staging_pool().release_all()
 }
 
-/// 背景事前タッチプール（`PrefetchedPretouched` opt-in 時に最大 256 MiB の通常ホストメモリを保持。
-/// イシュー #3225）の Ready バッファを明示解放し、解放バイト数を返す（REQ-14）。未 opt-in なら 0。
+/// 背景事前タッチプール（既定経路（#3227）で 1 MiB 以上の f32 readback が通ると最大 256 MiB の通常ホストメモリを保持しうる。
+/// イシュー #3225）の Ready バッファを明示解放し、解放バイト数を返す（REQ-14）。worker 未生成なら 0。
 pub fn release_readback_prefetch() -> u64 {
     crate::readback_prefetch::release_all_if_active()
 }

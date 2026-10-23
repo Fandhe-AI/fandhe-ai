@@ -18,10 +18,11 @@
 //! - 真の宛先再利用（copy-out なし）・ゼロコピーは `Tensor` の `Arc<Storage{Vec<T>}>` に drop フックが
 //!   なく返却できないため対象外（tensor-core のストレージ抽象変更と新規 `unsafe` が要りユーザー承認事項）。
 //!
-//! # 既定 OFF・数値契約
-//! 既定は `PretouchedFresh`（`memory::READBACK_DEST`）。`PinnedStagingReuse` も D2H が要素を全て
+//! # 既定・数値契約
+//! 既定は #3227 以降 `PrefetchedPretouched`（`memory::READBACK_DEST`。#3225 の ADOPT 判定に基づく）。
+//! env `pretouched` は従来方式 `PretouchedFresh` へ戻す opt-out 値。`PinnedStagingReuse` も D2H が要素を全て
 //! 上書きしてから `to_vec()` するため出力は bit 同一で、tolerance・REQ-2 判定には影響しない。
-//! ADOPT 後の既定値化は別 PR・ユーザー承認（pinned 確保の到達範囲が全 f32 readback に広がるため）。
+//! pinned-reuse の既定値化は別 PR・ユーザー承認（pinned 確保の到達範囲が全 f32 readback に広がるため）。
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -38,7 +39,7 @@ pub(crate) fn parse_env_value(raw: &str) -> Option<ReadbackDest> {
     match raw {
         "pretouched" => Some(ReadbackDest::PretouchedFresh),
         "pinned-reuse" => Some(ReadbackDest::PinnedStagingReuse),
-        // イシュー #3225: 背景事前タッチ済み宛先プール（f32 のみ。既定 OFF）。
+        // イシュー #3225: 背景事前タッチ済み宛先プール（f32 のみ。#3227 で既定。本値は明示選択用）。
         "pretouched-prefetch" => Some(ReadbackDest::PrefetchedPretouched),
         _ => None,
     }
@@ -265,8 +266,8 @@ mod tests {
 
     /// 既定定数を直接検査するドリフトガード（setter・env を経由しない。#1585 の教訓）。
     #[test]
-    fn default_dest_is_pretouched_fresh() {
-        assert_eq!(READBACK_DEST, ReadbackDest::PretouchedFresh);
+    fn default_dest_is_prefetched_pretouched() {
+        assert_eq!(READBACK_DEST, ReadbackDest::PrefetchedPretouched);
     }
 
     #[test]

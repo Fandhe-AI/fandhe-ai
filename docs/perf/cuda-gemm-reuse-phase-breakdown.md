@@ -688,7 +688,7 @@ N=1024/2048/4096 で 1.10/1.13/1.10 倍に後退した。
 イシュー #3225。§14.5 の入力（事前タッチ済み宛先を glibc の mmap 閾値に依存せず確保する経路）を、
 `readback() -> Vec<T>` の形を変えず新規 `unsafe` なしで実現する opt-in 機構として実装した。
 
-### §15.1 機構（既定 OFF）
+### §15.1 機構（#3225 では既定 OFF・#3227 で既定化）
 
 - `memory::ReadbackDest::PrefetchedPretouched`。env `FANDHE_AI_CUDA_READBACK_DEST=pretouched-prefetch` でのみ
   選ばれる（`readback_policy.rs` の完全一致 allowlist）。`READBACK_DEST` の既定は `PretouchedFresh` のまま。
@@ -741,3 +741,12 @@ N=1024/2048/4096 で 1.10/1.13/1.10 倍に後退した。
 - ゼロコピー readback・`Tensor` ストレージの drop フック・`mallopt`／`madvise`／`MAP_POPULATE`／THP ヒント・整列確保
   （新規 `unsafe` か libc 用途の拡張が要り所有者承認事項）。
 - 既定の反転（ADOPT の場合）は #3227。f32 以外の型・Metal・MLP の `mem.download` の借用ビュー化。
+
+### §15.4 既定の反転（#3227）
+
+- 反転: `crates/backend-cuda/src/memory.rs` の `READBACK_DEST` を `PretouchedFresh` から `PrefetchedPretouched` へ。根拠は §15.2 の ADOPT（凍結 RULE の逐語適用。主判定 5 セル ratio 0.41〜0.59・ガード最大 1.0106・checksum 完全一致）。§15.3 の「既定の反転は #3227」はここで実施した。
+- opt-out: env `FANDHE_AI_CUDA_READBACK_DEST=pretouched`（完全一致 allowlist・OnceLock は不変）。
+- 到達範囲: A/B は gemm cuda 10 セルだが、既定化で facade から届く 1 MiB 以上 128 MiB 以下の f32 readback 全般に効く。数値は D2H が全要素を上書きするため bit 同一。f32 以外・1 MiB 未満・プール miss は従来処理。
+- REQ-14: 既定経路で最大 256 MiB（8 エントリ）の通常ホストメモリと worker 1 本を保持しうる。`release_readback_prefetch()` はあるが facade の `release_cached_memory(Device::Cuda)` へは未結線（公開 API 追加は #3227 の範囲外）。結線先は `release_cached_device_memory` の `allocator.release_cached()` 直後。追跡 Issue 起票は所有者承認待ち。
+- 検証状況: CI で動く単体テスト（ドリフトガード `default_dest_is_prefetched_pretouched` を含む）のみ実施。**GB10 の `#[ignore]` 全件の main 突き合わせ・確認計測（train／infer の record_only を含む）は未検証**（本実装セッションは実機に届かない）。後退セルは未計測のため併記できない。実測後に本節へ追記する。
+- 不変: tolerance・parity baseline・FMA 契約・`PREFETCH_LIMITS`・RULE.txt は変更していない。
