@@ -265,6 +265,46 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(code, 2, text)
         self.assertNotIn('hard 条件の不一致', text)
 
+    def _mutate_opp(self, field, value, fw='candle', task='gemm', device='cpu', size=256, profile='macmini'):
+        d = Path(tempfile.mkdtemp(dir=self.tmp))
+        rule, env, glog = make_series(d / 's', profile)
+        d = d / 's'
+        for i in range(1, 6):
+            p = d / f'run{i}' / 'results-opp.jsonl'
+            out = []
+            for l in p.read_text().splitlines():
+                r = json.loads(l)
+                if (r['framework'], r['task'], r['device'], int(r['size']), r['mode']) == (fw, task, device, size, 'fresh'):
+                    if value is J.Undetermined:
+                        r.pop(field, None)
+                    else:
+                        r[field] = value
+                out.append(json.dumps(r))
+            p.write_text('\n'.join(out) + '\n')
+        return run_judge(d, profile, rule, env, glog)
+
+    def test_nonpositive_or_nan_median_is_undetermined(self):
+        for v in (float('nan'), 0, -1.0):
+            code, text = self._mutate_opp('median_s', v)
+            self.assertEqual(code, 2, text)
+            self.assertIn('median_s が有限の正数でない', text)
+
+    def test_missing_or_null_parity_fail_count_is_undetermined(self):
+        for v in (J.Undetermined, None, -1, 1.5):
+            code, text = self._mutate_opp('parity_fail_count', v)
+            self.assertEqual(code, 2, text)
+            self.assertIn('parity_fail_count が非負整数でない', text)
+
+    def test_gb10_gate_enforced_without_flag_and_env_gate1(self):
+        for profile, env_line in (('gb10', ''), ('macmini', 'gate=1\n')):
+            d = self.tmp / f's-{profile}'
+            rule, env, glog = make_series(d, profile)
+            env.write_text(env.read_text() + env_line)
+            glog.write_text('round1 gate=pass\nGATE-TIMEOUT before run2\n')
+            self.assertEqual(run_judge(d, profile, rule, env, glog, gate=False)[0], 2)
+            glog.unlink()
+            self.assertEqual(run_judge(d, profile, rule, env, glog, gate=False)[0], 2)
+
 
 if __name__ == '__main__':
     unittest.main()

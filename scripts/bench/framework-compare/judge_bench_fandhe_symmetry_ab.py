@@ -111,6 +111,26 @@ def load_runs(series_dir, arms, nruns=NRUNS):
     return runs
 
 
+def _valid_median(row, what):
+    """median_s が有限の正数であることを検証して返す。NaN・0・負・欠落・非数値は Undetermined。"""
+    v = row.get('median_s')
+    if not (isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+            and v not in (float('inf'), float('-inf')) and v > 0):
+        raise Undetermined(f'{what}: median_s が有限の正数でない（{v!r}）')
+    return v
+
+
+def _parity_fail(row, task, what):
+    """GEMM 行の parity_fail_count（非負整数）を返す。欠落・null・不正値は Undetermined。
+    train／infer の行は parity 項目を出力しないので 0 扱い。"""
+    if task != 'gemm':
+        return row.get('parity_fail_count') or 0
+    v = row.get('parity_fail_count')
+    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+        raise Undetermined(f'{what}: parity_fail_count が非負整数でない（{v!r}）')
+    return v
+
+
 def paired_ratio(per_run_me, per_run_opp, task, device, size, required=()):
     """gen_0110_macmini.py の paired_ratio と同式: run ごとの（有効な相手最速 ÷ fandhe reuse）の中央値。"""
     rs, best = [], {}
@@ -118,7 +138,8 @@ def paired_ratio(per_run_me, per_run_opp, task, device, size, required=()):
         me = me_idx.get(('fandhe-ai', task, device, size, 'reuse'))
         if me is None:
             raise Undetermined(f'run{i}: fandhe-ai reuse 欠損 {task} {device} N={size}')
-        if (me.get('parity_fail_count') or 0) > 0:
+        me_s = _valid_median(me, f'run{i}: fandhe-ai reuse {task} {device} N={size}')
+        if _parity_fail(me, task, f'run{i}: fandhe-ai reuse {task} {device} N={size}') > 0:
             raise Undetermined(f'run{i}: fandhe-ai reuse の要素検証が不合格（判定不能）{task} {device} N={size}')
         missing = [fw for fw in required if (fw, task, device, size, 'fresh') not in opp_idx]
         if missing:
@@ -126,13 +147,16 @@ def paired_ratio(per_run_me, per_run_opp, task, device, size, required=()):
         comp = []
         for fw in FW_ORDER:
             r = opp_idx.get((fw, task, device, size, 'fresh'))
-            if r is not None and (r.get('parity_fail_count') or 0) == 0:
-                comp.append((r['median_s'], fw))
+            if r is None:
+                continue
+            what = f'run{i}: {fw} fresh {task} {device} N={size}'
+            if _parity_fail(r, task, what) == 0:
+                comp.append((_valid_median(r, what), fw))
         if not comp:
             raise Undetermined(f'run{i}: 有効な比較相手がない {task} {device} N={size}')
         m, fw = min(comp)
         best[fw] = best.get(fw, 0) + 1
-        rs.append(m / me['median_s'])
+        rs.append(m / me_s)
     top = sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
     return statistics.median(rs), rs, top
 
@@ -150,9 +174,11 @@ def arm_stats(runs, arm, task, device, size, required=()):
     me = [r[arm] for r in runs]
     opp = [r['opp'] for r in runs]
     ratio, rs, top = paired_ratio(me, opp, task, device, size, required)
-    ms = [r[arm][('fandhe-ai', task, device, size, 'reuse')]['median_s'] for r in runs]
+    ms = [_valid_median(r[arm][('fandhe-ai', task, device, size, 'reuse')], f'{arm} reuse {task} {device} N={size}')
+          for r in runs]
     fresh = [r[arm].get(('fandhe-ai', task, device, size, 'fresh')) for r in runs]
-    fresh_ms = None if any(f is None for f in fresh) else statistics.median(f['median_s'] for f in fresh)
+    fresh_ms = None if any(f is None for f in fresh) else statistics.median(
+        _valid_median(f, f'fandhe-ai fresh {task} {device} N={size}') for f in fresh)
     return dict(ratio=ratio, runs=rs, top=top, cls=classify(ratio), ms=ms,
                 med_ms=statistics.median(ms) * 1e3,
                 fresh_ms=None if fresh_ms is None else fresh_ms * 1e3)
@@ -195,9 +221,13 @@ def hard_check(runs, task, device, size):
     return mismatch, missing
 
 
-def check_series_meta(rule_path, env_info_path, gate_log, require_gate):
-    """RULE sha256・env_info・ゲートの整合。成立しなければ理由リストを返す（空なら成立）。"""
+def check_series_meta(rule_path, env_info_path, gate_log, require_gate, profile=''):
+    """RULE sha256・env_info・ゲートの整合。成立しなければ理由リストを返す（空なら成立）。
+
+    ゲート検証は --require-gate、gb10（ランナーが AB_GATE=1 を必須とする）、env_info の gate=1 の
+    いずれかで有効になる（フラグの付け忘れで gate.log 欠損・GATE-TIMEOUT を見逃さない）。"""
     issues = []
+    require_gate = require_gate or profile == 'gb10'
     rule = Path(rule_path)
     if not rule.is_file():
         return [f'RULE 欠損: {rule}']
@@ -209,6 +239,8 @@ def check_series_meta(rule_path, env_info_path, gate_log, require_gate):
         recorded = [l.split('=', 1)[1].strip() for l in env.read_text().splitlines() if l.startswith('rule_sha256=')]
         if recorded != [rule_sha]:
             issues.append(f'env_info の rule_sha256 が現 RULE と不一致（env={recorded} rule={rule_sha}）')
+        if any(l.strip() == 'gate=1' for l in env.read_text().splitlines()):
+            require_gate = True
     if require_gate:
         g = Path(gate_log) if gate_log else None
         if g is None or not g.is_file():
@@ -249,7 +281,7 @@ def build(args):
     """(Markdown 文字列, 終了コード) を返す。"""
     cells = CELLS[args.profile]
     out, undetermined, hard = [], [], []
-    meta = check_series_meta(args.rule, args.env_info, args.gate_log, args.require_gate)
+    meta = check_series_meta(args.rule, args.env_info, args.gate_log, args.require_gate, args.profile)
     out.append(f'# bench-fandhe 是正前後の併記（#3266）: {args.profile} / {args.label}\n')
     out.append('旧条件腕 = #3265 直前、新条件腕 = #3265。判定式は 0.11.0 スコアボードと同一（同一 run 内の最速相手比の 5 run 中央値）。'
                '腕比 new/old は参考で、合格ラインはない。\n')
@@ -313,7 +345,7 @@ def main(argv=None):
     p.add_argument('--env-info', required=True)
     p.add_argument('--rule', required=True)
     p.add_argument('--gate-log', default='')
-    p.add_argument('--require-gate', action='store_true', help='ゲート付き系列。gate.log の 5 ラウンド pass を必須にする')
+    p.add_argument('--require-gate', action='store_true', help='ゲート付き系列。gate.log の 5 ラウンド pass を必須にする（gb10 と env_info の gate=1 では指定なしでも適用）')
     p.add_argument('--ref-dir', default='', help='0.11.0 正式系列の run ディレクトリ群の親（参考列。任意）')
     args = p.parse_args(argv)
     text, code = build(args)
