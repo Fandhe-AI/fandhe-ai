@@ -1,0 +1,13 @@
+機体: DGX Spark (GB10 / sm_121, aarch64)
+driver: 580.173.02 / CUDA 13.0 (nvcc 13.0.88)
+OS: Ubuntu 24.04.4 LTS, Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07) / cargo 1.97.0 (c980f4866 2026-06-30)
+計測 UTC: 2026-10-23T11:39Z〜11:43Z（A/B 本体。bit 一致テストはその直前）
+計測 sha: 73768af83c0f45b482f1a209d4539a4f06b8e0bc（ラベル head-73768af-3225）
+fandhe-ai: 0.11.0 を HEAD の crates/facade の path で patch（manifest bin_source=path:crates/facade）
+bench-fandhe sha256: 4d5ea174838d7b50fa84ef7183f5f9f09fd73dc413793a2625e7841b93a55bab
+専有ゲート: exclusive（load1<1.0 かつ GPU util 0% を 3 連続。gate ログ参照）
+実行前: FANDHE_AI_CUDA_READBACK_DEST 未設定・GPU util 0%・load average 0.23
+実行中の uptime: uptime ログ参照（load average 上昇は計測プロセス自身による）
+補足: ab ログ冒頭に「他の bench-fandhe/bench-candle プロセスが実行中の可能性（pgrep 検出）」の警告があるが、
+      専有ゲート（GPU util 0%・load1 閾値）は成立しており、判定には影響しない
