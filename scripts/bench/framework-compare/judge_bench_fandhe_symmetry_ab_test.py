@@ -295,6 +295,35 @@ class JudgeTest(unittest.TestCase):
             self.assertEqual(code, 2, text)
             self.assertIn('parity_fail_count が非負整数でない', text)
 
+    def test_malformed_json_rows_are_undetermined(self):
+        for bad in ('null', '[1]', '{"framework": "x"}',
+                    '{"framework":"candle","task":"gemm","device":"cpu","size":"abc","mode":"fresh"}'):
+            d = self.tmp / f'bad-{abs(hash(bad))}'
+            rule, env, glog = make_series(d, 'macmini')
+            p = d / 'run1' / 'results-opp.jsonl'
+            p.write_text(p.read_text() + bad + '\n')
+            code, text = run_judge(d, 'macmini', rule, env, glog)
+            self.assertEqual(code, 2, text)
+            self.assertIn('results-opp.jsonl:', text)
+
+    def test_fresh_fandhe_parity_fail_is_undetermined(self):
+        d = self.tmp / 'fresh-pf'
+        rule, env, glog = make_series(d, 'macmini')
+        for i in range(1, 6):
+            for arm in ('old', 'new'):
+                p = d / f'run{i}' / f'results-{arm}.jsonl'
+                out = []
+                for l in p.read_text().splitlines():
+                    r = json.loads(l)
+                    if (r['framework'] == 'fandhe-ai' and r['mode'] == 'fresh' and r['task'] == 'gemm'
+                            and r['device'] == 'cpu' and r['size'] == 256):
+                        r['parity_fail_count'] = 3
+                    out.append(json.dumps(r))
+                p.write_text('\n'.join(out) + '\n')
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 2, text)
+        self.assertIn('parity_fail_count が 0 でない', text)
+
     def test_gb10_gate_enforced_without_flag_and_env_gate1(self):
         for profile, env_line in (('gb10', ''), ('macmini', 'gate=1\n')):
             d = self.tmp / f's-{profile}'

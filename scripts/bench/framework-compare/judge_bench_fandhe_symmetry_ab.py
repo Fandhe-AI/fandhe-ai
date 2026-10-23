@@ -71,10 +71,26 @@ def load(path):
         if not line.strip():
             continue
         try:
-            rows.append(json.loads(line))
+            r = json.loads(line)
         except json.JSONDecodeError as e:
             raise Undetermined(f'JSON 不正 {p}:{i}: {e}')
+        _validate_row(r, p, i)
+        rows.append(r)
     return rows
+
+
+def _validate_row(r, p, i):
+    """索引作成前の構造検証。オブジェクト型・必須キー・size の型が不正なら Undetermined（ファイル名・行番号付き）。"""
+    if not isinstance(r, dict):
+        raise Undetermined(f'行がオブジェクトでない {p}:{i}')
+    missing = [k for k in ('framework', 'task', 'device', 'size', 'mode') if k not in r]
+    if missing:
+        raise Undetermined(f'必須キー欠落（{",".join(missing)}） {p}:{i}')
+    if any(not isinstance(r[k], str) for k in ('framework', 'task', 'device', 'mode')):
+        raise Undetermined(f'framework/task/device/mode が文字列でない {p}:{i}')
+    sz = r['size']
+    if isinstance(sz, bool) or not isinstance(sz, (int, float)) or sz != sz or sz in (float('inf'), float('-inf')) or sz != int(sz):
+        raise Undetermined(f'size が整数でない（{sz!r}） {p}:{i}')
 
 
 def key(r):
@@ -211,6 +227,11 @@ def hard_check(runs, task, device, size):
                 bad = [f for f in req if not _is_num(row.get(f))]
                 if bad:
                     missing.append(f'{mode} run{i} {arm}: 必須項目の欠落／不正値 {",".join(bad)}')
+                    continue
+                pf = row.get('parity_fail_count')
+                if isinstance(pf, (int, float)) and not isinstance(pf, bool) and pf != 0:
+                    # fresh 側を含め fandhe の要素検証不合格は判定不能（RULE: parity_fail_count > 0）
+                    missing.append(f'{mode} run{i} {arm}: parity_fail_count が 0 でない（{pf!r}。判定不能）')
                     continue
                 sig = tuple(row[f] for f in req)
                 if base is None:
