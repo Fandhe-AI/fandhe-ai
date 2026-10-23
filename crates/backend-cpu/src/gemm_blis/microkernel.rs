@@ -860,8 +860,13 @@ impl Microkernel for SmeKernel {
             // では、構築スレッドと実行スレッドが異なりうる Rayon worker
             // 分配のもとでは不十分なため、ここで実行スレッド自身の確認
             // を必須とする）。`sme::kernel_unchecked` の `# Safety` 契約
-            // を満たす。
-            let _ = unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) };
+            // を満たす。戻り値は release では破棄し、debug では到達不能
+            // （検証済み入力のため Err にならない）の表明に使う（#3231）。
+            let res = unsafe { sme::kernel_unchecked(ap, bp, c_tile, kc_len) };
+            debug_assert!(
+                res.is_ok(),
+                "sme::kernel_unchecked は検証済み入力で Err を返さない契約"
+            );
         } else {
             let _ = sme::scalar_fallback_kernel(ap, bp, c_tile, kc_len);
         }

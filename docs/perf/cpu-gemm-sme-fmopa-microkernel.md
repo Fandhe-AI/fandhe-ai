@@ -160,17 +160,19 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
 
 ### 3.3 ディスパッチ結線（`crates/backend-cpu/src/gemm_blis/mod.rs`）
 
-- 単一 const ゲート `SME_PRODUCTION_ENABLED`（既定 `false`。
+- 単一 const ゲート `SME_PRODUCTION_ENABLED`（既定 `true`〈#3231 で ON 確定。それ以前は `false`〉。
   `TWO_D_DYNAMIC_PRODUCTION_ENABLED` と同型のロールバック機構）。
 - 純関数 `sme_shape_eligible(m_total, n, k) -> bool`（`SME_MIN_M=256`・
   `SME_MIN_N=256`・`SME_MIN_K=64`。§5.4.1 R4 参照）。
 - aarch64 版 `dispatch_two_d_dynamic`（`gemm_blis_parallel_with_transpose`・
-  `gemm_blis_bias_act_parallel` の共有本番入口）に
-  `if SME_PRODUCTION_ENABLED && sme_shape_eligible(...) && let Some(kernel)
-  = SmeKernel::try_new() { … }` を追加し、それ以外は従来どおり
-  `NeonKernel`。`SME_PRODUCTION_ENABLED=false` の間は実行 CPU が SME に
-  対応していても常に NEON が選ばれ、#1313 以前と bit 完全一致する
-  （`sme_production_enabled_is_false_pending_measurement` がドリフト検出）。
+  `gemm_blis_bias_act_parallel` の共有本番入口）は safe 関数
+  `sme_kernel_for_shape(m_total, n, k)`（`SME_PRODUCTION_ENABLED &&
+  sme_shape_eligible(...)` のときだけ `SmeKernel::try_new()`）が `Some` の
+  ときに SME へ、それ以外は従来どおり `NeonKernel`。SME 非搭載ホストでは
+  `try_new()` が `None` となり NEON へ fall back して出力は不変。`false` に
+  戻すと実行 CPU が SME に対応していても常に NEON（#1313 以前と bit 完全一致）。
+  ドリフト検出は `sme_production_enabled_is_true_with_neon_fallback`
+  （#3231 で `..._is_false_pending_measurement` から置換）。
 - `Isa` enum への variant 追加は行わない（SME 検出は `Isa::detect()` とは
   独立の軸であり、`Isa::Sme` を追加すると crates.io 公開クレート
   `fandhe-ai-backend-cpu` の `pub enum` への semver 破壊になる一方、
@@ -750,8 +752,26 @@ GB10（外側専有ゲートは記録のみ）:
 `SME_PRODUCTION_ENABLED` を反転した framework-compare の CPU 10 セル、R4 格子、MLP 長方形 4 形状を実測した（2026-10-21・計測コミット `1a9031537`）。
 全セルで checksum 完全一致。gemm 到達 6 セルの after/before は 0.47〜0.60 倍（M4 Max は 0.57〜0.74 倍）で 5/5。
 PyTorch 比（同 run 内）は gemm で 0.49〜0.74 倍から 1.03〜1.41 倍へ。現行しきい値領域（min>=256 かつ k>=64）は R4 で全点成立。
-`SME_PRODUCTION_ENABLED` は `false` のまま。ログは `logs/sme-macmini-3176/macmini/`、結論は
+`SME_PRODUCTION_ENABLED` は #3231 で `true` へ切り替えた（§5.10）。ログは `logs/sme-macmini-3176/macmini/`、結論は
 [`cpu-gemm-sme-ab-macmini.md`](cpu-gemm-sme-ab-macmini.md)。本番切替は #3230、しきい値の確定は #3231。（訂正: 本番切替は #3231。#3230 は unsafe 監査の更新と再開条件の確認〈`docs/cpu-gemm-sme-unsafe-audit.md` §12〉）
+
+### 5.10 既定 ON とするしきい値の確定（イシュー #3231）
+
+所有者確認（https://github.com/Fandhe-AI/fandhe-ai/issues/3231#issuecomment-6369076139・2026-10-24。`docs/cpu-gemm-sme-unsafe-audit.md` §12.8 の 3 項目）を根拠に、`SME_PRODUCTION_ENABLED` を `true` に切り替え、しきい値を
+**`SME_MIN_M=256`・`SME_MIN_N=256`・`SME_MIN_K=64` で確定**した（据え置き）。
+
+- 根拠（判定機は Mac mini〈Apple M4〉。M4 Max の値は Mac mini の値として扱わない）: R4 格子
+  （`docs/perf/logs/sme-macmini-3176/macmini/r4_run{1..5}.log`・集計 `aggregate.md`・`cpu-gemm-sme-ab-macmini.md` §2）で、現行領域の全 6 点が 5/5 で SME>=NEON
+  （(256,64)=1.404・(256,128)=1.607・(256,256)=1.602・(512,64)=1.641・(512,128)=1.930・(512,256)=1.983）。
+  K=32 へ下げて入る (256,32)=1.122 や、M/N<=128 で入る (128,32)・(128,64)・(64,64) は 5/5 を満たさないため下げない。
+  MLP 長方形 4 形状は事前登録上「記録のみ」のため判定に使わず、(64,256,784)・(784,64,256) への拡張はしない（m=64 は #3233）。
+- 残留事項: M4 Max（§5.4.1）では境界点 (256,64) が 5/5 を満たさなかった（中央値 1.161・2/5 run で 1.0 未満）。
+- GB10 の非後退（再開条件 2）は #3232 の後置ゲート。後退が出た場合のロールバックは `SME_PRODUCTION_ENABLED` を `false` に戻す 1 行と、
+  `sme_production_enabled_is_true_with_neon_fallback` の反転のみ。
+- 同時に A/B ハーネスの NEON 腕を `GemmDriverVariant::TwoDDynamicNeon`（NEON 強制・ゲート迂回）へ切り替えた
+  （`TwoDDynamic` は ON 後に SME 搭載機で SME を含むため）。ラベル `NEON(TwoDDynamic)` は集計スクリプト互換で不変。
+- bit 同一: `production_gemm_matches_naive_and_neon_forced_bit_exact_across_thread_counts`（NN/TN/NT/bias+ReLU・スレッド {1,2,3,4,8}）と
+  プロセス単位の `RAYON_NUM_THREADS` sweep（`logs/sme-default-on-3231/`）。GB10 の全出力 bit 同一は §5.6（旧 sha）を参照。
 
 ## 6. セキュリティ考慮（OWASP Top 10）
 
@@ -769,7 +789,7 @@ PyTorch 比（同 run 内）は gemm で 0.49〜0.74 倍から 1.03〜1.41 倍�
   バックへ切り替える。§3.2「フォールバック契約」参照）。
 - **REQ-8**: `check_panel_lengths`／`check_c_tile_bounds` を asm 呼び出し
   前に必ず通す（最適化を理由に境界検査を省略しない）。
-- **unsafe 監査記録**: `asm!` の監査結果と本番化の条件付き再承認申請（未承認）は
+- **unsafe 監査記録**: `asm!` の監査結果と本番化の条件付き再承認申請は（#3231 で既定 ON。§12.11）
   `docs/cpu-gemm-sme-unsafe-audit.md`（イシュー #2119）を参照。
 
 ## 7. スコープ外

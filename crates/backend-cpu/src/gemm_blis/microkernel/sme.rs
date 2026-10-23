@@ -167,9 +167,9 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
     let kc = kc_len;
 
     // SAFETY: 呼び出し元契約（本関数 `# Safety` 節）により実行 CPU は
-    // SME・非拡張 FP32 外径（`SME_F32F32`）に対応し SVL=64 バイト。
+    // SME・非拡張 FP32 外積（`SME_F32F32`）に対応し SVL=64 バイト。
     //
-    // レジスタ・状態契約（`docs/cpu-gemm-sme-fmopa-microkernel.md` §3 の
+    // レジスタ・状態契約（`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §3 の
     // asm 契約節を参照。1 箇所に局所化）:
     // - `.arch_extension sme` はアセンブラへ SME 命令の使用を許可する
     //   ディレクティブ（コンパイル時のみに影響）。
