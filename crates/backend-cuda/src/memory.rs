@@ -973,7 +973,8 @@ where
     T: ReadbackSentinel,
     Src: DevicePtr<T>,
 {
-    match dest {
+    let numel = dev.len();
+    let res: Result<Vec<T>, CudaError> = match dest {
         #[cfg(feature = "internal-diagnostics")]
         ReadbackDest::Fresh => {
             let host = stream.clone_dtoh(dev)?;
@@ -990,7 +991,12 @@ where
         }
         ReadbackDest::PinnedStagingReuse => T::readback_pinned_reuse(stream, dev),
         ReadbackDest::PrefetchedPretouched => T::readback_prefetched(stream, dev),
-    }
+    };
+    let out = res?;
+    // D2H 計数は全宛先方式の共通出口で 1 回だけ行う（イシュー #3224。以前は gemm.rs の
+    // 一部経路でのみ数えていたため、先読み既定 ON の readback で `d2h_calls` が 0 のままだった）。
+    crate::gemm::diag_count_readback(numel * std::mem::size_of::<T>());
+    Ok(out)
 }
 
 /// `readback_with` を `ReadbackDest::Fresh`／`PretouchedFresh` の両方で

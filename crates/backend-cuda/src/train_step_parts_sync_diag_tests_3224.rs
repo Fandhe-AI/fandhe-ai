@@ -89,13 +89,14 @@ fn transpose(stored: &[f32], r: usize, c: usize) -> Vec<f32> {
 }
 
 /// 対照: `download` が同期と D2H を数えること（カウンタが生きていることの確認）。
+/// D2H は `memory::readback_with` の共通出口で数えるため、先読み既定 ON（#3227）でも > 0 になる。
 fn assert_download_is_counted(ops: &CudaBackendOps, buf: &DeviceBuffer<f32>) {
     gemm_launch_diag_reset();
     let before = gemm_launch_diag_snapshot();
     let _ = download(ops, buf);
     let d = gemm_launch_diag_snapshot().since(before);
     assert!(d.stream_syncs >= 1, "download must synchronize: {d:?}");
-    assert!(d.d2h_calls >= 1, "download must D2H: {d:?}");
+    assert!(d.d2h_calls >= 1, "download must count D2H: {d:?}");
 }
 
 /// ReLU マスク: `[64, 256]` の RowMajor／Transposed で、非 tracked・tracked とも同期・D2H が 0。
@@ -105,6 +106,7 @@ fn relu_mask_device_issues_no_sync_no_d2h() {
     let ops = make_ops();
     let (r, c) = (64usize, 256usize);
     let n = r * c;
+    let mut last_out: Option<DeviceBuffer<f32>> = None;
     for layout in [DeviceMatrixLayout::RowMajor, DeviceMatrixLayout::Transposed] {
         let g_store = pattern(n, 1);
         let m_store = pattern(n, 2);
@@ -146,8 +148,10 @@ fn relu_mask_device_issues_no_sync_no_d2h() {
             &format!("tracked {layout:?}"),
         );
         assert!(!token.is_set());
-        assert_download_is_counted(&ops, &out);
+        last_out = Some(out);
     }
+    // 対照は全 layout（Transposed 周回を含む）の検査を終えてからループ外で 1 回取る。
+    assert_download_is_counted(&ops, last_out.as_ref().expect("loop ran"));
 }
 
 /// MSE: `[64, 10]` の forward（Mean／Sum）・backward が、非 tracked・tracked とも同期・D2H 0。
@@ -219,7 +223,7 @@ fn mse_device_issues_no_sync_no_d2h() {
     let _ = ops.mse_loss_backward(&p_h, &t_h, scale).unwrap();
     let d = gemm_launch_diag_snapshot().since(before);
     assert!(d.stream_syncs >= 1, "host mse must synchronize: {d:?}");
-    assert!(d.d2h_calls >= 1, "host mse must D2H: {d:?}");
+    assert!(d.d2h_calls >= 1, "host mse must count D2H: {d:?}");
 }
 
 /// dW（TN・bias あり）と d_input（`Transposed`）を MLP の 2 形状で呼び、H2D・同期・D2H が 0。

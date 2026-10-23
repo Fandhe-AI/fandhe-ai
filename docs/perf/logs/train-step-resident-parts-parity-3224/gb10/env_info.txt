@@ -1,0 +1,300 @@
+--- before relu_mask_device_parity run1 2026-10-23T14:54:50Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after relu_mask_device_parity run1 2026-10-23T14:54:52Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before relu_mask_device_parity run2 2026-10-23T14:54:52Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after relu_mask_device_parity run2 2026-10-23T14:54:53Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before relu_mask_device_parity run3 2026-10-23T14:54:53Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after relu_mask_device_parity run3 2026-10-23T14:54:54Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before relu_mask_device_parity run4 2026-10-23T14:54:54Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after relu_mask_device_parity run4 2026-10-23T14:54:55Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before relu_mask_device_parity run5 2026-10-23T14:54:55Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after relu_mask_device_parity run5 2026-10-23T14:54:56Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before mse_device_parity run1 2026-10-23T14:54:56Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after mse_device_parity run1 2026-10-23T14:54:57Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before mse_device_parity run2 2026-10-23T14:54:57Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after mse_device_parity run2 2026-10-23T14:54:58Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before mse_device_parity run3 2026-10-23T14:54:58Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after mse_device_parity run3 2026-10-23T14:54:59Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before mse_device_parity run4 2026-10-23T14:54:59Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after mse_device_parity run4 2026-10-23T14:55:00Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before mse_device_parity run5 2026-10-23T14:55:01Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after mse_device_parity run5 2026-10-23T14:55:02Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_parity run1 2026-10-23T14:55:02Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_parity run1 2026-10-23T14:55:04Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_parity run2 2026-10-23T14:55:04Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_parity run2 2026-10-23T14:55:06Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_parity run3 2026-10-23T14:55:06Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_parity run3 2026-10-23T14:55:07Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_parity run4 2026-10-23T14:55:07Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_parity run4 2026-10-23T14:55:08Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_parity run5 2026-10-23T14:55:09Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_parity run5 2026-10-23T14:55:10Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_diag_tests_3223 run1 2026-10-23T14:55:10Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_diag_tests_3223 run1 2026-10-23T14:55:11Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_diag_tests_3223 run2 2026-10-23T14:55:11Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_diag_tests_3223 run2 2026-10-23T14:55:12Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_diag_tests_3223 run3 2026-10-23T14:55:12Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_diag_tests_3223 run3 2026-10-23T14:55:13Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_diag_tests_3223 run4 2026-10-23T14:55:13Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_diag_tests_3223 run4 2026-10-23T14:55:14Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before gemm_device_input_diag_tests_3223 run5 2026-10-23T14:55:14Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after gemm_device_input_diag_tests_3223 run5 2026-10-23T14:55:15Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before train_step_parts_sync_diag_tests_3224 run1 2026-10-23T14:55:15Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after train_step_parts_sync_diag_tests_3224 run1 2026-10-23T14:55:16Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before train_step_parts_sync_diag_tests_3224 run2 2026-10-23T14:55:16Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after train_step_parts_sync_diag_tests_3224 run2 2026-10-23T14:55:17Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before train_step_parts_sync_diag_tests_3224 run3 2026-10-23T14:55:17Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after train_step_parts_sync_diag_tests_3224 run3 2026-10-23T14:55:18Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before train_step_parts_sync_diag_tests_3224 run4 2026-10-23T14:55:18Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after train_step_parts_sync_diag_tests_3224 run4 2026-10-23T14:55:20Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- before train_step_parts_sync_diag_tests_3224 run5 2026-10-23T14:55:20Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %
+--- after train_step_parts_sync_diag_tests_3224 run5 2026-10-23T14:55:21Z
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+pid, process_name, used_gpu_memory [MiB]
+utilization.gpu [%]
+0 %

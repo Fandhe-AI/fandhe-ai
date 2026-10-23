@@ -382,12 +382,12 @@ fn diag_count_kernel_launch() {
 #[inline(always)]
 fn diag_count_kernel_launch() {}
 
-/// D2H（`memory::readback` の成功）だけを数える。同期回数は
+/// D2H（`memory::readback_with` の成功。全 readback 経路の共通出口で数える）だけを数える。同期回数は
 /// [`diag_count_stream_sync`] が同期の実行箇所（`memory.rs::readback_with`）で
 /// 別途数えるため、ここでは `stream_syncs` を触らない（固定 +1 の推定を排除）。
 #[cfg(any(test, feature = "internal-diagnostics"))]
 #[inline]
-fn diag_count_readback(bytes: usize) {
+pub(crate) fn diag_count_readback(bytes: usize) {
     gemm_launch_diag_update(|c| {
         c.d2h_calls += 1;
         c.d2h_bytes += bytes as u64;
@@ -395,7 +395,7 @@ fn diag_count_readback(bytes: usize) {
 }
 #[cfg(not(any(test, feature = "internal-diagnostics")))]
 #[inline(always)]
-fn diag_count_readback(_bytes: usize) {}
+pub(crate) fn diag_count_readback(_bytes: usize) {}
 
 /// `CudaStream::synchronize` の成功を実行箇所で数える（`memory.rs::readback_with`
 /// の各同期直後から呼ぶ）。
@@ -5164,7 +5164,6 @@ impl CudaGemm {
             // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
             // ため、論理長ビュー（`as_view()`）を渡す。
             let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
-            diag_count_readback(std::mem::size_of_val(c_host.as_slice()));
             Ok(c_host)
         })
     }

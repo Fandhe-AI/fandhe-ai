@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/gemm_device_input_parity.rs (<home>/work/target-fandhe-ai/release/deps/gemm_device_input_parity-41f79bd3860e1763)
+
+running 7 tests
+test dinput_bit_identical_to_host ... ok
+test dinput_zero_dims_follow_host_contract ... ok
+test dw_error_paths_are_typed_and_leave_out_untouched ... ok
+test dw_nt_bit_identical_to_host ... ok
+test dw_tn_bit_identical_to_host ... ok
+test race_no_sync_chain_matches_host ... ok
+test race_two_threads_share_workspace_under_mutex ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+
+rc=0
