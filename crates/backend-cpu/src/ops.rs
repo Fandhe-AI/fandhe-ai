@@ -17,12 +17,13 @@ use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, AdagradStepConfig, AdamStepConfig, AdamStepKind, BackendOps, BatchNormTrainOutput,
-    BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, Conv3dParams, DType, EighFactors,
-    FusionPlan, GemmChecksum, GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode,
-    KlDivTarget, LambMoments, LambStepConfig, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
-    PagedAttentionArgs, PagedKvLayout, Pool2dParams, QrFactors, RmsPropOptionalBuffers,
-    RmsPropStepConfig, ScatterReduce, SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors,
-    Tensor, UnaryElementwiseOp, VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout,
+    BceKind, BinaryElementwiseOp, ChecksumReadout, Conv2dParams, Conv3dParams, DType,
+    DeviceMatrixLayout, DispatchFailureCell, EighFactors, FusionPlan, GemmChecksum,
+    GruBackwardOutput, GruPointwiseOutput, HuberKind, InterpolateMode, KlDivTarget, LambMoments,
+    LambStepConfig, LstmPointwiseOutput, MatrixNormOrd, MseReduction, PagedAttentionArgs,
+    PagedKvLayout, Pool2dParams, QrFactors, RmsPropOptionalBuffers, RmsPropStepConfig,
+    ScatterReduce, SgdStepConfig, ShapeError, SlogdetFactors, SvdFactors, Tensor,
+    UnaryElementwiseOp, VectorNormOrd, adaptive_pool2d_out_shape, batch_norm_layout,
     gather_out_shape, im2col_out_shape, im2col3d_out_shape, interpolate_out_shape_for_mode,
     one_hot_out_shape, pad_out_shape, pool2d_out_shape, require_same_shape, row_norm_layout,
     row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
@@ -66,6 +67,11 @@ use crate::{
 fn shared_cpu_memory() -> &'static CpuMemory {
     static SHARED: OnceLock<CpuMemory> = OnceLock::new();
     SHARED.get_or_init(CpuMemory::new)
+}
+
+/// 共有本体が `None` 出力で `Some(buffer)` を返さなかった場合（実装上到達しない）の型付きエラー。
+fn no_output() -> BackendError {
+    BackendError::Unsupported("internal: shared core produced no output buffer".into())
 }
 
 /// CPU バックエンドの `BackendOps` 実装。状態を持たないゼロサイズ型
@@ -487,6 +493,24 @@ fn linear_forward_device_with(
     act: Activation,
     prepack_enabled: bool,
 ) -> Result<DeviceBuffer<f32>, BackendError> {
+    linear_forward_device_core(a, w, bias, act, prepack_enabled, None)?.ok_or_else(|| {
+        BackendError::Unsupported("linear_forward_device: internal: no output produced".into())
+    })
+}
+
+/// [`linear_forward_device_with`]（確保版）と `linear_forward_device_into_tracked`（`out` 書き込み版・
+/// イシュー #3253）が共有する本体。検査とカーネル呼び出しを 1 本にして二重に持たない
+/// （CUDA の `*_core` と同じ構成。`docs/compat-resident-train-step-decision.md` §13）。
+/// `out` が `None` なら確保して `Some(buffer)` を返し、`Some(out)` なら事前検査の後に 0 埋めして
+/// 書き込み `None` を返す（BLIS は C を load して書き戻すため 0 埋めが bit 一致の前提）。
+fn linear_forward_device_core(
+    a: &DeviceBuffer<f32>,
+    w: DeviceBufferView<'_>,
+    bias: Option<DeviceBufferView<'_>>,
+    act: Activation,
+    prepack_enabled: bool,
+    out: Option<&mut DeviceBuffer<f32>>,
+) -> Result<Option<DeviceBuffer<f32>>, BackendError> {
     if a.device() != Device::Cpu || w.device() != Device::Cpu {
         return Err(BackendError::DeviceMismatch);
     }
@@ -567,25 +591,47 @@ fn linear_forward_device_with(
     let out_len = m.checked_mul(n).ok_or(BackendError::ShapeMismatch(
         ShapeError::ElementCountOverflow,
     ))?;
-    let mut out = vec![0.0f32; out_len];
     let prepack = prepack_enabled.then(|| PrepackSource {
         cache: w_handle.prepack_cache(),
         offset: w.offset(),
     });
-    gemm_blis_bias_act_parallel_prepacked(
-        a_slice,
-        w_slice,
-        &mut out,
-        m,
-        n,
-        k,
-        bias_handle_slice,
-        act,
-        prepack,
-    )
-    .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
-
-    shared_cpu_memory().wrap_vec(out, vec![m, n])
+    match out {
+        None => {
+            let mut buf = vec![0.0f32; out_len];
+            gemm_blis_bias_act_parallel_prepacked(
+                a_slice,
+                w_slice,
+                &mut buf,
+                m,
+                n,
+                k,
+                bias_handle_slice,
+                act,
+                prepack,
+            )
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+            shared_cpu_memory().wrap_vec(buf, vec![m, n]).map(Some)
+        }
+        Some(out) => {
+            // 書き込み前に out の device・shape・実体長をすべて検査する（Err 時は out 不変）。
+            train_chain_parts::check_cpu_into_out(out, &[m, n])?;
+            let dst = train_chain_parts::out_slice_mut(out, out_len)?;
+            dst.fill(0.0);
+            gemm_blis_bias_act_parallel_prepacked(
+                a_slice,
+                w_slice,
+                dst,
+                m,
+                n,
+                k,
+                bias_handle_slice,
+                act,
+                prepack,
+            )
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+            Ok(None)
+        }
+    }
 }
 
 impl BackendOps for CpuBackendOps {
@@ -1666,6 +1712,134 @@ impl BackendOps for CpuBackendOps {
         linear_forward_device_with(a, w, bias, act, RESIDENT_W_PREPACK_ENABLED)
     }
 
+    /// 学習チェーンの forward を、呼び出し元の既存出力 `out`（shape `[m, n]`）へ書く版
+    /// （イシュー #3253）。確保版 [`BackendOps::linear_forward_device`] と同じ核・同じ prepack 引き当てで、
+    /// 出力だけ再利用する（事前に 0 埋め。BLIS は C を load して書き戻すため）。CPU は同期実行のため
+    /// `_token` は使わない。
+    fn linear_forward_device_into_tracked(
+        &self,
+        a: &DeviceBuffer<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+        act: Activation,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        linear_forward_device_core(a, w, bias, act, RESIDENT_W_PREPACK_ENABLED, Some(out))
+            .map(|_| ())
+    }
+
+    /// MSE forward のデバイス版（イシュー #3253）。ホスト `mse_loss` と同じ縮約核・同じ最終式。
+    fn mse_loss_device(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        train_chain_parts::mse_loss_device_core(pred, target, reduction, None)?
+            .ok_or_else(no_output)
+    }
+
+    /// [`Self::mse_loss_device`] の `out` 書き込み版（#3253。`out` は shape `[]`）。
+    fn mse_loss_device_into_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        train_chain_parts::mse_loss_device_core(pred, target, reduction, Some(out)).map(|_| ())
+    }
+
+    /// MSE backward のデバイス版（#3253）。ホスト `mse_loss_backward` と同じ核。
+    fn mse_loss_backward_device(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        train_chain_parts::mse_loss_backward_device_core(pred, target, scale, None)?
+            .ok_or_else(no_output)
+    }
+
+    /// [`Self::mse_loss_backward_device`] の `out` 書き込み版（#3253）。
+    fn mse_loss_backward_device_into_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        train_chain_parts::mse_loss_backward_device_core(pred, target, scale, Some(out)).map(|_| ())
+    }
+
+    /// ReLU backward マスク（乗算ではなく選択）のデバイス版（#3253）。
+    fn relu_backward_mask_device(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        train_chain_parts::relu_backward_mask_device_core(g, g_layout, mask_src, None)?
+            .ok_or_else(no_output)
+    }
+
+    /// [`Self::relu_backward_mask_device`] の `out` 書き込み版（#3253）。
+    fn relu_backward_mask_device_into_tracked(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        train_chain_parts::relu_backward_mask_device_core(g, g_layout, mask_src, Some(out))
+            .map(|_| ())
+    }
+
+    /// dW の GEMM（bias 縮約の融合を含む）のデバイス版（#3253）。bit 一致の比較先はホストの
+    /// `gemm_fp32_strict_into`＋`reduce_bias_grad_rows`。`bias` が `Some` なら必ず書いて `true` を返す。
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_fp32_strict_into_device(
+        &self,
+        a: DeviceBufferView<'_>,
+        a_layout: DeviceMatrixLayout,
+        b: DeviceBufferView<'_>,
+        b_layout: DeviceMatrixLayout,
+        out: &mut DeviceBuffer<f32>,
+        out_offset: usize,
+        bias: Option<(usize, usize)>,
+    ) -> Result<bool, BackendError> {
+        train_chain_parts::gemm_fp32_strict_into_device_core(
+            a, a_layout, b, b_layout, out, out_offset, bias,
+        )
+    }
+
+    /// d_input の GEMM（`W @ op(B)`）のデバイス版（#3253）。ホスト `gemm_resident_lhs` と同じ核。
+    fn gemm_resident_lhs_device(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: DeviceMatrixLayout,
+    ) -> Result<DeviceBuffer<f32>, BackendError> {
+        train_chain_parts::gemm_resident_lhs_device_core(w, b, b_layout, None)?
+            .ok_or_else(no_output)
+    }
+
+    /// [`Self::gemm_resident_lhs_device`] の `out` 書き込み版（#3253）。
+    fn gemm_resident_lhs_device_into_tracked(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: DeviceMatrixLayout,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        train_chain_parts::gemm_resident_lhs_device_core(w, b, b_layout, Some(out)).map(|_| ())
+    }
+
     /// [`BackendOps::gemm_device`] の CPU 実装（イシュー #3250 P4）。入力は upload 済みの
     /// contiguous 行優先なので、[`Self::gemm`] が転置判定の後に通る汎用分岐と同じ
     /// `gemm_blis_parallel` をスライスのまま呼ぶ（`Tensor` への再コピーなし）。
@@ -2388,21 +2562,8 @@ impl BackendOps for CpuBackendOps {
         let target_slice = target_c.as_slice().unwrap_or(&[]);
         let numel = pred_slice.len();
         let sum_sq = mse::mse_sum_sq_f32(pred_slice, target_slice)?;
-        let value = match reduction {
-            MseReduction::Mean => {
-                if numel == 0 {
-                    0.0
-                } else {
-                    sum_sq / numel as f32
-                }
-            }
-            MseReduction::Sum => sum_sq,
-            _ => {
-                return Err(BackendError::Unsupported(format!(
-                    "mse_loss: unsupported MseReduction variant {reduction:?}"
-                )));
-            }
-        };
+        // 最終スカラー式はデバイス版（#3253）と共有する（別式だと bit がずれる）。
+        let value = train_chain_parts::mse_reduce_value(sum_sq, numel, reduction, "mse_loss")?;
         Tensor::new(vec![value], &[]).map_err(BackendError::ShapeMismatch)
     }
 
@@ -5033,3 +5194,8 @@ mod col2im_shape_validation_tests {
 #[cfg(test)]
 #[path = "ops_resident_w_prepack_tests.rs"]
 mod resident_w_prepack_tests;
+
+// 学習チェーン（イシュー #3253）の常駐部品。private な `shared_cpu_memory`・
+// `linear_forward_device_core` を子モジュールとして参照するため `ops` 配下に置く。
+#[path = "ops_train_chain_parts.rs"]
+mod train_chain_parts;

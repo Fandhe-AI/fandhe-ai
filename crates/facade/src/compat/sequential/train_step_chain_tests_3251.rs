@@ -9,9 +9,10 @@
 //! #3254 はこの補助の形を本番コードへ移す。
 //!
 //! # テスト
-//! - CPU（CI で実行）: CPU バックエンドは部品が未実装（#3253）で `Unsupported`。store が不変で
-//!   poison しないことを固定する（黙って別の計算をしない）。#3253 が入って `Ok` になったら
-//!   loss の有限性を確かめる（期待値の更新はそのときの PR で行う）
+//! - CPU（CI で実行。イシュー #3253）: CPU バックエンドの部品が入り、チェーンが Tape 経路と
+//!   loss 列・全パラメータで bit 一致すること（step 2 以降は `_into` の再利用経路）。範囲外の構成
+//!   （Sigmoid／Tanh・最終層 ReLU・空バッチ・別 store の入力）は型付きエラーで止まり store を
+//!   変えないこと。CI の debug ビルドの負荷のため、784 幅は 1 構成に絞り残りは中サイズで確かめる
 //! - Metal（`#[ignore]`・実機）: loss と更新後パラメータが Tape 経路と bit 一致すること
 //!   （momentum 0／>0・2 層／3 層）、1 step の `waitUntilCompleted` が loss を読む 1 回だけ
 //!   であること。受け入れ記録は `docs/perf/logs/train-step-chain-metal-3251/`（Mac mini）
@@ -88,16 +89,10 @@ fn bits(t: &Tensor<f32>) -> Vec<u32> {
 }
 
 #[test]
-fn cpu_chain_keeps_the_store_unchanged_until_cpu_parts_exist() {
+fn cpu_chain_runs_and_returns_finite_loss() {
     let model = build_mlp(&[6, 8, 3]);
     let tape = crate::tape();
     let mut store = model.init_device_param_store(&tape).unwrap();
-    let before: Vec<Vec<u32>> = tape
-        .sync_device_param_store_to_host(&store)
-        .unwrap()
-        .iter()
-        .map(bits)
-        .collect();
     let x = tape
         .upload_resident(&store, &host_tensor(1, &[4, 6]))
         .unwrap();
@@ -105,24 +100,133 @@ fn cpu_chain_keeps_the_store_unchanged_until_cpu_parts_exist() {
         .upload_resident(&store, &host_tensor(2, &[4, 3]))
         .unwrap();
     let config = SgdConfig::new(0.05);
-    match chain_train_step(&model, &mut store, &tape, &x, &y, &config) {
-        // 部品が未実装の間（#3253 まで）は Unsupported で止まり、何も変えない。
-        Err(BackendError::Unsupported(_)) => {
-            let after: Vec<Vec<u32>> = tape
-                .sync_device_param_store_to_host(&store)
-                .unwrap()
-                .iter()
-                .map(bits)
-                .collect();
-            assert_eq!(before, after, "Unsupported のとき params は不変");
-        }
-        // #3253 で CPU の部品が入った後はチェーンが通る。loss が有限であることだけ確かめる。
-        Ok(loss) => {
-            let v = store.read_train_step_loss(&tape.0, &loss).unwrap();
-            assert!(v.is_finite(), "loss={v}");
-        }
-        Err(e) => panic!("想定外のエラー: {e:?}"),
+    let loss = chain_train_step(&model, &mut store, &tape, &x, &y, &config)
+        .expect("CPU の部品が入ったのでチェーンは通る（#3253）");
+    let v = store.read_train_step_loss(&tape.0, &loss).unwrap();
+    assert!(v.is_finite(), "loss={v}");
+}
+
+fn params_bits(tape: &Tape, store: &DeviceParamStore) -> Vec<Vec<u32>> {
+    tape.sync_device_param_store_to_host(store)
+        .unwrap()
+        .iter()
+        .map(bits)
+        .collect()
+}
+
+/// 範囲外構成の拒否: 型付きエラーで止まり、params が bit 単位で不変であること。
+fn assert_rejected_and_unchanged(model: &Sequential, x_shape: &[usize], y_shape: &[usize]) {
+    let tape = crate::tape();
+    let mut store = model.init_device_param_store(&tape).unwrap();
+    let before = params_bits(&tape, &store);
+    let x = tape
+        .upload_resident(&store, &host_tensor(1, x_shape))
+        .unwrap();
+    let y = tape
+        .upload_resident(&store, &host_tensor(2, y_shape))
+        .unwrap();
+    let r = chain_train_step(model, &mut store, &tape, &x, &y, &SgdConfig::new(0.05));
+    assert!(
+        matches!(r, Err(BackendError::Unsupported(_))),
+        "範囲外は Unsupported のはず: {r:?}"
+    );
+    assert_eq!(before, params_bits(&tape, &store), "拒否時は params 不変");
+}
+
+#[test]
+fn cpu_chain_rejects_unsupported_activation_and_keeps_store() {
+    let mut model = Sequential::new();
+    model = model.add_linear(6, 8, 7000).unwrap().add_sigmoid();
+    model = model.add_linear(8, 3, 7001).unwrap();
+    assert_rejected_and_unchanged(&model, &[4, 6], &[4, 3]);
+    let mut model = Sequential::new();
+    model = model.add_linear(6, 8, 7000).unwrap().add_tanh();
+    model = model.add_linear(8, 3, 7001).unwrap();
+    assert_rejected_and_unchanged(&model, &[4, 6], &[4, 3]);
+}
+
+#[test]
+fn cpu_chain_rejects_trailing_relu_and_keeps_store() {
+    let model = build_mlp(&[6, 8, 3]).add_relu();
+    assert_rejected_and_unchanged(&model, &[4, 6], &[4, 3]);
+}
+
+#[test]
+fn cpu_chain_rejects_empty_batch_and_keeps_store() {
+    let model = build_mlp(&[6, 8, 3]);
+    assert_rejected_and_unchanged(&model, &[0, 6], &[0, 3]);
+}
+
+#[test]
+fn cpu_chain_rejects_resident_input_of_another_store() {
+    let model = build_mlp(&[6, 8, 3]);
+    let tape = crate::tape();
+    let mut store = model.init_device_param_store(&tape).unwrap();
+    let other = model.init_device_param_store(&tape).unwrap();
+    let before = params_bits(&tape, &store);
+    let x = tape
+        .upload_resident(&other, &host_tensor(1, &[4, 6]))
+        .unwrap();
+    let y = tape
+        .upload_resident(&other, &host_tensor(2, &[4, 3]))
+        .unwrap();
+    let r = chain_train_step(&model, &mut store, &tape, &x, &y, &SgdConfig::new(0.05));
+    assert!(
+        matches!(r, Err(BackendError::InvalidArgument(_))),
+        "別 store の入力は InvalidArgument のはず: {r:?}"
+    );
+    assert_eq!(before, params_bits(&tape, &store), "拒否時は params 不変");
+}
+
+fn momentum_config() -> SgdConfig {
+    SgdConfig {
+        lr: 0.05,
+        momentum: 0.9,
+        dampening: 0.1,
+        weight_decay: 1e-3,
+        nesterov: false,
     }
+}
+
+fn nesterov_config() -> SgdConfig {
+    SgdConfig {
+        lr: 0.05,
+        momentum: 0.9,
+        dampening: 0.0,
+        weight_decay: 1e-3,
+        nesterov: true,
+    }
+}
+
+/// 2 層（L1 の d_input は計算しない契約）。784 幅は debug ビルドで重いため plain の 1 構成に絞る。
+#[test]
+fn cpu_chain_matches_tape_path_bit_exact_two_layers() {
+    compare_with_tape_path(Device::Cpu, &[784, 256, 10], 64, &SgdConfig::new(0.05), 4);
+    for config in [momentum_config(), nesterov_config()] {
+        compare_with_tape_path(Device::Cpu, &[96, 64, 10], 64, &config, 4);
+    }
+}
+
+/// 3 層（L2 の d_input・ReLU マスクを通る）。
+#[test]
+fn cpu_chain_matches_tape_path_bit_exact_three_layers() {
+    let config = SgdConfig {
+        lr: 0.05,
+        momentum: 0.9,
+        dampening: 0.0,
+        weight_decay: 0.0,
+        nesterov: false,
+    };
+    compare_with_tape_path(Device::Cpu, &[96, 64, 32, 10], 64, &config, 4);
+    compare_with_tape_path(Device::Cpu, &[96, 64, 32, 10], 64, &SgdConfig::new(0.05), 3);
+}
+
+/// 端数形状と batch 1（bias 縮約の `k == 1` 分岐・-0.0 保持）。
+#[test]
+fn cpu_chain_matches_tape_path_bit_exact_odd_shapes_and_batch_one() {
+    compare_with_tape_path(Device::Cpu, &[7, 5, 3], 3, &momentum_config(), 4);
+    compare_with_tape_path(Device::Cpu, &[7, 5, 3], 1, &SgdConfig::new(0.05), 4);
+    compare_with_tape_path(Device::Cpu, &[7, 5, 4, 3], 1, &momentum_config(), 3);
 }
 
 /// 最終層の出力幅 0（n == 0）は `mse_loss_scale` が inf になるため、型付きエラーで拒否し params を変えない。
@@ -159,10 +263,8 @@ fn chain_rejects_zero_width_output() {
     assert_eq!(before, after, "拒否時は params 不変");
 }
 
-#[cfg(unix)]
 use fandhe_ai_tensor_core::Device;
 
-#[cfg(unix)]
 fn assert_bits_or_nan_class(actual: &[u32], expected: &[u32], what: &str) {
     assert_eq!(actual.len(), expected.len(), "{what}: len");
     for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
@@ -175,7 +277,6 @@ fn assert_bits_or_nan_class(actual: &[u32], expected: &[u32], what: &str) {
     }
 }
 
-#[cfg(unix)]
 /// 同じ初期値の store を 2 つ作り、A はチェーン・B は Tape 経路で `steps` 回学習して
 /// step ごとの loss と最終パラメータの bit 一致を確かめる。
 fn compare_with_tape_path(
