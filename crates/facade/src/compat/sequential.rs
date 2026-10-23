@@ -108,7 +108,7 @@ use crate::inference::batch::{
 };
 use crate::{
     AutodiffError, BackendError, DeviceParamStore, EmbeddingBagMode, GlobalPoolMode, Gradients,
-    InterpolateMode, LinearVars, ResidentLeaf, Tape, Tensor, Var,
+    InterpolateMode, LinearVars, ResidentLeaf, ResidentTensor, Tape, Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{
     Celu, Elu, Gelu, GeluTanh, Glu, Hardsigmoid, Hardswish, Hardtanh, LeakyRelu, LogSigmoid,
@@ -3780,6 +3780,45 @@ impl Sequential {
         let input_var = tape.var(input);
         let output = self.forward_from_flat_leaves(&tape.0, &input_var, &leaves, store)?;
         Ok(output.to_tensor())
+    }
+
+    /// [`Self::predict_resident`] の常駐入力版（イシュー #3250 P3）。入力を
+    /// [`Tape::upload_resident`] で窓の外へ 1 回置いた [`ResidentTensor`] として受け、
+    /// 窓の中は入力の H2D なし・出力の D2H 1 回だけで推論する。チェーン本体は
+    /// ホスト入力版と同一（`DeviceParamStore::predict_device_chain_resident`）なので出力は
+    /// [`Self::predict_resident`] と bit 一致する。
+    ///
+    /// **ホスト経路へは落とさない**: `Sigmoid`／`Tanh` 混在・層の過不足・空 `Sequential`
+    /// （チェーンを組めない場合）や、バックエンドがデバイス常駐チェーンに対応しない場合は
+    /// [`BackendError::Unsupported`] を返して止める（download してホスト経路へ回すと、
+    /// 本 API が取り除く H2D が戻るため）。チェーンは `store` を書き換えないので状態は変わらない。
+    /// 別 `store`・別デバイスのハンドルは型付きエラー（`InvalidArgument`・`DeviceMismatch`）。
+    pub fn predict_resident_input(
+        &self,
+        store: &DeviceParamStore,
+        input: &ResidentTensor,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        if self.contains_resident_unsupported_layer() {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Sequential::predict_resident_input: Conv／Norm／Embedding／Attention／Pooling／PReLU 層を \
+                 含む Sequential はデバイス常駐経路非対応（イシュー #1770・#1760・#1957・#2529）"
+                    .to_string(),
+            )));
+        }
+        self.reject_untracked_parametric_layer_resident("Sequential::predict_resident_input")
+            .map_err(AutodiffError::Backend)?;
+        let tape = crate::tape_for(store.device())?;
+        let leaves = store.snapshot_resident_params(&tape.0)?;
+        let Some(steps) = self.build_device_chain_steps(&leaves) else {
+            return Err(AutodiffError::Backend(BackendError::Unsupported(
+                "Sequential::predict_resident_input: Linear（＋ReLU）以外の層を含む、または層が空の \
+                 Sequential はデバイス常駐チェーン非対応（ホスト経路へは落とさない。イシュー #3250）"
+                    .to_string(),
+            )));
+        };
+        store
+            .predict_device_chain_resident(&tape.0, &input.0, &steps)
+            .map_err(AutodiffError::Backend)
     }
 
     /// `self.layers` を走査し、[`DeviceParamStore::predict_device_chain`]

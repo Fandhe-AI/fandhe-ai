@@ -842,6 +842,10 @@ mod gemm_tile_select_macmini_diag_tests;
 // #3181 の診断モジュールと同じ理由（`pub(crate)` 面への到達）でクレートルートの兄弟として置く。
 #[cfg(all(test, target_os = "macos"))]
 mod gemm_tile_macmini_table_diag_tests;
+// イシュー #3250: 常駐入力の行列積・推論チェーン層列が窓の中で入力 H2D を起こさないことの実機検証。
+// `buffer::diag_h2d_buffer_count`（`pub(crate)`）へ到達するため兄弟モジュールとして置く。
+#[cfg(all(test, target_os = "macos"))]
+mod resident_input_diag_tests_3250;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
 // バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの

@@ -185,3 +185,13 @@ M4 Max 実機での実測自体は本エージェント実行環境に Apple Sil
 - **決定 7（`Unsupported` は tape 経路への全体フォールバック）との整合**: capture の不適用は `Ok(None)` で表し、
   既存の非 capture チェーンへ進む（`Unsupported` にすると非 capture チェーンを飛び越えて遅い経路へ落ちるため）
 - 関連: `crates/backend-cuda/src/graph.rs`・`ops.rs::linear_chain_forward_captured`・`crates/autodiff/src/optim/device_store.rs::predict_device_chain`
+
+## 12. 常駐入力の入口（#3250）
+
+`predict_device_chain_once` を、入力を `ChainInput`（ホスト `Tensor`／常駐 `DeviceBuffer`）で受ける本体に
+分けた。ホスト入力は本体が upload して所有し第 1 層の発行直後に解放する（従来どおり）。常駐入力
+（`DeviceParamStore::predict_device_chain_resident`）は借用のみで upload も解放もしない。層ループ・scratch・
+失敗トークンの再検査・capture 衝突の再試行は共有する。常駐入力は Graph capture 経路を通らない
+（#3258 の課題）。ホスト経路へは落とさず `Unsupported` を返す。詳細は
+`docs/compat-resident-train-step-decision.md` §10。
+
