@@ -58,7 +58,7 @@ def finite_num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def load_rows(path, task, bad):
+def load_rows(path, task, bad, ck_all):
     """正常行だけを返し、不正行は理由を bad へ収集する（例外で全行を捨てない）。
 
     正常行の checksum を保持して不一致 FAIL の確認を続けるため（RULE §4: FAIL は常に最優先）。
@@ -89,10 +89,13 @@ def load_rows(path, task, bad):
         if (task, size, mode) not in CELLS:
             bad.append(where + " 未知のセル: %s size=%s mode=%s" % (task, size, mode))
             continue
+        ck_ok = finite_num(o.get("checksum"))
+        if ck_ok:
+            ck_all.setdefault((task, size, mode), []).append(o["checksum"])
         if not finite_num(o.get("median_s")) or o["median_s"] <= 0:
             bad.append(where + " median_s が不正")
             continue
-        if not finite_num(o.get("checksum")):
+        if not ck_ok:
             bad.append(where + " checksum が非有限・欠損")
             continue
         rows.append(o)
@@ -106,7 +109,7 @@ def find_one(pattern):
     return hits[0]
 
 
-def load_arm_cells(ab, arm, problems):
+def load_arm_cells(ab, arm, problems, ck_all):
     """読めた行だけを返し、欠測・件数不足・不正行は problems へ収集する（例外で打ち切らない）。
 
     checksum 不一致（FAIL）の確認を欠測で妨げないため（RULE §4: FAIL は常に最優先）。"""
@@ -114,7 +117,7 @@ def load_arm_cells(ab, arm, problems):
     for task in KNOWN_TASKS:
         try:
             path = find_one(os.path.join(ab, "results-%s-*-cpu-%s.jsonl" % (arm, task)))
-            rows = load_rows(path, task, problems)
+            rows = load_rows(path, task, problems, ck_all)
         except AggError as e:
             problems.append("arm=%s: %s" % (arm, e))
             continue
@@ -169,11 +172,12 @@ def evaluate(base, host):
     ab = os.path.join(base, "ab")
     res = {"host": host, "gate_fail": [], "notes": []}
     problems = []
-    arm = {a: load_arm_cells(ab, a, problems) for a in ("before", "after")}
+    ck_all = {}
+    arm = {a: load_arm_cells(ab, a, problems, ck_all) for a in ("before", "after")}
     # checksum 完全一致（FAIL）。読めた行だけで先に確認し、欠測があっても FAIL を保持する
     ck_bad = []
     for cell in CELLS:
-        vals = [o["checksum"] for a in arm for o in arm[a].get(cell, [])]
+        vals = ck_all.get(cell, [])
         if len(set(vals)) > 1:
             ck_bad.append(cell)
     res["checksum_bad"] = ck_bad
@@ -405,7 +409,7 @@ def _write(path, text):
     open(path, "w", encoding="utf-8").write(text)
 
 
-def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False, bd_cmp=None, bad_row=False):
+def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, gate_ok=True, bad_regress=False, torch_mode="full", rm_tree=False, bd_mismatch=False, bd_fail=False, bd_cmp=None, bad_row=False, bad_time_ck=False):
     ab = os.path.join(root, "ab")
     for arm in ("before", "after"):
         for task in KNOWN_TASKS:
@@ -427,6 +431,9 @@ def _fixture(root, host, on_ratio=0.9, ck_bad=False, drop_row=False, dup=False, 
                 lines.append(lines[0])
             if bad_row and arm == "after" and task == "gemm":
                 lines.append(json.dumps({"task": "gemm", "device": "cpu", "size": 256, "mode": "fresh", "median_s": -1, "checksum": 1.5}))
+            if bad_time_ck and arm == "after" and task == "gemm":
+                # 計測時間が不正かつ before と異なる checksum の行（正常 5 行は維持）
+                lines.append(json.dumps({"task": "gemm", "device": "cpu", "size": 256, "mode": "fresh", "median_s": 0, "checksum": 9.5}))
             _write(os.path.join(ab, "results-%s-3232-r1-cpu-%s.jsonl" % (arm, task)), "\n".join(lines) + "\n")
     tl = []
     for r in range(ROUNDS):
@@ -501,6 +508,7 @@ def self_test():
     check("checksum 不一致 + 前提ログ欠損でも FAIL を保つ", _verdict("macmini", ck_bad=True, rm_tree=True), "FAIL")
     check("欠測 + checksum 不一致でも FAIL（1 機内）", _verdict("macmini", ck_bad=True, drop_row=True), "FAIL")
     check("不正行混在 + checksum 不一致でも FAIL を保つ", _verdict("macmini", ck_bad=True, bad_row=True), "FAIL")
+    check("median_s 不正行の checksum 不一致でも FAIL", _verdict("macmini", bad_time_ck=True), "FAIL")
     check("不正行のみは undetermined", _verdict("macmini", bad_row=True), "undetermined")
     check("cmp 実行エラー（exit 2）は undetermined", _verdict("gb10", bd_cmp=2), "undetermined")
     check("cmp exit 1 は FAIL", _verdict("gb10", bd_cmp=1), "FAIL")
