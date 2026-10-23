@@ -366,3 +366,78 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   wait 0）。`_into` 版の部品は新しい設計項目で #3258 と同系。
 - **#3252（CUDA）・#3253（CPU）**: 部品が実装済みなら同じ `train_step_device_chain` がそのまま動く。CUDA の Graph capture
   （#3258）は固定構造（永続ワークスペース・永続 loss スカラー）を前提にする。
+
+## §12 #3252 実装記録（CUDA の学習チェーン。区間内の同期・H2D・確保を 0 にする）
+
+### 実装した名前と配置
+
+| 層 | 名前 |
+|---|---|
+| tensor-core（内部 trait の非破壊拡張。既定は `Unsupported`） | `BackendOps::mse_loss_device_into_tracked`・`mse_loss_backward_device_into_tracked`・`relu_backward_mask_device_into_tracked`・`gemm_resident_lhs_device_into_tracked`（いずれも `_tracked` 版だけ。末尾の `out` が出力先、その前が既存部品と同じ引数、最後が `token`）。#3205 の `linear_forward_device_into_tracked` と合わせて、チェーンの出力を作る 5 部品が `_into` 版を持つ。dW は #3223 から既に勾配連結バッファへ書く形のため追加なし |
+| backend-cuda | `ops.rs` の 4 本の `*_impl` を `*_core(.., out: Option<&mut DeviceBuffer<f32>>) -> Result<Option<DeviceBuffer<f32>>, _>` へ一般化し、確保版は `*_core(.., None)`、`_into` 版は `*_core(.., Some(out))` を呼ぶ（検査・起動ヘルパ・カーネルは共有）。`token` は使わない明示 override。診断は `gemm.rs` の `GemmLaunchDiagCounters::mem_allocs`・`diag_count_mem_alloc`（`CudaMemory::alloc_zeroed_inner` の成功、MSE partial・GEMM device workspace の grow で数える） |
+| autodiff | `device_store/train_chain.rs`: `TrainChainBufs`（層出力・dPred・d_input・mask 後勾配。鍵は `(m, 各層の出力幅)`）、`TrainChainCaps`（部品ごとの `_into` 対応ラッチ）、`produce_part`。`predict_device_chain` の `chain_scratch` とは別フィールド（鮮度契約を混ぜない）。公開入口は増やしていない（`api_surface.rs` 不変） |
+
+- **チェーンのループは #3251 のまま 1 本**。各部品はまず再利用バッファへ `_into_tracked` を試し、`Unsupported` なら
+  その部品だけ確保版 `_tracked` へ進み、`caps` へラッチして以後は `_into` を試さない。`Unsupported` は部品単位で
+  消費し、チェーン全体の `Unsupported` としては表に出さない（Metal・CPU の挙動と §11 の失敗境界は不変）。
+  世代切れ（`StaleDeviceGeneration`）は再利用バッファを捨てて確保し直す。初回（再利用バッファなし）は確保した出力へ
+  `_into` を 1 回だけ試して能力を確定する（同じ結果の上書き。`predict_device_chain` と同じ方式）。
+- **失敗経路のバッファは再利用せず `train_chain_hold` へ退避**する（実行中の GPU 処理と競合させない）。成功した step の
+  バッファだけを次 step の出力先として store に戻す。
+- **古い loss ハンドル**: loss バッファを再利用する step の開始時に世代を進める。書き込み後に失敗しても、古いハンドルが
+  新 step の途中値を読むことはない（世代検査が拒否する）。
+
+### bit 一致の前提（コードで確認した事実）
+
+再利用バッファは確保版のような memset 済みではない。bit が確保版と一致するのは、出力カーネルが各要素へ**無条件に
+代入**し既存値を読まないため。
+
+- ReLU マスク: `ew_relu_mask_select_f32` は `out[idx] = ..`（`kernels_elementwise.rs`）
+- MSE forward: `mse_finalize_f32` の lane 0 が `out[0] = block_sum * factor`、backward は `dpred[idx] = scale * (..)`
+  （`kernels_mse.rs`）
+- d_input・forward の GEMM: 選ばれうる tiled f32 variant はすべて `c[..] = acc`（`kernels.rs`・
+  `kernels_tiled_pipeline.rs`・`kernels_tiled_pipeline_128x64.rs`。`+=` で `c` を読む variant は無い）
+- 代入でない variant が将来入った場合は、その `_into` 版で再利用バッファへストリーム順序の `memset_zeros` を先に積んで
+  確保版と bit をそろえる（memset は確保でも同期でもない）。黙って bit ずれを受け入れない
+
+### 窓内の隠れた確保・同期の監査
+
+- 確保: チェーンから到達する GEMM 経路（`launch_gemm_dw_device`・`launch_gemm_dinput_device`・`launch_tiled_f32_resident`・
+  `launch_tiled_bias_act_f32_resident`）に呼び出しごとの `alloc_zeros` は無い。`gemm.rs` の `alloc_zeros`（tile_counter・
+  unit_counter・partials）は `compile_*` 系（構築時）にあり、呼び出しごとの経路ではない。永続ワークスペース
+  （`CudaGemm::device_workspace`・`CudaMse::partial_workspace`）は初回だけ grow し、grow も `mem_allocs` で数える
+  （初回 step で 11 件、定常状態で 0 件を実測）。bias 縮約（`launch_sum_axis_generic_into`）・SGD 起動も確保しない
+- 同期: チェーンの部品から到達する `synchronize()` は無い（`memory.rs` の `readback` 系・`host_readback`・`host_view_managed`
+  は `download`／`with_host_view` 経路で、`read_train_step_loss` の 1 回だけが通る。`pool.rs` の同期は破棄経路）。
+  計数不能なのは cudarc `CudaSlice::Drop` が `has_async_alloc == false` の環境でだけ行う同期で、GB10 は `true`
+  （#3223 §6 と同じ前提）。定常状態では `_into` による再利用で `CudaSlice` の drop 自体が起きないため、非 async-alloc
+  環境でも窓内には出ない
+- 診断カウンタ（`cfg(any(test, feature = "internal-diagnostics"))`）の範囲外はこの監査で補う。既定ビルドの公開面・性能に影響しない
+
+### 検証
+
+- CI（GitHub ホステッド）: tensor-core の既定動作（4 部品とも `Unsupported`・`token` 非接触）、backend-cuda の
+  `out` のデバイス／shape 不一致を driver より前に拒否する単体テスト、autodiff の記録型モック 5 件（`_into` 対応時に
+  2 step 目以降の確保版部品呼び出し・`alloc_zeroed`・upload・download がすべて 0／`_into` 未対応時に従来経路で同じ結果で
+  `Unsupported` を表に出さない／鍵が変わったら作り直す／世代切れで確保し直す／失敗 step のバッファは再利用せず hold に残る）。
+  既存モック 12 件（L1 の d_input 無し・poison 境界・失敗トークンほか）は変更なしで通る
+- 実機 `#[ignore]`（GB10・5 run 各すべて pass。記録は `docs/perf/logs/train-step-chain-cuda-3252/`。RULE.txt を事前登録）:
+  - B1（`train_step_chain_diag_tests_3252`）: 784-256-10・batch 64・momentum 0.9・ウォームアップ 3 step の後の窓で
+    `stream_syncs`・`d2h_calls`・`h2d_calls`・`mem_uploads`・`mem_allocs` がすべて 0、loss 読み出しで `stream_syncs` = 1・
+    `d2h_calls` = 1。対照として初回 step の `mem_allocs` = 11、同期 0
+  - B2・B3（facade の in-crate）: loss と更新後の全パラメータが Tape 経路と bit 一致（784-256-10・784-128-64-10・
+    momentum 0／0.9／dampening／weight_decay／nesterov・各 3〜4 step。2 step 目以降が再利用経路）
+- Metal の後退なし: 開発機（M4 Max）で `train_step_chain_tests_3251` の Metal `#[ignore]` 3 件が通る（Metal は `_into` 未対応のため
+  経路は不変）。Mac mini での再計測は未実施
+- `unsafe {` の数（変更前後）: backend-cuda の `ops.rs` 0→0・`gemm.rs` 28→28・`memory.rs` 5→5・`mse.rs` 3→3・
+  `elementwise.rs` 7→7・`reduce.rs` 12→12。**新規 `unsafe` なし**（起動ヘルパは既に `&mut CudaArgMut` を受けるため）
+- 性能（目安 0.18〜0.25 ms）は本 issue の受け入れ条件に含まれないため計測していない（A/B は別途）
+
+### 範囲外・申し送り
+
+- **#3254**: 公開入口、`ResidentInput` を永続バッファへ `upload_into` で更新する入口（窓の外。公開形を伴う）、P7 の D2H なし完了待ち、
+  Tape 経路への全体フォールバック
+- **#3258**: step 全体の CUDA Graph capture。永続スクラッチ・永続 loss は固定構造として揃った（capture 中は確保・grow を
+  拒否するため、capture 前にウォームアップで定常状態にする必要がある）
+- **Metal の `_into` 版部品（確保ゼロ化）**: 未着手。Metal は従来どおり step ごとに確保する（pool 再利用で同期は起きない）
+- **CPU（#3253）**: 部品が実装されれば同じループを再利用する

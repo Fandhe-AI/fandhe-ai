@@ -15,6 +15,10 @@
 //! - Metal（`#[ignore]`・実機）: loss と更新後パラメータが Tape 経路と bit 一致すること
 //!   （momentum 0／>0・2 層／3 層）、1 step の `waitUntilCompleted` が loss を読む 1 回だけ
 //!   であること。受け入れ記録は `docs/perf/logs/train-step-chain-metal-3251/`（Mac mini）
+//! - CUDA（`#[ignore]`・GB10 実機。イシュー #3252）: 同じ Tape 経路との bit 一致（`_into` 版の
+//!   部品で再利用バッファへ書く経路を含む。step 数 4 で 2 step 目以降が再利用経路）。同期・確保・
+//!   H2D の回数は backend-cuda の診断テスト（`train_step_chain_diag_tests_3252`）が数える。
+//!   受け入れ記録は `docs/perf/logs/train-step-chain-cuda-3252/`
 
 use super::*;
 use fandhe_ai_autodiff::optim::SgdConfig;
@@ -155,11 +159,82 @@ fn chain_rejects_zero_width_output() {
     assert_eq!(before, after, "拒否時は params 不変");
 }
 
+#[cfg(unix)]
+use fandhe_ai_tensor_core::Device;
+
+#[cfg(unix)]
+fn assert_bits_or_nan_class(actual: &[u32], expected: &[u32], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: len");
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        let (fa, fe) = (f32::from_bits(*a), f32::from_bits(*e));
+        if fe.is_nan() {
+            assert!(fa.is_nan(), "{what} idx {i}: expected NaN, got {fa}");
+        } else {
+            assert_eq!(a, e, "{what} idx {i}: {fa} vs {fe}");
+        }
+    }
+}
+
+#[cfg(unix)]
+/// 同じ初期値の store を 2 つ作り、A はチェーン・B は Tape 経路で `steps` 回学習して
+/// step ごとの loss と最終パラメータの bit 一致を確かめる。
+fn compare_with_tape_path(
+    device: Device,
+    dims: &[usize],
+    batch: usize,
+    config: &SgdConfig,
+    steps: usize,
+) {
+    let model = build_mlp(dims);
+    let d_in = dims[0];
+    let d_out = *dims.last().unwrap();
+    let x = host_tensor(11, &[batch, d_in]);
+    let y = host_tensor(12, &[batch, d_out]);
+
+    let tape_a = crate::tape_for(device).expect("実機が必要");
+    let mut store_a = model.init_device_param_store(&tape_a).unwrap();
+    let mut store_b = model.init_device_param_store(&tape_a).unwrap();
+    let x_res = tape_a.upload_resident(&store_a, &x).unwrap();
+    let y_res = tape_a.upload_resident(&store_a, &y).unwrap();
+
+    for step in 0..steps {
+        let handle =
+            chain_train_step(&model, &mut store_a, &tape_a, &x_res, &y_res, config).unwrap();
+        let loss_a = store_a.read_train_step_loss(&tape_a.0, &handle).unwrap();
+
+        let tape_b = crate::tape_for(device).unwrap();
+        let xv = tape_b.var_no_grad(&x);
+        let yv = tape_b.var_no_grad(&y);
+        let pred = model.forward_resident(&tape_b, &xv, &mut store_b).unwrap();
+        let loss = pred.mse_loss(&yv).unwrap();
+        let loss_b = loss.to_tensor().get(&[]).unwrap();
+        let grads = tape_b.backward_device_param_store(&loss, &store_b).unwrap();
+        tape_b
+            .step_device_param_store(&mut store_b, &grads, config)
+            .unwrap();
+
+        assert_bits_or_nan_class(
+            &[loss_a.to_bits()],
+            &[loss_b.to_bits()],
+            &format!("{dims:?} step {step} loss"),
+        );
+        let pa = tape_a.sync_device_param_store_to_host(&store_a).unwrap();
+        let pb = tape_a.sync_device_param_store_to_host(&store_b).unwrap();
+        assert_eq!(pa.len(), pb.len());
+        for (i, (a, b)) in pa.iter().zip(&pb).enumerate() {
+            assert_bits_or_nan_class(
+                &bits(a),
+                &bits(b),
+                &format!("{dims:?} step {step} param {i}"),
+            );
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod metal {
     use super::*;
     use fandhe_ai_backend_metal::__diagnostic_batch_counters_snapshot;
-    use fandhe_ai_tensor_core::Device;
     use std::sync::Mutex;
 
     /// Metal コンテキストと診断カウンタはプロセス共有のため、テストを直列化する。
@@ -167,67 +242,6 @@ mod metal {
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {
         METAL_LOCK.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    fn assert_bits_or_nan_class(actual: &[u32], expected: &[u32], what: &str) {
-        assert_eq!(actual.len(), expected.len(), "{what}: len");
-        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-            let (fa, fe) = (f32::from_bits(*a), f32::from_bits(*e));
-            if fe.is_nan() {
-                assert!(fa.is_nan(), "{what} idx {i}: expected NaN, got {fa}");
-            } else {
-                assert_eq!(a, e, "{what} idx {i}: {fa} vs {fe}");
-            }
-        }
-    }
-
-    /// 同じ初期値の store を 2 つ作り、A はチェーン・B は Tape 経路で `steps` 回学習して
-    /// step ごとの loss と最終パラメータの bit 一致を確かめる。
-    fn compare_with_tape_path(dims: &[usize], batch: usize, config: &SgdConfig, steps: usize) {
-        let model = build_mlp(dims);
-        let d_in = dims[0];
-        let d_out = *dims.last().unwrap();
-        let x = host_tensor(11, &[batch, d_in]);
-        let y = host_tensor(12, &[batch, d_out]);
-
-        let tape_a = crate::tape_for(Device::Metal).expect("Metal 実機が必要");
-        let mut store_a = model.init_device_param_store(&tape_a).unwrap();
-        let mut store_b = model.init_device_param_store(&tape_a).unwrap();
-        let x_res = tape_a.upload_resident(&store_a, &x).unwrap();
-        let y_res = tape_a.upload_resident(&store_a, &y).unwrap();
-
-        for step in 0..steps {
-            let handle =
-                chain_train_step(&model, &mut store_a, &tape_a, &x_res, &y_res, config).unwrap();
-            let loss_a = store_a.read_train_step_loss(&tape_a.0, &handle).unwrap();
-
-            let tape_b = crate::tape_for(Device::Metal).unwrap();
-            let xv = tape_b.var_no_grad(&x);
-            let yv = tape_b.var_no_grad(&y);
-            let pred = model.forward_resident(&tape_b, &xv, &mut store_b).unwrap();
-            let loss = pred.mse_loss(&yv).unwrap();
-            let loss_b = loss.to_tensor().get(&[]).unwrap();
-            let grads = tape_b.backward_device_param_store(&loss, &store_b).unwrap();
-            tape_b
-                .step_device_param_store(&mut store_b, &grads, config)
-                .unwrap();
-
-            assert_bits_or_nan_class(
-                &[loss_a.to_bits()],
-                &[loss_b.to_bits()],
-                &format!("{dims:?} step {step} loss"),
-            );
-            let pa = tape_a.sync_device_param_store_to_host(&store_a).unwrap();
-            let pb = tape_a.sync_device_param_store_to_host(&store_b).unwrap();
-            assert_eq!(pa.len(), pb.len());
-            for (i, (a, b)) in pa.iter().zip(&pb).enumerate() {
-                assert_bits_or_nan_class(
-                    &bits(a),
-                    &bits(b),
-                    &format!("{dims:?} step {step} param {i}"),
-                );
-            }
-        }
     }
 
     #[test]
@@ -251,7 +265,7 @@ mod metal {
                 nesterov: true,
             },
         ] {
-            compare_with_tape_path(&[784, 256, 10], 64, &config, 4);
+            compare_with_tape_path(Device::Metal, &[784, 256, 10], 64, &config, 4);
         }
     }
 
@@ -266,8 +280,14 @@ mod metal {
             weight_decay: 0.0,
             nesterov: false,
         };
-        compare_with_tape_path(&[784, 128, 64, 10], 64, &config, 4);
-        compare_with_tape_path(&[784, 128, 64, 10], 64, &SgdConfig::new(0.05), 3);
+        compare_with_tape_path(Device::Metal, &[784, 128, 64, 10], 64, &config, 4);
+        compare_with_tape_path(
+            Device::Metal,
+            &[784, 128, 64, 10],
+            64,
+            &SgdConfig::new(0.05),
+            3,
+        );
     }
 
     #[test]
@@ -323,6 +343,67 @@ mod metal {
             s2.wait_until_completed - s0.wait_until_completed,
             1,
             "学習 1 step の wait は loss を読む 1 回だけ"
+        );
+    }
+}
+
+/// CUDA 実機（GB10）。部品の `_into_tracked` 版が再利用バッファへ書く経路（2 step 目以降）が、
+/// 確保版と同じ bit を出す（Tape 経路と一致する）ことを確かめる（イシュー #3252）。
+#[cfg(unix)]
+mod cuda {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// CUDA コンテキストはプロセス共有のため、テストを直列化する。
+    static CUDA_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        CUDA_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない"]
+    fn cuda_chain_matches_tape_path_bit_exact_two_layers() {
+        let _g = lock();
+        for config in [
+            SgdConfig::new(0.05),
+            SgdConfig {
+                lr: 0.05,
+                momentum: 0.9,
+                dampening: 0.1,
+                weight_decay: 1e-3,
+                nesterov: false,
+            },
+            SgdConfig {
+                lr: 0.05,
+                momentum: 0.9,
+                dampening: 0.0,
+                weight_decay: 1e-3,
+                nesterov: true,
+            },
+        ] {
+            compare_with_tape_path(Device::Cuda(0), &[784, 256, 10], 64, &config, 4);
+        }
+    }
+
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等）依存。CI では実行しない"]
+    fn cuda_chain_matches_tape_path_bit_exact_three_layers() {
+        let _g = lock();
+        let config = SgdConfig {
+            lr: 0.05,
+            momentum: 0.9,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+        };
+        compare_with_tape_path(Device::Cuda(0), &[784, 128, 64, 10], 64, &config, 4);
+        compare_with_tape_path(
+            Device::Cuda(0),
+            &[784, 128, 64, 10],
+            64,
+            &SgdConfig::new(0.05),
+            3,
         );
     }
 }

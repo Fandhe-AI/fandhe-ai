@@ -739,6 +739,7 @@ fn expected_counts(n: usize) -> GemmLaunchDiagCounters {
         d2h_bytes: bytes,
         stream_syncs: 1,
         mem_uploads: 0,
+        mem_allocs: 0,
     }
 }
 

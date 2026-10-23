@@ -1,0 +1,4 @@
+base=c9c25c7850bf6fa4773a472ac14fd5770829ee4c
+tree=base + uncommitted working tree (crates/ diff of this change)
+crates_diff_sha256=570f96cc93cd3918421e4aeb91cf88d68771c5dee29e0e8e9d213e5886d77f1d
+(git diff --cached -- crates | shasum -a 256 を測定ツリー作成後に取った値)
