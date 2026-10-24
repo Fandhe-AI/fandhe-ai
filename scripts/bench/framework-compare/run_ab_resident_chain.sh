@@ -34,8 +34,8 @@ if [[ "$ROUNDS" != "5" ]]; then
   exit 1
 fi
 case "$PROFILE" in
-  macmini) DEVICES="cpu metal"; RULE_LOAD_GATE=3.0 ;;
-  gb10) DEVICES="cpu cuda"; RULE_LOAD_GATE=1.0 ;;
+  macmini) DEVICES="cpu metal"; RULE_LOAD_GATE=3.0; CANDLE_FEATURE_ARGS=() ;; # 既定 feature（metal）
+  gb10) DEVICES="cpu cuda"; RULE_LOAD_GATE=1.0; CANDLE_FEATURE_ARGS=(--no-default-features --features cuda) ;; # Linux では metal 依存を除き CUDA でビルド（run_all_cuda.sh と同型）
   *) echo "error: AB_PROFILE は macmini か gb10（got: ${PROFILE:-unset}）" >&2; exit 1 ;;
 esac
 
@@ -133,7 +133,7 @@ if ! echo "$tree" | grep -qE 'fandhe-ai v[0-9.]+ \(.*crates/facade\)'; then
   echo "error: fandhe-ai が path patch に解決されていない" >&2; echo "$tree" >&2; exit 1
 fi
 echo "$tree" >"$OUT/tree-${LABEL}.txt"
-if ! cargo build --release -p bench-candle --target-dir "$TDIR_C" 2>"$OUT/build-candle-${LABEL}.err"; then
+if ! cargo build --release -p bench-candle ${CANDLE_FEATURE_ARGS[@]+"${CANDLE_FEATURE_ARGS[@]}"} --target-dir "$TDIR_C" 2>"$OUT/build-candle-${LABEL}.err"; then
   tail -40 "$OUT/build-candle-${LABEL}.err"; echo "bench-candle BUILD FAILED" >>"$SKIP"; exit 1
 fi
 BIN_F="$OUT/bench-fandhe-${LABEL}"; BIN_C="$OUT/bench-candle-${LABEL}"
