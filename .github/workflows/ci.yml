@@ -1051,6 +1051,12 @@ jobs:
       - name: フレームワーク横並びベンチ opp_kernel_cuda_diag.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/opp_kernel_cuda_diag_test.py
 
+      # イシュー #3266: judge_bench_fandhe_symmetry_ab.py（bench-fandhe 是正前後の併記集計器）の回帰テスト。
+      # 0.11.0 正式系列のログを両腕へ入れて gen_0110_macmini.out の比を再現することで判定式の不変を担保する。
+      # 同一方針（stdlib の unittest のみ・cargo の有無に関わらず常時実行）。
+      - name: フレームワーク横並びベンチ judge_bench_fandhe_symmetry_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/judge_bench_fandhe_symmetry_ab_test.py
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
