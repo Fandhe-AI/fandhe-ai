@@ -546,6 +546,8 @@ fn only_y_of_another_store_is_invalid_argument_and_keeps_store() {
 // ---- 実機（`#[ignore]`。実行・実測は #3256） ----
 
 // プロセス共有のデバイスコンテキストを直列化する（poison は回復する）。
+// 使用側（Metal 実機テスト）と同じ cfg。非 macOS では dead_code になるため。
+#[cfg(target_os = "macos")]
 static METAL_LOCK: Mutex<()> = Mutex::new(());
 static CUDA_LOCK: Mutex<()> = Mutex::new(());
 
