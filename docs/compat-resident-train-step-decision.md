@@ -222,7 +222,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   必要なら `*HoldDoctestGuard`（`crates/facade/src/lib.rs` の既存パターン）で保留を固定し、
   #3254 で正ガードへ反転する。`!Send` を前提とし `assert_send` を足さない。
   `docs/compat-api-scope.md` §5 の適用記録・`docs/public-api-design.md`・`docs/README.md` を更新する。
-- **#3255**: 公開 API だけでの Tape 経路との bit 一致テスト。**実装済み（§15。CPU は CI、CUDA・Metal は `#[ignore]` で未実測）。**
+- **#3255**: 公開 API だけでの Tape 経路との bit 一致テスト。**実装済み（§15。CPU は CI、CUDA・Metal は `#[ignore]` で未実測）。** 実機の実行・実測は §16（#3256）。
 - **#3258**: P5 の固定構造（永続ワークスペース・永続 loss スカラー）を capture 区間の前提として
   参照する。
   **#3254 は実装済み（§14 に記録）。**
@@ -567,7 +567,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   `--test api_surface`・`--doc`。
 - 実機: Metal は**開発機（M4 Max）で `#[ignore]` テストを通過確認**（公開入口の bit 一致・1 step の wait 1 回・
   `wait_device_param_store` の wait 1 回）。**Mac mini での受け入れ記録の再取得は未実施**。
-  **GB10（CUDA）は未実測**（`#[ignore]` テストは追加済み。窓内の `stream_syncs`／`d2h_calls` の数値は未取得）。
+  **GB10（CUDA）は未実測**（`#[ignore]` テストは追加済み。窓内の `stream_syncs`／`d2h_calls` の数値は未取得）。 → §16 で GB10 を実測済み。
   性能（ms）は受け入れ条件外のため計測していない。
 
 ### 範囲外・申し送り
@@ -610,3 +610,28 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 
 CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M4 Max）で参考として pass したが、受け入れ記録（Mac mini）
 ではない。GB10（CUDA）・Mac mini（Metal）での実行・実測は #3256。
+
+## §16 #3256 実機記録（常駐チェーンの parity と学習 1 step の同期回数）
+
+実測・ログ・事前登録規則は `docs/perf/logs/resident-chain-parity-3256/`（`RULE.txt`・`README.md`・`macmini/`・`gb10/`）。
+本番コード・公開 API・tolerance・baseline・既存 assert は変更していない。追加したのは backend-cuda の `#[ignore]` テスト 2 件
+（`train_step_chain_diag_tests_3252.rs`）だけ。
+
+### 結果（各行 5 run・全 pass・invalid 0）
+
+| 項目 | 結果 |
+|---|---|
+| Metal（Mac mini・M4）公開 API の Tape 経路との bit 一致（#3255 の 4 件） | 5/5 pass |
+| CUDA（GB10）公開 API の Tape 経路との bit 一致（#3255 の 4 件＋TF32 の 1 件） | 5/5 pass |
+| Metal 公開入口の同期 | encode 10・チェーン区間 wait 0・読み出しで 1（従来 Tape 経路は 7。§14 の「Mac mini での受け入れ記録は未取得」を解消） |
+| CUDA 公開入口と同じ呼び出し列の同期 | 窓の `stream_syncs`／`d2h_calls`／`h2d_calls`／`mem_uploads`／`mem_allocs` が 0、読み出しで `stream_syncs` 1・`d2h_calls` 1（§14 の「GB10 未実測」を解消） |
+| CUDA TF32 モードのチェーン | `Ok`（第 2 段フォールバックに入らない）。#3255 の申し送り（§15）を閉じる |
+
+### 測り方と監査範囲
+
+- CUDA の診断カウンタは facade から届かない（`internal-diagnostics` を facade の dev-dependency にすると CI の
+  `cargo test --workspace` の対象が増える）。そのため facade の `resolve_ops`・`tape_for`・`train_step_resident_with`・
+  `ResidentLoss::read` と同じ呼び出し列を backend-cuda 内で再現して数えた。facade 固有のホスト処理は純計算でデバイス呼び出しを
+  持たないため監査で補った。facade から直接数えた値ではない。
+- P7 の CUDA 同期（`synchronize_device`）は `stream_syncs` の対象外。機能確認のみで回数は未記録。
+- 残る同期点は無い（窓 0・読み出し 1）。TF32 でチェーンが FP32 厳密のまま走る理由の掘り下げは本記録の対象外。

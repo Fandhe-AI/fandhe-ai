@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai_backend_cuda-36ccc3a3f56c3e6f)
+
+running 1 test
+test train_step_chain_diag_tests_3252::train_chain_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync ... DIAG window=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 0 } read=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 1, d2h_bytes: 4, stream_syncs: 1, mem_uploads: 0, mem_allocs: 0 } first=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 11 } loss=1.1653609
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1373 filtered out; finished in 0.53s
+
+rc=0

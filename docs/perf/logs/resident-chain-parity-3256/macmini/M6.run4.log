@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/fandhe_ai-b9e1ba5ea1ebba4e)
+
+running 1 test
+test compat::sequential::train_step_chain_tests_3251::metal::metal_wait_device_param_store_issues_exactly_one_wait ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 547 filtered out; finished in 0.02s
+
+rc=0

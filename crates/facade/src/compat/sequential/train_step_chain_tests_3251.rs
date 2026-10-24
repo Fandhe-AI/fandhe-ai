@@ -559,7 +559,7 @@ mod metal {
     }
 
     /// P7（イシュー #3254）: `wait_device_param_store` は D2H なしで `waitUntilCompleted` を 1 回だけ出し、
-    /// その後の loss 読み出しは追加の待機を要しない（積んだ仕事は完了済み）。未実測（実機で未実行）。
+    /// その後の loss 読み出しは追加の待機を要しない（積んだ仕事は完了済み）。Mac mini で 5 run 実測済み（wait 1。docs/perf/logs/resident-chain-parity-3256/）。
     #[test]
     #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
     fn metal_wait_device_param_store_issues_exactly_one_wait() {
