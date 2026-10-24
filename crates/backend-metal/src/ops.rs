@@ -2283,6 +2283,17 @@ impl BackendOps for MetalBackendOps {
         static_metal_memory().ok().map(|m| m as &dyn MemoryOps)
     }
 
+    /// プロセス共有コンテキストのコマンドバッチを D2H なしで同期する（イシュー #3254 P7。
+    /// `BackendOps::synchronize_device` の Metal 実装）。encode-only（`*_tracked`）で積んだ仕事は
+    /// このコンテキストのバッチに溜まっているため、`synchronize`（`waitUntilCompleted` 1 回）で
+    /// 完了する。実行時エラーは `map_metal_error` で型付きエラーへ変換する。
+    fn synchronize_device(&self) -> Result<(), BackendError> {
+        crate::context_cache::cached_context()
+            .map_err(crate::memory::map_metal_error)?
+            .synchronize()
+            .map_err(crate::memory::map_metal_error)
+    }
+
     /// `crate::typed_f16::MetalBackendOps`（`impl TypedOps<f16>`）への
     /// capability accessor（イシュー #1705）。`typed_ops_f64` は
     /// オーバーライドせず既定 `None`（恒久 `Unsupported`。MSL に
