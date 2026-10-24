@@ -235,7 +235,9 @@ def hard_check(runs, task, device, size):
     mismatch, missing = [], []
     req = _required_fields(task)
     for mode in ('reuse', 'fresh'):
-        base = None
+        # 項目ごとに基準値（最初に現れた妥当な値）と比較する。一部項目が欠落した行でも、妥当な項目の
+        # 不一致は検出する（欠落は判定不能として記録するだけで、行全体を読み飛ばさない）。
+        base = {}
         for i, r in enumerate(runs, 1):
             for arm in ('old', 'new'):
                 row = r[arm].get(('fandhe-ai', task, device, size, mode))
@@ -245,17 +247,19 @@ def hard_check(runs, task, device, size):
                 bad = [f for f in req if not _is_num(row.get(f))]
                 if bad:
                     missing.append(f'{mode} run{i} {arm}: 必須項目の欠落／不正値 {",".join(bad)}')
-                    continue
                 pf = row.get('parity_fail_count')
-                if isinstance(pf, (int, float)) and not isinstance(pf, bool) and pf != 0:
+                if _is_num(pf) and pf != 0:
                     # fresh 側を含め fandhe の要素検証不合格は判定不能（RULE: parity_fail_count > 0）
-                    # 判定不能として記録したうえで一致比較は継続する（checksum 等の不一致を落とさない。hard 不一致が優先）
                     missing.append(f'{mode} run{i} {arm}: parity_fail_count が 0 でない（{pf!r}。判定不能）')
-                sig = tuple(row[f] for f in req)
-                if base is None:
-                    base = sig
-                elif sig != base:
-                    diff = [f for f, a, b in zip(req, sig, base) if a != b]
+                diff = []
+                for f in req:
+                    if f in bad:
+                        continue
+                    if f not in base:
+                        base[f] = row[f]
+                    elif row[f] != base[f]:
+                        diff.append(f)
+                if diff:
                     mismatch.append(f'{mode} run{i} {arm}: 不一致 {",".join(diff)}')
     return mismatch, missing
 

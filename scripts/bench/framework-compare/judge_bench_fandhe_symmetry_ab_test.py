@@ -255,6 +255,27 @@ class JudgeTest(unittest.TestCase):
         code, text = run_judge(d, 'macmini', rule, env, glog)
         self.assertEqual(code, 3, text)
 
+    def test_missing_field_row_still_detects_other_field_mismatch_exit3(self):
+        # new run3 で parity_total が欠落し、同時に checksum が他と異なる行: 欠落は判定不能だが
+        # checksum 不一致は独立に検出して終了コード 3 になる。
+        def mut(arm, run, rows):
+            if arm == 'new' and run == 3:
+                out = []
+                for l in rows:
+                    r = json.loads(l)
+                    if r.get('framework') == 'fandhe-ai' and r.get('task') == 'gemm':
+                        r.pop('parity_total', None)
+                        if isinstance(r.get('checksum'), (int, float)):
+                            r['checksum'] = r['checksum'] + 1.0
+                    out.append(json.dumps(r))
+                return out
+            return rows
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini', mut)
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 3, text)
+        self.assertIn('不一致 checksum', text)
+
     def test_hard_fields_removed_everywhere_is_undetermined(self):
         def mut(arm, run, rows):
             out = []
