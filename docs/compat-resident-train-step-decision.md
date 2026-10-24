@@ -13,7 +13,7 @@ tolerance・baseline は変更しない。
 | 方式 | **案 A**（専用の学習ステップ・チェーン。facade の公開 API の追加）。案 B（Tape のデバイス値化）は不採用（§3） |
 | 変更の種類 | **追加のみ**。既存の公開シグネチャ・挙動は変えない（`fandhe-ai =0.11.0` に対する追加。§7） |
 | 初期の対応範囲 | 損失は MSE（mean）のみ、最適化は SGD のみ、層は `Linear`＋`ReLU` 系の常駐対応構成のみ（§5） |
-| 公開状態 | 未公開（本記録は公開形の確定のみ。実装は #3250・#3251〜#3253・公開は #3254） |
+| 公開状態 | 未公開（本記録は公開形の確定のみ。実装は #3250・#3251〜#3253・公開は #3254）。**追記（#3254）: P1〜P7 を facade に公開済み（§14。公開形は本記録の表のとおりで変更なし）** |
 | `unsafe`・依存 | 新規 `unsafe`・依存追加なし。`unsafe impl Send` は作らない（§4） |
 | REQ-12 | 整合する。所有者へ戻す項目なし（§6） |
 
@@ -215,7 +215,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   L1 の d_input は計算しない）と完了待ちの内部メソッド。
   **#3251 は実装済み（§11 に記録。ループはバックエンド非依存で #3252・#3253 が再利用する。
   Metal は Mac mini で wait 1 回・Tape 経路と bit 一致を実測済み）。完了待ちの内部メソッド（P7 の実体）は
-  #3251 では足さず #3254 へ寄せた（§11 範囲外）。**
+  #3251 では足さず #3254 へ寄せた（§11 範囲外）。#3253（CPU）は実装済み（§13）。**
 - **#3254**: facade 公開の仕上げ。`crates/facade/tests/api_surface.rs` に正ガード（追加した名前の
   `pub use` 行・facade の inherent `pub fn` 集合・関数ポインタ型による署名固定プローブ・
   利用例 doctest の実在検査）を足す。内部実装が先に入る期間に facade へ早期に漏れないよう、
@@ -224,6 +224,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   `docs/compat-api-scope.md` §5 の適用記録・`docs/public-api-design.md`・`docs/README.md` を更新する。
 - **#3258**: P5 の固定構造（永続ワークスペース・永続 loss スカラー）を capture 区間の前提として
   参照する。
+  **#3254 は実装済み（§14 に記録）。**
 
 ## §9 OWASP Top 10 観点
 
@@ -366,3 +367,213 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   wait 0）。`_into` 版の部品は新しい設計項目で #3258 と同系。
 - **#3252（CUDA）・#3253（CPU）**: 部品が実装済みなら同じ `train_step_device_chain` がそのまま動く。CUDA の Graph capture
   （#3258）は固定構造（永続ワークスペース・永続 loss スカラー）を前提にする。
+
+## §12 #3252 実装記録（CUDA の学習チェーン。区間内の同期・H2D・確保を 0 にする）
+
+### 実装した名前と配置
+
+| 層 | 名前 |
+|---|---|
+| tensor-core（内部 trait の非破壊拡張。既定は `Unsupported`） | `BackendOps::mse_loss_device_into_tracked`・`mse_loss_backward_device_into_tracked`・`relu_backward_mask_device_into_tracked`・`gemm_resident_lhs_device_into_tracked`（いずれも `_tracked` 版だけ。末尾の `out` が出力先、その前が既存部品と同じ引数、最後が `token`）。#3205 の `linear_forward_device_into_tracked` と合わせて、チェーンの出力を作る 5 部品が `_into` 版を持つ。dW は #3223 から既に勾配連結バッファへ書く形のため追加なし |
+| backend-cuda | `ops.rs` の 4 本の `*_impl` を `*_core(.., out: Option<&mut DeviceBuffer<f32>>) -> Result<Option<DeviceBuffer<f32>>, _>` へ一般化し、確保版は `*_core(.., None)`、`_into` 版は `*_core(.., Some(out))` を呼ぶ（検査・起動ヘルパ・カーネルは共有）。`token` は使わない明示 override。診断は `gemm.rs` の `GemmLaunchDiagCounters::mem_allocs`・`diag_count_mem_alloc`（`CudaMemory::alloc_zeroed_inner` の成功、MSE partial・GEMM device workspace の grow で数える） |
+| autodiff | `device_store/train_chain.rs`: `TrainChainBufs`（層出力・dPred・d_input・mask 後勾配。鍵は `(m, 各層の出力幅)`）、`TrainChainCaps`（部品ごとの `_into` 対応ラッチ）、`produce_part`。`predict_device_chain` の `chain_scratch` とは別フィールド（鮮度契約を混ぜない）。公開入口は増やしていない（`api_surface.rs` 不変） |
+
+- **チェーンのループは #3251 のまま 1 本**。各部品はまず再利用バッファへ `_into_tracked` を試し、`Unsupported` なら
+  その部品だけ確保版 `_tracked` へ進み、`caps` へラッチして以後は `_into` を試さない。`Unsupported` は部品単位で
+  消費し、チェーン全体の `Unsupported` としては表に出さない（Metal・CPU の挙動と §11 の失敗境界は不変）。
+  世代切れ（`StaleDeviceGeneration`）は再利用バッファを捨てて確保し直す。初回（再利用バッファなし）は確保した出力へ
+  `_into` を 1 回だけ試して能力を確定する（同じ結果の上書き。`predict_device_chain` と同じ方式）。
+- **失敗経路のバッファは再利用せず `train_chain_hold` へ退避**する（実行中の GPU 処理と競合させない）。成功した step の
+  バッファだけを次 step の出力先として store に戻す。
+- **古い loss ハンドル**: loss バッファを再利用する step の開始時に世代を進める。書き込み後に失敗しても、古いハンドルが
+  新 step の途中値を読むことはない（世代検査が拒否する）。
+
+### bit 一致の前提（コードで確認した事実）
+
+再利用バッファは確保版のような memset 済みではない。bit が確保版と一致するのは、出力カーネルが各要素へ**無条件に
+代入**し既存値を読まないため。
+
+- ReLU マスク: `ew_relu_mask_select_f32` は `out[idx] = ..`（`kernels_elementwise.rs`）
+- MSE forward: `mse_finalize_f32` の lane 0 が `out[0] = block_sum * factor`、backward は `dpred[idx] = scale * (..)`
+  （`kernels_mse.rs`）
+- d_input・forward の GEMM: 選ばれうる tiled f32 variant はすべて `c[..] = acc`（`kernels.rs`・
+  `kernels_tiled_pipeline.rs`・`kernels_tiled_pipeline_128x64.rs`。`+=` で `c` を読む variant は無い）
+- 代入でない variant が将来入った場合は、その `_into` 版で再利用バッファへストリーム順序の `memset_zeros` を先に積んで
+  確保版と bit をそろえる（memset は確保でも同期でもない）。黙って bit ずれを受け入れない
+
+### 窓内の隠れた確保・同期の監査
+
+- 確保: チェーンから到達する GEMM 経路（`launch_gemm_dw_device`・`launch_gemm_dinput_device`・`launch_tiled_f32_resident`・
+  `launch_tiled_bias_act_f32_resident`）に呼び出しごとの `alloc_zeros` は無い。`gemm.rs` の `alloc_zeros`（tile_counter・
+  unit_counter・partials）は `compile_*` 系（構築時）にあり、呼び出しごとの経路ではない。永続ワークスペース
+  （`CudaGemm::device_workspace`・`CudaMse::partial_workspace`）は初回だけ grow し、grow も `mem_allocs` で数える
+  （初回 step で 11 件、定常状態で 0 件を実測）。bias 縮約（`launch_sum_axis_generic_into`）・SGD 起動も確保しない
+- 同期: チェーンの部品から到達する `synchronize()` は無い（`memory.rs` の `readback` 系・`host_readback`・`host_view_managed`
+  は `download`／`with_host_view` 経路で、`read_train_step_loss` の 1 回だけが通る。`pool.rs` の同期は破棄経路）。
+  計数不能なのは cudarc `CudaSlice::Drop` が `has_async_alloc == false` の環境でだけ行う同期で、GB10 は `true`
+  （#3223 §6 と同じ前提）。定常状態では `_into` による再利用で `CudaSlice` の drop 自体が起きないため、非 async-alloc
+  環境でも窓内には出ない
+- 診断カウンタ（`cfg(any(test, feature = "internal-diagnostics"))`）の範囲外はこの監査で補う。既定ビルドの公開面・性能に影響しない
+
+### 検証
+
+- CI（GitHub ホステッド）: tensor-core の既定動作（4 部品とも `Unsupported`・`token` 非接触）、backend-cuda の
+  `out` のデバイス／shape 不一致を driver より前に拒否する単体テスト、autodiff の記録型モック 5 件（`_into` 対応時に
+  2 step 目以降の確保版部品呼び出し・`alloc_zeroed`・upload・download がすべて 0／`_into` 未対応時に従来経路で同じ結果で
+  `Unsupported` を表に出さない／鍵が変わったら作り直す／世代切れで確保し直す／失敗 step のバッファは再利用せず hold に残る）。
+  既存モック 12 件（L1 の d_input 無し・poison 境界・失敗トークンほか）は変更なしで通る
+- 実機 `#[ignore]`（GB10・5 run 各すべて pass。記録は `docs/perf/logs/train-step-chain-cuda-3252/`。RULE.txt を事前登録）:
+  - B1（`train_step_chain_diag_tests_3252`）: 784-256-10・batch 64・momentum 0.9・ウォームアップ 3 step の後の窓で
+    `stream_syncs`・`d2h_calls`・`h2d_calls`・`mem_uploads`・`mem_allocs` がすべて 0、loss 読み出しで `stream_syncs` = 1・
+    `d2h_calls` = 1。対照として初回 step の `mem_allocs` = 11、同期 0
+  - B2・B3（facade の in-crate）: loss と更新後の全パラメータが Tape 経路と bit 一致（784-256-10・784-128-64-10・
+    momentum 0／0.9／dampening／weight_decay／nesterov・各 3〜4 step。2 step 目以降が再利用経路）
+- Metal の後退なし: 開発機（M4 Max）で `train_step_chain_tests_3251` の Metal `#[ignore]` 3 件が通る（Metal は `_into` 未対応のため
+  経路は不変）。Mac mini での再計測は未実施
+- `unsafe {` の数（変更前後）: backend-cuda の `ops.rs` 0→0・`gemm.rs` 28→28・`memory.rs` 5→5・`mse.rs` 3→3・
+  `elementwise.rs` 7→7・`reduce.rs` 12→12。**新規 `unsafe` なし**（起動ヘルパは既に `&mut CudaArgMut` を受けるため）
+- 性能（目安 0.18〜0.25 ms）は本 issue の受け入れ条件に含まれないため計測していない（A/B は別途）
+
+### 範囲外・申し送り
+
+- **#3254**: 公開入口、`ResidentInput` を永続バッファへ `upload_into` で更新する入口（窓の外。公開形を伴う）、P7 の D2H なし完了待ち、
+  Tape 経路への全体フォールバック
+- **#3258**: step 全体の CUDA Graph capture。永続スクラッチ・永続 loss は固定構造として揃った（capture 中は確保・grow を
+  拒否するため、capture 前にウォームアップで定常状態にする必要がある）
+- **Metal の `_into` 版部品（確保ゼロ化）**: 未着手。Metal は従来どおり step ごとに確保する（pool 再利用で同期は起きない）
+- **CPU（#3253）**: 実装済み（§13）。同じループを再利用する
+
+## §13 #3253 実装記録（CPU の学習チェーン部品）
+
+所有者回答（§2。案 A・既存シグネチャは変えず追加のみ・初期対応は MSE と SGD）の範囲で、CPU の
+`BackendOps` に足りなかった部品を override した。**CPU 専用のチェーンは作らず、§11 のループをそのまま
+再利用する**（チェーンを 2 本にしない）。facade の本番コード・公開面（`api_surface.rs`）は変えていない
+（公開入口 P5〜P7 は #3254）。
+
+### 実装した部品（`crates/backend-cpu/src/ops_train_chain_parts.rs`・`ops.rs` の `impl BackendOps`）
+
+| 部品 | 確保版 | `_into_tracked` | 比較先のホスト経路・核 |
+|---|---|---|---|
+| forward | 既存 `linear_forward_device` | 新規 | 同じ `gemm_blis_bias_act_parallel_prepacked`（共有本体 `linear_forward_device_core`） |
+| MSE forward | 新規 | 新規 | `mse::mse_sum_sq_f32`＋最終式（`mse_reduce_value` をホスト `mse_loss` と共有） |
+| MSE backward | 新規 | 新規 | `mse::mse_loss_backward_f32` |
+| ReLU マスク | 新規 | 新規 | 選択（`mask > 0 ? g : +0.0`）。`elementwise_mul_mask` と同式 |
+| dW＋bias 縮約 | 新規 | （trait に `_into` 版は無い。確保版が out と offset を直接受ける） | `(Transposed, RowMajor)`→`gemm_blis_parallel_tn`・`(RowMajor, Transposed)`→`_nt`・`(RowMajor, RowMajor)`→`gemm_blis_parallel` |
+| d_input | 新規 | 新規 | `Transposed`→`gemm_blis_parallel_nt`・`RowMajor`→`gemm_blis_parallel` |
+
+各部品は共有本体 `*_core(.., out: Option<&mut DeviceBuffer<f32>>)` を 1 本持ち、確保版は `None`、`_into`
+は `Some(out)` を渡す（検査とカーネル呼び出しを二重に持たない。CUDA §12 と同じ構成）。`_tracked`
+（非 into）は override せず既定の委譲に任せる。CPU は同期実行のため `DispatchFailureCell` は使わず、
+エラーは同期的に `Err` で返す。
+
+### 設計判断
+
+- **0 埋めが必須**: BLIS 核は C タイルを load して書き戻すため、再利用する出力先は書き込み前に必ず
+  `fill(0.0)` する（ホスト `gemm_fp32_strict_into` と同じ。無いと 2 step 目以降で bit が崩れる）
+- **bias 縮約の融合**: チェーンは dW の呼び出しで `bias_filled == false` を契約違反として止める。CPU は
+  ホストで `reduce_bias_grad_rows`（`f64` 逐次和・最後に 1 回 `f32`・`k == 1` は複製して `-0.0` 保持）を
+  通るため、デバイス版も同一アルゴリズムで `out[bias_offset..+n]` へ書き `true` を返す
+  （`.claude/rules/coding-rust.md` の `f64` アキュムレータ契約。ホストの CPU 経路は変更していない）
+- **`(Transposed, Transposed)` は `Unsupported`**: ホストは `contiguous()` 実体化の別経路で 1 対 1 の核が
+  無い。別の核で黙って計算しない（チェーンはこの形を使わない）
+- **退化形状**: `_into` 版は空・`q == 0` を契約どおり `Unsupported`（確保版へ任せる）。確保版は空／全 0 を返す
+- 境界検査（REQ-8・A03）: shape・offset は `checked_*`、スライス取得は `get(range)`。検査はすべて書き込み前で、
+  `Err` のとき `out` は変わらない
+
+### 検証（すべて CI で実行。`#[ignore]` なし）
+
+- `crates/backend-cpu/tests/mse_device_parity.rs`・`relu_mask_device_parity.rs`・`gemm_device_input_parity.rs`:
+  ホスト版との `to_bits()` 一致（NaN はクラス一致）、事前に汚した `out` への上書き、view offset、
+  `k == 1` の `-0.0`、`out_offset`・bias 範囲のオーバーフロー／重なり拒否、型付きエラー時の `out` 不変
+- facade `train_step_chain_tests_3251.rs`: CPU のチェーンが Tape 経路と loss 列・全パラメータで bit 一致
+  （`[784,256,10]` plain 4 step・`[96,64,10]` momentum／nesterov・3 層・端数形状・batch 1。step 2 以降は
+  `_into` 再利用経路）。範囲外（Sigmoid／Tanh・最終層 ReLU・空バッチ・別 store の入力）は型付きエラーで
+  store 不変。CI の debug ビルドの負荷のため 784 幅は 1 構成に絞った
+- 新規 `unsafe` なし・依存追加なし・tolerance／baseline 不変
+
+### 範囲外・申し送り
+
+- 公開入口・`ResidentLoss::read`・P7 の D2H なし完了待ち・Tape 経路への全体フォールバック: #3254
+- GEMM 内部のパック用ヒープ確保の削減: #3197（job 統合）の範囲
+- Mac mini・GB10 の CPU セルでの A/B 計測: 受け入れ条件外（CPU は同期がなく効果は小さい見込み）
+
+## §14 #3254 実装記録（facade への公開。P1〜P7 の仕上げ）
+
+イシュー #3254（親 #3248）。公開形は §4 の表のとおりで**署名は変えていない**（追加のみ）。
+新しい `pub use` 行・依存・`unsafe`・エラー型・variant は足していない。
+
+### 実装した名前と配置
+
+| 名前 | 配置 |
+|---|---|
+| P1〜P4（実装は #3250） | `crates/facade/src/lib.rs`（`ResidentTensor`・`Tape::upload_resident`・`Tape::matmul_resident`）・`compat/sequential.rs`（`predict_resident_input`）。本 PR で正ガード・doctest を追加 |
+| P5 `Sequential::train_step_resident` | `crates/facade/src/compat/sequential.rs`（`predict_resident_input` の直後） |
+| P6 `ResidentLoss`・`ResidentLoss::read` | `crates/facade/src/lib.rs`（`ResidentTensor` の直後。`facade` 内で定義する型） |
+| P7 `Tape::wait_device_param_store` | `crates/facade/src/lib.rs`（`impl Tape`。1 行の委譲） |
+| P7 の部品 `BackendOps::synchronize_device` | `crates/tensor-core/src/backend_ops.rs`（既定は `Unsupported`）。CPU は `Ok(())`、Metal は共有コンテキストの `synchronize`、CUDA は `with_sync_point_call` 内で default stream を `synchronize`（`unsafe` 追加なし）。ROCm は既定のまま |
+| 内部入口（autodiff。生の `&Tape` を取るため利用者から到達不可） | `crates/autodiff/src/optim/device_store/train_chain.rs`: `validate_train_step_device_chain`・`download_resident_input`・`record_host_train_step_loss`・`wait_device` |
+
+### 設計判断
+
+- **tape を内部で作る**: P5・P6 は `Tape` を引数に取らない（§4 の署名どおり）。`predict_resident_input` の
+  前例に倣い `tape_for(store.device())` を内部で作る。作り直しても順序が保たれる根拠: CUDA は
+  `CudaBackendOps::new(ordinal)` が `context_cache::cached_device(ordinal)`（プロセス内キャッシュ）経由で
+  同じ context・default stream を共有し、Metal は `MetalBackendOps` が ZST で積んだ仕事を
+  `context_cache::cached_context()` のプロセス全体のバッチに持つ。`ResidentInput`・`TrainStepLoss` は
+  `store_id`（＋世代）に束縛され tape には束縛されない（§4「ハンドルの寿命」）。
+  固定費として、Metal の `tape_for` は呼び出しごとに存在確認（#2114）の費用がかかる（同期回数とは無関係）。
+- **範囲外の 2 段の判別（§5）**: 第 1 段（モデル・損失・最適化が範囲外）は**フォールバックせず**、
+  `store` を変更する前に型付きエラーを返す。判別を 1 か所にまとめるため、チェーンの encode 前検査を
+  autodiff の private `precheck_train_chain` に切り出し、`train_step_device_chain` と
+  副作用のない `validate_train_step_device_chain` が共有する（検査を二重に書かない）。第 2 段
+  （バックエンドが部品を持たない）は、**事前検証を通った後**にチェーンが `Unsupported` を返した場合だけ
+  step 全体を Tape 経路（`x`・`y` を download → `forward_resident` → `mse_loss` →
+  `backward_device_param_store` → `step_device_param_store`）で実行する。§11 の失敗境界により、最初の dW の前の
+  `Unsupported` は store を poison せず状態を変えない。`Unsupported` 以外のエラー（書き込み後の失敗・poison・
+  capture 衝突）はフォールバックせずそのまま返す。この経路は D2H を伴う（§5 が許す）。
+- **フォールバックの loss ハンドルも 1 型**: `ResidentLoss`・`read` は 1 本のまま保つため、フォールバックの
+  loss（ホスト `f32`）は store の `train_chain_host_loss` に置き、世代を進めて新しい `TrainStepLoss` を返す。
+  `read_train_step_loss` は host loss が `Some` なら同期なしで返す（poison・失敗トークンは従来どおり検査）。
+  チェーンが成功した step の確定時に host loss を `None` へ戻す。古いハンドルは両経路の後で `InvalidArgument`。
+- **`synchronize_device`**: `BackendOps` に既定実装つき（`Unsupported`）で足す非破壊追加（#3217 記録 §3 と同型）。
+  `wait_device_capture_idle`（capture 専用）とは別物。`DeviceParamStore::wait_device` は poison・デバイス検査 →
+  待機 → 失敗トークン再検査（セット済みなら poison して `StorePoisoned`）。待機の `Unsupported` は store を変えず
+  返し、実行時エラーは poison する。
+- **`!Send`**: `ResidentLoss` は `PhantomData<*const ()>` を持つ newtype で `!Send` を固定する（`unsafe` なし。
+  内部の `TrainStepLoss` は整数だけで自動では `Send` になるため）。`assert_send` は書かず、`ResidentTensor`・
+  `ResidentLoss` の `compile_fail` doctest で固定する。
+- **`ResidentLoss::read` が `&mut DeviceParamStore` を取る**のは §4 の署名どおり（内部の読み出しは `&self`）。
+
+### 追加したガード
+
+- `crates/facade/tests/api_surface.rs`: `facade_resident_train_step_surface_matches_approved_shape`
+  （P2〜P7 のシグネチャ完全一致・置き場所〈`impl Tape`／`impl Sequential`／`impl ResidentLoss` 直下に各 1 件〉・他ファイルに同名 `fn` が無いこと、
+  `ResidentTensor`＝`{device, shape}`・`ResidentLoss`＝`{read}`・タプルフィールド非公開・属性なし・trait impl は `Debug` のみ、
+  `ResidentInput`／`TrainStepLoss`／`resident_input` の `pub use` が無いこと、利用例 doctest と `!Send` の `compile_fail` doctest の実在）、
+  `facade_resident_train_step_signatures_are_pinned_by_fn_pointer_probes`（関数ポインタ型での署名固定）、
+  自己テスト `facade_resident_train_step_surface_detects_each_category`。保留ガード（`*HoldDoctestGuard`）は
+  常駐学習ステップ用のものが存在しなかったため反転対象なし（新設もしない）。
+- doctest: `ResidentLoss`（P1・P2・P5・P6・P7 の利用例）・`Tape::matmul_resident`（P3・P4）・
+  `Sequential::train_step_resident`・`compile_fail` 2 件。
+
+### 検証
+
+- CI で実行（すべて CPU）: `cargo test -p fandhe-ai-tensor-core`（`synchronize_device` の既定は `Unsupported`）・
+  `-p fandhe-ai-backend-cpu`・`-p fandhe-ai-autodiff train_chain`（24 件。既存 17 件は変更なし）・
+  `-p fandhe-ai --lib train_step_chain`（付け替えた公開入口越しの bit 一致〈`[784,256,10]`・momentum／nesterov・3 層・端数形状・batch 1〉、
+  第 1 段の拒否で `Unsupported` 注入のチェーンが呼ばれないこと、第 2 段フォールバックが Tape 経路と bit 一致すること、
+  `Unsupported` 以外はフォールバックしないこと）・`--test resident_train_step`（公開 API だけの結合テスト）・
+  `--test api_surface`・`--doc`。
+- 実機: Metal は**開発機（M4 Max）で `#[ignore]` テストを通過確認**（公開入口の bit 一致・1 step の wait 1 回・
+  `wait_device_param_store` の wait 1 回）。**Mac mini での受け入れ記録の再取得は未実施**。
+  **GB10（CUDA）は未実測**（`#[ignore]` テストは追加済み。窓内の `stream_syncs`／`d2h_calls` の数値は未取得）。
+  性能（ms）は受け入れ条件外のため計測していない。
+
+### 範囲外・申し送り
+
+- `scripts/bench/framework-compare/bench-fandhe` の `run_train_reuse` の P7 化: crates.io の `fandhe-ai` を新しい版へ
+  上げた後（ピン更新は所有者承認）。
+- step 全体の CUDA Graph capture・常駐入力の capture 対応: #3258。
+- Metal の `_into` 版部品（確保ゼロ化）: §12 の申し送りのまま。
+- `ResidentInput` を永続バッファへ `upload_into` で更新する入口（§12 で #3254 へ申し送り）: 新しい公開形を伴い §4 の
+  P1〜P7 に無いため本 PR では足さない。**公開形の追加は決定記録 → 所有者確認の 2 段が必要**。

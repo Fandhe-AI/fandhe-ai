@@ -1,0 +1,37 @@
+事前登録規則（イシュー #3252）。固定日: 2026-10-24。本規則の固定時点で GB10 の実測値は 1 件も含まない。
+
+[対象]  各行 = 独立プロセス 1 本 x 5 run。CUDA（DGX Spark GB10 / sm_121・CUDA 13.0 系）。
+共通引数: cargo test -p <crate> --lib --release <フィルタ> -- --ignored --exact --test-threads=1 --nocapture
+  B1  -p fandhe-ai-backend-cuda  train_step_chain_diag_tests_3252::train_chain_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync
+  B2  -p fandhe-ai  compat::sequential::train_step_chain_tests_3251::cuda::cuda_chain_matches_tape_path_bit_exact_two_layers
+  B3  -p fandhe-ai  compat::sequential::train_step_chain_tests_3251::cuda::cuda_chain_matches_tape_path_bit_exact_three_layers
+
+[判定]
+  - B1（診断カウンタ。784-256-10・batch 64・momentum 0.9・3 step ウォームアップ後の 1 step）:
+      (a) チェーン区間（窓）の stream_syncs・d2h_calls・h2d_calls・mem_uploads・mem_allocs がすべて 0
+      (b) read_train_step_loss 区間の stream_syncs = 1 かつ d2h_calls = 1
+      (c) 対照: 初回 step の mem_allocs > 0（カウンタが 0 固定でないことの担保）、初回 step の stream_syncs = 0
+  - B2・B3: チェーンの loss と更新後の全パラメータが Tape 経路と to_bits() 一致（NaN は両者 is_nan() の
+    クラス一致）。B2 = 784-256-10・batch 64・momentum 0／0.9（dampening 0.1・weight_decay 1e-3）／
+    0.9（nesterov）各 4 step、B3 = 784-128-64-10・batch 64・momentum 0.9／0 各 4・3 step。
+    2 step 目以降が `_into_tracked`（再利用バッファ）経路になる。
+  - 合否: 5 run すべて pass で pass。1 run でも fail なら fail。期待値（0／1／0）は事後に変更しない。
+    不一致が出ても tolerance・判定を緩めず、原因を調べる（部品ごとの bit 一致は #3224・#3568 で確認済み）。
+  - 性能（目安 0.18〜0.25 ms）は本 issue の受け入れ条件に含まれないため判定しない。
+
+[実行]
+  - 独立プロセスで 5 回。ビルドは計測前に 1 回だけ（build.log。判定外）。
+  - 計測前に nvidia-smi で compute プロセスを記録する。計数・bit 一致の判定は GPU 負荷に依存しない
+    （時間を測らない）ため、常駐サービスの存在は run を無効にしない。常駐サービス以外の fandhe 系
+    プロセスが居る場合は env_info に記録し「未実測」扱いにするかを判断する。
+
+[run の無効化]
+  - 各 run の前後で foreign の cargo／rustc プロセスを検出した run は invalid とし、同じ番号で取り直す
+    （前の試行のログと理由は attempts/ へ退避して残す）。invalid の件数と理由はすべて記録する。
+  - それ以外の理由での再実行・選別・ケースの除外はしない。
+
+[fail の扱い]
+  - 結果は pass／fail にかかわらず採用する。fail は事実として README の「不一致」節に記録し、事後に規則を緩めない。
+
+[同梱物]
+  - .rev-stamp（展開ツリーのもの）・env_info.txt（前後）。ホスト名・ユーザー名・絶対パスはマスクする。

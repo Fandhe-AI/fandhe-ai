@@ -3944,6 +3944,82 @@ pub trait BackendOps {
         ))
     }
 
+    /// [`Self::mse_loss_device_tracked`] と同じ計算を、**呼び出し元が持つ既存のスカラー出力
+    /// `out`（shape `[]`・numel 1）へ書き込む**版（イシュー #3252。学習チェーンの loss
+    /// 確保を step 間で再利用して区間内の確保を 0 にする内部 trait の非破壊拡張。公開 API ではない。
+    /// 設計 `docs/train-step-resident-parts-design.md` §3）。
+    ///
+    /// # 契約
+    /// - `out` は同一デバイス・現行世代・numel 1 でなければならない（不一致は型付きエラー。
+    ///   driver 呼び出しより前に検出する）。既存内容は読まれず全要素が上書きされる。
+    /// - `numel == 0`（pred が空）は確保経路へ任せるため `Unsupported`。
+    /// - `_tracked` 版だけを置き、トークンなしの encode-only 入口は作らない（#3217 記録 §5）。
+    ///
+    /// # デフォルト実装
+    /// 既定は [`BackendError::Unsupported`]（ホストへ黙示フォールバックしない。A08）。呼び出し元
+    /// （`autodiff::DeviceParamStore::train_step_device_chain`）はこれを「その部品は確保版の
+    /// `_tracked` を使う」合図として消費し、チェーン全体の `Unsupported` には伝播させない。
+    fn mse_loss_device_into_tracked(
+        &self,
+        _pred: &DeviceBuffer<f32>,
+        _target: &DeviceBuffer<f32>,
+        _reduction: MseReduction,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
+    /// [`Self::mse_loss_backward_device_tracked`] と同じ計算を、既存の出力 `out`（pred と同じ
+    /// shape）へ書き込む版（イシュー #3252）。契約・既定動作は
+    /// [`Self::mse_loss_device_into_tracked`] と同じ（`numel == 0` は `Unsupported`）。
+    fn mse_loss_backward_device_into_tracked(
+        &self,
+        _pred: &DeviceBuffer<f32>,
+        _target: &DeviceBuffer<f32>,
+        _scale: f32,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "mse_loss_backward_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
+    /// [`Self::relu_backward_mask_device_tracked`] と同じ選択を、既存の出力 `out`（論理形・
+    /// 行優先）へ書き込む版（イシュー #3252）。契約・既定動作は
+    /// [`Self::mse_loss_device_into_tracked`] と同じ（空形状は `Unsupported`）。
+    fn relu_backward_mask_device_into_tracked(
+        &self,
+        _g: DeviceBufferView<'_>,
+        _g_layout: DeviceMatrixLayout,
+        _mask_src: DeviceBufferView<'_>,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "relu_backward_mask_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
+    /// [`Self::gemm_resident_lhs_device_tracked`] と同じ `w @ op(b)` を、既存の出力 `out`
+    /// （shape `[k, m]`。既存版の出力形と同じ）へ書き込む版（イシュー #3252）。契約・既定動作は
+    /// [`Self::mse_loss_device_into_tracked`] と同じ（退化形状は `Unsupported`）。
+    fn gemm_resident_lhs_device_into_tracked(
+        &self,
+        _w: DeviceBufferView<'_>,
+        _b: DeviceBufferView<'_>,
+        _b_layout: DeviceMatrixLayout,
+        _out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_resident_lhs_device_into_tracked: not supported by this backend".to_string(),
+        ))
+    }
+
     /// ReLU の backward マスクをデバイス常駐のまま適用する（イシュー #3218・
     /// 設計 `docs/train-step-resident-parts-design.md` §3 行 3・§4・§5。
     /// 学習 1 step の同期回数を 1 回へ減らす #3248・#3251 の部品）。
@@ -3969,7 +4045,7 @@ pub trait BackendOps {
     /// フォールバックは同期回数の受け入れ条件を静かに破るため禁止）。
     /// Metal（`backend-metal::ops::MetalBackendOps`）と CUDA
     /// （`backend-cuda::ops::CudaBackendOps`。#3221）が実装し、CPU は #3253 で
-    /// 対応する。ROCm は既定を継承する。
+    /// 実装済み（`backend-cpu::ops`）。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。
@@ -4023,7 +4099,7 @@ pub trait BackendOps {
     /// # 既定実装
     /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示フォール
     /// バックは禁止）。Metal が #3219、CUDA が #3222 で実装し、CPU は #3253 で
-    /// 対応する。ROCm は既定を継承する。
+    /// 実装済み（`backend-cpu::ops`）。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。encode のみの
@@ -4109,7 +4185,7 @@ pub trait BackendOps {
     /// # 既定実装
     /// [`BackendError::Unsupported`] を返す fail-safe（ホストへの黙示フォール
     /// バックは禁止）。Metal が #3220、CUDA が #3223 で実装し、CPU は #3253 で
-    /// 対応する。ROCm は既定を継承する。
+    /// 実装済み（`backend-cpu::ops`）。ROCm は既定を継承する。
     ///
     /// # 同期契約
     /// 本メソッド（非 tracked）は復帰時点で GPU 実行の完了・成否を返す。encode のみの
@@ -4340,6 +4416,25 @@ pub trait BackendOps {
     /// 非破壊拡張）。
     fn wait_device_capture_idle(&self, _timeout: std::time::Duration) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    /// D2H（ホスト転送）を伴わずに、このバックエンドへ積まれた仕事（`*_tracked` で encode-only に
+    /// 積んだ部品を含む）の完了を待つ（イシュー #3254 P7。決定記録
+    /// `docs/compat-resident-train-step-decision.md` §4・§11）。
+    ///
+    /// 呼び出し元は autodiff の `DeviceParamStore::wait_device`（facade の
+    /// `Tape::wait_device_param_store` の実体）。学習ループの途中（loss を読まない step）で
+    /// デバイスの進行を区切りたい利用者が、読み出しなしに同期点だけを置くための部品。
+    ///
+    /// # デフォルト実装
+    /// `Err(BackendError::Unsupported)`。「待てない」を黙って `Ok` にすると、完了を前提にした
+    /// 呼び出し側（計測窓の終端など）が誤るため fail-closed とする（非破壊拡張。#3217 記録 §3 と同型）。
+    /// ホストへの黙示フォールバックはしない。同期実行のバックエンド（CPU）は `Ok(())` で override する。
+    fn synchronize_device(&self) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "BackendOps::synchronize_device: this backend does not implement a D2H-free wait"
+                .to_string(),
+        ))
     }
 
     /// `a op b`（`op` は [`BinaryElementwiseOp`]）を `a`／`b`／戻り値
@@ -6349,6 +6444,48 @@ mod tests {
         assert!(!token.is_set());
     }
 
+    /// 既定の `*_into_tracked` 4 部品は `Unsupported` を返し、`token` に触れない
+    /// （イシュー #3252。呼び出し元は部品単位で確保版へ進む合図として扱う）。
+    #[test]
+    fn train_chain_into_tracked_defaults_are_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        let a = empty_device_buffer(Device::Cpu);
+        let b = empty_device_buffer(Device::Cpu);
+        let mut out = empty_device_buffer(Device::Cpu);
+        let token = DispatchFailureCell::new();
+        let va = DeviceBufferView::new(&a, 0, &[1]).unwrap();
+        let vb = DeviceBufferView::new(&b, 0, &[1]).unwrap();
+        assert!(matches!(
+            ops.mse_loss_device_into_tracked(&a, &b, MseReduction::Mean, &mut out, &token),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.mse_loss_backward_device_into_tracked(&a, &b, 1.0, &mut out, &token),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.relu_backward_mask_device_into_tracked(
+                va,
+                DeviceMatrixLayout::RowMajor,
+                vb,
+                &mut out,
+                &token
+            ),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(matches!(
+            ops.gemm_resident_lhs_device_into_tracked(
+                va,
+                vb,
+                DeviceMatrixLayout::RowMajor,
+                &mut out,
+                &token
+            ),
+            Err(BackendError::Unsupported(_))
+        ));
+        assert!(!token.is_set());
+    }
+
     /// 既定の `paged_kv_append`／`paged_attention_forward` は fail-safe の
     /// `Unsupported` を返す（K-1 へ暗黙フォールバックしない。イシュー #3111）。
     #[test]
@@ -6453,6 +6590,17 @@ mod tests {
             ops.wait_device_capture_idle(std::time::Duration::from_millis(1))
                 .is_ok()
         );
+    }
+
+    /// [`BackendOps::synchronize_device`] の既定実装が `Unsupported`（`Ok` に黙示フォールバック
+    /// しない）を返すこと（イシュー #3254 P7）。
+    #[test]
+    fn synchronize_device_default_is_unsupported() {
+        let ops = MockOps(Device::Cpu);
+        assert!(matches!(
+            ops.synchronize_device(),
+            Err(BackendError::Unsupported(_))
+        ));
     }
 
     /// [`BackendOps::fft_rfft`]／[`BackendOps::fft_irfft`] の既定実装が

@@ -10,6 +10,7 @@
 
 - `docs/perf/train-step-phase-breakdown.md`: backward が学習 1 step の 75〜97% を占める支配項であり、update（`device_update`）は 0.5〜0.7% に留まる
 - 本実装が capture できる区間（update）は step 全体の 1% に満たないため、**性能効果は中立が期待値**であり、本 PR での結線判断は「機構として正しく動作すること」を優先する。性能の正式計測・採否判断は兄弟イシュー #1350 へ引き継ぐ
+- **step 全体 capture の前提（#3252）**: 学習チェーン（`DeviceParamStore::train_step_device_chain`）は、CUDA で層出力・dPred・d_input・mask 後勾配・loss を永続バッファへ `_into_tracked` で書き、定常状態の区間内にホスト同期・H2D・確保を持たない（GB10 実測は `docs/perf/logs/train-step-chain-cuda-3252/`、設計は `docs/compat-resident-train-step-decision.md` §12）。#3258 の step 全体 capture が要る固定構造（永続スクラッチ・永続 loss）はこれで揃った。capture 中の確保・ワークスペース grow は拒否されるため、capture の前にウォームアップで定常状態にする
 
 ## 2. 調査で確定した前提・制約
 

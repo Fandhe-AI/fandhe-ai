@@ -546,9 +546,19 @@ pub struct DeviceParamStore {
     train_chain_loss: Option<DeviceBuffer<f32>>,
     /// 直近のチェーン step の世代（`TrainStepLoss` の鮮度検査の基準）。
     train_chain_generation: u64,
+    /// 直近の step が Tape 経路へのフォールバックで確定した loss（ホスト `f32`。イシュー #3254）。
+    /// `Some` の間は [`Self::read_train_step_loss`] が D2H・同期なしでこの値を返す。チェーンが
+    /// 成功した step の確定時に `None` へ戻す（`train_chain_loss` のデバイス値が最新になる）。
+    train_chain_host_loss: Option<f32>,
     /// 直近のチェーン step が積んだ中間バッファ（層出力・勾配・d_input）。encode のみで
     /// 積んだ GPU 仕事が完了するまで解放しないために次の step まで保持する。
     train_chain_hold: Vec<DeviceBuffer<f32>>,
+    /// 学習チェーンの層出力・dPred・d_input・mask 後勾配（イシュー #3252）。成功した step の
+    /// ものだけを次 step の `_into_tracked` の出力先として再利用する。`predict_device_chain` の
+    /// `chain_scratch` とは別フィールド（鮮度契約を混ぜない）。
+    train_chain_bufs: Option<train_chain::TrainChainBufs>,
+    /// 学習チェーンの部品ごとの `_into_tracked` 対応状況（能力ラッチ）。
+    train_chain_caps: train_chain::TrainChainCaps,
 }
 
 /// `AutodiffError` を `BackendError` へ変換する（イシュー #1022）。
@@ -1339,7 +1349,10 @@ impl DeviceParamStore {
             train_chain_grad: None,
             train_chain_loss: None,
             train_chain_generation: 0,
+            train_chain_host_loss: None,
             train_chain_hold: Vec::new(),
+            train_chain_bufs: None,
+            train_chain_caps: train_chain::TrainChainCaps::default(),
         })
     }
 

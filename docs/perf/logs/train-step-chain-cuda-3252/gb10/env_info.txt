@@ -1,0 +1,210 @@
+--- before B1 run1 2026-10-23T21:49:38Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B1 run1 2026-10-23T21:49:39Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B1 run2 2026-10-23T21:49:39Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B1 run2 2026-10-23T21:49:40Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B1 run3 2026-10-23T21:49:40Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B1 run3 2026-10-23T21:49:40Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B1 run4 2026-10-23T21:49:41Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B1 run4 2026-10-23T21:49:41Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B1 run5 2026-10-23T21:49:41Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B1 run5 2026-10-23T21:49:42Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B2 run1 2026-10-23T21:49:42Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B2 run1 2026-10-23T21:49:44Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B2 run2 2026-10-23T21:49:44Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B2 run2 2026-10-23T21:49:45Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B2 run3 2026-10-23T21:49:45Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B2 run3 2026-10-23T21:49:46Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B2 run4 2026-10-23T21:49:46Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B2 run4 2026-10-23T21:49:47Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B2 run5 2026-10-23T21:49:47Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B2 run5 2026-10-23T21:49:47Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B3 run1 2026-10-23T21:49:48Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B3 run1 2026-10-23T21:49:48Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B3 run2 2026-10-23T21:49:48Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B3 run2 2026-10-23T21:49:49Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B3 run3 2026-10-23T21:49:49Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B3 run3 2026-10-23T21:49:50Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B3 run4 2026-10-23T21:49:50Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B3 run4 2026-10-23T21:49:51Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- before B3 run5 2026-10-23T21:49:51Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python
+--- after B3 run5 2026-10-23T21:49:52Z
+Linux 6.17.0-1031-nvidia aarch64
+rustc 1.97.0 (2d8144b78 2026-07-07)
+NVIDIA GB10, 580.173.02
+2083578, VLLM::StageEngineCoreProc_stage0_replica0_DP0
+2084616, VLLM::StageEngineCoreProc_stage1_replica0_DP0
+2626105, /opt/llm-infra/ComfyUI-next/venv/bin/python

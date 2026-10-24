@@ -43082,3 +43082,349 @@ fn backend_rocm_guard_detects_header_style_dependency() {
     let dev = "[dev-dependencies]\nbackend-rocm = { path = \"../backend-rocm\" }\n[dev-dependencies.backend-rocm]\npath = \"x\"\n";
     assert!(find_backend_rocm_reference_outside_dev(dev).is_none());
 }
+// ---------------------------------------------------------------------------
+// イシュー #3254: 常駐学習ステップの公開面（P1〜P7）の正ガード
+// （決定記録 `docs/compat-resident-train-step-decision.md` §4・§8・§14）
+// ---------------------------------------------------------------------------
+
+/// 承認形シグネチャ（P2・P4・P7。`pub fn` から本体 `{` の直前まで）。複数行整形の末尾カンマは
+/// [`resident_sig_norm`] が除くため、単一行で書く。
+const RESIDENT_TAPE_APPROVED_SIGNATURES: [(&str, &str); 3] = [
+    (
+        "upload_resident",
+        "pub fn upload_resident(&self, store: &DeviceParamStore, x: &Tensor<f32>) -> Result<ResidentTensor, AutodiffError>",
+    ),
+    (
+        "matmul_resident",
+        "pub fn matmul_resident(&self, a: &ResidentTensor, b: &ResidentTensor) -> Result<Tensor<f32>, AutodiffError>",
+    ),
+    (
+        "wait_device_param_store",
+        "pub fn wait_device_param_store(&self, store: &DeviceParamStore) -> Result<(), AutodiffError>",
+    ),
+];
+
+/// 承認形シグネチャ（P3・P5）。
+const RESIDENT_SEQUENTIAL_APPROVED_SIGNATURES: [(&str, &str); 2] = [
+    (
+        "predict_resident_input",
+        "pub fn predict_resident_input(&self, store: &DeviceParamStore, input: &ResidentTensor) -> Result<Tensor<f32>, AutodiffError>",
+    ),
+    (
+        "train_step_resident",
+        "pub fn train_step_resident(&self, store: &mut DeviceParamStore, x: &ResidentTensor, y: &ResidentTensor, config: &SgdConfig) -> Result<ResidentLoss, AutodiffError>",
+    ),
+];
+
+/// 承認形シグネチャ（P6 の `ResidentLoss::read`）。
+const RESIDENT_LOSS_READ_APPROVED_SIGNATURE: &str =
+    "pub fn read(&self, store: &mut DeviceParamStore) -> Result<f32, AutodiffError>";
+
+/// 正規化トークン列から、閉じ括弧直前の末尾カンマ（rustfmt の複数行整形）を除く。
+fn resident_sig_norm(s: &str) -> String {
+    normalized_tokens(s).replace(" , )", " )")
+}
+
+/// `impl <X> for <type_name>` のトレイト名（`for` の直前トークン）を列挙する。
+fn resident_trait_impls_for(tokens: &[String], type_name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 1..tokens.len().saturating_sub(1) {
+        if tokens[i] == "for" && tokens[i + 1] == type_name {
+            out.push(tokens[i - 1].clone());
+        }
+    }
+    out
+}
+
+/// `pub struct <name> (` のタプルフィールドが `pub(crate)`（または非公開）で、属性（`#[derive]` 等）が
+/// 直前に無く、inherent `pub fn` 集合と trait impl が承認形（`Debug` のみ）であることを検査する。
+fn check_resident_type_shape(
+    tokens: &[String],
+    name: &str,
+    want_fns: &[&str],
+) -> Result<(), String> {
+    let starts = pb_find_seq(tokens, &["pub", "struct", name, "("]);
+    if starts.len() != 1 {
+        return Err(format!("`pub struct {name}(..)` が {} 件", starts.len()));
+    }
+    let i = starts[0];
+    if i > 0 && tokens[i - 1] == "]" {
+        return Err(format!("`{name}` に属性（derive 等）が付いている"));
+    }
+    let field = &tokens[i + 4..(i + 8).min(tokens.len())];
+    if field.first().map(String::as_str) == Some("pub")
+        && field.get(1).map(String::as_str) != Some("(")
+    {
+        return Err(format!("`{name}` のタプルフィールドが pub"));
+    }
+    let fns = pb_pub_fn_names_in_inherent_impls(tokens, name);
+    let want: Vec<String> = want_fns.iter().map(|s| s.to_string()).collect();
+    if fns != want {
+        return Err(format!(
+            "`{name}` の inherent pub fn が {fns:?}（承認: {want:?}）"
+        ));
+    }
+    for t in resident_trait_impls_for(tokens, name) {
+        if t != "Debug" {
+            return Err(format!(
+                "`{name}` に `{t}` の impl がある（`Debug` のみ承認）"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `lib.rs`・`compat/sequential.rs` の常駐学習ステップ公開面が承認形かを検査する（正ガード本体）。
+/// (a) P2〜P7 のシグネチャ完全一致と置き場所（`impl Tape`／`impl Sequential`／`impl ResidentLoss`
+/// 直下に各 1 件）、(b) 型の形（`ResidentTensor`＝`{shape, device}`・`ResidentLoss`＝`{read}`・
+/// フィールド非公開・属性なし・trait impl は `Debug` のみ）、(c) 内部型（`ResidentInput`・
+/// `TrainStepLoss`・`resident_input`）の `pub use` 再エクスポートが無いこと、(d) 利用例 doctest と
+/// `!Send` の `compile_fail` doctest の実在、を固定する。
+fn check_resident_train_step_surface(lib_src: &str, seq_src: &str) -> Result<(), String> {
+    let lib_clean: String = strip_comments_and_literals(lib_src).into_iter().collect();
+    let lib_tokens = tokenize_including_punctuation(&lib_clean);
+    let seq_clean: String = strip_comments_and_literals(seq_src).into_iter().collect();
+    let seq_tokens = tokenize_including_punctuation(&seq_clean);
+
+    let tape_fns = pb_pub_fn_names_in_inherent_impls(&lib_tokens, "Tape");
+    for (name, sig) in RESIDENT_TAPE_APPROVED_SIGNATURES {
+        let sigs = fn_signatures_by_name(&lib_tokens, name);
+        if sigs.len() != 1 || resident_sig_norm(&sigs[0]) != resident_sig_norm(sig) {
+            return Err(format!(
+                "`Tape::{name}` が承認形（1 件・シグネチャ一致）でない: {sigs:?}"
+            ));
+        }
+        if tape_fns.iter().filter(|n| *n == name).count() != 1 {
+            return Err(format!(
+                "`{name}` が `impl Tape` 直下の `pub fn` として 1 件でない"
+            ));
+        }
+    }
+    let seq_fns = pb_pub_fn_names_in_inherent_impls(&seq_tokens, "Sequential");
+    for (name, sig) in RESIDENT_SEQUENTIAL_APPROVED_SIGNATURES {
+        let sigs = fn_signatures_by_name(&seq_tokens, name);
+        if sigs.len() != 1 || resident_sig_norm(&sigs[0]) != resident_sig_norm(sig) {
+            return Err(format!(
+                "`Sequential::{name}` が承認形（1 件・シグネチャ一致）でない: {sigs:?}"
+            ));
+        }
+        if seq_fns.iter().filter(|n| *n == name).count() != 1 {
+            return Err(format!(
+                "`{name}` が `impl Sequential` 直下の `pub fn` として 1 件でない"
+            ));
+        }
+    }
+    let read_sigs = fn_signatures_by_name(&lib_tokens, "read");
+    let want_read = resident_sig_norm(RESIDENT_LOSS_READ_APPROVED_SIGNATURE);
+    if read_sigs
+        .iter()
+        .filter(|s| resident_sig_norm(s) == want_read)
+        .count()
+        != 1
+    {
+        return Err(format!(
+            "`ResidentLoss::read` が承認形で 1 件でない: {read_sigs:?}"
+        ));
+    }
+    check_resident_type_shape(&lib_tokens, "ResidentTensor", &["device", "shape"])?;
+    check_resident_type_shape(&lib_tokens, "ResidentLoss", &["read"])?;
+
+    // (c) 内部型の再エクスポート禁止。
+    for (label, tokens) in [
+        ("lib.rs", &lib_tokens),
+        ("compat/sequential.rs", &seq_tokens),
+    ] {
+        for (i, t) in tokens.iter().enumerate() {
+            if t != "use" || i == 0 || tokens[i - 1] != "pub" {
+                continue;
+            }
+            let end = (i..tokens.len())
+                .find(|&j| tokens[j] == ";")
+                .unwrap_or(tokens.len());
+            if tokens[i..end]
+                .iter()
+                .any(|x| x == "ResidentInput" || x == "TrainStepLoss" || x == "resident_input")
+            {
+                return Err(format!(
+                    "{label}: `pub use` が内部型（ResidentInput／TrainStepLoss／resident_input）を再エクスポートしている"
+                ));
+            }
+        }
+    }
+
+    // (d) 利用例 doctest と `!Send` の compile_fail doctest の実在（doc コメントは走査前の生テキスト）。
+    for needle in [
+        "tape.upload_resident(&store",
+        "model.train_step_resident(&mut store",
+        ".read(&mut store)",
+        "tape.wait_device_param_store(&store)",
+    ] {
+        if !lib_src.contains(needle) && !seq_src.contains(needle) {
+            return Err(format!("利用例 doctest に `{needle}` が無い"));
+        }
+    }
+    let lines: Vec<&str> = lib_src.lines().collect();
+    for ty in ["ResidentTensor", "ResidentLoss"] {
+        let probe = format!("assert_send::<fandhe_ai::{ty}>();");
+        let hits: Vec<usize> = (0..lines.len())
+            .filter(|&i| lines[i].contains(&probe))
+            .collect();
+        if hits.len() != 1 {
+            return Err(format!(
+                "`{probe}` が {} 件（compile_fail doctest に 1 件）",
+                hits.len()
+            ));
+        }
+        let h = hits[0];
+        let in_doc = lines[h].trim_start().starts_with("///");
+        let marked = (h.saturating_sub(3)..h).any(|j| lines[j].contains("```compile_fail"));
+        if !in_doc || !marked {
+            return Err(format!(
+                "`{probe}` が `compile_fail` doctest の中にない（Send を保証していないか）"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resident_sources() -> (String, String) {
+    (
+        read_to_string_or_panic(&lib_rs_path()),
+        read_to_string_or_panic(&facade_crate_root().join("src/compat/sequential.rs")),
+    )
+}
+
+/// 常駐学習ステップ公開面（P1〜P7）が承認形であること（イシュー #3254 の正ガード）。
+#[test]
+fn facade_resident_train_step_surface_matches_approved_shape() {
+    let (lib_src, seq_src) = resident_sources();
+    if let Err(e) = check_resident_train_step_surface(&lib_src, &seq_src) {
+        panic!(
+            "常駐学習ステップの公開面が承認形（#3254・決定記録 `compat-resident-train-step-decision.md` §4）と一致しない: {e}"
+        );
+    }
+    // 同名の `fn` 宣言が facade src の他ファイルに無いこと（迂回経路の混入防止）。
+    let src_dir = facade_crate_root().join("src");
+    visit_rs_files(&src_dir, &mut |path, content| {
+        let is_lib = path.ends_with("src/lib.rs");
+        let is_seq = path.ends_with("src/compat/sequential.rs");
+        let cleaned: String = strip_comments_and_literals(content).into_iter().collect();
+        let tokens = tokenize_including_punctuation(&cleaned);
+        for name in [
+            "upload_resident",
+            "matmul_resident",
+            "wait_device_param_store",
+            "predict_resident_input",
+            "train_step_resident",
+        ] {
+            let allowed = match name {
+                "predict_resident_input" | "train_step_resident" => is_seq,
+                _ => is_lib,
+            };
+            let count = count_fn_declarations_by_name(&tokens, name);
+            assert_eq!(
+                count,
+                usize::from(allowed),
+                "{} の `fn {name}` 宣言が {count} 件（承認された置き場所のみ 1 件）",
+                path.display()
+            );
+        }
+    });
+}
+
+/// 関数ポインタ型で P2〜P7 のシグネチャをコンパイル時に固定するプローブ（型が変わるとビルドが落ちる）。
+#[test]
+fn facade_resident_train_step_signatures_are_pinned_by_fn_pointer_probes() {
+    use fandhe_ai::compat::Sequential;
+    use fandhe_ai::{
+        AutodiffError, DeviceParamStore, ResidentLoss, ResidentTensor, SgdConfig, Tape, Tensor,
+    };
+    let _: fn(&Tape, &DeviceParamStore, &Tensor<f32>) -> Result<ResidentTensor, AutodiffError> =
+        Tape::upload_resident;
+    let _: fn(&Tape, &ResidentTensor, &ResidentTensor) -> Result<Tensor<f32>, AutodiffError> =
+        Tape::matmul_resident;
+    let _: fn(&Tape, &DeviceParamStore) -> Result<(), AutodiffError> =
+        Tape::wait_device_param_store;
+    let _: fn(
+        &Sequential,
+        &DeviceParamStore,
+        &ResidentTensor,
+    ) -> Result<Tensor<f32>, AutodiffError> = Sequential::predict_resident_input;
+    let _: fn(
+        &Sequential,
+        &mut DeviceParamStore,
+        &ResidentTensor,
+        &ResidentTensor,
+        &SgdConfig,
+    ) -> Result<ResidentLoss, AutodiffError> = Sequential::train_step_resident;
+    let _: fn(&ResidentLoss, &mut DeviceParamStore) -> Result<f32, AutodiffError> =
+        ResidentLoss::read;
+}
+
+/// [`check_resident_train_step_surface`] の自己テスト（承認形は無違反・各違反類型を検出・空振りを拒否）。
+#[test]
+fn facade_resident_train_step_surface_detects_each_category() {
+    let (lib_src, seq_src) = resident_sources();
+    assert!(check_resident_train_step_surface(&lib_src, &seq_src).is_ok());
+    // 空振り（対象不在）を拒否する。
+    assert!(check_resident_train_step_surface("", "").is_err());
+    // シグネチャの改変（`&mut` の脱落・戻り値型の変更）。
+    let m = seq_src.replace(
+        "store: &mut DeviceParamStore,\n        x: &ResidentTensor,",
+        "store: &DeviceParamStore,\n        x: &ResidentTensor,",
+    );
+    assert_ne!(m, seq_src);
+    assert!(check_resident_train_step_surface(&lib_src, &m).is_err());
+    let m = lib_src.replace(
+        "pub fn read(&self, store: &mut DeviceParamStore) -> Result<f32, AutodiffError>",
+        "pub fn read(&self, store: &mut DeviceParamStore) -> Result<f64, AutodiffError>",
+    );
+    assert_ne!(m, lib_src);
+    assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+    // 重複宣言（`impl Tape` に同名の追加）。
+    let m = lib_src.replace(
+        "impl Tape {\n    /// `store` のデバイスに積まれた仕事",
+        "impl Tape {\n    pub fn wait_device_param_store(&self, store: &DeviceParamStore) -> Result<(), AutodiffError> { Ok(()) }\n    /// `store` のデバイスに積まれた仕事",
+    );
+    // 実ソースの並びが変わった場合はこの置換が空振りするため、無効な自己テストを黙って通さない。
+    if m == lib_src {
+        let appended = format!(
+            "{lib_src}\nimpl Tape {{ pub fn wait_device_param_store(&self, store: &DeviceParamStore) -> Result<(), AutodiffError> {{ Ok(()) }} }}\n"
+        );
+        assert!(check_resident_train_step_surface(&appended, &seq_src).is_err());
+    } else {
+        assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+    }
+    // 型の形: inherent pub fn の追加・フィールドの pub 化・Send の impl・属性の付与。
+    let m = lib_src.replace(
+        "impl ResidentLoss {",
+        "impl ResidentLoss {\n    pub fn extra(&self) {}",
+    );
+    assert_ne!(m, lib_src);
+    assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+    let m = lib_src.replace(
+        "pub struct ResidentLoss(\n    pub(crate)",
+        "pub struct ResidentLoss(\n    pub",
+    );
+    assert_ne!(m, lib_src);
+    assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+    let m = format!("{lib_src}\nunsafe impl Send for ResidentLoss {{}}\n");
+    assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+    let m = lib_src.replace(
+        "pub struct ResidentLoss(",
+        "#[derive(Clone)]\npub struct ResidentLoss(",
+    );
+    assert_ne!(m, lib_src);
+    assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+    // 内部型の再エクスポート。
+    let m =
+        format!("{lib_src}\npub use fandhe_ai_autodiff::optim::resident_input::TrainStepLoss;\n");
+    assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+    // `compile_fail` の脱落（`Send` を正のコードとして書いた状態）。
+    let m = lib_src.replace(
+        "/// ```compile_fail\n/// fn assert_send<T: Send>() {}\n/// assert_send::<fandhe_ai::ResidentLoss>();",
+        "/// ```\n/// fn assert_send<T: Send>() {}\n/// assert_send::<fandhe_ai::ResidentLoss>();",
+    );
+    assert_ne!(m, lib_src);
+    assert!(check_resident_train_step_surface(&m, &seq_src).is_err());
+}

@@ -2514,6 +2514,36 @@ pub(crate) fn checked_bytes_for<T>(shape: &[usize]) -> Result<usize, ShapeError>
     Ok(numel)
 }
 
+/// `*_into_tracked` が受け取る `out` の driver 前検査（イシュー #3252。A03）: デバイス一致 →
+/// shape 一致。世代（`StaleDeviceGeneration`）は各本体が `out.generation()` を
+/// `resident_generations` へ含めて `begin_driver_call` で検査する。
+fn check_into_out(
+    out: &DeviceBuffer<f32>,
+    ordinal: usize,
+    expected_shape: &[usize],
+) -> Result<(), BackendError> {
+    if out.device() != Device::Cuda(ordinal) {
+        return Err(BackendError::DeviceMismatch);
+    }
+    if out.shape() != expected_shape {
+        return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs: out.shape().to_vec(),
+            rhs: expected_shape.to_vec(),
+        }));
+    }
+    Ok(())
+}
+
+/// 確保版の本体 `*_core(.., None)` が返す `Some(出力)` を取り出す（`None` は内部矛盾）。
+fn expect_owned_out(
+    r: Option<DeviceBuffer<f32>>,
+    what: &str,
+) -> Result<DeviceBuffer<f32>, BackendError> {
+    r.ok_or_else(|| {
+        BackendError::InvalidArgument(format!("{what}: output buffer missing (internal error)"))
+    })
+}
+
 impl CudaBackendOps {
     /// [`BackendOps::relu_backward_mask_device`]／
     /// [`BackendOps::relu_backward_mask_device_tracked`] の共有本体（イシュー
@@ -2534,6 +2564,22 @@ impl CudaBackendOps {
         g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
         mask_src: DeviceBufferView<'_>,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let r = self.relu_backward_mask_device_core(g, g_layout, mask_src, None)?;
+        expect_owned_out(r, "relu_backward_mask_device")
+    }
+
+    /// [`Self::relu_backward_mask_device_impl`] の本体。`out` が `Some` なら呼び出し元の
+    /// 既存バッファへ書き（確保しない。イシュー #3252）、`None` なら確保して `Some(出力)` を返す。
+    /// カーネル `ew_relu_mask_select_f32` は論理形の全要素へ無条件に代入する（`out[idx] = ..`。
+    /// 既存値を読まない）ため、再利用バッファでも確保版（memset 済み）と bit 一致する。
+    /// 空形状は `out` ありなら確保経路へ任せる `Unsupported`。
+    fn relu_backward_mask_device_core(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        out: Option<&mut DeviceBuffer<f32>>,
+    ) -> Result<Option<DeviceBuffer<f32>>, BackendError> {
         if g.device() != Device::Cuda(self.ordinal)
             || mask_src.device() != Device::Cuda(self.ordinal)
         {
@@ -2542,9 +2588,21 @@ impl CudaBackendOps {
         let plan = crate::relu_mask_model::plan_relu_mask(g.shape(), g_layout, mask_src.shape())?;
         let logical = plan.logical_shape();
         let numel = plan.numel;
-        let resident_generations = [g.buffer().generation(), mask_src.buffer().generation()];
+        let mut resident_generations =
+            vec![g.buffer().generation(), mask_src.buffer().generation()];
+        if let Some(o) = out.as_deref() {
+            check_into_out(o, self.ordinal, &logical)?;
+            resident_generations.push(o.generation());
+        }
 
         if numel == 0 {
+            if out.is_some() {
+                return Err(BackendError::Unsupported(
+                    "relu_backward_mask_device_into_tracked: empty output is handled by the \
+                     allocating path"
+                        .to_string(),
+                ));
+            }
             // 早期 return でも poison 状態・世代は fail-closed に検査する
             // （`binary_elementwise_device` の `numel == 0` と同じ理由）。
             context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
@@ -2554,7 +2612,7 @@ impl CudaBackendOps {
                 || self.device_handle_raw(),
             )?;
             let mem = static_cuda_memory(self.ordinal, &device)?;
-            return mem.alloc_zeroed(&logical);
+            return Ok(Some(mem.alloc_zeroed(&logical)?));
         }
 
         let g_handle = g
@@ -2597,18 +2655,16 @@ impl CudaBackendOps {
             |e| BackendError::CudaUnavailable(e.to_string()),
             || self.device_handle_raw(),
         )?;
-        let mem = static_cuda_memory(self.ordinal, &device)?;
-        let mut out_dev_buf = mem.alloc_zeroed(&logical)?;
-        let out_handle = out_dev_buf
-            .downcast_handle_mut::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(out_storage) = out_handle.storage.as_mut() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "relu_backward_mask_device: output buffer has numel > 0 but no device allocation"
-                    .into(),
-            ));
+        let mut owned: Option<DeviceBuffer<f32>> = None;
+        let out_buf: &mut DeviceBuffer<f32> = match out {
+            Some(o) => o,
+            None => {
+                let mem = static_cuda_memory(self.ordinal, &device)?;
+                owned.insert(mem.alloc_zeroed(&logical)?)
+            }
         };
-        let mut out_arg = out_storage.as_arg_mut();
+        let mut out_arg =
+            cuda_storage_mut(out_buf, numel, "relu_backward_mask_device: out")?.as_arg_mut();
 
         let ew = self.with_driver_call(
             &resident_generations,
@@ -2631,7 +2687,7 @@ impl CudaBackendOps {
         )?;
 
         // `download` しない: 同期点は呼び出し元の `download` へ集約。
-        Ok(out_dev_buf)
+        Ok(owned)
     }
 
     /// [`BackendOps::gemm_fp32_strict_into_device`]／`_tracked` の共有本体
@@ -2802,15 +2858,42 @@ impl CudaBackendOps {
         b: DeviceBufferView<'_>,
         b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let r = self.gemm_resident_lhs_device_core(w, b, b_layout, None)?;
+        expect_owned_out(r, "gemm_resident_lhs_device")
+    }
+
+    /// [`Self::gemm_resident_lhs_device_impl`] の本体。`out` が `Some`（shape `[p, r]`）なら既存
+    /// バッファへ書き（確保しない。イシュー #3252）、`None` なら確保して返す。選ばれうる全 tiled
+    /// f32 カーネル（classic／pipeline／128x64）は `c[..] = acc` と無条件に代入し既存値を読まない
+    /// ため、再利用バッファでも bit 一致する。退化形状（`p == 0 || r == 0 || q == 0`）は
+    /// `out` ありなら `Unsupported`（確保経路へ任せる）。
+    fn gemm_resident_lhs_device_core(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: Option<&mut DeviceBuffer<f32>>,
+    ) -> Result<Option<DeviceBuffer<f32>>, BackendError> {
         let dev = Device::Cuda(self.ordinal);
         if w.device() != dev || b.device() != dev {
             return Err(BackendError::DeviceMismatch);
         }
         let plan = crate::gemm_device_model::plan_dinput_device(w.shape(), b.shape(), b_layout)?;
         let (p, q, r) = (plan.p, plan.q, plan.r);
-        let generations = [w.buffer().generation(), b.buffer().generation()];
+        let mut generations = vec![w.buffer().generation(), b.buffer().generation()];
+        if let Some(o) = out.as_deref() {
+            check_into_out(o, self.ordinal, &[p, r])?;
+            generations.push(o.generation());
+        }
 
         if p == 0 || r == 0 || q == 0 {
+            if out.is_some() {
+                return Err(BackendError::Unsupported(
+                    "gemm_resident_lhs_device_into_tracked: degenerate shape is handled by the \
+                     allocating path"
+                        .to_string(),
+                ));
+            }
             // 早期 return でも poison・世代は fail-closed に検査する
             // （`relu_backward_mask_device_impl` の `numel == 0` と同じ理由）。
             context_cache::begin_driver_call(self.ordinal, &generations)?;
@@ -2820,7 +2903,7 @@ impl CudaBackendOps {
                 || self.device_handle_raw(),
             )?;
             let mem = static_cuda_memory(self.ordinal, &device)?;
-            return mem.alloc_zeroed(&[p, r]);
+            return Ok(Some(mem.alloc_zeroed(&[p, r])?));
         }
         let to_u32 = |v: usize, what: &str| {
             u32::try_from(v).map_err(|_| {
@@ -2882,18 +2965,16 @@ impl CudaBackendOps {
                 "gemm_resident_lhs_device: transpose kernel unavailable".into(),
             ));
         }
-        let mem = static_cuda_memory(self.ordinal, &device)?;
-        let mut out_dev_buf = mem.alloc_zeroed(&[p, r])?;
-        let out_handle = out_dev_buf
-            .downcast_handle_mut::<CudaBufferHandle>()
-            .ok_or(BackendError::DeviceMismatch)?;
-        let Some(out_storage) = out_handle.storage.as_mut() else {
-            return Err(BackendError::DeviceAllocationFailed(
-                "gemm_resident_lhs_device: output buffer has numel > 0 but no device allocation"
-                    .into(),
-            ));
+        let mut owned: Option<DeviceBuffer<f32>> = None;
+        let out_buf: &mut DeviceBuffer<f32> = match out {
+            Some(o) => o,
+            None => {
+                let mem = static_cuda_memory(self.ordinal, &device)?;
+                owned.insert(mem.alloc_zeroed(&[p, r])?)
+            }
         };
-        let mut out_arg = out_storage.as_arg_mut();
+        let mut out_arg =
+            cuda_storage_mut(out_buf, p * r, "gemm_resident_lhs_device: out")?.as_arg_mut();
 
         self.with_driver_call(&generations, map_device_gemm_launch_error, || {
             gemm.launch_gemm_dinput_device(
@@ -2909,7 +2990,7 @@ impl CudaBackendOps {
             )
         })?;
         // `download` しない: 同期点は呼び出し元へ集約。
-        Ok(out_dev_buf)
+        Ok(owned)
     }
 
     /// MSE デバイス版 2 本（forward／backward）の driver 前検査（イシュー #3222）:
@@ -2964,9 +3045,34 @@ impl CudaBackendOps {
         target: &DeviceBuffer<f32>,
         reduction: MseReduction,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let r = self.mse_loss_device_core(pred, target, reduction, None)?;
+        expect_owned_out(r, "mse_loss_device")
+    }
+
+    /// [`Self::mse_loss_device_impl`] の本体。`out`（shape `[]`）が `Some` なら既存のスカラーへ
+    /// 書き（確保しない。イシュー #3252）、`None` なら確保して返す。`mse_finalize_f32` の lane 0 が
+    /// `out[0]` へ無条件に代入する（既存値を読まない）ため bit 一致する。空形状は `out` ありなら
+    /// `Unsupported`。
+    fn mse_loss_device_core(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+        out: Option<&mut DeviceBuffer<f32>>,
+    ) -> Result<Option<DeviceBuffer<f32>>, BackendError> {
         let plan = self.mse_device_plan(pred, target, "mse_loss_device")?;
         let factor = mse_factor(reduction, plan.numel)?;
-        let generations = plan.generations;
+        let mut generations = plan.generations.to_vec();
+        if let Some(o) = out.as_deref() {
+            check_into_out(o, self.ordinal, &[])?;
+            generations.push(o.generation());
+            if plan.numel == 0 {
+                return Err(BackendError::Unsupported(
+                    "mse_loss_device_into_tracked: empty input is handled by the allocating path"
+                        .to_string(),
+                ));
+            }
+        }
 
         let device = self.with_driver_call(
             &generations,
@@ -2977,14 +3083,17 @@ impl CudaBackendOps {
         if plan.numel == 0 {
             // `with_driver_call` 経由で poison・世代は検査済み。空和は 0.0。
             context_cache::begin_driver_call(self.ordinal, &generations)?;
-            return mem.alloc_zeroed(&[]);
+            return Ok(Some(mem.alloc_zeroed(&[])?));
         }
 
         let pred_arg = cuda_storage_ref(pred, plan.numel, "mse_loss_device: pred")?.as_arg();
         let target_arg = cuda_storage_ref(target, plan.numel, "mse_loss_device: target")?.as_arg();
-        let mut out_dev_buf = mem.alloc_zeroed(&[])?;
-        let mut out_arg =
-            cuda_storage_mut(&mut out_dev_buf, 1, "mse_loss_device: out")?.as_arg_mut();
+        let mut owned: Option<DeviceBuffer<f32>> = None;
+        let out_buf: &mut DeviceBuffer<f32> = match out {
+            Some(o) => o,
+            None => owned.insert(mem.alloc_zeroed(&[])?),
+        };
+        let mut out_arg = cuda_storage_mut(out_buf, 1, "mse_loss_device: out")?.as_arg_mut();
 
         let mse = self.with_driver_call(
             &generations,
@@ -3006,7 +3115,7 @@ impl CudaBackendOps {
         )?;
 
         // `download` しない: 同期点は呼び出し元の `download` へ集約。
-        Ok(out_dev_buf)
+        Ok(owned)
     }
 
     /// [`BackendOps::mse_loss_backward_device`]／`_tracked` の共有本体（イシュー
@@ -3018,8 +3127,34 @@ impl CudaBackendOps {
         target: &DeviceBuffer<f32>,
         scale: f32,
     ) -> Result<DeviceBuffer<f32>, BackendError> {
+        let r = self.mse_loss_backward_device_core(pred, target, scale, None)?;
+        expect_owned_out(r, "mse_loss_backward_device")
+    }
+
+    /// [`Self::mse_loss_backward_device_impl`] の本体。`out`（pred と同 shape）が `Some` なら既存
+    /// バッファへ書き（確保しない。イシュー #3252）、`None` なら確保して返す。カーネル
+    /// `mse_backward_f32` は `dpred[idx] = ..` と無条件に代入する。空形状は `out` ありなら
+    /// `Unsupported`。
+    fn mse_loss_backward_device_core(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+        out: Option<&mut DeviceBuffer<f32>>,
+    ) -> Result<Option<DeviceBuffer<f32>>, BackendError> {
         let plan = self.mse_device_plan(pred, target, "mse_loss_backward_device")?;
-        let generations = plan.generations;
+        let mut generations = plan.generations.to_vec();
+        if let Some(o) = out.as_deref() {
+            check_into_out(o, self.ordinal, &plan.shape)?;
+            generations.push(o.generation());
+            if plan.numel == 0 {
+                return Err(BackendError::Unsupported(
+                    "mse_loss_backward_device_into_tracked: empty input is handled by the \
+                     allocating path"
+                        .to_string(),
+                ));
+            }
+        }
 
         let device = self.with_driver_call(
             &generations,
@@ -3029,20 +3164,20 @@ impl CudaBackendOps {
         let mem = static_cuda_memory(self.ordinal, &device)?;
         if plan.numel == 0 {
             context_cache::begin_driver_call(self.ordinal, &generations)?;
-            return mem.alloc_zeroed(&plan.shape);
+            return Ok(Some(mem.alloc_zeroed(&plan.shape)?));
         }
 
         let pred_arg =
             cuda_storage_ref(pred, plan.numel, "mse_loss_backward_device: pred")?.as_arg();
         let target_arg =
             cuda_storage_ref(target, plan.numel, "mse_loss_backward_device: target")?.as_arg();
-        let mut out_dev_buf = mem.alloc_zeroed(&plan.shape)?;
-        let mut out_arg = cuda_storage_mut(
-            &mut out_dev_buf,
-            plan.numel,
-            "mse_loss_backward_device: out",
-        )?
-        .as_arg_mut();
+        let mut owned: Option<DeviceBuffer<f32>> = None;
+        let out_buf: &mut DeviceBuffer<f32> = match out {
+            Some(o) => o,
+            None => owned.insert(mem.alloc_zeroed(&plan.shape)?),
+        };
+        let mut out_arg =
+            cuda_storage_mut(out_buf, plan.numel, "mse_loss_backward_device: out")?.as_arg_mut();
 
         let mse = self.with_driver_call(
             &generations,
@@ -3063,7 +3198,7 @@ impl CudaBackendOps {
             },
         )?;
 
-        Ok(out_dev_buf)
+        Ok(owned)
     }
 
     /// [`BackendOps::run_fused`] の GPU elementwise allowlist 融合経路
@@ -3766,6 +3901,28 @@ impl BackendOps for CudaBackendOps {
 
     fn wait_device_capture_idle(&self, timeout: std::time::Duration) -> Result<(), BackendError> {
         context_cache::wait_foreign_capture_idle(self.ordinal, timeout)
+    }
+
+    /// default stream の完了を D2H なしで待つ（イシュー #3254 P7。`BackendOps::synchronize_device`
+    /// の CUDA 実装）。`DeviceParamStore::wait_device` から呼ばれる。
+    ///
+    /// ストリーム順序契約（`*_tracked` の部品は同じ context の default stream へ積まれる）により、
+    /// この同期が返った時点で積んだ仕事はすべて完了している。driver に触れるため
+    /// `with_sync_point_call`（poison 検査・sticky エラー観測・Graph capture 中の拒否）の内側で
+    /// 行い、`device_handle()`（driver 非接触経路専用）は使わない。`unsafe` は追加しない。
+    /// 同期は診断カウンタ `stream_syncs` に数える（D2H ではないので `d2h_calls` は増えない）。
+    fn synchronize_device(&self) -> Result<(), BackendError> {
+        self.with_sync_point_call(
+            &[],
+            "synchronize_device",
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                let device = self.device_handle_raw()?;
+                device.stream().synchronize()?;
+                crate::gemm::diag_count_stream_sync();
+                Ok(())
+            },
+        )
     }
 
     /// GEMM 本体（f32）。既定は FP32 厳密経路（`run_tiled_f32`）で、
@@ -4611,6 +4768,61 @@ impl BackendOps for CudaBackendOps {
             },
         )?;
         Ok(())
+    }
+
+    /// [`BackendOps::mse_loss_device_into_tracked`] の CUDA 実装（イシュー #3252）。`token` 不使用の
+    /// 明示 override（ストリーム順序契約。同期しない）。前回 step の読み出しより今回の書き込みが
+    /// ストリーム順で後になるため、ホスト同期なしで再利用しても競合しない。本体は
+    /// `mse_loss_device_core`。
+    fn mse_loss_device_into_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        reduction: MseReduction,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.mse_loss_device_core(pred, target, reduction, Some(out))
+            .map(|_| ())
+    }
+
+    /// [`BackendOps::mse_loss_backward_device_into_tracked`] の CUDA 実装（イシュー #3252）。
+    fn mse_loss_backward_device_into_tracked(
+        &self,
+        pred: &DeviceBuffer<f32>,
+        target: &DeviceBuffer<f32>,
+        scale: f32,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.mse_loss_backward_device_core(pred, target, scale, Some(out))
+            .map(|_| ())
+    }
+
+    /// [`BackendOps::relu_backward_mask_device_into_tracked`] の CUDA 実装（イシュー #3252）。
+    fn relu_backward_mask_device_into_tracked(
+        &self,
+        g: DeviceBufferView<'_>,
+        g_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        mask_src: DeviceBufferView<'_>,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.relu_backward_mask_device_core(g, g_layout, mask_src, Some(out))
+            .map(|_| ())
+    }
+
+    /// [`BackendOps::gemm_resident_lhs_device_into_tracked`] の CUDA 実装（イシュー #3252）。
+    fn gemm_resident_lhs_device_into_tracked(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: DeviceBufferView<'_>,
+        b_layout: fandhe_ai_tensor_core::DeviceMatrixLayout,
+        out: &mut DeviceBuffer<f32>,
+        _token: &DispatchFailureCell,
+    ) -> Result<(), BackendError> {
+        self.gemm_resident_lhs_device_core(w, b, b_layout, Some(out))
+            .map(|_| ())
     }
     /// ページ化 KV プールへのスロット写像どおりの追記（K-3。イシュー #3111）。
     ///
@@ -10040,6 +10252,125 @@ mod tests {
         let mv = DeviceBufferView::new(&m, 0, m.shape()).expect("view");
         let r = cuda.relu_backward_mask_device(gv, DeviceMatrixLayout::RowMajor, mv);
         assert!(matches!(r, Err(BackendError::DeviceMismatch)));
+    }
+
+    /// `*_into_tracked` 4 部品（#3252）: `out` のデバイス不一致・shape 不一致は driver に触れず
+    /// 型付きエラーで拒否する（A03）。空形状は確保経路へ任せる `Unsupported`。
+    #[test]
+    fn train_chain_into_tracked_reject_bad_out_before_driver() {
+        use fandhe_ai_tensor_core::buffer::DeviceBuffer;
+        use fandhe_ai_tensor_core::{DeviceMatrixLayout, MseReduction};
+
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let dev = Device::Cuda(ordinal);
+        let token = DispatchFailureCell::new();
+        let mk = |d: Device, shape: &[usize]| {
+            DeviceBuffer::new(d, shape.to_vec(), Box::new(EmptyHandle))
+        };
+        fn view(b: &DeviceBuffer<f32>) -> DeviceBufferView<'_> {
+            DeviceBufferView::new(b, 0, b.shape()).expect("view")
+        }
+
+        let pred = mk(dev, &[2, 3]);
+        let target = mk(dev, &[2, 3]);
+        let wrong_dev = Device::Cuda(unique_test_ordinal());
+
+        // MSE forward: out は shape []。
+        let mut out_bad_dev = mk(wrong_dev, &[]);
+        assert!(matches!(
+            cuda.mse_loss_device_into_tracked(
+                &pred,
+                &target,
+                MseReduction::Mean,
+                &mut out_bad_dev,
+                &token
+            ),
+            Err(BackendError::DeviceMismatch)
+        ));
+        let mut out_bad_shape = mk(dev, &[1]);
+        assert!(matches!(
+            cuda.mse_loss_device_into_tracked(
+                &pred,
+                &target,
+                MseReduction::Mean,
+                &mut out_bad_shape,
+                &token
+            ),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        // MSE backward: out は pred と同 shape。
+        let mut out_bad_shape = mk(dev, &[3, 2]);
+        assert!(matches!(
+            cuda.mse_loss_backward_device_into_tracked(
+                &pred,
+                &target,
+                1.0,
+                &mut out_bad_shape,
+                &token
+            ),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        let mut out_bad_dev = mk(wrong_dev, &[2, 3]);
+        assert!(matches!(
+            cuda.mse_loss_backward_device_into_tracked(
+                &pred,
+                &target,
+                1.0,
+                &mut out_bad_dev,
+                &token
+            ),
+            Err(BackendError::DeviceMismatch)
+        ));
+        // ReLU マスク: out は論理形（Transposed の g [2,3] なら [3,2]）。
+        let (g, mask) = (mk(dev, &[2, 3]), mk(dev, &[3, 2]));
+        let mut out_bad_shape = mk(dev, &[2, 3]);
+        assert!(matches!(
+            cuda.relu_backward_mask_device_into_tracked(
+                view(&g),
+                DeviceMatrixLayout::Transposed,
+                view(&mask),
+                &mut out_bad_shape,
+                &token
+            ),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        let mut out_bad_dev = mk(wrong_dev, &[3, 2]);
+        assert!(matches!(
+            cuda.relu_backward_mask_device_into_tracked(
+                view(&g),
+                DeviceMatrixLayout::Transposed,
+                view(&mask),
+                &mut out_bad_dev,
+                &token
+            ),
+            Err(BackendError::DeviceMismatch)
+        ));
+        // d_input: w [k, n] @ gᵀ（g [m, n] Transposed）→ [k, m]。
+        let (w, gg) = (mk(dev, &[4, 3]), mk(dev, &[5, 3]));
+        let mut out_bad_shape = mk(dev, &[5, 4]);
+        assert!(matches!(
+            cuda.gemm_resident_lhs_device_into_tracked(
+                view(&w),
+                view(&gg),
+                DeviceMatrixLayout::Transposed,
+                &mut out_bad_shape,
+                &token
+            ),
+            Err(BackendError::ShapeMismatch(_))
+        ));
+        let mut out_bad_dev = mk(wrong_dev, &[4, 5]);
+        assert!(matches!(
+            cuda.gemm_resident_lhs_device_into_tracked(
+                view(&w),
+                view(&gg),
+                DeviceMatrixLayout::Transposed,
+                &mut out_bad_dev,
+                &token
+            ),
+            Err(BackendError::DeviceMismatch)
+        ));
+        assert!(!token.is_set());
     }
 
     /// 形状違反は driver に触れず型付きエラー（rank 違反・論理形不一致）。

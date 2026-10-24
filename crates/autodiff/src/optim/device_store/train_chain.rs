@@ -11,12 +11,14 @@
 //! # バックエンド非依存
 //! チェーンのループは `BackendOps` の trait メソッドだけを呼ぶ。Metal 固有の処理は無い
 //! （#3251 の Metal 固有部分は実機テストと記録だけ）。CUDA（#3252）・CPU（#3253）は部品を
-//! 実装すれば同じループを再利用する。部品が `Unsupported` のバックエンドでは本メソッドは
+//! 実装済みで同じループを再利用する（CPU の部品は `backend-cpu::ops_train_chain_parts`）。部品が `Unsupported` のバックエンドでは本メソッドは
 //! `Unsupported` を返し、黙ってホスト経路へ落とさない。
 //!
 //! # 呼び出し元・境界
-//! - 呼ぶ: facade の `#[cfg(test)]` 補助（#3251）。公開入口 `Sequential::train_step_resident`・
-//!   `ResidentLoss::read` は #3254 の担当で、本 PR では公開面を増やさない
+//! - 呼ぶ: facade の公開入口 `Sequential::train_step_resident`・`ResidentLoss::read`
+//!   （#3254）。入口は先に [`DeviceParamStore::validate_train_step_device_chain`] で範囲外を
+//!   型付きエラーにし、チェーンが書き込み前に `Unsupported` を返した場合だけ Tape 経路へ全体
+//!   フォールバックする（`download_resident_input`・`record_host_train_step_loss` が内部入口）
 //! - 生の autodiff `Tape` を取るため facade の利用者からは到達できない
 //!   （`predict_device_chain_resident` と同じ前例）
 //!
@@ -45,16 +47,26 @@
 //! 全部品を `_tracked` 版で呼び、store の `failure_token` へ登録する。loss を読んだ後に
 //! トークンを再検査し、セット済みなら poison して `StorePoisoned` を返す。
 //!
-//! # 確保について
-//! 勾配連結バッファ・loss スカラー・中間バッファは store が次の step まで保持する。
-//! Metal の部品は新しいバッファを返すため step ごとの確保はゼロにならない（pool 再利用で
-//! 同期は起きない）。確保ゼロ化（`_into` 版の部品）は本 PR の範囲外。
+//! # 確保について（イシュー #3252）
+//! 勾配連結バッファ・loss スカラー・層出力・dPred・層ごとの d_input と mask 後勾配は store が
+//! step を跨いで保持する（[`TrainChainBufs`]。鍵は `(m, 各層の出力幅)`。変わったら作り直す）。
+//! 部品ごとに `BackendOps::*_into_tracked`（出力先を受け取る版）を先に試し、`Unsupported` を返す
+//! 部品だけが確保版の `*_tracked` を使う（`Unsupported` はここで消費し、チェーン全体の
+//! `Unsupported` としては表に出さない。能力は [`TrainChainCaps`] へラッチする）。
+//! - CUDA: 全部品が `_into` 対応のため、定常状態（2 step 目以降）の区間内の確保は 0
+//!   （永続ワークスペースは初回だけ grow）。ストリーム順序契約により、前 step の読み出しより
+//!   今回の書き込みが後になるためホスト同期なしで再利用しても競合しない
+//! - Metal・CPU: `_into` 未対応のため従来どおり step ごとに確保する（pool 再利用で同期は起きない）
+//! - 初回 step は確保した出力へ `_into` を 1 回試して能力を確定する（同じ結果の上書き）
+//! - 失敗経路のバッファは再利用せず `train_chain_hold` へ退避する
+//! - 古い loss ハンドルは世代検査が拒否する（loss バッファを再利用する step の開始時に世代を進める）
 
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, DeviceMatrixLayout, MseReduction, SgdStepConfig,
 };
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
 use crate::grad::mse_loss_scale;
@@ -76,24 +88,188 @@ struct ChainLayer {
 /// encode 中の失敗。`written` は勾配バッファへ 1 回以上書いたか。
 type EncodeFailure = (BackendError, bool);
 
+/// 部品の番号（[`TrainChainCaps`] の添字）。
+const PART_FORWARD: usize = 0;
+const PART_MSE: usize = 1;
+const PART_MSE_BWD: usize = 2;
+const PART_MASK: usize = 3;
+const PART_LHS: usize = 4;
+const N_PARTS: usize = 5;
+
+/// 部品ごとの `_into_tracked` 対応状況（バックエンド固有。一度確定したら変わらない）。
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct TrainChainCaps {
+    /// `Unsupported` を返した部品。以後その部品は確保版だけを使う。
+    unsupported: [bool; N_PARTS],
+    /// `_into` が成功した部品（初回の能力判定の省略に使う）。
+    probed: [bool; N_PARTS],
+}
+
+/// step を跨いで保持する学習チェーンの出力バッファ群。`key`（`m` と各層の出力幅）が変わったら
+/// 破棄して作り直す。成功した step の分だけを戻す（失敗した step のバッファは残さない）。
+#[derive(Debug)]
+pub(super) struct TrainChainBufs {
+    key: (usize, Vec<usize>),
+    outs: Vec<DeviceBuffer<f32>>,
+    dpred: Option<DeviceBuffer<f32>>,
+    /// 層 `n-1`, `n-2`, .., `1` の順（生成順）の d_input（`[k, m]`）。
+    t: Vec<DeviceBuffer<f32>>,
+    /// 同順の mask 後勾配（`[m, k]`）。
+    gm: Vec<DeviceBuffer<f32>>,
+}
+
+impl TrainChainBufs {
+    fn into_vec(self) -> Vec<DeviceBuffer<f32>> {
+        let mut v = self.outs;
+        v.extend(self.dpred);
+        v.extend(self.t);
+        v.extend(self.gm);
+        v
+    }
+}
+
+/// 前 step から引き継いだ再利用バッファ（生成順に取り出す）。
+#[derive(Default)]
+struct ReuseQueues {
+    outs: VecDeque<DeviceBuffer<f32>>,
+    dpred: Option<DeviceBuffer<f32>>,
+    t: VecDeque<DeviceBuffer<f32>>,
+    gm: VecDeque<DeviceBuffer<f32>>,
+    loss: Option<DeviceBuffer<f32>>,
+}
+
 /// encode 中に生成した GPU バッファの置き場。成功・失敗どちらの経路でも、encode-only の GPU 処理が
-/// 完了するまでバッファを解放しないよう、呼び出し側が [`Self::into_held`] で store へ退避する。
+/// 完了するまでバッファを解放しないよう、呼び出し側が [`Self::into_held`]／[`Self::finish`] で
+/// store へ退避する。
 #[derive(Default)]
 struct ChainScratch {
     outs: Vec<DeviceBuffer<f32>>,
     loss: Option<DeviceBuffer<f32>>,
-    g_cur: Option<DeviceBuffer<f32>>,
+    dpred: Option<DeviceBuffer<f32>>,
+    t: Vec<DeviceBuffer<f32>>,
+    gm: Vec<DeviceBuffer<f32>>,
+    /// 再利用できず捨てるバッファ（世代切れ・`Unsupported` 確定後・未消費分）。実行中の GPU 処理が
+    /// 触れうるため解放せず退避する。
     hold: Vec<DeviceBuffer<f32>>,
+    reuse: ReuseQueues,
+    /// 部品ごとの `_into` 対応状況（encode 中に更新し、呼び出し側が store へ書き戻す）。
+    caps: TrainChainCaps,
 }
 
 impl ChainScratch {
-    /// loss を除く保持対象を 1 本の Vec へ集約し、loss と共に返す。
-    fn into_held(self) -> (Option<DeviceBuffer<f32>>, Vec<DeviceBuffer<f32>>) {
+    fn with_reuse(
+        bufs: Option<TrainChainBufs>,
+        loss: Option<DeviceBuffer<f32>>,
+        caps: TrainChainCaps,
+    ) -> Self {
+        let mut reuse = ReuseQueues {
+            loss,
+            ..ReuseQueues::default()
+        };
+        if let Some(b) = bufs {
+            reuse.outs = b.outs.into();
+            reuse.dpred = b.dpred;
+            reuse.t = b.t.into();
+            reuse.gm = b.gm.into();
+        }
+        Self {
+            reuse,
+            caps,
+            ..Self::default()
+        }
+    }
+
+    /// 未消費の再利用バッファを `hold` へ移す。
+    fn drain_reuse_into_hold(&mut self) {
+        let r = std::mem::take(&mut self.reuse);
+        self.hold.extend(r.outs);
+        self.hold.extend(r.dpred);
+        self.hold.extend(r.t);
+        self.hold.extend(r.gm);
+        self.hold.extend(r.loss);
+    }
+
+    /// 失敗経路: loss を除く全バッファを 1 本の Vec へ集約し、loss と共に返す。
+    fn into_held(mut self) -> (Option<DeviceBuffer<f32>>, Vec<DeviceBuffer<f32>>) {
+        self.drain_reuse_into_hold();
         let mut hold = self.hold;
-        hold.extend(self.g_cur);
+        hold.extend(self.dpred);
         hold.extend(self.outs);
+        hold.extend(self.t);
+        hold.extend(self.gm);
         (self.loss, hold)
     }
+
+    /// 成功経路: loss・次 step へ引き継ぐバッファ群・捨てるバッファに分けて返す。
+    fn finish(
+        mut self,
+        key: (usize, Vec<usize>),
+    ) -> (
+        Option<DeviceBuffer<f32>>,
+        TrainChainBufs,
+        Vec<DeviceBuffer<f32>>,
+    ) {
+        self.drain_reuse_into_hold();
+        (
+            self.loss,
+            TrainChainBufs {
+                key,
+                outs: self.outs,
+                dpred: self.dpred,
+                t: self.t,
+                gm: self.gm,
+            },
+            self.hold,
+        )
+    }
+}
+
+/// 1 部品の出力を得る。再利用バッファがあれば `into`（`_into_tracked`）で書き込み、なければ
+/// `alloc`（確保版 `_tracked`）で確保する。`into` の `Unsupported` は部品単位のフォールバックの
+/// 合図として消費し（チェーン全体には伝播させない）、`caps` へラッチして以後は `_into` を試さない。
+/// 世代切れ（古いバッファ）は捨てて確保し直す。初回（再利用バッファなし）は確保した出力へ
+/// `into` を 1 回試して能力を確定する（同じ結果の上書き。`predict_device_chain` と同じ方式）。
+/// 捨てるバッファは実行中の GPU 処理が触れうるため `hold` へ退避する（drop しない）。
+fn produce_part(
+    part: usize,
+    caps: &mut TrainChainCaps,
+    reuse: Option<DeviceBuffer<f32>>,
+    hold: &mut Vec<DeviceBuffer<f32>>,
+    into: &mut dyn FnMut(&mut DeviceBuffer<f32>) -> Result<(), BackendError>,
+    alloc: &mut dyn FnMut() -> Result<DeviceBuffer<f32>, BackendError>,
+) -> Result<DeviceBuffer<f32>, BackendError> {
+    let non_empty = |b: &DeviceBuffer<f32>| b.shape().iter().product::<usize>() != 0;
+    if let Some(mut out) = reuse {
+        if caps.unsupported[part] || !non_empty(&out) {
+            hold.push(out);
+        } else {
+            match into(&mut out) {
+                Ok(()) => return Ok(out),
+                Err(BackendError::Unsupported(_)) => {
+                    caps.unsupported[part] = true;
+                    hold.push(out);
+                }
+                Err(BackendError::StaleDeviceGeneration { .. }) => hold.push(out),
+                Err(e) => {
+                    hold.push(out);
+                    return Err(e);
+                }
+            }
+        }
+    }
+    let mut out = alloc()?;
+    if !caps.unsupported[part] && !caps.probed[part] && non_empty(&out) {
+        match into(&mut out) {
+            Ok(()) => caps.probed[part] = true,
+            Err(BackendError::Unsupported(_)) => caps.unsupported[part] = true,
+            Err(BackendError::StaleDeviceGeneration { .. }) => {}
+            Err(e) => {
+                hold.push(out);
+                return Err(e);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn invalid(msg: String) -> BackendError {
@@ -115,6 +291,309 @@ impl DeviceParamStore {
         steps: &[ChainStep<'_, 't>],
         config: &SgdConfig,
     ) -> Result<TrainStepLoss, BackendError> {
+        let layers = self.precheck_train_chain(tape, x, y, steps, config)?;
+        let use_momentum = config.momentum != 0.0;
+        let is_first_step = !self.sgd_used;
+        let ops = tape.ops();
+        let mem = ops.memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::train_step_device_chain: backend does not implement MemoryOps"
+                    .to_string(),
+            )
+        })?;
+        let m = x.shape()[0];
+        let n_last = y.shape()[1];
+        // 式は Tape 経路（`grad.rs` の `Op::MseLoss` VJP）と同じ関数を共有する（二重に書かない）。
+        let scale = mse_loss_scale(1.0, m * n_last, Reduction::Mean);
+
+        // 勾配バッファを先に確保し、そのあとで velocity を確定する。この呼び出しで新規確保した
+        // velocity は、poison せず戻る失敗経路（velocity 自身・勾配バッファの確保失敗を含む）で
+        // `None` へ戻す（残すと `sgd_used == false` のまま velocity だけ在り、次回以降の
+        // momentum 構成検査が「途中変更」と誤判定してストアが固着する）。
+        let mut grad = match self.train_chain_grad.take() {
+            Some(g) if g.shape() == [self.total_numel] => g,
+            _ => mem.alloc_zeroed(&[self.total_numel])?,
+        };
+        let velocity_is_new = use_momentum && self.velocity.is_none();
+        if velocity_is_new {
+            match mem.alloc_zeroed(&[self.total_numel]) {
+                Ok(v) => self.velocity = Some(v),
+                Err(e) => {
+                    self.train_chain_grad = Some(grad);
+                    return Err(e);
+                }
+            }
+        }
+
+        // 前 step のバッファを引き継ぐ（鍵が違えば破棄。解放は backend 側で deferred）。loss バッファを
+        // 再利用する step では、書き込み後の失敗で古いハンドルが新 step の途中値を読めないよう、
+        // 取り出した時点で世代を進める。
+        let widths: Vec<usize> = layers
+            .iter()
+            .map(|l| self.layout[l.w_slot].shape.get(1).copied().unwrap_or(0))
+            .collect();
+        let key = (m, widths);
+        let reuse_bufs = self.train_chain_bufs.take().filter(|b| b.key == key);
+        let reuse_loss = self.train_chain_loss.take();
+        if reuse_loss.is_some() {
+            self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
+        }
+        let mut scratch = ChainScratch::with_reuse(reuse_bufs, reuse_loss, self.train_chain_caps);
+        let encoded = self.encode_train_chain(ops, (x, y), &layers, &mut grad, scale, &mut scratch);
+        self.train_chain_caps = scratch.caps;
+        self.train_chain_grad = Some(grad);
+        if let Err((e, written)) = encoded {
+            let (loss_opt, hold) = scratch.into_held();
+            // 成功経路と同様、中間バッファは GPU 処理の完了まで store が保持する（loss も含む）。
+            let mut keep = hold;
+            keep.extend(loss_opt);
+            self.train_chain_hold = keep;
+            // 書き込み前の `Unsupported`・一時的な capture 衝突だけが「何も変わっていない」ことを
+            // 保証できる。
+            let unchanged = !written
+                && matches!(
+                    e,
+                    BackendError::Unsupported(_)
+                        | BackendError::DeviceContextCaptureInProgress { .. }
+                );
+            if !unchanged {
+                self.poisoned.store(true, Ordering::SeqCst);
+            } else if velocity_is_new {
+                self.velocity = None;
+            }
+            return Err(e);
+        }
+        let (loss_opt, bufs, mut hold) = scratch.finish(key);
+        let Some(loss) = loss_opt else {
+            hold.extend(bufs.into_vec());
+            self.train_chain_hold = hold;
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(invalid(
+                "loss buffer is missing (internal error)".to_string(),
+            ));
+        };
+
+        let step_config = SgdStepConfig {
+            lr: config.lr,
+            momentum: config.momentum,
+            dampening: config.dampening,
+            weight_decay: config.weight_decay,
+            nesterov: config.nesterov,
+            is_first_step,
+        };
+        let velocity_ref = if use_momentum {
+            self.velocity.as_mut()
+        } else {
+            None
+        };
+        // `train_chain_grad` は直前に `Some` を入れたため常に在る。None は内部矛盾として拒否する。
+        let grad_ref = self
+            .train_chain_grad
+            .as_ref()
+            .ok_or_else(|| invalid("gradient workspace is missing (internal error)".to_string()))?;
+        if let Err(e) = ops.sgd_step_device_tracked(
+            &mut self.params,
+            grad_ref,
+            velocity_ref,
+            &step_config,
+            &self.failure_token,
+        ) {
+            // `step()` と同じ: capture 競合は params 未変更の一過性エラーで poison しない。
+            // encode 済みの GPU 処理が実行中でありうるため、中間バッファ・loss は解放せず退避する。
+            hold.push(loss);
+            hold.extend(bufs.into_vec());
+            self.train_chain_hold = std::mem::take(&mut hold);
+            if !matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
+                self.poisoned.store(true, Ordering::SeqCst);
+            } else if velocity_is_new {
+                self.velocity = None;
+            }
+            return Err(e);
+        }
+
+        self.step_count += 1;
+        self.sgd_used = true;
+        self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
+        self.train_chain_loss = Some(loss);
+        self.train_chain_host_loss = None;
+        // 成功した step のバッファを次 step の再利用元として保持する。再利用できず捨てた分だけを
+        // hold へ残す（解放は backend 側で deferred のため同期しない）。
+        self.train_chain_bufs = Some(bufs);
+        self.train_chain_hold = std::mem::take(&mut hold);
+        Ok(TrainStepLoss::new(
+            self.store_id,
+            self.train_chain_generation,
+        ))
+    }
+
+    /// [`Self::train_step_device_chain`] の事前検証だけを行う（副作用なし。イシュー #3254）。
+    ///
+    /// facade の `Sequential::train_step_resident` が「モデル構成・損失・最適化が範囲外（型付き
+    /// エラーで止める）」と「バックエンドが部品を持たない（Tape 経路へ全体フォールバックしてよい）」を
+    /// 判別するために、チェーンを積む前に呼ぶ。ここを通った後にチェーンが返す `Unsupported` は
+    /// 後者（最初の dW の前の失敗は store を変えない。モジュール doc「失敗の境界」）に限られる。
+    /// 生の `&Tape` を取るため facade の利用者からは到達できない。
+    pub fn validate_train_step_device_chain<'t>(
+        &self,
+        tape: &'t Tape,
+        x: &ResidentInput,
+        y: &ResidentInput,
+        steps: &[ChainStep<'_, 't>],
+        config: &SgdConfig,
+    ) -> Result<(), BackendError> {
+        self.precheck_train_chain(tape, x, y, steps, config)
+            .map(|_| ())
+    }
+
+    /// 常駐入力をホストへ download する（イシュー #3254。Tape 経路フォールバック専用。D2H が入る
+    /// ため通常のチェーン経路では呼ばない）。別 store・別デバイスのハンドルは拒否する。
+    pub fn download_resident_input(
+        &self,
+        tape: &Tape,
+        input: &ResidentInput,
+    ) -> Result<fandhe_ai_tensor_core::Tensor<f32>, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        if input.store_id() != self.store_id {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::download_resident_input: input belongs to a different \
+                 DeviceParamStore (store_id mismatch)"
+                    .to_string(),
+            ));
+        }
+        if input.device() != self.device {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let mem = tape.ops().memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::download_resident_input: backend does not implement MemoryOps"
+                    .to_string(),
+            )
+        })?;
+        mem.download(input.buffer())
+    }
+
+    /// Tape 経路へフォールバックした step の loss（ホスト `f32`）を記録し、新しい世代の
+    /// ハンドルを返す（イシュー #3254）。世代を進めるため、それ以前のハンドル（チェーン・
+    /// フォールバックのどちらのものも）は `InvalidArgument` になる。読み出し
+    /// （[`Self::read_train_step_loss`]）は同期なしでこの値を返す。
+    pub fn record_host_train_step_loss(
+        &mut self,
+        tape: &Tape,
+        loss: f32,
+    ) -> Result<TrainStepLoss, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
+        self.train_chain_host_loss = Some(loss);
+        Ok(TrainStepLoss::new(
+            self.store_id,
+            self.train_chain_generation,
+        ))
+    }
+
+    /// このバックエンドへ積まれた仕事の完了を D2H なしで待つ（イシュー #3254 P7。facade の
+    /// `Tape::wait_device_param_store` の実体）。poison 済み・別デバイスは拒否し、待機後に失敗
+    /// トークンを再検査してセット済みなら poison して `StorePoisoned`（A08）。ops が同期の部品を
+    /// 持たない（`Unsupported`）場合は store の状態を変えずにそのまま返す。待機自体が失敗した
+    /// 場合は積んだ GPU 仕事の失敗が表面化したとみなして poison する。
+    pub fn wait_device(&self, tape: &Tape) -> Result<(), BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        match tape.ops().synchronize_device() {
+            Ok(()) => {}
+            Err(e @ BackendError::Unsupported(_)) => return Err(e),
+            // 別スレッドの capture 中は driver に触れる前に返る一過性エラー。積んだ GPU 仕事の
+            // 失敗ではないため poison せず、store を変えずに返す（step 系と同じ再試行可能な契約）。
+            Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => return Err(e),
+            Err(e) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+        if self.failure_token.is_set() {
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(BackendError::StorePoisoned);
+        }
+        Ok(())
+    }
+
+    /// [`Self::train_step_device_chain`] が積んだ step の loss を `f32` で読む。D2H と同期は
+    /// ここ 1 回だけ。ハンドルが別 store・古い世代なら `InvalidArgument`。download の後に
+    /// 失敗トークンを再検査し、セット済みなら poison して `StorePoisoned`。
+    pub fn read_train_step_loss(
+        &self,
+        tape: &Tape,
+        loss: &TrainStepLoss,
+    ) -> Result<f32, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        if loss.store_id() != self.store_id {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::read_train_step_loss: loss belongs to a different \
+                 DeviceParamStore (store_id mismatch)"
+                    .to_string(),
+            ));
+        }
+        if loss.generation() != self.train_chain_generation {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore::read_train_step_loss: stale loss handle (a newer train step \
+                 has replaced this loss)"
+                    .to_string(),
+            ));
+        }
+        // Tape 経路フォールバックの step（`record_host_train_step_loss`）はホストで確定済みの値を
+        // 同期なしで返す（poison・失敗トークンは上の `check_not_poisoned` が検査済み）。
+        if let Some(v) = self.train_chain_host_loss {
+            return Ok(v);
+        }
+        let buf = self.train_chain_loss.as_ref().ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "DeviceParamStore::read_train_step_loss: no train step has been issued".to_string(),
+            )
+        })?;
+        let mem = tape.ops().memory_ops().ok_or_else(|| {
+            BackendError::Unsupported(
+                "DeviceParamStore::read_train_step_loss: backend does not implement MemoryOps"
+                    .to_string(),
+            )
+        })?;
+        let host = match mem.download(buf) {
+            Ok(t) => t,
+            // capture 競合は GPU 仕事の失敗ではない一過性エラー。poison せず再試行可能にする。
+            Err(e @ BackendError::DeviceContextCaptureInProgress { .. }) => return Err(e),
+            Err(e) => {
+                // 積んだ GPU 仕事の失敗がここで表面化しうるため、store を隔離する。
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
+        if self.failure_token.is_set() {
+            self.poisoned.store(true, Ordering::SeqCst);
+            return Err(BackendError::StorePoisoned);
+        }
+        let host = host.contiguous();
+        host.as_slice()
+            .and_then(|s| s.first())
+            .copied()
+            .ok_or_else(|| {
+                BackendError::InvalidArgument(
+                    "DeviceParamStore::read_train_step_loss: loss buffer is empty".to_string(),
+                )
+            })
+    }
+
+    /// encode より前の事前検証一式（poison・デバイス・pending・入力の束縛・SGD 設定・optimizer
+    /// 状態・[`Self::plan_train_chain`]）。`self` を変更しない。[`Self::train_step_device_chain`] と
+    /// [`Self::validate_train_step_device_chain`] が共有する（検査を二重に書かない）。
+    fn precheck_train_chain<'t>(
+        &self,
+        tape: &'t Tape,
+        x: &ResidentInput,
+        y: &ResidentInput,
+        steps: &[ChainStep<'_, 't>],
+        config: &SgdConfig,
+    ) -> Result<Vec<ChainLayer>, BackendError> {
         self.check_not_poisoned()?;
         self.check_device(tape)?;
         if self.pending.is_some() {
@@ -152,178 +631,7 @@ impl DeviceParamStore {
                  momentum settings"
             )));
         }
-        let is_first_step = !self.sgd_used;
-
-        let layers = self.plan_train_chain(tape, x, y, steps)?;
-        let ops = tape.ops();
-        let mem = ops.memory_ops().ok_or_else(|| {
-            BackendError::Unsupported(
-                "DeviceParamStore::train_step_device_chain: backend does not implement MemoryOps"
-                    .to_string(),
-            )
-        })?;
-        let m = x.shape()[0];
-        let n_last = y.shape()[1];
-        // 式は Tape 経路（`grad.rs` の `Op::MseLoss` VJP）と同じ関数を共有する（二重に書かない）。
-        let scale = mse_loss_scale(1.0, m * n_last, Reduction::Mean);
-
-        // 勾配バッファを先に確保し、そのあとで velocity を確定する。この呼び出しで新規確保した
-        // velocity は、poison せず戻る失敗経路（velocity 自身・勾配バッファの確保失敗を含む）で
-        // `None` へ戻す（残すと `sgd_used == false` のまま velocity だけ在り、次回以降の
-        // momentum 構成検査が「途中変更」と誤判定してストアが固着する）。
-        let mut grad = match self.train_chain_grad.take() {
-            Some(g) if g.shape() == [self.total_numel] => g,
-            _ => mem.alloc_zeroed(&[self.total_numel])?,
-        };
-        let velocity_is_new = use_momentum && self.velocity.is_none();
-        if velocity_is_new {
-            match mem.alloc_zeroed(&[self.total_numel]) {
-                Ok(v) => self.velocity = Some(v),
-                Err(e) => {
-                    self.train_chain_grad = Some(grad);
-                    return Err(e);
-                }
-            }
-        }
-
-        let mut scratch = ChainScratch::default();
-        let encoded = self.encode_train_chain(ops, (x, y), &layers, &mut grad, scale, &mut scratch);
-        self.train_chain_grad = Some(grad);
-        let (loss_opt, mut hold) = scratch.into_held();
-        if let Err((e, written)) = encoded {
-            // 成功経路と同様、中間バッファは GPU 処理の完了まで store が保持する（loss も含む）。
-            let mut keep = hold;
-            keep.extend(loss_opt);
-            self.train_chain_hold = keep;
-            // 書き込み前の `Unsupported`・一時的な capture 衝突だけが「何も変わっていない」ことを
-            // 保証できる。
-            let unchanged = !written
-                && matches!(
-                    e,
-                    BackendError::Unsupported(_)
-                        | BackendError::DeviceContextCaptureInProgress { .. }
-                );
-            if !unchanged {
-                self.poisoned.store(true, Ordering::SeqCst);
-            } else if velocity_is_new {
-                self.velocity = None;
-            }
-            return Err(e);
-        }
-        let Some(loss) = loss_opt else {
-            self.train_chain_hold = hold;
-            self.poisoned.store(true, Ordering::SeqCst);
-            return Err(invalid(
-                "loss buffer is missing (internal error)".to_string(),
-            ));
-        };
-
-        let step_config = SgdStepConfig {
-            lr: config.lr,
-            momentum: config.momentum,
-            dampening: config.dampening,
-            weight_decay: config.weight_decay,
-            nesterov: config.nesterov,
-            is_first_step,
-        };
-        let velocity_ref = if use_momentum {
-            self.velocity.as_mut()
-        } else {
-            None
-        };
-        // `train_chain_grad` は直前に `Some` を入れたため常に在る。None は内部矛盾として拒否する。
-        let grad_ref = self
-            .train_chain_grad
-            .as_ref()
-            .ok_or_else(|| invalid("gradient workspace is missing (internal error)".to_string()))?;
-        if let Err(e) = ops.sgd_step_device_tracked(
-            &mut self.params,
-            grad_ref,
-            velocity_ref,
-            &step_config,
-            &self.failure_token,
-        ) {
-            // `step()` と同じ: capture 競合は params 未変更の一過性エラーで poison しない。
-            // encode 済みの GPU 処理が実行中でありうるため、中間バッファ・loss は解放せず退避する。
-            hold.push(loss);
-            self.train_chain_hold = std::mem::take(&mut hold);
-            if !matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
-                self.poisoned.store(true, Ordering::SeqCst);
-            } else if velocity_is_new {
-                self.velocity = None;
-            }
-            return Err(e);
-        }
-
-        self.step_count += 1;
-        self.sgd_used = true;
-        self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
-        self.train_chain_loss = Some(loss);
-        // 新しい step の中間バッファで置き換える（前 step のものはここで解放される。
-        // 解放は backend 側で deferred のため同期しない）。
-        self.train_chain_hold = std::mem::take(&mut hold);
-        Ok(TrainStepLoss::new(
-            self.store_id,
-            self.train_chain_generation,
-        ))
-    }
-
-    /// [`Self::train_step_device_chain`] が積んだ step の loss を `f32` で読む。D2H と同期は
-    /// ここ 1 回だけ。ハンドルが別 store・古い世代なら `InvalidArgument`。download の後に
-    /// 失敗トークンを再検査し、セット済みなら poison して `StorePoisoned`。
-    pub fn read_train_step_loss(
-        &self,
-        tape: &Tape,
-        loss: &TrainStepLoss,
-    ) -> Result<f32, BackendError> {
-        self.check_not_poisoned()?;
-        self.check_device(tape)?;
-        if loss.store_id() != self.store_id {
-            return Err(BackendError::InvalidArgument(
-                "DeviceParamStore::read_train_step_loss: loss belongs to a different \
-                 DeviceParamStore (store_id mismatch)"
-                    .to_string(),
-            ));
-        }
-        if loss.generation() != self.train_chain_generation {
-            return Err(BackendError::InvalidArgument(
-                "DeviceParamStore::read_train_step_loss: stale loss handle (a newer train step \
-                 has replaced this loss)"
-                    .to_string(),
-            ));
-        }
-        let buf = self.train_chain_loss.as_ref().ok_or_else(|| {
-            BackendError::InvalidArgument(
-                "DeviceParamStore::read_train_step_loss: no train step has been issued".to_string(),
-            )
-        })?;
-        let mem = tape.ops().memory_ops().ok_or_else(|| {
-            BackendError::Unsupported(
-                "DeviceParamStore::read_train_step_loss: backend does not implement MemoryOps"
-                    .to_string(),
-            )
-        })?;
-        let host = match mem.download(buf) {
-            Ok(t) => t,
-            Err(e) => {
-                // 積んだ GPU 仕事の失敗がここで表面化しうるため、store を隔離する。
-                self.poisoned.store(true, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
-        if self.failure_token.is_set() {
-            self.poisoned.store(true, Ordering::SeqCst);
-            return Err(BackendError::StorePoisoned);
-        }
-        let host = host.contiguous();
-        host.as_slice()
-            .and_then(|s| s.first())
-            .copied()
-            .ok_or_else(|| {
-                BackendError::InvalidArgument(
-                    "DeviceParamStore::read_train_step_loss: loss buffer is empty".to_string(),
-                )
-            })
+        self.plan_train_chain(tape, x, y, steps)
     }
 
     /// encode より前の事前検証。`self` を変更しない。
@@ -492,111 +800,166 @@ impl DeviceParamStore {
                 ),
                 None => None,
             };
+            let reuse = scratch.reuse.outs.pop_front();
             let out = {
                 let src = if i == 0 { x_buf } else { &scratch.outs[i - 1] };
-                ops.linear_forward_device_tracked(src, w, b, l.act, token)
-                    .map_err(|e| (e, written))?
+                produce_part(
+                    PART_FORWARD,
+                    &mut scratch.caps,
+                    reuse,
+                    &mut scratch.hold,
+                    &mut |o| ops.linear_forward_device_into_tracked(src, w, b, l.act, o, token),
+                    &mut || ops.linear_forward_device_tracked(src, w, b, l.act, token),
+                )
+                .map_err(|e| (e, written))?
             };
             scratch.outs.push(out);
         }
 
         let pred = &scratch.outs[n_layers - 1];
+        let reuse_loss = scratch.reuse.loss.take();
         scratch.loss = Some(
-            ops.mse_loss_device_tracked(pred, y_buf, MseReduction::Mean, token)
-                .map_err(|e| (e, written))?,
+            produce_part(
+                PART_MSE,
+                &mut scratch.caps,
+                reuse_loss,
+                &mut scratch.hold,
+                &mut |o| {
+                    ops.mse_loss_device_into_tracked(pred, y_buf, MseReduction::Mean, o, token)
+                },
+                &mut || ops.mse_loss_device_tracked(pred, y_buf, MseReduction::Mean, token),
+            )
+            .map_err(|e| (e, written))?,
         );
-        scratch.g_cur = Some(
-            ops.mse_loss_backward_device_tracked(pred, y_buf, scale, token)
-                .map_err(|e| (e, written))?,
+        let reuse_dpred = scratch.reuse.dpred.take();
+        scratch.dpred = Some(
+            produce_part(
+                PART_MSE_BWD,
+                &mut scratch.caps,
+                reuse_dpred,
+                &mut scratch.hold,
+                &mut |o| ops.mse_loss_backward_device_into_tracked(pred, y_buf, scale, o, token),
+                &mut || ops.mse_loss_backward_device_tracked(pred, y_buf, scale, token),
+            )
+            .map_err(|e| (e, written))?,
         );
 
         for i in (0..n_layers).rev() {
             let l = &layers[i];
             let src = if i == 0 { x_buf } else { &scratch.outs[i - 1] };
-            let g_cur = scratch.g_cur.as_ref().ok_or_else(|| {
-                (
-                    invalid("gradient chain buffer is missing (internal error)".to_string()),
-                    written,
-                )
-            })?;
+            // 現在の勾配: 最後に作った mask 後勾配、なければ dPred。
+            let g_cur = scratch
+                .gm
+                .last()
+                .or(scratch.dpred.as_ref())
+                .ok_or_else(|| {
+                    (
+                        invalid("gradient chain buffer is missing (internal error)".to_string()),
+                        written,
+                    )
+                })?;
             let w_off = self.layout[l.w_slot].offset;
             let n = self.layout[l.w_slot].shape.get(1).copied().unwrap_or(0);
             let bias = l.b_slot.map(|s| (self.layout[s].offset, n));
 
-            let g_prev = {
-                let src_view =
-                    DeviceBufferView::new(src, 0, src.shape()).map_err(|e| (e, written))?;
-                let g_view =
-                    DeviceBufferView::new(g_cur, 0, g_cur.shape()).map_err(|e| (e, written))?;
-                let bias_filled = ops
-                    .gemm_fp32_strict_into_device_tracked(
-                        src_view,
-                        DeviceMatrixLayout::Transposed,
+            let src_view = DeviceBufferView::new(src, 0, src.shape()).map_err(|e| (e, written))?;
+            let g_view =
+                DeviceBufferView::new(g_cur, 0, g_cur.shape()).map_err(|e| (e, written))?;
+            let bias_filled = ops
+                .gemm_fp32_strict_into_device_tracked(
+                    src_view,
+                    DeviceMatrixLayout::Transposed,
+                    g_view,
+                    DeviceMatrixLayout::RowMajor,
+                    grad,
+                    w_off,
+                    bias,
+                    token,
+                )
+                .map_err(|e| (e, written))?;
+            written = true;
+            if bias.is_some() && !bias_filled {
+                return Err((
+                    invalid(
+                        "backend did not fuse the bias gradient reduction (contract \
+                         violation: bias gradient would be missing)"
+                            .to_string(),
+                    ),
+                    written,
+                ));
+            }
+            if i == 0 {
+                // 第 1 層の d_input は使わないので計算しない（#3245）。
+                continue;
+            }
+            let w = self
+                .checked_resident_buffer(self.store_id, l.w_slot)
+                .map_err(|e| (e, written))?;
+            // 格納 `[k, m]` で中身は d_out_{i-1} の転置。
+            let reuse_t = scratch.reuse.t.pop_front();
+            let t = produce_part(
+                PART_LHS,
+                &mut scratch.caps,
+                reuse_t,
+                &mut scratch.hold,
+                &mut |o| {
+                    ops.gemm_resident_lhs_device_into_tracked(
+                        w,
                         g_view,
-                        DeviceMatrixLayout::RowMajor,
-                        grad,
-                        w_off,
-                        bias,
+                        DeviceMatrixLayout::Transposed,
+                        o,
                         token,
                     )
-                    .map_err(|e| (e, written))?;
-                written = true;
-                if bias.is_some() && !bias_filled {
-                    return Err((
-                        invalid(
-                            "backend did not fuse the bias gradient reduction (contract \
-                             violation: bias gradient would be missing)"
-                                .to_string(),
-                        ),
-                        written,
-                    ));
-                }
-                if i == 0 {
-                    // 第 1 層の d_input は使わないので計算しない（#3245）。
-                    None
-                } else {
-                    let w = self
-                        .checked_resident_buffer(self.store_id, l.w_slot)
-                        .map_err(|e| (e, written))?;
-                    // 格納 `[k, m]` で中身は d_out_{i-1} の転置。
-                    let t = ops
-                        .gemm_resident_lhs_device_tracked(
-                            w,
-                            g_view,
-                            DeviceMatrixLayout::Transposed,
-                            token,
-                        )
-                        .map_err(|e| (e, written))?;
-                    let prev_out = &scratch.outs[i - 1];
-                    let prev_view = DeviceBufferView::new(prev_out, 0, prev_out.shape())
-                        .map_err(|e| (e, written))?;
-                    // gemm は `t` へ書く GPU 作業を積み済み。後続の view 設定・mask encode が失敗
-                    // しても完了前に drop されプールが再利用しないよう、成功直後に hold へ移す。
-                    scratch.hold.push(t);
-                    let t = scratch.hold.last().ok_or_else(|| {
-                        (
-                            invalid("hold buffer is missing (internal error)".to_string()),
-                            written,
-                        )
-                    })?;
-                    let t_view =
-                        DeviceBufferView::new(t, 0, t.shape()).map_err(|e| (e, written))?;
-                    let g_prev = ops
-                        .relu_backward_mask_device_tracked(
-                            t_view,
-                            DeviceMatrixLayout::Transposed,
-                            prev_view,
-                            token,
-                        )
-                        .map_err(|e| (e, written))?;
-                    Some(g_prev)
-                }
-            };
-            if let Some(g_prev) = g_prev
-                && let Some(old) = scratch.g_cur.replace(g_prev)
-            {
-                scratch.hold.push(old);
-            }
+                },
+                &mut || {
+                    ops.gemm_resident_lhs_device_tracked(
+                        w,
+                        g_view,
+                        DeviceMatrixLayout::Transposed,
+                        token,
+                    )
+                },
+            )
+            .map_err(|e| (e, written))?;
+            // gemm は `t` へ書く GPU 作業を積み済み。後続の view 設定・mask encode が失敗
+            // しても完了前に drop されプールが再利用しないよう、成功直後に scratch へ移す。
+            scratch.t.push(t);
+            let t = scratch.t.last().ok_or_else(|| {
+                (
+                    invalid("d_input buffer is missing (internal error)".to_string()),
+                    written,
+                )
+            })?;
+            let t_view = DeviceBufferView::new(t, 0, t.shape()).map_err(|e| (e, written))?;
+            let prev_out = &scratch.outs[i - 1];
+            let prev_view =
+                DeviceBufferView::new(prev_out, 0, prev_out.shape()).map_err(|e| (e, written))?;
+            let reuse_g = scratch.reuse.gm.pop_front();
+            let g_prev = produce_part(
+                PART_MASK,
+                &mut scratch.caps,
+                reuse_g,
+                &mut scratch.hold,
+                &mut |o| {
+                    ops.relu_backward_mask_device_into_tracked(
+                        t_view,
+                        DeviceMatrixLayout::Transposed,
+                        prev_view,
+                        o,
+                        token,
+                    )
+                },
+                &mut || {
+                    ops.relu_backward_mask_device_tracked(
+                        t_view,
+                        DeviceMatrixLayout::Transposed,
+                        prev_view,
+                        token,
+                    )
+                },
+            )
+            .map_err(|e| (e, written))?;
+            scratch.gm.push(g_prev);
         }
         Ok(())
     }
@@ -624,6 +987,14 @@ mod tests {
         sgd: AtomicUsize,
         download: AtomicUsize,
         upload: AtomicUsize,
+        /// `synchronize_device` の呼び出し回数（イシュー #3254）。
+        sync: AtomicUsize,
+        /// `MemoryOps::alloc_zeroed` の呼び出し回数。
+        alloc: AtomicUsize,
+        /// `*_into_tracked` が成功した回数（部品の合計）。
+        into_ok: AtomicUsize,
+        /// `*_into_tracked` の呼び出し回数（`Unsupported` を返した分を含む）。
+        into_calls: AtomicUsize,
         /// 各 `_tracked` 呼び出しが受け取ったトークンのアドレス。
         tokens: Mutex<Vec<usize>>,
         /// `sgd_step_device_tracked` が受けた `is_first_step` の列。
@@ -640,6 +1011,8 @@ mod tests {
         /// d_input（`gemm_resident_lhs`）が `Unsupported`（最初の dW の後）。
         LhsUnsupported,
         SgdFails,
+        /// `synchronize_device` が一時的な capture 衝突を返す。
+        SyncCaptureBusy,
         /// dW が `bias_filled == false` を返す。
         BiasNotFilled,
         /// forward が一時的な capture 衝突を返す（どの書き込みよりも前）。
@@ -648,11 +1021,19 @@ mod tests {
         FirstDwCaptureBusy,
         /// ReLU マスク encode が失敗（d_input の `gemm_resident_lhs` 出力は生成・encode 済み）。
         MaskUnsupported,
+        /// `synchronize_device` が `Unsupported`（既定実装と同じ。イシュー #3254）。
+        SyncUnsupported,
+        /// `synchronize_device` が実行時エラー。
+        SyncFails,
     }
 
     struct Rec {
         c: Arc<Counters>,
         fault: Fault,
+        /// `true` なら `*_into_tracked` を実装する（CUDA 相当）。`false` は既定の `Unsupported`。
+        into_supported: bool,
+        /// `true` なら `*_into_tracked` が世代切れ（`StaleDeviceGeneration`）を返す。
+        into_stale: bool,
     }
 
     struct H(std::cell::RefCell<Vec<f32>>);
@@ -677,6 +1058,24 @@ mod tests {
     }
 
     impl Rec {
+        /// 全 `_into` 部品の共通挙動（呼び出し回数を数え、設定に応じて成功・`Unsupported`・世代切れ）。
+        fn run_into_part(&self, t: &DispatchFailureCell) -> Result<(), BackendError> {
+            self.c.into_calls.fetch_add(1, Ordering::SeqCst);
+            if !self.into_supported {
+                return Err(BackendError::Unsupported("mock: no into".into()));
+            }
+            self.note(t);
+            if self.into_stale {
+                return Err(BackendError::StaleDeviceGeneration {
+                    ordinal: 0,
+                    resource_generation: 0,
+                    current_generation: 1,
+                });
+            }
+            self.c.into_ok.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         fn note(&self, t: &DispatchFailureCell) {
             self.c
                 .tokens
@@ -688,6 +1087,7 @@ mod tests {
 
     impl MemoryOps for Rec {
         fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
+            self.c.alloc.fetch_add(1, Ordering::SeqCst);
             Ok(buf(shape, 0.0))
         }
         fn upload(&self, t: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
@@ -712,6 +1112,17 @@ mod tests {
         }
         fn memory_ops(&self) -> Option<&dyn MemoryOps> {
             Some(self)
+        }
+        fn synchronize_device(&self) -> Result<(), BackendError> {
+            self.c.sync.fetch_add(1, Ordering::SeqCst);
+            match self.fault {
+                Fault::SyncUnsupported => Err(BackendError::Unsupported("mock sync".into())),
+                Fault::SyncFails => Err(BackendError::KernelLaunchFailed("mock sync".into())),
+                Fault::SyncCaptureBusy => {
+                    Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 })
+                }
+                _ => Ok(()),
+            }
         }
         fn sgd_step_device(
             &self,
@@ -829,6 +1240,57 @@ mod tests {
             }
             Ok(buf(m.shape(), 1.0))
         }
+        fn linear_forward_device_into_tracked(
+            &self,
+            _a: &DeviceBuffer<f32>,
+            _w: DeviceBufferView<'_>,
+            _b: Option<DeviceBufferView<'_>>,
+            _act: Activation,
+            _out: &mut DeviceBuffer<f32>,
+            t: &DispatchFailureCell,
+        ) -> Result<(), BackendError> {
+            self.run_into_part(t)
+        }
+        fn mse_loss_device_into_tracked(
+            &self,
+            _p: &DeviceBuffer<f32>,
+            _t: &DeviceBuffer<f32>,
+            _r: MseReduction,
+            _out: &mut DeviceBuffer<f32>,
+            t: &DispatchFailureCell,
+        ) -> Result<(), BackendError> {
+            self.run_into_part(t)
+        }
+        fn mse_loss_backward_device_into_tracked(
+            &self,
+            _p: &DeviceBuffer<f32>,
+            _t: &DeviceBuffer<f32>,
+            _s: f32,
+            _out: &mut DeviceBuffer<f32>,
+            t: &DispatchFailureCell,
+        ) -> Result<(), BackendError> {
+            self.run_into_part(t)
+        }
+        fn relu_backward_mask_device_into_tracked(
+            &self,
+            _g: DeviceBufferView<'_>,
+            _l: DeviceMatrixLayout,
+            _m: DeviceBufferView<'_>,
+            _out: &mut DeviceBuffer<f32>,
+            t: &DispatchFailureCell,
+        ) -> Result<(), BackendError> {
+            self.run_into_part(t)
+        }
+        fn gemm_resident_lhs_device_into_tracked(
+            &self,
+            _w: DeviceBufferView<'_>,
+            _b: DeviceBufferView<'_>,
+            _l: DeviceMatrixLayout,
+            _out: &mut DeviceBuffer<f32>,
+            t: &DispatchFailureCell,
+        ) -> Result<(), BackendError> {
+            self.run_into_part(t)
+        }
         fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
             Ok(crate::eval::matmul(a, b))
         }
@@ -871,10 +1333,20 @@ mod tests {
 
     /// 3 層 MLP（bias あり）の tape・store・カウンタ。
     fn setup(fault: Fault) -> (Tape, DeviceParamStore, Arc<Counters>) {
+        setup_with(fault, false, false)
+    }
+
+    fn setup_with(
+        fault: Fault,
+        into_supported: bool,
+        into_stale: bool,
+    ) -> (Tape, DeviceParamStore, Arc<Counters>) {
         let c = Arc::new(Counters::default());
         let tape = Tape::new_with_ops(Box::new(Rec {
             c: Arc::clone(&c),
             fault,
+            into_supported,
+            into_stale,
         }));
         let ps = [
             t(&[D_IN, D_HID]),
@@ -1064,6 +1536,24 @@ mod tests {
     }
 
     #[test]
+    fn wait_device_capture_conflict_does_not_poison_the_store() {
+        let (tape, store, _c) = setup(Fault::SyncCaptureBusy);
+        let err = store.wait_device(&tape).unwrap_err();
+        assert!(
+            matches!(err, BackendError::DeviceContextCaptureInProgress { .. }),
+            "{err:?}"
+        );
+        store.check_not_poisoned().unwrap();
+        // 衝突解消後の再試行は poison されずに到達する（失敗トークンも未設定）。
+        let err2 = store.wait_device(&tape).unwrap_err();
+        assert!(matches!(
+            err2,
+            BackendError::DeviceContextCaptureInProgress { .. }
+        ));
+        store.check_not_poisoned().unwrap();
+    }
+
+    #[test]
     fn transient_capture_conflict_before_write_does_not_poison_the_store() {
         for fault in [Fault::ForwardCaptureBusy, Fault::FirstDwCaptureBusy] {
             let (tape, mut store, c) = setup(fault);
@@ -1172,5 +1662,234 @@ mod tests {
             matches!(err, BackendError::PendingForwardUnconsumed),
             "{err:?}"
         );
+    }
+
+    /// 3 層（forward 3・MSE 1・dPred 1・d_input 2・mask 2）の `_into` 部品の合計回数。
+    const INTO_PARTS_PER_STEP: usize = 3 + 1 + 1 + 2 + 2;
+
+    #[test]
+    fn into_supported_backend_allocates_nothing_in_steady_state() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let x = store.upload_resident_input(&tape, &t(&[M, D_IN])).unwrap();
+        let y = store.upload_resident_input(&tape, &t(&[M, D_OUT])).unwrap();
+        // 初回 step: 確保版で作り、能力判定のため `_into` を 1 回ずつ試す。
+        let l1 = run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.9)).unwrap();
+        assert_eq!(count(&c.forward), 3);
+        // 能力判定は部品ごとに 1 回（5 部品）。
+        assert_eq!(count(&c.into_ok), N_PARTS);
+        let (fwd, mse, bwd, lhs, mask) = (
+            count(&c.forward),
+            count(&c.mse),
+            count(&c.mse_bwd),
+            count(&c.lhs),
+            count(&c.mask),
+        );
+        let (alloc, up, down) = (count(&c.alloc), count(&c.upload), count(&c.download));
+        let into_before = count(&c.into_ok);
+        // 2・3 step 目（定常状態）: 確保版の部品呼び出し 0・alloc_zeroed 0・upload／download 0。
+        for _ in 0..2 {
+            run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.9)).unwrap();
+        }
+        assert_eq!(count(&c.forward), fwd);
+        assert_eq!(count(&c.mse), mse);
+        assert_eq!(count(&c.mse_bwd), bwd);
+        assert_eq!(count(&c.lhs), lhs);
+        assert_eq!(count(&c.mask), mask);
+        assert_eq!(count(&c.alloc), alloc);
+        assert_eq!(count(&c.upload), up);
+        assert_eq!(count(&c.download), down);
+        assert_eq!(count(&c.into_ok), into_before + 2 * INTO_PARTS_PER_STEP);
+        // dW・SGD は従来どおり step ごとに 1 セット。L1 の d_input は計算しない（#3245）。
+        assert_eq!(count(&c.dw), 9);
+        assert_eq!(count(&c.sgd), 3);
+        // 古いハンドルは世代検査が拒否し、最新は読める。
+        assert!(store.read_train_step_loss(&tape, &l1).is_err());
+        let l4 = run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.9)).unwrap();
+        assert_eq!(store.read_train_step_loss(&tape, &l4).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn into_unsupported_backend_falls_back_per_part_without_surfacing_unsupported() {
+        let (tape, mut store, c) = setup_with(Fault::None, false, false);
+        for _ in 0..3 {
+            run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        }
+        // 毎 step 確保版の部品を使う（結果は従来と同じ）。`_into` は初回の能力判定で 1 回ずつ
+        // 試されて以後ラッチされる（5 部品）。
+        assert_eq!(count(&c.forward), 9);
+        assert_eq!(count(&c.mse), 3);
+        assert_eq!(count(&c.lhs), 6);
+        assert_eq!(count(&c.mask), 6);
+        assert_eq!(count(&c.into_calls), 5);
+        assert_eq!(count(&c.into_ok), 0);
+        store.check_not_poisoned().unwrap();
+        assert_eq!(store.step_count, 3);
+    }
+
+    #[test]
+    fn changed_batch_or_width_rebuilds_the_scratch() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        let into_before = count(&c.into_ok);
+        let fwd_before = count(&c.forward);
+        // バッチ行数が変わる → 鍵不一致で再利用せず確保版で作り直す（以後はまた再利用）。
+        let x2 = store
+            .upload_resident_input(&tape, &t(&[M + 2, D_IN]))
+            .unwrap();
+        let y2 = store
+            .upload_resident_input(&tape, &t(&[M + 2, D_OUT]))
+            .unwrap();
+        run_with(&tape, &mut store, &x2, &y2, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.forward), fwd_before + 3);
+        // 能力は確定済み（probed）のため再判定の `_into` は呼ばれない。loss（shape `[]`）だけは
+        // 鍵に依らず再利用される。
+        assert_eq!(count(&c.into_ok), into_before + 1);
+        run_with(&tape, &mut store, &x2, &y2, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.forward), fwd_before + 3);
+        assert_eq!(count(&c.into_ok), into_before + 1 + INTO_PARTS_PER_STEP);
+    }
+
+    #[test]
+    fn stale_scratch_is_dropped_and_reallocated() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        // 世代切れを返す設定へ差し替える代わりに、新しい mock で 2 step 目から stale を返す。
+        let (tape2, mut store2, c2) = setup_with(Fault::None, true, true);
+        run(&tape2, &mut store2, &ACTS, &cfg(0.0)).unwrap();
+        run(&tape2, &mut store2, &ACTS, &cfg(0.0)).unwrap();
+        // 初回は能力判定の `_into` が世代切れ（確定せず）、2 step 目も再利用に失敗して確保版へ進む。
+        assert_eq!(count(&c2.forward), 6);
+        assert_eq!(count(&c2.mse), 2);
+        assert_eq!(count(&c2.into_ok), 0);
+        store2.check_not_poisoned().unwrap();
+        assert_eq!(store2.step_count, 2);
+        // 対照: 世代切れでない mock は 2 step 目で確保版を呼ばない。
+        run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.forward), 3);
+    }
+
+    #[test]
+    fn failed_step_buffers_are_held_and_not_reused() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        assert!(store.train_chain_bufs.is_some());
+        // 2 step 目を最初の dW 後の失敗にする（Rec の fault は固定のため新ストアで検証）。
+        let (tape2, mut store2, _c2) = setup_with(Fault::LhsUnsupported, true, false);
+        assert!(run(&tape2, &mut store2, &ACTS, &cfg(0.0)).is_err());
+        assert!(
+            store2.train_chain_bufs.is_none(),
+            "失敗 step のバッファは再利用しない"
+        );
+        assert!(!store2.train_chain_hold.is_empty());
+        let _ = c;
+    }
+
+    // ---- イシュー #3254: facade 公開入口のための内部入口 ----
+
+    /// 事前検証は store を変えない（pending・世代・step_count・params・確保・encode なし）。
+    #[test]
+    fn validate_does_not_touch_store_or_encode() {
+        let (tape, store, c) = setup(Fault::None);
+        let x = store.upload_resident_input(&tape, &t(&[M, D_IN])).unwrap();
+        let y = store.upload_resident_input(&tape, &t(&[M, D_OUT])).unwrap();
+        let leaves = store.snapshot_resident_params(&tape).unwrap();
+        let steps: Vec<ChainStep<'_, '_>> = ACTS
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (&leaves[2 * i], Some(&leaves[2 * i + 1]), *a))
+            .collect();
+        let gen_before = store.train_chain_generation;
+        store
+            .validate_train_step_device_chain(&tape, &x, &y, &steps, &cfg(0.9))
+            .unwrap();
+        assert_eq!(store.step_count, 0);
+        assert!(!store.sgd_used);
+        assert!(store.velocity.is_none());
+        assert_eq!(store.train_chain_generation, gen_before);
+        assert_eq!(count(&c.forward) + count(&c.sgd) + count(&c.dw), 0);
+        // 範囲外（最終層 ReLU）は encode 前に Unsupported。
+        let bad: Vec<ChainStep<'_, '_>> = [Activation::Relu; 3]
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (&leaves[2 * i], Some(&leaves[2 * i + 1]), *a))
+            .collect();
+        let r = store.validate_train_step_device_chain(&tape, &x, &y, &bad, &cfg(0.0));
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        assert_eq!(count(&c.forward), 0);
+    }
+
+    /// フォールバックの loss は同期なしで読め、世代が進むと古いデバイスハンドルは拒否される。
+    #[test]
+    fn host_loss_handle_reads_without_download_and_invalidates_older_handles() {
+        let (tape, mut store, c) = setup(Fault::None);
+        let dev = run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        let host = store.record_host_train_step_loss(&tape, 1.25).unwrap();
+        let before = count(&c.download);
+        assert_eq!(store.read_train_step_loss(&tape, &host).unwrap(), 1.25);
+        assert_eq!(count(&c.download), before, "host loss は download しない");
+        let r = store.read_train_step_loss(&tape, &dev);
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+    }
+
+    /// チェーンが成功すると古い host ハンドルは拒否され、新しいデバイスハンドルが読める。
+    #[test]
+    fn chain_after_host_loss_invalidates_host_handle() {
+        let (tape, mut store, _c) = setup(Fault::None);
+        let host = store.record_host_train_step_loss(&tape, 9.0).unwrap();
+        let dev = run(&tape, &mut store, &ACTS, &cfg(0.0)).unwrap();
+        let r = store.read_train_step_loss(&tape, &host);
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+        assert_eq!(store.read_train_step_loss(&tape, &dev).unwrap(), 0.5);
+    }
+
+    #[test]
+    fn download_resident_input_checks_store_and_returns_host_copy() {
+        let (tape, store, _c) = setup(Fault::None);
+        let x = store.upload_resident_input(&tape, &t(&[M, D_IN])).unwrap();
+        let host = store.download_resident_input(&tape, &x).unwrap();
+        assert_eq!(host.shape(), &[M, D_IN]);
+        let (tape2, store2, _c2) = setup(Fault::None);
+        let other = store2
+            .upload_resident_input(&tape2, &t(&[M, D_IN]))
+            .unwrap();
+        let r = store.download_resident_input(&tape, &other);
+        assert!(matches!(r, Err(BackendError::InvalidArgument(_))), "{r:?}");
+    }
+
+    #[test]
+    fn wait_device_syncs_without_download_and_rejects_poisoned_store() {
+        let (tape, store, c) = setup(Fault::None);
+        let before = count(&c.download);
+        store.wait_device(&tape).unwrap();
+        assert_eq!(count(&c.sync), 1);
+        assert_eq!(count(&c.download), before, "D2H なし");
+        store.poisoned.store(true, Ordering::SeqCst);
+        let r = store.wait_device(&tape);
+        assert!(matches!(r, Err(BackendError::StorePoisoned)), "{r:?}");
+        assert_eq!(count(&c.sync), 1, "poison 済みは待たずに拒否");
+    }
+
+    #[test]
+    fn wait_device_rejects_set_failure_token_and_poisons() {
+        let (tape, store, _c) = setup(Fault::None);
+        store
+            .failure_token
+            .set(BackendError::KernelLaunchFailed("mock".into()));
+        let r = store.wait_device(&tape);
+        assert!(matches!(r, Err(BackendError::StorePoisoned)), "{r:?}");
+        assert!(store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// `Unsupported` は状態を変えない（poison しない）。実行時エラーは poison する。
+    #[test]
+    fn wait_device_unsupported_keeps_store_usable_and_runtime_error_poisons() {
+        let (tape, store, _c) = setup(Fault::SyncUnsupported);
+        let r = store.wait_device(&tape);
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        assert!(!store.poisoned.load(Ordering::SeqCst));
+        let (tape, store, _c) = setup(Fault::SyncFails);
+        assert!(store.wait_device(&tape).is_err());
+        assert!(store.poisoned.load(Ordering::SeqCst));
     }
 }

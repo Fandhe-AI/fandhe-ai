@@ -1301,6 +1301,7 @@ impl CudaMemory {
             // `CU_MEM_ATTACH_SINGLE` は不要。
             let mut unified = unsafe { self.stream.context().alloc_unified::<f32>(numel, true)? };
             self.stream.memset_zeros(&mut unified)?;
+            crate::gemm::diag_count_mem_alloc();
             let bytes = checked_byte_len(numel)?;
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
             Box::new(CudaBufferHandle {
@@ -1311,6 +1312,7 @@ impl CudaMemory {
             })
         } else {
             let slice = self.stream.alloc_zeros::<f32>(numel)?;
+            crate::gemm::diag_count_mem_alloc();
             let bytes = checked_byte_len(numel)?;
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
             Box::new(CudaBufferHandle {

@@ -407,6 +407,8 @@ impl CudaMse {
                     })?;
             if guard.is_none() {
                 *guard = Some(self.stream.alloc_zeros::<f32>(MSE_MAX_BLOCKS as usize)?);
+                // 永続ワークスペースの初回確保も数える（#3252。定常状態では 0）。
+                crate::gemm::diag_count_mem_alloc();
             }
             let Some(ws) = guard.as_mut() else {
                 return Err(CudaError::InvalidElementwiseShape {

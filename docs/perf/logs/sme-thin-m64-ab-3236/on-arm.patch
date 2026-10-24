@@ -1,0 +1,13 @@
+diff --git a/crates/backend-cpu/src/gemm_blis/mod.rs b/crates/backend-cpu/src/gemm_blis/mod.rs
+index c6f070907..588331dc4 100644
+--- a/crates/backend-cpu/src/gemm_blis/mod.rs
++++ b/crates/backend-cpu/src/gemm_blis/mod.rs
+@@ -3598,7 +3598,7 @@ fn sme_kernel_for_shape(m_total: usize, n: usize, k: usize) -> Option<microkerne
+ /// #3236（Mac mini の事前登録 A/B）の ADOPT が前提で、本 issue では性能を測っていない。
+ /// **ロールバックは本 const を `false` に戻す 1 行のみ**。環境変数・実行時設定では切り替えない。
+ /// ドリフト検出は `sme_thin_m64_disabled_by_default`。
+-const SME_THIN_M64_ENABLED: bool = false;
++const SME_THIN_M64_ENABLED: bool = true;
+ 
+ /// m=64 専用経路の適格形状判定（純関数）。`n` は 16 の倍数（端のマスク付きストアは未対応で従来経路へ
+ /// 落とす）、転置は Nn／Nt のみ（Tn は対象外）。k の下限は #3236 の格子で決めるため置かず `k >= 1` だけ
