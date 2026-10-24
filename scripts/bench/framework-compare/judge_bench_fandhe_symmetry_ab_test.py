@@ -225,6 +225,25 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(code, 2, text)
         self.assertIn('比較相手の行が欠損', text)
 
+    def test_missing_opp_file_still_checks_hard_exit3(self):
+        def mut(arm, run, rows):
+            if arm == 'new' and run == 3:
+                rows = [l.replace('"checksum":237.546660', '"checksum":237.546661') for l in rows]
+            return rows
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini', mut)
+        (d / 'run2' / 'results-py.jsonl').unlink()
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 3, text)
+        self.assertIn('hard 条件の不一致', text)
+
+    def test_missing_opp_file_alone_is_undetermined(self):
+        d = self.tmp / 's'
+        rule, env, glog = make_series(d, 'macmini')
+        (d / 'run2' / 'results-py.jsonl').unlink()
+        code, text = run_judge(d, 'macmini', rule, env, glog)
+        self.assertEqual(code, 2, text)
+
     def test_hard_mismatch_wins_over_undetermined_cell(self):
         def mut(arm, run, rows):
             if arm == 'new' and run == 1:

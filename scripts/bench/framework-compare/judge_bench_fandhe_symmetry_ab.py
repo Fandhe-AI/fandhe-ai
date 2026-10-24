@@ -127,10 +127,17 @@ def load_runs(series_dir, arms, nruns=NRUNS):
         rd = Path(series_dir) / f'run{i}'
         if not rd.is_dir():
             raise Undetermined(f'run{i} ディレクトリ欠損（run 数不足）')
-        opp = index(load(rd / 'results-opp.jsonl') + load(rd / 'results-py.jsonl'))
-        entry = {'opp': opp}
+        entry = {}
+        # 腕（old/new）の読み込み失敗は系列全体の判定不能。相手の読み込み失敗は勝敗の列だけを判定不能にし、
+        # 腕どうしの hard 条件（checksum・parity）は続けて検証する（終了コード 3 が 2 より優先）。
         for arm in arms:
             entry[arm] = index(load(rd / f'results-{arm}.jsonl'))
+        try:
+            entry['opp'] = index(load(rd / 'results-opp.jsonl') + load(rd / 'results-py.jsonl'))
+            entry['opp_err'] = None
+        except Undetermined as e:
+            entry['opp'] = None
+            entry['opp_err'] = f'run{i}: 比較相手の入力が読めない（{e}）'
         runs.append(entry)
     return runs
 
@@ -196,6 +203,9 @@ def classify(ratio):
 
 def arm_stats(runs, arm, task, device, size, required=()):
     me = [r[arm] for r in runs]
+    for r in runs:
+        if r['opp'] is None:
+            raise Undetermined(r['opp_err'])
     opp = [r['opp'] for r in runs]
     ratio, rs, top = paired_ratio(me, opp, task, device, size, required)
     ms = [_valid_median(r[arm][('fandhe-ai', task, device, size, 'reuse')], f'{arm} reuse {task} {device} N={size}')
