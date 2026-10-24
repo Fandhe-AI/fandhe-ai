@@ -1,0 +1,45 @@
+RULE fixed-at-utc: 2026-10-24T09:00:00Z
+issue: #3266（親: #3263。是正 #3265 の前後を両機体で併記計測する）
+doc: docs/framework-compare-harness-decision.md §7.8
+本規則は計測より前に固定する。事後に緩めない。変更が要る場合は別名の RULE を計測前に再登録する。
+本計測は #3247 のような ADOPT／REJECT の二値判定を行わない。効果の向きも大きさも仮説にとどめ、数値目標は置かない。
+併記が目的で、判定式（同一 run 内の最速相手比・区分の閾値）は 0.11.0 スコアボード（gen_0110_macmini.py の paired_ratio／judge）から変えない。
+
+[腕]
+- old = 61c69352d4b465c53c5265a1eb8adbd2afb2297f（#3265 直前の main）
+- new = 40453506ae65c81f8f065853c50eda9caa7ae459（#3265 のマージ）
+- 両腕とも registry の fandhe-ai =0.11.0（path patch なし・--locked）。bench-fandhe 以外（Cargo.lock・各 Cargo.toml・bench-candle・bench-burn・bench-common）は両腕で完全一致であることを precheck で検査する。
+- 各腕は git archive <sha> で展開し .rev-stamp（フル SHA）を置く。runner ツリーは本規則を含むコミット。相手のバイナリは new ツリーからビルドして共用する。
+
+[セル]（判定行は fandhe reuse。fresh は参考・対照。0.11.0 スコアボードと同じ 27 判定行）
+- Mac mini（Apple M4 のみ。M4 Max は拒否）13 行: gemm CPU N=256/512/1024/2048、gemm Metal N=256/512/1024/2048/4096、train CPU・Metal（size 64）、infer CPU・Metal（size 64）。
+- GB10 14 行: gemm CUDA・CPU N=256/512/1024/2048/4096、train CPU・CUDA、infer CPU・CUDA（size 64）。
+- 処置: gemm 全般（(1) 反復ごとの reset）、Metal の gemm・infer（(3) readout の借用ビュー既定化。Metal の fresh 行にも効く）、train（(6) 入力 var_no_grad。0.11.0 では速度中立の見込み）。対照: CPU・CUDA の fresh、infer CPU・CUDA。
+- 相手は同じラウンドで実測する: candle・burn fresh、PyTorch・TensorFlow・SciPy（Mac mini は CPU・Metal、GB10 は CPU と PyTorch CUDA）。burn Metal gemm N=512〜4096 は既知の MEASURE_ERROR（記録拒否）4 件。
+- --phases・--tf32・--device-checksum は測らない。
+
+[手順]
+- 5 ラウンド固定（AB_ROUNDS が 5 以外なら拒否）。プロセスは独立起動。順序は Rust の相手 → fandhe 両腕 → Python。fandhe はセルごとに old/new を続けて走らせ、先行腕はラウンドの奇偶で反転する。
+- 全ビルドを round1 の前に済ませ、計測中はビルドを並走させない。run の差し替え・追加起動・セル除外はしない。同じラベルの既存出力があれば停止。RAYON_NUM_THREADS は unset。
+- 期待行数（ラウンドごと。外れたら系列を打ち切る）: Mac mini old 26／new 26／相手 Rust 22（skipped は burn Metal gemm の既知 4 件のみ）／Python 32。GB10 old 28／new 28／相手 Rust 28／Python 28。
+- 実機ロックを取り、ロックなしで測った値は使わない。
+
+[負荷ゲート]
+- Mac mini: 系列 A はゲートなし（対照）。系列 B は各ラウンド前に load1 < 3.0 を 30 秒間隔・最大 30 分待つ（GATE-INVALID／GATE-TIMEOUT で打ち切り）。系列 B が 5/5 完走すれば正式、そうでなければ系列 A を正式とする。両系列を並べ、区分が反転した行はノイズ帯として示す。pmset -g therm を各ラウンドの前後で記録する。
+- GB10: load1 < 1.0 を 30 秒間隔・最大 30 分待ち、さらに GPU 使用率 0% を 3 サンプル連続で確認する。通らないラウンドを含む系列は undetermined。
+
+[比・区分]
+- 腕ごとに、run ごとに「同じ run の有効な相手（parity_fail_count == 0 の fresh 行）の最速 median_s ÷ その腕の fandhe reuse median_s」を求め、5 run の中央値で区分する（1 を超えれば 1 位、0.90 以上なら僅差、それ以外は負け）。
+- 腕比（参考）: median(new の reuse median_s) ÷ median(old の同) と run ごとの new_r/old_r。合格ラインは置かない。
+- 0.11.0 正式系列の値は別日・別ツリーの参考列で、判定には使わない。
+
+[hard 条件]
+- セルごとに、5 run すべてで checksum・parity_total・parity_fail_count・parity_max_abs_err・parity_max_rel_err・parity_scaled_abs_bound・parity_scaled_abs_rescued が完全に一致し、old と new の間でも一致すること（reuse・fresh 両方）。
+- 不一致は「正しさの失敗」として記録し所有者へ報告する。tolerance・baseline は変えない。fandhe の parity_fail_count > 0 は判定不能として勝敗に混ぜない。
+
+[結果の扱い]
+- 結果はすべて記録する。自律的な revert・再計測による差し替えはしない。
+- 事前に表明する仮説（合格ラインではない）: GEMM reuse は fresh 並みに近づく可能性。Metal readout は #3184 G5 で 0.96〜0.98 倍だった。train は中立の見込み。
+
+[機体の同定]
+- Mac mini は machdep.cpu.brand_string が "Apple M4" と完全一致。GB10 は uname -m が aarch64 で、GPU 名を env_info へ記録する。
