@@ -357,6 +357,9 @@ GEMM の結果検証は 2 層防御で構成する。
 
 §7.3 の方針（旧条件の値を残し、判定規則を変えずに新条件を並べる）の実行用に、計測の部品と事前登録規則を `docs/perf/logs/bench-fandhe-symmetry-ab-3266/` と `scripts/bench/framework-compare/`（`run_ab_bench_fandhe_symmetry.sh`・`judge_bench_fandhe_symmetry_ab.py`）へ用意した。腕は #3265 の直前（`61c69352d`）と #3265（`40453506a`）で、どちらも registry の `fandhe-ai =0.11.0`。判定式は 0.11.0 スコアボードと同一で、集計器のテストが 0.11.0 のログから `gen_0110_macmini.out` の 27 行を再現することを確認している。
 
-- 実測の状態: **未実施**（Mac mini・GB10 とも未測定。結果が入るまで本節に数値を書かない）。
+- 実測の状態: **実測済み**（2026-10-24。Mac mini 系列 A・系列 B、GB10 の 3 系列とも 5/5 完走）。集計器の終了コードは 3 系列とも 0 で、hard 条件（checksum・parity 判定の run 間・腕間一致）は全セル OK。Mac mini の正式系列は系列 B（ゲート通過 5/5）。出典は `docs/perf/logs/bench-fandhe-symmetry-ab-3266/judge-3266-{series-a,series-b,gb10}.md`（`.exit` 付き）。
+- 結果の要約（旧条件から新条件への区分の変化。判定ではなく観察）: Mac mini 系列 B は gemm metal N=256 が 負け→僅差、N=512 が 僅差→1 位（系列 A は N=256 が 負け→僅差、N=512 が 負け→負け で、N=512 は旧条件腕も系列間で区分が反転するノイズ帯）。GB10 は gemm cuda N=512・1024・2048 が 負け→僅差、gemm cpu N=256・512 が 負け→1 位、N=1024 が 僅差→1 位。gemm cuda N=4096 と gemm cpu N=2048・4096 は区分が変わらない。学習・推論セルは両機体とも区分が変わらず、腕比はほぼ 1.0 だった（GB10 の train cpu は 1.116 で run 間の振れが大きい）。
+- 仮説（GEMM reuse が fresh 並みに近づくか）への観察: 新条件の reuse の中央値は、GB10 の gemm cuda と Mac mini の gemm metal で同じ run 群の fresh の中央値とほぼ並んだ（例: GB10 gemm cuda N=512 は旧条件 reuse 0.550 ms・fresh 0.257 ms、新条件 reuse 0.256 ms）。この観察は合格判定ではない。
+- Metal のノイズ帯: 系列 A と系列 B で区分が反転したセルは、新条件腕が gemm metal N=512・infer metal、旧条件腕が gemm metal N=512。Mac mini の区分の読みはこの帯を割り引いて行う。
 - 事実の記録: #3265 の (3) は `readout_uses_borrowed_view` から Metal 分岐を除いたため、Metal の fresh（gemm・infer）の readout も変わっている。「fresh は変更しない」は CPU・CUDA にだけ当てはまり、併記では Metal の fresh を「参考・変化あり」として読む。
 - 対象外: 入力のデバイス常駐と学習ステップ入口（#3272）、0.12.0 へのピン更新（#3271）、`--phases`・TF32 行の併記。
