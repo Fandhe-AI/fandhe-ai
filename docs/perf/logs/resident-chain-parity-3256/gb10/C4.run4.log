@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/resident_train_step.rs (target/release/deps/resident_train_step-0769e4ec1743d999)
+
+running 1 test
+test cuda_upload_resident_with_cpu_tape_is_device_mismatch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.22s
+
+rc=0
