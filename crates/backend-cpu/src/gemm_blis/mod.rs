@@ -3542,15 +3542,17 @@ const TWO_D_DYNAMIC_PRODUCTION_ENABLED: bool = true;
 /// どうかの単一 const ゲート（[`TWO_D_DYNAMIC_PRODUCTION_ENABLED`]・
 /// `thread_limit::BIG_CORE_LIMIT_ENABLED` と同型のロールバック機構）。
 ///
-/// ADOPT 確定により既定 `true`（イシュー #3231。Mac mini〈Apple M4〉A/B の
-/// 実測は `docs/perf/cpu-gemm-sme-ab-macmini.md`・確定記録は
-/// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.10）。実行 CPU が SME
-/// 非搭載・SVL≠64 等の場合は [`microkernel::SmeKernel::try_new`] が `None`
-/// を返し NEON へ fall back する（出力 bit 不変）。**ロールバックは本 const
-/// を `false` に戻す 1 行のみ**（#3232 の GB10 非後退ゲートで後退が出た
-/// 場合。`sme_production_enabled_is_true_with_neon_fallback` も反転する）。
+/// 既定 `false`（既定 OFF）。#3231 で一度 `true`（既定 ON）にしたが、#3232 の
+/// A/B（`docs/perf/logs/sme-default-on-ab-3232/`）で GB10 が REJECT
+/// （`gemm 256 fresh`・`gemm 2048 reuse` が 5/5 round 一貫で後退）となり、
+/// 事前登録規則（RULE.txt:55）どおり本 const を `false` へ戻した
+/// （2026-10-24 所有者判断）。Mac mini〈Apple M4〉の A/B 実測は
+/// `docs/perf/cpu-gemm-sme-ab-macmini.md`、経緯は
+/// `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.10。`false` では
+/// [`sme_kernel_for_shape`] が常に `None`（NEON）を返し出力 bit は不変。
+/// ドリフト検出は `sme_production_disabled_after_gb10_reject`。
 #[cfg(target_arch = "aarch64")]
-const SME_PRODUCTION_ENABLED: bool = true;
+const SME_PRODUCTION_ENABLED: bool = false;
 
 /// [`SME_PRODUCTION_ENABLED`] が `true` のときに SME 経路を候補とする
 /// 形状しきい値（イシュー #1587 事前登録規則 R4）。`sme_shape_eligible`
@@ -3978,9 +3980,10 @@ pub(crate) enum GemmDriverVariant {
     #[cfg(target_arch = "aarch64")]
     TwoDDynamicSme,
     /// (mc, nc) 2D 動的分配を **NEON 強制・SME ゲート迂回**で実行する
-    /// 参照候補（#3231）。既定 ON 後は [`TwoDDynamic`](Self::TwoDDynamic)
-    /// が SME 搭載機で SME を含むため、A/B の NEON 腕と bit 同一テストの
-    /// 参照にはこちらを使う。aarch64 限定。
+    /// 参照候補（#3231）。[`SME_PRODUCTION_ENABLED`] を `true` にした場合は
+    /// [`TwoDDynamic`](Self::TwoDDynamic) が SME 搭載機で SME を含むため、
+    /// A/B の NEON 腕と bit 同一テストの参照にはこちらを使う（既定 OFF に
+    /// 戻した現在は両者が同一経路）。aarch64 限定。
     #[cfg(target_arch = "aarch64")]
     TwoDDynamicNeon,
 }
@@ -5826,25 +5829,22 @@ mod tests {
         ));
     }
 
-    /// イシュー #3231: 既定 ON（[`SME_PRODUCTION_ENABLED`] = `true`）と
-    /// NEON fallback 契約のドリフト検出。確定しきい値 (256, 256, 64) の
-    /// 固定、およびゲート式 [`sme_kernel_for_shape`] が「SME 搭載ホストでは
-    /// `Some`・非搭載ホストでは `None`（= NEON へ fall back）」であることを
-    /// 機械的に表明する。しきい値直下の形状は環境によらず `None`。
-    ///
-    /// #3232 の off 腕（`SME_PRODUCTION_ENABLED = false`）ではこのテストが
-    /// 構造上 FAIL する（想定内の 1 件。ロールバック時は本テストを反転する）。
+    /// イシュー #3232: GB10 REJECT により既定 OFF（[`SME_PRODUCTION_ENABLED`]
+    /// = `false`。RULE.txt:55・2026-10-24 所有者判断）に戻した契約のドリフト
+    /// 検出。確定しきい値 (256, 256, 64) の固定、およびゲート式
+    /// [`sme_kernel_for_shape`] が形状・ホストによらず常に `None`（NEON）で
+    /// あることを機械的に表明する。再度 ON にする場合は本テストを反転する。
     #[cfg(target_arch = "aarch64")]
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn sme_production_enabled_is_true_with_neon_fallback() {
-        assert!(SME_PRODUCTION_ENABLED, "#3231 で既定 ON に確定した契約");
-        assert_eq!((SME_MIN_M, SME_MIN_N, SME_MIN_K), (256, 256, 64));
-        assert_eq!(
-            sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K).is_some(),
-            crate::sme_detect::sme_report().kernel_enabled,
-            "しきい値ちょうどの形状は SME 搭載ホストでのみ SME を選び、非搭載では None（NEON）"
+    fn sme_production_disabled_after_gb10_reject() {
+        assert!(
+            !SME_PRODUCTION_ENABLED,
+            "#3232 の GB10 REJECT で既定 OFF に戻した契約"
         );
+        assert_eq!((SME_MIN_M, SME_MIN_N, SME_MIN_K), (256, 256, 64));
+        assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K).is_none());
+        assert!(sme_kernel_for_shape(SME_MIN_M * 4, SME_MIN_N * 4, SME_MIN_K * 4).is_none());
         assert!(sme_kernel_for_shape(SME_MIN_M - 1, SME_MIN_N, SME_MIN_K).is_none());
         assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N - 1, SME_MIN_K).is_none());
         assert!(sme_kernel_for_shape(SME_MIN_M, SME_MIN_N, SME_MIN_K - 1).is_none());
