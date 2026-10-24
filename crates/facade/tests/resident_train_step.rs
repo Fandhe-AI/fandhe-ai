@@ -258,12 +258,12 @@ fn compare_with_tape_path_ext(
 
     let mut handles = Vec::new();
     let mut last_loss_b = 0.0f32;
-    for step in 0..steps {
-        let h = model
-            .train_step_resident(&mut store_a, &x_res, &y_res, config)
-            .unwrap();
-        let lb = tape_path_step(device, &model, &mut store_b, &x, &y, config);
-        if read_every_step {
+    if read_every_step {
+        for step in 0..steps {
+            let h = model
+                .train_step_resident(&mut store_a, &x_res, &y_res, config)
+                .unwrap();
+            let lb = tape_path_step(device, &model, &mut store_b, &x, &y, config);
             let la = h.read(&mut store_a).unwrap();
             assert_bits_or_nan_class(
                 &[la.to_bits()],
@@ -276,9 +276,20 @@ fn compare_with_tape_path_ext(
                 &store_b,
                 &format!("{dims:?} step {step}"),
             );
-        } else {
-            last_loss_b = lb;
-            handles.push(h);
+        }
+    } else {
+        // 参照経路（Tape）は loss のホスト読み出しで共有ストリーム／コンテキストを同期するため、
+        // チェーンの連続投入区間に混ぜると同期なし積みの回帰を隠す。チェーンを先に全 step 積み切ってから
+        // 参照経路を回す（store_b は store_a と独立なので順序は結果に影響しない）。
+        for _ in 0..steps {
+            handles.push(
+                model
+                    .train_step_resident(&mut store_a, &x_res, &y_res, config)
+                    .unwrap(),
+            );
+        }
+        for _ in 0..steps {
+            last_loss_b = tape_path_step(device, &model, &mut store_b, &x, &y, config);
         }
     }
     if !read_every_step {
