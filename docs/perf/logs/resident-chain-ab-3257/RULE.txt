@@ -1,0 +1,71 @@
+RULE fixed-at-utc: 2026-10-24T02:00:00Z
+issue: #3257（親: Phase 11 の常駐チェーン。依存 #3256 は完了）
+doc: docs/compat-resident-train-step-decision.md §17「#3257 計測基盤と実測の状態（参考系列）」
+本規則は計測より前に固定する。事後に緩めない。変更が要る場合は別名の RULE を計測前に再登録する。
+本件は参考系列である。正式な 6 フレームワーク同席計測は #3273（0.12.0 のピン更新後）が担当する。
+
+[対象]
+- runner = 本規則を含むコミット（フル SHA は .rev-stamp 1 行目と env_info の rev_stamp_head_runner）。
+- facade = 同じツリーの crates/facade への [patch.crates-io.fandhe-ai] path patch（--config 引数のみ。Cargo.toml／Cargo.lock へはコミットしない）。
+- bench-resident-chain.patch（sha256 は env_info の patch_sha256）を runner ツリーにだけ適用する。パッチは次の 3 点だけ:
+  (1) --mode chain（train: train_step_resident＋ResidentLoss::read／infer: predict_resident_input）を追加。x・y は窓の外で 1 回だけ Tape::upload_resident。
+  (2) BENCH_PARAM_DIGEST=1 のとき reuse と chain の終端同期後に全パラメータの FNV-1a 64 を stderr へ出す。
+  (3) bench-common の --mode 許可リストに chain を足す。
+  reuse／fresh の挙動は変えない。
+
+[セル]
+- Mac mini: train／infer × {CPU, Metal}。GB10: train／infer × {CPU, CUDA}。各セルで before（reuse）・after（chain）・candle・torch（pytorch）。size=64。TF32 OFF・--graph なし。
+- bench-burn・TensorFlow・SciPy は対象外（#3273）。
+
+[手順]
+- 5 round 固定（AB_ROUNDS が 5 以外なら拒否）。プロセスは独立起動。run の差し替え・追加起動・セル除外はしない。同じラベルの既存出力があれば停止。RAYON_NUM_THREADS は unset。
+- round ごとに 4 腕（B=before A=after C=candle T=torch）の起動順を回転: r1 B,A,C,T / r2 A,C,T,B / r3 C,T,B,A / r4 T,B,A,C / r5 は r1 と同じ。
+- 全ビルドを計測の前に済ませる（計測中のビルド並走禁止）。
+
+[負荷ゲート]
+- GB10: load1 < 1.0 を 30 秒間隔・最大 30 分待つ。CUDA はさらに GPU 使用率 0% を 3 サンプル連続。
+- Mac mini: load1 < 3.0。round 前に ab_round_cooldown.sh（AB_ROUND_COOLDOWN_MAX_LOAD1=3.0）を通し、pmset -g therm を前後で記録する。
+- 不通過 round を含む系列は INVALID（judge が拒否）。
+
+[機体の同定]
+- Mac mini: sysctl -n machdep.cpu.brand_string が "Apple M4" に完全一致（M4 Max 開発機の値は使わない）。
+- GB10: uname -m = aarch64、nvidia-smi の GPU 名を env_info に記録。
+
+[precheck（fail-closed）]
+- facade/src に行頭アンカー付きで pub fn train_step_resident(・pub fn predict_resident_input(・pub fn upload_resident(・impl ResidentLoss {・ResidentLoss::read が存在する。
+- パッチ後の main.rs に ("train", "chain", false) と ("infer", "chain", false) がある。
+- runner ツリーの変更追跡ファイルが bench-common/src/lib.rs と bench-fandhe/src/main.rs の 2 件だけで、パッチの逆適用チェックが通る。
+- .rev-stamp の 1 行目が実 HEAD と一致し、2 行目が dirty=0。cargo tree で fandhe-ai が crates/facade の path に解決される。
+
+[hard 条件（判定より先）]
+- 各セルで before／after の checksum（train は最終 loss、infer は出力）が全 run・両腕で完全一致。
+- train は PARAM_DIGEST も全 run・両腕で同値。欠落は不一致として扱う。
+- 不一致のセルは REJECT（正しさの失敗）とし、所有者へ報告する。相手の checksum は記録するだけで判定しない。
+
+[比]
+- ratio_ab = median(after 5 run の median_s) / median(before 5 run の median_s)。ratio_r = after_r / before_r（JSONL の行順 = round 順）。
+- 相手軸: 同一 round 内の有効な相手最速（candle・torch の小さい方）÷ fandhe の 5 round 中央値を before・after それぞれで出す（参考・判定外）。1 超で 1 位、0.90 以上で僅差。
+
+[判定（参考系列。既定値やゲートを判定で切り替えない）]
+- IMPROVE: ratio_ab <= 0.95 かつ 5/5 round で ratio_r < 1.00。
+- REGRESS: ratio_ab > 1.00 または 5/5 round で ratio_r > 1.00。
+- NEUTRAL（上のどちらでもない。事前登録上の undetermined）。
+- INVALID: run 数不足・ゲート不通過・env_info／RULE sha／パッチ sha の不一致。
+
+[事前表明する仮説（推定・合格ラインではない）]
+- train CUDA 約 0.18〜0.25 ms、train Metal 約 0.65〜0.9 ms（Mac mini の内訳は未実測）。Metal は PyTorch MPS と同程度で、明確に勝つ見込みは薄い。
+- infer の改善は小さい（毎反復の x の H2D が消えるだけ。出力の D2H と同期 1 回は残る）。CPU は同期が無いので中立に近い。
+
+[残差の分解（相手に届かないセル）]
+- 差 Δ = after − 相手最速 を、wait 固定費・launch 固定費・共通の checksum 窓・カーネル時間・未説明残差に分ける。直接の実測値以外は「推定」と明記する。
+- 3 分類（ハードの上限／共通の計測窓／自分たちの制約）への対応は表で示し、合わないものは未説明残差として残す。制約の緩和は提案しない。
+
+[限界]
+- 公開面からは train_step_resident が Tape 経路へフォールバックしたかを観測できない。チェーンが走ったことの証明ではない（根拠は #3256 §16）。
+- checksum の一致は bit 同一性の証明ではない（train は PARAM_DIGEST で補う）。
+
+[結果の扱い]
+- REGRESS・NEUTRAL・INVALID も正当な結果として記録する。tolerance・baseline・依存ピンは変更しない。
+
+[対象外]
+- fandhe-ai =0.12.0 へのピン更新と bench の P7 化のコミット（#3273）、CUDA Graph capture（#3258／#3261）、bench-burn・TF・SciPy、既定精度（#3262）。

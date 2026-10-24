@@ -1034,6 +1034,11 @@ jobs:
       - name: フレームワーク横並びベンチ judge_infer_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/judge_infer_ab_test.py
 
+      # イシュー #3257: judge_resident_chain_ab.py（常駐チェーンの A/B 判定。checksum・digest 不一致は REJECT、
+      # run 数不足・ゲート不通過・RULE／パッチ sha 不一致は INVALID）の回帰テスト。stdlib の unittest のみ。
+      - name: フレームワーク横並びベンチ judge_resident_chain_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/judge_resident_chain_ab_test.py
+
       # イシュー #3179: opp_kernel_torch_diag.py（Mac mini で PyTorch の純カーネル時間と
       # Python 側 checksum を測る診断）の torch／numpy 不要部分の回帰テスト。同一方針
       # （stdlib の unittest のみ・cargo の有無に関わらず常時実行）。

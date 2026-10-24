@@ -2036,6 +2036,10 @@ main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の
 
 `AB_PROFILE=macmini|gb10` で両機体の train fresh／reuse を before／after の 2 本の facade path patch で 5 round 計測する。runner ツリーへ計測専用パッチ `docs/perf/logs/dinput-skip-ab-3247/bench-var-no-grad.patch`（reuse の入力を `var_no_grad` にし、`BENCH_PARAM_DIGEST=1` で更新後パラメータの digest を出す）を当てることが前提で、precheck が行頭アンカー付き grep とパッチの逆適用チェックで確認する。macOS の bash 3.2 で動き、jq には依存しない。判定は `judge_dinput_skip_ab.py`（stdlib のみ。テストは `python3 -I judge_dinput_skip_ab_test.py`）。規則は `docs/perf/logs/dinput-skip-ab-3247/RULE.txt`。
 
+## 常駐チェーンの A/B（`run_ab_resident_chain.sh`・`judge_resident_chain_ab.py`、イシュー #3257）
+
+参考系列（正式な 6 フレームワーク同席計測は #3273）。`AB_PROFILE=macmini|gb10` で train／infer × device を、before（現行経路 `--mode reuse`）・after（常駐チェーン `--mode chain`）・candle・PyTorch の 4 腕で 5 round 計測する。runner ツリーへ計測専用パッチ `docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch`（`bench-fandhe/src/main.rs` と `bench-common/src/lib.rs` の 2 ファイル。コミットしない）を当て、1 ツリー・1 ビルド（`crates/facade` への `--config` path patch）で同じバイナリから `reuse`／`chain` を呼ぶ。判定は `judge_resident_chain_ab.py`（RULE を fail-closed に適用。`judge_resident_chain_ab_test.py` は CI で実行）。規則は同 `RULE.txt`、手順と状態は同 `README.md`。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）
