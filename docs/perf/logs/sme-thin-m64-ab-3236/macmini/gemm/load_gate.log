@@ -1,0 +1,5 @@
+round1 gate=pass gate_ok=1 threshold=3.0 load1=2.63 waited_s=210 at=2026-10-24T01:13:13Z
+round2 gate=pass gate_ok=1 threshold=3.0 load1=2.63 waited_s=0 at=2026-10-24T01:13:15Z
+round3 gate=pass gate_ok=1 threshold=3.0 load1=2.63 waited_s=0 at=2026-10-24T01:13:15Z
+round4 gate=pass gate_ok=1 threshold=3.0 load1=2.63 waited_s=0 at=2026-10-24T01:13:16Z
+round5 gate=pass gate_ok=1 threshold=3.0 load1=2.63 waited_s=0 at=2026-10-24T01:13:16Z
