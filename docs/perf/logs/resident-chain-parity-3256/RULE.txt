@@ -1,0 +1,51 @@
+事前登録規則（イシュー #3256）。固定日: 2026-10-24。本規則の固定時点で Mac mini・GB10 の実測値は 1 件も含まない。
+
+[対象]  各行 = 独立プロセス 1 本 x 5 run。共通引数: --release -- --ignored --exact --test-threads=1 --nocapture
+  Mac mini（Metal / Apple M4）:
+    M1  -p fandhe-ai --test resident_train_step  metal_public_api_chain_matches_tape_path_bit_exact_two_layers
+    M2  同  metal_public_api_chain_matches_tape_path_bit_exact_three_layers
+    M3  同  metal_public_api_unread_steps_then_final_params_match_tape_path
+    M4  同  metal_upload_resident_with_cpu_tape_is_device_mismatch
+    M5  -p fandhe-ai --lib  compat::sequential::train_step_chain_tests_3251::metal::metal_chain_step_issues_exactly_one_wait
+    M6  -p fandhe-ai --lib  同 ::metal::metal_wait_device_param_store_issues_exactly_one_wait
+  GB10（CUDA / sm_121・CUDA 13.0 系）:
+    C1〜C4  -p fandhe-ai --test resident_train_step  cuda_public_api_chain_matches_tape_path_bit_exact_two_layers／
+            _three_layers／cuda_public_api_unread_steps_then_final_params_match_tape_path／
+            cuda_upload_resident_with_cpu_tape_is_device_mismatch
+    C5  同  cuda_tf32_mode_chain_matches_tape_path_bit_exact
+    C6  -p fandhe-ai-backend-cuda --lib  train_step_chain_diag_tests_3252::train_chain_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync（#3252 の B1）
+    C7  -p fandhe-ai-backend-cuda --lib  train_step_chain_diag_tests_3252::public_entry_call_sequence_window_has_no_sync_and_read_is_one_sync
+    C8  -p fandhe-ai-backend-cuda --lib  train_step_chain_diag_tests_3252::tf32_mode_chain_outcome_is_recorded（記録専用。合否判定しない）
+    C9  -p fandhe-ai --lib  compat::sequential::train_step_chain_tests_3251::cuda::cuda_wait_device_param_store_and_read_after_internal_tape_dropped
+
+[判定]
+  - M1〜M4・C1〜C5: テストの assert どおり pass（loss 列と全パラメータが to_bits() 一致。NaN はクラス一致。
+    M4・C4 はエラー系の assert）。tolerance・baseline・既存 assert は変更しない。
+  - M5: encode 10・チェーン区間の wait 0・読み出しを含めて wait 1（テストの assert どおり）。M6: wait 1。
+  - C6・C7: 窓（チェーン区間）の stream_syncs・d2h_calls・h2d_calls・mem_uploads・mem_allocs がすべて 0、
+    読み出し区間の stream_syncs = 1 かつ d2h_calls = 1、対照として初回 step の mem_allocs > 0。
+    C7 は公開入口と同じ呼び出し列（存在検証・tape 作成・snapshot・validate・読み出し用の新 tape）を再現する。
+  - C9: pass（機能確認のみ。P7 の CUDA 同期は診断カウンタの範囲外のため回数は記録しない）。
+  - C8: println の TF32OBS 行（Ok／Err(Unsupported)＝第 2 段フォールバック／その他）を記録するだけ。
+  - 0 件実行の扱い: ログに `running 1 test` と `1 passed` が無い run（フィルタ不一致の 0 tests・rc=0 を含む）は fail。
+  - 合否: 5 run すべて pass で pass、1 run でも fail なら fail。期待値は事後に変更しない。
+  - 同期が 1 回でなかった場合は、残る同期点を特定して README に書く（受け入れ条件 2）。
+
+[実行]
+  - ビルドは測定前に 1 回だけ（cargo test --no-run を対象 crate・ターゲットごとに実施。build.log は判定外）。
+  - 測定中はビルドも別の GPU 負荷も並走させない。各ノードで rsync・ビルド・測定の前に実機ロック
+    （mkdir ~/work/.fandhe-hw-lock・owner に `#3256 <UTC 時刻>`）を取り、回収後に外す。ロックを持たずに測った値は採用しない。
+  - 計数・bit 一致の判定は時間を測らないため GPU 負荷に依存しない。CUDA は nvidia-smi の compute プロセスを env_info に記録する。
+
+[run の無効化]
+  - 各 run の前後で foreign の cargo／rustc プロセスを検出した run は invalid とし、同じ番号で取り直す
+    （前の試行のログと理由は attempts/ へ退避する）。invalid の件数と理由はすべて記録する。
+  - それ以外の理由での再実行・選別・ケースの除外はしない。
+
+[fail の扱い]
+  - 結果は pass／fail にかかわらず採用する。fail は README の「不一致」節に原因の調査結果とともに記録し、
+    tolerance・baseline・判定を事後に緩めない。
+
+[同梱物]
+  - .rev-stamp（展開ツリーのもの）・env_info.txt（前後）・tree-manifest-check.txt。
+    ホスト名・ユーザー名・絶対パスはマスクする。
