@@ -184,9 +184,11 @@ def opponent_ratio(d, label, dev, task, fandhe_rows):
                 series.append(rows)
         if not series:
             return "n/a"
+        # RULE.txt 契約: 分母は fandhe の 5 round 中央値に固定する（各 round の値では割らない）
+        fmed = statistics.median(x["median_s"] for x in fandhe_rows)
         for r in range(ROUNDS):
             best = min(s[r]["median_s"] for s in series)
-            per_round.append(best / fandhe_rows[r]["median_s"])
+            per_round.append(best / fmed)
     except Bad as e:
         return f"n/a (相手不正: {str(e)[:50]})".replace("|", "/")
     return f"{statistics.median(per_round):.2f}x"
