@@ -42,7 +42,8 @@ DIGEST_RE = re.compile(
     r"n_tensors=(\d+) n_elems=(\d+) fnv1a64=(0x[0-9a-f]{16})$"
 )
 ARM_MODE = {"before": "reuse", "after": "chain"}
-OPPONENTS = ("candle", "torch")
+# ファイル名ラベル -> 生ログの framework 名（run_ab_resident_chain.sh の --framework 値）
+OPPONENTS = {"candle": "candle", "torch": "pytorch"}
 
 
 class Bad(Exception):
@@ -64,8 +65,10 @@ def _num(o, k, where):
     return v
 
 
-def load_rows(path, task, dev, mode=None, fandhe=True):
-    """JSONL から task・device が一致する行を出現順に返す。fandhe=True は fandhe-ai 行で mode 一致必須。"""
+def load_rows(path, task, dev, mode=None, fandhe=True, framework=None):
+    """JSONL から task・device が一致する行を出現順に返す。fandhe=True は fandhe-ai 行で mode 一致必須。
+
+    fandhe=False（相手）は framework（期待名）との完全一致と checksum の有限性を必須とする（取り違え・NaN の排除）。"""
     rows = []
     for n, line in enumerate(_read_lines(path), 1):
         if not line.strip():
@@ -88,8 +91,10 @@ def load_rows(path, task, dev, mode=None, fandhe=True):
                 raise Bad(f"{where}: framework != fandhe-ai")
             if o.get("mode") != mode:
                 raise Bad(f"{where}: mode が {mode} でない ({o.get('mode')!r})")
-        elif o.get("framework") == "fandhe-ai":
-            raise Bad(f"{where}: 相手ファイルに fandhe-ai 行")
+        elif framework is None or o.get("framework") != framework:
+            raise Bad(f"{where}: framework が {framework!r} でない ({o.get('framework')!r})")
+        else:
+            _num(o, "checksum", where)
         if _num(o, "median_s", where) <= 0:
             raise Bad(f"{where}: median_s <= 0")
         if fandhe:
@@ -181,11 +186,11 @@ def opponent_ratio(d, label, dev, task, fandhe_rows):
     per_round = []
     try:
         series = []
-        for opp in OPPONENTS:
+        for opp, fw in OPPONENTS.items():
             p = f"{d}/results-{opp}-{label}-{dev}-{task}.jsonl"
             if not os.path.exists(p):
                 continue
-            rows = load_rows(p, task, dev, fandhe=False)
+            rows = load_rows(p, task, dev, fandhe=False, framework=fw)
             if len(rows) == ROUNDS:
                 series.append(rows)
         if not series:

@@ -143,6 +143,36 @@ class JudgeTest(unittest.TestCase):
         r = J.judge_cell("gb10", "cpu", "infer", fx.d, LABEL, sha(fx.rule_bytes), "0" * 64)
         self.assertEqual(r["verdict"], "INVALID")
 
+    def _opp(self, fx, name, **over):
+        with open(f"{fx.d}/results-{name}-{LABEL}-cpu-infer.jsonl", "w") as fh:
+            for _ in range(5):
+                row = {"framework": {"candle": "candle", "torch": "pytorch"}[name], "task": "infer",
+                       "device": "cpu", "size": 64, "median_s": 0.0005, "checksum": 1.5}
+                row.update(over)
+                fh.write(json.dumps(row) + "\n")
+
+    def test_opponent_valid_used(self):
+        fx = Fixture(before_ms=B, after_ms=B)
+        self.addCleanup(fx.close)
+        self._opp(fx, "candle")
+        r = J.judge_cell("gb10", "cpu", "infer", fx.d, LABEL, sha(fx.rule_bytes), sha(fx.patch_bytes))
+        self.assertTrue(r["opp_before"].endswith("x"), r["opp_before"])
+
+    def test_opponent_wrong_framework_na(self):
+        fx = Fixture(before_ms=B, after_ms=B)
+        self.addCleanup(fx.close)
+        self._opp(fx, "candle", framework="pytorch")
+        r = J.judge_cell("gb10", "cpu", "infer", fx.d, LABEL, sha(fx.rule_bytes), sha(fx.patch_bytes))
+        self.assertTrue(r["opp_before"].startswith("n/a (相手不正"), r["opp_before"])
+
+    def test_opponent_nonfinite_or_missing_checksum_na(self):
+        for over in ({"checksum": float("nan")}, {"checksum": None}):
+            fx = Fixture(before_ms=B, after_ms=B)
+            self.addCleanup(fx.close)
+            self._opp(fx, "torch", **over)
+            r = J.judge_cell("gb10", "cpu", "infer", fx.d, LABEL, sha(fx.rule_bytes), sha(fx.patch_bytes))
+            self.assertTrue(r["opp_after"].startswith("n/a (相手不正"), r["opp_after"])
+
     def test_main_exit_codes(self):
         fx = Fixture(before_ms=B, after_ms=B, checksum_after=1.6)
         self.addCleanup(fx.close)
