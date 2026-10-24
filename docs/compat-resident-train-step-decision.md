@@ -222,6 +222,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
   必要なら `*HoldDoctestGuard`（`crates/facade/src/lib.rs` の既存パターン）で保留を固定し、
   #3254 で正ガードへ反転する。`!Send` を前提とし `assert_send` を足さない。
   `docs/compat-api-scope.md` §5 の適用記録・`docs/public-api-design.md`・`docs/README.md` を更新する。
+- **#3255**: 公開 API だけでの Tape 経路との bit 一致テスト。**実装済み（§15。CPU は CI、CUDA・Metal は `#[ignore]` で未実測）。**
 - **#3258**: P5 の固定構造（永続ワークスペース・永続 loss スカラー）を capture 区間の前提として
   参照する。
   **#3254 は実装済み（§14 に記録）。**
@@ -577,3 +578,35 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 - Metal の `_into` 版部品（確保ゼロ化）: §12 の申し送りのまま。
 - `ResidentInput` を永続バッファへ `upload_into` で更新する入口（§12 で #3254 へ申し送り）: 新しい公開形を伴い §4 の
   P1〜P7 に無いため本 PR では足さない。**公開形の追加は決定記録 → 所有者確認の 2 段が必要**。
+
+## §15 #3255 テスト記録（公開 API だけでの Tape 経路との bit 一致）
+
+`crates/facade/tests/resident_train_step.rs` に追記した（結合テストのバイナリを増やさず、常駐学習ステップの
+公開 API テストを 1 か所にまとめる）。本番コード・公開 API・tolerance・baseline は変更していない。比較は bit 一致
+（期待値が NaN のときだけ NaN クラス一致）で、tolerance 定数は参照しない。
+
+### 追加したテストと受け入れ基準
+
+| テスト | 内容 | 基準 |
+|---|---|---|
+| `public_api_chain_matches_tape_path_bit_exact_{two_layers,three_layers,odd_shapes_and_batch_one}`（CPU） | 決定的シード（`Xorshift64Star`）で複数 step の loss 列と全パラメータが Tape 経路と bit 一致（plain・momentum・nesterov・端数形状・batch 1） | 1 |
+| `public_api_chain_unread_steps_then_final_params_match_tape_path`（CPU） | 途中の loss を読まず積み、最後のハンドルだけ読んで bit 一致。途中の古いハンドルは `InvalidArgument` | 1 |
+| `public_api_out_of_scope_models_are_unsupported_without_fallback` ほか `public_api_*_rejected*`・`shape_mismatch` | Tanh・最終層 ReLU・出力幅 0・空バッチは `Unsupported`（フォールバックせず params 不変）。不正 `SgdConfig`・momentum 途中変更・RMSProp 使用後・未消費 forward・形状不一致は型付きエラーで params 不変 | 2 |
+| `resident_tensor_from_another_tape_instance_is_accepted_and_bit_identical`・`only_y_of_another_store_is_invalid_argument_and_keeps_store` | ハンドルは store_id＋device に束縛され tape インスタンスには束縛されない（§4）。片方だけ別 store なら `InvalidArgument` | 4 |
+| `{metal,cuda}_public_api_*`・`cuda_tf32_mode_chain_matches_tape_path_bit_exact`（`#[ignore]`） | 実機での同じ bit 一致比較（784 幅・batch 64） | 3 |
+| `{metal,cuda}_upload_resident_with_cpu_tape_is_device_mismatch`（`#[ignore]`） | デバイス store を CPU tape で扱うと `DeviceMismatch`、デバイス入力を CPU store へ渡すと `InvalidArgument` | 4 |
+
+### 分担と制約
+
+- 注入による第 2 段フォールバックの bit 一致は非公開の `train_step_resident_with` が要るためクレート内テスト
+  （`train_step_chain_tests_3251.rs`）が担う。公開面の CPU テストは「第 1 段の拒否はフォールバックしない」ことだけを固定する。
+- CPU の tape はすべて同一デバイスのため、公開面で `TapeMismatch` は作れない（leaf は `train_step_resident` 内部の tape で作られる）。
+  別デバイスの tape は `#[ignore]` の実機テストで扱う。
+- Conv を含むモデルは `init_device_param_store` の段階で拒否されるため `train_step_resident` まで届かず、本テストの対象外。
+- CUDA の TF32 テストは、モードでも Tape 経路と bit 一致することだけを固定し、第 2 段フォールバックに入ることは主張しない
+  （未確認のため。`backend-cuda` の部品が TF32 で `Unsupported` を返すかは #3256 の実機実行時に確認する）。
+
+### 検証
+
+CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M4 Max）で参考として pass したが、受け入れ記録（Mac mini）
+ではない。GB10（CUDA）・Mac mini（Metal）での実行・実測は #3256。
