@@ -69,3 +69,15 @@ on-arm.patch sha256: 18de3c6a57d5ca3094abe046e88d89a4d389e95ce3997413070eb7b5213
 9. マスク規則
   - 収録するログのホスト名は masked、$HOME は <home>、ユーザー名と絶対パスは除去。実機のホスト名・接続情報はリポに書かない。
   - .rev-stamp (after は <sha>+on-arm.patch)・ツリー指紋 (git ls-files の sha256) を成果物に含める。
+
+RULE-amend-1 (2026-10-24、計測前の訂正。結果を見る前に追記する。緩和ではない)
+  - 理由: #3580 が SME_PRODUCTION_ENABLED を false に戻し、本 issue のコメントで所有者が「#3580 マージ後の main で計測」と指示した。
+    旧 §3 の P-TREE「SME_PRODUCTION_ENABLED は両腕とも true」は #3580 後の main では必ず不成立になるため、条件を「両腕とも false」に改める。
+  - 登録基準: origin/main (#3580 以降。ed635d3a9 を含む) + 本追記を含むコミット。計測はこのコミットのツリーで行う (rev-stamp の 1 行目と一致させる)。
+  - 腕の差は SME_THIN_M64_ENABLED の 1 行 (on-arm.patch) のままで変わらない。薄型経路の分岐 (sme_thin_m64_path / thin_m64_kernel_for_shape) は
+    SME_THIN_M64_ENABLED だけで決まり SME_PRODUCTION_ENABLED に依存しないため、production SME が false でも腕は分離できる。
+  - 副作用: 非到達ガードセル (l1_dw・ref_square_512・framework-compare train の L1 dW) は両腕とも NEON になる。セルの分類・判定式・N=5・tolerance・baseline は変えない。
+  - orchestrate_macmini.sh の P-TREE の grep だけを上記に合わせて変更した (リテラル一致のまま。「両腕で等しい」への緩和はしない)。on-arm.patch は不変。
+  - P-BIT が実行する --ignored sme_thin_m64 には非正規化数・NaN の実機テスト (…_denormal・…_denormal_result_from_normal_operands・…_nan_input_does_not_panic) が含まれる。
+    これを #3233 独立監査 P2 #3「非正規化数・NaN の実機 bit 判定」の根拠に充てる。範囲: 非正規化数は assert_eq の値一致 (±0 の符号は区別しない)、NaN はクラス一致のみ (payload 非比較)、FPCR は既定。
+    to_bits の NaN payload・±0 符号の厳密判定は本 issue の範囲外 (反転 PR の範囲)。

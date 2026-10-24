@@ -31,7 +31,7 @@ DRY=0
 if [ "${DRY}" = "1" ]; then
     echo "# dry-run: 実行計画（副作用なし）"
     echo "0. ロック: mkdir ${LOCK_DIR}（取れなければ 60 秒おきに再試行）。owner に '#3236 <UTC>' を書き hwlock.log へ取得・解放時刻を残す"
-    echo "1. P-TREE: main を clone して on-arm.patch を適用（sha256 は RULE.txt の値と照合・git apply --check が先）。差分ファイルが ${GATE_FILE} の 1 件だけで before が false・after が true であること"
+    echo "1. P-TREE: main を clone して on-arm.patch を適用（sha256 は RULE.txt の値と照合・git apply --check が先）。差分ファイルが ${GATE_FILE} の 1 件だけで before が false・after が true であること。SME_PRODUCTION_ENABLED は両腕とも false（RULE-amend-1・#3580 後の main）"
     echo "2. P-R0: 両腕で sme_report() が kernel_enabled: true であること（cpu-gemm-sme-fmopa-1587/gb10/sme-probe-* を流用。外れたら中止）"
     echo "3. P-BIT: main ツリーのみで cargo test -p fandhe-ai-backend-cpu --release --lib sme_thin_m64 と -- --ignored sme_thin_m64 --test-threads=1（after では --lib を実行しない）"
     echo "4. ビルド: 両ツリーで cpu_jobgrid_bench・cpu_sme_thin_m64_kgrid を release ビルド（計測前に完了。ビルドと計測を並べない）"
@@ -98,7 +98,7 @@ grep -n '^const SME_THIN_M64_ENABLED: bool' "${AFTER}/${GATE_FILE}" >> "${OUT}/g
 [ "$(sed -n 1p "${OUT}/gate_constant.txt" | sed 's/^[0-9]*://')" = "const SME_THIN_M64_ENABLED: bool = false;" ] || { echo "before の定数が false ではない" >&2; exit 1; }
 [ "$(sed -n 2p "${OUT}/gate_constant.txt" | sed 's/^[0-9]*://')" = "const SME_THIN_M64_ENABLED: bool = true;" ] || { echo "after の定数が true ではない" >&2; exit 1; }
 for t in "${MAIN}" "${AFTER}"; do
-    grep -q '^const SME_PRODUCTION_ENABLED: bool = true;$' "${t}/${GATE_FILE}" || { echo "SME_PRODUCTION_ENABLED が両腕とも true ではない" >&2; exit 1; }
+    grep -q '^const SME_PRODUCTION_ENABLED: bool = false;$' "${t}/${GATE_FILE}" || { echo "SME_PRODUCTION_ENABLED が両腕とも false ではない（RULE-amend-1）" >&2; exit 1; }
 done
 git -C "${MAIN}" rev-parse HEAD > "${OUT}/rev-stamp.txt"
 echo "$(git -C "${MAIN}" rev-parse HEAD)+on-arm.patch" >> "${OUT}/rev-stamp.txt"
