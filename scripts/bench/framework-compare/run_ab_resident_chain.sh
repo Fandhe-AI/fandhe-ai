@@ -39,6 +39,18 @@ case "$PROFILE" in
   *) echo "error: AB_PROFILE は macmini か gb10（got: ${PROFILE:-unset}）" >&2; exit 1 ;;
 esac
 
+# RULE.txt [負荷ゲート]: Mac mini は round 前に ab_round_cooldown.sh を AB_ROUND_COOLDOWN_MAX_LOAD1=3.0 で通す
+# 必須。共有ヘルパーは未設定だと即 return しログも作らないため、未設定なら 3.0 を設定し、異値は拒否する
+# （事前登録手順を満たさない記録を防ぐ）。GB10 は RULE が cooldown を要求しないため触らない。
+if [[ "$PROFILE" == "macmini" ]]; then
+  if [[ -z "${AB_ROUND_COOLDOWN_MAX_LOAD1:-}" ]]; then
+    AB_ROUND_COOLDOWN_MAX_LOAD1=3.0
+  elif [[ "$AB_ROUND_COOLDOWN_MAX_LOAD1" != "3.0" ]]; then
+    echo "error: macmini の AB_ROUND_COOLDOWN_MAX_LOAD1 は 3.0 固定（RULE.txt。got: ${AB_ROUND_COOLDOWN_MAX_LOAD1}）" >&2; exit 1
+  fi
+  export AB_ROUND_COOLDOWN_MAX_LOAD1
+fi
+
 # 絶対パス・引用符／バックスラッシュ／改行の拒否（--config 文字列へ埋め込むため。A03）。
 validate_abs_path() { # <var_name> <path>
   local var_name=$1 path=$2
