@@ -173,6 +173,16 @@ class JudgeTest(unittest.TestCase):
             r = J.judge_cell("gb10", "cpu", "infer", fx.d, LABEL, sha(fx.rule_bytes), sha(fx.patch_bytes))
             self.assertTrue(r["opp_after"].startswith("n/a (相手不正"), r["opp_after"])
 
+    def test_opponent_one_bad_other_valid_kept(self):
+        for bad in ("candle", "torch"):
+            good = "torch" if bad == "candle" else "candle"
+            fx = Fixture(before_ms=B, after_ms=B)
+            self.addCleanup(fx.close)
+            self._opp(fx, bad, checksum=float("nan"))
+            self._opp(fx, good)
+            r = J.judge_cell("gb10", "cpu", "infer", fx.d, LABEL, sha(fx.rule_bytes), sha(fx.patch_bytes))
+            self.assertTrue(r["opp_before"].endswith("x") and not r["opp_before"].startswith("n/a"), r["opp_before"])
+
     def test_main_exit_codes(self):
         fx = Fixture(before_ms=B, after_ms=B, checksum_after=1.6)
         self.addCleanup(fx.close)

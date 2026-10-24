@@ -184,24 +184,29 @@ def check_gate(profile, dev, path):
 def opponent_ratio(d, label, dev, task, fandhe_rows):
     """参考: 同一 round 内の有効な相手最速 ÷ fandhe の 5 round 中央値。読めなければ n/a（判定外）。"""
     per_round = []
-    try:
-        series = []
-        for opp, fw in OPPONENTS.items():
-            p = f"{d}/results-{opp}-{label}-{dev}-{task}.jsonl"
-            if not os.path.exists(p):
-                continue
+    series = []
+    bad = []
+    for opp, fw in OPPONENTS.items():
+        p = f"{d}/results-{opp}-{label}-{dev}-{task}.jsonl"
+        if not os.path.exists(p):
+            continue
+        # 相手ごとに検証し、不正な系列のみ除外する（有効な系列が残ればその最速で算出）
+        try:
             rows = load_rows(p, task, dev, fandhe=False, framework=fw)
-            if len(rows) == ROUNDS:
-                series.append(rows)
-        if not series:
-            return "n/a"
-        # RULE.txt 契約: 分母は fandhe の 5 round 中央値に固定する（各 round の値では割らない）
-        fmed = statistics.median(x["median_s"] for x in fandhe_rows)
-        for r in range(ROUNDS):
-            best = min(s[r]["median_s"] for s in series)
-            per_round.append(best / fmed)
-    except Bad as e:
-        return f"n/a (相手不正: {str(e)[:50]})".replace("|", "/")
+        except Bad as e:
+            bad.append(str(e)[:50])
+            continue
+        if len(rows) == ROUNDS:
+            series.append(rows)
+    if not series:
+        if bad:
+            return f"n/a (相手不正: {bad[0]})".replace("|", "/")
+        return "n/a"
+    # RULE.txt 契約: 分母は fandhe の 5 round 中央値に固定する（各 round の値では割らない）
+    fmed = statistics.median(x["median_s"] for x in fandhe_rows)
+    for r in range(ROUNDS):
+        best = min(s[r]["median_s"] for s in series)
+        per_round.append(best / fmed)
     return f"{statistics.median(per_round):.2f}x"
 
 
