@@ -93,6 +93,12 @@ def load_rows(path, task, dev, mode=None, fandhe=True):
         if _num(o, "median_s", where) <= 0:
             raise Bad(f"{where}: median_s <= 0")
         if fandhe:
+            # RULE.txt は全セルを「TF32 OFF・--graph なし」に固定。キー省略（off）は許容し、
+            # 有効を示す値（tf32 が真・graph が文字列）を含む行は INVALID（Bad）にする。
+            if "tf32" in o and o["tf32"] is not False:
+                raise Bad(f"{where}: tf32 が有効（RULE は TF32 OFF 固定: {o['tf32']!r}）")
+            if "graph" in o and o["graph"] is not None:
+                raise Bad(f"{where}: graph 指定あり（RULE は --graph なし固定: {o['graph']!r}）")
             _num(o, "checksum", where)
         rows.append(o)
     return rows

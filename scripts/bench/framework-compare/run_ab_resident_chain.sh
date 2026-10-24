@@ -117,6 +117,20 @@ want_status=" M scripts/bench/framework-compare/bench-common/src/lib.rs
 [[ "$status_lines" == "$want_status" ]] \
   || precheck_fail "runner ツリーの変更が bench-common/lib.rs・bench-fandhe/main.rs の 2 件だけでない（${status_lines}）"
 git -C "$RUNNER_ROOT" apply --reverse --check "$PATCH_FILE" || precheck_fail "patch が runner ツリーと一致しない"
+# 完全一致検証: 一時 index に HEAD + 所定パッチだけを適用し、対象 2 ファイルの全内容が作業ツリーと
+# 一致することを確認する（逆適用チェックだけでは同ファイルの別位置の変更を見逃す）。
+TMP_IDX="$(mktemp "${TMPDIR:-/tmp}/ab-idx.XXXXXX")" || precheck_fail "一時 index を作れない"
+rm -f "$TMP_IDX"
+if ! GIT_INDEX_FILE="$TMP_IDX" git -C "$RUNNER_ROOT" read-tree HEAD \
+  || ! GIT_INDEX_FILE="$TMP_IDX" git -C "$RUNNER_ROOT" apply --cached "$PATCH_FILE"; then
+  rm -f "$TMP_IDX"; precheck_fail "HEAD へ所定パッチを適用できない"
+fi
+if ! GIT_INDEX_FILE="$TMP_IDX" git -C "$RUNNER_ROOT" diff --quiet -- \
+  scripts/bench/framework-compare/bench-common/src/lib.rs \
+  scripts/bench/framework-compare/bench-fandhe/src/main.rs; then
+  rm -f "$TMP_IDX"; precheck_fail "対象 2 ファイルの内容が HEAD + 所定パッチと完全一致しない"
+fi
+rm -f "$TMP_IDX"
 echo "precheck=assert ok"
 
 bench_fandhe_setup_lock_restore_trap

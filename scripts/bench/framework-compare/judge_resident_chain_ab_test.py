@@ -24,7 +24,7 @@ def sha(b):
 
 class Fixture:
     def __init__(self, before_ms, after_ms, checksum_after=None, digest_after=None, drop_digest=False,
-                 n_after=5, gate_fail=False):
+                 n_after=5, gate_fail=False, before_extra=None):
         self.root = tempfile.mkdtemp(prefix="j3257-")
         self.rule = os.path.join(self.root, "RULE.txt")
         self.rule_bytes = b"RULE test\n"
@@ -44,7 +44,8 @@ class Fixture:
                 with open(f"{self.d}/results-{arm}-{LABEL}-{dev}-{task}.jsonl", "w") as fh:
                     for i in range(n):
                         fh.write(json.dumps({"framework": "fandhe-ai", "task": task, "device": dev, "size": 64,
-                                             "mode": mode, "median_s": vals[i] / 1e3, "checksum": cs}) + "\n")
+                                             "mode": mode, "median_s": vals[i] / 1e3, "checksum": cs,
+                                             **((before_extra or {}) if arm == "before" else {})}) + "\n")
                 if task == "train":
                     for r in range(1, 6):
                         if arm == "after" and drop_digest and r == 3:
@@ -109,6 +110,18 @@ class JudgeTest(unittest.TestCase):
     def test_missing_digest_rejects(self):
         r = self.run_fx(before_ms=B, after_ms=B, drop_digest=True)
         self.assertEqual(r[0]["verdict"], "REJECT")
+
+    def test_before_tf32_on_invalid(self):
+        r = self.run_fx(before_ms=B, after_ms=[0.5] * 5, before_extra={"tf32": True})
+        self.assertEqual(r[0]["verdict"], "INVALID")
+
+    def test_before_graph_on_invalid(self):
+        r = self.run_fx(before_ms=B, after_ms=[0.5] * 5, before_extra={"graph": "on"})
+        self.assertEqual(r[0]["verdict"], "INVALID")
+
+    def test_before_tf32_false_ok(self):
+        r = self.run_fx(before_ms=B, after_ms=[0.5] * 5, before_extra={"tf32": False})
+        self.assertEqual(r[0]["verdict"], "IMPROVE")
 
     def test_four_runs_invalid(self):
         r = self.run_fx(before_ms=B, after_ms=B, n_after=4)
