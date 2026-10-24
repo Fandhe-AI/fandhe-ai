@@ -2,7 +2,7 @@
 
 ## 1. 状態
 
-> 注記（#3231）: `SME_PRODUCTION_ENABLED` は #3231 で既定 ON に切り替えた。現在の状態は §12.11 を正とする（本節以降 §11 までは当時の記録で書き換えない）。
+> 注記（#3231・#3232）: `SME_PRODUCTION_ENABLED` は #3231 で既定 ON に切り替えたが、#3232 の GB10 REJECT により **既定 OFF へ戻した**（2026-10-24 所有者判断・RULE.txt:55。§12.12）。監査所見・受理条件は §12.11 を正とする（本節以降 §11 までは当時の記録で書き換えない）。
 
 | 項目 | 内容 |
 |------|------|
@@ -243,7 +243,7 @@
 | 条件 | 判定 | 根拠 | 保留・補足 |
 |------|------|------|-----------|
 | 1（到達セル 5/5 で 1.00 以下かつ checksum 一致の ADOPT） | **Mac mini では充足。ただし計測機の読み替えは所有者確認が未取得のため判定保留** | `docs/perf/cpu-gemm-sme-ab-macmini.md`・`docs/perf/logs/sme-macmini-3176/aggregate.md`・`macmini/r1r2/`・`macmini/r4_run{1..5}.log`・`macmini/sme_report.txt`。#3175 の `docs/perf/cpu-sme-thread-scaling-macmini.md` は参考 | 元の条件は M4 Max。M4 Max は §5.4.4 が undetermined で、#2118 の §5.8.3 は全欄未実測。2026-10-11 の所有者指示（計測は Mac mini）は根拠として引用するが、条件 1 の読み替えへの確認の代わりにはしない。M4 Max の値を Mac mini の値として扱わない |
-| 2（GB10 既存経路が 5/5 一貫で非後退） | **未充足（#3232 の実測で再確認。2026-10-23 UTC）** | `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.5（後退あり。1024/reuse が 5/5 一貫）・§5.6（bit 同一は成立）・§5.7（未分離。ノイズ帯。§5.5 の判定は覆っていない）・`docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/`・#3232 実測: `docs/perf/logs/sme-default-on-ab-3232/aggregate-gb10.md`（5/5 一貫の後退が `gemm 256 fresh`・`gemm 2048 reuse` の 2 セル。checksum 全一致・bitdump 一致。判定 REJECT）・`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.13 | GB10 は SME 非対応で `kernel_enabled: false`。ツリー設計では最終確認を #3232（ON の前後比較）が担い、後退があれば #3231 を戻す。この「後置ゲート」扱いも 12.8 の確認対象 |
+| 2（GB10 既存経路が 5/5 一貫で非後退） | **未充足（#3232 の実測で再確認。2026-10-23 UTC）。#3232 で GB10 REJECT → 既定 OFF に戻した（§12.12）** | `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.5（後退あり。1024/reuse が 5/5 一貫）・§5.6（bit 同一は成立）・§5.7（未分離。ノイズ帯。§5.5 の判定は覆っていない）・`docs/perf/logs/cpu-gemm-sme-fmopa-1587/gb10/`・#3232 実測: `docs/perf/logs/sme-default-on-ab-3232/aggregate-gb10.md`（5/5 一貫の後退が `gemm 256 fresh`・`gemm 2048 reuse` の 2 セル。checksum 全一致・bitdump 一致。判定 REJECT）・`docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.13 | GB10 は SME 非対応で `kernel_enabled: false`。ツリー設計では最終確認を #3232（ON の前後比較）が担い、後退があれば #3231 を戻す。この「後置ゲート」扱いも 12.8 の確認対象 |
 | 3（unsafe 監査＋別 issue での承認） | **監査は本 PR で更新（自己点検。独立監査は PR レビューで要実施）。承認は D-C の条件付き承認にとどまる** | 12.3〜12.5・#3018 コメント 6111643437 | D-C は本更新前の方針承認のため、更新所見の受理を 12.8 で確認する |
 
 ### 12.8 所有者確認欄
@@ -282,8 +282,16 @@
 
 | 承認欄 | 状態 |
 |--------|------|
-| D-C（SME カーネルの本番化。#3018 コメント 6111643437） | 条件付き承認（unsafe 監査が条件）。#3231 で既定 ON |
+| D-C（SME カーネルの本番化。#3018 コメント 6111643437） | 条件付き承認（unsafe 監査が条件）。#3231 で既定 ON → #3232 の GB10 REJECT で既定 OFF に戻した（§12.12） |
 | 本節の更新所見の受理 | 条件つき受理（2026-10-24 所有者・https://github.com/Fandhe-AI/fandhe-ai/issues/3231#issuecomment-6369076139） |
+
+### 12.12 #3232 の GB10 REJECT による既定 OFF への復帰（2026-10-24 追記）
+
+| 項目 | 内容 |
+|------|------|
+| `SME_PRODUCTION_ENABLED` | **`false`（既定 OFF）に戻した**。#3232 の A/B で GB10 に 5/5 一貫の後退 2 セル（`gemm 256 fresh`・`gemm 2048 reuse`）。規則 `docs/perf/logs/sme-default-on-ab-3232/RULE.txt:55` どおり（2026-10-24 所有者判断） |
+| 条件 2（GB10 非後退） | 未充足のまま（後置ゲートで REJECT） |
+| §12.8・§12.11 の記録 | 所有者確認・監査要約は当時の記録として不変。本変更は定数 1 行とドリフト検出テストの反転のみで、新規 `unsafe`・`asm!` なし |
 
 ## 13. 2026-10-24 追記（イシュー #3235: m=64 専用 4 タイル SME カーネル。既定 OFF）
 

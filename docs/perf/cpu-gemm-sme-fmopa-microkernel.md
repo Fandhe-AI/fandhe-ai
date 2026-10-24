@@ -160,7 +160,7 @@ GB10（DGX Spark GB10）の CPU（Grace）は SME 非対応であり、CPU GEMM 
 
 ### 3.3 ディスパッチ結線（`crates/backend-cpu/src/gemm_blis/mod.rs`）
 
-- 単一 const ゲート `SME_PRODUCTION_ENABLED`（既定 `true`〈#3231 で ON 確定。それ以前は `false`〉。
+- 単一 const ゲート `SME_PRODUCTION_ENABLED`（既定 `false`〈#3231 で一度 `true` にしたが #3232 の GB10 REJECT により `false` へ戻した。§5.14〉。
   `TWO_D_DYNAMIC_PRODUCTION_ENABLED` と同型のロールバック機構）。
 - 純関数 `sme_shape_eligible(m_total, n, k) -> bool`（`SME_MIN_M=256`・
   `SME_MIN_N=256`・`SME_MIN_K=64`。§5.4.1 R4 参照）。
@@ -773,6 +773,8 @@ PyTorch 比（同 run 内）は gemm で 0.49〜0.74 倍から 1.03〜1.41 倍�
 - bit 同一: `production_gemm_matches_naive_and_neon_forced_bit_exact_across_thread_counts`（NN/TN/NT/bias+ReLU・スレッド {1,2,3,4,8}）と
   プロセス単位の `RAYON_NUM_THREADS` sweep（`logs/sme-default-on-3231/`）。GB10 の全出力 bit 同一は §5.6（旧 sha）を参照。
 
+> 注記（#3232）: 本節の既定 ON は #3232 の GB10 REJECT により **既定 OFF へ戻した**（§5.14。2026-10-24 所有者判断・RULE.txt:55）。本節は当時の記録で書き換えない。
+
 ### 5.11 job ごとの SME／NEON 混在分配の着手条件の判定（イシュー #3238。不成立・未着手で close）
 
 `dispatch_two_d_dynamic` は領域ごとに SME か NEON のどちらか 1 種類を選ぶ。これを job ごとに混在させる分配は、
@@ -912,3 +914,14 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
   向け再チューニング、E コア／P コア親和性制御、`gemm_blis`（直列入口）
   の SME 対応、32×32（4 タイル）版。既存 `out-of-scope-tracking.md`
   規約に従い、承認後に別 issue で追跡する。
+
+### 5.14 既定 OFF への復帰（イシュー #3232 → #3229）
+
+§5.13 の総合判定 REJECT を受け、事前登録規則 `docs/perf/logs/sme-default-on-ab-3232/RULE.txt:55`
+（REJECT／FAIL／GB10 後退ありの場合は `SME_PRODUCTION_ENABLED` を `false` に戻す 1 行とドリフト検出テストの反転を、計測記録とは別コミットで入れる）
+どおりに **`SME_PRODUCTION_ENABLED` を `false`（既定 OFF）へ戻した**（2026-10-24 所有者判断）。
+
+- 根拠: GB10 で 5/5 一貫の後退 2 セル（`gemm 256 fresh`・`gemm 2048 reuse`。`aggregate-gb10.md`）。Mac mini は到達 10 セルで ON が 5/5 速かったが、規則の合成で総合 REJECT。
+- 変更: 定数 1 行と、ドリフト検出テストの反転（`sme_production_enabled_is_true_with_neon_fallback` → `sme_production_disabled_after_gb10_reject`）のみ。
+  しきい値 `SME_MIN_M/N/K=256/256/64`・`sme_kernel_for_shape` の置換・`debug_assert!`・`GemmDriverVariant::TwoDDynamicNeon`・bit 一致テストは維持。tolerance・baseline・RULE.txt は不変。
+- OFF では `sme_kernel_for_shape` が常に `None`（NEON）で、出力 bit は #1313 以前と同一。
