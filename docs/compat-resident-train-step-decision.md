@@ -635,3 +635,12 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
   持たないため監査で補った。facade から直接数えた値ではない。
 - P7 の CUDA 同期（`synchronize_device`）は `stream_syncs` の対象外。機能確認のみで回数は未記録。
 - 残る同期点は無い（窓 0・読み出し 1）。TF32 でチェーンが FP32 厳密のまま走る理由の掘り下げは本記録の対象外。
+
+## §17 #3257 計測基盤と実測の状態（参考系列）
+
+- 目的: 0.11.0 時点の差（Mac mini の train Metal 2.133 ms 対 PyTorch MPS 0.689 ms ほか）に対し、main HEAD の常駐チェーン（`train_step_resident`＋`ResidentLoss::read`、`upload_resident`＋`predict_resident_input`）がどこまで縮めるかを、現行経路・candle・PyTorch と同じ round で並べて測る。§14 のとおり bench の P7 化のコミットはピン更新後（#3273）なので、`bench-resident-chain.patch` を runner ツリーにだけ当てる計測専用方式にした。
+- 収録済み: 事前登録規則・計測専用パッチ・ランナー `run_ab_resident_chain.sh`・判定 `judge_resident_chain_ab.py`（単体テストは CI）。置き場は `docs/perf/logs/resident-chain-ab-3257/`。
+- ローカル煙試験（M4 Max・CPU。記録に使わない）: train の loss checksum と PARAM_DIGEST、infer の checksum が reuse と chain で一致した。
+- **実機計測（Mac mini・GB10）は未実施**。結果表・比・残差の分解は未取得で、推定値も置いていない。事前表明した仮説は RULE.txt にある。
+- 限界: 公開面からはチェーンが Tape 経路へフォールバックしたかを観測できない（根拠は §16）。infer の after でも出力の D2H と同期 1 回は残る。
+- 正式系列は #3273。

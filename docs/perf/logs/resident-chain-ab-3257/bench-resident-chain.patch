@@ -1,0 +1,273 @@
+diff --git a/scripts/bench/framework-compare/bench-common/src/lib.rs b/scripts/bench/framework-compare/bench-common/src/lib.rs
+index 09ad299d9..4d6739796 100644
+--- a/scripts/bench/framework-compare/bench-common/src/lib.rs
++++ b/scripts/bench/framework-compare/bench-common/src/lib.rs
+@@ -632,7 +632,8 @@ pub fn parse_cli_from(args: &[String]) -> Result<Cli, BenchError> {
+         None => 256,
+     };
+     let mode = get("--mode").unwrap_or_else(|| "fresh".into());
+-    if mode != "fresh" && mode != "reuse" {
++    // #3257 計測専用パッチ: "chain"（常駐チェーン）を許可する。main の既定契約は fresh／reuse のまま。
++    if mode != "fresh" && mode != "reuse" && mode != "chain" {
+         return Err(BenchError::InvalidMode { value: mode });
+     }
+     // イシュー #1350: `--graph` は値付きフラグ（`--mode` と同型）。値は
+diff --git a/scripts/bench/framework-compare/bench-fandhe/src/main.rs b/scripts/bench/framework-compare/bench-fandhe/src/main.rs
+index 137c74d42..8b6a37958 100644
+--- a/scripts/bench/framework-compare/bench-fandhe/src/main.rs
++++ b/scripts/bench/framework-compare/bench-fandhe/src/main.rs
+@@ -1075,6 +1075,37 @@ fn build_model() -> Result<Sequential, Box<dyn std::error::Error>> {
+         .add_linear(D_HIDDEN, D_OUT, SEED_L2)?)
+ }
+ 
++/// #3257 計測専用: 更新後パラメータの bit 列 FNV-1a 64 を stderr へ 1 行出す。
++/// `BENCH_PARAM_DIGEST=1` のときだけ動作し、計測窓の外（終端同期後）から呼ぶ。
++/// reuse（現行経路）と chain（常駐チェーン）の更新結果が bit 一致することの確認用。
++fn emit_param_digest(
++    mode: &str,
++    device: &str,
++    params: &[impl std::borrow::Borrow<Tensor<f32>>],
++) -> Result<(), Box<dyn std::error::Error>> {
++    if std::env::var("BENCH_PARAM_DIGEST").as_deref() != Ok("1") {
++        return Ok(());
++    }
++    let mut h: u64 = 0xcbf29ce484222325;
++    let mut n_elems = 0usize;
++    for t in params {
++        let c = t.borrow().contiguous();
++        let sl = c.as_slice().ok_or("digest: param as_slice None")?;
++        for v in sl {
++            for b in v.to_bits().to_le_bytes() {
++                h ^= u64::from(b);
++                h = h.wrapping_mul(0x100000001b3);
++            }
++        }
++        n_elems += sl.len();
++    }
++    eprintln!(
++        "PARAM_DIGEST task=train mode={mode} device={device} n_tensors={} n_elems={n_elems} fnv1a64=0x{h:016x}",
++        params.len()
++    );
++    Ok(())
++}
++
+ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+     let mut model = build_model()?;
+     let (x_data, y_data) = mlp_data()?;
+@@ -1300,6 +1331,7 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+         }
+     }
+ 
++    emit_param_digest("reuse", &cli.device, &synced)?;
+     let measured = &durations[TRAIN_WARMUP..];
+     let st = stats(measured)?;
+     Record {
+@@ -1336,6 +1368,178 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+     Ok(())
+ }
+ 
++/// `train --mode chain`（#3257 計測専用。参考系列）。`run_train_reuse` と同じ構造・同じ
++/// init／warmup／計測回数で、窓の中だけを常駐チェーン（`Sequential::train_step_resident`
++/// ＋ `ResidentLoss::read`）に置き換える。`x`・`y` は窓の外（init）で 1 回だけ
++/// `Tape::upload_resident` する（PyTorch 側 `bench_py.py` が X／Y を窓の外で 1 回だけ
++/// 置くのと対称）。`init_s` は upload_resident の時間を含む。公開面からはチェーンが
++/// Tape 経路へフォールバックしたかを観測できない（RULE.txt [限界]）。
++fn run_train_chain(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
++    let model = build_model()?;
++    let (x_data, y_data) = mlp_data()?;
++
++    let init_start = Instant::now();
++    let init_tape = make_tape(&cli.device)?;
++    let mut store = model.init_device_param_store(&init_tape)?;
++    let rx = init_tape.upload_resident(&store, &x_data)?;
++    let ry = init_tape.upload_resident(&store, &y_data)?;
++    let _ = init_tape.sync_device_param_store_to_host(&store)?;
++    drop(init_tape);
++    let init_s = init_start.elapsed().as_secs_f64();
++
++    let config = SgdConfig::new(LR);
++    let mut durations = Vec::with_capacity(TRAIN_STEPS);
++    let mut last_loss = 0.0f32;
++    for _ in 0..TRAIN_STEPS {
++        let start = Instant::now();
++        let resident_loss = model.train_step_resident(&mut store, &rx, &ry, &config)?;
++        last_loss = resident_loss.read(&mut store)?;
++        durations.push(start.elapsed());
++    }
++    if !last_loss.is_finite() {
++        return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
++    }
++
++    let final_tape = make_tape(&cli.device)?;
++    let synced = final_tape.sync_device_param_store_to_host(&store)?;
++    let expected_len = model.trainable_parameters().len();
++    if synced.len() != expected_len {
++        return Err(format!(
++            "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
++            synced.len()
++        )
++        .into());
++    }
++    for t in &synced {
++        let slice = t
++            .contiguous()
++            .as_slice()
++            .ok_or("synced param as_slice() returned None")?
++            .to_vec();
++        if slice.iter().any(|v| !v.is_finite()) {
++            return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
++        }
++    }
++    emit_param_digest("chain", &cli.device, &synced)?;
++
++    let measured = &durations[TRAIN_WARMUP..];
++    let st = stats(measured)?;
++    Record {
++        framework: FRAMEWORK,
++        framework_version: VERSION,
++        task: "train",
++        device: &cli.device,
++        size: BATCH,
++        stats: st,
++        gflops: None,
++        throughput_per_s: None,
++        checksum: last_loss as f64,
++        warmup: TRAIN_WARMUP,
++        iters: measured.len(),
++        mode: "chain",
++        init_s: Some(init_s),
++        parity: None,
++        tf32: false,
++        managed: cli.managed,
++        device_checksum: false,
++        graph: cli.graph.as_deref(),
++        readout: None,
++        metal_split_k: cli.metal_split_k.as_deref(),
++        pinned_h2d: cli.pinned_h2d,
++        #[cfg(feature = "graph-step")]
++        graph_stats: cli.graph.as_ref().map(|_| current_graph_stats()),
++        #[cfg(not(feature = "graph-step"))]
++        graph_stats: None,
++    }
++    .emit(&cli.out)?;
++    Ok(())
++}
++
++/// `infer --mode chain`（#3257 計測専用。参考系列）。`run_infer_reuse` と同じ構造で、
++/// 入力を窓の外で 1 回だけ `Tape::upload_resident` し、窓の中は
++/// `Sequential::predict_resident_input` ＋ checksum とする。出力のホスト `Tensor` 化
++/// （D2H と同期 1 回）は残る。`init_s` は upload_resident の時間を含む。
++fn run_infer_chain(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
++    let model = build_model()?;
++    let batch = infer_batch()?;
++    let x_data = infer_input(batch)?;
++
++    let init_start = Instant::now();
++    let init_tape = make_tape(&cli.device)?;
++    let store = model.init_device_param_store(&init_tape)?;
++    let rx = init_tape.upload_resident(&store, &x_data)?;
++    let _ = init_tape.sync_device_param_store_to_host(&store)?;
++    drop(init_tape);
++    let init_s = init_start.elapsed().as_secs_f64();
++
++    let mut checksum = 0.0;
++    let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
++        let start = Instant::now();
++        let out = model.predict_resident_input(&store, &rx)?;
++        *sync_checksum = checksum_tensor(&out, cli.readout.as_deref())?;
++        Ok(start.elapsed())
++    };
++    for _ in 0..WARMUP_ITERS {
++        one(&mut checksum)?;
++    }
++    let mut durations = Vec::with_capacity(MEASURE_ITERS);
++    for _ in 0..MEASURE_ITERS {
++        durations.push(one(&mut checksum)?);
++    }
++    if !checksum.is_finite() {
++        return Err(format!("MEASURE_ERROR: final checksum not finite: {checksum}").into());
++    }
++
++    let final_tape = make_tape(&cli.device)?;
++    let synced = final_tape.sync_device_param_store_to_host(&store)?;
++    let expected_len = model.trainable_parameters().len();
++    if synced.len() != expected_len {
++        return Err(format!(
++            "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
++            synced.len()
++        )
++        .into());
++    }
++    for t in &synced {
++        let slice = t
++            .contiguous()
++            .as_slice()
++            .ok_or("synced param as_slice() returned None")?
++            .to_vec();
++        if slice.iter().any(|v| !v.is_finite()) {
++            return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
++        }
++    }
++
++    let st = stats(&durations)?;
++    Record {
++        framework: FRAMEWORK,
++        framework_version: VERSION,
++        task: "infer",
++        device: &cli.device,
++        size: batch,
++        stats: st,
++        gflops: None,
++        throughput_per_s: Some(1.0 / st.median_s),
++        checksum,
++        warmup: WARMUP_ITERS,
++        iters: MEASURE_ITERS,
++        mode: "chain",
++        init_s: Some(init_s),
++        parity: None,
++        tf32: false,
++        managed: cli.managed,
++        device_checksum: false,
++        graph: None,
++        graph_stats: None,
++        readout: cli.readout.as_deref(),
++        metal_split_k: cli.metal_split_k.as_deref(),
++        pinned_h2d: cli.pinned_h2d,
++    }
++    .emit(&cli.out)?;
++    Ok(())
++}
++
+ /// `train --phases`（fresh。イシュー #1009）の計測本体。`run_train` と
+ /// 同一の処理順・同一の API 呼び出し（fresh/phases 間の最終 loss 一致は
+ /// `tests::train_phases_fresh_final_loss_matches_run_train` が固定する）を
+@@ -2425,6 +2629,20 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+             .into());
+         }
+     }
++    // #3257 計測専用: chain は train／infer 専用で、--phases／--graph／--tf32／--managed／
++    // --pinned-h2d と併用しない。
++    if cli.mode == "chain"
++        && (cli.phases
++            || cli.graph.is_some()
++            || cli.tf32
++            || cli.managed
++            || cli.pinned_h2d
++            || !matches!(cli.task.as_str(), "train" | "infer"))
++    {
++        return Err("MEASURE_ERROR: --mode chain は train／infer 専用で \
++             --phases／--graph／--tf32／--managed／--pinned-h2d と併用できない（#3257）"
++            .into());
++    }
+     match (cli.task.as_str(), cli.mode.as_str(), cli.phases) {
+         ("train", "fresh", true) => run_train_phases(cli),
+         ("train", "reuse", true) => run_train_reuse_phases(cli),
+@@ -2445,6 +2663,8 @@ fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+         ("gemm", "reuse", false) => run_gemm_reuse(cli),
+         ("train", "fresh", false) => run_train(cli),
+         ("train", "reuse", false) => run_train_reuse(cli),
++        ("train", "chain", false) => run_train_chain(cli),
++        ("infer", "chain", false) => run_infer_chain(cli),
+         ("infer", "fresh", false) => run_infer(cli),
+         // イシュー #1217: `infer --mode reuse` を追加。
+         ("infer", "reuse", false) => run_infer_reuse(cli),

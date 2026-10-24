@@ -2036,6 +2036,10 @@ main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の
 
 `AB_PROFILE=macmini|gb10` で両機体の train fresh／reuse を before／after の 2 本の facade path patch で 5 round 計測する。runner ツリーへ計測専用パッチ `docs/perf/logs/dinput-skip-ab-3247/bench-var-no-grad.patch`（reuse の入力を `var_no_grad` にし、`BENCH_PARAM_DIGEST=1` で更新後パラメータの digest を出す）を当てることが前提で、precheck が行頭アンカー付き grep とパッチの逆適用チェックで確認する。macOS の bash 3.2 で動き、jq には依存しない。判定は `judge_dinput_skip_ab.py`（stdlib のみ。テストは `python3 -I judge_dinput_skip_ab_test.py`）。規則は `docs/perf/logs/dinput-skip-ab-3247/RULE.txt`。
 
+## 常駐チェーンの A/B（`run_ab_resident_chain.sh`・`judge_resident_chain_ab.py`、イシュー #3257）
+
+参考系列（正式な 6 フレームワーク同席計測は #3273）。`AB_PROFILE=macmini|gb10` で train／infer × device を、before（現行経路 `--mode reuse`）・after（常駐チェーン `--mode chain`）・candle・PyTorch の 4 腕で 5 round 計測する。runner ツリーへ計測専用パッチ `docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch`（`bench-fandhe/src/main.rs` と `bench-common/src/lib.rs` の 2 ファイル。コミットしない）を当て、1 ツリー・1 ビルド（`crates/facade` への `--config` path patch）で同じバイナリから `reuse`／`chain` を呼ぶ。判定は `judge_resident_chain_ab.py`（RULE を fail-closed に適用。`judge_resident_chain_ab_test.py` は CI で実行）。規則は同 `RULE.txt`、手順と状態は同 `README.md`。
+
 ## bench-fandhe 是正前後の新旧併記（`run_ab_bench_fandhe_symmetry.sh`・`judge_bench_fandhe_symmetry_ab.py`、イシュー #3266）
 
 #3265 の是正の前後（old=`61c69352d`・new=`40453506a`。どちらも registry の `fandhe-ai =0.11.0`）を、相手フレームワークと同じラウンドで 5 ラウンド測り、腕ごとの「同一 run 内の最速相手比」と区分を並べる。`AB_PROFILE=macmini|gb10`、`AB_GATE=0|1`（系列 A は 0、GB10 は 1 必須）、`AB_OLD_ROOT`・`AB_NEW_ROOT`・`AB_RUNNER_ROOT`（`.rev-stamp` を置いた展開ツリーの絶対パス）、Python の絶対パス（`AB_PY_TORCH`・`AB_PY_TF`／`AB_PY`）で起動する。precheck（rev-stamp と RULE の SHA、old と new の差が bench-fandhe に限ること、腕の取り違え、`bench_py.py` の sha256）が fail-closed で止める。出力は `results/raw/ab3266-<label>/run{1..5}/results-{old,new,opp,py}.jsonl`。集計器は寛容パースをせず、欠損・重複・run 不足・ゲート不成立・RULE の sha 不一致を undetermined（終了コード 2）、checksum・parity 項目の不一致を終了コード 3 にする。ADOPT／REJECT の判定はなく、腕比は参考表示。規則と手順は `docs/perf/logs/bench-fandhe-symmetry-ab-3266/`。
