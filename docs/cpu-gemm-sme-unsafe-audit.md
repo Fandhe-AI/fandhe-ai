@@ -306,6 +306,8 @@
 | ゲート | `SME_THIN_M64_ENABLED = false`（`mod.rs:3601`）。既定反転は #3236 の事前登録 A/B の ADOPT が前提。ロールバックは 1 行 |
 | 監査方法 | 実装担当による自己点検（自動運転モードで独立 security-auditor を起動できなかった）。**独立した security-auditor の読み取り専用監査は PR レビューで要実施**。承認を得たとは記載しない |
 
+→ 独立 security-auditor 監査は 2026-10-24 に実施済み。要約は §13.6（承認ではない）。
+
 ### 13.2 機械的インベントリ（差分）
 
 - 本番の `asm!` は 3 → 4 ブロック（追加: `sme_thin_m64.rs:129` の `compute_thin_m64`）。テストの `asm!` は増えない。
@@ -338,3 +340,17 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - 実機テスト（`--ignored sme_thin_m64 --test-threads=1`）: 4 件 PASS（scalar 参照との bit 一致〈ldc>16・b_stride>16 を含む〉・非正規化数・正規数から非正規化数の結果・NaN で panic なし）。
 - 非 `#[ignore]` の `sme_thin_m64_matches_naive_and_neon_bit_exact` は SME 搭載ホストでカーネルを実行し、`gemm_naive`・NEON 強制と要素単位で一致（スレッド数 {1,2,3,4,8}・Nn／Nt・C 初期値 0／非ゼロ）。
 - 未実施: Mac mini・GB10 での計測（性能は本 issue の範囲外。#3236）。x86_64 の CI で実行されるのは fall-through のテストのみ。
+
+### 13.6 独立 security-auditor 監査の要約（2026-10-24・#3233 コメント・基準 origin/main `bdfe6a624`）
+
+#3233 の独立監査（読み取り専用・SME 実機での再実行なし）の要約を転記する。**本節は監査結果の転記であり、既定 ON への承認ではない**。
+
+- **判定**: P0 0 件／P1 0 件／P2 3 件／情報 4 件。結論は「既定 OFF のままなら可、既定 ON への反転は P2 の条件つき」。
+- 所見の要旨: `sme_thin_m64.rs` の `asm!` は 1 ブロックで、`smstart`／`smstop` が同一ブロック内で対・間に脱出経路なし・clobber 全宣言・`options(nostack)` のみ。境界は asm 前の `check_bounds` と `thin_m64_drive` の `checked_*` で REQ-8 を満たす。実行スレッドごとに SVL・TPIDR2 を再確認し、lazy-ZA 保留時は `scalar_fallback` へ。既定 OFF では `try_new` も呼ばれない。
+- **P2（既定 ON へ反転する前の条件）**:
+  1. 薄型ゲートが `SME_PRODUCTION_ENABLED` に従属しない。反転時は `SME_PRODUCTION_ENABLED && SME_THIN_M64_ENABLED` へ結合する。
+  2. lazy-ZA 保留時の thin 側回帰テストが無い（`sme.rs` の dormant-ZA ヘルパーを流用して追加する）。
+  3. bit 一致の範囲は「有限値 + FPCR 既定」。#3236 の A/B に非正規化数・NaN の実機判定を含める。
+- 情報: `b_stride` のバイト換算の未検査乗算（k=1 のみ・UB なし）、`M`／`NR` の `pub` は `pub(crate)` で足りる（ほか 2 件は原文を参照）。
+- 引き継ぎ: 残留リスク L3（macOS のストリーミング中シグナル配送）と発見 e（呼び出し元 ZA 使用の検出なし）は新カーネルにも当てはまる。
+- **P2 #3 の対応状況（#3236・Mac mini 実機）**: P-BIT の `--ignored sme_thin_m64` 4 件が pass し、非正規化数 2 件・NaN 1 件を含む（`docs/perf/logs/sme-thin-m64-ab-3236/macmini/p_bit.log`）。判定範囲は、非正規化数は値一致（±0 符号は区別しない）、NaN はクラス一致で payload 非比較、FPCR は既定。`to_bits` の厳密判定は未実施。P2 #1・#2 は未対応（既定 OFF のため）。#3236 の A/B 判定は undetermined で、反転 PR は作っていない。

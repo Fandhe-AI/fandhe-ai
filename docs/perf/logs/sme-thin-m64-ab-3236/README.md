@@ -2,8 +2,9 @@
 
 ## 状態
 
-**未実測**（計測基盤と事前登録規則のみ。実機での計測・集計は未実施）。実測後に本節を「実測済み」へ更新し、判定は
-`aggregate.md`（`aggregate.py` の機械出力）と `docs/perf/cpu-gemm-sme-thin-m64-decision.md` §11 に記録する。
+**実測済み（判定: undetermined。2026-10-24・Mac mini）**。機械出力は `aggregate.md`、解釈と処置は
+`docs/perf/cpu-gemm-sme-thin-m64-decision.md` §11.1。計測は #3580 後の main（コミット `3f122311f`。`macmini/rev-stamp.txt`）で、
+RULE-amend-1（P-TREE の `SME_PRODUCTION_ENABLED` を両腕 false に訂正。計測前に追記）に従った。
 
 ## 目的
 
@@ -19,7 +20,7 @@ Mac mini（Apple M4）で OFF（main）と ON（定数 1 行を反転した計�
 | `on-arm.patch` | after 腕。`mod.rs` の `SME_THIN_M64_ENABLED` を true にする 1 行（sha256 は `RULE.txt` に固定） |
 | `orchestrate_macmini.sh` | ロック → P-TREE → P-R0 → P-BIT → ビルド → GEMM／K 格子 5 round → framework-compare A/B → 記録 run → マスク収録（`--dry-run` あり） |
 | `aggregate.py` | 厳密集計（標準ライブラリのみ。`python3 -I aggregate.py --self-test`／`python3 -I aggregate.py macmini`） |
-| `aggregate.md`・`macmini/` | 実測後に追加（`aggregate.md` は手で直さない） |
+| `aggregate.md`・`macmini/` | 実測の機械出力と収録ログ（`aggregate.md` は手で直さない） |
 | `../../../../scripts/bench/framework-compare/run_ab_sme_thin_m64_macmini_cpu.sh` | framework-compare の A/B 本体（#3232 の `run_ab_sme_default_on_cpu.sh` の派生。元は変更しない） |
 | `../../../../crates/backend-cpu/examples/cpu_sme_thin_m64_kgrid.rs` | K 格子の計時 binary |
 
@@ -44,3 +45,9 @@ Mac mini（Apple M4）で OFF（main）と ON（定数 1 行を反転した計�
 - GB10 の計測（SME 非搭載で経路が変わらない）。
 - epilogue の asm 融合・A pack の並列化・`ldc=n` への直接ストア・n%16≠0 のマスク付きストア・スレッド方針の本番化（決定記録 §8・§10）。
 - #3232（SME 既定 ON の A/B）の実測。
+
+## 実績（2026-10-24）
+
+- 転送段のロック: 01:08:28Z 取得・01:08:35Z 解放（bundle を clone し `rev-parse HEAD` とクリーン状態を確認）。計測段のロック: スクリプトが 01:08:41Z に取得し、終了後に不在を確認。
+- 転送は bundle → clone 方式（P-TREE が `.git` を使うため rsync のみは不可）。収録ログのマスク漏れ（ホスト名・ユーザー名・絶対パス）は grep で 0 件を確認した。
+- 計測後、Mac mini 側の作業ツリー・target・bundle は削除済み。
