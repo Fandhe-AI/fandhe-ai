@@ -6,6 +6,8 @@
 
 **当初想定との乖離**: 起票時は「学習 step の capture」を想定していたが、実装開始時の調査（本文書 §1）により、現行データパス（forward・backward がホスト `Tensor` の授受を含み、pageable H2D・複数の同期点を跨ぐ）では **step 全体を 1 個の graph として capture することは構造的に不可能**であることが判明した。CUDA Graph capture は「同一ストリーム上の driver 呼び出しのみで完結する区間」を要求するが、forward の `gemm_resident_rhs_act`（ホスト `Tensor` を返す＝`readback` で同期）・`mse_loss`（ホスト）・backward の `gemm_resident_lhs`（ホスト `Tensor` を返す）はいずれも同期点を含む。そのため本実装は **学習 step のうち update 区間（`BackendOps::sgd_step_device_tracked`）のみ**を capture 対象とする。
 
+**#3259 追補**: その後 #3252 で前提が揃い、step 全体の capture 設計は §8 に記録した（本節の記述は #1349 当時の事実として残す）。
+
 ## 1. 背景・実測根拠
 
 - `docs/perf/train-step-phase-breakdown.md`: backward が学習 1 step の 75〜97% を占める支配項であり、update（`device_update`）は 0.5〜0.7% に留まる
@@ -45,8 +47,8 @@
 - **推論チェーンの capture は別機構（#2115）**: 推論 forward チェーン（`predict_device_chain`）の capture は本書の update 区間 capture とは別の opt-in（`FANDHE_AI_CUDA_GRAPH_INFER`）として `crates/backend-cuda/src/graph.rs` に追加した（`docs/perf/infer-chain-graphcapture-cuda-ab.md`）。created stream の選択（§4.1）は両 opt-in の OR で決まる
 
 - **exec update**（`cuGraphExecUpdate_v2`）: `unsafe` 導入が必要（F3）
-- **forward／backward の capture**: 前提となる「forward の facade 常駐チェーン結線（#1216 Phase 2 未完了）」「backward の d_input／d_weight デバイス直接計算（CUDA の `gemm_fp32_strict_into` は #1559 で実装済みだが、ホスト入力の関数内同期を伴い capture 中は `Unsupported`）」「loss のデバイス常駐化」が未整備（F2）
-- **tape レベルの構造検出**（tape 長・形状・dtype ハッシュ）: step 全体 capture と同時に導入する対象であり、本イシューのキー（`SegmentKey`）は「パラメータ layout + SGD 設定 + 世代 + バッファ同一性」に限定
+- **forward／backward の capture**: 前提となる「forward の facade 常駐チェーン結線（#1216 Phase 2 未完了）」「backward の d_input／d_weight デバイス直接計算（CUDA の `gemm_fp32_strict_into` は #1559 で実装済みだが、ホスト入力の関数内同期を伴い capture 中は `Unsupported`）」「loss のデバイス常駐化」が未整備（F2）（#3252 で前提が揃い、設計は §8）
+- **tape レベルの構造検出**（tape 長・形状・dtype ハッシュ）: step 全体 capture と同時に導入する対象であり、本イシューのキー（`SegmentKey`）は「パラメータ layout + SGD 設定 + 世代 + バッファ同一性」に限定（step 全体のキー設計は §8.3）
 - **`bench-fandhe --graph` フラグ・GB10 実測**: #1350
 - **同期点ガードの適用範囲**: `memory.rs`（`download`／`upload`／`upload_into`／`alloc_zeroed`）・`ops.rs::release_cached_device_memory` に限定した。`gemm.rs::synchronize()`（診断専用・本番ディスパッチから呼ばれない）・`pool.rs` 内部の低レベル確保（`alloc_zeroed`／`alloc_uninit`。`CudaMemory::alloc_zeroed` 経由で既に上位ガード済み）には個別のガードを追加していない。update 区間の body（`sgd_step_device_tracked`）はこれらを呼ばないため受け入れ条件には影響しないが、将来 capture 対象を拡張する場合は再検討が必要
 - **cudarc の自動 event 管理の回避策**: 当初は「実機プローブ（§5）で必要性が判明した場合のみユーザー承認を得て実装する・本 PR では実装しない」としていたが、PR #1390 の codex-review P1 指摘（`new_stream()` 有効化時、`launch_builder` が capture 外で記録された read/write イベントへ通常フラグで待機し capture 中は禁止操作としてエラー→ordinal poison につながる）を受け、**案 A（`CudaContext::disable_event_tracking()`〈`unsafe fn`〉）を採用し実装済み**（`device.rs::CudaDevice::new`。§4.1 追記）。本クレートはこの `CudaContext` につき常に単一ストリームのみを保持し複数ストリームを実際には使わないため、cudarc のイベントベース cross-stream 同期機構はそもそも不要という前提に基づく。案 B（生ポインタ引数の launch 変種）は不要となったため対象外のまま
@@ -218,3 +220,93 @@ PR #1390 の codex-review P2 指摘（本文書 §3.1 項目 9 が引用する `
 - cudarc の自動 event 管理（ON 時のみ有効化される `cuStreamWaitEvent`）は capture と非互換であることが PR #1390 の codex-review 指摘（§3.2・§4.1 追記）で確定した。回避策（`disable_event_tracking()`）は unsafe 面の判断を伴うが、本クレートがこの `CudaContext` につき単一ストリームしか使わない前提が安全性根拠として成立するため実装・適用済み（§4.1）
 - 別スレッドが同じ ordinal の `DeviceBuffer` を drop すると `CudaSlice::drop` が capture 中の共有ストリームへ非同期解放を発行しうる問題（codex-review P1 指摘。PR #1390）に対し、`context_cache::begin_buffer_release` を `CudaBufferHandle::Drop` から呼び、返した `BufferReleaseToken` を実際の解放が完了するまで保持することで対応した（`memory.rs`。§4.2「バッファ解放の排他」参照。P0 再指摘・Bugbot High デッドロック指摘を経て `capturing_active` サブフラグによる再修正済み）
 - 「step 全体」を capture できない事実は起票時の想定との乖離であり、隠さず本文書 §0 に明記する
+
+## 8. #3259 追補: 学習ステップ全体の capture 設計（決定記録）と所有者確認
+
+親 #3258。#1350 の判定（§6。update 区間 capture は中立・既定 OFF）は**覆さない**。本節は「capture の範囲を step 全体へ広げる」別の候補を、実測前に設計として固定する記録である。`.rs`・`docs/spec`・tolerance・baseline・FMA 契約は変えない。
+
+### 8.0 結論
+
+- **(A) で確定**（所有者回答。§8.6）。step 全体の capture は**再 capture だけ**で実装し、新規 `unsafe` を足さない。opt-in・既定 OFF
+- 既定の反転は #3261 の事前登録規則で ADOPT が出た後の別 PR とする
+- §0 の「step 全体の capture は構造的に不可能」は #1349 当時の事実である。前提は #3252（`DeviceParamStore::train_step_device_chain` の区間内で同期・H2D・確保が 0。定常状態 0 件・初回 11 件を GB10 で実測。`docs/compat-resident-train-step-decision.md` §12）で揃った
+
+### 8.1 判断材料
+
+- **#1350（update 区間だけ）**: `step_total` ON/OFF 中央値比 0.9552／0.9644（ADOPT 基準 ≤ 0.95 未達）。`device_update` は中央値 0.9719 だが 5 run 中 1 run で符号反転。checksum は全セル一致。判定は中立・既定 OFF（`docs/perf/train-step-phase-breakdown.md` §16.7・§16.8）
+- **推論チェーン capture（#2115。`FANDHE_AI_CUDA_GRAPH_INFER`。#3190 で実測）**: 2026-10-20 に GB10 で**実測済み・判定は undetermined**（`docs/perf/infer-chain-graphcapture-cuda-ab.md` §3）。
+  - reuse の after/before 比 0.8610（batch 64）・0.9270（1024）・0.9761（4096）、fresh は 0.9243・0.9763・0.9955。checksum は全セル一致
+  - R1(b) で `DeviceContextCaptureInProgress` が出て ADOPT 条件 5 を満たさなかった。#3205 の再判定（2026-10-23）も undetermined（`docs/perf/infer-chain-fixed-cost-reduction-3205.md` §10）
+- **示唆（仮説）**: 固定費削減の効果はカーネル数が多い区間ほど大きい（reuse の batch 64 が最大）。step 全体は update 区間（カーネル 1 個）より launch がはるかに多い。ただし効くかどうかは実測で決める
+- **推定値の扱い**: #3258 起票時の到達目安「約 0.10〜0.15 ms」は**推定**で根拠は薄い。**合格ラインには使わない**。起票時の現状値（train CUDA 0.331 ms・candle 0.272 ms）も起票時の値であり、本書では docs 出典を確認していないため判断に使わない。合格ラインは #3261 の RULE.txt が実測前に決める
+
+### 8.2 capture の範囲と前提
+
+- 範囲は `train_step_device_chain` が 1 区間に積む forward・MSE（mean）・backward（dW・bias 勾配・ReLU マスク・d_input）・SGD の全カーネル
+- 区間の外: 入力の H2D、loss の `download`（`read_train_step_loss`。同期はこの 1 回だけ）、store のホスト側状態の更新（`step_count`・`sgd_used`・`train_chain_generation`）
+- ウォームアップで定常状態にしてから capture する。条件は次の 4 つ
+  - `TrainChainCaps` の全部品が probed
+  - `TrainChainBufs` が確定
+  - 永続ワークスペース（`CudaGemm::device_workspace`・`CudaMse::partial_workspace`）の grow が済み
+  - NVRTC のコンパイルが済み
+- capture 中の確保・grow・同期は §4.2 の同期点ガードで拒否される。§3.2 の「同期点ガードの適用範囲は update 区間 body が呼ばないものに限る」は、step 全体へ広げる際に再監査が要る。#3252 §12「窓内の隠れた確保・同期の監査」を #3260 へ申し送る
+- 初回の momentum step は `is_first_step` がカーネル引数のため 2 step 目以降と graph が分かれる。初回はウォームアップ（capture しない）に回す
+
+### 8.3 構造キー
+
+- 型は `SegmentKey` と推論側 `run_captured_linear_chain` のキーにそろえる。構成は「デバイス世代 + `config_key` + 触れる全バッファのアドレスと長さ」
+- 対象: params・勾配連結バッファ（`train_chain_grad`）・velocity、`TrainChainBufs` の層出力・dPred・d_input・mask 後勾配、loss スカラー、入力 x・目標 y、層構成（各層の `(k, n, act, bias 有無)`）
+- **世代の取り違えに注意する**。世代は 2 種ある。
+  - `context_cache::current_generation`（デバイス世代。invalidate からの回復で進む）
+  - store の `train_chain_generation`（古い loss ハンドルを拒否するため**毎 step 進む**）
+
+  キーに入れるのは**デバイス世代だけ**。`train_chain_generation` を入れると毎 step キャッシュミスになる
+- **毎 step 新規 Tape**: facade の `train_step_resident` は `tape_for` を毎回作る（`compat-resident-train-step-decision.md` §14）。キーは Tape の同一性ではなく store の永続バッファで作る。Tape は `cached_device(ordinal)` 経由で同じ context・stream を共有するため順序は保たれる
+- **x／y の再アップロードが前提になる**: 現行 `DeviceParamStore::upload_resident_input` は呼ぶたびに新しいバッファを確保する。step ごとに upload し直す使い方では x／y のアドレスが変わり、毎 step 再 capture になる。永続バッファへ `upload_into` で上書きする入口は無い。対処案は 2 つで、どちらも **#3260 の実装事項**として申し送る
+  - (i) 永続の入力 staging を graph キャッシュ側に持ち、launch 前に stream 順序の D2D コピーで詰める（ホスト同期なし）
+  - (ii) store 内部に `upload_into` で上書きする入口を足す
+
+  公開形の追加・変更が要る場合は `compat-resident-train-step-decision.md` §4 に従い別承認とする。(i) は cudarc の安全 API だけで書けるかを #3260 で確かめ、新規 `unsafe` が要るなら止めて所有者へ戻す
+- キャッシュは thread-local（`CudaGraph` は `!Send`。F4）。ordinal で分け、上限件数を持ち、世代が合わないものは evict する（推論側と同形）
+
+### 8.4 lr などのスカラー（更新方式の比較）
+
+SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_first_step` と MSE の scale はカーネル引数として graph に焼き込まれる。設定の変化は `fold_sgd_step_config_key` の `config_key` で区別する。
+
+| 案 | 内容 | 新規 `unsafe` | 長所 | 短所 |
+|---|---|---|---|---|
+| (A) 再 capture だけ（**推奨・確定**） | `config_key`／構造キーが変わったら capture と instantiate をやり直す | なし | 既存の `begin_capture`／`end_capture`／`launch` の安全 API だけで書ける。#1349 と同型 | lr を毎 step 変えるスケジューラでは毎 step 再 capture になり逆効果になりうる（§8.5 の抑止で防ぐ） |
+| (B) `cuGraphExecUpdate_v2` も使う | 引数だけ違う graph を exec update で差し替える | **要る**（cudarc では `sys` の生 FFI のみ。F3・spec 提案 H5／B-4） | lr スケジュールでも再 instantiate を避けられる | security-auditor の監査と所有者承認が要る。**未承認** |
+| (C) 見送る | step 全体の capture を実装しない | なし | 変更なし | #3258 の候補が消える |
+
+(A) では lr スケジュール下で効果が出ないことを明記する。(B) が必要になったら、実測を添えて所有者へ戻す。
+
+### 8.5 opt-in・ストリーム・fail-safe
+
+- **opt-in**: 新しい環境変数（例 `FANDHE_AI_CUDA_GRAPH_TRAIN`。名前の確定は #3260）と単一の const ゲート（既定 OFF）を設ける。`FANDHE_AI_CUDA_GRAPH_STEP`（#1349／#1350）は #1350 の判定対象と混ぜないため再利用しない。framework-compare の `bench-fandhe` は crates.io のピン版なので届くのは環境変数のみ（F8）
+- **created stream とイベント追跡**: capture は legacy stream では不可（F1）。新しい opt-in を `device.rs` が created stream を選ぶ OR 条件（`step_graph_mode`・`infer_graph_enabled`）に加える。最初のデバイス初期化より前に設定が要り、ordinal ごとに固定される。`disable_event_tracking()`（§4.1。既存の `unsafe` で新規ではない）は適用済み。**既定を反転すると全 CUDA 利用者の既定ストリームとイベント追跡が変わる**（`infer-chain-graphcapture-cuda-ab.md` §1）ため、反転は ADOPT 後の別 PR で影響評価を含める
+- **fail-safe**
+  - キーを作れない・ウォームアップ未了・capture 不可の場合は `Ok(None)` 相当で、**capture しない既存のチェーン**へ進む（Tape 経路へは落とさず `Unsupported` を表に出さない）
+  - capture 途中の失敗は `end_capture` で破棄する。エラーの意味は §4.7 と `train_chain.rs` のモジュール doc「失敗の境界」にそろえる。書き込み前の失敗は poison しない。replay の `graph.launch()` 失敗は書き込み後の失敗として poison する
+  - 別スレッドの capture との衝突は #3205 の `wait_device_capture_idle`（待ち上限つき）と同じ扱いにする。推論側 R1(b) の欠陥を繰り返さないよう、並列テストを #3260 の受入に含める
+  - 再 capture が続く場合に備え、キーが連続して変わったら capture をやめて既存チェーンへ戻す抑止を案とする。回数は #3260 で決める（ガードレール閾値には当たらない）
+  - 失敗トークン（A08）は `_tracked` の登録と loss 読み出し後の再検査をそのまま使う
+- **数値**: 同じカーネルを同じ順に再生するだけで FMA 契約と結合順序は変わらない。graph 経路と非 graph 経路は **bit 一致**を受入にする（#1350／#1480 と同じ 2 プロセス比較）。tolerance・baseline は変えない
+
+### 8.6 所有者確認の転記
+
+| 項目 | 内容 | 状態 |
+|---|---|---|
+| (A) 再 capture だけ・新規 `unsafe` なし・既定 OFF | 推奨 | **確定** |
+| (B) `cuGraphExecUpdate` を使う | 必要になったら実測を添えて所有者へ戻す | **未承認** |
+| (C) 見送り | 採らない | - |
+| 既定の反転 | 事前登録規則の ADOPT が前提 | **未承認**（ADOPT 後に別判断） |
+| 公開形の追加・新規 `unsafe` | 承認範囲外 | **未承認** |
+
+- 出所: イシュー #3259 の所有者コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3259#issuecomment-6111775631>（ID `IC_kwDOTuUCJc8AAAABbEpLjw`）。`createdAt` は 2026-10-11T17:35:55Z（UTC。JST では 2026-10-12 02:35。コメント本文の記載日は 2026-10-12）。判断待ちの issue について「全て推奨で」と回答し、本 issue は (A) で確定
+- tolerance・baseline・FMA 契約は不変
+
+### 8.7 申し送り
+
+- **#3260（既定 OFF で実装）**: x／y の上書き入口（§8.3）、同期点ガードの再監査（§8.2）、並列 capture の衝突テスト、新 opt-in と created stream の OR、`crates/backend-cuda/src/graph.rs` 冒頭 `//!`（「update 区間のみ」）の更新（本 issue は `.rs` を変えないためここでは直さない）。`unsafe` を足す場合は security-auditor 監査必須（足さないのが前提）
+- **#3261（GB10 A/B）**: 実測前に RULE.txt を固定する。合格ラインはそこで決め、推定値は使わない。#1350 の基準（中央値比 ≤ 0.95・5/5 符号一貫・checksum 一致）は前例として引くのみ。bit ダンプの diff を含める

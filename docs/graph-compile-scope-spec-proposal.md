@@ -169,3 +169,7 @@ Keras 風 `Sequential::compile(optimizer, loss)`（学習設定 API）は別物�
 ## #3385 追補
 
 B-1 の CUDA／Metal の opt-in setter 2 対を facade に公開した（R1 は #3114 コメントで承認済み・R2 の監査結果は `docs/facade-graph-tier-b-optin-exposure-decision.md` §13）。このため H2 の「facade 再公開 0 件」とその確認コマンドの結果は #3385 以降は古くなる（本文は書き換えない）。既定は OFF のまま。
+
+## #3259 追補
+
+B-3（学習 step 部分）と B-5 の前提ゲートは #3252 で満たされた。学習 step 全体の capture 設計と (A)（再 capture だけ・新規 `unsafe` なし・既定 OFF）の確定は `docs/backend-cuda-graph-step-capture-design.md` §8。§2 H4 の「GB10 未実測」は #3190 で 2026-10-20 に実測済み（verdict は undetermined。`docs/perf/infer-chain-graphcapture-cuda-ab.md` §3）で、本文は書き換えない。
