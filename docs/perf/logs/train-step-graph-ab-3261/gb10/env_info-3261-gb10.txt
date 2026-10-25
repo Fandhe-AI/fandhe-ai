@@ -1,0 +1,17 @@
+profile=gb10
+host=masked
+uname=Linux 6.17.0-1031-nvidia aarch64
+gpu=NVIDIA GB10
+nvidia_driver=580.173.02
+rustc=rustc 1.97.1 (8bab26f4f 2026-07-14)
+rule_sha256=d0ec1c0a71fef6ac88c32e1d71cbc03c91670cc7711c3c5f1af763bdb8ed165e
+patch_sha256=92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819
+bench_py_sha256=9fd2c08f37d66b5bb41ececab8a5b3daaa36b55609770502ed3b35ae2ce2409b
+torch_python=masked
+rev_stamp_head_runner=6a97087ac7e29381eb932584783dc2495bd889e5
+bin_sha256=b22ef81102609610eb03b0110527193cd59673834b598b7ba8c9ebcaaaef40f7
+bin_candle_sha256=6af71bf5302e00e8dd57d16b625e87758926e3dc6c082e143b1a310597f81071
+arms=same_binary_env_toggle
+precheck=assert
+rounds=5
+tf32=off

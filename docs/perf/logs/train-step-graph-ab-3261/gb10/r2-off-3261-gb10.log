@@ -1,0 +1,100 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/cuda_graph_train_step_bit_identity.rs (<home>/work/ab-3261/runner/target-ab-train-graph-3261-gb10-gates/release/deps/cuda_graph_train_step_bit_identity-ca6f52c691a0e530)
+
+running 1 test
+BITS 2layer-plain step 0 loss 3eb2645f
+BITS 2layer-plain step 1 loss 3eaf0234
+BITS 2layer-plain step 2 loss 3eabc175
+BITS 2layer-plain step 3 loss 3ea89e7d
+BITS 2layer-plain step 4 loss 3ea5992f
+BITS 2layer-plain step 5 loss 3ea2ad93
+BITS 2layer-plain step 6 loss 3e9fd91b
+BITS 2layer-plain step 7 loss 3e9d1aa3
+BITS 2layer-plain step 8 loss 3e9a7045
+BITS 2layer-plain step 9 loss 3e97da08
+BITS 2layer-plain final param 0 len 200704 fnv b8d7d4073c2fcd36
+BITS 2layer-plain final param 1 len 256 fnv 741fb597bed1baed
+BITS 2layer-plain final param 2 len 2560 fnv 17b3f1ced461030f
+BITS 2layer-plain final param 3 len 10 fnv 385491307d4387ea
+BITS 2layer-momentum step 0 loss 3eb2645f
+BITS 2layer-momentum step 1 loss 3eaf01e4
+BITS 2layer-momentum step 2 loss 3ea92634
+BITS 2layer-momentum step 3 loss 3ea1702a
+BITS 2layer-momentum step 4 loss 3e98770a
+BITS 2layer-momentum step 5 loss 3e8ec93b
+BITS 2layer-momentum step 6 loss 3e84cf9f
+BITS 2layer-momentum step 7 loss 3e75a1cd
+BITS 2layer-momentum step 8 loss 3e61f73d
+BITS 2layer-momentum step 9 loss 3e4ed83d
+BITS 2layer-momentum final param 0 len 200704 fnv adc50011dd8e707b
+BITS 2layer-momentum final param 1 len 256 fnv f2aaa44ed01e7c19
+BITS 2layer-momentum final param 2 len 2560 fnv 8559154d82087b85
+BITS 2layer-momentum final param 3 len 10 fnv 8bfeb82a41e1b294
+BITS 2layer-nesterov step 0 loss 3eb2645f
+BITS 2layer-nesterov step 1 loss 3eac06aa
+BITS 2layer-nesterov step 2 loss 3ea395db
+BITS 2layer-nesterov step 3 loss 3e99ca80
+BITS 2layer-nesterov step 4 loss 3e8f432c
+BITS 2layer-nesterov step 5 loss 3e847130
+BITS 2layer-nesterov step 6 loss 3e733be3
+BITS 2layer-nesterov step 7 loss 3e5df4b2
+BITS 2layer-nesterov step 8 loss 3e4949a7
+BITS 2layer-nesterov step 9 loss 3e3548b7
+BITS 2layer-nesterov final param 0 len 200704 fnv 06c597818b9ddca3
+BITS 2layer-nesterov final param 1 len 256 fnv e98682c698457fd7
+BITS 2layer-nesterov final param 2 len 2560 fnv 0aced9be13f51171
+BITS 2layer-nesterov final param 3 len 10 fnv 103ce38a727b34f3
+BITS 3layer-plain step 0 loss 3eae49ed
+BITS 3layer-plain step 1 loss 3ead8577
+BITS 3layer-plain step 2 loss 3eacc60f
+BITS 3layer-plain step 3 loss 3eac0bb3
+BITS 3layer-plain step 4 loss 3eab558f
+BITS 3layer-plain step 5 loss 3eaaa336
+BITS 3layer-plain step 6 loss 3ea9f43c
+BITS 3layer-plain step 7 loss 3ea94802
+BITS 3layer-plain step 8 loss 3ea89f7a
+BITS 3layer-plain step 9 loss 3ea7fae5
+BITS 3layer-plain final param 0 len 100352 fnv ed9de3e2cedbdb77
+BITS 3layer-plain final param 1 len 128 fnv 39ed606cda1734b5
+BITS 3layer-plain final param 2 len 8192 fnv 847c6efa7a1065a3
+BITS 3layer-plain final param 3 len 64 fnv 1943145c473f8e32
+BITS 3layer-plain final param 4 len 640 fnv 4fb55dacec57311a
+BITS 3layer-plain final param 5 len 10 fnv f84e0f6f2015fc4e
+BITS 3layer-momentum step 0 loss 3eae49ed
+BITS 3layer-momentum step 1 loss 3ead8558
+BITS 3layer-momentum step 2 loss 3eac2d7e
+BITS 3layer-momentum step 3 loss 3eaa5ff2
+BITS 3layer-momentum step 4 loss 3ea836e3
+BITS 3layer-momentum step 5 loss 3ea5cf8e
+BITS 3layer-momentum step 6 loss 3ea34257
+BITS 3layer-momentum step 7 loss 3ea0ad9b
+BITS 3layer-momentum step 8 loss 3e9e15b5
+BITS 3layer-momentum step 9 loss 3e9b873b
+BITS 3layer-momentum final param 0 len 100352 fnv 07ee09f8cf8e28ea
+BITS 3layer-momentum final param 1 len 128 fnv b09c40cb668ab7a4
+BITS 3layer-momentum final param 2 len 8192 fnv d2bc959f8be725b3
+BITS 3layer-momentum final param 3 len 64 fnv dbe16d86f57137b4
+BITS 3layer-momentum final param 4 len 640 fnv be05b9f0ca627a9a
+BITS 3layer-momentum final param 5 len 10 fnv 56b74e1be81716b2
+BITS 3layer-nesterov step 0 loss 3eae49ed
+BITS 3layer-nesterov step 1 loss 3eacd711
+BITS 3layer-nesterov step 2 loss 3eaae0cf
+BITS 3layer-nesterov step 3 loss 3ea885e3
+BITS 3layer-nesterov step 4 loss 3ea5e7eb
+BITS 3layer-nesterov step 5 loss 3ea321b2
+BITS 3layer-nesterov step 6 loss 3ea05522
+BITS 3layer-nesterov step 7 loss 3e9d84db
+BITS 3layer-nesterov step 8 loss 3e9abf32
+BITS 3layer-nesterov step 9 loss 3e98077c
+BITS 3layer-nesterov final param 0 len 100352 fnv bb4b34cf8639101a
+BITS 3layer-nesterov final param 1 len 128 fnv 12b7f5296e00bdb8
+BITS 3layer-nesterov final param 2 len 8192 fnv 0ebfab52c61684f2
+BITS 3layer-nesterov final param 3 len 64 fnv d68ad2547dfbec2b
+BITS 3layer-nesterov final param 4 len 640 fnv 0aeec4a355b8b92c
+BITS 3layer-nesterov final param 5 len 10 fnv c56a41624c83539a
+STATS captured=0 replayed=0 fallbacks=0
+test dump_bits_for_two_process_diff ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.59s
+
+rc=0

@@ -376,3 +376,42 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 
 - A/B の「after」は `FANDHE_AI_CUDA_GRAPH_TRAIN=1`、「before」は未設定。x／y を窓の外で 1 回だけ upload する計測ランナーでは replay が続く。step ごとに upload し直すランナーでは再 capture が走り、3 回で既存チェーンへ戻る
 - 実測前に RULE.txt を固定する（§8.7）。bit ダンプの diff は `cuda_graph_train_step_bit_identity.rs::dump_bits_for_two_process_diff` を使える
+
+## 8.9 #3261 GB10 A/B の結果（学習ステップ全体の capture）
+
+事前登録規則 `docs/perf/logs/train-step-graph-ab-3261/RULE.txt`（sha256 `d0ec1c0a…`）に従い、`FANDHE_AI_CUDA_GRAPH_TRAIN` なし（off）／`=1`（on）を GB10 の train CUDA（size=64・TF32 OFF）で 5 round 計測した。生ログ・JSONL・前提ゲートのログは `docs/perf/logs/train-step-graph-ab-3261/gb10/`（ホスト名・ホームパスをマスク済み）、判定出力は同ディレクトリの `judge-3261.md`／`judge-3261.exit` にある。
+
+### 8.9.1 実施条件
+
+| 項目 | 内容 |
+|------|------|
+| 実施日・ノード | 2026-10-25（UTC。実機ロック取得 22:55Z・解除 23:07Z）・GB10 ノード `spark-939e`（GPU 使用率 0%・load1 < 1.0。実ホスト名は `.local.md` のみ） |
+| runner | `6a97087ac7e29381eb932584783dc2495bd889e5`（`.rev-stamp` 2 行目 `dirty=0`）に `bench-resident-chain.patch`（sha256 `92d0a8d4…`）だけを適用。on／off は同一バイナリ（`bin_sha256` 1 つ） |
+| torch | 2.14.0+cu130（専用 venv。`gb10/torch-version.txt`）。candle は同ハーネスの `candle-core =0.11.0` |
+| 専有ゲート | 5 round すべて `gate=pass`（load1 0.09〜0.26）。`skipped` ログは空 |
+
+### 8.9.2 判定: **ADOPT**（`judge_train_graph_ab.py` の終了コード 0）
+
+| セル | off 中央値 ms | on 中央値 ms | ratio | ratio_r（5 round） | 相手最速÷off | 相手最速÷on |
+|---|---|---|---|---|---|---|
+| chain（判定） | 0.1347 | 0.1126 | 0.836 | 0.839, 0.839, 0.836, 0.833, 0.833 | 2.03x | 2.42x |
+| reuse（対照） | 0.2769 | 0.2625 | 0.948 | 0.953, 0.958, 0.947, 0.959, 0.942 | 0.99x | 1.04x |
+| fresh（対照） | 0.5058 | 0.4915 | 0.972 | 0.972, 0.922, 0.972, 0.936, 1.045 | 0.54x | 0.56x |
+
+- ADOPT 条件 1〜5 をすべて満たす: 専有ゲート全通過・R0〜R2 合格（R0: 3＋2＋1 passed、R1: facade 1 passed・backend-cuda 8 passed、R2: 2 プロセスの BITS 差分が空。全ログ `rc=0`）・hard 条件（chain・reuse・fresh とも checksum 0.080541 が全 run で一致、chain・reuse は PARAM_DIGEST も一致〈chain は `fnv1a64=0xfb061246845ce46f`〉）・chain の ratio 0.836 ≦ 0.95 かつ 5/5 round で ratio_r < 1.00・reuse／fresh の ratio ≦ 1.00。
+- 相手比は同一 round の candle・torch の最速（本計測では全 round で candle）を fandhe の 5 round 中央値で割った参考値で、判定には使っていない。candle の中央値は 0.2703〜0.2746 ms（torch は 0.998〜1.601 ms）。
+- #3257 の基準（chain 0.1343 ms・candle 比 2.02x）に対し、off の chain は 0.1347 ms・2.03x で再現した。on で 0.1126 ms・2.42x。
+- 事前表明した到達目安 0.10〜0.15 ms は根拠の薄い**推定**であり合格ラインではない。on の 0.1126 ms はこの範囲に入ったが、判定には使っていない。
+- 帰属: chain の改善が capture の効果。reuse・fresh は bench の経路が `train_step_device_chain` に届かないため、効果は created stream 化とイベント追跡の無効化（stream 変更）だけによる。fresh の ratio_r には 1.045 の round が 1 つあり（5/5 符号一貫は fresh には課していない）、中央値では中立〜わずかな改善である。
+
+### 8.9.3 既定は反転していない
+
+- ADOPT でも `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。既定の反転は §8.6 で所有者判断（未承認）とされ、全 CUDA 利用者の stream・イベント追跡の変更と、lr スケジューラ下で 3 step 後に既存チェーンへ戻る点の影響評価を伴う別 PR を要する。
+- #3261 の本文は ADOPT 時に反転 PR を求めていたが、後に出た所有者の指示と本節の決定記録（§8.6）を優先し、本件では反転しない。
+- tolerance・baseline・FMA 契約・依存ピンは変更していない（コード変更なし）。
+
+### 8.9.4 限界
+
+- bench からは capture が replay されたかを観測できない。R1（facade の bit 一致テストと backend-cuda の 8 テスト）で結線を補っているが、R1 の形状は bench の形状と同一ではない。
+- checksum の一致は bit 同一性の証明ではない。PARAM_DIGEST と R2（2 プロセスの bit 比較）で補っている。
+- 単一機体（GB10）・train CUDA・size=64 の結果で、infer・CPU・Metal・他形状には及ばない。正式な 6 フレームワーク同席計測は #3273。
