@@ -45,7 +45,7 @@ doc: docs/backend-cuda-graph-step-capture-design.md §8（§8.8.5 申し送り�
 - R0（非後退。環境変数なし／各 opt-in なし）: train_step_chain_diag_tests_3252（3 passed）・graph_capture_real_device（2 passed）・graph_capture_real_device_optin_off（1 passed）。
 - R1（結線の証明。bench からは train_graph_stats を観測できないため必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1）:
   facade の cuda_graph_train_step_bit_identity::in_process_capture_matches_plain_chain_bit_exact（--exact・1 passed。組み合わせごとに captured 1・replayed 8・fallbacks 0 をテスト内で表明）と、
-  backend-cuda の train_step_graph_diag_tests_3260（--test-threads=1・7 passed）。
+  backend-cuda の train_step_graph_diag_tests_3260（--test-threads=1・8 passed）。
 - R2（2 プロセスの bit 一致）: dump_bits_for_two_process_diff を環境変数なしと =1 で 1 回ずつ実行し、BITS 行を比較して差が空であること。BITS 行が 0 なら不合格。
 - 各ログに rc= 行（終了コード）を残す。
 

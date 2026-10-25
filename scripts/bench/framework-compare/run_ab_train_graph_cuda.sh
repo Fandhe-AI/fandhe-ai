@@ -235,11 +235,12 @@ fi
 # 専有ゲート。load1<1.0 かつ GPU 使用率 0% を 3 サンプル連続。
 gate_ok_once() {
   local l1 util n
-  l1="$(uptime | sed -n 's/.*load average[s]*: *\([0-9.]*\).*/\1/p')"
-  [[ "$l1" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
-  [[ "$(awk -v a="$l1" -v t="$LOAD_GATE" 'BEGIN{print (a<t)?1:0}')" == "1" ]] || return 1
   n=0
   while [[ "$n" -lt 3 ]]; do
+    # 各サンプルで load1 と GPU 使用率の両方を確認する（RULE.txt: 3 サンプル連続）
+    l1="$(uptime | sed -n 's/.*load average[s]*: *\([0-9.]*\).*/\1/p')"
+    [[ "$l1" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+    [[ "$(awk -v a="$l1" -v t="$LOAD_GATE" 'BEGIN{print (a<t)?1:0}')" == "1" ]] || return 1
     util="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d ' ')"
     [[ "$util" == "0" ]] || return 1
     n=$((n + 1))

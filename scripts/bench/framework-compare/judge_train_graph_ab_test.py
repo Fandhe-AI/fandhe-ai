@@ -76,6 +76,13 @@ class Fixture:
 
 
 class JudgeTest(unittest.TestCase):
+    def test_pregate_3260_count_matches_source(self):
+        src = os.path.join(HERE, "..", "..", "..", "crates", "backend-cuda", "src",
+                           "train_step_graph_diag_tests_3260.rs")
+        with open(src, encoding="utf-8") as f:
+            n = sum(1 for line in f if line.strip() == "#[test]")
+        self.assertEqual(judge.PREGATES["r1-3260"], n)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.fx = Fixture(self.tmp)

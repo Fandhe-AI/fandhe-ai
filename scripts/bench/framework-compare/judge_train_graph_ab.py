@@ -33,7 +33,7 @@ PREGATES = {
     "r0-real-device": 2,
     "r0-optin-off": 1,
     "r1-facade": 1,
-    "r1-3260": 7,
+    "r1-3260": 8,
     "r2-off": 1,
     "r2-on": 1,
 }
