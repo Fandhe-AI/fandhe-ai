@@ -136,7 +136,10 @@ class JudgeTest(unittest.TestCase):
     def test_gate_fail_undetermined(self):
         self.fx.build()
         p = f"{self.tmp}/load_gate-{LABEL}-cuda.log"
-        open(p, "w").write(open(p).read().replace("round3 dev=cuda gate=pass gate_ok=1", "round3 dev=cuda gate=fail gate_ok=0"))
+        with open(p) as fh:
+            txt = fh.read()
+        with open(p, "w") as fh:
+            fh.write(txt.replace("round3 dev=cuda gate=pass gate_ok=1", "round3 dev=cuda gate=fail gate_ok=0"))
         self.assertEqual(self.run_judge(), "UNDETERMINED")
 
     def test_rule_sha_mismatch_undetermined(self):

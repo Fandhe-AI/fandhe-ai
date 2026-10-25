@@ -232,7 +232,7 @@ if [[ "$PREGATE_OK" != "1" ]]; then
 fi
 
 # ---- 計測 ----
-# 専有ゲート。load1<1.0 かつ GPU 使用率 0% を 3 サンプル連続。
+# 専有ゲート。load1<1.0 かつ GPU 使用率 0% を 30 秒間隔で 3 サンプル連続（RULE.txt [専有ゲート]）。
 gate_ok_once() {
   local l1 util n
   n=0
@@ -244,7 +244,7 @@ gate_ok_once() {
     util="$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d ' ')"
     [[ "$util" == "0" ]] || return 1
     n=$((n + 1))
-    if [[ "$n" -lt 3 ]]; then sleep 2; fi
+    if [[ "$n" -lt 3 ]]; then sleep 30; fi
   done
   return 0
 }
