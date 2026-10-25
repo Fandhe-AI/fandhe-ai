@@ -1,0 +1,10 @@
+dev=cpu run 1: 13:35  up 13 days, 13:09, 1 user, load averages: 2.69 3.29 2.34
+dev=cpu run 2: 13:35  up 13 days, 13:09, 1 user, load averages: 2.69 3.29 2.34
+dev=cpu run 3: 13:35  up 13 days, 13:09, 1 user, load averages: 2.69 3.29 2.34
+dev=cpu run 4: 13:35  up 13 days, 13:09, 1 user, load averages: 2.69 3.29 2.34
+dev=cpu run 5: 13:35  up 13 days, 13:09, 1 user, load averages: 2.64 3.27 2.34
+dev=metal run 1: 13:35  up 13 days, 13:09, 1 user, load averages: 2.59 3.25 2.33
+dev=metal run 2: 13:35  up 13 days, 13:09, 1 user, load averages: 2.62 3.24 2.34
+dev=metal run 3: 13:35  up 13 days, 13:09, 1 user, load averages: 2.62 3.24 2.34
+dev=metal run 4: 13:35  up 13 days, 13:09, 1 user, load averages: 2.62 3.24 2.34
+dev=metal run 5: 13:35  up 13 days, 13:09, 1 user, load averages: 2.57 3.22 2.34

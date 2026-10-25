@@ -1,0 +1,1 @@
+PARAM_DIGEST task=train mode=reuse device=cuda n_tensors=4 n_elems=203530 fnv1a64=0xfb061246845ce46f

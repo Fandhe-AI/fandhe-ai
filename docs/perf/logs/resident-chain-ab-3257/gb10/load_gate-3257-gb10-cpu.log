@@ -1,0 +1,6 @@
+series=official threshold=1.0 rule_threshold=1.0 precheck=assert
+round1 dev=cpu gate=pass gate_ok=1 threshold=1.0 waited_s=150 load1=0.82
+round2 dev=cpu gate=pass gate_ok=1 threshold=1.0 waited_s=0 load1=0.83
+round3 dev=cpu gate=pass gate_ok=1 threshold=1.0 waited_s=0 load1=0.83
+round4 dev=cpu gate=pass gate_ok=1 threshold=1.0 waited_s=0 load1=0.85
+round5 dev=cpu gate=pass gate_ok=1 threshold=1.0 waited_s=0 load1=0.85
