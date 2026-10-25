@@ -1116,6 +1116,29 @@ fn cuda_graph_infer_optin_is_reachable_via_facade() {
     assert_eq!(count("override_infer_graph_for_scope"), 0);
 }
 
+/// イシュー #3260: 学習 step 全体の Graph capture（環境変数 `FANDHE_AI_CUDA_GRAPH_TRAIN` だけで
+/// opt-in する内部機構）は facade の公開面に出ない。API setter・診断カウンタ・テスト専用 override・
+/// 計画/層の型を再公開しないこと（公開形の追加は未承認。決定記録
+/// `docs/backend-cuda-graph-step-capture-design.md` §8.6）を、`lib.rs` のソース走査で固定する。
+#[test]
+fn train_graph_capture_internals_are_not_exposed_by_the_facade() {
+    let src = include_str!("../src/lib.rs");
+    let count = |needle: &str| src.matches(needle).count();
+    for needle in [
+        "train_graph_enabled",
+        "override_train_graph_for_scope",
+        "inject_train_capture_failure_for_scope",
+        "TrainGraphStats",
+        "train_graph_stats",
+        "set_cuda_graph_train",
+        "TrainChainCapturePlan",
+        "TrainChainCaptureLayer",
+        "train_chain_captured",
+    ] {
+        assert_eq!(count(needle), 0, "{needle} は facade に出さない");
+    }
+}
+
 /// `lib.rs` ソースに対する B-1（elementwise 融合）の公開面検査。違反の
 /// 一覧を返す（空なら適合）。否定ガードが本当に効くことは下の自己テスト
 /// （正のプローブ）で示す（stable rustdoc は compile_fail のコードを照合

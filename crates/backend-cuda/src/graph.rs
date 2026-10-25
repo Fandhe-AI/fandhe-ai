@@ -28,6 +28,17 @@
 //! `docs/perf/infer-chain-graphcapture-cuda-ab.md`・
 //! `docs/inference-chain-single-sync-design.md` §11。
 //!
+//! # 学習 step 全体の capture（イシュー #3260。さらに別機構）
+//!
+//! 上の update 区間のみの capture は効果が中立と判定され既定 OFF のまま（design doc §6）。
+//! #3252 で forward・MSE・backward・SGD の全カーネルが同期なしの 1 区間に並ぶようになったため、
+//! その区間全体を 1 本の graph へ capture・再生する **3 つ目の opt-in** を持つ
+//! （`run_captured_train_chain`・opt-in は [`train_graph_enabled`]・環境変数
+//! `FANDHE_AI_CUDA_GRAPH_TRAIN`・既定 OFF・API setter なし）。方式は (A) 再 capture だけ
+//! （`cuGraphExecUpdate` は使わず新規 `unsafe` なし。design doc §8）。stream 種別の決定は
+//! 学習 update・推論と共通の OR（`device.rs`）。キャッシュ（`TRAIN_GRAPHS`）・診断カウンタ
+//! （[`TrainGraphStats`]）・抑止（`TrainCaptureThrottle`）は他の 2 機構と独立。
+//!
 //! # opt-in フラグと共有ストリーム（`device.rs` との契約）
 //!
 //! `STEP_GRAPH_MODE` は 3 値（`GraphMode::Off`／`GraphMode::StreamOnly`／
@@ -66,7 +77,8 @@ use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{
-    BackendOps, DispatchFailureCell, SegmentKey, SegmentRun, SgdStepConfig, Tensor,
+    BackendOps, DeviceMatrixLayout, DispatchFailureCell, MseReduction, SegmentKey, SegmentRun,
+    SgdStepConfig, Tensor, TrainChainCapturePlan,
 };
 
 use crate::context_cache;
@@ -1148,6 +1160,621 @@ pub(crate) fn run_captured_linear_chain(
         }
     }
 }
+// ============================================================
+// 学習 step 全体の capture（イシュー #3260。別機構・opt-in・既定 OFF）
+// ============================================================
+//
+// `BackendOps::train_chain_captured`（CUDA 実装は `ops.rs`）の実体。forward・MSE・backward・SGD
+// の全カーネルを 1 本の graph へ capture し、2 step 目以降は graph launch 1 回で再生する。
+// 決定記録は `docs/backend-cuda-graph-step-capture-design.md` §8（方式 (A) 再 capture だけ・
+// 新規 `unsafe` なし・既定 OFF）。update 区間だけの capture（上の `STEP_GRAPHS`・#1349）とは別機構で、
+// opt-in・キャッシュ・診断カウンタを共有しない（stream 種別の決定だけは `device.rs` が OR で共有）。
+
+/// 学習 step 全体 capture の既定値（**既定 OFF**）。反転は #3261 の GB10 A/B で ADOPT と判定された後の
+/// 別 PR に限る（反転すると `device.rs` の created stream 選択にも波及し、全 CUDA 利用者の
+/// 既定ストリームが変わるため）。
+pub(crate) const TRAIN_GRAPH_DEFAULT_ENABLED: bool = false;
+
+/// 環境変数 `FANDHE_AI_CUDA_GRAPH_TRAIN` の値と既定値から opt-in を決める純粋関数（`std::env` を
+/// 読まないため並列テストで安全）。許容値は `1`／`true` の完全一致のみで、それ以外は fail-closed で
+/// OFF（OWASP A03。値をログ・エラー文へエコーしない）。未設定は `default`。
+fn resolve_train_enabled(env: Option<&str>, default: bool) -> bool {
+    match env {
+        Some(raw) => matches!(raw, "1" | "true"),
+        None => default,
+    }
+}
+
+static TRAIN_ENV_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// override を含まない opt-in 判定（環境変数はプロセス生存期間中 1 回だけ読む）。
+/// `device.rs::CudaDevice::new` が created stream を選ぶ判断に使う（stream 種別は ordinal ごとに
+/// sticky なため、スレッドローカルの test override を混ぜない）。API setter は持たない
+/// （公開形の追加は未承認。`docs/backend-cuda-graph-step-capture-design.md` §8.6）。
+///
+/// `internal-diagnostics` feature 下では `device.rs` 側の分岐が cfg で除外され呼ばれなくなる
+/// （`infer_graph_stream_requested` と同じ）。
+#[cfg_attr(feature = "internal-diagnostics", allow(dead_code))]
+pub(crate) fn train_graph_stream_requested() -> bool {
+    *TRAIN_ENV_ENABLED.get_or_init(|| {
+        resolve_train_enabled(
+            std::env::var("FANDHE_AI_CUDA_GRAPH_TRAIN").ok().as_deref(),
+            TRAIN_GRAPH_DEFAULT_ENABLED,
+        )
+    })
+}
+
+thread_local! {
+    /// テスト専用の thread-local override（[`override_train_graph_for_scope`]）。
+    static TRAIN_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    /// テスト専用の capture 失敗注入（残り回数。[`inject_train_capture_failure_for_scope`]）。
+    static TRAIN_INJECT_FAILURES: Cell<u32> = const { Cell::new(0) };
+}
+
+/// 学習 step 全体の capture が有効か（override > 環境変数 > 既定 const）。
+/// `CudaBackendOps::train_chain_captured` の最初の判定。
+pub fn train_graph_enabled() -> bool {
+    TRAIN_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or_else(train_graph_stream_requested)
+}
+
+/// [`override_train_graph_for_scope`] の RAII ガード。drop で直前の値へ戻す。thread-local を
+/// 書き換えるため `!Send`（[`InferGraphOverrideGuard`] と同型）。
+#[must_use = "ガードを drop すると override が解除される"]
+pub struct TrainGraphOverrideGuard {
+    prev: Option<bool>,
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for TrainGraphOverrideGuard {
+    fn drop(&mut self) {
+        let prev = self.prev;
+        let _ = TRAIN_OVERRIDE.try_with(|c| c.set(prev));
+    }
+}
+
+/// 同一プロセス内で capture あり／なしを比較する実機テスト専用に、現スレッドの
+/// [`train_graph_enabled`] を上書きする。**stream 種別は変えない**（created stream 化は環境変数で
+/// 起動時に決まる）ため、`true` を指定しても legacy stream 上では `Ok(None)`（不適用）になる。
+#[doc(hidden)]
+pub fn override_train_graph_for_scope(enabled: bool) -> TrainGraphOverrideGuard {
+    let prev = TRAIN_OVERRIDE.with(|c| c.replace(Some(enabled)));
+    TrainGraphOverrideGuard {
+        prev,
+        _not_send: PhantomData,
+    }
+}
+
+/// [`inject_train_capture_failure_for_scope`] の RAII ガード（drop で残り回数を 0 に戻す）。
+#[must_use = "ガードを drop すると注入が解除される"]
+pub struct TrainCaptureFailureGuard {
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Drop for TrainCaptureFailureGuard {
+    fn drop(&mut self) {
+        let _ = TRAIN_INJECT_FAILURES.try_with(|c| c.set(0));
+    }
+}
+
+/// 実機テスト専用: 現スレッドの次の `times` 回の学習 capture で、capture 区間の本体の先頭に
+/// 非 sticky な失敗を起こす（fail-safe の検証用。ordinal は poison されず、出力は非 graph 経路と
+/// bit 一致するはず）。実際の driver 状態は変えず、`end_capture` まで通常どおり実行される。
+#[doc(hidden)]
+pub fn inject_train_capture_failure_for_scope(times: u32) -> TrainCaptureFailureGuard {
+    TRAIN_INJECT_FAILURES.with(|c| c.set(times));
+    TrainCaptureFailureGuard {
+        _not_send: PhantomData,
+    }
+}
+
+fn take_injected_train_failure() -> bool {
+    TRAIN_INJECT_FAILURES
+        .try_with(|c| {
+            let n = c.get();
+            if n > 0 {
+                c.set(n - 1);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+static TRAIN_CAPTURED_COUNT: AtomicU64 = AtomicU64::new(0);
+static TRAIN_REPLAYED_COUNT: AtomicU64 = AtomicU64::new(0);
+static TRAIN_GRAPH_LAUNCH_COUNT: AtomicU64 = AtomicU64::new(0);
+static TRAIN_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 学習 step 全体 capture の診断カウンタ（POD）。[`StepGraphStats`]・[`InferGraphStats`] とは
+/// 独立の型（公開済みの型を変えない）。値はプロセス起動からの累積で、前後の差分で使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrainGraphStats {
+    /// 新規 capture（キャッシュミス→capture→初回 launch 成功）の回数。
+    pub captured: u64,
+    /// 既存 graph の再生回数。
+    pub replayed: u64,
+    /// `CudaGraph::launch()` 成功回数（`captured + replayed` と一致する）。
+    pub graph_launches: u64,
+    /// capture の準備・記録・終了の失敗により、capture しない既存チェーンへ戻した回数。
+    pub fallbacks: u64,
+}
+
+/// [`TrainGraphStats`] の現在値を返す。
+pub fn train_graph_stats() -> TrainGraphStats {
+    TrainGraphStats {
+        captured: TRAIN_CAPTURED_COUNT.load(Ordering::Relaxed),
+        replayed: TRAIN_REPLAYED_COUNT.load(Ordering::Relaxed),
+        graph_launches: TRAIN_GRAPH_LAUNCH_COUNT.load(Ordering::Relaxed),
+        fallbacks: TRAIN_FALLBACK_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+/// 連続の新規 capture（間に replay が無い）がこの回数に達したら、replay が起きるまで新規 capture を
+/// 止めて既存チェーンへ戻す（lr を毎 step 変える・x／y を毎 step upload し直す等でキーが毎回
+/// 外れる使い方で、capture 費を払い続けないため。決定記録 §8.4・§8.8）。性能の抑止パラメータで
+/// あり、ガードレール閾値・tolerance ではない。
+pub(crate) const TRAIN_GRAPH_MAX_CONSECUTIVE_CAPTURES: u32 = 3;
+/// capture 準備・記録・終了の失敗がこの回数に達したら、そのスレッド・ordinal では新規 capture を
+/// 止める（既存 graph の replay は続ける）。
+pub(crate) const TRAIN_GRAPH_MAX_CAPTURE_FAILURES: u32 = 2;
+
+/// 新規 capture の再試行を抑止する状態機械（スレッド・ordinal ごと。純粋な構造体で単体テストする）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TrainCaptureThrottle {
+    consecutive_captures: u32,
+    failures: u32,
+}
+
+impl TrainCaptureThrottle {
+    fn allows_capture(&self) -> bool {
+        self.consecutive_captures < TRAIN_GRAPH_MAX_CONSECUTIVE_CAPTURES
+            && self.failures < TRAIN_GRAPH_MAX_CAPTURE_FAILURES
+    }
+
+    fn on_captured(&mut self) {
+        self.consecutive_captures = self.consecutive_captures.saturating_add(1);
+    }
+
+    fn on_replayed(&mut self) {
+        self.consecutive_captures = 0;
+    }
+
+    fn on_capture_failed(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+    }
+}
+
+/// thread-local に保持する 1 個の capture 済み学習 step graph。
+struct CachedTrainChain {
+    graph: CudaGraph,
+    inserted_seq: u64,
+}
+
+/// 1 ordinal 分のキャッシュと抑止状態。
+#[derive(Default)]
+struct TrainOrdinalState {
+    graphs: HashMap<SegmentKey, CachedTrainChain>,
+    throttle: TrainCaptureThrottle,
+}
+
+thread_local! {
+    /// ordinal でパーティションした学習 step graph のキャッシュ（`STEP_GRAPHS` と同型。別 ordinal の
+    /// graph を replay・evict しない）。graph は呼び出し元のバッファを直接参照する（所有しない）ため、
+    /// キー（全バッファのアドレス・長さを含む）が一致したときだけ再生する。
+    static TRAIN_GRAPHS: RefCell<HashMap<usize, TrainOrdinalState>> = RefCell::new(HashMap::new());
+}
+
+fn take_train_graph(ordinal: usize, key: &SegmentKey) -> Option<CudaGraph> {
+    TRAIN_GRAPHS
+        .try_with(|cache| {
+            cache
+                .borrow_mut()
+                .get_mut(&ordinal)
+                .and_then(|s| s.graphs.remove(key))
+                .map(|c| c.graph)
+        })
+        .ok()
+        .flatten()
+}
+
+/// graph を戻す（世代不一致の陳腐化エントリの掃除・上限超過時の最古 evict を含む。同一 ordinal 内に閉じる）。
+fn put_train_graph(ordinal: usize, key: SegmentKey, graph: CudaGraph) {
+    let _ = TRAIN_GRAPHS.try_with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let state = cache.entry(ordinal).or_default();
+        state.graphs.retain(|k, _| k.generation == key.generation);
+        if state.graphs.len() >= MAX_CACHED_GRAPHS_PER_THREAD
+            && !state.graphs.contains_key(&key)
+            && let Some(oldest) = state
+                .graphs
+                .iter()
+                .min_by_key(|(_, v)| v.inserted_seq)
+                .map(|(k, _)| k.clone())
+        {
+            state.graphs.remove(&oldest);
+        }
+        state.graphs.insert(
+            key,
+            CachedTrainChain {
+                graph,
+                inserted_seq: next_seq(),
+            },
+        );
+    });
+}
+
+fn with_train_throttle<R>(
+    ordinal: usize,
+    f: impl FnOnce(&mut TrainCaptureThrottle) -> R,
+) -> Option<R> {
+    TRAIN_GRAPHS
+        .try_with(|cache| {
+            let mut cache = cache.borrow_mut();
+            f(&mut cache.entry(ordinal).or_default().throttle)
+        })
+        .ok()
+}
+
+/// capture 区間の本体: 学習 1 step の全カーネルを `encode_train_chain` ＋ `sgd_step_device_tracked`
+/// （autodiff の `optim/device_store/train_chain.rs`）と**同じ順・同じ引数**で積む。カーネルも引数も
+/// 同じなので、capture あり／なしで出力が bit 一致する（CI では順序を検証できないため GB10 の bit
+/// テストで担保する）。**autodiff 側の順序を変えたら本関数も直す**。alloc・upload・download・同期は
+/// 含まない（定常状態で #3252 が 0 を確認済み。永続ワークスペースの grow は capture 中に
+/// `CaptureExclusionRejected` で拒否される）。
+fn launch_train_chain(
+    ops: &CudaBackendOps,
+    plan: &mut TrainChainCapturePlan<'_>,
+) -> Result<(), BackendError> {
+    let n = plan.layers.len();
+    if n == 0 || plan.outs.len() != n || plan.d_input.len() != n - 1 || plan.masked.len() != n - 1 {
+        return Err(BackendError::InvalidArgument(
+            "train_chain_captured: layers/outs/d_input/masked length mismatch".to_string(),
+        ));
+    }
+    let token = plan.token;
+    let x = plan.x;
+    let y = plan.y;
+    let layers = plan.layers;
+
+    // forward（autodiff: `PART_FORWARD`）。
+    for (i, l) in layers.iter().enumerate() {
+        let w_shape = [l.k, l.n];
+        let b_shape = [l.n];
+        let w = DeviceBufferView::new(&*plan.params, l.w_offset, &w_shape)?;
+        let b = l
+            .bias_offset
+            .map(|o| DeviceBufferView::new(&*plan.params, o, &b_shape))
+            .transpose()?;
+        let (done, rest) = plan.outs.split_at_mut(i);
+        let src: &DeviceBuffer<f32> = if i == 0 { x } else { &done[i - 1] };
+        let out = rest.first_mut().ok_or_else(|| {
+            BackendError::InvalidArgument("train_chain_captured: outs is too short".to_string())
+        })?;
+        ops.linear_forward_device_into_tracked(src, w, b, l.act, out, token)?;
+    }
+
+    // loss と dPred（`PART_MSE`・`PART_MSE_BWD`）。
+    {
+        let pred = &plan.outs[n - 1];
+        ops.mse_loss_device_into_tracked(pred, y, MseReduction::Mean, plan.loss, token)?;
+        ops.mse_loss_backward_device_into_tracked(pred, y, plan.mse_scale, plan.dpred, token)?;
+    }
+
+    // backward: 層を逆順に dW（と bias 勾配）を grad へ書き、L2 以降は d_input と ReLU マスクを作る。
+    for i in (0..n).rev() {
+        let l = &layers[i];
+        let src: &DeviceBuffer<f32> = if i == 0 { x } else { &plan.outs[i - 1] };
+        let g_cur: &DeviceBuffer<f32> = if i == n - 1 {
+            &*plan.dpred
+        } else {
+            &plan.masked[n - 2 - i]
+        };
+        let src_view = DeviceBufferView::new(src, 0, src.shape())?;
+        let g_view = DeviceBufferView::new(g_cur, 0, g_cur.shape())?;
+        let bias = l.bias_offset.map(|o| (o, l.n));
+        let bias_filled = ops.gemm_fp32_strict_into_device_tracked(
+            src_view,
+            DeviceMatrixLayout::Transposed,
+            g_view,
+            DeviceMatrixLayout::RowMajor,
+            plan.grad,
+            l.w_offset,
+            bias,
+            token,
+        )?;
+        if bias.is_some() && !bias_filled {
+            return Err(BackendError::KernelLaunchFailed(
+                "train_chain_captured: backend did not fuse the bias gradient reduction"
+                    .to_string(),
+            ));
+        }
+        if i == 0 {
+            continue;
+        }
+        let w_shape = [l.k, l.n];
+        let w = DeviceBufferView::new(&*plan.params, l.w_offset, &w_shape)?;
+        let ti = n - 1 - i;
+        ops.gemm_resident_lhs_device_into_tracked(
+            w,
+            g_view,
+            DeviceMatrixLayout::Transposed,
+            &mut plan.d_input[ti],
+            token,
+        )?;
+        let t = &plan.d_input[ti];
+        let t_view = DeviceBufferView::new(t, 0, t.shape())?;
+        let prev = &plan.outs[i - 1];
+        let prev_view = DeviceBufferView::new(prev, 0, prev.shape())?;
+        ops.relu_backward_mask_device_into_tracked(
+            t_view,
+            DeviceMatrixLayout::Transposed,
+            prev_view,
+            &mut plan.masked[ti],
+            token,
+        )?;
+    }
+
+    // SGD（autodiff の `sgd_step_device_tracked` 呼び出しと同じ引数）。
+    ops.sgd_step_device_tracked(
+        plan.params,
+        &*plan.grad,
+        plan.velocity.as_deref_mut(),
+        &plan.sgd,
+        token,
+    )
+}
+
+/// panic ペイロードから可読なメッセージを取り出す（`&str`／`String` 以外は定型文）。
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_else(|| "panic payload of unknown type".to_string())
+}
+
+/// capture の失敗の分類（初回 launch の前か後か）。
+enum TrainCaptureError {
+    /// 初回 launch より前の失敗。GPU 上では何も実行されておらず、params・grad・loss は不変。
+    BeforeLaunch(BackendError),
+    /// 初回 launch 自体の失敗（書き込み後の可能性がある）。
+    Launch(BackendError),
+}
+
+/// キャッシュミス時に学習 step を capture し、続けて初回 launch する（`run_captured_sgd_step_segment`
+/// の ②と同じ手順: ウォームアップ → `begin_capture_session` → `begin_driver_call` →
+/// `begin_capture` → 本体〈`catch_unwind`〉→ 必ず `end_capture` → `upload` → `launch`）。
+///
+/// **`capture_chain`（推論）と異なり、capture 前に本体を実 launch するウォームアップはしない**。
+/// SGD は冪等ではなく（2 回更新になる）、capture は記録だけで実行しないため「capture ＋初回 launch」
+/// でちょうど 1 step になる。モジュールロード・永続ワークスペースの grow は、適用条件（ウォーム
+/// アップ済みの 2 step 目以降のみ試す。autodiff 側）で済んでいる。
+///
+/// 呼び出し時点でスレッドは当該 ordinal の `CallToken` を保持していないこと
+/// （`begin_capture_session` の in_flight ドレイン契約）。
+fn capture_train_chain(
+    ops: &CudaBackendOps,
+    ordinal: usize,
+    device: &Arc<CudaDevice>,
+    generation: u64,
+    plan: &mut TrainChainCapturePlan<'_>,
+) -> Result<CudaGraph, TrainCaptureError> {
+    use TrainCaptureError::{BeforeLaunch, Launch};
+    let stream = device.stream();
+
+    // getter のキャッシュ確認（ヒットなら driver に触れない）を capture の排他区間の外で行う。
+    {
+        let warmup_token =
+            context_cache::begin_driver_call(ordinal, &[generation]).map_err(BeforeLaunch)?;
+        let warm: Result<(), CudaError> = (|| {
+            context_cache::cached_gemm(device)?;
+            context_cache::cached_reduce(device)?;
+            context_cache::cached_mse(device)?;
+            context_cache::cached_sgd(device)?;
+            Ok(())
+        })();
+        let warm = context_cache::observe_cuda_result(ordinal, &warmup_token, warm);
+        drop(warmup_token);
+        warm.map_err(|e| BeforeLaunch(crate::memory::map_cuda_error(e)))?;
+    }
+
+    let guard = context_cache::begin_capture_session(ordinal).map_err(BeforeLaunch)?;
+    let token = match context_cache::begin_driver_call(ordinal, &[generation]) {
+        Ok(t) => t,
+        Err(e) => {
+            drop(guard);
+            return Err(BeforeLaunch(e));
+        }
+    };
+    let begin_result =
+        stream.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
+    if let Err(e) = context_cache::observe_driver_result(ordinal, &token, begin_result) {
+        drop(guard);
+        return Err(BeforeLaunch(crate::memory::map_cuda_error(
+            CudaError::Driver(e),
+        )));
+    }
+
+    // panic しても必ず `end_capture` してから型付きエラーへ変換する（driver 側の capture を
+    // 残さない。本番経路で panic を再送出しない）。
+    let body_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if take_injected_train_failure() {
+            return Err(BackendError::KernelLaunchFailed(
+                "train_chain_captured: injected capture failure (test hook)".to_string(),
+            ));
+        }
+        launch_train_chain(ops, plan)
+    }));
+    let end_result = stream.end_capture(instantiate_flags());
+    // capture 中は他スレッドの driver 呼び出し（= GEMM ワークスペースの grow）が排他されている。
+    // この排他の内側で焼き込み時点のワークスペース世代を確定し、guard 解放後の初回 launch は
+    // ワークスペース mutex 下で世代を再検証してから行う（#3260 codex P0・Bugbot High）。
+    let captured_epoch = context_cache::cached_gemm(device).map(|g| g.workspace_epoch());
+    drop(guard);
+
+    let body_err = match body_outcome {
+        Ok(r) => r.err(),
+        Err(payload) => Some(BackendError::KernelLaunchFailed(format!(
+            "capture_train_chain: step body panicked during CUDA Graph capture (end_capture has \
+             already been called): {}",
+            panic_payload_message(payload.as_ref())
+        ))),
+    };
+
+    let graph = match end_result {
+        Ok(Some(graph)) => graph,
+        Ok(None) => {
+            return Err(BeforeLaunch(body_err.unwrap_or_else(|| {
+                BackendError::KernelLaunchFailed(
+                    "capture_train_chain: end_capture produced an empty graph (no kernel \
+                     launches were recorded during capture)"
+                        .to_string(),
+                )
+            })));
+        }
+        Err(e) => {
+            let _ = context_cache::observe_driver_result::<()>(ordinal, &token, Err(e));
+            let mapped = crate::memory::map_cuda_error(CudaError::Driver(e));
+            return Err(BeforeLaunch(body_err.unwrap_or(mapped)));
+        }
+    };
+    if let Some(e) = body_err {
+        // capture 自体は正常終了したが本体が失敗した graph は使わず破棄する。
+        return Err(BeforeLaunch(e));
+    }
+    let captured_epoch = match captured_epoch {
+        Ok(e) => e,
+        Err(e) => return Err(BeforeLaunch(crate::memory::map_cuda_error(e))),
+    };
+    // upload と初回 launch を、ワークスペース mutex 保持かつ世代一致の下で行う。世代が進んで
+    // いれば焼き込み済み領域は解放済みの可能性があるため、何も実行せず graph を捨てる。
+    let gemm = context_cache::cached_gemm(device)
+        .map_err(|e| BeforeLaunch(crate::memory::map_cuda_error(e)))?;
+    let guarded = gemm.with_workspace_epoch(captured_epoch, || {
+        if let Err(e) = graph.upload() {
+            return Err((true, e));
+        }
+        graph.launch().map_err(|e| (false, e))
+    });
+    match guarded {
+        Err(e) => return Err(BeforeLaunch(crate::memory::map_cuda_error(e))),
+        Ok(None) => {
+            return Err(BeforeLaunch(BackendError::KernelLaunchFailed(
+                "capture_train_chain: GEMM workspace grew between capture and first launch \
+                 (stale graph discarded; falling back)"
+                    .to_string(),
+            )));
+        }
+        Ok(Some(Err((true, e)))) => {
+            context_cache::observe_cuda_error_ref(ordinal, &token, &CudaError::Driver(e));
+            return Err(BeforeLaunch(crate::memory::map_cuda_error(
+                CudaError::Driver(e),
+            )));
+        }
+        Ok(Some(Err((false, e)))) => {
+            let r = context_cache::observe_driver_result::<()>(ordinal, &token, Err(e));
+            if let Err(e) = r {
+                return Err(Launch(crate::memory::map_cuda_error(CudaError::Driver(e))));
+            }
+        }
+        Ok(Some(Ok(()))) => {
+            let _ = context_cache::observe_driver_result::<()>(ordinal, &token, Ok(()));
+        }
+    }
+    Ok(graph)
+}
+
+/// [`crate::ops::CudaBackendOps::train_chain_captured`] の実体（イシュー #3260）。`key` に対応する
+/// capture 済み graph があれば replay、なければ（抑止中でなければ）capture ＋初回 launch する。
+/// `key` は呼び出し元が同じ呼び出し内の live 借用から計算した値のため、ヒットした graph が焼き
+/// 込んだアドレスは現在生存しているバッファと一致する（#1349 §4.4 の再検証論法）。
+///
+/// 戻り値は [`BackendOps::train_chain_captured`] の契約どおり: `Ok(None)` は launch 前の失敗・抑止中で
+/// `plan` は不変、`Err(DeviceContextCaptureInProgress)` は launch 前の衝突、それ以外の `Err` は
+/// replay／初回 launch の失敗（書き込み後の可能性）かポイズン済み ordinal。**`Unsupported` を外へ
+/// 返さない**（autodiff はそれを書き込み前の Tape 経路フォールバックと解釈するため）。
+///
+/// 呼び出しスレッドは当該 ordinal の `CallToken` を保持していないこと。
+pub(crate) fn run_captured_train_chain(
+    ops: &CudaBackendOps,
+    ordinal: usize,
+    device: &Arc<CudaDevice>,
+    key: SegmentKey,
+    workspace_epoch: u64,
+    mut plan: TrainChainCapturePlan<'_>,
+) -> Result<Option<SegmentRun>, BackendError> {
+    let generation = key.generation;
+
+    // ① キャッシュヒット: 既存 graph を再生する。
+    if let Some(graph) = take_train_graph(ordinal, &key) {
+        let call_token = match context_cache::begin_driver_call(ordinal, &[generation]) {
+            Ok(t) => t,
+            Err(e) => {
+                // 一過性の capture 衝突等では graph は破損していないので戻す。
+                put_train_graph(ordinal, key, graph);
+                return Err(e);
+            }
+        };
+        // Graph が焼き込む GEMM 内部ワークスペースが grow されていないことを、ワークスペース
+        // mutex 下で確認してから launch する（#3260 codex P0。別 store の大きい step が
+        // ワークスペースを拡張すると旧領域は解放され、再生すると解放済み領域を読み書きする）。
+        // 世代が進んでいれば graph を捨て、この step は既存チェーンへ戻す。
+        let guarded = context_cache::cached_gemm(device)
+            .and_then(|gemm| gemm.with_workspace_epoch(workspace_epoch, || graph.launch()));
+        let launch_result = match guarded {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                drop(call_token);
+                return Ok(None);
+            }
+            Err(e) => {
+                put_train_graph(ordinal, key, graph);
+                return Err(crate::memory::map_cuda_error(e));
+            }
+        };
+        if let Err(e) = context_cache::observe_driver_result(ordinal, &call_token, launch_result) {
+            put_train_graph(ordinal, key, graph);
+            return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));
+        }
+        drop(call_token);
+        TRAIN_GRAPH_LAUNCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        TRAIN_REPLAYED_COUNT.fetch_add(1, Ordering::Relaxed);
+        let _ = with_train_throttle(ordinal, |t| t.on_replayed());
+        put_train_graph(ordinal, key, graph);
+        return Ok(Some(SegmentRun::Replayed));
+    }
+
+    // ② キャッシュミス: 抑止中は capture せず既存チェーンへ戻す。
+    if !with_train_throttle(ordinal, |t| t.allows_capture()).unwrap_or(false) {
+        return Ok(None);
+    }
+    match capture_train_chain(ops, ordinal, device, generation, &mut plan) {
+        Ok(graph) => {
+            TRAIN_GRAPH_LAUNCH_COUNT.fetch_add(1, Ordering::Relaxed);
+            TRAIN_CAPTURED_COUNT.fetch_add(1, Ordering::Relaxed);
+            let _ = with_train_throttle(ordinal, |t| t.on_captured());
+            put_train_graph(ordinal, key, graph);
+            Ok(Some(SegmentRun::Captured))
+        }
+        Err(TrainCaptureError::Launch(e)) => Err(e),
+        // 別スレッドの capture と衝突しただけ（何も記録・実行していない）。失敗には数えず、
+        // 呼び出し元の待機・再試行へ委ねる。
+        Err(TrainCaptureError::BeforeLaunch(
+            e @ BackendError::DeviceContextCaptureInProgress { .. },
+        )) => Err(e),
+        Err(TrainCaptureError::BeforeLaunch(_)) => {
+            TRAIN_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            let _ = with_train_throttle(ordinal, |t| t.on_capture_failed());
+            // ordinal が poison された（sticky な driver エラー）場合は既存チェーンへ戻さず
+            // 型付きエラーで返す。そうでなければ capture しない経路で同じ step を実行させる。
+            context_cache::begin_driver_call(ordinal, &[generation])?;
+            Ok(None)
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1399,6 +2026,156 @@ mod tests {
         thread_local! { static T: TouchOnDrop = const { TouchOnDrop }; }
         std::thread::spawn(|| {
             let _ = INFER_GRAPHS.with(|c| c.borrow().len());
+            T.with(|_| {});
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// イシュー #3260: 学習 step 全体 capture の環境変数解釈は `1`／`true` の完全一致のみ ON
+    /// （未設定は既定値・それ以外は fail-closed で OFF）。
+    #[test]
+    fn resolve_train_enabled_accepts_only_allowlisted_values() {
+        assert!(resolve_train_enabled(Some("1"), false));
+        assert!(resolve_train_enabled(Some("true"), false));
+        for bad in [
+            "0",
+            "false",
+            "TRUE",
+            "True",
+            "",
+            " 1",
+            "; rm -rf /",
+            "stream-only",
+        ] {
+            assert!(
+                !resolve_train_enabled(Some(bad), true),
+                "{bad:?} は OFF のはず"
+            );
+        }
+        assert!(!resolve_train_enabled(None, false));
+        assert!(resolve_train_enabled(None, true));
+    }
+
+    /// 既定は OFF（反転は #3261 の ADOPT 判定後の別 PR）。
+    #[test]
+    fn train_graph_default_is_off() {
+        const { assert!(!TRAIN_GRAPH_DEFAULT_ENABLED) };
+    }
+
+    /// override は現スレッド限定で、ガード drop で直前の値へ戻り、入れ子にできる。
+    #[test]
+    fn override_train_graph_round_trips_nests_and_stays_thread_local() {
+        let base = train_graph_enabled();
+        {
+            let _g1 = override_train_graph_for_scope(true);
+            assert!(train_graph_enabled());
+            {
+                let _g2 = override_train_graph_for_scope(false);
+                assert!(!train_graph_enabled());
+            }
+            assert!(train_graph_enabled());
+            let other = std::thread::spawn(train_graph_enabled).join().unwrap();
+            assert_eq!(other, train_graph_stream_requested());
+        }
+        assert_eq!(train_graph_enabled(), base);
+    }
+
+    /// override は stream 要求（sticky）へ影響しない。
+    #[test]
+    fn override_does_not_change_stream_request() {
+        let before = train_graph_stream_requested();
+        let _g = override_train_graph_for_scope(!before);
+        assert_eq!(train_graph_stream_requested(), before);
+    }
+
+    /// `train_graph_stats` がカウンタ現在値を反映する（差分検証）。
+    #[test]
+    fn train_graph_stats_reflects_counters() {
+        let before = train_graph_stats();
+        TRAIN_CAPTURED_COUNT.fetch_add(1, Ordering::Relaxed);
+        TRAIN_REPLAYED_COUNT.fetch_add(2, Ordering::Relaxed);
+        TRAIN_GRAPH_LAUNCH_COUNT.fetch_add(3, Ordering::Relaxed);
+        TRAIN_FALLBACK_COUNT.fetch_add(4, Ordering::Relaxed);
+        let after = train_graph_stats();
+        assert_eq!(after.captured - before.captured, 1);
+        assert_eq!(after.replayed - before.replayed, 2);
+        assert_eq!(after.graph_launches - before.graph_launches, 3);
+        assert_eq!(after.fallbacks - before.fallbacks, 4);
+    }
+
+    /// 抑止の状態機械: 連続 capture が上限に達したら止まり、replay で戻る。失敗は上限で止まる。
+    #[test]
+    fn train_capture_throttle_transitions() {
+        let mut t = TrainCaptureThrottle::default();
+        assert!(t.allows_capture());
+        for _ in 0..TRAIN_GRAPH_MAX_CONSECUTIVE_CAPTURES - 1 {
+            t.on_captured();
+            assert!(t.allows_capture());
+        }
+        t.on_captured();
+        assert!(!t.allows_capture(), "連続 capture が上限で停止");
+        t.on_replayed();
+        assert!(t.allows_capture(), "replay で連続数が戻る");
+
+        let mut f = TrainCaptureThrottle::default();
+        for _ in 0..TRAIN_GRAPH_MAX_CAPTURE_FAILURES - 1 {
+            f.on_capture_failed();
+            assert!(f.allows_capture());
+        }
+        f.on_capture_failed();
+        assert!(!f.allows_capture(), "失敗が上限で停止");
+        f.on_replayed();
+        assert!(!f.allows_capture(), "replay では失敗の停止は解けない");
+    }
+
+    /// 抑止状態は ordinal ごとに独立している。
+    #[test]
+    fn train_throttle_is_partitioned_by_ordinal() {
+        let (a, b) = (usize::MAX - 11, usize::MAX - 12);
+        for _ in 0..TRAIN_GRAPH_MAX_CONSECUTIVE_CAPTURES {
+            with_train_throttle(a, |t| t.on_captured()).unwrap();
+        }
+        assert_eq!(with_train_throttle(a, |t| t.allows_capture()), Some(false));
+        assert_eq!(with_train_throttle(b, |t| t.allows_capture()), Some(true));
+    }
+
+    /// 注入フックは指定回数だけ失敗を返し、ガード drop で解除される。
+    #[test]
+    fn injected_capture_failure_is_consumed_and_cleared_by_the_guard() {
+        assert!(!take_injected_train_failure());
+        {
+            let _g = inject_train_capture_failure_for_scope(2);
+            assert!(take_injected_train_failure());
+            assert!(take_injected_train_failure());
+            assert!(!take_injected_train_failure());
+        }
+        let _g = inject_train_capture_failure_for_scope(5);
+        drop(_g);
+        assert!(!take_injected_train_failure());
+    }
+
+    /// TLS 破棄後を模擬: 別スレッドの終了時に `TRAIN_GRAPHS` を触っても（`try_with` により）
+    /// abort しない。キャッシュ操作が破棄後に no-op へ縮退することを確認する。
+    #[test]
+    fn train_cache_access_after_tls_destruction_does_not_panic() {
+        struct TouchOnDrop;
+        impl Drop for TouchOnDrop {
+            fn drop(&mut self) {
+                let key = SegmentKey {
+                    generation: 0,
+                    config_key: 0,
+                    resources: Vec::new(),
+                };
+                assert!(take_train_graph(usize::MAX, &key).is_none());
+                // TLS の破棄順は未規定のため、破棄済みなら `None`・未破棄なら `Some`。
+                // どちらでも panic しないことだけを確認する。
+                let _ = with_train_throttle(usize::MAX, |t| t.allows_capture());
+            }
+        }
+        thread_local! { static T: TouchOnDrop = const { TouchOnDrop }; }
+        std::thread::spawn(|| {
+            let _ = TRAIN_GRAPHS.with(|c| c.borrow().len());
             T.with(|_| {});
         })
         .join()

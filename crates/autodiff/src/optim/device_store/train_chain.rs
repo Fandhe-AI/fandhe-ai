@@ -60,11 +60,27 @@
 //! - 初回 step は確保した出力へ `_into` を 1 回試して能力を確定する（同じ結果の上書き）
 //! - 失敗経路のバッファは再利用せず `train_chain_hold` へ退避する
 //! - 古い loss ハンドルは世代検査が拒否する（loss バッファを再利用する step の開始時に世代を進める）
+//!
+//! # 一括再生機構（Graph capture。イシュー #3260。opt-in・既定 OFF）
+//! 2 step 目以降で、部品ごとの encode の**前**に `BackendOps::train_chain_captured` を 1 回試す
+//! （[`DeviceParamStore::try_captured_train_step`]）。CUDA は opt-in（環境変数
+//! `FANDHE_AI_CUDA_GRAPH_TRAIN`）が ON のとき step 全体を 1 本の graph へ capture・再生し、それ以外の
+//! バックエンドと既定の CUDA は `Ok(None)` で、従来のチェーンがそのまま走る（出力も経路も不変）。
+//! - 適用条件: 成功 step を 1 回以上経ている・前 step の永続バッファ一式を鍵つきで再利用できる・
+//!   勾配バッファと velocity を新規確保していない・使う部品の `_into` 対応が確定済み
+//! - `Ok(None)` なら store もバッファも変えていないので、同じ step を従来のチェーンで実行する
+//!   （Tape 経路へは落とさない。`Unsupported` はバックエンドが外へ返さない契約）
+//! - `Err(DeviceContextCaptureInProgress)` は launch 前の一過性の衝突で poison しない。外側の
+//!   [`DeviceParamStore::train_step_device_chain`] が待ち上限つきで step 全体をやり直す
+//! - それ以外の `Err` は書き込み後の可能性があるため store を poison する
+//! - capture 区間の本体は `backend-cuda/src/graph.rs::launch_train_chain` にあり、**`encode_train_chain`
+//!   ＋ SGD と同じ順・同じ引数**で部品を呼ぶ（bit 一致のため）。ここの順序を変えたらそちらも直す
 
 use fandhe_ai_tensor_core::buffer::{DeviceBuffer, DeviceBufferView};
 use fandhe_ai_tensor_core::device::BackendError;
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, DeviceMatrixLayout, MseReduction, SgdStepConfig,
+    TrainChainCaptureLayer, TrainChainCapturePlan,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -76,6 +92,14 @@ use crate::tape::Tape;
 use crate::var::Reduction;
 
 use super::{ChainStep, DeviceParamStore};
+
+/// 別スレッドの Graph capture と衝突した step を待って再試行する際の待ち上限（全体）。
+/// `predict_device_chain` の `PREDICT_CAPTURE_WAIT_TIMEOUT` と同じ値（イシュー #3205・#3260）。
+/// テストでは mock の待機が即時に返るため、busy-loop を避けて短くする。
+#[cfg(not(test))]
+const TRAIN_CAPTURE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+#[cfg(test)]
+const TRAIN_CAPTURE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// 検証済みの 1 層分の計画。
 #[derive(Debug, Clone, Copy)]
@@ -283,7 +307,40 @@ impl DeviceParamStore {
     ///
     /// `x`・`y` は [`Self::upload_resident_input`] が窓の外で upload したハンドル。
     /// `steps` は `predict_device_chain` と同じ `(weight, bias, act)` の列。
+    ///
+    /// 別スレッドの Graph capture と衝突した場合（`DeviceContextCaptureInProgress`。書き込み前、
+    /// または SGD 段の衝突で params は未変更）は、待ち上限（`TRAIN_CAPTURE_WAIT_TIMEOUT`）の範囲で
+    /// capture の終了を待って step 全体をやり直す（`predict_device_chain` と同型。イシュー #3260・
+    /// 決定記録 `docs/backend-cuda-graph-step-capture-design.md` §8.5）。やり直しで部分結果は
+    /// 漏れない（勾配バッファと loss は次の試行が全要素を上書きする）。capture が 1 つも無ければ
+    /// このエラーは起きず、ループは 1 回で抜ける。
     pub fn train_step_device_chain<'t>(
+        &mut self,
+        tape: &'t Tape,
+        x: &ResidentInput,
+        y: &ResidentInput,
+        steps: &[ChainStep<'_, 't>],
+        config: &SgdConfig,
+    ) -> Result<TrainStepLoss, BackendError> {
+        let deadline = std::time::Instant::now() + TRAIN_CAPTURE_WAIT_TIMEOUT;
+        loop {
+            match self.train_step_device_chain_once(tape, x, y, steps, config) {
+                Err(BackendError::DeviceContextCaptureInProgress { ordinal })
+                    if !self.poisoned.load(Ordering::SeqCst) =>
+                {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+                    }
+                    tape.ops().wait_device_capture_idle(remaining)?;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// [`Self::train_step_device_chain`] の 1 回分（待機・再試行なし）。
+    fn train_step_device_chain_once<'t>(
         &mut self,
         tape: &'t Tape,
         x: &ResidentInput,
@@ -310,9 +367,9 @@ impl DeviceParamStore {
         // velocity は、poison せず戻る失敗経路（velocity 自身・勾配バッファの確保失敗を含む）で
         // `None` へ戻す（残すと `sgd_used == false` のまま velocity だけ在り、次回以降の
         // momentum 構成検査が「途中変更」と誤判定してストアが固着する）。
-        let mut grad = match self.train_chain_grad.take() {
-            Some(g) if g.shape() == [self.total_numel] => g,
-            _ => mem.alloc_zeroed(&[self.total_numel])?,
+        let (mut grad, grad_is_new) = match self.train_chain_grad.take() {
+            Some(g) if g.shape() == [self.total_numel] => (g, false),
+            _ => (mem.alloc_zeroed(&[self.total_numel])?, true),
         };
         let velocity_is_new = use_momentum && self.velocity.is_none();
         if velocity_is_new {
@@ -333,6 +390,46 @@ impl DeviceParamStore {
             .map(|l| self.layout[l.w_slot].shape.get(1).copied().unwrap_or(0))
             .collect();
         let key = (m, widths);
+        let step_config = SgdStepConfig {
+            lr: config.lr,
+            momentum: config.momentum,
+            dampening: config.dampening,
+            weight_decay: config.weight_decay,
+            nesterov: config.nesterov,
+            is_first_step,
+        };
+
+        // opt-in の一括再生機構（CUDA Graph。イシュー #3260）。バックエンドが `Ok(None)` を返す
+        // （既定・不適用・capture 失敗の抑止）か、適用条件を満たさなければ、以降の既存チェーンへ進む。
+        let steady = !grad_is_new && !velocity_is_new;
+        match self.try_captured_train_step(
+            ops,
+            (x, y),
+            &layers,
+            &key,
+            scale,
+            step_config,
+            &mut grad,
+            steady,
+        ) {
+            Ok(false) => {}
+            Ok(true) => {
+                self.train_chain_grad = Some(grad);
+                return Ok(TrainStepLoss::new(
+                    self.store_id,
+                    self.train_chain_generation,
+                ));
+            }
+            Err(e) => {
+                self.train_chain_grad = Some(grad);
+                // launch 前の capture 衝突だけが「何も変わっていない」ことを保証できる。
+                if !matches!(e, BackendError::DeviceContextCaptureInProgress { .. }) {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                }
+                return Err(e);
+            }
+        }
+
         let reuse_bufs = self.train_chain_bufs.take().filter(|b| b.key == key);
         let reuse_loss = self.train_chain_loss.take();
         if reuse_loss.is_some() {
@@ -373,14 +470,6 @@ impl DeviceParamStore {
             ));
         };
 
-        let step_config = SgdStepConfig {
-            lr: config.lr,
-            momentum: config.momentum,
-            dampening: config.dampening,
-            weight_decay: config.weight_decay,
-            nesterov: config.nesterov,
-            is_first_step,
-        };
         let velocity_ref = if use_momentum {
             self.velocity.as_mut()
         } else {
@@ -424,6 +513,116 @@ impl DeviceParamStore {
             self.store_id,
             self.train_chain_generation,
         ))
+    }
+
+    /// opt-in の一括再生機構（`BackendOps::train_chain_captured`。CUDA では学習 step 全体の
+    /// Graph capture・replay。イシュー #3260）で 1 step を実行する。`Ok(true)` は 1 step 分
+    /// （SGD の更新を含む）を実行済みで、`step_count`・`sgd_used`・世代・loss を成功 step と
+    /// 同じに確定済み。`Ok(false)` は不適用で **store もバッファも変えていない**ので、呼び出し元は
+    /// 既存の encode ループを実行する。`Err` はバックエンドの契約どおり（launch 前の
+    /// `DeviceContextCaptureInProgress` か、書き込み後の可能性がある失敗）。
+    ///
+    /// 適用条件（決定記録 §8.2 のウォームアップ）: 既存チェーンの成功 step を 1 回以上経ており
+    /// （`!is_first_step`。モジュールロード・永続ワークスペースの grow は済んでいる）、前 step の
+    /// 永続バッファ一式を鍵つきで再利用でき、勾配バッファと velocity を新規確保しておらず、
+    /// 使う部品の `_into` 対応が確定済みで、配列の本数が層数とそろっていること。
+    #[allow(clippy::too_many_arguments)]
+    fn try_captured_train_step(
+        &mut self,
+        ops: &dyn BackendOps,
+        io: (&ResidentInput, &ResidentInput),
+        layers: &[ChainLayer],
+        key: &(usize, Vec<usize>),
+        scale: f32,
+        sgd: SgdStepConfig,
+        grad: &mut DeviceBuffer<f32>,
+        steady: bool,
+    ) -> Result<bool, BackendError> {
+        let n_layers = layers.len();
+        let caps = &self.train_chain_caps;
+        let needed: &[usize] = if n_layers > 1 {
+            &[PART_FORWARD, PART_MSE, PART_MSE_BWD, PART_MASK, PART_LHS]
+        } else {
+            &[PART_FORWARD, PART_MSE, PART_MSE_BWD]
+        };
+        let caps_ready = needed
+            .iter()
+            .all(|&p| caps.probed[p] && !caps.unsupported[p]);
+        let use_momentum = sgd.momentum != 0.0;
+        let shapes_fit = self.train_chain_bufs.as_ref().is_some_and(|b| {
+            b.key == *key
+                && b.outs.len() == n_layers
+                && b.dpred.is_some()
+                && b.t.len() == n_layers - 1
+                && b.gm.len() == n_layers - 1
+        });
+        if sgd.is_first_step
+            || !steady
+            || !caps_ready
+            || !shapes_fit
+            || self.train_chain_loss.is_none()
+            || self.total_numel == 0
+            || (use_momentum && self.velocity.is_none())
+        {
+            return Ok(false);
+        }
+        let descs: Vec<TrainChainCaptureLayer> = layers
+            .iter()
+            .map(|l| {
+                let w = &self.layout[l.w_slot];
+                TrainChainCaptureLayer {
+                    w_offset: w.offset,
+                    k: w.shape.first().copied().unwrap_or(0),
+                    n: w.shape.get(1).copied().unwrap_or(0),
+                    bias_offset: l.b_slot.map(|s| self.layout[s].offset),
+                    act: l.act,
+                }
+            })
+            .collect();
+
+        // loss バッファを書き換える step では、書き込み後の失敗で古いハンドルが新 step の途中値を
+        // 読めないよう、先に世代を進める（既存チェーンの `reuse_loss` と同じ）。`Ok(None)` で従来の
+        // チェーンへ進む場合は世代がもう一度進むが、古いハンドルの拒否は変わらず観測差は無い。
+        self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
+        let (Some(bufs), Some(loss)) = (
+            self.train_chain_bufs.as_mut(),
+            self.train_chain_loss.as_mut(),
+        ) else {
+            return Ok(false);
+        };
+        let Some(dpred) = bufs.dpred.as_mut() else {
+            return Ok(false);
+        };
+        let plan = TrainChainCapturePlan {
+            x: io.0.buffer(),
+            y: io.1.buffer(),
+            params: &mut self.params,
+            layers: &descs,
+            grad,
+            velocity: if use_momentum {
+                self.velocity.as_mut()
+            } else {
+                None
+            },
+            outs: &mut bufs.outs,
+            dpred,
+            d_input: &mut bufs.t,
+            masked: &mut bufs.gm,
+            loss,
+            mse_scale: scale,
+            sgd,
+            token: &self.failure_token,
+        };
+        match ops.train_chain_captured(plan)? {
+            None => Ok(false),
+            Some(_) => {
+                self.step_count += 1;
+                self.sgd_used = true;
+                self.train_chain_generation = self.train_chain_generation.wrapping_add(1);
+                self.train_chain_host_loss = None;
+                Ok(true)
+            }
+        }
     }
 
     /// [`Self::train_step_device_chain`] の事前検証だけを行う（副作用なし。イシュー #3254）。
@@ -771,6 +970,9 @@ impl DeviceParamStore {
 
     /// forward → loss → MSE backward → 層ごとの dW（と L2 以降の d_input・ReLU マスク）を
     /// encode のみで積む。SGD は呼ばない。生成したバッファ（loss 含む）は成否に依らず `scratch` へ置く。
+    ///
+    /// 部品を呼ぶ順・引数は `backend-cuda/src/graph.rs::launch_train_chain`（Graph capture の本体。
+    /// イシュー #3260）と同一に保つこと（capture あり／なしの bit 一致のため）。
     fn encode_train_chain(
         &self,
         ops: &dyn BackendOps,
@@ -971,7 +1173,7 @@ mod tests {
     //! 失敗時の store 状態・事前検証を固定する。
     use super::*;
     use fandhe_ai_tensor_core::buffer::{BufferHandle, MemoryOps};
-    use fandhe_ai_tensor_core::{Device, DispatchFailureCell, Tensor};
+    use fandhe_ai_tensor_core::{Device, DispatchFailureCell, SegmentRun, Tensor};
     use std::any::Any;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
@@ -999,7 +1201,24 @@ mod tests {
         tokens: Mutex<Vec<usize>>,
         /// `sgd_step_device_tracked` が受けた `is_first_step` の列。
         first_flags: Mutex<Vec<bool>>,
+        /// `train_chain_captured` の挙動（`CAP_*`）。
+        cap_mode: AtomicUsize,
+        /// `train_chain_captured` の呼び出し回数。
+        cap_calls: AtomicUsize,
+        /// 各 `train_chain_captured` 呼び出しが受けた永続バッファのアドレス（params・grad・loss・outs 先頭）。
+        cap_ptrs: Mutex<Vec<[usize; 4]>>,
     }
+
+    /// `train_chain_captured` を実装しない（既定の `Ok(None)`）。
+    const CAP_NONE: usize = 0;
+    /// 常に `Ok(Some(Replayed))`（部品も SGD も積まない）。
+    const CAP_REPLAY: usize = 1;
+    /// 最初の 1 回だけ capture 衝突、以後 `Replayed`。
+    const CAP_BUSY_ONCE: usize = 2;
+    /// 常に capture 衝突。
+    const CAP_BUSY_ALWAYS: usize = 3;
+    /// 常に実行時エラー（書き込み後の失敗を模擬）。
+    const CAP_FAILS: usize = 4;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Fault {
@@ -1112,6 +1331,29 @@ mod tests {
         }
         fn memory_ops(&self) -> Option<&dyn MemoryOps> {
             Some(self)
+        }
+        fn train_chain_captured(
+            &self,
+            plan: TrainChainCapturePlan<'_>,
+        ) -> Result<Option<SegmentRun>, BackendError> {
+            let calls = self.c.cap_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.note(plan.token);
+            self.c.cap_ptrs.lock().unwrap().push([
+                &*plan.params as *const DeviceBuffer<f32> as usize,
+                &*plan.grad as *const DeviceBuffer<f32> as usize,
+                &*plan.loss as *const DeviceBuffer<f32> as usize,
+                plan.outs.as_ptr() as usize,
+            ]);
+            match self.c.cap_mode.load(Ordering::SeqCst) {
+                CAP_REPLAY => Ok(Some(SegmentRun::Replayed)),
+                CAP_BUSY_ONCE if calls == 1 => {
+                    Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 })
+                }
+                CAP_BUSY_ONCE => Ok(Some(SegmentRun::Replayed)),
+                CAP_BUSY_ALWAYS => Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 }),
+                CAP_FAILS => Err(BackendError::KernelLaunchFailed("mock capture".into())),
+                _ => Ok(None),
+            }
         }
         fn synchronize_device(&self) -> Result<(), BackendError> {
             self.c.sync.fetch_add(1, Ordering::SeqCst);
@@ -1387,7 +1629,7 @@ mod tests {
             .enumerate()
             .map(|(i, a)| (&leaves[2 * i], Some(&leaves[2 * i + 1]), *a))
             .collect();
-        store.train_step_device_chain(tape, x, y, &steps, config)
+        store.train_step_device_chain_once(tape, x, y, &steps, config)
     }
 
     fn run(
@@ -1891,5 +2133,178 @@ mod tests {
         let (tape, store, _c) = setup(Fault::SyncFails);
         assert!(store.wait_device(&tape).is_err());
         assert!(store.poisoned.load(Ordering::SeqCst));
+    }
+
+    /// 待機・再試行つきの公開入口（`train_step_device_chain`）で 1 step 実行する。
+    fn run_retrying(
+        tape: &Tape,
+        store: &mut DeviceParamStore,
+        x: &ResidentInput,
+        y: &ResidentInput,
+    ) -> Result<TrainStepLoss, BackendError> {
+        let leaves = store.snapshot_resident_params(tape).unwrap();
+        let steps: Vec<ChainStep<'_, '_>> = ACTS
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (&leaves[2 * i], Some(&leaves[2 * i + 1]), *a))
+            .collect();
+        store.train_step_device_chain(tape, x, y, &steps, &cfg(0.0))
+    }
+
+    fn io(tape: &Tape, store: &DeviceParamStore) -> (ResidentInput, ResidentInput) {
+        (
+            store.upload_resident_input(tape, &t(&[M, D_IN])).unwrap(),
+            store.upload_resident_input(tape, &t(&[M, D_OUT])).unwrap(),
+        )
+    }
+
+    /// 既定（`Ok(None)`）では capture 経路を 2 step 目以降だけ試し、結果は従来と同じ（R1・D3）。
+    #[test]
+    fn default_none_tries_capture_from_the_second_step_and_keeps_every_part_count() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        for step in 1..=3usize {
+            run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+            // 1 step 目はウォームアップ（試さない）。2 step 目以降は 1 回ずつ試す。
+            assert_eq!(count(&c.cap_calls), step - 1);
+            // `Ok(None)` なら部品・SGD は従来どおり step ごとに全部積む。
+            assert_eq!(count(&c.sgd), step);
+            assert_eq!(store.step_count as usize, step);
+        }
+    }
+
+    /// `into` 未対応のバックエンド（Metal・CPU 相当）では capture 経路を呼ばない。
+    #[test]
+    fn capture_is_not_tried_without_into_support() {
+        let (tape, mut store, c) = setup_with(Fault::None, false, false);
+        let (x, y) = io(&tape, &store);
+        for _ in 0..3 {
+            run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+        }
+        assert_eq!(count(&c.cap_calls), 0);
+    }
+
+    /// `Replayed` なら部品も SGD も積まず、状態・世代・loss 読み出しは成功 step と同じ。
+    /// 渡す永続バッファは step をまたいで同じアドレス。
+    #[test]
+    fn replayed_step_skips_parts_and_sgd_and_updates_state() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+        c.cap_mode.store(CAP_REPLAY, Ordering::SeqCst);
+        let (fwd, sgd, gen_before) = (
+            count(&c.forward),
+            count(&c.sgd),
+            store.train_chain_generation,
+        );
+        let mut losses = Vec::new();
+        for _ in 0..2 {
+            let downloads = count(&c.download);
+            let allocs = count(&c.alloc);
+            let loss = run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+            // 区間内の確保・download は 0。
+            assert_eq!(count(&c.alloc), allocs);
+            assert_eq!(count(&c.download), downloads);
+            losses.push(loss);
+        }
+        assert_eq!(count(&c.forward), fwd);
+        assert_eq!(count(&c.sgd), sgd);
+        assert_eq!(store.step_count, 3);
+        assert!(store.sgd_used);
+        assert!(store.train_chain_generation > gen_before);
+        // 古いハンドルは拒否され、最新は download 1 回で読める。
+        assert!(store.read_train_step_loss(&tape, &losses[0]).is_err());
+        let downloads = count(&c.download);
+        assert_eq!(store.read_train_step_loss(&tape, &losses[1]).unwrap(), 0.5);
+        assert_eq!(count(&c.download), downloads + 1);
+        let ptrs = c.cap_ptrs.lock().unwrap();
+        assert_eq!(ptrs.len(), 2);
+        assert_eq!(
+            ptrs[0], ptrs[1],
+            "永続バッファは step をまたいで同じアドレス"
+        );
+        // 全バッファが store の failure_token を受ける。
+        let expected = &store.failure_token as *const DispatchFailureCell as usize;
+        assert!(c.tokens.lock().unwrap().contains(&expected));
+    }
+
+    /// バッチ形状が変わった直後は鍵が合わないので capture 経路を呼ばない。
+    #[test]
+    fn changed_batch_does_not_try_capture() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+        let x2 = store
+            .upload_resident_input(&tape, &t(&[M + 2, D_IN]))
+            .unwrap();
+        let y2 = store
+            .upload_resident_input(&tape, &t(&[M + 2, D_OUT]))
+            .unwrap();
+        run_with(&tape, &mut store, &x2, &y2, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.cap_calls), 0);
+        // 同じ形状が続けば次の step から試す。
+        run_with(&tape, &mut store, &x2, &y2, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.cap_calls), 1);
+    }
+
+    /// 一過性の capture 衝突は poison せず、待って再試行して成功する（R6・D6）。
+    #[test]
+    fn capture_conflict_is_retried_without_poisoning() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_retrying(&tape, &mut store, &x, &y).unwrap();
+        c.cap_mode.store(CAP_BUSY_ONCE, Ordering::SeqCst);
+        run_retrying(&tape, &mut store, &x, &y).unwrap();
+        assert_eq!(count(&c.cap_calls), 2, "衝突 1 回 + 再試行 1 回");
+        store.check_not_poisoned().unwrap();
+        assert_eq!(store.step_count, 2);
+    }
+
+    /// 衝突が続けば待ち上限でエラーを返すが、poison せず状態も変えない。解消後は続けられる。
+    #[test]
+    fn persistent_capture_conflict_returns_error_without_poison_or_state_change() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_retrying(&tape, &mut store, &x, &y).unwrap();
+        c.cap_mode.store(CAP_BUSY_ALWAYS, Ordering::SeqCst);
+        let err = run_retrying(&tape, &mut store, &x, &y).unwrap_err();
+        assert!(
+            matches!(err, BackendError::DeviceContextCaptureInProgress { .. }),
+            "{err:?}"
+        );
+        store.check_not_poisoned().unwrap();
+        assert_eq!(store.step_count, 1);
+        c.cap_mode.store(CAP_NONE, Ordering::SeqCst);
+        run_retrying(&tape, &mut store, &x, &y).unwrap();
+        assert_eq!(store.step_count, 2);
+    }
+
+    /// capture 経路の実行時エラーは書き込み後の可能性があるため store を poison する。
+    #[test]
+    fn capture_runtime_failure_poisons_the_store() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_retrying(&tape, &mut store, &x, &y).unwrap();
+        c.cap_mode.store(CAP_FAILS, Ordering::SeqCst);
+        assert!(run_retrying(&tape, &mut store, &x, &y).is_err());
+        assert!(matches!(
+            store.check_not_poisoned(),
+            Err(BackendError::StorePoisoned)
+        ));
+    }
+
+    /// capture 経路の後でも、失敗トークンがセット済みなら読み出し時に poison になる（A08）。
+    #[test]
+    fn token_set_after_a_replayed_step_poisons_the_store_on_read() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_retrying(&tape, &mut store, &x, &y).unwrap();
+        c.cap_mode.store(CAP_REPLAY, Ordering::SeqCst);
+        let loss = run_retrying(&tape, &mut store, &x, &y).unwrap();
+        store
+            .failure_token
+            .set(BackendError::KernelLaunchFailed("late".into()));
+        let err = store.read_train_step_loss(&tape, &loss).unwrap_err();
+        assert!(matches!(err, BackendError::StorePoisoned), "{err:?}");
     }
 }
