@@ -309,7 +309,7 @@ impl DeviceParamStore {
     /// `steps` は `predict_device_chain` と同じ `(weight, bias, act)` の列。
     ///
     /// 別スレッドの Graph capture と衝突した場合（`DeviceContextCaptureInProgress`。書き込み前、
-    /// または SGD 段の衝突で params は未変更）は、待ち上限（[`TRAIN_CAPTURE_WAIT_TIMEOUT`]）の範囲で
+    /// または SGD 段の衝突で params は未変更）は、待ち上限（`TRAIN_CAPTURE_WAIT_TIMEOUT`）の範囲で
     /// capture の終了を待って step 全体をやり直す（`predict_device_chain` と同型。イシュー #3260・
     /// 決定記録 `docs/backend-cuda-graph-step-capture-design.md` §8.5）。やり直しで部分結果は
     /// 漏れない（勾配バッファと loss は次の試行が全要素を上書きする）。capture が 1 つも無ければ

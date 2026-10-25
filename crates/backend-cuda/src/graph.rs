@@ -1670,6 +1670,7 @@ pub(crate) fn run_captured_train_chain(
     ordinal: usize,
     device: &Arc<CudaDevice>,
     key: SegmentKey,
+    workspace_epoch: u64,
     mut plan: TrainChainCapturePlan<'_>,
 ) -> Result<Option<SegmentRun>, BackendError> {
     let generation = key.generation;
@@ -1684,7 +1685,23 @@ pub(crate) fn run_captured_train_chain(
                 return Err(e);
             }
         };
-        let launch_result = graph.launch();
+        // Graph が焼き込む GEMM 内部ワークスペースが grow されていないことを、ワークスペース
+        // mutex 下で確認してから launch する（#3260 codex P0。別 store の大きい step が
+        // ワークスペースを拡張すると旧領域は解放され、再生すると解放済み領域を読み書きする）。
+        // 世代が進んでいれば graph を捨て、この step は既存チェーンへ戻す。
+        let guarded = context_cache::cached_gemm(device)
+            .and_then(|gemm| gemm.with_workspace_epoch(workspace_epoch, || graph.launch()));
+        let launch_result = match guarded {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                drop(call_token);
+                return Ok(None);
+            }
+            Err(e) => {
+                put_train_graph(ordinal, key, graph);
+                return Err(crate::memory::map_cuda_error(e));
+            }
+        };
         if let Err(e) = context_cache::observe_driver_result(ordinal, &call_token, launch_result) {
             put_train_graph(ordinal, key, graph);
             return Err(crate::memory::map_cuda_error(CudaError::Driver(e)));

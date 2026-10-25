@@ -81,20 +81,25 @@ struct Run {
 
 /// 同じ初期値・同じ入力の MLP（784-256-10・batch 64）。
 fn new_run() -> Run {
+    new_run_with(DIMS)
+}
+
+/// 層幅を指定できる版（GEMM 内部ワークスペースを拡張させる大きい store の構築用）。
+fn new_run_with(dims: [usize; 3]) -> Run {
     let tape = Tape::new_with_ops(Box::new(CudaBackendOps::new(0)));
     let params = [
-        tensor(1, &[DIMS[0], DIMS[1]]),
-        tensor(2, &[DIMS[1]]),
-        tensor(3, &[DIMS[1], DIMS[2]]),
-        tensor(4, &[DIMS[2]]),
+        tensor(1, &[dims[0], dims[1]]),
+        tensor(2, &[dims[1]]),
+        tensor(3, &[dims[1], dims[2]]),
+        tensor(4, &[dims[2]]),
     ];
     let refs: Vec<&Tensor<f32>> = params.iter().collect();
     let store = DeviceParamStore::new(&tape, &refs).expect("store");
     let x = store
-        .upload_resident_input(&tape, &tensor(5, &[BATCH, DIMS[0]]))
+        .upload_resident_input(&tape, &tensor(5, &[BATCH, dims[0]]))
         .expect("x");
     let y = store
-        .upload_resident_input(&tape, &tensor(6, &[BATCH, DIMS[2]]))
+        .upload_resident_input(&tape, &tensor(6, &[BATCH, dims[2]]))
         .expect("y");
     Run { tape, store, x, y }
 }
@@ -414,4 +419,45 @@ fn two_threads_capturing_concurrently_do_not_fail() {
         let out = h.join().expect("スレッドが panic しない");
         assert_same(&out, &reference, &format!("thread {n} vs single"));
     }
+}
+
+/// store A を capture → 同デバイスの大きい store B を実行してワークスペースを拡張 → A を再生、
+/// の順で回しても A の loss・全パラメータが非 capture と bit 一致する（codex P0 の回帰。
+/// 世代が進んだ旧 Graph は再生されず、既存チェーンで実行されたのち再 capture される）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
+fn workspace_growth_by_other_store_invalidates_captured_graph() {
+    require_opt_in_env();
+    const BIG: [usize; 3] = [784, 2048, 10];
+    let drive = |capture: bool| -> Outcome {
+        let _opt = override_train_graph_for_scope(capture);
+        let mut a = new_run();
+        let mut b = new_run_with(BIG);
+        let mut losses = Vec::new();
+        let run_a = |a: &mut Run, n: usize, losses: &mut Vec<u32>| {
+            for _ in 0..n {
+                let h = step(a, 0.01).expect("step A");
+                losses.push(read_loss(a, &h).to_bits());
+            }
+        };
+        run_a(&mut a, 4, &mut losses);
+        // B の 1 step が共有ワークスペースを拡張する（A の Graph が焼き込んだ領域を解放）。
+        let hb = step(&mut b, 0.01).expect("step B");
+        let _ = read_loss(&b, &hb);
+        run_a(&mut a, 4, &mut losses);
+        assert_not_poisoned(&a);
+        Outcome {
+            losses,
+            params: param_bits(&a),
+        }
+    };
+    let plain = drive(false);
+    let before = train_graph_stats();
+    let graph = drive(true);
+    let d = train_graph_stats();
+    assert!(
+        d.captured - before.captured >= 2,
+        "拡張後に旧 Graph を再生せず再 capture する"
+    );
+    assert_same(&graph, &plain, "workspace growth vs plain");
 }

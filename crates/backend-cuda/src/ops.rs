@@ -2125,9 +2125,11 @@ fn train_chain_plan_fits_capture(ordinal: usize, plan: &TrainChainCapturePlan<'_
 /// 起動パラメータ（`m`・x／y の形状・層の構成・MSE の係数・SGD の全設定・velocity の有無）を
 /// `DefaultHasher`（SipHash 系。#4.5 の衝突耐性の前例）で畳み込む。lr などが変わるとキーが変わり、
 /// 再 capture になる（決定記録 §8.3・R5）。f32 は `to_bits` で畳み込み、`-0.0`／NaN も区別する。
-fn train_chain_config_key(plan: &TrainChainCapturePlan<'_>) -> u64 {
+fn train_chain_config_key(plan: &TrainChainCapturePlan<'_>, workspace_epoch: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // GEMM 内部ワークスペースの grow 世代（焼き込まれたアドレスの寿命。#3260 codex P0）。
+    workspace_epoch.hash(&mut h);
     plan.x.shape().hash(&mut h);
     plan.y.shape().hash(&mut h);
     for l in plan.layers {
@@ -4016,6 +4018,7 @@ impl BackendOps for CudaBackendOps {
             return Ok(None);
         }
 
+        let workspace_epoch;
         let key_and_device = {
             // キーに含める全バッファ（順序は固定。`SegmentKey::resources` は順序を含めて比較する）。
             let mut bufs: Vec<&DeviceBuffer<f32>> = vec![&*plan.params, &*plan.grad];
@@ -4036,16 +4039,30 @@ impl BackendOps for CudaBackendOps {
                 return Ok(None);
             }
             let resources = Self::segment_resources_for(&bufs, device.stream())?;
+            let gemm = context_cache::observe_cuda_result(
+                self.ordinal,
+                &token,
+                context_cache::cached_gemm(&device),
+            )
+            .map_err(|e| BackendError::CudaUnavailable(e.to_string()))?;
+            workspace_epoch = gemm.workspace_epoch();
             let key = SegmentKey {
                 generation: token.generation(),
-                config_key: train_chain_config_key(&plan),
+                config_key: train_chain_config_key(&plan, workspace_epoch),
                 resources,
             };
             drop(token);
             (key, device)
         };
         let (key, device) = key_and_device;
-        crate::graph::run_captured_train_chain(self, self.ordinal, &device, key, plan)
+        crate::graph::run_captured_train_chain(
+            self,
+            self.ordinal,
+            &device,
+            key,
+            workspace_epoch,
+            plan,
+        )
     }
 
     fn wait_device_capture_idle(&self, timeout: std::time::Duration) -> Result<(), BackendError> {
@@ -11193,27 +11210,39 @@ mod tests {
     fn train_chain_config_key_tracks_baked_parameters() {
         let ordinal = unique_test_ordinal();
         let mut parts = train_plan_parts(ordinal);
-        let base = with_plan(&mut parts, |p| train_chain_config_key(&p));
-        assert_eq!(base, with_plan(&mut parts, |p| train_chain_config_key(&p)));
+        let base = with_plan(&mut parts, |p| train_chain_config_key(&p, 0));
+        assert_eq!(
+            base,
+            with_plan(&mut parts, |p| train_chain_config_key(&p, 0))
+        );
 
         let lr_changed = with_plan(&mut parts, |mut p| {
             p.sgd.lr = 0.2;
-            train_chain_config_key(&p)
+            train_chain_config_key(&p, 0)
         });
         assert_ne!(base, lr_changed);
         let scale_changed = with_plan(&mut parts, |mut p| {
             p.mse_scale = 0.25;
-            train_chain_config_key(&p)
+            train_chain_config_key(&p, 0)
         });
         assert_ne!(base, scale_changed);
         let nesterov_changed = with_plan(&mut parts, |mut p| {
             p.sgd.nesterov = true;
-            train_chain_config_key(&p)
+            train_chain_config_key(&p, 0)
         });
         assert_ne!(base, nesterov_changed);
 
+        // GEMM ワークスペースの grow 世代が進むと旧 Graph は別キーになる（#3260 codex P0）。
+        assert_ne!(
+            base,
+            with_plan(&mut parts, |p| train_chain_config_key(&p, 1))
+        );
+
         parts.layers[0].bias_offset = None;
-        assert_ne!(base, with_plan(&mut parts, |p| train_chain_config_key(&p)));
+        assert_ne!(
+            base,
+            with_plan(&mut parts, |p| train_chain_config_key(&p, 0))
+        );
     }
 
     /// opt-in OFF（既定）では driver に触れず `Ok(None)`（GPU の無い CI でも通る。R1）。

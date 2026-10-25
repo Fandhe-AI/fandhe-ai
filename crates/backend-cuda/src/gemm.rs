@@ -517,6 +517,11 @@ pub struct CudaGemm {
     /// 起動を積み終えるまで `Mutex` を保持し、スレッド間共有でも 1 本の
     /// ストリーム上で順序が崩れないようにする。
     device_workspace: Mutex<GemmDeviceWorkspace>,
+    /// `device_workspace` の grow（旧 `CudaSlice` の drop）回数（イシュー #3260 codex P0）。
+    /// 学習 step 全体の Graph はこのワークスペースのアドレスを焼き込むため、grow 後は
+    /// 旧 Graph を再生してはならない。`SegmentKey::config_key` に畳み込み、再生直前に
+    /// `with_workspace_epoch` でワークスペース mutex 下で再確認する。
+    workspace_epoch: std::sync::atomic::AtomicU64,
     naive_f32: CudaFunction,
     naive_f16: CudaFunction,
     tiled_f32: CudaFunction,
@@ -2746,6 +2751,7 @@ impl CudaGemm {
             allocator,
             h2d_staging: Arc::new(Mutex::new(H2dStagingCache::new())),
             device_workspace: Mutex::new(GemmDeviceWorkspace::default()),
+            workspace_epoch: std::sync::atomic::AtomicU64::new(0),
             naive_f32,
             naive_f16,
             tiled_f32,
@@ -5680,6 +5686,10 @@ impl CudaGemm {
                 });
             }
             *slot = Some(self.stream.alloc_zeros::<f32>(len)?);
+            // 旧領域を焼き込んだ Graph を無効化するため世代を進める（#3260）。
+            // 呼び出し元はワークスペース mutex を保持しており、`with_workspace_epoch` と排他。
+            self.workspace_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // 永続ワークスペースの grow も確保として数える（#3252。定常状態では 0）。
             diag_count_mem_alloc();
         }
@@ -5711,6 +5721,30 @@ impl CudaGemm {
         let s = self.workspace_slot(slot, len)?;
         let mut dst = CudaArgMut::View(s.slice_mut(0..len));
         dst.copy_from_dtod(&self.stream, src)
+    }
+
+    /// ワークスペースの grow 世代（#3260。`ops.rs::train_chain_captured` が Graph の
+    /// `SegmentKey` へ畳み込む）。
+    pub(crate) fn workspace_epoch(&self) -> u64 {
+        self.workspace_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// ワークスペース mutex を保持したまま世代が `expected` のときだけ `f` を実行する
+    /// （#3260。Graph 再生の launch を包む）。grow はこの mutex 下でしか起きないため、
+    /// `Some` を返した `f` の間に焼き込み済みの領域が解放されることはない。
+    /// 世代が進んでいれば `None`（呼び出し側は旧 Graph を捨てて非 capture 経路へ戻る）。
+    /// mutex 汚染は `Err`。
+    pub(crate) fn with_workspace_epoch<R>(
+        &self,
+        expected: u64,
+        f: impl FnOnce() -> R,
+    ) -> Result<Option<R>, CudaError> {
+        let _ws = self.lock_device_workspace()?;
+        if self.workspace_epoch() != expected {
+            return Ok(None);
+        }
+        Ok(Some(f()))
     }
 
     fn lock_device_workspace(
