@@ -576,6 +576,8 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 
 ### 10.7 TF32・3×TF32 の実測（GB10・CUDA GEMM。既定精度の判断は #3262 の領分）
 
+既定精度の判断は `docs/cuda-gemm-default-precision-decision.md` を正とする（#3262・(A) FP32 維持で確定）。
+
 下表は値の転記で、既定精度の是非には触れない。
 
 | N | 区分 | 値 | 出典・機体・版 |
@@ -720,7 +722,7 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 | #3225 | open | CUDA の reuse の readback の遅さの是正 | G-CUDA-G512〜G2048 |
 | #3226 | open | CPU で reuse が fresh より遅い逆転の是正 | G-CPU-G256〜G2048 |
 | #3227 | open | ADOPT になった opt-in の既定を ON にする（第 1 回は反転 0 件〈§10.8.1〉・第 2 回は CUDA readback 1 件を反転〈§10.8.2〉・第 3 回で GB10 実機を確認し新しい反転は 0 件〈§10.8.3〉。今後の ADOPT を受けるため open） | 全 opt-in 対象セル |
-| #3262 | open | CUDA GEMM の既定精度の判断材料（§10.7 の値を入力にする） | G-CUDA-G2048・G4096 |
+| #3262 | 決定記録あり（`docs/cuda-gemm-default-precision-decision.md`・(A) FP32 維持で確定） | CUDA GEMM の既定精度の判断材料（§10.7 の値を入力にする） | G-CUDA-G2048・G4096 |
 | #3273 | open | 0.12.0 の 6 フレームワーク同席計測（本表との突き合わせ先） | 27 セルすべて |
 | #3195 | open | 要素数の小さい MSE backward を逐次で実行する（G2 縮約逐次化の関連） | MM-MTL-TRN・MM-CPU-TRN |
 | #3193・#3194・#3196・#3202・#3203 | closed | HEAD に実装済み（0.11.0 に含まれない）。効果の確認は #3273 | G-CPU-TRN・G-CPU-INF・G-CUDA-TRN |
