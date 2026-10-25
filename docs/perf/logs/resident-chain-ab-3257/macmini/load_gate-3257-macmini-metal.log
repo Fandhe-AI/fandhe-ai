@@ -1,0 +1,6 @@
+series=official threshold=3.0 rule_threshold=3.0 precheck=assert
+round1 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.64
+round2 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.59
+round3 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.62
+round4 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.62
+round5 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.62

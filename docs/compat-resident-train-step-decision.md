@@ -641,6 +641,69 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - 目的: 0.11.0 時点の差（Mac mini の train Metal 2.133 ms 対 PyTorch MPS 0.689 ms ほか）に対し、main HEAD の常駐チェーン（`train_step_resident`＋`ResidentLoss::read`、`upload_resident`＋`predict_resident_input`）がどこまで縮めるかを、現行経路・candle・PyTorch と同じ round で並べて測る。§14 のとおり bench の P7 化のコミットはピン更新後（#3273）なので、`bench-resident-chain.patch` を runner ツリーにだけ当てる計測専用方式にした。
 - 収録済み: 事前登録規則・計測専用パッチ・ランナー `run_ab_resident_chain.sh`・判定 `judge_resident_chain_ab.py`（単体テストは CI）。置き場は `docs/perf/logs/resident-chain-ab-3257/`。
 - ローカル煙試験（M4 Max・CPU。記録に使わない）: train の loss checksum と PARAM_DIGEST、infer の checksum が reuse と chain で一致した。
-- **実機計測（Mac mini・GB10）は未実施**。結果表・比・残差の分解は未取得で、推定値も置いていない。事前表明した仮説は RULE.txt にある。
+- 実機計測（Mac mini・GB10）は 2026-10-24 に実施済み。結果は §17.1〜§17.4、生ログと判定出力は `docs/perf/logs/resident-chain-ab-3257/{macmini,gb10}/`・`judge-3257*.md`。事前表明した仮説は RULE.txt にある。
 - 限界: 公開面からはチェーンが Tape 経路へフォールバックしたかを観測できない（根拠は §16）。infer の after でも出力の D2H と同期 1 回は残る。
 - 正式系列は #3273。
+
+### 17.1 実測結果（5 round 中央値・判定は RULE 適用）
+
+- 計測: 2026-10-24（UTC 04:29〜04:36）。runner は `786d18b50`（#3584。以降の main の差分は skills 更新のみで `crates/`・`scripts/bench/framework-compare/` に変更なし）、`.rev-stamp` `dirty=0`、計測専用パッチ適用。機体ロックは `#3257` が取得（owner 時刻 04:28:52Z）。torch は両機体とも 2.14.0（GB10 は 2.14.0+cu130）。size=64、TF32 OFF、`--graph` なし。
+- 判定: `judge-3257.md`（`--require-both`）の終了コードは 0（全 8 セル判定可能・INVALID／REJECT なし）。機体別の `judge-3257-macmini.md`・`judge-3257-gb10.md` も終了コード 0。
+- checksum: 全 run・両腕（before=`--mode reuse`・after=`--mode chain`）で一致（train は loss 0.080541 と PARAM_DIGEST、infer は 13.976574。judge が fail-closed に検査し通過）。tolerance・baseline は変更していない。
+- ratio_ab = after÷before（小さいほど改善）。ratio_r は 5 round 個別の比。
+
+| 機体 | task | device | before ms | after ms | ratio_ab | 判定 |
+|---|---|---|---:|---:|---:|---|
+| Mac mini | train | cpu | 0.4991 | 0.5009 | 1.004 | REGRESS |
+| Mac mini | infer | cpu | 0.2050 | 0.2010 | 0.980 | NEUTRAL |
+| Mac mini | train | metal | 1.5679 | 0.5047 | 0.322 | IMPROVE |
+| Mac mini | infer | metal | 0.3331 | 0.3279 | 0.984 | NEUTRAL |
+| GB10 | train | cpu | 0.7231 | 0.7659 | 1.059 | REGRESS |
+| GB10 | infer | cpu | 0.1911 | 0.1620 | 0.848 | IMPROVE |
+| GB10 | train | cuda | 0.2765 | 0.1343 | 0.486 | IMPROVE |
+| GB10 | infer | cuda | 0.0899 | 0.0776 | 0.863 | IMPROVE |
+
+- REGRESS（CPU train 2 セル）は RULE の厳格条件（ratio>1.00）による。Mac mini の +0.4% は ratio_r が 0.948〜1.018 に散り、誤差範囲に近い。GB10 の +5.9% は ratio_r が 0.893〜1.102 に散る。いずれも事後に規則を緩めず、そのまま記録する。CPU はデバイス同期が無いので、チェーン化は RULE の仮説どおり「中立に近い」見込みだった。実測は GB10 infer CPU の 0.848（IMPROVE）が仮説外で、原因は未調査。
+- Mac mini の infer Metal は ratio_r が 0.776〜1.075 と散る（before の q1〜q3 幅も大きい）。NEUTRAL は「改善とは言えない」の意味で、後退でもない。
+
+### 17.2 相手との比（5 round 中央値。参考。判定外）
+
+- 相手最速÷x は judge の列そのもの。1 超は fandhe-ai が相手最速より速い。「1 超で 1 位・0.90 以上で僅差」は参考の目安で、判定には使わない。candle・torch の列は各 JSONL の 5 round 中央値（`results-{candle,torch}-3257-*`）。
+
+| 機体 | task | device | before | after | candle | torch | 相手最速÷before | 相手最速÷after |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| Mac mini | train | cpu | 0.4991 | 0.5009 | 0.6248 | 0.1368 | 0.27 | 0.27 |
+| Mac mini | infer | cpu | 0.2050 | 0.2010 | 0.1595 | 0.0317 | 0.15 | 0.16 |
+| Mac mini | train | metal | 1.5679 | 0.5047 | 1.1195 | 0.4904 | 0.31 | 0.97 |
+| Mac mini | infer | metal | 0.3331 | 0.3279 | 0.3258 | 0.3210 | 0.96 | 0.98 |
+| GB10 | train | cpu | 0.7231 | 0.7659 | 2.3249 | 0.3734 | 0.52 | 0.49 |
+| GB10 | infer | cpu | 0.1911 | 0.1620 | 0.2488 | 0.1382 | 0.72 | 0.85 |
+| GB10 | train | cuda | 0.2765 | 0.1343 | 0.2710 | 1.0266 | 0.98 | 2.02 |
+| GB10 | infer | cuda | 0.0899 | 0.0776 | 0.0414 | 0.0396 | 0.44 | 0.51 |
+
+- 単位は ms。参考として 0.11.0 正式系列の値は Mac mini の train Metal 2.133 ms 対 PyTorch 0.689 ms（`docs/perf/logs/framework-compare-0.11.0-macmini-remeasure/`）、GB10 の train CUDA 0.331 ms 対 candle 0.272 ms（`docs/perf/logs/framework-compare-0.11.0-remeasure/gb10/`）。本計測の before は HEAD の reuse 経路で、版も runner も異なるため 0.11.0 の値とは直接比べない。
+- 相手とは初期値・入力が非対称で checksum は一致しない（candle・torch の checksum は値が異なる）。本節の比は時間の比で、数値一致の主張ではない。入力の対称化は #3263・#3266 の範囲。
+- 推定との比較: RULE の事前仮説（推定）は train CUDA 0.18〜0.25 ms・train Metal 0.65〜0.9 ms。実測は 0.134 ms・0.505 ms で、いずれも仮説の範囲より速かった。仮説は保守的すぎた。Metal は PyTorch MPS と同程度で明確には勝てない、という仮説は実測と整合する（0.97 倍）。infer の改善は小さい、という仮説は Metal（−1.6%）で整合し、CUDA（−13.7%）はやや大きかった。
+
+### 17.3 届かないセルの残りの差の分解
+
+対象は after が相手最速に届かない 6 セル。枠組みは `docs/perf/loss-attribution-matrix.md` §10（ハードの上限／共通の計測窓／自分たちの制約）。**実測**は本計測で直接得た値（Δ・中央値）だけ。内訳の各項は 0.11.0 の registry 版で別途実測した固定費（`docs/perf/logs/cuda-train-infer-gb10-3189/gb10/aggregate.md`）からの**推定**であり、main HEAD の値ではない。run の追加は RULE で禁止されているため、内訳そのものの実測は追加していない。
+
+| セル | Δ = after − 相手最速（実測） | 内訳 | 分類 |
+|---|---:|---|---|
+| Mac mini train metal | +0.0143 ms（+2.9%、vs torch） | 分解不能。Mac mini の train／infer の内訳は未実測。M4 Max の旧内訳（`train-step-phase-breakdown.md`）は機体が違うため流用しない | 未説明残差（Mac mini の内訳は未実測） |
+| Mac mini infer metal | +0.0069 ms（+2.2%、vs torch） | 同上。ratio_r が 0.776〜1.075 に散り、Δ は round 間の揺れと同程度 | 未説明残差。差は誤差範囲に近い |
+| GB10 infer cuda | +0.0380 ms（vs torch） | 推定: launch の発行 14.1 µs（L1 7.5＋L2 6.6。相手も launch するので全額が Δ ではなく上限）、同期の待ち固定費 1 回 約 9.7 µs（kernel_wait。相手も同期 1 回を負うので Δ に入らない見込み）、checksum 窓 0.6〜0.8 µs（両者共通で Δ へほぼ寄与しない）。残りの約 23.9 µs（Δ から launch 発行を引いた値）はカーネル時間差と launch 数差を含み、分離できない | 計測窓（同期・checksum は共通の窓）＋自分たちの制約（launch 回数、推定）。未説明残差 約 23.9 µs（推定） |
+| GB10 train cpu | +0.3925 ms（vs torch） | 同期が無いので wait 固定費はゼロ。CPU の GEMM・autodiff の演算時間の差で、本計測に内訳なし | 未説明残差。内訳は未実測（チェーン化の対象外） |
+| GB10 infer cpu | +0.0238 ms（vs torch） | 同上 | 未説明残差。内訳は未実測 |
+| Mac mini train／infer cpu | +0.3641 ms／+0.1693 ms（vs torch） | 同上 | 未説明残差。内訳は未実測（チェーン化の対象外） |
+
+- GB10 train cuda は after が相手最速（candle）より 2.02 倍速いので分解の対象外。
+- 数字で振り分けられたのは GB10 infer cuda の推定分だけで、それ以外は「内訳が未実測」として残した。ハードの上限／計測窓／自分たちの制約への割り当ては、内訳の実測（Mac mini の phases 腕、GB10 の HEAD での再分解）が揃うまで確定しない。制約の緩和は提案しない。
+
+### 17.4 限界・未実測
+
+- 公開面からはチェーンが Tape 経路へフォールバックしたかを観測できない（§16）。infer の after でも出力の D2H と同期 1 回は残る。checksum 一致は bit 同一の証明ではなく、train は PARAM_DIGEST（chain 腕と reuse 腕で一致）で補っている。
+- 機体ロック取得前後の GPU 占有（`nvidia-smi`）と計測中の他プロセスの記録は取れていない（計測時のログに無い）。Mac mini の load average は計測中 2.6〜3.3 で、ランナーの負荷ゲートは通過している。
+- Mac mini の train／infer の内訳、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
+- 本計測は参考系列で、正式な 6 フレームワーク同席計測とピン更新（0.12.0）は #3273。
