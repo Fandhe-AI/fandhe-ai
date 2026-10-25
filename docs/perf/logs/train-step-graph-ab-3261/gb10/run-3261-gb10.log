@@ -1,0 +1,82 @@
+precheck=assert ok
+== train cuda arm=chain-off round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134144,"q1_s":0.000134064,"q3_s":0.000134216,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.309770833}
+== train cuda arm=chain-on round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112592,"q1_s":0.000112459,"q3_s":0.000112656,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.257739091}
+== train cuda arm=reuse-off round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000275751,"q1_s":0.000274715,"q3_s":0.000276955,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.258067922}
+== train cuda arm=reuse-on round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000262671,"q1_s":0.000261403,"q3_s":0.000264507,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.260446538}
+== train cuda arm=fresh-off round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000505823,"q1_s":0.000484163,"q3_s":0.000526135,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=fresh-on round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000491535,"q1_s":0.000488407,"q3_s":0.000495278,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=candle round=1 ==
+{"framework":"candle","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000271912,"q1_s":0.000269699,"q3_s":0.000277472,"checksum":0.117549,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=torch round=1 ==
+run 1:  08:02:43 up 59 days, 19:29,  2 users,  load average: 0.38, 1.61, 0.98
+== train cuda arm=reuse-on round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000262527,"q1_s":0.000261435,"q3_s":0.000263683,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.310762945}
+== train cuda arm=fresh-off round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000527846,"q1_s":0.000525089,"q3_s":0.000531777,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=fresh-on round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000486629,"q1_s":0.000483646,"q3_s":0.000492473,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=candle round=2 ==
+{"framework":"candle","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000270343,"q1_s":0.000267819,"q3_s":0.000273783,"checksum":0.117549,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=torch round=2 ==
+== train cuda arm=chain-off round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134223,"q1_s":0.000134063,"q3_s":0.000134923,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.261635581}
+== train cuda arm=chain-on round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112663,"q1_s":0.000112464,"q3_s":0.000112932,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.270777343}
+== train cuda arm=reuse-off round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000274015,"q1_s":0.000272879,"q3_s":0.000275623,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.260908291}
+run 2:  08:03:50 up 59 days, 19:30,  2 users,  load average: 0.24, 1.32, 0.92
+== train cuda arm=candle round=3 ==
+{"framework":"candle","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000273015,"q1_s":0.000271247,"q3_s":0.000276067,"checksum":0.117549,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=torch round=3 ==
+== train cuda arm=chain-off round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134687,"q1_s":0.000134235,"q3_s":0.000135108,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.259457758}
+== train cuda arm=chain-on round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112607,"q1_s":0.000112528,"q3_s":0.000112660,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.262903036}
+== train cuda arm=reuse-off round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000276967,"q1_s":0.000270603,"q3_s":0.000278982,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.272515422}
+== train cuda arm=reuse-on round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000262423,"q1_s":0.000261375,"q3_s":0.000263679,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.259990989}
+== train cuda arm=fresh-off round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000503750,"q1_s":0.000495818,"q3_s":0.000510997,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=fresh-on round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000489693,"q1_s":0.000486322,"q3_s":0.000494745,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+run 3:  08:04:57 up 59 days, 19:31,  2 users,  load average: 0.16, 1.08, 0.86
+== train cuda arm=chain-on round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112608,"q1_s":0.000112544,"q3_s":0.000112672,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.315894142}
+== train cuda arm=reuse-off round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000276911,"q1_s":0.000271602,"q3_s":0.000278494,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.276680312}
+== train cuda arm=reuse-on round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000265519,"q1_s":0.000262563,"q3_s":0.000266607,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.268764990}
+== train cuda arm=fresh-off round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000540141,"q1_s":0.000519562,"q3_s":0.000572337,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=fresh-on round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000505822,"q1_s":0.000501297,"q3_s":0.000509858,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=candle round=4 ==
+{"framework":"candle","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000274598,"q1_s":0.000272814,"q3_s":0.000277151,"checksum":0.117549,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=torch round=4 ==
+== train cuda arm=chain-off round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135111,"q1_s":0.000134860,"q3_s":0.000135247,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.269763022}
+run 4:  08:06:04 up 59 days, 19:33,  2 users,  load average: 0.17, 0.88, 0.81
+== train cuda arm=fresh-off round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000494742,"q1_s":0.000488378,"q3_s":0.000506073,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=fresh-on round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000517030,"q1_s":0.000489858,"q3_s":0.000535314,"checksum":0.080541,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=candle round=5 ==
+{"framework":"candle","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000273519,"q1_s":0.000272023,"q3_s":0.000276551,"checksum":0.117549,"warmup":20,"iters":80,"mode":"fresh"}
+== train cuda arm=torch round=5 ==
+== train cuda arm=chain-off round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135152,"q1_s":0.000134892,"q3_s":0.000135399,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.269210566}
+== train cuda arm=chain-on round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112607,"q1_s":0.000112511,"q3_s":0.000112671,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.257678970}
+== train cuda arm=reuse-off round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000276974,"q1_s":0.000275291,"q3_s":0.000278623,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.261938440}
+== train cuda arm=reuse-on round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000260791,"q1_s":0.000259595,"q3_s":0.000262219,"checksum":0.080541,"warmup":20,"iters":80,"mode":"reuse","init_s":0.260672959}
+run 5:  08:07:10 up 59 days, 19:34,  2 users,  load average: 0.19, 0.74, 0.76
+done. results in results/raw; skipped log: results/raw/skipped-train-graph-3261-gb10.log

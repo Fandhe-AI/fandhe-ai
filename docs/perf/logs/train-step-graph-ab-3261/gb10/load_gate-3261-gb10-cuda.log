@@ -1,0 +1,6 @@
+series=official threshold=1.0 rule_threshold=1.0 precheck=assert
+round1 dev=cuda gate=pass gate_ok=1 threshold=1.0 waited_s=210 load1=0.26
+round2 dev=cuda gate=pass gate_ok=1 threshold=1.0 waited_s=60 load1=0.18
+round3 dev=cuda gate=pass gate_ok=1 threshold=1.0 waited_s=60 load1=0.09
+round4 dev=cuda gate=pass gate_ok=1 threshold=1.0 waited_s=60 load1=0.10
+round5 dev=cuda gate=pass gate_ok=1 threshold=1.0 waited_s=60 load1=0.11
