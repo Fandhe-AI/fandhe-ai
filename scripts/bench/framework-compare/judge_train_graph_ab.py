@@ -235,8 +235,12 @@ def opponent_ratio(d, label, fandhe_rows):
 
 
 def judge(d, label, rule_path):
-    rule_text = read_text(rule_path)
-    rule_sha = sha256_file(rule_path)
+    # RULE の読取不能は入力不正（終了コード 2）として扱う（Undet のまま漏らさない）
+    try:
+        rule_text = read_text(rule_path)
+        rule_sha = sha256_file(rule_path)
+    except Undet as e:
+        raise Bad(f"RULE 読取不能: {e}")
     psha = rule_patch_sha(rule_text)
     undet, reject = [], []
     cells = {}

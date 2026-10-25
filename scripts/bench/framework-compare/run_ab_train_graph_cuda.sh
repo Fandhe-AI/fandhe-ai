@@ -233,10 +233,13 @@ fi
 
 # ---- 計測 ----
 # 専有ゲート。load1<1.0 かつ GPU 使用率 0% を 30 秒間隔で 3 サンプル連続（RULE.txt [専有ゲート]）。
+GATE_START=$SECONDS
 gate_ok_once() {
   local l1 util n
   n=0
   while [[ "$n" -lt 3 ]]; do
+    # 実時間の期限（RULE.txt 最大 30 分）を検査より前に確認し、期限後の通過を受理しない
+    [[ $((SECONDS - GATE_START)) -le 1800 ]] || return 1
     # 各サンプルで load1 と GPU 使用率の両方を確認する（RULE.txt: 3 サンプル連続）
     l1="$(uptime | sed -n 's/.*load average[s]*: *\([0-9.]*\).*/\1/p')"
     [[ "$l1" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
@@ -250,11 +253,14 @@ gate_ok_once() {
 }
 wait_gate() { # <round> <logfile>
   local waited=0 ok=0 l1
+  GATE_START=$SECONDS
   while :; do
     if gate_ok_once; then ok=1; break; fi
-    if [[ "$waited" -ge 1800 ]]; then break; fi
-    sleep 30; waited=$((waited + 30))
+    # サンプル間の待機を含む実経過時間で期限を判定する
+    if [[ $((SECONDS - GATE_START)) -ge 1800 ]]; then break; fi
+    sleep 30
   done
+  waited=$((SECONDS - GATE_START))
   l1="$(uptime | sed -n 's/.*load average[s]*: *\([0-9.]*\).*/\1/p')"
   if [[ "$ok" == "1" ]]; then
     echo "round$1 dev=cuda gate=pass gate_ok=1 threshold=${LOAD_GATE} waited_s=${waited} load1=${l1}" >>"$2"
