@@ -1609,6 +1609,10 @@ fn capture_train_chain(
         launch_train_chain(ops, plan)
     }));
     let end_result = stream.end_capture(instantiate_flags());
+    // capture 中は他スレッドの driver 呼び出し（= GEMM ワークスペースの grow）が排他されている。
+    // この排他の内側で焼き込み時点のワークスペース世代を確定し、guard 解放後の初回 launch は
+    // ワークスペース mutex 下で世代を再検証してから行う（#3260 codex P0・Bugbot High）。
+    let captured_epoch = context_cache::cached_gemm(device).map(|g| g.workspace_epoch());
     drop(guard);
 
     let body_err = match body_outcome {
@@ -1641,15 +1645,44 @@ fn capture_train_chain(
         // capture 自体は正常終了したが本体が失敗した graph は使わず破棄する。
         return Err(BeforeLaunch(e));
     }
-    if let Err(e) = graph.upload() {
-        context_cache::observe_cuda_error_ref(ordinal, &token, &CudaError::Driver(e));
-        return Err(BeforeLaunch(crate::memory::map_cuda_error(
-            CudaError::Driver(e),
-        )));
-    }
-    let launch_result = graph.launch();
-    if let Err(e) = context_cache::observe_driver_result::<()>(ordinal, &token, launch_result) {
-        return Err(Launch(crate::memory::map_cuda_error(CudaError::Driver(e))));
+    let captured_epoch = match captured_epoch {
+        Ok(e) => e,
+        Err(e) => return Err(BeforeLaunch(crate::memory::map_cuda_error(e))),
+    };
+    // upload と初回 launch を、ワークスペース mutex 保持かつ世代一致の下で行う。世代が進んで
+    // いれば焼き込み済み領域は解放済みの可能性があるため、何も実行せず graph を捨てる。
+    let gemm = context_cache::cached_gemm(device)
+        .map_err(|e| BeforeLaunch(crate::memory::map_cuda_error(e)))?;
+    let guarded = gemm.with_workspace_epoch(captured_epoch, || {
+        if let Err(e) = graph.upload() {
+            return Err((true, e));
+        }
+        graph.launch().map_err(|e| (false, e))
+    });
+    match guarded {
+        Err(e) => return Err(BeforeLaunch(crate::memory::map_cuda_error(e))),
+        Ok(None) => {
+            return Err(BeforeLaunch(BackendError::KernelLaunchFailed(
+                "capture_train_chain: GEMM workspace grew between capture and first launch \
+                 (stale graph discarded; falling back)"
+                    .to_string(),
+            )));
+        }
+        Ok(Some(Err((true, e)))) => {
+            context_cache::observe_cuda_error_ref(ordinal, &token, &CudaError::Driver(e));
+            return Err(BeforeLaunch(crate::memory::map_cuda_error(
+                CudaError::Driver(e),
+            )));
+        }
+        Ok(Some(Err((false, e)))) => {
+            let r = context_cache::observe_driver_result::<()>(ordinal, &token, Err(e));
+            if let Err(e) = r {
+                return Err(Launch(crate::memory::map_cuda_error(CudaError::Driver(e))));
+            }
+        }
+        Ok(Some(Ok(()))) => {
+            let _ = context_cache::observe_driver_result::<()>(ordinal, &token, Ok(()));
+        }
     }
     Ok(graph)
 }

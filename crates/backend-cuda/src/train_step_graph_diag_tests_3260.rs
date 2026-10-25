@@ -441,9 +441,23 @@ fn workspace_growth_by_other_store_invalidates_captured_graph() {
             }
         };
         run_a(&mut a, 4, &mut losses);
+        let epoch_of = || {
+            let dev = crate::context_cache::cached_device(0).expect("device");
+            crate::context_cache::cached_gemm(&dev)
+                .expect("gemm")
+                .workspace_epoch()
+        };
+        let epoch_before = epoch_of();
         // B の 1 step が共有ワークスペースを拡張する（A の Graph が焼き込んだ領域を解放）。
         let hb = step(&mut b, 0.01).expect("step B");
         let _ = read_loss(&b, &hb);
+        if capture {
+            // 無効化の検証が成立する前提: この区間でワークスペース世代が実際に進んだこと。
+            assert!(
+                epoch_of() > epoch_before,
+                "B の step で共有ワークスペースの世代が進むこと（capture 側を先に実行する）"
+            );
+        }
         run_a(&mut a, 4, &mut losses);
         assert_not_poisoned(&a);
         Outcome {
@@ -451,10 +465,12 @@ fn workspace_growth_by_other_store_invalidates_captured_graph() {
             params: param_bits(&a),
         }
     };
-    let plain = drive(false);
+    // capture 側を先に実行する。非 capture 側を先に回すと共有 grow-only ワークスペースが BIG まで
+    // 拡張済みになり、capture 側で世代が進まず無効化を検証できない（#3260 codex P2）。
     let before = train_graph_stats();
     let graph = drive(true);
     let d = train_graph_stats();
+    let plain = drive(false);
     assert!(
         d.captured - before.captured >= 2,
         "拡張後に旧 Graph を再生せず再 capture する"
