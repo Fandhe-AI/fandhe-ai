@@ -27,6 +27,7 @@ CELLS = ("chain", "reuse", "fresh")
 DIGEST_CELLS = ("chain", "reuse")
 OPPONENTS = {"candle": "candle", "torch": "pytorch"}
 GATE_LOAD1 = 1.0
+GATE_MAX_WAIT_S = 1800
 # 前提ゲートのログ名 -> 期待 passed 件数（RULE.txt [前提ゲート]）
 # run_ab_train_graph_cuda.sh が前提ゲート不合格で計測前に停止したときに残す印（計測欠測と区別するため）
 PREGATE_STOP_MARK = "pregate-stop-{label}.txt"
@@ -182,8 +183,24 @@ def check_gate(path):
         raise Undet("round 行が round1〜5 と一致しない")
     for ln in rounds:
         r = parse_kv(ln)
+        name = ln.split()[0]
         if r.get("dev") != "cuda" or r.get("gate") != "pass" or r.get("gate_ok") != "1":
-            raise Undet(f"専有ゲート不通過: {ln.split()[0]}")
+            raise Undet(f"専有ゲート不通過: {name}")
+        # 実測値も検証する（項目欠落・非有限・閾値不一致・待機超過は不合格。RULE.txt [前提ゲート] 専有ゲート）
+        try:
+            thr = float(r.get("threshold", ""))
+            l1 = float(r.get("load1", ""))
+            waited = float(r.get("waited_s", ""))
+        except ValueError:
+            raise Undet(f"専有ゲートの threshold/load1/waited_s が欠落または数値でない: {name}")
+        if not (math.isfinite(thr) and math.isfinite(l1) and math.isfinite(waited)):
+            raise Undet(f"専有ゲートの実測値が有限でない: {name}")
+        if thr != GATE_LOAD1:
+            raise Undet(f"専有ゲートの threshold が規則値 {GATE_LOAD1} と不一致: {name}")
+        if not (0.0 <= l1 < GATE_LOAD1):
+            raise Undet(f"専有ゲートの load1 が {GATE_LOAD1} 未満でない ({l1}): {name}")
+        if not (0.0 <= waited <= GATE_MAX_WAIT_S):
+            raise Undet(f"専有ゲートの waited_s が 0〜{GATE_MAX_WAIT_S} 秒の範囲外 ({waited}): {name}")
 
 
 def check_rc0(text, path):
@@ -211,6 +228,13 @@ def pregate_state(d, label):
                 raise
     off = [ln for ln in lines_of(f"{d}/bits-off-{label}.txt") if ln.strip()]
     on = [ln for ln in lines_of(f"{d}/bits-on-{label}.txt") if ln.strip()]
+    # 抽出ファイルは古い可能性があるため、生ログの BITS 行と一致することを必ず検証する（欠落・不一致は不合格）
+    raw_off = [ln for ln in lines_of(f"{d}/r2-off-{label}.log") if ln.startswith("BITS")]
+    raw_on = [ln for ln in lines_of(f"{d}/r2-on-{label}.log") if ln.startswith("BITS")]
+    if raw_off != [ln for ln in off] or raw_on != [ln for ln in on]:
+        fails.append("R2: bits-off／on 抽出ファイルが生ログの BITS 行と一致しない")
+    if raw_off != raw_on:
+        fails.append("R2: 生ログの BITS が off／on で不一致（bit 不一致）")
     if not off or not on:
         if fails:
             # R1・R2 が既に失敗確定なら BITS 欠落も同じ失敗の帰結（REJECT のまま）

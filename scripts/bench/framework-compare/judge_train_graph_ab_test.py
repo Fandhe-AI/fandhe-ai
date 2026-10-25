@@ -142,6 +142,39 @@ class JudgeTest(unittest.TestCase):
             fh.write(txt.replace("round3 dev=cuda gate=pass gate_ok=1", "round3 dev=cuda gate=fail gate_ok=0"))
         self.assertEqual(self.run_judge(), "UNDETERMINED")
 
+    def _gate_replace(self, old, new):
+        self.fx.build()
+        p = f"{self.tmp}/load_gate-{LABEL}-cuda.log"
+        txt = open(p).read()
+        self.assertIn(old, txt)
+        open(p, "w").write(txt.replace(old, new, 1))
+
+    def test_gate_load1_high_undetermined(self):
+        self._gate_replace("load1=0.1", "load1=2.0")
+        self.assertEqual(self.run_judge(), "UNDETERMINED")
+
+    def test_gate_waited_over_undetermined(self):
+        self._gate_replace("waited_s=0", "waited_s=1900")
+        self.assertEqual(self.run_judge(), "UNDETERMINED")
+
+    def test_gate_missing_fields_undetermined(self):
+        self._gate_replace(" load1=0.1", "")
+        self.assertEqual(self.run_judge(), "UNDETERMINED")
+
+    def test_gate_threshold_mismatch_undetermined(self):
+        self._gate_replace("gate_ok=1 threshold=1.0", "gate_ok=1 threshold=3.0")
+        self.assertEqual(self.run_judge(), "UNDETERMINED")
+
+    def test_r2_raw_log_mismatch_rejects(self):
+        self.fx.build()
+        self.fx.write(f"r2-on-{LABEL}.log", "BITS a 1\nBITS b 9\ntest result: ok. 1 passed; 0 failed; 0 ignored\nrc=0\n")
+        self.assertEqual(self.run_judge(), "REJECT")
+
+    def test_r2_stale_extract_rejects(self):
+        self.fx.build()
+        self.fx.write(f"r2-off-{LABEL}.log", "BITS a 1\nBITS b 7\ntest result: ok. 1 passed; 0 failed; 0 ignored\nrc=0\n")
+        self.assertEqual(self.run_judge(), "REJECT")
+
     def test_rule_sha_mismatch_undetermined(self):
         self.fx.build()
         open(self.fx.rule, "a").write("changed\n")
@@ -156,6 +189,8 @@ class JudgeTest(unittest.TestCase):
         self.fx.build()
         self.fx.write(f"bits-off-{LABEL}.txt", "")
         self.fx.write(f"bits-on-{LABEL}.txt", "")
+        for arm in ("off", "on"):
+            self.fx.write(f"r2-{arm}-{LABEL}.log", "test result: ok. 1 passed; 0 failed; 0 ignored\nrc=0\n")
         self.assertEqual(self.run_judge(), "UNDETERMINED")
 
     def test_r1_failure_rejects(self):
