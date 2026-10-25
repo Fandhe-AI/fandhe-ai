@@ -227,6 +227,8 @@ if [[ ! -s "$OUT/bits-off-${LABEL}.txt" ]] || ! diff "$OUT/bits-off-${LABEL}.txt
   echo "pregate r2-diff FAILED（BITS が空、または off／on で差がある）" >>"$SKIP"; PREGATE_OK=0
 fi
 if [[ "$PREGATE_OK" != "1" ]]; then
+  # 判定ツールへ「計測欠測ではなく前提ゲート不合格で停止した」ことを渡す印（R1・R2 の失敗は REJECT。judge が生ログで再確認する）
+  cp "$SKIP" "$OUT/pregate-stop-${LABEL}.txt"
   echo "undetermined: pregate（前提ゲート不合格のため計測しない。詳細は ${SKIP}）" | tee -a "$SKIP" >&2
   exit 1
 fi

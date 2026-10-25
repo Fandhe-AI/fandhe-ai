@@ -28,6 +28,8 @@ DIGEST_CELLS = ("chain", "reuse")
 OPPONENTS = {"candle": "candle", "torch": "pytorch"}
 GATE_LOAD1 = 1.0
 # 前提ゲートのログ名 -> 期待 passed 件数（RULE.txt [前提ゲート]）
+# run_ab_train_graph_cuda.sh が前提ゲート不合格で計測前に停止したときに残す印（計測欠測と区別するため）
+PREGATE_STOP_MARK = "pregate-stop-{label}.txt"
 PREGATES = {
     "r0-3252": 3,
     "r0-real-device": 2,
@@ -210,6 +212,10 @@ def pregate_state(d, label):
     off = [ln for ln in lines_of(f"{d}/bits-off-{label}.txt") if ln.strip()]
     on = [ln for ln in lines_of(f"{d}/bits-on-{label}.txt") if ln.strip()]
     if not off or not on:
+        if fails:
+            # R1・R2 が既に失敗確定なら BITS 欠落も同じ失敗の帰結（REJECT のまま）
+            fails.append("R2: BITS 行が 0 行")
+            return fails
         raise Undet("R2: BITS 行が 0 行")
     if any(not ln.startswith("BITS ") for ln in off + on):
         raise Bad("R2: BITS 以外の行が混入している")
@@ -244,6 +250,9 @@ def judge(d, label, rule_path):
     psha = rule_patch_sha(rule_text)
     undet, reject = [], []
     cells = {}
+    stop = early_pregate_stop(d, label, rule_sha, psha)
+    if stop is not None:
+        return stop
     # 1. 取り込み（入力不正は Bad で即終了）
     for cell in CELLS:
         try:
@@ -314,6 +323,36 @@ def judge(d, label, rule_path):
     else:
         verdict = "ADOPT"
     return verdict, table, undet, reject, rule_sha
+
+
+def early_pregate_stop(d, label, rule_sha, psha):
+    """前提ゲート不合格で計測前に停止した run の判定。印が無ければ None（通常経路）。
+
+    RULE.txt [判定]「R1 または R2 の失敗は REJECT」を、未実行計測による欠測（UNDETERMINED）で埋もれさせない。
+    印は主張にすぎないため、env_info（GB10・RULE sha）と前提ゲートの生ログから R1・R2 の失敗を独立に再確認し、
+    再確認できない・R0 が不合格・環境不一致なら UNDETERMINED に倒す（fail-closed）。計測セルは存在しないため表は空。
+    """
+    mark = f"{d}/" + PREGATE_STOP_MARK.format(label=label)
+    try:
+        with open(mark, encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise Bad(f"{mark}: 開けない ({e})")
+    undet, reject = [], []
+    if not [ln for ln in text.splitlines() if ln.strip()]:
+        undet.append("前提ゲート停止の印が空")
+    try:
+        check_env(f"{d}/env_info-{label}.txt", rule_sha, psha)
+        reject.extend(pregate_state(d, label))
+    except Undet as e:
+        undet.append(str(e))
+    if not undet and not reject:
+        undet.append("前提ゲート停止の印があるが、ログから R1・R2 の失敗を再確認できない")
+    if undet:
+        return "UNDETERMINED", [], undet, reject, rule_sha
+    return "REJECT", [], undet, reject, rule_sha
 
 
 def lines_of_safe(path):

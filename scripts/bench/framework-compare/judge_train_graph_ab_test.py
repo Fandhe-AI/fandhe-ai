@@ -163,6 +163,38 @@ class JudgeTest(unittest.TestCase):
         self.fx.write(f"r1-facade-{LABEL}.log", "test result: ok. 1 passed; 0 failed;\nrc=101\n")
         self.assertEqual(self.run_judge(), "REJECT")
 
+    def _stop(self):
+        """前提ゲート停止 run を模す: 計測成果物・ゲートログ・BITS を除き印を置く。"""
+        for f in os.listdir(self.tmp):
+            if f.startswith(("results-", "digest-", "load_gate-")):
+                os.remove(f"{self.tmp}/{f}")
+        self.fx.write(f"skipped-train-graph-{LABEL}.log", "pregate r1-facade FAILED rc=101\n")
+        self.fx.write(f"pregate-stop-{LABEL}.txt", "pregate r1-facade FAILED rc=101\n")
+
+    def test_pregate_stop_r1_rejects(self):
+        self.fx.build()
+        self.fx.write(f"r1-facade-{LABEL}.log", "rc=101\n")
+        self._stop()
+        self.assertEqual(self.run_judge(), "REJECT")
+
+    def test_pregate_stop_r2_diff_rejects(self):
+        self.fx.build()
+        self.fx.write(f"bits-on-{LABEL}.txt", "BITS a 1\nBITS b 3\n")
+        self._stop()
+        self.assertEqual(self.run_judge(), "REJECT")
+
+    def test_pregate_stop_r0_failure_undetermined(self):
+        self.fx.build()
+        self.fx.write(f"r1-facade-{LABEL}.log", "rc=101\n")
+        self.fx.write(f"r0-3252-{LABEL}.log", "rc=101\n")
+        self._stop()
+        self.assertEqual(self.run_judge(), "UNDETERMINED")
+
+    def test_pregate_stop_unconfirmed_undetermined(self):
+        self.fx.build()
+        self._stop()
+        self.assertEqual(self.run_judge(), "UNDETERMINED")
+
     def test_r0_missing_undetermined(self):
         self.fx.build()
         os.remove(f"{self.tmp}/r0-3252-{LABEL}.log")
