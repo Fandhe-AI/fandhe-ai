@@ -38,11 +38,11 @@ use fandhe_ai_tensor_core::{
     HuberKind, InterpolateMode, KlDivTarget, LstmPointwiseOutput, MatrixNormOrd, MseReduction,
     PagedAttentionArgs, PagedKvLayout, Pool2dParams, QrFactors, ScalarBinaryOp, ScalarUnaryOp,
     ScatterReduce, SegmentKey, SegmentResource, SegmentRun, ShapeError, SvdFactors, Tensor,
-    UnaryElementwiseOp, adaptive_pool2d_out_shape, batch_norm_layout, gather_out_shape,
-    im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape, pad_out_shape,
-    pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout, row_softmax_layout,
-    scatter_out_shape, sort_out_shape, topk_out_shape, validate_paged_attention,
-    validate_paged_kv_append,
+    TrainChainCapturePlan, UnaryElementwiseOp, adaptive_pool2d_out_shape, batch_norm_layout,
+    gather_out_shape, im2col_out_shape, interpolate_out_shape_for_mode, one_hot_out_shape,
+    pad_out_shape, pool2d_out_shape, reduce_out_shape, require_same_shape, row_norm_layout,
+    row_softmax_layout, scatter_out_shape, sort_out_shape, topk_out_shape,
+    validate_paged_attention, validate_paged_kv_append,
 };
 // `TypedOps` は意図的に `use` しない（`crate::typed_bf16` 参照）。
 // この trait をスコープへ import すると、`self.add`／`self.relu`
@@ -2069,6 +2069,92 @@ fn chain_layers_for_capture<'a>(
     Some((m, chain))
 }
 
+/// [`CudaBackendOps::train_chain_captured`] の host-only 検査（イシュー #3260）。plan が capture
+/// 対象にできる形（全バッファがこのデバイス・層の形状連鎖と配列の本数が整合・u32 範囲・`k` 上限・
+/// 活性化が `None`／`Relu`）なら `true`。`false` は不適用（`Ok(None)`）で、型付きエラーの付与は
+/// 既存の非 capture チェーンへ委ねる。driver には触れない。
+fn train_chain_plan_fits_capture(ordinal: usize, plan: &TrainChainCapturePlan<'_>) -> bool {
+    let n = plan.layers.len();
+    if n == 0 || plan.outs.len() != n || plan.d_input.len() != n - 1 || plan.masked.len() != n - 1 {
+        return false;
+    }
+    let here = Device::Cuda(ordinal);
+    let single = [
+        plan.x,
+        plan.y,
+        &*plan.params,
+        &*plan.grad,
+        &*plan.dpred,
+        &*plan.loss,
+    ];
+    if single.iter().any(|b| b.device() != here)
+        || plan.velocity.as_deref().is_some_and(|v| v.device() != here)
+        || plan
+            .outs
+            .iter()
+            .chain(plan.d_input.iter())
+            .chain(plan.masked.iter())
+            .any(|b| b.device() != here)
+    {
+        return false;
+    }
+    let (xs, ys) = (plan.x.shape(), plan.y.shape());
+    if xs.len() != 2 || ys.len() != 2 || xs[0] == 0 || xs[1] == 0 || ys[0] != xs[0] {
+        return false;
+    }
+    if u32::try_from(xs[0]).is_err() {
+        return false;
+    }
+    let mut k = xs[1];
+    for l in plan.layers {
+        if l.k != k || l.n == 0 || !matches!(l.act, Activation::None | Activation::Relu) {
+            return false;
+        }
+        let Ok(k_u32) = u32::try_from(l.k) else {
+            return false;
+        };
+        if crate::gemm::validate_tiled_k_bound(k_u32).is_err() || u32::try_from(l.n).is_err() {
+            return false;
+        }
+        k = l.n;
+    }
+    ys[1] == k
+}
+
+/// [`CudaBackendOps::train_chain_captured`] の `SegmentKey::config_key`（イシュー #3260）。焼き込まれる
+/// 起動パラメータ（`m`・x／y の形状・層の構成・MSE の係数・SGD の全設定・velocity の有無）を
+/// `DefaultHasher`（SipHash 系。#4.5 の衝突耐性の前例）で畳み込む。lr などが変わるとキーが変わり、
+/// 再 capture になる（決定記録 §8.3・R5）。f32 は `to_bits` で畳み込み、`-0.0`／NaN も区別する。
+fn train_chain_config_key(plan: &TrainChainCapturePlan<'_>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    plan.x.shape().hash(&mut h);
+    plan.y.shape().hash(&mut h);
+    for l in plan.layers {
+        (
+            l.w_offset,
+            l.k,
+            l.n,
+            l.bias_offset,
+            matches!(l.act, Activation::Relu),
+        )
+            .hash(&mut h);
+    }
+    plan.mse_scale.to_bits().hash(&mut h);
+    let s = &plan.sgd;
+    (
+        s.lr.to_bits(),
+        s.momentum.to_bits(),
+        s.dampening.to_bits(),
+        s.weight_decay.to_bits(),
+        s.nesterov,
+        s.is_first_step,
+        plan.velocity.is_some(),
+    )
+        .hash(&mut h);
+    h.finish()
+}
+
 /// `ordinal` に対応する `&'static CudaMemory` をプロセス内キャッシュから
 /// 取得する（イシュー #935）。
 ///
@@ -3897,6 +3983,69 @@ impl BackendOps for CudaBackendOps {
         let mem = static_cuda_memory(self.ordinal, &device)?;
         crate::graph::run_captured_linear_chain(self.ordinal, &device, mem, key, input, m, &chain)
             .map(Some)
+    }
+
+    /// 学習 1 step 全体（forward・MSE・backward・SGD）を CUDA Graph へ capture し、2 回目以降は
+    /// graph launch 1 回で再生する opt-in 経路（イシュー #3260。実体は
+    /// `crate::graph::run_captured_train_chain`。決定記録は
+    /// `docs/backend-cuda-graph-step-capture-design.md` §8）。
+    ///
+    /// **`Ok(None)`（不適用）にする条件**: opt-in OFF（既定・`crate::graph::train_graph_enabled`）、
+    /// GEMM 精度が `Fp32Strict` 以外（replay だけ FP32 で走り非 graph 経路と食い違うのを防ぐ）、
+    /// plan が capture 対象の形でない（`train_chain_plan_fits_capture`）、対象デバイスが capture
+    /// 不能な legacy stream（opt-in の設定順序誤り・`internal-diagnostics` ビルド）の場合。
+    /// 不適用を `Err(Unsupported)` にしないのは、チェーン側の `Unsupported` が書き込み前の
+    /// Tape 経路への全体フォールバックを意味するため。
+    ///
+    /// **driver 呼び出し境界**: `linear_chain_forward_captured` と同じ順序（世代収集〈host-only〉→
+    /// `begin_driver_call` → 観測付き `device_handle_raw` → アドレス導出）で `SegmentKey` を作り、
+    /// そのトークンを drop してから graph 機構へ委譲する（`begin_capture_session` の in_flight
+    /// ドレイン契約）。key は毎回この呼び出しの live 借用（x・y・params・勾配・中間バッファ全て）から
+    /// 計算するため、ヒットした graph が焼き込んだアドレスは現在生存しているバッファと一致する。
+    fn train_chain_captured(
+        &self,
+        plan: TrainChainCapturePlan<'_>,
+    ) -> Result<Option<SegmentRun>, BackendError> {
+        if !crate::graph::train_graph_enabled() {
+            return Ok(None);
+        }
+        if crate::precision::gemm_precision() != crate::precision::CudaGemmPrecision::Fp32Strict {
+            return Ok(None);
+        }
+        if !train_chain_plan_fits_capture(self.ordinal, &plan) {
+            return Ok(None);
+        }
+
+        let key_and_device = {
+            // キーに含める全バッファ（順序は固定。`SegmentKey::resources` は順序を含めて比較する）。
+            let mut bufs: Vec<&DeviceBuffer<f32>> = vec![&*plan.params, &*plan.grad];
+            bufs.extend(plan.velocity.as_deref());
+            bufs.push(&*plan.loss);
+            bufs.extend(plan.outs.iter());
+            bufs.push(&*plan.dpred);
+            bufs.extend(plan.d_input.iter());
+            bufs.extend(plan.masked.iter());
+            bufs.push(plan.x);
+            bufs.push(plan.y);
+            let generations: Vec<u64> = bufs.iter().map(|b| b.generation()).collect();
+            let token = context_cache::begin_driver_call(self.ordinal, &generations)?;
+            let device =
+                context_cache::observe_cuda_result(self.ordinal, &token, self.device_handle_raw())
+                    .map_err(|e| BackendError::CudaUnavailable(e.to_string()))?;
+            if !device.is_capturable_stream() {
+                return Ok(None);
+            }
+            let resources = Self::segment_resources_for(&bufs, device.stream())?;
+            let key = SegmentKey {
+                generation: token.generation(),
+                config_key: train_chain_config_key(&plan),
+                resources,
+            };
+            drop(token);
+            (key, device)
+        };
+        let (key, device) = key_and_device;
+        crate::graph::run_captured_train_chain(self, self.ordinal, &device, key, plan)
     }
 
     fn wait_device_capture_idle(&self, timeout: std::time::Duration) -> Result<(), BackendError> {
@@ -10884,6 +11033,213 @@ mod tests {
              with_sync_point_call を経由せずとも本関数入口で Unsupported を \
              返すはず: {result:?}"
         );
+    }
+    // ---- イシュー #3260: 学習 step 全体 capture の host-only 検査 ----
+
+    /// `train_chain_plan_fits_capture` の検査用に、全バッファが `Device::Cuda(ordinal)` の
+    /// 2 層（`[m, k0] -> [m, n0] -> [m, n1]`）plan 用の素材を作る。
+    struct TrainPlanParts {
+        x: DeviceBuffer<f32>,
+        y: DeviceBuffer<f32>,
+        params: DeviceBuffer<f32>,
+        grad: DeviceBuffer<f32>,
+        dpred: DeviceBuffer<f32>,
+        loss: DeviceBuffer<f32>,
+        outs: Vec<DeviceBuffer<f32>>,
+        d_input: Vec<DeviceBuffer<f32>>,
+        masked: Vec<DeviceBuffer<f32>>,
+        layers: Vec<fandhe_ai_tensor_core::TrainChainCaptureLayer>,
+        token: DispatchFailureCell,
+    }
+
+    fn cuda_buf(device: Device, shape: &[usize]) -> DeviceBuffer<f32> {
+        DeviceBuffer::new(device, shape.to_vec(), Box::new(EmptyHandle))
+    }
+
+    fn train_plan_parts(ordinal: usize) -> TrainPlanParts {
+        let dev = Device::Cuda(ordinal);
+        let (m, k0, n0, n1) = (4usize, 3usize, 5usize, 2usize);
+        TrainPlanParts {
+            x: cuda_buf(dev, &[m, k0]),
+            y: cuda_buf(dev, &[m, n1]),
+            params: cuda_buf(dev, &[k0 * n0 + n0 + n0 * n1 + n1]),
+            grad: cuda_buf(dev, &[k0 * n0 + n0 + n0 * n1 + n1]),
+            dpred: cuda_buf(dev, &[m, n1]),
+            loss: cuda_buf(dev, &[1]),
+            outs: vec![cuda_buf(dev, &[m, n0]), cuda_buf(dev, &[m, n1])],
+            d_input: vec![cuda_buf(dev, &[n0, m])],
+            masked: vec![cuda_buf(dev, &[m, n0])],
+            layers: vec![
+                fandhe_ai_tensor_core::TrainChainCaptureLayer {
+                    w_offset: 0,
+                    k: k0,
+                    n: n0,
+                    bias_offset: Some(k0 * n0),
+                    act: Activation::Relu,
+                },
+                fandhe_ai_tensor_core::TrainChainCaptureLayer {
+                    w_offset: k0 * n0 + n0,
+                    k: n0,
+                    n: n1,
+                    bias_offset: Some(k0 * n0 + n0 + n0 * n1),
+                    act: Activation::None,
+                },
+            ],
+            token: DispatchFailureCell::default(),
+        }
+    }
+
+    fn sgd_cfg() -> fandhe_ai_tensor_core::SgdStepConfig {
+        fandhe_ai_tensor_core::SgdStepConfig {
+            lr: 0.1,
+            momentum: 0.0,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+            is_first_step: false,
+        }
+    }
+
+    /// `parts` を借用した plan を組み、`f` に渡す（借用の寿命を 1 関数内に閉じる）。
+    fn with_plan<R>(
+        parts: &mut TrainPlanParts,
+        f: impl FnOnce(fandhe_ai_tensor_core::TrainChainCapturePlan<'_>) -> R,
+    ) -> R {
+        let plan = fandhe_ai_tensor_core::TrainChainCapturePlan {
+            x: &parts.x,
+            y: &parts.y,
+            params: &mut parts.params,
+            layers: &parts.layers,
+            grad: &mut parts.grad,
+            velocity: None,
+            outs: &mut parts.outs,
+            dpred: &mut parts.dpred,
+            d_input: &mut parts.d_input,
+            masked: &mut parts.masked,
+            loss: &mut parts.loss,
+            mse_scale: 0.125,
+            sgd: sgd_cfg(),
+            token: &parts.token,
+        };
+        f(plan)
+    }
+
+    #[test]
+    fn train_chain_plan_fits_capture_accepts_a_consistent_plan() {
+        let ordinal = unique_test_ordinal();
+        let mut parts = train_plan_parts(ordinal);
+        assert!(with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal, &p
+        )));
+    }
+
+    #[test]
+    fn train_chain_plan_fits_capture_rejects_inconsistent_plans() {
+        let ordinal = unique_test_ordinal();
+
+        // 別デバイスのバッファ。
+        let mut parts = train_plan_parts(ordinal);
+        parts.x = cuda_buf(Device::Cpu, &[4, 3]);
+        assert!(!with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal, &p
+        )));
+
+        // 別の ordinal の CudaBackendOps に渡した。
+        let mut parts = train_plan_parts(ordinal);
+        assert!(!with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal + 1,
+            &p
+        )));
+
+        // 配列の本数が層数と合わない。
+        let mut parts = train_plan_parts(ordinal);
+        parts.masked.clear();
+        assert!(!with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal, &p
+        )));
+
+        // 層の幅の連鎖が合わない。
+        let mut parts = train_plan_parts(ordinal);
+        parts.layers[1].k = 7;
+        assert!(!with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal, &p
+        )));
+
+        // x の列数が第 1 層の k と合わない。
+        let mut parts = train_plan_parts(ordinal);
+        parts.x = cuda_buf(Device::Cuda(ordinal), &[4, 9]);
+        assert!(!with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal, &p
+        )));
+
+        // y の形が最終層の出力と合わない。
+        let mut parts = train_plan_parts(ordinal);
+        parts.y = cuda_buf(Device::Cuda(ordinal), &[4, 3]);
+        assert!(!with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal, &p
+        )));
+
+        // 空バッチ。
+        let mut parts = train_plan_parts(ordinal);
+        parts.x = cuda_buf(Device::Cuda(ordinal), &[0, 3]);
+        assert!(!with_plan(&mut parts, |p| train_chain_plan_fits_capture(
+            ordinal, &p
+        )));
+    }
+
+    /// 起動パラメータ（lr・momentum 構成・層のオフセット等）が変わると config_key が変わり、
+    /// 同じ plan なら同じ値になる（R5。lr 変更で再 capture になる根拠）。
+    #[test]
+    fn train_chain_config_key_tracks_baked_parameters() {
+        let ordinal = unique_test_ordinal();
+        let mut parts = train_plan_parts(ordinal);
+        let base = with_plan(&mut parts, |p| train_chain_config_key(&p));
+        assert_eq!(base, with_plan(&mut parts, |p| train_chain_config_key(&p)));
+
+        let lr_changed = with_plan(&mut parts, |mut p| {
+            p.sgd.lr = 0.2;
+            train_chain_config_key(&p)
+        });
+        assert_ne!(base, lr_changed);
+        let scale_changed = with_plan(&mut parts, |mut p| {
+            p.mse_scale = 0.25;
+            train_chain_config_key(&p)
+        });
+        assert_ne!(base, scale_changed);
+        let nesterov_changed = with_plan(&mut parts, |mut p| {
+            p.sgd.nesterov = true;
+            train_chain_config_key(&p)
+        });
+        assert_ne!(base, nesterov_changed);
+
+        parts.layers[0].bias_offset = None;
+        assert_ne!(base, with_plan(&mut parts, |p| train_chain_config_key(&p)));
+    }
+
+    /// opt-in OFF（既定）では driver に触れず `Ok(None)`（GPU の無い CI でも通る。R1）。
+    #[test]
+    fn train_chain_captured_is_inapplicable_when_opt_in_is_off() {
+        let ordinal = unique_test_ordinal();
+        let _off = crate::graph::override_train_graph_for_scope(false);
+        let mut parts = train_plan_parts(ordinal);
+        let ops = CudaBackendOps::new(ordinal);
+        let r = with_plan(&mut parts, |p| ops.train_chain_captured(p));
+        assert!(matches!(r, Ok(None)), "{r:?}");
+        assert!(!parts.token.is_set());
+    }
+
+    /// opt-in ON でも GEMM 精度が `Fp32Strict` 以外なら `Ok(None)`（replay だけ FP32 で走り
+    /// 非 graph 経路と食い違うのを防ぐ）。
+    #[test]
+    fn train_chain_captured_is_inapplicable_for_non_strict_gemm_precision() {
+        let ordinal = unique_test_ordinal();
+        let _on = crate::graph::override_train_graph_for_scope(true);
+        let _guard = Tf32FlagGuard::acquire();
+        crate::precision::set_gemm_precision(crate::precision::CudaGemmPrecision::Tf32);
+        let mut parts = train_plan_parts(ordinal);
+        let ops = CudaBackendOps::new(ordinal);
+        let r = with_plan(&mut parts, |p| ops.train_chain_captured(p));
+        assert!(matches!(r, Ok(None)), "{r:?}");
     }
 }
 

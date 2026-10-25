@@ -406,6 +406,14 @@ impl CudaMse {
                         detail: "mse partial workspace mutex poisoned".to_string(),
                     })?;
             if guard.is_none() {
+                // Graph capture 中の確保は graph に記録されてしまうため拒否する（イシュー #3260 の
+                // 同期点ガード再監査。`gemm.rs::workspace_slot` と同型。定常状態では確保済みで通らない）。
+                if crate::context_cache::is_capturing_on_current_thread(self.ordinal) {
+                    return Err(CudaError::CaptureExclusionRejected {
+                        detail: "mse partial workspace must be allocated during graph capture"
+                            .to_string(),
+                    });
+                }
                 *guard = Some(self.stream.alloc_zeros::<f32>(MSE_MAX_BLOCKS as usize)?);
                 // 永続ワークスペースの初回確保も数える（#3252。定常状態では 0）。
                 crate::gemm::diag_count_mem_alloc();

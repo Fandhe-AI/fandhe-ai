@@ -906,6 +906,63 @@ pub enum SegmentRun {
     Replayed,
 }
 
+/// [`TrainChainCapturePlan`] の 1 層分の記述（イシュー #3260）。`w_offset`・`bias_offset` は
+/// 連結パラメータバッファ（`params`）内の要素オフセットで、weight の形状は `[k, n]`、bias は `[n]`。
+/// 活性化は `DeviceParamStore::train_step_device_chain` と同じく、最後の層以外が
+/// [`Activation::Relu`]・最後の層が [`Activation::None`] に限られる（呼び出し元が検証済み）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrainChainCaptureLayer {
+    /// weight（`[k, n]`）の `params` 内オフセット。
+    pub w_offset: usize,
+    /// 入力幅。
+    pub k: usize,
+    /// 出力幅。
+    pub n: usize,
+    /// bias（`[n]`）の `params` 内オフセット。bias なしは `None`。
+    pub bias_offset: Option<usize>,
+    /// 層の活性化。
+    pub act: Activation,
+}
+
+/// [`BackendOps::train_chain_captured`] に渡す、学習 1 step 全体（forward・MSE・backward・SGD）が
+/// 触れる全リソースの束（イシュー #3260。決定記録 `docs/backend-cuda-graph-step-capture-design.md`
+/// §8）。任意クロージャを受け取らず触れるバッファを全て明示する固定形にするのは、
+/// `run_captured_sgd_step_segment` の codex-review P0 指摘（区間本体がリソース一覧に無い
+/// バッファへ触れる抜け道の排除。§4.3）と同じ理由による。
+///
+/// 配列系フィールドの並びは `DeviceParamStore` の `TrainChainBufs` と同じ: `outs` は層順、
+/// `d_input`（`[k, m]`）と `masked`（`[m, k]`）は層 `n-1, n-2, .., 1` の順（生成順）。
+pub struct TrainChainCapturePlan<'a> {
+    /// 常駐入力 `x`（`[m, k0]`）。
+    pub x: &'a DeviceBuffer<f32>,
+    /// 常駐目標 `y`（`[m, n_last]`）。
+    pub y: &'a DeviceBuffer<f32>,
+    /// 全パラメータの連結バッファ（SGD が更新する）。
+    pub params: &'a mut DeviceBuffer<f32>,
+    /// 層の記述（層順）。
+    pub layers: &'a [TrainChainCaptureLayer],
+    /// 勾配の連結バッファ（`params` と同形）。
+    pub grad: &'a mut DeviceBuffer<f32>,
+    /// momentum バッファ（momentum 無効なら `None`）。
+    pub velocity: Option<&'a mut DeviceBuffer<f32>>,
+    /// 層ごとの出力（`[m, n_i]`）。
+    pub outs: &'a mut [DeviceBuffer<f32>],
+    /// MSE の出力側勾配（`[m, n_last]`）。
+    pub dpred: &'a mut DeviceBuffer<f32>,
+    /// 層ごとの d_input（層 `n-1` から `1` の順）。
+    pub d_input: &'a mut [DeviceBuffer<f32>],
+    /// 層ごとの ReLU マスク後勾配（同順）。
+    pub masked: &'a mut [DeviceBuffer<f32>],
+    /// loss スカラー（1 要素）。
+    pub loss: &'a mut DeviceBuffer<f32>,
+    /// MSE backward の係数（`mse_loss_scale` の値）。
+    pub mse_scale: f32,
+    /// SGD の設定（`is_first_step` を含む）。
+    pub sgd: SgdStepConfig,
+    /// 失敗トークン（`*_tracked` 部品へ渡す）。
+    pub token: &'a DispatchFailureCell,
+}
+
 /// [`BackendOps::gemm_checksum`] の読み戻しモード（イシュー #1339）。
 ///
 /// framework-compare の gemm 計測窓では、GEMM 出力 `C = A@B` を毎反復
@@ -4402,6 +4459,34 @@ pub trait BackendOps {
         Ok(None)
     }
 
+    /// 学習 1 step 全体（forward・MSE・backward・SGD）を、バックエンド固有の一括再生機構
+    /// （CUDA では CUDA Graph の stream capture → graph launch。イシュー #3260）で実行する
+    /// opt-in 拡張。`DeviceParamStore::train_step_device_chain` が、部品ごとの encode ループの
+    /// **前**に 1 回だけ呼ぶ。決定記録は `docs/backend-cuda-graph-step-capture-design.md` §8。
+    ///
+    /// # 戻り値の契約（`linear_chain_forward_captured` と同型）
+    /// - `Ok(Some(run))`: 1 step 分（SGD の更新を含む）を実行済み。呼び出し元は部品の encode も
+    ///   SGD も行わない。`plan` の `loss` には今回の loss が書かれている。
+    /// - `Ok(None)`: このバックエンド・この設定・この状態では使わない（既定 OFF・未対応・
+    ///   キー不一致の再 capture 抑止中・capture の準備段階の失敗等）。**`plan` のバッファは
+    ///   1 つも書き換えていない**ので、呼び出し元は既存の encode ループを実行する。
+    /// - `Err(DeviceContextCaptureInProgress)`: 別スレッドの capture と衝突した（launch 前。
+    ///   何も書いていない）。呼び出し元は待って再試行できる。
+    /// - その他の `Err`: 実際の driver・起動失敗。書き込み後の可能性があるため呼び出し元は
+    ///   store を poison する。
+    ///
+    /// **不適用を `Err(Unsupported)` で表現しない**。チェーン側の `Unsupported` は書き込み前なら
+    /// Tape 経路への全体フォールバックを意味するため、不適用は `Option` で区別する。
+    ///
+    /// # デフォルト実装
+    /// 常に `Ok(None)` で `plan` に触れない（非破壊拡張。CPU・Metal は既定のまま）。
+    fn train_chain_captured(
+        &self,
+        _plan: TrainChainCapturePlan<'_>,
+    ) -> Result<Option<SegmentRun>, BackendError> {
+        Ok(None)
+    }
+
     /// 別スレッドが同じデバイスで行っている Graph capture の終了を、上限
     /// `timeout` 付きで待つ（イシュー #3205。推論チェーンの capture 競合是正）。
     ///
@@ -6579,6 +6664,45 @@ mod tests {
         let result = ops.linear_chain_forward_captured(&input, &[(w_view, None, Activation::None)]);
 
         assert!(matches!(result, Ok(None)));
+    }
+
+    /// [`BackendOps::train_chain_captured`] の既定実装は `Ok(None)` で `plan` のバッファに触れない
+    /// （イシュー #3260。`Err(Unsupported)` ではない）。
+    #[test]
+    fn train_chain_captured_default_returns_none_without_touching_buffers() {
+        let ops = MockOps(Device::Cpu);
+        let x = empty_device_buffer(Device::Cpu);
+        let y = empty_device_buffer(Device::Cpu);
+        let mut params = empty_device_buffer(Device::Cpu);
+        let mut grad = empty_device_buffer(Device::Cpu);
+        let mut dpred = empty_device_buffer(Device::Cpu);
+        let mut loss = empty_device_buffer(Device::Cpu);
+        let token = DispatchFailureCell::default();
+        let plan = TrainChainCapturePlan {
+            x: &x,
+            y: &y,
+            params: &mut params,
+            layers: &[],
+            grad: &mut grad,
+            velocity: None,
+            outs: &mut [],
+            dpred: &mut dpred,
+            d_input: &mut [],
+            masked: &mut [],
+            loss: &mut loss,
+            mse_scale: 1.0,
+            sgd: SgdStepConfig {
+                lr: 0.1,
+                momentum: 0.0,
+                dampening: 0.0,
+                weight_decay: 0.0,
+                nesterov: false,
+                is_first_step: false,
+            },
+            token: &token,
+        };
+        assert!(matches!(ops.train_chain_captured(plan), Ok(None)));
+        assert!(!token.is_set());
     }
 
     /// [`BackendOps::wait_device_capture_idle`] の既定実装が待たず `Ok(())`

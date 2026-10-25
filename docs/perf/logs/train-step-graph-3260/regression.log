@@ -1,0 +1,26 @@
+== 3252 diag
+test train_step_chain_diag_tests_3252::public_entry_call_sequence_window_has_no_sync_and_read_is_one_sync ... ok
+test train_step_chain_diag_tests_3252::tf32_mode_chain_outcome_is_recorded ... ok
+test train_step_chain_diag_tests_3252::train_chain_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1392 filtered out; finished in 0.53s
+== resident_train_step cuda
+test cuda_public_api_chain_matches_tape_path_bit_exact_three_layers ... ok
+test cuda_public_api_chain_matches_tape_path_bit_exact_two_layers ... ok
+test cuda_public_api_unread_steps_then_final_params_match_tape_path ... ok
+test cuda_tf32_mode_chain_matches_tape_path_bit_exact ... ok
+test cuda_upload_resident_with_cpu_tape_is_device_mismatch ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.55s
+== graph_capture_real_device
+test different_config_key_produces_a_different_segment_key ... ok
+test sgd_update_segment_captures_then_replays_bit_identically ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+== optin_off
+test opt_in_off_keeps_legacy_stream_and_returns_none ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+== infer
+test chain_capture_then_replay_is_bit_identical_to_uncaptured_chain ... ok
+test different_batch_recaptures_under_a_different_key ... ok
+test inapplicable_inputs_return_none ... ok
+test replay_reflects_in_place_weight_update ... ok
+test worker_thread_exit_with_populated_cache_does_not_abort ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s

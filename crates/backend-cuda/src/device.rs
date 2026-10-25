@@ -379,7 +379,9 @@ impl CudaDevice {
             // infer_graph_stream_requested` doc 参照〉）。ordinal ごとに
             // sticky のため、いずれも最初のデバイス初期化前に設定が必要。
             crate::graph::step_graph_mode().requires_created_stream()
-                || crate::graph::infer_graph_stream_requested(),
+                || crate::graph::infer_graph_stream_requested()
+                // イシュー #3260: 学習 step 全体 capture の opt-in も created stream を要求する。
+                || crate::graph::train_graph_stream_requested(),
         )?;
         let name = ctx.name()?;
         let compute_capability = ctx.compute_capability()?;

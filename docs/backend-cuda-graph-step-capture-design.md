@@ -50,7 +50,7 @@
 - **forward／backward の capture**: 前提となる「forward の facade 常駐チェーン結線（#1216 Phase 2 未完了）」「backward の d_input／d_weight デバイス直接計算（CUDA の `gemm_fp32_strict_into` は #1559 で実装済みだが、ホスト入力の関数内同期を伴い capture 中は `Unsupported`）」「loss のデバイス常駐化」が未整備（F2）（#3252 で前提が揃い、設計は §8）
 - **tape レベルの構造検出**（tape 長・形状・dtype ハッシュ）: step 全体 capture と同時に導入する対象であり、本イシューのキー（`SegmentKey`）は「パラメータ layout + SGD 設定 + 世代 + バッファ同一性」に限定（step 全体のキー設計は §8.3）
 - **`bench-fandhe --graph` フラグ・GB10 実測**: #1350
-- **同期点ガードの適用範囲**: `memory.rs`（`download`／`upload`／`upload_into`／`alloc_zeroed`）・`ops.rs::release_cached_device_memory` に限定した。`gemm.rs::synchronize()`（診断専用・本番ディスパッチから呼ばれない）・`pool.rs` 内部の低レベル確保（`alloc_zeroed`／`alloc_uninit`。`CudaMemory::alloc_zeroed` 経由で既に上位ガード済み）には個別のガードを追加していない。update 区間の body（`sgd_step_device_tracked`）はこれらを呼ばないため受け入れ条件には影響しないが、将来 capture 対象を拡張する場合は再検討が必要
+- **同期点ガードの適用範囲**: `memory.rs`（`download`／`upload`／`upload_into`／`alloc_zeroed`）・`ops.rs::release_cached_device_memory` に限定した。`gemm.rs::synchronize()`（診断専用・本番ディスパッチから呼ばれない）・`pool.rs` 内部の低レベル確保（`alloc_zeroed`／`alloc_uninit`。`CudaMemory::alloc_zeroed` 経由で既に上位ガード済み）には個別のガードを追加していない。update 区間の body（`sgd_step_device_tracked`）はこれらを呼ばないため受け入れ条件には影響しないが、将来 capture 対象を拡張する場合は再検討が必要（**#3260 で step 全体へ拡張した際に再監査済み**。結果は §8.8.3。`mse.rs` の永続ワークスペース初回確保にガードが無かったため是正した）
 - **cudarc の自動 event 管理の回避策**: 当初は「実機プローブ（§5）で必要性が判明した場合のみユーザー承認を得て実装する・本 PR では実装しない」としていたが、PR #1390 の codex-review P1 指摘（`new_stream()` 有効化時、`launch_builder` が capture 外で記録された read/write イベントへ通常フラグで待機し capture 中は禁止操作としてエラー→ordinal poison につながる）を受け、**案 A（`CudaContext::disable_event_tracking()`〈`unsafe fn`〉）を採用し実装済み**（`device.rs::CudaDevice::new`。§4.1 追記）。本クレートはこの `CudaContext` につき常に単一ストリームのみを保持し複数ストリームを実際には使わないため、cudarc のイベントベース cross-stream 同期機構はそもそも不要という前提に基づく。案 B（生ポインタ引数の launch 変種）は不要となったため対象外のまま
 
 ## 4. 設計の要点
@@ -310,3 +310,69 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 
 - **#3260（既定 OFF で実装）**: x／y の上書き入口（§8.3）、同期点ガードの再監査（§8.2）、並列 capture の衝突テスト、新 opt-in と created stream の OR、`crates/backend-cuda/src/graph.rs` 冒頭 `//!`（「update 区間のみ」）の更新（本 issue は `.rs` を変えないためここでは直さない）。`unsafe` を足す場合は security-auditor 監査必須（足さないのが前提）
 - **#3261（GB10 A/B）**: 実測前に RULE.txt を固定する。合格ラインはそこで決め、推定値は使わない。#1350 の基準（中央値比 ≤ 0.95・5/5 符号一貫・checksum 一致）は前例として引くのみ。bit ダンプの diff を含める
+
+
+## 8.8 #3260 実装記録: 学習ステップ全体の capture（既定 OFF）
+
+親 #3258。§8 の (A) 再 capture だけ・新規 `unsafe` なし・既定 OFF で実装した。**性能の評価・既定の反転は #3261 の範囲**で、本節は機構の実装と、bit 一致・fail-safe の実機確認だけを記録する。tolerance・baseline・FMA 契約・`docs/spec` は変えていない。
+
+### 8.8.1 構成
+
+| 項目 | 実装 |
+|---|---|
+| opt-in | 環境変数 `FANDHE_AI_CUDA_GRAPH_TRAIN`（`1`／`true` の完全一致だけ ON。それ以外は fail-closed で OFF。値はエコーしない）。const `TRAIN_GRAPH_DEFAULT_ENABLED = false`。**API の setter は持たない**（§8.6: 公開形の追加は未承認）。`facade` は変えず、`api_surface.rs` が再公開 0 件を固定する |
+| stream | `device.rs` の created stream 選択に `train_graph_stream_requested()` を OR で追加。ordinal ごとに固定され、最初の CUDA 初期化より前の設定が要る。`internal-diagnostics` ビルドでは stream が Legacy に固定され capture に届かない（実機テストは既定 feature で実行する） |
+| trait | `tensor-core::BackendOps::train_chain_captured(TrainChainCapturePlan)`（既定 `Ok(None)`。非破壊拡張）。`plan` は触れる全バッファを引数で受ける固定形で、任意クロージャは使わない（§4.3 の codex P0 の前例） |
+| CUDA 本体 | `backend-cuda/src/graph.rs::launch_train_chain`。`autodiff` の `encode_train_chain` ＋ `sgd_step_device_tracked` と**同じ順・同じ引数**で `*_into_tracked` 部品を呼ぶ（カーネルも引数も同じなので bit 一致する）。順序を変えるときは両側を直す旨を双方のコメントに書いた |
+| 結線 | `autodiff` の `DeviceParamStore::try_captured_train_step`。部品ごとの encode の前に 1 回試す |
+| キー | `SegmentKey { generation（デバイス世代のみ）, config_key, resources }`。`config_key` は x／y の形状・各層の `(w_offset, k, n, bias_offset, relu)`・MSE の係数・SGD の全設定（f32 は `to_bits`）・velocity の有無を `DefaultHasher` で畳み込む。`resources` は params・grad・velocity・loss・層出力・dPred・d_input・mask 後勾配・x・y のアドレスと長さ。毎回、その呼び出しで借りている live なバッファから計算する |
+| 診断 | `TrainGraphStats { captured, replayed, graph_launches, fallbacks }`（推論側 `InferGraphStats` と別型）と `train_graph_stats()` |
+
+### 8.8.2 判断の記録
+
+1. **x／y の扱い（§8.3 の申し送りへの回答）**: x／y のアドレスをキーに入れ、graph は呼び出し元のバッファを直接読む。step ごとに upload し直す使い方ではキーが外れて再 capture になるが、下の抑止で既存チェーンへ戻り、結果は bit 一致のまま保たれる。理由は 3 つ。(1) 計測ランナー（`docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch`）は x／y を窓の外で 1 回だけ upload する。(2) 案 (i)（graph が持つ staging へ D2D コピー）は step ごとに `memcpy_dtod` が 2 回増え、固定費削減を食う。(3) 案 (ii)（公開形の追加）は承認範囲外。**案 (i) は `memory.rs::CudaStorage::copy_from_dtod`（cudarc の安全 API `memcpy_dtod` を包むもの）で新規 `unsafe` なしに書ける**ことを確認した。#3261 の結果しだいで後続の候補にする
+2. **capture 前の実 launch はしない**: 推論側 `capture_chain` は capture 前に本体を 1 回実 launch するが、SGD は冪等ではない（2 回更新になる）ため写さない。capture は記録だけで実行しないので「capture ＋初回 launch」でちょうど 1 step になる。モジュールロード・永続ワークスペースの grow は、適用条件（下記）でウォームアップ済みの 2 step 目以降に限ることで済ませる
+3. **適用条件（autodiff 側。§8.2 のウォームアップ）**: 成功 step を 1 回以上経ている（`is_first_step == false`）・前 step の永続バッファ一式を鍵つきで再利用できる・勾配バッファと velocity を新規確保していない・使う部品の `_into` 対応が確定済み（単層は forward・MSE・MSE backward、多層は mask・d_input も）・配列の本数が層数とそろっている。満たさなければ従来のチェーンがそのまま走る
+4. **`Unsupported` を外へ返さない**: autodiff／facade は書き込み前の `Unsupported` を Tape 経路への全体フォールバックと解釈するため、同期点ガード・ワークスペース grow の拒否〈`CaptureExclusionRejected` 由来〉を含め、launch 前の失敗はすべて `Ok(None)` に変える。その際 ordinal が poison 済みなら型付きエラーで返す
+5. **失敗の分類**: launch 前の失敗（本体のエラー・panic・`end_capture` 失敗・空 graph・`upload` 失敗）は graph を捨て `Ok(None)`（`fallbacks` と抑止の失敗数を増やす）。`DeviceContextCaptureInProgress` は launch 前の衝突として表へ返し、`train_step_device_chain` が待って step 全体をやり直す。初回 launch の失敗と replay の失敗は書き込み後の失敗として表へ返し、store を poison する（replay の失敗時は既存 graph を戻す）
+6. **別スレッドの capture との衝突（R6）**: `train_step_device_chain` に待ち上限つきの再試行ループを置いた（`predict_device_chain` と同型。上限は 1000 ms で `PREDICT_CAPTURE_WAIT_TIMEOUT` と同値。テストでは 30 ms）。再試行が安全なのは、書き込み前の衝突と SGD 段の衝突がどちらも params を変えず（既存の「poison しない」判定の範囲）、勾配バッファと loss は次の試行が全要素を上書きするため。capture が 1 つも無ければこのエラーは起きず、ループは 1 回で抜ける
+7. **再 capture の抑止（§8.5 の「回数は #3260 で決める」への回答）**: スレッド・ordinal ごとの状態機械 `TrainCaptureThrottle`。連続の新規 capture（間に replay が無い）が **3 回**で、replay が起きるまで新規 capture を止める。capture 準備・記録・終了の失敗が **2 回**に達したら、そのスレッド・ordinal では新規 capture を止める。止まっても既存 graph の replay は続ける。性能の抑止パラメータでありガードレール閾値・tolerance ではない。lr を毎 step 変えるスケジューラでは 3 step で既存チェーンへ戻る（(A) の既知の短所）
+8. **GEMM 精度**: `Fp32Strict` 以外では `Ok(None)`（replay だけ FP32 で走り非 graph 経路と食い違うのを防ぐ）
+
+### 8.8.3 同期点ガードの再監査（§8.2・§8.7）
+
+| 対象 | 結果 |
+|---|---|
+| `linear_forward_device_into_tracked`・`gemm_resident_lhs_device_core`・`relu_backward_mask_device_core`・`mse_loss_device_core`・`mse_loss_backward_device_core`・`sgd_step_device_tracked` | alloc・upload・download・同期を呼ばない。`with_sync_point_call` を通らない（`ops.rs` の使用箇所は host 入力の `gemm_fp32_strict_into` NN/TN 経路と `synchronize_device` だけ） |
+| `gemm_fp32_strict_into_device_impl`（dW・bias 勾配） | `with_driver_call` ＋ `cached_gemm`／`cached_reduce` ＋ `launch_gemm_dw_device` だけ。ホスト入力版の関数内同期は無い。ワークスペースの grow は `workspace_slot` が capture 中に `CaptureExclusionRejected` で拒否する |
+| `mse.rs::launch_mse_loss_device_f32` の `partial_workspace` 初回確保 | **ガードが無かった**。`is_capturing_on_current_thread` なら `CaptureExclusionRejected` で拒否するよう是正した（`gemm.rs::workspace_slot` と同型。定常状態は確保済みで経路は変わらない） |
+| `cached_*` の getter | キャッシュがヒットすれば driver のモジュールロードは起きない。capture の前に独立した `begin_driver_call` 境界で確認する（ウォームアップ済みの適用条件で保証） |
+
+実機の確認: 全 6 組み合わせ・10 step で `fallbacks == 0`（capture 中に拒否された操作が無かった）。replay 中の step の窓で `stream_syncs`・`d2h_calls`・`h2d_calls`・`mem_uploads`・`mem_allocs` がすべて 0。
+
+### 8.8.4 実機確認（GB10・`spark-dbd9`・既定 feature・`--release`）
+
+ログは `docs/perf/logs/train-step-graph-3260/`（`env_info.txt`・`.rev-stamp`）。`.rev-stamp` は転送元 HEAD ＋ 未コミット件数で、実装コミット前の作業ツリーを転送して実行した。
+
+| 検証 | 結果 |
+|---|---|
+| `train_step_graph_diag_tests_3260`（7 件。`FANDHE_AI_CUDA_GRAPH_TRAIN=1`・`--test-threads=1`） | 7 passed（`diag_all.log`） |
+| 同一プロセスで capture あり／なしを 10 step 比較（784-256-10・batch 64・momentum。loss と全パラメータ bit 一致）＋ stats | captured 1・replayed 8・graph_launches 9・fallbacks 0 |
+| facade `train_step_resident` 経由・6 組み合わせ（2 層／3 層 × plain／momentum／nesterov）・各 10 step の bit 一致 | passed。組み合わせごとに capture 1・replay 8（`facade_in_process.log`） |
+| 2 プロセス比較（環境変数なしの Legacy stream と `=1`）の `BITS` 90 行 | diff 空（`bits_off.txt`／`bits_on.txt`）。ON 側 stats は captured 6・replayed 48・fallbacks 0 |
+| fail-safe: capture 失敗の注入（1 回・上限到達） | 1 回: fallbacks 1・次の step で capture・bit 一致。上限（2 回）到達後は capture を試さず既存チェーンで bit 一致 |
+| lr を 1 回変更 | 再 capture（captured 2・replayed 5）・bit 一致。毎 step 変更は captured 3 で止まり replay 0・bit 一致 |
+| x／y を毎 step upload し直す | bit 一致（プールのアドレス再利用により captured 4・replayed 4。キーが外れた分は再 capture）。結果は不変 |
+| 並列: 2 スレッドが別 store で capture ON のまま 20 step（1 step 目後に柵） | エラー 0・単独実行と bit 一致。30 回繰り返して 30/30 passed（`two_threads_x30.log`） |
+| replay 中の窓 | 同期・D2H・H2D・確保がすべて 0。loss の読み出しは同期 1・D2H 1 |
+| 既存の回帰（opt-in なし／各 opt-in） | `train_step_chain_diag_tests_3252`・facade `resident_train_step` の CUDA 5 件・`graph_capture_real_device`・`graph_capture_real_device_optin_off`・`infer_graph_capture_real_device` がすべて pass（`regression.log`） |
+
+**未検証・制約**
+- facade の `Sequential` は bias なしの Linear を作れないため、bias なしの経路は公開面からは到達できず、実機では確認していない（キーへの反映はホストの単体テストで確認）
+- 性能（launch 固定費の削減の有無）は未測定。#3261 が RULE.txt を実測前に固定して測る
+- **既知の制約**: 通常チェーン（capture しない step）の途中で他スレッドの capture が始まり、最初の dW の書き込み後に `DeviceContextCaptureInProgress` が出ると、既存の契約（`train_chain.rs`「失敗の境界」）どおり store が poison される。並列テストは各スレッドの 1 step 目の後に柵を置いてこの窓を避けている。この契約の見直し（SGD 前の衝突は params 未変更のため再試行できる可能性）は #3260 の範囲外
+
+### 8.8.5 申し送り（#3261）
+
+- A/B の「after」は `FANDHE_AI_CUDA_GRAPH_TRAIN=1`、「before」は未設定。x／y を窓の外で 1 回だけ upload する計測ランナーでは replay が続く。step ごとに upload し直すランナーでは再 capture が走り、3 回で既存チェーンへ戻る
+- 実測前に RULE.txt を固定する（§8.7）。bit ダンプの diff は `cuda_graph_train_step_bit_identity.rs::dump_bits_for_two_process_diff` を使える
