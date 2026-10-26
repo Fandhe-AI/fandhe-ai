@@ -4077,12 +4077,25 @@ impl BackendOps for CudaBackendOps {
     /// `begin_capture_session` は `in_flight` ドレインでチェーンの完走を待つ。capture 開始後に来た
     /// チェーンはここ（書き込み前）で `DeviceContextCaptureInProgress` を受ける。
     ///
-    /// capture 可能な stream でない（legacy stream。既定 OFF の利用者）ordinal では capture は
-    /// 起きない（3 つの capture 経路はいずれも `is_capturable_stream` を前提にする）ため、トークンを
-    /// すぐ手放し中身のないスコープを返す。デバイス同期は足さない。`unsafe` は追加しない。
+    /// legacy stream（既定 OFF の利用者）と確定済みの ordinal では capture は起きない
+    /// （3 つの capture 経路はいずれも `is_capturable_stream` を前提にする）ため、driver に触れず
+    /// 中身のないスコープをすぐ返す（r3）。デバイス未構築の ordinal は fail-closed で下の経路へ進み、
+    /// そこでも capture 不可 stream ならトークンを手放して中身のないスコープを返す。
+    /// デバイス同期は足さない。`unsafe` は追加しない。
     fn begin_device_chain_scope(
         &self,
     ) -> Result<fandhe_ai_tensor_core::DeviceChainScope, BackendError> {
+        // イシュー #3596 r3: ordinal の StreamKind は最初のデバイス構築で固定され変わらない
+        // （`device::resolved_stream_kind`）。Legacy と確定済みなら capture session は始まらない
+        // （3 つの capture 入口は `is_capturable_stream` 前提）ため、driver にも
+        // `begin_driver_call` にも触れず素通りにする。未構築（`None`）は後から Created の
+        // デバイスが作られうるので、必ず下の現行経路（トークンを取る）へ倒す（fail-closed）。
+        if matches!(
+            crate::device::resolved_stream_kind(self.ordinal),
+            Some(crate::device::StreamKind::Legacy)
+        ) {
+            return Ok(fandhe_ai_tensor_core::DeviceChainScope::none());
+        }
         let token = context_cache::begin_driver_call(self.ordinal, &[])?;
         let device =
             context_cache::observe_cuda_result(self.ordinal, &token, self.device_handle_raw())
@@ -11453,5 +11466,70 @@ mod repack_count_tests {
             }
             Err(other) => panic!("unexpected error variant for gemm_fp32_strict_impl: {other}"),
         }
+    }
+}
+
+/// 学習チェーン排他スコープの素通り判定（イシュー #3596 r3）の CI テスト（GPU 不要）。
+#[cfg(test)]
+mod chain_scope_passthrough_tests {
+    use super::*;
+    use fandhe_ai_tensor_core::BackendOps;
+
+    fn ordinal() -> usize {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(31_000);
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// 別スレッドで capture を成立させたまま `f` を実行する。
+    fn with_foreign_capture<R>(ordinal: usize, f: impl FnOnce() -> R) -> R {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let guard = context_cache::begin_capture_session(ordinal).expect("capture 成立");
+            ready_tx.send(()).expect("send");
+            let _ = done_rx.recv();
+            drop(guard);
+        });
+        ready_rx.recv().expect("capture 成立待ち");
+        let r = f();
+        done_tx.send(()).expect("send");
+        handle.join().expect("no panic");
+        r
+    }
+
+    /// Legacy と確定済みの ordinal は、別スレッドの capture 中でも driver 非接触で素通りする。
+    #[test]
+    fn chain_scope_skips_driver_call_on_known_legacy_ordinal_even_while_foreign_capture() {
+        let o = ordinal();
+        #[cfg(not(feature = "internal-diagnostics"))]
+        crate::device::seed_legacy_stream_kind_for_test(o);
+        let scope = with_foreign_capture(o, || CudaBackendOps::new(o).begin_device_chain_scope());
+        let scope = scope.expect("legacy は capture 中でも素通り");
+        assert!(!scope.is_holding());
+        assert_eq!(context_cache::in_flight_for_test(o), 0);
+    }
+
+    /// 未構築（未登録）の ordinal は現行経路（fail-closed）へ入り、capture 中は拒否される。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    #[test]
+    fn chain_scope_falls_back_to_token_path_on_unresolved_ordinal() {
+        let o = ordinal();
+        let r = with_foreign_capture(o, || CudaBackendOps::new(o).begin_device_chain_scope());
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextCaptureInProgress { ordinal: x }) if x == o),
+            "{r:?}"
+        );
+        assert_eq!(context_cache::in_flight_for_test(o), 0);
+    }
+
+    /// 未登録・capture なしでも現行経路を通り（デバイス取得に失敗して Err）、トークンを残さない。
+    #[cfg(not(feature = "internal-diagnostics"))]
+    #[test]
+    fn chain_scope_falls_back_on_unresolved_ordinal_and_releases_token() {
+        let o = ordinal();
+        let r = CudaBackendOps::new(o).begin_device_chain_scope();
+        assert!(r.is_err(), "存在しない ordinal はデバイス取得で失敗する");
+        assert_eq!(context_cache::in_flight_for_test(o), 0);
     }
 }

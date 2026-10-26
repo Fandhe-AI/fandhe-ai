@@ -255,5 +255,26 @@ class RuleR2ParseTest(unittest.TestCase):
         self.assertEqual(rule["crates_ref"][:9], "63f85eff2")
 
 
+class RuleR3ParseTest(unittest.TestCase):
+    """別名規則 RULE-r3.txt（#3596 r3 再実測）が行頭アンカー 3 項目を読め、閾値・腕が RULE-r2 と同じであること。"""
+
+    def test_rule_r3_parses(self):
+        path = REAL_RULE.replace("RULE.txt", "RULE-r3.txt")
+        sha, rule = judge.read_rule(path)
+        self.assertEqual(len(sha), 64)
+        self.assertEqual(rule["patch"], "92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819")
+        self.assertEqual(rule["before"][:9], "f7fe6b4df")
+        self.assertEqual(rule["crates_ref"][:9], "2794cfba6")
+
+    def test_rule_r3_keeps_r2_contract(self):
+        r2 = open(REAL_RULE.replace("RULE.txt", "RULE-r2.txt"), encoding="utf-8").read()
+        r3 = open(REAL_RULE.replace("RULE.txt", "RULE-r3.txt"), encoding="utf-8").read()
+        for head in ("[腕（", "[手順]", "[専有ゲート]", "[前提ゲート", "[hard 条件", "[比]", "[判定]"):
+            sec2 = r2[r2.index(head):].split("\n\n")[0]
+            sec3 = r3[r3.index(head):].split("\n\n")[0]
+            self.assertEqual(sec2, sec3, head)
+        self.assertIn("ratio <= 1.00", r3)
+
+
 if __name__ == "__main__":
     unittest.main()

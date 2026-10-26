@@ -196,6 +196,43 @@ fn resolve_stream_kind_for(
     }
 }
 
+/// `ordinal` の解決済みストリーム種別を driver 非接触で返す（イシュー #3596 r3）。
+///
+/// `ops.rs::begin_device_chain_scope` が、既定 OFF（legacy stream）の ordinal で毎 step
+/// driver 呼び出し経路へ入らず排他スコープを素通りにするための判定材料。[`STREAM_KIND_CACHE`]
+/// は ordinal ごとに最初の `CudaDevice::new` で決まり、以後 insert のみで変わらない（sticky）ため、
+/// `Some(Legacy)` は将来も Legacy のままである。未登録（デバイス未構築）は `None` を返し、
+/// 呼び出し側は排他を保つ現行経路へ倒す（fail-closed）。
+/// `internal-diagnostics` では Created 分岐がコンパイルされないので常に `Some(Legacy)`。
+/// 代替の lock-free ヒント表は、mutex 1 回（数十 ns）で足りるため採らなかった。
+#[cfg(not(feature = "internal-diagnostics"))]
+pub(crate) fn resolved_stream_kind(ordinal: usize) -> Option<StreamKind> {
+    let cache = STREAM_KIND_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.get(&ordinal).map(|k| match k {
+        ResolvedStreamKind::Legacy => StreamKind::Legacy,
+        ResolvedStreamKind::Created(..) => StreamKind::Created,
+    })
+}
+
+/// [`resolved_stream_kind`] の `internal-diagnostics` 版（常に Legacy）。
+#[cfg(feature = "internal-diagnostics")]
+pub(crate) fn resolved_stream_kind(_ordinal: usize) -> Option<StreamKind> {
+    Some(StreamKind::Legacy)
+}
+
+/// テスト専用: 未登録の `ordinal` を Legacy として登録する（`CudaContext` 不要）。
+#[cfg(all(test, not(feature = "internal-diagnostics")))]
+pub(crate) fn seed_legacy_stream_kind_for_test(ordinal: usize) {
+    let cache = STREAM_KIND_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.entry(ordinal).or_insert(ResolvedStreamKind::Legacy);
+}
+
 /// GPU 1 台分のハンドル・メタデータ。
 ///
 /// `ctx`／`stream` は `Arc` で共有し、#33/#34 のカーネルモジュールが
@@ -758,5 +795,25 @@ impl DeviceProvider for CudaDeviceProvider {
             )));
         }
         Self::probe(ordinal).map_err(|err| BackendError::CudaUnavailable(format!("{err}")))
+    }
+}
+
+#[cfg(test)]
+mod resolved_stream_kind_tests {
+    use super::*;
+
+    #[cfg(not(feature = "internal-diagnostics"))]
+    #[test]
+    fn unresolved_then_seeded_legacy() {
+        let o = 32_000;
+        assert!(resolved_stream_kind(o).is_none());
+        seed_legacy_stream_kind_for_test(o);
+        assert_eq!(resolved_stream_kind(o), Some(StreamKind::Legacy));
+    }
+
+    #[cfg(feature = "internal-diagnostics")]
+    #[test]
+    fn always_legacy_under_internal_diagnostics() {
+        assert_eq!(resolved_stream_kind(32_001), Some(StreamKind::Legacy));
     }
 }
