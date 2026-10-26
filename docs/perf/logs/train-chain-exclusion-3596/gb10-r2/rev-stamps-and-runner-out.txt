@@ -1,0 +1,42 @@
+## after
+616be4ff7658657933319a7e8cb8cec7a95d8422
+dirty=0
+## before
+f7fe6b4dfaabbdbc51a900709fe6648c36120c58
+dirty=0
+## before-diag
+f7fe6b4dfaabbdbc51a900709fe6648c36120c58
+dirty=0
+## main-prefix-diag
+c1204755e938a7908265c630968d864ec3443569
+dirty=0
+## attempt1
+precheck FAILED: after ツリーに基準コミット 63f85eff27e5a087f8909516b8f1723de0b7cc72 が無い（git bundle に履歴を含めること）
+## runner.out (head)
+precheck=assert ok
+== train cuda chain arm=excl0-off round=1 ==
+== train cuda chain arm=excl1-off round=1 ==
+== train cuda chain arm=excl0-on round=1 ==
+== train cuda chain arm=excl1-on round=1 ==
+run 1:  19:24:53 up 60 days,  6:51,  2 users,  load average: 0.32, 2.06, 2.05
+== train cuda chain arm=excl1-off round=2 ==
+== train cuda chain arm=excl0-on round=2 ==
+== train cuda chain arm=excl1-on round=2 ==
+== train cuda chain arm=excl0-off round=2 ==
+run 2:  19:25:56 up 60 days,  6:52,  2 users,  load average: 0.27, 1.69, 1.92
+== train cuda chain arm=excl0-on round=3 ==
+== train cuda chain arm=excl1-on round=3 ==
+== train cuda chain arm=excl0-off round=3 ==
+== train cuda chain arm=excl1-off round=3 ==
+run 3:  19:26:59 up 60 days,  6:54,  2 users,  load average: 0.10, 1.38, 1.80
+== train cuda chain arm=excl1-on round=4 ==
+== train cuda chain arm=excl0-off round=4 ==
+== train cuda chain arm=excl1-off round=4 ==
+== train cuda chain arm=excl0-on round=4 ==
+run 4:  19:28:02 up 60 days,  6:55,  2 users,  load average: 0.14, 1.13, 1.69
+== train cuda chain arm=excl0-off round=5 ==
+== train cuda chain arm=excl1-off round=5 ==
+== train cuda chain arm=excl0-on round=5 ==
+== train cuda chain arm=excl1-on round=5 ==
+run 5:  19:29:05 up 60 days,  6:56,  2 users,  load average: 0.13, 0.93, 1.57
+done. results in results/raw; skipped log: results/raw/skipped-train-chain-exclusion-3596-r2-gb10.log

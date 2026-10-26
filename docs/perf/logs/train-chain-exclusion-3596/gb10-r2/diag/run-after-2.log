@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-3596-r2-after/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
+
+running 1 test
+test train_graph_shared_workspace_tests_3596::replay_thread_and_plain_chain_thread_keep_losses_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1403 filtered out; finished in 0.72s
+
+rc=0

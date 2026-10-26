@@ -1,0 +1,9 @@
+before 1 rc=101
+before 2 rc=0
+before 3 rc=0
+before 4 rc=101
+after 1 rc=101
+after 2 rc=0
+after 3 rc=0
+after 4 rc=101
+done.

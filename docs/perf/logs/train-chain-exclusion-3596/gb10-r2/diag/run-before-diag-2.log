@@ -1,0 +1,23 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-3596-r2-before-diag/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
+
+running 1 test
+test train_graph_shared_workspace_tests_3596::replay_thread_and_plain_chain_thread_keep_losses_bit_exact ... DIAG3596 plain repeat 0: loss idx 4 got 0.2083997 expected 1.1649379 equals-reference-idx [] params_equal=true
+DIAG3596 plain repeat 0: loss idx 5 got 0.14944647 expected 1.081221 equals-reference-idx [] params_equal=true
+DIAG3596 plain repeat 0: loss idx 6 got 0.05043086 expected 1.0031589 equals-reference-idx [] params_equal=true
+DIAG3596 plain repeat 0: loss idx 12 got 0.01776623 expected 0.7552145 equals-reference-idx [] params_equal=true
+
+thread 'train_graph_shared_workspace_tests_3596::replay_thread_and_plain_chain_thread_keep_losses_bit_exact' (16434) panicked at crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs:93:5:
+replay と非 capture チェーンの並行で loss／パラメータが参照とずれた（DIAG3596 行を参照）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    train_graph_shared_workspace_tests_3596::replay_thread_and_plain_chain_thread_keep_losses_bit_exact
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1397 filtered out; finished in 0.74s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --lib`
+rc=101

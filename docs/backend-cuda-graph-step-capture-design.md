@@ -482,7 +482,9 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 
 ### 8.11.6 原因の切り分け（G1 の loss 取り違え。2026-10-26）
 
-**状態: コード上の原因特定と修正は済み。GB10 での確定・再実測は未実測**（本記録時点で実機に到達できなかったため、下記は静的な読解に基づく推定である。実測値で埋めない）。
+**状態: コード上の原因特定と修正は済み。GB10 での確認は §8.11.7 のとおり実施済みで、修正の効果は確認できたが、下記の機構の推定は実機の `DIAG3596` と一部食い違った**（下記の本文は静的な読解に基づく推定として残す）。
+
+- 実機での確認（2026-10-26。RULE-r2 [原因切り分け]。ログは `docs/perf/logs/train-chain-exclusion-3596/gb10-r2/diag/`）: 診断テストは #3597 以前の `f7fe6b4df`（テスト専用パッチ付き）でも、修正前 main の `c1204755e`（同）でも落ちた（各 2/2 回）ので、#3597 以前からある欠陥という推定は支持された。パラメータは一致し（`params_equal=true`）、ずれるのは非 capture スレッドの loss だけという点も一致した。一方で、**ずれた loss は参照列のどの index とも bit 一致しなかった**（`equals-reference-idx []`。例: 期待 1.1649379 に対し 0.22982085）。「相手 step の loss を読む」という推定のとおりなら別 index と一致するはずなので、機構の記述は未確定として扱う（RULE-r2 に従い、修正の機構は確定させない。所有者判断事項）。修正後（`616be4ff7`）は 5/5 回 pass。
 
 - 機構（推定）: `CudaMse` は ordinal ごとに 1 つで、デバイス上の永続 `partial` ワークスペースを持つ（`mse.rs`）。非 capture の forward は、このロックを partial と finalize の 2 起動にまたがって保持することで安全になっている。一方、学習 graph（`launch_train_chain` の capture 結果）は同じ `partial` のアドレスを焼き込むが、replay（`run_captured_train_chain` ①）も初回 launch も GEMM の `device_workspace` mutex しか取らず、MSE のロックを取っていなかった。2 スレッドは同じ ordinal の同じ stream に積むため、「非 capture の partial → graph（自分の partial と finalize）→ 非 capture の finalize」の順になりうる。その場合、非 capture 側の finalize は graph が書いた partial を読み、相手スレッドの step の loss を自分の loss として書く。
 - ログの症状との一致: 失敗は非 capture スレッドだけ（graph は stream 上で一体に実行されるので割り込まれない）。値は参照列の別 index の値になる（相手は同じ初期値・同じ入力）。poison は起きない。パラメータは影響を受けない見込み（MSE backward は pred／target から再計算し、dW のワークスペースは GEMM mutex で守られる）。
@@ -495,7 +497,13 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 
 ### 8.11.7 修正後の GB10 実測結果（RULE-r2。`3596-r2-gb10`）
 
-**未実測**（本記録時点）。規則は `docs/perf/logs/train-chain-exclusion-3596/RULE-r2.txt` に計測前に登録済み。G1 の 30 回繰り返し・`#[ignore]` 全件の突き合わせ・chain セルの結果は実機で得てからここに追記する。
+**GB10 で実施済み・判定 REGRESSION（終了コード 3）**（2026-10-26）。規則は `docs/perf/logs/train-chain-exclusion-3596/RULE-r2.txt`（計測前に登録）。出典: `judge-3596-r2.md`・`gb10-r2/`。機体は GB10（driver 580.173.02・rustc 1.97.1）、before `f7fe6b4df`・after `616be4ff7`（`crates/` は基準 `63f85eff2` と同一）。
+
+- **G1 は合格**: 前提ゲート g1（`--exact`）・g2（3260 診断 9 件）・g3・g4（facade と 2 プロセス bit 一致、BITS 90 行・差分空）がすべて合格。初回（§8.11.5）で不合格だった loss の取り違えは再現しなかった。診断テストも after で 5/5 pass。
+- **`#[ignore]` 全件**: 排他が原因の新規 fail は 0 件。after にだけ出た 2 件（`small_shape_matrix_unit_has_no_floor_tflops_record`・`wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096`）は一過性・既存の不安定で、単独実行は両ツリーで同じ傾向だった。詳細は `gb10-r2/ignored-compare-3596-r2.md`。
+- **chain セル（1 スレッド・size=64・5 round）**: hard 条件（checksum 0.080541・PARAM_DIGEST）は全 run・全腕で一致。ratio（排他あり / なし）は graph off が **1.002**（ratio_r 1.001〜1.004 で 5/5 round が 1.00 超。0.1346 → 0.1349 ms）、graph on が 1.000（0.1126 ms）。RULE-r2 の判定は「いずれかのモードで ratio > 1.00 かつ 5/5 round で ratio_r > 1.00」を REGRESSION とするため、off で REGRESSION になった。
+- 限界: 差は約 0.3 µs。2 腕は別ビルドで #3597・#3601 以外の変更を含みうる。1 機体・単一構成の結果で、並行時の性能は対象外。コード・閾値・規則は変更していない。
+- 所有者判断事項: off の 0.2% の差を後退として扱うか（別名 RULE-r3 の事前登録による再実測が要るか）、§8.11.6 の機構の食い違いの追加調査。#3594 の前提は引き続き満たされない（§8.12.2）。
 
 ## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 
@@ -505,7 +513,7 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 ### 8.12.2 見送りの理由（未解決事項）
 - #3596 の `begin_device_chain_scope` が保護するのは encode と SGD の区間だけである。チェーン外の通常操作（`ResidentLoss::read` → `read_train_step_loss` → `mem.download`、Tape の通常演算など）は、待機も再試行もしない。
 - 既定 ON では、環境変数なしで同じ ordinal を複数スレッドが使うと、一方の学習 capture 中に他方の通常操作が `DeviceContextCaptureInProgress` で失敗し、公開 API（`step` → `loss.read()?`）からそのまま返る。従来は設定不要で動いていた並行学習が、別 store の capture タイミングだけで中断する。
-- さらに、graph の replay と非 capture チェーンが共有の永続ワークスペースを取り合い loss を取り違える欠陥があった（§8.11.6。修正済みだが GB10 での確認は未実測）。反転の前提に関わる。
+- さらに、graph の replay と非 capture チェーンが共有の永続ワークスペースを取り合い loss を取り違える欠陥があった（§8.11.6。修正済み。GB10 で G1・診断テストの pass は確認したが、既定 OFF の chain セルが RULE-r2 の閾値を超えた〈§8.11.7〉）。反転の前提に関わる。
 - 反転の前提条件: チェーン外の通常操作にも、capture 中は安全に待機して再試行する仕組みを入れ、その並行回帰テスト（GB10 実機）を通すこと。
 
 ### 8.12.3 反転 PR に再度必要な確認（未実測）
