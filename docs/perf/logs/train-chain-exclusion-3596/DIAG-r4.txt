@@ -1,0 +1,67 @@
+DIAG-r4 fixed-at-utc: 2026-10-26T14:30:00Z
+issue: #3596（RULE-r3 の判定は UNDETERMINED。既定 OFF の chain セルで off ratio 1.007〔ratio_r 0.995〜1.009〕。所有者判断〔2026-10-26〕: driver 呼び出しは原因ではなかった。約 0.9 µs の差の出どころを GB10 で切り分ける）
+doc: docs/backend-cuda-graph-step-capture-design.md §8.11.10（結果の記録先）
+本ファイルは診断手順であり判定ツール（judge_train_chain_exclusion_ab.py）の入力ではない。計測より前に固定する。RULE.txt・RULE-r2.txt・RULE-r3.txt とその判定記録は変えない。閾値・round 数・判定方法・tolerance・baseline は変えない。
+診断は分類であり、NON-REGRESSION／REGRESSION の判定ではない。#3596 の完了条件の判定は、原因が見つかり修正した場合に別名の RULE-r4.txt を計測前に登録して行う。
+
+[対象]
+- before = f7fe6b4dfaabbdbc51a900709fe6648c36120c58
+- after_crates_identical_to = 46a2a43d991f7099eaa4dfb97e07878e106b5c61
+- 計測専用パッチ docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch を全ツリーに適用する。
+  patch_sha256: 92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819
+- 計測専用 revert パッチ（diag-r4/。crates/ へはコミットしない。after のツリーに当てて計測するためだけに使う。警告 dead_code が出るのは計測専用ビルドなので許容）:
+  rv-scopecall_sha256: 9c9a00cc63c8bb293b8f2842ad53b5e6099a89e360fcc8bc7458d798fdbafbdb
+  rv-kindlookup_sha256: 1ebce013edbdd1e770057bd25c189a1bbf012a10a7d61a95d33e1f2b1b892dae
+  rv-graphlock_sha256: b32dc6b1b363df0930fc50a5dd0a89c77f1f2349ab8d9a5ff4cbd61ba4e88589
+- rv-scopecall: train_chain.rs の begin_device_chain_scope 呼び出しブロックを除く。
+- rv-kindlookup: CudaBackendOps::begin_device_chain_scope を常に none() で返す（呼び出しと dyn dispatch は残し、resolved_stream_kind の mutex だけ外す）。
+- rv-graphlock: graph.rs の with_train_graph_workspaces_locked を #3601 以前の gemm.with_workspace_epoch のみに戻す（既定 OFF の経路外の対照）。
+
+[腕（すべて chain セル・GB10・train CUDA・size=64・TF32 OFF・--graph なし・FANDHE_AI_CUDA_GRAPH_TRAIN／_STEP／_INFER 未設定・BENCH_PARAM_DIGEST=1）]
+- aa0／aa1: before の同一バイナリ（同じファイルを 2 腕で起動。sha256 一致を env_info に記録）。A/A。
+- excl0-rebuild: before を別 target-dir で再ビルドしたもの（ビルドパス違いの影響を見る対照）。
+- excl1: after そのまま。
+- rv-scopecall／rv-kindlookup／rv-graphlock: after に各パッチ 1 本を当てたもの。
+- 7 腕。candle・torch は計測しない。
+
+[手順]
+- 5 round 固定（AB_ROUNDS が 5 以外なら拒否）。プロセスは独立起動。run の差し替え・追加起動・腕の除外はしない。同じラベルの既存出力があれば停止。RAYON_NUM_THREADS は unset。
+- 起動順の回転（基準順 L = aa0, aa1, excl0-rebuild, excl1, rv-scopecall, rv-kindlookup, rv-graphlock。round r は L の位置 (r-1) mod 7 から巡回）:
+  r1: aa0 aa1 excl0-rebuild excl1 rv-scopecall rv-kindlookup rv-graphlock
+  r2: aa1 excl0-rebuild excl1 rv-scopecall rv-kindlookup rv-graphlock aa0
+  r3: excl0-rebuild excl1 rv-scopecall rv-kindlookup rv-graphlock aa0 aa1
+  r4: excl1 rv-scopecall rv-kindlookup rv-graphlock aa0 aa1 excl0-rebuild
+  r5: rv-scopecall rv-kindlookup rv-graphlock aa0 aa1 excl0-rebuild excl1
+- 全ビルドを計測の前に済ませる。計測中のビルド並走禁止（開発機・ノードとも）。
+- 前提ゲート g1〜g4 と #[ignore] 全件の突き合わせは本診断では行わない（修正を入れた場合の RULE-r4 で実施する）。
+
+[専有ゲート]
+- load1 < 1.0 かつ GPU 使用率 0% を 3 サンプル連続。30 秒間隔・最大 30 分。round ごとに通す。不通過 round を含む系列は診断不能。
+
+[機体の同定]
+- uname -m = aarch64。nvidia-smi の GPU 名に GB10 を含む。env_info に記録する。
+
+[hard 条件]
+- checksum（最終 loss）と PARAM_DIGEST が全 run・全腕で一致。欠落は不一致として扱う。不一致は「診断不能」として記録して止まる。
+
+[読み方の規則（分類であり判定ではない。事後に変えない）]
+- 腕 a の代表値 = 5 run の median_s の中央値。比 rho(a) = 代表値(a) / 代表値(aa0)。round 内比 rho_r(a) = 同一 round 内の a / aa0。
+- ノイズ幅 N = max(|rho(aa1) - 1|, max_r |rho_r(aa1) - 1|)。Delta_after = rho(excl1) - 1。
+- (i) |Delta_after| <= N: 「差は A/A と同程度。コードに原因は見つからない」→ 停止して所有者へ報告。
+- (ii) Delta_after > N のとき、各 revert 腕 R について:
+  - 原因候補: |rho(R) - 1| <= N かつ rho_r(R) / rho_r(excl1) < 1 が 4/5 round 以上。
+  - 無関係: |rho(R) / rho(excl1) - 1| <= N。
+  - それ以外: 部分／不明。
+- (iii) Delta_after < -N: 「after が速い」。停止して報告。
+- excl0-rebuild または rv-graphlock（既定 OFF の経路外）が |rho - 1| > N で動いた場合は「ビルド・配置の影響あり」と併記する。
+- 結論の対応表: rv-kindlookup が原因候補 → resolved_stream_kind の mutex 等の本体コスト。rv-scopecall だけが原因候補（rv-kindlookup は無関係）→ 呼び出し・スコープ型の扱い自体のコスト。OFF 経路の腕がどれも原因候補にならず対照腕が動く → 配置・ビルド起因（コード原因なし）→ 停止。どれにも当てはまらない → 停止・報告（推定で埋めない）。
+
+[事前表明する仮説（推定・合格ラインではない）]
+- mutex 1 回は数十 ns で 0.9 µs を説明しにくい。rv-graphlock は経路外なので中立と見込む。
+
+[限界]
+- 単一機体・train CUDA・size=64・1 スレッド。別ビルド比較。round 数 5 は RULE-r3 と同じで検出力は限られる。
+- 診断腕のパッチは計測専用であり、排他の正しさ（G1 ほか）を検証しない。
+
+[ドリフトガードの除外]
+- 専有ゲート定数（load1 閾値 1.0・GPU 使用率 3 サンプル・待機上限）のドリフトガードテストは最初から除外する。

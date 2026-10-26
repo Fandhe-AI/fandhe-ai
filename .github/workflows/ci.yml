@@ -1046,6 +1046,10 @@ jobs:
       # NON-REGRESSION／REGRESSION／UNDETERMINED を RULE.txt どおり fail-closed に適用する。合成 fixture のみで実機不要）の単体テスト。
       - name: フレームワーク横並びベンチ judge_train_chain_exclusion_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/judge_train_chain_exclusion_ab_test.py
+      # イシュー #3596 r4: summarize_diag_train_chain_exclusion.py（既定 OFF の chain セル差の切り分け診断 DIAG-r4.txt の
+      # 集計。分類であり判定ではない。合成 fixture のみで実機不要）の単体テスト。
+      - name: フレームワーク横並びベンチ summarize_diag_train_chain_exclusion.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/summarize_diag_train_chain_exclusion_test.py
 
       # イシュー #3179: opp_kernel_torch_diag.py（Mac mini で PyTorch の純カーネル時間と
       # Python 側 checksum を測る診断）の torch／numpy 不要部分の回帰テスト。同一方針

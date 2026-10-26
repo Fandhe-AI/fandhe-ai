@@ -16,6 +16,7 @@
 | `RULE-r2.txt` | 原因修正（学習 graph の起動で MSE ワークスペースのロックを取る。設計記録 §8.11.6）後の再実測の事前登録規則（計測前に登録。閾値は RULE.txt と同一）。ランナーは `AB_RULE_NAME=RULE-r2.txt` で読む |
 | `judge-3596-r3.md`・`judge-3596-r3.exit` | r3 の判定ツールの出力と終了コード（UNDETERMINED・4） |
 | `RULE-r3.txt` | r2 の REGRESSION 後、既定 OFF の ordinal で排他スコープを素通りにする修正（設計記録 §8.11.8）の再実測の事前登録規則（計測前に登録。閾値・腕・ゲートは RULE-r2 と同一）。ランナーは `AB_RULE_NAME=RULE-r3.txt` で読む。マージ SHA `46a2a43d9`（2026-10-26T20:36+09:00）で、計測より前に main へ登録済み。r3 の GB10 実測結果は下記と設計記録 §8.11.9 |
+| `DIAG-r4.txt`・`diag-r4/` | r3 の UNDETERMINED で残った既定 OFF の約 0.9 µs の差の切り分け診断（設計記録 §8.11.10）の手順（計測前に固定。判定ではなく分類。判定ツールの入力ではない）と、計測専用 revert パッチ 3 本・`patches.sha256`。**GB10 での計測は未実施**。ランナー: `run_diag_train_chain_exclusion_cuda.sh`、集計: `summarize_diag_train_chain_exclusion.py`（テストは CI） |
 | `gb10/` | 初回のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`#[ignore]` 全件の結果と分類・`judge-3596.md`／`.exit` |
 | `gb10-r3/` | r3 のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`ignored/`・`ignored-compare-3596-r3.md`・`rev-stamps-and-runner-out.txt` |
 | `gb10-r2/` | r2 のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`diag/`（原因切り分けのログとテスト専用パッチ）・`ignored/`・`ignored-compare-3596-r2.md` |

@@ -532,6 +532,17 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 - 限界: 2 腕は別ビルド。1 機体・単一構成の結果で、並行時の性能は対象外。コード・閾値・規則は変更していない。
 - 所有者判断事項: off の差を追加計測（round 数を増やす別名 RULE の事前登録等）で切り分けるか、判定基準を見直すか。完了条件（`judge-3596-r3.exit` = 0）が未達のため #3596 は閉じない。#3594 の前提は引き続き満たされない（§8.12.2）。
 
+### 8.11.10 r3 の差の切り分け診断（DIAG-r4。手順の登録）
+
+**状態: 手順・計測専用パッチ・ランナー・集計ツールを計測前に固定した段階。GB10 での計測は未実施**（結果は計測後にこの節へ追記する。推測の値は書かない）。
+
+- 目的: RULE-r3 の UNDETERMINED で残った既定 OFF の chain セルの約 0.9 µs の差の出どころを切り分ける（所有者判断 2026-10-26: driver 呼び出しは原因ではなかった）。判定ではなく分類であり、RULE.txt・RULE-r2.txt・RULE-r3.txt と判定記録は変えない。
+- 手順の正本: `docs/perf/logs/train-chain-exclusion-3596/DIAG-r4.txt`（腕 7 つ・5 round 巡回・専有ゲートは RULE-r3 と同一・A/A ノイズ幅 N による分類規則と結論の対応表を計測前に固定）。
+- 既定 OFF 経路に乗る before→after の差分は 2 つだけ: `train_chain.rs` の `begin_device_chain_scope` 呼び出し（毎 step・dyn dispatch）と、その実体が読む `device::resolved_stream_kind`（`Mutex` 1 回）。`graph.rs`／`mse.rs` の #3601 のロックは既定 OFF では `train_chain_captured` が即 `Ok(None)` で届かないため経路外で、対照腕（`rv-graphlock`）として置く。
+- 腕: `aa0`／`aa1`（before の同一バイナリ = A/A）、`excl0-rebuild`（before の再ビルド）、`excl1`（after）、`rv-scopecall`／`rv-kindlookup`／`rv-graphlock`（after に計測専用パッチ 1 本。`diag-r4/*.patch`。`crates/` へはコミットしない）。
+- 道具: `scripts/bench/framework-compare/run_diag_train_chain_exclusion_cuda.sh`（ランナー）、`summarize_diag_train_chain_exclusion.py`（集計。テストは CI で実行）。
+- 差が A/A と同程度、または配置・ビルド起因なら記録して止め、所有者へ報告する。コードに原因が見つかった場合に限り、最小の修正を入れ、別名の RULE-r4.txt を計測前に登録して再実測する（#3596 は NON-REGRESSION が出るまで閉じない）。
+
 ## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 
 ### 8.12.1 結論
