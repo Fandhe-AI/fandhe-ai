@@ -449,7 +449,7 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - 新しいロックや状態フィールドは足さない。非 capture チェーン（encode ＋ SGD）の間、**外側の `CallToken` を 1 つ持ち続ける**。`BackendOps::begin_device_chain_scope`（tensor-core。既定は中身のないスコープで CPU・Metal は不変）が `DeviceChainScope`（`!Send`・RAII）を返し、CUDA 実装（`ops.rs`）が `begin_driver_call` のトークンを包む。
 - チェーン内の各部品は「このスレッドが in-flight を持つ」通過条件で通る。別スレッドの `begin_capture_session` は既存の `in_flight` ドレインでチェーンの完走を待つ。capture 開始後に来た新しいチェーンはスコープ取得（書き込み前）で一過性エラーを受け、`train_step_device_chain` の待機・再試行ループが処理する。
 - スコープは `try_captured_train_step` が `Ok(false)` を返した**後**に取る（スコープを持つスレッドは capture を開始できないため）。取得失敗は書き込み前の失敗として扱い、`Unsupported`・一過性衝突は poison せず velocity の新規確保分を戻す。それ以外は従来どおり poison する。
-- legacy stream（既定 OFF。`is_capturable_stream() == false`）の ordinal では capture 経路が成立しない（3 経路とも capturable stream を前提）ため、トークンをすぐ手放す。デバイス同期は足さない。新しい `unsafe` はない。
+- legacy stream（既定 OFF。`is_capturable_stream() == false`）の ordinal では capture 経路が成立しない（3 経路とも capturable stream を前提）。Legacy と確定済みの ordinal はスコープ取得の時点で driver に触れず素通りにする（§8.11.8。r3 まではトークンを取ってから手放していた）。デバイス同期は足さない。新しい `unsafe` はない。
 - `DeviceChainScope` は内部クレート用で facade には出さない。`mem::forget` してはならない（in-flight が戻らず capture・invalidate が待ち続ける）。
 
 ### 8.11.3 デッドロック分析
@@ -504,6 +504,26 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - **chain セル（1 スレッド・size=64・5 round）**: hard 条件（checksum 0.080541・PARAM_DIGEST）は全 run・全腕で一致。ratio（排他あり / なし）は graph off が **1.002**（ratio_r 1.001〜1.004 で 5/5 round が 1.00 超。0.1346 → 0.1349 ms）、graph on が 1.000（0.1126 ms）。RULE-r2 の判定は「いずれかのモードで ratio > 1.00 かつ 5/5 round で ratio_r > 1.00」を REGRESSION とするため、off で REGRESSION になった。
 - 限界: 差は約 0.3 µs。2 腕は別ビルドで #3597・#3601 以外の変更を含みうる。1 機体・単一構成の結果で、並行時の性能は対象外。コード・閾値・規則は変更していない。
 - 所有者判断事項: off の 0.2% の差を後退として扱うか（別名 RULE-r3 の事前登録による再実測が要るか）、§8.11.6 の機構の食い違いの追加調査。#3594 の前提は引き続き満たされない（§8.12.2）。
+
+### 8.11.8 既定 OFF の ordinal は排他スコープを素通りにする（r3。2026-10-26）
+
+RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.11.7）。所有者判断（2026-10-26）に基づき、`begin_device_chain_scope`（`ops.rs`）を次のとおり変えた。`TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。GEMM→MSE のロック順（§8.11.6）、tolerance、baseline、FMA 契約、依存、`unsafe` は変えない。
+
+- **分岐**: `device::resolved_stream_kind(ordinal)` が `Some(Legacy)` なら、`begin_driver_call`・デバイスキャッシュ・`observe_cuda_result` に触れず `DeviceChainScope::none()` を返す。`Some(Created)` と `None` は従来の経路（トークンを取り、capturable stream なら保持）。
+- **`None`（デバイス未構築）は fail-closed**: 後から Created のデバイスが作られうるので、素通りにしない。2 step 目以降はデバイスがキャッシュされ判定が確定する。
+- **判定の材料**: `device.rs` の `STREAM_KIND_CACHE`（ordinal ごとに最初の `CudaDevice::new` で決まる）。読み出しは mutex 1 回で driver 非接触。lock-free のヒント表は、mutex 1 回（数十 ns）が r2 の差（約 0.3 µs）より十分小さく、状態を増やさずに済むため採らなかった。
+- **判定が古くならない根拠**:
+  1. 単調性: `STREAM_KIND_CACHE` への書き込みは insert のみ（remove・clear・retain はない）。一度 Legacy と記録された ordinal は変わらない。invalidate 後の再構築も同じ関数を通る。
+  2. capture の入口（step の `captured_segment_key`、推論チェーン、`train_chain_captured`）はいずれも `is_capturable_stream()` を確かめてから `begin_capture_session` へ進む。Legacy の ordinal では capture session が始まらず、排他の相手がいない。
+  3. `internal-diagnostics` では Created 分岐がコンパイルされないため常に Legacy。
+  4. `None` は現行経路（fail-closed）。
+  5. poison・Retiring の検査はスコープ取得から encode の最初の部品の `begin_driver_call` へ移るだけ。`train_chain.rs` の encode エラー処理で、スコープ取得の失敗時と同じく poison される。
+- **採らなかった案**: `begin_capture_session` で Legacy の ordinal を拒否する防御。`internal-diagnostics` では accessor が常に Legacy を返し、偽 ordinal を使う既存の CI テストを壊すため。根拠 1・2 で足りる。
+- **テスト（GPU 不要）**: Legacy 登録済みの ordinal は別スレッドの capture 中でも `Ok`・非保持・in-flight 0（素通りの証拠）。未登録は `DeviceContextCaptureInProgress`（現行経路へ入った証拠）。未登録・capture なしは `Err` でトークンを残さない。
+
+### 8.11.9 r3 の GB10 実測結果（RULE-r3。`3596-r3-gb10`）
+
+**未実測**（コードと RULE-r3 の登録まで。GB10 へ到達できるセッションでの実測が必要）。規則は `docs/perf/logs/train-chain-exclusion-3596/RULE-r3.txt`（計測前に登録。`after_crates_identical_to` = `2794cfba6`）。実施する場合は README「実施条件」の手順で、前提ゲート g1〜g4（G1 の 30 回を含む）・chain セル 5 round・`#[ignore]` 全件の突き合わせを行う。別の機体の値で埋めない。完了条件（`judge-3596-r3.exit` が 0・G1 pass・`#[ignore]` で排他が原因の新規 fail 0 件）が揃うまで #3596 は閉じない。
 
 ## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 

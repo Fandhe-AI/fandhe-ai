@@ -14,6 +14,7 @@
 | `judge-3596-r2.md`・`judge-3596-r2.exit` | r2 の判定ツールの出力と終了コード（REGRESSION・3） |
 | `RULE.txt` | 計測前に固定した事前登録規則（腕・前提ゲート・hard 条件・判定・限界） |
 | `RULE-r2.txt` | 原因修正（学習 graph の起動で MSE ワークスペースのロックを取る。設計記録 §8.11.6）後の再実測の事前登録規則（計測前に登録。閾値は RULE.txt と同一）。ランナーは `AB_RULE_NAME=RULE-r2.txt` で読む |
+| `RULE-r3.txt` | r2 の REGRESSION 後、既定 OFF の ordinal で排他スコープを素通りにする修正（設計記録 §8.11.8）の再実測の事前登録規則（計測前に登録。閾値・腕・ゲートは RULE-r2 と同一）。ランナーは `AB_RULE_NAME=RULE-r3.txt` で読む。**r3 の GB10 実測は未実施（設計記録 §8.11.9）** |
 | `gb10/` | 初回のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`#[ignore]` 全件の結果と分類・`judge-3596.md`／`.exit` |
 | `gb10-r2/` | r2 のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`diag/`（原因切り分けのログとテスト専用パッチ）・`ignored/`・`ignored-compare-3596-r2.md` |
 
@@ -27,6 +28,10 @@
 | backend-cuda・facade の `#[ignore]` 全件を #3597 より前の main と突き合わせ、新しい fail がない | 新規 fail 1 件（G1） | **排他が原因の新規 fail 0 件**（`gb10-r2/ignored-compare-3596-r2.md`） |
 | chain セル（1 スレッド）で排他あり・なしの非後退（既定 OFF・opt-in ON） | 未計測 | **既定 OFF が後退判定**（ratio 1.002、5/5 round で > 1.00）。opt-in ON は 1.000 |
 | `TRAIN_GRAPH_DEFAULT_ENABLED` が `false` のまま | 確認済み | 確認済み（`crates/backend-cuda/src/graph.rs` の const assert） |
+
+## r3 再実測（RULE-r3）の結果
+
+**未実測**。コード修正（`2794cfba6`）と RULE-r3 の登録のみ。判定・生ログ・`#[ignore]` 突き合わせは GB10 で実施後に `judge-3596-r3.md`・`gb10-r3/` として追加する。
 
 ## r2 再実測（RULE-r2）の結果
 
