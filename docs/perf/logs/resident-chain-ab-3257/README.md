@@ -5,6 +5,7 @@
 - **実機計測（Mac mini・GB10）は 2026-10-24 に実施済み**。両機体とも 5 round・全 8 セルが判定可能（`judge-3257.md`、終了コード 0）。結果表・比・残差の分解は決定記録 `docs/compat-resident-train-step-decision.md` §17.1〜§17.4。
 - 判定の要旨: IMPROVE 4（Mac mini train Metal・GB10 infer CPU・train CUDA・infer CUDA）、NEUTRAL 2（Mac mini infer CPU・infer Metal）、REGRESS 2（CPU train が両機体。+0.4%・+5.9%）。INVALID／REJECT なし。
 - 正式な 6 フレームワーク同席計測は #3273（0.12.0 のピン更新後）。
+- CPU train の REGRESS 2 件の切り分けは #3611（手順の登録のみ・未実測。`../resident-chain-cpu-train-diag-3611/`、決定記録 §17.5）。
 
 ## 収録物
 
