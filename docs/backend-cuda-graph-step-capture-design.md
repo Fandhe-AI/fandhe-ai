@@ -470,6 +470,15 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - GB10 `#[ignore]`: `unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（`train_step_graph_diag_tests_3260.rs`。柵なし・30 繰り返し）を追加。
 - **未実測（本記録時点）**: GB10 での上記テストの pass、backend-cuda・facade の `#[ignore]` 全件の main との突き合わせ、1 スレッド chain セルの排他あり・なし比較（既定 OFF・opt-in ON）。実機を使えない環境で実装したため、別の機体の値では埋めない。#3594 の前提（これらの実測）が揃うまで `Closes` は付けない。
 
+### 8.11.5 GB10 実測結果（2026-10-26。#3596 再オープン後）
+
+- 出典: `docs/perf/logs/train-chain-exclusion-3596/`（RULE.txt・judge-3596.md・gb10/）。機体は GB10（driver 580.173.02）、before `f7fe6b4df`・after `087e7f6d4`（`crates/` は `d3f38f71b` と同一）。§8.11.4 は記録時点の履歴として残す。
+- **G1 不合格**: `unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact` は 8 回中 7 回失敗した。poison は起きていないが、非 capture スレッド（thread 1）の loss 列が単独実行の参照と一致せず、別 step の loss らしい値が読める（例: `loss idx 18: 1.2480911 vs 0.6393652`）。§8.11.3 の分析で捕捉できていない経路が残っていると推定されるが、原因は未特定（本 Issue の範囲外）。
+- **`#[ignore]` 突き合わせ**: after にだけ出た fail は G1 のみ（補足実行のフレーク 1 件を除く）。共通の失敗（TF32／f16 の parity・stress・probe 系など）は排他と無関係の既存事項。詳細は `gb10/ignored-compare-3596.md`。
+- **chain セル非後退: 未計測**。ランナーの前提ゲート g2（G1 を含む）が失敗し、規則どおり停止した。g3・g4（2 プロセス bit 一致）は合格。判定ツールの結果は REGRESSION（終了コード 3）。
+- 限界: 1 機体・1 日の結果。G1 の確率的な失敗は件数が少なく、頻度の推定は粗い。コード・閾値・規則は変更していない。
+- 結論: 排他（#3597）だけでは並行時の結果取り違えを防げていないため、#3594（既定 ON 反転）の前提はさらに遠のく。所有者判断: 原因調査と修正方針、別名 RULE での再実測。
+
 ## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 
 ### 8.12.1 結論

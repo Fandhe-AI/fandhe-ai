@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running tests/cuda_graph_train_step_bit_identity.rs (<home>/work/3596-ab/after/target-ab-chain-excl-3596-gb10-gates/release/deps/cuda_graph_train_step_bit_identity-ca6f52c691a0e530)
+
+running 1 test
+test in_process_capture_matches_plain_chain_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.61s
+
+rc=0

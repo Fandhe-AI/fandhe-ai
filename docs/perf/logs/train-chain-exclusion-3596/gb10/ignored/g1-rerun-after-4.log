@@ -1,0 +1,11 @@
+     Running unittests src/lib.rs (<home>/work/target-3596-after/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
+running 1 test
+test train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact ... 
+thread 'train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact' (4053714) panicked at crates/backend-cuda/src/train_step_graph_diag_tests_3260.rs:161:13:
+assertion `left == right` failed: thread 1 repeat 4 vs single: loss idx 15: 1.380431 vs 0.7051117
+failures:
+failures:
+    train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1400 filtered out; finished in 0.85s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --lib`
+rc=101

@@ -1,0 +1,365 @@
+     Running unittests src/lib.rs (<home>/work/target-3596-after/release/deps/fandhe_ai_backend_cuda-1903b33100841bd6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1412 filtered out; finished in 0.00s
+     Running tests/adam_device_contract.rs (<home>/work/target-3596-after/release/deps/adam_device_contract-beffab897084e512)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/adam_device_real_device.rs (<home>/work/target-3596-after/release/deps/adam_device_real_device-c5d09f750ac03a86)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/async_ordering_real_device.rs (<home>/work/target-3596-after/release/deps/async_ordering_real_device-a48f48e4a0920541)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/backend_ops_real_device.rs (<home>/work/target-3596-after/release/deps/backend_ops_real_device-3d4d580c6b54b79a)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/batch_norm_parity.rs (<home>/work/target-3596-after/release/deps/batch_norm_parity-f10be69f0de88480)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+     Running tests/bce_parity.rs (<home>/work/target-3596-after/release/deps/bce_parity-b45de03bb8c79c10)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/cast_ops_contract.rs (<home>/work/target-3596-after/release/deps/cast_ops_contract-1d3e1f4cbabb4a86)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/cast_parity.rs (<home>/work/target-3596-after/release/deps/cast_parity-48508b0712ee6537)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/constant_pad_parity.rs (<home>/work/target-3596-after/release/deps/constant_pad_parity-91fd60e6b581a6ff)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/cpu_cuda_mma_parity.rs (<home>/work/target-3596-after/release/deps/cpu_cuda_mma_parity-b37c9647ae425e6f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/cpu_cuda_parity.rs (<home>/work/target-3596-after/release/deps/cpu_cuda_parity-47e2f6c4174ca6ba)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/cpu_cuda_tiled_pipeline_parity.rs (<home>/work/target-3596-after/release/deps/cpu_cuda_tiled_pipeline_parity-00b84fcbe6b5f201)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+     Running tests/cpu_cuda_tiled_pipeline_persistent_parity.rs (<home>/work/target-3596-after/release/deps/cpu_cuda_tiled_pipeline_persistent_parity-9d2b3ac9660f720c)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+     Running tests/cpu_cuda_tiled_pipeline_streamk_parity.rs (<home>/work/target-3596-after/release/deps/cpu_cuda_tiled_pipeline_streamk_parity-620a6e0eaa32e1d3)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/cpu_cuda_tiled_pipeline_tma_parity.rs (<home>/work/target-3596-after/release/deps/cpu_cuda_tiled_pipeline_tma_parity-874f3eaca2d88516)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/cpu_cuda_wmma_parity.rs (<home>/work/target-3596-after/release/deps/cpu_cuda_wmma_parity-95eea62314155e2d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/device.rs (<home>/work/target-3596-after/release/deps/device-961aa56045f9ec36)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/device_init.rs (<home>/work/target-3596-after/release/deps/device_init-2be4f0a09d949d55)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/dispatch_boundary.rs (<home>/work/target-3596-after/release/deps/dispatch_boundary-e0b995b255d4492b)
+running 1 test
+test small_shape_matrix_unit_has_no_floor_tflops_record ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.61s
+     Running tests/elementwise_device_real_device.rs (<home>/work/target-3596-after/release/deps/elementwise_device_real_device-90e41cab52de57ab)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/fused_elementwise_parity.rs (<home>/work/target-3596-after/release/deps/fused_elementwise_parity-a081fe3fcf0c4e93)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/gather_scatter_parity.rs (<home>/work/target-3596-after/release/deps/gather_scatter_parity-2510e820b9bb1a13)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/gemm_auto.rs (<home>/work/target-3596-after/release/deps/gemm_auto-b9601edf4418ed6f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/gemm_batched_parity.rs (<home>/work/target-3596-after/release/deps/gemm_batched_parity-c5410c1f36b1ddd4)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/gemm_bias_act_parity.rs (<home>/work/target-3596-after/release/deps/gemm_bias_act_parity-52015564bd17f146)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/gemm_device_input_parity.rs (<home>/work/target-3596-after/release/deps/gemm_device_input_parity-fdc9730cdd8a4418)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/gemm_f32_variants.rs (<home>/work/target-3596-after/release/deps/gemm_f32_variants-8859c5d45c1834bd)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/gemm_fp32_strict_into_parity.rs (<home>/work/target-3596-after/release/deps/gemm_fp32_strict_into_parity-736bf0ff40406559)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/gemm_mma.rs (<home>/work/target-3596-after/release/deps/gemm_mma-d8aca5a80bb39cf4)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/gemm_mma_tf32.rs (<home>/work/target-3596-after/release/deps/gemm_mma_tf32-d97f52457192c71a)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/gemm_mma_tf32_triage.rs (<home>/work/target-3596-after/release/deps/gemm_mma_tf32_triage-5d1afdd0076e9934)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/gemm_mma_tf32x3.rs (<home>/work/target-3596-after/release/deps/gemm_mma_tf32x3-6f0e236826ad9b9b)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/gemm_naive.rs (<home>/work/target-3596-after/release/deps/gemm_naive-1e5892480b16dcb7)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/gemm_resident_real_device.rs (<home>/work/target-3596-after/release/deps/gemm_resident_real_device-4cb28d1d88e27076)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/gemm_resident_rhs_act_fused_real_device.rs (<home>/work/target-3596-after/release/deps/gemm_resident_rhs_act_fused_real_device-0cd95f820a8d6f7a)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/gemm_tf32_optin.rs (<home>/work/target-3596-after/release/deps/gemm_tf32_optin-a6332f160bef8b1d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/gemm_tiled.rs (<home>/work/target-3596-after/release/deps/gemm_tiled-f14f6d6faddef233)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/gemm_tiled_naive_speedup_triage_1203.rs (<home>/work/target-3596-after/release/deps/gemm_tiled_naive_speedup_triage_1203-e88e433b59ee9096)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/gemm_transposed_parity.rs (<home>/work/target-3596-after/release/deps/gemm_transposed_parity-c16bc3e4acc463fa)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/gemm_transposed_perf.rs (<home>/work/target-3596-after/release/deps/gemm_transposed_perf-79fa26bd9ad11e65)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/gemm_wmma.rs (<home>/work/target-3596-after/release/deps/gemm_wmma-d3762b31d603dacd)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/gemm_wmma_f16_opt.rs (<home>/work/target-3596-after/release/deps/gemm_wmma_f16_opt-a2bda9c8ef5e2ca5)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/gemm_wmma_tf32.rs (<home>/work/target-3596-after/release/deps/gemm_wmma_tf32-bcd995086aa4f20d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/gemm_wmma_tf32_opt.rs (<home>/work/target-3596-after/release/deps/gemm_wmma_tf32_opt-13461ae8c05b3329)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/gemm_wmma_tf32_staged.rs (<home>/work/target-3596-after/release/deps/gemm_wmma_tf32_staged-768936e2f44f3879)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/graph_capture_real_device.rs (<home>/work/target-3596-after/release/deps/graph_capture_real_device-26938dee3007d536)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/graph_capture_real_device_optin_off.rs (<home>/work/target-3596-after/release/deps/graph_capture_real_device_optin_off-0fb480c1e17d108a)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/host_view_real_device.rs (<home>/work/target-3596-after/release/deps/host_view_real_device-9e571b2267426cc7)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/host_view_staging_readout_ab_1336.rs (<home>/work/target-3596-after/release/deps/host_view_staging_readout_ab_1336-06189867b6c367ad)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/huber_parity.rs (<home>/work/target-3596-after/release/deps/huber_parity-14d005311bf1a4f1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/im2col_col2im_parity.rs (<home>/work/target-3596-after/release/deps/im2col_col2im_parity-9419b9de06bd64a6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/infer_chain_issue_breakdown_diag_3205.rs (<home>/work/target-3596-after/release/deps/infer_chain_issue_breakdown_diag_3205-726746dbeba9eefc)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/infer_chain_phase_diag_3189.rs (<home>/work/target-3596-after/release/deps/infer_chain_phase_diag_3189-f87e8bd03d927ee0)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/infer_graph_capture_real_device.rs (<home>/work/target-3596-after/release/deps/infer_graph_capture_real_device-f781ff8ff79f733d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/int8_mma_probe_real_device.rs (<home>/work/target-3596-after/release/deps/int8_mma_probe_real_device-4e0682076f74e3fa)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/interpolate_parity.rs (<home>/work/target-3596-after/release/deps/interpolate_parity-315d6055556a6b47)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/kl_div_parity.rs (<home>/work/target-3596-after/release/deps/kl_div_parity-7ebc540db562750d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/large_buffer_percall_alloc_ab_1149.rs (<home>/work/target-3596-after/release/deps/large_buffer_percall_alloc_ab_1149-e4efefada20f321d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+     Running tests/large_buffer_percall_alloc_transfer_triage.rs (<home>/work/target-3596-after/release/deps/large_buffer_percall_alloc_transfer_triage-9950f53ed595026d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/layer_norm_parity.rs (<home>/work/target-3596-after/release/deps/layer_norm_parity-0b5190e61800ae74)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/linalg_factor_parity.rs (<home>/work/target-3596-after/release/deps/linalg_factor_parity-fdcbdafb9cc81879)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+     Running tests/linalg_lu_parity.rs (<home>/work/target-3596-after/release/deps/linalg_lu_parity-f78ba01f09d4ded6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+     Running tests/linear_forward_device_real_device.rs (<home>/work/target-3596-after/release/deps/linear_forward_device_real_device-b3f958cdb06f0db6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/log_softmax_backward_parity.rs (<home>/work/target-3596-after/release/deps/log_softmax_backward_parity-723af923312ce38f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/log_softmax_parity.rs (<home>/work/target-3596-after/release/deps/log_softmax_parity-53effdcc0bc15445)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/managed_placement_bandwidth_real_device.rs (<home>/work/target-3596-after/release/deps/managed_placement_bandwidth_real_device-e657743f1fd8a984)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/managed_placement_real_device.rs (<home>/work/target-3596-after/release/deps/managed_placement_real_device-b575fe989bf8935d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/memory_real_device.rs (<home>/work/target-3596-after/release/deps/memory_real_device-ddc97f7e65e31b20)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/mma_tf32_vs_wmma_tf32_staged.rs (<home>/work/target-3596-after/release/deps/mma_tf32_vs_wmma_tf32_staged-3d1a76d247e182df)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/mse_device_parity.rs (<home>/work/target-3596-after/release/deps/mse_device_parity-13fa7c4222f6035c)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/mse_parity.rs (<home>/work/target-3596-after/release/deps/mse_parity-efd3c0e6a5749211)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/nll_parity.rs (<home>/work/target-3596-after/release/deps/nll_parity-85ac3e4cb2a8844f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/norm_backward_parity.rs (<home>/work/target-3596-after/release/deps/norm_backward_parity-de48e4cac9ea4f72)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/paged_attention_judgement_contract.rs (<home>/work/target-3596-after/release/deps/paged_attention_judgement_contract-a1a59b5bd4e415f8)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/paged_kv_real_device.rs (<home>/work/target-3596-after/release/deps/paged_kv_real_device-1251e7ed94908e7e)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/parity_nonregression.rs (<home>/work/target-3596-after/release/deps/parity_nonregression-50dc104b88af4c7f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/pinned_h2d_real_device.rs (<home>/work/target-3596-after/release/deps/pinned_h2d_real_device-757b26e82821965b)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/pinned_h2d_upload_ab_1585.rs (<home>/work/target-3596-after/release/deps/pinned_h2d_upload_ab_1585-edf84e795e1ef01f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/readback_default_prefetch_3227.rs (<home>/work/target-3596-after/release/deps/readback_default_prefetch_3227-83e95c67c00e7322)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/readback_prefetch_bit_match_3225.rs (<home>/work/target-3596-after/release/deps/readback_prefetch_bit_match_3225-68d3f00c011e16a4)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/readback_pretouched_bit_match_1437.rs (<home>/work/target-3596-after/release/deps/readback_pretouched_bit_match_1437-c6e1623104da4fef)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/readback_reuse_bit_match_2108.rs (<home>/work/target-3596-after/release/deps/readback_reuse_bit_match_2108-e8ed4c1e527467b4)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/reduce_parity.rs (<home>/work/target-3596-after/release/deps/reduce_parity-ec807c215bfab6a0)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/relu_mask_cpu_reference.rs (<home>/work/target-3596-after/release/deps/relu_mask_cpu_reference-387bd779043a077c)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/relu_mask_device_parity.rs (<home>/work/target-3596-after/release/deps/relu_mask_device_parity-7502f8982e7aa237)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/rmsnorm_backward_parity.rs (<home>/work/target-3596-after/release/deps/rmsnorm_backward_parity-a5b149f469400dd5)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/rmsnorm_parity.rs (<home>/work/target-3596-after/release/deps/rmsnorm_parity-b0b844fdda2fe2f4)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/rnn_cell_parity.rs (<home>/work/target-3596-after/release/deps/rnn_cell_parity-4d0e43473fbce876)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/scalar_op_parity.rs (<home>/work/target-3596-after/release/deps/scalar_op_parity-2fee9b367f48e471)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/scan_parity.rs (<home>/work/target-3596-after/release/deps/scan_parity-b4af9e88ae7c762a)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/setmaxnreg_probe_dec_accel_real_device.rs (<home>/work/target-3596-after/release/deps/setmaxnreg_probe_dec_accel_real_device-848b5fd82e2ff403)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/setmaxnreg_probe_dec_base_real_device.rs (<home>/work/target-3596-after/release/deps/setmaxnreg_probe_dec_base_real_device-53ee44ac03e79a11)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/setmaxnreg_probe_incdec_accel_real_device.rs (<home>/work/target-3596-after/release/deps/setmaxnreg_probe_incdec_accel_real_device-adf157fd20cf5f78)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/setmaxnreg_probe_incdec_base_real_device.rs (<home>/work/target-3596-after/release/deps/setmaxnreg_probe_incdec_base_real_device-5002964d4fe5eae6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/sgd_device_real_device.rs (<home>/work/target-3596-after/release/deps/sgd_device_real_device-385a01e6f2c6c5b9)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/sm121_isa_probe_compile.rs (<home>/work/target-3596-after/release/deps/sm121_isa_probe_compile-b03f2da268f241c3)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/sm121_isa_probe_exec_real_device.rs (<home>/work/target-3596-after/release/deps/sm121_isa_probe_exec_real_device-1794565ac28d1722)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/sm121_isa_probe_registry.rs (<home>/work/target-3596-after/release/deps/sm121_isa_probe_registry-b32e7bbf6a0fcdd1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+     Running tests/softmax_parity.rs (<home>/work/target-3596-after/release/deps/softmax_parity-eeee0b523a6dd692)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/sort_topk_parity.rs (<home>/work/target-3596-after/release/deps/sort_topk_parity-4a5004b52d35b774)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/specialized_mma_f16_sweep_1159.rs (<home>/work/target-3596-after/release/deps/specialized_mma_f16_sweep_1159-681a1b42fec9a02b)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/specialized_mma_f16_triage.rs (<home>/work/target-3596-after/release/deps/specialized_mma_f16_triage-323d5fe37aea8657)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/specialized_mma_parity.rs (<home>/work/target-3596-after/release/deps/specialized_mma_parity-763b9390cb0483c7)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/splitk_reorder_error_host_model.rs (<home>/work/target-3596-after/release/deps/splitk_reorder_error_host_model-2ce35ee0e63a8c91)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/tensor_core_real_device.rs (<home>/work/target-3596-after/release/deps/tensor_core_real_device-47eb1d20f2c2b2ec)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/tma_probe_real_device.rs (<home>/work/target-3596-after/release/deps/tma_probe_real_device-9fd88c3361ec9a54)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/transpose_parity.rs (<home>/work/target-3596-after/release/deps/transpose_parity-8269b8a19a092a97)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/typed_ops_bf16_parity.rs (<home>/work/target-3596-after/release/deps/typed_ops_bf16_parity-3736f18e098704d6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/typed_ops_f16_parity.rs (<home>/work/target-3596-after/release/deps/typed_ops_f16_parity-f3cac231cbf5f9c0)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/typed_ops_f64_contract.rs (<home>/work/target-3596-after/release/deps/typed_ops_f64_contract-306020dd07b86760)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/typed_ops_f64_parity.rs (<home>/work/target-3596-after/release/deps/typed_ops_f64_parity-0d469e678dd328d7)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/unique_parity.rs (<home>/work/target-3596-after/release/deps/unique_parity-6bfe63f4e5cf415f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/where_masked_fill_parity.rs (<home>/work/target-3596-after/release/deps/where_masked_fill_parity-b6cc58d42c23edcc)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/wmma_f16_opt_perf_triage.rs (<home>/work/target-3596-after/release/deps/wmma_f16_opt_perf_triage-f90c0dd09fb12bfd)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running unittests examples/cuda_floor_bench.rs (<home>/work/target-3596-after/release/examples/cuda_floor_bench-1ac851f946b75703)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running unittests examples/device_attributes_dump.rs (<home>/work/target-3596-after/release/examples/device_attributes_dump-0577af17d7c55e74)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running unittests examples/gemm_candidate_event_ab_3215.rs (<home>/work/target-3596-after/release/examples/gemm_candidate_event_ab_3215-2e42194c544db6f1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running unittests examples/gemm_tf32x3_kernel_time_bench.rs (<home>/work/target-3596-after/release/examples/gemm_tf32x3_kernel_time_bench-f9df7fba86493f74)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running unittests examples/wmma_tolerance_probe.rs (<home>/work/target-3596-after/release/examples/wmma_tolerance_probe-e81cb680617fef6b)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 49 filtered out; finished in 0.00s
+   Doc-tests fandhe_ai_backend_cuda
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+rc=0
