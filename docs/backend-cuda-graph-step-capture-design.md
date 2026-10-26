@@ -300,7 +300,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 | (A) 再 capture だけ・新規 `unsafe` なし・既定 OFF | 推奨 | **確定** |
 | (B) `cuGraphExecUpdate` を使う | 必要になったら実測を添えて所有者へ戻す | **未承認** |
 | (C) 見送り | 採らない | - |
-| 既定の反転 | 事前登録規則の ADOPT が前提 | #3594 で反転（イシュー #3594 本文に記載の所有者承認 2026-10-26・#3261 ADOPT・#3596 排他が前提。§8.12。GB10 実測は未了） |
+| 既定の反転 | 事前登録規則の ADOPT が前提 | #3594 で一度反転を試みたがチェーン外の capture 衝突が未解決のため見送り（既定 OFF 維持。§8.12） |
 | 公開形の追加・新規 `unsafe` | 承認範囲外 | **未承認** |
 
 - 出所: イシュー #3259 の所有者コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3259#issuecomment-6111775631>（ID `IC_kwDOTuUCJc8AAAABbEpLjw`）。`createdAt` は 2026-10-11T17:35:55Z（UTC。JST では 2026-10-12 02:35。コメント本文の記載日は 2026-10-12）。判断待ちの issue について「全て推奨で」と回答し、本 issue は (A) で確定
@@ -409,7 +409,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 - ADOPT でも `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。既定の反転は §8.6 で所有者判断（未承認）とされ、全 CUDA 利用者の stream・イベント追跡の変更と、lr スケジューラ下で 3 step 後に既存チェーンへ戻る点の影響評価を伴う別 PR を要する。
 - #3261 の本文は ADOPT 時に反転 PR を求めていたが、後に出た所有者の指示と本節の決定記録（§8.6）を優先し、本件では反転しない。
 - tolerance・baseline・FMA 契約・依存ピンは変更していない（コード変更なし）。
-- → 影響 2 点の評価と反転は §8.12 で行った。
+- → 影響 2 点の評価と、反転を見送った理由は §8.12 に記録した。
 
 ### 8.9.4 限界
 
@@ -423,7 +423,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 - 解消案は、チェーン全体の実行と capture を ordinal 単位で排他すること（non-capture チェーンが capture 中のコンテキストに入らない、または capture 開始側がチェーン完走を待つ）。GB10 実機での検証が必要なため本 PR の範囲に収めない。
 - よって `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` を維持する。反転は、ordinal 排他の実装と「同一 ordinal で 2 スレッド同時学習しても store が poison されない」回帰テストを付けた後続 PR で行う。
 - tolerance・baseline・FMA 契約・依存・`unsafe` は変更していない（コード変更なし）。
-- → §8.11 の排他を前提に §8.12 で反転した。
+- → §8.11 の排他だけでは足りず、反転は §8.12 の未解決事項のため見送った。
 
 ## 8.11 #3596 学習チェーンと Graph capture の ordinal 単位の排他
 
@@ -470,46 +470,19 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - GB10 `#[ignore]`: `unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（`train_step_graph_diag_tests_3260.rs`。柵なし・30 繰り返し）を追加。
 - **未実測（本記録時点）**: GB10 での上記テストの pass、backend-cuda・facade の `#[ignore]` 全件の main との突き合わせ、1 スレッド chain セルの排他あり・なし比較（既定 OFF・opt-in ON）。実機を使えない環境で実装したため、別の機体の値では埋めない。#3594 の前提（これらの実測）が揃うまで `Closes` は付けない。
 
-## 8.12 #3594 既定 ON への反転と影響評価
+## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 
-### 8.12.1 変更
+### 8.12.1 結論
+- `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。コード変更なし（反転の差分は PR レビュー指摘 P1 を受けて取り下げた）。tolerance・baseline・FMA 契約・依存・`unsafe` も変更なし。
 
-- `graph.rs` の `TRAIN_GRAPH_DEFAULT_ENABLED` を `true` にした。`FANDHE_AI_CUDA_GRAPH_TRAIN` が `1`／`true` 以外（`0`・空文字・`TRUE` など）なら OFF（fail-closed。明示 OFF の経路は従来のまま）。
-- 承認範囲は反転のみ（出所: イシュー #3594 本文の記載）。新しい `unsafe`・`cuGraphExecUpdate`（(B)）・公開 setter・tolerance・baseline・FMA 契約・依存の変更は含まない（未承認）。ロジックの変更はなく、doc・コメントと `#[ignore]` テストの前提だけを直した。
-- 既定 OFF を固定していた const assert は `train_graph_default_is_on` に置き換えた。`resolve_train_enabled(None, 既定)` が ON、`Some("0")` が OFF であることも 1 件固定した。
-- `#[ignore]` テスト `graph_capture_real_device_optin_off` は「既定では Legacy」を前提にしていたため、期待値を opt-in から導く形（`internal-diagnostics` ビルドまたは全 opt-in OFF なら Legacy、それ以外は Created）へ付け直した。テスト名は変えていない。
+### 8.12.2 見送りの理由（未解決事項）
+- #3596 の `begin_device_chain_scope` が保護するのは encode と SGD の区間だけである。チェーン外の通常操作（`ResidentLoss::read` → `read_train_step_loss` → `mem.download`、Tape の通常演算など）は、待機も再試行もしない。
+- 既定 ON では、環境変数なしで同じ ordinal を複数スレッドが使うと、一方の学習 capture 中に他方の通常操作が `DeviceContextCaptureInProgress` で失敗し、公開 API（`step` → `loss.read()?`）からそのまま返る。従来は設定不要で動いていた並行学習が、別 store の capture タイミングだけで中断する。
+- 反転の前提条件: チェーン外の通常操作にも、capture 中は安全に待機して再試行する仕組みを入れ、その並行回帰テスト（GB10 実機）を通すこと。
 
-### 8.12.2 影響評価
+### 8.12.3 反転 PR に再度必要な確認（未実測）
+- 腕 A（既定 ON）・B（`=0`）・C（main）の backend-cuda・facade `#[ignore]` 全件の突き合わせ、`unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（30 回）、`train_step_graph_diag_tests_3260` の 7 件、2 プロセス bit 一致、1 スレッド chain セルの排他あり・なし比較。
+- 影響評価（再開時の参考）: 既定 stream が created stream になり全 CUDA 利用者に波及する・lr スケジューラ下では 3 回の無駄な capture 後に従来チェーンへ戻る（有界・bit 一致）・`GemmPrecision` が `Fp32Strict` 以外なら capture しない。
 
-(a) stream とイベント追跡（§8.9.3 の 1 点目）
-- 既定の stream が legacy NULL stream から created stream（`CU_STREAM_NON_BLOCKING`）になる。reuse・fresh 経路も含む全 CUDA 利用者が対象。イベント追跡は無効のまま（既存の `unsafe { disable_event_tracking() }` が既定経路になる。ctx 上で `CudaDevice` が作る stream は 1 本で、`internal-diagnostics` は raw context・stream の公開と排他、という前提に依る）。stream 種別は最初の CUDA 初期化時に ordinal ごとに固定される。
-- `internal-diagnostics` ビルドは Legacy のまま。CI の `--all-features` も Legacy のため、CI は既定 ON の stream を通らない。
-- 性能の根拠は #3261: reuse 0.948・fresh 0.972（stream 変更のみの効果）・chain 0.836。
-- 正しさの根拠として、既定 ON の全 `#[ignore]` を GB10 で通すことが必要。#3260 で created stream 上を確認したのは `regression.log` の部分集合だけで、全件を確認したことはない。
-- #3596 のチェーンスコープは capturable stream 上で常に有効になる。1 スレッドの追加コストは未実測。
-- 副次的変化: stream が既に created のため、後から setter（`set_cuda_graph_infer_enabled`）で ON にしても推論 capture に届く。#1350 の stream と capture の分離計測（`StreamOnly`）は `FANDHE_AI_CUDA_GRAPH_TRAIN=0` を併せないと分離できない。
-
-(b) lr スケジューラ（§8.9.3 の 2 点目）
-- `TrainCaptureThrottle` は、間に replay を挟まない新規 capture が 3 回続くと、replay が起きるまで新規 capture を止める。
-- 毎 step lr が変わる場合、スレッド・ordinal ごとに capture を 3 回無駄にした後は、ずっと従来のチェーンで走る（有界。結果は bit 一致。#3260 で captured 3・replay 0 を確認済み）。N step ごとに変わる場合は、変わるたびに再 capture が 1 回起き、その後は replay に戻る。capture の失敗が 2 回に達すると、そのスレッド・ordinal では新規 capture を止める。
-- 最初の 3 step の固定費は未実測。根本対策は (B) だが未承認。
-
-(c) 運用上の注意
-- 明示 OFF は `FANDHE_AI_CUDA_GRAPH_TRAIN=0`。最初の `CudaDevice::new` より前に環境へ入っている必要がある。既定 ON の下では「空文字を設定すると黙って OFF になる」。
-- `GemmPrecision` が `Fp32Strict` 以外なら capture しない。
-- framework-compare の bench は crates.io のピン版（0.11.0）を使うため、次のリリースまで影響しない。リリース後の A/B は `run_ab_train_graph_cuda.sh` の off 腕（現状「未設定」）を `=0` にする必要がある（本件の範囲外）。
-
-### 8.12.3 GB10 実測（**未実測**）
-
-本実装は GB10 に接続できない環境で行った。次はすべて未実測で、別の機体の値では埋めない。このため PR は `Refs #3594` とし、`Closes` は付けない。
-- 腕 A（本ブランチ・既定 ON）・B（`=0`）・C（main）の backend-cuda・facade `#[ignore]` 全件の突き合わせ（FAIL の分類: A のみ fail は後退、全腕 fail は既存、B・C のみ fail は無関係）
-- ハードゲート: `unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（30 回。#3597 で追加され実機で未実行。§8.10 の前提はこのテストにかかる）・`train_step_graph_diag_tests_3260` の 7 件・facade の `in_process_capture_matches_plain_chain_bit_exact`
-- 2 プロセス bit 一致（`dump_bits_for_two_process_diff` を `=0` と環境変数なしで比較）
-- §8.11.4 の未実測項目（1 スレッド chain セルの排他あり・なし比較）、最初の 3 step の固定費
-- 2 つ目の GPU を使うテスト（GB10 は 1 ordinal のため skip）
-
-ハードゲートが fail、または A のみ fail の分類が 1 件でもあれば、反転を戻す（`TRAIN_GRAPH_DEFAULT_ENABLED = false`）。
-
-### 8.12.4 申し送り・範囲外
-- reuse／fresh・Tape の通常演算で、書き込み後に `DeviceContextCaptureInProgress` を受けたときの扱い（#3597 で未確認。既定 ON では他スレッドの capture と並ぶ機会が増える）。起票はユーザー承認後。
-- `run_ab_train_graph_cuda.sh` の off 腕の定義更新、(B) の導入、リリース後の framework-compare 再計測。
+### 8.12.4 申し送り
+- チェーン外の通常操作の待機・再試行は別 Issue で追跡する（起票はユーザー承認後）。

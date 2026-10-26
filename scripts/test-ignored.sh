@@ -11,9 +11,6 @@ case "${1:-}" in
   cuda)
     # TASK-1.7e（イシュー #36）: backend-cuda 限定。--release 既定（M=N=K=4096 の実測や
     # CPU 参照実装の計算量が大きく debug では著しく遅い）。
-    # 注（#3594）: 学習 step capture が既定 ON になったが、1 回目の --all-features は
-    # internal-diagnostics により stream が Legacy に固定され既定 ON の stream を通らない
-    # （Legacy 固定の対照）。既定 ON の stream を通る主経路は feature なしの 2 回目（現状 graph_capture_real_device のみ。他は手動の既定 feature 実行）。
     # --all-features 必須（PR #685 是正）: specialized_mma_parity は required-features =
     # ["internal-diagnostics"] でゲートされ、feature 未指定だとテストバイナリ自体が
     # ビルドされず --ignored を渡しても暗黙に「パス」扱いになる（false-green）。

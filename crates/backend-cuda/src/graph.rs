@@ -32,9 +32,9 @@
 //!
 //! 上の update 区間のみの capture は効果が中立と判定され既定 OFF のまま（design doc §6）。
 //! #3252 で forward・MSE・backward・SGD の全カーネルが同期なしの 1 区間に並ぶようになったため、
-//! その区間全体を 1 本の graph へ capture・再生する **3 つ目の opt-in（#3594 以降は既定 ON）** を持つ
+//! その区間全体を 1 本の graph へ capture・再生する **3 つ目の opt-in** を持つ
 //! （`run_captured_train_chain`・opt-in は [`train_graph_enabled`]・環境変数
-//! `FANDHE_AI_CUDA_GRAPH_TRAIN`・既定 ON〈#3594 で反転〉・`=0` 等で OFF・API setter なし）。方式は (A) 再 capture だけ
+//! `FANDHE_AI_CUDA_GRAPH_TRAIN`・既定 OFF・API setter なし）。方式は (A) 再 capture だけ
 //! （`cuGraphExecUpdate` は使わず新規 `unsafe` なし。design doc §8）。stream 種別の決定は
 //! 学習 update・推論と共通の OR（`device.rs`）。キャッシュ（`TRAIN_GRAPHS`）・診断カウンタ
 //! （[`TrainGraphStats`]）・抑止（`TrainCaptureThrottle`）は他の 2 機構と独立。
@@ -1161,20 +1161,19 @@ pub(crate) fn run_captured_linear_chain(
     }
 }
 // ============================================================
-// 学習 step 全体の capture（イシュー #3260。別機構・opt-in 機構・#3594 で既定 ON）
+// 学習 step 全体の capture（イシュー #3260。別機構・opt-in・既定 OFF）
 // ============================================================
 //
 // `BackendOps::train_chain_captured`（CUDA 実装は `ops.rs`）の実体。forward・MSE・backward・SGD
 // の全カーネルを 1 本の graph へ capture し、2 step 目以降は graph launch 1 回で再生する。
 // 決定記録は `docs/backend-cuda-graph-step-capture-design.md` §8（方式 (A) 再 capture だけ・
-// 新規 `unsafe` なし・#3594 で既定 ON）。update 区間だけの capture（上の `STEP_GRAPHS`・#1349）とは別機構で、
+// 新規 `unsafe` なし・既定 OFF）。update 区間だけの capture（上の `STEP_GRAPHS`・#1349）とは別機構で、
 // opt-in・キャッシュ・診断カウンタを共有しない（stream 種別の決定だけは `device.rs` が OR で共有）。
 
-/// 学習 step 全体 capture の既定値（**既定 ON**。#3261 の GB10 A/B が ADOPT・#3596 の ordinal 単位
-/// 排他の後に #3594 で反転）。`FANDHE_AI_CUDA_GRAPH_TRAIN` が `1`／`true` 以外なら OFF。
-/// 反転により `device.rs` の created stream 選択へ波及し、全 CUDA 利用者の既定 stream が変わる
-/// （stream 種別は最初の CUDA 初期化時に ordinal ごとに固定される。設計 doc §8.12）。
-pub(crate) const TRAIN_GRAPH_DEFAULT_ENABLED: bool = true;
+/// 学習 step 全体 capture の既定値（**既定 OFF**）。反転は #3261 の GB10 A/B で ADOPT と判定された後の
+/// 別 PR に限る（反転すると `device.rs` の created stream 選択にも波及し、全 CUDA 利用者の
+/// 既定ストリームが変わるため）。
+pub(crate) const TRAIN_GRAPH_DEFAULT_ENABLED: bool = false;
 
 /// 環境変数 `FANDHE_AI_CUDA_GRAPH_TRAIN` の値と既定値から opt-in を決める純粋関数（`std::env` を
 /// 読まないため並列テストで安全）。許容値は `1`／`true` の完全一致のみで、それ以外は fail-closed で
@@ -2058,20 +2057,10 @@ mod tests {
         assert!(resolve_train_enabled(None, true));
     }
 
-    /// 既定は ON（#3594）。誤って戻したら CI が落ちる。
+    /// 既定は OFF（反転は #3261 の ADOPT 判定後の別 PR）。
     #[test]
-    fn train_graph_default_is_on() {
-        const { assert!(TRAIN_GRAPH_DEFAULT_ENABLED) };
-    }
-
-    /// 既定 ON の下でも、環境変数の明示 OFF（`0` 等）は OFF に倒れる。
-    #[test]
-    fn train_graph_default_on_still_allows_explicit_off() {
-        assert!(resolve_train_enabled(None, TRAIN_GRAPH_DEFAULT_ENABLED));
-        assert!(!resolve_train_enabled(
-            Some("0"),
-            TRAIN_GRAPH_DEFAULT_ENABLED
-        ));
+    fn train_graph_default_is_off() {
+        const { assert!(!TRAIN_GRAPH_DEFAULT_ENABLED) };
     }
 
     /// override は現スレッド限定で、ガード drop で直前の値へ戻り、入れ子にできる。

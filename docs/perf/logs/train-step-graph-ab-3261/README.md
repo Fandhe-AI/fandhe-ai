@@ -2,7 +2,7 @@
 
 ## 状態
 
-**実測済み・判定 ADOPT**（2026-10-25・GB10 `spark-939e`）。chain の ratio 0.836（5/5 round で < 1.00）・reuse 0.948・fresh 0.972・hard 条件と R0〜R2 はすべて合格。詳細は `judge-3261.md`（終了コード `judge-3261.exit` = 0）と設計 doc `docs/backend-cuda-graph-step-capture-design.md` §8.9。ADOPT でも既定（`TRAIN_GRAPH_DEFAULT_ENABLED`）は反転していない（設計 §8.6・所有者判断）。→ #3594 で反転（設計 §8.12）。
+**実測済み・判定 ADOPT**（2026-10-25・GB10 `spark-939e`）。chain の ratio 0.836（5/5 round で < 1.00）・reuse 0.948・fresh 0.972・hard 条件と R0〜R2 はすべて合格。詳細は `judge-3261.md`（終了コード `judge-3261.exit` = 0）と設計 doc `docs/backend-cuda-graph-step-capture-design.md` §8.9。ADOPT でも既定（`TRAIN_GRAPH_DEFAULT_ENABLED`）は反転していない（設計 §8.6・所有者判断）。
 
 ## 収録物
 

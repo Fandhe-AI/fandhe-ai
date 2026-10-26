@@ -3992,7 +3992,7 @@ impl BackendOps for CudaBackendOps {
     /// `crate::graph::run_captured_train_chain`。決定記録は
     /// `docs/backend-cuda-graph-step-capture-design.md` §8）。
     ///
-    /// **`Ok(None)`（不適用）にする条件**: opt-in OFF（#3594 以降は既定 ON で、環境変数 `FANDHE_AI_CUDA_GRAPH_TRAIN=0` 等で OFF。`crate::graph::train_graph_enabled`）、
+    /// **`Ok(None)`（不適用）にする条件**: opt-in OFF（既定・`crate::graph::train_graph_enabled`）、
     /// GEMM 精度が `Fp32Strict` 以外（replay だけ FP32 で走り非 graph 経路と食い違うのを防ぐ）、
     /// plan が capture 対象の形でない（`train_chain_plan_fits_capture`）、対象デバイスが capture
     /// 不能な legacy stream（opt-in の設定順序誤り・`internal-diagnostics` ビルド）の場合。
@@ -4077,7 +4077,7 @@ impl BackendOps for CudaBackendOps {
     /// `begin_capture_session` は `in_flight` ドレインでチェーンの完走を待つ。capture 開始後に来た
     /// チェーンはここ（書き込み前）で `DeviceContextCaptureInProgress` を受ける。
     ///
-    /// capture 可能な stream でない（legacy stream。`FANDHE_AI_CUDA_GRAPH_TRAIN=0` 等で全 opt-in を OFF にした利用者や `internal-diagnostics` ビルド。#3594 以降の既定は capturable stream でスコープが常に有効）ordinal では capture は
+    /// capture 可能な stream でない（legacy stream。既定 OFF の利用者）ordinal では capture は
     /// 起きない（3 つの capture 経路はいずれも `is_capturable_stream` を前提にする）ため、トークンを
     /// すぐ手放し中身のないスコープを返す。デバイス同期は足さない。`unsafe` は追加しない。
     fn begin_device_chain_scope(
@@ -11271,7 +11271,7 @@ mod tests {
         );
     }
 
-    /// opt-in OFF（明示 OFF。#3594 以降の既定は ON のためテストは override で固定）では driver に触れず `Ok(None)`（GPU の無い CI でも通る。R1）。
+    /// opt-in OFF（既定）では driver に触れず `Ok(None)`（GPU の無い CI でも通る。R1）。
     #[test]
     fn train_chain_captured_is_inapplicable_when_opt_in_is_off() {
         let ordinal = unique_test_ordinal();
