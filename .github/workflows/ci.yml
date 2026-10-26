@@ -1042,6 +1042,10 @@ jobs:
       # ADOPT／REJECT／UNDETERMINED を RULE.txt どおり fail-closed に適用する。合成 fixture のみで実機不要）の単体テスト。
       - name: フレームワーク横並びベンチ judge_train_graph_ab.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/judge_train_graph_ab_test.py
+      # イシュー #3596: judge_train_chain_exclusion_ab.py（学習チェーンと Graph capture の排他の GB10 非後退判定。
+      # NON-REGRESSION／REGRESSION／UNDETERMINED を RULE.txt どおり fail-closed に適用する。合成 fixture のみで実機不要）の単体テスト。
+      - name: フレームワーク横並びベンチ judge_train_chain_exclusion_ab.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/judge_train_chain_exclusion_ab_test.py
 
       # イシュー #3179: opp_kernel_torch_diag.py（Mac mini で PyTorch の純カーネル時間と
       # Python 側 checksum を測る診断）の torch／numpy 不要部分の回帰テスト。同一方針
