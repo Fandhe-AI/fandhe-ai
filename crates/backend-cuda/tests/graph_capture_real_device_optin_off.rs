@@ -24,15 +24,18 @@
 //! 本ファイルは opt-in を一切変更しない単一テストのみを持つため
 //! `--test-threads` は問わない）。
 
-use fandhe_ai_backend_cuda::graph::step_graph_enabled;
+use fandhe_ai_backend_cuda::graph::{infer_graph_enabled, step_graph_enabled, train_graph_enabled};
 use fandhe_ai_backend_cuda::{CudaBackendOps, CudaDevice};
 use fandhe_ai_tensor_core::BackendOps;
 use fandhe_ai_tensor_core::Tensor;
 use fandhe_ai_tensor_core::buffer::DeviceBuffer;
 
-/// opt-in OFF（既定）では `captured_segment_key` が常に `Ok(None)` を
-/// 返し、ストリームは legacy のまま（本イシュー導入前と挙動不変）で
-/// あることを確認する（design doc §4.1 の非後退契約）。
+/// step update 区間の opt-in OFF（既定）では `captured_segment_key` が常に `Ok(None)` を
+/// 返すことを確認する（design doc §4.1 の非後退契約）。
+///
+/// stream 種別の期待値は #3594（学習 step 全体 capture の既定 ON 反転）以降、条件つき:
+/// 既定 feature では学習／推論 capture が ON なら Created、`internal-diagnostics` では常に Legacy。
+/// 環境変数なし・`=0` のどちらでも、`--all-features`・既定 feature のどちらでも pass する。
 ///
 /// 本ファイルは opt-in を一度も `true` にしないため、
 /// `context_cache::cached_device` が本プロセス内で最初に確保する
@@ -46,9 +49,13 @@ fn opt_in_off_keeps_legacy_stream_and_returns_none() {
         "本ファイルは opt-in を変更しないため常に OFF のはず"
     );
     let device = CudaDevice::new(0).expect("CUDA device 0 must be available");
-    assert!(
-        !device.is_capturable_stream(),
-        "opt-in OFF では legacy stream のまま（本イシュー導入前と挙動不変）"
+    // 本 binary は override を使わないので `*_enabled()` は環境変数で決まる値と一致する。
+    let expected_created = cfg!(not(feature = "internal-diagnostics"))
+        && (train_graph_enabled() || infer_graph_enabled());
+    assert_eq!(
+        device.is_capturable_stream(),
+        expected_created,
+        "stream 種別は学習／推論 capture の ON/OFF と feature で決まる期待値どおりのはず"
     );
 
     let cuda = CudaBackendOps::new(0);

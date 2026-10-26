@@ -300,7 +300,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 | (A) 再 capture だけ・新規 `unsafe` なし・既定 OFF | 推奨 | **確定** |
 | (B) `cuGraphExecUpdate` を使う | 必要になったら実測を添えて所有者へ戻す | **未承認** |
 | (C) 見送り | 採らない | - |
-| 既定の反転 | 事前登録規則の ADOPT が前提 | **未承認**（ADOPT 後に別判断） |
+| 既定の反転 | 事前登録規則の ADOPT が前提 | **#3594 で反転**（承認の記載元はイシュー #3594 本文〈所有者が 2026-10-26 に #3018 のセッションで承認と記載〉。GitHub 上のコメント URL は未確認）。§8.10 |
 | 公開形の追加・新規 `unsafe` | 承認範囲外 | **未承認** |
 
 - 出所: イシュー #3259 の所有者コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3259#issuecomment-6111775631>（ID `IC_kwDOTuUCJc8AAAABbEpLjw`）。`createdAt` は 2026-10-11T17:35:55Z（UTC。JST では 2026-10-12 02:35。コメント本文の記載日は 2026-10-12）。判断待ちの issue について「全て推奨で」と回答し、本 issue は (A) で確定
@@ -409,9 +409,55 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 - ADOPT でも `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。既定の反転は §8.6 で所有者判断（未承認）とされ、全 CUDA 利用者の stream・イベント追跡の変更と、lr スケジューラ下で 3 step 後に既存チェーンへ戻る点の影響評価を伴う別 PR を要する。
 - #3261 の本文は ADOPT 時に反転 PR を求めていたが、後に出た所有者の指示と本節の決定記録（§8.6）を優先し、本件では反転しない。
 - tolerance・baseline・FMA 契約・依存ピンは変更していない（コード変更なし）。
+- 反転は後続の #3594 で行った（§8.10）。上記は #3261 時点の記録で、書き換えない。
 
 ### 8.9.4 限界
 
 - bench からは capture が replay されたかを観測できない。R1（facade の bit 一致テストと backend-cuda の 8 テスト）で結線を補っているが、R1 の形状は bench の形状と同一ではない。
 - checksum の一致は bit 同一性の証明ではない。PARAM_DIGEST と R2（2 プロセスの bit 比較）で補っている。
 - 単一機体（GB10）・train CUDA・size=64 の結果で、infer・CPU・Metal・他形状には及ばない。正式な 6 フレームワーク同席計測は #3273。
+
+## 8.10 #3594 既定 ON への反転と影響評価
+
+### 8.10.1 反転の内容
+
+- `TRAIN_GRAPH_DEFAULT_ENABLED` を `true` にした（`crates/backend-cuda/src/graph.rs`）。環境変数の解釈は不変（`1`／`true` の完全一致だけ ON、それ以外は OFF）。**明示 OFF の正規の値は `FANDHE_AI_CUDA_GRAPH_TRAIN=0`**。打ち間違い（`TRUE` 等）は capture しない安全側（OFF）に倒れる。API setter は足していない。
+- 根拠: #3261 の GB10 A/B が ADOPT（chain 比 0.836、5 round すべて < 1.00。bit 一致。§8.9）。承認の記載元はイシュー #3594 本文（所有者が 2026-10-26 に #3018 のセッションで承認と記載）。GitHub 上の所有者コメントは本実装時点で確認できていない。
+- tolerance・baseline・FMA 契約・依存・`unsafe`（新規なし）は不変。(B) `cuGraphExecUpdate` は未承認のまま。
+
+### 8.10.2 全 CUDA 利用者の stream 種別・イベント追跡（§8.9.3 の 1 点目）
+
+- 既定 feature では最初の CUDA デバイス初期化で Created stream と `disable_event_tracking()` が選ばれる（`device.rs` の OR。コード変更なし）。既存の `unsafe` で新規ではない。SAFETY 根拠（ordinal ごとにストリームは 1 本。`default_stream()`／`new_stream()` の使用は `device.rs` だけ）は保たれる。
+- `internal-diagnostics` ビルドは従来どおり Legacy 固定で、capture には届かない。3 つの opt-in（学習 step 全体・推論・update 区間）をすべて OFF にすれば導入前と同じ Legacy。
+- 学習 capture を使わない経路（推論・GEMM 単体・reuse・fresh）にも stream 変更は及ぶ。実測根拠は #3261 の reuse 0.948・fresh 0.972（stream 変更だけの効果。fresh に ratio_r 1.045 の round が 1 つある）。
+- update 区間の capture（#1349）と推論 capture（#2115）の opt-in は既定 OFF のまま。
+
+### 8.10.3 lr スケジューラ下の挙動（§8.9.3 の 2 点目）
+
+- §8.8.4 の実機結果: lr を毎 step 変えると captured 3 で止まり replay 0、bit 一致。抑止はスレッド・ordinal ごとで、replay が起きるまで止まったまま。結果は bit 一致のまま。
+- 性能: 最初の 3 step の capture 固定費は**未計測（未実測）**。その後は非 capture のチェーンと同じ。(B) は未承認。
+
+### 8.10.4 既定経路で起こりうるようになった残リスク（§8.8.4 の既知の制約）
+
+- 同じ ordinal で 2 スレッドが学習し、一方の非 capture チェーンが最初の dW を書いた後に `DeviceContextCaptureInProgress` が出ると store が poison される。従来は opt-in 時のみの問題だったが、既定で起こりうる。後続課題（起票はユーザー承認の後）。
+
+### 8.10.5 capture が適用されない条件
+
+- GEMM 精度が `Fp32Strict` 以外（TF32 等）なら `Ok(None)`。2 step 目以降・永続バッファの再利用などの適用条件を満たさない場合も従来のチェーンに倒れる。
+
+### 8.10.6 framework-compare・計測ランナーへの波及
+
+- framework-compare は crates.io ピン版（`fandhe-ai =0.11.0`）を使うため、反転は次のリリースまで届かない。
+- `run_ab_train_graph_cuda.sh`（#3261）は「環境変数なし = 既定 OFF」が前提のため、既定 OFF のツリー専用とし、`TRAIN_GRAPH_DEFAULT_ENABLED = false` を fail-closed の precheck で強制する（計測ロジック・RULE は不変）。反転後に再計測するなら off 腕を `=0` に読み替えた新しい RULE が要る。
+
+### 8.10.7 テスト・スクリプトの更新
+
+- `graph_capture_real_device_optin_off.rs` の stream 期待値を条件つきにした（既定 feature では ON なら Created、`internal-diagnostics` では Legacy）。
+- `scripts/test-ignored.sh cuda` は、1 回目（`--all-features`・Legacy 固定）から `train_step_graph_diag_tests_3260` を `--skip` し、既定 feature・環境変数なしの呼び出しを足した（既定 ON の本番経路を通るのはこの呼び出しだけ）。
+- 3260 の診断テスト・facade の bit 一致テストの手順は、OFF = `=0`、ON = 環境変数なしに改めた。
+
+### 8.10.8 GB10 実機検証: **未実測**
+
+- 本実装を行った環境（macOS 開発機）から GB10 に到達できなかったため、既定 ON での `#[ignore]` 実機テスト全件の main との突き合わせ（A 既定 ON／B `=0`／C main の 3 腕、FAIL の 3 段分類、2 プロセスの bit 一致）は**未実測**。代替機の値では埋めない。
+- 合格ライン: 「反転が原因」の FAIL が 0 件。census 系など回数を固定したテストの期待値が stream 種別で動いた場合は、黙って貼り直さず「反転による契約の更新」として所有者に示す。製品側の後退なら反転を止める。
+- 実機で確認すべき項目: backend-cuda の既定 feature `--lib --tests -- --ignored`、`--all-features -- --ignored`（Legacy 固定のため ON は検証できない）、facade `--tests -- --ignored`、`train_step_graph_diag_tests_3260`、`cuda_graph_train_step_bit_identity`（`in_process_*`・2 プロセス diff）、`graph_capture_real_device` の ON 側。

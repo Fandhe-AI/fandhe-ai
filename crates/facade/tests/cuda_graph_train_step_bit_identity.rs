@@ -1,31 +1,31 @@
-//! イシュー #3260: 学習 step 全体の Graph capture（opt-in・既定 OFF。環境変数
-//! `FANDHE_AI_CUDA_GRAPH_TRAIN`）を、facade の公開入口 `Sequential::train_step_resident` 経由で
+//! イシュー #3260: 学習 step 全体の Graph capture（既定 ON〈#3594〉。環境変数
+//! `FANDHE_AI_CUDA_GRAPH_TRAIN=0` で OFF）を、facade の公開入口 `Sequential::train_step_resident` 経由で
 //! 実行したときの loss・更新後パラメータの bit 一致を検証する CUDA 実機テスト
 //! （GB10 等。`#[ignore]`。決定記録 `docs/backend-cuda-graph-step-capture-design.md` §8）。
 //!
 //! # 2 つの検証
 //! - `in_process_capture_matches_plain_chain_bit_exact`: **同一プロセス**で、capture あり
-//!   （環境変数で opt-in 済み）と、同じ初期値・同じ入力で `override_train_graph_for_scope(false)`
+//!   （既定 ON）と、同じ初期値・同じ入力で `override_train_graph_for_scope(false)`
 //!   にした capture なしを交互に 10 step 進め、各 step の loss とパラメータを bit 比較する。
 //!   併せて `train_graph_stats` の差分で結線（組み合わせごとに capture 1・replay 8）を固定する
 //!   （黙って非 capture に落ちても bit 一致は合格してしまうため必須）
-//! - `dump_bits_for_two_process_diff`: 環境変数を設定しない Legacy stream のプロセスと、
-//!   `FANDHE_AI_CUDA_GRAPH_TRAIN=1` のプロセスで同じ列を標準出力へ出す。`BITS` 行を `diff` で
+//! - `dump_bits_for_two_process_diff`: `FANDHE_AI_CUDA_GRAPH_TRAIN=0`（OFF・Legacy stream）のプロセスと、
+//!   環境変数なし（既定 ON）のプロセスで同じ列を標準出力へ出す。`BITS` 行を `diff` で
 //!   完全一致させる（stream 種別が違う 2 つの構成の突合。#1350・#1480 と同じ方式）
 //!
 //! # 実行方法
 //! stream 種別は ordinal ごとに sticky なので、各テストは `--exact` で単独・単スレッド実行する。
 //!
 //! ```sh
-//! # 同一プロセス比較（capture ON のプロセス）
-//! FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai --release \
+//! # 同一プロセス比較（既定 ON のプロセス。環境変数を付けない）
+//! cargo test -p fandhe-ai --release \
 //!   --test cuda_graph_train_step_bit_identity \
 //!   -- --ignored --nocapture --exact in_process_capture_matches_plain_chain_bit_exact
 //!
-//! # 2 プロセス比較（OFF と ON の出力を diff する）
-//! cargo test -p fandhe-ai --release --test cuda_graph_train_step_bit_identity \
+//! # 2 プロセス比較（OFF = `=0`、ON = 環境変数なしの出力を diff する）
+//! FANDHE_AI_CUDA_GRAPH_TRAIN=0 cargo test -p fandhe-ai --release --test cuda_graph_train_step_bit_identity \
 //!   -- --ignored --nocapture --exact dump_bits_for_two_process_diff | grep '^BITS' > off.txt
-//! FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai --release \
+//! cargo test -p fandhe-ai --release \
 //!   --test cuda_graph_train_step_bit_identity \
 //!   -- --ignored --nocapture --exact dump_bits_for_two_process_diff | grep '^BITS' > on.txt
 //! diff off.txt on.txt
@@ -128,11 +128,11 @@ fn assert_bits_or_nan_class(actual: &[u32], expected: &[u32], what: &str) {
 }
 
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で --exact 単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けず）で --exact 単独実行"]
 fn in_process_capture_matches_plain_chain_bit_exact() {
     assert!(
         train_graph_enabled(),
-        "FANDHE_AI_CUDA_GRAPH_TRAIN=1 を付けて起動すること（stream 種別は起動時に決まる）"
+        "`FANDHE_AI_CUDA_GRAPH_TRAIN=0` など OFF の値を付けずに起動すること（stream 種別は起動時に決まる）"
     );
     let before = train_graph_stats();
     let n_combos = combos().len() as u64;
@@ -190,10 +190,10 @@ fn in_process_capture_matches_plain_chain_bit_exact() {
     assert_eq!(d.fallbacks - before.fallbacks, 0);
 }
 
-/// 2 プロセス比較用: 環境変数だけで opt-in が決まる状態で全組み合わせを回し、各 step の loss と
+/// 2 プロセス比較用: 環境変数だけで ON/OFF が決まる状態で全組み合わせを回し、各 step の loss と
 /// 最終パラメータの bit を `BITS` 行で出す。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。環境変数の有無で 2 回 --exact 単独実行して diff"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。`=0` の有無で 2 回 --exact 単独実行して diff"]
 fn dump_bits_for_two_process_diff() {
     for (name, dims, config) in combos() {
         let model = build_mlp(&dims);
