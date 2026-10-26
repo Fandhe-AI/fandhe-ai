@@ -354,3 +354,12 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 - 情報: `b_stride` のバイト換算の未検査乗算（k=1 のみ・UB なし）、`M`／`NR` の `pub` は `pub(crate)` で足りる（ほか 2 件は原文を参照）。
 - 引き継ぎ: 残留リスク L3（macOS のストリーミング中シグナル配送）と発見 e（呼び出し元 ZA 使用の検出なし）は新カーネルにも当てはまる。
 - **P2 #3 の対応状況（#3236・Mac mini 実機）**: P-BIT の `--ignored sme_thin_m64` 4 件が pass し、非正規化数 2 件・NaN 1 件を含む（`docs/perf/logs/sme-thin-m64-ab-3236/macmini/p_bit.log`）。判定範囲は、非正規化数は値一致（±0 符号は区別しない）、NaN はクラス一致で payload 非比較、FPCR は既定。`to_bits` の厳密判定は未実施。P2 #1・#2 は未対応（既定 OFF のため）。#3236 の A/B 判定は undetermined で、反転 PR は作っていない。
+
+### 12.13 条件 2 の帰属切り分け（イシュー #3613。2026-10-27 追記）
+
+§12.12 の GB10 REJECT（SME 非搭載機での 2 セル 5/5 後退）の原因を、HEAD 基準の 3 腕 A/B（before・prime・after）で切り分ける計測部品を登録した
+（`docs/perf/logs/sme-gb10-attribution-3613/RULE.txt`。性能解釈は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.15）。
+
+- **状態**: GB10 実測は **未実測**。機械出力の帰属分類（`aggregate-gb10.md`）は計測後に記入する。
+- 本節は `unsafe`・FMA 契約・tolerance・baseline・REQ-8 の手動境界検査を変更しない。Rust コード（`crates/`）の変更はない。パッチは計測ツリー専用で main には入れない。
+- 既定 ON へ戻すか・次の手（再 A/B・是正）の要否: **所有者判断待ち**（承認は未取得）。

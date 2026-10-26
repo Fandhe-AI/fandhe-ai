@@ -925,3 +925,15 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
 - 変更: 定数 1 行と、ドリフト検出テストの反転（`sme_production_enabled_is_true_with_neon_fallback` → `sme_production_disabled_after_gb10_reject`）のみ。
   しきい値 `SME_MIN_M/N/K=256/256/64`・`sme_kernel_for_shape` の置換・`debug_assert!`・`GemmDriverVariant::TwoDDynamicNeon`・bit 一致テストは維持。tolerance・baseline・RULE.txt は不変。
 - OFF では `sme_kernel_for_shape` が常に `None`（NEON）で、出力 bit は #1313 以前と同一。
+
+### 5.15 GB10 後退 2 セルの 3 腕帰属切り分け（イシュー #3613）
+
+§5.13 で GB10（SME 非搭載・両腕が同じ NEON 経路・bitdump bit 同一）でも `gemm 256 fresh`・`gemm 2048 reuse` が 5/5 round で後退した原因は推定のままだった。
+§5.7 型の 3 腕 A/B で帰属を切り分ける。**状態: 計測部品の登録のみ。GB10 実測は未実測**（下の数値・分類欄は計測後に記入する。推測値・M4 Max／Linux の代替値は書かない）。
+
+- 事前登録規則・パッチ・スクリプト: `docs/perf/logs/sme-gb10-attribution-3613/`（`RULE.txt`・`on-arm.patch`・`on-arm-prime.patch`・`orchestrate_gb10.sh`・`aggregate.py`）、A/B 本体 `scripts/bench/framework-compare/run_ab_sme_attribution_gb10_cpu.sh`。
+- 3 腕（HEAD `3e5d41016` 基準・`gemm_blis/mod.rs` のみの差分）: before = HEAD そのまま（定数 false）／prime = 定数 true + `sme_kernel_for_shape` の `try_new()` を `None` へ置換／after = 定数 true のみ。
+- **構造上の注意（計測前に記録）**: HEAD で定数を使う本番コードは `sme_kernel_for_shape` だけ（`mod.rs:3589〜3595`）のため、prime は before とほぼ同じコードに畳まれる。組 1（before/prime）は実質 A/A 対照、帰属を見分けるのは組 2（prime/after。`try_new()` 呼び出しの有無）。バイナリ sha256 の差は帰属の根拠にしない（パス埋め込みのため）。
+- 分類（RULE §4）: 非再現（ノイズ帯・判定不能）／方法感度（判定不能）／SME 経路の選択ロジックに帰属／再現したが未分離（ノイズ帯）／FAIL／undetermined（前提不成立）。**非再現・判定不能も正式な結果**として記録する（§5.7 は未分離だった）。
+- 結果欄（未実測）: 組 0〜2 の round 別比・中央値、腕別 bench sha256、bitdump、機械出力の分類、前提ゲート成否 — いずれも未実測。
+- 次の手（既定 ON の再 A/B・是正の要否）は **所有者の判断として記録する**。本 issue では定数の切替・是正・新規 issue 起票を行わない。

@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""イシュー #3613: GB10 の 3 腕 A/B（before / prime / after）を RULE.txt §4 の分類表で機械的に集計する。
+
+役割: gb10/ 配下の収録ログ（A/B の JSONL・前提ゲートのログ）を厳格に読み、2 判定セルそれぞれへ
+RULE.txt の帰属分類を適用し、aggregate-gb10.md を出力する（手で直さない）。#3232 の aggregate.py
+（同ディレクトリの兄弟 ../sme-default-on-ab-3232/aggregate.py）の厳密集計方針を継承する:
+欠損・型不正・件数不一致は例外にせず「判定不能（前提不成立）」へ倒す。標準ライブラリのみ。
+
+使い方:
+  python3 -I aggregate.py gb10      # このスクリプトのあるディレクトリの gb10/ を読み aggregate-gb10.md を書く
+  python3 -I aggregate.py --self-test
+"""
+import json
+import math
+import os
+import re
+import statistics
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+LABEL = "3613-r1"
+ROUNDS = 5
+THRESHOLD = 1.00
+ARMS = ("before", "prime", "after")
+# 組: 名前 -> (分母の腕, 分子の腕)。比 = 分子 / 分母（> 1.00 = 後退）
+PAIRS = {"pair0": ("before", "after"), "pair1": ("before", "prime"), "pair2": ("prime", "after")}
+JUDGE_CELLS = (("gemm", "fresh", 256), ("gemm", "reuse", 2048))
+ALL_CELLS = (
+    [("gemm", m, n) for n in (256, 512, 1024, 2048) for m in ("fresh", "reuse")]
+    + [("train", m, 64) for m in ("fresh", "reuse")]
+    + [("infer", m, 64) for m in ("fresh", "reuse")]
+)
+
+# 分類名（RULE.txt §4 と一字一句一致させる）
+C_PRECOND = "undetermined（前提不成立）"
+C_FAIL = "FAIL"
+C_NOREPRO = "非再現（ノイズ帯・判定不能）"
+C_SENS = "方法感度（判定不能）"
+C_SELECT = "SME 経路の選択ロジック（try_new 呼び出しの有無に伴うコード配置・実行コスト）に帰属"
+C_UNSEP = "再現したが未分離（ノイズ帯）"
+
+
+def classify(ratios, checksum_ok, preconditions_ok):
+    """ratios: {pair名: [round1..5 の比]}。RULE.txt §4 を上から順に評価して分類名を返す。"""
+    if not preconditions_ok:
+        return C_PRECOND
+    if not checksum_ok:
+        return C_FAIL
+
+    def all_regress(p):
+        r = ratios.get(p)
+        return r is not None and len(r) == ROUNDS and all(x > THRESHOLD for x in r)
+
+    if not all_regress("pair0"):
+        return C_NOREPRO
+    if all_regress("pair1"):
+        return C_SENS
+    if all_regress("pair2"):
+        return C_SELECT
+    return C_UNSEP
+
+
+def read_jsonl(path):
+    """厳格読み込み。失敗は (None, 理由)。"""
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                o = json.loads(line)
+                if not isinstance(o, dict):
+                    return None, "%s:%d 行がオブジェクトではない" % (path, i)
+                rows.append(o)
+    except (OSError, ValueError) as e:
+        return None, "%s: %s" % (path, e)
+    return rows, None
+
+
+def cell_rows(rows, mode, size):
+    out = []
+    for o in rows:
+        sz, md = o.get("size"), o.get("mode", "fresh")
+        if isinstance(sz, bool) or not isinstance(sz, int) or not isinstance(md, str):
+            return None
+        if o.get("device") == "cpu" and md == mode and sz == size:
+            out.append(o)
+    return out
+
+
+def load_cells(abdir, label):
+    """{(task,mode,size): {arm: [row...]}} と問題リストを返す。"""
+    data, problems = {}, []
+    files = {}
+    for arm in ARMS:
+        for task in ("gemm", "train", "infer"):
+            p = os.path.join(abdir, "results-%s-%s-cpu-%s.jsonl" % (arm, label, task))
+            rows, err = read_jsonl(p)
+            if rows is None:
+                problems.append("読み込み不能: " + err)
+                rows = []
+            files[(arm, task)] = rows
+    for task, mode, size in ALL_CELLS:
+        per_arm = {}
+        for arm in ARMS:
+            rs = cell_rows(files[(arm, task)], mode, size)
+            if rs is None or len(rs) != ROUNDS:
+                problems.append("P-CELLS 不成立: %s %s %d arm=%s 行数=%s" % (task, mode, size, arm, "NA" if rs is None else len(rs)))
+                rs = rs or []
+            per_arm[arm] = rs
+        data[(task, mode, size)] = per_arm
+    return data, problems
+
+
+def finite_pos(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
+
+
+def cell_analysis(per_arm):
+    """セルごとに medians・checksum 一致・組別 round 比を返す（不正は ok=False と理由）。"""
+    res = {"ok": True, "reason": "", "median": {}, "checksum_ok": True, "ratios": {}}
+    for arm in ARMS:
+        rs = per_arm.get(arm, [])
+        if len(rs) != ROUNDS or not all(finite_pos(r.get("median_s")) for r in rs):
+            res["ok"], res["reason"] = False, "median_s が不正または件数不足 (%s)" % arm
+            return res
+        res["median"][arm] = statistics.median(r["median_s"] for r in rs)
+    cks = []
+    for arm in ARMS:
+        for r in per_arm[arm]:
+            c = r.get("checksum")
+            if isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c):
+                res["checksum_ok"] = False
+            cks.append(c)
+    if len(set(cks)) != 1:
+        res["checksum_ok"] = False
+    for name, (den, num) in PAIRS.items():
+        res["ratios"][name] = [per_arm[num][i]["median_s"] / per_arm[den][i]["median_s"] for i in range(ROUNDS)]
+    return res
+
+
+def gate_checks(root):
+    """前提ゲート。{名前: (ok, 理由)}。ファイル欠損は未実測として不成立。"""
+    g = {}
+
+    def read(rel):
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    t = read("tree_verify.txt")
+    g["P-TREE"] = (t is not None and "rc=0" in t, "tree_verify.txt に rc=0 が無い（未実測または不成立）")
+    s = read("sme_report.txt")
+    lines = [l for l in (s or "").splitlines() if l.strip()]
+    g["P-R0"] = (len(lines) == 3 and all("kernel_enabled: false" in l for l in lines), "3 腕とも kernel_enabled: false の記録が無い")
+    bs = read("bitdump/summary.txt")
+    cmp_ = read("bitdump/cmp.txt")
+    ok = False
+    if bs and cmp_ is not None:
+        shas = re.findall(r"_sha256=([0-9a-f]{64})", bs)
+        nl = re.findall(r"_lines=(\d+)", bs)
+        ok = len(set(shas)) == 1 and len(shas) == 3 and all(x == "6726847" for x in nl) and cmp_.strip() == ""
+    g["P-BIT"] = (ok, "3 腕の bitdump が 6,726,847 行で sha 一致・cmp 差分 0 となる記録が無い")
+    rt = read("rt_before.log")
+    g["P-RT"] = (bool(rt) and "FAILED" not in rt and "test result: ok" in rt, "before の cargo test が全件 pass の記録が無い")
+    lk = read("hwlock.log")
+    g["P-LOCK"] = (bool(lk) and "acquired" in lk and "released" in lk, "hwlock.log に取得・解放の記録が無い")
+    lg = None
+    for name in os.listdir(os.path.join(root, "ab")) if os.path.isdir(os.path.join(root, "ab")) else []:
+        if name.startswith("load_gate-"):
+            lg = read(os.path.join("ab", name))
+    n_ok = len(re.findall(r"gate_ok=1\b", lg or ""))
+    outer = read("load_gate_outer.log")
+    g["P-GATE"] = (n_ok == ROUNDS and bool(outer) and " pass" in outer, "内側 8.0 の 5/5 round 通過と外側ゲート pass の記録が無い（gate_ok=1 は %d 件）" % n_ok)
+    lo = read("load_gate.log")
+    g["P-RUNAB"] = (bool(lo) and "run_ab exit=0" in lo, "run_ab exit=0 の記録が無い")
+    g["P-COLLECT"] = (bool(lo) and "collect exit=0" in lo, "collect exit=0 の記録が無い")
+    return g
+
+
+def fmt_ratios(r):
+    return " / ".join("%.3f" % x for x in r)
+
+
+def render(root, label):
+    abdir = os.path.join(root, "ab")
+    data, problems = load_cells(abdir, label)
+    gates = gate_checks(root)
+    pre_ok = not problems and all(ok for ok, _ in gates.values())
+    out = ["# #3613 3 腕 A/B 集計（GB10・機械出力。手で直さない）", ""]
+    out.append("ラベル: `%s` / 規則: `RULE.txt` §4（閾値 %.2f・%d round・5/5 一貫）" % (label, THRESHOLD, ROUNDS))
+    out += ["", "## 前提ゲート", ""]
+    for k, (ok, why) in gates.items():
+        out.append("- %s: %s" % (k, "成立" if ok else "不成立 — " + why))
+    if problems:
+        out.append("- P-CELLS ほか入力不備:")
+        out += ["  - " + p for p in problems[:30]]
+    out += ["", "## 判定セルの帰属分類", ""]
+    cells = {}
+    for key in ALL_CELLS:
+        cells[key] = cell_analysis(data[key]) if not problems else {"ok": False, "reason": "入力不備", "median": {}, "checksum_ok": True, "ratios": {}}
+    for task, mode, size in JUDGE_CELLS:
+        a = cells[(task, mode, size)]
+        cls = classify(a["ratios"], a["checksum_ok"], pre_ok and a["ok"])
+        out.append("- **%s %d %s**: %s" % (task, size, mode, cls))
+    out += ["", "## セル別の組比（後者/前者の round 別比と中央値。> 1.00 = 後退）", "",
+            "| セル | 判定 | 組 | round 別比 | 中央値比 | 5/5 後退 |", "|---|---|---|---|---|---|"]
+    for key in ALL_CELLS:
+        a = cells[key]
+        tag = "判定" if key in JUDGE_CELLS else "併記"
+        name = "%s %d %s" % (key[0], key[2], key[1])
+        if not a["ok"] or not a["ratios"]:
+            out.append("| %s | %s | - | 未実測または不正（%s） | - | - |" % (name, tag, a["reason"]))
+            continue
+        for p, (den, num) in PAIRS.items():
+            r = a["ratios"][p]
+            out.append("| %s | %s | %s (%s/%s) | %s | %.3f | %s |" % (
+                name, tag, p, num, den, fmt_ratios(r), statistics.median(r), "はい" if all(x > THRESHOLD for x in r) else "いいえ"))
+    out += ["", "checksum 3 腕完全一致: " + ("全セル一致" if all(c["checksum_ok"] for c in cells.values() if c["ok"]) and not problems else "不一致または未確認")]
+    out.append("")
+    out.append("注: 分類は帰属の候補であり判定（ADOPT／REJECT）ではない。既定 ON へ戻すかは所有者の判断。")
+    return "\n".join(out) + "\n"
+
+
+def self_test():
+    def R(v):
+        return [v] * ROUNDS
+
+    ok = [1.1] * 5
+    flat = [1.0, 0.99, 1.01, 1.0, 1.0]
+    cases = [
+        (dict(pair0=ok, pair1=flat, pair2=ok), True, True, C_SELECT),
+        (dict(pair0=ok, pair1=ok, pair2=ok), True, True, C_SENS),
+        (dict(pair0=flat, pair1=flat, pair2=ok), True, True, C_NOREPRO),
+        (dict(pair0=ok, pair1=flat, pair2=flat), True, True, C_UNSEP),
+        (dict(pair0=ok, pair1=flat, pair2=ok), False, True, C_FAIL),
+        (dict(pair0=ok, pair1=flat, pair2=ok), True, False, C_PRECOND),
+        (dict(pair0=[1.1, 1.1, 1.1, 1.1, 1.0], pair1=flat, pair2=ok), True, True, C_NOREPRO),
+        (dict(pair0=R(1.0), pair1=R(1.0), pair2=R(1.0)), True, True, C_NOREPRO),
+    ]
+    for ratios, ck, pre, want in cases:
+        got = classify(ratios, ck, pre)
+        assert got == want, (ratios, ck, pre, got, want)
+    # 前提不成立が FAIL より優先される
+    assert classify(dict(pair0=ok, pair1=ok, pair2=ok), False, False) == C_PRECOND
+    # cell_analysis: 不正な median_s は ok=False
+    bad = {a: [{"median_s": float("nan"), "checksum": 1.0}] * ROUNDS for a in ARMS}
+    assert cell_analysis(bad)["ok"] is False
+    good = {a: [{"median_s": 1.0, "checksum": 1.0}] * ROUNDS for a in ARMS}
+    ga = cell_analysis(good)
+    assert ga["ok"] and ga["checksum_ok"] and ga["ratios"]["pair0"] == R(1.0)
+    diff = {a: [{"median_s": 1.0, "checksum": 1.0 if a != "prime" else 2.0}] * ROUNDS for a in ARMS}
+    assert cell_analysis(diff)["checksum_ok"] is False
+    print("self-test ok")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
+        self_test()
+    elif len(sys.argv) == 2 and sys.argv[1] == "gb10":
+        root = os.path.join(HERE, "gb10")
+        text = render(root, LABEL)
+        with open(os.path.join(HERE, "aggregate-gb10.md"), "w", encoding="utf-8") as f:
+            f.write(text)
+        print(text)
+    else:
+        sys.exit("usage: aggregate.py gb10 | --self-test")
