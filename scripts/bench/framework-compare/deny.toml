@@ -83,7 +83,11 @@ ignore = [
 [licenses]
 version = 2
 include-dev = true
-# 先頭 8 件はルート `deny.toml` の [licenses] allow と同一リスト。
+# 先頭 9 件はルート `deny.toml` の [licenses] allow と同一リスト。うち
+# `CDLA-Permissive-2.0` は `webpki-root-certs`（fandhe-ai 0.12.0 の facade →
+# ureq/native-tls 経由の推移的依存。ルートと同じ第 11 区分の監査済み版）用に
+# ルートを写したもので、本 workspace 限定の追加ではない（2026-10-27 所有者承認:
+# #3271 issuecomment-6426224103）。
 # 末尾 3 件（MPL-2.0・CC0-1.0・BSL-1.0）は本 workspace 限定の追加（cargo deny の
 # 実測で比較対象の推移的依存に含まれることを確認済み。ベンチ専用・非配布のため
 # 受容する。2026-08-28 ユーザー承認: PR #915 導入指示。本体側のルート deny.toml
@@ -101,6 +105,7 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "BSD-2-Clause",
+    "CDLA-Permissive-2.0",
     "MPL-2.0",
     "CC0-1.0",
     "BSL-1.0",

@@ -572,6 +572,23 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 > （`scripts/bench/framework-compare/`。`Cargo.lock` の差分は自社 7 クレートの
 > 版・checksum のみで外部依存の増減なし）。上の「未更新」は 2026-10-09 時点の記述。
 
+> **追補（2026-10-27・v0.12.0 公開完了）**: `.github/workflows/release-all.yml`
+> （`mode: publish` run 40392236921。main `e23417cb4`）により公開 7 クレートの
+> **v0.12.0 の公開を完了した**（crates.io API で 7 クレートすべて 0.12.0・yanked=false・
+> created_at 2026-10-26T20:10Z UTC〈2026-10-27 JST〉を確認済み）。版数バンプは #3270
+> （§11 手順 1）。リリースタグ `v0.12.0` は注釈付きタグ（メッセージ
+> `release: v0.12.0`）としてコミット `e23417cb4` に付与されている。
+
+> **追補（2026-10-27・v0.12.0 ピン更新）**: 所有者の承認（#3271 の
+> issuecomment-6426224103）により、framework-compare の承認ピンを
+> `fandhe-ai =0.11.0` から `=0.12.0` へ更新した。今回の `Cargo.lock` の差分は
+> 自社 7 クレートの版・checksum に加え、外部 crate 20 件の追加（facade の第 11 区分
+> `ureq`〈`native-tls`・vendored OpenSSL・`webpki-root-certs`〉の依存閉包。全件が本体ルート
+> lock と同版・同 checksum。削除 0・既存外部 crate の更新 0）である。ハーネス専用
+> `deny.toml` の licenses allow に `CDLA-Permissive-2.0` を追加した（ルートと同一識別子）。
+> 内訳と承認範囲は `docs/framework-compare-harness-decision.md` 4 節。上の「未更新」は
+> 2026-10-09 時点の記述。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
@@ -903,6 +920,13 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-27（v0.12.0 公開完了）: `release-all.yml`（`mode: publish` run 40392236921。
+  main `e23417cb4`）で公開 7 クレートの v0.12.0 公開を完了した（crates.io で 7 クレート
+  反映確認済み）。注釈付きタグ `v0.12.0` は `e23417cb4`。§10 に追補を記録した。
+- 2026-10-27（v0.12.0 ピン更新）: 所有者の承認（#3271 issuecomment-6426224103）により
+  framework-compare の承認ピンを `fandhe-ai =0.11.0` → `=0.12.0` へ更新した
+  （`Cargo.lock` は自社 7 クレートに加え外部 crate 20 件を追加。`deny.toml` に
+  `CDLA-Permissive-2.0` を追加）。§10 に追補を記録した。
 - 2026-10-27（v0.12.0 リリースサイクル・バンプ）: 公開 7 クレートを lockstep で
   0.11.0 → 0.12.0 へ上げた（`workspace.version`・内部依存 12 箇所・ルート
   `Cargo.lock`・`scripts/bench/oss-gemm-compare/Cargo.lock` の 5 行。イシュー #3270）。
