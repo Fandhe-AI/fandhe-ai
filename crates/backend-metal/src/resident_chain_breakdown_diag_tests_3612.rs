@@ -274,25 +274,105 @@ fn resident_chain_breakdown_3612_infer() {
     ];
 
     // B0: 本番経路の wall。定常で wait は 1 回。
-    let (mut b0_wall, mut b0_ref) = (Vec::new(), None);
-    let mut b0_wait_max = 0;
-    for i in 0..(INFER_WARMUP + INFER_ITERS) {
-        let c0 = counters();
-        let t = Instant::now();
-        let o = store
-            .predict_device_chain_resident(&tape, &x, &steps)
-            .expect("predict_device_chain_resident");
-        let wall = t.elapsed().as_secs_f64();
-        let c1 = counters();
-        let waits = c1.wait_until_completed - c0.wait_until_completed;
-        if i >= INFER_WARMUP {
-            assert_eq!(waits, 1, "B0 infer: wait の差分（iter={i}）");
-            b0_wait_max = b0_wait_max.max(waits);
-            b0_wall.push(wall);
+    // RULE.txt: 奇数 round は B0 先・偶数 round は B1 先。ランナーが偶数 round で
+    // `BREAKDOWN_3612_B1_FIRST=1` を渡し、計測順だけを反転する（出力の bit 一致検査は順序に依らない）。
+    let run_b0 = || {
+        let (mut b0_wall, mut b0_ref) = (Vec::new(), None);
+        let mut b0_wait_max = 0;
+        for i in 0..(INFER_WARMUP + INFER_ITERS) {
+            let c0 = counters();
+            let t = Instant::now();
+            let o = store
+                .predict_device_chain_resident(&tape, &x, &steps)
+                .expect("predict_device_chain_resident");
+            let wall = t.elapsed().as_secs_f64();
+            let c1 = counters();
+            let waits = c1.wait_until_completed - c0.wait_until_completed;
+            if i >= INFER_WARMUP {
+                assert_eq!(waits, 1, "B0 infer: wait の差分（iter={i}）");
+                b0_wait_max = b0_wait_max.max(waits);
+                b0_wall.push(wall);
+            }
+            b0_ref = Some(o);
         }
-        b0_ref = Some(o);
-    }
-    let b0_ref = b0_ref.expect("非空");
+        (b0_ref.expect("非空"), b0_wall, b0_wait_max)
+    };
+
+    // B1: 同じ部品列を own buffer で再現（store と同じ初期値を upload）。
+    let run_b1 = || {
+        let ops = MetalBackendOps::new();
+        let mem = ops.memory_ops().expect("Metal は MemoryOps を実装");
+        let w1 = mem.upload(&tensor(1, &[DIMS[0], DIMS[1]])).expect("w1");
+        let b1 = mem.upload(&tensor(2, &[DIMS[1]])).expect("b1");
+        let w2 = mem.upload(&tensor(3, &[DIMS[1], DIMS[2]])).expect("w2");
+        let b2 = mem.upload(&tensor(4, &[DIMS[2]])).expect("b2");
+        let xin = mem.upload(&tensor(5, &[BATCH, DIMS[0]])).expect("x");
+        let (s_w1, s_b1, s_w2, s_b2) =
+            ([DIMS[0], DIMS[1]], [DIMS[1]], [DIMS[1], DIMS[2]], [DIMS[2]]);
+        let (mut enc, mut cw, mut gb, mut ro, mut tot) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut last = None;
+        let mut wait_max = 0;
+        for i in 0..(INFER_WARMUP + INFER_ITERS) {
+            let c0 = counters();
+            let t_all = Instant::now();
+            let t = Instant::now();
+            let h = ops
+                .linear_forward_device(
+                    &xin,
+                    DeviceBufferView::new(&w1, 0, &s_w1).expect("view"),
+                    Some(DeviceBufferView::new(&b1, 0, &s_b1).expect("view")),
+                    Activation::Relu,
+                )
+                .expect("L1");
+            let o = ops
+                .linear_forward_device(
+                    &h,
+                    DeviceBufferView::new(&w2, 0, &s_w2).expect("view"),
+                    Some(DeviceBufferView::new(&b2, 0, &s_b2).expect("view")),
+                    Activation::None,
+                )
+                .expect("L2");
+            let e = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let batches = ctx
+                .synchronize_with_gpu_timestamps()
+                .expect("commit + wait");
+            let c = t.elapsed().as_secs_f64();
+            let g: f64 = batches
+                .iter()
+                .map(|b| b.kernel_gpu_secs().expect("GPU タイムスタンプが取れない"))
+                .sum();
+            let t = Instant::now();
+            let res = mem.download(&o).expect("download");
+            let r = t.elapsed().as_secs_f64();
+            let total = t_all.elapsed().as_secs_f64();
+            let waits = counters().wait_until_completed - c0.wait_until_completed;
+            if i >= INFER_WARMUP {
+                // train・B0 と同じく定常区間の各反復で同期 1 回を hard 条件にする。
+                assert_eq!(waits, 1, "B1 infer: wait の差分（iter={i}）");
+                wait_max = wait_max.max(waits);
+                enc.push(e);
+                cw.push(c);
+                gb.push(g);
+                ro.push(r);
+                tot.push(total);
+            }
+            last = Some(res);
+        }
+        (last.expect("非空"), enc, cw, gb, ro, tot, wait_max)
+    };
+
+    let b1_first = std::env::var("BREAKDOWN_3612_B1_FIRST").is_ok_and(|v| v == "1");
+    let ((b0_ref, b0_wall, b0_wait_max), (last, enc, cw, gb, ro, tot, wait_max)) = if b1_first {
+        let b1r = run_b1();
+        let b0r = run_b0();
+        (b0r, b1r)
+    } else {
+        let b0r = run_b0();
+        let b1r = run_b1();
+        (b0r, b1r)
+    };
     let sum0: f64 = b0_ref
         .as_slice()
         .expect("contiguous")
@@ -308,66 +388,6 @@ fn resident_chain_breakdown_3612_infer() {
             sum0
         ),
     );
-
-    // B1: 同じ部品列を own buffer で再現（store と同じ初期値を upload）。
-    let ops = MetalBackendOps::new();
-    let mem = ops.memory_ops().expect("Metal は MemoryOps を実装");
-    let w1 = mem.upload(&tensor(1, &[DIMS[0], DIMS[1]])).expect("w1");
-    let b1 = mem.upload(&tensor(2, &[DIMS[1]])).expect("b1");
-    let w2 = mem.upload(&tensor(3, &[DIMS[1], DIMS[2]])).expect("w2");
-    let b2 = mem.upload(&tensor(4, &[DIMS[2]])).expect("b2");
-    let xin = mem.upload(&tensor(5, &[BATCH, DIMS[0]])).expect("x");
-    let (s_w1, s_b1, s_w2, s_b2) = ([DIMS[0], DIMS[1]], [DIMS[1]], [DIMS[1], DIMS[2]], [DIMS[2]]);
-    let (mut enc, mut cw, mut gb, mut ro, mut tot) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut last = None;
-    let mut wait_max = 0;
-    for i in 0..(INFER_WARMUP + INFER_ITERS) {
-        let c0 = counters();
-        let t_all = Instant::now();
-        let t = Instant::now();
-        let h = ops
-            .linear_forward_device(
-                &xin,
-                DeviceBufferView::new(&w1, 0, &s_w1).expect("view"),
-                Some(DeviceBufferView::new(&b1, 0, &s_b1).expect("view")),
-                Activation::Relu,
-            )
-            .expect("L1");
-        let o = ops
-            .linear_forward_device(
-                &h,
-                DeviceBufferView::new(&w2, 0, &s_w2).expect("view"),
-                Some(DeviceBufferView::new(&b2, 0, &s_b2).expect("view")),
-                Activation::None,
-            )
-            .expect("L2");
-        let e = t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        let batches = ctx
-            .synchronize_with_gpu_timestamps()
-            .expect("commit + wait");
-        let c = t.elapsed().as_secs_f64();
-        let g: f64 = batches
-            .iter()
-            .map(|b| b.kernel_gpu_secs().expect("GPU タイムスタンプが取れない"))
-            .sum();
-        let t = Instant::now();
-        let res = mem.download(&o).expect("download");
-        let r = t.elapsed().as_secs_f64();
-        let total = t_all.elapsed().as_secs_f64();
-        let waits = counters().wait_until_completed - c0.wait_until_completed;
-        if i >= INFER_WARMUP {
-            wait_max = wait_max.max(waits);
-            enc.push(e);
-            cw.push(c);
-            gb.push(g);
-            ro.push(r);
-            tot.push(total);
-        }
-        last = Some(res);
-    }
-    let last = last.expect("非空");
     // hard 条件: B1 の再現出力は B0 と bit 一致（窓の外で 1 回検査）。
     let (a, b) = (
         last.as_slice().expect("contiguous"),

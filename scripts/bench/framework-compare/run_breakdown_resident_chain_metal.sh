@@ -49,11 +49,11 @@ real="$(git -C "$RUNNER_ROOT" rev-parse HEAD 2>/dev/null || true)"
 if [[ -z "$stamp" || "$stamp" != "$real" || "$dirty" != "dirty=0" ]]; then
   echo "error: .rev-stamp が無い・HEAD と不一致・dirty=0 でない" >&2; exit 1
 fi
-if ! git -C "$RUNNER_ROOT" diff --quiet; then
+if ! git -C "$RUNNER_ROOT" diff --quiet HEAD --; then
   echo "error: 追跡ファイルに未コミットの差分がある" >&2; exit 1
 fi
 
-OUT="results/raw"
+OUT="$PWD/results/raw"
 mkdir -p "$OUT"
 SKIP="$OUT/skipped-breakdown-3612-${LABEL}.log"
 ENV_INFO="$OUT/env_info-3612-${LABEL}.txt"
@@ -123,7 +123,7 @@ run_cell() { # <test_name> <task> <arm> <round>
   local t=$1 task=$2 arm=$3 r=$4 res
   res="$OUT/results-3612-${task}-${arm}-${LABEL}.jsonl"
   echo "== 3612 ${task} ${arm} round=${r} =="
-  if ! BREAKDOWN_3612_OUT="$PWD/$res" "$BIN" --ignored --exact --nocapture --test-threads=1 \
+  if ! BREAKDOWN_3612_OUT="$res" "$BIN" --ignored --exact --nocapture --test-threads=1 \
     "resident_chain_breakdown_diag_tests_3612::${t}" >"$OUT/run-3612-${task}-${arm}-${LABEL}-r${r}.log" 2>&1; then
     echo "${task} ${arm} round=${r}: $(tail -3 "$OUT/run-3612-${task}-${arm}-${LABEL}-r${r}.log" | tr '\n' ' ')" >>"$SKIP"
     ANY_FAILED=$((ANY_FAILED + 1))
@@ -150,7 +150,10 @@ for r in 1 2 3 4 5; do
   fi
   # infer は 1 テストが b0／b1 の 2 行を出す。行を task／arm 別ファイルへ分ける。
   tmp="$(mktemp)" || { echo "error: mktemp" >&2; exit 1; }
-  if BREAKDOWN_3612_OUT="$tmp" "$BIN" --ignored --exact --nocapture --test-threads=1 \
+  # 推論も同じ規定: 偶数 round は B1 先（テスト側が BREAKDOWN_3612_B1_FIRST=1 で計測順を反転する）。
+  b1_first=0
+  if [[ $((r % 2)) -eq 0 ]]; then b1_first=1; fi
+  if BREAKDOWN_3612_B1_FIRST="$b1_first" BREAKDOWN_3612_OUT="$tmp" "$BIN" --ignored --exact --nocapture --test-threads=1 \
     "resident_chain_breakdown_diag_tests_3612::resident_chain_breakdown_3612_infer" >"$OUT/run-3612-infer-${LABEL}-r${r}.log" 2>&1; then
     grep -E '^\{"task":"infer","arm":"b0"' "$tmp" >>"$OUT/results-3612-infer-b0-${LABEL}.jsonl"
     grep -E '^\{"task":"infer","arm":"b1"' "$tmp" >>"$OUT/results-3612-infer-b1-${LABEL}.jsonl"
