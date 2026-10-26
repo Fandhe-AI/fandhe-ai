@@ -229,24 +229,28 @@ class RejectTest(unittest.TestCase):
 
     def test_patch_sha_mismatch_rejected(self):
         p = f"{self.fx.d}/env_info-diag-{LABEL}.txt"
-        open(p, "w").write(open(p).read().replace(f"layout_shift_sha256={LSHA}", f"layout_shift_sha256={'c' * 64}"))
+        text = open(p).read().replace(f"layout_shift_sha256={LSHA}", f"layout_shift_sha256={'c' * 64}")
+        open(p, "w").write(text)
         self.undet()
 
     def test_same_binary_for_layout_arms_rejected(self):
         p = f"{self.fx.d}/env_info-diag-{LABEL}.txt"
-        open(p, "w").write(open(p).read().replace("bin_sha256_rb0=" + "2" * 64, "bin_sha256_rb0=" + "1" * 64))
+        text = open(p).read().replace("bin_sha256_rb0=" + "2" * 64, "bin_sha256_rb0=" + "1" * 64)
+        open(p, "w").write(text)
         self.undet()
 
     def test_no_layout_symbol_diff_rejected(self):
         p = f"{self.fx.d}/env_info-diag-{LABEL}.txt"
-        open(p, "w").write(open(p).read().replace("layout_symbol_diff=2", "layout_symbol_diff=0"))
+        text = open(p).read().replace("layout_symbol_diff=2", "layout_symbol_diff=0")
+        open(p, "w").write(text)
         self.undet()
 
     def test_macmini_wrong_brand_rejected(self):
         fx = Fixture(self._td.name, "macmini")
         fx.build({})
         p = f"{fx.d}/env_info-diag-{LABEL}.txt"
-        open(p, "w").write(open(p).read().replace("Apple M4", "Apple M4 Max"))
+        text = open(p).read().replace("Apple M4", "Apple M4 Max")
+        open(p, "w").write(text)
         with self.assertRaises(summ.Undet):
             fx.run()
 

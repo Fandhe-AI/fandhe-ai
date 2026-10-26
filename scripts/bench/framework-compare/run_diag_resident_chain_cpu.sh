@@ -148,7 +148,12 @@ STAMP_B1="$(stamp_head "$B1_ROOT")" || exit 1
 # ツリーが「HEAD + bench パッチ（+ layout パッチ）」だけであることを、一時 index による完全一致で検証する。
 check_patched_tree() { # <root> [<extra_patch>]
   local root=$1 extra=${2:-} tmp_idx
-  git -C "$root" apply --reverse --check "$PATCH_FILE" 2>/dev/null || precheck_fail "bench patch が ${root} と一致しない"
+  # extra（layout パッチ）適用済みのツリーでは bench パッチのハンクが layout パッチの挿入で
+  # 文脈ずれし逆適用チェックが常に失敗するため、extra 無しのときだけ行う。
+  # extra 有りの場合は下の一時 index との完全一致（HEAD + bench + extra）が同じ保証を担う。
+  if [[ -z "$extra" ]]; then
+    git -C "$root" apply --reverse --check "$PATCH_FILE" 2>/dev/null || precheck_fail "bench patch が ${root} と一致しない"
+  fi
   tmp_idx="$(mktemp "${TMPDIR:-/tmp}/diag-idx.XXXXXX")" || precheck_fail "一時 index を作れない"
   rm -f "$tmp_idx"
   if ! GIT_INDEX_FILE="$tmp_idx" git -C "$root" read-tree HEAD \
