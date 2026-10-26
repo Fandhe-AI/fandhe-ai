@@ -300,7 +300,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 | (A) 再 capture だけ・新規 `unsafe` なし・既定 OFF | 推奨 | **確定** |
 | (B) `cuGraphExecUpdate` を使う | 必要になったら実測を添えて所有者へ戻す | **未承認** |
 | (C) 見送り | 採らない | - |
-| 既定の反転 | 事前登録規則の ADOPT が前提 | **未承認**（ADOPT 後に別判断） |
+| 既定の反転 | 事前登録規則の ADOPT が前提 | #3594 で一度反転を試みたがチェーン外の capture 衝突が未解決のため見送り（既定 OFF 維持。§8.12） |
 | 公開形の追加・新規 `unsafe` | 承認範囲外 | **未承認** |
 
 - 出所: イシュー #3259 の所有者コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3259#issuecomment-6111775631>（ID `IC_kwDOTuUCJc8AAAABbEpLjw`）。`createdAt` は 2026-10-11T17:35:55Z（UTC。JST では 2026-10-12 02:35。コメント本文の記載日は 2026-10-12）。判断待ちの issue について「全て推奨で」と回答し、本 issue は (A) で確定
@@ -409,6 +409,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 - ADOPT でも `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。既定の反転は §8.6 で所有者判断（未承認）とされ、全 CUDA 利用者の stream・イベント追跡の変更と、lr スケジューラ下で 3 step 後に既存チェーンへ戻る点の影響評価を伴う別 PR を要する。
 - #3261 の本文は ADOPT 時に反転 PR を求めていたが、後に出た所有者の指示と本節の決定記録（§8.6）を優先し、本件では反転しない。
 - tolerance・baseline・FMA 契約・依存ピンは変更していない（コード変更なし）。
+- → 影響 2 点の評価と、反転を見送った理由は §8.12 に記録した。
 
 ### 8.9.4 限界
 
@@ -422,6 +423,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 - 解消案は、チェーン全体の実行と capture を ordinal 単位で排他すること（non-capture チェーンが capture 中のコンテキストに入らない、または capture 開始側がチェーン完走を待つ）。GB10 実機での検証が必要なため本 PR の範囲に収めない。
 - よって `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` を維持する。反転は、ordinal 排他の実装と「同一 ordinal で 2 スレッド同時学習しても store が poison されない」回帰テストを付けた後続 PR で行う。
 - tolerance・baseline・FMA 契約・依存・`unsafe` は変更していない（コード変更なし）。
+- → §8.11 の排他だけでは足りず、反転は §8.12 の未解決事項のため見送った。
 
 ## 8.11 #3596 学習チェーンと Graph capture の ordinal 単位の排他
 
@@ -467,3 +469,20 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - CI（実行済み）: `context_cache.rs` の `chain_scope_*` 4 件、`train_chain.rs` の mock テスト 4 件、`backend_ops.rs` の既定実装テスト。
 - GB10 `#[ignore]`: `unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（`train_step_graph_diag_tests_3260.rs`。柵なし・30 繰り返し）を追加。
 - **未実測（本記録時点）**: GB10 での上記テストの pass、backend-cuda・facade の `#[ignore]` 全件の main との突き合わせ、1 スレッド chain セルの排他あり・なし比較（既定 OFF・opt-in ON）。実機を使えない環境で実装したため、別の機体の値では埋めない。#3594 の前提（これらの実測）が揃うまで `Closes` は付けない。
+
+## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
+
+### 8.12.1 結論
+- `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。コード変更なし（反転の差分は PR レビュー指摘 P1 を受けて取り下げた）。tolerance・baseline・FMA 契約・依存・`unsafe` も変更なし。
+
+### 8.12.2 見送りの理由（未解決事項）
+- #3596 の `begin_device_chain_scope` が保護するのは encode と SGD の区間だけである。チェーン外の通常操作（`ResidentLoss::read` → `read_train_step_loss` → `mem.download`、Tape の通常演算など）は、待機も再試行もしない。
+- 既定 ON では、環境変数なしで同じ ordinal を複数スレッドが使うと、一方の学習 capture 中に他方の通常操作が `DeviceContextCaptureInProgress` で失敗し、公開 API（`step` → `loss.read()?`）からそのまま返る。従来は設定不要で動いていた並行学習が、別 store の capture タイミングだけで中断する。
+- 反転の前提条件: チェーン外の通常操作にも、capture 中は安全に待機して再試行する仕組みを入れ、その並行回帰テスト（GB10 実機）を通すこと。
+
+### 8.12.3 反転 PR に再度必要な確認（未実測）
+- 腕 A（既定 ON）・B（`=0`）・C（main）の backend-cuda・facade `#[ignore]` 全件の突き合わせ、`unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（30 回）、`train_step_graph_diag_tests_3260` の 7 件、2 プロセス bit 一致、1 スレッド chain セルの排他あり・なし比較。
+- 影響評価（再開時の参考）: 既定 stream が created stream になり全 CUDA 利用者に波及する・lr スケジューラ下では 3 回の無駄な capture 後に従来チェーンへ戻る（有界・bit 一致）・`GemmPrecision` が `Fp32Strict` 以外なら capture しない。
+
+### 8.12.4 申し送り
+- チェーン外の通常操作の待機・再試行は別 Issue で追跡する（起票はユーザー承認後）。
