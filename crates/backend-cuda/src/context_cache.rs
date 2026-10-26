@@ -1436,6 +1436,15 @@ pub(crate) fn wait_foreign_capture_idle(
     }
 }
 
+/// テスト専用: `ordinal` の in-flight 数を読む（`ops.rs` のチェーンスコープのテストが
+/// 「トークンを取らなかった」ことを確かめる。本番ロジックは変えない）。
+#[cfg(test)]
+pub(crate) fn in_flight_for_test(ordinal: usize) -> u64 {
+    let cell = ordinal_registry().entry(ordinal).expect("registry entry");
+    let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+    state.in_flight
+}
+
 /// `graph::run_captured_sgd_step_segment` が stream capture 開始直前に 1 回だけ
 /// 呼ぶ（イシュー #1349・codex-review P0 指摘対応）。同一 ordinal で既に
 /// capture 中（別スレッド・同一スレッドいずれも）なら
