@@ -111,6 +111,9 @@ def classify(med):
     n_width = max(abs(rho["aa1"] - 1.0), max(abs(x - 1.0) for x in rho_r["aa1"]))
     delta = rho["excl1"] - 1.0
     out = {"rep": rep, "rho": rho, "rho_r": rho_r, "N": n_width, "delta_after": delta, "arm_class": {}}
+    # 対照腕の変動は場合 (i)・(iii) の早期 return でも併記する（DIAG の読み方の規則）
+    moved = [a for a in OFF_PATH_CONTROLS if abs(rho[a] - 1.0) > n_width]
+    out["controls_moved"] = moved
     if abs(delta) <= n_width:
         out["case"] = "i"
         out["conclusion"] = "差は A/A と同程度。コードに原因は見つからない（停止して所有者へ報告）"
@@ -129,8 +132,6 @@ def classify(med):
         else:
             cls = "部分／不明"
         out["arm_class"][rv] = cls
-    moved = [a for a in OFF_PATH_CONTROLS if abs(rho[a] - 1.0) > n_width]
-    out["controls_moved"] = moved
     cand = [rv for rv in RV_ARMS if out["arm_class"][rv] == "原因候補"]
     kl, sc = out["arm_class"]["rv-kindlookup"], out["arm_class"]["rv-scopecall"]
     if kl == "原因候補":

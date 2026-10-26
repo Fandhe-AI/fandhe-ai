@@ -121,6 +121,18 @@ class SummarizeTest(unittest.TestCase):
         self.assertIn("ビルド・配置の影響あり", out)
         self.assertIn("配置・ビルド起因", out)
 
+    def test_controls_moved_reported_in_case_i(self):
+        self.fx.build({"aa1": [1.001] * 5, "excl1": [1.0005] * 5, "excl0-rebuild": [1.02] * 5})
+        out = self.fx.run()
+        self.assertIn("場合 = (i)", out)
+        self.assertIn("ビルド・配置の影響あり（併記）: excl0-rebuild", out)
+
+    def test_controls_moved_reported_in_case_iii(self):
+        self.fx.build({"aa1": [1.001] * 5, "excl1": [0.98] * 5, "rv-graphlock": [1.02] * 5})
+        out = self.fx.run()
+        self.assertIn("場合 = (iii)", out)
+        self.assertIn("ビルド・配置の影響あり（併記）: rv-graphlock", out)
+
     def test_after_faster_stops(self):
         self.fx.build({"aa1": [1.001] * 5, "excl1": [0.98] * 5})
         self.assertIn("場合 = (iii)", self.fx.run())
