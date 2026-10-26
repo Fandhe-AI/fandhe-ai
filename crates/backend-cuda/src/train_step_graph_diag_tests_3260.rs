@@ -85,6 +85,8 @@ fn new_run() -> Run {
 }
 
 /// 層幅を指定できる版（GEMM 内部ワークスペースを拡張させる大きい store の構築用）。
+/// 並行テストでは他スレッドの capture と衝突して `DeviceContextCaptureInProgress`（一過性）が
+/// 返りうるため、store 構築と入力アップロードは `retry_busy` で上限つきに再試行する。
 fn new_run_with(dims: [usize; 3]) -> Run {
     let tape = Tape::new_with_ops(Box::new(CudaBackendOps::new(0)));
     let params = [
@@ -94,13 +96,9 @@ fn new_run_with(dims: [usize; 3]) -> Run {
         tensor(4, &[dims[2]]),
     ];
     let refs: Vec<&Tensor<f32>> = params.iter().collect();
-    let store = DeviceParamStore::new(&tape, &refs).expect("store");
-    let x = store
-        .upload_resident_input(&tape, &tensor(5, &[BATCH, dims[0]]))
-        .expect("x");
-    let y = store
-        .upload_resident_input(&tape, &tensor(6, &[BATCH, dims[2]]))
-        .expect("y");
+    let store = retry_busy(|| DeviceParamStore::new(&tape, &refs));
+    let x = retry_busy(|| store.upload_resident_input(&tape, &tensor(5, &[BATCH, dims[0]])));
+    let y = retry_busy(|| store.upload_resident_input(&tape, &tensor(6, &[BATCH, dims[2]])));
     Run { tape, store, x, y }
 }
 
