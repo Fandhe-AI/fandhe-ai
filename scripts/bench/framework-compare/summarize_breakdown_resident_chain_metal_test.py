@@ -91,6 +91,16 @@ class T(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("wait_max=7", out)
 
+    def test_command_buffers_missing(self):
+        def m(task, arm, rows):
+            if task == "infer" and arm == "b0":
+                del rows[0]["command_buffers_max"]
+            return rows
+        build(self.d, m)
+        code, out, _ = run(self.d)
+        self.assertEqual(code, 1)
+        self.assertIn("command_buffers_max が欠落", out)
+
     def test_bit_mismatch(self):
         def m(task, arm, rows):
             if task == "infer" and arm == "b1":

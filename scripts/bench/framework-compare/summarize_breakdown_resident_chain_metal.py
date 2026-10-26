@@ -103,7 +103,9 @@ def analyse(dirpath, label, a0):
                     violations.append(f"{task}/{arm}: wait_max={r['wait_max']}（1 でない。フォールバックまたは追加同期）")
                 if task == "infer" and arm == "b1" and r.get("bit_identical_to_b0") is not True:
                     violations.append("infer/b1: B0 と bit 一致でない")
-                if "command_buffers_max" in r and num(r["command_buffers_max"], "command_buffers_max") != 1:
+                if "command_buffers_max" not in r:
+                    violations.append(f"{task}/{arm}: command_buffers_max が欠落（RULE.txt hard 条件 3 の必須項目）")
+                elif num(r["command_buffers_max"], "command_buffers_max") != 1:
                     out.append(f"注記: {task}/{arm} command_buffers_max={r['command_buffers_max']}（2 以上は auto-flush）")
             data[(task, arm)] = rows
     passed = parse_gate(os.path.join(dirpath, f"load_gate-3612-{label}.log"))

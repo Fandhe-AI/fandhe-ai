@@ -278,7 +278,7 @@ fn resident_chain_breakdown_3612_infer() {
     // `BREAKDOWN_3612_B1_FIRST=1` を渡し、計測順だけを反転する（出力の bit 一致検査は順序に依らない）。
     let run_b0 = || {
         let (mut b0_wall, mut b0_ref) = (Vec::new(), None);
-        let mut b0_wait_max = 0;
+        let (mut b0_wait_max, mut b0_cb_max) = (0, 0);
         for i in 0..(INFER_WARMUP + INFER_ITERS) {
             let c0 = counters();
             let t = Instant::now();
@@ -288,14 +288,16 @@ fn resident_chain_breakdown_3612_infer() {
             let wall = t.elapsed().as_secs_f64();
             let c1 = counters();
             let waits = c1.wait_until_completed - c0.wait_until_completed;
+            let cbs = c1.command_buffers - c0.command_buffers;
             if i >= INFER_WARMUP {
                 assert_eq!(waits, 1, "B0 infer: wait の差分（iter={i}）");
                 b0_wait_max = b0_wait_max.max(waits);
+                b0_cb_max = b0_cb_max.max(cbs);
                 b0_wall.push(wall);
             }
             b0_ref = Some(o);
         }
-        (b0_ref.expect("非空"), b0_wall, b0_wait_max)
+        (b0_ref.expect("非空"), b0_wall, b0_wait_max, b0_cb_max)
     };
 
     // B1: 同じ部品列を own buffer で再現（store と同じ初期値を upload）。
@@ -312,7 +314,7 @@ fn resident_chain_breakdown_3612_infer() {
         let (mut enc, mut cw, mut gb, mut ro, mut tot) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut last = None;
-        let mut wait_max = 0;
+        let (mut wait_max, mut cb_max) = (0, 0);
         for i in 0..(INFER_WARMUP + INFER_ITERS) {
             let c0 = counters();
             let t_all = Instant::now();
@@ -347,11 +349,14 @@ fn resident_chain_breakdown_3612_infer() {
             let res = mem.download(&o).expect("download");
             let r = t.elapsed().as_secs_f64();
             let total = t_all.elapsed().as_secs_f64();
-            let waits = counters().wait_until_completed - c0.wait_until_completed;
+            let c1 = counters();
+            let waits = c1.wait_until_completed - c0.wait_until_completed;
+            let cbs = c1.command_buffers - c0.command_buffers;
             if i >= INFER_WARMUP {
                 // train・B0 と同じく定常区間の各反復で同期 1 回を hard 条件にする。
                 assert_eq!(waits, 1, "B1 infer: wait の差分（iter={i}）");
                 wait_max = wait_max.max(waits);
+                cb_max = cb_max.max(cbs);
                 enc.push(e);
                 cw.push(c);
                 gb.push(g);
@@ -360,19 +365,20 @@ fn resident_chain_breakdown_3612_infer() {
             }
             last = Some(res);
         }
-        (last.expect("非空"), enc, cw, gb, ro, tot, wait_max)
+        (last.expect("非空"), enc, cw, gb, ro, tot, wait_max, cb_max)
     };
 
     let b1_first = std::env::var("BREAKDOWN_3612_B1_FIRST").is_ok_and(|v| v == "1");
-    let ((b0_ref, b0_wall, b0_wait_max), (last, enc, cw, gb, ro, tot, wait_max)) = if b1_first {
-        let b1r = run_b1();
-        let b0r = run_b0();
-        (b0r, b1r)
-    } else {
-        let b0r = run_b0();
-        let b1r = run_b1();
-        (b0r, b1r)
-    };
+    let ((b0_ref, b0_wall, b0_wait_max, b0_cb_max), (last, enc, cw, gb, ro, tot, wait_max, cb_max)) =
+        if b1_first {
+            let b1r = run_b1();
+            let b0r = run_b0();
+            (b0r, b1r)
+        } else {
+            let b0r = run_b0();
+            let b1r = run_b1();
+            (b0r, b1r)
+        };
     let sum0: f64 = b0_ref
         .as_slice()
         .expect("contiguous")
@@ -382,7 +388,7 @@ fn resident_chain_breakdown_3612_infer() {
     emit(
         &mut out,
         &format!(
-            "{{\"task\":\"infer\",\"arm\":\"b0\",\"n\":{},\"total_us\":{:.3},\"wait_max\":{b0_wait_max},\"checksum\":{:.9}}}",
+            "{{\"task\":\"infer\",\"arm\":\"b0\",\"n\":{},\"total_us\":{:.3},\"wait_max\":{b0_wait_max},\"command_buffers_max\":{b0_cb_max},\"checksum\":{:.9}}}",
             b0_wall.len(),
             med(&b0_wall) * 1e6,
             sum0
@@ -399,7 +405,7 @@ fn resident_chain_breakdown_3612_infer() {
     emit(
         &mut out,
         &format!(
-            "{{\"task\":\"infer\",\"arm\":\"b1\",\"n\":{},\"encode_us\":{:.3},\"commit_wait_us\":{:.3},\"gpu_busy_us\":{:.3},\"host_fixed_us\":{:.3},\"readout_us\":{:.3},\"total_us\":{:.3},\"wait_max\":{wait_max},\"bit_identical_to_b0\":true}}",
+            "{{\"task\":\"infer\",\"arm\":\"b1\",\"n\":{},\"encode_us\":{:.3},\"commit_wait_us\":{:.3},\"gpu_busy_us\":{:.3},\"host_fixed_us\":{:.3},\"readout_us\":{:.3},\"total_us\":{:.3},\"wait_max\":{wait_max},\"command_buffers_max\":{cb_max},\"bit_identical_to_b0\":true}}",
             tot.len(),
             med(&enc) * 1e6,
             med(&cw) * 1e6,
