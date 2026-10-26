@@ -299,6 +299,7 @@ wait_gate() { # <round> <logfile>
     echo "round$1 dev=cuda gate=pass gate_ok=1 threshold=${LOAD_GATE} waited_s=${waited} load1=${l1}" >>"$2"
   else
     echo "round$1 dev=cuda gate=fail gate_ok=0 threshold=${LOAD_GATE} waited_s=${waited} load1=${l1}" >>"$2"
+    return 1
   fi
 }
 
@@ -334,7 +335,14 @@ GATE_LOG="$OUT/load_gate-diag-${LABEL}-cuda.log"
 echo "series=official threshold=${LOAD_GATE} rule_threshold=${LOAD_GATE} precheck=assert" >"$GATE_LOG"
 { uptime; nvidia-smi; } >"$OUT/nvidia-smi-before-diag-${LABEL}.txt" 2>&1 || true
 for r in 1 2 3 4 5; do
-  wait_gate "$r" "$GATE_LOG"
+  # 専有ゲート不通過は診断不能（DIAG-r4.txt の専有ゲート契約）。負荷下で計測を続けず、
+  # 記録して計測を停止し、ANY_FAILED へ加算して非 0 終了させる。
+  if ! wait_gate "$r" "$GATE_LOG"; then
+    echo "round${r}: exclusivity gate failed; diagnosis impossible, stopping measurement" >>"$SKIP"
+    echo "round${r}: exclusivity gate failed; stopping" >&2
+    ANY_FAILED=$((ANY_FAILED + 1))
+    break
+  fi
   for arm in $(order_for_round "$r"); do run_arm "$arm" "$r"; done
   echo "run ${r}: $(uptime)" | tee -a "$OUT/uptime-diag-${LABEL}.log"
 done
