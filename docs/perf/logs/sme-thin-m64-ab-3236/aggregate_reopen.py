@@ -250,8 +250,9 @@ def evaluate(base):
         if others_ok and K is not None and K > KS[0]:
             res["verdict"] = "ADOPT-k（k >= %d）" % K
         else:
-            res["verdict"] = "undetermined"
-            res["notes"].append("l2_dx のみ N/N 後退だが K 下限を格子上で一意に決められない（undetermined）")
+            # RULE-reopen-1: l2_dx が後退して ADOPT-k に当たらない場合は REJECT（undetermined 例外なし）
+            res["verdict"] = "REJECT"
+            res["notes"].append("l2_dx が N/N 後退し ADOPT-k の条件（K 一意かつ K > %d・他セル ADOPT）を満たさない（RULE-reopen-1 により REJECT）" % KS[0])
     elif reach_ok:
         res["verdict"] = "ADOPT"
     else:
@@ -381,7 +382,8 @@ def self_test():
     check("正常（ON が速い）", _verdict(), "ADOPT")
     check("l2_dx が 10/11 のみ後退は undetermined", _verdict(flaky="l2_dx"), "undetermined")
     check("l2_dx が 11/11 後退 + K=16 は ADOPT-k", _verdict(regress="l2_dx", kmin=16), "ADOPT-k（k >= 16）")
-    check("l2_dx が 11/11 後退で K 格子に後退なしは undetermined", _verdict(regress="l2_dx"), "undetermined")
+    check("l2_dx が 11/11 後退で K 格子に後退なしは REJECT（RULE-reopen-1）", _verdict(regress="l2_dx"), "REJECT")
+    check("l2_dx が 11/11 後退 + K=10（K > 10 を満たさない）は REJECT", _verdict(regress="l2_dx", kmin=10), "REJECT")
     check("l1_fwd の 11/11 後退は REJECT", _verdict(regress="l1_fwd"), "REJECT")
     check("l1_dx の 11/11 後退 + l2_dx 後退は REJECT", _verdict(regress="l1_dx", kmin=16), "REJECT")
     check("checksum 不一致は FAIL", _verdict(ck_bad=True), "FAIL")
