@@ -1,0 +1,27 @@
+### rev-stamp before
+f7fe6b4dfaabbdbc51a900709fe6648c36120c58
+dirty=0
+### rev-stamp after
+46a2a43d991f7099eaa4dfb97e07878e106b5c61
+dirty=0
+### runner.out (head 20)
+precheck=assert ok
+== train cuda chain arm=excl0-off round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134887,"q1_s":0.000134175,"q3_s":0.000135135,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.308868877}
+== train cuda chain arm=excl1-off round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134191,"q1_s":0.000134079,"q3_s":0.000135027,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.263064406}
+== train cuda chain arm=excl0-on round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112599,"q1_s":0.000112543,"q3_s":0.000112671,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.261759409}
+== train cuda chain arm=excl1-on round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112543,"q1_s":0.000112287,"q3_s":0.000112719,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.263927233}
+run 1:  21:50:56 up 60 days,  9:17,  2 users,  load average: 0.33, 2.98, 2.89
+== train cuda chain arm=excl1-off round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135767,"q1_s":0.000135167,"q3_s":0.000136247,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.313130828}
+== train cuda chain arm=excl0-on round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112575,"q1_s":0.000112491,"q3_s":0.000112708,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.260981464}
+== train cuda chain arm=excl1-on round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000112671,"q1_s":0.000112543,"q3_s":0.000112883,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.261209830}
+== train cuda chain arm=excl0-off round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134911,"q1_s":0.000134767,"q3_s":0.000135391,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.273755382}
+run 2:  21:51:59 up 60 days,  9:19,  2 users,  load average: 0.19, 2.41, 2.70
+== train cuda chain arm=excl0-on round=3 ==

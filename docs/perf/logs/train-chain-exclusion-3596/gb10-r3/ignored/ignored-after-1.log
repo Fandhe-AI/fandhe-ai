@@ -1,0 +1,800 @@
+     Running unittests src/lib.rs (<home>/work/target-3596-r3-after/release/deps/fandhe_ai_backend_cuda-1903b33100841bd6)
+test context_cache::poison_recovery_real_device_tests::poison_from_real_cuda_error_fails_closed_to_unrecoverable ... ok
+test context_cache::poison_recovery_real_device_tests::poison_recovery_real_probe_restores_active_and_rejects_stale_generation ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_g_cached_device_select_reference ... ok
+test context_cache::tests::cached_allocator_keeps_distinct_contexts_on_same_ordinal_separate ... ok
+test context_cache::async_ordering_poison_tests::invalidate_with_real_stream_sync_drains_pending_launches_and_reactivates ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v1_keep_alive ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v3_pooled_output ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v0_fresh_drop_each_trial ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_drop_reused ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_drop_untouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_keep_untouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_drop_pretouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_keep_untouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_drop_reused ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_drop_untouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_keep_pinned ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_drop_pinned ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_drop_pretouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_drop_pinned ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_drop_pretouched_split ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_keep_pinned ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_keep_pretouched_split ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_drop_pretouched_split ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_keep_pretouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n2048_keep_pretouched_split ... ok
+test fresh_overhead_diag_tests::fresh_overhead_diag_v2_pre_touched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n1024_keep_pretouched ... ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_base_bit_exact_output ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_drop_pretouched ... ok
+test gemm::tests::tiled_f32_swizzle_variant_matches_cpu_reference ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_keep_untouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_drop_untouched ... ok
+test gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_drop_pretouched_split ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_drop_reused ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_keep_pinned ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_keep_pretouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_drop_pinned ... ok
+test gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n512_keep_pretouched_split ... ok
+test gemm_mma::tests::mma_f16_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+test gemm_mma::tests::mma_f16_derived_stage_count_matches_default_stage_count_bit_exact ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_drop_pinned ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_drop_reused ... ok
+test gemm::tests::wmma_tf32_diagnostic_constructors_force_expected_kernel ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_drop_untouched ... ok
+test gemm::tests::wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_constructor ... ok
+test gemm_small_launch_cost_diag_tests::gemm_small_launch_counts_exact ... ok
+test gemm_device_input_diag_tests_3223::device_input_gemm_issues_no_h2d_no_sync_no_d2h ... ok
+test kernels_mma::tests::mma_f16_sources_compile_with_nvrtc_when_available ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_keep_pinned ... ok
+test gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096 ... ok
+test module_cache_wiring_tests::cuda_gemm_new_stores_disk_cache_entry_for_every_kernel ... ok
+test gemm_mma::tests::mma_f16_stage_count_does_not_change_bit_exact_output ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_keep_pretouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_drop_pretouched_split ... ok
+test nvrtc::tests::nvrtc_version_returns_ok_on_real_device ... ok
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test kernels_wmma_opt::tests::wmma_opt_sources_compile_with_nvrtc_when_available ... ok
+test gemm_mma::tests::mma_f16_swizzle_variant_matches_base_bit_exact_output ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_keep_untouched ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_drop_pretouched ... ok
+test init_cost_diag_tests::init_cost_diag_e2e_matches_framework_compare_shape ... ok
+test fresh_reuse_window_diag_tests_3186::window_gap_3186_n4096_keep_pretouched_split ... ok
+test init_cost_diag_tests::init_cost_diag_gemm_new_lru_cold_vs_warm ... ok
+test pooling::pooling_real_device_tests::adaptive_avg_pool2d_global_average_matches_model ... ok
+test pooling::pooling_real_device_tests::adaptive_avg_pool2d_upsampling_matches_model ... ok
+test pooling::pooling_real_device_tests::avg_pool2d_count_include_pad_true_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_basic_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_dilation_boundary_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_1d_merged_shape_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_nan_inf_negzero_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_crosses_block_boundary_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_overlapping_window_matches_model ... ok
+test pooling::pooling_real_device_tests::avg_pool2d_count_include_pad_false_matches_model ... ok
+test pooling::pooling_real_device_tests::max_pool2d_run_to_run_bit_identical ... ok
+test init_cost_diag_tests::init_cost_diag_reused_handle_steady_state_reference ... ok
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_cold_compile_vs_warm_load_latency ... ok
+test gemm::tests::wmma_tf32_staged_pad_variant_matches_base_bit_exact_output ... ok
+test gemm::tests::wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n1024_prod_order_reused ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n1024_clone_dtoh_legacy_to_vec ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n1024_clone_dtoh_borrowed_dummy_alloc_free ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n1024_prod_order_fresh ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n1024_clone_dtoh_borrowed_keep_alive ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n1024_pretouched_fresh_split ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n1024_pretouched_fresh_production ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n2048_clone_dtoh_borrowed_keep_alive ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n2048_pretouched_fresh_production ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n2048_clone_dtoh_borrowed_dummy_alloc_free ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n2048_prod_order_reused ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n2048_clone_dtoh_legacy_to_vec ... ok
+test gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n2048_prod_order_fresh ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n2048_pretouched_fresh_split ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_borrowed_keep_alive ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_pretouched_fresh_dest ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_borrowed_with_dummy_alloc_free ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_legacy_to_vec ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024_pretouched_reused_dest ... ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_classic ... ok
+test gemm_reuse_phase_diag_tests::gemm_reuse_phase_diag_select ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n4096_prod_order_fresh ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n4096_prod_order_reused ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n4096_clone_dtoh_borrowed_keep_alive ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n4096_clone_dtoh_borrowed_dummy_alloc_free ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n4096_clone_dtoh_legacy_to_vec ... ok
+test resident_input_diag_tests_3250::chain_layers_window_has_no_input_h2d ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n4096_pretouched_fresh_split ... ok
+test readback_attribution_diag_tests_2107::readback_attribution_2107_n4096_pretouched_fresh_production ... ok
+thread 'resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d' (301279) panicked at crates/backend-cuda/src/resident_input_diag_tests_3250.rs:120:5:
+test scalar_op_cache_wiring_tests::cached_scalar_binary_kernel_second_call_reuses_cache ... ok
+test resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d ... FAILED
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_clamp_payload_does_not_split_cache ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_returns_none_for_unimplemented_kind ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_distinct_devices_do_not_share_cache ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_second_call_reuses_cache ... ok
+test scalar_op_cache_wiring_tests::cached_scalar_unary_kernel_second_call_reuses_cache_for_transcendental_kind ... ok
+test train_step_chain_diag_tests_3252::public_entry_call_sequence_window_has_no_sync_and_read_is_one_sync ... ok
+thread 'resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise' (301278) panicked at crates/backend-cuda/src/resident_input_diag_tests_3250.rs:88:45:
+test resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise ... FAILED
+test train_step_chain_diag_tests_3252::tf32_mode_chain_outcome_is_recorded ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_borrowed_keep_alive ... ok
+test train_step_parts_sync_diag_tests_3224::gemm_device_input_mlp_shapes_issue_no_h2d_no_sync_no_d2h ... ok
+test train_step_chain_diag_tests_3252::train_chain_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_legacy_to_vec ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_pretouched_fresh_dest ... ok
+test train_step_parts_sync_diag_tests_3224::mlp_backward_parts_tracked_chain_issues_no_sync ... ok
+test train_step_parts_sync_diag_tests_3224::relu_mask_device_issues_no_sync_no_d2h ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_pretouched_reused_dest ... ok
+test train_step_parts_sync_diag_tests_3224::mse_device_issues_no_sync_no_d2h ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048_borrowed_with_dummy_alloc_free ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_borrowed_keep_alive ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_pretouched_fresh_dest ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_pretouched_reused_dest ... ok
+test init_cost_diag_tests::init_cost_diag_phase_breakdown ... ok
+test nvrtc::jit_cache_bench_tests::jit_cache_bench_module_load_and_throughput_parity ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_borrowed_with_dummy_alloc_free ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096_legacy_to_vec ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n1024 ... ok
+test train_forward_resident_diag_tests::cuda_train_forward_resident_backend_phases ... ok
+test gemm_small_launch_cost_diag_tests::gemm_small_launch_cost_diag ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n2048 ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_n4096 ... ok
+test readout_regression_diag_tests_1436::readout_regression_diag_all_arms ... ok
+failures:
+failures:
+    resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise
+    resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d
+test result: FAILED. 141 passed; 2 failed; 0 ignored; 0 measured; 1274 filtered out; finished in 72.32s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --lib`
+     Running tests/adam_device_contract.rs (<home>/work/target-3596-r3-after/release/deps/adam_device_contract-beffab897084e512)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/adam_device_real_device.rs (<home>/work/target-3596-r3-after/release/deps/adam_device_real_device-c5d09f750ac03a86)
+test coupled_wd_zero_matches_cpu_reference_across_100_steps ... ok
+test odd_numel_multi_block_matches_cpu_reference_across_5_steps ... ok
+test decoupled_wd_zero_matches_cpu_reference_across_100_steps ... ok
+test decoupled_wd_nonzero_matches_cpu_reference_across_100_steps ... ok
+test coupled_wd_nonzero_matches_cpu_reference_across_100_steps ... ok
+test run_to_run_bit_identical_across_5_runs ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+     Running tests/async_ordering_real_device.rs (<home>/work/target-3596-r3-after/release/deps/async_ordering_real_device-a48f48e4a0920541)
+test probe_has_async_alloc_on_real_device ... ok
+test forward_backward_update_chain_matches_cpu_reference_without_explicit_sync ... ok
+test many_chained_sgd_steps_then_immediate_download_matches_cpu_reference ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+     Running tests/backend_ops_real_device.rs (<home>/work/target-3596-r3-after/release/deps/backend_ops_real_device-3d4d580c6b54b79a)
+test backend_ops_gemm_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.47s
+     Running tests/batch_norm_parity.rs (<home>/work/target-3596-r3-after/release/deps/batch_norm_parity-f10be69f0de88480)
+test backend_ops_batch_norm_rejects_length_mismatch ... ok
+test backend_ops_batch_norm_train_non_contiguous_input_matches_contiguous_equivalent ... ok
+test batch_norm_train_matches_backend_cpu_directly ... ok
+test backend_ops_batch_norm_matches_cpu_backend_ops_across_shapes ... ok
+test batch_norm_train_extreme_scale_does_not_overflow ... ok
+test batch_norm_train_is_run_to_run_deterministic ... ok
+test batch_norm_train_propagates_nan_only_for_channel_with_nan ... ok
+test batch_norm_train_extreme_values_no_nan_inf ... ok
+test batch_norm_infer_matches_naive_across_shapes ... ok
+test batch_norm_train_matches_naive_across_shapes ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.43s
+     Running tests/bce_parity.rs (<home>/work/target-3596-r3-after/release/deps/bce_parity-b45de03bb8c79c10)
+test bce_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.44s
+     Running tests/cast_ops_contract.rs (<home>/work/target-3596-r3-after/release/deps/cast_ops_contract-1d3e1f4cbabb4a86)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/cast_parity.rs (<home>/work/target-3596-r3-after/release/deps/cast_parity-48508b0712ee6537)
+test cast_matches_cpu_across_sizes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.36s
+     Running tests/constant_pad_parity.rs (<home>/work/target-3596-r3-after/release/deps/constant_pad_parity-91fd60e6b581a6ff)
+test pad_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.29s
+     Running tests/cpu_cuda_mma_parity.rs (<home>/work/target-3596-r3-after/release/deps/cpu_cuda_mma_parity-b37c9647ae425e6f)
+thread 'mma_f16_k4096_stress' (301422) panicked at crates/backend-cuda/tests/cpu_cuda_mma_parity.rs:65:5:
+test mma_f16_k4096_stress ... FAILED
+test mma_f16_matches_reference_across_shapes ... ok
+test mma_f16_k4096_stress_non_regression ... ok
+test mma_f16_cross_check_against_wmma_f16 ... ok
+failures:
+failures:
+    mma_f16_k4096_stress
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.63s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test cpu_cuda_mma_parity`
+     Running tests/cpu_cuda_parity.rs (<home>/work/target-3596-r3-after/release/deps/cpu_cuda_parity-47e2f6c4174ca6ba)
+test naive_f32_matches_reference_across_shapes ... ok
+test naive_f32_k4096_stress_poc_v2_5 ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.71s
+     Running tests/cpu_cuda_tiled_pipeline_parity.rs (<home>/work/target-3596-r3-after/release/deps/cpu_cuda_tiled_pipeline_parity-00b84fcbe6b5f201)
+test tiled_pipeline_rejects_misaligned_shape ... ok
+test compile_tiled_pipeline_128x64_variant_matches_run_tiled_pipeline_f32 ... ok
+test run_tiled_f32_optin_dispatches_128x64_for_aligned_shape ... ok
+test tiled_pipeline_matches_reference_across_shapes ... ok
+test tiled_pipeline_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_pipeline_128x64_matches_reference_across_shapes ... ok
+test tiled_pipeline_matches_tiled_f32_classic_bit_exact ... ok
+test run_tiled_f32_dispatches_to_pipeline_for_aligned_shape ... ok
+test launch_tiled_pipeline_zero_dim_shape_is_noop_without_launch ... ok
+test tiled_pipeline_zero_k_returns_all_zero ... ok
+test run_tiled_f32_falls_back_to_classic_for_unaligned_shape ... ok
+test tiled_pipeline_rejects_mismatched_context_handle ... ok
+test tiled_pipeline_128x64_matches_classic_bit_exact ... ok
+test tiled_pipeline_128x64_matches_pipeline_64x64_bit_exact ... ok
+test tiled_pipeline_rejects_mismatched_context_buffers ... ok
+test default_new_dispatches_128x64_for_shapes_meeting_threshold_when_enabled ... ok
+test tiled_pipeline_128x64_k4096_stress ... ok
+test tiled_pipeline_k4096_stress ... ok
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 14.24s
+     Running tests/cpu_cuda_tiled_pipeline_persistent_parity.rs (<home>/work/target-3596-r3-after/release/deps/cpu_cuda_tiled_pipeline_persistent_parity-9d2b3ac9660f720c)
+test compile_tiled_pipeline_persistent_variant_rejects_zero_blocks_per_sm ... ok
+test tiled_pipeline_persistent_rejects_mismatched_context_handle ... ok
+test tiled_pipeline_128x64_persistent_repeated_launch_is_deterministic ... ok
+test tiled_pipeline_persistent_rejects_misaligned_shape ... ok
+test tiled_pipeline_persistent_repeated_launch_is_deterministic ... ok
+test launch_tiled_pipeline_persistent_zero_dim_shape_is_noop_without_launch ... ok
+test tiled_pipeline_persistent_zero_k_returns_all_zero ... ok
+test tiled_pipeline_128x64_persistent_matches_64x64_persistent_bit_exact ... ok
+test tiled_pipeline_persistent_matches_non_persistent_bit_exact ... ok
+test tiled_pipeline_128x64_persistent_matches_non_persistent_bit_exact ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 24.75s
+     Running tests/cpu_cuda_tiled_pipeline_streamk_parity.rs (<home>/work/target-3596-r3-after/release/deps/cpu_cuda_tiled_pipeline_streamk_parity-620a6e0eaa32e1d3)
+test compile_tiled_pipeline_streamk_variant_rejects_zero_blocks_per_sm ... ok
+test streamk_rejects_misaligned_shape ... ok
+test launch_tiled_pipeline_streamk_zero_dim_shape_is_noop_without_launch ... ok
+test streamk_rejects_mismatched_context_handle ... ok
+test streamk_zero_k_returns_all_zero ... ok
+test streamk_inactive_matches_non_streamk_bit_exact ... ok
+test streamk_repeated_launch_is_deterministic ... ok
+test streamk_full_tiles_match_non_persistent_bit_exact ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 22.26s
+     Running tests/cpu_cuda_tiled_pipeline_tma_parity.rs (<home>/work/target-3596-r3-after/release/deps/cpu_cuda_tiled_pipeline_tma_parity-874f3eaca2d88516)
+test tiled_pipeline_tma_128x64_k_zero_determinism_prepared_and_pretransposed ... ok
+test tiled_pipeline_tma_prepared_matches_one_shot_launch_bit_exact ... ok
+test tiled_pipeline_tma_k_zero_produces_all_zero_output ... ok
+test tiled_pipeline_tma_none_repeated_launch_is_deterministic ... ok
+test tiled_pipeline_tma_none_matches_pipeline_with_pretransposed_host_input ... ok
+test tiled_pipeline_tma_128x64_matches_cp_async_with_nan_inf_inputs ... ok
+test tiled_pipeline_tma_b64_matches_pipeline_or_records_hypothesis_gap ... ok
+test tiled_pipeline_tma_none_matches_pipeline_bit_exact ... ok
+test tiled_pipeline_tma_128x64_matches_cp_async_128x64_bit_exact ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 2.80s
+     Running tests/cpu_cuda_wmma_parity.rs (<home>/work/target-3596-r3-after/release/deps/cpu_cuda_wmma_parity-95eea62314155e2d)
+test wmma_f16_k4096_stress_non_regression ... ok
+thread 'wmma_f16_k4096_stress' (301721) panicked at crates/backend-cuda/tests/cpu_cuda_wmma_parity.rs:92:5:
+test wmma_f16_k4096_stress ... FAILED
+test wmma_f16_matches_reference_across_shapes ... ok
+test wmma_f16_cross_check_against_naive_f16 ... ok
+failures:
+failures:
+    wmma_f16_k4096_stress
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.71s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test cpu_cuda_wmma_parity`
+     Running tests/device.rs (<home>/work/target-3596-r3-after/release/deps/device-961aa56045f9ec36)
+test select_device_zero_on_real_hardware ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.25s
+     Running tests/device_init.rs (<home>/work/target-3596-r3-after/release/deps/device_init-2be4f0a09d949d55)
+test new_returns_ok_with_valid_metadata_on_real_hardware ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.35s
+     Running tests/dispatch_boundary.rs (<home>/work/target-3596-r3-after/release/deps/dispatch_boundary-e0b995b255d4492b)
+thread 'small_shape_matrix_unit_has_no_floor_tflops_record' (301747) panicked at crates/backend-cuda/tests/dispatch_boundary.rs:218:9:
+test small_shape_matrix_unit_has_no_floor_tflops_record ... FAILED
+test large_shape_mma_pipeline_vs_wmma_tflops_record ... ok
+failures:
+failures:
+    small_shape_matrix_unit_has_no_floor_tflops_record
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.15s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test dispatch_boundary`
+     Running tests/elementwise_device_real_device.rs (<home>/work/target-3596-r3-after/release/deps/elementwise_device_real_device-90e41cab52de57ab)
+test binary_elementwise_device_handles_empty_numel_on_real_device ... ok
+test binary_elementwise_device_rejects_shape_and_device_mismatch_on_real_device ... ok
+test elementwise_device_chain_matches_per_op_host_composition_on_real_device ... ok
+test binary_and_unary_elementwise_device_match_host_bit_exact_on_real_device ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+     Running tests/fused_elementwise_parity.rs (<home>/work/target-3596-r3-after/release/deps/fused_elementwise_parity-a081fe3fcf0c4e93)
+test fused_elementwise_gate_off_returns_unsupported_on_real_device ... ok
+test fused_elementwise_matches_per_op_and_cpu_across_shapes ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.34s
+     Running tests/gather_scatter_parity.rs (<home>/work/target-3596-r3-after/release/deps/gather_scatter_parity-2510e820b9bb1a13)
+test one_hot_matches_cpu_across_shapes ... ok
+test scatter_matches_cpu_across_shapes_and_reduce ... ok
+test gather_matches_cpu_across_shapes ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.36s
+     Running tests/gemm_auto.rs (<home>/work/target-3596-r3-after/release/deps/gemm_auto-b9601edf4418ed6f)
+test select_tile_config_for_device_succeeds_on_real_hardware ... ok
+test f16_matrix_unit_impl_reports_selected_implementation ... ok
+test run_f16_k4096_stress_non_regression_route_aware ... ok
+test run_f16_matches_cpu_reference ... ok
+test run_f16_matches_cpu_reference_across_aligned_shapes ... ok
+test run_f32_matches_cpu_reference ... ok
+test run_f16_misaligned_shape_falls_back_to_wmma_or_tiled ... ok
+test mma_field_is_constructed_by_compute_capability_gate ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.50s
+     Running tests/gemm_batched_parity.rs (<home>/work/target-3596-r3-after/release/deps/gemm_batched_parity-c5410c1f36b1ddd4)
+test gemm_batched_fp32_strict_matches_default_per_batch_composition_bit_exact_on_real_device ... ok
+test gemm_batched_matches_cpu_reference_on_real_device ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.55s
+     Running tests/gemm_bias_act_parity.rs (<home>/work/target-3596-r3-after/release/deps/gemm_bias_act_parity-52015564bd17f146)
+test elementwise_matches_cpu_across_ops ... ok
+test gemm_bias_act_matches_cpu_across_shapes ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.51s
+     Running tests/gemm_device_input_parity.rs (<home>/work/target-3596-r3-after/release/deps/gemm_device_input_parity-fdc9730cdd8a4418)
+test dw_error_paths_are_typed_and_leave_out_untouched ... ok
+test dinput_zero_dims_follow_host_contract ... ok
+test dinput_bit_identical_to_host ... ok
+test race_two_threads_share_workspace_under_mutex ... ok
+test race_no_sync_chain_matches_host ... ok
+test dw_nt_bit_identical_to_host ... ok
+test dw_tn_bit_identical_to_host ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s
+     Running tests/gemm_f32_variants.rs (<home>/work/target-3596-r3-after/release/deps/gemm_f32_variants-8859c5d45c1834bd)
+test split_k_forced_execution_is_bit_deterministic_and_reproduces_gb10_fail ... ok
+test run_f32_matches_cpu_reference_across_variant_shapes ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 10.13s
+     Running tests/gemm_fp32_strict_into_parity.rs (<home>/work/target-3596-r3-after/release/deps/gemm_fp32_strict_into_parity-736bf0ff40406559)
+test gemm_fp32_strict_into_rejects_out_on_different_ordinal_on_real_device ... ok
+test gemm_fp32_strict_into_bias_none_and_invalid_range_on_real_device ... ok
+test gemm_fp32_strict_into_nn_fallback_matches_gemm_fp32_strict_on_real_device ... ok
+test gemm_fp32_strict_into_respects_nonzero_offset_and_leaves_out_of_range_untouched_on_real_device ... ok
+test gemm_fp32_strict_into_nt_and_tn_match_gemm_fp32_strict_on_real_device ... ok
+test gemm_fp32_strict_into_bias_reduce_special_values_on_real_device ... ok
+test gemm_fp32_strict_into_bias_reduce_matches_host_reference_on_real_device ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+     Running tests/gemm_mma.rs (<home>/work/target-3596-r3-after/release/deps/gemm_mma-d8aca5a80bb39cf4)
+test mma_f16_accepts_noop_shape_with_misaligned_n_when_k_is_zero ... ok
+test mma_f16_rejects_non_multiple_of_eight_shape ... ok
+test mma_f16_zero_k_returns_all_zero ... ok
+test mma_f16_zero_dim_shape_returns_empty_without_launch ... ok
+test mma_f16_rejects_m_exceeding_grid_dim_y_limit ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.58s
+     Running tests/gemm_mma_tf32.rs (<home>/work/target-3596-r3-after/release/deps/gemm_mma_tf32-d97f52457192c71a)
+test launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch ... ok
+test mma_tf32_zero_dim_shape_returns_empty_without_launch ... ok
+test mma_tf32_matches_reference_across_shapes ... ok
+test mma_tf32_k4096_stress ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.94s
+     Running tests/gemm_mma_tf32_triage.rs (<home>/work/target-3596-r3-after/release/deps/gemm_mma_tf32_triage-5d1afdd0076e9934)
+test mma_tf32_triage_dump ... ok
+test mma_tf32_triage_all_shapes ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 9.74s
+     Running tests/gemm_mma_tf32x3.rs (<home>/work/target-3596-r3-after/release/deps/gemm_mma_tf32x3-6f0e236826ad9b9b)
+test launch_tf32x3_zero_dim_shape_is_noop_or_zero_fills_without_launch ... ok
+test mma_tf32x3_zero_dim_shape_returns_empty_without_launch ... ok
+thread 'mma_tf32x3_matches_reference_across_shapes' (301972) panicked at crates/backend-cuda/tests/gemm_mma_tf32x3.rs:312:9:
+test mma_tf32x3_matches_reference_across_shapes ... FAILED
+thread 'mma_tf32x3_k4096_stress' (301971) panicked at crates/backend-cuda/tests/gemm_mma_tf32x3.rs:344:5:
+test mma_tf32x3_k4096_stress ... FAILED
+failures:
+failures:
+    mma_tf32x3_k4096_stress
+    mma_tf32x3_matches_reference_across_shapes
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.88s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_mma_tf32x3`
+     Running tests/gemm_naive.rs (<home>/work/target-3596-r3-after/release/deps/gemm_naive-1e5892480b16dcb7)
+test naive_f16_runs_and_returns_expected_shape ... ok
+test run_naive_f32_rejects_length_mismatch_before_launch ... ok
+test naive_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.90s
+     Running tests/gemm_resident_real_device.rs (<home>/work/target-3596-r3-after/release/deps/gemm_resident_real_device-4cb28d1d88e27076)
+test gemm_resident_lhs_matches_cpu_reference_on_real_device ... ok
+test gemm_resident_rhs_matches_cpu_reference_on_real_device ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+     Running tests/gemm_resident_rhs_act_fused_real_device.rs (<home>/work/target-3596-r3-after/release/deps/gemm_resident_rhs_act_fused_real_device-0cd95f820a8d6f7a)
+test fused_relu_epilogue_bit_identical_on_special_values ... ok
+test fused_relu_epilogue_bit_identical_to_manual_composition ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+     Running tests/gemm_tf32_optin.rs (<home>/work/target-3596-r3-after/release/deps/gemm_tf32_optin-a6332f160bef8b1d)
+thread 'gemm_tf32_optin_on_matches_cpu_across_shapes' (302052) panicked at crates/backend-cuda/tests/gemm_tf32_optin.rs:161:5:
+test gemm_tf32_optin_on_matches_cpu_across_shapes ... FAILED
+thread 'gemm_tf32x3_optin_on_matches_cpu_across_shapes' (302054) panicked at crates/backend-cuda/tests/gemm_tf32_optin.rs:437:9:
+test gemm_tf32x3_optin_on_matches_cpu_across_shapes ... FAILED
+test gemm_tf32x3_optin_on_wiring_matches_run_tf32x3 ... ok
+test gemm_tf32_optin_on_wiring_matches_run_wmma_tf32 ... ok
+failures:
+failures:
+    gemm_tf32_optin_on_matches_cpu_across_shapes
+    gemm_tf32x3_optin_on_matches_cpu_across_shapes
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.49s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_tf32_optin`
+     Running tests/gemm_tiled.rs (<home>/work/target-3596-r3-after/release/deps/gemm_tiled-f14f6d6faddef233)
+test tiled_f32_zero_k_returns_all_zero ... ok
+test tiled_f32_zero_dim_shape_returns_empty_without_launch ... ok
+test tiled_f16_runs_and_returns_expected_shape ... ok
+test tiled_f32_matches_cpu_reference_across_shapes ... ok
+test tiled_f32_matches_cpu_reference_k_stress ... ok
+test tiled_f32_outperforms_naive_at_4096 ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 2.90s
+     Running tests/gemm_tiled_naive_speedup_triage_1203.rs (<home>/work/target-3596-r3-after/release/deps/gemm_tiled_naive_speedup_triage_1203-e88e433b59ee9096)
+test triage_interleaved_naive_tiled ... ok
+test triage_classic_vs_pipeline_tiled ... ok
+test triage_reversed_order_tiled_then_naive ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.39s
+     Running tests/gemm_transposed_parity.rs (<home>/work/target-3596-r3-after/release/deps/gemm_transposed_parity-c16bc3e4acc463fa)
+test gemm_narrow_then_transpose_general_stride_falls_back_but_still_correct_on_real_device ... ok
+test gemm_tt_both_transposed_falls_back_but_still_correct_on_real_device ... ok
+test gemm_resident_lhs_nt_transposed_view_matches_contiguous_on_real_device ... ok
+test gemm_nt_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test gemm_tn_transposed_view_matches_contiguous_and_cpu_reference_on_real_device ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+     Running tests/gemm_transposed_perf.rs (<home>/work/target-3596-r3-after/release/deps/gemm_transposed_perf-79fa26bd9ad11e65)
+test nt_transposed_entry_vs_contiguous_across_shapes ... ok
+test tn_transposed_entry_vs_contiguous_across_shapes ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+     Running tests/gemm_wmma.rs (<home>/work/target-3596-r3-after/release/deps/gemm_wmma-d3762b31d603dacd)
+test wmma_f16_zero_dim_shape_returns_empty_without_launch ... ok
+test wmma_f16_zero_k_returns_all_zero ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.51s
+     Running tests/gemm_wmma_f16_opt.rs (<home>/work/target-3596-r3-after/release/deps/gemm_wmma_f16_opt-a2bda9c8ef5e2ca5)
+test wmma_f16_opt_k4096_stress_non_regression ... ok
+test wmma_f16_opt_zero_dim_shape_returns_empty_without_launch ... ok
+thread 'wmma_f16_opt_k4096_stress' (302159) panicked at crates/backend-cuda/tests/gemm_wmma_f16_opt.rs:57:5:
+test wmma_f16_opt_k4096_stress ... FAILED
+test wmma_f16_opt_zero_k_returns_all_zero ... ok
+test wmma_f16_opt_matches_reference_across_shapes ... ok
+failures:
+failures:
+    wmma_f16_opt_k4096_stress
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.72s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_wmma_f16_opt`
+     Running tests/gemm_wmma_tf32.rs (<home>/work/target-3596-r3-after/release/deps/gemm_wmma_tf32-bcd995086aa4f20d)
+test wmma_tf32_matches_reference_across_shapes ... ok
+test wmma_tf32_zero_dim_shape_returns_empty_without_launch ... ok
+test wmma_tf32_zero_k_returns_all_zero ... ok
+test wmma_tf32_routed_path_baselines_do_not_regress ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.36s
+     Running tests/gemm_wmma_tf32_opt.rs (<home>/work/target-3596-r3-after/release/deps/gemm_wmma_tf32_opt-13461ae8c05b3329)
+test wmma_tf32_opt_zero_k_returns_all_zero ... ok
+test wmma_tf32_routed_path_matches_reference_across_shapes ... ok
+test wmma_tf32_opt_zero_dim_shape_returns_empty_without_launch ... ok
+thread 'wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096' (302181) panicked at crates/backend-cuda/tests/gemm_wmma_tf32_opt.rs:330:5:
+test wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096 ... FAILED
+test wmma_tf32_routed_path_baselines_do_not_regress ... ok
+failures:
+failures:
+    wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.81s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_wmma_tf32_opt`
+     Running tests/gemm_wmma_tf32_staged.rs (<home>/work/target-3596-r3-after/release/deps/gemm_wmma_tf32_staged-768936e2f44f3879)
+test wmma_tf32_staged_zero_k_returns_all_zero ... ok
+test wmma_tf32_staged_matches_reference_across_shapes ... ok
+test wmma_tf32_staged_zero_dim_shape_returns_empty_without_launch ... ok
+thread 'wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096' (302201) panicked at crates/backend-cuda/tests/gemm_wmma_tf32_staged.rs:244:5:
+test wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096 ... FAILED
+failures:
+failures:
+    wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.66s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_wmma_tf32_staged`
+     Running tests/graph_capture_real_device.rs (<home>/work/target-3596-r3-after/release/deps/graph_capture_real_device-26938dee3007d536)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/graph_capture_real_device_optin_off.rs (<home>/work/target-3596-r3-after/release/deps/graph_capture_real_device_optin_off-0fb480c1e17d108a)
+test opt_in_off_keeps_legacy_stream_and_returns_none ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+     Running tests/host_view_real_device.rs (<home>/work/target-3596-r3-after/release/deps/host_view_real_device-9e571b2267426cc7)
+test default_cuda_memory_uses_pinned_staging_and_matches_pageable_bit_exact ... ok
+test with_host_view_cached_pinned_matches_download_bit_exact ... ok
+test with_host_view_matches_download_and_upload_source_bit_exact ... ok
+test with_host_view_using_kind_pinned_matches_pageable_and_download_bit_exact ... ok
+test with_host_view_reuses_staging_buffer_for_same_shape ... ok
+test pooled_memory_with_host_view_matches_download_bit_exact ... ok
+test release_host_staging_clears_cache_and_frees_reported_bytes ... ok
+test with_host_view_matches_download_on_managed_placement ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.28s
+     Running tests/host_view_staging_readout_ab_1336.rs (<home>/work/target-3596-r3-after/release/deps/host_view_staging_readout_ab_1336-06189867b6c367ad)
+test host_view_staging_readout_ab ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.01s
+     Running tests/huber_parity.rs (<home>/work/target-3596-r3-after/release/deps/huber_parity-14d005311bf1a4f1)
+test huber_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.46s
+     Running tests/im2col_col2im_parity.rs (<home>/work/target-3596-r3-after/release/deps/im2col_col2im_parity-9419b9de06bd64a6)
+test im2col_col2im_matches_cpu_across_shapes ... ok
+test im2col_matches_cpu_for_non_contiguous_input ... ok
+test im2col_col2im_special_values_pass_through ... ok
+test im2col_col2im_crosses_256_block_boundary ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.32s
+     Running tests/infer_chain_issue_breakdown_diag_3205.rs (<home>/work/target-3596-r3-after/release/deps/infer_chain_issue_breakdown_diag_3205-726746dbeba9eefc)
+test infer_chain_issue_breakdown_diag_3205 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+     Running tests/infer_chain_phase_diag_3189.rs (<home>/work/target-3596-r3-after/release/deps/infer_chain_phase_diag_3189-f87e8bd03d927ee0)
+test infer_chain_phase_diag_3189 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+     Running tests/infer_graph_capture_real_device.rs (<home>/work/target-3596-r3-after/release/deps/infer_graph_capture_real_device-f781ff8ff79f733d)
+test chain_capture_then_replay_is_bit_identical_to_uncaptured_chain ... ok
+test different_batch_recaptures_under_a_different_key ... ok
+test inapplicable_inputs_return_none ... ok
+test replay_reflects_in_place_weight_update ... ok
+test worker_thread_exit_with_populated_cache_does_not_abort ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/int8_mma_probe_real_device.rs (<home>/work/target-3596-r3-after/release/deps/int8_mma_probe_real_device-4e0682076f74e3fa)
+thread 'int8_mma_probe_exec_selected' (302294) panicked at crates/backend-cuda/tests/int8_mma_probe_real_device.rs:413:14:
+test int8_mma_probe_exec_selected ... FAILED
+failures:
+failures:
+    int8_mma_probe_exec_selected
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test int8_mma_probe_real_device`
+     Running tests/interpolate_parity.rs (<home>/work/target-3596-r3-after/release/deps/interpolate_parity-315d6055556a6b47)
+test interpolate_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.31s
+     Running tests/kl_div_parity.rs (<home>/work/target-3596-r3-after/release/deps/kl_div_parity-7ebc540db562750d)
+test kl_div_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.44s
+     Running tests/large_buffer_percall_alloc_ab_1149.rs (<home>/work/target-3596-r3-after/release/deps/large_buffer_percall_alloc_ab_1149-e4efefada20f321d)
+test large_buffer_percall_alloc_ab_record has been running for over 60 seconds
+test large_buffer_percall_alloc_ab_record ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1059.03s
+     Running tests/large_buffer_percall_alloc_transfer_triage.rs (<home>/work/target-3596-r3-after/release/deps/large_buffer_percall_alloc_transfer_triage-9950f53ed595026d)
+test large_buffer_percall_fixed_total_size_comparison ... ok
+test large_buffer_percall_alloc_transfer_triage_record has been running for over 60 seconds
+test large_buffer_percall_alloc_transfer_triage_record ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 304.88s
+     Running tests/layer_norm_parity.rs (<home>/work/target-3596-r3-after/release/deps/layer_norm_parity-0b5190e61800ae74)
+test backend_ops_layer_norm_matches_cpu_backend_ops_across_shapes ... ok
+test layer_norm_extreme_values_no_nan_inf ... ok
+test layer_norm_matches_backend_cpu_directly ... ok
+test layer_norm_matches_cpu_across_shapes ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.37s
+     Running tests/linalg_factor_parity.rs (<home>/work/target-3596-r3-after/release/deps/linalg_factor_parity-fdcbdafb9cc81879)
+test cholesky_matches_cpu_on_device ... ok
+test cholesky_non_spd_is_invalid_argument_on_device ... ok
+test nvrtc_compiles_and_loads_factor_kernels_on_device ... ok
+test eigh_matches_cpu_on_device ... ok
+test eigh_non_convergence_is_invalid_argument_on_device ... ok
+test qr_matches_cpu_on_device ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.48s
+     Running tests/linalg_lu_parity.rs (<home>/work/target-3596-r3-after/release/deps/linalg_lu_parity-f78ba01f09d4ded6)
+test nvrtc_compiles_and_loads_lu_kernels_on_device ... ok
+test lu_det_matches_cpu_on_device ... ok
+test lu_det_matches_cpu_on_device_set ... ok
+test lu_singular_maps_like_cpu_on_device ... ok
+test lu_solve_matches_cpu_on_device ... ok
+test lu_inv_matches_cpu_on_device ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.38s
+     Running tests/linear_forward_device_real_device.rs (<home>/work/target-3596-r3-after/release/deps/linear_forward_device_real_device-b3f958cdb06f0db6)
+test linear_forward_device_rejects_shape_mismatches_and_handles_empty_input_on_real_device ... ok
+test linear_forward_device_two_layer_chain_matches_cpu_reference_on_real_device ... ok
+test linear_forward_device_matches_gemm_resident_rhs_act_bit_exact_on_real_device ... ok
+test linear_forward_device_matches_cpu_reference_on_real_device ... ok
+test linear_forward_device_bench_cuda ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+     Running tests/log_softmax_backward_parity.rs (<home>/work/target-3596-r3-after/release/deps/log_softmax_backward_parity-723af923312ce38f)
+test log_softmax_backward_is_run_to_run_bit_identical ... ok
+test backend_ops_log_softmax_backward_matches_cpu_reference_across_shapes ... ok
+test log_softmax_backward_cancelling_upstream_grad_matches_cpu ... ok
+test log_softmax_backward_matches_cpu_across_shapes ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.32s
+     Running tests/log_softmax_parity.rs (<home>/work/target-3596-r3-after/release/deps/log_softmax_parity-53effdcc0bc15445)
+test log_softmax_run_to_run_is_bit_identical ... ok
+test log_softmax_extreme_and_nonfinite_rows ... ok
+test log_softmax_matches_cpu_across_shapes ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.54s
+     Running tests/managed_placement_bandwidth_real_device.rs (<home>/work/target-3596-r3-after/release/deps/managed_placement_bandwidth_real_device-e657743f1fd8a984)
+test managed_vs_device_only_bandwidth_sweep_on_real_hardware ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.52s
+     Running tests/managed_placement_real_device.rs (<home>/work/target-3596-r3-after/release/deps/managed_placement_real_device-b575fe989bf8935d)
+test managed_download_is_correct_without_caller_side_synchronize_on_real_hardware ... ok
+test managed_upload_download_roundtrip_is_bit_exact_on_real_hardware ... ok
+test managed_alloc_zeroed_returns_all_zero_on_real_hardware ... ok
+test managed_placement_does_not_leak_on_real_hardware ... ok
+test device_and_managed_placement_produce_bit_identical_resident_gemm_output_on_real_hardware ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.73s
+     Running tests/memory_real_device.rs (<home>/work/target-3596-r3-after/release/deps/memory_real_device-ddc97f7e65e31b20)
+test alloc_zeroed_returns_all_zero_on_real_hardware ... ok
+test pooled_memory_reuses_buffer_and_zero_fills_on_real_hardware ... ok
+test peak_allocated_bytes_matches_known_allocation_size_on_real_hardware ... ok
+test upload_download_roundtrip_is_bit_exact_on_real_hardware ... ok
+test repeated_alloc_drop_cycles_do_not_leak_device_memory ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+     Running tests/mma_tf32_vs_wmma_tf32_staged.rs (<home>/work/target-3596-r3-after/release/deps/mma_tf32_vs_wmma_tf32_staged-3d1a76d247e182df)
+test mma_tf32_matches_wmma_tf32_staged_across_shapes ... ok
+test mma_tf32_matches_wmma_tf32_staged_k4096_stress ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.37s
+     Running tests/mse_device_parity.rs (<home>/work/target-3596-r3-after/release/deps/mse_device_parity-13fa7c4222f6035c)
+test empty_and_error_paths ... ok
+test tracked_chain_without_sync_matches_host ... ok
+test workspace_reuse_without_intermediate_sync_keeps_bits ... ok
+test forward_device_matches_host_bits_and_cpu_reference ... ok
+test backward_device_matches_host_bits_and_cpu_reference ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+     Running tests/mse_parity.rs (<home>/work/target-3596-r3-after/release/deps/mse_parity-efd3c0e6a5749211)
+test mse_matches_cpu_across_shapes ... ok
+test mse_target_cache_is_not_shared_across_contexts ... ok
+test mse_target_cache_is_bit_identical_to_fresh ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.91s
+     Running tests/nll_parity.rs (<home>/work/target-3596-r3-after/release/deps/nll_parity-85ac3e4cb2a8844f)
+test nll_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.44s
+     Running tests/norm_backward_parity.rs (<home>/work/target-3596-r3-after/release/deps/norm_backward_parity-de48e4cac9ea4f72)
+test norm_backward_zero_element_contract ... ok
+test norm_backward_cancelling_input_detects_reduction_order_regression ... ok
+test norm_backward_numerical_stability_and_determinism ... ok
+test rmsnorm_backward_matches_cpu_across_shapes ... ok
+test layer_norm_backward_matches_cpu_across_shapes ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.69s
+     Running tests/paged_attention_judgement_contract.rs (<home>/work/target-3596-r3-after/release/deps/paged_attention_judgement_contract-a1a59b5bd4e415f8)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/paged_kv_real_device.rs (<home>/work/target-3596-r3-after/release/deps/paged_kv_real_device-1251e7ed94908e7e)
+test cuda_paged_attention_tolerance_constants_pinned ... ok
+test single_token_attention_returns_v_row_on_real_device ... ok
+test paged_kv_matches_cpu_reference_on_real_device ... ok
+test cuda_paged_attention_matrix_matches_cpu_reference ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.35s
+     Running tests/parity_nonregression.rs (<home>/work/target-3596-r3-after/release/deps/parity_nonregression-50dc104b88af4c7f)
+test parity_baselines_do_not_regress ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 9.02s
+     Running tests/pinned_h2d_real_device.rs (<home>/work/target-3596-r3-after/release/deps/pinned_h2d_real_device-757b26e82821965b)
+test pinned_h2d_sequential_uploads_match_plain_upload_bit_exact ... ok
+test pinned_h2d_upload_into_partial_update_matches_plain_bit_exact ... ok
+test pinned_h2d_upload_after_release_staging_is_bit_exact ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+     Running tests/pinned_h2d_upload_ab_1585.rs (<home>/work/target-3596-r3-after/release/deps/pinned_h2d_upload_ab_1585-edf84e795e1ef01f)
+test pinned_h2d_upload_ab ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+     Running tests/readback_default_prefetch_3227.rs (<home>/work/target-3596-r3-after/release/deps/readback_default_prefetch_3227-83e95c67c00e7322)
+test default_readback_goes_through_prefetch_pool ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+     Running tests/readback_prefetch_bit_match_3225.rs (<home>/work/target-3596-r3-after/release/deps/readback_prefetch_bit_match_3225-68d3f00c011e16a4)
+test prefetched_is_bit_identical_and_hits_pool_f32 ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.75s
+     Running tests/readback_pretouched_bit_match_1437.rs (<home>/work/target-3596-r3-after/release/deps/readback_pretouched_bit_match_1437-c6e1623104da4fef)
+test readback_fresh_and_pretouched_fresh_are_bit_identical_f16 ... ok
+test readback_fresh_and_pretouched_fresh_are_bit_identical_f32 ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+     Running tests/readback_reuse_bit_match_2108.rs (<home>/work/target-3596-r3-after/release/deps/readback_reuse_bit_match_2108-e8ed4c1e527467b4)
+test non_f32_falls_back_to_pretouched_f16 ... ok
+test pinned_reuse_is_bit_identical_and_reuses_staging_f32 ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+     Running tests/reduce_parity.rs (<home>/work/target-3596-r3-after/release/deps/reduce_parity-ec807c215bfab6a0)
+test empty_reduction_semantics_match_cpu_on_real_device ... ok
+test sum_and_max_are_run_to_run_deterministic_on_real_device ... ok
+test nan_and_infinity_semantics_match_cpu_on_real_device ... ok
+test min_matches_cpu_reference_on_real_device ... ok
+test max_matches_cpu_reference_on_real_device ... ok
+test sum_matches_cpu_reference_on_real_device ... ok
+test argmax_and_argmin_empty_reduction_semantics_match_cpu_on_real_device ... ok
+test argmax_and_argmin_match_cpu_reference_for_transposed_view_on_real_device ... ok
+test argmax_and_argmin_are_run_to_run_deterministic_on_real_device ... ok
+test argmax_and_argmin_nan_and_infinity_semantics_match_cpu_on_real_device ... ok
+test argmax_and_argmin_match_cpu_reference_on_real_device ... ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+     Running tests/relu_mask_cpu_reference.rs (<home>/work/target-3596-r3-after/release/deps/relu_mask_cpu_reference-387bd779043a077c)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/relu_mask_device_parity.rs (<home>/work/target-3596-r3-after/release/deps/relu_mask_device_parity-7502f8982e7aa237)
+test error_paths_are_typed ... ok
+test zero_numel_returns_empty_output ... ok
+test chain_with_relu_mask_matches_per_op_host_composition ... ok
+test transposed_bit_identical_including_view_offsets ... ok
+test row_major_bit_identical_including_view_offsets ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+     Running tests/rmsnorm_backward_parity.rs (<home>/work/target-3596-r3-after/release/deps/rmsnorm_backward_parity-a5b149f469400dd5)
+test rmsnorm_backward_matches_cpu_across_shapes ... ok
+test rmsnorm_backward_dw_split_matches_cpu_across_shapes ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 4.24s
+     Running tests/rmsnorm_parity.rs (<home>/work/target-3596-r3-after/release/deps/rmsnorm_parity-b0b844fdda2fe2f4)
+test backend_ops_rmsnorm_matches_cpu_backend_ops_across_shapes ... ok
+test rmsnorm_matches_backend_cpu_directly ... ok
+test rmsnorm_matches_cpu_across_shapes ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.41s
+     Running tests/rnn_cell_parity.rs (<home>/work/target-3596-r3-after/release/deps/rnn_cell_parity-4d0e43473fbce876)
+test rnn_cell_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.47s
+     Running tests/scalar_op_parity.rs (<home>/work/target-3596-r3-after/release/deps/scalar_op_parity-2fee9b367f48e471)
+test scalar_op_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.64s
+     Running tests/scan_parity.rs (<home>/work/target-3596-r3-after/release/deps/scan_parity-b4af9e88ae7c762a)
+test scan_matches_cpu_for_large_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.33s
+     Running tests/setmaxnreg_probe_dec_accel_real_device.rs (<home>/work/target-3596-r3-after/release/deps/setmaxnreg_probe_dec_accel_real_device-848b5fd82e2ff403)
+test setmaxnreg_dec_accel_probe ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+     Running tests/setmaxnreg_probe_dec_base_real_device.rs (<home>/work/target-3596-r3-after/release/deps/setmaxnreg_probe_dec_base_real_device-53ee44ac03e79a11)
+test setmaxnreg_dec_base_probe ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+     Running tests/setmaxnreg_probe_incdec_accel_real_device.rs (<home>/work/target-3596-r3-after/release/deps/setmaxnreg_probe_incdec_accel_real_device-adf157fd20cf5f78)
+test setmaxnreg_incdec_accel_probe ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+     Running tests/setmaxnreg_probe_incdec_base_real_device.rs (<home>/work/target-3596-r3-after/release/deps/setmaxnreg_probe_incdec_base_real_device-5002964d4fe5eae6)
+test setmaxnreg_incdec_base_probe ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+     Running tests/sgd_device_real_device.rs (<home>/work/target-3596-r3-after/release/deps/sgd_device_real_device-385a01e6f2c6c5b9)
+test momentum_sgd_matches_cpu_reference_across_100_steps ... ok
+test momentum_sgd_matches_cpu_reference_across_multiple_steps ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+     Running tests/sm121_isa_probe_compile.rs (<home>/work/target-3596-r3-after/release/deps/sm121_isa_probe_compile-b03f2da268f241c3)
+test sm121_isa_probe_compile_matrix ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.90s
+     Running tests/sm121_isa_probe_exec_real_device.rs (<home>/work/target-3596-r3-after/release/deps/sm121_isa_probe_exec_real_device-1794565ac28d1722)
+thread 'sm121_isa_probe_exec_selected' (350753) panicked at crates/backend-cuda/tests/sm121_isa_probe_exec_real_device.rs:32:14:
+test sm121_isa_probe_exec_selected ... FAILED
+failures:
+failures:
+    sm121_isa_probe_exec_selected
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test sm121_isa_probe_exec_real_device`
+     Running tests/sm121_isa_probe_registry.rs (<home>/work/target-3596-r3-after/release/deps/sm121_isa_probe_registry-b32e7bbf6a0fcdd1)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+     Running tests/softmax_parity.rs (<home>/work/target-3596-r3-after/release/deps/softmax_parity-eeee0b523a6dd692)
+test backend_ops_softmax_matches_cpu_backend_ops_across_shapes ... ok
+test softmax_numerically_stable_for_extreme_inputs ... ok
+test softmax_matches_cpu_across_shapes ... ok
+test softmax_matches_backend_cpu_directly ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.45s
+     Running tests/sort_topk_parity.rs (<home>/work/target-3596-r3-after/release/deps/sort_topk_parity-4a5004b52d35b774)
+test sort_matches_cpu_for_non_contiguous_input ... ok
+test topk_matches_cpu_across_k_and_largest ... ok
+test sort_matches_cpu_across_shapes ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.31s
+     Running tests/specialized_mma_f16_sweep_1159.rs (<home>/work/target-3596-r3-after/release/deps/specialized_mma_f16_sweep_1159-681a1b42fec9a02b)
+test specialized_mma_f16_sweep_1159_all_shapes_and_presets ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+     Running tests/specialized_mma_f16_triage.rs (<home>/work/target-3596-r3-after/release/deps/specialized_mma_f16_triage-323d5fe37aea8657)
+test specialized_mma_f16_triage_exact_integer_inputs ... ok
+test specialized_mma_f16_triage_dump ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.35s
+     Running tests/specialized_mma_parity.rs (<home>/work/target-3596-r3-after/release/deps/specialized_mma_parity-763b9390cb0483c7)
+test specialized_mma_f16_handles_k_zero_noop_with_misaligned_n ... ok
+test specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape ... ok
+test specialized_mma_f16_static_nk_reuses_across_dynamic_m ... ok
+test specialized_mma_kernel_handle_compile_reuses_process_local_module_cache ... ok
+test specialized_mma_f16_matches_default_and_reference_across_shapes ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.05s
+     Running tests/splitk_reorder_error_host_model.rs (<home>/work/target-3596-r3-after/release/deps/splitk_reorder_error_host_model-2ce35ee0e63a8c91)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/tensor_core_real_device.rs (<home>/work/target-3596-r3-after/release/deps/tensor_core_real_device-47eb1d20f2c2b2ec)
+thread 'tensor_core_parity_record' (350824) panicked at crates/backend-cuda/tests/tensor_core_real_device.rs:462:5:
+test tensor_core_parity_record ... FAILED
+test tensor_core_tflops_record ... ok
+failures:
+failures:
+    tensor_core_parity_record
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.22s
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test tensor_core_real_device`
+     Running tests/tma_probe_real_device.rs (<home>/work/target-3596-r3-after/release/deps/tma_probe_real_device-9fd88c3361ec9a54)
+test tma_execution_probe ... ok
+test tma_execution_probe_cta ... ok
+test tma_nvrtc_compile_probe ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+     Running tests/transpose_parity.rs (<home>/work/target-3596-r3-after/release/deps/transpose_parity-8269b8a19a092a97)
+test launch_tiled_transposed_f32_zero_clears_stale_buffer_when_k_is_zero ... ok
+test transpose_f16_all_variants_bit_exact_match_cpu_reference ... ok
+test transpose_f32_all_variants_bit_exact_match_cpu_reference ... ok
+test tiled_transposed_f32_matches_host_transposed_tiled_and_cpu_reference ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.73s
+     Running tests/typed_ops_bf16_parity.rs (<home>/work/target-3596-r3-after/release/deps/typed_ops_bf16_parity-3736f18e098704d6)
+test typed_ops_bf16_matches_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.55s
+     Running tests/typed_ops_f16_parity.rs (<home>/work/target-3596-r3-after/release/deps/typed_ops_f16_parity-f3cac231cbf5f9c0)
+test typed_f16_elementwise_and_reduction_match_cpu_backend_ops_rounded ... ok
+test typed_f16_gemm_matches_cpu_reference_rounded ... ok
+test typed_f16_gemm_is_bit_identical_to_cuda_gemm_auto_run_f16 ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.02s
+     Running tests/typed_ops_f64_contract.rs (<home>/work/target-3596-r3-after/release/deps/typed_ops_f64_contract-306020dd07b86760)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/typed_ops_f64_parity.rs (<home>/work/target-3596-r3-after/release/deps/typed_ops_f64_parity-0d469e678dd328d7)
+test typed_f64_empty_and_boundary_shapes_match_cpu_semantics ... ok
+test typed_f64_gemm_is_bit_identical_to_reference_fma ... ok
+test typed_f64_elementwise_and_reduction_match_cpu_reference ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+     Running tests/unique_parity.rs (<home>/work/target-3596-r3-after/release/deps/unique_parity-6bfe63f4e5cf415f)
+test unique_matches_cpu_across_sizes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.28s
+     Running tests/where_masked_fill_parity.rs (<home>/work/target-3596-r3-after/release/deps/where_masked_fill_parity-b6cc58d42c23edcc)
+test where_masked_fill_matches_cpu_across_shapes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.31s
+     Running tests/wmma_f16_opt_perf_triage.rs (<home>/work/target-3596-r3-after/release/deps/wmma_f16_opt_perf_triage-f90c0dd09fb12bfd)
+test wmma_f16_opt_perf_triage_record ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.78s
+     Running unittests examples/cuda_floor_bench.rs (<home>/work/target-3596-r3-after/release/examples/cuda_floor_bench-1ac851f946b75703)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running unittests examples/device_attributes_dump.rs (<home>/work/target-3596-r3-after/release/examples/device_attributes_dump-0577af17d7c55e74)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running unittests examples/gemm_candidate_event_ab_3215.rs (<home>/work/target-3596-r3-after/release/examples/gemm_candidate_event_ab_3215-2e42194c544db6f1)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running unittests examples/gemm_tf32x3_kernel_time_bench.rs (<home>/work/target-3596-r3-after/release/examples/gemm_tf32x3_kernel_time_bench-f9df7fba86493f74)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running unittests examples/wmma_tolerance_probe.rs (<home>/work/target-3596-r3-after/release/examples/wmma_tolerance_probe-e81cb680617fef6b)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 49 filtered out; finished in 0.00s
+   Doc-tests fandhe_ai_backend_cuda
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: 12 targets failed:
+rc=101
