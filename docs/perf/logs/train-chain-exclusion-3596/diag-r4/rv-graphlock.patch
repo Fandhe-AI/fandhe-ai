@@ -1,0 +1,18 @@
+diff --git a/crates/backend-cuda/src/graph.rs b/crates/backend-cuda/src/graph.rs
+index c24085107..2d1294ae6 100644
+--- a/crates/backend-cuda/src/graph.rs
++++ b/crates/backend-cuda/src/graph.rs
+@@ -1709,11 +1709,8 @@ fn with_train_graph_workspaces_locked<R>(
+     epoch: u64,
+     f: impl FnOnce() -> R,
+ ) -> Result<Option<R>, CudaError> {
+-    let mse = context_cache::cached_mse(device)?;
+-    match gemm.with_workspace_epoch(epoch, || mse.with_partial_workspace_locked(f))? {
+-        None => Ok(None),
+-        Some(r) => r.map(Some),
+-    }
++    let _ = device;
++    gemm.with_workspace_epoch(epoch, f)
+ }
+ 
+ /// [`crate::ops::CudaBackendOps::train_chain_captured`] の実体（イシュー #3260）。`key` に対応する

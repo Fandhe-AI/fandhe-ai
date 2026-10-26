@@ -1,0 +1,16 @@
+diff --git a/crates/backend-cuda/src/ops.rs b/crates/backend-cuda/src/ops.rs
+index a1c49a2c7..87b955234 100644
+--- a/crates/backend-cuda/src/ops.rs
++++ b/crates/backend-cuda/src/ops.rs
+@@ -4090,10 +4090,7 @@ impl BackendOps for CudaBackendOps {
+         // （3 つの capture 入口は `is_capturable_stream` 前提）ため、driver にも
+         // `begin_driver_call` にも触れず素通りにする。未構築（`None`）は後から Created の
+         // デバイスが作られうるので、必ず下の現行経路（トークンを取る）へ倒す（fail-closed）。
+-        if matches!(
+-            crate::device::resolved_stream_kind(self.ordinal),
+-            Some(crate::device::StreamKind::Legacy)
+-        ) {
++        if true {
+             return Ok(fandhe_ai_tensor_core::DeviceChainScope::none());
+         }
+         let token = context_cache::begin_driver_call(self.ordinal, &[])?;

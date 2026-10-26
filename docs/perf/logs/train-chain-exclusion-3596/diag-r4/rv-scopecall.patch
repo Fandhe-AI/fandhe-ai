@@ -1,0 +1,30 @@
+diff --git a/crates/autodiff/src/optim/device_store/train_chain.rs b/crates/autodiff/src/optim/device_store/train_chain.rs
+index 88094a36d..245c04b18 100644
+--- a/crates/autodiff/src/optim/device_store/train_chain.rs
++++ b/crates/autodiff/src/optim/device_store/train_chain.rs
+@@ -442,25 +442,6 @@ impl DeviceParamStore {
+         // スレッドは capture を開始できない。関数を抜けるまで保持する（RAII。`?`・panic でも解放）。
+         // 取得は書き込み前なので、一過性の衝突・未対応は何も変えずに返す（再試行は呼び出し元の
+         // `train_step_device_chain` が待機して行う）。それ以外の失敗は従来どおり poison する。
+-        let _chain_scope = match ops.begin_device_chain_scope() {
+-            Ok(scope) => scope,
+-            Err(e) => {
+-                self.train_chain_grad = Some(grad);
+-                if matches!(
+-                    e,
+-                    BackendError::Unsupported(_)
+-                        | BackendError::DeviceContextCaptureInProgress { .. }
+-                ) {
+-                    if velocity_is_new {
+-                        self.velocity = None;
+-                    }
+-                } else {
+-                    self.poisoned.store(true, Ordering::SeqCst);
+-                }
+-                return Err(e);
+-            }
+-        };
+-
+         let reuse_bufs = self.train_chain_bufs.take().filter(|b| b.key == key);
+         let reuse_loss = self.train_chain_loss.take();
+         if reuse_loss.is_some() {
