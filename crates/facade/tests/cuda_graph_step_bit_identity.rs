@@ -84,7 +84,9 @@ mod cuda_graph_step_common;
 
 use cuda_graph_step_common::{LR, STEPS, print_bit_identity_report, train_on_cuda};
 
-/// 非 capture 経路（opt-in OFF。既定）の基準値を出力する。
+/// 非 capture 経路（step opt-in OFF。既定）の基準値を出力する。なお #3594 以降は学習 capture が
+/// 既定 ON のため OFF 側も Created stream 上を走り、Legacy を覆わない。Legacy の確認が要るときは
+/// `FANDHE_AI_CUDA_GRAPH_TRAIN=0` を併せて付ける。
 ///
 /// `FANDHE_AI_CUDA_GRAPH_STEP` が未設定であれば opt-in は既定 OFF の
 /// ままのはず（`--exact` 単独実行が前提。ファイル冒頭コメント参照）。

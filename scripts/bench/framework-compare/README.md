@@ -2042,7 +2042,7 @@ main の before を、gemm N=256/512/1024/2048 と train／infer（size=64）の
 
 ## 学習ステップ全体の Graph capture A/B（`run_ab_train_graph_cuda.sh`・`judge_train_graph_ab.py`、イシュー #3261）
 
-GB10 専用。#3260 の opt-in（`FANDHE_AI_CUDA_GRAPH_TRAIN=1`・既定 OFF）を train CUDA で 5 round 計測する。同一バイナリ・同一コミットで腕の差は環境変数だけ（off = 3 変数すべて未設定、on = TRAIN=1 のみ）。セルは {chain, reuse, fresh} × {off, on}。判定セルは chain（capture が届く唯一の経路。計測専用パッチ `docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch` を runner ツリーにだけ適用）、reuse・fresh は stream 変更のみの対照セル。計測前に前提ゲート R0〜R2（既存回帰・結線・2 プロセス bit 一致）を同じ HEAD で実行する。規則は `docs/perf/logs/train-step-graph-ab-3261/RULE.txt`、手順は同 `README.md`。判定は `judge_train_graph_ab.py`（終了コード ADOPT=0・REJECT=3・UNDETERMINED=4・入力不正=2。`judge_train_graph_ab_test.py` は CI で実行）。ADOPT でも既定の反転は本件の範囲外（設計 §8.6。所有者判断）。
+GB10 専用。#3260 の opt-in（`FANDHE_AI_CUDA_GRAPH_TRAIN=1`・既定 OFF）を train CUDA で 5 round 計測する。同一バイナリ・同一コミットで腕の差は環境変数だけ（off = 3 変数すべて未設定、on = TRAIN=1 のみ）。セルは {chain, reuse, fresh} × {off, on}。判定セルは chain（capture が届く唯一の経路。計測専用パッチ `docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch` を runner ツリーにだけ適用）、reuse・fresh は stream 変更のみの対照セル。計測前に前提ゲート R0〜R2（既存回帰・結線・2 プロセス bit 一致）を同じ HEAD で実行する。規則は `docs/perf/logs/train-step-graph-ab-3261/RULE.txt`、手順は同 `README.md`。判定は `judge_train_graph_ab.py`（終了コード ADOPT=0・REJECT=3・UNDETERMINED=4・入力不正=2。`judge_train_graph_ab_test.py` は CI で実行）。ADOPT でも既定の反転は本件の範囲外（設計 §8.6。所有者判断）。注: #3594 以降は既定 ON（設計 §8.12）。ただし本 bench は crates.io のピン版（0.11.0）を使うため次のリリースまで影響しない。以後の A/B では off 腕を `FANDHE_AI_CUDA_GRAPH_TRAIN=0` にする必要がある（`run_ab_train_graph_cuda.sh` の「off = 未設定」の更新は本件の範囲外）。
 
 ## bench-fandhe 是正前後の新旧併記（`run_ab_bench_fandhe_symmetry.sh`・`judge_bench_fandhe_symmetry_ab.py`、イシュー #3266）
 
