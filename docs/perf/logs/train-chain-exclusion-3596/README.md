@@ -12,6 +12,7 @@
 |---|---|
 | `judge-3596.md`・`judge-3596.exit` | 判定ツールの出力と終了コード（REGRESSION・3） |
 | `RULE.txt` | 計測前に固定した事前登録規則（腕・前提ゲート・hard 条件・判定・限界） |
+| `RULE-r2.txt` | 原因修正（学習 graph の起動で MSE ワークスペースのロックを取る。設計記録 §8.11.6）後の再実測の事前登録規則（計測前に登録。閾値は RULE.txt と同一）。ランナーは `AB_RULE_NAME=RULE-r2.txt` で読む |
 | `gb10/` | マスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`#[ignore]` 全件の結果と分類・`judge-3596.md`／`.exit` |
 
 ランナー: `scripts/bench/framework-compare/run_ab_train_chain_exclusion_cuda.sh`、判定: `judge_train_chain_exclusion_ab.py`（テスト: `_test.py`、CI で実行）。
@@ -24,6 +25,10 @@
 | backend-cuda・facade の `#[ignore]` 全件を #3597 より前の main と突き合わせ、新しい fail がない | **新規 fail 1 件（G1）**。ほか補足実行の `small_shape_matrix_unit_has_no_floor_tflops_record` は単独実行 3/3 pass のフレーク。詳細 `gb10/ignored-compare-3596.md` |
 | chain セル（1 スレッド）で排他あり・なしの非後退（既定 OFF・opt-in ON） | **未計測**（前提ゲート g2 の失敗でランナーが停止。`gb10/skipped-train-chain-exclusion-3596-gb10.log`）。g3・g4（2 プロセス bit 一致 BITS 90 行・差分空）は合格 |
 | `TRAIN_GRAPH_DEFAULT_ENABLED` が `false` のまま | 確認済み（`crates/backend-cuda/src/graph.rs` の const assert） |
+
+## r2 再実測（RULE-r2）の結果
+
+**未実測**（GB10 に到達できていない。ラベル `3596-r2-gb10`・出力先 `gb10-r2/`）。上の RULE.txt の記録（REGRESSION）は残す。
 
 ## 設計の要点
 

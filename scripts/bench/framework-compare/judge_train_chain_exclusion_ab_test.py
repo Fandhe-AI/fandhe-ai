@@ -243,5 +243,17 @@ class RuleDriftGuardTest(unittest.TestCase):
         self.assertIn("ratio <= 1.00", self.text)
 
 
+class RuleR2ParseTest(unittest.TestCase):
+    """別名規則 RULE-r2.txt（#3596 再実測）が行頭アンカー 3 項目を読めること。閾値・PREGATES は不変。"""
+
+    def test_rule_r2_parses(self):
+        path = REAL_RULE.replace("RULE.txt", "RULE-r2.txt")
+        sha, rule = judge.read_rule(path)
+        self.assertEqual(len(sha), 64)
+        self.assertEqual(rule["patch"], "92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819")
+        self.assertEqual(rule["before"][:9], "f7fe6b4df")
+        self.assertEqual(rule["crates_ref"][:9], "63f85eff2")
+
+
 if __name__ == "__main__":
     unittest.main()

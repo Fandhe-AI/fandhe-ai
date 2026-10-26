@@ -53,6 +53,19 @@ use crate::nvrtc::compile_ptx;
 use crate::pool::CudaAllocator;
 use crate::warp_geometry::WarpGeometry;
 
+/// `m` のロックを `f` の間だけ保持する。汚染は `detail` 付きの型付きエラーにする
+/// （`with_partial_workspace_locked` の実体。CUDA なしでもテストできるよう汎用化）。
+pub(crate) fn with_mutex_locked<T, R>(
+    m: &Mutex<T>,
+    detail: &str,
+    f: impl FnOnce() -> R,
+) -> Result<R, CudaError> {
+    let _guard = m.lock().map_err(|_| CudaError::InvalidElementwiseShape {
+        detail: detail.to_string(),
+    })?;
+    Ok(f())
+}
+
 /// `numel`（`pred`／`target`／`dpred` の要素数）が `i32::MAX` に収まる
 /// ことを検証する（`elementwise.rs::validate_elementwise_len` と同じ
 /// 理由。カーネル引数 `int numel` は C の 32bit 符号付き整数のため）。
@@ -209,6 +222,25 @@ impl CudaMse {
             target_cache: Mutex::new(None),
             partial_workspace: Mutex::new(None),
         })
+    }
+
+    /// 永続 `partial` ワークスペースのロックを `f` の間だけ保持する（イシュー #3596）。
+    ///
+    /// 学習 graph（`graph.rs::launch_train_chain` の capture 結果）は本ワークスペースの
+    /// アドレスを焼き込む。replay・初回 launch は `launch_mse_loss_device_f32` を通らないため、
+    /// 非 capture の forward が「partial → finalize」の 2 起動の間にいる最中に graph が
+    /// 同一 stream へ割り込むと、finalize が graph の partial を読んで他 step の loss を返す。
+    /// これを防ぐため graph の起動側（`graph.rs::with_train_graph_workspaces_locked`）が
+    /// 本メソッドで同じ mutex を取る。mutex 汚染は型付きエラー。
+    pub(crate) fn with_partial_workspace_locked<R>(
+        &self,
+        f: impl FnOnce() -> R,
+    ) -> Result<R, CudaError> {
+        with_mutex_locked(
+            &self.partial_workspace,
+            "mse partial workspace mutex poisoned",
+            f,
+        )
     }
 
     /// `target` のデバイスバッファを（可能なら再利用して）`f` に渡す。
@@ -623,5 +655,32 @@ mod tests {
         let before = c.upload;
         assert_eq!(run(&mut slot, &mut c, &a, false).unwrap(), a);
         assert_eq!(c.upload, before + 1);
+    }
+
+    #[test]
+    fn with_mutex_locked_releases_after_ok_and_panic() {
+        let m = Mutex::new(0u32);
+        assert_eq!(with_mutex_locked(&m, "x", || 7).unwrap(), 7);
+        assert!(m.try_lock().is_ok(), "Ok 後はロックが解放される");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = with_mutex_locked(&m, "x", || panic!("boom"));
+        }));
+        assert!(r.is_err());
+        // panic でガードが落ちると mutex は汚染され、以後は型付きエラーになる。
+        match with_mutex_locked(&m, "poisoned-detail", || 1) {
+            Err(CudaError::InvalidElementwiseShape { detail }) => {
+                assert_eq!(detail, "poisoned-detail")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_mutex_locked_holds_lock_during_closure() {
+        let m = Mutex::new(());
+        with_mutex_locked(&m, "x", || {
+            assert!(m.try_lock().is_err(), "f の間はロック保持");
+        })
+        .unwrap();
     }
 }

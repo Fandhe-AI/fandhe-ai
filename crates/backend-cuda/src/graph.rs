@@ -1653,7 +1653,7 @@ fn capture_train_chain(
     // いれば焼き込み済み領域は解放済みの可能性があるため、何も実行せず graph を捨てる。
     let gemm = context_cache::cached_gemm(device)
         .map_err(|e| BeforeLaunch(crate::memory::map_cuda_error(e)))?;
-    let guarded = gemm.with_workspace_epoch(captured_epoch, || {
+    let guarded = with_train_graph_workspaces_locked(device, &gemm, captured_epoch, || {
         if let Err(e) = graph.upload() {
             return Err((true, e));
         }
@@ -1685,6 +1685,35 @@ fn capture_train_chain(
         }
     }
     Ok(graph)
+}
+
+/// 学習 graph の起動（replay・初回 launch）を、graph が焼き込む ordinal 共有の永続
+/// ワークスペースのロック下で行う（イシュー #3596）。
+///
+/// graph は GEMM の `device_workspace`（transposed／staged）と MSE の `partial_workspace` の
+/// アドレスを焼き込む。非 capture のチェーンは各ワークスペースを「ロック＋stream 順序」で
+/// 守っているため、graph の起動側も同じロックを取らないと、他スレッドの MSE
+/// 「partial → finalize」の間に graph が割り込み、finalize が他 step の partial を読む
+/// （G1 の loss 取り違え。`docs/backend-cuda-graph-step-capture-design.md` §8.11.6）。
+///
+/// **ロック順は GEMM `device_workspace` → MSE `partial_workspace` に固定**する。非 capture の
+/// 経路はこの 2 つを入れ子で取らず（各部品が 1 つずつ取って放す）、graph の launch は
+/// 積むだけで他スレッドを待たないため、待ちの輪はできない。capture する部品に新しい
+/// ordinal 共有の永続ワークスペースを足したら、ここにそのロックも足すこと。
+///
+/// 戻り値は `CudaGemm::with_workspace_epoch` と同じ（世代不一致は `Ok(None)`、mutex 汚染は
+/// `Err`）。MSE の mutex 汚染も `Err`（launch 前の失敗）。
+fn with_train_graph_workspaces_locked<R>(
+    device: &Arc<CudaDevice>,
+    gemm: &crate::gemm::CudaGemm,
+    epoch: u64,
+    f: impl FnOnce() -> R,
+) -> Result<Option<R>, CudaError> {
+    let mse = context_cache::cached_mse(device)?;
+    match gemm.with_workspace_epoch(epoch, || mse.with_partial_workspace_locked(f))? {
+        None => Ok(None),
+        Some(r) => r.map(Some),
+    }
 }
 
 /// [`crate::ops::CudaBackendOps::train_chain_captured`] の実体（イシュー #3260）。`key` に対応する
@@ -1722,8 +1751,9 @@ pub(crate) fn run_captured_train_chain(
         // mutex 下で確認してから launch する（#3260 codex P0。別 store の大きい step が
         // ワークスペースを拡張すると旧領域は解放され、再生すると解放済み領域を読み書きする）。
         // 世代が進んでいれば graph を捨て、この step は既存チェーンへ戻す。
-        let guarded = context_cache::cached_gemm(device)
-            .and_then(|gemm| gemm.with_workspace_epoch(workspace_epoch, || graph.launch()));
+        let guarded = context_cache::cached_gemm(device).and_then(|gemm| {
+            with_train_graph_workspaces_locked(device, &gemm, workspace_epoch, || graph.launch())
+        });
         let launch_result = match guarded {
             Ok(Some(r)) => r,
             Ok(None) => {
