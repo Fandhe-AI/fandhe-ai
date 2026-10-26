@@ -5,7 +5,7 @@
 #
 # 1 ツリー・1 ビルド・1 バイナリ: bench-fandhe は runner ツリーの `crates/facade` への
 # `[patch.crates-io.fandhe-ai]` path patch（`--config` 引数のみ。コミットしない）で 1 回だけビルドし、
-# off／on の差は環境変数 FANDHE_AI_CUDA_GRAPH_TRAIN だけにする（on = `=1`、off = 未設定）。
+# off／on の差は環境変数 FANDHE_AI_CUDA_GRAPH_TRAIN だけにする（on = `=1`、off = `=0` を明示。#3594 の既定 ON 化後も off 腕が ON にならないようにする）。
 # セルは {chain, reuse, fresh} × {off, on}。判定セルは chain（capture が届く唯一の経路。計測専用パッチ
 # docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch が `--mode chain` を足す）。
 # 計測の前に前提ゲート R0〜R2（実機テスト）を同じ HEAD・同じ機体で実行する（RULE.txt [前提ゲート]）。
@@ -187,14 +187,14 @@ echo "$(sha256_of "$BIN_C")  bench-candle-${LABEL}" >"$OUT/sha-candle-${LABEL}.t
 } >"$ENV_INFO"
 
 # ---- 前提ゲート R0〜R2（RULE.txt [前提ゲート]。各ログに rc= 行を残す。不合格なら計測しない） ----
-# gate_run <log> <env_mode: off|on> <cmd...>: 環境変数は off で 3 変数すべて未設定、on で TRAIN=1 のみ。
+# gate_run <log> <env_mode: off|on> <cmd...>: 環境変数は off で TRAIN=0（明示）・STEP/INFER 未設定、on で TRAIN=1 のみ。
 gate_run() {
   local log=$1 mode=$2 rc
   shift 2
   if [[ "$mode" == "on" ]]; then
     env -u FANDHE_AI_CUDA_GRAPH_STEP -u FANDHE_AI_CUDA_GRAPH_INFER FANDHE_AI_CUDA_GRAPH_TRAIN=1 "$@" >"$log" 2>&1
   else
-    env -u FANDHE_AI_CUDA_GRAPH_TRAIN -u FANDHE_AI_CUDA_GRAPH_STEP -u FANDHE_AI_CUDA_GRAPH_INFER "$@" >"$log" 2>&1
+    env -u FANDHE_AI_CUDA_GRAPH_STEP -u FANDHE_AI_CUDA_GRAPH_INFER FANDHE_AI_CUDA_GRAPH_TRAIN=0 "$@" >"$log" 2>&1
   fi
   rc=$?
   echo "rc=${rc}" >>"$log"
@@ -286,7 +286,7 @@ run_arm() { # <arm> <round>
       case "$arm" in
         *-on) env -u FANDHE_AI_CUDA_GRAPH_STEP -u FANDHE_AI_CUDA_GRAPH_INFER FANDHE_AI_CUDA_GRAPH_TRAIN=1 \
                 BENCH_PARAM_DIGEST="$digest" "$BIN_F" --task train --device cuda --mode "$mode" --out "$res" 2>"$errf" ;;
-        *-off) env -u FANDHE_AI_CUDA_GRAPH_TRAIN -u FANDHE_AI_CUDA_GRAPH_STEP -u FANDHE_AI_CUDA_GRAPH_INFER \
+        *-off) env -u FANDHE_AI_CUDA_GRAPH_STEP -u FANDHE_AI_CUDA_GRAPH_INFER FANDHE_AI_CUDA_GRAPH_TRAIN=0 \
                 BENCH_PARAM_DIGEST="$digest" "$BIN_F" --task train --device cuda --mode "$mode" --out "$res" 2>"$errf" ;;
       esac
       ;;
