@@ -50,7 +50,7 @@
 | A3-d | param groups: `DeviceParamStore` 常駐経路 | 同上 | 保留 | 起票する（GPU 常駐更新の経路。実機 parity が要る） | 公開形・数値契約（bit 一致の維持を確認） | なし |
 | A3-e | param groups: `Lbfgs` 併用 | 同上 | 保留 | 対象外に分類する案を推奨（L-BFGS は単一のパラメータ集合を前提にする方式のため）。所有者が併用を望む場合のみ起票する | 公開形 | なし |
 | A3-f | param groups: スロット添字の公開ヘルパー | `docs/compat-api-scope.md:1842`・`docs/autodiff-param-groups-decision.md` §13.4（`named_parameters()` の位置が契約。利用例テスト `named_parameters_position_is_slot_index_for_groups`） | 保留 | 対象外に分類する（契約で代替済み） | 不要（所有者の確認のみ） | なし |
-| A3-g | `compile()` の `Optimizer` enum に無い 4 種（Adadelta・Adamax・NAdam・RAdam）の経路。issue 本文に無いが同じ decision doc に載る | `docs/autodiff-param-groups-decision.md` §12.6・§13.5。`Optimizer` enum は 6 種（`crates/facade/src/compat/training.rs:240-`） | 保留 | 起票する | 公開形（`Optimizer` の variant 追加） | なし |
+| A3-g | `compile()` の `Optimizer` enum に無い 4 種（Adadelta・Adamax・NAdam・RAdam）の経路。issue 本文に無いが同じ decision doc に載る | `docs/autodiff-param-groups-decision.md` §12.6・§13.5。`Optimizer` enum は 7 種（Sgd・AdamW・Adam・RmsProp・Adagrad・Lamb・Lbfgs）（`crates/facade/src/compat/training.rs:240-`） | 保留 | 起票する | 公開形（`Optimizer` の variant 追加） | なし |
 
 ### 4.2 群 B: 相互運用の拡張候補
 
