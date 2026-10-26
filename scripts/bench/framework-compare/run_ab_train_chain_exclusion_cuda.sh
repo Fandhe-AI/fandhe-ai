@@ -12,6 +12,7 @@
 # 呼び出し例:
 #   AB_BEFORE_FACADE_PATH=<abs>/before/crates/facade AB_AFTER_FACADE_PATH=<abs>/after/crates/facade \
 #   bash run_ab_train_chain_exclusion_cuda.sh 3596-gb10
+# 別名の規則で再実測する場合（#3596 r2）: AB_RULE_NAME=RULE-r2.txt を付ける（既定は RULE.txt）。
 # bash 3.2 互換（mapfile・連想配列・eval 不使用）。jq 不使用。失敗は捏造せず skipped へ記録し非 0 終了。
 set -u
 cd "$(dirname "$0")" || exit 1
@@ -64,7 +65,13 @@ fi
 if [[ "$BEFORE_ROOT" == "$AFTER_ROOT" ]]; then
   echo "error: before と after が同一ツリー" >&2; exit 1
 fi
-RULE_FILE="$RUNNER_ROOT/docs/perf/logs/train-chain-exclusion-3596/RULE.txt"
+# 規則ファイル名は環境変数 AB_RULE_NAME で選べる（既定 RULE.txt。#3596 の再実測は別名 RULE-r2.txt を
+# 計測前に登録して使う）。ファイル名だけを受け、固定ディレクトリ配下でのみ解決する（パス走査防止）。
+RULE_NAME="${AB_RULE_NAME-RULE.txt}"
+if [[ ! "$RULE_NAME" =~ ^RULE(-[a-z0-9]+)?\.txt$ ]]; then
+  echo "error: AB_RULE_NAME は RULE.txt か RULE-<英小文字数字>.txt のファイル名のみ（got: ${RULE_NAME}）" >&2; exit 1
+fi
+RULE_FILE="$RUNNER_ROOT/docs/perf/logs/train-chain-exclusion-3596/${RULE_NAME}"
 PATCH_FILE="$RUNNER_ROOT/docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch"
 ROOT_MANIFEST="$RUNNER_ROOT/Cargo.toml"
 
