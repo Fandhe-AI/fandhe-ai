@@ -846,6 +846,11 @@ mod gemm_tile_macmini_table_diag_tests;
 // `buffer::diag_h2d_buffer_count`（`pub(crate)`）へ到達するため兄弟モジュールとして置く。
 #[cfg(all(test, target_os = "macos"))]
 mod resident_input_diag_tests_3250;
+// イシュー #3612: Mac mini の Metal で常駐チェーン（train・infer）の 1 step の時間を区間別に測る record-only 診断。
+// `synchronize_with_gpu_timestamps`（既定ビルドで `pub(crate)`）と同期カウンタへ到達するため兄弟モジュールとして置く
+// （`infer_fixed_cost_diag_tests` と同型。lib 本体は変えない）。
+#[cfg(all(test, target_os = "macos"))]
+mod resident_chain_breakdown_diag_tests_3612;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
 // バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの

@@ -705,7 +705,7 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 
 - 公開面からはチェーンが Tape 経路へフォールバックしたかを観測できない（§16）。infer の after でも出力の D2H と同期 1 回は残る。checksum 一致は bit 同一の証明ではなく、train は PARAM_DIGEST（chain 腕と reuse 腕で一致）で補っている。
 - 機体ロック取得前後の GPU 占有（`nvidia-smi`）と計測中の他プロセスの記録は取れていない（計測時のログに無い）。Mac mini の load average は計測中 2.6〜3.3 で、ランナーの負荷ゲートは通過している。
-- Mac mini の train／infer の内訳、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
+- Mac mini の train／infer の内訳は §17.6（#3612。計測部品は登録済み・実機は未実測）、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
 - 本計測は参考系列で、正式な 6 フレームワーク同席計測とピン更新（0.12.0）は #3273。
 
 ### 17.5 #3611 CPU train の REGRESS の切り分け（手順の登録。状態: 未実測）
@@ -716,3 +716,12 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - 腕は 7 つ（A/A 2・B1 の chain・配置をずらした B2 の reuse／chain・#3257 時点のコード B0 の reuse／chain）。#3257 の before／after は同一バイナリだったため、配置の対照は「配置をずらした再ビルドでも差が同じ向きで残るか」で見る。
 - ツリーは HEAD の main ではなく #3622 の `a8e91f0c9`（版 0.11.0 のまま `crates/` が最新の最後のコミット）を使う。#3623 の 0.12.0 版上げ以降は bench-fandhe の `fandhe-ai =0.11.0` ピンが path patch に解決されず、#3273 のピン更新まで HEAD は計測できないため。`.rs` は main と同一。
 - 結果（分類・数値・ログのパス）と所有者判断事項は計測後にここへ追記する。両機体とも現時点では未実測。
+
+### 17.6 #3612 Mac mini Metal 常駐チェーンの内訳（手順の登録。状態: 未実測）
+
+§17.3 の Mac mini train metal（+14.3 us）・infer metal（+6.9 us）の未説明残差を、HEAD の常駐チェーン経路の区間別時間で `docs/perf/loss-attribution-matrix.md` §10 の枠組みへ振り分ける。
+
+- 手順の正本: `docs/perf/logs/resident-chain-metal-breakdown-3612/RULE.txt`（計測前に固定）。診断は `crates/backend-metal/src/resident_chain_breakdown_diag_tests_3612.rs`（`cfg(test)`・`#[ignore]`）、ランナーは `scripts/bench/framework-compare/run_breakdown_resident_chain_metal.sh`、集計は `summarize_breakdown_resident_chain_metal.py`。
+- 腕: B0（本番の同期位置。定常で wait が 1 step あたり 1 であることを assert し、Tape 経路へのフォールバックの検出を兼ねる）と B1（encode 直後に GPU タイムスタンプ付きで同期し、`gpu_busy`・`host_fixed`・`readout` を分ける）。全体時間の正は A0（#3257 と同じ窓の bench-fandhe）。
+- 限界: 常駐チェーンは 1 コマンドバッファのため、HEAD の経路では forward／backward／SGD の GPU 時間は分けられない（B2 は未実装）。torch 側の内訳は未測定なので、|Δ| がノイズ幅を超えても 1 つのタグへは確定させない。
+- 結果と所有者判断事項は計測後にここへ追記する。§17.3 の 2 行は実測まで書き換えない。

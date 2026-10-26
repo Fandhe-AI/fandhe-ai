@@ -1054,6 +1054,10 @@ jobs:
       # 集計。分類であり判定ではない。合成 fixture のみで実機不要）の単体テスト。既存ジョブ内のステップで check context は増えない。
       - name: フレームワーク横並びベンチ summarize_diag_resident_chain_cpu.py の単体テスト
         run: python3 -m unittest scripts/bench/framework-compare/summarize_diag_resident_chain_cpu_test.py
+      # イシュー #3612: summarize_breakdown_resident_chain_metal.py（Mac mini Metal 常駐チェーンの内訳の集計。hard 条件・
+      # 振り分けを RULE.txt どおり fail-closed に適用する。合成 fixture のみで実機不要）の単体テスト。既存ジョブ内のステップで check context は増えない。
+      - name: フレームワーク横並びベンチ summarize_breakdown_resident_chain_metal.py の単体テスト
+        run: python3 -m unittest scripts/bench/framework-compare/summarize_breakdown_resident_chain_metal_test.py
 
       # イシュー #3179: opp_kernel_torch_diag.py（Mac mini で PyTorch の純カーネル時間と
       # Python 側 checksum を測る診断）の torch／numpy 不要部分の回帰テスト。同一方針
