@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/graph_capture_real_device_optin_off.rs (<home>/work/3596-ab/after/target-ab-chain-excl-3596-gb10-gates/release/deps/graph_capture_real_device_optin_off-b13bda41fd245298)
+
+running 1 test
+test opt_in_off_keeps_legacy_stream_and_returns_none ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+rc=0

@@ -1,0 +1,2 @@
+pregate g2-3260 FAILED rc=101
+undetermined: pregate（前提ゲート不合格のため計測しない。詳細は results/raw/skipped-train-chain-exclusion-3596-gb10.log）

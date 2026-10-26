@@ -1,0 +1,31 @@
+    Finished `release` profile [optimized] target(s) in 0.06s
+     Running unittests src/lib.rs (<home>/work/3596-ab/after/target-ab-chain-excl-3596-gb10-gates/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
+
+running 9 tests
+test train_step_graph_diag_tests_3260::capture_matches_plain_chain_bit_exact_and_wires_up ... ok
+test train_step_graph_diag_tests_3260::injected_capture_failure_falls_back_to_plain_chain_bit_exact ... ok
+test train_step_graph_diag_tests_3260::lr_change_recaptures_and_stays_bit_exact ... ok
+test train_step_graph_diag_tests_3260::repeated_capture_failures_stop_capturing_but_stay_bit_exact ... ok
+test train_step_graph_diag_tests_3260::replay_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync ... DIAG3260 window=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 0 } read=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 1, d2h_bytes: 4, stream_syncs: 1, mem_uploads: 0, mem_allocs: 0 } loss=1.1649379
+ok
+test train_step_graph_diag_tests_3260::reuploading_inputs_every_step_stays_bit_exact ... DIAG3260 reupload captured=4 replayed=4 fallbacks=0
+ok
+test train_step_graph_diag_tests_3260::two_threads_capturing_concurrently_do_not_fail ... ok
+test train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact ... 
+thread 'train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact' (4154544) panicked at crates/backend-cuda/src/train_step_graph_diag_tests_3260.rs:161:13:
+assertion `left == right` failed: thread 1 repeat 0 vs single: loss idx 12: 0.68575007 vs 0.7552145
+  left: 1060080977
+ right: 1061246397
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test train_step_graph_diag_tests_3260::workspace_growth_by_other_store_invalidates_captured_graph ... ok
+
+failures:
+
+failures:
+    train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 1392 filtered out; finished in 0.84s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --lib`
+rc=101

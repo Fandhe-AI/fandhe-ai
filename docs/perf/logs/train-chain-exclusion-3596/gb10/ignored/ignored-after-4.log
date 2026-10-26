@@ -1,0 +1,456 @@
+     Running unittests src/lib.rs (<home>/work/target-3596-after/release/deps/fandhe_ai-a0fd0eb31ad6c3d4)
+running 6 tests
+test compat::functional::fit_parity_tests::cuda_parameter_gradients_match_cpu_reference ... ok
+test compat::functional::merge_tests::cuda_merge_graph_matches_cpu_reference ... ok
+test compat::functional::tests::cuda_functional_graph_matches_cpu_reference ... ok
+test compat::sequential::train_step_chain_tests_3251::cuda::cuda_chain_matches_tape_path_bit_exact_three_layers ... ok
+test compat::sequential::train_step_chain_tests_3251::cuda::cuda_chain_matches_tape_path_bit_exact_two_layers ... ok
+test compat::sequential::train_step_chain_tests_3251::cuda::cuda_wait_device_param_store_and_read_after_internal_tape_dropped ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 545 filtered out; finished in 1.34s
+     Running tests/activation_gelu_softplus_backend_parity.rs (<home>/work/target-3596-after/release/deps/activation_gelu_softplus_backend_parity-4a438c9429f5917d)
+running 3 tests
+test cuda_gelu_forward_matches_cpu ... ok
+test cuda_gelu_tanh_forward_matches_cpu ... ok
+test cuda_softplus_forward_matches_cpu ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.36s
+     Running tests/activation_ops_backend_parity.rs (<home>/work/target-3596-after/release/deps/activation_ops_backend_parity-7b47e8af3e47d28f)
+running 4 tests
+test cuda_bit_exact_backward_matches_cpu_reference ... ok
+test cuda_bit_exact_forward_matches_cpu_reference ... ok
+test cuda_req2_backward_matches_cpu_reference ... ok
+test cuda_req2_forward_matches_cpu_reference ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.41s
+     Running tests/activation_ops_facade.rs (<home>/work/target-3596-after/release/deps/activation_ops_facade-5038e056c4800e0f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/activation_scalar_ops_backend_parity.rs (<home>/work/target-3596-after/release/deps/activation_scalar_ops_backend_parity-a00a70542348d511)
+running 1 test
+test cuda_activation_scalar_ops_matches_cpu_reference ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.39s
+     Running tests/adaptive_max_global_pool_backend_parity.rs (<home>/work/target-3596-after/release/deps/adaptive_max_global_pool_backend_parity-86dbe04d774f2739)
+running 2 tests
+test cuda_adaptive_max_pool2d_forward_matches_cpu ... ok
+test cuda_global_pool_forward_matches_cpu ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.42s
+     Running tests/amp_conv_mha_low_precision_backend_parity.rs (<home>/work/target-3596-after/release/deps/amp_conv_mha_low_precision_backend_parity-3ce345f64006b86f)
+running 2 tests
+test cuda_mha_low_precision_forward_bf16_matches_cpu ... ok
+test cuda_mha_low_precision_forward_f16_matches_cpu ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+     Running tests/api_surface.rs (<home>/work/target-3596-after/release/deps/api_surface-17dc8786668282e6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 662 filtered out; finished in 0.00s
+     Running tests/attention_backend_parity.rs (<home>/work/target-3596-after/release/deps/attention_backend_parity-4d93f6da5a9e48d1)
+running 2 tests
+test cuda_sdpa_backward_dq_matches_cpu ... ok
+test cuda_sdpa_forward_matches_cpu ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.61s
+     Running tests/backward_accumulate_backend_parity.rs (<home>/work/target-3596-after/release/deps/backward_accumulate_backend_parity-42c2425f7492e91d)
+running 1 test
+test cuda_backward_accumulate_weight_grad_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.39s
+     Running tests/batch_norm_backend_parity.rs (<home>/work/target-3596-after/release/deps/batch_norm_backend_parity-0670dbb29db9d558)
+running 4 tests
+test cuda_batch_norm_infer_forward_matches_cpu ... ok
+test cuda_batch_norm_train_backward_matches_cpu ... ok
+test cuda_batch_norm_train_forward_matches_cpu ... ok
+test cuda_batch_norm_train_forward_rank4_matches_cpu ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.56s
+     Running tests/batched_matmul_backend_parity.rs (<home>/work/target-3596-after/release/deps/batched_matmul_backend_parity-72b06c7474cfd4cd)
+running 2 tests
+test cuda_batched_matmul_backward_matches_cpu ... ok
+test cuda_batched_matmul_forward_matches_cpu ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.49s
+     Running tests/bce_backend_parity.rs (<home>/work/target-3596-after/release/deps/bce_backend_parity-714bb0c43da50306)
+running 1 test
+test cuda_bce_with_logits_loss_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.34s
+     Running tests/binning_ops_backend_parity.rs (<home>/work/target-3596-after/release/deps/binning_ops_backend_parity-a17911b6cb515abc)
+running 1 test
+test cuda_binning_ops_match_cpu_reference ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/bool_ops_backend_parity.rs (<home>/work/target-3596-after/release/deps/bool_ops_backend_parity-10462d178588a6f9)
+running 1 test
+test cuda_bool_ops_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.43s
+     Running tests/bool_ops_logical_fns.rs (<home>/work/target-3596-after/release/deps/bool_ops_logical_fns-b000ed658e14c3fe)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/bool_ops_torch_behavior.rs (<home>/work/target-3596-after/release/deps/bool_ops_torch_behavior-b44cdb3aa9fa7cd0)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/bool_ops_var_methods.rs (<home>/work/target-3596-after/release/deps/bool_ops_var_methods-35dfa450d2c64ca8)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/cast_backend_parity.rs (<home>/work/target-3596-after/release/deps/cast_backend_parity-d0cdf5e063d6ddc1)
+running 1 test
+test cuda_cast_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.32s
+     Running tests/checkpoint_backend_bit_identity.rs (<home>/work/target-3596-after/release/deps/checkpoint_backend_bit_identity-53a81ae78243c34b)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/compat_functional.rs (<home>/work/target-3596-after/release/deps/compat_functional-fb2247f413ef8915)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/compat_functional_max_unpool.rs (<home>/work/target-3596-after/release/deps/compat_functional_max_unpool-27df29e1de73344c)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/compat_functional_max_unpool_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_functional_max_unpool_backend_parity-e1992cbd339f3b93)
+running 2 tests
+test cuda_functional_max_unpool_2d_forward_backward_matches_cpu ... ok
+test cuda_functional_max_unpool_3d_forward_backward_matches_cpu ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.71s
+     Running tests/compat_functional_max_unpool_model_io.rs (<home>/work/target-3596-after/release/deps/compat_functional_max_unpool_model_io-1cb1a4d6fae0b7e7)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/compat_functional_model_io.rs (<home>/work/target-3596-after/release/deps/compat_functional_model_io-cdbbfaca7df3ef98)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/compat_sequential.rs (<home>/work/target-3596-after/release/deps/compat_sequential-7da6344f5ab69065)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/compat_sequential_accumulate.rs (<home>/work/target-3596-after/release/deps/compat_sequential_accumulate-cad99746940b8a01)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+     Running tests/compat_sequential_activation_layers.rs (<home>/work/target-3596-after/release/deps/compat_sequential_activation_layers-284e90972f2e1ba0)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/compat_sequential_activation_layers_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_activation_layers_backend_parity-73c7e48b70205172)
+running 1 test
+test cuda_activation_layers_parity ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.53s
+     Running tests/compat_sequential_activation_scalar_layers.rs (<home>/work/target-3596-after/release/deps/compat_sequential_activation_scalar_layers-6fe22cb840f36a3b)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/compat_sequential_activation_scalar_layers_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_activation_scalar_layers_backend_parity-08efdf06972bfdc3)
+running 1 test
+test cuda_activation_scalar_layers_parity ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.58s
+     Running tests/compat_sequential_activation_shape.rs (<home>/work/target-3596-after/release/deps/compat_sequential_activation_shape-e6f94d6a13003d77)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/compat_sequential_activation_shape_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_activation_shape_backend_parity-fe312a266e6c8ede)
+running 3 tests
+test cuda_flatten_only_bit_exact ... ok
+test cuda_flatten_softmax_matches_cpu ... ok
+test cuda_log_softmax_gelu_softplus_matches_cpu ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+     Running tests/compat_sequential_adaptive_max_global_pool.rs (<home>/work/target-3596-after/release/deps/compat_sequential_adaptive_max_global_pool-6807c6bc6ab30555)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+     Running tests/compat_sequential_adaptive_max_global_pool_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_adaptive_max_global_pool_backend_parity-33fb003c777512b2)
+running 1 test
+test cuda_adaptive_max_global_pool_bit_exact ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.30s
+     Running tests/compat_sequential_callbacks.rs (<home>/work/target-3596-after/release/deps/compat_sequential_callbacks-43f43a6daa629d8d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+     Running tests/compat_sequential_checkpoint_file.rs (<home>/work/target-3596-after/release/deps/compat_sequential_checkpoint_file-414dec14a3f042e6)
+running 1 test
+test checkpoint_file_roundtrip_on_cuda ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.50s
+     Running tests/compat_sequential_conv.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv-2c6e155d456a0a29)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/compat_sequential_conv3d.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv3d-ec4d31a7a7bbda59)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/compat_sequential_conv3d_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv3d_backend_parity-fd708236bf4d9152)
+running 1 test
+test cuda_conv3d_forward_backward_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+     Running tests/compat_sequential_conv_transpose1d_unflatten.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv_transpose1d_unflatten-89be83b5f6f5d9dc)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+     Running tests/compat_sequential_conv_transpose2d.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv_transpose2d-a1f987075159ff72)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/compat_sequential_conv_transpose2d_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv_transpose2d_backend_parity-d70d61bb206c9d16)
+running 1 test
+test cuda_conv_transpose2d_forward_backward_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+     Running tests/compat_sequential_conv_transpose3d.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv_transpose3d-344bd8f078fe5405)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+     Running tests/compat_sequential_conv_transpose3d_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_conv_transpose3d_backend_parity-b52c10c16ba3504a)
+running 1 test
+test cuda_conv_transpose3d_forward_backward_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+     Running tests/compat_sequential_custom_module.rs (<home>/work/target-3596-after/release/deps/compat_sequential_custom_module-20e066af57d8d394)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/compat_sequential_dropout_embedding_bag.rs (<home>/work/target-3596-after/release/deps/compat_sequential_dropout_embedding_bag-0d476e2506470354)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+     Running tests/compat_sequential_dropout_embedding_bag_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_dropout_embedding_bag_backend_parity-a60d74129c3369e3)
+running 1 test
+test cuda_dropout_embedding_bag_bit_exact ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.42s
+     Running tests/compat_sequential_ema_manual.rs (<home>/work/target-3596-after/release/deps/compat_sequential_ema_manual-f4b2dc47270d8751)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit-da2774f0f00fc4bb)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_amp.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_amp-9febff657af710b8)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_amp_conv_mha.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_amp_conv_mha-f967fcc53da51afb)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_ema.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_ema-ca4b8fd4d4115e77)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_lbfgs.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_lbfgs-d8e5cb2bed374265)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_losses.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_losses-147a11d71da5e693)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_optimizers.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_optimizers-0283080f6db8ea99)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_prefetch.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_prefetch-e7e7ba32d6a34156)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_swa.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_swa-833ee28e03b23245)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_swa_lr.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_swa_lr-de790281cd713617)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_swa_wiring.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_swa_wiring-cad6998c6c516c68)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fit_weights.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fit_weights-640ed53411cbfd40)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fold_unfold.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fold_unfold-d0676d2cdd071e37)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/compat_sequential_fold_unfold_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_fold_unfold_backend_parity-1450a6f0b65c2995)
+running 1 test
+test cuda_fold_unfold_forward_backward_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+     Running tests/compat_sequential_group_instance_norm.rs (<home>/work/target-3596-after/release/deps/compat_sequential_group_instance_norm-982a257707a126c9)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+     Running tests/compat_sequential_group_instance_norm_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_group_instance_norm_backend_parity-902d0228d4fd2c98)
+running 1 test
+test cuda_group_instance_norm_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+     Running tests/compat_sequential_layers.rs (<home>/work/target-3596-after/release/deps/compat_sequential_layers-ac8ca633cb376fe0)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+     Running tests/compat_sequential_layers_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_layers_backend_parity-cf0948c159848493)
+running 7 tests
+test cuda_batch_norm2d_matches_cpu ... ok
+test cuda_multihead_attention_config_matches_cpu ... ok
+test cuda_multihead_attention_matches_cpu ... ok
+test cuda_norm_embedding_matches_cpu ... ok
+test cuda_transformer_decoder_layer_matches_cpu ... ok
+test cuda_transformer_encoder_matches_cpu ... ok
+test cuda_transformer_matches_cpu ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.85s
+     Running tests/compat_sequential_lbfgs_manual.rs (<home>/work/target-3596-after/release/deps/compat_sequential_lbfgs_manual-f56bd7612e99c3f7)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/compat_sequential_lr_scheduler_ext.rs (<home>/work/target-3596-after/release/deps/compat_sequential_lr_scheduler_ext-cdf60cf98429e314)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/compat_sequential_lr_scheduler_poly_chained_manual.rs (<home>/work/target-3596-after/release/deps/compat_sequential_lr_scheduler_poly_chained_manual-250c7f8b80657c99)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+     Running tests/compat_sequential_lrn.rs (<home>/work/target-3596-after/release/deps/compat_sequential_lrn-667542a855ecb237)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+     Running tests/compat_sequential_lrn_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_lrn_backend_parity-90941f5562a44db7)
+running 1 test
+test cuda_local_response_norm_forward_backward_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+     Running tests/compat_sequential_metrics.rs (<home>/work/target-3596-after/release/deps/compat_sequential_metrics-d2c3fb3f86f85e99)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+     Running tests/compat_sequential_metrics_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_metrics_backend_parity-2aa9985625bed2f8)
+running 1 test
+test cuda_metrics_result_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+     Running tests/compat_sequential_mha_config.rs (<home>/work/target-3596-after/release/deps/compat_sequential_mha_config-4fb8f45816a0e843)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/compat_sequential_mode.rs (<home>/work/target-3596-after/release/deps/compat_sequential_mode-0a69a484a86456b4)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io-7580a15241cf729f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_batch_norm.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_batch_norm-cfd0c3a469201b4a)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_compiled.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_compiled-bbdc6bf9a3d9982f)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_fs_threats.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_fs_threats-015d7eb8cd406130)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_layers.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_layers-3717b48172323ef0)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_lbfgs.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_lbfgs-412b73f3a07214a2)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_manual.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_manual-ff584566ea1c2028)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_reparam.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_reparam-f72a342a4397fc97)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+     Running tests/compat_sequential_model_io_tamper.rs (<home>/work/target-3596-after/release/deps/compat_sequential_model_io_tamper-2ea24e781264c515)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+     Running tests/compat_sequential_optim_ext.rs (<home>/work/target-3596-after/release/deps/compat_sequential_optim_ext-edd3a6dd90776f4c)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+     Running tests/compat_sequential_param_groups.rs (<home>/work/target-3596-after/release/deps/compat_sequential_param_groups-fb2836962d2ebdf6)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+     Running tests/compat_sequential_parametrize_conv.rs (<home>/work/target-3596-after/release/deps/compat_sequential_parametrize_conv-593be8820c6d053d)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+     Running tests/compat_sequential_parametrize_linear.rs (<home>/work/target-3596-after/release/deps/compat_sequential_parametrize_linear-20175740c5194440)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+     Running tests/compat_sequential_pixel_shuffle.rs (<home>/work/target-3596-after/release/deps/compat_sequential_pixel_shuffle-035aa524410bde29)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+     Running tests/compat_sequential_pixel_shuffle_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_pixel_shuffle_backend_parity-24c3315f0b326840)
+running 1 test
+test cuda_pixel_shuffle_layers_bit_exact ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.26s
+     Running tests/compat_sequential_pool3d.rs (<home>/work/target-3596-after/release/deps/compat_sequential_pool3d-3471cc4e2c214285)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/compat_sequential_pool3d_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_pool3d_backend_parity-ca86d8deda3f433f)
+running 1 test
+test cuda_pool3d_forward_backward_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+     Running tests/compat_sequential_pooling.rs (<home>/work/target-3596-after/release/deps/compat_sequential_pooling-048d06764684c558)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+     Running tests/compat_sequential_pooling_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_pooling_backend_parity-6e51ff0986718393)
+running 2 tests
+test cuda_pool1d_chain_matches_cpu ... ok
+test cuda_pool2d_chain_matches_cpu ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+     Running tests/compat_sequential_spatial_layers.rs (<home>/work/target-3596-after/release/deps/compat_sequential_spatial_layers-64e67a4f4dcf5edd)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/compat_sequential_spatial_layers_backend_parity.rs (<home>/work/target-3596-after/release/deps/compat_sequential_spatial_layers_backend_parity-370434c32b6a1cc0)
+running 2 tests
+test cuda_spatial_layers_bilinear_matches_cpu ... ok
+test cuda_spatial_layers_nearest_bit_exact ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+     Running tests/compat_sequential_state_dict.rs (<home>/work/target-3596-after/release/deps/compat_sequential_state_dict-2dfe3b1a84d487d9)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+     Running tests/compat_sequential_swa_manual.rs (<home>/work/target-3596-after/release/deps/compat_sequential_swa_manual-671b84ba21791aec)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+     Running tests/compat_sequential_train.rs (<home>/work/target-3596-after/release/deps/compat_sequential_train-41da954588b2ce14)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+     Running tests/compat_sequential_train_step.rs (<home>/work/target-3596-after/release/deps/compat_sequential_train_step-b1f14a9ad68a6bc9)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+     Running tests/compat_sequential_transformer.rs (<home>/work/target-3596-after/release/deps/compat_sequential_transformer-fbcd0a97abf7ea23)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+     Running tests/constant_pad_backend_parity.rs (<home>/work/target-3596-after/release/deps/constant_pad_backend_parity-b10c5ae06640c697)
+running 1 test
+test cuda_pad_forward_matches_cpu ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.29s
+     Running tests/conv1d_backend_parity.rs (<home>/work/target-3596-after/release/deps/conv1d_backend_parity-1a48c34330de4e84)
+running 4 tests
+test cuda_conv1d_backward_matches_cpu ... cuda_conv1d_backward_matches_cpu[dx].fold_bits=0x047f607b28f9903b
+test cuda_conv1d_forward_matches_cpu ... cuda_conv1d_forward_matches_cpu[out].fold_bits=0xb2970828c8e3b6af
+test cuda_conv1d_forward_matches_cpu_groups_dilation ... cuda_conv1d_forward_matches_cpu_groups_dilation[out].fold_bits=0x2591c3352a63aa7f
+test cuda_conv1d_matches_manual_reshape_conv2d_bit_exact ... conv1d_matches_manual_reshape_conv2d_on[out1].fold_bits=0x839f46ab83951414
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.60s
+     Running tests/conv2d_backend_parity.rs (<home>/work/target-3596-after/release/deps/conv2d_backend_parity-075a8dd2ec57697f)
+running 2 tests
+test cuda_conv2d_backward_matches_cpu ... cuda_conv2d_backward_matches_cpu[dx].fold_bits=0x166a7f2de9f73ecf
+test cuda_conv2d_forward_matches_cpu ... cuda_conv2d_forward_matches_cpu[out].fold_bits=0xb97abad9532331ff
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.60s
+     Running tests/conv3d_backend_parity.rs (<home>/work/target-3596-after/release/deps/conv3d_backend_parity-2540963876226cdc)
+running 1 test
+test cuda_conv3d_forward_matches_cpu ... cuda_conv3d_forward_matches_cpu[out].fold_bits=0x8048b987e658b206
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.52s
+     Running tests/conv_transpose2d_backend_parity.rs (<home>/work/target-3596-after/release/deps/conv_transpose2d_backend_parity-79618e7b8a27dd4a)
+running 2 tests
+test cuda_conv_transpose2d_backward_matches_cpu ... cuda_conv_transpose2d_backward_matches_cpu[dx].fold_bits=0xec52b24a33306fc6
+test cuda_conv_transpose2d_forward_matches_cpu ... cuda_conv_transpose2d_forward_matches_cpu[out].fold_bits=0xdb24c674dc27b687
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.59s
+     Running tests/conv_transpose3d_max_unpool_backend_parity.rs (<home>/work/target-3596-after/release/deps/conv_transpose3d_max_unpool_backend_parity-c4265fb8e2f7987e)
+running 1 test
+test cuda_conv_transpose3d_max_unpool_match_cpu_reference ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.59s
+     Running tests/cpu_gemm_reuse_fresh_diag.rs (<home>/work/target-3596-after/release/deps/cpu_gemm_reuse_fresh_diag-cbface730df674b2)
+running 1 test
+test cpu_gemm_reuse_fresh_phases ... DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":4.8e-7,"median_s":1.28e-7,"min_s":3.2e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_build","q1_s":9.6e-8,"q3_s":1.6e-7,"rayon_num_t
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 36.04s
+     Running tests/cpu_gemm_reuse_release_diag.rs (<home>/work/target-3596-after/release/deps/cpu_gemm_reuse_release_diag-250e399b2bd64100)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+     Running tests/cpu_gemm_reuse_release_phases.rs (<home>/work/target-3596-after/release/deps/cpu_gemm_reuse_release_phases-5fc28bed87375e0d)
+running 1 test
+test cpu_gemm_reuse_release_phases ... RELEASE_DIAG_JSON {"arm":"fresh","n":256,"median_s":0.000199503,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.92s
+     Running tests/cpu_predict_resident_fixedcost_diag.rs (<home>/work/target-3596-after/release/deps/cpu_predict_resident_fixedcost_diag-a2a736ce860e20fa)
+running 1 test
+test cpu_predict_resident_fixedcost_phases ... DIAG_JSON {"arm":"fresh","checksum_bits":null,"issue":2105,"max_s":0.001240298,"median_s":0.000183183,"min_s":0.000129327,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"predict","q1_s":0.000168351,"q3_s":0.000198959,"rayon_num_threa
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.13s
+     Running tests/cpu_reuse_device_update_diag.rs (<home>/work/target-3596-after/release/deps/cpu_reuse_device_update_diag-a3d1e50fba5448e4)
+running 1 test
+test cpu_reuse_device_update_phases ... DIAG_JSON {"arm":"insitu_direct","checksum_bits":"dcbf3bf566f8c1d7","issue":2106,"max_s":0.000192015,"median_s":0.000154127,"min_s":0.000121248,"n":80,"phase":"device_update","q1_s":0.000141535,"q3_s":0.000165327,"rayon_num_threads_env":null,"target_arch":"aar
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.26s
+     Running tests/cpu_reuse_device_update_h4_diag.rs (<home>/work/target-3596-after/release/deps/cpu_reuse_device_update_h4_diag-34f08d3c6d00046b)
+running 1 test
+test cpu_reuse_device_update_h4_phases ... DIAG_JSON {"arm":"insitu_direct","checksum_bits":"dcbf3bf566f8c1d7","core_moves":0,"issue":3188,"max_s":0.000188687,"median_s":0.000113327,"min_s":0.000095648,"minflt_total":0,"n":80,"phase":"device_update","q1_s":0.000105664,"q3_s":0.000141151,"rayon_num_t
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.38s
+     Running tests/cpu_reuse_step_grad_bit_dump.rs (<home>/work/target-3596-after/release/deps/cpu_reuse_step_grad_bit_dump-0403b157bfcb952f)
+running 1 test
+test dump_cpu_reuse_step_grad_bits ... === cpu_reuse_step_grad_bit_dump ===
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/cpu_sme_gate_bit_dump.rs (<home>/work/target-3596-after/release/deps/cpu_sme_gate_bit_dump-f50e11052878e083)
+running 1 test
+test dump_cpu_sme_gate_bits ... out[gemm512][0].bits=0xc0886ca4
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+     Running tests/create_graph_facade.rs (<home>/work/target-3596-after/release/deps/create_graph_facade-3407b7be20469c49)
+running 3 tests
+test create_graph_extended_ops_cuda_matches_cpu ... ok
+test create_graph_hessian_cuda_matches_cpu ... ok
+test create_graph_rejects_device_mismatch ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.87s
+     Running tests/creation_tensor_generation.rs (<home>/work/target-3596-after/release/deps/creation_tensor_generation-56198b3df5a8c58a)
+running 1 test
+test arange_upload_to_cuda_tape_round_trips ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.26s
+     Running tests/cuda_graph_infer_optin.rs (<home>/work/target-3596-after/release/deps/cuda_graph_infer_optin-ebe20d6d94ba3e1e)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+     Running tests/cuda_graph_infer_parity_real_device.rs (<home>/work/target-3596-after/release/deps/cuda_graph_infer_parity_real_device-d0269f96053901e5)
+running 1 test
+test api_enabled_infer_capture_matches_cpu_reference ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+     Running tests/cuda_graph_step_bit_identity.rs (<home>/work/target-3596-after/release/deps/cuda_graph_step_bit_identity-7df1f14ee5dd93d7)
+running 3 tests
+test eager_baseline ... === cuda_graph_step_bit_identity: eager (opt-in OFF) ===
+test graph_capture ... 
+thread 'graph_capture' (4052103) panicked at crates/facade/tests/cuda_graph_step_bit_identity.rs:120:5:
+test graph_capture_completes_training_loop_without_error ... ok
+failures:
+failures:
+    graph_capture
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+error: test failed, to rerun pass `-p fandhe-ai --test cuda_graph_step_bit_identity`
+rc=101
