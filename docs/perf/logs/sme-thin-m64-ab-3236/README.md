@@ -51,3 +51,17 @@ Mac mini（Apple M4）で OFF（main）と ON（定数 1 行を反転した計�
 - 転送段のロック: 01:08:28Z 取得・01:08:35Z 解放（bundle を clone し `rev-parse HEAD` とクリーン状態を確認）。計測段のロック: スクリプトが 01:08:41Z に取得し、終了後に不在を確認。
 - 転送は bundle → clone 方式（P-TREE が `.git` を使うため rsync のみは不可）。収録ログのマスク漏れ（ホスト名・ユーザー名・絶対パス）は grep で 0 件を確認した。
 - 計測後、Mac mini 側の作業ツリー・target・bundle は削除済み。
+
+## l2_dx 再計測系列（イシュー #3615・RULE-reopen-1）
+
+#3236 で undetermined だった `l2_dx` を、判定の閾値を変えずに反復数（warmup 200／iters 2000）と round 数（11）を増やして測り直す系列。
+規則は `RULE.txt` 末尾の RULE-reopen-1（計測前にコミット済み）。既存の `macmini/`・`aggregate.md`・`aggregate.py`・`orchestrate_macmini.sh` は差し替えない。
+
+| パス | 内容 |
+|---|---|
+| `orchestrate_macmini_reopen.sh` | `orchestrate_macmini.sh` の派生（ラベル `3236-reopen-r1`・11 round・framework-compare と記録 run は無し。`--dry-run` あり） |
+| `aggregate_reopen.py` | 厳密集計（`python3 -I aggregate_reopen.py --self-test`／`python3 -I aggregate_reopen.py macmini-reopen`） |
+| `../../../../crates/backend-cpu/examples/cpu_sme_thin_m64_reopen.rs` | 計時 binary（`<before\|after> <gemm\|kgrid>`。出力に `warmup=`／`iters=` を含む） |
+| `macmini-reopen/`・`aggregate-reopen.md` | 実測後に追加する収録ログと機械出力 |
+
+状態: **未実測**（計測部品と規則のみ。Mac mini での実測はこのコミット時点で未実施）。既定 `SME_THIN_M64_ENABLED` はこの issue では反転しない。
