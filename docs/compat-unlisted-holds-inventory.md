@@ -13,7 +13,7 @@
 
 - 区分: 公開／未公開／保留／対象外。
 - 「対象外」は 2 種類に分ける。(O-1) 所有者が確定したもの（コメント URL を出典にする）。(O-2) 決定記録に「その issue のスコープ外」と書かれているだけで、所有者の Won't ではないもの。O-2 は次回の監査で拾われうるため、本書では「未掲載の候補」として扱う。
-- D-0（#3021 確認表・2026-10-11 確定）: 機能が別名で公開済みなら、名前だけの差は対象外へ分類し直す。層型名の公開方針は #3022 で扱う。
+- D-0（#3021 確認表・2026-10-11 確定）: 機能が別名で公開済みなら、名前だけの差は対象外へ分類し直す。層型名の公開方針は #3022 で決定済み（`docs/facade-nn-layer-type-exposure-decision.md` §0。一括公開はせず、条件を満たす場合のみ個別承認）。
 - 提案: 起票する／対象外に分類する／既存 issue でカバー済み。
 - 必要な承認: 公開形（新しい公開名・シグネチャ）／数値契約／不要（記述の訂正）／spec 変更。
 
@@ -30,7 +30,7 @@
 | `save_model` 非対応の 11 層 | #3051 | 層の追加ではなく kind の追加 |
 | SWA の `fit` 結線 | #3056 | EMA とは別 |
 | `Tape::jvp` の複数入力・微分可能 jvp・`vmap(grad)`・`create_graph` の対象 Op 拡大 | #3062・#3065・#3069・#3075（BatchNorm は #3079、Pad は #3084） | `BatchNorm3d` の層とは無関係 |
-| 層型名の公開方針 | #3022 | 下表の C 群のうち層ラッパーは本方針に従属 |
+| 層型名の公開方針 | #3022（決定済み。`docs/facade-nn-layer-type-exposure-decision.md` §0） | 層型名は一括公開しない。下表の C 群のうち層ラッパーの型名公開は本方針に従う。`Sequential::add_*` による機能追加は型名公開とは別の判断 |
 
 最適化（EMA×AMP・warmup・param groups の保留）・ONNX autograd・ONNX export の層／op 拡張・safetensors の dtype・C 群の層は、#3018 配下のどの issue のタイトルにも現れない（照合語: ema・amp・param group・warmup・autograd・onnx・export・sigmoid・safetensors・dtype・shrink・bilinear・batchnorm・pad・cosine・pairwise・shuffle・softmax2d・lppool・fractional・3d・stream・lbfgs・DeviceParamStore）。
 
@@ -71,7 +71,7 @@
 | C1 | `Hardshrink`・`Softshrink` | なし（`shrink` を含むのは `tanhshrink` のみ。`crates/autodiff/src/softmin_threshold_ops.rs:71`） | なし | なし（`add_tanhshrink` のみ。`crates/facade/src/compat/sequential.rs:1132`） | なし。`Var::threshold` や `where_cond` で合成はできるが、同名の機能ではない | grep（`crates` 全体で `Hardshrink`／`Softshrink` は 0 件） | 未公開 | 起票する（`Var` の演算 2 件＋`add_*`） | 公開形 | なし |
 | C2 | `Bilinear`（`nn.Bilinear`。2 入力の双線形変換層） | なし | なし | なし | なし | `bilinear` を含むファイルは補間（`crates/tensor-core/src/interpolate.rs`・`InterpolateMode::Bilinear`）のみで、`nn.Bilinear` ではない | 未公開 | 起票する（優先度は低い） | 公開形 | なし |
 | C3 | `BatchNorm3d` | 一部。`Var::batch_norm` は rank 2〜4（`crates/tensor-core/src/ops_shape.rs:798-806` の `batch_norm_layout`）。rank 5 は対象外と明記（`crates/autodiff/src/nn/batch_norm.rs:47`） | なし | なし（`add_batch_norm1d`／`2d` のみ） | なし | 同左。層の rank 制限は `batch_norm.rs:66-70` | 未公開（O-2。`docs/batch-norm-ops-design.md` §7 が「本 issue の対象外」とするのみ） | 起票する（`Var::batch_norm` の rank 5 対応が先） | 公開形・数値契約（rank 5 の縮約順序の確認） | なし |
-| C4 | `ReflectionPad`／`ReplicationPad`／`CircularPad` の層 | あり。`Var::pad_with_mode`（`crates/autodiff/src/var.rs:5431`）と `PadMode`（`Reflect`／`Replicate`／`Circular`。`crates/facade/src/lib.rs:318` で再エクスポート済み。#2678 で公開形承認済み） | なし | なし（`add_zero_pad2d` のみ。`sequential.rs:2451`） | あり。機能は `Var::pad_with_mode` で到達できる | 同左 | 公開済み（機能）／層ラッパーは未公開 | 対象外に分類する（D-0。機能は到達可能）。`Sequential` 用の `add_*` は #3022 の方針が決まった後に判断する | 不要（所有者の確認のみ） | #3022 に従属 |
+| C4 | `ReflectionPad`／`ReplicationPad`／`CircularPad` の層 | あり。`Var::pad_with_mode`（`crates/autodiff/src/var.rs:5431`）と `PadMode`（`Reflect`／`Replicate`／`Circular`。`crates/facade/src/lib.rs:318` で再エクスポート済み。#2678 で公開形承認済み） | なし | なし（`add_zero_pad2d` のみ。`sequential.rs:2451`） | あり。機能は `Var::pad_with_mode` で到達できる | 同左 | 公開済み（機能）／層ラッパーは未公開 | 対象外に分類する（D-0。機能は到達可能）。型名の公開は #3022 の決定記録（個別承認の 3 条件）に従う。`Sequential` 用の `add_*`（機能追加）は型名公開と別に、必要性を所有者が判断する | 不要（所有者の確認のみ） | 型名公開は #3022 の決定に従う。`add_*` は別判断 |
 | C5 | `CosineSimilarity` | なし（`cosine_embedding_loss` のみ。`crates/autodiff/src/var.rs:4733`） | なし | なし | なし。`mul`／`sum`／`sqrt`／`div` で合成はできるが、同名の機能ではない | `cosine_similarity` は `crates` 全体で 0 件 | 未公開 | 起票する（`Var` の演算＋`add_*` は不要。`nn.CosineSimilarity` は 2 入力のため `Sequential` に載らない） | 公開形 | なし |
 | C6 | `PairwiseDistance` | 内部のみ。`triplet_margin_loss` の内部計算（`crates/autodiff/src/loss_ops.rs:212,692`） | なし | なし | なし | 同左 | 未公開 | 起票する（C5 と同じ issue にまとめる） | 公開形 | なし |
 | C7 | `ChannelShuffle` | なし | なし | なし | なし。`reshape`／`permute` で合成できる | 名前の grep は 0 件 | 未公開 | 起票する（優先度は低い。`add_pixel_shuffle` と同型） | 公開形 | なし |
@@ -108,7 +108,7 @@
 | 13 | C5＋C6: `CosineSimilarity`・`PairwiseDistance` | 起票（1 本にまとめる） | `loss_ops.rs:212,692` |
 | 14 | C7: `ChannelShuffle` | 起票（低優先） | grep 0 件 |
 | 15 | C9: `AdaptiveAvgPool3d`・`AdaptiveMaxPool3d`・`LPPool`・`FractionalMaxPool` | 起票（Adaptive 3D を先に） | `docs/autodiff-pool3d-ops-decision.md:170` |
-| 16 | C4: Reflection／Replication／Circular Pad の層 | 対象外に分類（機能は `Var::pad_with_mode` で到達。`add_*` は #3022 の後に判断） | D-0 |
+| 16 | C4: Reflection／Replication／Circular Pad の層 | 対象外に分類（機能は `Var::pad_with_mode` で到達。型名は #3022 の決定どおり非公開。`add_*` は別判断） | D-0 |
 | 17 | C8: `Softmax2d` | 対象外に分類（`add_softmax(dim)` で同じ） | D-0 |
 | 18 | A3-f: スロット添字の公開ヘルパー | 対象外に分類（`named_parameters()` の位置を契約とする方針で代替済み） | `docs/autodiff-param-groups-decision.md` §13.4 |
 
@@ -132,7 +132,7 @@ R1 は 1 行のコメント修正で足りる（コードの挙動は変わら�
 ## 6. 限界と申し送り
 
 - 報告 B・C の原文が無いため、issue に列挙されていない項目は拾えていない（§1）。
-- C 群の「別名の有無」は名前・語幹の grep と `Sequential::add_*` 一覧、`fandhe_ai::nn` の再エクスポートで確認した。facade の `nn` が層型を再エクスポートしない方針は #3022 で決まるため、(b) 列はその結果で変わりうる。
+- C 群の「別名の有無」は名前・語幹の grep と `Sequential::add_*` 一覧、`fandhe_ai::nn` の再エクスポートで確認した。facade の `nn` が層型を一括では再エクスポートしない方針は #3022 で決定済み（`docs/facade-nn-layer-type-exposure-decision.md` §0）。(b) 列は個別承認で例外的に出す場合のみ変わる。
 - 0.12.0 の監査記録は #3269 が作る。本書は監査記録を書き換えない。
 - 起票は承認後に人間が行う。親 issue の付け替えは `update-issue-tree` で提案する。
 
