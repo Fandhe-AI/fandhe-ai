@@ -165,6 +165,29 @@ echo "precheck=assert ok"
 
 bench_fandhe_setup_lock_restore_trap
 
+# before ツリー側の Cargo.lock も path patch 付き cargo build / cargo tree が書き換える。
+# 共有ヘルパーは cwd（after 側）の Cargo.lock しか復元しないため、before 側を独立に退避し、
+# 終了時に復元してから共有ヘルパーの trap へ連鎖する（残すと別ラベル再実行時に
+# check_patched_tree の「変更は所定の 2 ファイルのみ」検査で停止する）。
+BEFORE_LOCK="$BEFORE_ROOT/scripts/bench/framework-compare/Cargo.lock"
+BEFORE_LOCK_BACKUP="$(mktemp)" || { echo "error: before Cargo.lock 退避用の一時ファイルを作れない" >&2; exit 1; }
+if ! cp "$BEFORE_LOCK" "$BEFORE_LOCK_BACKUP" || ! cmp -s "$BEFORE_LOCK" "$BEFORE_LOCK_BACKUP"; then
+  rm -f "$BEFORE_LOCK_BACKUP"
+  echo "error: before の Cargo.lock の退避に失敗した" >&2; exit 1
+fi
+restore_before_lock_then_after_trap() {
+  local code=$?
+  if cp "$BEFORE_LOCK_BACKUP" "$BEFORE_LOCK"; then
+    rm -f "$BEFORE_LOCK_BACKUP"
+  else
+    echo "error: before の Cargo.lock の復元に失敗した。バックアップを保持する: $BEFORE_LOCK_BACKUP" >&2
+    [[ "$code" -eq 0 ]] && code=1
+  fi
+  (exit "$code")
+  bench_fandhe_restore_lock_trap
+}
+trap restore_before_lock_then_after_trap EXIT
+
 build_arm() { # <arm: excl1（runner ツリー）> <facade>
   local arm=$1 facade=$2 tdir="target-ab-chain-excl-${LABEL}-$1" cfg tree
   cfg="patch.crates-io.fandhe-ai.path=\"${facade}\""

@@ -169,13 +169,19 @@ class JudgeTest(unittest.TestCase):
     def test_non_gb10_undetermined(self):
         self.fx.build()
         p = f"{self.fx.d}/env_info-{LABEL}.txt"
-        open(p, "w").write(open(p).read().replace("NVIDIA GB10", "NVIDIA H100"))
+        with open(p) as fh:
+            t = fh.read().replace("NVIDIA GB10", "NVIDIA H100")
+        with open(p, "w") as fh:
+            fh.write(t)
         self.assertEqual(self.run_judge()[0], "UNDETERMINED")
 
     def test_gate_fail_undetermined(self):
         self.fx.build()
         p = f"{self.fx.d}/load_gate-{LABEL}-cuda.log"
-        open(p, "w").write(open(p).read().replace("gate=pass gate_ok=1", "gate=fail gate_ok=0", 1))
+        with open(p) as fh:
+            t = fh.read().replace("gate=pass gate_ok=1", "gate=fail gate_ok=0", 1)
+        with open(p, "w") as fh:
+            fh.write(t)
         self.assertEqual(self.run_judge()[0], "UNDETERMINED")
 
     def test_g1_failure_is_regression(self):
