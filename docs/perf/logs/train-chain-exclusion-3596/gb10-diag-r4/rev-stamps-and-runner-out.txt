@@ -1,0 +1,85 @@
+### rev-stamp before
+f7fe6b4dfaabbdbc51a900709fe6648c36120c58
+dirty=0
+### rev-stamp after
+9bff0b00d452128b6628575bf307ab968b32586a
+dirty=0
+### runner.out
+precheck=assert ok
+== diag train cuda chain arm=aa0 round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134160,"q1_s":0.000134075,"q3_s":0.000134400,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.309971643}
+== diag train cuda chain arm=aa1 round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134200,"q1_s":0.000134064,"q3_s":0.000134932,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.263316132}
+== diag train cuda chain arm=excl0-rebuild round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134608,"q1_s":0.000134256,"q3_s":0.000135168,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.264589762}
+== diag train cuda chain arm=excl1 round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134208,"q1_s":0.000134092,"q3_s":0.000135092,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.261541226}
+== diag train cuda chain arm=rv-scopecall round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135416,"q1_s":0.000135104,"q3_s":0.000136040,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.269999172}
+== diag train cuda chain arm=rv-kindlookup round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134496,"q1_s":0.000134176,"q3_s":0.000135103,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.269571269}
+== diag train cuda chain arm=rv-graphlock round=1 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135240,"q1_s":0.000135068,"q3_s":0.000136087,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.272606845}
+run 1:  01:07:28 up 60 days, 12:34,  2 users,  load average: 0.52, 2.27, 1.39
+== diag train cuda chain arm=aa1 round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134510,"q1_s":0.000134190,"q3_s":0.000135010,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.308964722}
+== diag train cuda chain arm=excl0-rebuild round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135390,"q1_s":0.000134942,"q3_s":0.000135850,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.268551656}
+== diag train cuda chain arm=excl1 round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135990,"q1_s":0.000135386,"q3_s":0.000136318,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.268096177}
+== diag train cuda chain arm=rv-scopecall round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135158,"q1_s":0.000134858,"q3_s":0.000135502,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.268450304}
+== diag train cuda chain arm=rv-kindlookup round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134542,"q1_s":0.000134170,"q3_s":0.000135070,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.269968430}
+== diag train cuda chain arm=rv-graphlock round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135742,"q1_s":0.000135118,"q3_s":0.000136206,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.273833866}
+== diag train cuda chain arm=aa0 round=2 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134382,"q1_s":0.000134094,"q3_s":0.000134814,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.266279180}
+run 2:  01:08:33 up 60 days, 12:35,  2 users,  load average: 0.32, 1.86, 1.31
+== diag train cuda chain arm=excl0-rebuild round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134254,"q1_s":0.000134062,"q3_s":0.000134798,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.307696277}
+== diag train cuda chain arm=excl1 round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134870,"q1_s":0.000134298,"q3_s":0.000135366,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.259354262}
+== diag train cuda chain arm=rv-scopecall round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134134,"q1_s":0.000134063,"q3_s":0.000135042,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.262623854}
+== diag train cuda chain arm=rv-kindlookup round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134398,"q1_s":0.000134074,"q3_s":0.000134954,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.263916334}
+== diag train cuda chain arm=rv-graphlock round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135414,"q1_s":0.000135146,"q3_s":0.000136006,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.268555264}
+== diag train cuda chain arm=aa0 round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135134,"q1_s":0.000134847,"q3_s":0.000135314,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.263061985}
+== diag train cuda chain arm=aa1 round=3 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134422,"q1_s":0.000134094,"q3_s":0.000135070,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.271199302}
+run 3:  01:09:38 up 60 days, 12:36,  2 users,  load average: 0.23, 1.52, 1.23
+== diag train cuda chain arm=excl1 round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135086,"q1_s":0.000134770,"q3_s":0.000135206,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.306652441}
+== diag train cuda chain arm=rv-scopecall round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134414,"q1_s":0.000134079,"q3_s":0.000134918,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.260893232}
+== diag train cuda chain arm=rv-kindlookup round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134462,"q1_s":0.000134138,"q3_s":0.000135102,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.266904264}
+== diag train cuda chain arm=rv-graphlock round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135078,"q1_s":0.000134478,"q3_s":0.000135182,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.262564770}
+== diag train cuda chain arm=aa0 round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134174,"q1_s":0.000134074,"q3_s":0.000134606,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.266858382}
+== diag train cuda chain arm=aa1 round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134550,"q1_s":0.000134126,"q3_s":0.000135182,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.260415937}
+== diag train cuda chain arm=excl0-rebuild round=4 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134606,"q1_s":0.000134175,"q3_s":0.000134962,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.264965533}
+run 4:  01:10:44 up 60 days, 12:37,  2 users,  load average: 0.16, 1.24, 1.14
+== diag train cuda chain arm=rv-scopecall round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134479,"q1_s":0.000134182,"q3_s":0.000135086,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.310960846}
+== diag train cuda chain arm=rv-kindlookup round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134167,"q1_s":0.000133834,"q3_s":0.000134510,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.263197579}
+== diag train cuda chain arm=rv-graphlock round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135135,"q1_s":0.000134911,"q3_s":0.000135406,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.264745629}
+== diag train cuda chain arm=aa0 round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134694,"q1_s":0.000134171,"q3_s":0.000135134,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.268459047}
+== diag train cuda chain arm=aa1 round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000134407,"q1_s":0.000134094,"q3_s":0.000135123,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.259874460}
+== diag train cuda chain arm=excl0-rebuild round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135118,"q1_s":0.000134831,"q3_s":0.000135251,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.274726726}
+== diag train cuda chain arm=excl1 round=5 ==
+{"framework":"fandhe-ai","version":"0.11.0","task":"train","device":"cuda","size":64,"median_s":0.000135047,"q1_s":0.000134434,"q3_s":0.000135202,"checksum":0.080541,"warmup":20,"iters":80,"mode":"chain","init_s":0.263441127}
+run 5:  01:12:19 up 60 days, 12:39,  2 users,  load average: 0.16, 0.94, 1.04
+done. results in results/raw; skipped log: results/raw/skipped-diag-train-chain-exclusion-3596-diag-r4-gb10.log
+done. exit=0
