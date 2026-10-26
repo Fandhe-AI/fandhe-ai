@@ -1,0 +1,13 @@
+build before-diag rc=0
+build main-prefix-diag rc=0
+build after rc=0
+run before-diag 1 rc=101
+run before-diag 2 rc=101
+run main-prefix-diag 1 rc=101
+run main-prefix-diag 2 rc=101
+run after 1 rc=0
+run after 2 rc=0
+run after 3 rc=0
+run after 4 rc=0
+run after 5 rc=0
+done.

@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/3596-r2/after/target-ab-chain-excl-3596-r2-gb10-gates/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
+
+running 3 tests
+test train_step_chain_diag_tests_3252::public_entry_call_sequence_window_has_no_sync_and_read_is_one_sync ... DIAG3256 window=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 0 } read=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 1, d2h_bytes: 4, stream_syncs: 1, mem_uploads: 0, mem_allocs: 0 } first=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 11 } loss=1.1653609
+ok
+test train_step_chain_diag_tests_3252::tf32_mode_chain_outcome_is_recorded ... TF32OBS outcome=Ok（チェーンが TF32 モードでも成功） counters=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 8 }
+ok
+test train_step_chain_diag_tests_3252::train_chain_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync ... DIAG window=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 0 } read=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 1, d2h_bytes: 4, stream_syncs: 1, mem_uploads: 0, mem_allocs: 0 } first=GemmLaunchDiagCounters { driver_call_scopes: 0, h2d_calls: 0, h2d_bytes: 0, pool_allocs: 0, kernel_launches: 0, d2h_calls: 0, d2h_bytes: 0, stream_syncs: 0, mem_uploads: 0, mem_allocs: 8 } loss=1.1653609
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1401 filtered out; finished in 0.61s
+
+rc=0

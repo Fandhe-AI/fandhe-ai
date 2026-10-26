@@ -1,0 +1,82 @@
+ = 0x3d6b7b32
+final.param[2][4].bits = 0x3e1ebfca
+final.param[2][5].bits = 0x3df7415e
+final.param[2][6].bits = 0xbe5d9a3e
+final.param[2][7].bits = 0xbe72aa4c
+final.param[2][8].bits = 0xbca4a68e
+final.param[2][9].bits = 0xbe65b42a
+final.param[2][10].bits = 0xbe5cf3b5
+final.param[2][11].bits = 0x39a4fb17
+final.param[2][12].bits = 0xbe510d68
+final.param[2][13].bits = 0x3d7612fe
+final.param[2][14].bits = 0x3dc2c391
+final.param[2][15].bits = 0xbd7ec203
+final.param[2][16].bits = 0x3e6afb78
+final.param[2][17].bits = 0x3deaae94
+final.param[2][18].bits = 0xbdbff640
+final.param[2][19].bits = 0x3dfacf44
+final.param[2][20].bits = 0xbe3b2393
+final.param[2][21].bits = 0x3d253c80
+final.param[2][22].bits = 0x3d8d89c7
+final.param[2][23].bits = 0x3d391d96
+final.param[2][24].bits = 0xbdf47fe1
+final.param[2][25].bits = 0xbd69444f
+final.param[2][26].bits = 0x3d805386
+final.param[2][27].bits = 0xbc999a28
+final.param[2][28].bits = 0xbd9fa1fe
+final.param[2][29].bits = 0x3ccce123
+final.param[2][30].bits = 0x3d993cf7
+final.param[2][31].bits = 0x3dd6536b
+final.param[2][32].bits = 0xbe40a156
+final.param[2][33].bits = 0x3dc68290
+final.param[2][34].bits = 0x3d872b62
+final.param[2][35].bits = 0x3d057940
+final.param[2][36].bits = 0xbd32a725
+final.param[2][37].bits = 0x3e64e8a1
+final.param[2][38].bits = 0x3e2ffc21
+final.param[2][39].bits = 0xbe433f35
+final.param[2][40].bits = 0x3db056d8
+final.param[2][41].bits = 0xba37186f
+final.param[2][42].bits = 0xbba7efea
+final.param[2][43].bits = 0x3e3c50e5
+final.param[2][44].bits = 0x3e65be30
+final.param[2][45].bits = 0xbdeeef86
+final.param[2][46].bits = 0x3db93781
+final.param[2][47].bits = 0x3da14e5f
+final.param[2][48].bits = 0x3cc4d97b
+final.param[2][49].bits = 0x3e1fba9c
+final.param[2][50].bits = 0x3dac52f3
+final.param[2][51].bits = 0xbe075d11
+final.param[2][52].bits = 0xbe15115e
+final.param[2][53].bits = 0x3e7f7f53
+final.param[2][54].bits = 0x3ddfd622
+final.param[2][55].bits = 0xbe243f43
+final.param[2][56].bits = 0x3e7181f1
+final.param[2][57].bits = 0xbdcb111d
+final.param[2][58].bits = 0xbdd96f8f
+final.param[2][59].bits = 0xbdeac71f
+final.param[2][60].bits = 0x3e2de8b9
+final.param[2][61].bits = 0xbe1c082f
+final.param[2][62].bits = 0xbe4a409a
+final.param[2][63].bits = 0x3d8f74dd
+final.param[3][0].bits = 0xbe134e9f
+final.param[3][1].bits = 0x3d140f1f
+final.param[3][2].bits = 0x3de32cf6
+final.param[3][3].bits = 0x3d67d211
+ok
+test graph_capture ... 
+thread 'graph_capture' (64466) panicked at crates/facade/tests/cuda_graph_step_bit_identity.rs:120:5:
+本テストは opt-in ON（環境変数 FANDHE_AI_CUDA_GRAPH_STEP=1）の 別プロセスとして実行すること
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test graph_capture_completes_training_loop_without_error ... ok
+
+failures:
+
+failures:
+    graph_capture
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+error: test failed, to rerun pass `-p fandhe-ai --test cuda_graph_step_bit_identity`
+rc=101
