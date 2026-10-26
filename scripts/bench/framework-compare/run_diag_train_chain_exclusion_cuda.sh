@@ -183,7 +183,7 @@ if ! cp "$BEFORE_LOCK" "$BEFORE_LOCK_BACKUP" || ! cmp -s "$BEFORE_LOCK" "$BEFORE
   rm -f "$BEFORE_LOCK_BACKUP"
   echo "error: before の Cargo.lock の退避に失敗した" >&2; exit 1
 fi
-WT_LIST=""
+WT_LIST=() # 空白を含むパスでも分割されないよう配列で保持する
 cleanup_then_after_trap() {
   local code=$? wt
   if cp "$BEFORE_LOCK_BACKUP" "$BEFORE_LOCK"; then
@@ -192,7 +192,8 @@ cleanup_then_after_trap() {
     echo "error: before の Cargo.lock の復元に失敗した。バックアップを保持する: $BEFORE_LOCK_BACKUP" >&2
     [[ "$code" -eq 0 ]] && code=1
   fi
-  for wt in $WT_LIST; do git -C "$AFTER_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 || true; done
+  # bash 3.2 + set -u で空配列展開が unbound になるため ${arr[@]+...} 形式で展開する
+  for wt in ${WT_LIST[@]+"${WT_LIST[@]}"}; do git -C "$AFTER_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 || true; done
   (exit "$code")
   bench_fandhe_restore_lock_trap
 }
@@ -224,7 +225,7 @@ make_rv_tree() { # <arm>
   wt="$(rv_tree_path "$arm")"
   [[ ! -e "$wt" ]] || precheck_fail "worktree ${wt} が既に存在する"
   git -C "$AFTER_ROOT" worktree add --detach "$wt" HEAD >/dev/null 2>&1 || precheck_fail "worktree ${wt} を作れない"
-  WT_LIST="${WT_LIST} ${wt}"
+  WT_LIST+=("$wt")
   git -C "$wt" apply "$PATCH_FILE" || precheck_fail "${arm}: bench patch を適用できない"
   git -C "$wt" apply "$LOGDIR/diag-r4/${arm}.patch" || precheck_fail "${arm}: revert patch を適用できない"
   check_patched_tree "$wt" "$LOGDIR/diag-r4/${arm}.patch"
