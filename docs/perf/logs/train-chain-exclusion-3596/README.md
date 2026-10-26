@@ -52,7 +52,7 @@ off の差 0.2%（約 0.3 µs）は規則の閾値 1.00 を 5/5 round で超え�
 
 - 初回（RULE.txt）: 機体は GB10（aarch64・driver 580.173.02・rustc 1.97.1）。before = `f7fe6b4dfaabbdbc51a900709fe6648c36120c58`、after = `087e7f6d463b42b24cb65769986d78948d61d53f`（`crates/` は `d3f38f71b` と同一）。ホスト名・ホームディレクトリはマスク済み（`<home>`）。
 - r2: 同一機体・同一 driver・同一 rustc。before = `f7fe6b4df`、after = `616be4ff7658657933319a7e8cb8cec7a95d8422`、診断用の修正前 main = `c1204755e938a7908265c630968d864ec3443569`。計測専用パッチの sha256 は RULE-r2 の値（`92d0a8d4…3a819`）と一致。テスト専用パッチ（診断テストと G1 だけを足す。本体コードは含まない）の sha256: `diag-test-only-f7fe6b4df.patch` = `e38de09c8be5c8f080584559fde7f436240d02f7469c1be793fcae7a5f967109`、`diag-test-only-c1204755e.patch` = `e5916951f01733d4741fe821e7af839c615c91685871c0b91fbd1d6dd98b708b`（`gb10-r2/diag/`）。
-- r2 の 1 回目の起動は、after ツリーに RULE-r2 の基準コミット `63f85eff2`（squash 前の履歴）が無くランナーの事前検査で停止した（計測前。`gb10-r2/attempt1-precheck-failed-skipped.log`）。基準コミットを bundle で追加し、同じラベルで再起動した。停止時点で計測は行われておらず、規則・入力は変えていない。
+- r2 の 1 回目の起動は、after ツリーに RULE-r2 の基準コミット `63f85eff2`（squash 前の履歴）が無くランナーの事前検査で停止した（計測前。`gb10-r2/rev-stamps-and-runner-out.txt` の `## attempt1` 節）。基準コミットを bundle で追加し、同じラベルで再起動した。停止時点で計測は行われておらず、規則・入力は変えていない。
 - 転送は `git bundle`（追跡ファイルのみ）。バイナリ本体はコミットしない。
 
 ## 所有者判断事項
