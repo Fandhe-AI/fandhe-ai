@@ -1,0 +1,7 @@
+   Compiling fandhe-ai-backend-cpu v0.11.0 (<home>/work/3610-r5/before/crates/backend-cpu)
+   Compiling fandhe-ai-tensor-core v0.11.0 (<home>/work/3610-r5/before/crates/tensor-core)
+   Compiling fandhe-ai-backend-cuda v0.11.0 (<home>/work/3610-r5/before/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.11.0 (<home>/work/3610-r5/before/crates/autodiff)
+   Compiling bench-harness v0.11.0 (<home>/work/3610-r5/before/crates/bench-harness)
+    Finished `release` profile [optimized] target(s) in 18.13s
+  Executable unittests src/lib.rs (<home>/work/target-3610-r5-before/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
