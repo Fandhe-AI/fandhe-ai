@@ -415,3 +415,10 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 - bench からは capture が replay されたかを観測できない。R1（facade の bit 一致テストと backend-cuda の 8 テスト）で結線を補っているが、R1 の形状は bench の形状と同一ではない。
 - checksum の一致は bit 同一性の証明ではない。PARAM_DIGEST と R2（2 プロセスの bit 比較）で補っている。
 - 単一機体（GB10）・train CUDA・size=64 の結果で、infer・CPU・Metal・他形状には及ばない。正式な 6 フレームワーク同席計測は #3273。
+
+## 8.10 #3594 既定 ON への反転の保留（同一 ordinal の並行学習との競合）
+
+- 既定 ON への反転は、同じ ordinal で別スレッドが capture を開始すると、非 capture の学習チェーンが最初の dW 書き込み後に `DeviceContextCaptureInProgress` を受け、`train_chain.rs` の encoded エラー処理（`written=true`）が store を poison して復旧できなくなる競合（§8.8.4 の既知の制約）を、既定の利用者へ広げる機能回帰になる（PR #3595 の codex-review P1 指摘）。
+- 解消案は、チェーン全体の実行と capture を ordinal 単位で排他すること（non-capture チェーンが capture 中のコンテキストに入らない、または capture 開始側がチェーン完走を待つ）。GB10 実機での検証が必要なため本 PR の範囲に収めない。
+- よって `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` を維持する。反転は、ordinal 排他の実装と「同一 ordinal で 2 スレッド同時学習しても store が poison されない」回帰テストを付けた後続 PR で行う。
+- tolerance・baseline・FMA 契約・依存・`unsafe` は変更していない（コード変更なし）。
