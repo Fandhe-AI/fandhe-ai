@@ -439,6 +439,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 | `predict_device_chain(_resident)` | はい（読み取りのみ） | store を変えず、待って再試行する | 変更なし |
 | `step()`・`step_adam_impl` 等の更新経路（`device_store.rs`） | upload → update | 保留分を戻して poison せずに返す（再試行は呼び出し元） | 変更なし。呼び出し元の再試行が前提 |
 | reuse 経路・fresh 経路・Tape の通常演算 | 演算ごと | 型付きエラーで返る。**勾配の書き込み後に拒否されたときの store・Tape の扱いは今回の範囲で確認していない** | 未確認。必要なら別 Issue の候補（起票はユーザー承認後） |
+| graph の replay・初回 launch と非 capture 処理が ordinal 共有の永続ワークスペース（GEMM transposed／staged・MSE partial）を取り合う経路（データ競合。`DeviceContextCaptureInProgress` ではない） | — | 他 step の値を読む（loss の取り違え） | **#3596 再オープン後に対処**（§8.11.6） |
 | `begin_buffer_release`・`invalidate_with` | — | — | §8.11.3 のとおりデッドロックしない |
 
 capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`。このモードは他スレッドから共有 stream へ起動することを防がないため、排他はホスト側（`begin_driver_call`。§4.2 参照）で担保する。本件はその担保をチェーン全体へ広げるもので、モードの選択は変えない。
@@ -479,6 +480,23 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - 限界: 1 機体・1 日の結果。G1 の確率的な失敗は件数が少なく、頻度の推定は粗い。コード・閾値・規則は変更していない。
 - 結論: 排他（#3597）だけでは並行時の結果取り違えを防げていないため、#3594（既定 ON 反転）の前提はさらに遠のく。所有者判断: 原因調査と修正方針、別名 RULE での再実測。
 
+### 8.11.6 原因の切り分け（G1 の loss 取り違え。2026-10-26）
+
+**状態: コード上の原因特定と修正は済み。GB10 での確定・再実測は未実測**（本記録時点で実機に到達できなかったため、下記は静的な読解に基づく推定である。実測値で埋めない）。
+
+- 機構（推定）: `CudaMse` は ordinal ごとに 1 つで、デバイス上の永続 `partial` ワークスペースを持つ（`mse.rs`）。非 capture の forward は、このロックを partial と finalize の 2 起動にまたがって保持することで安全になっている。一方、学習 graph（`launch_train_chain` の capture 結果）は同じ `partial` のアドレスを焼き込むが、replay（`run_captured_train_chain` ①）も初回 launch も GEMM の `device_workspace` mutex しか取らず、MSE のロックを取っていなかった。2 スレッドは同じ ordinal の同じ stream に積むため、「非 capture の partial → graph（自分の partial と finalize）→ 非 capture の finalize」の順になりうる。その場合、非 capture 側の finalize は graph が書いた partial を読み、相手スレッドの step の loss を自分の loss として書く。
+- ログの症状との一致: 失敗は非 capture スレッドだけ（graph は stream 上で一体に実行されるので割り込まれない）。値は参照列の別 index の値になる（相手は同じ初期値・同じ入力）。poison は起きない。パラメータは影響を受けない見込み（MSE backward は pred／target から再計算し、dW のワークスペースは GEMM mutex で守られる）。
+- #3597 との関係: #3597 が防ぐのは「capture の開始」とチェーンの衝突であり、「replay」とチェーンの衝突ではない。したがって #3260 からある既存の欠陥を、柵なしの G1 が初めて露出させたと推定する。確定には `train_graph_shared_workspace_tests_3596`（capture の開始を重ねず replay と非 capture チェーンだけを衝突させる診断テスト）を #3597 以前のツリー（`f7fe6b4df` に診断テストのみ足したもの）で実行する（RULE-r2 の [原因切り分け]。未実測）。
+- テスト側の原因の否定材料: 参照は `capture=false` の `run_scenario` で作り、初期値・入力は固定パターンで乱数がない。capture 側スレッドは 30 回とも参照と一致している。loss はスレッドごとの store から step 直後に同スレッド内で読んでいる。確定は新しい `DIAG3596` 行（ずれた loss が参照列のどの index と一致するか、パラメータが一致するか）で行う。
+- 永続ワークスペースの監査: `Mutex<Option<CudaSlice` 系の ordinal 共有領域は GEMM `device_workspace` と MSE `partial_workspace` の 2 つ。推論 graph・step graph（#1349 の SGD）が同様の共有領域に触れるかは今回確認していない（範囲外。必要なら別 Issue の候補。起票はユーザー承認後）。
+- 修正: `graph.rs::with_train_graph_workspaces_locked` が、replay と初回 launch を GEMM → MSE の順で両方のロック下で行う（`CudaMse::with_partial_workspace_locked`）。**ロック順は GEMM → MSE に固定**。非 capture の経路はこの 2 つを入れ子で取らず、graph の launch は積むだけで他スレッドを待たないため、待ちの輪はできない。世代不一致・mutex 汚染・launch 失敗の扱いは従来のまま。capture する部品に新しい永続ワークスペースを足したら、このヘルパーにロックを足す。1 スレッドでの追加費用は競合のない mutex 1 回で、同期・確保・driver 呼び出しは増えない。
+- 却下した代替案: store ごとの partial バッファ（tensor-core の trait・autodiff・メモリ量に波及する）。チェーン全体と replay を ordinal ロックで直列化する案（必要以上に待つ）。`cuGraphExecUpdate`（未承認・新しい `unsafe`）。
+- 新しい `unsafe` なし。tolerance・baseline・依存・FMA 契約は変更なし。
+
+### 8.11.7 修正後の GB10 実測結果（RULE-r2。`3596-r2-gb10`）
+
+**未実測**（本記録時点）。規則は `docs/perf/logs/train-chain-exclusion-3596/RULE-r2.txt` に計測前に登録済み。G1 の 30 回繰り返し・`#[ignore]` 全件の突き合わせ・chain セルの結果は実機で得てからここに追記する。
+
 ## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 
 ### 8.12.1 結論
@@ -487,6 +505,7 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 ### 8.12.2 見送りの理由（未解決事項）
 - #3596 の `begin_device_chain_scope` が保護するのは encode と SGD の区間だけである。チェーン外の通常操作（`ResidentLoss::read` → `read_train_step_loss` → `mem.download`、Tape の通常演算など）は、待機も再試行もしない。
 - 既定 ON では、環境変数なしで同じ ordinal を複数スレッドが使うと、一方の学習 capture 中に他方の通常操作が `DeviceContextCaptureInProgress` で失敗し、公開 API（`step` → `loss.read()?`）からそのまま返る。従来は設定不要で動いていた並行学習が、別 store の capture タイミングだけで中断する。
+- さらに、graph の replay と非 capture チェーンが共有の永続ワークスペースを取り合い loss を取り違える欠陥があった（§8.11.6。修正済みだが GB10 での確認は未実測）。反転の前提に関わる。
 - 反転の前提条件: チェーン外の通常操作にも、capture 中は安全に待機して再試行する仕組みを入れ、その並行回帰テスト（GB10 実機）を通すこと。
 
 ### 8.12.3 反転 PR に再度必要な確認（未実測）
