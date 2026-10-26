@@ -149,6 +149,25 @@ class AggregateTest(unittest.TestCase):
         with self.assertRaises(agg.AggregateError):
             agg.load_machine(self.root)
 
+    def test_non_finite_and_garbage_floats(self):
+        # 校正値の nan・非正値、wall_mean_ns の garbage・nan は fail-closed（RULE §8）。
+        cases = (
+            ("round1-timed-native.log", f"timer_tick_ns={TICK}", "timer_tick_ns=nan"),
+            ("round1-timed-native.log", f"timer_tick_ns={TICK}", "timer_tick_ns=0"),
+            ("round1-timed-native.log", "timer_pair_ns=57.3", "timer_pair_ns=inf"),
+            ("round1-base-native.log", "wall_mean_ns=100000.0", "wall_mean_ns=garbage"),
+            ("round1-base-native.log", "wall_mean_ns=100000.0", "wall_mean_ns=nan"),
+        )
+        for name, old, new in cases:
+            with self.subTest(new=new):
+                write_machine(self.root, [0.6] * 5)
+                path = os.path.join(self.root, name)
+                text = open(path, encoding="utf-8").read()
+                self.assertIn(old, text)
+                open(path, "w", encoding="utf-8").write(text.replace(old, new, 1))
+                with self.assertRaises(agg.AggregateError):
+                    agg.load_machine(self.root)
+
     def test_rayon_threads_mismatch(self):
         def mut(r, arm, mode, s, kw):
             if mode == "t1" and r == 1 and arm == "base" and s == "l1_dw":

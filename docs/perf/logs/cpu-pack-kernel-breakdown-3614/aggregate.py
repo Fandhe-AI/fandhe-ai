@@ -9,6 +9,7 @@ INDETERMINATE の判定を Markdown で標準出力へ出す。標準ライブ�
 停止条件（RULE §8）に当たると AggregateError を投げ、終了コード 1 で理由を標準エラーへ出す。
 """
 
+import math
 import os
 import re
 import statistics
@@ -44,6 +45,9 @@ TIMED_KEYS = (
 INT_KEYS = (
     "m", "n", "k", "rayon_threads", "calls", "wall_median_ns",
 ) + TIMED_KEYS
+
+
+FLOAT_KEYS = ("wall_mean_ns",)
 
 
 class AggregateError(Exception):
@@ -83,6 +87,9 @@ def parse_log(path, arm, mode):
                     calib = {"tick": float(kv["timer_tick_ns"]), "pair": float(kv["timer_pair_ns"])}
                 except ValueError as exc:
                     raise AggregateError(f"{where}: 校正値が数値でない") from exc
+                for ck, cv in calib.items():
+                    if not math.isfinite(cv) or cv <= 0:
+                        raise AggregateError(f"{where}: 校正値 {ck} が有限の正値でない: {cv!r}")
                 continue
             need = COMMON_KEYS + (TIMED_KEYS if arm == "timed" else ())
             for key in need:
@@ -94,6 +101,13 @@ def parse_log(path, arm, mode):
                         kv[key] = int(kv[key])
                     except ValueError as exc:
                         raise AggregateError(f"{where}: {key} が整数でない: {kv[key]!r}") from exc
+            for key in FLOAT_KEYS:
+                try:
+                    kv[key] = float(kv[key])
+                except ValueError as exc:
+                    raise AggregateError(f"{where}: {key} が数値でない: {kv[key]!r}") from exc
+                if not math.isfinite(kv[key]) or kv[key] < 0:
+                    raise AggregateError(f"{where}: {key} が有限の非負値でない: {kv[key]!r}")
             if not re.fullmatch(r"0x[0-9a-f]{16}", kv["bits_hash"]):
                 raise AggregateError(f"{where}: bits_hash の形式が不正")
             if kv["arm"] != arm or kv["mode"] != mode:

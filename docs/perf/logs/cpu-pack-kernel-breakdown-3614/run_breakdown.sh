@@ -147,8 +147,9 @@ cp "${BASE}/${LOGDIR}/patch_sha256.txt" "${OUT}/patch_sha256.txt"
 } 2>&1 | mask > "${OUT}/tree_verify.txt"
 
 # 3. ビルド（逐次。計測と並走させない）
-( cd "${BASE}" && cargo build --release -p "${PKG}" --example "${EX}" ) > "${OUT}/build-base.log" 2>&1 || { echo "error: base のビルド失敗" >&2; exit 1; }
-( cd "${TIMED}" && cargo build --release -p "${PKG}" --example "${EX}" ) > "${OUT}/build-timed.log" 2>&1 || { echo "error: timed のビルド失敗" >&2; exit 1; }
+# cargo の Compiling 行はソースの絶対パスを含むため mask を通す。pipefail で cargo の終了コードを保つ。
+( set -o pipefail; cd "${BASE}" && cargo build --release -p "${PKG}" --example "${EX}" 2>&1 | mask > "${OUT}/build-base.log" ) || { echo "error: base のビルド失敗" >&2; exit 1; }
+( set -o pipefail; cd "${TIMED}" && cargo build --release -p "${PKG}" --example "${EX}" 2>&1 | mask > "${OUT}/build-timed.log" ) || { echo "error: timed のビルド失敗" >&2; exit 1; }
 BIN_BASE="${BASE}/target/release/examples/${EX}"
 BIN_TIMED="${TIMED}/target/release/examples/${EX}"
 
