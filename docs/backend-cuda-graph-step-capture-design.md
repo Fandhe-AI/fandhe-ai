@@ -422,3 +422,48 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 - 解消案は、チェーン全体の実行と capture を ordinal 単位で排他すること（non-capture チェーンが capture 中のコンテキストに入らない、または capture 開始側がチェーン完走を待つ）。GB10 実機での検証が必要なため本 PR の範囲に収めない。
 - よって `TRAIN_GRAPH_DEFAULT_ENABLED` は `false` を維持する。反転は、ordinal 排他の実装と「同一 ordinal で 2 スレッド同時学習しても store が poison されない」回帰テストを付けた後続 PR で行う。
 - tolerance・baseline・FMA 契約・依存・`unsafe` は変更していない（コード変更なし）。
+
+## 8.11 #3596 学習チェーンと Graph capture の ordinal 単位の排他
+
+§8.8.4 の既知の制約と §8.10 の保留（#3594）を解消するための実装記録。`TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま（反転は #3594）。
+
+### 8.11.1 競合経路の洗い出し（R1）
+
+| 経路 | 複数回の driver 呼び出し | 書き込み後に `DeviceContextCaptureInProgress` を受けたとき | 対処 |
+|---|---|---|---|
+| `train_step_device_chain` の encode（`encode_train_chain`） | はい | store を poison する（不具合。§8.8.4） | **本件のスコープで排他し、書き込み後には起きなくする** |
+| 同経路の SGD 段（`sgd_step_device_tracked`） | 1 回 | poison しない（既存の分岐） | スコープ内では起きない。防御として分岐は残す |
+| `try_captured_train_step`・replay | — | launch 前に返る（何も書かない） | 変更なし |
+| `predict_device_chain(_resident)` | はい（読み取りのみ） | store を変えず、待って再試行する | 変更なし |
+| `step()`・`step_adam_impl` 等の更新経路（`device_store.rs`） | upload → update | 保留分を戻して poison せずに返す（再試行は呼び出し元） | 変更なし。呼び出し元の再試行が前提 |
+| reuse 経路・fresh 経路・Tape の通常演算 | 演算ごと | 型付きエラーで返る。**勾配の書き込み後に拒否されたときの store・Tape の扱いは今回の範囲で確認していない** | 未確認。必要なら別 Issue の候補（起票はユーザー承認後） |
+| `begin_buffer_release`・`invalidate_with` | — | — | §8.11.3 のとおりデッドロックしない |
+
+capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`。このモードは他スレッドから共有 stream へ起動することを防がないため、排他はホスト側（`begin_driver_call`。§4.2 参照）で担保する。本件はその担保をチェーン全体へ広げるもので、モードの選択は変えない。
+
+### 8.11.2 設計
+
+- 新しいロックや状態フィールドは足さない。非 capture チェーン（encode ＋ SGD）の間、**外側の `CallToken` を 1 つ持ち続ける**。`BackendOps::begin_device_chain_scope`（tensor-core。既定は中身のないスコープで CPU・Metal は不変）が `DeviceChainScope`（`!Send`・RAII）を返し、CUDA 実装（`ops.rs`）が `begin_driver_call` のトークンを包む。
+- チェーン内の各部品は「このスレッドが in-flight を持つ」通過条件で通る。別スレッドの `begin_capture_session` は既存の `in_flight` ドレインでチェーンの完走を待つ。capture 開始後に来た新しいチェーンはスコープ取得（書き込み前）で一過性エラーを受け、`train_step_device_chain` の待機・再試行ループが処理する。
+- スコープは `try_captured_train_step` が `Ok(false)` を返した**後**に取る（スコープを持つスレッドは capture を開始できないため）。取得失敗は書き込み前の失敗として扱い、`Unsupported`・一過性衝突は poison せず velocity の新規確保分を戻す。それ以外は従来どおり poison する。
+- legacy stream（既定 OFF。`is_capturable_stream() == false`）の ordinal では capture 経路が成立しない（3 経路とも capturable stream を前提）ため、トークンをすぐ手放す。デバイス同期は足さない。新しい `unsafe` はない。
+- `DeviceChainScope` は内部クレート用で facade には出さない。`mem::forget` してはならない（in-flight が戻らず capture・invalidate が待ち続ける）。
+
+### 8.11.3 デッドロック分析
+
+| 状況 | 結果 |
+|---|---|
+| capture 自身がチェーンを実行する | `launch_train_chain` は部品を直接呼びスコープを取らない。autodiff はスコープの外で capture を試す。万一スコープを持ったまま capture を始めても `begin_capture_session` が `InvalidArgument` で即座に拒否する（CI テストで固定） |
+| 再 capture（同じスレッド・step ごと） | 前 step のスコープは drop 済みで待たない |
+| スコープを持ったまま待機 | `wait_foreign_capture_idle` は即座にエラー（CI テストで固定）。再試行ループはスコープの外 |
+| ドレイン中のチェーン側の buffer 解放 | ドレイン中は capture が有効でないため `begin_buffer_release` は止まらない（既存） |
+| ドレイン中のチェーン内の入れ子 `begin_driver_call` | 通過条件で通る（既存テスト `begin_driver_call_allows_nested_call_...`） |
+| `invalidate_with` | スコープを持つスレッド自身から `invalidate` へ届く経路はない（呼び出しは context_cache 外では公開 API のみ）。他スレッドの `invalidate` はチェーン完走後に進む |
+| capture 側の飢え | capture 開始後に新しいチェーンは入れない。待つのは既に走っている 1 step 分だけ |
+| エラー・panic | RAII。`?` の早期 return と `catch_unwind` を CI テストで確認 |
+
+### 8.11.4 テストと実測
+
+- CI（実行済み）: `context_cache.rs` の `chain_scope_*` 4 件、`train_chain.rs` の mock テスト 4 件、`backend_ops.rs` の既定実装テスト。
+- GB10 `#[ignore]`: `unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（`train_step_graph_diag_tests_3260.rs`。柵なし・30 繰り返し）を追加。
+- **未実測（本記録時点）**: GB10 での上記テストの pass、backend-cuda・facade の `#[ignore]` 全件の main との突き合わせ、1 スレッド chain セルの排他あり・なし比較（既定 OFF・opt-in ON）。実機を使えない環境で実装したため、別の機体の値では埋めない。#3594 の前提（これらの実測）が揃うまで `Closes` は付けない。

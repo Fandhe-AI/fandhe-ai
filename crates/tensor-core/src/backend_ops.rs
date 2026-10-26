@@ -924,6 +924,57 @@ pub struct TrainChainCaptureLayer {
     pub act: Activation,
 }
 
+/// 非 capture の学習チェーン（複数の driver 呼び出しの列）が実行中であることを、バックエンドの
+/// Graph capture 排他機構へ表明する RAII スコープ（イシュー #3596）。
+/// [`BackendOps::begin_device_chain_scope`] が返し、drop で排他区間が終わる。
+///
+/// 呼び出し元は autodiff の `DeviceParamStore::train_step_device_chain` のみ。CUDA はスコープの
+/// 間 ordinal の in-flight トークンを 1 つ持ち続け、別スレッドの capture 開始（in-flight ドレイン）が
+/// チェーンの完走を待ち、capture 開始後の新しいチェーンは書き込み前に一過性エラーで拒否される。
+///
+/// - **`Send` ではない**: 実体は thread-local な深度カウンタと対で動くため、別スレッドでの drop は
+///   カウンタを壊す（`PhantomData<*const ()>` で型として禁止する）。
+/// - `mem::forget` してはならない（in-flight が戻らず capture・invalidate が永久に待つ）。
+/// - capture 試行（`train_chain_captured`）と待機（`wait_device_capture_idle`）はスコープの**外**で
+///   呼ぶ（自スレッドがトークンを持つと capture 開始は `InvalidArgument` で拒否される）。
+/// - 内部クレート用の API であり facade には公開しない。
+#[must_use = "drop した時点で排他区間が終わる。チェーンを抜けるまで変数に束縛して保持すること"]
+pub struct DeviceChainScope {
+    _guard: Option<Box<dyn std::any::Any>>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl DeviceChainScope {
+    /// 排他の保持を持たないスコープ（既定実装・legacy stream 用）。
+    pub fn none() -> Self {
+        Self {
+            _guard: None,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    /// バックエンド実装が排他の実体（drop で解放される値）を包んで返す。
+    pub fn holding(guard: Box<dyn std::any::Any>) -> Self {
+        Self {
+            _guard: Some(guard),
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    /// 排他の実体を保持しているか（テスト・診断用）。
+    pub fn is_holding(&self) -> bool {
+        self._guard.is_some()
+    }
+}
+
+impl std::fmt::Debug for DeviceChainScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceChainScope")
+            .field("holding", &self.is_holding())
+            .finish()
+    }
+}
+
 /// [`BackendOps::train_chain_captured`] に渡す、学習 1 step 全体（forward・MSE・backward・SGD）が
 /// 触れる全リソースの束（イシュー #3260。決定記録 `docs/backend-cuda-graph-step-capture-design.md`
 /// §8）。任意クロージャを受け取らず触れるバッファを全て明示する固定形にするのは、
@@ -4503,6 +4554,21 @@ pub trait BackendOps {
         Ok(())
     }
 
+    /// 非 capture の学習チェーン（encode ＋ SGD）の実行区間を、同じ ordinal の Graph capture と
+    /// 排他するスコープを開く（イシュー #3596。決定記録
+    /// `docs/backend-cuda-graph-step-capture-design.md` §8.11）。
+    ///
+    /// 返した [`DeviceChainScope`] を持つ間、別スレッドの capture 開始はチェーンの完走を待ち、
+    /// capture 中のコンテキストへは書き込み前に `DeviceContextCaptureInProgress` で入れない
+    /// （チェーン途中で拒否されて store が poison される経路を閉じる）。呼び出し元は
+    /// `DeviceParamStore::train_step_device_chain` のみで、capture 試行・待機はスコープの外で行う。
+    ///
+    /// # デフォルト実装
+    /// 排他すべき capture が無いため中身のないスコープを返す（CPU・Metal は既定のまま。非破壊拡張）。
+    fn begin_device_chain_scope(&self) -> Result<DeviceChainScope, BackendError> {
+        Ok(DeviceChainScope::none())
+    }
+
     /// D2H（ホスト転送）を伴わずに、このバックエンドへ積まれた仕事（`*_tracked` で encode-only に
     /// 積んだ部品を含む）の完了を待つ（イシュー #3254 P7。決定記録
     /// `docs/compat-resident-train-step-decision.md` §4・§11）。
@@ -6714,6 +6780,18 @@ mod tests {
             ops.wait_device_capture_idle(std::time::Duration::from_millis(1))
                 .is_ok()
         );
+    }
+
+    /// [`BackendOps::begin_device_chain_scope`] の既定実装が中身のないスコープを返すこと
+    /// （イシュー #3596）。`Box<dyn BackendOps + Send>` の object safety も保つ。
+    #[test]
+    fn begin_device_chain_scope_default_holds_nothing() {
+        let ops = MockOps(Device::Cpu);
+        let scope = ops.begin_device_chain_scope().unwrap();
+        assert!(!scope.is_holding());
+        let boxed: Box<dyn BackendOps + Send> = Box::new(MockOps(Device::Cpu));
+        assert!(!boxed.begin_device_chain_scope().unwrap().is_holding());
+        assert!(DeviceChainScope::holding(Box::new(7_u8)).is_holding());
     }
 
     /// [`BackendOps::synchronize_device`] の既定実装が `Unsupported`（`Ok` に黙示フォールバック
