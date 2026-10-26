@@ -903,6 +903,14 @@ lock-all` も green。
 
 ## 変更履歴
 
+- 2026-10-27（v0.12.0 リリースサイクル・バンプ）: 公開 7 クレートを lockstep で
+  0.11.0 → 0.12.0 へ上げた（`workspace.version`・内部依存 12 箇所・ルート
+  `Cargo.lock`・`scripts/bench/oss-gemm-compare/Cargo.lock` の 5 行。イシュー #3270）。
+  #3245 は案 2 で決着済みのため `backward_device_param_store`／`Gradients` の契約変更は
+  含まない。公開クレート集合は 7 のまま（`hf-hub` の公開は
+  `docs/hf-hub-integration-design.md` §9.3 の 2 段目が未承認）。framework-compare の
+  承認ピン（`fandhe-ai =0.11.0`）は本バンプでは変えない（#3271）。公開日・タグ
+  `v0.12.0` は公開完了後に記録する。
 - 2026-10-09（v0.11.0 公開完了）: `.github/workflows/release-all.yml`（`mode: publish`
   run 37933003465。事前 dry-run〈verify〉run 37925912879）で公開 7 クレートの v0.11.0
   公開を完了した（7 クレート sparse index 反映確認済み）。タグ `v0.11.0` は

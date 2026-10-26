@@ -123,7 +123,21 @@ members = [
 # f64 自動微分・Functional API 等）と、Phase 7〜9（関数型 AD〈vjp・hvp・vmap・jvp・
 # jacfwd〉・speculative decoding〈greedy〉・連続バッチング第 1 段階・テキスト変換
 # `fandhe_ai::text`）。
-version = "0.11.0"
+#
+# v0.12.0（2026-10）: 0.11.0 公開（2026-10-09）以降の 349 コミット——#3018 ツリー
+# （対応表「部分的」行の解消と性能の引き上げ）——を含めて crates.io へ公開するため
+# 0.11.0 → 0.12.0 とする。主な追加は分散学習の初期形 `fandhe_ai::distributed`
+# （ホスト側 ring all-reduce）・`PagedKvCache`／paged attention・サンプリング版
+# speculative・`Sequential::train_step_resident`／`ResidentLoss`・`jvp_multi`／
+# `vmap_grad`・`backward_create_graph` の対象 Op 拡張・SWA の `Callback::Swa`・
+# CUDA／Metal の elementwise 融合と CUDA Graph 推論の opt-in setter・
+# `predict_resident_input`。公開 API は追加中心。#3245 は案 2 で決着しており
+# （`var_no_grad` の入力について `LinearResident` の d_input を省く性能改善〈#3246〉。
+# `Gradients` の契約は変わらず、案 1 は未実装）、`backward_device_param_store` の
+# 契約変更は含まない。非公開クレート `hf-hub`・`backend-rocm` も追加された
+# （`publish = false`。公開対象外で公開クレートは 7 のまま）。変更点の網羅は
+# `docs/perf/framework-compare-feature-matrix-0.12.0.md` の監査記録を正とする。
+version = "0.12.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
