@@ -1,0 +1,40 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-3610-r5-before/release/deps/fandhe_ai_backend_cuda-227257fd9bbfbd47)
+
+running 1 test
+test train_graph_shared_workspace_tests_3596::replay_thread_and_plain_chain_thread_keep_losses_bit_exact ... DIAG3610 plain repeat 0: plain-params-equal=true
+DIAG3610 plain repeat 1: plain-params-equal=true
+DIAG3610 plain repeat 2: plain-params-equal=true
+DIAG3610 plain repeat 3: plain-params-equal=true
+DIAG3610 plain repeat 4: plain-params-equal=true
+DIAG3610 plain repeat 5: plain-params-equal=true
+DIAG3610 plain repeat 6: plain-params-equal=true
+DIAG3610 plain repeat 7: plain-params-equal=true
+DIAG3610 plain repeat 8: plain-params-equal=true
+DIAG3610 plain repeat 9: plain-params-equal=true
+DIAG3610 plain repeat 10: plain-params-equal=true
+DIAG3610 plain repeat 11: plain-params-equal=true
+DIAG3610 plain repeat 12: plain-params-equal=true
+DIAG3610 plain repeat 13: plain-params-equal=true
+DIAG3610 plain repeat 14: plain-params-equal=true
+DIAG3610 plain repeat 15: plain-params-equal=true
+DIAG3610 plain repeat 16: plain-params-equal=true
+DIAG3610 plain repeat 17: plain-params-equal=true
+DIAG3610 plain repeat 18: plain-params-equal=true
+DIAG3610 plain repeat 19: plain-params-equal=true
+DIAG3610 plain repeat 20: plain-params-equal=true
+DIAG3610 plain repeat 21: plain-params-equal=true
+DIAG3610 plain repeat 22: plain-params-equal=true
+DIAG3610 plain repeat 23: plain-params-equal=true
+DIAG3610 plain repeat 24: plain-params-equal=true
+DIAG3610 plain repeat 25: plain-params-equal=true
+DIAG3610 plain repeat 26: plain-params-equal=true
+DIAG3610 plain repeat 27: plain-params-equal=true
+DIAG3610 plain repeat 28: plain-params-equal=true
+DIAG3610 plain repeat 29: plain-params-equal=true
+DIAG3610 summary: mismatches=0 matched_full=0 unmatched=0 idx_ge_20=0 in_window=0 plain_params_diff=0 replay_bad=false
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1397 filtered out; finished in 0.81s
+
+rc=0

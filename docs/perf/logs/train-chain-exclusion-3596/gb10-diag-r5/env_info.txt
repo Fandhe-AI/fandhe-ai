@@ -1,0 +1,27 @@
+== env_info
+2026-10-26T19:59:59Z
+aarch64
+GPU 0: NVIDIA GB10 (UUID: <masked>)
+| NVIDIA-SMI 580.173.02             Driver Version: 580.173.02     CUDA Version: 13.0     |
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+ad9eda3aa5ae318d6f78a5cd751f08e39a59b49f1bcf74e2ebbffe1a809827b7  <home>/work/3610-r5-patches/diag-r5-616be4ff7.patch
+2e7f1d61e8a120e593323689f3c7055d01f4b45613179dc39890b7b3482a6367  <home>/work/3610-r5-patches/diag-r5-c1204755e.patch
+94f050f717895b8f80479727fb265bfba5de73cdc56039c66b9a7956e8d541cf  <home>/work/3610-r5-patches/diag-r5-f7fe6b4df.patch
+5e1d9c8db88a5f13b5096caba4fa548fb107ce991e80e47796a4c5bba73e7e01  <home>/work/3610-r5-patches/DIAG-r5.txt
+== before
+f7fe6b4dfaabbdbc51a900709fe6648c36120c58
+dirty=0
+ M crates/backend-cuda/src/lib.rs
+ M crates/backend-cuda/src/train_step_graph_diag_tests_3260.rs
+?? crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs
+== mainprefix
+c1204755e938a7908265c630968d864ec3443569
+dirty=0
+ M crates/backend-cuda/src/lib.rs
+ M crates/backend-cuda/src/train_step_graph_diag_tests_3260.rs
+?? crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs
+== after
+616be4ff7658657933319a7e8cb8cec7a95d8422
+dirty=0
+ M crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs
+ 05:00:00 up 60 days, 16:27,  1 user,  load average: 4.13, 1.13, 0.38
