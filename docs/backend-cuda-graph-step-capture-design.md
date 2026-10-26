@@ -534,7 +534,7 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 
 ### 8.11.10 r3 の差の切り分け診断（DIAG-r4。手順の登録）
 
-**状態: 手順・計測専用パッチ・ランナー・集計ツールを計測前に固定した段階。GB10 での計測は未実施**（結果は計測後にこの節へ追記する。推測の値は書かない）。
+**状態: GB10 で実測済み。分類は場合 (i)「差は A/A と同程度。コードに原因は見つからない」（集計ツールの終了コード 0）。コード（`crates/`）は変えていない**（2026-10-27。出典: `docs/perf/logs/train-chain-exclusion-3596/gb10-diag-r4/summary-3596-diag-r4.md`・`.exit`）。
 
 - 目的: RULE-r3 の UNDETERMINED で残った既定 OFF の chain セルの約 0.9 µs の差の出どころを切り分ける（所有者判断 2026-10-26: driver 呼び出しは原因ではなかった）。判定ではなく分類であり、RULE.txt・RULE-r2.txt・RULE-r3.txt と判定記録は変えない。
 - 手順の正本: `docs/perf/logs/train-chain-exclusion-3596/DIAG-r4.txt`（腕 7 つ・5 round 巡回・専有ゲートは RULE-r3 と同一・A/A ノイズ幅 N による分類規則と結論の対応表を計測前に固定）。
@@ -542,6 +542,27 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 - 腕: `aa0`／`aa1`（before の同一バイナリ = A/A）、`excl0-rebuild`（before の再ビルド）、`excl1`（after）、`rv-scopecall`／`rv-kindlookup`／`rv-graphlock`（after に計測専用パッチ 1 本。`diag-r4/*.patch`。`crates/` へはコミットしない）。
 - 道具: `scripts/bench/framework-compare/run_diag_train_chain_exclusion_cuda.sh`（ランナー）、`summarize_diag_train_chain_exclusion.py`（集計。テストは CI で実行）。
 - 差が A/A と同程度、または配置・ビルド起因なら記録して止め、所有者へ報告する。コードに原因が見つかった場合に限り、最小の修正を入れ、別名の RULE-r4.txt を計測前に登録して再実測する（#3596 は NON-REGRESSION が出るまで閉じない）。
+
+#### 実測結果（`gb10-diag-r4/`。ラベル `3596-diag-r4-gb10`）
+
+- 条件: GB10（aarch64）・before = `f7fe6b4dfaabbdbc51a900709fe6648c36120c58`、after = `9bff0b00d452128b6628575bf307ab968b32586a`（`git diff 46a2a43d9 9bff0b00d -- crates` は空で、DIAG-r4 の `after_crates_identical_to` を満たす）。7 腕 × 5 round を DIAG-r4 の巡回順で実施。`precheck=assert ok`、ランナー終了コード 0、専有ゲートは全 round 通過、skipped ログは空。`env_info` の `diag_sha256` は main の `DIAG-r4.txt` の sha256 と一致し、`bin_sha256_aa0` と `bin_sha256_aa1` も一致。ホスト名・`$HOME` はマスク済み（`<home>`）。
+- hard 条件（checksum・PARAM_DIGEST の全 run・全腕での一致）は集計ツールが検査して合格（終了コード 0）。
+
+| 腕 | 代表値 median_s (s) | rho | rho_r (r1..r5) |
+|---|---|---|---|
+| aa0 | 0.000134382 | 1.0000 | 1.0000 1.0000 1.0000 1.0000 1.0000 |
+| aa1 | 0.000134422 | 1.0003 | 1.0003 1.0010 0.9947 1.0028 0.9979 |
+| excl0-rebuild | 0.000134608 | 1.0017 | 1.0033 1.0075 0.9935 1.0032 1.0031 |
+| excl1 | 0.000135047 | 1.0049 | 1.0004 1.0120 0.9980 1.0068 1.0026 |
+| rv-scopecall | 0.000134479 | 1.0007 | 1.0094 1.0058 0.9926 1.0018 0.9984 |
+| rv-kindlookup | 0.000134462 | 1.0006 | 1.0025 1.0012 0.9946 1.0021 0.9961 |
+| rv-graphlock | 0.000135240 | 1.0064 | 1.0081 1.0101 1.0021 1.0067 1.0033 |
+
+- N（A/A ノイズ幅）= 0.0053、Delta_after = rho(excl1) - 1 = +0.0049。|Delta_after| <= N のため場合 (i)。revert 腕の原因候補判定は場合 (ii) のときだけ行う規則なので適用されない（参考として rho は rv-scopecall 1.0007・rv-kindlookup 1.0006・rv-graphlock 1.0064）。
+- 併記（ビルド・配置の影響あり）: rv-graphlock（既定 OFF の経路外の対照腕。|rho - 1| = 0.0064 > N）。場合 (i) のため分類は (i) のままで、この動きの原因は推定で埋めない。
+- 読み方: RULE-r3 で観測した約 0.9 µs（ratio 1.007）の差は、本診断では excl1 で +0.66 µs（rho 1.0049）に縮み、A/A（aa1）の round 内ばらつき（rho_r 0.9947〜1.0028）の幅 N に収まった。差の出どころとしてコード上の原因（スコープ呼び出し・`resolved_stream_kind` の mutex）は見つからなかった。
+- 限界（DIAG-r4 のとおり）: 単一機体・train CUDA・size=64・1 スレッド・別ビルド比較・5 round で検出力は限られる。診断腕のパッチは計測専用で、排他の正しさ（G1 ほか）を検証しない。
+- 所有者判断事項: 場合 (i) のため、DIAG-r4 の規則どおり停止して所有者へ報告する。選択肢は (a) 約 0.5% の差を測定ノイズ水準として許容し、RULE の判定基準（閾値 1.00・符号一貫の要件）を見直すか、(b) round 数を増やす別名 RULE の事前登録で再実測するか、のいずれか。閾値・round 数・判定方法は変えていない。`TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。#3596 は NON-REGRESSION が出ていないため閉じない。
 
 ## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 
