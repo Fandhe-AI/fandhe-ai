@@ -490,10 +490,59 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - ログの症状との一致: 失敗は非 capture スレッドだけ（graph は stream 上で一体に実行されるので割り込まれない）。値は参照列の別 index の値になる（相手は同じ初期値・同じ入力）。poison は起きない。パラメータは影響を受けない見込み（MSE backward は pred／target から再計算し、dW のワークスペースは GEMM mutex で守られる）。
 - #3597 との関係: #3597 が防ぐのは「capture の開始」とチェーンの衝突であり、「replay」とチェーンの衝突ではない。したがって #3260 からある既存の欠陥を、柵なしの G1 が初めて露出させたと推定する。確定には `train_graph_shared_workspace_tests_3596`（capture の開始を重ねず replay と非 capture チェーンだけを衝突させる診断テスト）を #3597 以前のツリー（`f7fe6b4df` に診断テストのみ足したもの）で実行する（RULE-r2 の [原因切り分け]。未実測）。
 - テスト側の原因の否定材料: 参照は `capture=false` の `run_scenario` で作り、初期値・入力は固定パターンで乱数がない。capture 側スレッドは 30 回とも参照と一致している。loss はスレッドごとの store から step 直後に同スレッド内で読んでいる。確定は新しい `DIAG3596` 行（ずれた loss が参照列のどの index と一致するか、パラメータが一致するか）で行う。
-- 永続ワークスペースの監査: `Mutex<Option<CudaSlice` 系の ordinal 共有領域は GEMM `device_workspace` と MSE `partial_workspace` の 2 つ。推論 graph・step graph（#1349 の SGD）が同様の共有領域に触れるかは今回確認していない（範囲外。必要なら別 Issue の候補。起票はユーザー承認後）。
+- 永続ワークスペースの監査: `Mutex<Option<CudaSlice` 系の ordinal 共有領域は GEMM `device_workspace` と MSE `partial_workspace` の 2 つ。推論 graph・step graph（#1349 の SGD）が同様の共有領域に触れるかは #3609 で確認した（触れない。下記「永続ワークスペースの監査の追補」）。
 - 修正: `graph.rs::with_train_graph_workspaces_locked` が、replay と初回 launch を GEMM → MSE の順で両方のロック下で行う（`CudaMse::with_partial_workspace_locked`）。**ロック順は GEMM → MSE に固定**。非 capture の経路はこの 2 つを入れ子で取らず、graph の launch は積むだけで他スレッドを待たないため、待ちの輪はできない。世代不一致・mutex 汚染・launch 失敗の扱いは従来のまま。capture する部品に新しい永続ワークスペースを足したら、このヘルパーにロックを足す。1 スレッドでの追加費用は競合のない mutex 1 回で、同期・確保・driver 呼び出しは増えない。
 - 却下した代替案: store ごとの partial バッファ（tensor-core の trait・autodiff・メモリ量に波及する）。チェーン全体と replay を ordinal ロックで直列化する案（必要以上に待つ）。`cuGraphExecUpdate`（未承認・新しい `unsafe`）。
 - 新しい `unsafe` なし。tolerance・baseline・依存・FMA 契約は変更なし。
+
+#### 永続ワークスペースの監査の追補（#3609。推論 graph・step graph）
+
+**結論: 推論 graph・step graph は ordinal 共有の永続ワークスペースを焼き込まない。#3601 と同じ種類の取り違えは、この 2 経路では起こらない。** 静的な読解のみで、コードは変えていない（基準 `c52a9042e`。行番号は `crates/backend-cuda/src/` 配下）。GB10 での実測はしていない（下記「限界」）。
+
+**capture の入口は 3 つだけ**（`begin_capture(` の grep）: step graph `graph.rs:549`・推論 graph `graph.rs:1013`・学習 graph `graph.rs:1593`。学習 graph は #3601 の修正済みで本節の対象外。
+
+**焼き込むデバイスアドレスと所有の単位**
+
+| graph | 焼き込むアドレス | 所有者 | 分類 | 根拠 |
+|---|---|---|---|---|
+| step（#1349） | `param`・`grad`・`velocity`（`None` のときは `grad` を再 push） | 呼び出し元の `DeviceParamStore` | インスタンス | `sgd.rs:117` の `run`。`push` 順は同関数の launch ブロック。`SegmentKey` の再検証は `ops.rs:3822`・`ops.rs:1255` |
+| step | SGD のスカラー（lr 等） | カーネル引数の値 | 該当なし（アドレスではない） | 同上 |
+| 推論（#2115） | `input_staging`・`acts[i]` | thread-local の `INFER_GRAPHS` が持つ `CachedInferChain` | thread-local | `graph.rs:807〜823`（構造体・`thread_local!`） |
+| 推論 | 各層の `w`・`bias`（`bias` が無いときは `a` を再利用） | 呼び出し元 | インスタンス | `graph.rs:885`〜（`launch_chain_layers`）→ `gemm.rs:6408`（`launch_tiled_bias_act_f32_resident`）。key の生成は `ops.rs:3927〜3986` |
+
+どちらの capture 本体も、確保・Mutex・ワークスペースを持たない。step は `STEP_GRAPHS`（`graph.rs:318〜339`）が thread-local。`CudaSgd` のフィールドは `stream` とコンパイル済み関数ハンドルだけ（`sgd.rs:54`）。推論の launch は引数（`a`・`w`・`bias`・`c`）とスカラーだけで起動する（`gemm.rs:6408` 以降）。`kernels.rs`・`kernels_sgd.rs` にモジュールスコープの `__device__`／`__constant__` 変数は無い（grep）。
+
+**ordinal 共有の領域と入口**（#3601 で確定した 2 つ）
+
+- GEMM `device_workspace`（`gemm.rs:519`）: ロックを取る入口は `lock_device_workspace`（`gemm.rs:5750`）経由の `with_workspace_epoch`（`gemm.rs:5743`）・`launch_gemm_dw_device`（`gemm.rs:5818`）・`launch_gemm_dinput_device`（`gemm.rs:5910`）の 3 つだけ。
+- MSE `partial_workspace`（`mse.rs:184`）: 入口は `launch_mse_loss_device_f32`（`mse.rs:425`、ロックは `mse.rs:435`）と `with_partial_workspace_locked`（`mse.rs:235`）。`launch_mse_loss_device_f32` の呼び出し元は `ops.rs:3195`（`mse_loss_device` の実装）だけ。
+- 推論・step の capture 本体はこれらの入口を呼ばない。推論は `launch_tiled_bias_act_f32_resident` だけ（`dw`・`dinput` 系や MSE を通らない）、step は `CudaSgd::run` だけ。学習チェーンの部品（`graph.rs:1462`・`1478`・`1500` の `mse_loss_device_into_tracked`・`gemm_fp32_strict_into_device_tracked`・`gemm_resident_lhs_device_into_tracked`）は `launch_train_chain` の中でだけ使われる。
+
+**§8.11.6 で「未精読」だった 3 点の分類**
+
+- `mse.rs:180` の `target_cache`: 使うのは `with_target_dev`（`mse.rs:252`）で、その呼び出しはホスト版 `run_mse_loss_f32`（`mse.rs:498`）・`run_mse_backward_f32`（`mse.rs:557`）だけ。デバイス版・graph 経路は通らず、どの graph にも焼き込まれない。
+- `h2d_staging`（`memory.rs:621`・`gemm.rs:509`）: pinned のホストメモリ（#1585・opt-in）で、デバイスアドレスではない。推論 replay の `upload_into`（`memory.rs:1702`）は capture の外（replay の前）で動く。
+- `launch_tiled_bias_act_f32_resident` の全体: 上記のとおり引数だけで launch し、ワークスペースを持たない。
+
+**ロックの突き合わせ**
+
+- step の replay（`graph.rs:473〜489`）・推論の replay（`execute_chain`、`graph.rs:1087`〜）・両者の初回 launch が取るのは、`begin_driver_call` による driver 呼び出しの区間（世代検査・poison 検査）だけ。これで足りるのは、graph が焼き込むものがすべて thread-local またはインスタンス所有で、他スレッドの非 capture チェーンと共有する可変領域が無いため。
+- 対比: 学習 graph の replay は `with_train_graph_workspaces_locked`（`graph.rs:1706`）で GEMM → MSE の順に両方のロックを取る。ordinal 共有の領域を焼き込むからである。
+- 非 capture 経路（`mse_loss_device`・`gemm_*_device`）は共有領域を使うが、推論・step の graph はそれらを読み書きしないので、stream 上で順序が入れ替わっても取り違える対象が無い。
+
+**デバイスメモリの再配布の窓（プールの確認）**
+
+- `input_staging`・`acts` は `alloc_zeroed_inner`（`memory.rs:1261`）の device 分岐で `stream.alloc_zeros` により確保する。`gemm.rs` の `PooledCudaHandle`（drop 時にストリーム順序を持たないプール。`gemm.rs:510〜518` のコメント）は経由しない。
+- cudarc 0.19.8 は非同期確保が使えるとき `malloc_async` で確保し、drop は `free_async` でストリーム順序に従う（cudarc `driver/safe/core.rs:809〜811`・`1535〜1536`）。`CudaBufferHandle::drop`（`memory.rs:156`）は `begin_buffer_release` の後にそれを呼ぶ。
+- 推論 graph の evict・TLS 破棄は同一スレッド内で起き、`execute_chain` は毎回 `download` で同期して終わる（`graph.rs:1087〜1114`）ので、最後の launch は完了している。ほかのスレッドが同じアドレスを受け取る窓は、静的な読解では見つからなかった。
+- step graph の `param`・`grad`・`velocity` の解放は呼び出し元（`DeviceParamStore`）の drop で、`SegmentKey` が live 借用から作り直され replay 直前に再検証される（`ops.rs:3822`・#1349 §4.4）。これは #3601 より前からある契約で、本節の範囲では変えない。
+
+**限界**
+
+- 静的な監査のみで、GB10 の実測はしていない。「無い」という結論のため、再現テストの案は書かない（根拠は上記の呼び出し連鎖）。
+- cudarc 内部の `CudaSlice` のイベント追跡と graph の関係、同じストアを複数スレッドが同時に更新・推論する利用者側のデータ競合は対象外。必要なら別 Issue の候補（起票はユーザー承認後）。
+
+**将来への注意**: 推論・step の capture 本体に ordinal 共有の永続ワークスペースを足すときは、`with_train_graph_workspaces_locked` と同じく、replay と初回 launch に該当のロックを足す。
 
 ### 8.11.7 修正後の GB10 実測結果（RULE-r2。`3596-r2-gb10`）
 
