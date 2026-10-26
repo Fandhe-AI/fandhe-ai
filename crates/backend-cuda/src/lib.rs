@@ -401,6 +401,11 @@ mod train_step_chain_diag_tests_3252;
 // 再 capture・別スレッド衝突・replay 窓のカウンタの実機テスト（兄弟配置の理由は同上）。
 #[cfg(test)]
 mod train_step_graph_diag_tests_3260;
+// イシュー #3596: graph の replay と非 capture チェーンが ordinal 共有の永続ワークスペース
+// （MSE partial）を取り合う経路の GB10 診断テスト（`train_step_graph_diag_tests_3260` の
+// ヘルパーを使う兄弟配置）。
+#[cfg(test)]
+mod train_graph_shared_workspace_tests_3596;
 // イシュー #2116: CUDA train reuse の `forward_resident` 区間（層ごとの
 // `gemm_resident_rhs` 往復・未融合 relu・mse の H2D／確保／起動／同期 D2H）を
 // 層の種類別・batch 別に分解する診断テスト。`context_cache`・

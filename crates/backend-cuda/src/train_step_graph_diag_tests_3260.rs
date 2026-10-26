@@ -65,14 +65,14 @@ fn config(lr: f32) -> SgdConfig {
 
 /// 起動時に opt-in していないと created stream にならず、capture に届かないまま bit 一致だけが
 /// 合格してしまう。そのため最初に確認する。
-fn require_opt_in_env() {
+pub(super) fn require_opt_in_env() {
     assert!(
         train_graph_stream_requested(),
         "FANDHE_AI_CUDA_GRAPH_TRAIN=1 を付けて起動すること（stream 種別は起動時に決まる）"
     );
 }
 
-struct Run {
+pub(super) struct Run {
     tape: Tape,
     store: DeviceParamStore,
     x: ResidentInput,
@@ -80,7 +80,7 @@ struct Run {
 }
 
 /// 同じ初期値・同じ入力の MLP（784-256-10・batch 64）。
-fn new_run() -> Run {
+pub(super) fn new_run() -> Run {
     new_run_with(DIMS)
 }
 
@@ -102,7 +102,7 @@ fn new_run_with(dims: [usize; 3]) -> Run {
     Run { tape, store, x, y }
 }
 
-fn step(run: &mut Run, lr: f32) -> Result<TrainStepLoss, BackendError> {
+pub(super) fn step(run: &mut Run, lr: f32) -> Result<TrainStepLoss, BackendError> {
     let leaves: Vec<ResidentLeaf<'_>> = run.store.snapshot_resident_params(&run.tape)?;
     let steps = [
         (&leaves[0], Some(&leaves[1]), Activation::Relu),
@@ -114,7 +114,7 @@ fn step(run: &mut Run, lr: f32) -> Result<TrainStepLoss, BackendError> {
 
 /// 別スレッドの capture と衝突した読み出し・同期は一過性のエラーなので、上限つきで再試行する
 /// （`read_train_step_loss`／`sync_to_host` の契約。poison はされない）。
-fn retry_busy<T>(mut f: impl FnMut() -> Result<T, BackendError>) -> T {
+pub(super) fn retry_busy<T>(mut f: impl FnMut() -> Result<T, BackendError>) -> T {
     for _ in 0..2000 {
         match f() {
             Err(BackendError::DeviceContextCaptureInProgress { .. }) => {
@@ -128,15 +128,15 @@ fn retry_busy<T>(mut f: impl FnMut() -> Result<T, BackendError>) -> T {
 
 /// store が poison されていないこと（`wait_device` は poison 済みなら `StorePoisoned` を返し、
 /// 失敗トークンもここで検査する）。
-fn assert_not_poisoned(run: &Run) {
+pub(super) fn assert_not_poisoned(run: &Run) {
     retry_busy(|| run.store.wait_device(&run.tape));
 }
 
-fn read_loss(run: &Run, h: &TrainStepLoss) -> f32 {
+pub(super) fn read_loss(run: &Run, h: &TrainStepLoss) -> f32 {
     retry_busy(|| run.store.read_train_step_loss(&run.tape, h))
 }
 
-fn param_bits(run: &Run) -> Vec<Vec<u32>> {
+pub(super) fn param_bits(run: &Run) -> Vec<Vec<u32>> {
     retry_busy(|| run.store.sync_to_host(&run.tape))
         .iter()
         .map(|t| {
@@ -164,14 +164,14 @@ fn assert_bits(actual: &[u32], expected: &[u32], what: &str) {
 }
 
 /// 1 シナリオの結果（各 step の loss bit と、最後のパラメータ bit）。
-struct Outcome {
-    losses: Vec<u32>,
-    params: Vec<Vec<u32>>,
+pub(super) struct Outcome {
+    pub(super) losses: Vec<u32>,
+    pub(super) params: Vec<Vec<u32>>,
 }
 
 /// `steps` 回進める。`capture` は現スレッドの opt-in（override）、`reupload` は毎 step x／y を
 /// upload し直す、`inject_at` はその step だけ capture 失敗を 1 回注入する。
-fn run_scenario(
+pub(super) fn run_scenario(
     steps: usize,
     lr_of: impl Fn(usize) -> f32,
     capture: bool,
@@ -209,6 +209,32 @@ fn assert_same(a: &Outcome, b: &Outcome, what: &str) {
     assert_eq!(a.params.len(), b.params.len(), "{what}: param count");
     for (i, (x, y)) in a.params.iter().zip(&b.params).enumerate() {
         assert_bits(x, y, &format!("{what}: param {i}"));
+    }
+}
+
+/// loss／パラメータが参照とずれたとき、assert の前に原因切り分け用の `DIAG3596` 行を出す
+/// （イシュー #3596。設計記録 §8.11.6）。ずれた loss が参照列のどの index と bit 一致するか
+/// （= 他 step の値の取り違えか）と、パラメータがずれたかを示す。判定は呼び出し側の assert が行う。
+pub(super) fn report_mismatch_3596(out: &Outcome, reference: &Outcome, what: &str) {
+    let params_equal = out.params == reference.params;
+    for (i, (a, e)) in out.losses.iter().zip(&reference.losses).enumerate() {
+        if a != e {
+            let matches: Vec<usize> = reference
+                .losses
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| *r == a)
+                .map(|(j, _)| j)
+                .collect();
+            eprintln!(
+                "DIAG3596 {what}: loss idx {i} got {} expected {} equals-reference-idx {matches:?} params_equal={params_equal}",
+                f32::from_bits(*a),
+                f32::from_bits(*e),
+            );
+        }
+    }
+    if !params_equal {
+        eprintln!("DIAG3596 {what}: params differ from reference");
     }
 }
 
@@ -463,6 +489,7 @@ fn unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact() {
             .iter()
             .enumerate()
         {
+            report_mismatch_3596(out, &reference, &format!("thread {n} repeat {r}"));
             assert_same(out, &reference, &format!("thread {n} repeat {r} vs single"));
         }
     }
