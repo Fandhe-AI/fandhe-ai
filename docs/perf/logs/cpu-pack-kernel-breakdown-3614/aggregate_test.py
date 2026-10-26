@@ -22,8 +22,9 @@ TICK = 41.0
 def make_line(arm, mode, shape, *, threads, sa, tj=100_000.0, calls=500, jobs=10, hash_="0x" + "ab" * 8,
               interval_ns=1000.0, wall=100_000):
     """tJob=tj・A pack の割合=sa の 1 行。B pack・kernel は残りを 1:3 で割る。"""
+    trans, m, n, k = agg.SHAPE_DEFS[shape]
     base = (
-        f"arm={arm} mode={mode} shape={shape} trans=nn m=64 n=256 k=784 rayon_threads={threads} "
+        f"arm={arm} mode={mode} shape={shape} trans={trans} m={m} n={n} k={k} rayon_threads={threads} "
         f"calls={calls} wall_median_ns={wall} wall_mean_ns={wall}.0 bits_hash={hash_}"
     )
     if arm == "base":
@@ -186,6 +187,20 @@ class AggregateTest(unittest.TestCase):
         write_machine(self.root, [0.6] * 5, mutate=mut)
         with self.assertRaises(agg.AggregateError):
             agg.load_machine(self.root)
+
+    def test_shape_trans_dims_mismatch(self):
+        # l1_dx の行が trans=nn・別寸法でも受理してはならない（RULE §2 の対応表と照合）
+        write_machine(self.root, [0.6] * 5)
+        path = os.path.join(self.root, "round1-base-native.log")
+        with open(path, encoding="utf-8") as fh:
+            txt = fh.read()
+        bad = txt.replace("shape=l1_dx trans=nt m=64 n=784 k=256", "shape=l1_dx trans=nn m=64 n=256 k=784")
+        self.assertNotEqual(txt, bad)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(bad)
+        with self.assertRaises(agg.AggregateError) as cm:
+            agg.load_machine(self.root)
+        self.assertIn("l1_dx", str(cm.exception))
 
     def test_jobs_zero(self):
         def mut(r, arm, mode, s, kw):

@@ -119,6 +119,8 @@ cp "${BASE}/.rev-stamp" "${OUT}/.rev-stamp" || { echo "error: ${BASE}/.rev-stamp
 
 # 2. P-TREE: timed ツリーを BASE から複製してパッチを当てる。
 TIMED="${WORK}/timed-tree-${MACHINE}"
+# 前回実行の残骸が混ざると診断パッチ以外の差を含む腕で計測しうるため、既存なら停止し毎回空の複製先を使う。
+if [ -e "${TIMED}" ]; then echo "error: ${TIMED} が既に存在する（前回の残骸を混ぜない。削除してから再実行すること）" >&2; exit 1; fi
 mkdir -p "${TIMED}" || exit 1
 ( cd "${BASE}" && tar --exclude=./target --exclude=./.git -cf - . ) | ( cd "${TIMED}" && tar -xf - ) || exit 1
 PATCH="${BASE}/${LOGDIR}/diag_timing.patch"

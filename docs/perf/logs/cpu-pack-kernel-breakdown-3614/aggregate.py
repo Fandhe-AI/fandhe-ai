@@ -26,6 +26,16 @@ SPLIT_RATIO = 1.5
 SHAPES = ("l1_fwd", "l1_dw", "l1_dx", "l2_fwd", "l2_dw", "l2_dx")
 REF_SHAPE = "ref_square_512"
 ALL_SHAPES = SHAPES + (REF_SHAPE,)
+# RULE §2 の形状定義: ラベル -> (trans, m, n, k)。ログ行の対応を検証する。
+SHAPE_DEFS = {
+    "l1_fwd": ("nn", 64, 256, 784),
+    "l1_dw": ("tn", 784, 256, 64),
+    "l1_dx": ("nt", 64, 784, 256),
+    "l2_fwd": ("nn", 64, 10, 256),
+    "l2_dw": ("tn", 256, 10, 64),
+    "l2_dx": ("nt", 64, 256, 10),
+    REF_SHAPE: ("nn", 512, 512, 512),
+}
 # A pack を取り除く (A) の対象（Nn／Nt）。決定記録 §4.1。
 JUDGE_SHAPES = ("l1_fwd", "l1_dx", "l2_fwd", "l2_dx")
 INTERVAL_KEYS = (
@@ -112,6 +122,12 @@ def parse_log(path, arm, mode):
                 raise AggregateError(f"{where}: bits_hash の形式が不正")
             if kv["arm"] != arm or kv["mode"] != mode:
                 raise AggregateError(f"{where}: arm/mode がファイル名と食い違う ({kv['arm']}/{kv['mode']})")
+            if kv["shape"] not in SHAPE_DEFS:
+                raise AggregateError(f"{where}: 未知の shape {kv['shape']!r}")
+            got = (kv["trans"], kv["m"], kv["n"], kv["k"])
+            if got != SHAPE_DEFS[kv["shape"]]:
+                raise AggregateError(
+                    f"{where}: shape {kv['shape']} の trans/m/n/k {got} が RULE §2 の定義 {SHAPE_DEFS[kv['shape']]} と不一致")
             if kv["shape"] in rows:
                 raise AggregateError(f"{where}: shape {kv['shape']} が重複")
             if kv["calls"] <= 0:
