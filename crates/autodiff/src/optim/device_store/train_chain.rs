@@ -61,11 +61,11 @@
 //! - 失敗経路のバッファは再利用せず `train_chain_hold` へ退避する
 //! - 古い loss ハンドルは世代検査が拒否する（loss バッファを再利用する step の開始時に世代を進める）
 //!
-//! # 一括再生機構（Graph capture。イシュー #3260。既定 ON〈#3594〉）
+//! # 一括再生機構（Graph capture。イシュー #3260。opt-in・既定 OFF）
 //! 2 step 目以降で、部品ごとの encode の**前**に `BackendOps::train_chain_captured` を 1 回試す
-//! （[`DeviceParamStore::try_captured_train_step`]）。CUDA は既定 ON（環境変数
-//! `FANDHE_AI_CUDA_GRAPH_TRAIN=0` で OFF）で、ON のとき step 全体を 1 本の graph へ capture・再生し、それ以外の
-//! バックエンドと明示 OFF の CUDA は `Ok(None)` で、従来のチェーンがそのまま走る（出力も経路も不変）。
+//! （[`DeviceParamStore::try_captured_train_step`]）。CUDA は opt-in（環境変数
+//! `FANDHE_AI_CUDA_GRAPH_TRAIN`）が ON のとき step 全体を 1 本の graph へ capture・再生し、それ以外の
+//! バックエンドと既定の CUDA は `Ok(None)` で、従来のチェーンがそのまま走る（出力も経路も不変）。
 //! - 適用条件: 成功 step を 1 回以上経ている・前 step の永続バッファ一式を鍵つきで再利用できる・
 //!   勾配バッファと velocity を新規確保していない・使う部品の `_into` 対応が確定済み
 //! - `Ok(None)` なら store もバッファも変えていないので、同じ step を従来のチェーンで実行する

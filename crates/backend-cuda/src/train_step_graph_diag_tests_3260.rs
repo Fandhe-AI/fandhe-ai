@@ -1,5 +1,5 @@
 //! イシュー #3260: 学習 step 全体の Graph capture（`BackendOps::train_chain_captured` の CUDA 実装。
-//! 既定 ON〈#3594〉）の GB10 実機テスト。capture あり／なしの bit 一致・fail-safe・再 capture・
+//! opt-in・既定 OFF）の GB10 実機テスト。capture あり／なしの bit 一致・fail-safe・再 capture・
 //! 別スレッドとの衝突・replay 中の窓のカウンタを検証する
 //! （決定記録 `docs/backend-cuda-graph-step-capture-design.md` §8）。
 //!
@@ -10,13 +10,12 @@
 //!
 //! # 実行方法（既定 feature・`--release`・単独・単スレッド）
 //! stream 種別は ordinal ごとに sticky で、capture には created stream が要る。プロセス起動時に
-//! 既定 ON（#3594。`FANDHE_AI_CUDA_GRAPH_TRAIN=0` なら OFF）で、最初の CUDA 初期化より前に決まる。`internal-diagnostics` feature を付けると
+//! 環境変数で opt-in し、最初の CUDA 初期化より前に決める。`internal-diagnostics` feature を付けると
 //! stream が Legacy に固定され capture に届かないので、付けない（CI の `--all-features` では
 //! `#[ignore]` のためそもそも走らない）。
 //!
 //! ```sh
-//! # 環境変数なし（既定 ON。`=1` も同じ）。`=0` などの OFF 値を付けないこと
-//! cargo test -p fandhe-ai-backend-cuda --release --lib \
+//! FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai-backend-cuda --release --lib \
 //!   train_step_graph_diag_tests_3260 -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
@@ -64,12 +63,12 @@ fn config(lr: f32) -> SgdConfig {
     }
 }
 
-/// 起動時に ON になっていない（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` 等）と created stream にならず、capture に届かないまま bit 一致だけが
+/// 起動時に opt-in していないと created stream にならず、capture に届かないまま bit 一致だけが
 /// 合格してしまう。そのため最初に確認する。
 fn require_opt_in_env() {
     assert!(
         train_graph_stream_requested(),
-        "`FANDHE_AI_CUDA_GRAPH_TRAIN=0` など OFF の値を付けずに起動すること（stream 種別は起動時に決まる）"
+        "FANDHE_AI_CUDA_GRAPH_TRAIN=1 を付けて起動すること（stream 種別は起動時に決まる）"
     );
 }
 
@@ -218,7 +217,7 @@ fn assert_same(a: &Outcome, b: &Outcome, what: &str) {
 /// 10 step の基本: step 1 はウォームアップ、step 2 で capture、step 3〜10 は replay。
 /// loss と全パラメータは非 capture と bit 一致（R2）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn capture_matches_plain_chain_bit_exact_and_wires_up() {
     require_opt_in_env();
     let plain = run_scenario(10, |_| 0.01, false, false, None);
@@ -238,7 +237,7 @@ fn capture_matches_plain_chain_bit_exact_and_wires_up() {
 
 /// replay 中の step の窓で、同期・D2H・H2D・確保が 0。loss を読む区間は同期 1・D2H 1。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn replay_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync() {
     require_opt_in_env();
     let _opt = override_train_graph_for_scope(true);
@@ -276,7 +275,7 @@ fn replay_window_has_no_sync_alloc_or_h2d_and_loss_read_is_one_sync() {
 /// capture の失敗（注入）では ordinal を poison せず、capture しない既存チェーンで同じ step を
 /// 実行して bit 一致を保つ（R3）。失敗は `fallbacks` に数えられ、次の step で再 capture に成功する。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn injected_capture_failure_falls_back_to_plain_chain_bit_exact() {
     require_opt_in_env();
     let plain = run_scenario(8, |_| 0.01, false, false, None);
@@ -297,7 +296,7 @@ fn injected_capture_failure_falls_back_to_plain_chain_bit_exact() {
 /// 失敗が続くとスレッド・ordinal 単位で capture を止め、以後は既存チェーンで走り続ける
 /// （結果は bit 一致のまま）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn repeated_capture_failures_stop_capturing_but_stay_bit_exact() {
     require_opt_in_env();
     let plain = run_scenario(8, |_| 0.01, false, false, None);
@@ -331,7 +330,7 @@ fn repeated_capture_failures_stop_capturing_but_stay_bit_exact() {
 /// x／y を毎 step upload し直す使い方（キーが外れうる）でも結果は bit 一致し、再 capture は
 /// 抑止で打ち止めになる。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn reuploading_inputs_every_step_stays_bit_exact() {
     require_opt_in_env();
     let plain = run_scenario(10, |_| 0.01, false, true, None);
@@ -350,7 +349,7 @@ fn reuploading_inputs_every_step_stays_bit_exact() {
 /// lr を 1 回変えると焼き込み値が変わるので再 capture する（R5）。毎 step 変えると抑止で打ち止め。
 /// いずれも bit 一致。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn lr_change_recaptures_and_stays_bit_exact() {
     require_opt_in_env();
     let step_lr = |i: usize| if i < 4 { 0.01 } else { 0.02 };
@@ -388,7 +387,7 @@ fn lr_change_recaptures_and_stays_bit_exact() {
 /// 衝突は store を poison する既存の契約（モジュール doc「失敗の境界」）のため、本テストはそこを
 /// 範囲外として柵で避ける（設計記録 §8.8 の既知の制約）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn two_threads_capturing_concurrently_do_not_fail() {
     require_opt_in_env();
     const STEPS: usize = 20;
@@ -426,7 +425,7 @@ fn two_threads_capturing_concurrently_do_not_fail() {
 /// の順で回しても A の loss・全パラメータが非 capture と bit 一致する（codex P0 の回帰。
 /// 世代が進んだ旧 Graph は再生されず、既存チェーンで実行されたのち再 capture される）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。既定 ON のまま（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` を付けずに）単独実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn workspace_growth_by_other_store_invalidates_captured_graph() {
     require_opt_in_env();
     const BIG: [usize; 3] = [784, 2048, 10];

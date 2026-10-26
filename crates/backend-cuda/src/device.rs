@@ -242,10 +242,9 @@ pub struct CudaDevice {
 /// capture opt-in（`crate::graph::step_graph_mode` が
 /// `crate::graph::GraphMode::StreamOnly` 以上）が最初の CUDA デバイス
 /// 初期化より前に設定されている場合のみ `ctx.new_stream()`
-/// （非 legacy・capture 可能なストリーム）を保持する。**#3594 以降、学習 step 全体 capture が
-/// 既定 ON のため、既定 feature では既定で Created になる**（`internal-diagnostics` ビルドは
-/// 従来どおり Legacy 固定）。3 つの opt-in をすべて OFF（`FANDHE_AI_CUDA_GRAPH_TRAIN=0` ほか）に
-/// すれば導入前と同じ [`StreamKind::Legacy`]・bit・timing とも不変（`new_stream()` は
+/// （非 legacy・capture 可能なストリーム）を保持する。opt-in OFF
+/// （既定）では常に [`StreamKind::Legacy`] のまま、本イシュー導入前と
+/// ストリーム挙動・性能とも bit・timing とも不変（`new_stream()` は
 /// `cudarc` の「multi-stream mode」を有効化し、以降の全 `device_ptr`
 /// 呼び出しに `cuStreamWaitEvent` を自動挿入するため、無条件に切り替える
 /// と opt-in OFF 時の既存経路まで変えてしまう。design doc §4.1）。
@@ -297,10 +296,8 @@ impl CudaDevice {
         // イシュー #1349: CUDA Graph capture opt-in が最初のデバイス
         // 初期化より前に設定されている場合のみ、capture 可能な
         // `new_stream()` を保持する（`StreamKind` doc コメント参照）。
-        // 3 つの opt-in がすべて OFF の場合のみ `default_stream()`
-        // （legacy NULL stream）のまま。#3594 で学習 capture が既定 ON となり、既定 feature では
-        // Created stream と `disable_event_tracking()` が既定で通る（ordinal ごとに stream は
-        // 1 本・`default_stream()`／`new_stream()` は本ファイルだけ、という SAFETY 根拠は不変）。
+        // opt-in OFF（既定）では現行どおり `default_stream()`
+        // （legacy NULL stream）のまま、本イシュー導入前と挙動不変。
         //
         // **`internal-diagnostics` feature が有効な間は常に
         // `StreamKind::Legacy` に固定する（codex-review P0 再々指摘

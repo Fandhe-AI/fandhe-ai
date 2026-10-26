@@ -1117,7 +1117,7 @@ fn cuda_graph_infer_optin_is_reachable_via_facade() {
 }
 
 /// イシュー #3260: 学習 step 全体の Graph capture（環境変数 `FANDHE_AI_CUDA_GRAPH_TRAIN` だけで
-/// 制御する内部機構。既定 ON・#3594）は facade の公開面に出ない。API setter・診断カウンタ・テスト専用 override・
+/// opt-in する内部機構）は facade の公開面に出ない。API setter・診断カウンタ・テスト専用 override・
 /// 計画/層の型を再公開しないこと（公開形の追加は未承認。決定記録
 /// `docs/backend-cuda-graph-step-capture-design.md` §8.6）を、`lib.rs` のソース走査で固定する。
 #[test]

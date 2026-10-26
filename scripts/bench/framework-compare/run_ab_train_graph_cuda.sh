@@ -108,10 +108,6 @@ MAIN_RS="bench-fandhe/src/main.rs"
 grep -qE '^[[:space:]]*\("train", "chain", false\) =>' "$MAIN_RS" || precheck_fail "main.rs に (train, chain) の分岐が無い。パッチ未適用の可能性"
 grep -qE '^[[:space:]]*[^/[:space:]].*FANDHE_AI_CUDA_GRAPH_TRAIN' "$RUNNER_ROOT/crates/backend-cuda/src/graph.rs" \
   || precheck_fail "backend-cuda の graph.rs に FANDHE_AI_CUDA_GRAPH_TRAIN の読み出しが無い"
-# #3594: 本ランナーの off 腕は「環境変数なし = 既定 OFF」が前提。既定 ON へ反転したツリーで走らせると
-# off 腕が実は ON になり比較が無意味になるため、既定 OFF のツリー（#3261 当時）専用として強制する。
-grep -qE '^pub\(crate\) const TRAIN_GRAPH_DEFAULT_ENABLED: bool = false;' "$RUNNER_ROOT/crates/backend-cuda/src/graph.rs" \
-  || precheck_fail "TRAIN_GRAPH_DEFAULT_ENABLED が false でない。本ランナーは既定 OFF のツリー専用（#3594 で既定 ON に反転済み。再計測には off 腕を =0 に読み替えた新しい RULE が要る）"
 status_lines="$(git -C "$RUNNER_ROOT" status --porcelain | grep -v '^??' | sort || true)"
 want_status=" M scripts/bench/framework-compare/bench-common/src/lib.rs
  M scripts/bench/framework-compare/bench-fandhe/src/main.rs"

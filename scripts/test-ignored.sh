@@ -20,17 +20,10 @@ case "${1:-}" in
     # StreamKind を常に Legacy に固定するため、capturable stream 前提の 2 テストは
     # 1 回目（--all-features）では実機上で確実に失敗する。--skip で 1 回目から除外し、
     # internal-diagnostics を持たない 2 回目で実行する（--test-threads=1 を明示）。
-    #
-    # #3594（学習 step 全体 capture の既定 ON 反転）: 同じ理由で train_step_graph_diag_tests_3260 も
-    # 1 回目（Legacy 固定）では stats の assert で失敗するため --skip し、既定 feature・環境変数なし
-    # （既定 ON）の 3 回目で単独・単スレッド実行する（既定 ON の本番経路を通るのはこの呼び出しだけ）。
     cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture \
       --skip sgd_update_segment_captures_then_replays_bit_identically \
-      --skip different_config_key_produces_a_different_segment_key \
-      --skip train_step_graph_diag_tests_3260
+      --skip different_config_key_produces_a_different_segment_key
     cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device -- \
-      --ignored --nocapture --test-threads=1
-    cargo test -p fandhe-ai-backend-cuda --release --lib train_step_graph_diag_tests_3260 -- \
       --ignored --nocapture --test-threads=1
     ;;
   metal-facade)
