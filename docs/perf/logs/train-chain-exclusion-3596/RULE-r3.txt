@@ -1,0 +1,86 @@
+RULE-r3 fixed-at-utc: 2026-10-26T15:00:00Z
+issue: #3596（学習チェーンと Graph capture の ordinal 単位排他。RULE-r2 の判定は REGRESSION〔既定 OFF の chain セル ratio 1.002・5/5 round で 1.00 超。設計記録 §8.11.7〕。所有者判断〔2026-10-26〕に基づき、capture できない stream の ordinal では begin_device_chain_scope が driver・begin_driver_call に触れず素通りにする修正を入れた。本規則 RULE-r3 はその再実測が対象）
+doc: docs/backend-cuda-graph-step-capture-design.md §8.11（§8.11.8 が r3 の設計、§8.11.9 が r3 の実測結果、§8.12 が既定 ON 反転の取り下げ記録）
+本規則は計測より前に固定する。事後に緩めない。変更が要る場合は別名の RULE を計測前に再登録する。RULE.txt・RULE-r2.txt とその判定記録（REGRESSION）は残し、本規則は腕・手順・専有ゲート・hard 条件・比・判定の閾値を RULE-r2.txt と同一に保つ（緩めない）。差分は after の基準コミット、事前表明する仮説、および原因切り分けの節を外したこと（r2 で実施済みのため）だけ。ランナーは AB_RULE_NAME=RULE-r3.txt で本ファイルを読む。
+本件は GB10 の train CUDA・1 スレッド chain セル専用の非後退確認である。#3594（既定 ON 反転）の前提を満たすものではない（§8.12.2 の未解決事項が残る）。
+
+[対象]
+- 排他に当たる実行時トグルは無い（#3597 は新しい状態を足していない）。比較は 2 ツリー間で行う。
+- 排他なし excl0（before）= 学習チェーン排他の導入前の main:
+- before = f7fe6b4dfaabbdbc51a900709fe6648c36120c58
+- 排他あり excl1（after）= 本規則を含むコミット。RULE 自身のコミット SHA は本ファイルに書けないため、crates/ が下記の基準コミットと同一であることで固定する（ランナーが git diff --quiet で検査し、env_info の crates_identical_to へ記録する）。
+- after_crates_identical_to = 2794cfba6234de7fd4603f47f327c46504f8a0c7
+- facade = 各ツリーの crates/facade への [patch.crates-io.fandhe-ai] path patch（--config 引数のみ。Cargo.toml／Cargo.lock へはコミットしない）。
+- 計測専用パッチ docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch（#3261 と同じ）を両ツリーにだけ適用する（`--mode chain` を足す）。
+  patch_sha256: 92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819
+
+[腕（chain セル・GB10・train CUDA・size=64・TF32 OFF・--graph なし）]
+- excl0-off／excl1-off: FANDHE_AI_CUDA_GRAPH_TRAIN・_STEP・_INFER がすべて未設定。
+- excl0-on／excl1-on: FANDHE_AI_CUDA_GRAPH_TRAIN=1 だけ（他の 2 つは未設定）。
+- 全腕に BENCH_PARAM_DIGEST=1。継承環境に上記変数が存在すればランナーが停止する。
+- candle・torch は判定に要らないため計測しない（計測時間の短縮が理由）。
+
+[手順]
+- 5 round 固定（AB_ROUNDS が 5 以外なら拒否）。プロセスは独立起動。run の差し替え・追加起動・腕の除外はしない。同じラベルの既存出力があれば停止。RAYON_NUM_THREADS は unset。
+- 起動順: 基準順 L = [excl0-off, excl1-off, excl0-on, excl1-on]。round r は L の位置 (r-1) mod 4 から巡回する。
+  r1: excl0-off excl1-off excl0-on excl1-on
+  r2: excl1-off excl0-on excl1-on excl0-off
+  r3: excl0-on excl1-on excl0-off excl1-off
+  r4: excl1-on excl0-off excl1-off excl0-on
+  r5: excl0-off excl1-off excl0-on excl1-on
+- 全ビルド（2 つの bench バイナリと前提ゲート用テストバイナリ）を計測の前に済ませる。計測中のビルド並走禁止（開発機・ノードとも）。
+
+[専有ゲート]
+- load1 < 1.0 かつ GPU 使用率 0% を 3 サンプル連続。30 秒間隔・最大 30 分。round ごとに通す。不通過 round を含む系列は undetermined。
+
+[機体の同定]
+- uname -m = aarch64。nvidia-smi の GPU 名に GB10 を含む。env_info に記録する。
+
+[前提ゲート（after ツリー・既定 feature・--release。省略不可。SKIP・未実行は不合格。各ログに rc= 行）]
+- g1-unfenced（受入基準 1。FANDHE_AI_CUDA_GRAPH_TRAIN=1）: train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact（--exact・--test-threads=1）1 passed。
+- g2-3260（FANDHE_AI_CUDA_GRAPH_TRAIN=1・--test-threads=1）: train_step_graph_diag_tests_3260 9 passed。
+- g3-3252（環境変数なし）: train_step_chain_diag_tests_3252 3 passed。
+- g3-real-device（環境変数なし）: graph_capture_real_device 2 passed。
+- g3-optin-off（環境変数なし）: graph_capture_real_device_optin_off 1 passed。
+- g4-facade（TRAIN=1）: facade の cuda_graph_train_step_bit_identity::in_process_capture_matches_plain_chain_bit_exact（--exact）1 passed。
+- g4-off／g4-on: dump_bits_for_two_process_diff を環境変数なしと =1 で 1 回ずつ（各 1 passed）。BITS 行を比較して差が空であること。BITS 行が 0 なら不合格。
+
+[#[ignore] 全件の突き合わせ（受入基準 2。完了条件は backend-cuda と facade）]
+- before・after の両ツリーで同じコマンド列を既定環境（FANDHE_AI_CUDA_GRAPH_* 未設定）で順に実行する。計測と並走させない。
+  1. cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture --skip sgd_update_segment_captures_then_replays_bit_identically --skip different_config_key_produces_a_different_segment_key --skip train_step_graph_diag_tests_3260 --skip train_graph_shared_workspace_tests_3596
+  2. cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device -- --ignored --nocapture --test-threads=1
+  3. FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai-backend-cuda --release --lib train_step_graph_diag_tests_3260 -- --ignored --test-threads=1 --nocapture（before 8 件・after 9 件）
+  4. cargo test -p fandhe-ai --release --tests -- --ignored --nocapture --test-threads=1
+- after にだけある FAIL を新規 fail とする。新規 fail は単独再実行→before で単独実行の順に切り分け、「排他が原因／既存の不具合／並走による一過性／環境要因」に分類して件数とテスト名を記録する。
+- 本節は judge-3596 の判定入力ではない（別記録）。受入基準 2 は新規 fail 0 件（または全件が排他以外に分類）で満たす。
+
+[hard 条件（判定より先）]
+- 4 腕の checksum（最終 loss）が全 run で完全一致。PARAM_DIGEST も全 run・全腕で同値（欠落は不一致として扱う）。
+- 不一致は REGRESSION（正しさの失敗）。
+
+[比]
+- graph モード m ∈ {off, on} ごとに ratio_m = median(excl1-m の 5 run の median_s) / median(excl0-m の 5 run の median_s)。ratio_r = 同一 round 内の excl1-m / excl0-m。
+- 基準値 1.00 は #2115・#3261 の「全セル ≤ 1.00」の前例に揃える。
+
+[判定]
+- NON-REGRESSION（すべて満たす）: 専有ゲート全 round 通過／前提ゲート g1〜g4 合格／hard 条件／両モードで ratio <= 1.00。
+- REGRESSION（いずれか）: いずれかのモードで ratio > 1.00 かつ 5/5 round で ratio_r > 1.00／hard 条件の不一致／前提ゲート g1〜g4 の失敗。
+- UNDETERMINED（いずれか）: 専有ゲート不通過／run 数不足・欠測／前提ゲートのログ欠落・未実行／GB10 以外／env_info・RULE sha・パッチ sha・before SHA・crates 同一性の不一致／ratio > 1.00 だが 5/5 の符号一貫がない。
+- 判定の優先順: 入力不正 → undetermined 要因 → 正しさの失敗 → 比。
+- 後退や判定不能になっても、コード・tolerance・閾値は変えない。結果を記録し、所有者判断事項として報告する。
+
+[事前表明する仮説（推定・合格ラインではない）]
+- 既定 OFF（legacy stream）: Legacy と確定済みの ordinal では begin_device_chain_scope が StreamKind の記録表を mutex 1 回で読むだけで素通りし、driver・レジストリ・ordinal state mutex・デバイスキャッシュに触れない。r2 で見えた約 0.3 µs の差は解消し、ratio は 1.00 前後（0.99〜1.00）と見込む。
+- opt-in ON: Created の経路は不変（現行コードのまま）。中立と見込む。
+
+[限界]
+- checksum の一致は bit 同一性の証明ではない。PARAM_DIGEST と g4 で補う。
+- 単一機体（GB10）・train CUDA・size=64 の結果であり他の構成に及ばない。
+- 並行時（2 スレッド）の性能は対象外。受入基準は 1 スレッドの非後退のみ。
+- 2 つの別ビルドの比較であり、バイナリの差は排他以外（#3597 と同時期の変更）を含みうる。crates/ 同一性検査は after 側だけを固定する。
+
+[ドリフトガードの除外]
+- 専有ゲート定数（load1 閾値 1.0・GPU 使用率 3 サンプル・待機上限）のドリフトガードテストは最初から除外する（計測条件であり判定規則の変更ではないため）。
+
+[対象外]
+- 既定 ON への反転（#3594。§8.12 の未解決事項が前提）、reuse・fresh 経路と Tape の通常演算が書き込み後に DeviceContextCaptureInProgress を受けた場合の扱い、facade 経由 2 スレッド bit 一致テスト、cuGraphExecUpdate（未承認）、candle・torch の同席計測、並行時性能。
