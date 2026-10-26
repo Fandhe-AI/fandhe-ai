@@ -482,12 +482,13 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 
 ### 8.11.6 原因の切り分け（G1 の loss 取り違え。2026-10-26）
 
-**状態: コード上の原因特定と修正は済み。GB10 での確認は §8.11.7 のとおり実施済みで、修正の効果は確認できたが、下記の機構の推定は実機の `DIAG3596` と一部食い違った**（下記の本文は静的な読解に基づく推定として残す）。
+**状態: コード上の原因特定と修正は済み。GB10 での確認は §8.11.7 のとおり実施済みで、修正の効果は確認できた。下記の機構の推定は実機の `DIAG3596` と一部食い違ったが、その食い違いは診断の照合範囲が先頭 20 件だったことによる見かけ上のもので、追加診断（DIAG-r5。#3610。下記）で解消した。ずれた loss は replay スレッドの step の loss と bit 一致した（起動順そのものの直接観測ではない）**（下記の本文は静的な読解に基づく推定として残す）。
 
 - 実機での確認（2026-10-26。RULE-r2 [原因切り分け]。ログは `docs/perf/logs/train-chain-exclusion-3596/gb10-r2/diag/`）: 診断テストは #3597 以前の `f7fe6b4df`（テスト専用パッチ付き）でも、修正前 main の `c1204755e`（同）でも落ちた（各 2/2 回）ので、#3597 以前からある欠陥という推定は支持された。パラメータは一致し（`params_equal=true`）、ずれるのは非 capture スレッドの loss だけという点も一致した。一方で、**ずれた loss は参照列のどの index とも bit 一致しなかった**（`equals-reference-idx []`。例: 期待 1.1649379 に対し 0.22982085）。「相手 step の loss を読む」という推定のとおりなら別 index と一致するはずなので、機構の記述は未確定として扱う（RULE-r2 に従い、修正の機構は確定させない。所有者判断事項）。修正後（`616be4ff7`）は 5/5 回 pass。
 
+- **追加診断（#3610・DIAG-r5。2026-10-26。ログは `docs/perf/logs/train-chain-exclusion-3596/gb10-diag-r5/`、事前登録は `DIAG-r5.txt`）**: 上記の `equals-reference-idx []` の読み方を見直した。(1) r2 の診断テストは非 capture のずれた loss を参照の**先頭 20 件**にしか照合していなかった（replay スレッドは 200 step 進む）。(2) 非 capture 側のパラメータは両辺とも空で、`params_equal=true` は何も比べていなかった。増強した診断（参照 200 件と replay の実 loss 列への照合・replay の進捗窓・非 capture 側のパラメータ bit の比較）を、`f7fe6b4df`・`c1204755e`・`616be4ff7`（修正後）に各 5 回流した。結果: 修正前の 2 ツリー 10 run 中 5 run が失敗し、ずれ 13 件はすべて replay スレッドのある step の loss とちょうど 1 つの index で bit 一致した（unmatched = 0。index は 15〜176 で、10 件が 20 以上）。非 capture 側のパラメータは全 450 repeat で参照と一致した（`params_equal` の記述は plain 側でも実証された）。修正後は 5/5 で loss・パラメータとも一致した。事前登録の分類は場合 (a)。結論: 「非 capture スレッドの loss が、相手の step の loss と取り違えられる」は実測と整合する。ただし `partial`／`finalize` のどちらの起動がどの順で割り込んだか（finalize が graph の partial を読む起動順）は loss の値からは直接観測できず、機構の起動順は引き続き推定である。限界: 1 機体・各 5 回・replay の進捗はホスト側の step 完了数による近似。main の診断テストの照合範囲と plain のパラメータ比較の不足は本調査では直していない（コード変更になるため別イシューで扱う候補）。
 - 機構（推定）: `CudaMse` は ordinal ごとに 1 つで、デバイス上の永続 `partial` ワークスペースを持つ（`mse.rs`）。非 capture の forward は、このロックを partial と finalize の 2 起動にまたがって保持することで安全になっている。一方、学習 graph（`launch_train_chain` の capture 結果）は同じ `partial` のアドレスを焼き込むが、replay（`run_captured_train_chain` ①）も初回 launch も GEMM の `device_workspace` mutex しか取らず、MSE のロックを取っていなかった。2 スレッドは同じ ordinal の同じ stream に積むため、「非 capture の partial → graph（自分の partial と finalize）→ 非 capture の finalize」の順になりうる。その場合、非 capture 側の finalize は graph が書いた partial を読み、相手スレッドの step の loss を自分の loss として書く。
-- ログの症状との一致: 失敗は非 capture スレッドだけ（graph は stream 上で一体に実行されるので割り込まれない）。値は参照列の別 index の値になる（相手は同じ初期値・同じ入力）。poison は起きない。パラメータは影響を受けない見込み（MSE backward は pred／target から再計算し、dW のワークスペースは GEMM mutex で守られる）。
+- ログの症状との一致（DIAG-r5 で確認。上記）: 失敗は非 capture スレッドだけ（graph は stream 上で一体に実行されるので割り込まれない）。値は参照列の別 index の値になる（相手は同じ初期値・同じ入力）。poison は起きない。パラメータは影響を受けない見込み（MSE backward は pred／target から再計算し、dW のワークスペースは GEMM mutex で守られる）。
 - #3597 との関係: #3597 が防ぐのは「capture の開始」とチェーンの衝突であり、「replay」とチェーンの衝突ではない。したがって #3260 からある既存の欠陥を、柵なしの G1 が初めて露出させたと推定する。確定には `train_graph_shared_workspace_tests_3596`（capture の開始を重ねず replay と非 capture チェーンだけを衝突させる診断テスト）を #3597 以前のツリー（`f7fe6b4df` に診断テストのみ足したもの）で実行する（RULE-r2 の [原因切り分け]。未実測）。
 - テスト側の原因の否定材料: 参照は `capture=false` の `run_scenario` で作り、初期値・入力は固定パターンで乱数がない。capture 側スレッドは 30 回とも参照と一致している。loss はスレッドごとの store から step 直後に同スレッド内で読んでいる。確定は新しい `DIAG3596` 行（ずれた loss が参照列のどの index と一致するか、パラメータが一致するか）で行う。
 - 永続ワークスペースの監査: `Mutex<Option<CudaSlice` 系の ordinal 共有領域は GEMM `device_workspace` と MSE `partial_workspace` の 2 つ。推論 graph・step graph（#1349 の SGD）が同様の共有領域に触れるかは #3609 で確認した（触れない。下記「永続ワークスペースの監査の追補」）。
@@ -552,7 +553,7 @@ capture モードは 3 経路（step・推論・学習）とも `CU_STREAM_CAPTU
 - **`#[ignore]` 全件**: 排他が原因の新規 fail は 0 件。after にだけ出た 2 件（`small_shape_matrix_unit_has_no_floor_tflops_record`・`wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096`）は一過性・既存の不安定で、単独実行は両ツリーで同じ傾向だった。詳細は `gb10-r2/ignored-compare-3596-r2.md`。
 - **chain セル（1 スレッド・size=64・5 round）**: hard 条件（checksum 0.080541・PARAM_DIGEST）は全 run・全腕で一致。ratio（排他あり / なし）は graph off が **1.002**（ratio_r 1.001〜1.004 で 5/5 round が 1.00 超。0.1346 → 0.1349 ms）、graph on が 1.000（0.1126 ms）。RULE-r2 の判定は「いずれかのモードで ratio > 1.00 かつ 5/5 round で ratio_r > 1.00」を REGRESSION とするため、off で REGRESSION になった。
 - 限界: 差は約 0.3 µs。2 腕は別ビルドで #3597・#3601 以外の変更を含みうる。1 機体・単一構成の結果で、並行時の性能は対象外。コード・閾値・規則は変更していない。
-- 所有者判断事項: off の 0.2% の差を後退として扱うか（別名 RULE-r3 の事前登録による再実測が要るか）、§8.11.6 の機構の食い違いの追加調査。#3594 の前提は引き続き満たされない（§8.12.2）。
+- 所有者判断事項: off の 0.2% の差を後退として扱うか（別名 RULE-r3 の事前登録による再実測が要るか）、§8.11.6 の機構の食い違いの追加調査（DIAG-r5・#3610 で解消。§8.11.6）。#3594 の前提は引き続き満たされない（§8.12.2）。
 
 ### 8.11.8 既定 OFF の ordinal は排他スコープを素通りにする（r3。2026-10-26）
 

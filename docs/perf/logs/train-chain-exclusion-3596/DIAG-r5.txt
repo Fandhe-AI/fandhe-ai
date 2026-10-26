@@ -1,0 +1,63 @@
+DIAG-r5 fixed-at-utc: 2026-10-26T20:05:00Z
+issue: #3610（§8.11.6 の loss 取り違えの機構の推定と、実機の DIAG3596〔ずれた loss が参照列のどの index とも一致しない〕の食い違いを調べる）
+doc: docs/backend-cuda-graph-step-capture-design.md §8.11.6（結果の記録先）
+本ファイルは診断手順であり判定ツール（judge_train_chain_exclusion_ab.py）の入力ではない。計測より前に固定する。RULE.txt・RULE-r2.txt・RULE-r3.txt・DIAG-r4.txt とその記録は変えない。閾値・tolerance・baseline・修正後のコード（crates/）は変えない。
+診断は分類であり、NON-REGRESSION／REGRESSION の判定ではない。
+
+[背景（事前の静的読解。仮説であり結論ではない）]
+- r2 の診断テストは、非 capture スレッドのずれた loss を short（reference.losses の先頭 20 件だけ）と比べていた。replay スレッドは 200 step 進むため、DIAG3596 の `equals-reference-idx []` は「参照の idx 0..19 のどれとも一致しない」ことしか示さない。
+- r2 では short.params と probe.params がどちらも空で、plain 行の `params_equal=true` は何も比べていなかった。
+
+[対象]
+- before = f7fe6b4dfaabbdbc51a900709fe6648c36120c58（#3597 の直前）
+- main_prefix = c1204755e938a7908265c630968d864ec3443569（診断用の修正前 main）
+- after = 616be4ff7658657933319a7e8cb8cec7a95d8422（#3601 を含む。r2 の after と同じ）
+- テスト専用パッチ（診断テストと G1 のヘルパーの可視性だけ。本体の非テストコードは含まない。crates/ へはコミットしない。診断テストを DIAG3610 行つきに増強したもの）:
+  diag-r5-f7fe6b4df.patch sha256: 94f050f717895b8f80479727fb265bfba5de73cdc56039c66b9a7956e8d541cf
+  diag-r5-c1204755e.patch sha256: 2e7f1d61e8a120e593323689f3c7055d01f4b45613179dc39890b7b3482a6367
+  diag-r5-616be4ff7.patch sha256: ad9eda3aa5ae318d6f78a5cd751f08e39a59b49f1bcf74e2ebbffe1a809827b7
+  （diag-r5/patches.sha256 と一致。各パッチは対応する素のツリーへ git apply する）
+- 開発機で 3 ツリーに当てて cargo clippy -p fandhe-ai-backend-cuda --tests -- -D warnings が通ることを確認済み（GB10 の実測の代わりではない）。
+
+[増強の内容]
+- 非 capture スレッドのずれた loss を、reference.losses の全 200 件と replay スレッドの実 loss 列の両方へ照合する（DIAG3610 行。DIAG3596 行も従来どおり出す）。
+- replay スレッドは step ごとに完了数を共有カウンタへ書く。非 capture 側は step の直前と loss 読み出し直後に読み、`replay-window [before, after]` として出す。
+- 20 step の参照パラメータ（run_scenario(20, …)）を作り、非 capture の各 repeat の loss ループの後で param_bits を比べる（`plain-params-equal=`）。
+- 失敗時は replay の 200 件・参照の 200 件・ずれた repeat の loss 列（bit 値）を `DIAG3610 series` 行で全件出す。
+- run ごとに要約 1 行: `DIAG3610 summary: mismatches= matched_full= unmatched= idx_ge_20= in_window= plain_params_diff= replay_bad=`。
+  matched_full = 全 200 件の参照または replay の実 loss 列のどれかと bit 一致したずれの数、unmatched = どれとも一致しなかった数、idx_ge_20 = 一致 index に 20 以上を含む数、in_window = 一致 index j が [before, after+1] に入る数（補強の指標。進捗カウンタはホスト側の step 完了数による近似）、plain_params_diff = パラメータがずれた repeat 数。
+
+[実行]
+- 手順は docs/real-hardware-verification-env.md に従う。ノードは local.fandhe.spark-939e。実機ロック ~/work/.fandhe-hw-lock を取る。計測中はビルドを並走させない（開発機・ノードとも）。
+- 3 ツリーは git bundle で転送して clone し、各ツリーに .rev-stamp（1 行目 HEAD・2 行目 dirty=0。.git/info/exclude に追加）を作ってからパッチを当てる。当てた後のパッチの sha256 と、ノード上の DIAG-r5.txt の sha256 を env_info に記録する。
+- 全ツリーのビルドを済ませてから実行する。順序は before → main_prefix → after。
+- コマンド（各ツリーで）: FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai-backend-cuda --release --lib train_graph_shared_workspace_tests_3596 -- --ignored --test-threads=1 --nocapture
+- 回数: 各ツリー 5 回固定（before 5・main_prefix 5・after 5）。差し替え・追加起動・除外はしない。各回の終了コードを progress.txt に記録する。
+- 機体の同定: uname -m = aarch64、nvidia-smi の GPU 名に GB10 を含む。env_info に記録する。
+- ログはホスト名・$HOME・ユーザー名をマスクして保存する。テストバイナリはコミットしない。
+
+[事前表明する仮説（推定であり合格ラインではない）]
+- H1 探索範囲の不足（見かけ上の食い違い）〔推定〕: ずれた plain の loss は replay スレッドのある step の loss と bit 一致し、その index は 20 以上（short の外）にある。§8.11.6 の機構（finalize が graph の partial を読む）と矛盾しない。
+  支持: ずれた値がすべて 200 件の参照または replay の実 loss 列のいずれかと bit 一致する（unmatched = 0 かつ matched_full = mismatches）。補強: in_window が mismatches に近い。
+  棄却: 一致しない値が 1 件でもある。
+- H2 部分和の混在・部分的な上書き〔推定〕: finalize が読む partial に graph の分と自分の分が混じる。
+  支持: ずれた値が、200 件の参照・replay の実 loss 列のどれとも一致しない（unmatched >= 1）。
+  棄却: すべて一致する。
+- H3 loss 以外の汚染〔推定〕: 非 capture のパラメータも参照からずれる。
+  支持: plain_params_diff >= 1。棄却: 全 repeat で一致する。
+- H4 不再現: before 側（f7fe6b4df・c1204755e）の各 5 回に、mismatches >= 1 の run が 1 つもない。判定不能として記録し、追加の起動はしない。
+- 対照: after に同じ増強を当てる。mismatches や plain_params_diff が 1 件でも出れば、修正が不十分な可能性として所有者へ報告する（その場では直さない）。
+
+[分類規則（計測前に固定。事後に変えない）]
+各ツリーの全 run の要約行を集計して当てはめる。複数に当てはまる場合は併記する。要約行や run が欠けたら、その分は「欠損」として別記し、当てはまる場合に数えない。
+- (a) before と main_prefix のいずれかで mismatches >= 1 の run があり、全 run を通して unmatched = 0、plain_params_diff = 0、after は 5/5 で mismatches = 0 かつ plain_params_diff = 0 → §8.11.6 の機構の推定は実測と整合する。食い違いは診断の照合範囲（先頭 20 件）によるものと記録する。
+- (b) 全 run を通して unmatched >= 1 → 機構は未確定。残る仮説と必要な追加診断（partial の中身の記録など）を記録する。
+- (c) plain_params_diff >= 1 の run がある → loss だけの取り違えという記述を改める。修正範囲の見直しは所有者判断事項にする（その場では直さない）。
+- (d) before と main_prefix の全 10 run で mismatches = 0 → 判定不能（不再現）。仮説は残したまま記録する。
+- (e) after の run に mismatches >= 1 または plain_params_diff >= 1 がある → 修正が不十分な可能性。所有者判断事項にする（その場では直さない）。
+
+[限界]
+- 単一機体・単一日・各 5 回。race は確率的に起きるので不再現もありうる。
+- 進捗カウンタはホスト側の step 完了数に基づく近似であり、stream 上の実行順そのものではない。in_window は支持の補強にとどめる。
+- 増強したテストは observer の効果（パラメータ読み出しなど）で race の窓を変えうる。パラメータはループの後で読んでいる。
+- main の診断テストの照合範囲（先頭 20 件）と、plain のパラメータを比べていない点は本診断では直さない（修正後のコードは変えない。直すかどうかは所有者判断事項・スコープ外）。

@@ -1,0 +1,185 @@
+diff --git a/crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs b/crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs
+index 98bbd14..1e9a8c7 100644
+--- a/crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs
++++ b/crates/backend-cuda/src/train_graph_shared_workspace_tests_3596.rs
+@@ -7,13 +7,19 @@
+ //! 「replay」と「非 capture チェーン」の衝突だけを切り出す。#3597 より前のツリーでも poison 経路を
+ //! 通らずに実行できるため、原因が #3597 以前からあるかの切り分けに使う。
+ //!
++//! イシュー #3610（DIAG-r5）の増強: 非 capture 側のずれた loss を、先頭 `PLAIN_STEPS` 件ではなく
++//! replay の参照全体（200 件）と replay スレッドの実 loss 列に照合し（`DIAG3610` 行）、replay の
++//! 進捗窓・非 capture 側のパラメータ bit も記録する。判定（assert）の対象は従来と同じ loss の
++//! bit 一致に、非 capture 側のパラメータ bit 一致を加えたもの。
++//!
+ //! # 実行方法（GB10・既定 feature・`--release`・単独）
+ //! ```sh
+ //! FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai-backend-cuda --release --lib \
+ //!   train_graph_shared_workspace_tests_3596 -- --ignored --test-threads=1 --nocapture
+ //! ```
+-//! 判定は bit 完全一致のみ（tolerance なし）。不一致時は assert の前に `DIAG3596` 行を出す。
++//! 判定は bit 完全一致のみ（tolerance なし）。不一致時は assert の前に `DIAG3596`／`DIAG3610` 行を出す。
+ 
++use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::{Arc, Barrier};
+ 
+ use super::train_step_graph_diag_tests_3260::{
+@@ -22,6 +28,23 @@ use super::train_step_graph_diag_tests_3260::{
+ };
+ use crate::graph::override_train_graph_for_scope;
+ 
++/// 非 capture スレッドの 1 repeat の観測（loss 列・step ごとの replay 進捗窓・最後のパラメータ bit）。
++struct PlainRun {
++    losses: Vec<u32>,
++    /// step ごとに、その step の直前と loss 読み出し直後の replay 完了 step 数 `[before, after]`。
++    windows: Vec<(usize, usize)>,
++    params: Vec<Vec<u32>>,
++}
++
++fn indices_of(series: &[u32], value: u32) -> Vec<usize> {
++    series
++        .iter()
++        .enumerate()
++        .filter(|(_, v)| **v == value)
++        .map(|(j, _)| j)
++        .collect()
++}
++
+ #[test]
+ #[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
+ fn replay_thread_and_plain_chain_thread_keep_losses_bit_exact() {
+@@ -30,10 +53,14 @@ fn replay_thread_and_plain_chain_thread_keep_losses_bit_exact() {
+     const PLAIN_STEPS: usize = 20;
+     const PLAIN_REPEATS: usize = 30;
+     let reference = run_scenario(REPLAY_STEPS, |_| 0.01, false, false, None);
++    // 非 capture 側が PLAIN_STEPS 進んだ時点のパラメータ参照（r2 では作っておらず比較していなかった）。
++    let plain_reference = run_scenario(PLAIN_STEPS, |_| 0.01, false, false, None);
+     let barrier = Arc::new(Barrier::new(2));
++    let progress = Arc::new(AtomicUsize::new(0));
+ 
+     // thread 0: ウォームアップ → capture を柵の前に終え、柵の後は replay だけを続ける。
+     let b0 = Arc::clone(&barrier);
++    let p0 = Arc::clone(&progress);
+     let replay = std::thread::spawn(move || {
+         let _opt = override_train_graph_for_scope(true);
+         let mut run = new_run();
+@@ -44,6 +71,7 @@ fn replay_thread_and_plain_chain_thread_keep_losses_bit_exact() {
+             }
+             let h = step(&mut run, 0.01).unwrap_or_else(|e| panic!("step {i}: {e:?}"));
+             losses.push(read_loss(&run, &h).to_bits());
++            p0.store(i + 1, Ordering::SeqCst);
+         }
+         assert_not_poisoned(&run);
+         Outcome {
+@@ -54,6 +82,7 @@ fn replay_thread_and_plain_chain_thread_keep_losses_bit_exact() {
+ 
+     // thread 1: 柵の後に、新しい store で非 capture のチェーンを繰り返す。
+     let b1 = Arc::clone(&barrier);
++    let p1 = Arc::clone(&progress);
+     let plain = std::thread::spawn(move || {
+         let _opt = override_train_graph_for_scope(false);
+         b1.wait();
+@@ -61,12 +90,21 @@ fn replay_thread_and_plain_chain_thread_keep_losses_bit_exact() {
+         for _ in 0..PLAIN_REPEATS {
+             let mut run = new_run();
+             let mut losses = Vec::with_capacity(PLAIN_STEPS);
++            let mut windows = Vec::with_capacity(PLAIN_STEPS);
+             for i in 0..PLAIN_STEPS {
++                let before = p1.load(Ordering::SeqCst);
+                 let h = step(&mut run, 0.01).unwrap_or_else(|e| panic!("step {i}: {e:?}"));
+                 losses.push(read_loss(&run, &h).to_bits());
++                windows.push((before, p1.load(Ordering::SeqCst)));
+             }
+             assert_not_poisoned(&run);
+-            outs.push(losses);
++            // race の窓を変えないよう、パラメータは loss ループの後に読む。
++            let params = param_bits(&run);
++            outs.push(PlainRun {
++                losses,
++                windows,
++                params,
++            });
+         }
+         outs
+     });
+@@ -74,24 +112,74 @@ fn replay_thread_and_plain_chain_thread_keep_losses_bit_exact() {
+     let replay_out = replay.join().expect("replay スレッドが panic しない");
+     let plain_outs = plain.join().expect("plain スレッドが panic しない");
+     let mut failed = false;
+-    // 非 capture 側は損失列のみを参照の先頭 PLAIN_STEPS 件と比較する（パラメータは store ごとに
+-    // 別で、ずれた場合は loss 側にも現れる。パラメータの診断は replay 側で出す）。
++    // r2 互換の照合（先頭 PLAIN_STEPS 件のみ。DIAG3596 行）。
+     let short = Outcome {
+         losses: reference.losses[..PLAIN_STEPS].to_vec(),
+         params: Vec::new(),
+     };
+-    for (r, losses) in plain_outs.into_iter().enumerate() {
++    let (mut mismatches, mut matched, mut unmatched) = (0usize, 0usize, 0usize);
++    let (mut idx_ge_20, mut in_window, mut params_diff) = (0usize, 0usize, 0usize);
++    for (r, p) in plain_outs.iter().enumerate() {
+         let probe = Outcome {
+-            losses,
++            losses: p.losses.clone(),
+             params: Vec::new(),
+         };
+         report_mismatch_3596(&probe, &short, &format!("plain repeat {r}"));
+-        failed |= probe.losses != short.losses;
++        failed |= p.losses != short.losses;
++        let params_equal = p.params == plain_reference.params;
++        eprintln!("DIAG3610 plain repeat {r}: plain-params-equal={params_equal}");
++        if !params_equal {
++            params_diff += 1;
++            failed = true;
++        }
++        let mut repeat_bad = false;
++        for (i, (got, exp)) in p.losses.iter().zip(&short.losses).enumerate() {
++            if got == exp {
++                continue;
++            }
++            repeat_bad = true;
++            mismatches += 1;
++            let full = indices_of(&reference.losses, *got);
++            let live = indices_of(&replay_out.losses, *got);
++            if full.is_empty() && live.is_empty() {
++                unmatched += 1;
++            } else {
++                matched += 1;
++            }
++            if full.iter().chain(live.iter()).any(|&j| j >= PLAIN_STEPS) {
++                idx_ge_20 += 1;
++            }
++            let (b, a) = p.windows[i];
++            // replay の step j は完了数が j のあいだ実行中。観測窓 [b, a] に 1 の余裕を持たせる。
++            if full
++                .iter()
++                .chain(live.iter())
++                .any(|&j| j >= b && j <= a + 1)
++            {
++                in_window += 1;
++            }
++            eprintln!(
++                "DIAG3610 plain repeat {r} loss idx {i} got {} expected {} full-reference-idx {full:?} replay-live-idx {live:?} replay-window [{b}, {a}]",
++                f32::from_bits(*got),
++                f32::from_bits(*exp),
++            );
++        }
++        if repeat_bad {
++            eprintln!("DIAG3610 series plain repeat {r}: {:?}", p.losses);
++        }
+     }
+     report_mismatch_3596(&replay_out, &reference, "replay thread");
+-    failed |= replay_out.losses != reference.losses || replay_out.params != reference.params;
++    let replay_bad = replay_out.losses != reference.losses || replay_out.params != reference.params;
++    failed |= replay_bad;
++    if failed {
++        eprintln!("DIAG3610 series replay: {:?}", replay_out.losses);
++        eprintln!("DIAG3610 series reference: {:?}", reference.losses);
++    }
++    eprintln!(
++        "DIAG3610 summary: mismatches={mismatches} matched_full={matched} unmatched={unmatched} idx_ge_20={idx_ge_20} in_window={in_window} plain_params_diff={params_diff} replay_bad={replay_bad}"
++    );
+     assert!(
+         !failed,
+-        "replay と非 capture チェーンの並行で loss／パラメータが参照とずれた（DIAG3596 行を参照）"
++        "replay と非 capture チェーンの並行で loss／パラメータが参照とずれた（DIAG3596／DIAG3610 行を参照）"
+     );
+ }

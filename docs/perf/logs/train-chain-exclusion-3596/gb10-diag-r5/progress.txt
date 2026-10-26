@@ -1,0 +1,19 @@
+build before rc=0
+build mainprefix rc=0
+build after rc=0
+run before 1 rc=0
+run before 2 rc=0
+run before 3 rc=0
+run before 4 rc=101
+run before 5 rc=101
+run mainprefix 1 rc=101
+run mainprefix 2 rc=0
+run mainprefix 3 rc=101
+run mainprefix 4 rc=101
+run mainprefix 5 rc=0
+run after 1 rc=0
+run after 2 rc=0
+run after 3 rc=0
+run after 4 rc=0
+run after 5 rc=0
+done.

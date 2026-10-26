@@ -18,6 +18,8 @@
 | `RULE-r3.txt` | r2 の REGRESSION 後、既定 OFF の ordinal で排他スコープを素通りにする修正（設計記録 §8.11.8）の再実測の事前登録規則（計測前に登録。閾値・腕・ゲートは RULE-r2 と同一）。ランナーは `AB_RULE_NAME=RULE-r3.txt` で読む。マージ SHA `46a2a43d9`（2026-10-26T20:36+09:00）で、計測より前に main へ登録済み。r3 の GB10 実測結果は下記と設計記録 §8.11.9 |
 | `DIAG-r4.txt`・`diag-r4/` | r3 の UNDETERMINED で残った既定 OFF の約 0.9 µs の差の切り分け診断（設計記録 §8.11.10）の手順（計測前に固定。判定ではなく分類。判定ツールの入力ではない）と、計測専用 revert パッチ 3 本・`patches.sha256`。GB10 での計測は実施済み（結果は `gb10-diag-r4/` と下記「DIAG-r4 の結果」）。ランナー: `run_diag_train_chain_exclusion_cuda.sh`、集計: `summarize_diag_train_chain_exclusion.py`（テストは CI） |
 | `gb10-diag-r4/` | DIAG-r4 のマスク済みの生ログ（digest 35 本）・JSONL 7 腕・`env_info`・build `.err`・`sha-*`／`tree-*`・専有ゲートのログ・`rev-stamps-and-runner-out.txt`・`summary-3596-diag-r4.md`／`.exit`（集計ツールの出力と終了コード 0）。バイナリはコミットしない |
+| `DIAG-r5.txt`・`diag-r5/` | §8.11.6 の loss 取り違えの機構の推定と実機の `DIAG3596` の食い違いを調べる診断（#3610）の手順・仮説・分類規則（計測前に固定。判定ではなく分類）と、増強した診断テストのテスト専用パッチ 3 本・`patches.sha256`。実測済み（下記「DIAG-r5 の結果」） |
+| `gb10-diag-r5/` | DIAG-r5 のマスク済みの生ログ（15 run）・`env_info`・build ログ・`progress.txt`・`classify-3610.md`（分類）。バイナリはコミットしない |
 | `gb10/` | 初回のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`#[ignore]` 全件の結果と分類・`judge-3596.md`／`.exit` |
 | `gb10-r3/` | r3 のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`ignored/`・`ignored-compare-3596-r3.md`・`rev-stamps-and-runner-out.txt` |
 | `gb10-r2/` | r2 のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`diag/`（原因切り分けのログとテスト専用パッチ）・`ignored/`・`ignored-compare-3596-r2.md` |
@@ -32,6 +34,15 @@
 | backend-cuda・facade の `#[ignore]` 全件を #3597 より前の main と突き合わせ、新しい fail がない | 新規 fail 1 件（G1） | **排他が原因の新規 fail 0 件**（`gb10-r2/ignored-compare-3596-r2.md`） | **排他が原因の新規 fail 0 件**（`gb10-r3/ignored-compare-3596-r3.md`） |
 | chain セル（1 スレッド）で排他あり・なしの非後退（既定 OFF・opt-in ON） | 未計測 | **既定 OFF が後退判定**（ratio 1.002、5/5 round で > 1.00）。opt-in ON は 1.000 | **UNDETERMINED**（既定 OFF が ratio 1.007 > 1.00 だが 5/5 の符号一貫なし〈ratio_r 0.995〜1.009〉。opt-in ON は 1.000）。**未達** |
 | `TRAIN_GRAPH_DEFAULT_ENABLED` が `false` のまま | 確認済み | 確認済み（`crates/backend-cuda/src/graph.rs` の const assert） | 確認済み（`graph.rs` に差分なし） |
+
+## DIAG-r5 の結果（§8.11.6 の機構の食い違いの調査。判定ではなく分類）
+
+イシュー #3610。事前登録: コミット `3c7d29fde`（`DIAG-r5.txt` の sha256 `5e1d9c8db88a5f13b5096caba4fa548fb107ce991e80e47796a4c5bba73e7e01`。ノード上で測った値と一致。パッチ 3 本の sha256 も `env_info` と一致）。GB10（`aarch64`・driver 580.173.02・rustc 1.97.1）で 2026-10-26、before `f7fe6b4df`・修正前 main `c1204755e`・after `616be4ff7` を各 5 回（差し替え・追加起動なし）。出力先 `gb10-diag-r5/`。
+
+- r2 の `equals-reference-idx []` は診断の探索範囲の不足だった。r2 は非 capture のずれた loss を参照の先頭 20 件にしか照合しておらず、replay スレッドは 200 step 進む。今回は参照 200 件と replay の実 loss 列に照合した。
+- 失敗は before 5 run 中 2 run・修正前 main 5 run 中 3 run。ずれ 13 件はすべて replay スレッドのある step の loss とちょうど 1 つの index で bit 一致した（unmatched = 0）。パラメータは全 450 repeat で参照と一致した。after は 5/5 で一致。
+- 分類は場合 (a)（詳細は `gb10-diag-r5/classify-3610.md`）。§8.11.6 の機構の推定「非 capture スレッドの loss が、graph（replay スレッド）が書いた値と取り違えられる」は実測と整合する。起動順（finalize が graph の partial を読む）の直接観測ではない。
+- main の診断テスト（`report_mismatch_3596`）の照合範囲（先頭 20 件）と、非 capture 側のパラメータを比べていない点は本イシューでは直していない（下記「所有者判断事項」）。
 
 ## DIAG-r4 の結果（切り分け診断。判定ではなく分類）
 
@@ -100,7 +111,7 @@ off の差 0.2%（約 0.3 µs）は規則の閾値 1.00 を 5/5 round で超え�
 - **所有者判断（2026-10-27）**: 差は A/A のノイズ幅と同じ程度で、ビルドごとの配置の違い（対照腕 rv-graphlock の +0.64%）でも同じ程度に動く。round を増やしてもこの偏りは消えないため、再計測はしない。性能は RULE-r3 の判定 UNDETERMINED のまま記録し、NON-REGRESSION（pass）としては扱わない。閾値・判定方法・round 数は変えない。正しさの受入基準（G1〜G4・`#[ignore]` 全件の突き合わせで、排他が原因の新規 fail は 0 件。r3）を満たしたので #3596 を閉じる。`TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。
 - **（r3 の結果）** off の ratio 1.007 は UNDETERMINED（符号の一貫なし）。追加の切り分け（round 数を増やす別名 RULE の事前登録、同一バイナリ内の比較など）を行うか、現状の差を許容して判定基準を見直すか。閾値 1.00 は規則どおり変えていない。
 - r2 の off モード ratio 1.002（REGRESSION）は、RULE-r3 の再実測（上記）で ratio 1.007・UNDETERMINED となった。r2 の扱いは先頭の r3 の項目に統合する。
-- §8.11.6 の機構の推定が実機の `DIAG3596` と食い違った点（ずれた loss が参照列のどの index とも一致しない）の追加調査。修正自体は after 5/5 pass。
+- §8.11.6 の機構の推定が実機の `DIAG3596` と食い違った点（ずれた loss が参照列のどの index とも一致しない）は、DIAG-r5（#3610）で解消した。食い違いは照合範囲が先頭 20 件だったことによる見かけ上のもので、ずれた loss は replay スレッドの step の loss と bit 一致した。残る判断: main の診断テストの照合範囲を参照全体と replay の実 loss 列へ広げ、非 capture 側のパラメータ比較を足すか（コード変更になるため本イシューではスコープ外。起票はユーザー承認後）。
 - #3594（既定 ON 反転）の前提は、§8.12.2 の未解決事項が残るため引き続き満たされない。
 
 ## GB10 での実行手順（再実施する場合）
