@@ -1,0 +1,41 @@
+### after 1 resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise
+test resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1416 filtered out; finished in 1.04s
+### after 2 resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise
+test resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1416 filtered out; finished in 0.98s
+### after 1 resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d
+test resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d ... 
+thread 'resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d' (375370) panicked at crates/backend-cuda/src/resident_input_diag_tests_3250.rs:120:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1416 filtered out; finished in 0.75s
+### after 2 resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d
+test resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d ... 
+thread 'resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d' (375394) panicked at crates/backend-cuda/src/resident_input_diag_tests_3250.rs:120:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1416 filtered out; finished in 0.76s
+### after 1 module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1416 filtered out; finished in 0.48s
+### after 2 module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1416 filtered out; finished in 0.47s
+### before 1 resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise
+test resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1406 filtered out; finished in 1.01s
+### before 2 resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise
+test resident_input_diag_tests_3250::gemm_device_matches_host_gemm_bitwise ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1406 filtered out; finished in 0.99s
+### before 1 resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d
+test resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d ... 
+thread 'resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d' (375512) panicked at crates/backend-cuda/src/resident_input_diag_tests_3250.rs:120:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1406 filtered out; finished in 0.74s
+### before 2 resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d
+test resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d ... 
+thread 'resident_input_diag_tests_3250::gemm_device_window_has_no_input_h2d' (375538) panicked at crates/backend-cuda/src/resident_input_diag_tests_3250.rs:120:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1406 filtered out; finished in 0.75s
+### before 1 module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1406 filtered out; finished in 0.47s
+### before 2 module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1406 filtered out; finished in 0.46s
+done.

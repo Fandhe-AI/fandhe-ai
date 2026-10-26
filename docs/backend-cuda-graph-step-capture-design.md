@@ -523,7 +523,14 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 
 ### 8.11.9 r3 の GB10 実測結果（RULE-r3。`3596-r3-gb10`）
 
-**未実測**（コードと RULE-r3 の登録まで。GB10 へ到達できるセッションでの実測が必要）。規則は `docs/perf/logs/train-chain-exclusion-3596/RULE-r3.txt`（計測前に登録。`after_crates_identical_to` = `2794cfba6`）。実施する場合は README「実施条件」の手順で、前提ゲート g1〜g4（G1 の 30 回を含む）・chain セル 5 round・`#[ignore]` 全件の突き合わせを行う。別の機体の値で埋めない。完了条件（`judge-3596-r3.exit` が 0・G1 pass・`#[ignore]` で排他が原因の新規 fail 0 件）が揃うまで #3596 は閉じない。
+**GB10 で実施済み・判定 UNDETERMINED（終了コード 4）**（2026-10-26）。規則は `docs/perf/logs/train-chain-exclusion-3596/RULE-r3.txt`（計測前に main へ登録。マージ SHA `46a2a43d9`）。出典: `judge-3596-r3.md`・`gb10-r3/`。機体は GB10（driver 580.173.02・rustc 1.97.1）、before `f7fe6b4df`・after `46a2a43d991f7099eaa4dfb97e07878e106b5c61`（`crates/` は基準 `2794cfba6` と同一）。
+
+- **G1 は合格**: 前提ゲート g1（`--exact`）・g2（3260 診断 9 件）・g3・g4（facade と 2 プロセス bit 一致、BITS 90 行・差分空）がすべて合格。
+- **`#[ignore]` 全件**: 排他が原因の新規 fail は 0 件。after にだけ出た 1 件（`gemm_device_matches_host_gemm_bitwise`）は単独 2/2 pass の一過性。`train_step_graph_diag_tests_3260` は after で 9 件全件 pass。詳細は `gb10-r3/ignored-compare-3596-r3.md`。
+- **chain セル（1 スレッド・size=64・5 round）**: hard 条件（checksum 0.080541・PARAM_DIGEST）は全 run・全腕で一致。専有ゲートは全 round 通過。ratio（排他あり / なし）は graph off が **1.007**（ratio_r 0.995, 1.006, 1.006, 1.007, 1.009。0.1344 → 0.1353 ms）、graph on が 1.000（0.1126 ms）。off は ratio > 1.00 だが round 1 が 0.995 で 5/5 の符号一貫がないため、RULE-r3 の判定は UNDETERMINED（REGRESSION でも NON-REGRESSION でもない）。
+- 事前表明の仮説（off の ratio 0.99〜1.00）は外れた。off の差は r2（1.002）より大きい。原因の切り分けは未実施で、本節では推定しない。
+- 限界: 2 腕は別ビルド。1 機体・単一構成の結果で、並行時の性能は対象外。コード・閾値・規則は変更していない。
+- 所有者判断事項: off の差を追加計測（round 数を増やす別名 RULE の事前登録等）で切り分けるか、判定基準を見直すか。完了条件（`judge-3596-r3.exit` = 0）が未達のため #3596 は閉じない。#3594 の前提は引き続き満たされない（§8.12.2）。
 
 ## 8.12 #3594 既定 ON への反転は見送り（既定 OFF 維持）
 
@@ -533,7 +540,7 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 ### 8.12.2 見送りの理由（未解決事項）
 - #3596 の `begin_device_chain_scope` が保護するのは encode と SGD の区間だけである。チェーン外の通常操作（`ResidentLoss::read` → `read_train_step_loss` → `mem.download`、Tape の通常演算など）は、待機も再試行もしない。
 - 既定 ON では、環境変数なしで同じ ordinal を複数スレッドが使うと、一方の学習 capture 中に他方の通常操作が `DeviceContextCaptureInProgress` で失敗し、公開 API（`step` → `loss.read()?`）からそのまま返る。従来は設定不要で動いていた並行学習が、別 store の capture タイミングだけで中断する。
-- さらに、graph の replay と非 capture チェーンが共有の永続ワークスペースを取り合い loss を取り違える欠陥があった（§8.11.6。修正済み。GB10 で G1・診断テストの pass は確認したが、既定 OFF の chain セルが RULE-r2 の閾値を超えた〈§8.11.7〉）。反転の前提に関わる。
+- さらに、graph の replay と非 capture チェーンが共有の永続ワークスペースを取り合い loss を取り違える欠陥があった（§8.11.6。修正済み。GB10 で G1・診断テストの pass は確認したが、既定 OFF の chain セルが RULE-r2 の閾値を超えた〈§8.11.7〉。r3 の再実測は UNDETERMINED〈§8.11.9〉）。反転の前提に関わる。
 - 反転の前提条件: チェーン外の通常操作にも、capture 中は安全に待機して再試行する仕組みを入れ、その並行回帰テスト（GB10 実機）を通すこと。
 
 ### 8.12.3 反転 PR に再度必要な確認（未実測）
