@@ -73,6 +73,12 @@
 //! - `Err(DeviceContextCaptureInProgress)` は launch 前の一過性の衝突で poison しない。外側の
 //!   [`DeviceParamStore::train_step_device_chain`] が待ち上限つきで step 全体をやり直す
 //! - それ以外の `Err` は書き込み後の可能性があるため store を poison する
+//! - **非 capture チェーンの排他（イシュー #3596）**: capture 試行が `Ok(false)` のあと、チェーン
+//!   （encode ＋ SGD）の間 `BackendOps::begin_device_chain_scope` のスコープを関数末尾まで持つ。
+//!   CUDA では別スレッドの capture 開始がチェーンの完走を待ち、capture 開始後の新しいチェーンは
+//!   **書き込み前**（スコープ取得）に `DeviceContextCaptureInProgress` を受けるため、書き込み後に
+//!   この衝突で poison される経路はない（SGD 段の同エラー分岐は防御として残す）。スコープは capture
+//!   試行・待機の外で取る（持ったまま capture すると開始が拒否される）
 //! - capture 区間の本体は `backend-cuda/src/graph.rs::launch_train_chain` にあり、**`encode_train_chain`
 //!   ＋ SGD と同じ順・同じ引数**で部品を呼ぶ（bit 一致のため）。ここの順序を変えたらそちらも直す
 
@@ -429,6 +435,31 @@ impl DeviceParamStore {
                 return Err(e);
             }
         }
+
+        // 非 capture チェーン（encode ＋ SGD）の実行区間を、同じ ordinal の別スレッド capture と
+        // 排他する（イシュー #3596。決定記録 `docs/backend-cuda-graph-step-capture-design.md`
+        // §8.11）。**capture 試行（上の `try_captured_train_step`）の後**で取る: スコープを持つ
+        // スレッドは capture を開始できない。関数を抜けるまで保持する（RAII。`?`・panic でも解放）。
+        // 取得は書き込み前なので、一過性の衝突・未対応は何も変えずに返す（再試行は呼び出し元の
+        // `train_step_device_chain` が待機して行う）。それ以外の失敗は従来どおり poison する。
+        let _chain_scope = match ops.begin_device_chain_scope() {
+            Ok(scope) => scope,
+            Err(e) => {
+                self.train_chain_grad = Some(grad);
+                if matches!(
+                    e,
+                    BackendError::Unsupported(_)
+                        | BackendError::DeviceContextCaptureInProgress { .. }
+                ) {
+                    if velocity_is_new {
+                        self.velocity = None;
+                    }
+                } else {
+                    self.poisoned.store(true, Ordering::SeqCst);
+                }
+                return Err(e);
+            }
+        };
 
         let reuse_bufs = self.train_chain_bufs.take().filter(|b| b.key == key);
         let reuse_loss = self.train_chain_loss.take();
@@ -1207,6 +1238,30 @@ mod tests {
         cap_calls: AtomicUsize,
         /// 各 `train_chain_captured` 呼び出しが受けた永続バッファのアドレス（params・grad・loss・outs 先頭）。
         cap_ptrs: Mutex<Vec<[usize; 4]>>,
+        /// `begin_device_chain_scope` の呼び出し回数（イシュー #3596）。
+        scope_opens: AtomicUsize,
+        /// いま保持中のスコープの個数（drop で減る）。
+        scope_live: Arc<AtomicUsize>,
+        /// スコープ取得の挙動（`SCOPE_*`）。
+        scope_mode: AtomicUsize,
+        /// 各 `train_chain_captured` 呼び出し時点の保持中スコープ数（0 でなければならない）。
+        live_at_cap: Mutex<Vec<usize>>,
+        /// 各 `sgd_step_device_tracked` 呼び出し時点の保持中スコープ数（1 でなければならない）。
+        live_at_sgd: Mutex<Vec<usize>>,
+    }
+
+    // スコープ取得は既定（0）で常に成功する。
+    /// 最初の 1 回だけ capture 衝突（書き込み前）。
+    const SCOPE_BUSY_ONCE: usize = 1;
+    /// 常に実行時エラー。
+    const SCOPE_FAILS: usize = 2;
+
+    /// 保持中の個数を drop で戻すモックのスコープ実体。
+    struct ScopeGuard(Arc<AtomicUsize>);
+    impl Drop for ScopeGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     /// `train_chain_captured` を実装しない（既定の `Ok(None)`）。
@@ -1337,6 +1392,11 @@ mod tests {
             plan: TrainChainCapturePlan<'_>,
         ) -> Result<Option<SegmentRun>, BackendError> {
             let calls = self.c.cap_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.c
+                .live_at_cap
+                .lock()
+                .unwrap()
+                .push(self.c.scope_live.load(Ordering::SeqCst));
             self.note(plan.token);
             self.c.cap_ptrs.lock().unwrap().push([
                 &*plan.params as *const DeviceBuffer<f32> as usize,
@@ -1353,6 +1413,23 @@ mod tests {
                 CAP_BUSY_ALWAYS => Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 }),
                 CAP_FAILS => Err(BackendError::KernelLaunchFailed("mock capture".into())),
                 _ => Ok(None),
+            }
+        }
+        fn begin_device_chain_scope(
+            &self,
+        ) -> Result<fandhe_ai_tensor_core::DeviceChainScope, BackendError> {
+            let opens = self.c.scope_opens.fetch_add(1, Ordering::SeqCst) + 1;
+            match self.c.scope_mode.load(Ordering::SeqCst) {
+                SCOPE_BUSY_ONCE if opens == 1 => {
+                    Err(BackendError::DeviceContextCaptureInProgress { ordinal: 0 })
+                }
+                SCOPE_FAILS => Err(BackendError::KernelLaunchFailed("mock scope".into())),
+                _ => {
+                    self.c.scope_live.fetch_add(1, Ordering::SeqCst);
+                    Ok(fandhe_ai_tensor_core::DeviceChainScope::holding(Box::new(
+                        ScopeGuard(Arc::clone(&self.c.scope_live)),
+                    )))
+                }
             }
         }
         fn synchronize_device(&self) -> Result<(), BackendError> {
@@ -1384,6 +1461,11 @@ mod tests {
             t: &DispatchFailureCell,
         ) -> Result<(), BackendError> {
             self.c.sgd.fetch_add(1, Ordering::SeqCst);
+            self.c
+                .live_at_sgd
+                .lock()
+                .unwrap()
+                .push(self.c.scope_live.load(Ordering::SeqCst));
             self.c.first_flags.lock().unwrap().push(c.is_first_step);
             self.note(t);
             if self.fault == Fault::SgdFails {
@@ -2277,6 +2359,82 @@ mod tests {
         c.cap_mode.store(CAP_NONE, Ordering::SeqCst);
         run_retrying(&tape, &mut store, &x, &y).unwrap();
         assert_eq!(store.step_count, 2);
+    }
+
+    /// 排他スコープは 1 step に 1 回だけ、capture 試行の後・SGD の前から関数を抜けるまで保持し、
+    /// 成功でも各エラー分岐でも解放される（イシュー #3596）。
+    #[test]
+    fn chain_scope_is_held_once_across_encode_and_sgd_and_released_on_every_path() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.scope_opens), 1);
+        assert_eq!(count(&c.scope_live), 0);
+        assert_eq!(*c.live_at_sgd.lock().unwrap(), vec![1]);
+        // 2 step 目は capture 試行（スコープの外）→ 不適用なので通常チェーン（スコープ内）。
+        run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.scope_opens), 2);
+        assert_eq!(count(&c.scope_live), 0);
+        assert!(c.live_at_cap.lock().unwrap().iter().all(|&n| n == 0));
+        for fault in [
+            Fault::ForwardUnsupported,
+            Fault::LhsUnsupported,
+            Fault::SgdFails,
+        ] {
+            let (tape, mut store, c) = setup_with(fault, true, false);
+            let (x, y) = io(&tape, &store);
+            let _ = run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0));
+            assert_eq!(
+                count(&c.scope_live),
+                0,
+                "エラー分岐でもスコープは解放される"
+            );
+        }
+    }
+
+    /// capture が成功した step（`Replayed`）ではスコープを取らない。
+    #[test]
+    fn replayed_step_does_not_open_a_chain_scope() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+        let opens = count(&c.scope_opens);
+        c.cap_mode.store(CAP_REPLAY, Ordering::SeqCst);
+        run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).unwrap();
+        assert_eq!(count(&c.scope_opens), opens);
+    }
+
+    /// スコープ取得が capture 衝突を返しても（書き込み前）store は poison されず、新規確保した
+    /// velocity は戻り、再試行で成功する。
+    #[test]
+    fn scope_acquisition_conflict_does_not_poison_and_is_retried() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        c.scope_mode.store(SCOPE_BUSY_ONCE, Ordering::SeqCst);
+        let err = run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.9)).unwrap_err();
+        assert!(matches!(
+            err,
+            BackendError::DeviceContextCaptureInProgress { .. }
+        ));
+        store.check_not_poisoned().unwrap();
+        assert!(store.velocity.is_none(), "新規確保した velocity は戻る");
+        assert_eq!(count(&c.forward), 0, "書き込み前に拒否される");
+        run_retrying(&tape, &mut store, &x, &y).unwrap();
+        assert_eq!(store.step_count, 1);
+        assert_eq!(count(&c.scope_live), 0);
+    }
+
+    /// スコープ取得の実行時エラー（poison 済み等）は従来どおり store を poison する。
+    #[test]
+    fn scope_acquisition_hard_failure_poisons_the_store() {
+        let (tape, mut store, c) = setup_with(Fault::None, true, false);
+        let (x, y) = io(&tape, &store);
+        c.scope_mode.store(SCOPE_FAILS, Ordering::SeqCst);
+        assert!(run_with(&tape, &mut store, &x, &y, &ACTS, &cfg(0.0)).is_err());
+        assert!(matches!(
+            store.check_not_poisoned(),
+            Err(BackendError::StorePoisoned)
+        ));
     }
 
     /// capture 経路の実行時エラーは書き込み後の可能性があるため store を poison する。

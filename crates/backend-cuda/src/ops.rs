@@ -4069,6 +4069,32 @@ impl BackendOps for CudaBackendOps {
         context_cache::wait_foreign_capture_idle(self.ordinal, timeout)
     }
 
+    /// 非 capture の学習チェーンと別スレッドの Graph capture を ordinal 単位で排他する
+    /// （イシュー #3596。`docs/backend-cuda-graph-step-capture-design.md` §8.11）。
+    ///
+    /// チェーンの間 ordinal の `CallToken` を 1 つ持ち続ける。チェーン内の各部品の
+    /// `begin_driver_call` は「このスレッドが in-flight を持つ」通過条件で通り、別スレッドの
+    /// `begin_capture_session` は `in_flight` ドレインでチェーンの完走を待つ。capture 開始後に来た
+    /// チェーンはここ（書き込み前）で `DeviceContextCaptureInProgress` を受ける。
+    ///
+    /// capture 可能な stream でない（legacy stream。既定 OFF の利用者）ordinal では capture は
+    /// 起きない（3 つの capture 経路はいずれも `is_capturable_stream` を前提にする）ため、トークンを
+    /// すぐ手放し中身のないスコープを返す。デバイス同期は足さない。`unsafe` は追加しない。
+    fn begin_device_chain_scope(
+        &self,
+    ) -> Result<fandhe_ai_tensor_core::DeviceChainScope, BackendError> {
+        let token = context_cache::begin_driver_call(self.ordinal, &[])?;
+        let device =
+            context_cache::observe_cuda_result(self.ordinal, &token, self.device_handle_raw())
+                .map_err(|e| BackendError::CudaUnavailable(e.to_string()))?;
+        if !device.is_capturable_stream() {
+            return Ok(fandhe_ai_tensor_core::DeviceChainScope::none());
+        }
+        Ok(fandhe_ai_tensor_core::DeviceChainScope::holding(Box::new(
+            token,
+        )))
+    }
+
     /// default stream の完了を D2H なしで待つ（イシュー #3254 P7。`BackendOps::synchronize_device`
     /// の CUDA 実装）。`DeviceParamStore::wait_device` から呼ばれる。
     ///

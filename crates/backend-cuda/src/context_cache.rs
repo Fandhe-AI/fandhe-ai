@@ -3575,6 +3575,124 @@ mod poison_state_tests {
         drop(guard);
     }
 
+    fn in_flight_of(ordinal: usize) -> u64 {
+        let cell = ordinal_registry().entry(ordinal).expect("registry entry");
+        let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.in_flight
+    }
+
+    /// 学習チェーンの排他スコープ（`BackendOps::begin_device_chain_scope` の実体＝外側の
+    /// `CallToken`。イシュー #3596）を持つ間、別スレッドの `begin_capture_session` は in-flight
+    /// ドレインで待ち、スコープを手放すと進む（capture 側がチェーンの完走を待つ契約）。
+    #[test]
+    fn chain_scope_token_makes_a_foreign_capture_session_wait_until_released() {
+        let ordinal = unique_ordinal();
+        let scope = begin_driver_call(ordinal, &[]).expect("scope token");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let r = begin_capture_session(ordinal);
+            tx.send(()).expect("send");
+            r
+        });
+        // capture 側が state.capture を立ててドレイン待ちに入るまで進める。
+        let cell = ordinal_registry().entry(ordinal).expect("registry entry");
+        loop {
+            let state = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.capture.is_some() {
+                break;
+            }
+            drop(state);
+            std::thread::yield_now();
+        }
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "スコープを持つ間は capture session が成立してはならない"
+        );
+        drop(scope);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("スコープ解放後に capture session が進むはず");
+        let guard = handle.join().expect("no panic").expect("capture 成立");
+        drop(guard);
+    }
+
+    /// capture 開始後（`state.capture` が別スレッド）に来た新しいチェーンは、スコープ取得
+    /// （書き込み前）で `DeviceContextCaptureInProgress` を受け、in-flight を増やさない。
+    #[test]
+    fn chain_scope_acquisition_is_rejected_before_writing_while_a_foreign_capture_is_active() {
+        let ordinal = unique_ordinal();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let guard = begin_capture_session(ordinal).expect("capture 成立");
+            ready_tx.send(()).expect("send");
+            let _ = done_rx.recv();
+            drop(guard);
+        });
+        ready_rx.recv().expect("capture が成立するまで待つ");
+        let r = begin_driver_call(ordinal, &[]);
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextCaptureInProgress { ordinal: o }) if o == ordinal),
+            "{r:?}"
+        );
+        assert_eq!(in_flight_of(ordinal), 0);
+        done_tx.send(()).expect("send");
+        handle.join().expect("no panic");
+        // capture 終了後は取得できる。
+        assert!(begin_driver_call(ordinal, &[]).is_ok());
+    }
+
+    /// スコープを持ったまま同じスレッドで capture を始める／待機する経路は、待たずに拒否される
+    /// （自己デッドロックしない。`train_chain_captured`・`wait_device_capture_idle` はスコープの外で
+    /// 呼ぶ契約の裏付け）。
+    #[test]
+    fn chain_scope_holder_cannot_start_or_wait_for_capture_on_the_same_thread() {
+        let ordinal = unique_ordinal();
+        let scope = begin_driver_call(ordinal, &[]).expect("scope token");
+        let start = begin_capture_session(ordinal);
+        assert!(
+            matches!(start, Err(BackendError::InvalidArgument(_))),
+            "{start:?}"
+        );
+        let wait = wait_foreign_capture_idle(ordinal, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(
+                wait,
+                Err(BackendError::DeviceContextCaptureInProgress { .. })
+            ),
+            "{wait:?}"
+        );
+        drop(scope);
+        assert_eq!(in_flight_of(ordinal), 0);
+    }
+
+    /// `?` による早期 return でも panic（unwind）でもスコープは解放され、待っていた capture が進む。
+    #[test]
+    fn chain_scope_is_released_on_early_return_and_on_panic() {
+        let ordinal = unique_ordinal();
+        let early = |fail: bool| -> Result<(), BackendError> {
+            let _scope = begin_driver_call(ordinal, &[])?;
+            if fail {
+                return Err(BackendError::Unsupported("early".into()));
+            }
+            Ok(())
+        };
+        assert!(early(true).is_err());
+        assert_eq!(in_flight_of(ordinal), 0);
+        assert!(early(false).is_ok());
+        assert_eq!(in_flight_of(ordinal), 0);
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _scope = begin_driver_call(ordinal, &[]).expect("scope token");
+            panic!("chain panics while holding the scope");
+        });
+        assert!(panicked.is_err());
+        assert_eq!(in_flight_of(ordinal), 0);
+        // 解放済みなので、このスレッドの深度も戻り capture を始められる。
+        let guard = begin_capture_session(ordinal).expect("capture 成立");
+        drop(guard);
+    }
+
     #[test]
     fn begin_sync_point_call_rejects_before_touching_driver_while_capturing() {
         let ordinal = unique_ordinal();

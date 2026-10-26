@@ -85,6 +85,8 @@ fn new_run() -> Run {
 }
 
 /// 層幅を指定できる版（GEMM 内部ワークスペースを拡張させる大きい store の構築用）。
+/// 並行テストでは他スレッドの capture と衝突して `DeviceContextCaptureInProgress`（一過性）が
+/// 返りうるため、store 構築と入力アップロードは `retry_busy` で上限つきに再試行する。
 fn new_run_with(dims: [usize; 3]) -> Run {
     let tape = Tape::new_with_ops(Box::new(CudaBackendOps::new(0)));
     let params = [
@@ -94,13 +96,9 @@ fn new_run_with(dims: [usize; 3]) -> Run {
         tensor(4, &[dims[2]]),
     ];
     let refs: Vec<&Tensor<f32>> = params.iter().collect();
-    let store = DeviceParamStore::new(&tape, &refs).expect("store");
-    let x = store
-        .upload_resident_input(&tape, &tensor(5, &[BATCH, dims[0]]))
-        .expect("x");
-    let y = store
-        .upload_resident_input(&tape, &tensor(6, &[BATCH, dims[2]]))
-        .expect("y");
+    let store = retry_busy(|| DeviceParamStore::new(&tape, &refs));
+    let x = retry_busy(|| store.upload_resident_input(&tape, &tensor(5, &[BATCH, dims[0]])));
+    let y = retry_busy(|| store.upload_resident_input(&tape, &tensor(6, &[BATCH, dims[2]])));
     Run { tape, store, x, y }
 }
 
@@ -383,9 +381,9 @@ fn lr_change_recaptures_and_stays_bit_exact() {
 /// （`DeviceContextCaptureInProgress` を待機・再試行で吸収する。R6）。結果は単独実行と bit 一致。
 ///
 /// 各スレッドは 1 step 目（ウォームアップ。非 capture の通常チェーン）を終えて柵で揃えてから
-/// capture に入る。通常チェーンの途中で他スレッドの capture が始まると、最初の dW の書き込み後の
-/// 衝突は store を poison する既存の契約（モジュール doc「失敗の境界」）のため、本テストはそこを
-/// 範囲外として柵で避ける（設計記録 §8.8 の既知の制約）。
+/// capture に入る。この柵は #3596 以前の「通常チェーンの途中で他スレッドの capture が始まると
+/// store が poison される」制約の回避として入れたもので、柵なしで同じ状況を作る回帰テストは
+/// `unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact`（排他は設計記録 §8.11）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
 fn two_threads_capturing_concurrently_do_not_fail() {
@@ -418,6 +416,55 @@ fn two_threads_capturing_concurrently_do_not_fail() {
     for (n, h) in handles.into_iter().enumerate() {
         let out = h.join().expect("スレッドが panic しない");
         assert_same(&out, &reference, &format!("thread {n} vs single"));
+    }
+}
+
+/// 柵を置かずに、同じ ordinal で capture するスレッドと非 capture のスレッドが並行して学習しても、
+/// どちらの store も poison されず、全 step の loss と最終パラメータが単独実行と bit 一致する
+/// （イシュー #3596。学習チェーンと capture の ordinal 単位の排他。設計記録 §8.11）。
+///
+/// 衝突を起こしやすくするため、capture 側は繰り返しごとに新しい store を作り（毎回、非 capture の
+/// ウォームアップ step → capture の流れを通る）、非 capture 側も新しい store で通常チェーンを
+/// 繰り返す。スレッド間に柵は置かない。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須。FANDHE_AI_CUDA_GRAPH_TRAIN=1 で単独実行"]
+fn unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact() {
+    require_opt_in_env();
+    const STEPS: usize = 20;
+    const REPEATS: usize = 30;
+    let reference = run_scenario(STEPS, |_| 0.01, false, false, None);
+    let handles: Vec<_> = [true, false]
+        .into_iter()
+        .map(|capture| {
+            std::thread::spawn(move || {
+                let _opt = override_train_graph_for_scope(capture);
+                let mut outs = Vec::with_capacity(REPEATS);
+                for _ in 0..REPEATS {
+                    let mut run = new_run();
+                    let mut losses = Vec::with_capacity(STEPS);
+                    for i in 0..STEPS {
+                        let h = step(&mut run, 0.01).unwrap_or_else(|e| panic!("step {i}: {e:?}"));
+                        losses.push(read_loss(&run, &h).to_bits());
+                    }
+                    assert_not_poisoned(&run);
+                    outs.push(Outcome {
+                        losses,
+                        params: param_bits(&run),
+                    });
+                }
+                outs
+            })
+        })
+        .collect();
+    for (n, h) in handles.into_iter().enumerate() {
+        for (r, out) in h
+            .join()
+            .expect("スレッドが panic しない")
+            .iter()
+            .enumerate()
+        {
+            assert_same(out, &reference, &format!("thread {n} repeat {r} vs single"));
+        }
     }
 }
 
