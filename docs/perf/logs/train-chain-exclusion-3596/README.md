@@ -1,6 +1,6 @@
 # 学習チェーンと Graph capture の ordinal 単位排他 GB10 検証（イシュー #3596）
 
-**状態: 初回（RULE.txt）は判定 REGRESSION（終了コード 3。G1 不合格で chain セル未計測）。修正（#3601）後の再実測（RULE-r2）も判定 REGRESSION（終了コード 3。前提ゲート・hard 条件は合格し、既定 OFF の chain セルが ratio 1.002 > 1.00）。RULE-r3 の再実測は判定 UNDETERMINED（終了コード 4。前提ゲート・hard 条件・G1・`#[ignore]` は合格したが、既定 OFF の chain セルが ratio 1.007 > 1.00 で 5/5 の符号一貫がない）。完了条件は未達のため #3596 は閉じない**。r4 の切り分け診断（DIAG-r4）は GB10 で実測済みで場合 (i)「差は A/A と同程度。コードに原因は見つからない」（`gb10-diag-r4/summary-3596-diag-r4.md`・設計記録 §8.11.10。完了条件は引き続き未達）（2026-10-26。出典: `judge-3596.md`・`judge-3596-r2.md`・`judge-3596-r3.md`・`gb10/ignored-compare-3596.md`・`gb10-r2/ignored-compare-3596-r2.md`・`gb10-r3/ignored-compare-3596-r3.md`）
+**状態: 初回（RULE.txt）は判定 REGRESSION（終了コード 3。G1 不合格で chain セル未計測）。修正（#3601）後の再実測（RULE-r2）も判定 REGRESSION（終了コード 3。前提ゲート・hard 条件は合格し、既定 OFF の chain セルが ratio 1.002 > 1.00）。RULE-r3 の再実測は判定 UNDETERMINED（終了コード 4。前提ゲート・hard 条件・G1・`#[ignore]` は合格したが、既定 OFF の chain セルが ratio 1.007 > 1.00 で 5/5 の符号一貫がない）。完了条件は未達のため #3596 は閉じない**。r4 の切り分け診断（DIAG-r4）は GB10 で実測済みで場合 (i)「差は A/A と同程度。コードに原因は見つからない」（`gb10-diag-r4/summary-3596-diag-r4.md`・設計記録 §8.11.10。完了条件は引き続き未達）。所有者判断（2026-10-27）で、性能は UNDETERMINED のまま記録し、正しさの受入基準を満たしたので #3596 を閉じた（下記「所有者判断事項」）（2026-10-26。出典: `judge-3596.md`・`judge-3596-r2.md`・`judge-3596-r3.md`・`gb10/ignored-compare-3596.md`・`gb10-r2/ignored-compare-3596-r2.md`・`gb10-r3/ignored-compare-3596-r3.md`）
 
 排他の実装は PR #3597 で main に入っている。完了条件の GB10 実機検証（下記 3 項目）は、本ディレクトリで事前登録して実測した。
 設計は `docs/backend-cuda-graph-step-capture-design.md` §8.11、既定 ON 反転の取り下げ記録は §8.12。
@@ -97,6 +97,7 @@ off の差 0.2%（約 0.3 µs）は規則の閾値 1.00 を 5/5 round で超え�
 ## 所有者判断事項
 
 - **（DIAG-r4 の結果）** 場合 (i)。コードに原因は見つからず、DIAG-r4 の規則どおり停止した。(a) 約 0.5% の差を測定ノイズ水準として許容し判定基準（閾値 1.00・符号一貫の要件）を見直すか、(b) round 数を増やす別名 RULE を事前登録して再実測するか。閾値・round 数は変えていない。#3596 は完了条件が未達のため閉じない。
+- **所有者判断（2026-10-27）**: 差は A/A のノイズ幅と同じ程度で、ビルドごとの配置の違い（対照腕 rv-graphlock の +0.64%）でも同じ程度に動く。round を増やしてもこの偏りは消えないため、再計測はしない。性能は RULE-r3 の判定 UNDETERMINED のまま記録し、NON-REGRESSION（pass）としては扱わない。閾値・判定方法・round 数は変えない。正しさの受入基準（G1〜G4・`#[ignore]` 全件の突き合わせで、排他が原因の新規 fail は 0 件。r3）を満たしたので #3596 を閉じる。`TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。
 - **（r3 の結果）** off の ratio 1.007 は UNDETERMINED（符号の一貫なし）。追加の切り分け（round 数を増やす別名 RULE の事前登録、同一バイナリ内の比較など）を行うか、現状の差を許容して判定基準を見直すか。閾値 1.00 は規則どおり変えていない。
 - r2 の off モード ratio 1.002（REGRESSION）は、RULE-r3 の再実測（上記）で ratio 1.007・UNDETERMINED となった。r2 の扱いは先頭の r3 の項目に統合する。
 - §8.11.6 の機構の推定が実機の `DIAG3596` と食い違った点（ずれた loss が参照列のどの index とも一致しない）の追加調査。修正自体は after 5/5 pass。
