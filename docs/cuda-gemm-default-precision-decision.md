@@ -38,7 +38,7 @@ tolerance 定数・parity baseline・既定精度は変更しない。
 | 案 | 内容 | 前提・必要な手続き | 判断 |
 |---|---|---|---|
 | (A) | 既定は FP32 のまま。burn との比較は精度クラスを併記して読む | なし（現状維持） | **採用（推奨）** |
-| (B) | TF32 を既定にする | TF32 は strict 判定で全要素 fail するため、形状二分＋`ParityBaseline` 方式が前提。baseline の追加は実機実測値・人間承認に限られる。REQ-2 の扱いが変わるため、先に Fandhe-AI/fandhe-ai-spec への提案が必要 | 採らない |
+| (B) | TF32 を既定にする | TF32 は strict 判定で非ゼロの不合格要素（約 13〜17%。1×1×1 は不合格ゼロ）が生じ、厳密ゼロ fail 判定を満たさない形状があるため、形状二分＋`ParityBaseline` 方式が前提。baseline の追加は実機実測値・人間承認に限られる。REQ-2 の扱いが変わるため、先に Fandhe-AI/fandhe-ai-spec への提案が必要 | 採らない |
 | (C) | TF32 opt-in カーネルの最適化で差を詰める | 既定精度は変えない。別イシュー | 本件では扱わない |
 
 (A) を推奨する理由: REQ-2 の統一複合判定（相対 1e-3 未満または絶対 1e-5 未満）を既定のまま満たす唯一の構成であり、(B) は spec 側の手続きなしには成立しない。TF32 を使いたい利用者は既存の opt-in で選べる。
@@ -102,7 +102,7 @@ burn のセルは「TF32 相手に FP32 strict で並べた比」と読む。TF3
 
 ## §7 (B) を採らない理由
 
-TF32 は strict 判定で全要素 fail する。採るなら形状二分＋`ParityBaseline` 方式（`docs/cuda-tensor-core-parity-judgment-decision.md`・spec REQ-2 2026-09-02 追記）が前提で、baseline の追加は実機実測値と人間承認に限られる。既定にするなら先に spec への提案が必要で、所有者回答（§2）も行わないとしている。
+TF32 は strict 判定で非ゼロの不合格要素（約 13〜17%。1×1×1 は不合格ゼロ。`docs/cuda-tensor-core-parity-judgment-decision.md` §1.1）が生じ、厳密ゼロ fail 判定を満たさない形状がある。採るなら形状二分＋`ParityBaseline` 方式（`docs/cuda-tensor-core-parity-judgment-decision.md`・spec REQ-2 2026-09-02 追記）が前提で、baseline の追加は実機実測値と人間承認に限られる。既定にするなら先に spec への提案が必要で、所有者回答（§2）も行わないとしている。
 
 ## §8 「勝てるセルは是正で届く見込み」の扱い
 
