@@ -1,0 +1,94 @@
+RULE fixed-at-utc: 2026-10-28T00:00:00Z (実機計測より前にコミットして固定。事後に緩めない)
+issue: #3646 GB10 の CPU gemm で常駐入力の reuse が fresh より遅い原因の切り分け
+doc: docs/perf/cpu-gemm-reuse-fresh-inversion.md §9
+
+[実行方法]
+- 1 run = 1 プロセス。テストバイナリ crates/facade/tests/cpu_gemm_resident_reuse_diag.rs を
+  `--ignored --exact cpu_gemm_resident_reuse_phases --nocapture --test-threads=1` で起動し、
+  出力は 1 つの run{N}.jsonl。run1〜run5 の 5 run。差し替え・追加起動・セル除外・
+  既存 run ファイルの上書きはしない。
+- 各 (arm, n) のブロックは N=256〜2048 が warmup 20 + 計測 20 反復、N=4096 は warmup 5 +
+  計測 10 反復。これを 4 ラウンド回しラウンドごとに arm 順を反転する
+  （n_samples は N=4096 が 40、それ以外が 80）。
+- N = 256・512・1024・2048・4096。対象ホスト: DGX Spark GB10 (gb10) が正式系列、
+  Apple M4 Max (m4max) は疎通確認のみ（record_only・判定対象外）。
+
+[腕と区間]（窓は iter_total。解放位置は腕ごとに固定）
+- fresh: tape_build / var_upload / matmul / readout / checksum / iter_total（+ 窓外の tape_drop）
+- resident_public: facade の matmul_resident → contiguous 借用 → checksum（bench 新腕の写し。
+  upload は窓の外で 1 回）。区間 matmul / readout / checksum / iter_total
+- resident_reupload: 毎反復、窓の外で A・B を upload し直してから resident_public と同じ窓（H2・H3）
+- resident_split: 内部 API で gemm_device / download / out_drop（窓内 drop）/ readout / checksum に分割
+- gemm_device_hold: gemm_device のみ計時、出力は窓の外で drop
+- gemm_device_drop_in: gemm_device + 窓内 drop（H1b）
+- gemm_device_download: gemm_device + download、出力 drop は窓の外（H1）
+- backend_drop: BackendOps::gemm 直接呼び（kernel_call。#3187 と同じ対照）
+- 旧腕（Tape 経路 reuse + reset）は本診断に含めない（旧条件の ratio は #3265・#3273 の既存記録を参照）。
+
+[代表値]
+- 各 (arm, n, phase) は run ごとの median_s を採り、5 run 間の中央値と min-max を報告する。
+
+[checksum 規則（hard・fail-closed）]
+- n ごとに全腕・全 run の iter_total.checksum_bits が一致すること（f64 の bit 単位）。
+  1 件でも不一致なら系列は無効（aggregate.py は exit != 0）。
+
+[再現判定]
+- ratio = resident_public.iter_total / fresh.iter_total（5 run 中央値同士）。
+- ratio > 1.00 なら「再現」、<= 1.00 なら「非再現」としてその N の帰属は行わない。
+
+[帰属規則（再現した N ごと）]
+- G = resident_public.iter_total - fresh.iter_total
+- rho_DL   = (gemm_device_download - gemm_device_hold) / G   >= 0.5 -> H1（download の追加確保＋コピー）を支持
+- rho_DROP = (gemm_device_drop_in - gemm_device_hold) / G    >= 0.5 -> H1b（出力の窓内解放）を支持
+- rho_K    = (gemm_device_hold - backend_drop.kernel_call) / G >= 0.5 -> gemm_device 内の確保かカーネルを支持
+- rho_IN   = |resident_reupload - resident_public| / G       >= 0.5 -> H2・H3（入力の寿命・配置）を支持
+- どれも 0.5 に届かない、または G <= 0 なら「未確定」とし各 rho を併記する。
+- resident_split の区間和と iter_total の残差は記録のみ。
+- 仮説 H4（スレッド親和性）は補助系列 taskset の ratio が 1.0 付近へ動くかを記録するのみ（判定外）。
+
+[ブリッジ（bench との窓の一致確認）]
+- 補助手順: bench-fandhe（registry fandhe-ai =0.12.0）の `--task gemm --device cpu --mode reuse|fresh --phases`
+  を N=256〜4096 で各 5 run。--phases の matmul 区間差が iter_total 差の 50% 以上でなければ、
+  その N は「bench と診断の窓が一致しない」として帰属を保留する。
+
+[補助系列（判定外・record-only。別ディレクトリ・別 series_kind。正式系列に混ぜない）]
+- minflt: GEMM_REUSE_MINFLT=1 の 1 run。
+- tunables: GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=1073741824 の 5 run
+  （mmap_threshold の上限は 32 MiB のため N=4096 の 64 MiB 出力は対象外のまま）。
+  ratio <= 1.05 なら「機構は glibc の確保とページ返却」と記録する。それ以外は「それだけでは説明できない」。
+- taskset: taskset -c 5-9,15-19（#2117 の大コア集合）の 5 run。
+
+[ゲート]
+- gb10: 各 run の開始前に load1 < 1.0 を 30 秒間隔・最大 30 分待つ。1 run でも通過しなければ
+  系列を参考扱いにし判定しない（load_gate.log に記録）。GB10 専有（compute プロセス 0）を別途確認する。
+- m4max: record_only。RAYON_NUM_THREADS が設定されていれば orchestrate.sh は拒否する。
+
+[ドリフトガード]
+- 計測ツリーの .rev-stamp（1 行目 HEAD・2 行目 dirty=<件数>）が RULE.txt を含むコミットで、
+  RULE.txt の sha256 が env_info.txt の記録と一致すること。
+
+[G-CPU-INF の分類規則（要件 2。記録のみ。0.12.0 の正式値・tally は変えない）]
+- 測る（GB10・同一セッション・各 5 run）:
+  (i) PyTorch CPU 純カーネル: opp_kernel_torch_diag.py measure --device cpu --shapes mlp --arm base
+      （l1_fwd 64x256x784・l2_fwd 64x10x256）と Python checksum の ns/要素。venv は #3185 で承認済みの既存のみ。
+  (ii) fandhe-ai: bench-fandhe --task infer --device cpu --mode reuse --phases と通常行、
+      可能なら cpu_predict_resident_fixedcost_diag（#2105）の層別区間。
+  (iii) PyTorch の CPU BLAS 経路の実行時確認: LD_DEBUG=bindings で sgemm 系の解決先 .so を grep、
+      次に perf が使える場合のみ perf record、どちらも無理なら「未確認」。
+- D = fandhe 窓 - PyTorch 窓。
+  - 窓の構成差（checksum・readout・fandhe 固有の固定費など、窓に入るが純カーネルではない部分）が D の 50% 以上
+    -> 「計測窓の定義」
+  - 純カーネルの差（fandhe 層カーネル合計 - PyTorch mm 合計）が D の 50% 以上で、相手経路が閉源ライブラリと
+    実行時に確認できた -> 「自分たちの制約（REQ-1）」（G-CUDA-INF〈cuBLAS〉の先例に揃える。境界は
+    loss-attribution-matrix.md §10.5 の定義を根拠とする）
+  - 純カーネルの差が 50% 以上でも経路を確認できない -> 「保留」。足りない数値（相手経路の実行時確認）を名指しする
+  - どれも 50% に届かない -> 「保留」。各成分の値を併記する
+- 実行できなかった項目は「未実測」と書く。M4 Max・Linux x86 の値で代替しない。
+
+[対象外（再実験しない）]
+- #1364 BIG_CORE_LIMIT・#1575 small_shape_thread_cap・KC 再スイープ・GB10_AFFINITY_ENABLED の反転（#3227）・
+  EAGER_MATMUL_RELEASE_DEFAULT_ENABLED の変更・tolerance／parity baseline／判定規則の変更。
+- 修正（CPU matmul_resident の download 経路改善等）は所有者へ方針提示後に別 issue。本 RULE の範囲外。
+
+[固定後]
+- 規則・期待行数・閾値を変えない。変えるなら RULE.v2 を別コミットで作り理由を記録する。

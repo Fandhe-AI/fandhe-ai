@@ -202,3 +202,64 @@ checksum 全一致。`.rev-stamp`・ツリー指紋・`rule_sha256` は `logs/cp
 - minflt 補助 run（GB10・1 回・`gb10/minflt-run.txt`）: reuse の minflt/iter は N=512 で 925・N=1024 で 3169・N=2048 で 7719 に対し、
   reuse_release は 0.00（fresh 並み）。「minflt/iter が 0 に近づく」予測と一致。
 - 既定は OFF のまま。REJECT のため #3227（既定反転）は進めない。
+
+## 9. 常駐入力経路の逆転（#3646）
+
+0.12.0 の同席計測（#3273）で、bench の `gemm --mode reuse` を常駐入力経路（`upload_resident` → `matmul_resident`。#3272）に
+切り替えると、GB10 の CPU gemm だけ reuse が同 round の fresh より 1.23〜1.79 倍遅くなった
+（`logs/framework-compare-0.12.0-remeasure/README.md`「GB10 CPU gemm の新旧差」）。旧条件（ホスト入力・Tape 経路）では
+並んでおり、Mac mini は新旧とも並ぶ。本節は切り分けの設計と状態を記録する。
+
+### 9.1 状態（先に結論）
+
+- **原因は未特定**。GB10 実測（正式 5 run・補助系列・ブリッジ）は **未実測**（実行環境に GB10 への接続がなかった）。
+  Linux・M4 Max の値は代替に使わない。推測で帰属を埋めない
+- 整備済み: 診断テスト `crates/facade/tests/cpu_gemm_resident_reuse_diag.rs`、事前登録規則
+  `logs/cpu-gemm-resident-reuse-3646/RULE.txt`、`orchestrate.sh`、`aggregate.py`（`--self-test`・fail-closed）
+- tolerance・parity baseline・判定規則・本番コードは変更していない
+
+### 9.2 コード上の事実（読解。実測ではない）
+
+新腕の窓にだけ入る処理は 3 つ。カーネル本体（`gemm_blis_parallel`）と入力の寿命は両腕で同じ。
+
+1. `matmul_resident` が `gemm_device` の後に呼ぶ `MemoryOps::download`（CPU では `data().to_vec()`。N² の新規確保＋単一スレッド memcpy）
+2. `gemm_device` が返す出力 `DeviceBuffer` を、関数を抜けるときに窓内で drop すること（大きいサイズでは munmap）
+3. `zeroed_output`（calloc 相当）の新規確保
+
+旧腕は出力 Vec がそのまま `Tensor` になり `host_view` で借用されるためコピーがない。
+計測ツリーの等価性: `git diff --stat v0.12.0 HEAD -- crates/backend-cpu/src crates/autodiff/src/optim/resident_input.rs crates/autodiff/src/optim/device_store.rs crates/facade/src/lib.rs crates/tensor-core/src/alloc.rs` は実装時点で空（診断は 0.12.0 の bench と同じコードを測る）。
+
+### 9.3 仮説と予測（RULE.txt に事前登録）
+
+| 記号 | 仮説 | 支持の条件 |
+|---|---|---|
+| H1 | `download` の追加確保とコピー（first-touch＋単一スレッド memcpy） | rho_DL ≥ 0.5 |
+| H1b | `gemm_device` 出力の窓内解放（munmap・TLB shootdown） | rho_DROP ≥ 0.5 |
+| H2・H3 | 入力の寿命・ページ配置 | rho_IN ≥ 0.5 |
+| H4 | スレッド親和性 | 補助系列 taskset で ratio が 1.0 付近へ動くか（判定外） |
+
+先行記録（#3187 §6・#3226 §8.4）は、出力の確保・解放パターンが GB10 の glibc・ページフォールト機構に当たることを示しており、
+H1・H1b が最有力だが、これは先行記録からの見込みで本件の実測結果ではない。
+
+### 9.4 G-CPU-INF の分類（要件 2）
+
+**保留（未実測）**。0.12.0 の PyTorch 窓との差 D を「窓の定義／純カーネル差（閉源経路を実行時確認できた場合のみ自分たちの制約）／ハード上限」に
+割り当てる規則を RULE.txt 末尾へ事前登録した。割り当てに足りない数値は、GB10 同一セッションの PyTorch CPU 純カーネル・fandhe 層別区間・
+PyTorch CPU BLAS 経路の実行時確認（#3185 では未確認）。0.12.0 の正式値・tally は変えない（#3274 の範囲）。
+
+### 9.5 修正方針の提案（要件 3。実装はしていない・所有者判断待ち）
+
+実測で帰属が決まってから確定する。候補のみ記す。
+
+- (a) CPU の `matmul_resident` で `gemm_device` の出力 Vec を `Tensor` へ所有権ごと移す（download のコピーを除く。bit 同一）
+- (b) 出力バッファの再利用（store 側のプール）
+- (c) bench 側の窓の見直し（判定規則・D-C の範囲に関わるため所有者判断）
+
+**性能規則の結論**（ADOPT／REJECT）は将来の A/B を別 RULE で事前登録して決める。**保守性の判断**（`MemoryOps` への所有権移動版 download の追加か CPU 特化分岐か、
+公開 API への影響、`unsafe` の有無）はそれとは別に所有者へ示す。現時点で結論は出していない。
+
+### 9.6 限界
+
+- GB10 の実測が無いため、§9.2〜9.3 は読解と先行記録に基づく仮説であり検証されていない
+- 診断の `resident_*` 腕は内部 API（`MemoryOps::download` 等）を使うため、bench（公開 API）との窓の一致は RULE.txt のブリッジ手順で確認する必要がある
+- 旧腕（Tape 経路 reuse＋reset）は本診断に含めていない

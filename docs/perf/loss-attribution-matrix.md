@@ -768,3 +768,8 @@ train／infer は相手のステップ内訳を Phase 9 で測っていない。
 - Δ との関係: 集計の結論は train・infer とも「Δ ≤ N（N は A0 の揺れ。train 362.0・infer 141.5 µs）。揺れの範囲」。N は A0 の round 1 に支配され、Δ を各区分へ配分する根拠にはならない。**振り分け不能（相手の内訳が未測定）**。自分側の量の上限は上表（自分たちの制約は train 約 8 µs・infer 約 3 µs で、Δ=14.3／6.9 µs より小さい）。
 - REQ-8 の境界検査の単独コストは未測定（分離できない）。制約の緩和は提案しない。
 - 未測定のまま: backward 内部（GEMM／非 GEMM。HEAD の経路は 1 コマンドバッファで GPU 内を分けられない）・torch のステップ内訳（§10.10 の項目を据え置く）。
+
+### 10.11 G-CPU-INF と GB10 CPU gemm の常駐入力経路の追記（#3646。追記のみ・上表の値と判定は変えない）
+
+- 0.12.0 の新腕（常駐入力経路）で GB10 CPU gemm の reuse が fresh より 1.23〜1.79 倍遅くなった件の切り分けは、診断基盤と事前登録規則を整備した段階で、**GB10 実測は未実測・原因は未特定**（`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9・`docs/perf/logs/cpu-gemm-resident-reuse-3646/`）。
+- G-CPU-INF の 3 区分（ハードの上限／計測窓の定義／自分たちの制約）への数字つき割り当ては **保留（未実測）**。割り当て規則は同 RULE.txt 末尾に事前登録済みで、足りない数値は GB10 同一セッションの PyTorch CPU 純カーネル・fandhe 層別区間・PyTorch CPU BLAS 経路の実行時確認。Linux・M4 Max の値は代替に使わない。
