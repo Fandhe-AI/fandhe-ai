@@ -49,7 +49,8 @@ doc: docs/backend-cuda-graph-step-capture-design.md §8.12.5（§8.12.5.8 が実
 
 [#[ignore] 全件の突き合わせ（受入基準 2。完了条件は backend-cuda と facade）]
 - before・after の両ツリーで同じコマンド列を既定環境（FANDHE_AI_CUDA_GRAPH_* 未設定）で順に実行する。計測と並走させない。
-  1. cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture --skip sgd_update_segment_captures_then_replays_bit_identically --skip different_config_key_produces_a_different_segment_key --skip train_step_graph_diag_tests_3260 --skip train_graph_shared_workspace_tests_3596
+  1. cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture --skip sgd_update_segment_captures_then_replays_bit_identically --skip different_config_key_produces_a_different_segment_key --skip train_step_graph_diag_tests_3260 --skip train_graph_shared_workspace_tests_3596 --skip out_of_chain_ops_wait_for_foreign_capture_without_errors_and_stay_bit_exact
+     （新設テストは FANDHE_AI_CUDA_GRAPH_TRAIN=1 必須のため既定環境では after 側だけ必ず拒否される。偽の新規 fail を避けるため除外し、検証は前提ゲート g5 の opt-in 指定で行う）
   2. cargo test -p fandhe-ai-backend-cuda --release --test graph_capture_real_device -- --ignored --nocapture --test-threads=1
   3. FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai-backend-cuda --release --lib train_step_graph_diag_tests_3260 -- --ignored --test-threads=1 --nocapture（before 8 件・after 9 件）
   4. cargo test -p fandhe-ai --release --tests -- --ignored --nocapture --test-threads=1
