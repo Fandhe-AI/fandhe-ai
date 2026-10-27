@@ -1,0 +1,15 @@
+== build after (default features, g5 test)
+== g5 run 1 16:18:06
+== g5 run 2 16:18:08
+== g5 run 3 16:18:09
+== g5 run 4 16:18:10
+== g5 run 5 16:18:11
+== ignored before cmd1 16:18:12
+== ignored before cmd2
+== ignored before cmd3
+== ignored before cmd4
+== ignored after cmd1 16:22:06
+== ignored after cmd2
+== ignored after cmd3
+== ignored after cmd4
+== STAGE A DONE 16:25:54

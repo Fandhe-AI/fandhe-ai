@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/w3608/after/target-ab-chain-excl-3608-w-gb10-gates/release/deps/fandhe_ai_backend_cuda-ee162dd2443c02ac)
+
+running 1 test
+test train_step_graph_diag_tests_3260::unfenced_chain_and_capture_threads_do_not_poison_and_stay_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1417 filtered out; finished in 0.79s
+
+rc=0

@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/gemm_wmma_tf32_opt.rs (<home>/work/target-3608-after/release/deps/gemm_wmma_tf32_opt-55263bead9b8234c)
+
+running 1 test
+test wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096 ... 
+thread 'wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096' (2853644) panicked at crates/backend-cuda/tests/gemm_wmma_tf32_opt.rs:330:5:
+opt 経路（4.239 TFLOPS）が tiled f32（4.357 TFLOPS）を 上回りませんでした（受け入れ条件: PoC-v2-3 参考値 1.832 TFLOPS 超過）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.92s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_wmma_tf32_opt`
+rc=101

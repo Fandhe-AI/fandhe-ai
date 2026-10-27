@@ -1,0 +1,26 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/gemm_wmma_tf32_opt.rs (<home>/work/target-3608-before/release/deps/gemm_wmma_tf32_opt-55263bead9b8234c)
+
+running 1 test
+test wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.90s
+
+     Running tests/gemm_wmma_tf32_staged.rs (<home>/work/target-3608-before/release/deps/gemm_wmma_tf32_staged-a17c1b6d6702d10e)
+
+running 1 test
+test wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096 ... 
+thread 'wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096' (2853699) panicked at crates/backend-cuda/tests/gemm_wmma_tf32_staged.rs:244:5:
+staged 経路（4.070 TFLOPS）が tiled f32（4.107 TFLOPS）を 上回りませんでした（M=N=K=4096）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.94s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-cuda --test gemm_wmma_tf32_staged`
+rc=101

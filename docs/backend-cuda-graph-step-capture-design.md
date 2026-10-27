@@ -632,7 +632,7 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 
 ### 8.12.4 申し送り
 - チェーン外の通常操作の待機・再試行は別 Issue で追跡する（起票はユーザー承認後）。
-  - 追跡先は #3608。設計は §8.12.5（所有者確認済み・実装済み。GB10 実測は未実測）。
+  - 追跡先は #3608。設計は §8.12.5（所有者確認済み・実装済み。GB10 実測は §8.12.5.9: g5 5/5・`#[ignore]` 本件起因 fail 0 件・既定 OFF の chain セルは UNDETERMINED）。
 
 ### 8.12.5 #3608 チェーン外の通常操作の待機・再試行（所有者確認済み・2026-10-27）
 
@@ -719,7 +719,7 @@ tensor-core の trait は変えないため、CPU・Metal には影響しない�
 
 #### 8.12.5.6 性能の予想
 
-既定 OFF（Legacy stream）では capture が始まらないため待機の経路に届かない。競合のない高速経路で増えるのは、拒否エラーを見る分岐だけと予想する。これは予想であり**未実測**。既定 OFF の chain セルに RULE 計測が必要かは所有者に確認する。「後退なし」とは書かない。
+既定 OFF（Legacy stream）では capture が始まらないため待機の経路に届かない。競合のない高速経路で増えるのは、拒否エラーを見る分岐だけと予想する。これは予想であり、GB10 実測は §8.12.5.9（off の ratio 1.005・UNDETERMINED）。既定 OFF の chain セルに RULE 計測が必要かは所有者に確認する。「後退なし」とは書かない。
 
 #### 8.12.5.7 所有者に確認する事項
 
@@ -754,4 +754,12 @@ tensor-core の trait は変えないため、CPU・Metal には影響しない�
 
 #### 8.12.5.9 GB10 実測結果
 
-**未実測**（GB10 での並行テスト・前提ゲート・`#[ignore]` 全件の突き合わせ・chain セルの RULE 計測は未実施。RULE は `docs/perf/logs/train-chain-exclusion-3596/RULE-w3608.txt` に計測前に登録した）。実測後に本節へ記録する。実測できていない項目を pass として書かない。
+2026-10-28、GB10（aarch64・driver 580.173.02・rustc 1.97.0）。before = `e2660eba0`、after = `08902dbf3`（`crates/` は RULE-w3608 の基準 `7ea459d9d` と同一）。事前登録は `docs/perf/logs/train-chain-exclusion-3596/RULE-w3608.txt`（計測前に登録。規則・閾値・コードは変えていない）。生ログ・判定は `docs/perf/logs/train-chain-exclusion-3596/gb10-w3608/`・`judge-3596-w3608.md`。
+
+- **g5（`train_graph_out_of_chain_wait_3608`・`TRAIN=1`・5 回独立）**: 5/5 pass。毎回 `1 passed`、`OOC3608` 行の `captured` は 18・11・20・23・24（1 以上）、`fallbacks=0`、`DeviceContextCaptureInProgress` なし。
+- **前提ゲート g1〜g4**: 合格（BITS 90 行・差分空）。専有ゲート 5 round 通過。checksum・PARAM_DIGEST は全 run・全腕で一致。
+- **`#[ignore]` 全件の突き合わせ（backend-cuda・facade）**: 本件が原因の新規 fail は 0 件。after にだけ出た 3 件は単独再実行と before 単独で切り分け済み（`module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache` は並走起因の一過性・TFLOPS 閾値の 2 件は before でも落ちる既存の不安定）。`train_step_graph_diag_tests_3260` は before・after とも 9 passed（RULE の注記「before 8 件」は古い記述）。詳細は `ignored-compare-w3608.md`。
+- **chain セル（1 スレッド・train CUDA・size=64・5 round 中央値）**: off は ratio **1.005**（0.1351 → 0.1358 ms。ratio_r 1.002, 1.006, 1.009, 1.007, 0.999）、on は 1.000（0.1126 ms）。判定は **UNDETERMINED**（終了コード 4。off が 1.00 を超えたが 5/5 の符号一貫がない）。NON-REGRESSION とは判定されていない。事前表明した仮説（off は 1.00 前後）は外れた。差は #3596 の r2（1.002）・r3（1.007）と同程度。
+- **限界**: 単一機体・1 スレッド・size=64。2 つの別ビルドの比較で、差には待ち型の入口以外の変更を含みうる。2 スレッド（並行）時の性能は対象外。g5 の `captured` は capture が実際に起きた回数で、待機が発生した回数（`waited`）とは別。checksum の一致は bit 同一性の証明ではない（PARAM_DIGEST・g4 で補う）。
+- **未実測・未修正（変えていない）**: §8.12.3 の反転用の再確認項目は未実測。§8.12.5.5 の `any_resident` 側 `upload_into` ループの poison は未修正（所有者確認 6）。g5 はランナーの前提ゲートに組み込まれていない（手で実行）。
+- **所有者判断事項**: 既定 OFF の chain セルが UNDETERMINED のため、#3596（所有者判断 2026-10-27）と同様にノイズ幅内として許容するか、別の切り分けを行うか。#3608 の PR は `Closes` にせず `Refs`。
