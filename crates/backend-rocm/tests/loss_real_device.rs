@@ -11,7 +11,9 @@
 //!   CPU 照合テストと同じ集合（`LOSS_MAX_BLOCKS` 上限で grid-stride が 2 周以上する最後の
 //!   サイズを含む）。
 
-use fandhe_ai_backend_cpu::{CpuBackendOps, assert_parity};
+use std::cell::Cell;
+
+use fandhe_ai_backend_cpu::{CpuBackendOps, compare};
 use fandhe_ai_backend_rocm::{GfxTarget, RocmBackendOps};
 use fandhe_ai_tensor_core::{BackendOps, BceKind, HuberKind, KlDivTarget, MseReduction, Tensor};
 
@@ -33,13 +35,46 @@ fn t1(v: Vec<f32>) -> Tensor<f32> {
     Tensor::new(v, &[n]).unwrap()
 }
 
+thread_local! {
+    /// テスト関数（= スレッド）ごとの複合判定 fail 要素数の累計。`finish` が 0 を要求する。
+    static FAILS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// 1 件ぶんの記録行（`ROCM_PARITY_LOSS`）を出力し、fail 数を累計する。
+///
+/// 判定は `assert_parity` と同値（`compare` の `fail_count == 0`）。外れても最初の 1 件で止めず、
+/// 全ケースの fail 要素数と最大誤差をログに残してから `finish` で落とす（#3159 作業 4）。
+/// tolerance 定数・`compare` 本体は変更しない。
 fn check(label: &str, got: &Tensor<f32>, want: &Tensor<f32>) {
     assert_eq!(got.shape(), want.shape(), "{label}");
-    assert_parity(
-        label,
-        got.contiguous().as_slice().unwrap(),
-        want.contiguous().as_slice().unwrap(),
+    let (g, w) = (
+        got.contiguous().as_slice().unwrap().to_vec(),
+        want.contiguous().as_slice().unwrap().to_vec(),
     );
+    let r = compare(&g, &w).unwrap_or_else(|e| panic!("compare {label}: {e:?}"));
+    let bit_mismatch = g
+        .iter()
+        .zip(&w)
+        .filter(|(p, q)| p.to_bits() != q.to_bits())
+        .count();
+    eprintln!(
+        "ROCM_PARITY_LOSS\t{label}\ttotal={}\tfail={}\tmax_abs={:e}\tmax_rel={:e}\tmean_abs={:e}\tp99_abs={:e}\tbit_mismatch={bit_mismatch}",
+        r.total, r.fail_count, r.max_abs_diff, r.max_rel_err, r.mean_abs_diff, r.p99_abs_diff
+    );
+    FAILS.with(|f| f.set(f.get() + r.fail_count));
+}
+
+/// テスト開始時に累計 fail 数を 0 へ戻す。`--test-threads=1` では全テストが同一スレッドで走り、
+/// thread_local が引き継がれるため、先行テストの fail が後続の `finish` を誤って落とさないようにする。
+/// 判定条件（tolerance・`compare`）は変更しない。
+fn reset() {
+    FAILS.with(|f| f.set(0));
+}
+
+/// 累計 fail が 0 でなければ落とす（REQ-2 複合判定を外れた要素がある）。
+fn finish() {
+    let fails = FAILS.with(Cell::get);
+    assert_eq!(fails, 0, "REQ-2 複合判定を外れた要素がある");
 }
 
 fn bits(x: &Tensor<f32>) -> Vec<u32> {
@@ -54,6 +89,7 @@ fn bits(x: &Tensor<f32>) -> Vec<u32> {
 #[test]
 #[ignore = "ROCm 実機（MI300X・gfx942）専用。実測は #3159 段 B"]
 fn elementwise_loss_family_matches_cpu_and_is_deterministic() {
+    reset();
     let (dev, cpu) = (RocmBackendOps::new(GfxTarget::Gfx942), CpuBackendOps);
     for n in SIZES {
         let p = t1(lcg(n, 1, -3.0, 3.0));
@@ -63,14 +99,14 @@ fn elementwise_loss_family_matches_cpu_and_is_deterministic() {
         for red in REDUCTIONS {
             let got = dev.mse_loss(&p, &tg, red).unwrap();
             check(
-                &format!("mse n{n}"),
+                &format!("mse n{n} {red:?}"),
                 &got,
                 &cpu.mse_loss(&p, &tg, red).unwrap(),
             );
             assert_eq!(bits(&got), bits(&dev.mse_loss(&p, &tg, red).unwrap()));
             for (k, d) in [(HuberKind::Huber, 0.7f32), (HuberKind::SmoothL1, 1.3)] {
                 check(
-                    &format!("huber n{n}"),
+                    &format!("huber n{n} {k:?} {red:?}"),
                     &dev.huber_loss(&p, &tg, k, d, red).unwrap(),
                     &cpu.huber_loss(&p, &tg, k, d, red).unwrap(),
                 );
@@ -82,14 +118,14 @@ fn elementwise_loss_family_matches_cpu_and_is_deterministic() {
                     &p
                 };
                 check(
-                    &format!("bce n{n}"),
+                    &format!("bce n{n} {k:?} {red:?}"),
                     &dev.bce_loss(x, &tprob, k, red).unwrap(),
                     &cpu.bce_loss(x, &tprob, k, red).unwrap(),
                 );
             }
             for k in [KlDivTarget::Probabilities, KlDivTarget::LogProbabilities] {
                 check(
-                    &format!("kl_div n{n}"),
+                    &format!("kl_div n{n} {k:?} {red:?}"),
                     &dev.kl_div_loss(&p, &tprob, k, red).unwrap(),
                     &cpu.kl_div_loss(&p, &tprob, k, red).unwrap(),
                 );
@@ -102,7 +138,7 @@ fn elementwise_loss_family_matches_cpu_and_is_deterministic() {
         );
         for (k, d) in [(HuberKind::Huber, 0.7f32), (HuberKind::SmoothL1, 1.3)] {
             check(
-                &format!("huber bwd n{n}"),
+                &format!("huber bwd n{n} {k:?}"),
                 &dev.huber_loss_backward(&p, &tg, k, d, 0.5).unwrap(),
                 &cpu.huber_loss_backward(&p, &tg, k, d, 0.5).unwrap(),
             );
@@ -114,24 +150,26 @@ fn elementwise_loss_family_matches_cpu_and_is_deterministic() {
                 &p
             };
             check(
-                &format!("bce bwd n{n}"),
+                &format!("bce bwd n{n} {k:?}"),
                 &dev.bce_loss_backward(x, &tprob, k, 0.5).unwrap(),
                 &cpu.bce_loss_backward(x, &tprob, k, 0.5).unwrap(),
             );
         }
         for k in [KlDivTarget::Probabilities, KlDivTarget::LogProbabilities] {
             check(
-                &format!("kl_div bwd n{n}"),
+                &format!("kl_div bwd n{n} {k:?}"),
                 &dev.kl_div_loss_backward(&p, &tprob, k, 0.5).unwrap(),
                 &cpu.kl_div_loss_backward(&p, &tprob, k, 0.5).unwrap(),
             );
         }
     }
+    finish();
 }
 
 #[test]
 #[ignore = "ROCm 実機（MI300X・gfx942）専用。実測は #3159 段 B"]
 fn nll_matches_cpu_and_is_deterministic() {
+    reset();
     let (dev, cpu) = (RocmBackendOps::new(GfxTarget::Gfx942), CpuBackendOps);
     let cases: [(&[usize], usize); 5] = [
         (&[5], 0),
@@ -156,7 +194,7 @@ fn nll_matches_cpu_and_is_deterministic() {
         for red in REDUCTIONS {
             let got = dev.nll_loss(&input, &tt, cd, red).unwrap();
             check(
-                &format!("nll {shape:?}"),
+                &format!("nll {shape:?} {red:?}"),
                 &got,
                 &cpu.nll_loss(&input, &tt, cd, red).unwrap(),
             );
@@ -171,4 +209,5 @@ fn nll_matches_cpu_and_is_deterministic() {
             &cpu.nll_loss_backward(shape, &tt, cd, 0.125).unwrap(),
         );
     }
+    finish();
 }
