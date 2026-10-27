@@ -791,7 +791,7 @@ tolerance・baseline・判定規則・依存・`unsafe`・`docs/spec`・`generat
 - 分布検定は §20.6 により契約外のため追加しない（閾値つき統計量は足していない）
 - 厳密入力の選定理由: logits を集合上 `0.0`・外 `-1e4`、集合の大きさを 2 のべき乗に限ると、`Generator` へ渡る `f32` 値（サンプリング重み・受理確率 0／0.5／1・残差重み）が libm・計算順序・プラットフォームによらず bit 単位で一意に決まる。再生オラクル `reference_speculative` は同じ `Generator` を §25.2 の消費順で引く独立実装で、`generate_speculative` と token 列の完全一致を固定掃引（5120 通り）で要求する。draft 規則 5 種で受理確率 0／0.5／1・残差・bonus の全経路を通ることを統計で確認する
 - 実機: `speculative_batching_backend_parity.rs` に §20.7 の再生方式（参照側で記録した id 列を比較側へ再生し logits だけを `assert_parity` で比べる。token 列は比べない）を追加した。属性なしの CPU 対 Naive（`cpu_backend_ops_matches_naive_ops_for_speculative_sampling`）と再生ハーネスの検出力テストは CI 実行、`cuda_speculative_sampling_matches_cpu`・`metal_speculative_sampling_matches_cpu` は `#[ignore]` で、実機（GB10／Mac mini）で pass 実測済み（2026-10-27。`docs/perf/logs/speculative-sampling-3102/README.md`）
-- 実機テストを #3171（CUDA）・#3172（Metal）の実測対象に加えるかは所有者の判断事項
+- 実機テストを #3171（CUDA）・#3172（Metal）の実測対象に加えるかは所有者の判断事項だった（下記のとおり確定済み）
 - 2026-10-27 の reopen（所有者判断）で、この実機テストを測定対象に加えると確定した。実測結果は `docs/perf/logs/speculative-sampling-3102/README.md`
 
 ## 28. 実装記録（#3107・親 #3103）
