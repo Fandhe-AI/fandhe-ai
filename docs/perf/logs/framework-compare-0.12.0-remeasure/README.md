@@ -34,6 +34,7 @@
 | 正式系列 | 5 ラウンド（RULE どおり） | 系列 B が 5/5 完走したため系列 B を正式、系列 A は対照（RULE どおり） |
 | 実機ロック | `~/work/.fandhe-hw-lock`（owner `#3273 2026-10-27T07:03:07Z`）を 07:03:07Z に取得し、venv 構築・転送・ビルド・スモーク・系列・実機テスト・回収の後 07:58:26Z に解除 | 同 07:03:07Z 取得・07:56:09Z 解除 |
 
+- **版の照合（JSONL の `version`）**: 全 15 run の Python 3 FW 行の `(framework, version)` 集合が 0.11.0 と一致した（GB10 `pytorch 2.14.0+cu130・tensorflow 2.21.0・scipy 1.18.1`、Mac mini 系列 A・B `pytorch 2.14.0・tensorflow 2.16.2・scipy 1.18.1`）。`check_identity.py` は収録後のツリーで再実行して 3 系列とも rc=0。
 - 行数スモーク（RULE 固定前に 1 round。値は判定に使わない）は `smoke/`（GB10）・Mac mini 側 `smoke/` に置いた。行数は期待値どおり（RULE.txt に記入済み）。
 - 旧腕は round 内の位置が新腕と違う（GB10 は stage2 の後・stage3 の前、Mac mini は Rust 段の直後）。RULE に偏りの可能性として明記した。
 - **判定不能 1 セル**: GB10 PyTorch CPU gemm N=4096 の 1 要素が複合判定を外れる（`parity_fail_count` 1／16777216。0.11.0 と同じ）。順位に含めない。fandhe-ai／candle の CUDA TF32 opt-in 行は f32 判定から外す（0.11.0 と同じ扱い）。
@@ -204,4 +205,6 @@ cargo test -p bench-fandhe --release --locked tests::resident_paths_match_tape_p
 
 1. **GB10 CPU gemm の新旧差**: 新条件の bench-fandhe では GB10 の CPU gemm reuse が同じ round の fresh より 1.23〜1.79 倍遅く、旧条件で 1 位だった 4 セル（N=256・1024・2048・4096）が負け・僅差になった。判定規則どおり新条件の値を正式とするが、#3274 の対戦成績でこの 5 セルをどう扱うか（旧条件の併記で足りるか、常駐経路の CPU 側の切り分けを別イシューにするか）。
 2. **G-CPU-INF の分類保留**: 数字で 3 区分に割り当てられない。相手の経路の確認（#3191 の (1) が未測定）を待つか。
-3. **Mac mini CPU のセッション差**: gemm CPU で全フレームワークの窓が 0.11.0 の約 0.5〜0.8 倍で、gemm CPU N=256・512 は 0.11.0 の 1 位から負けに変わった（相手の PyTorch の窓が 0.52 倍）。fandhe-ai 側の変化ではない。
+3. **Mac mini CPU のセッション差**: gemm CPU で全フレームワークの窓が 0.11.0 の約 0.5〜0.8 倍で、gemm CPU N=256・512 は 0.11.0 の 1 位から負けに変わった。N=256 の窓は fandhe-ai が 0.77 倍、PyTorch が 0.52 倍で、相手の窓の縮小のほうが大きい。
+4. **GB10 の計測個体**: GB10 の venv は、PR #3640 の事前確認で PyTorch を見つけた個体とは別の GB10 に新規作成した（0.11.0 の GB10 の計測個体は記録がなく、同一個体かは不明）。
+5. **勝ちセルの (3)(4) との突き合わせ**: 1.0 以下の 17 セルは (3)(4) と並べたが、1 位の 10 セルの (3)(4) 列は作っていない。#3274 のスコアボード（`--unreached-tsv`）で扱うか。
