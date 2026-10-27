@@ -603,7 +603,11 @@ impl CudaBackendOps {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-            context_cache::begin_driver_call(self.ordinal, &empty_shape_generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &empty_shape_generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
         }
 
@@ -1418,7 +1422,11 @@ impl CudaBackendOps {
         map: impl FnOnce(CudaError) -> BackendError,
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, BackendError> {
-        let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
+        let token = context_cache::begin_driver_call_waiting(
+            self.ordinal,
+            resource_generations,
+            context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+        )?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
 
@@ -1439,7 +1447,12 @@ impl CudaBackendOps {
         map: impl FnOnce(CudaError) -> BackendError,
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, BackendError> {
-        let token = context_cache::begin_sync_point_call(self.ordinal, resource_generations, what)?;
+        let token = context_cache::begin_sync_point_call_waiting(
+            self.ordinal,
+            resource_generations,
+            what,
+            context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+        )?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
 
@@ -2693,7 +2706,11 @@ impl CudaBackendOps {
             }
             // 早期 return でも poison 状態・世代は fail-closed に検査する
             // （`binary_elementwise_device` の `numel == 0` と同じ理由）。
-            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &resident_generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             let device = self.with_driver_call(
                 &resident_generations,
                 |e| BackendError::CudaUnavailable(e.to_string()),
@@ -2984,7 +3001,11 @@ impl CudaBackendOps {
             }
             // 早期 return でも poison・世代は fail-closed に検査する
             // （`relu_backward_mask_device_impl` の `numel == 0` と同じ理由）。
-            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             let device = self.with_driver_call(
                 &generations,
                 |e| BackendError::CudaUnavailable(e.to_string()),
@@ -3170,7 +3191,11 @@ impl CudaBackendOps {
         let mem = static_cuda_memory(self.ordinal, &device)?;
         if plan.numel == 0 {
             // `with_driver_call` 経由で poison・世代は検査済み。空和は 0.0。
-            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             return Ok(Some(mem.alloc_zeroed(&[])?));
         }
 
@@ -3251,7 +3276,11 @@ impl CudaBackendOps {
         )?;
         let mem = static_cuda_memory(self.ordinal, &device)?;
         if plan.numel == 0 {
-            context_cache::begin_driver_call(self.ordinal, &generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             return Ok(Some(mem.alloc_zeroed(&plan.shape)?));
         }
 
@@ -4696,7 +4725,11 @@ impl BackendOps for CudaBackendOps {
         if m == 0 || n == 0 {
             // 早期 return でも poison 状態・世代は fail-closed に検査する
             // （`gemm_resident_rhs` の同種分岐と同じ理由。PR #1064 追補）。
-            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &resident_generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             let device = self.with_driver_call(
                 &resident_generations,
                 |e| BackendError::CudaUnavailable(e.to_string()),
@@ -5075,7 +5108,11 @@ impl BackendOps for CudaBackendOps {
         ];
         if rows == 0 {
             // 早期 return でも poison 状態・世代は fail-closed に検査する。
-            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &resident_generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             return Ok(());
         }
 
@@ -5153,7 +5190,11 @@ impl BackendOps for CudaBackendOps {
 
         if plan.query_rows == 0 || plan.out_numel == 0 {
             // 早期 return でも poison 状態・世代は fail-closed に検査する。
-            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &resident_generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             let device = self.with_driver_call(
                 &resident_generations,
                 |e| BackendError::CudaUnavailable(e.to_string()),
@@ -5241,7 +5282,11 @@ impl BackendOps for CudaBackendOps {
             // 早期 return でも poison 状態・世代は fail-closed に検査する
             // （`linear_forward_device` の `m == 0 || n == 0` 早期
             // return と同じ理由。PR #1064 追補）。
-            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &resident_generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             let device = self.with_driver_call(
                 &resident_generations,
                 |e| BackendError::CudaUnavailable(e.to_string()),
@@ -5323,7 +5368,11 @@ impl BackendOps for CudaBackendOps {
         let resident_generations = [a.generation()];
 
         if numel == 0 {
-            context_cache::begin_driver_call(self.ordinal, &resident_generations)?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &resident_generations,
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             let device = self.with_driver_call(
                 &resident_generations,
                 |e| BackendError::CudaUnavailable(e.to_string()),
@@ -5444,7 +5493,11 @@ impl BackendOps for CudaBackendOps {
             // 渡す（codex-review P1 指摘・PR #1064 追補: 空スライスの
             // ままだと `invalidate` 後の旧世代 `w` ビューがこの分岐だけ
             // `StaleDeviceGeneration` を経由せず成功してしまう）。
-            context_cache::begin_driver_call(self.ordinal, &[w.buffer().generation()])?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &[w.buffer().generation()],
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             return Tensor::new(Vec::new(), &[p, r]).map_err(BackendError::ShapeMismatch);
         }
         if q == 0 {
@@ -5458,7 +5511,11 @@ impl BackendOps for CudaBackendOps {
             // 明示的に経由しないと poison 済み ordinal でも「空 step」
             // 相当が黙って成功してしまう）。世代も通常経路と同じ `w` の
             // generation を渡す（codex-review P1 指摘・PR #1064 追補）。
-            context_cache::begin_driver_call(self.ordinal, &[w.buffer().generation()])?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &[w.buffer().generation()],
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             return Tensor::from_shape_fill(&[p, r], |_| 0.0).map_err(BackendError::ShapeMismatch);
         }
 
@@ -11050,6 +11107,78 @@ mod tests {
             matches!(&result, Err(BackendError::Unsupported(msg)) if msg.contains("gemm_fp32_strict_into")),
             "capture 中の with_sync_point_call は Unsupported で拒否されるはず: {result:?}"
         );
+    }
+
+    /// イシュー #3608: `with_driver_call`／`with_sync_point_call` は別スレッドの capture が
+    /// 上限内（`cfg(test)` は 30 ms）に終われば待ってから `f` を 1 回だけ実行し、
+    /// 上限を超えれば `f` を実行せず `DeviceContextCaptureInProgress` を返す。
+    #[test]
+    fn ops_wrappers_wait_for_foreign_capture_within_limit_and_reject_after_it() {
+        let ordinal = unique_test_ordinal();
+        let cuda = CudaBackendOps::new(ordinal);
+        let map = |e: CudaError| BackendError::KernelLaunchFailed(e.to_string());
+
+        let spawn_holder = || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+            let holder = std::thread::spawn(move || {
+                let guard = context_cache::begin_capture_session(ordinal).expect("capture starts");
+                tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+                drop(guard);
+            });
+            rx.recv().unwrap();
+            (holder, go_tx)
+        };
+
+        // 上限内に解放: 待ってから 1 回だけ実行。
+        for sync_point in [false, true] {
+            let (holder, go_tx) = spawn_holder();
+            let releaser = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                go_tx.send(()).unwrap();
+            });
+            let mut calls = 0;
+            let r: Result<(), BackendError> = if sync_point {
+                cuda.with_sync_point_call(&[], "download", map, || {
+                    calls += 1;
+                    Ok(())
+                })
+            } else {
+                cuda.with_driver_call(&[], map, || {
+                    calls += 1;
+                    Ok(())
+                })
+            };
+            assert!(r.is_ok(), "sync_point={sync_point}: {r:?}");
+            assert_eq!(calls, 1);
+            holder.join().unwrap();
+            releaser.join().unwrap();
+        }
+
+        // 上限超過: f を実行せず DeviceContextCaptureInProgress。
+        for sync_point in [false, true] {
+            let (holder, go_tx) = spawn_holder();
+            let mut calls = 0;
+            let r: Result<(), BackendError> = if sync_point {
+                cuda.with_sync_point_call(&[], "download", map, || {
+                    calls += 1;
+                    Ok(())
+                })
+            } else {
+                cuda.with_driver_call(&[], map, || {
+                    calls += 1;
+                    Ok(())
+                })
+            };
+            assert!(
+                matches!(r, Err(BackendError::DeviceContextCaptureInProgress { .. })),
+                "sync_point={sync_point}: {r:?}"
+            );
+            assert_eq!(calls, 0);
+            go_tx.send(()).unwrap();
+            holder.join().unwrap();
+        }
     }
 
     /// codex-review 指摘（PR #1569）の再発防止テスト: `gemm_fp32_strict_
