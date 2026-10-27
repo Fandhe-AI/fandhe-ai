@@ -250,7 +250,7 @@ fail-closed に検査する点で回帰検出契約としては維持される�
   「#3617 HEAD 再計測」）。ceiling は `docs/perf/cuda-parity-baseline.md` §6 の表記丸め規約
   （表示桁最終桁 +1）。max_abs は `1.5626e-2` 型
 - ゲートの GB10 実行: `.rev-stamp` = `045a18a231ac8dfa255b275e9f30a33b0879e897`、1 passed（exit 0、
-  `cuda/gate_3617.log`）。同一ビルドの診断も再計測値と完全一致
+  `cuda/gate_3617.log`）。同一ビルドの診断ログは保存しておらず、診断値の一致は記録上未確認
 - **残存リスク**: クレート外を指す `#[path]` は前例がなく、facade は crates.io 公開クレートである。
   パッケージに入る `tests/low_precision_ops_backend_parity.rs` は共有ファイルを同梱しないため、
   下流が tarball から `cargo test` するとこのテストファイルはコンパイルできない。

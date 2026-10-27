@@ -193,5 +193,6 @@ baseline の ceiling 換算（表示桁最終桁 +1）:
 
 ゲート実行（規則 6〜8）の結果: 2026-10-27・GB10・`.rev-stamp` `045a18a231ac8dfa255b275e9f30a33b0879e897`
 （`cuda/rev-stamp-3617-gate.txt`）。ゲート `cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress`
-は 1 passed・exit 0（`cuda/gate_3617.log`）= pass（規則 7）。同一ビルドの診断も規則 2・3 の値と完全一致
-（規則 8）。baseline の値は所有者の確認待ち。
+は 1 passed・exit 0（`cuda/gate_3617.log`）= pass（規則 7）。規則 8（同一ビルドの診断値の一致）は、
+ゲート時のビルド（`045a18a2`）の診断ログを保存していないため記録上は未確認（保存済みの診断ログは
+`a053ea7ed` の run1・run2 のみ。`045a18a2` との `crates/` の差分は `tests/` 配下のテストファイルのみで、計測対象のライブラリコードは同一）。baseline の値は所有者の確認待ち。
