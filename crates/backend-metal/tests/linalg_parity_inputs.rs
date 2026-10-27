@@ -3,7 +3,8 @@
 //!
 //! `docs/backend-gpu-linalg-decision.md` §5 の入力集合（κ₂ ≤ 1e3・n ≤ 64・行列全体の 1e±20 倍・
 //! `1e20 × I₂`）をここで固定する。`docs/perf/logs/metal-linalg-parity-3139/RULE.txt` の事前登録と
-//! 1 対 1 に対応させる。実機結果を見た後に入力を変えない。cfg は付けない（Linux でも κ ガードが読む）。
+//! 1 対 1 に対応させる。実機結果を見た後に入力を変えない
+//! （例外: 2026-10-28 の所有者判断 (a) による `qr_input(3,8)` の是正のみ。決定記録 §5 に経緯と元入力の fail を残す）。cfg は付けない（Linux でも κ ガードが読む）。
 //! 各テストは `#[path]` で include するため、使わない項目は `dead_code` を許容する。
 
 #![allow(dead_code)]
@@ -21,6 +22,9 @@ pub const DET_MAX_N: usize = 17;
 pub const EYE2_SCALE: f32 = 1e20;
 /// QR の判定形状。
 pub const QR_SHAPES: [(usize, usize); 3] = [(8, 3), (3, 8), (17, 17)];
+
+/// (3,8) の主対角へ加えるシフト（2026-10-28 所有者判断 (a)）。
+pub const QR_WIDE_DIAG_SHIFT: f32 = 2.0;
 
 pub fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("valid tensor")
@@ -70,10 +74,16 @@ pub fn eye2_scaled(factor: f32) -> Tensor<f32> {
 
 /// QR 入力（m×n）。旧 17×17（`(((i*37+11)%23)-11)/7` のみ）は数値的に特異（κ₂ ≈ 3.5e16）で
 /// §5 の κ ≤ 1e3 に反するため、17×17 のみ対角へ `2n` を加えて是正した（実機結果を見る前の決定。RULE.txt）。
-/// (8,3)・(3,8) は旧式のまま（κ₂ ≈ 2.7・1.9）。
+/// (3,8) も 2026-10-28 の所有者判断 (a) で主対角へ `QR_WIDE_DIAG_SHIFT` を加えた。旧式は第 0 列と第 2 列が
+/// 偶然直交し `R[0,2]` の真値が厳密 0 となるため、1e20 倍で f32（GPU・ホストモデル）と f64（CPU 参照）の
+/// 丸め残差の差が相対誤差 1.0 として露出し fail した（カーネルのずれではない。PR #3654・#3658 の実測。
+/// `docs/backend-gpu-linalg-decision.md` §5「QR 入力 (3,8) の是正」）。tolerance・判定式は不変。
+/// (8,3) は旧式のまま（κ₂ ≈ 2.7）。
 pub fn qr_input(m: usize, n: usize) -> Tensor<f32> {
     let shift = if m == n && n == 17 {
         2.0 * n as f32
+    } else if (m, n) == (3, 8) {
+        QR_WIDE_DIAG_SHIFT
     } else {
         0.0
     };

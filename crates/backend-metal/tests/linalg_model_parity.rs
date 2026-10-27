@@ -254,6 +254,56 @@ fn qr_householder_does_not_overflow_near_f32_max() {
         assert!(r[0] > 0.0);
     }
 }
+/// 実機テスト `qr_matches_cpu_on_device` と同じケース列・同じ assert を f32 ホストモデル対 CPU 参照（f64）で
+/// 常時実行する（#2676。GPU はホストモデルとビット一致のため実機 pass の事前検証。実機 pass の根拠にはしない）。
+/// tolerance・判定式は変えない。入力是正（`qr_input(3,8)`）後に全ケースが厳密 fail 0 であることを固定する。
+#[test]
+fn qr_parity_inputs_model_matches_cpu() {
+    let cpu = CpuBackendOps::new();
+    let mut cases: Vec<(String, f32, _)> = Vec::new();
+    for (m, n) in inputs::QR_SHAPES {
+        for factor in inputs::SCALES {
+            cases.push((
+                format!("{m}x{n} scale={factor:e}"),
+                factor,
+                inputs::scaled(&inputs::qr_input(m, n), factor),
+            ));
+        }
+    }
+    cases.push((
+        "eye2 1e20".into(),
+        inputs::EYE2_SCALE,
+        inputs::eye2_scaled(inputs::EYE2_SCALE),
+    ));
+    for (label, factor, a) in cases {
+        let sh = a.shape().to_vec();
+        let (m, n) = (sh[0], sh[1]);
+        let (gr, gq) = model_qr(&s(&a), m, n);
+        let reference = cpu.linalg_qr(&a).expect("cpu qr");
+        let (rr, rq) = (s(&reference.r), s(&reference.q));
+        assert_parity(&format!("qr R {label}"), &gr, &rr);
+        assert_parity(&format!("qr Q {label}"), &gq, &rq);
+        assert!(
+            gr.iter().chain(gq.iter()).all(|v| v.is_finite()),
+            "qr {label}: R/Q に非有限値"
+        );
+        for i in 0..m.min(n) {
+            assert!(
+                gr[i * n + i] != 0.0 && rr[i * n + i] != 0.0,
+                "qr {label}: R の対角 [{i}] が 0"
+            );
+        }
+        if factor != 1.0 {
+            let norm = |v: &[f32]| -> Vec<f32> {
+                v.iter()
+                    .map(|&x| (x as f64 / factor as f64) as f32)
+                    .collect()
+            };
+            assert_parity(&format!("qr R/scale {label}"), &norm(&gr), &norm(&rr));
+        }
+    }
+}
+
 /// 記録専用診断（#3139。assert しない・判定に含めない）: 実機テスト `qr_matches_cpu_on_device` と
 /// 同じ入力（正本 `linalg_parity_inputs.rs`）で f32 ホストモデルを CPU 参照と突合し、判定を外れる要素を出力する。
 /// モデルが実機と同形の不一致を出すなら精度クラス（f32 対 f64）による差で、カーネルのずれではないと判別できる。
