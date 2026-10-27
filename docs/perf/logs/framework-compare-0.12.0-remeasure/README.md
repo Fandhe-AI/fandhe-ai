@@ -220,7 +220,7 @@ cargo test -p bench-fandhe --release --locked tests::resident_paths_match_tape_p
 
 ### 公開先
 
-0.12.0 用の claude.ai Artifact を新しく作る（所有者判断 2026-10-27）。0.11.0 版のページ（`../framework-compare-0.11.0-macmini-remeasure/README.md`「公開先」）は上書きせず、GitHub Pages には載せない。公開はメインのセッションが `scoreboard/out/scoreboard_0120.html` を使って行う。URL は公開後に記入する（本 PR の時点では未公開）。
+0.12.0 用の claude.ai Artifact を新しく作る（所有者判断 2026-10-27）。0.11.0 版のページ（`../framework-compare-0.11.0-macmini-remeasure/README.md`「公開先」）は上書きせず、GitHub Pages には載せない。公開はメインのセッションが `scoreboard/out/scoreboard_0120.html` を使って行う。2026-10-27 に公開した: <https://claude.ai/artifact/MY9opk9bGoA8fxu4qaNWMv>（非公開。共有範囲は所有者が設定する）。公開版は `scoreboard/out/scoreboard_0120.html` から、先頭の `charset`・`viewport` meta の 2 行だけを除いたもの（公開側の骨組みが同じ meta を付けるため）。
 
 ## 経緯（2026-10-27 の事前確認）
 
