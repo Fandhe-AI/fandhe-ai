@@ -1,0 +1,27 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/distributed_cuda_multiprocess_real_device.rs (<home>/work/target-fandhe-ai/release/deps/distributed_cuda_multiprocess_real_device-5283bd2d9057b356)
+
+running 1 test
+DDP_GB10 rdv_addr=127.0.0.1:35707 loopback=true non_loopback_allowed=false
+DDP_GB10 rdv_addr=127.0.0.1:44693 loopback=true non_loopback_allowed=false
+DDP_GB10 device=cuda0 opt=sgd vs=single_dev total=212 fail=0 max_abs=1.4901161193847656e-8 max_rel=2.439194538936131e-7 mean_abs=1.4716653891329495e-10
+DDP_GB10 device=cuda0 opt=sgd vs=single_cpu total=212 fail=0 max_abs=1.4901161193847656e-8 max_rel=2.979438596303053e-7 mean_abs=2.372236746662068e-10
+DDP_GB10 device=cuda0 opt=sgd vs=ref_single_dev_vs_single_cpu total=212 fail=0 max_abs=1.4901161193847656e-8 max_rel=2.439194538936131e-7 mean_abs=9.225365125908042e-11
+DDP_GB10 bits_equal kind=rank0_vs_rank1 opt=sgd value=true
+DDP_GB10 bits_equal kind=runA_vs_runB opt=sgd value=true
+DDP_GB10 device=cuda0 opt=adam vs=single_dev total=212 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.8688060758623138e-6 mean_abs=2.4655886556742324e-10
+DDP_GB10 device=cuda0 opt=adam vs=single_cpu total=212 fail=0 max_abs=2.9802322387695313e-8 max_rel=1.8688060758623138e-6 mean_abs=2.4655886556742324e-10
+DDP_GB10 device=cuda0 opt=adam vs=ref_single_dev_vs_single_cpu total=212 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0
+DDP_GB10 bits_equal kind=rank0_vs_rank1 opt=adam value=true
+DDP_GB10 bits_equal kind=runA_vs_runB opt=adam value=true
+DDP_GB10 device=cuda0 opt=adamw vs=single_dev total=212 fail=0 max_abs=1.4901161193847656e-8 max_rel=4.225114078080108e-5 mean_abs=1.526578276787164e-10
+DDP_GB10 device=cuda0 opt=adamw vs=single_cpu total=212 fail=0 max_abs=1.4901161193847656e-8 max_rel=4.225114078080108e-5 mean_abs=1.526578276787164e-10
+DDP_GB10 device=cuda0 opt=adamw vs=ref_single_dev_vs_single_cpu total=212 fail=0 max_abs=0e0 max_rel=0e0 mean_abs=0e0
+DDP_GB10 bits_equal kind=rank0_vs_rank1 opt=adamw value=true
+DDP_GB10 bits_equal kind=runA_vs_runB opt=adamw value=true
+DDP_GB10 device=cuda0 elapsed_s=1.5
+test cuda_two_process_ddp_on_shared_gpu_matches_single_cuda_and_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.54s
+
+rc=0

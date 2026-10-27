@@ -1,12 +1,12 @@
-# GB10 で同一 GPU を共有する 2 プロセスの分散学習（#3149）未実測の申し送り
+# GB10 で同一 GPU を共有する 2 プロセスの分散学習（#3149）実測記録
 
 親 #3143。DDP 初期形（ホスト側 std TCP の ring all-reduce。`docs/facade-distributed-host-collective-decision.md`）は、#3148 で
 CPU・loopback・複数プロセスの正しさを CI で確認済み。本ディレクトリは CUDA 版の実機確認の記録枠である。
 手元の CUDA 実機は GB10（GPU 1 基）だけで複数 GPU の DDP は検証できないため、同一 GPU（`Device::Cuda(0)`）の上で
 2 プロセスがそれぞれ自分の CUDA コンテキストを持ち、勾配をホスト経由で all-reduce する経路を確かめる。
 
-本実装エージェントの実行環境は GB10 に到達できないため、**実測は未実施**である。事前宣言は同ディレクトリの `RULE.txt`
-（実測前に固定し、事後に緩めない）。対象外: 性能（スケーリング効率・格上げ条件 (f)）・NCCL・複数 GPU。
+**2026-10-27 に GB10 で実測した。独立 5 run すべてで `RULE.txt` の合否規則を満たした（pass）**。6 比較（SGD・Adam・AdamW × `single_dev`・`single_cpu`）は全 run で `fail=0`、
+子プロセスは正常終了、elapsed は 1.5〜1.6 秒、待受は `127.0.0.1` のみ。事前宣言は同ディレクトリの `RULE.txt`（実測前に固定し、事後に緩めない。本実測でも変更していない）。対象外: 性能（スケーリング効率・格上げ条件 (f)）・NCCL・複数 GPU。
 
 ## 対象テスト
 
@@ -69,4 +69,31 @@ DDP_GB10 device=<..> elapsed_s=<秒>
 
 | 日付 | 実機 | コマンド | 結果 | 備考 |
 |---|---|---|---|---|
-| 未実測 | DGX Spark GB10 | 上記 4（5 回） | 未実測 | `DDP_GB10` 行の要約・loopback・GPU を共有する PID の証跡・`.rev-stamp` は実測時に記入 |
+| 2026-10-27 | DGX Spark GB10（<cuda-node>・sm_121。driver 580.173.02・CUDA 13.0.88・rustc 1.97.0） | 上記 4（独立 5 run。`run1.log`〜`run5.log`） | **pass**（5 run × 6 比較すべて `fail=0`。各 run の子プロセス rc=0・`1 passed; 0 failed`・elapsed 1.5〜1.6 秒） | 対象 `578e820d2`（dirty=0。`.rev-stamp`）。hw-lock 保持 2026-10-27 12:16:32Z〜12:17:29Z（UTC）。下の「実測値」参照 |
+
+本行が先頭の「未実測」行を引き継ぐ。
+
+## 実測値（5 run の中央値。`max_abs`・`max_rel`・`mean_abs`）
+
+| vs | opt | max_abs | max_rel | mean_abs |
+|---|---|---|---|---|
+| single_dev | sgd | 1.490e-08 | 2.439e-07 | 1.472e-10 |
+| single_dev | adam | 2.980e-08 | 1.869e-06 | 2.466e-10 |
+| single_dev | adamw | 1.490e-08 | 4.225e-05 | 1.527e-10 |
+| single_cpu | sgd | 1.490e-08 | 2.979e-07 | 2.372e-10 |
+| single_cpu | adam | 2.980e-08 | 1.869e-06 | 2.466e-10 |
+| single_cpu | adamw | 1.490e-08 | 4.225e-05 | 1.527e-10 |
+| ref_single_dev_vs_single_cpu（参考・判定対象外） | sgd | 1.490e-08 | 2.439e-07 | 9.225e-11 |
+| 同上 | adam | 0 | 0 | 0 |
+| 同上 | adamw | 0 | 0 | 0 |
+
+`total=212`（全要素数）・`fail=0` は全 run 共通。`bits_equal`（`rank0_vs_rank1`・`runA_vs_runB`）は全 run・全 optimizer で `true`（記録のみ。判定には使わない）。
+
+## 実測の付記
+
+- loopback: 全 run で `rdv_addr=127.0.0.1:<port> loopback=true non_loopback_allowed=false`（ポートは run ごとに異なる）。ログ内の IPv4 は `127.0.0.1` のみ。
+- 2 PID の証跡: `gpu-apps-run*.txt`（1 秒間隔の `nvidia-smi --query-compute-apps`）に、テストバイナリの異なる 2 PID が同一時刻に載った行が各 run で 1 サンプルある。run が 1.5 秒程度と短いため取れたサンプルは 1 回だけで、`used_memory` は取得できた（親 約 204 MiB・子 約 11 MiB は run1 の例）。
+- 常駐サービス: 計測前後の GPU 使用は常駐サービス 3 プロセス（<resident-service>。実名は公開しない）が計測前後とも載っていたが、計測前後の `utilization.gpu` は 0%。計測は hw-lock 保持中・ビルド完了後に行い、ビルドは並走させていない。
+- 手順の差異: 転送の rsync に `--delete-excluded` を付けていない（openrsync が protect フィルタを無視してノード側の別ディレクトリを消すため。#3138 と同じ扱い）。`.claude/worktrees/`・`target/` を追加で除外した。サンプラーは run ごとに開始・停止し、`rc=` はパイプを挟まず `cargo test` の直後に取った。
+- 不変: tolerance 定数・parity baseline・FMA 契約・カーネル・テストコード・`RULE.txt` は変更していない。
+- ログの加工: ホームの絶対パスを `<home>`、常駐サービスのプロセス名を `<resident-service>` に置換した以外は無加工。

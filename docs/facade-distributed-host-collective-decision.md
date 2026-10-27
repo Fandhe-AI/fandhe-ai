@@ -318,4 +318,4 @@ tolerance 定数・parity baseline・FMA 契約・依存・公開面は変更し
 - bit 一致（ランク間・run 間）は記録にとどめ合否に使わない。§6 のとおり GPU 経路の backward 決定性は未検証のため。
 - タイムアウト: NVRTC の JIT による偽 `Timeout` を避けるため、establish 120 秒・io 60 秒・op 180 秒・全体 600 秒とし、establish 後に JIT を前払いする。
 - 分散ステップは非 resident の step 経路（§15）を通り、`single_dev` は resident 経路を通る。fail の切り分けのため `single_dev` 対 `single_cpu` を参考行として出す。
-- 状態: GB10 での実測は未実施。実測記入欄は未記入で、issue は実測まで open のまま。
+- 状態: 2026-10-27 に GB10（sm_121）で実測済み（対象 `578e820d2`・dirty=0）。独立 5 run すべてで 6 比較（SGD・Adam・AdamW × `single_dev`・`single_cpu`）が `fail=0`・子プロセス rc=0・elapsed 1.5〜1.6 秒・待受は `127.0.0.1`（`non_loopback_allowed=false`）で、`RULE.txt` の合否規則を満たした。同じ GPU に 2 PID が同時に載った証跡は各 run で 1 サンプルずつ取れた。bit 一致（ランク間・run 間）は全 run で true（記録のみ）。ログは `docs/perf/logs/ddp-host-collective-gb10-3149/`。tolerance・baseline・カーネル・テストは不変。
