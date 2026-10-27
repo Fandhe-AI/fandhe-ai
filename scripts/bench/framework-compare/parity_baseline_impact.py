@@ -10,8 +10,8 @@ candle 側 fail 4 要素（イシュー #1184 ダンプ）に対し、候補判�
 （`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）へ OR 追加した場合の
 fail 数を要素ダンプの実値から算出した。本スクリプトは同じ候補定義を、
 fandhe-ai 本体側の parity 非後退契約（`crates/backend-cuda/tests/common/
-parity_baseline.rs::BASELINES`。45 行。#491 系）へ適用した場合の影響を
-机上で確認する。
+parity_baseline.rs::BASELINES`。現在 48 行のうち解析対象は 45 行。#491 系・
+#3617）へ適用した場合の影響を机上で確認する。
 
 **両者の重要な差**: #1237 は要素単位の fail ダンプ（fail した 2〜4 要素の
 `d`・`max_ab` 等）を入力に持つため候補の救済可否を直接判定できたが、
@@ -48,13 +48,34 @@ parity_baseline.rs::BASELINES`。45 行。#491 系）へ適用した場合の影
   （フィールド抽出漏れ・宣言スタイル変更のドリフト検出）
 - 各行で `total == m * n`・`baseline_fail_count <= total` を検査し、
   不成立なら非ゼロ終了する
-- **実測される行数は 45 である**（`ParityPath` 別内訳: WmmaTf32×9・
+- **実測される行数は 48 である**（`ParityPath` 別内訳: WmmaTf32×9・
   WmmaTf32Opt×9・WmmaTf32Staged×8・MmaF16×1・WmmaF16×2・MmaTf32×11・
-  MmaTf32VsWmmaStaged×2・SpecializedMmaF16×3 = 45。単純な
+  MmaTf32VsWmmaStaged×2・SpecializedMmaF16×3・FacadeLowPrecisionMatmulF16×3
+  = 48。うち FacadeLowPrecisionMatmulF16 の 3 行は下記「解析対象外」のため
+  机上分類の対象は 45 行。単純な
   `grep -c "ParityBaseline {"` はファイル中の `pub struct ParityBaseline {`
-  定義自体の 1 件を含んで 46 と数えるため、行数そのものの指標には使えない
+  定義自体の 1 件を含んで 49 と数えるため、行数そのものの指標には使えない
   ——本スクリプトはこの構造定義を含まない `BASELINES` 配列区間限定で
   カウントする）
+
+## 解析対象外の種別（`NOT_REPRODUCED_PATHS`）
+
+`ParityPath::FacadeLowPrecisionMatmulF16`（facade の f16 Tensor Core 経路。
+イシュー #3617・PR #3661 で追加した 3 行）は **解析対象外**とする。パースと
+行数・整合性検査（fail-closed 契約）には含めるが、`compute_scale` による
+`max|A|`・`max|B|` の再現と候補 bound の机上分類は行わない。理由:
+
+- 入力生成が既存経路と異なる。`crates/facade/tests/low_precision_ops_backend_
+  parity.rs::large_shape_inputs` は lhs を `Xorshift64Star::new(seed)`・rhs を
+  `new(seed + 1)` の **別ストリーム**で `fill_vec`（f32）生成し、f16 への
+  変換は facade の `matmul_low_precision` 内で行う。本スクリプトの
+  `compute_scale` は「`seed` 1 本のストリームで A に続けて B」を前提としており
+  （`fill_vec_f16` 経路用）、この入力を再現できない
+- 推測で近似すると誤ったスケールの bound が「全救済」等の判定に使われうる
+  ため、再現できないものは対象外として出力に明示する（出力の「解析対象外」節）
+
+対象に含めるには、入力生成（別ストリーム・f32→f16 変換の位置）と出力側の
+丸め（f16 出力）を踏まえた再現ロジックと、そのテストの追加が前提となる。
 
 ## 依存
 
@@ -62,7 +83,7 @@ Python 3 標準ライブラリのみ（`argparse`・`importlib`・`math`・`os`�
 `re`・`struct`・`sys`・`dataclasses`）。CI（`ci.yml` の `deps-forbidden`
 ジョブ）では単体テスト（`parity_baseline_impact_test.py`）のみ実行し、実
 ファイル（`crates/backend-cuda/tests/common/parity_baseline.rs`）に対する
-計算は行わない（実行コストの都合。`--scale-mode exact` は 45 行中の重複
+計算は行わない（実行コストの都合。`--scale-mode exact` は解析対象 45 行中の重複
 `(seed, m, k, n, dtype)` をメモ化しても約 1.2 億要素の生成を伴う）。
 
 ## 使い方
@@ -261,6 +282,15 @@ def round_f32_to_f16_abs(x: float) -> float:
 #   - f16（`fill_vec_f16`）: MmaF16・WmmaF16・SpecializedMmaF16
 F16_PATHS = frozenset({"MmaF16", "WmmaF16", "SpecializedMmaF16"})
 
+# 解析対象外の `ParityPath`（本ファイル冒頭 docstring「解析対象外の種別」
+# 参照）。`FacadeLowPrecisionMatmulF16`（イシュー #3617）は lhs=`seed`・
+# rhs=`seed+1` の別ストリームで `fill_vec`（f32）生成され f16 変換は facade
+# 内部で行われるため、`compute_scale` の入力再現（単一ストリーム・
+# `fill_vec_f16` 前提）が成り立たない。再現できないものを推測で近似しない
+# ため、`F16_PATHS` にも含めず（`is_f16` は `fill_vec_f16` 由来か否かの意）
+# 机上分類から除外する。パースと整合性検査・行数検査の対象には含める。
+NOT_REPRODUCED_PATHS = frozenset({"FacadeLowPrecisionMatmulF16"})
+
 
 _scale_cache: dict[tuple[int, int, int, int, bool], tuple[float, float]] = {}
 
@@ -274,7 +304,7 @@ def compute_scale(
     からの事前上界）を返す。全救済判定には使えない（上界を過大評価する
     ため）ことに注意。`mode == "exact"`（既定）では実際に PRNG を
     `m*k + k*n` 回進めて厳密値を求める。同一 `(seed, m, k, n, is_f16)` は
-    45 行中に複数回登場しうるため（例: `seed=0xBEEF, m=n=k=4096` は
+    解析対象 45 行中に複数回登場しうるため（例: `seed=0xBEEF, m=n=k=4096` は
     `WmmaTf32Opt`・`WmmaTf32Staged` の 2 行で共有）、プロセス内メモ化で
     重複計算を避ける。
     """
@@ -320,7 +350,7 @@ _ARRAY_START = "pub static BASELINES: &[ParityBaseline] = &["
 # 区間（`arr`）には `pub struct ParityBaseline {` という定義行は含まれない
 # （区間は `pub static BASELINES: &[ParityBaseline] = &[` 以降なので構造体
 # 定義より後ろから始まる）ため、`ParityBaseline {` という短いリテラルの
-# 出現数だけで安全にブロック数を数えられる（実測: 45。本ファイル冒頭
+# 出現数だけで安全にブロック数を数えられる（実測: 48。本ファイル冒頭
 # docstring「fail-closed 契約」参照）。
 #
 # **追加修正（codex-review 指摘・PR #1421 P2 再指摘）**: 上記の初回修正は
@@ -369,6 +399,11 @@ class BaselineRow:
     @property
     def is_f16(self) -> bool:
         return self.path in F16_PATHS
+
+    @property
+    def is_analyzable(self) -> bool:
+        """入力を再現でき机上分類の対象にできる行か（`NOT_REPRODUCED_PATHS` 外）。"""
+        return self.path not in NOT_REPRODUCED_PATHS
 
 
 class BaselineParseError(RuntimeError):
@@ -609,7 +644,19 @@ def _escape_md_cell(text: str) -> str:
     return text.replace("|", "\\|")
 
 
-def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
+def split_rows(rows: list[BaselineRow]) -> tuple[list[BaselineRow], list[BaselineRow]]:
+    """全行を (解析対象, 解析対象外) に分ける。順序は保つ。"""
+    return (
+        [r for r in rows if r.is_analyzable],
+        [r for r in rows if not r.is_analyzable],
+    )
+
+
+def render_markdown(all_rows: list[BaselineRow], scale_mode: str) -> str:
+    # 解析対象外（`NOT_REPRODUCED_PATHS`）は以降の机上分類・集計から外し、
+    # 末尾の「解析対象外」節に明示する。契約 5 項目の provenance 件数のみ
+    # 全行（`all_rows`）で数える。
+    rows, excluded_rows = split_rows(all_rows)
     # `upper-bound` モード（M=1 の事前上界）では `bound` 自体が実際の閾値を
     # 過大評価するため、`classify` の「全救済」確定を「部分／未確定」へ
     # 落とす（codex-review 指摘・PR #1421 P2-1。docstring 参照）。
@@ -619,8 +666,9 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
     lines.append("# candle-parity-tolerance-baseline-impact 生出力（イシュー #1238）")
     lines.append("")
     lines.append(
-        f"`--scale-mode {scale_mode}`。行数: {len(rows)}（実測値。"
-        "`ParityPath` 別内訳は本文 doc 参照）。"
+        f"`--scale-mode {scale_mode}`。BASELINES 全 {len(all_rows)} 行のうち"
+        f"解析対象 {len(rows)} 行・解析対象外 {len(excluded_rows)} 行"
+        "（実測値。`ParityPath` 別内訳は本文 doc 参照）。"
     )
     lines.append("")
 
@@ -717,17 +765,18 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
     # 契約 5 項目への影響（構造的事実。全候補・全行共通で不変）。
     # provenance 未確定件数はパース済み行から実測する（codex-review 指摘・
     # PR #1421 P2-5: 旧実装は「1 行のみ true」と固定文言で出力していたが、
-    # 現在の `BASELINES` は 45 行全てが `baseline_provenance_unconfirmed:
+    # 現在の `BASELINES` は 48 行全てが `baseline_provenance_unconfirmed:
     # false`〈ceiling が `None` の行を含む〉であり、固定文言は実データと
     # 乖離した別状態の記述だった）。
-    unconfirmed_count = sum(1 for row in rows if row.provenance_unconfirmed)
+    unconfirmed_count = sum(1 for row in all_rows if row.provenance_unconfirmed)
     lines.append("## 契約 5 項目への影響（構造的事実。OR 追加の単調性による）")
     lines.append("")
     lines.append("| 契約検査項目（`assert_no_parity_regression`） | 影響 |")
     lines.append("|---|---|")
     lines.append(
         f"| provenance 確定（`baseline_provenance_unconfirmed=true` の行数: "
-        f"{unconfirmed_count}/{len(rows)}） | 無影響（候補追加とは独立） |"
+        f"{unconfirmed_count}/{len(all_rows)}、解析対象外を含む全行） | "
+        "無影響（候補追加とは独立） |"
     )
     lines.append("| `total` 完全一致 | 無影響（要素数は不変） |")
     lines.append(
@@ -741,6 +790,28 @@ def render_markdown(rows: list[BaselineRow], scale_mode: str) -> str:
     lines.append(
         "| `max_abs_diff`/`max_rel_err <= ceiling`（`Some` のみ） | 無影響（同上） |"
     )
+    lines.append("")
+
+    # 解析対象外（再現不能のため机上分類しない行）。何が対象外かを出力だけで
+    # 分かるようにする（冒頭 docstring「解析対象外の種別」）。
+    lines.append("## 解析対象外の行（入力を再現できないため机上分類しない）")
+    lines.append("")
+    if excluded_rows:
+        lines.append(
+            "以下は `NOT_REPRODUCED_PATHS` の種別で、入力生成が `compute_scale` の"
+            "前提（`seed` 1 本のストリームで A に続けて B）と異なるため "
+            "S_A・S_B・候補 bound・分類を算出していない（上表・集計にも含めない）。"
+        )
+        lines.append("")
+        lines.append("| path | context | m | n | k | seed | fail_count |")
+        lines.append("|---|---|---:|---:|---:|---|---:|")
+        for row in excluded_rows:
+            lines.append(
+                f"| {row.path} | {_escape_md_cell(row.context)} | {row.m} | {row.n} | "
+                f"{row.k} | 0x{row.seed:X} | {row.fail_count} |"
+            )
+    else:
+        lines.append("なし。")
     lines.append("")
 
     return "\n".join(lines)

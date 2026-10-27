@@ -37,6 +37,7 @@ fail 数を、要素単位のダンプ実値から算出した。本 issue は�
   `MmaTf32`×11・`MmaTf32VsWmmaStaged`×2・`SpecializedMmaF16`×3・`WmmaF16`×2・
   `MmaF16`×1。K の集合 = {4, 8, 17, 19, 20, 32, 33, 36, 64, 65, 72, 128,
   256, 512, 1024, 4096}）
+- **追記（2026-10-28。#3617・PR #3661）**: `BASELINES` は `FacadeLowPrecisionMatmulF16`×3 の追加で現在 48 行になった。上記の 45 行と内訳は本分析（#1238）時点の記録であり、新 3 行の扱いは §11 を参照
 - **注意（単純な grep 出現数カウントとの食い違い）**: `grep -c
   "ParityBaseline {" crates/backend-cuda/tests/common/parity_baseline.rs`
   は 46 を返すが、これは `pub struct ParityBaseline { … }`（型定義自体）
@@ -363,3 +364,29 @@ python3 parity_baseline_impact.py --scale-mode upper-bound
 実機（GB10・M4 Max）実行は不要・実施していない（本分析は `BASELINES` に
 既に記録されている集計値と、コミット済みソースから決定的に導出できる
 入力規模のみを使う机上計算のため）。
+
+## 11. 追記: `FacadeLowPrecisionMatmulF16` 3 行の追加（#3617・PR #3661、2026-10-28）
+
+上記 §1〜§10 の「45 行」と数値（§5 の分類件数・生表）は #1238 実施時点の
+記録であり、書き換えない。その後 `BASELINES` に facade の f16 Tensor Core
+経路 `ParityPath::FacadeLowPrecisionMatmulF16` が 3 行（512x512x512・
+1024x1024x1024・256x256x1024。GB10 実測・所有者承認済み）追加され、現在は
+**48 行**である。
+
+- **扱い: 解析対象外**。`parity_baseline_impact.py` は 48 行すべてをパースし
+  行数・整合性の fail-closed 検査には含めるが、`S_A`・`S_B` の再現、候補
+  bound、分類は **45 行（従来の 8 種別）のみ**に行う。§5 の集計は引き続き
+  45 行に対するものとして有効
+- **理由**: 新種別の入力は `crates/facade/tests/low_precision_ops_backend_
+  parity.rs::large_shape_inputs` で、lhs=`Xorshift64Star::new(seed)`・
+  rhs=`new(seed + 1)` の別ストリームから `fill_vec`（f32）で生成し、f16 変換は
+  facade 内部で行う。スクリプトの `compute_scale` は「`seed` 1 本のストリーム
+  で A に続けて B」（§3.1。`fill_vec_f16` 経路）を前提としており再現できない。
+  推測による近似で誤ったスケールの bound を出さないため、対象外と明示する
+  （出力にも「解析対象外の行」節として出る）
+- `baseline_provenance_unconfirmed`: 新 3 行はいずれも `false`。全 48 行で
+  `true` の行は 0
+- 本体の判定式・tolerance 定数・`PARITY_SCALED_ABS_COEFF`・baseline の値は
+  変更していない
+- 対象に含める場合は、別ストリーム入力・f32→f16 変換位置・f16 出力の丸めを
+  踏まえた再現ロジックとテストが前提（別イシューで扱う）
