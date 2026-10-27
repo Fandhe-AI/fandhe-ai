@@ -47,3 +47,45 @@ fail 時の扱い:
   tolerance・κ 上限・判定方式・入力は変えない。fail_count・max_abs_diff 等を引用し、原因の仮説と
   カーネル側の是正方針を README と PR に「要対応」として記録する。Issue の起票・コメント、
   baseline 化はユーザー承認なしでは行わない。
+
+==============================================================================
+改訂（2026-10-27。実機実行前に宣言。実機結果を見た後に入力・判定を変えない）
+==============================================================================
+
+理由:
+  上記「対象コミット」d7d8d503 以降に crates/ 配下が更新されており、元の「crates/ 配下が同一」条件は満たせない。
+  #2676 の RULE（docs/perf/logs/metal-linalg-lu-chol-qr-2676/RULE.txt）が、線形代数関連ファイルの差分は
+  κ ガード（判定が厳しくなる方向・デバイス非接触）以外 0 件であることを確認済みで、それ以降
+  linalg.metal・linalg_kernel.rs・linalg.rs・linalg_model.rs・tests/linalg_parity*.rs・backend-cpu/src/linalg.rs は
+  変更がない。今回の差分は記録専用の診断テスト 2 件の追加のみ（判定ロジック・入力集合・tolerance 不変）:
+    - tests/linalg_parity.rs::qr_diagnose_all_cases_on_device（実機。assert しない）
+    - tests/linalg_model_parity.rs::qr_input_model_vs_cpu_diagnostic（デバイス不要。assert しない）
+    - tests/linalg_parity_inputs.rs::diag_compare（診断出力の共通ヘルパー）
+
+対象コミット:
+  本改訂をコミットした HEAD（フル SHA は README に記録）。ノード上の .rev-stamp は 1 行目にフル SHA、
+  2 行目に dirty=0 が必須で、満たさない実測は無効とする。.rev-stamp は転送後にノード上へ直接書く。
+
+実行件数:
+  各 run で `running 7 tests`（既存 6 本 + 診断 1 本）が出ること。期待と異なる run（0 本を含む）は無効で
+  pass の根拠にしない。
+
+判定（元の RULE の判定・入力集合・fail 時の扱いはすべて不変）:
+  判定対象は元の 4 本。記録専用は status_mapping_end_to_end_on_device・
+  gate_on_non_empty_does_not_return_unsupported・qr_diagnose_all_cases_on_device の 3 本。
+  5 run すべてが判定を満たしたときだけ pass とする。再実行で結果を選ばない。
+  判定テストが最初の assert で止まり到達しなかったケースは「判定としては未到達」と区別して記録し、
+  診断の値を pass の根拠にしない。
+
+手順:
+  独立したプロセスで 5 回実行する（各 run は別の ssh 呼び出し）。--test-threads は指定しない。
+  実機ロックは ~/work/.fandhe-hw-lock を mkdir で取得し、失敗時も必ず解放する。計測中は他のビルドを並走させない。
+  収録するログはホスト名・ユーザー名・絶対パスを <metal-node>・<home> にマスクする。
+
+事前に宣言する仮説（判別の手順の宣言であり、結果を見た後の判定変更ではない）:
+  #2676 の 2026-10-27 実測で qr R 3x8 scale=1e20 が fail した（コミット 1184586ee）。登録時点の観察:
+  等倍 qr_input(3,8) の R[0,2] は厳密 0（第 0 列と第 2 列が直交）で、f64 参照は約 1e-16 相対の残差、
+  f32 は約 1e-7 相対の残差を持つ。1e20 倍では絶対救済（1e-5）が効かず相対誤差だけが判定になり fail する。
+  f32 ホストモデル対 CPU の診断（model-diag.log。デバイス不要）が同じ要素 [0,2] で同形の不一致を出し、
+  かつ実機の GPU がモデルと一致するなら、精度クラス（f32 対 f64）による不可避の差でありカーネルのずれではない。
+  GPU がモデルからずれるなら #3137 側でカーネルの是正が必要。

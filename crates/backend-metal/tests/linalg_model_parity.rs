@@ -14,6 +14,10 @@ use fandhe_ai_backend_metal::linalg::{lu_diag_product, permutation_sign, qr_fina
 use fandhe_ai_backend_metal::linalg_model::{cholesky_f32, lu_factor_f32, lu_solve_f32, qr_f32};
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
+// #3139 の記録専用診断が入力の正本（実機テストと同一）と判定出力ヘルパーを共有する。
+#[path = "linalg_parity_inputs.rs"]
+mod inputs;
+
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("valid tensor")
 }
@@ -248,5 +252,46 @@ fn qr_householder_does_not_overflow_near_f32_max() {
             "m={m}: {r:?} {q:?}"
         );
         assert!(r[0] > 0.0);
+    }
+}
+/// 記録専用診断（#3139。assert しない・判定に含めない）: 実機テスト `qr_matches_cpu_on_device` と
+/// 同じ入力（正本 `linalg_parity_inputs.rs`）で f32 ホストモデルを CPU 参照と突合し、判定を外れる要素を出力する。
+/// モデルが実機と同形の不一致を出すなら精度クラス（f32 対 f64）による差で、カーネルのずれではないと判別できる。
+#[test]
+#[ignore = "記録専用診断（#3139）"]
+fn qr_input_model_vs_cpu_diagnostic() {
+    let cpu = CpuBackendOps::new();
+    let mut cases: Vec<(String, _)> = Vec::new();
+    for (m, n) in inputs::QR_SHAPES {
+        for factor in inputs::SCALES {
+            cases.push((
+                format!("{m}x{n} scale={factor:e}"),
+                inputs::scaled(&inputs::qr_input(m, n), factor),
+            ));
+        }
+    }
+    cases.push(("eye2 1e20".into(), inputs::eye2_scaled(inputs::EYE2_SCALE)));
+    for (label, a) in cases {
+        let sh = a.shape().to_vec();
+        let (m, n) = (sh[0], sh[1]);
+        let k = m.min(n);
+        let (mr, mq) = model_qr(&s(&a), m, n);
+        let reference = cpu.linalg_qr(&a).expect("cpu qr");
+        inputs::diag_compare(
+            &format!("R {label}"),
+            "model",
+            &mr,
+            "cpu",
+            &s(&reference.r),
+            n,
+        );
+        inputs::diag_compare(
+            &format!("Q {label}"),
+            "model",
+            &mq,
+            "cpu",
+            &s(&reference.q),
+            k,
+        );
     }
 }
