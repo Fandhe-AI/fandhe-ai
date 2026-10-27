@@ -80,6 +80,6 @@ Mac mini 側は `../framework-compare-0.12.0-macmini-remeasure/`。Mac mini と 
 
 - **状態: 生成器とテンプレートのみ（0.12.0 実測待ち）**。`gen_0120.out`（判定一覧）・HTML・Artifact は未生成で、0.12.0 の勝敗・届かなかったセルの値はまだ無い。
 - 生成器は 0.11.0 の正式データで回帰確認済み（`--run-ver 0.11.0 --prev-ver 0.10.0 --m4-prev ''` で標準出力が `gen_0110_macmini.out` と完全一致。tally 6 1 20 invalid 1 noise 1 total 27）。旧条件の注記は表示のみで、有無で判定一覧が変わらない。`--unreached-tsv` は分類が 3 種以外・比が数値でない行で非零終了する。
-- 対応表の fandhe-ai 列はタグ `v0.12.0` 基準（`docs/perf/framework-compare-feature-matrix-0.12.0.md` §8）。相互運用行は #3268 の棚卸しとの照合で「部分的」へ戻した（所有者確認待ち）。
-- **公開先（既存 Artifact の更新か新規か）と公開範囲: 所有者未確認（記入欄）**。確認前は公開しない。0.11.0 版のページは上書きしない。
+- 対応表の fandhe-ai 列はタグ `v0.12.0` 基準（`docs/perf/framework-compare-feature-matrix-0.12.0.md` §8）。相互運用行は #3268 の棚卸しとの照合で「部分的」へ戻し、所有者の回答で確定した（`#issuecomment-6435074095`。確定件数表は同書 §8.5。9 行すべてが「部分的」）。
+- **公開先と公開範囲（所有者回答 `#issuecomment-6435074095`）**: 0.12.0 用の Artifact を新しく作る。0.11.0 版は上書きせず、GitHub Pages にも載せない。Artifact の公開はメインのセッションが行い、#3274 の PR は HTML の生成までを担当する。HTML は #3273 の実測待ちで未生成。
 - 注意: 「約 5 倍」「0.33〜0.40」は出典がなく採らない。Python 側 checksum の補正は `docs/perf/loss-attribution-matrix.md` §10.6 の実測（Python÷Rust 3.66〜4.17）に合わせた。

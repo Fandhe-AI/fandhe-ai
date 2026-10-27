@@ -31,7 +31,7 @@
 </div>
 
 <h2>役割・機能の対応表 — fandhe-ai は何であり、何でないか</h2>
-<p class="note"><b>注記</b>: fandhe-ai 列の基準は crates.io <code>fandhe-ai =0.12.0</code>（2026-10-27 公開・タグ <code>v0.12.0</code>＝<code>e23417cb4</code>）の facade 公開面。事前監査（基準 sha <code>1009825c9</code>・#3269）との <code>crates/</code> 差分は内部依存の版数文字列 12 行だけで、<code>.rs</code> の差は 0 件（#3274 で確認。<code>docs/perf/framework-compare-feature-matrix-0.12.0.md</code> §8）。facade の <code>pub use</code>／<code>pub mod</code> から到達できるものだけを公開扱いとし、未公開・保留が 1 項目でも残る行は「部分的」とする（機械的判定）。承認済みの非目標（対象外）は行の判定を下げない。<b>監査に未掲載だった項目（#3268 の棚卸し・<code>docs/compat-unlisted-holds-inventory.md</code>）を当て直した結果、事前監査で「ある」だった相互運用を「部分的」へ戻した</b>（未公開 2 件・保留 1 件。所有者確認待ち）。監査対象外の 4 行（層・役割／言語・配布／固有の仕組み／本ページの性能実測）は 0.11.0 版の記述を引き継ぎ、層・役割の公開モジュール列挙のみ更新した。実機 parity は「測定コミットの内容が pass した」ことだけを意味し、基準 sha（またはタグ）での pass を意味しない（同書 §5。120 件のうち実測済み 70・実機未実測 10・判定対象外 3・性能計測 37）。</p>
+<p class="note"><b>注記</b>: fandhe-ai 列の基準は crates.io <code>fandhe-ai =0.12.0</code>（2026-10-27 公開・タグ <code>v0.12.0</code>＝<code>e23417cb4</code>）の facade 公開面。事前監査（基準 sha <code>1009825c9</code>・#3269）との <code>crates/</code> 差分は内部依存の版数文字列 12 行だけで、<code>.rs</code> の差は 0 件（#3274 で確認。<code>docs/perf/framework-compare-feature-matrix-0.12.0.md</code> §8）。facade の <code>pub use</code>／<code>pub mod</code> から到達できるものだけを公開扱いとし、未公開・保留が 1 項目でも残る行は「部分的」とする（機械的判定）。承認済みの非目標（対象外）は行の判定を下げない。<b>監査に未掲載だった項目（#3268 の棚卸し・<code>docs/compat-unlisted-holds-inventory.md</code>）を当て直した結果、事前監査で「ある」だった相互運用を「部分的」へ戻した</b>（未公開 2 件・保留 1 件。所有者が 2026-10-27 に確定）。この当て直しで NN 層・モデル構築（未公開 9 件・対象外 3 件）と最適化・学習ループ（保留 7 件・対象外 3 件）の件数も増えたが、行の判定は「部分的」のまま変わらず、結果として監査対象の 9 行はすべて「部分的」である。監査対象外の 4 行（層・役割／言語・配布／固有の仕組み／本ページの性能実測）は 0.11.0 版の記述を引き継ぎ、層・役割の公開モジュール列挙のみ更新した。実機 parity は「測定コミットの内容が pass した」ことだけを意味し、基準 sha（またはタグ）での pass を意味しない（同書 §5。120 件のうち実測済み 70・実機未実測 10・判定対象外 3・性能計測 37）。</p>
 <p class="note">他列は各プロジェクトの公開ドキュメント上の一般的事実。Hugging Face と LangChain は fandhe-ai と同じ層の製品ではなく、性能比較の相手ではない。</p>
 <div class="wrap"><table class="pos"><thead><tr><th>項目</th>
 <th>fandhe-ai 0.12.0</th>
@@ -82,7 +82,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">NN 層・モデル構築</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">Sequential::add_* は 65 → 71（3D プーリング・ConvTranspose3d・Fold／Unfold・LRN を追加）、MaxUnpool の層経路（FunctionalBuilder）、weight_norm／spectral_norm の結線、save_model の kind 追加、参照モデルが公開（6 件）。未公開 2 件（add_upsample の scale_factor・独自 Module から組み込み層を呼ぶ経路）、保留 0 件、対象外 1 件（層型名の公開。機能は別名で到達できる）。<br>棚卸し（#3268）で未掲載だった torch.nn との差分（Hardshrink／Softshrink・Bilinear・BatchNorm3d・CosineSimilarity／PairwiseDistance・ChannelShuffle・LPPool ほか 4 種）は、規則上は未公開に当たる（所有者確認待ち）</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">Sequential::add_* は 65 → 71（3D プーリング・ConvTranspose3d・Fold／Unfold・LRN を追加）、MaxUnpool の層経路（FunctionalBuilder）、weight_norm／spectral_norm の結線、save_model の kind 追加、参照モデルが公開（6 件）。未公開 9 件（add_upsample の scale_factor・独自 Module から組み込み層を呼ぶ経路の 2 件に、棚卸し #3268 で未掲載だった torch.nn との差分 7 項目を加えた。7 項目は Hardshrink／Softshrink・Bilinear・BatchNorm3d・CosineSimilarity・PairwiseDistance・ChannelShuffle・LPPool ほか 3 種）、保留 0 件、対象外 3 件（層型名の公開、ReflectionPad／ReplicationPad／CircularPad の層型、Softmax2d。いずれも機能は別名・別経路で到達できる）。<br>棚卸し分の区分は所有者の回答で確定した（2026-10-27。LPPool ほかの 4 種は未公開・保留のまま数える）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.nn 網羅</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras レイヤー網羅</span></td>
 <td class="pc"><span class="pill loss">ない</span><span class="pt">なし</span></td>
@@ -90,7 +90,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">最適化・学習ループ</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">optimizer（Adadelta／Adafactor／Adamax／ASGD／Lion／Rprop／NAdam／RAdam）、scheduler（PolynomialLr・CyclicLr）、param groups、OptimizerStateDict、EMA、SWA の fit 結線（Callback::Swa）、fit_with_weights／fit_with_train_step、学習ステップ入口、PrefetchDataLoader ほかが公開（7 件）。未公開 1 件（SWA の FitConfig 形）、対象外 1 件（FitConfig への EMA）。マルチワーカー DataLoader と同じ挙動かは判定していない。<br>棚卸し（#3268）で未掲載だった保留（EMA と AMP の併用拒否・EMA の warmup・param groups の併用・保存形式・常駐・Optimizer 4 種）は保留に当たる（所有者確認待ち）</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">optimizer（Adadelta／Adafactor／Adamax／ASGD／Lion／Rprop／NAdam／RAdam）、scheduler（PolynomialLr・CyclicLr）、param groups、OptimizerStateDict、EMA、SWA の fit 結線（Callback::Swa）、fit_with_weights／fit_with_train_step、学習ステップ入口、PrefetchDataLoader ほかが公開（7 件）。未公開 1 件（SWA の FitConfig 形）、保留 7 件（棚卸し #3268 で未掲載だった EMA と AMP の併用拒否・EMA の warmup・param groups の LrSchedule 併用・AMP 併用 API・保存形式・常駐・Optimizer 4 種の経路）、対象外 3 件（FitConfig への EMA、param groups と Lbfgs の併用、スロット添字の公開ヘルパー）。マルチワーカー DataLoader と同じ挙動かは判定していない。<br>棚卸し分の区分は所有者の回答で確定した（2026-10-27。EMA の warmup は保留のまま数える）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.optim 網羅・DataLoader・AMP</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">Keras optimizer 網羅・fit()・tf.data</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">scipy.optimize（L-BFGS 等。NN 学習用ではない）</span></td>
@@ -106,7 +106,7 @@
 <td class="pc"><span class="pill solo">対象外</span><span class="pt">—</span></td>
 </tr>
 <tr><th scope="row"><span class="ph">相互運用（重み・モデル形式）</span></th>
-<td class="pc me"><span class="pill near">部分的</span><span class="pt">facade から ONNX import（36 op・推論専用）・export（Sequential の 6 層と import 済みモデルの往復）・safetensors 保存／読込（F32）・save_model／load_model・Functional モデル保存・npy／npz 自由関数が使える（4 件）。Python バインディングと TF 系形式、Tensor への npy inherent は対象外（2 件）。<br><b>事前監査（#3269）は「ある」だったが、棚卸し（#3268）との照合で「部分的」へ戻した</b>: 未公開 2 件（ONNX autograd が facade 未接続・safetensors の F32 以外）、保留 1 件（Sigmoid の export。数値契約が承認保留）。export の対応層 6 種・op 26 種（import は 36 種）は機能範囲の制約で、行は下げない（UnsupportedLayer で fail-closed）</span></td>
+<td class="pc me"><span class="pill near">部分的</span><span class="pt">facade から ONNX import（36 op・推論専用）・export（Sequential の 6 層と import 済みモデルの往復）・safetensors 保存／読込（F32）・save_model／load_model・Functional モデル保存・npy／npz 自由関数が使える（4 件）。Python バインディングと TF 系形式、Tensor への npy inherent は対象外（2 件）。<br><b>事前監査（#3269）は「ある」だったが、棚卸し（#3268）との照合で「部分的」へ戻した</b>: 未公開 2 件（ONNX autograd が facade 未接続・safetensors の F32 以外）、保留 1 件（Sigmoid の export。数値契約が承認保留）。この区分は所有者の回答で確定した（2026-10-27）。export の対応層 6 種・op 26 種（import は 36 種）は機能範囲の制約で、行は下げない（UnsupportedLayer で fail-closed）</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">torch.export・ONNX export・safetensors</span></td>
 <td class="pc"><span class="pill win">ある</span><span class="pt">SavedModel・TFLite・ONNX（tf2onnx）</span></td>
 <td class="pc"><span class="pill near">部分的</span><span class="pt">npy/npz・scipy.io（MATLAB・netCDF）</span></td>
