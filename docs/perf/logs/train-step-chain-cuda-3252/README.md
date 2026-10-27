@@ -18,7 +18,7 @@ H2D・デバイス確保を持たず、同期が loss の読み出し 1 回だ�
 
 ## 手順
 
-1. 作業ツリーを GB10（spark-dbd9）の専用ディレクトリへ rsync（`target/`・`.git`・`docs/spec` を除外。openrsync は
+1. 作業ツリーを GB10（`<cuda-node>`）の専用ディレクトリへ rsync（`target/`・`.git`・`docs/spec` を除外。openrsync は
    protect フィルタを無視するため既存ツリーを触らない別ディレクトリへ置く）。
 2. ビルドを 1 回だけ（`gb10/build.log`。判定外）。
 3. `run_chain.sh <out>` で B1〜B3 を各 5 run（独立プロセス）。ログ・`env_info.txt` を回収し、`/home/<user>` を `<HOME>` へ置換。

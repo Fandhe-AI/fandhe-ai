@@ -117,7 +117,7 @@ off の差 0.2%（約 0.3 µs）は規則の閾値 1.00 を 5/5 round で超え�
 
 ## GB10 での実行手順（再実施する場合）
 
-1. 実機ロック `~/work/.fandhe-hw-lock` を取る（ノードは `spark-939e` 推奨）。
+1. 実機ロック `~/work/.fandhe-hw-lock` を取る（ノードは `<cuda-node>` 推奨）。
 2. after（本ランナーを含むマージコミット）と before（`f7fe6b4df`）を `git bundle` で転送して clone し、各ツリーに `.rev-stamp`（1 行目 HEAD・2 行目 `dirty=0`）を作り `.git/info/exclude` に足す。RULE の `crates_identical_to` の基準コミットが after の履歴に無い場合はその commit も bundle に含める。両ツリーに `bench-resident-chain.patch` を `git apply` する。
 3. 計測の前に RULE の「`#[ignore]` 全件の突き合わせ」を before → after の順に実行する。
 4. `AB_RULE_NAME=<RULE ファイル名> AB_BEFORE_FACADE_PATH=… AB_AFTER_FACADE_PATH=… bash run_ab_train_chain_exclusion_cuda.sh <ラベル>` を切り離し起動する（前提ゲート → 5 round）。

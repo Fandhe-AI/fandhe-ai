@@ -105,7 +105,7 @@
   rust-ai-library-run/`）へ転送し、`.rev-stamp` が転送元 sha
   （145639d047f6fcd7488d0665e1488e68ee084dfc）と一致することを確認済み
 - 回収後、内部ホスト名（`docs/real-hardware-verification-env.local.md` 記載の実値）・
-  machine-id・`/home/fandhe`・`local.fandhe` パターンで grep 走査し 0 件を確認してから
+  machine-id・`/home/fandhe`・`<internal-domain>` パターンで grep 走査し 0 件を確認してから
   本ディレクトリ・`results/raw/` へ配置（生データ・実行ログとも 0 件）
 - `scripts/bench/framework-compare/Cargo.lock`・`Cargo.toml` への path/patch 差し替えは
   行っていない（正式系列のみのため `--config patch.crates-io.fandhe-ai.path=...` は不使用）

@@ -28,7 +28,7 @@ doc: docs/backend-cuda-graph-step-capture-design.md §8.11.6（結果の記録�
   matched_full = 全 200 件の参照または replay の実 loss 列のどれかと bit 一致したずれの数、unmatched = どれとも一致しなかった数、idx_ge_20 = 一致 index に 20 以上を含む数、in_window = 一致 index j が [before, after+1] に入る数（補強の指標。進捗カウンタはホスト側の step 完了数による近似）、plain_params_diff = パラメータがずれた repeat 数。
 
 [実行]
-- 手順は docs/real-hardware-verification-env.md に従う。ノードは local.fandhe.spark-939e。実機ロック ~/work/.fandhe-hw-lock を取る。計測中はビルドを並走させない（開発機・ノードとも）。
+- 手順は docs/real-hardware-verification-env.md に従う。ノードは <cuda-node>。実機ロック ~/work/.fandhe-hw-lock を取る。計測中はビルドを並走させない（開発機・ノードとも）。
 - 3 ツリーは git bundle で転送して clone し、各ツリーに .rev-stamp（1 行目 HEAD・2 行目 dirty=0。.git/info/exclude に追加）を作ってからパッチを当てる。当てた後のパッチの sha256 と、ノード上の DIAG-r5.txt の sha256 を env_info に記録する。
 - 全ツリーのビルドを済ませてから実行する。順序は before → main_prefix → after。
 - コマンド（各ツリーで）: FANDHE_AI_CUDA_GRAPH_TRAIN=1 cargo test -p fandhe-ai-backend-cuda --release --lib train_graph_shared_workspace_tests_3596 -- --ignored --test-threads=1 --nocapture

@@ -350,7 +350,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 
 実機の確認: 全 6 組み合わせ・10 step で `fallbacks == 0`（capture 中に拒否された操作が無かった）。replay 中の step の窓で `stream_syncs`・`d2h_calls`・`h2d_calls`・`mem_uploads`・`mem_allocs` がすべて 0。
 
-### 8.8.4 実機確認（GB10・`spark-dbd9`・既定 feature・`--release`）
+### 8.8.4 実機確認（GB10・`<cuda-node>`・既定 feature・`--release`）
 
 ログは `docs/perf/logs/train-step-graph-3260/`（`env_info.txt`・`.rev-stamp`）。`.rev-stamp` は転送元 HEAD ＋ 未コミット件数で、実装コミット前の作業ツリーを転送して実行した。
 
@@ -385,7 +385,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 
 | 項目 | 内容 |
 |------|------|
-| 実施日・ノード | 2026-10-25（UTC。実機ロック取得 22:55Z・解除 23:07Z）・GB10 ノード `spark-939e`（GPU 使用率 0%・load1 < 1.0。実ホスト名は `.local.md` のみ） |
+| 実施日・ノード | 2026-10-25（UTC。実機ロック取得 22:55Z・解除 23:07Z）・GB10 ノード `<cuda-node>`（GPU 使用率 0%・load1 < 1.0。実ホスト名は `.local.md` のみ） |
 | runner | `6a97087ac7e29381eb932584783dc2495bd889e5`（`.rev-stamp` 2 行目 `dirty=0`）に `bench-resident-chain.patch`（sha256 `92d0a8d4…`）だけを適用。on／off は同一バイナリ（`bin_sha256` 1 つ） |
 | torch | 2.14.0+cu130（専用 venv。`gb10/torch-version.txt`）。candle は同ハーネスの `candle-core =0.11.0` |
 | 専有ゲート | 5 round すべて `gate=pass`（load1 0.09〜0.26）。`skipped` ログは空 |
