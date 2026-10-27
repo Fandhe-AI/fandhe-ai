@@ -55,6 +55,15 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 ### `--mode fresh|reuse`（イシュー #925。デバイス/tape 再利用モード）
 
+> **#3272 以降の `reuse`（bench-fandhe）**: 入力を計測窓の外で 1 回だけデバイスへ置く（candle・PyTorch と揃える）。
+> gemm は `upload_resident` → `matmul_resident`、train は `upload_resident` → `train_step_resident` + `ResidentLoss::read`
+> （`init_s` は `wait_device_param_store` で完了保証）、infer は `upload_resident` → `predict_resident_input`。gemm の `upload_resident` は
+> 束縛用の 1 層モデルの store を使い、その費用は `init_s` に入る。`--phases` は gemm・infer が常駐経路（区間名は不変で意味は
+> `matmul` = `matmul_resident`、`predict_resident` = `predict_resident_input`）、train は Tape 経路のまま（主行とは別条件）。
+> ホスト入力・Tape 経路に残る例外: `gemm --tf32`・`gemm --device-checksum`・`train --graph`。`--managed`／`--pinned-h2d` は
+> reuse 行では init の upload にしか効かない。`run_ab_graph_cuda.sh` の `off` 腕は HEAD ではチェーンになるため、#1350 の A/B の再現には
+> 旧条件腕のコミット `0ae5670359c0f9d7a82f8bbd71791fb516713627` を使う。詳細は `docs/framework-compare-harness-decision.md` §7.9。
+
 - 既定は `fresh`（上記「計測ごとに新しい計算グラフを作る」プロトコルと完全に同一。既存 JSONL・集計表との互換維持。
   ただし上記のとおり Metal / CUDA では candle / Burn とプロトコル同一ではない点に注意）
 - `reuse`（`bench-fandhe` の `gemm`／`train`／`infer`〈イシュー #1217〉タスクに対応。

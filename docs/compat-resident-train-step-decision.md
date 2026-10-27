@@ -573,7 +573,7 @@ L1 の d_input は計算しない = #3245〉→ SGD）を encode-only で積み�
 ### 範囲外・申し送り
 
 - `scripts/bench/framework-compare/bench-fandhe` の `run_train_reuse` の P7 化: crates.io の `fandhe-ai` を新しい版へ
-  上げた後（ピン更新は所有者承認）。
+  上げた後（ピン更新は所有者承認）。**#3272 で実施済み**（`framework-compare-harness-decision.md` §7.9）。
 - step 全体の CUDA Graph capture・常駐入力の capture 対応: #3258。
 - Metal の `_into` 版部品（確保ゼロ化）: §12 の申し送りのまま。
 - `ResidentInput` を永続バッファへ `upload_into` で更新する入口（§12 で #3254 へ申し送り）: 新しい公開形を伴い §4 の
