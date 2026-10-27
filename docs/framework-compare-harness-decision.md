@@ -227,8 +227,9 @@ paste unmaintained）はいずれも情報提供型（脆弱性ではない）�
   Codex 指摘への対応として 2026-10-17 に所有者承認のうえ追加。self-test に正負ケースあり）。
   別の版が入った場合は ignore を足さず承認を取り直す。
 - 2026-10-27: 所有者の承認（#3271 の issuecomment-6111781998＝2026-10-12 の (A)＋(b)
-  確定、および issuecomment-6426224103＝2026-10-27 のピン更新・推移的依存・
-  `CDLA-Permissive-2.0` の承認）に基づき、v0.12.0 の crates.io 公開（`release-all.yml`
+  確定〈https://github.com/Fandhe-AI/fandhe-ai/issues/3271#issuecomment-6111781998〉、および issuecomment-6426224103＝2026-10-27 のピン更新・推移的依存・
+  `CDLA-Permissive-2.0` の承認〈https://github.com/Fandhe-AI/fandhe-ai/issues/3271#issuecomment-6426224103〉。licenses の限定例外 (a)〜(d) は
+  PR #3633 で規約へ追加〈https://github.com/Fandhe-AI/fandhe-ai/issues/3271#issuecomment-6431265992〉）に基づき、v0.12.0 の crates.io 公開（`release-all.yml`
   publish run 40392236921・tag `v0.12.0` = `e23417cb4`。7 クレート公開）を受けて
   `fandhe-ai` 承認ピンを `=0.11.0` から `=0.12.0` へ更新した。
   - 承認された範囲: ピン更新、推移的依存 `ureq 3.4.2`・`native-tls`・vendored
