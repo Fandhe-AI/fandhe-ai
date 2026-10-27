@@ -311,7 +311,11 @@ impl std::ops::Deref for HostReadout {
     fn deref(&self) -> &[f32] {
         match self {
             HostReadout::Borrowed(view) => view,
-            HostReadout::Shared(t) => t.as_slice().unwrap_or(&[]),
+            // 構築側（readout_tensor）が contiguous を保証済み。前提が崩れたら
+            // 空スライスで checksum 0・parity 空検証を黙って通さず fail-closed で止める。
+            HostReadout::Shared(t) => t
+                .as_slice()
+                .unwrap_or_else(|| unreachable!("HostReadout::Shared は contiguous テンソル専用")),
             HostReadout::Owned(vec) => vec.as_slice(),
         }
     }
