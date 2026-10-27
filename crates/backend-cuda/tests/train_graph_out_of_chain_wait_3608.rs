@@ -23,6 +23,9 @@
 //! - B に `DeviceContextCaptureInProgress`（を含むどのエラー）も出ない
 //! - B の loss 列・最終パラメータ・Tape 演算の結果が、単独実行（A なし）の参照と bit 完全一致
 //! - A・B とも poison されない（`wait_device` が成功する）
+//! - `out_of_chain_capture_wait_count`（B 側の入口が foreign capture の待機分岐へ入った回数）が
+//!   1 以上増えている（A の capture と B の通常操作が実際に重なった確認。B は最低 REPEATS 回に
+//!   加え、A が終わるまで繰り返して重なりを確保する）
 //! - `train_graph_stats` の `captured` が増えている（capture に届いた確認。届かないまま合格
 //!   しないため必須）
 
@@ -30,8 +33,12 @@ use fandhe_ai_autodiff::Tape;
 use fandhe_ai_autodiff::optim::resident_input::{ResidentInput, TrainStepLoss};
 use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
 use fandhe_ai_backend_cuda::CudaBackendOps;
-use fandhe_ai_backend_cuda::graph::{override_train_graph_for_scope, train_graph_stats};
+use fandhe_ai_backend_cuda::graph::{
+    out_of_chain_capture_wait_count, override_train_graph_for_scope, train_graph_stats,
+};
 use fandhe_ai_tensor_core::{Activation, BackendError, Tensor};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const BATCH: usize = 64;
 const DIMS: [usize; 3] = [784, 256, 10];
@@ -193,6 +200,7 @@ fn capture_thread() -> usize {
 fn out_of_chain_ops_wait_for_foreign_capture_without_errors_and_stay_bit_exact() {
     require_opt_in_env();
     let before = train_graph_stats();
+    let wait_before = out_of_chain_capture_wait_count();
 
     // 参照: A なしの単独実行（opt-in OFF）。
     let reference = {
@@ -200,12 +208,25 @@ fn out_of_chain_ops_wait_for_foreign_capture_without_errors_and_stay_bit_exact()
         out_of_chain_once()
     };
 
-    let a = std::thread::spawn(capture_thread);
-    let b = std::thread::spawn(|| {
+    let a_done = Arc::new(AtomicBool::new(false));
+    let a_done_a = Arc::clone(&a_done);
+    let a = std::thread::spawn(move || {
+        let r = capture_thread();
+        a_done_a.store(true, Ordering::SeqCst);
+        r
+    });
+    let b = std::thread::spawn(move || {
         let _opt = override_train_graph_for_scope(false);
-        (0..REPEATS)
-            .map(|_| out_of_chain_once())
-            .collect::<Vec<_>>()
+        // 最低 REPEATS 回、A が終わるまで（待機経路に届くまで）繰り返す。上限は暴走防止。
+        let mut outs = Vec::new();
+        while outs.len() < REPEATS
+            || (!a_done.load(Ordering::SeqCst)
+                && out_of_chain_capture_wait_count() == wait_before
+                && outs.len() < REPEATS * 20)
+        {
+            outs.push(out_of_chain_once());
+        }
+        outs
     });
     let outs = b
         .join()
@@ -216,6 +237,12 @@ fn out_of_chain_ops_wait_for_foreign_capture_without_errors_and_stay_bit_exact()
         assert_eq!(out, &reference, "B repeat {r} が単独実行と bit 一致しない");
     }
     let after = train_graph_stats();
+    let waited = out_of_chain_capture_wait_count() - wait_before;
+    assert!(
+        waited >= 1,
+        "B が foreign capture の待機分岐に一度も入っていない（A の capture と重なっていない。\
+         待機処理が即時拒否へ戻っても通ってしまうため不合格とする）"
+    );
     assert!(
         after.captured > before.captured,
         "capture に届いていない（captured {} -> {}）。stream 種別・opt-in を確認すること",
@@ -223,7 +250,7 @@ fn out_of_chain_ops_wait_for_foreign_capture_without_errors_and_stay_bit_exact()
         after.captured
     );
     println!(
-        "OOC3608 captured={} replayed={} fallbacks={}",
+        "OOC3608 waited={waited} captured={} replayed={} fallbacks={}",
         after.captured - before.captured,
         after.replayed - before.replayed,
         after.fallbacks - before.fallbacks

@@ -1824,8 +1824,20 @@ pub(crate) fn begin_driver_call_waiting(
         if remaining.is_zero() {
             return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
         }
+        FOREIGN_CAPTURE_WAIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         wait_foreign_capture_idle(ordinal, remaining)?;
     }
+}
+
+/// [`begin_driver_call_waiting`] が別スレッドの capture を待つ分岐へ入った累計回数
+/// （イシュー #3608 の codex 指摘対応）。GB10 の並行回帰テストが「待機経路に実際に到達した」
+/// ことを観測するための診断用カウンタで、挙動には影響しない。
+static FOREIGN_CAPTURE_WAIT_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// [`FOREIGN_CAPTURE_WAIT_COUNT`] の現在値（`graph::out_of_chain_capture_wait_count` が再公開）。
+pub(crate) fn foreign_capture_wait_count() -> u64 {
+    FOREIGN_CAPTURE_WAIT_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// [`begin_sync_point_call`] の待ち型（イシュー #3608）。判定順は従来どおり、先に
