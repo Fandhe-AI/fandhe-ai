@@ -1,0 +1,3 @@
+series=g7r3-bitexact watchlist_procs=0
+series=g7r3-res watchlist_procs=0
+series=g7r3 watchlist_procs=0
