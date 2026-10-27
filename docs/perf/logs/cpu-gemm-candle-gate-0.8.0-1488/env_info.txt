@@ -37,7 +37,7 @@ DGX・M4 Max とも `results/raw/results-*-cpu-gemm-gate-0.8.0-1488.jsonl` は 4
 
 - ノード: `docs/real-hardware-verification-env.local.md` 記載の CUDA 実機ノード
   （`CUDA_NODE`。実 SSH ホスト名は非開示。本イシューは CPU 経路のみ使用）
-- OS: `Linux spark-dbd9 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul
+- OS: `Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul
   24 22:03:06 UTC 2026 aarch64`
 - CPU: Cortex-X925 ×10（大コア）+ Cortex-A725 ×10（小コア）計 20 論理 CPU
 - rustc: `1.97.0`（ノード側既定 toolchain）
@@ -50,7 +50,7 @@ DGX・M4 Max とも `results/raw/results-*-cpu-gemm-gate-0.8.0-1488.jsonl` は 4
   `real-hardware-verification-env.local.md`／`gemm-gate-trusted-hosts.local`）は
   0 件
 - trusted-hosts: `gemm-gate-trusted-hosts.local` をノード上で生成（`hostname`＝
-  `spark-dbd9`・`/etc/machine-id` の実値。Mac から転送していない・回収もして
+  `<cuda-node>`・`/etc/machine-id` の実値。Mac から転送していない・回収もして
   いない）
 - 並走プロセス確認: `pgrep -x bench-fandhe`／`pgrep -x bench-candle` はいずれも
   ヒットなし（`nvidia-smi --query-compute-apps` は ComfyUI・Kokoro の常駐サービス
@@ -69,7 +69,7 @@ DGX・M4 Max とも `results/raw/results-*-cpu-gemm-gate-0.8.0-1488.jsonl` は 4
 - `git status` は隔離ディレクトリのため本 worktree には影響なし。ノード側で
   `scripts/bench/framework-compare/Cargo.toml`／`Cargo.lock` は rsync 転送のまま
   未変更（ビルドは `GEMM_GATE_PATCH_FACADE_PATH` 未指定＝registry 解決のみ）
-- 秘密情報 grep（回収後）: 短縮ホスト名（`spark-dbd9`。信頼済みタグとして
+- 秘密情報 grep（回収後）: 短縮ホスト名（`<cuda-node>`。信頼済みタグとして
   precedent〈既存コミット済み manifest 等〉で許容されている表記）以外の内部実値は
   本ファイル・生成物のいずれにも含めていない。`/etc/machine-id` の実値は
   env_info.txt を含むどの生成物にも記載していない（trusted-hosts ファイルは

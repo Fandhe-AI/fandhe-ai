@@ -174,7 +174,7 @@ dedicated_pool_execution_matches_global_pool_bit_exact` が保証する
 small_shape_cap_report_bounds`（`#[cfg(not(target_os = "macos"))]` 分岐）
 が構造的根拠として担保する。
 
-**実機健全性確認（2026-09-12）**: GB10 実機（`spark-dbd9`。
+**実機健全性確認（2026-09-12）**: GB10 実機（`<cuda-node>`。
 rsync 転送・`PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH`）へ到達し
 `cargo test -p fandhe-ai-backend-cpu --lib small_shape` を実行、14 件
 全 pass を確認した（`eligible=false` を含む全契約テストが Linux 実機上

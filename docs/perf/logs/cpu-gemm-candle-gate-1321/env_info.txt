@@ -24,12 +24,12 @@
 ## DGX Spark GB10（Grace CPU）
 
 - ノード: `docs/real-hardware-verification-env.local.md` 記載の CUDA 実機ノード（`CUDA_NODE`。実 SSH ホスト名は非開示。本イシューは CPU 経路のみ使用）
-- OS: `Linux spark-dbd9 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64`
+- OS: `Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64`
 - CPU: `lscpu` — Cortex-X925 ×10（大コア）+ Cortex-A725 ×10（小コア）計 20 論理 CPU
 - rustc: `1.97.0 (2d8144b78 2026-07-07)`
 - 隔離ディレクトリ: `~/work/fc-1321/rust-ai-library-run/`（本イシュー専用。共有 `~/work/rust-ai-library-run` は未使用）。計測後に削除済み（`rm -rf ~/work/fc-1321` 実行・確認済み）
 - 転送: rsync（`.gitignore` フィルタ + 明示除外）。`.rev-stamp` がノード側で `ced4d14f8acf08499308142c19e3ea34e9a27097` と一致することを確認。転送後 secrets grep（`.env*`／`settings.local.json`／`real-hardware-verification-env.local.md`）は 0 件
-- trusted-hosts: `gemm-gate-trusted-hosts.local` をノード上で生成（`hostname`＝`spark-dbd9`・`/etc/machine-id` の実値。Mac から転送していない）
+- trusted-hosts: `gemm-gate-trusted-hosts.local` をノード上で生成（`hostname`＝`<cuda-node>`・`/etc/machine-id` の実値。Mac から転送していない）
 - 専有ゲート: 1 分 load average < 6.0 を 30 秒間隔で 2 回連続確認。**1 回目の試行（`orchestrate.sh`）は `CARGO_TARGET_DIR` を同期ツリー外（`~/work/target-fc-1321`）へ分離したところ `run_gemm_gate.sh` が `./target/release/...` を固定参照する実装のため manifest 記録に失敗（`formal exit=1`）。原因判明後 `CARGO_TARGET_DIR` を外し `./target`（隔離ディレクトリ内。計測後にディレクトリごと削除されるため恒久キャッシュ分離は不要と判断）で再実行（`orchestrate2.sh`）**。専有ゲートは 08:14:23〜08:14:53 UTC に 2 回連続 load1<6.0（0.29→0.50）で通過（`gate-dgx.log`）
 - 実行順（起動試行 2 回目・成功分。`orchestrate.sh` の 1 回目は 08:14:53〜08:16:07 UTC に両系列とも
   `exit=1` で失敗しており実測に含まれない）: 正式系列（`0.7.0-1321`。ビルド完了後の実測は
@@ -38,7 +38,7 @@
   7.87 と上昇。`run_gemm_gate_cpu-dgx-*.log` の `before`/`after` status）。DGX も M4 Max（下記）と
   同様、専有ゲート通過後の計測ウィンドウ中に load average が再上昇している
 - 完了時 load average: `5.23, 3.68, 1.62`（`uptime-dgx.log`）
-- 秘密情報 grep（回収後）: 短縮ホスト名（`spark-dbd9`。信頼済みタグとして precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で許容されている表記）以外の内部実値は本ファイル・生成物のいずれにも含めていない。`/etc/machine-id`・`IOPlatformUUID` の実値は env_info.txt を含むどの生成物にも記載していない（trusted-hosts ファイルはノード上で生成しノード上のまま残置。回収対象に含めていない）
+- 秘密情報 grep（回収後）: 短縮ホスト名（`<cuda-node>`。信頼済みタグとして precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で許容されている表記）以外の内部実値は本ファイル・生成物のいずれにも含めていない。`/etc/machine-id`・`IOPlatformUUID` の実値は env_info.txt を含むどの生成物にも記載していない（trusted-hosts ファイルはノード上で生成しノード上のまま残置。回収対象に含めていない）
 
 ## Apple M4 Max（このセッションが動くホスト自身）
 
@@ -57,7 +57,7 @@
   → 参考系列（`head-ced4d14-1321`。08:20:01〜08:20:49 UTC）
 - **注記（共有負荷）**: 専有ゲート自体は通過したが、参考系列の計測完了時点の load average は `9.27, 7.71, 7.96`（`uptime-m4max.log`）まで再上昇していた。他セッションの並走ビルド・計測が計測ウィンドウ中に増加した可能性がある。規則 4 に従い「専有ゲート通過」と「完了時点で共有負荷が再上昇した」の両方を事実として記録する（判定自体は §22.1 規則どおり確定するが、絶対値の解釈には幅を持たせる）
 - `git status` で `scripts/bench/framework-compare/Cargo.toml`／`Cargo.lock` の差分なしを確認済み
-- 秘密情報 grep: `/Users/nancy/...` パスは precedent（既存コミット済み manifest 多数。例 `manifest-m4max-cpu-gemm-gate-head-145639d-pzero-on.json`）と同型のため許容する既存慣行として扱う。DGX 側の CUDA_NODE 実 SSH ホスト名（`docs/real-hardware-verification-env.local.md` にのみ存在するフルドメイン形式）は非開示のまま維持し、本ファイル・生成物のいずれにも記載していない（`spark-dbd9`〈trusted-hosts の tag 用短縮形。実機の `hostname` コマンド出力〉自体は precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で既に許容されている短縮形のため同様に扱う）
+- 秘密情報 grep: `/Users/nancy/...` パスは precedent（既存コミット済み manifest 多数。例 `manifest-m4max-cpu-gemm-gate-head-145639d-pzero-on.json`）と同型のため許容する既存慣行として扱う。DGX 側の CUDA_NODE 実 SSH ホスト名（`docs/real-hardware-verification-env.local.md` にのみ存在するフルドメイン形式）は非開示のまま維持し、本ファイル・生成物のいずれにも記載していない（`<cuda-node>`〈trusted-hosts の tag 用短縮形。実機の `hostname` コマンド出力〉自体は precedent〈既存コミット済み manifest の `path:/home/fandhe/work/...` 等〉で既に許容されている短縮形のため同様に扱う）
 
 ## 実測結果サマリ（詳細は gate doc §22.4 を正とする）
 
