@@ -1,0 +1,6 @@
+patch_sha256=0b748dc040e1b1c175fac71309a4fd2a4040574b77eb577f90085ce83e487549
+base_tree_files=1764
+changed_files_vs_base:
+  crates/backend-cpu/examples/cpu_pack_kernel_breakdown.rs
+  crates/backend-cpu/src/gemm_blis/mod.rs
+  crates/backend-cpu/src/gemm_blis/diag_pack_timer.rs (timed のみ)
