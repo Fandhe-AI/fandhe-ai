@@ -231,7 +231,7 @@ README が無い 2 件（`infer-chain-graphcapture-rejudge-3205`・`train-step-g
 | `softmin-threshold-ops-2650/README.md` | Softmin・Tanhshrink・Threshold・RReLU | 演算 | 実測済み（pass） | 2026-10-11 | CUDA `784b4e79`／Metal `c8e1ceb1` |
 | `speculative-batching-2890/README.md` | speculative decoding・スケジューラの内部実装 | 推論・サービング | 実測済み（pass） | 2026-10-09 | `8bbeb874c`（GB10／M4 Max） |
 | `speculative-batching-facade-2934/README.md` | `inference` の speculative・`BatchScheduler`（facade） | 推論・サービング | 実測済み（pass） | 2026-10-09 | `8bbeb874c`（GB10／M4 Max） |
-| `speculative-sampling-3102/README.md` | サンプリング版 speculative decoding | 推論・サービング | 実機未実測（#3102 は CLOSED だが記入欄は未実測） | - | - |
+| `speculative-sampling-3102/README.md` | サンプリング版 speculative decoding | 推論・サービング | 実機未実測（本書の基準 sha 時点のスナップショット。意図的に据え置く。その後 2026-10-27 に README へ実測を追記済みで、現況は当該 README を正とする） | - | - |
 | `stat-reduce-ops-2637/README.md` | median／kthvalue／quantile 等 | 演算 | 実測済み（pass） | 2026-10-11 | CUDA `784b4e79`／Metal `c8e1ceb1` |
 | `tape-gradcheck-facade-2847/README.md` | `Tape::gradcheck`（facade） | 自動微分 | 実測済み（pass） | 2026-10-09 | `8bbeb874c`（GB10／M4 Max） |
 | `tensor-product-ops-2640/README.md` | kron／tensordot／cdist／cross | 演算 | 実測済み（pass） | 2026-10-11 | CUDA `784b4e79`／Metal `c8e1ceb1` |
