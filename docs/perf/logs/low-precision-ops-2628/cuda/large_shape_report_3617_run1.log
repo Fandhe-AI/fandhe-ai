@@ -1,0 +1,26 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/low_precision_ops_backend_parity.rs (~/work/target/release/deps/low_precision_ops_backend_parity-b83989608687259c)
+
+running 1 test
+test cuda_low_precision_matmul_large_shape_report ... ROUTE cuda cc=(12, 1) mma_available=true reason=None (predicted)
+REPORT cuda matmul-large F16 64x64x64 seed=11 route=f16:Mma total=4096 bit_eq=4096 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=4096 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large F16 128x128x128 seed=12 route=f16:Mma total=16384 bit_eq=16364 fail=0 mean_abs=3.711174940690398e-7 max_abs=1.953125e-3 max_rel=9.433962264150943e-4 ulp0=16364 ulp1=20 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large F16 256x256x256 seed=13 route=f16:Mma total=65536 bit_eq=65401 fail=0 mean_abs=1.9330200302647427e-6 max_abs=7.8125e-3 max_rel=1.2142857142857143e-2 ulp0=65401 ulp1=127 ulp_gt1=8 strict_pass=true
+REPORT cuda matmul-large F16 512x512x512 seed=14 route=f16:Mma total=262144 bit_eq=261313 fail=5 mean_abs=4.145593038629158e-6 max_abs=1.5625e-2 max_rel=3.8848920863309355e-1 ulp0=261313 ulp1=764 ulp_gt1=67 strict_pass=false
+REPORT cuda matmul-large F16 1024x1024x1024 seed=15 route=f16:Mma total=1048576 bit_eq=1043013 fail=192 mean_abs=1.0508246703011537e-5 max_abs=3.125e-2 max_rel=4.803921568627451e-1 ulp0=1043013 ulp1=5114 ulp_gt1=449 strict_pass=false
+REPORT cuda matmul-large F16 256x256x1024 seed=16 route=f16:Mma total=65536 bit_eq=65205 fail=16 mean_abs=8.295384759549052e-6 max_abs=1.5625e-2 max_rel=2.5336500395882817e-2 ulp0=65205 ulp1=293 ulp_gt1=38 strict_pass=false
+REPORT cuda matmul-large F16 128x128x100 seed=17 route=f16:Wmma-or-Tiled total=16384 bit_eq=16366 fail=0 mean_abs=6.130503606982529e-7 max_abs=3.90625e-3 max_rel=8.19000819000819e-4 ulp0=16366 ulp1=18 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large F16 65x63x33 seed=18 route=f16:Wmma-or-Tiled total=4095 bit_eq=4094 fail=0 mean_abs=2.91109376192384e-11 max_abs=1.1920928955078125e-7 max_rel=8.143322475570033e-4 ulp0=4094 ulp1=1 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 64x64x64 seed=11 route=fp32_strict(non-TC) total=4096 bit_eq=4096 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=4096 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 128x128x128 seed=12 route=fp32_strict(non-TC) total=16384 bit_eq=16384 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=16384 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 256x256x256 seed=13 route=fp32_strict(non-TC) total=65536 bit_eq=65536 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=65536 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 512x512x512 seed=14 route=fp32_strict(non-TC) total=262144 bit_eq=262144 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=262144 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 1024x1024x1024 seed=15 route=fp32_strict(non-TC) total=1048576 bit_eq=1048576 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=1048576 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 256x256x1024 seed=16 route=fp32_strict(non-TC) total=65536 bit_eq=65536 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=65536 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 128x128x100 seed=17 route=fp32_strict(non-TC) total=16384 bit_eq=16384 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=16384 ulp1=0 ulp_gt1=0 strict_pass=true
+REPORT cuda matmul-large Bf16 65x63x33 seed=18 route=fp32_strict(non-TC) total=4095 bit_eq=4095 fail=0 mean_abs=0e0 max_abs=0e0 max_rel=0e0 ulp0=4095 ulp1=0 ulp_gt1=0 strict_pass=true
+SUMMARY strict_zero_fail=["F16@64x64x64", "F16@128x128x128", "F16@256x256x256", "F16@128x128x100", "F16@65x63x33", "Bf16@64x64x64", "Bf16@128x128x128", "Bf16@256x256x256", "Bf16@512x512x512", "Bf16@1024x1024x1024", "Bf16@256x256x1024", "Bf16@128x128x100", "Bf16@65x63x33"] nonzero_fail=["F16@512x512x512", "F16@1024x1024x1024", "F16@256x256x1024"]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.55s
+
