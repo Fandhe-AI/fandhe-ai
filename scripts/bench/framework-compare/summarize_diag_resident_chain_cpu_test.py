@@ -19,7 +19,11 @@ spec = importlib.util.spec_from_file_location("summ", os.path.join(HERE, "summar
 summ = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(summ)
 
-REAL_DIAG = os.path.join(HERE, "..", "..", "..", "docs", "perf", "logs", "resident-chain-cpu-train-diag-3611", "DIAG.txt")
+DIAG_DIR = os.path.join(HERE, "..", "..", "..", "docs", "perf", "logs", "resident-chain-cpu-train-diag-3611")
+REAL_DIAGS = [os.path.join(DIAG_DIR, n) for n in ("DIAG.txt", "DIAG-r2.txt")]
+lspec = importlib.util.spec_from_file_location("lsym", os.path.join(HERE, "diag_layout_symbols.py"))
+lsym = importlib.util.module_from_spec(lspec)
+lspec.loader.exec_module(lsym)
 LABEL = "t"
 PSHA = "a" * 64
 LSHA = "b" * 64
@@ -266,36 +270,161 @@ class RejectTest(unittest.TestCase):
 
 
 class DriftGuardTest(unittest.TestCase):
-    """実 DIAG.txt と集計ツール定数の整合（負荷ゲート定数は対象外）。"""
+    """実 DIAG.txt（r1）・DIAG-r2.txt と集計ツール定数の整合（負荷ゲート定数は対象外）。"""
 
-    def setUp(self):
-        with open(REAL_DIAG, encoding="utf-8") as fh:
-            self.text = fh.read()
+    def each(self):
+        for path in REAL_DIAGS:
+            with open(path, encoding="utf-8") as fh:
+                yield path, fh.read()
 
     def test_fixed_values_readable(self):
-        for pat, what in ((r"^  patch_sha256: ([0-9a-f]{64})$", "patch"), (r"^  layout_shift_sha256: ([0-9a-f]{64})$", "layout"),
-                          (r"^- b1 = ([0-9a-f]{40})$", "b1"), (r"^- oldcode = ([0-9a-f]{40})$", "oldcode")):
-            summ.diag_field(self.text, pat, what)
+        for _, text in self.each():
+            for pat, what in ((r"^  patch_sha256: ([0-9a-f]{64})$", "patch"), (r"^  layout_shift_sha256: ([0-9a-f]{64})$", "layout"),
+                              (r"^- b1 = ([0-9a-f]{40})$", "b1"), (r"^- oldcode = ([0-9a-f]{40})$", "oldcode")):
+                summ.diag_field(text, pat, what)
 
     def test_patch_sha_matches_files(self):
-        base = os.path.dirname(REAL_DIAG)
-        for rel, pat in (("../resident-chain-ab-3257/bench-resident-chain.patch", r"^  patch_sha256: ([0-9a-f]{64})$"),
-                         ("layout-shift.patch", r"^  layout_shift_sha256: ([0-9a-f]{64})$")):
-            with open(os.path.join(base, rel), "rb") as fh:
-                self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), summ.diag_field(self.text, pat, rel))
+        for path, text in self.each():
+            base = os.path.dirname(path)
+            for rel, pat in (("../resident-chain-ab-3257/bench-resident-chain.patch", r"^  patch_sha256: ([0-9a-f]{64})$"),
+                             ("layout-shift.patch", r"^  layout_shift_sha256: ([0-9a-f]{64})$")):
+                with open(os.path.join(base, rel), "rb") as fh:
+                    self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), summ.diag_field(text, pat, rel))
 
     def test_rotation_matches_tool_arms(self):
-        rows = re.findall(r"^  r([1-5]): (.+)$", self.text, re.M)
-        self.assertEqual(len(rows), 5)
-        n = len(summ.ARMS)
-        for r, order in rows:
-            start = (int(r) - 1) % n
-            want = [summ.ARMS[(start + i) % n] for i in range(n)]
-            self.assertEqual(order.split(), want)
+        for _, text in self.each():
+            rows = re.findall(r"^  r([1-5]): (.+)$", text, re.M)
+            self.assertEqual(len(rows), 5)
+            n = len(summ.ARMS)
+            for r, order in rows:
+                start = (int(r) - 1) % n
+                want = [summ.ARMS[(start + i) % n] for i in range(n)]
+                self.assertEqual(order.split(), want)
 
     def test_arm_list_in_diag(self):
-        for a in summ.ARMS:
-            self.assertIn(f"- {a}: ", self.text)
+        for _, text in self.each():
+            for a in summ.ARMS:
+                self.assertIn(f"- {a}: ", text)
+
+    def test_r2_runner_and_helper_sha_match_files(self):
+        _, text = list(self.each())[1]
+        for name, pat in (("run_diag_resident_chain_cpu.sh", r"^  runner_sha256: ([0-9a-f]{64})$"),
+                          ("diag_layout_symbols.py", r"^  layout_helper_sha256: ([0-9a-f]{64})$")):
+            with open(os.path.join(HERE, name), "rb") as fh:
+                self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), summ.diag_field(text, pat, name))
+
+
+def nm_text(path, sep=" "):
+    """コミット済みの r1 ダンプ（`name addr`）を nm 生出力の形（`addr T name`）へ並べ替える。"""
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for ln in fh.read().splitlines():
+            name, addr = ln.split()
+            out.append(f"{addr} T {name}")
+    return "\n".join(out) + "\n"
+
+
+class LayoutSymbolsTest(unittest.TestCase):
+    """r1 停止の回帰（v0 mangling）と fail-closed 条件。"""
+
+    def r1(self, node):
+        d = os.path.join(DIAG_DIR, node)
+        a = lsym.parse_nm(nm_text(os.path.join(d, f"nm-diag-b1-3611-{node}.txt")), "B1")
+        b = lsym.parse_nm(nm_text(os.path.join(d, f"nm-diag-b2-3611-{node}.txt")), "B2")
+        return a, b
+
+    def test_r1_dumps_macmini_diff_2(self):
+        diff, keys, _ = lsym.compare(*self.r1("macmini"))
+        self.assertEqual((diff, keys), (2, 2))
+
+    def test_r1_dumps_gb10_diff_2(self):
+        diff, keys, _ = lsym.compare(*self.r1("gb10"))
+        self.assertEqual((diff, keys), (2, 2))
+
+    def sym(self, addr, name):
+        return f"{addr} T {name}\n"
+
+    def test_legacy_mangling(self):
+        def t(h, a):
+            return (self.sym(a, f"_ZN9fandhe_ai6compat10Sequential19train_step_resident17h{h * 16}E")
+                    + self.sym(a, f"_ZN9fandhe_ai6compat10Sequential16forward_resident17h{h * 16}E"))
+        diff, keys, _ = lsym.compare(lsym.parse_nm(t("a", "10"), "B1"), lsym.parse_nm(t("b", "20"), "B2"))
+        self.assertEqual((diff, keys), (2, 2))
+
+    def test_same_address_is_diff_0(self):
+        a, _ = self.r1("gb10")
+        diff, _, _ = lsym.compare(a, a)
+        self.assertEqual(diff, 0)
+
+    def test_duplicate_key_rejected(self):
+        t = (self.sym("1", "_RNvCsabc_9fandhe_ai19train_step_resident")
+             + self.sym("2", "_RNvCsdef_9fandhe_ai19train_step_resident"))
+        with self.assertRaises(lsym.Bad):
+            lsym.parse_nm(t, "B1")
+
+    def test_missing_required_symbol_rejected(self):
+        a, b = self.r1("gb10")
+        b = {k: v for k, v in b.items() if not k.endswith("16forward_resident")}
+        a = {k: v for k, v in a.items() if not k.endswith("16forward_resident")}
+        with self.assertRaises(lsym.Bad):
+            lsym.compare(a, b)
+
+    def test_no_common_key_rejected(self):
+        a, b = self.r1("gb10")
+        b = {k + "x": v for k, v in b.items()}
+        with self.assertRaises(lsym.Bad):
+            lsym.compare(a, b)
+
+    def test_non_hex_address_rejected(self):
+        with self.assertRaises(lsym.Bad):
+            lsym.parse_nm("zz T _RNvCsabc_9fandhe_ai19train_step_resident\n", "B1")
+
+    def test_cs_inside_identifier_not_normalized(self):
+        # Cs…_ の直後が数字・u でない位置（識別子の途中）は潰さない。
+        name = "_RNvCsabc_9fandhe_ai6Cslike_x19train_step_resident"
+        self.assertEqual(lsym.normalize(name), "_RNvC9fandhe_ai6Cslike_x19train_step_resident")
+
+    def test_one_underscore_extra_prefix_unified(self):
+        self.assertEqual(lsym.normalize("__RNvCsabc_9x"), lsym.normalize("_RNvCsxyz_9x"))
+
+
+class RunnerShaFieldTest(unittest.TestCase):
+    """DIAG に runner／helper の sha 行があるときだけ env_info との一致を必須にする。"""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def build(self, with_diag_sha, with_env_sha, env_sha="9" * 64):
+        extra = f"  runner_sha256: {'7' * 64}\n  layout_helper_sha256: {'8' * 64}\n" if with_diag_sha else ""
+        global DIAG
+        saved = DIAG
+        DIAG = saved + extra
+        try:
+            fx = Fixture(self._td.name)
+            fx.build({})
+        finally:
+            DIAG = saved
+        if with_env_sha:
+            with open(f"{fx.d}/env_info-diag-{LABEL}.txt", "a") as fh:
+                fh.write(f"runner_sha256={env_sha}\nlayout_helper_sha256={'8' * 64}\n")
+        return fx
+
+    def test_without_diag_fields_passes(self):
+        self.assertEqual(case_of(self.build(False, False).run()), "i")
+
+    def test_env_mismatch_rejected(self):
+        with self.assertRaises(summ.Undet):
+            self.build(True, True).run()
+
+    def test_env_missing_rejected(self):
+        with self.assertRaises(summ.Undet):
+            self.build(True, False).run()
+
+    def test_env_match_passes(self):
+        self.assertEqual(case_of(self.build(True, True, "7" * 64).run()), "i")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,86 @@
+DIAG fixed-at-utc: 2026-10-27T18:05:03Z
+DIAG-r2: 2 回目の事前登録（本ファイル。DIAG.txt は 1 回目の凍結記録で変えない）。r1（DIAG.txt）は precheck の主要シンボル突き合わせの正規化不備（v0 mangling のクレート識別子 Cs<base62>_ がビルドパスで変わる）で両機体とも計測 0 本で止まった。r2 は正規化のみを直し、同じ設計で再登録した。r1 の結果は無い。
+issue: #3611（#3257 の参考系列で CPU の train セルが両機体とも REGRESS: Mac mini ratio_ab 1.004〔ratio_r 0.948〜1.018〕・GB10 ratio_ab 1.059〔ratio_r 0.893〜1.102〕。出典 docs/perf/logs/resident-chain-ab-3257/judge-3257.md）
+doc: docs/compat-resident-train-step-decision.md §17.5（結果の記録先）
+本ファイルは診断手順であり判定ツール（judge_resident_chain_ab.py）の入力ではない。計測より前に固定する。resident-chain-ab-3257/RULE.txt とその判定記録は変えない。閾値・round 数・判定方法・tolerance・baseline・依存は変えない。
+診断は分類であり、IMPROVE／REGRESS の判定ではない。是正の要否は所有者が判断する（本 issue の中でコードは直さない）。
+#3257 の before と after は同じバイナリ（--mode reuse／--mode chain）だったため、#3257 の腕の差は「別ビルドの違い」では説明できない。本診断が検証するのは「reuse→chain の差が、A/A のノイズ幅より大きいか」「配置をずらした再ビルドでも同じ向き・同じ大きさで残るか」である。
+
+[対象]
+- 3 つのツリー（すべて bench-resident-chain.patch を適用する。ランナーは各ツリーの HEAD を .rev-stamp で照合する）:
+- b1 = a8e91f0c99fa40b0bbdb26a8ebd7f05f08ecf9d0
+- oldcode = 786d18b50e54de32aaec93228307a4207a7b4c08
+- b1 は fandhe-ai の版が 0.11.0 のまま crates/ を最新化した最後の main コミット（#3622）。次のコミット #3623 が workspace 版を 0.12.0 へ上げ、bench-fandhe の `fandhe-ai = "=0.11.0"` ピンが path patch に解決されなくなるため、HEAD の main は #3273（ピン更新）まで計測できない。b1 と main（7ae520e43）の差は crates/ 配下の Cargo.toml の版数のみで、.rs は同一。
+- oldcode は #3257 の runner（#3584）。b1 との crates/ の差は `git diff --stat 786d18b50 a8e91f0c9 -- crates` の 14 ファイル・約 3300 行（tensor-core の backend_ops.rs・autodiff の device_store/train_chain.rs ほか）。
+- 記号: B1 = b1 のツリー、B0 = oldcode のツリー、B2 = B1 と同じソース + layout-shift.patch（別 target-dir でビルド）。
+- 計測専用パッチ（crates/ へはコミットしない）:
+  patch_sha256: 92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819
+  layout_shift_sha256: 7ccd4b26a327da8ab4ed8759845cccc399afcc37218b4e9b116da489f9f929a0
+- patch = docs/perf/logs/resident-chain-ab-3257/bench-resident-chain.patch（B0・B1・B2 の全ツリーへ適用。--mode chain の追加と BENCH_PARAM_DIGEST のみ）。
+- layout_shift = docs/perf/logs/resident-chain-cpu-train-diag-3611/layout-shift.patch（B2 にだけ、patch の後に適用。bench-fandhe/src/main.rs に環境変数 BENCH_LAYOUT_PAD_3611 が設定されたときだけ呼ばれる #[inline(never)] の約 480 文の関数を足し、後続関数のコード配置だけをずらす。計測では環境変数を設定しないので実行されない。数値計算には触れない）。
+
+[腕（すべて CPU・train・size=64・TF32 OFF・--graph なし・BENCH_PARAM_DIGEST=1・RAYON_NUM_THREADS は unset・BENCH_LAYOUT_PAD_3611 は unset。candle・torch は計測しない）]
+- aa0: B1 のバイナリ、--mode reuse
+- aa1: aa0 と同じファイルを再度起動、--mode reuse（A/A。ノイズ幅の基準）
+- ch1: B1 のバイナリ、--mode chain
+- rb0: B2 のバイナリ、--mode reuse
+- rb1: B2 のバイナリ、--mode chain
+- o0: B0 のバイナリ、--mode reuse
+- o1: B0 のバイナリ、--mode chain
+- 7 腕。B0・B1・B2 の 3 本のバイナリの sha256 は互いに異なること（同じなら配置の対照にならないので停止）。
+- 主要シンボルの突き合わせ（r2 で定義。scripts/bench/framework-compare/diag_layout_symbols.py）: B1 と B2 の `nm` 生出力から `train_step_resident`・`forward_resident` を含む名前を取り、次の正規化キーで突き合わせる。legacy mangling は末尾の `17h<16hex>E` を除く。v0 mangling は先頭の `_+R` を `_R` に揃え、`Cs<base62>_`（直後が数字または `u`）を `C` へ置換する。正規化キーが同じで、アドレスが異なるキーの数を layout_symbol_diff とする。1 以上であること（配置がずれた証拠。0 なら停止）。
+- 突き合わせの fail-closed 条件（停止）: 同一バイナリ内で正規化キーが重複する／B1・B2 のどちらかに `19train_step_resident`・`16forward_resident` で終わるシンボルが無い／両者で共通のキーが無い／共通キーが 0 件。
+- 固定する実装（計測前に確定）:
+  runner_sha256: 969a49e44c7f8f0ce34f574931bc7224b49f4c98b510c41285af86aad8528fd0
+  layout_helper_sha256: 70a7b2cfb683271b80e64a586e9d047862c377228b12c5753be368b47b82d788
+- ラベル: 3611r2-macmini・3611r2-gb10。
+
+[手順]
+- 5 round 固定（AB_ROUNDS が 5 以外なら拒否）。プロセスは独立起動。run の差し替え・追加起動・腕の除外はしない。同じラベルの既存出力があれば停止。
+- 起動順の回転（基準順 L = aa0, aa1, ch1, rb0, rb1, o0, o1。round r は L の位置 (r-1) mod 7 から巡回）:
+  r1: aa0 aa1 ch1 rb0 rb1 o0 o1
+  r2: aa1 ch1 rb0 rb1 o0 o1 aa0
+  r3: ch1 rb0 rb1 o0 o1 aa0 aa1
+  r4: rb0 rb1 o0 o1 aa0 aa1 ch1
+  r5: rb1 o0 o1 aa0 aa1 ch1 rb0
+- 全ビルドを計測の前に済ませる。計測中のビルド並走禁止（同一機体。機体間の並走は可）。
+- precheck（fail-closed）: B0・B1 の .rev-stamp（1 行目が実 HEAD と一致・2 行目が dirty=0）。B0 の HEAD が oldcode、B1 の HEAD が b1 と一致。各ツリーが「HEAD + patch」だけ（B2 は + layout_shift）であること（一時 index による完全一致）。("train", "chain", false) の分岐の存在。パッチの sha256 が本ファイルの値と一致。cargo tree で fandhe-ai が各ツリーの crates/facade に解決される。
+- ランナー: scripts/bench/framework-compare/run_diag_resident_chain_cpu.sh。集計: scripts/bench/framework-compare/summarize_diag_resident_chain_cpu.py（本ファイルの [分類規則] を機械適用する）。
+
+[負荷ゲート]
+- Mac mini: load1 < 3.0。round 前に ab_round_cooldown.sh（AB_ROUND_COOLDOWN_MAX_LOAD1=3.0）を通し、pmset -g therm を前後で記録する。待機は 30 秒間隔・最大 30 分。
+- GB10: load1 < 1.0 を 30 秒間隔・最大 30 分待つ（CPU 専用なので GPU 使用率は見ない）。
+- 不通過 round を含む系列は判定不能。
+
+[機体の同定]
+- Mac mini: sysctl -n machdep.cpu.brand_string が "Apple M4" に完全一致（M4 Max 開発機の値は使わない）。
+- GB10: uname -m = aarch64。nvidia-smi の GPU 名を env_info に記録する（GB10 を含むこと）。
+
+[hard 条件]
+- 最終 loss の checksum と PARAM_DIGEST が全 run・全腕で一致。欠落は不一致として扱う。不一致は「判定不能（正しさの失敗）」として記録して止まり、所有者へ報告する。
+
+[分類規則（分類であり判定ではない。事後に変えない）]
+- 腕 a の代表値 = 5 run の median_s の中央値。比 rho(a) = 代表値(a) / 代表値(aa0)。round 内比 rho_r(a) = 同じ round の a の median_s / aa0 の median_s。
+- ノイズ幅 N = max(|rho(aa1) - 1|, max_r |rho_r(aa1) - 1|)。
+- D1 = rho(ch1) - 1（B1 での chain/reuse）。D2 = rho(rb1) / rho(rb0) - 1（B2 での chain/reuse）。P = |rho(rb0) - 1|（reuse の配置感度）。
+- c1 = rho_r(ch1) > 1 の round 数。c2 = 同じ round の rb1 / rb0 > 1 の round 数。
+- (i) ノイズ幅内: |D1| <= N かつ |D2| <= N。
+- (ii) チェーン化の後退: D1 > N かつ D2 > N かつ c1 >= 4 かつ c2 >= 4。→ CPU train の内訳（GEMM・autodiff・チェーン化の固定費）を測る腕を、別名の規則 DIAG-breakdown.txt で計測前に登録してから測る。
+- (iii) 配置の影響: (i)・(ii)・(iv) に当たらず、D1 と D2 の一方だけが N を超える、または両方が N を超えて符号が逆、かつ P > N。
+- (iv) chain が速い: D1 < -N かつ D2 < -N。報告して止める。
+- (v) 判定不能: 上のどれにも当たらない。報告して止める（推定で埋めない）。
+- 判定の順序: (i)、(iv)、(ii)、(iii)、(v)。境界（等号）は (i) 側（<= N）に倒す。
+- 併記（分類は変えない）: B0 の o1/o0 - 1（#3257 時点のコードでの chain/reuse）と、N・D1 との関係。N が観測差より大きいときに (i) になるのは規則上の帰結であり、正当な結果として記録する。round 数の追加・閾値の変更で白黒を付けにいかない。
+
+[事前表明する仮説（推定・合格ラインではない）]
+- GB10 は run 内のばらつきが大きく（#3257 の q3 は中央値の 50〜80% 超の IQR）、(i) の見込み。Mac mini の +0.4% も (i) の見込み。
+- (ii) になる場合の候補（推定）: 出力先を再利用する毎 step の fill(0.0)（crates/backend-cpu/src/ops_train_chain_parts.rs）・チェーンの事前検証・begin_device_chain_scope の dyn 呼び出し。減りうるコスト: reuse 経路の毎 step の Tape 構築と確保。
+
+[限界]
+- r2 の追記: b1 は、版 0.11.0 時点で crates/ が最新だった最後のコミットとして固定する。r2 登録時点では #3273 でピンが 0.12.0 へ更新済みで、main の crates/ は b1 から約 2000 行進んでいる（上の [対象] の「HEAD の main は #3273 まで計測できない」「b1 と main の .rs は同一」は r2 時点では古い）。B1 の結果は HEAD の結果ではない。b1 を据え置くのは、r1 で両機体のビルド成功と bench パッチの適用を確認済みで、設計を変えないため。HEAD への切り替えは所有者が判断できる。
+- 機体ごとに 1 系列・5 round・別ビルド比較で検出力は限られる。公開面からはチェーンが Tape 経路へフォールバックしたかを観測できない（docs/compat-resident-train-step-decision.md §16）。checksum の一致は bit 同一の証明ではない（PARAM_DIGEST で補う）。
+- HEAD の main の crates/ は b1 と .rs 同一だが、#3257 の計測と同じコードではない（oldcode との差が約 3300 行）。B1 の結果を #3257 と同じコードの結果として書かない。結び付けは B0 の併記による。
+- B2 は B1 と別パスの別ビルド。配置以外のビルド差（パス・メタデータハッシュ）も含む。
+
+[ドリフトガードの除外]
+- 負荷ゲート定数（load1 閾値・待機上限）のドリフトガードテストは最初から作らない。
