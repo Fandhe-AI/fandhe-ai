@@ -362,4 +362,5 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 
 - **状態**: GB10 実測済み（2026-10-27 UTC・計測ツリー `e2660eba0`。規則 §8 追記を参照）。機械出力の分類は 2 セルとも **非再現（ノイズ帯・判定不能）**、前提ゲートはすべて成立（`docs/perf/logs/sme-gb10-attribution-3613/aggregate-gb10.md`。性能解釈は perf doc §5.15）。§12.8 の条件 2 の欄は変更しない。
 - 本節は `unsafe`・FMA 契約・tolerance・baseline・REQ-8 の手動境界検査を変更しない。Rust コード（`crates/`）の変更はない。パッチは計測ツリー専用で main には入れない。
-- 既定 ON へ戻すか・次の手（再 A/B・是正）の要否: **所有者判断待ち**（承認は未取得）。
+- **所有者判断（2026-10-28 訂正。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3613#issuecomment-6446047066。原文は同コメントを正とする）**: `SME_PRODUCTION_ENABLED` は #3580 の既定 OFF（`false`。`crates/backend-cpu/src/gemm_blis/mod.rs:3555`）のまま据え置く。#3232 の REJECT は事前登録規則の結論で、条件の異なる非再現（#3635 による reuse 経路変更という交絡あり）では覆さず、既定 ON へ戻すのは新しい事前登録 A/B で合格したときに限る。2 セルの後退は非再現（ノイズ帯・判定不能、`kernel_enabled` は 3 腕とも false）として記録し、是正・再 A/B は行わない。`RULE.txt` §8 追記（計測ツリー `e2660eba0`）は事後承認済み。併記セル train 64 fresh の 5/5 後退は記録のみ。
+- 本判断の記録は `unsafe`・定数・コードを変更しない。§12.8 の受理条件・§12.11 の所見も変更しない。

@@ -7,7 +7,7 @@ NEON 直接カーネル (A) を再検討するかの前提データ（pack が�
 
 - **実測済み（2026-10-27）**。GB10 と Mac mini で 5 round 完走（負荷ゲート各 20/20 pass、`DONE` あり、`run.out` に完走を記録）。ログは `gb10/`・`macmini/`、集計は `aggregate.md`（終了コード 0 は `aggregate.exit`）。
 - 判定（native 腕）: GB10 **NOT_PACK_MAIN**（S_A 中央値 0.1492・0/5）、Mac mini **NOT_PACK_MAIN**（S_A 中央値 0.1737・0/5）。詳細と注記（L2 の分解能不足・摂動）は決定記録 §7.1。
-- (A) を再検討するかの所有者判断は未記録（所有者確認待ち）。本ディレクトリの記録は所有者の承認を意味しない。
+- 所有者判断済み（2026-10-28。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3614#issuecomment-6445943222）: 両機体とも NOT_PACK_MAIN のため NEON 直接カーネル (A) は再検討しない。本ディレクトリの計測値・`RULE.txt` は変えていない。
 
 ## 収録物
 

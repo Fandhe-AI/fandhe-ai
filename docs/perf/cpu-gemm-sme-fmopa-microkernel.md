@@ -936,7 +936,7 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
 - **構造上の注意（計測前に記録）**: HEAD で定数を使う本番コードは `sme_kernel_for_shape` だけ（`mod.rs:3589〜3595`）のため、prime は before とほぼ同じコードに畳まれる。組 1（before/prime）は実質 A/A 対照、帰属を見分けるのは組 2（prime/after。`try_new()` 呼び出しの有無）。バイナリ sha256 の差は帰属の根拠にしない（パス埋め込みのため）。
 - 分類（RULE §4）: 非再現（ノイズ帯・判定不能）／方法感度（判定不能）／SME 経路の選択ロジックに帰属／再現したが未分離（ノイズ帯）／FAIL／undetermined（前提不成立）。**非再現・判定不能も正式な結果**として記録する（§5.7 は未分離だった）。
 - **計測ツリー**: 規則冒頭の「3e5d41016 直系」のツリーでは bench-fandhe の固定版 `=0.11.0` と workspace `0.12.0` が食い違い、A/B 本体の path patch が使われず `cargo tree` 検査で必ず失敗する（推論。`1276ff3863` での実ビルド確認は省略）。
-  PR #3634 の squash 後 `e2660eba0` では固定版が `=0.12.0` で解決する。`crates/` の backend-cpu・facade・tensor-core・autodiff は `3e5d41016` との差分なしを確認した。計測前に `RULE.txt` §8 へ追記し、閾値・分類表は変えていない（所有者の事後確認対象）。
+  PR #3634 の squash 後 `e2660eba0` では固定版が `=0.12.0` で解決する。`crates/` の backend-cpu・facade・tensor-core・autodiff は `3e5d41016` との差分なしを確認した。計測前に `RULE.txt` §8 へ追記し、閾値・分類表は変えていない。この §8 追記は所有者が事後承認済み（2026-10-28。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3613#issuecomment-6446047066）。
   固定の証跡: 本 PR 内の §8 追記コミット（squash merge で SHA は消えるため、正は `gb10/prereg_append.txt` の sha256 と時刻）。`gb10/prereg_append.txt`（追記後 RULE.txt の sha256 と準備時刻 2026-10-27T07:12:30Z）が `gb10/hwlock.log` の acquired（07:13:03Z）より前。
 - **結果（機械出力。`docs/perf/logs/sme-gb10-attribution-3613/aggregate-gb10.md` を正とする。ログ: `.../gb10/`）**:
   - 前提ゲート: P-TREE・P-R0・P-BIT・P-RT・P-LOCK・P-GATE・P-RUNAB・P-COLLECT すべて成立。腕: before=`e2660eba0`／prime・after=それぞれ `+on-arm-prime.patch`／`+on-arm.patch`（`gb10/rev-stamp.txt`）。
@@ -947,4 +947,10 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
   - 腕別 bench sha256（参考。パス埋め込みのため帰属の根拠にしない）: before `4f2c2a27…`・prime `4aa35fd0…`・after `35f3f528…`（`gb10/bench_sha256.txt`）。
   - 計測は 07:13:03Z〜07:17:55Z（ロック保持時間）。PyTorch は GB10 に venv がないため未計測（RULE §5）。
 - **交絡の注記**: #3635 で bench-fandhe の `--mode reuse` が常駐入力経路へ変わり、`gemm 2048 reuse` は #3232 の旧 Tape 経路と同一条件ではない。今回は非再現のため「後退がハーネス変更で消えた」可能性と「#3232 の後退がノイズだった」可能性を本計測では区別できない。
-- 次の手（選択肢。いずれも **所有者判断待ち（承認未取得）**。本 issue では定数の切替・是正・新規 issue 起票を行わない）: (a) 現状維持（既定 OFF）、(b) 新しい事前登録での既定 ON の再 A/B（旧 Tape 経路相当の条件を含めるか）、(c) 計測方式の変更（round 数・ノイズ帯の見積り）。
+- **所有者判断（2026-10-28 訂正。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3613#issuecomment-6446047066。判断の原文は同コメントを正とする）**:
+  - `SME_PRODUCTION_ENABLED` は #3580 で既定 OFF（`false`。`crates/backend-cpu/src/gemm_blis/mod.rs:3555`）に戻してあり、**OFF のまま据え置く**。本 PR は定数・コードを変更しない。
+  - #3232 の REJECT は事前登録規則による結論で、条件の異なる非再現（#3635 で reuse の経路が変わった交絡あり）では覆さない。既定 ON に戻すのは、新しい事前登録 A/B で合格したときに限る。
+  - GB10 の 3 腕 A/B で 2 セル（`gemm 256 fresh`・`gemm 2048 reuse`）の後退は非再現（ノイズ帯・判定不能、`kernel_enabled` は 3 腕とも false）として記録する。是正・再 A/B は行わない（選択肢 (b)・(c) は採らない）。
+  - 計測ツリーを `e2660eba0` に変えた `RULE.txt` §8 追記は事後承認する。
+  - 併記セル train 64 fresh の 5/5 後退（pair0・pair2）は本節への記録のみとし、別 issue は起票しない。
+  - 計測値・規則・閾値・tolerance・baseline は不変。

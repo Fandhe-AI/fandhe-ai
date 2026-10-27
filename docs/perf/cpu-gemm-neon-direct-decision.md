@@ -115,7 +115,7 @@
   - 限界は RULE §13（plain GEMM 入口であり `bias_act` 融合経路ではない・L1 dX が本番で実行されるかは未確認・kernel 区間は端タイルのコピーを含む）。RULE §14 のとおり閾値は実装側が登録した値で、所有者が承認した定数ではない
   - 計測条件: `.rev-stamp` は両機体とも SHA `3e17739b0f0795677ce085ba4bdb8ea54db8e774`・ツリー指紋 `74d7c88267db8c531689212248094329b1a14b8fe4334f1ed1bfed0410b20af7`。診断パッチ sha256 `0b748dc0…7549` 一致。実機ロックの保持は GB10 07:47:12Z〜約 07:48:30Z・Mac mini 07:56:50Z〜約 08:01:40Z（ノード時計の UTC）。ログは `docs/perf/logs/cpu-pack-kernel-breakdown-3614/{gb10,macmini}/`（`bin_sha256.txt`・`load_gate.log`・`hwlock.log` を含む）
   - 事実整理（結論ではない）: 事前登録した式では pack 主因とは言えない。一方 L1 fwd・dX の s_pack（A＋B）は 0.24〜0.41 で、sA だけを見る判定式が (A) の効果の上限を表す点は RULE §10 の定義による
-- (A) を再検討するかの所有者判断: **未記録（所有者確認待ち）**。本節の追記は所有者の承認を意味しない
+- (A) を再検討するかの所有者判断（2026-10-28。出典: https://github.com/Fandhe-AI/fandhe-ai/issues/3614#issuecomment-6445943222）: 両機体とも NOT_PACK_MAIN（PR #3644）のため、NEON 直接カーネル (A) は再検討しない。本節の計測値・RULE の閾値は変えていない（RULE §14 のとおり閾値は実装側が登録した値で、所有者が承認した定数ではない点も不変）
 
 ## 8. 変更していないもの
 
