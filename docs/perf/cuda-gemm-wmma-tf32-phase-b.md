@@ -126,11 +126,11 @@ cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release -- --sh
 | parity mean_abs_diff | 既存 baseline | 未計測 | 非後退確認 |
 
 「4096 の対 PyTorch 比 25.64% 超（目標 35%）」の確定は実機計測でのみ判定可能であり、本 PR の作成セッション
-では実機（`spark-dbd9`）へ到達できなかったため未計測のまま達成を主張しない。実機再計測はイシュー #502
+では実機（`<cuda-node>`）へ到達できなかったため未計測のまま達成を主張しない。実機再計測はイシュー #502
 （Phase B 完了時点の f32/f16 再計測）へ引き継ぐ。
 
 **#502 実装セッション（2026-08-16）追記**: 引き継ぎ先の #502 セッションでも
-`docs/real-hardware-verification-env.local.md` が worktree に存在せず `spark-dbd9` の名前解決ができない
+`docs/real-hardware-verification-env.local.md` が worktree に存在せず `<cuda-node>` の名前解決ができない
 ため実機へ到達できず、本表は依然として未計測のまま確定させた（詳細・再実行手順は
 `docs/perf/cuda-gemm-mma-pipeline.md`「Phase B 完了時点の再計測（#502）」節）。
 

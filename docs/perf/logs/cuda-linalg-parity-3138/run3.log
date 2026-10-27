@@ -1,0 +1,53 @@
+== run3 2026-10-27T11:27:47Z
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/linalg_lu_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_lu_parity-c7725717d4b9a9d2)
+
+running 6 tests
+test lu_det_matches_cpu_on_device ... ok
+test lu_det_matches_cpu_on_device_set ... ok
+test lu_inv_matches_cpu_on_device ... ok
+test lu_singular_maps_like_cpu_on_device ... ok
+test lu_solve_matches_cpu_on_device ... ok
+test nvrtc_compiles_and_loads_lu_kernels_on_device ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.28s
+
+cmd=1 rc=0
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/linalg_factor_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_factor_parity-fc67e9fe5e44965f)
+
+running 6 tests
+test cholesky_matches_cpu_on_device ... ok
+test cholesky_non_spd_is_invalid_argument_on_device ... ok
+test eigh_matches_cpu_on_device ... ok
+test eigh_non_convergence_is_invalid_argument_on_device ... ok
+test nvrtc_compiles_and_loads_factor_kernels_on_device ... ok
+test qr_matches_cpu_on_device ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.29s
+
+cmd=2 rc=0
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/linalg_gpu_optin_cuda_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_gpu_optin_cuda_parity-e5f0fd2b8801e5ec)
+
+running 6 tests
+test facade_cholesky_gate_on_matches_cpu ... ok
+test facade_det_gate_on_matches_cpu ... ok
+test facade_eigh_gate_on_matches_cpu ... ok
+test facade_inv_gate_on_matches_cpu ... ok
+test facade_qr_gate_on_matches_cpu ... ok
+test facade_solve_gate_on_matches_cpu ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+cmd=3 rc=0
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/linalg_ops_backend_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_ops_backend_parity-c6c7c95d291ba1bb)
+
+running 2 tests
+test cuda_eigh_forward_matches_cpu_reference ... ok
+test cuda_pinv_forward_matches_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.21s
+
+cmd=4 rc=0

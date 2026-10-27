@@ -1,5 +1,5 @@
 2026年 10月 25日 日曜日 19:10:47 UTC
-Linux spark-dbd9 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+Linux <cuda-node> 6.17.0-1031-nvidia #31-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 24 22:03:06 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
 name, driver_version
 NVIDIA GB10, 580.173.02
 Cuda compilation tools, release 13.0, V13.0.88

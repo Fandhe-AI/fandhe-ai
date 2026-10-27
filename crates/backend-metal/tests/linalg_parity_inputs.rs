@@ -89,3 +89,25 @@ pub fn qr_input(m: usize, n: usize) -> Tensor<f32> {
         .collect();
     t(d, &[m, n])
 }
+/// #3139 の記録専用診断の共通出力（判定ではない）。`a`・`b` を `fandhe_ai_backend_cpu::compare`
+/// （REQ-2 の統一複合判定。定数は不変）で突合し、集計と「判定を外れた要素」の添字・値を `println!` する。
+/// 要素単位の可否は長さ 1 の `compare` を再利用して得る（判定式を書き直さない）。
+/// `linalg_parity.rs`（実機）と `linalg_model_parity.rs`（Linux 可）の `#[ignore]` 診断から呼ばれる。
+pub fn diag_compare(tag: &str, an: &str, a: &[f32], bn: &str, b: &[f32], cols: usize) {
+    use fandhe_ai_backend_cpu::compare;
+    let rep = compare(a, b).expect("same length");
+    println!(
+        "DIAG {tag} {an}-vs-{bn}: fail_count={}/{} max_abs_diff={:e} max_rel_err={:e}",
+        rep.fail_count, rep.total, rep.max_abs_diff, rep.max_rel_err
+    );
+    for (i, (&x, &y)) in a.iter().zip(b).enumerate() {
+        let one = compare(&[x], &[y]).expect("len 1");
+        if one.fail_count != 0 {
+            println!(
+                "DIAG {tag} {an}-vs-{bn} FAIL [{},{}]: {an}={x:e} {bn}={y:e}",
+                i / cols.max(1),
+                i % cols.max(1)
+            );
+        }
+    }
+}

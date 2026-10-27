@@ -13,6 +13,11 @@
   注記する（表示のみ。旧条件での勝敗は swap_fandhe_arm.py で入力を置き換えて同じ生成器をもう 1 回かける。判定経路は 1 本）。
 - --unreached-tsv: 1.0 以下のセルの届かなかった理由（ハードの上限／計測窓の定義／自分たちの制約）の表。分類が 3 種以外・比が
   数値でない行は SystemExit（寛容にパースしない）。未指定なら「0.12.0 は未実測」と 0.11.0 の分類の出典だけを出す。
+  所有者判断（2026-10-27・#3274）により、表示専用のラベル「分類保留」（数字で 3 分類に割り当てられなかったセル。G-CPU-INF）を
+  4 つ目の許容値として加えた。ほかの文字列は引き続き SystemExit。判定経路（judge／paired_ratio）には関わらない。
+- --oldarm-out／--prev-out: 旧条件（gen_0120_oldarm.out）と前版（0.11.0 の gen_0110_macmini.out）の tally 行を読み、新条件と
+  3 条件の tally 表を並べる（所有者判断 2026-10-27: 新条件を正式値とし旧条件を併記）。tally 行が 1 行でない・形式が違う・
+  判定行数が total と合わないときは SystemExit。旧条件の勝敗はこの生成器を旧腕置換の入力でもう 1 回かけた出力で、判定経路は 1 本のまま。
 
 判定規則（変えていない。0.11.0 版の関数群と字句で同じ）: 同一 run 内の対戦相手比の 5 run 中央値で区分する
 （>1 で 1 位、0.90 以上で僅差、それ未満は負け。RULE.txt の主判定）。parity_fail_count>0 のセルは判定不能で順位に含めない。
@@ -23,6 +28,7 @@ fandhe-ai／candle の `tf32: true` 行は f32 判定から除外し、burn の 
 --m4-runs／--m4-alt-runs／--gb-runs（run1〜run5 を含む親ディレクトリ）。
 """
 import argparse
+import re
 import statistics
 import json
 import html
@@ -71,6 +77,8 @@ def parse_args():
     p.add_argument('--m4-old', default='', help='旧条件腕の Apple 機 fandhe-ai 行（5 run 中央値）JSONL。判定セルに注記するだけ（任意）')
     p.add_argument('--gb-old', default='', help='旧条件腕の GB10 fandhe-ai 行（5 run 中央値）JSONL。判定セルに注記するだけ（任意）')
     p.add_argument('--unreached-tsv', default='', help='1.0 以下のセルの理由表 TSV（セルID・機体・比・分類・理由・出典。任意）')
+    p.add_argument('--oldarm-out', default='', help='旧条件の判定一覧（gen_0120_oldarm.out）。tally を 3 条件表に併記する（任意）')
+    p.add_argument('--prev-out', default='', help='前版の判定一覧（0.11.0 の gen_0110_macmini.out）。tally を 3 条件表に併記する（任意）')
     return p.parse_args()
 
 
@@ -437,6 +445,7 @@ CSS = open(Path(__file__).with_name('style.css')).read()
 BODY = open(Path(__file__).with_name('body_0120.html')).read()
 
 UNREACHED_CLASSES = ('ハードの上限', '計測窓の定義', '自分たちの制約')  # loss-attribution-matrix.md §10.5 の 3 分類
+UNREACHED_HOLD = '分類保留'  # 所有者判断（2026-10-27・#3274）: 数字で 3 分類に割り当てられなかったセルの表示専用ラベル
 
 def unreached_table(path):
     """届かなかったセル（1.0 以下）の理由表を HTML にする。分類が 3 種以外・比が数値でない行・列数不一致は SystemExit。
@@ -457,17 +466,70 @@ def unreached_table(path):
             ratio_v = float(ratio)
         except ValueError:
             raise SystemExit(f'{path}:{n}: 比が数値でない: {ratio!r}')
-        if cls not in UNREACHED_CLASSES:
-            raise SystemExit(f'{path}:{n}: 分類が 3 種（{"／".join(UNREACHED_CLASSES)}）以外: {cls!r}')
+        if cls not in UNREACHED_CLASSES and cls != UNREACHED_HOLD:
+            raise SystemExit(f'{path}:{n}: 分類が 3 種（{"／".join(UNREACHED_CLASSES)}）と「{UNREACHED_HOLD}」以外: {cls!r}')
         if not reason.strip() or not src.strip():
             raise SystemExit(f'{path}:{n}: 理由と出典は必須')
         rows.append((cell, machine, ratio_v, cls, reason, src))
     if not rows:
         raise SystemExit(f'{path}: 行がない')
     e = html.escape
-    body = ''.join(f'<tr><th scope="row">{e(c)}</th><td>{e(m)}</td><td class="num">{r:.2f}×</td><td>{e(k)}</td><td>{e(why)}</td><td><small>{e(s)}</small></td></tr>'
+    def cls_html(k):
+        if k == UNREACHED_HOLD:
+            return f'<span class="pill solo" title="数字で 3 分類に割り当てられなかった（所有者判断 2026-10-27）">{e(k)}</span>'
+        return e(k)
+    body = ''.join(f'<tr class="ur"><th scope="row">{e(c)}</th><td>{e(m)}</td><td class="num">{r:.2f}×</td><td>{cls_html(k)}</td><td class="why">{e(why)}</td><td class="why"><small>{e(s)}</small></td></tr>'
                    for c, m, r, k, why, s in rows)
-    return ('<div class="wrap"><table><thead><tr><th>セル</th><th>機体</th><th>比（実測）</th><th>分類</th><th>理由（数字つき）</th><th>出典</th></tr></thead>'
+    counts = '・'.join(f'{k} {sum(1 for x in rows if x[3] == k)}' for k in UNREACHED_CLASSES + (UNREACHED_HOLD,))
+    return (f'<p class="note">対象 {len(rows)} セル（新条件の比が 1.00 以下）: {counts}。</p>'
+            '<div class="wrap"><table class="ur"><thead><tr><th>セル</th><th>機体</th><th>比（実測）</th><th>分類</th><th>理由（数字つき）</th><th>出典</th></tr></thead>'
+            f'<tbody>{body}</tbody></table></div>')
+
+def read_tally(path, label):
+    """判定一覧（gen_*.out）の tally 行を (win, near, loss, invalid, noise, total) で返す。寛容にパースしない。"""
+    lines = [l.rstrip('\n') for l in open(path, encoding='utf-8') if l.strip()]
+    tl = [l for l in lines if l.startswith('tally ')]
+    if len(tl) != 1 or lines[-1] != tl[0]:
+        raise SystemExit(f'{path}: tally 行が末尾に 1 行だけではない（{label}）')
+    m = re.fullmatch(r'tally (\d+) (\d+) (\d+) invalid (\d+) noise (\d+) total (\d+)', tl[0])
+    if not m:
+        raise SystemExit(f'{path}: tally 行の形式が違う（{label}）: {tl[0]!r}')
+    t = tuple(int(x) for x in m.groups())
+    if t[0] + t[1] + t[2] != t[5] or len(lines) - 1 != t[5]:
+        raise SystemExit(f'{path}: 勝ち＋僅差＋負け・判定行数が total と合わない（{label}）')
+    return t
+
+def gb_cpu_gemm_regress_note():
+    """GB10 CPU gemm の新腕 reuse/fresh 比と旧腕の同じ比を注記文にする（所有者判断 2026-10-27: 後退は注記で触れ、切り分けは #3646）。
+    5 run 中央値同士の比（表示のみ。判定には使わない）。旧条件腕の入力（--gb-old）が無ければ空文字。欠損は SystemExit。"""
+    if gb_old is None:
+        return ''
+    parts = []
+    for n in (256, 512, 1024, 2048, 4096):
+        vals = []
+        for d, nm in ((gb, '新腕'), (gb_old, '旧腕')):
+            ru = d.get(('fandhe-ai', 'gemm', 'cpu', n, 'reuse'))
+            fr = d.get(('fandhe-ai', 'gemm', 'cpu', n, 'fresh'))
+            if ru is None or fr is None:
+                raise SystemExit(f'GB10 CPU gemm N={n} の {nm} reuse／fresh が欠損')
+            vals.append((ru['median_s'] * 1e3, fr['median_s'] * 1e3))
+        (nr, nf), (orr, of) = vals
+        parts.append(f'N={n} 新腕 {nr:.3f}／{nf:.3f} ms（{nr / nf:.2f}）・旧腕 {orr:.3f}／{of:.3f} ms（{orr / of:.2f}）')
+    return '；'.join(parts)
+
+def cond_tally_table():
+    """新条件（正式値）・旧条件・前版の tally を 1 枚の表にする（所有者判断 2026-10-27: 新条件を正式値とし旧条件を併記）。"""
+    rows = [(f'新条件（{VER}・bench-fandhe 是正後）<b>＝正式値</b>', (len(wins), len(nears), len(losses), invalid_n, len(noisy), len(allrows)), '本ページの表'),]
+    if ARGS.oldarm_out:
+        rows.append((f'旧条件（{VER}・#3272 直前の bench-fandhe）', read_tally(ARGS.oldarm_out, '旧条件'), '<code>gen_0120_oldarm.out</code>'))
+    if ARGS.prev_out:
+        rows.append((f'{PREV_VER}（Mac mini 系列 B・GB10 {PREV_VER} 正式系列）', read_tally(ARGS.prev_out, PREV_VER), '<code>gen_0110_macmini.out</code>'))
+    if len(rows) == 1:
+        return ''
+    body = ''.join(f'<tr class="ct"><th scope="row">{name}</th><td class="num">{t[0]}</td><td class="num">{t[1]}</td><td class="num">{t[2]}</td>'
+                   f'<td class="num">{t[3]}</td><td class="num">{t[4]}</td><td class="num">{t[5]}</td><td><small>{src}</small></td></tr>'
+                   for name, t, src in rows)
+    return ('<div class="wrap"><table class="ct"><thead><tr><th>条件</th><th>1 位</th><th>僅差</th><th>負け</th><th>判定不能</th><th>ノイズ帯</th><th>計</th><th>出典</th></tr></thead>'
             f'<tbody>{body}</tbody></table></div>')
 
 def fwver(data, fw):
@@ -503,12 +565,14 @@ out = BODY.format(
              + card_train(gb, gb_prev, ('cuda', 'cpu'), 'GB10 MLP 学習 1 step') + card_infer(gb, gb_prev, ('cuda', 'cpu'), 'GB10 推論スループット'),
     tf32_card=card_tf32(),
     unreached_table=unreached_table(ARGS.unreached_tsv),
+    cond_tally=cond_tally_table(),
+    gb_cpu_regress=gb_cpu_gemm_regress_note(),
     gb_date=html.escape(ARGS.gb_date) if ARGS.gb_date else '未実測',
     gb_skipped=html.escape(ARGS.gb_skipped_note) if ARGS.gb_skipped_note else '記録なし',
     updated_h=html.escape(ARGS.updated) if ARGS.updated else '未実測',
     ver=VER, prev_ver=PREV_VER,
 )
-Path(ARGS.out).write_text(out)
+Path(ARGS.out).write_text(out, encoding='utf-8')
 
 # 検証出力
 for r in allrows:

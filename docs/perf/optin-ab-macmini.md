@@ -1,6 +1,6 @@
 # Mac mini の未計測 opt-in 候補 A/B（イシュー #3184）
 
-状態: **再開分の実測済み（2026-10-22 JST。Mac mini M4・事前登録コミット `c80d9818`）。正式系列が成立し、G1・G4 は REJECT（Mac mini 単機で確定）、G2・G3 は undetermined、G5 は継承集計器が ADOPT（#1520 を覆さず #3265 へ）、G6 は arm 別の判定語彙が出た、G7 は record_only（H1〜H3 未確定・H4 支持）**。詳細は「再開分の結果」節。
+状態: **再開分の実測済み（2026-10-22 JST。Mac mini M4・事前登録コミット `c80d9818`）。正式系列が成立し、G1・G4 は REJECT（Mac mini 単機で確定）、G2・G3 は undetermined、G5 は継承集計器が ADOPT（#1520 を覆さず #3265 へ）、G6 は arm 別の判定語彙が出た、G7 は record_only（再開分では H1〜H3 未確定・H4 支持。分解能を上げた r3 再測定〈#3618〉で H1〜H3 は支持）**。詳細は「再開分の結果」節・「G7 の分解能を上げた再計測（#3618）」節。
 初回（2026-10-21・main `26e60f63`）は正式系列が成立せず全ゲート undetermined だった（旧系列として残す。「初回の記録」節）。
 main の定数・環境変数既定は変更していない。規則は `logs/optin-ab-macmini-3184/RULE.txt`（初回）と `RULE-reopen.txt`（再開分。いずれも計測前に固定。継承 RULE も補遺も計測後に緩めていない）。
 
@@ -45,7 +45,7 @@ before／after／diag の 3 clone と GB10 の 2 clone は全て同じ `c80d9818
 | G4 `READBACK_DEST_DEFAULT`（2112） | **REJECT**（専有ゲート成立の系列） | 専有ゲート（load1 < 4.0 を 2 回連続）成立・全 round `cooldown=pass`。gemm reuse N=1024 1.0228・N=4096 1.0074・infer reuse 1.1604（全て > 1.00）。2112 は「専有ゲートが成立した系列でいずれかのセルが ratio > 1.00」で REJECT | 対象外 | **REJECT**（Mac mini を M4 Max 枠として扱う補遺 RULE 4 による） |
 | G5 readout legacy／borrowed（§15.1） | 継承集計器の総合判定は ADOPT（6 セル全て ≤ 1.00） | borrowed/legacy は 1024／fresh 0.9592・reuse 0.9688、2048／fresh 0.9773・reuse 0.9679、4096／fresh 0.9752・reuse 0.9750。専有ゲート成立・全 round `cooldown=pass`。#1520 の REJECT は覆さない（条件を変えた再測定）ため、採否は #3265 | 対象外 | #3265 へ「専有 Mac mini での再測定」として渡す。本イシューは既定を変えない |
 | G6 steel 候補（2111） | 正式系列（gate OK・`reference_only=False`）。LU: UNDETERMINED、T0U: **REJECT**、T0U-LU: **REJECT**、T0U-LU-FB: UNDETERMINED | T0U／T0U-LU は N=512 が 1.0378／1.0547 で 5/5 run 符号一貫の後退（REJECT の条件）。N=1024 以上は T0U 0.8987／0.7657／0.7748、T0U-LU 0.8903／0.7587／0.7575 と 10〜24% 速い。N=512 の結論には candle デバイス区分の仮定が未確認という注記が付く | 対象外 | Mac mini 固有の結果（M4 では本番が 32×32 タイルのため） |
-| G7 `METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED`（2114。ADOPT 判定なし） | record_only。H1〜H3 は**未確定**、H4 は**支持** | 集計器が fail-closed で停止（run2 の `provider_select` の `median_s` = 0.0。`tape_new` は median 4.1e-8・q1 0.0 で、計時分解能 41.67 ns を下回る）。集計器の正値検査は変えていないため H1〜H3 は推定で埋めない。H4 は (c) の出力を転記: host_fixed 368.7 us が wall 588.6 us の 63%（>= 50% で支持） | 対象外 | record_only |
+| G7 `METAL_DEVICE_VERIFY_CACHE_DEFAULT_ENABLED`（2114。ADOPT 判定なし） | record_only。H1〜H3 は**未確定**、H4 は**支持** | 集計器が fail-closed で停止（run2 の `provider_select` の `median_s` = 0.0。`tape_new` は median 4.1e-8・q1 0.0 で、計時分解能 41.67 ns を下回る）。集計器の正値検査は変えていないため H1〜H3 は推定で埋めない。**r3 再測定（#3618。`verify-cache-r3/`）で集計器が停止せず完走し、H1 = 0.80 支持・H2 = 約 11 ns（< 1 us）支持・H3 支持**（詳細は「G7 の分解能を上げた再計測（#3618）」節）。H4 は (c) の出力を転記: host_fixed 368.7 us が wall 588.6 us の 63%（>= 50% で支持） | 対象外 | record_only |
 
 機体間で判定が割れたゲート: G1（Mac mini REJECT／GB10 undetermined。GB10 の train fresh は 0.8648 と改善、Mac mini の train reuse は後退。2104 の規則上は REJECT が優先）。
 
@@ -59,7 +59,7 @@ before／after／diag の 3 clone と GB10 の 2 clone は全て同じ `c80d9818
 | G4 | `readback-r2/`（`split/`・`compare-gemm-readback.md`・`compare-infer-readback.md`） |
 | G5 | `readout-r2/`（`compare-readout.md`） |
 | G6 | `steel-r2/`（`aggregate.md`・`cooldown.log`・`env_info.txt`） |
-| G7 | `verify-cache-r2/`（`aggregate.err`・`h4c.log`・`env_info.txt`） |
+| G7 | `verify-cache-r2/`（`aggregate.err`・`h4c.log`・`env_info.txt`）。r3: `verify-cache-r3/`（`aggregate.md`・`timer-res.log`・`steps.log`・`env_info.txt`・`run{1..5}.jsonl`）・`hwlock-r3.log`・`precheck-r3.txt` |
 | 機体の証跡 | Mac mini は `macmini-r2/`、GB10 は `gb10/`（`uname.txt`・`rev-stamp.txt`・`steps.log`・`machine_gate*`・`preflight-procs*`） |
 
 G3 前提ゲートの (c): `device_param_store_backend_parity` は after／before とも同じ 2 件（`device_resident_matches_host_sgd_on_cuda_across_100_steps`・`grad_readout_contract_on_cuda`。CUDA 前提で Mac では動かない）が失敗する既存の失敗で、非後退。その他の群は全て rc 0。
@@ -70,7 +70,7 @@ REQ-8 の確認（G6）は初回と同じ（固定 4 arm は手動境界チェ�
 - #3227: 反転できるゲートはない（ADOPT は両機体の成立が要り、GB10 側が undetermined）。G1 と G4 は Mac mini の正式系列で REJECT が確定したため、既定 OFF の維持が妥当。G3 は train reuse が 5/5 改善（0.9000）だが train fresh が 1.0077 で未成立。
 - #3265: G5 は専有 Mac mini の正式系列で全 6 セル ≤ 1.00（0.9592〜0.9773）。#1520 の REJECT を覆す材料として渡す（採否は #3265 の判断）。
 - 初回系列（record_only）は無効にせず残してある。旧 `steel/` を修正後の集計器で再集計すると判定語彙が出るが、旧系列は遡って有効にしない（RULE-reopen.txt 1.(ii)）。
-- スコープ外: `tape_new` が計時分解能を下回る問題（2114 の集計器と計測粒度の見直し）は #3618 で計測側を修正済み（まとめ計時。実機再測定は未実施。「G7 の分解能を上げた再計測（#3618）」節）。ruleset の required check の追加・変更は不要だった（workflow は触っていない）。
+- スコープ外: `tape_new` が計時分解能を下回る問題（2114 の集計器と計測粒度の見直し）は #3618 で計測側を修正済み（まとめ計時。実機再測定は実施済みで H1〜H3 は支持。「G7 の分解能を上げた再計測（#3618）」節）。ruleset の required check の追加・変更は不要だった（workflow は触っていない）。
 
 ---
 
@@ -181,8 +181,35 @@ REQ-8 の確認: 固定 4 arm は `metal-gemm-steel-candidates.md` §2 の構成
 
 ## G7 の分解能を上げた再計測（#3618）
 
-- 状態: **未実測**（Mac mini での再測定は本変更の時点で未実施。H1〜H3 は引き続き未確定。推定で埋めない）。
+- 状態: **実測済み（2026-10-27 JST。Mac mini M4・固定コミット `450e0c9d7`、label `3184-macmini-r3-g7`、`verify-cache-r3/`）**。集計器は停止せず完走（`aggregate rc=0`・`aggregate.err` 空）し、**H1〜H3 はいずれも支持**。事前登録の判定式・閾値・集計器・セッションスクリプトは無改変。
 - 原因: `Instant` は macOS で `clock_gettime(CLOCK_UPTIME_RAW)`（rust-src `library/std/src/sys/time/unix.rs` 55〜67 行目）。再開分の実ログの離散値（4.1e-8・4.2e-8・8.3e-8）から 1 tick は約 41.7 ns と推定している（実測は `timer_resolution_probe` を Mac mini で実行して確定させる）。集計器は 1 セルでも `median_s` が 0 なら全体を止める。
 - 対応（計測方法のみ。判定式・閾値・集計器は不変）: 4 セル（`tape_build_micro.tape_new`・`reuse_decomposed_off.tape_new`・`reuse_decomposed_on.tape_new`・`reuse_decomposed_on.provider_select`）を K = 1000 回まとめ計時した平均にし、従来値は `single_shot_*` に残す。バッチはカウンタ窓・`iter_total`・`tape_build` 窓の外で実行する。規則は `docs/perf/logs/optin-ab-macmini-3184/RULE-g7-r3.txt`、手順は `session-scripts/g7_r3_session.sh`。
 - 開発機（M4 Max）での動作確認のみ実施: 4 セルとも `median_s` > 0（tape_new 約 11〜14 ns・キャッシュ ON の provider_select 約 2 ns）、集計器の `--self-test` は変更なしで OK。この値は結果に使わない。
-- 次の手順: 事前登録コミットを Mac mini へ転送し `g7_r3_session.sh` を 1 回実行する（label `3184-macmini-r3-g7`）。H4 の再実行と #2114 の M4 Max 実測は対象外。
+
+### 実測結果
+
+- 順序の証跡: 固定コミットの作者日時 2026-10-27T10:06:05+09:00（= 01:06:05Z）は、`steps.log` の先頭（2026-10-27T09:20:16Z）・`env_info.txt` の `date_utc`（09:23:13Z）より前。`rev-stamp.txt` の HEAD は `450e0c9d7f1ba6eff5481906a526fe1668bb0850` で、作業ツリーの変更は 0 件（porcelain 出力が空）。RULE-g7-r3 §0 の 5 ファイルの sha256 は `precheck-r3.txt` で記載値と一致し、`aggregate.py --self-test` は OK。
+- 実行: 外側ラッパーで hw-lock を取得（`hwlock-r3.log`: acquired 09:20:16Z・released 09:23:15Z）してから `g7_r3_session.sh` を 1 回実行。`build rc=0`・`bitexact rc=0`・`timer-res rc=0`・`orchestrate rc=0`・`aggregate rc=0`・`DONE`。外側ゲートは 3 回とも成立（load1 = 2.98・並走プロセス 0 件。`machine_gate.log`）。5 run とも load_gate は record_only。
+- 分解能（`timer-res.log` の `TIMER_RES`）: `min_nonzero_ns=41`・`distinct_deltas_ns=[41, 42, 83, 84, 125, 166, 167, 208]`・`zero_fraction=0.506`。1 tick は約 41〜42 ns で、これまでの推定 41.7 ns と整合する。
+- H1〜H3（`aggregate.md` の出力をそのまま転記。ローカルで `python3 -I aggregate.py verify-cache-r3` を再集計し、マスク後も `aggregate.md` と完全一致することを確認）:
+
+| 仮説 | 集計器の出力 | 判定 |
+|---|---|---|
+| H1 | `micro.provider_select / fresh_off.tape_build = 0.80`（閾値 0.5） | 支持 |
+| H1a（補助） | `probe_gpu_core_count / provider_select = 1.10` | 参考 |
+| H2 | `micro.tape_new = 0.0 us`（表示は 0.1 us 丸めで 0.0 と出る。実値は下表の約 11 ns。閾値 1 us） | 支持 |
+| H3 | `reuse_off` の encode = 2・command_buffers = 1・wait = 1（全 run） | 支持 |
+| H4 | 再開分で支持済みのため r3 では再実行しない | 再開分の結果を維持 |
+
+- まとめ計時の 4 セル（`run1〜5.jsonl`。`median_s` = K = 1000 の平均、`single_shot_median_s` は参考で判定には使わない）:
+
+| セル | median_s（run 1〜5） | single_shot_median_s |
+|---|---|---|
+| `tape_build_micro.tape_new` | 11.5・11.3・11.4・11.3・11.3 ns | 0 または 41 ns（1 tick 前後） |
+| `reuse_decomposed_off.tape_new` | 11.3・11.3・11.3・11.3・11.4 ns | 0 または 41 ns |
+| `reuse_decomposed_on.tape_new` | 11.4・11.3・11.3・11.3・11.4 ns | 0 |
+| `reuse_decomposed_on.provider_select`（キャッシュ ON） | 1.83 ns（全 run） | 0 |
+
+- 他の主な値（`aggregate.md`、run 間 median）: `fresh_off.tape_build` 10.5 us・`tape_build_micro.provider_select` 8.4 us・`reuse_off` の `iter_total` 324.0 us・`reuse_on` の `iter_total` 311.8 us（`ratio_iter_reuse` = 0.9623）。`aggregate.md` の checksum 行の `fresh==reuse: False` は集計器の出力で、停止要因ではない（`aggregate.err` は空）。
+- 注記: 4 セルは K = 1000 回の平均である。他のセルは従来どおり 1 回計時のため H1 の両辺は比較可能なまま。G7 のゲートは record_only のままで、判定の変更・main の定数変更は行っていない。M4 Max の動作確認値は結果に使っていない。
+- 対象外: H4 の再実行、#2114 の M4 Max 実測、集計器の正値検査の見直し。

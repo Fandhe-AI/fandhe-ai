@@ -111,8 +111,8 @@ tracked 版の失敗トークン登録と非 wait は `crates/backend-metal/src/
 記録: `gb10/`（`.rev-stamp`・`tree-manifest-check.txt`・`env_info.txt`・`build.log`・`<name>.run{1..5}.log`・`DONE`・`summary.md`）。
 ホスト名・ユーザー名・絶対パスは `<cuda-node>`・`<user>`・`<home>` へ置換済み。
 
-- 経緯: 先に使った GB10（dbd9）は常駐 vLLM が許可リストに無く中止した（結果の選別ではない）。所有者が 2026-10-23 に指定した別の GB10 ノード
-  （dbd9 とは別。FQDN は記載しない）で取り直した。計測前の `nvidia-smi --query-compute-apps` は 0 件・`utilization.gpu` 0 %。
+- 経緯: 先に使った GB10（`<cuda-node-2>`）は常駐 vLLM が許可リストに無く中止した（結果の選別ではない）。所有者が 2026-10-23 に指定した別の GB10 ノード
+  （`<cuda-node-2>` とは別。FQDN は記載しない）で取り直した。計測前の `nvidia-smi --query-compute-apps` は 0 件・`utilization.gpu` 0 %。
   `PARITY_RESIDENT_APP_REGEX` は未設定。実機ロック（`~/work/.fandhe-hw-lock`）を取得して実施し、回収後に解放した。
 - 日付: 2026-10-23。計測コード: `45347ae0a5f3ca436b8136424a136d660c5a5280`（main。#3227 の readback 先読み既定 ON〈PR #3552〉を含む）。
   `dirty=0`（`tree-manifest-check.txt` 11998 件が全件 OK・`.env*`／`settings.local.json`／`*.local.md` の混入 0 件）。crate 版 0.11.0（workspace）。
@@ -165,7 +165,7 @@ C5 の fail 2 件は**対照 assert**（`download`／ホスト版が D2H を数�
 - 計測コードの選定: 最新 main ではなく `b6579c3f5` を採った。`45347ae0a..b6579c3f5` の `crates/` 差分は 3 ファイル（`gemm.rs`・`memory.rs`・
   `train_step_parts_sync_diag_tests_3224.rs`。計数修正とテスト順序の変更）だけで、`git diff --stat e62cce21b b6579c3f5 -- crates/backend-metal crates/backend-cpu crates/tensor-core`
   の出力は空（Metal の部品は `macmini/` の計測時から無変更）。
-- 実行ノード・条件: 所有者が指定した GB10 ノード（FQDN は記載しない。dbd9 とは別）。計測前の `nvidia-smi --query-compute-apps` は 0 件・`utilization.gpu` 0 %。
+- 実行ノード・条件: 所有者が指定した GB10 ノード（FQDN は記載しない。`<cuda-node-2>` とは別）。計測前の `nvidia-smi --query-compute-apps` は 0 件・`utilization.gpu` 0 %。
   `PARITY_RESIDENT_APP_REGEX` は未設定。実機ロック（`~/work/.fandhe-hw-lock`）を取得して実施し、回収後に解放した。
 - 環境: GB10（sm_121）・driver 580.173.02・CUDA 13.0 V13.0.88・rustc 1.97.1（8bab26f4f 2026-07-14）・aarch64 Linux。
   `cargo build --release --tests -p fandhe-ai-backend-cuda` は `build_rc=0`（判定外）。ビルド後の `--ignored --list` で C4 は 1 件・C5 は 4 件（期待件数と一致）。

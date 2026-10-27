@@ -18,14 +18,19 @@
 //! 検査）。`assert_parity` を fail 0 件で厳密に適用し、tolerance・baseline 方式は使わない（決定記録 §5）。
 //! 1e±20 倍の QR は絶対誤差の救済（1e-5）で自明 pass しうるため、finite・R 対角が 0 でないこと・
 //! 倍率で正規化した R の parity も追加で assert する（判定は厳しくなる方向のみ）。
+//!
+//! `qr_diagnose_all_cases_on_device` は記録専用の診断（#3139。assert せず判定に含めない）。判定テストは
+//! 最初の失敗で止まり後続ケースに到達しないため、全ケースの GPU・CPU・f32 モデルの差と
+//! 判定を外れた要素の添字・値を出力して原因切り分けの材料にする。tolerance・入力集合は不変。
 
 #![cfg(target_os = "macos")]
 
 use std::sync::Mutex;
 
 use fandhe_ai_backend_cpu::{CpuBackendOps, assert_parity};
-use fandhe_ai_backend_metal::linalg::set_gpu_linalg_enabled;
+use fandhe_ai_backend_metal::linalg::{qr_finalize, set_gpu_linalg_enabled};
 use fandhe_ai_backend_metal::linalg_kernel::MetalLinalg;
+use fandhe_ai_backend_metal::linalg_model::qr_f32;
 use fandhe_ai_backend_metal::{MetalBackendOps, MetalContext};
 use fandhe_ai_tensor_core::BackendOps;
 use fandhe_ai_tensor_core::device::BackendError;
@@ -353,6 +358,60 @@ fn qr_matches_cpu_on_device() {
                     .collect()
             };
             assert_parity(&format!("qr R/scale {label}"), &norm(&gr), &norm(&rr));
+        }
+    }
+}
+/// 記録専用診断（#3139。assert しない）: `qr_matches_cpu_on_device` と同じケース列の全件について、
+/// GPU・CPU 参照・f32 ホストモデルの 3 者差、判定を外れた要素、有限性、R 対角、倍率正規化 R を出力する。
+/// 起動失敗（`Unsupported` 等）だけは fail させ、green と取り違えない。
+#[test]
+#[ignore = "Apple Silicon 実機が必要（記録専用診断。判定に含めない）"]
+fn qr_diagnose_all_cases_on_device() {
+    let _g = GateOn::new(true);
+    let cpu = CpuBackendOps::new();
+    let mut cases: Vec<(String, f32, _)> = Vec::new();
+    for (m, n) in QR_SHAPES {
+        for factor in SCALES {
+            cases.push((
+                format!("{m}x{n} scale={factor:e}"),
+                factor,
+                scaled(&qr_input(m, n), factor),
+            ));
+        }
+    }
+    cases.push(("eye2 1e20".into(), EYE2_SCALE, eye2_scaled(EYE2_SCALE)));
+    for (label, factor, a) in cases {
+        let sh = a.shape().to_vec();
+        let (m, n) = (sh[0], sh[1]);
+        let k = m.min(n);
+        let got = expect_launch_or_fail(ops().linalg_qr(&a), "qr diag");
+        let reference = cpu.linalg_qr(&a).expect("cpu");
+        let (gr, gq) = (s(&got.r), s(&got.q));
+        let (rr, rq) = (s(&reference.r), s(&reference.q));
+        let (r_work, q_work) = qr_f32(&s(&a), m, n).expect("model dims");
+        let (mr, mq) = qr_finalize(&r_work, &q_work, m, n).expect("model finalize");
+        diag_compare(&format!("R {label}"), "gpu", &gr, "cpu", &rr, n);
+        diag_compare(&format!("R {label}"), "model", &mr, "cpu", &rr, n);
+        diag_compare(&format!("R {label}"), "gpu", &gr, "model", &mr, n);
+        diag_compare(&format!("Q {label}"), "gpu", &gq, "cpu", &rq, k);
+        diag_compare(&format!("Q {label}"), "model", &mq, "cpu", &rq, k);
+        let finite = gr.iter().chain(gq.iter()).all(|v| v.is_finite());
+        let diag_nonzero = (0..k).all(|i| gr[i * n + i] != 0.0 && rr[i * n + i] != 0.0);
+        println!("DIAG {label}: finite={finite} diag_nonzero={diag_nonzero}");
+        if factor != 1.0 {
+            let norm = |v: &[f32]| -> Vec<f32> {
+                v.iter()
+                    .map(|&x| (x as f64 / factor as f64) as f32)
+                    .collect()
+            };
+            diag_compare(
+                &format!("R/scale {label}"),
+                "gpu",
+                &norm(&gr),
+                "cpu",
+                &norm(&rr),
+                n,
+            );
         }
     }
 }

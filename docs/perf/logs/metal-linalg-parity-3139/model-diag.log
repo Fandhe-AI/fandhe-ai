@@ -1,0 +1,24 @@
+running 1 test
+DIAG R 8x3 scale=1e0 model-vs-cpu: fail_count=0/9 max_abs_diff=4.76837158203125e-7 max_rel_err=4.2368092504798454e-7
+DIAG Q 8x3 scale=1e0 model-vs-cpu: fail_count=0/24 max_abs_diff=2.682209014892578e-7 max_rel_err=1.0000000037252903e0
+DIAG R 8x3 scale=1e20 model-vs-cpu: fail_count=0/9 max_abs_diff=1.7592186044416e13 max_rel_err=1.823624342138916e-7
+DIAG Q 8x3 scale=1e20 model-vs-cpu: fail_count=0/24 max_abs_diff=5.960464499743523e-8 max_rel_err=1.0000000037252903e0
+DIAG R 8x3 scale=1e-20 model-vs-cpu: fail_count=0/9 max_abs_diff=3.2311742677852644e-27 max_rel_err=3.2311742677852644e-15
+DIAG Q 8x3 scale=1e-20 model-vs-cpu: fail_count=0/24 max_abs_diff=1.4901161193847656e-7 max_rel_err=1.0000000037252903e0
+DIAG R 3x8 scale=1e0 model-vs-cpu: fail_count=0/24 max_abs_diff=2.980232238769531e-7 max_rel_err=1.1102230246251565e-4
+DIAG Q 3x8 scale=1e0 model-vs-cpu: fail_count=0/9 max_abs_diff=1.1920928955078125e-7 max_rel_err=9.999999962747097e-1
+DIAG R 3x8 scale=1e20 model-vs-cpu: fail_count=1/24 max_abs_diff=3.7383395344384e13 max_rel_err=9.999999962747097e-1
+DIAG R 3x8 scale=1e20 model-vs-cpu FAIL [0,2]: model=-4.3980465e12 cpu=-1.6384e4
+DIAG Q 3x8 scale=1e20 model-vs-cpu: fail_count=0/9 max_abs_diff=1.7881393432617188e-7 max_rel_err=9.999999962747097e-1
+DIAG R 3x8 scale=1e-20 model-vs-cpu: fail_count=0/24 max_abs_diff=3.2311742677852644e-27 max_rel_err=3.2311742677852644e-15
+DIAG Q 3x8 scale=1e-20 model-vs-cpu: fail_count=0/9 max_abs_diff=1.1920928955078125e-7 max_rel_err=1.0000000037252903e0
+DIAG R 17x17 scale=1e0 model-vs-cpu: fail_count=0/289 max_abs_diff=2.288818359375e-5 max_rel_err=1.7146077162908124e-5
+DIAG Q 17x17 scale=1e0 model-vs-cpu: fail_count=0/289 max_abs_diff=5.960464477539063e-7 max_rel_err=5.4838343955951875e-6
+DIAG R 17x17 scale=1e20 model-vs-cpu: fail_count=0/289 max_abs_diff=2.81474976710656e15 max_rel_err=5.793415688758308e-6
+DIAG Q 17x17 scale=1e20 model-vs-cpu: fail_count=0/289 max_abs_diff=5.960464477539063e-7 max_rel_err=6.654532414350622e-6
+DIAG R 17x17 scale=1e-20 model-vs-cpu: fail_count=0/289 max_abs_diff=2.0679515313825692e-25 max_rel_err=2.0679515313825692e-13
+DIAG Q 17x17 scale=1e-20 model-vs-cpu: fail_count=0/289 max_abs_diff=5.364418029785156e-7 max_rel_err=5.237366378609462e-6
+DIAG R eye2 1e20 model-vs-cpu: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q eye2 1e20 model-vs-cpu: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+test qr_input_model_vs_cpu_diagnostic ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s

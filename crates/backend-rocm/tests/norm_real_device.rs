@@ -2,13 +2,15 @@
 //! テスト（イシュー #3437・R6。実測は #3159）。
 //!
 //! - 役割: `RocmBackendOps` の `rmsnorm`／`layer_norm`／`batch_norm_train`／`batch_norm_infer` を
-//!   `CpuBackendOps` と、backward 2 つを本ファイル内の f64 参照と `assert_parity`（REQ-2 統一複合判定。
+//!   `CpuBackendOps` と、backward 2 つを本ファイル内の f64 参照と `compare`（`assert_parity` と同値。REQ-2 統一複合判定。
 //!   相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。許容誤差は変更しない）で照合する。
 //! - 呼び出し文脈: CI では実行しない（`#[ignore]`）。HIPRTC のコンパイル（`__shfl_xor` の double 版・
 //!   `__builtin_fma` の f64 命令化）と wave64 の縮約順序の確認は、実機で本テストを実行して行う。
 //!   parity が外れても tolerance は緩めず、カーネルとホスト側モデル（`norm_model.rs`）の式の不一致として直す。
 
-use fandhe_ai_backend_cpu::{CpuBackendOps, assert_parity};
+use std::cell::Cell;
+
+use fandhe_ai_backend_cpu::{CpuBackendOps, compare};
 use fandhe_ai_backend_rocm::{GfxTarget, RocmBackendOps};
 use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
@@ -32,6 +34,51 @@ fn t(shape: &[usize], seed: u64) -> Tensor<f32> {
 
 fn flat(x: &Tensor<f32>) -> Vec<f32> {
     x.contiguous().as_slice().unwrap().to_vec()
+}
+
+thread_local! {
+    /// テスト関数（= スレッド）ごとの複合判定 fail 要素数の累計。`finish` が 0 を要求する。
+    static FAILS: Cell<usize> = const { Cell::new(0) };
+    /// 同一テスト内で行名が衝突しないよう、記録順の連番を付ける。
+    static SEQ: Cell<usize> = const { Cell::new(0) };
+}
+
+/// 1 件ぶんの記録行（`ROCM_PARITY_NORM`）を出力し、fail 数を累計する。
+///
+/// 判定は `assert_parity` と同値（`compare` の `fail_count == 0`）。外れても最初の 1 件で止めず、
+/// 全ケースの fail 要素数と最大誤差をログに残してから `finish` で落とす（#3159 作業 4）。
+/// 行名は `<label>#<連番>` とし、README の表へ転記するときに行が衝突しないようにする。
+/// tolerance 定数・`compare` 本体は変更しない。
+fn record(label: &str, got: &[f32], want: &[f32]) {
+    let r = compare(got, want).unwrap_or_else(|e| panic!("compare {label}: {e:?}"));
+    let bit_mismatch = got
+        .iter()
+        .zip(want)
+        .filter(|(p, q)| p.to_bits() != q.to_bits())
+        .count();
+    let seq = SEQ.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    eprintln!(
+        "ROCM_PARITY_NORM\t{label}#{seq}\ttotal={}\tfail={}\tmax_abs={:e}\tmax_rel={:e}\tmean_abs={:e}\tp99_abs={:e}\tbit_mismatch={bit_mismatch}",
+        r.total, r.fail_count, r.max_abs_diff, r.max_rel_err, r.mean_abs_diff, r.p99_abs_diff
+    );
+    FAILS.with(|f| f.set(f.get() + r.fail_count));
+}
+
+/// テスト開始時に累計 fail 数・連番を 0 へ戻す。`--test-threads=1` では全テストが同一スレッドで走り、
+/// thread_local が引き継がれるため、先行テストの fail が後続の `finish` を誤って落とさないようにする。
+/// 判定条件（tolerance・`compare`）は変更しない。
+fn reset() {
+    FAILS.with(|f| f.set(0));
+    SEQ.with(|c| c.set(0));
+}
+
+/// 累計 fail が 0 でなければ落とす（REQ-2 複合判定を外れた要素がある）。
+fn finish() {
+    let fails = FAILS.with(Cell::get);
+    assert_eq!(fails, 0, "REQ-2 複合判定を外れた要素がある");
 }
 
 /// 行ごとの f64 参照（RMSNorm backward）。
@@ -102,6 +149,7 @@ fn ref_layer_norm_backward(
 #[test]
 #[ignore = "ROCm 実機が必要（#3159 で実行）"]
 fn forward_matches_cpu_on_device() {
+    reset();
     let o = RocmBackendOps::new(GfxTarget::Gfx942);
     let c = CpuBackendOps;
     for shape in [
@@ -123,17 +171,19 @@ fn forward_matches_cpu_on_device() {
         ] {
             let got = o.rmsnorm(&x, wo, EPS).unwrap();
             let want = c.rmsnorm(&x, wo, EPS).unwrap();
-            assert_parity("rmsnorm", &flat(&got), &flat(&want));
+            record("rmsnorm", &flat(&got), &flat(&want));
             let got = o.layer_norm(&x, wo, bo, EPS).unwrap();
             let want = c.layer_norm(&x, wo, bo, EPS).unwrap();
-            assert_parity("layer_norm", &flat(&got), &flat(&want));
+            record("layer_norm", &flat(&got), &flat(&want));
         }
     }
+    finish();
 }
 
 #[test]
 #[ignore = "ROCm 実機が必要（#3159 で実行）"]
 fn backward_matches_reference_on_device() {
+    reset();
     let o = RocmBackendOps::new(GfxTarget::Gfx942);
     for (rows, hidden) in [(1usize, 1usize), (3, 31), (5, 64), (4, 65), (6, 257)] {
         let shape = [rows, hidden];
@@ -145,9 +195,9 @@ fn backward_matches_reference_on_device() {
             let (dx, dw) = o.rmsnorm_backward(&x, wo, &dy, EPS).unwrap();
             let (rdx, rdw) =
                 ref_rmsnorm_backward(&flat(&x), wf.as_deref(), &flat(&dy), rows, hidden);
-            assert_parity("rmsnorm_backward dx", &flat(&dx), &rdx);
+            record("rmsnorm_backward dx", &flat(&dx), &rdx);
             if let (Some(a), Some(b)) = (dw, rdw) {
-                assert_parity("rmsnorm_backward dw", &flat(&a), &b);
+                record("rmsnorm_backward dw", &flat(&a), &b);
             }
             for has_bias in [false, true] {
                 let (dx, dw, db) = o.layer_norm_backward(&x, wo, has_bias, &dy, EPS).unwrap();
@@ -159,21 +209,23 @@ fn backward_matches_reference_on_device() {
                     rows,
                     hidden,
                 );
-                assert_parity("layer_norm_backward dx", &flat(&dx), &rdx);
+                record("layer_norm_backward dx", &flat(&dx), &rdx);
                 if let (Some(a), Some(b)) = (dw, rdw) {
-                    assert_parity("layer_norm_backward dw", &flat(&a), &b);
+                    record("layer_norm_backward dw", &flat(&a), &b);
                 }
                 if let (Some(a), Some(b)) = (db, rdb) {
-                    assert_parity("layer_norm_backward db", &flat(&a), &b);
+                    record("layer_norm_backward db", &flat(&a), &b);
                 }
             }
         }
     }
+    finish();
 }
 
 #[test]
 #[ignore = "ROCm 実機が必要（#3159 で実行）"]
 fn batch_norm_matches_cpu_on_device() {
+    reset();
     let o = RocmBackendOps::new(GfxTarget::Gfx942);
     let c = CpuBackendOps;
     for shape in [vec![4usize, 3], vec![2, 3, 17], vec![2, 5, 4, 33]] {
@@ -191,12 +243,13 @@ fn batch_norm_matches_cpu_on_device() {
         ] {
             let got = o.batch_norm_train(&x, wo, bo, EPS).unwrap();
             let want = c.batch_norm_train(&x, wo, bo, EPS).unwrap();
-            assert_parity("bn out", &flat(&got.output), &flat(&want.output));
-            assert_parity("bn mean", &flat(&got.batch_mean), &flat(&want.batch_mean));
-            assert_parity("bn var", &flat(&got.batch_var), &flat(&want.batch_var));
+            record("bn out", &flat(&got.output), &flat(&want.output));
+            record("bn mean", &flat(&got.batch_mean), &flat(&want.batch_mean));
+            record("bn var", &flat(&got.batch_var), &flat(&want.batch_var));
             let got = o.batch_norm_infer(&x, &mean, &var, wo, bo, EPS).unwrap();
             let want = c.batch_norm_infer(&x, &mean, &var, wo, bo, EPS).unwrap();
-            assert_parity("bn infer", &flat(&got), &flat(&want));
+            record("bn infer", &flat(&got), &flat(&want));
         }
     }
+    finish();
 }
