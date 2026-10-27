@@ -1,0 +1,94 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/linalg_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_parity-dea6d694088a45cf)
+
+running 7 tests
+test pipeline_compiles_on_device ... ok
+test cholesky_matches_cpu_on_device ... ok
+test gate_on_non_empty_does_not_return_unsupported ... ok
+test lu_family_matches_cpu_on_device ... ok
+DIAG R 8x3 scale=1e0 gpu-vs-cpu: fail_count=0/9 max_abs_diff=4.76837158203125e-7 max_rel_err=4.2368092504798454e-7
+DIAG R 8x3 scale=1e0 model-vs-cpu: fail_count=0/9 max_abs_diff=4.76837158203125e-7 max_rel_err=4.2368092504798454e-7
+DIAG R 8x3 scale=1e0 gpu-vs-model: fail_count=0/9 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 8x3 scale=1e0 gpu-vs-cpu: fail_count=0/24 max_abs_diff=2.682209014892578e-7 max_rel_err=1.0000000037252903e0
+DIAG Q 8x3 scale=1e0 model-vs-cpu: fail_count=0/24 max_abs_diff=2.682209014892578e-7 max_rel_err=1.0000000037252903e0
+DIAG 8x3 scale=1e0: finite=true diag_nonzero=true
+DIAG R 8x3 scale=1e20 gpu-vs-cpu: fail_count=0/9 max_abs_diff=1.7592186044416e13 max_rel_err=1.823624342138916e-7
+DIAG R 8x3 scale=1e20 model-vs-cpu: fail_count=0/9 max_abs_diff=1.7592186044416e13 max_rel_err=1.823624342138916e-7
+DIAG R 8x3 scale=1e20 gpu-vs-model: fail_count=0/9 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 8x3 scale=1e20 gpu-vs-cpu: fail_count=0/24 max_abs_diff=5.960464499743523e-8 max_rel_err=1.0000000037252903e0
+DIAG Q 8x3 scale=1e20 model-vs-cpu: fail_count=0/24 max_abs_diff=5.960464499743523e-8 max_rel_err=1.0000000037252903e0
+DIAG 8x3 scale=1e20: finite=true diag_nonzero=true
+DIAG R/scale 8x3 scale=1e20 gpu-vs-cpu: fail_count=0/9 max_abs_diff=1.7881393432617188e-7 max_rel_err=1.853603965279032e-7
+DIAG R 8x3 scale=1e-20 gpu-vs-cpu: fail_count=0/9 max_abs_diff=3.2311742677852644e-27 max_rel_err=3.2311742677852644e-15
+DIAG R 8x3 scale=1e-20 model-vs-cpu: fail_count=0/9 max_abs_diff=3.2311742677852644e-27 max_rel_err=3.2311742677852644e-15
+DIAG R 8x3 scale=1e-20 gpu-vs-model: fail_count=0/9 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 8x3 scale=1e-20 gpu-vs-cpu: fail_count=0/24 max_abs_diff=1.4901161193847656e-7 max_rel_err=1.0000000037252903e0
+DIAG Q 8x3 scale=1e-20 model-vs-cpu: fail_count=0/24 max_abs_diff=1.4901161193847656e-7 max_rel_err=1.0000000037252903e0
+DIAG 8x3 scale=1e-20: finite=true diag_nonzero=true
+DIAG R/scale 8x3 scale=1e-20 gpu-vs-cpu: fail_count=0/9 max_abs_diff=3.5762786865234375e-7 max_rel_err=3.177606937859884e-7
+DIAG R 3x8 scale=1e0 gpu-vs-cpu: fail_count=0/24 max_abs_diff=2.980232238769531e-7 max_rel_err=1.1102230246251565e-4
+DIAG R 3x8 scale=1e0 model-vs-cpu: fail_count=0/24 max_abs_diff=2.980232238769531e-7 max_rel_err=1.1102230246251565e-4
+DIAG R 3x8 scale=1e0 gpu-vs-model: fail_count=0/24 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 3x8 scale=1e0 gpu-vs-cpu: fail_count=0/9 max_abs_diff=1.1920928955078125e-7 max_rel_err=9.999999962747097e-1
+DIAG Q 3x8 scale=1e0 model-vs-cpu: fail_count=0/9 max_abs_diff=1.1920928955078125e-7 max_rel_err=9.999999962747097e-1
+DIAG 3x8 scale=1e0: finite=true diag_nonzero=true
+DIAG R 3x8 scale=1e20 gpu-vs-cpu: fail_count=1/24 max_abs_diff=3.7383395344384e13 max_rel_err=9.999999962747097e-1
+DIAG R 3x8 scale=1e20 gpu-vs-cpu FAIL [0,2]: gpu=-4.3980465e12 cpu=-1.6384e4
+DIAG R 3x8 scale=1e20 model-vs-cpu: fail_count=1/24 max_abs_diff=3.7383395344384e13 max_rel_err=9.999999962747097e-1
+DIAG R 3x8 scale=1e20 model-vs-cpu FAIL [0,2]: model=-4.3980465e12 cpu=-1.6384e4
+DIAG R 3x8 scale=1e20 gpu-vs-model: fail_count=0/24 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 3x8 scale=1e20 gpu-vs-cpu: fail_count=0/9 max_abs_diff=1.7881393432617188e-7 max_rel_err=9.999999962747097e-1
+DIAG Q 3x8 scale=1e20 model-vs-cpu: fail_count=0/9 max_abs_diff=1.7881393432617188e-7 max_rel_err=9.999999962747097e-1
+DIAG 3x8 scale=1e20: finite=true diag_nonzero=true
+DIAG R/scale 3x8 scale=1e20 gpu-vs-cpu: fail_count=0/24 max_abs_diff=3.725290298461914e-7 max_rel_err=9.999999962747097e-1
+DIAG R 3x8 scale=1e-20 gpu-vs-cpu: fail_count=0/24 max_abs_diff=3.2311742677852644e-27 max_rel_err=3.2311742677852644e-15
+DIAG R 3x8 scale=1e-20 model-vs-cpu: fail_count=0/24 max_abs_diff=3.2311742677852644e-27 max_rel_err=3.2311742677852644e-15
+DIAG R 3x8 scale=1e-20 gpu-vs-model: fail_count=0/24 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 3x8 scale=1e-20 gpu-vs-cpu: fail_count=0/9 max_abs_diff=1.1920928955078125e-7 max_rel_err=1.0000000037252903e0
+DIAG Q 3x8 scale=1e-20 model-vs-cpu: fail_count=0/9 max_abs_diff=1.1920928955078125e-7 max_rel_err=1.0000000037252903e0
+DIAG 3x8 scale=1e-20: finite=true diag_nonzero=true
+DIAG R/scale 3x8 scale=1e-20 gpu-vs-cpu: fail_count=0/24 max_abs_diff=4.76837158203125e-7 max_rel_err=1.5046327992066888e-4
+DIAG R 17x17 scale=1e0 gpu-vs-cpu: fail_count=0/289 max_abs_diff=2.288818359375e-5 max_rel_err=1.7146077162908124e-5
+DIAG R 17x17 scale=1e0 model-vs-cpu: fail_count=0/289 max_abs_diff=2.288818359375e-5 max_rel_err=1.7146077162908124e-5
+DIAG R 17x17 scale=1e0 gpu-vs-model: fail_count=0/289 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 17x17 scale=1e0 gpu-vs-cpu: fail_count=0/289 max_abs_diff=5.960464477539063e-7 max_rel_err=5.4838343955951875e-6
+DIAG Q 17x17 scale=1e0 model-vs-cpu: fail_count=0/289 max_abs_diff=5.960464477539063e-7 max_rel_err=5.4838343955951875e-6
+DIAG 17x17 scale=1e0: finite=true diag_nonzero=true
+DIAG R 17x17 scale=1e20 gpu-vs-cpu: fail_count=0/289 max_abs_diff=2.81474976710656e15 max_rel_err=5.793415688758308e-6
+DIAG R 17x17 scale=1e20 model-vs-cpu: fail_count=0/289 max_abs_diff=2.81474976710656e15 max_rel_err=5.793415688758308e-6
+DIAG R 17x17 scale=1e20 gpu-vs-model: fail_count=0/289 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 17x17 scale=1e20 gpu-vs-cpu: fail_count=0/289 max_abs_diff=5.960464477539063e-7 max_rel_err=6.654532414350622e-6
+DIAG Q 17x17 scale=1e20 model-vs-cpu: fail_count=0/289 max_abs_diff=5.960464477539063e-7 max_rel_err=6.654532414350622e-6
+DIAG 17x17 scale=1e20: finite=true diag_nonzero=true
+DIAG R/scale 17x17 scale=1e20 gpu-vs-cpu: fail_count=0/289 max_abs_diff=2.6702880859375e-5 max_rel_err=5.84300822896412e-6
+DIAG R 17x17 scale=1e-20 gpu-vs-cpu: fail_count=0/289 max_abs_diff=2.0679515313825692e-25 max_rel_err=2.0679515313825692e-13
+DIAG R 17x17 scale=1e-20 model-vs-cpu: fail_count=0/289 max_abs_diff=2.0679515313825692e-25 max_rel_err=2.0679515313825692e-13
+DIAG R 17x17 scale=1e-20 gpu-vs-model: fail_count=0/289 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q 17x17 scale=1e-20 gpu-vs-cpu: fail_count=0/289 max_abs_diff=5.364418029785156e-7 max_rel_err=5.237366378609462e-6
+DIAG Q 17x17 scale=1e-20 model-vs-cpu: fail_count=0/289 max_abs_diff=5.364418029785156e-7 max_rel_err=5.237366378609462e-6
+DIAG 17x17 scale=1e-20: finite=true diag_nonzero=true
+DIAG R/scale 17x17 scale=1e-20 gpu-vs-cpu: fail_count=0/289 max_abs_diff=1.9073486328125e-5 max_rel_err=8.619797951936006e-6
+DIAG R eye2 1e20 gpu-vs-cpu: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+DIAG R eye2 1e20 model-vs-cpu: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+DIAG R eye2 1e20 gpu-vs-model: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q eye2 1e20 gpu-vs-cpu: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+DIAG Q eye2 1e20 model-vs-cpu: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+DIAG eye2 1e20: finite=true diag_nonzero=true
+DIAG R/scale eye2 1e20 gpu-vs-cpu: fail_count=0/4 max_abs_diff=0e0 max_rel_err=0e0
+test qr_diagnose_all_cases_on_device ... ok
+
+thread 'qr_matches_cpu_on_device' (21039349) panicked at crates/backend-metal/tests/linalg_parity.rs:339:9:
+qr R 3x8 scale=1e20: 複合判定 FAIL（fail_count=1/24, max_abs_diff=3.738e13, max_rel_err=1.000e0, mean_abs_diff=8.384e12, mean_rel_err=4.167e-2, p50_abs_diff=4.398e12, p99_abs_diff=3.738e13, p999_abs_diff=3.738e13）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test qr_matches_cpu_on_device ... FAILED
+test status_mapping_end_to_end_on_device ... ok
+
+failures:
+
+failures:
+    qr_matches_cpu_on_device
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-metal --test linalg_parity`
+exit_code=101

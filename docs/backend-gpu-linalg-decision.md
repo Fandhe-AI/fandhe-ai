@@ -130,7 +130,10 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
   `linalg_parity_inputs_guard.rs`）。QR 17×17 の旧入力は κ₂ ≈ 3.5e16 で §5 に反するため是正、det は n ≤ 17 に限定
   （n=64 は f32 範囲外で `inf - inf = NaN`）、QR に 1e±20 倍と `1e20 × I₂`（finite・R 対角非 0・正規化 R parity 付き）を追加。
   tolerance・判定方式（§5）は不変。
-- Mac mini 実機の結果は **未実測**（実機に到達できなかった）。事前登録と記録は `docs/perf/logs/metal-linalg-parity-3139/`。
+- Mac mini 実機の結果（2026-10-27・Apple M4・コミット `95a18c2d3`・5 run）: LU 系・cholesky・パイプライン構築は pass、**`qr_matches_cpu_on_device` は 5/5 run で fail**
+  （`qr R 3x8 scale=1e20` の `R[0,2]` ただ 1 要素。GPU は f32 ホストモデルとビット一致で、モデル対 CPU も同じ要素で同値の不一致を出すため、
+  構造的に 0 になる要素と 1e20 倍の相対判定が f32 対 f64 の精度クラス差を露出したものと判別した）。判定は fail のまま、tolerance・入力集合・カーネルは未変更。
+  選択肢（入力是正・判定契約見直し・据え置き）は所有者判断待ちで、詳細と事前登録・生ログは `docs/perf/logs/metal-linalg-parity-3139/`。
 
 ### #3135（CUDA LU 系 Stage B）の実施内容
 
@@ -170,7 +173,7 @@ parity 判定方式・公開形の推奨を確定させる。tolerance・baselin
 | ゲート | 状況 | 根拠 |
 |---|---|---|
 | G1: 公開形の所有者承認 | **取得済み（2026-10-17）** | §11.2 の推奨形 9 項目を所有者が承認した（#3140 コメント https://github.com/Fandhe-AI/fandhe-ai/issues/3140#issuecomment-6227907703）。既定 ON（Stage E）・tolerance／baseline・新しい `unsafe`・依存は承認範囲外。着手時点（a20d036f）では未取得で、D-C の承認対象は GPU 線形代数の `unsafe` のみだった |
-| G2: #3138・#3139 の実機 parity | **未実測** | `docs/perf/logs/cuda-linalg-parity-3138/README.md`・`docs/perf/logs/metal-linalg-parity-3139/README.md` がともに未実測 |
+| G2: #3138・#3139 の実機 parity | **未実測** | `docs/perf/logs/cuda-linalg-parity-3138/README.md` は未実測。Metal 側 `docs/perf/logs/metal-linalg-parity-3139/README.md` は 2026-10-27 に実測済みだが QR が fail（要対応・所有者判断待ち）で pass していない |
 
 「D-C の延長」と解釈して G1 を迂回しない（着手時点の判断。G1 はその後に個別承認で取得した）。
 
