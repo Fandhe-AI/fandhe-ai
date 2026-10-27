@@ -2182,10 +2182,10 @@ FAIL の追跡要否はユーザー判断に委ねる（本イシューではク
   推定の強化に留まり、TF32 の `round_to_tf32_rna` 相当の解析的な事前
   丸め一致証明（#1122 (b) 手法）は未実施
 
-## 14. イシュー #3617: facade low-precision matmul f16 の fail≠0 3 形状（baseline 追加・値は所有者確認待ち）
+## 14. イシュー #3617: facade low-precision matmul f16 の fail≠0 3 形状（baseline 追加・値は所有者承認済み）
 
 状態: `ParityPath::FacadeLowPrecisionMatmulF16` として 3 行を追加済み。形・値の出典・ceiling の型は
-所有者承認済み（#3617 コメント 6432022446）、**値は PR で提示し所有者の確認待ち**。形と扱いは
+所有者承認済み（#3617 コメント 6432022446）、**値は PR #3661 で提示し所有者承認済み**（#3617 コメント 6445938807（2026-10-28））。形と扱いは
 `docs/cuda-tensor-core-parity-judgment-decision.md` §7。経路: `fandhe_ai_autodiff::low_precision_ops::
 matmul_low_precision`（F16・`tape_for(Device::Cuda(0))`）対 CPU tape の同 Op。入力は f32 `fill_vec`
 （lhs=seed・rhs=seed+1）。

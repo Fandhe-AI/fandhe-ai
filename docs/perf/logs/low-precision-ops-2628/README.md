@@ -147,7 +147,7 @@ cargo test -p fandhe-ai --release --test low_precision_ops_backend_parity -- --i
 ## #3617 HEAD 再計測（baseline 候補値の確認）
 
 状態: HEAD 再計測は 2026-10-27 に GB10 で実施済み（下記「実測記入欄」）。baseline 行は
-`ParityPath::FacadeLowPrecisionMatmulF16` として追加したが、**値の確定は所有者の確認待ち**
+`ParityPath::FacadeLowPrecisionMatmulF16` として追加したが、**値は所有者承認済み**（#3617 コメント 6445938807（2026-10-28））
 （形・値の出典・ceiling の型は #3617 コメント 6432022446 で承認済み。決定記録 §7）。
 
 事前登録規則（計測前に固定）:
@@ -195,4 +195,4 @@ baseline の ceiling 換算（表示桁最終桁 +1）:
 （`cuda/rev-stamp-3617-gate.txt`）。ゲート `cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress`
 は 1 passed・exit 0（`cuda/gate_3617.log`）= pass（規則 7）。規則 8（同一ビルドの診断値の一致）は、
 ゲート時のビルド（`045a18a2`）の診断ログを保存していないため記録上は未確認（保存済みの診断ログは
-`a053ea7ed` の run1・run2 のみ。`045a18a2` との `crates/` の差分は `tests/` 配下のテストファイルのみで、計測対象のライブラリコードは同一）。baseline の値は所有者の確認待ち。
+`a053ea7ed` の run1・run2 のみ。`045a18a2` との `crates/` の差分は `tests/` 配下のテストファイルのみで、計測対象のライブラリコードは同一）。baseline の値は所有者承認済み（#3617 コメント 6445938807（2026-10-28））。

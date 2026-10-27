@@ -245,7 +245,7 @@ pub enum ParityPath {
     /// （本モジュールを `#[path]` で取り込む。`parity_nonregression.rs` の
     /// `CudaGemm`／`CudaMmaGemm` からは到達できないため同ファイルでは除外）。
     /// 形・値の出典・ceiling の型は所有者承認済み（イシュー #3617 コメント
-    /// 6432022446）。baseline の値は PR で所有者の確認待ち。
+    /// 6432022446）。baseline の値は PR #3661 で所有者承認済み（#3617 コメント 6445938807（2026-10-28））。
     FacadeLowPrecisionMatmulF16,
 }
 
