@@ -8,7 +8,9 @@ unset RAYON_NUM_THREADS CARGO_TARGET_DIR
 R=${HOME}/work/g7-3618
 REPO=${R}/repo
 OUT=${R}/collect-r3/verify-cache-r3
-mkdir -p "${OUT}"
+# 既存系列の証跡を上書きしない（RULE-g7-r3.txt §4「1 回だけ実行し差し替えない」）。親のみ -p・OUT は排他作成。
+mkdir -p "$(dirname "${OUT}")" || exit 1
+if ! mkdir "${OUT}" 2>/dev/null; then echo "ABORT: ${OUT} は既に存在する（再実行不可）" >&2; exit 1; fi
 step() { echo "$(date -u +%FT%TZ) $*" >>"${OUT}/steps.log"; }
 watch_procs() { ps -axo comm= | grep -ciE 'cargo|rustc|bench|python|gemm_'; }
 outer_gate() { # outer_gate <series>
@@ -21,6 +23,7 @@ outer_gate() { # outer_gate <series>
   done
   echo "series=${s} outer_gate_ok=${ok} load1=${l1} watchlist_procs=${p} waited_s=$((i*30)) at=$(date -u +%FT%TZ)" >>"${OUT}/machine_gate.log"
   echo "series=${s} watchlist_procs=${p}" >>"${OUT}/preflight-procs.txt"
+  [ "${ok}" = 1 ] # 専有条件不成立は非ゼロ（呼び出し側が中止。RULE-g7-r3.txt §4）
 }
 export CARGO_TARGET_DIR=${R}/target-r3
 cd "${REPO}" || exit 1
@@ -31,14 +34,14 @@ cargo test --release --locked -p fandhe-ai --test metal_infer_tape_build_fixedco
 rc=$?; step "build rc=${rc}"
 if [ "${rc}" != 0 ]; then step "ABORT build"; exit 1; fi
 T="cargo test --release --locked -p fandhe-ai --test metal_infer_tape_build_fixedcost_diag"
-outer_gate g7r3-bitexact
+outer_gate g7r3-bitexact || { step "ABORT outer_gate g7r3-bitexact"; exit 1; }
 ${T} -- --ignored --exact metal_infer_decomposition_matches_public_api_bit_exact --test-threads=1 --nocapture >"${OUT}/bitexact.log" 2>&1
 rc=$?; step "bitexact rc=${rc}"
 if [ "${rc}" != 0 ]; then step "ABORT bitexact"; exit 1; fi
-outer_gate g7r3-res
+outer_gate g7r3-res || { step "ABORT outer_gate g7r3-res"; exit 1; }
 ${T} -- --ignored --exact timer_resolution_probe --test-threads=1 --nocapture >"${OUT}/timer-res.log" 2>&1
 step "timer-res rc=$?"
-outer_gate g7r3
+outer_gate g7r3 || { step "ABORT outer_gate g7r3"; exit 1; }
 bash docs/perf/logs/metal-tape-build-infer-phase-2114/orchestrate.sh macmini --out "${OUT}" >"${OUT}/orchestrate.log" 2>&1
 step "orchestrate rc=$?"
 python3 -I docs/perf/logs/metal-tape-build-infer-phase-2114/aggregate.py "${OUT}" >"${OUT}/aggregate.md" 2>"${OUT}/aggregate.err"
