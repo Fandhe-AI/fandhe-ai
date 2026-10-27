@@ -67,6 +67,14 @@ fn record(label: &str, got: &[f32], want: &[f32]) {
     FAILS.with(|f| f.set(f.get() + r.fail_count));
 }
 
+/// テスト開始時に累計 fail 数・連番を 0 へ戻す。`--test-threads=1` では全テストが同一スレッドで走り、
+/// thread_local が引き継がれるため、先行テストの fail が後続の `finish` を誤って落とさないようにする。
+/// 判定条件（tolerance・`compare`）は変更しない。
+fn reset() {
+    FAILS.with(|f| f.set(0));
+    SEQ.with(|c| c.set(0));
+}
+
 /// 累計 fail が 0 でなければ落とす（REQ-2 複合判定を外れた要素がある）。
 fn finish() {
     let fails = FAILS.with(Cell::get);
@@ -141,6 +149,7 @@ fn ref_layer_norm_backward(
 #[test]
 #[ignore = "ROCm 実機が必要（#3159 で実行）"]
 fn forward_matches_cpu_on_device() {
+    reset();
     let o = RocmBackendOps::new(GfxTarget::Gfx942);
     let c = CpuBackendOps;
     for shape in [
@@ -174,6 +183,7 @@ fn forward_matches_cpu_on_device() {
 #[test]
 #[ignore = "ROCm 実機が必要（#3159 で実行）"]
 fn backward_matches_reference_on_device() {
+    reset();
     let o = RocmBackendOps::new(GfxTarget::Gfx942);
     for (rows, hidden) in [(1usize, 1usize), (3, 31), (5, 64), (4, 65), (6, 257)] {
         let shape = [rows, hidden];
@@ -215,6 +225,7 @@ fn backward_matches_reference_on_device() {
 #[test]
 #[ignore = "ROCm 実機が必要（#3159 で実行）"]
 fn batch_norm_matches_cpu_on_device() {
+    reset();
     let o = RocmBackendOps::new(GfxTarget::Gfx942);
     let c = CpuBackendOps;
     for shape in [vec![4usize, 3], vec![2, 3, 17], vec![2, 5, 4, 33]] {

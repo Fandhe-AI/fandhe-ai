@@ -64,6 +64,13 @@ fn check(label: &str, got: &Tensor<f32>, want: &Tensor<f32>) {
     FAILS.with(|f| f.set(f.get() + r.fail_count));
 }
 
+/// テスト開始時に累計 fail 数を 0 へ戻す。`--test-threads=1` では全テストが同一スレッドで走り、
+/// thread_local が引き継がれるため、先行テストの fail が後続の `finish` を誤って落とさないようにする。
+/// 判定条件（tolerance・`compare`）は変更しない。
+fn reset() {
+    FAILS.with(|f| f.set(0));
+}
+
 /// 累計 fail が 0 でなければ落とす（REQ-2 複合判定を外れた要素がある）。
 fn finish() {
     let fails = FAILS.with(Cell::get);
@@ -82,6 +89,7 @@ fn bits(x: &Tensor<f32>) -> Vec<u32> {
 #[test]
 #[ignore = "ROCm 実機（MI300X・gfx942）専用。実測は #3159 段 B"]
 fn elementwise_loss_family_matches_cpu_and_is_deterministic() {
+    reset();
     let (dev, cpu) = (RocmBackendOps::new(GfxTarget::Gfx942), CpuBackendOps);
     for n in SIZES {
         let p = t1(lcg(n, 1, -3.0, 3.0));
@@ -161,6 +169,7 @@ fn elementwise_loss_family_matches_cpu_and_is_deterministic() {
 #[test]
 #[ignore = "ROCm 実機（MI300X・gfx942）専用。実測は #3159 段 B"]
 fn nll_matches_cpu_and_is_deterministic() {
+    reset();
     let (dev, cpu) = (RocmBackendOps::new(GfxTarget::Gfx942), CpuBackendOps);
     let cases: [(&[usize], usize); 5] = [
         (&[5], 0),
