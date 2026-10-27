@@ -66,3 +66,11 @@ on-arm-prime.patch sha256: 1f1e79b237fa365de61168c88f5c9db628448fee0fccddcdb0932
 7. マスク規則
   - 収録ログのホスト名は masked、$HOME は <home>、ユーザー名と絶対パスは除去。実機のホスト名・接続情報・IP はリポに書かない。
   - rev-stamp (before は git rev-parse HEAD、prime／after は <sha>+<patch 名>) とツリー指紋を成果物に含める。
+
+8. 追記 (計測前・2026-10-27 UTC。閾値・round 数・セル・巡回順・前提ゲート・分類表・マスク規則・パッチは変更しない)
+  - 本規則を含むコミットは PR #3634 の squash により origin/main e2660eba0 (親 ff0ac8e4e) となった。計測ツリーは e2660eba0 とする (本追記コミットは docs だけで、計測ツリーには含めない)。
+  - 理由: 冒頭の「3e5d41016 直系」のツリーでは bench-fandhe の固定版が =0.11.0、workspace が 0.12.0 で食い違い、A/B 本体の path patch が使われず cargo tree 検査で必ず失敗する。
+    e2660eba0 では固定版が =0.12.0 (#3625) で path patch が効く。
+  - crates/ の本番ソース (backend-cpu・facade・tensor-core・autodiff) は 3e5d41016 と e2660eba0 で差分なしを確認済み。パッチの sha256・git apply --check・変更行数 (prime 4・after 2) は引き続き P-TREE の fail-closed 検査になる。
+  - 既知の交絡: #3635 で bench-fandhe の --mode reuse が常駐入力経路 (gemm は matmul_resident) へ変わった。gemm 2048 reuse は #3232 では旧 Tape 経路だった。
+    組 0 が P-REPRO を満たさない (非再現) 場合は「ハーネス変更」も別の説明として併記する。分類は §4 の表の機械適用結果をそのまま採り、事後に読み替えない。
