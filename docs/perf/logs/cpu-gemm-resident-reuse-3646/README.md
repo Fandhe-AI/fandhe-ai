@@ -48,7 +48,7 @@ bench-fandhe の `gemm --mode reuse` を常駐入力経路（#3272。`Tape::uplo
 1. RULE.txt を含むコミットを計測ツリーとして rsync し、ルートに `.rev-stamp`（1 行目 HEAD・2 行目 `dirty=<件数>`）を置く。
    ツリー指紋を `git archive` の展開物と突合して `rev-stamp-verification-3646.md` に残す
 2. `setsid nohup` で切り離し hw-lock を取得、PATH を明示、計測中はビルド並走禁止
-3. `bash orchestrate.sh gb10` → `python3 aggregate.py gb10`
-4. 補助: `--aux minflt`・`--aux tunables`・`--aux taskset`（別ディレクトリへ出力）
-5. ブリッジ: bench-fandhe `--task gemm --device cpu --mode reuse|fresh --phases` を N=256〜4096 各 5 run
+3. `bash orchestrate.sh gb10`
+4. ブリッジ（集計の前に行う）: bench-fandhe `--task gemm --device cpu --mode reuse|fresh --phases` を N=256〜4096 各 5 run。matmul 区間差が iter_total 差の 50% 以上かを N ごとに判定し、`gb10/bridge_status.txt` へ `<N> bridge=pass|fail` を 1 行ずつ記録する（未記録・fail の N は aggregate.py が帰属を保留する）
+5. `python3 aggregate.py gb10`。補助: `--aux minflt`・`--aux tunables`・`--aux taskset`（別ディレクトリへ出力。判定外）
 6. G-CPU-INF: RULE.txt 末尾の測定 (i)〜(iii)（既存の承認済み venv のみ。新規パッケージ導入はしない）

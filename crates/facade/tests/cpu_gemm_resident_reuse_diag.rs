@@ -311,36 +311,26 @@ fn one_iter(
             rec.record_checksum(s);
         }
         Kind::GemmHold | Kind::GemmDropIn | Kind::GemmDownload => {
+            // 反復間処理を 3 腕で揃える: 窓の外では出力（と download 結果）の drop だけを行い、
+            // 追加の GEMM・download は反復ループに置かない（確保・解放の回数と入力キャッシュ状態を
+            // 腕間で変えないため。出力の検証は `drive` がループ後の独立ブロックで行う）。
             let t_all = Instant::now();
             let f_all = minflt();
             let out = res.ops.gemm_device(&res.da, &res.db).expect("gemm_device");
-            let (out, host) = match arm.kind {
+            match arm.kind {
                 Kind::GemmDownload => {
                     let h = res.ops.download(&out).expect("download");
-                    (out, Some(h))
+                    rec.push("iter_total", t_all.elapsed().as_secs_f64(), f_all);
+                    drop((out, h));
                 }
-                _ => (out, None),
-            };
-            if arm.kind == Kind::GemmDropIn {
-                drop(out);
-                rec.push("iter_total", t_all.elapsed().as_secs_f64(), f_all);
-                // 出力の bit 一致は別途 download で確認（窓の外・計時対象外）。
-                let chk = res.ops.gemm_device(&res.da, &res.db).expect("gemm_device");
-                let h = res.ops.download(&chk).expect("download");
-                let sl = h.as_slice().expect("contiguous");
-                rec.record_checksum(checksum(sl));
-                take(sl);
-            } else {
-                rec.push("iter_total", t_all.elapsed().as_secs_f64(), f_all);
-                // 窓の外で drop（hold 系は解放をカーネル・確保の基準から除く）。
-                let h = match host {
-                    Some(h) => h,
-                    None => res.ops.download(&out).expect("download"),
-                };
-                let sl = h.as_slice().expect("contiguous");
-                rec.record_checksum(checksum(sl));
-                take(sl);
-                drop(out);
+                Kind::GemmDropIn => {
+                    drop(out);
+                    rec.push("iter_total", t_all.elapsed().as_secs_f64(), f_all);
+                }
+                _ => {
+                    rec.push("iter_total", t_all.elapsed().as_secs_f64(), f_all);
+                    drop(out);
+                }
             }
         }
         Kind::BackendDrop => {
@@ -372,11 +362,29 @@ fn drive(
         let mut out = Vec::new();
         let want = rec.on && captured.is_some();
         one_iter(rec, arm, &mut res, ab, want.then_some(&mut out));
-        if want && let Some(c) = captured.as_deref_mut() {
+        if want
+            && !out.is_empty()
+            && let Some(c) = captured.as_deref_mut()
+        {
             c.push(out);
         }
     }
     rec.on = false;
+    if matches!(
+        arm.kind,
+        Kind::GemmHold | Kind::GemmDropIn | Kind::GemmDownload
+    ) {
+        // 計測ループの外の独立ブロック: 出力の checksum と bit 一致用の出力をブロックごとに 1 回だけ確定する。
+        let chk = res.ops.gemm_device(&res.da, &res.db).expect("gemm_device");
+        let h = res.ops.download(&chk).expect("download");
+        let sl = h.as_slice().expect("contiguous");
+        rec.on = true;
+        rec.record_checksum(checksum(sl));
+        rec.on = false;
+        if let Some(c) = captured {
+            c.push(sl.to_vec());
+        }
+    }
 }
 
 /// 公開経路（`upload_resident → matmul_resident`）の出力。
@@ -402,7 +410,16 @@ fn cpu_gemm_resident_arms_match_public_path_bit_exact() {
             let mut rec = Rec::default();
             let mut outs = Vec::new();
             drive(&mut rec, arm, n, (&a, &b), (0, 3), Some(&mut outs));
-            assert_eq!(outs.len(), 3);
+            // gemm_device 系 3 腕は出力検証をループ外で 1 回だけ行う（反復間処理を揃えるため）。
+            let want_len = if matches!(
+                arm.kind,
+                Kind::GemmHold | Kind::GemmDropIn | Kind::GemmDownload
+            ) {
+                1
+            } else {
+                3
+            };
+            assert_eq!(outs.len(), want_len);
             for out in &outs {
                 assert_eq!(
                     bits(out),

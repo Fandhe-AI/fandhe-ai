@@ -4,7 +4,8 @@
 使い方: aggregate.py <dir>   （dir は run1.jsonl.. と load_gate_status.txt・series_kind.txt を持つ）
         aggregate.py --self-test
 欠落セル・不正 JSON・n_samples 不一致・非有限/非正の median_s・checksum の bit 不一致・
-ゲート状態／系列種別の欠落は fail-closed（exit 1）。判定閾値は RULE.txt（実測前に固定）が正で、
+ゲート状態／系列種別の欠落は fail-closed（exit 1）。
+ブリッジ確認結果（bridge_status.txt）が未記録・不成立の N は帰属を出さず保留する。判定閾値は RULE.txt（実測前に固定）が正で、
 本スクリプトは変更しない。判定は series_kind=main かつ gate=pass の系列だけで行う。
 """
 import json
@@ -30,6 +31,7 @@ EXPECTED = {
 EXPECTED_N = {n: (40 if n >= 4096 else 80) for n in SIZES}
 GATE_FILE = "load_gate_status.txt"
 KIND_FILE = "series_kind.txt"
+BRIDGE_FILE = "bridge_status.txt"
 KINDS = ("main", "minflt", "tunables", "taskset")
 THRESHOLD = 0.5  # RULE.txt 帰属規則（事後に変えない）
 TUNABLES_NEAR_ONE = 1.05  # RULE.txt 補助系列の解釈規則
@@ -112,6 +114,30 @@ def load_kind(d):
     return kind
 
 
+def load_bridge(d):
+    """N -> ブリッジ確認結果（pass / fail）。ファイル欠落は空 dict（帰属保留）、書式不正は fail-closed。
+
+    RULE.txt「ブリッジ」: --phases の matmul 区間差が iter_total 差の 50% 以上かを N ごとに
+    確認した結果を `<N> bridge=pass|fail` で 1 行ずつ記録する。未記録・fail の N は帰属を保留する。
+    """
+    path = os.path.join(d, BRIDGE_FILE)
+    if not os.path.exists(path):
+        return {}
+    seen = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+    except OSError as e:
+        raise AggError(f"{path}: 読み込み不可 ({e})")
+    for ln in lines:
+        parts = ln.split()
+        if (len(parts) != 2 or not parts[0].isdigit() or int(parts[0]) not in SIZES
+                or parts[1] not in ("bridge=pass", "bridge=fail") or int(parts[0]) in seen):
+            raise AggError(f"{path}: 不正または重複した行 {ln!r}")
+        seen[int(parts[0])] = parts[1][7:]
+    return seen
+
+
 def check_checksums(runs):
     for n in SIZES:
         ref = None
@@ -170,6 +196,7 @@ def aggregate(d):
     if record_only and len(record_only) != nruns:
         raise AggError(f"record_only と他状態の run が混在 ({record_only})")
     check_checksums(runs)
+    bridge = load_bridge(d)
     judge = kind == "main" and not unpassed and not record_only
     out = []
     w = out.append
@@ -205,6 +232,12 @@ def aggregate(d):
             continue
         if ratio <= 1.0:
             w("- 判定: 非再現（ratio <= 1.00）。帰属は行わない。")
+            w("")
+            continue
+        if bridge.get(n) != "pass":
+            why = "未記録" if n not in bridge else "不成立"
+            w(f"- 判定: 再現（ratio > 1.00）。ただしブリッジ確認が{why}（{BRIDGE_FILE}）。"
+              "bench と診断の窓の一致が未確認のため帰属を保留する（RULE.txt）。")
             w("")
             continue
         g = r_tot - f_tot
@@ -283,8 +316,20 @@ def self_test():
     with tempfile.TemporaryDirectory() as t:
         good = os.path.join(t, "good")
         _write_series(good)
+        with open(os.path.join(good, BRIDGE_FILE), "w", encoding="utf-8") as f:
+            f.writelines(f"{n} bridge=pass\n" for n in SIZES)
         text = aggregate(good)
         assert "再現（ratio > 1.00）" in text and "hard 検査通過" in text and "rho_DL" in text
+        nb = os.path.join(t, "nobridge")
+        _write_series(nb)
+        text = aggregate(nb)
+        assert "帰属を保留" in text and "- 帰属" not in text and "rho_DL" not in text
+        bf = os.path.join(t, "bridgefail")
+        _write_series(bf)
+        with open(os.path.join(bf, BRIDGE_FILE), "w", encoding="utf-8") as f:
+            f.writelines(f"{n} bridge=fail\n" for n in SIZES)
+        text = aggregate(bf)
+        assert "ブリッジ確認が不成立" in text and "- 帰属" not in text
         ro = os.path.join(t, "ro")
         _write_series(ro, gate_status="record_only")
         text = aggregate(ro)
