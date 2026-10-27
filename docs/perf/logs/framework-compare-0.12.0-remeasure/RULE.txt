@@ -1,0 +1,11 @@
+事前登録規則（DGX Spark GB10）0.12.0 6 フレームワーク同席計測 — 【未固定（草案）】
+イシュー #3273。固定時刻: 未記入（計測直前に UTC で記入し、以後編集しない）。本ファイルは実測値を含まない。
+
+腕・判別式・bench_py.py sha256・判定・N=5・既定設定・実機ロックは Mac mini 側
+（../framework-compare-0.12.0-macmini-remeasure/RULE.txt）と同じ。
+期待行数: stage1 112（skipped 0）/ stage2 8 / stage3 28 / stage4（旧腕）28。
+旧腕の位置: stage2 の後・stage3 の前。新腕と段の位置が違うことは偏りの可能性として明記する。
+ゲート: 各 round 前に load1 < 1.0 かつ GPU 使用率 0% が 3 サンプル連続（30 秒間隔・最大 30 分）。
+  値が数値で取れなければ GATE-INVALID、30 分超過は GATE-TIMEOUT として系列を打ち切る。5/5 完走のみ採用。
+常駐サービス（vLLM・ComfyUI）の有無は nvidia-smi --query-compute-apps で env_info.txt に記録する。
+#3256 の C1〜C9 は時間系列の後に同ロックで実行（判定は resident-chain-parity-3256/RULE.txt に従う）。
