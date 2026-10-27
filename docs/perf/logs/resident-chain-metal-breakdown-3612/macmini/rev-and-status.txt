@@ -1,0 +1,59 @@
+runner
+3e5d4101646c4dc77140f01993b862009aded476
+?? scripts/bench/framework-compare/results/raw/build-3612-3612-macmini.err
+?? scripts/bench/framework-compare/results/raw/cooldown-3612-3612-macmini.log
+?? scripts/bench/framework-compare/results/raw/env_info-3612-3612-macmini.txt
+?? scripts/bench/framework-compare/results/raw/load_gate-3612-3612-macmini.log
+?? scripts/bench/framework-compare/results/raw/pmset_therm_after-3612-3612-macmini.txt
+?? scripts/bench/framework-compare/results/raw/pmset_therm_before-3612-3612-macmini.txt
+?? scripts/bench/framework-compare/results/raw/results-3612-infer-b0-3612-macmini.jsonl
+?? scripts/bench/framework-compare/results/raw/results-3612-infer-b1-3612-macmini.jsonl
+?? scripts/bench/framework-compare/results/raw/results-3612-train-b0-3612-macmini.jsonl
+?? scripts/bench/framework-compare/results/raw/results-3612-train-b1-3612-macmini.jsonl
+?? scripts/bench/framework-compare/results/raw/run-3612-infer-3612-macmini-r1.log
+?? scripts/bench/framework-compare/results/raw/run-3612-infer-3612-macmini-r2.log
+?? scripts/bench/framework-compare/results/raw/run-3612-infer-3612-macmini-r3.log
+?? scripts/bench/framework-compare/results/raw/run-3612-infer-3612-macmini-r4.log
+?? scripts/bench/framework-compare/results/raw/run-3612-infer-3612-macmini-r5.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b0-3612-macmini-r1.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b0-3612-macmini-r2.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b0-3612-macmini-r3.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b0-3612-macmini-r4.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b0-3612-macmini-r5.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b1-3612-macmini-r1.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b1-3612-macmini-r2.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b1-3612-macmini-r3.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b1-3612-macmini-r4.log
+?? scripts/bench/framework-compare/results/raw/run-3612-train-b1-3612-macmini-r5.log
+?? scripts/bench/framework-compare/results/raw/skipped-breakdown-3612-3612-macmini.log
+?? scripts/bench/framework-compare/results/raw/uptime-3612-3612-macmini.log
+a0
+a8e91f0c99fa40b0bbdb26a8ebd7f05f08ecf9d0
+ M scripts/bench/framework-compare/Cargo.lock
+ M scripts/bench/framework-compare/bench-common/src/lib.rs
+ M scripts/bench/framework-compare/bench-fandhe/src/main.rs
+?? scripts/bench/framework-compare/results/raw/a0-3612-3612-macmini-a0-infer.jsonl
+?? scripts/bench/framework-compare/results/raw/a0-3612-3612-macmini-a0-train.jsonl
+?? scripts/bench/framework-compare/results/raw/a0-3612-3612-macmini-a0-us.txt
+?? scripts/bench/framework-compare/results/raw/a0-bench-fandhe-3612-3612-macmini-a0
+?? scripts/bench/framework-compare/results/raw/a0-build-3612-3612-macmini-a0.err
+?? scripts/bench/framework-compare/results/raw/a0-cooldown-3612-3612-macmini-a0.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-infer-r1.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-infer-r2.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-infer-r3.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-infer-r4.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-infer-r5.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-train-r1.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-train-r2.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-train-r3.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-train-r4.log
+?? scripts/bench/framework-compare/results/raw/a0-digest-3612-3612-macmini-a0-train-r5.log
+?? scripts/bench/framework-compare/results/raw/a0-env_info-3612-3612-macmini-a0.txt
+?? scripts/bench/framework-compare/results/raw/a0-load_gate-3612-3612-macmini-a0.log
+?? scripts/bench/framework-compare/results/raw/a0-pmset_therm_after-3612-3612-macmini-a0.txt
+?? scripts/bench/framework-compare/results/raw/a0-pmset_therm_before-3612-3612-macmini-a0.txt
+?? scripts/bench/framework-compare/results/raw/a0-sha-3612-3612-macmini-a0.txt
+?? scripts/bench/framework-compare/results/raw/a0-tree-3612-3612-macmini-a0.txt
+?? scripts/bench/framework-compare/results/raw/a0-uptime-3612-3612-macmini-a0.log
+?? scripts/bench/framework-compare/results/raw/skipped-a0-3612-3612-macmini-a0.log
+?? target-a0-3612/

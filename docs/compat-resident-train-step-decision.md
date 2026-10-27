@@ -691,8 +691,8 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 
 | セル | Δ = after − 相手最速（実測） | 内訳 | 分類 |
 |---|---:|---|---|
-| Mac mini train metal | +0.0143 ms（+2.9%、vs torch） | 分解不能。Mac mini の train／infer の内訳は未実測。M4 Max の旧内訳（`train-step-phase-breakdown.md`）は機体が違うため流用しない | 未説明残差（Mac mini の内訳は未実測） |
-| Mac mini infer metal | +0.0069 ms（+2.2%、vs torch） | 同上。ratio_r が 0.776〜1.075 に散り、Δ は round 間の揺れと同程度 | 未説明残差。差は誤差範囲に近い |
+| Mac mini train metal | +0.0143 ms（+2.9%、vs torch） | 実測（§17.6）: B1 の total 486.8 µs のうち host_fixed 228.2・gpu_busy 250.4・encode 8.0・prep 0.25・readout 0.25 µs。A0 窓のノイズ幅 N=362.0 µs で Δ（絶対値）=14.3 µs ≤ N。同一セッションの torch は未取得。M4 Max の旧内訳（`train-step-phase-breakdown.md`）は機体が違うため流用しない | 誤差範囲（集計の結論。N は A0 の round 1 に支配される）。振り分けは §17.6・`loss-attribution-matrix.md` §10.11 |
+| Mac mini infer metal | +0.0069 ms（+2.2%、vs torch） | 実測（§17.6）: B1 の total 305.9 µs のうち host_fixed 211.9・gpu_busy 90.9・encode 3.0・readout 0.2 µs。A0 窓の N=141.5 µs で Δ（絶対値）=6.9 µs ≤ N。ratio_r は 0.776〜1.075 に散り、Δ は round 間の揺れと同程度 | 誤差範囲（集計の結論） |
 | GB10 infer cuda | +0.0380 ms（vs torch） | 推定: launch の発行 14.1 µs（L1 7.5＋L2 6.6。相手も launch するので全額が Δ ではなく上限）、同期の待ち固定費 1 回 約 9.7 µs（kernel_wait。相手も同期 1 回を負うので Δ に入らない見込み）、checksum 窓 0.6〜0.8 µs（両者共通で Δ へほぼ寄与しない）。残りの約 23.9 µs（Δ から launch 発行を引いた値）はカーネル時間差と launch 数差を含み、分離できない | 計測窓（同期・checksum は共通の窓）＋自分たちの制約（launch 回数、推定）。未説明残差 約 23.9 µs（推定） |
 | GB10 train cpu | +0.3925 ms（vs torch） | 同期が無いので wait 固定費はゼロ。CPU の GEMM・autodiff の演算時間の差で、本計測に内訳なし | 未説明残差。内訳は未実測（チェーン化の対象外） |
 | GB10 infer cpu | +0.0238 ms（vs torch） | 同上 | 未説明残差。内訳は未実測 |
@@ -705,7 +705,7 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 
 - 公開面からはチェーンが Tape 経路へフォールバックしたかを観測できない（§16）。infer の after でも出力の D2H と同期 1 回は残る。checksum 一致は bit 同一の証明ではなく、train は PARAM_DIGEST（chain 腕と reuse 腕で一致）で補っている。
 - 機体ロック取得前後の GPU 占有（`nvidia-smi`）と計測中の他プロセスの記録は取れていない（計測時のログに無い）。Mac mini の load average は計測中 2.6〜3.3 で、ランナーの負荷ゲートは通過している。
-- Mac mini の train／infer の内訳は §17.6（#3612。計測部品は登録済み・実機は未実測）、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
+- Mac mini の train／infer の内訳は §17.6（#3612。2026-10-27 に実測済み。torch 側の内訳と B2 は未実測）、GB10 の HEAD での再分解は未実測（起票は所有者承認待ち）。
 - 本計測は参考系列で、正式な 6 フレームワーク同席計測とピン更新（0.12.0）は #3273。
 
 ### 17.5 #3611 CPU train の REGRESS の切り分け（状態: 両機体とも precheck 失敗で未実測。分類なし）
@@ -727,11 +727,39 @@ CPU テストは CI で全件 pass。Metal の `#[ignore]` 4 件は開発機（M
 - 上記の後に 2 機体の計測を再実施するか（再実施時は同じ label を使わず、別名 DIAG を計測前に固定する）。
 - CPU train の REGRESS の是正の要否は、分類が得られるまで判断材料がない。
 
-### 17.6 #3612 Mac mini Metal 常駐チェーンの内訳（手順の登録。状態: 未実測）
+### 17.6 #3612 Mac mini Metal 常駐チェーンの内訳（状態: 実測済み。hard 条件はすべて通過）
 
 §17.3 の Mac mini train metal（+14.3 us）・infer metal（+6.9 us）の未説明残差を、HEAD の常駐チェーン経路の区間別時間で `docs/perf/loss-attribution-matrix.md` §10 の枠組みへ振り分ける。
 
-- 手順の正本: `docs/perf/logs/resident-chain-metal-breakdown-3612/RULE.txt`（計測前に固定）。診断は `crates/backend-metal/src/resident_chain_breakdown_diag_tests_3612.rs`（`cfg(test)`・`#[ignore]`）、ランナーは `scripts/bench/framework-compare/run_breakdown_resident_chain_metal.sh`、集計は `summarize_breakdown_resident_chain_metal.py`。
+- 手順の正本: `docs/perf/logs/resident-chain-metal-breakdown-3612/RULE.txt`（計測前に固定。`rule_sha256` は現行 RULE と一致）。診断は `crates/backend-metal/src/resident_chain_breakdown_diag_tests_3612.rs`（`cfg(test)`・`#[ignore]`）、ランナーは `scripts/bench/framework-compare/run_breakdown_resident_chain_metal.sh`、集計は `summarize_breakdown_resident_chain_metal.py`。
 - 腕: B0（本番の同期位置。定常で wait が 1 step あたり 1 であることを assert し、Tape 経路へのフォールバックの検出を兼ねる）と B1（encode 直後に GPU タイムスタンプ付きで同期し、`gpu_busy`・`host_fixed`・`readout` を分ける）。全体時間の正は A0（#3257 と同じ窓の bench-fandhe）。
-- 限界: 常駐チェーンは 1 コマンドバッファのため、HEAD の経路では forward／backward／SGD の GPU 時間は分けられない（B2 は未実装）。torch 側の内訳は未測定なので、|Δ| がノイズ幅を超えても 1 つのタグへは確定させない。
-- 結果と所有者判断事項は計測後にここへ追記する。§17.3 の 2 行は実測まで書き換えない。
+- 実施: 2026-10-27（Mac mini・Apple M4。機体ロックは `#3612`）。B0／B1 はツリー `3e5d41016`（RULE を含み、`crates/` の `.rs`・`.metal` の `a8e91f0c9` との差は診断テストと `lib.rs` の `mod` 1 行だけ）。A0 は `a8e91f0c9` に #3257 の `bench-resident-chain.patch` を当てたツリー（`3e5d41016` は bench-fandhe のピン `=0.11.0` と facade 0.12.0 が食い違うため。RULE [限界]）。A0 は専用ランナー `run_a0_resident_chain_metal_3612.sh`（計測前にコミット）で取った。5 round すべて負荷ゲート（load1 < 3.0）を通過（B0／B1 の load1 は 2.77、A0 は 2.72〜2.87。B0／B1 は round 1 の cooldown で 210 秒待機）。
+- 欠損の経緯: B0／B1 の最初のランは完走したが、回収時のファイル名パターンの誤りで JSONL を回収できないままノード上の作業ディレクトリを削除した（値は一度も見ていない）。そのため新しいラベル（`3612-macmini2`）で同じ手順をやり直し、本節の値はこの 2 回目だけを使う。最初のランの付随ログは `macmini/first-attempt-collection-lost/` に残した（集計には使わない）。A0 は最初のセッションの値を使う（B 系の再実行とは独立）。
+
+結果（5 run それぞれの中央値の中央値。run 別と min–max は `summary-3612-3612-macmini2.md`、終了コード 0）:
+
+| 区間（µs） | train | infer | タグ（RULE 事前固定） |
+|---|---:|---:|---|
+| prep | 0.250 | - | 自分たちの制約 |
+| encode | 7.958 | 3.000 | 自分たちの制約 |
+| gpu_busy | 250.375 | 90.875 | GPU 計算（ピーク値の出典が無いため上限との比は出さない） |
+| host_fixed（commit_wait − gpu_busy） | 228.167 | 211.875 | 共通の計測窓 |
+| readout | 0.250 | 0.209 | 共通の計測窓 |
+| total(B1) | 486.833 | 305.875 | - |
+| total(B0) | 485.709 | 303.584 | - |
+| A0 窓の中央値 | 509.687 | 310.958 | - |
+
+| 突き合わせ（µs） | train | infer |
+|---|---:|---:|
+| gap1（B1 total − Σ区間） | -0.167 | -0.084 |
+| B1 − B0（観測の負荷） | 1.124 | 2.291 |
+| gap2（B0 total − A0 窓） | -23.978 | -7.374 |
+| N（max｜A0_r − 中央値｜） | 362.022 | 141.542 |
+| Δ（#3257 の after − torch。同一セッションの torch は未取得） | +14.3 | +6.9 |
+
+- 集計の結論: 両セルとも「|Δ| ≤ N。揺れの範囲として記録（未説明残差は誤差範囲）」。ただし N は A0 の round 1（train 871.7 µs・infer 452.5 µs。他の round は train 476〜730 µs・infer 309〜313 µs）に支配されている。RULE は N の定義を変えない（事後に外れ値を除かない）ので、そのまま記録する。Δ が小さいと言えるのは、A0 の揺れが大きいことの帰結であり、Δ を説明したわけではない。
+- 区間の読み方（事実）: 1 step の約半分（train 228 µs・infer 212 µs）は host_fixed、つまりコミットから完了待ちまでの固定費で、gpu_busy（train 250 µs・infer 91 µs）と同程度かそれ以上。encode と prep は train で約 8 µs、infer で約 3 µs と小さい。RULE の事前仮説（host_fixed が大きく encode+prep は小さい）と整合した。torch も同期 1 回を負うため、これで Δ の主因が特定できたわけではない。
+- hard 条件: すべて通過（wait は全 run で 1 step あたり 1・command_buffers_max は 1・infer の B1 は B0 と bit 一致・タイムスタンプ欠落なし・5 round とも負荷ゲート通過）。
+- A0 の記録のみの値: PARAM_DIGEST は train・infer とも各 round のログに保存（判定には使わない）。A0 の `env_info` の `rule_sha256` が空なのは、`a8e91f0c9` のツリーに RULE.txt が無いため（RULE の固定は B 系の `env_info` と `RULE.txt` の sha256 で確認する）。A0 のビルドで `scripts/bench/framework-compare/Cargo.lock` が更新されたが、使い捨てのノード上のツリーに閉じ、コミットしていない。
+- 限界: 常駐チェーンは 1 コマンドバッファのため、HEAD の経路では forward／backward／SGD の GPU 時間は分けられない（B2 は未実装）。torch 側の内訳は未測定なので、1 つのタグへは確定させない。診断は Mac mini 1 台・1 セッション。
+- 所有者判断事項（本 issue では何も直していない）: (1) 常駐チェーンの host_fixed（コミット＋完了待ちの固定費）が 1 step の約半分を占める。これを減らす案を検討するか（torch も同期 1 回を負うため、効果は未知）。(2) 正式な相手との同席計測（#3273）で Δ を再測定するか。(3) A0 の round 1 の外れ値の扱い（RULE は不変。別名の規則を計測前に登録するなら別 issue）。

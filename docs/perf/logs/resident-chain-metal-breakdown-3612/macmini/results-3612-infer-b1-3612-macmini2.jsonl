@@ -1,0 +1,5 @@
+{"task":"infer","arm":"b1","n":100,"encode_us":3.041,"commit_wait_us":303.791,"gpu_busy_us":91.875,"host_fixed_us":211.875,"readout_us":0.209,"total_us":307.125,"wait_max":1,"command_buffers_max":1,"bit_identical_to_b0":true}
+{"task":"infer","arm":"b1","n":100,"encode_us":3.000,"commit_wait_us":297.333,"gpu_busy_us":90.708,"host_fixed_us":207.001,"readout_us":0.209,"total_us":300.667,"wait_max":1,"command_buffers_max":1,"bit_identical_to_b0":true}
+{"task":"infer","arm":"b1","n":100,"encode_us":3.000,"commit_wait_us":303.375,"gpu_busy_us":91.875,"host_fixed_us":211.876,"readout_us":0.209,"total_us":306.666,"wait_max":1,"command_buffers_max":1,"bit_identical_to_b0":true}
+{"task":"infer","arm":"b1","n":100,"encode_us":3.000,"commit_wait_us":299.208,"gpu_busy_us":90.750,"host_fixed_us":208.583,"readout_us":0.250,"total_us":302.500,"wait_max":1,"command_buffers_max":1,"bit_identical_to_b0":true}
+{"task":"infer","arm":"b1","n":100,"encode_us":3.000,"commit_wait_us":302.584,"gpu_busy_us":90.875,"host_fixed_us":212.083,"readout_us":0.209,"total_us":305.875,"wait_max":1,"command_buffers_max":1,"bit_identical_to_b0":true}

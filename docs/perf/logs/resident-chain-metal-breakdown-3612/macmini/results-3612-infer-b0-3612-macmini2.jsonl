@@ -1,0 +1,5 @@
+{"task":"infer","arm":"b0","n":100,"total_us":311.125,"wait_max":1,"command_buffers_max":1,"checksum":-17.665832004}
+{"task":"infer","arm":"b0","n":100,"total_us":303.833,"wait_max":1,"command_buffers_max":1,"checksum":-17.665832004}
+{"task":"infer","arm":"b0","n":100,"total_us":289.708,"wait_max":1,"command_buffers_max":1,"checksum":-17.665832004}
+{"task":"infer","arm":"b0","n":100,"total_us":303.584,"wait_max":1,"command_buffers_max":1,"checksum":-17.665832004}
+{"task":"infer","arm":"b0","n":100,"total_us":300.125,"wait_max":1,"command_buffers_max":1,"checksum":-17.665832004}

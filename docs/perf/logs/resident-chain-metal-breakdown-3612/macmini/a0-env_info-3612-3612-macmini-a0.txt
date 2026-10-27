@@ -1,0 +1,10 @@
+host=masked
+uname=Darwin 27.0.0 arm64
+cpu_brand=Apple M4
+rustc=rustc 1.99.0 (b940084d7 2026-09-28)
+a0_tree_head=a8e91f0c99fa40b0bbdb26a8ebd7f05f08ecf9d0
+patch_sha256=92d0a8d446790feedfb0c3392c76c3641ac7977a1a604e26f68f5c811ac3a819
+rule_sha256=
+script_sha256=c7690466f6e6189498870a6aeb3091c70a1f753f42dfed4dbd31965f615ce33a
+bin_sha256=7bf7d4a0d8d0647d8a7c42aa0aec884bb035b1c8d0ddc52b8ff217addcab51ab
+rounds=5

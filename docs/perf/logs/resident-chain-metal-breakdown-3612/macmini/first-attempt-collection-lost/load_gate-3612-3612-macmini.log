@@ -1,0 +1,6 @@
+series=official threshold=3.0
+round1 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.61
+round2 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.61
+round3 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.61
+round4 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.61
+round5 dev=metal gate=pass gate_ok=1 threshold=3.0 waited_s=0 load1=2.61
