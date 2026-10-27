@@ -1,0 +1,3 @@
+prereg commit: 02baacf0d
+RULE.txt sha256: c0bf914e3583247c8fcf9a2d68af96377236a8169ac74208a60e55115d282ef8
+prepared-at-utc: 20261027T071230Z

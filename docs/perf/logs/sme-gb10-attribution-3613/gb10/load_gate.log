@@ -1,0 +1,4 @@
+rt_before exit=0
+run_ab exit=0
+bitdump exit=0 cmp_exit=0
+collect exit=0

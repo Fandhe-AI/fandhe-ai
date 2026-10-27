@@ -929,11 +929,22 @@ Mac mini（Apple M4）と GB10 で 5 round ずつ測った。規則は `docs/per
 ### 5.15 GB10 後退 2 セルの 3 腕帰属切り分け（イシュー #3613）
 
 §5.13 で GB10（SME 非搭載・両腕が同じ NEON 経路・bitdump bit 同一）でも `gemm 256 fresh`・`gemm 2048 reuse` が 5/5 round で後退した原因は推定のままだった。
-§5.7 型の 3 腕 A/B で帰属を切り分ける。**状態: 計測部品の登録のみ。GB10 実測は未実測**（下の数値・分類欄は計測後に記入する。推測値・M4 Max／Linux の代替値は書かない）。
+§5.7 型の 3 腕 A/B で帰属を切り分ける。**状態: GB10 実測済み（2026-10-27 UTC・計測ツリー `e2660eba0`。規則 §8 の計測前追記を参照）**。数値・分類は `aggregate-gb10.md` の機械出力の転記で、推測値・M4 Max／Linux の代替値は書かない。
 
 - 事前登録規則・パッチ・スクリプト: `docs/perf/logs/sme-gb10-attribution-3613/`（`RULE.txt`・`on-arm.patch`・`on-arm-prime.patch`・`orchestrate_gb10.sh`・`aggregate.py`）、A/B 本体 `scripts/bench/framework-compare/run_ab_sme_attribution_gb10_cpu.sh`。
-- 3 腕（HEAD `3e5d41016` 基準・`gemm_blis/mod.rs` のみの差分）: before = HEAD そのまま（定数 false）／prime = 定数 true + `sme_kernel_for_shape` の `try_new()` を `None` へ置換／after = 定数 true のみ。
+- 3 腕（登録基準 `3e5d41016`。実際の計測ツリーは squash 後の `e2660eba0`。理由は下記「計測ツリー」。`gemm_blis/mod.rs` のみの差分）: before = HEAD そのまま（定数 false）／prime = 定数 true + `sme_kernel_for_shape` の `try_new()` を `None` へ置換／after = 定数 true のみ。
 - **構造上の注意（計測前に記録）**: HEAD で定数を使う本番コードは `sme_kernel_for_shape` だけ（`mod.rs:3589〜3595`）のため、prime は before とほぼ同じコードに畳まれる。組 1（before/prime）は実質 A/A 対照、帰属を見分けるのは組 2（prime/after。`try_new()` 呼び出しの有無）。バイナリ sha256 の差は帰属の根拠にしない（パス埋め込みのため）。
 - 分類（RULE §4）: 非再現（ノイズ帯・判定不能）／方法感度（判定不能）／SME 経路の選択ロジックに帰属／再現したが未分離（ノイズ帯）／FAIL／undetermined（前提不成立）。**非再現・判定不能も正式な結果**として記録する（§5.7 は未分離だった）。
-- 結果欄（未実測）: 組 0〜2 の round 別比・中央値、腕別 bench sha256、bitdump、機械出力の分類、前提ゲート成否 — いずれも未実測。
-- 次の手（既定 ON の再 A/B・是正の要否）は **所有者の判断として記録する**。本 issue では定数の切替・是正・新規 issue 起票を行わない。
+- **計測ツリー**: 規則冒頭の「3e5d41016 直系」のツリーでは bench-fandhe の固定版 `=0.11.0` と workspace `0.12.0` が食い違い、A/B 本体の path patch が使われず `cargo tree` 検査で必ず失敗する（推論。`1276ff3863` での実ビルド確認は省略）。
+  PR #3634 の squash 後 `e2660eba0` では固定版が `=0.12.0` で解決する。`crates/` の backend-cpu・facade・tensor-core・autodiff は `3e5d41016` との差分なしを確認した。計測前に `RULE.txt` §8 へ追記し、閾値・分類表は変えていない（所有者の事後確認対象）。
+  固定の証跡: 追記コミット `02baacf0d`（未 push）。`gb10/prereg_append.txt`（追記後 RULE.txt の sha256 と準備時刻 2026-10-27T07:12:30Z）が `gb10/hwlock.log` の acquired（07:13:03Z）より前。
+- **結果（機械出力。`docs/perf/logs/sme-gb10-attribution-3613/aggregate-gb10.md` を正とする。ログ: `.../gb10/`）**:
+  - 前提ゲート: P-TREE・P-R0・P-BIT・P-RT・P-LOCK・P-GATE・P-RUNAB・P-COLLECT すべて成立。腕: before=`e2660eba0`／prime・after=それぞれ `+on-arm-prime.patch`／`+on-arm.patch`（`gb10/rev-stamp.txt`）。
+  - 判定 2 セルの分類: **gemm 256 fresh = 非再現（ノイズ帯・判定不能）／gemm 2048 reuse = 非再現（ノイズ帯・判定不能）**。
+  - 判定 2 セルの中央値比（> 1.00 = 後退）: gemm 256 fresh は pair0 0.964・pair1 0.876・pair2 1.072、gemm 2048 reuse は pair0 0.869・pair1 0.944・pair2 0.967。どの組も 5/5 後退ではない。round 別比は aggregate-gb10.md の表。
+  - checksum は 3 腕で全セル完全一致。bitdump は 3 腕とも 6726847 行・sha256 一致（`b8c399e9…`。`gb10/bitdump/summary.txt`）。
+  - 併記 10 セルのうち 5/5 後退は train 64 fresh の pair0（after/before 中央値 1.062）と pair2（after/prime 1.067）のみ（pair1 は 1.003）。併記セルで判定外のため分類しない。事実のみ記録する。
+  - 腕別 bench sha256（参考。パス埋め込みのため帰属の根拠にしない）: before `4f2c2a27…`・prime `4aa35fd0…`・after `35f3f528…`（`gb10/bench_sha256.txt`）。
+  - 計測は 07:13:03Z〜07:17:55Z（ロック保持時間）。PyTorch は GB10 に venv がないため未計測（RULE §5）。
+- **交絡の注記**: #3635 で bench-fandhe の `--mode reuse` が常駐入力経路へ変わり、`gemm 2048 reuse` は #3232 の旧 Tape 経路と同一条件ではない。今回は非再現のため「後退がハーネス変更で消えた」可能性と「#3232 の後退がノイズだった」可能性を本計測では区別できない。
+- 次の手（選択肢。いずれも **所有者判断待ち（承認未取得）**。本 issue では定数の切替・是正・新規 issue 起票を行わない）: (a) 現状維持（既定 OFF）、(b) 新しい事前登録での既定 ON の再 A/B（旧 Tape 経路相当の条件を含めるか）、(c) 計測方式の変更（round 数・ノイズ帯の見積り）。

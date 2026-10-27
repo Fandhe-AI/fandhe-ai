@@ -360,6 +360,6 @@ A03（入力検証: 形状・長さを asm 前に検査）・A04/A05（既定 OF
 §12.12 の GB10 REJECT（SME 非搭載機での 2 セル 5/5 後退）の原因を、HEAD 基準の 3 腕 A/B（before・prime・after）で切り分ける計測部品を登録した
 （`docs/perf/logs/sme-gb10-attribution-3613/RULE.txt`。性能解釈は `docs/perf/cpu-gemm-sme-fmopa-microkernel.md` §5.15）。
 
-- **状態**: GB10 実測は **未実測**。機械出力の帰属分類（`aggregate-gb10.md`）は計測後に記入する。
+- **状態**: GB10 実測済み（2026-10-27 UTC・計測ツリー `e2660eba0`。規則 §8 追記を参照）。機械出力の分類は 2 セルとも **非再現（ノイズ帯・判定不能）**、前提ゲートはすべて成立（`docs/perf/logs/sme-gb10-attribution-3613/aggregate-gb10.md`。性能解釈は perf doc §5.15）。§12.8 の条件 2 の欄は変更しない。
 - 本節は `unsafe`・FMA 契約・tolerance・baseline・REQ-8 の手動境界検査を変更しない。Rust コード（`crates/`）の変更はない。パッチは計測ツリー専用で main には入れない。
 - 既定 ON へ戻すか・次の手（再 A/B・是正）の要否: **所有者判断待ち**（承認は未取得）。
