@@ -1,0 +1,24 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running tests/linalg_parity.rs (<home>/work/target-fandhe-ai/release/deps/linalg_parity-dea6d694088a45cf)
+
+running 6 tests
+test pipeline_compiles_on_device ... ok
+test cholesky_matches_cpu_on_device ... ok
+test gate_on_non_empty_does_not_return_unsupported ... ok
+test lu_family_matches_cpu_on_device ... ok
+
+thread 'qr_matches_cpu_on_device' (20968828) panicked at crates/backend-metal/tests/linalg_parity.rs:334:9:
+qr R 3x8 scale=1e20: 複合判定 FAIL（fail_count=1/24, max_abs_diff=3.738e13, max_rel_err=1.000e0, mean_abs_diff=8.384e12, mean_rel_err=4.167e-2, p50_abs_diff=4.398e12, p99_abs_diff=3.738e13, p999_abs_diff=3.738e13）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test qr_matches_cpu_on_device ... FAILED
+test status_mapping_end_to_end_on_device ... ok
+
+failures:
+
+failures:
+    qr_matches_cpu_on_device
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p fandhe-ai-backend-metal --test linalg_parity`
+exit_code=101

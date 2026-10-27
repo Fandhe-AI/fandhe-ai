@@ -1,4 +1,6 @@
-# Metal 線形代数（LU 系・cholesky・QR。#2676・#3137）実機 parity 未実測の申し送り
+# Metal 線形代数（LU 系・cholesky・QR。#2676・#3137）実機 parity の記録
+
+**状態（2026-10-27）**: Mac mini（Apple M4）で事前登録 `RULE.txt` どおり実測し、**5 回中 5 回とも `qr_matches_cpu_on_device` が fail（要対応・所有者判断待ち）**。LU 系・cholesky は pass。詳細は末尾「2026-10-27 Mac mini 実測」節。
 
 `docs/backend-gpu-linalg-decision.md` §3〜§6・§10 参照。Stage A（#2676）は `unsafe` なしまでで止め、Stage B（#3137）で
 案 A（既存ヘルパーの共有モジュールへの移設。正味の新規 `unsafe` ブロックなし。`docs/gpu-linalg-kernel-launch-unsafe-audit.md` §3）により起動を結線した。
@@ -26,7 +28,7 @@ Metal の eigh は決定記録 §2 のとおり対象外（trait 既定のまま
 - `linalg.rs`: `decode_lu_status`・`decode_cholesky_status`・`det_from_lu`・`clamp_tg_width`・`validate_launch_stride_headroom`（Linux で単体テスト）。
 - `context_cache::cached_linalg`、`ops.rs` の 5 演算を実起動へ置換。エラー写像: solve／inv のピボット 0 は `InvalidArgument`、
   det のピボット 0 は `0.0`、非正定値は `InvalidArgument`、デバイス失敗は `map_metal_error`。
-- 実機の数値一致（`--ignored` 全件）は **未実測**。計測の事前登録・入力集合・記録は `docs/perf/logs/metal-linalg-parity-3139/`（#3139）。
+- 実機の数値一致（`--ignored` 全件）は Stage B 時点では未実測だった（2026-10-27 に Mac mini で実測。末尾節を参照）。計測の事前登録・入力集合・記録は `docs/perf/logs/metal-linalg-parity-3139/`（#3139）。
   #3139 で入力集合を是正した（QR 17×17 を κ₂ ≤ 1e3 の入力へ差し替え・det は n ≤ 17・QR に 1e±20 倍と `1e20 × I₂` を追加。tolerance は不変）。
 
 ## 測定コマンド（実機）
@@ -45,3 +47,40 @@ cargo test -p fandhe-ai-backend-metal --release --test linalg_parity -- --ignore
 | 2026-10-11 | Apple M4 Max | `pipeline_compiles_on_device` | pass | MSL 4 カーネルのコンパイルとパイプライン構築のみ（起動なし） |
 | 未実測 | Apple M4 Max | parity（`--ignored` 全件） | 未実測 | #3139 で Mac mini に置き換え |
 | 未実測（2026-10-16 時点） | Mac mini（Apple M4） | parity（`--ignored` 全件） | 未実測 | 実機に到達できず未実行。事前登録 `metal-linalg-parity-3139/RULE.txt`。Mac 側での実行を申し送り |
+| 2026-10-27 | Mac mini `<metal-node>`（Apple M4） | `RULE.txt` のコマンド × 5 run | **fail（5/5 run で同一）** | 各 run `running 6 tests`・5 passed／1 failed・終了コード 101。fail は `qr_matches_cpu_on_device` のみ。sha・環境は下記 |
+
+## 2026-10-27 Mac mini 実測（イシュー #2676）
+
+- 事前登録: `RULE.txt`（実測前にコミット `1184586ee0ae1f76aaf0f80dbdffbe53067010eb` で固定。判定方式・入力集合は `../metal-linalg-parity-3139/RULE.txt` を採用し、対象コミット条件のみ差し替え。#3139 の README・RULE は登録が異なるため更新していない）
+- 実測した展開ツリー: `rev-stamp.txt`（1 行目がフル SHA `1184586ee0ae1f76aaf0f80dbdffbe53067010eb`・2 行目 `dirty=0`）
+- 環境: `env.txt`（Apple M4・macOS 27.0.1・rustc 1.99.0・cargo 1.99.0）。ホスト名・ユーザー名・パスは `<metal-node>`・`<home>` にマスク
+- 実機ロック: 取得 2026-10-27T10:18:11Z／解放 2026-10-27T10:18:59Z（ノード時計の UTC。RULE.txt の宣言時刻はコミット前の見込みで、先後関係の正はコミット `1184586ee` が転送・実測より前に作られている事実）
+- 生ログ: `run1.log`〜`run5.log`（末尾に `exit_code=`）
+
+### 結果
+
+| テスト | 判定対象 | run1〜5 |
+|---|---|---|
+| `pipeline_compiles_on_device` | ○ | ok |
+| `cholesky_matches_cpu_on_device` | ○ | ok |
+| `lu_family_matches_cpu_on_device` | ○（inv・solve・det） | ok |
+| `qr_matches_cpu_on_device` | ○ | **FAILED（5 run とも同一メッセージ）** |
+| `status_mapping_end_to_end_on_device` | 記録のみ | ok |
+| `gate_on_non_empty_does_not_return_unsupported` | 記録のみ | ok |
+
+fail の内容（5 run 全て同一。決定的）:
+
+```
+qr R 3x8 scale=1e20: 複合判定 FAIL（fail_count=1/24, max_abs_diff=3.738e13, max_rel_err=1.000e0,
+mean_abs_diff=8.384e12, mean_rel_err=4.167e-2, p50_abs_diff=4.398e12, p99_abs_diff=3.738e13, p999_abs_diff=3.738e13）
+```
+
+- テストは最初の `assert_parity` 失敗で打ち切られる。形状 (8,3) の全倍率と (3,8) の等倍までは通過し、(3,8) の 1e20 倍で fail。**以降は未到達のため未実測**: (3,8) の 1e-20 倍、(17,17) の全倍率、`1e20 × I₂`、「R・Q が有限」「R の対角が 0 でない」「倍率で正規化した R の parity」（後者の NaN・0 検査は fail した倍率のケースでは実行されていない）。
+- 判定は `RULE.txt` に従い **fail**。tolerance・入力集合・カーネル・判定方式・baseline は変えていない。再実行で結果を選んでいない。M4 Max の値は使っていない。
+- 本 issue の閉じる条件（実機 pass）は**未達**。`Closes #2676` は書かない。
+
+### 要対応（所有者判断待ち）
+
+- 仮説（未検証）: R は上三角で 3x8 の下三角側は理論上 0 の要素を含み、CPU 参照と GPU のどちらかが丸め残差（1e20 倍で約 3.7e13、スケール比 約 3.7e-7）を持ち、もう一方が厳密に 0 となる。`max_rel_err=1.0` は片側が 0 の形と整合する。1e20 倍では絶対救済（1e-5）が効かず相対誤差だけが判定になるため、本来は 0 のはずの要素が fail として現れる可能性がある。原因が (a) カーネルの Householder 適用順序・scale/ssq ノルムの丸め、(b) 入力集合・判定（0 要素の扱い）のどちらにあるかは、fail 要素の値を出力して切り分ける必要がある。
+- 是正方針の候補: fail 要素の got／cpu 値を診断出力して原因を確定 → カーネル側の是正、または判定契約の見直し（後者は tolerance 変更に当たるため所有者承認が必要）。f32 ホスト逐語モデル（`linalg_model_parity.rs`）が同入力で CPU と parity するかも突き合わせる。
+- Issue の起票・コメント、baseline 化は承認なしでは行っていない。
