@@ -12,7 +12,7 @@
 |---|---|---|---|
 | A1 | 全 run の tree が v0.12.0・rev-stamp が同一 | **達成** | GB10 5 run・Mac mini 系列 A／B の計 15 run で `tree.txt`・`tree-old.txt` が `└── fandhe-ai v0.12.0`、`rev-stamp.txt` が新腕 `bdaca14ccff7a01a4582eb84c6655f025a23208f`、`rev-stamp-old.txt` が旧腕 `0ae5670359c0f9d7a82f8bbd71791fb516713627`。`aggregate/check_identity.py` が 3 系列とも rc=0（行数 GB10 112／8／28／28、Mac mini 48／26／32 を含む） |
 | A2 | 5 run 中央値を新・旧・0.11.0 で並べる | **達成** | `gb10/*-median5.jsonl`（新腕・extra・Python・旧腕・旧腕置換）と Mac mini 側の同名ファイル。3 条件の比を下の「結果」に並べた |
-| A3 | 全セルの比と 1.0 以下の理由 | **達成（1 セルは分類保留）** | 全 27 セルの比は `scoreboard/gen_0120.out`（新条件）・`gen_0120_oldarm.out`（旧条件）・`aggregate/cell_table.md`。1.0 以下の 17 セルの理由は「1.0 以下のセルの理由」。G-CPU-INF は数字で 3 分類に割り当てられず保留（所有者判断待ち） |
+| A3 | 全セルの比と 1.0 以下の理由 | **達成（1 セルは分類保留）** | 全 27 セルの比は `scoreboard/gen_0120.out`（新条件）・`gen_0120_oldarm.out`（旧条件）・`aggregate/cell_table.md`。1.0 以下の 17 セルの理由は「1.0 以下のセルの理由」。G-CPU-INF は数字で 3 分類に割り当てられず「分類保留」（所有者判断 2026-10-27 で確定。`scoreboard/unreached_0120.tsv`） |
 | A4 | 事前登録規則を計測前に固定 | **達成** | `RULE.txt`（固定 2026-10-27T07:17:00Z・コミット `593172a7c`）。系列の開始は GB10 07:18:50Z・Mac mini 07:17:47Z。固定後に規則・期待行数・tolerance は変えていない（RULE.v2 なし） |
 | A5 | 機体を混ぜない | **達成** | Mac mini は run ごとに `machdep.cpu.brand_string == "Apple M4"` を検査（`macmini-run-0120.sh`）。GB10 は `env_info.txt` が `NVIDIA GB10, 580.173.02`。M4 Max の値・Linux の代替値は使っていない |
 | A6 | #3256 の実機テスト結果（#3272 を含む） | **達成** | GB10: C1〜C9 各 5 run・45/45 pass、#3272 の `tests::resident_paths_match_tape_paths_cuda` 5/5 pass。Mac mini: M1〜M6 各 5 run・30/30 pass、`tests::resident_paths_match_tape_paths_metal` 5/5 pass。全 85 ログが `running 1 test`・`1 passed`・`rc=0` を満たし、invalid（foreign の cargo／rustc）は 0 件 |
@@ -167,9 +167,12 @@ fandhe-ai の 5 run 中央値（ms）。新腕の reuse は同じ round の新�
 | `env/pip-freeze-venv-bench.txt` | GB10 の venv の `pip freeze` |
 | `aggregate/median_rounds.py`・`swap_fandhe_arm.py`・`check_identity.py` | 集計器（変更なし） |
 | `aggregate/cell_table.py`・`cell_table.md` | 3 条件の判定一覧を 1 枚の表にする生成器（本 PR で追加）とその出力 |
-| `scoreboard/gen_0120.out`・`gen_0120_oldarm.out` | 新条件・旧条件の判定一覧（`gen_0120.py` の標準出力） |
+| `scoreboard/gen_0120.out`・`gen_0120_oldarm.out` | 新条件・旧条件の判定一覧（`gen_0120.py` の標準出力。#3274 の `run_0120.sh` で再生成して byte 一致を確認） |
 | `scoreboard/gen_args.txt` | 負荷・日付・skipped の注記引数（実測値を記入済み） |
-| `scoreboard/gen_0120.py`・`body_0120.html`・`style.css` | スコアボード生成器とテンプレート（#3274。HTML の生成は #3274 の範囲） |
+| `scoreboard/gen_0120.py`・`body_0120.html`・`style.css` | スコアボード生成器とテンプレート（#3274） |
+| `scoreboard/unreached_0120.tsv` | 新条件で 1 位でない 17 セルの届かなかった理由（3 分類＋分類保留。#3274） |
+| `scoreboard/run_0120.sh`・`check_0120.py` | 判定一覧 2 本と HTML の一括生成・HTML と判定一覧の機械照合（#3274） |
+| `scoreboard/out/scoreboard_0120.html` | 0.12.0 のスコアボード（1 ファイル・CSS インライン。#3274 で生成。公開はメインのセッション） |
 
 ## 再現手順
 
@@ -191,17 +194,41 @@ python3 scoreboard/gen_0120.py --m4 $M/macmini-series-b/results-macmini-0.12.0-m
   --gb-extra gb10/results-dgx-0.12.0-extra-median5.jsonl --gb-py gb10/results-dgx-py-0.12.0-median5.jsonl --gb-runs gb10 \
   --m4-old $M/macmini-series-b/results-macmini-old-0.12.0-median5.jsonl --gb-old gb10/results-dgx-old-0.12.0-median5.jsonl \
   --m4-date 2026-10-27 --gb-date 2026-10-27 --out /tmp/sb.html > scoreboard/gen_0120.out
+# 3'. #3274: 判定一覧 2 本（新条件・旧条件の一時ツリー）と HTML を一括で作り、HTML と判定一覧を照合する（下の「スコアボード」節）
+bash scoreboard/run_0120.sh
 python3 aggregate/cell_table.py scoreboard/gen_0120.out scoreboard/gen_0120_oldarm.out ../framework-compare-0.11.0-macmini-remeasure/scoreboard/gen_0110_macmini.out > aggregate/cell_table.md
 # 4. 実機テスト（新腕の全体ツリーで。系列の後・同じロック内）
 bash docs/perf/logs/resident-chain-parity-3256/run_rows.sh <out> cuda   # Mac mini は metal
 cargo test -p bench-fandhe --release --locked tests::resident_paths_match_tape_paths_cuda -- --ignored --exact --test-threads=1 --nocapture  # framework-compare で
 ```
 
+## スコアボード（#3274）
+
+**状態: 生成済み（2026-10-27）。** `scoreboard/run_0120.sh` が、`gen_args.txt` の注記引数（上の計測条件の値。`gate.log`・`uptime_*.txt`・`loop.log`・`skipped-*.log` と照合済み）を付けて `gen_0120.py` を 2 回かける。
+
+| 出力 | 内容 |
+|---|---|
+| `scoreboard/gen_0120.out` | 新条件の判定一覧。`tally 10 4 13 invalid 1 noise 0 total 27` |
+| `scoreboard/gen_0120_oldarm.out` | 旧条件の判定一覧。run ディレクトリの主 JSONL を旧腕置換版（`*-oldarm-swapped-0.12.0.jsonl`）にした一時ツリーで生成する。GB10 の置換版は extra を含むため extra は空ファイル、Mac mini は系列 A・B の両方を置換する。`tally 5 7 15 invalid 1 noise 0 total 27` |
+| `scoreboard/out/scoreboard_0120.html` | 新条件の HTML。旧条件・0.11.0（`../framework-compare-0.11.0-macmini-remeasure/scoreboard/gen_0110_macmini.out`・`tally 6 1 20 invalid 1 noise 1 total 27`）の tally を 3 条件表に並べる |
+
+- 再生成した 2 本の判定一覧は、#3273 でコミットした版と byte 一致した（`run_0120.sh` が `cmp` で検査し、不一致なら止める）。勝敗は上の「結果」の 3 条件（10/4/13/1・5/7/15/1・6/1/20/1）と一致する。
+- `check_0120.py` が、HTML の判定行 27 行（Mac mini 13・GB10 14）の順序・区分・比・相手・0.11.0 比、先頭の tally、3 条件の tally 表、届かなかったセルの表（TSV と同じ 17 行）、GB10 CPU gemm の注記の比を判定一覧と照合する。未実測の placeholder・実ホスト名・フォント以外の外部参照・script が無いことも確かめる。
+- 生成器の変更は表示だけで、`judge`／`paired_ratio`・判定規則・tolerance は変えていない。追加したのは、旧条件・前版の tally 表（`--oldarm-out`／`--prev-out`）、GB10 CPU gemm の新旧の reuse／fresh の注記（`--gb-old` のデータから生成）、届かなかったセルの表示専用ラベル「分類保留」、出力の UTF-8 指定。テンプレートには `<meta charset="utf-8">` を足した（file:// で開いたときの文字化け防止）。外部参照は Google Fonts の stylesheet だけ。
+- 所有者判断（2026-10-27）の注記: 新条件を正式値・旧条件を併記、GB10 CPU gemm の後退は注記して切り分けは #3646、G-CPU-INF は「分類保留（数字で 3 分類に割り当てられなかった）」、相互運用行は「部分的」、A3-e・A3-f・C4・C8 は対象外、`docs/perf/framework-compare-feature-matrix-0.12.0.md` §6 の 9 件は未回答の申し送り。
+- 届かなかったセル 17 件の内訳: ハードの上限 1・計測窓の定義 6（Mac mini gemm Metal N=1024 と GB10 CPU gemm 5 セル）・自分たちの制約 9（うち確度低 4）・分類保留 1（G-CPU-INF）。
+
+### 公開先
+
+0.12.0 用の claude.ai Artifact を新しく作る（所有者判断 2026-10-27）。0.11.0 版のページ（`../framework-compare-0.11.0-macmini-remeasure/README.md`「公開先」）は上書きせず、GitHub Pages には載せない。公開はメインのセッションが `scoreboard/out/scoreboard_0120.html` を使って行う。URL は公開後に記入する（本 PR の時点では未公開）。
+
 ## 経緯（2026-10-27 の事前確認）
 
 最初の事前確認（PR #3640）では、両機体とも Python 3 FW の環境（GB10 の TensorFlow・SciPy、Mac mini の `venv-tf`・`bench_py.py` の配置先）が無く、計測を見送った。2026-10-27 の所有者判断（#3273）で、0.11.0 と同じ版での再構築が承認され、本計測を行った。同じ版がすべて手に入ったため、代用した版はない。
 
 ## 所有者判断を仰ぐ点
+
+所有者判断（2026-10-27・#3274）: 1 は「新条件を正式値とし旧条件を併記。後退は注記で触れ、切り分けは #3646」、2 は「G-CPU-INF は分類保留（数字で 3 分類に割り当てられなかった）と明記」で確定した。3〜5 は未回答。
 
 1. **GB10 CPU gemm の新旧差**: 新条件の bench-fandhe では GB10 の CPU gemm reuse が同じ round の fresh より 1.23〜1.79 倍遅く、旧条件で 1 位だった 4 セル（N=256・1024・2048・4096）が負け・僅差になった。判定規則どおり新条件の値を正式とするが、#3274 の対戦成績でこの 5 セルをどう扱うか（旧条件の併記で足りるか、常駐経路の CPU 側の切り分けを別イシューにするか）。
 2. **G-CPU-INF の分類保留**: 数字で 3 区分に割り当てられない。相手の経路の確認（#3191 の (1) が未測定）を待つか。
