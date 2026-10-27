@@ -385,7 +385,7 @@ SGD の `lr`・`momentum`・`dampening`・`weight_decay`・`nesterov`・`is_firs
 
 | 項目 | 内容 |
 |------|------|
-| 実施日・ノード | 2026-10-25（UTC。実機ロック取得 22:55Z・解除 23:07Z）・GB10 ノード `<cuda-node-2>`（GPU 使用率 0%・load1 < 1.0。実ホスト名は `.local.md` のみ） |
+| 実施日・ノード | 2026-10-25（UTC。実機ロック取得 22:55Z・解除 23:07Z）・GB10 ノード `<cuda-node>`（GPU 使用率 0%・load1 < 1.0。実ホスト名は `.local.md` のみ） |
 | runner | `6a97087ac7e29381eb932584783dc2495bd889e5`（`.rev-stamp` 2 行目 `dirty=0`）に `bench-resident-chain.patch`（sha256 `92d0a8d4…`）だけを適用。on／off は同一バイナリ（`bin_sha256` 1 つ） |
 | torch | 2.14.0+cu130（専用 venv。`gb10/torch-version.txt`）。candle は同ハーネスの `candle-core =0.11.0` |
 | 専有ゲート | 5 round すべて `gate=pass`（load1 0.09〜0.26）。`skipped` ログは空 |
