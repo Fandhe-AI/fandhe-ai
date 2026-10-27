@@ -99,6 +99,8 @@
 
 ### GB10 CPU gemm の新旧差（実測）
 
+切り分けの設計と状態（GB10 実測は未実施・原因は未特定）は #3646（`../cpu-gemm-resident-reuse-3646/README.md`・`docs/perf/cpu-gemm-reuse-fresh-inversion.md` §9）。本節の数値と判定は変えない。
+
 fandhe-ai の 5 run 中央値（ms）。新腕の reuse は同じ round の新腕 fresh より遅く、旧腕は reuse と fresh が並ぶ。fresh 同士は新旧でほぼ同じ（位置の違う段で測っても差は 0〜5%）。
 
 | N | 新腕 fresh | 新腕 reuse | 新腕 reuse/fresh | 旧腕 fresh | 旧腕 reuse | 旧腕 reuse/fresh | 0.11.0 reuse |
