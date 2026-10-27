@@ -193,6 +193,18 @@ const PHASE_GEMM_ITER_TOTAL: &str = "iter_total";
 const PHASE_INFER_PREDICT: &str = "predict";
 const PHASE_INFER_PREDICT_RESIDENT: &str = "predict_resident";
 
+/// 区間記録が有効なときだけ `Instant::now()` を取る（無効時は時計を読まない）。
+fn lap_start(phases: &Option<PhaseSamples>) -> Option<Instant> {
+    phases.as_ref().map(|_| Instant::now())
+}
+
+/// [`lap_start`] が `Some` のときだけ経過を `phase` へ記録する。
+fn lap_end(phases: &mut Option<PhaseSamples>, phase: &'static str, t0: Option<Instant>) {
+    if let (Some(p), Some(t0)) = (phases.as_mut(), t0) {
+        p.push(phase, t0.elapsed());
+    }
+}
+
 /// `train --phases` の 1 step 分の区間計測を保持する順序付きサンプル集合
 /// （イシュー #1009）。phase の初出順が `phase_index`（README「train
 /// --phases」節・summarize.py (b'') 節の表示順と一致させる）。
@@ -298,10 +310,6 @@ fn readout_uses_borrowed_view(readout_override: Option<&str>) -> bool {
 /// legacy` の分岐は runtime 判定のためこの制約と無関係に成立する）。
 enum HostReadout {
     Borrowed(fandhe_ai::VarHostView),
-    /// 常駐経路（#3272）の出力 `Tensor` を保持する借用ビュー。構築側
-    /// （[`readout_tensor`]）が `as_slice()` が `Some` になる contiguous
-    /// テンソルだけをここへ入れる（`Deref` の中で失敗させないため）。
-    Shared(Tensor<f32>),
     Owned(Vec<f32>),
 }
 
@@ -311,12 +319,28 @@ impl std::ops::Deref for HostReadout {
     fn deref(&self) -> &[f32] {
         match self {
             HostReadout::Borrowed(view) => view,
-            // 構築側（readout_tensor）が contiguous を保証済み。前提が崩れたら
-            // 空スライスで checksum 0・parity 空検証を黙って通さず fail-closed で止める。
-            HostReadout::Shared(t) => t
-                .as_slice()
-                .unwrap_or_else(|| unreachable!("HostReadout::Shared は contiguous テンソル専用")),
             HostReadout::Owned(vec) => vec.as_slice(),
+        }
+    }
+}
+
+/// 常駐経路（#3272）の出力 [`readout_tensor`] の戻り型。`Deref` は実装せず、
+/// 要素スライスの取得を [`TensorReadout::slice`]（`Result`）に限る。
+/// 本番経路の panic を避け、非 contiguous の前提崩れを型付きエラーで返す。
+enum TensorReadout {
+    /// contiguous テンソルを memcpy なしで借用する（構築側が `as_slice()` が
+    /// `Some` のものだけを入れる）。
+    Shared(Tensor<f32>),
+    Owned(Vec<f32>),
+}
+
+impl TensorReadout {
+    fn slice(&self) -> Result<&[f32], Box<dyn std::error::Error>> {
+        match self {
+            TensorReadout::Shared(t) => t
+                .as_slice()
+                .ok_or_else(|| "TensorReadout::Shared は contiguous テンソル専用".into()),
+            TensorReadout::Owned(vec) => Ok(vec.as_slice()),
         }
     }
 }
@@ -401,7 +425,7 @@ fn checksum_tensor(
     }
 }
 
-/// 常駐経路（#3272）が返す `Tensor<f32>` を [`HostReadout`] へ変える。
+/// 常駐経路（#3272）が返す `Tensor<f32>` を [`TensorReadout`] へ変える。
 /// 分岐は [`readout_var`] と同じ [`readout_uses_borrowed_view`] を共有する:
 /// 既定は contiguous なら memcpy なしで借用し、非 contiguous か
 /// `--readout legacy` のときだけ `to_vec` で実体化する。`gemm reuse` が
@@ -410,20 +434,20 @@ fn checksum_tensor(
 fn readout_tensor(
     t: Tensor<f32>,
     readout_override: Option<&str>,
-) -> Result<HostReadout, Box<dyn std::error::Error>> {
+) -> Result<TensorReadout, Box<dyn std::error::Error>> {
     if readout_uses_borrowed_view(readout_override) {
         let c = t.contiguous();
         if c.as_slice().is_some() {
-            return Ok(HostReadout::Shared(c));
+            return Ok(TensorReadout::Shared(c));
         }
-        return Ok(HostReadout::Owned(c.host_slice().into_owned()));
+        return Ok(TensorReadout::Owned(c.host_slice().into_owned()));
     }
     let owned = t
         .contiguous()
         .as_slice()
         .ok_or("as_slice() returned None after contiguous()")?
         .to_vec();
-    Ok(HostReadout::Owned(owned))
+    Ok(TensorReadout::Owned(owned))
 }
 
 /// `gemm --mode reuse` が常駐入力経路（`Tape::upload_resident`／
@@ -627,7 +651,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// `gemm --mode reuse` の常駐入力経路（#3272）。計測は
 /// [`measure_gemm_reuse_resident`]、ここは Record の出力だけを担う。
 fn run_gemm_reuse_resident(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let run = measure_gemm_reuse_resident(cli)?;
+    let run = measure_gemm_reuse_resident(cli, false)?;
     let n = cli.size;
     let measured = &run.durations[run.durations.len() - MEASURE_ITERS..];
     let st = stats(measured)?;
@@ -957,7 +981,8 @@ fn run_gemm_reuse_device_checksum(
 /// 生の値（最終出力の bits）をここへ残す。
 struct GemmResidentRun {
     /// 反復ごとの区間（`iter_total` は窓全体）。warmup 残り + 計測の全反復分。
-    phases: PhaseSamples,
+    /// `record_phases` が偽なら `None`（通常計測では区間を記録しない）。
+    phases: Option<PhaseSamples>,
     /// 反復ごとの窓全体（`phases` の `iter_total` と同値）。
     durations: Vec<Duration>,
     checksum: f64,
@@ -984,7 +1009,10 @@ struct GemmResidentRun {
 /// 窓の外で `validate_gemm_checksum` と `verify_strict` を全反復で行い、
 /// worst 集約する。常駐 API の `Unsupported` 等はホスト経路へ戻さず
 /// `MEASURE_ERROR` として返す（別条件の行が `reuse` として残るのを防ぐ）。
-fn measure_gemm_reuse_resident(cli: &Cli) -> Result<GemmResidentRun, Box<dyn std::error::Error>> {
+fn measure_gemm_reuse_resident(
+    cli: &Cli,
+    record_phases: bool,
+) -> Result<GemmResidentRun, Box<dyn std::error::Error>> {
     let n = cli.size;
     let (a_data, b_data) = gemm_inputs(n)?;
     let a_host = a_data
@@ -1007,13 +1035,17 @@ fn measure_gemm_reuse_resident(cli: &Cli) -> Result<GemmResidentRun, Box<dyn std
     let rb: ResidentTensor = tape.upload_resident(&store, &b_data)?;
     let c0 = tape.matmul_resident(&ra, &rb)?;
     let out0 = readout_tensor(c0, ro)?;
-    let mut checksum: f64 = out0.iter().map(|&x| x as f64).sum();
+    let out0_slice = out0.slice()?;
+    let mut checksum: f64 = out0_slice.iter().map(|&x| x as f64).sum();
     let init_s = init_start.elapsed().as_secs_f64();
     validate_gemm_checksum(checksum)?;
-    let mut parity = reference.verify_strict(&out0)?;
+    let mut parity = reference.verify_strict(out0_slice)?;
     drop(out0);
 
-    let mut phases = PhaseSamples::new();
+    // 区間記録は診断（`--phases`）のときだけ有効にする。通常計測では
+    // 区間用の `Instant::now`／`PhaseSamples::push` を一切実行せず、
+    // 主行の median_s・GFLOP/s へ診断費用を混入させない（codex P2）。
+    let mut phases: Option<PhaseSamples> = record_phases.then(PhaseSamples::new);
     let mut durations = Vec::new();
     let mut last_out_bits = Vec::new();
     // 1 回は init 計測内で消費済み（run_gemm_reuse の warmup 消費規約）。
@@ -1021,46 +1053,49 @@ fn measure_gemm_reuse_resident(cli: &Cli) -> Result<GemmResidentRun, Box<dyn std
     for i in 0..total_iters {
         let iter_start = Instant::now();
 
-        let t0 = Instant::now();
+        let t0 = lap_start(&phases);
         let c = tape.matmul_resident(&ra, &rb)?;
-        phases.push(PHASE_GEMM_MATMUL, t0.elapsed());
+        lap_end(&mut phases, PHASE_GEMM_MATMUL, t0);
 
         // `to_tensor`: readout の構築（借用ビューでは contiguous の `Arc` 複製
         // だけで ≈0）。`host_copy`: スライス取得（借用では ≈0）、`--readout
         // legacy` では `to_vec` の memcpy 本体。区間名・順序・件数は不変。
         let out = if readout_uses_borrowed_view(ro) {
-            let t0 = Instant::now();
+            let t0 = lap_start(&phases);
             let out = readout_tensor(c, ro)?;
-            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
-            let t0 = Instant::now();
-            let _: &[f32] = &out;
-            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
+            lap_end(&mut phases, PHASE_GEMM_TO_TENSOR, t0);
+            let t0 = lap_start(&phases);
+            out.slice()?;
+            lap_end(&mut phases, PHASE_GEMM_HOST_COPY, t0);
             out
         } else {
-            let t0 = Instant::now();
+            let t0 = lap_start(&phases);
             let cont = c.contiguous();
-            phases.push(PHASE_GEMM_TO_TENSOR, t0.elapsed());
-            let t0 = Instant::now();
+            lap_end(&mut phases, PHASE_GEMM_TO_TENSOR, t0);
+            let t0 = lap_start(&phases);
             let owned = cont
                 .as_slice()
                 .ok_or("as_slice() returned None after contiguous()")?
                 .to_vec();
-            phases.push(PHASE_GEMM_HOST_COPY, t0.elapsed());
-            HostReadout::Owned(owned)
+            lap_end(&mut phases, PHASE_GEMM_HOST_COPY, t0);
+            TensorReadout::Owned(owned)
         };
+        let out_slice = out.slice()?;
 
-        let t0 = Instant::now();
-        checksum = out.iter().map(|&x| x as f64).sum();
-        phases.push(PHASE_GEMM_CHECKSUM, t0.elapsed());
+        let t0 = lap_start(&phases);
+        checksum = out_slice.iter().map(|&x| x as f64).sum();
+        lap_end(&mut phases, PHASE_GEMM_CHECKSUM, t0);
 
         let elapsed = iter_start.elapsed();
-        phases.push(PHASE_GEMM_ITER_TOTAL, elapsed);
+        if let Some(p) = phases.as_mut() {
+            p.push(PHASE_GEMM_ITER_TOTAL, elapsed);
+        }
         durations.push(elapsed);
 
         validate_gemm_checksum(checksum)?;
-        parity = parity.worst(reference.verify_strict(&out)?);
+        parity = parity.worst(reference.verify_strict(out_slice)?);
         if i + 1 == total_iters {
-            last_out_bits = out.iter().map(|x| x.to_bits()).collect();
+            last_out_bits = out_slice.iter().map(|x| x.to_bits()).collect();
         }
     }
 
@@ -1083,8 +1118,11 @@ fn measure_gemm_reuse_resident(cli: &Cli) -> Result<GemmResidentRun, Box<dyn std
 fn measure_gemm_reuse_phases(
     cli: &Cli,
 ) -> Result<(PhaseSamples, f64, f64, ParityStats), Box<dyn std::error::Error>> {
-    let run = measure_gemm_reuse_resident(cli)?;
-    Ok((run.phases, run.checksum, run.init_s, run.parity))
+    let run = measure_gemm_reuse_resident(cli, true)?;
+    let phases = run
+        .phases
+        .ok_or("measure_gemm_reuse_resident: 区間記録が有効なのに phases が None")?;
+    Ok((phases, run.checksum, run.init_s, run.parity))
 }
 
 /// [`measure_gemm_reuse_phases`] の結果を phase ごとに 1 行の JSONL
@@ -4743,7 +4781,7 @@ mod tests {
         let mut cli = make_cli("gemm", "reuse", out.path());
         cli.device = device.to_string();
         cli.size = n;
-        let run = measure_gemm_reuse_resident(&cli).expect("resident run");
+        let run = measure_gemm_reuse_resident(&cli, true).expect("resident run");
         let (bits, sum) = gemm_tape_reference(device, n);
         assert_eq!(run.last_out_bits, bits, "{device} N={n}: 出力 bits 不一致");
         assert_eq!(
@@ -4753,7 +4791,7 @@ mod tests {
         );
         assert_eq!(run.parity.fail_count, 0, "{device} N={n}: parity fail");
         // 5 区間・件数一致（summarize.py の固定契約）。
-        assert_eq!(run.phases.order.len(), 5);
+        assert_eq!(run.phases.as_ref().expect("phases").order.len(), 5);
         let total = WARMUP_ITERS.saturating_sub(1) + MEASURE_ITERS;
         assert_eq!(run.durations.len(), total);
     }
