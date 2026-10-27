@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (<home>/work/target-3608-before/release/deps/fandhe_ai_backend_cuda-d0761b267b09a532)
+
+running 1 test
+test module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1416 filtered out; finished in 0.41s
+
+rc=0

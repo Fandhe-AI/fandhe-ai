@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/train_graph_out_of_chain_wait_3608.rs (<home>/work/target-3608-after/release/deps/train_graph_out_of_chain_wait_3608-471b40d924b56c07)
+
+running 1 test
+test out_of_chain_ops_wait_for_foreign_capture_without_errors_and_stay_bit_exact ... OOC3608 waited=18 captured=23 replayed=547 fallbacks=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+rc=0

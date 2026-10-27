@@ -1,0 +1,1137 @@
+   Compiling libc v0.2.189
+   Compiling find-msvc-tools v0.1.10
+   Compiling shlex v2.0.1
+   Compiling pkg-config v0.3.34
+   Compiling serde_core v1.0.229
+   Compiling vcpkg v0.2.15
+   Compiling bytes v1.12.1
+   Compiling serde_json v1.0.151
+   Compiling anyhow v1.0.104
+   Compiling serde v1.0.229
+   Compiling openssl v0.10.81
+   Compiling httparse v1.10.1
+   Compiling syn v2.0.119
+   Compiling foreign-types-shared v0.1.1
+   Compiling either v1.17.0
+   Compiling zeroize v1.9.1
+   Compiling equivalent v1.0.2
+   Compiling base64ct v1.8.3
+   Compiling log v0.4.34
+   Compiling allocator-api2 v0.2.21
+   Compiling foreign-types v0.3.2
+   Compiling bitflags v2.13.1
+   Compiling cc v1.4.1
+   Compiling foldhash v0.2.0
+   Compiling native-tls v0.2.18
+   Compiling rustls-pki-types v1.15.1
+   Compiling itertools v0.14.0
+   Compiling openssl-probe v0.2.1
+   Compiling base64 v0.23.1
+   Compiling percent-encoding v2.3.2
+   Compiling pem-rfc7468 v1.0.0
+   Compiling utf8-zero v0.8.1
+   Compiling http v1.5.0
+   Compiling webpki-root-certs v1.0.10
+   Compiling der v0.8.2
+   Compiling openssl-src v300.6.1+3.6.3
+   Compiling openssl-sys v0.9.117
+   Compiling getrandom v0.3.4
+   Compiling ureq-proto v0.6.4
+   Compiling rand_core v0.9.5
+   Compiling hashbrown v0.16.1
+   Compiling zerocopy-derive v0.8.56
+   Compiling openssl-macros v0.1.1
+   Compiling prost-derive v0.14.4
+   Compiling safetensors v0.7.0
+   Compiling zerocopy v0.8.56
+   Compiling prost v0.14.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling fandhe-ai-tensor-core v0.12.0 (<home>/work/w3608/after/crates/tensor-core)
+   Compiling cudarc v0.19.8
+   Compiling fandhe-ai-backend-cuda v0.12.0 (<home>/work/w3608/after/crates/backend-cuda)
+   Compiling fandhe-ai-autodiff v0.12.0 (<home>/work/w3608/after/crates/autodiff)
+   Compiling fandhe-ai-backend-cpu v0.12.0 (<home>/work/w3608/after/crates/backend-cpu)
+   Compiling bench-harness v0.12.0 (<home>/work/w3608/after/crates/bench-harness)
+   Compiling fandhe-ai-onnx-interop v0.12.0 (<home>/work/w3608/after/crates/onnx-interop)
+   Compiling ureq v3.4.2
+   Compiling fandhe-ai v0.12.0 (<home>/work/w3608/after/crates/facade)
+    Finished `release` profile [optimized] target(s) in 56.78s
+     Running unittests src/lib.rs (<home>/work/target-3608-after/release/deps/fandhe_ai-83f48b1bc7ea3b64)
+
+running 6 tests
+test compat::functional::fit_parity_tests::cuda_parameter_gradients_match_cpu_reference ... ok
+test compat::functional::merge_tests::cuda_merge_graph_matches_cpu_reference ... ok
+test compat::functional::tests::cuda_functional_graph_matches_cpu_reference ... ok
+test compat::sequential::train_step_chain_tests_3251::cuda::cuda_chain_matches_tape_path_bit_exact_three_layers ... ok
+test compat::sequential::train_step_chain_tests_3251::cuda::cuda_chain_matches_tape_path_bit_exact_two_layers ... ok
+test compat::sequential::train_step_chain_tests_3251::cuda::cuda_wait_device_param_store_and_read_after_internal_tape_dropped ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 545 filtered out; finished in 1.28s
+
+     Running tests/activation_gelu_softplus_backend_parity.rs (<home>/work/target-3608-after/release/deps/activation_gelu_softplus_backend_parity-08301fdb34186832)
+
+running 3 tests
+test cuda_gelu_forward_matches_cpu ... ok
+test cuda_gelu_tanh_forward_matches_cpu ... ok
+test cuda_softplus_forward_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.33s
+
+     Running tests/activation_ops_backend_parity.rs (<home>/work/target-3608-after/release/deps/activation_ops_backend_parity-f29bde84815c24ec)
+
+running 4 tests
+test cuda_bit_exact_backward_matches_cpu_reference ... ok
+test cuda_bit_exact_forward_matches_cpu_reference ... ok
+test cuda_req2_backward_matches_cpu_reference ... ok
+test cuda_req2_forward_matches_cpu_reference ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.36s
+
+     Running tests/activation_ops_facade.rs (<home>/work/target-3608-after/release/deps/activation_ops_facade-fb0d85e76771f8a3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/activation_scalar_ops_backend_parity.rs (<home>/work/target-3608-after/release/deps/activation_scalar_ops_backend_parity-8d48320378a49a14)
+
+running 1 test
+test cuda_activation_scalar_ops_matches_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.34s
+
+     Running tests/adaptive_max_global_pool_backend_parity.rs (<home>/work/target-3608-after/release/deps/adaptive_max_global_pool_backend_parity-5fe6e469cb4fecbc)
+
+running 2 tests
+test cuda_adaptive_max_pool2d_forward_matches_cpu ... ok
+test cuda_global_pool_forward_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.39s
+
+     Running tests/amp_conv_mha_low_precision_backend_parity.rs (<home>/work/target-3608-after/release/deps/amp_conv_mha_low_precision_backend_parity-e3a8396c3fa95496)
+
+running 2 tests
+test cuda_mha_low_precision_forward_bf16_matches_cpu ... ok
+test cuda_mha_low_precision_forward_f16_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+     Running tests/api_surface.rs (<home>/work/target-3608-after/release/deps/api_surface-f76b55fea1f66d4b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 662 filtered out; finished in 0.00s
+
+     Running tests/attention_backend_parity.rs (<home>/work/target-3608-after/release/deps/attention_backend_parity-8516123098b6a6da)
+
+running 2 tests
+test cuda_sdpa_backward_dq_matches_cpu ... ok
+test cuda_sdpa_forward_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.56s
+
+     Running tests/backward_accumulate_backend_parity.rs (<home>/work/target-3608-after/release/deps/backward_accumulate_backend_parity-088734910892e3cc)
+
+running 1 test
+test cuda_backward_accumulate_weight_grad_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.34s
+
+     Running tests/batch_norm_backend_parity.rs (<home>/work/target-3608-after/release/deps/batch_norm_backend_parity-d9ad2150abd851c8)
+
+running 4 tests
+test cuda_batch_norm_infer_forward_matches_cpu ... ok
+test cuda_batch_norm_train_backward_matches_cpu ... ok
+test cuda_batch_norm_train_forward_matches_cpu ... ok
+test cuda_batch_norm_train_forward_rank4_matches_cpu ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.49s
+
+     Running tests/batched_matmul_backend_parity.rs (<home>/work/target-3608-after/release/deps/batched_matmul_backend_parity-5b24327d813e0902)
+
+running 2 tests
+test cuda_batched_matmul_backward_matches_cpu ... ok
+test cuda_batched_matmul_forward_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.45s
+
+     Running tests/bce_backend_parity.rs (<home>/work/target-3608-after/release/deps/bce_backend_parity-fcb658741aac8c4d)
+
+running 1 test
+test cuda_bce_with_logits_loss_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.29s
+
+     Running tests/binning_ops_backend_parity.rs (<home>/work/target-3608-after/release/deps/binning_ops_backend_parity-38cdac8cc3ca07db)
+
+running 1 test
+test cuda_binning_ops_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/bool_ops_backend_parity.rs (<home>/work/target-3608-after/release/deps/bool_ops_backend_parity-a276c47161f94671)
+
+running 1 test
+test cuda_bool_ops_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.39s
+
+     Running tests/bool_ops_logical_fns.rs (<home>/work/target-3608-after/release/deps/bool_ops_logical_fns-c2e352de765eb961)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/bool_ops_torch_behavior.rs (<home>/work/target-3608-after/release/deps/bool_ops_torch_behavior-f8e8c933c504ae32)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/bool_ops_var_methods.rs (<home>/work/target-3608-after/release/deps/bool_ops_var_methods-2c7609124234a446)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/cast_backend_parity.rs (<home>/work/target-3608-after/release/deps/cast_backend_parity-522d47f2c68a0382)
+
+running 1 test
+test cuda_cast_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.28s
+
+     Running tests/checkpoint_backend_bit_identity.rs (<home>/work/target-3608-after/release/deps/checkpoint_backend_bit_identity-1036421d2a725275)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/compat_functional.rs (<home>/work/target-3608-after/release/deps/compat_functional-7ac0eacca6714171)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/compat_functional_max_unpool.rs (<home>/work/target-3608-after/release/deps/compat_functional_max_unpool-be318c88f0bcf071)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compat_functional_max_unpool_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_functional_max_unpool_backend_parity-b49508987b9360bf)
+
+running 2 tests
+test cuda_functional_max_unpool_2d_forward_backward_matches_cpu ... ok
+test cuda_functional_max_unpool_3d_forward_backward_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.64s
+
+     Running tests/compat_functional_max_unpool_model_io.rs (<home>/work/target-3608-after/release/deps/compat_functional_max_unpool_model_io-f143644ba6ebff80)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/compat_functional_model_io.rs (<home>/work/target-3608-after/release/deps/compat_functional_model_io-5223952a3003b834)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential.rs (<home>/work/target-3608-after/release/deps/compat_sequential-41036398529369e8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_accumulate.rs (<home>/work/target-3608-after/release/deps/compat_sequential_accumulate-0ee4d4a3cb3cbb99)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_activation_layers.rs (<home>/work/target-3608-after/release/deps/compat_sequential_activation_layers-beacb89b1dd82e77)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_activation_layers_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_activation_layers_backend_parity-e52d2d823f01cbf5)
+
+running 1 test
+test cuda_activation_layers_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.50s
+
+     Running tests/compat_sequential_activation_scalar_layers.rs (<home>/work/target-3608-after/release/deps/compat_sequential_activation_scalar_layers-86a80badbdf31951)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_activation_scalar_layers_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_activation_scalar_layers_backend_parity-7cef6274b14b95a0)
+
+running 1 test
+test cuda_activation_scalar_layers_parity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.54s
+
+     Running tests/compat_sequential_activation_shape.rs (<home>/work/target-3608-after/release/deps/compat_sequential_activation_shape-57016c93f114953c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_activation_shape_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_activation_shape_backend_parity-0d1816608cefb52a)
+
+running 3 tests
+test cuda_flatten_only_bit_exact ... ok
+test cuda_flatten_softmax_matches_cpu ... ok
+test cuda_log_softmax_gelu_softplus_matches_cpu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running tests/compat_sequential_adaptive_max_global_pool.rs (<home>/work/target-3608-after/release/deps/compat_sequential_adaptive_max_global_pool-a173b787e3e94041)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_adaptive_max_global_pool_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_adaptive_max_global_pool_backend_parity-851c95f2edc90030)
+
+running 1 test
+test cuda_adaptive_max_global_pool_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.25s
+
+     Running tests/compat_sequential_callbacks.rs (<home>/work/target-3608-after/release/deps/compat_sequential_callbacks-7945b1da852dc3f4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_checkpoint_file.rs (<home>/work/target-3608-after/release/deps/compat_sequential_checkpoint_file-385d51db8cde50ae)
+
+running 1 test
+test checkpoint_file_roundtrip_on_cuda ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.46s
+
+     Running tests/compat_sequential_conv.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv-e88d7669788900a7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_conv3d.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv3d-2e3ce2114ab738e8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_conv3d_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv3d_backend_parity-f8fad40852baf940)
+
+running 1 test
+test cuda_conv3d_forward_backward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+     Running tests/compat_sequential_conv_transpose1d_unflatten.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv_transpose1d_unflatten-3945928829574c72)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_conv_transpose2d.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv_transpose2d-233a88d68159edc5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_conv_transpose2d_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv_transpose2d_backend_parity-3cdb71afbf1acfd3)
+
+running 1 test
+test cuda_conv_transpose2d_forward_backward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+     Running tests/compat_sequential_conv_transpose3d.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv_transpose3d-bfc0881575853884)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_conv_transpose3d_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_conv_transpose3d_backend_parity-4401872b0b016d0c)
+
+running 1 test
+test cuda_conv_transpose3d_forward_backward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+
+     Running tests/compat_sequential_custom_module.rs (<home>/work/target-3608-after/release/deps/compat_sequential_custom_module-2223a17cae22f01d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_dropout_embedding_bag.rs (<home>/work/target-3608-after/release/deps/compat_sequential_dropout_embedding_bag-22009ad2fcf12f75)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_dropout_embedding_bag_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_dropout_embedding_bag_backend_parity-90595abce654e687)
+
+running 1 test
+test cuda_dropout_embedding_bag_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.36s
+
+     Running tests/compat_sequential_ema_manual.rs (<home>/work/target-3608-after/release/deps/compat_sequential_ema_manual-0c4dad310df4ce8e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit-28c3be85095fb2f9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_amp.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_amp-9724d1bfd2a44bf7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_amp_conv_mha.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_amp_conv_mha-897a50b9b61448b4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_ema.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_ema-c2b0c71772889f2a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_lbfgs.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_lbfgs-0d51bbcce0c6919b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_losses.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_losses-caaa6f8b0f62cecf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_optimizers.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_optimizers-ffdf57a1efa5655d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_prefetch.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_prefetch-7c5bb168e6143245)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_swa.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_swa-24a52f67afa18996)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_swa_lr.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_swa_lr-4b7b0b6cd0849042)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_swa_wiring.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_swa_wiring-f0ddd578f8fb8292)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fit_weights.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fit_weights-9d4e8d3a99babed0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fold_unfold.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fold_unfold-b248763eb86159a1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_fold_unfold_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_fold_unfold_backend_parity-096b364adb078d4e)
+
+running 1 test
+test cuda_fold_unfold_forward_backward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/compat_sequential_group_instance_norm.rs (<home>/work/target-3608-after/release/deps/compat_sequential_group_instance_norm-e40e1be770deb6ef)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_group_instance_norm_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_group_instance_norm_backend_parity-fd99a02196680a2d)
+
+running 1 test
+test cuda_group_instance_norm_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/compat_sequential_layers.rs (<home>/work/target-3608-after/release/deps/compat_sequential_layers-023f7008121f0db2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_layers_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_layers_backend_parity-e612653a77e222f9)
+
+running 7 tests
+test cuda_batch_norm2d_matches_cpu ... ok
+test cuda_multihead_attention_config_matches_cpu ... ok
+test cuda_multihead_attention_matches_cpu ... ok
+test cuda_norm_embedding_matches_cpu ... ok
+test cuda_transformer_decoder_layer_matches_cpu ... ok
+test cuda_transformer_encoder_matches_cpu ... ok
+test cuda_transformer_matches_cpu ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+     Running tests/compat_sequential_lbfgs_manual.rs (<home>/work/target-3608-after/release/deps/compat_sequential_lbfgs_manual-6c090697cf022dfe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_lr_scheduler_ext.rs (<home>/work/target-3608-after/release/deps/compat_sequential_lr_scheduler_ext-ba8b004ee72a9085)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_lr_scheduler_poly_chained_manual.rs (<home>/work/target-3608-after/release/deps/compat_sequential_lr_scheduler_poly_chained_manual-5b9242c150714401)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_lrn.rs (<home>/work/target-3608-after/release/deps/compat_sequential_lrn-cdbed3148aed93df)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_lrn_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_lrn_backend_parity-18c45504c0ee6ed8)
+
+running 1 test
+test cuda_local_response_norm_forward_backward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/compat_sequential_metrics.rs (<home>/work/target-3608-after/release/deps/compat_sequential_metrics-a601f6c77102c597)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_metrics_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_metrics_backend_parity-17e2e62cebbc02c2)
+
+running 1 test
+test cuda_metrics_result_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/compat_sequential_mha_config.rs (<home>/work/target-3608-after/release/deps/compat_sequential_mha_config-dc35258bdd0b7185)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_mode.rs (<home>/work/target-3608-after/release/deps/compat_sequential_mode-685c7c2454aa6783)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io-3f3ba473e12a5f64)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_batch_norm.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_batch_norm-00abc366ce1eaf88)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_compiled.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_compiled-b6cb91c7f516b383)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_fs_threats.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_fs_threats-7f8abf7650bc1cfb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_layers.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_layers-d5106104bece8699)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_lbfgs.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_lbfgs-4b425fb1ae58933b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_manual.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_manual-105eb12e9af3b7d8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_reparam.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_reparam-cc7bdd53d370b104)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_model_io_tamper.rs (<home>/work/target-3608-after/release/deps/compat_sequential_model_io_tamper-6d2eb77fa9037927)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_optim_ext.rs (<home>/work/target-3608-after/release/deps/compat_sequential_optim_ext-5c24c122a4d638d0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_param_groups.rs (<home>/work/target-3608-after/release/deps/compat_sequential_param_groups-83c871dd30be4f6c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_parametrize_conv.rs (<home>/work/target-3608-after/release/deps/compat_sequential_parametrize_conv-5c409168c655f73c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_parametrize_linear.rs (<home>/work/target-3608-after/release/deps/compat_sequential_parametrize_linear-330ab1ea1c3d12b3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_pixel_shuffle.rs (<home>/work/target-3608-after/release/deps/compat_sequential_pixel_shuffle-5b79a8c185794a1d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_pixel_shuffle_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_pixel_shuffle_backend_parity-2080532809586b09)
+
+running 1 test
+test cuda_pixel_shuffle_layers_bit_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.21s
+
+     Running tests/compat_sequential_pool3d.rs (<home>/work/target-3608-after/release/deps/compat_sequential_pool3d-6b13e460502909a0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_pool3d_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_pool3d_backend_parity-8527aa7d0a201c6c)
+
+running 1 test
+test cuda_pool3d_forward_backward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/compat_sequential_pooling.rs (<home>/work/target-3608-after/release/deps/compat_sequential_pooling-b69cd29f83f76ef2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_pooling_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_pooling_backend_parity-da557b6652642f5a)
+
+running 2 tests
+test cuda_pool1d_chain_matches_cpu ... ok
+test cuda_pool2d_chain_matches_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/compat_sequential_spatial_layers.rs (<home>/work/target-3608-after/release/deps/compat_sequential_spatial_layers-03c8aa895381e004)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_spatial_layers_backend_parity.rs (<home>/work/target-3608-after/release/deps/compat_sequential_spatial_layers_backend_parity-eefcdf8565d89e2b)
+
+running 2 tests
+test cuda_spatial_layers_bilinear_matches_cpu ... ok
+test cuda_spatial_layers_nearest_bit_exact ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/compat_sequential_state_dict.rs (<home>/work/target-3608-after/release/deps/compat_sequential_state_dict-4adc478e254ead08)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_swa_manual.rs (<home>/work/target-3608-after/release/deps/compat_sequential_swa_manual-a11b0a1b858b1a26)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_train.rs (<home>/work/target-3608-after/release/deps/compat_sequential_train-b66c1c75458447c2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_train_step.rs (<home>/work/target-3608-after/release/deps/compat_sequential_train_step-cb456a81b4588920)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/compat_sequential_transformer.rs (<home>/work/target-3608-after/release/deps/compat_sequential_transformer-245dba981d6da187)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/constant_pad_backend_parity.rs (<home>/work/target-3608-after/release/deps/constant_pad_backend_parity-8c00c19bbdf734ad)
+
+running 1 test
+test cuda_pad_forward_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.24s
+
+     Running tests/conv1d_backend_parity.rs (<home>/work/target-3608-after/release/deps/conv1d_backend_parity-55db6e9d0721afa5)
+
+running 4 tests
+test cuda_conv1d_backward_matches_cpu ... cuda_conv1d_backward_matches_cpu[dx].fold_bits=0x047f607b28f9903b
+cuda_conv1d_backward_matches_cpu[dw].fold_bits=0x507cd3cf6c081620
+cuda_conv1d_backward_matches_cpu[db].fold_bits=0x3a8d042f865f2fb7
+ok
+test cuda_conv1d_forward_matches_cpu ... cuda_conv1d_forward_matches_cpu[out].fold_bits=0xb2970828c8e3b6af
+ok
+test cuda_conv1d_forward_matches_cpu_groups_dilation ... cuda_conv1d_forward_matches_cpu_groups_dilation[out].fold_bits=0x2591c3352a63aa7f
+ok
+test cuda_conv1d_matches_manual_reshape_conv2d_bit_exact ... conv1d_matches_manual_reshape_conv2d_on[out1].fold_bits=0x839f46ab83951414
+conv1d_matches_manual_reshape_conv2d_on[dx1].fold_bits=0x4d31d812b3f5848b
+conv1d_matches_manual_reshape_conv2d_on[dw1].fold_bits=0x66d3b9b48b19f745
+conv1d_matches_manual_reshape_conv2d_on[db1].fold_bits=0xce7734f8318e13f5
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.55s
+
+     Running tests/conv2d_backend_parity.rs (<home>/work/target-3608-after/release/deps/conv2d_backend_parity-92c3c1cff5895f3b)
+
+running 2 tests
+test cuda_conv2d_backward_matches_cpu ... cuda_conv2d_backward_matches_cpu[dx].fold_bits=0x166a7f2de9f73ecf
+cuda_conv2d_backward_matches_cpu[dw].fold_bits=0x0421eaab7ad053ff
+cuda_conv2d_backward_matches_cpu[db].fold_bits=0xfa8f174483472fb7
+ok
+test cuda_conv2d_forward_matches_cpu ... cuda_conv2d_forward_matches_cpu[out].fold_bits=0xb97abad9532331ff
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.55s
+
+     Running tests/conv3d_backend_parity.rs (<home>/work/target-3608-after/release/deps/conv3d_backend_parity-5930c10601b3f580)
+
+running 1 test
+test cuda_conv3d_forward_matches_cpu ... cuda_conv3d_forward_matches_cpu[out].fold_bits=0x8048b987e658b206
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.47s
+
+     Running tests/conv_transpose2d_backend_parity.rs (<home>/work/target-3608-after/release/deps/conv_transpose2d_backend_parity-354f993f0818d73b)
+
+running 2 tests
+test cuda_conv_transpose2d_backward_matches_cpu ... cuda_conv_transpose2d_backward_matches_cpu[dx].fold_bits=0xec52b24a33306fc6
+cuda_conv_transpose2d_backward_matches_cpu[dw].fold_bits=0x318e0cd19c6e58b7
+cuda_conv_transpose2d_backward_matches_cpu[db].fold_bits=0xfa8f174483472fb7
+ok
+test cuda_conv_transpose2d_forward_matches_cpu ... cuda_conv_transpose2d_forward_matches_cpu[out].fold_bits=0xdb24c674dc27b687
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.55s
+
+     Running tests/conv_transpose3d_max_unpool_backend_parity.rs (<home>/work/target-3608-after/release/deps/conv_transpose3d_max_unpool_backend_parity-0f8e8d0e85c9bb80)
+
+running 1 test
+test cuda_conv_transpose3d_max_unpool_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.56s
+
+     Running tests/cpu_gemm_reuse_fresh_diag.rs (<home>/work/target-3608-after/release/deps/cpu_gemm_reuse_fresh_diag-621fd479ad6cd5ef)
+
+running 1 test
+test cpu_gemm_reuse_fresh_phases ... DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":3.04e-7,"median_s":1.44e-7,"min_s":1.6e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_build","q1_s":1.12e-7,"q3_s":1.76e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":1.632e-6,"median_s":3.04e-7,"min_s":1.76e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"var_upload","q1_s":2.56e-7,"q3_s":5.92e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.000627943,"median_s":0.000141641,"min_s":0.000116167,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"matmul","q1_s":0.00013116,"q3_s":0.000152026,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":4.48e-7,"median_s":1.44e-7,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"host_copy","q1_s":8e-8,"q3_s":1.92e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.000047667,"median_s":0.000033842,"min_s":0.000033698,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"checksum","q1_s":0.000033778,"q3_s":0.000034658,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000663689,"median_s":0.000179739,"min_s":0.000150762,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000165994,"q3_s":0.00019598,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":2.576e-6,"median_s":6.72e-7,"min_s":2.56e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_drop","q1_s":5.44e-7,"q3_s":9.12e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.000379351,"median_s":0.000217197,"min_s":0.000111783,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"matmul","q1_s":0.000153082,"q3_s":0.000258144,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":2.88e-7,"median_s":8e-8,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"host_copy","q1_s":8e-8,"q3_s":1.6e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.000054292,"median_s":0.000033778,"min_s":0.000033666,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"checksum","q1_s":0.00003373,"q3_s":0.000033858,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000416026,"median_s":0.000251167,"min_s":0.000145881,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000197996,"q3_s":0.000295266,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":3.04e-7,"median_s":1.44e-7,"min_s":3.2e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_build","q1_s":9.6e-8,"q3_s":1.76e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":9.6e-7,"median_s":2.4e-7,"min_s":1.44e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"var_upload","q1_s":1.93e-7,"q3_s":3.84e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.000472653,"median_s":0.000202237,"min_s":0.000112887,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"matmul","q1_s":0.000131064,"q3_s":0.000219966,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":4.96e-7,"median_s":8e-8,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"host_copy","q1_s":8e-8,"q3_s":1.44e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.000049331,"median_s":0.000033762,"min_s":0.000033666,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"checksum","q1_s":0.000033746,"q3_s":0.000033842,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000525457,"median_s":0.000236943,"min_s":0.000147689,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000165834,"q3_s":0.000254559,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":3.52e-7,"median_s":1.44e-7,"min_s":3.2e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_build","q1_s":1.12e-7,"q3_s":1.92e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":1.856e-6,"median_s":4.64e-7,"min_s":2.08e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"var_upload","q1_s":3.04e-7,"q3_s":8.32e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.000563939,"median_s":0.000145081,"min_s":0.000111366,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"matmul","q1_s":0.00013292,"q3_s":0.00016697,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":4.64e-7,"median_s":1.6e-7,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"host_copy","q1_s":8e-8,"q3_s":2.24e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.000048243,"median_s":0.000034098,"min_s":0.00003373,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"checksum","q1_s":0.000033874,"q3_s":0.000046979,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":156,"miss":4,"recycled":160,"rejected":0},"arm":"fresh_arena","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.00061583,"median_s":0.000189163,"min_s":0.000146425,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000169275,"q3_s":0.000214589,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":2.608e-6,"median_s":8.32e-7,"min_s":2.89e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_drop","q1_s":6.08e-7,"q3_s":1.232e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.000378055,"median_s":0.000205228,"min_s":0.000113783,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"matmul","q1_s":0.000141416,"q3_s":0.000239726,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":4.8e-7,"median_s":1.44e-7,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"host_copy","q1_s":8e-8,"q3_s":1.92e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.000054388,"median_s":0.00003381,"min_s":0.000033666,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"checksum","q1_s":0.000033746,"q3_s":0.000047555,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":0,"miss":160,"recycled":160,"rejected":0},"arm":"reuse_arena","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000412761,"median_s":0.000242911,"min_s":0.000147818,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000180156,"q3_s":0.000282513,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":null,"issue":3187,"max_s":0.000319395,"median_s":0.000158538,"min_s":0.000110535,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"kernel_call","q1_s":0.000134968,"q3_s":0.000177034,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000319539,"median_s":0.000158633,"min_s":0.000110887,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000135048,"q3_s":0.000177386,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":null,"issue":3187,"max_s":0.00048651,"median_s":0.000205644,"min_s":0.000101751,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"kernel_call","q1_s":0.000134632,"q3_s":0.00023211,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000486734,"median_s":0.000205788,"min_s":0.000101895,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000134728,"q3_s":0.000232238,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":3.2e-7,"median_s":1.44e-7,"min_s":3.2e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_build","q1_s":1.12e-7,"q3_s":1.6e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":1.152e-6,"median_s":2.88e-7,"min_s":1.6e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"var_upload","q1_s":2.24e-7,"q3_s":4.64e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000283457,"median_s":0.000128984,"min_s":0.000104358,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"matmul","q1_s":0.00012316,"q3_s":0.000147913,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000016673,"median_s":5.889e-6,"min_s":4.609e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"host_copy","q1_s":5.328e-6,"q3_s":7.12e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000047299,"median_s":0.000033618,"min_s":0.000033538,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"checksum","q1_s":0.000033602,"q3_s":0.000033634,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000345749,"median_s":0.000169754,"min_s":0.000144793,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.00016265,"q3_s":0.000193868,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":2.176e-6,"median_s":6.72e-7,"min_s":2.88e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"tape_drop","q1_s":5.12e-7,"q3_s":9.44e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.000494654,"median_s":0.000140201,"min_s":0.000104646,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"matmul","q1_s":0.000126728,"q3_s":0.000170219,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.000125224,"median_s":0.000085989,"min_s":5.921e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"host_copy","q1_s":8.497e-6,"q3_s":0.000096358,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.000051299,"median_s":0.000033634,"min_s":0.00003357,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"checksum","q1_s":0.000033603,"q3_s":0.000033826,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":"4085faf0dcad8190","issue":3187,"max_s":0.000654888,"median_s":0.000252031,"min_s":0.000147913,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":256,"n_samples":80,"phase":"iter_total","q1_s":0.000187276,"q3_s":0.000290498,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":3.36e-7,"median_s":1.6e-7,"min_s":3.2e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"tape_build","q1_s":1.28e-7,"q3_s":2.4e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":1.504e-6,"median_s":4.96e-7,"min_s":2.24e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"var_upload","q1_s":3.36e-7,"q3_s":7.68e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.000962924,"median_s":0.000613685,"min_s":0.000359638,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"matmul","q1_s":0.000519904,"q3_s":0.000679898,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":5.6e-7,"median_s":2.24e-7,"min_s":8e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"host_copy","q1_s":1.44e-7,"q3_s":2.72e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.000197452,"median_s":0.000136056,"min_s":0.000134569,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"checksum","q1_s":0.000134713,"q3_s":0.000188715,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.001099108,"median_s":0.000770335,"min_s":0.000498766,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.000667897,"q3_s":0.000852676,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":2.464e-6,"median_s":9.92e-7,"min_s":4e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"tape_drop","q1_s":7.2e-7,"q3_s":1.264e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.00156704,"median_s":0.001164024,"min_s":0.000755102,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"matmul","q1_s":0.001028575,"q3_s":0.00127611,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":5.12e-7,"median_s":2.88e-7,"min_s":1.12e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"host_copy","q1_s":2.08e-7,"q3_s":3.52e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.000203037,"median_s":0.000189788,"min_s":0.000134648,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"checksum","q1_s":0.000187724,"q3_s":0.000191132,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.001764316,"median_s":0.001356516,"min_s":0.000890663,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.001216826,"q3_s":0.001474618,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":3.84e-7,"median_s":1.6e-7,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"tape_build","q1_s":1.28e-7,"q3_s":2.72e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":1.184e-6,"median_s":5.76e-7,"min_s":2.08e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"var_upload","q1_s":4e-7,"q3_s":7.84e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.001578881,"median_s":0.000987724,"min_s":0.000734765,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"matmul","q1_s":0.000893063,"q3_s":0.001135637,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":5.6e-7,"median_s":2.4e-7,"min_s":9.6e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"host_copy","q1_s":1.6e-7,"q3_s":3.04e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.000203308,"median_s":0.000135065,"min_s":0.000134568,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"checksum","q1_s":0.00013476,"q3_s":0.000188347,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.001714954,"median_s":0.001130197,"min_s":0.000880326,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.001037776,"q3_s":0.001290335,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":3.52e-7,"median_s":1.44e-7,"min_s":3.2e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"tape_build","q1_s":1.12e-7,"q3_s":1.76e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":1.264e-6,"median_s":5.12e-7,"min_s":2.56e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"var_upload","q1_s":4e-7,"q3_s":8e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.001069425,"median_s":0.000615813,"min_s":0.00032994,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"matmul","q1_s":0.000540609,"q3_s":0.000695819,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":5.92e-7,"median_s":1.76e-7,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"host_copy","q1_s":1.12e-7,"q3_s":2.4e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.000194956,"median_s":0.000134777,"min_s":0.000134584,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"checksum","q1_s":0.000134665,"q3_s":0.000137465,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":156,"miss":4,"recycled":160,"rejected":0},"arm":"fresh_arena","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.001260989,"median_s":0.000773375,"min_s":0.000465612,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.000703211,"q3_s":0.000860773,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":2.8e-6,"median_s":8.96e-7,"min_s":3.84e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"tape_drop","q1_s":6.4e-7,"q3_s":1.376e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.001323905,"median_s":0.001002317,"min_s":0.000719068,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"matmul","q1_s":0.000928761,"q3_s":0.001071346,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":5.6e-7,"median_s":2.24e-7,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"host_copy","q1_s":1.6e-7,"q3_s":3.04e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.000202124,"median_s":0.00013892,"min_s":0.000134584,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"checksum","q1_s":0.000134761,"q3_s":0.000189148,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":0,"miss":160,"recycled":160,"rejected":0},"arm":"reuse_arena","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.001513261,"median_s":0.001175193,"min_s":0.000867029,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.00108181,"q3_s":0.001256413,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":null,"issue":3187,"max_s":0.001103284,"median_s":0.00061887,"min_s":0.000374679,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"kernel_call","q1_s":0.000473229,"q3_s":0.000740733,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.00110394,"median_s":0.000619446,"min_s":0.000374823,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.000473533,"q3_s":0.000742014,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":null,"issue":3187,"max_s":0.00140759,"median_s":0.000948202,"min_s":0.000636999,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"kernel_call","q1_s":0.000839332,"q3_s":0.001076434,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.001408294,"median_s":0.00094865,"min_s":0.000637271,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.000839812,"q3_s":0.00107669,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":3.68e-7,"median_s":1.6e-7,"min_s":3.2e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"tape_build","q1_s":1.12e-7,"q3_s":2.4e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":1.168e-6,"median_s":4.8e-7,"min_s":2.4e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"var_upload","q1_s":3.52e-7,"q3_s":6.72e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000922009,"median_s":0.000603493,"min_s":0.000362102,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"matmul","q1_s":0.000509263,"q3_s":0.000702379,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000043459,"median_s":0.00002733,"min_s":0.000019313,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"host_copy","q1_s":0.000023682,"q3_s":0.000033778,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000201453,"median_s":0.000135384,"min_s":0.000134424,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"checksum","q1_s":0.000134489,"q3_s":0.000188924,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.00108149,"median_s":0.000771919,"min_s":0.000520592,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.000695899,"q3_s":0.000894679,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":2.096e-6,"median_s":9.92e-7,"min_s":4.16e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"tape_drop","q1_s":7.36e-7,"q3_s":1.312e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.001007038,"median_s":0.000696843,"min_s":0.0003926,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"matmul","q1_s":0.000595333,"q3_s":0.000843508,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.000599765,"median_s":0.000367063,"min_s":0.000333317,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"host_copy","q1_s":0.00035255,"q3_s":0.00039548,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.000204077,"median_s":0.000134776,"min_s":0.00013444,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"checksum","q1_s":0.000134584,"q3_s":0.000143353,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":"c0abbdde3dcff048","issue":3187,"max_s":0.001586801,"median_s":0.00124662,"min_s":0.00088135,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":512,"n_samples":80,"phase":"iter_total","q1_s":0.001113029,"q3_s":0.001368868,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":3.84e-7,"median_s":2.08e-7,"min_s":4.8e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"tape_build","q1_s":1.6e-7,"q3_s":2.88e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":1.76e-6,"median_s":8.8e-7,"min_s":3.2e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"var_upload","q1_s":5.28e-7,"q3_s":1.264e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.003500085,"median_s":0.002289068,"min_s":0.001883394,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"matmul","q1_s":0.002131297,"q3_s":0.003020327,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":6.88e-7,"median_s":3.2e-7,"min_s":8e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"host_copy","q1_s":1.76e-7,"q3_s":5.12e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.000775456,"median_s":0.00054725,"min_s":0.000538097,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"checksum","q1_s":0.000541458,"q3_s":0.000759486,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.004261331,"median_s":0.002951988,"min_s":0.002444102,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.002714245,"q3_s":0.00358777,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":2.529e-6,"median_s":1.424e-6,"min_s":4.64e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"tape_drop","q1_s":8.48e-7,"q3_s":2e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.004892553,"median_s":0.003847692,"min_s":0.002078222,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"matmul","q1_s":0.003640703,"q3_s":0.00406924,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":6.08e-7,"median_s":3.04e-7,"min_s":1.12e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"host_copy","q1_s":2.4e-7,"q3_s":4.16e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.000772238,"median_s":0.000757151,"min_s":0.000538497,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"checksum","q1_s":0.000544961,"q3_s":0.000762702,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.005656519,"median_s":0.004541637,"min_s":0.002848316,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.004255413,"q3_s":0.004729936,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":4.96e-7,"median_s":2.56e-7,"min_s":4.8e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"tape_build","q1_s":1.6e-7,"q3_s":3.2e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":2.016e-6,"median_s":1.024e-6,"min_s":4.64e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"var_upload","q1_s":8.32e-7,"q3_s":1.392e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.004875752,"median_s":0.003849306,"min_s":0.001928902,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"matmul","q1_s":0.003629871,"q3_s":0.004126155,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":9.44e-7,"median_s":3.68e-7,"min_s":1.44e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"host_copy","q1_s":3.04e-7,"q3_s":4.64e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.000777423,"median_s":0.000546657,"min_s":0.000538321,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"checksum","q1_s":0.000541936,"q3_s":0.000761822,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.005417433,"median_s":0.004463809,"min_s":0.002498008,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.004196943,"q3_s":0.004788901,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":3.84e-7,"median_s":2.08e-7,"min_s":6.4e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"tape_build","q1_s":1.6e-7,"q3_s":2.72e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":2.048e-6,"median_s":9.28e-7,"min_s":3.68e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"var_upload","q1_s":6.88e-7,"q3_s":1.328e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.003753542,"median_s":0.002398962,"min_s":0.001948791,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"matmul","q1_s":0.002213832,"q3_s":0.003187971,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":6.4e-7,"median_s":2.88e-7,"min_s":8e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"host_copy","q1_s":1.76e-7,"q3_s":4.16e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.000774879,"median_s":0.000543953,"min_s":0.000538032,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"checksum","q1_s":0.000540913,"q3_s":0.000765135,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":156,"miss":4,"recycled":160,"rejected":0},"arm":"fresh_arena","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.004396331,"median_s":0.003058939,"min_s":0.002494136,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.002822572,"q3_s":0.003768533,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":3.344e-6,"median_s":1.696e-6,"min_s":5.92e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"tape_drop","q1_s":1.136e-6,"q3_s":2.288e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.004687823,"median_s":0.00380132,"min_s":0.001889507,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"matmul","q1_s":0.003553545,"q3_s":0.003972322,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":7.04e-7,"median_s":4e-7,"min_s":9.6e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"host_copy","q1_s":2.88e-7,"q3_s":4.8e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.0007776,"median_s":0.000749709,"min_s":0.000538225,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"checksum","q1_s":0.000542465,"q3_s":0.000761551,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":0,"miss":160,"recycled":64,"rejected":96},"arm":"reuse_arena","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.005450812,"median_s":0.004401774,"min_s":0.002439797,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.004231763,"q3_s":0.004628633,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":null,"issue":3187,"max_s":0.003721875,"median_s":0.002440869,"min_s":0.001878802,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"kernel_call","q1_s":0.002178693,"q3_s":0.003197234,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.003722787,"median_s":0.002441909,"min_s":0.00187997,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.002180149,"q3_s":0.003197954,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":null,"issue":3187,"max_s":0.004685421,"median_s":0.003881212,"min_s":0.002052397,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"kernel_call","q1_s":0.003609181,"q3_s":0.004068072,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.004686365,"median_s":0.003882092,"min_s":0.002053581,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.003610685,"q3_s":0.004069448,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":4.96e-7,"median_s":2.56e-7,"min_s":8e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"tape_build","q1_s":1.76e-7,"q3_s":3.36e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":1.808e-6,"median_s":1.04e-6,"min_s":4.32e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"var_upload","q1_s":8.48e-7,"q3_s":1.312e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.003548169,"median_s":0.002339935,"min_s":0.001931894,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"matmul","q1_s":0.002169621,"q3_s":0.002623952,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000174011,"median_s":0.000124088,"min_s":0.000086837,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"host_copy","q1_s":0.000112247,"q3_s":0.000134392,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000765951,"median_s":0.000752382,"min_s":0.000542129,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"checksum","q1_s":0.000551681,"q3_s":0.000758943,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.004424255,"median_s":0.003215444,"min_s":0.00264109,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.002971492,"q3_s":0.003453731,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":2.368e-6,"median_s":1.408e-6,"min_s":7.2e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"tape_drop","q1_s":1.136e-6,"q3_s":1.872e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.004119227,"median_s":0.002963876,"min_s":0.0018404,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"matmul","q1_s":0.002472199,"q3_s":0.00341768,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.001884163,"median_s":0.001465114,"min_s":0.000126311,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"host_copy","q1_s":0.001180616,"q3_s":0.001574624,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.000771199,"median_s":0.000754654,"min_s":0.000537793,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"checksum","q1_s":0.000545985,"q3_s":0.000759935,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":"c0ad32dc03ae1f56","issue":3187,"max_s":0.00665402,"median_s":0.005174668,"min_s":0.002762648,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":1024,"n_samples":80,"phase":"iter_total","q1_s":0.004437326,"q3_s":0.005551364,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":6.4e-7,"median_s":2.88e-7,"min_s":9.6e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"tape_build","q1_s":1.92e-7,"q3_s":3.52e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":3.072e-6,"median_s":2.176e-6,"min_s":1.072e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"var_upload","q1_s":1.905e-6,"q3_s":2.337e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.021136001,"median_s":0.013213951,"min_s":0.012585593,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"matmul","q1_s":0.013003907,"q3_s":0.013568371,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":1.136e-6,"median_s":7.84e-7,"min_s":5.44e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"host_copy","q1_s":7.52e-7,"q3_s":8.16e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":0.003323561,"median_s":0.003045065,"min_s":0.002196178,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"checksum","q1_s":0.003041764,"q3_s":0.003050021,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.024190138,"median_s":0.016264163,"min_s":0.01478894,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.016057512,"q3_s":0.01662802,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh","checksum_bits":null,"issue":3187,"max_s":8.897e-6,"median_s":3.505e-6,"min_s":2.448e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"tape_drop","q1_s":3.28e-6,"q3_s":3.664e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.02318993,"median_s":0.015286796,"min_s":0.012574666,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"matmul","q1_s":0.014767741,"q3_s":0.018731271,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":1.152e-6,"median_s":7.52e-7,"min_s":5.92e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"host_copy","q1_s":7.2e-7,"q3_s":8e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":null,"issue":3187,"max_s":0.003072598,"median_s":0.003036648,"min_s":0.003001743,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"checksum","q1_s":0.003014963,"q3_s":0.003043368,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.026230978,"median_s":0.01831898,"min_s":0.015600618,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.017812309,"q3_s":0.021749772,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":4.48e-7,"median_s":2.56e-7,"min_s":1.28e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"tape_build","q1_s":1.76e-7,"q3_s":3.2e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":3.024e-6,"median_s":2e-6,"min_s":1.072e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"var_upload","q1_s":1.824e-6,"q3_s":2.24e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.023504996,"median_s":0.015530549,"min_s":0.012735889,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"matmul","q1_s":0.015013116,"q3_s":0.018990414,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":1.345e-6,"median_s":7.84e-7,"min_s":4.48e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"host_copy","q1_s":7.36e-7,"q3_s":8.16e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":null,"issue":3187,"max_s":0.003082442,"median_s":0.003018848,"min_s":0.002210099,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"checksum","q1_s":0.003013619,"q3_s":0.003039972,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_hold","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.026556618,"median_s":0.018573286,"min_s":0.01532481,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.018053384,"q3_s":0.022017134,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":5.92e-7,"median_s":2.88e-7,"min_s":1.12e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"tape_build","q1_s":2.08e-7,"q3_s":3.68e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.000013745,"median_s":2.144e-6,"min_s":7.84e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"var_upload","q1_s":1.968e-6,"q3_s":2.48e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.022238317,"median_s":0.013119276,"min_s":0.012407331,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"matmul","q1_s":0.012877352,"q3_s":0.01342584,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":1.296e-6,"median_s":7.84e-7,"min_s":6.56e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"host_copy","q1_s":7.52e-7,"q3_s":8.48e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":0.003077558,"median_s":0.003042488,"min_s":0.003033216,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"checksum","q1_s":0.003039493,"q3_s":0.003047284,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":156,"miss":4,"recycled":160,"rejected":0},"arm":"fresh_arena","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.025282814,"median_s":0.016175891,"min_s":0.01545756,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.0159283,"q3_s":0.016475701,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_arena","checksum_bits":null,"issue":3187,"max_s":5.232e-6,"median_s":4.352e-6,"min_s":3.28e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"tape_drop","q1_s":4.128e-6,"q3_s":4.609e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.027997311,"median_s":0.015235063,"min_s":0.012623608,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"matmul","q1_s":0.014443475,"q3_s":0.018962877,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":1.536e-6,"median_s":7.2e-7,"min_s":4.8e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"host_copy","q1_s":6.4e-7,"q3_s":7.68e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_arena","checksum_bits":null,"issue":3187,"max_s":0.00307045,"median_s":0.00301576,"min_s":0.002195796,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"checksum","q1_s":0.003008528,"q3_s":0.003040742,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":{"hit":0,"miss":160,"recycled":16,"rejected":144},"arm":"reuse_arena","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.031024591,"median_s":0.018214437,"min_s":0.014823549,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.017207358,"q3_s":0.021798708,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":null,"issue":3187,"max_s":0.021838714,"median_s":0.013055722,"min_s":0.012476256,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"kernel_call","q1_s":0.012861829,"q3_s":0.013305577,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_drop","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.02184057,"median_s":0.013057867,"min_s":0.012478288,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.012864181,"q3_s":0.013307369,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":null,"issue":3187,"max_s":0.026096158,"median_s":0.015514816,"min_s":0.01279141,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"kernel_call","q1_s":0.014778969,"q3_s":0.019076121,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"backend_hold","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.026098174,"median_s":0.015516976,"min_s":0.012793506,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.014780825,"q3_s":0.019078153,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":7.2e-7,"median_s":3.68e-7,"min_s":1.28e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"tape_build","q1_s":2.88e-7,"q3_s":4.48e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000013729,"median_s":2.288e-6,"min_s":8.16e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"var_upload","q1_s":2.112e-6,"q3_s":2.416e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.020519908,"median_s":0.013246811,"min_s":0.012480026,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"matmul","q1_s":0.012978011,"q3_s":0.013644833,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.000908375,"median_s":0.000660039,"min_s":0.000582242,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"host_copy","q1_s":0.00064623,"q3_s":0.000676921,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":0.003059143,"median_s":0.003009776,"min_s":0.002199153,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"checksum","q1_s":0.00300552,"q3_s":0.003017125,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.024193435,"median_s":0.016885317,"min_s":0.01536005,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.016590641,"q3_s":0.017299787,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"fresh_legacy","checksum_bits":null,"issue":3187,"max_s":4.017e-6,"median_s":3.377e-6,"min_s":1.92e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"tape_drop","q1_s":3.2e-6,"q3_s":3.52e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.02325949,"median_s":0.013255259,"min_s":0.012394631,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"matmul","q1_s":0.012928855,"q3_s":0.016284016,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.007160115,"median_s":0.006363709,"min_s":0.00064791,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"host_copy","q1_s":0.006196108,"q3_s":0.006596754,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":null,"issue":3187,"max_s":0.003042775,"median_s":0.003012181,"min_s":0.002162431,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"checksum","q1_s":0.0030048,"q3_s":0.003025122,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arena_stats":null,"arm":"reuse_legacy","checksum_bits":"40c4c7d76fb71acc","issue":3187,"max_s":0.033197608,"median_s":0.023824164,"min_s":0.016391671,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":2048,"n_samples":80,"phase":"iter_total","q1_s":0.022246807,"q3_s":0.025604271,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 33.60s
+
+     Running tests/cpu_gemm_reuse_release_diag.rs (<home>/work/target-3608-after/release/deps/cpu_gemm_reuse_release_diag-c3897cc19b2503e0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/cpu_gemm_reuse_release_phases.rs (<home>/work/target-3608-after/release/deps/cpu_gemm_reuse_release_phases-fb36b0023e71cded)
+
+running 1 test
+test cpu_gemm_reuse_release_phases ... RELEASE_DIAG_JSON {"arm":"fresh","n":256,"median_s":0.000190907,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"reuse","n":256,"median_s":0.000329027,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":256,"median_s":0.000207804,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":256,"median_s":0.000179690,"minflt_per_iter":-1.00,"checksum_bits":4642561946635918336}
+RELEASE_DIAG_JSON {"arm":"fresh","n":512,"median_s":0.000890004,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"reuse","n":512,"median_s":0.001541929,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":512,"median_s":0.000887619,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":512,"median_s":0.000772941,"minflt_per_iter":-1.00,"checksum_bits":4651459692523356064}
+RELEASE_DIAG_JSON {"arm":"fresh","n":1024,"median_s":0.002689644,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"reuse","n":1024,"median_s":0.004742850,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":1024,"median_s":0.003574975,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":1024,"median_s":0.003590544,"minflt_per_iter":-1.00,"checksum_bits":13879247857448813846}
+RELEASE_DIAG_JSON {"arm":"fresh","n":2048,"median_s":0.016357441,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+RELEASE_DIAG_JSON {"arm":"reuse","n":2048,"median_s":0.018528011,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+RELEASE_DIAG_JSON {"arm":"reuse_release","n":2048,"median_s":0.016506408,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+RELEASE_DIAG_JSON {"arm":"reuse_release_arena","n":2048,"median_s":0.016664462,"minflt_per_iter":-1.00,"checksum_bits":13886709564539656915}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.70s
+
+     Running tests/cpu_predict_resident_fixedcost_diag.rs (<home>/work/target-3608-after/release/deps/cpu_predict_resident_fixedcost_diag-7f0b36c61c938f26)
+
+running 1 test
+test cpu_predict_resident_fixedcost_phases ... DIAG_JSON {"arm":"fresh","checksum_bits":null,"issue":2105,"max_s":0.000264287,"median_s":0.000184427,"min_s":0.000133944,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"predict","q1_s":0.000170122,"q3_s":0.000199868,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"fresh","checksum_bits":null,"issue":2105,"max_s":1.248e-6,"median_s":7.69e-7,"min_s":4.96e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"host_copy","q1_s":6.88e-7,"q3_s":8.96e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"fresh","checksum_bits":null,"issue":2105,"max_s":4.8e-7,"median_s":3.36e-7,"min_s":3.2e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"checksum","q1_s":3.36e-7,"q3_s":4.64e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"fresh","checksum_bits":"c02230d0ff540000","issue":2105,"max_s":0.000266463,"median_s":0.000186282,"min_s":0.000135256,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"iter_total","q1_s":0.000172266,"q3_s":0.000201036,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse","checksum_bits":null,"issue":2105,"max_s":0.000318818,"median_s":0.000193691,"min_s":0.000125943,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"predict","q1_s":0.000179339,"q3_s":0.000206827,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse","checksum_bits":null,"issue":2105,"max_s":1.76e-6,"median_s":8.32e-7,"min_s":5.28e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"host_copy","q1_s":7.2e-7,"q3_s":1.008e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse","checksum_bits":null,"issue":2105,"max_s":4.8e-7,"median_s":3.36e-7,"min_s":3.2e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"checksum","q1_s":3.36e-7,"q3_s":4.64e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse","checksum_bits":"c02230d0ff540000","issue":2105,"max_s":0.00032077,"median_s":0.000195755,"min_s":0.000127783,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"iter_total","q1_s":0.000180619,"q3_s":0.0002091,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":3.84e-7,"median_s":1.44e-7,"min_s":1.6e-8,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"tape_new","q1_s":3.2e-8,"q3_s":2.4e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":1.552e-6,"median_s":8.32e-7,"min_s":3.84e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"snapshot","q1_s":6.56e-7,"q3_s":9.92e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":2.704e-6,"median_s":1.44e-6,"min_s":6.4e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"tape_build","q1_s":9.92e-7,"q3_s":1.792e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":0.000011985,"median_s":6.161e-6,"min_s":2.688e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"upload","q1_s":4.976e-6,"q3_s":7.76e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":0.000173482,"median_s":0.000141833,"min_s":0.000100229,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"l1_linear_forward_device","q1_s":0.00013372,"q3_s":0.000150361,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":0.000079029,"median_s":0.000040931,"min_s":0.000015473,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"l2_linear_forward_device","q1_s":0.000024929,"q3_s":0.000049843,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":0.00023899,"median_s":0.000191387,"min_s":0.000123367,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"forward_resident","q1_s":0.000168953,"q3_s":0.000205708,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":2.768e-6,"median_s":1.008e-6,"min_s":4.8e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"readout","q1_s":8e-7,"q3_s":1.297e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":6.24e-6,"median_s":1.008e-6,"min_s":5.92e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"host_copy","q1_s":8.8e-7,"q3_s":1.12e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":5.13e-7,"median_s":3.52e-7,"min_s":3.2e-7,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"checksum","q1_s":3.36e-7,"q3_s":4.64e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":"c02230d0ff540000","issue":2105,"max_s":0.000243742,"median_s":0.000197275,"min_s":0.000126408,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"iter_total","q1_s":0.00017289,"q3_s":0.000210524,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"reuse_decomposed","checksum_bits":null,"issue":2105,"max_s":0.00024179,"median_s":0.000191563,"min_s":0.000140232,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"chain_public","q1_s":0.000171386,"q3_s":0.000204892,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"fresh_layers","checksum_bits":null,"issue":2105,"max_s":0.000160025,"median_s":0.000128904,"min_s":0.000095141,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"l1_linear_relu_fused","q1_s":0.000120935,"q3_s":0.000139048,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"fresh_layers","checksum_bits":null,"issue":2105,"max_s":0.000086229,"median_s":0.000051731,"min_s":0.000022161,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"l2_linear_gemm_add","q1_s":0.000039842,"q3_s":0.000056019,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"ablation","checksum_bits":null,"issue":2105,"max_s":0.000256527,"median_s":0.000176282,"min_s":0.000140456,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"l1_host_unfused_gemm_add_relu","q1_s":0.000152329,"q3_s":0.00020766,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"ablation","checksum_bits":null,"issue":2105,"max_s":9.409e-6,"median_s":6.017e-6,"min_s":4.448e-6,"minflt_delta_per_iter":null,"minflt_enabled":false,"n":80,"phase":"input_to_vec_copy","q1_s":4.944e-6,"q3_s":7.92e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.12s
+
+     Running tests/cpu_reuse_device_update_diag.rs (<home>/work/target-3608-after/release/deps/cpu_reuse_device_update_diag-534a65c93ecdb643)
+
+running 1 test
+test cpu_reuse_device_update_phases ... DIAG_JSON {"arm":"insitu_direct","checksum_bits":"dcbf3bf566f8c1d7","issue":2106,"max_s":0.000192299,"median_s":0.00016977,"min_s":0.000140248,"n":80,"phase":"device_update","q1_s":0.000161801,"q3_s":0.000176906,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"insitu_pretouch","checksum_bits":"dcbf3bf566f8c1d7","issue":2106,"max_s":0.000202332,"median_s":0.000174571,"min_s":0.000128248,"n":80,"phase":"device_update","q1_s":0.000159257,"q3_s":0.00017801,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":null,"issue":2106,"max_s":2.336e-6,"median_s":9.92e-7,"min_s":5.44e-7,"n":80,"phase":"alloc","q1_s":8.48e-7,"q3_s":1.169e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":null,"issue":2106,"max_s":1.264e-6,"median_s":7.52e-7,"min_s":5.6e-7,"n":80,"phase":"stage","q1_s":6.88e-7,"q3_s":8.16e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","issue":2106,"max_s":0.000094358,"median_s":0.000025521,"min_s":0.000016561,"n":80,"phase":"sgd_kernel","q1_s":0.000017793,"q3_s":0.000035874,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":null,"issue":2106,"max_s":2.88e-7,"median_s":1.12e-7,"min_s":3.2e-8,"n":80,"phase":"sgd_kernel_fixed","q1_s":6.4e-8,"q3_s":1.76e-7,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":null,"issue":2106,"max_s":0.000046339,"median_s":0.00002677,"min_s":0.000020961,"n":80,"phase":"sgd_compute_split","q1_s":0.000023201,"q3_s":0.000033026,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","issue":2106,"max_s":0.000030129,"median_s":0.000015776,"min_s":0.000010401,"n":80,"phase":"apply_params_split","q1_s":0.000013553,"q3_s":0.000020161,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","issue":2106,"max_s":0.00003317,"median_s":0.000018593,"min_s":0.000016417,"n":80,"phase":"sgd_kernel_zip","q1_s":0.000017537,"q3_s":0.000023042,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","issue":2106,"max_s":0.000099109,"median_s":0.000031698,"min_s":0.000014961,"n":80,"phase":"sgd_kernel_xthread","q1_s":0.000015905,"q3_s":0.000038882,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+
+     Running tests/cpu_reuse_device_update_h4_diag.rs (<home>/work/target-3608-after/release/deps/cpu_reuse_device_update_h4_diag-81d9e6a7a0c6b77a)
+
+running 1 test
+test cpu_reuse_device_update_h4_phases ... DIAG_JSON {"arm":"insitu_direct","checksum_bits":"dcbf3bf566f8c1d7","core_moves":0,"issue":3188,"max_s":0.000186667,"median_s":0.000160729,"min_s":0.000129799,"minflt_total":0,"n":80,"phase":"device_update","q1_s":0.000147352,"q3_s":0.000168506,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"insitu_probe","checksum_bits":null,"core_moves":0,"issue":3188,"max_s":4.16e-6,"median_s":2.144e-6,"min_s":9.61e-7,"minflt_total":0,"n":80,"phase":"prologue_probe","q1_s":1.616e-6,"q3_s":2.448e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"insitu_probe","checksum_bits":"dcbf3bf566f8c1d7","core_moves":1,"issue":3188,"max_s":0.000229085,"median_s":0.000158233,"min_s":0.000119799,"minflt_total":0,"n":80,"phase":"after_probe","q1_s":0.000146697,"q3_s":0.00016665,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":null,"core_moves":0,"issue":3188,"max_s":2.096e-6,"median_s":9.92e-7,"min_s":6.88e-7,"minflt_total":0,"n":80,"phase":"stage","q1_s":8.48e-7,"q3_s":1.184e-6,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","core_moves":0,"issue":3188,"max_s":0.000050723,"median_s":0.00003477,"min_s":0.000030465,"minflt_total":0,"n":80,"phase":"sgd_kernel","q1_s":0.000032626,"q3_s":0.000036482,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","core_moves":0,"issue":3188,"max_s":0.000086373,"median_s":0.000050931,"min_s":0.000040178,"minflt_total":0,"n":80,"phase":"sgd_kernel_cold","q1_s":0.000048082,"q3_s":0.000055523,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","core_moves":0,"issue":3188,"max_s":0.000089077,"median_s":0.00003493,"min_s":0.000026481,"minflt_total":0,"n":80,"phase":"zip_hot","q1_s":0.000033586,"q3_s":0.000057539,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+DIAG_JSON {"arm":"standalone","checksum_bits":"76b9a487b5fbb0fb","core_moves":0,"issue":3188,"max_s":0.000088293,"median_s":0.000043235,"min_s":0.000033602,"minflt_total":0,"n":80,"phase":"zip_xcore","q1_s":0.000038274,"q3_s":0.0000593,"rayon_num_threads_env":null,"target_arch":"aarch64","target_os":"linux"}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.41s
+
+     Running tests/cpu_reuse_step_grad_bit_dump.rs (<home>/work/target-3608-after/release/deps/cpu_reuse_step_grad_bit_dump-0ba0d2a5ed6cf8d5)
+
+running 1 test
+test dump_cpu_reuse_step_grad_bits ... === cpu_reuse_step_grad_bit_dump ===
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cpu_sme_gate_bit_dump.rs (<home>/work/target-3608-after/release/deps/cpu_sme_gate_bit_dump-bda53df0771b5cb4)
+
+running 1 test
+test dump_cpu_sme_gate_bits ... out[gemm512][0].bits=0xc0886ca4
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/create_graph_facade.rs (<home>/work/target-3608-after/release/deps/create_graph_facade-2321af7ce565e789)
+
+running 3 tests
+test create_graph_extended_ops_cuda_matches_cpu ... ok
+test create_graph_hessian_cuda_matches_cpu ... ok
+test create_graph_rejects_device_mismatch ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.74s
+
+     Running tests/creation_tensor_generation.rs (<home>/work/target-3608-after/release/deps/creation_tensor_generation-fcee94284c59be73)
+
+running 1 test
+test arange_upload_to_cuda_tape_round_trips ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.21s
+
+     Running tests/cuda_graph_infer_optin.rs (<home>/work/target-3608-after/release/deps/cuda_graph_infer_optin-bf6c968bbb1931c9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/cuda_graph_infer_parity_real_device.rs (<home>/work/target-3608-after/release/deps/cuda_graph_infer_parity_real_device-dba2a98b77da3f42)
+
+running 1 test
+test api_enabled_infer_capture_matches_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/cuda_graph_step_bit_identity.rs (<home>/work/target-3608-after/release/deps/cuda_graph_step_bit_identity-592de7d68bc84884)
+
+running 3 tests
+test eager_baseline ... === cuda_graph_step_bit_identity: eager (opt-in OFF) ===
+ok
+test graph_capture ... 
+thread 'graph_capture' (2780278) panicked at crates/facade/tests/cuda_graph_step_bit_identity.rs:120:5:
+本テストは opt-in ON（環境変数 FANDHE_AI_CUDA_GRAPH_STEP=1）の 別プロセスとして実行すること
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test graph_capture_completes_training_loop_without_error ... ok
+
+failures:
+
+failures:
+    graph_capture
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+error: test failed, to rerun pass `-p fandhe-ai --test cuda_graph_step_bit_identity`
+rc=101

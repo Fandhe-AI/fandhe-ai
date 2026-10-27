@@ -1,6 +1,6 @@
 # 学習チェーンと Graph capture の ordinal 単位排他 GB10 検証（イシュー #3596）
 
-**状態: 初回（RULE.txt）は判定 REGRESSION（終了コード 3。G1 不合格で chain セル未計測）。修正（#3601）後の再実測（RULE-r2）も判定 REGRESSION（終了コード 3。前提ゲート・hard 条件は合格し、既定 OFF の chain セルが ratio 1.002 > 1.00）。RULE-r3 の再実測は判定 UNDETERMINED（終了コード 4。前提ゲート・hard 条件・G1・`#[ignore]` は合格したが、既定 OFF の chain セルが ratio 1.007 > 1.00 で 5/5 の符号一貫がない）。完了条件は未達のため #3596 は閉じない**。r4 の切り分け診断（DIAG-r4）は GB10 で実測済みで場合 (i)「差は A/A と同程度。コードに原因は見つからない」（`gb10-diag-r4/summary-3596-diag-r4.md`・設計記録 §8.11.10。完了条件は引き続き未達）。所有者判断（2026-10-27）で、性能は UNDETERMINED のまま記録し、正しさの受入基準を満たしたので #3596 を閉じた（下記「所有者判断事項」）（2026-10-26。出典: `judge-3596.md`・`judge-3596-r2.md`・`judge-3596-r3.md`・`gb10/ignored-compare-3596.md`・`gb10-r2/ignored-compare-3596-r2.md`・`gb10-r3/ignored-compare-3596-r3.md`）
+**状態（#3608・RULE-w3608。2026-10-28）: 待ち型の入口（`08902dbf3`）の GB10 実測は g5 5/5 pass・前提ゲート g1〜g4 合格・`#[ignore]` の本件が原因の新規 fail 0 件だが、既定 OFF の chain セルは判定 UNDETERMINED（終了コード 4。ratio 1.005 > 1.00 で 5/5 の符号一貫なし）。#3608 は `Closes` にせず `Refs`（下記「RULE-w3608 の結果」）。以下は #3596 の状態。 初回（RULE.txt）は判定 REGRESSION（終了コード 3。G1 不合格で chain セル未計測）。修正（#3601）後の再実測（RULE-r2）も判定 REGRESSION（終了コード 3。前提ゲート・hard 条件は合格し、既定 OFF の chain セルが ratio 1.002 > 1.00）。RULE-r3 の再実測は判定 UNDETERMINED（終了コード 4。前提ゲート・hard 条件・G1・`#[ignore]` は合格したが、既定 OFF の chain セルが ratio 1.007 > 1.00 で 5/5 の符号一貫がない）。完了条件は未達のため #3596 は閉じない**。r4 の切り分け診断（DIAG-r4）は GB10 で実測済みで場合 (i)「差は A/A と同程度。コードに原因は見つからない」（`gb10-diag-r4/summary-3596-diag-r4.md`・設計記録 §8.11.10。完了条件は引き続き未達）。所有者判断（2026-10-27）で、性能は UNDETERMINED のまま記録し、正しさの受入基準を満たしたので #3596 を閉じた（下記「所有者判断事項」）（2026-10-26。出典: `judge-3596.md`・`judge-3596-r2.md`・`judge-3596-r3.md`・`gb10/ignored-compare-3596.md`・`gb10-r2/ignored-compare-3596-r2.md`・`gb10-r3/ignored-compare-3596-r3.md`）
 
 排他の実装は PR #3597 で main に入っている。完了条件の GB10 実機検証（下記 3 項目）は、本ディレクトリで事前登録して実測した。
 設計は `docs/backend-cuda-graph-step-capture-design.md` §8.11、既定 ON 反転の取り下げ記録は §8.12。
@@ -16,12 +16,14 @@
 | `RULE-r2.txt` | 原因修正（学習 graph の起動で MSE ワークスペースのロックを取る。設計記録 §8.11.6）後の再実測の事前登録規則（計測前に登録。閾値は RULE.txt と同一）。ランナーは `AB_RULE_NAME=RULE-r2.txt` で読む |
 | `judge-3596-r3.md`・`judge-3596-r3.exit` | r3 の判定ツールの出力と終了コード（UNDETERMINED・4） |
 | `RULE-r3.txt` | r2 の REGRESSION 後、既定 OFF の ordinal で排他スコープを素通りにする修正（設計記録 §8.11.8）の再実測の事前登録規則（計測前に登録。閾値・腕・ゲートは RULE-r2 と同一）。ランナーは `AB_RULE_NAME=RULE-r3.txt` で読む。マージ SHA `46a2a43d9`（2026-10-26T20:36+09:00）で、計測より前に main へ登録済み。r3 の GB10 実測結果は下記と設計記録 §8.11.9 |
-| `RULE-w3608.txt` | #3608（チェーン外の通常操作の待機・再試行。設計記録 §8.12.5）の既定 OFF の chain セルの非後退確認の事前登録規則（計測前に登録。腕・閾値・ゲートは RULE-r3 と同一。追加は前提ゲート g5〔`train_graph_out_of_chain_wait_3608` を手で 5 回〕と仮説のみ。before = `e2660eba0`、after の `crates/` は最終の crates/ 変更コミット `7ea459d9d` と同一）。ランナーは `AB_RULE_NAME=RULE-w3608.txt` で読む。**GB10 では未実測**（結果は §8.12.5.9 に記録する） |
+| `RULE-w3608.txt` | #3608（チェーン外の通常操作の待機・再試行。設計記録 §8.12.5）の既定 OFF の chain セルの非後退確認の事前登録規則（計測前に登録。腕・閾値・ゲートは RULE-r3 と同一。追加は前提ゲート g5〔`train_graph_out_of_chain_wait_3608` を手で 5 回〕と仮説のみ。before = `e2660eba0`、after の `crates/` は最終の crates/ 変更コミット `7ea459d9d` と同一）。ランナーは `AB_RULE_NAME=RULE-w3608.txt` で読む。結果は下記「RULE-w3608 の結果」と設計記録 §8.12.5.9（GB10 実測済み・判定 UNDETERMINED） |
 | `DIAG-r4.txt`・`diag-r4/` | r3 の UNDETERMINED で残った既定 OFF の約 0.9 µs の差の切り分け診断（設計記録 §8.11.10）の手順（計測前に固定。判定ではなく分類。判定ツールの入力ではない）と、計測専用 revert パッチ 3 本・`patches.sha256`。GB10 での計測は実施済み（結果は `gb10-diag-r4/` と下記「DIAG-r4 の結果」）。ランナー: `run_diag_train_chain_exclusion_cuda.sh`、集計: `summarize_diag_train_chain_exclusion.py`（テストは CI） |
 | `gb10-diag-r4/` | DIAG-r4 のマスク済みの生ログ（digest 35 本）・JSONL 7 腕・`env_info`・build `.err`・`sha-*`／`tree-*`・専有ゲートのログ・`rev-stamps-and-runner-out.txt`・`summary-3596-diag-r4.md`／`.exit`（集計ツールの出力と終了コード 0）。バイナリはコミットしない |
 | `DIAG-r5.txt`・`diag-r5/` | §8.11.6 の loss 取り違えの機構の推定と実機の `DIAG3596` の食い違いを調べる診断（#3610）の手順・仮説・分類規則（計測前に固定。判定ではなく分類）と、増強した診断テストのテスト専用パッチ 3 本・`patches.sha256`。実測済み（下記「DIAG-r5 の結果」） |
 | `gb10-diag-r5/` | DIAG-r5 のマスク済みの生ログ（15 run）・`env_info`・build ログ・`progress.txt`・`classify-3610.md`（分類）。バイナリはコミットしない |
 | `gb10/` | 初回のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`#[ignore]` 全件の結果と分類・`judge-3596.md`／`.exit` |
+| `judge-3596-w3608.md`・`judge-3596-w3608.exit` | RULE-w3608 の判定ツールの出力と終了コード（UNDETERMINED・4） |
+| `gb10-w3608/` | RULE-w3608 のマスク済みの生ログ（digest 20 本）・JSONL 4 腕・`env_info`・前提ゲート g1〜g4 のログ・g5（`g5-ooc3608-r{1..5}-after.log`）・専有ゲートのログ・`runner.log`・`ignored/`（`#[ignore]` 全件。コマンド 4 のログはビット列ダンプを除いた抜粋）・`ignored-compare-w3608.md`。バイナリはコミットしない |
 | `gb10-r3/` | r3 のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`ignored/`・`ignored-compare-3596-r3.md`・`rev-stamps-and-runner-out.txt` |
 | `gb10-r2/` | r2 のマスク済みの生ログ・JSONL・`env_info`・前提ゲートのログ・`diag/`（原因切り分けのログとテスト専用パッチ）・`ignored/`・`ignored-compare-3596-r2.md` |
 
@@ -92,6 +94,25 @@
 
 off の差 0.2%（約 0.3 µs）は規則の閾値 1.00 を 5/5 round で超えたため REGRESSION と判定した。2 腕は別ビルドで、#3597・#3601 以外の変更も含みうる（RULE-r2 [限界]）。規則・閾値・コードは変えていない。
 
+## RULE-w3608 の結果（イシュー #3608・チェーン外の通常操作の待機・再試行）
+
+ラベル `3608-w-gb10`・出力先 `gb10-w3608/`。機体は GB10（aarch64・driver 580.173.02・rustc 1.97.0）。before = `e2660eba09245ca00b9f6f8802fb0b7cd6ef464f`、after = `08902dbf3e9fe2686a1cf2bf0c5f365ecf04967c`（`crates/` は RULE の基準 `7ea459d9d879f40c0b795f392c57d80637a1f40c` と同一。ランナーの `precheck=assert ok`）。基準コミット `7ea459d9d`（squash 前の履歴）は bundle に含めた。計測専用パッチの sha256 は RULE の値（`92d0a8d4…3a819`）と一致。RULE-w3608.txt の sha256 は `c627f28c…624a7`（`env_info` と一致）。
+
+| 項目 | 結果 |
+|---|---|
+| g5（`train_graph_out_of_chain_wait_3608`・`TRAIN=1`・5 回独立・計測前に手で実行） | **5/5 pass**（毎回 `running 1 test`・`1 passed`・`rc=0`）。`OOC3608` 行の `captured` は 18・11・20・23・24（すべて 1 以上）、`waited` は 17・9・16・18・21、`fallbacks=0`。`DeviceContextCaptureInProgress` は出ていない。ログは `gb10-w3608/g5-ooc3608-r{1..5}-after.log` |
+| 前提ゲート g1〜g4 | **合格**（g1 1 passed・g2 3260 診断 9 passed・g3 3 種〈3・2・1 passed〉・g4 facade 1 passed・2 プロセス bit 一致 BITS 90 行・差分空） |
+| 専有ゲート・hard 条件 | 5 round とも通過。checksum（0.080541）・PARAM_DIGEST は全 run・全腕で一致 |
+| chain セル ratio（excl1 / excl0、5 round 中央値） | off: **1.005**（ratio_r 1.002, 1.006, 1.009, 1.007, 0.999。排他なし 0.1351 ms・あり 0.1358 ms）／ on: 1.000（1.000 が 5 回。0.1126 ms） |
+| 判定 | **UNDETERMINED（終了コード 4）**: off の ratio 1.005 > 1.00 だが round 5 の ratio_r が 0.999 で 5/5 の符号一貫がない。on は丸めると 1.000 だが規則の記録上は > 1.00 の扱いで同様に符号一貫なし。NON-REGRESSION の条件（両モード ratio <= 1.00）は満たさない |
+| `#[ignore]` 全件の突き合わせ | **本件が原因の新規 fail は 0 件**。after にだけ出た 3 件（`module_cache_wiring_tests::cuda_gemm_new_second_construction_reuses_module_cache`・`wmma_tf32_opt_exceeds_…`・`wmma_tf32_staged_exceeds_…`）は単独再実行・before 単独で切り分け済み（`gb10-w3608/ignored-compare-w3608.md`）。コマンド 3 は before・after とも 9 passed（RULE の注記「before 8 件」は古い記述で、観測値を記録した） |
+
+- 仮説（既定 OFF で ratio 1.00 前後・opt-in ON は中立）は、off の ratio 1.005 が 1.00 を超えたため外れた（事前表明は推定で合格ラインではない）。差は r2（1.002）・r3（1.007）と同程度で、所有者判断（2026-10-27）が示した A/A のノイズ幅（約 0.5%）に収まる。ただし #3596 の判断は #3596 に限る。本件へは流用せず、性能は UNDETERMINED のまま記録し、NON-REGRESSION（pass）として扱わない。
+- 規則・閾値・判定ツール・コード（`crates/`）は変えていない。
+- 完了条件のうち g5・`#[ignore]`・前提ゲートは満たしたが、judge が NON-REGRESSION（終了コード 0）でないため、PR は `Refs #3608`（`Closes` にしない）。
+- 対象外（未実施・未修正）: §8.12.3 の反転用の再確認項目は未実測のまま（#3594 の前提は満たされない）。§8.12.5.5 の `any_resident` 側 `upload_into` ループの poison は未修正（所有者確認 6）。g5 はランナーの前提ゲートに組み込まれていない（RULE-w3608 の定め。手で実行した）。
+- 実施条件: 全ビルドと `#[ignore]`・g5 は計測前に済ませ、計測と並走させていない。hw-lock を取得して作業し、終了時に解放した。ホスト名・ホームディレクトリはマスク済み。
+
 ## 設計の要点
 
 - 排他に実行時トグルは無いため 2 ツリー比較: excl0 = `f7fe6b4df`（#3597 の直前）、excl1 = `crates/` が RULE の基準コミットと同一の after ツリー（初回: `d3f38f71b`、r2: `63f85eff2`。r2 の実測は `616be4ff7`）。
@@ -108,6 +129,7 @@ off の差 0.2%（約 0.3 µs）は規則の閾値 1.00 を 5/5 round で超え�
 
 ## 所有者判断事項
 
+- **（RULE-w3608 の結果。#3608）** 既定 OFF の chain セルは UNDETERMINED（ratio 1.005・符号一貫なし）。#3596 の所有者判断（2026-10-27）と同じ扱い〈ノイズ幅内として許容し、正しさの受入基準で閉じる〉を本件にも適用するか、別の切り分けを行うかの判断が必要。g5 5/5・`#[ignore]` の本件起因 fail 0 件・前提ゲート合格は満たしている。閾値・判定方法は変えていない。#3608 は `Closes` にせず `Refs`。
 - **（DIAG-r4 の結果）** 場合 (i)。コードに原因は見つからず、DIAG-r4 の規則どおり停止した。(a) 約 0.5% の差を測定ノイズ水準として許容し判定基準（閾値 1.00・符号一貫の要件）を見直すか、(b) round 数を増やす別名 RULE を事前登録して再実測するか。閾値・round 数は変えていない。#3596 は完了条件が未達のため閉じない。
 - **所有者判断（2026-10-27）**: 差は A/A のノイズ幅と同じ程度で、ビルドごとの配置の違い（対照腕 rv-graphlock の +0.64%）でも同じ程度に動く。round を増やしてもこの偏りは消えないため、再計測はしない。性能は RULE-r3 の判定 UNDETERMINED のまま記録し、NON-REGRESSION（pass）としては扱わない。閾値・判定方法・round 数は変えない。正しさの受入基準（G1〜G4・`#[ignore]` 全件の突き合わせで、排他が原因の新規 fail は 0 件。r3）を満たしたので #3596 を閉じる。`TRAIN_GRAPH_DEFAULT_ENABLED` は `false` のまま。
 - **（r3 の結果）** off の ratio 1.007 は UNDETERMINED（符号の一貫なし）。追加の切り分け（round 数を増やす別名 RULE の事前登録、同一バイナリ内の比較など）を行うか、現状の差を許容して判定基準を見直すか。閾値 1.00 は規則どおり変えていない。
