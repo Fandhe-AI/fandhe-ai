@@ -632,11 +632,11 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 
 ### 8.12.4 申し送り
 - チェーン外の通常操作の待機・再試行は別 Issue で追跡する（起票はユーザー承認後）。
-  - 追跡先は #3608。設計案は §8.12.5（所有者確認待ち）。
+  - 追跡先は #3608。設計は §8.12.5（所有者確認済み・実装済み。GB10 実測は未実測）。
 
-### 8.12.5 #3608 チェーン外の通常操作の待機・再試行（設計案・所有者確認待ち）
+### 8.12.5 #3608 チェーン外の通常操作の待機・再試行（所有者確認済み・2026-10-27）
 
-§8.12.2 の反転前提条件（チェーン外の通常操作にも capture 中の安全な待機・再試行を入れる）を満たすための設計案。**本節は設計の記録だけで、コードは変更していない**。入口の全体に及ぶ変更のため、所有者の確認が記録されるまで実装しない（#3608 作業 1）。確認の記録は本節末尾に追記する。既定 OFF（`TRAIN_GRAPH_DEFAULT_ENABLED = false`）・tolerance・baseline・依存・`unsafe` は変えない。§8.11.1 の表で「未確認」とした行（reuse 経路・fresh 経路・Tape の通常演算）への答えは 8.12.5.5 に分けて書く。
+§8.12.2 の反転前提条件（チェーン外の通常操作にも capture 中の安全な待機・再試行を入れる）を満たすための設計案。本節は設計案（8.12.5.1〜8.12.5.6）、所有者の確認（8.12.5.7）、実装記録（8.12.5.8）、GB10 実測（8.12.5.9）の順に書く。入口の全体に及ぶ変更のため、実装は所有者の確認（8.12.5.7）の後に行った。既定 OFF（`TRAIN_GRAPH_DEFAULT_ENABLED = false`）・tolerance・baseline・依存・`unsafe` は変えない。§8.11.1 の表で「未確認」とした行（reuse 経路・fresh 経路・Tape の通常演算）への答えは 8.12.5.5 に分けて書く。
 
 #### 8.12.5.1 待機・再試行を入れる場所
 
@@ -655,7 +655,19 @@ RULE-r2 の判定は REGRESSION（既定 OFF の chain セル ratio 1.002。§8.
 
 1. `ops.rs::CudaBackendOps::with_driver_call`／`with_sync_point_call`、`memory.rs::CudaMemory::with_driver_call`／`with_sync_point_call`。
 2. `context_cache::with_driver_call`（63 か所が経由するカーネル側の入口）。これを切り替えると gemm・norm 等の通常演算が覆われる。一方でベンチ・診断用の低レベル API も影響を受けるため、**切り替えるか否かを所有者に確認する**。切り替えない場合、Tape の通常演算のうちカーネル側入口を通る演算は覆われず、受入基準を満たせない可能性がある。推奨は「切り替える」。
-3. ops.rs・memory.rs の直接呼び出し（resident 系・epilogue 融合系など）は、1 件ずつ「待つ／待たない」を段階 B の着手前に表にする。
+3. ops.rs・memory.rs の直接呼び出し（resident 系・epilogue 融合系など）は、1 件ずつ「待つ／待たない」を段階 B の着手前に表にする。結果は次のとおり（`origin/main` e2660eba0 で `git grep` した全件。テストを除く）。
+
+| 箇所（e2660eba0 の行） | 内容 | 判断 | 理由 |
+|---|---|---|---|
+| ops.rs `with_driver_call`・`with_sync_point_call`、memory.rs 同名 2 件 | 通常操作の共通入口 | 待つ | 所有者確認 1 |
+| `context_cache::with_driver_call`（63 か所が経由） | カーネル側の共通入口 | 待つ | 所有者確認 2 |
+| ops.rs:606・2696・2987・3173・3254・4699・5078・5156・5244・5326・5447・5461、memory.rs `zero_fill`（:1991） | 空入力の早期 return で poison・世代だけを検査し、token をすぐ捨てる「プローブ」 | 待つ | 保持するロックなし。同じ関数の通常経路（待つ入口）と挙動を揃える。チェーン部品として呼ばれる場合はスコープのトークンで通るので待ちに入らない |
+| ops.rs:4099 `begin_device_chain_scope` | 学習チェーンの入口 | 待たない | `train_chain` の再試行ループの内側。ここで待つと二重に待つ |
+| ops.rs `captured_segment_key`・`run_captured_sgd_step_segment`・`linear_chain_forward_captured`・`train_chain_captured`（3763・3856・3955・4034） | graph の key 導出・capture 区間の入口 | 待たない | 即時エラーで `step()` が直接実行へ落ちる／呼び出し元が再試行・フォールバックする契約 |
+| ops.rs `release_cached_device_memory`（7980） | キャッシュ解放（保守操作） | 待たない | 解放は通常操作ではなく、呼び出し元のロック有無を確かめきれていないため安全側 |
+| graph.rs の 10 か所・`begin_capture_session`・`begin_buffer_release`・`invalidate_with` | 上の表のとおり | 待たない | 既存の契約 |
+
+即時版の `context_cache::begin_sync_point_call` は本番の呼び出し元がなくなったため `#[cfg(test)]` にし、「待たない契約」を固定するテスト専用として残した。ops.rs の中でカーネル側の公開メソッドを外側のトークンなしで呼ぶ経路は見つかっていない（`launch_gemm_dw_device`・`launch_gemm_dinput_device`・`launch_mse_*_device_f32` は `ops.rs` の `with_driver_call` の内側からだけ呼ばれる。grep による確認）。
 
 待たせない入口（現行の即時版のまま残す）。
 
@@ -684,10 +696,10 @@ tensor-core の trait は変えないため、CPU・Metal には影響しない�
 | 別の ordinal のトークンを持ったまま待つ（ordinal をまたぐ輪） | 期限付きなので有界。安全側として「どの ordinal のトークンも持たないときだけ待つ」条件を推奨する。**所有者に確認する** |
 | phase が Active 以外 | 待たずに `wait_foreign_capture_idle` が `Ok` を返し、再試行した `begin_driver_call` が型付きエラーを返す |
 | capture 側の `in_flight` ドレイン | 待つスレッドはトークンを持たないのでドレインを妨げない |
-| ordinal 共有 Mutex を保持したまま入口へ入る経路 | **未確認**。`.lock()` を持つ backend-cuda のファイルは context_cache.rs・host_staging.rs・memory.rs・readback_prefetch.rs・readback_policy.rs・ops.rs・mse.rs・device.rs・module_cache.rs・graph.rs・gemm.rs ほか。「ロック → 入口」の順の経路が 1 つでもあれば、その経路は待たない版を使うかロック順を直すかを決める。段階 B の着手前に全箇所を確かめて本表へ追記する（確認できるまで実装しない） |
+| ordinal 共有 Mutex を保持したまま入口へ入る経路 | **確認済み（grep と該当箇所の読み取り。2026-10-27）**。「どの ordinal のトークンも持たずにロックを取り、その後で一番外側の入口に入る」経路は見つからなかった。`gemm.rs` の `lock_device_workspace`（`with_workspace_epoch`・`launch_gemm_dw_device`・`launch_gemm_dinput_device`）と `mse.rs` の `partial_workspace`・`target_cache` は、いずれも `ops.rs` の `with_driver_call`（トークン取得）の内側か、カーネル側 `with_driver_call` のクロージャの内側で取るので、順序は「トークン → ロック」。`graph.rs` の `with_train_graph_workspaces_locked` は待たない入口（即時版）のままで、再生はトークン → ワークスペースロックの順。`host_staging.rs`・`readback_prefetch.rs`・`readback_policy.rs`・`device.rs`（stream 種別キャッシュ）・`module_cache.rs` のロックは、キャッシュの取り出し・返却だけの短い区間で、保持中に driver 入口へ入らない。入れ子の入口は `DRIVER_CALL_DEPTH` の通過条件で必ず通るので、待ちが起きうるのは一番外側の入口だけである。ただしロックの全箇所を機械的に証明したわけではなく、静的な読み取りの結果である。ロック順の変更は行っていない |
 | 飢え | capture はキャッシュミスのときだけ起き、replay は capture を保持しない。待つのは 1 回の capture の区間だけ |
 
-#### 8.12.5.4 テスト計画（実装は確認後）
+#### 8.12.5.4 テスト計画
 
 - CI（GPU 不要。`internal-diagnostics` と偽 ordinal で §8.11.4 の既存テストと同型）: 別スレッドの capture が期限内に終わる → `Ok` / capture が続く → 期限後に `DeviceContextCaptureInProgress` / トークン保持スレッドは待たない / 非 Active は待たずに型付きエラー / capture スレッド自身の sync point は即 `Unsupported` / 待たせない入口は従来どおり即時拒否。既存の `begin_driver_call_rejects_other_thread_while_capturing` 等は変えない。
 - GB10（`#[ignore]`）: `train_step_graph_diag_tests_3260.rs` の G1 ハーネスを再利用し、スレッド A が opt-in ON で capture する学習 step を繰り返し、スレッド B が同じ ordinal で非 capture の step・`loss.read()`・Tape 演算を繰り返す。期待は B に `CaptureInProgress` が出ない・B の loss 列が単独実行と bit 一致・poison なし。
@@ -695,15 +707,15 @@ tensor-core の trait は変えないため、CPU・Metal には影響しない�
 
 #### 8.12.5.5 書き込み後に拒否されたときの store・Tape の扱い（§8.11.1 の未確認行）
 
-(B) では待機を各 driver 呼び出しの前に行うため、演算の途中で拒否が起きるのは期限切れのときだけになる。期限切れ時の扱いは次のとおり。**いずれも本段階ではコードを追っておらず「未確認」**。段階 B の前に経路ごとに確かめ、表を埋める。推測では埋めない。
+(B) では待機を各 driver 呼び出しの前に行うため、演算の途中で拒否が起きるのは期限切れのときだけになる。期限切れ時の扱いは次のとおり。2026-10-27 にコードを追って埋めた（`crates/autodiff/src/optim/device_store.rs`・`backward.rs`）。
 
 | 経路 | 確認する点 | 状態 |
 |---|---|---|
-| reuse 経路・fresh 経路（`device_store.rs` の更新経路） | 拒否が書き込みの前か後か・保留分の戻し・poison への遷移・params／velocity の状態・再試行で回復できるか | 未確認 |
-| Tape の forward | 出力は新規バッファなので既存状態は変わらない見込み | 未確認 |
-| Tape の backward（勾配の in-place 累積） | 途中失敗で Tape と勾配が部分更新のまま残るか。残る場合の利用者向け契約（例: その Tape を捨てる） | 未確認 |
+| reuse 経路・fresh 経路（`device_store.rs` の更新経路） | 拒否が書き込みの前か後か・保留分の戻し・poison への遷移・params／velocity の状態・再試行で回復できるか | 確認済み。勾配の staging への書き込み（`mem.upload`／`upload_into`）はまだ params・velocity を変えない。`upload` と SGD・Adam 等の更新段の `DeviceContextCaptureInProgress` は `pending` を戻して返し、poison しない（params 未変更）。**例外**: `any_resident` 側の複数回 `upload_into` ループ（`mem.upload_into(grad, &mut staging.buf, offset)`。`device_store.rs` の 2919・3316・3620・3859・4132 付近）は、`DeviceContextCaptureInProgress` を含む全エラーで `poisoned` を立てる。staging は次 step で上書きされ params は未変更なので、poison は保守的な扱いである。待ち型にした後、ここに届くのは期限切れ（1000 ms）のときだけ。**修正は所有者確認 6 により本 Issue では行わない（所有者への報告事項）** |
+| Tape の forward | 出力は新規バッファなので既存状態は変わらない見込み | 確認済み。各演算は新しい `Tensor`／バッファを返し、失敗時は `Err` で戻る。既存の入力は書き換えない |
+| Tape の backward（勾配の in-place 累積） | 途中失敗で Tape と勾配が部分更新のまま残るか。残る場合の利用者向け契約（例: その Tape を捨てる） | 確認済み。`backward_impl` は新しい `Gradients` を作って返し、途中で失敗したときは `Err` とともに破棄する。`backward_accumulate` は合算結果を新しい `Vec` に組み立て、全要素の合算に成功してから `into` へ書き戻す（部分適用を作らない）。`accumulate` の内部で既存の勾配を `take()` するのは、`backward_impl` が作る局所の `Gradients` の中だけである |
 
-確認の結果コード修正が必要と分かった場合、その採否は所有者に確認する事項とし、本 Issue の中で勝手に直さない。
+確認の結果コード修正が必要と分かった場合、その採否は所有者に確認する事項とし、本 Issue の中で勝手に直さない。上の `any_resident` の複数回 `upload_into` の poison は、本 Issue の目的（通常操作が待って成功する）の達成には要らず、期限切れでしか到達しなくなるため、修正は行わずに報告事項とした。
 
 #### 8.12.5.6 性能の予想
 
@@ -720,4 +732,26 @@ tensor-core の trait は変えないため、CPU・Metal には影響しない�
 
 §8.12.3 の反転 PR 用の再確認項目は引き続き**未実測**である。本節で反転の前提条件が満たされたことにはならない。
 
-所有者の確認: **未記録**（確認後にここへ日付と内容を追記する）。
+所有者の確認（2026-10-27。イシュー #3608 の所有者コメント <https://github.com/Fandhe-AI/fandhe-ai/issues/3608#issuecomment-6432022118>）:
+
+1. 方式 (B) を採る。待ち型の入口と sync point 版を新設し、通常操作の入口だけを切り替える。`begin_driver_call` は即時拒否のまま残す。
+2. `context_cache::with_driver_call`（カーネル側）も待ち型にする。
+3. 待つのは、呼び出しスレッドがどの ordinal のトークンも持たないときだけ。
+4. 上限は本番 1000 ms・`cfg(test)` 30 ms。定数は 1 つ新設する。error variant は足さない。
+5. 既定 OFF の chain セルを、新しい名前の RULE で計測前に登録したうえで GB10 で計測する。既存の RULE と閾値は変えない。
+6. store・Tape の経路にコード修正が要ると分かったら、直さずに止まって報告する。
+
+（上記はコメントにある内容の転記で、承認の範囲を広げていない。）
+
+#### 8.12.5.8 実装記録（#3608）
+
+- `context_cache::begin_driver_call_waiting`・`begin_sync_point_call_waiting`・`has_any_in_flight_call_on_this_thread`・`DRIVER_CALL_CAPTURE_WAIT_TIMEOUT`（本番 1000 ms・`cfg(test)` 30 ms）を新設した。待ちは `wait_foreign_capture_idle`（Condvar）で、ポーリングしない。
+- `has_any_in_flight_call_on_this_thread` は TLS 破棄後に `true`（保持あり＝待たない）を返す。既存の ordinal 単位のヘルパー（破棄後は `false`）とは意図が逆で、破棄中の `Drop` 経路で待ちに入らないための安全側である。
+- 切り替えた入口は 8.12.5.1 の表の「待つ」の行のとおり。待たない入口（`begin_device_chain_scope`・graph.rs・`captured_segment_key` ほか）は変えていない。
+- 変えていないもの: `TRAIN_GRAPH_DEFAULT_ENABLED = false`（既定は反転しない）・tolerance・baseline・FMA 契約・依存・`unsafe`（追加なし）・`BackendError` の variant・tensor-core の trait・facade の公開面・§8.12.3 の再確認項目（引き続き未実測）。
+- テスト: CI（GPU 不要）は `context_cache.rs` の `begin_driver_call_waiting_*`・`begin_sync_point_call_waiting_*`・`with_driver_call_waits_for_foreign_capture_and_runs_closure_once` と `ops.rs` の `ops_wrappers_wait_for_foreign_capture_within_limit_and_reject_after_it`。`memory.rs` のラッパーは `CudaDevice` が要り GPU なしでは試せないため、`ops.rs` と同一形のコードであることと GB10 の並行テストで担保する。GB10（`#[ignore]`）は `crates/backend-cuda/tests/train_graph_out_of_chain_wait_3608.rs`（本番値 1000 ms で走らせるため integration test。`retry_busy` を使わない）。
+- 残したリスク: 期限切れ（1000 ms 超の capture）では従来どおり `DeviceContextCaptureInProgress` が返る。8.12.5.5 の `upload_into` ループの poison は未修正（所有者確認 6）。
+
+#### 8.12.5.9 GB10 実測結果
+
+**未実測**（GB10 での並行テスト・前提ゲート・`#[ignore]` 全件の突き合わせ・chain セルの RULE 計測は未実施。RULE は `docs/perf/logs/train-chain-exclusion-3596/RULE-w3608.txt` に計測前に登録した）。実測後に本節へ記録する。実測できていない項目を pass として書かない。

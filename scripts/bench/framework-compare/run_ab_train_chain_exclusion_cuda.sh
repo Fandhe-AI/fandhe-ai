@@ -162,11 +162,21 @@ check_patched_tree() { # <root>
 }
 check_patched_tree "$BEFORE_ROOT"
 check_patched_tree "$AFTER_ROOT"
-# 排他の有無（after にだけ begin_device_chain_scope が存在する）を行頭アンカーで確認する。
-grep -rqE '^[[:space:]]*(pub )?fn begin_device_chain_scope' "$AFTER_ROOT/crates" \
-  || precheck_fail "after に begin_device_chain_scope が無い"
-if grep -rqE '^[[:space:]]*(pub )?fn begin_device_chain_scope' "$BEFORE_ROOT/crates"; then
-  precheck_fail "before に begin_device_chain_scope がある（排他導入前でない）"
+# 腕を区別する識別子（after にだけ存在し before に無い関数）を行頭アンカーで確認する。
+# RULE-w3608.txt は待ち型の入口（#3608）の導入前後の比較で、before（e2660eba0）には排他導入（#3597）の
+# begin_device_chain_scope が既にあるため、識別子を begin_driver_call_waiting へ切り替える。
+# それ以外の規則（RULE.txt・RULE-r2.txt・RULE-r3.txt）は従来どおり排他導入前後を検査する（維持）。
+if [[ "$RULE_NAME" == "RULE-w3608.txt" ]]; then
+  ARM_SENTINEL='begin_driver_call_waiting'
+  ARM_DESC="待ち型の入口導入"
+else
+  ARM_SENTINEL='begin_device_chain_scope'
+  ARM_DESC="排他導入"
+fi
+grep -rqE "^[[:space:]]*(pub(\([a-z]+\))? )?fn ${ARM_SENTINEL}" "$AFTER_ROOT/crates" \
+  || precheck_fail "after に ${ARM_SENTINEL} が無い"
+if grep -rqE "^[[:space:]]*(pub(\([a-z]+\))? )?fn ${ARM_SENTINEL}" "$BEFORE_ROOT/crates"; then
+  precheck_fail "before に ${ARM_SENTINEL} がある（${ARM_DESC}前でない）"
 fi
 echo "precheck=assert ok"
 

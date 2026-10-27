@@ -1462,7 +1462,11 @@ impl CudaMemory {
         map: impl FnOnce(CudaError) -> BackendError,
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, BackendError> {
-        let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
+        let token = context_cache::begin_driver_call_waiting(
+            self.ordinal,
+            resource_generations,
+            context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+        )?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
 
@@ -1481,7 +1485,12 @@ impl CudaMemory {
         map: impl FnOnce(CudaError) -> BackendError,
         f: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, BackendError> {
-        let token = context_cache::begin_sync_point_call(self.ordinal, resource_generations, what)?;
+        let token = context_cache::begin_sync_point_call_waiting(
+            self.ordinal,
+            resource_generations,
+            what,
+            context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+        )?;
         context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
     }
 
@@ -1988,7 +1997,11 @@ impl PoolZeroFill for CudaMemory {
         // gemm_resident_rhs`／`gemm_resident_lhs` の空 shape 早期 return
         // と同じ方針。codex-review P1 指摘・PR #1064 追補）。
         let Some(storage) = cuda_handle.storage.as_mut() else {
-            context_cache::begin_driver_call(self.ordinal, &[generation])?;
+            context_cache::begin_driver_call_waiting(
+                self.ordinal,
+                &[generation],
+                context_cache::DRIVER_CALL_CAPTURE_WAIT_TIMEOUT,
+            )?;
             return Ok(());
         };
         self.with_driver_call(&[generation], map_cuda_error, || match storage {

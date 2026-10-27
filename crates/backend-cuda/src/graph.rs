@@ -1302,6 +1302,12 @@ pub struct TrainGraphStats {
     pub fallbacks: u64,
 }
 
+/// チェーン外の通常操作の入口が別スレッドの capture を待つ分岐へ入った累計回数
+/// （イシュー #3608。並行回帰テストが待機経路への到達を確認する診断用）。
+pub fn out_of_chain_capture_wait_count() -> u64 {
+    crate::context_cache::foreign_capture_wait_count()
+}
+
 /// [`TrainGraphStats`] の現在値を返す。
 pub fn train_graph_stats() -> TrainGraphStats {
     TrainGraphStats {

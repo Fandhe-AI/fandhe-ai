@@ -1213,6 +1213,21 @@ fn has_in_flight_call_on_this_thread(ordinal: usize) -> bool {
         .unwrap_or(false)
 }
 
+/// このスレッドが**どれかの ordinal で**未解放の [`CallToken`] を 1 つでも保持しているか
+/// （イシュー #3608・`docs/backend-cuda-graph-step-capture-design.md` §8.12.5.3）。
+///
+/// 待ち型の入口（[`begin_driver_call_waiting`]）が「ordinal をまたぐ待ちの輪」を作らない
+/// ための判定で、どの ordinal のトークンも持たないときだけ待つ。
+///
+/// [`has_in_flight_call_on_this_thread`]（TLS 破棄後は「保持なし」）とは意図が逆で、
+/// TLS 破棄後は**「保持あり（true）」**を返し、待たずに従来どおり即時拒否へ倒す
+/// （破棄中の `Drop` 経路から呼ばれて待つ側へ倒すと、終了処理が上限分だけ止まりうるため）。
+fn has_any_in_flight_call_on_this_thread() -> bool {
+    DRIVER_CALL_DEPTH
+        .try_with(|depth| depth.borrow().values().any(|&n| n > 0))
+        .unwrap_or(true)
+}
+
 /// [`DRIVER_CALL_DEPTH`] のこのスレッド・`ordinal` の値を 1 増やす
 /// （[`begin_driver_call`] が [`CallToken`] を発行する直前に呼ぶ）。
 ///
@@ -1742,6 +1757,11 @@ pub(crate) fn begin_buffer_release(ordinal: usize) -> BufferReleaseToken {
 /// （`"upload"`／`"download"`／`"alloc_zeroed"`／`"synchronize"` 等）。
 ///
 /// capture 中でなければ [`begin_driver_call`] へそのまま委譲する。
+///
+/// イシュー #3608: 本番の同期点入口（`ops.rs`／`memory.rs` の `with_sync_point_call`）は待ち型
+/// [`begin_sync_point_call_waiting`] へ移行したため、即時拒否版は「待たない契約」を固定する
+/// テスト専用として残す。
+#[cfg(test)]
 pub(crate) fn begin_sync_point_call(
     ordinal: usize,
     resource_generations: &[u64],
@@ -1753,6 +1773,88 @@ pub(crate) fn begin_sync_point_call(
         )));
     }
     begin_driver_call(ordinal, resource_generations)
+}
+
+/// 通常操作の入口が別スレッドの capture を待つ上限（イシュー #3608・
+/// `docs/backend-cuda-graph-step-capture-design.md` §8.12.5.2）。
+///
+/// 本番は 1000 ms（`autodiff` 側の `TRAIN_CAPTURE_WAIT_TIMEOUT` と同値）。`cfg(test)` は
+/// 30 ms（CI のテストが期限切れを短時間で確かめるため）。実機の並行テスト
+/// （`tests/train_graph_out_of_chain_wait_3608.rs`）は integration test としてビルドされるので
+/// 本番値で走る。
+#[cfg(not(test))]
+pub(crate) const DRIVER_CALL_CAPTURE_WAIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(1000);
+#[cfg(test)]
+pub(crate) const DRIVER_CALL_CAPTURE_WAIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(30);
+
+/// [`begin_driver_call`] の待ち型（イシュー #3608・設計 §8.12.5 の方式 (B)）。
+///
+/// 役割: チェーン外の通常操作（`ops.rs`／`memory.rs` の `with_driver_call`・
+/// `with_sync_point_call`・カーネル側 [`with_driver_call`] 等）の入口が使う。別スレッドが
+/// 同じ ordinal で capture 中なら、終了を `timeout` まで待ってから取り直す。
+/// [`begin_driver_call`] 自体は即時拒否の契約のまま変えない（graph.rs・
+/// `captured_segment_key`・`begin_device_chain_scope` は即時エラーが前提）。
+///
+/// 手順: (1) [`begin_driver_call`] を試す → (2) `DeviceContextCaptureInProgress` のときだけ、
+/// **このスレッドがどの ordinal のトークンも持たない場合に限り**
+/// [`wait_foreign_capture_idle`] で待つ → (3) 期限まで (1) へ戻る。
+/// - トークン保持時は待たず即エラー（自己デッドロック・ordinal をまたぐ待ちの輪を防ぐ）。
+/// - Poisoned／Unrecoverable／Retiring／Stale 等は待たずにそのまま返す。
+/// - 待つのは driver に触れる前の入口だけで、呼び出し側の `f` を再実行しない
+///   （演算の二重書き込みなし）。
+/// - 競合がなければ (1) の 1 回で返り、追加コストは無い。
+/// - 期限切れは `DeviceContextCaptureInProgress { ordinal }`（新しい variant は足さない）。
+pub(crate) fn begin_driver_call_waiting(
+    ordinal: usize,
+    resource_generations: &[u64],
+    timeout: std::time::Duration,
+) -> Result<CallToken, BackendError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match begin_driver_call(ordinal, resource_generations) {
+            Err(BackendError::DeviceContextCaptureInProgress { .. }) => {}
+            other => return other,
+        }
+        if has_any_in_flight_call_on_this_thread() {
+            return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(BackendError::DeviceContextCaptureInProgress { ordinal });
+        }
+        FOREIGN_CAPTURE_WAIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        wait_foreign_capture_idle(ordinal, remaining)?;
+    }
+}
+
+/// [`begin_driver_call_waiting`] が別スレッドの capture を待つ分岐へ入った累計回数
+/// （イシュー #3608 の codex 指摘対応）。GB10 の並行回帰テストが「待機経路に実際に到達した」
+/// ことを観測するための診断用カウンタで、挙動には影響しない。
+static FOREIGN_CAPTURE_WAIT_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// [`FOREIGN_CAPTURE_WAIT_COUNT`] の現在値（`graph::out_of_chain_capture_wait_count` が再公開）。
+pub(crate) fn foreign_capture_wait_count() -> u64 {
+    FOREIGN_CAPTURE_WAIT_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// [`begin_sync_point_call`] の待ち型（イシュー #3608）。判定順は従来どおり、先に
+/// 「このスレッドが capture 中か」を見て `Unsupported` で即拒否し（待たない）、
+/// そうでなければ [`begin_driver_call_waiting`] へ委ねる。
+pub(crate) fn begin_sync_point_call_waiting(
+    ordinal: usize,
+    resource_generations: &[u64],
+    what: &'static str,
+    timeout: std::time::Duration,
+) -> Result<CallToken, BackendError> {
+    if is_capturing_on_current_thread(ordinal) {
+        return Err(BackendError::Unsupported(format!(
+            "cuda graph capture: {what} is a host synchronization point and cannot be captured"
+        )));
+    }
+    begin_driver_call_waiting(ordinal, resource_generations, timeout)
 }
 
 /// `invalidate` の実処理プローブの再試行上限（モジュール冒頭コメント
@@ -1889,6 +1991,10 @@ impl Drop for CallToken {
 /// 通す（`graph::run_captured_sgd_step_segment` の `body()` 実行自体が同一
 /// スレッドから `begin_driver_call` 経由で実カーネルを起動する契約の
 /// ため。再入拒否ではなく同一スレッドの正常フロー）。
+///
+/// **本関数は即時拒否の契約のまま**（イシュー #3608・設計 §8.12.5）。待たない入口が前提の
+/// 呼び出し元（graph.rs・`captured_segment_key`・`begin_device_chain_scope`）はこちらを使う。
+/// チェーン外の通常操作の入口は待ち型の [`begin_driver_call_waiting`] を使う。
 pub(crate) fn begin_driver_call(
     ordinal: usize,
     resource_generations: &[u64],
@@ -2015,9 +2121,14 @@ pub(crate) fn with_driver_call<T>(
     ordinal: usize,
     f: impl FnOnce() -> Result<T, CudaError>,
 ) -> Result<T, CudaError> {
+    // イシュー #3608: 通常操作の入口なので別スレッドの capture を上限付きで待つ
+    // （契約は [`begin_driver_call_waiting`]）。`BackendError` のまま待ってから従来どおり
+    // `CaptureExclusionRejected` へ写す（文字列化した後では判定しない）。
     let token =
-        begin_driver_call(ordinal, &[]).map_err(|e| CudaError::CaptureExclusionRejected {
-            detail: e.to_string(),
+        begin_driver_call_waiting(ordinal, &[], DRIVER_CALL_CAPTURE_WAIT_TIMEOUT).map_err(|e| {
+            CudaError::CaptureExclusionRejected {
+                detail: e.to_string(),
+            }
         })?;
     observe_cuda_result(ordinal, &token, f())
 }
@@ -3480,6 +3591,238 @@ mod poison_state_tests {
         ));
         assert!(t.elapsed() < std::time::Duration::from_secs(1));
         drop(token);
+    }
+
+    // ---- イシュー #3608: 待ち型の入口（begin_driver_call_waiting ほか） ----
+
+    /// 別スレッドで capture を開始し、`go_tx` を送るまで保持するスレッドを起こす。
+    /// 開始済みになるまで戻らない。
+    fn spawn_capture_holder(
+        ordinal: usize,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let guard = begin_capture_session(ordinal).expect("capture starts");
+            tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            drop(guard);
+        });
+        rx.recv().unwrap();
+        (holder, go_tx)
+    }
+
+    /// 別スレッドの capture が上限内に終われば待った後に token を 1 個だけ得る。
+    #[test]
+    fn begin_driver_call_waiting_succeeds_when_capture_ends_in_time() {
+        let ordinal = unique_ordinal();
+        let (holder, go_tx) = spawn_capture_holder(ordinal);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            go_tx.send(()).unwrap();
+        });
+        let token = begin_driver_call_waiting(ordinal, &[], std::time::Duration::from_secs(10))
+            .expect("capture 終了後に取れるはず");
+        assert_eq!(in_flight_for_test(ordinal), 1);
+        drop(token);
+        assert_eq!(in_flight_for_test(ordinal), 0);
+        holder.join().unwrap();
+        releaser.join().unwrap();
+    }
+
+    /// capture が続けば上限（以上）待った後に `DeviceContextCaptureInProgress`。
+    #[test]
+    fn begin_driver_call_waiting_times_out_with_capture_in_progress() {
+        let ordinal = unique_ordinal();
+        let (holder, go_tx) = spawn_capture_holder(ordinal);
+        let timeout = std::time::Duration::from_millis(60);
+        let t = std::time::Instant::now();
+        let r = begin_driver_call_waiting(ordinal, &[], timeout);
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextCaptureInProgress { ordinal: o }) if o == ordinal),
+            "{r:?}"
+        );
+        assert!(
+            t.elapsed() >= timeout,
+            "上限まで待つはず: {:?}",
+            t.elapsed()
+        );
+        assert_eq!(in_flight_for_test(ordinal), 0);
+        go_tx.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    /// 同じ ordinal のトークンを持つスレッドは待たずに通る（入れ子の通過条件）。
+    #[test]
+    fn begin_driver_call_waiting_passes_nested_call_while_other_thread_captures() {
+        let ordinal = unique_ordinal();
+        let outer = begin_driver_call(ordinal, &[]).expect("outer token");
+        // capture 開始は in_flight をドレインするので別スレッドから開始させる。
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            tx.send(()).unwrap();
+            let guard = begin_capture_session(ordinal).expect("capture starts");
+            go_rx.recv().unwrap();
+            drop(guard);
+        });
+        rx.recv().unwrap();
+        // holder が drain 待ちに入る（capture が立つ）まで少し待つ。
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let t = std::time::Instant::now();
+        let nested = begin_driver_call_waiting(ordinal, &[], std::time::Duration::from_secs(5))
+            .expect("入れ子は通過条件で通る");
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+        drop(nested);
+        drop(outer);
+        go_tx.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    /// 別 ordinal のトークンだけを持つスレッドは待たず即 `DeviceContextCaptureInProgress`
+    /// （ordinal をまたぐ待ちの輪を作らない。所有者確認 3）。
+    #[test]
+    fn begin_driver_call_waiting_does_not_wait_when_holding_other_ordinal_token() {
+        let ordinal = unique_ordinal();
+        let other = unique_ordinal();
+        let (holder, go_tx) = spawn_capture_holder(ordinal);
+        let held = begin_driver_call(other, &[]).expect("other ordinal token");
+        let t = std::time::Instant::now();
+        let r = begin_driver_call_waiting(ordinal, &[], std::time::Duration::from_secs(5));
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextCaptureInProgress { .. })),
+            "{r:?}"
+        );
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(1),
+            "待たないはず"
+        );
+        drop(held);
+        go_tx.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    /// poison 済みは待たずに型付きエラー（capture が無くても有っても）。
+    #[test]
+    fn begin_driver_call_waiting_does_not_wait_for_poisoned_ordinal() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("token");
+        let _ = observe_driver_result::<()>(ordinal, &token, Err(sticky_err()));
+        drop(token);
+        let (holder, go_tx) = spawn_capture_holder_after_poison(ordinal);
+        let t = std::time::Instant::now();
+        let r = begin_driver_call_waiting(ordinal, &[0], std::time::Duration::from_secs(5));
+        assert!(
+            matches!(r, Err(BackendError::DeviceContextPoisoned(_))),
+            "{r:?}"
+        );
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+        drop(go_tx);
+        let _ = holder.join();
+    }
+
+    /// poison 後は `begin_capture_session` 自体が拒否されうるため、開始できたときだけ保持する。
+    fn spawn_capture_holder_after_poison(
+        ordinal: usize,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            if let Ok(guard) = begin_capture_session(ordinal) {
+                let _ = go_rx.recv();
+                drop(guard);
+            }
+        });
+        (holder, go_tx)
+    }
+
+    /// 世代不一致は待たずに `StaleDeviceGeneration`。
+    #[test]
+    fn begin_driver_call_waiting_does_not_wait_for_stale_generation() {
+        let ordinal = unique_ordinal();
+        let t = std::time::Instant::now();
+        let r = begin_driver_call_waiting(ordinal, &[7], std::time::Duration::from_secs(5));
+        assert!(
+            matches!(r, Err(BackendError::StaleDeviceGeneration { .. })),
+            "{r:?}"
+        );
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// capture スレッド自身は即 `Ok`。sync point 版は即 `Unsupported`。
+    #[test]
+    fn begin_driver_call_waiting_passes_own_capture_and_sync_point_rejects() {
+        let ordinal = unique_ordinal();
+        let guard = begin_capture_session(ordinal).expect("capture starts");
+        let t = std::time::Instant::now();
+        let token = begin_driver_call_waiting(ordinal, &[], std::time::Duration::from_secs(5))
+            .expect("capture スレッド自身は通る");
+        drop(token);
+        let r = begin_sync_point_call_waiting(
+            ordinal,
+            &[],
+            "upload",
+            std::time::Duration::from_secs(5),
+        );
+        assert!(matches!(r, Err(BackendError::Unsupported(_))), "{r:?}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+        drop(guard);
+    }
+
+    /// sync point 版も別スレッドの capture を待ってから取る。
+    #[test]
+    fn begin_sync_point_call_waiting_waits_for_foreign_capture() {
+        let ordinal = unique_ordinal();
+        let (holder, go_tx) = spawn_capture_holder(ordinal);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            go_tx.send(()).unwrap();
+        });
+        let token = begin_sync_point_call_waiting(
+            ordinal,
+            &[],
+            "download",
+            std::time::Duration::from_secs(10),
+        )
+        .expect("capture 終了後に取れるはず");
+        drop(token);
+        holder.join().unwrap();
+        releaser.join().unwrap();
+    }
+
+    /// カーネル側 `with_driver_call` は別スレッドの capture 終了を待ち、`f` を 1 回だけ実行する。
+    /// 期限切れは従来どおり `CaptureExclusionRejected`。
+    #[test]
+    fn with_driver_call_waits_for_foreign_capture_and_runs_closure_once() {
+        let ordinal = unique_ordinal();
+        let (holder, go_tx) = spawn_capture_holder(ordinal);
+        // cfg(test) の上限は 30 ms。それより短く解放する。
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            go_tx.send(()).unwrap();
+        });
+        let mut calls = 0;
+        let r = with_driver_call(ordinal, || {
+            calls += 1;
+            Ok(())
+        });
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(calls, 1);
+        holder.join().unwrap();
+        releaser.join().unwrap();
+
+        let (holder, go_tx) = spawn_capture_holder(ordinal);
+        let mut calls = 0;
+        let r = with_driver_call(ordinal, || {
+            calls += 1;
+            Ok(())
+        });
+        assert!(
+            matches!(r, Err(CudaError::CaptureExclusionRejected { .. })),
+            "{r:?}"
+        );
+        assert_eq!(calls, 0, "期限切れでは f を実行しない");
+        go_tx.send(()).unwrap();
+        holder.join().unwrap();
     }
 
     #[test]
