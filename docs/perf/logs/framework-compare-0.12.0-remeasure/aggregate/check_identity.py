@@ -13,8 +13,12 @@ import os, re, sys, tempfile
 
 def check(new_sha, old_sha, spec, runs, expect_runs=5):
     errs = []
-    if len(runs) != expect_runs:
-        errs.append(f'run 数 {len(runs)}（期待 {expect_runs}）')
+    # realpath で正規化し、同じ run ディレクトリの重複指定で件数を満たすことを拒否する
+    real = [os.path.realpath(d) for d in runs]
+    if len(set(real)) != len(real):
+        errs.append('run ディレクトリが重複している')
+    if len(set(real)) != expect_runs:
+        errs.append(f'異なる run 数 {len(set(real))}（期待 {expect_runs}）')
     for d in runs:
         for name, sha in (('rev-stamp.txt', new_sha), ('rev-stamp-old.txt', old_sha)):
             p = os.path.join(d, name)
@@ -57,6 +61,7 @@ def self_test():
         assert check('c' * 40, 'b' * 40, {'r.jsonl': 3}, runs)
         assert check('a' * 40, 'b' * 40, {'r.jsonl': 4}, runs)
         assert check('a' * 40, 'b' * 40, {'r.jsonl': 3}, runs[:4])
+        assert check('a' * 40, 'b' * 40, {'r.jsonl': 3}, [runs[0]] * 5)
         os.remove(os.path.join(runs[0], 'tree-old.txt'))
         assert check('a' * 40, 'b' * 40, {'r.jsonl': 3}, runs)
     print('self-test ok')

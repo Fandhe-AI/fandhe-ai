@@ -13,6 +13,8 @@ validate_abs() { case "$2" in /*) ;; *) echo "$1 は絶対パスのみ"; exit 2;
 export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 ROOT="${ROOT:?new root}"; OLD_ROOT="${OLD_ROOT:?old root}"; LOGD="${LOGD:?logdir}"
 validate_abs ROOT "${ROOT}"; validate_abs OLD_ROOT "${OLD_ROOT}"; validate_abs LOGD "${LOGD}"
+# registry v0.12.0 の計測に path patch を継承させない（cargo tree は patch を使わないため、残っていると同定を通った別ソースを測りうる）
+[ -z "${GEMM_GATE_PATCH_FACADE_PATH:-}" ] || { echo "GEMM_GATE_PATCH_FACADE_PATH が非空（registry 計測では拒否）"; exit 2; }
 NEW_SHA="${EXPECT_NEW_SHA:?}"; OLD_SHA="${EXPECT_OLD_SHA:?}"
 FC="${ROOT}/scripts/bench/framework-compare"; OFC="${OLD_ROOT}/scripts/bench/framework-compare"
 OLD_TARGET="${OLD_ROOT}/../target-old"
@@ -41,7 +43,7 @@ for t in tree tree-old; do grep -q 'fandhe-ai v0\.12\.0$' "${LOGD}/${t}.txt" || 
 echo "start $(date -u +%FT%TZ) new=$(cut -c1-8 "${ROOT}/.rev-stamp") old=$(cut -c1-8 "${OLD_ROOT}/.rev-stamp")"; uptime > "${LOGD}/uptime_before_all.txt"
 nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader > "${LOGD}/gpu_util_before.txt"
 rm -f results/raw/results-cuda.jsonl results/raw/skipped-cuda.log
-bash ./run_all_cuda.sh > "${LOGD}/run_all_cuda.log" 2>&1; rc=$?; echo "run_all rc=${rc}"
+env -u GEMM_GATE_PATCH_FACADE_PATH bash ./run_all_cuda.sh > "${LOGD}/run_all_cuda.log" 2>&1; rc=$?; echo "run_all rc=${rc}"
 [ "${rc}" -eq 0 ] || fail "run_all_cuda.sh rc=${rc}"
 [ -f results/raw/results-cuda.jsonl ] || { fail "results-cuda.jsonl なし"; exit 1; }
 touch results/raw/skipped-cuda.log

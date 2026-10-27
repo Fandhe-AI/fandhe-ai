@@ -24,6 +24,14 @@ export PATH="${HOME}/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 # -p bench-fandhe で旧腕だけをビルドする（package 指定なしだと bench-candle の macOS 用 candle-core/metal 既定 feature が Linux でビルド失敗する）。
 (cd "${OLD_ROOT}/scripts/bench/framework-compare" && cargo build --release --locked -p bench-fandhe --target-dir "${OLD_TARGET}" > "${B}/build-old.log" 2>&1) || { echo "BUILD FAILED (old)"; exit 1; }
 [ -x "${OLD_TARGET}/release/bench-fandhe" ] || { echo "BUILD FAILED (old: binary missing)"; exit 1; }
+# 新腕・candle・burn も系列開始前にビルドする（run_all_cuda.sh と同じ package・feature。測定窓・専有ゲート後にビルド負荷・熱を入れない）。
+# run_all_cuda.sh 内の cargo build は最新成果物なら即終了する。patch 変数は registry 計測のため明示的に外す。
+[ -z "${GEMM_GATE_PATCH_FACADE_PATH:-}" ] || { echo "GEMM_GATE_PATCH_FACADE_PATH が非空（registry 計測では拒否）"; exit 2; }
+NFC="${ROOT}/scripts/bench/framework-compare"
+(cd "${NFC}" && cargo build --release -p bench-fandhe > "${B}/build-new.log" 2>&1 \
+  && cargo build --release -p bench-candle --no-default-features --features cuda >> "${B}/build-new.log" 2>&1 \
+  && cargo build --release -p bench-burn --no-default-features --features cuda >> "${B}/build-new.log" 2>&1) || { echo "BUILD FAILED (new)"; exit 1; }
+for bin in bench-fandhe bench-candle bench-burn; do [ -x "${NFC}/target/release/${bin}" ] || { echo "BUILD FAILED (new: ${bin} missing)"; exit 1; }; done
 done_n=0
 for i in 1 2 3 4 5; do
   grc=0; gate || grc=$?
