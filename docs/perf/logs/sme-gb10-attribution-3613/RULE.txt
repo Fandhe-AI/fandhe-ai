@@ -1,0 +1,68 @@
+イシュー #3613 事前登録規則 (GB10 で SME 既定 ON の 2 セルが後退した原因を 3 腕 A/B で切り分ける)
+fixed-at: この規則を含むコミットが origin へ push された時刻 (計測はその後に行う。以後、緩和・事後調整はしない。訂正は末尾への追記に限る)
+登録基準: origin/main 3e5d41016 + 本規則を含むコミット (計測はこのコミットのツリーで行う。docs と scripts の追加だけで bench バイナリには影響しない)
+on-arm.patch sha256: 226e73d0e78936bff508b1a746966c65641aed8ce1b0ae50b0a9b2d20132b964
+on-arm-prime.patch sha256: 1f1e79b237fa365de61168c88f5c9db628448fee0fccddcdb09328f56502cc2e
+
+0. 位置づけ
+  - #3232 の GB10 A/B (規則 docs/perf/logs/sme-default-on-ab-3232/RULE.txt) では、SME 非搭載の GB10 で両腕が同じ NEON 経路を通り bitdump も bit 同一だったのに、
+    gemm 256 fresh と gemm 2048 reuse の 2 セルが 5/5 round で後退した (aggregate-gb10.md:9・:16)。REJECT のため SME_PRODUCTION_ENABLED は false へ戻した (§5.14)。
+  - 本規則は後退の帰属 (選択ロジック／コード配置／ノイズ) を #2053 型 (perf doc §5.7) の 3 腕 A/B で切り分ける。是正・定数の切替・新規 issue 起票は範囲外。
+  - #3232 の閾値 (1.00)・5 round・5/5 一貫・--require-checksum-exact・tolerance・baseline は変えない。
+  - 前例 (§5.7) は「未分離 (ノイズ帯)」で 5/5 一貫の後退は再現しなかった。**非再現・判定不能も正式な結果としてそのまま記録する** (結果を見て規則や分類を作り直さない)。
+
+1. 腕 (HEAD 基準。古いパッチは対象行が移動しているため流用しない。旧 gb10/on-arm-prime.patch と sme-default-on-3231/off-arm.patch は使わない)
+  - before = HEAD そのまま (定数 SME_PRODUCTION_ENABLED = false。クリーンなツリー)
+  - prime  = HEAD + on-arm-prime.patch (定数 false -> true、かつ sme_kernel_for_shape 内の microkernel::SmeKernel::try_new() を None::<microkernel::SmeKernel> へ置換。計 2 行・変更行 4 本)
+  - after  = HEAD + on-arm.patch (定数 false -> true の 1 行・変更行 2 本)
+  - いずれも crates/backend-cpu/src/gemm_blis/mod.rs だけの差分。main へコミットしない計測専用ツリー。
+  - 比は「後者 / 前者」で > 1.00 = 後退 (#3232 と同じ向き)。
+  - 構造上の事前注意 (計測前に記録): HEAD では定数を使う本番コードは sme_kernel_for_shape (mod.rs:3589〜3595) だけで、:5842 は cfg(test)。
+    したがって prime は両分岐とも None を返し、before とほぼ同じコードに畳まれる見込みである。
+      * 組 1 (before vs prime) は実質 A/A 対照 (ノイズの床)
+      * 帰属を見分ける組は組 2 (prime vs after)。差は try_new() 呼び出しの有無 (OnceLock 読み取り・インライン化・コード配置) だけ
+  - bench-fandhe の sha256 を腕ごとに記録する。sha が一致すればコード生成が同一と言える。一方、チェックアウトのパスが埋め込まれる (panic 位置・debuginfo) ため、
+    **sha が違ってもコード生成が違う証拠にはならない。sha の差を帰属の根拠に使わない**。
+
+2. 組と実行順
+  - 組 0 = before/after (#3232 の再現確認)、組 1 = before/prime、組 2 = prime/after。各組で compare_gemm_ab.py --threshold 1.00 --per-run --require-checksum-exact (gemm は --sizes threadpolicy)。
+  - 同じ round の中で各セルについて 3 腕を 1 回ずつ実行する。巡回順は round ごとに固定 (run_ab_sme_attribution_gb10_cpu.sh の rotation_for_round):
+      r1 before prime after / r2 prime after before / r3 after before prime / r4 before after prime / r5 prime before after
+  - 5 round 固定。各腕・各セル・各 round 1 行 (--per-run は行の出現順で round を対応づける)。
+  - セル: gemm N=256/512/1024/2048 x fresh/reuse (8)、train size=64 x fresh/reuse (2)、infer size=64 x fresh/reuse (2) の 12 セル (#3232 と同じ)。
+    **判定に使うのは gemm 256 fresh と gemm 2048 reuse の 2 セルだけ**。残り 10 セルは round 別比と 5/5 状態を併記する (判定には使わない)。
+
+3. 前提ゲート (1 つでも不成立なら undetermined（前提不成立）。理由は併記)
+  - P-TREE   : before はクリーン。prime の差分は定数 1 行 + try_new 1 行、after は定数 1 行で、いずれも gemm_blis/mod.rs に限る。パッチの sha256 が上記と一致。3 腕の HEAD が同一で未追跡のビルド入力が無い。
+  - P-R0     : 3 腕とも sme_report() が kernel_enabled: false (cpu-gemm-sme-fmopa-1587/gb10/sme-probe-* を流用)。外れたら中止して記録だけ残す。
+  - P-BIT    : bitdump (crates/facade/tests/cpu_sme_gate_bit_dump.rs の dump_cpu_sme_gate_bits の ^out[ 行) が 3 腕とも 6,726,847 行で sha256 一致、cmp 差分 0。checksum は全セル 3 腕で完全一致。
+  - P-RT     : before でだけ cargo test -p fandhe-ai-backend-cpu --release を実行し全件 pass。prime・after では実行しない (定数 true のためドリフト検出テスト
+               sme_production_disabled_after_gb10_reject が作りの上で必ず落ちるため。最初から除外とする)。
+  - P-CELLS  : 12 セル x 3 腕 x 5 行ちょうど (重複・欠損・非有限値は不成立)。P-RUNAB／P-COLLECT: A/B スクリプトと収録が exit 0。
+  - P-LOCK   : 実機ロック (~/work/.fandhe-hw-lock) を保持したまま計測し、取得・解放の時刻を hwlock.log に残した。
+  - P-GATE   : 外側ゲート (load1 < 1.0 かつ GPU 使用率 0%、最大 20 回・30 秒間隔) の記録と、内側 8.0 の 5/5 round 通過。
+  - RAYON_NUM_THREADS が設定されていれば実行を拒否する。計測中はビルドを並走させない。LABEL は [A-Za-z0-9._-]+ の allowlist で検証し、既存記録があれば fail-closed で止める。
+
+4. 帰属の分類 (2 判定セルそれぞれに独立して適用。上から順に評価し、最初に当てはまったものを採る。aggregate.py が機械的に適用する)
+  1. 前提ゲートが 1 つでも不成立 -> undetermined（前提不成立）
+  2. checksum が 3 腕のどこかで完全一致しない -> FAIL (性能判定に進まない)
+  3. P-REPRO: 組 0 でそのセルが 5/5 round とも > 1.00 でない -> 非再現（ノイズ帯・判定不能）。組 1・組 2 は記録だけする
+  4. 組 1 が 5/5 で後退 -> 方法感度（判定不能）。ほぼ同一コードの A/A で 5/5 が出たことになり、この方式では帰属できない。組 2 も 5/5 なら併記する
+     (「定数の有無によるコード配置」は HEAD の構造では組 1 に当たり、§1 の理由で A/A 化するため、この分類を方法感度として扱う)
+  5. 組 2 が 5/5 で後退し、組 1 がそうでない -> SME 経路の選択ロジック（try_new 呼び出しの有無に伴うコード配置・実行コスト）に帰属
+  6. 上のどれでもない (再現したが組 1・組 2 とも 5/5 でない) -> 再現したが未分離（ノイズ帯）
+  - 4/5 や中央値 > 1.00 は「証拠なし」とし、値を併記する (前例どおり)。
+  - 分類は帰属の候補であり ADOPT／REJECT の判定ではない。結果によらず、是正・定数の切替・新規 issue 起票はしない (対策案の列挙までとする)。
+    次の手 (既定 ON の再 A/B など) の要否は所有者の判断として記録する (承認を得ていないものを承認済みとは書かない)。
+
+5. 相手比
+  - GB10 には torch 2.14.0+cu130 の venv がないため PyTorch は「未計測」と記録する (判定には使わない)。candle・burn・TF・SciPy は測らない。
+  - Linux や M4 Max の値を GB10 の値として書かない。実行できなかった項目は「未実測」と書く。
+
+6. 負荷・並走・ロック
+  - 外側ゲート (load1 < 1.0 かつ GPU 0%) を最大 20 回・30 秒間隔で待ち、内側は 8.0。開始時に mkdir ~/work/.fandhe-hw-lock でロックを取り (取れなければ 60 秒おきに再取得)、
+    owner に `#3613 <UTC>` を書き、回収後に外す。ロックを持たずに測った値は記録に使わない。
+
+7. マスク規則
+  - 収録ログのホスト名は masked、$HOME は <home>、ユーザー名と絶対パスは除去。実機のホスト名・接続情報・IP はリポに書かない。
+  - rev-stamp (before は git rev-parse HEAD、prime／after は <sha>+<patch 名>) とツリー指紋を成果物に含める。
