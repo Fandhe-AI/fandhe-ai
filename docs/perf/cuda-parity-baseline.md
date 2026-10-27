@@ -155,6 +155,12 @@ parity_baselines_do_not_regress` の staged 検査。`assert_parity` 系と異�
 最初の fail で panic せず全要素集計の `CompareReport` を返す経路のため、
 fail_count・mean_abs_diff は全 262144 要素の集計値である）。
 
+#### 追加経路（#3617）
+
+| 経路 | エントリポイント | 形状（M×N×K） | seed | fail_count/total | 出典テスト |
+|---|---|---|---|---|---|
+| `facade_low_precision_matmul_f16` | `matmul_low_precision`（F16・`tape_for(Device::Cuda(0))`） | 512×512×512 / 1024×1024×1024 / 256×256×1024 | 14 / 15 / 16 | 5/262144 / 192/1048576 / 16/65536 | facade `cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress`（詳細は §14） |
+
 ## 4. 表記丸め対応
 
 §5.3 の記録値は 4 有効桁への丸め表記のため、fixture
@@ -180,6 +186,10 @@ fail_count・mean_abs_diff は全 262144 要素の集計値である）。
 - **f16 経路**（`mma_f16`）: f16→f32→`matmul_reference_fma`→f16 丸め→f32 の
   量子化込み経路（`cpu_cuda_mma_parity.rs::assert_mma_f16_parity` と同一
   手順。GPU 側エピローグ store の丸めを参照側にも反映させる）
+
+- **facade f16 経路**（`facade_low_precision_matmul_f16`・#3617）: 参照は CPU tape の同じ
+  `matmul_low_precision(F16)`（入力は f32 `fill_vec`。lhs=seed・rhs=seed+1）。`mma_f16` の
+  量子化込み参照とは別経路で、同じ行に混ぜない
 
 ## 6. ベースライン更新規約
 
@@ -2172,17 +2182,21 @@ FAIL の追跡要否はユーザー判断に委ねる（本イシューではク
   推定の強化に留まり、TF32 の `round_to_tf32_rna` 相当の解析的な事前
   丸め一致証明（#1122 (b) 手法）は未実施
 
-## 14. イシュー #3617: facade low-precision matmul f16 の fail≠0 3 形状（提案・承認待ち）
+## 14. イシュー #3617: facade low-precision matmul f16 の fail≠0 3 形状（baseline 追加・値は所有者確認待ち）
 
-状態: **提案のみ・未承認・HEAD 再計測は未実測**。形と扱いは
-`docs/cuda-tensor-core-parity-judgment-decision.md` §7 を参照。以下は #3170
-（`b640875f`・GB10）の実測値で、baseline 値の確定は所有者の承認と HEAD 再計測後とする。
+状態: `ParityPath::FacadeLowPrecisionMatmulF16` として 3 行を追加済み。形・値の出典・ceiling の型は
+所有者承認済み（#3617 コメント 6432022446）、**値は PR で提示し所有者の確認待ち**。形と扱いは
+`docs/cuda-tensor-core-parity-judgment-decision.md` §7。経路: `fandhe_ai_autodiff::low_precision_ops::
+matmul_low_precision`（F16・`tape_for(Device::Cuda(0))`）対 CPU tape の同 Op。入力は f32 `fill_vec`
+（lhs=seed・rhs=seed+1）。
 
-| 形状 | seed | total | fail | mean_abs | max_abs | max_rel |
+HEAD（`a053ea7ed`）の GB10 再計測値（2 回完全一致・`b640875f` とも完全一致。
+`docs/perf/logs/low-precision-ops-2628/README.md`）と ceiling（表示桁の最終桁 +1。max_abs は `1.5626e-2` 型）:
+
+| 形状 | seed | total | fail | mean_abs（実測 → ceiling） | max_abs（実測 → ceiling） | max_rel（実測 → ceiling） |
 |---|---|---|---|---|---|---|
-| 512×512×512 | 14 | 262144 | 5 | 4.145593038629158e-6 | 1.5625e-2 | 3.8848920863309355e-1 |
-| 1024×1024×1024 | 15 | 1048576 | 192 | 1.0508246703011537e-5 | 3.125e-2 | 4.803921568627451e-1 |
-| 256×256×1024 | 16 | 65536 | 16 | 8.295384759549052e-6 | 1.5625e-2 | 2.5336500395882817e-2 |
+| 512×512×512 | 14 | 262144 | 5 | 4.145593038629158e-6 → 4.145593038629159e-6 | 1.5625e-2 → 1.5626e-2 | 3.8848920863309355e-1 → 3.8848920863309356e-1 |
+| 1024×1024×1024 | 15 | 1048576 | 192 | 1.0508246703011537e-5 → 1.0508246703011538e-5 | 3.125e-2 → 3.126e-2 | 4.803921568627451e-1 → 4.803921568627452e-1 |
+| 256×256×1024 | 16 | 65536 | 16 | 8.295384759549052e-6 → 8.295384759549053e-6 | 1.5625e-2 → 1.5626e-2 | 2.5336500395882817e-2 → 2.5336500395882818e-2 |
 
-ceiling は §6 の表記丸め規約（表示桁の最終桁 +1）で算出する。max_abs の丸め
-（`1.562501e-2` 型か `1.5626e-2` 型か）は既存前例に揺れがあるため所有者が選ぶ。
+検査: facade `cuda_low_precision_matmul_f16_nonzero_fail_shapes_do_not_regress`（`#[ignore]`・GB10 で pass）。
